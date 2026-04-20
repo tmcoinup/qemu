@@ -367,6 +367,13 @@ static void pc_q35_machine_options(MachineClass *m)
 static void pc_q35_machine_11_0_options(MachineClass *m)
 {
     pc_q35_machine_options(m);
+
+    /*
+     * 中文注释：vmate 的硬件画像需要把单条 SMBIOS Type 17 记录限制为
+     * 常见消费级容量。旧分支把该默认值挂在当时最新的 9.2 机型上；升级后
+     * 必须迁移到新的最新 11.0 机型，不能把 9.2 的 alias 写法带进新版机型链。
+     */
+    m->smbios_memory_device_size = 4 * GiB;
 }
 
 DEFINE_Q35_MACHINE_AS_LATEST(11, 0);

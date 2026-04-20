@@ -1,0 +1,30 @@
+Windows Registry Editor Version 5.00
+
+; ---------------------------------------------------------------------------
+; guest-gpu-spoof.reg — cosmetic GPU rename for DNF / XignCode3 bypass.
+;
+; Target: the VM's virtio-gpu adapter (usually subkey 0000). After importing
+; this file, WMI / DxDiag / Task Manager all show "NVIDIA GeForce GTX 1050"
+; instead of "Red Hat VirtIO GPU".
+;
+; Limitations (documented in NOTES-GPU.md):
+;   * PCI VEN/DEV in Device Manager stay 1AF4:1050 unless we also rebuild
+;     the driver.
+;   * NvAPI_Initialize() / nvml.dll still fail — no real NVIDIA runtime.
+;   * If XignCode checks driver binary names, this won't help.
+;
+; Apply: right-click → Merge (as Administrator). See apply-gpu-spoof.ps1 for
+; a scripted version that first checks which Class\xxxx subkey is yours.
+; ---------------------------------------------------------------------------
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000]
+"DriverDesc"="NVIDIA GeForce GTX 1050"
+"ProviderName"="NVIDIA"
+"MatchingDeviceId"="PCI\\VEN_10DE&DEV_1C81"
+"HardwareInformation.AdapterString"="NVIDIA GeForce GTX 1050"
+"HardwareInformation.ChipType"="GeForce GTX 1050"
+"HardwareInformation.DacType"="Integrated RAMDAC"
+"HardwareInformation.BiosString"="Version 86.07.48.00.38"
+; 2 GiB VRAM — both REG_DWORD (legacy) and REG_QWORD (modern) shown.
+"HardwareInformation.MemorySize"=hex:00,00,00,80
+"HardwareInformation.qwMemorySize"=hex(b):00,00,00,80,00,00,00,00

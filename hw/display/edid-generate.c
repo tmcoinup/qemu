@@ -394,10 +394,10 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     /* =============== set defaults  =============== */
 
     if (!info->vendor || strlen(info->vendor) != 3) {
-        info->vendor = "RHT";
+        info->vendor = "SAM";
     }
     if (!info->name) {
-        info->name = "QEMU Monitor";
+        info->name = "SyncMaster";
     }
     if (!info->prefx) {
         info->prefx = 1280;

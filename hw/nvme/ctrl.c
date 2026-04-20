@@ -8553,7 +8553,14 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     pci_conf[PCI_INTERRUPT_PIN] = pci_is_vf(pci_dev) ? 0 : 1;
     pci_config_set_prog_interface(pci_conf, 0x2);
 
-    if (n->params.use_intel_id) {
+    if (n->params.use_samsung_id) {
+        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_SAMSUNG);
+        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_SAMSUNG_NVME);
+        pci_set_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID,
+                     PCI_SUBVENDOR_ID_SAMSUNG_970EVO);
+        pci_set_word(pci_conf + PCI_SUBSYSTEM_ID,
+                     PCI_SUBDEVICE_ID_SAMSUNG_970EVO);
+    } else if (n->params.use_intel_id) {
         pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
         pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
     } else {
@@ -8662,8 +8669,15 @@ static void nvme_init_subnqn(NvmeCtrl *n)
     NvmeIdCtrl *id = &n->id_ctrl;
 
     if (!subsys) {
-        snprintf((char *)id->subnqn, sizeof(id->subnqn),
-                 "nqn.2019-08.org.qemu:%s", n->params.serial);
+        if (n->params.use_samsung_id) {
+            /* Samsung-style NQN format used by real 970 EVO controllers */
+            snprintf((char *)id->subnqn, sizeof(id->subnqn),
+                     "nqn.1994-11.com.samsung:nvme:970EVO:%s:%s",
+                     "M.2", n->params.serial);
+        } else {
+            snprintf((char *)id->subnqn, sizeof(id->subnqn),
+                     "nqn.2019-08.org.qemu:%s", n->params.serial);
+        }
     } else {
         pstrcpy((char *)id->subnqn, sizeof(id->subnqn), (char*)subsys->subnqn);
     }
@@ -8679,8 +8693,23 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
-    strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe Ctrl", ' ');
-    strpadcpy((char *)id->fr, sizeof(id->fr), QEMU_VERSION, ' ');
+    if (n->params.model_number) {
+        strpadcpy((char *)id->mn, sizeof(id->mn),
+                  n->params.model_number, ' ');
+    } else if (n->params.use_samsung_id) {
+        strpadcpy((char *)id->mn, sizeof(id->mn),
+                  "Samsung SSD 970 PRO 512GB", ' ');
+    } else {
+        strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe Ctrl", ' ');
+    }
+    if (n->params.firmware_rev) {
+        strpadcpy((char *)id->fr, sizeof(id->fr),
+                  n->params.firmware_rev, ' ');
+    } else if (n->params.use_samsung_id) {
+        strpadcpy((char *)id->fr, sizeof(id->fr), "1B2QEXE7", ' ');
+    } else {
+        strpadcpy((char *)id->fr, sizeof(id->fr), QEMU_VERSION, ' ');
+    }
     strpadcpy((char *)id->sn, sizeof(id->sn), n->params.serial, ' ');
 
     id->cntlid = cpu_to_le16(n->cntlid);
@@ -8694,7 +8723,12 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 
     id->rab = 6;
 
-    if (n->params.use_intel_id) {
+    if (n->params.use_samsung_id) {
+        /* Samsung IEEE OUI 00-25-38 (Samsung Electronics) */
+        id->ieee[0] = 0x38;
+        id->ieee[1] = 0x25;
+        id->ieee[2] = 0x00;
+    } else if (n->params.use_intel_id) {
         id->ieee[0] = 0xb3;
         id->ieee[1] = 0x02;
         id->ieee[2] = 0x00;
@@ -8943,6 +8977,9 @@ static Property nvme_props[] = {
     DEFINE_PROP_UINT8("mdts", NvmeCtrl, params.mdts, 7),
     DEFINE_PROP_UINT8("vsl", NvmeCtrl, params.vsl, 7),
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
+    DEFINE_PROP_BOOL("use-samsung-id", NvmeCtrl, params.use_samsung_id, false),
+    DEFINE_PROP_STRING("model-number", NvmeCtrl, params.model_number),
+    DEFINE_PROP_STRING("firmware-rev", NvmeCtrl, params.firmware_rev),
     DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),
     DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, params.ioeventfd, false),
     DEFINE_PROP_UINT8("zoned.zasl", NvmeCtrl, params.zasl, 0),

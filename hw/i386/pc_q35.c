@@ -360,6 +360,7 @@ static void pc_q35_machine_9_2_options(MachineClass *m)
 {
     pc_q35_machine_options(m);
     m->alias = "q35";
+    m->smbios_memory_device_size = 4 * GiB;
 }
 
 DEFINE_Q35_MACHINE(9, 2);

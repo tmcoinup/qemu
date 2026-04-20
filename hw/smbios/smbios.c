@@ -887,7 +887,24 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
     t->device_set = 0; /* Not in a set */
     snprintf(loc_str, sizeof(loc_str), "%s %d", type17.loc_pfx, instance);
     SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
-    SMBIOS_TABLE_SET_STR(17, bank_locator_str, type17.bank);
+    /* Dual-channel support: substitute "%C" in bank string with channel
+     * letter based on DIMM index (A for even, B for odd). This allows a
+     * single -smbios type=17,bank="P0 CHANNEL %C" override to produce
+     * "P0 CHANNEL A" for DIMM 0 and "P0 CHANNEL B" for DIMM 1, matching
+     * real dual-channel Ryzen board SMBIOS dumps. */
+    {
+        char bank_str[128];
+        const char *pct;
+        if (type17.bank && (pct = strstr(type17.bank, "%C")) != NULL) {
+            int pre_len = pct - type17.bank;
+            snprintf(bank_str, sizeof(bank_str), "%.*s%c%s",
+                     pre_len, type17.bank,
+                     (instance & 1) ? 'B' : 'A', pct + 2);
+            SMBIOS_TABLE_SET_STR(17, bank_locator_str, bank_str);
+        } else {
+            SMBIOS_TABLE_SET_STR(17, bank_locator_str, type17.bank);
+        }
+    }
     t->memory_type = 0x07; /* RAM */
     t->type_detail = cpu_to_le16(0x02); /* Other */
     t->speed = cpu_to_le16(type17.speed);

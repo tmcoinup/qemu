@@ -2324,6 +2324,39 @@ int kvm_arch_init_vcpu(CPUState *cs)
 
     cpuid_data.cpuid.nent = cpuid_i;
 
+    /*
+     * Anti-detection: when kvm=off is requested, aggressively scrub any
+     * residual hypervisor traces from the CPUID table right before it's
+     * pushed into the kernel. This defends against future QEMU changes
+     * that might re-introduce the hypervisor bit via non-obvious paths
+     * (confidential-guest overrides, VMware CPUID freq leaf, etc).
+     *
+     *  - Clear CPUID.1:ECX bit 31 (hypervisor present).
+     *  - Drop every leaf in the paravirt range 0x40000000..0x400000FF so
+     *    guest queries return zero (KVM will return zero for absent leaves
+     *    on hosts with KVM_CAP_ENFORCE_PV_FEATURE_CPUID; on older hosts
+     *    the leaves simply won't be present in the CPUID table).
+     */
+    if (!cpu->expose_kvm) {
+        int w = 0;
+        for (int i = 0; i < cpuid_data.cpuid.nent; i++) {
+            struct kvm_cpuid_entry2 *e = &cpuid_data.entries[i];
+
+            if (e->function >= 0x40000000 && e->function <= 0x400000ff) {
+                /* drop paravirt / Hyper-V leaves entirely */
+                continue;
+            }
+            if (e->function == 1) {
+                e->ecx &= ~CPUID_EXT_HYPERVISOR;
+            }
+            if (i != w) {
+                cpuid_data.entries[w] = *e;
+            }
+            w++;
+        }
+        cpuid_data.cpuid.nent = w;
+    }
+
     cpuid_data.cpuid.padding = 0;
     r = kvm_vcpu_ioctl(cs, KVM_SET_CPUID2, &cpuid_data);
     if (r) {

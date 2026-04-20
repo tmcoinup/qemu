@@ -12,10 +12,10 @@
 
 大多数消费级反作弊（包括 DNF 用的 XignCode3）读的是 WMI 的 `Win32_VideoController.Name` 或者 DXGI 的 `DXGI_ADAPTER_DESC.Description`。这两个值都来自驱动元数据，我们可以改写。
 
-本包提供两份工具：
+本包提供的工具：
 
-* `deploy/scripts/guest-gpu-spoof.reg`——静态 `.reg`，默认 virtio 适配器在 Class 子键 `0000`。以管理员身份导入。**只**改 Class 子键那一侧，**不**改 Enum 节点、**不**装任务计划，重启后 `Win32_VideoController.Name` 会被 BasicDisplay 驱动刷回系统本地化的基本显示适配器名字，**不推荐继续用**。
 * `deploy/scripts/apply-gpu-spoof.ps1`——一次到位的安装器。会扫 `Class\{4d36e968-...}`，自动挑出 `DriverDesc` 匹配 `virtio / Red Hat / Microsoft Basic / Standard VGA` 或其中文本地化字串（`基本显示`、`标准 VGA`）的那一项来改，**同时**改 `Enum\PCI\VEN_...\...\FriendlyName` 和 `DeviceDesc`（这两个才是 `Win32_VideoController.Name` 和设备管理器显示名的真正来源），**并安装一个开机自启的任务计划**做持久化（见下文）。
+* `deploy/scripts/host-fix-gpu-devpkey.sh`——host 侧 offline 修补器。`apply-gpu-spoof.ps1` 跑完后，shutdown VM 再跑一次这个，把 `Enum\PCI\...\Properties\{a8b865dd-...}` 下 DriverDesc / DriverProvider 的 DEVPROP 类型从 `0x1` 改成 `0xFFFF0012`，同时绕开 TrustedInstaller ACL（否则 Device Manager 驱动程序选项卡显示"驱动程序提供商: 未知"）。详见 `USAGE.md` 第 7.6 节。
 
 脚本写入 `Class\{4d36e968-...}\NNNN` 的值：
 

@@ -151,7 +151,7 @@ stealth_print_profile
 # -------------------------------------------------------------------
 QMP_SOCK="/tmp/qemu-stealth-${INSTANCE}.qmp"
 MON_SOCK="/tmp/qemu-stealth-${INSTANCE}.mon"
-VNC_DISPLAY=$(( INSTANCE - 1 ))              # VNC port 5900 + display
+: "${VNC_DISPLAY:=$(( INSTANCE - 1 ))}"      # VNC port 5900 + display (env-overridable)
 SPICE_PORT=$(( 5930 + INSTANCE ))
 SSH_FWD_PORT=$(( 10022 + INSTANCE ))
 RDP_FWD_PORT=$(( 13389 + INSTANCE ))
@@ -190,6 +190,17 @@ done < <(stealth_smbios_args)
 # NOTES-GPU.md. virtio-gpu accepts OpenGL via VirGL and Mesa d3d->gl.
 # Fallback to qxl-vga if HEADLESS is set.
 # -------------------------------------------------------------------
+# GPU subsystem spoof: keep VEN/DEV at 1AF4:1050 so virtio-win binds,
+# but rewrite subsys pair + rev to NVIDIA GTX 1050 (GP107 A1). Real INF
+# rename + registry refresh (apply-gpu-spoof.ps1) runs inside the guest.
+#
+# 10DE = NVIDIA, 1C81 = GP107 GTX 1050 (reference), rev A1 matches
+# Pascal retail silicon as seen by lspci on real cards.
+GPU_SUBSYS_VEN=${GPU_SUBSYS_VEN:-0x10DE}
+GPU_SUBSYS_DEV=${GPU_SUBSYS_DEV:-0x1C81}
+GPU_REV=${GPU_REV:-0xA1}
+GPU_STEALTH="x-pci-sub-vendor-id=${GPU_SUBSYS_VEN},x-pci-sub-device-id=${GPU_SUBSYS_DEV},x-pci-revision=${GPU_REV}"
+
 if [[ "$HEADLESS" == "1" ]]; then
     # Headless: VNC only. virtio-vga (no GL) because SPICE GL is local-only
     # and VNC doesn't render OpenGL output. Guest-side DirectX still goes
@@ -203,12 +214,12 @@ if [[ "$HEADLESS" == "1" ]]; then
     DISP_ARGS=(
         -display none
         -vnc 127.0.0.1:$VNC_DISPLAY
-        -device virtio-vga,edid=on,xres=1920,yres=1080
+        -device "virtio-vga,edid=on,xres=1920,yres=1080,${GPU_STEALTH}"
     )
 else
     DISP_ARGS=(
-        -display sdl,gl=on,show-cursor=on
-        -device virtio-vga-gl,edid=on,xres=1920,yres=1080
+        -display sdl,gl=on,show-cursor=off
+        -device "virtio-vga-gl,edid=on,xres=1920,yres=1080,${GPU_STEALTH}"
     )
 fi
 

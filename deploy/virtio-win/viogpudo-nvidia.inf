@@ -1,0 +1,86 @@
+; viogpudo-nvidia.inf
+;
+; Modified copy of the upstream virtio-win `viogpudo.inf` (VirtIO GPU DOD /
+; WDDM display driver).  Only the *metadata* strings that end up in
+; `Enum\PCI\...\DeviceDesc`, `Enum\PCI\...\FriendlyName` and the driver
+; Class subkey are rewritten; Hardware ID matching is UNTOUCHED, so the
+; driver still binds to PCI\VEN_1AF4&DEV_1050 exactly like the original.
+;
+; Drop this file, viogpudo.cat and viogpudo.sys into the same folder,
+; re-sign with a test cert, enable test-signing on the guest (see
+; PLAN-GPU-NVIDIA.md), then `pnputil /add-driver viogpudo-nvidia.inf
+; /install`.
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Display
+ClassGuid={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%PROVIDER%
+DriverVer=02/01/2024,100.93.0.0
+CatalogFile=viogpudo.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir   = 12
+VioGpuDod.Copy   = 12
+
+[SourceDisksNames]
+1 = %DiskId1%,,,""
+
+[SourceDisksFiles]
+viogpudo.sys  = 1,,
+
+; --- Device enumeration ---------------------------------------------------
+[Manufacturer]
+%PROVIDER% = VioGpuDod,NT$ARCH$.10.0...17134
+
+; The Models section is what Windows PnP walks to decide whether this INF
+; is a candidate for a given PCI device.  The Hardware ID must stay at
+; VEN_1AF4&DEV_1050 -- that's what the QEMU virtio-gpu PCI config header
+; exposes (SUBSYS_1C8110DE only shows up as a secondary match).
+[VioGpuDod.NT$ARCH$.10.0...17134]
+%VIOGPUDOD.DeviceDesc% = VioGpuDod_Install, PCI\VEN_1AF4&DEV_1050&SUBSYS_1C8110DE
+%VIOGPUDOD.DeviceDesc% = VioGpuDod_Install, PCI\VEN_1AF4&DEV_1050
+
+; --- Install section ------------------------------------------------------
+[VioGpuDod_Install]
+FeatureScore = F8
+CopyFiles    = VioGpuDod.Copy
+AddReg       = VioGpuDod.AddReg
+
+[VioGpuDod.Copy]
+viogpudo.sys
+
+[VioGpuDod_Install.Services]
+AddService = VioGpuDod, 0x00000002, VioGpuDod_Service_Install
+
+[VioGpuDod_Service_Install]
+DisplayName    = %VIOGPUDOD.SvcDesc%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\viogpudo.sys
+
+; --- Registry: the strings Windows actually surfaces -----------------------
+; DriverDesc is what the Class subkey (Class\{4d36e968-...}\NNNN) stores;
+; Win32_VideoController.Name + DXGI_ADAPTER_DESC.Description are built
+; from DriverDesc + Enum\PCI\...\FriendlyName.  ChipType / AdapterString /
+; DacType are read by DxDiag and by many anti-cheat GPU fingerprinters.
+[VioGpuDod.AddReg]
+HKR,, DriverDesc,                    0,  "%VIOGPUDOD.DeviceDesc%"
+HKR,, ProviderName,                  0,  "NVIDIA"
+HKR,, MatchingDeviceId,              0,  "PCI\VEN_10DE&DEV_1C81"
+HKR,"HardwareInformation", AdapterString, 0, "NVIDIA GeForce GTX 1050"
+HKR,"HardwareInformation", ChipType,      0, "GeForce GTX 1050"
+HKR,"HardwareInformation", DacType,       0, "Integrated RAMDAC"
+HKR,"HardwareInformation", BiosString,    0, "Version 86.07.48.00.38"
+HKR,"HardwareInformation", MemorySize,    %REG_BINARY%, 00,00,00,80
+HKR,"HardwareInformation", qwMemorySize,  %REG_QWORD%,  0x0000000080000000
+
+[Strings]
+REG_BINARY            = 0x00000001
+REG_QWORD             = 0x0000000B
+PROVIDER              = "NVIDIA"
+DiskId1               = "NVIDIA GeForce Driver (virtio-win rebranded)"
+VIOGPUDOD.DeviceDesc  = "NVIDIA GeForce GTX 1050"
+VIOGPUDOD.SvcDesc     = "NVIDIA GeForce GTX 1050 Display Driver"

@@ -166,6 +166,10 @@ struct VirtIOPCIProxy {
     uint32_t dfselect;
     uint32_t gfselect;
     uint32_t guest_features[2];
+    /* deploy stealth: PCI subsystem + revision overrides (UINT32_MAX = unset) */
+    uint32_t x_subsys_vendor_id;
+    uint32_t x_subsys_device_id;
+    uint32_t x_pci_revision;
     VirtIOPCIQueue vqs[VIRTIO_QUEUE_MAX];
 
     VirtIOIRQFD *vector_irqfd;

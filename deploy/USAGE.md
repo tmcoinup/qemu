@@ -71,6 +71,36 @@ patch 实质是 `debian/rules` 里把 `PcdFirmwareVendor` 从 `"<lsb_release -is
 
 `down.sh` 在等 guest 优雅关机期间按 Ctrl+C：脚本退出，VM 可能还在关机中 — 再跑一次 `./down.sh` 继续等，或 `./down.sh --force` 直接杀。
 
+### VNC 进 guest（不加显示适配器的备用通道）
+
+RDP 必然在 guest 设备管理器里留一条 Microsoft Remote Display Adapter。想完全没这个 PnP 条目可以走 **TightVNC**（GDI polling，**无 mirror driver**）。
+
+一次性装（guest 内运行）：
+
+```powershell
+cd C:\nv
+powershell -ExecutionPolicy Bypass -File .\install-tightvnc.ps1
+# 默认 pw 123456，端口 5900
+# 或: .\install-tightvnc.ps1 -Password 'mypw12' -Port 5901
+```
+
+宿主连：
+
+```bash
+./vnc-guest.sh                    # 自动探 IP，密码 123456
+./vnc-guest.sh --port 5901 --password mypw12
+```
+
+区别：
+- `vnc-vm.sh` = 连 QEMU 自己的 `-vnc` socket（宿主端口 5901+，`--no-gpu` 模式用）
+- `vnc-guest.sh` = 连 **guest 内**的 TightVNC Server（guest IP:5900，无 mirror driver，无 Display 适配器）
+
+trade-off：
+- ✅ 设备管理器比 RDP 干净，没有 Microsoft Remote Display Adapter 混进来
+- ✅ tvnserver 作为服务跑在 SYSTEM 下，不占 session
+- ⚠️ 加了一个进程 `tvnserver.exe`（如果 DNF TP 扫进程名要改 service binary 名）
+- ⚠️ GDI polling，帧率和色彩不如 H.264 AVC444 的 RDP；不适合打游戏，适合装软件/设置
+
 ---
 
 > 下面是完整参考手册。按「从零到 DNF 可玩」的时间顺序写。前面 0–4 节是**一次性**操作；

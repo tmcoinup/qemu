@@ -80,7 +80,7 @@ $p = Start-Process msiexec.exe -ArgumentList $args -Wait -PassThru
 if ($p.ExitCode -ne 0) { throw "msiexec returned $($p.ExitCode)" }
 
 # ─── 3. registry tuning — no tray icon, allow remote ────────────────
-Write-Host '[3/5] registry: hide tray icon, tune server' -Fore Cyan
+Write-Host '[3/5] registry: hide tray icon, tune server, set password' -Fore Cyan
 $reg = 'HKLM:\SOFTWARE\TightVNC\Server'
 New-Item -Path $reg -Force | Out-Null
 Set-ItemProperty $reg -Name 'ShowTrayIcon' -Value 0 -Type DWord
@@ -93,6 +93,23 @@ Set-ItemProperty $reg -Name 'EnableFileTransfers' -Value 1 -Type DWord
 Set-ItemProperty $reg -Name 'UseVncAuthentication' -Value 1 -Type DWord
 Set-ItemProperty $reg -Name 'BlockRemoteInput' -Value 0 -Type DWord
 Set-ItemProperty $reg -Name 'LocalInputPriority' -Value 0 -Type DWord
+
+# Password blob — TightVNC MSI's VALUE_OF_PASSWORD property is unreliable
+# (2.8.84 silently ignores it in some installs). Always write the DES-
+# encrypted 8-byte blob directly: key is the standard RealVNC/VNC
+# key (reversed-bit DES key), data is password truncated/NUL-padded to
+# 8 bytes.
+$pwBytes = [System.Text.Encoding]::ASCII.GetBytes($Password)
+if ($pwBytes.Length -lt 8) { $pwBytes = $pwBytes + (New-Object byte[] (8 - $pwBytes.Length)) }
+elseif ($pwBytes.Length -gt 8) { $pwBytes = $pwBytes[0..7] }
+$key = [byte[]] (0xE8, 0x4A, 0xD6, 0x60, 0xC4, 0x72, 0x1A, 0xE0)
+$des = New-Object System.Security.Cryptography.DESCryptoServiceProvider
+$des.Mode = 'ECB'
+$des.Padding = 'None'
+$des.Key = $key
+$enc = $des.CreateEncryptor().TransformFinalBlock($pwBytes, 0, 8)
+Set-ItemProperty $reg -Name 'Password' -Value $enc -Type Binary -Force
+"  password blob: $([BitConverter]::ToString($enc))"
 
 # ─── 4. firewall rule (MSI already added one, but double-check) ─────
 Write-Host '[4/5] firewall: allow inbound TCP/' $Port -Fore Cyan

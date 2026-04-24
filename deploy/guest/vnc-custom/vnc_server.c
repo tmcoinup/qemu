@@ -50,6 +50,8 @@
 #define RFB_VERSION         "RFB 003.008\n"
 #define SECTYPE_VNCAUTH     2
 #define SECTYPE_INVALID     0
+#define MSG_SETPIXELFORMAT  0
+#define MSG_SETENCODINGS    2
 #define MSG_FBUPDATE_REQ    3
 #define MSG_KEYEVENT        4
 #define MSG_POINTEREVENT    5
@@ -405,6 +407,27 @@ static int rfb_session(SOCKET s, Screen *scr, const char *password) {
             uint8_t type;
             if (read_exact(s, &type, 1) < 0) return -1;
             switch (type) {
+            case MSG_SETPIXELFORMAT: {
+                /* type(1) already read, then 3 pad + 16-byte pixel format.
+                 * We ignore what the client asks for — we always send 32bpp
+                 * little-endian rgb888 which TigerVNC accepts. */
+                uint8_t skip[3 + 16];
+                if (read_exact(s, skip, sizeof(skip)) < 0) return -1;
+                break;
+            }
+            case MSG_SETENCODINGS: {
+                /* 1 pad + 2-byte count + count*4 encoding types. We only
+                 * advertise Raw, so the list content is informational. */
+                uint8_t pad; uint8_t cnt[2];
+                if (read_exact(s, &pad, 1) < 0 || read_exact(s, cnt, 2) < 0) return -1;
+                uint32_t n = ((uint32_t)cnt[0]<<8) | cnt[1];
+                if (n > 64) n = 64;  /* sanity clamp */
+                uint8_t enc[4];
+                for (uint32_t i = 0; i < n; i++) {
+                    if (read_exact(s, enc, 4) < 0) return -1;
+                }
+                break;
+            }
             case MSG_FBUPDATE_REQ: {
                 uint8_t pad_inc, rect[8];
                 if (read_exact(s, &pad_inc, 1) < 0 || read_exact(s, rect, 8) < 0) return -1;

@@ -23,6 +23,7 @@ IP_OVERRIDE=""
 PORT=${VNC_PORT:-5900}
 PASSWORD=${VNC_PASSWORD:-123456}
 SCALE=${VNC_SCALE:-}     # e.g. 50 for half, 75 for 3/4. Empty = client native.
+CLIENT=${VNC_CLIENT:-auto}  # auto | tiger | remmina | gvnc
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -30,6 +31,9 @@ while [[ $# -gt 0 ]]; do
         --port)     PORT="$2"; shift 2 ;;
         --password) PASSWORD="$2"; shift 2 ;;
         --scale)    SCALE="$2"; shift 2 ;;
+        --remmina)  CLIENT=remmina; shift ;;
+        --tiger)    CLIENT=tiger; shift ;;
+        --client)   CLIENT="$2"; shift 2 ;;
         -h|--help)  sed -n '3,17p' "$0"; exit 0 ;;
         # positional: IP 优先判（带点）。 bash case glob 里 * 会吃任意字符（含点），
         # 所以必须先匹配带点模式，再匹配纯数字。
@@ -105,9 +109,7 @@ scale_opt=()
 [[ -n "$SCALE" ]] && scale_opt=( "-Scaling=$SCALE%" )
 
 # Generate the 8-byte DES-encrypted VNC password file that -PasswordFile
-# expects. The VNC spec encrypts the 8-byte padded password with a fixed
-# DES key (same bit-reversed key server-side uses) — result is exactly 8
-# bytes. TigerVNC Viewer reads this, no interactive prompt.
+# expects. Also usable from Remmina profile.
 passwd_file="/tmp/.vnc-vm${VM_ID}.pass"
 python3 - "$PASSWORD" "$passwd_file" <<'PYEOF'
 import sys
@@ -126,15 +128,39 @@ with open(out, 'wb') as f: f.write(enc)
 import os; os.chmod(out, 0o600)
 PYEOF
 
-if command -v xtigervncviewer >/dev/null; then
-    exec xtigervncviewer "${scale_opt[@]}" -PasswordFile="$passwd_file" "$IP::$PORT"
-elif command -v remmina >/dev/null; then
-    exec remmina -c "vnc://$IP:$PORT"
-elif command -v vncviewer >/dev/null; then
-    exec vncviewer -passwd "$passwd_file" "$IP::$PORT"
-elif command -v gvncviewer >/dev/null; then
-    exec gvncviewer "$IP:$((PORT-5900))"
-else
-    echo 'No VNC client found. sudo apt install -y tigervnc-viewer remmina' >&2
-    exit 1
+# Auto-pick client if user didn't override.
+if [[ "$CLIENT" == auto ]]; then
+    if command -v xtigervncviewer >/dev/null; then CLIENT=tiger
+    elif command -v remmina >/dev/null;        then CLIENT=remmina
+    elif command -v gvncviewer >/dev/null;     then CLIENT=gvnc
+    else echo 'No VNC client found. sudo apt install -y tigervnc-viewer remmina' >&2; exit 1
+    fi
 fi
+
+case "$CLIENT" in
+    tiger)
+        exec xtigervncviewer "${scale_opt[@]}" -PasswordFile="$passwd_file" "$IP::$PORT"
+        ;;
+    remmina)
+        # Build a one-shot .remmina profile so we can pre-fill password + port.
+        prof="/tmp/vm${VM_ID}-vnc.remmina"
+        # Remmina wants base64 of DES-encoded password, same blob we wrote.
+        pw_b64=$(base64 -w0 < "$passwd_file")
+        cat > "$prof" <<EOF
+[remmina]
+name=vm${VM_ID} VNC
+protocol=VNC
+server=${IP}:${PORT}
+password=${pw_b64}
+viewmode=4
+quality=2
+colordepth=24
+EOF
+        exec remmina -c "$prof"
+        ;;
+    gvnc)
+        exec gvncviewer "$IP:$((PORT-5900))"
+        ;;
+    *)
+        echo "unknown --client $CLIENT (auto|tiger|remmina|gvnc)" >&2; exit 2 ;;
+esac

@@ -798,8 +798,39 @@ static void cmd_inquiry(IDEState *s, uint8_t *buf)
         buf[5] = 0;    /* reserved */
         buf[6] = 0;    /* reserved */
         buf[7] = 0;    /* reserved */
-        padstr8(buf + 8, 8, "QEMU");
-        padstr8(buf + 16, 16, "QEMU DVD-ROM");
+        /*
+         * SCSI INQUIRY returns vendor (8 bytes) + product (16 bytes). Default
+         * is "QEMU" + "QEMU DVD-ROM", which leaks virtualization in Windows
+         * Device Manager (shows "QEMU QEMU DVD-ROM"). When -device ide-cd
+         * model=... is given (via the qdev "model" property that already
+         * populates s->drive_model_str for ATA IDENTIFY), reuse that string:
+         * split on the first space into vendor|product so users can configure
+         * e.g. "TSSTcorp CDDVDW SH-224DB" and get a convincing real-world ID.
+         */
+        {
+            char vendor[9]  = "QEMU";
+            char product[17] = "QEMU DVD-ROM";
+            const char *mdl = s->drive_model_str;
+            if (mdl && mdl[0] &&
+                strcmp(mdl, "QEMU DVD-ROM") != 0 &&
+                strcmp(mdl, "QEMU HARDDISK") != 0) {
+                const char *sep = strchr(mdl, ' ');
+                if (sep && (sep - mdl) <= 8) {
+                    size_t vlen = sep - mdl;
+                    memcpy(vendor, mdl, vlen);
+                    memset(vendor + vlen, ' ', 8 - vlen);
+                    vendor[8] = 0;
+                    pstrcpy(product, sizeof(product), sep + 1);
+                } else {
+                    /* no split: pad vendor with spaces, whole string as product */
+                    memset(vendor, ' ', 8);
+                    vendor[8] = 0;
+                    pstrcpy(product, sizeof(product), mdl);
+                }
+            }
+            padstr8(buf + 8, 8, vendor);
+            padstr8(buf + 16, 16, product);
+        }
         padstr8(buf + 32, 4, s->version);
         idx = 36;
     }

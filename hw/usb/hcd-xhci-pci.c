@@ -265,6 +265,16 @@ static void qemu_xhci_class_init(ObjectClass *klass, const void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
+    /*
+     * Default xHCI identity. Upstream uses Red Hat / Qumranet 0x1B36 which
+     * is a QEMU tell in Windows PnP. Tried Intel 100-series 0x8086/0xA12F
+     * once to hide that — guest then came up but then on next cold boot
+     * with stealth chain enabled (no IDD, -vga none, vGPU in early boot)
+     * Windows never reached network, so xHCI PnP re-enumeration seems to
+     * interact with the rest of the boot chain. Reverting. Revisit only
+     * with a plan to re-arm input drivers (usb-tablet binds to the xHCI
+     * HCD on every boot).
+     */
     k->vendor_id    = PCI_VENDOR_ID_REDHAT;
     k->device_id    = PCI_DEVICE_ID_REDHAT_XHCI;
     k->revision     = 0x01;

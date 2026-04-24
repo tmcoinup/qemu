@@ -1,0 +1,25 @@
+# /etc/netplan/99-qemu-br0.yaml
+# 把物理网卡并进 br0，VM 通过 qemu-bridge-helper 直接挂上来，与宿主同网段。
+# ⚠️  应用后宿主会短暂断网。请先把 IFACE 改成本机实际网卡名。
+#
+# 推荐用法 (应用前必读 deploy/host/setup-bridge.sh 的校验步骤):
+#   sudo cp deploy/host/netplan-br0.yaml /etc/netplan/99-qemu-br0.yaml
+#   sudo chmod 600 /etc/netplan/99-qemu-br0.yaml
+#   sudo netplan try      # 120 秒回滚超时，确认网络可用后按 Enter
+#   sudo netplan apply
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    # 用 `ip link` 查到的物理网卡名替换
+    enp3s0:
+      dhcp4: false
+      dhcp6: false
+  bridges:
+    br0:
+      interfaces: [enp3s0]
+      dhcp4: true
+      dhcp6: false
+      parameters:
+        stp: false
+        forward-delay: 0

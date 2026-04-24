@@ -50,6 +50,16 @@ static int smbios_type4_count = 0;
 static bool smbios_have_defaults;
 static uint32_t smbios_cpuid_version, smbios_cpuid_features;
 
+/*
+ * Handles of the first type 7 (Cache Information) record emitted at each
+ * cache level (index 1=L1, 2=L2, 3=L3). Populated while building type 7 and
+ * consumed while building type 4 so Windows Win32_Processor.L[123]CacheSize
+ * can resolve. 0xFFFF = no such level supplied.
+ */
+static uint16_t smbios_type7_level_handle[4] = {
+    0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF
+};
+
 DECLARE_BITMAP(smbios_have_binfile_bitmap, SMBIOS_MAX_TYPE + 1);
 DECLARE_BITMAP(smbios_have_fields_bitmap, SMBIOS_MAX_TYPE + 1);
 
@@ -62,7 +72,10 @@ static struct {
 
 static struct {
     const char *manufacturer, *version, *serial, *asset, *sku;
-} type3;
+    uint8_t chassis_type;           /* SMBIOS chassis enum, 0x03 Desktop / 0x07 Tower */
+} type3 = {
+    .chassis_type = 0x03, /* Desktop — far more common than the old hardcoded 0x01 (Other) */
+};
 
 /*
  * SVVP requires max_speed and current_speed to be set and not being
@@ -77,12 +90,34 @@ static struct {
     uint64_t max_speed;
     uint64_t current_speed;
     uint64_t processor_id;
+    uint16_t external_clock;        /* MHz; 0 = Unknown */
+    uint8_t voltage;                /* SMBIOS encoding, bit7=1 | tenths-of-volt */
 } type4 = {
     .max_speed = DEFAULT_CPU_SPEED,
     .current_speed = DEFAULT_CPU_SPEED,
     .processor_id = 0,
     .processor_family = 0x01, /* Other */
+    /*
+     * Desktop Intel defaults that make Win32_Processor look like a real
+     * chip instead of an emulator: 100 MHz BCLK, 1.2 V core.
+     * (SMBIOS voltage encoding: bit7=1 + tenths-of-volt, so 0x8C = 1.2V.)
+     */
+    .external_clock = 100,
+    .voltage = 0x8C,
 };
+
+/* type 7 instance for parsing */
+struct type7_instance {
+    const char *socket_designation;
+    uint8_t level;                 /* 1=L1, 2=L2, 3=L3 (normalized; wire is level-1) */
+    uint16_t installed_size;       /* in KB */
+    uint16_t max_size;             /* in KB */
+    uint8_t associativity;         /* SMBIOS enum, 7=8-way, 8=16-way, etc */
+    uint8_t cache_type;            /* 3=Instr, 4=Data, 5=Unified */
+    uint8_t error_correction;      /* 3=None, 5=SingleBit ECC, 6=MultiBit ECC */
+    QTAILQ_ENTRY(type7_instance) next;
+};
+static QTAILQ_HEAD(, type7_instance) type7 = QTAILQ_HEAD_INITIALIZER(type7);
 
 struct type8_instance {
     const char *internal_reference, *external_reference;
@@ -109,6 +144,17 @@ static struct {
 static struct {
     const char *loc_pfx, *bank, *manufacturer, *serial, *asset, *part;
     uint16_t speed;
+    /*
+     * 0 keeps the legacy defaults (memory_type=0x07 "RAM",
+     * type_detail=0x02 "Other", widths=0xFFFF "Unknown"). Any non-zero
+     * value is written verbatim into the corresponding SMBIOS field so
+     * guests see e.g. DDR4 / Synchronous / 64-bit modules that match the
+     * memory brand they were told about via manufacturer/part.
+     */
+    uint8_t memtype;
+    uint16_t type_detail;
+    uint16_t data_width;
+    uint16_t total_width;
 } type17;
 
 static QEnumLookup type41_kind_lookup = {
@@ -282,6 +328,10 @@ static const QemuOptDesc qemu_smbios_type3_opts[] = {
         .name = "sku",
         .type = QEMU_OPT_STRING,
         .help = "SKU number",
+    },{
+        .name = "chassis_type",
+        .type = QEMU_OPT_NUMBER,
+        .help = "chassis enclosure type (SMBIOS enum: 3=Desktop, 7=Tower, ...)",
     },
     { /* end of list */ }
 };
@@ -331,6 +381,51 @@ static const QemuOptDesc qemu_smbios_type4_opts[] = {
         .name = "processor-id",
         .type = QEMU_OPT_NUMBER,
         .help = "processor id",
+    }, {
+        .name = "external-clock",
+        .type = QEMU_OPT_NUMBER,
+        .help = "external (bus) clock in MHz",
+    }, {
+        .name = "voltage",
+        .type = QEMU_OPT_NUMBER,
+        .help = "voltage byte (bit7=1 | tenths-of-volt, e.g. 0x8C = 1.2V)",
+    },
+    { /* end of list */ }
+};
+
+static const QemuOptDesc qemu_smbios_type7_opts[] = {
+    {
+        .name = "type",
+        .type = QEMU_OPT_NUMBER,
+        .help = "SMBIOS element type",
+    },{
+        .name = "socket_designation",
+        .type = QEMU_OPT_STRING,
+        .help = "cache socket designation string (e.g. 'L1 Cache')",
+    },{
+        .name = "level",
+        .type = QEMU_OPT_NUMBER,
+        .help = "cache level (1=L1, 2=L2, 3=L3)",
+    },{
+        .name = "installed_size",
+        .type = QEMU_OPT_NUMBER,
+        .help = "cache installed size in KB",
+    },{
+        .name = "max_size",
+        .type = QEMU_OPT_NUMBER,
+        .help = "cache max size in KB (defaults to installed_size)",
+    },{
+        .name = "associativity",
+        .type = QEMU_OPT_NUMBER,
+        .help = "SMBIOS associativity enum (7=8-way, 8=16-way, ...)",
+    },{
+        .name = "cache_type",
+        .type = QEMU_OPT_NUMBER,
+        .help = "3=Instruction, 4=Data, 5=Unified",
+    },{
+        .name = "error_correction",
+        .type = QEMU_OPT_NUMBER,
+        .help = "3=None, 5=SingleBit ECC, 6=MultiBit ECC (default 3)",
     },
     { /* end of list */ }
 };
@@ -469,6 +564,22 @@ static const QemuOptDesc qemu_smbios_type17_opts[] = {
         .name = "speed",
         .type = QEMU_OPT_NUMBER,
         .help = "maximum capable speed",
+    },{
+        .name = "memtype",
+        .type = QEMU_OPT_NUMBER,
+        .help = "memory type byte (0x18=DDR3, 0x1A=DDR4, 0x22=DDR5)",
+    },{
+        .name = "typedetail",
+        .type = QEMU_OPT_NUMBER,
+        .help = "type_detail bitmask (0x80=Synchronous, ...)",
+    },{
+        .name = "width",
+        .type = QEMU_OPT_NUMBER,
+        .help = "data width in bits (e.g. 64)",
+    },{
+        .name = "totalwidth",
+        .type = QEMU_OPT_NUMBER,
+        .help = "total width in bits (data+ECC; defaults to data width)",
     },
     { /* end of list */ }
 };
@@ -553,6 +664,7 @@ bool smbios_skip_table(uint8_t type, bool required_table)
 #define T2_BASE 0x200
 #define T3_BASE 0x300
 #define T4_BASE 0x400
+#define T7_BASE 0x700
 #define T9_BASE 0x900
 #define T11_BASE 0xe00
 
@@ -656,7 +768,7 @@ static void smbios_build_type_3_table(void)
     SMBIOS_BUILD_TABLE_PRE(3, T3_BASE, true); /* required */
 
     SMBIOS_TABLE_SET_STR(3, manufacturer_str, type3.manufacturer);
-    t->type = 0x01; /* Other */
+    t->type = type3.chassis_type ?: 0x03; /* Desktop by default */
     SMBIOS_TABLE_SET_STR(3, version_str, type3.version);
     SMBIOS_TABLE_SET_STR(3, serial_number_str, type3.serial);
     SMBIOS_TABLE_SET_STR(3, asset_tag_number_str, type3.asset);
@@ -703,15 +815,20 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance,
         t->processor_id[1] = cpu_to_le32(type4.processor_id >> 32);
     }
     SMBIOS_TABLE_SET_STR(4, processor_version_str, type4.version);
-    t->voltage = 0;
-    t->external_clock = cpu_to_le16(0); /* Unknown */
+    t->voltage = type4.voltage;
+    t->external_clock = cpu_to_le16(type4.external_clock);
     t->max_speed = cpu_to_le16(type4.max_speed);
     t->current_speed = cpu_to_le16(type4.current_speed);
     t->status = 0x41; /* Socket populated, CPU enabled */
     t->processor_upgrade = 0x01; /* Other */
-    t->l1_cache_handle = cpu_to_le16(0xFFFF); /* N/A */
-    t->l2_cache_handle = cpu_to_le16(0xFFFF); /* N/A */
-    t->l3_cache_handle = cpu_to_le16(0xFFFF); /* N/A */
+    /*
+     * Point at the matching type 7 (Cache Information) records if they
+     * were emitted. Windows Win32_Processor.L[123]CacheSize follows these
+     * handles; leaving them 0xFFFF gives L2CacheSize = "" / L3CacheSize = 0.
+     */
+    t->l1_cache_handle = cpu_to_le16(smbios_type7_level_handle[1]);
+    t->l2_cache_handle = cpu_to_le16(smbios_type7_level_handle[2]);
+    t->l3_cache_handle = cpu_to_le16(smbios_type7_level_handle[3]);
     SMBIOS_TABLE_SET_STR(4, serial_number_str, type4.serial);
     SMBIOS_TABLE_SET_STR(4, asset_tag_number_str, type4.asset);
     SMBIOS_TABLE_SET_STR(4, part_number_str, type4.part);
@@ -740,6 +857,68 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance,
 
     SMBIOS_BUILD_TABLE_POST;
     smbios_type4_count++;
+}
+
+/*
+ * SMBIOS type 7 Cache Info. Each type7_instance describes one cache level.
+ * Real desktop CPUs have 3-4 type 7 entries (L1 Data / L1 Instruction / L2 / L3
+ * or a combined L1 / L2 / L3). VM guests without this table leave WMI
+ * Win32_CacheMemory empty, which is a noticable virtualization tell — so we
+ * emit them.
+ *
+ * Encoding notes (SMBIOS spec v3.x):
+ *  - cache_configuration bits:
+ *      [2:0]  cache level (0=L1, 1=L2, 2=L3)     -> level-1 in wire value
+ *      [3]    socketed (0 for CPU cache)
+ *      [5:4]  location (00 internal)
+ *      [7]    enabled (1)
+ *      [9:8]  operational mode (01 write-back)
+ *  - max/installed size [15] = 0 uses 1K granularity (fits up to 32MB)
+ *  - SRAM type = 0x0020 (Synchronous)
+ */
+static void smbios_build_type_7_table(void)
+{
+    unsigned instance = 0;
+    struct type7_instance *t7;
+
+    QTAILQ_FOREACH(t7, &type7, next) {
+        const char *sd = t7->socket_designation ? t7->socket_designation
+                                                : "CPU Cache";
+        uint16_t handle = T7_BASE + instance;
+        SMBIOS_BUILD_TABLE_PRE(7, handle, true);
+
+        /* Remember first handle at each level (L1/L2/L3) for type 4 linkage. */
+        if (t7->level >= 1 && t7->level <= 3 &&
+            smbios_type7_level_handle[t7->level] == 0xFFFF) {
+            smbios_type7_level_handle[t7->level] = handle;
+        }
+
+        SMBIOS_TABLE_SET_STR(7, socket_designation_str, sd);
+
+        /* cache_configuration */
+        uint16_t cfg = 0;
+        uint8_t lvl_wire = (t7->level > 0) ? (t7->level - 1) : 0;
+        cfg |= (lvl_wire & 0x7);          /* level */
+        cfg |= (1 << 7);                  /* enabled */
+        cfg |= (1 << 8);                  /* WB */
+        t->cache_configuration = cpu_to_le16(cfg);
+
+        /* sizes in 1KB granularity */
+        t->max_cache_size       = cpu_to_le16(t7->max_size);
+        t->installed_size       = cpu_to_le16(t7->installed_size);
+        t->max_cache_size_2     = cpu_to_le32(t7->max_size);
+        t->installed_size_2     = cpu_to_le32(t7->installed_size);
+
+        t->supported_sram_type  = cpu_to_le16(0x0020); /* Synchronous */
+        t->current_sram_type    = cpu_to_le16(0x0020);
+        t->cache_speed          = 0;      /* unknown */
+        t->error_correction_type = t7->error_correction ?: 0x03; /* None */
+        t->system_cache_type    = t7->cache_type ?: 0x05; /* Unified */
+        t->associativity        = t7->associativity ?: 0x07; /* 8-way */
+
+        SMBIOS_BUILD_TABLE_POST;
+        instance++;
+    }
 }
 
 static void smbios_build_type_8_table(void)
@@ -881,8 +1060,13 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
 
     t->physical_memory_array_handle = cpu_to_le16(0x1000); /* Type 16 above */
     t->memory_error_information_handle = cpu_to_le16(0xFFFE); /* Not provided */
-    t->total_width = cpu_to_le16(0xFFFF); /* Unknown */
-    t->data_width = cpu_to_le16(0xFFFF); /* Unknown */
+    {
+        uint16_t dw = type17.data_width ? type17.data_width : 0xFFFF;
+        uint16_t tw = type17.total_width ? type17.total_width :
+                      (type17.data_width ? type17.data_width : 0xFFFF);
+        t->total_width = cpu_to_le16(tw);
+        t->data_width = cpu_to_le16(dw);
+    }
     size_mb = QEMU_ALIGN_UP(size, MiB) / MiB;
     if (size_mb < MAX_T17_STD_SZ) {
         t->size = cpu_to_le16(size_mb);
@@ -894,11 +1078,25 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
     }
     t->form_factor = 0x09; /* DIMM */
     t->device_set = 0; /* Not in a set */
-    snprintf(loc_str, sizeof(loc_str), "%s %d", type17.loc_pfx, instance);
-    SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
-    SMBIOS_TABLE_SET_STR(17, bank_locator_str, type17.bank);
-    t->memory_type = 0x07; /* RAM */
-    t->type_detail = cpu_to_le16(0x02); /* Other */
+    /*
+     * Real desktop BIOSes label DIMM slots with channel letters so tools
+     * like CPU-Z / AIDA / HWiNFO detect dual-channel operation. Lay them
+     * out as A1, B1, A2, B2, ... — even instances to channel A, odd to B.
+     */
+    {
+        char ch = 'A' + (instance & 1);
+        unsigned rank = (instance >> 1) + 1;
+        char bank_str[32];
+        snprintf(loc_str, sizeof(loc_str), "%s_%c%u",
+                 type17.loc_pfx, ch, rank);
+        snprintf(bank_str, sizeof(bank_str), "%s_Channel%c-DIMM%u",
+                 type17.bank, ch, rank);
+        SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
+        SMBIOS_TABLE_SET_STR(17, bank_locator_str, bank_str);
+    }
+    t->memory_type = type17.memtype ? type17.memtype : 0x07; /* default RAM */
+    t->type_detail = cpu_to_le16(type17.type_detail ?
+                                 type17.type_detail : 0x02); /* default Other */
     t->speed = cpu_to_le16(type17.speed);
     SMBIOS_TABLE_SET_STR(17, manufacturer_str, type17.manufacturer);
     SMBIOS_TABLE_SET_STR(17, serial_number_str, type17.serial);
@@ -1110,6 +1308,9 @@ static bool smbios_get_tables_ep(MachineState *ms,
 
     g_free(smbios_tables);
     smbios_type4_count = 0;
+    smbios_type7_level_handle[1] = 0xFFFF;
+    smbios_type7_level_handle[2] = 0xFFFF;
+    smbios_type7_level_handle[3] = 0xFFFF;
     smbios_tables = g_memdup2(usr_blobs, usr_blobs_len);
     smbios_tables_len = usr_blobs_len;
     smbios_table_max = usr_table_max;
@@ -1121,6 +1322,9 @@ static bool smbios_get_tables_ep(MachineState *ms,
     smbios_build_type_3_table();
 
     assert(ms->smp.sockets >= 1);
+
+    /* Build type 7 first so type 4 can reference the cache handles. */
+    smbios_build_type_7_table();
 
     for (i = 0; i < ms->smp.sockets; i++) {
         smbios_build_type_4_table(ms, i, ep_type, errp);
@@ -1465,6 +1669,8 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
             save_opt(&type3.serial, opts, "serial");
             save_opt(&type3.asset, opts, "asset");
             save_opt(&type3.sku, opts, "sku");
+            type3.chassis_type = qemu_opt_get_number(opts, "chassis_type",
+                                                     type3.chassis_type);
             return;
         case 4:
             if (!qemu_opts_validate(opts, qemu_smbios_type4_opts, errp)) {
@@ -1490,7 +1696,28 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
                 error_setg(errp, "SMBIOS CPU speed is too large (> %d)",
                            UINT16_MAX);
             }
+            type4.external_clock = qemu_opt_get_number(opts, "external-clock",
+                                                       type4.external_clock);
+            type4.voltage = qemu_opt_get_number(opts, "voltage",
+                                                type4.voltage);
             return;
+        case 7: {
+            if (!qemu_opts_validate(opts, qemu_smbios_type7_opts, errp)) {
+                return;
+            }
+            struct type7_instance *t7_i;
+            t7_i = g_new0(struct type7_instance, 1);
+            save_opt(&t7_i->socket_designation, opts, "socket_designation");
+            t7_i->level            = qemu_opt_get_number(opts, "level", 1);
+            t7_i->installed_size   = qemu_opt_get_number(opts, "installed_size", 0);
+            t7_i->max_size         = qemu_opt_get_number(opts, "max_size",
+                                                         t7_i->installed_size);
+            t7_i->associativity    = qemu_opt_get_number(opts, "associativity", 7);
+            t7_i->cache_type       = qemu_opt_get_number(opts, "cache_type", 5);
+            t7_i->error_correction = qemu_opt_get_number(opts, "error_correction", 3);
+            QTAILQ_INSERT_TAIL(&type7, t7_i, next);
+            return;
+        }
         case 8:
             if (!qemu_opts_validate(opts, qemu_smbios_type8_opts, errp)) {
                 return;
@@ -1544,6 +1771,10 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
             save_opt(&type17.asset, opts, "asset");
             save_opt(&type17.part, opts, "part");
             type17.speed = qemu_opt_get_number(opts, "speed", 0);
+            type17.memtype = qemu_opt_get_number(opts, "memtype", 0);
+            type17.type_detail = qemu_opt_get_number(opts, "typedetail", 0);
+            type17.data_width = qemu_opt_get_number(opts, "width", 0);
+            type17.total_width = qemu_opt_get_number(opts, "totalwidth", 0);
             return;
         case 41: {
             struct type41_instance *t41_i;

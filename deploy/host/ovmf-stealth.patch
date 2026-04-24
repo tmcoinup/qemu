@@ -1,0 +1,17 @@
+# Apply to Ubuntu's edk2 source after `apt-get source edk2`.
+# From deploy/host/: cd ovmf-build/edk2-2024.02 && patch -p1 < ../../ovmf-stealth.patch
+--- a/debian/rules
++++ b/debian/rules
+@@ -23,9 +23,9 @@
+ endif
+ 
+ PCD_RELEASE_DATE = $(shell date -d@$(SOURCE_DATE_EPOCH) "+%m/%d/%Y")
+-PCD_FLAGS  = --pcd PcdFirmwareVendor=L"$(shell lsb_release -is) distribution of EDK II\\0"
+-PCD_FLAGS += --pcd PcdFirmwareVersionString=L"$(DEB_VERSION)\\0"
+-PCD_FLAGS += --pcd PcdFirmwareReleaseDateString=L"$(PCD_RELEASE_DATE)\\0"
++PCD_FLAGS  = --pcd PcdFirmwareVendor=L"American Megatrends Inc.\\0"
++PCD_FLAGS += --pcd PcdFirmwareVersionString=L"V3.20\\0"
++PCD_FLAGS += --pcd PcdFirmwareReleaseDateString=L"04/25/2018\\0"
+ COMMON_FLAGS  = -DCC_MEASUREMENT_ENABLE=TRUE
+ COMMON_FLAGS += -DNETWORK_HTTP_BOOT_ENABLE=TRUE
+ COMMON_FLAGS += -DNETWORK_IP6_ENABLE=TRUE

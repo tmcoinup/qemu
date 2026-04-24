@@ -2358,6 +2358,14 @@ struct ArchCPU {
      */
     bool force_features;
     bool expose_kvm;
+    /*
+     * Stealth-hypervisor mode: if true, suppress the CPUID.1.ECX[31]
+     * HYPERVISOR bit that QEMU otherwise forces on. Used with kvm=off
+     * to also hide the KVM paravirt signature leaf (0x40000000).
+     * Turns a guest's virtualization detection surface opaque for
+     * anti-cheat / DRM probes that rely on these CPUID markers.
+     */
+    bool stealth_hypervisor;
     bool expose_tcg;
     bool migratable;
     bool migrate_smi_count;

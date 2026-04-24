@@ -1,0 +1,47 @@
+# /etc/vgpu_unlock/profile_override.toml
+#
+# vgpu_unlock-rs 运行时读这个文件，按 mdev profile (nvidia-XXX) 做字段级覆写。
+#
+# 本机可用 profile:
+#   ls /sys/bus/pci/devices/0000:04:00.0/mdev_supported_types/ + cat name
+#   nvidia-256 = GRID RTX6000-1Q   (1024 MB)
+#   nvidia-257 = GRID RTX6000-2Q   (2048 MB)    ← 本项目用这个 (每个 VM 2 GB)
+#   nvidia-258 = GRID RTX6000-3Q   (3072 MB)
+#   ...
+#
+# 注意：vgpu_unlock-rs 的 TOML 字段名是 `pci_id` / `pci_device_id`，
+# 内部映射到 NVIDIA struct 的 vdev_id / pdev_id。写 16-bit 仅改 device id 部分。
+# guest 里 lspci 看到的 vendor:device 另外由 QEMU -device vfio-pci 的
+# x-pci-vendor-id / x-pci-device-id / x-pci-sub-* 覆盖（见 start-vm.sh）。
+
+[profile.nvidia-257]
+num_displays = 4
+display_width = 1920
+display_height = 1200
+max_pixels = 9216000
+framebuffer = 0x80000000             # 2 GB
+framebuffer_reservation = 0x10000000 # 约 256 MB host overhead
+
+# ⚠️  不要覆写 pci_id / pci_device_id。
+# 保持 NVIDIA driver 默认报告的 Quadro RTX 6000 (0x10DE:0x1E30) 让 guest 里
+# GRID Windows 驱动 INF (nvdm*.inf) 能按原生 PCI\VEN_10DE&DEV_1E30 匹配上、
+# 正常装上。消费卡伪装 (GTX 1050 / GT 1030) 放到 guest 的 inf-patch.ps1 那
+# 步做：
+#   1) 装完 GRID 驱动
+#   2) inf-patch.ps1 在 INF [Strings]/[NVIDIA_Devices] 段加 DEV_1C81/DEV_1D01
+#   3) 关 VM 再用 start-vm.sh 的默认 (SPOOF=1) 启动 → QEMU x-pci-device-id 把
+#      PCI config space 的 DEV 改成 1C81/1D01 → Windows 用修改后的 INF 里新
+#      加的 DEV_1C81/DEV_1D01 条目 bind 同一份 driver。
+#
+# 如果后面要强行伪装到 vGPU 驱动内部 (而非仅 PCI config)，再把下面两行解
+# 注释；但值必须是 0x10DE_XXXX 的完整 32-bit (高 16 vendor + 低 16 device)。
+#pci_id = 0x10DE1C81
+#pci_device_id = 0x10DE1C81
+
+# 备用: 4 GB profile (nvidia-259 = 4Q) 伪装 GT 1030
+# 需要时解注释并确保总显存不超 16 GB 上限
+#[profile.nvidia-259]
+#num_displays = 4
+#framebuffer = 0x100000000            # 4 GB
+#pci_id = 0x10DE1D01                  # 10DE:1D01 = GT 1030
+#pci_device_id = 0x10DE1D01

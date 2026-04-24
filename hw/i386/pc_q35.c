@@ -367,6 +367,14 @@ static void pc_q35_machine_options(MachineClass *m)
 static void pc_q35_machine_11_0_options(MachineClass *m)
 {
     pc_q35_machine_options(m);
+    /*
+     * Split the guest RAM into 4 GiB DIMMs so an 8 GB VM looks like a
+     * dual-channel desktop build (two populated slots, same kit). CPU-Z
+     * / AIDA / 鲁大师 use SMBIOS type 17 topology to label "Dual Channel";
+     * leaving the upstream 2 TiB default collapses everything into one
+     * giant DIMM, which is a virtualization tell.
+     */
+    m->smbios_memory_device_size = 4 * GiB;
 }
 
 DEFINE_Q35_MACHINE_AS_LATEST(11, 0);

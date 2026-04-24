@@ -351,6 +351,28 @@ static void pci_del_option_rom(PCIDevice *pdev);
 static uint16_t pci_default_sub_vendor_id = PCI_SUBVENDOR_ID_REDHAT_QUMRANET;
 static uint16_t pci_default_sub_device_id = PCI_SUBDEVICE_ID_QEMU;
 
+/*
+ * Every PCI device that does not explicitly set its PCI subsystem ID inherits
+ * pci_default_sub_vendor_id/pci_default_sub_device_id. Default (Red Hat
+ * 0x1AF4 / QEMU 0x1100) is the single biggest "this is a QEMU VM" fingerprint
+ * in lspci output. Let QEMU_PCI_SUBVENDOR_ID / QEMU_PCI_SUBDEVICE_ID env vars
+ * override, so start-vm.sh can pick an OEM subsystem matching the fake
+ * motherboard (e.g. ASUS 0x1043 / MSI 0x1462 / Gigabyte 0x1458 / ASRock 0x1849).
+ */
+static void __attribute__((constructor)) pci_default_sub_ids_from_env(void)
+{
+    const char *v;
+    unsigned long n;
+    if ((v = getenv("QEMU_PCI_SUBVENDOR_ID")) && *v) {
+        n = strtoul(v, NULL, 0);
+        if (n <= 0xFFFF) pci_default_sub_vendor_id = (uint16_t)n;
+    }
+    if ((v = getenv("QEMU_PCI_SUBDEVICE_ID")) && *v) {
+        n = strtoul(v, NULL, 0);
+        if (n <= 0xFFFF) pci_default_sub_device_id = (uint16_t)n;
+    }
+}
+
 PCIHostStateList pci_host_bridges;
 
 int pci_bar(PCIDevice *d, int reg)

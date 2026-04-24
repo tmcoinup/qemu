@@ -5,9 +5,12 @@
 #
 # Prereq: guest has install-tightvnc.ps1 done.
 #
+# Usage:
 #   ./vnc-guest.sh                        auto-discover IP, 5900, pw 123456
+#   ./vnc-guest.sh <vm_id>                as above, use vmN.conf
+#   ./vnc-guest.sh <ip>                   skip discovery, use that IP
+#   ./vnc-guest.sh --ip 192.168.30.191    same
 #   ./vnc-guest.sh --port 5901 --password mypw
-#   ./vnc-guest.sh --ip 192.168.30.191
 #
 # Unlike xfreerdp3, the VNC path doesn't add a Remote Display Adapter in
 # guest's Device Manager — TightVNC 2.x uses GDI polling, no mirror driver.
@@ -25,8 +28,13 @@ while [[ $# -gt 0 ]]; do
         --ip)       IP_OVERRIDE="$2"; shift 2 ;;
         --port)     PORT="$2"; shift 2 ;;
         --password) PASSWORD="$2"; shift 2 ;;
-        -h|--help)  sed -n '3,15p' "$0"; exit 0 ;;
-        *) echo "unknown arg: $1"; exit 2 ;;
+        -h|--help)  sed -n '3,17p' "$0"; exit 0 ;;
+        # positional: either a VM id (1-9) or an IP
+        [0-9]|[1-9][0-9]*)            VM_ID="$1"; shift ;;
+        [0-9]*.[0-9]*.[0-9]*.[0-9]*)  IP_OVERRIDE="$1"; shift ;;
+        *) echo "unknown arg: $1" >&2
+           echo "usage: $0 [<vm_id>|<ip>] [--port N] [--password X]" >&2
+           exit 2 ;;
     esac
 done
 
@@ -48,7 +56,16 @@ if [[ -z "$IP_OVERRIDE" ]]; then
 else
     IP="$IP_OVERRIDE"
 fi
-[[ -n "$IP" ]] || { echo "no IP — is guest booted?" >&2; exit 1; }
+if [[ -z "$IP" ]]; then
+    echo "[vnc-guest] no IP for MAC $VM_MAC in ARP table." >&2
+    echo "            guest boot slow / network not up yet?" >&2
+    echo "            workarounds:" >&2
+    echo "              1) wait 30 s and try again" >&2
+    echo "              2) tmux attach -t vm${VM_ID}       # see QEMU log" >&2
+    echo "              3) ./vnc-guest.sh 192.168.30.191   # explicit IP" >&2
+    echo "              4) ./up.sh --connect-only          # RDP 3389 has the same hint for when guest boots" >&2
+    exit 1
+fi
 
 if ! nc -zv -w 2 "$IP" "$PORT" 2>/dev/null; then
     echo "[vnc-guest] $IP:$PORT not listening — did you run install-tightvnc.ps1 in the guest?"

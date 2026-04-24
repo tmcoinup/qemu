@@ -81,7 +81,7 @@ typedef struct {
 
 /* ------- override functions that the app will call ------- */
 
-static NvAPI_Status __stdcall
+static NvAPI_Status __cdecl
 hook_GetAllClockFrequencies(void *hPhysicalGpu, NV_GPU_CLOCK_FREQUENCIES_V2 *pClk)
 {
     if (!pClk) return -5;  /* NVAPI_INVALID_ARGUMENT */
@@ -101,7 +101,7 @@ hook_GetAllClockFrequencies(void *hPhysicalGpu, NV_GPU_CLOCK_FREQUENCIES_V2 *pCl
     return 0;
 }
 
-static NvAPI_Status __stdcall
+static NvAPI_Status __cdecl
 hook_GetRamMaker(void *hPhysicalGpu, NvU32 *pMaker)
 {
     if (!pMaker) return -5;
@@ -109,7 +109,7 @@ hook_GetRamMaker(void *hPhysicalGpu, NvU32 *pMaker)
     return 0;
 }
 
-static NvAPI_Status __stdcall
+static NvAPI_Status __cdecl
 hook_GetRamType(void *hPhysicalGpu, NvU32 *pType)
 {
     if (!pType) return -5;
@@ -117,7 +117,7 @@ hook_GetRamType(void *hPhysicalGpu, NvU32 *pType)
     return 0;
 }
 
-static NvAPI_Status __stdcall
+static NvAPI_Status __cdecl
 hook_GetRamBusWidth(void *hPhysicalGpu, NvU32 *pWidth)
 {
     if (!pWidth) return -5;
@@ -125,7 +125,7 @@ hook_GetRamBusWidth(void *hPhysicalGpu, NvU32 *pWidth)
     return 0;
 }
 
-static NvAPI_Status __stdcall
+static NvAPI_Status __cdecl
 hook_GetRamBandwidth(void *hPhysicalGpu, NvU32 *pMBps)
 {
     if (!pMBps) return -5;
@@ -154,7 +154,7 @@ static const struct override g_overrides[] = {
 
 /* ------- the only export: nvapi_QueryInterface ------- */
 
-__declspec(dllexport) void* __stdcall
+__declspec(dllexport) void* __cdecl
 nvapi_QueryInterface(NvU32 id)
 {
     if (!g_real_QI) return NULL;
@@ -166,16 +166,27 @@ nvapi_QueryInterface(NvU32 id)
     return g_real_QI(id);
 }
 
+/* Arch-specific backup name + system dir:
+ *   x64 shim:  System32\nvapi64_orig.dll
+ *   x86 shim:  SysWOW64\nvapi_orig.dll    (32-bit apps on x64 Windows)
+ */
+#ifdef _WIN64
+  #define BACKUP_NAME     "nvapi64_orig.dll"
+  #define BACKUP_FULLPATH "C:\\Windows\\System32\\nvapi64_orig.dll"
+#else
+  #define BACKUP_NAME     "nvapi_orig.dll"
+  #define BACKUP_FULLPATH "C:\\Windows\\SysWOW64\\nvapi_orig.dll"
+#endif
+
 BOOL APIENTRY
 DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved)
 {
     (void)hInst; (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         /* Load the original DLL we renamed aside */
-        g_real_nvapi = LoadLibraryA("nvapi64_orig.dll");
+        g_real_nvapi = LoadLibraryA(BACKUP_NAME);
         if (!g_real_nvapi) {
-            /* Try absolute path in case system32 isn't in search path */
-            g_real_nvapi = LoadLibraryA("C:\\Windows\\System32\\nvapi64_orig.dll");
+            g_real_nvapi = LoadLibraryA(BACKUP_FULLPATH);
         }
         if (g_real_nvapi) {
             g_real_QI = (QueryInterface_t)GetProcAddress(g_real_nvapi, "nvapi_QueryInterface");

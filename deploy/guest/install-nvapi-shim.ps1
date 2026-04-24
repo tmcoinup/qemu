@@ -18,7 +18,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ServerUrl = 'http://192.168.30.127:8080/nvapi64.dll',
+    [string]$BaseUrl = 'http://192.168.30.127:8080',
     [switch]$Uninstall
 )
 
@@ -28,10 +28,15 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 $ErrorActionPreference = 'Stop'
-$sys = 'C:\Windows\System32'
-$target = Join-Path $sys 'nvapi64.dll'
-$backup = Join-Path $sys 'nvapi64_orig.dll'
-$scratch = 'C:\nv\nvapi64.shim.dll'
+
+# Install both 64-bit (System32\nvapi64.dll for 64-bit apps) AND 32-bit
+# (SysWOW64\nvapi.dll for 32-bit apps like 鲁大师 on x64 Windows). 鲁大师
+# loads SysWOW64\nvapi.dll (confirmed in-guest), so a 64-bit-only install
+# leaves 鲁大师 seeing real RTX 2080 specs.
+$arches = @(
+    @{ label='x64'; sys='C:\Windows\System32'; name='nvapi64.dll'; backup='nvapi64_orig.dll'; scratch='C:\nv\nvapi64.shim.dll' },
+    @{ label='x86'; sys='C:\Windows\SysWOW64'; name='nvapi.dll';   backup='nvapi_orig.dll';   scratch='C:\nv\nvapi.shim.dll'   }
+)
 
 function Take-Own($f) {
     & cmd /c takeown /f "`"$f`"" /a 2>&1 | Out-Null
@@ -39,79 +44,67 @@ function Take-Own($f) {
 }
 
 if ($Uninstall) {
-    Write-Host '[uninstall] restoring original nvapi64.dll' -Fore Cyan
-    if (Test-Path $backup) {
-        Take-Own $target
-        Remove-Item $target -Force -EA 0
-        Move-Item $backup $target -Force
-        Write-Host '  reverted. Reboot to drop cached handles.'
-    } else {
-        Write-Host "  no backup at $backup — nothing to do." -Fore Yellow
+    Write-Host '[uninstall] restoring original nvapi DLLs' -Fore Cyan
+    foreach ($a in $arches) {
+        $target = Join-Path $a.sys $a.name
+        $backup = Join-Path $a.sys $a.backup
+        if (Test-Path $backup) {
+            Take-Own $target
+            Remove-Item $target -Force -EA 0
+            Move-Item $backup $target -Force
+            Write-Host "  [$($a.label)] reverted $target"
+        }
     }
+    Write-Host 'Reboot to drop cached handles.'
     return
 }
 
-# ─── 1. pull shim ───────────────────────────────────────────
 New-Item -Type Directory -Force 'C:\nv' | Out-Null
-Write-Host "[1/4] download shim: $ServerUrl" -Fore Cyan
 $ProgressPreference = 'SilentlyContinue'
-Invoke-WebRequest $ServerUrl -OutFile $scratch -UseBasicParsing
-"  size: $((Get-Item $scratch).Length) bytes"
+$pending = @()
+$pendKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
 
-# ─── 2. backup original (only if we haven't already) ────────
-Write-Host '[2/4] backup original nvapi64.dll' -Fore Cyan
-if (-not (Test-Path $backup)) {
+foreach ($a in $arches) {
+    $target = Join-Path $a.sys $a.name
+    $backup = Join-Path $a.sys $a.backup
+    $url    = "$BaseUrl/$($a.name)"
+    Write-Host "[$($a.label)] install $target (<- $url)" -Fore Cyan
+
+    # pull shim
+    Invoke-WebRequest $url -OutFile $a.scratch -UseBasicParsing
+    "  scratch size: $((Get-Item $a.scratch).Length) bytes"
+
+    # backup original once
+    if (-not (Test-Path $backup)) {
+        Take-Own $target
+        Copy-Item $target $backup -Force
+        "  backup -> $backup"
+    } else {
+        "  backup $backup already exists"
+    }
+
+    # install — try direct copy, fall back to PendingFileRenameOperations
+    # when NVIDIA services hold the DLL open.
     Take-Own $target
-    Copy-Item $target $backup -Force
-    "  backup -> $backup"
+    try {
+        Copy-Item $a.scratch $target -Force -ErrorAction Stop
+        "  direct copy OK"
+    }
+    catch [System.IO.IOException] {
+        Write-Host "  $target locked — scheduling swap at next boot" -Fore Yellow
+        $pending += @("\??\$target", "")                       # delete live
+        $pending += @("\??\$($a.scratch)", "\??\$target")       # then rename
+    }
+}
+
+if ($pending.Count) {
+    $existing = (Get-ItemProperty $pendKey -Name PendingFileRenameOperations -EA 0).PendingFileRenameOperations
+    if ($existing) { $pending = $existing + $pending }
+    Set-ItemProperty $pendKey -Name PendingFileRenameOperations -Value $pending -Type MultiString -Force
+    Write-Host ''
+    Write-Host 'Some files are in use. Reboot to apply:' -Fore Green
+    Write-Host '  shutdown /r /t 5' -Fore Green
 } else {
-    "  $backup exists, keeping it"
+    Write-Host ''
+    Write-Host 'All shims installed live. No reboot required (though NVIDIA services hold the old DLLs — reboot for them to pick up new ones).' -Fore Green
 }
-
-# ─── 3. install shim ────────────────────────────────────────
-Write-Host '[3/4] install shim as nvapi64.dll' -Fore Cyan
-Take-Own $target
-# Try direct overwrite first; if file is locked (NVIDIA services often hold
-# nvapi64.dll open), schedule the replacement for the next reboot via
-# PendingFileRenameOperations. Session Manager handles this during early
-# boot before any user-mode service touches nvapi64.dll.
-try {
-    Copy-Item $scratch $target -Force -ErrorAction Stop
-    "  direct copy OK -> $target"
-}
-catch [System.IO.IOException] {
-    Write-Host '  nvapi64.dll is in use — scheduling replacement at next boot' -Fore Yellow
-    $pend = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
-    # Pending rename format: MULTI_SZ pairs of (src, dst). \??\ = NT path
-    # prefix. Empty dst means delete. Here: delete live target, then
-    # move scratch to target.
-    $ops = @(
-        "\??\$target", ""              # delete current nvapi64.dll
-        "\??\$scratch", "\??\$target"   # rename our shim into place
-    )
-    # Preserve any existing queued ops (rare but possible)
-    $existing = (Get-ItemProperty $pend -Name PendingFileRenameOperations -EA 0).PendingFileRenameOperations
-    if ($existing) { $ops = $existing + $ops }
-    Set-ItemProperty $pend -Name PendingFileRenameOperations -Value $ops -Type MultiString -Force
-    Write-Host "  queued. Reboot now; on next boot the shim will replace nvapi64.dll before NVIDIA services start." -Fore Yellow
-    Write-Host "  shutdown /r /t 5" -Fore Green
-    return
-}
-
-# ─── 4. verify DLL loads (sanity) ───────────────────────────
-Write-Host '[4/4] verify shim loads OK' -Fore Cyan
-$test = @'
-using System;
-using System.Runtime.InteropServices;
-public static class T {
-  [DllImport("nvapi64.dll", CallingConvention=CallingConvention.StdCall, EntryPoint="nvapi_QueryInterface")]
-  public static extern IntPtr Q(uint id);
-}
-'@
-Add-Type -TypeDefinition $test -Language CSharp
-$p = [T]::Q(0xDCB616C3)
-"  nvapi_QueryInterface(0xDCB616C3) -> $p (non-null = shim loaded + forwards)"
-
-Write-Host ''
-Write-Host 'Done. Reboot the guest to make long-running NVIDIA services pick up the new DLL.' -Fore Green
-Write-Host 'After reboot, check 鲁大师 / GPU-Z — core clock / mem clock / ram vendor should reflect spoof.' -Fore Green

@@ -22,12 +22,14 @@ VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
 PORT=${VNC_PORT:-5900}
 PASSWORD=${VNC_PASSWORD:-123456}
+SCALE=${VNC_SCALE:-}     # e.g. 50 for half, 75 for 3/4. Empty = client native.
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ip)       IP_OVERRIDE="$2"; shift 2 ;;
         --port)     PORT="$2"; shift 2 ;;
         --password) PASSWORD="$2"; shift 2 ;;
+        --scale)    SCALE="$2"; shift 2 ;;
         -h|--help)  sed -n '3,17p' "$0"; exit 0 ;;
         # positional: IP 优先判（带点）。 bash case glob 里 * 会吃任意字符（含点），
         # 所以必须先匹配带点模式，再匹配纯数字。
@@ -78,12 +80,15 @@ echo "[vnc-guest] connecting $IP:$PORT"
 # TigerVNC viewer supports an interactive password prompt; for one-line
 # passing we store the 8-byte VNC password hash file that the viewer can
 # --passwd. Easier: just echo on stdin (-autopass) on recent versions.
+scale_opt=()
+[[ -n "$SCALE" ]] && scale_opt=( "-Scaling=$SCALE%" )
+
 if command -v xtigervncviewer >/dev/null; then
     if xtigervncviewer --help 2>&1 | grep -q autopass; then
-        exec bash -c "echo '$PASSWORD' | xtigervncviewer -autopass '$IP::$PORT'"
+        exec bash -c "echo '$PASSWORD' | xtigervncviewer -autopass ${scale_opt[*]} '$IP::$PORT'"
     else
         echo "[vnc-guest] tigervnc without --autopass — will prompt for password ($PASSWORD)"
-        exec xtigervncviewer "$IP::$PORT"
+        exec xtigervncviewer "${scale_opt[@]}" "$IP::$PORT"
     fi
 elif command -v remmina >/dev/null; then
     exec remmina -c "vnc://$IP:$PORT"

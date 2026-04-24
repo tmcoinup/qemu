@@ -47,14 +47,35 @@ if [[ -z "$IP_OVERRIDE" ]]; then
     # shellcheck source=/dev/null
     source "$conf"
     mac_lc=${VM_MAC,,}
-    IP=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" '$3=="br0" && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}')
+
+    _by_mac() {
+        ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" \
+            '$3=="br0" && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}'
+    }
+
+    IP=$(_by_mac)
     if [[ -z "$IP" ]]; then
         subnet=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | awk -F. '{print $1"."$2"."$3}')
-        [[ -n "$subnet" ]] && for last in $(seq 1 254); do
-            ping -c1 -W0.2 -q "${subnet}.${last}" >/dev/null 2>&1 &
-        done
-        wait 2>/dev/null || true
-        IP=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" '$3=="br0" && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}')
+        if [[ -n "$subnet" ]]; then
+            echo "[vnc-guest] ARP 扫 ${subnet}.0/24..." >&2
+            # ICMP probe first (fast, parallel). Guest firewall may block
+            # ICMP — fall through to TCP probe.
+            for last in $(seq 1 254); do
+                ping -c1 -W0.2 -q "${subnet}.${last}" >/dev/null 2>&1 &
+            done
+            wait 2>/dev/null || true
+            IP=$(_by_mac)
+
+            # Still nothing? TCP SYN to port 3389/5985/5900 still forces an
+            # ARP resolution even if ICMP is blocked.
+            if [[ -z "$IP" ]]; then
+                for last in $(seq 1 254); do
+                    nc -z -w 1 "${subnet}.${last}" 3389 >/dev/null 2>&1 &
+                done
+                wait 2>/dev/null || true
+                IP=$(_by_mac)
+            fi
+        fi
     fi
 else
     IP="$IP_OVERRIDE"

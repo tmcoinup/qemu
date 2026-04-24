@@ -44,10 +44,19 @@ typedef NvAPI_Status (*generic_fn_t)(void*, void*);
 static HMODULE            g_real_nvapi = NULL;
 static QueryInterface_t   g_real_QI    = NULL;
 
-/* -------- GT 1030 spec constants (fake values) -------- */
-#define FAKE_CORE_CLOCK_KHZ     1227000   /* GT 1030 base 1227 MHz */
-#define FAKE_BOOST_CLOCK_KHZ    1468000   /* GT 1030 boost 1468 MHz */
-#define FAKE_MEM_CLOCK_KHZ      1502000   /* GT 1030 GDDR5 @ 6 Gbps */
+/* -------- GT 1030 spec constants (fake values) --------
+ *
+ * Clock values are in kHz, expressed as "data rate" because 鲁大师 and
+ * similar tools divide by 2 for DDR displays ("command clock" = half of
+ * data clock). Set to 2× the chip clock we want shown:
+ *   Display target     Shim value
+ *   Core   1227 MHz    1,227,000   (鲁大师 shows the raw)
+ *   Boost  1468 MHz    1,468,000
+ *   Memory 1502 MHz    3,004,000   (displayed as 1502 after /2)
+ */
+#define FAKE_CORE_CLOCK_KHZ     1227000
+#define FAKE_BOOST_CLOCK_KHZ    1468000
+#define FAKE_MEM_CLOCK_KHZ      3004000
 #define FAKE_MEM_BUS_WIDTH_BITS 64
 #define FAKE_MEM_BANDWIDTH_MBS  48100     /* MB/s, = 48.1 GB/s */
 #define FAKE_RAM_TYPE_GDDR5     8         /* NV_RAM_TYPE_GDDR5 enum */
@@ -85,19 +94,33 @@ static NvAPI_Status __cdecl
 hook_GetAllClockFrequencies(void *hPhysicalGpu, NV_GPU_CLOCK_FREQUENCIES_V2 *pClk)
 {
     if (!pClk) return -5;  /* NVAPI_INVALID_ARGUMENT */
-    /* Try to forward to real first — populates GPU-specific domain flags
-     * (which ones are actually present) and video clock etc. */
     generic_fn_t real = (generic_fn_t) g_real_QI(0xDCB616C3);
     NvAPI_Status real_rc = real ? real((void*)hPhysicalGpu, pClk) : -1;
 
-    /* Force-populate the two domains every tool cares about, independent
-     * of whether real() accepted our struct version. Mark both PRESENT so
-     * caller doesn't skip them, and set the spoofed frequencies. */
+    /* ClockType: 0 = current, 1 = base, 2 = boost.
+     * 鲁大师 queries with type 1 for "核心频率" and type 2 for "Boost频率",
+     * so we return FAKE_CORE for 0/1 and FAKE_BOOST for 2. */
+    NvU32 core_kHz = (pClk->ClockType == 2) ? FAKE_BOOST_CLOCK_KHZ : FAKE_CORE_CLOCK_KHZ;
+
     pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_GRAPHICS].present_and_reserved = 1;
-    pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_GRAPHICS].frequency_kHz = FAKE_CORE_CLOCK_KHZ;
+    pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_GRAPHICS].frequency_kHz = core_kHz;
     pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_MEMORY].present_and_reserved   = 1;
     pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_MEMORY].frequency_kHz   = FAKE_MEM_CLOCK_KHZ;
     (void)real_rc;
+    return 0;
+}
+
+/*
+ * NvAPI_GPU_GetFBWidthAndLocation (0x11104158) — returns FB bit width
+ * and physical location (video memory location enum). 鲁大师 reads bus
+ * width via this, not via GetRamBusWidth.
+ * Signature: NvAPI_Status (__cdecl *)(void* gpu, uint32_t *width, uint32_t *loc)
+ */
+static NvAPI_Status __cdecl
+hook_GetFBWidthAndLocation(void *hPhysicalGpu, NvU32 *pWidth, NvU32 *pLoc)
+{
+    if (pWidth) *pWidth = FAKE_MEM_BUS_WIDTH_BITS;   /* 64 */
+    if (pLoc)   *pLoc   = 1;                          /* NV_GPU_MEMORY_LOCATION_VIDMEM */
     return 0;
 }
 
@@ -144,9 +167,11 @@ static const struct override g_overrides[] = {
     { 0xDCB616C3, hook_GetAllClockFrequencies, "NvAPI_GPU_GetAllClockFrequencies" },
     { 0x42AEA16A, hook_GetRamMaker,            "NvAPI_GPU_GetRamMaker" },
     { 0x57F7CAAC, hook_GetRamType,             "NvAPI_GPU_GetRamType" },
-    /* These IDs are best-effort — different NVAPI minor versions have
-     * drifted function ids. Extend after verifying against a real 538.33
-     * nvapi64.dll symbol dump. */
+    /* This one IS the public bus width NVAPI — verified as what 鲁大师
+     * actually calls (setting it changes the 显存位宽 row). */
+    { 0x11104158, hook_GetFBWidthAndLocation,  "NvAPI_GPU_GetFBWidthAndLocation" },
+    /* The other two are guesses that didn't change 鲁大师 output — leave
+     * them in in case some other tool hits them. */
     { 0x7A5E9C9F, hook_GetRamBusWidth,         "NvAPI_GPU_GetRamBusWidth?" },
     { 0x1DCECC0E, hook_GetRamBandwidth,        "NvAPI_GPU_GetRamBandwidth?" },
     { 0, 0, 0 }

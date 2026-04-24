@@ -57,6 +57,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Honor APPROACH= from vm-configs/vmN.conf if the user didn't pass --spoof
+# explicitly. approach=b needs raw DEV_1E30 (SPOOF=0); approach=a wants the
+# consumer PCI id spoofed on (SPOOF=1, which is start-vm.sh's default).
+if [[ -z "$SPOOF_FLAG" ]]; then
+    conf="vm-configs/vm${VM_ID}.conf"
+    if [[ -f "$conf" ]]; then
+        approach=$(awk -F= '/^APPROACH=/ {print tolower($2); exit}' "$conf" | tr -d '[:space:]')
+        case "$approach" in
+            b) SPOOF_FLAG=--no-spoof; echo "[up] APPROACH=b → --no-spoof (原厂 INF 匹配 DEV_1E30)" ;;
+            a) SPOOF_FLAG=--spoof ;;
+        esac
+    fi
+fi
+
 # Stealth OVMF (FirmwareVendor rebuilt to "American Megatrends Inc."):
 if [[ "${STEALTH_OVMF:-0}" == "1" && -f host/OVMF_CODE_4M_stealth.fd ]]; then
     export OVMF_CODE="$(pwd)/host/OVMF_CODE_4M_stealth.fd"

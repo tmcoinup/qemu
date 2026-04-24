@@ -29,9 +29,10 @@ while [[ $# -gt 0 ]]; do
         --port)     PORT="$2"; shift 2 ;;
         --password) PASSWORD="$2"; shift 2 ;;
         -h|--help)  sed -n '3,17p' "$0"; exit 0 ;;
-        # positional: either a VM id (1-9) or an IP
-        [0-9]|[1-9][0-9]*)            VM_ID="$1"; shift ;;
-        [0-9]*.[0-9]*.[0-9]*.[0-9]*)  IP_OVERRIDE="$1"; shift ;;
+        # positional: IP 优先判（带点）。 bash case glob 里 * 会吃任意字符（含点），
+        # 所以必须先匹配带点模式，再匹配纯数字。
+        *.*.*.*)   IP_OVERRIDE="$1"; shift ;;
+        [0-9]*)    VM_ID="$1"; shift ;;
         *) echo "unknown arg: $1" >&2
            echo "usage: $0 [<vm_id>|<ip>] [--port N] [--password X]" >&2
            exit 2 ;;

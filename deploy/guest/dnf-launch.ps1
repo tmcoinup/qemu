@@ -42,6 +42,12 @@ $ErrorActionPreference = 'Continue'
 $prep = 'C:\nv\dnf-prep.ps1'
 if (-not (Test-Path $prep)) { throw "missing $prep — deploy it first" }
 
+# StatusOnly is a read-only TP-surface scan; the game path doesn't matter.
+if ($StatusOnly) {
+    & $prep Status
+    return
+}
+
 # Candidate game paths if the default doesn't exist — check before abort.
 $candidates = @(
     $GamePath,
@@ -57,11 +63,6 @@ if (-not $found) {
     exit 1
 }
 Write-Host "[dnf-launch] game  = $found" -Fore Cyan
-
-if ($StatusOnly) {
-    & $prep Status
-    return
-}
 
 try {
     if (-not $NoPrep) {

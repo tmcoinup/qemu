@@ -124,6 +124,10 @@ Set-ItemProperty $origReg -Name 'ShowTrayIcon' -Value 0 -Type DWord -Force
 Set-ItemProperty $origReg -Name 'UseMirrorDriver' -Value 0 -Type DWord -Force
 Set-ItemProperty $origReg -Name 'RfbPort' -Value $Port -Type DWord -Force
 Set-ItemProperty $origReg -Name 'RunControlInterface' -Value 0 -Type DWord -Force
+# Kill the HTTP VNC viewer port (default 5800) — never used in practice and
+# is a second VNC fingerprint TP can scan for. -1 disables.
+Set-ItemProperty $origReg -Name 'AcceptHttpConnections' -Value 0 -Type DWord -Force
+Set-ItemProperty $origReg -Name 'HttpPort' -Value 0 -Type DWord -Force
 
 # 7) Register the stealth-named service pointing at the renamed exe
 Write-Host "[6/8] install service $ServiceName" -Fore Cyan

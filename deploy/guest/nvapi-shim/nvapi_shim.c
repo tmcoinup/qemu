@@ -85,17 +85,19 @@ static NvAPI_Status __stdcall
 hook_GetAllClockFrequencies(void *hPhysicalGpu, NV_GPU_CLOCK_FREQUENCIES_V2 *pClk)
 {
     if (!pClk) return -5;  /* NVAPI_INVALID_ARGUMENT */
-    /* Forward to real to get the shape + all other fields populated */
+    /* Try to forward to real first — populates GPU-specific domain flags
+     * (which ones are actually present) and video clock etc. */
     generic_fn_t real = (generic_fn_t) g_real_QI(0xDCB616C3);
-    if (real) real((void*)hPhysicalGpu, pClk);
+    NvAPI_Status real_rc = real ? real((void*)hPhysicalGpu, pClk) : -1;
 
-    /* Overwrite clock frequencies for the public domains we care about. */
-    if (pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_GRAPHICS].present_and_reserved & 1) {
-        pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_GRAPHICS].frequency_kHz = FAKE_CORE_CLOCK_KHZ;
-    }
-    if (pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_MEMORY].present_and_reserved & 1) {
-        pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_MEMORY].frequency_kHz = FAKE_MEM_CLOCK_KHZ;
-    }
+    /* Force-populate the two domains every tool cares about, independent
+     * of whether real() accepted our struct version. Mark both PRESENT so
+     * caller doesn't skip them, and set the spoofed frequencies. */
+    pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_GRAPHICS].present_and_reserved = 1;
+    pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_GRAPHICS].frequency_kHz = FAKE_CORE_CLOCK_KHZ;
+    pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_MEMORY].present_and_reserved   = 1;
+    pClk->domain[NVAPI_GPU_PUBLIC_CLOCK_MEMORY].frequency_kHz   = FAKE_MEM_CLOCK_KHZ;
+    (void)real_rc;
     return 0;
 }
 

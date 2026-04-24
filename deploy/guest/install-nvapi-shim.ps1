@@ -71,9 +71,32 @@ if (-not (Test-Path $backup)) {
 # ─── 3. install shim ────────────────────────────────────────
 Write-Host '[3/4] install shim as nvapi64.dll' -Fore Cyan
 Take-Own $target
-# Overwrite, keeping the usual Windows ACL untouched.
-Copy-Item $scratch $target -Force
-"  installed -> $target"
+# Try direct overwrite first; if file is locked (NVIDIA services often hold
+# nvapi64.dll open), schedule the replacement for the next reboot via
+# PendingFileRenameOperations. Session Manager handles this during early
+# boot before any user-mode service touches nvapi64.dll.
+try {
+    Copy-Item $scratch $target -Force -ErrorAction Stop
+    "  direct copy OK -> $target"
+}
+catch [System.IO.IOException] {
+    Write-Host '  nvapi64.dll is in use — scheduling replacement at next boot' -Fore Yellow
+    $pend = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    # Pending rename format: MULTI_SZ pairs of (src, dst). \??\ = NT path
+    # prefix. Empty dst means delete. Here: delete live target, then
+    # move scratch to target.
+    $ops = @(
+        "\??\$target", ""              # delete current nvapi64.dll
+        "\??\$scratch", "\??\$target"   # rename our shim into place
+    )
+    # Preserve any existing queued ops (rare but possible)
+    $existing = (Get-ItemProperty $pend -Name PendingFileRenameOperations -EA 0).PendingFileRenameOperations
+    if ($existing) { $ops = $existing + $ops }
+    Set-ItemProperty $pend -Name PendingFileRenameOperations -Value $ops -Type MultiString -Force
+    Write-Host "  queued. Reboot now; on next boot the shim will replace nvapi64.dll before NVIDIA services start." -Fore Yellow
+    Write-Host "  shutdown /r /t 5" -Fore Green
+    return
+}
 
 # ─── 4. verify DLL loads (sanity) ───────────────────────────
 Write-Host '[4/4] verify shim loads OK' -Fore Cyan

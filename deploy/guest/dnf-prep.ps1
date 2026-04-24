@@ -68,8 +68,11 @@ function Show-Status {
         Write-Host '  processes: none running' -Fore Green
     }
 
+    # Known VNC / TeamViewer / AnyDesk / Parsec ports + our own stealth
+    # VNC port so you can see "oh yes my stealth-vnc is listening here".
+    # ANY listener on these is a potential TP signal.
     $portHits = @()
-    foreach ($p in 5900,5901,5902,5800,7070,7100,7575,24800) {
+    foreach ($p in 5900,5901,5902,5800,7070,7100,7575,24800,56789) {
         $c = Get-NetTCPConnection -LocalPort $p -State Listen -EA 0
         if ($c) { $portHits += $c }
     }
@@ -82,10 +85,14 @@ function Show-Status {
 
     Write-Host ''
     Write-Host '== Current session ==' -Fore Cyan
-    $smRemote = [bool](Add-Type -MemberDefinition @'
-[DllImport("user32.dll")] public static extern int GetSystemMetrics(int n);
-'@ -Name U -PassThru -EA 0).GetSystemMetrics(0x1000)  # SM_REMOTESESSION
-    "  GetSystemMetrics(SM_REMOTESESSION) = $smRemote $(if($smRemote){'(inside RDP — TP will flag)'}else{'(local)'})"
+    if (-not ('TP_U32' -as [type])) {
+        Add-Type -Name TP_U32 -Namespace TPProbe -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern int GetSystemMetrics(int n);
+'@ | Out-Null
+    }
+    $smRemote = [TPProbe.TP_U32]::GetSystemMetrics(0x1000)  # SM_REMOTESESSION=0x1000
+    "  GetSystemMetrics(SM_REMOTESESSION) = $smRemote $(if($smRemote){'(inside RDP — TP flags)'}else{'(local console — good)'})"
 
     $qwinsta = qwinsta 2>&1 | Out-String
     Write-Host '  qwinsta:' -Fore Gray

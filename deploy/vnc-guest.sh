@@ -104,17 +104,34 @@ echo "[vnc-guest] connecting $IP:$PORT"
 scale_opt=()
 [[ -n "$SCALE" ]] && scale_opt=( "-Scaling=$SCALE%" )
 
+# Generate the 8-byte DES-encrypted VNC password file that -PasswordFile
+# expects. The VNC spec encrypts the 8-byte padded password with a fixed
+# DES key (same bit-reversed key server-side uses) — result is exactly 8
+# bytes. TigerVNC Viewer reads this, no interactive prompt.
+passwd_file="/tmp/.vnc-vm${VM_ID}.pass"
+python3 - "$PASSWORD" "$passwd_file" <<'PYEOF'
+import sys
+try:
+    from Crypto.Cipher import DES
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet',
+                           '--break-system-packages', '--user', 'pycryptodome'])
+    from Crypto.Cipher import DES
+pw, out = sys.argv[1], sys.argv[2]
+pw_bytes = pw.encode('ascii')[:8].ljust(8, b'\x00')
+key = bytes([0xE8, 0x4A, 0xD6, 0x60, 0xC4, 0x72, 0x1A, 0xE0])
+enc = DES.new(key, DES.MODE_ECB).encrypt(pw_bytes)
+with open(out, 'wb') as f: f.write(enc)
+import os; os.chmod(out, 0o600)
+PYEOF
+
 if command -v xtigervncviewer >/dev/null; then
-    if xtigervncviewer --help 2>&1 | grep -q autopass; then
-        exec bash -c "echo '$PASSWORD' | xtigervncviewer -autopass ${scale_opt[*]} '$IP::$PORT'"
-    else
-        echo "[vnc-guest] tigervnc without --autopass — will prompt for password ($PASSWORD)"
-        exec xtigervncviewer "${scale_opt[@]}" "$IP::$PORT"
-    fi
+    exec xtigervncviewer "${scale_opt[@]}" -PasswordFile="$passwd_file" "$IP::$PORT"
 elif command -v remmina >/dev/null; then
     exec remmina -c "vnc://$IP:$PORT"
 elif command -v vncviewer >/dev/null; then
-    exec vncviewer "$IP::$PORT"
+    exec vncviewer -passwd "$passwd_file" "$IP::$PORT"
 elif command -v gvncviewer >/dev/null; then
     exec gvncviewer "$IP:$((PORT-5900))"
 else

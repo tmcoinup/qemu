@@ -35,6 +35,7 @@ MODE=rdp
 CONNECT=0
 CONNECT_ONLY=0
 IP_OVERRIDE=""
+SPOOF_FLAG=""  # passthrough to start-vm.sh: "" | "--spoof" | "--no-spoof"
 GUEST_USER=${GUEST_USER:-Administrator}
 GUEST_PASS=${GUEST_PASS:-123456}
 SUDO_PW=${SUDO_PASSWORD:-123456}
@@ -49,6 +50,8 @@ while [[ $# -gt 0 ]]; do
         --connect)      CONNECT=1; shift ;;
         --connect-only) CONNECT_ONLY=1; shift ;;
         --ip)           IP_OVERRIDE="$2"; shift 2 ;;
+        --no-spoof)     SPOOF_FLAG=--no-spoof; shift ;;   # PCI 保留真 DEV_1E30 (装/切 approach B 时用)
+        --spoof)        SPOOF_FLAG=--spoof; shift ;;
         -h|--help)      sed -n '3,19p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1"; exit 2 ;;
     esac
@@ -157,6 +160,7 @@ launch_vm() {
         gtk)     extra=( --gtk ) ;;
         rdp|*)   extra=( --rdp ) ;;
     esac
+    [[ -n "$SPOOF_FLAG" ]] && extra+=( "$SPOOF_FLAG" )
 
     # Small wrapper script avoids tmux quoting headaches — all env exported
     # gets inherited by the tmux-spawned shell.

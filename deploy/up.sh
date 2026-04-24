@@ -108,6 +108,14 @@ find_vm_ip() {
         done
         wait 2>/dev/null || true
         ip=$(_by_mac)
+        # TCP fallback if ICMP is blocked in guest firewall.
+        if [[ -z "$ip" ]]; then
+            for last in $(seq 1 254); do
+                nc -z -w 1 "${subnet_prefix}.${last}" 3389 >/dev/null 2>&1 &
+            done
+            wait 2>/dev/null || true
+            ip=$(_by_mac)
+        fi
     fi
     if [[ -z "$ip" ]]; then
         local f

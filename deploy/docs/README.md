@@ -14,7 +14,9 @@
 | Windows DSE | `testsigning=No` 在 BCD 里，但 boot 时 EfiGuard 把 ci.dll DSE 检查 NOP 掉 | `deploy/efiguard/custom-build/` (Loader.efi + EfiGuardDxe.efi，`DSE_DISABLE_AT_BOOT` + Loader fallback patch) |
 | nvapi | GPU-Z / 鲁大师调 NVAPI 时返回 GTX 1050 元数据 | `deploy/nvapi-shim/nvapi64.dll` → `C:\Windows\System32\` |
 | ACPI | `ALASKA / A M I` OEM ID | `hw/acpi/` patch |
-| 监视器 | `Samsung SyncMaster S24F350` | `hw/display/edid-generate.c` + 注册表 spoof |
+| 监视器 | `Samsung S24F350F` (PNP `MONITOR\SAM0F65`, 1920×1080@60, 530×300mm, HDMI) | `hw/display/edid-generate.c` (CEA-861 timing + Samsung-specific descriptor) + 注册表 HardwareID/CompatibleIDs |
+| 分辨率列表 | 只暴露 ≤1080p 模式（不出 4K/UWQHD） | `hw/display/virtio-gpu-base.c` 加 `xmax/ymax` 属性 + launcher 传 `xmax=1920,ymax=1080` |
+| 时区 | guest RTC = 北京时间 (`Asia/Shanghai`) 不论 host 时区 | launcher exec QEMU 前 `export TZ=Asia/Shanghai` |
 
 ## 一键流程
 
@@ -108,6 +110,8 @@ deploy/
 2. **EfiGuard pattern matching 跟 ntoskrnl 版本绑定** — 已验证 19041.1266 / 19041.6456 / 19045.x 工作；新 KB 出来如失效，看 `efiguard/patches/README.md`。
 3. **`STABLE_DISPLAY=1`（默认推荐）禁了 virgl** — guest 没 GL 加速，DirectX 走 WARP；DNF 仍可玩。如果你信任你的环境可以去掉它。
 4. **PCI VEN_10DE 只是 PCI header 重写** — 实际 device 还是 virtio-vga，ACE 如果在内核态走 PCI BAR / config space 反向探测可能识破。
+5. **`Win32_VideoController.CurrentRefreshRate = 1`、有源信号分辨率 -1×-1** — viogpudo 内核驱动 `BuildVideoSignalInfo` 把所有 freq 设成 `D3DKMDT_FREQUENCY_NOTSPECIFIED`。源码 patch 已写在 `deploy/driver-signing/patches/0001-viogpudo-realistic-vsync-freq.patch`，但需要正确集成的 VS Community + WDK 才能编出能加载的 `.sys`（VS Build Tools SKU 装不上 WDK VSIX；手 copy toolset 文件能编但缺 kernel-mode flag → Code 38）。短期权宜：留着这个 fingerprint。
+6. **`Win32_PnPSignedDriver.IsSigned = False` for GPU** — `WinVerifyTrust(DRIVER)` 内置 MS 根证书白名单，自签 backdated CA 不在名单里。同根因导致 DxDiag "未数字签名"。彻底解：EV cert + Microsoft Hardware Attestation 走 WHQL 流程。
 
 ## 当前已知 bug
 

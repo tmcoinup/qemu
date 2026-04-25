@@ -250,19 +250,19 @@ if [[ "$HEADLESS" == "1" ]]; then
     DISP_ARGS=(
         -display none
         -vnc 127.0.0.1:$VNC_DISPLAY
-        -device "virtio-vga,edid=on,xres=1920,yres=1080,${GPU_STEALTH}"
+        -device "virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
     )
 elif [[ "$STABLE_DISPLAY" == "1" ]]; then
     # Stability mode: SDL window for local control, no GL passthrough.
     # Use this for long DNF sessions or anti-cheat-stable runs.
     DISP_ARGS=(
         -display sdl,show-cursor=off
-        -device "virtio-vga,edid=on,xres=1920,yres=1080,${GPU_STEALTH}"
+        -device "virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
     )
 else
     DISP_ARGS=(
         -display sdl,gl=on,show-cursor=off
-        -device "virtio-vga-gl,edid=on,xres=1920,yres=1080,${GPU_STEALTH}"
+        -device "virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
     )
 fi
 
@@ -445,5 +445,12 @@ echo ">> SSH/RDP fwd: 127.0.0.1:$SSH_FWD_PORT / 127.0.0.1:$RDP_FWD_PORT"
 echo ">> boot mode:   $BOOT"
 echo ">> disk:        $DISK ($(stat -c%s "$DISK") bytes)"
 echo ">> --- launching ---"
+
+# QEMU's `-rtc base=localtime` calls libc localtime() which honours $TZ.
+# Pin to Asia/Shanghai so the VM RTC reflects Beijing time regardless of
+# what the host's /etc/timezone is set to. Without this an LA-host gives
+# the guest LA wall-clock and Windows (set to CST) shows it 15h off.
+export TZ="${TZ:-Asia/Shanghai}"
+echo ">> RTC TZ:       $TZ"
 
 exec "${CMD[@]}"

@@ -301,6 +301,22 @@ static void spawn_mpv(Window xwin, const char *ip, int vport,
 
     snprintf(url, sizeof(url), "tcp://%s:%d", ip, vport);
 
+    /* mpv low-latency cocktail.
+     *
+     * --demuxer-lavf-format=h264 — tell mpv the wire is bare H.264 Annex-B
+     *     (the server now uses `-f h264` instead of `-f mpegts`; raw NAL
+     *     units have no container overhead and no demuxer-side packet
+     *     accumulation, saves ~100 ms vs MPEG-TS).
+     * --untimed                  — render frames as soon as decoded, no
+     *     av-sync waiting for a wallclock timestamp (~16 ms saved per
+     *     frame at 60 Hz).
+     * --no-correct-pts           — don't reorder by PTS, just first-in-
+     *     first-out display order. Our encoder is `bf=0`, no B-frames,
+     *     so PTS == DTS == arrival order anyway.
+     * --vd-lavc-threads=1        — single-threaded decode is lower
+     *     latency than parallel slice/frame decoding for low-bitrate
+     *     720p; threading adds buffering.
+     */
     char *argv[] = {
         (char*)"mpv",
         wid_arg,
@@ -313,11 +329,14 @@ static void spawn_mpv(Window xwin, const char *ip, int vport,
         (char*)"--cursor-autohide=no",
         (char*)"--cache=no",
         (char*)"--demuxer-readahead-secs=0",
-        (char*)"--demuxer-lavf-o-set=fflags=+nobuffer+discardcorrupt",
+        (char*)"--demuxer-lavf-format=h264",
+        (char*)"--demuxer-lavf-o-set=fflags=+nobuffer+flush_packets+discardcorrupt",
         (char*)"--demuxer-lavf-probesize=32",
         (char*)"--demuxer-lavf-analyzeduration=0",
-        (char*)"--vd-lavc-threads=2",
-        (char*)"--video-sync=audio",
+        (char*)"--vd-lavc-threads=1",
+        (char*)"--vd-lavc-show-all=yes",
+        (char*)"--no-correct-pts",
+        (char*)"--untimed",
         (char*)"--no-audio",
         (char*)"--keepaspect=yes",
         (char*)"--no-border",
@@ -447,6 +466,14 @@ int main(int argc, char **argv) {
     signal(SIGCHLD, SIG_IGN);
     spawn_mpv(win, a.ip, a.vport, win_w, win_h);
 
+    /* Force keyboard focus on our window. mpv creates a child X window
+     * inside ours (via --wid) and X11 normally routes KeyPress to the
+     * deepest window the focus is *in*. We want every key to come to us.
+     * Set focus once after mpv is up; we'll also dynamically grab/ungrab
+     * the keyboard on Enter/Leave so focus drifts don't matter. */
+    XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+    XSync(dpy, False);
+
     signal(SIGINT,  on_quit);
     signal(SIGTERM, on_quit);
     signal(SIGPIPE, SIG_IGN);
@@ -461,6 +488,7 @@ int main(int argc, char **argv) {
     uint8_t button_mask = 0;
     int pending_x = 0, pending_y = 0;
     int dirty_pos = 0;
+    int kbd_grabbed = 0;
 
     while (!want_quit) {
         if (kill(mpv_pid, 0) < 0 && errno == ESRCH) {
@@ -522,6 +550,29 @@ int main(int argc, char **argv) {
                 dirty_pos = 0;
                 break;
             }
+            case EnterNotify:
+                /* Pointer entered our window — actively own the keyboard
+                 * so that key events don't leak to mpv's child window or
+                 * to the WM. owner_events=False routes ALL keys to us. */
+                if (!kbd_grabbed) {
+                    int rc = XGrabKeyboard(dpy, win, False,
+                                           GrabModeAsync, GrabModeAsync,
+                                           CurrentTime);
+                    if (rc == GrabSuccess) {
+                        kbd_grabbed = 1;
+                    } else {
+                        fprintf(stderr, "[stream] XGrabKeyboard rc=%d\n", rc);
+                    }
+                }
+                break;
+            case LeaveNotify:
+                /* Release the keyboard so the user can switch to other
+                 * apps with Alt+Tab etc. without us hogging keys. */
+                if (kbd_grabbed) {
+                    XUngrabKeyboard(dpy, CurrentTime);
+                    kbd_grabbed = 0;
+                }
+                break;
             case ClientMessage:
                 if ((Atom)xev.xclient.data.l[0] == WM_DELETE) {
                     want_quit = 1;

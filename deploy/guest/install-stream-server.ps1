@@ -90,16 +90,21 @@ Write-Host '[2/4] writing stream_video.ps1' -Fore Cyan
 `$ff  = '$ffExe'
 `$log = '$nvDir\stream.log'
 '' | Out-File `$log
+# Container choice: bare H.264 Annex-B over TCP. MPEG-TS adds a packet-
+# alignment buffer on the demuxer side that costs 50-200 ms of latency
+# for no real-world benefit on a single-stream private link.
+# bufsize is one frame (~bitrate/fps) → encoder doesn't pre-buffer.
 `$argList = @(
   '-y','-hide_banner','-loglevel','warning',
   '-filter_complex','ddagrab=output_idx=0:framerate=$FrameRate,hwdownload,format=bgra',
   '-c:v','h264_nvenc',
-  '-preset','p1','-tune','ull',
-  '-rc','cbr','-b:v','$Bitrate','-maxrate','$Bitrate','-bufsize','3M',
+  '-preset','p1','-tune','ull','-zerolatency','1',
+  '-rc','cbr','-b:v','$Bitrate','-maxrate','$Bitrate','-bufsize','500K',
   '-g','$FrameRate','-bf','0',
   '-flags','low_delay','-fflags','nobuffer',
+  '-flush_packets','1',
   '-strict','experimental',
-  '-f','mpegts','tcp://0.0.0.0:${VideoPort}?listen=1'
+  '-f','h264','tcp://0.0.0.0:${VideoPort}?listen=1'
 )
 while (`$true) {
     "[`$(Get-Date -Format 'HH:mm:ss')] starting ffmpeg" | Add-Content `$log

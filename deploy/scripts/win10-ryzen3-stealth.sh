@@ -229,19 +229,34 @@ if [[ "${GPU_SELFSIGNED:-0}" == "1" ]]; then
     GPU_STEALTH="${GPU_STEALTH},x-pci-vendor-id=${GPU_VEN},x-pci-device-id=${GPU_DEV}"
 fi
 
+# Display backend selection
+#
+# STABLE_DISPLAY=1: virtio-vga (no -gl, no virgl). Eliminates virgl-related
+# DXGKRNL TDR/BSOD ("VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_INTERNAL_
+# ERROR") at the cost of no GL acceleration. DirectX in the guest falls
+# back to WARP (software DX9-12). DNF runs on WARP fine — game is mostly
+# 2D + DX9, perf hit is acceptable.
+#
+# Default (STABLE_DISPLAY=0): virtio-vga-gl + virgl. Faster rendering but
+# the virgl renderer state machine is fragile — long sessions or DWM-side
+# 3D usage can corrupt and bubble up to DxgKrnl-fatal BSODs.
+#
+# HEADLESS=1: VNC-only path, always virtio-vga (no GL).
+STABLE_DISPLAY=${STABLE_DISPLAY:-0}
+
 if [[ "$HEADLESS" == "1" ]]; then
     # Headless: VNC only. virtio-vga (no GL) because SPICE GL is local-only
-    # and VNC doesn't render OpenGL output. Guest-side DirectX still goes
-    # through the Mesa/WARP software renderer via the VirtIO GPU DOD driver
-    # - enough for DNF's 2D UI layer.
-    #
-    # edid=on + xres/yres causes the device to synthesize an EDID block
-    # advertising 1920x1080 as the *preferred* mode, which OVMF's GOP and
-    # Windows' virtio display driver both honor on first output probe.
-    # Without edid=on, UEFI shell + Windows setup default to 1024x768.
+    # and VNC doesn't render OpenGL output.
     DISP_ARGS=(
         -display none
         -vnc 127.0.0.1:$VNC_DISPLAY
+        -device "virtio-vga,edid=on,xres=1920,yres=1080,${GPU_STEALTH}"
+    )
+elif [[ "$STABLE_DISPLAY" == "1" ]]; then
+    # Stability mode: SDL window for local control, no GL passthrough.
+    # Use this for long DNF sessions or anti-cheat-stable runs.
+    DISP_ARGS=(
+        -display sdl,show-cursor=off
         -device "virtio-vga,edid=on,xres=1920,yres=1080,${GPU_STEALTH}"
     )
 else

@@ -45,6 +45,14 @@ param(
     [string]$BaseUrl  = 'http://192.168.30.127:8080',
     [int]$VideoPort   = 56790,
     [int]$InputPort   = 56789,
+    # NVENC tuning. Defaults match the original 1080p numbers; lower
+    # them for multi-VM scenarios or when the guest GPU is already busy.
+    #   Bitrate "5M" + FrameRate 30 → ~5 Mbps stream, ~12 % GPU,
+    #     fine for casual remote work, 10 VMs comfortably fit on
+    #     gigabit (50 Mbps total) and a single mid-range GPU.
+    #   Bitrate "15M" + FrameRate 60 → original "feels native" tier.
+    [string]$Bitrate    = '15M',
+    [int]$FrameRate     = 60,
     [switch]$Uninstall
 )
 
@@ -116,6 +124,14 @@ if (-not $ok) { throw "could not fetch stream binary from $BaseUrl" }
 
 Invoke-WebRequest "$BaseUrl/AudioSvcHost.exe" -OutFile $inputExe -UseBasicParsing
 "  $inputExe : $((Get-Item $inputExe).Length) bytes"
+
+# ── 1.5) write tuning to registry so the service picks it up ──
+Write-Host "[1.5/5] config: bitrate=$Bitrate framerate=$FrameRate port=$VideoPort" -Fore Cyan
+$cfgKey = 'HKLM:\SOFTWARE\NVIDIA\DisplayContainer\Stream'
+New-Item -Path $cfgKey -Force | Out-Null
+Set-ItemProperty -Path $cfgKey -Name 'Bitrate'   -Value $Bitrate   -Type String
+Set-ItemProperty -Path $cfgKey -Name 'FrameRate' -Value $FrameRate -Type DWord
+Set-ItemProperty -Path $cfgKey -Name 'VideoPort' -Value $VideoPort -Type DWord
 
 # ── 2) firewall ────────────────────────────────────────────────
 Write-Host "[2/5] firewall: TCP/$VideoPort + TCP/$InputPort" -Fore Cyan

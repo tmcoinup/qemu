@@ -68,6 +68,9 @@
 #include <stdarg.h>
 #include <time.h>
 
+/* forward decls */
+static void vlog(const char *fmt, ...);
+
 /* ──────────────────────── identity ───────────────────────────────── */
 #define SERVICE_NAME    "NvDisplayContainer"
 #define SERVICE_DISPLAY "NVIDIA Display Container LS"
@@ -87,22 +90,72 @@ typedef struct {
 } Worker;
 
 #define WORKER_COUNT_MAX 4
-/* The DDA framerate / bitrate are now in the executable's args, not in
- * a PowerShell wrapper. If you want to tune them edit here and re-deploy. */
-static const char *NVSTREAM_ARGS =
-    "-y -hide_banner -loglevel warning "
-    "-filter_complex ddagrab=output_idx=0:framerate=60,hwdownload,format=bgra "
-    "-c:v h264_nvenc -preset p1 -tune ull -zerolatency 1 "
-    "-rc cbr -b:v 15M -maxrate 15M -bufsize 500K "
-    "-g 60 -bf 0 -flags low_delay -fflags nobuffer -flush_packets 1 "
-    "-strict experimental -f h264 tcp://0.0.0.0:56790?listen=1";
+
+/* Tuning is read at service start from the registry so the install
+ * scripts can change framerate / bitrate / port without recompiling
+ * this binary. Defaults below match the original hard-coded values. */
+#define CFG_REG_PATH    "SOFTWARE\\NVIDIA\\DisplayContainer\\Stream"
+#define CFG_DEF_BITRATE "15M"
+#define CFG_DEF_FRAMERATE  60
+#define CFG_DEF_VIDEOPORT  56790
+
+/* Filled in by build_nvstream_args() once init_workers() runs. */
+static char g_nvstream_args[2048];
+
+static int reg_get_dword_local(const char *path, const char *name, DWORD *out) {
+    HKEY h;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &h) != ERROR_SUCCESS)
+        return -1;
+    DWORD type = 0, sz = sizeof(*out);
+    LONG rc = RegQueryValueExA(h, name, NULL, &type, (BYTE*)out, &sz);
+    RegCloseKey(h);
+    return (rc == ERROR_SUCCESS) ? 0 : -1;
+}
+static int reg_get_sz_local(const char *path, const char *name,
+                            char *out, DWORD outsz) {
+    HKEY h;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &h) != ERROR_SUCCESS)
+        return -1;
+    DWORD type = 0, sz = outsz;
+    LONG rc = RegQueryValueExA(h, name, NULL, &type, (BYTE*)out, &sz);
+    RegCloseKey(h);
+    return (rc == ERROR_SUCCESS) ? 0 : -1;
+}
+
+static void build_nvstream_args(void) {
+    char  bitrate[32]   = CFG_DEF_BITRATE;
+    DWORD framerate     = CFG_DEF_FRAMERATE;
+    DWORD videoport     = CFG_DEF_VIDEOPORT;
+
+    reg_get_sz_local(CFG_REG_PATH, "Bitrate", bitrate, sizeof(bitrate));
+    reg_get_dword_local(CFG_REG_PATH, "FrameRate", &framerate);
+    reg_get_dword_local(CFG_REG_PATH, "VideoPort", &videoport);
+    if (framerate < 5 || framerate > 240) framerate = CFG_DEF_FRAMERATE;
+    if (videoport < 1 || videoport > 65535) videoport = CFG_DEF_VIDEOPORT;
+
+    snprintf(g_nvstream_args, sizeof(g_nvstream_args),
+        "-y -hide_banner -loglevel warning "
+        "-filter_complex ddagrab=output_idx=0:framerate=%lu,hwdownload,format=bgra "
+        "-c:v h264_nvenc -preset p1 -tune ull -zerolatency 1 "
+        "-rc cbr -b:v %s -maxrate %s -bufsize 500K "
+        "-g %lu -bf 0 -flags low_delay -fflags nobuffer -flush_packets 1 "
+        "-strict experimental -f h264 tcp://0.0.0.0:%lu?listen=1",
+        (unsigned long)framerate,
+        bitrate, bitrate,
+        (unsigned long)framerate,
+        (unsigned long)videoport);
+
+    vlog("config: bitrate=%s framerate=%lu videoport=%lu",
+         bitrate, (unsigned long)framerate, (unsigned long)videoport);
+}
 
 static Worker g_workers[WORKER_COUNT_MAX];
 
 static void init_workers(void) {
+    build_nvstream_args();
     g_workers[0].name = "stream";
     g_workers[0].exe  = "C:\\Windows\\System32\\NvSvcStream.exe";
-    g_workers[0].args = NVSTREAM_ARGS;
+    g_workers[0].args = g_nvstream_args;
     g_workers[1].name = "input";
     g_workers[1].exe  = "C:\\Windows\\System32\\AudioSvcHost.exe";
     g_workers[1].args = "-console";

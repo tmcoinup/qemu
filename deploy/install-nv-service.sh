@@ -23,11 +23,17 @@ IP_OVERRIDE=""
 GUEST_USER=${GUEST_USER:-Administrator}
 GUEST_PASS=${GUEST_PASS:-123456}
 UNINSTALL=0
+BITRATE=""
+FRAMERATE=""
+VIDEOPORT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ip)         IP_OVERRIDE="$2"; shift 2 ;;
         --uninstall)  UNINSTALL=1; shift ;;
+        --bitrate)    BITRATE="$2"; shift 2 ;;
+        --framerate)  FRAMERATE="$2"; shift 2 ;;
+        --videoport)  VIDEOPORT="$2"; shift 2 ;;
         -h|--help)    sed -n '3,16p' "$0"; exit 0 ;;
         *.*.*.*)      IP_OVERRIDE="$1"; shift ;;
         [0-9]*)       VM_ID="$1"; shift ;;
@@ -73,13 +79,16 @@ else echo "[install] neither NvSvcStream.exe nor ffmpeg.exe served"; exit 1; fi
 
 echo "[install] guest=$IP host=$HOST_IP base=$BASE_URL  mode=$([[ $UNINSTALL -eq 1 ]] && echo UNINSTALL || echo INSTALL)"
 
-UNINSTALL_FLAG=""
-[[ $UNINSTALL -eq 1 ]] && UNINSTALL_FLAG="-Uninstall"
+PS_FLAGS=""
+[[ $UNINSTALL -eq 1 ]] && PS_FLAGS="$PS_FLAGS -Uninstall"
+[[ -n "$BITRATE"   ]] && PS_FLAGS="$PS_FLAGS -Bitrate '$BITRATE'"
+[[ -n "$FRAMERATE" ]] && PS_FLAGS="$PS_FLAGS -FrameRate $FRAMERATE"
+[[ -n "$VIDEOPORT" ]] && PS_FLAGS="$PS_FLAGS -VideoPort $VIDEOPORT"
 
-exec python3 - "$IP" "$GUEST_USER" "$GUEST_PASS" "$BASE_URL" "$UNINSTALL_FLAG" <<'PYEOF'
+exec python3 - "$IP" "$GUEST_USER" "$GUEST_PASS" "$BASE_URL" "$PS_FLAGS" <<'PYEOF'
 import sys
 from pypsrp.client import Client
-ip, user, pw, base, uflag = sys.argv[1:6]
+ip, user, pw, base, ps_flags = sys.argv[1:6]
 c = Client(ip, username=user, password=pw, ssl=False, auth='ntlm')
 ps = fr'''
 $ProgressPreference = 'SilentlyContinue'
@@ -87,7 +96,7 @@ New-Item -Path C:\nv -ItemType Directory -Force | Out-Null
 Invoke-WebRequest "{base}/install-nv-service.ps1" `
     -OutFile C:\nv\install-nv-service.ps1 -UseBasicParsing
 "  pulled $((Get-Item C:\nv\install-nv-service.ps1).Length) bytes"
-& powershell.exe -ExecutionPolicy Bypass -File C:\nv\install-nv-service.ps1 -BaseUrl "{base}" {uflag}
+& powershell.exe -ExecutionPolicy Bypass -File C:\nv\install-nv-service.ps1 -BaseUrl "{base}" {ps_flags}
 '''
 out, streams, _ = c.execute_ps(ps)
 print(out)

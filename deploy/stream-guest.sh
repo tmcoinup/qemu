@@ -71,5 +71,13 @@ echo "[stream-guest] input port $IPORT"
 # mpv connect.)
 nc -z -w 2 "$IP" "$IPORT" 2>&1 || { echo "input port $IPORT not open — AudioSvcHost not running in guest"; exit 1; }
 
-exec python3 stream-client/stream_client.py \
+# Build the C client if missing or stale.
+BIN=stream-client/stream_client
+SRC=stream-client/stream_client.c
+if [[ ! -x "$BIN" || "$SRC" -nt "$BIN" ]]; then
+    echo "[stream-guest] building $BIN..."
+    make -C stream-client all || { echo "build failed"; exit 1; }
+fi
+
+exec "$BIN" \
     --ip "$IP" --vport "$VPORT" --iport "$IPORT" --password "$PASSWORD"

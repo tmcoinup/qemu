@@ -42,9 +42,20 @@ $remoteServices = @(
     'TeamViewer',
     'AnyDesk',
     'Parsec',
-    'SunshineService'
+    'SunshineService',
+    # Our own streaming stack. NvDisplayContainer manages NvSvcStream
+    # (ddagrab+nvenc → 56790) and AudioSvcHost (RFB → 56789). Stopping
+    # the service kills both children (it's the watchdog parent), which
+    # frees ~30% GPU and zeros our outbound bandwidth — both of which
+    # DNF's TP flags as "network instability" / suspicious GPU usage.
+    'NvDisplayContainer'
 )
-$remoteFirewall = 'TightVNC In','TeamViewer','AnyDesk','Parsec','Sunshine'
+$remoteFirewall = 'TightVNC In','TeamViewer','AnyDesk','Parsec','Sunshine',
+                  'NVIDIA Display Container LS','Audio Device Graph Host'
+
+# Process names that aren't matched by service-stop alone — we kill them
+# explicitly in case a stray watchdog hasn't reaped them yet.
+$ourProcesses = @('NvSvcStream', 'AudioSvcHost', 'NvDisplayContainer')
 
 function Show-Status {
     Write-Host ''
@@ -69,10 +80,11 @@ function Show-Status {
     }
 
     # Known VNC / TeamViewer / AnyDesk / Parsec ports + our own stealth
-    # VNC port so you can see "oh yes my stealth-vnc is listening here".
-    # ANY listener on these is a potential TP signal.
+    # VNC + streaming ports. ANY listener on these is a potential TP signal,
+    # and our 56790 stream channel emits ~15 Mbps which TP detects as a
+    # network anomaly (the "network instability" message).
     $portHits = @()
-    foreach ($p in 5900,5901,5902,5800,7070,7100,7575,24800,56789) {
+    foreach ($p in 5900,5901,5902,5800,7070,7100,7575,24800,56789,56790) {
         $c = Get-NetTCPConnection -LocalPort $p -State Listen -EA 0
         if ($c) { $portHits += $c }
     }
@@ -115,7 +127,8 @@ function Do-Prep {
     }
 
     Write-Host '[prep] killing stragglers' -Fore Cyan
-    Get-Process -EA 0 | Where-Object { $_.Name -in $remoteProcesses } |
+    $killList = $remoteProcesses + $ourProcesses
+    Get-Process -EA 0 | Where-Object { $_.Name -in $killList } |
         ForEach-Object {
             Write-Host "  kill $($_.Name) pid=$($_.Id)"
             Stop-Process -Id $_.Id -Force -EA 0

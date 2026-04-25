@@ -124,6 +124,8 @@ struct virtio_gpu_base_conf {
     uint32_t flags;
     uint32_t xres;
     uint32_t yres;
+    uint32_t xmax;
+    uint32_t ymax;
     uint64_t hostmem;
 };
 
@@ -167,7 +169,9 @@ struct VirtIOGPUBaseClass {
     DEFINE_PROP_BIT("edid", _state, _conf.flags, \
                     VIRTIO_GPU_FLAG_EDID_ENABLED, true), \
     DEFINE_PROP_UINT32("xres", _state, _conf.xres, 1280), \
-    DEFINE_PROP_UINT32("yres", _state, _conf.yres, 800)
+    DEFINE_PROP_UINT32("yres", _state, _conf.yres, 800), \
+    DEFINE_PROP_UINT32("xmax", _state, _conf.xmax, 0), \
+    DEFINE_PROP_UINT32("ymax", _state, _conf.ymax, 0)
 
 typedef struct VGPUDMABuf {
     QemuDmaBuf *buf;

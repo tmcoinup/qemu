@@ -60,10 +60,54 @@ typedef struct Timings {
     uint64_t clock;
 } Timings;
 
+/*
+ * Stealth: real CEA-861 / VESA DMT timings for common modes. The "thin
+ * air" formula below produces blanking values that don't line up with
+ * any hardware monitor (e.g. ~173 MHz dot clock for 1080p instead of
+ * the standard 148.5 MHz), which is detectable when an EDID parser
+ * cross-checks DTD math against expected VIC entries.
+ */
+struct std_timing {
+    uint32_t xres, yres, refresh;
+    uint32_t xfront, xsync, xblank;
+    uint32_t yfront, ysync, yblank;
+};
+
+static const struct std_timing known_timings[] = {
+    /* 1920x1080@60   CEA-861 VIC 16,  148.500 MHz */
+    { 1920, 1080, 60000,  88,  44, 280,  4,  5, 45 },
+    /* 1280x720@60    CEA-861 VIC 4,    74.250 MHz */
+    { 1280,  720, 60000, 110,  40, 370,  5,  5, 30 },
+    /* 1024x768@60    VESA DMT,         65.000 MHz */
+    { 1024,  768, 60000,  24, 136, 320,  3,  6, 38 },
+    /*  800x600@60    VESA DMT,         40.000 MHz */
+    {  800,  600, 60000,  40, 128, 256,  1,  4, 28 },
+    /*  640x480@60    VESA DMT,         25.175 MHz */
+    {  640,  480, 60000,  16,  96, 160, 10,  2, 45 },
+};
+
 static void generate_timings(Timings *timings, uint32_t refresh_rate,
                              uint32_t xres, uint32_t yres)
 {
-    /* pull some realistic looking timings out of thin air */
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(known_timings); i++) {
+        const struct std_timing *k = &known_timings[i];
+        if (k->xres == xres && k->yres == yres && k->refresh == refresh_rate) {
+            timings->xfront = k->xfront;
+            timings->xsync  = k->xsync;
+            timings->xblank = k->xblank;
+            timings->yfront = k->yfront;
+            timings->ysync  = k->ysync;
+            timings->yblank = k->yblank;
+            timings->clock  = ((uint64_t)refresh_rate *
+                               (xres + timings->xblank) *
+                               (yres + timings->yblank)) / 10000000;
+            return;
+        }
+    }
+
+    /* fall back: pull some realistic looking timings out of thin air */
     timings->xfront = xres * 25 / 100;
     timings->xsync  = xres *  3 / 100;
     timings->xblank = xres * 35 / 100;
@@ -224,16 +268,23 @@ static void edid_desc_ranges(uint8_t *desc)
 {
     edid_desc_type(desc, 0xfd);
 
-    /* vertical (50 -> 125 Hz) */
+    /*
+     * Stealth: Samsung S24F350F datasheet limits.
+     *   vfreq        50 -> 75  Hz
+     *   hfreq        30 -> 83  kHz
+     *   max dot clock         170 MHz
+     *
+     * The previous wide-open 50-125 / 30-160 / 2550 MHz range is itself
+     * a virtual-display fingerprint — physical monitors have narrow,
+     * spec-bounded scan limits.
+     */
     desc[5] =  50;
-    desc[6] = 125;
+    desc[6] =  75;
 
-    /* horizontal (30 -> 160 kHz) */
     desc[7] =  30;
-    desc[8] = 160;
+    desc[8] =  83;
 
-    /* max dot clock (2550 MHz) */
-    desc[9] = 2550 / 10;
+    desc[9] = 170 / 10;
 
     /* no extended timing information */
     desc[10] = 0x01;
@@ -387,7 +438,12 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     uint8_t *dta = NULL;
     uint8_t *did = NULL;
     uint32_t width_mm, height_mm;
-    uint32_t refresh_rate = info->refresh_rate ? info->refresh_rate : 75000;
+    /*
+     * Stealth: 60 Hz preferred timing, not 75. Real Samsung S24F350F's
+     * preferred mode in the EDID is 1920x1080@60 — 75 Hz at 1080p is
+     * uncommon enough to be a tell on its own.
+     */
+    uint32_t refresh_rate = info->refresh_rate ? info->refresh_rate : 60000;
     uint32_t dpi = 100; /* if no width_mm/height_mm */
     uint32_t large_screen = 0;
 
@@ -397,17 +453,34 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
         info->vendor = "SAM";
     }
     if (!info->name) {
-        info->name = "SyncMaster";
+        info->name = "S24F350";
+    }
+    if (!info->serial) {
+        /*
+         * Real monitors always carry a 0xff serial-number descriptor;
+         * a missing one is itself a fingerprint. Default to a 12-char
+         * Samsung-format serial. (atoi() of this is also non-zero, so
+         * the binary serial slot at edid[12..15] gets a non-default
+         * value too.)
+         */
+        info->serial = "H4ZK500001VL";
     }
     if (!info->prefx) {
-        info->prefx = 1280;
+        info->prefx = 1920;
     }
     if (!info->prefy) {
-        info->prefy = 800;
+        info->prefy = 1080;
     }
     if (info->width_mm && info->height_mm) {
         width_mm = info->width_mm;
         height_mm = info->height_mm;
+        dpi = qemu_edid_dpi_from_mm(width_mm, info->prefx);
+    } else if (info->prefx == 1920 && info->prefy == 1080) {
+        /* Stealth: 24" 16:9 ≈ 530 × 300 mm — matches Samsung S24F350F.
+         * The earlier 100 dpi default produced ~488 × 274 mm, closer
+         * to a 22" panel and inconsistent with the spoofed model. */
+        width_mm = 530;
+        height_mm = 300;
         dpi = qemu_edid_dpi_from_mm(width_mm, info->prefx);
     } else {
         width_mm = qemu_edid_dpi_to_mm(dpi, info->prefx);
@@ -451,19 +524,20 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
                           (((info->vendor[2] - '@') & 0x1f) <<  0));
     /*
      * deploy stealth: avoid the recognizable 0x1234 "QEMU Monitor"
-     * product code. Default to a real Samsung SyncMaster product code
-     * (S27E390F, seen in the wild) so GPU-Z / 鲁大师 read a plausible
-     * monitor descriptor instead of "SAM1234".
+     * product code. SAM:0x0F65 is the real product code Samsung's
+     * S24F350F panel reports — confirmed against multiple Linux EDID
+     * dumps in the wild — so MONITOR\SAM0F65 is a plausible HardwareID
+     * for the spoofed name "Samsung S24F350F".
      */
-    uint16_t model_nr = 0x0B76;
+    uint16_t model_nr = 0x0F65;
     uint32_t serial_nr = info->serial ? atoi(info->serial) : 0x01A5C3D2;
     stw_be_p(edid +  8, vendor_id);
     stw_le_p(edid + 10, model_nr);
     stl_le_p(edid + 12, serial_nr);
 
-    /* manufacture week and year */
-    edid[16] = 42;
-    edid[17] = 2014 - 1990;
+    /* manufacture week 32, year 2018 — within S24F350F production span */
+    edid[16] = 32;
+    edid[17] = 2018 - 1990;
 
     /* edid version */
     edid[18] = 1;
@@ -472,8 +546,12 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
 
     /* =============== basic display parameters =============== */
 
-    /* video input: digital, 8bpc, displayport */
-    edid[20] = 0xa5;
+    /*
+     * video input: digital, 8 bpc, HDMI-a.
+     * S24F350F's only digital input is HDMI; reporting DisplayPort on
+     * a budget Samsung 1080p panel is implausible.
+     */
+    edid[20] = 0xa3;
 
     /* screen size: undefined */
     edid[21] = width_mm / 10;

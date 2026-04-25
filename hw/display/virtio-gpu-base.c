@@ -61,6 +61,8 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
         .height_mm = g->req_state[scanout].height_mm,
         .prefx = g->req_state[scanout].width,
         .prefy = g->req_state[scanout].height,
+        .maxx = g->conf.xmax,
+        .maxy = g->conf.ymax,
         .refresh_rate = g->req_state[scanout].refresh_rate,
     };
 

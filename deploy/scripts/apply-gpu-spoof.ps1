@@ -38,9 +38,15 @@
 #   powershell -ExecutionPolicy Bypass -File .\apply-gpu-spoof.ps1 -SkipTask
 
 $spoofName    = 'NVIDIA GeForce GTX 1050'
-$spoofVendor  = 'NVIDIA'                      # Win32_VideoController.AdapterCompatibility / DxDiag 制造商
-$monitorName  = 'Samsung SyncMaster S24F350'  # Monitor 的 DeviceDesc / FriendlyName
-$monitorMfg   = 'Samsung'                     # Monitor 的 Mfg
+$spoofVendor  = 'NVIDIA'                                 # Win32_VideoController.AdapterCompatibility / DxDiag 制造商
+# Monitor 字段必须和 EDID 协调一致:
+#   QEMU edid-generate.c 现在把 EDID 上报为 SAM:0x0F65 + week32/2018,
+#   PnP HardwareID 自动变成 MONITOR\SAM0F65 — 这是真实 Samsung S24F350F
+#   面板的产品码. 注册表里的可读名也对齐到同一个具体型号.
+$monitorName  = 'Samsung S24F350F'
+$monitorMfg   = 'Samsung Electronics Co., Ltd.'
+$monitorHwId  = 'MONITOR\SAM0F65'                        # PnP HardwareID 主键
+$monitorPNP   = 'SAM0F65'                                # Enum\DISPLAY 子键名
 $classGuid    = '{4d36e968-e325-11ce-bfc1-08002be10318}'   # Display adapters
 $monClassGuid = '{4d36e96e-e325-11ce-bfc1-08002be10318}'   # Monitors
 $classRoot    = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $classGuid
@@ -273,14 +279,19 @@ if (-not $matchedEnum) {
 }
 
 # ---- patch Monitor class ---------------------------------------------------
-# Monitor 的来源:
-#   1) HKLM\...\Enum\DISPLAY\<PNPID>\<inst>\{DeviceDesc, FriendlyName, Mfg}
-#      -> Device Manager 里显示的名字
-#   2) HKLM\...\Control\Class\{4d36e96e-...}\NNNN\{DriverDesc, ProviderName}
-#      -> 安装的监视器 INF 驱动描述
-# EDID (QEMU 0007 补丁) 已经上报 "SAM SyncMaster"，但 Windows 没有预置
-# INF 匹配就会回落到 "Generic PnP Monitor". 我们直接改注册表把它改成
-# 一个看上去像真实显示器的名字.
+# Monitor 的来源 (按检测路径的高频顺序):
+#   1) Enum\DISPLAY\<PNPID>\<inst>\{DeviceDesc, FriendlyName, Mfg, HardwareID,
+#      CompatibleIDs}            -> Device Manager / Win32_DesktopMonitor /
+#                                    DxDiag 显示器制造商/型号
+#   2) Class\{4d36e96e-...}\NNNN\{DriverDesc, ProviderName} -> 已装的监视器
+#                                    INF 驱动 (没装就只有 generic 那一份)
+#
+# EDID (我们的 hw/display/edid-generate.c 改动) 已经把厂商/产品码上报为
+# SAM:0x0F65, 实际 PnP 出的 HardwareID 就是 MONITOR\SAM0F65 — 对应真实
+# Samsung S24F350F. 没装专用 INF 时 Windows 会用 display.inf 的 generic
+# 节点, 注册表里 DeviceDesc 落 "Generic PnP Monitor". 这里直接覆写到
+# "Samsung S24F350F" + Mfg = "Samsung Electronics Co., Ltd.", WMI 和
+# DxDiag 就一致了.
 Write-Host ""
 Write-Host "Patching Monitor (DISPLAY enum + {4d36e96e-...} class)..." -ForegroundColor Cyan
 Get-ChildItem $displayEnum -ErrorAction SilentlyContinue | ForEach-Object {
@@ -290,6 +301,14 @@ Get-ChildItem $displayEnum -ErrorAction SilentlyContinue | ForEach-Object {
         Set-ItemProperty -Path $inst.PSPath -Name DeviceDesc   -Type String -Value $monitorName
         Set-ItemProperty -Path $inst.PSPath -Name FriendlyName -Type String -Value $monitorName
         Set-ItemProperty -Path $inst.PSPath -Name Mfg          -Type String -Value $monitorMfg
+        # HardwareID/CompatibleIDs 是 PnP 在第一次发现 EDID 时根据上报的
+        # 厂商:产品码自动写的, 但只有当前枚举的 PNPID 跟我们 EDID 一致
+        # (SAM0F65) 时才能匹配 -- 给非匹配 PNPID 节点 (留下来的旧 EDID
+        # 缓存) 一并刷成 SAM0F65 让残留枚举也对齐.
+        Set-ItemProperty -Path $inst.PSPath -Name HardwareID `
+            -Type MultiString -Value @($monitorHwId)
+        Set-ItemProperty -Path $inst.PSPath -Name CompatibleIDs `
+            -Type MultiString -Value @('MONITOR\Default_Monitor')
         Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0004' -Value $monitorName
         Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0009' -Value $monitorMfg
         Write-Host ("  " + $pnp.PSChildName + "\" + $inst.PSChildName + " -> " + $monitorName) -ForegroundColor Green
@@ -321,8 +340,9 @@ if (-not $SkipTask) {
 $ErrorActionPreference = 'SilentlyContinue'
 $spoofName    = 'NVIDIA GeForce GTX 1050'
 $spoofVendor  = 'NVIDIA'
-$monitorName  = 'Samsung SyncMaster S24F350'
-$monitorMfg   = 'Samsung'
+$monitorName  = 'Samsung S24F350F'
+$monitorMfg   = 'Samsung Electronics Co., Ltd.'
+$monitorHwId  = 'MONITOR\SAM0F65'
 $classGuid    = '{4d36e968-e325-11ce-bfc1-08002be10318}'
 $monClassGuid = '{4d36e96e-e325-11ce-bfc1-08002be10318}'
 $fmtDev       = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
@@ -400,6 +420,10 @@ foreach ($pnp in Get-ChildItem $displayEnum) {
         Set-ItemProperty -Path $inst.PSPath -Name DeviceDesc   -Type String -Value $monitorName
         Set-ItemProperty -Path $inst.PSPath -Name FriendlyName -Type String -Value $monitorName
         Set-ItemProperty -Path $inst.PSPath -Name Mfg          -Type String -Value $monitorMfg
+        Set-ItemProperty -Path $inst.PSPath -Name HardwareID `
+            -Type MultiString -Value @($monitorHwId)
+        Set-ItemProperty -Path $inst.PSPath -Name CompatibleIDs `
+            -Type MultiString -Value @('MONITOR\Default_Monitor')
         Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0004' -Value $monitorName
         Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0009' -Value $monitorMfg
     }
@@ -442,6 +466,98 @@ foreach ($sub in Get-ChildItem $monClassRoot) {
     schtasks.exe /Run /TN $taskName | Out-Null
     Start-Sleep -Seconds 3
     Write-Host "  -> done (refresh script logged to " $scriptDir ")" -ForegroundColor Green
+
+    # ---- user-session task: force 1920x1080@60Hz via ChangeDisplaySettingsEx ----
+    # viogpudo 不填 dmDisplayFrequency, "高级显示设置" 里有源信号 -1×-1
+    # / 刷新率 1.000 Hz. ChangeDisplaySettingsEx 必须在交互会话里跑
+    # (Session 0 的 SYSTEM 没桌面, EnumDisplaySettings 全返 0). 用
+    # 当前登录用户 (autologon Administrator) 跑.
+    Write-Host ""
+    Write-Host "Installing user-session task to force 1920x1080@60Hz..." -ForegroundColor Cyan
+    $freqTask   = 'StealthGPU-ForceDisplayFreq'
+    $freqScript = Join-Path $scriptDir 'force-displayfreq.ps1'
+
+    $freqBody = @'
+# Force the active display mode to 1920x1080@60Hz so 高级显示设置 stops
+# showing 有源信号 -1×-1 / 刷新率 1.000 Hz. Idempotent; if the mode is
+# already correct, ChangeDisplaySettingsEx returns DISP_CHANGE_SUCCESSFUL
+# without flicker.
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -ErrorAction Stop @"
+using System;
+using System.Runtime.InteropServices;
+public class StDisp {
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct DEVMODE {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmDeviceName;
+        public ushort dmSpecVersion;
+        public ushort dmDriverVersion;
+        public ushort dmSize;
+        public ushort dmDriverExtra;
+        public uint   dmFields;
+        public int    dmPositionX;
+        public int    dmPositionY;
+        public uint   dmDisplayOrientation;
+        public uint   dmDisplayFixedOutput;
+        public short  dmColor;
+        public short  dmDuplex;
+        public short  dmYResolution;
+        public short  dmTTOption;
+        public short  dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmFormName;
+        public ushort dmLogPixels;
+        public uint   dmBitsPerPel;
+        public uint   dmPelsWidth;
+        public uint   dmPelsHeight;
+        public uint   dmDisplayFlags;
+        public uint   dmDisplayFrequency;
+        public uint   dmICMMethod;
+        public uint   dmICMIntent;
+        public uint   dmMediaType;
+        public uint   dmDitherType;
+        public uint   dmReserved1;
+        public uint   dmReserved2;
+        public uint   dmPanningWidth;
+        public uint   dmPanningHeight;
+    }
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern int EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern int ChangeDisplaySettings(ref DEVMODE devMode, uint flags);
+}
+"@
+
+$dm = New-Object StDisp+DEVMODE
+$dm.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($dm)
+$rc = [StDisp]::EnumDisplaySettings($null, -1, [ref]$dm)
+if ($rc -eq 0) { exit 0 }   # session has no display (Session 0 fallback) — give up
+
+$dm.dmPelsWidth        = 1920
+$dm.dmPelsHeight       = 1080
+$dm.dmBitsPerPel       = 32
+$dm.dmDisplayFrequency = 60
+# DM_PELSWIDTH(0x80000) | DM_PELSHEIGHT(0x100000) | DM_BITSPERPEL(0x40000) | DM_DISPLAYFREQUENCY(0x400000)
+$dm.dmFields = 0x5C0000
+[StDisp]::ChangeDisplaySettings([ref]$dm, 0) | Out-Null
+'@
+    $freqBytes = [System.Text.Encoding]::UTF8.GetBytes($freqBody)
+    [System.IO.File]::WriteAllBytes($freqScript, $bom + $freqBytes)
+
+    schtasks.exe /Delete /TN $freqTask /F 2>$null | Out-Null
+    $freqAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $freqScript + '"')
+    $freqTrig = New-ScheduledTaskTrigger -AtLogOn -User 'Administrator'
+    $freqPrincipal = New-ScheduledTaskPrincipal -UserId 'Administrator' `
+        -LogonType Interactive -RunLevel Highest
+    $freqSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries
+    $freqSched = New-ScheduledTask -Action $freqAction -Trigger $freqTrig `
+        -Principal $freqPrincipal -Settings $freqSettings
+    Register-ScheduledTask -TaskName $freqTask -InputObject $freqSched -Force | Out-Null
+    Write-Host ("  -> task '" + $freqTask + "' registered (AtLogOn, Administrator/Interactive)") -ForegroundColor Green
+    Write-Host "  -> running once now in current user session..." -ForegroundColor Cyan
+    schtasks.exe /Run /TN $freqTask | Out-Null
+    Start-Sleep -Seconds 2
 }
 
 # ---- force PnP property cache refresh --------------------------------------

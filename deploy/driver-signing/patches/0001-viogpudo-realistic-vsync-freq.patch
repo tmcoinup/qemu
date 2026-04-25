@@ -1,0 +1,51 @@
+diff --git a/viogpu/viogpudo/viogpudo.cpp b/viogpu/viogpudo/viogpudo.cpp
+index 4f684e5..ad45241 100644
+--- a/viogpu/viogpudo/viogpudo.cpp
++++ b/viogpu/viogpudo/viogpudo.cpp
+@@ -888,14 +888,38 @@ VOID VioGpuDod::BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalInfo
+     PAGED_CODE();
+ 
+     pVideoSignalInfo->VideoStandard = D3DKMDT_VSS_OTHER;
+-    pVideoSignalInfo->TotalSize.cx = pModeInfo->VisScreenWidth;
+-    pVideoSignalInfo->TotalSize.cy = pModeInfo->VisScreenHeight;
+-
+-    pVideoSignalInfo->VSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
+-    pVideoSignalInfo->VSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
+-    pVideoSignalInfo->HSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
+-    pVideoSignalInfo->HSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
+-    pVideoSignalInfo->PixelRate = D3DKMDT_FREQUENCY_NOTSPECIFIED;
++
++    /*
++     * Stealth: real monitors carry concrete VSync/HSync/PixelRate.
++     * Upstream's NOTSPECIFIED stub surfaces in WMI as
++     *   Win32_VideoController.CurrentRefreshRate = 1
++     *   高级显示设置.刷新频率 = 1.000 Hz
++     *   高级显示设置.有源信号分辨率 = -1 x -1
++     * which are virtual-display fingerprints anti-cheat keys on.
++     *
++     * Hardcode 60 Hz vertical with CEA-861-shaped totals derived from
++     * active size: vTotal = active_h * 25/24, hTotal = active_w * 11/10
++     * (1080->1125 / 1920->2112 — within ~1% of canonical CEA-861 1080p60
++     *  totals 1125 / 2200, close enough that PixelRate = HTotal*VTotal*60
++     *  is ~143 MHz vs canonical 148.5 MHz).
++     *
++     * Also fix ActiveSize: AddSingleTargetMode does
++     *   "ActiveSize = TotalSize"
++     * BEFORE this function runs, when both are still 0 from
++     * pfnCreateNewModeInfo, so post-Build state was TotalSize set,
++     * ActiveSize left at 0. Now both are written explicitly.
++     */
++    UINT vTotal = pModeInfo->VisScreenHeight + pModeInfo->VisScreenHeight / 24;
++    UINT hTotal = pModeInfo->VisScreenWidth  + pModeInfo->VisScreenWidth  / 10;
++    pVideoSignalInfo->ActiveSize.cx = pModeInfo->VisScreenWidth;
++    pVideoSignalInfo->ActiveSize.cy = pModeInfo->VisScreenHeight;
++    pVideoSignalInfo->TotalSize.cx  = hTotal;
++    pVideoSignalInfo->TotalSize.cy  = vTotal;
++    pVideoSignalInfo->VSyncFreq.Numerator   = 60;
++    pVideoSignalInfo->VSyncFreq.Denominator = 1;
++    pVideoSignalInfo->HSyncFreq.Numerator   = 60 * vTotal;
++    pVideoSignalInfo->HSyncFreq.Denominator = 1;
++    pVideoSignalInfo->PixelRate = (ULONGLONG)60 * vTotal * hTotal;
+     pVideoSignalInfo->ScanLineOrdering = D3DDDI_VSSLO_PROGRESSIVE;
+ }
+ 

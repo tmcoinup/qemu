@@ -405,10 +405,16 @@ model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXM7
     "${NET_ARGS[@]}"
     -device e1000e,netdev=net0,mac=$MAC_OVERRIDE,bus=rp2
 
-    # --- USB: xHCI + keyboard/mouse/tablet ---
+    # --- USB: xHCI + keyboard/mouse ---
+    # USB_RELATIVE_MOUSE=1: usb-mouse (relative coords, like real USB mouse).
+    #   Anti-cheat-friendly — guest sees normal HID mouse, no "absolute jump"
+    #   pattern. SDL will grab the cursor; release with Ctrl+Alt+G.
+    # default: usb-tablet (absolute coords). Friendlier UX (mouse can leave
+    #   the SDL window freely) but the absolute-coordinate event pattern is
+    #   a virtualization fingerprint.
     -device qemu-xhci,id=xhci,bus=rp3
-    -device usb-tablet,bus=xhci.0
     -device usb-kbd,bus=xhci.0
+    $([[ "${USB_RELATIVE_MOUSE:-0}" == "1" ]] && echo "-device usb-mouse,bus=xhci.0" || echo "-device usb-tablet,bus=xhci.0")
 
     # --- Audio: ICH9 HDA (looks like Realtek ALC). Use 'none' backend
     # unconditionally -- passes driver probe in guest without requiring

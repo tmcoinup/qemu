@@ -139,7 +139,20 @@ fi
 
 case "$CLIENT" in
     tiger)
-        exec xtigervncviewer "${scale_opt[@]}" -PasswordFile="$passwd_file" "$IP::$PORT"
+        # Explicit knobs:
+        #   -ViewOnly=0           — safety-belt: some distros ship with this set via /etc/vnc/default
+        #   -AutoSelect=0         — don't let Tiger probe random encodings; we only do Raw
+        #   -PreferredEncoding=raw — match our server (our SetEncodings drain accepts any list)
+        #   -FullColor=1          — 24-bit color, no quantization
+        #   -PointerEventInterval=0 — send every mouse move, not rate-limited client-side
+        exec xtigervncviewer "${scale_opt[@]}" \
+            -PasswordFile="$passwd_file" \
+            -ViewOnly=0 \
+            -AutoSelect=0 \
+            -PreferredEncoding=raw \
+            -FullColor=1 \
+            -PointerEventInterval=0 \
+            "$IP::$PORT"
         ;;
     remmina)
         # Build a one-shot .remmina profile so we can pre-fill password + port.

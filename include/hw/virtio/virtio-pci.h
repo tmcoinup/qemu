@@ -148,13 +148,15 @@ struct VirtIOPCIProxy {
     uint32_t guest_features[VIRTIO_FEATURES_NU32S];
 
     /*
-     * 中文注释：这三个字段只覆盖来宾可见的子系统标识和修订号，不修改
-     * virtio 的主厂商/设备 ID，因而不会破坏 virtio-win 驱动匹配。
-     * UINT32_MAX 表示沿用 QEMU 11 的原生默认值。
+     * 中文注释：这些字段保存来宾可见的 PCI 标识覆盖值。主厂商/设备 ID
+     * 只供已签名的定制驱动路径使用；UINT32_MAX 表示沿用 QEMU 11 的
+     * 原生默认值，避免普通 virtio-win 场景被意外改写。
      */
     uint32_t x_subsys_vendor_id;
     uint32_t x_subsys_device_id;
     uint32_t x_pci_revision;
+    uint32_t x_pci_vendor_id;
+    uint32_t x_pci_device_id;
     VirtIOPCIQueue vqs[VIRTIO_QUEUE_MAX];
 
     VirtIOIRQFD *vector_irqfd;

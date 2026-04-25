@@ -449,8 +449,14 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     uint16_t vendor_id = ((((info->vendor[0] - '@') & 0x1f) << 10) |
                           (((info->vendor[1] - '@') & 0x1f) <<  5) |
                           (((info->vendor[2] - '@') & 0x1f) <<  0));
-    uint16_t model_nr = 0x1234;
-    uint32_t serial_nr = info->serial ? atoi(info->serial) : 0;
+    /*
+     * deploy stealth: avoid the recognizable 0x1234 "QEMU Monitor"
+     * product code. Default to a real Samsung SyncMaster product code
+     * (S27E390F, seen in the wild) so GPU-Z / 鲁大师 read a plausible
+     * monitor descriptor instead of "SAM1234".
+     */
+    uint16_t model_nr = 0x0B76;
+    uint32_t serial_nr = info->serial ? atoi(info->serial) : 0x01A5C3D2;
     stw_be_p(edid +  8, vendor_id);
     stw_le_p(edid + 10, model_nr);
     stl_le_p(edid + 12, serial_nr);

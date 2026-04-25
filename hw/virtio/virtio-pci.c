@@ -2099,13 +2099,18 @@ static void virtio_pci_device_plugged(DeviceState *d, Error **errp)
     config[PCI_INTERRUPT_PIN] = 1;
 
     /*
-     * deploy stealth override: PCI subsystem + revision id.
-     *
-     * Applied AFTER both legacy and modern paths so we win the race
-     * against virtio-pci's own default stamping. VENDOR_ID/DEVICE_ID
-     * are intentionally not overridable here; they must stay at
-     * 1AF4:1050 (virtio 1.0 GPU) so virtio-win's INF can bind.
+     * 中文注释：所有覆盖都必须放在 legacy/modern 初始化之后，否则 QEMU
+     * 的原生初始化会重新写回默认 PCI 标识。主 VEN/DEV 覆盖仅供已签名的
+     * 定制驱动路径使用；未显式设置时保持 QEMU 11 的 virtio 标识。
      */
+    if (proxy->x_pci_vendor_id != UINT32_MAX) {
+        pci_set_word(config + PCI_VENDOR_ID,
+                     (uint16_t)proxy->x_pci_vendor_id);
+    }
+    if (proxy->x_pci_device_id != UINT32_MAX) {
+        pci_set_word(config + PCI_DEVICE_ID,
+                     (uint16_t)proxy->x_pci_device_id);
+    }
     if (proxy->x_subsys_vendor_id != UINT32_MAX) {
         pci_set_word(config + PCI_SUBSYSTEM_VENDOR_ID,
                      (uint16_t)proxy->x_subsys_vendor_id);
@@ -2466,6 +2471,10 @@ static const Property virtio_pci_properties[] = {
                        x_subsys_device_id, UINT32_MAX),
     DEFINE_PROP_UINT32("x-pci-revision", VirtIOPCIProxy,
                        x_pci_revision, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-vendor-id", VirtIOPCIProxy,
+                       x_pci_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-device-id", VirtIOPCIProxy,
+                       x_pci_device_id, UINT32_MAX),
 };
 
 static void virtio_pci_dc_realize(DeviceState *qdev, Error **errp)

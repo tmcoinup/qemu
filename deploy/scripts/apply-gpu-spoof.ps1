@@ -366,6 +366,16 @@ foreach ($ven in Get-ChildItem $enumRoot) {
     }
 }
 
+# -- Services\VioGpuDod\Video\DeviceDesc is Windows' own cache of the INF
+#    DeviceDesc, and 鲁大师 / some third-party tools read it directly.
+#    If we leave it referencing "@oem2.inf,%viogpudod.devicedesc%;Red Hat VirtIO..."
+#    the "Red Hat" tail survives every registry sweep. Overwrite with a plain
+#    resolved string so there is nothing for Windows to re-lookup. --
+$vgdVideo = 'HKLM:\SYSTEM\CurrentControlSet\Services\VioGpuDod\Video'
+if (Test-Path $vgdVideo) {
+    Set-ItemProperty -Path $vgdVideo -Name DeviceDesc -Type String -Value $spoofName -EA 0
+}
+
 # -- GPU: Class\{4d36e968-...} DriverDesc/ProviderName/HardwareInformation.* --
 foreach ($sub in Get-ChildItem $classRoot) {
     if ($sub.PSChildName -notmatch '^\d{4}$') { continue }

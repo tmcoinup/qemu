@@ -164,8 +164,21 @@ rm -f "$QMP_SOCK" "$MON_SOCK"
 # -------------------------------------------------------------------
 # OVMF firmware (UEFI SecureBoot-capable -> looks like modern PC).
 # Per-instance VARS copy so each VM has its own NVRAM.
+#
+# Stealth build: the custom OVMF_CODE_4M_stealth.fd at deploy/firmware/
+# adds PCI VEN_10DE:DEV_1C81 to QemuVideoDxe's whitelist so UEFI boot
+# display still works when virtio-vga is spoofed as NVIDIA GTX 1050
+# (GPU_SELFSIGNED=1 path). Without it OVMF can't find a matching GOP
+# driver and you stare at "Display output is not active" until
+# viogpudo.sys loads inside Windows. Falls back to Ubuntu's stock
+# OVMF_CODE_4M.fd if the stealth build is missing.
 # -------------------------------------------------------------------
-OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+STEALTH_OVMF="$(dirname "$0")/../firmware/OVMF_CODE_4M_stealth.fd"
+if [[ -f "$STEALTH_OVMF" ]]; then
+    OVMF_CODE="$(readlink -f "$STEALTH_OVMF")"
+else
+    OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+fi
 OVMF_VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
 OVMF_VARS=/home/ubuntu/images/ovmf-vars-${INSTANCE}.fd
 if [[ ! -f "$OVMF_VARS" ]]; then
@@ -177,6 +190,12 @@ fi
 # declare (so the part# picked matches the actual memory backend size).
 # -------------------------------------------------------------------
 export MEM_PER_DIMM_MB=$(( RAM / 2 ))
+
+# Override default PCI subsystem IDs for devices that don't set their own.
+# ASUS PRIME B350-PLUS uses 1043:8694 on many platform devices — keeps the
+# Red Hat/QEMU leak (1AF4:1100) off of xHCI, LPC, HDA, bridges, etc.
+export QEMU_PCI_SUBSYS_VEN=${QEMU_PCI_SUBSYS_VEN:-0x1043}
+export QEMU_PCI_SUBSYS_DEV=${QEMU_PCI_SUBSYS_DEV:-0x8694}
 SMBIOS_ARGS=()
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
@@ -200,6 +219,15 @@ GPU_SUBSYS_VEN=${GPU_SUBSYS_VEN:-0x10DE}
 GPU_SUBSYS_DEV=${GPU_SUBSYS_DEV:-0x1C81}
 GPU_REV=${GPU_REV:-0xA1}
 GPU_STEALTH="x-pci-sub-vendor-id=${GPU_SUBSYS_VEN},x-pci-sub-device-id=${GPU_SUBSYS_DEV},x-pci-revision=${GPU_REV}"
+
+# Self-signed driver path: override primary VEN/DEV as well so INF binds
+# PCI\VEN_10DE&DEV_1C81 directly (instead of virtio 1AF4:1050). Requires
+# the self-signed viogpudo.sys + catalog installed inside the guest.
+if [[ "${GPU_SELFSIGNED:-0}" == "1" ]]; then
+    GPU_VEN=${GPU_VEN:-0x10DE}
+    GPU_DEV=${GPU_DEV:-0x1C81}
+    GPU_STEALTH="${GPU_STEALTH},x-pci-vendor-id=${GPU_VEN},x-pci-device-id=${GPU_DEV}"
+fi
 
 if [[ "$HEADLESS" == "1" ]]; then
     # Headless: VNC only. virtio-vga (no GL) because SPICE GL is local-only
@@ -336,6 +364,18 @@ CMD=(
     -device pcie-root-port,id=rp1,slot=1,bus=pcie.0
     -device pcie-root-port,id=rp2,slot=2,bus=pcie.0
     -device pcie-root-port,id=rp3,slot=3,bus=pcie.0
+
+    # --- AMD Zen Data Fabric PCI stubs at 00:18.0-7 ---
+    # Real Zen silicon exposes 8 DF config functions; HWiNFO/CPU-Z use these
+    # to identify the CPU codename and derive channel topology.
+    -device amd-df-stub,bus=pcie.0,addr=0x18.0x0,multifunction=on,device-id=0x1460
+    -device amd-df-stub,bus=pcie.0,addr=0x18.0x1,device-id=0x1461
+    -device amd-df-stub,bus=pcie.0,addr=0x18.0x2,device-id=0x1462
+    -device amd-df-stub,bus=pcie.0,addr=0x18.0x3,device-id=0x1463
+    -device amd-df-stub,bus=pcie.0,addr=0x18.0x4,device-id=0x1464
+    -device amd-df-stub,bus=pcie.0,addr=0x18.0x5,device-id=0x1465
+    -device amd-df-stub,bus=pcie.0,addr=0x18.0x6,device-id=0x1466
+    -device amd-df-stub,bus=pcie.0,addr=0x18.0x7,device-id=0x1467
 
     # --- Storage: virtio-scsi host + Samsung NVMe as system drive ---
     -object iothread,id=io1

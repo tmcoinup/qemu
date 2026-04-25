@@ -238,7 +238,7 @@ _e() { echo "${1//,/,,}"; }
 #       looks like from Win32_PhysicalMemory.
 # ------------------------------------------------------------------
 stealth_smbios_args() {
-    local t0 t1 t2 t3 t4 t11 t17
+    local t0 t1 t2 t3 t4 t11 t16 t17
     local mem_per_dimm_mb="${MEM_PER_DIMM_MB:-4096}"
 
     # Ryzen 3 1200 (Summit Ridge) official memory spec: DDR4-2667 JEDEC.
@@ -256,7 +256,10 @@ stealth_smbios_args() {
     t1="type=1,manufacturer=$(_e "$SYSTEM_MFR"),product=$(_e "$SYSTEM_PRODUCT"),version=$(_e "$SYSTEM_VERSION"),serial=$(_e "$SYSTEM_SERIAL"),uuid=$UUID,sku=$(_e "$SYSTEM_SKU"),family=$(_e "$SYSTEM_FAMILY")"
     t2="type=2,manufacturer=$(_e "$BOARD_MFR"),product=$(_e "$BOARD_PRODUCT"),version=$(_e "$BOARD_VERSION"),serial=$(_e "$BOARD_SERIAL"),asset=$BOARD_ASSET,location=Default string"
     t3="type=3,manufacturer=$(_e "$BOARD_MFR"),version=$(_e "$BOARD_VERSION"),serial=$(_e "$CHASSIS_SERIAL"),asset=$BOARD_ASSET,sku=$(_e "$SYSTEM_SKU")"
-    t4="type=4,sock_pfx=AM4,manufacturer=Advanced Micro Devices Inc.,version=AMD Ryzen 3 1200 Quad-Core Processor,serial=$CPU_SERIAL,asset=$(_rand 1000 9999),part=YD1200BBM4KAE,max-speed=3400,current-speed=3100"
+    # processor-family=0x139 → SMBIOS 3.6 "Zen" (matches real Ryzen boards).
+    # part=YD1200BBM4KAE is the retail OEM OPN; HWiNFO parses this for
+    # 产品单元 (Product Unit).
+    t4="type=4,sock_pfx=AM4,manufacturer=Advanced Micro Devices Inc.,version=AMD Ryzen 3 1200 Quad-Core Processor,serial=$CPU_SERIAL,asset=$(_rand 1000 9999),part=YD1200BBM4KAE,max-speed=3400,current-speed=3100,processor-family=0x139"
     # OEM strings — presence matters more than exact content; most
     # detectors just check that type 11 exists. We still vendor-match
     # so an ASRock board doesn't carry ASUS_MB_* strings.
@@ -277,5 +280,12 @@ stealth_smbios_args() {
     # passes "%C" through literally (still uniform across DIMMs, but not
     # a detection red flag — most tools don't parse bank syntax).
     t17="type=17,loc_pfx=DIMM_A,bank=P0 CHANNEL %C,manufacturer=Kingston,serial=$(_rand 10000000 99999999),asset=9876543210,part=$(_e "$mem_part"),speed=$mem_speed"
-    printf '%s\n' "$t0" "$t1" "$t2" "$t3" "$t4" "$t11" "$t17"
+    # Physical memory array (type 16): advertise 64 GB max capacity and
+    # 4 DIMM slots — the real spec for B350-PLUS / typical AM4 ATX board.
+    # QEMU's default would set MaxCapacity == installed (8 GB) and slot
+    # count == dimm_cnt (2), which is a VM tell: retail boards always
+    # have empty slots. Extra slots past dimm_cnt are emitted as Size=0
+    # ("No Module Installed") type 17 entries.
+    t16="type=16,max-capacity=${T16_MAX_CAPACITY:-64G},num-devices=${T16_NUM_DEVICES:-4}"
+    printf '%s\n' "$t0" "$t1" "$t2" "$t3" "$t4" "$t11" "$t16" "$t17"
 }

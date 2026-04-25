@@ -281,8 +281,43 @@ static void pci_irq_handler(void *opaque, int irq_num, int level);
 static void pci_add_option_rom(PCIDevice *pdev, bool is_default_rom, Error **);
 static void pci_del_option_rom(PCIDevice *pdev);
 
+/* Default PCI subsystem IDs used when a device does not set its own.
+ *
+ * Stealth build: overridden at runtime via the QEMU_PCI_SUBSYS_VEN /
+ * QEMU_PCI_SUBSYS_DEV environment variables (initialized lazily below).
+ * The compile-time default remains Red Hat / QEMU so non-stealth use of
+ * this binary is unaffected.
+ */
 static uint16_t pci_default_sub_vendor_id = PCI_SUBVENDOR_ID_REDHAT_QUMRANET;
 static uint16_t pci_default_sub_device_id = PCI_SUBDEVICE_ID_QEMU;
+static bool pci_default_subsys_env_checked;
+
+static void pci_default_subsys_env_init(void)
+{
+    const char *s;
+    unsigned long v;
+    char *end;
+
+    if (pci_default_subsys_env_checked) {
+        return;
+    }
+    pci_default_subsys_env_checked = true;
+
+    s = getenv("QEMU_PCI_SUBSYS_VEN");
+    if (s && *s) {
+        v = strtoul(s, &end, 0);
+        if (!*end && v <= 0xFFFF) {
+            pci_default_sub_vendor_id = (uint16_t)v;
+        }
+    }
+    s = getenv("QEMU_PCI_SUBSYS_DEV");
+    if (s && *s) {
+        v = strtoul(s, &end, 0);
+        if (!*end && v <= 0xFFFF) {
+            pci_default_sub_device_id = (uint16_t)v;
+        }
+    }
+}
 
 PCIHostStateList pci_host_bridges;
 
@@ -796,6 +831,7 @@ int pci_device_load(PCIDevice *s, QEMUFile *f)
 
 static void pci_set_default_subsystem_id(PCIDevice *pci_dev)
 {
+    pci_default_subsys_env_init();
     pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID,
                  pci_default_sub_vendor_id);
     pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID,

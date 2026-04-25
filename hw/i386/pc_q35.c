@@ -312,7 +312,12 @@ static void pc_q35_init(MachineState *machine)
                                               TYPE_ICH9_SMB_DEVICE);
         pcms->smbus = I2C_BUS(qdev_get_child_bus(DEVICE(smb), "i2c"));
 
-        smbus_eeprom_init(pcms->smbus, 8, NULL, 0);
+        /* Populate two DDR4-2666 DIMM SPDs at 0x50/0x51 so guest tools
+         * (HWiNFO/CPU-Z) can decode realistic timings. */
+        smbus_eeprom_init_one(pcms->smbus, 0x50,
+                              spd_data_generate_ddr4(4096, 2666));
+        smbus_eeprom_init_one(pcms->smbus, 0x51,
+                              spd_data_generate_ddr4(4096, 2666));
     }
 
     /* the rest devices to which pci devfn is automatically assigned */

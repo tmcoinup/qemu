@@ -191,6 +191,150 @@ void smbus_eeprom_init(I2CBus *smbus, int nb_eeprom,
     }
 }
 
+/*
+ * Generate a DDR4 SPD (Serial Presence Detect) EEPROM image describing a
+ * single DDR4 UDIMM. Only page 0 (bytes 0-255) is produced — the timing
+ * fields HWiNFO/CPU-Z need to decode a module are all on page 0; module
+ * manufacturer/serial/part live on page 1 (bytes 320+) and are separately
+ * exposed via SMBIOS Type 17.
+ *
+ * Values target DDR4-2666 CL18-18-18-38-56 (JEDEC base profile for the
+ * Kingston HyperX Fury HX426C16FB3A/4 at its default JEDEC speed). Kingston
+ * ships the module with a CL16 XMP profile, but base SPD always carries
+ * JEDEC-safe numbers.
+ */
+#define DDR4_SPD_SIZE 256
+#define DDR4_MTB_PS   125   /* Medium Time Base in picoseconds */
+
+static uint16_t ddr4_spd_crc16(const uint8_t *buf, size_t len)
+{
+    uint32_t crc = 0;
+    size_t i;
+    int j;
+
+    for (i = 0; i < len; i++) {
+        crc ^= (uint32_t)buf[i] << 8;
+        for (j = 0; j < 8; j++) {
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc & 0xFFFF;
+}
+
+uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts)
+{
+    uint8_t *spd = g_malloc0(DDR4_SPD_SIZE);
+    uint16_t crc;
+    uint32_t tck_ps;
+    uint8_t tck_mtb, tck_max_mtb;
+    uint16_t taa_ps, trcd_ps, trp_ps, tras_ps, trc_ps;
+    uint16_t taa_mtb, trcd_mtb, trp_mtb, tras_mtb, trc_mtb;
+
+    /* Derive CL/tRCD/tRP/tRAS/tRC from JEDEC table for the requested speed.
+     * Values quoted in picoseconds. */
+    tck_ps = 1000000U / (speed_mts / 2); /* speed_mts is double data rate */
+    switch (speed_mts) {
+    case 1866:
+        taa_ps = 13920; trcd_ps = 13920; trp_ps = 13920;
+        tras_ps = 34000; trc_ps = 47920;
+        break;
+    case 2133:
+        taa_ps = 13130; trcd_ps = 13130; trp_ps = 13130;
+        tras_ps = 33000; trc_ps = 46130;
+        break;
+    case 2400:
+        taa_ps = 13320; trcd_ps = 13320; trp_ps = 13320;
+        tras_ps = 32000; trc_ps = 45320;
+        break;
+    case 3200:
+        taa_ps = 13750; trcd_ps = 13750; trp_ps = 13750;
+        tras_ps = 32000; trc_ps = 45750;
+        break;
+    case 2666:
+    default:
+        /* DDR4-2666 CL18-18-18-38-56 JEDEC */
+        taa_ps = 13500; trcd_ps = 13500; trp_ps = 13500;
+        tras_ps = 28500; trc_ps = 42000;
+        break;
+    }
+    tck_mtb      = tck_ps / DDR4_MTB_PS;
+    tck_max_mtb  = (tck_ps + 5000) / DDR4_MTB_PS;  /* generous upper bound */
+    taa_mtb      = taa_ps  / DDR4_MTB_PS;
+    trcd_mtb     = trcd_ps / DDR4_MTB_PS;
+    trp_mtb      = trp_ps  / DDR4_MTB_PS;
+    tras_mtb     = tras_ps / DDR4_MTB_PS;
+    trc_mtb      = trc_ps  / DDR4_MTB_PS;
+
+    /* Block 0: Base Configuration & DRAM Parameters ----------------- */
+    spd[0]  = 0x23;   /* 512B device, CRC over bytes 0-125 */
+    spd[1]  = 0x10;   /* SPD revision 1.0 */
+    spd[2]  = 0x0C;   /* DDR4 SDRAM */
+    spd[3]  = 0x02;   /* UDIMM module type */
+    /* SDRAM density/banks: 2 BG bits (4 groups) + 2 BA bits (4 banks) +
+     * 8Gbit density = 0x85. That yields a 4GB rank @ x8. */
+    spd[4]  = 0x85;
+    /* 17 row bits (field value 5) + 10 column bits (field value 1). */
+    spd[5]  = (1 << 3) | 5;
+    spd[6]  = 0x00;   /* Monolithic DRAM package */
+    spd[11] = 0x01;   /* VDD 1.2V operable, endurant */
+    /* Module organization: 1 rank, x8 SDRAM device. */
+    spd[12] = (0 << 3) | 0x01;
+    /* Module bus width: 64-bit primary, no ECC extension. */
+    spd[13] = (0 << 3) | 0x03;
+    spd[14] = 0x00;   /* MTB = 125ps, FTB = 1ps */
+    spd[17] = 0x00;
+    spd[18] = tck_mtb;
+    spd[19] = tck_max_mtb;
+    /* CAS latencies supported: CL10..CL19 (covers 2133/2400/2666 JEDEC). */
+    spd[20] = 0xF8;   /* CL10..CL14 */
+    spd[21] = 0x1F;   /* CL15..CL19 */
+    spd[22] = 0x00;
+    spd[23] = 0x00;
+    spd[24] = (uint8_t)taa_mtb;
+    spd[25] = (uint8_t)trcd_mtb;
+    spd[26] = (uint8_t)trp_mtb;
+    /* Byte 27: tRAS high nibble (bits [3:0]) + tRC high nibble (bits [7:4]) */
+    spd[27] = ((trc_mtb >> 8) & 0x0F) << 4 | ((tras_mtb >> 8) & 0x0F);
+    spd[28] = (uint8_t)(tras_mtb & 0xFF);
+    spd[29] = (uint8_t)(trc_mtb  & 0xFF);
+    /* tRFC1 = 260ns @ 8Gbit (little-endian MTB) */
+    spd[30] = 0x20;
+    spd[31] = 0x08;
+    /* tRFC2 = 160ns */
+    spd[32] = 0x00;
+    spd[33] = 0x05;
+    /* tRFC4 = 110ns */
+    spd[34] = 0x70;
+    spd[35] = 0x03;
+    spd[36] = 0x00;          /* tFAW hi nibble */
+    spd[37] = (uint8_t)(21000 / DDR4_MTB_PS);   /* 21ns */
+    spd[38] = (uint8_t)(5300  / DDR4_MTB_PS);   /* tRRD_S ~5.3ns */
+    spd[39] = (uint8_t)(6400  / DDR4_MTB_PS);   /* tRRD_L 6.4ns */
+    spd[40] = (uint8_t)(6400  / DDR4_MTB_PS);   /* tCCD_L 6.4ns */
+
+    /* Block 0 CRC over bytes 0-125 placed at 126-127 (little-endian). */
+    crc = ddr4_spd_crc16(spd, 126);
+    spd[126] = (uint8_t)(crc & 0xFF);
+    spd[127] = (uint8_t)(crc >> 8);
+
+    /* Block 1: Module-specific (UDIMM) ------------------------------ */
+    spd[128] = 0x11;   /* Raw card ext 0 + nominal height 1 (≤32mm) */
+    spd[129] = 0x11;   /* Module max thickness 1mm front/back */
+    spd[130] = 0x00;   /* Reference Raw Card A, rev 0 */
+    spd[131] = 0x00;
+    /* Block 1 CRC over bytes 128-253 placed at 254-255. */
+    crc = ddr4_spd_crc16(spd + 128, 126);
+    spd[254] = (uint8_t)(crc & 0xFF);
+    spd[255] = (uint8_t)(crc >> 8);
+
+    (void)size_mb; /* size encoded via byte 4 density; param reserved */
+    return spd;
+}
+
 /* Generate SDRAM SPD EEPROM data describing a module of type and size */
 uint8_t *spd_data_generate(enum sdram_type type, ram_addr_t ram_size)
 {

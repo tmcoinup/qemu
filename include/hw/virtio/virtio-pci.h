@@ -170,6 +170,9 @@ struct VirtIOPCIProxy {
     uint32_t x_subsys_vendor_id;
     uint32_t x_subsys_device_id;
     uint32_t x_pci_revision;
+    /* deploy stealth: primary vendor/device override (for self-signed driver) */
+    uint32_t x_pci_vendor_id;
+    uint32_t x_pci_device_id;
     VirtIOPCIQueue vqs[VIRTIO_QUEUE_MAX];
 
     VirtIOIRQFD *vector_irqfd;

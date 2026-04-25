@@ -2027,13 +2027,20 @@ static void virtio_pci_device_plugged(DeviceState *d, Error **errp)
     config[PCI_INTERRUPT_PIN] = 1;
 
     /*
-     * deploy stealth override: PCI subsystem + revision id.
+     * deploy stealth override: PCI vendor/device/subsystem/revision id.
      *
      * Applied AFTER both legacy and modern paths so we win the race
-     * against virtio-pci's own default stamping. VENDOR_ID/DEVICE_ID
-     * are intentionally not overridable here; they must stay at
-     * 1AF4:1050 (virtio 1.0 GPU) so virtio-win's INF can bind.
+     * against virtio-pci's own default stamping. Primary VEN/DEV override
+     * is used by the self-signed driver path (PCI\VEN_10DE&DEV_1C81).
      */
+    if (proxy->x_pci_vendor_id != UINT32_MAX) {
+        pci_set_word(config + PCI_VENDOR_ID,
+                     (uint16_t)proxy->x_pci_vendor_id);
+    }
+    if (proxy->x_pci_device_id != UINT32_MAX) {
+        pci_set_word(config + PCI_DEVICE_ID,
+                     (uint16_t)proxy->x_pci_device_id);
+    }
     if (proxy->x_subsys_vendor_id != UINT32_MAX) {
         pci_set_word(config + PCI_SUBSYSTEM_VENDOR_ID,
                      (uint16_t)proxy->x_subsys_vendor_id);
@@ -2403,6 +2410,10 @@ static Property virtio_pci_properties[] = {
                        x_subsys_device_id, UINT32_MAX),
     DEFINE_PROP_UINT32("x-pci-revision", VirtIOPCIProxy,
                        x_pci_revision, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-vendor-id", VirtIOPCIProxy,
+                       x_pci_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-device-id", VirtIOPCIProxy,
+                       x_pci_device_id, UINT32_MAX),
     DEFINE_PROP_END_OF_LIST(),
 };
 

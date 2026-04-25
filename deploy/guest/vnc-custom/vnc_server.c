@@ -392,6 +392,41 @@ static void inject_key(uint8_t down, uint32_t keysym) {
             case 0xFFE5:              vk = VK_CAPITAL; break;
             case 0xFFE7: case 0xFFE8: vk = VK_LWIN;    break;
             case 0xFFE9: case 0xFFEA: vk = VK_MENU;    break;
+            /* Numeric keypad. NumLock-on / NumLock-off X server emits two
+             * different keysym ranges, so we map both: 0xFFB0-0xFFB9 are
+             * the "digit" symbols (NumLock on), 0xFF95-0xFF9F are the
+             * navigation symbols (NumLock off). On the Windows side the
+             * VK_NUMPAD* codes already differentiate from the main row,
+             * so apps that care about KP-vs-main row see the right code. */
+            case 0xFF7F: vk = VK_NUMLOCK;  break;
+            case 0xFF8D: vk = VK_RETURN;   break;  /* KP_Enter */
+            case 0xFFAA: vk = VK_MULTIPLY; break;
+            case 0xFFAB: vk = VK_ADD;      break;
+            case 0xFFAC: vk = VK_SEPARATOR;break;
+            case 0xFFAD: vk = VK_SUBTRACT; break;
+            case 0xFFAE: vk = VK_DECIMAL;  break;
+            case 0xFFAF: vk = VK_DIVIDE;   break;
+            case 0xFFB0: vk = VK_NUMPAD0;  break;
+            case 0xFFB1: vk = VK_NUMPAD1;  break;
+            case 0xFFB2: vk = VK_NUMPAD2;  break;
+            case 0xFFB3: vk = VK_NUMPAD3;  break;
+            case 0xFFB4: vk = VK_NUMPAD4;  break;
+            case 0xFFB5: vk = VK_NUMPAD5;  break;
+            case 0xFFB6: vk = VK_NUMPAD6;  break;
+            case 0xFFB7: vk = VK_NUMPAD7;  break;
+            case 0xFFB8: vk = VK_NUMPAD8;  break;
+            case 0xFFB9: vk = VK_NUMPAD9;  break;
+            /* KP nav keys (NumLock off) */
+            case 0xFF95: vk = VK_HOME;   break;  /* KP_Home  */
+            case 0xFF96: vk = VK_LEFT;   break;
+            case 0xFF97: vk = VK_UP;     break;
+            case 0xFF98: vk = VK_RIGHT;  break;
+            case 0xFF99: vk = VK_DOWN;   break;
+            case 0xFF9A: vk = VK_PRIOR;  break;  /* KP_PageUp */
+            case 0xFF9B: vk = VK_NEXT;   break;  /* KP_PageDown */
+            case 0xFF9C: vk = VK_END;    break;
+            case 0xFF9E: vk = VK_INSERT; break;
+            case 0xFF9F: vk = VK_DELETE; break;
             default: return;
         }
     }

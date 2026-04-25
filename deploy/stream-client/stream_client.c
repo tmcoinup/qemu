@@ -466,32 +466,13 @@ int main(int argc, char **argv) {
     signal(SIGCHLD, SIG_IGN);
     spawn_mpv(win, a.ip, a.vport, win_w, win_h);
 
-    /* Force keyboard focus on our window AND hide the host pointer.
-     *
-     * mpv creates a child X window inside ours (via --wid) and X11
-     * routes KeyPress to the focus window. The mpv child fully covers
-     * our interior, so EnterNotify / FocusIn don't reach us — the
-     * earlier "grab on EnterNotify" hook never fired. Grab the keyboard
-     * unconditionally and immediately; owner_events=False routes EVERY
-     * KeyPress/KeyRelease to our window regardless of focus.
-     *
-     * The host X cursor would otherwise draw on top of the rendered
-     * video, which when paired with the guest's own cursor (encoded
-     * into the video frame and arriving ~30 ms later) creates a
-     * "double cursor / trail" artifact. XDefineCursor with a 1×1
-     * transparent pixmap suppresses the host cursor whenever the
-     * pointer is over our window — the user sees only the guest
-     * cursor coming from the video stream.
-     */
+    /* Grab the keyboard unconditionally and immediately. mpv creates a
+     * child X window inside ours (via --wid) which fully covers our
+     * interior, so EnterNotify / FocusIn don't reach us — the earlier
+     * "grab on EnterNotify" hook never fired. With owner_events=False
+     * EVERY KeyPress/KeyRelease is routed to our window regardless of
+     * which child currently has focus. */
     XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
-    {
-        Pixmap p = XCreatePixmap(dpy, win, 1, 1, 1);
-        XColor c = {0};
-        Cursor blank = XCreatePixmapCursor(dpy, p, p, &c, &c, 0, 0);
-        XDefineCursor(dpy, win, blank);
-        XFreePixmap(dpy, p);
-        XFreeCursor(dpy, blank);
-    }
     {
         int rc = XGrabKeyboard(dpy, win, False,
                                GrabModeAsync, GrabModeAsync, CurrentTime);

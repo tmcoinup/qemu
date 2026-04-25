@@ -466,12 +466,41 @@ int main(int argc, char **argv) {
     signal(SIGCHLD, SIG_IGN);
     spawn_mpv(win, a.ip, a.vport, win_w, win_h);
 
-    /* Force keyboard focus on our window. mpv creates a child X window
-     * inside ours (via --wid) and X11 normally routes KeyPress to the
-     * deepest window the focus is *in*. We want every key to come to us.
-     * Set focus once after mpv is up; we'll also dynamically grab/ungrab
-     * the keyboard on Enter/Leave so focus drifts don't matter. */
+    /* Force keyboard focus on our window AND hide the host pointer.
+     *
+     * mpv creates a child X window inside ours (via --wid) and X11
+     * routes KeyPress to the focus window. The mpv child fully covers
+     * our interior, so EnterNotify / FocusIn don't reach us — the
+     * earlier "grab on EnterNotify" hook never fired. Grab the keyboard
+     * unconditionally and immediately; owner_events=False routes EVERY
+     * KeyPress/KeyRelease to our window regardless of focus.
+     *
+     * The host X cursor would otherwise draw on top of the rendered
+     * video, which when paired with the guest's own cursor (encoded
+     * into the video frame and arriving ~30 ms later) creates a
+     * "double cursor / trail" artifact. XDefineCursor with a 1×1
+     * transparent pixmap suppresses the host cursor whenever the
+     * pointer is over our window — the user sees only the guest
+     * cursor coming from the video stream.
+     */
     XSetInputFocus(dpy, win, RevertToParent, CurrentTime);
+    {
+        Pixmap p = XCreatePixmap(dpy, win, 1, 1, 1);
+        XColor c = {0};
+        Cursor blank = XCreatePixmapCursor(dpy, p, p, &c, &c, 0, 0);
+        XDefineCursor(dpy, win, blank);
+        XFreePixmap(dpy, p);
+        XFreeCursor(dpy, blank);
+    }
+    {
+        int rc = XGrabKeyboard(dpy, win, False,
+                               GrabModeAsync, GrabModeAsync, CurrentTime);
+        if (rc == GrabSuccess) {
+            fprintf(stderr, "[stream] keyboard grabbed (rc=0)\n");
+        } else {
+            fprintf(stderr, "[stream] keyboard grab failed rc=%d\n", rc);
+        }
+    }
     XSync(dpy, False);
 
     signal(SIGINT,  on_quit);
@@ -488,7 +517,7 @@ int main(int argc, char **argv) {
     uint8_t button_mask = 0;
     int pending_x = 0, pending_y = 0;
     int dirty_pos = 0;
-    int kbd_grabbed = 0;
+    int kbd_grabbed = 1;  /* grabbed unconditionally above */
 
     while (!want_quit) {
         if (kill(mpv_pid, 0) < 0 && errno == ESRCH) {
@@ -504,6 +533,9 @@ int main(int argc, char **argv) {
 
         while (XPending(dpy)) {
             XNextEvent(dpy, &xev);
+            if (getenv("STREAM_DEBUG")) {
+                fprintf(stderr, "[stream-dbg] xev type=%d\n", xev.type);
+            }
             switch (xev.type) {
             case KeyPress:
             case KeyRelease: {
@@ -512,6 +544,11 @@ int main(int argc, char **argv) {
                 if (xev.xkey.state & ShiftMask) {
                     KeySym shifted = XkbKeycodeToKeysym(dpy, kc, 0, 1);
                     if (shifted != NoSymbol) ks = shifted;
+                }
+                if (getenv("STREAM_DEBUG")) {
+                    fprintf(stderr, "[stream-dbg]   key %s kc=%u ks=0x%lx\n",
+                            xev.type == KeyPress ? "DN" : "UP",
+                            (unsigned)kc, (unsigned long)ks);
                 }
                 if (ks != NoSymbol) {
                     rfb_send_key(isock, xev.type == KeyPress, (uint32_t)ks);
@@ -551,10 +588,13 @@ int main(int argc, char **argv) {
                 break;
             }
             case EnterNotify:
-                /* Pointer entered our window — actively own the keyboard
-                 * so that key events don't leak to mpv's child window or
-                 * to the WM. owner_events=False routes ALL keys to us. */
-                if (!kbd_grabbed) {
+                /* Filter out synthetic Enter/Leave events that XGrabKeyboard
+                 * itself produces (mode=NotifyGrab/NotifyUngrab) — we only
+                 * want to react to real pointer crossings caused by the
+                 * user moving the mouse. Without this filter the very act
+                 * of XGrabKeyboard fires a synthetic Leave and we'd
+                 * immediately ungrab the keyboard we just grabbed. */
+                if (xev.xcrossing.mode == NotifyNormal && !kbd_grabbed) {
                     int rc = XGrabKeyboard(dpy, win, False,
                                            GrabModeAsync, GrabModeAsync,
                                            CurrentTime);
@@ -567,8 +607,10 @@ int main(int argc, char **argv) {
                 break;
             case LeaveNotify:
                 /* Release the keyboard so the user can switch to other
-                 * apps with Alt+Tab etc. without us hogging keys. */
-                if (kbd_grabbed) {
+                 * apps with Alt+Tab etc. without us hogging keys. Only
+                 * on real pointer-out (mode=NotifyNormal); ignore the
+                 * NotifyGrab/Ungrab synthetics. */
+                if (xev.xcrossing.mode == NotifyNormal && kbd_grabbed) {
                     XUngrabKeyboard(dpy, CurrentTime);
                     kbd_grabbed = 0;
                 }

@@ -19,7 +19,7 @@
 | 显示            | virtio-vga-gl (1AF4:1050) + **SUBSYS `10DE:1C81` / REV `A1`**（NVIDIA GTX 1050 身份）|
 | 显卡改名        | 客机内：`NVIDIA GeForce GTX 1050` + 制造商 `NVIDIA`（改 `Enum\PCI\...\Mfg`，DxDiag 才对） |
 | 监视器          | 客机内：`Samsung SyncMaster S24F350`（改 `Enum\DISPLAY` + `Class\{4d36e96e-...}`）  |
-| 客机刷名脚本    | `apply-gpu-spoof.ps1` + `guest-lock-drivers.ps1`（客机，含开机任务计划）|
+| 客机刷名脚本    | `apply-gpu-spoof.ps1`（客机，含 `StealthGPU-RefreshName` 开机任务计划）|
 | Host 修 DEVPKEY | `host-fix-gpu-devpkey.sh`（offline raw-edit SYSTEM hive，修驱动程序提供商"未知"）|
 
 ## 目录结构
@@ -54,9 +54,8 @@ deploy/
 │   ├── verify-stealth.sh             # 离线检查 CPUID / 字符串是否符合预期
 │   ├── guest-bootstrap.cmd           # 客机 one-shot bootstrap（phase1+2 合并）
 │   ├── guest-bootstrap-phase1.cmd    # 客机 phase1：密码 + RDP + NLA
-│   ├── guest-bootstrap-phase2.cmd    # 客机 phase2：viogpudo + spoof + lock
+│   ├── guest-bootstrap-phase2.cmd    # 客机 phase2：viogpudo + spoof
 │   ├── apply-gpu-spoof.ps1           # 客机：改注册表 + 装开机任务计划
-│   ├── guest-lock-drivers.ps1        # 锁 display class 驱动更新，不停 WU 服务
 │   └── host-fix-gpu-devpkey.sh       # offline raw-edit hive 修 DEVPKEY 类型 + SD
 ├── virtio-win/
 │   └── viogpudo-nvidia.inf           # optional INF 重贴品牌（需 testsigning）
@@ -103,7 +102,7 @@ deploy/scripts/stop-vm.sh 1
 ```bash
 mkdir -p ~/deploy-serve
 for f in guest-bootstrap.cmd guest-bootstrap-phase1.cmd guest-bootstrap-phase2.cmd \
-         apply-gpu-spoof.ps1 guest-lock-drivers.ps1; do
+         apply-gpu-spoof.ps1; do
     ln -sf ~/projects/qemu/deploy/scripts/$f ~/deploy-serve/${f#guest-}
 done
 ln -sf ~/images/iso/virtio-win.iso ~/deploy-serve/virtio-win.iso
@@ -113,8 +112,7 @@ cd ~/deploy-serve && python3 -m http.server 8787 --bind 0.0.0.0 &
 虚机里通过 QMP sendkey 拉起管理员 cmd 后 `curl http://10.0.2.2:8787/phase1.cmd`
 → `/phase2.cmd` 依次跑完即可。phase2 会：
 拉 `virtio-win.iso` → mount → `pnputil /add-driver viogpudo.inf /install`
-→ `apply-gpu-spoof.ps1`（改名 + 装开机刷名任务）→ `guest-lock-drivers.ps1`
-（锁 display class 驱动更新）。phase1 跑完后可切 RDP：
+→ `apply-gpu-spoof.ps1`（改名 + 装开机刷名任务）。phase1 跑完后可切 RDP：
 
 ```bash
 xfreerdp /v:127.0.0.1:13390 /u:Administrator /p:123456 \
@@ -144,8 +142,8 @@ deploy/scripts/win10-ryzen3-stealth.sh 1          # 重启验证
 
 ## 已知限制 / 注意事项
 
-* DNF 的 0x403 拒绝来自 CPUID、WMI（`Win32_BaseBoard` / `Win32_VideoController`）以及驱动层探测的混合检查。本包里的 QEMU 补丁封堵了 CPUID、SMBIOS、ACPI、NVMe 以及 virtio-gpu PCI SUBSYS/REV 五个面；**客机侧 GPU 描述字段 + 制造商 + 监视器名仍需在 Windows 里 `apply-gpu-spoof.ps1` + `guest-lock-drivers.ps1` 补刀**（没有真实 NVIDIA 硬件可以直通），细节见 `NOTES-GPU.md` 和 `PLAN-GPU-NVIDIA.md`。
+* DNF 的 0x403 拒绝来自 CPUID、WMI（`Win32_BaseBoard` / `Win32_VideoController`）以及驱动层探测的混合检查。本包里的 QEMU 补丁封堵了 CPUID、SMBIOS、ACPI、NVMe 以及 virtio-gpu PCI SUBSYS/REV 五个面；**客机侧 GPU 描述字段 + 制造商 + 监视器名仍需在 Windows 里 `apply-gpu-spoof.ps1` 补刀**（没有真实 NVIDIA 硬件可以直通），细节见 `NOTES-GPU.md` 和 `PLAN-GPU-NVIDIA.md`。
 * `apply-gpu-spoof.ps1` 顶部 4 个变量（`$spoofName`/`$spoofVendor`/`$monitorName`/`$monitorMfg`）可改品牌；默认一套是 NVIDIA GTX 1050 + Samsung SyncMaster。DxDiag "制造商"字段读的是 `Enum\PCI\...\Mfg`（不是 `Class\...\ProviderName`），脚本已同步写。
 * 本包基于 `v9.2.0` tag。对 master 打补丁大概率会在 `target/i386/cpu.c` 冲突（那个区域改动很频繁）。
 * CPUID 里抹掉 hypervisor 叶只在 `expose_kvm=false` 时生效——永远在 `-cpu` 行里加 `kvm=off`。启动器已经帮你加好。
-* `guest-lock-drivers.ps1` 只动 policy 注册表，**不停** `wuauserv`/`UsoSvc`/`WaaSMedicSvc`——停服务本身是虚拟化指纹（反作弊会查），所以只堵驱动这一路，保留 WU 正常外观。
+* 2026-04-20 起撤回原先的 `guest-lock-drivers.ps1` 驱动锁策略（`DriverSearching\SearchOrderConfig=0` / `DeviceInstall\Restrictions\DenyDeviceClasses` / `PreventDeviceMetadataFromNetwork` / `ExcludeWUDriversInQualityUpdate`）——这些策略键本身就是企业托管 / VDI 机器才长成的样子，反倒给反作弊提供指纹。现在 WU 照常放行，名字字段被刷回靠 `apply-gpu-spoof.ps1` 装的 `StealthGPU-RefreshName` 开机任务兜底。老镜像升级时用 `guest-lock-drivers.ps1 -Unlock` 清旧策略即可——脚本已删，这个命令保留在 git 历史里的 `scripts/guest-lock-drivers.ps1` 可以翻。

@@ -1,0 +1,18 @@
+# WDK "sources" file -- build with the classic `build` command from
+# within an EWDK/WDK build environment.  Modern WDK (10.x+) prefers
+# MSBuild via the .vcxproj, but this sources-style build still works on
+# WDK 7.1.x for minimal x64 KM drivers.
+#
+# If you're on a modern WDK: use `msbuild cihider.vcxproj /p:Configuration=Release /p:Platform=x64`
+
+TARGETNAME=cihider
+TARGETTYPE=DRIVER
+TARGETPATH=obj
+DRIVERTYPE=WDM
+
+# x64 only
+AMD64_SOURCES=cihider.c
+SOURCES=cihider.c
+
+# Don't auto-link ntoskrnl/hal twice; WDK handles it
+MSC_WARNING_LEVEL=/W4 /WX

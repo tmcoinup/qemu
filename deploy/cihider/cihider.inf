@@ -1,0 +1,51 @@
+; cihider.inf - legacy-style service install for a non-PnP filter/service
+; driver.  Loads at SERVICE_SYSTEM_START so it runs *after* boot-start
+; drivers (including viogpudo.sys) and *before* the Service Control
+; Manager starts auto-start services -- i.e., long before any
+; anti-cheat usermode process.
+;
+; Install with:
+;    pnputil /add-driver cihider.inf /install
+; or manually:
+;    sc create CiHider type= kernel start= system error= normal binPath= \
+;       %SystemRoot%\System32\drivers\cihider.sys
+
+[Version]
+Signature    = "$Windows NT$"
+Class        = System
+ClassGuid    = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider     = %PROVIDER%
+CatalogFile  = cihider.cat
+DriverVer    = 04/20/2026,1.0.0.9
+PnpLockdown  = 1
+
+[DestinationDirs]
+DefaultDestDir     = 12    ; %SystemRoot%\System32\drivers
+CiHider.Copy       = 12
+
+[SourceDisksNames]
+1 = %DiskId%,,,""
+
+[SourceDisksFiles]
+cihider.sys = 1,,
+
+[DefaultInstall.NTamd64]
+CopyFiles = CiHider.Copy
+
+[DefaultInstall.NTamd64.Services]
+AddService = CiHider,,CiHider_Service
+
+[CiHider.Copy]
+cihider.sys
+
+[CiHider_Service]
+DisplayName    = %CIHIDER.SvcDesc%
+ServiceType    = 1     ; SERVICE_KERNEL_DRIVER
+StartType      = 1     ; SERVICE_SYSTEM_START (after boot-start drivers)
+ErrorControl   = 1     ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\cihider.sys
+
+[Strings]
+PROVIDER           = "CiHider"
+DiskId             = "CiHider Installation Disk"
+CIHIDER.SvcDesc    = "Code Integrity Options Adjuster"

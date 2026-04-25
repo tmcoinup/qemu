@@ -6,8 +6,14 @@
 > QEMU 侧新增 `0008-virtio-gpu-subsys.patch`，把 virtio-gpu 的 PCI
 > subsystem ID 改成 `10DE:1C81`（NVIDIA GTX 1050）+ Revision `A1`，
 > VEN/DEV 仍保留 `1AF4:1050` 让 virtio-win 驱动继续 bind。客机内再用
-> `apply-gpu-spoof.ps1` + `guest-lock-drivers.ps1` 锁名。整个 bootstrap
+> `apply-gpu-spoof.ps1` 改名字字段。整个 bootstrap
 > 过程可通过 QMP sendkey 全自动执行，不再依赖 RDP GUI。详见第 7.5 节。
+>
+> 2026-04-20 撤回：原先 `guest-lock-drivers.ps1` 写
+> `DenyDeviceClasses` / `ExcludeWUDriversInQualityUpdate` 等策略键本身
+> 就是虚拟化/OEM 不愿留下的指纹，反而帮反作弊识别，已整体去掉。WU
+> 若下发新显卡驱动导致名字被刷回，改靠重跑 `apply-gpu-spoof.ps1` 或
+> `StealthGPU-RefreshName` 开机任务兜底。
 >
 > 2026-04-20 补丁：Device Manager → GPU → 驱动程序 → "驱动程序提供商"
 > 会显示"未知"。原因是 `Enum\PCI\<inst>\Properties\{a8b865dd-...}` 这条
@@ -298,7 +304,7 @@ QEMU 侧已经配好了：`virtio-vga-gl,edid=on,xres=1920,yres=1080` 会合成�
    pnputil /add-driver D:\viogpudo\w10\amd64\viogpudo.inf /install
    ```
    装完 Windows 会自动把 Microsoft Basic Display 换成 `Red Hat VirtIO GPU DOD controller` 并切到 1080p。
-4. 紧接着跑 `apply-gpu-spoof.ps1`，把这个新显卡的描述字段改成 `NVIDIA GeForce GTX 1050`（7.4 节），再跑 `guest-lock-drivers.ps1` 锁住驱动防 WU 覆写（7.4 节）。
+4. 紧接着跑 `apply-gpu-spoof.ps1`，把这个新显卡的描述字段改成 `NVIDIA GeForce GTX 1050`（7.4 节）。WU 如果下发新 display.inf 把名字刷回，靠 `StealthGPU-RefreshName` 开机任务兜底即可——不要再装驱动锁策略，反而是指纹。
 
 如果你不想动 Windows 里的显示驱动，可以退而求其次：只在 QEMU 侧允许 1024×768，外加 `--headless` 走 VNC 客户端自行放大。但 DNF 不会关心客机当前的分辨率，所以这步只是易用性。
 
@@ -366,26 +372,29 @@ sudo deploy/scripts/host-fix-gpu-devpkey.sh 1    # 实例 1
 "驱动程序提供商"就固定为 `NVIDIA`，日期/版本/数字签名（Microsoft Windows
 Hardware Compatibility Publisher）全部正常。详见第 7.6 节。
 
-**锁定驱动防 Windows Update 刷回（2026-04-20 起新增）**：
+**关于驱动更新（2026-04-20 撤回驱动锁策略）**：
 
-```powershell
-# 推荐：在 apply-gpu-spoof.ps1 之后再跑一次，锁 display class 驱动更新
-powershell -ExecutionPolicy Bypass -File .\guest-lock-drivers.ps1
+早先版本用 `guest-lock-drivers.ps1` 把
+`DriverSearching\SearchOrderConfig=0`、
+`DeviceInstall\Restrictions\DenyDeviceClasses={4d36e968-...}`、
+`Device Metadata\PreventDeviceMetadataFromNetwork=1`、
+`WindowsUpdate\ExcludeWUDriversInQualityUpdate=1`
+这四处都写死；但这些策略键本身就是普通 OEM 机器不会长成的样子，
+反倒给反作弊提供了"这是被管控的 VM/企业托管机"的旁证。
 
-# 解锁（恢复默认）
-powershell -ExecutionPolicy Bypass -File .\guest-lock-drivers.ps1 -Unlock
+现在的做法是 **不碰策略**，WU 照常跑：名字字段如果被 WU 刷回，由
+`StealthGPU-RefreshName` 开机任务计划重新盖上即可。`apply-gpu-spoof.ps1`
+默认会装这个任务；硬件变动后重跑一次 `apply-gpu-spoof.ps1`。
+
+如果你是从老 bundle 升上来，确认先前写入的锁策略已清：
+
+```cmd
+reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" /v SearchOrderConfig
+reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions" /s
+reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\Device Metadata" /v PreventDeviceMetadataFromNetwork
 ```
 
-该脚本做四件事，全部只动 policy 注册表、不停 `wuauserv`/`UsoSvc`/`WaaSMedicSvc`
-（停这些服务本身就是虚拟化指纹，反而暴露）：
-
-1. `DriverSearching\SearchOrderConfig=0`—PnP 不再从 WU 搜驱动；
-2. `Policies\DeviceInstall\Restrictions\DenyDeviceClasses` 按 class GUID
-   `{4d36e968-...}` 禁止新 display 驱动安装；
-   `DenyDeviceClassesRetroactive=0` 保留当前 viogpudo bind 不动；
-3. `Device Metadata\PreventDeviceMetadataFromNetwork=1`—DMF 不联网查元数据；
-4. `Policies\WindowsUpdate\ExcludeWUDriversInQualityUpdate=1`—质量更新
-   不带驱动包。
+三处都回 "系统找不到指定的路径" 才算干净。
 
 同时一定要做：
 
@@ -411,10 +420,9 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorE
 | 文件                            | 作用                                                                 |
 |---------------------------------|----------------------------------------------------------------------|
 | `guest-bootstrap-phase1.cmd`    | 设置 Administrator 密码 `123456`、开 RDP、关 NLA、起 TermService     |
-| `guest-bootstrap-phase2.cmd`    | curl 拉 virtio-win.iso → mount → `pnputil /add-driver viogpudo.inf /install` → 跑 `apply-gpu-spoof.ps1` → 跑 `guest-lock-drivers.ps1` |
+| `guest-bootstrap-phase2.cmd`    | curl 拉 virtio-win.iso → mount → `pnputil /add-driver viogpudo.inf /install` → 跑 `apply-gpu-spoof.ps1` |
 | `guest-bootstrap.cmd`           | 1+2 合并的单段脚本（适合 RDP 进去后手动跑）                           |
 | `apply-gpu-spoof.ps1`           | 见 7.4                                                                |
-| `guest-lock-drivers.ps1`        | 见 7.4                                                                |
 
 #### 一、起 host HTTP 服务
 
@@ -427,7 +435,6 @@ mkdir -p ~/deploy-serve
 ln -sf ~/projects/qemu/deploy/scripts/guest-bootstrap-phase1.cmd ~/deploy-serve/phase1.cmd
 ln -sf ~/projects/qemu/deploy/scripts/guest-bootstrap-phase2.cmd ~/deploy-serve/phase2.cmd
 ln -sf ~/projects/qemu/deploy/scripts/apply-gpu-spoof.ps1         ~/deploy-serve/apply-gpu-spoof.ps1
-ln -sf ~/projects/qemu/deploy/scripts/guest-lock-drivers.ps1      ~/deploy-serve/guest-lock-drivers.ps1
 ln -sf ~/images/iso/virtio-win.iso                                ~/deploy-serve/virtio-win.iso
 
 cd ~/deploy-serve && python3 -m http.server 8787 --bind 0.0.0.0 &
@@ -617,7 +624,7 @@ A: 隔离桥没有 DHCP 服务，客机要么自配静态 IP（同 192.168.76.0/
 A: 重新构建时 0006 补丁没打上。确认 `deploy/patches/0006-smbios-dual-channel-bank.patch` 存在、`deploy/tools/apply-patches.sh` 的输出里有它、然后 `deploy/tools/build.sh --reconfig` 重编。
 
 **Q: DNF 还是报 403**
-A: 看 `NOTES-GPU.md` + `PLAN-GPU-NVIDIA.md`。主机这边 CPUID/SMBIOS/ACPI/NVMe/GPU-SUBSYS 五个面已关；剩的 GPU 名字必须进客机 `apply-gpu-spoof.ps1` + `guest-lock-drivers.ps1` 双发，缺一个 WU 都可能下发新 display.inf 把名字刷回去。
+A: 看 `NOTES-GPU.md` + `PLAN-GPU-NVIDIA.md`。主机这边 CPUID/SMBIOS/ACPI/NVMe/GPU-SUBSYS 五个面已关；剩的 GPU 名字必须进客机跑 `apply-gpu-spoof.ps1`，并确保 `StealthGPU-RefreshName` 开机任务计划已装（WU 若下发新 display.inf，任务会重新把名字盖回去）。
 
 **Q: 客机 `Get-PnpDevice -Class Display` 仍显示 `SUBSYS_11001AF4`（没改成 `1C8110DE`）**
 A: 0008 补丁没打进或启动器没带 `x-pci-sub-*` 参数。先 `deploy/tools/apply-patches.sh` 确认 `0008-virtio-gpu-subsys.patch` 打上；启动器会从 `GPU_SUBSYS_VEN/DEV/REV` 读默认 `0x10DE/0x1C81/0xA1`。
@@ -646,7 +653,7 @@ A: 0007 补丁让 QEMU 上报的 EDID 里 vendor=SAM / name=SyncMaster，但 Win
 名字固定成 `Samsung SyncMaster S24F350`，RefreshName 任务也会每次开机再刷一次。
 
 **Q: Windows Update 给我下发了 NVIDIA 真实驱动，虽然 bind 失败但 SetupAPI 留痕**
-A: `guest-lock-drivers.ps1` 没跑或被 `-Unlock` 撤销。确认 `HKLM\...\DriverSearching\SearchOrderConfig=0` 且 `...\Policies\...\DeviceInstall\Restrictions\DenyDeviceClasses\1={4d36e968-...}`。
+A: 不再用驱动锁策略压这个（策略键本身就是虚拟化指纹）。SetupAPI 留痕只是 `C:\Windows\INF\setupapi.dev.log` 里一行"无匹配设备"，反作弊通常不读；若真担心，在 WU 拉完之后清一下 `DriverStore\FileRepository\nv_dispi.*` 目录即可，别动策略键。
 
 **Q: 想复现出完全一样的 SMBIOS 身份**
 A: `SEED=<整数>` 固定种子，下次启动同一个 INSTANCE 会选到同样的主板/BIOS/序列号。
@@ -683,9 +690,8 @@ deploy/
 │   ├── verify-stealth.sh             # 离线自检
 │   ├── guest-bootstrap.cmd           # 客机总 bootstrap（phase1+2 合并）
 │   ├── guest-bootstrap-phase1.cmd    # 客机 phase1：密码 + RDP + NLA
-│   ├── guest-bootstrap-phase2.cmd    # 客机 phase2：viogpudo + spoof + lock
+│   ├── guest-bootstrap-phase2.cmd    # 客机 phase2：viogpudo + spoof
 │   ├── apply-gpu-spoof.ps1           # 客机：改 Class + Enum\PCI，并装开机任务计划
-│   ├── guest-lock-drivers.ps1        # 2026-04-20 新增：锁 display class 驱动更新
 │   └── host-fix-gpu-devpkey.sh       # 2026-04-20 新增：offline 修 DEVPKEY 类型 + SD (7.6 节)
 ├── virtio-win/
 │   └── viogpudo-nvidia.inf           # optional INF 重贴品牌（需 testsigning）

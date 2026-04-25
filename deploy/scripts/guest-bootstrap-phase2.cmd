@@ -35,15 +35,10 @@ if exist "%INF%" (
   dir %ISODRV%:\ /b
 )
 
-echo [4/5] fetch + apply GPU spoof (registry rebrand)
+echo [4/4] fetch + apply GPU spoof (registry rebrand)
 curl -fso %TMP%\apply-gpu-spoof.ps1 http://%HOST%:%PORT%/apply-gpu-spoof.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File %TMP%\apply-gpu-spoof.ps1 > %TMP%\spoof.log 2>&1
 type %TMP%\spoof.log
-
-echo [5/5] lock display-class driver updates (no WU driver churn)
-curl -fso %TMP%\guest-lock-drivers.ps1 http://%HOST%:%PORT%/guest-lock-drivers.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File %TMP%\guest-lock-drivers.ps1 -Quiet > %TMP%\lock.log 2>&1
-type %TMP%\lock.log
 
 echo === phase2 done ===
 endlocal

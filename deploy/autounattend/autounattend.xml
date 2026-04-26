@@ -161,6 +161,26 @@
                     <Description>Disable Windows Update auto-restart</Description>
                     <CommandLine>reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" /v NoAutoRebootWithLoggedOnUsers /t REG_DWORD /d 1 /f</CommandLine>
                 </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>6</Order>
+                    <Description>Register no-op handler for ms-gamingoverlay (LTSC has no Game Bar)</Description>
+                    <CommandLine>reg add "HKCR\ms-gamingoverlay" /ve /d "URL:ms-gamingoverlay" /f</CommandLine>
+                </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>7</Order>
+                    <Description>ms-gamingoverlay: URL Protocol marker</Description>
+                    <CommandLine>reg add "HKCR\ms-gamingoverlay" /v "URL Protocol" /t REG_SZ /d "" /f</CommandLine>
+                </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>8</Order>
+                    <Description>ms-gamingoverlay: silent no-op command (cmd /c exit)</Description>
+                    <CommandLine>reg add "HKCR\ms-gamingoverlay\shell\open\command" /ve /d "cmd.exe /c exit" /f</CommandLine>
+                </SynchronousCommand>
+                <SynchronousCommand wcm:action="add">
+                    <Order>9</Order>
+                    <Description>Disable Game DVR / GameBar (suppress overlay-trigger source)</Description>
+                    <CommandLine>reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /v AllowGameDVR /t REG_DWORD /d 0 /f</CommandLine>
+                </SynchronousCommand>
             </FirstLogonCommands>
         </component>
         <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">

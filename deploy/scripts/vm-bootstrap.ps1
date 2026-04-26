@@ -70,6 +70,30 @@ Set-ItemProperty $cc AutoReboot          0 -Type DWord -Force
 Set-ItemProperty $cc CrashDumpEnabled    3 -Type DWord -Force
 Set-ItemProperty $cc AlwaysKeepMemoryDump 1 -Type DWord -Force -EA 0
 
+Write-Host '=== suppress ms-gamingoverlay popup (LTSC has no Xbox Game Bar) ===' -Fore Cyan
+# CrossFire / DNF 等腾讯系网游启动时调 ms-gamingoverlay: URI 唤起 Xbox Game Bar，
+# LTSC 没装 Game Bar -> Shell 弹 "需要使用新应用以打开此 ms-gamingoverlay 链接"。
+# 两步根治: 注册 no-op handler 吃掉 URI + 关 Game DVR / GameBar 触发源。
+$gov = 'Registry::HKEY_CLASSES_ROOT\ms-gamingoverlay'
+New-Item -Path $gov -Force | Out-Null
+Set-ItemProperty -Path $gov -Name '(default)' -Value 'URL:ms-gamingoverlay'
+Set-ItemProperty -Path $gov -Name 'URL Protocol' -Value '' -Type String
+$govCmd = "$gov\shell\open\command"
+New-Item -Path $govCmd -Force | Out-Null
+Set-ItemProperty -Path $govCmd -Name '(default)' -Value 'cmd.exe /c exit'
+foreach ($k in @(
+    @{Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR'; Name='AppCaptureEnabled'; Value=0}
+    @{Path='HKCU:\System\GameConfigStore'; Name='GameDVR_Enabled'; Value=0}
+    @{Path='HKCU:\System\GameConfigStore'; Name='GameDVR_FSEBehaviorMode'; Value=2}
+    @{Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; Name='AllowGameDVR'; Value=0}
+    @{Path='HKCU:\Software\Microsoft\GameBar'; Name='ShowStartupPanel'; Value=0}
+    @{Path='HKCU:\Software\Microsoft\GameBar'; Name='AutoGameModeEnabled'; Value=0}
+    @{Path='HKCU:\Software\Microsoft\GameBar'; Name='UseNexusForGameBarEnabled'; Value=0}
+)) {
+    if (-not (Test-Path $k.Path)) { New-Item -Path $k.Path -Force | Out-Null }
+    Set-ItemProperty -Path $k.Path -Name $k.Name -Type DWord -Value $k.Value -EA 0
+}
+
 Write-Host ''
 Write-Host '=== bootstrap done ===' -Fore Green
 Get-NetIPAddress -AddressFamily IPv4 |

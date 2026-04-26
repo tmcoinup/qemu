@@ -89,18 +89,31 @@
 
 真实的 ASUS / MSI AM4 主板会带 3–5 条厂商字符串（`ASUS_MB_RSVD`、`ASUS_MB_CPU=…`、`ASUS_MB_LINK_URL=…`）。**缺失** type 11 比内容错误更显眼——我们现在产出一组 ASUS 风格的最小集。
 
-## 本包尚未封堵的残留面
+## 本包已封堵 / 残留 PCI/USB/ACPI 字符串
 
-### 主机端（需要更多 QEMU 补丁）
+### 已封堵（2026-04-25 P0/P1 一轮）
 
-| 面                             | 当前值                     | 目标值                              | 成本                                         |
-|--------------------------------|----------------------------|-------------------------------------|----------------------------------------------|
-| virtio-gpu PCI VEN:DEV         | `1AF4:1050`（Red Hat）     | `10DE:1C81`（NVIDIA GTX 1050）      | **已尝试**改主 VID → OVMF 的 virtio-gpu GOP 驱动按 `VEN_1AF4` 匹配，改成 10DE 后 UEFI 直接"Display output is not active"，整个启动链没画面；**不可行**，只能走客机端改名 |
-| 显示器 EDID 厂商 / 产品名      | 原 `RHT` / `QEMU Monitor`  | `SAM` / `SyncMaster`                | ✅ 已由 `0007-pci-gpu-edid-spoof.patch` 封堵，改 `hw/display/edid-generate.c` 默认串 |
-| qemu-xhci PCI VEN:DEV          | `1B36:000D`（Red Hat）     | `1022:43BA`（AMD X370 USB3）        | 补 `hw/usb/hcd-xhci-pci.c`                   |
-| intel-hda PCI VEN:DEV          | `8086:2668`（Intel ICH9）  | 不需要——Intel HDA 通用              | 无                                            |
-| e1000e subsystem ID            | `8086:0000`（默认）        | 板厂 OEM-ID（ASUS `1043:xxxx`）      | `-global` 打到设备上                         |
-| ACPI DSDT 方法名               | QEMU 默认                  | BIOS 厂商特定                        | 侵入 `hw/i386/acpi-build.c`，改动大          |
+| 面                                  | 修改前                          | 修改后                                       | 实现路径                                         |
+|-------------------------------------|---------------------------------|----------------------------------------------|--------------------------------------------------|
+| 显示器 EDID 厂商 / 产品名           | `RHT` / `QEMU Monitor`          | `SAM` / `Samsung S24F350F`（`SAM0F65`）      | `hw/display/edid-generate.c`（含 atoi 序列号 bug 修复，djb2 hash 兜底） |
+| qemu-xhci PCI VEN:DEV               | `1B36:000D`（Red Hat）          | `1022:43BB`（AMD 300 系列 USB 3.1 xHCI）     | `hw/usb/hcd-xhci-pci.c`                          |
+| pcie-root-port PCI VEN:DEV          | `1B36:000C`（Red Hat）          | `1022:1453`（AMD Family 17h Internal PCIe GPP）| `hw/pci-bridge/gen_pcie_root_port.c`             |
+| USB HID 描述符 manufacturer 串      | `QEMU`                          | `Microsoft`                                  | `hw/usb/dev-hid.c` `desc_strings[STR_MANUFACTURER]` |
+| USB HID 产品串（mouse/kbd/tablet）  | `QEMU USB Mouse/Tablet/Keyboard`| `Microsoft USB Optical Mouse` / `Microsoft Wired Keyboard 600` / `Microsoft USB Tablet` | 同上 + `usb_*_class_initfn` 的 `product_desc` |
+| USB HID idVendor:idProduct          | `0627:0001`（Adomax）           | mouse `045E:00CB` / kbd `045E:0750` / tablet `056A:00FB` | `desc_mouse / desc_mouse2 / desc_tablet / desc_tablet2 / desc_keyboard / desc_keyboard2` |
+| ACPI fw_cfg `_HID`                  | `QEMU0002`                      | `PNP0C02`（Motherboard Resources）           | `hw/i386/fw_cfg.c` 与 `hw/nvram/fw_cfg-acpi.c`   |
+| e1000e subsystem 默认               | `8086:0000`（Intel + 0）        | `1043:86C0`（ASUS PRIME B350）               | `hw/net/e1000e.c` `e1000e_properties`            |
+| SMBIOS Type16 `error_correction`    | `0x06` Multi-bit ECC            | `0x03` None（消费级 DDR4 一致）              | `hw/smbios/smbios.c`                             |
+| SMBIOS Type16 `location`            | `0x01` Other                    | `0x03` System board                          | 同上                                              |
+| virtio-gpu PCI VEN:DEV              | `1AF4:1050`（Red Hat）          | `10DE:1C81`（NVIDIA GTX 1050，仅 `GPU_SELFSIGNED=1`） | `x-pci-vendor-id`/`x-pci-device-id` 透传到 virtio-vga |
+
+### 仍残留（需要更换 machine type 或更大改动）
+
+| 面                             | 当前值                       | 目标值                              | 成本                                         |
+|--------------------------------|------------------------------|-------------------------------------|----------------------------------------------|
+| Q35 host bridge / LPC / SMBus / HDA controller | Intel `8086:29C0` / `2918` / `2930` / `2668` | AMD B350 chipset (e.g. `1022:43B7` / `1022:790E`) | 需新 machine type 或重写 `hw/i386/pc_q35.c`  |
+| ACPI DSDT 方法名               | QEMU 默认                     | BIOS 厂商特定                        | 侵入 `hw/i386/acpi-build.c`，改动大          |
+| viogpudo.sys 内部串            | `Red Hat VIOGPU WDDM DOD`     | `NVIDIA GeForce GTX 1050`           | 已用 patched `viogpudo.sys`（mm260 源码改 + backdated NVIDIA-fake CA 签）覆盖；详见 `feedback_vm2_gpu_recovery.md` |
 
 ### 客机端（装完系统后必做）
 

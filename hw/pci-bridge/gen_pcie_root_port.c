@@ -154,9 +154,18 @@ static void gen_rp_dev_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     PCIERootPortClass *rpc = PCIE_ROOT_PORT_CLASS(klass);
 
-    k->vendor_id = PCI_VENDOR_ID_REDHAT;
-    k->device_id = PCI_DEVICE_ID_REDHAT_PCIE_RP;
-    dc->desc = "PCI Express Root Port";
+    /*
+     * Stealth: default vendor/device used to be Red Hat's
+     * (1B36:000C) — a one-line tell when SetupAPI / lspci walks every
+     * pcie-root-port slot. Replace with AMD's Family 17h "Internal PCIe
+     * GPP" ID (1022:1453), which matches the root-complex ports on Zen1
+     * Ryzen consumer silicon. Per-device x-pci-vendor-id/x-pci-device-id
+     * still works for callers that need a different ID. Paired with the
+     * AMD DF stubs at 00:18.0-7, the topology now looks consistent.
+     */
+    k->vendor_id = PCI_VENDOR_ID_AMD;
+    k->device_id = 0x1453;
+    dc->desc = "AMD Family 17h Internal PCIe GPP Bridge";
     dc->vmsd = &vmstate_rp_dev;
     device_class_set_props(dc, gen_rp_props);
 

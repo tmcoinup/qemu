@@ -880,9 +880,16 @@ static void smbios_build_type_16_table(unsigned dimm_cnt)
 
     SMBIOS_BUILD_TABLE_PRE(16, T16_BASE, true); /* required */
 
-    t->location = 0x01; /* Other */
+    t->location = 0x03; /* System board or motherboard */
     t->use = 0x03; /* System memory */
-    t->error_correction = 0x06; /* Multi-bit ECC (for Microsoft, per SeaBIOS) */
+    /*
+     * Stealth: Multi-bit ECC (0x06) is implausible on a Ryzen 3 1200 / B350
+     * consumer board with HyperX (non-ECC) DDR4 — that combination would
+     * never report ECC. Use 0x03 (None) to match the consumer profile.
+     * The original 0x06 was a SeaBIOS/Windows-on-Hyper-V workaround that
+     * doesn't apply to real Win10/11 guests booting via OVMF.
+     */
+    t->error_correction = 0x03; /* None — consumer DDR4 is non-ECC */
     size_kb = type16.max_capacity_kb ? type16.max_capacity_kb :
               QEMU_ALIGN_UP(current_machine->ram_size, KiB) / KiB;
     if (size_kb < MAX_T16_STD_SZ) {

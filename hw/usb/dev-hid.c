@@ -63,10 +63,17 @@ enum {
 };
 
 static const USBDescStrings desc_strings = {
-    [STR_MANUFACTURER]     = "QEMU",
-    [STR_PRODUCT_MOUSE]    = "QEMU USB Mouse",
-    [STR_PRODUCT_TABLET]   = "QEMU USB Tablet",
-    [STR_PRODUCT_KEYBOARD] = "QEMU USB Keyboard",
+    /*
+     * Stealth: real USB HID peripherals always identify as a vendor brand.
+     * "QEMU"-prefixed strings are a one-line VM tell visible to anything
+     * that walks SetupAPI / WMI Win32_PnPEntity. Microsoft Wired Keyboard 600
+     * and Microsoft USB Optical Mouse are the most common bundled-with-PC
+     * peripherals — generic enough not to invite product-specific HID quirks.
+     */
+    [STR_MANUFACTURER]     = "Microsoft",
+    [STR_PRODUCT_MOUSE]    = "Microsoft USB Optical Mouse",
+    [STR_PRODUCT_TABLET]   = "Microsoft USB Tablet",
+    [STR_PRODUCT_KEYBOARD] = "Microsoft Wired Keyboard 600",
     [STR_SERIAL_COMPAT]    = "42",
     [STR_CONFIG_MOUSE]     = "HID Mouse",
     [STR_CONFIG_TABLET]    = "HID Tablet",
@@ -366,10 +373,21 @@ static const USBDescMSOS desc_msos_suspend = {
     .SelectiveSuspendEnabled = true,
 };
 
+/*
+ * Stealth: 0x0627 ("Adomax Technology Co., Ltd") is the QEMU-default USB
+ * HID VID — anything that cross-references USB IDs (lsusb -v, USB.org
+ * online lookup, or anti-cheat databases of well-known peripheral pairs)
+ * sees Adomax+0x0001 and concludes "QEMU virtual HID". Switch to real
+ * Microsoft VID 0x045E with retail PIDs that match the iProduct strings:
+ *   - Mouse:    045E:00CB (Microsoft USB Optical Mouse)
+ *   - Keyboard: 045E:0750 (Microsoft Wired Keyboard 600)
+ * Tablet keeps a Wacom-class VID (056A:00FB) so absolute-coord pointer
+ * looks like a graphics tablet rather than a virtual one.
+ */
 static const USBDesc desc_mouse = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
+        .idVendor          = 0x045E,
+        .idProduct         = 0x00CB,
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_MOUSE,
@@ -382,8 +400,8 @@ static const USBDesc desc_mouse = {
 
 static const USBDesc desc_mouse2 = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
+        .idVendor          = 0x045E,
+        .idProduct         = 0x00CB,
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_MOUSE,
@@ -397,8 +415,8 @@ static const USBDesc desc_mouse2 = {
 
 static const USBDesc desc_tablet = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
+        .idVendor          = 0x056A,
+        .idProduct         = 0x00FB,
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_TABLET,
@@ -411,8 +429,8 @@ static const USBDesc desc_tablet = {
 
 static const USBDesc desc_tablet2 = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
+        .idVendor          = 0x056A,
+        .idProduct         = 0x00FB,
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_TABLET,
@@ -426,8 +444,8 @@ static const USBDesc desc_tablet2 = {
 
 static const USBDesc desc_keyboard = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
+        .idVendor          = 0x045E,
+        .idProduct         = 0x0750,
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_KEYBOARD,
@@ -440,8 +458,8 @@ static const USBDesc desc_keyboard = {
 
 static const USBDesc desc_keyboard2 = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
+        .idVendor          = 0x045E,
+        .idProduct         = 0x0750,
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_KEYBOARD,
@@ -806,7 +824,7 @@ static void usb_tablet_class_initfn(ObjectClass *klass, void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_tablet_realize;
-    uc->product_desc   = "QEMU USB Tablet";
+    uc->product_desc   = "Microsoft USB Tablet";
     dc->vmsd = &vmstate_usb_ptr;
     device_class_set_props(dc, usb_tablet_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
@@ -829,7 +847,7 @@ static void usb_mouse_class_initfn(ObjectClass *klass, void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_mouse_realize;
-    uc->product_desc   = "QEMU USB Mouse";
+    uc->product_desc   = "Microsoft USB Optical Mouse";
     dc->vmsd = &vmstate_usb_ptr;
     device_class_set_props(dc, usb_mouse_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
@@ -853,7 +871,7 @@ static void usb_keyboard_class_initfn(ObjectClass *klass, void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_keyboard_realize;
-    uc->product_desc   = "QEMU USB Keyboard";
+    uc->product_desc   = "Microsoft Wired Keyboard 600";
     dc->vmsd = &vmstate_usb_kbd;
     device_class_set_props(dc, usb_keyboard_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);

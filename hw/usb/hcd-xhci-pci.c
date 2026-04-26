@@ -228,8 +228,15 @@ static void qemu_xhci_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->vendor_id    = PCI_VENDOR_ID_REDHAT;
-    k->device_id    = PCI_DEVICE_ID_REDHAT_XHCI;
+    /*
+     * Stealth: replace the Red Hat xHCI ID (1B36:000D) with AMD's 300-series
+     * chipset USB 3.1 xHCI controller ID (1022:43BB) so the host-side USB
+     * controller looks like a B350 chipset xHCI instead of a virtio-style
+     * Red Hat device. Class code (0x0C0330) is unchanged so Windows binds
+     * the generic usbxhci.sys via class match, not vendor INF.
+     */
+    k->vendor_id    = PCI_VENDOR_ID_AMD;
+    k->device_id    = 0x43BB;
     k->revision     = 0x01;
 }
 

@@ -665,10 +665,18 @@ static Property e1000e_properties[] = {
     DEFINE_NIC_PROPERTIES(E1000EState, conf),
     DEFINE_PROP_SIGNED("disable_vnet_hdr", E1000EState, disable_vnet, false,
                         e1000e_prop_disable_vnet, bool),
+    /*
+     * Stealth: e1000e self-writes subsystem vendor/id at realize time
+     * (config[PCI_SUBSYSTEM_*]). Default of (Intel, 0) yields 8086:0000
+     * which is a recognized "no subsystem" pattern from QEMU. ASUS
+     * (0x1043) PRIME B350 board ID 0x86C0 matches a real OEM 82574L NIC
+     * sticker, keeping the e1000e visible as an integrated AM4 LAN.
+     * Override per-device with subsys_ven=/subsys= when needed.
+     */
     DEFINE_PROP_SIGNED("subsys_ven", E1000EState, subsys_ven,
-                        PCI_VENDOR_ID_INTEL,
+                        0x1043,
                         e1000e_prop_subsys_ven, uint16_t),
-    DEFINE_PROP_SIGNED("subsys", E1000EState, subsys, 0,
+    DEFINE_PROP_SIGNED("subsys", E1000EState, subsys, 0x86C0,
                         e1000e_prop_subsys, uint16_t),
     DEFINE_PROP_BOOL("init-vet", E1000EState, init_vet, true),
     DEFINE_PROP_BOOL("migrate-timadj", E1000EState, timadj, true),

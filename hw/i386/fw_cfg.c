@@ -226,7 +226,17 @@ void fw_cfg_add_acpi_dsdt(Aml *scope, FWCfgState *fw_cfg)
     Aml *dev = aml_device("FWCF");
     Aml *crs = aml_resource_template();
 
-    aml_append(dev, aml_name_decl("_HID", aml_string("QEMU0002")));
+    /*
+     * Stealth: real ACPI namespace from a Ryzen consumer board has no
+     * "QEMU0002" device — that HID is a one-line VM tell. PNP0C02
+     * ("Motherboard Resources") is a generic Plug-and-Play PNP ID that
+     * legitimately reserves I/O regions on real hardware, so a guest
+     * walking the namespace sees a plausible motherboard resource block
+     * holding the FW_CFG I/O range instead of a QEMU-branded device.
+     * Linux fw_cfg sysfs (/sys/firmware/qemu_fw_cfg) won't bind, but
+     * SeaBIOS/OVMF firmware uses the I/O port directly without ACPI.
+     */
+    aml_append(dev, aml_name_decl("_HID", aml_string("PNP0C02")));
 
     /* device present, functioning, decoding, not shown in UI */
     aml_append(dev, aml_name_decl("_STA", aml_int(0xB)));

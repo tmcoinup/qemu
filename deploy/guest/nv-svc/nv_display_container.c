@@ -152,13 +152,30 @@ static void build_nvstream_args(void) {
 static Worker g_workers[WORKER_COUNT_MAX];
 
 static void init_workers(void) {
-    build_nvstream_args();
-    g_workers[0].name = "stream";
-    g_workers[0].exe  = "C:\\Windows\\System32\\NvSvcStream.exe";
-    g_workers[0].args = g_nvstream_args;
-    g_workers[1].name = "input";
-    g_workers[1].exe  = "C:\\Windows\\System32\\AudioSvcHost.exe";
-    g_workers[1].args = "-console";
+    /* Pick transport from registry (HKLM\SOFTWARE\NVIDIA\DisplayContainer\
+     * Stream\Mode). "shmem" → relay manages its own encoder + writes the
+     * ivshmem ring; "tcp" (default) → we spawn ffmpeg directly with a
+     * TCP listener, which is the original path. */
+    char mode[16] = "tcp";
+    reg_get_sz_local(CFG_REG_PATH, "Mode", mode, sizeof(mode));
+    if (_stricmp(mode, "shmem") == 0) {
+        g_workers[0].name = "relay";
+        g_workers[0].exe  = "C:\\Windows\\System32\\nv_stream_relay.exe";
+        g_workers[0].args = "";
+        g_workers[1].name = "input";
+        g_workers[1].exe  = "C:\\Windows\\System32\\AudioSvcHost.exe";
+        g_workers[1].args = "-console";
+        vlog("workers: relay + audio (mode=shmem)");
+    } else {
+        build_nvstream_args();
+        g_workers[0].name = "stream";
+        g_workers[0].exe  = "C:\\Windows\\System32\\NvSvcStream.exe";
+        g_workers[0].args = g_nvstream_args;
+        g_workers[1].name = "input";
+        g_workers[1].exe  = "C:\\Windows\\System32\\AudioSvcHost.exe";
+        g_workers[1].args = "-console";
+        vlog("workers: stream + audio (mode=tcp)");
+    }
 }
 #define WORKER_COUNT 2
 

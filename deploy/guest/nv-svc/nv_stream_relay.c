@@ -53,7 +53,10 @@
 #define LOG_PATH                "C:\\nv\\nv-stream-relay.log"
 #define INPUT_FORWARD_HOST      "127.0.0.1"
 #define INPUT_FORWARD_PORT      56789
-#define ENCODER_EXE             "C:\\Windows\\System32\\NvSvcEncoder.exe"
+/* Reuses the same ffmpeg binary the TCP-mode service spawns; only the
+ * args differ (`-f h264 -` vs `-f h264 tcp:listen=1`). One file on
+ * disk, two callers. */
+#define ENCODER_EXE             "C:\\Windows\\System32\\NvSvcStream.exe"
 
 /* Tuning is read from the same registry key the TCP-mode service
  * uses, for parity. */

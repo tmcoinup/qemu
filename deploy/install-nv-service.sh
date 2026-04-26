@@ -26,6 +26,7 @@ UNINSTALL=0
 BITRATE=""
 FRAMERATE=""
 VIDEOPORT=""
+MODE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,6 +35,9 @@ while [[ $# -gt 0 ]]; do
         --bitrate)    BITRATE="$2"; shift 2 ;;
         --framerate)  FRAMERATE="$2"; shift 2 ;;
         --videoport)  VIDEOPORT="$2"; shift 2 ;;
+        --shmem)      MODE="shmem"; shift ;;
+        --tcp)        MODE="tcp"; shift ;;
+        --mode)       MODE="$2"; shift 2 ;;
         -h|--help)    sed -n '3,16p' "$0"; exit 0 ;;
         *.*.*.*)      IP_OVERRIDE="$1"; shift ;;
         [0-9]*)       VM_ID="$1"; shift ;;
@@ -84,6 +88,7 @@ PS_FLAGS=""
 [[ -n "$BITRATE"   ]] && PS_FLAGS="$PS_FLAGS -Bitrate '$BITRATE'"
 [[ -n "$FRAMERATE" ]] && PS_FLAGS="$PS_FLAGS -FrameRate $FRAMERATE"
 [[ -n "$VIDEOPORT" ]] && PS_FLAGS="$PS_FLAGS -VideoPort $VIDEOPORT"
+[[ -n "$MODE"      ]] && PS_FLAGS="$PS_FLAGS -Mode $MODE"
 
 exec python3 - "$IP" "$GUEST_USER" "$GUEST_PASS" "$BASE_URL" "$PS_FLAGS" <<'PYEOF'
 import sys

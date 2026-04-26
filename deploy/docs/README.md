@@ -1,52 +1,73 @@
-# QEMU 9.2.0 stealth bundle for DNF / 腾讯反作弊
+# QEMU 9.2.0 stealth bundle
 
-让 Win10 客户机看起来像一台 AMD Ryzen 3 1200 + NVIDIA GTX 1050 的裸机工作站。
+让 Win10/11 LTSC 客户机看起来像一台 AMD Ryzen 3 + NVIDIA GTX 1050 的裸机工作站。
+两条强度可选，按反作弊场景挑：
+
+| 路径 | 适用 | GPU PCI 主 ID | 驱动签名 | 启动链 | ACE 13-131106-0 |
+|---|---|---|---|---|---|
+| **浅层** | 腾讯 ACE / 网易 NP / 一般 VM 检测 | `1AF4:1050`（virtio）+ subsys `1C8110DE`(NVIDIA) | stock virtio-win 0.1.266，**MS-WHQL** | 原版 Microsoft bootmgr | **过** ✅ |
+| 深层 | 不打 ACE 系，对抗 PCI 主 ID 内核检查 | `10DE:1C81` (NVIDIA 真改) | patched + 伪 NVIDIA Driver Signer | EfiGuard `Loader.efi` 替换 `bootmgfw.efi` | **不过** ❌ |
+
+两条路径共用同一份启动器和 stealth profile，靠 `GPU_SELFSIGNED` 开关切换。**默认是浅层**。
 
 ## 当前状态
 
 | 层 | 伪造目标 | 实现 |
 |---|---|---|
-| CPU | AMD Ryzen 3 1200 (Zen 1), CPUID HYPERVISOR=0, KVM/HV leaves stripped | `-cpu Ryzen3-1200,kvm=off,hypervisor=off,enforce=off` + repo 内 hw/i386 patch |
+| CPU | AMD Ryzen 3 1200 (Zen 1) 默认 / 2300X (Zen+) 可选；CPUID HYPERVISOR=0、KVM/HV leaves stripped | `-cpu Ryzen3-1200,kvm=off,hypervisor=off,enforce=off` + repo 内 `target/i386` patch |
+| CPU 持久化 | per-instance | `stealth-inst<N>.profile` 写入 `CPU_MODEL=`，下次启动直接复用 |
 | 主板/BIOS/RAM | ASUS/MSI/Gigabyte/ASRock 随机池 + American Megatrends BIOS + 2× Kingston HyperX Fury DDR4-2666 SPD | `stealth-lib.sh` 随机池 + `hw/i2c/smbus_eeprom.c` SPD 合成 |
 | NVMe | Samsung 970 PRO 512GB, 固件 `1B2QEXM7` | `nvme,use-samsung-id=on,model-number=...,serial=...` |
-| 显卡（PCI 真值）| `VEN_10DE&DEV_1C81&SUBSYS_1C8110DE&REV_A1` (GTX 1050) | `virtio-vga + x-pci-vendor-id=0x10DE,x-pci-device-id=0x1C81` (`GPU_SELFSIGNED=1` 路径) |
-| 显卡驱动 | viogpudo.sys 自签为 "NVIDIA Driver Signer" + INF 绑 `VEN_10DE&DEV_1C81` | `deploy/driver-signing/` 全套：backdated CA + signer + TSA + Inf2Cat 重生成 cat |
-| Windows DSE | `testsigning=No` 在 BCD 里，但 boot 时 EfiGuard 把 ci.dll DSE 检查 NOP 掉 | `deploy/efiguard/custom-build/` (Loader.efi + EfiGuardDxe.efi，`DSE_DISABLE_AT_BOOT` + Loader fallback patch) |
-| nvapi | GPU-Z / 鲁大师调 NVAPI 时返回 GTX 1050 元数据 | `deploy/nvapi-shim/nvapi64.dll` → `C:\Windows\System32\` |
-| ACPI | `ALASKA / A M I` OEM ID | `hw/acpi/` patch |
-| 监视器 | `Samsung S24F350F` (PNP `MONITOR\SAM0F65`, 1920×1080@60, 530×300mm, HDMI) | `hw/display/edid-generate.c` (CEA-861 timing + Samsung-specific descriptor) + 注册表 HardwareID/CompatibleIDs |
-| 分辨率列表 | 只暴露 ≤1080p 模式（不出 4K/UWQHD） | `hw/display/virtio-gpu-base.c` 加 `xmax/ymax` 属性 + launcher 传 `xmax=1920,ymax=1080` |
-| 时区 | guest RTC = 北京时间 (`Asia/Shanghai`) 不论 host 时区 | launcher exec QEMU 前 `export TZ=Asia/Shanghai` |
+| 显卡（浅层）| 主 `VEN_1AF4&DEV_1050` + subsys `1C8110DE` (NVIDIA GTX 1050) | `virtio-vga + x-pci-sub-vendor-id=0x10DE,x-pci-sub-device-id=0x1C81` |
+| 显卡（深层）| 主 `VEN_10DE&DEV_1C81&SUBSYS_1C8110DE` (NVIDIA 真改) | 同上 + `x-pci-vendor-id=0x10DE,x-pci-device-id=0x1C81` (`GPU_SELFSIGNED=1`) |
+| viogpudo（浅层）| stock virtio-win 0.1.266，MS Windows Hardware Compatibility Publisher 签 | `deploy/scripts/stock-viogpudo/`（从 `virtio-win.iso` w10/amd64 抽出） |
+| viogpudo（深层）| patched .sys，伪 NVIDIA Driver Signer 签 | `deploy/driver-signing/{certs,out}/` 全套 backdated 链 |
+| Windows DSE（浅层）| `testsigning=No`，DSE 正常生效 | guest 里 `bcdedit testsigning No`，无 EfiGuard |
+| Windows DSE（深层）| `testsigning=No` + EfiGuard 在 boot 时 NOP 掉 ci.dll DSE 检查 | `deploy/efiguard/custom-build/` |
+| GPU-Z 看到 1050 | 注册表覆盖 + nvapi shim | `deploy/scripts/apply-gpu-spoof.ps1` 改 `Class\{4d36e968-...}` 和 `Enum\PCI\...` 下的 `DeviceDesc / FriendlyName / DriverDesc / DEVPKEY`，`deploy/nvapi-shim/nvapi64.dll` 替换 `System32\nvapi64.dll` |
+| ACPI | `ALASKA / A M I` OEM ID + `_HID PNP0C02`（不再泄漏 `QEMU0002`） | `hw/acpi/` patch + `hw/i386/fw_cfg.c` |
+| PCI 设备 ID | xHCI = AMD `1022:43BB`，root-port = AMD `1022:1453`，e1000e subsys = ASUS `1043:86C0` | hw/usb/hcd-xhci-pci.c, hw/pci-bridge/gen_pcie_root_port.c, hw/net/e1000e.c patch |
+| USB HID | "Microsoft" 制造商串 + Microsoft `045E:00CB`/`045E:0750` + Wacom `056A:00FB` | `hw/usb/dev-hid.c` patch |
+| 监视器 | `Samsung S24F350F` (PNP `MONITOR\SAM0F65`, 1920×1080@60, 530×300mm, HDMI) | `hw/display/edid-generate.c` + 注册表 HardwareID/CompatibleIDs |
+| 时区 | guest RTC = 北京时间 (`Asia/Shanghai`) | launcher exec QEMU 前 `export TZ=Asia/Shanghai` |
 
 ## 一键流程
 
-完整流程见 **[STEALTH-WORKFLOW.md](STEALTH-WORKFLOW.md)** —— 从全新 LTSC ISO 到「testsigning=No + GPU-Z 识别 1050 + 干净 Device Manager」全套。
+完整流程见 **[STEALTH-WORKFLOW.md](STEALTH-WORKFLOW.md)**；ACE 兼容专用见 **[ACE-SHALLOW-STEALTH.md](ACE-SHALLOW-STEALTH.md)**。
 
-简化版：
+简化版（浅层 / ACE 兼容）：
 
 ```bash
 # 1. 一次性宿主准备
 sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
-deploy/tools/build.sh                                       # build patched QEMU
-deploy/driver-signing/scripts/gen-backdated-ca.sh           # CA + leaf signer
-deploy/driver-signing/scripts/gen-backdated-tsa.sh          # TSA cert (RFC3161)
+deploy/tools/build.sh                                # build patched QEMU
+cd deploy/scripts && python3 -m http.server 8765 --bind 192.168.30.<host-ip-on-br0> &
 
-# 2. 起 VM 装系统
-DISPLAY=:1 INSTANCE=2 BRIDGE=br0 STABLE_DISPLAY=1 \
-    deploy/scripts/win10-ryzen3-stealth.sh --iso=/path/to/win10_ltsc.iso
-# 走 OOBE，本地账户 Administrator/123456，进桌面
+# 2. 装系统（autounattend 自动跳过 OOBE，~10 分钟到桌面）
+DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+    deploy/scripts/start-vm.sh 2 --iso=/home/ubuntu/images/win10_ltsc.iso
 
-# 3. Guest bootstrap
-# host: python3 -m http.server 8765 --bind <host-br0-ip> （在 deploy/scripts/）
-# guest 管理员 PowerShell:  irm http://<host>:8765/vm-bootstrap.ps1 | iex
+# 3. 装完进桌面，guest 管理员 PowerShell：
+#    irm http://192.168.30.<host>:8765/shallow-stealth.ps1 | iex
+#    （拉 stock viogpudo + 注册表覆盖 + 重启）
 
-# 4. 一键全套 stealth
+# 4. 日常启动（无任何 env var）
+DISPLAY=:1 deploy/scripts/start-vm.sh 2
+```
+
+简化版（深层 / 无 ACE）：
+
+```bash
+# 1+2 同上；guest 内：irm .../vm-bootstrap.ps1 | iex
+# 3. 一键全套 stealth（host）
 deploy/scripts/install-stealth.sh 2
+# 4. 日常启动（带 GPU_SELFSIGNED=1）
+DISPLAY=:1 GPU_SELFSIGNED=1 deploy/scripts/start-vm.sh 2
 ```
 
 ## 多 VM
 
-启动器 `win10-ryzen3-stealth.sh` 用 `INSTANCE=N` 区分实例。每个 N 自动有自己的：
+启动器 `start-vm.sh` 用 `INSTANCE=N` 区分实例。每个 N 自动有自己的：
 - qcow2 磁盘 `/home/ubuntu/images/win10-inst<N>.qcow2`
 - 硬件身份 profile `/home/ubuntu/images/stealth-inst<N>.profile`（首次启动随机生成、固化）
 - OVMF NVRAM `/home/ubuntu/images/ovmf-vars-<N>.fd`
@@ -71,7 +92,7 @@ deploy/
 │   └── VERIFY.md                   # 离线自检 / 验收清单
 ├── patches/                        # QEMU hw/ 补丁（已合并到本仓库分支）
 ├── scripts/
-│   ├── win10-ryzen3-stealth.sh     # 主启动器（多实例）
+│   ├── start-vm.sh     # 主启动器（多实例）
 │   ├── install-stealth.sh          # 主一键全套（host）
 │   ├── install-stealth-guest.ps1   # 主一键全套（guest 内部，由上者调用）
 │   ├── vm-bootstrap.ps1            # guest 内裸机首启 bootstrap (OpenSSH + autologin)
@@ -79,7 +100,7 @@ deploy/
 │   ├── setup-bridge.sh             # 一次性桥接配置
 │   ├── stop-vm.sh                  # 优雅停机
 │   ├── reroll-identity.sh          # 重置硬件身份
-│   ├── stealth-lib.sh              # 随机池（被 win10-ryzen3-stealth.sh 调用）
+│   ├── stealth-lib.sh              # 随机池（被 start-vm.sh 调用）
 │   ├── host-performance.sh         # 主机调优 (透明大页 / CPU governor)
 │   ├── host-fix-gpu-devpkey.sh     # offline 修 DEVPKEY ACL（少用）
 │   ├── qmp-frame.sh                # QMP 截图 / sendkey

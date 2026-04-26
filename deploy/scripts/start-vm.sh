@@ -1,35 +1,44 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# win10-ryzen3-stealth.sh
+# start-vm.sh ——— 一键启动隐身 QEMU/KVM Windows 客机
 #
-# Launches a deeply-hidden QEMU/KVM Win10 guest posing as bare-metal
-# AMD Ryzen 3 1200 + random AM4 motherboard + 8GB dual-channel + Samsung
-# 970 PRO 512GB (PCIe 3.0 x4) + GTX 1050-class virtual display.
+# 客机伪装成裸金属：随机 AM4 主板（ASRock/MSI/ASUS 池）+ AMD Ryzen 3 + 8GB
+# DDR4 双通道 + Samsung 970 PRO 512GB NVMe + virtio-gpu 改名 GTX 1050。
 #
-#  Usage:
-#     ./win10-ryzen3-stealth.sh 1                    # instance 1, disk, br0
-#     ./win10-ryzen3-stealth.sh 2                    # instance 2, disk, br0
-#     ./win10-ryzen3-stealth.sh 1 --iso=/path/x.iso  # boot ISO (install media)
-#     ./win10-ryzen3-stealth.sh 1 --headless         # no SDL, VNC only
-#     ./win10-ryzen3-stealth.sh 1 --bridge=br1       # use a non-default bridge
-#     ./win10-ryzen3-stealth.sh 1 --no-bridge        # fall back to NAT
+# 用法（最简）：
+#     ./start-vm.sh 1                       # 启动 instance 1，桥接 br0，SDL 窗口
+#     ./start-vm.sh 2 --iso=/path/x.iso     # instance 2 从 ISO 装系统
+#     ./start-vm.sh 1 --headless            # 无 SDL，VNC only
+#     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
+#     ./start-vm.sh 1 --reroll              # 重新随机硬件身份
 #
-#  Hardware identity is randomized exactly once — on the first launch for a
-#  given instance — and persisted to
-#      /home/ubuntu/images/stealth-inst<INSTANCE>.profile
-#  Subsequent launches re-use it so Windows / anti-cheat sees the same
-#  motherboard / serials / MAC / UUID forever. Run
-#      deploy/scripts/reroll-identity.sh <INSTANCE>
-#  (or delete the .profile file) to force a re-roll on next launch.
+# 默认值（90% 情况都不用改）：
+#     BRIDGE=br0           桥接 br0（不存在自动回退到 user-mode NAT）
+#     STABLE_DISPLAY=1     virtio-vga（无 GL，规避 virgl BSOD；ACE/腾讯反作弊友好）
+#     GPU_SELFSIGNED=0     PCI 主 ID 留 1AF4:1050 + subsys 改 NVIDIA 1C8110DE
+#                          (子系统级 NVIDIA 改名，搭配 stock virtio-win 0.1.266
+#                          + apply-gpu-spoof.ps1 注册表覆盖 = 通过 ACE 13-131106-0)
+#     CPU_MODEL            读 profile，首次生成默认 Ryzen3-1200
 #
-#  Environment overrides (all flags have matching env vars too):
-#     RAM=8192         MiB of guest RAM (default 8192)
-#     CPUS=4           vCPUs (default 4, cores=4, threads=1, sockets=1)
-#     HEADLESS=1       disable SDL, use VNC only     (flag: --headless)
-#     BRIDGE=br0       host bridge name              (flag: --bridge=br0)
-#     ISO=<path>       installer ISO (implies iso boot, flag: --iso=<path>)
-#     DISK=<path>      qcow2 disk path               (flag: --disk=<path>)
-#     QEMU=<path>      path to qemu-system-x86_64    (flag: --qemu=<path>)
+# 硬件身份只在首次启动时随机一次，写到
+#     /home/ubuntu/images/stealth-inst<N>.profile
+# 之后所有启动复用，让 Windows / 反作弊看见永远同一台机器。
+# 想换身份: deploy/scripts/reroll-identity.sh <N>  或者直接删 .profile。
+#
+# 环境变量（不常用，默认就好）：
+#     RAM=8192             客机内存 MiB（默认 8192）
+#     CPUS=4               vCPU 数量（默认 4，cores=4 threads=1 sockets=1）
+#     HEADLESS=1           关 SDL，只开 VNC                    (flag: --headless)
+#     BRIDGE=br0           桥接网卡名字                         (flag: --bridge=br0)
+#     ISO=<path>           安装 ISO 路径                        (flag: --iso=<path>)
+#     DISK=<path>          qcow2 磁盘路径                       (flag: --disk=<path>)
+#     QEMU=<path>          qemu-system-x86_64 二进制路径        (flag: --qemu=<path>)
+#     EXTRA_ISO=<path>     副 CDROM（autounattend.xml / 驱动盘 等）
+#     STABLE_DISPLAY=0     允许 virtio-vga-gl + virgl 3D 加速（更快但偶发 BSOD）
+#     GPU_SELFSIGNED=1     PCI 主 ID 改成 NVIDIA 10DE:1C81。 ⚠️ 需要 patched
+#                          viogpudo + 伪 NVIDIA CA 链；ACE/腾讯反作弊判异常
+#                          (13-131106-0)。只用于轻反作弊场景。
+#     CPU_MODEL=Ryzen3-2300X  覆盖 profile 写入的 CPU 型号（一般不用）
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -76,10 +85,20 @@ while (( $# > 0 )); do
 done
 
 # ---------------- defaults ----------------
-: "${INSTANCE:=${_cli_instance:-1}}"
-[[ -n "$_cli_instance" ]] && INSTANCE="$_cli_instance"
+# INSTANCE 来源优先级:
+#   1. 命令行位置参数  ./start-vm.sh 2
+#   2. 环境变量 INSTANCE=2 ./start-vm.sh
+#   3. 默认 1
+# 如果同时给了位置参数和环境变量但不一致，警告并用位置参数（命令行更显式）。
+if [[ -n "$_cli_instance" ]]; then
+    if [[ -n "${INSTANCE:-}" && "$INSTANCE" != "$_cli_instance" ]]; then
+        echo ">> WARN: INSTANCE env=$INSTANCE 与位置参数 $_cli_instance 不一致，用位置参数" >&2
+    fi
+    INSTANCE="$_cli_instance"
+fi
+: "${INSTANCE:=1}"
 if ! [[ "$INSTANCE" =~ ^[0-9]+$ ]] || (( INSTANCE < 1 )); then
-    echo "ERROR: INSTANCE must be a positive integer (got: '$INSTANCE')" >&2
+    echo "ERROR: INSTANCE 必须是正整数 (实际: '$INSTANCE')" >&2
     exit 2
 fi
 
@@ -229,20 +248,18 @@ if [[ "${GPU_SELFSIGNED:-0}" == "1" ]]; then
     GPU_STEALTH="${GPU_STEALTH},x-pci-vendor-id=${GPU_VEN},x-pci-device-id=${GPU_DEV}"
 fi
 
-# Display backend selection
+# 显示后端选择
 #
-# STABLE_DISPLAY=1: virtio-vga (no -gl, no virgl). Eliminates virgl-related
-# DXGKRNL TDR/BSOD ("VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_INTERNAL_
-# ERROR") at the cost of no GL acceleration. DirectX in the guest falls
-# back to WARP (software DX9-12). DNF runs on WARP fine — game is mostly
-# 2D + DX9, perf hit is acceptable.
+# STABLE_DISPLAY=1（默认）: virtio-vga，不开 -gl/virgl。规避 virgl 长期运行后
+#   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
+#   INTERNAL_ERROR"）。代价是没有 GL 加速，guest 的 DirectX 回退到 WARP
+#   (软件 DX9-12)。DNF/腾讯 2D+DX9 类游戏 WARP 完全够用，性能差不大。
 #
-# Default (STABLE_DISPLAY=0): virtio-vga-gl + virgl. Faster rendering but
-# the virgl renderer state machine is fragile — long sessions or DWM-side
-# 3D usage can corrupt and bubble up to DxgKrnl-fatal BSODs.
+# STABLE_DISPLAY=0: virtio-vga-gl + virgl 3D 加速。渲染更快，但 virgl 状态机
+#   脆弱，长时间会话或 DWM 3D 使用会污染并最终 BSOD。
 #
-# HEADLESS=1: VNC-only path, always virtio-vga (no GL).
-STABLE_DISPLAY=${STABLE_DISPLAY:-0}
+# HEADLESS=1: 强制 VNC-only，始终 virtio-vga（不开 GL）。
+STABLE_DISPLAY=${STABLE_DISPLAY:-1}
 
 if [[ "$HEADLESS" == "1" ]]; then
     # Headless: VNC only. virtio-vga (no GL) because SPICE GL is local-only
@@ -283,6 +300,22 @@ if [[ "$BOOT" == "iso" ]]; then
     )
 else
     CDROM_ARGS=()
+fi
+
+# Optional second CDROM (autounattend.xml ISO, virtio-win driver disk, etc).
+# Windows Setup auto-discovers autounattend.xml on any attached removable
+# media, so this is the "OOBE bypass" hook without rebuilding the OS ISO.
+# Mounted with non-bootable bus index so it doesn't fight the install ISO.
+if [[ -n "${EXTRA_ISO:-}" ]]; then
+    if [[ ! -f "$EXTRA_ISO" ]]; then
+        echo "ERROR: EXTRA_ISO='$EXTRA_ISO' does not exist" >&2
+        exit 1
+    fi
+    CDROM_ARGS+=(
+        -drive file="$EXTRA_ISO",media=cdrom,if=none,id=cd1,readonly=on
+        -device ide-cd,drive=cd1,bus=ide.1
+    )
+    echo ">> extra ISO:   $EXTRA_ISO (autounattend / driver disk)"
 fi
 
 # -------------------------------------------------------------------
@@ -353,9 +386,11 @@ CMD=(
     -drive if=pflash,format=raw,file="$OVMF_VARS"
 
     # --- CPU: hidden hypervisor, hidden KVM, invtsc ---
-    # CPU_MODEL=Ryzen3-1200  → Summit Ridge / Zen 1 (default; Win10-friendly)
-    # CPU_MODEL=Ryzen3-2300X → Pinnacle Ridge / Zen+ (Win11 LTSC supported list)
-    -cpu ${CPU_MODEL:-Ryzen3-1200},kvm=off,hypervisor=off,+invtsc,+topoext,+tsc-deadline,enforce=off,host-phys-bits=on,tsc-freq=$([[ ${CPU_MODEL:-Ryzen3-1200} == Ryzen3-2300X ]] && echo 3500000000 || echo 3100000000),vendor=AuthenticAMD
+    # CPU_MODEL 来自 stealth profile（per-instance 持久化），首次生成默认
+    # Ryzen3-1200。可在 reroll 前 export 覆盖：
+    #   CPU_MODEL=Ryzen3-1200   Summit Ridge / Zen 1（Win10 LTSC 友好）
+    #   CPU_MODEL=Ryzen3-2300X  Pinnacle Ridge / Zen+（Win11 LTSC 24H2 支持列表）
+    -cpu ${CPU_MODEL},kvm=off,hypervisor=off,+invtsc,+topoext,+tsc-deadline,enforce=off,host-phys-bits=on,tsc-freq=$([[ ${CPU_MODEL} == Ryzen3-2300X ]] && echo 3500000000 || echo 3100000000),vendor=AuthenticAMD
     -smp cpus=$CPUS,cores=$CPUS,threads=1,sockets=1,maxcpus=$CPUS
 
     # --- Memory: backed by memfd for prealloc, dual-channel via 2 NUMA nodes ---

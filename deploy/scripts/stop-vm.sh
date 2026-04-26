@@ -1,6 +1,6 @@
 #!/bin/bash
 # stop-vm.sh  --  shut down a stealth VM instance started by
-#                 win10-ryzen3-stealth.sh.
+#                 start-vm.sh.
 #
 # Strategy: ACPI powerdown (system_powerdown via QMP) → wait up to N seconds
 # for the guest to flush + quit → fall back to `quit` (hard kill of QEMU).

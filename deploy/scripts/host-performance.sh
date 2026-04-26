@@ -3,7 +3,7 @@
 # host-performance.sh
 #
 # Once-per-boot host tuning for the stealth VMs. Requires sudo.
-# Run before launching win10-ryzen3-stealth.sh.
+# Run before launching start-vm.sh.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 

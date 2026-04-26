@@ -47,29 +47,38 @@ sudo deploy/scripts/setup-bridge.sh
 sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
 ```
 
-## 5. 启动器 (`win10-ryzen3-stealth.sh`)
+## 5. 启动器 (`start-vm.sh`)
 
 ```bash
-# 完整形式（环境变量 + 位置参数）
-DISPLAY=:1 INSTANCE=<N> BRIDGE=br0 \
-    [STABLE_DISPLAY=1] [GPU_SELFSIGNED=1] [HEADLESS=1] \
-    deploy/scripts/win10-ryzen3-stealth.sh [--iso=PATH] [--reroll]
+# 最简（90% 情况）
+DISPLAY=:1 deploy/scripts/start-vm.sh 1            # instance 1
+DISPLAY=:1 deploy/scripts/start-vm.sh 2            # instance 2
 
-DISPLAY=:1 BRIDGE=br0 ./deploy/scripts/win10-ryzen3-stealth.sh 3 --iso=/home/ubuntu/images/win11_ltsc.iso
+# 装系统时挂 ISO
+DISPLAY=:1 deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
+
+# 反正向 OOBE 自动跳过：再挂一张 autounattend 副 ISO
+DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+    deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
 ```
+
+INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` 环境变量也允许，但若两者不一致会警告并以位置参数为准。
 
 | 变量/标志 | 默认 | 说明 |
 |---|---|---|
-| `INSTANCE` | 1 | 多 VM 区分；决定磁盘/profile/socket/端口 |
-| `BRIDGE` | (unset) | 设为 `br0` 走桥接；未设则走 user-mode NAT |
-| `STABLE_DISPLAY` | 0 | 1 = `virtio-vga`（无 GL），避开 virgl BSOD；DNF 用 WARP 仍能玩 |
-| `GPU_SELFSIGNED` | 0 | 1 = 把 PCI VEN/DEV 也覆盖到 `0x10DE/0x1C81`；要求 guest 已装好自签 viogpudo |
+| 位置参数 N | 1 | instance 编号；决定磁盘/profile/socket/端口 |
+| `BRIDGE` | `br0` | 桥接网卡；不存在/无授权时自动回退到 user-mode NAT |
+| `--no-bridge` | - | 强制走 user-mode NAT（10.0.2.0/24） |
+| `STABLE_DISPLAY` | **1** | `virtio-vga` 无 GL，规避 virgl BSOD；ACE/腾讯反作弊友好 |
+| `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
 | `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |
 | `HEADLESS` | 0 | 1 = `-display none -vnc 127.0.0.1:N-1`，无 SDL 窗口 |
 | `RAM` | 8192 | 单位 MB |
 | `MEM_PER_DIMM_MB` | RAM/2 | DIMM 总量自动除 2 凑双通道 SPD |
-| `--iso=PATH` | - | 启动从 ISO（装系统） |
+| `EXTRA_ISO=PATH` | - | 副 CDROM（autounattend.xml / 驱动盘 等） |
+| `--iso=PATH` | - | 主启动 ISO（装系统） |
 | `--reroll` | - | 删掉 `stealth-inst<N>.profile` 重新随机一次硬件身份 |
+| `CPU_MODEL` | profile 写入 | `Ryzen3-1200`（默认）/ `Ryzen3-2300X`（Win11 LTSC 兼容）。第一次 reroll 时持久化到 profile，之后不用每次设 |
 
 每个 INSTANCE 的资源分配：
 - 磁盘：`/home/ubuntu/images/win10-inst<N>.qcow2`（不存在则创建空白 512GB）
@@ -98,24 +107,21 @@ deploy/scripts/install-stealth.sh <INSTANCE>
 每个 INSTANCE 独立装。比如：
 
 ```bash
-# Terminal A (装 VM1)
-DISPLAY=:1 INSTANCE=1 BRIDGE=br0 STABLE_DISPLAY=1 \
-    deploy/scripts/win10-ryzen3-stealth.sh --iso=/path/to/iso
+# Terminal A (装 VM1，挂 autounattend 全自动)
+DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+    deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
 
 # Terminal B (装 VM2)
-DISPLAY=:1 INSTANCE=2 BRIDGE=br0 STABLE_DISPLAY=1 \
-    deploy/scripts/win10-ryzen3-stealth.sh --iso=/path/to/iso
+DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+    deploy/scripts/start-vm.sh 2 --iso=/home/ubuntu/images/win10_ltsc.iso
 
 # 装好后给两个分别跑一次 stealth 安装
 deploy/scripts/install-stealth.sh 1
 deploy/scripts/install-stealth.sh 2
 
-# 同时跑（生产）
-DISPLAY=:1 INSTANCE=1 BRIDGE=br0 GPU_SELFSIGNED=1 STABLE_DISPLAY=1 \
-    nohup deploy/scripts/win10-ryzen3-stealth.sh > /tmp/qemu1.log 2>&1 &
-
-DISPLAY=:1 INSTANCE=2 BRIDGE=br0 GPU_SELFSIGNED=1 STABLE_DISPLAY=1 \
-    nohup deploy/scripts/win10-ryzen3-stealth.sh > /tmp/qemu2.log 2>&1 &
+# 同时跑（生产，无窗口）
+HEADLESS=1 nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
+HEADLESS=1 nohup deploy/scripts/start-vm.sh 2 > /tmp/qemu2.log 2>&1 &
 ```
 
 注意 RAM：每台默认 8GB，宿主要够。
@@ -131,7 +137,7 @@ deploy/scripts/stop-vm.sh <INSTANCE>
 
 ```bash
 deploy/scripts/reroll-identity.sh <INSTANCE>
-# 或单次：deploy/scripts/win10-ryzen3-stealth.sh <N> --reroll
+# 或单次：deploy/scripts/start-vm.sh <N> --reroll
 ```
 
 ## 10. QMP / HMP 调试

@@ -244,4 +244,4 @@ fi
 
 echo ""
 echo ">> done. Launch a guest with:"
-echo "      BRIDGE=$BR INSTANCE=1 deploy/scripts/win10-ryzen3-stealth.sh"
+echo "      BRIDGE=$BR INSTANCE=1 deploy/scripts/start-vm.sh"

@@ -146,11 +146,16 @@ stealth_pick_profile() {
 
     CPU_SERIAL="$(_rand 1000000000 9999999999)"
 
+    # CPU 型号写入 profile，避免每次启动都靠环境变量;
+    # 默认 Ryzen3-1200 (Zen1, Win10/11 LTSC 友好);
+    # 想换 Pinnacle Ridge / Zen+ 可在生成前先 export CPU_MODEL=Ryzen3-2300X 再 reroll。
+    : "${CPU_MODEL:=Ryzen3-1200}"
+
     export BOARD_MFR BOARD_PRODUCT BOARD_FAMILY BOARD_VERSION BOARD_SERIAL BOARD_ASSET
     export SYSTEM_MFR SYSTEM_PRODUCT SYSTEM_FAMILY SYSTEM_VERSION SYSTEM_SERIAL SYSTEM_SKU
     export BIOS_VENDOR BIOS_VERSION BIOS_DATE
     export CHASSIS_TYPE CHASSIS_SERIAL
-    export NIC_MAC NVME_SERIAL UUID CPU_SERIAL
+    export NIC_MAC NVME_SERIAL UUID CPU_SERIAL CPU_MODEL
 }
 
 # ------------------------------------------------------------------
@@ -170,6 +175,7 @@ _STEALTH_PROFILE_VARS=(
     BIOS_VENDOR BIOS_VERSION BIOS_DATE
     CHASSIS_TYPE CHASSIS_SERIAL
     NIC_MAC NVME_SERIAL UUID CPU_SERIAL
+    CPU_MODEL
 )
 
 stealth_have_profile() { [[ -s "$1" ]]; }
@@ -193,6 +199,8 @@ stealth_load_profile() {
     local path="$1"
     # shellcheck disable=SC1090
     source "$path"
+    # 老 profile 没有 CPU_MODEL 字段：补上默认值，下次 stealth_save_profile 写盘时会持久化
+    : "${CPU_MODEL:=Ryzen3-1200}"
     local v
     for v in "${_STEALTH_PROFILE_VARS[@]}"; do
         export "$v"
@@ -211,6 +219,7 @@ stealth_print_profile() {
   NVMe SN  : $NVME_SERIAL
   NIC MAC  : $NIC_MAC
   UUID     : $UUID
+  CPU      : $CPU_MODEL
 =======================
 EOF
 }

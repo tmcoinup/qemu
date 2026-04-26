@@ -23,19 +23,17 @@ cd "$(dirname "$(readlink -f "$0")")"
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
-VPORT=${VPORT:-56790}
 IPORT=${IPORT:-56789}
 PASSWORD=${VNC_PASSWORD:-123456}
-TRANSPORT=${STREAM_TRANSPORT:-tcp}   # tcp (default) | shmem
+TRANSPORT=${STREAM_TRANSPORT:-dda}   # dda (default, ivshmem dirty-tile)
+                                     # tcp (legacy h.264 over network, fallback)
 SHMEM_PATH=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ip)        IP_OVERRIDE="$2"; shift 2 ;;
-        --vport)     VPORT="$2"; shift 2 ;;
         --iport)     IPORT="$2"; shift 2 ;;
         --password)  PASSWORD="$2"; shift 2 ;;
-        --shmem)     TRANSPORT=shmem; shift ;;
         --dda)       TRANSPORT=dda; shift ;;
         --tcp)       TRANSPORT=tcp; shift ;;
         --shmem-path) SHMEM_PATH="$2"; shift 2 ;;
@@ -79,26 +77,24 @@ nc -z -w 2 "$IP" "$IPORT" 2>&1 || { echo "input port $IPORT not open — AudioSv
 
 # Build the C client if missing or stale.
 case "$TRANSPORT" in
-shmem)
-    # Legacy: shmem H.264 (mpv) — kept for fallback. Should retire.
-    BIN=stream-client/stream_client_shmem
-    SRC=stream-client/stream_client_shmem.c
-    [[ -n "$SHMEM_PATH" ]] || SHMEM_PATH="/dev/shm/nv-shmem-vm${VM_ID}"
-    [[ -e "$SHMEM_PATH" ]] || { echo "[stream-guest] $SHMEM_PATH missing"; exit 1; }
-    echo "[stream-guest] transport: shmem-h264 ($SHMEM_PATH)"
-    ;;
 dda)
-    # Native DDA: dirty-tile raw BGRA via ivshmem, SDL2 viewer.
+    # DEFAULT: native DDA dirty-tile raw BGRA via ivshmem → SDL2.
     BIN=stream-client/stream_client_dda
     SRC=stream-client/stream_client_dda.c
     [[ -n "$SHMEM_PATH" ]] || SHMEM_PATH="/dev/shm/nv-shmem-vm${VM_ID}"
-    [[ -e "$SHMEM_PATH" ]] || { echo "[stream-guest] $SHMEM_PATH missing"; exit 1; }
+    [[ -e "$SHMEM_PATH" ]] || {
+        echo "[stream-guest] $SHMEM_PATH missing — start the VM (./start-vm.sh $VM_ID) first"
+        exit 1
+    }
     echo "[stream-guest] transport: dda ($SHMEM_PATH)"
     ;;
-*)
+tcp)
+    # Legacy fallback: TCP h.264 from NvSvcStream (ffmpeg). Requires
+    # vGPU + NVENC, no ivshmem.
     BIN=stream-client/stream_client
     SRC=stream-client/stream_client.c
-    echo "[stream-guest] transport: tcp ($IP:$VPORT video / $IP:$IPORT input)"
+    VPORT=${VPORT:-56790}
+    echo "[stream-guest] transport: tcp ($IP:$VPORT video / $IP:$IPORT input) [legacy]"
     ;;
 esac
 
@@ -108,8 +104,7 @@ if [[ ! -x "$BIN" || "$SRC" -nt "$BIN" ]]; then
 fi
 
 case "$TRANSPORT" in
-shmem) exec "$BIN" --shmem "$SHMEM_PATH" ;;
-dda)   exec "$BIN" --shmem "$SHMEM_PATH" ;;
-*)     exec "$BIN" --ip "$IP" --vport "$VPORT" --iport "$IPORT" --password "$PASSWORD" ;;
+dda) exec "$BIN" --shmem "$SHMEM_PATH" ;;
+tcp) exec "$BIN" --ip "$IP" --vport "$VPORT" --iport "$IPORT" --password "$PASSWORD" ;;
 esac
 fi

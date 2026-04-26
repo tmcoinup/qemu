@@ -62,6 +62,11 @@
 #define CFG_DEF_BITRATE         "10M"
 #define CFG_DEF_FRAMERATE       60
 
+/* forward decls (helpers defined further down) */
+static void vlog(const char *fmt, ...);
+static int  reg_get_dword(const char *path, const char *name, DWORD *out);
+static int  reg_get_sz   (const char *path, const char *name, char *out, DWORD outsz);
+
 /* Looking Glass ivshmem driver IOCTLs (public protocol — values are
  * stable since LG 0.7+). We don't need their .lib, just these constants
  * and the device interface GUID. */
@@ -311,6 +316,40 @@ static void video_push(NvShmemHdr *hdr, uint8_t *ring, const void *data, uint32_
         }
         Sleep(1);
     }
+}
+
+/* ──────────────────────── desktop resolution ────────────────────── */
+/* Force the primary display to a specific mode before initializing
+ * DDA. vGPU's default 1280×720 is too small once the host SDL2 viewer
+ * sizes its window to the guest fb; 1920×1080 is the sweet spot.
+ *
+ * Reads HKLM\SOFTWARE\NVIDIA\DisplayContainer\Stream registry for
+ * DesktopWidth + DesktopHeight (DWORDs). Skips if either is 0. */
+static void apply_desktop_mode(void) {
+    DWORD want_w = 0, want_h = 0;
+    reg_get_dword(CFG_REG_PATH, "DesktopWidth",  &want_w);
+    reg_get_dword(CFG_REG_PATH, "DesktopHeight", &want_h);
+    if (want_w == 0 || want_h == 0) {
+        want_w = 1920; want_h = 1080;  /* sensible default */
+    }
+
+    DEVMODEA dm = {0};
+    dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm)) {
+        vlog("EnumDisplaySettings failed: %lu", GetLastError());
+        return;
+    }
+    if (dm.dmPelsWidth == want_w && dm.dmPelsHeight == want_h) {
+        vlog("desktop already %lux%lu", want_w, want_h);
+        return;
+    }
+    DWORD cur_w = dm.dmPelsWidth, cur_h = dm.dmPelsHeight;
+    dm.dmPelsWidth  = want_w;
+    dm.dmPelsHeight = want_h;
+    dm.dmFields     = DM_PELSWIDTH | DM_PELSHEIGHT;
+    LONG rc = ChangeDisplaySettingsExA(NULL, &dm, NULL, 0, NULL);
+    vlog("ChangeDisplaySettings %lux%lu -> %lux%lu rc=%ld",
+         cur_w, cur_h, want_w, want_h, rc);
 }
 
 /* ──────────────────────── DDA + dirty-tile capture ──────────────── */
@@ -745,6 +784,10 @@ int main(int argc, char **argv) {
     DWORD frame_us = 1000000u / framerate;
 
     (void)bitrate; (void)bitrate_bps;  /* dirty-tile mode is bandwidth-adaptive */
+
+    /* Force desktop to configured resolution (default 1920x1080)
+     * BEFORE the first DDA init so capture grabs the right size. */
+    apply_desktop_mode();
 
     while (!g_stop) {
         CaptureCtx cc = {0};

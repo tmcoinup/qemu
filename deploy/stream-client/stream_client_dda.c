@@ -145,8 +145,10 @@ static uint32_t sdl_to_rfb_keysym(SDL_Keysym k) {
     case SDLK_F11: return 0xFFC8;  case SDLK_F12: return 0xFFC9;
     case SDLK_LSHIFT: case SDLK_RSHIFT:   return 0xFFE1;
     case SDLK_LCTRL:  case SDLK_RCTRL:    return 0xFFE3;
-    case SDLK_LALT:   case SDLK_RALT:     return 0xFFE9;
-    case SDLK_LGUI:   case SDLK_RGUI:     return 0xFFE7;
+    case SDLK_LALT:                       return 0xFFE9;
+    case SDLK_RALT:                       return 0xFFEA;
+    case SDLK_LGUI:                       return 0xFFEB;  /* XK_Super_L = Win key */
+    case SDLK_RGUI:                       return 0xFFEC;  /* XK_Super_R */
     case SDLK_CAPSLOCK:   return 0xFFE5;
     case SDLK_NUMLOCKCLEAR: return 0xFF7F;
     case SDLK_KP_ENTER:   return 0xFF8D;
@@ -216,6 +218,13 @@ int main(int argc, char **argv) {
     int win_w = a.width  ? a.width  : srv_w;
     int win_h = a.height ? a.height : srv_h;
 
+    /* Hints must be set before SDL_Init.
+     *   GRAB_KEYBOARD = "1": XGrabKeyboard on focus, so the WM doesn't
+     *     swallow Win+X / Alt+Tab / Super+L etc. and they reach us.
+     *   X11_NET_WM_BYPASS_COMPOSITOR: avoid 1-frame compositor lag. */
+    SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, "1");
+    SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "1");
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1;
     }
@@ -243,6 +252,14 @@ int main(int argc, char **argv) {
 
     SDL_ShowCursor(SDL_ENABLE);
     SDL_SetRelativeMouseMode(SDL_FALSE);
+    /* Take an exclusive keyboard grab while the window is focused.
+     * SDL_SetWindowKeyboardGrab is the modern (2.0.16+) call; falls
+     * back to SDL_SetWindowGrab on older builds if needed. */
+#if SDL_VERSION_ATLEAST(2, 0, 16)
+    SDL_SetWindowKeyboardGrab(win, SDL_TRUE);
+#else
+    SDL_SetWindowGrab(win, SDL_TRUE);
+#endif
 
     signal(SIGINT,  on_quit);
     signal(SIGTERM, on_quit);

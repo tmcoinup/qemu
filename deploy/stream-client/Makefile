@@ -14,6 +14,6 @@ stream_client_dda: stream_client_dda.c ../nv-shmem/nv_shmem_proto.h
 	$(CC) $(CFLAGS) $(SDL2_CFLAGS) -o $@ stream_client_dda.c $(SDL2_LIBS)
 
 clean:
-	rm -f stream_client stream_client_dda stream_client_shmem
+	rm -f stream_client stream_client_dda
 
 .PHONY: all clean

@@ -70,10 +70,14 @@
 DEFINE_GUID(GUID_DEVINTERFACE_IVSHMEM,
     0xdf576976, 0x569d, 0x4672, 0x95, 0xa0, 0xf5, 0x7e, 0x4e, 0xa0, 0xb2, 0x10);
 
-#define IOCTL_IVSHMEM_REQUEST_PEERID   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_IVSHMEM_REQUEST_SIZE     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_IVSHMEM_REQUEST_MMAP     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_IVSHMEM_RELEASE_MMAP     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* IOCTL function codes per Looking Glass vendor/ivshmem/ivshmem.h —
+ * note these start at 0x800, NOT 0x801. Earlier this file had the
+ * codes off by +1 across the board, so REQUEST_MMAP was actually
+ * calling RELEASE_MMAP and getting STATUS_INVALID_FUNCTION. */
+#define IOCTL_IVSHMEM_REQUEST_PEERID   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_IVSHMEM_REQUEST_SIZE     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_IVSHMEM_REQUEST_MMAP     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_IVSHMEM_RELEASE_MMAP     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 #define IVSHMEM_CACHE_NONCACHED        0
 #define IVSHMEM_CACHE_CACHED           1
@@ -221,22 +225,13 @@ static int ivshmem_open(void) {
         return -1;
     }
 
-    /* request size first so we know what's there */
-    UINT64 region_size = 0;
+    /* The 2022-vintage Looking-Glass driver ships in the B7 host package
+     * is fussy about REQUEST_SIZE buffers — it returns
+     * STATUS_INVALID_USER_BUFFER on a plain `&UINT64`. Skip that probe
+     * and go straight to REQUEST_MMAP; the IVSHMEM_MMAP struct it
+     * returns already contains the size, and we'll bail if that's
+     * smaller than NV_SHMEM_TOTAL_BYTES. */
     DWORD ret = 0;
-    if (!DeviceIoControl(h, IOCTL_IVSHMEM_REQUEST_SIZE, NULL, 0,
-                         &region_size, sizeof(region_size), &ret, NULL)) {
-        vlog("REQUEST_SIZE failed: %lu", GetLastError());
-        CloseHandle(h); return -1;
-    }
-    vlog("ivshmem region size = %llu bytes", (unsigned long long)region_size);
-    if (region_size < NV_SHMEM_TOTAL_BYTES) {
-        vlog("ivshmem region too small (need %u)", NV_SHMEM_TOTAL_BYTES);
-        CloseHandle(h); return -1;
-    }
-
-    /* mmap into our address space (write-combined for streaming write
-     * performance — kernel will use WC PTEs, NUMA-friendly) */
     IVSHMEM_MMAP_CONFIG cfg = { .cacheMode = IVSHMEM_CACHE_WRITECOMBINED };
     IVSHMEM_MMAP map = {0};
     if (!DeviceIoControl(h, IOCTL_IVSHMEM_REQUEST_MMAP,
@@ -248,6 +243,11 @@ static int ivshmem_open(void) {
     }
     vlog("mapped %llu bytes at %p (peerID=%u)",
          (unsigned long long)map.size, map.ptr, map.peerID);
+    if (map.size < NV_SHMEM_TOTAL_BYTES) {
+        vlog("ivshmem region too small (have %llu need %u)",
+             (unsigned long long)map.size, NV_SHMEM_TOTAL_BYTES);
+        CloseHandle(h); return -1;
+    }
 
     g_ivs_handle = h;
     g_ivs_base   = map.ptr;
@@ -308,9 +308,17 @@ static int spawn_encoder(EncoderChild *ec, int framerate, const char *bitrate) {
     }
     SetHandleInformation(r, HANDLE_FLAG_INHERIT, 0);
 
+    /* stderr → file, otherwise ffmpeg's log lines pollute the H.264
+     * NAL stream we're trying to capture from stdout. */
+    HANDLE err_h = CreateFileA("C:\\nv\\nv-stream-encoder.log",
+                               GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               &sa, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+    if (err_h == INVALID_HANDLE_VALUE) err_h = w;  /* fall back */
+
     char cmdline[2048];
     snprintf(cmdline, sizeof(cmdline),
-        "\"%s\" -y -hide_banner -loglevel warning "
+        "\"%s\" -y -hide_banner -loglevel info "
         "-filter_complex ddagrab=output_idx=0:framerate=%d,hwdownload,format=bgra "
         "-c:v h264_nvenc -preset p1 -tune ull -zerolatency 1 "
         "-rc cbr -b:v %s -maxrate %s -bufsize 500K "
@@ -321,7 +329,7 @@ static int spawn_encoder(EncoderChild *ec, int framerate, const char *bitrate) {
     STARTUPINFOA si = { sizeof(si) };
     si.dwFlags    = STARTF_USESTDHANDLES;
     si.hStdOutput = w;
-    si.hStdError  = w;
+    si.hStdError  = err_h;
     si.hStdInput  = NULL;
     PROCESS_INFORMATION pi = {0};
 
@@ -329,6 +337,7 @@ static int spawn_encoder(EncoderChild *ec, int framerate, const char *bitrate) {
                              CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
     DWORD err = ok ? 0 : GetLastError();
     CloseHandle(w);  /* keep only the read end */
+    if (err_h != w) CloseHandle(err_h);
     if (!ok) {
         CloseHandle(r);
         vlog("CreateProcess encoder failed: %lu", err);

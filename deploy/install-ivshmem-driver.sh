@@ -87,10 +87,14 @@ HOST_IP=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | 
 DEPLOY=/home/ubuntu/Downloads/nv-deploy
 if [[ $UNINSTALL -eq 0 ]]; then
     mkdir -p "$DEPLOY/ivshmem-driver"
-    for f in ivshmem.inf ivshmem.sys ivshmem.cat; do
-        cp -f "$DRIVER_DIR/$f" "$DEPLOY/ivshmem-driver/$f"
-    done
-    echo "[install-ivshmem-driver] staged 3 files at $DEPLOY/ivshmem-driver/"
+    if [[ "$(readlink -f "$DRIVER_DIR")" != "$(readlink -f "$DEPLOY/ivshmem-driver")" ]]; then
+        for f in ivshmem.inf ivshmem.sys ivshmem.cat; do
+            cp -f "$DRIVER_DIR/$f" "$DEPLOY/ivshmem-driver/$f"
+        done
+        echo "[install-ivshmem-driver] staged 3 files at $DEPLOY/ivshmem-driver/"
+    else
+        echo "[install-ivshmem-driver] driver already in $DEPLOY/ivshmem-driver/"
+    fi
 fi
 
 echo "[install-ivshmem-driver] guest=$IP  mode=$([[ $UNINSTALL -eq 1 ]] && echo UNINSTALL || echo INSTALL)"

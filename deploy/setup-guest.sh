@@ -116,14 +116,17 @@ $tn = 'RefreshGridNames'
 Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA 0
 $a = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 -TargetName "{gpu}"'
+# AtStartup only — running again at logon causes Device Manager to
+# flicker (registry edits trigger a PnP rescan, which redraws the
+# whole 设备管理器 UI). One pass at boot is enough; cold-start PnP
+# enum runs before this so we land after every reboot.
 $tBoot  = New-ScheduledTaskTrigger -AtStartup
-$tLogon = New-ScheduledTaskTrigger -AtLogOn
 $prin   = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
 $set    = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(2))
-Register-ScheduledTask -TaskName $tn -Action $a -Trigger @($tBoot,$tLogon) `
+Register-ScheduledTask -TaskName $tn -Action $a -Trigger $tBoot `
     -Principal $prin -Settings $set -Force | Out-Null
-"  RefreshGridNames task registered (Boot + Logon, SYSTEM)"
+"  RefreshGridNames task registered (Boot, SYSTEM)"
 
 "=== final state ==="
 Get-CimInstance Win32_VideoController | Format-Table Name, Status -AutoSize | Out-String

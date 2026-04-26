@@ -380,6 +380,7 @@ typedef struct {
     uint32_t                  frame_buf_cap;
     uint32_t                  frame_seq;
     int                       force_keyframe;
+    int                       staging_valid;   /* CopyResource was issued at least once */
 } CaptureCtx;
 
 #define HRSAY(call, label) do { \
@@ -525,17 +526,52 @@ static uint32_t build_frame(CaptureCtx *cc, const D3D11_MAPPED_SUBRESOURCE *m) {
     return (uint32_t)(cursor - cc->frame_buf);
 }
 
-/* Acquire one frame from DDA, diff into tiles, push into ring. */
+/* Acquire one frame from DDA, diff into tiles, push into ring.
+ *
+ * Two implicit timers control "force a keyframe" behaviour:
+ *   - 5 second periodic keyframe (recovers a fresh viewer that joins
+ *     mid-stream when the desktop hasn't changed for a while).
+ *   - host_alive_tick rising edge: when the host side starts
+ *     incrementing its heartbeat after being silent, we know a new
+ *     viewer just attached and immediately force a keyframe so they
+ *     don't have to wait the 5 second period. */
 static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
+    static DWORD     last_keyframe_tick = 0;
+    static uint32_t  last_host_alive    = 0;
+
+    DWORD now = GetTickCount();
+    uint32_t host_alive = NV_SHMEM_LOAD_ACQ(&hdr->host_alive_tick);
+    /* Rising edge or large jump (host disconnected, reconnected) */
+    if ((last_host_alive == 0 && host_alive != 0) ||
+        (host_alive > last_host_alive + 200)) {
+        cc->force_keyframe = 1;
+    }
+    last_host_alive = host_alive;
+    if (now - last_keyframe_tick > 5000) {
+        cc->force_keyframe = 1;
+    }
+
     DXGI_OUTDUPL_FRAME_INFO info;
     IDXGIResource *res = NULL;
     HRESULT hr = IDXGIOutputDuplication_AcquireNextFrame(cc->dup, 50, &info, &res);
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-        /* Even if the desktop is unchanged, ship an empty FRAM frame
-         * once per second so the receiver knows we're still alive
-         * AND so a late-joining viewer eventually sees the keyframe
-         * we'll force after a long quiet period. */
-        DWORD now = GetTickCount();
+        /* Idle path. If a keyframe was requested AND we have a
+         * captured staging texture from a previous frame, we can
+         * remap it and ship that as the keyframe — viewers attaching
+         * during a static-desktop pause don't have to wait for the
+         * next mouse jiggle to see the screen. */
+        if (cc->force_keyframe && cc->staging_valid) {
+            D3D11_MAPPED_SUBRESOURCE m;
+            HRESULT mhr = ID3D11DeviceContext_Map(cc->d3d_ctx,
+                (ID3D11Resource*)cc->staging, 0, D3D11_MAP_READ, 0, &m);
+            if (SUCCEEDED(mhr)) {
+                uint32_t msg_size = build_frame(cc, &m);
+                ID3D11DeviceContext_Unmap(cc->d3d_ctx, (ID3D11Resource*)cc->staging, 0);
+                video_push(hdr, ring, cc->frame_buf, msg_size);
+                last_keyframe_tick = now;
+                return 0;
+            }
+        }
         static DWORD last_idle_tick = 0;
         if (now - last_idle_tick > 1000) {
             last_idle_tick = now;
@@ -547,6 +583,7 @@ static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
         return 0;
     }
     if (FAILED(hr)) { vlog("AcquireNextFrame hr=0x%08lx", (unsigned long)hr); return -1; }
+    if (cc->force_keyframe) last_keyframe_tick = now;
 
     ID3D11Texture2D *src = NULL;
     HRESULT qhr = IDXGIResource_QueryInterface(res, &IID_ID3D11Texture2D, (void**)&src);
@@ -560,6 +597,7 @@ static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
     ID3D11DeviceContext_CopyResource(cc->d3d_ctx,
         (ID3D11Resource*)cc->staging, (ID3D11Resource*)src);
     ID3D11Texture2D_Release(src);
+    cc->staging_valid = 1;
 
     D3D11_MAPPED_SUBRESOURCE m;
     HRESULT mhr = ID3D11DeviceContext_Map(cc->d3d_ctx,

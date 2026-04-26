@@ -1,4 +1,4 @@
-﻿# diag-gpu-props.ps1 — dump PnP DriverProvider/DriverDesc registry layout
+# diag-gpu-props.ps1 — dump PnP DriverProvider/DriverDesc registry layout
 # Run as admin, pipe output back for analysis.
 
 $fmt = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'

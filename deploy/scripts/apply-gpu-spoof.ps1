@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Subkey = "",
     [switch]$ListOnly,
     [switch]$SkipTask,                          # skip the scheduled-task install step

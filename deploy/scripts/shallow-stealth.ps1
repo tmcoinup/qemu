@@ -1,4 +1,4 @@
-﻿# shallow-stealth.ps1 — install ACE-friendly GTX 1050 spoof on a guest that
+# shallow-stealth.ps1 — install ACE-friendly GTX 1050 spoof on a guest that
 # already had destealth-revert.ps1 applied (no EfiGuard, no NVIDIA-fake CA,
 # no patched viogpudo).
 #

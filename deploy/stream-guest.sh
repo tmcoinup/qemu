@@ -36,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --iport)     IPORT="$2"; shift 2 ;;
         --password)  PASSWORD="$2"; shift 2 ;;
         --shmem)     TRANSPORT=shmem; shift ;;
+        --dda)       TRANSPORT=dda; shift ;;
         --tcp)       TRANSPORT=tcp; shift ;;
         --shmem-path) SHMEM_PATH="$2"; shift 2 ;;
         -h|--help)   sed -n '3,18p' "$0"; exit 0 ;;
@@ -77,29 +78,38 @@ echo "[stream-guest] input port $IPORT"
 nc -z -w 2 "$IP" "$IPORT" 2>&1 || { echo "input port $IPORT not open — AudioSvcHost not running in guest"; exit 1; }
 
 # Build the C client if missing or stale.
-if [[ "$TRANSPORT" == "shmem" ]]; then
+case "$TRANSPORT" in
+shmem)
+    # Legacy: shmem H.264 (mpv) — kept for fallback. Should retire.
     BIN=stream-client/stream_client_shmem
     SRC=stream-client/stream_client_shmem.c
     [[ -n "$SHMEM_PATH" ]] || SHMEM_PATH="/dev/shm/nv-shmem-vm${VM_ID}"
-    if [[ ! -e "$SHMEM_PATH" ]]; then
-        echo "[stream-guest] $SHMEM_PATH missing — start the VM with --shmem in start-vm.sh first"
-        exit 1
-    fi
-    echo "[stream-guest] transport: shmem ($SHMEM_PATH)"
-else
+    [[ -e "$SHMEM_PATH" ]] || { echo "[stream-guest] $SHMEM_PATH missing"; exit 1; }
+    echo "[stream-guest] transport: shmem-h264 ($SHMEM_PATH)"
+    ;;
+dda)
+    # Native DDA: dirty-tile raw BGRA via ivshmem, SDL2 viewer.
+    BIN=stream-client/stream_client_dda
+    SRC=stream-client/stream_client_dda.c
+    [[ -n "$SHMEM_PATH" ]] || SHMEM_PATH="/dev/shm/nv-shmem-vm${VM_ID}"
+    [[ -e "$SHMEM_PATH" ]] || { echo "[stream-guest] $SHMEM_PATH missing"; exit 1; }
+    echo "[stream-guest] transport: dda ($SHMEM_PATH)"
+    ;;
+*)
     BIN=stream-client/stream_client
     SRC=stream-client/stream_client.c
     echo "[stream-guest] transport: tcp ($IP:$VPORT video / $IP:$IPORT input)"
-fi
+    ;;
+esac
 
 if [[ ! -x "$BIN" || "$SRC" -nt "$BIN" ]]; then
     echo "[stream-guest] building $BIN..."
     make -C stream-client all || { echo "build failed"; exit 1; }
 fi
 
-if [[ "$TRANSPORT" == "shmem" ]]; then
-    exec "$BIN" --shmem "$SHMEM_PATH"
-else
-    exec "$BIN" \
-        --ip "$IP" --vport "$VPORT" --iport "$IPORT" --password "$PASSWORD"
+case "$TRANSPORT" in
+shmem) exec "$BIN" --shmem "$SHMEM_PATH" ;;
+dda)   exec "$BIN" --shmem "$SHMEM_PATH" ;;
+*)     exec "$BIN" --ip "$IP" --vport "$VPORT" --iport "$IPORT" --password "$PASSWORD" ;;
+esac
 fi

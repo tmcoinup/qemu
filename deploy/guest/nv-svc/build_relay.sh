@@ -17,6 +17,7 @@ $CC -O2 -std=c99 -Wall -Wno-unused-parameter -Wno-pointer-sign \
     -I "$SHMEM_DIR" \
     -o "$OUT" "$SRC" \
     -lsetupapi -ladvapi32 -lws2_32 -luser32 -lkernel32 \
+    -ld3d11 -ldxgi \
     -static -s
 
 ls -la "$OUT"

@@ -1,49 +1,47 @@
 /*
- * nv_stream_relay.c — guest-side bridge between ffmpeg and the
- * ivshmem video/input rings.
+ * nv_stream_relay.c — guest-side native screen capture + dirty-tile
+ * raw BGRA streamer that writes directly into the ivshmem ring.
  *
- * Replaces the old NvSvcStream worker that streamed H.264 directly
- * over a TCP listener. Now:
+ * No ffmpeg, no NVENC, no JPEG codec. The encode hardware is
+ * deliberately untouched — anti-cheat in a guest will flag suspicious
+ * GPU-HAL traffic before it flags raw pixel-pushing.
  *
- *   1. Open the Looking-Glass-style ivshmem PCI device (the only
- *      Windows ivshmem driver with stable IOCTLs we can rely on),
- *      DeviceIoControl REQUEST_MMAP to get a userspace pointer to
- *      the shared region.
- *   2. Initialize / validate NvShmemHdr at offset 0; advertise the
- *      guest's desktop dimensions so the host can scale input
- *      coordinates correctly.
- *   3. Spawn ffmpeg as a child process with stdout = anonymous pipe
- *      (renamed NvSvcEncoder.exe so task manager doesn't show
- *      "ffmpeg"), arguments tuned identically to the TCP path
- *      (DDA → NVENC → raw H.264 Annex-B), only difference is
- *      `-` instead of `tcp://0.0.0.0:56790?listen=1` on the output.
- *   4. Pump thread: read from ffmpeg's stdout pipe, push frames into
- *      the video ring as records (each NAL unit ≤ slot size).
- *   5. Input thread: drain the input ring, forward each RFB-shaped
- *      record (4-byte key event or 6-byte pointer event) to
- *      AudioSvcHost via local TCP 127.0.0.1:56789. AudioSvcHost
- *      doesn't need to change; from its POV input still arrives over
- *      RFB, just from localhost not from the network.
- *   6. Heartbeat tick + ffmpeg watchdog (restart on crash with backoff).
+ *   * Capture:    Desktop Duplication API (DXGI), same call as OBS /
+ *                 Microsoft RDP / TeamViewer.
+ *   * Download:   D3D11 STAGING texture + Map() — CPU readback.
+ *   * "Encode":   None. Hash each 32×32 tile, compare to previous
+ *                 frame, ship only the dirty tiles' raw BGRA bytes
+ *                 into the video ring as a single FRAM record.
+ *                 Static desktop → 12-byte empty frame. Full screen
+ *                 change → ~8 MB at 1080p. Office workload averages
+ *                 a few MB/s.
  *
- * Build: x86_64-w64-mingw32-gcc cross-compile (see build.sh).
- *        Static link, no runtime DLL footprint beyond Windows core.
+ * Single Windows binary; IAT references only kernel32/user32/d3d11/
+ * dxgi/setupapi/ws2_32 — no NVIDIA codec strings, no third-party
+ * codec libraries linked.
  */
 
 #define _WIN32_WINNT 0x0600
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID    /* needed for DEFINE_GUID() to actually emit storage */
+#define COBJMACROS  /* C-style COM dispatch (lpVtbl->Method) for D3D11/DXGI */
+#define CINTERFACE
 #include <windows.h>
 #include <initguid.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <setupapi.h>
 #include <winioctl.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdarg.h>
+
+/* No third-party codec includes. Pure platform headers + our own
+ * shared memory protocol header. */
 
 /* nv_shmem_proto.h is shared between host and guest source trees.
  * For mingw we copy the header into this directory's build area. */
@@ -288,95 +286,18 @@ static void shmem_header_init(NvShmemHdr *hdr) {
     vlog("header initialized (magic NVHM)");
 }
 
-/* ──────────────────────── ffmpeg child + pump ───────────────────── */
+/* ──────────────────────── stop flag ─────────────────────────────── */
 static volatile LONG g_stop = 0;
 
-typedef struct {
-    HANDLE  h_proc;
-    HANDLE  h_stdout_r;
-    DWORD   pid;
-    DWORD   start_tick;
-    DWORD   fail_count;
-} EncoderChild;
-
-static int spawn_encoder(EncoderChild *ec, int framerate, const char *bitrate) {
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-    HANDLE r = NULL, w = NULL;
-    if (!CreatePipe(&r, &w, &sa, 4 * 1024 * 1024)) {
-        vlog("CreatePipe failed: %lu", GetLastError());
-        return -1;
-    }
-    SetHandleInformation(r, HANDLE_FLAG_INHERIT, 0);
-
-    /* stderr → file, otherwise ffmpeg's log lines pollute the H.264
-     * NAL stream we're trying to capture from stdout. */
-    HANDLE err_h = CreateFileA("C:\\nv\\nv-stream-encoder.log",
-                               GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               &sa, CREATE_ALWAYS,
-                               FILE_ATTRIBUTE_NORMAL, NULL);
-    if (err_h == INVALID_HANDLE_VALUE) err_h = w;  /* fall back */
-
-    char cmdline[2048];
-    snprintf(cmdline, sizeof(cmdline),
-        "\"%s\" -y -hide_banner -loglevel info "
-        "-filter_complex ddagrab=output_idx=0:framerate=%d,hwdownload,format=bgra "
-        "-c:v h264_nvenc -preset p1 -tune ull -zerolatency 1 "
-        "-rc cbr -b:v %s -maxrate %s -bufsize 500K "
-        "-g %d -bf 0 -flags low_delay -fflags nobuffer -flush_packets 1 "
-        "-strict experimental -f h264 -",
-        ENCODER_EXE, framerate, bitrate, bitrate, framerate);
-
-    STARTUPINFOA si = { sizeof(si) };
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdOutput = w;
-    si.hStdError  = err_h;
-    si.hStdInput  = NULL;
-    PROCESS_INFORMATION pi = {0};
-
-    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE,
-                             CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    DWORD err = ok ? 0 : GetLastError();
-    CloseHandle(w);  /* keep only the read end */
-    if (err_h != w) CloseHandle(err_h);
-    if (!ok) {
-        CloseHandle(r);
-        vlog("CreateProcess encoder failed: %lu", err);
-        return -1;
-    }
-    CloseHandle(pi.hThread);
-
-    ec->h_proc     = pi.hProcess;
-    ec->h_stdout_r = r;
-    ec->pid        = pi.dwProcessId;
-    ec->start_tick = GetTickCount();
-    vlog("encoder spawned pid=%lu (fr=%d br=%s)", ec->pid, framerate, bitrate);
-    return 0;
-}
-
-static void kill_encoder(EncoderChild *ec) {
-    if (ec->h_proc) {
-        TerminateProcess(ec->h_proc, 0);
-        WaitForSingleObject(ec->h_proc, 2000);
-        CloseHandle(ec->h_proc);
-        ec->h_proc = NULL;
-    }
-    if (ec->h_stdout_r) {
-        CloseHandle(ec->h_stdout_r);
-        ec->h_stdout_r = NULL;
-    }
-}
-
 /* Write one chunk into the video ring. If full, drop oldest by
- * spinning until reader catches up — for video, dropping is better
- * than blocking the encoder. */
+ * advancing reader_seq — for video, dropping the past is better
+ * than blocking the encoder thread. */
 static void video_push(NvShmemHdr *hdr, uint8_t *ring, const void *data, uint32_t size) {
     int rc;
     int retries = 0;
     while ((rc = nv_shmem_write(ring, NV_SHMEM_VIDEO_BYTES, &hdr->video, data, size)) != 0) {
         retries++;
-        if (retries > 50) {  /* ~50 ms blocked */
-            /* hard drop: advance reader_seq enough to make room. We
-             * lose frames but never block the encoder thread. */
+        if (retries > 5) {
             uint32_t free = nv_shmem_ring_free(hdr->video.writer_seq,
                                                hdr->video.reader_seq,
                                                NV_SHMEM_VIDEO_BYTES);
@@ -392,27 +313,246 @@ static void video_push(NvShmemHdr *hdr, uint8_t *ring, const void *data, uint32_
     }
 }
 
-static DWORD WINAPI video_pump(LPVOID arg) {
-    EncoderChild *ec = (EncoderChild*)arg;
-    NvShmemHdr *hdr = (NvShmemHdr*)g_ivs_base;
-    uint8_t    *ring = (uint8_t*)g_ivs_base + hdr->video_off;
+/* ──────────────────────── DDA + dirty-tile capture ──────────────── */
 
-    /* Read ffmpeg stdout in chunks. Each read may contain several
-     * NAL units glued together (raw Annex-B); we forward them as a
-     * single record per ReadFile to minimize overhead. The decoder
-     * on the other side splits NALs by the 00 00 00 01 start code. */
-    uint8_t buf[256 * 1024];
-    while (!g_stop) {
-        DWORD nread = 0;
-        BOOL ok = ReadFile(ec->h_stdout_r, buf, sizeof(buf), &nread, NULL);
-        if (!ok || nread == 0) {
-            DWORD ec_code = GetLastError();
-            vlog("ffmpeg pipe ended (err=%lu)", ec_code);
-            break;
-        }
-        video_push(hdr, ring, buf, nread);
+typedef struct {
+    /* DXGI / D3D11 */
+    IDXGIFactory1            *factory;
+    IDXGIAdapter1            *adapter;
+    IDXGIOutput1             *output1;
+    ID3D11Device             *d3d_dev;
+    ID3D11DeviceContext      *d3d_ctx;
+    IDXGIOutputDuplication   *dup;
+    ID3D11Texture2D          *staging;       /* CPU-readable BGRA copy */
+
+    UINT                      width;
+    UINT                      height;
+
+    /* Tile diff state */
+    UINT                      tiles_x;       /* ceil(width  / NV_TILE_SIZE) */
+    UINT                      tiles_y;       /* ceil(height / NV_TILE_SIZE) */
+    uint32_t                 *tile_hash;     /* tiles_x * tiles_y FNV-1a hashes */
+
+    /* Frame assembly buffer; sized to fit a full-screen keyframe:
+     *   sizeof(NvFrameHdr) + tiles * (sizeof(NvFrameTile) + tile_pixels)
+     *   ~= 12 + tiles*(8 + 4096) ≈ 8.4 MB at 1080p
+     */
+    uint8_t                  *frame_buf;
+    uint32_t                  frame_buf_cap;
+    uint32_t                  frame_seq;
+    int                       force_keyframe;
+} CaptureCtx;
+
+#define HRSAY(call, label) do { \
+    HRESULT _hr = (call); \
+    if (FAILED(_hr)) { vlog("%s failed hr=0x%08lx", (label), (unsigned long)_hr); return -1; } \
+} while(0)
+
+static int dda_init(CaptureCtx *cc) {
+    HRSAY(CreateDXGIFactory1(&IID_IDXGIFactory1, (void**)&cc->factory),
+          "CreateDXGIFactory1");
+    HRSAY(IDXGIFactory1_EnumAdapters1(cc->factory, 0, &cc->adapter),
+          "EnumAdapters1");
+
+    DXGI_ADAPTER_DESC1 ad;
+    IDXGIAdapter1_GetDesc1(cc->adapter, &ad);
+    vlog("DXGI adapter[0]: VendorID=0x%04x DeviceID=0x%04x", ad.VendorId, ad.DeviceId);
+
+    IDXGIOutput *out0 = NULL;
+    HRSAY(IDXGIAdapter1_EnumOutputs(cc->adapter, 0, &out0), "EnumOutputs");
+    HRSAY(IDXGIOutput_QueryInterface(out0, &IID_IDXGIOutput1, (void**)&cc->output1),
+          "QI IDXGIOutput1");
+    IDXGIOutput_Release(out0);
+
+    DXGI_OUTPUT_DESC od;
+    IDXGIOutput1_GetDesc(cc->output1, &od);
+    cc->width  = od.DesktopCoordinates.right  - od.DesktopCoordinates.left;
+    cc->height = od.DesktopCoordinates.bottom - od.DesktopCoordinates.top;
+    vlog("desktop: %ux%u rotation=%d", cc->width, cc->height, od.Rotation);
+
+    D3D_FEATURE_LEVEL fls[] = {
+        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
+    };
+    D3D_FEATURE_LEVEL got;
+    HRSAY(D3D11CreateDevice((IDXGIAdapter*)cc->adapter,
+                            D3D_DRIVER_TYPE_UNKNOWN,
+                            NULL, 0,
+                            fls, sizeof(fls)/sizeof(fls[0]),
+                            D3D11_SDK_VERSION,
+                            &cc->d3d_dev, &got, &cc->d3d_ctx),
+          "D3D11CreateDevice");
+    vlog("D3D11 device feature level 0x%x", (int)got);
+
+    HRSAY(IDXGIOutput1_DuplicateOutput(cc->output1,
+                                       (IUnknown*)cc->d3d_dev,
+                                       &cc->dup),
+          "DuplicateOutput");
+
+    /* Staging texture: same size + format as the DDA frame, but
+     * USAGE_STAGING + CPU_ACCESS_READ so we can Map() it. */
+    D3D11_TEXTURE2D_DESC td = {0};
+    td.Width              = cc->width;
+    td.Height             = cc->height;
+    td.MipLevels          = 1;
+    td.ArraySize          = 1;
+    td.Format             = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count   = 1;
+    td.Usage              = D3D11_USAGE_STAGING;
+    td.CPUAccessFlags     = D3D11_CPU_ACCESS_READ;
+    HRSAY(ID3D11Device_CreateTexture2D(cc->d3d_dev, &td, NULL, &cc->staging),
+          "CreateTexture2D(staging)");
+
+    /* Tile geometry + hash table */
+    cc->tiles_x = (cc->width  + NV_TILE_SIZE - 1) / NV_TILE_SIZE;
+    cc->tiles_y = (cc->height + NV_TILE_SIZE - 1) / NV_TILE_SIZE;
+    size_t n_tiles = (size_t)cc->tiles_x * cc->tiles_y;
+    cc->tile_hash = calloc(n_tiles, sizeof(uint32_t));
+
+    /* Worst-case frame buffer: full keyframe = NvFrameHdr + every
+     * tile (header + pixels). tile pixels max NV_TILE_SIZE^2 * 4. */
+    cc->frame_buf_cap = (uint32_t)(sizeof(NvFrameHdr)
+        + n_tiles * (sizeof(NvFrameTile) + NV_TILE_SIZE * NV_TILE_SIZE * 4));
+    cc->frame_buf = malloc(cc->frame_buf_cap);
+    if (!cc->tile_hash || !cc->frame_buf) {
+        vlog("malloc tile_hash/frame_buf failed"); return -1;
     }
+    cc->force_keyframe = 1;  /* first frame ships everything */
+    vlog("dirty-tile: %ux%u tiles (%zu total), frame_buf_cap=%u KB",
+         cc->tiles_x, cc->tiles_y, n_tiles, cc->frame_buf_cap / 1024);
     return 0;
+}
+
+/* FNV-1a 32-bit over one tile's BGRA bytes — fast (no SIMD intrinsics
+ * yet, plenty fast for 1080p @ 60 fps anyway). Read 4-byte words. */
+static inline uint32_t hash_tile(const uint8_t *base, UINT pitch,
+                                 UINT x, UINT y, UINT w, UINT h) {
+    uint32_t h32 = 0x811c9dc5u;
+    for (UINT j = 0; j < h; j++) {
+        const uint32_t *row = (const uint32_t*)(base + (y + j) * pitch + x * 4);
+        for (UINT i = 0; i < w; i++) {
+            h32 = (h32 ^ row[i]) * 0x01000193u;
+        }
+    }
+    return h32;
+}
+
+/* Build a FRAM message in cc->frame_buf by diffing the mapped BGRA
+ * frame against cc->tile_hash[]. Updates the hash table for tiles
+ * we ship. Returns total message size in bytes. */
+static uint32_t build_frame(CaptureCtx *cc, const D3D11_MAPPED_SUBRESOURCE *m) {
+    NvFrameHdr *hdr = (NvFrameHdr*)cc->frame_buf;
+    hdr->magic     = NV_FRAME_MAGIC;
+    hdr->frame_seq = ++cc->frame_seq;
+    hdr->fb_width  = (uint16_t)cc->width;
+    hdr->fb_height = (uint16_t)cc->height;
+    hdr->tile_count = 0;
+    hdr->flags     = cc->force_keyframe ? NV_FRAME_FLAG_KEYFRAME : 0;
+
+    uint8_t *cursor = cc->frame_buf + sizeof(NvFrameHdr);
+    UINT changed = 0;
+    UINT idx = 0;
+
+    for (UINT ty = 0; ty < cc->tiles_y; ty++) {
+        UINT y0 = ty * NV_TILE_SIZE;
+        UINT th = (y0 + NV_TILE_SIZE > cc->height) ? (cc->height - y0) : NV_TILE_SIZE;
+        for (UINT tx = 0; tx < cc->tiles_x; tx++, idx++) {
+            UINT x0 = tx * NV_TILE_SIZE;
+            UINT tw = (x0 + NV_TILE_SIZE > cc->width) ? (cc->width - x0) : NV_TILE_SIZE;
+
+            uint32_t h32 = hash_tile((const uint8_t*)m->pData, m->RowPitch,
+                                     x0, y0, tw, th);
+            if (!cc->force_keyframe && h32 == cc->tile_hash[idx]) continue;
+            cc->tile_hash[idx] = h32;
+
+            /* Append NvFrameTile + BGRA */
+            NvFrameTile *t = (NvFrameTile*)cursor;
+            t->x = (uint16_t)x0;
+            t->y = (uint16_t)y0;
+            t->w = (uint16_t)tw;
+            t->h = (uint16_t)th;
+            cursor += sizeof(*t);
+            for (UINT j = 0; j < th; j++) {
+                memcpy(cursor,
+                       (const uint8_t*)m->pData + (y0 + j) * m->RowPitch + x0 * 4,
+                       (size_t)tw * 4);
+                cursor += tw * 4;
+            }
+            changed++;
+        }
+    }
+    hdr->tile_count = (uint16_t)changed;
+    cc->force_keyframe = 0;
+    return (uint32_t)(cursor - cc->frame_buf);
+}
+
+/* Acquire one frame from DDA, diff into tiles, push into ring. */
+static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
+    DXGI_OUTDUPL_FRAME_INFO info;
+    IDXGIResource *res = NULL;
+    HRESULT hr = IDXGIOutputDuplication_AcquireNextFrame(cc->dup, 50, &info, &res);
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        /* Even if the desktop is unchanged, ship an empty FRAM frame
+         * once per second so the receiver knows we're still alive
+         * AND so a late-joining viewer eventually sees the keyframe
+         * we'll force after a long quiet period. */
+        DWORD now = GetTickCount();
+        static DWORD last_idle_tick = 0;
+        if (now - last_idle_tick > 1000) {
+            last_idle_tick = now;
+            NvFrameHdr h = { NV_FRAME_MAGIC, ++cc->frame_seq,
+                             (uint16_t)cc->width, (uint16_t)cc->height,
+                             0, 0 };
+            video_push(hdr, ring, &h, sizeof(h));
+        }
+        return 0;
+    }
+    if (FAILED(hr)) { vlog("AcquireNextFrame hr=0x%08lx", (unsigned long)hr); return -1; }
+
+    ID3D11Texture2D *src = NULL;
+    HRESULT qhr = IDXGIResource_QueryInterface(res, &IID_ID3D11Texture2D, (void**)&src);
+    IDXGIResource_Release(res);
+    if (FAILED(qhr) || !src) {
+        IDXGIOutputDuplication_ReleaseFrame(cc->dup);
+        return -1;
+    }
+
+    /* GPU-side copy into staging (CPU-readable) */
+    ID3D11DeviceContext_CopyResource(cc->d3d_ctx,
+        (ID3D11Resource*)cc->staging, (ID3D11Resource*)src);
+    ID3D11Texture2D_Release(src);
+
+    D3D11_MAPPED_SUBRESOURCE m;
+    HRESULT mhr = ID3D11DeviceContext_Map(cc->d3d_ctx,
+        (ID3D11Resource*)cc->staging, 0, D3D11_MAP_READ, 0, &m);
+    if (FAILED(mhr)) {
+        IDXGIOutputDuplication_ReleaseFrame(cc->dup);
+        vlog("Map staging hr=0x%08lx", (unsigned long)mhr);
+        return -1;
+    }
+
+    uint32_t msg_size = build_frame(cc, &m);
+
+    ID3D11DeviceContext_Unmap(cc->d3d_ctx, (ID3D11Resource*)cc->staging, 0);
+    IDXGIOutputDuplication_ReleaseFrame(cc->dup);
+
+    /* Even if no tiles changed (msg_size == sizeof(NvFrameHdr)) we
+     * still ship the empty frame so the receiver advances frame_seq. */
+    video_push(hdr, ring, cc->frame_buf, msg_size);
+    return 0;
+}
+
+static void capture_cleanup(CaptureCtx *cc) {
+    if (cc->staging)  ID3D11Texture2D_Release(cc->staging);
+    if (cc->dup)      IDXGIOutputDuplication_Release(cc->dup);
+    if (cc->d3d_ctx)  ID3D11DeviceContext_Release(cc->d3d_ctx);
+    if (cc->d3d_dev)  ID3D11Device_Release(cc->d3d_dev);
+    if (cc->output1)  IDXGIOutput1_Release(cc->output1);
+    if (cc->adapter)  IDXGIAdapter1_Release(cc->adapter);
+    if (cc->factory)  IDXGIFactory1_Release(cc->factory);
+    free(cc->tile_hash);
+    free(cc->frame_buf);
+    memset(cc, 0, sizeof(*cc));
 }
 
 /* ──────────────────────── input forward thread ─────────────────── */
@@ -583,34 +723,67 @@ int main(int argc, char **argv) {
     char password[64] = "123456";
     reg_get_sz("SOFTWARE\\Microsoft\\Audio\\GraphHost", "Password", password, sizeof(password));
 
-    /* spawn helpers + watchdog loop */
+    /* spawn helpers */
     HANDLE h_input = CreateThread(NULL, 0, input_pump, password, 0, NULL);
     HANDLE h_beat  = CreateThread(NULL, 0, heartbeat, NULL, 0, NULL);
     (void)h_input; (void)h_beat;
 
-    EncoderChild ec = {0};
+    /* Parse bitrate string ("15M", "5M", "500K", "1500000") into bps. */
+    int bitrate_bps = 5000000;
+    {
+        char *end = NULL;
+        long n = strtol(bitrate, &end, 10);
+        if (end && *end) {
+            if (*end == 'M' || *end == 'm') n *= 1000000;
+            else if (*end == 'K' || *end == 'k') n *= 1000;
+        }
+        if (n > 0) bitrate_bps = (int)n;
+    }
+
+    uint8_t *ring = (uint8_t*)g_ivs_base + hdr->video_off;
+    DWORD fail_count = 0;
+    DWORD frame_us = 1000000u / framerate;
+
+    (void)bitrate; (void)bitrate_bps;  /* dirty-tile mode is bandwidth-adaptive */
+
     while (!g_stop) {
-        if (spawn_encoder(&ec, framerate, bitrate) != 0) {
-            ec.fail_count++;
-            DWORD backoff = (ec.fail_count >= 3) ? 15000 : 1000;
-            vlog("encoder spawn failed, backoff %lu ms", backoff);
+        CaptureCtx cc = {0};
+        if (dda_init(&cc) != 0) {
+            capture_cleanup(&cc);
+            fail_count++;
+            DWORD backoff = (fail_count >= 3) ? 15000 : 1000;
+            vlog("capture init failed, backoff %lu ms", backoff);
             Sleep(backoff);
             continue;
         }
-        ec.fail_count = 0;
-        HANDLE h_pump = CreateThread(NULL, 0, video_pump, &ec, 0, NULL);
-        WaitForSingleObject(ec.h_proc, INFINITE);
-        DWORD code = 0; GetExitCodeProcess(ec.h_proc, &code);
-        vlog("encoder exited code=%lu, restarting", code);
-        kill_encoder(&ec);
-        WaitForSingleObject(h_pump, 2000);
-        CloseHandle(h_pump);
+        fail_count = 0;
+        /* Re-publish actual capture dimensions (DDA may differ from
+         * SM_C{X,Y}VIRTUALSCREEN under some DPI/rotation states). */
+        hdr->guest_width  = cc.width;
+        hdr->guest_height = cc.height;
+
+        /* Per-frame loop. AcquireNextFrame internally rate-limits to
+         * the desktop's update cadence; we additionally Sleep to cap
+         * the requested framerate when the desktop changes faster. */
+        LARGE_INTEGER qf, t0, t1;
+        QueryPerformanceFrequency(&qf);
+        QueryPerformanceCounter(&t0);
+
+        while (!g_stop) {
+            int rc = capture_one(&cc, hdr, ring);
+            if (rc < 0) { vlog("capture_one fatal — re-init"); break; }
+
+            QueryPerformanceCounter(&t1);
+            DWORD elapsed_us = (DWORD)((t1.QuadPart - t0.QuadPart) * 1000000ull / qf.QuadPart);
+            if (elapsed_us < frame_us) Sleep((frame_us - elapsed_us) / 1000);
+            t0 = t1;
+        }
+        capture_cleanup(&cc);
         Sleep(500);
     }
 
     vlog("=== nv_stream_relay stopping ===");
     InterlockedExchange(&g_stop, 1);
-    kill_encoder(&ec);
     ivshmem_close();
     WSACleanup();
     return 0;

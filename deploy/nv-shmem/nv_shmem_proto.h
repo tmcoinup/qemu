@@ -244,4 +244,46 @@ static inline int nv_shmem_read(uint8_t *ring_base, uint32_t cap,
     return 1;
 }
 
+/* ───── Frame / dirty-tile protocol ────────────────────────────────
+ *
+ * Each video-ring record carries one FRAME message, which is a small
+ * header followed by a flat array of NvFrameTile entries; each tile
+ * is its own header followed by w*h*4 BGRA bytes (DXGI native).
+ *
+ *   record_size = sizeof(NvFrameHdr) + sum_i (sizeof(NvFrameTile) + w_i*h_i*4)
+ *
+ * The receiver iterates tile_count times: read tile header, read
+ * tile_w*tile_h*4 bytes, blit into local framebuffer at (x, y).
+ *
+ * Producer hashes each TILE_SIZE×TILE_SIZE region of the new frame
+ * and compares to the previous frame's hash table; only changed
+ * tiles enter the message. Static desktop → tile_count=0, message
+ * size = sizeof(NvFrameHdr) = 12 bytes.
+ *
+ * First frame after attach should be a "full keyframe" with all
+ * tiles included so the receiver can paint a complete picture
+ * regardless of when it joined.
+ */
+#define NV_TILE_SIZE          32u
+#define NV_FRAME_MAGIC        0x4D415246u   /* "FRAM" */
+
+typedef struct {
+    uint32_t magic;        /* NV_FRAME_MAGIC */
+    uint32_t frame_seq;    /* monotonic; receiver may use to detect drops */
+    uint16_t fb_width;     /* full framebuffer width  (px) */
+    uint16_t fb_height;    /* full framebuffer height (px) */
+    uint16_t tile_count;   /* number of NvFrameTile entries that follow */
+    uint16_t flags;        /* bit 0 = keyframe (full-screen redraw) */
+} NvFrameHdr;
+
+#define NV_FRAME_FLAG_KEYFRAME  0x0001
+
+typedef struct {
+    uint16_t x;            /* tile origin X (px), aligned to NV_TILE_SIZE */
+    uint16_t y;            /* tile origin Y (px), aligned to NV_TILE_SIZE */
+    uint16_t w;            /* actual tile width  (≤ NV_TILE_SIZE) */
+    uint16_t h;            /* actual tile height (≤ NV_TILE_SIZE) */
+    /* followed by w*h*4 bytes of BGRA pixel data, row-major top-down */
+} NvFrameTile;
+
 #endif /* NV_SHMEM_PROTO_H */

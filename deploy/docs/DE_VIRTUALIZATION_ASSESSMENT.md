@@ -4,7 +4,10 @@
 
 评估对象：当前工作树，基于 `v9.2.0` tag 的 `qemu-9.2.0` 分支，以及当前未提交改动。
 
-评估结论：当前项目没有完成“全面去虚拟化”。它已经覆盖了一批常见的用户态静态特征，尤其是 CPU 型号、CPUID hypervisor/KVM leaves、部分 SMBIOS、部分 ACPI OEM 字符串、NVMe 字段、EDID 和 virtio-gpu 的可见 ID 改写。但整体仍是“特定启动脚本 + 客机侧修补 + 局部 QEMU patch”的组合，不是一个默认全局隐身的 QEMU 构建。对内核态、PCI/ACPI/USB 枚举、硬件画像一致性、驱动栈一致性和反作弊级别检测，仍有多个高置信残留点。
+评估结论：当前项目没有完成"全面去虚拟化"。它已经覆盖了一批常见的用户态静态特征，尤其是 CPU 型号、CPUID hypervisor/KVM leaves、部分 SMBIOS、部分 ACPI OEM 字符串、NVMe 字段、EDID 和 virtio-gpu 的可见 ID 改写。但整体仍是"特定启动脚本 + 客机侧修补 + 局部 QEMU patch"的组合，不是一个默认全局隐身的 QEMU 构建。对内核态、PCI/ACPI/USB 枚举、硬件画像一致性、驱动栈一致性和反作弊级别检测，仍有多个高置信残留点。
+
+> **2026-04-25 后续修复进度**（本评估正文之后追加，详见文末"更新记录"）
+> P0 / P1 中除"Q35/ICH9 平台矛盾"外，其余条目（Red Hat root-port、qemu-xhci、USB HID descriptor、ACPI `QEMU0002`、e1000e subsystem、EDID atoi 序列号一致性、SMBIOS Type16 ECC）已在源码中修复并在 VM2 客机内验证通过。
 
 ## 评估边界
 
@@ -434,4 +437,48 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 当前项目完成了“QEMU v9.2.0 上的一组定向去虚拟化改造”，但没有完成“全面去虚拟化”。最强的已完成项是 CPU/CPUID 静态暴露清理、部分 SMBIOS/ACPI header、NVMe 字段和 EDID/显示器表面伪装。最主要的未完成项是 AMD/Intel 平台矛盾、Red Hat/QEMU PCI 设备、QEMU USB descriptor、ACPI `QEMU0002`、SMBIOS/SPD 不一致、virtio GPU 本质暴露，以及 EfiGuard/DSE 路径带来的额外检测风险。
 
-用一句话概括：当前状态适合继续做“表面特征收敛”的迭代基础，但不能作为已完成的全面去虚拟化版本发布或验收。
+用一句话概括：当前状态适合继续做"表面特征收敛"的迭代基础，但不能作为已完成的全面去虚拟化版本发布或验收。
+
+## 更新记录
+
+### 2026-04-25：P0 / P1 一轮源码修复 + VM2 验证
+
+本评估给出后立即跟进了一轮源码层修复，目标是把"字符串 / 硬编码 PCI ID"层的一票 P0/P1 残留点一次性收敛掉。**只有"Q35/ICH9 vs AMD 平台矛盾"未做（需更换 machine type 或重写 `hw/i386/pc_q35.c`，超出本轮范围）**。
+
+**已修改文件（`qemu-9.2.0` 分支）：**
+
+| 文件 | 改动摘要 |
+|---|---|
+| `hw/usb/dev-hid.c` | `desc_strings` 字符串："QEMU" → "Microsoft"，product 串改为 "Microsoft USB Optical Mouse" / "Microsoft Wired Keyboard 600" / "Microsoft USB Tablet"；mouse/mouse2/tablet/tablet2/keyboard/keyboard2 六个 `USBDesc` 的 idVendor/idProduct 由 0x0627:0x0001 (Adomax) 改为 045E:00CB（mouse）/ 045E:0750（keyboard）/ 056A:00FB（tablet via Wacom-class VID）；`usb_*_class_initfn` 里 `uc->product_desc` 同步 |
+| `hw/i386/fw_cfg.c` | DSDT FWCF `_HID` 由 `"QEMU0002"` 改为 `"PNP0C02"` (Motherboard Resources) |
+| `hw/nvram/fw_cfg-acpi.c` | 同上修改（覆盖 ARM virt / MMIO 路径） |
+| `hw/pci-bridge/gen_pcie_root_port.c` | `gen_rp_dev_class_init`：`vendor_id=PCI_VENDOR_ID_REDHAT / device_id=PCI_DEVICE_ID_REDHAT_PCIE_RP` 改为 `0x1022:0x1453`（AMD Family 17h Internal PCIe GPP），`dc->desc` 同步 |
+| `hw/usb/hcd-xhci-pci.c` | `qemu_xhci_class_init`：RH `1B36:000D` 改为 AMD `1022:43BB`（300 系列 USB 3.1 xHCI）。class code `0x0C0330` 不变，guest 仍用 usbxhci.sys class-bind |
+| `hw/net/e1000e.c` | `subsys_ven` 默认 `PCI_VENDOR_ID_INTEL` → `0x1043`（ASUS）；`subsys` 默认 `0` → `0x86C0`（PRIME B350-PLUS-style） |
+| `hw/display/edid-generate.c` | `serial_nr = atoi(info->serial)` 修复：当 atoi 返回 0（字母开头序列号）时改用 djb2 hash 兜底，使 EDID 12-15 字节的二进制序列号与 descriptor 字符串序列号同时为非零、互相一致 |
+| `hw/smbios/smbios.c` | Type16 `error_correction` 由 `0x06` (Multi-bit ECC) 改为 `0x03` (None)，符合 Ryzen 3 1200 / B350 / HyperX 非 ECC DDR4 配置；`location` 由 `0x01` (Other) 改为 `0x03` (System board or motherboard) |
+
+**VM2（`/home/ubuntu/images/win10-inst2.qcow2`，Win10 LTSC 19044，bridge 192.168.30.144）客机内验证：**
+
+| 检测项 | 结果 |
+|---|---|
+| `Get-PnpDevice -Class Display` | `NVIDIA GeForce GTX 1050 Status=OK Problem=CM_PROB_NONE`（patched viogpudo 100.93.0.0） |
+| `PCI\VEN_1022&DEV_43BB` | "AMD USB 3.0 可扩展主控制器 - 1.0 (Microsoft)" Status=OK |
+| `PCI\VEN_1022&DEV_1453` | 4 × "PCI-to-PCI Bridge" Status=OK |
+| `PCI\VEN_1B36` | 在 active 设备中已不存在（仅 phantom） |
+| `ACPI\PNP0C02` | "Motherboard resources"（取代 `QEMU0002`） |
+| `ACPI\QEMU0002` | 不存在 |
+| `HID\VID_045E&PID_0750` | "HID Keyboard Device" |
+| `HID\VID_056A&PID_00FB` | "HID-compliant mouse" |
+| `USB\VID_0627` | 不存在（QEMU 默认 Adomax VID 已消除） |
+| `HID-compliant mouse` 制造商串 | `Microsoft` |
+| e1000e SUBSYS | `86C01043` (ASUS) |
+| `Win32_VideoController.VideoProcessor` | `GeForce GTX 1050`（评估时为 `QEMU VIRTIO GPU`） |
+| 显示器 | `Samsung S24F350F` (`DISPLAY\SAM0F65`) |
+
+**仍残留（P0 #1，本轮未做）：** `-machine q35` 自带的 Intel Q35/ICH9 平台设备：HDA controller `8086:2668`、CPU-IO `8086:29C0`、LPC `8086:2918`、SMBus `8086:2930`。这些与 AMD Ryzen/B350 SMBIOS 画像之间的矛盾仍是 SetupAPI/PCI 枚举层面的核心 leak，需要 machine type 改造或 `hw/i386/pc_q35.c` 重写。
+
+**附属：VM2 复活** — 评估时 VM2 处于 GPU code 43（`CM_PROB_FAILED_POST_START`）状态，原因是 stock virtio-win 0.1.266 的 `viogpudo.sys` 把 PCI ID `1AF4:1050` 硬编码在 `CheckHardware` 里，与 `GPU_SELFSIGNED=1` 暴露的 `10DE:1C81` 冲突。修复方法是把 host 端 `deploy/driver-signing/out/{viogpudo.sys,viogpudo.cat,viogpudo-nvidia.inf}`（patched + backdated NVIDIA-fake CA 签名）通过 `pnputil /add-driver /install` 装进客机并 **重启**（不要 disable/enable 主显卡，会 BSOD 到 QEMU 进程退出）。
+
+**重新构建 / 复现：** `deploy/tools/build.sh && stop-vm.sh 2 && DISPLAY=:1 INSTANCE=2 BRIDGE=br0 STABLE_DISPLAY=1 GPU_SELFSIGNED=1 nohup ./deploy/scripts/win10-ryzen3-stealth.sh 2 > /tmp/qemu-stealth-2.log 2>&1 &`
+

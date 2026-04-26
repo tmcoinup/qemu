@@ -530,7 +530,29 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
      * for the spoofed name "Samsung S24F350F".
      */
     uint16_t model_nr = 0x0F65;
-    uint32_t serial_nr = info->serial ? atoi(info->serial) : 0x01A5C3D2;
+    /*
+     * EDID byte 12-15 is a 32-bit binary serial. atoi() on a Samsung-style
+     * alphanumeric serial like "H4ZK500001VL" returns 0 because parsing
+     * stops at the first non-digit. A zero binary serial paired with a
+     * non-zero string serial is a self-inconsistent EDID — strict parsers
+     * (read-edid, edid-decode --check) flag it. Hash the alphanumeric
+     * serial via djb2 so the binary slot is deterministic, non-zero, and
+     * cannot collide with the obviously-default 0x01A5C3D2 either.
+     */
+    uint32_t serial_nr;
+    if (info->serial) {
+        serial_nr = atoi(info->serial);
+        if (serial_nr == 0) {
+            /* djb2 hash for stable non-zero serial from alphanumeric input */
+            uint32_t h = 5381;
+            for (const char *p = info->serial; *p; p++) {
+                h = ((h << 5) + h) + (uint8_t)*p;
+            }
+            serial_nr = h ? h : 0xC0DECAFE;
+        }
+    } else {
+        serial_nr = 0x01A5C3D2;
+    }
     stw_be_p(edid +  8, vendor_id);
     stw_le_p(edid + 10, model_nr);
     stl_le_p(edid + 12, serial_nr);

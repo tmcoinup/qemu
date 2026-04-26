@@ -15,7 +15,7 @@
 | 层 | 伪造目标 | 实现 |
 |---|---|---|
 | CPU | AMD Ryzen 3 1200 (Zen 1) 默认 / 2300X (Zen+) 可选；CPUID HYPERVISOR=0、KVM/HV leaves stripped | `-cpu Ryzen3-1200,kvm=off,hypervisor=off,enforce=off` + repo 内 `target/i386` patch |
-| CPU 持久化 | per-instance | `stealth-inst<N>.profile` 写入 `CPU_MODEL=`，下次启动直接复用 |
+| CPU 持久化 | per-instance | `vms/<N>/profile` 写入 `CPU_MODEL=`，下次启动直接复用 |
 | 主板/BIOS/RAM | ASUS/MSI/Gigabyte/ASRock 随机池 + American Megatrends BIOS + 2× Kingston HyperX Fury DDR4-2666 SPD | `stealth-lib.sh` 随机池 + `hw/i2c/smbus_eeprom.c` SPD 合成 |
 | NVMe | Samsung 970 PRO 512GB, 固件 `1B2QEXM7` | `nvme,use-samsung-id=on,model-number=...,serial=...` |
 | 显卡（浅层）| 主 `VEN_1AF4&DEV_1050` + subsys `1C8110DE` (NVIDIA GTX 1050) | `virtio-vga + x-pci-sub-vendor-id=0x10DE,x-pci-sub-device-id=0x1C81` |
@@ -68,9 +68,9 @@ DISPLAY=:1 GPU_SELFSIGNED=1 deploy/scripts/start-vm.sh 2
 ## 多 VM
 
 启动器 `start-vm.sh` 用 `INSTANCE=N` 区分实例。每个 N 自动有自己的：
-- qcow2 磁盘 `/home/ubuntu/images/win10-inst<N>.qcow2`
-- 硬件身份 profile `/home/ubuntu/images/stealth-inst<N>.profile`（首次启动随机生成、固化）
-- OVMF NVRAM `/home/ubuntu/images/ovmf-vars-<N>.fd`
+- qcow2 磁盘 `/home/ubuntu/images/vms/<N>/disk.qcow2`
+- 硬件身份 profile `/home/ubuntu/images/vms/<N>/profile`（首次启动随机生成、固化）
+- OVMF NVRAM `/home/ubuntu/images/vms/<N>/ovmf-vars.fd`
 - QMP socket `/tmp/qemu-stealth-<N>.qmp`
 - VNC display `N-1`（端口 5900+N-1）
 - SSH 转发 `127.0.0.1:1002<N+2>`、RDP 转发 `127.0.0.1:1338<N+8>`

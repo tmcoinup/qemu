@@ -21,9 +21,9 @@
 #     CPU_MODEL            读 profile，首次生成默认 Ryzen3-1200
 #
 # 硬件身份只在首次启动时随机一次，写到
-#     /home/ubuntu/images/stealth-inst<N>.profile
+#     /home/ubuntu/images/vms/<N>/profile
 # 之后所有启动复用，让 Windows / 反作弊看见永远同一台机器。
-# 想换身份: deploy/scripts/reroll-identity.sh <N>  或者直接删 .profile。
+# 想换身份: deploy/scripts/reroll-identity.sh <N>  或者直接删 profile 文件。
 #
 # 环境变量（不常用，默认就好）：
 #     RAM=8192             客机内存 MiB（默认 8192）
@@ -102,12 +102,17 @@ if ! [[ "$INSTANCE" =~ ^[0-9]+$ ]] || (( INSTANCE < 1 )); then
     exit 2
 fi
 
-: "${RAM:=8192}"
+: "${RAM:=4096}"
 : "${CPUS:=4}"
 : "${HEADLESS:=0}"
 : "${ISO:=${_cli_iso:-/home/ubuntu/images/win10.iso}}"
 [[ -n "$_cli_iso" ]] && ISO="$_cli_iso"
-: "${DISK:=/home/ubuntu/images/win10-inst${INSTANCE}.qcow2}"
+
+# 新版目录结构：所有 per-instance 文件都归在 /home/ubuntu/images/vms/<N>/
+# 老版（直接放在 /home/ubuntu/images/）会被自动迁移到新位置。
+VM_DIR="/home/ubuntu/images/vms/${INSTANCE}"
+mkdir -p "$VM_DIR"
+: "${DISK:=$VM_DIR/disk.qcow2}"
 : "${QEMU:=$REPO_ROOT/build/qemu-system-x86_64}"
 # Bridge is the default network backend. Pass BRIDGE= (empty) or NO_BRIDGE=1
 # to opt out and fall back to user-mode NAT. Reason: a real LAN IP is the
@@ -115,7 +120,21 @@ fi
 # is itself a VM signal.
 : "${BRIDGE:=br0}"
 [[ "${NO_BRIDGE:-0}" == "1" ]] && BRIDGE=""
-PROFILE_FILE="/home/ubuntu/images/stealth-inst${INSTANCE}.profile"
+PROFILE_FILE="$VM_DIR/profile"
+
+# 兼容老布局：把旧路径文件迁到新目录
+for _legacy_pair in \
+    "/home/ubuntu/images/win10-inst${INSTANCE}.qcow2|$VM_DIR/disk.qcow2" \
+    "/home/ubuntu/images/stealth-inst${INSTANCE}.profile|$VM_DIR/profile" \
+    "/home/ubuntu/images/ovmf-vars-${INSTANCE}.fd|$VM_DIR/ovmf-vars.fd"
+do
+    _src="${_legacy_pair%|*}"
+    _dst="${_legacy_pair##*|}"
+    if [[ -f "$_src" && ! -f "$_dst" ]]; then
+        mv "$_src" "$_dst"
+        echo ">> migrated legacy: $_src -> $_dst"
+    fi
+done
 
 # Low-entropy bash RANDOM seed only used when we re-roll identity; the saved
 # profile pins the final values, so reseed quality doesn't matter for steady
@@ -124,11 +143,24 @@ RANDOM=$((INSTANCE * 13 + $(date +%s) % 32768))
 
 # -------------------------------------------------------------------
 # Per-instance disk creation (thin 512GB qcow2 on first run — Samsung 970 PRO)
+# 如果 BASE_IMAGE=<path> 被设置，新盘以 base 为 backing-file 创建（克隆模式）
+# 这样多个 instance 共享同一份基础镜像，每台只存增量。
 # -------------------------------------------------------------------
 if [[ ! -f "$DISK" ]]; then
-    echo ">> creating fresh 512GB qcow2 at $DISK"
-    /home/ubuntu/projects/qemu/build/qemu-img create -f qcow2 -o preallocation=off,cluster_size=65536 \
-        "$DISK" 512000000000
+    if [[ -n "${BASE_IMAGE:-}" ]]; then
+        if [[ ! -f "$BASE_IMAGE" ]]; then
+            echo "ERROR: BASE_IMAGE='$BASE_IMAGE' 不存在" >&2
+            exit 1
+        fi
+        echo ">> 从 base 镜像克隆: $BASE_IMAGE"
+        echo ">>   -> $DISK (qcow2 增量层)"
+        "$REPO_ROOT/build/qemu-img" create -f qcow2 \
+            -F qcow2 -b "$BASE_IMAGE" "$DISK" >/dev/null
+    else
+        echo ">> creating fresh 512GB qcow2 at $DISK"
+        "$REPO_ROOT/build/qemu-img" create -f qcow2 -o preallocation=off,cluster_size=65536 \
+            "$DISK" 512000000000
+    fi
 fi
 
 # -------------------------------------------------------------------
@@ -199,7 +231,7 @@ else
     OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 fi
 OVMF_VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
-OVMF_VARS=/home/ubuntu/images/ovmf-vars-${INSTANCE}.fd
+OVMF_VARS="$VM_DIR/ovmf-vars.fd"
 if [[ ! -f "$OVMF_VARS" ]]; then
     cp "$OVMF_VARS_SRC" "$OVMF_VARS"
 fi
@@ -221,6 +253,21 @@ while IFS= read -r line; do
     SMBIOS_ARGS+=("-smbios" "$line")
 done < <(stealth_smbios_args)
 
+# AMD DF stubs only for AMD CPUs
+AMD_DF_ARGS=()
+if [[ "$CPU_VENDOR" == "AuthenticAMD" ]]; then
+    AMD_DF_ARGS=(
+        -device amd-df-stub,bus=pcie.0,addr=0x18.0x0,multifunction=on,device-id=0x1460
+        -device amd-df-stub,bus=pcie.0,addr=0x18.0x1,device-id=0x1461
+        -device amd-df-stub,bus=pcie.0,addr=0x18.0x2,device-id=0x1462
+        -device amd-df-stub,bus=pcie.0,addr=0x18.0x3,device-id=0x1463
+        -device amd-df-stub,bus=pcie.0,addr=0x18.0x4,device-id=0x1464
+        -device amd-df-stub,bus=pcie.0,addr=0x18.0x5,device-id=0x1465
+        -device amd-df-stub,bus=pcie.0,addr=0x18.0x6,device-id=0x1466
+        -device amd-df-stub,bus=pcie.0,addr=0x18.0x7,device-id=0x1467
+    )
+fi
+
 # -------------------------------------------------------------------
 # Guest display: virtio-gpu-gl for 3D accel (DNF needs DirectX).
 # We label it as a GTX 1050-class adapter only at the SMBIOS level;
@@ -228,24 +275,17 @@ done < <(stealth_smbios_args)
 # NOTES-GPU.md. virtio-gpu accepts OpenGL via VirGL and Mesa d3d->gl.
 # Fallback to qxl-vga if HEADLESS is set.
 # -------------------------------------------------------------------
-# GPU subsystem spoof: keep VEN/DEV at 1AF4:1050 so virtio-win binds,
-# but rewrite subsys pair + rev to NVIDIA GTX 1050 (GP107 A1). Real INF
-# rename + registry refresh (apply-gpu-spoof.ps1) runs inside the guest.
-#
-# 10DE = NVIDIA, 1C81 = GP107 GTX 1050 (reference), rev A1 matches
-# Pascal retail silicon as seen by lspci on real cards.
-GPU_SUBSYS_VEN=${GPU_SUBSYS_VEN:-0x10DE}
-GPU_SUBSYS_DEV=${GPU_SUBSYS_DEV:-0x1C81}
-GPU_REV=${GPU_REV:-0xA1}
-GPU_STEALTH="x-pci-sub-vendor-id=${GPU_SUBSYS_VEN},x-pci-sub-device-id=${GPU_SUBSYS_DEV},x-pci-revision=${GPU_REV}"
+# GPU subsystem spoof: 主 ID 留 1AF4:1050 (virtio) 让 stock virtio-win 绑定，
+# subsys 改成 profile 选定的 GPU (NVIDIA / AMD)。
+# apply-gpu-spoof.ps1 + nvapi64.dll shim 在 guest 里把 WMI / Device Manager 的
+# 显示名也对齐到 profile.GPU_NAME。
+GPU_STEALTH="x-pci-sub-vendor-id=${GPU_PCI_VEN},x-pci-sub-device-id=${GPU_PCI_DEV},x-pci-revision=${GPU_REV}"
 
-# Self-signed driver path: override primary VEN/DEV as well so INF binds
-# PCI\VEN_10DE&DEV_1C81 directly (instead of virtio 1AF4:1050). Requires
-# the self-signed viogpudo.sys + catalog installed inside the guest.
+# GPU_SELFSIGNED=1：把 PCI 主 ID 也改成 NVIDIA / AMD（深层 stealth，
+# ⚠️ ACE 反作弊会判异常 13-131106-0；只用于无 ACE 类反作弊场景）。
+# 需要 guest 里事先装好 patched viogpudo.sys + 伪 NVIDIA/AMD CA 链。
 if [[ "${GPU_SELFSIGNED:-0}" == "1" ]]; then
-    GPU_VEN=${GPU_VEN:-0x10DE}
-    GPU_DEV=${GPU_DEV:-0x1C81}
-    GPU_STEALTH="${GPU_STEALTH},x-pci-vendor-id=${GPU_VEN},x-pci-device-id=${GPU_DEV}"
+    GPU_STEALTH="${GPU_STEALTH},x-pci-vendor-id=${GPU_PCI_VEN},x-pci-device-id=${GPU_PCI_DEV}"
 fi
 
 # 显示后端选择
@@ -273,15 +313,22 @@ elif [[ "$STABLE_DISPLAY" == "1" ]]; then
     # Stability mode: SDL window for local control, no GL passthrough.
     # Use this for long DNF sessions or anti-cheat-stable runs.
     DISP_ARGS=(
-        -display sdl,show-cursor=off
+        -display sdl,show-cursor=off,grab-mod=lshift-lctrl
         -device "virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
     )
 else
     DISP_ARGS=(
-        -display sdl,gl=on,show-cursor=off
+        -display sdl,gl=on,show-cursor=off,grab-mod=lshift-lctrl
         -device "virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
     )
 fi
+
+# 用 ps2 keyboard 替代 usb-kbd 解决 host 与 guest NumLock / 小键盘状态不同步问题：
+# Q35 平台默认启用 i8042 PS/2 控制器，QEMU 把 host SDL 收到的 NumLock / 数字键盘
+# 完整翻译为 PS/2 scancode（含 LED 状态），guest 看见的是真实 PS/2 键盘。
+# usb-kbd 的 HID descriptor 经过 USB 总线翻译，NumLock LED 不会回送到 host。
+# (老的 usb-kbd 语句已删，下面的 USB 设备只剩鼠标/平板)
+KBD_PS2_HINT='已启用 PS/2 键盘（i8042），NumLock/小键盘与 host 实时同步'
 
 # -------------------------------------------------------------------
 # Boot order
@@ -386,11 +433,10 @@ CMD=(
     -drive if=pflash,format=raw,file="$OVMF_VARS"
 
     # --- CPU: hidden hypervisor, hidden KVM, invtsc ---
-    # CPU_MODEL 来自 stealth profile（per-instance 持久化），首次生成默认
-    # Ryzen3-1200。可在 reroll 前 export 覆盖：
-    #   CPU_MODEL=Ryzen3-1200   Summit Ridge / Zen 1（Win10 LTSC 友好）
-    #   CPU_MODEL=Ryzen3-2300X  Pinnacle Ridge / Zen+（Win11 LTSC 24H2 支持列表）
-    -cpu ${CPU_MODEL},kvm=off,hypervisor=off,+invtsc,+topoext,+tsc-deadline,enforce=off,host-phys-bits=on,tsc-freq=$([[ ${CPU_MODEL} == Ryzen3-2300X ]] && echo 3500000000 || echo 3100000000),vendor=AuthenticAMD
+    # CPU 完整 -cpu 串由 stealth_qemu_cpu_arg 拼出（包含 family/model/stepping
+    # 覆盖、tsc-freq、vendor、AMD 专属 +topoext 等）。CPU 型号从 profile 随机，
+    # 池子里有 AMD Ryzen3-1200/2300X 与 Intel i3-9100F/9100/G6400/G5400。
+    -cpu "$(stealth_qemu_cpu_arg)"
     -smp cpus=$CPUS,cores=$CPUS,threads=1,sockets=1,maxcpus=$CPUS
 
     # --- Memory: backed by memfd for prealloc, dual-channel via 2 NUMA nodes ---
@@ -417,24 +463,16 @@ CMD=(
     -device pcie-root-port,id=rp2,slot=2,bus=pcie.0
     -device pcie-root-port,id=rp3,slot=3,bus=pcie.0
 
-    # --- AMD Zen Data Fabric PCI stubs at 00:18.0-7 ---
+    # --- AMD Zen Data Fabric PCI stubs at 00:18.0-7 (only for AMD CPUs) ---
     # Real Zen silicon exposes 8 DF config functions; HWiNFO/CPU-Z use these
-    # to identify the CPU codename and derive channel topology.
-    -device amd-df-stub,bus=pcie.0,addr=0x18.0x0,multifunction=on,device-id=0x1460
-    -device amd-df-stub,bus=pcie.0,addr=0x18.0x1,device-id=0x1461
-    -device amd-df-stub,bus=pcie.0,addr=0x18.0x2,device-id=0x1462
-    -device amd-df-stub,bus=pcie.0,addr=0x18.0x3,device-id=0x1463
-    -device amd-df-stub,bus=pcie.0,addr=0x18.0x4,device-id=0x1464
-    -device amd-df-stub,bus=pcie.0,addr=0x18.0x5,device-id=0x1465
-    -device amd-df-stub,bus=pcie.0,addr=0x18.0x6,device-id=0x1466
-    -device amd-df-stub,bus=pcie.0,addr=0x18.0x7,device-id=0x1467
+    # to identify the CPU codename and derive channel topology. Intel CPUs
+    # 不放 DF stub —— 否则会出现 "Intel CPU 但有 AMD DF" 的矛盾。
+    "${AMD_DF_ARGS[@]}"
 
-    # --- Storage: virtio-scsi host + Samsung NVMe as system drive ---
+    # --- Storage: virtio-scsi host + 随机 Samsung NVMe (model/firmware/SN 来自 profile) ---
     -object iothread,id=io1
     -drive file="$DISK",if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap
-    -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,\
-serial="$NVME_SERIAL",use-samsung-id=on,bootindex=2,\
-model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXM7
+    -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,serial="$NVME_SERIAL",use-samsung-id=on,bootindex=2,model-number="$NVME_MODEL",firmware-rev="$NVME_FIRMWARE"
 
     "${CDROM_ARGS[@]}"
 
@@ -442,15 +480,14 @@ model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXM7
     "${NET_ARGS[@]}"
     -device e1000e,netdev=net0,mac=$MAC_OVERRIDE,bus=rp2
 
-    # --- USB: xHCI + keyboard/mouse ---
-    # USB_RELATIVE_MOUSE=1: usb-mouse (relative coords, like real USB mouse).
-    #   Anti-cheat-friendly — guest sees normal HID mouse, no "absolute jump"
-    #   pattern. SDL will grab the cursor; release with Ctrl+Alt+G.
-    # default: usb-tablet (absolute coords). Friendlier UX (mouse can leave
-    #   the SDL window freely) but the absolute-coordinate event pattern is
-    #   a virtualization fingerprint.
+    # --- USB: xHCI + 鼠标 ---
+    # 键盘走 q35 自带的 i8042 PS/2 控制器（不在这里声明，SeaBIOS/OVMF 会自动建）
+    # —— 这样 NumLock LED 与小键盘 scancode 与 host SDL 实时同步。usb-kbd 不行，
+    #    HID descriptor 翻译过程会丢 LED 反馈。
+    # USB_RELATIVE_MOUSE=1: usb-mouse (相对坐标，更像真鼠标，反作弊友好；
+    #   SDL 抓鼠标，Ctrl+Shift+G 释放)
+    # 默认 usb-tablet (绝对坐标，鼠标可自由出入 SDL 窗口)
     -device qemu-xhci,id=xhci,bus=rp3
-    -device usb-kbd,bus=xhci.0
     $([[ "${USB_RELATIVE_MOUSE:-0}" == "1" ]] && echo "-device usb-mouse,bus=xhci.0" || echo "-device usb-tablet,bus=xhci.0")
 
     # --- Audio: ICH9 HDA (looks like Realtek ALC). Use 'none' backend
@@ -475,12 +512,14 @@ model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXM7
 )
 
 echo ">> instance:    $INSTANCE"
+echo ">> VM 目录:     $VM_DIR"
 echo ">> QMP socket:  $QMP_SOCK"
 echo ">> HMP socket:  $MON_SOCK"
 echo ">> VNC display: :$VNC_DISPLAY (port $((5900+VNC_DISPLAY)))"
 echo ">> SSH/RDP fwd: 127.0.0.1:$SSH_FWD_PORT / 127.0.0.1:$RDP_FWD_PORT"
 echo ">> boot mode:   $BOOT"
 echo ">> disk:        $DISK ($(stat -c%s "$DISK") bytes)"
+echo ">> 键盘:        $KBD_PS2_HINT"
 echo ">> --- launching ---"
 
 # QEMU's `-rtc base=localtime` calls libc localtime() which honours $TZ.
@@ -489,5 +528,34 @@ echo ">> --- launching ---"
 # the guest LA wall-clock and Windows (set to CST) shows it 15h off.
 export TZ="${TZ:-Asia/Shanghai}"
 echo ">> RTC TZ:       $TZ"
+
+# 禁用 host 端 X11 DPMS / 屏保，避免 host 屏幕休眠时 SDL 窗口被冻结导致
+# guest 视为黑屏。退出时恢复原状。
+if [[ "${HEADLESS:-0}" != "1" && -n "${DISPLAY:-}" ]]; then
+    if command -v xset >/dev/null 2>&1; then
+        # 记录原值，trap 退出还原
+        _xset_dpms_orig=$(xset q 2>/dev/null | awk '/DPMS is/{print $NF}')
+        _xset_ss_orig=$(xset q 2>/dev/null | awk '/Screen Saver/{f=1;next} f&&/timeout:/{print $2;exit}')
+        xset s off -dpms 2>/dev/null || true
+        echo ">> host DPMS / 屏保: 已临时关闭（VM 退出后还原）"
+        _restore_xset() {
+            [[ "${_xset_dpms_orig:-}" == "Enabled" ]] && xset +dpms 2>/dev/null || true
+            [[ -n "${_xset_ss_orig:-}" && "${_xset_ss_orig}" != "0" ]] && \
+                xset s "${_xset_ss_orig}" 2>/dev/null || true
+        }
+        trap _restore_xset EXIT INT TERM
+    fi
+
+    # 避免桌面环境 (GNOME/KDE/XFCE) 自身的待机/锁屏 — systemd-inhibit 拦截一下。
+    # 没有 systemd-inhibit 时退化成裸 exec。
+    if command -v systemd-inhibit >/dev/null 2>&1; then
+        exec systemd-inhibit \
+            --who="qemu-stealth-${INSTANCE}" \
+            --why="保持 guest 显示活性" \
+            --what="idle:sleep:handle-lid-switch" \
+            --mode=block \
+            -- "${CMD[@]}"
+    fi
+fi
 
 exec "${CMD[@]}"

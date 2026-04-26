@@ -14,7 +14,7 @@ sudo apt install -y build-essential ninja-build python3-venv python3-pip \
 
 必备文件：
 - `/home/ubuntu/images/win10.iso` 或 `/home/ubuntu/images/win10_ltsc.iso`
-- `/usr/share/OVMF/OVMF_CODE_4M.fd` / `OVMF_VARS_4M.fd`（启动器首跑会拷贝模板到 `/home/ubuntu/images/ovmf-vars-<N>.fd`）
+- `/usr/share/OVMF/OVMF_CODE_4M.fd` / `OVMF_VARS_4M.fd`（启动器首跑会拷贝模板到 `/home/ubuntu/images/vms/<N>/ovmf-vars.fd`）
 
 ## 2. 构建 QEMU
 
@@ -77,13 +77,13 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `MEM_PER_DIMM_MB` | RAM/2 | DIMM 总量自动除 2 凑双通道 SPD |
 | `EXTRA_ISO=PATH` | - | 副 CDROM（autounattend.xml / 驱动盘 等） |
 | `--iso=PATH` | - | 主启动 ISO（装系统） |
-| `--reroll` | - | 删掉 `stealth-inst<N>.profile` 重新随机一次硬件身份 |
+| `--reroll` | - | 删掉 `vms/<N>/profile` 重新随机一次硬件身份 |
 | `CPU_MODEL` | profile 写入 | `Ryzen3-1200`（默认）/ `Ryzen3-2300X`（Win11 LTSC 兼容）。第一次 reroll 时持久化到 profile，之后不用每次设 |
 
 每个 INSTANCE 的资源分配：
-- 磁盘：`/home/ubuntu/images/win10-inst<N>.qcow2`（不存在则创建空白 512GB）
-- profile：`/home/ubuntu/images/stealth-inst<N>.profile`
-- OVMF NVRAM：`/home/ubuntu/images/ovmf-vars-<N>.fd`
+- 磁盘：`/home/ubuntu/images/vms/<N>/disk.qcow2`（不存在则创建空白 512GB）
+- profile：`/home/ubuntu/images/vms/<N>/profile`
+- OVMF NVRAM：`/home/ubuntu/images/vms/<N>/ovmf-vars.fd`
 - QMP socket：`/tmp/qemu-stealth-<N>.qmp`
 - HMP socket：`/tmp/qemu-stealth-<N>.mon`
 - VNC 显示：`<N-1>`（端口 5900+N-1）
@@ -124,7 +124,36 @@ HEADLESS=1 nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
 HEADLESS=1 nohup deploy/scripts/start-vm.sh 2 > /tmp/qemu2.log 2>&1 &
 ```
 
-注意 RAM：每台默认 8GB，宿主要够。
+注意 RAM：每台默认 4GB（2×2GB 双通道），宿主要够。
+
+## 7.1. 基础镜像克隆（快速创建新 VM）
+
+适合先装好 1 台「干净系统 + 浅层 stealth」当模板，后续不再走 ISO 装系统：
+
+```bash
+# 把已经装好的 instance 2 固化为 base（VM 必须先关机）
+deploy/scripts/seal-base.sh 2 win10-ltsc-shallow
+# -> /home/ubuntu/images/vms/_base/win10-ltsc-shallow.qcow2 （只读）
+
+# 用 base 克隆出新 instance 4（增量盘，硬件身份重新随机）
+deploy/scripts/clone-from-base.sh win10-ltsc-shallow 4
+# -> /home/ubuntu/images/vms/4/disk.qcow2  (qcow2 backed by base)
+# -> /home/ubuntu/images/vms/4/profile     (新随机 CPU/主板/GPU/MAC)
+
+# 直接启动
+DISPLAY=:1 deploy/scripts/start-vm.sh 4
+```
+
+或不通过 seal/clone，直接在 `start-vm.sh` 加 `BASE_IMAGE=`：
+
+```bash
+BASE_IMAGE=/home/ubuntu/images/vms/_base/win10-ltsc-shallow.qcow2 \
+    DISPLAY=:1 deploy/scripts/start-vm.sh 5
+# 首次启动前自动建增量盘
+```
+
+⚠️ 没有 sysprep 的话克隆出的 VM 与 base 共享 SID/MachineGUID；
+单机用没问题，多机并发 / 域加入会冲突。需要彻底干净就在 base 里跑 `sysprep /generalize /oobe` 后再 seal-base.sh。
 
 ## 8. 停机
 
@@ -181,7 +210,7 @@ sshpass -p 123456 scp Administrator@<guest>:'C:/Windows/Minidump/*.dmp' /tmp/
 deploy/efiguard/analyze-minidump.sh /tmp/<dump>.dmp
 
 # offline 改 ESP（guest 关机后）
-sudo qemu-nbd --connect=/dev/nbd0 /home/ubuntu/images/win10-inst<N>.qcow2
+sudo qemu-nbd --connect=/dev/nbd0 /home/ubuntu/images/vms/<N>/disk.qcow2
 sudo mount /dev/nbd0p1 /mnt/esp
 # ... 改文件 ...
 sudo umount /mnt/esp

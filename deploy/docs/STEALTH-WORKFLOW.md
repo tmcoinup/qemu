@@ -57,9 +57,9 @@ DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
 ```
 
 启动器会自动：
-- 在 `/home/ubuntu/images/win10-inst<N>.qcow2` 创建空白 512GB 盘
-- 在 `/home/ubuntu/images/stealth-inst<N>.profile` 随机出一份硬件身份并固化
-- `/home/ubuntu/images/ovmf-vars-<N>.fd` 独立 NVRAM
+- 在 `/home/ubuntu/images/vms/<N>/disk.qcow2` 创建空白 512GB 盘
+- 在 `/home/ubuntu/images/vms/<N>/profile` 随机出一份硬件身份并固化
+- `/home/ubuntu/images/vms/<N>/ovmf-vars.fd` 独立 NVRAM
 - 端口分配：`10022+N` (SSH fwd)、`13389+N` (RDP fwd)、`5900+N-1` (VNC)
 
 走 OOBE：选语言 → 创建本地账户 `Administrator` / `123456` → 进桌面。

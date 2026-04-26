@@ -458,7 +458,7 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 | `hw/display/edid-generate.c` | `serial_nr = atoi(info->serial)` 修复：当 atoi 返回 0（字母开头序列号）时改用 djb2 hash 兜底，使 EDID 12-15 字节的二进制序列号与 descriptor 字符串序列号同时为非零、互相一致 |
 | `hw/smbios/smbios.c` | Type16 `error_correction` 由 `0x06` (Multi-bit ECC) 改为 `0x03` (None)，符合 Ryzen 3 1200 / B350 / HyperX 非 ECC DDR4 配置；`location` 由 `0x01` (Other) 改为 `0x03` (System board or motherboard) |
 
-**VM2（`/home/ubuntu/images/win10-inst2.qcow2`，Win10 LTSC 19044，bridge 192.168.30.144）客机内验证：**
+**VM2（`/home/ubuntu/images/vms/2/disk.qcow2`，Win10 LTSC 19044，bridge 192.168.30.144）客机内验证：**
 
 | 检测项 | 结果 |
 |---|---|

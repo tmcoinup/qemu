@@ -270,11 +270,23 @@ if [[ "${IVSHMEM_SIZE_MB:-0}" -gt 0 ]]; then
         truncate -s "${IVSHMEM_BYTES}" "$IVSHMEM_PATH"
         chmod 660 "$IVSHMEM_PATH"
     fi
+    # PCI identity stealth (patched into QEMU's hw/misc/ivshmem-pci.c):
+    #   - main vendor/device kept at 0x1AF4:0x1110 so the Looking Glass
+    #     ivshmem.sys driver still binds (its INF matches that pair)
+    #   - subsystem IDs forged to NVIDIA (0x10DE) so PCI subsystem
+    #     vendor in device manager doesn't read "Red Hat" — instead it
+    #     looks like an OEM NVIDIA system device (0x10DE:0x1551 is one
+    #     of NVIDIA's real SMU/system device subsys IDs from MCP/Tegra
+    #     SoCs, plausible to a casual eye)
+    #   - class 0x05/0x80 (Memory Controller / Other) instead of the
+    #     default 0x05/0x00 (RAM Controller) — "Other Memory Controller"
+    #     reads as boring SoC peripheral, not "shared RAM"
+    #   - revision 0xa1 — non-zero, looks shipping
     IVSHMEM_ARGS=(
         -object "memory-backend-file,id=ivshm,mem-path=${IVSHMEM_PATH},size=${IVSHMEM_BYTES},share=on"
-        -device "ivshmem-plain,memdev=ivshm,bus=pcie.0,addr=0x12"
+        -device "ivshmem-plain,memdev=ivshm,bus=pcie.0,addr=0x12,x-pci-sub-vendor-id=0x10DE,x-pci-sub-device-id=0x1551,x-pci-class-id=0x058000,x-pci-revision=0xa1"
     )
-    echo "  ivshmem: ${IVSHMEM_PATH} (${IVSHMEM_SIZE_MB} MB) → guest PCI 00:12.0"
+    echo "  ivshmem: ${IVSHMEM_PATH} (${IVSHMEM_SIZE_MB} MB) → guest PCI 00:12.0 (stealth subsys=0x10DE:0x1551)"
 fi
 
 echo "启动 VM ${VM_ID} 模式=${MODE}"

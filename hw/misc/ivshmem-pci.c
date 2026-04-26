@@ -117,6 +117,20 @@ struct IVShmemState {
     /* migration stuff */
     OnOffAuto master;
     Error *migration_blocker;
+
+    /* PCI identity overrides (stealth) — when non-zero, override the
+     * defaults the class_init writes into PCI config space. Lets the
+     * device blend in with the host's spoofed motherboard / GPU
+     * vendor instead of advertising RedHat/QUMRANET to the guest's
+     * device manager. The main vendor/device IDs are deliberately
+     * NOT overridable: the Looking Glass ivshmem.sys driver matches
+     * on PCI\VEN_1AF4&DEV_1110 in its INF, so changing those would
+     * un-bind the driver. Subsystem IDs + class + revision are free
+     * to twist. */
+    uint16_t sub_vendor_id;
+    uint16_t sub_device_id;
+    uint8_t  rev_override;
+    uint32_t class_override;
 };
 
 /* registers for the Inter-VM shared memory device */
@@ -1044,6 +1058,11 @@ static const Property ivshmem_plain_properties[] = {
     DEFINE_PROP_ON_OFF_AUTO("master", IVShmemState, master, ON_OFF_AUTO_OFF),
     DEFINE_PROP_LINK("memdev", IVShmemState, hostmem, TYPE_MEMORY_BACKEND,
                      HostMemoryBackend *),
+    /* Stealth knobs — see "PCI identity overrides" in IVShmemState. */
+    DEFINE_PROP_UINT16("x-pci-sub-vendor-id", IVShmemState, sub_vendor_id, 0),
+    DEFINE_PROP_UINT16("x-pci-sub-device-id", IVShmemState, sub_device_id, 0),
+    DEFINE_PROP_UINT8 ("x-pci-revision",      IVShmemState, rev_override,  0),
+    DEFINE_PROP_UINT32("x-pci-class-id",      IVShmemState, class_override, 0),
 };
 
 static void ivshmem_plain_realize(PCIDevice *dev, Error **errp)
@@ -1060,6 +1079,29 @@ static void ivshmem_plain_realize(PCIDevice *dev, Error **errp)
     }
 
     ivshmem_common_realize(dev, errp);
+    if (errp && *errp) return;
+
+    /* Apply stealth overrides into PCI config space *after* the common
+     * realize has populated defaults. We only touch the standard 64-byte
+     * PCI header — no extended capabilities to worry about. */
+    if (s->sub_vendor_id) {
+        pci_set_word(dev->config + PCI_SUBSYSTEM_VENDOR_ID, s->sub_vendor_id);
+    }
+    if (s->sub_device_id) {
+        pci_set_word(dev->config + PCI_SUBSYSTEM_ID, s->sub_device_id);
+    }
+    if (s->rev_override) {
+        dev->config[PCI_REVISION_ID] = s->rev_override;
+    }
+    if (s->class_override) {
+        /* PCI class is 24 bits at offset 0x09 (rev) + 0x0A (subclass) +
+         * 0x0B (base class). Layout in our uint32 is base<<16 | sub<<8 |
+         * progIF, matching the convention used by lib/vgpu-mdev.sh and
+         * QEMU's pci_config_set_class(). */
+        pci_set_byte(dev->config + PCI_CLASS_PROG, s->class_override & 0xFF);
+        pci_set_word(dev->config + PCI_CLASS_DEVICE,
+                     (s->class_override >> 8) & 0xFFFF);
+    }
 }
 
 static void ivshmem_plain_class_init(ObjectClass *klass, const void *data)

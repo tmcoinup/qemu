@@ -18,7 +18,7 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-PROFILE_DIR="${PROFILE_DIR:-/home/ubuntu/images}"
+VMS_DIR="${VMS_DIR:-/home/ubuntu/images/vms}"
 
 usage() {
     sed -n '2,/^# --*$/p' "$0" | sed -e 's/^# *//' -e 's/^#$//' >&2
@@ -32,13 +32,13 @@ fi
 targets=()
 if [[ "$1" == "--all" ]]; then
     shopt -s nullglob
-    for f in "$PROFILE_DIR"/stealth-inst*.profile; do
-        n="${f##*/stealth-inst}"; n="${n%.profile}"
+    for f in "$VMS_DIR"/[0-9]*/profile; do
+        n="${f%/profile}"; n="${n##*/}"
         targets+=("$n")
     done
     shopt -u nullglob
     if (( ${#targets[@]} == 0 )); then
-        echo ">> no saved profiles found in $PROFILE_DIR"
+        echo ">> no saved profiles found in $VMS_DIR/<N>/profile"
         exit 0
     fi
 else
@@ -52,7 +52,7 @@ else
 fi
 
 for n in "${targets[@]}"; do
-    f="$PROFILE_DIR/stealth-inst${n}.profile"
+    f="$VMS_DIR/${n}/profile"
     if [[ -f "$f" ]]; then
         rm -f "$f"
         echo ">> removed $f (instance $n will re-roll on next launch)"

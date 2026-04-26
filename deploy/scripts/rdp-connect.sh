@@ -39,7 +39,7 @@ done
 USER_NAME="${RDP_USER:-Administrator}"
 PASS="${RDP_PASS:-123456}"
 SIZE="${RDP_SIZE:-1600x900}"
-PROFILE="/home/ubuntu/images/stealth-inst${INSTANCE}.profile"
+PROFILE="/home/ubuntu/images/vms/${INSTANCE}/profile"
 
 resolve_from_neigh() {
     local mac="$1"

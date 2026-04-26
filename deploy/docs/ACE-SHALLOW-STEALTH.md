@@ -84,7 +84,7 @@ DISPLAY=:1 deploy/scripts/start-vm.sh 2
 - BRIDGE 默认 `br0`
 - STABLE_DISPLAY 默认 `1`（virtio-vga，无 GL，ACE 友好，且不会因为 virgl bug 长时间运行 BSOD）
 - GPU_SELFSIGNED 默认 `0`（PCI 主 ID 留 1AF4:1050，stock 驱动可绑）
-- CPU_MODEL 从 `stealth-inst2.profile` 读取（首次为 Ryzen3-1200）
+- CPU_MODEL 从 `vms/<N>/profile` 读取（首次随机生成，AMD Ryzen3-1200/2300X 或 Intel i3-9100F/G6400/G5400 等）
 
 ---
 

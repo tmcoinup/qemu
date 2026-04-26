@@ -1,7 +1,11 @@
 ﻿param(
     [string]$Subkey = "",
     [switch]$ListOnly,
-    [switch]$SkipTask     # skip the scheduled-task install step
+    [switch]$SkipTask,                          # skip the scheduled-task install step
+    [string]$SpoofName    = 'NVIDIA GeForce GTX 1050',
+    [string]$SpoofVendor  = 'NVIDIA',           # 'NVIDIA' / 'AMD'
+    [int]   $SpoofRamMb   = 2048,               # 显存 MB（注册表 HardwareInformation.MemorySize）
+    [string]$SpoofBios    = 'Version 86.07.48.00.38'
 )
 
 # apply-gpu-spoof.ps1 - run INSIDE the Win10 guest, as Administrator.
@@ -37,8 +41,11 @@
 #   powershell -ExecutionPolicy Bypass -File .\apply-gpu-spoof.ps1 -ListOnly
 #   powershell -ExecutionPolicy Bypass -File .\apply-gpu-spoof.ps1 -SkipTask
 
-$spoofName    = 'NVIDIA GeForce GTX 1050'
-$spoofVendor  = 'NVIDIA'                                 # Win32_VideoController.AdapterCompatibility / DxDiag 制造商
+# 参数化（来自 -SpoofName/-SpoofVendor，默认仍是 GTX 1050 兼容老调用方式）
+$spoofName    = $SpoofName
+$spoofVendor  = $SpoofVendor                             # Win32_VideoController.AdapterCompatibility / DxDiag 制造商
+$spoofBios    = $SpoofBios                               # HardwareInformation.BiosString (随机 NVIDIA/AMD)
+$spoofRamMb   = $SpoofRamMb                              # HardwareInformation.MemorySize (字节 = $spoofRamMb * 1MB)
 # Monitor 字段必须和 EDID 协调一致:
 #   QEMU edid-generate.c 现在把 EDID 上报为 SAM:0x0F65 + week32/2018,
 #   PnP HardwareID 自动变成 MONITOR\SAM0F65 — 这是真实 Samsung S24F350F
@@ -219,18 +226,22 @@ if (-not $targets) {
 foreach ($t in $targets) {
     Write-Host ""
     Write-Host ("Patching class " + $t.Sub + " (was: " + $t.Desc + ")") -ForegroundColor Cyan
+    # ChipType (GPU-Z 等读 HardwareInformation.ChipType): 用 SpoofName 去掉 vendor 前缀作为芯片型号
+    $chipType = $spoofName -replace '^(NVIDIA|AMD)\s+', ''
+    # MemorySize: $spoofRamMb * 1MB. byte[] little-endian QWORD.
+    $memBytes = [BitConverter]::GetBytes([UInt64]$spoofRamMb * 1MB)
+
     Set-ItemProperty -Path $t.Path -Name "DriverDesc"   -Type String -Value $spoofName
-    Set-ItemProperty -Path $t.Path -Name "ProviderName" -Type String -Value "NVIDIA"
-    Set-ItemProperty -Path $t.Path -Name "MatchingDeviceId" -Type String -Value "PCI\VEN_10DE&DEV_1C81"
+    Set-ItemProperty -Path $t.Path -Name "ProviderName" -Type String -Value $spoofVendor
     Set-ItemProperty -Path $t.Path -Name "HardwareInformation.AdapterString" -Type String -Value $spoofName
-    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.ChipType"      -Type String -Value "GeForce GTX 1050"
+    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.ChipType"      -Type String -Value $chipType
     Set-ItemProperty -Path $t.Path -Name "HardwareInformation.DacType"       -Type String -Value "Integrated RAMDAC"
-    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.BiosString"    -Type String -Value "Version 86.07.48.00.38"
-    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.MemorySize" -Type Binary -Value ([byte[]](0x00,0x00,0x00,0x80))
+    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.BiosString"    -Type String -Value $spoofBios
+    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.MemorySize" -Type Binary -Value $memBytes[0..3]
     if (Get-ItemProperty -Path $t.Path -Name "HardwareInformation.qwMemorySize" -ErrorAction SilentlyContinue) {
         Remove-ItemProperty -Path $t.Path -Name "HardwareInformation.qwMemorySize"
     }
-    New-ItemProperty -Path $t.Path -Name "HardwareInformation.qwMemorySize" -PropertyType QWord -Value 0x80000000 | Out-Null
+    New-ItemProperty -Path $t.Path -Name "HardwareInformation.qwMemorySize" -PropertyType QWord -Value ([UInt64]$spoofRamMb * 1MB) | Out-Null
     # PnP properties on class subkey (fallback for Driver tab)
     Set-DevProp -DevPath $t.Path -Fmtid $fmtDev -PidHex '0004' -Value $spoofName
     Set-DevProp -DevPath $t.Path -Fmtid $fmtDev -PidHex '0009' -Value $spoofVendor
@@ -336,10 +347,25 @@ if (-not $SkipTask) {
     $scriptPath = Join-Path $scriptDir 'refresh-gpu-name.ps1'
     New-Item -Path $scriptDir -ItemType Directory -Force | Out-Null
 
+    # 把当前 spoof 配置持久化到 HKLM:\SOFTWARE\StealthGPU，让开机后的 refresh
+    # 任务读到当前 VM 实际选定的 GPU（不再硬编码 GTX 1050）。
+    New-Item -Path 'HKLM:\SOFTWARE\StealthGPU' -Force | Out-Null
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\StealthGPU' -Name SpoofName    -Type String -Value $spoofName
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\StealthGPU' -Name SpoofVendor  -Type String -Value $spoofVendor
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\StealthGPU' -Name SpoofBios    -Type String -Value $spoofBios
+    Set-ItemProperty -Path 'HKLM:\SOFTWARE\StealthGPU' -Name SpoofRamMb   -Type DWord  -Value $spoofRamMb
+
     $body = @'
 $ErrorActionPreference = 'SilentlyContinue'
-$spoofName    = 'NVIDIA GeForce GTX 1050'
-$spoofVendor  = 'NVIDIA'
+# 从 HKLM:\SOFTWARE\StealthGPU 读出本 VM 选定的 spoof 名称（apply-gpu-spoof.ps1
+# 安装时写入），缺省回退到 GTX 1050 兼容老安装。
+$cfg = Get-ItemProperty 'HKLM:\SOFTWARE\StealthGPU' -ErrorAction SilentlyContinue
+$spoofName    = if ($cfg.SpoofName)   { $cfg.SpoofName }   else { 'NVIDIA GeForce GTX 1050' }
+$spoofVendor  = if ($cfg.SpoofVendor) { $cfg.SpoofVendor } else { 'NVIDIA' }
+$spoofBios    = if ($cfg.SpoofBios)   { $cfg.SpoofBios }   else { 'Version 86.07.48.00.38' }
+$spoofRamMb   = if ($cfg.SpoofRamMb)  { [int]$cfg.SpoofRamMb } else { 2048 }
+$chipType     = $spoofName -replace '^(NVIDIA|AMD)\s+', ''
+$memBytes     = [BitConverter]::GetBytes([UInt64]$spoofRamMb * 1MB)
 $monitorName  = 'Samsung S24F350F'
 $monitorMfg   = 'Samsung Electronics Co., Ltd.'
 $monitorHwId  = 'MONITOR\SAM0F65'
@@ -405,10 +431,11 @@ foreach ($sub in Get-ChildItem $classRoot) {
         Set-ItemProperty -Path $p -Name DriverDesc   -Type String -Value $spoofName
         Set-ItemProperty -Path $p -Name ProviderName -Type String -Value $spoofVendor
         Set-ItemProperty -Path $p -Name 'HardwareInformation.AdapterString' -Type String -Value $spoofName
-        Set-ItemProperty -Path $p -Name 'HardwareInformation.ChipType'      -Type String -Value 'GeForce GTX 1050'
+        Set-ItemProperty -Path $p -Name 'HardwareInformation.ChipType'      -Type String -Value $chipType
         Set-ItemProperty -Path $p -Name 'HardwareInformation.DacType'       -Type String -Value 'Integrated RAMDAC'
-        Set-ItemProperty -Path $p -Name 'HardwareInformation.BiosString'    -Type String -Value 'Version 86.07.48.00.38'
-        Set-ItemProperty -Path $p -Name 'HardwareInformation.MemorySize' -Type Binary -Value ([byte[]](0x00,0x00,0x00,0x80))
+        Set-ItemProperty -Path $p -Name 'HardwareInformation.BiosString'    -Type String -Value $spoofBios
+        Set-ItemProperty -Path $p -Name 'HardwareInformation.MemorySize' -Type Binary -Value $memBytes[0..3]
+        New-ItemProperty -Path $p -Name 'HardwareInformation.qwMemorySize' -PropertyType QWord -Value ([UInt64]$spoofRamMb * 1MB) -Force | Out-Null
         Set-DevProp -DevPath $p -Fmtid $fmtDev -PidHex '0004' -Value $spoofName
         Set-DevProp -DevPath $p -Fmtid $fmtDev -PidHex '0009' -Value $spoofVendor
     }

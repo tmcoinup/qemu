@@ -84,8 +84,39 @@ try {
 }
 
 Write-Host ""
-Write-Host "  running apply-gpu-spoof.ps1 -SkipTask=`$false" -ForegroundColor Yellow
-& powershell -NoProfile -ExecutionPolicy Bypass -File $spoof 2>&1 | Select-Object -Last 30
+Write-Host "  探测当前 GPU subsys，找到对应的 spoof 名称" -ForegroundColor Yellow
+
+# 按 PCI subsys ID 反查 GPU 池：launcher 的 stealth_pick_profile 把随机选定的
+# GPU 写到 virtio-vga 的 subsys，guest 这边读 InstanceId 拿到 SUBSYS 串然后查表。
+$gpuMap = @{
+    '138010DE' = @{ Name='NVIDIA GeForce GTX 750 Ti'; Vendor='NVIDIA'; Bios='Version 82.07.41.00.32'; RamMb=2048 }
+    '1D0110DE' = @{ Name='NVIDIA GeForce GT 1030';    Vendor='NVIDIA'; Bios='Version 86.08.46.00.81'; RamMb=2048 }
+    '1C8110DE' = @{ Name='NVIDIA GeForce GTX 1050';   Vendor='NVIDIA'; Bios='Version 86.07.48.00.38'; RamMb=2048 }
+    '1C8210DE' = @{ Name='NVIDIA GeForce GTX 1050 Ti';Vendor='NVIDIA'; Bios='Version 86.07.48.00.A0'; RamMb=4096 }
+    '699F1002' = @{ Name='AMD Radeon RX 550';         Vendor='AMD';    Bios='016.011.000.029.000000'; RamMb=2048 }
+    '67FF1002' = @{ Name='AMD Radeon RX 560';         Vendor='AMD';    Bios='016.011.000.029.000000'; RamMb=4096 }
+}
+$gpuDev = Get-PnpDevice -Class Display | Where-Object { $_.Status -ne 'Unknown' } | Select-Object -First 1
+$cfg = $null
+if ($gpuDev -and $gpuDev.InstanceId -match 'SUBSYS_([0-9A-Fa-f]{8})') {
+    $subsys = $matches[1].ToUpper()
+    if ($gpuMap.ContainsKey($subsys)) {
+        $cfg = $gpuMap[$subsys]
+        Write-Host "  匹配到: subsys=$subsys -> $($cfg.Name)" -ForegroundColor Gray
+    } else {
+        Write-Host "  subsys=$subsys 未在已知池中，使用默认 GTX 1050" -ForegroundColor Yellow
+    }
+}
+if (-not $cfg) {
+    $cfg = @{ Name='NVIDIA GeForce GTX 1050'; Vendor='NVIDIA'; Bios='Version 86.07.48.00.38'; RamMb=2048 }
+}
+
+& powershell -NoProfile -ExecutionPolicy Bypass -File $spoof `
+    -SpoofName   $cfg.Name `
+    -SpoofVendor $cfg.Vendor `
+    -SpoofBios   $cfg.Bios `
+    -SpoofRamMb  $cfg.RamMb `
+    2>&1 | Select-Object -Last 30
 
 # ----------------------------------------------------------------------
 # 4) Final state

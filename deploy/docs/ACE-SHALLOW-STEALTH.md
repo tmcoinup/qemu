@@ -43,7 +43,7 @@ ls deploy/scripts/stock-viogpudo/
 #   viogpudo.sys  viogpudo.cat  viogpudo.inf
 
 # HTTP 服务器（一次起好，多 VM 共用）
-cd deploy/scripts && python3 -m http.server 8765 --bind 192.168.30.<host-ip-on-br0> &
+nohup python3 deploy/scripts/serve-stealth-http.py 8765 &> /tmp/serve-http.log &
 ```
 
 ---

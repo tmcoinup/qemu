@@ -41,7 +41,7 @@
 # 1. 一次性宿主准备
 sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
 deploy/tools/build.sh                                # build patched QEMU
-cd deploy/scripts && python3 -m http.server 8765 --bind 192.168.30.<host-ip-on-br0> &
+nohup python3 deploy/scripts/serve-stealth-http.py 8765 &> /tmp/serve-http.log &
 
 # 2. 装系统（autounattend 自动跳过 OOBE，~10 分钟到桌面）
 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \

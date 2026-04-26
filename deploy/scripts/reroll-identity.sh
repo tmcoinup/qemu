@@ -3,7 +3,7 @@
 # reroll-identity.sh [INSTANCE ...]
 #
 # Deletes the saved hardware-identity profile(s) so the next launch of
-# win10-ryzen3-stealth.sh regenerates a random motherboard / serials / MAC
+# start-vm.sh regenerates a random motherboard / serials / MAC
 # / UUID for those instance(s).
 #
 # The VM qcow2 disk, OVMF NVRAM, and installed OS are untouched — only

@@ -51,14 +51,14 @@ sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
 
 ```bash
 # 最简（90% 情况）
-DISPLAY=:1 deploy/scripts/start-vm.sh 1            # instance 1
-DISPLAY=:1 deploy/scripts/start-vm.sh 2            # instance 2
+deploy/scripts/start-vm.sh 1            # instance 1
+deploy/scripts/start-vm.sh 2            # instance 2
 
 # 装系统时挂 ISO
-DISPLAY=:1 deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
+deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
 
 # 反正向 OOBE 自动跳过：再挂一张 autounattend 副 ISO
-DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
     deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
 ```
 
@@ -73,8 +73,9 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
 | `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |
 | `HEADLESS` | 0 | 1 = `-display none -vnc 127.0.0.1:N-1`，无 SDL 窗口 |
-| `RAM` | 8192 | 单位 MB |
+| `RAM` | 4096 | 单位 MB（4GB 双通道 = 2×2GB） |
 | `MEM_PER_DIMM_MB` | RAM/2 | DIMM 总量自动除 2 凑双通道 SPD |
+| `DISPLAY` | `:0` | X11 显示，未设默认本地 :0；HEADLESS=1 时忽略 |
 | `EXTRA_ISO=PATH` | - | 副 CDROM（autounattend.xml / 驱动盘 等） |
 | `--iso=PATH` | - | 主启动 ISO（装系统） |
 | `--reroll` | - | 删掉 `vms/<N>/profile` 重新随机一次硬件身份 |
@@ -108,11 +109,11 @@ deploy/scripts/install-stealth.sh <INSTANCE>
 
 ```bash
 # Terminal A (装 VM1，挂 autounattend 全自动)
-DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
     deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
 
 # Terminal B (装 VM2)
-DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
     deploy/scripts/start-vm.sh 2 --iso=/home/ubuntu/images/win10_ltsc.iso
 
 # 装好后给两个分别跑一次 stealth 安装
@@ -141,14 +142,14 @@ deploy/scripts/clone-from-base.sh win10-ltsc-shallow 4
 # -> /home/ubuntu/images/vms/4/profile     (新随机 CPU/主板/GPU/MAC)
 
 # 直接启动
-DISPLAY=:1 deploy/scripts/start-vm.sh 4
+deploy/scripts/start-vm.sh 4
 ```
 
 或不通过 seal/clone，直接在 `start-vm.sh` 加 `BASE_IMAGE=`：
 
 ```bash
 BASE_IMAGE=/home/ubuntu/images/vms/_base/win10-ltsc-shallow.qcow2 \
-    DISPLAY=:1 deploy/scripts/start-vm.sh 5
+    deploy/scripts/start-vm.sh 5
 # 首次启动前自动建增量盘
 ```
 

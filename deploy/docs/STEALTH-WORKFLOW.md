@@ -49,10 +49,10 @@ deploy/driver-signing/scripts/sign-backdated.sh \
 
 ```bash
 # 启动到 ISO 安装
-DISPLAY=:1 deploy/scripts/start-vm.sh 2 --iso=/path/to/win10_ltsc.iso
+deploy/scripts/start-vm.sh 2 --iso=/path/to/win10_ltsc.iso
 
 # 想全自动跳过 OOBE：附加 autounattend ISO
-DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
     deploy/scripts/start-vm.sh 2 --iso=/path/to/win10_ltsc.iso
 ```
 
@@ -125,7 +125,7 @@ Trusted Root           : 无非标根证书
 启动器命令保持默认 `GPU_SELFSIGNED=0`：
 
 ```bash
-DISPLAY=:1 deploy/scripts/start-vm.sh <INSTANCE>
+deploy/scripts/start-vm.sh <INSTANCE>
 ```
 
 → 进游戏，ACE 验证通过。
@@ -170,7 +170,7 @@ ConfigManagerErrorCode : 0
 irm http://192.168.30.<host>:8765/destealth-revert.ps1 | iex
 # 关机
 # host 重启（保持 GPU_SELFSIGNED=0 默认）
-DISPLAY=:1 deploy/scripts/start-vm.sh <INSTANCE>
+deploy/scripts/start-vm.sh <INSTANCE>
 # guest 内再跑浅层
 irm http://192.168.30.<host>:8765/shallow-stealth.ps1 | iex
 ```
@@ -192,16 +192,16 @@ irm http://192.168.30.<host>:8765/shallow-stealth.ps1 | iex
 
 ```bash
 # VM1
-DISPLAY=:1 nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
+nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
 
 # VM2
-DISPLAY=:1 nohup deploy/scripts/start-vm.sh 2 > /tmp/qemu2.log 2>&1 &
+nohup deploy/scripts/start-vm.sh 2 > /tmp/qemu2.log 2>&1 &
 ```
 
 需要深层路径（无 ACE 类反作弊）时加 `GPU_SELFSIGNED=1`：
 
 ```bash
-DISPLAY=:1 GPU_SELFSIGNED=1 nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
+GPU_SELFSIGNED=1 nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
 ```
 
 注意：

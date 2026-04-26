@@ -44,7 +44,7 @@ deploy/tools/build.sh                                # build patched QEMU
 cd deploy/scripts && python3 -m http.server 8765 --bind 192.168.30.<host-ip-on-br0> &
 
 # 2. 装系统（autounattend 自动跳过 OOBE，~10 分钟到桌面）
-DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
     deploy/scripts/start-vm.sh 2 --iso=/home/ubuntu/images/win10_ltsc.iso
 
 # 3. 装完进桌面，guest 管理员 PowerShell：
@@ -52,7 +52,7 @@ DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
 #    （拉 stock viogpudo + 注册表覆盖 + 重启）
 
 # 4. 日常启动（无任何 env var）
-DISPLAY=:1 deploy/scripts/start-vm.sh 2
+deploy/scripts/start-vm.sh 2
 ```
 
 简化版（深层 / 无 ACE）：
@@ -62,7 +62,7 @@ DISPLAY=:1 deploy/scripts/start-vm.sh 2
 # 3. 一键全套 stealth（host）
 deploy/scripts/install-stealth.sh 2
 # 4. 日常启动（带 GPU_SELFSIGNED=1）
-DISPLAY=:1 GPU_SELFSIGNED=1 deploy/scripts/start-vm.sh 2
+GPU_SELFSIGNED=1 deploy/scripts/start-vm.sh 2
 ```
 
 ## 多 VM

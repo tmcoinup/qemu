@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+#
+# setup-guest.sh — one-shot bootstrap for everything streaming-related
+# inside a guest. Run this ONCE on a freshly-installed guest (after
+# Windows install + WinRM enabled + initial vGPU bring-up). On every
+# subsequent code update just rerun individual installers.
+#
+# What it does (in order):
+#   1. Install vGPU GRID 553.24 driver       (install-vgpu-driver.sh)
+#   2. Install ivshmem.sys driver            (install-ivshmem-driver.sh)
+#   3. Install NvDisplayContainer Windows    (install-nv-service.sh --shmem)
+#      service + nv_stream_relay + AudioSvcHost, set Mode=shmem +
+#      DesktopWidth/Height registry keys
+#   4. patch-grid-strings.ps1 → "GeForce GT 1030"
+#      (and register a RefreshGridNames Scheduled Task so PnP cold-
+#       starts can't undo it)
+#
+# After this finishes, on the host:
+#     ./connect.sh <vm_id>
+#
+# Skip individual steps:
+#     ./setup-guest.sh 1 --skip-vgpu       # already installed
+#     ./setup-guest.sh 1 --skip-ivshmem
+#     ./setup-guest.sh 1 --skip-stealth    # don't rename GPU
+#
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")"
+
+VM_ID=${VM_ID:-1}
+IP_OVERRIDE=""
+GPU_NAME="${GPU_NAME:-GeForce GT 1030}"
+
+SKIP_VGPU=0
+SKIP_IVSHMEM=0
+SKIP_SERVICE=0
+SKIP_STEALTH=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --ip)            IP_OVERRIDE="$2"; shift 2 ;;
+        --skip-vgpu)     SKIP_VGPU=1; shift ;;
+        --skip-ivshmem)  SKIP_IVSHMEM=1; shift ;;
+        --skip-service)  SKIP_SERVICE=1; shift ;;
+        --skip-stealth)  SKIP_STEALTH=1; shift ;;
+        --gpu-name)      GPU_NAME="$2"; shift 2 ;;
+        -h|--help)       sed -n '3,28p' "$0"; exit 0 ;;
+        *.*.*.*)         IP_OVERRIDE="$1"; shift ;;
+        [0-9]*)          VM_ID="$1"; shift ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+ip_arg=""
+[[ -n "$IP_OVERRIDE" ]] && ip_arg="--ip $IP_OVERRIDE"
+
+# Always make sure the host http.server is up (most installers need it)
+if ! ss -tln 2>/dev/null | grep -q ':8080 '; then
+    echo "[setup-guest] starting http.server on 8080"
+    ( cd /home/ubuntu/Downloads/nv-deploy && nohup python3 -m http.server 8080 \
+        > /tmp/nv-http.log 2>&1 & )
+    sleep 1
+fi
+
+step() { echo; echo "════════════════════ $* ════════════════════"; }
+
+if [[ $SKIP_VGPU -eq 0 ]]; then
+    step "[1/4] vGPU 17.4 driver (553.24)"
+    ./install-vgpu-driver.sh "$VM_ID" $ip_arg --no-reboot
+fi
+
+if [[ $SKIP_IVSHMEM -eq 0 ]]; then
+    step "[2/4] ivshmem.sys driver"
+    ./install-ivshmem-driver.sh "$VM_ID" $ip_arg
+fi
+
+if [[ $SKIP_SERVICE -eq 0 ]]; then
+    step "[3/4] NvDisplayContainer service + nv_stream_relay + AudioSvcHost (shmem mode)"
+    ./install-nv-service.sh "$VM_ID" $ip_arg --shmem
+fi
+
+if [[ $SKIP_STEALTH -eq 0 ]]; then
+    step "[4/4] GPU name spoof: '${GPU_NAME}' + RefreshGridNames task"
+    cp -f guest/patch-grid-strings.ps1 /home/ubuntu/Downloads/nv-deploy/
+
+    HOST_IP=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    [[ -n "$HOST_IP" ]] || HOST_IP="192.168.30.127"
+
+    if [[ -z "$IP_OVERRIDE" ]]; then
+        conf="vm-configs/vm${VM_ID}.conf"
+        # shellcheck source=/dev/null
+        source "$conf"
+        mac_lc=${VM_MAC,,}
+        IP=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" \
+            '$3=="br0" && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}')
+    else
+        IP="$IP_OVERRIDE"
+    fi
+
+    python3 - "$IP" "$HOST_IP" "$GPU_NAME" <<'PYEOF'
+import sys
+from pypsrp.client import Client
+ip, host, gpu = sys.argv[1:4]
+c = Client(ip, username='Administrator', password='123456', ssl=False, auth='ntlm')
+ps = fr'''
+$ProgressPreference = 'SilentlyContinue'
+Invoke-WebRequest 'http://{host}:8080/patch-grid-strings.ps1' `
+    -OutFile C:\nv\patch-grid-strings.ps1 -UseBasicParsing
+& powershell.exe -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 `
+    -TargetName '{gpu}'
+
+# Register a Scheduled Task that runs the patch on every boot AND
+# every interactive logon, so PnP cold-start re-enumeration can't
+# undo it. Runs as SYSTEM (no UI) at boot, again as Administrator
+# on logon. (memory: project_approach_b_reboot_rename.md)
+$tn = 'RefreshGridNames'
+Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA 0
+$a = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 -TargetName "{gpu}"'
+$tBoot  = New-ScheduledTaskTrigger -AtStartup
+$tLogon = New-ScheduledTaskTrigger -AtLogOn
+$prin   = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+$set    = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(2))
+Register-ScheduledTask -TaskName $tn -Action $a -Trigger @($tBoot,$tLogon) `
+    -Principal $prin -Settings $set -Force | Out-Null
+"  RefreshGridNames task registered (Boot + Logon, SYSTEM)"
+
+"=== final state ==="
+Get-CimInstance Win32_VideoController | Format-Table Name, Status -AutoSize | Out-String
+'''
+out, streams, _ = c.execute_ps(ps)
+print(out)
+for e in (streams.error or []): print(f'[err] {e}', file=sys.stderr)
+PYEOF
+fi
+
+echo
+echo "════════════════════ done ════════════════════"
+echo "Connect from host:"
+echo "    ./deploy/connect.sh ${VM_ID}"

@@ -1,5 +1,48 @@
 # QEMU v11.0.0 反虚拟化化 + vGPU 拆分工程（DNF TP 可玩目标）
 
+## 入口脚本（host）
+
+| 命令 | 干什么 |
+|---|---|
+| `./deploy/start-vm.sh <vm_id>` | 启 VM (默认 mode=rdp + ivshmem 64M + vGPU mdev) |
+| `./deploy/down.sh <vm_id>` | 关 VM |
+| `./deploy/setup-guest.sh <vm_id>` | **一次性** bootstrap guest 全套：vGPU 驱动 + ivshmem 驱动 + NvDisplayContainer service + nv_stream_relay + AudioSvcHost + GPU 名字 spoof + 1080p |
+| `./deploy/connect.sh <vm_id>` | 连接 viewer (默认 --dda：DDA + 32x32 dirty-tile + ivshmem + SDL2，0 编解码 0 网络) |
+| `./deploy/service.sh <vm_id> {stop\|start\|status\|restart}` | guest 内 NvDisplayContainer 服务控制；玩 TP-sensitive 游戏前 `stop` 把 stream 全关 |
+
+## 工作流（一台 fresh guest 装好 Windows 后）
+
+```bash
+# 1. host 启 VM
+./deploy/start-vm.sh 1
+
+# 2. host 一键 bootstrap guest
+./deploy/setup-guest.sh 1
+# 这一步装 driver 后会重启 guest；setup 自动等 WinRM 重连
+
+# 3. 之后任何时候连接
+./deploy/connect.sh 1
+```
+
+玩游戏前临时停 stream：
+```bash
+./deploy/service.sh 1 stop      # NvSvcStream / nv_stream_relay 全停，0 GPU 0 网络 0 ring traffic
+# 玩游戏...
+./deploy/service.sh 1 start     # 玩完恢复
+```
+
+数据通路：
+```
+guest:  vGPU desktop ─DDA→ D3D11 staging ─Map→ BGRA bytes ─tile diff→ ivshmem ring
+                                                                             │
+host:   /dev/shm/nv-shmem-vmN ◄──────────────────────────────────────────────┘
+        │
+        └─ stream_client_dda (SDL2): per-tile SDL_UpdateTexture → present
+        └─ X11 input events ─RFB→ ivshmem input ring → AudioSvcHost (local 127.0.0.1)
+```
+
+零网络 listener、无 mpv、无 ffmpeg、无 NVENC、无 codec 库。
+
 ## 本仓库的源码级改动
 
 | 位置 | 改动 |

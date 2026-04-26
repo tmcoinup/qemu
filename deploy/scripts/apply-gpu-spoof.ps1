@@ -8,6 +8,11 @@
     [string]$SpoofBios    = 'Version 86.07.48.00.38'
 )
 
+# zh-CN Win10 默认 console code page = 936 (GBK)，把 Write-Host 中文当 GBK 输出 → 终端乱码。
+try { chcp 65001 | Out-Null } catch {}
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
+$OutputEncoding = [System.Text.UTF8Encoding]::new()
+
 # apply-gpu-spoof.ps1 - run INSIDE the Win10 guest, as Administrator.
 #
 # One-shot installer for the NVIDIA GTX 1050 spoof:

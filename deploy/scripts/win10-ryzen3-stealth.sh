@@ -352,8 +352,10 @@ CMD=(
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
     -drive if=pflash,format=raw,file="$OVMF_VARS"
 
-    # --- CPU: hidden hypervisor, hidden KVM, invtsc, AMD Zen1 profile ---
-    -cpu Ryzen3-1200,kvm=off,hypervisor=off,+invtsc,+topoext,+tsc-deadline,enforce=off,host-phys-bits=on,tsc-freq=3100000000,vendor=AuthenticAMD
+    # --- CPU: hidden hypervisor, hidden KVM, invtsc ---
+    # CPU_MODEL=Ryzen3-1200  → Summit Ridge / Zen 1 (default; Win10-friendly)
+    # CPU_MODEL=Ryzen3-2300X → Pinnacle Ridge / Zen+ (Win11 LTSC supported list)
+    -cpu ${CPU_MODEL:-Ryzen3-1200},kvm=off,hypervisor=off,+invtsc,+topoext,+tsc-deadline,enforce=off,host-phys-bits=on,tsc-freq=$([[ ${CPU_MODEL:-Ryzen3-1200} == Ryzen3-2300X ]] && echo 3500000000 || echo 3100000000),vendor=AuthenticAMD
     -smp cpus=$CPUS,cores=$CPUS,threads=1,sockets=1,maxcpus=$CPUS
 
     # --- Memory: backed by memfd for prealloc, dual-channel via 2 NUMA nodes ---

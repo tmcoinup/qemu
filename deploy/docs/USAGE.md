@@ -54,6 +54,8 @@ sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
 DISPLAY=:1 INSTANCE=<N> BRIDGE=br0 \
     [STABLE_DISPLAY=1] [GPU_SELFSIGNED=1] [HEADLESS=1] \
     deploy/scripts/win10-ryzen3-stealth.sh [--iso=PATH] [--reroll]
+
+DISPLAY=:1 BRIDGE=br0 ./deploy/scripts/win10-ryzen3-stealth.sh 3 --iso=/home/ubuntu/images/win11_ltsc.iso
 ```
 
 | 变量/标志 | 默认 | 说明 |

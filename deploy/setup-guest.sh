@@ -12,8 +12,10 @@
 #      service + nv_stream_relay + AudioSvcHost, set Mode=shmem +
 #      DesktopWidth/Height registry keys
 #   4. patch-grid-strings.ps1 → "GeForce GT 1030"
-#      (and register a RefreshGridNames Scheduled Task so PnP cold-
-#       starts can't undo it)
+#      (and register a RefreshGridNames Scheduled Task at boot so
+#       PnP cold-start re-enum can't undo it)
+#   5. spoof-monitor.ps1 → DELL P2419H (EDID injection + monitor
+#      device cycle, so 设备管理器 shows real-brand monitor name)
 #
 # After this finishes, on the host:
 #     ./connect.sh <vm_id>
@@ -22,6 +24,12 @@
 #     ./setup-guest.sh 1 --skip-vgpu       # already installed
 #     ./setup-guest.sh 1 --skip-ivshmem
 #     ./setup-guest.sh 1 --skip-stealth    # don't rename GPU
+#     ./setup-guest.sh 1 --skip-monitor    # leave monitor as Generic
+#
+# Customize:
+#     ./setup-guest.sh 1 --gpu-name "GeForce GTX 1050"
+#     ./setup-guest.sh 1 --monitor samsung-s24f350
+#     ./setup-guest.sh 1 --monitor lg-27uk850
 #
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
@@ -29,11 +37,13 @@ cd "$(dirname "$(readlink -f "$0")")"
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
 GPU_NAME="${GPU_NAME:-GeForce GT 1030}"
+MONITOR_BRAND="${MONITOR_BRAND:-dell-p2419h}"
 
 SKIP_VGPU=0
 SKIP_IVSHMEM=0
 SKIP_SERVICE=0
 SKIP_STEALTH=0
+SKIP_MONITOR=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,7 +52,9 @@ while [[ $# -gt 0 ]]; do
         --skip-ivshmem)  SKIP_IVSHMEM=1; shift ;;
         --skip-service)  SKIP_SERVICE=1; shift ;;
         --skip-stealth)  SKIP_STEALTH=1; shift ;;
+        --skip-monitor)  SKIP_MONITOR=1; shift ;;
         --gpu-name)      GPU_NAME="$2"; shift 2 ;;
+        --monitor)       MONITOR_BRAND="$2"; shift 2 ;;
         -h|--help)       sed -n '3,28p' "$0"; exit 0 ;;
         *.*.*.*)         IP_OVERRIDE="$1"; shift ;;
         [0-9]*)          VM_ID="$1"; shift ;;
@@ -130,6 +142,42 @@ Register-ScheduledTask -TaskName $tn -Action $a -Trigger $tBoot `
 
 "=== final state ==="
 Get-CimInstance Win32_VideoController | Format-Table Name, Status -AutoSize | Out-String
+'''
+out, streams, _ = c.execute_ps(ps)
+print(out)
+for e in (streams.error or []): print(f'[err] {e}', file=sys.stderr)
+PYEOF
+fi
+
+if [[ $SKIP_MONITOR -eq 0 ]]; then
+    step "[5/5] Monitor EDID spoof: brand=${MONITOR_BRAND}"
+    cp -f guest/spoof-monitor.ps1 /home/ubuntu/Downloads/nv-deploy/
+
+    HOST_IP=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    [[ -n "$HOST_IP" ]] || HOST_IP="192.168.30.127"
+
+    if [[ -z "$IP_OVERRIDE" ]]; then
+        conf="vm-configs/vm${VM_ID}.conf"
+        # shellcheck source=/dev/null
+        source "$conf"
+        mac_lc=${VM_MAC,,}
+        IP=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" \
+            '$3=="br0" && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}')
+    else
+        IP="$IP_OVERRIDE"
+    fi
+
+    python3 - "$IP" "$HOST_IP" "$MONITOR_BRAND" <<'PYEOF'
+import sys
+from pypsrp.client import Client
+ip, host, brand = sys.argv[1:4]
+c = Client(ip, username='Administrator', password='123456', ssl=False, auth='ntlm')
+ps = fr'''
+$ProgressPreference = 'SilentlyContinue'
+Invoke-WebRequest 'http://{host}:8080/spoof-monitor.ps1' `
+    -OutFile C:\nv\spoof-monitor.ps1 -UseBasicParsing
+& powershell.exe -ExecutionPolicy Bypass -File C:\nv\spoof-monitor.ps1 `
+    -Brand '{brand}'
 '''
 out, streams, _ = c.execute_ps(ps)
 print(out)

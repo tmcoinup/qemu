@@ -111,4 +111,3 @@ case "$TRANSPORT" in
 dda) exec "$BIN" --shmem "$SHMEM_PATH" ;;
 tcp) exec "$BIN" --ip "$IP" --vport "$VPORT" --iport "$IPORT" --password "$PASSWORD" ;;
 esac
-fi

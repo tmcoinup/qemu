@@ -1,4 +1,4 @@
-﻿# vm-bootstrap.ps1 — runs INSIDE a freshly installed Win10 guest as Administrator.
+# vm-bootstrap.ps1 — runs INSIDE a freshly installed Win10 guest as Administrator.
 #
 # Bootstraps just enough so the host can SSH in for the rest. Idempotent.
 #

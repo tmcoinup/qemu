@@ -1,4 +1,4 @@
-﻿# destealth-revert.ps1 — back out EfiGuard + patched viogpudo on a guest that
+# destealth-revert.ps1 — back out EfiGuard + patched viogpudo on a guest that
 # already had install-stealth-guest.ps1 applied. Used when ACE/anti-cheat
 # rejects the deeper stealth path. After this script the guest is in
 # "shallow stealth": stock virtio-win driver bound to PCI VEN_1AF4&DEV_1050

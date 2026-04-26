@@ -41,6 +41,11 @@ EXTRA=""
 VNC_DISPLAY=":${VM_ID}"
 DEFAULT_ISO="/home/ubuntu/images/win10-ltsc.iso"
 
+# ivshmem (Inter-VM shared memory) — 用作 stream / 输入数据通道，替代
+# TCP socket。host 后端文件 /dev/shm/nv-shmem-vm${VM_ID}，guest 端通过
+# ivshmem.sys 驱动暴露为 PCI BAR2 内存映射。0=禁用，>0=启用并指定大小。
+IVSHMEM_SIZE_MB=${IVSHMEM_SIZE_MB:-64}
+
 while (( $# > 0 )); do
     case "$1" in
         --install)
@@ -56,6 +61,8 @@ while (( $# > 0 )); do
         --vnc)     VNC_DISPLAY="$2"; shift 2 ;;
         --no-spoof) SPOOF=0; shift ;;    # 装 GRID 驱动时用，暴露真 Quadro PCI ID
         --spoof)    SPOOF=1; shift ;;    # 显式打开（默认即开）
+        --no-shmem) IVSHMEM_SIZE_MB=0; shift ;;     # 禁用 ivshmem 通道
+        --shmem)    IVSHMEM_SIZE_MB="$2"; shift 2 ;; # 指定大小 (MB)
         --extra)   EXTRA="$2"; shift 2 ;;
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
@@ -250,6 +257,26 @@ PIDFILE="$RUN_DIR/vm${VM_ID}.pid"
 MON_SOCK="$RUN_DIR/vm${VM_ID}.mon"
 QMP_SOCK="$RUN_DIR/vm${VM_ID}.qmp"
 
+# ─── ivshmem ──────────────────────────────────────────────────────────────
+# host 后端文件挂在 tmpfs (/dev/shm)，size 必须是 2 的幂次。预创建/截断到
+# 指定大小，guest 一启动 QEMU 就把它 mmap 暴露为 PCI BAR2。
+# guest 装 ivshmem.sys 后可以从 BAR2 直接读写这块内存 — 双方都是同一段
+# host 物理 RAM (kvm 把 host page mapping 直接映射进 guest)。
+IVSHMEM_ARGS=()
+if [[ "${IVSHMEM_SIZE_MB:-0}" -gt 0 ]]; then
+    IVSHMEM_PATH="/dev/shm/nv-shmem-vm${VM_ID}"
+    IVSHMEM_BYTES=$(( IVSHMEM_SIZE_MB * 1024 * 1024 ))
+    if [[ ! -f "$IVSHMEM_PATH" ]] || [[ "$(stat -c%s "$IVSHMEM_PATH" 2>/dev/null || echo 0)" -ne "$IVSHMEM_BYTES" ]]; then
+        truncate -s "${IVSHMEM_BYTES}" "$IVSHMEM_PATH"
+        chmod 660 "$IVSHMEM_PATH"
+    fi
+    IVSHMEM_ARGS=(
+        -object "memory-backend-file,id=ivshm,mem-path=${IVSHMEM_PATH},size=${IVSHMEM_BYTES},share=on"
+        -device "ivshmem-plain,memdev=ivshm,bus=pcie.0,addr=0x12"
+    )
+    echo "  ivshmem: ${IVSHMEM_PATH} (${IVSHMEM_SIZE_MB} MB) → guest PCI 00:12.0"
+fi
+
 echo "启动 VM ${VM_ID} 模式=${MODE}"
 echo "  CPU: ${CPU_MODEL}@${TSC_FREQ}Hz"
 echo "  主板: ${BOARD_BRAND} ${BOARD_MODEL} / ${VM_UUID}"
@@ -278,6 +305,7 @@ exec "$QEMU_BIN" \
     "${GFX_ARGS[@]}" \
     -device qemu-xhci,id=xhci,bus=pcie.0,addr=0x6 -device usb-tablet \
     -device intel-hda,bus=pcie.0,addr=0x7 -device hda-duplex \
+    "${IVSHMEM_ARGS[@]}" \
     -monitor "unix:${MON_SOCK},server,nowait" \
     -qmp "unix:${QMP_SOCK},server,nowait" \
     -pidfile "$PIDFILE" \

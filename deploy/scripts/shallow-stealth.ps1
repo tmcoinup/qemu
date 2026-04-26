@@ -1,4 +1,4 @@
-# shallow-stealth.ps1 — install ACE-friendly GTX 1050 spoof on a guest that
+﻿# shallow-stealth.ps1 — install ACE-friendly GTX 1050 spoof on a guest that
 # already had destealth-revert.ps1 applied (no EfiGuard, no NVIDIA-fake CA,
 # no patched viogpudo).
 #
@@ -20,6 +20,11 @@
 #     irm http://192.168.30.33:8765/shallow-stealth.ps1 | iex
 
 $ErrorActionPreference = 'Continue'
+# zh-CN Win10 默认 console code page = 936 (GBK)，会把中文 Write-Host 输出搞乱码。强制 UTF-8。
+try { chcp 65001 | Out-Null } catch {}
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
+$OutputEncoding = [System.Text.UTF8Encoding]::new()
+
 $base = 'http://192.168.30.33:8765'
 $dst  = 'C:\stealth\nv-stock'
 $null = New-Item -ItemType Directory -Force -Path $dst -ErrorAction SilentlyContinue

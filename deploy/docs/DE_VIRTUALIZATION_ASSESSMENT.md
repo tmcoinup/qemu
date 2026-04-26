@@ -480,7 +480,7 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 **附属：VM2 复活** — 评估时 VM2 处于 GPU code 43（`CM_PROB_FAILED_POST_START`）状态，原因是 stock virtio-win 0.1.266 的 `viogpudo.sys` 把 PCI ID `1AF4:1050` 硬编码在 `CheckHardware` 里，与 `GPU_SELFSIGNED=1` 暴露的 `10DE:1C81` 冲突。修复方法是把 host 端 `deploy/driver-signing/out/{viogpudo.sys,viogpudo.cat,viogpudo-nvidia.inf}`（patched + backdated NVIDIA-fake CA 签名）通过 `pnputil /add-driver /install` 装进客机并 **重启**（不要 disable/enable 主显卡，会 BSOD 到 QEMU 进程退出）。
 
-**重新构建 / 复现：** `deploy/tools/build.sh && stop-vm.sh 2 && DISPLAY=:1 INSTANCE=2 BRIDGE=br0 STABLE_DISPLAY=1 GPU_SELFSIGNED=1 nohup ./deploy/scripts/start-vm.sh 2 > /tmp/qemu-stealth-2.log 2>&1 &`
+**重新构建 / 复现：** `deploy/tools/build.sh && stop-vm.sh 2 && INSTANCE=2 BRIDGE=br0 STABLE_DISPLAY=1 GPU_SELFSIGNED=1 nohup ./deploy/scripts/start-vm.sh 2 > /tmp/qemu-stealth-2.log 2>&1 &`
 
 ### 2026-04-26：ACE 反作弊实测 + "浅层 stealth" 路径定型
 

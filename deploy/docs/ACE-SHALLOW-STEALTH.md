@@ -52,7 +52,7 @@ cd deploy/scripts && python3 -m http.server 8765 --bind 192.168.30.<host-ip-on-b
 
 ```bash
 # 1. 装系统（autounattend 自动跳过 OOBE）
-DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
+EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
     deploy/scripts/start-vm.sh 2 --iso=/home/ubuntu/images/win10_ltsc.iso
 
 # 2. 装完进桌面后（Administrator / 123456 自动登录），管理员 PowerShell 跑：
@@ -76,7 +76,7 @@ DISPLAY=:1 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
 VM2 第一次跑完 shallow-stealth.ps1 之后，每次只需要：
 
 ```bash
-DISPLAY=:1 deploy/scripts/start-vm.sh 2
+deploy/scripts/start-vm.sh 2
 ```
 
 不带任何 `INSTANCE=` / `BRIDGE=` / `STABLE_DISPLAY=` / `GPU_SELFSIGNED=`：

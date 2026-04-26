@@ -108,6 +108,13 @@ fi
 : "${ISO:=${_cli_iso:-/home/ubuntu/images/win10.iso}}"
 [[ -n "$_cli_iso" ]] && ISO="$_cli_iso"
 
+# DISPLAY 默认 :0（典型本地 X11 会话）；从 SSH 终端运行时若未 export DISPLAY，
+# 这里自动补上让 SDL 能找到 X server。HEADLESS=1 时 SDL 不启用，DISPLAY 不影响。
+if [[ "$HEADLESS" != "1" ]]; then
+    : "${DISPLAY:=:0}"
+    export DISPLAY
+fi
+
 # 新版目录结构：所有 per-instance 文件都归在 /home/ubuntu/images/vms/<N>/
 # 老版（直接放在 /home/ubuntu/images/）会被自动迁移到新位置。
 VM_DIR="/home/ubuntu/images/vms/${INSTANCE}"
@@ -312,13 +319,14 @@ if [[ "$HEADLESS" == "1" ]]; then
 elif [[ "$STABLE_DISPLAY" == "1" ]]; then
     # Stability mode: SDL window for local control, no GL passthrough.
     # Use this for long DNF sessions or anti-cheat-stable runs.
+    # SDL grab-mod 默认是 lshift-lctrl-lalt（Ctrl+Shift+Alt+G 切换抓取），保持默认。
     DISP_ARGS=(
-        -display sdl,show-cursor=off,grab-mod=lshift-lctrl
+        -display sdl,show-cursor=off
         -device "virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
     )
 else
     DISP_ARGS=(
-        -display sdl,gl=on,show-cursor=off,grab-mod=lshift-lctrl
+        -display sdl,gl=on,show-cursor=off
         -device "virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
     )
 fi

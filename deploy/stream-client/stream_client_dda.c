@@ -248,7 +248,11 @@ int main(int argc, char **argv) {
     signal(SIGTERM, on_quit);
 
     uint8_t  *ring = (uint8_t*)g_shmem + hdr->video_off;
-    uint8_t   recbuf[16 * 1024 * 1024];   /* worst case: full 1080p keyframe */
+    /* Worst-case keyframe at 1080p ≈ 8.4 MiB. Default Linux thread
+     * stack is 8 MiB so this MUST be heap-allocated, not on stack. */
+    const uint32_t recbuf_cap = 16 * 1024 * 1024;
+    uint8_t  *recbuf = malloc(recbuf_cap);
+    if (!recbuf) { fprintf(stderr, "malloc recbuf failed\n"); return 1; }
     uint32_t  rec_size = 0;
     uint8_t   button_mask = 0;
     int last_pos_x = 0, last_pos_y = 0;
@@ -260,7 +264,7 @@ int main(int argc, char **argv) {
     while (!want_quit) {
         /* ── 1. drain video ring ───────────────────────────── */
         int rc = nv_shmem_read(ring, NV_SHMEM_VIDEO_BYTES, &hdr->video,
-                               recbuf, sizeof(recbuf), &rec_size);
+                               recbuf, recbuf_cap, &rec_size);
         if (rc > 0 && rec_size >= sizeof(NvFrameHdr)) {
             NvFrameHdr *fh = (NvFrameHdr*)recbuf;
             if (fh->magic == NV_FRAME_MAGIC && fh->fb_width && fh->fb_height) {
@@ -353,6 +357,7 @@ int main(int argc, char **argv) {
     }
 
     fprintf(stderr, "[stream-dda] shutting down\n");
+    free(recbuf);
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);

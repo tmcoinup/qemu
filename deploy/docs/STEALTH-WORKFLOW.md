@@ -73,7 +73,7 @@ EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
 ```bash
 # host
 cd deploy/scripts
-python3 -m http.server 8765 --bind 192.168.30.<host-ip-on-br0> &
+nohup python3 deploy/scripts/serve-stealth-http.py 8765 &> /tmp/serve-http.log &
 ```
 
 Guest（管理员 PowerShell）：

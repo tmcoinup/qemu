@@ -5115,13 +5115,65 @@ static const X86CPUDefinition builtin_x86_defs[] = {
     },
     {
         /*
-         * Ryzen 3 1200 (Summit Ridge, Zen 1). Family 17h model 01h stepping 1
-         * (ZP-B1). Feature set matches AMD Family 17h Model 01h datasheet:
-         * no AVX-512, no CLWB, no RDPID, no WBNOINVD. CLZERO + XSAVEERPTR
-         * present. IBPB available via microcode update.
+         * Ryzen 3 2300X (Pinnacle Ridge, Zen+). Family 17h model 08h stepping 2.
+         * 4c/4t, base 3.5 GHz, boost 4.0 GHz, AM4. The Zen+ refresh is on the
+         * official Win11 supported-CPU list, while the Summit-Ridge Ryzen3-1200
+         * (also defined below) is not — pick this model when targeting Win11
+         * LTSC IoT 2024 guests.
          *
-         * Topology (4c/4t, SMT off) must be set via -smp cpus=4,cores=4,
-         * threads=1,sockets=1 on the command line.
+         * Topology must be set via -smp cpus=4,cores=4,threads=1,sockets=1.
+         */
+        .name = "Ryzen3-2300X",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_AMD,
+        .family = 23,
+        .model = 8,         /* Pinnacle Ridge — PiR-B2 — Zen+ */
+        .stepping = 2,
+        .features[FEAT_1_EDX] =
+            CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX | CPUID_CLFLUSH |
+            CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA | CPUID_PGE |
+            CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 | CPUID_MCE |
+            CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE | CPUID_DE |
+            CPUID_VME | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_RDRAND | CPUID_EXT_F16C | CPUID_EXT_AVX |
+            CPUID_EXT_XSAVE | CPUID_EXT_AES | CPUID_EXT_POPCNT |
+            CPUID_EXT_MOVBE | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
+            CPUID_EXT_CX16 | CPUID_EXT_FMA | CPUID_EXT_SSSE3 |
+            CPUID_EXT_MONITOR | CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_PDPE1GB |
+            CPUID_EXT2_FFXSR | CPUID_EXT2_MMXEXT | CPUID_EXT2_NX |
+            CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_OSVW | CPUID_EXT3_3DNOWPREFETCH |
+            CPUID_EXT3_MISALIGNSSE | CPUID_EXT3_SSE4A | CPUID_EXT3_ABM |
+            CPUID_EXT3_CR8LEG | CPUID_EXT3_SVM | CPUID_EXT3_LAHF_LM |
+            CPUID_EXT3_TOPOEXT,
+        .features[FEAT_8000_0008_EBX] =
+            CPUID_8000_0008_EBX_CLZERO | CPUID_8000_0008_EBX_XSAVEERPTR |
+            CPUID_8000_0008_EBX_IBPB,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_AVX2 |
+            CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_RDSEED |
+            CPUID_7_0_EBX_ADX | CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_CLFLUSHOPT |
+            CPUID_7_0_EBX_SHA_NI,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT | CPUID_XSAVE_XSAVEC |
+            CPUID_XSAVE_XGETBV1,
+        .features[FEAT_6_EAX] =
+            CPUID_6_EAX_ARAT,
+        .features[FEAT_SVM] =
+            CPUID_SVM_NPT | CPUID_SVM_NRIPSAVE,
+        .features[FEAT_8000_0007_EDX] =
+            CPUID_APM_INVTSC,
+        .xlevel = 0x8000001E,
+        .model_id = "AMD Ryzen 3 2300X Quad-Core Processor",
+        .cache_info = &epyc_cache_info,
+    },
+    {
+        /*
+         * Ryzen 3 1200 (Summit Ridge, Zen 1). Family 17h model 01h stepping 1.
          */
         .name = "Ryzen3-1200",
         .level = 0xd,

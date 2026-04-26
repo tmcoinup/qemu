@@ -257,9 +257,21 @@ stealth_smbios_args() {
     t2="type=2,manufacturer=$(_e "$BOARD_MFR"),product=$(_e "$BOARD_PRODUCT"),version=$(_e "$BOARD_VERSION"),serial=$(_e "$BOARD_SERIAL"),asset=$BOARD_ASSET,location=Default string"
     t3="type=3,manufacturer=$(_e "$BOARD_MFR"),version=$(_e "$BOARD_VERSION"),serial=$(_e "$CHASSIS_SERIAL"),asset=$BOARD_ASSET,sku=$(_e "$SYSTEM_SKU")"
     # processor-family=0x139 → SMBIOS 3.6 "Zen" (matches real Ryzen boards).
-    # part=YD1200BBM4KAE is the retail OEM OPN; HWiNFO parses this for
-    # 产品单元 (Product Unit).
-    t4="type=4,sock_pfx=AM4,manufacturer=Advanced Micro Devices Inc.,version=AMD Ryzen 3 1200 Quad-Core Processor,serial=$CPU_SERIAL,asset=$(_rand 1000 9999),part=YD1200BBM4KAE,max-speed=3400,current-speed=3100,processor-family=0x139"
+    # CPU model selection follows the QEMU -cpu argument the launcher built:
+    #   Ryzen3-1200  → Summit Ridge / Zen 1   (Win11 ineligible; default)
+    #   Ryzen3-2300X → Pinnacle Ridge / Zen+  (Win11 list-eligible)
+    # part code is the retail OEM OPN; HWiNFO parses this for 产品单元.
+    case "${CPU_MODEL:-Ryzen3-1200}" in
+        Ryzen3-2300X)
+            local _cpu_ver="AMD Ryzen 3 2300X Quad-Core Processor"
+            local _cpu_part="YD230XBBM4KAF"
+            local _cpu_max=4000  ; local _cpu_now=3500 ;;
+        *)
+            local _cpu_ver="AMD Ryzen 3 1200 Quad-Core Processor"
+            local _cpu_part="YD1200BBM4KAE"
+            local _cpu_max=3400  ; local _cpu_now=3100 ;;
+    esac
+    t4="type=4,sock_pfx=AM4,manufacturer=Advanced Micro Devices Inc.,version=$_cpu_ver,serial=$CPU_SERIAL,asset=$(_rand 1000 9999),part=$_cpu_part,max-speed=$_cpu_max,current-speed=$_cpu_now,processor-family=0x139"
     # OEM strings — presence matters more than exact content; most
     # detectors just check that type 11 exists. We still vendor-match
     # so an ASRock board doesn't carry ASUS_MB_* strings.

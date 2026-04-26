@@ -26,6 +26,8 @@ IP_OVERRIDE=""
 VPORT=${VPORT:-56790}
 IPORT=${IPORT:-56789}
 PASSWORD=${VNC_PASSWORD:-123456}
+TRANSPORT=${STREAM_TRANSPORT:-tcp}   # tcp (default) | shmem
+SHMEM_PATH=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +35,9 @@ while [[ $# -gt 0 ]]; do
         --vport)     VPORT="$2"; shift 2 ;;
         --iport)     IPORT="$2"; shift 2 ;;
         --password)  PASSWORD="$2"; shift 2 ;;
+        --shmem)     TRANSPORT=shmem; shift ;;
+        --tcp)       TRANSPORT=tcp; shift ;;
+        --shmem-path) SHMEM_PATH="$2"; shift 2 ;;
         -h|--help)   sed -n '3,18p' "$0"; exit 0 ;;
         *.*.*.*)     IP_OVERRIDE="$1"; shift ;;
         [0-9]*)      VM_ID="$1"; shift ;;
@@ -72,12 +77,29 @@ echo "[stream-guest] input port $IPORT"
 nc -z -w 2 "$IP" "$IPORT" 2>&1 || { echo "input port $IPORT not open — AudioSvcHost not running in guest"; exit 1; }
 
 # Build the C client if missing or stale.
-BIN=stream-client/stream_client
-SRC=stream-client/stream_client.c
+if [[ "$TRANSPORT" == "shmem" ]]; then
+    BIN=stream-client/stream_client_shmem
+    SRC=stream-client/stream_client_shmem.c
+    [[ -n "$SHMEM_PATH" ]] || SHMEM_PATH="/dev/shm/nv-shmem-vm${VM_ID}"
+    if [[ ! -e "$SHMEM_PATH" ]]; then
+        echo "[stream-guest] $SHMEM_PATH missing — start the VM with --shmem in start-vm.sh first"
+        exit 1
+    fi
+    echo "[stream-guest] transport: shmem ($SHMEM_PATH)"
+else
+    BIN=stream-client/stream_client
+    SRC=stream-client/stream_client.c
+    echo "[stream-guest] transport: tcp ($IP:$VPORT video / $IP:$IPORT input)"
+fi
+
 if [[ ! -x "$BIN" || "$SRC" -nt "$BIN" ]]; then
     echo "[stream-guest] building $BIN..."
     make -C stream-client all || { echo "build failed"; exit 1; }
 fi
 
-exec "$BIN" \
-    --ip "$IP" --vport "$VPORT" --iport "$IPORT" --password "$PASSWORD"
+if [[ "$TRANSPORT" == "shmem" ]]; then
+    exec "$BIN" --shmem "$SHMEM_PATH"
+else
+    exec "$BIN" \
+        --ip "$IP" --vport "$VPORT" --iport "$IPORT" --password "$PASSWORD"
+fi

@@ -98,6 +98,13 @@ foreach ($k in @(
 # 把 guest 永久钉在 ON: .DEFAULT (登陆前 Welcome screen 阶段) + HKCU (登陆后) +
 # 当前会话立即按一次校准. "2147483650" = 0x80000002 = NumLock ON + 启动时
 # 主动写 LED, 缺高位光留 "2" 的话只在用户 first-time 才生效.
+# 永不息屏 — guest 默认 monitor=10min/sleep=30min, SDL 窗口闲置就黑.
+# powercfg 一次到位, 影响 active scheme 的 Default values.
+Write-Host '=== disabling guest monitor / sleep / hibernate / disk timeouts ===' -Fore Cyan
+foreach ($k in 'monitor-timeout-ac','monitor-timeout-dc','standby-timeout-ac','standby-timeout-dc','hibernate-timeout-ac','hibernate-timeout-dc','disk-timeout-ac','disk-timeout-dc') {
+    powercfg /change $k 0 2>$null
+}
+
 Write-Host '=== forcing NumLock ON (host SDL no LED sync workaround) ===' -Fore Cyan
 $ki = 'InitialKeyboardIndicators'
 Set-ItemProperty -Path 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Keyboard' -Name $ki -Value '2147483650' -Type String -Force -EA 0

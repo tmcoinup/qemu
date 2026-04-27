@@ -554,15 +554,33 @@ if [[ "${HEADLESS:-0}" != "1" && -n "${DISPLAY:-}" ]]; then
         trap _restore_xset EXIT INT TERM
     fi
 
+    # GNOME mutter 自己跑 idle 计时（org.gnome.desktop.session idle-delay）,
+    # 不看 systemd-logind 的 idle hint, 所以 systemd-inhibit 拦不住 GNOME blank.
+    # gnome-session-inhibit 调 D-Bus org.gnome.SessionManager.Inhibit, mutter
+    # 会 honor 它. 链式包: gnome-session-inhibit → systemd-inhibit → qemu.
+    GNOME_INHIBIT=()
+    if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && command -v gnome-session-inhibit >/dev/null 2>&1; then
+        # gnome-session-inhibit 选项必须空格分开, 不接受 --key=value 写法.
+        GNOME_INHIBIT=(gnome-session-inhibit
+            --app-id "qemu-stealth-${INSTANCE}"
+            --reason "保持 guest 显示活性"
+            --inhibit idle:logout)
+        echo ">> GNOME idle: 已 inhibit (gnome-session-inhibit)"
+    fi
+
     # 避免桌面环境 (GNOME/KDE/XFCE) 自身的待机/锁屏 — systemd-inhibit 拦截一下。
     # 没有 systemd-inhibit 时退化成裸 exec。
     if command -v systemd-inhibit >/dev/null 2>&1; then
-        exec systemd-inhibit \
+        exec "${GNOME_INHIBIT[@]}" systemd-inhibit \
             --who="qemu-stealth-${INSTANCE}" \
             --why="保持 guest 显示活性" \
             --what="idle:sleep:handle-lid-switch" \
             --mode=block \
             -- "${CMD[@]}"
+    fi
+
+    if (( ${#GNOME_INHIBIT[@]} )); then
+        exec "${GNOME_INHIBIT[@]}" "${CMD[@]}"
     fi
 fi
 

@@ -60,7 +60,7 @@ enum {
     STR_SERIAL_MOUSE,
     STR_SERIAL_TABLET,
     STR_SERIAL_KEYBOARD,
-    STR_MANUFACTURER_TABLET,   /* Wacom — tablet 用 056A VID, 字符串得跟 VID 对得上 */
+    STR_MANUFACTURER_TABLET,   /* HUION (绘王) — tablet 用 256C VID, 字符串得跟 VID 对得上 */
 };
 
 static const USBDescStrings desc_strings = {
@@ -73,7 +73,7 @@ static const USBDescStrings desc_strings = {
      */
     [STR_MANUFACTURER]         = "Microsoft",
     [STR_PRODUCT_MOUSE]        = "Microsoft USB Optical Mouse",
-    [STR_PRODUCT_TABLET]       = "Wacom Tablet",
+    [STR_PRODUCT_TABLET]       = "HUION PenTablet",
     [STR_PRODUCT_KEYBOARD]     = "Microsoft Wired Keyboard 600",
     [STR_SERIAL_COMPAT]        = "42",
     [STR_CONFIG_MOUSE]         = "HID Mouse",
@@ -82,7 +82,7 @@ static const USBDescStrings desc_strings = {
     [STR_SERIAL_MOUSE]         = "89126",
     [STR_SERIAL_TABLET]        = "28754",
     [STR_SERIAL_KEYBOARD]      = "68284",
-    [STR_MANUFACTURER_TABLET]  = "Wacom Co.,Ltd.",
+    [STR_MANUFACTURER_TABLET]  = "HUION",
 };
 
 static const USBDescIface desc_iface_mouse = {
@@ -383,8 +383,9 @@ static const USBDescMSOS desc_msos_suspend = {
  * Microsoft VID 0x045E with retail PIDs that match the iProduct strings:
  *   - Mouse:    045E:00CB (Microsoft USB Optical Mouse)
  *   - Keyboard: 045E:0750 (Microsoft Wired Keyboard 600)
- * Tablet keeps a Wacom-class VID (056A:00FB) so absolute-coord pointer
- * looks like a graphics tablet rather than a virtual one.
+ * Tablet 用 HUION (绘王) 256C:006D — 国内深圳厂, 淘宝入门款 H420 数位板,
+ * 比 Wacom 草根, 不会引来"为什么家用机插 Wacom 专业板"这类二级怀疑.
+ * 绝对坐标 USB pointer 报为 graphics tablet 而非 virtual mouse.
  */
 static const USBDesc desc_mouse = {
     .id = {
@@ -417,8 +418,8 @@ static const USBDesc desc_mouse2 = {
 
 static const USBDesc desc_tablet = {
     .id = {
-        .idVendor          = 0x056A,
-        .idProduct         = 0x00FB,
+        .idVendor          = 0x256C,
+        .idProduct         = 0x006D,
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER_TABLET,
         .iProduct          = STR_PRODUCT_TABLET,
@@ -431,8 +432,8 @@ static const USBDesc desc_tablet = {
 
 static const USBDesc desc_tablet2 = {
     .id = {
-        .idVendor          = 0x056A,
-        .idProduct         = 0x00FB,
+        .idVendor          = 0x256C,
+        .idProduct         = 0x006D,
         .bcdDevice         = 0,
         .iManufacturer     = STR_MANUFACTURER_TABLET,
         .iProduct          = STR_PRODUCT_TABLET,
@@ -826,7 +827,7 @@ static void usb_tablet_class_initfn(ObjectClass *klass, void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_tablet_realize;
-    uc->product_desc   = "Wacom Tablet";
+    uc->product_desc   = "HUION PenTablet";
     dc->vmsd = &vmstate_usb_ptr;
     device_class_set_props(dc, usb_tablet_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);

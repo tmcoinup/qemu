@@ -94,6 +94,27 @@ foreach ($k in @(
     Set-ItemProperty -Path $k.Path -Name $k.Name -Type DWord -Value $k.Value -EA 0
 }
 
+# NumLock — host SDL 不反向同步 LED, guest 默认 OFF 时小键盘 7 进的是 Home.
+# 把 guest 永久钉在 ON: .DEFAULT (登陆前 Welcome screen 阶段) + HKCU (登陆后) +
+# 当前会话立即按一次校准. "2147483650" = 0x80000002 = NumLock ON + 启动时
+# 主动写 LED, 缺高位光留 "2" 的话只在用户 first-time 才生效.
+Write-Host '=== forcing NumLock ON (host SDL no LED sync workaround) ===' -Fore Cyan
+$ki = 'InitialKeyboardIndicators'
+Set-ItemProperty -Path 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Keyboard' -Name $ki -Value '2147483650' -Type String -Force -EA 0
+Set-ItemProperty -Path 'HKCU:\Control Panel\Keyboard' -Name $ki -Value '2147483650' -Type String -Force -EA 0
+Add-Type -Name Kb -Namespace W -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, uint flags, System.IntPtr extra);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern short GetKeyState(int vKey);
+'@ -EA 0
+$VK_NUMLOCK = 0x90
+if (([W.Kb]::GetKeyState($VK_NUMLOCK) -band 1) -eq 0) {
+    [W.Kb]::keybd_event([byte]$VK_NUMLOCK, 0, 0, [System.IntPtr]::Zero)
+    [W.Kb]::keybd_event([byte]$VK_NUMLOCK, 0, 2, [System.IntPtr]::Zero)
+    Write-Host '  toggled NumLock ON (was OFF)' -Fore Green
+} else {
+    Write-Host '  NumLock already ON' -Fore Gray
+}
+
 Write-Host ''
 Write-Host '=== bootstrap done ===' -Fore Green
 Get-NetIPAddress -AddressFamily IPv4 |

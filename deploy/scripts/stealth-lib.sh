@@ -407,6 +407,6 @@ stealth_smbios_args() {
             t11="type=11,value=Default string,value=OEM_Default" ;;
     esac
     t17="type=17,loc_pfx=DIMM_A,bank=P0 CHANNEL %C,manufacturer=$(_e "$MEM_MFR"),serial=$(_rand 10000000 99999999),asset=9876543210,part=$(_e "$mem_part"),speed=$mem_speed"
-    t16="type=16,max-capacity=${T16_MAX_CAPACITY:-64G},num-devices=${T16_NUM_DEVICES:-4}"
+    t16="type=16,max-capacity=${T16_MAX_CAPACITY:-64G},num-devices=${T16_NUM_DEVICES:-2}"
     printf '%s\n' "$t0" "$t1" "$t2" "$t3" "$t4" "$t11" "$t16" "$t17"
 }

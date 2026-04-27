@@ -25,7 +25,8 @@
 # still running, it will invoke stop-vm.sh (as the original user) first.
 #
 # Environment overrides:
-#   DISK=<path>           default /home/ubuntu/images/win10-inst<N>.qcow2
+#   DISK=<path>           default /home/ubuntu/images/vms/<N>/disk.qcow2
+#                         (auto-falls back to legacy win10-inst<N>.qcow2 layout)
 #   NBD=/dev/nbdN         default /dev/nbd0
 #   MOUNT=<path>          default /mnt/win10-inst<N>
 #   PROVIDER=<string>     default "NVIDIA"            (pid 0009 value)
@@ -53,7 +54,14 @@ done
 # The original user for invoking stop-vm.sh (QMP socket is under their uid).
 ORIG_USER="${SUDO_USER:-ubuntu}"
 
-: "${DISK:=/home/ubuntu/images/win10-inst${INSTANCE}.qcow2}"
+# 默认走 hardware pools v2 新布局；旧 win10-inst<N>.qcow2 还在的话回退过去。
+if [[ -z "${DISK:-}" ]]; then
+    if [[ -f "/home/ubuntu/images/vms/${INSTANCE}/disk.qcow2" ]]; then
+        DISK="/home/ubuntu/images/vms/${INSTANCE}/disk.qcow2"
+    else
+        DISK="/home/ubuntu/images/win10-inst${INSTANCE}.qcow2"
+    fi
+fi
 : "${NBD:=/dev/nbd0}"
 : "${MOUNT:=/mnt/win10-inst${INSTANCE}}"
 : "${PROVIDER:=NVIDIA}"

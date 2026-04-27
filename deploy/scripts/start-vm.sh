@@ -331,12 +331,12 @@ else
     )
 fi
 
-# 用 ps2 keyboard 替代 usb-kbd 解决 host 与 guest NumLock / 小键盘状态不同步问题：
-# Q35 平台默认启用 i8042 PS/2 控制器，QEMU 把 host SDL 收到的 NumLock / 数字键盘
-# 完整翻译为 PS/2 scancode（含 LED 状态），guest 看见的是真实 PS/2 键盘。
-# usb-kbd 的 HID descriptor 经过 USB 总线翻译，NumLock LED 不会回送到 host。
-# (老的 usb-kbd 语句已删，下面的 USB 设备只剩鼠标/平板)
-KBD_PS2_HINT='已启用 PS/2 键盘（i8042），NumLock/小键盘与 host 实时同步'
+# 键盘走 USB HID (usb-kbd) — DirectInput / Raw Input 类游戏 (DNF / 腾讯反作弊)
+# 只读 USB keyboard, PS/2 keyboard 在它们眼里不存在 → 游戏内按键完全无响应.
+# q35 i8042 控制器仍默认带, 但没东西往那里发 scancode 就是空通道, 不影响.
+# NumLock 状态由 hive 的 InitialKeyboardIndicators=2147483650 在 Welcome 阶段
+# 钉 ON (vm-bootstrap.ps1 / host-fix-numlock.sh 保证), 不依赖 SDL LED 双向同步.
+KBD_HINT='USB keyboard (DirectInput/Raw Input 兼容); NumLock 由 hive 钉 ON'
 
 # -------------------------------------------------------------------
 # Boot order
@@ -488,14 +488,13 @@ CMD=(
     "${NET_ARGS[@]}"
     -device e1000e,netdev=net0,mac=$MAC_OVERRIDE,bus=rp2
 
-    # --- USB: xHCI + 鼠标 ---
-    # 键盘走 q35 自带的 i8042 PS/2 控制器（不在这里声明，SeaBIOS/OVMF 会自动建）
-    # —— 这样 NumLock LED 与小键盘 scancode 与 host SDL 实时同步。usb-kbd 不行，
-    #    HID descriptor 翻译过程会丢 LED 反馈。
+    # --- USB: xHCI + 键盘 + 鼠标 ---
+    # usb-kbd: DirectInput/Raw Input 兼容 (DNF/腾讯反作弊只读 USB HID, 不读 PS/2).
     # USB_RELATIVE_MOUSE=1: usb-mouse (相对坐标，更像真鼠标，反作弊友好；
     #   SDL 抓鼠标，Ctrl+Shift+G 释放)
     # 默认 usb-tablet (绝对坐标，鼠标可自由出入 SDL 窗口)
     -device qemu-xhci,id=xhci,bus=rp3
+    -device usb-kbd,bus=xhci.0
     $([[ "${USB_RELATIVE_MOUSE:-0}" == "1" ]] && echo "-device usb-mouse,bus=xhci.0" || echo "-device usb-tablet,bus=xhci.0")
 
     # --- Audio: ICH9 HDA (looks like Realtek ALC). Use 'none' backend
@@ -527,7 +526,7 @@ echo ">> VNC display: :$VNC_DISPLAY (port $((5900+VNC_DISPLAY)))"
 echo ">> SSH/RDP fwd: 127.0.0.1:$SSH_FWD_PORT / 127.0.0.1:$RDP_FWD_PORT"
 echo ">> boot mode:   $BOOT"
 echo ">> disk:        $DISK ($(stat -c%s "$DISK") bytes)"
-echo ">> 键盘:        $KBD_PS2_HINT"
+echo ">> 键盘:        $KBD_HINT"
 echo ">> --- launching ---"
 
 # QEMU's `-rtc base=localtime` calls libc localtime() which honours $TZ.

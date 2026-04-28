@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Monitor EDID spoof — make Windows think the vGPU's virtual display
   is a real-world brand-name monitor (default: Dell P2419H 24" 1080p).
@@ -21,7 +21,9 @@
   monitor INF database, and renders the friendly name accordingly.
 
 .PARAMETER Brand
-  dell-p2419h | samsung-s24f350 | lg-27uk850
+  dell-p2419h | samsung-s24f350 | lg-27uk850 |
+  aoc-24g2    | hkc-sg24        | philips-245v |
+  generic-1080p
 
 .NOTES
   - The EDID blob is normally write-locked by the kernel after first
@@ -34,8 +36,11 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('dell-p2419h','samsung-s24f350','lg-27uk850','generic-1080p')]
-    [string]$Brand = 'dell-p2419h'
+    [ValidateSet(
+        'dell-p2419h','samsung-s24f350','lg-27uk850',
+        'aoc-24g2','hkc-sg24','philips-245v',
+        'generic-1080p')]
+    [string]$Brand = 'aoc-24g2'
 )
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -55,6 +60,85 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 # Followed by basic display parameters, color characteristics,
 # established + standard timings, 4 detailed timing descriptors,
 # extension count, checksum.
+
+# Synthetic EDID builder: takes a 3-letter PnP manufacturer code, a
+# 16-bit product code, and a model display name, returns a 128-byte
+# EDID 1.4 block with a 1920x1080@60 detailed timing + the brand name
+# in the FC descriptor. Checksum is computed at the end so model name
+# changes don't require re-hashing by hand.
+function Build-Edid {
+    param(
+        [Parameter(Mandatory)] [string]$Mfr,
+        [Parameter(Mandatory)] [int]   $Prod,
+        [Parameter(Mandatory)] [string]$ModelName,
+        [int]$Year = 2023,
+        [int]$Week = 20
+    )
+    $a = [int][char]$Mfr[0] - 64
+    $b = [int][char]$Mfr[1] - 64
+    $c = [int][char]$Mfr[2] - 64
+    $pnp = ($a -shl 10) -bor ($b -shl 5) -bor $c
+
+    $e = [byte[]]::new(128)
+    [byte[]]@(0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00) | ForEach-Object -Begin { $i = 0 } -Process {
+        $e[$i] = $_; $i++
+    }
+    $e[8]  = ($pnp -shr 8) -band 0xFF
+    $e[9]  =  $pnp        -band 0xFF
+    $e[10] =  $Prod       -band 0xFF
+    $e[11] = ($Prod -shr 8) -band 0xFF
+    # serial 12..15 = 0
+    $e[16] = $Week
+    $e[17] = $Year - 1990
+    $e[18] = 0x01     # EDID 1.4
+    $e[19] = 0x04
+    $e[20] = 0xA5     # digital, 8 bpc, DisplayPort
+    $e[21] = 53       # max H size cm (~24")
+    $e[22] = 30
+    $e[23] = 0x78     # gamma 2.20
+    $e[24] = 0x3A     # features
+    # color characteristics — copy a generic 1080p table
+    [byte[]]@(0xEE,0x95,0xA3,0x54,0x4C,0x99,0x26,0x0F,0x50,0x54) |
+        ForEach-Object -Begin { $i = 25 } -Process { $e[$i] = $_; $i++ }
+    $e[35] = 0xA5; $e[36] = 0x4B; $e[37] = 0x00
+    # standard timings
+    [byte[]]@(0x71,0x4F, 0x81,0x80, 0xA9,0xC0, 0xD1,0xC0, 0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01) |
+        ForEach-Object -Begin { $i = 38 } -Process { $e[$i] = $_; $i++ }
+    # DTD #1: 1920x1080 @ 60 Hz (preferred)
+    [byte[]]@(0x02,0x3A,0x80,0x18,0x71,0x38,0x2D,0x40,0x58,0x2C,0x45,0x00,0x06,0x44,0x21,0x00,0x00,0x1E) |
+        ForEach-Object -Begin { $i = 54 } -Process { $e[$i] = $_; $i++ }
+    # Descriptor #2: range limits (FD)
+    [byte[]]@(0x00,0x00,0x00,0xFD,0x00,
+              0x32,0x4B,0x18,0x53,0x11,0x00,0x0A,
+              0x20,0x20,0x20,0x20,0x20,0x20) |
+        ForEach-Object -Begin { $i = 72 } -Process { $e[$i] = $_; $i++ }
+    # Descriptor #3: model name (FC) — what Device Manager 显示
+    $e[90] = 0x00; $e[91] = 0x00; $e[92] = 0x00
+    $e[93] = 0xFC; $e[94] = 0x00
+    for ($k = 0; $k -lt 13; $k++) { $e[95 + $k] = 0x20 }
+    $nameLen = [Math]::Min($ModelName.Length, 12)
+    for ($k = 0; $k -lt $nameLen; $k++) {
+        $e[95 + $k] = [byte][char]$ModelName[$k]
+    }
+    $e[95 + $nameLen] = 0x0A
+    # Descriptor #4: serial (FF)
+    $e[108] = 0x00; $e[109] = 0x00; $e[110] = 0x00
+    $e[111] = 0xFF; $e[112] = 0x00
+    for ($k = 0; $k -lt 13; $k++) { $e[113 + $k] = 0x20 }
+    $sn = "S$($Prod.ToString('X4'))AA"
+    $snLen = [Math]::Min($sn.Length, 12)
+    for ($k = 0; $k -lt $snLen; $k++) {
+        $e[113 + $k] = [byte][char]$sn[$k]
+    }
+    $e[113 + $snLen] = 0x0A
+    # extension count
+    $e[126] = 0x00
+    # checksum
+    $sum = 0
+    for ($k = 0; $k -lt 127; $k++) { $sum = ($sum + $e[$k]) -band 0xFF }
+    $e[127] = (256 - $sum) -band 0xFF
+    return ,$e
+}
 
 function Get-Edid([string]$brand) {
     switch ($brand) {
@@ -122,6 +206,23 @@ function Get-Edid([string]$brand) {
                 0x47,0x33,0x39,0x36,0x0A,0x20,0x01,0x82
             )
         }
+        'aoc-24g2' {
+            # AOC 24G2 — 24" 1920x1080 144 Hz IPS, 冠捷电竞主流款。
+            # Device Manager 监视器节点显示 "AOC 24G2"。
+            # comma 防 PowerShell 把 byte[] 单层 unroll 成标量。
+            $b = Build-Edid -Mfr 'AOC' -Prod 0x2401 -ModelName 'AOC 24G2' -Year 2022 -Week 18
+            return ,$b
+        }
+        'hkc-sg24' {
+            # HKC SG24 — 惠科 24" 1920x1080，国产白牌主力面板厂。
+            $b = Build-Edid -Mfr 'HKC' -Prod 0x2400 -ModelName 'HKC SG24' -Year 2023 -Week 12
+            return ,$b
+        }
+        'philips-245v' {
+            # Philips 245V5 — 飞利浦 24" 1080p，国内办公主流款。
+            $b = Build-Edid -Mfr 'PHL' -Prod 0x0245 -ModelName 'Philips 245V5' -Year 2022 -Week 30
+            return ,$b
+        }
         default {
             # generic 1080p with no brand string — safe fallback
             return [byte[]] @(
@@ -183,38 +284,141 @@ if ($active) {
 & pnputil.exe /scan-devices 2>&1 | Out-Null
 Start-Sleep 2
 
-# Some EDID + driver combinations refuse to update the FriendlyName
-# even after a cycle. Belt+suspenders: rewrite the DeviceDesc string
-# under the active monitor's PnP enum key directly. The brand string
-# we want is encoded in the EDID (for inspectors) AND visible in
-# Device Manager (for the user).
+# Belt+suspenders: 改 4 处 registry — 借鉴 qemu-9.2.0 分支的 apply-gpu-spoof
+# 经验。光改 EDID 不够，因为 Windows 在 BasicDisplay driver init 时会用
+# 自己的 DeviceDesc / FriendlyName / DEVPKEY 覆盖。需要：
+#   (1) Enum\DISPLAY\<dev>\<inst>\{DeviceDesc, FriendlyName, Mfg}
+#       — Device Manager 设备列表显示的名字
+#   (2) Class\{4d36e96e-...}\NNNN\{DriverDesc, ProviderName}
+#       — 监视器 INF 驱动描述（Device Manager 驱动选项卡）
+#   (3) Enum\DISPLAY\...\Properties\{a8b865dd-...}\0004\00000000 (DriverDesc)
+#                                                  \0009\00000000 (DriverProvider)
+#       — DEVPKEY，Device Manager 驱动选项卡实际读这里 (REG_SZ 在 DISPLAY 下能写,
+#         不像 Enum\PCI 需要 type 0xFFFF0012 + offline edit)
 $brandLabel = switch ($Brand) {
-    'dell-p2419h'    { 'DELL P2419H' }
-    'samsung-s24f350'{ 'SAMSUNG S24F350' }
-    'lg-27uk850'     { 'LG UltraFine 27UK850' }
-    default          { 'Generic Monitor' }
+    'dell-p2419h'    { @{ Name='DELL P2419H';            Mfg='Dell Inc.'      } }
+    'samsung-s24f350'{ @{ Name='SAMSUNG S24F350';        Mfg='Samsung'        } }
+    'lg-27uk850'     { @{ Name='LG UltraFine 27UK850';   Mfg='LG Electronics' } }
+    'aoc-24g2'       { @{ Name='AOC 24G2';               Mfg='AOC'            } }
+    'hkc-sg24'       { @{ Name='HKC SG24';               Mfg='HKC'            } }
+    'philips-245v'   { @{ Name='Philips 245V5';          Mfg='Philips'        } }
+    default          { @{ Name='Generic PnP Monitor';    Mfg='(Standard monitor types)' } }
 }
-$active = Get-PnpDevice -Class Monitor -PresentOnly | Select-Object -First 1
-if ($active) {
-    $regKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($active.InstanceId)"
-    if (Test-Path $regKey) {
-        $cur = (Get-ItemProperty -Path $regKey -Name DeviceDesc -EA 0).DeviceDesc
-        # DeviceDesc may be "@monitor.inf,%foo%;Generic PnP Monitor"
-        # or just plain text. Replace the trailing component.
-        if ($cur -match '^@.+;(.+)$') {
-            $new = ($cur -replace ';.+$', ";$brandLabel")
-        } else {
-            $new = $brandLabel
-        }
-        Set-ItemProperty -Path $regKey -Name DeviceDesc -Value $new -Force
-        Write-Host "  DeviceDesc -> $new"
+$brandName = $brandLabel.Name
+$brandMfg  = $brandLabel.Mfg
+
+$monClassRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}'
+$fmtDev       = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
+
+function Convert-ToRegPath([string]$PSPath) {
+    $r = $PSPath
+    $r = $r -replace '^Microsoft\.PowerShell\.Core\\Registry::', ''
+    $r = $r -replace '^HKEY_LOCAL_MACHINE', 'HKLM'
+    $r = $r -replace '^HKLM:', 'HKLM'
+    return $r
+}
+function Set-DevProp($DevPath, $PidHex, $Value) {
+    # Enum\DISPLAY\... 下的 DEVPKEY 用 REG_SZ 落得下去（不是 Enum\PCI 那种
+    # 锁 TrustedInstaller 的路径）。reg.exe add /f 即可。
+    $propKey = Join-Path $DevPath ("Properties\" + $fmtDev + "\" + $PidHex)
+    $r = Convert-ToRegPath $propKey
+    & reg.exe add "$r" /v "00000000" /t REG_SZ /d $Value /f 2>$null | Out-Null
+}
+
+Write-Host '[spoof-monitor] patching DISPLAY enum + Class\{4d36e96e-...} + DEVPKEY' -Fore Cyan
+Get-ChildItem $base -EA 0 | ForEach-Object {
+    $pnp = $_
+    Get-ChildItem $pnp.PSPath -EA 0 | ForEach-Object {
+        $inst = $_
+        Set-ItemProperty -Path $inst.PSPath -Name DeviceDesc   -Type String -Value $brandName -Force
+        Set-ItemProperty -Path $inst.PSPath -Name FriendlyName -Type String -Value $brandName -Force
+        Set-ItemProperty -Path $inst.PSPath -Name Mfg          -Type String -Value $brandMfg  -Force
+        Set-DevProp -DevPath $inst.PSPath -PidHex '0004' -Value $brandName  # DEVPKEY_Device_DriverDesc
+        Set-DevProp -DevPath $inst.PSPath -PidHex '0009' -Value $brandMfg   # DEVPKEY_Device_DriverProvider
+        Write-Host ("  Enum\DISPLAY\" + $pnp.PSChildName + "\" + $inst.PSChildName + " -> " + $brandName)
     }
 }
+Get-ChildItem $monClassRoot -EA 0 |
+    Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
+        $p = $_.PSPath
+        if (Get-ItemProperty -Path $p -Name DriverDesc -EA 0) {
+            Set-ItemProperty -Path $p -Name DriverDesc   -Type String -Value $brandName -Force
+            Set-ItemProperty -Path $p -Name ProviderName -Type String -Value $brandMfg  -Force
+            Set-DevProp -DevPath $p -PidHex '0004' -Value $brandName
+            Set-DevProp -DevPath $p -PidHex '0009' -Value $brandMfg
+            Write-Host ("  Class\{4d36e96e-...}\" + $_.PSChildName + " -> " + $brandName)
+        }
+    }
+
+# ───── boot-time refresh task ──────────────────────────────────────
+# Windows 开机时 BasicDisplay driver init 会把 DeviceDesc / DEVPKEY 用
+# display.inf 默认值刷回 "通用即插即用监视器"。装一个 SYSTEM scheduled
+# task (AtStartup + AtLogOn) 在每次开机/登录后 ~3 秒重新写 4 处 registry。
+# 这就是为什么 GUI 截图永远是 Generic — 不装 task 每次冷启动都被刷回。
+Write-Host '[spoof-monitor] installing boot-time refresh task (defeats BasicDisplay clobber)' -Fore Cyan
+$taskName  = 'StealthMonitor-Refresh'
+$scriptDir = 'C:\ProgramData\StealthMonitor'
+$scriptPath = Join-Path $scriptDir 'refresh-monitor-name.ps1'
+New-Item -Path $scriptDir -ItemType Directory -Force | Out-Null
+
+$body = @"
+# auto-generated by spoof-monitor.ps1 — re-applies brand strings after
+# every boot/logon, since BasicDisplay driver init clobbers them.
+`$ErrorActionPreference = 'SilentlyContinue'
+`$brandName = '$brandName'
+`$brandMfg  = '$brandMfg'
+`$base         = 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY'
+`$monClassRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}'
+`$fmtDev       = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
+function Convert-ToRegPath(`$p) {
+    `$r = `$p -replace '^Microsoft\.PowerShell\.Core\\Registry::',''
+    `$r = `$r -replace '^HKEY_LOCAL_MACHINE','HKLM'
+    `$r = `$r -replace '^HKLM:','HKLM'
+    return `$r
+}
+function Set-DevProp(`$DevPath, `$PidHex, `$Value) {
+    `$propKey = Join-Path `$DevPath ("Properties\" + `$fmtDev + "\" + `$PidHex)
+    `$r = Convert-ToRegPath `$propKey
+    & reg.exe add "`$r" /v "00000000" /t REG_SZ /d `$Value /f 2>`$null | Out-Null
+}
+Start-Sleep -Seconds 3   # 等 BasicDisplay 完成它的初始化覆盖
+Get-ChildItem `$base -EA 0 | ForEach-Object {
+    Get-ChildItem `$_.PSPath -EA 0 | ForEach-Object {
+        Set-ItemProperty -Path `$_.PSPath -Name DeviceDesc   -Type String -Value `$brandName -Force
+        Set-ItemProperty -Path `$_.PSPath -Name FriendlyName -Type String -Value `$brandName -Force
+        Set-ItemProperty -Path `$_.PSPath -Name Mfg          -Type String -Value `$brandMfg  -Force
+        Set-DevProp -DevPath `$_.PSPath -PidHex '0004' -Value `$brandName
+        Set-DevProp -DevPath `$_.PSPath -PidHex '0009' -Value `$brandMfg
+    }
+}
+Get-ChildItem `$monClassRoot -EA 0 | Where-Object { `$_.PSChildName -match '^\d{4}`$' } | ForEach-Object {
+    `$p = `$_.PSPath
+    if (Get-ItemProperty -Path `$p -Name DriverDesc -EA 0) {
+        Set-ItemProperty -Path `$p -Name DriverDesc   -Type String -Value `$brandName -Force
+        Set-ItemProperty -Path `$p -Name ProviderName -Type String -Value `$brandMfg  -Force
+        Set-DevProp -DevPath `$p -PidHex '0004' -Value `$brandName
+        Set-DevProp -DevPath `$p -PidHex '0009' -Value `$brandMfg
+    }
+}
+"@
+Set-Content -Path $scriptPath -Value $body -Encoding UTF8 -Force
+
+# Re-create scheduled task (idempotent)
+& schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
+$tr = "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -NoProfile -File `"$scriptPath`""
+& schtasks.exe /Create /TN $taskName /SC ONSTART /RU SYSTEM /RL HIGHEST `
+    /TR $tr /F 2>&1 | Out-Null
+& schtasks.exe /Create /TN ($taskName + '-Logon') /SC ONLOGON /RU SYSTEM /RL HIGHEST `
+    /TR $tr /F 2>&1 | Out-Null
+& schtasks.exe /Run /TN $taskName 2>&1 | Out-Null
+Write-Host "  installed task: $taskName (AtStartup + AtLogOn, SYSTEM)" -Fore Gray
 
 # Final scan + report
 & pnputil.exe /scan-devices 2>&1 | Out-Null
-Start-Sleep 1
+Start-Sleep 2
 Write-Host ''
 Write-Host '=== monitors after spoof ===' -Fore Green
 Get-PnpDevice -Class Monitor -PresentOnly |
     Format-Table FriendlyName, Status, InstanceId -AutoSize | Out-Host
+Write-Host ''
+Write-Host "Device Manager 已开着的请按 F5 / 关闭重开。 重启后 task 会自动 re-apply。" -Fore Yellow

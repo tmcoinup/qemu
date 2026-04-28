@@ -4,24 +4,37 @@
 
 | 命令 | 干什么 |
 |---|---|
-| `./deploy/start-vm.sh <vm_id>` | 启 VM (默认 mode=rdp + ivshmem 64M + vGPU mdev) |
-| `./deploy/down.sh <vm_id>` | 关 VM |
-| `./deploy/setup-guest.sh <vm_id>` | **一次性** bootstrap guest 全套：vGPU 驱动 + ivshmem 驱动 + NvDisplayContainer service + nv_stream_relay + AudioSvcHost + GPU 名字 spoof + 1080p |
-| `./deploy/connect.sh <vm_id>` | 连接 viewer (默认 --dda：DDA + 32x32 dirty-tile + ivshmem + SDL2，0 编解码 0 网络) |
+| `./deploy/start-vm.sh <vm_id>` | **一条龙**：起 VM + (按需) setup-guest + SDL2 viewer。Ctrl+C 优雅关 |
+| `./deploy/stop-vm.sh <vm_id>` | 关 VM (另一终端用 / start-vm.sh 退出后兜底) |
 | `./deploy/service.sh <vm_id> {stop\|start\|status\|restart}` | guest 内 NvDisplayContainer 服务控制；玩 TP-sensitive 游戏前 `stop` 把 stream 全关 |
 
-## 工作流（一台 fresh guest 装好 Windows 后）
+`setup-guest.sh` / `connect.sh` 仍然在，供单独调试用，但日常工作流不需要碰。
 
+## 工作流
+
+**首次部署 / driver 未装**：
 ```bash
-# 1. host 启 VM
-./deploy/start-vm.sh 1
+./deploy/start-vm.sh 1 --no-spoof    # PCI 真身，driver 才装得上（A 模式下 GRID INF 不匹配会 -436207360）
+# setup-task 自动检测 driver 缺 → 跑 setup-guest:
+#   1) install-vgpu-driver  (装 GRID 553.24 + 写注册表 block Windows Update)
+#   2) install-vgpu-license (从 fastapi-dls 拉 token + 重启 NVDisplay daemon)
+#   3) ivshmem driver  4) NvDisplayContainer service  5) name spoof  6) EDID spoof
+# guest 重启进 1080p，viewer 自动看到画面
+```
 
-# 2. host 一键 bootstrap guest
-./deploy/setup-guest.sh 1
-# 这一步装 driver 后会重启 guest；setup 自动等 WinRM 重连
+**日常使用**：
+```bash
+./deploy/start-vm.sh 1               # 默认 SPOOF_MODE=A (PCI + name spoof)
+# setup-task 检测到全 OK → 直接 viewer
+# Ctrl+C / 关 SDL 窗口 / 另一终端 ./stop-vm.sh 1 都能优雅关
+```
 
-# 3. 之后任何时候连接
-./deploy/connect.sh 1
+**spoof 切换**：
+```bash
+./deploy/start-vm.sh 1 --no-spoof          # off：装 driver / 调试用
+./deploy/start-vm.sh 1 --spoof-name-only   # B：PCI 真身 + name spoof，driver 最稳
+./deploy/start-vm.sh 1                     # A：PCI + name 全 spoof（默认，最彻底）
+echo 'SPOOF_MODE=B' >> /home/ubuntu/images/vms/configs/vm1.conf  # per-VM 永久切到 B
 ```
 
 玩游戏前临时停 stream：
@@ -64,7 +77,7 @@ host:   /dev/shm/nv-shmem-vmN ◄───────────────�
 | `hw/usb/hcd-xhci-pci.c` | xHCI 默认 PCI 从 `PCI_VENDOR_ID_REDHAT` 改为 Intel Sunrise Point-H (`0x8086`/`0xA12F`)，USB 3.0 控制器看起来像 100-series 主板板载 |
 | `hw/smbios/smbios.c` | type 17 `device_locator` 从 `DIMM 0/1/...` 改成 `DIMM_A1/B1/A2/B2/...` 交替分配到 channel A/B；`bank_locator` 带 `Channel{A,B}-DIMM{n}` 后缀；配合 `pc_q35_machine_11_0_options.smbios_memory_device_size = 4 GiB` 让 8GB guest 拆成 2 条 4GB = 双通道视图 |
 | `hw/i386/pc_q35.c` | `pc_q35_machine_11_0_options` 里 `m->smbios_memory_device_size = 4 * GiB`（上游默认 2 TiB，导致 8 GB 塞一条大 DIMM） |
-| `deploy/host/OVMF_CODE_4M_stealth.fd` | 本地 rebuild 的 OVMF，`PcdFirmwareVendor` 从 `"Ubuntu distribution of EDK II"` → `"American Megatrends Inc."`。源码在 `host/ovmf-build/edk2-2024.02/debian/rules` 第 26-28 行。`STEALTH_OVMF=1 ./up.sh` 使用。实测 `SystemBiosVersion` 第三项已从 `Ubuntu ... - 10000` → `American Megatrends Inc. - 10000` |
+| `deploy/host/OVMF_CODE_4M_stealth.fd` | 本地 rebuild 的 OVMF，`PcdFirmwareVendor` 从 `"Ubuntu distribution of EDK II"` → `"American Megatrends Inc."`。源码在 `host/ovmf-build/edk2-2024.02/debian/rules` 第 26-28 行。用 `OVMF_CODE=host/OVMF_CODE_4M_stealth.fd ./start-vm.sh 1` 启用。实测 `SystemBiosVersion` 第三项已从 `Ubuntu ... - 10000` → `American Megatrends Inc. - 10000` |
 
 编译后通过 `build/qemu-system-x86_64 -cpu help | grep Core-i` 可以看到三个新 CPU 模型。
 
@@ -87,7 +100,10 @@ deploy/
 │   └── spoof-inf/
 │       ├── README.md         # GRID → GeForce INF 伪装流程
 │       └── inf-patch.ps1     # 自动改 INF 并 pnputil 重装
-├── vm-configs/               # vmN.conf 存放地（由 create-vm.sh 写入、只读）
+# vmN.conf / runtime sockets / qcow2 / VARS / log 全在
+# $VM_ROOT (默认 /home/ubuntu/images/vms/) 下:
+#   configs/vmN.conf  run/vmN.{pid,qmp,mon}  log/vmN.log
+#   win10-base.qcow2  win10-vmN.qcow2  vmN_VARS.fd
 └── docs/
     ├── DETECTION.md          # 反虚拟化检测面清单（按层组织）
     └── DEBUG.md              # 调试手段 (perf / GDB / trace / 日志)
@@ -129,7 +145,7 @@ sudo systemctl restart nvidia-vgpu-mgr
 ```bash
 ./create-vm.sh 1
 ./create-vm.sh 2
-# 每个 VM 的平台/主板/内存/序列号/MAC 全部写死到 vm-configs/vmN.conf
+# 每个 VM 的平台/主板/内存/序列号/MAC 全部写死到 $VM_ROOT/configs/vmN.conf
 ```
 
 ### 5. 建 qcow2 盘 + 初次装 Windows (NO_VFIO install 模式)

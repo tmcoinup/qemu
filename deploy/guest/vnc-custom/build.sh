@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build AudioSvcHost.exe (64-bit) from vnc_server.c via mingw-w64.
-# Stages to ~/Downloads/nv-deploy/ for HTTP pickup by guest installer.
+# Stages to /home/ubuntu/images/staging/ for HTTP pickup by guest installer.
 #
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
@@ -18,7 +18,7 @@ $CC -O2 -std=c99 -Wall -Wno-unused-parameter \
 ls -la "$OUT"
 file "$OUT"
 
-deploy=${NV_DEPLOY_DIR:-/home/ubuntu/Downloads/nv-deploy}
+deploy=${NV_DEPLOY_DIR:-/home/ubuntu/images/staging}
 mkdir -p "$deploy"
 cp "$OUT" "$deploy/"
 echo "Staged at $deploy/$OUT"

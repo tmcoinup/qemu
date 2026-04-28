@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# create-vm.sh — 一次性生成 vm-configs/vmN.conf。
+# create-vm.sh — 一次性生成 $VM_ROOT/configs/vmN.conf。
 #
 #   用法:  ./create-vm.sh <vm_id>          # 1..N
 #          ./create-vm.sh <vm_id> --force  # 覆盖已存在配置
 #
 # 随机挑选一套「平台 (i5-4590 / i5-6500 / i3-8100) + 主板 + 内存 + SSD」，
-# 生成 UUID / 各种序列号 / MAC，写入 vm-configs/vmN.conf 后仅作只读。
+# 生成 UUID / 各种序列号 / MAC，写入 $VM_ROOT/configs/vmN.conf 后仅作只读。
 # start-vm.sh 只读这个文件，确保同一个 VM 每次开机表现一致。
 
 set -euo pipefail
@@ -24,13 +24,14 @@ if [[ -z "$VM_ID" || ! "$VM_ID" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-CONF="vm-configs/vm${VM_ID}.conf"
+VM_ROOT="${VM_ROOT:-/home/ubuntu/images/vms}"
+CONF="$VM_ROOT/configs/vm${VM_ID}.conf"
 if [[ -f "$CONF" && $FORCE -eq 0 ]]; then
     echo "VM $VM_ID 已存在 ($CONF)，--force 覆盖" >&2
     exit 0
 fi
 
-mkdir -p vm-configs
+mkdir -p "$VM_ROOT/configs"
 
 # ─── 平台选择 ────────────────────────────────────────────────────────────────
 PLATFORMS=(i5-4590 i5-6500 i3-8100)
@@ -163,7 +164,7 @@ esac
 
 cat > "$CONF" <<EOF
 # === 自动生成于 $(date -Iseconds) ===
-# vm-configs/vm${VM_ID}.conf — 只读，任何时候修改都可能让 guest 内 license/driver
+# $VM_ROOT/configs/vm${VM_ID}.conf — 只读，任何时候修改都可能让 guest 内 license/driver
 # / Windows 激活等失效。更换硬件指纹请用新 VM_ID + --force。
 
 VM_ID=${VM_ID}

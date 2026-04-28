@@ -11,7 +11,7 @@
 | VM 配置到 **GT 1030** | `install-patched-driver.ps1`（下 Display.Driver.zip 时里面 INF 已包含 DEV_1D01） |
 | VM 配置到 **GTX 1050** | `install-patched-driver.ps1` 改参 or 用 `inf-patch.ps1 -Profile gtx1050_2gb` 动态 patch |
 | Approach A 切回 B | `switch-to-approach-b.ps1 -TargetName 'GeForce GT 1030'` |
-| 不确定 VM 当前是什么 profile | `cat deploy/vm-configs/vm1.conf \| grep GPU_` |
+| 不确定 VM 当前是什么 profile | `cat /home/ubuntu/images/vms/configs/vm1.conf \| grep GPU_` |
 
 ---
 
@@ -46,7 +46,7 @@ C:\nv\nvgridsw.CAT.new   ← 自签 cat (approach A 时)
 `install-patched-driver.ps1` 里硬编 `http://192.168.30.127:8080/Display.Driver.zip`。宿主要先把这个起来：
 
 ```bash
-cd ~/Downloads/nv-deploy              # 放 Display.Driver.zip 的目录
+cd /home/ubuntu/images/staging              # 放 Display.Driver.zip 的目录
 python3 ~/projects/qemu/deploy/server.py   # 监听 0.0.0.0:8000 (注意端口)
 # 或简单:
 python3 -m http.server 8080
@@ -55,16 +55,16 @@ python3 -m http.server 8080
 ⚠️ server.py 默认端口是 **8000**，install-patched-driver.ps1 里写的是 **8080** — 要么改脚本的 port 要么改 URL。最省事：
 
 ```bash
-cd ~/Downloads/nv-deploy && python3 -m http.server 8080
+cd /home/ubuntu/images/staging && python3 -m http.server 8080
 ```
 
 `Display.Driver.zip` 是 538.33 解压后 `Display.Driver` 文件夹的 zip 包（包含 `nvgridsw.inf`, `nvlddmkm.sys`, `nvwgf2umx.dll` 等）。本机已生成过这个 zip：
 
 ```bash
-ls ~/Downloads/nv-deploy/Display.Driver.zip     # 应该有
+ls /home/ubuntu/images/staging/Display.Driver.zip     # 应该有
 # 没有的话: cd ~/Downloads/vGPU17.6/Guest_Drivers/ && mkdir /tmp/ex && cd /tmp/ex && \
 #           7z x 553.74_grid_*.exe && zip -r Display.Driver.zip Display.Driver/ && \
-#           mv Display.Driver.zip ~/Downloads/nv-deploy/
+#           mv Display.Driver.zip /home/ubuntu/images/staging/
 ```
 
 ---
@@ -117,14 +117,14 @@ bcdedit | Select-String testsigning
 **办法 1：改宿主侧 zip（推荐，一次改了所有 VM 复用）**
 
 ```bash
-cd ~/Downloads/nv-deploy
+cd /home/ubuntu/images/staging
 unzip Display.Driver.zip -d /tmp/ex && cd /tmp/ex/Display.Driver
 # 编辑 nvgridsw.inf，在 [Strings] 和 [NVIDIA_Devices.NTamd64.*] 里加:
 #   NVIDIA_DEV.1C81 = "NVIDIA GeForce GTX 1050"
 #   %NVIDIA_DEV.1C81% = Section400, PCI\VEN_10DE&DEV_1C81
 # 同时保留 1D01 的条目，zip 就能同时支持 1030 和 1050
 zip -r Display.Driver.zip Display.Driver/
-cp Display.Driver.zip ~/Downloads/nv-deploy/
+cp Display.Driver.zip /home/ubuntu/images/staging/
 ```
 
 **办法 2：用 `guest/spoof-inf/inf-patch.ps1` 在 guest 里动态 patch（给现有驱动追加 DeviceID）**
@@ -162,7 +162,8 @@ approach B 用 NVIDIA **原厂签名**的 nvgridsw.inf，PCI 保留 DEV_1E30 (Qu
 
 ```bash
 cd ~/projects/qemu/deploy
-STEALTH_OVMF=1 ./up.sh --no-spoof --connect
+OVMF_CODE=host/OVMF_CODE_4M_stealth.fd GPU_SPOOF=0 ./start-vm.sh 1
+./connect.sh 1
 ```
 
 guest 里：
@@ -205,7 +206,7 @@ C:\nv\purge-rdp-ghosts.ps1              # 一次性清
 C:\nv\purge-rdp-ghosts.ps1 -Install    # 注册 SYSTEM 计划任务 (事件 21/23/24/25 触发)
 ```
 
-**切换方案**：approach A ↔ B 可以反复切，每次切完必须重启 guest。每次切换前建议 `./down.sh` 先备份 qcow2 （baseline 写进 `win10-ok.qcow2`）。
+**切换方案**：approach A ↔ B 可以反复切，每次切完必须重启 guest。
 
 ---
 
@@ -215,6 +216,5 @@ C:\nv\purge-rdp-ghosts.ps1 -Install    # 注册 SYSTEM 计划任务 (事件 21/2
 |---|---|---|
 | pnputil /add-driver 报 "无效数字签名" | 自签证书没进 TrustedPublisher | 重跑 install-patched-driver.ps1 step 4 |
 | Device Manager 里 NVIDIA 有叹号 Error 43 | INF 匹配了 DEV_1E30 但 PCI 是 DEV_1D01 | 宿主 `--no-spoof` 或 guest 重装 approach A 装 DEV_1D01 匹配的 patched INF |
-| 装完驱动进不了桌面 / bootmgr 卡 spinner | Fast Startup 存了不兼容的 hiberfile | `./down.sh --force && ./restore.sh`（或 mount qcow2 删 hiberfil.sys，见 memory `project_windows_boot_hang_recovery`）|
-| RDP 只有 800×600 | 禁用了 Microsoft Remote Display Adapter | `./up.sh --connect-only`（新版默认 1920×1080）或再启用 RDP IDD |
-| `install-patched-driver.ps1` 下载 zip 失败 | 宿主 HTTP 没起 | `cd ~/Downloads/nv-deploy && python3 -m http.server 8080` |
+| 装完驱动进不了桌面 / bootmgr 卡 spinner | Fast Startup 存了不兼容的 hiberfile | `./stop-vm.sh --force` 后 mount qcow2 删 hiberfil.sys（见 memory `project_windows_boot_hang_recovery`）|
+| `install-patched-driver.ps1` 下载 zip 失败 | 宿主 HTTP 没起 | `cd /home/ubuntu/images/staging && python3 -m http.server 8080` |

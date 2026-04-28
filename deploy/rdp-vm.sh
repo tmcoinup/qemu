@@ -46,7 +46,7 @@ EOF
     exit 2
 fi
 
-CONF="vm-configs/vm${VM_ID}.conf"
+CONF="${VM_ROOT:-/home/ubuntu/images/vms}/configs/vm${VM_ID}.conf"
 [[ -f "$CONF" ]] || { echo "$CONF 不存在" >&2; exit 1; }
 # shellcheck source=/dev/null
 source "$CONF"

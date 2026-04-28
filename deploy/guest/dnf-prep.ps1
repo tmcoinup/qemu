@@ -43,19 +43,19 @@ $remoteServices = @(
     'AnyDesk',
     'Parsec',
     'SunshineService',
-    # Our own streaming stack. NvDisplayContainer manages NvSvcStream
-    # (ddagrab+nvenc → 56790) and AudioSvcHost (RFB → 56789). Stopping
-    # the service kills both children (it's the watchdog parent), which
-    # frees ~30% GPU and zeros our outbound bandwidth — both of which
-    # DNF's TP flags as "network instability" / suspicious GPU usage.
+    # Our own streaming stack. NvDisplayContainer manages nv_stream_relay
+    # (DDA capture → ivshmem ring) and AudioSvcHost (RFB input → loopback
+    # 56789). Stopping the service kills both children (it's the watchdog
+    # parent), which frees the GPU capture pipe and removes our only
+    # listening socket — both of which DNF's TP flags as suspicious.
     'NvDisplayContainer'
 )
 $remoteFirewall = 'TightVNC In','TeamViewer','AnyDesk','Parsec','Sunshine',
-                  'NVIDIA Display Container LS','Audio Device Graph Host'
+                  'Audio Device Graph Host'
 
 # Process names that aren't matched by service-stop alone — we kill them
 # explicitly in case a stray watchdog hasn't reaped them yet.
-$ourProcesses = @('NvSvcStream', 'AudioSvcHost', 'NvDisplayContainer')
+$ourProcesses = @('nv_stream_relay', 'AudioSvcHost', 'NvDisplayContainer')
 
 function Show-Status {
     Write-Host ''
@@ -79,12 +79,12 @@ function Show-Status {
         Write-Host '  processes: none running' -Fore Green
     }
 
-    # Known VNC / TeamViewer / AnyDesk / Parsec ports + our own stealth
-    # VNC + streaming ports. ANY listener on these is a potential TP signal,
-    # and our 56790 stream channel emits ~15 Mbps which TP detects as a
-    # network anomaly (the "network instability" message).
+    # Known VNC / TeamViewer / AnyDesk / Parsec ports + our own input
+    # listener (56789, loopback only). Video is pure ivshmem so there's
+    # no outbound traffic now — this is mostly to catch competitors'
+    # stragglers and an unexpected loopback listener that survived stop.
     $portHits = @()
-    foreach ($p in 5900,5901,5902,5800,7070,7100,7575,24800,56789,56790) {
+    foreach ($p in 5900,5901,5902,5800,7070,7100,7575,24800,56789) {
         $c = Get-NetTCPConnection -LocalPort $p -State Listen -EA 0
         if ($c) { $portHits += $c }
     }

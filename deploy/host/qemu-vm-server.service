@@ -1,0 +1,31 @@
+# /etc/systemd/system/qemu-vm-server.service
+#
+# 给 guest 拉脚本/binary/license token 的 HTTP server 自启。
+# 装:
+#   sudo install -m 644 deploy/host/qemu-vm-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now qemu-vm-server.service
+# 看日志:
+#   journalctl -u qemu-vm-server -f
+[Unit]
+Description=QEMU VM staging HTTP server (deploy/server.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/projects/qemu/deploy
+ExecStart=/usr/bin/python3 /home/ubuntu/projects/qemu/deploy/server.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+# server.py 默认 bind 0.0.0.0:8080 + serve /home/ubuntu/images/staging
+# 改端口 / dir 在这里 override:
+#   Environment=STAGE_DIR=/some/path
+#   ExecStart=/usr/bin/python3 ... --port 9000
+
+[Install]
+WantedBy=multi-user.target

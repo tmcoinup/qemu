@@ -57,7 +57,8 @@ ls -la "$DST"
 
 cat <<EOF
 Done.  Now run from deploy/:
-    STEALTH_OVMF=1 ./up.sh --connect
+    OVMF_CODE=host/OVMF_CODE_4M_stealth.fd ./start-vm.sh 1
+    ./connect.sh 1
 Verify in guest:
     Get-ItemProperty 'HKLM:\\HARDWARE\\DESCRIPTION\\System' SystemBiosVersion
 should show "American Megatrends Inc. - 10000" in the list (not "Ubuntu ...").

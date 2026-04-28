@@ -18,7 +18,7 @@
 
 ### GDB attach 到 QEMU 进程
 ```bash
-sudo gdb -p "$(cat deploy/run/vm${VM_ID}.pid)"
+sudo gdb -p "$(cat /home/ubuntu/images/vms/run/vm${VM_ID}.pid)"
 (gdb) info threads
 (gdb) thread N
 (gdb) bt
@@ -34,7 +34,7 @@ sudo gdb -p "$(cat deploy/run/vm${VM_ID}.pid)"
 
 ### QMP 监控
 ```bash
-socat - unix-connect:deploy/run/vm${VM_ID}.qmp
+socat - unix-connect:/home/ubuntu/images/vms/run/vm${VM_ID}.qmp
 {"execute":"qmp_capabilities"}
 {"execute":"query-cpu-model-expansion","arguments":{"type":"full","model":{"name":"Core-i5-6500"}}}
 ```

@@ -51,15 +51,8 @@
 #define LOG_PATH                "C:\\nv\\nv-stream-relay.log"
 #define INPUT_FORWARD_HOST      "127.0.0.1"
 #define INPUT_FORWARD_PORT      56789
-/* Reuses the same ffmpeg binary the TCP-mode service spawns; only the
- * args differ (`-f h264 -` vs `-f h264 tcp:listen=1`). One file on
- * disk, two callers. */
-#define ENCODER_EXE             "C:\\Windows\\System32\\NvSvcStream.exe"
 
-/* Tuning is read from the same registry key the TCP-mode service
- * uses, for parity. */
 #define CFG_REG_PATH            "SOFTWARE\\NVIDIA\\DisplayContainer\\Stream"
-#define CFG_DEF_BITRATE         "10M"
 #define CFG_DEF_FRAMERATE       60
 
 /* forward decls (helpers defined further down) */
@@ -294,6 +287,42 @@ static void shmem_header_init(NvShmemHdr *hdr) {
 /* ──────────────────────── stop flag ─────────────────────────────── */
 static volatile LONG g_stop = 0;
 
+/* Windows console-app shutdown handler. The service launcher
+ * (NvDisplayContainer) spawns us as a CONSOLE subsystem child via
+ * CreateProcessAsUser, so we get CTRL_SHUTDOWN_EVENT on system
+ * shutdown / logoff and CTRL_CLOSE_EVENT when the parent service
+ * orderly stops us. Set g_stop=1; the main loop will see it within
+ * the next ~50ms (capture cadence) and exit, which lets our final
+ * `guest_alive_tick = 0` write reach the host viewer **before** the
+ * 4-second timeout kicks in.
+ *
+ * Returning TRUE tells Windows we handled it. The parent process
+ * gives us a few seconds (SCM default 5s) to actually exit before
+ * TerminateProcess. */
+static BOOL WINAPI on_ctrl_signal(DWORD dwCtrlType) {
+    switch (dwCtrlType) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        InterlockedExchange(&g_stop, 1);
+        /* Write the proactive shutdown marker INLINE — by the time
+         * main() reaches its cleanup we may already have been
+         * TerminateProcess'd by NvDisplayContainer. The mmap stays
+         * alive on the QEMU side after we die, so this single
+         * release-store is enough to wake the host viewer. */
+        if (g_ivs_base) {
+            NvShmemHdr *hdr = (NvShmemHdr*)g_ivs_base;
+            NV_SHMEM_STORE_REL(&hdr->guest_alive_tick, 0);
+        }
+        vlog("ctrl signal %lu — stopping (alive_tick=0 published)", dwCtrlType);
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 /* Write one chunk into the video ring. If full, drop oldest by
  * advancing reader_seq — for video, dropping the past is better
  * than blocking the encoder thread. */
@@ -367,14 +396,15 @@ typedef struct {
     UINT                      width;
     UINT                      height;
 
-    /* Tile diff state */
-    UINT                      tiles_x;       /* ceil(width  / NV_TILE_SIZE) */
-    UINT                      tiles_y;       /* ceil(height / NV_TILE_SIZE) */
-    uint32_t                 *tile_hash;     /* tiles_x * tiles_y FNV-1a hashes */
+    /* DDA reports its own dirty-rect list per frame. We allocate a
+     * scratch buffer sized to TotalMetadataBufferSize on demand; saves
+     * us from running a per-tile hash in software. */
+    BYTE                     *meta_buf;
+    UINT                      meta_cap;
 
-    /* Frame assembly buffer; sized to fit a full-screen keyframe:
-     *   sizeof(NvFrameHdr) + tiles * (sizeof(NvFrameTile) + tile_pixels)
-     *   ~= 12 + tiles*(8 + 4096) ≈ 8.4 MB at 1080p
+    /* Frame assembly buffer. Worst case is one full-screen rect, which
+     * fits in width*height*4 + sizeof(NvFrameTile) + sizeof(NvFrameHdr).
+     * We reserve a bit more so multi-rect bursts don't blow the cap.
      */
     uint8_t                  *frame_buf;
     uint32_t                  frame_buf_cap;
@@ -443,85 +473,121 @@ static int dda_init(CaptureCtx *cc) {
     HRSAY(ID3D11Device_CreateTexture2D(cc->d3d_dev, &td, NULL, &cc->staging),
           "CreateTexture2D(staging)");
 
-    /* Tile geometry + hash table */
-    cc->tiles_x = (cc->width  + NV_TILE_SIZE - 1) / NV_TILE_SIZE;
-    cc->tiles_y = (cc->height + NV_TILE_SIZE - 1) / NV_TILE_SIZE;
-    size_t n_tiles = (size_t)cc->tiles_x * cc->tiles_y;
-    cc->tile_hash = calloc(n_tiles, sizeof(uint32_t));
-
-    /* Worst-case frame buffer: full keyframe = NvFrameHdr + every
-     * tile (header + pixels). tile pixels max NV_TILE_SIZE^2 * 4. */
+    /* Worst case is one full-screen rect: NvFrameHdr + NvFrameTile +
+     * width*height*4. Add a generous slack for multi-rect bursts. */
     cc->frame_buf_cap = (uint32_t)(sizeof(NvFrameHdr)
-        + n_tiles * (sizeof(NvFrameTile) + NV_TILE_SIZE * NV_TILE_SIZE * 4));
+        + 256 * sizeof(NvFrameTile)
+        + (size_t)cc->width * cc->height * 4);
     cc->frame_buf = malloc(cc->frame_buf_cap);
-    if (!cc->tile_hash || !cc->frame_buf) {
-        vlog("malloc tile_hash/frame_buf failed"); return -1;
+    if (!cc->frame_buf) {
+        vlog("malloc frame_buf failed"); return -1;
     }
+    /* meta_buf is grown lazily on first AcquireNextFrame seeing a
+     * non-zero TotalMetadataBufferSize. */
+    cc->meta_buf = NULL;
+    cc->meta_cap = 0;
     cc->force_keyframe = 1;  /* first frame ships everything */
-    vlog("dirty-tile: %ux%u tiles (%zu total), frame_buf_cap=%u KB",
-         cc->tiles_x, cc->tiles_y, n_tiles, cc->frame_buf_cap / 1024);
+    vlog("DDA dirty-rect: fb=%ux%u, frame_buf_cap=%u KB",
+         cc->width, cc->height, cc->frame_buf_cap / 1024);
+
+    /* Prime the duplication so a fresh viewer never sees black.
+     * AcquireNextFrame returns WAIT_TIMEOUT forever on a perfectly
+     * static desktop; without an initial frame we never CopyResource,
+     * staging_valid stays 0, and the timeout-path keyframe branch
+     * can't fire — so the viewer's texture stays blank until the
+     * user wiggles the cursor. We try ~2s for the system's natural
+     * "first frame after DuplicateOutput" push, and halfway through
+     * inject a zero-motion mouse event to force a desktop redraw. */
+    for (int i = 0; i < 10; i++) {
+        DXGI_OUTDUPL_FRAME_INFO info;
+        IDXGIResource *res = NULL;
+        HRESULT hr = IDXGIOutputDuplication_AcquireNextFrame(cc->dup, 200, &info, &res);
+        if (SUCCEEDED(hr)) {
+            ID3D11Texture2D *src = NULL;
+            HRESULT qhr = IDXGIResource_QueryInterface(res,
+                &IID_ID3D11Texture2D, (void**)&src);
+            if (SUCCEEDED(qhr) && src) {
+                ID3D11DeviceContext_CopyResource(cc->d3d_ctx,
+                    (ID3D11Resource*)cc->staging, (ID3D11Resource*)src);
+                ID3D11Texture2D_Release(src);
+                cc->staging_valid = 1;
+                vlog("dda: primed initial frame (try=%d)", i);
+            }
+            IDXGIResource_Release(res);
+            IDXGIOutputDuplication_ReleaseFrame(cc->dup);
+            break;
+        }
+        if (hr != DXGI_ERROR_WAIT_TIMEOUT) {
+            vlog("dda prime: AcquireNextFrame hr=0x%08lx", (unsigned long)hr);
+            break;
+        }
+        if (i == 4) {
+            INPUT in = {0};
+            in.type = INPUT_MOUSE;
+            in.mi.dwFlags = MOUSEEVENTF_MOVE;  /* dx=dy=0 → no visual change */
+            SendInput(1, &in, sizeof(in));
+            vlog("dda prime: nudged mouse (no visual move) to break static-desktop stall");
+        }
+    }
     return 0;
 }
 
-/* FNV-1a 32-bit over one tile's BGRA bytes — fast (no SIMD intrinsics
- * yet, plenty fast for 1080p @ 60 fps anyway). Read 4-byte words. */
-static inline uint32_t hash_tile(const uint8_t *base, UINT pitch,
-                                 UINT x, UINT y, UINT w, UINT h) {
-    uint32_t h32 = 0x811c9dc5u;
-    for (UINT j = 0; j < h; j++) {
-        const uint32_t *row = (const uint32_t*)(base + (y + j) * pitch + x * 4);
-        for (UINT i = 0; i < w; i++) {
-            h32 = (h32 ^ row[i]) * 0x01000193u;
-        }
-    }
-    return h32;
-}
-
-/* Build a FRAM message in cc->frame_buf by diffing the mapped BGRA
- * frame against cc->tile_hash[]. Updates the hash table for tiles
- * we ship. Returns total message size in bytes. */
-static uint32_t build_frame(CaptureCtx *cc, const D3D11_MAPPED_SUBRESOURCE *m) {
+/* Build a FRAM message in cc->frame_buf by emitting one NvFrameTile
+ * per dirty rect. No per-pixel hashing — DDA already tells us what
+ * changed. */
+static uint32_t build_frame(CaptureCtx *cc,
+                            const D3D11_MAPPED_SUBRESOURCE *m,
+                            const RECT *rects, UINT n_rects) {
     NvFrameHdr *hdr = (NvFrameHdr*)cc->frame_buf;
-    hdr->magic     = NV_FRAME_MAGIC;
-    hdr->frame_seq = ++cc->frame_seq;
-    hdr->fb_width  = (uint16_t)cc->width;
-    hdr->fb_height = (uint16_t)cc->height;
+    hdr->magic      = NV_FRAME_MAGIC;
+    hdr->frame_seq  = ++cc->frame_seq;
+    hdr->fb_width   = (uint16_t)cc->width;
+    hdr->fb_height  = (uint16_t)cc->height;
     hdr->tile_count = 0;
-    hdr->flags     = cc->force_keyframe ? NV_FRAME_FLAG_KEYFRAME : 0;
+    hdr->flags      = cc->force_keyframe ? NV_FRAME_FLAG_KEYFRAME : 0;
 
     uint8_t *cursor = cc->frame_buf + sizeof(NvFrameHdr);
-    UINT changed = 0;
-    UINT idx = 0;
+    uint8_t *cap    = cc->frame_buf + cc->frame_buf_cap;
+    UINT emitted = 0;
 
-    for (UINT ty = 0; ty < cc->tiles_y; ty++) {
-        UINT y0 = ty * NV_TILE_SIZE;
-        UINT th = (y0 + NV_TILE_SIZE > cc->height) ? (cc->height - y0) : NV_TILE_SIZE;
-        for (UINT tx = 0; tx < cc->tiles_x; tx++, idx++) {
-            UINT x0 = tx * NV_TILE_SIZE;
-            UINT tw = (x0 + NV_TILE_SIZE > cc->width) ? (cc->width - x0) : NV_TILE_SIZE;
+    for (UINT i = 0; i < n_rects; i++) {
+        LONG l = rects[i].left, t_ = rects[i].top;
+        LONG r = rects[i].right, b = rects[i].bottom;
+        if (l < 0) l = 0;
+        if (t_ < 0) t_ = 0;
+        if (r > (LONG)cc->width)  r = (LONG)cc->width;
+        if (b > (LONG)cc->height) b = (LONG)cc->height;
+        if (r <= l || b <= t_) continue;
 
-            uint32_t h32 = hash_tile((const uint8_t*)m->pData, m->RowPitch,
-                                     x0, y0, tw, th);
-            if (!cc->force_keyframe && h32 == cc->tile_hash[idx]) continue;
-            cc->tile_hash[idx] = h32;
+        UINT x0 = (UINT)l, y0 = (UINT)t_;
+        UINT rw = (UINT)(r - l);
+        UINT rh = (UINT)(b - t_);
+        if (rw > 0xFFFFu) rw = 0xFFFFu;
+        if (rh > 0xFFFFu) rh = 0xFFFFu;
 
-            /* Append NvFrameTile + BGRA */
-            NvFrameTile *t = (NvFrameTile*)cursor;
-            t->x = (uint16_t)x0;
-            t->y = (uint16_t)y0;
-            t->w = (uint16_t)tw;
-            t->h = (uint16_t)th;
-            cursor += sizeof(*t);
-            for (UINT j = 0; j < th; j++) {
-                memcpy(cursor,
-                       (const uint8_t*)m->pData + (y0 + j) * m->RowPitch + x0 * 4,
-                       (size_t)tw * 4);
-                cursor += tw * 4;
-            }
-            changed++;
+        /* Defensive overflow check; with DDA's non-overlapping rects
+         * total area ≤ desktop area, so this should never fire. */
+        size_t need = sizeof(NvFrameTile) + (size_t)rw * rh * 4;
+        if ((size_t)(cap - cursor) < need) {
+            vlog("frame_buf would overflow (rects=%u emitted=%u)", n_rects, emitted);
+            break;
         }
+
+        NvFrameTile *tile = (NvFrameTile*)cursor;
+        tile->x = (uint16_t)x0;
+        tile->y = (uint16_t)y0;
+        tile->w = (uint16_t)rw;
+        tile->h = (uint16_t)rh;
+        cursor += sizeof(*tile);
+        for (UINT j = 0; j < rh; j++) {
+            memcpy(cursor,
+                   (const uint8_t*)m->pData + (y0 + j) * m->RowPitch + x0 * 4,
+                   (size_t)rw * 4);
+            cursor += rw * 4;
+        }
+        emitted++;
     }
-    hdr->tile_count = (uint16_t)changed;
+    hdr->tile_count = (uint16_t)emitted;
     cc->force_keyframe = 0;
     return (uint32_t)(cursor - cc->frame_buf);
 }
@@ -554,18 +620,36 @@ static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
     DXGI_OUTDUPL_FRAME_INFO info;
     IDXGIResource *res = NULL;
     HRESULT hr = IDXGIOutputDuplication_AcquireNextFrame(cc->dup, 50, &info, &res);
+    /* Debug heartbeat: every 5 s log what's happening so we don't have
+     * to guess which path the loop is going down. */
+    static DWORD last_diag_tick = 0;
+    static DWORD diag_total = 0, diag_timeout = 0, diag_ok = 0, diag_err = 0;
+    diag_total++;
+    if      (hr == DXGI_ERROR_WAIT_TIMEOUT) diag_timeout++;
+    else if (SUCCEEDED(hr))                 diag_ok++;
+    else                                    diag_err++;
+    if (now - last_diag_tick > 5000) {
+        vlog("capture diag: total=%lu timeout=%lu ok=%lu err=%lu  hr=0x%08lx  staging_valid=%d  force_kf=%d  host_alive=%lu",
+             diag_total, diag_timeout, diag_ok, diag_err,
+             (unsigned long)hr, cc->staging_valid, cc->force_keyframe,
+             (unsigned long)host_alive);
+        last_diag_tick = now;
+    }
+
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
         /* Idle path. If a keyframe was requested AND we have a
          * captured staging texture from a previous frame, we can
-         * remap it and ship that as the keyframe — viewers attaching
-         * during a static-desktop pause don't have to wait for the
-         * next mouse jiggle to see the screen. */
+         * remap it and ship the whole frame as a single full-screen
+         * rect — viewers attaching during a static-desktop pause
+         * don't have to wait for the next mouse jiggle to see the
+         * screen. */
         if (cc->force_keyframe && cc->staging_valid) {
             D3D11_MAPPED_SUBRESOURCE m;
             HRESULT mhr = ID3D11DeviceContext_Map(cc->d3d_ctx,
                 (ID3D11Resource*)cc->staging, 0, D3D11_MAP_READ, 0, &m);
             if (SUCCEEDED(mhr)) {
-                uint32_t msg_size = build_frame(cc, &m);
+                RECT full = { 0, 0, (LONG)cc->width, (LONG)cc->height };
+                uint32_t msg_size = build_frame(cc, &m, &full, 1);
                 ID3D11DeviceContext_Unmap(cc->d3d_ctx, (ID3D11Resource*)cc->staging, 0);
                 video_push(hdr, ring, cc->frame_buf, msg_size);
                 last_keyframe_tick = now;
@@ -593,6 +677,49 @@ static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
         return -1;
     }
 
+    /* Decide rect list. Keyframe → one full-screen rect. Else ask
+     * DDA which rectangles changed; mouse-only updates surface as
+     * TotalMetadataBufferSize==0 and we ship a 12-byte empty frame
+     * (heartbeat). */
+    RECT  full_rect = { 0, 0, (LONG)cc->width, (LONG)cc->height };
+    RECT *rects     = NULL;
+    UINT  n_rects   = 0;
+
+    if (cc->force_keyframe) {
+        rects   = &full_rect;
+        n_rects = 1;
+    } else if (info.TotalMetadataBufferSize > 0) {
+        if (info.TotalMetadataBufferSize > cc->meta_cap) {
+            BYTE *nb = realloc(cc->meta_buf, info.TotalMetadataBufferSize);
+            if (nb) {
+                cc->meta_buf = nb;
+                cc->meta_cap = info.TotalMetadataBufferSize;
+            }
+        }
+        if (cc->meta_buf && cc->meta_cap >= info.TotalMetadataBufferSize) {
+            UINT used = 0;
+            HRESULT dhr = IDXGIOutputDuplication_GetFrameDirtyRects(
+                cc->dup, cc->meta_cap, (RECT*)cc->meta_buf, &used);
+            if (SUCCEEDED(dhr) && used >= sizeof(RECT)) {
+                rects   = (RECT*)cc->meta_buf;
+                n_rects = used / sizeof(RECT);
+            }
+        }
+    }
+
+    /* No dirty area (cursor moved / no visual change) → skip the
+     * GPU readback entirely and just ship a heartbeat. This is the
+     * common static-desktop path and what makes CPU usage drop. */
+    if (n_rects == 0) {
+        ID3D11Texture2D_Release(src);
+        IDXGIOutputDuplication_ReleaseFrame(cc->dup);
+        NvFrameHdr h = { NV_FRAME_MAGIC, ++cc->frame_seq,
+                         (uint16_t)cc->width, (uint16_t)cc->height,
+                         0, 0 };
+        video_push(hdr, ring, &h, sizeof(h));
+        return 0;
+    }
+
     /* GPU-side copy into staging (CPU-readable) */
     ID3D11DeviceContext_CopyResource(cc->d3d_ctx,
         (ID3D11Resource*)cc->staging, (ID3D11Resource*)src);
@@ -608,13 +735,11 @@ static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
         return -1;
     }
 
-    uint32_t msg_size = build_frame(cc, &m);
+    uint32_t msg_size = build_frame(cc, &m, rects, n_rects);
 
     ID3D11DeviceContext_Unmap(cc->d3d_ctx, (ID3D11Resource*)cc->staging, 0);
     IDXGIOutputDuplication_ReleaseFrame(cc->dup);
 
-    /* Even if no tiles changed (msg_size == sizeof(NvFrameHdr)) we
-     * still ship the empty frame so the receiver advances frame_seq. */
     video_push(hdr, ring, cc->frame_buf, msg_size);
     return 0;
 }
@@ -627,7 +752,7 @@ static void capture_cleanup(CaptureCtx *cc) {
     if (cc->output1)  IDXGIOutput1_Release(cc->output1);
     if (cc->adapter)  IDXGIAdapter1_Release(cc->adapter);
     if (cc->factory)  IDXGIFactory1_Release(cc->factory);
-    free(cc->tile_hash);
+    free(cc->meta_buf);
     free(cc->frame_buf);
     memset(cc, 0, sizeof(*cc));
 }
@@ -774,6 +899,10 @@ int main(int argc, char **argv) {
     log_init();
     vlog("=== nv_stream_relay starting (pid=%lu) ===", (unsigned long)GetCurrentProcessId());
 
+    /* 主动关机通知 — 见 on_ctrl_signal 注释。注册必须在 ivshmem
+     * mmap 之前，确保最早一次 shutdown 信号也能被接收。 */
+    SetConsoleCtrlHandler(on_ctrl_signal, TRUE);
+
     WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
 
     if (ivshmem_open() != 0) {
@@ -787,13 +916,13 @@ int main(int argc, char **argv) {
     hdr->guest_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
     vlog("guest desktop %ux%u", hdr->guest_width, hdr->guest_height);
 
-    /* tuning from registry, defaults match TCP-mode service */
-    char  bitrate[32]   = CFG_DEF_BITRATE;
-    DWORD framerate     = CFG_DEF_FRAMERATE;
-    reg_get_sz   (CFG_REG_PATH, "Bitrate",   bitrate, sizeof(bitrate));
+    /* Frame pacing from registry (set by install-nv-service.ps1).
+     * Dirty-tile mode is bandwidth-adaptive — there's no bitrate
+     * knob, only how often we sample the desktop. */
+    DWORD framerate = CFG_DEF_FRAMERATE;
     reg_get_dword(CFG_REG_PATH, "FrameRate", &framerate);
     if (framerate < 5 || framerate > 240) framerate = CFG_DEF_FRAMERATE;
-    vlog("config: bitrate=%s framerate=%lu", bitrate, framerate);
+    vlog("config: framerate=%lu", framerate);
 
     /* AudioSvcHost VncAuth password — same default as install-custom-vnc.ps1
      * uses (registry HKLM\SOFTWARE\Microsoft\Audio\GraphHost\Password). */
@@ -805,23 +934,9 @@ int main(int argc, char **argv) {
     HANDLE h_beat  = CreateThread(NULL, 0, heartbeat, NULL, 0, NULL);
     (void)h_input; (void)h_beat;
 
-    /* Parse bitrate string ("15M", "5M", "500K", "1500000") into bps. */
-    int bitrate_bps = 5000000;
-    {
-        char *end = NULL;
-        long n = strtol(bitrate, &end, 10);
-        if (end && *end) {
-            if (*end == 'M' || *end == 'm') n *= 1000000;
-            else if (*end == 'K' || *end == 'k') n *= 1000;
-        }
-        if (n > 0) bitrate_bps = (int)n;
-    }
-
     uint8_t *ring = (uint8_t*)g_ivs_base + hdr->video_off;
     DWORD fail_count = 0;
     DWORD frame_us = 1000000u / framerate;
-
-    (void)bitrate; (void)bitrate_bps;  /* dirty-tile mode is bandwidth-adaptive */
 
     /* Force desktop to configured resolution (default 1920x1080)
      * BEFORE the first DDA init so capture grabs the right size. */
@@ -865,6 +980,15 @@ int main(int argc, char **argv) {
 
     vlog("=== nv_stream_relay stopping ===");
     InterlockedExchange(&g_stop, 1);
+
+    /* 主动通告 host：写 guest_alive_tick = 0，host viewer 看到从
+     * 非零跳 0 立刻 want_quit，不用等 4 秒心跳超时。这是用户在 OS
+     * 关机 / "stop service" 时能立即收回 SDL 窗口的关键路径。 */
+    if (g_ivs_base) {
+        NvShmemHdr *hdr = (NvShmemHdr*)g_ivs_base;
+        NV_SHMEM_STORE_REL(&hdr->guest_alive_tick, 0);
+        vlog("guest_alive_tick = 0 (proactive shutdown notify)");
+    }
     ivshmem_close();
     WSACleanup();
     return 0;

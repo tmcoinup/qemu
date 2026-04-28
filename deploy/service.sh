@@ -40,7 +40,7 @@ done
 [[ -n "$ACTION" ]] || { echo "missing action (stop|start|restart|status)" >&2; exit 2; }
 
 if [[ -z "$IP_OVERRIDE" ]]; then
-    conf="vm-configs/vm${VM_ID}.conf"
+    conf="${VM_ROOT:-/home/ubuntu/images/vms}/configs/vm${VM_ID}.conf"
     [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }
     # shellcheck source=/dev/null
     source "$conf"

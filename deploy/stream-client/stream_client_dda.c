@@ -1,6 +1,6 @@
 /*
  * stream_client_dda.c — host-side viewer for the dirty-tile / raw-BGRA
- * ivshmem transport written by nv_stream_relay.exe in the guest.
+ * ivshmem transport written by NvStreamSvc.exe in the guest.
  *
  * No mpv, no ffmpeg, no codec at all on the host. The guest streams
  * raw 32x32 tiles of BGRA pixels into the video ring; this client
@@ -21,13 +21,6 @@
 #include "../nv-shmem/nv_shmem_proto.h"
 
 #include <SDL2/SDL.h>
-#include <SDL2/SDL_syswm.h>
-
-/* Used for the explicit XGrabKeyboard fallback. SDL's own
- * SDL_HINT_GRAB_KEYBOARD doesn't always defeat WM-level grabs of
- * Super+X / Super+L on some desktops (gnome-shell, KWin, i3 with
- * mod=$mod4). We do a direct Xlib grab too. */
-#include <X11/Xlib.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,18 +49,79 @@ static int shmem_attach(const char *path) {
     return 0;
 }
 
-static int shmem_wait_ready(int deadline_ms) {
-    NvShmemHdr *hdr = (NvShmemHdr*)g_shmem;
-    int waited = 0;
-    while (waited < deadline_ms) {
-        if (NV_SHMEM_LOAD_ACQ(&hdr->magic)        == NV_SHMEM_MAGIC &&
-            NV_SHMEM_LOAD_ACQ(&hdr->guest_width)  != 0 &&
-            NV_SHMEM_LOAD_ACQ(&hdr->guest_height) != 0) return 0;
-        struct timespec ts = {0, 50 * 1000 * 1000};
-        nanosleep(&ts, NULL);
-        waited += 50;
+/* ──────────────────────── waiting splash drawing ───────────────
+ * No SDL2_ttf dep — render a 7-segment elapsed-seconds counter and
+ * a 4-quadrant rotating spinner using only SDL_RenderFillRect. */
+
+/* Segment layout per digit:
+ *
+ *      0
+ *    ┌───┐
+ *    │1  │2
+ *    ├─3─┤
+ *    │4  │5
+ *    └───┘
+ *      6
+ *
+ * Bit i in digit_segments[d] = segment i is on for digit d. */
+static const uint8_t digit_segments[10] = {
+    0x77, /* 0: 0,1,2,4,5,6 */
+    0x24, /* 1: 2,5         */
+    0x5D, /* 2: 0,2,3,4,6   */
+    0x6D, /* 3: 0,2,3,5,6   */
+    0x2E, /* 4: 1,2,3,5     */
+    0x6B, /* 5: 0,1,3,5,6   */
+    0x7B, /* 6: 0,1,3,4,5,6 */
+    0x25, /* 7: 0,2,5       */
+    0x7F, /* 8: all         */
+    0x6F, /* 9: 0,1,2,3,5,6 */
+};
+
+static void draw_7seg_digit(SDL_Renderer *r, int x, int y, int w, int h, int d) {
+    if (d < 0 || d > 9) return;
+    int t = h / 12; if (t < 2) t = 2;          /* segment thickness */
+    int half_h = h / 2;
+    uint8_t seg = digit_segments[d];
+    SDL_Rect rc;
+    if (seg & 0x01) { rc=(SDL_Rect){x,         y,                w, t};      SDL_RenderFillRect(r,&rc); } /* top   */
+    if (seg & 0x02) { rc=(SDL_Rect){x,         y,                t, half_h}; SDL_RenderFillRect(r,&rc); } /* TL    */
+    if (seg & 0x04) { rc=(SDL_Rect){x + w - t, y,                t, half_h}; SDL_RenderFillRect(r,&rc); } /* TR    */
+    if (seg & 0x08) { rc=(SDL_Rect){x,         y + half_h - t/2, w, t};      SDL_RenderFillRect(r,&rc); } /* mid   */
+    if (seg & 0x10) { rc=(SDL_Rect){x,         y + half_h,       t, half_h}; SDL_RenderFillRect(r,&rc); } /* BL    */
+    if (seg & 0x20) { rc=(SDL_Rect){x + w - t, y + half_h,       t, half_h}; SDL_RenderFillRect(r,&rc); } /* BR    */
+    if (seg & 0x40) { rc=(SDL_Rect){x,         y + h - t,        w, t};      SDL_RenderFillRect(r,&rc); } /* btm   */
+}
+
+/* Draw "Ns" centered, where N is the elapsed seconds. The trailing
+ * 's' label is drawn as a half-height 7-seg-style block (we don't
+ * have a real font, so it's just a small filled bar to mark units). */
+static void draw_seconds(SDL_Renderer *r, int win_w, int win_h, int secs) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", secs);
+    int n = (int)strlen(buf);
+    int digit_h = win_h / 3;        if (digit_h < 40) digit_h = 40;
+    int digit_w = digit_h * 3 / 5;
+    int gap     = digit_h / 10;     if (gap < 4) gap = 4;
+    int total_w = n * digit_w + (n - 1) * gap;
+    int x0 = (win_w - total_w) / 2;
+    int y0 = (win_h - digit_h) / 2;
+    for (int i = 0; i < n; i++) {
+        draw_7seg_digit(r, x0 + i * (digit_w + gap), y0, digit_w, digit_h, buf[i] - '0');
     }
-    return -1;
+}
+
+/* 4-quadrant rotating spinner: one quadrant lit per frame, rotates clockwise. */
+static void draw_spinner(SDL_Renderer *r, int cx, int cy, int size, int frame) {
+    int half = size / 2;
+    int gap  = size / 16; if (gap < 2) gap = 2;
+    SDL_Rect quads[4] = {
+        { cx - half,         cy - half,         half - gap, half - gap }, /* TL */
+        { cx + gap,          cy - half,         half - gap, half - gap }, /* TR */
+        { cx + gap,          cy + gap,          half - gap, half - gap }, /* BR */
+        { cx - half,         cy + gap,          half - gap, half - gap }, /* BL */
+    };
+    int active = ((unsigned)frame) % 4;
+    SDL_RenderFillRect(r, &quads[active]);
 }
 
 /* ──────────────────────── input write helpers ──────────────────── */
@@ -186,8 +240,25 @@ static char path_buf[64];
 static volatile sig_atomic_t want_quit = 0;
 static void on_quit(int s) { (void)s; want_quit = 1; }
 
+/* Cursor visibility helper — 鼠标在 viewer 内时隐宿主光标（DDA 帧
+ * 没有光标位图，我们自绘 Win 风格假光标），移出 / 失焦时显回宿主
+ * 光标。**不**触碰任何 grab API：Wayland XWayland 下 SDL/X grab 抢
+ * 不了 mutter 的系统快捷键，反而引入状态机抖动 (frequent ON/OFF)
+ * 和 focus race (截图 / 切窗时键盘事件丢)。键盘路由完全靠 SDL 自然
+ * focus dispatch — viewer 在 input focus 时 SDL 收 KEYDOWN，否则
+ * 系统把键发给别的窗口；这是最简单且零 race 的模型。 */
+static void update_cursor_vis(int *visible, int want)
+{
+    if (want == *visible) return;
+    SDL_ShowCursor(want ? SDL_ENABLE : SDL_DISABLE);
+    *visible = want;
+}
+
 static void parse_args(int argc, char **argv, struct args *a) {
     a->vm_id = 1; a->shmem_path = NULL; a->width = 0; a->height = 0;
+    /* Default windowed. Fullscreen + Wayland-native 上一版被证明会
+     * 模糊 + 卡死，回滚为默认窗口模式；用户可 --fullscreen 显式
+     * 进入（不推荐 Wayland 下用）。 */
     a->fullscreen = 0;
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--vm")     && i+1 < argc) a->vm_id = atoi(argv[++i]);
@@ -195,9 +266,15 @@ static void parse_args(int argc, char **argv, struct args *a) {
         else if (!strcmp(argv[i], "--width")  && i+1 < argc) a->width = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--height") && i+1 < argc) a->height = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) a->fullscreen = 1;
+        else if (!strcmp(argv[i], "--windowed"))   a->fullscreen = 0;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             fprintf(stderr,
-              "usage: %s [--vm N | --shmem /path] [--width N --height N] [--fullscreen]\n",
+              "usage: %s [--vm N | --shmem /path] [--width N --height N]\n"
+              "          [--fullscreen | --windowed]\n"
+              "in-window hotkeys:\n"
+              "  RAlt        Win key (RAlt + X = Win + X)\n"
+              "  RAlt + Q    quit viewer\n"
+              "  RAlt + F11  toggle fullscreen (use at your own risk on Wayland)\n",
               argv[0]); exit(0);
         } else { fprintf(stderr, "unknown arg %s\n", argv[i]); exit(2); }
     }
@@ -213,23 +290,20 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "[stream-dda] attaching %s\n", a.shmem_path);
     if (shmem_attach(a.shmem_path) < 0) return 1;
-    fprintf(stderr, "[stream-dda] waiting for guest relay (magic+size)\n");
-    if (shmem_wait_ready(15000) < 0) {
-        fprintf(stderr, "[stream-dda] timeout — is nv_stream_relay running in guest?\n");
-        return 1;
-    }
+    /* Don't block here — SDL window comes up immediately with a
+     * "waiting for guest" placeholder, and we lazy-init the texture
+     * once the guest's ring header has magic+size. This way the user
+     * sees a window even during fresh-boot / setup-guest. */
     NvShmemHdr *hdr = (NvShmemHdr*)g_shmem;
-    int srv_w = hdr->guest_width, srv_h = hdr->guest_height;
-    fprintf(stderr, "[stream-dda] guest desktop %dx%d\n", srv_w, srv_h);
+    int srv_w = a.width  ? a.width  : 1280;
+    int srv_h = a.height ? a.height : 720;
+    int win_w = srv_w, win_h = srv_h;
+    int guest_ready = 0;
 
-    int win_w = a.width  ? a.width  : srv_w;
-    int win_h = a.height ? a.height : srv_h;
-
-    /* Hints must be set before SDL_Init.
-     *   GRAB_KEYBOARD = "1": XGrabKeyboard on focus, so the WM doesn't
-     *     swallow Win+X / Alt+Tab / Super+L etc. and they reach us.
-     *   X11_NET_WM_BYPASS_COMPOSITOR: avoid 1-frame compositor lag. */
-    SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, "1");
+    /* Hints must be set before SDL_Init. 我们**故意不设** GRAB_KEYBOARD —
+     * Wayland XWayland 下 mutter 不让客户端抢系统快捷键，强行 grab
+     * 反而带来 focus 抖动 (frequent ENTER/LEAVE) 和 race。键盘路由
+     * 完全靠 SDL 默认 focus dispatch，简洁可靠。 */
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "1");
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
@@ -240,57 +314,88 @@ int main(int argc, char **argv) {
     Uint32 wflags = SDL_WINDOW_RESIZABLE;
     if (a.fullscreen) wflags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     char title[160];
-    snprintf(title, sizeof(title), "Audio Stream (DDA) - vm%d", a.vm_id);
+    snprintf(title, sizeof(title), "vm%d - waiting for guest...", a.vm_id);
     SDL_Window *win = SDL_CreateWindow(title,
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         win_w, win_h, wflags);
     if (!win) { fprintf(stderr, "CreateWindow: %s\n", SDL_GetError()); return 1; }
-    SDL_Renderer *ren = SDL_CreateRenderer(win, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    /* 去掉 PRESENTVSYNC — Wayland (XWayland) 下窗口 occluded/minimized 时
+     * X server 不发 frame done event，SDL_RenderPresent 会 block forever
+     * 在 poll fd=5（X socket）→ 整个 viewer 主 loop 卡死。我们的视频流
+     * 自己有 60 fps cadence（guest relay frame_us），不需要 SDL vsync 二次
+     * 节流。 */
+    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
+    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
     if (!ren) {
         ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
     }
     if (!ren) { fprintf(stderr, "CreateRenderer: %s\n", SDL_GetError()); return 1; }
-    SDL_Texture *tex = SDL_CreateTexture(ren,
-        SDL_PIXELFORMAT_ARGB8888,             /* BGRA on little-endian */
-        SDL_TEXTUREACCESS_STREAMING,
-        srv_w, srv_h);
-    if (!tex) { fprintf(stderr, "CreateTexture: %s\n", SDL_GetError()); return 1; }
+    /* Texture is lazy — we don't know the real guest dimensions yet.
+     * Allocated/recreated when the ring header reports them, and again
+     * any time the guest desktop is resized. */
+    SDL_Texture *tex = NULL;
 
+    /* 默认显宿主光标。鼠标进窗时 update_grab 会切到隐藏 + 自绘
+     * Windows-style 光标；移出时再显回来。 */
     SDL_ShowCursor(SDL_ENABLE);
     SDL_SetRelativeMouseMode(SDL_FALSE);
 
-    /* SDL's grab hint + per-window keyboard grab is the polite version. */
-#if SDL_VERSION_ATLEAST(2, 0, 16)
-    SDL_SetWindowKeyboardGrab(win, SDL_TRUE);
-#else
-    SDL_SetWindowGrab(win, SDL_TRUE);
-#endif
-
-    /* Belt + suspenders: also do a direct Xlib XGrabKeyboard. SDL's
-     * grab path on X11 doesn't always defeat WM-level grabs (gnome-
-     * shell, KWin, i3-style $mod4 bindings) for keys like Super+X /
-     * Super+L. owner_events=False forces ALL keypresses, including
-     * those the WM would otherwise capture, into our window. */
-    Display *xdpy = NULL;
-    Window xwin_handle = 0;
+    /* Build a small RGBA arrow texture once (12x19, classic Win32
+     * cursor: white interior, black outline, transparent background). */
+    SDL_Texture *cur_tex = NULL;
+    int cur_w = 12, cur_h = 19;
     {
-        SDL_SysWMinfo wm;
-        SDL_VERSION(&wm.version);
-        if (SDL_GetWindowWMInfo(win, &wm) && wm.subsystem == SDL_SYSWM_X11) {
-            xdpy = wm.info.x11.display;
-            xwin_handle = wm.info.x11.window;
-            int rc = XGrabKeyboard(xdpy, xwin_handle,
-                                   False, GrabModeAsync, GrabModeAsync,
-                                   CurrentTime);
-            fprintf(stderr, "[stream-dda] XGrabKeyboard rc=%d (0=GrabSuccess)\n", rc);
+        static const char cur_pat[19][12] = {
+            {1,0,0,0,0,0,0,0,0,0,0,0},
+            {1,1,0,0,0,0,0,0,0,0,0,0},
+            {1,2,1,0,0,0,0,0,0,0,0,0},
+            {1,2,2,1,0,0,0,0,0,0,0,0},
+            {1,2,2,2,1,0,0,0,0,0,0,0},
+            {1,2,2,2,2,1,0,0,0,0,0,0},
+            {1,2,2,2,2,2,1,0,0,0,0,0},
+            {1,2,2,2,2,2,2,1,0,0,0,0},
+            {1,2,2,2,2,2,2,2,1,0,0,0},
+            {1,2,2,2,2,2,2,2,2,1,0,0},
+            {1,2,2,2,2,2,2,2,2,2,1,0},
+            {1,2,2,2,2,2,2,1,1,1,1,1},
+            {1,2,2,2,1,2,2,1,0,0,0,0},
+            {1,2,2,1,1,2,2,1,0,0,0,0},
+            {1,2,1,0,0,1,2,2,1,0,0,0},
+            {1,1,0,0,0,1,2,2,1,0,0,0},
+            {0,0,0,0,0,0,1,2,2,1,0,0},
+            {0,0,0,0,0,0,1,2,2,1,0,0},
+            {0,0,0,0,0,0,0,1,1,0,0,0},
+        };
+        uint32_t cur_px[19 * 12];
+        for (int yy = 0; yy < cur_h; yy++) {
+            for (int xx = 0; xx < cur_w; xx++) {
+                uint32_t v = 0; /* RGBA: transparent */
+                if (cur_pat[yy][xx] == 1) v = 0xFF000000u;            /* black AABBGGRR */
+                else if (cur_pat[yy][xx] == 2) v = 0xFFFFFFFFu;       /* white */
+                cur_px[yy * cur_w + xx] = v;
+            }
+        }
+        cur_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888,
+                                    SDL_TEXTUREACCESS_STATIC, cur_w, cur_h);
+        if (cur_tex) {
+            SDL_UpdateTexture(cur_tex, NULL, cur_px, cur_w * 4);
+            SDL_SetTextureBlendMode(cur_tex, SDL_BLENDMODE_BLEND);
         }
     }
+
+    /* SDL 自然 focus 路由 — 不调任何 grab API。鼠标光标按 ENTER/LEAVE
+     * 简单切显隐，独立于键盘转发逻辑。 */
+    SDL_PumpEvents();
+    SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+    int cursor_visible = 1;   /* SDL 默认 enable，跟 SDL_ShowCursor 同步 */
+    Uint32 wfl0  = SDL_GetWindowFlags(win);
+    /* 鼠标若启动时已在窗内（SDL 不发 ENTER），先隐宿主光标 */
+    if (wfl0 & SDL_WINDOW_MOUSE_FOCUS) update_cursor_vis(&cursor_visible, 0);
 
     signal(SIGINT,  on_quit);
     signal(SIGTERM, on_quit);
 
-    uint8_t  *ring = (uint8_t*)g_shmem + hdr->video_off;
+    uint8_t  *ring = NULL;          /* set when guest_ready */
     /* Worst-case keyframe at 1080p ≈ 8.4 MiB. Default Linux thread
      * stack is 8 MiB so this MUST be heap-allocated, not on stack. */
     const uint32_t recbuf_cap = 16 * 1024 * 1024;
@@ -301,19 +406,138 @@ int main(int argc, char **argv) {
     int last_pos_x = 0, last_pos_y = 0;
     int dirty_pos = 0;
 
-    /* Bump host_alive_tick on attach so the relay sees a rising edge
-     * and forces a keyframe — viewer doesn't have to wait for the
-     * next 5 second periodic refresh to see a non-black screen. */
-    NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 1);
     int debug_keys = getenv("STREAM_DEBUG") != NULL;
 
-    /* On every iteration: drain 1 ring record, drain SDL events,
-     * present a frame. RENDERER_PRESENTVSYNC paces the loop to the
-     * monitor refresh rate. */
+    Uint32 start_ticks = SDL_GetTicks();
+
+    /* Guest 心跳超时：guest 内 NvStreamSvc 每 100ms 给
+     * hdr->guest_alive_tick +1。8 秒看不到变化 = relay 死了 / VM 关机
+     * / QEMU 异常 → viewer 主动 want_quit=1 自我了断，避免出现
+     * "guest 关机但 viewer 窗口还在" 这种悬挂。Splash 阶段 (guest
+     * 还没起) 不算 — 那时 alive 本来就是 0；要 guest_ready 后才计时。 */
+    uint32_t  alive_last_seen   = 0;
+    Uint32    alive_last_change = SDL_GetTicks();
+    const Uint32 ALIVE_TIMEOUT_MS = 4000;
+
+    /* On every iteration: maybe transition to guest_ready, drain 1 ring
+     * record, drain SDL events, present a frame. */
     while (!want_quit) {
+        /* ── 0. lazy guest-ready transition ────────────────────────
+         * While the guest's nv_stream_relay isn't running yet (cold
+         * boot / setup-guest in progress) we just paint black and
+         * pump SDL events so the window stays responsive. As soon as
+         * the ring header carries magic+size we create the texture,
+         * resize the window to the guest desktop, and bump the
+         * host_alive_tick so the relay forces a keyframe immediately. */
+        if (!guest_ready) {
+            if (NV_SHMEM_LOAD_ACQ(&hdr->magic)        == NV_SHMEM_MAGIC &&
+                NV_SHMEM_LOAD_ACQ(&hdr->guest_width)  != 0 &&
+                NV_SHMEM_LOAD_ACQ(&hdr->guest_height) != 0) {
+                srv_w = hdr->guest_width;
+                srv_h = hdr->guest_height;
+                ring  = (uint8_t*)g_shmem + hdr->video_off;
+                /* 上次 viewer 留下的 reader_seq 跟当前 writer_seq 不同步
+                 * (尤其旧 viewer 卡死后留下的旧值)。从 ring 中间读会拿到
+                 * record 中间字节，size 字段是 garbage → nv_shmem_read 返
+                 * -1 永远卡。把 reader_seq 拉到 writer_seq 丢老帧从最新开始。
+                 * 同样把 input ring 也归零（旧的 input event 不要 replay）。 */
+                NV_SHMEM_STORE_REL(&hdr->video.reader_seq,
+                                   NV_SHMEM_LOAD_ACQ(&hdr->video.writer_seq));
+                NV_SHMEM_STORE_REL(&hdr->input.reader_seq,
+                                   NV_SHMEM_LOAD_ACQ(&hdr->input.writer_seq));
+                tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
+                    SDL_TEXTUREACCESS_STREAMING, srv_w, srv_h);
+                if (!tex) {
+                    fprintf(stderr, "CreateTexture: %s\n", SDL_GetError());
+                    return 1;
+                }
+                if (!a.fullscreen && (!a.width || !a.height)) {
+                    SDL_SetWindowSize(win, srv_w, srv_h);
+                    SDL_SetWindowPosition(win,
+                        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+                }
+                snprintf(title, sizeof(title),
+                    "vm%d - %dx%d", a.vm_id, srv_w, srv_h);
+                SDL_SetWindowTitle(win, title);
+                NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 1);
+                guest_ready = 1;
+                fprintf(stderr, "[stream-dda] guest desktop %dx%d\n", srv_w, srv_h);
+            } else {
+                /* Not ready yet — splash screen with a spinner + an
+                 * elapsed-seconds counter so the user knows the
+                 * viewer is alive while the guest boots / setup-guest
+                 * runs. Pump SDL events + sleep 100 ms so we don't
+                 * spin. */
+                Uint32 now = SDL_GetTicks();
+                int    elapsed_sec = (int)((now - start_ticks) / 1000);
+                int    spin_frame  = (int)((now - start_ticks) / 200);
+
+                int cur_w, cur_h;
+                SDL_GetWindowSize(win, &cur_w, &cur_h);
+
+                SDL_SetRenderDrawColor(ren, 18, 22, 32, 255);   /* dark slate bg */
+                SDL_RenderClear(ren);
+
+                /* Spinner above the number, ~1/8 of window height in size. */
+                int spin_size = cur_h / 8;
+                if (spin_size < 32) spin_size = 32;
+                int spin_y    = cur_h / 2 - cur_h / 3;
+                SDL_SetRenderDrawColor(ren, 90, 140, 220, 255); /* spinner: muted blue */
+                draw_spinner(ren, cur_w / 2, spin_y, spin_size, spin_frame);
+
+                /* Big 7-seg seconds counter, centered. */
+                SDL_SetRenderDrawColor(ren, 200, 220, 255, 255); /* counter: light blue-white */
+                draw_seconds(ren, cur_w, cur_h, elapsed_sec);
+
+                SDL_RenderPresent(ren);
+
+                /* Splash 期间：响应 close + RAlt+Q + 光标显隐 */
+                SDL_Event ev;
+                while (SDL_PollEvent(&ev)) {
+                    if (ev.type == SDL_QUIT) want_quit = 1;
+                    else if (ev.type == SDL_WINDOWEVENT) {
+                        switch (ev.window.event) {
+                        case SDL_WINDOWEVENT_ENTER:
+                            update_cursor_vis(&cursor_visible, 0); break;
+                        case SDL_WINDOWEVENT_LEAVE:
+                        case SDL_WINDOWEVENT_FOCUS_LOST:
+                        case SDL_WINDOWEVENT_MINIMIZED:
+                        case SDL_WINDOWEVENT_HIDDEN:
+                            update_cursor_vis(&cursor_visible, 1); break;
+                        case SDL_WINDOWEVENT_CLOSE: want_quit = 1; break;
+                        }
+                    }
+                    else if (ev.type == SDL_KEYDOWN &&
+                             (ev.key.keysym.mod & KMOD_RALT) &&
+                             ev.key.keysym.sym == SDLK_q) {
+                        want_quit = 1;
+                    }
+                }
+                struct timespec ts = {0, 100 * 1000 * 1000};
+                nanosleep(&ts, NULL);
+                continue;
+            }
+        }
+
+        /* ── 0.5. pump SDL events FIRST so big video drain below
+         * doesn't starve mouse/keyboard. SDL_PollEvent 不会 implicit
+         * pump — 必须显式 SDL_PumpEvents 让 X events 流入 SDL queue。 */
+        SDL_PumpEvents();
+
         /* ── 1. drain video ring ───────────────────────────── */
         int rc = nv_shmem_read(ring, NV_SHMEM_VIDEO_BYTES, &hdr->video,
                                recbuf, recbuf_cap, &rec_size);
+        if (rc < 0) {
+            /* size > recbuf_cap：多半是 ring 状态错乱 (size 字段 garbage)。
+             * 强制把 reader 拉到 writer 同步重同步，丢掉所有 buffered 帧。
+             * 下次 keyframe 来时画面会自己恢复。 */
+            fprintf(stderr, "[stream-dda] ring read returned -1 (size=%u > cap=%u), resetting\n",
+                    rec_size, recbuf_cap);
+            NV_SHMEM_STORE_REL(&hdr->video.reader_seq,
+                               NV_SHMEM_LOAD_ACQ(&hdr->video.writer_seq));
+            NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 1);  /* 让 relay 发 keyframe */
+            rc = 0;
+        }
         if (rc > 0 && rec_size >= sizeof(NvFrameHdr)) {
             NvFrameHdr *fh = (NvFrameHdr*)recbuf;
             if (fh->magic == NV_FRAME_MAGIC && fh->fb_width && fh->fb_height) {
@@ -346,11 +570,45 @@ int main(int argc, char **argv) {
             switch (ev.type) {
             case SDL_QUIT: want_quit = 1; break;
 
+            case SDL_WINDOWEVENT:
+                switch (ev.window.event) {
+                case SDL_WINDOWEVENT_ENTER:
+                    update_cursor_vis(&cursor_visible, 0);  /* 进窗：隐宿主光标 */
+                    break;
+                case SDL_WINDOWEVENT_LEAVE:
+                case SDL_WINDOWEVENT_FOCUS_LOST:
+                case SDL_WINDOWEVENT_MINIMIZED:
+                case SDL_WINDOWEVENT_HIDDEN:
+                    update_cursor_vis(&cursor_visible, 1);  /* 出窗/失焦：显宿主光标 */
+                    break;
+                case SDL_WINDOWEVENT_CLOSE: want_quit = 1; break;
+                default: break;
+                }
+                break;
+
             case SDL_KEYDOWN:
             case SDL_KEYUP: {
-                /* Avoid auto-repeat — RFB convention is that Windows
-                 * key auto-repeat is generated by the OS on the guest. */
                 if (ev.key.repeat) break;
+
+                /* RAlt + Q → quit viewer (本地拦截，不发 guest) */
+                if (ev.type == SDL_KEYDOWN &&
+                    (ev.key.keysym.mod & KMOD_RALT) &&
+                    ev.key.keysym.sym == SDLK_q) {
+                    want_quit = 1;
+                    if (debug_keys) fprintf(stderr, "[stream-dda] RAlt+Q → quit\n");
+                    break;
+                }
+
+                /* Right Alt 当 Super_L 用 — Wayland mutter 抢 LSuper/
+                 * RSuper，RAlt 是 GNOME 不抢的剩下能传给 client 的修
+                 * 饰键。RAlt+X = Win+X，RAlt 单按 = 按 Win。 */
+                if (ev.key.keysym.sym == SDLK_RALT) {
+                    shmem_send_key(ev.type == SDL_KEYDOWN, 0xFFEB /* XK_Super_L */);
+                    if (debug_keys) fprintf(stderr, "[stream-dda] %s RAlt → Super_L\n",
+                        ev.type == SDL_KEYDOWN ? "DN" : "UP");
+                    break;
+                }
+
                 uint32_t ks = sdl_to_rfb_keysym(ev.key.keysym);
                 if (debug_keys) {
                     fprintf(stderr, "[stream-dda] %s sdl=0x%x mod=0x%x → ks=0x%x %s\n",
@@ -410,6 +668,16 @@ int main(int argc, char **argv) {
         /* ── 3. render ─────────────────────────────────────── */
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
+        /* host 光标隐藏时（=鼠标在窗内）画 Win 风格假光标。 */
+        if (!cursor_visible && cur_tex && srv_w > 0 && srv_h > 0) {
+            int rw, rh; SDL_GetWindowSize(win, &rw, &rh);
+            SDL_Rect cdst;
+            cdst.x = (int)((int64_t)last_pos_x * rw / srv_w);
+            cdst.y = (int)((int64_t)last_pos_y * rh / srv_h);
+            cdst.w = cur_w;
+            cdst.h = cur_h;
+            SDL_RenderCopy(ren, cur_tex, NULL, &cdst);
+        }
         SDL_RenderPresent(ren);
 
         /* ── 4. heartbeat ──────────────────────────────────── */
@@ -418,16 +686,36 @@ int main(int argc, char **argv) {
          * rising edge from 0 (i.e., new host attach). */
         NV_SHMEM_STORE_REL(&hdr->host_alive_tick,
                            hdr->host_alive_tick + 1);
+
+        /* ── 5. guest 心跳：fast path (relay 主动写 0) + 兜底超时 ──
+         * relay 在 SetConsoleCtrlHandler 收到 CTRL_SHUTDOWN_EVENT /
+         * CTRL_LOGOFF_EVENT 时会同步把 guest_alive_tick 写 0；这条
+         * 路径正常工作时 viewer 在 ~100ms 内退出，不用等 4 秒。 */
+        if (guest_ready) {
+            uint32_t alive_now = NV_SHMEM_LOAD_ACQ(&hdr->guest_alive_tick);
+            if (alive_now == 0 && alive_last_seen != 0) {
+                fprintf(stderr,
+                    "[stream-dda] guest_alive_tick=0 — guest 主动通告关机，立即退出\n");
+                want_quit = 1;
+            } else if (alive_now != alive_last_seen) {
+                alive_last_seen   = alive_now;
+                alive_last_change = SDL_GetTicks();
+            } else if (SDL_GetTicks() - alive_last_change > ALIVE_TIMEOUT_MS) {
+                fprintf(stderr,
+                    "[stream-dda] guest heartbeat stalled %u ms — exiting "
+                    "(VM 异常 / relay 崩了 / TerminateProcess 抢在 ctrl handler 之前)\n",
+                    SDL_GetTicks() - alive_last_change);
+                want_quit = 1;
+            }
+        }
     }
 
     fprintf(stderr, "[stream-dda] shutting down\n");
     /* Tell the relay we're gone — it will reset its rising-edge
      * detector and force a keyframe for the next viewer. */
     NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 0);
-    if (xdpy && xwin_handle) {
-        XUngrabKeyboard(xdpy, CurrentTime);
-    }
     free(recbuf);
+    if (cur_tex) SDL_DestroyTexture(cur_tex);
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);

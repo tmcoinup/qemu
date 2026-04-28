@@ -1,0 +1,33 @@
+/* nv_display_container.rc — Win32 VERSIONINFO for the service shim.
+ * Sits in System32 next to nvcontainer.exe siblings; NVIDIA's real
+ * one ships these strings so we mirror them. */
+#include <winver.h>
+
+1 VERSIONINFO
+FILEVERSION    31,0,15,3833
+PRODUCTVERSION 31,0,15,3833
+FILEFLAGSMASK  0x3FL
+FILEFLAGS      0x0L
+FILEOS         0x40004L
+FILETYPE       0x1L
+FILESUBTYPE    0x0L
+{
+    BLOCK "StringFileInfo"
+    {
+        BLOCK "040904b0"
+        {
+            VALUE "CompanyName",      "NVIDIA Corporation"
+            VALUE "FileDescription",  "NVIDIA Display Container LS"
+            VALUE "FileVersion",      "31.0.15.3833"
+            VALUE "InternalName",     "NvContainer"
+            VALUE "LegalCopyright",   "(C) NVIDIA Corporation. All rights reserved."
+            VALUE "OriginalFilename", "NvContainer.exe"
+            VALUE "ProductName",      "NVIDIA Display Container"
+            VALUE "ProductVersion",   "31.0.15.3833"
+        }
+    }
+    BLOCK "VarFileInfo"
+    {
+        VALUE "Translation", 0x0409, 0x04B0
+    }
+}

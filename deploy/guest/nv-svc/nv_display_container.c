@@ -20,10 +20,10 @@
  *       CreateEnvironmentBlock(&env, hPrimary, FALSE)
  *       CreateProcessAsUserA(hPrimary, exe, cmdline, ...)
  *
- *   to spawn the actual workers — NvSvcStream.exe (= renamed ffmpeg) and
- *   AudioSvcHost.exe — into the active console session as the logged-in
- *   user. They get the real desktop, capture works, NVENC encodes, life
- *   is good.
+ *   to spawn the actual workers — NvStreamSvc.exe (DDA capture +
+ *   ivshmem ring writer) and AudioSvcHost.exe (input bridge) — into
+ *   the active console session as the logged-in user. They get the
+ *   real desktop and capture works.
  *
  *   On top of that we run a watchdog: if a child exits we relaunch it
  *   after a short backoff. Service stop terminates them.
@@ -62,6 +62,7 @@
 #include <windows.h>
 #include <wtsapi32.h>
 #include <userenv.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -91,91 +92,16 @@ typedef struct {
 
 #define WORKER_COUNT_MAX 4
 
-/* Tuning is read at service start from the registry so the install
- * scripts can change framerate / bitrate / port without recompiling
- * this binary. Defaults below match the original hard-coded values. */
-#define CFG_REG_PATH    "SOFTWARE\\NVIDIA\\DisplayContainer\\Stream"
-#define CFG_DEF_BITRATE "15M"
-#define CFG_DEF_FRAMERATE  60
-#define CFG_DEF_VIDEOPORT  56790
-
-/* Filled in by build_nvstream_args() once init_workers() runs. */
-static char g_nvstream_args[2048];
-
-static int reg_get_dword_local(const char *path, const char *name, DWORD *out) {
-    HKEY h;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &h) != ERROR_SUCCESS)
-        return -1;
-    DWORD type = 0, sz = sizeof(*out);
-    LONG rc = RegQueryValueExA(h, name, NULL, &type, (BYTE*)out, &sz);
-    RegCloseKey(h);
-    return (rc == ERROR_SUCCESS) ? 0 : -1;
-}
-static int reg_get_sz_local(const char *path, const char *name,
-                            char *out, DWORD outsz) {
-    HKEY h;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &h) != ERROR_SUCCESS)
-        return -1;
-    DWORD type = 0, sz = outsz;
-    LONG rc = RegQueryValueExA(h, name, NULL, &type, (BYTE*)out, &sz);
-    RegCloseKey(h);
-    return (rc == ERROR_SUCCESS) ? 0 : -1;
-}
-
-static void build_nvstream_args(void) {
-    char  bitrate[32]   = CFG_DEF_BITRATE;
-    DWORD framerate     = CFG_DEF_FRAMERATE;
-    DWORD videoport     = CFG_DEF_VIDEOPORT;
-
-    reg_get_sz_local(CFG_REG_PATH, "Bitrate", bitrate, sizeof(bitrate));
-    reg_get_dword_local(CFG_REG_PATH, "FrameRate", &framerate);
-    reg_get_dword_local(CFG_REG_PATH, "VideoPort", &videoport);
-    if (framerate < 5 || framerate > 240) framerate = CFG_DEF_FRAMERATE;
-    if (videoport < 1 || videoport > 65535) videoport = CFG_DEF_VIDEOPORT;
-
-    snprintf(g_nvstream_args, sizeof(g_nvstream_args),
-        "-y -hide_banner -loglevel warning "
-        "-filter_complex ddagrab=output_idx=0:framerate=%lu,hwdownload,format=bgra "
-        "-c:v h264_nvenc -preset p1 -tune ull -zerolatency 1 "
-        "-rc cbr -b:v %s -maxrate %s -bufsize 500K "
-        "-g %lu -bf 0 -flags low_delay -fflags nobuffer -flush_packets 1 "
-        "-strict experimental -f h264 tcp://0.0.0.0:%lu?listen=1",
-        (unsigned long)framerate,
-        bitrate, bitrate,
-        (unsigned long)framerate,
-        (unsigned long)videoport);
-
-    vlog("config: bitrate=%s framerate=%lu videoport=%lu",
-         bitrate, (unsigned long)framerate, (unsigned long)videoport);
-}
-
 static Worker g_workers[WORKER_COUNT_MAX];
 
 static void init_workers(void) {
-    /* Pick transport from registry (HKLM\SOFTWARE\NVIDIA\DisplayContainer\
-     * Stream\Mode). "shmem" → relay manages its own encoder + writes the
-     * ivshmem ring; "tcp" (default) → we spawn ffmpeg directly with a
-     * TCP listener, which is the original path. */
-    char mode[16] = "tcp";
-    reg_get_sz_local(CFG_REG_PATH, "Mode", mode, sizeof(mode));
-    if (_stricmp(mode, "shmem") == 0) {
-        g_workers[0].name = "relay";
-        g_workers[0].exe  = "C:\\Windows\\System32\\nv_stream_relay.exe";
-        g_workers[0].args = "";
-        g_workers[1].name = "input";
-        g_workers[1].exe  = "C:\\Windows\\System32\\AudioSvcHost.exe";
-        g_workers[1].args = "-console";
-        vlog("workers: relay + audio (mode=shmem)");
-    } else {
-        build_nvstream_args();
-        g_workers[0].name = "stream";
-        g_workers[0].exe  = "C:\\Windows\\System32\\NvSvcStream.exe";
-        g_workers[0].args = g_nvstream_args;
-        g_workers[1].name = "input";
-        g_workers[1].exe  = "C:\\Windows\\System32\\AudioSvcHost.exe";
-        g_workers[1].args = "-console";
-        vlog("workers: stream + audio (mode=tcp)");
-    }
+    g_workers[0].name = "relay";
+    g_workers[0].exe  = "C:\\Windows\\System32\\NvStreamSvc.exe";
+    g_workers[0].args = "";
+    g_workers[1].name = "input";
+    g_workers[1].exe  = "C:\\Windows\\System32\\AudioSvcHost.exe";
+    g_workers[1].args = "-console";
+    vlog("workers: relay + audio");
 }
 #define WORKER_COUNT 2
 
@@ -312,6 +238,35 @@ static DWORD spawn_in_session(DWORD session_id,
 }
 
 /* ──────────────────────── service core loop ─────────────────────── */
+/* Walk every running process; if its image basename matches `name`
+ * (case-insensitive) and it's not us, TerminateProcess. Used to clean
+ * up orphan workers from a previous service instance that didn't go
+ * through cleanup (system crash, ungraceful kill, …). Without this,
+ * the LG ivshmem driver — which only allows ONE userspace mmap at a
+ * time — refuses the new worker's REQUEST_MMAP and we end up in a
+ * fail/respawn loop. */
+static void kill_orphans(const char *name) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32 pe = { .dwSize = sizeof(pe) };
+    DWORD self = GetCurrentProcessId();
+    if (Process32First(snap, &pe)) {
+        do {
+            if (_stricmp(pe.szExeFile, name) == 0 && pe.th32ProcessID != self) {
+                HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE,
+                                       FALSE, pe.th32ProcessID);
+                if (h) {
+                    vlog("kill orphan %s pid=%lu", name, pe.th32ProcessID);
+                    TerminateProcess(h, 0);
+                    WaitForSingleObject(h, 1000);
+                    CloseHandle(h);
+                }
+            }
+        } while (Process32Next(snap, &pe));
+    }
+    CloseHandle(snap);
+}
+
 static void server_loop(void) {
     log_init();
     vlog("=== NvDisplayContainer starting (pid=%lu) ===",
@@ -320,6 +275,13 @@ static void server_loop(void) {
     enable_privilege("SeTcbPrivilege");
     enable_privilege("SeIncreaseQuotaPrivilege");
     enable_privilege("SeAssignPrimaryTokenPrivilege");
+
+    /* Kill anything left over from a previous instance BEFORE we
+     * start spawning workers. The ivshmem driver can only host one
+     * mmap at a time, so an orphan relay would block all our new
+     * spawns from acquiring it. */
+    kill_orphans("NvStreamSvc.exe");
+    kill_orphans("AudioSvcHost.exe");
 
     init_workers();
     DWORD last_session = 0;
@@ -392,16 +354,42 @@ static void server_loop(void) {
         Sleep(1000);
     }
 
-    /* Stopping: terminate children. */
-    vlog("stop requested, terminating workers");
+    /* Stopping: 先给 children 一次 graceful 机会，再 TerminateProcess
+     * 兜底。relay 在收到 CTRL_BREAK_EVENT 后会跑它的
+     * SetConsoleCtrlHandler 把 guest_alive_tick 写 0，让 host 端
+     * SDL 窗口立刻自杀。500ms 给它跑完 ConsoleCtrlHandler。
+     *
+     * GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) 只对**和发起者
+     * 同一 console 进程组**有效；NvDisplayContainer 这边没 console，
+     * 所以走 AttachConsole(child_pid) 临时接 child 的 console，
+     * 再 GenerateConsoleCtrlEvent。失败也没关系 — 系统级 shutdown
+     * 时 Windows 会单独给每个 console process 发 CTRL_SHUTDOWN_EVENT，
+     * 那条路径跟我们这条独立。 */
+    vlog("stop requested, signaling workers (CTRL_BREAK then terminate)");
     for (DWORD i = 0; i < WORKER_COUNT; i++) {
         Worker *w = &g_workers[i];
-        if (w->h_proc) {
-            TerminateProcess(w->h_proc, 0);
-            WaitForSingleObject(w->h_proc, 3000);
-            CloseHandle(w->h_proc);
-            w->h_proc = NULL;
+        if (!w->h_proc) continue;
+        FreeConsole();   /* 防御：万一上一轮还有挂着的 console */
+        if (AttachConsole(w->pid)) {
+            /* 别让我们自己也被这个 CTRL_BREAK 干掉 */
+            SetConsoleCtrlHandler(NULL, TRUE);
+            GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
+            FreeConsole();
+            SetConsoleCtrlHandler(NULL, FALSE);
+            vlog("[%s] sent CTRL_BREAK to pid=%lu", w->name, w->pid);
         }
+    }
+    /* 给 child ~500ms 跑 handler */
+    Sleep(500);
+    for (DWORD i = 0; i < WORKER_COUNT; i++) {
+        Worker *w = &g_workers[i];
+        if (!w->h_proc) continue;
+        if (WaitForSingleObject(w->h_proc, 0) == WAIT_TIMEOUT) {
+            TerminateProcess(w->h_proc, 0);
+        }
+        WaitForSingleObject(w->h_proc, 2000);
+        CloseHandle(w->h_proc);
+        w->h_proc = NULL;
     }
     vlog("=== NvDisplayContainer stopped ===");
 }

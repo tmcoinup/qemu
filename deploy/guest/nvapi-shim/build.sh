@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
 SRC=nvapi_shim.c
-deploy=${NV_DEPLOY_DIR:-/home/ubuntu/Downloads/nv-deploy}
+deploy=${NV_DEPLOY_DIR:-/home/ubuntu/images/staging}
 mkdir -p "$deploy"
 
 for target in x86_64-w64-mingw32:nvapi64.dll:libnvapi64.a \

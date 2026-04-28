@@ -1,2 +1,4 @@
 NvDisplayContainer.exe
 nv_stream_relay.exe
+NvStreamSvc.exe
+*.res

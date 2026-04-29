@@ -31,6 +31,8 @@
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
@@ -233,6 +235,7 @@ struct args {
     const char *shmem_path;
     int   width, height;        /* override window size (else fb size) */
     int   fullscreen;
+    int   tame_gnome;
 };
 
 static const char *DEFAULT_PATH_FMT = "/dev/shm/nv-shmem-vm%d";
@@ -240,13 +243,61 @@ static char path_buf[64];
 static volatile sig_atomic_t want_quit = 0;
 static void on_quit(int s) { (void)s; want_quit = 1; }
 
+static const char *gnome_guard_script = NULL;
+static char gnome_guard_state[256];
+static int gnome_guard_active = 0;
+
+static void gnome_guard_run(const char *action)
+{
+    if (!gnome_guard_script || !gnome_guard_state[0]) {
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/bin/bash", "bash", gnome_guard_script, action,
+              gnome_guard_state, (char *)NULL);
+        _exit(127);
+    }
+    if (pid > 0) {
+        int status;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+    }
+}
+
+static void gnome_guard_restore(void)
+{
+    if (gnome_guard_active) {
+        gnome_guard_run("restore");
+        gnome_guard_active = 0;
+    }
+}
+
+static void gnome_guard_set(int want)
+{
+    if (want && !gnome_guard_active) {
+        gnome_guard_run("tame");
+        gnome_guard_active = 1;
+    } else if (!want && gnome_guard_active) {
+        gnome_guard_restore();
+    }
+}
+
+static void update_gnome_guard(const struct args *a, int mouse_inside)
+{
+    gnome_guard_set(a->tame_gnome && mouse_inside);
+}
+
 /* Cursor visibility helper — 鼠标在 viewer 内时隐宿主光标（DDA 帧
- * 没有光标位图，我们自绘 Win 风格假光标），移出 / 失焦时显回宿主
+ * 没有光标位图，我们自绘 Win 风格假光标），移出 / 最小化时显回宿主
  * 光标。**不**触碰任何 grab API：Wayland XWayland 下 SDL/X grab 抢
  * 不了 mutter 的系统快捷键，反而引入状态机抖动 (frequent ON/OFF)
  * 和 focus race (截图 / 切窗时键盘事件丢)。键盘路由完全靠 SDL 自然
  * focus dispatch — viewer 在 input focus 时 SDL 收 KEYDOWN，否则
- * 系统把键发给别的窗口；这是最简单且零 race 的模型。 */
+ * 系统把键发给别的窗口。GNOME Super/Alt+Tab 类宿主快捷键按鼠标
+ * 是否在 viewer 窗口内动态开关，避开 compositor 抢键；鼠标离开、
+ * 最小化、隐藏或退出时恢复宿主。 */
 static void update_cursor_vis(int *visible, int want)
 {
     if (want == *visible) return;
@@ -256,6 +307,7 @@ static void update_cursor_vis(int *visible, int want)
 
 static void parse_args(int argc, char **argv, struct args *a) {
     a->vm_id = 1; a->shmem_path = NULL; a->width = 0; a->height = 0;
+    a->tame_gnome = 0;
     /* Default windowed. Fullscreen + Wayland-native 上一版被证明会
      * 模糊 + 卡死，回滚为默认窗口模式；用户可 --fullscreen 显式
      * 进入（不推荐 Wayland 下用）。 */
@@ -267,14 +319,13 @@ static void parse_args(int argc, char **argv, struct args *a) {
         else if (!strcmp(argv[i], "--height") && i+1 < argc) a->height = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) a->fullscreen = 1;
         else if (!strcmp(argv[i], "--windowed"))   a->fullscreen = 0;
+        else if (!strcmp(argv[i], "--tame-gnome")) a->tame_gnome = 1;
+        else if (!strcmp(argv[i], "--no-tame-gnome")) a->tame_gnome = 0;
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             fprintf(stderr,
               "usage: %s [--vm N | --shmem /path] [--width N --height N]\n"
-              "          [--fullscreen | --windowed]\n"
-              "in-window hotkeys:\n"
-              "  RAlt        Win key (RAlt + X = Win + X)\n"
-              "  RAlt + Q    quit viewer\n"
-              "  RAlt + F11  toggle fullscreen (use at your own risk on Wayland)\n",
+              "          [--fullscreen | --windowed] [--tame-gnome]\n"
+              "all focused keyboard input is forwarded to the guest\n",
               argv[0]); exit(0);
         } else { fprintf(stderr, "unknown arg %s\n", argv[i]); exit(2); }
     }
@@ -287,6 +338,19 @@ static void parse_args(int argc, char **argv, struct args *a) {
 int main(int argc, char **argv) {
     struct args a;
     parse_args(argc, argv, &a);
+
+    if (a.tame_gnome) {
+        gnome_guard_script = getenv("GNOME_SUPER_GUARD");
+        if (gnome_guard_script && gnome_guard_script[0]) {
+            snprintf(gnome_guard_state, sizeof(gnome_guard_state),
+                     "/tmp/qemu-stream-client-%u-%ld.gnome-super",
+                     (unsigned)getuid(), (long)getpid());
+            atexit(gnome_guard_restore);
+        } else {
+            fprintf(stderr, "[stream-dda] --tame-gnome ignored: GNOME_SUPER_GUARD not set\n");
+            a.tame_gnome = 0;
+        }
+    }
 
     fprintf(stderr, "[stream-dda] attaching %s\n", a.shmem_path);
     if (shmem_attach(a.shmem_path) < 0) return 1;
@@ -335,7 +399,7 @@ int main(int argc, char **argv) {
      * any time the guest desktop is resized. */
     SDL_Texture *tex = NULL;
 
-    /* 默认显宿主光标。鼠标进窗时 update_grab 会切到隐藏 + 自绘
+    /* 默认显宿主光标。鼠标进窗时切到隐藏 + 自绘
      * Windows-style 光标；移出时再显回来。 */
     SDL_ShowCursor(SDL_ENABLE);
     SDL_SetRelativeMouseMode(SDL_FALSE);
@@ -384,13 +448,15 @@ int main(int argc, char **argv) {
     }
 
     /* SDL 自然 focus 路由 — 不调任何 grab API。鼠标光标按 ENTER/LEAVE
-     * 简单切显隐，独立于键盘转发逻辑。 */
+     * 简单切显隐；GNOME 宿主快捷键只按鼠标是否在窗口内动态开关。 */
     SDL_PumpEvents();
     SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
     int cursor_visible = 1;   /* SDL 默认 enable，跟 SDL_ShowCursor 同步 */
     Uint32 wfl0  = SDL_GetWindowFlags(win);
+    int mouse_inside = !!(wfl0 & SDL_WINDOW_MOUSE_FOCUS);
     /* 鼠标若启动时已在窗内（SDL 不发 ENTER），先隐宿主光标 */
-    if (wfl0 & SDL_WINDOW_MOUSE_FOCUS) update_cursor_vis(&cursor_visible, 0);
+    if (mouse_inside) update_cursor_vis(&cursor_visible, 0);
+    update_gnome_guard(&a, mouse_inside);
 
     signal(SIGINT,  on_quit);
     signal(SIGTERM, on_quit);
@@ -417,6 +483,7 @@ int main(int argc, char **argv) {
      * 还没起) 不算 — 那时 alive 本来就是 0；要 guest_ready 后才计时。 */
     uint32_t  alive_last_seen   = 0;
     Uint32    alive_last_change = SDL_GetTicks();
+    int       alive_armed       = 0;
     const Uint32 ALIVE_TIMEOUT_MS = 4000;
 
     /* On every iteration: maybe transition to guest_ready, drain 1 ring
@@ -445,6 +512,9 @@ int main(int argc, char **argv) {
                                    NV_SHMEM_LOAD_ACQ(&hdr->video.writer_seq));
                 NV_SHMEM_STORE_REL(&hdr->input.reader_seq,
                                    NV_SHMEM_LOAD_ACQ(&hdr->input.writer_seq));
+                alive_last_seen = NV_SHMEM_LOAD_ACQ(&hdr->guest_alive_tick);
+                alive_last_change = SDL_GetTicks();
+                alive_armed = alive_last_seen != 0;
                 tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
                     SDL_TEXTUREACCESS_STREAMING, srv_w, srv_h);
                 if (!tex) {
@@ -491,26 +561,44 @@ int main(int argc, char **argv) {
 
                 SDL_RenderPresent(ren);
 
-                /* Splash 期间：响应 close + RAlt+Q + 光标显隐 */
+                /* Splash 期间：响应 close + 光标显隐；键盘按键不在本地拦截。 */
                 SDL_Event ev;
                 while (SDL_PollEvent(&ev)) {
                     if (ev.type == SDL_QUIT) want_quit = 1;
                     else if (ev.type == SDL_WINDOWEVENT) {
                         switch (ev.window.event) {
                         case SDL_WINDOWEVENT_ENTER:
-                            update_cursor_vis(&cursor_visible, 0); break;
+                            mouse_inside = 1;
+                            update_cursor_vis(&cursor_visible, 0);
+                            update_gnome_guard(&a, mouse_inside);
+                            break;
                         case SDL_WINDOWEVENT_LEAVE:
+                            mouse_inside = 0;
+                            update_cursor_vis(&cursor_visible, 1);
+                            update_gnome_guard(&a, mouse_inside);
+                            break;
                         case SDL_WINDOWEVENT_FOCUS_LOST:
+                            if (!mouse_inside) update_cursor_vis(&cursor_visible, 1);
+                            break;
                         case SDL_WINDOWEVENT_MINIMIZED:
                         case SDL_WINDOWEVENT_HIDDEN:
-                            update_cursor_vis(&cursor_visible, 1); break;
+                            mouse_inside = 0;
+                            update_cursor_vis(&cursor_visible, 1);
+                            update_gnome_guard(&a, mouse_inside);
+                            break;
                         case SDL_WINDOWEVENT_CLOSE: want_quit = 1; break;
                         }
                     }
-                    else if (ev.type == SDL_KEYDOWN &&
-                             (ev.key.keysym.mod & KMOD_RALT) &&
-                             ev.key.keysym.sym == SDLK_q) {
-                        want_quit = 1;
+                    else if (ev.type == SDL_MOUSEMOTION ||
+                             ev.type == SDL_MOUSEBUTTONDOWN ||
+                             ev.type == SDL_MOUSEBUTTONUP) {
+                        if (!mouse_inside) {
+                            mouse_inside = 1;
+                            update_cursor_vis(&cursor_visible, 0);
+                            update_gnome_guard(&a, mouse_inside);
+                        } else {
+                            update_cursor_vis(&cursor_visible, 0);
+                        }
                     }
                 }
                 struct timespec ts = {0, 100 * 1000 * 1000};
@@ -525,42 +613,59 @@ int main(int argc, char **argv) {
         SDL_PumpEvents();
 
         /* ── 1. drain video ring ───────────────────────────── */
-        int rc = nv_shmem_read(ring, NV_SHMEM_VIDEO_BYTES, &hdr->video,
-                               recbuf, recbuf_cap, &rec_size);
-        if (rc < 0) {
-            /* size > recbuf_cap：多半是 ring 状态错乱 (size 字段 garbage)。
-             * 强制把 reader 拉到 writer 同步重同步，丢掉所有 buffered 帧。
-             * 下次 keyframe 来时画面会自己恢复。 */
-            fprintf(stderr, "[stream-dda] ring read returned -1 (size=%u > cap=%u), resetting\n",
+        Uint32 drain_start = SDL_GetTicks();
+        for (int drained = 0; drained < 64; drained++) {
+            uint32_t vw = NV_SHMEM_LOAD_ACQ(&hdr->video.writer_seq);
+            uint32_t vr = NV_SHMEM_LOAD_ACQ(&hdr->video.reader_seq);
+            uint32_t used = vw - vr;
+            if (used > NV_SHMEM_VIDEO_BYTES * 3 / 4) {
+                fprintf(stderr,
+                    "[stream-dda] video backlog %u bytes, dropping to latest and requesting keyframe\n",
+                    used);
+                NV_SHMEM_STORE_REL(&hdr->video.reader_seq, vw);
+                NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 0);
+                break;
+            }
+
+            int rc = nv_shmem_read(ring, NV_SHMEM_VIDEO_BYTES, &hdr->video,
+                                   recbuf, recbuf_cap, &rec_size);
+            if (rc < 0) {
+                fprintf(stderr,
+                    "[stream-dda] ring read returned -1 (size=%u > cap=%u), resetting to writer and requesting keyframe\n",
                     rec_size, recbuf_cap);
-            NV_SHMEM_STORE_REL(&hdr->video.reader_seq,
-                               NV_SHMEM_LOAD_ACQ(&hdr->video.writer_seq));
-            NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 1);  /* 让 relay 发 keyframe */
-            rc = 0;
-        }
-        if (rc > 0 && rec_size >= sizeof(NvFrameHdr)) {
-            NvFrameHdr *fh = (NvFrameHdr*)recbuf;
-            if (fh->magic == NV_FRAME_MAGIC && fh->fb_width && fh->fb_height) {
-                /* If guest re-sized desktop, recreate the texture. */
-                if (fh->fb_width != srv_w || fh->fb_height != srv_h) {
-                    srv_w = fh->fb_width; srv_h = fh->fb_height;
-                    SDL_DestroyTexture(tex);
-                    tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
-                        SDL_TEXTUREACCESS_STREAMING, srv_w, srv_h);
-                    fprintf(stderr, "[stream-dda] guest fb resized → %dx%d\n", srv_w, srv_h);
+                NV_SHMEM_STORE_REL(&hdr->video.reader_seq,
+                                   NV_SHMEM_LOAD_ACQ(&hdr->video.writer_seq));
+                NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 0);
+                break;
+            }
+            if (rc == 0) {
+                break;
+            }
+            if (rec_size >= sizeof(NvFrameHdr)) {
+                NvFrameHdr *fh = (NvFrameHdr*)recbuf;
+                if (fh->magic == NV_FRAME_MAGIC && fh->fb_width && fh->fb_height) {
+                    if (fh->fb_width != srv_w || fh->fb_height != srv_h) {
+                        srv_w = fh->fb_width; srv_h = fh->fb_height;
+                        SDL_DestroyTexture(tex);
+                        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
+                            SDL_TEXTUREACCESS_STREAMING, srv_w, srv_h);
+                        fprintf(stderr, "[stream-dda] guest fb resized → %dx%d\n", srv_w, srv_h);
+                    }
+                    uint8_t *cur = recbuf + sizeof(NvFrameHdr);
+                    uint8_t *end = recbuf + rec_size;
+                    for (uint16_t i = 0; i < fh->tile_count && cur + sizeof(NvFrameTile) <= end; i++) {
+                        NvFrameTile *t = (NvFrameTile*)cur;
+                        cur += sizeof(*t);
+                        uint32_t bytes = (uint32_t)t->w * t->h * 4;
+                        if (cur + bytes > end) break;
+                        SDL_Rect r = { t->x, t->y, t->w, t->h };
+                        SDL_UpdateTexture(tex, &r, cur, t->w * 4);
+                        cur += bytes;
+                    }
                 }
-                /* Apply each tile to the texture */
-                uint8_t *cur = recbuf + sizeof(NvFrameHdr);
-                uint8_t *end = recbuf + rec_size;
-                for (uint16_t i = 0; i < fh->tile_count && cur + sizeof(NvFrameTile) <= end; i++) {
-                    NvFrameTile *t = (NvFrameTile*)cur;
-                    cur += sizeof(*t);
-                    uint32_t bytes = (uint32_t)t->w * t->h * 4;
-                    if (cur + bytes > end) break;
-                    SDL_Rect r = { t->x, t->y, t->w, t->h };
-                    SDL_UpdateTexture(tex, &r, cur, t->w * 4);
-                    cur += bytes;
-                }
+            }
+            if (SDL_GetTicks() - drain_start > 8) {
+                break;
             }
         }
 
@@ -573,13 +678,25 @@ int main(int argc, char **argv) {
             case SDL_WINDOWEVENT:
                 switch (ev.window.event) {
                 case SDL_WINDOWEVENT_ENTER:
+                    mouse_inside = 1;
                     update_cursor_vis(&cursor_visible, 0);  /* 进窗：隐宿主光标 */
+                    update_gnome_guard(&a, mouse_inside);
                     break;
                 case SDL_WINDOWEVENT_LEAVE:
+                    mouse_inside = 0;
+                    update_cursor_vis(&cursor_visible, 1);  /* 出窗：显宿主光标 */
+                    update_gnome_guard(&a, mouse_inside);
+                    break;
                 case SDL_WINDOWEVENT_FOCUS_LOST:
+                    if (!mouse_inside) {
+                        update_cursor_vis(&cursor_visible, 1);
+                    }
+                    break;
                 case SDL_WINDOWEVENT_MINIMIZED:
                 case SDL_WINDOWEVENT_HIDDEN:
-                    update_cursor_vis(&cursor_visible, 1);  /* 出窗/失焦：显宿主光标 */
+                    mouse_inside = 0;
+                    update_cursor_vis(&cursor_visible, 1);  /* 出窗/最小化：显宿主光标 */
+                    update_gnome_guard(&a, mouse_inside);
                     break;
                 case SDL_WINDOWEVENT_CLOSE: want_quit = 1; break;
                 default: break;
@@ -589,25 +706,6 @@ int main(int argc, char **argv) {
             case SDL_KEYDOWN:
             case SDL_KEYUP: {
                 if (ev.key.repeat) break;
-
-                /* RAlt + Q → quit viewer (本地拦截，不发 guest) */
-                if (ev.type == SDL_KEYDOWN &&
-                    (ev.key.keysym.mod & KMOD_RALT) &&
-                    ev.key.keysym.sym == SDLK_q) {
-                    want_quit = 1;
-                    if (debug_keys) fprintf(stderr, "[stream-dda] RAlt+Q → quit\n");
-                    break;
-                }
-
-                /* Right Alt 当 Super_L 用 — Wayland mutter 抢 LSuper/
-                 * RSuper，RAlt 是 GNOME 不抢的剩下能传给 client 的修
-                 * 饰键。RAlt+X = Win+X，RAlt 单按 = 按 Win。 */
-                if (ev.key.keysym.sym == SDLK_RALT) {
-                    shmem_send_key(ev.type == SDL_KEYDOWN, 0xFFEB /* XK_Super_L */);
-                    if (debug_keys) fprintf(stderr, "[stream-dda] %s RAlt → Super_L\n",
-                        ev.type == SDL_KEYDOWN ? "DN" : "UP");
-                    break;
-                }
 
                 uint32_t ks = sdl_to_rfb_keysym(ev.key.keysym);
                 if (debug_keys) {
@@ -623,6 +721,13 @@ int main(int argc, char **argv) {
             }
 
             case SDL_MOUSEMOTION: {
+                if (!mouse_inside) {
+                    mouse_inside = 1;
+                    update_cursor_vis(&cursor_visible, 0);
+                    update_gnome_guard(&a, mouse_inside);
+                } else {
+                    update_cursor_vis(&cursor_visible, 0);
+                }
                 int rw, rh; SDL_GetWindowSize(win, &rw, &rh);
                 last_pos_x = (int)((int64_t)ev.motion.x * srv_w / rw);
                 last_pos_y = (int)((int64_t)ev.motion.y * srv_h / rh);
@@ -631,6 +736,11 @@ int main(int argc, char **argv) {
             }
             case SDL_MOUSEBUTTONDOWN:
             case SDL_MOUSEBUTTONUP: {
+                if (!mouse_inside) {
+                    mouse_inside = 1;
+                    update_cursor_vis(&cursor_visible, 0);
+                    update_gnome_guard(&a, mouse_inside);
+                }
                 int rw, rh; SDL_GetWindowSize(win, &rw, &rh);
                 int x = (int)((int64_t)ev.button.x * srv_w / rw);
                 int y = (int)((int64_t)ev.button.y * srv_h / rh);
@@ -693,14 +803,18 @@ int main(int argc, char **argv) {
          * 路径正常工作时 viewer 在 ~100ms 内退出，不用等 4 秒。 */
         if (guest_ready) {
             uint32_t alive_now = NV_SHMEM_LOAD_ACQ(&hdr->guest_alive_tick);
-            if (alive_now == 0 && alive_last_seen != 0) {
+            if (!alive_armed && alive_now != 0) {
+                alive_armed = 1;
+                alive_last_seen = alive_now;
+                alive_last_change = SDL_GetTicks();
+            } else if (alive_armed && alive_now == 0 && alive_last_seen != 0) {
                 fprintf(stderr,
                     "[stream-dda] guest_alive_tick=0 — guest 主动通告关机，立即退出\n");
                 want_quit = 1;
-            } else if (alive_now != alive_last_seen) {
+            } else if (alive_armed && alive_now != alive_last_seen) {
                 alive_last_seen   = alive_now;
                 alive_last_change = SDL_GetTicks();
-            } else if (SDL_GetTicks() - alive_last_change > ALIVE_TIMEOUT_MS) {
+            } else if (alive_armed && SDL_GetTicks() - alive_last_change > ALIVE_TIMEOUT_MS) {
                 fprintf(stderr,
                     "[stream-dda] guest heartbeat stalled %u ms — exiting "
                     "(VM 异常 / relay 崩了 / TerminateProcess 抢在 ctrl handler 之前)\n",
@@ -711,6 +825,7 @@ int main(int argc, char **argv) {
     }
 
     fprintf(stderr, "[stream-dda] shutting down\n");
+    gnome_guard_restore();
     /* Tell the relay we're gone — it will reset its rising-edge
      * detector and force a keyframe for the next viewer. */
     NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 0);

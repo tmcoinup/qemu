@@ -7,15 +7,10 @@
 # Input flows back through ivshmem input ring → relay → loopback
 # AudioSvcHost → Win32 SendInput.
 #
-# 启动后 viewer 是普通窗口；**鼠标悬停 + 焦点在 viewer 内**才抓键盘，
-# 鼠标移出 / 切到别的窗口 / 最小化 → 自动放掉键盘还宿主。Super 键
-# 在 Wayland windowed 模式下永远到不了 viewer (mutter 协议硬限)，
-# 用 Right Alt 当 Super 替代：RAlt+X = Win+X，RAlt 单按 = 按 Win。
-#
-# Hotkeys (focus 在 viewer 时):
-#   RAlt          Win key (RAlt + X = Win + X，RAlt + R = Win + R...)
-#   RAlt + Q      Quit viewer
-#   RAlt + F11    Toggle fullscreen (Wayland 慎用)
+# 启动后 viewer 是普通窗口；鼠标移出 / 最小化时自动显回宿主光标。
+# GNOME/Wayland 下鼠标在 viewer 窗口内时会临时关闭宿主 Super/Alt+Tab 绑定，
+# 鼠标离开、最小化、隐藏或退出立即恢复。
+# viewer 聚焦时不保留本地键盘热键；SDL 收到的键盘输入全部转发 guest。
 #
 # Prereqs in guest (one-time):
 #   ./deploy/setup-guest.sh <vm_id>
@@ -25,15 +20,19 @@
 #   ./connect.sh <vm_id>
 #   ./connect.sh --shmem-path /dev/shm/nv-shmem-vm2
 #   ./connect.sh 1 --fullscreen        # 显式全屏 (X11 session 推荐)
-#   ./connect.sh 1 --tame-gnome        # 临时关 GNOME super-shortcut + 退出恢复
+#   ./connect.sh 1 --no-tame-gnome     # 禁用 GNOME host-shortcut 动态保护
 #
 set -euo pipefail
-cd "$(dirname "$(readlink -f "$0")")"
+here="$(dirname "$(readlink -f "$0")")"
+cd "$here"
+
+# shellcheck source=lib/gnome-shortcuts.sh
+source "$here/lib/gnome-shortcuts.sh"
 
 VM_ID=${VM_ID:-1}
 SHMEM_PATH=""
 EXTRA_ARGS=()
-TAME_GNOME=0
+TAME_GNOME=${TAME_GNOME:-auto}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +41,7 @@ while [[ $# -gt 0 ]]; do
         --windowed)   EXTRA_ARGS+=("$1"); shift ;;
         --width|--height) EXTRA_ARGS+=("$1" "$2"); shift 2 ;;
         --tame-gnome) TAME_GNOME=1; shift ;;
+        --no-tame-gnome) TAME_GNOME=0; shift ;;
         -h|--help)    sed -n '3,30p' "$0"; exit 0 ;;
         [0-9]*)       VM_ID="$1"; shift ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -63,48 +63,28 @@ fi
 
 echo "[connect] vm${VM_ID}  shmem=$SHMEM_PATH"
 
-# ────────────────────── GNOME super tame (opt-in) ──────────────────
-# Windowed + XWayland 下抓 Super 注定失败 (mutter wayland 协议层
+# ─────────────────── GNOME host-shortcut tame (dynamic) ─────────────
+# Windowed + XWayland 下抓 Super/Alt+Tab 注定失败 (mutter wayland 协议层
 # 拦截，X grab 是 no-op；keyboard-shortcuts-inhibit 协议要求
-# fullscreen)。所以默认**不动 GNOME 设置** — 留给用户自己决定。
-# 用户加 --tame-gnome 时才临时 reset 几个 super-shortcut，并保证
-# trap 恢复（包括 viewer 卡死被 KILL 时也通过 EXIT trap 触发）。
-declare -A SAVED_BINDINGS=()
-have_gsettings=0
-if [[ $TAME_GNOME -eq 1 ]] \
-    && command -v gsettings >/dev/null 2>&1 \
-    && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}${XDG_RUNTIME_DIR:-}" ]]; then
-    have_gsettings=1
-    echo "[connect] tame GNOME super-shortcuts (will restore on exit)"
-    for entry in \
-        'org.gnome.mutter overlay-key' \
-        'org.gnome.shell.keybindings toggle-overview' \
-        'org.gnome.shell.keybindings toggle-application-view' \
-        'org.gnome.shell.keybindings toggle-quick-settings' \
-        'org.gnome.desktop.wm.keybindings panel-main-menu' \
-    ; do
-        schema="${entry% *}"
-        key="${entry##* }"
-        cur=$(gsettings get "$schema" "$key" 2>/dev/null) || continue
-        SAVED_BINDINGS["$schema $key"]="$cur"
-        if [[ "$cur" == \'*\' ]]; then
-            gsettings set "$schema" "$key" "''" 2>/dev/null || true
-        else
-            gsettings set "$schema" "$key" "[]" 2>/dev/null || true
-        fi
-    done
-fi
-
-restore_gnome() {
-    [[ $have_gsettings -eq 1 ]] || return 0
-    for entry in "${!SAVED_BINDINGS[@]}"; do
-        schema="${entry% *}"
-        key="${entry##* }"
-        gsettings set "$schema" "$key" "${SAVED_BINDINGS[$entry]}" 2>/dev/null || true
-    done
+# fullscreen)。viewer 只在鼠标位于窗口内时临时关掉 GNOME/IBus
+# Super/Alt+Tab 快捷键，鼠标离开、最小化、隐藏或退出马上恢复。
+should_tame_gnome_super() {
+    local mode=${TAME_GNOME,,}
+    case "$mode" in
+        1|yes|true|on) return 0 ;;
+        0|no|false|off) return 1 ;;
+    esac
+    gnome_super_shortcuts_is_gnome && gnome_super_shortcuts_available
 }
-trap 'restore_gnome' EXIT
 
-"$BIN" --shmem "$SHMEM_PATH" "${EXTRA_ARGS[@]}"
+if should_tame_gnome_super; then
+    export GNOME_SUPER_GUARD="$here/gnome-super-guard.sh"
+    "$GNOME_SUPER_GUARD" restore-stale 2>/dev/null || true
+    EXTRA_ARGS+=(--tame-gnome)
+    echo "[connect] GNOME/IBus host-shortcut guard: active only while the mouse is inside the viewer window"
+fi
+trap '"$here/gnome-super-guard.sh" restore-stale 2>/dev/null || true' EXIT
+
+"$BIN" --vm "$VM_ID" --shmem "$SHMEM_PATH" "${EXTRA_ARGS[@]}"
 rc=$?
 exit "$rc"

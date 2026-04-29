@@ -9,6 +9,8 @@
 #   --sdl              桌面 sdl 窗口 (同上)
 #   --no-gpu           调试/首次启动不挂 vGPU (std-vga 唯一显示)
 #   --vnc <disp>       指定 VNC display (默认 :${VM_ID})
+#   --no-tame-gnome    不让 viewer 动态处理 GNOME/IBus 宿主快捷键
+#   --tame-gnome       强制让鼠标在 viewer 内时临时关闭宿主 Super/Alt+Tab 快捷键
 #   --extra "<args>"   透传额外 QEMU 参数
 #
 # 环境变量:
@@ -35,10 +37,12 @@ mkdir -p "$VM_ROOT/configs" "$VM_ROOT/run" "$VM_ROOT/log"
 
 # shellcheck source=lib/vgpu-mdev.sh
 source "$here/lib/vgpu-mdev.sh"
+# shellcheck source=lib/gnome-shortcuts.sh
+source "$here/lib/gnome-shortcuts.sh"
 
 VM_ID="${1:-}"
 [[ -z "$VM_ID" || ! "$VM_ID" =~ ^[1-9][0-9]*$ ]] && {
-    echo "usage: $0 <vm_id> [--install iso|--rdp|--gtk|--sdl|--no-gpu|--vnc :N|--extra \"...\"]" >&2
+    echo "usage: $0 <vm_id> [--install iso|--rdp|--gtk|--sdl|--no-gpu|--vnc :N|--tame-gnome|--no-tame-gnome|--extra \"...\"]" >&2
     exit 2
 }
 shift
@@ -80,8 +84,10 @@ if [[ -n "${SPOOF:-}" ]]; then
 fi
 ISO=""
 EXTRA=""
+VIEWER_ARGS=()
 VNC_DISPLAY=":${VM_ID}"
 DEFAULT_ISO="/home/ubuntu/images/win10-ltsc.iso"
+TAME_GNOME="${TAME_GNOME:-auto}"
 
 # ivshmem (Inter-VM shared memory) — 用作 stream / 输入数据通道，替代
 # TCP socket。host 后端文件 /dev/shm/nv-shmem-vm${VM_ID}，guest 端通过
@@ -107,6 +113,10 @@ while (( $# > 0 )); do
         --spoof-mode)      SPOOF_MODE="$2"; shift 2 ;; # 直接指定 A/B/off
         --no-shmem) IVSHMEM_SIZE_MB=0; shift ;;     # 禁用 ivshmem 通道
         --shmem)    IVSHMEM_SIZE_MB="$2"; shift 2 ;; # 指定大小 (MB)
+        --tame-gnome) TAME_GNOME=1; shift ;;
+        --no-tame-gnome) TAME_GNOME=0; shift ;;
+        --fullscreen|--windowed) VIEWER_ARGS+=("$1"); shift ;;
+        --width|--height) VIEWER_ARGS+=("$1" "$2"); shift 2 ;;
         --extra)   EXTRA="$2"; shift 2 ;;
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
@@ -418,6 +428,15 @@ fi
 SHMEM_PATH="${IVSHMEM_PATH:-/dev/shm/nv-shmem-vm${VM_ID}}"
 VIEWER_BIN="$here/stream-client/stream_client_dda"
 
+should_tame_gnome_super() {
+    local mode=${TAME_GNOME,,}
+    case "$mode" in
+        1|yes|true|on) return 0 ;;
+        0|no|false|off) return 1 ;;
+    esac
+    gnome_super_shortcuts_is_gnome && gnome_super_shortcuts_available
+}
+
 _kill_tree() {
     # kill PID 自己 + 它所有 children/孙子。setup-task 是 ( ... ) & subshell，
     # 内部还在 sleep / nc / python 时单 kill subshell 不够，sleep 子孙会跑完
@@ -439,6 +458,8 @@ cleanup_all() {
     _kill_tree "${VIEWER_PID:-}"
     # 优雅关→不行就 --force（fresh boot 阶段 WinRM 没起来时会走到这条）
     "$here/stop-vm.sh" "$VM_ID" || "$here/stop-vm.sh" "$VM_ID" --force || true
+    gnome_super_shortcuts_restore
+    "$here/gnome-super-guard.sh" restore-stale 2>/dev/null || true
     exit 0
 }
 trap cleanup_all INT TERM EXIT
@@ -612,8 +633,14 @@ fi
 if [[ ! -x "$VIEWER_BIN" || "$here/stream-client/stream_client_dda.c" -nt "$VIEWER_BIN" ]]; then
     make -C "$here/stream-client" all >/dev/null
 fi
+if should_tame_gnome_super; then
+    export GNOME_SUPER_GUARD="$here/gnome-super-guard.sh"
+    "$GNOME_SUPER_GUARD" restore-stale 2>/dev/null || true
+    VIEWER_ARGS+=(--tame-gnome)
+    echo "[start-vm] GNOME/IBus 宿主快捷键保护已启用：鼠标在 viewer 窗口内时临时关闭 Super/Alt+Tab，离开/最小化/退出立即恢复"
+fi
 echo "[start-vm] 启动 SDL viewer (窗口立刻弹，黑屏等 guest 第一帧)..."
-"$VIEWER_BIN" --shmem "$SHMEM_PATH" &
+"$VIEWER_BIN" --vm "$VM_ID" --shmem "$SHMEM_PATH" "${VIEWER_ARGS[@]}" &
 VIEWER_PID=$!
 
 # Viewer sanity: 如果 SDL_Init / CreateWindow 失败 (X 不通 / GL 缺) viewer

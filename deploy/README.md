@@ -29,6 +29,8 @@
 # Ctrl+C / 关 SDL 窗口 / 另一终端 ./stop-vm.sh 1 都能优雅关
 ```
 
+GNOME/Ubuntu 桌面下，默认启动会启用 viewer 侧的动态宿主快捷键保护：鼠标在 VM 窗口内时临时关闭宿主侧 `Super`/`Meta` 和 `Alt+Tab` 类 GNOME/IBus 快捷键，鼠标移出、最小化、隐藏或退出立即恢复。保留宿主快捷键行为可加 `--no-tame-gnome`。
+
 **spoof 切换**：
 ```bash
 ./deploy/start-vm.sh 1 --no-spoof          # off：装 driver / 调试用

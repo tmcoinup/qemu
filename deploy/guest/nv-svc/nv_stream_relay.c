@@ -323,23 +323,23 @@ static BOOL WINAPI on_ctrl_signal(DWORD dwCtrlType) {
     }
 }
 
-/* Write one chunk into the video ring. If full, drop oldest by
- * advancing reader_seq — for video, dropping the past is better
- * than blocking the encoder thread. */
+static volatile LONG g_force_keyframe_after_overflow = 0;
+
+/* Write one chunk into the video ring. If full, drop the whole old
+ * backlog by moving reader_seq to the current writer_seq. Do not advance
+ * reader_seq by arbitrary byte counts: that can land the host reader in
+ * the middle of a record and poison the stream until the next reset. */
 static void video_push(NvShmemHdr *hdr, uint8_t *ring, const void *data, uint32_t size) {
     int rc;
     int retries = 0;
     while ((rc = nv_shmem_write(ring, NV_SHMEM_VIDEO_BYTES, &hdr->video, data, size)) != 0) {
         retries++;
         if (retries > 5) {
-            uint32_t free = nv_shmem_ring_free(hdr->video.writer_seq,
-                                               hdr->video.reader_seq,
-                                               NV_SHMEM_VIDEO_BYTES);
-            if (free < size + 4) {
-                uint32_t need = (size + 4) - free + 16;
-                NV_SHMEM_STORE_REL(&hdr->video.reader_seq, hdr->video.reader_seq + need);
-                vlog("video ring overflow, dropped %u bytes", need);
-            }
+            uint32_t w = NV_SHMEM_LOAD_ACQ(&hdr->video.writer_seq);
+            uint32_t r = NV_SHMEM_LOAD_ACQ(&hdr->video.reader_seq);
+            NV_SHMEM_STORE_REL(&hdr->video.reader_seq, w);
+            InterlockedExchange(&g_force_keyframe_after_overflow, 1);
+            vlog("video ring overflow, dropped backlog bytes=%u", w - r);
             retries = 0;
             continue;
         }
@@ -610,6 +610,9 @@ static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
     /* Rising edge or large jump (host disconnected, reconnected) */
     if ((last_host_alive == 0 && host_alive != 0) ||
         (host_alive > last_host_alive + 200)) {
+        cc->force_keyframe = 1;
+    }
+    if (InterlockedExchange(&g_force_keyframe_after_overflow, 0)) {
         cc->force_keyframe = 1;
     }
     last_host_alive = host_alive;

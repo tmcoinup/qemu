@@ -390,7 +390,8 @@ static void inject_key(uint8_t down, uint32_t keysym) {
             case 0xFFE1: case 0xFFE2: vk = VK_SHIFT;   break;
             case 0xFFE3: case 0xFFE4: vk = VK_CONTROL; break;
             case 0xFFE5:              vk = VK_CAPITAL; break;
-            case 0xFFE7: case 0xFFE8: vk = VK_LWIN;    break;
+            case 0xFFE7: case 0xFFEB: vk = VK_LWIN;    break;
+            case 0xFFE8: case 0xFFEC: vk = VK_RWIN;    break;
             case 0xFFE9: case 0xFFEA: vk = VK_MENU;    break;
             /* Numeric keypad. NumLock-on / NumLock-off X server emits two
              * different keysym ranges, so we map both: 0xFFB0-0xFFB9 are

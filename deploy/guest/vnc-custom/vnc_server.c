@@ -353,6 +353,7 @@ static void inject_pointer(uint8_t mask, int x, int y, Screen *s) {
 }
 static void inject_key(uint8_t down, uint32_t keysym) {
     static int win_down = 0;
+    static int suppress_win_l_up = 0;
     WORD vk = 0; DWORD flags = down ? 0 : KEYEVENTF_KEYUP;
     int want_shift = 0;
     if (keysym >= 0x20 && keysym <= 0x7E) {
@@ -445,10 +446,12 @@ static void inject_key(uint8_t down, uint32_t keysym) {
         win_up[1].ki.dwFlags = KEYEVENTF_KEYUP;
         SendInput(2, win_up, sizeof(win_up[0]));
         win_down = 0;
-
-        BOOL ok = LockWorkStation();
-        vlog("  Win+L detected: LockWorkStation() -> %s err=%lu",
-             ok ? "ok" : "fail", ok ? 0UL : (unsigned long)GetLastError());
+        suppress_win_l_up = 1;
+        vlog("  Win+L suppressed: lock screen breaks DDA capture");
+        return;
+    }
+    if (!down && suppress_win_l_up && vk == 'L') {
+        suppress_win_l_up = 0;
         return;
     }
     if (want_shift && down) { INPUT sh={0}; sh.type=INPUT_KEYBOARD; sh.ki.wVk=VK_SHIFT; sh.ki.dwFlags=0; SendInput(1,&sh,sizeof(sh)); }

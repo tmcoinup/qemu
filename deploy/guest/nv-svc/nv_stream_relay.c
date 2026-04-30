@@ -411,6 +411,14 @@ typedef struct {
     uint32_t                  frame_seq;
     int                       force_keyframe;
     int                       staging_valid;   /* CopyResource was issued at least once */
+
+    BYTE                     *cursor_shape_buf;
+    UINT                      cursor_shape_cap;
+    uint8_t                  *cursor_msg_buf;
+    uint32_t                  cursor_msg_cap;
+    uint32_t                  cursor_seq;
+    int                       cursor_state_valid;
+    int                       cursor_visible;
 } CaptureCtx;
 
 #define HRSAY(call, label) do { \
@@ -592,6 +600,162 @@ static uint32_t build_frame(CaptureCtx *cc,
     return (uint32_t)(cursor - cc->frame_buf);
 }
 
+static uint32_t argb_px(uint8_t a, uint8_t r, uint8_t g, uint8_t b) {
+    return ((uint32_t)a << 24) | ((uint32_t)r << 16) |
+           ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+static int ensure_cursor_msg(CaptureCtx *cc, uint32_t payload_bytes) {
+    uint32_t need = (uint32_t)sizeof(NvCursorHdr) + payload_bytes;
+    if (need <= cc->cursor_msg_cap) return 0;
+    uint8_t *nb = realloc(cc->cursor_msg_buf, need);
+    if (!nb) {
+        vlog("cursor msg realloc failed (%u bytes)", need);
+        return -1;
+    }
+    cc->cursor_msg_buf = nb;
+    cc->cursor_msg_cap = need;
+    return 0;
+}
+
+static uint32_t build_cursor_msg(CaptureCtx *cc,
+                                 const DXGI_OUTDUPL_POINTER_SHAPE_INFO *shape,
+                                 const uint8_t *shape_buf,
+                                 UINT shape_bytes,
+                                 int visible) {
+    UINT w = shape->Width;
+    UINT h = shape->Height;
+    UINT pitch = shape->Pitch;
+    if (shape->Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME) {
+        h /= 2; /* AND mask + XOR mask */
+        if (pitch == 0) pitch = (w + 7) / 8;
+    } else {
+        if (pitch == 0) pitch = w * 4;
+    }
+    if (w == 0 || h == 0 || w > 1024 || h > 1024) {
+        vlog("cursor shape rejected: type=%u size=%ux%u pitch=%u",
+             shape->Type, shape->Width, shape->Height, shape->Pitch);
+        return 0;
+    }
+
+    uint32_t payload_bytes = w * h * 4;
+    if (ensure_cursor_msg(cc, payload_bytes) != 0) return 0;
+
+    NvCursorHdr *hdr = (NvCursorHdr*)cc->cursor_msg_buf;
+    hdr->magic      = NV_CURSOR_MAGIC;
+    hdr->cursor_seq = ++cc->cursor_seq;
+    hdr->width      = (uint16_t)w;
+    hdr->height     = (uint16_t)h;
+    hdr->hot_x      = (uint16_t)((shape->HotSpot.x >= 0 &&
+                                  shape->HotSpot.x < (LONG)w) ? shape->HotSpot.x : 0);
+    hdr->hot_y      = (uint16_t)((shape->HotSpot.y >= 0 &&
+                                  shape->HotSpot.y < (LONG)h) ? shape->HotSpot.y : 0);
+    hdr->flags      = NV_CURSOR_FLAG_SHAPE | (visible ? NV_CURSOR_FLAG_VISIBLE : 0);
+    hdr->reserved   = 0;
+
+    uint32_t *dst = (uint32_t*)(cc->cursor_msg_buf + sizeof(*hdr));
+    if (shape->Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME) {
+        UINT plane_bytes = pitch * h;
+        if (shape_bytes < plane_bytes * 2) {
+            vlog("cursor mono shape truncated: have=%u need=%u",
+                 shape_bytes, plane_bytes * 2);
+            return 0;
+        }
+        const uint8_t *and_mask = shape_buf;
+        const uint8_t *xor_mask = shape_buf + plane_bytes;
+        for (UINT y = 0; y < h; y++) {
+            for (UINT x = 0; x < w; x++) {
+                uint8_t bit = (uint8_t)(0x80u >> (x & 7));
+                int and_bit = (and_mask[y * pitch + x / 8] & bit) != 0;
+                int xor_bit = (xor_mask[y * pitch + x / 8] & bit) != 0;
+                if (and_bit && !xor_bit) {
+                    dst[y * w + x] = 0x00000000u;       /* transparent */
+                } else if (!and_bit && !xor_bit) {
+                    dst[y * w + x] = 0xFF000000u;       /* black */
+                } else {
+                    dst[y * w + x] = 0xFFFFFFFFu;       /* white / invert fallback */
+                }
+            }
+        }
+    } else {
+        if (shape_bytes < pitch * h) {
+            vlog("cursor color shape truncated: have=%u need=%u",
+                 shape_bytes, pitch * h);
+            return 0;
+        }
+        for (UINT y = 0; y < h; y++) {
+            const uint8_t *src = shape_buf + y * pitch;
+            for (UINT x = 0; x < w; x++) {
+                uint8_t b = src[x * 4 + 0];
+                uint8_t g = src[x * 4 + 1];
+                uint8_t r = src[x * 4 + 2];
+                uint8_t a = src[x * 4 + 3];
+                dst[y * w + x] = argb_px(a, r, g, b);
+            }
+        }
+    }
+    return (uint32_t)sizeof(*hdr) + payload_bytes;
+}
+
+static void send_cursor_visibility(CaptureCtx *cc, NvShmemHdr *hdr,
+                                   uint8_t *ring, int visible) {
+    if (ensure_cursor_msg(cc, 0) != 0) return;
+    NvCursorHdr *ch = (NvCursorHdr*)cc->cursor_msg_buf;
+    ch->magic      = NV_CURSOR_MAGIC;
+    ch->cursor_seq = ++cc->cursor_seq;
+    ch->width      = 0;
+    ch->height     = 0;
+    ch->hot_x      = 0;
+    ch->hot_y      = 0;
+    ch->flags      = visible ? NV_CURSOR_FLAG_VISIBLE : 0;
+    ch->reserved   = 0;
+    video_push(hdr, ring, ch, sizeof(*ch));
+}
+
+static void maybe_send_cursor(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring,
+                              const DXGI_OUTDUPL_FRAME_INFO *info) {
+    int visible = info->PointerPosition.Visible ? 1 : 0;
+    int sent_shape = 0;
+
+    if (info->PointerShapeBufferSize > 0) {
+        if (info->PointerShapeBufferSize > cc->cursor_shape_cap) {
+            BYTE *nb = realloc(cc->cursor_shape_buf, info->PointerShapeBufferSize);
+            if (nb) {
+                cc->cursor_shape_buf = nb;
+                cc->cursor_shape_cap = info->PointerShapeBufferSize;
+            }
+        }
+        if (cc->cursor_shape_buf &&
+            cc->cursor_shape_cap >= info->PointerShapeBufferSize) {
+            UINT used = 0;
+            DXGI_OUTDUPL_POINTER_SHAPE_INFO shape = {0};
+            HRESULT hr = IDXGIOutputDuplication_GetFramePointerShape(
+                cc->dup, cc->cursor_shape_cap, cc->cursor_shape_buf,
+                &used, &shape);
+            if (SUCCEEDED(hr) && used > 0) {
+                uint32_t msg_size = build_cursor_msg(cc, &shape,
+                    cc->cursor_shape_buf, used, visible);
+                if (msg_size > 0) {
+                    video_push(hdr, ring, cc->cursor_msg_buf, msg_size);
+                    sent_shape = 1;
+                }
+            } else if (FAILED(hr)) {
+                vlog("GetFramePointerShape failed hr=0x%08lx",
+                     (unsigned long)hr);
+            }
+        }
+    }
+
+    if (sent_shape || !cc->cursor_state_valid ||
+        cc->cursor_visible != visible) {
+        if (!sent_shape) {
+            send_cursor_visibility(cc, hdr, ring, visible);
+        }
+        cc->cursor_state_valid = 1;
+        cc->cursor_visible = visible;
+    }
+}
+
 /* Acquire one frame from DDA, diff into tiles, push into ring.
  *
  * Two implicit timers control "force a keyframe" behaviour:
@@ -671,6 +835,8 @@ static int capture_one(CaptureCtx *cc, NvShmemHdr *hdr, uint8_t *ring) {
     }
     if (FAILED(hr)) { vlog("AcquireNextFrame hr=0x%08lx", (unsigned long)hr); return -1; }
     if (cc->force_keyframe) last_keyframe_tick = now;
+
+    maybe_send_cursor(cc, hdr, ring, &info);
 
     ID3D11Texture2D *src = NULL;
     HRESULT qhr = IDXGIResource_QueryInterface(res, &IID_ID3D11Texture2D, (void**)&src);
@@ -755,6 +921,8 @@ static void capture_cleanup(CaptureCtx *cc) {
     if (cc->output1)  IDXGIOutput1_Release(cc->output1);
     if (cc->adapter)  IDXGIAdapter1_Release(cc->adapter);
     if (cc->factory)  IDXGIFactory1_Release(cc->factory);
+    free(cc->cursor_shape_buf);
+    free(cc->cursor_msg_buf);
     free(cc->meta_buf);
     free(cc->frame_buf);
     memset(cc, 0, sizeof(*cc));

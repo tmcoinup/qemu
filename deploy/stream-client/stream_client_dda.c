@@ -296,9 +296,10 @@ static void update_gnome_guard(const struct args *a, int mouse_inside)
     gnome_guard_set(a->tame_gnome && mouse_inside);
 }
 
-/* Cursor visibility helper — 鼠标在 viewer 内时隐宿主光标（DDA 帧
- * 没有光标位图，我们自绘 Win 风格假光标），移出 / 最小化时显回宿主
- * 光标。**不**触碰任何 grab API：Wayland XWayland 下 SDL/X grab 抢
+/* Cursor visibility helper — 鼠标在 viewer 内时使用 guest 通过 DDA
+ * pointer-shape 发来的真实光标；guest 报告隐藏光标时 SDL 也隐藏
+ * 本地光标，让游戏自己画在 framebuffer 里的 software cursor 显示。
+ * 移出 / 最小化时显回宿主光标。**不**触碰任何 grab API：Wayland XWayland 下 SDL/X grab 抢
  * 不了 mutter 的系统快捷键，反而引入状态机抖动 (frequent ON/OFF)
  * 和 focus race (截图 / 切窗时键盘事件丢)。键盘路由完全靠 SDL 自然
  * focus dispatch — viewer 在 input focus 时 SDL 收 KEYDOWN，否则
@@ -310,6 +311,65 @@ static void update_cursor_vis(int *visible, int want)
     if (want == *visible) return;
     SDL_ShowCursor(want ? SDL_ENABLE : SDL_DISABLE);
     *visible = want;
+}
+
+static SDL_Rect framebuffer_rect(int win_w, int win_h, int fb_w, int fb_h)
+{
+    SDL_Rect r;
+    r.w = fb_w;
+    r.h = fb_h;
+    r.x = (win_w - fb_w) / 2;
+    r.y = (win_h - fb_h) / 2;
+    return r;
+}
+
+static void window_to_guest(int wx, int wy, int win_w, int win_h,
+                            int fb_w, int fb_h, int *gx, int *gy)
+{
+    SDL_Rect r = framebuffer_rect(win_w, win_h, fb_w, fb_h);
+    int x = wx - r.x;
+    int y = wy - r.y;
+    if (x < 0) x = 0; else if (x >= fb_w) x = fb_w - 1;
+    if (y < 0) y = 0; else if (y >= fb_h) y = fb_h - 1;
+    *gx = x;
+    *gy = y;
+}
+
+static void apply_cursor_state(SDL_Cursor *default_cursor,
+                               SDL_Cursor *guest_cursor,
+                               int guest_cursor_visible,
+                               int mouse_inside,
+                               int *cursor_visible)
+{
+    if (!mouse_inside) {
+        SDL_SetCursor(default_cursor);
+        update_cursor_vis(cursor_visible, 1);
+        return;
+    }
+
+    SDL_SetCursor(guest_cursor ? guest_cursor : default_cursor);
+    update_cursor_vis(cursor_visible, guest_cursor_visible ? 1 : 0);
+}
+
+static SDL_Cursor *create_guest_cursor(const NvCursorHdr *ch,
+                                       const uint8_t *payload,
+                                       uint32_t payload_bytes)
+{
+    if (!(ch->flags & NV_CURSOR_FLAG_SHAPE)) return NULL;
+    if (ch->width == 0 || ch->height == 0 ||
+        ch->width > 1024 || ch->height > 1024) {
+        return NULL;
+    }
+    uint32_t need = (uint32_t)ch->width * ch->height * 4;
+    if (payload_bytes < need) return NULL;
+
+    SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
+        (void*)payload, ch->width, ch->height, 32, ch->width * 4,
+        SDL_PIXELFORMAT_ARGB8888);
+    if (!surf) return NULL;
+    SDL_Cursor *cursor = SDL_CreateColorCursor(surf, ch->hot_x, ch->hot_y);
+    SDL_FreeSurface(surf);
+    return cursor;
 }
 
 static void parse_args(int argc, char **argv, struct args *a) {
@@ -411,58 +471,19 @@ int main(int argc, char **argv) {
     SDL_ShowCursor(SDL_ENABLE);
     SDL_SetRelativeMouseMode(SDL_FALSE);
 
-    /* Build a small RGBA arrow texture once (12x19, classic Win32
-     * cursor: white interior, black outline, transparent background). */
-    SDL_Texture *cur_tex = NULL;
-    int cur_w = 12, cur_h = 19;
-    {
-        static const char cur_pat[19][12] = {
-            {1,0,0,0,0,0,0,0,0,0,0,0},
-            {1,1,0,0,0,0,0,0,0,0,0,0},
-            {1,2,1,0,0,0,0,0,0,0,0,0},
-            {1,2,2,1,0,0,0,0,0,0,0,0},
-            {1,2,2,2,1,0,0,0,0,0,0,0},
-            {1,2,2,2,2,1,0,0,0,0,0,0},
-            {1,2,2,2,2,2,1,0,0,0,0,0},
-            {1,2,2,2,2,2,2,1,0,0,0,0},
-            {1,2,2,2,2,2,2,2,1,0,0,0},
-            {1,2,2,2,2,2,2,2,2,1,0,0},
-            {1,2,2,2,2,2,2,2,2,2,1,0},
-            {1,2,2,2,2,2,2,1,1,1,1,1},
-            {1,2,2,2,1,2,2,1,0,0,0,0},
-            {1,2,2,1,1,2,2,1,0,0,0,0},
-            {1,2,1,0,0,1,2,2,1,0,0,0},
-            {1,1,0,0,0,1,2,2,1,0,0,0},
-            {0,0,0,0,0,0,1,2,2,1,0,0},
-            {0,0,0,0,0,0,1,2,2,1,0,0},
-            {0,0,0,0,0,0,0,1,1,0,0,0},
-        };
-        uint32_t cur_px[19 * 12];
-        for (int yy = 0; yy < cur_h; yy++) {
-            for (int xx = 0; xx < cur_w; xx++) {
-                uint32_t v = 0; /* RGBA: transparent */
-                if (cur_pat[yy][xx] == 1) v = 0xFF000000u;            /* black AABBGGRR */
-                else if (cur_pat[yy][xx] == 2) v = 0xFFFFFFFFu;       /* white */
-                cur_px[yy * cur_w + xx] = v;
-            }
-        }
-        cur_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ABGR8888,
-                                    SDL_TEXTUREACCESS_STATIC, cur_w, cur_h);
-        if (cur_tex) {
-            SDL_UpdateTexture(cur_tex, NULL, cur_px, cur_w * 4);
-            SDL_SetTextureBlendMode(cur_tex, SDL_BLENDMODE_BLEND);
-        }
-    }
-
     /* SDL 自然 focus 路由 — 不调任何 grab API。鼠标光标按 ENTER/LEAVE
      * 简单切显隐；GNOME 宿主快捷键按鼠标是否在窗口内动态开关。 */
     SDL_PumpEvents();
     SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
     int cursor_visible = 1;   /* SDL 默认 enable，跟 SDL_ShowCursor 同步 */
+    SDL_Cursor *default_cursor = SDL_GetDefaultCursor();
+    SDL_Cursor *guest_cursor = NULL;
+    int guest_cursor_visible = 1;
     Uint32 wfl0  = SDL_GetWindowFlags(win);
     int mouse_inside = !!(wfl0 & SDL_WINDOW_MOUSE_FOCUS);
-    /* 鼠标若启动时已在窗内（SDL 不发 ENTER），先隐宿主光标 */
-    if (mouse_inside) update_cursor_vis(&cursor_visible, 0);
+    /* 鼠标若启动时已在窗内（SDL 不发 ENTER），立即套用 guest cursor 状态。 */
+    apply_cursor_state(default_cursor, guest_cursor, guest_cursor_visible,
+                       mouse_inside, &cursor_visible);
     update_gnome_guard(&a, mouse_inside);
 
     signal(SIGINT,  on_quit);
@@ -576,21 +597,31 @@ int main(int argc, char **argv) {
                         switch (ev.window.event) {
                         case SDL_WINDOWEVENT_ENTER:
                             mouse_inside = 1;
-                            update_cursor_vis(&cursor_visible, 0);
+                            apply_cursor_state(default_cursor, guest_cursor,
+                                               guest_cursor_visible, mouse_inside,
+                                               &cursor_visible);
                             update_gnome_guard(&a, mouse_inside);
                             break;
                         case SDL_WINDOWEVENT_LEAVE:
                             mouse_inside = 0;
-                            update_cursor_vis(&cursor_visible, 1);
+                            apply_cursor_state(default_cursor, guest_cursor,
+                                               guest_cursor_visible, mouse_inside,
+                                               &cursor_visible);
                             update_gnome_guard(&a, mouse_inside);
                             break;
                         case SDL_WINDOWEVENT_FOCUS_LOST:
-                            if (!mouse_inside) update_cursor_vis(&cursor_visible, 1);
+                            if (!mouse_inside) {
+                                apply_cursor_state(default_cursor, guest_cursor,
+                                                   guest_cursor_visible, mouse_inside,
+                                                   &cursor_visible);
+                            }
                             break;
                         case SDL_WINDOWEVENT_MINIMIZED:
                         case SDL_WINDOWEVENT_HIDDEN:
                             mouse_inside = 0;
-                            update_cursor_vis(&cursor_visible, 1);
+                            apply_cursor_state(default_cursor, guest_cursor,
+                                               guest_cursor_visible, mouse_inside,
+                                               &cursor_visible);
                             update_gnome_guard(&a, mouse_inside);
                             break;
                         case SDL_WINDOWEVENT_CLOSE: want_quit = 1; break;
@@ -601,11 +632,11 @@ int main(int argc, char **argv) {
                              ev.type == SDL_MOUSEBUTTONUP) {
                         if (!mouse_inside) {
                             mouse_inside = 1;
-                            update_cursor_vis(&cursor_visible, 0);
                             update_gnome_guard(&a, mouse_inside);
-                        } else {
-                            update_cursor_vis(&cursor_visible, 0);
                         }
+                        apply_cursor_state(default_cursor, guest_cursor,
+                                           guest_cursor_visible, mouse_inside,
+                                           &cursor_visible);
                     }
                 }
                 struct timespec ts = {0, 100 * 1000 * 1000};
@@ -648,9 +679,13 @@ int main(int argc, char **argv) {
             if (rc == 0) {
                 break;
             }
-            if (rec_size >= sizeof(NvFrameHdr)) {
-                NvFrameHdr *fh = (NvFrameHdr*)recbuf;
-                if (fh->magic == NV_FRAME_MAGIC && fh->fb_width && fh->fb_height) {
+            if (rec_size >= sizeof(uint32_t)) {
+                uint32_t magic = *(uint32_t*)recbuf;
+                if (magic == NV_FRAME_MAGIC && rec_size >= sizeof(NvFrameHdr)) {
+                    NvFrameHdr *fh = (NvFrameHdr*)recbuf;
+                    if (!fh->fb_width || !fh->fb_height) {
+                        continue;
+                    }
                     if (fh->fb_width != srv_w || fh->fb_height != srv_h) {
                         srv_w = fh->fb_width; srv_h = fh->fb_height;
                         SDL_DestroyTexture(tex);
@@ -669,6 +704,20 @@ int main(int argc, char **argv) {
                         SDL_UpdateTexture(tex, &r, cur, t->w * 4);
                         cur += bytes;
                     }
+                } else if (magic == NV_CURSOR_MAGIC && rec_size >= sizeof(NvCursorHdr)) {
+                    NvCursorHdr *ch = (NvCursorHdr*)recbuf;
+                    guest_cursor_visible = (ch->flags & NV_CURSOR_FLAG_VISIBLE) ? 1 : 0;
+                    if (ch->flags & NV_CURSOR_FLAG_SHAPE) {
+                        SDL_Cursor *next = create_guest_cursor(
+                            ch, recbuf + sizeof(*ch), rec_size - (uint32_t)sizeof(*ch));
+                        if (next) {
+                            if (guest_cursor) SDL_FreeCursor(guest_cursor);
+                            guest_cursor = next;
+                        }
+                    }
+                    apply_cursor_state(default_cursor, guest_cursor,
+                                       guest_cursor_visible, mouse_inside,
+                                       &cursor_visible);
                 }
             }
             if (SDL_GetTicks() - drain_start > 8) {
@@ -686,23 +735,31 @@ int main(int argc, char **argv) {
                 switch (ev.window.event) {
                 case SDL_WINDOWEVENT_ENTER:
                     mouse_inside = 1;
-                    update_cursor_vis(&cursor_visible, 0);  /* 进窗：隐宿主光标 */
+                    apply_cursor_state(default_cursor, guest_cursor,
+                                       guest_cursor_visible, mouse_inside,
+                                       &cursor_visible);
                     update_gnome_guard(&a, mouse_inside);
                     break;
                 case SDL_WINDOWEVENT_LEAVE:
                     mouse_inside = 0;
-                    update_cursor_vis(&cursor_visible, 1);  /* 出窗：显宿主光标 */
+                    apply_cursor_state(default_cursor, guest_cursor,
+                                       guest_cursor_visible, mouse_inside,
+                                       &cursor_visible);
                     update_gnome_guard(&a, mouse_inside);
                     break;
                 case SDL_WINDOWEVENT_FOCUS_LOST:
                     if (!mouse_inside) {
-                        update_cursor_vis(&cursor_visible, 1);
+                        apply_cursor_state(default_cursor, guest_cursor,
+                                           guest_cursor_visible, mouse_inside,
+                                           &cursor_visible);
                     }
                     break;
                 case SDL_WINDOWEVENT_MINIMIZED:
                 case SDL_WINDOWEVENT_HIDDEN:
                     mouse_inside = 0;
-                    update_cursor_vis(&cursor_visible, 1);  /* 出窗/最小化：显宿主光标 */
+                    apply_cursor_state(default_cursor, guest_cursor,
+                                       guest_cursor_visible, mouse_inside,
+                                       &cursor_visible);
                     update_gnome_guard(&a, mouse_inside);
                     break;
                 case SDL_WINDOWEVENT_CLOSE: want_quit = 1; break;
@@ -728,14 +785,14 @@ int main(int argc, char **argv) {
             case SDL_MOUSEMOTION: {
                 if (!mouse_inside) {
                     mouse_inside = 1;
-                    update_cursor_vis(&cursor_visible, 0);
                     update_gnome_guard(&a, mouse_inside);
-                } else {
-                    update_cursor_vis(&cursor_visible, 0);
                 }
+                apply_cursor_state(default_cursor, guest_cursor,
+                                   guest_cursor_visible, mouse_inside,
+                                   &cursor_visible);
                 int rw, rh; SDL_GetWindowSize(win, &rw, &rh);
-                last_pos_x = (int)((int64_t)ev.motion.x * srv_w / rw);
-                last_pos_y = (int)((int64_t)ev.motion.y * srv_h / rh);
+                window_to_guest(ev.motion.x, ev.motion.y, rw, rh,
+                                srv_w, srv_h, &last_pos_x, &last_pos_y);
                 dirty_pos = 1;
                 break;
             }
@@ -743,12 +800,15 @@ int main(int argc, char **argv) {
             case SDL_MOUSEBUTTONUP: {
                 if (!mouse_inside) {
                     mouse_inside = 1;
-                    update_cursor_vis(&cursor_visible, 0);
                     update_gnome_guard(&a, mouse_inside);
                 }
+                apply_cursor_state(default_cursor, guest_cursor,
+                                   guest_cursor_visible, mouse_inside,
+                                   &cursor_visible);
                 int rw, rh; SDL_GetWindowSize(win, &rw, &rh);
-                int x = (int)((int64_t)ev.button.x * srv_w / rw);
-                int y = (int)((int64_t)ev.button.y * srv_h / rh);
+                int x, y;
+                window_to_guest(ev.button.x, ev.button.y, rw, rh,
+                                srv_w, srv_h, &x, &y);
                 uint8_t bit = 0;
                 switch (ev.button.button) {
                 case SDL_BUTTON_LEFT:   bit = 1; break;
@@ -781,17 +841,12 @@ int main(int argc, char **argv) {
         }
 
         /* ── 3. render ─────────────────────────────────────── */
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
         SDL_RenderClear(ren);
-        SDL_RenderCopy(ren, tex, NULL, NULL);
-        /* host 光标隐藏时（=鼠标在窗内）画 Win 风格假光标。 */
-        if (!cursor_visible && cur_tex && srv_w > 0 && srv_h > 0) {
+        if (srv_w > 0 && srv_h > 0) {
             int rw, rh; SDL_GetWindowSize(win, &rw, &rh);
-            SDL_Rect cdst;
-            cdst.x = (int)((int64_t)last_pos_x * rw / srv_w);
-            cdst.y = (int)((int64_t)last_pos_y * rh / srv_h);
-            cdst.w = cur_w;
-            cdst.h = cur_h;
-            SDL_RenderCopy(ren, cur_tex, NULL, &cdst);
+            SDL_Rect dst = framebuffer_rect(rw, rh, srv_w, srv_h);
+            SDL_RenderCopy(ren, tex, NULL, &dst);
         }
         SDL_RenderPresent(ren);
 
@@ -835,7 +890,7 @@ int main(int argc, char **argv) {
      * detector and force a keyframe for the next viewer. */
     NV_SHMEM_STORE_REL(&hdr->host_alive_tick, 0);
     free(recbuf);
-    if (cur_tex) SDL_DestroyTexture(cur_tex);
+    if (guest_cursor) SDL_FreeCursor(guest_cursor);
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);

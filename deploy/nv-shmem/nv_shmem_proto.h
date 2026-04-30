@@ -266,6 +266,7 @@ static inline int nv_shmem_read(uint8_t *ring_base, uint32_t cap,
  */
 #define NV_TILE_SIZE          32u
 #define NV_FRAME_MAGIC        0x4D415246u   /* "FRAM" */
+#define NV_CURSOR_MAGIC       0x53525543u   /* "CURS" */
 
 typedef struct {
     uint32_t magic;        /* NV_FRAME_MAGIC */
@@ -285,5 +286,20 @@ typedef struct {
     uint16_t h;            /* actual tile height (≤ NV_TILE_SIZE) */
     /* followed by w*h*4 bytes of BGRA pixel data, row-major top-down */
 } NvFrameTile;
+
+#define NV_CURSOR_FLAG_VISIBLE  0x0001u
+#define NV_CURSOR_FLAG_SHAPE    0x0002u
+
+typedef struct {
+    uint32_t magic;        /* NV_CURSOR_MAGIC */
+    uint32_t cursor_seq;   /* monotonic; receiver may drop stale updates */
+    uint16_t width;        /* cursor bitmap width; 0 for visibility-only */
+    uint16_t height;       /* cursor bitmap height; 0 for visibility-only */
+    uint16_t hot_x;        /* cursor hotspot X */
+    uint16_t hot_y;        /* cursor hotspot Y */
+    uint16_t flags;        /* bit 0 = visible, bit 1 = shape payload present */
+    uint16_t reserved;
+    /* followed by width*height*4 bytes of 32-bit ARGB8888 cursor pixels */
+} NvCursorHdr;
 
 #endif /* NV_SHMEM_PROTO_H */

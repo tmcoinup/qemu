@@ -10,7 +10,7 @@
 #   --no-gpu           调试/首次启动不挂 vGPU (std-vga 唯一显示)
 #   --vnc <disp>       指定 VNC display (默认 :${VM_ID})
 #   --no-tame-gnome    不让 viewer 动态处理 GNOME/IBus 宿主快捷键
-#   --tame-gnome       强制让鼠标在 viewer 内时临时关闭宿主 Super/Alt+Tab 快捷键
+#   --tame-gnome       强制让 viewer 聚焦/鼠标在内时临时关闭宿主 Super/Alt+Tab 快捷键
 #   --extra "<args>"   透传额外 QEMU 参数
 #
 # 环境变量:
@@ -651,7 +651,7 @@ if should_tame_gnome_super; then
     export GNOME_SUPER_GUARD="$here/gnome-super-guard.sh"
     "$GNOME_SUPER_GUARD" restore-stale 2>/dev/null || true
     VIEWER_ARGS+=(--tame-gnome)
-    echo "[start-vm] GNOME/IBus 宿主快捷键保护已启用：鼠标在 viewer 窗口内时临时关闭 Super/Alt+Tab，离开/最小化/退出立即恢复"
+    echo "[start-vm] GNOME/IBus 宿主快捷键保护已启用：viewer 聚焦或鼠标在窗口内时临时关闭 Super/Alt+Tab/锁屏，失焦且离开/最小化/退出立即恢复"
 fi
 echo "[start-vm] 启动 SDL viewer (窗口立刻弹，黑屏等 guest 第一帧)..."
 "$VIEWER_BIN" --vm "$VM_ID" --shmem "$SHMEM_PATH" "${VIEWER_ARGS[@]}" &

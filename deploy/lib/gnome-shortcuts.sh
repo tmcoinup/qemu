@@ -139,6 +139,7 @@ org.gnome.settings-daemon.plugins.media-keys magnifier-zoom-in
 org.gnome.settings-daemon.plugins.media-keys magnifier-zoom-out
 org.gnome.settings-daemon.plugins.media-keys rotate-video-lock-static
 org.gnome.settings-daemon.plugins.media-keys screenreader
+org.gnome.settings-daemon.plugins.media-keys screensaver
 org.gnome.settings-daemon.plugins.media-keys touchpad-toggle-static
 org.gnome.shell.keybindings focus-active-notification
 org.gnome.shell.extensions.dash-to-dock shortcut

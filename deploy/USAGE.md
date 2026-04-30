@@ -16,7 +16,7 @@
 3. 前台 SDL2 viewer 立刻弹（splash spinner + 计时器，等 ring 第一帧）
 4. 退出：`Ctrl+C` / 关 SDL2 窗口 / 另一终端 `./stop-vm.sh 1`，三条都会兜底关 QEMU + 释放 mdev
 
-GNOME/Ubuntu 桌面下，`start-vm.sh` 会启用 viewer 侧的动态宿主快捷键保护：只有当鼠标在 VM 窗口内时，才临时关闭宿主侧 `Super`/`Meta` 和 `Alt+Tab` 类 GNOME/IBus 快捷键；鼠标移出、最小化、隐藏或退出都会立即恢复宿主按键。需要完全保留宿主快捷键行为时加 `--no-tame-gnome`。
+GNOME/Ubuntu 桌面下，`start-vm.sh` 会启用 viewer 侧的动态宿主快捷键保护：viewer 有键盘焦点或鼠标在 VM 窗口内时，临时关闭宿主侧 `Super`/`Meta`、`Alt+Tab`、锁屏等 GNOME/IBus 快捷键；失焦且鼠标移出、最小化、隐藏或退出都会立即恢复宿主按键。需要完全保留宿主快捷键行为时加 `--no-tame-gnome`。
 
 ### setup-task 决策矩阵
 
@@ -93,8 +93,8 @@ echo 'SPOOF_MODE=B' >> /home/ubuntu/images/vms/configs/vm1.conf
 |---|---|
 | 黑屏不显示 | `./deploy/service.sh 1 status` 看进程 + 服务状态 |
 | 键盘不工作 | `STREAM_DEBUG=1 ./deploy/connect.sh 1` 把每个 SDL keysym + RFB keysym trace 到 stderr |
-| Super 仍被宿主吃掉 | 确认鼠标在 VM 窗口内；动态 guard 会临时关闭宿主 `Super`/`Meta` 绑定 |
-| Alt+Tab 仍被宿主吃掉 | 确认鼠标在 VM 窗口内；动态 guard 会临时关闭宿主 `switch-windows` 绑定 |
+| Super 仍被宿主吃掉 | 确认 viewer 有键盘焦点或鼠标在 VM 窗口内；动态 guard 会临时关闭宿主 `Super`/`Meta` 绑定 |
+| Alt+Tab 仍被宿主吃掉 | 确认 viewer 有键盘焦点或鼠标在 VM 窗口内；动态 guard 会临时关闭宿主 `switch-windows` 绑定 |
 | 想看 ring 状态 | `./deploy/nv-shmem/nv_shmem_probe /dev/shm/nv-shmem-vm1` |
 | 服务/relay 日志 | guest 内 `Get-Content C:\nv\nv-svc.log` 和 `C:\nv\nv-stream-relay.log` |
 | ivshmem 没数据 (writer_seq=reader_seq) | `./deploy/service.sh 1 restart` |

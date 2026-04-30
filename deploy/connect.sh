@@ -8,8 +8,8 @@
 # AudioSvcHost → Win32 SendInput.
 #
 # 启动后 viewer 是普通窗口；鼠标移出 / 最小化时自动显回宿主光标。
-# GNOME/Wayland 下 viewer 有键盘焦点或鼠标在窗口内时会临时关闭宿主
-# Super/Alt+Tab/锁屏等绑定，失焦且鼠标离开、最小化、隐藏或退出立即恢复。
+# GNOME/Wayland 下鼠标在 viewer 窗口内时会临时关闭宿主
+# Super/Alt+Tab/锁屏等绑定，鼠标离开、最小化、隐藏或退出立即恢复。
 # viewer 聚焦时不保留本地键盘热键；SDL 收到的键盘输入全部转发 guest。
 #
 # Prereqs in guest (one-time):
@@ -66,8 +66,8 @@ echo "[connect] vm${VM_ID}  shmem=$SHMEM_PATH"
 # ─────────────────── GNOME host-shortcut tame (dynamic) ─────────────
 # Windowed + XWayland 下抓 Super/Alt+Tab 注定失败 (mutter wayland 协议层
 # 拦截，X grab 是 no-op；keyboard-shortcuts-inhibit 协议要求
-# fullscreen)。viewer 在键盘焦点或鼠标位于窗口内时临时关掉 GNOME/IBus
-# Super/Alt+Tab/锁屏快捷键，失焦且鼠标离开、最小化、隐藏或退出马上恢复。
+# fullscreen)。viewer 在鼠标位于窗口内时临时关掉 GNOME/IBus
+# Super/Alt+Tab/锁屏快捷键，鼠标离开、最小化、隐藏或退出马上恢复。
 should_tame_gnome_super() {
     local mode=${TAME_GNOME,,}
     case "$mode" in
@@ -81,7 +81,7 @@ if should_tame_gnome_super; then
     export GNOME_SUPER_GUARD="$here/gnome-super-guard.sh"
     "$GNOME_SUPER_GUARD" restore-stale 2>/dev/null || true
     EXTRA_ARGS+=(--tame-gnome)
-    echo "[connect] GNOME/IBus host-shortcut guard: active while viewer has keyboard focus or mouse inside"
+    echo "[connect] GNOME/IBus host-shortcut guard: active only while the mouse is inside the viewer window"
 fi
 trap '"$here/gnome-super-guard.sh" restore-stale 2>/dev/null || true' EXIT
 

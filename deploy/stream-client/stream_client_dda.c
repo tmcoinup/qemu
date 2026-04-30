@@ -284,9 +284,9 @@ static void gnome_guard_set(int want)
     }
 }
 
-static void update_gnome_guard(const struct args *a, int mouse_inside, int input_focus)
+static void update_gnome_guard(const struct args *a, int mouse_inside)
 {
-    gnome_guard_set(a->tame_gnome && (mouse_inside || input_focus));
+    gnome_guard_set(a->tame_gnome && mouse_inside);
 }
 
 /* Cursor visibility helper — 鼠标在 viewer 内时隐宿主光标（DDA 帧
@@ -295,9 +295,9 @@ static void update_gnome_guard(const struct args *a, int mouse_inside, int input
  * 不了 mutter 的系统快捷键，反而引入状态机抖动 (frequent ON/OFF)
  * 和 focus race (截图 / 切窗时键盘事件丢)。键盘路由完全靠 SDL 自然
  * focus dispatch — viewer 在 input focus 时 SDL 收 KEYDOWN，否则
- * 系统把键发给别的窗口。GNOME Super/Alt+Tab 类宿主快捷键在 viewer
- * 有键盘焦点或鼠标位于窗口内时动态关闭，避开 compositor 抢键；
- * viewer 失焦且鼠标离开、最小化、隐藏或退出时恢复宿主。 */
+ * 系统把键发给别的窗口。GNOME Super/Alt+Tab/锁屏类宿主快捷键只在
+ * 鼠标位于 viewer 窗口内时动态关闭，鼠标离开、最小化、隐藏或退出
+ * 时恢复宿主。这样宿主快捷键恢复跟随 pointer crossing，不依赖焦点。 */
 static void update_cursor_vis(int *visible, int want)
 {
     if (want == *visible) return;
@@ -448,16 +448,15 @@ int main(int argc, char **argv) {
     }
 
     /* SDL 自然 focus 路由 — 不调任何 grab API。鼠标光标按 ENTER/LEAVE
-     * 简单切显隐；GNOME 宿主快捷键按键盘焦点或鼠标是否在窗口内动态开关。 */
+     * 简单切显隐；GNOME 宿主快捷键按鼠标是否在窗口内动态开关。 */
     SDL_PumpEvents();
     SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
     int cursor_visible = 1;   /* SDL 默认 enable，跟 SDL_ShowCursor 同步 */
     Uint32 wfl0  = SDL_GetWindowFlags(win);
     int mouse_inside = !!(wfl0 & SDL_WINDOW_MOUSE_FOCUS);
-    int input_focus  = !!(wfl0 & SDL_WINDOW_INPUT_FOCUS);
     /* 鼠标若启动时已在窗内（SDL 不发 ENTER），先隐宿主光标 */
     if (mouse_inside) update_cursor_vis(&cursor_visible, 0);
-    update_gnome_guard(&a, mouse_inside, input_focus);
+    update_gnome_guard(&a, mouse_inside);
 
     signal(SIGINT,  on_quit);
     signal(SIGTERM, on_quit);
@@ -571,28 +570,21 @@ int main(int argc, char **argv) {
                         case SDL_WINDOWEVENT_ENTER:
                             mouse_inside = 1;
                             update_cursor_vis(&cursor_visible, 0);
-                            update_gnome_guard(&a, mouse_inside, input_focus);
+                            update_gnome_guard(&a, mouse_inside);
                             break;
                         case SDL_WINDOWEVENT_LEAVE:
                             mouse_inside = 0;
                             update_cursor_vis(&cursor_visible, 1);
-                            update_gnome_guard(&a, mouse_inside, input_focus);
-                            break;
-                        case SDL_WINDOWEVENT_FOCUS_GAINED:
-                            input_focus = 1;
-                            update_gnome_guard(&a, mouse_inside, input_focus);
+                            update_gnome_guard(&a, mouse_inside);
                             break;
                         case SDL_WINDOWEVENT_FOCUS_LOST:
-                            input_focus = 0;
                             if (!mouse_inside) update_cursor_vis(&cursor_visible, 1);
-                            update_gnome_guard(&a, mouse_inside, input_focus);
                             break;
                         case SDL_WINDOWEVENT_MINIMIZED:
                         case SDL_WINDOWEVENT_HIDDEN:
                             mouse_inside = 0;
-                            input_focus = 0;
                             update_cursor_vis(&cursor_visible, 1);
-                            update_gnome_guard(&a, mouse_inside, input_focus);
+                            update_gnome_guard(&a, mouse_inside);
                             break;
                         case SDL_WINDOWEVENT_CLOSE: want_quit = 1; break;
                         }
@@ -603,7 +595,7 @@ int main(int argc, char **argv) {
                         if (!mouse_inside) {
                             mouse_inside = 1;
                             update_cursor_vis(&cursor_visible, 0);
-                            update_gnome_guard(&a, mouse_inside, input_focus);
+                            update_gnome_guard(&a, mouse_inside);
                         } else {
                             update_cursor_vis(&cursor_visible, 0);
                         }
@@ -688,30 +680,23 @@ int main(int argc, char **argv) {
                 case SDL_WINDOWEVENT_ENTER:
                     mouse_inside = 1;
                     update_cursor_vis(&cursor_visible, 0);  /* 进窗：隐宿主光标 */
-                    update_gnome_guard(&a, mouse_inside, input_focus);
+                    update_gnome_guard(&a, mouse_inside);
                     break;
                 case SDL_WINDOWEVENT_LEAVE:
                     mouse_inside = 0;
                     update_cursor_vis(&cursor_visible, 1);  /* 出窗：显宿主光标 */
-                    update_gnome_guard(&a, mouse_inside, input_focus);
-                    break;
-                case SDL_WINDOWEVENT_FOCUS_GAINED:
-                    input_focus = 1;
-                    update_gnome_guard(&a, mouse_inside, input_focus);
+                    update_gnome_guard(&a, mouse_inside);
                     break;
                 case SDL_WINDOWEVENT_FOCUS_LOST:
-                    input_focus = 0;
                     if (!mouse_inside) {
                         update_cursor_vis(&cursor_visible, 1);
                     }
-                    update_gnome_guard(&a, mouse_inside, input_focus);
                     break;
                 case SDL_WINDOWEVENT_MINIMIZED:
                 case SDL_WINDOWEVENT_HIDDEN:
                     mouse_inside = 0;
-                    input_focus = 0;
                     update_cursor_vis(&cursor_visible, 1);  /* 出窗/最小化：显宿主光标 */
-                    update_gnome_guard(&a, mouse_inside, input_focus);
+                    update_gnome_guard(&a, mouse_inside);
                     break;
                 case SDL_WINDOWEVENT_CLOSE: want_quit = 1; break;
                 default: break;
@@ -739,7 +724,7 @@ int main(int argc, char **argv) {
                 if (!mouse_inside) {
                     mouse_inside = 1;
                     update_cursor_vis(&cursor_visible, 0);
-                    update_gnome_guard(&a, mouse_inside, input_focus);
+                    update_gnome_guard(&a, mouse_inside);
                 } else {
                     update_cursor_vis(&cursor_visible, 0);
                 }
@@ -754,7 +739,7 @@ int main(int argc, char **argv) {
                 if (!mouse_inside) {
                     mouse_inside = 1;
                     update_cursor_vis(&cursor_visible, 0);
-                    update_gnome_guard(&a, mouse_inside, input_focus);
+                    update_gnome_guard(&a, mouse_inside);
                 }
                 int rw, rh; SDL_GetWindowSize(win, &rw, &rh);
                 int x = (int)((int64_t)ev.button.x * srv_w / rw);

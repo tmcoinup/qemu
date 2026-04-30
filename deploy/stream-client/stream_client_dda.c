@@ -157,6 +157,13 @@ static inline void shmem_send_key(int down, uint32_t keysym) {
  * rest case-by-case. */
 static uint32_t sdl_to_rfb_keysym(SDL_Keysym k) {
     SDL_Keycode kc = k.sym;
+    /* Windows/Super shortcuts are virtual-key style shortcuts.  Use the
+     * physical QWERTY letter for Super+A..Z so host IME/layout translation
+     * cannot turn Win+L into a different letter before it reaches Windows. */
+    if ((k.mod & KMOD_GUI) &&
+        k.scancode >= SDL_SCANCODE_A && k.scancode <= SDL_SCANCODE_Z) {
+        return (uint32_t)('a' + (k.scancode - SDL_SCANCODE_A));
+    }
     /* Printable ASCII fits directly */
     if (kc >= 0x20 && kc <= 0x7E) {
         if (k.mod & KMOD_SHIFT) {
@@ -705,8 +712,6 @@ int main(int argc, char **argv) {
 
             case SDL_KEYDOWN:
             case SDL_KEYUP: {
-                if (ev.key.repeat) break;
-
                 uint32_t ks = sdl_to_rfb_keysym(ev.key.keysym);
                 if (debug_keys) {
                     fprintf(stderr, "[stream-dda] %s sdl=0x%x mod=0x%x → ks=0x%x %s\n",

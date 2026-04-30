@@ -563,7 +563,7 @@ PY
         if [[ "$state" == *"|"* ]]; then
             break
         fi
-        echo "[setup-task] 状态查询失败/空结果，重试 ${k}/8..."
+        echo "[setup-task] guest 状态暂未就绪，重试 ${k}/8..."
         sleep 3
     done
     IFS='|' read -r svc grid ver err lic spoofed <<<"$state"

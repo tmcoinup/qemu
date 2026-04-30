@@ -352,6 +352,7 @@ static void inject_pointer(uint8_t mask, int x, int y, Screen *s) {
     if (mask & 16) { INPUT w={0}; w.type=INPUT_MOUSE; w.mi.dwFlags=MOUSEEVENTF_WHEEL; w.mi.mouseData=-120; SendInput(1,&w,sizeof(w)); }
 }
 static void inject_key(uint8_t down, uint32_t keysym) {
+    static int win_down = 0;
     WORD vk = 0; DWORD flags = down ? 0 : KEYEVENTF_KEYUP;
     int want_shift = 0;
     if (keysym >= 0x20 && keysym <= 0x7E) {
@@ -430,6 +431,25 @@ static void inject_key(uint8_t down, uint32_t keysym) {
             case 0xFF9F: vk = VK_DELETE; break;
             default: return;
         }
+    }
+    if (vk == VK_LWIN || vk == VK_RWIN) {
+        win_down = down ? 1 : 0;
+    }
+    if (down && win_down && vk == 'L') {
+        INPUT win_up[2] = {0};
+        win_up[0].type = INPUT_KEYBOARD;
+        win_up[0].ki.wVk = VK_LWIN;
+        win_up[0].ki.dwFlags = KEYEVENTF_KEYUP;
+        win_up[1].type = INPUT_KEYBOARD;
+        win_up[1].ki.wVk = VK_RWIN;
+        win_up[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, win_up, sizeof(win_up[0]));
+        win_down = 0;
+
+        BOOL ok = LockWorkStation();
+        vlog("  Win+L detected: LockWorkStation() -> %s err=%lu",
+             ok ? "ok" : "fail", ok ? 0UL : (unsigned long)GetLastError());
+        return;
     }
     if (want_shift && down) { INPUT sh={0}; sh.type=INPUT_KEYBOARD; sh.ki.wVk=VK_SHIFT; sh.ki.dwFlags=0; SendInput(1,&sh,sizeof(sh)); }
     INPUT in = {0}; in.type = INPUT_KEYBOARD; in.ki.wVk = vk; in.ki.dwFlags = flags;

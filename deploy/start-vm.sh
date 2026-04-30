@@ -492,6 +492,7 @@ fi
     cd "$here"
     mac_lc=${VM_MAC,,}
     guest_ip=""
+    winrm_ready=0
     echo "[setup-task] 等 guest WinRM (5985)..."
     for i in $(seq 1 120); do
         guest_ip=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" \
@@ -502,27 +503,28 @@ fi
             # 端口通了但 Windows 后台 service 还在 init，pypsrp connect
             # 会 connection refused / 401。等 NTLM 稳定一次再继续。
             for j in $(seq 1 30); do
-                if python3 -c "
-from pypsrp.client import Client
+                if python3 - "$guest_ip" <<'PY' >/dev/null 2>&1; then
 import sys
+from pypsrp.client import Client
 try:
-    Client('$guest_ip', username='Administrator', password='123456', ssl=False, auth='ntlm') \
+    Client(sys.argv[1], username='Administrator', password='123456', ssl=False, auth='ntlm') \
         .execute_ps('Get-Date')
     sys.exit(0)
 except Exception:
     sys.exit(1)
-" 2>/dev/null; then
+PY
                     echo "[setup-task] WinRM ready (NTLM round-trip OK)"
+                    winrm_ready=1
                     break
                 fi
                 sleep 3
             done
-            break
+            [[ "$winrm_ready" -eq 1 ]] && break
         fi
         sleep 2
     done
-    if [[ -z "$guest_ip" ]]; then
-        echo "[setup-task] guest 没起 WinRM (4 分钟)，跳过 auto-setup"
+    if [[ -z "$guest_ip" || "$winrm_ready" -ne 1 ]]; then
+        echo "[setup-task] guest WinRM/NTLM 未稳定 (4 分钟)，跳过 auto-setup"
         exit 0
     fi
     # 一次拿齐 5 个状态信号：
@@ -532,7 +534,9 @@ except Exception:
     #           不是这个 = 被 Windows Update 替换或没装好
     #   err:    Win32_VideoController.ConfigManagerErrorCode (43=反虚拟化/无 license)
     #   lic:    nvidia-smi License Status (Licensed/Unlicensed/N/A)
-    state=$(python3 - "$guest_ip" <<'PY' 2>/dev/null || true
+    state=""
+    for k in $(seq 1 8); do
+        state=$(python3 - "$guest_ip" <<'PY' 2>/dev/null || true
 import sys
 from pypsrp.client import Client
 c = Client(sys.argv[1], username='Administrator', password='123456', ssl=False, auth='ntlm')
@@ -556,8 +560,18 @@ out, _, _ = c.execute_ps(ps)
 print((out or '').strip())
 PY
 )
+        if [[ "$state" == *"|"* ]]; then
+            break
+        fi
+        echo "[setup-task] 状态查询失败/空结果，重试 ${k}/8..."
+        sleep 3
+    done
     IFS='|' read -r svc grid ver err lic spoofed <<<"$state"
     echo "[setup-task] svc=${svc:-?} sys=${grid:-?} ver=${ver:-?} err=${err:-?} license=${lic:-?} name_spoofed=${spoofed:-?}"
+    if [[ "$state" != *"|"* || -z "${ver:-}" || -z "${err:-}" ]]; then
+        echo "[setup-task] 状态未知，跳过 auto-setup，避免误判后重装 driver"
+        exit 0
+    fi
 
     # 期望 driver 版本：GRID 16.4 / 538.33 内部版本号
     # (host vGPU driver 是 535.161.05 = vGPU 16.x，必须配 16.x guest driver

@@ -163,6 +163,46 @@ The control socket also accepts ``SET_ROI`` and ``SET_RATE`` messages
 (see ``FB_SHM_CTL_*`` in the ABI header).  The reference Python
 consumer exposes them via ``--roi x,y,w,h`` and ``--rate Hz``.
 
+Resize notification (``NOTIFY_RESIZED``)
+----------------------------------------
+
+A ``SET_ROI`` (or any guest-driven resolution change) makes QEMU
+re-allocate the backing memfd, which leaves every previously-handed-out
+mapping pointing at frozen pixels.  The ABI v1 protocol therefore
+includes a server-initiated message — ``FB_SHM_CTL_NOTIFY_RESIZED``
+(op code 5) — that re-broadcasts a fresh
+``{memfd, eventfd}`` pair via ``SCM_RIGHTS`` to every consumer that
+opted in.
+
+Opt-in is encoded in the ``flags`` field of the ``HELLO`` request
+(formerly ``reserved``):
+
+* ``FB_SHM_HELLO_F_RESIZE_NOTIFY (1<<0)`` — "I will react to
+  ``NOTIFY_RESIZED`` by re-mapping the new memfd and replacing my
+  eventfd watch."
+
+A consumer that does **not** set the flag preserves the legacy
+behaviour (frozen frames after a ROI change until it reconnects) and
+remains wire-compatible with QEMU builds that pre-date this message.
+
+On the client side, after a ``NOTIFY_RESIZED`` arrives:
+
+1. ``recvmsg`` the 32-byte ack plus the two ``SCM_RIGHTS`` fds.
+2. ``mmap(new_memfd, ack.shm_size)`` and replace the previous
+   mapping.
+3. Replace the old eventfd watch with the new fd; the old eventfd
+   stops firing (QEMU keeps re-using a single ``wake_eventfd``
+   per backend, but every consumer holds its own dup).
+4. Reset any local "last consumed ``frame_seq``" to 0 — the new
+   memfd starts a fresh seqlock at 0.
+
+The reference Rust consumer in ``dgame``
+(``adapters/capture/fb_shm/control.rs``) does this in a background
+``tokio`` task that multiplexes the control socket: synchronous
+``SET_ROI`` / ``SET_RATE`` acks are routed via ``oneshot`` channels
+while ``NOTIFY_RESIZED`` lands on a separate ``mpsc`` and triggers an
+in-place mmap / eventfd swap without dropping the session.
+
 Reference consumer
 ==================
 

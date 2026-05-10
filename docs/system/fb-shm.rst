@@ -237,6 +237,53 @@ depending on whether OpenGL is enabled.  An unknown name returns a
 * ``object-del fb-shm`` — same as the pause above plus releases the
   memfd / socket / eventfd.  Use when the consumer is fully done.
 
+Multiple subscribers per backend
+================================
+
+A single ``fb-shm`` instance handles N concurrent consumers out of the
+box.  The control socket's accept queue is sized at 16; each connecting
+consumer receives its own ``SCM_RIGHTS`` copy of the (refcounted) memfd
+and eventfd, so:
+
+* All consumers ``mmap`` the **same physical pages** — zero extra
+  memory cost regardless of how many you attach.
+* The eventfd doorbell is shared.  Every ``select`` / ``poll`` fires on
+  every QEMU commit; the first reader drains the counter and the rest
+  see ``EAGAIN`` but have already woken up.  Correctness comes from the
+  seqlock (compare ``frame_seq``), not from the eventfd value.
+* Slow consumers cannot back-pressure QEMU or the other consumers — a
+  consumer that misses a tick simply re-reads the latest ``active_idx``
+  on the next wake.
+
+Example: live RTMP push *and* local archival recording in parallel::
+
+    # QEMU started with -object fb-shm,id=cap,path=/run/qemu/fb-vm1.sock
+
+    # consumer A: NVENC -> RTMP
+    scripts/qemu-fb-shm-stream.py --sock /run/qemu/fb-vm1.sock \
+        --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc &
+
+    # consumer B: x264 -> local mp4
+    scripts/qemu-fb-shm-stream.py --sock /run/qemu/fb-vm1.sock \
+        --output /tmp/vm1.mp4 --encoder libx264 --preset veryfast &
+
+    # consumer C: a custom Rust analyser that just inspects pixels
+    ./my-analyser --sock /run/qemu/fb-vm1.sock &
+
+Caveats:
+
+* ``listen(fd, 16)`` — 17+ consumers racing to connect at the exact
+  same instant get ``ECONNREFUSED`` and must retry.  Not normally a
+  problem; consumers connect at human time scales.
+* The eventfd's "exact wake count" is lost when sharing.  If your
+  consumer relies on the eventfd value rather than the seqlock, switch
+  to per-client eventfds (a future ABI extension; not implemented in
+  v1).
+* Each consumer is responsible for its own framerate / decode.  If
+  consumer A wants 60 Hz and consumer B wants 30 Hz, B simply skips
+  every other ``frame_seq`` advance.  fb-shm itself runs at the
+  configured ``rate``.
+
 Multi-VM fan-out
 ================
 

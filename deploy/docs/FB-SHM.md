@@ -70,6 +70,40 @@ scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
 ROI 是在 QEMU 进程里通过 `pixman_image_composite32` 一次完成裁剪 + BGR0 格式转换，
 省下的内存带宽和编码器算力都是真实节约。
 
+## 一个 VM：多个订阅端并行
+
+一个 fb-shm socket 可以同时被多个消费端连接 —— 比如一边 RTMP 推流一边本地归档：
+
+```bash
+./deploy/scripts/start-vm.sh 1                                  # 起 VM
+
+# 终端 A: RTMP 推 NVENC
+scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+    --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M &
+
+# 终端 B: 本地存档 x264
+scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+    --output /tmp/vm1.mp4 --encoder libx264 --preset veryfast &
+
+# 终端 C: 自定义 Rust/Python 分析（仅读像素，不编码）
+./my-pixel-analyser --sock /tmp/qemu-stealth-1.fb &
+```
+
+每个消费端经 `SCM_RIGHTS` 各拿一份 memfd + eventfd（kernel 引用计数），
+**全部 mmap 同一块物理页 → 零额外内存代价**。慢消费端只会自己跳帧，不反压 QEMU
+也不影响其它端。
+
+实测 3 个并行消费端 30Hz × 2 秒：A=62 帧，B=62 帧，C=62 帧，seq 范围对齐
+1..62，无丢失。
+
+边界：
+- `listen` backlog = 16，超过 16 个**并发 connect()** 才会 ECONNREFUSED
+  （现实里消费端慢慢接入不会撞）。
+- eventfd doorbell 共享 —— 第一个 read 拿走计数，其他端见 EAGAIN 但已经被
+  level-triggered 唤醒；靠 `frame_seq` seqlock 判断有无新帧（参考 consumer
+  脚本已正确处理）。
+- 各消费端可独立选不同 ROI/编码/帧率（每端跳过它不需要的 frame_seq）。
+
 ## 多 VM：每台独立推流
 
 ```bash

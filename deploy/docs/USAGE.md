@@ -49,10 +49,40 @@ sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
 
 ## 5. 启动器 (`start-vm.sh`)
 
+### 5.1 显示模式（默认 SDL + fb-shm 双开）
+
+`fb-shm` 是 `-object fb-shm,...` 用户可创建对象，在主显示控制台上注册一条独立
+DCL，与 `-display sdl/none/...` 完全解耦 —— 所以默认两条通道并存：
+
+| 命令 | 本地窗口 | 远程 | 推流通道 |
+|---|---|---|---|
+| `start-vm.sh 1`                       | **SDL** | 无 | **fb-shm @ `/tmp/qemu-stealth-1.fb`** |
+| `start-vm.sh 1 --headless`            | 无 | VNC :5900+N-1 | + fb-shm |
+| `start-vm.sh 1 --no-sdl`              | 无 | 无 | fb-shm（后台 daemon）|
+| `start-vm.sh 1 --no-fb-shm`           | SDL | 无 | — |
+| `start-vm.sh 1 --headless --no-fb-shm`| 无 | VNC | — |
+
+无 `DISPLAY` 又非交互终端时（`nohup ... &`）自动降级 `--no-sdl`，避免 SDL crash。
+
+### 5.2 常见调用
+
 ```bash
-# 最简（90% 情况）
-deploy/scripts/start-vm.sh 1            # instance 1
-deploy/scripts/start-vm.sh 2            # instance 2
+# 最简（默认 SDL 窗口 + fb-shm 推流并存，可同时直接玩 + 录屏）
+deploy/scripts/start-vm.sh 1
+# 另开一个终端开始拉流：
+scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+    --output /tmp/vm1.mp4 --encoder libx264 --preset veryfast
+
+# 后台 daemon：关 SDL，仅 fb-shm 推流
+deploy/scripts/start-vm.sh 1 --no-sdl
+
+# 远程登录 + 推流：VNC 看实时画面，fb-shm 推 RTMP
+deploy/scripts/start-vm.sh 1 --headless
+scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+    --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M
+
+# 只推 ROI（省 CPU/带宽）
+deploy/scripts/start-vm.sh 1 --fb-shm-roi=0,0,1280,720 --fb-shm-rate=30
 
 # 装系统时挂 ISO
 deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
@@ -69,10 +99,15 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | 位置参数 N | 1 | instance 编号；决定磁盘/profile/socket/端口 |
 | `BRIDGE` | `br0` | 桥接网卡；不存在/无授权时自动回退到 user-mode NAT |
 | `--no-bridge` | - | 强制走 user-mode NAT（10.0.2.0/24） |
-| `STABLE_DISPLAY` | **1** | `virtio-vga` 无 GL，规避 virgl BSOD；ACE/腾讯反作弊友好 |
+| `STABLE_DISPLAY` | **1** | 仅 `--sdl` 模式生效：`virtio-vga` 无 GL，规避 virgl BSOD |
 | `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
 | `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |
-| `HEADLESS` | 0 | 1 = `-display none -vnc 127.0.0.1:N-1`，无 SDL 窗口 |
+| **`FB_SHM`** | **1** | **默认开**：始终带 `-object fb-shm,...` 共享内存推流通道。`--no-fb-shm` 关 |
+| `FB_SHM_SOCK` | `/tmp/qemu-stealth-<N>.fb` | 控制 socket 路径 (flag: `--fb-shm-sock=…`) |
+| `FB_SHM_RATE` | 60 | 推流帧率 Hz, [1,240] (flag: `--fb-shm-rate=…`) |
+| `FB_SHM_ROI` | `` | 子区域 `x,y,w,h`；空 = 全屏 (flag: `--fb-shm-roi=…`) |
+| **`SDL`** | **1** | **默认开**：SDL 窗口；`--no-sdl` 关；`--headless` 自动关 |
+| `HEADLESS` | 0 | 1 = 关 SDL 改 VNC（与 fb-shm 并存）(flag: `--headless`) |
 | `RAM` | 4096 | 单位 MB（4GB 双通道 = 2×2GB） |
 | `MEM_PER_DIMM_MB` | RAM/2 | DIMM 总量自动除 2 凑双通道 SPD |
 | `DISPLAY` | `:0` | X11 显示，未设默认本地 :0；HEADLESS=1 时忽略 |
@@ -103,6 +138,23 @@ irm http://<host-on-br0>:8765/vm-bootstrap.ps1 | iex
 deploy/scripts/install-stealth.sh <INSTANCE>
 ```
 
+## 6.5 运行时切换显示通道
+
+启动后想隐藏 SDL 窗口只留推流（节省 ~3-7% CPU）/ 反向：
+
+```bash
+deploy/scripts/ctl-vm.sh 1 stream-only    # SDL 隐 + fb-shm 跑
+deploy/scripts/ctl-vm.sh 1 sdl-only       # SDL 显 + fb-shm 暂停
+deploy/scripts/ctl-vm.sh 1 sdl-hide       # 仅隐 SDL
+deploy/scripts/ctl-vm.sh 1 sdl-show       # 仅显 SDL
+deploy/scripts/ctl-vm.sh 1 fb-off         # 卸载 fb-shm（删 socket）
+deploy/scripts/ctl-vm.sh 1 fb-on 60       # 重装 fb-shm
+deploy/scripts/ctl-vm.sh 1 status         # 查询当前状态
+```
+
+底层走 QMP：`display-pause` / `display-resume`（DCL 暂停）+ `object-del` /
+`object-add`（fb-shm 卸载/重装）。详见 [FB-SHM.md](FB-SHM.md)。
+
 ## 7. 多 VM
 
 每个 INSTANCE 独立装。比如：
@@ -120,9 +172,18 @@ EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
 deploy/scripts/install-stealth.sh 1
 deploy/scripts/install-stealth.sh 2
 
-# 同时跑（生产，无窗口）
-HEADLESS=1 nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
-HEADLESS=1 nohup deploy/scripts/start-vm.sh 2 > /tmp/qemu2.log 2>&1 &
+# 同时跑（生产 daemon；nohup 无 DISPLAY 自动降级 --no-sdl，仅推流）
+nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
+nohup deploy/scripts/start-vm.sh 2 > /tmp/qemu2.log 2>&1 &
+
+# 给两台分别拉一路 NVENC 推流（不同 RTMP key / UDP 端口）
+scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+    --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M &
+scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-2.fb \
+    --output 'rtmp://ingest/live/vm2' --encoder h264_nvenc --bitrate 6M &
+
+# 或者用编排器一次起多 VM 消费端
+scripts/qemu-fb-shm-multivm.py --config multivm.yaml
 ```
 
 注意 RAM：每台默认 4GB（2×2GB 双通道），宿主要够。

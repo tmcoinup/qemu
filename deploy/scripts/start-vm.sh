@@ -6,11 +6,21 @@
 # DDR4 双通道 + Samsung 970 PRO 512GB NVMe + virtio-gpu 改名 GTX 1050。
 #
 # 用法（最简）：
-#     ./start-vm.sh 1                       # 启动 instance 1，桥接 br0，SDL 窗口
+#     ./start-vm.sh 1                       # 启动 instance 1，桥接 br0
+#                                           # 默认 SDL 窗口 + fb-shm 推流并存
+#                                           # 推流 socket: /tmp/qemu-stealth-1.fb
 #     ./start-vm.sh 2 --iso=/path/x.iso     # instance 2 从 ISO 装系统
-#     ./start-vm.sh 1 --headless            # 无 SDL，VNC only
+#     ./start-vm.sh 1 --no-sdl              # 后台 daemon：关 SDL，仅推流
+#     ./start-vm.sh 1 --headless            # VNC 远程 + fb-shm（无本地窗口）
+#     ./start-vm.sh 1 --no-fb-shm           # 关推流，仅 SDL（回历史行为）
 #     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
 #     ./start-vm.sh 1 --reroll              # 重新随机硬件身份
+#     ./start-vm.sh 1 --fb-shm-roi=0,0,1920,1080 --fb-shm-rate=60
+#
+# 边玩边拉流到 ffmpeg / NVENC：
+#     ./start-vm.sh 1                       # SDL 窗口照常出现，可直接玩
+#     scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \\
+#         --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M
 #
 # 默认值（90% 情况都不用改）：
 #     BRIDGE=br0           桥接 br0（不存在自动回退到 user-mode NAT）
@@ -25,20 +35,38 @@
 # 之后所有启动复用，让 Windows / 反作弊看见永远同一台机器。
 # 想换身份: deploy/scripts/reroll-identity.sh <N>  或者直接删 profile 文件。
 #
+# 显示后端 — 两条独立通道，默认全开：
+#     SDL 窗口（默认开）   本地交互窗口；DNF 等需要直接玩游戏的场景用。
+#                          --no-sdl 关；--headless 自动关并启 VNC 替代。
+#     fb-shm 推流（默认开）零拷贝共享内存推流，guest 完全不可见。
+#                          外部进程连 unix socket 拿 memfd+eventfd，配合
+#                          scripts/qemu-fb-shm-stream.py → ffmpeg/NVENC
+#                          推 RTMP / UDP / SRT / 本地 mp4。--no-fb-shm 关。
+#     --headless           关 SDL，开 VNC（fb-shm 仍照常）。
+#
 # 环境变量（不常用，默认就好）：
 #     RAM=8192             客机内存 MiB（默认 8192）
 #     CPUS=4               vCPU 数量（默认 4，cores=4 threads=1 sockets=1）
-#     HEADLESS=1           关 SDL，只开 VNC                    (flag: --headless)
-#     BRIDGE=br0           桥接网卡名字                         (flag: --bridge=br0)
-#     ISO=<path>           安装 ISO 路径                        (flag: --iso=<path>)
-#     DISK=<path>          qcow2 磁盘路径                       (flag: --disk=<path>)
-#     QEMU=<path>          qemu-system-x86_64 二进制路径        (flag: --qemu=<path>)
+#     SDL=1                SDL 窗口开关（默认 1） (flag: --sdl / --no-sdl)
+#     HEADLESS=1           关 SDL 启 VNC                          (flag: --headless)
+#     BRIDGE=br0           桥接网卡名字                          (flag: --bridge=br0)
+#     ISO=<path>           安装 ISO 路径                         (flag: --iso=<path>)
+#     DISK=<path>          qcow2 磁盘路径                        (flag: --disk=<path>)
+#     QEMU=<path>          qemu-system-x86_64 二进制路径         (flag: --qemu=<path>)
 #     EXTRA_ISO=<path>     副 CDROM（autounattend.xml / 驱动盘 等）
-#     STABLE_DISPLAY=0     允许 virtio-vga-gl + virgl 3D 加速（更快但偶发 BSOD）
+#     STABLE_DISPLAY=0     SDL 模式下允许 virtio-vga-gl + virgl 3D（fb-shm 模式
+#                          用不到此项；fb-shm 始终走 stable virtio-vga）
 #     GPU_SELFSIGNED=1     PCI 主 ID 改成 NVIDIA 10DE:1C81。 ⚠️ 需要 patched
 #                          viogpudo + 伪 NVIDIA CA 链；ACE/腾讯反作弊判异常
 #                          (13-131106-0)。只用于轻反作弊场景。
 #     CPU_MODEL=Ryzen3-2300X  覆盖 profile 写入的 CPU 型号（一般不用）
+#     FB_SHM_SOCK=<path>   fb-shm 控制 socket 路径
+#                          默认 /tmp/qemu-stealth-<N>.fb
+#                          (flag: --fb-shm-sock=<path>)
+#     FB_SHM_RATE=60       fb-shm 目标帧率 Hz，clamp [1,240]
+#                          (flag: --fb-shm-rate=<hz>)
+#     FB_SHM_ROI=x,y,w,h   只截 ROI 推流（省 CPU/带宽）。空 = 全屏
+#                          (flag: --fb-shm-roi=x,y,w,h)
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -69,6 +97,13 @@ while (( $# > 0 )); do
         --cpus=*)     CPUS="${1#*=}" ;;
         --headless)   HEADLESS=1 ;;
         --reroll)     _cli_reroll=1 ;;
+        --sdl)        SDL=1 ;;
+        --no-sdl)        SDL=0 ;;
+        --no-fb-shm)     FB_SHM=0 ;;
+        --fb-shm)        FB_SHM=1 ;;  # explicit on (already default)
+        --fb-shm-sock=*) FB_SHM=1; FB_SHM_SOCK="${1#*=}" ;;
+        --fb-shm-rate=*) FB_SHM=1; FB_SHM_RATE="${1#*=}" ;;
+        --fb-shm-roi=*)  FB_SHM=1; FB_SHM_ROI="${1#*=}" ;;
         --)           shift; break ;;
         -*)
             echo "ERROR: unknown flag '$1'" >&2
@@ -105,12 +140,48 @@ fi
 : "${RAM:=4096}"
 : "${CPUS:=4}"
 : "${HEADLESS:=0}"
+: "${SDL:=1}"      # 默认：SDL 窗口仍然弹出（与历史行为一致）
+: "${FB_SHM:=1}"   # 默认：再额外挂一条 -object fb-shm 推流通道
+: "${FB_SHM_RATE:=60}"
+: "${FB_SHM_ROI:=}"
+: "${FB_SHM_SOCK:=/tmp/qemu-stealth-${INSTANCE}.fb}"
 : "${ISO:=${_cli_iso:-/home/ubuntu/images/win10.iso}}"
 [[ -n "$_cli_iso" ]] && ISO="$_cli_iso"
 
+# 显示模式：SDL 窗口 + fb-shm 推流默认全开（互不影响）。
+#   (无 flag)            -> SDL 窗口 + fb-shm        ← 默认
+#   --headless           -> VNC 远程  + fb-shm（去窗口、加远程）
+#   --no-sdl             -> 关窗口，仅 fb-shm（适合后台 daemon / nohup）
+#   --no-fb-shm          -> 关推流，仅 SDL/VNC（回历史行为）
+#   --sdl --headless     -> 冲突，按 --headless 走
+if [[ "$HEADLESS" == "1" ]]; then
+    SDL=0   # headless 强制无窗口（VNC 替代）
+fi
+if [[ "$FB_SHM" != "1" && "$SDL" != "1" && "$HEADLESS" != "1" ]]; then
+    echo ">> WARN: --no-fb-shm + --no-sdl + 无 --headless，guest 无任何显示输出"
+fi
+# 后台 daemon 情况自动降级：DISPLAY 没设 + 不在 tty + 没显式 --headless => 关 SDL
+if [[ "$SDL" == "1" && -z "${DISPLAY:-}" && ! -t 1 && "$HEADLESS" != "1" ]]; then
+    echo ">> 自动降级: 无 DISPLAY 且非交互式终端 -> 关 SDL，仅 fb-shm 推流"
+    SDL=0
+fi
+
+# fb-shm 校验：rate 必须在 [1,240]
+if [[ "$FB_SHM" == "1" ]]; then
+    if ! [[ "$FB_SHM_RATE" =~ ^[0-9]+$ ]] || (( FB_SHM_RATE < 1 || FB_SHM_RATE > 240 )); then
+        echo "ERROR: FB_SHM_RATE 必须是 [1,240] 的整数 (实际: '$FB_SHM_RATE')" >&2
+        exit 2
+    fi
+    if [[ -n "$FB_SHM_ROI" ]] && ! [[ "$FB_SHM_ROI" =~ ^[0-9]+,[0-9]+,[0-9]+,[0-9]+$ ]]; then
+        echo "ERROR: FB_SHM_ROI 必须是 x,y,w,h 整数四元组 (实际: '$FB_SHM_ROI')" >&2
+        exit 2
+    fi
+fi
+
 # DISPLAY 默认 :0（典型本地 X11 会话）；从 SSH 终端运行时若未 export DISPLAY，
-# 这里自动补上让 SDL 能找到 X server。HEADLESS=1 时 SDL 不启用，DISPLAY 不影响。
-if [[ "$HEADLESS" != "1" ]]; then
+# 这里自动补上让 SDL 能找到 X server。只有 --sdl 才会真创窗口；
+# 纯 fb-shm（默认）和 --headless 都不需要 DISPLAY。
+if [[ "${SDL:-0}" == "1" && "${HEADLESS:-0}" != "1" ]]; then
     : "${DISPLAY:=:0}"
     export DISPLAY
 fi
@@ -297,38 +368,64 @@ fi
 
 # 显示后端选择
 #
+# 三个独立通道，可叠加（fb-shm 默认开，GUI 三选一）：
+#
+# 1) fb-shm（FB_SHM=1，默认）
+#    -object fb-shm,id=stealth-${INSTANCE},path=...
+#    零拷贝共享内存推流。配合 scripts/qemu-fb-shm-stream.py → ffmpeg/NVENC。
+#    与下面三种 GUI 通道全部可共存（独立 DCL，互不影响）。
+#
+# 2) GUI 通道（互斥三选一）
+#    --sdl       : -display sdl,...        (本地交互窗口；DNF 调试)
+#    --headless  : -display none -vnc ...  (VNC 远程)
+#    (默认)      : -display none           (无 GUI；纯推流场景)
+#
 # STABLE_DISPLAY=1（默认）: virtio-vga，不开 -gl/virgl。规避 virgl 长期运行后
 #   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
 #   INTERNAL_ERROR"）。代价是没有 GL 加速，guest 的 DirectX 回退到 WARP
 #   (软件 DX9-12)。DNF/腾讯 2D+DX9 类游戏 WARP 完全够用，性能差不大。
+#   (注：fb-shm + headless 模式与 STABLE_DISPLAY 无关，永远走 stable 路径)
 #
-# STABLE_DISPLAY=0: virtio-vga-gl + virgl 3D 加速。渲染更快，但 virgl 状态机
-#   脆弱，长时间会话或 DWM 3D 使用会污染并最终 BSOD。
-#
-# HEADLESS=1: 强制 VNC-only，始终 virtio-vga（不开 GL）。
+# STABLE_DISPLAY=0: 仅在 --sdl 模式下生效，启 virtio-vga-gl + virgl 3D 加速。
+#   渲染更快但 virgl 状态机长跑会脏。
 STABLE_DISPLAY=${STABLE_DISPLAY:-1}
 
-if [[ "$HEADLESS" == "1" ]]; then
-    # Headless: VNC only. virtio-vga (no GL) because SPICE GL is local-only
-    # and VNC doesn't render OpenGL output.
-    DISP_ARGS=(
-        -display none
-        -vnc 127.0.0.1:$VNC_DISPLAY
-        -device "virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
-    )
-elif [[ "$STABLE_DISPLAY" == "1" ]]; then
-    # Stability mode: SDL window for local control, no GL passthrough.
-    # Use this for long DNF sessions or anti-cheat-stable runs.
-    # SDL grab-mod 默认是 lshift-lctrl-lalt（Ctrl+Shift+Alt+G 切换抓取），保持默认。
-    DISP_ARGS=(
-        -display sdl,show-cursor=off
-        -device "virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
-    )
+# 拼 fb-shm -object 字符串
+FB_SHM_OBJ=""
+if [[ "$FB_SHM" == "1" ]]; then
+    FB_SHM_OBJ="fb-shm,id=stealth-${INSTANCE},path=${FB_SHM_SOCK},rate=${FB_SHM_RATE}"
+    if [[ -n "$FB_SHM_ROI" ]]; then
+        IFS=',' read -r _rx _ry _rw _rh <<<"$FB_SHM_ROI"
+        FB_SHM_OBJ="${FB_SHM_OBJ},x=${_rx},y=${_ry},width=${_rw},height=${_rh}"
+    fi
+fi
+
+# 选 virtio-vga 或 virtio-vga-gl
+if [[ "$SDL" == "1" && "$STABLE_DISPLAY" != "1" ]]; then
+    VGA_DEV="virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
 else
-    DISP_ARGS=(
-        -display sdl,gl=on,show-cursor=off
-        -device "virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
-    )
+    VGA_DEV="virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
+fi
+
+# GUI 通道
+DISP_ARGS=()
+if [[ "$HEADLESS" == "1" ]]; then
+    DISP_ARGS+=(-display none -vnc 127.0.0.1:$VNC_DISPLAY)
+elif [[ "$SDL" == "1" ]]; then
+    if [[ "$STABLE_DISPLAY" == "1" ]]; then
+        DISP_ARGS+=(-display sdl,show-cursor=off)
+    else
+        DISP_ARGS+=(-display sdl,gl=on,show-cursor=off)
+    fi
+else
+    # 默认无 GUI（纯 fb-shm 推流场景），或 --no-fb-shm 时也走这条
+    DISP_ARGS+=(-display none)
+fi
+DISP_ARGS+=(-device "$VGA_DEV")
+
+# fb-shm 推流通道（独立 -object，与 GUI 共存）
+if [[ -n "$FB_SHM_OBJ" ]]; then
+    DISP_ARGS+=(-object "$FB_SHM_OBJ")
 fi
 
 # 键盘走 USB HID (usb-kbd) — DirectInput / Raw Input 类游戏 (DNF / 腾讯反作弊)
@@ -527,7 +624,18 @@ echo ">> instance:    $INSTANCE"
 echo ">> VM 目录:     $VM_DIR"
 echo ">> QMP socket:  $QMP_SOCK"
 echo ">> HMP socket:  $MON_SOCK"
-echo ">> VNC display: :$VNC_DISPLAY (port $((5900+VNC_DISPLAY)))"
+# 显示通道
+if [[ "$HEADLESS" == "1" ]]; then
+    echo ">> GUI:         VNC 127.0.0.1:$((5900+VNC_DISPLAY)) (display :$VNC_DISPLAY)"
+elif [[ "$SDL" == "1" ]]; then
+    echo ">> GUI:         SDL 窗口 (DISPLAY=${DISPLAY:-未设})$([[ "$STABLE_DISPLAY" == "1" ]] && echo " stable" || echo " gl")"
+else
+    echo ">> GUI:         无（纯 fb-shm 推流模式）"
+fi
+if [[ "$FB_SHM" == "1" ]]; then
+    echo ">> fb-shm sock: $FB_SHM_SOCK (rate=${FB_SHM_RATE} Hz${FB_SHM_ROI:+, ROI=$FB_SHM_ROI})"
+    echo ">>   接消费端: scripts/qemu-fb-shm-stream.py --sock $FB_SHM_SOCK --output ..."
+fi
 echo ">> SSH/RDP fwd: 127.0.0.1:$SSH_FWD_PORT / 127.0.0.1:$RDP_FWD_PORT"
 echo ">> boot mode:   $BOOT"
 echo ">> disk:        $DISK ($(stat -c%s "$DISK") bytes)"
@@ -543,7 +651,9 @@ echo ">> RTC TZ:       $TZ"
 
 # 禁用 host 端 X11 DPMS / 屏保，避免 host 屏幕休眠时 SDL 窗口被冻结导致
 # guest 视为黑屏。退出时恢复原状。
-if [[ "${HEADLESS:-0}" != "1" && -n "${DISPLAY:-}" ]]; then
+# 只有真开了 SDL 窗口才需要 inhibit host 屏保 / DPMS。
+# 纯 fb-shm（默认）/ --headless 都没本地窗口，跳过这段。
+if [[ "${SDL:-0}" == "1" && "${HEADLESS:-0}" != "1" && -n "${DISPLAY:-}" ]]; then
     if command -v xset >/dev/null 2>&1; then
         # 记录原值，trap 退出还原
         _xset_dpms_orig=$(xset q 2>/dev/null | awk '/DPMS is/{print $NF}')

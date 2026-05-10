@@ -447,10 +447,14 @@ CMD=(
     -cpu "$(stealth_qemu_cpu_arg)"
     -smp cpus=$CPUS,cores=$CPUS,threads=1,sockets=1,maxcpus=$CPUS
 
-    # --- Memory: backed by memfd for prealloc, dual-channel via 2 NUMA nodes ---
+    # --- Memory: backed by memfd, dual-channel via 2 NUMA nodes ---
+    # share=on（关键）：让 host 进程地址空间和 KVM 给 guest 的 page 是同一份。
+    # 原本写 share=off 会触发 KVM 的 COW 路径，host 进程读到的是初始 prealloc 零页，
+    # 与 guest 实际 RAM 分叉——VMI（memflow / LibVMI）会读到全零，无法工作。
+    # share=on 对 guest 完全不可见（反作弊看不到任何差别），是 VMI 必须的前提。
     -m "${RAM}M"
-    -object memory-backend-memfd,id=mem0,size=$((RAM/2))M,share=off,prealloc=on
-    -object memory-backend-memfd,id=mem1,size=$((RAM/2))M,share=off,prealloc=on
+    -object memory-backend-memfd,id=mem0,size=$((RAM/2))M,share=on,prealloc=on
+    -object memory-backend-memfd,id=mem1,size=$((RAM/2))M,share=on,prealloc=on
     -numa node,nodeid=0,memdev=mem0,cpus=0-$((CPUS/2-1))
     -numa node,nodeid=1,memdev=mem1,cpus=$((CPUS/2))-$((CPUS-1))
 
@@ -508,8 +512,9 @@ CMD=(
     "${DISP_ARGS[@]}"
 
     # --- Control: QMP + HMP sockets for API access ---
-    -chardev socket,id=qmp0,path=$QMP_SOCK,server=on,wait=off
-    -mon chardev=qmp0,mode=control
+    # 用 -qmp shorthand 而不是 -chardev/-mon：等价语义，但 memflow 的命令行解析
+    # 只认 -qmp 这种 flag。这样 dgame 调试器用 memflow 直读时能找到 socket。
+    -qmp unix:$QMP_SOCK,server=on,wait=off
     -chardev socket,id=mon0,path=$MON_SOCK,server=on,wait=off
     -mon chardev=mon0,mode=readline
 

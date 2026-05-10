@@ -584,6 +584,44 @@ static void handle_mousewheel(SDL_Event *ev)
     qemu_input_event_sync();
 }
 
+static bool sdl2_confirm_close(SDL_Window *parent)
+{
+    /*
+     * X 关闭一次会同时派 SDL_WINDOWEVENT_CLOSE + SDL_QUIT，多 console 的
+     * poll 路径还可能再走一次；用 1.5s 时间窗复用上一次结果，避免连弹。
+     */
+    static Uint32 last_ticks;
+    static bool last_answer;
+    Uint32 now = SDL_GetTicks();
+    if (last_ticks && now - last_ticks < 1500) {
+        return last_answer;
+    }
+
+    const SDL_MessageBoxButtonData buttons[] = {
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "取消 / Cancel" },
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 1, "关机 / Shutdown" },
+    };
+    const SDL_MessageBoxData mbox = {
+        SDL_MESSAGEBOX_WARNING,
+        parent,
+        "QEMU",
+        "确认关闭虚拟机吗？\n点击 Shutdown 将向 guest 发出关机请求。",
+        SDL_arraysize(buttons),
+        buttons,
+        NULL,
+    };
+    int btn = -1;
+    if (SDL_ShowMessageBox(&mbox, &btn) < 0) {
+        last_answer = true;
+    } else {
+        last_answer = (btn == 1);
+    }
+    last_ticks = SDL_GetTicks();
+    /* 把对话框期间堆积的 QUIT/CLOSE 事件清掉，下一轮 poll 不会再问一遍 */
+    SDL_FlushEvent(SDL_QUIT);
+    return last_answer;
+}
+
 static void handle_windowevent(SDL_Event *ev)
 {
     struct sdl2_console *scon = get_scon_from_window(ev->window.windowID);
@@ -645,6 +683,9 @@ static void handle_windowevent(SDL_Event *ev)
             if (scon->opts->has_window_close && !scon->opts->window_close) {
                 allow_close = false;
             }
+            if (allow_close && !sdl2_confirm_close(scon->real_window)) {
+                allow_close = false;
+            }
             if (allow_close) {
                 shutdown_action = SHUTDOWN_ACTION_POWEROFF;
                 qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_UI);
@@ -690,6 +731,9 @@ void sdl2_poll_events(struct sdl2_console *scon)
             break;
         case SDL_QUIT:
             if (scon->opts->has_window_close && !scon->opts->window_close) {
+                allow_close = false;
+            }
+            if (allow_close && !sdl2_confirm_close(scon->real_window)) {
                 allow_close = false;
             }
             if (allow_close) {

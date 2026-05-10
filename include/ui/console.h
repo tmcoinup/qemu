@@ -265,6 +265,13 @@ typedef struct DisplayChangeListenerOps {
     void (*dpy_gl_update)(DisplayChangeListener *dcl,
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
+    /* optional - notified when @paused on the DCL flips.
+     * Backends use this to release window/GPU resources (e.g. SDL hides
+     * its window) and to refresh on resume.  The base console layer has
+     * already stopped invoking dpy_refresh when paused; this hook is
+     * just for backend-specific cleanup. */
+    void (*dpy_set_paused)(DisplayChangeListener *dcl, bool paused);
+
 } DisplayChangeListenerOps;
 
 struct DisplayChangeListener {
@@ -272,6 +279,7 @@ struct DisplayChangeListener {
     const DisplayChangeListenerOps *ops;
     DisplayState *ds;
     QemuConsole *con;
+    bool paused;          /* skip dpy_refresh() while true             */
 
     QLIST_ENTRY(DisplayChangeListener) next;
 };
@@ -307,6 +315,14 @@ void register_displaychangelistener(DisplayChangeListener *dcl);
 void update_displaychangelistener(DisplayChangeListener *dcl,
                                   uint64_t interval);
 void unregister_displaychangelistener(DisplayChangeListener *dcl);
+
+/*
+ * Pause / resume every DisplayChangeListener whose ops->dpy_name matches
+ * @name (e.g. "sdl2", "fb-shm").  Returns the number of listeners that
+ * actually flipped state, or -1 with *errp set if @name is unknown.
+ */
+int qemu_displaychangelistener_set_paused(const char *name, bool paused,
+                                          Error **errp);
 
 bool dpy_ui_info_supported(const QemuConsole *con);
 const QemuUIInfo *dpy_get_ui_info(const QemuConsole *con);

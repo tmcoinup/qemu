@@ -91,6 +91,9 @@ static void gui_update(void *opaque)
     ds->refreshing = false;
 
     QLIST_FOREACH(dcl, &ds->listeners, next) {
+        if (dcl->paused) {
+            continue;
+        }
         dcl_interval = dcl->update_interval ?
             dcl->update_interval : GUI_REFRESH_INTERVAL_DEFAULT;
         if (interval > dcl_interval) {
@@ -876,10 +879,68 @@ static void dpy_refresh(DisplayState *s)
     DisplayChangeListener *dcl;
 
     QLIST_FOREACH(dcl, &s->listeners, next) {
+        if (dcl->paused) {
+            continue;
+        }
         if (dcl->ops->dpy_refresh) {
             dcl->ops->dpy_refresh(dcl);
         }
     }
+}
+
+int qemu_displaychangelistener_set_paused(const char *name, bool paused,
+                                          Error **errp)
+{
+    DisplayState *ds = get_alloc_displaystate();
+    DisplayChangeListener *dcl;
+    int matched = 0;
+    int flipped = 0;
+
+    if (!name || !*name) {
+        error_setg(errp, "display name required");
+        return -1;
+    }
+
+    /* Match by prefix so e.g. "sdl2" hits both "sdl2-2d" and "sdl2-gl",
+     * and "fb" hits "fb-shm".  An exact match wins, but is not required. */
+    QLIST_FOREACH(dcl, &ds->listeners, next) {
+        const char *dcl_name = dcl->ops->dpy_name ? dcl->ops->dpy_name : "";
+        if (!g_str_has_prefix(dcl_name, name)) {
+            continue;
+        }
+        matched++;
+        if (dcl->paused == paused) {
+            continue;
+        }
+        dcl->paused = paused;
+        flipped++;
+        if (dcl->ops->dpy_set_paused) {
+            dcl->ops->dpy_set_paused(dcl, paused);
+        }
+    }
+
+    if (!matched) {
+        error_setg(errp,
+                   "no DisplayChangeListener whose dpy_name starts with '%s'",
+                   name);
+        return -1;
+    }
+
+    /* Recompute the gui timer interval since one of the contributors may
+     * have just gone silent (or come back). */
+    gui_setup_refresh(ds);
+
+    /*
+     * On resume, fire the timer immediately so the just-unpaused listener
+     * does not sit through the leftover IDLE interval (set when every DCL
+     * was paused).  Without this, a pause-then-resume sequence with no
+     * other active listener stalls for up to GUI_REFRESH_INTERVAL_IDLE
+     * (3s) before frames start flowing again.
+     */
+    if (flipped > 0 && !paused && ds->gui_timer) {
+        timer_mod(ds->gui_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
+    }
+    return flipped;
 }
 
 void dpy_text_cursor(QemuConsole *con, int x, int y)

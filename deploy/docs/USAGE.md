@@ -138,6 +138,39 @@ irm http://<host-on-br0>:8765/vm-bootstrap.ps1 | iex
 deploy/scripts/install-stealth.sh <INSTANCE>
 ```
 
+## 6.4 QMP 多客户端（qmp-proxy.py）
+
+QEMU 的 `-qmp unix:...,server=on` 是**单连接** chardev：dgame 一长期挂着，
+image-search / 任何脚本去 connect 就 ECONNREFUSED。 用 fanout 代理解决：
+
+```bash
+# 起 VM（不变）
+deploy/scripts/start-vm.sh 2
+
+# 起代理（独占 /tmp/qemu-stealth-2.qmp，再开一个 .proxy 多客户端入口）
+nohup deploy/scripts/qmp-proxy.py 2 > /tmp/qmp-proxy-2.log 2>&1 &
+
+# 把所有工具改成连 .qmp.proxy（不再连 .qmp）
+#   dgame:        --qmp /tmp/qemu-stealth-2.qmp.proxy
+#   image-search: 把 src/qmp.rs 里的 socket path 改后缀
+#   socat:        socat - UNIX-CONNECT:/tmp/qemu-stealth-2.qmp.proxy
+```
+
+代理工作机制：
+
+* upstream 单连接由代理独占，对下游开 16 后台连接的 listener；
+* 命令的 `id` 字段被代理改写成 `p<n>` 转发，响应回来按 `id` 路由回原 client，原始 id 还原；
+* 事件（RESET/SHUTDOWN/...）广播给所有 client；
+* `qmp_capabilities` 在每个下游 client 本地接住，不重复发上游；
+* OOB 命令（`exec-oob`）一并支持，路由方式相同；
+* upstream 死了广播一个合成的 `PROXY_UPSTREAM_LOST` 事件然后代理退出。
+
+实测：4 个并发 client 各自 `query-status`，id 全部正确路由；3 个 listener
+触发一次 `system_reset` 全部收到 `RESET` event。
+
+注意：fb-shm 截图比 QMP screendump 快 10-100×，长期方案是把 image-search 改成
+直接走 fb-shm（看 [FB-SHM.md](FB-SHM.md)）；qmp-proxy 是短期 workaround。
+
 ## 6.5 运行时切换显示通道
 
 启动后想隐藏 SDL 窗口只留推流（节省 ~3-7% CPU）/ 反向：

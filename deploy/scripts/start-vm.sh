@@ -16,6 +16,8 @@
 #     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
 #     ./start-vm.sh 1 --reroll              # 重新随机硬件身份
 #     ./start-vm.sh 1 --fb-shm-roi=0,0,1920,1080 --fb-shm-rate=60
+#     ./start-vm.sh 1 --proxy               # 同时起 qmp-proxy 让多客户端共存
+#                                           # listen: /tmp/qemu-stealth-1.qmp.proxy
 #
 # 边玩边拉流到 ffmpeg / NVENC：
 #     ./start-vm.sh 1                       # SDL 窗口照常出现，可直接玩
@@ -67,6 +69,10 @@
 #                          (flag: --fb-shm-rate=<hz>)
 #     FB_SHM_ROI=x,y,w,h   只截 ROI 推流（省 CPU/带宽）。空 = 全屏
 #                          (flag: --fb-shm-roi=x,y,w,h)
+#     PROXY=1              同时起 qmp-proxy.py 让多个客户端共存（默认 0）
+#                          (flag: --proxy / --no-proxy)
+#                          代理 listen: ${QMP_SOCK}.proxy；客户端连这里
+#                          就不会跟其他工具抢 QEMU 的单 QMP slot
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -104,6 +110,8 @@ while (( $# > 0 )); do
         --fb-shm-sock=*) FB_SHM=1; FB_SHM_SOCK="${1#*=}" ;;
         --fb-shm-rate=*) FB_SHM=1; FB_SHM_RATE="${1#*=}" ;;
         --fb-shm-roi=*)  FB_SHM=1; FB_SHM_ROI="${1#*=}" ;;
+        --proxy)         PROXY=1 ;;
+        --no-proxy)      PROXY=0 ;;
         --)           shift; break ;;
         -*)
             echo "ERROR: unknown flag '$1'" >&2
@@ -145,6 +153,11 @@ fi
 : "${FB_SHM_RATE:=60}"
 : "${FB_SHM_ROI:=}"
 : "${FB_SHM_SOCK:=/tmp/qemu-stealth-${INSTANCE}.fb}"
+# QMP fanout proxy: QEMU 的 -qmp 单 slot, 谁先连占着. PROXY=1 就在 QEMU 旁边
+# 起一个 qmp-proxy.py 后台进程, listen 在 ${QMP_SOCK}.proxy, 让 dgame /
+# image-search / 临时 socat 都连代理 socket → 互不竞争. proxy 在 QEMU 退出
+# (upstream EOF) 时自动 exit, 不需要手动清理.
+: "${PROXY:=0}"
 : "${ISO:=${_cli_iso:-/home/ubuntu/images/win10.iso}}"
 [[ -n "$_cli_iso" ]] && ISO="$_cli_iso"
 
@@ -623,6 +636,11 @@ CMD=(
 echo ">> instance:    $INSTANCE"
 echo ">> VM 目录:     $VM_DIR"
 echo ">> QMP socket:  $QMP_SOCK"
+if [[ "$PROXY" == "1" ]]; then
+    QMP_PROXY_SOCK="${QMP_SOCK}.proxy"
+    QMP_PROXY_LOG="/tmp/qemu-stealth-${INSTANCE}.qmp.proxy.log"
+    echo ">> QMP proxy:   $QMP_PROXY_SOCK (multi-client fanout, log: $QMP_PROXY_LOG)"
+fi
 echo ">> HMP socket:  $MON_SOCK"
 # 显示通道
 if [[ "$HEADLESS" == "1" ]]; then
@@ -641,6 +659,17 @@ echo ">> boot mode:   $BOOT"
 echo ">> disk:        $DISK ($(stat -c%s "$DISK") bytes)"
 echo ">> 键盘:        $KBD_HINT"
 echo ">> --- launching ---"
+
+# QMP fanout proxy: 后台起 qmp-proxy.py, --wait-upstream 让它在 QMP socket 还没
+# 就绪时 retry, 而不是 race condition 立即退出. proxy 会在 upstream EOF (QEMU
+# 退出) 时自己 exit, 所以不需要 trap. 重启 VM 时旧 proxy 已死, 新一轮会重新拉.
+if [[ "$PROXY" == "1" ]]; then
+    rm -f "$QMP_PROXY_SOCK"
+    "$HERE/qmp-proxy.py" "$INSTANCE" --wait-upstream 30 \
+        > "$QMP_PROXY_LOG" 2>&1 &
+    QMP_PROXY_PID=$!
+    echo ">> QMP proxy:   started pid=$QMP_PROXY_PID, listening on $QMP_PROXY_SOCK"
+fi
 
 # QEMU's `-rtc base=localtime` calls libc localtime() which honours $TZ.
 # Pin to Asia/Shanghai so the VM RTC reflects Beijing time regardless of

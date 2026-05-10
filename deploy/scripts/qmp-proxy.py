@@ -48,15 +48,18 @@ import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 LOG = logging.getLogger('qmp-proxy')
 
 
 class QmpProxy:
-    def __init__(self, upstream_path: str, listen_path: str):
+    def __init__(self, upstream_path: str, listen_path: str,
+                 wait_upstream_secs: float = 0.0):
         self.upstream_path = upstream_path
         self.listen_path = listen_path
+        self.wait_upstream_secs = wait_upstream_secs
         self.upstream_reader: asyncio.StreamReader | None = None
         self.upstream_writer: asyncio.StreamWriter | None = None
         self.upstream_greeting: dict | None = None
@@ -71,8 +74,26 @@ class QmpProxy:
 
     async def connect_upstream(self) -> None:
         LOG.info('connecting upstream %s', self.upstream_path)
-        self.upstream_reader, self.upstream_writer = \
-            await asyncio.open_unix_connection(self.upstream_path)
+        # Retry the initial connect when the user explicitly asked us to wait
+        # (e.g. start-vm.sh races us against QEMU's own listen()).  Without
+        # --wait-upstream we keep the historical "fail fast" behaviour so a
+        # plain misconfiguration still surfaces immediately.
+        deadline = (time.monotonic() + self.wait_upstream_secs
+                    if self.wait_upstream_secs > 0 else None)
+        first_attempt = True
+        while True:
+            try:
+                self.upstream_reader, self.upstream_writer = \
+                    await asyncio.open_unix_connection(self.upstream_path)
+                break
+            except (FileNotFoundError, ConnectionRefusedError) as e:
+                if deadline is None or time.monotonic() >= deadline:
+                    raise
+                if first_attempt:
+                    LOG.info('upstream not ready (%s); retrying for %.1fs',
+                             type(e).__name__, self.wait_upstream_secs)
+                    first_attempt = False
+                await asyncio.sleep(0.2)
         line = await self.upstream_reader.readline()
         if not line:
             raise RuntimeError('upstream closed before greeting')
@@ -293,6 +314,10 @@ def main() -> int:
                    help='QEMU QMP socket (the single-slot one)')
     p.add_argument('--listen',
                    help='proxy listen path (multi-client)')
+    p.add_argument('--wait-upstream', type=float, default=0.0, metavar='SECS',
+                   help='retry connecting upstream for up to SECS seconds '
+                        '(default 0 = fail fast); use this when racing the '
+                        'QEMU launcher (start-vm.sh --proxy passes 30)')
     p.add_argument('--verbose', '-v', action='store_true')
     args = p.parse_args()
 
@@ -310,10 +335,11 @@ def main() -> int:
         upstream = args.upstream
         listen = args.listen
 
-    if not os.path.exists(upstream):
-        sys.exit(f'upstream {upstream} does not exist - is QEMU running?')
+    if args.wait_upstream <= 0 and not os.path.exists(upstream):
+        sys.exit(f'upstream {upstream} does not exist - is QEMU running? '
+                 '(use --wait-upstream <secs> to retry while QEMU starts)')
 
-    proxy = QmpProxy(upstream, listen)
+    proxy = QmpProxy(upstream, listen, wait_upstream_secs=args.wait_upstream)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

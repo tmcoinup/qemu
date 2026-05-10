@@ -51,8 +51,10 @@ EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
 #    irm http://192.168.30.<host>:8765/shallow-stealth.ps1 | iex
 #    （拉 stock viogpudo + 注册表覆盖 + 重启）
 
-# 4. 日常启动（无任何 env var）
+# 4. 日常启动（无任何 env var；默认走 fb-shm 推流，无 SDL 窗口）
 deploy/scripts/start-vm.sh 2
+# 想要本地窗口加 --sdl；想要 VNC 加 --headless；两者都不开就是纯推流：
+#   scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-2.fb --output ...
 ```
 
 简化版（深层 / 无 ACE）：
@@ -72,7 +74,8 @@ GPU_SELFSIGNED=1 deploy/scripts/start-vm.sh 2
 - 硬件身份 profile `/home/ubuntu/images/vms/<N>/profile`（首次启动随机生成、固化）
 - OVMF NVRAM `/home/ubuntu/images/vms/<N>/ovmf-vars.fd`
 - QMP socket `/tmp/qemu-stealth-<N>.qmp`
-- VNC display `N-1`（端口 5900+N-1）
+- **fb-shm socket `/tmp/qemu-stealth-<N>.fb`（默认开；外部推流入口）**
+- VNC display `N-1`（端口 5900+N-1，仅 `--headless` 时实际监听）
 - SSH 转发 `127.0.0.1:1002<N+2>`、RDP 转发 `127.0.0.1:1338<N+8>`
 - MAC 从 Realtek/Intel/ASUS OUI 池随机一份
 
@@ -89,6 +92,7 @@ deploy/
 │   ├── DETECTION.md                # 反作弊全检测面清单
 │   ├── DEBUG.md                    # QEMU trace + GDB + QMP 调试
 │   ├── USAGE.md                    # （历史）单 VM 详细操作手册
+│   ├── FB-SHM.md                   # fb-shm 共享内存推流通道（默认开）
 │   └── VERIFY.md                   # 离线自检 / 验收清单
 ├── patches/                        # QEMU hw/ 补丁（已合并到本仓库分支）
 ├── scripts/
@@ -99,6 +103,7 @@ deploy/
 │   ├── apply-gpu-spoof.ps1         # 注册表 GPU 改名（被 install-stealth-guest 调用）
 │   ├── setup-bridge.sh             # 一次性桥接配置
 │   ├── stop-vm.sh                  # 优雅停机
+│   ├── ctl-vm.sh                   # 运行时切换 SDL/fb-shm（不关机）
 │   ├── reroll-identity.sh          # 重置硬件身份
 │   ├── stealth-lib.sh              # 随机池（被 start-vm.sh 调用）
 │   ├── host-performance.sh         # 主机调优 (透明大页 / CPU governor)

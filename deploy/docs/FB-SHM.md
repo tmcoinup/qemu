@@ -104,6 +104,40 @@ scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
   脚本已正确处理）。
 - 各消费端可独立选不同 ROI/编码/帧率（每端跳过它不需要的 frame_seq）。
 
+## ROI 变化时的热切换：`NOTIFY_RESIZED`
+
+任何 `SET_ROI` 或 guest 自己的分辨率切换都会让 QEMU 重新分配 backing memfd。
+旧版本协议下，server `munmap`+`close` 旧 memfd 之后 client 仍持有旧 mapping，
+kernel 因为引用计数没真正释放，但**没人再写它了 → 画面定格**。client 只能
+靠 1s watchdog 自己断开重连，每次损失 1.5–2.5 秒。
+
+ABI v1 加了一条 server 主动推送的消息 `FB_SHM_CTL_NOTIFY_RESIZED` (op=5)：
+reallocate 完成后 server 把新 `(memfd, eventfd)` 通过 `SCM_RIGHTS` 广播给所有
+**opt-in** 的 client；client 收到后**就地 remap**，不需要重连。
+
+opt-in 通过 HELLO 请求里的 `flags` 字段（原 `reserved`）：
+
+| 标志位 | 语义 |
+|---|---|
+| `FB_SHM_HELLO_F_RESIZE_NOTIFY (1<<0)` | "我会处理 NOTIFY_RESIZED：收到后丢掉旧 mmap、用新 fds 重 map" |
+
+不设这个 flag 的 client 仍然能正常 HELLO（向后兼容），只是行为退回旧版（卡帧
++ 自行重连）。
+
+Client 端处理流程：
+
+1. `recvmsg` 收到 32 字节 ack + 2 个 fd（`memfd`, `eventfd`）；
+2. `mmap(new_memfd, ack.shm_size)` 替换旧 mapping；
+3. 用新 eventfd 替换旧的 watch（旧 eventfd 不再被 server `write()`）；
+4. 把"上次消费的 frame_seq"重置为 0（新 memfd 从 0 开始计数）。
+
+dgame 端实现见 `dgame/client/src/adapters/capture/fb_shm/control.rs`：HELLO 之后
+跑一个 `tokio` 后台 task 多路复用控制 socket，普通 `SET_ROI` / `SET_RATE` ack
+走 `oneshot`，`NOTIFY_RESIZED` 走 `mpsc` 通知 frame source 原子换 mmap+eventfd。
+
+实测 1280×720 → 800×600 的 SET_ROI 切换，client 在收到 NOTIFY_RESIZED 后立即
+切到新尺寸，**无重连无丢帧**（10 秒 616 帧 = 61.6 fps）。
+
 ## 多 VM：每台独立推流
 
 ```bash
@@ -249,7 +283,8 @@ frame = r.read_frame()                # bytes, BGR0
 |---|---|
 | `bind() failed: Permission denied` | `FB_SHM_SOCK` 指到 root-only 目录；改用 `/tmp/qemu-stealth-N.fb`（默认）或 `chmod g+w`。|
 | `recvmsg: connection refused` | QEMU 还没启动到 `machine_init_done`；等 1-2 秒重试，或脚本里循环 `until [ -S $SOCK ]; do sleep 0.1; done`。|
-| 帧率达不到 `--fb-shm-rate` | guest 自己渲染速度低（idle 时驱动不重画），属正常；按生产端 commit 节奏走。|
+| 帧率达不到 `--fb-shm-rate` | guest 自己渲染速度低（idle 时驱动不重画），属正常；按生产端 commit 节奏走。也别忘了 `SET_RATE` 是全局的 —— 一个 client 设 30 Hz 后所有 client 都 30 Hz。|
+| HELLO 后 `frame_seq` 不动，几秒后才恢复 | client 没声明 `FB_SHM_HELLO_F_RESIZE_NOTIFY`，撞上一次 ROI / 分辨率切换；server 切了新 memfd 但旧 client 还盯着旧的。改成 opt-in NOTIFY_RESIZED 即可。|
 | HELLO 后 `frame_seq` 不动 | guest 还在黑屏 / ESC 启动菜单；进系统后会回正。|
 | 拉到的画面是 `bgr0` 不是 `nv12` | ABI v1 输出 BGR0；`pix_fmt bgr0 -> NV12` 转换让 NVENC 自己做（CUDA 上去），效率更高。|
 

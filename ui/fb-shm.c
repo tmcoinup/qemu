@@ -80,6 +80,8 @@ typedef struct FbShmDisplay FbShmDisplay;
 struct FbShmClient {
     FbShmDisplay *owner;
     int fd;
+    bool hello_done;            /* HELLO seen → eligible for broadcasts   */
+    bool wants_resize_notify;   /* HELLO opted into NOTIFY_RESIZED        */
     QLIST_ENTRY(FbShmClient) next;
 };
 
@@ -118,6 +120,8 @@ struct FbShmDisplay {
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
+
+static void fb_shm_broadcast_resize(FbShmDisplay *d);
 
 static uint64_t fb_shm_now_ns(void)
 {
@@ -253,6 +257,11 @@ static int fb_shm_allocate(FbShmDisplay *d, uint32_t w, uint32_t h,
     hdr->flags = FB_SHM_FLAG_RUNNING | FB_SHM_FLAG_RESIZED;
     hdr->frame_seq = 0;
     hdr->ts_ns = fb_shm_now_ns();
+
+    /* Push the new memfd / eventfd to every opted-in client; without this,
+     * existing consumers keep their old mapping and observe a frozen
+     * frame_seq even though we are now writing to a different memfd. */
+    fb_shm_broadcast_resize(d);
     return 0;
 }
 
@@ -293,8 +302,17 @@ static int fb_shm_send_fds(int fd, const FbShmCtlAck *ack,
     return (r == (ssize_t)sizeof(*ack)) ? 0 : -1;
 }
 
-static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c)
+static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
+                                const FbShmCtlReq *req)
 {
+    /* Mark the client eligible for broadcasts BEFORE we send the ack: a
+     * concurrent reallocate from the refresh tick is fine, the client will
+     * just see the HELLO ack followed by a NOTIFY_RESIZED carrying the same
+     * (or newer) fds. */
+    c->hello_done = true;
+    c->wants_resize_notify =
+        (req->flags & FB_SHM_HELLO_F_RESIZE_NOTIFY) != 0;
+
     FbShmCtlAck ack = {
         .magic  = FB_SHM_MAGIC,
         .op     = FB_SHM_CTL_HELLO,
@@ -309,6 +327,47 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c)
     int nfds = (d->memfd >= 0 && d->wake_eventfd >= 0) ? 2 : 0;
     if (fb_shm_send_fds(c->fd, &ack, fds, nfds) < 0) {
         fb_shm_client_drop(c);
+    }
+}
+
+/* Push the current { memfd, wake_eventfd } pair to every HELLO-completed
+ * client that opted into resize notifications.  Called from fb_shm_allocate
+ * after the new mapping is fully published.  Failed sends drop the client. */
+static void fb_shm_broadcast_resize(FbShmDisplay *d)
+{
+    if (d->memfd < 0 || d->wake_eventfd < 0) {
+        return;
+    }
+    FbShmCtlAck ack = {
+        .magic  = FB_SHM_MAGIC,
+        .op     = FB_SHM_CTL_NOTIFY_RESIZED,
+        .status = FB_SHM_CTL_OK,
+        .shm_size = (uint32_t)d->map_size,
+        .width  = d->cur_w,
+        .height = d->cur_h,
+        .fourcc = FB_SHM_FOURCC_BGR0,
+        .bpp    = 32,
+    };
+    int fds[2] = { d->memfd, d->wake_eventfd };
+    int recipients = 0;
+    FbShmClient *c, *cn;
+    QLIST_FOREACH_SAFE(c, &d->clients, next, cn) {
+        if (!c->hello_done || !c->wants_resize_notify) {
+            continue;
+        }
+        if (fb_shm_send_fds(c->fd, &ack, fds, 2) < 0) {
+            warn_report("fb-shm: NOTIFY_RESIZED send failed (errno=%d %s); "
+                        "dropping client fd=%d",
+                        errno, strerror(errno), c->fd);
+            fb_shm_client_drop(c);
+        } else {
+            recipients++;
+        }
+    }
+    if (recipients > 0) {
+        info_report("fb-shm: broadcast NOTIFY_RESIZED to %d client(s) "
+                    "(%ux%u, shm_size=%zu)",
+                    recipients, d->cur_w, d->cur_h, d->map_size);
     }
 }
 
@@ -373,7 +432,7 @@ static void fb_shm_client_read(void *opaque)
 
     switch (req.op) {
     case FB_SHM_CTL_HELLO:
-        fb_shm_handle_hello(d, c);
+        fb_shm_handle_hello(d, c, &req);
         break;
     case FB_SHM_CTL_SET_ROI:
         fb_shm_handle_set_roi(d, c, &req);

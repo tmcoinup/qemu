@@ -52,16 +52,26 @@
  *   client -> server : FbShmCtlReq (32 bytes, host byte order).
  *   server -> client : FbShmCtlAck (32 bytes) + ancillary SCM_RIGHTS
  *                      { memfd, eventfd } on HELLO ack.
+ *
+ * NOTIFY_RESIZED is the only server-initiated message: when QEMU re-allocates
+ * the backing memfd (resolution change, ROI update), it pushes a fresh
+ * { memfd, eventfd } pair to every client that opted into resize notifications
+ * via FB_SHM_HELLO_F_RESIZE_NOTIFY.  Clients that did not set the flag observe
+ * the legacy behaviour (frozen frames after resize).
  */
-#define FB_SHM_CTL_HELLO        1u
-#define FB_SHM_CTL_SET_ROI      2u
-#define FB_SHM_CTL_SET_RATE     3u
-#define FB_SHM_CTL_BYE          4u
+#define FB_SHM_CTL_HELLO          1u
+#define FB_SHM_CTL_SET_ROI        2u
+#define FB_SHM_CTL_SET_RATE       3u
+#define FB_SHM_CTL_BYE            4u
+#define FB_SHM_CTL_NOTIFY_RESIZED 5u   /* server -> client; SCM_RIGHTS {memfd,evfd} */
 
 #define FB_SHM_CTL_OK           0u
 #define FB_SHM_CTL_EINVAL       1u
 #define FB_SHM_CTL_EBUSY        2u
 #define FB_SHM_CTL_EUNSUPPORTED 3u
+
+/* HELLO request flag bits (FbShmCtlReq.flags). */
+#define FB_SHM_HELLO_F_RESIZE_NOTIFY (1u << 0)
 
 typedef struct FbShmCtlReq {
     uint32_t magic;
@@ -69,7 +79,7 @@ typedef struct FbShmCtlReq {
     int32_t  x, y;
     uint32_t w, h;
     uint32_t rate_hz;
-    uint32_t reserved;
+    uint32_t flags;          /* HELLO: FB_SHM_HELLO_F_*; otherwise reserved 0 */
 } FbShmCtlReq;
 
 typedef struct FbShmCtlAck {

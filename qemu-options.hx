@@ -2072,6 +2072,11 @@ DEF("display", HAS_ARG, QEMU_OPTION_display,
     "-display dbus[,addr=<dbusaddr>]\n"
     "             [,gl=on|core|es|off][,rendernode=<file>]\n"
 #endif
+#if defined(CONFIG_LINUX)
+    "-display fb-shm[,id=<name>][,path=<sock>]\n"
+    "                [,x=<n>][,y=<n>][,width=<n>][,height=<n>]\n"
+    "                [,rate=<hz>]\n"
+#endif
     "-display none\n"
     "                select display backend type\n"
     "                The default display is equivalent to\n                "
@@ -2096,6 +2101,18 @@ SRST
         Start QEMU as a Spice server and launch the default Spice client
         application. The Spice server will redirect the serial consoles
         and QEMU monitors. (Since 4.0)
+
+    ``fb-shm[,id=name][,path=sock][,x=n][,y=n][,width=n][,height=n][,rate=hz]``
+        Linux-only zero-copy framebuffer export (Since 9.2).  Publishes
+        the (cropped) guest framebuffer through a memfd plus an
+        eventfd doorbell.  External consumers connect to ``path``
+        (default ``/run/qemu/fb-${id}.sock``) and receive both fds via
+        ``SCM_RIGHTS``, then read frames with a seqlock pattern
+        (see ``include/ui/fb-shm-abi.h`` for the ABI).
+        ``width``/``height``/``x``/``y`` define a region of interest;
+        zero values mean "track the full guest surface".
+        ``rate`` is the target frame rate in Hz (default ``30``,
+        clamped to ``[1, 240]``).
 
     ``dbus``
         Export the display over D-Bus interfaces. (Since 7.0)

@@ -394,3 +394,13 @@ qmp_screendump(const char *filename, const char *device,
     }
 }
 #endif /* CONFIG_PIXMAN */
+
+void qmp_display_pause(const char *name, Error **errp)
+{
+    qemu_displaychangelistener_set_paused(name, true, errp);
+}
+
+void qmp_display_resume(const char *name, Error **errp)
+{
+    qemu_displaychangelistener_set_paused(name, false, errp);
+}

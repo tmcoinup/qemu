@@ -28,6 +28,7 @@ system_ss.add(when: spice_protocol, if_true: files('vdagent.c'))
 
 if host_os == 'linux'
   system_ss.add(files('input-linux.c', 'udmabuf.c'))
+  system_ss.add(when: pixman, if_true: files('fb-shm.c'))
 endif
 system_ss.add(when: cocoa, if_true: files('cocoa.m'))
 

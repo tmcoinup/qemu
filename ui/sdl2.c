@@ -841,6 +841,26 @@ static void sdl_cleanup(void)
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
+/*
+ * QMP @display-pause hook.  Hides the SDL window so the user sees
+ * neither the host-side stale frame nor a CPU-burning redraw loop;
+ * resume re-shows the window and forces a redraw to refill it from
+ * the (now possibly very different) guest surface.
+ */
+static void sdl2_set_paused(DisplayChangeListener *dcl, bool paused)
+{
+    struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    if (!scon->real_window) {
+        return;
+    }
+    if (paused) {
+        SDL_HideWindow(scon->real_window);
+    } else {
+        SDL_ShowWindow(scon->real_window);
+        graphic_hw_invalidate(dcl->con);
+    }
+}
+
 static const DisplayChangeListenerOps dcl_2d_ops = {
     .dpy_name             = "sdl2-2d",
     .dpy_gfx_update       = sdl2_2d_update,
@@ -849,6 +869,7 @@ static const DisplayChangeListenerOps dcl_2d_ops = {
     .dpy_refresh          = sdl2_2d_refresh,
     .dpy_mouse_set        = sdl_mouse_warp,
     .dpy_cursor_define    = sdl_mouse_define,
+    .dpy_set_paused       = sdl2_set_paused,
 };
 
 #ifdef CONFIG_OPENGL
@@ -860,6 +881,7 @@ static const DisplayChangeListenerOps dcl_gl_ops = {
     .dpy_refresh             = sdl2_gl_refresh,
     .dpy_mouse_set           = sdl_mouse_warp,
     .dpy_cursor_define       = sdl_mouse_define,
+    .dpy_set_paused          = sdl2_set_paused,
 
     .dpy_gl_scanout_disable  = sdl2_gl_scanout_disable,
     .dpy_gl_scanout_texture  = sdl2_gl_scanout_texture,

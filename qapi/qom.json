@@ -569,6 +569,50 @@
             '*poll-shrink': 'int' } }
 
 ##
+# @FbShmProperties:
+#
+# Properties for the ``fb-shm`` user-creatable object (Linux only).
+#
+# Coexists with any ``-display`` backend: registers a
+# DisplayChangeListener on the primary graphic console and exports the
+# (optionally cropped) framebuffer through a memfd plus an eventfd
+# doorbell, identical to the ``-display fb-shm`` form (see
+# ``include/ui/fb-shm-abi.h`` for the wire format).  Use this when you
+# want SDL/GTK/VNC for live debugging *and* a parallel zero-copy
+# stream for ffmpeg / NVENC.
+#
+# @path: control socket path (default
+#     ``/run/qemu/fb-${id}.sock``).
+#
+# @x: ROI x offset within the guest surface (default 0).
+#
+# @y: ROI y offset within the guest surface (default 0).
+#
+# @width: ROI width; 0 means "track the full surface width"
+#     (default 0).
+#
+# @height: ROI height; 0 means "track the full surface height"
+#     (default 0).
+#
+# @rate: target frame rate in Hz, clamped to ``[1, 240]``
+#     (default 30).
+#
+# @cursor: blend the guest cursor onto the published frame
+#     (default off; reserved for future use).
+#
+# Since: 9.2
+##
+{ 'struct': 'FbShmProperties',
+  'data': { '*path'   : 'str',
+            '*x'      : 'uint32',
+            '*y'      : 'uint32',
+            '*width'  : 'uint32',
+            '*height' : 'uint32',
+            '*rate'   : 'uint32',
+            '*cursor' : 'bool' },
+  'if': 'CONFIG_LINUX' }
+
+##
 # @MainLoopProperties:
 #
 # Properties for the main-loop object.
@@ -1097,6 +1141,7 @@
     { 'name': 'cryptodev-vhost-user',
       'if': 'CONFIG_VHOST_CRYPTO' },
     'dbus-vmstate',
+    { 'name': 'fb-shm', 'if': 'CONFIG_LINUX' },
     'filter-buffer',
     'filter-dump',
     'filter-mirror',
@@ -1172,6 +1217,8 @@
       'cryptodev-vhost-user':       { 'type': 'CryptodevVhostUserProperties',
                                       'if': 'CONFIG_VHOST_CRYPTO' },
       'dbus-vmstate':               'DBusVMStateProperties',
+      'fb-shm':                     { 'type': 'FbShmProperties',
+                                      'if': 'CONFIG_LINUX' },
       'filter-buffer':              'FilterBufferProperties',
       'filter-dump':                'FilterDumpProperties',
       'filter-mirror':              'FilterMirrorProperties',

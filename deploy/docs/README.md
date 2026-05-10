@@ -104,6 +104,7 @@ deploy/
 │   ├── setup-bridge.sh             # 一次性桥接配置
 │   ├── stop-vm.sh                  # 优雅停机
 │   ├── ctl-vm.sh                   # 运行时切换 SDL/fb-shm（不关机）
+│   ├── qmp-proxy.py                # QMP 多客户端 fanout（dgame + image-search 同时连）
 │   ├── reroll-identity.sh          # 重置硬件身份
 │   ├── stealth-lib.sh              # 随机池（被 start-vm.sh 调用）
 │   ├── host-performance.sh         # 主机调优 (透明大页 / CPU governor)

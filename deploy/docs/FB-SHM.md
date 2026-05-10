@@ -215,6 +215,34 @@ echo '{"execute":"qmp_capabilities"}{"execute":"display-resume","arguments":{"na
 * **不与 memflow 冲突**：fb-shm 用独立 memfd，不动 guest RAM 的
   `memory-backend-memfd,share=on` 路径；VMI 工具继续直读 guest 物理内存。
 
+## 抓单帧（替代 QMP screendump）
+
+`QMP screendump` 是单连接、走 PPM/PNG 编码 + 文件 I/O 的慢路径。如果工具只是想
+偶尔抓一张图（比如 image-search 的"找按钮"），强烈建议改走 fb-shm：
+
+* fb-shm 抓帧 = 一次 mmap + 一次 seqlock 读 + memcpy，typical 1080p < 10 ms；
+* QMP screendump = encode + write file + read file，typical 1080p > 100 ms；
+* fb-shm 是多订阅的，不和 dgame 抢 QMP 单 slot。
+
+参考 Python：抓一帧存 PNG 的 ~30 行：
+
+```python
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location(
+    'fbshm', '/path/to/qemu/scripts/qemu-fb-shm-stream.py')
+m = importlib.util.module_from_spec(spec); sys.modules['fbshm']=m
+spec.loader.exec_module(m)
+
+sock, mfd, evfd, ack = m.hello('/tmp/qemu-stealth-1.fb')
+r = m.FrameReader(mfd, evfd, ack[0])
+r.wait_frame(timeout=1.0)
+frame = r.read_frame()                # bytes, BGR0
+# frame -> PIL/Image / OpenCV / 直接喂模型
+```
+
+如果调用方暂时无法改（比如某些工具只会 QMP），用 `deploy/scripts/qmp-proxy.py`
+做 QMP 多客户端 fanout（短期 workaround，见 [USAGE.md 6.4](USAGE.md#64-qmp-多客户端qmp-proxypy)）。
+
 ## 故障排查
 
 | 现象 | 原因 / 修法 |

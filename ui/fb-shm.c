@@ -441,7 +441,7 @@ static int fb_shm_open_listener(FbShmDisplay *d, Error **errp)
     }
     /* World-readable so non-root consumers can connect; tighten if needed. */
     chmod(sa.sun_path, 0660);
-    if (listen(fd, 4) < 0) {
+    if (listen(fd, 16) < 0) {
         error_setg_errno(errp, errno, "fb-shm: listen() failed");
         close(fd);
         unlink(sa.sun_path);

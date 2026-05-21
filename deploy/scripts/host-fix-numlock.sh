@@ -122,10 +122,19 @@ mapfile -t HIVES < <(
 log "hives to patch:"
 for h in "${HIVES[@]}"; do log "  $h"; done
 
+# NB: 不要 truncate .LOG1/.LOG2 —— Win10 kernel mount hive 时 expects
+# LOG1/LOG2 是 valid file（不是 0-byte），否则 0xc0000001 + reboot loop。
+# Hive 改了之后 LOG stale，Windows 会把它当 discardable 而不是 corruption；
+# 改本就 in-place 走 hivex.commit() 也 update seq/checksum 让 LOG 自动失效。
+# 历史 chntpw truncate 法对 Win10 22H2 不再适用。
+
 DRY="$DRY" python3 - "${HIVES[@]}" <<'PY'
-"""Force InitialKeyboardIndicators=2147483650 (=0x80000002 = "actively
+r"""Force InitialKeyboardIndicators=2147483650 (=0x80000002 = "actively
 write LED at boot, NumLock=ON") into Control Panel\Keyboard of every
-listed hive. Reads existing value first; reports unchanged hives."""
+listed hive. Reads existing value first; reports unchanged hives.
+
+r-string 前缀避免 Python 3.12+ 把 docstring 里的 '\K' 当作转义抛
+SyntaxWarning (Control Panel\Keyboard 路径名含反斜线)。"""
 import hivex, os, sys
 WANT = '2147483650'
 DRY = os.environ.get('DRY') == '1'

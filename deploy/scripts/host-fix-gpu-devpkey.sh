@@ -16,7 +16,14 @@
 #
 #   This script does both offline by raw-editing the hive on qcow2.
 #
-# Prereqs (apt): qemu-utils, ntfs-3g, python3-hivex
+# 2026-05 改进：默认从 vms/<N>/profile **自动读** GPU_NAME / GPU_VENDOR，
+# 不再需要手工传 PROVIDER / DEVICE_DESC；NVIDIA / AMD 都识别。
+#
+# Prereqs (apt 一行装齐)：
+#   sudo apt install -y qemu-utils ntfs-3g python3-hivex
+#
+# 该脚本**纯离线** —— 直接读写 qcow2 文件，不连 guest、不联网。
+# 唯一要 root 的原因是 qemu-nbd / mount NTFS 需要。
 #
 # Usage:
 #   sudo deploy/scripts/host-fix-gpu-devpkey.sh <INSTANCE> [--dry-run]
@@ -24,14 +31,14 @@
 # Must be run as root (it does qemu-nbd / ntfsfix / mount). If the VM is
 # still running, it will invoke stop-vm.sh (as the original user) first.
 #
-# Environment overrides:
+# Environment overrides（不传就从 profile 自动派生）:
 #   DISK=<path>           default /home/ubuntu/images/vms/<N>/disk.qcow2
 #                         (auto-falls back to legacy win10-inst<N>.qcow2 layout)
 #   NBD=/dev/nbdN         default /dev/nbd0
 #   MOUNT=<path>          default /mnt/win10-inst<N>
-#   PROVIDER=<string>     default "NVIDIA"            (pid 0009 value)
-#   DEVICE_DESC=<string>  default "NVIDIA GeForce GTX 1050"  (pid 0004 value)
-#   SUBSYS_RE=<regex>     default '^VEN_1AF4&DEV_1050'
+#   PROVIDER=<string>     default = profile.GPU_VENDOR
+#   DEVICE_DESC=<string>  default = profile.GPU_NAME
+#   SUBSYS_RE=<regex>     default '^VEN_1AF4&DEV_1050' (virtio-vga 主 ID)
 #
 set -euo pipefail
 
@@ -54,27 +61,71 @@ done
 # The original user for invoking stop-vm.sh (QMP socket is under their uid).
 ORIG_USER="${SUDO_USER:-ubuntu}"
 
-# 默认走 hardware pools v2 新布局；旧 win10-inst<N>.qcow2 还在的话回退过去。
+# VM 目录（hardware pools v2 新布局；旧 win10-inst<N>.qcow2 还在的话回退过去）
+VM_DIR="/home/ubuntu/images/vms/${INSTANCE}"
+PROFILE_FILE="${VM_DIR}/profile"
 if [[ -z "${DISK:-}" ]]; then
-    if [[ -f "/home/ubuntu/images/vms/${INSTANCE}/disk.qcow2" ]]; then
-        DISK="/home/ubuntu/images/vms/${INSTANCE}/disk.qcow2"
+    if [[ -f "${VM_DIR}/disk.qcow2" ]]; then
+        DISK="${VM_DIR}/disk.qcow2"
     else
         DISK="/home/ubuntu/images/win10-inst${INSTANCE}.qcow2"
     fi
 fi
 : "${NBD:=/dev/nbd0}"
 : "${MOUNT:=/mnt/win10-inst${INSTANCE}}"
-: "${PROVIDER:=NVIDIA}"
-: "${DEVICE_DESC:=NVIDIA GeForce GTX 1050}"
 : "${SUBSYS_RE:=^VEN_1AF4&DEV_1050}"
 
 log() { printf '[fix-devpkey] %s\n' "$*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+# 一次性自检：缺包给出一行装齐命令，不要分散提示
+MISSING=()
+command -v qemu-nbd >/dev/null || MISSING+=("qemu-utils")
+command -v ntfsfix  >/dev/null || MISSING+=("ntfs-3g")
+python3 -c 'import hivex' 2>/dev/null || MISSING+=("python3-hivex")
+if (( ${#MISSING[@]} > 0 )); then
+    log "缺以下 apt 包：${MISSING[*]}"
+    log "一行装齐："
+    log "  sudo apt install -y ${MISSING[*]}"
+    exit 1
+fi
+
 [[ -f "$DISK" ]] || die "disk not found: $DISK"
-command -v qemu-nbd >/dev/null || die "need apt: qemu-utils"
-command -v ntfsfix  >/dev/null || die "need apt: ntfs-3g"
-python3 -c 'import hivex' 2>/dev/null || die "need apt: python3-hivex"
+
+# ----------------------------------------------------------------------
+# 从 vms/<N>/profile 自动读 GPU 信息（PROVIDER / DEVICE_DESC 不传时用）
+# ----------------------------------------------------------------------
+# 默认值（兜底，profile 不存在时也能跑）
+DEFAULT_PROVIDER="NVIDIA"
+DEFAULT_DEVICE_DESC="NVIDIA GeForce GTX 1050"
+
+if [[ -f "$PROFILE_FILE" ]]; then
+    # 在子 shell 里 source profile 避免污染当前环境；只取 GPU_VENDOR / GPU_NAME
+    PROF_GPU_VENDOR=$(bash -c "source '$PROFILE_FILE' 2>/dev/null && echo \"\${GPU_VENDOR:-}\"" 2>/dev/null || echo "")
+    PROF_GPU_NAME=$(bash -c "source '$PROFILE_FILE' 2>/dev/null && echo \"\${GPU_NAME:-}\"" 2>/dev/null || echo "")
+    if [[ -n "$PROF_GPU_VENDOR" ]]; then
+        DEFAULT_PROVIDER="$PROF_GPU_VENDOR"
+    fi
+    if [[ -n "$PROF_GPU_NAME" ]]; then
+        DEFAULT_DEVICE_DESC="$PROF_GPU_NAME"
+    fi
+    log "profile: ${PROFILE_FILE}"
+    log "  GPU_VENDOR=${PROF_GPU_VENDOR:-<空，用默认 NVIDIA>}"
+    log "  GPU_NAME=${PROF_GPU_NAME:-<空，用默认 GTX 1050>}"
+else
+    log "WARN: profile 文件不存在: $PROFILE_FILE"
+    log "  用默认 PROVIDER=NVIDIA / DEVICE_DESC='NVIDIA GeForce GTX 1050'"
+    log "  正常情况下 start-vm.sh 首启已生成 profile；手动传 env 也行："
+    log "  PROVIDER=AMD DEVICE_DESC='AMD Radeon RX 550' sudo $0 $INSTANCE"
+fi
+
+# env 显式覆盖 profile（向后兼容旧用法）
+: "${PROVIDER:=$DEFAULT_PROVIDER}"
+: "${DEVICE_DESC:=$DEFAULT_DEVICE_DESC}"
+
+log "将写入 Device Manager 字段："
+log "  驱动程序提供商 (pid 0009): $PROVIDER"
+log "  设备描述       (pid 0004): $DEVICE_DESC"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -115,12 +166,121 @@ mkdir -p "$MOUNT"
 log "ntfsfix --clear-dirty $SYSPART"
 ntfsfix --clear-dirty "$SYSPART" >/dev/null
 log "mount -t ntfs-3g -o rw,remove_hiberfile $SYSPART $MOUNT"
-mount -t ntfs-3g -o rw,remove_hiberfile "$SYSPART" "$MOUNT"
+MOUNT_ERR=$(mktemp)
+if ! mount -t ntfs-3g -o rw,remove_hiberfile "$SYSPART" "$MOUNT" 2> "$MOUNT_ERR"; then
+    cat "$MOUNT_ERR" >&2
+    if grep -q "hibernated" "$MOUNT_ERR"; then
+        cat >&2 <<'EOF'
+
+[fix-devpkey] ⚠ Windows 处于 Fast Startup（混合关机）状态，hiberfil.sys 阻止 RW 挂载。
+[fix-devpkey]   ntfs-3g 的 remove_hiberfile 选项在该情况下也失败。
+[fix-devpkey]
+[fix-devpkey] 永久修复（**只需一次**，往后 shutdown 永远干净）：
+[fix-devpkey]   1) start-vm.sh <N>      # 重启 VM
+[fix-devpkey]   2) guest 管理员 PowerShell:
+[fix-devpkey]      powercfg -h off
+[fix-devpkey]      Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' `
+[fix-devpkey]          -Name HiberbootEnabled -Type DWord -Value 0
+[fix-devpkey]      shutdown /s /t 0
+[fix-devpkey]   3) host 重跑本脚本
+[fix-devpkey]
+[fix-devpkey] 副作用：hibernation 被禁用、hiberfil.sys 被删；shutdown /s 变成真正 power-off。
+[fix-devpkey] 这跟 stealth 反作弊语义一致——hibernation 唤醒后 TPM/PCI 状态不一定能恢复。
+
+EOF
+    fi
+    rm -f "$MOUNT_ERR"
+    exit 1
+fi
+rm -f "$MOUNT_ERR"
 
 HIVE="${MOUNT}/Windows/System32/config/SYSTEM"
 [[ -f "$HIVE" ]] || die "SYSTEM hive not found at $HIVE"
 
-# 3) Run the embedded Python patcher.
+# NB: 不要 truncate .LOG1/.LOG2 —— Win10 kernel mount SYSTEM hive 时 expects
+# LOG1/LOG2 是 valid file（不是 0-byte），否则 winload reject hive → 0xc0000001
+# 反复 reboot 后 Recovery 屏。Hive 真改了之后 stale LOG 由 Windows 自己 discard
+# （比对 LOG 跟 hive 头 seq 不一致就丢）。
+
+# 3a) Pre-fixup: 同步 primary/secondary seq + 重算 checksum 让 hivex 能打开。
+#
+# Windows 写 hive 用 dirty-vector 协议：先 ++primary_seq、写数据、再 ++secondary_seq。
+# 中途断电 / cold shutdown 之间发生 race，primary > secondary 是常见现象（即"还
+# 有未 commit 的写"），libhivex 1.3.x 看见 seq 不一致直接返回 "Operation not supported"。
+#
+# 我们的修改其实**会重写**这些位置，并且 Python 阶段末尾的 Phase C 会再次同步
+# seq + 重算 checksum。所以这里安全地把 secondary 拉齐 primary 让 hivex 能打开，
+# 不会丢任何数据（如果 LOG1/LOG2 里有 pending，那才是真要丢的——但本脚本只读
+# Windows 已经稳定 commit 的 PCI Properties，pending 的临时 transactions 即使
+# 丢了也无影响）。
+log "pre-fixup: 同步 hive 头 primary/secondary seq + 拉齐 end_of_last_page + 重算 checksum"
+python3 - "$HIVE" <<'PY'
+"""regf 头 pre-fixup，让 libhivex 1.3.x 能打开 Win10 22H2 的 SYSTEM hive。
+
+两个常见的 ENOTSUP 原因：
+  (1) primary_seq != secondary_seq —— Windows 写过一半没 commit；
+      把 secondary 拉齐 primary 即可（hive 本身一致，差的是计数器）。
+  (2) end_of_last_page > 实际 hbin 链尾 —— Windows 预留了 reserved hbins
+      但 hivex 严格检查 "trailing garbage" 直接拒。把 end_of_last_page
+      改成 hivex 能 walk 到的最远 hbin 末尾即可。
+
+两步都安全：Phase C（脚本 Python 主体末尾）写完业务变更后会重算 checksum
++ 重新同步 sequence。这里改的只是让 hivex_open 不报错。
+"""
+import struct, sys
+path = sys.argv[1]
+HBIN_BASE = 0x1000
+
+with open(path, 'r+b') as f:
+    data = bytearray(f.read())
+
+if data[:4] != b'regf':
+    sys.exit(f'{path}: 不是 regf 文件 (got {data[:4]!r})')
+
+pri = struct.unpack_from('<I', data, 4)[0]
+sec = struct.unpack_from('<I', data, 8)[0]
+eolp = struct.unpack_from('<I', data, 0x28)[0]
+
+# (1) seq fixup
+if pri != sec:
+    newseq = max(pri, sec)
+    struct.pack_into('<I', data, 4, newseq)
+    struct.pack_into('<I', data, 8, newseq)
+    print(f'  seq: 0x{pri:x}/0x{sec:x} -> 0x{newseq:x}/0x{newseq:x}')
+
+# (2) walk hbin chain，找真实最远 hbin 末尾
+off = HBIN_BASE
+last_end = HBIN_BASE
+while off < len(data):
+    if bytes(data[off:off+4]) != b'hbin':
+        break
+    hbin_size = struct.unpack_from('<I', data, off + 8)[0]
+    if hbin_size == 0 or off + hbin_size > len(data):
+        break
+    last_end = off + hbin_size
+    off += hbin_size
+
+actual_eolp = last_end - HBIN_BASE
+if eolp > actual_eolp:
+    struct.pack_into('<I', data, 0x28, actual_eolp)
+    print(f'  end_of_last_page: 0x{eolp:x} -> 0x{actual_eolp:x} (hbin chain 实际止于 0x{last_end:x})')
+elif eolp == actual_eolp:
+    print(f'  end_of_last_page = 0x{eolp:x}, 与 hbin 链尾一致，无需调整')
+else:
+    print(f'  WARN: eolp 0x{eolp:x} < actual 0x{actual_eolp:x}; 不动')
+
+# 重算 checksum
+csum = 0
+for i in range(0, 0x1fc, 4):
+    csum ^= struct.unpack_from('<I', data, i)[0]
+struct.pack_into('<I', data, 0x1fc, csum)
+print(f'  checksum -> 0x{csum:08x}')
+
+with open(path, 'wb') as f:
+    f.write(data)
+PY
+
+# 3b) Run the embedded Python patcher.
 log "patching $HIVE (provider=$PROVIDER, desc=$DEVICE_DESC)"
 if [[ $DRY -eq 1 ]]; then
     DRY_RUN=1
@@ -183,7 +343,12 @@ def main():
 
     pci = walk(root, ['ControlSet001', 'Enum', 'PCI'])
     if pci is None:
-        sys.exit('ControlSet001\\Enum\\PCI not found')
+        # sysprep generalize 会清空 Enum\PCI；clone-from-base 后 guest 还没首启
+        # 时这是预期状态。不算错——RunOnce + respawn-stealth.ps1 会在 guest
+        # 首次开机后自己重做 GPU 注册表对齐，所以这里返回 0 让 clone 流程继续。
+        print('  ControlSet001\\Enum\\PCI 不存在 — sysprep base 未首启的预期状态')
+        print('  跳过离线 DEVPKEY 覆盖；guest 首次开机后 RunOnce 会处理 GPU 对齐')
+        sys.exit(0)
 
     targets = []
     for ven in h.node_children(pci):

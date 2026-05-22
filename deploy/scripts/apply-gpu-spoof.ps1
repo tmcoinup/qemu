@@ -1,12 +1,44 @@
-param(
+﻿param(
     [string]$Subkey = "",
     [switch]$ListOnly,
     [switch]$SkipTask,                          # skip the scheduled-task install step
+    [switch]$AutoDetect,                        # 自动按 PCI subsys 查 GPU 池映射；clone 后用
     [string]$SpoofName    = 'NVIDIA GeForce GTX 1050',
     [string]$SpoofVendor  = 'NVIDIA',           # 'NVIDIA' / 'AMD'
     [int]   $SpoofRamMb   = 2048,               # 显存 MB（注册表 HardwareInformation.MemorySize）
     [string]$SpoofBios    = 'Version 86.07.48.00.38'
 )
+
+# -AutoDetect：从 PnP Display 设备的 SUBSYS 串查映射表，覆盖 SpoofName/Vendor/Bios/RamMb。
+# 用于 clone-from-base 之后 profile reroll，PCI subsys 变了但 base 注册表覆盖还是老 GPU。
+if ($AutoDetect) {
+    $gpuMap = @{
+        '138010DE' = @{ Name='NVIDIA GeForce GTX 750 Ti';  Vendor='NVIDIA'; Bios='Version 82.07.41.00.32';    RamMb=2048 }
+        '1D0110DE' = @{ Name='NVIDIA GeForce GT 1030';     Vendor='NVIDIA'; Bios='Version 86.08.46.00.81';    RamMb=2048 }
+        '1C8110DE' = @{ Name='NVIDIA GeForce GTX 1050';    Vendor='NVIDIA'; Bios='Version 86.07.48.00.38';    RamMb=2048 }
+        '1C8210DE' = @{ Name='NVIDIA GeForce GTX 1050 Ti'; Vendor='NVIDIA'; Bios='Version 86.07.48.00.A0';    RamMb=4096 }
+        '699F1002' = @{ Name='AMD Radeon RX 550';          Vendor='AMD';    Bios='016.011.000.029.000000';   RamMb=2048 }
+        '67FF1002' = @{ Name='AMD Radeon RX 560';          Vendor='AMD';    Bios='016.011.000.029.000000';   RamMb=4096 }
+    }
+    $gpuDev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
+              Where-Object { $_.Status -ne 'Unknown' } |
+              Select-Object -First 1
+    if ($gpuDev -and $gpuDev.InstanceId -match 'SUBSYS_([0-9A-Fa-f]{8})') {
+        $subsys = $matches[1].ToUpper()
+        if ($gpuMap.ContainsKey($subsys)) {
+            $cfg = $gpuMap[$subsys]
+            $SpoofName   = $cfg.Name
+            $SpoofVendor = $cfg.Vendor
+            $SpoofBios   = $cfg.Bios
+            $SpoofRamMb  = $cfg.RamMb
+            Write-Host "AutoDetect: subsys=$subsys -> $($cfg.Name)" -ForegroundColor Cyan
+        } else {
+            Write-Host "AutoDetect: subsys=$subsys 未在已知池中，沿用默认 $SpoofName" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "AutoDetect: 未找到 Display 设备或缺 SUBSYS 串，沿用默认参数" -ForegroundColor Yellow
+    }
+}
 
 # zh-CN Win10 默认 console code page = 936 (GBK)，把 Write-Host 中文当 GBK 输出 → 终端乱码。
 try { chcp 65001 | Out-Null } catch {}
@@ -186,6 +218,18 @@ $fakeNeedles = @(
     'virtio', 'Red Hat', 'Microsoft Basic', 'Standard VGA', 'QXL', 'Cirrus',
     $zhBasicDisplay, $zhStandardVGA1, $zhStandardVGA2
 ) -join '|'
+
+# Clone 场景：base 被 sysprep 前已经跑过一次 apply-gpu-spoof，所以 Class\NNNN\DriverDesc
+# 不再是 "Red Hat VirtIO GPU DOD" 而是上一代 spoof 写进去的型号名（比如 base 里抽到了
+# AMD Radeon RX 560）。把"上次 spoof 名字"读出来加进 needle 池，让 clone 后的 AutoDetect
+# 能识别"上一代 spoof 留下的 Class 项 = 我应该重写的目标"。
+$prevSpoof = $null
+try {
+    $prevSpoof = (Get-ItemProperty 'HKLM:\SOFTWARE\StealthGPU' -ErrorAction SilentlyContinue).SpoofName
+} catch {}
+if ($prevSpoof -and $prevSpoof.Trim()) {
+    $fakeNeedles = $fakeNeedles + '|' + [regex]::Escape($prevSpoof)
+}
 
 # ---- list ------------------------------------------------------------------
 Write-Host ("Adapters under " + $classRoot + " :") -ForegroundColor Cyan

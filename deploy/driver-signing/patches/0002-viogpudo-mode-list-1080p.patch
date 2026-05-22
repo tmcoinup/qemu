@@ -1,0 +1,64 @@
+From: dgame stealth <stealth@local>
+Date: 2026-05-13
+Subject: [PATCH] viogpudo: 砍掉 1080p panel 不该有的模式
+
+upstream viogpudo 的 gTargetModes[] 数组里塞了 11 个常见分辨率，
+包括跟 24" 1080p 16:9 显示器画像不符的：
+  - 1920×1200 (16:10 工作站规格)
+  - 1280×800  (16:10 笔记本规格)
+  - 1440×900  (16:10)
+  - 1280×768  (4:3 老 LCD)
+  - 1366×768  (老笔记本)
+
+stealth profile 模拟的是 Samsung S24F350F / AOC 24G2E5 / BenQ GW2480
+这种 24" 1080p 16:9 监视器，driver 应该只暴露真实 panel 能扫的模式。
+
+upstream 表里跟 1080p 不冲突的保留：
+  - 800×600 / 1024×768 (4:3 兼容性)
+  - 1280×720 (16:9 720p)
+  - 1280×1024 (5:4 传统 LCD 兼容)
+  - 1600×900 (16:9 downscale)
+  - 1680×1050 (16:10 真实 Samsung S24F350F EDID 也列，downscale 友好)
+  - 1920×1080 (native)
+
+跟 patch 0001（vsync 频率）一起申请到 viogpudo.cpp，重编 viogpudo.sys
+就能让 Windows 显示设置下拉只列上面 7 个分辨率。
+
+**编译状态**：未编（同 patch 0001，依赖待解决的 VS+WDK build 环境，
+详见本目录 README.md "Build environment caveat"）。当 build 流程修好后
+此 patch 可与 0001 一起 apply。
+
+涉及文件：viogpu/viogpudo/viogpudo.cpp 中 gTargetModes[] 或等效数组定义。
+实际偏移随上游版本变；以 git apply --check 验证为准。
+
+---
+diff --git a/viogpu/viogpudo/viogpudo.cpp b/viogpu/viogpudo/viogpudo.cpp
+--- a/viogpu/viogpudo/viogpudo.cpp
++++ b/viogpu/viogpudo/viogpudo.cpp
+@@ -<line> +<line> @@ const D3DKMDT_2DREGION gTargetModes[] = {
+-    {800, 600},
+-    {1024, 768},
+-    {1280, 720},
+-    {1280, 800},
+-    {1280, 1024},
+-    {1366, 768},
+-    {1440, 900},
+-    {1600, 900},
+-    {1680, 1050},
+-    {1920, 1080},
+-    {1920, 1200},
++    /*
++     * Stealth: trimmed to modes a real 24" 1920x1080 16:9 panel exposes.
++     * Removed 16:10 (1920x1200, 1280x800, 1440x900) and laptop-only
++     * 1366x768 — they fight the stealth profile picked by stealth-lib.sh
++     * MONITOR_POOL (Samsung S24F350F / AOC 24G2E5 / BenQ GW2480 etc).
++     * Real S24F350F EDID dump lists exactly these.
++     */
++    {800,  600},
++    {1024, 768},
++    {1280, 720},
++    {1280, 1024},
++    {1600, 900},
++    {1680, 1050},
++    {1920, 1080},
+ };

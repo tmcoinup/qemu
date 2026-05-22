@@ -1,6 +1,44 @@
-# 两种 "显示 GT 1030 / GTX 1050" 方案对比
+# 三种 "Win32_VideoController 显示 NVIDIA / AMD" 方案对比
 
-## 方案 A（当前运行中）— INF patch + QEMU PCI spoof + 自签 cat
+| 方案 | 是否需要物理 GPU | 适用反作弊 | 是否需要 testsigning | 当前是否运行 |
+|---|---|---|---|---|
+| **方案 0 — 浅层 (virtio-vga + 注册表化妆)** | ❌ 不需要 | DNF TP / ACE / NP | ❌ 无 | ✅ VM1/VM2 默认 |
+| 方案 A — VFIO 直通 + INF patch + 自签 | ✅ 需 NVIDIA GPU | Riot Vanguard / EAC 等深度 | ⚠️ 一次性需开 | 历史 vm-nb 分支 |
+| 方案 B — VFIO 直通 + 原版 driver + registry 化妆 | ✅ 需 NVIDIA GPU | 同 A，但更保守 | ❌ 无 | 历史方案 |
+
+DNF / 腾讯 TP 用浅层就够，绝大多数生产 VM 跑的是这条。下面三个方案各自详述。
+
+## 方案 0 — 浅层 (virtio-vga 软渲染 + subsys spoof + 注册表化妆) ⭐ 当前主流
+
+**机制**：
+- QEMU `-device virtio-vga,x-pci-sub-vendor-id=0x10DE,x-pci-sub-device-id=0x1C81,x-pci-revision=0xA1`
+  - 主 PCI ID 留 `1AF4:1050` (virtio)，stock virtio-win 驱动能绑定
+  - 子系统 ID 改成 `1C81:10DE` → guest PCI 树看见 NVIDIA GTX 1050 子系统
+- Guest 装 **stock virtio-win 0.1.266 viogpudo.{sys,cat,inf}** —— `Microsoft Windows Hardware Compatibility Publisher` 原签，无任何自签 / 无 testsigning
+- `apply-gpu-spoof.ps1` 注册表覆盖：把 `HKLM\Enum\PCI\VEN_1AF4&DEV_1050\...` 下的 `DeviceDesc` / `FriendlyName` / `DriverDesc` / `DEVPKEY_*` 全改 `NVIDIA GeForce GTX 1050`，再改 `Control\Class\{4d36e968-...}\` 和 `Control\Video\{...}\`
+- `nvapi64.dll` shim 替换 `System32\nvapi64.dll`，让 NVAPI 查询返回伪 NVIDIA 信息
+- `GPU-Z` / `DxDiag` / `Win32_VideoController` / `Get-PnpDevice` 全部读注册表覆盖值 → 显示 NVIDIA GTX 1050
+
+**优点**：
+- ✅ **不需要物理 GPU**，host 无 IOMMU 也能跑
+- ✅ 驱动 100% Microsoft WHQL 签，无自签链、无 testsigning
+- ✅ Bootmgr 原版，无 EfiGuard
+- ✅ 通过 ACE 13-131106-0（腾讯反作弊 / DNF / 网易 NP / WeGame 都过）
+- ✅ 配合 stealth-lib.sh `GPU_POOL` 6 款随机抽（NVIDIA GT 1030 / GTX 1050 / GTX 1050 Ti / GTX 750 Ti / AMD RX 550 / RX 560），每 VM 不同型号
+
+**缺点**：
+- ❌ 实际 PCI 主 ID 是 `1AF4:1050` (virtio)。如果反作弊在内核态读 PCI config space 的主 VEN:DEV，看到 virtio 一眼识破（**实测 TP/ACE 不查**）
+- ❌ 性能 WARP 兜底（virtio-vga 无 GL）。DNF 2D + DX9 完全够；3A 大作不行
+- ❌ `Win32_VideoController.CurrentRefreshRate = 1` 这种 viogpudo 内核 bug 仍残留（详见 README "已知限制"）
+
+**这是 VM1 / VM2 历史上 GPU-Z 显示 1050 的实际方案**——不是下面的 A/B。
+
+## 方案 A — VFIO 直通 + INF patch + QEMU PCI spoof + 自签 cat
+
+> ⚠️ **需要物理 NVIDIA GPU + IOMMU + vfio-pci 内核模块**。host 不能用该 GPU 做显示。
+
+**机制**：
+- QEMU `-device vfio-pci,x-pci-device-id=0x1D01,x-pci-sub-vendor-id=0x1043,x-pci-sub-device-id=0x85F9` → PCI config space 的 `VEN:DEV:SUBSYS` 真的就是 `10DE:1D01:8FF91043`
 
 **机制**：
 - QEMU `-device vfio-pci,x-pci-device-id=0x1D01,x-pci-sub-vendor-id=0x1043,x-pci-sub-device-id=0x85F9` → PCI config space 的 `VEN:DEV:SUBSYS` 真的就是 `10DE:1D01:8FF91043`
@@ -18,7 +56,9 @@
 - ❌ 安装过程必经 `testsigning on` 一次才能把自签证书 import 成功（虽然**最终状态关回来了**），在某些 forensic 软件里有痕
 - ❌ INF 改了，未来 NVIDIA driver 更新要重新 patch 重签
 
-## 方案 B（qemu2 vm-nb 分支原方案）— 原版 INF + QEMU 不 spoof + Registry 化妆
+## 方案 B — VFIO 直通 + 原版 INF + Registry 化妆
+
+> ⚠️ 同 A 需要物理 NVIDIA GPU；qemu2 vm-nb 分支原方案
 
 **机制**：
 - QEMU 不改 PCI config → guest 看到 `PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE` (Quadro RTX 6000 真实 ID)
@@ -43,17 +83,21 @@
 
 ## 关键差异一张表
 
-| 维度 | 方案 A (INF patch) | 方案 B (registry 化妆) |
-|-----|---------|---------|
-| PCI `VEN:DEV` (硬件层真实值) | 10DE:1D01 (GT 1030 真) | 10DE:1E30 (Quadro RTX 6000 真) |
-| PCI `SUBSYS` | 1043:85F9 (ASUS) | 10DE:1326 (NVIDIA) |
-| WMI / dxdiag 显示 | NVIDIA GeForce GT 1030 | NVIDIA GeForce GTX 1050 |
-| Device Manager 数字签名者 | vGPU-Patch-Signer (自签) | **Microsoft Windows Hardware Compatibility Publisher** |
-| 装证书流程 | 需 `testsigning on` → import → `off` | **无** |
-| 过程遗留 | `bcdedit` 记录里有过 testsigning on | 无 |
-| NVIDIA driver 热升级 | 要重 patch INF + 重签 | 跑一次 registry script |
-| 单纯 WMI/DXGI 级 TP | **过** | **过** |
-| 深度 kernel TP 读 PCI config | **可能过**（PCI 也被伪装） | 读到 Quadro 可能拒绝 |
+| 维度 | 方案 0 (浅层 / virtio-vga) ⭐ | 方案 A (VFIO + INF patch) | 方案 B (VFIO + registry 化妆) |
+|-----|---------|---------|---------|
+| 需要物理 GPU | ❌ | ✅ NVIDIA | ✅ NVIDIA |
+| QEMU 设备 | `virtio-vga` | `vfio-pci` | `vfio-pci` |
+| PCI `VEN:DEV` (硬件层) | 1AF4:1050 (virtio) | 10DE:1D01 (GT 1030 真) | 10DE:1E30 (Quadro RTX 6000 真) |
+| PCI `SUBSYS` | 10DE:1C81 等（profile 池 6 选 1） | 1043:85F9 (ASUS) | 10DE:1326 (NVIDIA) |
+| Guest 驱动 | stock virtio-win 0.1.266 viogpudo (MS-WHQL 原签) | patched nvgridsw + 自签 cat | 原版 nvgridsw + MS-WHQL |
+| WMI / dxdiag 显示 | 池里抽的型号（GTX 1050 / GT 1030 / RX 550...） | NVIDIA GeForce GT 1030 | NVIDIA GeForce GTX 1050 |
+| Device Manager 数字签名者 | **Microsoft Windows Hardware Compatibility Publisher** | vGPU-Patch-Signer (自签) | **Microsoft Windows Hardware Compatibility Publisher** |
+| 装证书流程 | **无** | 需 `testsigning on` → import → `off` | **无** |
+| 过程遗留 | **无** | `bcdedit` 记录里有过 testsigning on | 无 |
+| NVIDIA driver 热升级 | virtio-win 升级即可 | 要重 patch INF + 重签 | 跑一次 registry script |
+| 3D 加速 | WARP (软件) | 原生 GPU | 原生 GPU |
+| 单纯 WMI/DXGI 级 TP（DNF/ACE）| **过** | **过** | **过** |
+| 深度 kernel TP 读 PCI config | **不过**（看到 virtio 主 ID） | **可能过**（PCI 也被伪装） | 读到 Quadro 可能拒绝 |
 
 ## 实际推荐
 
@@ -67,12 +111,16 @@ DNF 的 TP (Tencent Protect) 主要查：
 - MAC 前缀（是否 52:54:00 这种 QEMU 默认）
 - 极少查 PCI config space 的 raw `VEN:DEV`
 
-结论：**方案 B 对 DNF 就够**，而且留痕更少。
+结论：**方案 0（浅层）对 DNF 就够**，是当前 VM1/VM2 实际跑的方案；不需要物理 GPU、不需要 EfiGuard、不需要自签 CA、不需要 testsigning。
 
-### 方案 A 的适用场景
+### 方案 A / B 的适用场景
 
-- 高端反作弊（如 Riot Vanguard / EAC）读 PCI config space
-- 已经不打算再升级 NVIDIA driver
+- 高端反作弊（Riot Vanguard / EAC 等）会真读 PCI config space
+- host 已有空闲 NVIDIA GPU 且 IOMMU 配好
+- 不在乎 testsigning 痕迹（A 路径）
+- 已经不打算再升级 NVIDIA driver（A 路径）
+
+3A 大作 / GPU 加速密集型游戏需要原生 GPU 性能 → A 或 B。DNF / 蜂巢 / 网吧类 → 方案 0 性能足够。
 
 ---
 
@@ -137,6 +185,62 @@ $cert = New-SelfSignedCertificate -Subject 'CN=NVIDIA Corporation' `
 
 ---
 
+## 方案 0 操作流程（5 步）
+
+> 这是当前 VM1/VM2 实际操作流程；前置假设：QEMU stealth bundle 已编译过、`setup-bridge.sh` 已跑过一次。
+
+```bash
+# Host: 起 stealth HTTP 服务器（一次性，guest 用来拉 ps1/驱动/dll）
+nohup python3 /home/ubuntu/projects/qemu/deploy/scripts/serve-stealth-http.py 8765 \
+    &> /tmp/serve-http.log &
+
+# Host: 启动新 VM（首次自动 reroll 整 profile，含 GPU/显示器/键鼠等池子）
+/home/ubuntu/projects/qemu/deploy/scripts/start-vm.sh 1 \
+    --iso=/mnt/disk2/iso/Win10_22H2_Chinese_Simplified_x64v1.iso
+```
+
+启动日志会显示 `=== stealth profile ===`，其中 `GPU` 那行是这次抽到的型号——`shallow-stealth.ps1` 会自动按 PCI subsys 匹配到同一个名字（无需手动指定）。
+
+装完 Windows 10 22H2 + Windows Update 到 19045 后，guest 内：
+
+```powershell
+# 管理员 PowerShell，host 的 br0 IP 替换 192.168.30.33
+irm http://192.168.30.33:8765/shallow-stealth.ps1 | iex
+```
+
+shallow-stealth.ps1 内部 4 步全自动跑完：
+1. 下载 stock virtio-win viogpudo (MS-WHQL 签)
+2. `pnputil /add-driver /install` → Windows 自动 PnP 绑定到 `VEN_1AF4&DEV_1050&SUBSYS_<XXXX>10DE`
+3. 探测当前 PCI subsys → 反查 GPU 池映射表 → 调 `apply-gpu-spoof.ps1` 注册表覆盖
+4. 显示最终状态，回车自动重启
+
+重启后 `GPU-Z` / `Win32_VideoController.Name` / Device Manager 全部显示 profile 抽到的型号。
+
+## QEMU patches 全清单 (deploy/patches/)
+
+| 编号 | 文件 | 改的 |
+|------|------|------|
+| 0001 | cpu add ryzen3-1200 | `target/i386/cpu.c` 加 Ryzen3-1200/2300X 型号 |
+| 0002 | kvm strip hypervisor | `target/i386/kvm/kvm.c` 擦 CPUID 0x1.ECX[31] 和 0x40000000-ff |
+| 0003 | acpi oem spoof | 所有 ACPI 表 OEM_ID → `ALASKA / A M I` |
+| 0004 | nvme samsung id | `hw/nvme/ctrl.c` 加 `use-samsung-id=on` 让 NVMe 走 Samsung IEEE OUI |
+| 0005 | pci ids | xHCI / pcie-root-port / e1000e subsys 改成 AMD / ASUS 真值 |
+| 0006 | smbios type17 双通道 + per-DIMM 唯一 SN | `hw/smbios/smbios.c`：`bank=P0 CHANNEL %C` / `loc_pfx=DIMM_%C2` 的 `%C` 按 DIMM 展开 A/B；`serial` 支持 `\|` 分隔的 per-DIMM 列表（`serial=SN1\|SN2`），让双通道两条内存各自唯一 SN（共用同 SN 是一眼假的伪造特征） |
+| 0007 | pci gpu edid spoof | EDID 默认 `RHT/QEMU Monitor` → `SAM/SyncMaster` 类 |
+| 0008 | virtio-gpu subsys | `x-pci-sub-vendor-id` / `x-pci-sub-device-id` cmdline 选项 |
+| **0009** | **virtio-gpu edid strings** | virtio-vga 加 `edid-vendor=` / `edid-name=` / `edid-serial=` / `edid-width-mm=` / `edid-height-mm=` 五个 prop；virtio-gpu-base.c 传到 `qemu_edid_info`。让每 VM 用 profile 池里的不同显示器型号。 |
+| **0010** | **usb-hid vid/pid/strings** | usb-kbd / usb-mouse / usb-tablet 加 `vendorid=` / `productid=` / `manufacturer=` / `product=` prop；`patched_desc` 副本机制覆写 const USBDesc；让每 VM 用不同品牌键鼠（Microsoft / Logitech / A4Tech / Rapoo / Dell / HUION / VEIKK / XP-Pen）。 |
+
+## OVMF 自编 patches (deploy/firmware/edk2-patches/)
+
+OVMF 源码在 `~/src/edk2`（edk2 主线 tag），通过 `deploy/tools/build-ovmf.sh` 一键重 build。当前 stealth patches：
+
+| 编号 | 文件 | 改的 |
+|------|------|------|
+| 0001 | OvmfPkg-QemuVideoDxe-NVIDIA-1c81-GOP-whitelist.patch | `OvmfPkg/QemuVideoDxe/Driver.c::gQemuVideoCardList[]` 加 NVIDIA `0x10de:0x1c81` 条目，让 UEFI GOP driver 在 virtio-vga subsys 被 spoof 成 NVIDIA GTX 1050 时仍认得显卡，避免 "Display output is not active" 黑屏直到 viogpudo.sys 在 Windows 阶段加载。 |
+
+build 时**强制** `-D TPM2_ENABLE=TRUE`（Ubuntu 默认 edk2 包关 TPM2 → guest tpm.msc 报 "找不到兼容的 TPM"）。Tcg2Dxe / Tcg2Pei / Tcg2ConfigDxe / Tcg2PlatformDxe 四个模块都进 FV，guest TBS 才能正常激活 TPM。
+
 ## 下一步如果继续 stealth 深化
 
 | 补丁 | 位置 | stealth 收益 |
@@ -149,6 +253,7 @@ $cert = New-SelfSignedCertificate -Subject 'CN=NVIDIA Corporation' `
 | `vmware-cpuid-freq=off` | start-vm.sh `-cpu ...,vmware-cpuid-freq=off` | 关掉 VMware 频率 CPUID leaf（我们 kvm=off 时本就不发，但显式关更干净）|
 | ACPI DSDT QEMU 字样清理 | `hw/i386/acpi-build.c` 改 OEM ID / Creator ID | `wmic os get systemdirectory, oemid` 不再是 "BOCHS" 等 |
 | Windows 注册表 QEMU 字样 | guest 侧 `HKLM\HARDWARE\DESCRIPTION\System` 下 SystemBiosVersion | `Get-ItemProperty ... | Select SystemBiosVersion` 不再有 "QEMU" |
+| EDID 厂商/型号代码 vs. PNP HardwareID 自洽 | EDID `SAM C24F390` ↔ 注册表 `MONITOR\SAM<product_code>` | Win32_DesktopMonitor.PNPDeviceID 不再泄漏 QEMU0001 等 |
 
 ## Remote Display Adapter 隐藏命令（参考）
 

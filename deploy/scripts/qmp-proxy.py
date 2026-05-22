@@ -53,6 +53,12 @@ from pathlib import Path
 
 LOG = logging.getLogger('qmp-proxy')
 
+# asyncio.StreamReader 默认 buffer 上限 64 KB——QMP 的 `query-machines` /
+# `qom-list-types` 等响应在 stealth 全套 SMBIOS 配置下经常超过这个值，
+# readline() 没找到 '\n' 就抛 LimitOverrunError，整个 upstream_loop 死掉。
+# 4 MB 覆盖任何观察到的 QMP 响应（实际最大约 200–500 KB）。
+STREAM_LIMIT = 4 * 1024 * 1024
+
 
 class QmpProxy:
     def __init__(self, upstream_path: str, listen_path: str,
@@ -84,7 +90,8 @@ class QmpProxy:
         while True:
             try:
                 self.upstream_reader, self.upstream_writer = \
-                    await asyncio.open_unix_connection(self.upstream_path)
+                    await asyncio.open_unix_connection(
+                        self.upstream_path, limit=STREAM_LIMIT)
                 break
             except (FileNotFoundError, ConnectionRefusedError) as e:
                 if deadline is None or time.monotonic() >= deadline:
@@ -124,7 +131,26 @@ class QmpProxy:
     async def upstream_loop(self) -> None:
         try:
             while not self.shutting_down:
-                line = await self.upstream_reader.readline()
+                try:
+                    line = await self.upstream_reader.readline()
+                except asyncio.LimitOverrunError as e:
+                    # QMP 单条响应超过 STREAM_LIMIT——极罕见，但要扛住而不能让
+                    # 整个 proxy 死掉。把已读字节排空到下一个 '\n'，丢这条响应
+                    # 并 warn；客户端会等不到回应，自己会做超时重试。
+                    LOG.warning(
+                        'upstream message exceeded buffer limit %d B, '
+                        'dropping (consumed=%d): %s',
+                        STREAM_LIMIT, e.consumed, e)
+                    try:
+                        # readline 失败后 buffer 里仍残留 e.consumed 字节；
+                        # 用 readuntil with separator 把残余直接读完丢掉。
+                        # 如果连续多个超大消息接龙，下面这步也可能再抛——
+                        # 直接再 continue 等下一轮。
+                        await self.upstream_reader.readuntil(b'\n')
+                    except (asyncio.LimitOverrunError,
+                            asyncio.IncompleteReadError):
+                        pass
+                    continue
                 if not line:
                     LOG.warning('upstream EOF')
                     break
@@ -276,7 +302,7 @@ class QmpProxy:
             os.unlink(self.listen_path)
         Path(self.listen_path).parent.mkdir(parents=True, exist_ok=True)
         server = await asyncio.start_unix_server(
-            self.handle_client, path=self.listen_path)
+            self.handle_client, path=self.listen_path, limit=STREAM_LIMIT)
         os.chmod(self.listen_path, 0o660)
         LOG.info('proxy listening %s -> %s',
                  self.listen_path, self.upstream_path)

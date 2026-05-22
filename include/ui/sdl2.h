@@ -43,6 +43,14 @@ struct sdl2_console {
     int idle_counter;
     int ignore_hotkeys;
     bool gui_keysym;
+    /*
+     * 输入门控：键鼠事件只在窗口同时拥有 X11 输入焦点(FOCUS_GAINED)
+     * 和鼠标焦点(ENTER, 即指针在窗内) 时才下发给 guest。
+     * 任一条件失守 -> 把当前所有按下的键 lift 掉, 后续事件丢弃,
+     * 防止"窗外按键打到 guest"以及焦点切换时 guest 卡键。
+     */
+    bool has_input_focus;
+    bool has_mouse_focus;
     SDL_GLContext winctx;
     QKbdState *kbd;
 #ifdef CONFIG_OPENGL

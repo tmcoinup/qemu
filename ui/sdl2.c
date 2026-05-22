@@ -35,6 +35,9 @@
 #include "ui/win32-kbd-hook.h"
 #include "qemu/log.h"
 
+#include <sys/socket.h>
+#include <sys/un.h>
+
 static int sdl2_num_outputs;
 static struct sdl2_console *sdl2_console;
 
@@ -104,6 +107,15 @@ void sdl2_window_create(struct sdl2_console *scon)
                                          surface_width(scon->surface),
                                          surface_height(scon->surface),
                                          flags);
+    /*
+     * 窗口刚创建时, SDL 不一定补发 FOCUS_GAINED/ENTER (取决于 WM 和指针位置),
+     * 直接拿 SDL 当前 flag 做初值, 避免冷启动后 sdl2_input_allowed 永远 false.
+     */
+    if (scon->real_window) {
+        Uint32 wflags = SDL_GetWindowFlags(scon->real_window);
+        scon->has_input_focus = !!(wflags & SDL_WINDOW_INPUT_FOCUS);
+        scon->has_mouse_focus = !!(wflags & SDL_WINDOW_MOUSE_FOCUS);
+    }
     if (scon->opengl) {
         const char *driver = "opengl";
 
@@ -384,6 +396,57 @@ static void *sdl2_win32_get_hwnd(struct sdl2_console *scon)
     return NULL;
 }
 
+/*
+ * F4 热键 -> 戳宿主 hotkey-capture 守护进程的 DGRAM unix socket。
+ *
+ * 仅当环境变量 QEMU_HOTKEY_TRIGGER 指向 socket 路径时启用（由
+ * deploy/scripts/start-vm.sh --hotkey-capture 导出）。fire-and-forget：
+ * fd/地址只解析一次并缓存，守护进程没起或 socket 不在时 sendto 失败也忽略。
+ * 本函数不改变按键派发，F4 仍会正常下发给 guest。
+ */
+static void sdl2_hotkey_poke(void)
+{
+    static int fd = -1;
+    static struct sockaddr_un dst;
+    static int state; /* 0=未初始化 1=可用 -1=禁用 */
+    ssize_t n;
+
+    if (state == -1) {
+        return;
+    }
+    if (state == 0) {
+        const char *path = getenv("QEMU_HOTKEY_TRIGGER");
+
+        if (!path || !path[0] || strlen(path) >= sizeof(dst.sun_path)) {
+            state = -1;
+            return;
+        }
+        fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        if (fd < 0) {
+            state = -1;
+            return;
+        }
+        memset(&dst, 0, sizeof(dst));
+        dst.sun_family = AF_UNIX;
+        pstrcpy(dst.sun_path, sizeof(dst.sun_path), path);
+        state = 1;
+    }
+    n = sendto(fd, "\x01", 1, MSG_DONTWAIT,
+               (struct sockaddr *)&dst, sizeof(dst));
+    (void)n; /* best-effort：守护进程没起就当无事发生 */
+}
+
+/*
+ * 输入门控：键鼠事件只在窗口同时拥有 X11 输入焦点和鼠标焦点(指针在窗内)
+ * 时才允许下发到 guest。任一条件失守, 上层 handle_xxx 直接丢事件。
+ * 焦点状态在 handle_windowevent() 里随 FOCUS_GAINED/LOST 和 ENTER/LEAVE 维护,
+ * 丢失瞬间统一调 sdl2_release_modifiers() 抬起全键, 避免 guest 卡键。
+ */
+static bool sdl2_input_allowed(struct sdl2_console *scon)
+{
+    return scon && scon->has_input_focus && scon->has_mouse_focus;
+}
+
 static void handle_keydown(SDL_Event *ev)
 {
     int win;
@@ -393,8 +456,20 @@ static void handle_keydown(SDL_Event *ev)
     if (!scon) {
         return;
     }
+    /* 焦点 / 指针不在窗内时, KEYDOWN 一律丢. KEYUP 走 handle_keyup,
+     * 由 qkbd_state_key_event 的 suspicious-keyup 过滤天然抹掉. */
+    if (!sdl2_input_allowed(scon)) {
+        return;
+    }
 
     scon->gui_keysym = false;
+
+    /* F4：通知宿主热键截图守护进程。只戳一下，不吞按键——不设
+     * gui_keysym，F4 照常走 sdl2_process_key 下发给 guest。
+     * QEMU_HOTKEY_TRIGGER 未设时 sdl2_hotkey_poke() 无任何副作用。 */
+    if (ev->key.keysym.scancode == SDL_SCANCODE_F4 && !ev->key.repeat) {
+        sdl2_hotkey_poke();
+    }
 
     if (!scon->ignore_hotkeys && gui_key_modifier_pressed && !ev->key.repeat) {
         switch (ev->key.keysym.scancode) {
@@ -482,6 +557,13 @@ static void handle_keyup(SDL_Event *ev)
     }
 
     scon->ignore_hotkeys = false;
+    /*
+     * KEYUP 不走 sdl2_input_allowed 早退 —— 焦点丢失时 handle_windowevent
+     * 已经 lift 过全键, qkbd_state_key_event() 的 suspicious-keyup 兜底过滤
+     * 重复的 up; 但若在 allowed=true 期间按下、allowed=false 期间松开,
+     * 这里照常把 up 送给 qkbd_state 才能保持位图一致 (虽然此时通常已被
+     * lift 抬过, 仍属安全冗余).
+     */
     sdl2_process_key(scon, &ev->key);
 }
 
@@ -491,6 +573,9 @@ static void handle_textinput(SDL_Event *ev)
     QemuConsole *con = scon ? scon->dcl.con : NULL;
 
     if (!con) {
+        return;
+    }
+    if (!sdl2_input_allowed(scon)) {
         return;
     }
 
@@ -505,6 +590,11 @@ static void handle_mousemotion(SDL_Event *ev)
     struct sdl2_console *scon = get_scon_from_window(ev->motion.windowID);
 
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
+        return;
+    }
+    /* grab=on 时 SDL 把指针锁在窗内, sdl2_input_allowed 自然为真;
+     * grab=off 且指针在窗外/无焦点时, 不把鼠标位置写进 guest. */
+    if (!sdl2_input_allowed(scon)) {
         return;
     }
 
@@ -539,6 +629,9 @@ static void handle_mousebutton(SDL_Event *ev)
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
         return;
     }
+    if (!sdl2_input_allowed(scon)) {
+        return;
+    }
 
     bev = &ev->button;
     if (!gui_grab && !qemu_input_is_absolute(scon->dcl.con)) {
@@ -563,6 +656,9 @@ static void handle_mousewheel(SDL_Event *ev)
     InputButton btn;
 
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
+        return;
+    }
+    if (!sdl2_input_allowed(scon)) {
         return;
     }
 
@@ -646,12 +742,16 @@ static void handle_windowevent(SDL_Event *ev)
         sdl2_redraw(scon);
         break;
     case SDL_WINDOWEVENT_FOCUS_GAINED:
+        scon->has_input_focus = true;
         win32_kbd_set_grab(gui_grab);
         if (qemu_console_is_graphic(scon->dcl.con)) {
             win32_kbd_set_window(sdl2_win32_get_hwnd(scon));
         }
         /* fall through */
     case SDL_WINDOWEVENT_ENTER:
+        if (ev->window.event == SDL_WINDOWEVENT_ENTER) {
+            scon->has_mouse_focus = true;
+        }
         if (!gui_grab && (qemu_input_is_absolute(scon->dcl.con) || absolute_enabled)) {
             absolute_mouse_grab(scon);
         }
@@ -665,12 +765,22 @@ static void handle_windowevent(SDL_Event *ev)
         scon->ignore_hotkeys = get_mod_state();
         break;
     case SDL_WINDOWEVENT_FOCUS_LOST:
+        /* X11 输入焦点丢失 (alt-tab / WM 切窗 / 无 WM 时其他 client grab):
+         * 抬掉所有按下的键, 防止 guest 卡在 "W 一直按住" 之类状态. */
+        scon->has_input_focus = false;
+        sdl2_release_modifiers(scon);
         if (qemu_console_is_graphic(scon->dcl.con)) {
             win32_kbd_set_window(NULL);
         }
         if (gui_grab && !gui_fullscreen) {
             sdl_grab_end(scon);
         }
+        break;
+    case SDL_WINDOWEVENT_LEAVE:
+        /* 鼠标离开窗口: 用户要求"窗外按键不进 guest", 同样抬掉按下的键.
+         * 不动 gui_grab (grab 状态下指针锁在窗内, 不会触发 LEAVE). */
+        scon->has_mouse_focus = false;
+        sdl2_release_modifiers(scon);
         break;
     case SDL_WINDOWEVENT_RESTORED:
         update_displaychangelistener(&scon->dcl, GUI_REFRESH_INTERVAL_DEFAULT);

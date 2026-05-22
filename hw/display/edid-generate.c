@@ -16,33 +16,31 @@ static const struct edid_mode {
     uint32_t bit;
     uint32_t dta;
 } modes[] = {
-    /* dea/dta extension timings (all @ 50 Hz) */
-    { .xres = 5120,   .yres = 2160,   .dta = 125 },
-    { .xres = 4096,   .yres = 2160,   .dta = 101 },
-    { .xres = 3840,   .yres = 2160,   .dta =  96 },
-    { .xres = 2560,   .yres = 1080,   .dta =  89 },
-    { .xres = 2048,   .yres = 1152 },
-    { .xres = 1920,   .yres = 1080,   .dta =  31 },
+    /*
+     * Stealth: 我们的 stealth profile 模拟 24" 1080p 16:9 显示器
+     * (Samsung S24F350F / AOC 24G2E5 / BenQ GW2480 等)，EDID 只该暴露
+     * 1080p panel 真实能扫的 mode 集。原 generic 表里有：
+     *  - 4K / 5K (3840×2160 / 5120×2160) → 1080p panel 不可能支持
+     *  - 1920×1200 / 1280×800 → 16:10 工作站特征，不是 1080p panel
+     *  - 1920×1440 / 1856×1392 / 1792×1344 / 1440×1050 → 4:3 巨屏 CRT 时代
+     *
+     * 现仅保留真实 24" 1080p 显示器 EDID 抽样里高频出现的 mode：
+     *  - 1920×1080 16:9 (native)
+     *  - 1680×1050 16:10 (downscale 兼容老 16:10 软件)
+     *  - 1280×1024 5:4 (传统 LCD 老兼容)
+     *  - 1280×720 16:9 (720p)
+     *  - 1024×768 / 800×600 / 640×480 (established 4:3 兼容)
+     */
 
-    /* dea/dta extension timings (all @ 60 Hz) */
-    { .xres = 3840,   .yres = 2160,   .dta =  97 },
+    /* dea/dta extension timings (@ 60 Hz) */
+    { .xres = 1920,   .yres = 1080,   .dta =  31 },   /* VIC 16, native */
 
-    /* additional standard timings 3 (all @ 60Hz) */
-    { .xres = 1920,   .yres = 1200,   .xtra3 = 10,   .bit = 0 },
-    { .xres = 1600,   .yres = 1200,   .xtra3 =  9,   .bit = 2 },
+    /* additional standard timings 3 (@ 60 Hz) */
     { .xres = 1680,   .yres = 1050,   .xtra3 =  9,   .bit = 5 },
-    { .xres = 1440,   .yres =  900,   .xtra3 =  8,   .bit = 5 },
     { .xres = 1280,   .yres = 1024,   .xtra3 =  7,   .bit = 1 },
-    { .xres = 1280,   .yres =  960,   .xtra3 =  7,   .bit = 3 },
-    { .xres = 1280,   .yres =  768,   .xtra3 =  7,   .bit = 6 },
+    { .xres = 1280,   .yres =  720,   .xtra3 =  7,   .bit = 6 },
 
-    { .xres = 1920,   .yres = 1440,   .xtra3 = 11,   .bit = 5 },
-    { .xres = 1856,   .yres = 1392,   .xtra3 = 10,   .bit = 3 },
-    { .xres = 1792,   .yres = 1344,   .xtra3 = 10,   .bit = 5 },
-    { .xres = 1440,   .yres = 1050,   .xtra3 =  8,   .bit = 1 },
-    { .xres = 1360,   .yres =  768,   .xtra3 =  8,   .bit = 7 },
-
-    /* established timings (all @ 60Hz) */
+    /* established timings (@ 60Hz) */
     { .xres = 1024,   .yres =  768,   .byte  = 36,   .bit = 3 },
     { .xres =  800,   .yres =  600,   .byte  = 35,   .bit = 0 },
     { .xres =  640,   .yres =  480,   .byte  = 35,   .bit = 5 },

@@ -135,6 +135,17 @@ struct virtio_gpu_base_conf {
     uint32_t ymax;
     uint64_t hostmem;
     VirtIOGPUOutputList *outputs;
+
+    /*
+     * 中文注释：这些字段提供整块 virtio-gpu 的 EDID 默认画像；NULL 字符串
+     * 或 0 尺寸会回落到 QEMU 11 的原生生成逻辑。QEMU 11 新增的 outputs
+     * 列表仍保留，并可按输出覆盖这里的默认名称。
+     */
+    char *edid_vendor;
+    char *edid_name;
+    char *edid_serial;
+    uint32_t edid_width_mm;
+    uint32_t edid_height_mm;
 };
 
 struct virtio_gpu_ctrl_command {
@@ -180,7 +191,12 @@ struct VirtIOGPUBaseClass {
     DEFINE_PROP_UINT32("xres", _state, _conf.xres, 1280), \
     DEFINE_PROP_UINT32("yres", _state, _conf.yres, 800), \
     DEFINE_PROP_UINT32("xmax", _state, _conf.xmax, 0), \
-    DEFINE_PROP_UINT32("ymax", _state, _conf.ymax, 0)
+    DEFINE_PROP_UINT32("ymax", _state, _conf.ymax, 0), \
+    DEFINE_PROP_STRING("edid-vendor", _state, _conf.edid_vendor), \
+    DEFINE_PROP_STRING("edid-name", _state, _conf.edid_name), \
+    DEFINE_PROP_STRING("edid-serial", _state, _conf.edid_serial), \
+    DEFINE_PROP_UINT32("edid-width-mm", _state, _conf.edid_width_mm, 0), \
+    DEFINE_PROP_UINT32("edid-height-mm", _state, _conf.edid_height_mm, 0)
 
 typedef struct VGPUDMABuf {
     QemuDmaBuf *buf;

@@ -63,4 +63,216 @@ strings "$QEMU" | grep -E '^(ALASKA|A M I )' | head -5
 echo
 echo "=== (4) NVMe properties registered ==="
 "$QEMU" -device nvme,help 2>&1 | grep -E 'samsung|model-number|firmware-rev'
+
+echo
+echo "=== (5) TPM 2.0 emulator (swtpm) + OVMF Tcg2 模块 ==="
+if command -v swtpm >/dev/null 2>&1; then
+    echo "  swtpm        = $(swtpm --version | head -1)"
+    echo "  swtpm_setup  = $(command -v swtpm_setup)"
+    # QEMU `-tpmdev help` 退出码 = 1（QEMU 把 help 看作异常终止），
+    # 在 `set -o pipefail` 下会把整条 pipeline 拉成 fail。先 capture 输出
+    # 再独立 grep，绕开 pipefail 的退出码取最大语义。
+    tpm_help_out="$("$QEMU" -tpmdev help 2>&1 || true)"
+    if grep -qi emulator <<<"$tpm_help_out"; then
+        echo "  -tpmdev emulator: supported"
+    else
+        echo "FAIL: QEMU 没编 CONFIG_TPM_EMULATOR——guest 无法挂 swtpm"; exit 1
+    fi
+else
+    echo "WARN: swtpm 未装；start-vm.sh 会优雅降级（无 TPM）但反作弊会判 sandbox"
+fi
+# OVMF Tcg2 模块自检：Ubuntu 默认 ovmf 包不编 TPM2_ENABLE，guest tpm.msc
+# 会"找不到兼容的 TPM"。我们自编的 stealth fd 应该有 Tcg2 模块。
+EDK2_BUILD="${EDK2_BUILD:-$HOME/src/edk2/Build/OvmfX64/RELEASE_GCC5/X64}"
+if [[ -d "$EDK2_BUILD" ]]; then
+    tcg_count=0
+    for m in Tcg2Dxe Tcg2Pei Tcg2ConfigDxe Tcg2PlatformDxe; do
+        if [[ -f "$EDK2_BUILD/${m}.efi" ]]; then
+            tcg_count=$((tcg_count + 1))
+        fi
+    done
+    if (( tcg_count == 4 )); then
+        echo "  OVMF Tcg2 模块: 4/4 (Dxe/Pei/ConfigDxe/PlatformDxe) ✓"
+    else
+        echo "WARN: OVMF build 目录里 Tcg2 模块只 $tcg_count/4——guest TPM 可能不工作"
+        echo "      修复: $HERE/../tools/build-ovmf.sh"
+    fi
+else
+    echo "WARN: edk2 build 目录不存在 ($EDK2_BUILD)，无法验证 OVMF TPM 编译状态"
+fi
+
+echo
+echo "=== (6) 伪 BGRT 表存在 ==="
+BGRT_BIN="$(cd "$HERE/../firmware" && pwd)/bgrt.bin"
+if [[ -f "$BGRT_BIN" ]]; then
+    sz=$(stat -c%s "$BGRT_BIN")
+    if (( sz == 20 )); then
+        echo "  bgrt.bin     = 20 字节 (ACPI 5.0+ BGRT body 标准长度)"
+    else
+        echo "FAIL: bgrt.bin 长度 $sz 不是 20——结构异常"; exit 1
+    fi
+else
+    echo "WARN: bgrt.bin 不存在；start-vm.sh 会跳过 -acpitable，guest 缺 BGRT 表"
+fi
+
+echo
+echo "=== (7) stealth-lib.sh: BOARD_POOL 每条都有 SUBSYS_VEN|SUBSYS_DEV ==="
+# shellcheck disable=SC1091
+source "$HERE/stealth-lib.sh"
+bad_rows=0
+for row in "${BOARD_POOL[@]}"; do
+    # 分隔符数应该是 7（8 个字段）；老格式只有 5（6 字段）
+    n=$(awk -F'|' '{print NF}' <<<"$row")
+    if (( n != 8 )); then
+        echo "FAIL: 字段数 $n != 8: $row"
+        bad_rows=$((bad_rows + 1))
+    fi
+done
+if (( bad_rows > 0 )); then exit 1; fi
+echo "  ${#BOARD_POOL[@]} 条板子全部 8 字段（含 SUBSYS_VEN / SUBSYS_DEV）"
+
+echo
+echo "=== (8) CPU_POOL 只包含**无 iGPU** SKU ==="
+forbidden_substrings=("G6400" "G5400" "i3-9100 CPU")  # 不带 F 的 i3-9100 也算
+for row in "${CPU_POOL[@]}"; do
+    for kw in "${forbidden_substrings[@]}"; do
+        if [[ "$row" == *"$kw"* ]]; then
+            echo "FAIL: CPU_POOL 包含带 iGPU 型号: $row"; exit 1
+        fi
+    done
+done
+echo "  ${#CPU_POOL[@]} 个 CPU 全部无 iGPU"
+
+echo
+echo "=== (9) NVMe 池：MODEL ↔ SIZE 自洽 ==="
+# shellcheck disable=SC1091
+source "$HERE/stealth-lib.sh"
+bad_nvme=0
+for row in "${NVME_POOL[@]}"; do
+    IFS='|' read -r m fw sz <<<"$row"
+    if [[ -z "$sz" ]]; then
+        echo "FAIL: 缺 RAW_BYTES 字段: $row"; bad_nvme=$((bad_nvme + 1)); continue
+    fi
+    # 按 model 名字推容量段：1TB ≈ 10^12B、500/512GB ≈ 5×10^11B、2TB ≈ 2×10^12B
+    expected_lo=0; expected_hi=0
+    case "$m" in
+        *1TB*)   expected_lo=$((  900 * 1000 * 1000 * 1000));  expected_hi=$(( 1100 * 1000 * 1000 * 1000)) ;;
+        *2TB*)   expected_lo=$(( 1900 * 1000 * 1000 * 1000));  expected_hi=$(( 2100 * 1000 * 1000 * 1000)) ;;
+        *500GB*) expected_lo=$((  450 * 1000 * 1000 * 1000));  expected_hi=$((  520 * 1000 * 1000 * 1000)) ;;
+        *512GB*) expected_lo=$((  470 * 1000 * 1000 * 1000));  expected_hi=$((  530 * 1000 * 1000 * 1000)) ;;
+        *256GB*) expected_lo=$((  240 * 1000 * 1000 * 1000));  expected_hi=$((  280 * 1000 * 1000 * 1000)) ;;
+        *) echo "WARN: 无法从 model '$m' 推断容量段，跳过比对"; continue ;;
+    esac
+    if (( sz < expected_lo || sz > expected_hi )); then
+        echo "FAIL: $m → $sz 字节，期望 [$expected_lo, $expected_hi]"
+        bad_nvme=$((bad_nvme + 1))
+    fi
+done
+if (( bad_nvme > 0 )); then
+    echo "FAIL: NVMe 池有 $bad_nvme 条 model/size 不一致——会导致 Win32_DiskDrive Model vs Size 跨向量矛盾"; exit 1
+fi
+echo "  ${#NVME_POOL[@]} 条 NVMe 池全部 Model ↔ Size 一致"
+
+echo
+echo "=== (10) DIMM SN 持久化 ==="
+# 拉一份临时 profile, pick → save → load → 比对 SN 是否稳定
+_tmp_prof="/tmp/verify-stealth-tmp-profile.$$"
+(
+    # 1. pick 一份 profile + save
+    source "$HERE/stealth-lib.sh"
+    stealth_pick_profile
+    stealth_save_profile "$_tmp_prof"
+    echo "  pick 时 MEM_SERIAL = $MEM_SERIAL"
+) > /tmp/verify-stealth-step.log
+cat /tmp/verify-stealth-step.log
+sn_in_file=$(grep "^MEM_SERIAL=" "$_tmp_prof" | cut -d= -f2 | tr -d "'\"")
+echo "  写入 profile 文件   = $sn_in_file"
+# 2. 模拟"重启" - 新 subshell load
+sn_load_1=$(source "$HERE/stealth-lib.sh" && stealth_load_profile "$_tmp_prof" && echo "$MEM_SERIAL")
+sn_load_2=$(source "$HERE/stealth-lib.sh" && stealth_load_profile "$_tmp_prof" && echo "$MEM_SERIAL")
+echo "  load 第 1 次        = $sn_load_1"
+echo "  load 第 2 次        = $sn_load_2"
+if [[ "$sn_in_file" == "$sn_load_1" && "$sn_load_1" == "$sn_load_2" ]]; then
+    echo "  ✓ DIMM SN 跨重启一致"
+else
+    echo "FAIL: DIMM SN 在 save→load→load 之间漂移"; rm -f "$_tmp_prof" /tmp/verify-stealth-step.log; exit 1
+fi
+# 3. 老 profile 没 MEM_SERIAL 字段 → UUID 派生稳定值
+if [[ -f "$HOME/images/vms/1/profile" ]]; then
+    sn_old_1=$(source "$HERE/stealth-lib.sh" && stealth_load_profile "$HOME/images/vms/1/profile" && echo "$MEM_SERIAL")
+    sn_old_2=$(source "$HERE/stealth-lib.sh" && stealth_load_profile "$HOME/images/vms/1/profile" && echo "$MEM_SERIAL")
+    if [[ -n "$sn_old_1" && "$sn_old_1" == "$sn_old_2" ]]; then
+        echo "  ✓ 老 profile fallback 派生稳定: $sn_old_1"
+    else
+        echo "FAIL: 老 profile fallback 不稳定 ($sn_old_1 vs $sn_old_2)"; rm -f "$_tmp_prof" /tmp/verify-stealth-step.log; exit 1
+    fi
+fi
+rm -f "$_tmp_prof" /tmp/verify-stealth-step.log
+
+echo
+echo "=== (11) USB HID + EDID 自定义 prop（patch 0009/0010） ==="
+edid_help="$("$QEMU" -device virtio-vga,help 2>&1 || true)"
+if grep -qE "edid-vendor=|edid-name=|edid-serial=" <<<"$edid_help"; then
+    echo "  virtio-vga: edid-vendor / edid-name / edid-serial ✓ (patch 0009)"
+else
+    echo "FAIL: virtio-vga 缺 edid-vendor/edid-name/edid-serial——patch 0009 没编进 QEMU"
+    exit 1
+fi
+usbkbd_help="$("$QEMU" -device usb-kbd,help 2>&1 || true)"
+if grep -qE "vendorid=|productid=|manufacturer=|product=" <<<"$usbkbd_help"; then
+    echo "  usb-kbd:   vendorid / productid / manufacturer / product ✓ (patch 0010)"
+else
+    echo "FAIL: usb-kbd 缺 vendorid/productid/manufacturer/product——patch 0010 没编进 QEMU"
+    exit 1
+fi
+usbtab_help="$("$QEMU" -device usb-tablet,help 2>&1 || true)"
+if grep -qE "vendorid=|productid=" <<<"$usbtab_help"; then
+    echo "  usb-tablet: vendorid / productid ✓ (patch 0010)"
+else
+    echo "FAIL: usb-tablet 缺 vendorid/productid——patch 0010 没编进 QEMU"
+    exit 1
+fi
+
+echo
+echo "=== (12) 外设池字段数自洽 ==="
+# shellcheck disable=SC1091
+source "$HERE/stealth-lib.sh"
+bad_pool=0
+for row in "${MONITOR_POOL[@]}"; do
+    n=$(awk -F'|' '{print NF}' <<<"$row")
+    if (( n != 5 )); then echo "FAIL MONITOR_POOL: 字段数 $n != 5: $row"; bad_pool=$((bad_pool+1)); fi
+done
+for row in "${KBD_POOL[@]}" "${MOUSE_POOL[@]}" "${TABLET_POOL[@]}"; do
+    n=$(awk -F'|' '{print NF}' <<<"$row")
+    if (( n != 5 )); then echo "FAIL HID pool: 字段数 $n != 5: $row"; bad_pool=$((bad_pool+1)); fi
+done
+if (( bad_pool > 0 )); then exit 1; fi
+echo "  MONITOR_POOL=${#MONITOR_POOL[@]}  KBD=${#KBD_POOL[@]}  MOUSE=${#MOUSE_POOL[@]}  TABLET=${#TABLET_POOL[@]} 全部 5 字段"
+
+echo
+echo "=== (13) 伪 SSDT 热区表 ==="
+SSDT_AML="$(cd "$HERE/../firmware" && pwd)/ssdt-thermal.aml"
+if [[ -f "$SSDT_AML" ]]; then
+    # 头 4 字节必须是 ASCII "SSDT"
+    sig=$(head -c4 "$SSDT_AML")
+    if [[ "$sig" != "SSDT" ]]; then
+        echo "FAIL: $SSDT_AML 头不是 SSDT (实际: $sig)"; exit 1
+    fi
+    # iasl 输出的 AML 含完整表头 + body，最小合规 SSDT 不应小于 36+10 字节
+    sz=$(stat -c%s "$SSDT_AML")
+    if (( sz < 50 )); then
+        echo "FAIL: ssdt-thermal.aml 长度 $sz 太短（可能 iasl 未编完）"; exit 1
+    fi
+    echo "  ssdt-thermal.aml = $sz 字节, 头=SSDT ✓"
+    # 验证表里有 _TMP 关键字（OEM 反作弊扫表常匹配的字符串）
+    if ! grep -q "_TMP" "$SSDT_AML"; then
+        echo "FAIL: SSDT 里找不到 _TMP method 名"; exit 1
+    fi
+    echo "  含 _TMP / _CRT / _PSV ThermalZone method ✓"
+else
+    echo "WARN: ssdt-thermal.aml 不存在；start-vm.sh 会跳过 SSDT 注入，guest 缺热区"
+    echo "      修复: cd $(cd "$HERE/../firmware" && pwd) && iasl -p ssdt-thermal ssdt-thermal.asl"
+fi
+
+echo
 echo "all checks passed."

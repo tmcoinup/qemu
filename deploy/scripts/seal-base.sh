@@ -50,9 +50,23 @@ if [[ -f "$BASE_FILE" ]]; then
     exit 1
 fi
 
-# 检查 VM 是否在跑
-if pgrep -f "qemu-system-x86.*win10-ryzen3-${SRC_INSTANCE}," >/dev/null; then
-    echo "ERROR: instance $SRC_INSTANCE 还在运行，请先关机 (deploy/scripts/stop-vm.sh $SRC_INSTANCE)" >&2
+# 检查 VM 是否在跑——**两道防线**：QMP socket + 进程名。
+# 2026-05 修：start-vm.sh -name 改成 "win10-${N}"（去 ryzen3 标签），旧 pgrep
+# 模式永远 false → seal 在 VM 还跑时执行 → base 含 dirty NTFS → 所有 clone
+# 启动看见 "Preparing Automatic Repair"。
+if [[ -S "/tmp/qemu-stealth-${SRC_INSTANCE}.qmp" ]] \
+   || pgrep -f "qemu-system-x86.*win10-${SRC_INSTANCE}," >/dev/null \
+   || pgrep -f "qemu-system-x86.*win10-ryzen3-${SRC_INSTANCE}," >/dev/null; then
+    echo "ERROR: instance $SRC_INSTANCE 还在运行" >&2
+    echo "  先优雅关机：deploy/scripts/stop-vm.sh $SRC_INSTANCE" >&2
+    echo "  或 guest 内 shutdown /s /t 0 + 等 QMP socket 消失：" >&2
+    echo "      until [[ ! -S /tmp/qemu-stealth-${SRC_INSTANCE}.qmp ]]; do sleep 1; done" >&2
+    exit 1
+fi
+# 额外保险：检查 qcow2 是否被任何进程持有
+if lsof "$SRC_DISK" 2>/dev/null | grep -q .; then
+    echo "ERROR: $SRC_DISK 被进程持有；seal 会做出不一致 base" >&2
+    lsof "$SRC_DISK" 2>&1 | sed 's/^/    /' >&2
     exit 1
 fi
 

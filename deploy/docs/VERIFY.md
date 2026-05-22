@@ -42,15 +42,80 @@
 
 ## 存储
 
+NVMe 池（5 款）每条都带真实 advertised 字节数，profile 抽中后 qcow2 同步建对应大小，**Model ↔ Size 自洽**：
+
+| Model                            | Firmware | RAW_BYTES         | Win 看到容量 |
+|----------------------------------|----------|--------------------|--------------|
+| Samsung SSD 970 PRO 512GB        | 1B2QEXM7 | 512,110,190,592   | ~476.9 GiB    |
+| Samsung SSD 970 EVO Plus 500GB   | 2B2QEXM7 | 500,107,862,016   | ~465.7 GiB    |
+| Samsung SSD 980 PRO 500GB        | 5B2QGXA7 | 500,107,862,016   | ~465.7 GiB    |
+| Samsung SSD 980 1TB              | 3B4QFXO7 | 1,000,204,886,016 | ~931.5 GiB    |
+| Samsung SSD 990 PRO 1TB          | 3B2QJXD7 | 1,000,204,886,016 | ~931.5 GiB    |
+
 | 字段                  | 值                                   |
 |-----------------------|--------------------------------------|
 | PCI vendor/device     | 144D:A809（Samsung）                 |
 | 子 vendor/device      | 144D:A801（970 PRO 级）              |
-| Identify Ctrl `MN`    | `Samsung SSD 970 PRO 512GB`          |
-| Identify Ctrl `FR`    | `1B2QEXM7`                           |
-| 标称容量              | 512,000,000,000 B（厂家标签 512 × 10^9，PCIe 3.0 x4） |
-| IEEE OUI              | 00:25:38（Samsung）                  |
+| Identify Ctrl `MN`    | profile 抽中型号                      |
+| Identify Ctrl `FR`    | profile 抽中固件                      |
+| IEEE OUI              | 00:25:38（Samsung）—— `use-samsung-id=on` |
 | SUBNQN                | `nqn.1994-11.com.samsung:nvme:...`   |
+
+## 显示器（EDID 池，patch 0009）
+
+`MONITOR_POOL` 10 条 24" 1920×1080 显示器；profile 抽 1 条写 EDID。Guest 端
+`Get-CimInstance Win32_DesktopMonitor` 会看到对应型号。
+
+| EDID Vendor | Name         | 尺寸 (mm) | 备注          |
+|-------------|--------------|-----------|---------------|
+| SAM         | S24F350      | 530×300   | Samsung 三星  |
+| SAM         | C24F390      | 530×300   | 三星曲面      |
+| AOC         | 24G2E5       | 530×300   | AOC 冠捷      |
+| AOC         | 22B1H        | 485×275   | AOC 21.5"     |
+| BNQ         | GW2480       | 530×300   | BenQ 明基     |
+| DEL         | SE2419HR     | 527×296   | Dell OEM 捆绑 |
+| HKC         | SG24A1       | 530×300   | **HKC 国产**   |
+| HKC         | M24A1F       | 530×300   | HKC 国产      |
+| GSM         | 24MK430      | 527×296   | LG 乐金       |
+| PHL         | 246E9QJ      | 530×300   | Philips 飞利浦|
+
+实现：patch 0009 给 virtio-vga 加 `edid-vendor=` / `edid-name=` / `edid-serial=` / `edid-width-mm=` / `edid-height-mm=` cmdline 选项，start-vm.sh 从 profile.EDID_* 注入。
+
+## 键盘 / 鼠标 / 数位板（USB HID 池，patch 0010）
+
+每 VM 独立抽。Guest 端 `Get-CimInstance Win32_USBHub`、设备管理器、`lsusb` 都看到 profile 选定的品牌。
+
+| 池          | 数量 | 包含品牌 |
+|-------------|-----|----------|
+| KBD_POOL    | 5   | Microsoft / Logitech / **A4Tech 双飞燕** / **Rapoo 雷柏** / Dell |
+| MOUSE_POOL  | 5   | Microsoft / Logitech / A4Tech / Rapoo / Dell |
+| TABLET_POOL | 4   | HUION 绘王 / HUION H640P / **VEIKK** / **XP-Pen 国产** |
+
+实现：patch 0010 给 usb-kbd/mouse/tablet 加 `vendorid=` / `productid=` / `manufacturer=` / `product=` cmdline 选项；`serial=` 走 USBDevice 父级。start-vm.sh 从 profile.{KBD,MOUSE,TABLET}_* 注入。
+
+## TPM 2.0
+
+| 字段 | 值 |
+|---|---|
+| QEMU 设备 | `-device tpm-crb,tpmdev=tpm0` (CRB 现代主板风格，不是老 TIS) |
+| 后端 | `-tpmdev emulator,id=tpm0,chardev=chrtpm` + swtpm 后台 daemon |
+| State 目录 | `$VM_DIR/tpm-state/` (含 `tpm2-00.permall` 主存储) |
+| Control sock | `$VM_DIR/tpm-sock` (unixio chardev) |
+| 首启 init | `swtpm_setup --tpm2 --create-ek-cert --create-platform-cert --lock-nvram` |
+| OVMF 要求 | **必须**含 Tcg2Dxe/Pei/ConfigDxe/PlatformDxe 模块。Ubuntu 默认 `ovmf` 包**没编** TPM2 模块；本部署用 `deploy/tools/build-ovmf.sh` 重 build (`-D TPM2_ENABLE=TRUE`)，产出 `deploy/firmware/OVMF_CODE_4M_stealth.fd` |
+| Guest 端验证 | `Get-Tpm` 应返回 `TpmPresent=True, TpmReady=True` |
+| 常见坑 | (1) `/var/lib/swtpm-localca/` 只 root 可写 → EK cert 创建失败，permall 只 ~1.3KB；start-vm.sh 现自动 chown 修复，完整 init 后 permall ≥ 3KB。(2) OVMF 不含 Tcg2 → Get-Tpm 全 False；用 build-ovmf.sh 重 build。 |
+
+## ACPI BGRT / SSDT
+
+裸金属固件常有 BGRT (boot logo) + 至少一个 ThermalZone。空缺会被反作弊视为 VM 信号。本部署：
+
+| 表 | 文件 | 内容 |
+|---|---|---|
+| BGRT | `firmware/bgrt.bin` (20 字节) | status=migrated, address=0, OEMID `ALASKA / A M I` |
+| SSDT 热区 | `firmware/ssdt-thermal.{asl,aml}` (153 字节) | `\_SB.TZQE` ThermalZone (_TMP=40°C, _CRT=105°C, _PSV=85°C) + `\_SB.FANE` PNP0C0B 风扇 |
+
+注入：`-acpitable sig=BGRT,...,data=<bgrt.bin>` + `-acpitable file=<ssdt-thermal.aml>`。Guest 端 `Get-CimInstance Win32_TemperatureProbe` / `Win32_Fan` 应非空。
 
 ## 网卡
 
@@ -61,19 +126,24 @@
 | 是否避开 52:54:00  | 是——启动器里曾硬编码 QEMU/KVM OUI，本次修复           |
 | PHY 链路           | 1 Gbit 自动协商（e1000e 默认）                         |
 
-## 内存（双通道）
+## 内存（拓扑动态：1 条 / 2 条）
 
-| 字段                         | 值                                                       |
-|------------------------------|-----------------------------------------------------------|
-| 主机拓扑                     | 2 × `memory-backend-memfd`、2 × NUMA node                 |
-| Win32_PhysicalMemory 数量    | 2 条 DIMM（每个 memfd 后端一条）                          |
-| 单条容量                     | `RAM / 2` MiB（默认 8 GiB 总量时每条 4 GiB）              |
-| 厂商                         | Kingston                                                  |
-| 部件号                       | `HX426C16FB3A/4`（真实 HyperX Fury 4GB DDR4-2666 编号）   |
-| 速率                         | 2666 MT/s（Ryzen 3 1200 JEDEC 上限；可通过 `MEM_SPEED=` 改） |
-| Bank locator（DIMM 0）       | `P0 CHANNEL A`                                            |
-| Bank locator（DIMM 1）       | `P0 CHANNEL B`                                            |
-| 实现                         | `0006-smbios-dual-channel-bank.patch` 在 `hw/smbios/smbios.c` 加了 `%C` 替换，使同一条 `-smbios type=17,bank="P0 CHANNEL %C"` 按 DIMM 下标展开成 A/B |
+| 字段                         | RAM ≤ 4096 MiB              | RAM > 4096 MiB                  |
+|------------------------------|-----------------------------|----------------------------------|
+| QEMU 后端                    | 1 × `memory-backend-memfd`  | 2 × `memory-backend-memfd`       |
+| NUMA node                    | 1                           | 2                                |
+| Win32_PhysicalMemoryArray.MemoryDevices | 2 (T16_NUM_DEVICES) | 2 (T16_NUM_DEVICES) |
+| Win32_PhysicalMemory 数量    | **1 条** (T17 entries)       | **2 条** (T17 entries)            |
+| 卡槽布局                     | 2 卡槽 / 占 1 空 1            | 2 卡槽 / 全占                     |
+| 厂商池                       | Kingston / Crucial / Samsung / SK hynix（随机抽 1 厂商）            |
+| 部件号                       | < 4096 MiB/DIMM → `MEM_PART_2G`，≥ 4096 MiB/DIMM → `MEM_PART_4G` |
+| **SN 持久化** (2026-05 新)   | DIMM 0 一次性生成 8-char hex 写 profile（`MEM_SERIAL`），跨重启不变；老 profile 缺字段时按 UUID 派生 |
+| **双通道两条唯一 SN** (2026-05 新) | 第 2 条按 `sha256(MEM_SERIAL-dimm2)[:8]` 派生；emit `serial=SN1\|SN2`，两条 DIMM 各自唯一（共用同 SN = 伪造特征，`Win32_PhysicalMemory` 必查） |
+| 速率                         | 2666 MT/s（可通过 `MEM_SPEED=` 改） |
+| Device locator (DIMM 0/1)     | `DIMM_A2` / `DIMM_B2` （`loc_pfx=DIMM_%C2` 的 `%C` 替换） |
+| Bank locator (DIMM 0/1)       | `P0 CHANNEL A` / `P0 CHANNEL B` （`%C` 替换） |
+| 内存量来源                   | `profile.MEM_TOTAL_MB`（`set-vm-memory.sh <N> 8G` 切换）；`--ram=` / `RAM=` 临时覆盖 |
+| 实现                         | `start-vm.sh` 动态构造 `MEMORY_ARGS` 数组；`stealth_smbios_args` t17 emit `serial=SN1\|SN2` + `loc_pfx=DIMM_%C2`；`smbios.c` type17 支持 `\|` 分隔 per-DIMM serial |
 
 ## 网络链路
 
@@ -134,21 +204,58 @@
 
 ## 运行时验证命令
 
-在主机上、启动 Windows 之前：
+### Host 端开机前自检（13 段）
 
 ```bash
-deploy/scripts/verify-stealth.sh
+QEMU=/home/ubuntu/projects/qemu/build/qemu-system-x86_64 \
+    deploy/scripts/verify-stealth.sh
 ```
 
-从运行中的客机里：
+13 段全过才能放行启动：
+
+| # | 检查项 |
+|---|--------|
+| 1 | CPU 型号注册（Ryzen3-1200 alias） |
+| 2 | QMP query-cpu-model-expansion: hypervisor/kvm=False, invtsc/topoext/svm/sha-ni 在 |
+| 3 | ACPI OEM 字符串 `ALASKA` / `A M I` baked in |
+| 4 | NVMe `use-samsung-id` / `model-number` / `firmware-rev` 支持 |
+| 5 | TPM 2.0：swtpm 可用 + QEMU `-tpmdev emulator` 编进去 |
+| 6 | BGRT 伪表 (`firmware/bgrt.bin`, 20 字节) |
+| 7 | BOARD_POOL 每条 8 字段 (含 SUBSYS_VEN / SUBSYS_DEV) |
+| 8 | CPU_POOL 全部无 iGPU |
+| 9 | NVMe 池 Model ↔ Size 自洽（1TB model = 10^12 B，不再 512GB） |
+| 10 | DIMM SN 持久化：pick → save → load → load 全部一致；8GB 双通道时两条 DIMM SN 不重复（DIMM_A2 ≠ DIMM_B2） |
+| 11 | USB HID + EDID 自定义 prop (patch 0009/0010 编进 QEMU) |
+| 12 | 外设池 (MONITOR/KBD/MOUSE/TABLET) 字段数自洽 |
+| 13 | 伪 SSDT 热区表 (`firmware/ssdt-thermal.aml`) |
+
+### Guest 端装完 Windows 后验证
 
 ```powershell
-# 应打印 True
-(Get-WmiObject Win32_BIOS).Manufacturer -eq "American Megatrends Inc."
+# 基础（旧检查）
+(Get-WmiObject Win32_BIOS).Manufacturer -eq "American Megatrends Inc."     # True
+[Regex]::Match((Get-WmiObject Win32_ComputerSystem|Out-String),"BOCHS|BXPC").Success  # False
+(Get-WmiObject Win32_Processor).HypervisorPresent                           # False
 
-# 结果应该**不**包含 BOCHS 或 BXPC
-[Regex]::Match((Get-WmiObject Win32_ComputerSystem | Out-String),"BOCHS|BXPC").Success
+# TPM 2.0
+(Get-Tpm).TpmPresent                                                        # True
+(Get-Tpm).TpmReady                                                          # True
 
-# 所有核都应是 False
-(Get-WmiObject Win32_Processor).HypervisorPresent
+# ACPI 热区 / 风扇（patch 0007 SSDT 注入）
+Get-CimInstance Win32_TemperatureProbe | Measure-Object | % Count            # ≥ 1
+Get-CimInstance Win32_Fan | Measure-Object | % Count                         # ≥ 1
+
+# 显示器（patch 0009 EDID 注入）
+Get-CimInstance Win32_DesktopMonitor | Select Name, MonitorManufacturer, MonitorType
+# 应匹配 profile.EDID_VENDOR + EDID_NAME，不是 "QEMU Monitor"
+
+# USB HID 品牌（patch 0010）
+Get-PnpDevice -Class Keyboard | Select FriendlyName, InstanceId
+Get-PnpDevice -Class Mouse    | Select FriendlyName, InstanceId
+# FriendlyName 应该是 profile.KBD_PRODUCT / MOUSE_PRODUCT 不是 "QEMU USB *"
+
+# 跨向量自洽（这两组对照不应矛盾）
+(Get-CimInstance Win32_BaseBoard).Manufacturer                              # 比如 "ASRock"
+(Get-PnpDevice -Class System | ? Status -eq OK | Select -First 5 InstanceId) | fl
+# PCI VEN_1849:DEV_... 子系统应匹配 ASRock (0x1849)，不是 ASUS (0x1043)
 ```

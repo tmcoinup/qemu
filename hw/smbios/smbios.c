@@ -908,6 +908,59 @@ static void smbios_build_type_16_table(unsigned dimm_cnt)
 #define MAX_T17_STD_SZ 0x7FFF /* (32G - 1M), in Megabytes */
 #define MAX_T17_EXT_SZ 0x80000000 /* 2P, in Megabytes */
 
+/*
+ * stealth: build the Type 17 device-locator string. If loc_pfx contains
+ * "%C", substitute the channel letter (A for an even DIMM index, B for odd)
+ * and emit it verbatim, e.g. loc_pfx="DIMM_%C2" -> "DIMM_A2"/"DIMM_B2",
+ * matching real dual-channel desktop board SMBIOS dumps. Otherwise keep the
+ * legacy "<pfx> <instance>" form so unmodified callers are unaffected.
+ */
+static void smbios_type17_locator(char *buf, size_t buflen, unsigned instance)
+{
+    const char *pct = type17.loc_pfx ? strstr(type17.loc_pfx, "%C") : NULL;
+
+    if (pct) {
+        int pre_len = pct - type17.loc_pfx;
+        snprintf(buf, buflen, "%.*s%c%s", pre_len, type17.loc_pfx,
+                 (instance & 1) ? 'B' : 'A', pct + 2);
+    } else {
+        snprintf(buf, buflen, "%s %d", type17.loc_pfx, instance);
+    }
+}
+
+/*
+ * stealth: pick this DIMM's serial number. type17.serial may be a
+ * '|'-delimited list with one serial per populated slot, because real boards
+ * never repeat a serial across DIMMs -- a single shared serial is an obvious
+ * fabricated-SMBIOS tell. Returns the instance-th token, clamped to the last
+ * token, so a plain (non-delimited) serial keeps the legacy "same for every
+ * slot" behavior.
+ */
+static void smbios_type17_serial(char *buf, size_t buflen, unsigned instance)
+{
+    const char *tok = type17.serial ? type17.serial : "";
+    const char *p = tok;
+    unsigned idx = 0;
+    size_t len;
+
+    while (*p) {
+        if (*p == '|') {
+            if (idx == instance) {
+                break;
+            }
+            idx++;
+            tok = p + 1;
+        }
+        p++;
+    }
+    len = p - tok;
+    if (len >= buflen) {
+        len = buflen - 1;
+    }
+    memcpy(buf, tok, len);
+    buf[len] = '\0';
+}
+
 static void smbios_build_type_17_table(unsigned instance, uint64_t size)
 {
     char loc_str[128];
@@ -931,7 +984,7 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
     }
     t->form_factor = 0x09; /* DIMM */
     t->device_set = 0; /* Not in a set */
-    snprintf(loc_str, sizeof(loc_str), "%s %d", type17.loc_pfx, instance);
+    smbios_type17_locator(loc_str, sizeof(loc_str), instance);
     SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
     /* Dual-channel support: substitute "%C" in bank string with channel
      * letter based on DIMM index (A for even, B for odd). This allows a
@@ -957,7 +1010,11 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
     t->type_detail = cpu_to_le16(0x80); /* Synchronous */
     t->speed = cpu_to_le16(type17.speed);
     SMBIOS_TABLE_SET_STR(17, manufacturer_str, type17.manufacturer);
-    SMBIOS_TABLE_SET_STR(17, serial_number_str, type17.serial);
+    {
+        char serial_str[128];
+        smbios_type17_serial(serial_str, sizeof(serial_str), instance);
+        SMBIOS_TABLE_SET_STR(17, serial_number_str, serial_str);
+    }
     SMBIOS_TABLE_SET_STR(17, asset_tag_number_str, type17.asset);
     SMBIOS_TABLE_SET_STR(17, part_number_str, type17.part);
     t->attributes = 1; /* Rank 1 (single-rank) */
@@ -986,7 +1043,7 @@ static void smbios_build_type_17_empty_table(unsigned instance)
     t->size = cpu_to_le16(0); /* 0 = No Module Installed */
     t->form_factor = 0x09; /* DIMM */
     t->device_set = 0;
-    snprintf(loc_str, sizeof(loc_str), "%s %d", type17.loc_pfx, instance);
+    smbios_type17_locator(loc_str, sizeof(loc_str), instance);
     SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
     {
         char bank_str[128];

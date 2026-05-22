@@ -18,6 +18,8 @@
 #     ./start-vm.sh 1 --fb-shm-roi=0,0,1920,1080 --fb-shm-rate=60
 #     ./start-vm.sh 1 --proxy               # 同时起 qmp-proxy 让多客户端共存
 #                                           # listen: /tmp/qemu-stealth-1.qmp.proxy
+#     ./start-vm.sh 1 --hotkey-capture      # SDL 窗口里按 F4 -> fb-shm 抓 PNG
+#                                           # 存 $VM_DIR/captures；--hotkey-capture=F2 改键
 #
 # 边玩边拉流到 ffmpeg / NVENC：
 #     ./start-vm.sh 1                       # SDL 窗口照常出现，可直接玩
@@ -73,6 +75,10 @@
 #                          (flag: --proxy / --no-proxy)
 #                          代理 listen: ${QMP_SOCK}.proxy；客户端连这里
 #                          就不会跟其他工具抢 QEMU 的单 QMP slot
+#     HOTKEY_CAPTURE=1     SDL 窗口里按 HOTKEY_KEY 时从 fb-shm 抓 PNG（默认 0）
+#                          (flag: --hotkey-capture[=KEY] / --no-hotkey-capture)
+#     HOTKEY_KEY=F4        触发键名（X keysym），默认 F4
+#                          PNG 存 $VM_DIR/captures；日志 ${HOTKEY_LOG}
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -112,6 +118,9 @@ while (( $# > 0 )); do
         --fb-shm-roi=*)  FB_SHM=1; FB_SHM_ROI="${1#*=}" ;;
         --proxy)         PROXY=1 ;;
         --no-proxy)      PROXY=0 ;;
+        --hotkey-capture)     HOTKEY_CAPTURE=1 ;;
+        --hotkey-capture=*)   HOTKEY_CAPTURE=1; HOTKEY_KEY="${1#*=}" ;;
+        --no-hotkey-capture)  HOTKEY_CAPTURE=0 ;;
         --)           shift; break ;;
         -*)
             echo "ERROR: unknown flag '$1'" >&2
@@ -145,7 +154,9 @@ if ! [[ "$INSTANCE" =~ ^[0-9]+$ ]] || (( INSTANCE < 1 )); then
     exit 2
 fi
 
-: "${RAM:=4096}"
+# RAM 默认值故意不在这里钉死：profile.MEM_TOTAL_MB 可能提供持久化值，
+# 所以推迟到 profile 加载之后再解析（见下方 "RAM 解析" 块）。
+# 显式 --ram= / 环境 RAM= 在 CLI 解析阶段已赋值，会被那里当最高优先级保留。
 : "${CPUS:=4}"
 : "${HEADLESS:=0}"
 : "${SDL:=1}"      # 默认：SDL 窗口仍然弹出（与历史行为一致）
@@ -158,6 +169,14 @@ fi
 # image-search / 临时 socat 都连代理 socket → 互不竞争. proxy 在 QEMU 退出
 # (upstream EOF) 时自动 exit, 不需要手动清理.
 : "${PROXY:=0}"
+# 热键截图: HOTKEY_CAPTURE=1 时, 后台起 hotkey-capture.py, 同时给 QEMU 导出
+# QEMU_HOTKEY_TRIGGER. 用户在 SDL 窗口里按 HOTKEY_KEY(默认 F4), 守护进程从
+# fb-shm 零拷贝帧抓一张 PNG 存到 $VM_DIR/captures. guest 完全无感知.
+: "${HOTKEY_CAPTURE:=0}"
+: "${HOTKEY_KEY:=F4}"
+: "${HOTKEY_SOCK:=/tmp/qemu-stealth-${INSTANCE}.hotkey}"
+: "${HOTKEY_LOG:=/tmp/qemu-stealth-${INSTANCE}.hotkey.log}"
+: "${HOTKEY_OUT:=${VM_DIR:-/home/ubuntu/images/vms/${INSTANCE}}/captures}"
 : "${ISO:=${_cli_iso:-/home/ubuntu/images/win10.iso}}"
 [[ -n "$_cli_iso" ]] && ISO="$_cli_iso"
 
@@ -233,28 +252,6 @@ done
 RANDOM=$((INSTANCE * 13 + $(date +%s) % 32768))
 
 # -------------------------------------------------------------------
-# Per-instance disk creation (thin 512GB qcow2 on first run — Samsung 970 PRO)
-# 如果 BASE_IMAGE=<path> 被设置，新盘以 base 为 backing-file 创建（克隆模式）
-# 这样多个 instance 共享同一份基础镜像，每台只存增量。
-# -------------------------------------------------------------------
-if [[ ! -f "$DISK" ]]; then
-    if [[ -n "${BASE_IMAGE:-}" ]]; then
-        if [[ ! -f "$BASE_IMAGE" ]]; then
-            echo "ERROR: BASE_IMAGE='$BASE_IMAGE' 不存在" >&2
-            exit 1
-        fi
-        echo ">> 从 base 镜像克隆: $BASE_IMAGE"
-        echo ">>   -> $DISK (qcow2 增量层)"
-        "$REPO_ROOT/build/qemu-img" create -f qcow2 \
-            -F qcow2 -b "$BASE_IMAGE" "$DISK" >/dev/null
-    else
-        echo ">> creating fresh 512GB qcow2 at $DISK"
-        "$REPO_ROOT/build/qemu-img" create -f qcow2 -o preallocation=off,cluster_size=65536 \
-            "$DISK" 512000000000
-    fi
-fi
-
-# -------------------------------------------------------------------
 # Boot source:
 #   --iso=<path>  -> boot from that ISO (install media)
 #   (no flag)     -> boot from the qcow2 disk
@@ -272,6 +269,12 @@ fi
 # Subsequent launches: source the saved profile. This is what keeps
 # Windows from re-activating every boot and what stops XignCode3 from
 # noticing the motherboard serial flipping between sessions.
+#
+# **重要顺序**：profile 必须在磁盘创建**之前**加载，因为 qcow2 大小
+# 要按 profile.NVME_SIZE_BYTES 来——profile 抽到 "Samsung 980 1TB"
+# 就建 1TB qcow2、抽到 "970 PRO 512GB" 就建 512GB，Win32_DiskDrive
+# Model 和 Size 才会自洽。历史上这俩 block 顺序反了，profile 1TB +
+# 实盘 512GB 的反作弊指纹隐患由此而来。
 # -------------------------------------------------------------------
 if (( _cli_reroll )); then
     echo ">> --reroll: regenerating hardware identity for instance $INSTANCE"
@@ -286,7 +289,58 @@ else
     stealth_save_profile "$PROFILE_FILE"
     echo ">> profile:     NEW identity saved to $PROFILE_FILE"
 fi
-stealth_print_profile
+
+# -------------------------------------------------------------------
+# RAM 解析（必须在 profile 加载之后）。优先级：
+#   1. 显式 --ram=N / 环境 RAM=N    ← 命令行最高优先级（本次启动临时覆盖）
+#   2. profile.MEM_TOTAL_MB         ← 持久化值，跨重启稳定（推荐，扩容走这里）
+#   3. 4096                         ← 都没有时的历史兜底（老 profile 缺字段）
+# 把内存总量当硬件身份的一部分钉在 profile 里，避免"忘带 --ram → 4GB↔8GB 漂移"
+# 被反作弊当成硬件指纹变化。要把某台 VM 扩到 8GB：在它的 profile 写 MEM_TOTAL_MB=8192
+# （8192=2×4GB 双通道，两条 DIMM SN 各自唯一）。
+# -------------------------------------------------------------------
+if [[ -z "${RAM:-}" && -n "${MEM_TOTAL_MB:-}" ]]; then
+    RAM="$MEM_TOTAL_MB"
+fi
+: "${RAM:=4096}"
+
+# stealth_print_profile 移到 "--- launching ---" 前，那时 VGA_DEV /
+# USB_RELATIVE_MOUSE / NUM_DIMMS / PER_DIMM_MB 都已就绪，print 能反映
+# 真实运行参数（不是默认 fallback）。
+
+# -------------------------------------------------------------------
+# Per-instance disk creation —— qcow2 大小**对齐 profile.NVME_SIZE_BYTES**。
+# 之前硬编码 512000000000（512 GB），但 profile 抽到 "Samsung 980 1TB" 时
+# Windows WMI 看 Model=1TB / Size=476 GiB 跨向量矛盾。现在按 profile 字段建。
+#
+# qcow2 是 thin/sparse 的——1TB 镜像首次只占 ~200KB host 空间，guest 写多少
+# 实际才占多少；不必担心 1TB 镜像吃光物理盘。
+#
+# BASE_IMAGE 克隆模式：从 base 镜像派生增量层，size 跟 base 一致，与
+# NVME_SIZE_BYTES 无关（克隆场景下用户自负 size 一致性）。
+# -------------------------------------------------------------------
+if [[ ! -f "$DISK" ]]; then
+    if [[ -n "${BASE_IMAGE:-}" ]]; then
+        if [[ ! -f "$BASE_IMAGE" ]]; then
+            echo "ERROR: BASE_IMAGE='$BASE_IMAGE' 不存在" >&2
+            exit 1
+        fi
+        echo ">> 从 base 镜像克隆: $BASE_IMAGE"
+        echo ">>   -> $DISK (qcow2 增量层)"
+        "$REPO_ROOT/build/qemu-img" create -f qcow2 \
+            -F qcow2 -b "$BASE_IMAGE" "$DISK" >/dev/null
+    else
+        # 此时 profile 已加载，NVME_SIZE_BYTES 一定有值（pick_profile 写、
+        # 或 load_profile 按 NVME_MODEL 兜底推导）。再加 : 兜底防御退化路径。
+        : "${NVME_SIZE_BYTES:=512000000000}"
+        size_gib=$(( NVME_SIZE_BYTES / 1024 / 1024 / 1024 ))
+        echo ">> creating fresh qcow2 at $DISK"
+        echo ">>   model     : ${NVME_MODEL:-unknown}"
+        echo ">>   raw bytes : $NVME_SIZE_BYTES  (~${size_gib} GiB Windows-side)"
+        "$REPO_ROOT/build/qemu-img" create -f qcow2 -o preallocation=off,cluster_size=65536 \
+            "$DISK" "$NVME_SIZE_BYTES"
+    fi
+fi
 
 # -------------------------------------------------------------------
 # Port/socket allocation (offset by INSTANCE)
@@ -316,10 +370,54 @@ rm -f "$QMP_SOCK" "$MON_SOCK"
 # OVMF_CODE_4M.fd if the stealth build is missing.
 # -------------------------------------------------------------------
 STEALTH_OVMF="$(dirname "$0")/../firmware/OVMF_CODE_4M_stealth.fd"
-if [[ -f "$STEALTH_OVMF" ]]; then
-    OVMF_CODE="$(readlink -f "$STEALTH_OVMF")"
-else
-    OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+# OVMF_CODE 可被 env 覆盖：
+#   OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd ./start-vm.sh 3 --iso=...
+#
+# **ISO 装系统模式强制走 stock OVMF**：deploy/firmware/OVMF_CODE_4M_stealth.fd
+# (EDK2 master build with TPM2_ENABLE + NVIDIA-1c81 GOP whitelist) 的 ISO9660
+# driver 在 Windows ISO（UDF/ISO9660 hybrid，主表只含 README.TXT）上的行为
+# 退化：`if exist FS0:\sources\install.wim` 始终 false，导致 chainload 失败。
+# stock Ubuntu OVMF 2.70 同样 build with TPM2_ENABLE，且没那个 ISO9660 退化，
+# 装系统过得去。装好系统后 (BOOT=disk) 再用 stealth fd 也无所谓——OVMF NVRAM
+# 里的 Boot#### 已指向 Windows Boot Manager，BdsDxe 不再 walk ISO9660。
+if [[ -z "${OVMF_CODE:-}" ]]; then
+    if [[ "$BOOT" == "iso" ]]; then
+        OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+    elif [[ -f "$STEALTH_OVMF" ]]; then
+        OVMF_CODE="$(readlink -f "$STEALTH_OVMF")"
+    else
+        OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+    fi
+fi
+
+# -------------------------------------------------------------------
+# 伪 BGRT (Boot Graphics Resource Table)
+#
+# 裸金属 PC 出厂都有 BGRT（厂商启动 logo 位图描述符），反作弊扫 ACPI 表树
+# 发现没有 BGRT 是弱信号"这台机器不是真 OEM"。OVMF 不提供 BGRT，所以我们
+# 用 -acpitable 注入一个 status=migrated 的 20 字节末态 BGRT，OEMID 对齐
+# 主板 BIOS 的 "ALASKA / A M I  "（与 aml-build.h 一致）。
+#
+# 注意：BGRT body 仅 20 字节，不含 logo bitmap——OS 接管后地址清零是真实
+# 末态，反作弊只看 BGRT **存在**且 OEMID 一致，不会去 deref Image Address。
+# 文件不存在时 ACPI_ARGS 为空数组，cmdline 拼出来等于零参数，不影响其它路径。
+# -------------------------------------------------------------------
+BGRT_BIN="$(dirname "$0")/../firmware/bgrt.bin"
+SSDT_THERMAL_AML="$(dirname "$0")/../firmware/ssdt-thermal.aml"
+ACPI_ARGS=()
+if [[ -f "$BGRT_BIN" ]]; then
+    ACPI_ARGS+=(
+        -acpitable "sig=BGRT,rev=1,oem_id=ALASKA,oem_table_id=A M I   ,data=$BGRT_BIN"
+    )
+fi
+# 伪 SSDT：注入一个 \_SB.TZQE 热区 + \_SB.FANE 风扇，让裸金属画像完整。
+# 文件不存在时跳过；不致命（仅意味着 guest 内 Win32_TemperatureProbe 空）。
+# 用 `-acpitable file=` 形式——iasl 编译出来的 AML 已含完整 SSDT 表头 +
+# checksum，QEMU 直接挂上去即可，不需要重算 header。
+if [[ -f "$SSDT_THERMAL_AML" ]]; then
+    ACPI_ARGS+=(
+        -acpitable "file=$SSDT_THERMAL_AML"
+    )
 fi
 OVMF_VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
 OVMF_VARS="$VM_DIR/ovmf-vars.fd"
@@ -328,16 +426,136 @@ if [[ ! -f "$OVMF_VARS" ]]; then
 fi
 
 # -------------------------------------------------------------------
-# SMBIOS arg list. Tell stealth_smbios_args what per-DIMM capacity to
-# declare (so the part# picked matches the actual memory backend size).
+# TPM 2.0 emulator (swtpm)
+#
+# 为什么必须装：Win10 21H2+ / Win11 全面铺 TPM 2.0；裸金属 UEFI 都会探到。
+# Get-Tpm 返回 "Compatible TPM not found" 或 tpm.msc 空白，配合其它指纹
+# 反作弊立刻判 sandbox / VM。
+#
+# 实现：host 端 swtpm 后台 daemon，per-instance 状态目录在 $VM_DIR/tpm-state，
+# 控制 socket 在 $VM_DIR/tpm-sock，QEMU 通过 -tpmdev emulator + -device tpm-crb
+# 把 TPM 设备暴露给 guest。SecureBoot + TPM 2.0 → 现代裸金属画像完整。
+#
+# 缺 swtpm 时优雅降级（不致命）：跳过 TPM 设备，但打 WARN——这时反作弊会判
+# "无 TPM"，建议 apt install swtpm swtpm-tools 后再启动。
 # -------------------------------------------------------------------
-export MEM_PER_DIMM_MB=$(( RAM / 2 ))
+# TPM 默认启用（2026-05 stealth OVMF 已加 -D TPM2_ENABLE=TRUE 重 build，
+# Tcg2Dxe / Tcg2Pei / Tcg2ConfigDxe / Tcg2PlatformDxe 模块全在）。
+# guest 看到 tpm-crb 设备，Win 加载 TPM 驱动 + tpm.msc / Get-Tpm 全部正常。
+# 设 TPM=0 显式关掉（如果 OVMF 切回不支持 TPM 的旧 fd，或者想模拟"用户没在
+# BIOS 启用 fTPM"的状态——B350 / H310 / H410 入门主板出厂默认就是关的）。
+TPM_ARGS=()
+if [[ "${TPM:-1}" == "0" ]]; then
+    : # 显式禁用
+elif command -v swtpm >/dev/null 2>&1; then
+    TPM_STATE_DIR="$VM_DIR/tpm-state"
+    TPM_SOCK="$VM_DIR/tpm-sock"
+    TPM_LOG="$VM_DIR/tpm.log"
+    mkdir -p "$TPM_STATE_DIR"
+
+    # 首次启动 / state 不完整时初始化 TPM 2.0 state（manufacturer info、EK 证书）。
+    # 完整初始化产出 ~6KB permall（含 RSA EK + ECC EK + Platform cert + sha256 PCR banks）；
+    # 1.5KB 左右的"空 init"代表 swtpm_localca 创证书阶段失败（多半是
+    # /var/lib/swtpm-localca/ 只 root 能写）—— Windows 加载 TPM 驱动时找不到 EK
+    # 就报 "tpm.msc: 找不到兼容的 TPM"，必须重 init。
+    _need_tpm_init=0
+    if [[ ! -f "$TPM_STATE_DIR/tpm2-00.permall" ]]; then
+        _need_tpm_init=1
+    elif (( $(stat -c%s "$TPM_STATE_DIR/tpm2-00.permall") < 3000 )); then
+        echo ">> swtpm:       permall < 3KB（空 init），强制重新创建 EK / Platform cert"
+        _need_tpm_init=1
+        # 备份再清，万一是 stealth 重要数据
+        mv "$TPM_STATE_DIR/tpm2-00.permall" "$TPM_STATE_DIR/tpm2-00.permall.empty.bak.$(date +%s)" 2>/dev/null || true
+    fi
+
+    if (( _need_tpm_init )); then
+        # 防御性：swtpm_localca statedir 默认 0750 swtpm:root；ubuntu 没权限会
+        # 静默跳过证书创建。提前修一次（如果是 root 跑的就跳过，sudo 才有意义）。
+        if [[ -d /var/lib/swtpm-localca && ! -w /var/lib/swtpm-localca ]]; then
+            echo ">> swtpm:       /var/lib/swtpm-localca 不可写，尝试 sudo chown ubuntu"
+            if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
+                sudo chown -R "$(id -u):$(id -g)" /var/lib/swtpm-localca 2>/dev/null || true
+            else
+                echo ">> WARN: 没有免密 sudo，跑 'sudo chown -R \$(id -u):\$(id -g) /var/lib/swtpm-localca' 一次后重启"
+            fi
+        fi
+
+        echo ">> swtpm:       初始化 TPM 2.0 state at $TPM_STATE_DIR"
+        if ! swtpm_setup --tpm2 --tpmstate "$TPM_STATE_DIR" \
+                --create-ek-cert --create-platform-cert --lock-nvram \
+                --overwrite 2>&1 | tail -5; then
+            echo ">> WARN: swtpm_setup 失败；guest tpm.msc 会报找不到 TPM"
+        fi
+        # 二次确认大小：成功 init 应该 > 3KB
+        if [[ -f "$TPM_STATE_DIR/tpm2-00.permall" ]]; then
+            _sz=$(stat -c%s "$TPM_STATE_DIR/tpm2-00.permall")
+            echo ">> swtpm:       permall=${_sz} bytes (含 EK + Platform cert 应 > 3000)"
+        fi
+    fi
+
+    # 启动 swtpm daemon；clear-socket 避免 stale unix socket 残留
+    rm -f "$TPM_SOCK"
+    swtpm socket \
+        --tpmstate dir="$TPM_STATE_DIR" \
+        --ctrl type=unixio,path="$TPM_SOCK" \
+        --tpm2 \
+        --log file="$TPM_LOG",level=20 \
+        --daemon
+    # 等 socket 出现（最多 2 秒）
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -S "$TPM_SOCK" ]] && break
+        sleep 0.2
+    done
+    if [[ ! -S "$TPM_SOCK" ]]; then
+        echo ">> WARN: swtpm 启动超时（2s），跳过 TPM——guest 将看不到 TPM 设备" >&2
+    else
+        TPM_ARGS=(
+            -chardev "socket,id=chrtpm,path=$TPM_SOCK"
+            -tpmdev emulator,id=tpm0,chardev=chrtpm
+            -device tpm-crb,tpmdev=tpm0
+        )
+        echo ">> swtpm:       TPM 2.0 ready (sock=$TPM_SOCK, log=$TPM_LOG)"
+    fi
+else
+    echo ">> WARN: swtpm 未安装，guest 将无 TPM 2.0；反作弊会判 sandbox。建议：" >&2
+    echo ">>       sudo apt install swtpm swtpm-tools && 重启此脚本" >&2
+fi
+
+# -------------------------------------------------------------------
+# DIMM 拓扑决策（裸金属"双卡槽主板"画像）：
+#
+# - RAM ≤ 4096 MiB：1 条 DIMM 占满，**1 个卡槽空**（最常见的低端配置）；
+# - RAM > 4096 MiB：2 条 DIMM 各占总量一半，双通道。
+#
+# SMBIOS Type 16 num-devices **固定 2**（主板物理卡槽数不变，跟 BOARD_POOL
+# 的 B350/H310 入门主板真实拓扑一致）。Type 17 由 QEMU 按 `-object
+# memory-backend-*` 数量自动克隆——1 backend = 1 Type 17 记录 = 1 个
+# Win32_PhysicalMemory；空槽不会单独 emit。
+#
+# MEM_PER_DIMM_MB 影响 stealth_smbios_args 选 2GB/4GB part 号：
+#   < 4096 → MEM_PART_2G   ≥ 4096 → MEM_PART_4G
+# -------------------------------------------------------------------
+if (( RAM <= 4096 )); then
+    NUM_DIMMS=1
+    PER_DIMM_MB=$RAM
+else
+    NUM_DIMMS=2
+    PER_DIMM_MB=$(( RAM / 2 ))
+fi
+export MEM_PER_DIMM_MB="$PER_DIMM_MB"
+export T16_NUM_DEVICES=2   # 物理双卡槽不变，即便只插 1 条
 
 # Override default PCI subsystem IDs for devices that don't set their own.
-# ASUS PRIME B350-PLUS uses 1043:8694 on many platform devices — keeps the
-# Red Hat/QEMU leak (1AF4:1100) off of xHCI, LPC, HDA, bridges, etc.
-export QEMU_PCI_SUBSYS_VEN=${QEMU_PCI_SUBSYS_VEN:-0x1043}
-export QEMU_PCI_SUBSYS_DEV=${QEMU_PCI_SUBSYS_DEV:-0x8694}
+# **2026-05 修复**：之前 hardcoded ASUS B350-PLUS (1043:8694) 无视 BOARD_MFR；
+# profile 抽到 Gigabyte/MSI/ASRock 时 SMBIOS 报 X 牌但 PCI 桥子系统全报 ASUS，
+# 跨表对照即矛盾。现在 stealth_pick_profile 已经把对应板厂的 SUBSYS 写进 profile。
+# - ASUS     0x1043 / 0x8694 (B350-PLUS) / 0x86C7 (ROG/X370)
+# - MSI      0x1462 / board model 后缀 (7A34/7B49/7C95...)
+# - Gigabyte 0x1458 / 0x5001
+# - ASRock   0x1849 / 0x1230 / 0x9696
+# 老 profile 缺该字段时 stealth_load_profile 会兜底回 ASUS B350-PLUS 默认值。
+export QEMU_PCI_SUBSYS_VEN="${QEMU_PCI_SUBSYS_VEN:-$BOARD_SUBSYS_VEN}"
+export QEMU_PCI_SUBSYS_DEV="${QEMU_PCI_SUBSYS_DEV:-$BOARD_SUBSYS_DEV}"
 SMBIOS_ARGS=()
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
@@ -413,11 +631,12 @@ if [[ "$FB_SHM" == "1" ]]; then
     fi
 fi
 
-# 选 virtio-vga 或 virtio-vga-gl
+# 选 virtio-vga 或 virtio-vga-gl + 注入 profile 的 EDID 字符串（patch 0009 新选项）
+EDID_PROPS="edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID_SERIAL},edid-width-mm=${EDID_WIDTH_MM},edid-height-mm=${EDID_HEIGHT_MM}"
 if [[ "$SDL" == "1" && "$STABLE_DISPLAY" != "1" ]]; then
-    VGA_DEV="virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
+    VGA_DEV="virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${EDID_PROPS},${GPU_STEALTH}"
 else
-    VGA_DEV="virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${GPU_STEALTH}"
+    VGA_DEV="virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${EDID_PROPS},${GPU_STEALTH}"
 fi
 
 # GUI 通道
@@ -459,10 +678,40 @@ KBD_HINT='USB keyboard (DirectInput/Raw Input 兼容); NumLock 由 hive 钉 ON'
 # -------------------------------------------------------------------
 BOOT_ORDER="menu=on,splash-time=5000,reboot-timeout=5000"
 if [[ "$BOOT" == "iso" ]]; then
+    # **关键背景**：Windows 10/11 ISO 的 El Torito UEFI image 描述符 Ldsiz=1
+    # sector（512B），OVMF 2.70 (EDK2 stable) 因此**拒绝**把 CDROM 当 auto-boot
+    # 候选，UEFI Shell 提示 "Press any key to boot from CD" 永远等不到。
+    # 直接结果：bootindex=1 在 ide-cd 上无效，OVMF 跳过 CDROM、掉进 EFI Shell。
+    #
+    # 修复：再挂一个 16 MiB FAT helper image (deploy/firmware/uefi-shell-
+    # chainload.img) 作 bootindex=1 的 virtio-blk disk。Helper 里:
+    #   \EFI\BOOT\BOOTX64.EFI  ← 是 EDK2 自带的 UEFI Shell.efi
+    #   \startup.nsh           ← 自动 `connect -r` + 扫 FS0..FS9，找到带
+    #                            sources\install.wim 的 CDROM 就 chainload
+    #                            FS%a:\EFI\BOOT\BOOTX64.EFI
+    # OVMF fallback 路径 (\EFI\BOOT\BOOTX64.EFI) 对 FAT 文件系统是 work 的，
+    # 所以 virtio-blk helper 总能 boot；后面 Win Setup 出现自己的 "Press any
+    # key to boot from CD" prompt，guest 内按一次空格就进 Setup。
+    #
+    # Helper image 不存在时由 deploy/tools/build-uefi-chainload-helper.sh 现造。
+    HELPER_IMG="$(dirname "$0")/../firmware/uefi-shell-chainload.img"
+    if [[ ! -f "$HELPER_IMG" ]]; then
+        echo ">> chainload helper image not found, building..."
+        "$(dirname "$0")/../tools/build-uefi-chainload-helper.sh" 2>&1 | sed 's/^/    /'
+    fi
     CDROM_ARGS=(
+        # bootindex=1: virtio-blk helper image, OVMF auto-boots its
+        # \EFI\BOOT\BOOTX64.EFI (UEFI Shell) → startup.nsh → chainload Win ISO
+        -drive file="$HELPER_IMG",if=none,id=cdhelp,format=raw,readonly=on
+        -device "virtio-blk,drive=cdhelp,bootindex=1"
+
+        # bootindex=2: Windows install ISO on ide-cd. OVMF can't auto-boot it
+        # (El Torito UEFI image broken in MS ISO), but Shell can discover it
+        # via `connect -r` + `map -r` and chainload \EFI\BOOT\BOOTX64.EFI.
         -drive file="$ISO",media=cdrom,if=none,id=cd0,readonly=on
-        -device ide-cd,drive=cd0,bus=ide.0,bootindex=1
+        -device ide-cd,drive=cd0,bus=ide.0,bootindex=2
     )
+    echo ">> chainload:   $HELPER_IMG (UEFI Shell auto-boots and finds the Win ISO)"
 else
     CDROM_ARGS=()
 fi
@@ -537,6 +786,47 @@ else
 fi
 
 # -------------------------------------------------------------------
+# 构造 MEMORY_ARGS：根据 NUM_DIMMS 决定 1 backend 还是 2 backend，
+# 对应 1 个 NUMA node（单通道）还是 2 个 NUMA node（双通道）。
+# -------------------------------------------------------------------
+MEMORY_ARGS=(-m "${RAM}M")
+if (( NUM_DIMMS == 1 )); then
+    # 1 条 DIMM 占满总量，单 NUMA node 把所有 vCPU 都挂上
+    MEMORY_ARGS+=(
+        -object "memory-backend-memfd,id=mem0,size=${RAM}M,share=on,prealloc=on"
+        -numa "node,nodeid=0,memdev=mem0,cpus=0-$((CPUS-1))"
+    )
+else
+    # 2 条 DIMM 各占一半，双 NUMA node 配对 dual-channel 拓扑
+    MEMORY_ARGS+=(
+        -object "memory-backend-memfd,id=mem0,size=${PER_DIMM_MB}M,share=on,prealloc=on"
+        -object "memory-backend-memfd,id=mem1,size=${PER_DIMM_MB}M,share=on,prealloc=on"
+        -numa "node,nodeid=0,memdev=mem0,cpus=0-$((CPUS/2-1))"
+        -numa "node,nodeid=1,memdev=mem1,cpus=$((CPUS/2))-$((CPUS-1))"
+    )
+fi
+
+# -------------------------------------------------------------------
+# 构造 KBD_DEVICE_ARG / POINTER_DEVICE_ARG（patch 0010 新选项）
+#
+# QEMU `-device` 的 prop 值不接受裸逗号（逗号是 prop 分隔符）。我们 pool 里
+# 的 product 字符串如 "Logitech USB Keyboard K120" 不含逗号，安全；将来若加
+# 含逗号型号需用 ',,' 转义（参考 stealth_smbios_args::_e）。
+# -------------------------------------------------------------------
+KBD_DEVICE_ARG=(
+    -device "usb-kbd,bus=xhci.0,vendorid=${KBD_VID},productid=${KBD_PID},manufacturer=${KBD_MFR},product=${KBD_PRODUCT},serial=${KBD_SERIAL}"
+)
+if [[ "${USB_RELATIVE_MOUSE:-0}" == "1" ]]; then
+    POINTER_DEVICE_ARG=(
+        -device "usb-mouse,bus=xhci.0,vendorid=${MOUSE_VID},productid=${MOUSE_PID},manufacturer=${MOUSE_MFR},product=${MOUSE_PRODUCT},serial=${MOUSE_SERIAL}"
+    )
+else
+    POINTER_DEVICE_ARG=(
+        -device "usb-tablet,bus=xhci.0,vendorid=${TABLET_VID},productid=${TABLET_PID},manufacturer=${TABLET_MFR},product=${TABLET_PRODUCT},serial=${TABLET_SERIAL}"
+    )
+fi
+
+# -------------------------------------------------------------------
 # Assemble the command line
 # -------------------------------------------------------------------
 CMD=(
@@ -545,7 +835,11 @@ CMD=(
     # --- Machine / firmware ---
     # ACPI OEM IDs default to "ALASKA"/"A M I   " from our aml-build.h patch;
     # no need to pass x-oem-id on the cmdline. smm=on is required for OVMF S3.
-    -name "win10-ryzen3-${INSTANCE},debug-threads=on"
+    #
+    # **2026-05 改名**：原来 "win10-ryzen3-${INSTANCE}" host `ps` 一眼能看出
+    # stealth 设计；改成中性的 "win10-${INSTANCE}" 减少 host 端无意暴露
+    # （不影响 guest——guest 看不到 QEMU 进程名）。debug-threads 仍开。
+    -name "win10-${INSTANCE},debug-threads=on"
     -machine q35,accel=kvm,vmport=off,smm=on,hpet=off,kernel-irqchip=split
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
     -drive if=pflash,format=raw,file="$OVMF_VARS"
@@ -557,20 +851,25 @@ CMD=(
     -cpu "$(stealth_qemu_cpu_arg)"
     -smp cpus=$CPUS,cores=$CPUS,threads=1,sockets=1,maxcpus=$CPUS
 
-    # --- Memory: backed by memfd, dual-channel via 2 NUMA nodes ---
+    # --- Memory: backed by memfd, 拓扑由 MEMORY_ARGS 数组动态决定 ---
     # share=on（关键）：让 host 进程地址空间和 KVM 给 guest 的 page 是同一份。
     # 原本写 share=off 会触发 KVM 的 COW 路径，host 进程读到的是初始 prealloc 零页，
     # 与 guest 实际 RAM 分叉——VMI（memflow / LibVMI）会读到全零，无法工作。
     # share=on 对 guest 完全不可见（反作弊看不到任何差别），是 VMI 必须的前提。
-    -m "${RAM}M"
-    -object memory-backend-memfd,id=mem0,size=$((RAM/2))M,share=on,prealloc=on
-    -object memory-backend-memfd,id=mem1,size=$((RAM/2))M,share=on,prealloc=on
-    -numa node,nodeid=0,memdev=mem0,cpus=0-$((CPUS/2-1))
-    -numa node,nodeid=1,memdev=mem1,cpus=$((CPUS/2))-$((CPUS-1))
+    #
+    # MEMORY_ARGS 在 CMD 数组之前按 NUM_DIMMS 拼好：
+    #   NUM_DIMMS=1 (RAM ≤ 4GB)：1× full-size memfd + 1 NUMA node
+    #   NUM_DIMMS=2 (RAM > 4GB)：2× half-size memfd + 2 NUMA node (dual-channel)
+    "${MEMORY_ARGS[@]}"
 
     # --- Random identifiers ---
     -uuid "$UUID"
-    -rtc base=localtime,clock=host,driftfix=slew
+    # **2026-05 改 clock=vm**：原来 clock=host 让 guest RTC = host monotonic，
+    # 配合 +invtsc + 钉死 tsc-freq 后，RDTSC 和 wall-clock 完美 ppm 级对齐，
+    # 反而是 VM 特征（裸金属晶振温漂总有几十 ppm 偏移）。clock=vm 让 RTC 走
+    # guest 自己的 TSC 计数器自然产生微漂移；driftfix=slew 仍保证 Windows
+    # 时间服务能拉回 NTP 不出问题。
+    -rtc base=localtime,clock=vm,driftfix=slew
     -global kvm-pit.lost_tick_policy=delay
     -boot "$BOOT_ORDER"
     -no-user-config
@@ -579,11 +878,18 @@ CMD=(
     # --- SMBIOS / DMI override ---
     "${SMBIOS_ARGS[@]}"
 
+    # --- ACPI 补丁表（伪 BGRT，让 ACPI 表树看起来像真 OEM 机器） ---
+    "${ACPI_ARGS[@]}"
+
     # --- PCI root complex (pcie-pci-bridge hidden; default q35) ---
     -device pcie-root-port,id=rp0,slot=0,bus=pcie.0,multifunction=on
     -device pcie-root-port,id=rp1,slot=1,bus=pcie.0
     -device pcie-root-port,id=rp2,slot=2,bus=pcie.0
     -device pcie-root-port,id=rp3,slot=3,bus=pcie.0
+
+    # --- TPM 2.0 (swtpm emulator, tpm-crb 风格——现代主板默认走 CRB 而不是 TIS) ---
+    # 空数组时（swtpm 不可用）此处展开为零参数，不影响。
+    "${TPM_ARGS[@]}"
 
     # --- AMD Zen Data Fabric PCI stubs at 00:18.0-7 (only for AMD CPUs) ---
     # Real Zen silicon exposes 8 DF config functions; HWiNFO/CPU-Z use these
@@ -594,7 +900,9 @@ CMD=(
     # --- Storage: virtio-scsi host + 随机 Samsung NVMe (model/firmware/SN 来自 profile) ---
     -object iothread,id=io1
     -drive file="$DISK",if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap
-    -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,serial="$NVME_SERIAL",use-samsung-id=on,bootindex=2,model-number="$NVME_MODEL",firmware-rev="$NVME_FIRMWARE"
+    # bootindex=3 (装系统时 NVMe 空，让位给 helper image=1 / Win ISO=2)；
+    # 装好系统后 OVMF NVRAM 把 Windows Boot Manager 推到最高，bootindex 不再决定顺序。
+    -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,serial="$NVME_SERIAL",use-samsung-id=on,bootindex=3,model-number="$NVME_MODEL",firmware-rev="$NVME_FIRMWARE"
 
     "${CDROM_ARGS[@]}"
 
@@ -607,9 +915,11 @@ CMD=(
     # USB_RELATIVE_MOUSE=1: usb-mouse (相对坐标，更像真鼠标，反作弊友好；
     #   SDL 抓鼠标，Ctrl+Shift+G 释放)
     # 默认 usb-tablet (绝对坐标，鼠标可自由出入 SDL 窗口)
+    # 经 patch 0010 后 vendorid/productid/manufacturer/product/serial 全部从
+    # profile 的 KBD/MOUSE/TABLET 字段注入，每台 VM 看到不同品牌键鼠。
     -device qemu-xhci,id=xhci,bus=rp3
-    -device usb-kbd,bus=xhci.0
-    $([[ "${USB_RELATIVE_MOUSE:-0}" == "1" ]] && echo "-device usb-mouse,bus=xhci.0" || echo "-device usb-tablet,bus=xhci.0")
+    "${KBD_DEVICE_ARG[@]}"
+    "${POINTER_DEVICE_ARG[@]}"
 
     # --- Audio: ICH9 HDA (looks like Realtek ALC). Use 'none' backend
     # unconditionally -- passes driver probe in guest without requiring
@@ -654,10 +964,71 @@ if [[ "$FB_SHM" == "1" ]]; then
     echo ">> fb-shm sock: $FB_SHM_SOCK (rate=${FB_SHM_RATE} Hz${FB_SHM_ROI:+, ROI=$FB_SHM_ROI})"
     echo ">>   接消费端: scripts/qemu-fb-shm-stream.py --sock $FB_SHM_SOCK --output ..."
 fi
+if [[ "$HOTKEY_CAPTURE" == "1" ]]; then
+    if [[ "$SDL" != "1" ]]; then
+        echo ">> WARN: --hotkey-capture 需要 SDL 窗口接收按键，当前非 SDL，已忽略"
+        HOTKEY_CAPTURE=0
+    else
+        echo ">> hotkey:      按 $HOTKEY_KEY -> fb-shm 抓 PNG 到 $HOTKEY_OUT (log: $HOTKEY_LOG)"
+    fi
+fi
 echo ">> SSH/RDP fwd: 127.0.0.1:$SSH_FWD_PORT / 127.0.0.1:$RDP_FWD_PORT"
 echo ">> boot mode:   $BOOT"
-echo ">> disk:        $DISK ($(stat -c%s "$DISK") bytes)"
-echo ">> 键盘:        $KBD_HINT"
+if [[ "$BOOT" == "iso" ]]; then
+    # **ISO 装系统手动操作提示**：
+    # Windows ISO 的 El Torito UEFI image 描述 Ldsiz=1 sector，OVMF auto-boot
+    # 直接掉 UEFI Shell；ISO9660 主表也不含 \EFI\BOOT\BOOTX64.EFI（在 Joliet/
+    # UDF 扩展里），所以即使 chainload helper 加了 startup.nsh 也偶尔 miss。
+    # 手动路径最稳：OVMF splash 倒数 5 秒内按 ESC → Boot Manager →
+    # "UEFI QEMU DVD-ROM" → Setup 起来后按空格过 "Press any key to boot from
+    # CD or DVD"。SDL 窗口里直接键盘操作即可。
+    echo ">>"
+    echo ">> ============ 装系统手动步骤 ============"
+    echo ">>   1. SDL 窗口里, OVMF 倒数 5 秒内按 ESC 进 Boot Manager"
+    echo ">>   2. 选 'UEFI QEMU DVD-ROM QEMU DVD-ROM' → 回车 boot"
+    echo ">>   3. Setup 起来后按空格过 'Press any key to boot from CD'"
+    echo ">>   4. 进 Windows Setup 后正常装"
+    echo ">> 若 chainload helper 自动 work, 上面步骤可跳, 直接进 Setup。"
+    echo ">> ======================================="
+fi
+# 磁盘信息：现盘字节数 + profile 报的容量 + NVMe 型号——3 个值必须自洽。
+echo ">> disk:        $DISK"
+echo ">>   actual    : $(stat -c%s "$DISK") bytes (qcow2 sparse on-host)"
+echo ">>   advertised: ${NVME_SIZE_BYTES:-?} bytes = ${NVME_MODEL:-?}"
+# 内存信息：总量 + DIMM 拓扑 (1 单通道 / 2 双通道) + 厂商 + part number + memfd backend。
+# memfd 是 share=on 让 VMI（memflow）能 mmap 同一份物理页。NUMA node 数 = DIMM 数。
+# 主板物理 2 卡槽（T16_NUM_DEVICES=2）始终不变，4GB 时一个槽空。
+if (( PER_DIMM_MB >= 4096 )); then
+    _mem_part_used="$MEM_PART_4G"
+else
+    _mem_part_used="$MEM_PART_2G"
+fi
+if (( NUM_DIMMS == 1 )); then
+    echo ">> 内存:        ${RAM} MiB 单通道 (1× ${PER_DIMM_MB} MiB memfd, NUMA 1 node)"
+    echo ">>   卡槽布局 : 2 卡槽 / 占用 1 / 空 1"
+else
+    echo ">> 内存:        ${RAM} MiB 双通道 (2× ${PER_DIMM_MB} MiB memfd, NUMA 2 node)"
+    echo ">>   卡槽布局 : 2 卡槽 / 全部占用"
+fi
+echo ">>   DIMM 厂商 : ${MEM_MFR:-?}"
+echo ">>   part 号   : ${_mem_part_used:-?}"
+if (( NUM_DIMMS == 2 )); then
+    # 双通道：每条 DIMM 各自唯一 SN（第 2 条由 MEM_SERIAL 确定性派生），核对用
+    _mem_sn2=$(printf '%s' "${MEM_SERIAL}-dimm2" | sha256sum | head -c 8 | tr '[:lower:]' '[:upper:]')
+    echo ">>   SN        : ${MEM_SERIAL:-?} (DIMM_A2) / ${_mem_sn2} (DIMM_B2)  ← 两条各自唯一"
+else
+    echo ">>   SN        : ${MEM_SERIAL:-?}"
+fi
+# CPU 信息：profile 选定的型号 + 实际给 guest 的 vCPU 拓扑
+echo ">> CPU:         ${CPU_NAME:-?}"
+echo ">>   QEMU 串   : $(stealth_qemu_cpu_arg)"
+echo ">>   拓扑      : ${CPUS} vCPU (cores=${CPUS}, threads=1, sockets=1, maxcpus=${CPUS})"
+
+# 整份 stealth profile（含 CPU / 主板 / GPU / NVMe / 内存 / 网卡 / 声卡 /
+# 键鼠 / 显示器 / UUID 等）。这里才打，因为 VGA_DEV、USB_RELATIVE_MOUSE、
+# NUM_DIMMS、PER_DIMM_MB 都已就绪，print_profile 能反映真实运行参数。
+stealth_print_profile
+
 echo ">> --- launching ---"
 
 # QMP fanout proxy: 后台起 qmp-proxy.py, --wait-upstream 让它在 QMP socket 还没
@@ -669,6 +1040,46 @@ if [[ "$PROXY" == "1" ]]; then
         > "$QMP_PROXY_LOG" 2>&1 &
     QMP_PROXY_PID=$!
     echo ">> QMP proxy:   started pid=$QMP_PROXY_PID, listening on $QMP_PROXY_SOCK"
+fi
+
+# 热键截图: 给打了补丁的 QEMU 导出 QEMU_HOTKEY_TRIGGER(它在 ui/sdl2.c 收到
+# F4 时往这个 DGRAM socket 戳一字节), 再后台拉起 hotkey-capture.py 守护进程.
+# 守护进程同时跑触发器 A(XRecord 旁路监听同 display 的 F4) 与触发器 B(收上面
+# 那个 socket), 两路都从 fb-shm 抓帧. 守护进程内置 socket-not-exist 重试,
+# 可以先于 QEMU 起来; QEMU 退出后它收 SIGTERM 由 stop-vm.sh 清理.
+if [[ "$HOTKEY_CAPTURE" == "1" ]]; then
+    export QEMU_HOTKEY_TRIGGER="$HOTKEY_SOCK"
+    rm -f "$HOTKEY_SOCK"
+    "$HERE/hotkey-capture.py" "$INSTANCE" \
+        --key "$HOTKEY_KEY" \
+        --sock "$FB_SHM_SOCK" \
+        --trigger-sock "$HOTKEY_SOCK" \
+        --out-dir "$HOTKEY_OUT" \
+        > "$HOTKEY_LOG" 2>&1 &
+    HOTKEY_PID=$!
+    echo ">> hotkey:      started pid=$HOTKEY_PID, key=$HOTKEY_KEY sock=$HOTKEY_SOCK"
+fi
+
+# ISO 装系统：BOOTX64.EFI 启动后会显示 "Press any key to boot from CD or DVD"
+# prompt 5 秒。SDL 后端在 virtio-vga 切 mode 时偶发 "Display output is not
+# active" 占位字遮住 prompt，用户来不及按键。后台 daemon 在启动后 18-60 秒
+# 持续 QMP send-key spc 几次，确保 prompt 被吃掉、Setup 自动进入。Setup 进
+# graphics 模式后 spc 不响应（Setup UI 不绑定 spc），无副作用。
+if [[ "$BOOT" == "iso" ]]; then
+    (
+        # 等 OVMF + chainload 跑到 BOOTX64.EFI 大约要 15-18 秒
+        sleep 16
+        # 每 2 秒 send 一次, 共 ~22 次 = 44 秒，覆盖 BOOTX64.EFI 5 秒 prompt
+        # 窗口的多个 retry。Setup 真正起来后 spc 也是 noop。
+        for _i in $(seq 1 22); do
+            [[ -S "$QMP_SOCK" ]] || break
+            printf '{"execute":"qmp_capabilities"}{"execute":"human-monitor-command","arguments":{"command-line":"sendkey spc"}}\n' \
+                | timeout 2 socat - UNIX-CONNECT:"$QMP_SOCK" >/dev/null 2>&1 || true
+            sleep 2
+        done
+    ) &
+    _AUTO_KEY_PID=$!
+    echo ">> auto-key:    后台 daemon (pid=$_AUTO_KEY_PID) 跨过 BOOTX64.EFI 'Press any key' prompt"
 fi
 
 # QEMU's `-rtc base=localtime` calls libc localtime() which honours $TZ.

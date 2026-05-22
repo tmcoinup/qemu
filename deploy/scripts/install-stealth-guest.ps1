@@ -1,4 +1,4 @@
-# install-stealth-guest.ps1 — runs INSIDE Win10 guest as Administrator.
+﻿# install-stealth-guest.ps1 — runs INSIDE Win10 guest as Administrator.
 #
 # One-shot installer for:
 #   1. backdated CA chain into LocalMachine\Root + TrustedPublisher

@@ -1,4 +1,4 @@
-# fix-ms-gamingoverlay.ps1
+﻿# fix-ms-gamingoverlay.ps1
 #
 # 抑制 Win10 LTSC 上启动腾讯系网游 (CrossFire/DNF) 时弹的
 #   "需要使用新应用以打开此 ms-gamingoverlay 链接" 对话框。

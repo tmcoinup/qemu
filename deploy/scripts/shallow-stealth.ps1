@@ -134,8 +134,13 @@ $wmi = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -ne 'Micro
 "  WMI Name         : $($wmi.Name)"
 "  WMI VideoProc    : $($wmi.VideoProcessor)"
 "  Driver           : $($wmi.DriverVersion)"
-$ts = (bcdedit /enum '{current}' | Select-String 'testsigning').ToString().Trim()
-"  $ts"
+# BCD 里没 testsigning 项时 Select-String 返回 null，.ToString() 会炸；先判一次
+$tsMatch = bcdedit /enum '{current}' 2>$null | Select-String 'testsigning'
+if ($tsMatch) {
+    "  $($tsMatch.ToString().Trim())"
+} else {
+    "  testsigning            No (BCD 没此项 = 默认关)"
+}
 
 Write-Host "`n=== done ===" -ForegroundColor Green
 Write-Host "All requirements:" -ForegroundColor Yellow

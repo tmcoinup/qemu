@@ -8,7 +8,8 @@ repo (we tested against the `master` branch as of 2026-04-25).
 
 | Patch | Target | Purpose |
 |---|---|---|
-| `0001-viogpudo-realistic-vsync-freq.patch` | `viogpu/viogpudo/viogpudo.cpp` | Replace `D3DKMDT_FREQUENCY_NOTSPECIFIED` (=`~1`) in `BuildVideoSignalInfo` with concrete 60 Hz values, so `Win32_VideoController.CurrentRefreshRate`, `MinRefreshRate`, `MaxRefreshRate`, and 高级显示设置.刷新频率 stop reporting `1`. |
+| `0001-viogpudo-realistic-vsync-freq.patch` | `viogpu/viogpudo/viogpudo.cpp::BuildVideoSignalInfo` | Replace `D3DKMDT_FREQUENCY_NOTSPECIFIED` (=`~1`) with concrete 60 Hz values, so `Win32_VideoController.CurrentRefreshRate`, `MinRefreshRate`, `MaxRefreshRate`, and 高级显示设置.刷新频率 stop reporting `1`. |
+| `0002-viogpudo-mode-list-1080p.patch` | `viogpu/viogpudo/viogpudo.cpp::gTargetModes[]` | Trim driver's hardcoded mode list down to what a real 24" 1920×1080 16:9 panel exposes. Removes 1920×1200 / 1280×800 / 1440×900 / 1366×768 / 1280×768 (16:10 or laptop-only). Win10 display settings 分辨率下拉只列 7 条 16:9/4:3 模式。 |
 
 ## Applying
 
@@ -16,6 +17,7 @@ repo (we tested against the `master` branch as of 2026-04-25).
 git clone https://github.com/virtio-win/kvm-guest-drivers-windows.git
 cd kvm-guest-drivers-windows
 git apply /path/to/0001-viogpudo-realistic-vsync-freq.patch
+git apply /path/to/0002-viogpudo-mode-list-1080p.patch
 ```
 
 ## Build environment caveat (status: unresolved)

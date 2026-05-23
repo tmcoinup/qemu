@@ -39,6 +39,12 @@ struct GenPCIERootPort {
 
     /* additional resources to reserve */
     PCIResReserve res_reserve;
+
+    /* stealth: 可选 PCI ID 覆盖。0xFFFFFFFF = 沿用 class 默认 (AMD 1022:1453)。
+     * 启动脚本按平台注入，让根端口与 CPU/主板同厂商。 */
+    uint32_t stealth_vendor_id;
+    uint32_t stealth_device_id;
+    uint32_t stealth_revision;
 };
 
 static uint8_t gen_rp_aer_vector(const PCIDevice *d)
@@ -85,6 +91,18 @@ static void gen_rp_realize(DeviceState *dev, Error **errp)
     if (local_err) {
         error_propagate(errp, local_err);
         return;
+    }
+
+    /* stealth: parent_realize 已把 class 默认 vendor/device 写入 config，
+     * 这里按需覆盖成平台对应的根端口 ID（AMD GPP / Intel PCH Root Port）。 */
+    if (grp->stealth_vendor_id != 0xFFFFFFFF) {
+        pci_config_set_vendor_id(d->config, grp->stealth_vendor_id & 0xFFFF);
+    }
+    if (grp->stealth_device_id != 0xFFFFFFFF) {
+        pci_config_set_device_id(d->config, grp->stealth_device_id & 0xFFFF);
+    }
+    if (grp->stealth_revision != 0xFFFFFFFF) {
+        pci_config_set_revision(d->config, grp->stealth_revision & 0xFF);
     }
 
     /*
@@ -145,6 +163,12 @@ static Property gen_rp_props[] = {
                                 speed, PCIE_LINK_SPEED_16),
     DEFINE_PROP_PCIE_LINK_WIDTH("x-width", PCIESlot,
                                 width, PCIE_LINK_WIDTH_32),
+    DEFINE_PROP_UINT32("x-pci-vendor-id", GenPCIERootPort,
+                       stealth_vendor_id, 0xFFFFFFFF),
+    DEFINE_PROP_UINT32("x-pci-device-id", GenPCIERootPort,
+                       stealth_device_id, 0xFFFFFFFF),
+    DEFINE_PROP_UINT32("x-pci-revision", GenPCIERootPort,
+                       stealth_revision, 0xFFFFFFFF),
     DEFINE_PROP_END_OF_LIST()
 };
 
@@ -159,9 +183,14 @@ static void gen_rp_dev_class_init(ObjectClass *klass, void *data)
      * (1B36:000C) — a one-line tell when SetupAPI / lspci walks every
      * pcie-root-port slot. Replace with AMD's Family 17h "Internal PCIe
      * GPP" ID (1022:1453), which matches the root-complex ports on Zen1
-     * Ryzen consumer silicon. Per-device x-pci-vendor-id/x-pci-device-id
-     * still works for callers that need a different ID. Paired with the
-     * AMD DF stubs at 00:18.0-7, the topology now looks consistent.
+     * Ryzen consumer silicon. Paired with the AMD DF stubs at 00:18.0-7,
+     * the topology looks consistent for an AMD profile.
+     *
+     * For Intel CPU profiles this default is wrong (an Intel box must not
+     * expose AMD GPP bridges), so the per-instance x-pci-vendor-id /
+     * x-pci-device-id / x-pci-revision properties (see gen_rp_props /
+     * gen_rp_realize) let the launch script inject Intel PCH Root Port IDs
+     * instead. They default to 0xFFFFFFFF = keep this class default.
      */
     k->vendor_id = PCI_VENDOR_ID_AMD;
     k->device_id = 0x1453;

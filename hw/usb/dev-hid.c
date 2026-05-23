@@ -787,7 +787,15 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
         dev->usb_desc = selected;
     }
 
-    usb_desc_create_serial(dev);
+    /* stealth: 真实 OEM 鼠/键/平板的 USB descriptor 不暴露 serial 字符串
+     * (iSerialNumber=0，见上文 desc_mouse / desc_keyboard / desc_tablet)。
+     * usb_desc_create_serial() 在没有 dev->serial 时 assert(index != 0)，
+     * 因此裸 usb-kbd/usb-mouse/usb-tablet（无 serial= 属性）会直接崩溃。
+     * 仅当 descriptor 真正声明了 serial 索引时才生成 serial 字符串；
+     * iSerialNumber==0 时无可写入的 descriptor 槽，dev->serial 也无意义。 */
+    if (dev->usb_desc->id.iSerialNumber != 0) {
+        usb_desc_create_serial(dev);
+    }
     usb_desc_init(dev);
 
     /* 字符串覆盖：iManufacturer / iProduct 索引从 desc.id 读出，向 device

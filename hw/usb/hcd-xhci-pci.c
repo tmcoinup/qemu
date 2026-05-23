@@ -115,6 +115,19 @@ static void usb_xhci_pci_realize(struct PCIDevice *dev, Error **errp)
     dev->config[PCI_CACHE_LINE_SIZE] = 0x10;
     dev->config[0x60] = 0x30; /* release number */
 
+    /* stealth: 平台一致性 PCI ID 覆盖。class_init 写好的 vendor/device 已在
+     * pci_qdev_realize 阶段落入 config，这里按需改写。class code (0x0C0330)
+     * 不动，Windows 仍按 class match 绑定通用 usbxhci.sys。 */
+    if (s->stealth_vendor_id != 0xFFFFFFFF) {
+        pci_config_set_vendor_id(dev->config, s->stealth_vendor_id & 0xFFFF);
+    }
+    if (s->stealth_device_id != 0xFFFFFFFF) {
+        pci_config_set_device_id(dev->config, s->stealth_device_id & 0xFFFF);
+    }
+    if (s->stealth_revision != 0xFFFFFFFF) {
+        pci_config_set_revision(dev->config, s->stealth_revision & 0xFF);
+    }
+
     object_property_set_link(OBJECT(&s->xhci), "host", OBJECT(s), NULL);
     s->xhci.intr_update = xhci_pci_intr_update;
     s->xhci.intr_raise = xhci_pci_intr_raise;
@@ -197,6 +210,19 @@ static void xhci_instance_init(Object *obj)
     qdev_alias_all_properties(DEVICE(&s->xhci), obj);
 }
 
+/* stealth: 可选 PCI ID 覆盖属性。默认 0xFFFFFFFF = 沿用 class 默认值。
+ * 装在抽象基类 pci-xhci 上，qemu-xhci / nec-usb-xhci 经 device_initfn 沿类
+ * 继承链自动获得（不影响未设置时的默认行为）。 */
+static Property xhci_pci_props[] = {
+    DEFINE_PROP_UINT32("x-pci-vendor-id", XHCIPciState, stealth_vendor_id,
+                       0xFFFFFFFF),
+    DEFINE_PROP_UINT32("x-pci-device-id", XHCIPciState, stealth_device_id,
+                       0xFFFFFFFF),
+    DEFINE_PROP_UINT32("x-pci-revision", XHCIPciState, stealth_revision,
+                       0xFFFFFFFF),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void xhci_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -205,6 +231,7 @@ static void xhci_class_init(ObjectClass *klass, void *data)
     device_class_set_legacy_reset(dc, xhci_pci_reset);
     dc->vmsd    = &vmstate_xhci_pci;
     set_bit(DEVICE_CATEGORY_USB, dc->categories);
+    device_class_set_props(dc, xhci_pci_props);
     k->realize      = usb_xhci_pci_realize;
     k->exit         = usb_xhci_pci_exit;
     k->class_id     = PCI_CLASS_SERIAL_USB;

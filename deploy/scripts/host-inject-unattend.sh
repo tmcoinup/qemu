@@ -22,8 +22,8 @@
 #   - FirstLogonCommands: 启 RDP / 关 NLA / 注册 ms-gamingoverlay 等
 #
 # Per-instance customization:
-#   <ComputerName> 从 'DESKTOP-VM2' 改成 'DESKTOP-VM<INSTANCE>'，
-#   防多机同名 conflict。
+#   <ComputerName> 设成 '*' —— 让 Windows OOBE 自己随机生成主机名（默认行为），
+#   不带 'VM' 字样。'*' 生成的名字本身随机唯一，多机并发也不会同名 conflict。
 #
 # Usage:
 #   sudo deploy/scripts/host-inject-unattend.sh <INSTANCE>
@@ -94,9 +94,10 @@ DEST="$DEST_DIR/unattend.xml"
 
 mkdir -p "$DEST_DIR"
 
-# Per-instance 替换 ComputerName，避免 N 个 clone 同 hostname
-COMPUTER_NAME="DESKTOP-VM${INSTANCE}"
-log "writing unattend.xml -> $DEST  (ComputerName=$COMPUTER_NAME)"
+# ComputerName 用 '*'：Windows OOBE 自己随机生成主机名（默认行为，无 'VM' 字样），
+# 随机名天然唯一，多 clone 不会同 hostname。
+COMPUTER_NAME="*"
+log "writing unattend.xml -> $DEST  (ComputerName=$COMPUTER_NAME → Win 随机生成)"
 sed "s|<ComputerName>[^<]*</ComputerName>|<ComputerName>${COMPUTER_NAME}</ComputerName>|" \
     "$UNATTEND" > "$DEST"
 
@@ -105,8 +106,8 @@ cp "$DEST" "$MOUNT/unattend.xml"
 mkdir -p "$MOUNT/Windows/System32/Sysprep"
 cp "$DEST" "$MOUNT/Windows/System32/Sysprep/unattend.xml"
 
-# 验证 sed 替换成功
-if ! grep -q "<ComputerName>${COMPUTER_NAME}</ComputerName>" "$DEST"; then
+# 验证 sed 替换成功（-F：COMPUTER_NAME 含 '*'，避免被当正则）
+if ! grep -qF "<ComputerName>${COMPUTER_NAME}</ComputerName>" "$DEST"; then
     die "ComputerName 替换失败 — autounattend.xml 可能没 <ComputerName> 段"
 fi
 log "wrote 3 copies (Panther, C:\\ root, Sysprep)"

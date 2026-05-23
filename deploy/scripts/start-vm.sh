@@ -882,10 +882,16 @@ CMD=(
     "${ACPI_ARGS[@]}"
 
     # --- PCI root complex (pcie-pci-bridge hidden; default q35) ---
-    -device pcie-root-port,id=rp0,slot=0,bus=pcie.0,multifunction=on
-    -device pcie-root-port,id=rp1,slot=1,bus=pcie.0
-    -device pcie-root-port,id=rp2,slot=2,bus=pcie.0
-    -device pcie-root-port,id=rp3,slot=3,bus=pcie.0
+    # hotplug=off：清掉 Slot Capabilities 的 HPC/HPS 位 (见 hw/pci/pcie.c
+    # pcie_cap_slot_init)。否则根端口默认 hotplug=on → Windows pci.sys 把挂在
+    # 端口下的 NVMe/网卡/xHCI 判为"可热插拔",托盘冒出"安全删除硬件"图标
+    # (弹出 Samsung SSD / NVMe 控制器 / 82574L / USB3.0)——真实板载设备走的是
+    # 非热插拔端口,不会出现该图标。冷插(开机即在)的设备不受影响,USB 设备热插拔
+    # 走 usb 总线也不受影响,纯去指纹。
+    -device pcie-root-port,id=rp0,slot=0,bus=pcie.0,multifunction=on,hotplug=off
+    -device pcie-root-port,id=rp1,slot=1,bus=pcie.0,hotplug=off
+    -device pcie-root-port,id=rp2,slot=2,bus=pcie.0,hotplug=off
+    -device pcie-root-port,id=rp3,slot=3,bus=pcie.0,hotplug=off
 
     # --- TPM 2.0 (swtpm emulator, tpm-crb 风格——现代主板默认走 CRB 而不是 TIS) ---
     # 空数组时（swtpm 不可用）此处展开为零参数，不影响。

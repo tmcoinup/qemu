@@ -275,4 +275,47 @@ else
 fi
 
 echo
+echo "=== (14) PCIe 根端口 hotplug=off（消除托盘"安全删除硬件"图标） ==="
+# 真机板载 NVMe/网卡/USB 走非热插拔端口。若根端口 hotplug=on（QEMU 默认），
+# Slot Capabilities 会置 HPC/HPS 位 (hw/pci/pcie.c pcie_cap_slot_init)，Windows
+# pci.sys 沿父桥上溯后把下游 NVMe/82574L/xHCI 判为可移除 → 托盘冒出"弹出 …"。
+# 这里启真实四口根端口拓扑，用 qom-get 读回每个端口的 hotplug 属性，须全为 false。
+RPSOCK="/tmp/verify-stealth-rp.qmp"
+rm -f "$RPSOCK"
+"$QEMU" -machine q35,accel=tcg -m 256M -nographic -S \
+    -display none \
+    -qmp unix:$RPSOCK,server=on,wait=off \
+    -device pcie-root-port,id=rp0,slot=0,bus=pcie.0,multifunction=on,hotplug=off \
+    -device pcie-root-port,id=rp1,slot=1,bus=pcie.0,hotplug=off \
+    -device pcie-root-port,id=rp2,slot=2,bus=pcie.0,hotplug=off \
+    -device pcie-root-port,id=rp3,slot=3,bus=pcie.0,hotplug=off &
+RPPID=$!
+sleep 1.5
+if python3 - "$RPSOCK" <<'PY'
+import json, socket, sys
+p = sys.argv[1]
+s = socket.socket(socket.AF_UNIX); s.connect(p)
+f = s.makefile('rwb', buffering=0)
+f.readline()
+f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
+bad = []
+for rp in ("rp0", "rp1", "rp2", "rp3"):
+    cmd = {"execute": "qom-get",
+           "arguments": {"path": f"/machine/peripheral/{rp}", "property": "hotplug"}}
+    f.write((json.dumps(cmd) + "\n").encode())
+    val = json.loads(f.readline()).get("return")
+    print(f"  {rp}.hotplug = {val}")
+    if val is not False:
+        bad.append((rp, val))
+if bad:
+    print("FAIL: 根端口仍可热插拔（HPC 会被置位 → 托盘出现安全删除图标）:", bad)
+    sys.exit(1)
+print("OK: 四个根端口 hotplug 全部关闭")
+PY
+then RC=0; else RC=1; fi
+kill "$RPPID" 2>/dev/null || true
+rm -f "$RPSOCK"
+[[ $RC -eq 0 ]] || exit 1
+
+echo
 echo "all checks passed."

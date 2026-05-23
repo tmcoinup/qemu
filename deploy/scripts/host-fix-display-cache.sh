@@ -35,6 +35,7 @@ VMDIR="/home/ubuntu/images/vms/${INSTANCE}"
 DISK="${VMDIR}/disk.qcow2"
 PROFILE="${VMDIR}/profile"
 QEMU_EDID="${REPO_ROOT}/build/qemu-edid"
+_NBD_PINNED="${NBD:+1}"   # 记录用户是否显式指定 NBD（忙时决定 fail-fast vs 自动选盘）
 NBD="${NBD:-/dev/nbd0}"
 MOUNT="/tmp/winmnt-disp-${INSTANCE}"
 EDID_BIN="/tmp/stealth-edid-${INSTANCE}.bin"
@@ -53,8 +54,14 @@ if pgrep -af "qemu-system-x86_64" 2>/dev/null | grep -q "vms/${INSTANCE}/disk.qc
 fi
 
 # ---- 1) 读 profile 的 EDID 参数 ----
-# profile 是 shell 赋值格式；在子环境里 source，取我们要的几个变量。
-eval "$(grep -E '^EDID_(VENDOR|NAME|SERIAL|WIDTH_MM|HEIGHT_MM)=' "$PROFILE")"
+# 安全解析（P1#2）：不再 `eval grep`（被篡改的 profile 会执行任意 shell 代码），
+# 改用白名单单字段读取，只取这 5 个 EDID 字段。
+source "$SCRIPT_DIR/lib/stealth-profile-io.sh"
+EDID_VENDOR="$(stealth_profile_get EDID_VENDOR "$PROFILE" || true)"
+EDID_NAME="$(stealth_profile_get EDID_NAME "$PROFILE" || true)"
+EDID_SERIAL="$(stealth_profile_get EDID_SERIAL "$PROFILE" || true)"
+EDID_WIDTH_MM="$(stealth_profile_get EDID_WIDTH_MM "$PROFILE" || true)"
+EDID_HEIGHT_MM="$(stealth_profile_get EDID_HEIGHT_MM "$PROFILE" || true)"
 EDID_VENDOR="${EDID_VENDOR:-SAM}"
 EDID_NAME="${EDID_NAME:-S24F350}"
 EDID_SERIAL="${EDID_SERIAL:-H4ZK500001VL}"
@@ -110,17 +117,18 @@ PY
 log "EDID blob: $EDID_BIN ($(stat -c%s "$EDID_BIN") bytes)"
 
 # ---- 3) NBD 连接 overlay（RW，写只落到增量盘）+ 挂载 ----
+# 并发安全 (P2)：取全局 NBD 锁，串行化所有 host-*.sh 离线工具，防并发抢同一 nbd 设备。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/nbd-lock.sh"
 modprobe nbd max_part=16 2>/dev/null || true
 cleanup() {
     local rc=$?
     umount "$MOUNT" 2>/dev/null || true
-    qemu-nbd --disconnect "$NBD" 2>/dev/null || true
+    nbd_disconnect_if_owned   # 只断本脚本成功连接的设备（不误断外部）
     exit $rc
 }
 trap cleanup EXIT
-qemu-nbd --disconnect "$NBD" 2>/dev/null || true
 log "qemu-nbd --connect $NBD $DISK"
-qemu-nbd --connect="$NBD" --format=qcow2 "$DISK"
+nbd_connect NBD "$DISK"   # guard+选盘+connect，置 _NBD_CONNECTED；忙时显式→fail-fast / 默认→自动选盘
 sleep 1
 
 SYSPART=""

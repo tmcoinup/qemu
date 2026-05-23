@@ -97,8 +97,11 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | 变量/标志 | 默认 | 说明 |
 |---|---|---|
 | 位置参数 N | 1 | instance 编号；决定磁盘/profile/socket/端口 |
-| `BRIDGE` | `br0` | 桥接网卡；不存在/无授权时自动回退到 user-mode NAT |
+| `BRIDGE` | `br0` | 桥接网卡；不存在/无授权时**默认**回退 user-mode NAT（见 `STRICT_STEALTH`） |
 | `--no-bridge` | - | 强制走 user-mode NAT（10.0.2.0/24） |
+| `STRICT_STEALTH` | 0 | 1 = 桥接失败即 fail-fast，**拒绝**静默回退 NAT（NAT 的 10.0.2.x 子网本身是 VM 特征，隐身验收致命） |
+| `ALLOW_NAT_FALLBACK` | 0 | 1 = 在 `STRICT_STEALTH=1` 下显式允许回退 NAT（回退时日志打醒目标记） |
+| `DRY_RUN` | 0 | 1 = 仅打印组装好的 QEMU argv 后退出；不落盘、不起守护、不 exec（调试/回归基准用） |
 | `STABLE_DISPLAY` | **1** | 仅 `--sdl` 模式生效：`virtio-vga` 无 GL，规避 virgl BSOD |
 | `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
 | `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |

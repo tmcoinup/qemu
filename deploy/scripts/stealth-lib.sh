@@ -370,9 +370,11 @@ stealth_pick_profile() {
 
     # 内存总量 (MiB) 也钉进 profile，跟其它硬件身份一样跨重启稳定——否则启动时
     # 忘了带 --ram 就回退脚本默认值，"内存 4GB↔8GB 来回漂移"本身就是反作弊判定
-    # 硬件指纹变化的信号。新 VM 默认 4096 (4GB 单通道) 保持历史基线、不 surprise；
-    # 要切 8GB 双通道 (2×4GB)：deploy/scripts/set-vm-memory.sh <N> 8G，启动命令不变。
-    MEM_TOTAL_MB="${MEM_TOTAL_MB:-4096}"
+    # 硬件指纹变化的信号。新 VM 默认 8192 (8GB 双通道 2×4GB)——start-vm.sh 见
+    # RAM>4096 自动拆成 2 条 4GB DIMM 走双通道，两条 SN 各自唯一。老 profile 缺
+    # 字段仍退回 4096 (见 stealth_load_profile)，不擅自升级既有 VM 的硬件画像；
+    # 个别 VM 要改容量：deploy/scripts/set-vm-memory.sh <N> <size>，启动命令不变。
+    MEM_TOTAL_MB="${MEM_TOTAL_MB:-8192}"
 
     # 6. 显示器（EDID）
     local mo_n=${#MONITOR_POOL[@]}

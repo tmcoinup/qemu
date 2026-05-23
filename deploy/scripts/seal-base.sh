@@ -15,16 +15,29 @@
 #   - 源 VM 必须先关机（lsof 检查）
 #   - sysprep / 清掉 SID 等是 Windows 侧的事，本脚本不做 — 如果不 sysprep，
 #     克隆出的 VM 会复用 SID/MachineGUID。仅做单机用途时可以忽略。
-#   - 转换后源 disk.qcow2 不变，只是另存一份到 _base/。可选随后 rm 源 disk
-#     腾空间，再用 clone-from-base.sh 重建该 instance 即可。
+#   - **默认会先清理源 disk 的腾讯/WeGame 设备身份**（qimei / 登录态 / SDK 缓存 +
+#     注册表 Tencent 键，见 host-clean-tencent.sh），避免所有 clone 共享同一个
+#     qimei 被 ACE 判同机/多开。这一步会改源 disk（清空其 WeGame 登录态 —— base
+#     本该如此）。需要保留源 disk 原样请加 --no-clean。
+#   - convert 后另存一份到 _base/，源 disk 仅被上面的清理改动、不被 convert 改。
+#     可选随后 rm 源 disk 腾空间，再用 clone-from-base.sh 重建该 instance 即可。
 
 set -euo pipefail
 
-SRC_INSTANCE="${1:-}"
-BASE_NAME="${2:-}"
+CLEAN=1
+POS=()
+for a in "$@"; do
+    case "$a" in
+        --no-clean) CLEAN=0 ;;
+        --*) echo "ERROR: 未知 flag '$a'" >&2; exit 2 ;;
+        *) POS+=("$a") ;;
+    esac
+done
+SRC_INSTANCE="${POS[0]:-}"
+BASE_NAME="${POS[1]:-}"
 
 if [[ -z "$SRC_INSTANCE" || -z "$BASE_NAME" ]]; then
-    echo "usage: $0 <SRC_INSTANCE> <BASE_NAME>" >&2
+    echo "usage: $0 <SRC_INSTANCE> <BASE_NAME> [--no-clean]" >&2
     exit 2
 fi
 if ! [[ "$SRC_INSTANCE" =~ ^[0-9]+$ ]]; then
@@ -75,6 +88,55 @@ mkdir -p "$BASE_DIR"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 QEMU_IMG="$REPO_ROOT/build/qemu-img"
 [[ -x "$QEMU_IMG" ]] || QEMU_IMG=qemu-img
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ----------------------------------------------------------------------
+# NVMe 容量护栏（封 base 时 fail-fast，而不是等克隆才 WARN）
+#
+# clone-from-base.sh 要求克隆出的 profile.NVME_SIZE_BYTES **字节级精确等于** base
+# 虚拟容量（base 的 NTFS 只覆盖 base 容量，clone 盘大了尾段没分区 / 小了越界）。
+# 它靠"重抽 profile 最多 100 次直到匹配"实现——但前提是 NVME_POOL 里**确实存在**
+# 一个该容量的型号。若不存在，100 次全落空，fallback 成 size 矛盾的 profile
+# → guest 进 "Preparing Automatic Repair" + 反作弊看到"型号容量≠裸盘容量"。
+# 与其等到克隆时才 WARN，不如现在就拦下：base 一旦封死，后面每次克隆都中招。
+# ----------------------------------------------------------------------
+source "$SCRIPT_DIR/stealth-lib.sh"   # 取 NVME_POOL（库顶部纯定义，无副作用）
+BASE_BYTES=$("$QEMU_IMG" info --output=json "$SRC_DISK" \
+    | python3 -c 'import sys, json; print(json.load(sys.stdin)["virtual-size"])')
+echo ">> base 虚拟容量: $BASE_BYTES bytes ($(numfmt --to=iec --suffix=B "$BASE_BYTES"))"
+
+_nvme_match=()
+for _e in "${NVME_POOL[@]}"; do
+    IFS='|' read -r _m _fw _sz <<<"$_e"
+    [[ "$_sz" == "$BASE_BYTES" ]] && _nvme_match+=("$_m")
+done
+if (( ${#_nvme_match[@]} == 0 )); then
+    echo "ERROR: NVME_POOL 里没有容量 == ${BASE_BYTES} bytes 的型号" >&2
+    echo "  → clone-from-base.sh 配不出匹配 profile，会做出 size 矛盾的 base，拒绝继续。" >&2
+    echo "  池里现有容量：" >&2
+    for _e in "${NVME_POOL[@]}"; do
+        IFS='|' read -r _m _fw _sz <<<"$_e"
+        printf '    %-34s %s bytes (%s)\n' "$_m" "$_sz" "$(numfmt --to=iec --suffix=B "$_sz")" >&2
+    done
+    echo "  修法：往 deploy/scripts/stealth-lib.sh 的 NVME_POOL 加一条容量 == base 的型号，" >&2
+    echo "       或把 base 重建成池里已有的容量后重封。" >&2
+    exit 1
+fi
+echo ">> NVMe 容量护栏 ✓ 池里 ${#_nvme_match[@]} 个型号匹配该容量: ${_nvme_match[*]}"
+
+# 先清腾讯/WeGame 设备身份，再 convert —— 这样 base 天生干净且仍然压缩紧凑。
+# 失败就 abort：宁可不出 base，也不出一个所有 clone 共享同一 qimei 的"漏指纹" base。
+if (( CLEAN )); then
+    echo ">> 清理源 disk 的腾讯/WeGame 设备身份（qimei / 登录态 / SDK 缓存 + 注册表）..."
+    if ! sudo "$SCRIPT_DIR/host-clean-tencent.sh" "$SRC_INSTANCE" --disk "$SRC_DISK" 2>&1 | sed 's/^/    /'; then
+        echo "ERROR: 腾讯身份清理失败 —— 拒绝产出可能泄露 qimei 的 base" >&2
+        echo "  排查 host-clean-tencent.sh 后重跑；确认无需清理时加 --no-clean" >&2
+        exit 1
+    fi
+else
+    echo ">> --no-clean：跳过腾讯身份清理（源 disk 原样固化为 base）"
+fi
 
 echo ">> 源 disk: $SRC_DISK ($(numfmt --to=iec --suffix=B "$(stat -c%s "$SRC_DISK")"))"
 echo ">> 目标 base: $BASE_FILE"

@@ -131,6 +131,19 @@ static void usb_xhci_pci_realize(struct PCIDevice *dev, Error **errp)
     dev->config[PCI_CACHE_LINE_SIZE] = 0x10;
     dev->config[0x60] = 0x30; /* release number */
 
+    /* stealth: 平台一致性 PCI ID 覆盖。class_init 写好的 vendor/device 已在
+     * pci_qdev_realize 阶段落入 config，这里按需改写。class code (0x0C0330)
+     * 不动，Windows 仍按 class match 绑定通用 usbxhci.sys。 */
+    if (s->stealth_vendor_id != 0xFFFFFFFF) {
+        pci_config_set_vendor_id(dev->config, s->stealth_vendor_id & 0xFFFF);
+    }
+    if (s->stealth_device_id != 0xFFFFFFFF) {
+        pci_config_set_device_id(dev->config, s->stealth_device_id & 0xFFFF);
+    }
+    if (s->stealth_revision != 0xFFFFFFFF) {
+        pci_config_set_revision(dev->config, s->stealth_revision & 0xFF);
+    }
+
     object_property_set_link(OBJECT(&s->xhci), "host", OBJECT(s), NULL);
     s->xhci.intr_update = xhci_pci_intr_update;
     s->xhci.intr_raise = xhci_pci_intr_raise;
@@ -227,6 +240,12 @@ static const Property xhci_pci_properties[] = {
     DEFINE_PROP_ON_OFF_AUTO("msix", XHCIPciState, msix, ON_OFF_AUTO_AUTO),
     DEFINE_PROP_BOOL("conditional-intr-mapping", XHCIPciState,
                      conditional_intr_mapping, false),
+    DEFINE_PROP_UINT32("x-pci-vendor-id", XHCIPciState, stealth_vendor_id,
+                       0xFFFFFFFF),
+    DEFINE_PROP_UINT32("x-pci-device-id", XHCIPciState, stealth_device_id,
+                       0xFFFFFFFF),
+    DEFINE_PROP_UINT32("x-pci-revision", XHCIPciState, stealth_revision,
+                       0xFFFFFFFF),
 };
 
 static void xhci_class_init(ObjectClass *klass, const void *data)

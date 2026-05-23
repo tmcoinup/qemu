@@ -58,6 +58,7 @@ if [[ -z "${DISK:-}" ]]; then
         DISK="/home/ubuntu/images/win10-inst${INSTANCE}.qcow2"
     fi
 fi
+_NBD_PINNED="${NBD:+1}"   # 记录用户是否显式指定 NBD（忙时决定 fail-fast vs 自动选盘）
 : "${NBD:=/dev/nbd0}"
 : "${MOUNT:=/mnt/win10-inst${INSTANCE}}"
 
@@ -78,18 +79,20 @@ if [[ -S "$QMP_SOCK" ]]; then
     sleep 1
 fi
 
+# 并发安全 (P2)：取全局 NBD 锁，串行化所有 host-*.sh 离线工具，防并发抢同一 nbd 设备。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/nbd-lock.sh"
 modprobe nbd max_part=16 2>/dev/null || true
 
 cleanup() {
     local rc=$?
     umount "$MOUNT" 2>/dev/null || true
-    qemu-nbd --disconnect "$NBD" 2>/dev/null || true
+    nbd_disconnect_if_owned   # 只断本脚本成功连接的设备（不误断外部）
     exit $rc
 }
 trap cleanup EXIT
 
 log "attaching $DISK to $NBD"
-qemu-nbd --connect="$NBD" --format=qcow2 "$DISK"
+nbd_connect NBD "$DISK"   # guard+选盘+connect，置 _NBD_CONNECTED；忙时显式→fail-fast / 默认→自动选盘
 sleep 1
 
 SYSPART=""

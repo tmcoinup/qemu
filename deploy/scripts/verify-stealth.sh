@@ -12,17 +12,44 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 QEMU="${QEMU:-$REPO_ROOT/build/qemu-system-x86_64}"
 
+# --- stderr 安全网 (P1#4) ---------------------------------------------------
+# 仓库规则要求"运行无警告"。历史上 step(2) 在 TCG 上 realize Ryzen3-1200 会刷
+# 36 条 "TCG doesn't support requested feature" 警告（fxsr-opt/topoext/invtsc/
+# clzero/nrip-save/xsavec…）。现已改为：启动 vCPU 不指定该 CPU，改由
+# query-cpu-model-expansion 按名做静态展开，从源头消除警告。这里再加一道安全
+# 网——收集每次 QEMU 启动的 stderr，凡出现未登记的 warning/error 即判失败，
+# 避免真正的 regression warning 被淹没。预期可忽略项登记到 STDERR_ALLOW。
+STDERR_ALLOW=()      # 逐条 ERE，例如 "TCG doesn.t support requested feature"
+UNEXPECTED_STDERR=0
+scan_stderr() {
+    local f="$1" label="$2" lines pat
+    [[ -s "$f" ]] || return 0
+    lines="$(grep -E -i 'warning|error' "$f" || true)"
+    for pat in ${STDERR_ALLOW[@]+"${STDERR_ALLOW[@]}"}; do
+        lines="$(grep -E -v "$pat" <<<"$lines" || true)"
+    done
+    lines="$(grep -E -v '^[[:space:]]*$' <<<"$lines" || true)"
+    if [[ -n "$lines" ]]; then
+        echo "  ✗ [$label] 非预期 stderr：" >&2
+        sed 's/^/      /' <<<"$lines" >&2
+        UNEXPECTED_STDERR=1
+    fi
+}
+
 echo "=== (1) CPU model registered ==="
 "$QEMU" -cpu help 2>&1 | grep -i 'ryzen3-1200' || { echo "MISSING Ryzen3-1200"; exit 1; }
 
 echo
 echo "=== (2) CPU model expansion (via QMP query-cpu-model-expansion) ==="
 SOCK="/tmp/verify-stealth.qmp"
+CPU_ERR="/tmp/verify-stealth-cpu.err"
 rm -f "$SOCK"
+# 启动 vCPU 不指定 Ryzen3-1200：下面的 query-cpu-model-expansion 按名传参做静态
+# 展开，与所启 vCPU 无关。用 TCG 默认 CPU 可避免 realize 时刷 TCG 不支持特性的
+# 警告。stderr 收集到 $CPU_ERR，稍后 scan_stderr 检查。
 "$QEMU" -machine q35,accel=tcg -smp 4 -m 512M -nographic -S \
     -display none \
-    -qmp unix:$SOCK,server=on,wait=off \
-    -cpu Ryzen3-1200,kvm=off,hypervisor=off &
+    -qmp unix:$SOCK,server=on,wait=off 2>"$CPU_ERR" &
 QPID=$!
 trap 'kill $QPID 2>/dev/null; rm -f $SOCK' EXIT
 sleep 1.5
@@ -34,7 +61,9 @@ s = socket.socket(socket.AF_UNIX); s.connect(p)
 f = s.makefile('rwb', buffering=0)
 f.readline()
 f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
-f.write(b'{"execute":"query-cpu-model-expansion","arguments":{"type":"full","model":{"name":"Ryzen3-1200"}}}\n')
+# kvm=off,hypervisor=off 通过 query 的 props 传入（而非启动 -cpu 的全局属性），
+# 既保留对 stealth CPUID 面的校验，又不在 TCG 上 realize 带不支持特性的 vCPU。
+f.write(b'{"execute":"query-cpu-model-expansion","arguments":{"type":"full","model":{"name":"Ryzen3-1200","props":{"kvm":false,"hypervisor":false}}}}\n')
 resp = json.loads(f.readline())
 props = resp.get('return',{}).get('model',{}).get('props',{})
 bad = []
@@ -55,6 +84,8 @@ if bad or missing:
     print("FAIL:", bad, "missing:", missing); sys.exit(1)
 print("OK")
 PY
+
+scan_stderr "$CPU_ERR" "CPU expansion"
 
 echo
 echo "=== (3) ACPI OEM strings baked into binary ==="
@@ -281,6 +312,7 @@ echo "=== (14) PCIe 根端口 hotplug=off（消除托盘"安全删除硬件"图�
 # pci.sys 沿父桥上溯后把下游 NVMe/82574L/xHCI 判为可移除 → 托盘冒出"弹出 …"。
 # 这里启真实四口根端口拓扑，用 qom-get 读回每个端口的 hotplug 属性，须全为 false。
 RPSOCK="/tmp/verify-stealth-rp.qmp"
+RPERR="/tmp/verify-stealth-rp.err"
 rm -f "$RPSOCK"
 "$QEMU" -machine q35,accel=tcg -m 256M -nographic -S \
     -display none \
@@ -288,7 +320,7 @@ rm -f "$RPSOCK"
     -device pcie-root-port,id=rp0,slot=0,bus=pcie.0,multifunction=on,hotplug=off \
     -device pcie-root-port,id=rp1,slot=1,bus=pcie.0,hotplug=off \
     -device pcie-root-port,id=rp2,slot=2,bus=pcie.0,hotplug=off \
-    -device pcie-root-port,id=rp3,slot=3,bus=pcie.0,hotplug=off &
+    -device pcie-root-port,id=rp3,slot=3,bus=pcie.0,hotplug=off 2>"$RPERR" &
 RPPID=$!
 sleep 1.5
 if python3 - "$RPSOCK" <<'PY'
@@ -314,8 +346,57 @@ print("OK: 四个根端口 hotplug 全部关闭")
 PY
 then RC=0; else RC=1; fi
 kill "$RPPID" 2>/dev/null || true
+scan_stderr "$RPERR" "root-port"
 rm -f "$RPSOCK"
 [[ $RC -eq 0 ]] || exit 1
 
 echo
+echo "=== (15) 平台一致性：root-port / xHCI PCI ID 可按平台覆盖 (P0#3) ==="
+# 验证新加的 x-pci-vendor-id/device-id/revision 覆盖属性：默认沿用 AMD
+# (1022:1453 / 1022:43bb)，注入后变 Intel 300 系 PCH (8086:a338 / 8086:a36d)。
+# 设备直接挂 pcie.0 顶层，使 query-pci 无需固件枚举即可读到 vendor/device。
+P15SOCK="/tmp/verify-stealth-p15.qmp"; P15ERR="/tmp/verify-stealth-p15.err"; rm -f "$P15SOCK"
+"$QEMU" -machine q35,accel=tcg -m 256M -nographic -S -display none -nodefaults \
+    -qmp unix:$P15SOCK,server=on,wait=off \
+    -device pcie-root-port,id=rpa,bus=pcie.0,addr=0x2,chassis=1 \
+    -device pcie-root-port,id=rpi,bus=pcie.0,addr=0x3,chassis=2,x-pci-vendor-id=0x8086,x-pci-device-id=0xa338,x-pci-revision=0xf0 \
+    -device qemu-xhci,id=xa,bus=pcie.0,addr=0x4 \
+    -device qemu-xhci,id=xi,bus=pcie.0,addr=0x5,x-pci-vendor-id=0x8086,x-pci-device-id=0xa36d 2>"$P15ERR" &
+P15PID=$!
+for _ in $(seq 1 50); do [[ -S "$P15SOCK" ]] && break; sleep 0.1; done
+if python3 - "$P15SOCK" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
+f = s.makefile('rwb', buffering=0)
+f.readline(); f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
+f.write(b'{"execute":"query-pci"}\n'); r = json.loads(f.readline())
+ids = {}
+for bus in r["return"]:
+    for d in bus["devices"]:
+        ids[d["slot"]] = (d["id"]["vendor"], d["id"]["device"])
+want = {2: (0x1022, 0x1453), 3: (0x8086, 0xa338),
+        4: (0x1022, 0x43bb), 5: (0x8086, 0xa36d)}
+label = {2: "AMD root-port(default)", 3: "Intel root-port(override)",
+         4: "AMD xHCI(default)",      5: "Intel xHCI(override)"}
+bad = []
+for slot, (wv, wd) in want.items():
+    gv, gd = ids.get(slot, (0, 0))
+    print(f"  slot {slot} {label[slot]:28s} {gv:#06x}:{gd:#06x}  期望 {wv:#06x}:{wd:#06x}")
+    if (gv, gd) != (wv, wd):
+        bad.append(slot)
+if bad:
+    print("FAIL: PCI ID 覆盖未生效:", bad); sys.exit(1)
+print("OK: 默认 AMD / 覆盖 Intel 均生效")
+PY
+then RC=0; else RC=1; fi
+kill "$P15PID" 2>/dev/null || true
+scan_stderr "$P15ERR" "platform-id"
+rm -f "$P15SOCK"
+[[ $RC -eq 0 ]] || exit 1
+
+echo
+if [[ $UNEXPECTED_STDERR -ne 0 ]]; then
+    echo "FAIL: 检测到未登记的 warning/error（见上）——不满足'运行无警告'。" >&2
+    exit 1
+fi
 echo "all checks passed."

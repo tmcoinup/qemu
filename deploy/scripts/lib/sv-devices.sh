@@ -257,19 +257,25 @@ fi
 # -------------------------------------------------------------------
 # 构造 MEMORY_ARGS：根据 NUM_DIMMS 决定 1 backend 还是 2 backend，
 # 对应 1 个 NUMA node（单通道）还是 2 个 NUMA node（双通道）。
+#
+# prealloc=off（2026-05-25）：prealloc=on 会在开机即把整块 -m 摸一遍、钉死
+# host 物理内存（实测 guest 常只用一半），多 VM 并发时直接把 32G host 逼到
+# OOM-kill。prealloc 是纯 host 侧分配策略，guest 看到的 RAM 容量/SMBIOS 不
+# 变 → 零反检测影响。改 lazy 后未触及的 guest 页不占物理内存，配 mem-lock=off
+# 还可换出，多开稳得多。（首次访问页有极微延迟，反作弊无感。）
 # -------------------------------------------------------------------
 MEMORY_ARGS=(-m "${RAM}M")
 if (( NUM_DIMMS == 1 )); then
     # 1 条 DIMM 占满总量，单 NUMA node 把所有 vCPU 都挂上
     MEMORY_ARGS+=(
-        -object "memory-backend-memfd,id=mem0,size=${RAM}M,share=on,prealloc=on"
+        -object "memory-backend-memfd,id=mem0,size=${RAM}M,share=on,prealloc=off"
         -numa "node,nodeid=0,memdev=mem0,cpus=0-$((CPUS-1))"
     )
 else
     # 2 条 DIMM 各占一半，双 NUMA node 配对 dual-channel 拓扑
     MEMORY_ARGS+=(
-        -object "memory-backend-memfd,id=mem0,size=${PER_DIMM_MB}M,share=on,prealloc=on"
-        -object "memory-backend-memfd,id=mem1,size=${PER_DIMM_MB}M,share=on,prealloc=on"
+        -object "memory-backend-memfd,id=mem0,size=${PER_DIMM_MB}M,share=on,prealloc=off"
+        -object "memory-backend-memfd,id=mem1,size=${PER_DIMM_MB}M,share=on,prealloc=off"
         -numa "node,nodeid=0,memdev=mem0,cpus=0-$((CPUS/2-1))"
         -numa "node,nodeid=1,memdev=mem1,cpus=$((CPUS/2))-$((CPUS-1))"
     )

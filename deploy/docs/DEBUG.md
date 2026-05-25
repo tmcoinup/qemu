@@ -55,6 +55,31 @@ cat /sys/module/kvm_intel/parameters/ept        # 1
 cat /sys/module/kvm_intel/parameters/flexpriority# 1
 ```
 
+## swtpm / TPM 侧
+
+### `CMD_INIT: 0x9` → QEMU 秒退（exit status 1）
+```
+qemu-system-x86_64: tpm-emulator: TPM result for CMD_INIT: 0x9 operation failed
+```
+**根因**：被强杀(SIGKILL / OOM-kill)的 qemu 留下的 swtpm `--daemon`（PPID 已脱离
+qemu）仍持 `vms/<N>/tpm-state` 的 NVRAM flock。新 swtpm 能应答控制通道（start-vm 打印
+"TPM 2.0 ready"），但 QEMU 发 CMD_INIT 时抢不到锁。`tpm.log` 实锤：
+```
+SWTPM_NVRAM_Lock_Dir: Could not lock access to lockfile: Resource temporarily unavailable
+```
+失败重试还会再叠加孤儿（曾累计到 3 个）。
+
+**自愈**：`start-vm.sh` 起 daemon 前有 preflight reaper（无活 qemu 占用本实例 tpm-sock
+时按 `dir=.../vms/<N>/tpm-state` 精确清理，跨实例零误杀），所以正常重跑
+`start-vm.sh <N>` 即恢复；`stop-vm.sh <N>` 停机时也会一并收 swtpm。
+
+**手动兜底**：
+```bash
+pkill -f 'swtpm socket --tpmstate dir=.*vms/<N>/tpm-state'   # 只清这一实例
+# ⚠ 绝不删 vms/<N>/tpm-state/tpm2-00.permall —— 那是真 TPM 持久态(EK/Platform cert)，
+#   删了 guest BitLocker / 证明链会崩
+```
+
 ## NVIDIA vgpu_unlock 侧
 
 ```bash

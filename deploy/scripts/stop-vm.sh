@@ -159,5 +159,30 @@ if vm_alive; then
     rm -f "$MON" "$HOTKEY_SOCK" 2>/dev/null || true
     exit 1
 fi
+
+# swtpm daemon 随 VM 收摊（关键：否则孤儿在源头累积）。
+# swtpm 是 --daemon，PPID 已脱离 qemu，qemu 退出后它不会自己死，会一直持
+# 有 vms/N/tpm-state 的 NVRAM 锁；下次 start 时新 QEMU CMD_INIT 抢不到锁
+# 报 "0x9 operation failed" 秒退（详见 memory project_swtpm_orphan_lock，
+# start-vm.sh 已有 preflight reaper 兜底，这里在源头清干净，二者对称）。
+# 匹配 swtpm 专属调用形式 + 本实例 tpm-state：vms/N/tpm-state 是唯一串，
+# N=1 不会误命中 N=10；"swtpm socket --tpmstate dir=" 前缀只出现在真 swtpm
+# daemon，绝不会误匹配恰好含该路径的别的进程。
+_swtpm_pat="swtpm socket --tpmstate dir=.*vms/${INSTANCE}/tpm-state"
+_swtpm_pids=$(pgrep -f "$_swtpm_pat" 2>/dev/null || true)
+if [[ -n "$_swtpm_pids" ]]; then
+    echo "→ 停止实例 ${INSTANCE} 的 swtpm: $(echo $_swtpm_pids | tr '\n' ' ')"
+    kill $_swtpm_pids 2>/dev/null || true
+    for ((i=0; i<5; i++)); do
+        pgrep -f "$_swtpm_pat" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+    pgrep -f "$_swtpm_pat" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+fi
+
+# QMP proxy 正常会随 upstream EOF 自退；保险起见清掉可能的残留进程 + 其 socket。
+pkill -f "qmp-proxy\.py ${INSTANCE}\b" 2>/dev/null && echo "→ qmp-proxy (instance ${INSTANCE}) 已停止" || true
+rm -f "${QMP}.proxy" 2>/dev/null || true
+
 rm -f "$QMP" "$MON" "$HOTKEY_SOCK" 2>/dev/null || true
 echo "instance=${INSTANCE} stopped"

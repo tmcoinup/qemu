@@ -17,7 +17,7 @@
 | CPU 池（无 iGPU） | AMD Ryzen 3 1200/2300X + Intel i3-9100F（F 后缀=无 iGPU）；CPUID HYPERVISOR=0、KVM/HV leaves stripped | `-cpu ...,kvm=off,hypervisor=off,enforce=off` + `target/i386` patch |
 | CPU 持久化 | per-instance；DIMM SN / NVMe SN / Board SN 等全部一次性生成写 profile，跨重启不变 | `stealth_pick_profile` → `vms/<N>/profile` |
 | 主板池（27 条） | ASUS/MSI/Gigabyte/ASRock × AM4/LGA1151/LGA1200，每条带 PCI 子系统 vendor/device ID | `stealth-lib.sh::BOARD_POOL`；start-vm.sh 不再 hardcoded ASUS subsys |
-| 内存拓扑 | ≤4GB：1 条 DIMM + 单 NUMA（卡槽 2 占 1 空 1）；>4GB：2 条 DIMM + 双 NUMA + 双通道（槽位 DIMM_A2/DIMM_B2）。内存量钉 `profile.MEM_TOTAL_MB`，启动命令不变；`set-vm-memory.sh <N> 8G` 切换 | 动态 `MEMORY_ARGS` 数组；T16_NUM_DEVICES 始终 = 2（卡槽数不变） |
+| 内存拓扑 | ≤4GB：1 条 DIMM + 单 NUMA（卡槽 2 占 1 空 1）；>4GB：2 条 DIMM + 双 NUMA + 双通道（槽位 DIMM_A2/DIMM_B2）。内存量钉 `profile.MEM_TOTAL_MB`，启动命令不变；`set-vm-memory.sh <N> 8G` 切换 | 动态 `MEMORY_ARGS` 数组；T16_NUM_DEVICES 始终 = 2（卡槽数不变）；memfd `prealloc=off` 按需分配（未用页不占 host 物理内存）；起前内存 preflight 护栏防 OOM（`MEM_GUARD` / `MEM_FORCE`） |
 | 内存 SN 持久化 + 双通道唯一 SN | DIMM 0 一次性生成 8-char hex 写 profile；双通道第 2 条按 `sha256(MEM_SERIAL-dimm2)` 派生，两条各自唯一（共用同 SN 是伪造特征，必查 `Win32_PhysicalMemory`） | `MEM_SERIAL` 字段；`t17` emit `serial=SN1\|SN2`；`smbios.c` type17 serial 支持 `\|` 分隔的 per-DIMM 列表 |
 | NVMe | 5 款 Samsung (970 PRO / 970 EVO / 980 PRO / 980 / 990 PRO) 池，每款带真实 advertised 字节数 | `NVME_POOL` 含 `RAW_BYTES` 列；qcow2 大小按 profile 选定 model 同步建（Model ↔ Size 自洽） |
 | 显示器（随机）| 10 款 24" 1920×1080@60 池：SAM C24F390 / AOC 24G2E5 / BNQ GW2480 / DEL SE2419HR / **HKC SG24A1 国产** / LG / Philips / 三星曲面 | `MONITOR_POOL` + **patch 0009** virtio-vga 加 `edid-vendor/name/serial/width-mm/height-mm` cmdline 选项 |
@@ -34,7 +34,7 @@
 | ACPI OEM | `ALASKA / A M I` 全表 + `_HID PNP0C02`（不再泄漏 `QEMU0002`） | `hw/acpi/` patch + `hw/i386/fw_cfg.c` |
 | ACPI BGRT | 20-byte 伪 boot logo 表 (status=migrated)，OEMID `ALASKA / A M I` 对齐 DSDT | `firmware/bgrt.bin` + `-acpitable sig=BGRT,data=...` |
 | ACPI 热区/风扇 | `\_SB.TZQE` ThermalZone (_TMP/_CRT/_PSV) + `\_SB.FANE` PNP0C0B 风扇 | `firmware/ssdt-thermal.{asl,aml}` (iasl 编) + `-acpitable file=...` |
-| **TPM 2.0** | swtpm + tpm-crb 设备；per-VM state 目录 `$VM_DIR/tpm-state`；Win11 / 现代裸金属画像 | start-vm.sh 检测 swtpm 后启动 daemon + 挂 `-tpmdev emulator,id=tpm0`。**OVMF 必须含 Tcg2 模块**——用 `deploy/tools/build-ovmf.sh` 重 build (`-D TPM2_ENABLE=TRUE`) |
+| **TPM 2.0** | swtpm + tpm-crb 设备；per-VM state 目录 `$VM_DIR/tpm-state`；Win11 / 现代裸金属画像 | start-vm.sh 检测 swtpm 后启动 daemon + 挂 `-tpmdev emulator,id=tpm0`。**OVMF 必须含 Tcg2 模块**——用 `deploy/tools/build-ovmf.sh` 重 build (`-D TPM2_ENABLE=TRUE`)。swtpm 是脱离 qemu 的 `--daemon`，start-vm 起 daemon 前 + stop-vm 停机后都按实例 reap 孤儿 swtpm（防 NVRAM 锁残留致下次 `CMD_INIT 0x9` 秒退） |
 | PCI 设备 ID | xHCI = AMD `1022:43BB`，root-port = AMD `1022:1453`；e1000e subsys 跟 BOARD_MFR 走（ASUS/MSI/Giga/ASRock 真实子厂值，不再固定 ASUS） | hw/usb/hcd-xhci-pci.c, hw/pci-bridge/gen_pcie_root_port.c, hw/net/e1000e.c |
 | **RTC 时钟** | `clock=vm`（不是 host），让 RDTSC 与 wall-clock 自然漂移；裸金属晶振温漂特征 | `-rtc base=localtime,clock=vm,driftfix=slew` |
 | 时区 | guest RTC = 北京时间 (`Asia/Shanghai`) | launcher exec QEMU 前 `export TZ=Asia/Shanghai` |

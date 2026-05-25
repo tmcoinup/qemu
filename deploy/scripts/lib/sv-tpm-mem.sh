@@ -17,6 +17,41 @@
 # guest 看到 tpm-crb 设备，Win 加载 TPM 驱动 + tpm.msc / Get-Tpm 全部正常。
 # 设 TPM=0 显式关掉（如果 OVMF 切回不支持 TPM 的旧 fd，或者想模拟"用户没在
 # BIOS 启用 fTPM"的状态——B350 / H310 / H410 入门主板出厂默认就是关的）。
+# -------------------------------------------------------------------
+# 内存 preflight 护栏（防 OOM-kill 连锁）—— 必须在起 swtpm daemon 之前，
+# 否则拒绝启动时会漏一个 swtpm 孤儿（见 project_swtpm_orphan_lock）。
+# prealloc 已关→VM 按需吃内存，但最坏仍会摸满 -m=${RAM}M。起 QEMU 前估算
+# 可用物理(MemAvailable)+空闲 swap 能否再容下本 VM：
+#   · 够          → 放行
+#   · 紧(吃 host 余量) → WARN 但继续
+#   · 连 RAM+swap 都装不下 → 拒绝（OOM-kill 会随机杀进程，可能杀掉别的 VM）
+# 旁路：MEM_GUARD=0 整体关闭；MEM_FORCE=1 越过硬拒绝。
+# -------------------------------------------------------------------
+if [[ "${DRY_RUN:-0}" != "1" && "${MEM_GUARD:-1}" != "0" && "${RAM:-0}" -gt 0 ]]; then
+    _avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    _swapfree_kb=$(awk '/^SwapFree:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    _req_kb=$(( RAM * 1024 ))
+    _margin_kb=$(( 2 * 1024 * 1024 ))           # 2 GiB host 余量
+    _have_kb=$(( _avail_kb + _swapfree_kb ))
+    if (( _have_kb < _req_kb + _margin_kb )); then
+        _running=$(pgrep -af 'qemu-system-x86_64 -name win10' 2>/dev/null \
+                   | grep -v inhibit | grep -oE 'win10-[0-9]+' | sort -u | tr '\n' ' ' || true)
+        echo ">> ⚠ 内存护栏: 可用 $(( _have_kb/1024 )) MiB (物理 $(( _avail_kb/1024 )) + swapFree $(( _swapfree_kb/1024 ))) < 需求 ${RAM} + 余量 2048 MiB" >&2
+        echo ">>   已在跑: ${_running:-（无）}；再起本台有 OOM 风险（OOM-kill 随机杀进程，含别的 VM）" >&2
+        if (( _have_kb < _req_kb )); then
+            if [[ "${MEM_FORCE:-0}" == "1" ]]; then
+                echo ">>   MEM_FORCE=1 → 强行继续（风险自负）" >&2
+            else
+                echo ">> ✗ 物理内存+swap 都装不下 ${RAM}M，拒绝启动以保护正在运行的 VM。" >&2
+                echo ">>   先 ./stop-vm.sh <N> 停一台，或 MEM_FORCE=1 覆盖后重试。" >&2
+                exit 1
+            fi
+        fi
+    else
+        echo ">> 内存护栏:   可用 $(( _have_kb/1024 )) MiB ≥ 需求 ${RAM}+2048 MiB，放行"
+    fi
+fi
+
 TPM_ARGS=()
 if [[ "${TPM:-1}" == "0" ]]; then
     : # 显式禁用
@@ -35,6 +70,32 @@ elif command -v swtpm >/dev/null 2>&1; then
         echo ">> swtpm:       [DRY_RUN] 跳过 init/daemon，仅输出 TPM 设备参数"
     else
     mkdir -p "$TPM_STATE_DIR"
+
+    # --- 清理上一轮被 SIGKILL 留下的孤儿 swtpm（关键护栏）---
+    # QEMU 被强杀(KILL)时它的 swtpm daemon 不会被回收，会继续持有本实例
+    # tpm-state 的 NVRAM flock。下次启动时新 swtpm 能应答控制通道（打印
+    # "ready"），但 QEMU 发 CMD_INIT 抢不到锁 → tpm.log "Could not lock
+    # access to lockfile" → "TPM result for CMD_INIT: 0x9 operation failed"，
+    # QEMU 秒退（exit status 1）；每次重试还会再叠加一个孤儿。
+    # 这里在起 daemon 前按本实例 tpm-state 精确匹配清掉旧 swtpm——仅当没有
+    # 活着的 QEMU 占用本实例 tpm-sock 时才清（正常重启一定满足，绝不误杀
+    # 正在运行的其它实例：dir=/.../vms/N/tpm-state 是实例唯一串）。
+    if ! pgrep -af 'qemu-system' 2>/dev/null | grep -qF -- "path=$TPM_SOCK"; then
+        # 注意：脚本是 set -euo pipefail；无孤儿时 grep 返回 1 会经 pipefail
+        # 传到赋值退出码触发 set -e，故必须 || true 兜底（否则正常启动全挂）。
+        _tpm_orphans=$(pgrep -af 'swtpm' 2>/dev/null | grep -F -- "dir=$TPM_STATE_DIR" | awk '{print $1}' || true)
+        if [[ -n "$_tpm_orphans" ]]; then
+            echo ">> swtpm:       清理孤儿 swtpm（持本实例 tpm-state 锁但 QEMU 已不在）: $(echo $_tpm_orphans | tr '\n' ' ')"
+            kill $_tpm_orphans 2>/dev/null || true
+            # 给 SIGTERM 至多 1s 释放 flock；仍赖着则 SIGKILL
+            for _i in 1 2 3 4 5; do
+                pgrep -af 'swtpm' 2>/dev/null | grep -qF -- "dir=$TPM_STATE_DIR" || break
+                sleep 0.2
+            done
+            pgrep -af 'swtpm' 2>/dev/null | grep -F -- "dir=$TPM_STATE_DIR" \
+                | awk '{print $1}' | xargs -r kill -9 2>/dev/null || true
+        fi
+    fi
 
     # 首次启动 / state 不完整时初始化 TPM 2.0 state（manufacturer info、EK 证书）。
     # 完整初始化产出 ~6KB permall（含 RSA EK + ECC EK + Platform cert + sha256 PCR banks）；

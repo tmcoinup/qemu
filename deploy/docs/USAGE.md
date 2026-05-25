@@ -113,11 +113,18 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `HEADLESS` | 0 | 1 = 关 SDL 改 VNC（与 fb-shm 并存）(flag: `--headless`) |
 | `RAM` | 4096 | 单位 MB（4GB 双通道 = 2×2GB） |
 | `MEM_PER_DIMM_MB` | RAM/2 | DIMM 总量自动除 2 凑双通道 SPD |
+| `MEM_GUARD` | 1 | 启动前内存护栏：可用物理(MemAvailable)+SwapFree 不足以再容下本 VM 的 `-m`+2GiB 余量就 WARN；连 RAM+swap 都装不下则**拒绝启动**（防 OOM-kill 误伤其它在跑的 VM）。`0` = 关闭检查 |
+| `MEM_FORCE` | 0 | 1 = 越过 `MEM_GUARD` 的硬拒绝强行启动（风险自负） |
 | `DISPLAY` | `:0` | X11 显示，未设默认本地 :0；HEADLESS=1 时忽略 |
 | `EXTRA_ISO=PATH` | - | 副 CDROM（autounattend.xml / 驱动盘 等） |
 | `--iso=PATH` | - | 主启动 ISO（装系统） |
 | `--reroll` | - | 删掉 `vms/<N>/profile` 重新随机一次硬件身份 |
 | `CPU_MODEL` | profile 写入 | `Ryzen3-1200`（默认）/ `Ryzen3-2300X`（Win11 LTSC 兼容）。第一次 reroll 时持久化到 profile，之后不用每次设 |
+
+> **内存按需分配（`prealloc=off`）**：memfd 后端不再开机就把整块 `-m` 摸一遍钉死 host
+> 物理内存——guest 用多少才占多少，未触及页不占、配 `mem-lock=off` 还可换出。多 VM 并发
+> 时配合 `MEM_GUARD` 防 OOM。advertised 容量 / DIMM SMBIOS 完全不变（纯 host 侧分配策略，
+> **零反检测影响**）。host 为 32GiB 时，3×8GiB VM 已贴上限，第 4 台务必看护栏提示。
 
 每个 INSTANCE 的资源分配：
 - 磁盘：`/home/ubuntu/images/vms/<N>/disk.qcow2`（不存在则创建空白 512GB）
@@ -258,7 +265,14 @@ BASE_IMAGE=/home/ubuntu/images/vms/_base/win10-ltsc-shallow.qcow2 \
 ```bash
 deploy/scripts/stop-vm.sh <INSTANCE>
 # = ACPI shutdown → 等 30s → QMP quit → 再等 5s → SIGTERM → SIGKILL
+# 确认停机后还会收摊本实例的 swtpm daemon + qmp-proxy：swtpm 是脱离 qemu 的
+# --daemon，不显式停会一直持 tpm-state NVRAM 锁，下次启动新 QEMU CMD_INIT 抢不
+# 到锁报 0x9 秒退（见 docs/DEBUG.md）。
 ```
+
+> 直接 `kill -9` qemu 或关 SDL 窗口**不会**清 swtpm；但 `start-vm.sh` 起 daemon 前有
+> preflight reaper 会按实例自动清掉孤儿 swtpm（无活 qemu 占用本实例 tpm-sock 时才清，
+> 跨实例零误杀），所以即便硬杀过，下次 `start-vm.sh <N>` 也能自愈。
 
 ## 9. 重置硬件身份
 

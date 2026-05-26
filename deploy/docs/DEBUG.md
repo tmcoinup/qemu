@@ -84,7 +84,9 @@ Ryzen3-1200=3.1GHz），但**指令是按 host 真实频率执行的**。host(58
 `host-performance.sh`：governor=performance + halt_poll=500000 + THP defrag=never（治①），
 并把 `scaling_max_freq` 封顶到本实例 `CPU_MAX_MHZ`（治②，**只降不升**）。手动：
 ```bash
-sudo CPU_MAX_KHZ=3400000 deploy/scripts/host-performance.sh   # 3400=伪装 CPU 上限 MHz
+sudo deploy/scripts/host-performance.sh 3400000   # 位置参数=封顶 kHz(3400MHz=伪装 CPU 上限)
+# 已装 /etc/sudoers.d/qemu-hostperf → 仅此脚本免密；start-vm 自动调优不再提示输密码。
+# 多 VM 并发时 start-vm 自动取「在跑各 VM CPU_MAX_MHZ 最小值」做全局封顶(任一都不超规格)。
 ```
 **验证调优是否生效**：
 ```bash

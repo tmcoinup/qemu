@@ -18,8 +18,13 @@ CPU_POOL=(
     # AMD AM4 — Zen 1 / Zen+（桌面 Ryzen 3 全系无 iGPU；带 iGPU 的是 APU 2200G/3200G 系，本池排除）
     "Ryzen3-1200|AuthenticAMD|AMD Ryzen 3 1200 Quad-Core Processor|3400|3100|YD1200BBM4KAE|0x139|AM4"
     "Ryzen3-2300X|AuthenticAMD|AMD Ryzen 3 2300X Quad-Core Processor|4000|3500|YD230XBBM4KAF|0x139|AM4"
-    # Intel LGA1151 v2 — Coffee Lake R，"F" 后缀 = 无 UHD 630 iGPU
+    # Intel LGA1151 Coffee Lake，"F" 后缀 = 无 UHD 630 iGPU（本池硬约束：排除核显，
+    # 见 stealth_pick_profile 的 host-aware 选择——AMD 宿主机不会挑到这些 Intel）。
+    # 都是 4C/4T 无 HT：桌面 2C/4T 全部带核显，且把无 HT 的 i3 谎报成 2C/4T+HT 本身
+    # 是破绽，故无核显约束下只做 4H4C（4 核 4 线程）。频率取 E5-2696 v4 区间(≤3.6G)，
+    # 让未来 Intel 宿主机上自报规格真实可达。
     "Skylake-Client-IBRS,family=6,model=158,stepping=10,model-id=Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz|GenuineIntel|Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz|4200|3600|GX80684I39100F|0xCD|LGA1151"
+    "Skylake-Client-IBRS,family=6,model=158,stepping=10,model-id=Intel(R) Core(TM) i3-8100F CPU @ 3.60GHz|GenuineIntel|Intel(R) Core(TM) i3-8100F CPU @ 3.60GHz|3600|3600|GX80684I38100F|0xCD|LGA1151"
 )
 
 # ------------------------------------------------------------------
@@ -88,21 +93,39 @@ GPU_POOL=(
 # NVMe 池 —— 全部 Samsung 系列，搭配 use-samsung-id=on 保证 IEEE OUI 一致。
 # 格式：MODEL|FIRMWARE|RAW_BYTES
 #
-# **2026-05 增 RAW_BYTES 列**：之前 start-vm.sh 一律建 512 GB qcow2，但 NVMe
-# 池里有 1TB / 500GB 多种规格——profile 抽到 "Samsung 980 1TB" 时 Windows
-# WMI 看到 Model=1TB 但 Size=476 GiB（512×10⁹ B），跨向量矛盾。
-# 现在按各厂商 NVMe 真实 advertised capacity 填字节数：
-#   500GB SSD = 500,107,862,016 B (~465.7 GiB)
-#   512GB SSD = 512,110,190,592 B (~476.9 GiB)
-#   1TB   SSD = 1,000,204,886,016 B (~931.5 GiB)
+# **全部限定 PCIe 3.0 x4**（2026-05-26）：本套主板池是 AM4 Zen1/Zen+
+# (B350/X370/B450) + Intel LGA1151(300系) / LGA1200(400系) 入门平台，这些 CPU
+# 直连 lane 都是 PCIe 3.0。原来的 980 PRO / 990 PRO 是 PCIe 4.0 盘——装在这些
+# 老平台上要么协商降到 Gen3(link speed 与型号宣称不符)，要么型号本身对 Zen1
+# 时代的整机就过于超前(时间线矛盾)。故移除 Gen4 盘，只留 Gen3：
+#   970 PRO / 970 EVO / 970 EVO Plus / 980(非PRO) / 960 EVO / 960 PRO，均 Gen3 x4。
+# ⚠ 受 use-samsung-id=on 约束(PCI 厂商 ID 锁 Samsung 144D)，本池只能放 Samsung；
+#   要上 WD/Crucial/海康等多品牌须先让 nvme 设备按品牌切 PCI vendor-id(另议)。
+#
+# **RAW_BYTES 列**：之前一律建 512GB qcow2，但池里有 1TB/500GB 多规格——抽到
+# "980 1TB" 时 WMI 看到 Model=1TB 但 Size=476GiB(512×10⁹) 即矛盾。按真实
+# advertised capacity 填字节：
+#   500GB = 500,107,862,016 B (~465.7 GiB)
+#   512GB = 512,110,190,592 B (~476.9 GiB)
+#   1TB   = 1,000,204,886,016 B (~931.5 GiB)
 # qcow2 是 sparse 的，1TB 镜像不会立即占 host 1TB（只占实际写入）。
 # ------------------------------------------------------------------
 NVME_POOL=(
+    # Samsung 970 PRO (MLC, Gen3 x4)
     "Samsung SSD 970 PRO 512GB|1B2QEXM7|512110190592"
+    "Samsung SSD 970 PRO 1TB|1B2QEXM7|1000204886016"
+    # Samsung 970 EVO (TLC, Gen3 x4)
+    "Samsung SSD 970 EVO 500GB|1B2QEXE7|500107862016"
+    "Samsung SSD 970 EVO 1TB|1B2QEXE7|1000204886016"
+    # Samsung 970 EVO Plus (TLC, Gen3 x4)
     "Samsung SSD 970 EVO Plus 500GB|2B2QEXM7|500107862016"
-    "Samsung SSD 980 PRO 500GB|5B2QGXA7|500107862016"
+    "Samsung SSD 970 EVO Plus 1TB|2B2QEXM7|1000204886016"
+    # Samsung 980 (非 PRO, DRAM-less TLC, Gen3 x4)
+    "Samsung SSD 980 500GB|3B4QFXO7|500107862016"
     "Samsung SSD 980 1TB|3B4QFXO7|1000204886016"
-    "Samsung SSD 990 PRO 1TB|3B2QJXD7|1000204886016"
+    # Samsung 960 EVO / 960 PRO (Polaris, Gen3 x4, M.2 2280)
+    "Samsung SSD 960 EVO 500GB|3B7QCXE7|500107862016"
+    "Samsung SSD 960 PRO 512GB|4B6QCXP7|512110190592"
 )
 
 # ------------------------------------------------------------------

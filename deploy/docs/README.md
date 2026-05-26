@@ -18,6 +18,7 @@
 | CPU 持久化 | per-instance；DIMM SN / NVMe SN / Board SN 等全部一次性生成写 profile，跨重启不变 | `stealth_pick_profile` → `vms/<N>/profile` |
 | 主板池（27 条） | ASUS/MSI/Gigabyte/ASRock × AM4/LGA1151/LGA1200，每条带 PCI 子系统 vendor/device ID | `stealth-lib.sh::BOARD_POOL`；start-vm.sh 不再 hardcoded ASUS subsys |
 | 内存拓扑 | ≤4GB：1 条 DIMM + 单 NUMA（卡槽 2 占 1 空 1）；>4GB：2 条 DIMM + 双 NUMA + 双通道（槽位 DIMM_A2/DIMM_B2）。内存量钉 `profile.MEM_TOTAL_MB`，启动命令不变；`set-vm-memory.sh <N> 8G` 切换 | 动态 `MEMORY_ARGS` 数组；T16_NUM_DEVICES 始终 = 2（卡槽数不变）；memfd `prealloc=off` 按需分配（未用页不占 host 物理内存）；起前内存 preflight 护栏防 OOM（`MEM_GUARD` / `MEM_FORCE`） |
+| 内存频率配套 | 报告速率 = **min(颗粒额定, CPU 平台上限)**：Zen1=2667 / Zen+=2933 / Coffee i3=2400（B360/H310 锁）。修「i3 报 2666」「2400 颗粒报 2666」破绽；品牌+速率随颗粒/CPU 随机但永不超平台 | `NVME`/`MEM_POOL` 加 `RATED_MTS` 列；`stealth-smbios.sh::_cpu_max_mem` + `_min` |
 | 内存 SN 持久化 + 双通道唯一 SN | DIMM 0 一次性生成 8-char hex 写 profile；双通道第 2 条按 `sha256(MEM_SERIAL-dimm2)` 派生，两条各自唯一（共用同 SN 是伪造特征，必查 `Win32_PhysicalMemory`） | `MEM_SERIAL` 字段；`t17` emit `serial=SN1\|SN2`；`smbios.c` type17 serial 支持 `\|` 分隔的 per-DIMM 列表 |
 | NVMe（全 PCIe 3.0 x4） | 10 款 Samsung（970 PRO/EVO/EVO Plus、980、960 EVO/PRO）；**移除 980 PRO/990 PRO 两个 PCIe 4.0**——AM4 Zen1/+/LGA1151 老平台是 Gen3，Gen4 盘要么降速要么时间线超前=矛盾。受 `use-samsung-id=on` 约束本池只放 Samsung | `NVME_POOL` 含 `RAW_BYTES` 列；qcow2 大小按 profile 选定 model 同步建（Model ↔ Size 自洽） |
 | 显示器（随机）| 10 款 24" 1920×1080@60 池：SAM C24F390 / AOC 24G2E5 / BNQ GW2480 / DEL SE2419HR / **HKC SG24A1 国产** / LG / Philips / 三星曲面 | `MONITOR_POOL` + **patch 0009** virtio-vga 加 `edid-vendor/name/serial/width-mm/height-mm` cmdline 选项 |

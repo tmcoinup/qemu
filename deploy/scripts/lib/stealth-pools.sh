@@ -132,11 +132,18 @@ NVME_POOL=(
 # 内存 part / 厂商池 —— 低端 4G 总量典型搭配。
 # Format: MFR|PART_2G|PART_4G
 # ------------------------------------------------------------------
+# 增 RATED_MTS 列(2026-05-26)：颗粒额定速率(JEDEC/型号编码)。**报告速率 = min(本列,
+# CPU 平台内存上限)** —— 见 stealth-smbios.sh::_cpu_max_mem。这样既不会出现"i3-9100F
+# (官方 DDR4-2400)却报 2666"、也不会"2400 颗粒报 2666"，CPU/主板/内存频率三者配套。
+# 速率随颗粒(随机)+CPU(随机)而变 = 规格随机但永不超平台。
+# Format: MFR|PART_2G|PART_4G|RATED_MTS
 MEM_POOL=(
-    "Kingston|KVR26N19S6/2|HX426C16FB3A/4"
-    "Crucial|CT2G4DFS6266|CT4G4DFS8266"
-    "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC"
-    "SK hynix|HMA425S6BJR8N-V8|HMA851S6CJR6N-VK"
+    "Kingston|KVR26N19S6/2|HX426C16FB3A/4|2666"
+    "Crucial|CT2G4DFS6266|CT4G4DFS8266|2666"
+    "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400"
+    "SK hynix|HMA425S6BJR8N-V8|HMA851S6CJR6N-VK|2666"
+    "Kingston|KVR24N17S6/2|KVR24N17S8/4|2400"
+    "Crucial|CT2G4DFS624A|CT4G4DFS824A|2400"
 )
 
 # ------------------------------------------------------------------

@@ -13,13 +13,36 @@ stealth_qemu_cpu_arg() {
 # inside option values).
 _e() { echo "${1//,/,,}"; }
 
+_min() { if (( ${1:-0} < ${2:-0} )); then echo "${1:-0}"; else echo "${2:-0}"; fi; }
+
+# CPU 平台官方支持的最大内存速率 (MT/s)。报告速率取 min(颗粒额定, 本值)，保证
+# "CPU/主板/内存频率配套"——不会出现 i3 报超 2400、或 2400 颗粒报 2666 的破绽。
+#   Ryzen 3 1200(Zen1)=2667；2300X(Zen+)=2933；Coffee Lake i3=2400(B360/H310 锁)；
+#   Coffee i5/i7=2666；其它 Ryzen 兜 2933。(Haswell/DDR3 等留 DDR3 批次再加。)
+_cpu_max_mem() {
+    case "${CPU_NAME:-}${CPU_MODEL:-}" in
+        *2300X*)     echo 2933 ;;
+        *1200*)      echo 2667 ;;
+        *i3-*)       echo 2400 ;;
+        *i5-*|*i7-*) echo 2666 ;;
+        *Ryzen*)     echo 2933 ;;
+        *)           echo 2666 ;;
+    esac
+}
+
 # ------------------------------------------------------------------
 # SMBIOS 参数构造器，每行一个完整 -smbios option (commas 已转义)
 # ------------------------------------------------------------------
 stealth_smbios_args() {
     local t0 t1 t2 t3 t4 t11 t16 t17
     local mem_per_dimm_mb="${MEM_PER_DIMM_MB:-2048}"
-    local mem_speed="${MEM_SPEED:-2666}"
+    # 报告速率：显式 MEM_SPEED 优先；否则 min(颗粒额定 MEM_RATED, CPU 平台上限)。
+    local mem_speed
+    if [[ -n "${MEM_SPEED:-}" ]]; then
+        mem_speed="$MEM_SPEED"
+    else
+        mem_speed="$(_min "${MEM_RATED:-2666}" "$(_cpu_max_mem)")"
+    fi
     local mem_part="$MEM_PART_2G"
     (( mem_per_dimm_mb >= 4096 )) && mem_part="$MEM_PART_4G"
 

@@ -113,7 +113,7 @@ stealth_pick_profile() {
     # 5. 内存厂家 / part / 持久化序列号
     local mp_n=${#MEM_POOL[@]}
     local mp_i=$(( (RANDOM * 32768 + RANDOM) % mp_n ))
-    IFS='|' read -r MEM_MFR MEM_PART_2G MEM_PART_4G <<<"${MEM_POOL[$mp_i]}"
+    IFS='|' read -r MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED <<<"${MEM_POOL[$mp_i]}"
     # DIMM serial 在 pick 阶段一次性生成，写到 profile 持久化——避免之前每次
     # 启动 stealth_smbios_args 里 _rand 一遍导致 Win32_PhysicalMemory.SerialNumber
     # 重启就变（反作弊"硬件指纹漂移"检测的明显信号）。
@@ -163,7 +163,7 @@ stealth_pick_profile() {
     export NIC_MAC UUID
     export GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV
     export NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES
-    export MEM_MFR MEM_PART_2G MEM_PART_4G MEM_SERIAL MEM_TOTAL_MB
+    export MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SERIAL MEM_TOTAL_MB
     export EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL
     export KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_SERIAL
     export MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT MOUSE_SERIAL

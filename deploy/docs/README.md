@@ -14,12 +14,12 @@
 
 | 层 | 伪造目标 | 实现 |
 |---|---|---|
-| CPU 池（无 iGPU） | AMD Ryzen 3 1200/2300X + Intel i3-9100F（F 后缀=无 iGPU）；CPUID HYPERVISOR=0、KVM/HV leaves stripped | `-cpu ...,kvm=off,hypervisor=off,enforce=off` + `target/i386` patch |
+| CPU 池（无 iGPU，全 4C/4T） | AMD Ryzen 3 1200/2300X + Intel i3-9100F/8100F（F 后缀=无 iGPU；桌面 2C/4T 全带核显故只做 4H4C）；**按宿主机自动匹配**：硬过滤同厂商(KVM 直通特性一致)+ 频率≤host 可达(贴合未来 E5 宿主机)，AMD host 只挑 AMD；CPUID HYPERVISOR=0、KVM/HV leaves stripped | `-cpu ...,kvm=off,hypervisor=off,enforce=off` + `target/i386` patch；`stealth-pick.sh::_host_cpu_vendor/_host_cpu_max_mhz` 过滤 |
 | CPU 持久化 | per-instance；DIMM SN / NVMe SN / Board SN 等全部一次性生成写 profile，跨重启不变 | `stealth_pick_profile` → `vms/<N>/profile` |
 | 主板池（27 条） | ASUS/MSI/Gigabyte/ASRock × AM4/LGA1151/LGA1200，每条带 PCI 子系统 vendor/device ID | `stealth-lib.sh::BOARD_POOL`；start-vm.sh 不再 hardcoded ASUS subsys |
 | 内存拓扑 | ≤4GB：1 条 DIMM + 单 NUMA（卡槽 2 占 1 空 1）；>4GB：2 条 DIMM + 双 NUMA + 双通道（槽位 DIMM_A2/DIMM_B2）。内存量钉 `profile.MEM_TOTAL_MB`，启动命令不变；`set-vm-memory.sh <N> 8G` 切换 | 动态 `MEMORY_ARGS` 数组；T16_NUM_DEVICES 始终 = 2（卡槽数不变）；memfd `prealloc=off` 按需分配（未用页不占 host 物理内存）；起前内存 preflight 护栏防 OOM（`MEM_GUARD` / `MEM_FORCE`） |
 | 内存 SN 持久化 + 双通道唯一 SN | DIMM 0 一次性生成 8-char hex 写 profile；双通道第 2 条按 `sha256(MEM_SERIAL-dimm2)` 派生，两条各自唯一（共用同 SN 是伪造特征，必查 `Win32_PhysicalMemory`） | `MEM_SERIAL` 字段；`t17` emit `serial=SN1\|SN2`；`smbios.c` type17 serial 支持 `\|` 分隔的 per-DIMM 列表 |
-| NVMe | 5 款 Samsung (970 PRO / 970 EVO / 980 PRO / 980 / 990 PRO) 池，每款带真实 advertised 字节数 | `NVME_POOL` 含 `RAW_BYTES` 列；qcow2 大小按 profile 选定 model 同步建（Model ↔ Size 自洽） |
+| NVMe（全 PCIe 3.0 x4） | 10 款 Samsung（970 PRO/EVO/EVO Plus、980、960 EVO/PRO）；**移除 980 PRO/990 PRO 两个 PCIe 4.0**——AM4 Zen1/+/LGA1151 老平台是 Gen3，Gen4 盘要么降速要么时间线超前=矛盾。受 `use-samsung-id=on` 约束本池只放 Samsung | `NVME_POOL` 含 `RAW_BYTES` 列；qcow2 大小按 profile 选定 model 同步建（Model ↔ Size 自洽） |
 | 显示器（随机）| 10 款 24" 1920×1080@60 池：SAM C24F390 / AOC 24G2E5 / BNQ GW2480 / DEL SE2419HR / **HKC SG24A1 国产** / LG / Philips / 三星曲面 | `MONITOR_POOL` + **patch 0009** virtio-vga 加 `edid-vendor/name/serial/width-mm/height-mm` cmdline 选项 |
 | 显卡 GPU（浅层）| 主 `VEN_1AF4&DEV_1050` + subsys `1C8110DE`-类（NVIDIA / AMD 池随机抽） | `virtio-vga + x-pci-sub-vendor-id/device-id`；池里 NVIDIA GT 1030/GTX 1050/1050Ti/750Ti + AMD RX 550/560 |
 | 显卡 GPU（深层）| 主 `VEN_10DE&DEV_1C81&SUBSYS_1C8110DE` (NVIDIA 真改) | 同上 + `x-pci-vendor-id=0x10DE,x-pci-device-id=0x1C81` (`GPU_SELFSIGNED=1`) |

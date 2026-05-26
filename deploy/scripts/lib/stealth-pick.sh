@@ -1,12 +1,60 @@
 # ------------------------------------------------------------------
+# host-aware 选择助手：VM 伪装 CPU 要贴合**宿主机**真实能力。
+#   _host_cpu_vendor   -> AuthenticAMD / GenuineIntel（读 /proc/cpuinfo）
+#   _host_cpu_max_mhz  -> 宿主机单核可达上限 MHz（cpuinfo_max_freq；裸 VM 无 cpufreq
+#                         时从 model name "@ X.XGHz" 估；都拿不到给大数=不按频率过滤）
+# ------------------------------------------------------------------
+_host_cpu_vendor() {
+    local v
+    v="$(awk -F': ' '/^vendor_id/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+    case "$v" in
+        GenuineIntel) echo GenuineIntel ;;
+        AuthenticAMD) echo AuthenticAMD ;;
+        *)            echo "${v:-AuthenticAMD}" ;;
+    esac
+}
+_host_cpu_max_mhz() {
+    local khz mhz
+    khz="$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || echo '')"
+    if [[ "$khz" =~ ^[0-9]+$ ]]; then echo $(( khz / 1000 )); return; fi
+    mhz="$(awk -F'@ ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null \
+           | grep -oE '[0-9.]+GHz' | grep -oE '[0-9.]+')"
+    if [[ -n "$mhz" ]]; then awk -v g="$mhz" 'BEGIN{printf "%d", g*1000}'; return; fi
+    echo 99999
+}
+
+# ------------------------------------------------------------------
 # 公开：随机生成一份完整 profile 并 export
 # ------------------------------------------------------------------
 stealth_pick_profile() {
     _rng_init
 
-    # 1. 先选 CPU
-    local cpu_n=${#CPU_POOL[@]}
-    local cpu_i=$(( (RANDOM * 32768 + RANDOM) % cpu_n ))
+    # 1. 先选 CPU —— host-aware：
+    #    · 硬过滤**同厂商**：AMD 宿主机不伪装 Intel、反之亦然。enforce=off 下宿主机
+    #      微架构特性(MSR/CPUID leaf)会透过 KVM 暴露，伪装异厂商 = 立刻矛盾。
+    #    · 频率过滤 CPU_MAX_MHZ ≤ 宿主机单核上限：自报规格在本机真实可达，避免
+    #      "自报远超宿主机能给"的缺口（与未来 E5-2696 v4 宿主机对齐更干净）。
+    #    无频率匹配则放宽到仅同厂商；再无(异厂商池)则全池兜底并告警。
+    local _host_ven _host_max
+    _host_ven="$(_host_cpu_vendor)"
+    _host_max="$(_host_cpu_max_mhz)"
+    local _cand_vf=() _cand_v=() _ci _cv _cmx
+    for (( _ci=0; _ci<${#CPU_POOL[@]}; _ci++ )); do
+        IFS='|' read -r _ _cv _ _cmx _ _ _ _ <<<"${CPU_POOL[$_ci]}"
+        [[ "$_cv" == "$_host_ven" ]] || continue
+        _cand_v+=("$_ci")
+        if [[ "$_cmx" =~ ^[0-9]+$ && "$_host_max" =~ ^[0-9]+$ ]] && (( _cmx <= _host_max )); then
+            _cand_vf+=("$_ci")
+        fi
+    done
+    local -a _pick
+    if   (( ${#_cand_vf[@]} > 0 )); then _pick=("${_cand_vf[@]}")
+    elif (( ${#_cand_v[@]}  > 0 )); then _pick=("${_cand_v[@]}")
+    else
+        echo ">> WARN: CPU 池里无与宿主机($_host_ven)同厂商型号，回退全池(可能厂商不一致)" >&2
+        _pick=(); for (( _ci=0; _ci<${#CPU_POOL[@]}; _ci++ )); do _pick+=("$_ci"); done
+    fi
+    local cpu_i="${_pick[$(( (RANDOM * 32768 + RANDOM) % ${#_pick[@]} ))]}"
     IFS='|' read -r CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET <<<"${CPU_POOL[$cpu_i]}"
     # 兼容老 profile 的 CPU_MODEL 字段：保留它指向 QEMU 模型主名（不带 family/model 覆盖）
     CPU_MODEL="${CPU_QEMU_ARG%%,*}"

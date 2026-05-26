@@ -15,9 +15,15 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# 频率封顶上限可走 (1) 位置参数 $1 或 (2) 环境变量 CPU_MAX_KHZ。位置参数优先，
+# 这样 NOPASSWD sudoers 能按脚本路径放行(任意参数)，不必为传 env 开 setenv。
+CPU_MAX_KHZ="${1:-${CPU_MAX_KHZ:-}}"
+
 if [[ $EUID -ne 0 ]]; then
     echo "rerunning with sudo..."
-    exec sudo -E bash "$0" "$@"
+    # 直接以脚本路径(非 'bash 脚本')重入 sudo，命令名=脚本本身，匹配
+    # /etc/sudoers.d/qemu-hostperf 的 NOPASSWD 规则；参数($@)原样带过去。
+    exec sudo "$0" "$@"
 fi
 
 # 1) CPU governor -> performance：固定高频，消除 vm-exit 间降频导致的服务延迟

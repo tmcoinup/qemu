@@ -143,8 +143,18 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 > 实际以 host 频率执行指令——若 host 跑 4.4GHz，guest「单位 TSC tick 内干的活」就远超这颗
 > CPU 该有的量，等于一台超频/变速的机器，正是 `13-131130-8` 计时异常的来源之一。把
 > `scaling_max_freq` 压到 `CPU_MAX_MHZ`（伪装 CPU 上限）后，guest 再也跑不出超规格速度，
-> 且固定频率顺带把抖动也压平。**只降不升**：仅当当前上限高于本实例规格时才下压，多 VM
-> 并发收敛到运行中最小值。低规格 VM 停了 cap 不会自动回升（重启 host 或手动调）。
+> 且固定频率顺带把抖动也压平。**多 VM 取运行中最小**：scaling_max_freq=当前在跑各 VM
+> `CPU_MAX_MHZ` 的最小值（每次启动按实际在跑集合重算，可升可降），保证任一 VM 都不超自身
+> 规格。低规格 VM 停机不触发重算，高规格 VM 要到下次启动/手动调才回升。
+>
+> **免密 sudo**：频率封顶要写 `scaling_max_freq`（root）。已装 `/etc/sudoers.d/qemu-hostperf`
+> 仅给 `host-performance.sh` 免密（其余 sudo 仍要密码），所以 start-vm 自动调优**不再提示
+> 输密码**。手动也可：`sudo deploy/scripts/host-performance.sh <封顶kHz>`（cap 走位置参数）。
+>
+> **CPU 按宿主机自动匹配**：新建 VM 选伪装 CPU 时硬过滤**同厂商**（AMD 宿主机只挑 AMD、
+> 反之亦然——`enforce=off` 下宿主机微架构特性会透过 KVM 暴露，伪装异厂商即矛盾）+ 频率
+> ≤宿主机单核上限（自报规格本机真实可达）。CPU 再按 socket 配套对应主板。无核显约束下
+> CPU 池全 4C/4T（桌面 2C/4T 全带核显）。
 
 每个 INSTANCE 的资源分配：
 - 磁盘：`/home/ubuntu/images/vms/<N>/disk.qcow2`（不存在则创建空白 512GB）

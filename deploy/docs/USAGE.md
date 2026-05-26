@@ -115,6 +115,8 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `MEM_PER_DIMM_MB` | RAM/2 | DIMM 总量自动除 2 凑双通道 SPD |
 | `MEM_GUARD` | 1 | 启动前内存护栏：可用物理(MemAvailable)+SwapFree 不足以再容下本 VM 的 `-m`+2GiB 余量就 WARN；连 RAM+swap 都装不下则**拒绝启动**（防 OOM-kill 误伤其它在跑的 VM）。`0` = 关闭检查 |
 | `MEM_FORCE` | 0 | 1 = 越过 `MEM_GUARD` 的硬拒绝强行启动（风险自负） |
+| `HOST_TUNE` | **1** | 起 VM 前自动跑 `host-performance.sh`：governor=performance + halt_poll=500000 + THP defrag=never，压低 vCPU 服务延迟方差 → 缓解 ACE「游戏计时异常」(13-131130-8)。只动 host 侧旋钮，guest CPUID/tsc-freq/拓扑全不变（**零反检测影响**）。已调优自动跳过免重复 sudo；DRY_RUN 下严格 no-op。`0` / `--no-host-tune` = 跳过 |
+| `CPU_FREQ_CAP` | **1** | （需 `HOST_TUNE=1`）把 host `scaling_max_freq` 封顶到本实例伪装 CPU 的 `CPU_MAX_MHZ`（= SMBIOS Type4 自报 `max-speed`，如 Ryzen3-1200=3400）。host(5800) boost 4.6GHz 远超伪装规格，固定 `tsc-freq` 下 guest 实测吞吐就会超该型号上限 = **变速器/计时异常 tell**。**只降不升**：多 VM 并发自然收敛到运行中最小值，绝不让任一 VM 跑出超自身规格的速度。`0` / `--no-freq-cap` = 满 boost 不封顶 |
 | `DISPLAY` | `:0` | X11 显示，未设默认本地 :0；HEADLESS=1 时忽略 |
 | `EXTRA_ISO=PATH` | - | 副 CDROM（autounattend.xml / 驱动盘 等） |
 | `--iso=PATH` | - | 主启动 ISO（装系统） |
@@ -125,6 +127,24 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 > 物理内存——guest 用多少才占多少，未触及页不占、配 `mem-lock=off` 还可换出。多 VM 并发
 > 时配合 `MEM_GUARD` 防 OOM。advertised 容量 / DIMM SMBIOS 完全不变（纯 host 侧分配策略，
 > **零反检测影响**）。host 为 32GiB 时，3×8GiB VM 已贴上限，第 4 台务必看护栏提示。
+
+> **host 计时抖动调优（`HOST_TUNE=1`，默认开）**：start-vm.sh 起 VM 前自动跑
+> `host-performance.sh`，把 CPU governor 钉到 `performance`、halt_poll 拉到 500000ns、
+> THP `defrag=never`。这些压低 vCPU 服务延迟的方差——ACE「游戏计时异常」(13-131130-8)
+> 这类反作弊时钟检测对抖动尖刺敏感。**只动 host 侧**：guest 的 CPUID / 品牌串 /
+> `tsc-freq` / vCPU 拓扑全不变，零反检测影响。已调优自动跳过（不每次 sudo）；后台/无 tty
+> 且无免密 sudo 时只 WARN 不阻断启动。`--no-host-tune` 跳过。
+> ⚠ 旧版 `host-performance.sh` 默认预留 32GiB hugepage——但内存后端是 `memfd`，**不用**
+> 显式 hugepage 池，预留只会白锁 host 内存重新招回 OOM。现已默认关，仅 `HUGEPAGES=N`
+> 且后端换 hugetlbfs 时才开。
+>
+> **频率封顶（`CPU_FREQ_CAP=1`，默认开）**：host(Ryzen7 5800)的 boost 能到 4.6GHz，
+> 而 VM 伪装的是 Ryzen3-1200（自报 boost 3.4GHz）。guest 的 TSC 被钉死在 3.1GHz，但 CPU
+> 实际以 host 频率执行指令——若 host 跑 4.4GHz，guest「单位 TSC tick 内干的活」就远超这颗
+> CPU 该有的量，等于一台超频/变速的机器，正是 `13-131130-8` 计时异常的来源之一。把
+> `scaling_max_freq` 压到 `CPU_MAX_MHZ`（伪装 CPU 上限）后，guest 再也跑不出超规格速度，
+> 且固定频率顺带把抖动也压平。**只降不升**：仅当当前上限高于本实例规格时才下压，多 VM
+> 并发收敛到运行中最小值。低规格 VM 停了 cap 不会自动回升（重启 host 或手动调）。
 
 每个 INSTANCE 的资源分配：
 - 磁盘：`/home/ubuntu/images/vms/<N>/disk.qcow2`（不存在则创建空白 512GB）

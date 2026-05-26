@@ -24,6 +24,10 @@ while (( $# > 0 )); do
         --fb-shm-roi=*)  FB_SHM=1; FB_SHM_ROI="${1#*=}" ;;
         --proxy)         PROXY=1 ;;
         --no-proxy)      PROXY=0 ;;
+        --host-tune)     HOST_TUNE=1 ;;
+        --no-host-tune)  HOST_TUNE=0 ;;
+        --freq-cap)      CPU_FREQ_CAP=1 ;;
+        --no-freq-cap)   CPU_FREQ_CAP=0 ;;
         --hotkey-capture)     HOTKEY_CAPTURE=1 ;;
         --hotkey-capture=*)   HOTKEY_CAPTURE=1; HOTKEY_KEY="${1#*=}" ;;
         --no-hotkey-capture)  HOTKEY_CAPTURE=0 ;;
@@ -78,6 +82,16 @@ fi
 # 热键截图: HOTKEY_CAPTURE=1 时, 后台起 hotkey-capture.py, 同时给 QEMU 导出
 # QEMU_HOTKEY_TRIGGER. 用户在 SDL 窗口里按 HOTKEY_KEY(默认 F4), 守护进程从
 # fb-shm 零拷贝帧抓一张 PNG 存到 $VM_DIR/captures. guest 完全无感知.
+# host 侧调度/时钟抖动调优: 起 VM 前自动跑 host-performance.sh(governor=performance
+# + halt_poll=500000 + THP defrag=never), 压低 vCPU 服务延迟方差——ACE「游戏计时
+# 异常」(13-131130-8) 这类反作弊时钟检测对抖动敏感. 只动 host 侧, 零反检测影响.
+# 已调优则自动跳过(免每次 sudo); DRY_RUN 下严格 no-op. (flag: --host-tune/--no-host-tune)
+: "${HOST_TUNE:=1}"
+# CPU 频率封顶: 把 host scaling_max_freq 压到本实例伪装 CPU 的 CPU_MAX_MHZ(SMBIOS
+# Type4 自报上限), 防止 guest 实测吞吐超出该型号规格(超规格=变速器/计时异常 tell).
+# 只降不升(多 VM 取运行中最小, 绝不让任一 VM 超自身规格). HOST_TUNE=1 时才生效.
+# (flag: --freq-cap / --no-freq-cap)
+: "${CPU_FREQ_CAP:=1}"
 : "${HOTKEY_CAPTURE:=0}"
 : "${HOTKEY_KEY:=F4}"
 : "${HOTKEY_SOCK:=/tmp/qemu-stealth-${INSTANCE}.hotkey}"

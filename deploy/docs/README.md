@@ -208,7 +208,7 @@ deploy/
 │   ├── qmp-proxy.py                # QMP 多客户端 fanout（dgame + image-search 同时连）
 │   ├── reroll-identity.sh          # 重置硬件身份
 │   ├── stealth-lib.sh              # 随机池（被 start-vm.sh 调用）
-│   ├── host-performance.sh         # 主机调优 (透明大页 / CPU governor)
+│   ├── host-performance.sh         # 主机调优: governor=performance + halt_poll + THP defrag=never 压计时抖动(ACE 13-131130-8) + CPU_MAX_KHZ 按伪装 CPU 封顶频率防超规格; start-vm 默认 HOST_TUNE=1/CPU_FREQ_CAP=1 自动跑. memfd 后端不预留 hugepage
 │   ├── host-fix-gpu-devpkey.sh     # offline 修 DEVPKEY ACL（少用）
 │   ├── qmp-frame.sh                # QMP 截图 / sendkey
 │   ├── rdp-connect.sh              # 用 xfreerdp 进 guest

@@ -55,6 +55,54 @@ cat /sys/module/kvm_intel/parameters/ept        # 1
 cat /sys/module/kvm_intel/parameters/flexpriority# 1
 ```
 
+## ACE 反作弊 / 计时检测侧
+
+### `游戏计时异常` → `(13-131130-8)`
+```
+检测到游戏计时异常。请关闭并卸载变速器等可能影响游戏计时的软件，重启后重试。
+(13-131130-8)
+```
+**注意先分清两个 ACE 码**：`13-131106-0` 是 **GPU PCI 主 ID** 异常（深层 `GPU_SELFSIGNED=1`
+改 `10DE:1C81` 才会触发，浅层不碰）；`13-131130-8` 是 **计时（timing）异常**，跟 GPU 无关，
+矛头指向 vCPU 服务延迟 / 时钟进度的方差。
+
+**两类根因，都在 host 侧（非 guest 配置）**：
+
+① **调度/时钟抖动**——
+- `governor=powersave`：核在 vm-exit 之间降频，每次 exit 服务延迟忽高忽低；
+- `halt_poll_ns` 太短（默认 200000）：guest HLT 后唤醒落在 poll 窗外 → IPI 唤醒延迟尖刺；
+- THP `defrag=madvise/always`：khugepaged / 同步整理 stall 把 vCPU 冻住几毫秒 → 计时跳变。
+这些都会让 ACE 读到的帧/tick 计时方差超阈值，误判成「变速器」。
+
+② **超规格频率（关键，易漏）**——guest 的 TSC 被钉死在伪装 CPU 的 `tsc-freq`（如
+Ryzen3-1200=3.1GHz），但**指令是按 host 真实频率执行的**。host(5800) governor=performance
+能 boost 到 4.4GHz+，而伪装 CPU 自报的 SMBIOS Type4 `max-speed` 只有 3400MHz。于是 guest
+「单位 TSC tick 内干的活」远超这颗 CPU 该有的量 = 一台超频/变速的机器 → 直接踩 `13-131130-8`。
+⚠ 注意：单开 `governor=performance` 反而**加重**②（把 host 顶到满 boost），必须同时封顶频率。
+
+**修复**：`start-vm.sh` 默认 `HOST_TUNE=1` + `CPU_FREQ_CAP=1`，起 VM 前自动跑
+`host-performance.sh`：governor=performance + halt_poll=500000 + THP defrag=never（治①），
+并把 `scaling_max_freq` 封顶到本实例 `CPU_MAX_MHZ`（治②，**只降不升**）。手动：
+```bash
+sudo CPU_MAX_KHZ=3400000 deploy/scripts/host-performance.sh   # 3400=伪装 CPU 上限 MHz
+```
+**验证调优是否生效**：
+```bash
+cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort -u   # performance
+cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq  | sort -u   # =CPU_MAX_MHZ*1000(如3400000)
+cat /sys/module/kvm/parameters/halt_poll_ns                          # 500000
+cat /sys/kernel/mm/transparent_hugepage/defrag                       # [never]
+grep -m4 MHz /proc/cpuinfo                                           # 应 ≤ 封顶值, 不再 4.4G
+cat /proc/sys/vm/nr_hugepages                                        # 必须仍是 0(memfd 不预留)
+```
+**绝不能动的反检测命脉**（动了反而更可疑，且与计时检测无关）：`-cpu` 的
+`tsc-freq=`/`+invtsc`/`+tsc-deadline`、`kvm=off`/`hypervisor=off`/`vendor=`、vCPU 数/拓扑
+（`cores=N` 对应伪 N 核）、`-rtc clock=vm,driftfix=slew`、`-overcommit cpu-pm=on`。
+
+> 若调优后仍报 `13-131130-8`：排查 host 是否被别的重负载抢核（`pidstat`/`perf kvm stat`），
+> 或 vCPU 超额订阅（运行的 VM 总 vCPU > host 逻辑核）。本机 8c/16t，单 VM 4 vCPU，
+> ≤4 台不超订。考虑给 VM 做 vCPU pinning 进一步降抖动（尚未默认开启）。
+
 ## swtpm / TPM 侧
 
 ### `CMD_INIT: 0x9` → QEMU 秒退（exit status 1）

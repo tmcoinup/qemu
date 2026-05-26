@@ -18,6 +18,7 @@
 #     ./start-vm.sh 1 --fb-shm-roi=0,0,1920,1080 --fb-shm-rate=60
 #     ./start-vm.sh 1 --proxy               # 同时起 qmp-proxy 让多客户端共存
 #                                           # listen: /tmp/qemu-stealth-1.qmp.proxy
+#     ./start-vm.sh 1 --no-host-tune        # 跳过起前的 host 调优(默认会自动跑)
 #     ./start-vm.sh 1 --hotkey-capture      # SDL 窗口里按 F4 -> fb-shm 抓 PNG
 #                                           # 存 $VM_DIR/captures；--hotkey-capture=F2 改键
 #
@@ -75,6 +76,16 @@
 #                          (flag: --proxy / --no-proxy)
 #                          代理 listen: ${QMP_SOCK}.proxy；客户端连这里
 #                          就不会跟其他工具抢 QEMU 的单 QMP slot
+#     HOST_TUNE=1          起 VM 前自动跑 host-performance.sh 压计时抖动（默认 1）
+#                          (flag: --host-tune / --no-host-tune)
+#                          governor=performance + halt_poll=500000 + THP defrag=never，
+#                          缓解 ACE「游戏计时异常」(13-131130-8)。只动 host 侧，零反检测
+#                          影响；已调优自动跳过(免每次 sudo)；DRY_RUN 下 no-op。
+#     CPU_FREQ_CAP=1       把 host scaling_max_freq 封顶到本实例伪装 CPU 的上限
+#                          (CPU_MAX_MHZ=SMBIOS Type4 max-speed)（默认 1，需 HOST_TUNE=1）
+#                          (flag: --freq-cap / --no-freq-cap)
+#                          防 guest 实测吞吐超出该型号规格(超规格=变速器/计时异常 tell)。
+#                          只降不升：多 VM 并发收敛到运行中最小，绝不让任一 VM 超自身规格。
 #     HOTKEY_CAPTURE=1     SDL 窗口里按 HOTKEY_KEY 时从 fb-shm 抓 PNG（默认 0）
 #                          (flag: --hotkey-capture[=KEY] / --no-hotkey-capture)
 #     HOTKEY_KEY=F4        触发键名（X keysym），默认 F4
@@ -98,6 +109,8 @@ _usage() {
 # ------------------------------------------------------------------
 source "$HERE/lib/sv-cli.sh"        # CLI 解析 + 默认值 + 目录 / RANDOM 种子
 source "$HERE/lib/sv-identity.sh"   # 启动源 + 硬件身份 profile + OVMF + ACPI 表
+source "$HERE/lib/sv-hosttune.sh"   # (可选,默认开) host 压抖动 + 按伪装 CPU 封顶频率
+                                    #   ↑ 必须在 identity 之后: 频率封顶要用 CPU_MAX_MHZ
 source "$HERE/lib/sv-tpm-mem.sh"    # TPM(swtpm) + DIMM 拓扑 / 内存 / SMBIOS / AMD DF
 source "$HERE/lib/sv-devices.sh"    # 平台 PCI ID + 显示/EDID + 启动序 + CDROM + 网络 + USB + 音频
 source "$HERE/lib/sv-assemble.sh"   # 组装 QEMU argv + (DRY_RUN 出参) + 守护进程 + exec

@@ -10,7 +10,7 @@ _STEALTH_PROFILE_VARS=(
     NIC_MAC UUID
     GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV
     NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES
-    MEM_MFR MEM_PART_2G MEM_PART_4G MEM_SERIAL MEM_TOTAL_MB
+    MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SERIAL MEM_TOTAL_MB
     EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL
     KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_SERIAL
     MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT MOUSE_SERIAL
@@ -161,6 +161,15 @@ stealth_load_profile() {
     : "${MEM_MFR:=Kingston}"
     : "${MEM_PART_2G:=KVR26N19S6/2}"
     : "${MEM_PART_4G:=HX426C16FB3A/4}"
+    # 颗粒额定速率：老 profile 缺 → 按 part number 编码推导(26=2666/24=2400/-CRC=2400)，
+    # 推不出兜 2666(与默认 Kingston HyperX 2666 一致)。报告速率再 min(CPU 平台上限)。
+    if [[ -z "${MEM_RATED:-}" ]]; then
+        case "${MEM_PART_4G:-}${MEM_PART_2G:-}" in
+            *-CRC*|*24N*|*DFS624*|*DFS824*) MEM_RATED=2400 ;;
+            *26N*|*266*|*C16F*)             MEM_RATED=2666 ;;
+            *)                              MEM_RATED=2666 ;;
+        esac
+    fi
 
     # MEM_SERIAL 老 profile 没这字段：用 UUID 派生 8 字符十六进制，
     # 保证**同一 VM 跨重启 SN 不变**（即便没 reroll，老 VM 也不再每次启动漂移）。

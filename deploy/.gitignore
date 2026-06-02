@@ -11,3 +11,7 @@ efiguard/EfiGuard-v1.4/
 *.ppm
 *.png
 *.dmp
+
+# guest-stealth self-contained drop built by package.sh (regenerable; contains
+# a copy of apply-gpu-spoof.ps1 — keep single source of truth in deploy/scripts/)
+guest-stealth/dist/

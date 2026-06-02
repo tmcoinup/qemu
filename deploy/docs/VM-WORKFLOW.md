@@ -142,6 +142,8 @@ Get-Tpm | Select-Object TpmPresent, TpmReady
 
 ## 阶段 B：密封 base
 
+> 💡 封 base 前可选（**推荐**）：把**离线一键重对齐脚本**打包进 base，让每个 clone 自带、host 连不上也能本地重对齐 GPU。两条 `iwr` 命令搞定，见文末「客机本地一键重对齐 GPU」。
+
 ### B.1 sysprep（强烈建议）
 
 guest 内最后一次跑（**不可逆**，跑完进 OOBE）：
@@ -238,9 +240,11 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 
 #### C.2.1 兜底：FirstLogonCommands Order=10 没拉到 respawn-stealth.ps1 怎么办
 
-少数情况首启那次 Order 10 网络抖了 / HTTP server 没起，表现 = guest 进桌面后 Device Manager GPU 名还是 base 里的老型号。
+少数情况首启那次 Order 10 网络抖了 / HTTP server 没起，表现 = guest 进桌面后 Device Manager GPU 名还是 base 里的老型号。两种补救，任选其一：
 
-guest 内开**管理员 PowerShell** 手敲一次（URL **只一个点** —— `respawn-stealth.ps1` 不是 `respawn-stealth..ps1`）：
+**① 离线一键（推荐，host 连不上也能用）** —— 前提是 base 已按文末「客机本地一键重对齐 GPU」打包过。客机内进 `C:\stealth\` **双击 `respawn-stealth.bat`** 即可（全程不连 host），跑完自动重启。
+
+**② HTTP irm（host server 在线时）** —— guest 内开**管理员 PowerShell** 手敲一次（URL **只一个点** —— `respawn-stealth.ps1` 不是 `respawn-stealth..ps1`）：
 
 ```powershell
 irm http://192.168.30.33:8765/respawn-stealth.ps1 | iex
@@ -295,6 +299,60 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 
 ---
 
+## 客机本地一键重对齐 GPU（`deploy/guest-stealth/`，离线、无需 host HTTP）
+
+阶段 C 的 GPU 重对齐（首启 `FirstLogonCommands` Order=10 / C.2.1 兜底）都要从 host `8765` 拉 `respawn-stealth.ps1`，**host 关机 / 网络抖 / server 漏起就拉不到**。`deploy/guest-stealth/` 是它的**纯本地等价物**：预先打包进 base，客机内**双击即跑**，全程不连 host。
+
+### 文件
+
+| 文件 | 作用 |
+|---|---|
+| `respawn-stealth.bat` | **一键入口**：双击 → 自动 UAC 提权 → 跑下面的 `.ps1` |
+| `respawn-stealth-local.ps1` | 本地主逻辑：磁盘上定位 `apply-gpu-spoof.ps1` → `-AutoDetect` → 清 RunOnce → 重启 |
+| `README.md` | 该目录自带的简要说明 |
+| `package.sh` | host 上打一个**自带依赖**的 `dist/`（连 `apply-gpu-spoof.ps1` 一起拷进去；已 gitignore）|
+
+行为跟 HTTP 版 `respawn-stealth.ps1` 完全一致：按当前显卡 PCI SUBSYS 自动查 GPU 池表选型号 → 改 `Class\{4d36e968}` + `Enum\PCI` + `Enum\DISPLAY` 注册表覆盖 → 装开机自刷计划任务 → 完成后重启。**唯一区别是"脚本从哪来"**：
+
+| | HTTP 版 `respawn-stealth.ps1` | 本地版 `deploy/guest-stealth/` |
+|---|---|---|
+| `apply-gpu-spoof.ps1` 来源 | host `irm http://…:8765/…` | 本机磁盘（同目录 → `C:\stealth\` → `C:\ProgramData\StealthGPU`）|
+| 依赖 host server | 是 | **否** |
+| 触发 | clone 首启 FirstLogonCommands Order=10 | 客机内双击 `.bat` / 手动 |
+| 额外 | — | UAC 自提权 + 管理员自检 + 退出码判断（失败不盲目重启）+ `-NoReboot` |
+
+### 打包进 base（封 base 前做一次）
+
+`respawn-stealth-local.ps1` 默认找 `C:\stealth\apply-gpu-spoof.ps1`，而阶段 A.5 的 `shallow-stealth.ps1` 已经把它落在那儿了，所以**只需把两个入口文件拷进客机**。封 base 前（阶段 A 末、B.1 sysprep 之前，此时 host HTTP server 还开着），客机内开管理员 PowerShell：
+
+```powershell
+# 这两个文件已 symlink 进 HTTP 根（同 nvapi64.dll 套路），iwr 直接拉、字节级保真（保留 .ps1 的 BOM）
+iwr http://192.168.30.33:8765/respawn-stealth.bat       -OutFile C:\stealth\respawn-stealth.bat
+iwr http://192.168.30.33:8765/respawn-stealth-local.ps1 -OutFile C:\stealth\respawn-stealth-local.ps1
+```
+
+> 想做成"放哪都能跑、不依赖 `C:\stealth`"的独立文件夹：host 上先 `bash deploy/guest-stealth/package.sh`，把生成的 `dist/`（含 `apply-gpu-spoof.ps1`）整个拷进客机即可（`respawn-stealth-local.ps1` 会优先用同目录那份）。
+
+拷完照常 sysprep + `seal-base.sh` 封 base，之后**每个 clone 都自带这份一键脚本**，无需再单独处理。
+
+### 客机内怎么用
+
+资源管理器进 `C:\stealth\`，**双击 `respawn-stealth.bat`** → UAC 点"是" → 跑完自动重启。等价手动命令（管理员 PowerShell）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\stealth\respawn-stealth-local.ps1
+# 不想跑完自动重启（先看输出）：
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\stealth\respawn-stealth-local.ps1 -NoReboot
+```
+
+### 什么时候用它
+
+- **C.2.1 的离线兜底**：clone 进桌面后 GPU 名还是 base 老型号、且 host server 连不上 → 双击 `.bat` 即可（不用 `irm`）。
+- **随时重抽身份后重跑**：任何时候想按当前 PCI subsys 重新对齐 GPU 注册表覆盖，客机内双击一下就行（可反复跑，幂等）。
+- **断网环境**：客机不通 host / 不通网时唯一可用的重对齐手段。
+
+---
+
 ## 总览：每阶段用到的脚本
 
 | 阶段 | 在哪跑 | 命令 | 干啥 |
@@ -305,11 +363,13 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 | A.5 | guest | `irm .../shallow-stealth.ps1 \| iex` | GPU spoof（viogpudo 装 + 注册表改名 + nvapi shim）|
 | A.6 | host | `sudo .../host-fix-gpu-devpkey.sh 1` | 改 DEVPKEY 让"驱动程序提供商"显示 NVIDIA |
 | A.7 | guest | 手动装 wegame / DNF / 实际游戏环境 | — |
+| A 末 | guest | `iwr .../respawn-stealth.bat` + `.../respawn-stealth-local.ps1 -OutFile C:\stealth\` | （可选/推荐）把离线一键脚本打包进 base，clone 自带 |
 | B.1 | guest | `sysprep /generalize /oobe /shutdown` | 清 SID/MachineGUID 让 clone 独立 |
 | B.2 | host | `deploy/scripts/seal-base.sh 1 <name>` | 密封 base |
 | B.3 | host | `chmod -w _base/<name>.qcow2` | 物理锁 base |
 | C.1 | host | `sudo .../clone-from-base.sh <name> 2` | clone qcow2 增量 + reroll profile + 注 unattend.xml（OOBE 自动跳 + AutoLogon + FirstLogonCommands Order 10 拉 respawn-stealth.ps1）|
 | C.2 | host | `.../start-vm.sh 2` | 启动新 VM；**guest 内 0 手动操作**；如果 Order 10 网络抖手敲 `irm .../respawn-stealth.ps1 \| iex` 兜底 |
+| C 兜底 | guest | 双击 `C:\stealth\respawn-stealth.bat` | **离线**本地重对齐 GPU（=不连 host 的 respawn-stealth）|
 | D | host + guest | 滚版本（见上） | 升级 base |
 
 ## 不会再跑的脚本（不用问、不用纠结）
@@ -333,8 +393,8 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 | clone 完启动报 `Recovery 0xc0000001 / Your PC couldn't start properly` | 离线改了 boot-critical hive（SYSTEM/SOFTWARE/DEFAULT）—— Win10 22H2 incremental log 协议下，无论 LOG 保留 / truncate / restore 都崩 | 唯一解：boot-critical hive 一概不离线动；guest 启动后要的注册表改动写进 `autounattend.xml` 的 `<FirstLogonCommands>` |
 | 设备管理器看 GPU 还是 "Red Hat" | host-fix-gpu-devpkey.sh 没跑（**只对装机的 base/VM1 阶段成立** — clone 出来的 VM 这一步永远会 skip，靠 FirstLogonCommand 重对齐） | guest 关机，host 端 `sudo host-fix-gpu-devpkey.sh <N>` |
 | clone 完 host 端报 `ControlSet001\Enum\PCI 不存在` | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不是 bug —— 脚本自动 skip；guest 首次登录后 FirstLogonCommand Order=10 会重对齐 GPU |
-| clone VM 进桌面后 GPU 名还是 base 老型号 | 首次登录那次 FirstLogonCommand Order=10 没自动跑或拉取失败 | guest 管理员 PS：`irm http://192.168.30.33:8765/respawn-stealth.ps1 \| iex`（**URL 一个点**） |
-| `irm` 报 404 或 connection refused | URL typo（常见：`respawn-stealth..ps1` 两个点）/ HTTP server 没起 | 检查 URL 单点；host `ss -tlnp \| grep 8765` 看 server 在不（clone-from-base.sh 已会自动起，但若 clone 前手动 start-vm 启了新机的话需要补 `nohup python3 deploy/scripts/serve-stealth-http.py 8765 &`）|
+| clone VM 进桌面后 GPU 名还是 base 老型号 | 首次登录那次 FirstLogonCommand Order=10 没自动跑或拉取失败 | **离线**（base 已打包时）：双击 `C:\stealth\respawn-stealth.bat`；**或** guest 管理员 PS：`irm http://192.168.30.33:8765/respawn-stealth.ps1 \| iex`（**URL 一个点**） |
+| `irm` 报 404 或 connection refused | URL typo（常见：`respawn-stealth..ps1` 两个点）/ HTTP server 没起 | 检查 URL 单点；host `ss -tlnp \| grep 8765` 看 server 在不（clone-from-base.sh 已会自动起，但若 clone 前手动 start-vm 启了新机的话需要补 `nohup python3 deploy/scripts/serve-stealth-http.py 8765 &`）；**或干脆走离线一键** `respawn-stealth.bat`（不连 host）|
 | guest 卡 "区域设置 / 让我们设置你的设备" 等 OOBE 画面 | unattend.xml 没写进 disk（host-inject-unattend.sh 跑失败 / autounattend.xml 缺组件）| host 端 `sudo deploy/scripts/host-inject-unattend.sh <N>` 离线补一份，再重启 guest |
 | `Get-Tpm` 全 False | OVMF 没编 TPM2_ENABLE，或 swtpm permall 太小 | host 跑 `deploy/tools/build-ovmf.sh` + `sudo chown -R ubuntu /var/lib/swtpm-localca` |
 | 小键盘灯不亮、数字键失灵 | NumLock 默认 OFF | guest 内跑 vm-prep.ps1 / 或 host 端跑 `host-fix-numlock.sh <N>`（VM 关机） |

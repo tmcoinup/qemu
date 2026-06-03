@@ -214,7 +214,9 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
    - `%WINDIR%\Panther\Unattend\unattend.xml`（OOBE 主搜索路径）
    - `C:\unattend.xml`（备用）
    - `%WINDIR%\System32\Sysprep\unattend.xml`（备用）
-   - per-instance 替换 `<ComputerName>DESKTOP-VM<N></ComputerName>` 避免多机同名
+   - per-instance 把 `<ComputerName>` 替换成 `DESKTOP-<7位随机[A-Z0-9]>`（仿全新消费级
+     Win10 默认主机名）。**不用 `*`** —— `*` 会让 OOBE 拿 `RegisteredOwner`(Administrator)
+     当前缀生成 `ADMINIS-XXXXXXX`，暴露 sysprep 模板身份。随机后缀天然唯一，多机不撞名
 7. chown vms/<N>/ 回原用户
 
 ### C.2 启动新 VM
@@ -225,7 +227,7 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 
 **guest 内 0 手动操作** ——OOBE 自动跑完 unattend.xml：
 
-1. **OOBE specialize 阶段**（首启）：处理 `<settings pass="specialize">`，应用 `ComputerName=DESKTOP-VM<N>` + 时区 + 输入法等，重启
+1. **OOBE specialize 阶段**（首启）：处理 `<settings pass="specialize">`，应用 `ComputerName=DESKTOP-XXXXXXX`（host-inject 注入的随机名）+ 时区 + 输入法等，重启
 2. **OOBE oobeSystem 阶段**（第二启）：自动跳 `SkipMachineOOBE / SkipUserOOBE / HideEULAPage / HideLocalAccountScreen / ...` 全套画面，建/激活 Administrator/123456 账号
 3. **AutoLogon Administrator**：`<AutoLogon Enabled=true LogonCount=999>` 自动登录到桌面
 4. **`<FirstLogonCommands>` Order 1→10 顺序跑**：

@@ -22,8 +22,12 @@
 #   - FirstLogonCommands: 启 RDP / 关 NLA / 注册 ms-gamingoverlay 等
 #
 # Per-instance customization:
-#   <ComputerName> 设成 '*' —— 让 Windows OOBE 自己随机生成主机名（默认行为），
-#   不带 'VM' 字样。'*' 生成的名字本身随机唯一，多机并发也不会同名 conflict。
+#   <ComputerName> = DESKTOP-<7位随机[A-Z0-9]> —— 跟全新消费级 Win10 出厂默认
+#   主机名格式一模一样。**绝不能用 '*'**：'*' 会让 OOBE 拿 RegisteredOwner
+#   ("Administrator") 的前 7 字符当前缀，生成 "ADMINIS-XXXXXXX"，一眼暴露
+#   这是 sysprep 模板克隆（真机不会叫 ADMINIS-…）。显式 DESKTOP-XXXXXXX：
+#     ① 无 'VM'/'ADMINIS' 破绽，长得像普通家用机
+#     ② 7 位随机后缀天然唯一，多 clone 并发也不会撞 hostname
 #
 # Usage:
 #   sudo deploy/scripts/host-inject-unattend.sh <INSTANCE>
@@ -97,10 +101,21 @@ DEST="$DEST_DIR/unattend.xml"
 
 mkdir -p "$DEST_DIR"
 
-# ComputerName 用 '*'：Windows OOBE 自己随机生成主机名（默认行为，无 'VM' 字样），
-# 随机名天然唯一，多 clone 不会同 hostname。
-COMPUTER_NAME="*"
-log "writing unattend.xml -> $DEST  (ComputerName=$COMPUTER_NAME → Win 随机生成)"
+# ComputerName = DESKTOP-<7位随机[A-Z0-9]>，跟全新消费级 Win10 默认主机名格式
+# 完全一致（见顶部注释，绝不用 '*'，否则 OOBE 生成 "ADMINIS-XXXXXXX" 暴露模板）。
+# 纯 bash 生成：避开 `/dev/urandom | head` 在 set -euo pipefail 下的 SIGPIPE abort
+# （历史教训 lib/nbd-lock.sh 那批离线工具就栽过 pipefail）。
+gen_computer_name() {
+    local chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' out='' i seed
+    # 用 /dev/urandom 给 $RANDOM 播种，保证同秒并发 clone 也不同名；失败则用 bash
+    # 自带的逐进程种子（每次 clone 是独立进程，PID/时间不同 → 名字本就不同）。
+    seed="$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -dc '0-9' || true)"
+    if [[ -n "$seed" ]]; then RANDOM="$seed"; fi
+    for ((i=0; i<7; i++)); do out+="${chars:RANDOM%36:1}"; done
+    printf 'DESKTOP-%s' "$out"   # "DESKTOP-"(8)+7=15，正好 NetBIOS 15 字符上限
+}
+COMPUTER_NAME="$(gen_computer_name)"
+log "writing unattend.xml -> $DEST  (ComputerName=$COMPUTER_NAME — 仿全新 Win10 默认名)"
 sed "s|<ComputerName>[^<]*</ComputerName>|<ComputerName>${COMPUTER_NAME}</ComputerName>|" \
     "$UNATTEND" > "$DEST"
 

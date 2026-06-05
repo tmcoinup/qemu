@@ -62,6 +62,41 @@ struct sdl2_console {
 #endif
 };
 
+/*
+ * Centred destination rectangle for a gw*gh guest surface inside a ww*wh
+ * window.  The guest is shown at its native resolution and is never magnified
+ * beyond 1:1: a larger window is letterboxed / pillarboxed (black borders)
+ * instead of upscaling, while a smaller window shrinks the image to fit,
+ * preserving the aspect ratio (so nothing is ever clipped).  Used for both the
+ * GL viewport and the absolute-pointer mapping so the guest cursor stays
+ * aligned with the visible picture.
+ */
+static inline void sdl2_gfx_dst_rect(int ww, int wh, int gw, int gh,
+                                     int *px, int *py, int *pw, int *ph)
+{
+    double scale;
+    int dw, dh;
+
+    if (gw < 1 || gh < 1) {
+        *px = 0;
+        *py = 0;
+        *pw = ww;
+        *ph = wh;
+        return;
+    }
+
+    scale = MIN((double)ww / gw, (double)wh / gh);
+    if (scale > 1.0) {
+        scale = 1.0;            /* never magnify past the native resolution */
+    }
+    dw = (int)(gw * scale + 0.5);
+    dh = (int)(gh * scale + 0.5);
+    *pw = dw;
+    *ph = dh;
+    *px = (ww - dw) / 2;
+    *py = (wh - dh) / 2;
+}
+
 void sdl2_window_create(struct sdl2_console *scon);
 void sdl2_window_destroy(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);

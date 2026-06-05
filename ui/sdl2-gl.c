@@ -48,13 +48,23 @@ static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 
 static void sdl2_gl_render_surface(struct sdl2_console *scon)
 {
-    int ww, wh;
+    int ww, wh, dx, dy, dw, dh;
 
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
     sdl2_set_scanout_mode(scon, false);
 
     SDL_GetWindowSize(scon->real_window, &ww, &wh);
-    surface_gl_setup_viewport(scon->gls, scon->surface, ww, wh);
+    /*
+     * Show the guest at its native resolution (1:1) centred in the window and
+     * letterbox the surplus instead of upscaling it (sdl2_gfx_dst_rect()).
+     * surface_gl_render_texture() clears the whole framebuffer first, so the
+     * area outside the viewport is left as the (black) border.
+     */
+    sdl2_gfx_dst_rect(ww, wh,
+                      surface_width(scon->surface),
+                      surface_height(scon->surface),
+                      &dx, &dy, &dw, &dh);
+    glViewport(dx, dy, dw, dh);
 
     surface_gl_render_texture(scon->gls, scon->surface);
     SDL_GL_SwapWindow(scon->real_window);

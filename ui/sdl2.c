@@ -333,10 +333,31 @@ static void sdl_send_mouse_event(struct sdl2_console *scon, int dx, int dy,
     }
 
     if (qemu_input_is_absolute(scon->dcl.con)) {
-        qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_X,
-                             x, 0, surface_width(scon->surface));
-        qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_Y,
-                             y, 0, surface_height(scon->surface));
+        /*
+         * In the GL path the guest is letterboxed 1:1 inside the window
+         * (sdl2_gfx_dst_rect()); map the pointer through the same centred
+         * rectangle and clamp it to the image so the guest cursor tracks the
+         * visible picture and stops at the black border.  The 2D path relies on
+         * SDL's logical-size translation, so there x/y already are surface
+         * coordinates — keep its original 0..surface mapping untouched.
+         */
+        int min_x = 0, max_x = surface_width(scon->surface);
+        int min_y = 0, max_y = surface_height(scon->surface);
+
+        if (scon->opengl) {
+            int ww, wh, rx, ry, rw, rh;
+
+            SDL_GetWindowSize(scon->real_window, &ww, &wh);
+            sdl2_gfx_dst_rect(ww, wh, max_x, max_y, &rx, &ry, &rw, &rh);
+            min_x = rx;
+            max_x = rx + rw;
+            min_y = ry;
+            max_y = ry + rh;
+            x = MAX(min_x, MIN(x, max_x));
+            y = MAX(min_y, MIN(y, max_y));
+        }
+        qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_X, x, min_x, max_x);
+        qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_Y, y, min_y, max_y);
     } else {
         if (guest_cursor) {
             x -= guest_x;

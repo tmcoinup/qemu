@@ -96,8 +96,14 @@ fi
 : "${HOTKEY_KEY:=F4}"
 : "${HOTKEY_SOCK:=/tmp/qemu-stealth-${INSTANCE}.hotkey}"
 : "${HOTKEY_LOG:=/tmp/qemu-stealth-${INSTANCE}.hotkey.log}"
-: "${HOTKEY_OUT:=${VM_DIR:-/home/ubuntu/images/vms/${INSTANCE}}/captures}"
-: "${ISO:=${_cli_iso:-/home/ubuntu/images/win10.iso}}"
+# IMAGE_ROOT/VMS_DIR 让整套 VM 数据可迁移到任意挂载点；默认保持历史路径不变。
+: "${IMAGE_ROOT:=/home/ubuntu/images}"
+IMAGE_ROOT="${IMAGE_ROOT%/}"
+[[ -n "$IMAGE_ROOT" ]] || IMAGE_ROOT="/"
+: "${VMS_DIR:=$IMAGE_ROOT/vms}"
+VMS_DIR="${VMS_DIR%/}"
+[[ -n "$VMS_DIR" ]] || VMS_DIR="/"
+: "${ISO:=${_cli_iso:-$IMAGE_ROOT/win10.iso}}"
 [[ -n "$_cli_iso" ]] && ISO="$_cli_iso"
 
 # 显示模式：SDL 窗口 + fb-shm 推流默认全开（互不影响）。
@@ -138,13 +144,16 @@ if [[ "${SDL:-0}" == "1" && "${HEADLESS:-0}" != "1" ]]; then
     export DISPLAY
 fi
 
-# 新版目录结构：所有 per-instance 文件都归在 /home/ubuntu/images/vms/<N>/
-# 老版（直接放在 /home/ubuntu/images/）会被自动迁移到新位置。
-VM_DIR="/home/ubuntu/images/vms/${INSTANCE}"
+# 新版目录结构：所有 per-instance 文件都归在 $VMS_DIR/<N>/。
+# VM_DIR 可显式覆盖，便于把单个实例放到独立磁盘；老版 flat 布局会按
+# IMAGE_ROOT 自动迁移到新位置。
+VM_DIR="${VM_DIR:-${VMS_DIR}/${INSTANCE}}"
 # DRY_RUN 时不建目录（P1#1：真正无副作用 dry-run，误用新实例号也不留痕）。
 [[ "${DRY_RUN:-0}" == "1" ]] || mkdir -p "$VM_DIR"
 : "${DISK:=$VM_DIR/disk.qcow2}"
 : "${QEMU:=$REPO_ROOT/build/qemu-system-x86_64}"
+: "${QEMU_IMG:=$REPO_ROOT/build/qemu-img}"
+: "${HOTKEY_OUT:=$VM_DIR/captures}"
 # Bridge is the default network backend. Pass BRIDGE= (empty) or NO_BRIDGE=1
 # to opt out and fall back to user-mode NAT. Reason: a real LAN IP is the
 # whole point of the stealth bundle for DNF — user mode's 10.0.2.x subnet
@@ -155,9 +164,9 @@ PROFILE_FILE="$VM_DIR/profile"
 
 # 兼容老布局：把旧路径文件迁到新目录
 for _legacy_pair in \
-    "/home/ubuntu/images/win10-inst${INSTANCE}.qcow2|$VM_DIR/disk.qcow2" \
-    "/home/ubuntu/images/stealth-inst${INSTANCE}.profile|$VM_DIR/profile" \
-    "/home/ubuntu/images/ovmf-vars-${INSTANCE}.fd|$VM_DIR/ovmf-vars.fd"
+    "$IMAGE_ROOT/win10-inst${INSTANCE}.qcow2|$VM_DIR/disk.qcow2" \
+    "$IMAGE_ROOT/stealth-inst${INSTANCE}.profile|$VM_DIR/profile" \
+    "$IMAGE_ROOT/ovmf-vars-${INSTANCE}.fd|$VM_DIR/ovmf-vars.fd"
 do
     _src="${_legacy_pair%|*}"
     _dst="${_legacy_pair##*|}"
@@ -175,4 +184,3 @@ done
 # profile pins the final values, so reseed quality doesn't matter for steady
 # state.
 RANDOM=$((INSTANCE * 13 + $(date +%s) % 32768))
-

@@ -29,6 +29,9 @@ deploy/tools/build.sh --verify        # 完后跑 verify-stealth.sh
 
 输出：`build/qemu-system-x86_64`。
 
+迁移到其它 host 时不要使用系统自带 QEMU。启动器会做 patched QEMU 能力预检；
+路径和二进制位置配置见 [PORTABILITY.md](PORTABILITY.md)。
+
 ## 3. 主机调优（建议每次开机跑一次）
 
 ```bash
@@ -102,6 +105,12 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `STRICT_STEALTH` | 0 | 1 = 桥接失败即 fail-fast，**拒绝**静默回退 NAT（NAT 的 10.0.2.x 子网本身是 VM 特征，隐身验收致命） |
 | `ALLOW_NAT_FALLBACK` | 0 | 1 = 在 `STRICT_STEALTH=1` 下显式允许回退 NAT（回退时日志打醒目标记） |
 | `DRY_RUN` | 0 | 1 = 仅打印组装好的 QEMU argv 后退出；不落盘、不起守护、不 exec（调试/回归基准用） |
+| `IMAGE_ROOT` | `/home/ubuntu/images` | VM 数据根目录；迁移到其它 host/挂载点时改这里即可 |
+| `VMS_DIR` | `$IMAGE_ROOT/vms` | 多实例目录；每台 VM 默认在 `$VMS_DIR/<N>` |
+| `VM_DIR` | `$VMS_DIR/<N>` | 单实例目录覆盖；用于把某台 VM 放到独立盘 |
+| `QEMU` | `build/qemu-system-x86_64` | QEMU 二进制；迁移时必须指向 patched QEMU，不能用 stock QEMU |
+| `QEMU_IMG` | `build/qemu-img` | 创建/克隆 qcow2 用的 qemu-img |
+| `QEMU_CAP_CHECK` | 1 | 1 = 启动前检查 QEMU 是否带 NVMe/EDID/USB/fb-shm 等 stealth 属性；缺失则 fail-fast，防止误用 stock QEMU 破坏真机模拟 |
 | `STABLE_DISPLAY` | **1** | 仅 `--sdl` 模式生效：`virtio-vga` 无 GL，规避 virgl BSOD |
 | `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
 | `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |
@@ -156,10 +165,10 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 > ≤宿主机单核上限（自报规格本机真实可达）。CPU 再按 socket 配套对应主板。无核显约束下
 > CPU 池全 4C/4T（桌面 2C/4T 全带核显）。
 
-每个 INSTANCE 的资源分配：
-- 磁盘：`/home/ubuntu/images/vms/<N>/disk.qcow2`（不存在则创建空白 512GB）
-- profile：`/home/ubuntu/images/vms/<N>/profile`
-- OVMF NVRAM：`/home/ubuntu/images/vms/<N>/ovmf-vars.fd`
+每个 INSTANCE 的资源分配（默认 `IMAGE_ROOT=/home/ubuntu/images`，可迁移，见 [PORTABILITY.md](PORTABILITY.md)）：
+- 磁盘：`$VMS_DIR/<N>/disk.qcow2`（不存在则按 profile 的 NVMe 容量创建 sparse qcow2）
+- profile：`$VMS_DIR/<N>/profile`
+- OVMF NVRAM：`$VMS_DIR/<N>/ovmf-vars.fd`
 - QMP socket：`/tmp/qemu-stealth-<N>.qmp`
 - HMP socket：`/tmp/qemu-stealth-<N>.mon`
 - VNC 显示：`<N-1>`（端口 5900+N-1）

@@ -73,8 +73,9 @@ CMD=(
     # 不放 DF stub —— 否则会出现 "Intel CPU 但有 AMD DF" 的矛盾。
     "${AMD_DF_ARGS[@]}"
 
-    # --- Storage: virtio-scsi host + 随机 Samsung NVMe (model/firmware/SN 来自 profile) ---
-    -object iothread,id=io1
+    # --- Storage: 随机 Samsung NVMe (model/firmware/SN 来自 profile) ---
+    # emulated NVMe 的 DMA helpers 仍要求 BlockBackend 留在主 AioContext；
+    # 这里保持 cache=none,aio=threads 的稳定路径，避免 iothread 触发断言。
     -drive file="$DISK",if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap
     # bootindex=3 (装系统时 NVMe 空，让位给 helper image=1 / Win ISO=2)；
     # 装好系统后 OVMF NVRAM 把 Windows Boot Manager 推到最高，bootindex 不再决定顺序。

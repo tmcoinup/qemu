@@ -281,6 +281,11 @@ echo ">> RTC TZ:       $TZ"
 # 只有真开了 SDL 窗口才需要 inhibit host 屏保 / DPMS。
 # 纯 fb-shm（默认）/ --headless 都没本地窗口，跳过这段。
 if [[ "${SDL:-0}" == "1" && "${HEADLESS:-0}" != "1" && -n "${DISPLAY:-}" ]]; then
+    # dash-to-dock 集成（实现见 lib/sv-dock.sh）：给本实例 SDL 窗口钉唯一
+    # WM_CLASS=win10-<N> + 落 per-instance .desktop/编号图标 + 首启自动固定到
+    # 收藏。任意实例号 N 自适配；失败以 `|| true` 兜底，绝不拖垮 VM 启动。
+    sv_dock_integrate || true
+
     if command -v xset >/dev/null 2>&1; then
         # 记录原值，trap 退出还原
         _xset_dpms_orig=$(xset q 2>/dev/null | awk '/DPMS is/{print $NF}')

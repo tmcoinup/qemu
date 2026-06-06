@@ -334,30 +334,24 @@ static void sdl_send_mouse_event(struct sdl2_console *scon, int dx, int dy,
 
     if (qemu_input_is_absolute(scon->dcl.con)) {
         /*
-         * In the GL path the guest is letterboxed 1:1 inside the window
-         * (sdl2_gfx_dst_rect()); map the pointer through the same centred
-         * rectangle and clamp it to the image so the guest cursor tracks the
-         * visible picture and stops at the black border.  The 2D path relies on
-         * SDL's logical-size translation, so there x/y already are surface
-         * coordinates — keep its original 0..surface mapping untouched.
+         * Both display paths letterbox the guest 1:1 inside the window
+         * (sdl2_gfx_dst_rect(); the 2D path no longer sets an SDL logical
+         * size, so x/y are window pixels in both cases).  Map the pointer
+         * through the same centred rectangle and clamp it to the image so the
+         * guest cursor tracks the visible picture and stops at the black
+         * border.
          */
-        int min_x = 0, max_x = surface_width(scon->surface);
-        int min_y = 0, max_y = surface_height(scon->surface);
+        int ww, wh, rx, ry, rw, rh;
 
-        if (scon->opengl) {
-            int ww, wh, rx, ry, rw, rh;
-
-            SDL_GetWindowSize(scon->real_window, &ww, &wh);
-            sdl2_gfx_dst_rect(ww, wh, max_x, max_y, &rx, &ry, &rw, &rh);
-            min_x = rx;
-            max_x = rx + rw;
-            min_y = ry;
-            max_y = ry + rh;
-            x = MAX(min_x, MIN(x, max_x));
-            y = MAX(min_y, MIN(y, max_y));
-        }
-        qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_X, x, min_x, max_x);
-        qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_Y, y, min_y, max_y);
+        SDL_GetWindowSize(scon->real_window, &ww, &wh);
+        sdl2_gfx_dst_rect(ww, wh,
+                          surface_width(scon->surface),
+                          surface_height(scon->surface),
+                          &rx, &ry, &rw, &rh);
+        x = MAX(rx, MIN(x, rx + rw));
+        y = MAX(ry, MIN(y, ry + rh));
+        qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_X, x, rx, rx + rw);
+        qemu_input_queue_abs(scon->dcl.con, INPUT_AXIS_Y, y, ry, ry + rh);
     } else {
         if (guest_cursor) {
             x -= guest_x;

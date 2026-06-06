@@ -33,8 +33,9 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
     DisplaySurface *surf = scon->surface;
-    SDL_Rect rect;
+    SDL_Rect rect, dst;
     size_t surface_data_offset;
+    int ow, oh, dx, dy, dw, dh;
     assert(!scon->opengl);
 
     if (!scon->texture) {
@@ -51,8 +52,24 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     SDL_UpdateTexture(scon->texture, &rect,
                       surface_data(surf) + surface_data_offset,
                       surface_stride(surf));
+
+    /*
+     * Show the guest at its native resolution (1:1) centred in the window and
+     * letterbox the surplus with black borders instead of upscaling it.  The
+     * destination rectangle is placed by sdl2_gfx_dst_rect() rather than via
+     * SDL_RenderSetLogicalSize(), which would scale the guest up to fill the
+     * window.
+     */
+    SDL_GetRendererOutputSize(scon->real_renderer, &ow, &oh);
+    sdl2_gfx_dst_rect(ow, oh, surface_width(surf), surface_height(surf),
+                      &dx, &dy, &dw, &dh);
+    dst.x = dx;
+    dst.y = dy;
+    dst.w = dw;
+    dst.h = dh;
+    SDL_SetRenderDrawColor(scon->real_renderer, 0, 0, 0, 255);
     SDL_RenderClear(scon->real_renderer);
-    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, NULL);
+    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
     SDL_RenderPresent(scon->real_renderer);
 }
 
@@ -85,10 +102,12 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
         sdl2_window_resize(scon);
     }
 
-    SDL_RenderSetLogicalSize(scon->real_renderer,
-                             surface_width(new_surface),
-                             surface_height(new_surface));
-
+    /*
+     * No SDL_RenderSetLogicalSize() here: it would letterbox *and* upscale the
+     * guest to fill the window.  sdl2_2d_update() instead blits to a centred
+     * 1:1 destination rectangle, and the absolute-pointer mapping in
+     * sdl_send_mouse_event() works in window pixels to match.
+     */
     switch (surface_format(scon->surface)) {
     case PIXMAN_x1r5g5b5:
         format = SDL_PIXELFORMAT_ARGB1555;

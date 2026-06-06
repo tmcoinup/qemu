@@ -194,6 +194,7 @@ deploy/
 │   ├── DETECTION.md                # 反作弊全检测面清单
 │   ├── DEBUG.md                    # QEMU trace + GDB + QMP 调试
 │   ├── USAGE.md                    # （历史）单 VM 详细操作手册
+│   ├── PORTABILITY.md              # host 迁移兼容：IMAGE_ROOT / QEMU_CAP_CHECK / patched QEMU
 │   ├── FB-SHM.md                   # fb-shm 共享内存推流通道（默认开）
 │   └── VERIFY.md                   # 13 段离线自检 + guest 端验证命令
 ├── patches/                        # QEMU hw/ 补丁（已合并到本仓库分支）

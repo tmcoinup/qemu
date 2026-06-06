@@ -108,6 +108,7 @@ _usage() {
 # 共享 $@ 与全局变量，与单文件版逐字节等价；DRY_RUN argv harness 校验）。
 # ------------------------------------------------------------------
 source "$HERE/lib/sv-cli.sh"        # CLI 解析 + 默认值 + 目录 / RANDOM 种子
+source "$HERE/lib/sv-portability.sh" # 迁移 host 预检：路径/QEMU 能力，不做隐身降级
 source "$HERE/lib/sv-identity.sh"   # 启动源 + 硬件身份 profile + OVMF + ACPI 表
 source "$HERE/lib/sv-hosttune.sh"   # (可选,默认开) host 压抖动 + 按伪装 CPU 封顶频率
                                     #   ↑ 必须在 identity 之后: 频率封顶要用 CPU_MAX_MHZ

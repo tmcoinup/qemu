@@ -80,7 +80,7 @@ if [[ ! -f "$DISK" ]]; then
         fi
         echo ">> 从 base 镜像克隆: $BASE_IMAGE"
         echo ">>   -> $DISK (qcow2 增量层)"
-        "$REPO_ROOT/build/qemu-img" create -f qcow2 \
+        "$QEMU_IMG" create -f qcow2 \
             -F qcow2 -b "$BASE_IMAGE" "$DISK" >/dev/null
     else
         # 此时 profile 已加载，NVME_SIZE_BYTES 一定有值（pick_profile 写、
@@ -90,7 +90,7 @@ if [[ ! -f "$DISK" ]]; then
         echo ">> creating fresh qcow2 at $DISK"
         echo ">>   model     : ${NVME_MODEL:-unknown}"
         echo ">>   raw bytes : $NVME_SIZE_BYTES  (~${size_gib} GiB Windows-side)"
-        "$REPO_ROOT/build/qemu-img" create -f qcow2 -o preallocation=off,cluster_size=65536 \
+        "$QEMU_IMG" create -f qcow2 -o preallocation=off,cluster_size=65536 \
             "$DISK" "$NVME_SIZE_BYTES"
     fi
 fi
@@ -182,4 +182,3 @@ if [[ ! -f "$OVMF_VARS" ]]; then
         cp "$OVMF_VARS_SRC" "$OVMF_VARS"
     fi
 fi
-

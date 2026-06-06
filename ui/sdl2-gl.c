@@ -238,7 +238,8 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
-    int ww, wh;
+    int ww, wh, dx, dy, dw, dh;
+    GLint sy1, sy2;
 
     assert(scon->opengl);
     if (!scon->scanout_mode) {
@@ -251,8 +252,31 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
     SDL_GetWindowSize(scon->real_window, &ww, &wh);
-    egl_fb_setup_default(&scon->win_fb, ww, wh);
-    egl_fb_blit(&scon->win_fb, &scon->guest_fb, !scon->y0_top);
+    /*
+     * virtio-gpu-gl (virgl) routes the scanout through this GL-texture path
+     * even for a plain 2D guest, so this — not sdl2_gl_render_surface() — is
+     * what draws the picture here.  Keep them consistent: show the guest at
+     * its native resolution (1:1) centred in the window, letterboxed with
+     * black borders instead of stretched to fill, shrinking only when the
+     * window is too small (sdl2_gfx_dst_rect()).  Blit straight to the default
+     * framebuffer after clearing it to black for the borders.
+     */
+    sdl2_gfx_dst_rect(ww, wh,
+                      scon->guest_fb.width, scon->guest_fb.height,
+                      &dx, &dy, &dw, &dh);
+
+    /* guest texture is bottom-up unless y0_top: flip the source Y span */
+    sy1 = scon->y0_top ? 0 : scon->guest_fb.height;
+    sy2 = scon->y0_top ? scon->guest_fb.height : 0;
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, scon->guest_fb.framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glViewport(0, 0, ww, wh);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBlitFramebuffer(0, sy1, scon->guest_fb.width, sy2,
+                      dx, dy, dx + dw, dy + dh,
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
     SDL_GL_SwapWindow(scon->real_window);
 }

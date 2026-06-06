@@ -244,7 +244,7 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
-    int ww, wh;
+    int ww, wh, dx, dy, dw, dh;
 
     assert(scon->opengl);
     if (!scon->scanout_mode) {
@@ -257,7 +257,17 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
     SDL_GetWindowSize(scon->real_window, &ww, &wh);
-    egl_fb_setup_default(&scon->win_fb, ww, wh, 0, 0);
+    /*
+     * 中文注释：virgl 的纹理扫描输出也按来宾原生分辨率居中，窗口空间
+     * 不足时才等比缩小。这里继续使用 QEMU 11 的 egl_fb_blit()，因为它
+     * 会正确处理 dmabuf 的有效区域和 Y 轴方向；只把目标 framebuffer
+     * 的尺寸与偏移改成居中的 letterbox 矩形。
+     */
+    sdl2_gfx_dst_rect(ww, wh,
+                      scon->guest_fb.width, scon->guest_fb.height,
+                      &dx, &dy, &dw, &dh);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    egl_fb_setup_default(&scon->win_fb, dw, dh, dx, dy);
     egl_fb_blit(&scon->win_fb, &scon->guest_fb, !scon->y0_top);
 
     SDL_GL_SwapWindow(scon->real_window);

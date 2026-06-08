@@ -50,6 +50,9 @@ _sv_dock_write_desktop() {
     mkdir -p "$appdir" "$icodir"
     _sv_dock_make_icon "$icon" "$n" || true
     local iconref="$icon"; [[ -s "$icon" ]] || iconref=virt-manager
+    # Exec 走 sv-dock-launch.sh（不是直接 start-vm.sh）：GNOME 正常时靠
+    # StartupWMClass 把 SDL 窗口归到本图标；dash-to-dock 收藏抖动丢关联时，点击会
+    # 落到 Exec —— launch 脚本先找窗口前置、绝不盲目重启，避免弹终端刷命令+双启撞盘锁。
     cat > "$desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -59,7 +62,7 @@ Name[zh_CN]=Win10-${n} 虚拟机
 GenericName=QEMU Virtual Machine
 Comment=QEMU 隐身虚拟机 win10-${n}（DNF 多开）— 由 start-vm.sh 启动/匹配
 Icon=${iconref}
-Exec=gnome-terminal --working-directory=${REPO_ROOT} -- ${HERE}/start-vm.sh ${n} --proxy
+Exec=${HERE}/sv-dock-launch.sh ${n} --proxy
 Path=${REPO_ROOT}
 Terminal=false
 Categories=System;Emulator;

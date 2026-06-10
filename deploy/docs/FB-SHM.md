@@ -274,8 +274,8 @@ frame = r.read_frame()                # bytes, BGR0
 # frame -> PIL/Image / OpenCV / 直接喂模型
 ```
 
-如果调用方暂时无法改（比如某些工具只会 QMP），用 `deploy/scripts/qmp-proxy.py`
-做 QMP 多客户端 fanout（短期 workaround，见 [USAGE.md 6.4](USAGE.md#64-qmp-多客户端qmp-proxypy)）。
+如果调用方暂时无法改（比如某些工具只会 QMP），用 `start-vm.sh --proxy`
+启用 QEMU 原生 QMP multi-client（见 [USAGE.md 6.4](USAGE.md#64-qmp-多客户端qemu-原生-multion)）。
 
 ## 故障排查
 

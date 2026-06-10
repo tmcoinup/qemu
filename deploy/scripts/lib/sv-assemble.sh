@@ -1,6 +1,14 @@
 # -------------------------------------------------------------------
 # Assemble the command line
 # -------------------------------------------------------------------
+QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off")
+if [[ "$PROXY" == "1" ]]; then
+    # --proxy 现在映射到 QEMU 原生 QMP multi-client listener：
+    # 同一路径可被 dgame / image-search / 临时 socat 同时连接。保留 -qmp
+    # shorthand，memflow 仍能从 QEMU argv 里识别 QMP socket。
+    QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off,multi=on")
+fi
+
 CMD=(
     "$QEMU"
 
@@ -112,7 +120,7 @@ CMD=(
     # --- Control: QMP + HMP sockets for API access ---
     # 用 -qmp shorthand 而不是 -chardev/-mon：等价语义，但 memflow 的命令行解析
     # 只认 -qmp 这种 flag。这样 dgame 调试器用 memflow 直读时能找到 socket。
-    -qmp unix:$QMP_SOCK,server=on,wait=off
+    "${QMP_ARGS[@]}"
     -chardev socket,id=mon0,path=$MON_SOCK,server=on,wait=off
     -mon chardev=mon0,mode=readline
 
@@ -135,8 +143,8 @@ echo ">> VM 目录:     $VM_DIR"
 echo ">> QMP socket:  $QMP_SOCK"
 if [[ "$PROXY" == "1" ]]; then
     QMP_PROXY_SOCK="${QMP_SOCK}.proxy"
-    QMP_PROXY_LOG="/tmp/qemu-stealth-${INSTANCE}.qmp.proxy.log"
-    echo ">> QMP proxy:   $QMP_PROXY_SOCK (multi-client fanout, log: $QMP_PROXY_LOG)"
+    echo ">> QMP multi:   native multi-client on $QMP_SOCK"
+    echo ">> QMP alias:   $QMP_PROXY_SOCK (compat symlink for old tool configs)"
 fi
 echo ">> HMP socket:  $MON_SOCK"
 # 显示通道
@@ -218,15 +226,16 @@ stealth_print_profile
 
 echo ">> --- launching ---"
 
-# QMP fanout proxy: 后台起 qmp-proxy.py, --wait-upstream 让它在 QMP socket 还没
-# 就绪时 retry, 而不是 race condition 立即退出. proxy 会在 upstream EOF (QEMU
-# 退出) 时自己 exit, 所以不需要 trap. 重启 VM 时旧 proxy 已死, 新一轮会重新拉.
+# QMP multi-client alias: 旧工具可能已经写死 .qmp.proxy；现在不再起 Python
+# 中转进程，而是让 .qmp.proxy 指向原生 multi=on 的 QMP socket。Unix socket
+# connect 会跟随 symlink，因此两条路径等价；失败只影响兼容别名，不影响 QMP 本体。
 if [[ "$PROXY" == "1" ]]; then
     rm -f "$QMP_PROXY_SOCK"
-    "$HERE/qmp-proxy.py" "$INSTANCE" --wait-upstream 30 \
-        > "$QMP_PROXY_LOG" 2>&1 &
-    QMP_PROXY_PID=$!
-    echo ">> QMP proxy:   started pid=$QMP_PROXY_PID, listening on $QMP_PROXY_SOCK"
+    if ln -s "$QMP_SOCK" "$QMP_PROXY_SOCK" 2>/dev/null; then
+        echo ">> QMP alias:   $QMP_PROXY_SOCK -> $QMP_SOCK"
+    else
+        echo ">> WARN: QMP alias 创建失败: $QMP_PROXY_SOCK"
+    fi
 fi
 
 # 热键截图: 给打了补丁的 QEMU 导出 QEMU_HOTKEY_TRIGGER(它在 ui/sdl2.c 收到

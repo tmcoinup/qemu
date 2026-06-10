@@ -180,8 +180,9 @@ if [[ -n "$_swtpm_pids" ]]; then
     pgrep -f "$_swtpm_pat" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 fi
 
-# QMP proxy 正常会随 upstream EOF 自退；保险起见清掉可能的残留进程 + 其 socket。
-pkill -f "qmp-proxy\.py ${INSTANCE}\b" 2>/dev/null && echo "→ qmp-proxy (instance ${INSTANCE}) 已停止" || true
+# 兼容旧版 Python qmp-proxy：新版 --proxy 已改为 QEMU 原生 multi=on，这里仍清理
+# 可能残留的旧代理进程和 .qmp.proxy 兼容别名，避免下次启动撞路径。
+pkill -f "qmp-proxy\.py ${INSTANCE}\b" 2>/dev/null && echo "→ legacy qmp-proxy (instance ${INSTANCE}) 已停止" || true
 rm -f "${QMP}.proxy" 2>/dev/null || true
 
 rm -f "$QMP" "$MON" "$HOTKEY_SOCK" 2>/dev/null || true

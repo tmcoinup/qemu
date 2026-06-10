@@ -914,6 +914,9 @@ QemuOptsList qemu_chardev_opts = {
             .name = "websocket",
             .type = QEMU_OPT_BOOL,
         },{
+            .name = "multi",
+            .type = QEMU_OPT_BOOL,
+        },{
             .name = "width",
             .type = QEMU_OPT_NUMBER,
         },{

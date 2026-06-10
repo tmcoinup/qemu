@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "chardev/char-socket.h"
 #include "monitor-internal.h"
 #include "qapi/error.h"
 #include "qapi/opts-visitor.h"
@@ -742,11 +743,20 @@ int monitor_init(MonitorOptions *opts, bool allow_hmp, Error **errp)
 
     switch (opts->mode) {
     case MONITOR_MODE_CONTROL:
-        monitor_init_qmp(chr, opts->pretty, errp);
+        if (qemu_chr_socket_is_multi(chr)) {
+            monitor_init_qmp_multi(chr, opts->pretty, errp);
+        } else {
+            monitor_init_qmp(chr, opts->pretty, errp);
+        }
         break;
     case MONITOR_MODE_READLINE:
         if (!allow_hmp) {
             error_setg(errp, "Only QMP is supported");
+            return -1;
+        }
+        if (qemu_chr_socket_is_multi(chr)) {
+            error_setg(errp, "multi=on socket chardevs are only "
+                       "supported by QMP monitors");
             return -1;
         }
         if (opts->pretty) {

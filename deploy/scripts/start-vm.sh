@@ -16,8 +16,8 @@
 #     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
 #     ./start-vm.sh 1 --reroll              # 重新随机硬件身份
 #     ./start-vm.sh 1 --fb-shm-roi=0,0,1920,1080 --fb-shm-rate=60
-#     ./start-vm.sh 1 --proxy               # 同时起 qmp-proxy 让多客户端共存
-#                                           # listen: /tmp/qemu-stealth-1.qmp.proxy
+#     ./start-vm.sh 1 --proxy               # 启用 QEMU 原生 QMP multi-client
+#                                           # 兼容别名: /tmp/qemu-stealth-1.qmp.proxy
 #     ./start-vm.sh 1 --no-host-tune        # 跳过起前的 host 调优(默认会自动跑)
 #     ./start-vm.sh 1 --hotkey-capture      # SDL 窗口里按 F4 -> fb-shm 抓 PNG
 #                                           # 存 $VM_DIR/captures；--hotkey-capture=F2 改键
@@ -72,10 +72,10 @@
 #                          (flag: --fb-shm-rate=<hz>)
 #     FB_SHM_ROI=x,y,w,h   只截 ROI 推流（省 CPU/带宽）。空 = 全屏
 #                          (flag: --fb-shm-roi=x,y,w,h)
-#     PROXY=1              同时起 qmp-proxy.py 让多个客户端共存（默认 0）
+#     PROXY=1              启用 QEMU 原生 QMP multi-client（默认 0）
 #                          (flag: --proxy / --no-proxy)
-#                          代理 listen: ${QMP_SOCK}.proxy；客户端连这里
-#                          就不会跟其他工具抢 QEMU 的单 QMP slot
+#                          ${QMP_SOCK} 可多客户端并发；同时创建
+#                          ${QMP_SOCK}.proxy 兼容旧工具配置
 #     HOST_TUNE=1          起 VM 前自动跑 host-performance.sh 压计时抖动（默认 1）
 #                          (flag: --host-tune / --no-host-tune)
 #                          governor=performance + halt_poll=500000 + THP defrag=never，

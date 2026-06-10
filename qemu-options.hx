@@ -4508,6 +4508,11 @@ SRST
 
         -qmp tcp:localhost:4444,server=on,wait=off
 
+    A socket QMP monitor can accept multiple concurrent clients when
+    ``multi=on`` is specified::
+
+        -qmp unix:/tmp/qmp.sock,server=on,wait=off,multi=on
+
     Not all options are configurable via this syntax; for maximum
     flexibility use the ``-mon`` option and an accompanying ``-chardev``.
 

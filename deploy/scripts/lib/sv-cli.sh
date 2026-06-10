@@ -74,10 +74,9 @@ fi
 : "${FB_SHM_RATE:=60}"
 : "${FB_SHM_ROI:=}"
 : "${FB_SHM_SOCK:=/tmp/qemu-stealth-${INSTANCE}.fb}"
-# QMP fanout proxy: QEMU 的 -qmp 单 slot, 谁先连占着. PROXY=1 就在 QEMU 旁边
-# 起一个 qmp-proxy.py 后台进程, listen 在 ${QMP_SOCK}.proxy, 让 dgame /
-# image-search / 临时 socat 都连代理 socket → 互不竞争. proxy 在 QEMU 退出
-# (upstream EOF) 时自动 exit, 不需要手动清理.
+# QMP 多客户端：PROXY=1 时启用 QEMU 原生 multi=on QMP listener，同一路径可被
+# dgame / image-search / 临时 socat 同时连接。为了兼容旧工具配置，启动脚本还会
+# 建一个 ${QMP_SOCK}.proxy -> ${QMP_SOCK} 的 symlink，但不再起 Python 中转进程。
 : "${PROXY:=0}"
 # 热键截图: HOTKEY_CAPTURE=1 时, 后台起 hotkey-capture.py, 同时给 QEMU 导出
 # QEMU_HOTKEY_TRIGGER. 用户在 SDL 窗口里按 HOTKEY_KEY(默认 F4), 守护进程从

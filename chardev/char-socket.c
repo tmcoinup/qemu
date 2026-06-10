@@ -38,6 +38,8 @@
 #include "chardev/char-io.h"
 #include "chardev/char-socket.h"
 
+#define TCP_MULTI_CLIENT_BACKLOG 64
+
 static gboolean socket_reconnect_timeout(gpointer opaque);
 static void tcp_chr_telnet_init(Chardev *chr);
 
@@ -473,7 +475,7 @@ static void tcp_chr_disconnect_locked(Chardev *chr)
     trace_chr_socket_disconnect(chr, chr->label);
     tcp_chr_free_connection(chr);
 
-    if (s->listener) {
+    if (s->listener && !s->is_multi) {
         qio_net_listener_set_client_func_full(s->listener, tcp_chr_accept,
                                               chr, NULL, chr->gcontext);
     }
@@ -657,7 +659,8 @@ static void tcp_chr_update_read_handler(Chardev *chr)
 {
     SocketChardev *s = SOCKET_CHARDEV(chr);
 
-    if (s->listener && s->state == TCP_CHARDEV_STATE_DISCONNECTED) {
+    if (s->listener && !s->is_multi &&
+        s->state == TCP_CHARDEV_STATE_DISCONNECTED) {
         /*
          * It's possible that chardev context is changed in
          * qemu_chr_be_update_read_handlers().  Reset it for QIO net
@@ -1228,6 +1231,7 @@ static int qmp_chardev_open_socket_server(Chardev *chr,
 {
     SocketChardev *s = SOCKET_CHARDEV(chr);
     char *name;
+    int backlog = TCP_MULTI_CLIENT_BACKLOG;
     if (is_telnet) {
         s->do_telnetopt = 1;
     }
@@ -1241,7 +1245,10 @@ static int qmp_chardev_open_socket_server(Chardev *chr,
         goto skip_listen;
     }
 
-    if (qio_net_listener_open_sync(s->listener, s->addr, 1, errp) < 0) {
+    if (!s->is_multi) {
+        backlog = 1;
+    }
+    if (qio_net_listener_open_sync(s->listener, s->addr, backlog, errp) < 0) {
         object_unref(OBJECT(s->listener));
         s->listener = NULL;
         return -1;
@@ -1253,7 +1260,13 @@ static int qmp_chardev_open_socket_server(Chardev *chr,
 skip_listen:
     update_disconnected_filename(s);
 
-    if (is_waitconnect) {
+    if (s->is_multi) {
+        /*
+         * multi=on 时 listener 只负责保活和持续 accept，真正的每客户端
+         * QMP monitor 由 monitor/qmp-multi.c 在 monitor 初始化后安装回调。
+         * 这里不接 tcp_chr_accept，否则 socket chardev 会退回单连接语义。
+         */
+    } else if (is_waitconnect) {
         tcp_chr_accept_server_sync(chr);
     } else {
         qio_net_listener_set_client_func_full(s->listener,
@@ -1360,6 +1373,35 @@ static bool qmp_chardev_validate_socket(ChardevSocket *sock,
         return false;
     }
 
+    if (sock->has_multi && sock->multi) {
+        bool is_server = !sock->has_server || sock->server;
+
+        if (!is_server) {
+            error_setg(errp, "'multi' option requires server mode");
+            return false;
+        }
+        if (sock->has_wait && sock->wait) {
+            error_setg(errp, "'multi' option is incompatible with 'wait=on'");
+            return false;
+        }
+        if (sock->has_telnet && sock->telnet) {
+            error_setg(errp, "'multi' option is incompatible with 'telnet'");
+            return false;
+        }
+        if (sock->has_tn3270 && sock->tn3270) {
+            error_setg(errp, "'multi' option is incompatible with 'tn3270'");
+            return false;
+        }
+        if (sock->has_websocket && sock->websocket) {
+            error_setg(errp, "'multi' option is incompatible with 'websocket'");
+            return false;
+        }
+        if (sock->tls_creds || sock->tls_authz) {
+            error_setg(errp, "'multi' option is incompatible with TLS");
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1377,6 +1419,7 @@ static void qmp_chardev_open_socket(Chardev *chr,
     bool is_tn3270      = sock->has_tn3270  ? sock->tn3270  : false;
     bool is_waitconnect = sock->has_wait    ? sock->wait    : false;
     bool is_websock     = sock->has_websocket ? sock->websocket : false;
+    bool is_multi       = sock->has_multi ? sock->multi : false;
     int64_t reconnect_ms = 0;
     SocketAddress *addr;
 
@@ -1385,6 +1428,7 @@ static void qmp_chardev_open_socket(Chardev *chr,
     s->is_tn3270 = is_tn3270;
     s->is_websock = is_websock;
     s->do_nodelay = do_nodelay;
+    s->is_multi = is_multi;
     if (sock->tls_creds) {
         Object *creds;
         creds = object_resolve_path_component(
@@ -1513,6 +1557,8 @@ static void qemu_chr_parse_socket(QemuOpts *opts, ChardevBackend *backend,
     sock->tn3270 = qemu_opt_get_bool(opts, "tn3270", false);
     sock->has_websocket = qemu_opt_get(opts, "websocket");
     sock->websocket = qemu_opt_get_bool(opts, "websocket", false);
+    sock->has_multi = qemu_opt_get(opts, "multi");
+    sock->multi = qemu_opt_get_bool(opts, "multi", false);
     /*
      * We have different default to QMP for 'wait' when 'server'
      * is set, hence we can't just check for existence of 'wait'
@@ -1575,6 +1621,34 @@ char_socket_get_connected(Object *obj, Error **errp)
     SocketChardev *s = SOCKET_CHARDEV(obj);
 
     return s->state == TCP_CHARDEV_STATE_CONNECTED;
+}
+
+bool qemu_chr_socket_is_multi(Chardev *chr)
+{
+    if (!chr) {
+        return false;
+    }
+
+    if (!object_dynamic_cast(OBJECT(chr), TYPE_CHARDEV_SOCKET)) {
+        return false;
+    }
+
+    return SOCKET_CHARDEV(chr)->is_multi;
+}
+
+void qemu_chr_socket_set_multi_client_func(Chardev *chr,
+                                           QIONetListenerClientFunc func,
+                                           gpointer data,
+                                           GDestroyNotify notify,
+                                           GMainContext *context)
+{
+    SocketChardev *s = SOCKET_CHARDEV(chr);
+
+    assert(s->is_multi);
+    assert(s->listener);
+
+    qio_net_listener_set_client_func_full(s->listener, func, data, notify,
+                                          context);
 }
 
 static void char_socket_class_init(ObjectClass *oc, void *data)

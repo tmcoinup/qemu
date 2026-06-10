@@ -207,7 +207,7 @@ deploy/
 │   ├── setup-bridge.sh             # 一次性桥接配置
 │   ├── stop-vm.sh                  # 优雅停机
 │   ├── ctl-vm.sh                   # 运行时切换 SDL/fb-shm（不关机）
-│   ├── qmp-proxy.py                # QMP 多客户端 fanout（dgame + image-search 同时连）
+│   ├── qmp-proxy.py                # 旧版 QMP Python fanout（保留兼容；默认改用 QEMU 原生 multi=on）
 │   ├── reroll-identity.sh          # 重置硬件身份
 │   ├── stealth-lib.sh              # 随机池（被 start-vm.sh 调用）
 │   ├── host-performance.sh         # 主机调优: governor=performance + halt_poll + THP defrag=never 压计时抖动(ACE 13-131130-8) + CPU_MAX_KHZ 按伪装 CPU 封顶频率防超规格; start-vm 默认 HOST_TUNE=1/CPU_FREQ_CAP=1 自动跑. memfd 后端不预留 hugepage

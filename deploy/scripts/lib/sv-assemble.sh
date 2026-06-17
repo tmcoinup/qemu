@@ -278,6 +278,12 @@ if [[ "$BOOT" == "iso" ]]; then
     echo ">> auto-key:    后台 daemon (pid=$_AUTO_KEY_PID) 跨过 BOOTX64.EFI 'Press any key' prompt"
 fi
 
+# CPU 亲和隔离(默认开): 后台 pinner 等 QEMU/QMP 起来后, 把 vCPU 钉进 cgroup cpuset
+# 独占分区, 与宿主机其它负载(尤其 cargo/rust 编译吃满全核)在调度层隔离, 治宿主机满
+# 载时 VM 卡顿/掉帧/ACE 计时异常。必须在 exec QEMU 前 fork(否则本进程已被替换);
+# 内部自带 CPU_ISOLATE/DRY_RUN 守卫与失败兜底, 绝不阻断启动。
+sv_cpu_isolate_launch || true
+
 # QEMU's `-rtc base=localtime` calls libc localtime() which honours $TZ.
 # Pin to Asia/Shanghai so the VM RTC reflects Beijing time regardless of
 # what the host's /etc/timezone is set to. Without this an LA-host gives

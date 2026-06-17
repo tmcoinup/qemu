@@ -18,6 +18,8 @@
 #   ./stop-vm.sh 1 --wait=120
 set -euo pipefail
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
 INSTANCE=1
 HARD=0
 WAIT=60
@@ -184,6 +186,13 @@ fi
 # 可能残留的旧代理进程和 .qmp.proxy 兼容别名，避免下次启动撞路径。
 pkill -f "qmp-proxy\.py ${INSTANCE}\b" 2>/dev/null && echo "→ legacy qmp-proxy (instance ${INSTANCE}) 已停止" || true
 rm -f "${QMP}.proxy" 2>/dev/null || true
+
+# CPU 亲和隔离收摊: 释放本实例的 cpuset 独占分区 → 专属物理核还给宿主机。
+# release 内部会判断分区里是否还有别的在跑 VM, 空了才真正拆分区还核(多 VM 安全)。
+# QEMU 已死 → 它的 pid 自动从 cgroup.procs 移除, 所以现在调最干净。失败不阻断。
+if [[ -x "$HERE/host-cpu-isolate.sh" ]]; then
+    sudo -n "$HERE/host-cpu-isolate.sh" release "$INSTANCE" 2>/dev/null || true
+fi
 
 rm -f "$QMP" "$MON" "$HOTKEY_SOCK" 2>/dev/null || true
 echo "instance=${INSTANCE} stopped"

@@ -28,6 +28,8 @@ while (( $# > 0 )); do
         --no-host-tune)  HOST_TUNE=0 ;;
         --freq-cap)      CPU_FREQ_CAP=1 ;;
         --no-freq-cap)   CPU_FREQ_CAP=0 ;;
+        --cpu-isolate)    CPU_ISOLATE=1 ;;
+        --no-cpu-isolate) CPU_ISOLATE=0 ;;
         --hotkey-capture)     HOTKEY_CAPTURE=1 ;;
         --hotkey-capture=*)   HOTKEY_CAPTURE=1; HOTKEY_KEY="${1#*=}" ;;
         --no-hotkey-capture)  HOTKEY_CAPTURE=0 ;;
@@ -91,6 +93,13 @@ fi
 # 只降不升(多 VM 取运行中最小, 绝不让任一 VM 超自身规格). HOST_TUNE=1 时才生效.
 # (flag: --freq-cap / --no-freq-cap)
 : "${CPU_FREQ_CAP:=1}"
+# CPU 亲和隔离(线程级): 起 VM 后把 QEMU 钉进 cgroup cpuset 独占分区, 每个 vCPU 独占
+# 1 个逻辑线程(非整核)——4vCPU 的 VM 只吃 4 个逻辑线程, 宿主机保留其余(本机 16 线程
+# 留 12, 含 SMT 兄弟)。与宿主机负载(尤其 cargo/rust 编译)在调度层隔离: vCPU 永不被
+# 宿主机抢占。多 VM 自动错开线程、分区随起停伸缩、停机自动还线程。纯运行态(cgroup v2
+# partition, 不重启), 默认开。HOST_RESERVE_CORES(默认2)=永久留给宿主机的物理核数。
+# (flag: --cpu-isolate / --no-cpu-isolate)
+: "${CPU_ISOLATE:=1}"
 : "${HOTKEY_CAPTURE:=0}"
 : "${HOTKEY_KEY:=F4}"
 : "${HOTKEY_SOCK:=/tmp/qemu-stealth-${INSTANCE}.hotkey}"

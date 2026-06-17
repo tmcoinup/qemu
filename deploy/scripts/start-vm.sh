@@ -19,6 +19,7 @@
 #     ./start-vm.sh 1 --proxy               # 启用 QEMU 原生 QMP multi-client
 #                                           # 兼容别名: /tmp/qemu-stealth-1.qmp.proxy
 #     ./start-vm.sh 1 --no-host-tune        # 跳过起前的 host 调优(默认会自动跑)
+#     ./start-vm.sh 1 --no-cpu-isolate      # 不给 vCPU 划专属核(默认会绑核隔离)
 #     ./start-vm.sh 1 --hotkey-capture      # SDL 窗口里按 F4 -> fb-shm 抓 PNG
 #                                           # 存 $VM_DIR/captures；--hotkey-capture=F2 改键
 #
@@ -86,6 +87,17 @@
 #                          (flag: --freq-cap / --no-freq-cap)
 #                          防 guest 实测吞吐超出该型号规格(超规格=变速器/计时异常 tell)。
 #                          只降不升：多 VM 并发收敛到运行中最小，绝不让任一 VM 超自身规格。
+#     CPU_ISOLATE=1        起 VM 后把 QEMU 钉进 cgroup cpuset 独占分区（默认 1，线程级）
+#                          (flag: --cpu-isolate / --no-cpu-isolate)
+#                          每个 vCPU 独占 1 个逻辑线程(不是整颗物理核)：4vCPU 的 VM 只
+#                          吃 4 个逻辑线程，宿主机保留其余(本机 16 线程→留 12，含 SMT
+#                          兄弟)。频率封顶只管「跑多快」，这个管「vCPU 抢不抢得到核」——
+#                          宿主机满载(cargo/rust 编译塞满全核)时治 VM 卡顿/掉帧/ACE 计时
+#                          异常的真正旋钮：vCPU 独占自己的线程、永不被宿主机抢占。多 VM
+#                          自动错开(第2台落 SMT 兄弟线程)、分区随起停伸缩、VM 停机自动还
+#                          线程。纯运行态(cgroup v2 partition，不重启)；需 host-cpu-isolate.sh
+#                          的 sudo NOPASSWD(同 host-tune)。
+#     HOST_RESERVE_CORES=2 永久保留给宿主机、任何情况都不被 VM 吃的最低物理核数(默认 2)。
 #     HOTKEY_CAPTURE=1     SDL 窗口里按 HOTKEY_KEY 时从 fb-shm 抓 PNG（默认 0）
 #                          (flag: --hotkey-capture[=KEY] / --no-hotkey-capture)
 #     HOTKEY_KEY=F4        触发键名（X keysym），默认 F4
@@ -115,4 +127,5 @@ source "$HERE/lib/sv-hosttune.sh"   # (可选,默认开) host 压抖动 + 按伪
 source "$HERE/lib/sv-tpm-mem.sh"    # TPM(swtpm) + DIMM 拓扑 / 内存 / SMBIOS / AMD DF
 source "$HERE/lib/sv-devices.sh"    # 平台 PCI ID + 显示/EDID + 启动序 + CDROM + 网络 + USB + 音频
 source "$HERE/lib/sv-dock.sh"       # GNOME dash-to-dock 集成：每实例独立可固定/可排序图标(SDL 窗口)
+source "$HERE/lib/sv-cpupin.sh"     # (可选,默认开) 起 VM 后 vCPU 钉进 cpuset 独占分区, 与宿主机编译隔离
 source "$HERE/lib/sv-assemble.sh"   # 组装 QEMU argv + (DRY_RUN 出参) + 守护进程 + exec

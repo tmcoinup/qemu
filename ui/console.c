@@ -52,6 +52,7 @@ typedef struct QemuGraphicConsole {
     QEMUCursor *cursor;
     int cursor_x, cursor_y;
     bool cursor_on;
+    bool cursor_position_valid;
 } QemuGraphicConsole;
 
 typedef QemuConsoleClass QemuGraphicConsoleClass;
@@ -78,6 +79,17 @@ static bool console_compatible_with(QemuConsole *con,
                                     DisplayChangeListener *dcl, Error **errp);
 static QemuConsole *qemu_graphic_console_lookup_unused(void);
 static void dpy_set_ui_info_timer(void *opaque);
+
+static int qemu_console_cursor_u32_to_int(uint32_t value)
+{
+    /*
+     * GL cursor paths use unsigned 32 bit coordinates while the legacy
+     * DisplayChangeListener cursor callback still takes int.
+     * 这里钳住超出 int 范围的值，
+     * 避免 host 查询和旧前端收到截断值。
+     */
+    return value > INT_MAX ? INT_MAX : (int)value;
+}
 
 static void gui_update(void *opaque)
 {
@@ -1003,9 +1015,16 @@ void dpy_mouse_set(QemuConsole *c, int x, int y, bool on)
     DisplayState *s = c->ds;
     DisplayChangeListener *dcl;
 
+    /*
+     * 客户机通过显卡硬件光标通道上报位置。
+     * 这里保存的是 host 内部状态，
+     * 只供 QMP/显示前端读取。
+     * 不会新增任何 guest 可见的接口。
+     */
     con->cursor_x = x;
     con->cursor_y = y;
     con->cursor_on = on;
+    con->cursor_position_valid = true;
     if (!qemu_console_is_visible(c)) {
         return;
     }
@@ -1132,6 +1151,13 @@ void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
 
+    /*
+     * VFIO/GL 光标使用独立的 dmabuf 表示可见性。位置由
+     * dpy_gl_cursor_position() 单独更新。
+     * 因此这里只同步 on/off 状态。
+     */
+    QEMU_GRAPHIC_CONSOLE(con)->cursor_on = dmabuf != NULL;
+
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
             continue;
@@ -1146,8 +1172,18 @@ void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
 void dpy_gl_cursor_position(QemuConsole *con,
                             uint32_t pos_x, uint32_t pos_y)
 {
+    QemuGraphicConsole *graphic = QEMU_GRAPHIC_CONSOLE(con);
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+
+    /*
+     * GL scanout 的光标移动此前只通知显示前端。
+     * 同步到图形 console 后，host-side QMP 查询
+     * 才能在 VFIO/GL 场景拿到同一份最新坐标。
+     */
+    graphic->cursor_x = qemu_console_cursor_u32_to_int(pos_x);
+    graphic->cursor_y = qemu_console_cursor_u32_to_int(pos_y);
+    graphic->cursor_position_valid = true;
 
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1385,6 +1421,60 @@ static QemuConsole *qemu_graphic_console_lookup_unused(void)
 QEMUCursor *qemu_console_get_cursor(QemuConsole *con)
 {
     return QEMU_IS_GRAPHIC_CONSOLE(con) ? QEMU_GRAPHIC_CONSOLE(con)->cursor : NULL;
+}
+
+GuestMousePosition *qmp_query_guest_mouse_position(const char *device,
+                                                   bool has_head,
+                                                   int64_t head,
+                                                   Error **errp)
+{
+    QemuConsole *con;
+    QemuGraphicConsole *graphic;
+    GuestMousePosition *position;
+
+    if (device) {
+        if (!has_head) {
+            head = 0;
+        }
+        if (head < 0 || head > UINT32_MAX) {
+            error_setg(errp, "head must be in the range 0..%u", UINT32_MAX);
+            return NULL;
+        }
+        con = qemu_console_lookup_by_device_name(device, head, errp);
+        if (!con) {
+            return NULL;
+        }
+    } else {
+        if (has_head) {
+            error_setg(errp, "'head' must be specified together with 'device'");
+            return NULL;
+        }
+        con = qemu_console_lookup_default();
+        if (!con) {
+            error_setg(errp,
+                       "There is no console to query guest mouse position from");
+            return NULL;
+        }
+    }
+
+    if (!QEMU_IS_GRAPHIC_CONSOLE(con)) {
+        error_setg(errp, "Console is not a graphic console");
+        return NULL;
+    }
+
+    /*
+     * QMP 返回的是 QEMU 已观察到的客户机硬件光标状态。
+     * valid=false 表示客户机尚未上报位置，
+     * 调用方不能把 x/y 当作真实坐标。
+     */
+    graphic = QEMU_GRAPHIC_CONSOLE(con);
+    position = g_new0(GuestMousePosition, 1);
+    position->x = graphic->cursor_x;
+    position->y = graphic->cursor_y;
+    position->visible = graphic->cursor_on;
+    position->valid = graphic->cursor_position_valid;
+
+    return position;
 }
 
 bool qemu_console_is_visible(QemuConsole *con)

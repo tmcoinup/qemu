@@ -848,6 +848,59 @@
 { 'command': 'query-mice', 'returns': ['MouseInfo'] }
 
 ##
+# @GuestMousePosition:
+#
+# Guest-reported hardware cursor position for a graphic console.
+#
+# @x: X coordinate in the guest display coordinate space.
+#
+# @y: Y coordinate in the guest display coordinate space.
+#
+# @visible: true if the guest currently marks the hardware cursor
+#     visible.
+#
+# @valid: true if QEMU has received at least one hardware cursor
+#     position update from the guest.  When false, @x and @y are only
+#     placeholders and must not be treated as an actual guest cursor
+#     position.
+#
+# Since: 9.2
+##
+{ 'struct': 'GuestMousePosition',
+  'data': { 'x': 'int', 'y': 'int',
+            'visible': 'bool', 'valid': 'bool' } }
+
+##
+# @query-guest-mouse-position:
+#
+# Return the latest guest-reported hardware cursor position for a
+# graphic console.
+#
+# This is a host-side QMP query only.  It does not create any new
+# guest-visible device, register, or guest agent command.  Software
+# cursors drawn directly into the guest framebuffer are not observable
+# through this command.
+#
+# @device: display device ID.  If omitted, the primary graphic console
+#     is used.
+#
+# @head: display head to use together with @device.  Defaults to 0.
+#
+# Returns: @GuestMousePosition
+#
+# Since: 9.2
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-guest-mouse-position" }
+#     <- { "return": { "x": 640, "y": 360,
+#                      "visible": true, "valid": true } }
+##
+{ 'command': 'query-guest-mouse-position',
+  'data': { '*device': 'str', '*head': 'int' },
+  'returns': 'GuestMousePosition' }
+
+##
 # @QKeyCode:
 #
 # An enumeration of key name.

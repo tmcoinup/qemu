@@ -8571,6 +8571,21 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
     nvme_add_pm_capability(pci_dev, 0x60);
     pcie_endpoint_cap_init(pci_dev, 0x80);
+
+    if (n->params.use_samsung_id) {
+        /*
+         * Stealth: a real Samsung 9xx / 980 consumer NVMe negotiates PCIe 3.0
+         * x4 (8 GT/s, x4). pcie_endpoint_cap_init() leaves the endpoint at the
+         * PCIe spec default of Gen1 x1 (2.5 GT/s), so without this the guest
+         * reads PCI_EXP_LNKCAP / LNKSTA = Gen1 x1 on a drive whose model string
+         * claims a Gen3 part — CrystalDiskInfo / Device Manager "PCI link
+         * speed" / anti-cheat see an impossible link and flag the VM. Every
+         * model in the deploy NVMe pool is Gen3 x4, so advertise that.
+         * (Keep in sync with deploy/scripts/lib/stealth-pools.sh.)
+         */
+        pcie_cap_fill_link_ep_usp(pci_dev, QEMU_PCI_EXP_LNK_X4,
+                                  QEMU_PCI_EXP_LNK_8GT);
+    }
     pcie_cap_flr_init(pci_dev);
     if (n->params.sriov_max_vfs) {
         pcie_ari_init(pci_dev, 0x100);

@@ -64,6 +64,17 @@ fi
 
 mkdir -p "$VM_DIR"
 
+# sudo 跑完文件默认 root:root，普通用户读不了 profile，
+# 也写不了 OVMF NVRAM。
+# 用 EXIT trap 兜底 chown：无论后面哪步失败 abort，
+# 都保证退出前把 vms/<N>/ 归还执行 sudo 的原用户。
+# 历史 bug：devpkey 失败后 set -e+pipefail 中途退出，
+# 跳过末尾 chown，留下 root:root，
+# start-vm.sh 报 "profile: Permission denied"。
+ORIG_USER="${SUDO_USER:-ubuntu}"
+ORIG_GROUP="$(id -gn "$ORIG_USER" 2>/dev/null || echo "$ORIG_USER")"
+trap 'chown -R "${ORIG_USER}:${ORIG_GROUP}" "$VM_DIR" 2>/dev/null || true' EXIT
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 QEMU_IMG="$REPO_ROOT/build/qemu-img"
 [[ -x "$QEMU_IMG" ]] || QEMU_IMG=qemu-img
@@ -147,7 +158,20 @@ DEVPKEY_FIX="$SCRIPT_DIR/host-fix-gpu-devpkey.sh"
 if [[ -x "$DEVPKEY_FIX" ]]; then
     echo ">> 重写 DEVPKEY DriverProvider / DeviceDesc（用新 profile.GPU_*）..."
     if [[ $EUID -eq 0 ]]; then
-        "$DEVPKEY_FIX" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /'
+        # 非致命：失败也不能 abort 整个 clone。
+        # 否则会跳过后面的 unattend 注入和 chown，
+        # 留下 root:root 且没注入 OOBE unattend 的半成品 VM。
+        # GPU DEVPKEY 即便没离线写入，首启脚本也会按新
+        # PCI subsys 重对齐 GPU 注册表。
+        if ! "$DEVPKEY_FIX" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /'; then
+            echo "   WARN: host-fix-gpu-devpkey.sh 失败"
+            echo "         非致命，继续 clone。"
+            echo "         GPU 名首启由 respawn-stealth.ps1"
+            echo "         兜底重对齐。"
+            echo "         若反复失败，多半是 base 处于"
+            echo "         Fast Startup/hiberfile。"
+            echo "         在 base 内 powercfg -h off 一次即可修复。"
+        fi
     else
         echo ">> 需 sudo 权限挂 NTFS；执行： sudo $DEVPKEY_FIX $NEW_INSTANCE"
         echo "   或者先用 sudo 运行 clone-from-base.sh"
@@ -181,12 +205,11 @@ fi
 #        deploy/autounattend/autounattend.xml 的 FirstLogonCommands Order=10，
 #        OOBE 走完 unattend 后第一次 logon 自动跑，不需要动注册表 hive。
 
-# --- 5) sudo 跑完之后所有文件都是 root:root，普通用户的 start-vm.sh 写不了 OVMF NVRAM
-#        把 vms/<N>/ chown 回执行 sudo 的原用户，让 start-vm.sh 不用再 sudo。
-ORIG_USER="${SUDO_USER:-ubuntu}"
-ORIG_GROUP="$(id -gn "$ORIG_USER" 2>/dev/null || echo "$ORIG_USER")"
-chown -R "${ORIG_USER}:${ORIG_GROUP}" "$VM_DIR"
-echo ">> 目录所有权 → ${ORIG_USER}:${ORIG_GROUP} (start-vm.sh 可直接非 root 起)"
+# --- 6) 目录所有权由顶部的 EXIT trap 统一 chown 回 ORIG_USER。
+#        无论成功还是中途失败，都只在 trap 中处理。
+#        这里只打印结果说明，不再重复 chown。
+echo ">> 目录所有权将 → ${ORIG_USER}:${ORIG_GROUP}"
+echo "   (EXIT trap 兜底，start-vm.sh 可直接非 root 起)"
 
 echo ""
 echo "=== Done ==="

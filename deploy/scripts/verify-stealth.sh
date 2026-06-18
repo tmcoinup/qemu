@@ -395,6 +395,94 @@ rm -f "$P15SOCK"
 [[ $RC -eq 0 ]] || exit 1
 
 echo
+echo "=== (16) PCIe 链路速率：根端口/NVMe 端点链路自洽 ==="
+# QEMU 的 pcie-root-port 默认 x-speed=Gen4(16GT/s) / x-width=x32。
+# NVMe 端点默认 Gen1 x1。两者都与 AM4/300·400 系平台 +
+# Samsung Gen3 盘矛盾。CrystalDiskInfo / 设备管理器
+# “PCI 链接速度” / 反作弊读 PCI_EXP_LNKCAP 会看到破绽。
+#   (a) 运行态：qom-get 验四个根端口 x-speed/x-width 已钉死
+#       (rp1=NVMe Gen3 x4；rp0/rp2/rp3 = Gen1 x1)；
+#   (b) 静态：sv-devices.sh 和 hw/nvme/ctrl.c 补丁仍在位。
+P16SOCK="/tmp/verify-stealth-p16.qmp"
+P16ERR="/tmp/verify-stealth-p16.err"
+rm -f "$P16SOCK"
+"$QEMU" -machine q35,accel=tcg -m 256M -nographic -S -display none -nodefaults \
+    -qmp unix:$P16SOCK,server=on,wait=off \
+    -device "pcie-root-port,id=rp0,slot=0,bus=pcie.0,"\
+"multifunction=on,hotplug=off,x-speed=2_5,x-width=1" \
+    -device "pcie-root-port,id=rp1,slot=1,bus=pcie.0,"\
+"hotplug=off,x-speed=8,x-width=4" \
+    -device "pcie-root-port,id=rp2,slot=2,bus=pcie.0,"\
+"hotplug=off,x-speed=2_5,x-width=1" \
+    -device "pcie-root-port,id=rp3,slot=3,bus=pcie.0,"\
+"hotplug=off,x-speed=2_5,x-width=1" 2>"$P16ERR" &
+P16PID=$!
+for _ in $(seq 1 50); do [[ -S "$P16SOCK" ]] && break; sleep 0.1; done
+if python3 - "$P16SOCK" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
+f = s.makefile('rwb', buffering=0)
+f.readline(); f.write(b'{"execute":"qmp_capabilities"}\n'); f.readline()
+want = {"rp0": ("2_5", "1"), "rp1": ("8", "4"),
+        "rp2": ("2_5", "1"), "rp3": ("2_5", "1")}
+label = {
+    "rp0": "空槽",
+    "rp1": "NVMe",
+    "rp2": "e1000e/82574L",
+    "rp3": "xHCI",
+}
+def get(rp, prop):
+    req = {"execute": "qom-get", "arguments": {
+        "path": f"/machine/peripheral/{rp}",
+        "property": prop,
+    }}
+    f.write((json.dumps(req) + "\n").encode())
+    return str(json.loads(f.readline()).get("return"))
+bad = []
+for rp, (ws, ww) in want.items():
+    gs, gw = get(rp, "x-speed"), get(rp, "x-width")
+    print(
+        f"  {rp} {label[rp]:14s} "
+        f"x-speed={gs:<3s} x-width={gw:<2s}  期望 {ws}/{ww}"
+    )
+    if (gs, gw) != (ws, ww):
+        bad.append(rp)
+if bad:
+    print("FAIL: 根端口链路速率/宽度未钉到真实值:", bad)
+    sys.exit(1)
+print("OK: 根端口链路 = NVMe Gen3 x4，其余 Gen1 x1")
+PY
+then RC=0; else RC=1; fi
+kill "$P16PID" 2>/dev/null || true
+scan_stderr "$P16ERR" "pcie-link"
+rm -f "$P16SOCK"
+[[ $RC -eq 0 ]] || exit 1
+
+# (b) 静态护栏：
+#     确保两半改动不在版本升级/重打补丁时丢掉。
+SVDEV="$HERE/lib/sv-devices.sh"; CTRL="$REPO_ROOT/hw/nvme/ctrl.c"
+if [[ -f "$SVDEV" ]]; then
+    svdev_flat="$(tr -d '\n\t\\"' < "$SVDEV")"
+    grep -Eq 'id=rp1.*x-speed=8,x-width=4' <<<"$svdev_flat" \
+        || { echo "FAIL: sv-devices.sh rp1 未钉 NVMe Gen3 x4"; exit 1; }
+    grep -Eq 'id=rp2.*x-speed=2_5,x-width=1' <<<"$svdev_flat" \
+        || { echo "FAIL: sv-devices.sh rp2 未钉 82574L Gen1 x1"; exit 1; }
+    echo "  sv-devices.sh: 根端口 x-speed/x-width 静态校验通过"
+else
+    echo "  (skip 静态校验：未找到 $SVDEV)"
+fi
+if [[ -f "$CTRL" ]]; then
+    grep -Eq 'pcie_cap_fill_link_ep_usp\(pci_dev, *QEMU_PCI_EXP_LNK_X4' \
+        "$CTRL" || {
+            echo "FAIL: hw/nvme/ctrl.c 未把 Samsung NVMe 端点抬到 Gen3 x4"
+            exit 1
+        }
+    echo "  hw/nvme/ctrl.c: NVMe 端点 Gen3 x4 端点补丁在位"
+else
+    echo "  (skip 静态校验：未找到 $CTRL)"
+fi
+
+echo
 if [[ $UNEXPECTED_STDERR -ne 0 ]]; then
     echo "FAIL: 检测到未登记的 warning/error（见上）——不满足'运行无警告'。" >&2
     exit 1

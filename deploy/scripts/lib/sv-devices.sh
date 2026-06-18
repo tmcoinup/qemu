@@ -25,11 +25,32 @@ else
 fi
 
 # 4 口根端口（hotplug=off 见下方 QEMU_ARGS 处的说明），ID 按平台注入。
+#
+# 每口 x-speed/x-width 必须显式钉死（2026-06-02）。
+# QEMU 的 pcie-root-port 默认 Gen4 16GT/s、x32。
+# 不设就是“Gen4 x32 根端口”，AM4 Zen1/Zen+ /
+# Intel 300·400 系平台根本没有这种链路。
+# 根端口 LnkSta 会按 pcie_sync_bridge_lnk
+# 同步成下游设备的协商值，
+# 故必须让端口能力 = 下游真实链路：
+#   rp1=NVMe   → Gen3 x4，配 hw/nvme/ctrl.c 端点 Gen3 x4
+#   rp2=e1000e → Gen1 x1，真 Intel 82574L 就是 PCIe 1.1 x1
+#   rp3=xHCI   → Gen1 x1，qemu-xhci 端点默认 Gen1 x1
+#   rp0=空槽   → Gen1 x1，无下游，给个朴素值，别留 Gen4 x32
 ROOT_PORT_ARGS=(
-    -device "pcie-root-port,id=rp0,slot=0,bus=pcie.0,multifunction=on,hotplug=off,x-pci-vendor-id=${RP_VEN},x-pci-device-id=${RP_DEV[0]},x-pci-revision=${RP_REV}"
-    -device "pcie-root-port,id=rp1,slot=1,bus=pcie.0,hotplug=off,x-pci-vendor-id=${RP_VEN},x-pci-device-id=${RP_DEV[1]},x-pci-revision=${RP_REV}"
-    -device "pcie-root-port,id=rp2,slot=2,bus=pcie.0,hotplug=off,x-pci-vendor-id=${RP_VEN},x-pci-device-id=${RP_DEV[2]},x-pci-revision=${RP_REV}"
-    -device "pcie-root-port,id=rp3,slot=3,bus=pcie.0,hotplug=off,x-pci-vendor-id=${RP_VEN},x-pci-device-id=${RP_DEV[3]},x-pci-revision=${RP_REV}"
+    -device "pcie-root-port,id=rp0,slot=0,bus=pcie.0,"\
+"multifunction=on,hotplug=off,x-speed=2_5,x-width=1,"\
+"x-pci-vendor-id=${RP_VEN},x-pci-device-id=${RP_DEV[0]},"\
+"x-pci-revision=${RP_REV}"
+    -device "pcie-root-port,id=rp1,slot=1,bus=pcie.0,"\
+"hotplug=off,x-speed=8,x-width=4,x-pci-vendor-id=${RP_VEN},"\
+"x-pci-device-id=${RP_DEV[1]},x-pci-revision=${RP_REV}"
+    -device "pcie-root-port,id=rp2,slot=2,bus=pcie.0,"\
+"hotplug=off,x-speed=2_5,x-width=1,x-pci-vendor-id=${RP_VEN},"\
+"x-pci-device-id=${RP_DEV[2]},x-pci-revision=${RP_REV}"
+    -device "pcie-root-port,id=rp3,slot=3,bus=pcie.0,"\
+"hotplug=off,x-speed=2_5,x-width=1,x-pci-vendor-id=${RP_VEN},"\
+"x-pci-device-id=${RP_DEV[3]},x-pci-revision=${RP_REV}"
 )
 
 # -------------------------------------------------------------------
@@ -306,4 +327,3 @@ else
         -device "usb-tablet,bus=xhci.0,vendorid=${TABLET_VID},productid=${TABLET_PID},manufacturer=${TABLET_MFR},product=${TABLET_PRODUCT}"
     )
 fi
-

@@ -49,10 +49,23 @@ nbd_assert_device_free() {
 nbd_guard_disk() {
     local disk="$1" holders=""
     [[ -n "$disk" && -e "$disk" ]] || return 0
+    # lsof / fuser 在“文件没有任何进程持有”时 exit 非零。
+    # 这恰是正常情况。调用方普遍 set -euo pipefail，
+    # 所以命令替换失败会经 pipefail 上抛，
+    # 被 set -e 当致命错误。
+    # 实测 clone-from-base.sh 的 devpkey 步
+    # 会在 attach nbd 后 rc=1 退出，
+    # 连分区都没扫到，进而跳过 unattend 注入和 chown。
+    # 每个赋值补 || true：只取输出，退出码不参与 set -e。
     if command -v lsof >/dev/null 2>&1; then
-        holders="$(lsof -- "$disk" 2>/dev/null | awk 'NR>1{print $1"(pid "$2")"}' | sort -u | tr '\n' ' ')"
+        holders="$(
+            lsof -- "$disk" 2>/dev/null |
+                awk 'NR>1{print $1"(pid "$2")"}' |
+                sort -u |
+                tr '\n' ' '
+        )" || true
     elif command -v fuser >/dev/null 2>&1; then
-        holders="$(fuser "$disk" 2>/dev/null | tr -s ' ')"
+        holders="$(fuser "$disk" 2>/dev/null | tr -s ' ')" || true
     fi
     if [[ -n "$holders" ]]; then
         echo "ERROR: 磁盘 $disk 正被进程持有: $holders" >&2

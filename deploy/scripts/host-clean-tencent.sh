@@ -19,9 +19,18 @@
 #   - AppData\...\Microsoft：shell/字体/.NET 等 per-user 必需状态，整删会坏配置。
 #
 # 纯离线：qemu-nbd 直接读写 qcow2，不连 guest、不联网。要 root 仅因 nbd/mount NTFS。
-# 离线改 hive **不 truncate .LOG1/.LOG2**（truncate 会让 winload reject hive →
-# 0xc0000001 reboot loop，见 host-inject-runonce.sh 的废弃教训）；只做 header
-# pre-fixup 让 hivex 能打开，删键后 hivex commit 自己同步 seq/checksum。
+# 离线改 hive 的正确配方（2026-06-02 修）：
+#   1) header pre-fixup：同步 seq + 拉齐 eolp + 重算 checksum，
+#      让 hivex 能打开冷关机 hive；
+#   2) hivex 删键并 commit，写出布局一致的 clean 主文件；
+#   3) 清零同名 .LOG1/.LOG2/.LOG。hivex 会重排布局，
+#      旧日志按旧布局存脏页。Windows 首启一旦重放，
+#      就把主文件写花，导致 NTUSER.DAT 加载失败，
+#      之后进入临时配置文件。
+#   顺序铁律：先把主文件 commit 成 clean 再清日志。
+#   反过来（脏主文件+无日志）才会 0xc0000001。
+#   那是旧版“不 truncate”的误判根因，
+#   不是 truncate 本身的错。
 #
 # Prereqs (apt 一行装齐)：
 #   sudo apt install -y qemu-utils ntfs-3g python3-hivex
@@ -237,12 +246,33 @@ with open(path, 'wb') as f:
 PY
     }
 
+    # 离线改完 hive 后清零同名 .LOG1/.LOG2/.LOG。
+    # 必须在主文件已 commit 成 clean 之后调用。
+    # 不清的话 Windows 首启把旧布局日志重放到被 hivex
+    # 重排过的主文件上，导致 hive 写花和临时配置文件。
+    truncate_hive_logs() {
+        local hive="$1" dir base lg
+        dir=$(dirname "$hive"); base=$(basename "$hive")
+        # 大小写不敏感匹配 <hive>.LOG1/.LOG2/.LOG。
+        # Windows 有时把日志存成小写。
+        # ntfs-3g 默认大小写敏感。
+        # 写死大写会漏清，脏日志仍可能首启重放写花 hive。
+        while IFS= read -r -d '' lg; do
+            log "    清零日志: ${lg#$MOUNT}"
+            : > "$lg"
+        done < <(find "$dir" -maxdepth 1 -type f \
+                    \( -iname "${base}.LOG1" \
+                       -o -iname "${base}.LOG2" \
+                       -o -iname "${base}.LOG" \) \
+                    -print0 2>/dev/null)
+    }
+
     # 删指定 hive 下的若干键路径（'\' 分隔）。DRY=1 只报告。
     del_keys() {
         local hive="$1"; shift
         [[ -f "$hive" ]] || { log "  (跳过，hive 不存在: ${hive#$MOUNT})"; return 0; }
         (( DRY == 0 )) && pre_fixup "$hive"
-        DRY="$DRY" HIVE="$hive" KEYS="$*" python3 - <<'PY' || log "  WARN: hivex 处理失败（文件已删，注册表残留不致命，guest 首启会重建）: ${HIVE#$MOUNT}"
+        if DRY="$DRY" HIVE="$hive" KEYS="$*" python3 - <<'PY'
 import hivex, os, sys
 hive = os.environ['HIVE']
 dry  = os.environ.get('DRY') == '1'
@@ -271,6 +301,17 @@ for keypath in keys:
 if removed and not dry:
     h.commit(None)
 PY
+        then
+            # 改成功后主文件已 clean。
+            # 现在清零日志。
+            # 杜绝 Windows 首启重放旧日志写花 hive。
+            (( DRY == 0 )) && truncate_hive_logs "$hive"
+        else
+            # 失败：主文件可能没改成。
+            # 保留 .LOG 让 Windows 自恢复，绝不清日志。
+            log "  WARN: hivex 处理失败，保留 .LOG 让 Windows 自恢复"
+            log "        文件已删，残留不致命: ${hive#$MOUNT}"
+        fi
     }
 
     # HKLM\SOFTWARE：Tencent + 32 位重定向 WOW6432Node\Tencent

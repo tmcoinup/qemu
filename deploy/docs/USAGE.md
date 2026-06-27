@@ -126,8 +126,9 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `MEM_FORCE` | 0 | 1 = 越过 `MEM_GUARD` 的硬拒绝强行启动（风险自负） |
 | `HOST_TUNE` | **1** | 起 VM 前自动跑 `host-performance.sh`：governor=performance + halt_poll=500000 + THP defrag=never，压低 vCPU 服务延迟方差 → 缓解 ACE「游戏计时异常」(13-131130-8)。只动 host 侧旋钮，guest CPUID/tsc-freq/拓扑全不变（**零反检测影响**）。已调优自动跳过免重复 sudo；DRY_RUN 下严格 no-op。`0` / `--no-host-tune` = 跳过 |
 | `CPU_FREQ_CAP` | **1** | （需 `HOST_TUNE=1`）把 host `scaling_max_freq` 封顶到本实例伪装 CPU 的 `CPU_MAX_MHZ`（= SMBIOS Type4 自报 `max-speed`，如 Ryzen3-1200=3400）。host(5800) boost 4.6GHz 远超伪装规格，固定 `tsc-freq` 下 guest 实测吞吐就会超该型号上限 = **变速器/计时异常 tell**。**只降不升**：多 VM 并发自然收敛到运行中最小值，绝不让任一 VM 跑出超自身规格的速度。`0` / `--no-freq-cap` = 满 boost 不封顶 |
-| `CPU_ISOLATE` | **1** | 起 VM 后把 QEMU 钉进 cgroup v2 cpuset 独占分区，**线程级**隔离 vCPU：每个 vCPU 独占 1 个逻辑线程（非整颗物理核），4vCPU 的 VM 只吃 4 个逻辑线程，宿主机保留其余（本机 16 线程→留 12，含 SMT 兄弟）。频率封顶管「跑多快」，这个管「vCPU 抢不抢得到核」——宿主机满载（cargo/rust 编译塞满全核）时治 VM 卡顿/掉帧/ACE 计时异常的真正旋钮：vCPU 永不被宿主机抢占。多 VM 自动错开线程、分区随起停伸缩、停机自动还线程。纯运行态（不重启）。`0` / `--no-cpu-isolate` = 关 |
-| `HOST_RESERVE_CORES` | **2** | 永久留给宿主机、任何情况都不被 VM 吃的最低物理核数（仅 `CPU_ISOLATE=1` 生效） |
+| `CPU_ISOLATE` | **1** | 起 VM 后把 QEMU 钉进 cgroup v2 cpuset 独占分区，**线程级**隔离 vCPU：每个 vCPU 独占 1 个逻辑线程（非整颗物理核），4vCPU 的 VM 只吃 4 个逻辑线程。分配器优先把多台 VM 横向铺到不同物理核心，主线程耗尽后才使用 SMT 兄弟。`0` / `--no-cpu-isolate` = 关 |
+| `HOST_RESERVE_CORES` | **auto** | 给宿主机预留物理核心；auto 默认 `max(2, ceil(物理核心数/8))`，多开需求过高时自动缩小预留以保证 VM 先铺不同物理核心。显式 N = 硬预留 N 颗，`0` = 使用整机逻辑 CPU 池（仅 `CPU_ISOLATE=1` 生效） |
+| `QEMU_SERVICE_CPUS` / `QEMU_SVC_CPUS` | **0** | 给 QEMU main/IO/SDL/fb-shm worker 等非 vCPU 辅助线程额外预留 N 个逻辑 CPU；默认 0 保持旧行为。常用 `--svc-cpu`（等价 1）/ `--svc-cpus=N` / `--no-svc-cpus`，长兼容别名 `--qemu-service-cpu` / `--qemu-service-cpus=N` |
 | `DISPLAY` | `:0` | X11 显示，未设默认本地 :0；HEADLESS=1 时忽略 |
 | `EXTRA_ISO=PATH` | - | 副 CDROM（autounattend.xml / 驱动盘 等） |
 | `--iso=PATH` | - | 主启动 ISO（装系统） |
@@ -167,16 +168,18 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 > 16 线程），QEMU 的 vCPU 线程只是普通 CFS 线程，要和几十个编译线程抢同一批核 → guest 该跑
 > 时抢不到 → 卡顿/掉帧/鼠标延迟/ACE 计时异常。`start-vm` 起 VM 后由后台 pinner 等 QMP 报出
 > vCPU 线程号，调 `host-cpu-isolate.sh` 把 QEMU 钉进 cgroup v2 cpuset **独占分区**：
-> - **线程级**——每个 vCPU 独占 1 个逻辑线程（不是整颗物理核）。4vCPU 的 VM 只吃 4 个逻辑
->   线程，宿主机保留其余（本机 8 核 16 线程 → 宿主机留 12 线程，含那 4 核的 SMT 兄弟）。
+> - **线程级**——每个 vCPU 独占 1 个逻辑线程（不是整颗物理核）。4vCPU 的 VM 默认只占
+>   4 个逻辑线程；分配顺序优先遍历可用物理核心的第一个逻辑线程，主线程耗尽后才使用 SMT 兄弟。
 > - 分区 `cpuset.cpus.partition=root` → 这些线程从 root cgroup 的 effective 摘走，宿主机
 >   一切进程（桌面 / 编译）被内核挤到其余线程，**物理上碰不到 VM 的线程**；vCPU 永不被抢占。
-> - **多 VM**：所有实例共用同一 `vmiso` 分区并按已占线程错开（flock 串行）——第 1 台落
->   `4-7`，第 2 台自动落 SMT 兄弟 `12-15`；分区随起停**动态伸缩**，某台停机即把它的线程还给
->   宿主机（`stop-vm.sh` 自动调 `release`）。
+> - **多 VM**：所有实例共用同一 `vmiso` 分区并按已占线程错开（flock 串行）。`HOST_RESERVE_CORES=auto`
+>   会在多开需求较高时自动缩小宿主机预留，让 VM 优先横向铺到不同物理核心。分区随起停**动态伸缩**，
+>   某台停机即把它的线程还给宿主机（`stop-vm.sh` 自动调 `release`）。
+> - **辅助线程专用 CPU**：`--svc-cpu` / `QEMU_SVC_CPUS=1` 会额外分配 1 个逻辑 CPU，并把 QEMU
+>   main loop、IO、SDL、fb-shm worker 等非 vCPU 线程收窄到这组 CPU。vCPU 满载时，显示/IO 路径
+>   不再和 vCPU 抢同一条调度队列；日志应出现 `>> qemu svc`。`--svc-cpus=N` 可加大数量。
 > - 代价：线程级下宿主机用到兄弟线程时与 vCPU 共享物理核执行单元（SMT 争用，**只掉吞吐不掉
->   调度**），换来宿主机多 4 个线程（编译更快）。想要最强隔离（独占整核、无 SMT 共享）可调高
->   `HOST_RESERVE_CORES` 或后续加整核模式。
+>   调度**）。想要更强隔离可调高 `HOST_RESERVE_CORES`，或减少每台 VM 的 `--cpus=` 并配 `--svc-cpu`。
 > - 纯运行态（cgroup v2，不重启），`guest` 完全无感知（零反检测影响）。免密 sudo 走
 >   `/etc/sudoers.d/qemu-cpuiso`（仅 `host-cpu-isolate.sh`）。`--no-cpu-isolate` 关；
 >   查看状态 `sudo deploy/scripts/host-cpu-isolate.sh status`。

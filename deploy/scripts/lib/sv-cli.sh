@@ -30,6 +30,9 @@ while (( $# > 0 )); do
         --no-freq-cap)   CPU_FREQ_CAP=0 ;;
         --cpu-isolate)    CPU_ISOLATE=1 ;;
         --no-cpu-isolate) CPU_ISOLATE=0 ;;
+        --svc-cpu|--qemu-service-cpu)      QEMU_SERVICE_CPUS=1 ;;
+        --svc-cpus=*|--qemu-service-cpus=*) QEMU_SERVICE_CPUS="${1#*=}" ;;
+        --no-svc-cpu|--no-svc-cpus|--no-qemu-service-cpu|--no-qemu-service-cpus) QEMU_SERVICE_CPUS=0 ;;
         --hotkey-capture)     HOTKEY_CAPTURE=1 ;;
         --hotkey-capture=*)   HOTKEY_CAPTURE=1; HOTKEY_KEY="${1#*=}" ;;
         --no-hotkey-capture)  HOTKEY_CAPTURE=0 ;;
@@ -94,12 +97,22 @@ fi
 # (flag: --freq-cap / --no-freq-cap)
 : "${CPU_FREQ_CAP:=1}"
 # CPU 亲和隔离(线程级): 起 VM 后把 QEMU 钉进 cgroup cpuset 独占分区, 每个 vCPU 独占
-# 1 个逻辑线程(非整核)——4vCPU 的 VM 只吃 4 个逻辑线程, 宿主机保留其余(本机 16 线程
-# 留 12, 含 SMT 兄弟)。与宿主机负载(尤其 cargo/rust 编译)在调度层隔离: vCPU 永不被
-# 宿主机抢占。多 VM 自动错开线程、分区随起停伸缩、停机自动还线程。纯运行态(cgroup v2
-# partition, 不重启), 默认开。HOST_RESERVE_CORES(默认2)=永久留给宿主机的物理核数。
+# 1 个逻辑线程(非整核)——4vCPU 的 VM 只吃 4 个逻辑线程。分配器自动读取 host 拓扑，
+# 先把不同 VM 横向铺到不同物理核心，物理核心主线程用尽后才使用 SMT 兄弟线程。
+# 与宿主机负载(尤其 cargo/rust 编译)在调度层隔离: vCPU 永不被宿主机抢占。
+# 多 VM 自动错开线程、分区随起停伸缩、停机自动还线程。纯运行态(cgroup v2
+# partition, 不重启), 默认开。HOST_RESERVE_CORES=auto 默认自动预留
+# max(2, ceil(物理核心数/8))，并会在多开需求过高时弹性缩小；显式 N 表示硬预留。
+# 设 0 表示使用整机逻辑 CPU 池。
 # (flag: --cpu-isolate / --no-cpu-isolate)
 : "${CPU_ISOLATE:=1}"
+# QEMU 辅助线程专用逻辑 CPU 数：默认 0，保持旧行为；显式启用后，root helper 会额外
+# 给本 VM 分配 N 个逻辑 CPU，并把 QEMU main loop / IO / SDL / fb-shm worker 等非 vCPU
+# 线程收窄到这些 CPU 上。这样 vCPU 仍独占自己的单核，显示/IO 线程也不再和满载 vCPU
+# 抢同一条调度队列。常用：--svc-cpu（等价 1）或 --svc-cpus=2；长别名
+# --qemu-service-cpu / --qemu-service-cpus=N 保留兼容。环境变量也可用短名
+# QEMU_SVC_CPUS=1，显式 QEMU_SERVICE_CPUS 优先级更高。
+: "${QEMU_SERVICE_CPUS:=${QEMU_SVC_CPUS:-0}}"
 : "${HOTKEY_CAPTURE:=0}"
 : "${HOTKEY_KEY:=F4}"
 : "${HOTKEY_SOCK:=/tmp/qemu-stealth-${INSTANCE}.hotkey}"
@@ -142,6 +155,13 @@ if [[ "$FB_SHM" == "1" ]]; then
         echo "ERROR: FB_SHM_ROI 必须是 x,y,w,h 整数四元组 (实际: '$FB_SHM_ROI')" >&2
         exit 2
     fi
+fi
+
+# QEMU_SERVICE_CPUS 是隔离层参数，不影响 QEMU argv；DRY_RUN 也需要校验，防止错误配置
+# 在真正启动时才暴露。0 表示关闭辅助线程专用 CPU，保持历史行为。
+if ! [[ "$QEMU_SERVICE_CPUS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: QEMU_SERVICE_CPUS 必须是非负整数 (实际: '$QEMU_SERVICE_CPUS')" >&2
+    exit 2
 fi
 
 # DISPLAY 默认 :0（典型本地 X11 会话）；从 SSH 终端运行时若未 export DISPLAY，

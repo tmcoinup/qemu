@@ -90,14 +90,23 @@
 #     CPU_ISOLATE=1        起 VM 后把 QEMU 钉进 cgroup cpuset 独占分区（默认 1，线程级）
 #                          (flag: --cpu-isolate / --no-cpu-isolate)
 #                          每个 vCPU 独占 1 个逻辑线程(不是整颗物理核)：4vCPU 的 VM 只
-#                          吃 4 个逻辑线程，宿主机保留其余(本机 16 线程→留 12，含 SMT
-#                          兄弟)。频率封顶只管「跑多快」，这个管「vCPU 抢不抢得到核」——
+#                          吃 4 个逻辑线程；默认自动给宿主机预留约 12.5% 物理核心(至少 2 个)，
+#                          其余逻辑 CPU 进入自动分配池，分配顺序物理核心优先、SMT 兄弟靠后。
+#                          频率封顶只管「跑多快」，这个管「vCPU 抢不抢得到核」——
 #                          宿主机满载(cargo/rust 编译塞满全核)时治 VM 卡顿/掉帧/ACE 计时
 #                          异常的真正旋钮：vCPU 独占自己的线程、永不被宿主机抢占。多 VM
-#                          自动错开(第2台落 SMT 兄弟线程)、分区随起停伸缩、VM 停机自动还
+#                          自动错开到不同物理核心；主线程用尽后才落 SMT 兄弟。分区随起停伸缩、VM 停机自动还
 #                          线程。纯运行态(cgroup v2 partition，不重启)；需 host-cpu-isolate.sh
 #                          的 sudo NOPASSWD(同 host-tune)。
-#     HOST_RESERVE_CORES=2 永久保留给宿主机、任何情况都不被 VM 吃的最低物理核数(默认 2)。
+#     HOST_RESERVE_CORES=auto 给宿主机预留物理核心。auto 会按多开需求弹性缩小预留，
+#                          优先让 VM 横向铺到不同物理核心；显式 N 表示硬预留 N 颗。
+#                          默认自动: max(2, ceil(物理核心数/8))；设 0 可使用整机逻辑 CPU 池。
+#     QEMU_SERVICE_CPUS=0  给 QEMU 辅助线程额外预留逻辑 CPU 数（默认 0，保持旧行为）。
+#                          启用后 root helper 会把 main/IO/SDL/fb-shm worker 等非 vCPU 线程
+#                          收窄到这组 CPU，避免它们和满载 vCPU 抢同一条调度队列。
+#                          短 flag: --svc-cpu(=1) / --svc-cpus=N / --no-svc-cpus；
+#                          长兼容: --qemu-service-cpu / --qemu-service-cpus=N。
+#                          短环境变量: QEMU_SVC_CPUS=1。
 #     HOTKEY_CAPTURE=1     SDL 窗口里按 HOTKEY_KEY 时从 fb-shm 抓 PNG（默认 0）
 #                          (flag: --hotkey-capture[=KEY] / --no-hotkey-capture)
 #     HOTKEY_KEY=F4        触发键名（X keysym），默认 F4

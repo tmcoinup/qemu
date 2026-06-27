@@ -204,6 +204,44 @@ test_custom_image_root_dry_run() {
         || fail "dry-run created VM directory under custom IMAGE_ROOT"
 }
 
+test_qemu_service_cpu_flags_dry_run() {
+    local out="$1"
+
+    DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9879 \
+        "$START_VM" --no-sdl --no-fb-shm --no-bridge --svc-cpu > "$out"
+
+    DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9880 \
+        "$START_VM" --no-sdl --no-fb-shm --no-bridge --svc-cpus=2 > "$out"
+
+    DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9881 \
+        "$START_VM" --no-sdl --no-fb-shm --no-bridge --no-svc-cpus > "$out"
+
+    QEMU_SVC_CPUS=1 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9882 \
+        "$START_VM" --no-sdl --no-fb-shm --no-bridge > "$out"
+
+    DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9883 \
+        "$START_VM" --no-sdl --no-fb-shm --no-bridge --qemu-service-cpu > "$out"
+
+    if DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9884 \
+        "$START_VM" --no-sdl --no-fb-shm --no-bridge --svc-cpus=bad > "$out" 2>&1
+    then
+        fail "invalid --svc-cpus value should fail"
+    fi
+    grep -F -- "QEMU_SERVICE_CPUS 必须是非负整数" "$out" >/dev/null \
+        || fail "invalid --svc-cpus did not explain the validation error"
+}
+
+test_cpu_isolate_scripts_parse() {
+    bash -n "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh"
+    bash -n "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh"
+    bash -n "$REPO_ROOT/deploy/scripts/host-cpu-isolate.sh"
+
+    grep -F -- "\"\${QEMU_SERVICE_CPUS:-0}\" <<'PY' &" "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
+        || fail "cpu pinner must pass QEMU_SERVICE_CPUS as argv, not rely on export"
+    grep -F -- 'sys.argv[5]' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
+        || fail "cpu pinner Python must read service CPU count from argv"
+}
+
 main() {
     require_executable "$START_VM"
     require_executable "$QEMU"
@@ -224,6 +262,8 @@ main() {
     test_qmp_multi_accepts_two_clients "$multi_sock" "$multi_err"
     test_proxy_dry_run_uses_native_qmp_multi "$out"
     test_custom_image_root_dry_run "$image_root" "$out"
+    test_qemu_service_cpu_flags_dry_run "$out"
+    test_cpu_isolate_scripts_parse
     echo "PASS: start-vm NVMe storage portability path"
 }
 

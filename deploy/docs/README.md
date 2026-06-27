@@ -211,7 +211,7 @@ deploy/
 │   ├── reroll-identity.sh          # 重置硬件身份
 │   ├── stealth-lib.sh              # 随机池（被 start-vm.sh 调用）
 │   ├── host-performance.sh         # 主机调优: governor=performance + halt_poll + THP defrag=never 压计时抖动(ACE 13-131130-8) + CPU_MAX_KHZ 按伪装 CPU 封顶频率防超规格; start-vm 默认 HOST_TUNE=1/CPU_FREQ_CAP=1 自动跑. memfd 后端不预留 hugepage
-│   ├── host-cpu-isolate.sh         # CPU 亲和隔离(root助手): cgroup v2 cpuset 独占分区, 线程级给 vCPU 绑核(4vCPU=4 逻辑线程), 治宿主机满载(cargo 编译)时 VM 卡顿; start-vm 默认 CPU_ISOLATE=1 自动跑(后台 pinner lib/sv-cpupin.sh), stop-vm 自动 release 还核
+│   ├── host-cpu-isolate.sh         # CPU 亲和隔离(root助手): cgroup v2 cpuset 独占分区, 线程级给 vCPU 绑核(4vCPU=4 逻辑线程), 可用 --svc-cpu 给 QEMU main/IO/fb-shm 辅助线程留核; start-vm 默认 CPU_ISOLATE=1 自动跑(后台 pinner lib/sv-cpupin.sh), stop-vm 自动 release 还核
 │   ├── host-fix-gpu-devpkey.sh     # offline 修 DEVPKEY ACL（少用）
 │   ├── qmp-frame.sh                # QMP 截图 / sendkey
 │   ├── rdp-connect.sh              # 用 xfreerdp 进 guest

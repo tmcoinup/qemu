@@ -148,17 +148,10 @@ else
     done
 fi
 
-# 热键截图守护进程随 VM 收摊：精确匹配 "hotkey-capture.py <实例号>"
-# （避免误杀其他实例），再清掉它的触发 socket。
-HOTKEY_SOCK="/tmp/qemu-stealth-${INSTANCE}.hotkey"
-if pkill -f "hotkey-capture\.py ${INSTANCE}\b" 2>/dev/null; then
-    echo "→ hotkey-capture (instance ${INSTANCE}) 已停止"
-fi
-
 # 仅在确认 VM 已停后清 socket；若仍存活则保留 QMP socket 供重试。
 if vm_alive; then
     echo "⚠ VM 仍未停止，保留 QMP socket 供重试，不做清理" >&2
-    rm -f "$MON" "$HOTKEY_SOCK" 2>/dev/null || true
+    rm -f "$MON" 2>/dev/null || true
     exit 1
 fi
 
@@ -194,5 +187,5 @@ if [[ -x "$HERE/host-cpu-isolate.sh" ]]; then
     sudo -n "$HERE/host-cpu-isolate.sh" release "$INSTANCE" 2>/dev/null || true
 fi
 
-rm -f "$QMP" "$MON" "$HOTKEY_SOCK" 2>/dev/null || true
+rm -f "$QMP" "$MON" 2>/dev/null || true
 echo "instance=${INSTANCE} stopped"

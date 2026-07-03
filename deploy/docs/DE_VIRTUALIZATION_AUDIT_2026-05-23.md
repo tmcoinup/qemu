@@ -123,9 +123,8 @@
 ```bash
 git diff --check
 find deploy/scripts -maxdepth 2 \( -name '*.sh' -o -name 'start-vm.sh' -o -name 'stop-vm.sh' \) -print0 | xargs -0 -n1 bash -n
-python3 -m py_compile deploy/scripts/lib/devpkey-prefixup.py deploy/scripts/lib/devpkey-patch.py deploy/scripts/qmp-proxy.py deploy/scripts/hotkey-capture.py
+python3 -m py_compile deploy/scripts/lib/devpkey-prefixup.py deploy/scripts/lib/devpkey-patch.py deploy/scripts/qmp-proxy.py
 ninja -C build qemu-system-x86_64 qemu-edid
-python3 deploy/scripts/tests/test_hotkey_capture.py
 deploy/scripts/verify-stealth.sh
 DRY_RUN=1 TPM=1 BRIDGE= INSTANCE=9876 deploy/scripts/start-vm.sh --no-sdl --no-fb-shm
 timeout 5 build/qemu-system-x86_64 -machine q35,accel=tcg -nodefaults -display none -S -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0
@@ -141,7 +140,6 @@ timeout 5 build/qemu-system-x86_64 -machine q35,accel=tcg -nodefaults -display n
 | Bash 语法检查 | 通过 |
 | Python `py_compile` | 通过 |
 | 构建 `qemu-system-x86_64 qemu-edid` | 通过 |
-| hotkey 单测 | 6 项通过；有一条预期的缺 socket unittest 日志 |
 | `verify-stealth.sh` | 15 项通过，无原 TCG feature warning |
 | DRY_RUN 新实例 | 未创建 VM_DIR/profile/disk/OVMF VARS，未留下 socket |
 | USB HID smoke | kbd/mouse/tablet 均未断言崩溃；最终由 timeout 终止，符合 `-S` 预期 |

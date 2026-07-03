@@ -5,7 +5,7 @@
 #
 # 为什么放后台: start-vm 最终 exec 进 QEMU, 本函数无法在同进程里等 QEMU 起来;
 # 真正的绑核要等 QMP 能查到 vCPU 线程号, 所以 fork 一个后台 pinner(与 ISO
-# auto-key / hotkey-capture 同款 `&` 模式), 它轮询 QMP 拿到 vCPU tid 后再调
+# auto-key 同款 `&` 模式), 它轮询 QMP 拿到 vCPU tid 后再调
 # host-cpu-isolate.sh(sudo NOPASSWD) 做 cpuset 分区 + 1:1 绑核。若启动时传
 # QEMU_SERVICE_CPUS / QEMU_SVC_CPUS / --svc-cpus=N，则额外给 QEMU 非 vCPU 辅助线程
 # 分配专用逻辑 CPU，避免 fb-shm/SDL/IO 路径和满载 vCPU 抢调度。

@@ -73,7 +73,7 @@ DCL，与 `-display sdl/none/...` 完全解耦 —— 所以默认两条通道�
 # 最简（默认 SDL 窗口 + fb-shm 推流并存，可同时直接玩 + 录屏）
 deploy/scripts/start-vm.sh 1
 # 另开一个终端开始拉流：
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output /tmp/vm1.mp4 --encoder libx264 --preset veryfast
 
 # 后台 daemon：关 SDL，仅 fb-shm 推流
@@ -81,7 +81,7 @@ deploy/scripts/start-vm.sh 1 --no-sdl
 
 # 远程登录 + 推流：VNC 看实时画面，fb-shm 推 RTMP
 deploy/scripts/start-vm.sh 1 --headless
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M
 
 # 只推 ROI（省 CPU/带宽）
@@ -281,9 +281,9 @@ nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
 nohup deploy/scripts/start-vm.sh 2 > /tmp/qemu2.log 2>&1 &
 
 # 给两台分别拉一路 NVENC 推流（不同 RTMP key / UDP 端口）
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M &
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-2.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-2.fb \
     --output 'rtmp://ingest/live/vm2' --encoder h264_nvenc --bitrate 6M &
 
 # 或者用编排器一次起多 VM 消费端

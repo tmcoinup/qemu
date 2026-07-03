@@ -3,10 +3,10 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Linux-only `-display fb-shm[,id=...]` backend.  Exposes the guest
- * framebuffer to external processes through a single memfd plus an
- * eventfd doorbell, with optional rectangular region-of-interest
- * cropping.  See include/ui/fb-shm-abi.h for the wire format.
+ * Cross-host `-display fb-shm[,id=...]` backend.  Exposes the guest
+ * framebuffer to external processes through shared memory plus a host-native
+ * wakeup primitive, with optional rectangular region-of-interest cropping.
+ * See include/ui/fb-shm-abi.h for the wire format.
  *
  * Pipeline overview:
  *
@@ -14,13 +14,13 @@
  *           |
  *           v
  *      this backend                        +---------- consumer ----------+
- *      (DisplayChangeListener)             |  recvmsg() SCM_RIGHTS        |
- *           |                              |   memfd, eventfd             |
+ *      (DisplayChangeListener)             |  Linux: SCM_RIGHTS fds       |
+ *           |                              |  Win32: mapping/event names  |
  *           |  pixman_image_composite()    |  mmap(memfd)                 |
  *           |  (ROI crop + format convert) |  poll(eventfd)               |
  *           v                              |  seqlock read of buf[i]      |
- *      memfd[buf[i]]  <-- atomic seqlock --|  pipe -> ffmpeg / NVENC      |
- *      eventfd kick   ---------------------+  (RTMP / UDP / RTP / file)   |
+ *      shm[buf[i]]    <-- atomic seqlock --|  pipe -> ffmpeg / NVENC      |
+ *      doorbell       ---------------------+  (RTMP / UDP / RTP / file)   |
  *                                          +------------------------------+
  *
  * The DCL is refresh-driven: graphic_hw_update() is invoked at the
@@ -48,11 +48,15 @@
 #include "ui/egl-helpers.h"
 #endif
 
-#include <sys/eventfd.h>
-#include <sys/mman.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <linux/memfd.h>
+#ifndef _WIN32
+# include <sys/eventfd.h>
+# include <sys/mman.h>
+# include <sys/socket.h>
+# include <sys/un.h>
+# include <linux/memfd.h>
+#else
+# include <windows.h>
+#endif
 
 #ifdef CONFIG_OPENGL
 #define FB_SHM_GL_PBO_COUNT 3
@@ -88,7 +92,11 @@ QEMU_BUILD_BUG_ON(FB_SHM_BUF_COUNT < 2);
 #define FB_SHM_MAX_RATE       240u
 #define FB_SHM_MIN_RATE       1u
 #define FB_SHM_MAX_DIM        16384u
-#define FB_SHM_DEFAULT_RUNDIR "/run/qemu"
+#ifndef _WIN32
+# define FB_SHM_DEFAULT_RUNDIR "/run/qemu"
+#else
+# define FB_SHM_DEFAULT_RUNDIR "."
+#endif
 
 typedef struct FbShmClient FbShmClient;
 typedef struct FbShmDisplay FbShmDisplay;
@@ -98,8 +106,13 @@ struct FbShmClient {
     int fd;
     bool hello_done;            /* HELLO seen → eligible for broadcasts   */
     bool wants_resize_notify;   /* HELLO opted into NOTIFY_RESIZED        */
+    bool wants_win32_names;      /* HELLO requested Win32 name payload     */
     bool linked;                /* present in owner->clients              */
     bool dropping;              /* fd removed; waiting for deferred free  */
+#ifdef _WIN32
+    HANDLE wake_event;           /* 每个客户端独立事件，避免多消费者抢同一 doorbell */
+    char *wake_event_name;
+#endif
     QLIST_ENTRY(FbShmClient) next;
 };
 
@@ -117,8 +130,6 @@ struct FbShmDisplay {
     bool blend_cursor;            /* reserved for future use     */
 
     /* SHM state */
-    int memfd;
-    int wake_eventfd;
     void *shm;
     size_t map_size;
     FbShmHeader *hdr;
@@ -131,6 +142,15 @@ struct FbShmDisplay {
     int32_t cur_roi_x, cur_roi_y;
     uint64_t frame_seq;
     bool surface_present;
+
+#ifndef _WIN32
+    int memfd;
+    int wake_eventfd;
+#else
+    HANDLE map_handle;
+    char *map_name;
+    uint32_t map_generation;
+#endif
 
 #ifdef CONFIG_OPENGL
     /*
@@ -496,19 +516,33 @@ static void fb_shm_release_mapping(FbShmDisplay *d)
     for (uint32_t i = 0; i < FB_SHM_BUF_COUNT; i++) {
         d->slot[i] = NULL;
     }
+#ifndef _WIN32
     if (d->shm && d->shm != MAP_FAILED) {
         munmap(d->shm, d->map_size);
     }
+#else
+    if (d->shm) {
+        UnmapViewOfFile(d->shm);
+    }
+#endif
     d->shm = NULL;
     d->hdr = NULL;
     d->map_size = 0;
     d->cap_w = 0;
     d->cap_h = 0;
     d->cap_buf_size = 0;
+#ifndef _WIN32
     if (d->memfd >= 0) {
         close(d->memfd);
         d->memfd = -1;
     }
+#else
+    if (d->map_handle) {
+        CloseHandle(d->map_handle);
+        d->map_handle = NULL;
+    }
+    g_clear_pointer(&d->map_name, g_free);
+#endif
 }
 
 static int fb_shm_apply_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
@@ -596,6 +630,36 @@ static int fb_shm_apply_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
 
 /* Allocate a backing store sized for the full source surface, not the ROI.
  * ROI changes can then update only the header and local pixman views. */
+#ifdef _WIN32
+static char *fb_shm_win32_safe_id(const char *id)
+{
+    GString *s = g_string_new(NULL);
+
+    /*
+     * Win32 内核对象名把反斜杠当命名空间分隔符。这里把 id 收窄到
+     * ASCII 安全集合，保证 profile/实例名来自外部输入时也不会越过
+     * Local\qemu-fb-shm-* 这个命名空间。
+     */
+    for (const char *p = id && *id ? id : "default"; *p; p++) {
+        if (g_ascii_isalnum(*p) || *p == '-' || *p == '_') {
+            g_string_append_c(s, *p);
+        } else {
+            g_string_append_c(s, '_');
+        }
+    }
+    return g_string_free(s, FALSE);
+}
+
+static char *fb_shm_win32_mapping_name(FbShmDisplay *d)
+{
+    g_autofree char *safe_id = fb_shm_win32_safe_id(d->id);
+
+    d->map_generation++;
+    return g_strdup_printf("Local\\qemu-fb-shm-%s-map-%u",
+                           safe_id, d->map_generation);
+}
+#endif
+
 static int fb_shm_allocate_mapping(FbShmDisplay *d, uint32_t cap_w,
                                    uint32_t cap_h, Error **errp)
 {
@@ -611,6 +675,7 @@ static int fb_shm_allocate_mapping(FbShmDisplay *d, uint32_t cap_w,
     size_t buf_size = fb_shm_frame_bytes(cap_w, cap_h);
     size_t map_size = FB_SHM_HEADER_SIZE + (size_t)FB_SHM_BUF_COUNT * buf_size;
 
+#ifndef _WIN32
     int fd = memfd_create("qemu-fb-shm", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (fd < 0) {
         error_setg_errno(errp, errno, "fb-shm: memfd_create failed");
@@ -630,9 +695,34 @@ static int fb_shm_allocate_mapping(FbShmDisplay *d, uint32_t cap_w,
         close(fd);
         return -1;
     }
+#else
+    g_autofree char *map_name = fb_shm_win32_mapping_name(d);
+    HANDLE map_handle = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL,
+                                           PAGE_READWRITE,
+                                           (DWORD)(map_size >> 32),
+                                           (DWORD)(map_size & 0xffffffffu),
+                                           map_name);
+    if (!map_handle) {
+        error_setg_win32(errp, GetLastError(),
+                         "fb-shm: CreateFileMappingA failed");
+        return -1;
+    }
+    void *p = MapViewOfFile(map_handle, FILE_MAP_ALL_ACCESS, 0, 0, map_size);
+    if (!p) {
+        error_setg_win32(errp, GetLastError(),
+                         "fb-shm: MapViewOfFile failed");
+        CloseHandle(map_handle);
+        return -1;
+    }
+#endif
     memset(p, 0, FB_SHM_HEADER_SIZE);
 
+#ifndef _WIN32
     d->memfd = fd;
+#else
+    d->map_handle = map_handle;
+    d->map_name = g_steal_pointer(&map_name);
+#endif
     d->shm = p;
     d->map_size = map_size;
     d->hdr = (FbShmHeader *)p;
@@ -714,6 +804,13 @@ static void fb_shm_client_drop(FbShmClient *c)
         qemu_set_fd_handler(fd, NULL, NULL, NULL);
         close(fd);
     }
+#ifdef _WIN32
+    if (c->wake_event) {
+        CloseHandle(c->wake_event);
+        c->wake_event = NULL;
+    }
+    g_clear_pointer(&c->wake_event_name, g_free);
+#endif
     if (c->linked) {
         QLIST_REMOVE(c, next);
         c->linked = false;
@@ -729,8 +826,9 @@ static void fb_shm_client_free_bh(void *opaque)
     g_free(c);
 }
 
-static int fb_shm_send_fds(int fd, const FbShmCtlAck *ack,
-                           const int *fds, int nfds)
+#ifndef _WIN32
+static int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
+                           const FbShmCtlAck *ack, bool include_handles)
 {
     struct iovec iov = { .iov_base = (void *)ack, .iov_len = sizeof(*ack) };
     char cbuf[CMSG_SPACE(sizeof(int) * 2)];
@@ -738,7 +836,10 @@ static int fb_shm_send_fds(int fd, const FbShmCtlAck *ack,
         .msg_iov = &iov,
         .msg_iovlen = 1,
     };
-    if (fds && nfds > 0) {
+    int fds[2] = { d->memfd, d->wake_eventfd };
+    int nfds = (include_handles && d->memfd >= 0 && d->wake_eventfd >= 0) ? 2 : 0;
+
+    if (nfds > 0) {
         msg.msg_control = cbuf;
         msg.msg_controllen = CMSG_SPACE(sizeof(int) * nfds);
         struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
@@ -749,10 +850,87 @@ static int fb_shm_send_fds(int fd, const FbShmCtlAck *ack,
     }
     ssize_t r;
     do {
-        r = sendmsg(fd, &msg, MSG_NOSIGNAL);
+        r = sendmsg(c->fd, &msg, MSG_NOSIGNAL);
     } while (r < 0 && errno == EINTR);
     return (r == (ssize_t)sizeof(*ack)) ? 0 : -1;
 }
+#else
+static int fb_shm_send_bytes(int fd, const void *buf, size_t len)
+{
+    const uint8_t *p = buf;
+
+    while (len > 0) {
+        ssize_t r;
+
+        do {
+            r = send(fd, (const char *)p, len, 0);
+        } while (r < 0 && errno == EINTR);
+        if (r <= 0) {
+            return -1;
+        }
+        p += r;
+        len -= r;
+    }
+    return 0;
+}
+
+static char *fb_shm_win32_event_name(FbShmDisplay *d, FbShmClient *c)
+{
+    g_autofree char *safe_id = fb_shm_win32_safe_id(d->id);
+
+    return g_strdup_printf("Local\\qemu-fb-shm-%s-client-%p", safe_id, c);
+}
+
+static bool fb_shm_win32_ensure_client_event(FbShmDisplay *d, FbShmClient *c,
+                                             Error **errp)
+{
+    if (c->wake_event) {
+        return true;
+    }
+
+    c->wake_event_name = fb_shm_win32_event_name(d, c);
+    c->wake_event = CreateEventA(NULL, FALSE, FALSE, c->wake_event_name);
+    if (!c->wake_event) {
+        error_setg_win32(errp, GetLastError(),
+                         "fb-shm: CreateEventA failed");
+        g_clear_pointer(&c->wake_event_name, g_free);
+        return false;
+    }
+    return true;
+}
+
+static int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
+                           const FbShmCtlAck *ack, bool include_handles)
+{
+    if (fb_shm_send_bytes(c->fd, ack, sizeof(*ack)) < 0) {
+        return -1;
+    }
+
+    if (!include_handles || !c->wants_win32_names || !d->map_name ||
+        !c->wake_event_name || ack->status != FB_SHM_CTL_OK) {
+        return 0;
+    }
+
+    FbShmWin32Names names = {
+        .magic = FB_SHM_MAGIC,
+        .version = FB_SHM_VERSION,
+        .size = sizeof(names),
+    };
+
+    /*
+     * 固定宽度 payload 让原生消费端不需要 JSON/PowerShell/Python。名称过长
+     * 直接截断会导致 OpenFileMapping/OpenEvent 失败，因此这里显式检查。
+     */
+    if (g_strlcpy(names.mapping_name, d->map_name,
+                  sizeof(names.mapping_name)) >= sizeof(names.mapping_name) ||
+        g_strlcpy(names.event_name, c->wake_event_name,
+                  sizeof(names.event_name)) >= sizeof(names.event_name)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return fb_shm_send_bytes(c->fd, &names, sizeof(names));
+}
+#endif
 
 static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
                                 const FbShmCtlReq *req)
@@ -768,6 +946,8 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
     c->hello_done = true;
     c->wants_resize_notify =
         (req->flags & FB_SHM_HELLO_F_RESIZE_NOTIFY) != 0;
+    c->wants_win32_names =
+        (req->flags & FB_SHM_HELLO_F_WIN32_NAMES) != 0;
 
     FbShmCtlAck ack = {
         .magic  = FB_SHM_MAGIC,
@@ -779,21 +959,35 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
         .fourcc = FB_SHM_FOURCC_BGR0,
         .bpp    = 32,
     };
-    int fds[2] = { d->memfd, d->wake_eventfd };
-    int nfds = (d->memfd >= 0 && d->wake_eventfd >= 0) ? 2 : 0;
-    if (fb_shm_send_fds(c->fd, &ack, fds, nfds) < 0) {
+#ifdef _WIN32
+    if (ack.status == FB_SHM_CTL_OK) {
+        Error *err = NULL;
+
+        if (!fb_shm_win32_ensure_client_event(d, c, &err)) {
+            warn_report_err(err);
+            ack.status = FB_SHM_CTL_EBUSY;
+        }
+    }
+#endif
+    if (fb_shm_send_ack(d, c, &ack, true) < 0) {
         fb_shm_client_drop(c);
     }
 }
 
-/* Push the current { memfd, wake_eventfd } pair to every HELLO-completed
+/* Push the current backing-store descriptor/name to every HELLO-completed
  * client that opted into resize notifications.  Called from fb_shm_allocate
  * after the new mapping is fully published.  Failed sends drop the client. */
 static void fb_shm_broadcast_resize(FbShmDisplay *d)
 {
+#ifndef _WIN32
     if (d->memfd < 0 || d->wake_eventfd < 0) {
         return;
     }
+#else
+    if (!d->map_name) {
+        return;
+    }
+#endif
     FbShmCtlAck ack = {
         .magic  = FB_SHM_MAGIC,
         .op     = FB_SHM_CTL_NOTIFY_RESIZED,
@@ -804,7 +998,6 @@ static void fb_shm_broadcast_resize(FbShmDisplay *d)
         .fourcc = FB_SHM_FOURCC_BGR0,
         .bpp    = 32,
     };
-    int fds[2] = { d->memfd, d->wake_eventfd };
     int recipients = 0;
     FbShmClient *c, *cn;
     QLIST_FOREACH_SAFE(c, &d->clients, next, cn) {
@@ -812,7 +1005,12 @@ static void fb_shm_broadcast_resize(FbShmDisplay *d)
             !c->hello_done || !c->wants_resize_notify) {
             continue;
         }
-        if (fb_shm_send_fds(c->fd, &ack, fds, 2) < 0) {
+#ifdef _WIN32
+        if (!c->wake_event_name) {
+            continue;
+        }
+#endif
+        if (fb_shm_send_ack(d, c, &ack, true) < 0) {
             warn_report("fb-shm: NOTIFY_RESIZED send failed (errno=%d %s); "
                         "dropping client fd=%d",
                         errno, strerror(errno), c->fd);
@@ -838,7 +1036,7 @@ static void fb_shm_handle_set_roi(FbShmDisplay *d, FbShmClient *c,
     if (req->w > FB_SHM_MAX_DIM || req->h > FB_SHM_MAX_DIM) {
         FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                             .status = FB_SHM_CTL_EINVAL };
-        if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+        if (fb_shm_send_ack(d, c, &ack, false) < 0) {
             fb_shm_client_drop(c);
         }
         return;
@@ -853,7 +1051,7 @@ static void fb_shm_handle_set_roi(FbShmDisplay *d, FbShmClient *c,
                         .shm_size = (uint32_t)d->map_size,
                         .width = d->cur_w, .height = d->cur_h,
                         .fourcc = FB_SHM_FOURCC_BGR0, .bpp = 32 };
-    if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+    if (fb_shm_send_ack(d, c, &ack, false) < 0) {
         fb_shm_client_drop(c);
     }
 }
@@ -876,7 +1074,7 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
 
     FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                         .status = FB_SHM_CTL_OK };
-    if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+    if (fb_shm_send_ack(d, c, &ack, false) < 0) {
         fb_shm_client_drop(c);
     }
 }
@@ -893,7 +1091,7 @@ static void fb_shm_client_read(void *opaque)
     }
 
     do {
-        r = recv(c->fd, &req, sizeof(req), MSG_DONTWAIT);
+        r = recv(c->fd, (char *)&req, sizeof(req), 0);
     } while (r < 0 && errno == EINTR);
     if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
         fb_shm_client_drop(c);
@@ -902,7 +1100,7 @@ static void fb_shm_client_read(void *opaque)
     if (r != (ssize_t)sizeof(req) || req.magic != FB_SHM_MAGIC) {
         FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = 0,
                             .status = FB_SHM_CTL_EINVAL };
-        if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+        if (fb_shm_send_ack(d, c, &ack, false) < 0) {
             fb_shm_client_drop(c);
         }
         return;
@@ -924,7 +1122,7 @@ static void fb_shm_client_read(void *opaque)
     default: {
         FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req.op,
                             .status = FB_SHM_CTL_EUNSUPPORTED };
-        if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+        if (fb_shm_send_ack(d, c, &ack, false) < 0) {
             fb_shm_client_drop(c);
         }
         break;
@@ -937,7 +1135,7 @@ static void fb_shm_listener_accept(void *opaque)
     FbShmDisplay *d = opaque;
     int cfd;
     do {
-        cfd = accept4(d->listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+        cfd = qemu_accept(d->listen_fd, NULL, NULL);
     } while (cfd < 0 && errno == EINTR);
     if (cfd < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -945,6 +1143,7 @@ static void fb_shm_listener_accept(void *opaque)
         }
         return;
     }
+    qemu_socket_set_nonblock(cfd);
     FbShmClient *c = g_new0(FbShmClient, 1);
     c->owner = d;
     c->fd = cfd;
@@ -955,38 +1154,21 @@ static void fb_shm_listener_accept(void *opaque)
 
 static int fb_shm_open_listener(FbShmDisplay *d, Error **errp)
 {
-    /* Make sure /run/qemu exists when using the default path. */
+    /* Make sure the parent directory exists when using a pathname socket. */
     g_autofree char *parent = g_path_get_dirname(d->sock_path);
     if (g_mkdir_with_parents(parent, 0750) < 0 && errno != EEXIST) {
         warn_report("fb-shm: cannot create %s: %s", parent, strerror(errno));
     }
 
-    struct sockaddr_un sa = { .sun_family = AF_UNIX };
-    if (strlen(d->sock_path) >= sizeof(sa.sun_path)) {
-        error_setg(errp, "fb-shm: socket path too long: %s", d->sock_path);
-        return -1;
-    }
-    g_strlcpy(sa.sun_path, d->sock_path, sizeof(sa.sun_path));
-    unlink(sa.sun_path);
-
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int fd = unix_listen(d->sock_path, errp);
     if (fd < 0) {
-        error_setg_errno(errp, errno, "fb-shm: socket() failed");
         return -1;
     }
-    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        error_setg_errno(errp, errno, "fb-shm: bind(%s) failed", sa.sun_path);
-        close(fd);
-        return -1;
-    }
+    qemu_socket_set_nonblock(fd);
+#ifndef _WIN32
     /* World-readable so non-root consumers can connect; tighten if needed. */
-    chmod(sa.sun_path, 0660);
-    if (listen(fd, 16) < 0) {
-        error_setg_errno(errp, errno, "fb-shm: listen() failed");
-        close(fd);
-        unlink(sa.sun_path);
-        return -1;
-    }
+    chmod(d->sock_path, 0660);
+#endif
     d->listen_fd = fd;
     qemu_set_fd_handler(fd, fb_shm_listener_accept, NULL, d);
     return 0;
@@ -1088,7 +1270,8 @@ static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
     d->frame_seq++;
     qatomic_store_release(&hdr->frame_seq, d->frame_seq);
 
-    /* doorbell */
+#ifndef _WIN32
+    /* Linux doorbell：eventfd 计数器，慢消费端只会跳帧，不会反压 QEMU。 */
     if (d->wake_eventfd >= 0) {
         uint64_t v = 1;
         ssize_t r;
@@ -1097,6 +1280,18 @@ static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
         } while (r < 0 && errno == EINTR);
         (void)r;   /* full ringbuffer just means consumer hasn't drained */
     }
+#else
+    /*
+     * Win32 doorbell：每个客户端独立 auto-reset event。共享内存仍是同一块，
+     * 但唤醒不共享，保证多路 RTMP/本地归档同时挂载时互不抢信号。
+     */
+    FbShmClient *c;
+    QLIST_FOREACH(c, &d->clients, next) {
+        if (!c->dropping && c->hello_done && c->wake_event) {
+            SetEvent(c->wake_event);
+        }
+    }
+#endif
 }
 
 #ifdef CONFIG_OPENGL
@@ -1174,9 +1369,17 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     int sy1 = (int)d->gl_y + ry;
     int sy2 = sy1 + (int)rh;
     if (d->gl_y0_top) {
-        int top = sy1;
-        sy1 = sy2;
-        sy2 = top;
+        /*
+         * 上原点纹理：源 Y 必须绕 backing 高度做镜像，而不能只交换 sy1/sy2。
+         * 简单交换仅在“整高 ROI（gl_y+ry==0 且 rh==backing_h）”时恰好成立；
+         * 对任意带 y 偏移的裁剪 ROI，交换会读到偏移 2*(gl_y+ry) 的错误条带，
+         * 使裁剪结果底部残留 (backing_h - 2*(gl_y+ry) - rh) 像素的过期桌面。
+         * 反射后 dst 顶行对应 ROI 顶行、dst 底行对应 ROI 底行；对整高 ROI 与旧
+         * 交换逐字节等价（(BH,0)），因此不改变既有正确路径的画面朝向。
+         */
+        int bh = (int)d->gl_backing_h;
+        sy1 = bh - ((int)d->gl_y + ry);
+        sy2 = bh - ((int)d->gl_y + ry + (int)rh);
     }
 
     int pbo_status = fb_shm_gl_pbo_issue(d, rw, rh, sx1, sy1, sx2, sy2);
@@ -1323,8 +1526,10 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
 
     FbShmDisplay *d = g_new0(FbShmDisplay, 1);
     QLIST_INIT(&d->clients);
+#ifndef _WIN32
     d->memfd = -1;
     d->wake_eventfd = -1;
+#endif
     d->listen_fd = -1;
     d->con = con;
     d->dcl.con = con;
@@ -1342,11 +1547,13 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     if (d->target_fps > FB_SHM_MAX_RATE) d->target_fps = FB_SHM_MAX_RATE;
     d->blend_cursor = cfg->blend_cursor;
 
+#ifndef _WIN32
     d->wake_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (d->wake_eventfd < 0) {
         error_setg_errno(errp, errno, "fb-shm: eventfd() failed");
         goto err;
     }
+#endif
 
     if (fb_shm_open_listener(d, errp) < 0) {
         goto err;
@@ -1361,7 +1568,9 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     return d;
 
 err:
+#ifndef _WIN32
     if (d->wake_eventfd >= 0) close(d->wake_eventfd);
+#endif
     g_free(d->id);
     g_free(d->sock_path);
     g_free(d);
@@ -1388,7 +1597,9 @@ static void fb_shm_destroy(FbShmDisplay *d)
     fb_shm_gl_release(d);
 #endif
     fb_shm_release_mapping(d);
+#ifndef _WIN32
     if (d->wake_eventfd >= 0) close(d->wake_eventfd);
+#endif
     g_free(d->id);
     g_free(d->sock_path);
     g_free(d);

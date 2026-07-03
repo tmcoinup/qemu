@@ -1,12 +1,14 @@
-============================================================
-``-display fb-shm`` — zero-copy framebuffer streaming (Linux)
-============================================================
+======================================================================
+``-display fb-shm`` — zero-copy framebuffer streaming (Linux/Windows)
+======================================================================
 
 The ``fb-shm`` display backend exports the (optionally cropped) guest
-framebuffer through a single ``memfd`` plus an ``eventfd`` doorbell, so
-external processes can pull frames at the lowest latency Linux allows
-without writing to disk and without spawning an in-process video
-encoder.
+framebuffer through host shared memory plus a doorbell event, so
+external processes can pull frames at low latency without writing to
+disk and without spawning an in-process video encoder.  Linux hosts use
+``memfd`` + ``eventfd``.  Windows hosts use a named file mapping plus a
+per-client Win32 event, while preserving the same frame header and
+control ABI.
 
 It was designed for three workloads that don't fit the existing
 backends well:
@@ -43,14 +45,14 @@ Architecture
     |   pixman_image_composite32(SRC, ROI -> dst[i])    |
     |              |                                    |
     |              v                                    |
-    |   memfd  [hdr|buf0|buf1]   eventfd  [doorbell]    |
+    |   shm    [hdr|buf0|buf1]   event    [doorbell]    |
     +-------|----------------------|--------------------+
-            |  SCM_RIGHTS via       |
-            |  /run/qemu/fb-X.sock  |
+            |  AF_UNIX control      |
+            |  socket               |
             v                       v
     +-- consumer process (per VM) ------------+
-    |  recvmsg(SCM_RIGHTS) -> (memfd, evfd)   |
-    |  mmap(memfd)                            |
+    |  receive mapping/event handles or names |
+    |  mmap / MapViewOfFile                   |
     |  for ever:                              |
     |    poll(evfd)                           |
     |    seqlock-read shm[active_idx]         |
@@ -68,8 +70,8 @@ Producer side (QEMU) work per frame:
    done by every other backend on every refresh tick).
 2. **One** ``pixman_image_composite32(PIXMAN_OP_SRC, ...)`` call that
    crops to ROI and converts to BGR0 in a single pass.
-3. Two atomic stores (``active_idx``, ``frame_seq``) and one 8-byte
-   write to the ``eventfd``.
+3. Two atomic stores (``active_idx``, ``frame_seq``) and one doorbell
+   signal (``eventfd`` on Linux, ``SetEvent`` on Windows).
 
 There is no host-side encoding, no scaling, no colour-space conversion
 beyond what ``pixman`` already does for any backend, and no extra
@@ -81,17 +83,16 @@ Data flow & ABI
 
 Every backend instance owns:
 
-* a sealed ``memfd`` of ``256 + N * (W * H * 4)`` bytes, where ``N`` is
-  the buffer count (currently 2);
-* a non-blocking ``eventfd`` that pulses once per committed frame;
+* a host shared-memory object of ``256 + N * (W * H * 4)`` bytes, where
+  ``N`` is the buffer count (currently 2);
+* a doorbell event that pulses once per committed frame;
 * a ``SOCK_STREAM`` ``AF_UNIX`` listener at
   ``/run/qemu/fb-${id}.sock``.
 
 The on-disk layout, request/reply structs, and atomicity rules are
 documented in `<../include/ui/fb-shm-abi.h>`_.  Consumers in any
-language replicate that header (the Python reference consumer in
-``scripts/qemu-fb-shm-stream.py`` does so as a single ``struct``
-format string).
+language replicate that header.  The native ``qemu-fb-shm-stream``
+consumer uses the same packed C structures as QEMU.
 
 Wire-format summary:
 
@@ -107,7 +108,7 @@ Producer commit sequence (refresh tick):
 2. Composite ROI into ``slot[next_idx]``.
 3. ``store_release(active_idx, next_idx)``.
 4. ``store_release(frame_seq, frame_seq + 1)``.
-5. ``write(eventfd, u64=1)``.
+5. Signal the per-host doorbell.
 
 Consumer read sequence (seqlock):
 
@@ -160,32 +161,34 @@ Runtime control
 ---------------
 
 The control socket also accepts ``SET_ROI`` and ``SET_RATE`` messages
-(see ``FB_SHM_CTL_*`` in the ABI header).  The reference Python
-consumer exposes them via ``--roi x,y,w,h`` and ``--rate Hz``.
+(see ``FB_SHM_CTL_*`` in the ABI header).  The native consumer exposes
+them via ``--roi x,y,w,h`` and ``--rate Hz``.
 
 Resize notification (``NOTIFY_RESIZED``)
 ----------------------------------------
 
 A ``SET_ROI`` (or any guest-driven resolution change) makes QEMU
-re-allocate the backing memfd, which leaves every previously-handed-out
-mapping pointing at frozen pixels.  The ABI v1 protocol therefore
-includes a server-initiated message — ``FB_SHM_CTL_NOTIFY_RESIZED``
-(op code 5) — that re-broadcasts a fresh
-``{memfd, eventfd}`` pair via ``SCM_RIGHTS`` to every consumer that
-opted in.
+re-allocate the backing shared-memory object, which leaves every
+previously-handed-out mapping pointing at frozen pixels.  The ABI v1
+protocol therefore includes a server-initiated message —
+``FB_SHM_CTL_NOTIFY_RESIZED`` (op code 5) — that re-broadcasts fresh
+Linux fds via ``SCM_RIGHTS`` or fresh Windows object names to every
+consumer that opted in.
 
 Opt-in is encoded in the ``flags`` field of the ``HELLO`` request
 (formerly ``reserved``):
 
 * ``FB_SHM_HELLO_F_RESIZE_NOTIFY (1<<0)`` — "I will react to
-  ``NOTIFY_RESIZED`` by re-mapping the new memfd and replacing my
-  eventfd watch."
+  ``NOTIFY_RESIZED`` by re-mapping the new shared memory and replacing
+  my doorbell watch."
+* ``FB_SHM_HELLO_F_WIN32_NAMES (1<<1)`` — Windows-only: "send Win32
+  mapping/event names after the ack payload."
 
 A consumer that does **not** set the flag preserves the legacy
 behaviour (frozen frames after a ROI change until it reconnects) and
 remains wire-compatible with QEMU builds that pre-date this message.
 
-On the client side, after a ``NOTIFY_RESIZED`` arrives:
+On the Linux client side, after a ``NOTIFY_RESIZED`` arrives:
 
 1. ``recvmsg`` the 32-byte ack plus the two ``SCM_RIGHTS`` fds.
 2. ``mmap(new_memfd, ack.shm_size)`` and replace the previous
@@ -195,6 +198,11 @@ On the client side, after a ``NOTIFY_RESIZED`` arrives:
    per backend, but every consumer holds its own dup).
 4. Reset any local "last consumed ``frame_seq``" to 0 — the new
    memfd starts a fresh seqlock at 0.
+
+On the Windows client side, the ack is followed by ``FbShmWin32Names``.
+The consumer opens the new mapping with ``OpenFileMappingA``, opens the
+new event with ``OpenEventA``, then replaces the previous
+``MapViewOfFile`` view.
 
 The reference Rust consumer in ``dgame``
 (``adapters/capture/fb_shm/control.rs``) does this in a background
@@ -206,7 +214,7 @@ in-place mmap / eventfd swap without dropping the session.
 Reference consumer
 ==================
 
-``scripts/qemu-fb-shm-stream.py`` implements the full handshake and
+``qemu-fb-shm-stream`` implements the full handshake and
 seqlock reader, then pipes raw frames into ffmpeg.  Encoders verified
 to work end-to-end:
 
@@ -220,16 +228,16 @@ to work end-to-end:
 Examples::
 
     # local preview to ffplay/mpv
-    scripts/qemu-fb-shm-stream.py --sock /run/qemu/fb-qemu-12345.sock \
+    qemu-fb-shm-stream --sock /run/qemu/fb-qemu-12345.sock \
         --output 'udp://127.0.0.1:5000?pkt_size=1316' \
         --encoder h264_nvenc --bitrate 8M
 
     # local capture to mp4 (no network)
-    scripts/qemu-fb-shm-stream.py --sock /run/qemu/fb-vm1.sock \
+    qemu-fb-shm-stream --sock /run/qemu/fb-vm1.sock \
         --output /tmp/vm1.mp4 --encoder libx264 --preset veryfast
 
     # crop a 1280x720 ROI on a 4K guest
-    scripts/qemu-fb-shm-stream.py --sock /run/qemu/fb-vm1.sock \
+    qemu-fb-shm-stream --sock /run/qemu/fb-vm1.sock \
         --roi 320,180,1280,720 --rate 60 \
         --encoder h264_nvenc --bitrate 6M \
         --output 'rtmp://ingest/live/vm1'
@@ -300,11 +308,11 @@ Example: live RTMP push *and* local archival recording in parallel::
     # QEMU started with -object fb-shm,id=cap,path=/run/qemu/fb-vm1.sock
 
     # consumer A: NVENC -> RTMP
-    scripts/qemu-fb-shm-stream.py --sock /run/qemu/fb-vm1.sock \
+    qemu-fb-shm-stream --sock /run/qemu/fb-vm1.sock \
         --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc &
 
     # consumer B: x264 -> local mp4
-    scripts/qemu-fb-shm-stream.py --sock /run/qemu/fb-vm1.sock \
+    qemu-fb-shm-stream --sock /run/qemu/fb-vm1.sock \
         --output /tmp/vm1.mp4 --encoder libx264 --preset veryfast &
 
     # consumer C: a custom Rust analyser that just inspects pixels
@@ -423,13 +431,13 @@ Known gaps in the v9.2 implementation:
   guests need one ``fb-shm`` instance per head.
 * ABI v1 always publishes ``BGR0``.  ``NV12`` / ``DMA-BUF`` paths are
   on the roadmap (``DisplayFbShm.format``).
-* Only Linux hosts.  ``memfd_create`` and ``SCM_RIGHTS`` are the
-  blockers; FreeBSD/macOS would need a POSIX-shm fallback.
+* Linux and Windows hosts are supported.  FreeBSD/macOS would need a
+  POSIX-shm or mach shared-memory fallback.
 
 See also
 ========
 
 * `<../include/ui/fb-shm-abi.h>`_ — wire format reference.
-* ``scripts/qemu-fb-shm-stream.py`` — reference Python consumer.
+* ``qemu-fb-shm-stream`` — native Linux/Windows consumer.
 * ``scripts/qemu-fb-shm-multivm.py`` — multi-VM orchestrator.
 * ``scripts/qemu-fb-shm-spawn.sh`` — example QEMU launcher.

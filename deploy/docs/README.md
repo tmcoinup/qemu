@@ -85,7 +85,7 @@ EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
 # 4. 日常启动（无任何 env var；默认走 fb-shm 推流，无 SDL 窗口）
 deploy/scripts/start-vm.sh 2
 # 想要本地窗口加 --sdl；想要 VNC 加 --headless；两者都不开就是纯推流：
-#   scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-2.fb --output ...
+#   qemu-fb-shm-stream --sock /tmp/qemu-stealth-2.fb --output ...
 ```
 
 简化版（深层 / 无 ACE）：
@@ -209,6 +209,7 @@ deploy/
 │   ├── USAGE.md                    # （历史）单 VM 详细操作手册
 │   ├── PORTABILITY.md              # host 迁移兼容：IMAGE_ROOT / QEMU_CAP_CHECK / patched QEMU
 │   ├── FB-SHM.md                   # fb-shm 共享内存推流通道（默认开）
+│   ├── WINDOWS-PACKAGING.md        # Windows 10/11 打包、启动、fb-shm 原生推流方案
 │   └── VERIFY.md                   # 13 段离线自检 + guest 端验证命令
 ├── patches/                        # QEMU hw/ 补丁（已合并到本仓库分支）
 ├── scripts/
@@ -230,6 +231,10 @@ deploy/
 │   ├── rdp-connect.sh              # 用 xfreerdp 进 guest
 │   ├── diag-gpu-props.ps1          # guest 内 GPU 属性诊断
 │   └── verify-stealth.sh           # 离线自检
+├── windows/
+│   ├── start-vm.ps1                # Windows 宿主启动 patched QEMU
+│   ├── stream-fb-shm.ps1           # Windows 原生 fb-shm 推流封装
+│   └── stop-vm.ps1                 # Windows QMP 优雅停止
 ├── driver-signing/
 │   ├── scripts/                    # gen-CA / sign / Inf2Cat / verify
 │   ├── certs/                      # 生成的 CA + signer + TSA (.key/.pfx 不入仓)

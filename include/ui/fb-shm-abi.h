@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Wire-stable layout used by the `-display fb-shm` backend (Linux only).
+ * Wire-stable layout used by the `-display fb-shm` backend.
  * Consumers (Python / Rust / C) mirror this struct verbatim.
  *
  * Memory map (single memfd, sealed against grow/shrink):
@@ -51,17 +51,27 @@
 #define FB_SHM_FLAG_RESIZED        (1u << 2)
 
 /*
- * Control socket protocol (one Unix-domain stream socket per backend).
+ * Control socket protocol (one stream socket per backend).
  *
  *   client -> server : FbShmCtlReq (32 bytes, host byte order).
+ *
+ * Linux / POSIX:
  *   server -> client : FbShmCtlAck (32 bytes) + ancillary SCM_RIGHTS
  *                      { memfd, eventfd } on HELLO ack.
  *
+ * Windows:
+ *   client sets FB_SHM_HELLO_F_WIN32_NAMES in HELLO.flags.
+ *   server -> client : FbShmCtlAck (32 bytes) + FbShmWin32Names.
+ *   The client opens @mapping_name with OpenFileMappingA() and @event_name
+ *   with OpenEventA().  QEMU sets a per-client event on every published
+ *   frame, so multiple consumers get independent wakeups while sharing the
+ *   same frame mapping.
+ *
  * NOTIFY_RESIZED is the only server-initiated message: when QEMU re-allocates
- * the backing memfd (resolution change, ROI update), it pushes a fresh
- * { memfd, eventfd } pair to every client that opted into resize notifications
- * via FB_SHM_HELLO_F_RESIZE_NOTIFY.  Clients that did not set the flag observe
- * the legacy behaviour (frozen frames after resize).
+ * the backing store (resolution change, ROI update), it pushes a fresh
+ * Linux fd pair or Windows object-name payload to every client that opted into
+ * resize notifications via FB_SHM_HELLO_F_RESIZE_NOTIFY.  Clients that did
+ * not set the flag observe the legacy behaviour (frozen frames after resize).
  */
 #define FB_SHM_CTL_HELLO          1u
 #define FB_SHM_CTL_SET_ROI        2u
@@ -76,6 +86,9 @@
 
 /* HELLO request flag bits (FbShmCtlReq.flags). */
 #define FB_SHM_HELLO_F_RESIZE_NOTIFY (1u << 0)
+#define FB_SHM_HELLO_F_WIN32_NAMES   (1u << 1)
+
+#define FB_SHM_WIN32_NAME_MAX 260u
 
 typedef struct FbShmCtlReq {
     uint32_t magic;
@@ -95,6 +108,21 @@ typedef struct FbShmCtlAck {
     uint32_t fourcc;
     uint32_t bpp;
 } FbShmCtlAck;
+
+/*
+ * Windows-only payload sent immediately after FbShmCtlAck when the client
+ * requested FB_SHM_HELLO_F_WIN32_NAMES and the ack status is FB_SHM_CTL_OK.
+ * The strings are UTF-8 / ANSI Win32 object names, NUL-terminated when shorter
+ * than FB_SHM_WIN32_NAME_MAX.
+ */
+typedef struct FbShmWin32Names {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t size;
+    uint32_t flags;
+    char mapping_name[FB_SHM_WIN32_NAME_MAX];
+    char event_name[FB_SHM_WIN32_NAME_MAX];
+} FbShmWin32Names;
 
 /*
  * Header that lives at offset 0 in the memfd / POSIX shm.

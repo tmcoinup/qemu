@@ -159,14 +159,6 @@ if [[ "$FB_SHM" == "1" ]]; then
     echo ">> fb-shm sock: $FB_SHM_SOCK (rate=${FB_SHM_RATE} Hz${FB_SHM_ROI:+, ROI=$FB_SHM_ROI})"
     echo ">>   接消费端: scripts/qemu-fb-shm-stream.py --sock $FB_SHM_SOCK --output ..."
 fi
-if [[ "$HOTKEY_CAPTURE" == "1" ]]; then
-    if [[ "$SDL" != "1" ]]; then
-        echo ">> WARN: --hotkey-capture 需要 SDL 窗口接收按键，当前非 SDL，已忽略"
-        HOTKEY_CAPTURE=0
-    else
-        echo ">> hotkey:      按 $HOTKEY_KEY -> fb-shm 抓 PNG 到 $HOTKEY_OUT (log: $HOTKEY_LOG)"
-    fi
-fi
 echo ">> SSH/RDP fwd: 127.0.0.1:$SSH_FWD_PORT / 127.0.0.1:$RDP_FWD_PORT"
 echo ">> boot mode:   $BOOT"
 if [[ "$BOOT" == "iso" ]]; then
@@ -236,24 +228,6 @@ if [[ "$PROXY" == "1" ]]; then
     else
         echo ">> WARN: QMP alias 创建失败: $QMP_PROXY_SOCK"
     fi
-fi
-
-# 热键截图: 给打了补丁的 QEMU 导出 QEMU_HOTKEY_TRIGGER(它在 ui/sdl2.c 收到
-# F4 时往这个 DGRAM socket 戳一字节), 再后台拉起 hotkey-capture.py 守护进程.
-# 守护进程同时跑触发器 A(XRecord 旁路监听同 display 的 F4) 与触发器 B(收上面
-# 那个 socket), 两路都从 fb-shm 抓帧. 守护进程内置 socket-not-exist 重试,
-# 可以先于 QEMU 起来; QEMU 退出后它收 SIGTERM 由 stop-vm.sh 清理.
-if [[ "$HOTKEY_CAPTURE" == "1" ]]; then
-    export QEMU_HOTKEY_TRIGGER="$HOTKEY_SOCK"
-    rm -f "$HOTKEY_SOCK"
-    "$HERE/hotkey-capture.py" "$INSTANCE" \
-        --key "$HOTKEY_KEY" \
-        --sock "$FB_SHM_SOCK" \
-        --trigger-sock "$HOTKEY_SOCK" \
-        --out-dir "$HOTKEY_OUT" \
-        > "$HOTKEY_LOG" 2>&1 &
-    HOTKEY_PID=$!
-    echo ">> hotkey:      started pid=$HOTKEY_PID, key=$HOTKEY_KEY sock=$HOTKEY_SOCK"
 fi
 
 # ISO 装系统：BOOTX64.EFI 启动后会显示 "Press any key to boot from CD or DVD"

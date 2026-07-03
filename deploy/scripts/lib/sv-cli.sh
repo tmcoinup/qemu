@@ -33,9 +33,6 @@ while (( $# > 0 )); do
         --svc-cpu|--qemu-service-cpu)      QEMU_SERVICE_CPUS=1 ;;
         --svc-cpus=*|--qemu-service-cpus=*) QEMU_SERVICE_CPUS="${1#*=}" ;;
         --no-svc-cpu|--no-svc-cpus|--no-qemu-service-cpu|--no-qemu-service-cpus) QEMU_SERVICE_CPUS=0 ;;
-        --hotkey-capture)     HOTKEY_CAPTURE=1 ;;
-        --hotkey-capture=*)   HOTKEY_CAPTURE=1; HOTKEY_KEY="${1#*=}" ;;
-        --no-hotkey-capture)  HOTKEY_CAPTURE=0 ;;
         --)           shift; break ;;
         -*)
             echo "ERROR: unknown flag '$1'" >&2
@@ -83,9 +80,6 @@ fi
 # dgame / image-search / 临时 socat 同时连接。为了兼容旧工具配置，启动脚本还会
 # 建一个 ${QMP_SOCK}.proxy -> ${QMP_SOCK} 的 symlink，但不再起 Python 中转进程。
 : "${PROXY:=0}"
-# 热键截图: HOTKEY_CAPTURE=1 时, 后台起 hotkey-capture.py, 同时给 QEMU 导出
-# QEMU_HOTKEY_TRIGGER. 用户在 SDL 窗口里按 HOTKEY_KEY(默认 F4), 守护进程从
-# fb-shm 零拷贝帧抓一张 PNG 存到 $VM_DIR/captures. guest 完全无感知.
 # host 侧调度/时钟抖动调优: 起 VM 前自动跑 host-performance.sh(governor=performance
 # + halt_poll=500000 + THP defrag=never), 压低 vCPU 服务延迟方差——ACE「游戏计时
 # 异常」(13-131130-8) 这类反作弊时钟检测对抖动敏感. 只动 host 侧, 零反检测影响.
@@ -113,10 +107,6 @@ fi
 # --qemu-service-cpu / --qemu-service-cpus=N 保留兼容。环境变量也可用短名
 # QEMU_SVC_CPUS=1，显式 QEMU_SERVICE_CPUS 优先级更高。
 : "${QEMU_SERVICE_CPUS:=${QEMU_SVC_CPUS:-0}}"
-: "${HOTKEY_CAPTURE:=0}"
-: "${HOTKEY_KEY:=F4}"
-: "${HOTKEY_SOCK:=/tmp/qemu-stealth-${INSTANCE}.hotkey}"
-: "${HOTKEY_LOG:=/tmp/qemu-stealth-${INSTANCE}.hotkey.log}"
 # IMAGE_ROOT/VMS_DIR 让整套 VM 数据可迁移到任意挂载点；默认保持历史路径不变。
 : "${IMAGE_ROOT:=/home/ubuntu/images}"
 IMAGE_ROOT="${IMAGE_ROOT%/}"
@@ -181,7 +171,6 @@ VM_DIR="${VM_DIR:-${VMS_DIR}/${INSTANCE}}"
 : "${DISK:=$VM_DIR/disk.qcow2}"
 : "${QEMU:=$REPO_ROOT/build/qemu-system-x86_64}"
 : "${QEMU_IMG:=$REPO_ROOT/build/qemu-img}"
-: "${HOTKEY_OUT:=$VM_DIR/captures}"
 # Bridge is the default network backend. Pass BRIDGE= (empty) or NO_BRIDGE=1
 # to opt out and fall back to user-mode NAT. Reason: a real LAN IP is the
 # whole point of the stealth bundle for DNF — user mode's 10.0.2.x subnet

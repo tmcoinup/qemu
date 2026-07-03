@@ -35,9 +35,6 @@
 #include "ui/win32-kbd-hook.h"
 #include "qemu/log.h"
 
-#include <sys/socket.h>
-#include <sys/un.h>
-
 static int sdl2_num_outputs;
 static struct sdl2_console *sdl2_console;
 
@@ -412,46 +409,6 @@ static void *sdl2_win32_get_hwnd(struct sdl2_console *scon)
 }
 
 /*
- * F4 热键 -> 戳宿主 hotkey-capture 守护进程的 DGRAM unix socket。
- *
- * 仅当环境变量 QEMU_HOTKEY_TRIGGER 指向 socket 路径时启用（由
- * deploy/scripts/start-vm.sh --hotkey-capture 导出）。fire-and-forget：
- * fd/地址只解析一次并缓存，守护进程没起或 socket 不在时 sendto 失败也忽略。
- * 本函数不改变按键派发，F4 仍会正常下发给 guest。
- */
-static void sdl2_hotkey_poke(void)
-{
-    static int fd = -1;
-    static struct sockaddr_un dst;
-    static int state; /* 0=未初始化 1=可用 -1=禁用 */
-    ssize_t n;
-
-    if (state == -1) {
-        return;
-    }
-    if (state == 0) {
-        const char *path = getenv("QEMU_HOTKEY_TRIGGER");
-
-        if (!path || !path[0] || strlen(path) >= sizeof(dst.sun_path)) {
-            state = -1;
-            return;
-        }
-        fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-        if (fd < 0) {
-            state = -1;
-            return;
-        }
-        memset(&dst, 0, sizeof(dst));
-        dst.sun_family = AF_UNIX;
-        pstrcpy(dst.sun_path, sizeof(dst.sun_path), path);
-        state = 1;
-    }
-    n = sendto(fd, "\x01", 1, MSG_DONTWAIT,
-               (struct sockaddr *)&dst, sizeof(dst));
-    (void)n; /* best-effort：守护进程没起就当无事发生 */
-}
-
-/*
  * 输入门控：键鼠事件只在窗口同时拥有 X11 输入焦点和鼠标焦点(指针在窗内)
  * 时才允许下发到 guest。任一条件失守, 上层 handle_xxx 直接丢事件。
  * 焦点状态在 handle_windowevent() 里随 FOCUS_GAINED/LOST 和 ENTER/LEAVE 维护,
@@ -478,13 +435,6 @@ static void handle_keydown(SDL_Event *ev)
     }
 
     scon->gui_keysym = false;
-
-    /* F4：通知宿主热键截图守护进程。只戳一下，不吞按键——不设
-     * gui_keysym，F4 照常走 sdl2_process_key 下发给 guest。
-     * QEMU_HOTKEY_TRIGGER 未设时 sdl2_hotkey_poke() 无任何副作用。 */
-    if (ev->key.keysym.scancode == SDL_SCANCODE_F4 && !ev->key.repeat) {
-        sdl2_hotkey_poke();
-    }
 
     if (!scon->ignore_hotkeys && gui_key_modifier_pressed && !ev->key.repeat) {
         switch (ev->key.keysym.scancode) {

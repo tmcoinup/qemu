@@ -1528,11 +1528,11 @@
 ##
 # @DisplayFbShm:
 #
-# Linux-only framebuffer shared-memory display backend. The guest
-# framebuffer is exported through a memfd plus an eventfd doorbell;
-# external consumers connect to the control socket and receive both
-# fds via SCM_RIGHTS, then read frames in BGR0 / 32bpp with a
-# seqlock pattern (see include/ui/fb-shm-abi.h).
+# Cross-host framebuffer shared-memory display backend. The guest
+# framebuffer is exported through host-native shared memory; external
+# consumers connect to the control socket and receive either Linux fds
+# or Win32 object names, then read frames in BGR0 / 32bpp with a seqlock
+# pattern (see include/ui/fb-shm-abi.h).
 #
 # @id: backend identifier used to derive default paths
 #     (default: "qemu-${pid}").
@@ -1602,11 +1602,11 @@
 #
 # @dbus: Start a D-Bus service for the display.  (Since 7.0)
 #
-# @fb-shm: Linux-only zero-copy framebuffer export through memfd plus
-#     an eventfd doorbell.  External consumers connect to a Unix
-#     domain control socket and receive both fds via SCM_RIGHTS,
-#     then read frames in BGR0 with a seqlock pattern.  Supports
-#     rectangular region-of-interest cropping.  (Since 9.2)
+# @fb-shm: Cross-host zero-copy framebuffer export through shared
+#     memory plus a host-native doorbell.  Linux clients receive
+#     memfd/eventfd via SCM_RIGHTS; Windows clients receive named file
+#     mapping/event objects.  Supports rectangular region-of-interest
+#     cropping.  (Since 9.2)
 #
 # Since: 2.12
 ##
@@ -1621,7 +1621,7 @@
     { 'name': 'cocoa', 'if': 'CONFIG_COCOA' },
     { 'name': 'spice-app', 'if': 'CONFIG_SPICE' },
     { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' },
-    { 'name': 'fb-shm', 'if': 'CONFIG_LINUX' }
+    { 'name': 'fb-shm', 'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } }
   ]
 }
 
@@ -1660,7 +1660,8 @@
                         'if': 'CONFIG_OPENGL' },
       'dbus': { 'type': 'DisplayDBus', 'if': 'CONFIG_DBUS_DISPLAY' },
       'sdl': { 'type': 'DisplaySDL', 'if': 'CONFIG_SDL' },
-      'fb-shm': { 'type': 'DisplayFbShm', 'if': 'CONFIG_LINUX' }
+      'fb-shm': { 'type': 'DisplayFbShm',
+                  'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } }
   }
 }
 

@@ -231,6 +231,30 @@ test_qemu_service_cpu_flags_dry_run() {
         || fail "invalid --svc-cpus did not explain the validation error"
 }
 
+test_hotkey_capture_option_removed() {
+    local out="$1"
+
+    # 旧版 --hotkey-capture 会启动宿主侧 F4 监听/截图守护进程。现在这个功能已删除，
+    # 所以入口必须在 CLI 解析阶段直接失败，避免任何后续启动路径重新导出触发 socket。
+    if DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9885 \
+        "$START_VM" --no-sdl --no-fb-shm --no-bridge --hotkey-capture > "$out" 2>&1
+    then
+        fail "removed --hotkey-capture option should fail"
+    fi
+    grep -F -- "unknown flag '--hotkey-capture'" "$out" >/dev/null \
+        || fail "removed --hotkey-capture option did not fail at CLI parsing"
+
+    # 主启动脚本和 SDL 前端都不应再保留宿主热键捕获的环境变量或函数名。
+    if grep -F -- "QEMU_HOTKEY_TRIGGER" \
+        "$REPO_ROOT/ui/sdl2.c" \
+        "$REPO_ROOT/deploy/scripts/start-vm.sh" \
+        "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh" \
+        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null
+    then
+        fail "hotkey trigger environment hook is still present"
+    fi
+}
+
 test_cpu_isolate_scripts_parse() {
     bash -n "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh"
     bash -n "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh"
@@ -263,6 +287,7 @@ main() {
     test_proxy_dry_run_uses_native_qmp_multi "$out"
     test_custom_image_root_dry_run "$image_root" "$out"
     test_qemu_service_cpu_flags_dry_run "$out"
+    test_hotkey_capture_option_removed "$out"
     test_cpu_isolate_scripts_parse
     echo "PASS: start-vm NVMe storage portability path"
 }

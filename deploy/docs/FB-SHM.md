@@ -1,7 +1,10 @@
 # fb-shm —— 共享内存推流通道（默认开）
 
 deploy bundle 的默认显示模式是 fb-shm 推流：guest 完全不可见地把 framebuffer 写到
-host 一块共享内存里，外部进程通过一个 unix socket 拿 fd 读帧推 ffmpeg / NVENC。
+host 一块共享内存里，外部进程通过控制 socket 连接后读帧推 ffmpeg / NVENC。
+Linux 宿主通过 `SCM_RIGHTS` 拿 `memfd/eventfd`，Windows 10/11 宿主通过 Win32
+命名 file mapping + event 打开同一份 ABI。Windows 打包和启动见
+[WINDOWS-PACKAGING.md](WINDOWS-PACKAGING.md)。
 反作弊看不到任何额外 PCI 设备 / 驱动，与 NVIDIA-spoof virtio-gpu + ACE 浅层
 stealth 完全兼容。
 
@@ -41,7 +44,7 @@ QEMU 端实现：fb-shm 注册成 `-object fb-shm,id=stealth-${N},...` 用户可
 deploy/scripts/start-vm.sh 1                                         # 后台跑
 
 # 另开终端
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output /tmp/vm1.mp4 \
     --encoder libx264 --preset veryfast --bitrate 4M
 ```
@@ -49,7 +52,7 @@ scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
 ## 单 VM：推 RTMP / NVENC
 
 ```bash
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output 'rtmp://ingest.example/live/vm1' \
     --encoder h264_nvenc --preset p1 --bitrate 6M --gop 60
 ```
@@ -62,7 +65,7 @@ NVENC 消费级显卡默认 5 路同时推流上限，超出加 [nvidia-patch] �
 deploy/scripts/start-vm.sh 1 \
     --fb-shm-roi=0,0,1280,720 --fb-shm-rate=30      # host 端只截 720p
 
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output 'udp://127.0.0.1:5000?pkt_size=1316' \
     --encoder h264_nvenc --bitrate 3M
 ```
@@ -78,20 +81,21 @@ ROI 是在 QEMU 进程里通过 `pixman_image_composite32` 一次完成裁剪 + 
 ./deploy/scripts/start-vm.sh 1                                  # 起 VM
 
 # 终端 A: RTMP 推 NVENC
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M &
 
 # 终端 B: 本地存档 x264
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output /tmp/vm1.mp4 --encoder libx264 --preset veryfast &
 
 # 终端 C: 自定义 Rust/Python 分析（仅读像素，不编码）
 ./my-pixel-analyser --sock /tmp/qemu-stealth-1.fb &
 ```
 
-每个消费端经 `SCM_RIGHTS` 各拿一份 memfd + eventfd（kernel 引用计数），
-**全部 mmap 同一块物理页 → 零额外内存代价**。慢消费端只会自己跳帧，不反压 QEMU
-也不影响其它端。
+Linux 下每个消费端经 `SCM_RIGHTS` 各拿一份 memfd + eventfd（kernel 引用计数）；
+Windows 下每个消费端拿到独立 event 名称并打开同一份 file mapping。
+两边都是**全部映射同一块宿主共享内存 → 零额外帧缓存代价**。慢消费端只会自己跳帧，
+不反压 QEMU 也不影响其它端。
 
 实测 3 个并行消费端 30Hz × 2 秒：A=62 帧，B=62 帧，C=62 帧，seq 范围对齐
 1..62，无丢失。
@@ -99,37 +103,46 @@ scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
 边界：
 - `listen` backlog = 16，超过 16 个**并发 connect()** 才会 ECONNREFUSED
   （现实里消费端慢慢接入不会撞）。
-- eventfd doorbell 共享 —— 第一个 read 拿走计数，其他端见 EAGAIN 但已经被
-  level-triggered 唤醒；靠 `frame_seq` seqlock 判断有无新帧（参考 consumer
-  脚本已正确处理）。
+- Linux 的 eventfd doorbell 共享 —— 第一个 read 拿走计数，其他端见 EAGAIN
+  但已经被 level-triggered 唤醒；Windows 是每客户端 event。两边都靠
+  `frame_seq` seqlock 判断有无新帧。
 - 各消费端可独立选不同 ROI/编码/帧率（每端跳过它不需要的 frame_seq）。
 
 ## ROI 变化时的热切换：`NOTIFY_RESIZED`
 
-任何 `SET_ROI` 或 guest 自己的分辨率切换都会让 QEMU 重新分配 backing memfd。
-旧版本协议下，server `munmap`+`close` 旧 memfd 之后 client 仍持有旧 mapping，
-kernel 因为引用计数没真正释放，但**没人再写它了 → 画面定格**。client 只能
-靠 1s watchdog 自己断开重连，每次损失 1.5–2.5 秒。
+任何 `SET_ROI` 或 guest 自己的分辨率切换都会让 QEMU 重新分配 backing shared
+memory。旧版本协议下，server 切走旧 mapping 之后 client 仍持有旧 mapping，
+但**没人再写它了 → 画面定格**。client 只能靠 1s watchdog 自己断开重连，
+每次损失 1.5–2.5 秒。
 
 ABI v1 加了一条 server 主动推送的消息 `FB_SHM_CTL_NOTIFY_RESIZED` (op=5)：
-reallocate 完成后 server 把新 `(memfd, eventfd)` 通过 `SCM_RIGHTS` 广播给所有
-**opt-in** 的 client；client 收到后**就地 remap**，不需要重连。
+reallocate 完成后 server 在 Linux 下把新 `(memfd, eventfd)` 通过 `SCM_RIGHTS`
+广播，在 Windows 下追加新的 Win32 mapping/event 名称；所有 **opt-in** client
+收到后**就地 remap**，不需要重连。
 
 opt-in 通过 HELLO 请求里的 `flags` 字段（原 `reserved`）：
 
 | 标志位 | 语义 |
 |---|---|
-| `FB_SHM_HELLO_F_RESIZE_NOTIFY (1<<0)` | "我会处理 NOTIFY_RESIZED：收到后丢掉旧 mmap、用新 fds 重 map" |
+| `FB_SHM_HELLO_F_RESIZE_NOTIFY (1<<0)` | "我会处理 NOTIFY_RESIZED：收到后丢掉旧 mapping、重新 map" |
+| `FB_SHM_HELLO_F_WIN32_NAMES (1<<1)` | Windows 消费端请求 ack 后追加 Win32 mapping/event 名称 |
 
 不设这个 flag 的 client 仍然能正常 HELLO（向后兼容），只是行为退回旧版（卡帧
 + 自行重连）。
 
-Client 端处理流程：
+Linux client 端处理流程：
 
 1. `recvmsg` 收到 32 字节 ack + 2 个 fd（`memfd`, `eventfd`）；
 2. `mmap(new_memfd, ack.shm_size)` 替换旧 mapping；
 3. 用新 eventfd 替换旧的 watch（旧 eventfd 不再被 server `write()`）；
 4. 把"上次消费的 frame_seq"重置为 0（新 memfd 从 0 开始计数）。
+
+Windows client 端处理流程：
+
+1. 收到 32 字节 ack；
+2. 继续读取固定长度 `FbShmWin32Names`；
+3. 用 `OpenFileMappingA` / `OpenEventA` 打开新对象；
+4. 用 `MapViewOfFile` 替换旧 view，并把本地 `frame_seq` 游标清零。
 
 dgame 端实现见 `dgame/client/src/adapters/capture/fb_shm/control.rs`：HELLO 之后
 跑一个 `tokio` 后台 task 多路复用控制 socket，普通 `SET_ROI` / `SET_RATE` ack
@@ -180,7 +193,7 @@ scripts/qemu-fb-shm-multivm.py --config /tmp/multivm.yaml
 ```bash
 deploy/scripts/start-vm.sh 1             # SDL 窗口直接弹出，可以玩
 # 同时另起一个推流（共用一个 fb-shm socket）
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output /tmp/replay.mp4 --encoder libx264
 ```
 
@@ -208,7 +221,7 @@ QEMU 内部 SDL 是一条 DCL，fb-shm 是另一条 DCL，guest 一份 surface �
 ./deploy/scripts/ctl-vm.sh 1 stream-only
 
 # 4) 启外部消费端（NVENC 推 RTMP）
-scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \
+qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output 'rtmp://...' --encoder h264_nvenc --bitrate 6M
 
 # 5) 临时回去操作
@@ -258,21 +271,9 @@ echo '{"execute":"qmp_capabilities"}{"execute":"display-resume","arguments":{"na
 * QMP screendump = encode + write file + read file，typical 1080p > 100 ms；
 * fb-shm 是多订阅的，不和 dgame 抢 QMP 单 slot。
 
-参考 Python：抓一帧存 PNG 的 ~30 行：
-
-```python
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location(
-    'fbshm', '/path/to/qemu/scripts/qemu-fb-shm-stream.py')
-m = importlib.util.module_from_spec(spec); sys.modules['fbshm']=m
-spec.loader.exec_module(m)
-
-sock, mfd, evfd, ack = m.hello('/tmp/qemu-stealth-1.fb')
-r = m.FrameReader(mfd, evfd, ack[0])
-r.wait_frame(timeout=1.0)
-frame = r.read_frame()                # bytes, BGR0
-# frame -> PIL/Image / OpenCV / 直接喂模型
-```
+不建议再把 Python 作为运行时截图路径。需要长期集成时，直接复用
+`include/ui/fb-shm-abi.h` 和 `tools/fb-shm-stream/` 的原生握手/映射逻辑；
+一次性录制或推流则直接调用 `qemu-fb-shm-stream`。
 
 如果调用方暂时无法改（比如某些工具只会 QMP），用 `start-vm.sh --proxy`
 启用 QEMU 原生 QMP multi-client（见 [USAGE.md 6.4](USAGE.md#64-qmp-多客户端qemu-原生-multion)）。
@@ -291,7 +292,7 @@ frame = r.read_frame()                # bytes, BGR0
 ## 参考
 
 * [`docs/system/fb-shm.rst`](../../docs/system/fb-shm.rst) — QEMU 上游级文档（架构图、ABI、性能策略、GPU passthrough 替代）
-* [`scripts/qemu-fb-shm-stream.py`](../../scripts/qemu-fb-shm-stream.py) — 参考消费端
+* [`tools/fb-shm-stream`](../../tools/fb-shm-stream) — 原生 Linux/Windows 参考消费端
 * [`scripts/qemu-fb-shm-multivm.py`](../../scripts/qemu-fb-shm-multivm.py) — 多 VM 编排器
 * [`include/ui/fb-shm-abi.h`](../../include/ui/fb-shm-abi.h) — 二进制 ABI
 

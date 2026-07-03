@@ -20,8 +20,6 @@
 #                                           # 兼容别名: /tmp/qemu-stealth-1.qmp.proxy
 #     ./start-vm.sh 1 --no-host-tune        # 跳过起前的 host 调优(默认会自动跑)
 #     ./start-vm.sh 1 --no-cpu-isolate      # 不给 vCPU 划专属核(默认会绑核隔离)
-#     ./start-vm.sh 1 --hotkey-capture      # SDL 窗口里按 F4 -> fb-shm 抓 PNG
-#                                           # 存 $VM_DIR/captures；--hotkey-capture=F2 改键
 #
 # 边玩边拉流到 ffmpeg / NVENC：
 #     ./start-vm.sh 1                       # SDL 窗口照常出现，可直接玩
@@ -108,10 +106,6 @@
 #                          短 flag: --svc-cpu(=1) / --svc-cpus=N / --no-svc-cpus；
 #                          长兼容: --qemu-service-cpu / --qemu-service-cpus=N。
 #                          短环境变量: QEMU_SVC_CPUS=1。
-#     HOTKEY_CAPTURE=1     SDL 窗口里按 HOTKEY_KEY 时从 fb-shm 抓 PNG（默认 0）
-#                          (flag: --hotkey-capture[=KEY] / --no-hotkey-capture)
-#     HOTKEY_KEY=F4        触发键名（X keysym），默认 F4
-#                          PNG 存 $VM_DIR/captures；日志 ${HOTKEY_LOG}
 # ---------------------------------------------------------------------------
 set -euo pipefail
 

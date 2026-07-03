@@ -571,15 +571,15 @@
 ##
 # @FbShmProperties:
 #
-# Properties for the ``fb-shm`` user-creatable object (Linux only).
+# Properties for the ``fb-shm`` user-creatable object.
 #
 # Coexists with any ``-display`` backend: registers a
 # DisplayChangeListener on the primary graphic console and exports the
-# (optionally cropped) framebuffer through a memfd plus an eventfd
-# doorbell, identical to the ``-display fb-shm`` form (see
-# ``include/ui/fb-shm-abi.h`` for the wire format).  Use this when you
-# want SDL/GTK/VNC for live debugging *and* a parallel zero-copy
-# stream for ffmpeg / NVENC.
+# (optionally cropped) framebuffer through host-native shared memory plus
+# a doorbell, identical to the ``-display fb-shm`` form (see
+# ``include/ui/fb-shm-abi.h`` for the wire format).  Use this when you want
+# SDL/GTK/VNC for live debugging *and* a parallel zero-copy stream for
+# ffmpeg / NVENC.
 #
 # @path: control socket path (default
 #     ``/run/qemu/fb-${id}.sock``).
@@ -610,7 +610,7 @@
             '*height' : 'uint32',
             '*rate'   : 'uint32',
             '*cursor' : 'bool' },
-  'if': 'CONFIG_LINUX' }
+  'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } }
 
 ##
 # @MainLoopProperties:
@@ -1141,7 +1141,7 @@
     { 'name': 'cryptodev-vhost-user',
       'if': 'CONFIG_VHOST_CRYPTO' },
     'dbus-vmstate',
-    { 'name': 'fb-shm', 'if': 'CONFIG_LINUX' },
+    { 'name': 'fb-shm', 'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } },
     'filter-buffer',
     'filter-dump',
     'filter-mirror',
@@ -1218,7 +1218,8 @@
                                       'if': 'CONFIG_VHOST_CRYPTO' },
       'dbus-vmstate':               'DBusVMStateProperties',
       'fb-shm':                     { 'type': 'FbShmProperties',
-                                      'if': 'CONFIG_LINUX' },
+                                      'if': { 'any': [ 'CONFIG_LINUX',
+                                                       'CONFIG_WIN32' ] } },
       'filter-buffer':              'FilterBufferProperties',
       'filter-dump':                'FilterDumpProperties',
       'filter-mirror':              'FilterMirrorProperties',

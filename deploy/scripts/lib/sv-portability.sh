@@ -63,7 +63,7 @@ _sv_check_qemu_caps() {
         'x-pci-sub-vendor-id=' 'x-pci-sub-device-id=' \
         || _sv_die_missing_qemu_feature "virtio-vga EDID / PCI subsystem 属性"
 
-    if [[ "${SDL:-0}" == "1" && "${STABLE_DISPLAY:-1}" != "1" ]]; then
+    if [[ "${SDL:-0}" == "1" && "${STABLE_DISPLAY:-0}" != "1" ]]; then
         help="$(_sv_qemu_device_help virtio-vga-gl)"
         _sv_qemu_help_has_all "$help" \
             'edid-vendor=' 'edid-name=' 'edid-serial=' \

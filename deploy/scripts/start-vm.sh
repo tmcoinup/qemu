@@ -30,7 +30,7 @@
 #
 # 默认值（90% 情况都不用改）：
 #     BRIDGE=br0           桥接 br0（不存在自动回退到 user-mode NAT）
-#     STABLE_DISPLAY=1     virtio-vga（无 GL，规避 virgl BSOD；ACE/腾讯反作弊友好）
+#     STABLE_DISPLAY=0     SDL 模式默认 virtio-vga-gl + virgl 3D；fb-shm 同步推流
 #     GPU_SELFSIGNED=0     PCI 主 ID 留 1AF4:1050 + subsys 改 NVIDIA 1C8110DE
 #                          (子系统级 NVIDIA 改名，搭配 stock virtio-win 0.1.266
 #                          + apply-gpu-spoof.ps1 注册表覆盖 = 通过 ACE 13-131106-0)
@@ -60,8 +60,9 @@
 #     DISK=<path>          qcow2 磁盘路径                        (flag: --disk=<path>)
 #     QEMU=<path>          qemu-system-x86_64 二进制路径         (flag: --qemu=<path>)
 #     EXTRA_ISO=<path>     副 CDROM（autounattend.xml / 驱动盘 等）
-#     STABLE_DISPLAY=0     SDL 模式下允许 virtio-vga-gl + virgl 3D；fb-shm 会挂到
-#                          同一个 GL scanout 上读回推流，适合本地窗口+推流同时保留。
+#     STABLE_DISPLAY=1     强制 virtio-vga（无 GL），用于回避个别环境的 virgl
+#                          长跑 TDR/BSOD。--no-sdl/--headless 无窗口 GL context，
+#                          也会走 stable virtio-vga。
 #     GPU_SELFSIGNED=1     PCI 主 ID 改成 NVIDIA 10DE:1C81。 ⚠️ 需要 patched
 #                          viogpudo + 伪 NVIDIA CA 链；ACE/腾讯反作弊判异常
 #                          (13-131106-0)。只用于轻反作弊场景。

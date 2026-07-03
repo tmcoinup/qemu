@@ -253,7 +253,7 @@ deploy/
 
 1. **EfiGuard `DSE_DISABLE_AT_BOOT` 会改 ci.dll text** — ACE 如果做内核哈希校验有概率被 30 分钟周期触发主动 reboot。彻底解只有买 EV cert + Microsoft attestation。
 2. **EfiGuard pattern matching 跟 ntoskrnl 版本绑定** — 已验证 19041.1266 / 19041.6456 / 19045.x 工作；新 KB 出来如失效，看 `efiguard/patches/README.md`。
-3. **`STABLE_DISPLAY=1`（默认推荐）禁了 virgl** — guest 没 GL 加速，DirectX 走 WARP；DNF 仍可玩。如果你信任你的环境可以去掉它。
+3. **`STABLE_DISPLAY=0` 现在是默认** — SDL 模式走 `virtio-vga-gl` + virgl 3D，fb-shm 同步推流；如果某台 VM 长跑 virgl 不稳，再显式 `STABLE_DISPLAY=1` 回退无 GL stable 路径。
 4. **PCI VEN_10DE 只是 PCI header 重写** — 实际 device 还是 virtio-vga，ACE 如果在内核态走 PCI BAR / config space 反向探测可能识破。
 5. **`Win32_VideoController.CurrentRefreshRate = 1`、有源信号分辨率 -1×-1** — viogpudo 内核驱动 `BuildVideoSignalInfo` 把所有 freq 设成 `D3DKMDT_FREQUENCY_NOTSPECIFIED`。源码 patch 已写在 `deploy/driver-signing/patches/0001-viogpudo-realistic-vsync-freq.patch`，但需要正确集成的 VS Community + WDK 才能编出能加载的 `.sys`（VS Build Tools SKU 装不上 WDK VSIX；手 copy toolset 文件能编但缺 kernel-mode flag → Code 38）。短期权宜：留着这个 fingerprint。
 6. **`Win32_PnPSignedDriver.IsSigned = False` for GPU** — `WinVerifyTrust(DRIVER)` 内置 MS 根证书白名单，自签 backdated CA 不在名单里。同根因导致 DxDiag "未数字签名"。彻底解：EV cert + Microsoft Hardware Attestation 走 WHQL 流程。
@@ -262,7 +262,7 @@ deploy/
 
 记 memory 里。最重要的：
 - 30 分钟 ACE 主动重启（`wininit.exe` 触发 `0x800000ff`）—— 见 `feedback_efiguard_default.md`
-- VIDEO_DXGKRNL_FATAL_ERROR if `STABLE_DISPLAY=0`（virgl 状态机长时间崩）
+- 个别环境 `STABLE_DISPLAY=0` 长跑仍可能触发 VIDEO_DXGKRNL_FATAL_ERROR（virgl 状态机问题）；该实例可临时用 `STABLE_DISPLAY=1` 回退。
 
 ## 反检测路线（仍在探索）
 

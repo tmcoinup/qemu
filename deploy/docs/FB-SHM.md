@@ -5,6 +5,9 @@ host 一块共享内存里，外部进程通过控制 socket 连接后读帧推 
 Linux 宿主通过 `SCM_RIGHTS` 拿 `memfd/eventfd`，Windows 10/11 宿主通过 Win32
 命名 file mapping + event 打开同一份 ABI。Windows 打包和启动见
 [WINDOWS-PACKAGING.md](WINDOWS-PACKAGING.md)。
+支持 GL/dma-buf/D3D scanout 的宿主还会按需发布 GPU resident frame metadata：
+Linux 是 `dma-buf` fd，Windows 是 D3D11 shared texture 名称。旧共享内存路径
+保留为默认可用推流回退。
 反作弊看不到任何额外 PCI 设备 / 驱动，与 NVIDIA-spoof virtio-gpu + ACE 浅层
 stealth 完全兼容。
 
@@ -37,6 +40,7 @@ QEMU 端实现：fb-shm 注册成 `-object fb-shm,id=stealth-${N},...` 用户可
 | ROI    | 全屏                                | `--fb-shm-roi=x,y,w,h` |
 | 像素   | `BGR0`（x8r8g8b8 LE）                | 由 ABI 决定，不可改 |
 | 双缓冲 | 2 个 ROI 大小的槽 + atomic seq      | `include/ui/fb-shm-abi.h` |
+| GPU    | `auto`                              | consumer 订阅 `NOTIFY_GPU_FRAME`，不能导入时走 SHM |
 
 ## 单 VM：录到本地 mp4
 
@@ -54,10 +58,13 @@ qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
 ```bash
 qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
     --output 'rtmp://ingest.example/live/vm1' \
-    --encoder h264_nvenc --preset p1 --bitrate 6M --gop 60
+    --encoder h264_nvenc --preset p1 --bitrate 6M --gop 60 --mode auto
 ```
 
 NVENC 消费级显卡默认 5 路同时推流上限，超出加 [nvidia-patch] 解锁。
+注意：仓库自带 `qemu-fb-shm-stream` 仍是 ffmpeg stdin/rawvideo 编码器，`auto`
+模式会请求 GPU metadata 但保持 SHM 推流回退；`--mode gpu` 用于验证 QEMU 是否
+发布了 dma-buf/D3D11 texture，当前没有 native GPU encoder 时会拒绝静默降级。
 
 ## 单 VM：低带宽 / ROI 推流（DNF 1080p 主战场）
 
@@ -126,6 +133,8 @@ opt-in 通过 HELLO 请求里的 `flags` 字段（原 `reserved`）：
 |---|---|
 | `FB_SHM_HELLO_F_RESIZE_NOTIFY (1<<0)` | "我会处理 NOTIFY_RESIZED：收到后丢掉旧 mapping、重新 map" |
 | `FB_SHM_HELLO_F_WIN32_NAMES (1<<1)` | Windows 消费端请求 ack 后追加 Win32 mapping/event 名称 |
+| `FB_SHM_HELLO_F_GPU_FRAMES (1<<2)` | 订阅 `NOTIFY_GPU_FRAME`：Linux 收 dma-buf fd，Windows 收 D3D11 shared texture 名称 |
+| `FB_SHM_HELLO_F_GPU_REQUIRED (1<<3)` | strict GPU 模式：不接受 SHM-only 握手 |
 
 不设这个 flag 的 client 仍然能正常 HELLO（向后兼容），只是行为退回旧版（卡帧
 + 自行重连）。

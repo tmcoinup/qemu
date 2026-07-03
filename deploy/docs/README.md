@@ -209,6 +209,7 @@ deploy/
 │   ├── USAGE.md                    # （历史）单 VM 详细操作手册
 │   ├── PORTABILITY.md              # host 迁移兼容：IMAGE_ROOT / QEMU_CAP_CHECK / patched QEMU
 │   ├── FB-SHM.md                   # fb-shm 共享内存推流通道（默认开）
+│   ├── FB-SHM-GPU-ZEROCOPY.md      # fb-shm GPU handle 零拷贝导出设计与审核说明
 │   ├── WINDOWS-PACKAGING.md        # Windows 10/11 打包、启动、fb-shm 原生推流方案
 │   └── VERIFY.md                   # 13 段离线自检 + guest 端验证命令
 ├── patches/                        # QEMU hw/ 补丁（已合并到本仓库分支）

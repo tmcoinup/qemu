@@ -21,6 +21,8 @@ param(
     [string]$Encoder = "h264_nvenc",
     [string]$Preset = "p1",
     [string]$Bitrate = "6M",
+    [ValidateSet('auto', 'gpu', 'shm')]
+    [string]$Mode = "auto",
     [int]$Gop = 60,
     [int]$Rate = 0,
     [string]$Roi = "",
@@ -87,6 +89,7 @@ Add-Arg $argsList @(
     '--encoder', $Encoder,
     '--preset', $Preset,
     '--bitrate', $Bitrate,
+    '--mode', $Mode,
     '--gop', $Gop.ToString()
 )
 if ($Rate -gt 0) {

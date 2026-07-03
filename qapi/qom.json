@@ -576,10 +576,11 @@
 # Coexists with any ``-display`` backend: registers a
 # DisplayChangeListener on the primary graphic console and exports the
 # (optionally cropped) framebuffer through host-native shared memory plus
-# a doorbell, identical to the ``-display fb-shm`` form (see
-# ``include/ui/fb-shm-abi.h`` for the wire format).  Use this when you want
-# SDL/GTK/VNC for live debugging *and* a parallel zero-copy stream for
-# ffmpeg / NVENC.
+# a doorbell, identical to the ``-display fb-shm`` form.  GPU scanout
+# clients may additionally subscribe to dma-buf / D3D11 shared texture
+# metadata (see ``include/ui/fb-shm-abi.h`` for the wire format).  Use
+# this when you want SDL/GTK/VNC for live debugging *and* a parallel
+# low-latency stream path for ffmpeg / NVENC.
 #
 # @path: control socket path (default
 #     ``/run/qemu/fb-${id}.sock``).

@@ -29,7 +29,11 @@ reject_text_ci() {
 
 test_abi_has_win32_names() {
     require_text "FB_SHM_HELLO_F_WIN32_NAMES" "$REPO_ROOT/include/ui/fb-shm-abi.h"
+    require_text "FB_SHM_HELLO_F_GPU_FRAMES" "$REPO_ROOT/include/ui/fb-shm-abi.h"
+    require_text "FB_SHM_HELLO_F_GPU_REQUIRED" "$REPO_ROOT/include/ui/fb-shm-abi.h"
+    require_text "FB_SHM_CTL_NOTIFY_GPU_FRAME" "$REPO_ROOT/include/ui/fb-shm-abi.h"
     require_text "FbShmWin32Names" "$REPO_ROOT/include/ui/fb-shm-abi.h"
+    require_text "FbShmGpuFrame" "$REPO_ROOT/include/ui/fb-shm-abi.h"
     require_text "FB_SHM_WIN32_NAME_MAX" "$REPO_ROOT/include/ui/fb-shm-abi.h"
 }
 
@@ -46,6 +50,9 @@ test_qemu_backend_has_win32_mapping() {
     require_text "CreateFileMappingA" "$REPO_ROOT/ui/fb-shm.c"
     require_text "MapViewOfFile" "$REPO_ROOT/ui/fb-shm.c"
     require_text "SetEvent" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "CreateSharedHandle" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "dpy_gl_scanout_dmabuf" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "FB_SHM_CTL_NOTIFY_GPU_FRAME" "$REPO_ROOT/ui/fb-shm.c"
     require_text "SCM_RIGHTS" "$REPO_ROOT/ui/fb-shm.c"
 }
 
@@ -54,6 +61,9 @@ test_native_streamer_has_both_platforms() {
     require_text "OpenEventA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
     require_text "recvmsg" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
     require_text "SCM_RIGHTS" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
+    require_text "STREAM_MODE_GPU" "$REPO_ROOT/tools/fb-shm-stream/common.h"
+    require_text "--mode auto|gpu|shm" "$REPO_ROOT/tools/fb-shm-stream/main.c"
+    require_text "FB_SHM_CTL_NOTIFY_GPU_FRAME" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
     require_text "qemu-fb-shm-stream" "$REPO_ROOT/meson.build"
 }
 
@@ -62,6 +72,7 @@ test_windows_scripts_are_native() {
     require_text "fb-shm" "$REPO_ROOT/deploy/windows/start-vm.ps1"
     require_text "-accel', 'whpx" "$REPO_ROOT/deploy/windows/start-vm.ps1"
     require_text "qemu-fb-shm-stream.exe" "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1"
+    require_text "[ValidateSet('auto', 'gpu', 'shm')]" "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1"
     require_text "BeginConnect" "$REPO_ROOT/deploy/windows/stop-vm.ps1"
     reject_text_ci "python.exe" "$REPO_ROOT/deploy/windows/start-vm.ps1"
     reject_text_ci "python3" "$REPO_ROOT/deploy/windows/start-vm.ps1"
@@ -77,8 +88,11 @@ test_windows_scripts_are_native() {
 test_docs_cover_windows_packaging() {
     require_text "Windows 10 / Windows 11" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "qemu-fb-shm-stream.exe" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
+    require_text "NOTIFY_GPU_FRAME" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "ninja installer" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "WINDOWS-PACKAGING.md" "$REPO_ROOT/deploy/docs/README.md"
+    require_text "FB-SHM-GPU-ZEROCOPY.md" "$REPO_ROOT/deploy/docs/README.md"
+    require_text "NOTIFY_GPU_FRAME" "$REPO_ROOT/deploy/docs/FB-SHM-GPU-ZEROCOPY.md"
     require_text "Linux/Windows" "$REPO_ROOT/docs/system/fb-shm.rst"
 }
 
@@ -92,6 +106,7 @@ test_new_files_stay_small() {
         "$REPO_ROOT/deploy/windows/start-vm.ps1" \
         "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1" \
         "$REPO_ROOT/deploy/windows/stop-vm.ps1" \
+        "$REPO_ROOT/deploy/docs/FB-SHM-GPU-ZEROCOPY.md" \
         "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"; do
         local lines
 

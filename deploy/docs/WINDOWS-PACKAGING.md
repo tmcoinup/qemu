@@ -16,6 +16,7 @@
 | 帧共享内存 | `memfd_create` + `mmap` | `CreateFileMappingA` + `MapViewOfFile` |
 | 帧通知 | `eventfd` | 每客户端 `CreateEventA` |
 | resize/ROI 热切换 | `NOTIFY_RESIZED` + `SCM_RIGHTS` 重新发 fd | `NOTIFY_RESIZED` + 命名 mapping/event 重新发名称 |
+| GPU frame export | `NOTIFY_GPU_FRAME` + `dma-buf` fd | `NOTIFY_GPU_FRAME` + D3D11 shared texture 名称 |
 | 帧 ABI | `include/ui/fb-shm-abi.h` | 同一份 `include/ui/fb-shm-abi.h` |
 
 Windows 侧没有 `SCM_RIGHTS`，所以 HELLO 时如果 client 带
@@ -100,7 +101,8 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\stream-fb-shm.ps1 `
   -Output C:\qemu\captures\vm1.mp4 `
   -Encoder libx264 `
   -Preset veryfast `
-  -Bitrate 4M
+  -Bitrate 4M `
+  -Mode auto
 ```
 
 RTMP + NVENC：
@@ -112,7 +114,8 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\stream-fb-shm.ps1 `
   -Encoder h264_nvenc `
   -Preset p1 `
   -Bitrate 6M `
-  -Gop 60
+  -Gop 60 `
+  -Mode auto
 ```
 
 也可以直接调用原生工具：
@@ -120,8 +123,13 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\stream-fb-shm.ps1 `
 ```powershell
 qemu-fb-shm-stream.exe --sock C:\qemu-run\fb-1.sock `
   --output C:\qemu\captures\vm1.mp4 `
-  --encoder libx264 --preset veryfast --bitrate 4M
+  --encoder libx264 --preset veryfast --bitrate 4M --mode auto
 ```
+
+`-Mode auto` 会请求 GPU resident frame metadata。Windows GL/ANGLE 路径可发布
+D3D11 shared texture 名称；当前内置 ffmpeg stdin backend 仍以 SHM rawvideo
+作为实际推流路径。`-Mode gpu` 用于 strict 验证 GPU export，不会把 SHM 回退
+伪装成零拷贝 GPU 编码。
 
 ## 停止 VM
 

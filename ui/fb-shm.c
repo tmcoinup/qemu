@@ -56,6 +56,10 @@
 # include <linux/memfd.h>
 #else
 # include <windows.h>
+# ifdef CONFIG_OPENGL
+#  include <d3d11.h>
+#  include <dxgi1_2.h>
+# endif
 #endif
 
 #ifdef CONFIG_OPENGL
@@ -107,6 +111,8 @@ struct FbShmClient {
     bool hello_done;            /* HELLO seen → eligible for broadcasts   */
     bool wants_resize_notify;   /* HELLO opted into NOTIFY_RESIZED        */
     bool wants_win32_names;      /* HELLO requested Win32 name payload     */
+    bool wants_gpu_frames;       /* HELLO 订阅 GPU resident frame 通知      */
+    bool gpu_required;           /* 客户端要求 GPU 路径，不接受 SHM 回退    */
     bool linked;                /* present in owner->clients              */
     bool dropping;              /* fd removed; waiting for deferred free  */
 #ifdef _WIN32
@@ -171,9 +177,11 @@ struct FbShmDisplay {
     uint32_t gl_backing_w, gl_backing_h;
     uint32_t gl_x, gl_y, gl_w, gl_h;
     uint64_t gl_last_frame_ns;
+    uint64_t gpu_frame_seq;
     QEMUGLContext gl_ctx;
     egl_fb gl_guest_fb;
     egl_fb gl_blit_fb;
+    QemuDmaBuf *gl_dmabuf;
     DisplaySurface *gl_slot_surface[FB_SHM_BUF_COUNT];
     bool gl_pbo_checked;
     bool gl_pbo_supported;
@@ -181,6 +189,12 @@ struct FbShmDisplay {
     uint32_t gl_pbo_head;
     uint32_t gl_pbo_tail;
     FbShmGlPbo gl_pbo[FB_SHM_GL_PBO_COUNT];
+#ifdef _WIN32
+    void *gl_d3d_tex2d;
+    HANDLE gl_d3d_share_handle;
+    char *gl_d3d_name;
+    uint32_t gl_d3d_generation;
+#endif
 #endif
 
     /* control socket */
@@ -196,6 +210,11 @@ static void fb_shm_broadcast_resize(FbShmDisplay *d);
 static void fb_shm_client_free_bh(void *opaque);
 static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
                                  uint32_t w, uint32_t h);
+#ifdef CONFIG_OPENGL
+static void fb_shm_broadcast_current_gpu_frame(FbShmDisplay *d,
+                                               uint32_t w, uint32_t h,
+                                               int32_t roi_x, int32_t roi_y);
+#endif
 
 static size_t fb_shm_frame_bytes(uint32_t w, uint32_t h)
 {
@@ -348,6 +367,18 @@ static void fb_shm_gl_pbo_discard(FbShmDisplay *d, bool delete_buffers)
     d->gl_pbo_tail = 0;
 }
 
+#ifdef _WIN32
+static void fb_shm_gl_forget_d3d_share(FbShmDisplay *d)
+{
+    if (d->gl_d3d_share_handle) {
+        CloseHandle(d->gl_d3d_share_handle);
+        d->gl_d3d_share_handle = NULL;
+    }
+    g_clear_pointer(&d->gl_d3d_name, g_free);
+    d->gl_d3d_tex2d = NULL;
+}
+#endif
+
 static bool fb_shm_gl_pbo_finish_one(FbShmDisplay *d, FbShmGlPbo *pbo)
 {
     GLenum wait_status;
@@ -490,6 +521,11 @@ static int fb_shm_gl_pbo_issue(FbShmDisplay *d, uint32_t rw, uint32_t rh,
 
 static void fb_shm_gl_release_fbos(FbShmDisplay *d)
 {
+    d->gl_dmabuf = NULL;
+#ifdef _WIN32
+    fb_shm_gl_forget_d3d_share(d);
+#endif
+
     if (!d->gl_ctx || !fb_shm_gl_make_current(d)) {
         return;
     }
@@ -932,9 +968,130 @@ static int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
 }
 #endif
 
+static bool fb_shm_client_accepts_gpu(const FbShmClient *c)
+{
+    return c->hello_done && c->wants_gpu_frames &&
+           !c->dropping && c->fd >= 0;
+}
+
+static bool fb_shm_has_gpu_clients(FbShmDisplay *d)
+{
+    FbShmClient *c;
+
+    QLIST_FOREACH(c, &d->clients, next) {
+        if (fb_shm_client_accepts_gpu(c)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool fb_shm_has_shm_consumers(FbShmDisplay *d)
+{
+    FbShmClient *c;
+
+    QLIST_FOREACH(c, &d->clients, next) {
+        if (c->hello_done && !c->gpu_required &&
+            !c->dropping && c->fd >= 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#ifndef _WIN32
+static int fb_shm_send_gpu_frame(FbShmClient *c,
+                                 const FbShmGpuFrame *frame, int gpu_fd)
+{
+    FbShmCtlAck ack = {
+        .magic = FB_SHM_MAGIC,
+        .op = FB_SHM_CTL_NOTIFY_GPU_FRAME,
+        .status = FB_SHM_CTL_OK,
+        .shm_size = sizeof(*frame),
+        .width = frame->width,
+        .height = frame->height,
+        .fourcc = frame->fourcc,
+    };
+    struct iovec iov[2] = {
+        { .iov_base = &ack, .iov_len = sizeof(ack) },
+        { .iov_base = (void *)frame, .iov_len = sizeof(*frame) },
+    };
+    char cbuf[CMSG_SPACE(sizeof(int))];
+    struct msghdr msg = {
+        .msg_iov = iov,
+        .msg_iovlen = G_N_ELEMENTS(iov),
+    };
+    ssize_t r;
+
+    if (gpu_fd >= 0) {
+        memset(cbuf, 0, sizeof(cbuf));
+        msg.msg_control = cbuf;
+        msg.msg_controllen = CMSG_SPACE(sizeof(int));
+
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+        cm->cmsg_level = SOL_SOCKET;
+        cm->cmsg_type = SCM_RIGHTS;
+        cm->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(cm), &gpu_fd, sizeof(gpu_fd));
+    }
+
+    do {
+        r = sendmsg(c->fd, &msg, MSG_NOSIGNAL);
+    } while (r < 0 && errno == EINTR);
+
+    return r == (ssize_t)(sizeof(ack) + sizeof(*frame)) ? 0 : -1;
+}
+#else
+static int fb_shm_send_gpu_frame(FbShmClient *c,
+                                 const FbShmGpuFrame *frame, int gpu_fd)
+{
+    FbShmCtlAck ack = {
+        .magic = FB_SHM_MAGIC,
+        .op = FB_SHM_CTL_NOTIFY_GPU_FRAME,
+        .status = FB_SHM_CTL_OK,
+        .shm_size = sizeof(*frame),
+        .width = frame->width,
+        .height = frame->height,
+        .fourcc = frame->fourcc,
+    };
+
+    (void)gpu_fd;
+    if (fb_shm_send_bytes(c->fd, &ack, sizeof(ack)) < 0) {
+        return -1;
+    }
+    return fb_shm_send_bytes(c->fd, frame, sizeof(*frame));
+}
+#endif
+
+static void fb_shm_broadcast_gpu_frame(FbShmDisplay *d,
+                                       const FbShmGpuFrame *frame,
+                                       int gpu_fd)
+{
+    FbShmClient *c, *cn;
+    int recipients = 0;
+
+    QLIST_FOREACH_SAFE(c, &d->clients, next, cn) {
+        if (!fb_shm_client_accepts_gpu(c)) {
+            continue;
+        }
+        if (fb_shm_send_gpu_frame(c, frame, gpu_fd) < 0) {
+            warn_report("fb-shm: NOTIFY_GPU_FRAME send failed (errno=%d %s); "
+                        "dropping client fd=%d",
+                        errno, strerror(errno), c->fd);
+            fb_shm_client_drop(c);
+        } else {
+            recipients++;
+        }
+    }
+
+    (void)recipients;
+}
+
 static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
                                 const FbShmCtlReq *req)
 {
+    bool gpu_only;
+
     if (c->dropping || c->fd < 0) {
         return;
     }
@@ -948,11 +1105,16 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
         (req->flags & FB_SHM_HELLO_F_RESIZE_NOTIFY) != 0;
     c->wants_win32_names =
         (req->flags & FB_SHM_HELLO_F_WIN32_NAMES) != 0;
+    c->wants_gpu_frames =
+        (req->flags & FB_SHM_HELLO_F_GPU_FRAMES) != 0;
+    c->gpu_required =
+        (req->flags & FB_SHM_HELLO_F_GPU_REQUIRED) != 0;
+    gpu_only = c->wants_gpu_frames && c->gpu_required;
 
     FbShmCtlAck ack = {
         .magic  = FB_SHM_MAGIC,
         .op     = FB_SHM_CTL_HELLO,
-        .status = d->shm ? FB_SHM_CTL_OK : FB_SHM_CTL_EBUSY,
+        .status = (d->shm || gpu_only) ? FB_SHM_CTL_OK : FB_SHM_CTL_EBUSY,
         .shm_size = (uint32_t)d->map_size,
         .width  = d->cur_w,
         .height = d->cur_h,
@@ -960,7 +1122,7 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
         .bpp    = 32,
     };
 #ifdef _WIN32
-    if (ack.status == FB_SHM_CTL_OK) {
+    if (ack.status == FB_SHM_CTL_OK && d->shm) {
         Error *err = NULL;
 
         if (!fb_shm_win32_ensure_client_event(d, c, &err)) {
@@ -1295,6 +1457,262 @@ static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
 }
 
 #ifdef CONFIG_OPENGL
+static void fb_shm_gpu_frame_init(FbShmDisplay *d, FbShmGpuFrame *frame,
+                                  uint32_t handle_type, uint32_t flags,
+                                  uint32_t w, uint32_t h, uint32_t stride,
+                                  uint32_t fourcc, uint32_t x, uint32_t y,
+                                  uint32_t backing_w, uint32_t backing_h,
+                                  uint64_t modifier)
+{
+    memset(frame, 0, sizeof(*frame));
+    frame->magic = FB_SHM_MAGIC;
+    frame->version = FB_SHM_VERSION;
+    frame->size = sizeof(*frame);
+    frame->handle_type = handle_type;
+    frame->flags = flags;
+    frame->width = w;
+    frame->height = h;
+    frame->stride = stride;
+    frame->fourcc = fourcc;
+    frame->x = x;
+    frame->y = y;
+    frame->backing_width = backing_w;
+    frame->backing_height = backing_h;
+    frame->modifier = modifier;
+
+    /*
+     * GPU 帧有自己的序列号：SHM consumer 看 FbShmHeader.frame_seq，
+     * GPU consumer 看 FbShmGpuFrame.frame_seq。两条路径可以独立降级，
+     * 也方便 consumer 发现 GPU 通知是否停滞。
+     */
+    d->gpu_frame_seq++;
+    frame->frame_seq = d->gpu_frame_seq;
+}
+
+static void fb_shm_broadcast_dmabuf_frame(FbShmDisplay *d,
+                                          QemuDmaBuf *dmabuf,
+                                          uint32_t w, uint32_t h,
+                                          int32_t roi_x, int32_t roi_y)
+{
+#ifndef _WIN32
+    FbShmGpuFrame frame;
+    int fd;
+    uint32_t flags = 0;
+    uint32_t x;
+    uint32_t y;
+
+    if (!dmabuf || !fb_shm_has_gpu_clients(d)) {
+        return;
+    }
+
+    fd = qemu_dmabuf_dup_fd(dmabuf);
+    if (fd < 0) {
+        return;
+    }
+
+    if (qemu_dmabuf_get_y0_top(dmabuf)) {
+        flags |= FB_SHM_GPU_FRAME_F_Y0_TOP;
+    }
+    x = qemu_dmabuf_get_x(dmabuf) + (uint32_t)roi_x;
+    y = qemu_dmabuf_get_y(dmabuf) + (uint32_t)roi_y;
+    fb_shm_gpu_frame_init(d, &frame, FB_SHM_GPU_HANDLE_DMA_BUF, flags,
+                          w, h, qemu_dmabuf_get_stride(dmabuf),
+                          qemu_dmabuf_get_fourcc(dmabuf), x, y,
+                          qemu_dmabuf_get_backing_width(dmabuf),
+                          qemu_dmabuf_get_backing_height(dmabuf),
+                          qemu_dmabuf_get_modifier(dmabuf));
+    fb_shm_broadcast_gpu_frame(d, &frame, fd);
+    close(fd);
+#else
+    (void)d;
+    (void)dmabuf;
+    (void)w;
+    (void)h;
+    (void)roi_x;
+    (void)roi_y;
+#endif
+}
+
+#if defined(CONFIG_GBM) && !defined(_WIN32)
+static void fb_shm_broadcast_texture_dmabuf_frame(FbShmDisplay *d,
+                                                  uint32_t w, uint32_t h,
+                                                  int32_t roi_x,
+                                                  int32_t roi_y)
+{
+    FbShmGpuFrame frame;
+    EGLint stride = 0;
+    EGLint fourcc = 0;
+    EGLuint64KHR modifier = 0;
+    uint32_t flags = 0;
+    int fd;
+
+    if (!fb_shm_has_gpu_clients(d) || !d->gl_backing_id) {
+        return;
+    }
+
+    /*
+     * EGL_MESA_image_dma_buf_export 把当前 GL texture 导出成 dma-buf fd。
+     * fd 只描述 GPU backing，不做 CPU readback；consumer 负责导入到
+     * VAAPI/CUDA/DRM 等它自己的硬件编码栈。
+     */
+    fd = egl_get_fd_for_texture(d->gl_backing_id, &stride, &fourcc, &modifier);
+    if (fd < 0) {
+        return;
+    }
+
+    if (d->gl_y0_top) {
+        flags |= FB_SHM_GPU_FRAME_F_Y0_TOP;
+    }
+    fb_shm_gpu_frame_init(d, &frame, FB_SHM_GPU_HANDLE_DMA_BUF, flags,
+                          w, h, (uint32_t)stride, (uint32_t)fourcc,
+                          d->gl_x + (uint32_t)roi_x,
+                          d->gl_y + (uint32_t)roi_y,
+                          d->gl_backing_w, d->gl_backing_h,
+                          (uint64_t)modifier);
+    fb_shm_broadcast_gpu_frame(d, &frame, fd);
+    close(fd);
+}
+#else
+static void fb_shm_broadcast_texture_dmabuf_frame(FbShmDisplay *d,
+                                                  uint32_t w, uint32_t h,
+                                                  int32_t roi_x,
+                                                  int32_t roi_y)
+{
+    (void)d;
+    (void)w;
+    (void)h;
+    (void)roi_x;
+    (void)roi_y;
+}
+#endif
+
+#ifdef _WIN32
+static char *fb_shm_win32_d3d_name(FbShmDisplay *d)
+{
+    g_autofree char *safe_id = fb_shm_win32_safe_id(d->id);
+
+    d->gl_d3d_generation++;
+    return g_strdup_printf("Local\\qemu-fb-shm-%s-d3d-%u",
+                           safe_id, d->gl_d3d_generation);
+}
+
+static bool fb_shm_d3d_texture_share_named(ID3D11Texture2D *texture,
+                                           const char *name,
+                                           HANDLE *handle, Error **errp)
+{
+    IDXGIResource1 *resource = NULL;
+    g_autofree gunichar2 *wide_name = NULL;
+    HRESULT hr;
+
+    wide_name = g_utf8_to_utf16(name, -1, NULL, NULL, NULL);
+    if (!wide_name) {
+        error_setg(errp, "fb-shm: invalid D3D shared texture name");
+        return false;
+    }
+
+    hr = texture->lpVtbl->QueryInterface(texture, &IID_IDXGIResource1,
+                                         (void **)&resource);
+    if (FAILED(hr)) {
+        error_setg(errp, "fb-shm: IDXGIResource1 query failed: 0x%08lx",
+                   (unsigned long)hr);
+        return false;
+    }
+
+    hr = resource->lpVtbl->CreateSharedHandle(
+        resource, NULL,
+        DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+        (LPCWSTR)wide_name, handle);
+    resource->lpVtbl->Release(resource);
+
+    if (FAILED(hr)) {
+        error_setg(errp, "fb-shm: CreateSharedHandle failed: 0x%08lx",
+                   (unsigned long)hr);
+        return false;
+    }
+    return true;
+}
+
+static bool fb_shm_d3d_prepare_share(FbShmDisplay *d, void *d3d_tex2d)
+{
+    ID3D11Texture2D *texture = d3d_tex2d;
+    g_autofree char *name = NULL;
+    HANDLE handle = NULL;
+    Error *err = NULL;
+
+    if (!texture) {
+        fb_shm_gl_forget_d3d_share(d);
+        return false;
+    }
+    if (d->gl_d3d_tex2d == d3d_tex2d && d->gl_d3d_name) {
+        return true;
+    }
+
+    fb_shm_gl_forget_d3d_share(d);
+    name = fb_shm_win32_d3d_name(d);
+    if (!fb_shm_d3d_texture_share_named(texture, name, &handle, &err)) {
+        warn_report_err(err);
+        return false;
+    }
+
+    /*
+     * 共享句柄由 QEMU 持有到 scanout 切换，consumer 通过名称打开同一份
+     * D3D11 texture。这里不创建 staging texture，因此没有 GPU->CPU 拷贝。
+     */
+    d->gl_d3d_tex2d = d3d_tex2d;
+    d->gl_d3d_name = g_steal_pointer(&name);
+    d->gl_d3d_share_handle = handle;
+    return true;
+}
+
+static void fb_shm_broadcast_d3d_frame(FbShmDisplay *d,
+                                       uint32_t w, uint32_t h,
+                                       int32_t roi_x, int32_t roi_y)
+{
+    FbShmGpuFrame frame;
+    uint32_t flags = 0;
+
+    if (!fb_shm_has_gpu_clients(d) || !d->gl_d3d_name) {
+        return;
+    }
+    if (d->gl_y0_top) {
+        flags |= FB_SHM_GPU_FRAME_F_Y0_TOP;
+    }
+
+    fb_shm_gpu_frame_init(d, &frame, FB_SHM_GPU_HANDLE_D3D11_TEXTURE,
+                          flags, w, h, d->gl_backing_w * 4,
+                          FB_SHM_FOURCC_BGRA,
+                          d->gl_x + (uint32_t)roi_x,
+                          d->gl_y + (uint32_t)roi_y,
+                          d->gl_backing_w, d->gl_backing_h, 0);
+    if (g_strlcpy(frame.handle_name, d->gl_d3d_name,
+                  sizeof(frame.handle_name)) >= sizeof(frame.handle_name)) {
+        return;
+    }
+    fb_shm_broadcast_gpu_frame(d, &frame, -1);
+}
+#endif
+
+static void fb_shm_broadcast_current_gpu_frame(FbShmDisplay *d,
+                                               uint32_t w, uint32_t h,
+                                               int32_t roi_x, int32_t roi_y)
+{
+    if (!fb_shm_has_gpu_clients(d)) {
+        return;
+    }
+
+    if (d->gl_dmabuf) {
+        fb_shm_broadcast_dmabuf_frame(d, d->gl_dmabuf, w, h, roi_x, roi_y);
+        return;
+    }
+#ifdef _WIN32
+    if (d->gl_d3d_name) {
+        fb_shm_broadcast_d3d_frame(d, w, h, roi_x, roi_y);
+        return;
+    }
+#endif
+    fb_shm_broadcast_texture_dmabuf_frame(d, w, h, roi_x, roi_y);
+}
+
 static bool fb_shm_gl_rate_limited(FbShmDisplay *d, uint64_t now_ns)
 {
     uint64_t interval_ns;
@@ -1320,6 +1738,7 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     int32_t rx, ry;
     uint64_t now_ns;
     bool geometry_changed;
+    bool gpu_only_clients;
     Error *err = NULL;
 
     if (!d->gl_scanout || !d->gl_guest_fb.texture || !sw || !sh) {
@@ -1334,6 +1753,17 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     geometry_changed = !d->shm || rw != d->cur_w || rh != d->cur_h ||
                        sw != d->cur_src_w || sh != d->cur_src_h ||
                        rx != d->cur_roi_x || ry != d->cur_roi_y;
+    gpu_only_clients = fb_shm_has_gpu_clients(d) && !fb_shm_has_shm_consumers(d);
+    now_ns = fb_shm_now_ns();
+    if (fb_shm_gl_rate_limited(d, now_ns)) {
+        return;
+    }
+
+    fb_shm_broadcast_current_gpu_frame(d, rw, rh, rx, ry);
+    if (gpu_only_clients) {
+        return;
+    }
+
     if (geometry_changed) {
         /*
          * 旧 PBO 的尺寸对应旧 memfd/ROI。几何变化时直接丢掉未发布帧，
@@ -1346,11 +1776,6 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
         }
     } else {
         fb_shm_gl_pbo_drain(d);
-    }
-
-    now_ns = fb_shm_now_ns();
-    if (fb_shm_gl_rate_limited(d, now_ns)) {
-        return;
     }
 
     if (d->gl_blit_fb.width != rw || d->gl_blit_fb.height != rh) {
@@ -1407,6 +1832,7 @@ static void fb_shm_gl_scanout_disable(DisplayChangeListener *dcl)
 
     d->gl_scanout = false;
     d->gl_last_frame_ns = 0;
+    d->gl_dmabuf = NULL;
     fb_shm_gl_release_fbos(d);
 }
 
@@ -1421,15 +1847,18 @@ static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
 
-    (void)d3d_tex2d;
-
     if (!backing_id || !backing_width || !backing_height ||
         x >= backing_width || y >= backing_height) {
         d->gl_scanout = false;
+        d->gl_dmabuf = NULL;
+#ifdef _WIN32
+        fb_shm_gl_forget_d3d_share(d);
+#endif
         return;
     }
 
     d->gl_scanout = true;
+    d->gl_dmabuf = NULL;
     d->gl_y0_top = backing_y_0_top;
     d->gl_backing_id = backing_id;
     d->gl_backing_w = backing_width;
@@ -1439,6 +1868,18 @@ static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
     d->gl_w = MIN(w, backing_width - x);
     d->gl_h = MIN(h, backing_height - y);
 
+#ifdef _WIN32
+    if (!fb_shm_d3d_prepare_share(d, d3d_tex2d)) {
+        /*
+         * ANGLE 没给 D3D texture 或共享句柄创建失败时，只禁用 GPU
+         * metadata；后面的 GL texture -> PBO/SHM 回退仍然照常工作。
+         */
+        (void)0;
+    }
+#else
+    (void)d3d_tex2d;
+#endif
+
     if (!fb_shm_gl_make_current(d)) {
         return;
     }
@@ -1446,6 +1887,59 @@ static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
     egl_fb_setup_for_tex(&d->gl_guest_fb,
                          backing_width, backing_height, backing_id, false);
 }
+
+#ifdef CONFIG_GBM
+static void fb_shm_gl_scanout_dmabuf(DisplayChangeListener *dcl,
+                                     QemuDmaBuf *dmabuf)
+{
+    FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+    uint32_t texture;
+
+    if (!dmabuf) {
+        d->gl_scanout = false;
+        d->gl_dmabuf = NULL;
+        return;
+    }
+    if (!fb_shm_gl_make_current(d)) {
+        return;
+    }
+
+    /*
+     * Linux dma-buf 是真正的 GPU 零拷贝来源：consumer 能直接导入同一份
+     * buffer；SHM 兼容路径则把它作为 GL texture 读回到旧 ABI。
+     */
+    egl_dmabuf_import_texture(dmabuf);
+    texture = qemu_dmabuf_get_texture(dmabuf);
+    if (!texture) {
+        return;
+    }
+
+    d->gl_scanout = true;
+    d->gl_dmabuf = dmabuf;
+    d->gl_y0_top = qemu_dmabuf_get_y0_top(dmabuf);
+    d->gl_backing_id = texture;
+    d->gl_backing_w = qemu_dmabuf_get_backing_width(dmabuf);
+    d->gl_backing_h = qemu_dmabuf_get_backing_height(dmabuf);
+    d->gl_x = qemu_dmabuf_get_x(dmabuf);
+    d->gl_y = qemu_dmabuf_get_y(dmabuf);
+    d->gl_w = qemu_dmabuf_get_width(dmabuf);
+    d->gl_h = qemu_dmabuf_get_height(dmabuf);
+
+    egl_fb_setup_for_tex(&d->gl_guest_fb, d->gl_backing_w,
+                         d->gl_backing_h, texture, false);
+}
+
+static void fb_shm_gl_release_dmabuf(DisplayChangeListener *dcl,
+                                     QemuDmaBuf *dmabuf)
+{
+    FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+
+    if (d->gl_dmabuf == dmabuf) {
+        d->gl_dmabuf = NULL;
+    }
+    egl_dmabuf_release_texture(dmabuf);
+}
+#endif
 
 static void fb_shm_gl_update(DisplayChangeListener *dcl,
                              uint32_t x, uint32_t y,
@@ -1487,6 +1981,10 @@ static const DisplayChangeListenerOps fb_shm_ops = {
     .dpy_gl_scanout_disable = fb_shm_gl_scanout_disable,
     .dpy_gl_scanout_texture = fb_shm_gl_scanout_texture,
     .dpy_gl_update          = fb_shm_gl_update,
+#ifdef CONFIG_GBM
+    .dpy_gl_scanout_dmabuf  = fb_shm_gl_scanout_dmabuf,
+    .dpy_gl_release_dmabuf  = fb_shm_gl_release_dmabuf,
+#endif
 #endif
 };
 

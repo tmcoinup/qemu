@@ -1528,11 +1528,12 @@
 ##
 # @DisplayFbShm:
 #
-# Cross-host framebuffer shared-memory display backend. The guest
-# framebuffer is exported through host-native shared memory; external
-# consumers connect to the control socket and receive either Linux fds
-# or Win32 object names, then read frames in BGR0 / 32bpp with a seqlock
-# pattern (see include/ui/fb-shm-abi.h).
+# Cross-host framebuffer export backend. The guest framebuffer is
+# exported through host-native shared memory; GPU scanout clients may
+# additionally subscribe to dma-buf / D3D11 shared texture metadata.
+# External consumers connect to the control socket and receive either
+# Linux fds or Win32 object names, then read frames in BGR0 / 32bpp
+# with a seqlock pattern (see include/ui/fb-shm-abi.h).
 #
 # @id: backend identifier used to derive default paths
 #     (default: "qemu-${pid}").

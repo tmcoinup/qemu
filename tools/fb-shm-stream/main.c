@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * 主循环保持很薄：解析参数、连接 fb-shm、等待帧通知、按 seqlock 语义复制
- * 当前帧，然后写入 ffmpeg stdin。平台差异都在 platform.c 中。
+ * 当前帧，然后写入 ffmpeg stdin。GPU 模式的控制面同样在这里调度，但平台
+ * fd/name 细节都在 platform.c 中。
  */
 
 #include "common.h"
@@ -14,9 +15,25 @@ static void fb_shm_stream_usage(const char *argv0)
     fprintf(stderr,
             "usage: %s --sock PATH --output URL [--encoder h264_nvenc]\n"
             "          [--preset p1] [--bitrate 6M] [--gop 60]\n"
-            "          [--roi x,y,w,h] [--rate Hz] [--container muxer]\n",
+            "          [--roi x,y,w,h] [--rate Hz] [--container muxer]\n"
+            "          [--mode auto|gpu|shm]\n",
             argv0);
     exit(2);
+}
+
+static StreamMode fb_shm_stream_parse_mode(const char *value)
+{
+    if (!strcmp(value, "auto")) {
+        return STREAM_MODE_AUTO;
+    }
+    if (!strcmp(value, "gpu")) {
+        return STREAM_MODE_GPU;
+    }
+    if (!strcmp(value, "shm")) {
+        return STREAM_MODE_SHM;
+    }
+    fb_shm_stream_die("--mode must be auto, gpu or shm");
+    return STREAM_MODE_AUTO;
 }
 
 static Options fb_shm_stream_parse_args(int argc, char **argv)
@@ -25,6 +42,7 @@ static Options fb_shm_stream_parse_args(int argc, char **argv)
         .encoder = "h264_nvenc",
         .preset = "p1",
         .bitrate = "6M",
+        .mode = STREAM_MODE_AUTO,
         .gop = 60,
     };
 
@@ -44,6 +62,8 @@ static Options fb_shm_stream_parse_args(int argc, char **argv)
             o.bitrate = argv[++i];
         } else if (!strcmp(a, "--container") && v) {
             o.container = argv[++i];
+        } else if (!strcmp(a, "--mode") && v) {
+            o.mode = fb_shm_stream_parse_mode(argv[++i]);
         } else if (!strcmp(a, "--gop") && v) {
             o.gop = atoi(argv[++i]);
         } else if (!strcmp(a, "--rate") && v) {
@@ -96,6 +116,9 @@ static const FbShmHeader *fb_shm_stream_header(Session *s)
 {
     const FbShmHeader *hdr = (const FbShmHeader *)s->map.base;
 
+    if (!s->shm_ready) {
+        fb_shm_stream_die("fb-shm shared-memory path is not available");
+    }
     if (!hdr || hdr->magic != FB_SHM_MAGIC || hdr->version != FB_SHM_VERSION) {
         fb_shm_stream_die("invalid fb-shm header");
     }
@@ -154,9 +177,15 @@ static size_t fb_shm_stream_read_frame(Session *s, const FbShmHeader *hdr)
 static bool fb_shm_stream_wait_frame(Session *s)
 {
 #ifdef _WIN32
-    DWORD rc = WaitForSingleObject(s->map.event_handle, 1000);
+    DWORD rc;
 
-    (void)fb_shm_stream_try_resize(s);
+    (void)fb_shm_stream_try_control(s);
+    if (!s->map.event_handle) {
+        Sleep(10);
+        return false;
+    }
+    rc = WaitForSingleObject(s->map.event_handle, 1000);
+    (void)fb_shm_stream_try_control(s);
     return rc == WAIT_OBJECT_0;
 #else
     struct pollfd pfd[2] = {
@@ -170,7 +199,7 @@ static bool fb_shm_stream_wait_frame(Session *s)
         return false;
     }
     if (pfd[1].revents & POLLIN) {
-        (void)fb_shm_stream_try_resize(s);
+        (void)fb_shm_stream_try_control(s);
     }
     if (!(pfd[0].revents & POLLIN)) {
         return false;
@@ -189,7 +218,23 @@ static void fb_shm_stream_init_session(Session *s)
 #ifndef _WIN32
     s->map.memfd = -1;
     s->map.eventfd = -1;
+    s->gpu_fd = -1;
 #endif
+}
+
+static void fb_shm_stream_log_gpu_frame(Session *s)
+{
+    const FbShmGpuFrame *g = &s->gpu_frame;
+
+    if (!s->gpu_frame_ready || s->gpu_logged) {
+        return;
+    }
+    fprintf(stderr,
+            "[fb-shm] gpu-frame: type=%u %ux%u stride=%u fourcc=0x%08x "
+            "seq=%" PRIu64 "\n",
+            g->handle_type, g->width, g->height, g->stride,
+            g->fourcc, g->frame_seq);
+    s->gpu_logged = true;
 }
 
 int main(int argc, char **argv)
@@ -200,18 +245,42 @@ int main(int argc, char **argv)
 
     fb_shm_stream_init_session(&s);
     s.sock = fb_shm_stream_connect_unix_socket(o.sock);
-    fb_shm_stream_hello(&s);
+    fb_shm_stream_hello(&s, o.mode);
     fb_shm_stream_request_roi_rate(&o, s.sock);
     fb_shm_stream_set_sock_nonblock(s.sock);
 
-    fprintf(stderr, "[fb-shm] connected: %ux%u shm=%zuB\n",
-            fb_shm_stream_header(&s)->width,
-            fb_shm_stream_header(&s)->height, s.map.size);
+    if (s.shm_ready) {
+        fprintf(stderr, "[fb-shm] connected: %ux%u shm=%zuB\n",
+                fb_shm_stream_header(&s)->width,
+                fb_shm_stream_header(&s)->height, s.map.size);
+    } else {
+        fprintf(stderr, "[fb-shm] connected: waiting for GPU frames\n");
+    }
 
     while (!o.max_frames || frames < o.max_frames) {
         const FbShmHeader *hdr;
         size_t len;
 
+        (void)fb_shm_stream_try_control(&s);
+        fb_shm_stream_log_gpu_frame(&s);
+        if (o.mode == STREAM_MODE_GPU && !s.gpu_frame_ready) {
+#ifdef _WIN32
+            Sleep(10);
+#else
+            usleep(10000);
+#endif
+            continue;
+        }
+        if (o.mode == STREAM_MODE_GPU) {
+            /*
+             * 这里故意不静默降级到 SHM：GPU strict 模式用于验证 QEMU
+             * 是否真的发布了 dma-buf/D3D 共享纹理。当前 ffmpeg stdin
+             * 后端不能导入这些句柄，真正编码应由后续 libav/NVENC/AMF
+             * GPU backend 接管。
+             */
+            fb_shm_stream_die("GPU frame export is available, but this "
+                              "streamer build has no native GPU encoder");
+        }
         if (!fb_shm_stream_wait_frame(&s)) {
             continue;
         }
@@ -228,6 +297,7 @@ int main(int argc, char **argv)
     }
 
     fb_shm_stream_close_ffmpeg(s.ffmpeg);
+    fb_shm_stream_close_gpu_frame(&s);
     free(s.frame);
     fb_shm_stream_close_mapping(&s.map);
     if (s.sock != FB_SHM_STREAM_INVALID_SOCKET) {

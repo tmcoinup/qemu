@@ -23,8 +23,8 @@
 #
 # 边玩边拉流到 ffmpeg / NVENC：
 #     ./start-vm.sh 1                       # SDL 窗口照常出现，可直接玩
-#     scripts/qemu-fb-shm-stream.py --sock /tmp/qemu-stealth-1.fb \\
-#         --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M
+#     qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \\
+#         --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M --mode auto
 #
 # 默认值（90% 情况都不用改）：
 #     BRIDGE=br0           桥接 br0（不存在自动回退到 user-mode NAT）
@@ -42,10 +42,11 @@
 # 显示后端 — 两条独立通道，默认全开：
 #     SDL 窗口（默认开）   本地交互窗口；DNF 等需要直接玩游戏的场景用。
 #                          --no-sdl 关；--headless 自动关并启 VNC 替代。
-#     fb-shm 推流（默认开）零拷贝共享内存推流，guest 完全不可见。
-#                          外部进程连 unix socket 拿 memfd+eventfd，配合
-#                          scripts/qemu-fb-shm-stream.py → ffmpeg/NVENC
-#                          推 RTMP / UDP / SRT / 本地 mp4。--no-fb-shm 关。
+#     fb-shm 推流（默认开）共享内存推流 + 可选 GPU frame metadata，guest 完全不可见。
+#                          外部进程连 unix socket 拿 memfd/eventfd；GL/dma-buf
+#                          路径还能订阅 NOTIFY_GPU_FRAME 做零拷贝 GPU handoff。
+#                          qemu-fb-shm-stream → ffmpeg/NVENC 推 RTMP / UDP / SRT /
+#                          本地 mp4。--no-fb-shm 关。
 #     --headless           关 SDL，开 VNC（fb-shm 仍照常）。
 #
 # 环境变量（不常用，默认就好）：

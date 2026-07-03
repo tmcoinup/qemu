@@ -3,12 +3,12 @@
 ======================================================================
 
 The ``fb-shm`` display backend exports the (optionally cropped) guest
-framebuffer through host shared memory plus a doorbell event, so
-external processes can pull frames at low latency without writing to
-disk and without spawning an in-process video encoder.  Linux hosts use
-``memfd`` + ``eventfd``.  Windows hosts use a named file mapping plus a
-per-client Win32 event, while preserving the same frame header and
-control ABI.
+framebuffer through host shared memory plus a doorbell event, and can
+also publish GPU-resident scanout handles to clients that explicitly
+request them.  Linux hosts use ``memfd`` + ``eventfd`` for the SHM
+path and ``dma-buf`` fds for GPU frames.  Windows hosts use a named
+file mapping plus a per-client Win32 event for SHM, and named D3D11
+shared textures for GPU frames.
 
 It was designed for three workloads that don't fit the existing
 backends well:
@@ -37,15 +37,15 @@ Architecture
     |  guest GPU device (virtio-gpu / std-vga / qxl)    |
     |              |                                    |
     |              v                                    |
-    |       DisplaySurface  (pixman_image_t, BGR0)      |
+    |       DisplaySurface or GL/dma-buf/D3D scanout    |
     |              |                                    |
     |              v                                    |
     |     fb-shm DisplayChangeListener                  |
-    |              |                                    |
-    |   pixman_image_composite32(SRC, ROI -> dst[i])    |
-    |              |                                    |
-    |              v                                    |
-    |   shm    [hdr|buf0|buf1]   event    [doorbell]    |
+    |        |                       |                  |
+    |        | SHM fallback          | GPU export       |
+    |        v                       v                  |
+    |   shm [hdr|buf0|buf1]     dma-buf / D3D11 name    |
+    |   event [doorbell]        NOTIFY_GPU_FRAME        |
     +-------|----------------------|--------------------+
             |  AF_UNIX control      |
             |  socket               |
@@ -54,9 +54,9 @@ Architecture
     |  receive mapping/event handles or names |
     |  mmap / MapViewOfFile                   |
     |  for ever:                              |
-    |    poll(evfd)                           |
-    |    seqlock-read shm[active_idx]         |
-    |    write(ffmpeg_stdin, frame)           |
+    |    poll(evfd) or control socket         |
+    |    SHM: seqlock-read shm[active_idx]    |
+    |    GPU: import dma-buf / D3D11 texture  |
     |                                         |
     |  ffmpeg                                 |
     |    -f rawvideo -pix_fmt bgr0 -i -        |
@@ -73,10 +73,10 @@ Producer side (QEMU) work per frame:
 3. Two atomic stores (``active_idx``, ``frame_seq``) and one doorbell
    signal (``eventfd`` on Linux, ``SetEvent`` on Windows).
 
-There is no host-side encoding, no scaling, no colour-space conversion
-beyond what ``pixman`` already does for any backend, and no extra
-buffer copy.  Anti-cheat code paths see exactly the same DCL hooks
-that ``-display sdl`` and ``-display gtk`` install.
+There is no host-side encoding inside QEMU.  In GPU mode QEMU does not
+perform a GL readback: it sends a control-plane descriptor for the same
+GPU backing object.  If the consumer cannot import that handle, it can
+ignore ``NOTIFY_GPU_FRAME`` and keep using the SHM BGR0 path.
 
 Data flow & ABI
 ===============
@@ -215,8 +215,18 @@ Reference consumer
 ==================
 
 ``qemu-fb-shm-stream`` implements the full handshake and
-seqlock reader, then pipes raw frames into ffmpeg.  Encoders verified
-to work end-to-end:
+seqlock reader, then pipes raw frames into ffmpeg.  It accepts
+``--mode auto|gpu|shm``:
+
+* ``auto`` (default) asks QEMU for GPU frame notifications but keeps
+  the SHM rawvideo ffmpeg path as the working stream path.
+* ``shm`` disables GPU notifications and preserves the historical ABI.
+* ``gpu`` refuses SHM fallback and is intended for native GPU encoder
+  backends that import dma-buf / D3D11 directly.  The bundled stdin
+  ffmpeg backend validates the GPU export and fails rather than
+  pretending the SHM path is zero-copy GPU encoding.
+
+Encoders verified to work end-to-end on the SHM fallback path:
 
 * ``h264_nvenc`` / ``hevc_nvenc`` — recommended for 1080p60 fan-out;
   one session per VM.
@@ -230,7 +240,7 @@ Examples::
     # local preview to ffplay/mpv
     qemu-fb-shm-stream --sock /run/qemu/fb-qemu-12345.sock \
         --output 'udp://127.0.0.1:5000?pkt_size=1316' \
-        --encoder h264_nvenc --bitrate 8M
+        --encoder h264_nvenc --bitrate 8M --mode auto
 
     # local capture to mp4 (no network)
     qemu-fb-shm-stream --sock /run/qemu/fb-vm1.sock \

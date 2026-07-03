@@ -44,6 +44,12 @@ typedef int FbShmStreamSocket;
 
 #include "ui/fb-shm-abi.h"
 
+typedef enum StreamMode {
+    STREAM_MODE_AUTO,
+    STREAM_MODE_GPU,
+    STREAM_MODE_SHM,
+} StreamMode;
+
 typedef struct Options {
     const char *sock;
     const char *output;
@@ -51,6 +57,7 @@ typedef struct Options {
     const char *preset;
     const char *bitrate;
     const char *container;
+    StreamMode mode;
     int gop;
     int rate;
     int max_frames;
@@ -80,6 +87,13 @@ typedef struct Session {
     uint8_t *frame;
     size_t frame_cap;
     uint64_t last_seq;
+    FbShmGpuFrame gpu_frame;
+    bool gpu_frame_ready;
+    bool gpu_logged;
+    bool shm_ready;
+#ifndef _WIN32
+    int gpu_fd;
+#endif
     uint32_t ff_w;
     uint32_t ff_h;
     uint32_t ff_fps;
@@ -103,8 +117,9 @@ FbShmStreamSocket fb_shm_stream_connect_unix_socket(const char *path);
 void fb_shm_stream_set_sock_nonblock(FbShmStreamSocket fd);
 void fb_shm_stream_close_socket(FbShmStreamSocket fd);
 void fb_shm_stream_cleanup_network(void);
-void fb_shm_stream_hello(Session *s);
-bool fb_shm_stream_try_resize(Session *s);
+void fb_shm_stream_hello(Session *s, StreamMode mode);
+bool fb_shm_stream_try_control(Session *s);
+void fb_shm_stream_close_gpu_frame(Session *s);
 
 FILE *fb_shm_stream_open_ffmpeg(const Options *o, const FbShmHeader *hdr);
 void fb_shm_stream_close_ffmpeg(FILE *ffmpeg);

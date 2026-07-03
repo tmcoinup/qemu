@@ -101,6 +101,18 @@ void fb_shm_stream_close_mapping(Mapping *m)
 #endif
 }
 
+void fb_shm_stream_close_gpu_frame(Session *s)
+{
+#ifndef _WIN32
+    if (s->gpu_fd >= 0) {
+        close(s->gpu_fd);
+        s->gpu_fd = -1;
+    }
+#else
+    (void)s;
+#endif
+}
+
 #ifdef _WIN32
 static void fb_shm_stream_map_from_names(Mapping *m,
                                          const FbShmWin32Names *names,
@@ -210,8 +222,24 @@ void fb_shm_stream_cleanup_network(void)
 #endif
 }
 
+static uint32_t fb_shm_stream_hello_flags(StreamMode mode)
+{
+    uint32_t flags = FB_SHM_HELLO_F_RESIZE_NOTIFY;
+
+    if (mode != STREAM_MODE_SHM) {
+        flags |= FB_SHM_HELLO_F_GPU_FRAMES;
+    }
+    if (mode == STREAM_MODE_GPU) {
+        flags |= FB_SHM_HELLO_F_GPU_REQUIRED;
+    }
+#ifdef _WIN32
+    flags |= FB_SHM_HELLO_F_WIN32_NAMES;
+#endif
+    return flags;
+}
+
 #ifndef _WIN32
-static void fb_shm_stream_hello_posix(Session *s)
+static void fb_shm_stream_hello_posix(Session *s, StreamMode mode)
 {
     FbShmCtlReq req = fb_shm_stream_ctl_req(FB_SHM_CTL_HELLO);
     FbShmCtlAck ack;
@@ -222,7 +250,7 @@ static void fb_shm_stream_hello_posix(Session *s)
                           .msg_controllen = sizeof(cbuf) };
     int fds[2] = { -1, -1 };
 
-    req.flags = FB_SHM_HELLO_F_RESIZE_NOTIFY;
+    req.flags = fb_shm_stream_hello_flags(mode);
     if (fb_shm_stream_send_all(s->sock, &req, sizeof(req)) < 0 ||
         recvmsg(s->sock, &msg, 0) != sizeof(ack) ||
         ack.magic != FB_SHM_MAGIC || ack.status != FB_SHM_CTL_OK) {
@@ -231,21 +259,30 @@ static void fb_shm_stream_hello_posix(Session *s)
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(&msg); cm;
          cm = CMSG_NXTHDR(&msg, cm)) {
         if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
-            memcpy(fds, CMSG_DATA(cm), sizeof(fds));
+            size_t bytes = cm->cmsg_len - CMSG_LEN(0);
+            memcpy(fds, CMSG_DATA(cm), bytes < sizeof(fds) ? bytes : sizeof(fds));
         }
     }
-    if (fds[0] < 0 || fds[1] < 0) {
+    if (fds[0] >= 0 && fds[1] >= 0) {
+        fb_shm_stream_map_from_fds(&s->map, fds[0], fds[1], ack.shm_size);
+        s->shm_ready = true;
+        return;
+    }
+    if (mode != STREAM_MODE_GPU) {
         fb_shm_stream_die("fb-shm HELLO missing fds");
     }
-    fb_shm_stream_map_from_fds(&s->map, fds[0], fds[1], ack.shm_size);
 }
 
-static bool fb_shm_stream_try_resize_posix(Session *s)
+static bool fb_shm_stream_try_control_posix(Session *s)
 {
     FbShmCtlAck ack;
+    FbShmGpuFrame gpu;
     char cbuf[CMSG_SPACE(sizeof(int) * 2)];
-    struct iovec iov = { .iov_base = &ack, .iov_len = sizeof(ack) };
-    struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
+    struct iovec iov[2] = {
+        { .iov_base = &ack, .iov_len = sizeof(ack) },
+        { .iov_base = &gpu, .iov_len = sizeof(gpu) },
+    };
+    struct msghdr msg = { .msg_iov = iov, .msg_iovlen = 2,
                           .msg_control = cbuf,
                           .msg_controllen = sizeof(cbuf) };
     int fds[2] = { -1, -1 };
@@ -254,45 +291,73 @@ static bool fb_shm_stream_try_resize_posix(Session *s)
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         return false;
     }
-    if (n != sizeof(ack) || ack.magic != FB_SHM_MAGIC ||
-        ack.op != FB_SHM_CTL_NOTIFY_RESIZED || ack.status != FB_SHM_CTL_OK) {
+    if (n < (ssize_t)sizeof(ack) || ack.magic != FB_SHM_MAGIC ||
+        ack.status != FB_SHM_CTL_OK) {
         return false;
     }
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(&msg); cm;
          cm = CMSG_NXTHDR(&msg, cm)) {
         if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
-            memcpy(fds, CMSG_DATA(cm), sizeof(fds));
+            size_t bytes = cm->cmsg_len - CMSG_LEN(0);
+            memcpy(fds, CMSG_DATA(cm), bytes < sizeof(fds) ? bytes : sizeof(fds));
         }
     }
-    if (fds[0] >= 0 && fds[1] >= 0) {
+    if (ack.op == FB_SHM_CTL_NOTIFY_RESIZED && fds[0] >= 0 && fds[1] >= 0) {
         fb_shm_stream_map_from_fds(&s->map, fds[0], fds[1], ack.shm_size);
         s->last_seq = 0;
+        s->shm_ready = true;
         return true;
+    }
+    if (ack.op == FB_SHM_CTL_NOTIFY_GPU_FRAME &&
+        n == (ssize_t)(sizeof(ack) + sizeof(gpu)) &&
+        gpu.magic == FB_SHM_MAGIC && gpu.size == sizeof(gpu)) {
+        fb_shm_stream_close_gpu_frame(s);
+        s->gpu_frame = gpu;
+        s->gpu_fd = fds[0];
+        s->gpu_frame_ready = true;
+        if (fds[1] >= 0) {
+            close(fds[1]);
+        }
+        return true;
+    }
+    if (fds[0] >= 0) {
+        close(fds[0]);
+    }
+    if (fds[1] >= 0) {
+        close(fds[1]);
     }
     return false;
 }
 #else
-static void fb_shm_stream_hello_win32(Session *s)
+static void fb_shm_stream_hello_win32(Session *s, StreamMode mode)
 {
     FbShmCtlReq req = fb_shm_stream_ctl_req(FB_SHM_CTL_HELLO);
     FbShmCtlAck ack;
     FbShmWin32Names names;
 
-    req.flags = FB_SHM_HELLO_F_RESIZE_NOTIFY | FB_SHM_HELLO_F_WIN32_NAMES;
+    req.flags = fb_shm_stream_hello_flags(mode);
     if (fb_shm_stream_send_all(s->sock, &req, sizeof(req)) < 0 ||
         fb_shm_stream_recv_all(s->sock, &ack, sizeof(ack)) < 0 ||
-        ack.magic != FB_SHM_MAGIC || ack.status != FB_SHM_CTL_OK ||
-        fb_shm_stream_recv_all(s->sock, &names, sizeof(names)) < 0 ||
-        names.magic != FB_SHM_MAGIC) {
+        ack.magic != FB_SHM_MAGIC || ack.status != FB_SHM_CTL_OK) {
         fb_shm_stream_die("fb-shm HELLO failed");
     }
-    fb_shm_stream_map_from_names(&s->map, &names, ack.shm_size);
+    if (ack.shm_size > 0) {
+        if (fb_shm_stream_recv_all(s->sock, &names, sizeof(names)) < 0 ||
+            names.magic != FB_SHM_MAGIC) {
+            fb_shm_stream_die("fb-shm HELLO failed");
+        }
+        fb_shm_stream_map_from_names(&s->map, &names, ack.shm_size);
+        s->shm_ready = true;
+    } else if (mode != STREAM_MODE_GPU) {
+        fb_shm_stream_die("fb-shm HELLO missing Win32 names");
+    }
 }
 
-static bool fb_shm_stream_try_resize_win32(Session *s)
+static bool fb_shm_stream_try_control_win32(Session *s)
 {
     FbShmCtlAck ack;
     FbShmWin32Names names;
+    FbShmGpuFrame gpu;
     fd_set rfds;
     struct timeval tv = { 0, 0 };
     int rc;
@@ -310,35 +375,52 @@ static bool fb_shm_stream_try_resize_win32(Session *s)
      */
     fb_shm_stream_set_sock_blocking(s->sock, true);
     if (fb_shm_stream_recv_all(s->sock, &ack, sizeof(ack)) < 0 ||
-        ack.magic != FB_SHM_MAGIC ||
-        ack.op != FB_SHM_CTL_NOTIFY_RESIZED ||
-        ack.status != FB_SHM_CTL_OK ||
-        fb_shm_stream_recv_all(s->sock, &names, sizeof(names)) < 0 ||
-        names.magic != FB_SHM_MAGIC) {
+        ack.magic != FB_SHM_MAGIC || ack.status != FB_SHM_CTL_OK) {
         fb_shm_stream_set_sock_nonblock(s->sock);
         return false;
     }
+    if (ack.op == FB_SHM_CTL_NOTIFY_RESIZED) {
+        if (fb_shm_stream_recv_all(s->sock, &names, sizeof(names)) < 0 ||
+            names.magic != FB_SHM_MAGIC) {
+            fb_shm_stream_set_sock_nonblock(s->sock);
+            return false;
+        }
+        fb_shm_stream_map_from_names(&s->map, &names, ack.shm_size);
+        s->last_seq = 0;
+        s->shm_ready = true;
+        fb_shm_stream_set_sock_nonblock(s->sock);
+        return true;
+    }
+    if (ack.op == FB_SHM_CTL_NOTIFY_GPU_FRAME) {
+        if (fb_shm_stream_recv_all(s->sock, &gpu, sizeof(gpu)) < 0 ||
+            gpu.magic != FB_SHM_MAGIC || gpu.size != sizeof(gpu)) {
+            fb_shm_stream_set_sock_nonblock(s->sock);
+            return false;
+        }
+        s->gpu_frame = gpu;
+        s->gpu_frame_ready = true;
+        fb_shm_stream_set_sock_nonblock(s->sock);
+        return true;
+    }
     fb_shm_stream_set_sock_nonblock(s->sock);
-    fb_shm_stream_map_from_names(&s->map, &names, ack.shm_size);
-    s->last_seq = 0;
-    return true;
+    return false;
 }
 #endif
 
-void fb_shm_stream_hello(Session *s)
+void fb_shm_stream_hello(Session *s, StreamMode mode)
 {
 #ifdef _WIN32
-    fb_shm_stream_hello_win32(s);
+    fb_shm_stream_hello_win32(s, mode);
 #else
-    fb_shm_stream_hello_posix(s);
+    fb_shm_stream_hello_posix(s, mode);
 #endif
 }
 
-bool fb_shm_stream_try_resize(Session *s)
+bool fb_shm_stream_try_control(Session *s)
 {
 #ifdef _WIN32
-    return fb_shm_stream_try_resize_win32(s);
+    return fb_shm_stream_try_control_win32(s);
 #else
-    return fb_shm_stream_try_resize_posix(s);
+    return fb_shm_stream_try_control_posix(s);
 #endif
 }

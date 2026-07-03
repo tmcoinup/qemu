@@ -161,6 +161,12 @@ void qmp_input_send_event(const char *device,
     for (e = events; e != NULL; e = e->next) {
         InputEvent *evt = e->value;
 
+        if (evt->type == INPUT_EVENT_KIND_ABS) {
+            InputMoveEvent *move = evt->u.abs.data;
+
+            qemu_console_record_absolute_input(con, move->axis, move->value);
+        }
+
         if (evt->type == INPUT_EVENT_KIND_KEY &&
             evt->u.key.data->key->type == KEY_VALUE_KIND_NUMBER) {
             KeyValue *key = evt->u.key.data->key;

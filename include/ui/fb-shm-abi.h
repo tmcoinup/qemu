@@ -9,8 +9,12 @@
  * Memory map (single memfd, sealed against grow/shrink):
  *
  *   [0 .. FB_SHM_HEADER_SIZE)     : FbShmHeader (256 bytes)
- *   [hdr.buf_offset[0] .. +len)   : pixel buffer slot 0 (BGR0/BGRA, ROI sized)
+ *   [hdr.buf_offset[0] .. +len)   : pixel buffer slot 0 (BGR0/BGRA)
  *   [hdr.buf_offset[1] .. +len)   : pixel buffer slot 1
+ *
+ * hdr.buf_size is the current visible frame size.  The physical distance
+ * between buf_offset entries may be larger, allowing producers to keep a
+ * fixed backing map while ROI dimensions change.
  *
  * The producer (QEMU) commits a frame by:
  *   1. Writing the inactive slot completely.

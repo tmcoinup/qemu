@@ -147,6 +147,27 @@ static void assert_guest_mouse_position(QTestState *qts, bool valid,
     qobject_unref(resp);
 }
 
+static void send_absolute_mouse_input(QTestState *qts, int64_t x, int64_t y)
+{
+    QDict *resp;
+
+    /*
+     * 这里走已有 host QMP input-send-event 注入路径，guest 只看到普通
+     * usb-tablet 绝对鼠标事件；坐标缓存完全停留在 QEMU 进程内，
+     * 不新增 guest 可探测的查询接口。
+     */
+    resp = qtest_qmp(qts,
+                     "{ 'execute': 'input-send-event',"
+                     "  'arguments': { 'events': ["
+                     "    { 'type': 'abs',"
+                     "      'data': { 'axis': 'x', 'value': %ld } },"
+                     "    { 'type': 'abs',"
+                     "      'data': { 'axis': 'y', 'value': %ld } } ] } }",
+                     x, y);
+    g_assert(qdict_haskey(resp, "return"));
+    qobject_unref(resp);
+}
+
 static void vmware_guest_mouse_position(void)
 {
     QTestState *qts;
@@ -164,6 +185,20 @@ static void vmware_guest_mouse_position(void)
     vmware_svga_write_reg(qts, VMWARE_SVGA_REG_CURSOR_ON,
                           VMWARE_SVGA_CURSOR_ON_HIDE);
     assert_guest_mouse_position(qts, true, 123, 45, false);
+
+    qtest_quit(qts);
+}
+
+static void host_absolute_input_mouse_position(void)
+{
+    QTestState *qts;
+
+    qts = qtest_init("-vga none -device VGA -device qemu-xhci "
+                     "-device usb-tablet");
+    assert_guest_mouse_position(qts, false, 0, 0, false);
+
+    send_absolute_mouse_input(qts, 0, 0);
+    assert_guest_mouse_position(qts, true, 0, 0, true);
 
     qtest_quit(qts);
 }
@@ -197,6 +232,12 @@ int main(int argc, char **argv)
         qtest_has_device("vmware-svga")) {
         qtest_add_func("/display/pci/vmware-svga/guest-mouse-position",
                        vmware_guest_mouse_position);
+    }
+    if ((g_str_equal(arch, "i386") || g_str_equal(arch, "x86_64")) &&
+        qtest_has_device("VGA") && qtest_has_device("qemu-xhci") &&
+        qtest_has_device("usb-tablet")) {
+        qtest_add_func("/display/pci/vga/host-absolute-input-mouse-position",
+                       host_absolute_input_mouse_position);
     }
 
     return g_test_run();

@@ -41,6 +41,23 @@ static IOWatchPoll *io_watch_poll_from_source(GSource *source)
     return container_of(source, IOWatchPoll, parent);
 }
 
+static void io_watch_poll_clear_child(IOWatchPoll *iwp)
+{
+    GSource *src = iwp->src;
+
+    if (!src) {
+        return;
+    }
+
+    /*
+     * 中文注释：先发布 NULL 再进入 GLib。g_source_destroy() 可能间接触发
+     * 回调或析构；重入的清理路径看到 NULL 后便不会再次释放同一个子 source。
+     */
+    iwp->src = NULL;
+    g_source_destroy(src);
+    g_source_unref(src);
+}
+
 static gboolean io_watch_poll_prepare(GSource *source,
                                       gint *timeout)
 {
@@ -67,9 +84,7 @@ static gboolean io_watch_poll_prepare(GSource *source,
         g_source_set_callback(iwp->src, iwp->fd_read, iwp->opaque, NULL);
         g_source_attach(iwp->src, iwp->context);
     } else {
-        g_source_destroy(iwp->src);
-        g_source_unref(iwp->src);
-        iwp->src = NULL;
+        io_watch_poll_clear_child(iwp);
     }
     return FALSE;
 }
@@ -89,13 +104,9 @@ static void io_watch_poll_finalize(GSource *source)
 {
     IOWatchPoll *iwp = io_watch_poll_from_source(source);
 
+    /* 中文注释：保留 QEMU 11 新增的 ioc 引用配对，防止异步 watch 悬空。 */
     object_unref(OBJECT(iwp->ioc));
-
-    if (iwp->src) {
-        g_source_destroy(iwp->src);
-        g_source_unref(iwp->src);
-        iwp->src = NULL;
-    }
+    io_watch_poll_clear_child(iwp);
 }
 
 static GSourceFuncs io_watch_poll_funcs = {

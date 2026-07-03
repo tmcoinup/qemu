@@ -44,6 +44,39 @@ static gboolean socket_reconnect_timeout(gpointer opaque);
 static void tcp_chr_telnet_init(Chardev *chr);
 static char *qemu_chr_compute_filename(SocketChardev *s);
 
+static void tcp_chr_source_destroy_unref(GSource **sourcep)
+{
+    GSource *source = *sourcep;
+
+    if (!source) {
+        return;
+    }
+
+    /*
+     * 中文注释：source 回调可能与 chardev 销毁并发。先发布 NULL 再进入
+     * GLib，确保重入的取消路径不会重复 destroy/unref 同一个 GSource。
+     */
+    *sourcep = NULL;
+    g_source_destroy(source);
+    g_source_unref(source);
+}
+
+static void tcp_chr_source_unref_current(GSource **sourcep)
+{
+    GSource *source = *sourcep;
+
+    if (!source) {
+        return;
+    }
+
+    /*
+     * 中文注释：该函数从 source 自身回调中调用；回调返回
+     * G_SOURCE_REMOVE 后由 GLib 销毁已挂载 source，这里只释放保存的引用。
+     */
+    *sourcep = NULL;
+    g_source_unref(source);
+}
+
 static void tcp_chr_change_state(SocketChardev *s, TCPChardevState state)
 {
     switch (state) {
@@ -61,11 +94,7 @@ static void tcp_chr_change_state(SocketChardev *s, TCPChardevState state)
 
 static void tcp_chr_reconn_timer_cancel(SocketChardev *s)
 {
-    if (s->reconnect_timer) {
-        g_source_destroy(s->reconnect_timer);
-        g_source_unref(s->reconnect_timer);
-        s->reconnect_timer = NULL;
-    }
+    tcp_chr_source_destroy_unref(&s->reconnect_timer);
 }
 
 static void qemu_chr_socket_restart_timer(Chardev *chr)
@@ -340,11 +369,7 @@ static GSource *tcp_chr_add_watch(Chardev *chr, GIOCondition cond)
 
 static void remove_hup_source(SocketChardev *s)
 {
-    if (s->hup_source != NULL) {
-        g_source_destroy(s->hup_source);
-        g_source_unref(s->hup_source);
-        s->hup_source = NULL;
-    }
+    tcp_chr_source_destroy_unref(&s->hup_source);
 }
 
 static void char_socket_yank_iochannel(void *opaque)
@@ -648,11 +673,7 @@ static void tcp_chr_connect(void *opaque)
 
 static void tcp_chr_telnet_destroy(SocketChardev *s)
 {
-    if (s->telnet_source) {
-        g_source_destroy(s->telnet_source);
-        g_source_unref(s->telnet_source);
-        s->telnet_source = NULL;
-    }
+    tcp_chr_source_destroy_unref(&s->telnet_source);
 }
 
 static void tcp_chr_update_read_handler(Chardev *chr)
@@ -714,8 +735,7 @@ static gboolean tcp_chr_telnet_init_io(QIOChannel *ioc,
 end:
     g_free(s->telnet_init);
     s->telnet_init = NULL;
-    g_source_unref(s->telnet_source);
-    s->telnet_source = NULL;
+    tcp_chr_source_unref_current(&s->telnet_source);
     return G_SOURCE_REMOVE;
 }
 
@@ -1195,8 +1215,7 @@ static gboolean socket_reconnect_timeout(gpointer opaque)
     SocketChardev *s = SOCKET_CHARDEV(opaque);
 
     qemu_mutex_lock(&chr->chr_write_lock);
-    g_source_unref(s->reconnect_timer);
-    s->reconnect_timer = NULL;
+    tcp_chr_source_unref_current(&s->reconnect_timer);
     qemu_mutex_unlock(&chr->chr_write_lock);
 
     if (chr->be_open) {

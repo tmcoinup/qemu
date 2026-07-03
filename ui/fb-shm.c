@@ -54,6 +54,19 @@
 #include <sys/un.h>
 #include <linux/memfd.h>
 
+#ifdef CONFIG_OPENGL
+#define FB_SHM_GL_PBO_COUNT 3
+
+typedef struct FbShmGlPbo {
+    GLuint id;
+    GLsync fence;
+    size_t bytes;
+    uint32_t w;
+    uint32_t h;
+    bool pending;
+} FbShmGlPbo;
+#endif
+
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC      0x0001U
 #endif
@@ -142,6 +155,12 @@ struct FbShmDisplay {
     egl_fb gl_guest_fb;
     egl_fb gl_blit_fb;
     DisplaySurface *gl_slot_surface[FB_SHM_BUF_COUNT];
+    bool gl_pbo_checked;
+    bool gl_pbo_supported;
+    bool gl_warned_pbo;
+    uint32_t gl_pbo_head;
+    uint32_t gl_pbo_tail;
+    FbShmGlPbo gl_pbo[FB_SHM_GL_PBO_COUNT];
 #endif
 
     /* control socket */
@@ -251,12 +270,211 @@ static bool fb_shm_gl_make_current(FbShmDisplay *d)
     return true;
 }
 
+static bool fb_shm_gl_pbo_can_use(FbShmDisplay *d)
+{
+    int gl_version;
+    bool is_desktop;
+    bool has_pbo;
+    bool has_sync;
+
+    if (d->gl_pbo_checked) {
+        return d->gl_pbo_supported;
+    }
+
+    /*
+     * PBO 把 glReadPixels 变成“先排队、后取结果”，但没有 fence 就无法
+     * 非阻塞判断结果是否已经完成。这里要求 PBO + sync 同时可用，否则
+     * 回落到同步读回，保证 SDL 窗口和推流链路仍然可用。
+     */
+    gl_version = epoxy_gl_version();
+    is_desktop = epoxy_is_desktop_gl();
+    has_pbo = gl_version >= 30 ||
+              (is_desktop && epoxy_has_gl_extension("GL_ARB_pixel_buffer_object"));
+    has_sync = (!is_desktop && gl_version >= 30) ||
+               (is_desktop && (gl_version >= 32 ||
+                               epoxy_has_gl_extension("GL_ARB_sync")));
+
+    d->gl_pbo_supported = has_pbo && has_sync;
+    d->gl_pbo_checked = true;
+    return d->gl_pbo_supported;
+}
+
+static void fb_shm_gl_pbo_forget(FbShmGlPbo *pbo, bool delete_buffer)
+{
+    if (pbo->fence) {
+        glDeleteSync(pbo->fence);
+        pbo->fence = NULL;
+    }
+
+    if (delete_buffer && pbo->id) {
+        glDeleteBuffers(1, &pbo->id);
+        pbo->id = 0;
+    }
+
+    pbo->pending = false;
+    if (delete_buffer) {
+        pbo->bytes = 0;
+    }
+    pbo->w = 0;
+    pbo->h = 0;
+}
+
+static void fb_shm_gl_pbo_discard(FbShmDisplay *d, bool delete_buffers)
+{
+    for (uint32_t i = 0; i < FB_SHM_GL_PBO_COUNT; i++) {
+        fb_shm_gl_pbo_forget(&d->gl_pbo[i], delete_buffers);
+    }
+    d->gl_pbo_head = 0;
+    d->gl_pbo_tail = 0;
+}
+
+static bool fb_shm_gl_pbo_finish_one(FbShmDisplay *d, FbShmGlPbo *pbo)
+{
+    GLenum wait_status;
+    void *pixels;
+    uint32_t cur_idx;
+    uint32_t next_idx;
+    size_t frame_bytes;
+
+    if (!pbo->pending) {
+        return true;
+    }
+
+    wait_status = glClientWaitSync(pbo->fence, 0, 0);
+    if (wait_status == GL_TIMEOUT_EXPIRED) {
+        return false;
+    }
+
+    if (wait_status == GL_WAIT_FAILED) {
+        if (!d->gl_warned_pbo) {
+            warn_report("fb-shm: async GL PBO fence wait failed; "
+                        "dropping one readback frame");
+            d->gl_warned_pbo = true;
+        }
+        fb_shm_gl_pbo_forget(pbo, false);
+        return true;
+    }
+
+    if (!d->hdr || !d->slot[0]) {
+        fb_shm_gl_pbo_forget(pbo, false);
+        return true;
+    }
+
+    frame_bytes = fb_shm_frame_bytes(d->cur_w, d->cur_h);
+    if (pbo->bytes != frame_bytes || pbo->w != d->cur_w || pbo->h != d->cur_h) {
+        fb_shm_gl_pbo_forget(pbo, false);
+        return true;
+    }
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->id);
+    pixels = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, pbo->bytes,
+                              GL_MAP_READ_BIT);
+    if (!pixels) {
+        if (!d->gl_warned_pbo) {
+            warn_report("fb-shm: async GL PBO map failed; "
+                        "dropping one readback frame");
+            d->gl_warned_pbo = true;
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        fb_shm_gl_pbo_forget(pbo, false);
+        return true;
+    }
+
+    cur_idx = qatomic_load_acquire(&d->hdr->active_idx);
+    next_idx = (cur_idx + 1) % FB_SHM_BUF_COUNT;
+    memcpy(d->slot[next_idx], pixels, pbo->bytes);
+    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+    fb_shm_publish_frame(d, next_idx, pbo->w, pbo->h);
+    fb_shm_gl_pbo_forget(pbo, false);
+    return true;
+}
+
+static void fb_shm_gl_pbo_drain(FbShmDisplay *d)
+{
+    FbShmGlPbo *pbo;
+
+    while (true) {
+        pbo = &d->gl_pbo[d->gl_pbo_tail];
+        if (!pbo->pending) {
+            return;
+        }
+        if (!fb_shm_gl_pbo_finish_one(d, pbo)) {
+            return;
+        }
+        d->gl_pbo_tail = (d->gl_pbo_tail + 1) % FB_SHM_GL_PBO_COUNT;
+    }
+}
+
+static int fb_shm_gl_pbo_issue(FbShmDisplay *d, uint32_t rw, uint32_t rh,
+                               int sx1, int sy1, int sx2, int sy2)
+{
+    FbShmGlPbo *pbo;
+    size_t bytes = fb_shm_frame_bytes(rw, rh);
+
+    if (!fb_shm_gl_pbo_can_use(d)) {
+        return -1;
+    }
+
+    fb_shm_gl_pbo_drain(d);
+    pbo = &d->gl_pbo[d->gl_pbo_head];
+    if (pbo->pending) {
+        /*
+         * 三个 PBO 都还没完成时直接丢本次采样。这里选择稳帧而不是
+         * fallback 到同步 glReadPixels，否则最慢帧会再次卡住 SDL/main loop。
+         */
+        return 0;
+    }
+
+    if (!pbo->id) {
+        glGenBuffers(1, &pbo->id);
+        if (!pbo->id) {
+            if (!d->gl_warned_pbo) {
+                warn_report("fb-shm: cannot allocate GL PBO; "
+                            "using sync readback");
+                d->gl_warned_pbo = true;
+            }
+            return -1;
+        }
+    }
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->id);
+    if (pbo->bytes != bytes) {
+        glBufferData(GL_PIXEL_PACK_BUFFER, bytes, NULL, GL_STREAM_READ);
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, d->gl_guest_fb.framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->gl_blit_fb.framebuffer);
+    glViewport(0, 0, rw, rh);
+    glBlitFramebuffer(sx1, sy1, sx2, sy2,
+                      0, 0, rw, rh,
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, d->gl_blit_fb.framebuffer);
+    glReadBuffer(GL_COLOR_ATTACHMENT0_EXT);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, rw, rh, GL_BGRA, GL_UNSIGNED_BYTE, 0);
+
+    pbo->fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    pbo->bytes = bytes;
+    pbo->w = rw;
+    pbo->h = rh;
+    pbo->pending = true;
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glFlush();
+
+    d->gl_pbo_head = (d->gl_pbo_head + 1) % FB_SHM_GL_PBO_COUNT;
+    return 1;
+}
+
 static void fb_shm_gl_release_fbos(FbShmDisplay *d)
 {
     if (!d->gl_ctx || !fb_shm_gl_make_current(d)) {
         return;
     }
 
+    fb_shm_gl_pbo_discard(d, true);
     egl_fb_destroy(&d->gl_guest_fb);
     egl_fb_destroy(&d->gl_blit_fb);
 }
@@ -905,30 +1123,38 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     uint32_t sh = d->gl_h;
     uint32_t rw, rh;
     int32_t rx, ry;
-    uint32_t cur_idx, next_idx;
     uint64_t now_ns;
+    bool geometry_changed;
     Error *err = NULL;
 
     if (!d->gl_scanout || !d->gl_guest_fb.texture || !sw || !sh) {
         return;
     }
 
-    now_ns = fb_shm_now_ns();
-    if (fb_shm_gl_rate_limited(d, now_ns)) {
+    if (!fb_shm_gl_make_current(d)) {
         return;
     }
 
     fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
-    if (!d->shm || rw != d->cur_w || rh != d->cur_h ||
-        sw != d->cur_src_w || sh != d->cur_src_h ||
-        rx != d->cur_roi_x || ry != d->cur_roi_y) {
+    geometry_changed = !d->shm || rw != d->cur_w || rh != d->cur_h ||
+                       sw != d->cur_src_w || sh != d->cur_src_h ||
+                       rx != d->cur_roi_x || ry != d->cur_roi_y;
+    if (geometry_changed) {
+        /*
+         * 旧 PBO 的尺寸对应旧 memfd/ROI。几何变化时直接丢掉未发布帧，
+         * 避免异步完成后写进已经替换过的 SHM view。
+         */
+        fb_shm_gl_pbo_discard(d, false);
         if (fb_shm_ensure_geometry(d, rw, rh, sw, sh, rx, ry, &err) < 0) {
             warn_report_err(err);
             return;
         }
+    } else {
+        fb_shm_gl_pbo_drain(d);
     }
 
-    if (!fb_shm_gl_make_current(d)) {
+    now_ns = fb_shm_now_ns();
+    if (fb_shm_gl_rate_limited(d, now_ns)) {
         return;
     }
 
@@ -937,13 +1163,11 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
         egl_fb_setup_new_tex(&d->gl_blit_fb, rw, rh);
     }
 
-    cur_idx = qatomic_load_acquire(&d->hdr->active_idx);
-    next_idx = (cur_idx + 1) % FB_SHM_BUF_COUNT;
-
     /*
      * virgl 给出的 texture 可能是 y0_top，也可能是传统 GL bottom-up。
      * fb-shm 对外固定输出 BGR0、top-left 语义；这里先用 blit 把 ROI
-     * 归一化到 fb-shm 私有 FBO，再读回到 inactive SHM slot。
+     * 归一化到 fb-shm 私有 FBO，再通过 PBO 异步读回。驱动不支持 PBO
+     * 时回落到同步 glReadPixels，保证功能可用优先。
      */
     int sx1 = (int)d->gl_x + rx;
     int sx2 = sx1 + (int)rw;
@@ -954,6 +1178,14 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
         sy1 = sy2;
         sy2 = top;
     }
+
+    int pbo_status = fb_shm_gl_pbo_issue(d, rw, rh, sx1, sy1, sx2, sy2);
+    if (pbo_status >= 0) {
+        return;
+    }
+
+    uint32_t cur_idx = qatomic_load_acquire(&d->hdr->active_idx);
+    uint32_t next_idx = (cur_idx + 1) % FB_SHM_BUF_COUNT;
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, d->gl_guest_fb.framebuffer);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->gl_blit_fb.framebuffer);
@@ -1029,6 +1261,7 @@ static void fb_shm_refresh(DisplayChangeListener *dcl)
     graphic_hw_update(dcl->con);
 #ifdef CONFIG_OPENGL
     if (d->gl_scanout) {
+        fb_shm_commit_gl_frame(d);
         return;
     }
 #endif

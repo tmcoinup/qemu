@@ -1017,7 +1017,18 @@ static bool
 sdl2_gl_is_compatible_dcl(DisplayGLCtx *dgc,
                           DisplayChangeListener *dcl)
 {
-    return dcl->ops == &dcl_gl_ops;
+    /*
+     * SDL 拥有实际窗口 GL context。普通 GL scanout 必须走 sdl2-gl DCL；
+     * fb-shm 是例外：它会创建一个与 SDL window context 共享的私有 GL
+     * context，只做 texture->memfd 读回，不参与窗口绘制。
+     */
+    if (dcl->ops == &dcl_gl_ops) {
+        return true;
+    }
+
+    return g_strcmp0(dcl->ops->dpy_name, "fb-shm") == 0 &&
+           dcl->ops->dpy_gl_scanout_texture &&
+           dcl->ops->dpy_gl_update;
 }
 
 static const DisplayGLCtxOps gl_ctx_ops = {

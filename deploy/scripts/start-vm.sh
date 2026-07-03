@@ -60,8 +60,8 @@
 #     DISK=<path>          qcow2 磁盘路径                        (flag: --disk=<path>)
 #     QEMU=<path>          qemu-system-x86_64 二进制路径         (flag: --qemu=<path>)
 #     EXTRA_ISO=<path>     副 CDROM（autounattend.xml / 驱动盘 等）
-#     STABLE_DISPLAY=0     SDL 模式下允许 virtio-vga-gl + virgl 3D（fb-shm 模式
-#                          用不到此项；fb-shm 始终走 stable virtio-vga）
+#     STABLE_DISPLAY=0     SDL 模式下允许 virtio-vga-gl + virgl 3D；fb-shm 会挂到
+#                          同一个 GL scanout 上读回推流，适合本地窗口+推流同时保留。
 #     GPU_SELFSIGNED=1     PCI 主 ID 改成 NVIDIA 10DE:1C81。 ⚠️ 需要 patched
 #                          viogpudo + 伪 NVIDIA CA 链；ACE/腾讯反作弊判异常
 #                          (13-131106-0)。只用于轻反作弊场景。

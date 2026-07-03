@@ -44,6 +44,9 @@
 #include "sysemu/sysemu.h"
 #include "ui/console.h"
 #include "ui/fb-shm-abi.h"
+#ifdef CONFIG_OPENGL
+#include "ui/egl-helpers.h"
+#endif
 
 #include <sys/eventfd.h>
 #include <sys/mman.h>
@@ -116,6 +119,31 @@ struct FbShmDisplay {
     uint64_t frame_seq;
     bool surface_present;
 
+#ifdef CONFIG_OPENGL
+    /*
+     * GL scanout 兼容路径：
+     *
+     * virtio-vga-gl/virgl 不再把画面先落到 CPU 可见 DisplaySurface，
+     * 而是把 texture 直接交给 GL 前端。fb-shm 的消费者仍然需要 BGR0
+     * memfd，所以这里为 fb-shm 自己创建一个共享 GL context，把 texture
+     * blit 到私有 FBO，再 glReadPixels 到当前 inactive SHM slot。
+     *
+     * 这条路径只在收到 dpy_gl_scanout_texture() 后启用；普通 virtio-vga
+     * 仍然走原来的 pixman/DisplaySurface 路径。
+     */
+    bool gl_scanout;
+    bool gl_y0_top;
+    bool gl_warned_context;
+    uint32_t gl_backing_id;
+    uint32_t gl_backing_w, gl_backing_h;
+    uint32_t gl_x, gl_y, gl_w, gl_h;
+    uint64_t gl_last_frame_ns;
+    QEMUGLContext gl_ctx;
+    egl_fb gl_guest_fb;
+    egl_fb gl_blit_fb;
+    DisplaySurface *gl_slot_surface[FB_SHM_BUF_COUNT];
+#endif
+
     /* control socket */
     int listen_fd;
     QLIST_HEAD(, FbShmClient) clients;
@@ -127,6 +155,8 @@ struct FbShmDisplay {
 
 static void fb_shm_broadcast_resize(FbShmDisplay *d);
 static void fb_shm_client_free_bh(void *opaque);
+static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
+                                 uint32_t w, uint32_t h);
 
 static size_t fb_shm_frame_bytes(uint32_t w, uint32_t h)
 {
@@ -169,8 +199,78 @@ static void fb_shm_release_slot_images(FbShmDisplay *d)
             pixman_image_unref(d->slot_img[i]);
             d->slot_img[i] = NULL;
         }
+#ifdef CONFIG_OPENGL
+        g_clear_pointer(&d->gl_slot_surface[i], qemu_free_displaysurface);
+#endif
     }
 }
+
+#ifdef CONFIG_OPENGL
+static bool fb_shm_gl_make_current(FbShmDisplay *d)
+{
+    if (!console_has_gl(d->con)) {
+        if (!d->gl_warned_context) {
+            warn_report("fb-shm: GL scanout has no display GL context; "
+                        "GL frames will not be exported");
+            d->gl_warned_context = true;
+        }
+        return false;
+    }
+
+    if (!d->gl_ctx) {
+        /*
+         * SDL/EGL 已经给 console 安装了主 GL provider。这里再创建一个
+         * 共享 context，避免依赖其它 DCL 的当前 context 顺序；否则 fb-shm
+         * 在 listener 链表中排在 SDL 前面时会读不到 virgl texture。
+         */
+        QEMUGLParams params = {
+            .major_ver = 3,
+            .minor_ver = 0,
+        };
+
+        d->gl_ctx = dpy_gl_ctx_create(d->con, &params);
+        if (!d->gl_ctx) {
+            if (!d->gl_warned_context) {
+                warn_report("fb-shm: cannot create shared GL context; "
+                            "GL frames will not be exported");
+                d->gl_warned_context = true;
+            }
+            return false;
+        }
+    }
+
+    if (dpy_gl_ctx_make_current(d->con, d->gl_ctx) != 0) {
+        if (!d->gl_warned_context) {
+            warn_report("fb-shm: cannot make shared GL context current; "
+                        "GL frames will not be exported");
+            d->gl_warned_context = true;
+        }
+        return false;
+    }
+
+    return true;
+}
+
+static void fb_shm_gl_release_fbos(FbShmDisplay *d)
+{
+    if (!d->gl_ctx || !fb_shm_gl_make_current(d)) {
+        return;
+    }
+
+    egl_fb_destroy(&d->gl_guest_fb);
+    egl_fb_destroy(&d->gl_blit_fb);
+}
+
+static void fb_shm_gl_release(FbShmDisplay *d)
+{
+    fb_shm_gl_release_fbos(d);
+
+    if (d->gl_ctx) {
+        dpy_gl_ctx_destroy(d->con, d->gl_ctx);
+        d->gl_ctx = NULL;
+    }
+}
+#endif
 
 static void fb_shm_release_mapping(FbShmDisplay *d)
 {
@@ -224,6 +324,15 @@ static int fb_shm_apply_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
             fb_shm_release_slot_images(d);
             return -1;
         }
+#ifdef CONFIG_OPENGL
+        /*
+         * GL 读回直接写入同一个 SHM slot。为每个 slot 建一个不拥有内存的
+         * DisplaySurface 包装层，这样可以复用 QEMU 已有的 egl_fb_read()
+         * BGR0 读回逻辑，而不会额外分配帧缓冲。
+         */
+        d->gl_slot_surface[i] = qemu_create_displaysurface_from(
+            w, h, PIXMAN_x8r8g8b8, (int)(w * 4), d->slot[i]);
+#endif
     }
 
     size_t buf_size = (size_t)w * h * 4;
@@ -743,10 +852,18 @@ static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
                              0, 0,          /* dst offset                */
                              (int)rw, (int)rh);
 
+    fb_shm_publish_frame(d, next_idx, rw, rh);
+}
+
+static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
+                                 uint32_t w, uint32_t h)
+{
+    FbShmHeader *hdr = d->hdr;
+
     hdr->damage_x = 0;
     hdr->damage_y = 0;
-    hdr->damage_w = (int32_t)rw;
-    hdr->damage_h = (int32_t)rh;
+    hdr->damage_w = (int32_t)w;
+    hdr->damage_h = (int32_t)h;
     hdr->ts_ns = fb_shm_now_ns();
     qatomic_store_release(&hdr->active_idx, next_idx);
 
@@ -764,10 +881,157 @@ static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
     }
 }
 
+#ifdef CONFIG_OPENGL
+static bool fb_shm_gl_rate_limited(FbShmDisplay *d, uint64_t now_ns)
+{
+    uint64_t interval_ns;
+
+    if (!d->target_fps) {
+        return false;
+    }
+
+    interval_ns = 1000000000ull / d->target_fps;
+    if (d->gl_last_frame_ns && now_ns - d->gl_last_frame_ns < interval_ns) {
+        return true;
+    }
+
+    d->gl_last_frame_ns = now_ns;
+    return false;
+}
+
+static void fb_shm_commit_gl_frame(FbShmDisplay *d)
+{
+    uint32_t sw = d->gl_w;
+    uint32_t sh = d->gl_h;
+    uint32_t rw, rh;
+    int32_t rx, ry;
+    uint32_t cur_idx, next_idx;
+    uint64_t now_ns;
+    Error *err = NULL;
+
+    if (!d->gl_scanout || !d->gl_guest_fb.texture || !sw || !sh) {
+        return;
+    }
+
+    now_ns = fb_shm_now_ns();
+    if (fb_shm_gl_rate_limited(d, now_ns)) {
+        return;
+    }
+
+    fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
+    if (!d->shm || rw != d->cur_w || rh != d->cur_h ||
+        sw != d->cur_src_w || sh != d->cur_src_h ||
+        rx != d->cur_roi_x || ry != d->cur_roi_y) {
+        if (fb_shm_ensure_geometry(d, rw, rh, sw, sh, rx, ry, &err) < 0) {
+            warn_report_err(err);
+            return;
+        }
+    }
+
+    if (!fb_shm_gl_make_current(d)) {
+        return;
+    }
+
+    if (d->gl_blit_fb.width != rw || d->gl_blit_fb.height != rh) {
+        egl_fb_destroy(&d->gl_blit_fb);
+        egl_fb_setup_new_tex(&d->gl_blit_fb, rw, rh);
+    }
+
+    cur_idx = qatomic_load_acquire(&d->hdr->active_idx);
+    next_idx = (cur_idx + 1) % FB_SHM_BUF_COUNT;
+
+    /*
+     * virgl 给出的 texture 可能是 y0_top，也可能是传统 GL bottom-up。
+     * fb-shm 对外固定输出 BGR0、top-left 语义；这里先用 blit 把 ROI
+     * 归一化到 fb-shm 私有 FBO，再读回到 inactive SHM slot。
+     */
+    int sx1 = (int)d->gl_x + rx;
+    int sx2 = sx1 + (int)rw;
+    int sy1 = (int)d->gl_y + ry;
+    int sy2 = sy1 + (int)rh;
+    if (d->gl_y0_top) {
+        int top = sy1;
+        sy1 = sy2;
+        sy2 = top;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, d->gl_guest_fb.framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->gl_blit_fb.framebuffer);
+    glViewport(0, 0, rw, rh);
+    glBlitFramebuffer(sx1, sy1, sx2, sy2,
+                      0, 0, rw, rh,
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    egl_fb_read(d->gl_slot_surface[next_idx], &d->gl_blit_fb);
+    fb_shm_publish_frame(d, next_idx, rw, rh);
+}
+
+static void fb_shm_gl_scanout_disable(DisplayChangeListener *dcl)
+{
+    FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+
+    d->gl_scanout = false;
+    d->gl_last_frame_ns = 0;
+    fb_shm_gl_release_fbos(d);
+}
+
+static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
+                                      uint32_t backing_id,
+                                      bool backing_y_0_top,
+                                      uint32_t backing_width,
+                                      uint32_t backing_height,
+                                      uint32_t x, uint32_t y,
+                                      uint32_t w, uint32_t h,
+                                      void *d3d_tex2d)
+{
+    FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+
+    (void)d3d_tex2d;
+
+    if (!backing_id || !backing_width || !backing_height ||
+        x >= backing_width || y >= backing_height) {
+        d->gl_scanout = false;
+        return;
+    }
+
+    d->gl_scanout = true;
+    d->gl_y0_top = backing_y_0_top;
+    d->gl_backing_id = backing_id;
+    d->gl_backing_w = backing_width;
+    d->gl_backing_h = backing_height;
+    d->gl_x = x;
+    d->gl_y = y;
+    d->gl_w = MIN(w, backing_width - x);
+    d->gl_h = MIN(h, backing_height - y);
+
+    if (!fb_shm_gl_make_current(d)) {
+        return;
+    }
+
+    egl_fb_setup_for_tex(&d->gl_guest_fb,
+                         backing_width, backing_height, backing_id, false);
+}
+
+static void fb_shm_gl_update(DisplayChangeListener *dcl,
+                             uint32_t x, uint32_t y,
+                             uint32_t w, uint32_t h)
+{
+    FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+
+    (void)x; (void)y; (void)w; (void)h;
+    fb_shm_commit_gl_frame(d);
+}
+#endif
+
 static void fb_shm_refresh(DisplayChangeListener *dcl)
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
     graphic_hw_update(dcl->con);
+#ifdef CONFIG_OPENGL
+    if (d->gl_scanout) {
+        return;
+    }
+#endif
     if (!d->surface_present) {
         return;
     }
@@ -783,6 +1047,11 @@ static const DisplayChangeListenerOps fb_shm_ops = {
     .dpy_refresh     = fb_shm_refresh,
     .dpy_gfx_update  = fb_shm_gfx_update,
     .dpy_gfx_switch  = fb_shm_gfx_switch,
+#ifdef CONFIG_OPENGL
+    .dpy_gl_scanout_disable = fb_shm_gl_scanout_disable,
+    .dpy_gl_scanout_texture = fb_shm_gl_scanout_texture,
+    .dpy_gl_update          = fb_shm_gl_update,
+#endif
 };
 
 /* ------------------------------------------------------------------ */
@@ -882,6 +1151,9 @@ static void fb_shm_destroy(FbShmDisplay *d)
     if (d->dcl.ds) {
         unregister_displaychangelistener(&d->dcl);
     }
+#ifdef CONFIG_OPENGL
+    fb_shm_gl_release(d);
+#endif
     fb_shm_release_mapping(d);
     if (d->wake_eventfd >= 0) close(d->wake_eventfd);
     g_free(d->id);

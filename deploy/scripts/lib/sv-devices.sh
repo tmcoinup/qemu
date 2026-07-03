@@ -85,18 +85,17 @@ fi
 # 2) GUI 通道（互斥三选一）
 #    --sdl       : -display sdl,...        (本地交互窗口；DNF 调试)
 #    --headless  : -display none -vnc ...  (VNC 远程)
-#    (默认)      : -display none           (无 GUI；纯推流场景)
+#    --no-sdl    : -display none           (无 GUI；纯推流场景)
 #
-# STABLE_DISPLAY=1（默认）: virtio-vga，不开 -gl/virgl。规避 virgl 长期运行后
-#   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
-#   INTERNAL_ERROR"）。代价是没有 GL 加速，guest 的 DirectX 回退到 WARP
-#   (软件 DX9-12)。DNF/腾讯 2D+DX9 类游戏 WARP 完全够用，性能差不大。
-#   (注：--no-sdl/--headless 没有窗口 GL context，仍然走 stable 路径)
-#
-# STABLE_DISPLAY=0: 仅在 --sdl 模式下生效，启 virtio-vga-gl + virgl 3D 加速。
+# STABLE_DISPLAY=0（默认）: 仅在 --sdl 模式下生效，启 virtio-vga-gl + virgl 3D 加速。
 #   fb-shm 会作为第二个 DCL 共享 SDL 的 GL scanout，把纹理读回到 SHM 推流；
 #   渲染更快但 virgl 状态机长跑会脏。
-STABLE_DISPLAY=${STABLE_DISPLAY:-1}
+#
+# STABLE_DISPLAY=1: 强制 virtio-vga，不开 -gl/virgl。用于规避 virgl 长期运行后
+#   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
+#   INTERNAL_ERROR"）。代价是没有 GL 加速，guest 的 DirectX 回退到 WARP。
+#   (注：--no-sdl/--headless 没有窗口 GL context，仍然走 stable 路径)
+STABLE_DISPLAY=${STABLE_DISPLAY:-0}
 
 # 拼 fb-shm -object 字符串
 FB_SHM_OBJ=""

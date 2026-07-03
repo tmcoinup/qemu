@@ -206,7 +206,7 @@ GPU_SELFSIGNED=1 nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
 
 注意：
 - 每台 VM 默认 8GB RAM，宿主要够。
-- `STABLE_DISPLAY=1` 用 virtio-vga 不带 GL，避开 `VIDEO_DXGKRNL_FATAL_ERROR` BSOD（virgl 在长时间运行时状态不稳）。
+- 默认 `STABLE_DISPLAY=0` 用 virtio-vga-gl + virgl；如果某台 VM 长跑触发 `VIDEO_DXGKRNL_FATAL_ERROR`，再显式 `STABLE_DISPLAY=1` 回退 virtio-vga 无 GL 路径。
 - 所有 stealth 资产（cert / driver / EfiGuard） 都是每个 VM 独立装在自己的 ESP 里 —— 一份装好不影响另一份。
 
 ---

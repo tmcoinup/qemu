@@ -208,11 +208,25 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 1. 起 HTTP server (8765) 如果还没跑
 2. 创建 qcow2 增量层 `vms/2/disk.qcow2` backed by base
 3. `stealth_pick_profile` reroll 硬件身份（新 CPU / 主板 / GPU / MAC / UUID / NVMe SN），NVMe 容量强制等于 base 容量避免 NTFS 错位
-4. `host-fix-gpu-devpkey.sh` 在 sysprep base 上自动 skip（无 PCI enum）
+4. `host-fix-gpu-devpkey.sh` 在 sysprep base 上自动 skip（无 PCI enum）；首启枚举后再跑 `finalize-clone-gpu.sh`
 5. `host-fix-numlock.sh` 改 per-user `NTUSER.DAT` 的 `InitialKeyboardIndicators=0x80000002`
 6. **`host-inject-unattend.sh`** 把 `deploy/autounattend/autounattend.xml` 写到 guest 三处：
    - `%WINDIR%\Panther\Unattend\unattend.xml`（OOBE 主搜索路径）
    - `C:\unattend.xml`（备用）
+
+### C.2 首启后 GPU Provider 一键收尾
+
+clone 首启后 Windows 会重新枚举显示设备，并按 stock `viogpudo.inf` 把设备管理器 → GPU → 驱动程序 → 驱动程序提供商写回 `Red Hat, Inc.`。等 guest 第一次进桌面、`respawn-stealth.ps1` 完成 GPU 名重对齐并重启/关机后，在 host 跑：
+
+```bash
+deploy/scripts/finalize-clone-gpu.sh 2
+```
+
+普通用户直接跑即可；脚本会自动 `sudo -E` 提权，因为底层需要 qemu-nbd + ntfs-3g 离线挂载 Windows 盘。若希望修完后自动启动：
+
+```bash
+STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 deploy/scripts/finalize-clone-gpu.sh 2 --restart -- --proxy
+```
    - `%WINDIR%\System32\Sysprep\unattend.xml`（备用）
    - per-instance 把 `<ComputerName>` 替换成 `DESKTOP-<7位随机[A-Z0-9]>`（仿全新消费级
      Win10 默认主机名）。**不用 `*`** —— `*` 会让 OOBE 拿 `RegisteredOwner`(Administrator)
@@ -393,7 +407,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\stealth\respawn-stealth-l
 | `irm apply-gpu-spoof.ps1 \| iex` 报"赋值表达式无效" | 该脚本有 `param()`，`iex` 不支持参数化 | 不要直接跑——它会被 shallow-stealth / respawn-stealth 自动调 |
 | host offline 改 hive 时报 "Windows is hibernated" | Fast Startup 没关 | guest 内 `powercfg -h off` + `shutdown /s /t 0`，**别**用 GUI "关机"或 `shutdown /r` |
 | clone 完启动报 `Recovery 0xc0000001 / Your PC couldn't start properly` | 离线改了 boot-critical hive（SYSTEM/SOFTWARE/DEFAULT）—— Win10 22H2 incremental log 协议下，无论 LOG 保留 / truncate / restore 都崩 | 唯一解：boot-critical hive 一概不离线动；guest 启动后要的注册表改动写进 `autounattend.xml` 的 `<FirstLogonCommands>` |
-| 设备管理器看 GPU 还是 "Red Hat" | host-fix-gpu-devpkey.sh 没跑（**只对装机的 base/VM1 阶段成立** — clone 出来的 VM 这一步永远会 skip，靠 FirstLogonCommand 重对齐） | guest 关机，host 端 `sudo host-fix-gpu-devpkey.sh <N>` |
+| 设备管理器驱动程序提供商还是 `Red Hat, Inc.` | clone 首启后 Windows 按 `viogpudo.inf` 重新写回 Provider，覆盖了 clone 阶段预写 | guest 关机，host 端 `deploy/scripts/finalize-clone-gpu.sh <N>`；脚本会自动 sudo 提权 |
 | clone 完 host 端报 `ControlSet001\Enum\PCI 不存在` | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不是 bug —— 脚本自动 skip；guest 首次登录后 FirstLogonCommand Order=10 会重对齐 GPU |
 | clone VM 进桌面后 GPU 名还是 base 老型号 | 首次登录那次 FirstLogonCommand Order=10 没自动跑或拉取失败 | **离线**（base 已打包时）：双击 `C:\stealth\respawn-stealth.bat`；**或** guest 管理员 PS：`irm http://192.168.30.33:8765/respawn-stealth.ps1 \| iex`（**URL 一个点**） |
 | `irm` 报 404 或 connection refused | URL typo（常见：`respawn-stealth..ps1` 两个点）/ HTTP server 没起 | 检查 URL 单点；host `ss -tlnp \| grep 8765` 看 server 在不（clone-from-base.sh 已会自动起，但若 clone 前手动 start-vm 启了新机的话需要补 `nohup python3 deploy/scripts/serve-stealth-http.py 8765 &`）；**或干脆走离线一键** `respawn-stealth.bat`（不连 host）|

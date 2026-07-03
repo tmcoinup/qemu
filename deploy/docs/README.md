@@ -110,11 +110,14 @@ ls -la /home/ubuntu/images/vms/_base/win10-shallow-dnf-v1.qcow2
 chmod -w /home/ubuntu/images/vms/_base/win10-shallow-dnf-v1.qcow2     # 物理锁死
 ```
 
-之后新建 VM **一行**：
+之后新建 VM：
 
 ```bash
 sudo deploy/scripts/clone-from-base.sh win10-shallow-dnf-v1 2
 deploy/scripts/start-vm.sh 2
+
+# 首启进桌面并让 respawn-stealth 完成重启/关机后，收尾修 DriverProvider
+deploy/scripts/finalize-clone-gpu.sh 2
 ```
 
 `clone-from-base.sh` 自动做完 5 件事：
@@ -124,10 +127,20 @@ deploy/scripts/start-vm.sh 2
 | 1 | 创建 qcow2 backing-file 增量层 | base 共享只读，新 VM 只存增量（首次几百 MB） |
 | 2 | `stealth_pick_profile` 重新随机硬件身份 | CPU / 主板 / GPU / MAC / UUID / NVMe SN 全换 |
 | 3 | `qemu-img resize` 匹配 profile.NVME_SIZE_BYTES | 新 profile 抽到 1TB Samsung 980 → qcow2 扩到 1TB；避免 Win Model=1TB 但 Size=512GB 的跨向量矛盾 |
-| 4 | `host-fix-gpu-devpkey.sh` 重写 DEVPKEY | 新 GPU_NAME（比如 base 是 GTX 750 Ti，clone 抽到 GTX 1050 Ti）→ 设备管理器立刻显示新名字 + Provider=NVIDIA |
+| 4 | `host-fix-gpu-devpkey.sh` 预尝试重写 DEVPKEY | sysprep base 没有新 PCI enum 时会安全 skip；首启枚举后用 `finalize-clone-gpu.sh` 一键收尾 |
 | 5 | `host-inject-runonce.sh` 注入 RunOnce | guest 首次开机自动拉 `respawn-stealth.ps1` → 走 `apply-gpu-spoof.ps1 -AutoDetect` → 按新 PCI subsys 改注册表 → 重启 |
 
-**clone 后哪些脚本还要手动跑？答案：零**。NumLock / Fast Startup / vm-bootstrap / Windows Update / DNF 安装 全部继承 base，硬件指纹相关的 GPU 改名 / DEVPKEY 自动重写。
+**clone 后要记的收尾命令只有一条**：
+
+```bash
+deploy/scripts/finalize-clone-gpu.sh 2
+```
+
+它可以普通用户运行，会自动 `sudo -E` 提权；原因是底层要 qemu-nbd + ntfs-3g 离线挂载 Windows 盘。若想修完自动重启：
+
+```bash
+STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 deploy/scripts/finalize-clone-gpu.sh 2 --restart -- --proxy
+```
 
 ### base 想换怎么办
 

@@ -127,7 +127,7 @@ GPU-Z 打开后应该看到 `NVIDIA GeForce GTX 1050`、Subvendor `NVIDIA`、Dev
 |---|---|---|
 | `Win32_VideoController.Name = "Microsoft Basic Display Adapter"` | stock virtio-win 没装上，或装了但 `apply-gpu-spoof.ps1` 没执行覆盖 | 重跑 `irm .../shallow-stealth.ps1 \| iex` |
 | GPU 设备 `Problem = CM_PROB_FAILED_POST_START`（code 43） | 误用了 `GPU_SELFSIGNED=1` 启动器，但 guest 里是 stock viogpudo | 关 VM，去掉 `GPU_SELFSIGNED=1` 重启；或装 patched viogpudo（=深层路径，丢 ACE） |
-| Device Manager 驱动程序提供商显示「未知」 | DEVPKEY `{a8b865dd-...}\0009` 槽位需 TrustedInstaller 权限 + DEVPROP 类型 0xFFFF0012 才能写对，guest 内 `apply-gpu-spoof.ps1` 写不进 | 关 VM，host 跑 `sudo deploy/scripts/host-fix-gpu-devpkey.sh 2` |
+| Device Manager 驱动程序提供商显示「未知」或 `Red Hat, Inc.` | DEVPKEY `{a8b865dd-...}\0009` 槽位需 TrustedInstaller 权限 + DEVPROP 类型 0xFFFF0012 才能写对；clone 首启还会被 `viogpudo.inf` 写回 Red Hat | 关 VM，host 跑 `deploy/scripts/finalize-clone-gpu.sh 2`（会自动 sudo 提权） |
 | ACE 仍报 13-131106-0 | 系统里有黑名单驱动 / 测试模式开了 / 装过 EfiGuard 没回退干净 | 跑 `irm .../destealth-revert.ps1 \| iex` 全部回退，再走浅层 |
 
 ---

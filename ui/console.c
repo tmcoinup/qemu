@@ -53,6 +53,9 @@ typedef struct QemuGraphicConsole {
     int cursor_x, cursor_y;
     bool cursor_on;
     bool cursor_position_valid;
+    int input_cursor_x, input_cursor_y;
+    bool input_cursor_x_valid, input_cursor_y_valid;
+    bool input_cursor_position_valid;
 } QemuGraphicConsole;
 
 typedef QemuConsoleClass QemuGraphicConsoleClass;
@@ -1423,6 +1426,57 @@ QEMUCursor *qemu_console_get_cursor(QemuConsole *con)
     return QEMU_IS_GRAPHIC_CONSOLE(con) ? QEMU_GRAPHIC_CONSOLE(con)->cursor : NULL;
 }
 
+static int qemu_console_abs_to_pixel(int value, int pixels)
+{
+    int upper;
+
+    if (pixels <= 1) {
+        return 0;
+    }
+
+    upper = pixels - 1;
+    value = CLAMP(value, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX);
+    return ((int64_t)value * upper + INPUT_EVENT_ABS_MAX / 2) /
+           INPUT_EVENT_ABS_MAX;
+}
+
+void qemu_console_record_absolute_input(QemuConsole *con,
+                                        InputAxis axis,
+                                        int value)
+{
+    QemuGraphicConsole *graphic;
+    int width, height;
+
+    if (!con) {
+        con = qemu_console_lookup_default();
+    }
+    if (!con || !QEMU_IS_GRAPHIC_CONSOLE(con)) {
+        return;
+    }
+
+    width = qemu_console_get_width(con, 0);
+    height = qemu_console_get_height(con, 0);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    graphic = QEMU_GRAPHIC_CONSOLE(con);
+    switch (axis) {
+    case INPUT_AXIS_X:
+        graphic->input_cursor_x = qemu_console_abs_to_pixel(value, width);
+        graphic->input_cursor_x_valid = true;
+        break;
+    case INPUT_AXIS_Y:
+        graphic->input_cursor_y = qemu_console_abs_to_pixel(value, height);
+        graphic->input_cursor_y_valid = true;
+        break;
+    default:
+        return;
+    }
+    graphic->input_cursor_position_valid =
+        graphic->input_cursor_x_valid && graphic->input_cursor_y_valid;
+}
+
 GuestMousePosition *qmp_query_guest_mouse_position(const char *device,
                                                    bool has_head,
                                                    int64_t head,
@@ -1463,16 +1517,29 @@ GuestMousePosition *qmp_query_guest_mouse_position(const char *device,
     }
 
     /*
-     * QMP 返回的是 QEMU 已观察到的客户机硬件光标状态。
-     * valid=false 表示客户机尚未上报位置，
-     * 调用方不能把 x/y 当作真实坐标。
+     * 纯 host-side 查询：优先返回显示后端已经观察到的硬件光标；
+     * Win10/DNF 这类软件光标路径可能永远不会触发 cursor_position_valid，
+     * 因此再回退到 QMP input-send-event 注入的最近一次绝对鼠标位置。
+     * 这些状态只保存在 QEMU 进程内，不新增 guest 可见设备、寄存器或 agent 命令。
      */
     graphic = QEMU_GRAPHIC_CONSOLE(con);
     position = g_new0(GuestMousePosition, 1);
-    position->x = graphic->cursor_x;
-    position->y = graphic->cursor_y;
-    position->visible = graphic->cursor_on;
-    position->valid = graphic->cursor_position_valid;
+    if (graphic->cursor_position_valid) {
+        position->x = graphic->cursor_x;
+        position->y = graphic->cursor_y;
+        position->visible = graphic->cursor_on;
+        position->valid = true;
+    } else if (graphic->input_cursor_position_valid) {
+        position->x = graphic->input_cursor_x;
+        position->y = graphic->input_cursor_y;
+        position->visible = true;
+        position->valid = true;
+    } else {
+        position->x = 0;
+        position->y = 0;
+        position->visible = false;
+        position->valid = false;
+    }
 
     return position;
 }

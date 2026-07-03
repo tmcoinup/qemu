@@ -41,6 +41,24 @@ static IOWatchPoll *io_watch_poll_from_source(GSource *source)
     return container_of(source, IOWatchPoll, parent);
 }
 
+static void io_watch_poll_clear_child(IOWatchPoll *iwp)
+{
+    GSource *src = iwp->src;
+
+    if (!src) {
+        return;
+    }
+
+    /*
+     * Clear the member before touching GLib.  g_source_destroy() can run
+     * callbacks/finalizers indirectly, and re-entrant cleanup must see that
+     * the child watch is already gone instead of trying to unref it again.
+     */
+    iwp->src = NULL;
+    g_source_destroy(src);
+    g_source_unref(src);
+}
+
 static gboolean io_watch_poll_prepare(GSource *source,
                                       gint *timeout)
 {
@@ -67,9 +85,7 @@ static gboolean io_watch_poll_prepare(GSource *source,
         g_source_set_callback(iwp->src, iwp->fd_read, iwp->opaque, NULL);
         g_source_attach(iwp->src, iwp->context);
     } else {
-        g_source_destroy(iwp->src);
-        g_source_unref(iwp->src);
-        iwp->src = NULL;
+        io_watch_poll_clear_child(iwp);
     }
     return FALSE;
 }
@@ -88,11 +104,8 @@ static gboolean io_watch_poll_dispatch(GSource *source, GSourceFunc callback,
 static void io_watch_poll_finalize(GSource *source)
 {
     IOWatchPoll *iwp = io_watch_poll_from_source(source);
-    if (iwp->src) {
-        g_source_destroy(iwp->src);
-        g_source_unref(iwp->src);
-        iwp->src = NULL;
-    }
+
+    io_watch_poll_clear_child(iwp);
 }
 
 static GSourceFuncs io_watch_poll_funcs = {

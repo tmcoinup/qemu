@@ -82,6 +82,8 @@ struct FbShmClient {
     int fd;
     bool hello_done;            /* HELLO seen → eligible for broadcasts   */
     bool wants_resize_notify;   /* HELLO opted into NOTIFY_RESIZED        */
+    bool linked;                /* present in owner->clients              */
+    bool dropping;              /* fd removed; waiting for deferred free  */
     QLIST_ENTRY(FbShmClient) next;
 };
 
@@ -106,6 +108,8 @@ struct FbShmDisplay {
     FbShmHeader *hdr;
     uint8_t *slot[FB_SHM_BUF_COUNT];
     pixman_image_t *slot_img[FB_SHM_BUF_COUNT];
+    uint32_t cap_w, cap_h;       /* backing-slot capacity, never ROI-only  */
+    size_t cap_buf_size;
     uint32_t cur_w, cur_h;
     uint32_t cur_src_w, cur_src_h;
     int32_t cur_roi_x, cur_roi_y;
@@ -122,6 +126,12 @@ struct FbShmDisplay {
 /* ------------------------------------------------------------------ */
 
 static void fb_shm_broadcast_resize(FbShmDisplay *d);
+static void fb_shm_client_free_bh(void *opaque);
+
+static size_t fb_shm_frame_bytes(uint32_t w, uint32_t h)
+{
+    return (size_t)w * h * 4;
+}
 
 static uint64_t fb_shm_now_ns(void)
 {
@@ -152,13 +162,20 @@ static void fb_shm_resolve_roi(FbShmDisplay *d, uint32_t sw, uint32_t sh,
     *out_h = rh;
 }
 
-static void fb_shm_release_mapping(FbShmDisplay *d)
+static void fb_shm_release_slot_images(FbShmDisplay *d)
 {
     for (uint32_t i = 0; i < FB_SHM_BUF_COUNT; i++) {
         if (d->slot_img[i]) {
             pixman_image_unref(d->slot_img[i]);
             d->slot_img[i] = NULL;
         }
+    }
+}
+
+static void fb_shm_release_mapping(FbShmDisplay *d)
+{
+    fb_shm_release_slot_images(d);
+    for (uint32_t i = 0; i < FB_SHM_BUF_COUNT; i++) {
         d->slot[i] = NULL;
     }
     if (d->shm && d->shm != MAP_FAILED) {
@@ -167,25 +184,104 @@ static void fb_shm_release_mapping(FbShmDisplay *d)
     d->shm = NULL;
     d->hdr = NULL;
     d->map_size = 0;
+    d->cap_w = 0;
+    d->cap_h = 0;
+    d->cap_buf_size = 0;
     if (d->memfd >= 0) {
         close(d->memfd);
         d->memfd = -1;
     }
 }
 
-/* (Re)allocate the memfd backing store for ROI dimensions w x h. */
-static int fb_shm_allocate(FbShmDisplay *d, uint32_t w, uint32_t h,
-                           uint32_t sw, uint32_t sh,
-                           int32_t roi_x, int32_t roi_y, Error **errp)
+static int fb_shm_apply_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
+                                 uint32_t sw, uint32_t sh,
+                                 int32_t roi_x, int32_t roi_y, Error **errp)
 {
+    uint32_t old_w = d->cur_w;
+    uint32_t old_h = d->cur_h;
+    uint32_t old_sw = d->cur_src_w;
+    uint32_t old_sh = d->cur_src_h;
+    int32_t old_roi_x = d->cur_roi_x;
+    int32_t old_roi_y = d->cur_roi_y;
+
     if (w == 0 || h == 0 || w > FB_SHM_MAX_DIM || h > FB_SHM_MAX_DIM) {
         error_setg(errp, "fb-shm: invalid ROI %ux%u", w, h);
+        return -1;
+    }
+    if (!d->shm || !d->hdr || fb_shm_frame_bytes(w, h) > d->cap_buf_size) {
+        error_setg(errp, "fb-shm: ROI %ux%u exceeds backing capacity %ux%u",
+                   w, h, d->cap_w, d->cap_h);
+        return -1;
+    }
+
+    fb_shm_release_slot_images(d);
+    for (uint32_t i = 0; i < FB_SHM_BUF_COUNT; i++) {
+        d->slot[i] = (uint8_t *)d->shm + d->hdr->buf_offset[i];
+        d->slot_img[i] = pixman_image_create_bits_no_clear(
+            PIXMAN_x8r8g8b8, w, h, (uint32_t *)d->slot[i], (int)(w * 4));
+        if (!d->slot_img[i]) {
+            error_setg(errp, "fb-shm: pixman dest image alloc failed");
+            fb_shm_release_slot_images(d);
+            return -1;
+        }
+    }
+
+    size_t buf_size = (size_t)w * h * 4;
+    d->cur_w = w;
+    d->cur_h = h;
+    d->cur_src_w = sw;
+    d->cur_src_h = sh;
+    d->cur_roi_x = roi_x;
+    d->cur_roi_y = roi_y;
+
+    FbShmHeader *hdr = d->hdr;
+    hdr->buf_size = buf_size;
+    hdr->width = w;
+    hdr->height = h;
+    hdr->stride = w * 4;
+    hdr->target_fps = d->target_fps;
+    hdr->src_width = sw;
+    hdr->src_height = sh;
+    hdr->roi_x = roi_x;
+    hdr->roi_y = roi_y;
+    hdr->damage_x = 0;
+    hdr->damage_y = 0;
+    hdr->damage_w = (int32_t)w;
+    hdr->damage_h = (int32_t)h;
+    hdr->flags = FB_SHM_FLAG_RUNNING | FB_SHM_FLAG_RESIZED;
+    hdr->ts_ns = fb_shm_now_ns();
+
+    /*
+     * 这里记录实际推流几何，而不是只记录 memfd 重建。
+     * 现在 ROI 变小/变大且仍落在既有 backing capacity 内时只会更新
+     * header 和 pixman view，不会触发 NOTIFY_RESIZED 广播；这条日志用于
+     * 恢复“推流尺寸发生调整时一定可见”的诊断信号。
+     */
+    if (old_w != 0 || old_h != 0) {
+        info_report("fb-shm: geometry updated %ux%u@%d,%d/%ux%u -> "
+                    "%ux%u@%d,%d/%ux%u (cap=%ux%u, shm_size=%zu)",
+                    old_w, old_h, old_roi_x, old_roi_y, old_sw, old_sh,
+                    w, h, roi_x, roi_y, sw, sh,
+                    d->cap_w, d->cap_h, d->map_size);
+    }
+    return 0;
+}
+
+/* Allocate a backing store sized for the full source surface, not the ROI.
+ * ROI changes can then update only the header and local pixman views. */
+static int fb_shm_allocate_mapping(FbShmDisplay *d, uint32_t cap_w,
+                                   uint32_t cap_h, Error **errp)
+{
+    if (cap_w == 0 || cap_h == 0 ||
+        cap_w > FB_SHM_MAX_DIM || cap_h > FB_SHM_MAX_DIM) {
+        error_setg(errp, "fb-shm: invalid backing capacity %ux%u",
+                   cap_w, cap_h);
         return -1;
     }
 
     fb_shm_release_mapping(d);
 
-    size_t buf_size = (size_t)w * h * 4;
+    size_t buf_size = fb_shm_frame_bytes(cap_w, cap_h);
     size_t map_size = FB_SHM_HEADER_SIZE + (size_t)FB_SHM_BUF_COUNT * buf_size;
 
     int fd = memfd_create("qemu-fb-shm", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -213,14 +309,11 @@ static int fb_shm_allocate(FbShmDisplay *d, uint32_t w, uint32_t h,
     d->shm = p;
     d->map_size = map_size;
     d->hdr = (FbShmHeader *)p;
-    d->cur_w = w;
-    d->cur_h = h;
-    d->cur_src_w = sw;
-    d->cur_src_h = sh;
-    d->cur_roi_x = roi_x;
-    d->cur_roi_y = roi_y;
+    d->cap_w = cap_w;
+    d->cap_h = cap_h;
+    d->cap_buf_size = buf_size;
 
-    /* Header init (visible to consumer once we publish frame_seq>=1). */
+    /* Header init.  Geometry fields are filled by fb_shm_apply_geometry(). */
     FbShmHeader *hdr = d->hdr;
     hdr->magic = FB_SHM_MAGIC;
     hdr->version = FB_SHM_VERSION;
@@ -231,37 +324,47 @@ static int fb_shm_allocate(FbShmDisplay *d, uint32_t w, uint32_t h,
     for (uint32_t i = 0; i < FB_SHM_BUF_COUNT; i++) {
         hdr->buf_offset[i] = FB_SHM_HEADER_SIZE + (uint64_t)i * buf_size;
         d->slot[i] = (uint8_t *)p + hdr->buf_offset[i];
-        d->slot_img[i] = pixman_image_create_bits_no_clear(
-            PIXMAN_x8r8g8b8, w, h, (uint32_t *)d->slot[i], (int)(w * 4));
-        if (!d->slot_img[i]) {
-            error_setg(errp, "fb-shm: pixman dest image alloc failed");
-            fb_shm_release_mapping(d);
-            return -1;
-        }
     }
-    hdr->width = w;
-    hdr->height = h;
-    hdr->stride = w * 4;
     hdr->fourcc = FB_SHM_FOURCC_BGR0;
     hdr->bpp = 32;
     hdr->target_fps = d->target_fps;
-    hdr->src_width = sw;
-    hdr->src_height = sh;
-    hdr->roi_x = roi_x;
-    hdr->roi_y = roi_y;
-    hdr->damage_x = 0;
-    hdr->damage_y = 0;
-    hdr->damage_w = (int32_t)w;
-    hdr->damage_h = (int32_t)h;
     hdr->active_idx = 0;
     hdr->flags = FB_SHM_FLAG_RUNNING | FB_SHM_FLAG_RESIZED;
     hdr->frame_seq = 0;
     hdr->ts_ns = fb_shm_now_ns();
+    return 0;
+}
 
-    /* Push the new memfd / eventfd to every opted-in client; without this,
-     * existing consumers keep their old mapping and observe a frozen
-     * frame_seq even though we are now writing to a different memfd. */
-    fb_shm_broadcast_resize(d);
+static int fb_shm_ensure_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
+                                  uint32_t sw, uint32_t sh,
+                                  int32_t roi_x, int32_t roi_y, Error **errp)
+{
+    bool needs_mapping = !d->shm || w > d->cap_w || h > d->cap_h;
+    uint32_t cap_w = d->cap_w;
+    uint32_t cap_h = d->cap_h;
+
+    if (needs_mapping) {
+        cap_w = sw > cap_w ? sw : cap_w;
+        cap_h = sh > cap_h ? sh : cap_h;
+        cap_w = w > cap_w ? w : cap_w;
+        cap_h = h > cap_h ? h : cap_h;
+        if (fb_shm_allocate_mapping(d, cap_w, cap_h, errp) < 0) {
+            return -1;
+        }
+    }
+
+    if (w != d->cur_w || h != d->cur_h ||
+        sw != d->cur_src_w || sh != d->cur_src_h ||
+        roi_x != d->cur_roi_x || roi_y != d->cur_roi_y) {
+        if (fb_shm_apply_geometry(d, w, h, sw, sh, roi_x, roi_y, errp) < 0) {
+            return -1;
+        }
+    }
+
+    if (needs_mapping) {
+        /* Only a real memfd replacement needs an out-of-band fd update. */
+        fb_shm_broadcast_resize(d);
+    }
     return 0;
 }
 
@@ -271,9 +374,31 @@ static int fb_shm_allocate(FbShmDisplay *d, uint32_t w, uint32_t h,
 
 static void fb_shm_client_drop(FbShmClient *c)
 {
-    qemu_set_fd_handler(c->fd, NULL, NULL, NULL);
-    close(c->fd);
-    QLIST_REMOVE(c, next);
+    int fd;
+
+    if (!c || c->dropping) {
+        return;
+    }
+
+    c->dropping = true;
+    fd = c->fd;
+    c->fd = -1;
+    if (fd >= 0) {
+        qemu_set_fd_handler(fd, NULL, NULL, NULL);
+        close(fd);
+    }
+    if (c->linked) {
+        QLIST_REMOVE(c, next);
+        c->linked = false;
+    }
+    c->owner = NULL;
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), fb_shm_client_free_bh, c);
+}
+
+static void fb_shm_client_free_bh(void *opaque)
+{
+    FbShmClient *c = opaque;
+
     g_free(c);
 }
 
@@ -305,6 +430,10 @@ static int fb_shm_send_fds(int fd, const FbShmCtlAck *ack,
 static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
                                 const FbShmCtlReq *req)
 {
+    if (c->dropping || c->fd < 0) {
+        return;
+    }
+
     /* Mark the client eligible for broadcasts BEFORE we send the ack: a
      * concurrent reallocate from the refresh tick is fine, the client will
      * just see the HELLO ack followed by a NOTIFY_RESIZED carrying the same
@@ -352,7 +481,8 @@ static void fb_shm_broadcast_resize(FbShmDisplay *d)
     int recipients = 0;
     FbShmClient *c, *cn;
     QLIST_FOREACH_SAFE(c, &d->clients, next, cn) {
-        if (!c->hello_done || !c->wants_resize_notify) {
+        if (c->dropping || c->fd < 0 ||
+            !c->hello_done || !c->wants_resize_notify) {
             continue;
         }
         if (fb_shm_send_fds(c->fd, &ack, fds, 2) < 0) {
@@ -374,10 +504,16 @@ static void fb_shm_broadcast_resize(FbShmDisplay *d)
 static void fb_shm_handle_set_roi(FbShmDisplay *d, FbShmClient *c,
                                   const FbShmCtlReq *req)
 {
+    if (c->dropping || c->fd < 0) {
+        return;
+    }
+
     if (req->w > FB_SHM_MAX_DIM || req->h > FB_SHM_MAX_DIM) {
         FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                             .status = FB_SHM_CTL_EINVAL };
-        fb_shm_send_fds(c->fd, &ack, NULL, 0);
+        if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+            fb_shm_client_drop(c);
+        }
         return;
     }
     d->cfg_x = (uint32_t)(req->x < 0 ? 0 : req->x);
@@ -390,12 +526,18 @@ static void fb_shm_handle_set_roi(FbShmDisplay *d, FbShmClient *c,
                         .shm_size = (uint32_t)d->map_size,
                         .width = d->cur_w, .height = d->cur_h,
                         .fourcc = FB_SHM_FOURCC_BGR0, .bpp = 32 };
-    fb_shm_send_fds(c->fd, &ack, NULL, 0);
+    if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+        fb_shm_client_drop(c);
+    }
 }
 
 static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
                                    const FbShmCtlReq *req)
 {
+    if (c->dropping || c->fd < 0) {
+        return;
+    }
+
     uint32_t r = req->rate_hz;
     if (r < FB_SHM_MIN_RATE) r = FB_SHM_MIN_RATE;
     if (r > FB_SHM_MAX_RATE) r = FB_SHM_MAX_RATE;
@@ -407,7 +549,9 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
 
     FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                         .status = FB_SHM_CTL_OK };
-    fb_shm_send_fds(c->fd, &ack, NULL, 0);
+    if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+        fb_shm_client_drop(c);
+    }
 }
 
 static void fb_shm_client_read(void *opaque)
@@ -416,6 +560,11 @@ static void fb_shm_client_read(void *opaque)
     FbShmDisplay *d = c->owner;
     FbShmCtlReq req;
     ssize_t r;
+
+    if (c->dropping || c->fd < 0 || !d) {
+        return;
+    }
+
     do {
         r = recv(c->fd, &req, sizeof(req), MSG_DONTWAIT);
     } while (r < 0 && errno == EINTR);
@@ -426,7 +575,9 @@ static void fb_shm_client_read(void *opaque)
     if (r != (ssize_t)sizeof(req) || req.magic != FB_SHM_MAGIC) {
         FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = 0,
                             .status = FB_SHM_CTL_EINVAL };
-        fb_shm_send_fds(c->fd, &ack, NULL, 0);
+        if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+            fb_shm_client_drop(c);
+        }
         return;
     }
 
@@ -446,7 +597,9 @@ static void fb_shm_client_read(void *opaque)
     default: {
         FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req.op,
                             .status = FB_SHM_CTL_EUNSUPPORTED };
-        fb_shm_send_fds(c->fd, &ack, NULL, 0);
+        if (fb_shm_send_fds(c->fd, &ack, NULL, 0) < 0) {
+            fb_shm_client_drop(c);
+        }
         break;
     }
     }
@@ -468,6 +621,7 @@ static void fb_shm_listener_accept(void *opaque)
     FbShmClient *c = g_new0(FbShmClient, 1);
     c->owner = d;
     c->fd = cfd;
+    c->linked = true;
     QLIST_INSERT_HEAD(&d->clients, c, next);
     qemu_set_fd_handler(cfd, fb_shm_client_read, NULL, c);
 }
@@ -538,7 +692,7 @@ static void fb_shm_gfx_switch(DisplayChangeListener *dcl,
         sw != d->cur_src_w || sh != d->cur_src_h ||
         rx != d->cur_roi_x || ry != d->cur_roi_y) {
         Error *err = NULL;
-        if (fb_shm_allocate(d, rw, rh, sw, sh, rx, ry, &err) < 0) {
+        if (fb_shm_ensure_geometry(d, rw, rh, sw, sh, rx, ry, &err) < 0) {
             warn_report_err(err);
             return;
         }
@@ -567,7 +721,7 @@ static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
         sw != d->cur_src_w || sh != d->cur_src_h ||
         rx != d->cur_roi_x || ry != d->cur_roi_y) {
         Error *err = NULL;
-        if (fb_shm_allocate(d, rw, rh, sw, sh, rx, ry, &err) < 0) {
+        if (fb_shm_ensure_geometry(d, rw, rh, sw, sh, rx, ry, &err) < 0) {
             warn_report_err(err);
             return;
         }

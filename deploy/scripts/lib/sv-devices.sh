@@ -91,9 +91,10 @@ fi
 #   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
 #   INTERNAL_ERROR"）。代价是没有 GL 加速，guest 的 DirectX 回退到 WARP
 #   (软件 DX9-12)。DNF/腾讯 2D+DX9 类游戏 WARP 完全够用，性能差不大。
-#   (注：fb-shm + headless 模式与 STABLE_DISPLAY 无关，永远走 stable 路径)
+#   (注：--no-sdl/--headless 没有窗口 GL context，仍然走 stable 路径)
 #
 # STABLE_DISPLAY=0: 仅在 --sdl 模式下生效，启 virtio-vga-gl + virgl 3D 加速。
+#   fb-shm 会作为第二个 DCL 共享 SDL 的 GL scanout，把纹理读回到 SHM 推流；
 #   渲染更快但 virgl 状态机长跑会脏。
 STABLE_DISPLAY=${STABLE_DISPLAY:-1}
 

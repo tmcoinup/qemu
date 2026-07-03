@@ -585,6 +585,19 @@ static bool displaychangelistener_has_dmabuf(DisplayChangeListener *dcl)
     return false;
 }
 
+static bool displaychangelistener_accepts_gl(DisplayChangeListener *dcl)
+{
+    /*
+     * fb-shm 这类非窗口 DCL 可能早于 SDL/GTK display 初始化。此时 console
+     * 还没有 GL provider，但 DCL 本身已经能接收后续的 GL scanout 回调。
+     * 允许它先注册到 listener 链表；display 初始化完成后，真正的 texture
+     * scanout/update 会再次广播给它。
+     */
+    return g_strcmp0(dcl->ops->dpy_name, "fb-shm") == 0 &&
+           (dcl->ops->dpy_gl_scanout_texture ||
+            dcl->ops->dpy_gl_scanout_dmabuf);
+}
+
 static bool console_compatible_with(QemuConsole *con,
                                     DisplayChangeListener *dcl, Error **errp)
 {
@@ -601,6 +614,9 @@ static bool console_compatible_with(QemuConsole *con,
 
     if (flags & GRAPHIC_FLAGS_GL &&
         !console_has_gl(con)) {
+        if (displaychangelistener_accepts_gl(dcl)) {
+            return false;
+        }
         error_setg(errp, "The console requires a GL context.");
         return false;
 

@@ -81,7 +81,7 @@ Ryzen3-1200=3.1GHz），但**指令是按 host 真实频率执行的**。host(58
 ⚠ 注意：单开 `governor=performance` 反而**加重**②（把 host 顶到满 boost），必须同时封顶频率。
 
 **修复**：`start-vm.sh` 默认 `HOST_TUNE=1` + `CPU_FREQ_CAP=1`，起 VM 前自动跑
-`host-performance.sh`：governor=performance + halt_poll=500000 + THP defrag=never（治①），
+`host-performance.sh`：governor=performance + 可配置 halt_poll + THP defrag=never（治①），
 并把 `scaling_max_freq` 封顶到本实例 `CPU_MAX_MHZ`（治②，**只降不升**）。手动：
 ```bash
 sudo deploy/scripts/host-performance.sh 3400000   # 位置参数=封顶 kHz(3400MHz=伪装 CPU 上限)
@@ -92,14 +92,15 @@ sudo deploy/scripts/host-performance.sh 3400000   # 位置参数=封顶 kHz(3400
 ```bash
 cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort -u   # performance
 cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq  | sort -u   # =CPU_MAX_MHZ*1000(如3400000)
-cat /sys/module/kvm/parameters/halt_poll_ns                          # 500000
+cat /sys/module/kvm/parameters/halt_poll_ns                          # 默认 0；低延迟诊断可 KVM_HALT_POLL_NS=500000
 cat /sys/kernel/mm/transparent_hugepage/defrag                       # [never]
 grep -m4 MHz /proc/cpuinfo                                           # 应 ≤ 封顶值, 不再 4.4G
 cat /proc/sys/vm/nr_hugepages                                        # 必须仍是 0(memfd 不预留)
 ```
 **绝不能动的反检测命脉**（动了反而更可疑，且与计时检测无关）：`-cpu` 的
 `tsc-freq=`/`+invtsc`/`+tsc-deadline`、`kvm=off`/`hypervisor=off`/`vendor=`、vCPU 数/拓扑
-（`cores=N` 对应伪 N 核）、`-rtc clock=vm,driftfix=slew`、`-overcommit cpu-pm=on`。
+（`cores=N` 对应伪 N 核）、`-rtc clock=vm,driftfix=slew`。`-overcommit cpu-pm`
+默认保持 `off`，多开时不要打开；只有单机低延迟诊断才用 `QEMU_CPU_PM=1` 临时启用。
 
 > 若调优后仍报 `13-131130-8`：排查 host 是否被别的重负载抢核（`pidstat`/`perf kvm stat`），
 > 或 vCPU 超额订阅（运行的 VM 总 vCPU > host 逻辑核）。本机 8c/16t，单 VM 4 vCPU，

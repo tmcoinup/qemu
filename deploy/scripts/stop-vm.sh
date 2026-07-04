@@ -51,14 +51,25 @@ pid_of_vm() {
 qmp_cmd() {
     local execute="$1"
     python3 - "$QMP" "$execute" <<'PY'
-import json, socket, sys
+import json, socket, sys, time
 sock_path, execute = sys.argv[1], sys.argv[2]
-s = socket.socket(socket.AF_UNIX)
-s.settimeout(5)
-try:
-    s.connect(sock_path)
-except Exception as e:
-    print(f"qmp connect failed: {e}", file=sys.stderr); sys.exit(3)
+last_error = None
+s = None
+for _ in range(10):
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(5)
+    try:
+        s.connect(sock_path)
+        break
+    except Exception as e:
+        last_error = e
+        try:
+            s.close()
+        except Exception:
+            pass
+        time.sleep(0.2)
+else:
+    print(f"qmp connect failed: {last_error}", file=sys.stderr); sys.exit(3)
 f = s.makefile("rw")
 json.loads(f.readline())   # greeting
 f.write(json.dumps({"execute": "qmp_capabilities"}) + "\n"); f.flush()
@@ -118,7 +129,12 @@ else
         fi
     else
         echo "→ ACPI powerdown (system_powerdown), waiting up to ${WAIT}s"
-        qmp_cmd system_powerdown >/dev/null || true
+        # QEMU 正在退出或刚重建 socket 时，QMP connect 可能瞬间 ECONNREFUSED。
+        # 如果随后进程已经消失，就不要把这类瞬时错误误报给操作者。
+        if ! _qmp_err="$(qmp_cmd system_powerdown 2>&1 >/dev/null)"; then
+            sleep 1
+            vm_alive && echo "$_qmp_err" >&2
+        fi
         for ((i=0; i<WAIT; i++)); do
             vm_alive || break
             sleep 1

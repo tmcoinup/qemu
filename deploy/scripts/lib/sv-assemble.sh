@@ -9,6 +9,14 @@ if [[ "$PROXY" == "1" ]]; then
     QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off,multi=on")
 fi
 
+# QEMU 文档明确说明 cpu-pm=on 适合 host CPU 不超售的场景；多开时默认关闭，
+# 避免 guest 空闲时宿主仍把 vCPU 线程记成满核。需要极限低延迟可显式
+# QEMU_CPU_PM=1 打开。
+CPU_PM_ARG=off
+if [[ "${QEMU_CPU_PM:-0}" =~ ^(1|on|true|yes)$ ]]; then
+    CPU_PM_ARG=on
+fi
+
 CMD=(
     "$QEMU"
 
@@ -126,7 +134,7 @@ CMD=(
 
     # --- Misc anti-detection knobs ---
     -msg timestamp=off
-    -overcommit mem-lock=off,cpu-pm=on
+    -overcommit "mem-lock=off,cpu-pm=${CPU_PM_ARG}"
 )
 
 # 回归/调试出参：DRY_RUN=1 时打印完整 QEMU argv（每行一个）后退出，不启动任何
@@ -150,8 +158,14 @@ echo ">> HMP socket:  $MON_SOCK"
 # 显示通道
 if [[ "$HEADLESS" == "1" ]]; then
     echo ">> GUI:         VNC 127.0.0.1:$((5900+VNC_DISPLAY)) (display :$VNC_DISPLAY)"
+elif [[ "${GPU_DISPLAY:-sdl}" == "egl-headless" ]]; then
+    echo ">> GUI:         EGL headless GPU (rendernode=${GPU_RENDERNODE:-auto})"
 elif [[ "$SDL" == "1" ]]; then
-    echo ">> GUI:         SDL 窗口 (DISPLAY=${DISPLAY:-未设})$([[ "$STABLE_DISPLAY" == "1" ]] && echo " stable" || echo " gl")"
+    if [[ "${SDL_NATIVE_EGL:-0}" == "1" ]]; then
+        echo ">> GUI:         SDL 窗口 (DISPLAY=${DISPLAY:-未设}) native EGL GPU"
+    else
+        echo ">> GUI:         SDL 窗口 (DISPLAY=${DISPLAY:-未设})$([[ "$STABLE_DISPLAY" == "1" ]] && echo " stable" || echo " gl")"
+    fi
 else
     echo ">> GUI:         无（纯 fb-shm 推流模式）"
 fi
@@ -294,7 +308,9 @@ if [[ "${SDL:-0}" == "1" && "${HEADLESS:-0}" != "1" && -n "${DISPLAY:-}" ]]; the
     # gnome-session-inhibit 调 D-Bus org.gnome.SessionManager.Inhibit, mutter
     # 会 honor 它. 链式包: gnome-session-inhibit → systemd-inhibit → qemu.
     GNOME_INHIBIT=()
-    if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && command -v gnome-session-inhibit >/dev/null 2>&1; then
+    if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && \
+       [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && \
+       command -v gnome-session-inhibit >/dev/null 2>&1; then
         # gnome-session-inhibit 选项必须空格分开, 不接受 --key=value 写法.
         GNOME_INHIBIT=(gnome-session-inhibit
             --app-id "qemu-stealth-${INSTANCE}"

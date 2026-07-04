@@ -231,6 +231,62 @@ test_qemu_service_cpu_flags_dry_run() {
         || fail "invalid --svc-cpus did not explain the validation error"
 }
 
+test_gl_display_enables_gpu_blob_dry_run() {
+    local out="$1"
+    local vga_line
+
+    DISPLAY=:0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9886 \
+        "$START_VM" --no-fb-shm --no-bridge > "$out"
+
+    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
+    [[ "$vga_line" == *"blob=true"* ]] \
+        || fail "SDL+GL dry-run did not enable virtio-gpu blob resources"
+    [[ "$vga_line" == *"hostmem=256M"* ]] \
+        || fail "SDL+GL dry-run did not set default GPU hostmem"
+
+    DISPLAY=:0 GPU_HOSTMEM=512M DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9887 \
+        "$START_VM" --no-fb-shm --no-bridge > "$out"
+
+    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
+    [[ "$vga_line" == *"hostmem=512M"* ]] \
+        || fail "SDL+GL dry-run did not honor GPU_HOSTMEM"
+
+    DISPLAY=:0 GPU_ZEROCOPY=0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9888 \
+        "$START_VM" --no-fb-shm --no-bridge > "$out"
+
+    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
+    [[ "$vga_line" != *"blob=true"* && "$vga_line" != *"hostmem="* ]] \
+        || fail "GPU_ZEROCOPY=0 should keep historical texture-only device"
+
+    DISPLAY=:0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9890 \
+        "$START_VM" --gpu-sdl-egl --no-fb-shm --no-bridge > "$out"
+
+    grep -Fx -- "sdl,gl=on,show-cursor=off" "$out" >/dev/null \
+        || fail "--gpu-sdl-egl must keep an SDL window display"
+    grep -Fx -- "egl-headless" "$out" >/dev/null \
+        && fail "--gpu-sdl-egl must not select headless display"
+    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
+    [[ "$vga_line" == *"blob=true"* && "$vga_line" == *"hostmem=256M"* ]] \
+        || fail "--gpu-sdl-egl did not keep virtio-vga-gl blob/hostmem enabled"
+}
+
+test_gpu_headless_display_dry_run() {
+    local out="$1"
+    local vga_line
+
+    DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9889 \
+        "$START_VM" --gpu-headless --no-fb-shm --no-bridge > "$out"
+
+    grep -Fx -- "egl-headless" "$out" >/dev/null \
+        || fail "--gpu-headless did not select egl-headless display"
+    grep -Fx -- "sdl,gl=on,show-cursor=off" "$out" >/dev/null \
+        && fail "--gpu-headless should not create an SDL window"
+
+    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
+    [[ "$vga_line" == *"blob=true"* && "$vga_line" == *"hostmem=256M"* ]] \
+        || fail "--gpu-headless did not keep virtio-vga-gl blob/hostmem enabled"
+}
+
 test_hotkey_capture_option_removed() {
     local out="$1"
 
@@ -287,6 +343,8 @@ main() {
     test_proxy_dry_run_uses_native_qmp_multi "$out"
     test_custom_image_root_dry_run "$image_root" "$out"
     test_qemu_service_cpu_flags_dry_run "$out"
+    test_gl_display_enables_gpu_blob_dry_run "$out"
+    test_gpu_headless_display_dry_run "$out"
     test_hotkey_capture_option_removed "$out"
     test_cpu_isolate_scripts_parse
     echo "PASS: start-vm NVMe storage portability path"

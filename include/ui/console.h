@@ -251,6 +251,17 @@ typedef struct DisplayChangeListenerOps {
     /* optional */
     void (*dpy_gl_scanout_dmabuf)(DisplayChangeListener *dcl,
                                   QemuDmaBuf *dmabuf);
+    /*
+     * 可选：旁路 dma-buf 通知。
+     *
+     * 普通 dpy_gl_scanout_dmabuf() 表示显示设备已经把主 scanout 切换成
+     * dma-buf，窗口 DCL 可以据此改变自己的显示状态。这个回调只用于
+     * “主显示仍是 texture/surface，但同一帧额外导出了 dma-buf”的场景，
+     * 例如 fb-shm GPU 推流。窗口后端不实现它，避免旁路句柄覆盖本地窗口
+     * 原本稳定的 texture scanout。
+     */
+    void (*dpy_gl_scanout_dmabuf_update)(DisplayChangeListener *dcl,
+                                         QemuDmaBuf *dmabuf);
     /* optional */
     void (*dpy_gl_cursor_dmabuf)(DisplayChangeListener *dcl,
                                  QemuDmaBuf *dmabuf, bool have_hot,
@@ -348,6 +359,8 @@ void dpy_gl_scanout_texture(QemuConsole *con,
                             void *d3d_tex2d);
 void dpy_gl_scanout_dmabuf(QemuConsole *con,
                            QemuDmaBuf *dmabuf);
+void dpy_gl_scanout_dmabuf_update(QemuConsole *con,
+                                  QemuDmaBuf *dmabuf);
 void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
                           bool have_hot, uint32_t hot_x, uint32_t hot_y);
 void dpy_gl_cursor_position(QemuConsole *con,
@@ -363,6 +376,7 @@ void dpy_gl_ctx_destroy(QemuConsole *con, QEMUGLContext ctx);
 int dpy_gl_ctx_make_current(QemuConsole *con, QEMUGLContext ctx);
 
 bool console_has_gl(QemuConsole *con);
+int qemu_console_get_graphic_flags(QemuConsole *con);
 
 typedef uint32_t console_ch_t;
 

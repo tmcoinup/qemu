@@ -5,9 +5,9 @@
 #
 # 两件事，都只动 host 侧旋钮，guest 的 CPUID / tsc-freq / 拓扑 / SMBIOS 全不变：
 #
-#  1) 抖动调优 (HOST_TUNE=1): governor=performance + halt_poll=500000 +
-#     THP defrag=never，压低 vCPU 服务延迟方差。ACE「游戏计时异常」(13-131130-8)
-#     这类时钟检测对抖动尖刺敏感。
+#  1) 抖动调优 (HOST_TUNE=1): governor=performance + 可配置 halt_poll +
+#     THP defrag=never。多开默认 KVM_HALT_POLL_NS=0，靠 cpuset 隔离防止宿主
+#     编译抢 vCPU；需要旧低延迟策略时显式 KVM_HALT_POLL_NS=500000。
 #
 #  2) 频率封顶 (CPU_FREQ_CAP=1): 把 scaling_max_freq 压到「**运行中所有 VM**
 #     伪装 CPU 上限(CPU_MAX_MHZ=SMBIOS Type4 max-speed)的最小值」。host boost 远
@@ -34,15 +34,17 @@ fi
 if [[ "${HOST_TUNE:-1}" == "1" ]]; then
     _ht_script="$HERE/host-performance.sh"
     _ht_need=0
+    _ht_halt_poll_target="${KVM_HALT_POLL_NS:-0}"
+    [[ "$_ht_halt_poll_target" =~ ^[0-9]+$ ]] || _ht_halt_poll_target=0
 
-    # --- 抖动调优是否需要：全核 governor=performance 且 halt_poll≥500000 ---
+    # --- 抖动调优是否需要：全核 governor=performance 且 halt_poll 等于目标值 ---
     for _g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
         [[ -r "$_g" ]] || continue
         [[ "$(cat "$_g" 2>/dev/null)" == "performance" ]] || { _ht_need=1; break; }
     done
     _hp=$(cat /sys/module/kvm/parameters/halt_poll_ns 2>/dev/null || echo 0)
     [[ "$_hp" =~ ^[0-9]+$ ]] || _hp=0
-    (( _hp < 500000 )) && _ht_need=1
+    (( _hp != _ht_halt_poll_target )) && _ht_need=1
 
     # --- 频率封顶目标 = 运行中所有 VM(含本实例) CPU_MAX_MHZ 的最小值 ---
     # _ht_cap_arg: 传给 host-performance.sh 的 kHz；空=不封顶(CPU_FREQ_CAP=0)。
@@ -77,7 +79,7 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
     fi
 
     if (( _ht_need == 0 )); then
-        echo ">> host 调优:   已是 performance + halt_poll≥500000$([[ -n "$_ht_cap_arg" ]] && echo " + 频率封顶 $(( _ht_cap_arg/1000 ))MHz")，跳过"
+        echo ">> host 调优:   已是 performance + halt_poll=${_ht_halt_poll_target}ns$([[ -n "$_ht_cap_arg" ]] && echo " + 频率封顶 $(( _ht_cap_arg/1000 ))MHz")，跳过"
     elif [[ ! -f "$_ht_script" ]]; then
         echo ">> host 调优:   ⚠ 找不到 $_ht_script，跳过（HOST_TUNE=0 可静默）" >&2
     else

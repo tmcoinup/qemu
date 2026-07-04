@@ -64,11 +64,33 @@ _sv_check_qemu_caps() {
         || _sv_die_missing_qemu_feature "virtio-vga EDID / PCI subsystem 属性"
 
     if [[ "${SDL:-0}" == "1" && "${STABLE_DISPLAY:-0}" != "1" ]]; then
+        _sv_need_gl_display=1
+    elif [[ "${GPU_DISPLAY:-sdl}" == "egl-headless" && "${STABLE_DISPLAY:-0}" != "1" ]]; then
+        _sv_need_gl_display=1
+    else
+        _sv_need_gl_display=0
+    fi
+
+    if [[ "$_sv_need_gl_display" == "1" ]]; then
         help="$(_sv_qemu_device_help virtio-vga-gl)"
         _sv_qemu_help_has_all "$help" \
             'edid-vendor=' 'edid-name=' 'edid-serial=' \
             'edid-width-mm=' 'edid-height-mm=' \
             || _sv_die_missing_qemu_feature "virtio-vga-gl EDID 属性"
+        if [[ "${GPU_ZEROCOPY:-1}" == "1" ]]; then
+            _sv_qemu_help_has_all "$help" 'blob=' 'hostmem=' \
+                || _sv_die_missing_qemu_feature "virtio-vga-gl GPU blob/hostmem 属性"
+        fi
+    fi
+    if [[ "${GPU_DISPLAY:-sdl}" == "egl-headless" ]]; then
+        help="$("$QEMU" -display help 2>&1)"
+        _sv_qemu_help_has_all "$help" 'egl-headless' \
+            || _sv_die_missing_qemu_feature "egl-headless display backend"
+        if [[ -n "${GPU_RENDERNODE:-}" && ( ! -r "$GPU_RENDERNODE" || ! -w "$GPU_RENDERNODE" ) ]]; then
+            echo "ERROR: GPU_RENDERNODE 不可读写: $GPU_RENDERNODE" >&2
+            echo "       请把当前用户加入 render 组，或给 render node 配置 ACL。" >&2
+            exit 1
+        fi
     fi
 
     for _dev in usb-kbd usb-mouse usb-tablet; do

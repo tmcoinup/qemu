@@ -572,6 +572,16 @@ bool console_has_gl(QemuConsole *con)
     return con->gl != NULL;
 }
 
+int qemu_console_get_graphic_flags(QemuConsole *con)
+{
+    if (!con || !QEMU_IS_GRAPHIC_CONSOLE(con) ||
+        !con->hw_ops || !con->hw_ops->get_flags) {
+        return GRAPHIC_FLAGS_NONE;
+    }
+
+    return con->hw_ops->get_flags(con->hw);
+}
+
 static bool displaychangelistener_has_dmabuf(DisplayChangeListener *dcl)
 {
     if (dcl->ops->dpy_has_dmabuf) {
@@ -603,7 +613,7 @@ static bool console_compatible_with(QemuConsole *con,
 {
     int flags;
 
-    flags = con->hw_ops->get_flags ? con->hw_ops->get_flags(con->hw) : 0;
+    flags = qemu_console_get_graphic_flags(con);
 
     if (console_has_gl(con) &&
         !con->gl->ops->dpy_gl_ctx_is_compatible_dcl(con->gl, dcl)) {
@@ -1160,6 +1170,29 @@ void dpy_gl_scanout_dmabuf(QemuConsole *con,
         }
         if (dcl->ops->dpy_gl_scanout_dmabuf) {
             dcl->ops->dpy_gl_scanout_dmabuf(dcl, dmabuf);
+        }
+    }
+}
+
+void dpy_gl_scanout_dmabuf_update(QemuConsole *con,
+                                  QemuDmaBuf *dmabuf)
+{
+    DisplayState *s = con->ds;
+    DisplayChangeListener *dcl;
+
+    /*
+     * 中文注释：SDL/GTK 这类窗口后端仍以 texture scanout 作为主显示状态；
+     * fb-shm 这类旁路消费者只需要同一帧的 dma-buf 句柄。这里只通知明确
+     * 实现 sideband 回调的 DCL，不复用 dpy_gl_scanout_dmabuf()，避免本地
+     * 窗口被旁路 dma-buf 覆盖，导致固件/主板阶段原本可见的 texture 画面
+     * 变成黑屏。
+     */
+    QLIST_FOREACH(dcl, &s->listeners, next) {
+        if (con != dcl->con) {
+            continue;
+        }
+        if (dcl->ops->dpy_gl_scanout_dmabuf_update) {
+            dcl->ops->dpy_gl_scanout_dmabuf_update(dcl, dmabuf);
         }
     }
 }

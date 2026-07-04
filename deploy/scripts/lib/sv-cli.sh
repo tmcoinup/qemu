@@ -22,6 +22,13 @@ while (( $# > 0 )); do
         --fb-shm-sock=*) FB_SHM=1; FB_SHM_SOCK="${1#*=}" ;;
         --fb-shm-rate=*) FB_SHM=1; FB_SHM_RATE="${1#*=}" ;;
         --fb-shm-roi=*)  FB_SHM=1; FB_SHM_ROI="${1#*=}" ;;
+        --gpu-zerocopy)     GPU_ZEROCOPY=1 ;;
+        --no-gpu-zerocopy)  GPU_ZEROCOPY=0 ;;
+        --gpu-hostmem=*)    GPU_HOSTMEM="${1#*=}" ;;
+        --gpu-headless)     GPU_DISPLAY=egl-headless; SDL=0 ;;
+        --gpu-sdl-egl)      GPU_DISPLAY=sdl-egl; SDL=1 ;;
+        --gpu-display=*)    GPU_DISPLAY="${1#*=}" ;;
+        --gpu-rendernode=*) GPU_RENDERNODE="${1#*=}" ;;
         --proxy)         PROXY=1 ;;
         --no-proxy)      PROXY=0 ;;
         --host-tune)     HOST_TUNE=1 ;;
@@ -73,16 +80,25 @@ fi
 : "${HEADLESS:=0}"
 : "${SDL:=1}"      # 默认：SDL 窗口仍然弹出（与历史行为一致）
 : "${FB_SHM:=1}"   # 默认：再额外挂一条 -object fb-shm 推流通道
+: "${STABLE_DISPLAY:=0}"
 : "${FB_SHM_RATE:=60}"
 : "${FB_SHM_ROI:=}"
 : "${FB_SHM_SOCK:=/tmp/qemu-stealth-${INSTANCE}.fb}"
+# GPU 零拷贝元数据依赖 virtio-gpu blob resource + host-visible memory。
+# 默认打开，让 fb-shm 的 GPU consumer 能收到 dma-buf scanout；遇到旧 guest/旧
+# virglrenderer 可用 --no-gpu-zerocopy 显式回退到历史 GL texture + SHM readback。
+: "${GPU_ZEROCOPY:=1}"
+: "${GPU_HOSTMEM:=256M}"
+: "${GPU_DISPLAY:=sdl-egl}"
+: "${GPU_RENDERNODE:=}"
 # QMP 多客户端：PROXY=1 时启用 QEMU 原生 multi=on QMP listener，同一路径可被
 # dgame / image-search / 临时 socat 同时连接。为了兼容旧工具配置，启动脚本还会
 # 建一个 ${QMP_SOCK}.proxy -> ${QMP_SOCK} 的 symlink，但不再起 Python 中转进程。
 : "${PROXY:=0}"
 # host 侧调度/时钟抖动调优: 起 VM 前自动跑 host-performance.sh(governor=performance
-# + halt_poll=500000 + THP defrag=never), 压低 vCPU 服务延迟方差——ACE「游戏计时
-# 异常」(13-131130-8) 这类反作弊时钟检测对抖动敏感. 只动 host 侧, 零反检测影响.
+# + KVM_HALT_POLL_NS(默认 0) + THP defrag=never)。多开时主要靠 cpuset 隔离
+# 防止宿主编译抢 vCPU；如需旧低延迟 busy-poll 策略，可显式 KVM_HALT_POLL_NS=500000。
+# 只动 host 侧, 零反检测硬件身份影响.
 # 已调优则自动跳过(免每次 sudo); DRY_RUN 下严格 no-op. (flag: --host-tune/--no-host-tune)
 : "${HOST_TUNE:=1}"
 # CPU 频率封顶: 把 host scaling_max_freq 压到本实例伪装 CPU 的 CPU_MAX_MHZ(SMBIOS
@@ -121,8 +137,32 @@ VMS_DIR="${VMS_DIR%/}"
 #   (无 flag)            -> SDL 窗口 + fb-shm        ← 默认
 #   --headless           -> VNC 远程  + fb-shm（去窗口、加远程）
 #   --no-sdl             -> 关窗口，仅 fb-shm（适合后台 daemon / nohup）
+#   --gpu-sdl-egl        -> SDL 本地窗口 + native EGL（fb-shm GPU 零拷贝）
+#   --gpu-headless       -> EGL rendernode + fb-shm（GPU 零拷贝推流验证）
 #   --no-fb-shm          -> 关推流，仅 SDL/VNC（回历史行为）
 #   --sdl --headless     -> 冲突，按 --headless 走
+case "$GPU_DISPLAY" in
+    sdl|sdl-egl|egl-headless) ;;
+    *)
+        echo "ERROR: GPU_DISPLAY 只支持 sdl、sdl-egl 或 egl-headless (实际: '$GPU_DISPLAY')" >&2
+        exit 2 ;;
+esac
+if [[ "$STABLE_DISPLAY" == "1" && "$GPU_DISPLAY" == "sdl-egl" ]]; then
+    # 中文注释：stable 模式故意关闭 virtio-gpu GL；native EGL 没有可绑定的 GL
+    # scanout，自动退回普通 SDL 窗口，保持旧的稳定显示路径。
+    GPU_DISPLAY=sdl
+fi
+if [[ "$GPU_DISPLAY" == "egl-headless" && "$HEADLESS" == "1" ]]; then
+    echo "ERROR: --gpu-headless/GPU_DISPLAY=egl-headless 不能和 --headless/VNC 同时使用" >&2
+    exit 2
+fi
+if [[ "$GPU_DISPLAY" == "egl-headless" && "$STABLE_DISPLAY" == "1" ]]; then
+    echo "ERROR: GPU EGL headless 需要 virtio-vga-gl；请取消 STABLE_DISPLAY=1" >&2
+    exit 2
+fi
+if [[ "$GPU_DISPLAY" == "egl-headless" ]]; then
+    SDL=0
+fi
 if [[ "$HEADLESS" == "1" ]]; then
     SDL=0   # headless 强制无窗口（VNC 替代）
 fi
@@ -145,6 +185,21 @@ if [[ "$FB_SHM" == "1" ]]; then
         echo "ERROR: FB_SHM_ROI 必须是 x,y,w,h 整数四元组 (实际: '$FB_SHM_ROI')" >&2
         exit 2
     fi
+fi
+
+if [[ "$GPU_ZEROCOPY" != "0" && "$GPU_ZEROCOPY" != "1" ]]; then
+    echo "ERROR: GPU_ZEROCOPY 必须是 0 或 1 (实际: '$GPU_ZEROCOPY')" >&2
+    exit 2
+fi
+if [[ "$GPU_ZEROCOPY" == "1" ]]; then
+    if ! [[ "$GPU_HOSTMEM" =~ ^[0-9]+([KkMmGgTt])?$ ]]; then
+        echo "ERROR: GPU_HOSTMEM 必须是 QEMU size 值，如 256M/1G (实际: '$GPU_HOSTMEM')" >&2
+        exit 2
+    fi
+fi
+if [[ -n "$GPU_RENDERNODE" && ! -e "$GPU_RENDERNODE" ]]; then
+    echo "ERROR: GPU_RENDERNODE 不存在: $GPU_RENDERNODE" >&2
+    exit 2
 fi
 
 # QEMU_SERVICE_CPUS 是隔离层参数，不影响 QEMU argv；DRY_RUN 也需要校验，防止错误配置

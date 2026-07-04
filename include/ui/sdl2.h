@@ -59,6 +59,16 @@ struct sdl2_console {
     egl_fb win_fb;
     bool y0_top;
     bool scanout_mode;
+    bool native_egl;
+    uintptr_t native_egl_window;
+    uintptr_t native_egl_colormap;
+    EGLContext ectx;
+    EGLSurface esurface;
+    bool logged_native_egl_visual;
+    bool logged_scanout_texture;
+    bool logged_scanout_flush;
+    bool warned_missing_scanout_fb;
+    bool warned_native_egl_blit;
 #endif
 };
 
@@ -137,6 +147,12 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
                              uint32_t x, uint32_t y,
                              uint32_t w, uint32_t h,
                              void *d3d_tex2d);
+#ifdef CONFIG_GBM
+void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
+                            QemuDmaBuf *dmabuf);
+void sdl2_gl_release_dmabuf(DisplayChangeListener *dcl,
+                            QemuDmaBuf *dmabuf);
+#endif
 void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 

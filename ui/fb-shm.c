@@ -132,7 +132,9 @@ struct FbShmDisplay {
     char *sock_path;
     uint32_t cfg_x, cfg_y;
     uint32_t cfg_w, cfg_h;       /* 0 means "track source dim" */
-    uint32_t target_fps;
+    uint32_t target_fps;         /* effective DCL tick rate       */
+    uint32_t shm_target_fps;     /* SHM/CPU readback publish rate */
+    uint32_t gpu_target_fps;     /* GPU metadata publish rate     */
     bool blend_cursor;            /* reserved for future use     */
 
     /* SHM state */
@@ -177,6 +179,7 @@ struct FbShmDisplay {
     uint32_t gl_backing_w, gl_backing_h;
     uint32_t gl_x, gl_y, gl_w, gl_h;
     uint64_t gl_last_frame_ns;
+    uint64_t shm_last_frame_ns;
     uint64_t gpu_frame_seq;
     QEMUGLContext gl_ctx;
     egl_fb gl_guest_fb;
@@ -186,6 +189,9 @@ struct FbShmDisplay {
     bool gl_pbo_checked;
     bool gl_pbo_supported;
     bool gl_warned_pbo;
+    bool gl_warned_texture_export;
+    bool gl_logged_texture_scanout;
+    bool gl_logged_dmabuf_scanout;
     uint32_t gl_pbo_head;
     uint32_t gl_pbo_tail;
     FbShmGlPbo gl_pbo[FB_SHM_GL_PBO_COUNT];
@@ -210,6 +216,9 @@ static void fb_shm_broadcast_resize(FbShmDisplay *d);
 static void fb_shm_client_free_bh(void *opaque);
 static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
                                  uint32_t w, uint32_t h);
+static void fb_shm_update_effective_rate(FbShmDisplay *d);
+static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
+                            uint64_t now_ns);
 #ifdef CONFIG_OPENGL
 static void fb_shm_broadcast_current_gpu_frame(FbShmDisplay *d,
                                                uint32_t w, uint32_t h,
@@ -636,7 +645,7 @@ static int fb_shm_apply_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
     hdr->width = w;
     hdr->height = h;
     hdr->stride = w * 4;
-    hdr->target_fps = d->target_fps;
+    hdr->target_fps = d->shm_target_fps;
     hdr->src_width = sw;
     hdr->src_height = sh;
     hdr->roi_x = roi_x;
@@ -780,7 +789,7 @@ static int fb_shm_allocate_mapping(FbShmDisplay *d, uint32_t cap_w,
     }
     hdr->fourcc = FB_SHM_FOURCC_BGR0;
     hdr->bpp = 32;
-    hdr->target_fps = d->target_fps;
+    hdr->target_fps = d->shm_target_fps;
     hdr->active_idx = 0;
     hdr->flags = FB_SHM_FLAG_RUNNING | FB_SHM_FLAG_RESIZED;
     hdr->frame_seq = 0;
@@ -851,6 +860,7 @@ static void fb_shm_client_drop(FbShmClient *c)
         QLIST_REMOVE(c, next);
         c->linked = false;
     }
+    fb_shm_update_effective_rate(c->owner);
     c->owner = NULL;
     aio_bh_schedule_oneshot(qemu_get_aio_context(), fb_shm_client_free_bh, c);
 }
@@ -860,6 +870,28 @@ static void fb_shm_client_free_bh(void *opaque)
     FbShmClient *c = opaque;
 
     g_free(c);
+}
+
+static uint32_t fb_shm_clamp_rate(uint32_t rate)
+{
+    if (rate < FB_SHM_MIN_RATE) {
+        rate = FB_SHM_MIN_RATE;
+    }
+    if (rate > FB_SHM_MAX_RATE) {
+        rate = FB_SHM_MAX_RATE;
+    }
+    return rate;
+}
+
+static uint32_t fb_shm_rate_interval_ms(uint32_t rate)
+{
+    /*
+     * DisplayChangeListener 的刷新间隔只能传毫秒整数。这里和 DCL 使用同一套
+     * 量化周期，避免 60Hz 时 DCL 每 16ms 调一次，而后面的纳秒级节流又按
+     * 16.666ms 判定“太早”，导致实际每隔一帧才发布一次 GPU frame。
+     */
+    rate = fb_shm_clamp_rate(rate);
+    return MAX(1, 1000 / rate);
 }
 
 #ifndef _WIN32
@@ -999,6 +1031,38 @@ static bool fb_shm_has_shm_consumers(FbShmDisplay *d)
     return false;
 }
 
+static uint32_t fb_shm_effective_rate(FbShmDisplay *d)
+{
+    uint32_t rate = 0;
+
+    if (fb_shm_has_gpu_clients(d)) {
+        rate = d->gpu_target_fps;
+    }
+    /*
+     * !d->shm 时保留一次低频 SHM bootstrap：普通 SHM consumer 需要 HELLO
+     * 时拿到 memfd/eventfd；映射建好且没有 SHM consumer 后，GL 路径会跳过
+     * CPU readback。
+     */
+    if (fb_shm_has_shm_consumers(d) || !d->shm) {
+        rate = MAX(rate, d->shm_target_fps);
+    }
+    if (!rate) {
+        rate = FB_SHM_MIN_RATE;
+    }
+    return fb_shm_clamp_rate(rate);
+}
+
+static void fb_shm_update_effective_rate(FbShmDisplay *d)
+{
+    uint32_t rate = fb_shm_effective_rate(d);
+
+    d->target_fps = rate;
+    if (d->hdr) {
+        d->hdr->target_fps = d->shm_target_fps;
+    }
+    update_displaychangelistener(&d->dcl, fb_shm_rate_interval_ms(rate));
+}
+
 #ifndef _WIN32
 static int fb_shm_send_gpu_frame(FbShmClient *c,
                                  const FbShmGpuFrame *frame, int gpu_fd)
@@ -1063,6 +1127,11 @@ static int fb_shm_send_gpu_frame(FbShmClient *c,
 }
 #endif
 
+static bool fb_shm_client_disconnect_errno(int err)
+{
+    return err == EPIPE || err == ECONNRESET || err == ENOTCONN;
+}
+
 static void fb_shm_broadcast_gpu_frame(FbShmDisplay *d,
                                        const FbShmGpuFrame *frame,
                                        int gpu_fd)
@@ -1075,9 +1144,11 @@ static void fb_shm_broadcast_gpu_frame(FbShmDisplay *d,
             continue;
         }
         if (fb_shm_send_gpu_frame(c, frame, gpu_fd) < 0) {
-            warn_report("fb-shm: NOTIFY_GPU_FRAME send failed (errno=%d %s); "
-                        "dropping client fd=%d",
-                        errno, strerror(errno), c->fd);
+            if (!fb_shm_client_disconnect_errno(errno)) {
+                warn_report("fb-shm: NOTIFY_GPU_FRAME send failed "
+                            "(errno=%d %s); dropping client fd=%d",
+                            errno, strerror(errno), c->fd);
+            }
             fb_shm_client_drop(c);
         } else {
             recipients++;
@@ -1110,6 +1181,7 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
     c->gpu_required =
         (req->flags & FB_SHM_HELLO_F_GPU_REQUIRED) != 0;
     gpu_only = c->wants_gpu_frames && c->gpu_required;
+    fb_shm_update_effective_rate(d);
 
     FbShmCtlAck ack = {
         .magic  = FB_SHM_MAGIC,
@@ -1225,14 +1297,13 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
         return;
     }
 
-    uint32_t r = req->rate_hz;
-    if (r < FB_SHM_MIN_RATE) r = FB_SHM_MIN_RATE;
-    if (r > FB_SHM_MAX_RATE) r = FB_SHM_MAX_RATE;
-    d->target_fps = r;
-    if (d->hdr) {
-        d->hdr->target_fps = r;
+    uint32_t r = fb_shm_clamp_rate(req->rate_hz);
+    if (c->wants_gpu_frames && c->gpu_required) {
+        d->gpu_target_fps = r;
+    } else {
+        d->shm_target_fps = r;
     }
-    update_displaychangelistener(&d->dcl, 1000 / r);
+    fb_shm_update_effective_rate(d);
 
     FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                         .status = FB_SHM_CTL_OK };
@@ -1383,10 +1454,18 @@ static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
 {
     uint32_t sw = surface_width(surface);
     uint32_t sh = surface_height(surface);
+    uint64_t now_ns = fb_shm_now_ns();
 
     uint32_t rw, rh;
     int32_t rx, ry;
     fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
+
+    if (d->shm && !fb_shm_has_shm_consumers(d)) {
+        return;
+    }
+    if (!fb_shm_rate_due(d->shm_target_fps, &d->shm_last_frame_ns, now_ns)) {
+        return;
+    }
 
     if (!d->shm || rw != d->cur_w || rh != d->cur_h ||
         sw != d->cur_src_w || sh != d->cur_src_h ||
@@ -1557,6 +1636,14 @@ static void fb_shm_broadcast_texture_dmabuf_frame(FbShmDisplay *d,
      */
     fd = egl_get_fd_for_texture(d->gl_backing_id, &stride, &fourcc, &modifier);
     if (fd < 0) {
+        if (!d->gl_warned_texture_export) {
+            warn_report("fb-shm: GL scanout is texture-only and texture "
+                        "dma-buf export is unavailable; using SHM fallback. "
+                        "Start virtio-vga-gl with blob=true,hostmem=SIZE or "
+                        "use an EGL stack with EGL_KHR_image and "
+                        "EGL_MESA_image_dma_buf_export");
+            d->gl_warned_texture_export = true;
+        }
         return;
     }
 
@@ -1713,21 +1800,34 @@ static void fb_shm_broadcast_current_gpu_frame(FbShmDisplay *d,
     fb_shm_broadcast_texture_dmabuf_frame(d, w, h, roi_x, roi_y);
 }
 
-static bool fb_shm_gl_rate_limited(FbShmDisplay *d, uint64_t now_ns)
+static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
+                            uint64_t now_ns)
 {
+    const uint64_t slack_ns = 1000000ull;
     uint64_t interval_ns;
 
-    if (!d->target_fps) {
-        return false;
-    }
-
-    interval_ns = 1000000000ull / d->target_fps;
-    if (d->gl_last_frame_ns && now_ns - d->gl_last_frame_ns < interval_ns) {
+    rate_hz = fb_shm_clamp_rate(rate_hz);
+    interval_ns = 1000000000ull / rate_hz;
+    if (!*last_ns) {
+        *last_ns = now_ns + interval_ns;
         return true;
     }
 
-    d->gl_last_frame_ns = now_ns;
-    return false;
+    /*
+     * last_ns 在第一次发布后存的是“下一帧 deadline”，不是上一帧时间。
+     * 这样 DCL 用 16ms tick 驱动 60Hz 时，不会因为 16ms < 16.666ms
+     * 永远隔帧丢，也不会固定跑成 62.5Hz；deadline 会累积 0.666ms
+     * 误差，周期性跳过一帧，让长期平均值贴近目标 rate。
+     */
+    if (now_ns + slack_ns < *last_ns) {
+        return false;
+    }
+
+    *last_ns += interval_ns;
+    if (now_ns > *last_ns + interval_ns) {
+        *last_ns = now_ns + interval_ns;
+    }
+    return true;
 }
 
 static void fb_shm_commit_gl_frame(FbShmDisplay *d)
@@ -1738,14 +1838,13 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     int32_t rx, ry;
     uint64_t now_ns;
     bool geometry_changed;
-    bool gpu_only_clients;
+    bool has_gpu_clients;
+    bool has_shm_consumers;
+    bool gpu_due = false;
+    bool shm_due = false;
     Error *err = NULL;
 
-    if (!d->gl_scanout || !d->gl_guest_fb.texture || !sw || !sh) {
-        return;
-    }
-
-    if (!fb_shm_gl_make_current(d)) {
+    if (!d->gl_scanout || !sw || !sh) {
         return;
     }
 
@@ -1753,14 +1852,35 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     geometry_changed = !d->shm || rw != d->cur_w || rh != d->cur_h ||
                        sw != d->cur_src_w || sh != d->cur_src_h ||
                        rx != d->cur_roi_x || ry != d->cur_roi_y;
-    gpu_only_clients = fb_shm_has_gpu_clients(d) && !fb_shm_has_shm_consumers(d);
+    has_gpu_clients = fb_shm_has_gpu_clients(d);
+    has_shm_consumers = fb_shm_has_shm_consumers(d);
     now_ns = fb_shm_now_ns();
-    if (fb_shm_gl_rate_limited(d, now_ns)) {
+
+    if (has_gpu_clients) {
+        gpu_due = fb_shm_rate_due(d->gpu_target_fps, &d->gl_last_frame_ns,
+                                  now_ns);
+    }
+    if (has_shm_consumers || !d->shm) {
+        shm_due = fb_shm_rate_due(d->shm_target_fps, &d->shm_last_frame_ns,
+                                  now_ns);
+    }
+    if (!gpu_due && !shm_due) {
         return;
     }
 
-    fb_shm_broadcast_current_gpu_frame(d, rw, rh, rx, ry);
-    if (gpu_only_clients) {
+    if (gpu_due) {
+        if (!d->gl_dmabuf && !fb_shm_gl_make_current(d)) {
+            return;
+        }
+        fb_shm_broadcast_current_gpu_frame(d, rw, rh, rx, ry);
+    }
+    if (!shm_due) {
+        return;
+    }
+    if (!d->gl_guest_fb.texture) {
+        return;
+    }
+    if (!fb_shm_gl_make_current(d)) {
         return;
     }
 
@@ -1868,6 +1988,15 @@ static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
     d->gl_w = MIN(w, backing_width - x);
     d->gl_h = MIN(h, backing_height - y);
 
+    if (!d->gl_logged_texture_scanout) {
+        info_report("fb-shm: GL texture scanout active "
+                    "(%ux%u@%u,%u backing=%ux%u y0_top=%d)",
+                    d->gl_w, d->gl_h, d->gl_x, d->gl_y,
+                    d->gl_backing_w, d->gl_backing_h,
+                    d->gl_y0_top);
+        d->gl_logged_texture_scanout = true;
+    }
+
 #ifdef _WIN32
     if (!fb_shm_d3d_prepare_share(d, d3d_tex2d)) {
         /*
@@ -1900,24 +2029,10 @@ static void fb_shm_gl_scanout_dmabuf(DisplayChangeListener *dcl,
         d->gl_dmabuf = NULL;
         return;
     }
-    if (!fb_shm_gl_make_current(d)) {
-        return;
-    }
-
-    /*
-     * Linux dma-buf 是真正的 GPU 零拷贝来源：consumer 能直接导入同一份
-     * buffer；SHM 兼容路径则把它作为 GL texture 读回到旧 ABI。
-     */
-    egl_dmabuf_import_texture(dmabuf);
-    texture = qemu_dmabuf_get_texture(dmabuf);
-    if (!texture) {
-        return;
-    }
 
     d->gl_scanout = true;
     d->gl_dmabuf = dmabuf;
     d->gl_y0_top = qemu_dmabuf_get_y0_top(dmabuf);
-    d->gl_backing_id = texture;
     d->gl_backing_w = qemu_dmabuf_get_backing_width(dmabuf);
     d->gl_backing_h = qemu_dmabuf_get_backing_height(dmabuf);
     d->gl_x = qemu_dmabuf_get_x(dmabuf);
@@ -1925,6 +2040,33 @@ static void fb_shm_gl_scanout_dmabuf(DisplayChangeListener *dcl,
     d->gl_w = qemu_dmabuf_get_width(dmabuf);
     d->gl_h = qemu_dmabuf_get_height(dmabuf);
 
+    if (!d->gl_logged_dmabuf_scanout) {
+        info_report("fb-shm: dma-buf scanout active "
+                    "(%ux%u backing=%ux%u stride=%u fd=%d)",
+                    d->gl_w, d->gl_h,
+                    d->gl_backing_w, d->gl_backing_h,
+                    qemu_dmabuf_get_stride(dmabuf),
+                    qemu_dmabuf_get_fd(dmabuf));
+        d->gl_logged_dmabuf_scanout = true;
+    }
+
+    /*
+     * Linux dma-buf 是真正的 GPU 零拷贝来源：GPU consumer 可以直接使用
+     * fd，不需要 QEMU 先导入 GL texture。只有 SHM 兼容读回才需要导入；
+     * SDL_GL/GLX 路径下 EGL 导入可能不可用，此时仍然保留 GPU metadata。
+     */
+    if (!fb_shm_gl_make_current(d)) {
+        return;
+    }
+    egl_dmabuf_import_texture(dmabuf);
+    texture = qemu_dmabuf_get_texture(dmabuf);
+    if (!texture) {
+        egl_fb_destroy(&d->gl_guest_fb);
+        d->gl_backing_id = 0;
+        return;
+    }
+
+    d->gl_backing_id = texture;
     egl_fb_setup_for_tex(&d->gl_guest_fb, d->gl_backing_w,
                          d->gl_backing_h, texture, false);
 }
@@ -1955,6 +2097,20 @@ static void fb_shm_gl_update(DisplayChangeListener *dcl,
 static void fb_shm_refresh(DisplayChangeListener *dcl)
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+
+#ifdef CONFIG_OPENGL
+    /*
+     * fb-shm 对 GL console 是旁路 consumer，不能在 SDL/GTK 等主显示还没安装
+     * GL provider 时先调用 graphic_hw_update()。否则 virtio-gpu/virgl 会在无
+     * current context 的线程上进入 epoxy。普通 CPU surface 设备 flags=0，不走
+     * 这个等待分支。
+     */
+    if ((qemu_console_get_graphic_flags(dcl->con) & GRAPHIC_FLAGS_GL) &&
+        !console_has_gl(dcl->con)) {
+        return;
+    }
+#endif
+
     graphic_hw_update(dcl->con);
 #ifdef CONFIG_OPENGL
     if (d->gl_scanout) {
@@ -1983,6 +2139,8 @@ static const DisplayChangeListenerOps fb_shm_ops = {
     .dpy_gl_update          = fb_shm_gl_update,
 #ifdef CONFIG_GBM
     .dpy_gl_scanout_dmabuf  = fb_shm_gl_scanout_dmabuf,
+    .dpy_gl_scanout_dmabuf_update =
+        fb_shm_gl_scanout_dmabuf,
     .dpy_gl_release_dmabuf  = fb_shm_gl_release_dmabuf,
 #endif
 #endif
@@ -2040,9 +2198,9 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     d->cfg_y = cfg->y;
     d->cfg_w = cfg->w;
     d->cfg_h = cfg->h;
-    d->target_fps = cfg->rate ? cfg->rate : FB_SHM_DEFAULT_RATE;
-    if (d->target_fps < FB_SHM_MIN_RATE) d->target_fps = FB_SHM_MIN_RATE;
-    if (d->target_fps > FB_SHM_MAX_RATE) d->target_fps = FB_SHM_MAX_RATE;
+    d->target_fps = fb_shm_clamp_rate(cfg->rate ? cfg->rate : FB_SHM_DEFAULT_RATE);
+    d->shm_target_fps = d->target_fps;
+    d->gpu_target_fps = d->target_fps;
     d->blend_cursor = cfg->blend_cursor;
 
 #ifndef _WIN32

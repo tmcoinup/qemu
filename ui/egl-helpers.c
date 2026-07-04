@@ -31,6 +31,17 @@ bool qemu_egl_angle_d3d;
 
 /* ------------------------------------------------------------------ */
 
+static EGLDisplay qemu_egl_current_or_global_display(void)
+{
+    EGLDisplay egl_display = eglGetCurrentDisplay();
+
+    if (egl_display != EGL_NO_DISPLAY) {
+        return egl_display;
+    }
+
+    return (EGLDisplay)qemu_egl_display;
+}
+
 const char *qemu_egl_get_error_string(void)
 {
     EGLint error = eglGetError();
@@ -280,10 +291,30 @@ err:
 int egl_get_fd_for_texture(uint32_t tex_id, EGLint *stride, EGLint *fourcc,
                            EGLuint64KHR *modifier)
 {
+    EGLDisplay egl_display = qemu_egl_current_or_global_display();
+    EGLContext egl_context = eglGetCurrentContext();
     EGLImageKHR image;
     EGLint num_planes, fd;
 
-    image = eglCreateImageKHR(qemu_egl_display, eglGetCurrentContext(),
+    if (egl_display == EGL_NO_DISPLAY || egl_context == EGL_NO_CONTEXT) {
+        return -1;
+    }
+
+    /*
+     * libepoxy 对缺失 provider 的 EGL 扩展函数会直接 abort。texture→dma-buf
+     * 导出是 fb-shm/Spice 的可选优化；扩展不存在时必须安静失败，让调用方回退
+     * 到 SHM/PBO 路径，而不是杀掉整个虚拟机进程。
+     */
+    if (!epoxy_has_egl_extension(egl_display, "EGL_KHR_image_base") &&
+        !epoxy_has_egl_extension(egl_display, "EGL_KHR_image")) {
+        return -1;
+    }
+    if (!epoxy_has_egl_extension(egl_display,
+                                 "EGL_MESA_image_dma_buf_export")) {
+        return -1;
+    }
+
+    image = eglCreateImageKHR(egl_display, egl_context,
                               EGL_GL_TEXTURE_2D_KHR,
                               (EGLClientBuffer)(unsigned long)tex_id,
                               NULL);
@@ -291,20 +322,22 @@ int egl_get_fd_for_texture(uint32_t tex_id, EGLint *stride, EGLint *fourcc,
         return -1;
     }
 
-    eglExportDMABUFImageQueryMESA(qemu_egl_display, image, fourcc,
+    eglExportDMABUFImageQueryMESA(egl_display, image, fourcc,
                                   &num_planes, modifier);
     if (num_planes != 1) {
-        eglDestroyImageKHR(qemu_egl_display, image);
+        eglDestroyImageKHR(egl_display, image);
         return -1;
     }
-    eglExportDMABUFImageMESA(qemu_egl_display, image, &fd, stride, NULL);
-    eglDestroyImageKHR(qemu_egl_display, image);
+    eglExportDMABUFImageMESA(egl_display, image, &fd, stride, NULL);
+    eglDestroyImageKHR(egl_display, image);
 
     return fd;
 }
 
 void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
 {
+    EGLDisplay egl_display = qemu_egl_current_or_global_display();
+    EGLContext egl_context = eglGetCurrentContext();
     EGLImageKHR image = EGL_NO_IMAGE_KHR;
     EGLint attrs[64];
     int i = 0;
@@ -312,6 +345,24 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
     uint32_t texture = qemu_dmabuf_get_texture(dmabuf);
 
     if (texture != 0) {
+        return;
+    }
+    if (egl_display == EGL_NO_DISPLAY) {
+        error_report("egl: no current display for dmabuf import");
+        return;
+    }
+    if (egl_context == EGL_NO_CONTEXT) {
+        error_report("egl: no current context for dmabuf import");
+        return;
+    }
+    if (!epoxy_has_egl_extension(egl_display, "EGL_KHR_image_base") &&
+        !epoxy_has_egl_extension(egl_display, "EGL_KHR_image")) {
+        error_report("egl: EGL_KHR_image is unavailable for dmabuf import");
+        return;
+    }
+    if (!epoxy_has_egl_extension(egl_display,
+                                 "EGL_EXT_image_dma_buf_import")) {
+        error_report("egl: EGL_EXT_image_dma_buf_import is unavailable");
         return;
     }
 
@@ -339,7 +390,7 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
 #endif
     attrs[i++] = EGL_NONE;
 
-    image = eglCreateImageKHR(qemu_egl_display,
+    image = eglCreateImageKHR(egl_display,
                               EGL_NO_CONTEXT,
                               EGL_LINUX_DMA_BUF_EXT,
                               NULL, attrs);
@@ -355,7 +406,7 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)image);
-    eglDestroyImageKHR(qemu_egl_display, image);
+    eglDestroyImageKHR(egl_display, image);
 }
 
 void egl_dmabuf_release_texture(QemuDmaBuf *dmabuf)

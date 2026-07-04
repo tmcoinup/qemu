@@ -36,7 +36,7 @@ deploy/tools/build.sh --verify        # 完后跑 verify-stealth.sh
 
 ```bash
 sudo deploy/scripts/host-performance.sh
-# governor=performance / hugepages / THP=madvise / KVM halt_poll=500µs /
+# governor=performance / hugepages / THP=madvise / KVM halt_poll 可配置 /
 # 停 irqbalance / NVMe scheduler=none
 ```
 
@@ -113,6 +113,10 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `QEMU_CAP_CHECK` | 1 | 1 = 启动前检查 QEMU 是否带 NVMe/EDID/USB/fb-shm 等 stealth 属性；缺失则 fail-fast，防止误用 stock QEMU 破坏真机模拟 |
 | `STABLE_DISPLAY` | **1** | 仅 `--sdl` 模式生效：`virtio-vga` 无 GL，规避 virgl BSOD |
 | `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
+| `GPU_ZEROCOPY` | **1** | SDL+GL 模式默认给 `virtio-vga-gl` 加 `blob=true,hostmem=GPU_HOSTMEM`，让 fb-shm GPU consumer 可收到 dma-buf scanout；`0` / `--no-gpu-zerocopy` 回退历史 texture+SHM |
+| `GPU_HOSTMEM` | `256M` | virtio-gpu host-visible memory window 大小，常用 `256M`-`1G`；flag: `--gpu-hostmem=SIZE` |
+| `GPU_DISPLAY` | `sdl-egl` | GPU 显示后端。`sdl-egl` 保持本地 SDL 窗口并启用 native EGL，DGame 仍可显示/隐藏窗口，同时 fb-shm GPU consumer 可收到 dma-buf；`sdl` 回退兼容 SDL/GLX；`egl-headless` 通过 `--gpu-headless` 启用无窗口 rendernode EGL |
+| `GPU_RENDERNODE` | 空 | `egl-headless` 的 render node 路径，空值让 QEMU 自动选择；常用 `/dev/dri/renderD128`，flag: `--gpu-rendernode=PATH` |
 | `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |
 | **`FB_SHM`** | **1** | **默认开**：始终带 `-object fb-shm,...` 共享内存推流通道。`--no-fb-shm` 关 |
 | `FB_SHM_SOCK` | `/tmp/qemu-stealth-<N>.fb` | 控制 socket 路径 (flag: `--fb-shm-sock=…`) |
@@ -124,7 +128,7 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `MEM_PER_DIMM_MB` | RAM/2 | DIMM 总量自动除 2 凑双通道 SPD |
 | `MEM_GUARD` | 1 | 启动前内存护栏：可用物理(MemAvailable)+SwapFree 不足以再容下本 VM 的 `-m`+2GiB 余量就 WARN；连 RAM+swap 都装不下则**拒绝启动**（防 OOM-kill 误伤其它在跑的 VM）。`0` = 关闭检查 |
 | `MEM_FORCE` | 0 | 1 = 越过 `MEM_GUARD` 的硬拒绝强行启动（风险自负） |
-| `HOST_TUNE` | **1** | 起 VM 前自动跑 `host-performance.sh`：governor=performance + halt_poll=500000 + THP defrag=never，压低 vCPU 服务延迟方差 → 缓解 ACE「游戏计时异常」(13-131130-8)。只动 host 侧旋钮，guest CPUID/tsc-freq/拓扑全不变（**零反检测影响**）。已调优自动跳过免重复 sudo；DRY_RUN 下严格 no-op。`0` / `--no-host-tune` = 跳过 |
+| `HOST_TUNE` | **1** | 起 VM 前自动跑 `host-performance.sh`：governor=performance + `KVM_HALT_POLL_NS`（默认 0）+ THP defrag=never。多开时防宿主编译抢 vCPU 主要靠 `CPU_ISOLATE` 的 cpuset 独占分区；如需旧低延迟 busy-poll 策略，可显式 `KVM_HALT_POLL_NS=500000`。只动 host 侧旋钮，guest CPUID/tsc-freq/拓扑全不变。已调优自动跳过免重复 sudo；DRY_RUN 下严格 no-op。`0` / `--no-host-tune` = 跳过 |
 | `CPU_FREQ_CAP` | **1** | （需 `HOST_TUNE=1`）把 host `scaling_max_freq` 封顶到本实例伪装 CPU 的 `CPU_MAX_MHZ`（= SMBIOS Type4 自报 `max-speed`，如 Ryzen3-1200=3400）。host(5800) boost 4.6GHz 远超伪装规格，固定 `tsc-freq` 下 guest 实测吞吐就会超该型号上限 = **变速器/计时异常 tell**。**只降不升**：多 VM 并发自然收敛到运行中最小值，绝不让任一 VM 跑出超自身规格的速度。`0` / `--no-freq-cap` = 满 boost 不封顶 |
 | `CPU_ISOLATE` | **1** | 起 VM 后把 QEMU 钉进 cgroup v2 cpuset 独占分区，**线程级**隔离 vCPU：每个 vCPU 独占 1 个逻辑线程（非整颗物理核），4vCPU 的 VM 只吃 4 个逻辑线程。分配器优先把多台 VM 横向铺到不同物理核心，主线程耗尽后才使用 SMT 兄弟。`0` / `--no-cpu-isolate` = 关 |
 | `HOST_RESERVE_CORES` | **auto** | 给宿主机预留物理核心；auto 默认 `max(2, ceil(物理核心数/8))`，多开需求过高时自动缩小预留以保证 VM 先铺不同物理核心。显式 N = 硬预留 N 颗，`0` = 使用整机逻辑 CPU 池（仅 `CPU_ISOLATE=1` 生效） |
@@ -141,7 +145,8 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 > **零反检测影响**）。host 为 32GiB 时，3×8GiB VM 已贴上限，第 4 台务必看护栏提示。
 
 > **host 计时抖动调优（`HOST_TUNE=1`，默认开）**：start-vm.sh 起 VM 前自动跑
-> `host-performance.sh`，把 CPU governor 钉到 `performance`、halt_poll 拉到 500000ns、
+> `host-performance.sh`，把 CPU governor 钉到 `performance`、halt_poll 写成
+> `KVM_HALT_POLL_NS`（默认 0）、
 > THP `defrag=never`。这些压低 vCPU 服务延迟的方差——ACE「游戏计时异常」(13-131130-8)
 > 这类反作弊时钟检测对抖动尖刺敏感。**只动 host 侧**：guest 的 CPUID / 品牌串 /
 > `tsc-freq` / vCPU 拓扑全不变，零反检测影响。已调优自动跳过（不每次 sudo）；后台/无 tty

@@ -417,6 +417,14 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
     if (ss.resource_id && ss.r.width && ss.r.height) {
         struct virgl_renderer_resource_info info;
         void *d3d_tex2d = NULL;
+        bool dmabuf_exported = false;
+        static bool logged_scanout_info;
+        static bool logged_dmabuf_export;
+        static bool warned_no_dmabuf_export;
+#if VIRGL_VERSION_MAJOR >= 1
+        static bool warned_export_blob_failure;
+        static bool warned_export_blob_no_format;
+#endif
 
 #if VIRGL_VERSION_MAJOR >= 1
         struct virgl_renderer_resource_info_ext ext;
@@ -444,6 +452,114 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
             info.width, info.height,
             ss.r.x, ss.r.y, ss.r.width, ss.r.height,
             d3d_tex2d);
+#if VIRGL_VERSION_MAJOR >= 1
+        if (!logged_scanout_info) {
+            info_report("virtio-gpu-virgl: scanout resource info "
+                        "(tex=%u %ux%u stride=%u virgl_format=%u "
+                        "drm_fourcc=0x%x flags=0x%x has_dmabuf_export=%d "
+                        "info_fd=%d planes=%d modifier=0x%" PRIx64 ")",
+                        info.tex_id, info.width, info.height, info.stride,
+                        info.virgl_format, info.drm_fourcc, info.flags,
+                        ext.has_dmabuf_export, info.fd, ext.planes,
+                        ext.modifiers);
+            logged_scanout_info = true;
+        }
+        if (ext.has_dmabuf_export && info.fd >= 0 && info.drm_fourcc) {
+            /*
+             * 中文注释：SDL 本地窗口继续使用 texture scanout；同一帧如果
+             * virglrenderer 已提供 dma-buf fd，则额外旁路通知 fb-shm。这个
+             * 通知不修改全局 scanout kind，避免 SDL 被切到自己不支持的
+             * dmabuf 显示路径。
+             */
+            if (!virtio_gpu_update_dmabuf_fd(
+                    g, ss.scanout_id, info.fd,
+                    ss.r.width, ss.r.height, info.stride,
+                    ss.r.x, ss.r.y, info.width, info.height,
+                    info.drm_fourcc, ext.modifiers,
+                    info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
+                    false)) {
+                dmabuf_exported = true;
+                if (!logged_dmabuf_export) {
+                    info_report("virtio-gpu-virgl: scanout dma-buf sideband "
+                                "active (%ux%u@%u,%u backing=%ux%u stride=%u "
+                                "fourcc=0x%x)",
+                                ss.r.width, ss.r.height, ss.r.x, ss.r.y,
+                                info.width, info.height, info.stride,
+                                info.drm_fourcc);
+                    logged_dmabuf_export = true;
+                }
+            }
+        }
+        if (!dmabuf_exported) {
+            uint32_t fd_type = 0;
+            int export_fd = -1;
+            int export_ret;
+
+            /*
+             * 中文注释：有些 virgl scanout 不在 get_info_ext 里直接带 fd，
+             * 但 virglrenderer 仍可能通过 export_blob() 返回 dma-buf。这个
+             * fd 是新导出的句柄，后续由 VGPUDMABuf owns_fd 路径负责关闭。
+             */
+            export_ret = virgl_renderer_resource_export_blob(
+                ss.resource_id, &fd_type, &export_fd);
+            if (!export_ret &&
+                fd_type == VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF &&
+                export_fd >= 0 &&
+                info.drm_fourcc) {
+                if (!virtio_gpu_update_dmabuf_fd(
+                        g, ss.scanout_id, export_fd,
+                        ss.r.width, ss.r.height, info.stride,
+                        ss.r.x, ss.r.y, info.width, info.height,
+                        info.drm_fourcc, ext.modifiers,
+                        info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
+                        true)) {
+                    dmabuf_exported = true;
+                    if (!logged_dmabuf_export) {
+                        info_report("virtio-gpu-virgl: scanout dma-buf "
+                                    "export_blob sideband active "
+                                    "(%ux%u@%u,%u backing=%ux%u stride=%u "
+                                    "fourcc=0x%x)",
+                                    ss.r.width, ss.r.height, ss.r.x, ss.r.y,
+                                    info.width, info.height, info.stride,
+                                    info.drm_fourcc);
+                        logged_dmabuf_export = true;
+                    }
+                } else {
+                    close(export_fd);
+                }
+            } else if (!export_ret &&
+                       fd_type == VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF &&
+                       export_fd >= 0) {
+                close(export_fd);
+                if (!warned_export_blob_no_format) {
+                    warn_report("virtio-gpu-virgl: export_blob returned "
+                                "dma-buf but scanout has no drm_fourcc "
+                                "(virgl_format=%u stride=%u); not forwarding "
+                                "ambiguous GPU frame",
+                                info.virgl_format, info.stride);
+                    warned_export_blob_no_format = true;
+                }
+            } else if (export_fd >= 0) {
+                close(export_fd);
+            } else if (!warned_export_blob_failure) {
+                warn_report("virtio-gpu-virgl: export_blob unavailable for "
+                            "scanout resource (ret=%d fd_type=%u fourcc=0x%x "
+                            "has_ext_dmabuf=%d info_fd=%d)",
+                            export_ret, fd_type, info.drm_fourcc,
+                            ext.has_dmabuf_export, info.fd);
+                warned_export_blob_failure = true;
+            }
+        }
+#endif
+        if (!dmabuf_exported) {
+            virtio_gpu_clear_dmabuf(g, ss.scanout_id);
+            if (!warned_no_dmabuf_export) {
+                warn_report("virtio-gpu-virgl: scanout texture has no "
+                            "dma-buf export; fb-shm GPU consumers will fall "
+                            "back to SHM on this display path");
+                warned_no_dmabuf_export = true;
+            }
+        }
     } else {
         dpy_gfx_replace_surface(
             g->parent_obj.scanout[ss.scanout_id].con, NULL);

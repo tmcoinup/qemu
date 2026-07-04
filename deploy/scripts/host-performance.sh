@@ -18,6 +18,10 @@ set -euo pipefail
 # 频率封顶上限可走 (1) 位置参数 $1 或 (2) 环境变量 CPU_MAX_KHZ。位置参数优先，
 # 这样 NOPASSWD sudoers 能按脚本路径放行(任意参数)，不必为传 env 开 setenv。
 CPU_MAX_KHZ="${1:-${CPU_MAX_KHZ:-}}"
+# KVM halt polling 是“低唤醒延迟换空闲 CPU 忙等”。多开 + cpuset 隔离后，防编译
+# 抢核主要靠独占分区，不再默认用 500us 忙等；需要旧低延迟策略时可显式传
+# KVM_HALT_POLL_NS=500000。
+KVM_HALT_POLL_NS="${KVM_HALT_POLL_NS:-0}"
 
 if [[ $EUID -ne 0 ]]; then
     echo "rerunning with sudo..."
@@ -68,10 +72,16 @@ echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
 echo never    > /sys/kernel/mm/transparent_hugepage/defrag  2>/dev/null || true
 echo ">> THP       : enabled=madvise defrag=never"
 
-# 3) KVM halt-poll：拉大轮询窗口，更多唤醒落在 poll 内 → 降 vCPU 唤醒延迟尖刺。
+# 3) KVM halt-poll：默认 0，避免空闲 guest 在宿主侧烧满 vCPU 线程。
+#    旧的 500000ns 能降低 HLT 后唤醒尖刺，但代价是空闲 VM 也持续忙等；在
+#    cpuset 独占分区已启用时，编译抢核由隔离解决，不再靠 halt-poll 硬扛。
 if [[ -w /sys/module/kvm/parameters/halt_poll_ns ]]; then
-    echo 500000 > /sys/module/kvm/parameters/halt_poll_ns
-    echo ">> halt_poll : 500000 ns"
+    if [[ "$KVM_HALT_POLL_NS" =~ ^[0-9]+$ ]]; then
+        echo "$KVM_HALT_POLL_NS" > /sys/module/kvm/parameters/halt_poll_ns
+        echo ">> halt_poll : ${KVM_HALT_POLL_NS} ns"
+    else
+        echo ">> halt_poll : 跳过（KVM_HALT_POLL_NS 非数字: $KVM_HALT_POLL_NS）"
+    fi
 fi
 
 # 4) irqbalance：停掉，避免 IRQ 在核间迁移带来的不确定延迟。

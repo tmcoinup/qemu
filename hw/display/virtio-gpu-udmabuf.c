@@ -163,33 +163,80 @@ static void virtio_gpu_free_dmabuf(VirtIOGPU *g, VGPUDMABuf *dmabuf)
 
     scanout = &g->parent_obj.scanout[dmabuf->scanout_id];
     dpy_gl_release_dmabuf(scanout->con, dmabuf->buf);
+    if (dmabuf->owns_fd) {
+        qemu_dmabuf_close(dmabuf->buf);
+    }
     g_clear_pointer(&dmabuf->buf, qemu_dmabuf_free);
     QTAILQ_REMOVE(&g->dmabuf.bufs, dmabuf, next);
     g_free(dmabuf);
 }
 
-static VGPUDMABuf
-*virtio_gpu_create_dmabuf(VirtIOGPU *g,
-                          uint32_t scanout_id,
-                          struct virtio_gpu_simple_resource *res,
-                          struct virtio_gpu_framebuffer *fb,
-                          struct virtio_gpu_rect *r)
+static VGPUDMABuf *
+virtio_gpu_create_dmabuf_from_fd(VirtIOGPU *g,
+                                 uint32_t scanout_id,
+                                 int dmabuf_fd,
+                                 uint32_t width,
+                                 uint32_t height,
+                                 uint32_t stride,
+                                 uint32_t x,
+                                 uint32_t y,
+                                 uint32_t backing_width,
+                                 uint32_t backing_height,
+                                 uint32_t fourcc,
+                                 uint64_t modifier,
+                                 bool y0_top,
+                                 bool owns_fd)
 {
     VGPUDMABuf *dmabuf;
 
-    if (res->dmabuf_fd < 0) {
+    if (dmabuf_fd < 0) {
         return NULL;
     }
 
     dmabuf = g_new0(VGPUDMABuf, 1);
-    dmabuf->buf = qemu_dmabuf_new(r->width, r->height, fb->stride,
-                                  r->x, r->y, fb->width, fb->height,
-                                  qemu_pixman_to_drm_format(fb->format),
-                                  0, res->dmabuf_fd, true, false);
+    /*
+     * 中文注释：这里不复制像素，只把现有 dma-buf fd 封装成 QemuDmaBuf。
+     * fd 的生命周期仍归 resource/virglrenderer 所有；跨进程消费者通过
+     * qemu_dmabuf_dup_fd() 获得自己的 fd。
+     */
+    dmabuf->buf = qemu_dmabuf_new(width, height, stride,
+                                  x, y, backing_width, backing_height,
+                                  fourcc, modifier, dmabuf_fd, true, y0_top);
     dmabuf->scanout_id = scanout_id;
+    dmabuf->owns_fd = owns_fd;
     QTAILQ_INSERT_HEAD(&g->dmabuf.bufs, dmabuf, next);
 
     return dmabuf;
+}
+
+static VGPUDMABuf *
+virtio_gpu_create_dmabuf(VirtIOGPU *g,
+                         uint32_t scanout_id,
+                         struct virtio_gpu_simple_resource *res,
+                         struct virtio_gpu_framebuffer *fb,
+                         struct virtio_gpu_rect *r)
+{
+    return virtio_gpu_create_dmabuf_from_fd(
+        g, scanout_id, res->dmabuf_fd, r->width, r->height, fb->stride,
+        r->x, r->y, fb->width, fb->height,
+        qemu_pixman_to_drm_format(fb->format), 0, false, false);
+}
+
+void virtio_gpu_clear_dmabuf(VirtIOGPU *g, uint32_t scanout_id)
+{
+    VGPUDMABuf *old_primary;
+
+    if (scanout_id >= g->parent_obj.conf.max_outputs) {
+        return;
+    }
+
+    old_primary = g->dmabuf.primary[scanout_id];
+    if (!old_primary) {
+        return;
+    }
+
+    g->dmabuf.primary[scanout_id] = NULL;
+    virtio_gpu_free_dmabuf(g, old_primary);
 }
 
 int virtio_gpu_update_dmabuf(VirtIOGPU *g,
@@ -216,6 +263,48 @@ int virtio_gpu_update_dmabuf(VirtIOGPU *g,
     g->dmabuf.primary[scanout_id] = new_primary;
     qemu_console_resize(scanout->con, width, height);
     dpy_gl_scanout_dmabuf(scanout->con, new_primary->buf);
+
+    if (old_primary) {
+        virtio_gpu_free_dmabuf(g, old_primary);
+    }
+
+    return 0;
+}
+
+int virtio_gpu_update_dmabuf_fd(VirtIOGPU *g,
+                                uint32_t scanout_id,
+                                int dmabuf_fd,
+                                uint32_t width,
+                                uint32_t height,
+                                uint32_t stride,
+                                uint32_t x,
+                                uint32_t y,
+                                uint32_t backing_width,
+                                uint32_t backing_height,
+                                uint32_t fourcc,
+                                uint64_t modifier,
+                                bool y0_top,
+                                bool owns_fd)
+{
+    struct virtio_gpu_scanout *scanout;
+    VGPUDMABuf *new_primary;
+    VGPUDMABuf *old_primary;
+
+    if (scanout_id >= g->parent_obj.conf.max_outputs) {
+        return -EINVAL;
+    }
+
+    scanout = &g->parent_obj.scanout[scanout_id];
+    new_primary = virtio_gpu_create_dmabuf_from_fd(
+        g, scanout_id, dmabuf_fd, width, height, stride, x, y,
+        backing_width, backing_height, fourcc, modifier, y0_top, owns_fd);
+    if (!new_primary) {
+        return -EINVAL;
+    }
+
+    old_primary = g->dmabuf.primary[scanout_id];
+    g->dmabuf.primary[scanout_id] = new_primary;
+    dpy_gl_scanout_dmabuf_update(scanout->con, new_primary->buf);
 
     if (old_primary) {
         virtio_gpu_free_dmabuf(g, old_primary);

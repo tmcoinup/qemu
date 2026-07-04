@@ -11,6 +11,8 @@
 #                                           # 推流 socket: /tmp/qemu-stealth-1.fb
 #     ./start-vm.sh 2 --iso=/path/x.iso     # instance 2 从 ISO 装系统
 #     ./start-vm.sh 1 --no-sdl              # 后台 daemon：关 SDL，仅推流
+#     ./start-vm.sh 1 --gpu-sdl-egl         # SDL 窗口 + native EGL + fb-shm GPU
+#     ./start-vm.sh 1 --gpu-headless        # EGL rendernode + fb-shm，验证 GPU 零拷贝
 #     ./start-vm.sh 1 --headless            # VNC 远程 + fb-shm（无本地窗口）
 #     ./start-vm.sh 1 --no-fb-shm           # 关推流，仅 SDL（回历史行为）
 #     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
@@ -48,6 +50,10 @@
 #                          qemu-fb-shm-stream → ffmpeg/NVENC 推 RTMP / UDP / SRT /
 #                          本地 mp4。--no-fb-shm 关。
 #     --headless           关 SDL，开 VNC（fb-shm 仍照常）。
+#     --gpu-sdl-egl        保留 SDL 本地窗口，并让 SDL backend 使用 native EGL；
+#                          DGame 仍可显示/隐藏窗口，fb-shm 可发布 GPU dma-buf。
+#     --gpu-headless       关 SDL，使用 egl-headless/rendernode 保留 virtio-gpu GL，
+#                          用于 fb-shm dma-buf/GPU metadata 路径。
 #
 # 环境变量（不常用，默认就好）：
 #     RAM=8192             客机内存 MiB（默认 8192）
@@ -73,15 +79,26 @@
 #                          (flag: --fb-shm-rate=<hz>)
 #     FB_SHM_ROI=x,y,w,h   只截 ROI 推流（省 CPU/带宽）。空 = 全屏
 #                          (flag: --fb-shm-roi=x,y,w,h)
+#     GPU_ZEROCOPY=1       SDL+GL 模式默认给 virtio-vga-gl 打开 blob/hostmem，
+#                          让 fb-shm GPU consumer 能收到 dma-buf metadata。
+#                          设 0 或 --no-gpu-zerocopy 回退到历史 texture+SHM。
+#     GPU_HOSTMEM=256M     virtio-gpu host-visible memory window 大小。
+#                          (flag: --gpu-hostmem=SIZE)
+#     GPU_DISPLAY=sdl-egl  GPU 显示后端；sdl-egl=默认本地窗口+native EGL，
+#                          sdl=兼容 SDL/GLX，egl-headless=无窗口 EGL。
+#                          (flag: --gpu-display=sdl|sdl-egl|egl-headless /
+#                          --gpu-sdl-egl / --gpu-headless)
+#     GPU_RENDERNODE=      egl-headless render node 路径；空值让 QEMU 自动选择。
+#                          常用 /dev/dri/renderD128 (flag: --gpu-rendernode=PATH)
 #     PROXY=1              启用 QEMU 原生 QMP multi-client（默认 0）
 #                          (flag: --proxy / --no-proxy)
 #                          ${QMP_SOCK} 可多客户端并发；同时创建
 #                          ${QMP_SOCK}.proxy 兼容旧工具配置
 #     HOST_TUNE=1          起 VM 前自动跑 host-performance.sh 压计时抖动（默认 1）
 #                          (flag: --host-tune / --no-host-tune)
-#                          governor=performance + halt_poll=500000 + THP defrag=never，
-#                          缓解 ACE「游戏计时异常」(13-131130-8)。只动 host 侧，零反检测
-#                          影响；已调优自动跳过(免每次 sudo)；DRY_RUN 下 no-op。
+#                          governor=performance + KVM_HALT_POLL_NS(默认 0) + THP
+#                          defrag=never。防编译抢 vCPU 主要靠 CPU_ISOLATE/cpuset；
+#                          需要旧低延迟 busy-poll 可显式 KVM_HALT_POLL_NS=500000。
 #     CPU_FREQ_CAP=1       把 host scaling_max_freq 封顶到本实例伪装 CPU 的上限
 #                          (CPU_MAX_MHZ=SMBIOS Type4 max-speed)（默认 1，需 HOST_TUNE=1）
 #                          (flag: --freq-cap / --no-freq-cap)

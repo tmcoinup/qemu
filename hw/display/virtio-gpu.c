@@ -367,6 +367,8 @@ void virtio_gpu_disable_scanout(VirtIOGPU *g, int scanout_id)
     struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[scanout_id];
     struct virtio_gpu_simple_resource *res;
 
+    virtio_gpu_clear_dmabuf(g, scanout_id);
+
     if (scanout->resource_id == 0) {
         return;
     }

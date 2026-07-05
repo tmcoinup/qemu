@@ -420,9 +420,9 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
         bool dmabuf_exported = false;
         static bool logged_scanout_info;
         static bool logged_dmabuf_export;
-        static bool warned_no_dmabuf_export;
+        static bool logged_no_dmabuf_export;
 #if VIRGL_VERSION_MAJOR >= 1
-        static bool warned_export_blob_failure;
+        static bool logged_export_blob_failure;
         static bool warned_export_blob_no_format;
 #endif
 
@@ -541,23 +541,32 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
                 }
             } else if (export_fd >= 0) {
                 close(export_fd);
-            } else if (!warned_export_blob_failure) {
-                warn_report("virtio-gpu-virgl: export_blob unavailable for "
-                            "scanout resource (ret=%d fd_type=%u fourcc=0x%x "
+            } else if (!logged_export_blob_failure) {
+                /*
+                 * 中文注释：没有 dma-buf 句柄时会走后面的 SHM 降级路径，
+                 * 这是受支持的运行模式；只记录 info，避免正常启动刷 warning。
+                 */
+                info_report("virtio-gpu-virgl: export_blob unavailable for "
+                            "scanout resource; fb-shm will use SHM fallback "
+                            "(ret=%d fd_type=%u fourcc=0x%x "
                             "has_ext_dmabuf=%d info_fd=%d)",
                             export_ret, fd_type, info.drm_fourcc,
                             ext.has_dmabuf_export, info.fd);
-                warned_export_blob_failure = true;
+                logged_export_blob_failure = true;
             }
         }
 #endif
         if (!dmabuf_exported) {
             virtio_gpu_clear_dmabuf(g, ss.scanout_id);
-            if (!warned_no_dmabuf_export) {
-                warn_report("virtio-gpu-virgl: scanout texture has no "
+            if (!logged_no_dmabuf_export) {
+                /*
+                 * 中文注释：scanout texture 可继续由 SDL native EGL 显示；
+                 * fb-shm 只是在 GPU 旁路导出失败时回退 SHM，不应作为警告。
+                 */
+                info_report("virtio-gpu-virgl: scanout texture has no "
                             "dma-buf export; fb-shm GPU consumers will fall "
                             "back to SHM on this display path");
-                warned_no_dmabuf_export = true;
+                logged_no_dmabuf_export = true;
             }
         }
     } else {

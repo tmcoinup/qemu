@@ -2,7 +2,7 @@
 # 持久化 / 载入
 # ------------------------------------------------------------------
 _STEALTH_PROFILE_VARS=(
-    CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET CPU_MODEL CPU_SERIAL
+    CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET CPU_MODEL CPU_SERIAL CPU_ASSET
     BOARD_MFR BOARD_PRODUCT BOARD_FAMILY BOARD_VERSION BOARD_SERIAL BOARD_ASSET BOARD_SUBSYS_VEN BOARD_SUBSYS_DEV
     SYSTEM_MFR SYSTEM_PRODUCT SYSTEM_FAMILY SYSTEM_VERSION SYSTEM_SERIAL SYSTEM_SKU
     BIOS_VENDOR BIOS_VERSION BIOS_DATE
@@ -116,6 +116,17 @@ stealth_load_profile() {
     : "${CPU_SOCKET:=AM4}"
     : "${CPU_MODEL:=Ryzen3-1200}"
 
+    # CPU asset tag 也是 SMBIOS Type 4 的 guest 可见字段。老 profile 没有该字段
+    # 或被手工改坏时，不再每次启动随机，而是从 CPU_SERIAL/UUID 稳定派生，避免
+    # 硬件指纹漂移，也避免把非数字 asset 写进 SMBIOS。
+    if ! [[ "${CPU_ASSET:-}" =~ ^[0-9]{4}$ ]]; then
+        local _cpu_asset_key _cpu_asset_seed
+        _cpu_asset_key="${CPU_SERIAL:-${UUID:-cpu}}"
+        _cpu_asset_seed="$(printf '%s' "${_cpu_asset_key}-asset" | cksum)"
+        _cpu_asset_seed="${_cpu_asset_seed%% *}"
+        CPU_ASSET=$(( 1000 + (_cpu_asset_seed % 9000) ))
+    fi
+
     # PCI 子系统 ID 老 profile 缺失：按 BOARD_MFR 智能推导每家典型 vendor ID，
     # 避免一律兜回 ASUS 导致"主板是 MSI 但 PCI 子系统报 ASUS"的遗留矛盾。
     # 这样老 VM 不用 reroll 整身份也能修好 PCI 不一致。
@@ -221,4 +232,3 @@ stealth_load_profile() {
         export "$v"
     done
 }
-

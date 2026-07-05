@@ -58,8 +58,18 @@ stealth_smbios_args() {
     else
         cpu_smbios_mfr="Intel(R) Corporation"
     fi
+    local cpu_asset="${CPU_ASSET:-}"
+    if ! [[ "$cpu_asset" =~ ^[0-9]{4}$ ]]; then
+        # 外部调试若绕过 stealth_load_profile，或 profile 被手工写坏，仍按
+        # CPU_SERIAL/UUID 稳定派生兜底，保证 SMBIOS Type 4 asset 是四位数字。
+        local _cpu_asset_key _cpu_asset_seed
+        _cpu_asset_key="${CPU_SERIAL:-${UUID:-cpu}}"
+        _cpu_asset_seed="$(printf '%s' "${_cpu_asset_key}-asset" | cksum)"
+        _cpu_asset_seed="${_cpu_asset_seed%% *}"
+        cpu_asset=$(( 1000 + (_cpu_asset_seed % 9000) ))
+    fi
 
-    t4="type=4,sock_pfx=${CPU_SOCKET},manufacturer=$(_e "$cpu_smbios_mfr"),version=$(_e "$CPU_NAME"),serial=$CPU_SERIAL,asset=$(_rand 1000 9999),part=$CPU_PART,max-speed=$CPU_MAX_MHZ,current-speed=$CPU_CUR_MHZ,processor-family=$CPU_PROC_FAMILY"
+    t4="type=4,sock_pfx=${CPU_SOCKET},manufacturer=$(_e "$cpu_smbios_mfr"),version=$(_e "$CPU_NAME"),serial=$CPU_SERIAL,asset=$cpu_asset,part=$CPU_PART,max-speed=$CPU_MAX_MHZ,current-speed=$CPU_CUR_MHZ,processor-family=$CPU_PROC_FAMILY"
 
     case "$BOARD_MFR" in
         ASUS*|*ASUSTeK*)

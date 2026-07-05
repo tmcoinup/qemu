@@ -168,9 +168,28 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
                       surface_width(scon->surface),
                       surface_height(scon->surface),
                       &dx, &dy, &dw, &dh);
+    if (scon->native_egl) {
+        /*
+         * 中文注释：native EGL 子窗口使用带 alpha 的 X11 visual。普通
+         * DisplaySurface 通过 shader 绘制到默认 framebuffer 时，部分驱动/
+         * compositor 会保留透明 alpha，导致 GL 读回已有固件画面但窗口合成仍
+         * 是黑的。显式选择默认 back buffer，并在 RGB 绘制后把 alpha 置为
+         * 不透明，保持和 scanout blit 路径一致。
+         */
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glDrawBuffer(GL_BACK);
+        glReadBuffer(GL_BACK);
+    }
     glViewport(dx, dy, dw, dh);
 
     surface_gl_render_texture(scon->gls, scon->surface);
+    if (scon->native_egl) {
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
     sdl2_gl_swap_window(scon);
 }
 

@@ -231,20 +231,20 @@ test_qemu_service_cpu_flags_dry_run() {
         || fail "invalid --svc-cpus did not explain the validation error"
 }
 
-test_cpu_pm_keeps_low_latency_default_dry_run() {
+test_cpu_pm_keeps_upstream_default_dry_run() {
     local out="$1"
 
     DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9891 \
         "$START_VM" --no-sdl --no-fb-shm --no-bridge > "$out"
 
-    grep -Fx -- "mem-lock=off,cpu-pm=on" "$out" >/dev/null \
-        || fail "default dry-run must keep cpu-pm=on for low-latency guests"
+    grep -Fx -- "mem-lock=off,cpu-pm=off" "$out" >/dev/null \
+        || fail "default dry-run must keep cpu-pm=off for portable multi-VM guests"
 
-    QEMU_CPU_PM=0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9892 \
+    QEMU_CPU_PM=1 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9892 \
         "$START_VM" --no-sdl --no-fb-shm --no-bridge > "$out"
 
-    grep -Fx -- "mem-lock=off,cpu-pm=off" "$out" >/dev/null \
-        || fail "QEMU_CPU_PM=0 must explicitly disable cpu-pm"
+    grep -Fx -- "mem-lock=off,cpu-pm=on" "$out" >/dev/null \
+        || fail "QEMU_CPU_PM=1 must explicitly enable cpu-pm"
 }
 
 test_gl_display_keeps_historical_default_dry_run() {
@@ -367,7 +367,7 @@ main() {
     test_proxy_dry_run_uses_native_qmp_multi "$out"
     test_custom_image_root_dry_run "$image_root" "$out"
     test_qemu_service_cpu_flags_dry_run "$out"
-    test_cpu_pm_keeps_low_latency_default_dry_run "$out"
+    test_cpu_pm_keeps_upstream_default_dry_run "$out"
     test_gl_display_keeps_historical_default_dry_run "$out"
     test_gpu_headless_display_dry_run "$out"
     test_hotkey_capture_option_removed "$out"

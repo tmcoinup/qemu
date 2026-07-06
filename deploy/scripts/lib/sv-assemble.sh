@@ -10,12 +10,12 @@ if [[ "$PROXY" == "1" ]]; then
 fi
 
 # QEMU 文档说明 cpu-pm=on 会把 host CPU power management 能力交给 guest：
-# 宿主统计会不准，但 guest worst-case latency 更低。DNF 这种追帧率/低延迟的
-# 本地交互 VM 默认沿用历史高帧率路径；如果以后出现 vCPU 超售/压榨多开，再用
-# QEMU_CPU_PM=0 显式关闭。
-CPU_PM_ARG=on
-if [[ "${QEMU_CPU_PM:-1}" =~ ^(0|off|false|no)$ ]]; then
-    CPU_PM_ARG=off
+# 这可能降低单 VM worst-case latency，但会让宿主调度/统计更难预测。默认关闭，
+# 保持和 QEMU 上游一致，也方便后续迁移到 E5/多开场景时统一按宿主策略分配。
+# 只有明确做单机低延迟实验时，才用 QEMU_CPU_PM=1 显式打开。
+CPU_PM_ARG=off
+if [[ "${QEMU_CPU_PM:-0}" =~ ^(1|on|true|yes)$ ]]; then
+    CPU_PM_ARG=on
 fi
 
 CMD=(

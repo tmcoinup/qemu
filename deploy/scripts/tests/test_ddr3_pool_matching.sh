@@ -29,6 +29,24 @@ socket_has_memory() {
     return 1
 }
 
+is_known_no_igpu_consumer_ddr3_cpu() {
+    local name="$1"
+    case "$name" in
+        "AMD Athlon(tm) II X2 250 Processor" \
+        |"AMD Athlon(tm) II X4 640 Processor" \
+        |"AMD Phenom(tm) II X4 955 Processor" \
+        |"AMD FX(tm)-4100 Quad-Core Processor" \
+        |"AMD FX(tm)-4300 Quad-Core Processor" \
+        |"AMD Athlon(tm) X4 860K Quad Core Processor" \
+        |"Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz" \
+        |"Intel(R) Core(TM) i5-2550K CPU @ 3.40GHz" \
+        |"Intel(R) Core(TM) i5-3350P CPU @ 3.10GHz")
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
 for row in "${CPU_POOL[@]}"; do
     [[ "$row" != *"Xeon"* ]] || fail "DDR3 家用池不得引入 Xeon/E 系列 CPU: $row"
     [[ "$row" != *" E3-"* ]] || fail "DDR3 家用池不得引入 E3 CPU: $row"
@@ -40,6 +58,8 @@ for row in "${CPU_POOL[@]}"; do
     case "$socket" in
         AM3|AM3+|FM2+|LGA1155)
             ddr3_cpu_count=$((ddr3_cpu_count + 1))
+            is_known_no_igpu_consumer_ddr3_cpu "$name" \
+                || fail "DDR3 CPU 不在无核显家用白名单: $name"
             socket_has_board "$socket" || fail "CPU $name 的 socket=$socket 缺少主板"
             socket_has_memory "$socket" || fail "CPU $name 的 socket=$socket 缺少 DDR3 内存"
             ;;

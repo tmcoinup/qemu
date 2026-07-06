@@ -100,8 +100,9 @@ cat /proc/sys/vm/nr_hugepages                                        # 必须仍
 **绝不能动的反检测命脉**（动了反而更可疑，且与计时检测无关）：`-cpu` 的
 `tsc-freq=`/`+invtsc`/`+tsc-deadline`、`kvm=off`/`hypervisor=off`/`vendor=`、vCPU 数/拓扑
 （`cores=N` 对应伪 N 核）、`-rtc clock=vm,driftfix=slew`。`-overcommit cpu-pm`
-默认保持 `on`，沿用低延迟/高帧率启动路径；只有 vCPU 超售或压榨多开时才用
-`QEMU_CPU_PM=0` 显式关闭。
+默认保持 `off`，与 QEMU 上游默认一致，避免把 host CPU power management 能力交给
+guest 后影响宿主调度统计；只有单 VM 低延迟实验需要时，才用 `QEMU_CPU_PM=1`
+显式打开。
 
 > 若调优后仍报 `13-131130-8`：排查 host 是否被别的重负载抢核（`pidstat`/`perf kvm stat`），
 > 或 vCPU 超额订阅（运行的 VM 总 vCPU > host 逻辑核）。本机 8c/16t，单 VM 4 vCPU，

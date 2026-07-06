@@ -231,7 +231,7 @@ test_qemu_service_cpu_flags_dry_run() {
         || fail "invalid --svc-cpus did not explain the validation error"
 }
 
-test_gl_display_enables_gpu_blob_dry_run() {
+test_gl_display_keeps_historical_default_dry_run() {
     local out="$1"
     local vga_line
 
@@ -239,17 +239,19 @@ test_gl_display_enables_gpu_blob_dry_run() {
         "$START_VM" --no-fb-shm --no-bridge > "$out"
 
     vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
-    [[ "$vga_line" == *"blob=true"* ]] \
-        || fail "SDL+GL dry-run did not enable virtio-gpu blob resources"
-    [[ "$vga_line" == *"hostmem=256M"* ]] \
-        || fail "SDL+GL dry-run did not set default GPU hostmem"
+    [[ -n "$vga_line" ]] \
+        || fail "default SDL dry-run did not keep virtio-vga-gl"
+    [[ "$vga_line" != *"blob=true"* && "$vga_line" != *"hostmem="* ]] \
+        || fail "default SDL dry-run must keep historical texture-only device"
 
-    DISPLAY=:0 GPU_HOSTMEM=512M DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9887 \
+    DISPLAY=:0 GPU_ZEROCOPY=1 GPU_HOSTMEM=512M DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9887 \
         "$START_VM" --no-fb-shm --no-bridge > "$out"
 
     vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
+    [[ "$vga_line" == *"blob=true"* ]] \
+        || fail "GPU_ZEROCOPY=1 did not enable virtio-gpu blob resources"
     [[ "$vga_line" == *"hostmem=512M"* ]] \
-        || fail "SDL+GL dry-run did not honor GPU_HOSTMEM"
+        || fail "GPU_ZEROCOPY=1 did not honor GPU_HOSTMEM"
 
     DISPLAY=:0 GPU_ZEROCOPY=0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9888 \
         "$START_VM" --no-fb-shm --no-bridge > "$out"
@@ -349,7 +351,7 @@ main() {
     test_proxy_dry_run_uses_native_qmp_multi "$out"
     test_custom_image_root_dry_run "$image_root" "$out"
     test_qemu_service_cpu_flags_dry_run "$out"
-    test_gl_display_enables_gpu_blob_dry_run "$out"
+    test_gl_display_keeps_historical_default_dry_run "$out"
     test_gpu_headless_display_dry_run "$out"
     test_hotkey_capture_option_removed "$out"
     test_cpu_isolate_scripts_parse

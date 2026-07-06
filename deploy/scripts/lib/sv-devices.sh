@@ -94,20 +94,21 @@ fi
 #
 # STABLE_DISPLAY=0（默认）: 在 --sdl / --gpu-headless 模式下生效，
 #   启 virtio-vga-gl + virgl 3D 加速。
-#   fb-shm 会作为第二个 DCL 共享 SDL 的 GL scanout，把纹理读回到 SHM 推流；
-#   渲染更快但 virgl 状态机长跑会脏。
+#   普通 --sdl 默认保持历史 SDL/GLX + texture scanout；--gpu-sdl-egl /
+#   --gpu-headless 才启用实验 native EGL / blob resource 零拷贝路径。
 #
 # STABLE_DISPLAY=1: 强制 virtio-vga，不开 -gl/virgl。用于规避 virgl 长期运行后
 #   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
 #   INTERNAL_ERROR"）。代价是没有 GL 加速，guest 的 DirectX 回退到 WARP。
 #   (注：--no-sdl/--headless 没有窗口 GL context，仍然走 stable 路径)
 STABLE_DISPLAY=${STABLE_DISPLAY:-0}
+GPU_DISPLAY_MODE=${GPU_DISPLAY:-sdl}
 GPU_EGL_HEADLESS=0
-if [[ "${GPU_DISPLAY:-sdl}" == "egl-headless" && "$STABLE_DISPLAY" != "1" ]]; then
+if [[ "$GPU_DISPLAY_MODE" == "egl-headless" && "$STABLE_DISPLAY" != "1" ]]; then
     GPU_EGL_HEADLESS=1
 fi
 SDL_NATIVE_EGL=0
-if [[ "${GPU_DISPLAY:-sdl-egl}" == "sdl-egl" && "$STABLE_DISPLAY" != "1" && "$SDL" == "1" ]]; then
+if [[ "$GPU_DISPLAY_MODE" == "sdl-egl" && "$STABLE_DISPLAY" != "1" && "$SDL" == "1" ]]; then
     # 中文注释：QEMU SDL backend 仍使用 `-display sdl,gl=on`，这里只通过环境
     # 开关让 SDL 父窗口里的 GL surface 改由 native EGL 子窗口承载。这样
     # DGame 仍能用 xdotool 显示/隐藏 SDL 父窗口，同时 fb-shm 能发布 dma-buf。
@@ -135,7 +136,7 @@ fi
 EDID_PROPS="edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID_SERIAL},edid-width-mm=${EDID_WIDTH_MM},edid-height-mm=${EDID_HEIGHT_MM}"
 if [[ "$GPU_GL_DISPLAY" == "1" ]]; then
     VGA_DEV="virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${EDID_PROPS},${GPU_STEALTH}"
-    if [[ "${GPU_ZEROCOPY:-1}" == "1" ]]; then
+    if [[ "${GPU_ZEROCOPY:-0}" == "1" ]]; then
         # 中文注释：fb-shm 的 GPU metadata 只有在 guest 使用可共享 backing 时
         # 才能拿到 dma-buf scanout。blob=true 打开 virtio-gpu resource blob，
         # hostmem 暴露 host-visible window；否则 QEMU 只能收到普通 GL texture，

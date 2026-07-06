@@ -77,7 +77,7 @@ _sv_check_qemu_caps() {
             'edid-vendor=' 'edid-name=' 'edid-serial=' \
             'edid-width-mm=' 'edid-height-mm=' \
             || _sv_die_missing_qemu_feature "virtio-vga-gl EDID 属性"
-        if [[ "${GPU_ZEROCOPY:-1}" == "1" ]]; then
+        if [[ "${GPU_ZEROCOPY:-0}" == "1" ]]; then
             _sv_qemu_help_has_all "$help" 'blob=' 'hostmem=' \
                 || _sv_die_missing_qemu_feature "virtio-vga-gl GPU blob/hostmem 属性"
         fi

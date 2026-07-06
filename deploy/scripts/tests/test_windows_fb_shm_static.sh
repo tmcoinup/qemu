@@ -84,6 +84,22 @@ test_gl_readback_drains_pbo_before_rate_gate() {
         || fail "fb_shm_commit_gl_frame must drain GL PBO before SHM rate gate"
 }
 
+test_texture_export_warning_is_strict_only() {
+    # 中文注释：texture-only scanout 在稳定路径下回落 SHM 是预期行为，不能用
+    # warning 误导操作者去打开 blob/native EGL；只有 strict GPU consumer 才警告。
+    awk '
+        /static void fb_shm_broadcast_texture_dmabuf_frame/ { in_func = 1 }
+        in_func && /fb_shm_has_required_gpu_clients\(d\)/ { strict_gate = 1 }
+        in_func && strict_gate && /warn_report/ { strict_warn = 1 }
+        in_func && /else if \(!d->gl_logged_texture_export\)/ { fallback_branch = 1 }
+        in_func && fallback_branch && /info_report/ { fallback_info = 1 }
+        in_func && /^}/ {
+            exit strict_gate && strict_warn && fallback_info ? 0 : 1
+        }
+    ' "$REPO_ROOT/ui/fb-shm.c" \
+        || fail "texture dma-buf export fallback must warn only for strict GPU clients"
+}
+
 test_native_streamer_has_both_platforms() {
     require_text "OpenFileMappingA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
     require_text "OpenEventA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
@@ -168,6 +184,7 @@ test_qapi_and_meson_enable_windows
 test_qemu_backend_has_win32_mapping
 test_backend_drops_idle_listener_rate
 test_gl_readback_drains_pbo_before_rate_gate
+test_texture_export_warning_is_strict_only
 test_native_streamer_has_both_platforms
 test_windows_scripts_are_native
 test_docs_cover_windows_packaging

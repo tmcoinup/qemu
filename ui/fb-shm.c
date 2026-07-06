@@ -190,6 +190,7 @@ struct FbShmDisplay {
     bool gl_pbo_supported;
     bool gl_warned_pbo;
     bool gl_warned_texture_export;
+    bool gl_logged_texture_export;
     bool gl_logged_texture_scanout;
     bool gl_logged_dmabuf_scanout;
     uint32_t gl_pbo_head;
@@ -1031,6 +1032,18 @@ static bool fb_shm_has_gpu_clients(FbShmDisplay *d)
     return false;
 }
 
+static bool fb_shm_has_required_gpu_clients(FbShmDisplay *d)
+{
+    FbShmClient *c;
+
+    QLIST_FOREACH(c, &d->clients, next) {
+        if (fb_shm_client_accepts_gpu(c) && c->gpu_required) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool fb_shm_has_shm_consumers(FbShmDisplay *d)
 {
     FbShmClient *c;
@@ -1649,13 +1662,25 @@ static void fb_shm_broadcast_texture_dmabuf_frame(FbShmDisplay *d,
      */
     fd = egl_get_fd_for_texture(d->gl_backing_id, &stride, &fourcc, &modifier);
     if (fd < 0) {
-        if (!d->gl_warned_texture_export) {
-            warn_report("fb-shm: GL scanout is texture-only and texture "
-                        "dma-buf export is unavailable; using SHM fallback. "
-                        "Start virtio-vga-gl with blob=true,hostmem=SIZE or "
-                        "use an EGL stack with EGL_KHR_image and "
-                        "EGL_MESA_image_dma_buf_export");
-            d->gl_warned_texture_export = true;
+        /*
+         * 中文注释：默认稳定路径允许 GPU metadata 不可用后继续走 SHM；这不是
+         * 运行异常。只有 consumer 明确声明 GPU_REQUIRED 时，才把它作为 warning，
+         * 避免正常 DGame/auto 预览日志里出现误导性的“需要 blob=true”提示。
+         */
+        if (fb_shm_has_required_gpu_clients(d)) {
+            if (!d->gl_warned_texture_export) {
+                warn_report("fb-shm: GL scanout is texture-only and texture "
+                            "dma-buf export is unavailable for a strict GPU "
+                            "consumer; using SHM fallback. Start "
+                            "virtio-vga-gl with blob=true,hostmem=SIZE or "
+                            "use an EGL stack with EGL_KHR_image and "
+                            "EGL_MESA_image_dma_buf_export");
+                d->gl_warned_texture_export = true;
+            }
+        } else if (!d->gl_logged_texture_export) {
+            info_report("fb-shm: GL scanout is texture-only and texture "
+                        "dma-buf export is unavailable; keeping SHM fallback");
+            d->gl_logged_texture_export = true;
         }
         return;
     }

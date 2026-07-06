@@ -94,8 +94,8 @@ fi
 #
 # STABLE_DISPLAY=0（默认）: 在 --sdl / --gpu-headless 模式下生效，
 #   启 virtio-vga-gl + virgl 3D 加速。
-#   普通 --sdl 默认保持历史 SDL/GLX + texture scanout；--gpu-sdl-egl /
-#   --gpu-headless 才启用实验 native EGL / blob resource 零拷贝路径。
+#   默认 --sdl 走 native EGL + blob resource，给 fb-shm/dgame 发布 GPU metadata；
+#   如需排查兼容问题，可显式 --gpu-display=sdl --no-gpu-zerocopy 回退 SHM。
 #
 # STABLE_DISPLAY=1: 强制 virtio-vga，不开 -gl/virgl。用于规避 virgl 长期运行后
 #   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
@@ -136,7 +136,7 @@ fi
 EDID_PROPS="edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID_SERIAL},edid-width-mm=${EDID_WIDTH_MM},edid-height-mm=${EDID_HEIGHT_MM}"
 if [[ "$GPU_GL_DISPLAY" == "1" ]]; then
     VGA_DEV="virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${EDID_PROPS},${GPU_STEALTH}"
-    if [[ "${GPU_ZEROCOPY:-0}" == "1" ]]; then
+    if [[ "${GPU_ZEROCOPY:-1}" == "1" ]]; then
         # 中文注释：fb-shm 的 GPU metadata 只有在 guest 使用可共享 backing 时
         # 才能拿到 dma-buf scanout。blob=true 打开 virtio-gpu resource blob，
         # hostmem 暴露 host-visible window；否则 QEMU 只能收到普通 GL texture，

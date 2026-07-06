@@ -28,10 +28,9 @@ CPU_POOL=(
     # Intel LGA1151 Coffee Lake，"F" 后缀 = 无 UHD 630 iGPU（本池硬约束：排除核显，
     # 见 stealth_pick_profile 的 host-aware 选择——AMD 宿主机不会挑到这些 Intel）。
     # 都是 4C/4T 无 HT：桌面 2C/4T 全部带核显，且把无 HT 的 i3 谎报成 2C/4T+HT 本身
-    # 是破绽，故无核显约束下只做 4H4C（4 核 4 线程）。频率取 E5-2696 v4 区间(≤3.6G)，
-    # 让未来 Intel 宿主机上自报规格真实可达。
+    # 是破绽，故无核显约束下只做 4H4C（4 核 4 线程）。current-speed 贴近常见
+    # 睿频/基频区间，max-speed 保留官方最大值，避免把已发售 SKU 报成不存在规格。
     "Skylake-Client-IBRS,family=6,model=158,stepping=10,model-id=Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz|GenuineIntel|Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz|4200|3600|GX80684I39100F|0xCD|LGA1151"
-    "Skylake-Client-IBRS,family=6,model=158,stepping=10,model-id=Intel(R) Core(TM) i3-8100F CPU @ 3.60GHz|GenuineIntel|Intel(R) Core(TM) i3-8100F CPU @ 3.60GHz|3600|3600|GX80684I38100F|0xCD|LGA1151"
     # Intel DDR3 家用平台：P/K 中无核显 SKU，全部 4C/4T；不使用 Xeon E3 / E 系列。
     "SandyBridge-IBRS,model-id=Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz|GenuineIntel|Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz|3400|3100|BX80623I52380P|0xCD|LGA1155"
     "SandyBridge-IBRS,model-id=Intel(R) Core(TM) i5-2550K CPU @ 3.40GHz|GenuineIntel|Intel(R) Core(TM) i5-2550K CPU @ 3.40GHz|3800|3400|BX80623I52550K|0xCD|LGA1155"
@@ -87,8 +86,8 @@ BOARD_POOL=(
     "LGA1151|ASUSTeK COMPUTER INC.|PRIME H310M-K|PRIME|Rev 1.xx|_serial_asus|0x1043|0x8694"
     "LGA1151|ASUSTeK COMPUTER INC.|PRIME B360M-A|PRIME|Rev 1.xx|_serial_asus|0x1043|0x8694"
     "LGA1151|ASUSTeK COMPUTER INC.|PRIME H370-A|PRIME|Rev 1.xx|_serial_asus|0x1043|0x8694"
-    "LGA1151|Micro-Star International Co., Ltd.|H310M PRO-VL (MS-7B24)|MSI|1.0|_serial_msi|0x1462|0x7B24"
-    "LGA1151|Micro-Star International Co., Ltd.|B360M PRO-VH (MS-7B49)|MSI|1.0|_serial_msi|0x1462|0x7B49"
+    "LGA1151|Micro-Star International Co., Ltd.|H310M PRO-VL (MS-7B75)|MSI|1.0|_serial_msi|0x1462|0x7B75"
+    "LGA1151|Micro-Star International Co., Ltd.|B360M PRO-VH (MS-7B53)|MSI|1.0|_serial_msi|0x1462|0x7B53"
     "LGA1151|Gigabyte Technology Co., Ltd.|H310M S2H|H310M|x.x|_serial_giga|0x1458|0x5001"
     "LGA1151|Gigabyte Technology Co., Ltd.|B360M D2V|B360M|x.x|_serial_giga|0x1458|0x5001"
     "LGA1151|ASRock|B360M Pro4|B360M Pro4|Default string|_serial_asr|0x1849|0x1230"
@@ -96,8 +95,8 @@ BOARD_POOL=(
     # LGA1200 (H410/B460/H470 入门)
     "LGA1200|ASUSTeK COMPUTER INC.|PRIME H410M-A|PRIME|Rev 1.xx|_serial_asus|0x1043|0x8694"
     "LGA1200|ASUSTeK COMPUTER INC.|PRIME B460M-A|PRIME|Rev 1.xx|_serial_asus|0x1043|0x8694"
-    "LGA1200|Micro-Star International Co., Ltd.|H410M PRO (MS-7C95)|MSI|1.0|_serial_msi|0x1462|0x7C95"
-    "LGA1200|Micro-Star International Co., Ltd.|B460M PRO-VDH (MS-7C82)|MSI|1.0|_serial_msi|0x1462|0x7C82"
+    "LGA1200|Micro-Star International Co., Ltd.|H410M PRO (MS-7C89)|MSI|1.0|_serial_msi|0x1462|0x7C89"
+    "LGA1200|Micro-Star International Co., Ltd.|B460M PRO-VDH WIFI (MS-7C83)|MSI|1.0|_serial_msi|0x1462|0x7C83"
     "LGA1200|Gigabyte Technology Co., Ltd.|H410M S2H|H410M|x.x|_serial_giga|0x1458|0x5001"
     "LGA1200|Gigabyte Technology Co., Ltd.|B460M DS3H|B460M|x.x|_serial_giga|0x1458|0x5001"
     "LGA1200|ASRock|H410M-HDV|H410M-HDV|Default string|_serial_asr|0x1849|0x1230"
@@ -166,24 +165,19 @@ NVME_POOL=(
 # CPU 平台内存上限)** —— 见 stealth-smbios.sh::_cpu_max_mem。这样既不会出现"i3-9100F
 # (官方 DDR4-2400)却报 2666"、也不会"2400 颗粒报 2666"，CPU/主板/内存频率三者配套。
 # 速率随颗粒(随机)+CPU(随机)而变 = 规格随机但永不超平台。
-# Format: MFR|PART_2G|PART_4G|RATED_MTS
 MEM_POOL=(
     # DDR4：AM4 / LGA1151 / LGA1200
-    "Kingston|KVR26N19S6/2|HX426C16FB3A/4|2666|AM4,LGA1151,LGA1200"
     "Crucial|CT2G4DFS6266|CT4G4DFS8266|2666|AM4,LGA1151,LGA1200"
     "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400|AM4,LGA1151,LGA1200"
-    "SK hynix|HMA425S6BJR8N-V8|HMA851S6CJR6N-VK|2666|AM4,LGA1151,LGA1200"
     "Kingston|KVR24N17S6/2|KVR24N17S8/4|2400|AM4,LGA1151,LGA1200"
     "Crucial|CT2G4DFS624A|CT4G4DFS824A|2400|AM4,LGA1151,LGA1200"
-    # DDR3：AM3 / AM3+ / FM2+ / LGA1155，家用平台常见 1333/1600/1866 颗粒。
-    "Kingston|KVR16N11S6/2|KVR16N11S8/4|1600|AM3,AM3+,FM2+,LGA1155"
-    "Crucial|CT25664BA160B|CT51264BA160B|1600|AM3,AM3+,FM2+,LGA1155"
-    "Samsung|M378B5773DH0-CH9|M378B5173QH0-CK0|1600|AM3,AM3+,FM2+,LGA1155"
-    "SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600|AM3,AM3+,FM2+,LGA1155"
-    "Kingston|KVR13N9S6/2|KVR13N9S8/4|1333|AM3,LGA1155"
-    "G.Skill|F3-10600CL9S-2GBNT|F3-10600CL9S-4GBNT|1333|AM3,LGA1155"
-    "Kingston|KHX1866C9D3/2G|KHX1866C9D3/4G|1866|AM3+,FM2+"
-    "G.Skill|F3-14900CL9S-2GBSR|F3-14900CL9S-4GBSR|1866|AM3+,FM2+"
+    "SK hynix|HMA425U6AFR6N-UH|HMA851U6AFR6N-UH|2400|AM4,LGA1151,LGA1200"
+    # DDR3：只保留能核验到 2G/4G 成对真实型号的 1333/1600 桌面 UDIMM。
+    # AM3 / Sandy Bridge 这类 CPU 上限为 1333，选择阶段会按 _cpu_max_mem 自动过滤。
+    "Kingston|KVR16N11S6/2|KVR16N11S8/4|1600|AM3+,FM2+,LGA1155"
+    "Crucial|CT25664BA160B|CT51264BA160B|1600|AM3+,FM2+,LGA1155"
+    "SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600|AM3+,FM2+,LGA1155"
+    "Kingston|KVR13N9S6/2|KVR13N9S8/4|1333|AM3,AM3+,FM2+,LGA1155"
 )
 
 # ------------------------------------------------------------------

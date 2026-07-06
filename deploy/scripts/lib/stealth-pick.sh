@@ -113,17 +113,25 @@ stealth_pick_profile() {
     NVME_SERIAL="$(_nvme_serial)"
 
     # 5. 内存厂家 / part / 持久化序列号
-    # MEM_POOL 第 5 列是适配 socket 列表；先按 CPU_SOCKET 过滤，避免 DDR3/DDR4 乱配。
+    # MEM_POOL 第 5 列是适配 socket 列表；再用 _cpu_max_mem 按 CPU 内存控制器
+    # 上限过滤颗粒额定速率，避免 Sandy Bridge/AM3 平台抽到 DDR3-1600/1866 后
+    # 虽然 SMBIOS 降速展示但物料本身超出官方常规支持范围。
     local mem_matched=()
+    local _mem_max
+    _mem_max="$(_cpu_max_mem)"
     for entry in "${MEM_POOL[@]}"; do
         local _mmfr _m2g _m4g _mrated _msockets
         IFS='|' read -r _mmfr _m2g _m4g _mrated _msockets <<<"$entry"
-        if [[ -z "${_msockets:-}" || ",$_msockets," == *",$CPU_SOCKET,"* ]]; then
+        if ! [[ "$_mrated" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        if [[ -z "${_msockets:-}" || ",$_msockets," == *",$CPU_SOCKET,"* ]] \
+            && (( _mrated <= _mem_max )); then
             mem_matched+=("$entry")
         fi
     done
     if (( ${#mem_matched[@]} == 0 )); then
-        echo "ERROR: 没有 socket=$CPU_SOCKET 的内存可选" >&2
+        echo "ERROR: 没有 socket=$CPU_SOCKET 且速率<=${_mem_max}MT/s 的内存可选" >&2
         return 1
     fi
     local mp_i=$(( (RANDOM * 32768 + RANDOM) % ${#mem_matched[@]} ))

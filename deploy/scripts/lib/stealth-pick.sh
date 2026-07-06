@@ -113,9 +113,22 @@ stealth_pick_profile() {
     NVME_SERIAL="$(_nvme_serial)"
 
     # 5. 内存厂家 / part / 持久化序列号
-    local mp_n=${#MEM_POOL[@]}
-    local mp_i=$(( (RANDOM * 32768 + RANDOM) % mp_n ))
-    IFS='|' read -r MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED <<<"${MEM_POOL[$mp_i]}"
+    # MEM_POOL 第 5 列是适配 socket 列表；先按 CPU_SOCKET 过滤，避免 DDR3/DDR4 乱配。
+    local mem_matched=()
+    for entry in "${MEM_POOL[@]}"; do
+        local _mmfr _m2g _m4g _mrated _msockets
+        IFS='|' read -r _mmfr _m2g _m4g _mrated _msockets <<<"$entry"
+        if [[ -z "${_msockets:-}" || ",$_msockets," == *",$CPU_SOCKET,"* ]]; then
+            mem_matched+=("$entry")
+        fi
+    done
+    if (( ${#mem_matched[@]} == 0 )); then
+        echo "ERROR: 没有 socket=$CPU_SOCKET 的内存可选" >&2
+        return 1
+    fi
+    local mp_i=$(( (RANDOM * 32768 + RANDOM) % ${#mem_matched[@]} ))
+    local MEM_SOCKETS
+    IFS='|' read -r MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SOCKETS <<<"${mem_matched[$mp_i]}"
     # DIMM serial 在 pick 阶段一次性生成，写到 profile 持久化——避免之前每次
     # 启动 stealth_smbios_args 里 _rand 一遍导致 Win32_PhysicalMemory.SerialNumber
     # 重启就变（反作弊"硬件指纹漂移"检测的明显信号）。

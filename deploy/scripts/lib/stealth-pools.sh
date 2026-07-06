@@ -18,6 +18,13 @@ CPU_POOL=(
     # AMD AM4 — Zen 1 / Zen+（桌面 Ryzen 3 全系无 iGPU；带 iGPU 的是 APU 2200G/3200G 系，本池排除）
     "Ryzen3-1200|AuthenticAMD|AMD Ryzen 3 1200 Quad-Core Processor|3400|3100|YD1200BBM4KAE|0x139|AM4"
     "Ryzen3-2300X|AuthenticAMD|AMD Ryzen 3 2300X Quad-Core Processor|4000|3500|YD230XBBM4KAF|0x139|AM4"
+    # AMD DDR3 家用平台：只收无核显消费级型号；2C/2T 或 4C/4T，总线程不超过 4。
+    "phenom,model-id=AMD Athlon(tm) II X2 250 Processor|AuthenticAMD|AMD Athlon(tm) II X2 250 Processor|3000|3000|ADX250OCK23GQ|0x83|AM3"
+    "phenom,model-id=AMD Athlon(tm) II X4 640 Processor|AuthenticAMD|AMD Athlon(tm) II X4 640 Processor|3000|3000|ADX640WFK42GM|0x83|AM3"
+    "phenom,model-id=AMD Phenom(tm) II X4 955 Processor|AuthenticAMD|AMD Phenom(tm) II X4 955 Processor|3200|3200|HDZ955FBK4DGM|0x83|AM3"
+    "Opteron_G5,model-id=AMD FX(tm)-4100 Quad-Core Processor|AuthenticAMD|AMD FX(tm)-4100 Quad-Core Processor|3800|3600|FD4100WMW4KGU|0x8F|AM3+"
+    "Opteron_G5,model-id=AMD FX(tm)-4300 Quad-Core Processor|AuthenticAMD|AMD FX(tm)-4300 Quad-Core Processor|4000|3800|FD4300WMW4MHK|0x8F|AM3+"
+    "Opteron_G5,model-id=AMD Athlon(tm) X4 860K Quad Core Processor|AuthenticAMD|AMD Athlon(tm) X4 860K Quad Core Processor|4000|3700|AD860KXBJABOX|0x8F|FM2+"
     # Intel LGA1151 Coffee Lake，"F" 后缀 = 无 UHD 630 iGPU（本池硬约束：排除核显，
     # 见 stealth_pick_profile 的 host-aware 选择——AMD 宿主机不会挑到这些 Intel）。
     # 都是 4C/4T 无 HT：桌面 2C/4T 全部带核显，且把无 HT 的 i3 谎报成 2C/4T+HT 本身
@@ -25,6 +32,10 @@ CPU_POOL=(
     # 让未来 Intel 宿主机上自报规格真实可达。
     "Skylake-Client-IBRS,family=6,model=158,stepping=10,model-id=Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz|GenuineIntel|Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz|4200|3600|GX80684I39100F|0xCD|LGA1151"
     "Skylake-Client-IBRS,family=6,model=158,stepping=10,model-id=Intel(R) Core(TM) i3-8100F CPU @ 3.60GHz|GenuineIntel|Intel(R) Core(TM) i3-8100F CPU @ 3.60GHz|3600|3600|GX80684I38100F|0xCD|LGA1151"
+    # Intel DDR3 家用平台：P/K 中无核显 SKU，全部 4C/4T；不使用 Xeon E3 / E 系列。
+    "SandyBridge-IBRS,model-id=Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz|GenuineIntel|Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz|3400|3100|BX80623I52380P|0xCD|LGA1155"
+    "SandyBridge-IBRS,model-id=Intel(R) Core(TM) i5-2550K CPU @ 3.40GHz|GenuineIntel|Intel(R) Core(TM) i5-2550K CPU @ 3.40GHz|3800|3400|BX80623I52550K|0xCD|LGA1155"
+    "IvyBridge-IBRS,model-id=Intel(R) Core(TM) i5-3350P CPU @ 3.10GHz|GenuineIntel|Intel(R) Core(TM) i5-3350P CPU @ 3.10GHz|3300|3100|BX80637I53350P|0xCD|LGA1155"
 )
 
 # ------------------------------------------------------------------
@@ -53,6 +64,25 @@ BOARD_POOL=(
     "AM4|Gigabyte Technology Co., Ltd.|B450 AORUS M|B450 AORUS M|x.x|_serial_giga|0x1458|0x5001"
     "AM4|ASRock|AB350 Pro4|AB350 Pro4|Default string|_serial_asr|0x1849|0x1230"
     "AM4|ASRock|X370 Taichi|X370 Taichi|Default string|_serial_asr|0x1849|0x9696"
+    # DDR3 AMD 家用平台：870/970/A88X，无 CPU 核显；显卡仍走独显池。
+    "AM3|ASUSTeK COMPUTER INC.|M4A87TD EVO|M4A87TD EVO|Rev 1.xx|_serial_asus|0x1043|0x843E"
+    "AM3|Gigabyte Technology Co., Ltd.|GA-870A-UD3|GA-870A-UD3|x.x|_serial_giga|0x1458|0x5001"
+    "AM3|Micro-Star International Co., Ltd.|870A-G54 (MS-7599)|MSI|1.0|_serial_msi|0x1462|0x7599"
+    "AM3|ASRock|870 Extreme3|870 Extreme3|Default string|_serial_asr|0x1849|0x0870"
+    "AM3+|ASUSTeK COMPUTER INC.|M5A97 R2.0|M5A97|Rev 1.xx|_serial_asus|0x1043|0x84EF"
+    "AM3+|Gigabyte Technology Co., Ltd.|GA-970A-DS3P|GA-970A-DS3P|x.x|_serial_giga|0x1458|0x5001"
+    "AM3+|Micro-Star International Co., Ltd.|970A-G43 (MS-7693)|MSI|3.0|_serial_msi|0x1462|0x7693"
+    "AM3+|ASRock|970 Extreme3 R2.0|970 Extreme3|Default string|_serial_asr|0x1849|0x0970"
+    "FM2+|ASUSTeK COMPUTER INC.|A88XM-A|A88XM-A|Rev X.0x|_serial_asus|0x1043|0x85CB"
+    "FM2+|Gigabyte Technology Co., Ltd.|GA-F2A88XM-D3H|GA-F2A88XM-D3H|x.x|_serial_giga|0x1458|0x5001"
+    "FM2+|Micro-Star International Co., Ltd.|A88XM-E35 (MS-7721)|MSI|6.0|_serial_msi|0x1462|0x7721"
+    "FM2+|ASRock|FM2A88X Extreme4+|FM2A88X Extreme4+|Default string|_serial_asr|0x1849|0xA88A"
+    # DDR3 Intel 家用平台：P67/Z77 搭配无核显 Core i5 P/K 型号。
+    "LGA1155|ASUSTeK COMPUTER INC.|P8P67 LE|P8P67|Rev 3.0|_serial_asus|0x1043|0x844D"
+    "LGA1155|ASUSTeK COMPUTER INC.|P8Z77-V LX|P8Z77|Rev X.0x|_serial_asus|0x1043|0x84CA"
+    "LGA1155|Gigabyte Technology Co., Ltd.|GA-P67A-D3-B3|GA-P67A-D3-B3|x.x|_serial_giga|0x1458|0x5001"
+    "LGA1155|Micro-Star International Co., Ltd.|P67A-C43 (MS-7673)|MSI|1.0|_serial_msi|0x1462|0x7673"
+    "LGA1155|ASRock|P67 Pro3|P67 Pro3|Default string|_serial_asr|0x1849|0x7673"
     # LGA1151 v2 (H310/B360/H370 入门)
     "LGA1151|ASUSTeK COMPUTER INC.|PRIME H310M-K|PRIME|Rev 1.xx|_serial_asus|0x1043|0x8694"
     "LGA1151|ASUSTeK COMPUTER INC.|PRIME B360M-A|PRIME|Rev 1.xx|_serial_asus|0x1043|0x8694"
@@ -130,7 +160,7 @@ NVME_POOL=(
 
 # ------------------------------------------------------------------
 # 内存 part / 厂商池 —— 低端 4G 总量典型搭配。
-# Format: MFR|PART_2G|PART_4G
+# Format: MFR|PART_2G|PART_4G|RATED_MTS|SOCKETS
 # ------------------------------------------------------------------
 # 增 RATED_MTS 列(2026-05-26)：颗粒额定速率(JEDEC/型号编码)。**报告速率 = min(本列,
 # CPU 平台内存上限)** —— 见 stealth-smbios.sh::_cpu_max_mem。这样既不会出现"i3-9100F
@@ -138,12 +168,22 @@ NVME_POOL=(
 # 速率随颗粒(随机)+CPU(随机)而变 = 规格随机但永不超平台。
 # Format: MFR|PART_2G|PART_4G|RATED_MTS
 MEM_POOL=(
-    "Kingston|KVR26N19S6/2|HX426C16FB3A/4|2666"
-    "Crucial|CT2G4DFS6266|CT4G4DFS8266|2666"
-    "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400"
-    "SK hynix|HMA425S6BJR8N-V8|HMA851S6CJR6N-VK|2666"
-    "Kingston|KVR24N17S6/2|KVR24N17S8/4|2400"
-    "Crucial|CT2G4DFS624A|CT4G4DFS824A|2400"
+    # DDR4：AM4 / LGA1151 / LGA1200
+    "Kingston|KVR26N19S6/2|HX426C16FB3A/4|2666|AM4,LGA1151,LGA1200"
+    "Crucial|CT2G4DFS6266|CT4G4DFS8266|2666|AM4,LGA1151,LGA1200"
+    "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400|AM4,LGA1151,LGA1200"
+    "SK hynix|HMA425S6BJR8N-V8|HMA851S6CJR6N-VK|2666|AM4,LGA1151,LGA1200"
+    "Kingston|KVR24N17S6/2|KVR24N17S8/4|2400|AM4,LGA1151,LGA1200"
+    "Crucial|CT2G4DFS624A|CT4G4DFS824A|2400|AM4,LGA1151,LGA1200"
+    # DDR3：AM3 / AM3+ / FM2+ / LGA1155，家用平台常见 1333/1600/1866 颗粒。
+    "Kingston|KVR16N11S6/2|KVR16N11S8/4|1600|AM3,AM3+,FM2+,LGA1155"
+    "Crucial|CT25664BA160B|CT51264BA160B|1600|AM3,AM3+,FM2+,LGA1155"
+    "Samsung|M378B5773DH0-CH9|M378B5173QH0-CK0|1600|AM3,AM3+,FM2+,LGA1155"
+    "SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600|AM3,AM3+,FM2+,LGA1155"
+    "Kingston|KVR13N9S6/2|KVR13N9S8/4|1333|AM3,LGA1155"
+    "G.Skill|F3-10600CL9S-2GBNT|F3-10600CL9S-4GBNT|1333|AM3,LGA1155"
+    "Kingston|KHX1866C9D3/2G|KHX1866C9D3/4G|1866|AM3+,FM2+"
+    "G.Skill|F3-14900CL9S-2GBSR|F3-14900CL9S-4GBSR|1866|AM3+,FM2+"
 )
 
 # ------------------------------------------------------------------
@@ -233,4 +273,3 @@ SYSTEM_FAMILY_POOL=(
     "Default string"
     "Desktop"
 )
-

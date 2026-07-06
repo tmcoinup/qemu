@@ -18,9 +18,13 @@ _min() { if (( ${1:-0} < ${2:-0} )); then echo "${1:-0}"; else echo "${2:-0}"; f
 # CPU 平台官方支持的最大内存速率 (MT/s)。报告速率取 min(颗粒额定, 本值)，保证
 # "CPU/主板/内存频率配套"——不会出现 i3 报超 2400、或 2400 颗粒报 2666 的破绽。
 #   Ryzen 3 1200(Zen1)=2667；2300X(Zen+)=2933；Coffee Lake i3=2400(B360/H310 锁)；
-#   Coffee i5/i7=2666；其它 Ryzen 兜 2933。(Haswell/DDR3 等留 DDR3 批次再加。)
+#   Coffee i5/i7=2666；DDR3 家用平台按 CPU/芯片组常见上限收敛。
 _cpu_max_mem() {
     case "${CPU_NAME:-}${CPU_MODEL:-}" in
+        *Athlon*II*|*Phenom*II*) echo 1333 ;;
+        *FX-4100*|*FX-4300*)     echo 1866 ;;
+        *Athlon*X4*860K*)        echo 2133 ;;
+        *i5-2380P*|*i5-2550K*|*i5-3350P*) echo 1600 ;;
         *2300X*)     echo 2933 ;;
         *1200*)      echo 2667 ;;
         *i3-*)       echo 2400 ;;

@@ -320,6 +320,12 @@ test_cpu_isolate_scripts_parse() {
         || fail "cpu pinner must pass QEMU_SERVICE_CPUS as argv, not rely on export"
     grep -F -- 'sys.argv[5]' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
         || fail "cpu pinner Python must read service CPU count from argv"
+    grep -F -- 'read_held_vcpu_cpus' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
+        || fail "cpu pinner must separately count existing vCPU pins"
+    grep -F -- 'primary_pool_size_after_reserve' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
+        || fail "cpu pinner must check physical-primary capacity before keeping host reserve"
+    grep -F -- 'primary_pool_size_after_reserve(reserve) < vcpu_primary_demand' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
+        || fail "HOST_RESERVE_CORES=auto must shrink before assigning vCPUs to SMT siblings"
 }
 
 main() {

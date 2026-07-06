@@ -167,6 +167,55 @@ def read_held_isolated_cpus(current_pid=None):
                 continue
     return held
 
+def read_held_vcpu_cpus(current_pid=None):
+    """读取其它 VM 已钉死的 vCPU 逻辑 CPU。
+
+    中文注释：`held_cpus` 会同时包含 vCPU 和可选 service CPU，适合用来避让
+    已占线程；但双开游戏帧率更关心 vCPU 是否优先落到不同物理核心的主线程。
+    因此这里只统计 `CPU n/KVM` 线程，用于判断 `HOST_RESERVE_CORES=auto`
+    是否应缩小预留，避免第二台 4vCPU VM 过早落到第一台的 SMT 兄弟线程。
+    """
+    held = set()
+    name = os.environ.get("VMISO_NAME", "vmiso") or "vmiso"
+    procs = f"/sys/fs/cgroup/{name}/cgroup.procs"
+    try:
+        with open(procs) as fh:
+            pids = [line.strip() for line in fh if line.strip()]
+    except OSError:
+        return held
+    for pid_text in pids:
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if current_pid is not None and pid == current_pid:
+            continue
+        task_dir = f"/proc/{pid}/task"
+        try:
+            tids = os.listdir(task_dir)
+        except OSError:
+            continue
+        for tid in tids:
+            try:
+                with open(os.path.join(task_dir, tid, "comm")) as fh:
+                    comm = fh.read().strip()
+            except OSError:
+                continue
+            if not (comm.startswith("CPU ") and comm.endswith("/KVM")):
+                continue
+            status = os.path.join(task_dir, tid, "status")
+            try:
+                with open(status) as fh:
+                    for line in fh:
+                        if line.startswith("Cpus_allowed_list:"):
+                            allowed_set = set(expand_list(line.split()[1]))
+                            if allowed_set:
+                                held.update(allowed_set)
+                            break
+            except OSError:
+                continue
+    return held
+
 topo = host_topology()
 total_phys = len(topo)
 if total_phys < 2:
@@ -199,22 +248,32 @@ reserve_default = min(max(2, (total_phys + 7) // 8), total_phys - 1)
 reserve_raw = os.environ.get("HOST_RESERVE_CORES")
 service_cpus = service_cpus_arg
 held_cpus = read_held_isolated_cpus(pid)
+held_vcpu_cpus = read_held_vcpu_cpus(pid)
 demand = len(held_cpus) + len(vcpus) + service_cpus
+vcpu_primary_demand = len(held_vcpu_cpus) + len(vcpus)
 
 def pool_size_after_reserve(reserve_count):
     """reserve_count 是物理核数；返回剩余物理核包含的逻辑 CPU 数。"""
     return sum(len(core) for core in topo[reserve_count:])
 
+def primary_pool_size_after_reserve(reserve_count):
+    """reserve_count 是物理核数；返回剩余物理核的主逻辑线程数。"""
+    return len(topo[reserve_count:])
+
 if reserve_raw is None or reserve_raw.strip() == "" or reserve_raw.strip().lower() == "auto":
     reserve = reserve_default
-    while reserve > 0 and pool_size_after_reserve(reserve) < demand:
+    while (reserve > 0 and
+           (pool_size_after_reserve(reserve) < demand or
+            primary_pool_size_after_reserve(reserve) < vcpu_primary_demand)):
         reserve -= 1
 else:
     try:
         reserve = max(0, min(int(reserve_raw), total_phys - 1))
     except ValueError:
         reserve = reserve_default
-        while reserve > 0 and pool_size_after_reserve(reserve) < demand:
+        while (reserve > 0 and
+               (pool_size_after_reserve(reserve) < demand or
+                primary_pool_size_after_reserve(reserve) < vcpu_primary_demand)):
             reserve -= 1
 eligible = topo[reserve:]                         # 砍掉最低 reserve 颗核(永久留宿主机)
 if not eligible:

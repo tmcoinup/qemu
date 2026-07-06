@@ -56,6 +56,19 @@ test_qemu_backend_has_win32_mapping() {
     require_text "SCM_RIGHTS" "$REPO_ROOT/ui/fb-shm.c"
 }
 
+test_backend_drops_idle_listener_rate() {
+    # 中文注释：没有消费者时 fb-shm 只需要低频保活。第一次 mapping 建好后
+    # 若不重算 DCL rate，GL/SDL 主显示路径会继续被 60Hz graphic_hw_update()
+    # 旁路拖慢，游戏帧率会从 58/59 掉到 30 多。
+    awk '
+        /static int fb_shm_ensure_geometry/ { in_func = 1 }
+        in_func && /fb_shm_broadcast_resize\(d\)/ { saw_resize = 1 }
+        in_func && saw_resize && /fb_shm_update_effective_rate\(d\)/ { saw_rate = 1 }
+        in_func && /^}/ { exit saw_rate ? 0 : 1 }
+    ' "$REPO_ROOT/ui/fb-shm.c" \
+        || fail "fb_shm_ensure_geometry must recompute idle listener rate after mapping"
+}
+
 test_native_streamer_has_both_platforms() {
     require_text "OpenFileMappingA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
     require_text "OpenEventA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
@@ -138,6 +151,7 @@ test_optional_mingw_streamer_syntax() {
 test_abi_has_win32_names
 test_qapi_and_meson_enable_windows
 test_qemu_backend_has_win32_mapping
+test_backend_drops_idle_listener_rate
 test_native_streamer_has_both_platforms
 test_windows_scripts_are_native
 test_docs_cover_windows_packaging

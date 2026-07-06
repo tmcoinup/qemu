@@ -79,13 +79,13 @@
 #                          (flag: --fb-shm-rate=<hz>)
 #     FB_SHM_ROI=x,y,w,h   只截 ROI 推流（省 CPU/带宽）。空 = 全屏
 #                          (flag: --fb-shm-roi=x,y,w,h)
-#     GPU_ZEROCOPY=1       默认给 virtio-vga-gl 打开 blob/hostmem，让 fb-shm
-#                          GPU consumer 收到 dma-buf；设 0 或
-#                          --no-gpu-zerocopy 回退 texture+SHM。
+#     GPU_ZEROCOPY=0       普通 SDL+GL 默认保持历史 texture+SHM 路径。
+#                          设 1 或 --gpu-zerocopy 才给 virtio-vga-gl 打开
+#                          blob/hostmem，让 fb-shm GPU consumer 收到 dma-buf。
 #     GPU_HOSTMEM=256M     virtio-gpu host-visible memory window 大小。
 #                          (flag: --gpu-hostmem=SIZE)
-#     GPU_DISPLAY=sdl-egl  GPU 显示后端；sdl-egl=默认本地窗口+native EGL，
-#                          sdl=兼容 SDL/GLX 回退路径，
+#     GPU_DISPLAY=sdl      GPU 显示后端；sdl=默认兼容 SDL/GLX，
+#                          sdl-egl=本地窗口+native EGL 实验路径，
 #                          egl-headless=无窗口 EGL。
 #                          (flag: --gpu-display=sdl|sdl-egl|egl-headless /
 #                          --gpu-sdl-egl / --gpu-headless)

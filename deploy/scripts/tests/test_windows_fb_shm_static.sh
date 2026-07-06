@@ -69,6 +69,21 @@ test_backend_drops_idle_listener_rate() {
         || fail "fb_shm_ensure_geometry must recompute idle listener rate after mapping"
 }
 
+test_gl_readback_drains_pbo_before_rate_gate() {
+    # 中文注释：普通 SHM consumer 依赖 PBO 异步读回。必须先 drain 已完成的
+    # PBO，再按目标 FPS 判断是否发起下一次采样；如果先按 rate return，
+    # 完成帧只会在 60Hz tick 上被处理，容易把 SDL/virgl 热路径拖回 100fps。
+    awk '
+        /static void fb_shm_commit_gl_frame/ { in_func = 1 }
+        in_func && /fb_shm_gl_pbo_drain\(d\)/ { saw_drain = 1 }
+        in_func && /fb_shm_rate_due\(d->shm_target_fps/ {
+            exit saw_drain ? 0 : 1
+        }
+        in_func && /^}/ { exit 1 }
+    ' "$REPO_ROOT/ui/fb-shm.c" \
+        || fail "fb_shm_commit_gl_frame must drain GL PBO before SHM rate gate"
+}
+
 test_native_streamer_has_both_platforms() {
     require_text "OpenFileMappingA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
     require_text "OpenEventA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
@@ -152,6 +167,7 @@ test_abi_has_win32_names
 test_qapi_and_meson_enable_windows
 test_qemu_backend_has_win32_mapping
 test_backend_drops_idle_listener_rate
+test_gl_readback_drains_pbo_before_rate_gate
 test_native_streamer_has_both_platforms
 test_windows_scripts_are_native
 test_docs_cover_windows_packaging

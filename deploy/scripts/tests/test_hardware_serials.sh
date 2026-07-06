@@ -22,9 +22,36 @@ unset_profile_vars() {
     done
 }
 
+# 标准层并不规定所有厂商序列号的统一样式；DMTF SMBIOS 只要求这些字段
+# 是字符串。这里用 printable ASCII + 长度上限做“标准外壳”校验，再用
+# 下方的厂商样式正则做“真实设备观感”校验。
+assert_ascii_len() {
+    local label="$1"
+    local value="$2"
+    local min_len="$3"
+    local max_len="$4"
+    local len
+
+    LC_ALL=C grep -Eq '^[ -~]+$' <<< "$value" \
+        || fail "$label 含非 printable ASCII: $value"
+    len="${#value}"
+    (( len >= min_len && len <= max_len )) \
+        || fail "$label 长度 $len 不在 [$min_len,$max_len]: $value"
+}
+
+assert_mac_is_global_unicast() {
+    local label="$1"
+    local mac="$2"
+    local first_octet
+
+    first_octet=$((16#${mac%%:*}))
+    (( (first_octet & 1) == 0 )) || fail "$label NIC_MAC 是 multicast: $mac"
+    (( (first_octet & 2) == 0 )) || fail "$label NIC_MAC 是 locally administered: $mac"
+}
+
 assert_serials_reasonable() {
     local label="$1"
-    [[ "${UUID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+    [[ "${UUID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
         || fail "$label UUID 格式异常: ${UUID:-}"
     [[ "${CPU_SERIAL:-}" =~ ^[0-9]{10}$ ]] || fail "$label CPU_SERIAL 异常: ${CPU_SERIAL:-}"
     [[ "${CPU_ASSET:-}" =~ ^[0-9]{4}$ ]] || fail "$label CPU_ASSET 异常: ${CPU_ASSET:-}"
@@ -35,6 +62,7 @@ assert_serials_reasonable() {
     [[ "${CHASSIS_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]] || fail "$label CHASSIS_SERIAL 异常: ${CHASSIS_SERIAL:-}"
     [[ "${NIC_MAC:-}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || fail "$label NIC_MAC 异常: ${NIC_MAC:-}"
     [[ "${NIC_MAC:-}" != 52:54:00:* ]] || fail "$label NIC_MAC 使用了 QEMU OUI: ${NIC_MAC:-}"
+    assert_mac_is_global_unicast "$label" "${NIC_MAC:-}"
     [[ "${NVME_SERIAL:-}" =~ ^S[0-9A-F]{10}N$ ]] || fail "$label NVME_SERIAL 异常: ${NVME_SERIAL:-}"
     [[ "${MEM_SERIAL:-}" =~ ^[0-9A-F]{8}$ ]] || fail "$label MEM_SERIAL 异常: ${MEM_SERIAL:-}"
     [[ "${MEM_SERIAL:-}" != "00000000" && "${MEM_SERIAL:-}" != "00000001" ]] \
@@ -43,6 +71,26 @@ assert_serials_reasonable() {
     [[ "${KBD_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]] || fail "$label KBD_SERIAL 异常: ${KBD_SERIAL:-}"
     [[ "${MOUSE_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]] || fail "$label MOUSE_SERIAL 异常: ${MOUSE_SERIAL:-}"
     [[ "${TABLET_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]] || fail "$label TABLET_SERIAL 异常: ${TABLET_SERIAL:-}"
+
+    # SMBIOS 字段是 null-terminated string 引用；这里把 guest 可见字符串限制在
+    # 常见固件/工具能稳定显示的 ASCII 范围，避免空值、控制字符和超长值。
+    assert_ascii_len "$label CPU_SERIAL(SMBIOS Type 4)" "${CPU_SERIAL:-}" 1 64
+    assert_ascii_len "$label CPU_ASSET(SMBIOS Type 4)" "${CPU_ASSET:-}" 1 64
+    assert_ascii_len "$label BOARD_SERIAL(SMBIOS Type 2)" "${BOARD_SERIAL:-}" 1 64
+    assert_ascii_len "$label BOARD_ASSET(SMBIOS Type 2)" "${BOARD_ASSET:-}" 1 64
+    assert_ascii_len "$label SYSTEM_SERIAL(SMBIOS Type 1)" "${SYSTEM_SERIAL:-}" 1 64
+    assert_ascii_len "$label SYSTEM_SKU(SMBIOS Type 1)" "${SYSTEM_SKU:-}" 1 64
+    assert_ascii_len "$label CHASSIS_SERIAL(SMBIOS Type 3)" "${CHASSIS_SERIAL:-}" 1 64
+    assert_ascii_len "$label MEM_SERIAL(SMBIOS Type 17)" "${MEM_SERIAL:-}" 1 64
+
+    # NVMe Identify Controller 的 SN 字段是 20 字节 ASCII；QEMU 会右侧空格补齐。
+    assert_ascii_len "$label NVME_SERIAL(NVMe SN[20])" "${NVME_SERIAL:-}" 1 20
+    # EDID #FF serial descriptor 最多 13 个 ASCII/字母数字字符。
+    assert_ascii_len "$label EDID_SERIAL(EDID #FF)" "${EDID_SERIAL:-}" 1 13
+    # USB HID serial 当前只保存在 profile，设备参数未暴露给 guest；仍限制为短 ASCII。
+    assert_ascii_len "$label KBD_SERIAL(profile)" "${KBD_SERIAL:-}" 1 64
+    assert_ascii_len "$label MOUSE_SERIAL(profile)" "${MOUSE_SERIAL:-}" 1 64
+    assert_ascii_len "$label TABLET_SERIAL(profile)" "${TABLET_SERIAL:-}" 1 64
 
     local mem_serial2
     mem_serial2="$(printf '%s' "${MEM_SERIAL}-dimm2" | sha256sum | head -c 8 | tr '[:lower:]' '[:upper:]')"

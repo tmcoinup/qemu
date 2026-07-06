@@ -63,6 +63,52 @@ stealth_profile_get() {
     return 1
 }
 
+_stealth_stable_hex() {
+    local key="$1" width="$2" digest
+    digest="$(printf '%s' "$key" | sha256sum | cut -d' ' -f1 | tr '[:lower:]' '[:upper:]')"
+    echo "${digest:0:$width}"
+}
+
+_stealth_stable_dec_range() {
+    local key="$1" lo="$2" hi="$3" hex
+    hex="$(_stealth_stable_hex "$key" 12)"
+    echo $(( lo + (16#$hex % (hi - lo + 1)) ))
+}
+
+_stealth_stable_uuid() {
+    local key="$1" h
+    h="$(_stealth_stable_hex "$key" 32 | tr '[:upper:]' '[:lower:]')"
+    echo "${h:0:8}-${h:8:4}-4${h:12:3}-8${h:16:3}-${h:20:12}"
+}
+
+_stealth_stable_board_serial() {
+    local mfr="$1" key="$2"
+    case "$mfr" in
+        *Micro-Star*|*MSI*)
+            echo "$(_stealth_stable_hex "$key-msi" 4)$(_stealth_stable_dec_range "$key-msi-num" 100000 999999)" ;;
+        *Gigabyte*)
+            echo "SN$(_stealth_stable_dec_range "$key-giga" 10000000 99999999)" ;;
+        ASRock*)
+            echo "M80-$(_stealth_stable_hex "$key-asrock" 4)$(_stealth_stable_dec_range "$key-asrock-num" 1000 9999)" ;;
+        *)
+            echo "MB-$(_stealth_stable_hex "$key-asus" 6)$(_stealth_stable_dec_range "$key-asus-num" 10000 99999)" ;;
+    esac
+}
+
+_stealth_stable_mac() {
+    local key="$1"
+    local ouis=(
+        "00:1b:21" "00:1e:67" "00:a0:c9" "3c:fd:fe" "54:bf:64" "a0:36:9f"
+        "1c:1b:0d" "00:e0:4c" "4c:cc:6a" "24:4b:fe" "a8:a1:59"
+    )
+    local idx b1 b2 b3
+    idx="$(_stealth_stable_dec_range "$key-oui" 0 $((${#ouis[@]} - 1)))"
+    b1="$(_stealth_stable_dec_range "$key-b1" 0 255)"
+    b2="$(_stealth_stable_dec_range "$key-b2" 0 255)"
+    b3="$(_stealth_stable_dec_range "$key-b3" 0 255)"
+    printf '%s:%02x:%02x:%02x\n' "${ouis[$idx]}" "$b1" "$b2" "$b3"
+}
+
 stealth_load_profile() {
     local path="$1"
 
@@ -116,6 +162,17 @@ stealth_load_profile() {
     : "${CPU_SOCKET:=AM4}"
     : "${CPU_MODEL:=Ryzen3-1200}"
 
+    # 老 profile 若缺关键硬件序列号，不能用全 0 / 固定默认值兜底；这里按
+    # profile 路径或已有 UUID 稳定派生，保证格式像真实硬件且跨重启不漂移。
+    local _identity_key
+    if ! [[ "${UUID:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+        UUID="$(_stealth_stable_uuid "$path-uuid")"
+    fi
+    _identity_key="$UUID"
+    if ! [[ "${CPU_SERIAL:-}" =~ ^[0-9]{10}$ ]]; then
+        CPU_SERIAL="$(_stealth_stable_dec_range "$_identity_key-cpu-serial" 1000000000 9999999999)"
+    fi
+
     # CPU asset tag 也是 SMBIOS Type 4 的 guest 可见字段。老 profile 没有该字段
     # 或被手工改坏时，不再每次启动随机，而是从 CPU_SERIAL/UUID 稳定派生，避免
     # 硬件指纹漂移，也避免把非数字 asset 写进 SMBIOS。
@@ -125,6 +182,25 @@ stealth_load_profile() {
         _cpu_asset_seed="$(printf '%s' "${_cpu_asset_key}-asset" | cksum)"
         _cpu_asset_seed="${_cpu_asset_seed%% *}"
         CPU_ASSET=$(( 1000 + (_cpu_asset_seed % 9000) ))
+    fi
+
+    if ! [[ "${BOARD_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]]; then
+        BOARD_SERIAL="$(_stealth_stable_board_serial "${BOARD_MFR:-ASUSTeK COMPUTER INC.}" "$_identity_key-board")"
+    fi
+    if ! [[ "${BOARD_ASSET:-}" =~ ^[0-9]{10}$ ]]; then
+        BOARD_ASSET="$(_stealth_stable_dec_range "$_identity_key-board-asset" 1000000000 9999999999)"
+    fi
+    if ! [[ "${SYSTEM_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]]; then
+        SYSTEM_SERIAL="$(_stealth_stable_board_serial "${SYSTEM_MFR:-${BOARD_MFR:-ASUSTeK COMPUTER INC.}}" "$_identity_key-system")"
+    fi
+    if ! [[ "${SYSTEM_SKU:-}" =~ ^SKU[0-9]{6}$ ]]; then
+        SYSTEM_SKU="SKU$(_stealth_stable_dec_range "$_identity_key-sku" 100000 999999)"
+    fi
+    if ! [[ "${CHASSIS_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]]; then
+        CHASSIS_SERIAL="$(_stealth_stable_board_serial "${BOARD_MFR:-ASUSTeK COMPUTER INC.}" "$_identity_key-chassis")"
+    fi
+    if ! [[ "${NIC_MAC:-}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || [[ "${NIC_MAC:-}" == 52:54:00:* ]]; then
+        NIC_MAC="$(_stealth_stable_mac "$_identity_key-nic")"
     fi
 
     # PCI 子系统 ID 老 profile 缺失：按 BOARD_MFR 智能推导每家典型 vendor ID，
@@ -154,6 +230,9 @@ stealth_load_profile() {
 
     : "${NVME_MODEL:=Samsung SSD 970 PRO 512GB}"
     : "${NVME_FIRMWARE:=1B2QEXM7}"
+    if ! [[ "${NVME_SERIAL:-}" =~ ^S[0-9A-F]{10}N$ ]]; then
+        NVME_SERIAL="S$(_stealth_stable_hex "$_identity_key-nvme" 10)N"
+    fi
 
     # 老 profile 没 NVME_SIZE_BYTES 字段：按 NVME_MODEL 名字智能推导，
     # 让历史磁盘容量跟广告容量自洽，避免再次出现 1TB 型号 + 512GB 实盘的 stealth 矛盾。
@@ -169,9 +248,9 @@ stealth_load_profile() {
         esac
     fi
 
-    : "${MEM_MFR:=Kingston}"
-    : "${MEM_PART_2G:=KVR26N19S6/2}"
-    : "${MEM_PART_4G:=HX426C16FB3A/4}"
+    : "${MEM_MFR:=Crucial}"
+    : "${MEM_PART_2G:=CT2G4DFS6266}"
+    : "${MEM_PART_4G:=CT4G4DFS8266}"
     # 颗粒额定速率：老 profile 缺 → 按 part number 编码推导(26=2666/24=2400/-CRC=2400)，
     # 推不出兜 2666(与默认 Kingston HyperX 2666 一致)。报告速率再 min(CPU 平台上限)。
     if [[ -z "${MEM_RATED:-}" ]]; then
@@ -186,13 +265,9 @@ stealth_load_profile() {
     # 保证**同一 VM 跨重启 SN 不变**（即便没 reroll，老 VM 也不再每次启动漂移）。
     # 不用纯随机回填——那会让升级后第一次启动仍然换 SN，与"持久化"语义不符。
     # 用 UUID 的 sha256 前 8 字符做确定性派生：UUID 跨 VM 唯一，SN 自然也唯一。
-    if [[ -z "${MEM_SERIAL:-}" ]]; then
-        if [[ -n "${UUID:-}" ]]; then
-            MEM_SERIAL=$(printf '%s' "${UUID}-mem" | sha256sum | head -c 8 | tr '[:lower:]' '[:upper:]')
-        else
-            # UUID 也没——彻底退化（不应该发生，UUID 是必填字段）
-            MEM_SERIAL="00000001"
-        fi
+    if ! [[ "${MEM_SERIAL:-}" =~ ^[0-9A-F]{8}$ ]] \
+        || [[ "${MEM_SERIAL:-}" == "00000000" || "${MEM_SERIAL:-}" == "00000001" ]]; then
+        MEM_SERIAL="$(_stealth_stable_hex "$_identity_key-mem" 8)"
     fi
 
     # MEM_TOTAL_MB 老 profile 没有：留空 → start-vm.sh 退回历史默认 4096 MiB。
@@ -207,25 +282,33 @@ stealth_load_profile() {
     : "${EDID_NAME:=S24F350}"
     : "${EDID_WIDTH_MM:=530}"
     : "${EDID_HEIGHT_MM:=300}"
-    : "${EDID_SERIAL:=H4ZK500001VL}"
+    if ! [[ "${EDID_SERIAL:-}" =~ ^[A-Z0-9]{8,13}$ ]]; then
+        EDID_SERIAL="${EDID_VENDOR}$(_stealth_stable_hex "$_identity_key-edid" 8)"
+    fi
 
     : "${KBD_VID:=0x045E}"
     : "${KBD_PID:=0x0750}"
     : "${KBD_MFR:=Microsoft}"
     : "${KBD_PRODUCT:=Microsoft Wired Keyboard 600}"
-    : "${KBD_SERIAL:=68284}"
+    if ! [[ "${KBD_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]]; then
+        KBD_SERIAL="KB$(_stealth_stable_hex "$_identity_key-kbd" 6)"
+    fi
 
     : "${MOUSE_VID:=0x045E}"
     : "${MOUSE_PID:=0x00CB}"
     : "${MOUSE_MFR:=Microsoft}"
     : "${MOUSE_PRODUCT:=Microsoft USB Optical Mouse}"
-    : "${MOUSE_SERIAL:=42}"
+    if ! [[ "${MOUSE_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]]; then
+        MOUSE_SERIAL="MS$(_stealth_stable_hex "$_identity_key-mouse" 6)"
+    fi
 
     : "${TABLET_VID:=0x256C}"
     : "${TABLET_PID:=0x006D}"
     : "${TABLET_MFR:=HUION}"
     : "${TABLET_PRODUCT:=HUION PenTablet}"
-    : "${TABLET_SERIAL:=HU000001}"
+    if ! [[ "${TABLET_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]]; then
+        TABLET_SERIAL="TB$(_stealth_stable_hex "$_identity_key-tablet" 6)"
+    fi
 
     local v
     for v in "${_STEALTH_PROFILE_VARS[@]}"; do

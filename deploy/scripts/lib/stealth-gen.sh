@@ -1,5 +1,6 @@
-# Samsung NVMe serial: S<10 hex>N
-_nvme_serial() { echo "S$(printf '%010X' $((RANDOM * RANDOM)))N"; }
+# Samsung NVMe serial: S<10 hex>N。用 stealth-rng 的 _hex 取满 40 bit，
+# 比 RANDOM*RANDOM 的有效空间更宽，批量克隆时更不容易撞号。
+_nvme_serial() { echo "S$(_hex 10 | tr a-f A-F)N"; }
 
 # DIMM serial: 8 大写十六进制（Kingston / Crucial / Samsung / Hynix 都用这格式）
 _mem_serial() { printf '%08X\n' $(( (RANDOM << 16) | RANDOM )); }
@@ -45,4 +46,3 @@ _gen_uuid() {
         $((RANDOM & 0xffff)) \
         $((RANDOM * RANDOM))
 }
-

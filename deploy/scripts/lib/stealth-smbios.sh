@@ -22,9 +22,10 @@ _min() { if (( ${1:-0} < ${2:-0} )); then echo "${1:-0}"; else echo "${2:-0}"; f
 _cpu_max_mem() {
     case "${CPU_NAME:-}${CPU_MODEL:-}" in
         *Athlon*II*|*Phenom*II*) echo 1333 ;;
-        *FX-4100*|*FX-4300*)     echo 1866 ;;
+        *FX*4100*|*FX*4300*)     echo 1866 ;;
         *Athlon*X4*860K*)        echo 2133 ;;
-        *i5-2380P*|*i5-2550K*|*i5-3350P*) echo 1600 ;;
+        *i5-2380P*|*i5-2550K*) echo 1333 ;;
+        *i5-3350P*) echo 1600 ;;
         *2300X*)     echo 2933 ;;
         *1200*)      echo 2667 ;;
         *i3-*)       echo 2400 ;;

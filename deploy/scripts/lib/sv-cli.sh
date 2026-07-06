@@ -84,13 +84,21 @@ fi
 : "${FB_SHM_RATE:=60}"
 : "${FB_SHM_ROI:=}"
 : "${FB_SHM_SOCK:=/tmp/qemu-stealth-${INSTANCE}.fb}"
-# GPU 零拷贝元数据依赖 virtio-gpu blob resource + host-visible memory。
-# 默认打开，让 fb-shm 的 GPU consumer 能收到 dma-buf scanout；遇到旧 guest/旧
-# virglrenderer 可用 --no-gpu-zerocopy 显式回退到历史 GL texture + SHM readback。
-: "${GPU_ZEROCOPY:=1}"
+_gpu_zerocopy_explicit=0
+[[ -n "${GPU_ZEROCOPY+x}" ]] && _gpu_zerocopy_explicit=1
 : "${GPU_HOSTMEM:=256M}"
-: "${GPU_DISPLAY:=sdl-egl}"
+: "${GPU_DISPLAY:=sdl}"
 : "${GPU_RENDERNODE:=}"
+# GPU 零拷贝元数据依赖 virtio-gpu blob resource + host-visible memory。
+# 中文注释：普通本地游戏窗口默认保持历史 SDL/GLX + texture scanout 路径，
+# 避免实验 native EGL / blob resource 改变 guest 渲染性能。只有显式选择
+# GPU 推流显示后端时，才默认打开零拷贝；环境变量或 CLI 仍可强制覆盖。
+if [[ "$_gpu_zerocopy_explicit" == "0" ]]; then
+    case "$GPU_DISPLAY" in
+        sdl-egl|egl-headless) GPU_ZEROCOPY=1 ;;
+        *) GPU_ZEROCOPY=0 ;;
+    esac
+fi
 # QMP 多客户端：PROXY=1 时启用 QEMU 原生 multi=on QMP listener，同一路径可被
 # dgame / image-search / 临时 socat 同时连接。为了兼容旧工具配置，启动脚本还会
 # 建一个 ${QMP_SOCK}.proxy -> ${QMP_SOCK} 的 symlink，但不再起 Python 中转进程。
@@ -137,7 +145,7 @@ VMS_DIR="${VMS_DIR%/}"
 #   (无 flag)            -> SDL 窗口 + fb-shm        ← 默认
 #   --headless           -> VNC 远程  + fb-shm（去窗口、加远程）
 #   --no-sdl             -> 关窗口，仅 fb-shm（适合后台 daemon / nohup）
-#   --gpu-sdl-egl        -> SDL 本地窗口 + native EGL（fb-shm GPU 零拷贝）
+#   --gpu-sdl-egl        -> SDL 本地窗口 + native EGL（fb-shm GPU 零拷贝实验）
 #   --gpu-headless       -> EGL rendernode + fb-shm（GPU 零拷贝推流验证）
 #   --no-fb-shm          -> 关推流，仅 SDL/VNC（回历史行为）
 #   --sdl --headless     -> 冲突，按 --headless 走
@@ -151,6 +159,9 @@ if [[ "$STABLE_DISPLAY" == "1" && "$GPU_DISPLAY" == "sdl-egl" ]]; then
     # 中文注释：stable 模式故意关闭 virtio-gpu GL；native EGL 没有可绑定的 GL
     # scanout，自动退回普通 SDL 窗口，保持旧的稳定显示路径。
     GPU_DISPLAY=sdl
+    if [[ "$_gpu_zerocopy_explicit" == "0" ]]; then
+        GPU_ZEROCOPY=0
+    fi
 fi
 if [[ "$GPU_DISPLAY" == "egl-headless" && "$HEADLESS" == "1" ]]; then
     echo "ERROR: --gpu-headless/GPU_DISPLAY=egl-headless 不能和 --headless/VNC 同时使用" >&2

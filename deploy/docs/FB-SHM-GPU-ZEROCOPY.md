@@ -42,11 +42,13 @@ Linux 下 QEMU 有两种 GPU 导出来源：
    - QEMU `dup()` 该 dma-buf fd；
    - 发送 `FbShmCtlAck + FbShmGpuFrame`；
    - 通过 `SCM_RIGHTS` 附带 dma-buf fd。
-   - 启动侧默认用 `virtio-vga-gl,blob=true,hostmem=256M` 打开这条路径；
-     可用 `GPU_HOSTMEM=512M` 调整窗口大小，或 `--no-gpu-zerocopy` 显式回退。
-   - 默认 `GPU_DISPLAY=sdl-egl` 使用 SDL 父窗口 + native EGL 子窗口：宿主本地
-     SDL 窗口仍存在，DGame 的显示/隐藏仍然操作同一个窗口；fb-shm 则从 EGL
-     texture 导出 dma-buf 给 GPU consumer。
+   - 普通 `./start-vm.sh <N>` 默认保持历史 `GPU_DISPLAY=sdl` / SDL+GLX 路径，
+     不自动追加 `blob=true,hostmem=...`，避免游戏本地窗口走实验显示链路。
+   - 需要验证 GPU 零拷贝时，显式使用 `--gpu-sdl-egl` 或 `--gpu-zerocopy`；
+     `GPU_HOSTMEM=512M` 可调整 host-visible window 大小。
+   - `GPU_DISPLAY=sdl-egl` 使用 SDL 父窗口 + native EGL 子窗口：宿主本地
+     SDL 窗口仍存在，DGame 的显示/隐藏仍然操作同一个窗口；fb-shm 则尝试从
+     EGL texture 导出 dma-buf 给 GPU consumer。
    - 如需无本地窗口的纯推流验证，可用
      `deploy/scripts/start-vm.sh <N> --gpu-headless --gpu-rendernode=/dev/dri/renderD128`
      切到 rendernode EGL 后端。
@@ -164,8 +166,8 @@ rg -n "unwrap\(" include/ui/fb-shm-abi.h ui/fb-shm.c tools/fb-shm-stream \
 - 如果启动时没有 `blob=true,hostmem=SIZE`，Windows/virgl 常只给 QEMU 普通 GL
   texture；在缺少 EGL texture export 的宿主上不会产生 `NOTIFY_GPU_FRAME`，
   只能继续走 SHM fallback；
-- `GPU_DISPLAY=sdl` 是兼容 SDL/GLX 路径，可能只能走 SHM/CPU fallback；需要
-  DGame UI 预览显示 `G` 时，应使用默认 `sdl-egl` 或显式 `--gpu-sdl-egl`；
+- `GPU_DISPLAY=sdl` 是默认兼容 SDL/GLX 路径，可能只能走 SHM/CPU fallback；
+  需要 DGame UI 预览显示 `G` 时，应显式使用 `--gpu-sdl-egl`；
 - `--gpu-headless` 会关闭 SDL 窗口并使用 `egl-headless` display backend；这是
   fb-shm GPU 预览/转码的无窗口模式，不适合作为宿主本地交互窗口；
 - Windows GPU export 依赖 ANGLE/D3D11 texture，纯 OpenGL 或没有 shared texture 时会回退 SHM；

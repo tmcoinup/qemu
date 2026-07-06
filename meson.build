@@ -4363,7 +4363,8 @@ if have_tools
     executable('qemu-fb-shm-stream',
                files('tools/fb-shm-stream/main.c',
                      'tools/fb-shm-stream/platform.c',
-                     'tools/fb-shm-stream/ffmpeg.c'),
+                     'tools/fb-shm-stream/ffmpeg.c',
+                     'tools/fb-shm-stream/pace.c'),
                include_directories: include_directories('include'),
                dependencies: [socket],
                install: true)

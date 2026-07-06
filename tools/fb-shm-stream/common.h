@@ -68,6 +68,12 @@ typedef struct Options {
     uint32_t roi_h;
 } Options;
 
+typedef struct StreamPacer {
+    uint64_t interval_ns;
+    uint64_t next_frame_ns;
+    bool started;
+} StreamPacer;
+
 typedef struct Mapping {
     void *base;
     size_t size;
@@ -123,5 +129,11 @@ void fb_shm_stream_close_gpu_frame(Session *s);
 
 FILE *fb_shm_stream_open_ffmpeg(const Options *o, const FbShmHeader *hdr);
 void fb_shm_stream_close_ffmpeg(FILE *ffmpeg);
+
+uint64_t fb_shm_stream_monotonic_ns(void);
+void fb_shm_stream_pacer_reset(StreamPacer *p, uint32_t fps);
+void fb_shm_stream_pacer_start(StreamPacer *p, uint64_t now_ns);
+int fb_shm_stream_pacer_wait_ms(const StreamPacer *p, uint64_t now_ns);
+void fb_shm_stream_pacer_finish_frame(StreamPacer *p, uint64_t now_ns);
 
 #endif /* QEMU_TOOLS_FB_SHM_STREAM_COMMON_H */

@@ -233,7 +233,13 @@ static size_t fb_shm_frame_bytes(uint32_t w, uint32_t h)
 static uint64_t fb_shm_now_ns(void)
 {
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+
+    /*
+     * 帧率节流只关心相邻帧间隔，必须使用单调时钟。CLOCK_REALTIME 被 NTP、
+     * 手工改时或宿主休眠恢复扰动时，会让 deadline 判断突然提前/落后，从而
+     * 造成推流端一段时间快进或停顿。
+     */
+    clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
@@ -826,6 +832,13 @@ static int fb_shm_ensure_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
     if (needs_mapping) {
         /* Only a real memfd replacement needs an out-of-band fd update. */
         fb_shm_broadcast_resize(d);
+        /*
+         * 中文注释：启动时为了让首个普通 SHM 客户端能拿到 memfd/eventfd，
+         * fb-shm 会先按配置帧率驱动一次 DCL。mapping 建好后如果没有消费者，
+         * 必须立刻重算有效帧率，把旁路监听器降到 1Hz；否则即使没人推流，
+         * GL/SDL 主显示路径也会被每秒 60 次 graphic_hw_update() 拖慢。
+         */
+        fb_shm_update_effective_rate(d);
     }
     return 0;
 }
@@ -1807,26 +1820,26 @@ static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
     uint64_t interval_ns;
 
     rate_hz = fb_shm_clamp_rate(rate_hz);
-    interval_ns = 1000000000ull / rate_hz;
+    /*
+     * DisplayChangeListener 的 update_interval 只能表达整数毫秒。这里使用同一
+     * 个量化周期来做节流，避免 60Hz 被 16ms tick 驱动时又按 16.666ms 判断，
+     * 周期性跳成 16/32ms；真实目标 fps 由外部 streamer 的稳定节拍保证。
+     */
+    interval_ns = (uint64_t)fb_shm_rate_interval_ms(rate_hz) * 1000000ull;
     if (!*last_ns) {
-        *last_ns = now_ns + interval_ns;
+        *last_ns = now_ns;
         return true;
     }
 
     /*
-     * last_ns 在第一次发布后存的是“下一帧 deadline”，不是上一帧时间。
-     * 这样 DCL 用 16ms tick 驱动 60Hz 时，不会因为 16ms < 16.666ms
-     * 永远隔帧丢，也不会固定跑成 62.5Hz；deadline 会累积 0.666ms
-     * 误差，周期性跳过一帧，让长期平均值贴近目标 rate。
+     * QEMU 只发布“当前 tick 的最新帧”。如果宿主被调度走或 GL 读回慢了，
+     * 不在这里补多个 deadline；消费端会重复上一帧或丢帧，避免视觉快进。
      */
-    if (now_ns + slack_ns < *last_ns) {
+    if (now_ns + slack_ns < *last_ns + interval_ns) {
         return false;
     }
 
-    *last_ns += interval_ns;
-    if (now_ns > *last_ns + interval_ns) {
-        *last_ns = now_ns + interval_ns;
-    }
+    *last_ns = now_ns;
     return true;
 }
 

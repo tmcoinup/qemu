@@ -125,14 +125,14 @@ static const FbShmHeader *fb_shm_stream_header(Session *s)
     return hdr;
 }
 
-static void fb_shm_stream_ensure_ffmpeg(Session *s, const Options *o,
+static bool fb_shm_stream_ensure_ffmpeg(Session *s, const Options *o,
                                         const FbShmHeader *hdr)
 {
     uint32_t fps = hdr->target_fps ? hdr->target_fps : 30;
 
     if (s->ffmpeg && s->ff_w == hdr->width && s->ff_h == hdr->height &&
         s->ff_fps == fps && s->ff_fourcc == hdr->fourcc) {
-        return;
+        return false;
     }
     fb_shm_stream_close_ffmpeg(s->ffmpeg);
     s->ffmpeg = fb_shm_stream_open_ffmpeg(o, hdr);
@@ -143,6 +143,7 @@ static void fb_shm_stream_ensure_ffmpeg(Session *s, const Options *o,
     s->ff_h = hdr->height;
     s->ff_fps = fps;
     s->ff_fourcc = hdr->fourcc;
+    return true;
 }
 
 static size_t fb_shm_stream_read_frame(Session *s, const FbShmHeader *hdr)
@@ -174,17 +175,18 @@ static size_t fb_shm_stream_read_frame(Session *s, const FbShmHeader *hdr)
     return 0;
 }
 
-static bool fb_shm_stream_wait_frame(Session *s)
+static bool fb_shm_stream_wait_frame(Session *s, int timeout_ms)
 {
 #ifdef _WIN32
     DWORD rc;
+    DWORD timeout = timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms;
 
     (void)fb_shm_stream_try_control(s);
     if (!s->map.event_handle) {
-        Sleep(10);
+        Sleep(timeout_ms > 0 ? (DWORD)timeout_ms : 0);
         return false;
     }
-    rc = WaitForSingleObject(s->map.event_handle, 1000);
+    rc = WaitForSingleObject(s->map.event_handle, timeout);
     (void)fb_shm_stream_try_control(s);
     return rc == WAIT_OBJECT_0;
 #else
@@ -193,7 +195,7 @@ static bool fb_shm_stream_wait_frame(Session *s)
         { .fd = s->sock, .events = POLLIN },
     };
     uint64_t v;
-    int rc = poll(pfd, 2, 1000);
+    int rc = poll(pfd, 2, timeout_ms);
 
     if (rc <= 0) {
         return false;
@@ -209,6 +211,13 @@ static bool fb_shm_stream_wait_frame(Session *s)
     }
     return true;
 #endif
+}
+
+static void fb_shm_stream_drain_control(Session *s)
+{
+    while (fb_shm_stream_try_control(s)) {
+        /* 控制面消息很短，循环读空，避免 resize/GPU 通知滞留到下一帧节拍。 */
+    }
 }
 
 static void fb_shm_stream_init_session(Session *s)
@@ -237,13 +246,46 @@ static void fb_shm_stream_log_gpu_frame(Session *s)
     s->gpu_logged = true;
 }
 
+static void fb_shm_stream_update_latest_frame(Session *s, const Options *o,
+                                              StreamPacer *pacer,
+                                              bool *have_frame,
+                                              size_t *frame_len)
+{
+    const FbShmHeader *hdr = fb_shm_stream_header(s);
+    size_t len;
+
+    if (fb_shm_stream_ensure_ffmpeg(s, o, hdr)) {
+        /*
+         * 分辨率、像素格式或 fps 变化会重启 ffmpeg；旧帧尺寸/时间基都不再
+         * 匹配，必须等新 mapping 的第一帧，而不能继续重复上一帧。
+         */
+        *have_frame = false;
+        *frame_len = 0;
+        fb_shm_stream_pacer_reset(pacer, s->ff_fps);
+    }
+
+    len = fb_shm_stream_read_frame(s, hdr);
+    if (len) {
+        *have_frame = true;
+        *frame_len = len;
+        if (!pacer->started) {
+            fb_shm_stream_pacer_start(pacer,
+                                      fb_shm_stream_monotonic_ns());
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     Options o = fb_shm_stream_parse_args(argc, argv);
     Session s;
+    StreamPacer pacer;
+    bool have_frame = false;
+    size_t frame_len = 0;
     int frames = 0;
 
     fb_shm_stream_init_session(&s);
+    fb_shm_stream_pacer_reset(&pacer, 30);
     s.sock = fb_shm_stream_connect_unix_socket(o.sock);
     fb_shm_stream_hello(&s, o.mode);
     fb_shm_stream_request_roi_rate(&o, s.sock);
@@ -258,10 +300,10 @@ int main(int argc, char **argv)
     }
 
     while (!o.max_frames || frames < o.max_frames) {
-        const FbShmHeader *hdr;
-        size_t len;
+        int wait_ms;
+        uint64_t now_ns;
 
-        (void)fb_shm_stream_try_control(&s);
+        fb_shm_stream_drain_control(&s);
         fb_shm_stream_log_gpu_frame(&s);
         if (o.mode == STREAM_MODE_GPU && !s.gpu_frame_ready) {
 #ifdef _WIN32
@@ -281,19 +323,28 @@ int main(int argc, char **argv)
             fb_shm_stream_die("GPU frame export is available, but this "
                               "streamer build has no native GPU encoder");
         }
-        if (!fb_shm_stream_wait_frame(&s)) {
+        if (s.shm_ready) {
+            fb_shm_stream_update_latest_frame(&s, &o, &pacer, &have_frame,
+                                              &frame_len);
+        }
+        if (!have_frame) {
+            (void)fb_shm_stream_wait_frame(&s, 1000);
             continue;
         }
-        hdr = fb_shm_stream_header(&s);
-        fb_shm_stream_ensure_ffmpeg(&s, &o, hdr);
-        len = fb_shm_stream_read_frame(&s, hdr);
-        if (!len) {
+
+        now_ns = fb_shm_stream_monotonic_ns();
+        wait_ms = fb_shm_stream_pacer_wait_ms(&pacer, now_ns);
+        if (wait_ms > 0) {
+            (void)fb_shm_stream_wait_frame(&s, wait_ms);
             continue;
         }
-        if (fwrite(s.frame, 1, len, s.ffmpeg) != len) {
+
+        if (fwrite(s.frame, 1, frame_len, s.ffmpeg) != frame_len) {
             break;
         }
         frames++;
+        fb_shm_stream_pacer_finish_frame(&pacer,
+                                         fb_shm_stream_monotonic_ns());
     }
 
     fb_shm_stream_close_ffmpeg(s.ffmpeg);

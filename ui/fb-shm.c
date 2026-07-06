@@ -1853,41 +1853,22 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     bool geometry_changed;
     bool has_gpu_clients;
     bool has_shm_consumers;
-    bool gpu_due = false;
-    bool shm_due = false;
+    bool need_shm_frame;
     Error *err = NULL;
 
     if (!d->gl_scanout || !sw || !sh) {
         return;
     }
 
-    fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
-    geometry_changed = !d->shm || rw != d->cur_w || rh != d->cur_h ||
-                       sw != d->cur_src_w || sh != d->cur_src_h ||
-                       rx != d->cur_roi_x || ry != d->cur_roi_y;
     has_gpu_clients = fb_shm_has_gpu_clients(d);
     has_shm_consumers = fb_shm_has_shm_consumers(d);
-    now_ns = fb_shm_now_ns();
-
-    if (has_gpu_clients) {
-        gpu_due = fb_shm_rate_due(d->gpu_target_fps, &d->gl_last_frame_ns,
-                                  now_ns);
-    }
-    if (has_shm_consumers || !d->shm) {
-        shm_due = fb_shm_rate_due(d->shm_target_fps, &d->shm_last_frame_ns,
-                                  now_ns);
-    }
-    if (!gpu_due && !shm_due) {
-        return;
-    }
-
-    if (gpu_due) {
-        if (!d->gl_dmabuf && !fb_shm_gl_make_current(d)) {
-            return;
-        }
-        fb_shm_broadcast_current_gpu_frame(d, rw, rh, rx, ry);
-    }
-    if (!shm_due) {
+    need_shm_frame = has_shm_consumers || !d->shm;
+    /*
+     * 中文注释：没有任何消费者时不要进入 GL current / PBO drain 热路径。
+     * 这是零拷贝实验后保留的优化；但一旦普通 SHM consumer 存在，下面必须
+     * 恢复旧版顺序，先及时 drain 已完成 PBO，再按目标帧率发起下一次采样。
+     */
+    if (!has_gpu_clients && !need_shm_frame) {
         return;
     }
     if (!d->gl_guest_fb.texture) {
@@ -1897,6 +1878,10 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
         return;
     }
 
+    fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
+    geometry_changed = !d->shm || rw != d->cur_w || rh != d->cur_h ||
+                       sw != d->cur_src_w || sh != d->cur_src_h ||
+                       rx != d->cur_roi_x || ry != d->cur_roi_y;
     if (geometry_changed) {
         /*
          * 旧 PBO 的尺寸对应旧 memfd/ROI。几何变化时直接丢掉未发布帧，
@@ -1909,6 +1894,16 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
         }
     } else {
         fb_shm_gl_pbo_drain(d);
+    }
+
+    now_ns = fb_shm_now_ns();
+    if (has_gpu_clients &&
+        fb_shm_rate_due(d->gpu_target_fps, &d->gl_last_frame_ns, now_ns)) {
+        fb_shm_broadcast_current_gpu_frame(d, rw, rh, rx, ry);
+    }
+    if (!need_shm_frame ||
+        !fb_shm_rate_due(d->shm_target_fps, &d->shm_last_frame_ns, now_ns)) {
+        return;
     }
 
     if (d->gl_blit_fb.width != rw || d->gl_blit_fb.height != rh) {

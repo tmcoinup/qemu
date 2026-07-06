@@ -9,12 +9,13 @@ if [[ "$PROXY" == "1" ]]; then
     QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off,multi=on")
 fi
 
-# QEMU 文档明确说明 cpu-pm=on 适合 host CPU 不超售的场景；多开时默认关闭，
-# 避免 guest 空闲时宿主仍把 vCPU 线程记成满核。需要极限低延迟可显式
-# QEMU_CPU_PM=1 打开。
-CPU_PM_ARG=off
-if [[ "${QEMU_CPU_PM:-0}" =~ ^(1|on|true|yes)$ ]]; then
-    CPU_PM_ARG=on
+# QEMU 文档说明 cpu-pm=on 会把 host CPU power management 能力交给 guest：
+# 宿主统计会不准，但 guest worst-case latency 更低。DNF 这种追帧率/低延迟的
+# 本地交互 VM 默认沿用历史高帧率路径；如果以后出现 vCPU 超售/压榨多开，再用
+# QEMU_CPU_PM=0 显式关闭。
+CPU_PM_ARG=on
+if [[ "${QEMU_CPU_PM:-1}" =~ ^(0|off|false|no)$ ]]; then
+    CPU_PM_ARG=off
 fi
 
 CMD=(

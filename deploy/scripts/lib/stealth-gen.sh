@@ -1,4 +1,5 @@
-# Samsung NVMe serial: S<10 hex>N。用 stealth-rng 的 _hex 取满 40 bit，
+# NVMe Identify Controller 的 SN 字段是 20 字节 ASCII，QEMU 会按规范右侧空格补齐。
+# 这里生成 Samsung 常见的 S<10 hex>N 可读形态，并用 _hex 取满 40 bit，
 # 比 RANDOM*RANDOM 的有效空间更宽，批量克隆时更不容易撞号。
 _nvme_serial() { echo "S$(_hex 10 | tr a-f A-F)N"; }
 

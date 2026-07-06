@@ -113,9 +113,9 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `QEMU_CAP_CHECK` | 1 | 1 = 启动前检查 QEMU 是否带 NVMe/EDID/USB/fb-shm 等 stealth 属性；缺失则 fail-fast，防止误用 stock QEMU 破坏真机模拟 |
 | `STABLE_DISPLAY` | **0** | 仅 `--sdl` 模式生效：0 = `virtio-vga-gl` + SDL/GLX；1 = `virtio-vga` 无 GL，规避 virgl BSOD |
 | `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
-| `GPU_ZEROCOPY` | **0** | 普通 SDL+GL 默认保持历史 texture+SHM 路径；设 `1` / `--gpu-zerocopy` 或使用 `--gpu-sdl-egl` / `--gpu-headless` 才给 `virtio-vga-gl` 加 `blob=true,hostmem=GPU_HOSTMEM` |
+| `GPU_ZEROCOPY` | **1** | SDL+GL 模式默认给 `virtio-vga-gl` 加 `blob=true,hostmem=GPU_HOSTMEM`，让 fb-shm GPU consumer 可收到 dma-buf scanout；`0` / `--no-gpu-zerocopy` 回退历史 texture+SHM |
 | `GPU_HOSTMEM` | `256M` | virtio-gpu host-visible memory window 大小，常用 `256M`-`1G`；flag: `--gpu-hostmem=SIZE` |
-| `GPU_DISPLAY` | `sdl` | GPU 显示后端。`sdl` 是默认兼容 SDL/GLX 本地窗口；`sdl-egl` 保持本地 SDL 窗口并启用 native EGL 实验路径；`egl-headless` 通过 `--gpu-headless` 启用无窗口 rendernode EGL |
+| `GPU_DISPLAY` | `sdl-egl` | GPU 显示后端。`sdl-egl` 保持本地 SDL 窗口并启用 native EGL，DGame 仍可显示/隐藏窗口，同时 fb-shm GPU consumer 可收到 dma-buf；`sdl` 回退兼容 SDL/GLX；`egl-headless` 通过 `--gpu-headless` 启用无窗口 rendernode EGL |
 | `GPU_RENDERNODE` | 空 | `egl-headless` 的 render node 路径，空值让 QEMU 自动选择；常用 `/dev/dri/renderD128`，flag: `--gpu-rendernode=PATH` |
 | `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |
 | **`FB_SHM`** | **1** | **默认开**：始终带 `-object fb-shm,...` 共享内存推流通道。`--no-fb-shm` 关 |

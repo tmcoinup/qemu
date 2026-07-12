@@ -125,6 +125,10 @@ void sdl2_gl_redraw(struct sdl2_console *scon);
 
 QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
                                      QEMUGLParams *params);
+void sdl2_gl_save_current_context(DisplayGLCtx *dgc,
+                                  QEMUGLContextState *state);
+int sdl2_gl_restore_current_context(DisplayGLCtx *dgc,
+                                    const QEMUGLContextState *state);
 void sdl2_gl_destroy_context(DisplayGLCtx *dgc, QEMUGLContext ctx);
 int sdl2_gl_make_context_current(DisplayGLCtx *dgc,
                                  QEMUGLContext ctx);

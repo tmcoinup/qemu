@@ -11,7 +11,7 @@
 #                                           # 推流 socket: /tmp/qemu-stealth-1.fb
 #     ./start-vm.sh 2 --iso=/path/x.iso     # instance 2 从 ISO 装系统
 #     ./start-vm.sh 1 --no-sdl              # 后台 daemon：关 SDL，仅推流
-#     ./start-vm.sh 1 --gpu-sdl-egl         # SDL 窗口 + native EGL + fb-shm GPU
+#     ./start-vm.sh 1 --gpu-sdl-egl         # SDL 窗口 + QEMU 11 SDL/EGL + fb-shm GPU
 #     ./start-vm.sh 1 --gpu-headless        # EGL rendernode + fb-shm，验证 GPU 零拷贝
 #     ./start-vm.sh 1 --headless            # VNC 远程 + fb-shm（无本地窗口）
 #     ./start-vm.sh 1 --no-fb-shm           # 关推流，仅 SDL（回历史行为）
@@ -52,7 +52,8 @@
 #                          qemu-fb-shm-stream → ffmpeg/NVENC 推 RTMP / UDP / SRT /
 #                          本地 mp4。--no-fb-shm 关。
 #     --headless           关 SDL，开 VNC（fb-shm 仍照常）。
-#     --gpu-sdl-egl        保留 SDL 本地窗口，并让 SDL backend 使用 native EGL；
+#     --gpu-sdl-egl        保留 SDL 本地窗口的兼容模式名；实际仍使用 QEMU 11
+#                          官方 `-display sdl,gl=on`，由 SDL 后端自行探测 EGL。
 #                          DGame 仍可显示/隐藏窗口，fb-shm 可发布 GPU dma-buf。
 #     --gpu-headless       关 SDL，使用 egl-headless/rendernode 保留 virtio-gpu GL，
 #                          用于 fb-shm dma-buf/GPU metadata 路径。
@@ -94,8 +95,9 @@
 #                          blob/hostmem，让 fb-shm GPU consumer 收到 dma-buf。
 #     GPU_HOSTMEM=256M     virtio-gpu host-visible memory window 大小。
 #                          (flag: --gpu-hostmem=SIZE)
-#     GPU_DISPLAY=sdl      GPU 显示后端；sdl=默认兼容 SDL/GLX，
-#                          sdl-egl=本地窗口+native EGL 实验路径，
+#     GPU_DISPLAY=sdl      GPU 显示模式；sdl=默认官方 SDL/GL，
+#                          sdl-egl=兼容模式名（同样生成 `-display sdl,gl=on`，
+#                          由 QEMU 11 探测 EGL，并默认启用 blob/hostmem），
 #                          egl-headless=无窗口 EGL。
 #                          (flag: --gpu-display=sdl|sdl-egl|egl-headless /
 #                          --gpu-sdl-egl / --gpu-headless)

@@ -1,4 +1,8 @@
-# QEMU 9.2.0 stealth bundle
+# vmate stealth bundle（基于 QEMU 11.0.2）
+
+> **当前维护基线**：上游版本为 QEMU `v11.0.2`，维护分支为 `vmate`。
+> `vmate` 是本仓库定制分支名称；QEMU 的版权归属、`qemu-*` 可执行文件名、
+> QMP/QGA 协议字段和其它兼容性标识继续沿用上游名称，不能做全局字符串替换。
 
 让 Win10/11 LTSC 客户机看起来像一台 AMD Ryzen 3 + NVIDIA GTX 1050 的裸机工作站。
 两条强度可选，按反作弊场景挑：
@@ -206,7 +210,7 @@ deploy/
 │   ├── PROFILE-FIELDS.md           # vms/<N>/profile 60+ 字段全表 + pool 来源 + WMI 映射 + 老 profile 升级路径
 │   ├── DETECTION.md                # 反作弊全检测面清单
 │   ├── DEBUG.md                    # QEMU trace + GDB + QMP 调试
-│   ├── USAGE.md                    # （历史）单 VM 详细操作手册
+│   ├── USAGE.md                    # QEMU 11.0.2 + vmate 操作参考
 │   ├── PORTABILITY.md              # host 迁移兼容：IMAGE_ROOT / QEMU_CAP_CHECK / patched QEMU
 │   ├── FB-SHM.md                   # fb-shm 共享内存推流通道（默认开）
 │   ├── FB-SHM-GPU-ZEROCOPY.md      # fb-shm GPU handle 零拷贝导出设计与审核说明

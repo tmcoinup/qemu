@@ -218,6 +218,11 @@ shallow-stealth.ps1 内部 4 步全自动跑完：
 
 ## QEMU patches 全清单 (deploy/patches/)
 
+> **QEMU 11 迁移说明**：下列文件保留的是最初基于 QEMU 9.2.0 的历史补丁，
+> 用于审计功能来源，不再直接对 QEMU 11 执行 `git apply`。当前 `vmate` 分支
+> 已按 QEMU 11.0.2 API 内建对应实现；`deploy/tools/apply-patches.sh` 现在验证
+> 这些迁移落点完整后直接调用构建脚本，避免旧上下文覆盖 QEMU 11 新特性。
+
 | 编号 | 文件 | 改的 |
 |------|------|------|
 | 0001 | cpu add ryzen3-1200 | `target/i386/cpu.c` 加 Ryzen3-1200/2300X 型号 |

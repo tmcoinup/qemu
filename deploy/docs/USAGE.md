@@ -1,5 +1,9 @@
 # USAGE — 操作参考
 
+> **版本基线**：本文适用于 QEMU `11.0.2` + `vmate` 分支。命令行和构建产物仍保留
+> `qemu-system-*`、`qemu-img` 等上游兼容名称；`vmate` 只表示本仓库维护分支，
+> 不改变 QMP/QGA、设备模型或管理工具依赖的 QEMU 标识。
+
 主流程在 [STEALTH-WORKFLOW.md](STEALTH-WORKFLOW.md)。本文件是命令参考。
 
 ## 1. 前置依赖（一次性）
@@ -16,7 +20,7 @@ sudo apt install -y build-essential ninja-build python3-venv python3-pip \
 - `/home/ubuntu/images/win10.iso` 或 `/home/ubuntu/images/win10_ltsc.iso`
 - `/usr/share/OVMF/OVMF_CODE_4M.fd` / `OVMF_VARS_4M.fd`（启动器首跑会拷贝模板到 `/home/ubuntu/images/vms/<N>/ovmf-vars.fd`）
 
-## 2. 构建 QEMU
+## 2. 构建 QEMU 11.0.2 + vmate
 
 ```bash
 deploy/tools/build.sh                 # 增量构建
@@ -204,11 +208,11 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | `QEMU` | `build/qemu-system-x86_64` | QEMU 二进制；迁移时必须指向 patched QEMU，不能用 stock QEMU |
 | `QEMU_IMG` | `build/qemu-img` | 创建/克隆 qcow2 用的 qemu-img |
 | `QEMU_CAP_CHECK` | 1 | 1 = 启动前检查 QEMU 是否带 NVMe/EDID/USB/fb-shm 等 stealth 属性；缺失则 fail-fast，防止误用 stock QEMU 破坏真机模拟 |
-| `STABLE_DISPLAY` | **0** | 仅 `--sdl` 模式生效：0 = `virtio-vga-gl` + SDL/GLX；1 = `virtio-vga` 无 GL，规避 virgl BSOD |
+| `STABLE_DISPLAY` | **0** | 仅 `--sdl` 模式生效：0 = `virtio-vga-gl` + QEMU 11 官方 SDL/OpenGL 路径（X11 上优先探测 EGL，必要时由 SDL 回退）；1 = `virtio-vga` 无 GL，规避 virgl BSOD |
 | `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
 | `GPU_ZEROCOPY` | **0** | 普通 SDL+GL 默认保持历史 texture+SHM 路径；设 `1` / `--gpu-zerocopy` 或使用 `--gpu-sdl-egl` / `--gpu-headless` 才给 `virtio-vga-gl` 加 `blob=true,hostmem=GPU_HOSTMEM` |
 | `GPU_HOSTMEM` | `256M` | virtio-gpu host-visible memory window 大小，常用 `256M`-`1G`；flag: `--gpu-hostmem=SIZE` |
-| `GPU_DISPLAY` | `sdl` | GPU 显示后端。`sdl` 是默认兼容 SDL/GLX 本地窗口；`sdl-egl` 保持本地 SDL 窗口并启用 native EGL 实验路径；`egl-headless` 通过 `--gpu-headless` 启用无窗口 rendernode EGL |
+| `GPU_DISPLAY` | `sdl` | GPU 显示策略。`sdl` 使用 QEMU 11 官方 SDL/OpenGL 后端；X11 环境会显式按 X11 platform 探测 EGL，避免把 X11 display 误当成 Wayland。`sdl-egl` 是启用 GPU 导出参数的兼容入口，仍复用同一个官方 SDL 窗口和 context，不再创建额外 native EGL 子窗口；`egl-headless` 通过 `--gpu-headless` 启用无窗口 rendernode EGL |
 | `GPU_RENDERNODE` | 空 | `egl-headless` 的 render node 路径，空值让 QEMU 自动选择；常用 `/dev/dri/renderD128`，flag: `--gpu-rendernode=PATH` |
 | `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |
 | **`FB_SHM`** | **1** | **默认开**：始终带 `-object fb-shm,...` 共享内存推流通道。`--no-fb-shm` 关 |

@@ -273,8 +273,9 @@
 # @websocket: enable websocket protocol on server sockets
 #     (default: false) (Since: 3.1)
 #
-# @multi: keep a server socket open for multiple concurrent QMP clients.
-#     This is only valid for socket chardevs used by a QMP monitor.
+# @multi: keep a server socket open for multiple concurrent QMP
+#     clients.  This is only valid for socket chardevs used by a QMP
+#     monitor.
 #     (default: false) (Since: 11.0.2)
 #
 # @reconnect-ms: For a client socket, if a socket is disconnected,

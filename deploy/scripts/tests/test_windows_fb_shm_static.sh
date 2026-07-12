@@ -18,6 +18,15 @@ require_text() {
         || fail "missing '$needle' in $file"
 }
 
+reject_text() {
+    local needle="$1"
+    local file="$2"
+
+    if grep -F -- "$needle" "$file" >/dev/null; then
+        fail "unexpected '$needle' in $file"
+    fi
+}
+
 reject_text_ci() {
     local needle="$1"
     local file="$2"
@@ -86,7 +95,7 @@ test_gl_readback_drains_pbo_before_rate_gate() {
 
 test_texture_export_warning_is_strict_only() {
     # 中文注释：texture-only scanout 在稳定路径下回落 SHM 是预期行为，不能用
-    # warning 误导操作者去打开 blob/native EGL；只有 strict GPU consumer 才警告。
+    # warning 误导操作者绕过 QEMU 11 官方 SDL/EGL；只有 strict GPU consumer 才警告。
     awk '
         /static void fb_shm_broadcast_texture_dmabuf_frame/ { in_func = 1 }
         in_func && /fb_shm_has_required_gpu_clients\(d\)/ { strict_gate = 1 }
@@ -98,6 +107,48 @@ test_texture_export_warning_is_strict_only() {
         }
     ' "$REPO_ROOT/ui/fb-shm.c" \
         || fail "texture dma-buf export fallback must warn only for strict GPU clients"
+}
+
+test_launcher_uses_qemu11_sdl_egl() {
+    # Linux 启动器与 Windows streamer 共用 fb-shm ABI；这里钉住 Linux 入口只用
+    # QEMU 11 官方 SDL/GL 参数，避免私有环境钩子再次污染跨平台 GPU 帧路径。
+    require_text 'DISP_ARGS+=(-display sdl,gl=on,show-cursor=off)' \
+        "$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
+    reject_text_ci "SDL_NATIVE_EGL" "$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
+    reject_text_ci "SDL_NATIVE_EGL" "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh"
+}
+
+test_scanout_disable_releases_dmabuf() {
+    # 中文注释：export_blob 的 fd 由 scanout dmabuf 对象持有。资源被 guest
+    # 关闭时必须先 clear，再通知 display disable，否则 BO/fd 会跨帧泄漏。
+    require_text "virtio_gpu_virgl_disable_scanout(g, ss.scanout_id)" \
+        "$REPO_ROOT/hw/display/virtio-gpu-virgl.c"
+}
+
+test_fb_shm_notifier_is_unregistered_before_free() {
+    # 中文注释：machine ready 回调可能在 object-add 内同步执行；无论回调是否
+    # 已执行，finalize 都必须依据独立注册标志摘掉全局 notifier 节点。
+    require_text "bool notifier_registered;" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "if (o->notifier_registered)" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "qemu_remove_machine_init_done_notifier" "$REPO_ROOT/ui/fb-shm.c"
+}
+
+test_fb_shm_treats_shared_header_as_untrusted() {
+    # producer 的 slot 指针和 active index 必须来自私有状态；共享 header 只
+    # 是对 consumer 的输出，不能反向参与 QEMU 宿主地址计算。
+    require_text "fb_shm_restore_private_layout" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "uint32_t active_idx;" "$REPO_ROOT/ui/fb-shm.c"
+    reject_text "d->hdr->buf_offset" "$REPO_ROOT/ui/fb-shm.c"
+    reject_text "qatomic_load_acquire(&d->hdr->active_idx)" \
+        "$REPO_ROOT/ui/fb-shm.c"
+}
+
+test_fb_shm_buffers_stream_requests() {
+    # SOCK_STREAM 的合法短读必须累计到完整控制帧；每轮上限避免 flood 饿死
+    # QEMU 主事件循环。
+    require_text "request_buf[sizeof(FbShmCtlReq)]" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "FB_SHM_MAX_REQS_PER_TICK" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "fb_shm_dispatch_request" "$REPO_ROOT/ui/fb-shm.c"
 }
 
 test_gl_context_failure_does_not_destroy_bad_context() {
@@ -112,6 +163,32 @@ test_gl_context_failure_does_not_destroy_bad_context() {
         }
     ' "$REPO_ROOT/ui/fb-shm.c" \
         || fail "fb-shm must not destroy a GL context after make-current failure"
+}
+
+test_gl_sidecar_restores_provider_context() {
+    local failure_restores
+
+    # 中文注释：QEMU 11 的 virglrenderer 会缓存 current-context 状态。fb-shm
+    # 可以临时进入共享 context 做异步读回，但每个提前返回也必须恢复 provider
+    # 的精确 context；仅靠 listener 排序无法保护下一条异步 virgl 命令。
+    require_text "bool dpy_gl_sidecar;" "$REPO_ROOT/include/ui/console.h"
+    require_text "QEMUGLContextState" "$REPO_ROOT/include/ui/console.h"
+    require_text "dpy_gl_ctx_save_current" "$REPO_ROOT/include/ui/console.h"
+    require_text "dpy_gl_ctx_restore_current" "$REPO_ROOT/include/ui/console.h"
+    require_text "FbShmGlContextGuard" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "g_auto(FbShmGlContextGuard)" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "dpy_gl_ctx_restore_current(d->con, &guard->previous)" \
+        "$REPO_ROOT/ui/fb-shm.c"
+    require_text "SDL_GL_GetCurrentWindow" "$REPO_ROOT/ui/sdl2-gl.c"
+    require_text "state->draw" "$REPO_ROOT/ui/sdl2-gl.c"
+    # context create 与 make-current 两个失败出口都必须恢复外层完整快照。
+    failure_restores="$(grep -c \
+        '(void)dpy_gl_ctx_restore_current(d->con, &previous)' \
+        "$REPO_ROOT/ui/fb-shm.c")"
+    [[ "$failure_restores" -ge 2 ]] \
+        || fail "fb-shm GL create/make failure paths must restore provider binding"
+    reject_text_ci "egl_provider_make_current" \
+        "$REPO_ROOT/ui/egl-headless.c"
 }
 
 test_native_streamer_has_both_platforms() {
@@ -199,7 +276,13 @@ test_qemu_backend_has_win32_mapping
 test_backend_drops_idle_listener_rate
 test_gl_readback_drains_pbo_before_rate_gate
 test_texture_export_warning_is_strict_only
+test_launcher_uses_qemu11_sdl_egl
+test_scanout_disable_releases_dmabuf
+test_fb_shm_notifier_is_unregistered_before_free
+test_fb_shm_treats_shared_header_as_untrusted
+test_fb_shm_buffers_stream_requests
 test_gl_context_failure_does_not_destroy_bad_context
+test_gl_sidecar_restores_provider_context
 test_native_streamer_has_both_platforms
 test_windows_scripts_are_native
 test_docs_cover_windows_packaging

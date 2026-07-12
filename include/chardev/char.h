@@ -215,6 +215,16 @@ void qemu_chr_be_update_read_handlers(Chardev *s,
  */
 void qemu_chr_be_event(Chardev *s, QEMUChrEvent event);
 
+/**
+ * qemu_chr_add_client:
+ * @s: target character device
+ * @fd: accepted socket descriptor
+ *
+ * Transfer @fd to @s on success.  On failure, ownership remains with the
+ * caller, which must close @fd.
+ *
+ * Returns: 0 on success, or -1 on failure.
+ */
 int qemu_chr_add_client(Chardev *s, int fd);
 Chardev *qemu_chr_find(const char *name);
 

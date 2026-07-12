@@ -8982,7 +8982,7 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
          * (Keep in sync with deploy/scripts/lib/stealth-pools.sh.)
          */
         pcie_cap_fill_link_ep_usp(pci_dev, QEMU_PCI_EXP_LNK_X4,
-                                  QEMU_PCI_EXP_LNK_8GT);
+                                  QEMU_PCI_EXP_LNK_8GT, false);
     }
     pcie_cap_flr_init(pci_dev);
     if (n->params.sriov_max_vfs) {

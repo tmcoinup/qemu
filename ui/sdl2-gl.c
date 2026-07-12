@@ -152,10 +152,12 @@ QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
 {
     struct sdl2_console *scon = container_of(dgc, struct sdl2_console, dgc);
     SDL_GLContext ctx, current_ctx;
+    SDL_Window *current_window;
 
     assert(scon->opengl);
 
     current_ctx = SDL_GL_GetCurrentContext();
+    current_window = SDL_GL_GetCurrentWindow();
 
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
@@ -182,9 +184,47 @@ QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
         ctx = SDL_GL_CreateContext(scon->real_window);
     }
 
-    SDL_GL_MakeCurrent(scon->real_window, current_ctx);
+    /*
+     * 中文注释：多 console 时 current_ctx 可能属于另一个 SDL_Window。
+     * context 创建无论成功或失败都必须恢复原窗口/context 对，不能把原
+     * context 错绑到当前 scon 的窗口。
+     */
+    SDL_GL_MakeCurrent(current_window ? current_window : scon->real_window,
+                       current_ctx);
 
     return (QEMUGLContext)ctx;
+}
+
+void sdl2_gl_save_current_context(DisplayGLCtx *dgc,
+                                  QEMUGLContextState *state)
+{
+    /*
+     * SDL 可能使用 EGL，也可能使用 GLX。
+     * context 与窗口必须一起通过 SDL 查询。
+     * 不能猜测底层窗口系统。
+     */
+    (void)dgc;
+    state->ctx = (QEMUGLContext)SDL_GL_GetCurrentContext();
+    state->draw = SDL_GL_GetCurrentWindow();
+    state->read = state->draw;
+}
+
+int sdl2_gl_restore_current_context(DisplayGLCtx *dgc,
+                                    const QEMUGLContextState *state)
+{
+    struct sdl2_console *scon = container_of(dgc, struct sdl2_console, dgc);
+    SDL_Window *window = (SDL_Window *)state->draw;
+
+    /*
+     * 不能使用 dgc 对应的窗口代替原窗口。
+     * 多输出时，原 current context 可能属于另一个 SDL 窗口。
+     */
+    /* 无 current context 时用本窗口执行解除绑定，兼容不接受 NULL window 的后端。 */
+    if (!window) {
+        window = scon->real_window;
+    }
+    return SDL_GL_MakeCurrent(window,
+                              (SDL_GLContext)state->ctx);
 }
 
 void sdl2_gl_destroy_context(DisplayGLCtx *dgc, QEMUGLContext ctx)
@@ -202,6 +242,7 @@ int sdl2_gl_make_context_current(DisplayGLCtx *dgc,
 
     assert(scon->opengl);
 
+    /* ctx == NULL 会解除当前窗口的 context 绑定。 */
     return SDL_GL_MakeCurrent(scon->real_window, sdlctx);
 }
 

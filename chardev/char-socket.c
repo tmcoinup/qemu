@@ -973,6 +973,16 @@ static int tcp_chr_add_client(Chardev *chr, int fd)
     tcp_chr_change_state(s, TCP_CHARDEV_STATE_CONNECTING);
     tcp_chr_set_client_ioc_name(chr, sioc);
     ret = tcp_chr_new_client(chr, sioc);
+    if (ret < 0) {
+        /*
+         * 中文注释：qemu_chr_add_client() 约定只有成功才接管 fd。QIOChannel
+         * 已暂存该 fd，因此失败时必须先清空字段再 unref，并恢复 chardev
+         * 状态；否则 finalize 会提前 close，调用方按契约清理时将 double-close，
+         * 甚至可能关闭另一个线程刚复用到同一编号的描述符。
+         */
+        sioc->fd = -1;
+        tcp_chr_change_state(s, TCP_CHARDEV_STATE_DISCONNECTED);
+    }
     object_unref(OBJECT(sioc));
     return ret;
 }

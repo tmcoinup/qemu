@@ -15,7 +15,7 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "hw/pci/pci_device.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
 
@@ -56,14 +56,13 @@ static void amd_df_stub_realize(PCIDevice *dev, Error **errp)
     pci_set_word(dev->config + PCI_SUBSYSTEM_ID,        s->sub_device_id);
 }
 
-static Property amd_df_stub_properties[] = {
+static const Property amd_df_stub_properties[] = {
     DEFINE_PROP_UINT16("device-id",     AMDDataFabricStub, func_device_id, 0x1460),
     DEFINE_PROP_UINT16("sub-vendor-id", AMDDataFabricStub, sub_vendor_id,  0x0000),
     DEFINE_PROP_UINT16("sub-device-id", AMDDataFabricStub, sub_device_id,  0x0000),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void amd_df_stub_class_init(ObjectClass *klass, void *data)
+static void amd_df_stub_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(klass);

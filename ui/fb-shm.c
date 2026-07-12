@@ -8,6 +8,12 @@
  * wakeup primitive, with optional rectangular region-of-interest cropping.
  * See include/ui/fb-shm-abi.h for the wire format.
  *
+ * 文件规模说明：该文件在本次升级前已超过 2500 行。QOM 对象、DCL 回调、
+ * Linux/Windows 控制通道和 GL 异步 PBO 共用同一组私有生命周期状态；在跨越
+ * QEMU 9→11 API 迁移时强行拆成多个编译单元，会扩大私有 ABI 与析构竞态面。
+ * 因此本次保留后端单元边界，把协议 ABI、原生 consumer、平台封装和测试继续
+ * 放在既有独立文件中；后续拆分应先引入私有头和独立生命周期单元测试。
+ *
  * Pipeline overview:
  *
  *   guest GPU device --> DisplaySurface (pixman_image_t)
@@ -99,6 +105,7 @@ QEMU_BUILD_BUG_ON(FB_SHM_BUF_COUNT < 2);
 #define FB_SHM_MAX_RATE       240u
 #define FB_SHM_MIN_RATE       1u
 #define FB_SHM_MAX_DIM        16384u
+#define FB_SHM_MAX_REQS_PER_TICK 64u
 #ifndef _WIN32
 # define FB_SHM_DEFAULT_RUNDIR "/run/qemu"
 #else
@@ -118,10 +125,14 @@ struct FbShmClient {
     bool gpu_required;           /* 客户端要求 GPU 路径，不接受 SHM 回退    */
     bool linked;                /* present in owner->clients              */
     bool dropping;              /* fd removed; waiting for deferred free  */
-#ifdef _WIN32
+#ifndef _WIN32
+    int wake_eventfd;             /* 每个客户端独立计数器，避免多消费者抢唤醒 */
+#else
     HANDLE wake_event;           /* 每个客户端独立事件，避免多消费者抢同一 doorbell */
     char *wake_event_name;
 #endif
+    uint8_t request_buf[sizeof(FbShmCtlReq)];
+    size_t request_len;
     QLIST_ENTRY(FbShmClient) next;
 };
 
@@ -151,12 +162,12 @@ struct FbShmDisplay {
     uint32_t cur_w, cur_h;
     uint32_t cur_src_w, cur_src_h;
     int32_t cur_roi_x, cur_roi_y;
+    uint32_t active_idx;           /* producer-private; shared header is untrusted */
     uint64_t frame_seq;
     bool surface_present;
 
 #ifndef _WIN32
     int memfd;
-    int wake_eventfd;
 #else
     HANDLE map_handle;
     char *map_name;
@@ -228,6 +239,7 @@ static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
 static void fb_shm_broadcast_current_gpu_frame(FbShmDisplay *d,
                                                uint32_t w, uint32_t h,
                                                int32_t roi_x, int32_t roi_y);
+static void fb_shm_gl_scanout_disable(DisplayChangeListener *dcl);
 #endif
 
 static size_t fb_shm_frame_bytes(uint32_t w, uint32_t h)
@@ -284,8 +296,47 @@ static void fb_shm_release_slot_images(FbShmDisplay *d)
 }
 
 #ifdef CONFIG_OPENGL
-static bool fb_shm_gl_make_current(FbShmDisplay *d)
+typedef struct FbShmGlContextGuard {
+    FbShmDisplay *display;
+    QEMUGLContextState previous;
+    bool active;
+} FbShmGlContextGuard;
+
+static void fb_shm_gl_context_leave(FbShmGlContextGuard *guard)
 {
+    FbShmDisplay *d;
+
+    if (!guard->active) {
+        return;
+    }
+
+    d = guard->display;
+    guard->active = false;
+    /*
+     * 中文注释：virglrenderer 会缓存“当前 context”状态。fb-shm 若把自己的
+     * 共享 context 留在当前线程，即使下一次 provider 回调重新绑定了窗口，
+     * virgl 的异步 fence/资源命令仍可能基于错误缓存运行。因此所有出口（包括
+     * 下方函数中的提前 return）都通过 g_auto cleanup 恢复进入前的完整
+     * context + drawable/surface 绑定。
+     */
+    if (dpy_gl_ctx_restore_current(d->con, &guard->previous) != 0) {
+        if (!d->gl_warned_context) {
+            warn_report("fb-shm: cannot restore display GL context; "
+                        "GL frames will not be exported");
+            d->gl_warned_context = true;
+        }
+        d->gl_ctx_unusable = true;
+    }
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(FbShmGlContextGuard,
+                                 fb_shm_gl_context_leave);
+
+static bool fb_shm_gl_context_enter(FbShmDisplay *d,
+                                    FbShmGlContextGuard *guard)
+{
+    QEMUGLContextState previous = { 0 };
+
     if (d->gl_ctx_unusable) {
         return false;
     }
@@ -299,6 +350,13 @@ static bool fb_shm_gl_make_current(FbShmDisplay *d)
         return false;
     }
 
+    /*
+     * 中文注释：必须在创建共享 context 之前保存 provider 的完整 current
+     * binding。SDL 与 GtkGLArea 的 create 回调会临时切换 context 后再恢复，
+     * EGL create 本身不切换；统一在这里取值，才能覆盖三类 provider，且在
+     * 多窗口场景恢复原 drawable，而不是误绑到本 console 的窗口。
+     */
+    dpy_gl_ctx_save_current(d->con, &previous);
     if (!d->gl_ctx) {
         /*
          * SDL/EGL 已经给 console 安装了主 GL provider。这里再创建一个
@@ -312,6 +370,11 @@ static bool fb_shm_gl_make_current(FbShmDisplay *d)
 
         d->gl_ctx = dpy_gl_ctx_create(d->con, &params);
         if (!d->gl_ctx) {
+            /*
+             * provider 的 create 回调按契约不应改变 current binding，但失败
+             * 路径最容易受底层 SDL/GLX 驱动扰动；仍用外层快照强制恢复。
+             */
+            (void)dpy_gl_ctx_restore_current(d->con, &previous);
             if (!d->gl_warned_context) {
                 warn_report("fb-shm: cannot create shared GL context; "
                             "GL frames will not be exported");
@@ -337,9 +400,17 @@ static bool fb_shm_gl_make_current(FbShmDisplay *d)
          */
         d->gl_ctx_unusable = true;
         d->gl_ctx = NULL;
+        /*
+         * make-current 失败也可能扰动驱动状态；尽力恢复 provider，不能把
+         * 辅助推流失败扩散成主窗口或 virglrenderer 的上下文错误。
+         */
+        (void)dpy_gl_ctx_restore_current(d->con, &previous);
         return false;
     }
 
+    guard->display = d;
+    guard->previous = previous;
+    guard->active = true;
     return true;
 }
 
@@ -465,7 +536,7 @@ static bool fb_shm_gl_pbo_finish_one(FbShmDisplay *d, FbShmGlPbo *pbo)
         return true;
     }
 
-    cur_idx = qatomic_load_acquire(&d->hdr->active_idx);
+    cur_idx = d->active_idx;
     next_idx = (cur_idx + 1) % FB_SHM_BUF_COUNT;
     memcpy(d->slot[next_idx], pixels, pbo->bytes);
     glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
@@ -555,12 +626,14 @@ static int fb_shm_gl_pbo_issue(FbShmDisplay *d, uint32_t rw, uint32_t rh,
 
 static void fb_shm_gl_release_fbos(FbShmDisplay *d)
 {
+    g_auto(FbShmGlContextGuard) guard = { 0 };
+
     d->gl_dmabuf = NULL;
 #ifdef _WIN32
     fb_shm_gl_forget_d3d_share(d);
 #endif
 
-    if (!d->gl_ctx || !fb_shm_gl_make_current(d)) {
+    if (!d->gl_ctx || !fb_shm_gl_context_enter(d, &guard)) {
         return;
     }
 
@@ -601,6 +674,7 @@ static void fb_shm_release_mapping(FbShmDisplay *d)
     d->cap_w = 0;
     d->cap_h = 0;
     d->cap_buf_size = 0;
+    d->active_idx = 0;
 #ifndef _WIN32
     if (d->memfd >= 0) {
         close(d->memfd);
@@ -613,6 +687,45 @@ static void fb_shm_release_mapping(FbShmDisplay *d)
     }
     g_clear_pointer(&d->map_name, g_free);
 #endif
+}
+
+static int fb_shm_restore_private_layout(FbShmDisplay *d, Error **errp)
+{
+    FbShmHeader *hdr = d->hdr;
+
+    /*
+     * 中文注释：consumer 必须能读取帧，所以共享 mapping 无法视为可信输入。
+     * producer 的写指针只能由私有 map_size/cap_buf_size 推导，绝不能读取
+     * consumer 可改写的 hdr->buf_offset[]。同时逐槽做减法式边界检查，避免
+     * 加法溢出后得到一个看似落在 mapping 内的宿主指针。
+     */
+    if (!d->shm || !hdr || d->cap_buf_size == 0 ||
+        d->cap_buf_size > (SIZE_MAX - FB_SHM_HEADER_SIZE) /
+                          FB_SHM_BUF_COUNT) {
+        error_setg(errp, "fb-shm: invalid private backing layout");
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < FB_SHM_BUF_COUNT; i++) {
+        size_t offset = FB_SHM_HEADER_SIZE + (size_t)i * d->cap_buf_size;
+
+        if (offset > d->map_size || d->cap_buf_size > d->map_size - offset) {
+            error_setg(errp, "fb-shm: private slot %u exceeds mapping", i);
+            return -1;
+        }
+        d->slot[i] = (uint8_t *)d->shm + offset;
+        hdr->buf_offset[i] = offset;
+    }
+
+    /* consumer 即使损坏静态 ABI 字段，下一次几何更新也会恢复生产端真值。 */
+    hdr->magic = FB_SHM_MAGIC;
+    hdr->version = FB_SHM_VERSION;
+    hdr->header_size = FB_SHM_HEADER_SIZE;
+    hdr->buf_count = FB_SHM_BUF_COUNT;
+    hdr->map_size = d->map_size;
+    hdr->fourcc = FB_SHM_FOURCC_BGR0;
+    hdr->bpp = 32;
+    return 0;
 }
 
 static int fb_shm_apply_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
@@ -636,9 +749,12 @@ static int fb_shm_apply_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
         return -1;
     }
 
+    if (fb_shm_restore_private_layout(d, errp) < 0) {
+        return -1;
+    }
+
     fb_shm_release_slot_images(d);
     for (uint32_t i = 0; i < FB_SHM_BUF_COUNT; i++) {
-        d->slot[i] = (uint8_t *)d->shm + d->hdr->buf_offset[i];
         d->slot_img[i] = pixman_image_create_bits_no_clear(
             PIXMAN_x8r8g8b8, w, h, (uint32_t *)d->slot[i], (int)(w * 4));
         if (!d->slot_img[i]) {
@@ -740,10 +856,15 @@ static int fb_shm_allocate_mapping(FbShmDisplay *d, uint32_t cap_w,
         return -1;
     }
 
-    fb_shm_release_mapping(d);
-
     size_t buf_size = fb_shm_frame_bytes(cap_w, cap_h);
+    if (buf_size > (SIZE_MAX - FB_SHM_HEADER_SIZE) / FB_SHM_BUF_COUNT) {
+        error_setg(errp, "fb-shm: backing capacity %ux%u is too large",
+                   cap_w, cap_h);
+        return -1;
+    }
     size_t map_size = FB_SHM_HEADER_SIZE + (size_t)FB_SHM_BUF_COUNT * buf_size;
+
+    fb_shm_release_mapping(d);
 
 #ifndef _WIN32
     int fd = memfd_create("qemu-fb-shm", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -802,19 +923,13 @@ static int fb_shm_allocate_mapping(FbShmDisplay *d, uint32_t cap_w,
 
     /* Header init.  Geometry fields are filled by fb_shm_apply_geometry(). */
     FbShmHeader *hdr = d->hdr;
-    hdr->magic = FB_SHM_MAGIC;
-    hdr->version = FB_SHM_VERSION;
-    hdr->header_size = FB_SHM_HEADER_SIZE;
-    hdr->buf_count = FB_SHM_BUF_COUNT;
     hdr->buf_size = buf_size;
-    hdr->map_size = map_size;
-    for (uint32_t i = 0; i < FB_SHM_BUF_COUNT; i++) {
-        hdr->buf_offset[i] = FB_SHM_HEADER_SIZE + (uint64_t)i * buf_size;
-        d->slot[i] = (uint8_t *)p + hdr->buf_offset[i];
+    if (fb_shm_restore_private_layout(d, errp) < 0) {
+        fb_shm_release_mapping(d);
+        return -1;
     }
-    hdr->fourcc = FB_SHM_FOURCC_BGR0;
-    hdr->bpp = 32;
     hdr->target_fps = d->shm_target_fps;
+    d->active_idx = 0;
     hdr->active_idx = 0;
     hdr->flags = FB_SHM_FLAG_RUNNING | FB_SHM_FLAG_RESIZED;
     hdr->frame_seq = 0;
@@ -881,7 +996,12 @@ static void fb_shm_client_drop(FbShmClient *c)
         qemu_set_fd_handler(fd, NULL, NULL, NULL);
         close(fd);
     }
-#ifdef _WIN32
+#ifndef _WIN32
+    if (c->wake_eventfd >= 0) {
+        close(c->wake_eventfd);
+        c->wake_eventfd = -1;
+    }
+#else
     if (c->wake_event) {
         CloseHandle(c->wake_event);
         c->wake_event = NULL;
@@ -936,8 +1056,8 @@ static int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
         .msg_iov = &iov,
         .msg_iovlen = 1,
     };
-    int fds[2] = { d->memfd, d->wake_eventfd };
-    int nfds = (include_handles && d->memfd >= 0 && d->wake_eventfd >= 0) ? 2 : 0;
+    int fds[2] = { d->memfd, c->wake_eventfd };
+    int nfds = (include_handles && d->memfd >= 0 && c->wake_eventfd >= 0) ? 2 : 0;
 
     if (nfds > 0) {
         msg.msg_control = cbuf;
@@ -1264,7 +1384,7 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
 static void fb_shm_broadcast_resize(FbShmDisplay *d)
 {
 #ifndef _WIN32
-    if (d->memfd < 0 || d->wake_eventfd < 0) {
+    if (d->memfd < 0) {
         return;
     }
 #else
@@ -1289,7 +1409,11 @@ static void fb_shm_broadcast_resize(FbShmDisplay *d)
             !c->hello_done || !c->wants_resize_notify) {
             continue;
         }
-#ifdef _WIN32
+#ifndef _WIN32
+        if (c->wake_eventfd < 0) {
+            continue;
+        }
+#else
         if (!c->wake_event_name) {
             continue;
         }
@@ -1362,25 +1486,10 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
     }
 }
 
-static void fb_shm_client_read(void *opaque)
+static void fb_shm_dispatch_request(FbShmDisplay *d, FbShmClient *c,
+                                    const FbShmCtlReq *req)
 {
-    FbShmClient *c = opaque;
-    FbShmDisplay *d = c->owner;
-    FbShmCtlReq req;
-    ssize_t r;
-
-    if (c->dropping || c->fd < 0 || !d) {
-        return;
-    }
-
-    do {
-        r = recv(c->fd, (char *)&req, sizeof(req), 0);
-    } while (r < 0 && errno == EINTR);
-    if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-        fb_shm_client_drop(c);
-        return;
-    }
-    if (r != (ssize_t)sizeof(req) || req.magic != FB_SHM_MAGIC) {
+    if (req->magic != FB_SHM_MAGIC) {
         FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = 0,
                             .status = FB_SHM_CTL_EINVAL };
         if (fb_shm_send_ack(d, c, &ack, false) < 0) {
@@ -1389,27 +1498,72 @@ static void fb_shm_client_read(void *opaque)
         return;
     }
 
-    switch (req.op) {
+    switch (req->op) {
     case FB_SHM_CTL_HELLO:
-        fb_shm_handle_hello(d, c, &req);
+        fb_shm_handle_hello(d, c, req);
         break;
     case FB_SHM_CTL_SET_ROI:
-        fb_shm_handle_set_roi(d, c, &req);
+        fb_shm_handle_set_roi(d, c, req);
         break;
     case FB_SHM_CTL_SET_RATE:
-        fb_shm_handle_set_rate(d, c, &req);
+        fb_shm_handle_set_rate(d, c, req);
         break;
     case FB_SHM_CTL_BYE:
         fb_shm_client_drop(c);
         break;
     default: {
-        FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req.op,
+        FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                             .status = FB_SHM_CTL_EUNSUPPORTED };
         if (fb_shm_send_ack(d, c, &ack, false) < 0) {
             fb_shm_client_drop(c);
         }
         break;
     }
+    }
+}
+
+static void fb_shm_client_read(void *opaque)
+{
+    FbShmClient *c = opaque;
+    unsigned int handled = 0;
+
+    /*
+     * 中文注释：SOCK_STREAM 不保留消息边界，一份 32 字节请求可能被拆成任意
+     * 多次 recv，也可能与后续请求粘在一起。每客户端缓存未完成尾部，并持续
+     * 读取到 EAGAIN；每轮限制处理数量，防止恶意连接长期占住主事件循环。
+     */
+    while (!c->dropping && c->fd >= 0 && c->owner &&
+           handled < FB_SHM_MAX_REQS_PER_TICK) {
+        size_t remaining = sizeof(c->request_buf) - c->request_len;
+        ssize_t r;
+
+        do {
+            r = recv(c->fd, (char *)c->request_buf + c->request_len,
+                     remaining, 0);
+        } while (r < 0 && errno == EINTR);
+
+        if (r == 0) {
+            fb_shm_client_drop(c);
+            return;
+        }
+        if (r < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return;
+            }
+            fb_shm_client_drop(c);
+            return;
+        }
+
+        c->request_len += r;
+        if (c->request_len < sizeof(c->request_buf)) {
+            continue;
+        }
+
+        FbShmCtlReq req;
+        memcpy(&req, c->request_buf, sizeof(req));
+        c->request_len = 0;
+        handled++;
+        fb_shm_dispatch_request(c->owner, c, &req);
     }
 }
 
@@ -1426,10 +1580,29 @@ static void fb_shm_listener_accept(void *opaque)
         }
         return;
     }
-    qemu_socket_set_nonblock(cfd);
+    /*
+     * QEMU 11 统一通过 qemu_set_blocking() 修改描述符状态；若切换失败，
+     * 立即关闭新连接，避免把阻塞套接字注册到主事件循环后卡住虚拟机。
+     */
+    Error *local_err = NULL;
+    if (!qemu_set_blocking(cfd, false, &local_err)) {
+        warn_report_err(local_err);
+        qemu_close(cfd);
+        return;
+    }
     FbShmClient *c = g_new0(FbShmClient, 1);
     c->owner = d;
     c->fd = cfd;
+#ifndef _WIN32
+    /* 每个客户端独占 eventfd counter；不能从 display 级 eventfd dup。 */
+    c->wake_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (c->wake_eventfd < 0) {
+        warn_report("fb-shm: client eventfd() failed: %s", strerror(errno));
+        qemu_close(cfd);
+        g_free(c);
+        return;
+    }
+#endif
     c->linked = true;
     QLIST_INSERT_HEAD(&d->clients, c, next);
     qemu_set_fd_handler(cfd, fb_shm_client_read, NULL, c);
@@ -1447,7 +1620,11 @@ static int fb_shm_open_listener(FbShmDisplay *d, Error **errp)
     if (fd < 0) {
         return -1;
     }
-    qemu_socket_set_nonblock(fd);
+    /* 监听套接字必须非阻塞，否则一次伪唤醒就可能阻塞主事件循环。 */
+    if (!qemu_set_blocking(fd, false, errp)) {
+        qemu_close(fd);
+        return -1;
+    }
 #ifndef _WIN32
     /* World-readable so non-root consumers can connect; tighten if needed. */
     chmod(d->sock_path, 0660);
@@ -1465,6 +1642,18 @@ static void fb_shm_gfx_switch(DisplayChangeListener *dcl,
                               DisplaySurface *new_surface)
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+#ifdef CONFIG_OPENGL
+    /*
+     * 中文注释：设备从 texture/dma-buf scanout 切回真实 CPU surface 时，
+     * console 不一定先广播 dpy_gl_scanout_disable。主动释放旧 FBO/dma-buf
+     * 并清 gl_scanout，避免 refresh 继续读取已删除纹理且跳过 CPU 帧路径。
+     * GL provider 使用的 placeholder 不代表切换，不能在这里误清理。
+     */
+    if (d->gl_scanout &&
+        (!new_surface || !surface_is_placeholder(new_surface))) {
+        fb_shm_gl_scanout_disable(dcl);
+    }
+#endif
     if (!new_surface) {
         d->surface_present = false;
         return;
@@ -1527,8 +1716,7 @@ static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
         }
     }
 
-    FbShmHeader *hdr = d->hdr;
-    uint32_t cur_idx = qatomic_load_acquire(&hdr->active_idx);
+    uint32_t cur_idx = d->active_idx;
     uint32_t next_idx = (cur_idx + 1) % FB_SHM_BUF_COUNT;
 
     /*
@@ -1556,20 +1744,31 @@ static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
     hdr->damage_w = (int32_t)w;
     hdr->damage_h = (int32_t)h;
     hdr->ts_ns = fb_shm_now_ns();
+    d->active_idx = next_idx;
     qatomic_store_release(&hdr->active_idx, next_idx);
 
     d->frame_seq++;
     qatomic_store_release(&hdr->frame_seq, d->frame_seq);
 
 #ifndef _WIN32
-    /* Linux doorbell：eventfd 计数器，慢消费端只会跳帧，不会反压 QEMU。 */
-    if (d->wake_eventfd >= 0) {
-        uint64_t v = 1;
-        ssize_t r;
-        do {
-            r = write(d->wake_eventfd, &v, sizeof(v));
-        } while (r < 0 && errno == EINTR);
-        (void)r;   /* full ringbuffer just means consumer hasn't drained */
+    /*
+     * Linux doorbell：每个 SHM consumer 都有独立 eventfd。SCM_RIGHTS 复制
+     * 同一个 eventfd 只会复制描述符，counter 仍共享，一个 reader 会吞掉
+     * 其他 reader 的唤醒；逐客户端写入才能保证多路推流互不抢事件。
+     */
+    FbShmClient *c;
+    QLIST_FOREACH(c, &d->clients, next) {
+        if (!c->dropping && c->hello_done && !c->gpu_required &&
+            c->wake_eventfd >= 0) {
+            uint64_t v = 1;
+            ssize_t r;
+
+            do {
+                r = write(c->wake_eventfd, &v, sizeof(v));
+            } while (r < 0 && errno == EINTR);
+            /* counter 满只表示该 consumer 尚未 drain，不得反压 QEMU。 */
+            (void)r;
+        }
     }
 #else
     /*
@@ -1578,7 +1777,8 @@ static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
      */
     FbShmClient *c;
     QLIST_FOREACH(c, &d->clients, next) {
-        if (!c->dropping && c->hello_done && c->wake_event) {
+        if (!c->dropping && c->hello_done && !c->gpu_required &&
+            c->wake_event) {
             SetEvent(c->wake_event);
         }
     }
@@ -1917,6 +2117,7 @@ static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
 
 static void fb_shm_commit_gl_frame(FbShmDisplay *d)
 {
+    g_auto(FbShmGlContextGuard) guard = { 0 };
     uint32_t sw = d->gl_w;
     uint32_t sh = d->gl_h;
     uint32_t rw, rh;
@@ -1946,7 +2147,7 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     if (!d->gl_guest_fb.texture) {
         return;
     }
-    if (!fb_shm_gl_make_current(d)) {
+    if (!fb_shm_gl_context_enter(d, &guard)) {
         return;
     }
 
@@ -2012,7 +2213,7 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
         return;
     }
 
-    uint32_t cur_idx = qatomic_load_acquire(&d->hdr->active_idx);
+    uint32_t cur_idx = d->active_idx;
     uint32_t next_idx = (cur_idx + 1) % FB_SHM_BUF_COUNT;
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, d->gl_guest_fb.framebuffer);
@@ -2046,14 +2247,16 @@ static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
                                       void *d3d_tex2d)
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+    g_auto(FbShmGlContextGuard) guard = { 0 };
 
     if (!backing_id || !backing_width || !backing_height ||
         x >= backing_width || y >= backing_height) {
         d->gl_scanout = false;
-        d->gl_dmabuf = NULL;
-#ifdef _WIN32
-        fb_shm_gl_forget_d3d_share(d);
-#endif
+        /*
+         * 中文注释：provider 用空/越界参数表达无效 scanout 时，也必须释放
+         * 上一个 texture 的 FBO/PBO；只清标志会把旧附着保留到对象析构。
+         */
+        fb_shm_gl_release_fbos(d);
         return;
     }
 
@@ -2089,7 +2292,7 @@ static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
     (void)d3d_tex2d;
 #endif
 
-    if (!fb_shm_gl_make_current(d)) {
+    if (!fb_shm_gl_context_enter(d, &guard)) {
         return;
     }
 
@@ -2102,13 +2305,15 @@ static void fb_shm_gl_scanout_dmabuf(DisplayChangeListener *dcl,
                                      QemuDmaBuf *dmabuf)
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+    g_auto(FbShmGlContextGuard) guard = { 0 };
     const uint32_t *strides;
     const int *fds;
     uint32_t texture;
 
     if (!dmabuf) {
         d->gl_scanout = false;
-        d->gl_dmabuf = NULL;
+        /* NULL dma-buf 与显式 disable 等价，不能保留上一帧的私有 FBO。 */
+        fb_shm_gl_release_fbos(d);
         return;
     }
 
@@ -2138,7 +2343,7 @@ static void fb_shm_gl_scanout_dmabuf(DisplayChangeListener *dcl,
      * fd，不需要 QEMU 先导入 GL texture。只有 SHM 兼容读回才需要导入；
      * SDL_GL/GLX 路径下 EGL 导入可能不可用，此时仍然保留 GPU metadata。
      */
-    if (!fb_shm_gl_make_current(d)) {
+    if (!fb_shm_gl_context_enter(d, &guard)) {
         return;
     }
     egl_dmabuf_import_texture(dmabuf);
@@ -2158,9 +2363,13 @@ static void fb_shm_gl_release_dmabuf(DisplayChangeListener *dcl,
                                      QemuDmaBuf *dmabuf)
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+    g_auto(FbShmGlContextGuard) guard = { 0 };
 
     if (d->gl_dmabuf == dmabuf) {
         d->gl_dmabuf = NULL;
+    }
+    if (!fb_shm_gl_context_enter(d, &guard)) {
+        return;
     }
     egl_dmabuf_release_texture(dmabuf);
 }
@@ -2213,6 +2422,7 @@ static void fb_shm_refresh(DisplayChangeListener *dcl)
 
 static const DisplayChangeListenerOps fb_shm_ops = {
     .dpy_name        = "fb-shm",
+    .dpy_gl_sidecar  = true,
     .dpy_refresh     = fb_shm_refresh,
     .dpy_gfx_update  = fb_shm_gfx_update,
     .dpy_gfx_switch  = fb_shm_gfx_switch,
@@ -2267,7 +2477,6 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     QLIST_INIT(&d->clients);
 #ifndef _WIN32
     d->memfd = -1;
-    d->wake_eventfd = -1;
 #endif
     d->listen_fd = -1;
     d->con = con;
@@ -2286,14 +2495,6 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     d->gpu_target_fps = d->target_fps;
     d->blend_cursor = cfg->blend_cursor;
 
-#ifndef _WIN32
-    d->wake_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (d->wake_eventfd < 0) {
-        error_setg_errno(errp, errno, "fb-shm: eventfd() failed");
-        goto err;
-    }
-#endif
-
     if (fb_shm_open_listener(d, errp) < 0) {
         goto err;
     }
@@ -2307,9 +2508,6 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     return d;
 
 err:
-#ifndef _WIN32
-    if (d->wake_eventfd >= 0) close(d->wake_eventfd);
-#endif
     g_free(d->id);
     g_free(d->sock_path);
     g_free(d);
@@ -2336,9 +2534,6 @@ static void fb_shm_destroy(FbShmDisplay *d)
     fb_shm_gl_release(d);
 #endif
     fb_shm_release_mapping(d);
-#ifndef _WIN32
-    if (d->wake_eventfd >= 0) close(d->wake_eventfd);
-#endif
     g_free(d->id);
     g_free(d->sock_path);
     g_free(d);
@@ -2402,6 +2597,7 @@ struct FbShmExport {
     bool cursor;
     /* runtime */
     Notifier machine_done_notifier;
+    bool notifier_registered;
     bool deferred_pending;
     FbShmDisplay *display;
 };
@@ -2430,6 +2626,15 @@ static void fb_shm_export_machine_done(Notifier *n, void *unused)
     FbShmExport *o = container_of(n, FbShmExport, machine_done_notifier);
     if (!o->deferred_pending) {
         return;
+    }
+    /*
+     * 中文注释：machine-init notifier 是一次性延迟器。回调可能由 notifier
+     * 遍历触发，也可能在 machine 已 ready 时由 add() 同步触发；两种情况都
+     * 必须先从全局链表摘除，避免 object-del 后链表残留悬空节点。
+     */
+    if (o->notifier_registered) {
+        qemu_remove_machine_init_done_notifier(&o->machine_done_notifier);
+        o->notifier_registered = false;
     }
     o->deferred_pending = false;
     const char *id = object_get_canonical_path_component(OBJECT(o));
@@ -2464,23 +2669,28 @@ static void fb_shm_export_complete(UserCreatable *uc, Error **errp)
     }
     o->machine_done_notifier.notify = fb_shm_export_machine_done;
     o->deferred_pending = true;
+    o->notifier_registered = true;
     qemu_add_machine_init_done_notifier(&o->machine_done_notifier);
 }
 
 static void fb_shm_export_instance_finalize(Object *obj)
 {
     FbShmExport *o = FB_SHM_EXPORT(obj);
-    if (o->deferred_pending) {
-        notifier_remove(&o->machine_done_notifier);
-        o->deferred_pending = false;
+    if (o->notifier_registered) {
+        qemu_remove_machine_init_done_notifier(&o->machine_done_notifier);
+        o->notifier_registered = false;
     }
+    o->deferred_pending = false;
     fb_shm_destroy(o->display);
     o->display = NULL;
     g_free(o->path);
 }
 
-/* per-field uint32 visitors - QEMU 9.2 has no offset-based uint32 prop helper
- * so we generate trivial accessors via macro. */
+/*
+ * 中文注释：fb-shm 的 QOM 属性需要逐字段调用 uint32 visitor。这里用宏生成
+ * 对称的 getter/setter，避免复制五组完全相同的访问逻辑；该做法与具体
+ * QEMU 版本无关，也不会绕过 QEMU 11 的 visitor 类型检查。
+ */
 
 #define FB_SHM_UINT32_PROP(NAME, FIELD)                                       \
 static void fb_shm_export_get_##FIELD(Object *obj, Visitor *v,                \
@@ -2517,7 +2727,7 @@ static void fb_shm_export_set_cursor(Object *obj, Visitor *v,
     visit_type_bool(v, name, &o->cursor, errp);
 }
 
-static void fb_shm_export_class_init(ObjectClass *oc, void *data)
+static void fb_shm_export_class_init(ObjectClass *oc, const void *data)
 {
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
     ucc->complete = fb_shm_export_complete;

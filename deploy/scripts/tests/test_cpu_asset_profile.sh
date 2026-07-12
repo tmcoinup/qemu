@@ -21,8 +21,11 @@ make_profile() {
 
     # 先走正式随机身份生成/保存路径，再覆盖待测 CPU 字段，保证 profile 结构完整。
     stealth_pick_profile
+    # 这些全局变量由已 source 的函数按名称读取，ShellCheck 无法静态跟踪。
+    # shellcheck disable=SC2034
     CPU_SERIAL=1642844234
     CPU_ASSET=6999
+    # shellcheck disable=SC2034
     UUID=237c3804-420b-41bf-8155-1b8808de43a8
     stealth_save_profile "$path"
 

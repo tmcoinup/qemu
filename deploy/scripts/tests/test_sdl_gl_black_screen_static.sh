@@ -5,6 +5,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SDL2_C="$REPO_ROOT/ui/sdl2.c"
+SV_DEVICES="$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
+SV_ASSEMBLE="$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -37,7 +39,20 @@ test_display_resume_replays_scanout() {
     ' "$SDL2_C" || fail "SDL display-resume must redraw the current GL scanout"
 }
 
+test_qemu11_sdl_egl_replaces_private_hook() {
+    # 中文注释：QEMU 11 已在 SDL backend 内探测 X11 EGL 并设置官方 SDL hint；
+    # 启动器只应传标准 display 参数，不能再维护环境变量控制的私有子窗口。
+    grep -F -- "sdl2_set_hint_x11_force_egl();" "$SDL2_C" >/dev/null \
+        || fail "QEMU 11 SDL backend must run its EGL capability probe"
+    grep -F -- 'DISP_ARGS+=(-display sdl,gl=on,show-cursor=off)' "$SV_DEVICES" >/dev/null \
+        || fail "launcher must use the official SDL/GL display option"
+    if grep -F -- "SDL_NATIVE_EGL" "$SV_DEVICES" "$SV_ASSEMBLE" >/dev/null; then
+        fail "launcher still contains the private SDL native-EGL hook"
+    fi
+}
+
 test_focus_gain_replays_scanout
 test_display_resume_replays_scanout
+test_qemu11_sdl_egl_replaces_private_hook
 
 echo "OK: SDL GL black-screen static checks passed"

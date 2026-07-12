@@ -80,6 +80,8 @@ dbus_update_texture(DisplayGLCtx *ctx, DisplaySurface *surface,
 
 static const DisplayGLCtxOps dbus_gl_ops = {
     .dpy_gl_ctx_is_compatible_dcl = dbus_is_compatible_dcl,
+    .dpy_gl_ctx_save_current = qemu_egl_save_current_context,
+    .dpy_gl_ctx_restore_current = qemu_egl_restore_current_context,
     .dpy_gl_ctx_create       = dbus_create_context,
     .dpy_gl_ctx_destroy      = qemu_egl_destroy_context,
     .dpy_gl_ctx_make_current = qemu_egl_make_context_current,

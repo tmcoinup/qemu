@@ -864,7 +864,8 @@
 # @valid: true if @x and @y can be used as a current host-side cursor
 #     position.  QEMU first uses the guest-reported hardware cursor.
 #     If the guest does not report one, QEMU falls back to the most
-#     recent absolute pointer position injected through input-send-event.
+#     recent absolute pointer position injected through
+#     input-send-event.
 #     When false, @x and @y are only placeholders.
 #
 # Since: 9.2
@@ -1536,7 +1537,7 @@
 ##
 # @DisplayFbShm:
 #
-# Cross-host framebuffer export backend. The guest framebuffer is
+# Cross-host framebuffer export backend.  The guest framebuffer is
 # exported through host-native shared memory; GPU scanout clients may
 # additionally subscribe to dma-buf / D3D11 shared texture metadata.
 # External consumers connect to the control socket and receive either

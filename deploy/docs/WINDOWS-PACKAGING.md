@@ -1,5 +1,9 @@
 # Windows 打包与启动方案
 
+> **版本基线**：当前维护目标为 QEMU `11.0.2` + `vmate` 分支。安装包继续保留
+> `qemu-system-x86_64.exe`、`qemu-img.exe` 等上游兼容文件名，避免破坏脚本、
+> QMP 管理工具和既有自动化；`vmate` 用于标识本仓库维护分支和下游构建来源。
+
 本文档覆盖 Windows 10 / Windows 11 宿主运行 patched QEMU 的方案。目标是：
 
 - QEMU、`fb-shm`、启动脚本、推流工具在 Windows/Linux 上功能 1:1 对齐。
@@ -156,8 +160,8 @@ podman build -t qemu-win64-cross -f tests/docker/dockerfiles/fedora-win64-cross.
 进入容器后配置 Windows x86_64 目标：
 
 ```bash
-mkdir -p build-win64
-cd build-win64
+mkdir -p build-win64-vmate
+cd build-win64-vmate
 ../configure \
   --cross-prefix=x86_64-w64-mingw32- \
   --target-list=x86_64-softmmu \
@@ -178,7 +182,7 @@ ninja installer
 输出文件名由 Meson 生成，形如：
 
 ```text
-build-win64/qemu-setup-9.2.0.exe
+build-win64-vmate/qemu-setup-11.0.2.exe
 ```
 
 `scripts/nsis.py` 会先执行 `make install DESTDIR=...`，再分析 exe/dll 依赖并复制

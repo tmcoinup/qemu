@@ -204,6 +204,10 @@ void gd_gl_area_switch(DisplayChangeListener *dcl,
                        DisplaySurface *surface);
 QEMUGLContext gd_gl_area_create_context(DisplayGLCtx *dgc,
                                         QEMUGLParams *params);
+void gd_gl_area_save_current_context(DisplayGLCtx *dgc,
+                                     QEMUGLContextState *state);
+int gd_gl_area_restore_current_context(DisplayGLCtx *dgc,
+                                       const QEMUGLContextState *state);
 void gd_gl_area_destroy_context(DisplayGLCtx *dgc,
                                 QEMUGLContext ctx);
 void gd_gl_area_scanout_dmabuf(DisplayChangeListener *dcl,

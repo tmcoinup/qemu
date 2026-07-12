@@ -8,6 +8,7 @@
 import os
 import socket
 import subprocess
+import tempfile
 
 from qemu_test import QemuSystemTest, Asset
 from qemu_test import wait_for_console_pattern
@@ -38,18 +39,7 @@ class VirtioGPUx86(QemuSystemTest):
          "/pxeboot/initrd.img"),
         'c49b97f893a5349e4883452178763e402bdc5caa8845b226a2d1329b5f356045')
 
-    def wait_for_console_pattern(self, success_message, vm=None):
-        wait_for_console_pattern(
-            self,
-            success_message,
-            failure_message="Kernel panic - not syncing",
-            vm=vm,
-        )
-
-    def test_virtio_vga_virgl(self):
-        self.require_accelerator('kvm')
-        self.require_device('virtio-vga-gl')
-
+    def _launch_virtio_vga_virgl(self, fb_shm_path=None):
         kernel_path = self.ASSET_KERNEL.fetch()
         initrd_path = self.ASSET_INITRD.fetch()
 
@@ -59,6 +49,10 @@ class VirtioGPUx86(QemuSystemTest):
         self.vm.add_args("-machine", "pc,accel=kvm")
         self.vm.add_args("-device", "virtio-vga-gl")
         self.vm.add_args("-display", "egl-headless")
+        if fb_shm_path:
+            self.vm.add_args(
+                "-object", f"fb-shm,id=boot-fb,path={fb_shm_path},rate=30"
+            )
         self.vm.add_args(
             "-kernel",
             kernel_path,
@@ -76,6 +70,54 @@ class VirtioGPUx86(QemuSystemTest):
         self.wait_for_console_pattern("as init process")
         exec_command_and_wait_for_pattern(
             self, "/usr/sbin/modprobe virtio_gpu", "features: +virgl +edid"
+        )
+
+    def wait_for_console_pattern(self, success_message, vm=None):
+        wait_for_console_pattern(
+            self,
+            success_message,
+            failure_message="Kernel panic - not syncing",
+            vm=vm,
+        )
+
+    def test_virtio_vga_virgl(self):
+        self.require_accelerator('kvm')
+        self.require_device('virtio-vga-gl')
+
+        self._launch_virtio_vga_virgl()
+
+    def test_virtio_vga_virgl_fb_shm_sidecar(self):
+        self.require_accelerator('kvm')
+        self.require_device('virtio-vga-gl')
+
+        # AF_UNIX sun_path 只有 108 字节；功能测试的默认 scratch 路径包含完整
+        # 类名，可能超限，因此 socket 单独放在短的临时目录中。
+        with tempfile.TemporaryDirectory(prefix="qemu-fb-") as fb_dir:
+            boot_path = os.path.join(fb_dir, "boot.sock")
+            hot_path = os.path.join(fb_dir, "hot.sock")
+            self._launch_virtio_vga_virgl(boot_path)
+
+            # 驱动先打印 virgl feature，再异步建立 KMS framebuffer；等到 fb0
+            # 注册完成，才能保证来宾已发送 SET_SCANOUT/RESOURCE_FLUSH。
+            exec_command_and_wait_for_pattern(
+                self, "sleep 1; dmesg", "fb0: virtio_gpudrmfb"
+            )
+
+            # 中文注释：modprobe 会提交真实 virgl texture scanout。此时删除
+            # 命令行 sidecar，再针对活跃 scanout 热添加新 sidecar，可同时覆盖
+            # FBO 析构、注册时状态回放和完整 previous-binding 恢复。
+            self.vm.cmd('object-del', id='boot-fb')
+            self.vm.cmd('object-add', qom_type='fb-shm', id='hot-fb',
+                        path=hot_path, rate=30)
+            self.vm.cmd('object-del', id='hot-fb')
+            self.vm.cmd('query-status')
+            self.vm.shutdown()
+
+        log = self.vm.get_log()
+        self.assertRegex(log, r'fb-shm: GL texture scanout active')
+        self.assertNotRegex(
+            log,
+            r'fb-shm: cannot (create|make|restore).*GL context',
         )
 
     def test_vhost_user_vga_virgl(self):

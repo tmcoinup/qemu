@@ -405,6 +405,22 @@ static void virgl_cmd_create_resource_3d(VirtIOGPU *g,
     virgl_renderer_resource_create(&args, NULL, 0);
 }
 
+static void virtio_gpu_virgl_disable_scanout(VirtIOGPU *g, int scanout_id)
+{
+    struct virtio_gpu_scanout *scanout =
+        &g->parent_obj.scanout[scanout_id];
+
+    /*
+     * 中文注释：GL scanout 同时持有 renderer texture、可选 dma-buf sideband
+     * 和 display listener 私有 FBO。必须在 renderer resource 销毁前按此顺序
+     * 全部解绑；只清 dma-buf 会让 SDL/EGL/fb-shm 继续引用已经失效的 texture。
+     */
+    virtio_gpu_clear_dmabuf(g, scanout_id);
+    dpy_gfx_replace_surface(scanout->con, NULL);
+    dpy_gl_scanout_disable(scanout->con);
+    scanout->resource_id = 0;
+}
+
 static int
 virtio_gpu_virgl_resource_unref(VirtIOGPU *g,
                                 struct virtio_gpu_virgl_resource *res,
@@ -412,6 +428,7 @@ virtio_gpu_virgl_resource_unref(VirtIOGPU *g,
 {
     struct iovec *res_iovs = NULL;
     int num_iovs = 0;
+    int i;
 #if VIRGL_VERSION_MAJOR >= 1
     int ret;
 
@@ -423,6 +440,24 @@ virtio_gpu_virgl_resource_unref(VirtIOGPU *g,
         return 0;
     }
 #endif
+
+    /*
+     * 中文注释：virgl texture scanout 的 dma-buf sideband 有两种 fd
+     * 所有权：get_info_ext() 返回的 fd 由 virglrenderer 持有，
+     * export_blob() 返回的 fd 则由 VGPUDMABuf 持有。不论哪一种，都必须
+     * 在 virgl resource 销毁前清理：前者可避免显示后端继续访问已经失效
+     * 的借用 fd，后者可触发 close()，避免 resource-unref 后遗留 fd/BO。
+     *
+     * 这里按 scanout.resource_id 精确匹配，既覆盖同一 resource 被多个
+     * scanout 复用的情况，也不会误清理已经切换到其他 resource 的输出。
+     * RESOURCE_UNREF 允许来宾不先发送 SET_SCANOUT(0)，所以还必须同步禁用
+     * display scanout，不能给异常来宾留下悬挂的 host texture 引用。
+     */
+    for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
+        if (g->parent_obj.scanout[i].resource_id == res->base.resource_id) {
+            virtio_gpu_virgl_disable_scanout(g, i);
+        }
+    }
 
     virgl_renderer_resource_detach_iov(res->base.resource_id,
                                        &res_iovs,
@@ -564,10 +599,10 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
         struct virgl_renderer_resource_info info;
         void *d3d_tex2d = NULL;
         bool dmabuf_exported = false;
-        static bool logged_scanout_info;
-        static bool logged_dmabuf_export;
         static bool logged_no_dmabuf_export;
 #if VIRGL_VERSION_MAJOR >= 1
+        static bool logged_scanout_info;
+        static bool logged_dmabuf_export;
         static bool logged_export_blob_failure;
         static bool warned_export_blob_no_format;
 #endif
@@ -710,8 +745,9 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
             virtio_gpu_clear_dmabuf(g, ss.scanout_id);
             if (!logged_no_dmabuf_export) {
                 /*
-                 * 中文注释：scanout texture 可继续由 SDL native EGL 显示；
-                 * fb-shm 只是在 GPU 旁路导出失败时回退 SHM，不应作为警告。
+                 * 中文注释：scanout texture 继续由 QEMU 11 官方 SDL/EGL
+                 * 路径显示；fb-shm 只在 GPU 旁路导出失败时回退 SHM，属于
+                 * 正常能力降级，不应作为运行警告。
                  */
                 info_report("virtio-gpu-virgl: scanout texture has no "
                             "dma-buf export; fb-shm GPU consumers will fall "
@@ -720,9 +756,12 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
             }
         }
     } else {
-        dpy_gfx_replace_surface(
-            g->parent_obj.scanout[ss.scanout_id].con, NULL);
-        dpy_gl_scanout_disable(g->parent_obj.scanout[ss.scanout_id].con);
+        /*
+         * 中文注释：关闭 scanout 时必须同步释放上一帧的 dma-buf sideband。
+         * export_blob 路径由 VGPUDMABuf 持有导出 fd；只通知显示后端 disable
+         * 不会触发 release 回调，会让 BO 与 fd 一直存活到设备析构。
+         */
+        virtio_gpu_virgl_disable_scanout(g, ss.scanout_id);
     }
     g->parent_obj.scanout[ss.scanout_id].resource_id = ss.resource_id;
 }
@@ -1528,8 +1567,12 @@ void virtio_gpu_virgl_reset_scanout(VirtIOGPU *g)
     int i;
 
     for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
-        dpy_gfx_replace_surface(g->parent_obj.scanout[i].con, NULL);
-        dpy_gl_scanout_disable(g->parent_obj.scanout[i].con);
+        /*
+         * 中文注释：reset 会把 GL scanout 切回空的 CPU surface。必须先
+         * 释放 dma-buf sideband，让 display listener 在 renderer reset
+         * 之前完成 texture release，并关闭 export_blob() 产生的 owned fd。
+         */
+        virtio_gpu_virgl_disable_scanout(g, i);
     }
 }
 

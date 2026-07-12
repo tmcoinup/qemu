@@ -603,7 +603,7 @@ static bool displaychangelistener_accepts_gl(DisplayChangeListener *dcl)
      * 允许它先注册到 listener 链表；display 初始化完成后，真正的 texture
      * scanout/update 会再次广播给它。
      */
-    return g_strcmp0(dcl->ops->dpy_name, "fb-shm") == 0 &&
+    return dcl->ops->dpy_gl_sidecar &&
            (dcl->ops->dpy_gl_scanout_texture ||
             dcl->ops->dpy_gl_scanout_dmabuf);
 }
@@ -734,7 +734,27 @@ void register_displaychangelistener(DisplayChangeListener *dcl)
 
     trace_displaychangelistener_register(dcl, dcl->ops->dpy_name);
     dcl->ds = get_alloc_displaystate();
-    QLIST_INSERT_HEAD(&dcl->ds->listeners, dcl, next);
+    if (dcl->ops->dpy_gl_sidecar && !QLIST_EMPTY(&dcl->ds->listeners)) {
+        DisplayChangeListener *tail;
+
+        /*
+         * GL provider 必须先 make-current，
+         * 并建立自己的 FBO。
+         * 旁路 consumer 随后才能读取共享 texture。
+         * 热 object-add 若仍头插，
+         * fb-shm 会抢先改变 current context，
+         * provider 随后可能使用不属于自己的 FBO 名称。
+         * 因此旁路 listener 固定尾插；普通 UI 保持历史头插。
+         */
+        QLIST_FOREACH(tail, &dcl->ds->listeners, next) {
+            if (!QLIST_NEXT(tail, next)) {
+                break;
+            }
+        }
+        QLIST_INSERT_AFTER(tail, dcl, next);
+    } else {
+        QLIST_INSERT_HEAD(&dcl->ds->listeners, dcl, next);
+    }
     gui_setup_refresh(dcl->ds);
     if (dcl->con) {
         dcl->con->dcls++;
@@ -1093,6 +1113,22 @@ QEMUGLContext dpy_gl_ctx_create(QemuConsole *con,
 {
     assert(con->gl);
     return con->gl->ops->dpy_gl_ctx_create(con->gl, qparams);
+}
+
+void dpy_gl_ctx_save_current(QemuConsole *con,
+                             QEMUGLContextState *state)
+{
+    assert(con->gl);
+    assert(con->gl->ops->dpy_gl_ctx_save_current);
+    con->gl->ops->dpy_gl_ctx_save_current(con->gl, state);
+}
+
+int dpy_gl_ctx_restore_current(QemuConsole *con,
+                               const QEMUGLContextState *state)
+{
+    assert(con->gl);
+    assert(con->gl->ops->dpy_gl_ctx_restore_current);
+    return con->gl->ops->dpy_gl_ctx_restore_current(con->gl, state);
 }
 
 void dpy_gl_ctx_destroy(QemuConsole *con, QEMUGLContext ctx)

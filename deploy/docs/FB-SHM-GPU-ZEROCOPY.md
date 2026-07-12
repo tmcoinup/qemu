@@ -1,5 +1,8 @@
 # fb-shm 零拷贝 GPU 推流设计说明
 
+> **版本基线**：QEMU `11.0.2` + `vmate` 分支。本文所称 SDL/EGL 是 QEMU 11
+> 官方 SDL/OpenGL 集成路径；旧版定制 native EGL 子窗口实现已不再作为当前架构。
+
 本文档给代码审核和运维使用，说明本仓库当前 `fb-shm` 的 GPU 零拷贝导出能力、
 Linux/Windows 差异、consumer 模式，以及仍需后续接入的 native GPU encoder 边界。
 
@@ -42,20 +45,26 @@ Linux 下 QEMU 有两种 GPU 导出来源：
    - QEMU `dup()` 该 dma-buf fd；
    - 发送 `FbShmCtlAck + FbShmGpuFrame`；
    - 通过 `SCM_RIGHTS` 附带 dma-buf fd。
-   - 普通 `./start-vm.sh <N>` 默认保持历史 `GPU_DISPLAY=sdl` / SDL+GLX 路径，
-     不自动追加 `blob=true,hostmem=...`，避免游戏本地窗口走实验显示链路。
+   - 普通 `./start-vm.sh <N>` 默认使用 `GPU_DISPLAY=sdl`，即 QEMU 11 官方
+     SDL/OpenGL 路径；X11 下会显式使用 X11 EGL platform 做能力探测，避免
+     EGL 把 X11 display 按 Wayland 解释。不自动追加 `blob=true,hostmem=...`，
+     以免未请求 GPU 导出的实例改变 virtio-gpu 资源策略。
    - 需要验证 GPU 零拷贝时，显式使用 `--gpu-sdl-egl` 或 `--gpu-zerocopy`；
      `GPU_HOSTMEM=512M` 可调整 host-visible window 大小。
-   - `GPU_DISPLAY=sdl-egl` 使用 SDL 父窗口 + native EGL 子窗口：宿主本地
-     SDL 窗口仍存在，DGame 的显示/隐藏仍然操作同一个窗口；fb-shm 则尝试从
-     EGL texture 导出 dma-buf 给 GPU consumer。
+   - `GPU_DISPLAY=sdl-egl` 继续保留为启动策略兼容入口，但显示实现直接复用
+     QEMU 11 官方 SDL/EGL 窗口与 context，不再在 SDL 父窗口内创建额外 X11/EGL
+     子窗口。DGame 的显示/隐藏始终操作同一个 SDL 窗口；fb-shm 从当前 EGL
+     provider 对应的 texture 尝试导出 dma-buf。
    - 如需无本地窗口的纯推流验证，可用
      `deploy/scripts/start-vm.sh <N> --gpu-headless --gpu-rendernode=/dev/dri/renderD128`
      切到 rendernode EGL 后端。
 
 2. 只有 GL texture、没有现成 dma-buf：
-   - 如果构建带 `CONFIG_GBM`，通过 `egl_get_fd_for_texture()` 尝试导出 dma-buf；
-   - 导出失败时不影响 SHM fallback。
+   - 如果构建带 `CONFIG_GBM`，通过 QEMU 11 的
+     `egl_dmabuf_export_texture()` 尝试导出 dma-buf；该接口按 plane 返回
+     fd、offset、stride 和 modifier，可正确承载带压缩元数据的多平面纹理；
+   - 导出前会核对当前 EGL display/context 与所需扩展。导出失败返回 `false`，
+     调用方继续走 SHM/PBO fallback，不会把失败误报成 GPU frame。
 
 GPU frame 的 ROI 语义是 metadata 裁剪：`FbShmGpuFrame.x/y/width/height`
 描述同一份 backing 内要编码的区域，不把 ROI 复制到新 buffer。
@@ -166,8 +175,10 @@ rg -n "unwrap\(" include/ui/fb-shm-abi.h ui/fb-shm.c tools/fb-shm-stream \
 - 如果启动时没有 `blob=true,hostmem=SIZE`，Windows/virgl 常只给 QEMU 普通 GL
   texture；在缺少 EGL texture export 的宿主上不会产生 `NOTIFY_GPU_FRAME`，
   只能继续走 SHM fallback；
-- `GPU_DISPLAY=sdl` 是默认兼容 SDL/GLX 路径，可能只能走 SHM/CPU fallback；
-  需要 DGame UI 预览显示 `G` 时，应显式使用 `--gpu-sdl-egl`；
+- `GPU_DISPLAY=sdl` 使用 QEMU 11 官方 SDL/OpenGL 路径；实际 EGL/GL provider
+  由 SDL 与宿主能力共同决定，因此缺少 dma-buf export 扩展时仍会走 SHM/CPU
+  fallback。需要 DGame UI 预览显示 `G` 时，应显式使用 `--gpu-sdl-egl` 或
+  `--gpu-zerocopy` 打开 blob/hostmem 与 GPU frame 通知；
 - `--gpu-headless` 会关闭 SDL 窗口并使用 `egl-headless` display backend；这是
   fb-shm GPU 预览/转码的无窗口模式，不适合作为宿主本地交互窗口；
 - Windows GPU export 依赖 ANGLE/D3D11 texture，纯 OpenGL 或没有 shared texture 时会回退 SHM；

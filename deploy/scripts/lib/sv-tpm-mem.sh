@@ -221,4 +221,3 @@ if [[ "$CPU_VENDOR" == "AuthenticAMD" ]]; then
         -device amd-df-stub,bus=pcie.0,addr=0x18.0x7,device-id=0x1467
     )
 fi
-

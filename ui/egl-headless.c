@@ -185,6 +185,9 @@ static bool
 egl_is_compatible_dcl(DisplayGLCtx *dgc,
                       DisplayChangeListener *dcl)
 {
+    if (dcl->ops->dpy_gl_sidecar) {
+        return true;
+    }
     if (!dcl->ops->dpy_gl_update) {
         /*
          * egl-headless is compatible with all 2d listeners, as it blits the GL
@@ -198,6 +201,8 @@ egl_is_compatible_dcl(DisplayGLCtx *dgc,
 
 static const DisplayGLCtxOps eglctx_ops = {
     .dpy_gl_ctx_is_compatible_dcl = egl_is_compatible_dcl,
+    .dpy_gl_ctx_save_current = qemu_egl_save_current_context,
+    .dpy_gl_ctx_restore_current = qemu_egl_restore_current_context,
     .dpy_gl_ctx_create       = egl_create_context,
     .dpy_gl_ctx_destroy      = qemu_egl_destroy_context,
     .dpy_gl_ctx_make_current = qemu_egl_make_context_current,

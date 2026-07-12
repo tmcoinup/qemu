@@ -431,9 +431,14 @@ int gd_egl_make_current(DisplayGLCtx *dgc,
                         QEMUGLContext ctx)
 {
     VirtualConsole *vc = container_of(dgc, VirtualConsole, gfx.dgc);
+    EGLSurface surface = ctx ? vc->gfx.esurface : EGL_NO_SURFACE;
 
-    if (!eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
-                        vc->gfx.esurface, ctx)) {
+    /*
+     * 前一个 context 可能是 EGL_NO_CONTEXT。
+     * EGL 规定此时 draw/read surface 也必须是 EGL_NO_SURFACE，
+     * 否则会返回 EGL_BAD_MATCH。
+     */
+    if (!eglMakeCurrent(qemu_egl_display, surface, surface, ctx)) {
         error_report("egl: eglMakeCurrent failed: %s", qemu_egl_get_error_string());
         return -1;
     }

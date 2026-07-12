@@ -158,9 +158,9 @@ _gpu_zerocopy_explicit=0
 : "${GPU_DISPLAY:=sdl}"
 : "${GPU_RENDERNODE:=}"
 # GPU 零拷贝元数据依赖 virtio-gpu blob resource + host-visible memory。
-# 中文注释：普通本地游戏窗口默认保持历史 SDL/GLX + texture scanout 路径，
-# 避免 native EGL 实验路径在宿主驱动上反复触发 EGL_BAD_ACCESS。只有显式
-# 选择 GPU 推流显示后端时，才默认打开零拷贝；环境变量或 CLI 仍可强制覆盖。
+# 中文注释：普通本地游戏窗口使用 QEMU 11 官方 SDL/GL，并默认保持 texture
+# scanout。`sdl-egl` 只作为旧配置兼容名：显示参数与 `sdl` 相同，但会默认打开
+# blob/hostmem 供 GPU consumer 使用；环境变量或 CLI 仍可显式覆盖零拷贝开关。
 if [[ "$_gpu_zerocopy_explicit" == "0" ]]; then
     case "$GPU_DISPLAY" in
         sdl-egl|egl-headless) GPU_ZEROCOPY=1 ;;
@@ -213,7 +213,7 @@ VMS_DIR="${VMS_DIR%/}"
 #   (无 flag)            -> SDL 窗口 + fb-shm        ← 默认
 #   --headless           -> VNC 远程  + fb-shm（去窗口、加远程）
 #   --no-sdl             -> 关窗口，仅 fb-shm（适合后台 daemon / nohup）
-#   --gpu-sdl-egl        -> SDL 本地窗口 + native EGL（fb-shm GPU 零拷贝实验）
+#   --gpu-sdl-egl        -> SDL 本地窗口兼容名（QEMU 11 自动探测 EGL）
 #   --gpu-headless       -> EGL rendernode + fb-shm（GPU 零拷贝推流验证）
 #   --no-fb-shm          -> 关推流，仅 SDL/VNC（回历史行为）
 #   --sdl --headless     -> 冲突，按 --headless 走
@@ -224,8 +224,8 @@ case "$GPU_DISPLAY" in
         exit 2 ;;
 esac
 if [[ "$STABLE_DISPLAY" == "1" && "$GPU_DISPLAY" == "sdl-egl" ]]; then
-    # 中文注释：stable 模式故意关闭 virtio-gpu GL；native EGL 没有可绑定的 GL
-    # scanout，自动退回普通 SDL 窗口，保持旧的稳定显示路径。
+    # 中文注释：stable 模式故意关闭 virtio-gpu GL；兼容名 sdl-egl 此时没有
+    # 可供官方 SDL/EGL 后端绑定的 GL scanout，退回普通 SDL 稳定路径。
     GPU_DISPLAY=sdl
     if [[ "$_gpu_zerocopy_explicit" == "0" ]]; then
         GPU_ZEROCOPY=0

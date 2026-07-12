@@ -175,10 +175,14 @@ if [[ "$HEADLESS" == "1" ]]; then
 elif [[ "${GPU_DISPLAY:-sdl}" == "egl-headless" ]]; then
     echo ">> GUI:         EGL headless GPU (rendernode=${GPU_RENDERNODE:-auto})"
 elif [[ "$SDL" == "1" ]]; then
-    if [[ "${SDL_NATIVE_EGL:-0}" == "1" ]]; then
-        echo ">> GUI:         SDL 窗口 (DISPLAY=${DISPLAY:-未设}) native EGL GPU"
+    if [[ "$STABLE_DISPLAY" == "1" ]]; then
+        echo ">> GUI:         SDL 窗口 (DISPLAY=${DISPLAY:-未设}) stable"
+    elif [[ "${GPU_DISPLAY:-sdl}" == "sdl-egl" ]]; then
+        # 中文注释：sdl-egl 是兼容模式名；实际 EGL 能力由 QEMU 11 SDL 后端
+        # 自行探测，启动器不再导出私有开关或创建额外 X11 子窗口。
+        echo ">> GUI:         SDL/GL 窗口 (QEMU 11 自动探测 EGL，兼容模式 sdl-egl)"
     else
-        echo ">> GUI:         SDL 窗口 (DISPLAY=${DISPLAY:-未设})$([[ "$STABLE_DISPLAY" == "1" ]] && echo " stable" || echo " gl")"
+        echo ">> GUI:         SDL/GL 窗口 (DISPLAY=${DISPLAY:-未设})"
     fi
 else
     echo ">> GUI:         无（纯 fb-shm 推流模式）"

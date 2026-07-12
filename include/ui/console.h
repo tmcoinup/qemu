@@ -176,6 +176,21 @@ void cursor_set_mono(QEMUCursor *c,
 void cursor_get_mono_mask(QEMUCursor *c, int transparent, uint8_t *mask);
 
 typedef void *QEMUGLContext;
+
+/*
+ * GL current binding 的完整快照。
+ *
+ * ctx 保存 provider context handle。
+ * draw/read 保存 provider 私有 drawable 或 surface。
+ * SDL 只使用 draw 保存窗口，GDK 只需要 ctx。
+ * 未使用字段保持 NULL。
+ * 调用者不得解释 handle，只能交回同一 provider 恢复。
+ */
+typedef struct QEMUGLContextState {
+    QEMUGLContext ctx;
+    void *draw;
+    void *read;
+} QEMUGLContextState;
 typedef struct QEMUGLParams QEMUGLParams;
 
 struct QEMUGLParams {
@@ -204,6 +219,16 @@ typedef struct DisplayGLCtx DisplayGLCtx;
 
 typedef struct DisplayChangeListenerOps {
     const char *dpy_name;
+
+    /*
+     * 可选：GL 旁路消费者标记。
+     *
+     * 旁路 DCL 不拥有窗口/provider。
+     * 它只创建共享 context 读取同一 scanout。
+     * console 会把它排在主显示 DCL 之后。
+     * provider 兼容回调仍须明确接受它。
+     */
+    bool dpy_gl_sidecar;
 
     /* optional */
     void (*dpy_refresh)(DisplayChangeListener *dcl);
@@ -298,6 +323,19 @@ struct DisplayChangeListener {
 typedef struct DisplayGLCtxOps {
     bool (*dpy_gl_ctx_is_compatible_dcl)(DisplayGLCtx *dgc,
                                          DisplayChangeListener *dcl);
+    /*
+     * 保存并恢复当前线程的完整 GL binding。
+     *
+     * 只保存 context 不够。
+     * EGL 还需保留 draw/read surface。
+     * SDL 还需保留 window。
+     * GL sidecar 必须在退出前恢复完整状态。
+     * 否则会破坏 virglrenderer 对 current binding 的缓存。
+     */
+    void (*dpy_gl_ctx_save_current)(DisplayGLCtx *dgc,
+                                    QEMUGLContextState *state);
+    int (*dpy_gl_ctx_restore_current)(DisplayGLCtx *dgc,
+                                      const QEMUGLContextState *state);
     QEMUGLContext (*dpy_gl_ctx_create)(DisplayGLCtx *dgc,
                                        QEMUGLParams *params);
     void (*dpy_gl_ctx_destroy)(DisplayGLCtx *dgc,
@@ -372,6 +410,10 @@ void dpy_gl_update(QemuConsole *con,
 
 QEMUGLContext dpy_gl_ctx_create(QemuConsole *con,
                                 QEMUGLParams *params);
+void dpy_gl_ctx_save_current(QemuConsole *con,
+                             QEMUGLContextState *state);
+int dpy_gl_ctx_restore_current(QemuConsole *con,
+                               const QEMUGLContextState *state);
 void dpy_gl_ctx_destroy(QemuConsole *con, QEMUGLContext ctx);
 int dpy_gl_ctx_make_current(QemuConsole *con, QEMUGLContext ctx);
 

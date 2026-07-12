@@ -25,6 +25,35 @@ QEMUGLContext qemu_egl_create_context(DisplayGLCtx *dgc,
    return ctx;
 }
 
+void qemu_egl_save_current_context(DisplayGLCtx *dgc,
+                                   QEMUGLContextState *state)
+{
+    /*
+     * EGL current binding 包含 context、draw surface 和 read surface。
+     * 三者必须成组保存，不能用 provider 根 binding 代替。
+     */
+    (void)dgc;
+    state->ctx = eglGetCurrentContext();
+    state->draw = eglGetCurrentSurface(EGL_DRAW);
+    state->read = eglGetCurrentSurface(EGL_READ);
+}
+
+int qemu_egl_restore_current_context(DisplayGLCtx *dgc,
+                                     const QEMUGLContextState *state)
+{
+    (void)dgc;
+    if (!eglMakeCurrent(qemu_egl_display,
+                        (EGLSurface)state->draw,
+                        (EGLSurface)state->read,
+                        (EGLContext)state->ctx)) {
+        error_report("egl: restoring current binding failed: %s",
+                     qemu_egl_get_error_string());
+        return -1;
+    }
+
+    return 0;
+}
+
 void qemu_egl_destroy_context(DisplayGLCtx *dgc, QEMUGLContext ctx)
 {
     eglDestroyContext(qemu_egl_display, ctx);

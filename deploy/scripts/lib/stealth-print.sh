@@ -83,4 +83,3 @@ stealth_print_profile() {
 =======================
 EOF
 }
-

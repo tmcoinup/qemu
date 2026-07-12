@@ -998,13 +998,15 @@ sdl2_gl_is_compatible_dcl(DisplayGLCtx *dgc,
         return true;
     }
 
-    return g_strcmp0(dcl->ops->dpy_name, "fb-shm") == 0 &&
+    return dcl->ops->dpy_gl_sidecar &&
            dcl->ops->dpy_gl_scanout_texture &&
            dcl->ops->dpy_gl_update;
 }
 
 static const DisplayGLCtxOps gl_ctx_ops = {
     .dpy_gl_ctx_is_compatible_dcl = sdl2_gl_is_compatible_dcl,
+    .dpy_gl_ctx_save_current = sdl2_gl_save_current_context,
+    .dpy_gl_ctx_restore_current = sdl2_gl_restore_current_context,
     .dpy_gl_ctx_create       = sdl2_gl_create_context,
     .dpy_gl_ctx_destroy      = sdl2_gl_destroy_context,
     .dpy_gl_ctx_make_current = sdl2_gl_make_context_current,

@@ -187,7 +187,7 @@ def wait_for_child_count(stream, tag, expected=1):
         time.sleep(0.01)
     raise AssertionError(f"{tag}: QMP child count did not return to {expected}")
 
-# 中文注释：c1 保持常驻，反复创建并关闭第二个 client，模拟 VMate 的
+# 中文注释：c1 保持常驻，反复创建并关闭第二个 client，模拟 vmate 的
 # query-status 短连接。每个 transient child 都必须删除，不能按连接数增长。
 s2.close()
 c2.close()
@@ -337,9 +337,14 @@ test_phenom_cpu_masks_missing_3dnow() {
 
     (
         source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+        # 以下全局变量由已 source 的函数按名称读取，ShellCheck 无法静态跟踪。
+        # shellcheck disable=SC2034
         CPU_CUR_MHZ=3200
+        # shellcheck disable=SC2034
         CPU_VENDOR=AuthenticAMD
+        # shellcheck disable=SC2034
         CPU_QEMU_ARG="phenom,model-id=AMD Phenom(tm) II X4 955 Processor"
+        # shellcheck disable=SC2034
         STEALTH_HOST_CPU_FLAGS="fpu sse sse2 3dnow 3dnowext"
         stealth_qemu_cpu_arg
     ) > "$out"
@@ -351,17 +356,25 @@ test_phenom_cpu_masks_missing_3dnow() {
     fi
 }
 
-test_gl_display_keeps_historical_default_dry_run() {
+test_gl_display_uses_qemu11_sdl_default_dry_run() {
     local out="$1"
     local vga_line
 
     DISPLAY=:0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9886 \
         "$START_VM" --no-fb-shm --no-bridge > "$out"
 
-    # 中文注释：native EGL 通过环境变量传给 QEMU，DRY_RUN argv 不会打印该环境。
-    # 这里静态钉住默认 GPU_DISPLAY=sdl，避免以后默认再次切回 sdl-egl 后漏测。
+    # 中文注释：默认名与兼容名都必须走 QEMU 11 官方 SDL/GL 参数；EGL 由
+    # QEMU 自行探测，启动器不得再导出旧的私有开关或创建 X11 子窗口。
     grep -F -- ': "${GPU_DISPLAY:=sdl}"' "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh" >/dev/null \
-        || fail "default GPU_DISPLAY must stay on stable SDL/GLX"
+        || fail "default GPU_DISPLAY must stay on official SDL/GL"
+    if grep -F -- "SDL_NATIVE_EGL" \
+        "$REPO_ROOT/deploy/scripts/start-vm.sh" \
+        "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh" \
+        "$REPO_ROOT/deploy/scripts/lib/sv-devices.sh" \
+        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null
+    then
+        fail "launcher must not retain the private SDL native-EGL environment hook"
+    fi
     grep -Fx -- "sdl,gl=on,show-cursor=off" "$out" >/dev/null \
         || fail "default SDL dry-run must keep the SDL/GL window display"
     grep -Fx -- "egl-headless" "$out" >/dev/null \
@@ -392,7 +405,7 @@ test_gl_display_keeps_historical_default_dry_run() {
         "$START_VM" --gpu-sdl-egl --no-fb-shm --no-bridge > "$out"
 
     grep -Fx -- "sdl,gl=on,show-cursor=off" "$out" >/dev/null \
-        || fail "--gpu-sdl-egl must keep an SDL window display"
+        || fail "--gpu-sdl-egl compatibility name must use official SDL/GL"
     grep -Fx -- "egl-headless" "$out" >/dev/null \
         && fail "--gpu-sdl-egl must not select headless display"
     vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
@@ -481,7 +494,7 @@ main() {
     test_qemu_service_cpu_flags_dry_run "$out"
     test_cpu_pm_keeps_upstream_default_dry_run "$out"
     test_phenom_cpu_masks_missing_3dnow "$out"
-    test_gl_display_keeps_historical_default_dry_run "$out"
+    test_gl_display_uses_qemu11_sdl_default_dry_run "$out"
     test_gpu_headless_display_dry_run "$out"
     test_hotkey_capture_option_removed "$out"
     test_cpu_isolate_scripts_parse

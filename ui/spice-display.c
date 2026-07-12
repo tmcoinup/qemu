@@ -1375,6 +1375,8 @@ qemu_spice_is_compatible_dcl(DisplayGLCtx *dgc,
 
 static const DisplayGLCtxOps gl_ctx_ops = {
     .dpy_gl_ctx_is_compatible_dcl = qemu_spice_is_compatible_dcl,
+    .dpy_gl_ctx_save_current = qemu_egl_save_current_context,
+    .dpy_gl_ctx_restore_current = qemu_egl_restore_current_context,
     .dpy_gl_ctx_create       = qemu_spice_gl_create_context,
     .dpy_gl_ctx_destroy      = qemu_egl_destroy_context,
     .dpy_gl_ctx_make_current = qemu_egl_make_context_current,

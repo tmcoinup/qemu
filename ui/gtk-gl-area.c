@@ -293,6 +293,31 @@ QEMUGLContext gd_gl_area_create_context(DisplayGLCtx *dgc,
     return ctx;
 }
 
+void gd_gl_area_save_current_context(DisplayGLCtx *dgc,
+                                     QEMUGLContextState *state)
+{
+    /*
+     * GdkGLContext 已封装对应 drawable。
+     * 不应绕过 GDK 查询 EGL/GLX surface。
+     */
+    (void)dgc;
+    state->ctx = gdk_gl_context_get_current();
+    state->draw = NULL;
+    state->read = NULL;
+}
+
+int gd_gl_area_restore_current_context(DisplayGLCtx *dgc,
+                                       const QEMUGLContextState *state)
+{
+    (void)dgc;
+    if (state->ctx) {
+        gdk_gl_context_make_current(state->ctx);
+    } else {
+        gdk_gl_context_clear_current();
+    }
+    return 0;
+}
+
 void gd_gl_area_destroy_context(DisplayGLCtx *dgc, QEMUGLContext ctx)
 {
     GdkGLContext *current_ctx = gdk_gl_context_get_current();
@@ -395,6 +420,11 @@ void gtk_gl_area_init(void)
 int gd_gl_area_make_current(DisplayGLCtx *dgc,
                             QEMUGLContext ctx)
 {
-    gdk_gl_context_make_current(ctx);
+    if (ctx) {
+        gdk_gl_context_make_current(ctx);
+    } else {
+        /* NULL 必须使用 GDK 的专用清空接口。 */
+        gdk_gl_context_clear_current();
+    }
     return 0;
 }

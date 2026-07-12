@@ -87,15 +87,17 @@ fi
 #    --headless  : -display none -vnc ...  (VNC 远程)
 #    --no-sdl    : -display none           (无 GUI；纯推流场景)
 #    --gpu-sdl-egl
-#                : -display sdl,gl=on + native EGL 子窗口
-#                  (保留本地 SDL 窗口，同时给 fb-shm 导出 dma-buf)
+#                : -display sdl,gl=on       (兼容模式名)
+#                  QEMU 11 SDL 后端会自行探测 EGL；不再创建私有 X11 子窗口，
+#                  同时通过默认 blob/hostmem 给 fb-shm 提供 dma-buf 条件。
 #    --gpu-headless
 #                : -display egl-headless   (rendernode EGL，给 fb-shm 走 GPU 导出)
 #
 # STABLE_DISPLAY=0（默认）: 在 --sdl / --gpu-headless 模式下生效，
 #   启 virtio-vga-gl + virgl 3D 加速。
-#   普通 --sdl 默认保持历史 SDL/GLX + texture scanout；--gpu-sdl-egl /
-#   --gpu-headless 才启用实验 native EGL / blob resource 零拷贝路径。
+#   普通 --sdl 与兼容名 --gpu-sdl-egl 都使用 QEMU 11 官方 SDL/GL；前者默认
+#   保持 texture scanout，后者默认加 blob resource，EGL/GLX 由 QEMU 自行探测。
+#   --gpu-headless 则显式选择无窗口 rendernode EGL 路径。
 #
 # STABLE_DISPLAY=1: 强制 virtio-vga，不开 -gl/virgl。用于规避 virgl 长期运行后
 #   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
@@ -107,16 +109,9 @@ GPU_EGL_HEADLESS=0
 if [[ "$GPU_DISPLAY_MODE" == "egl-headless" && "$STABLE_DISPLAY" != "1" ]]; then
     GPU_EGL_HEADLESS=1
 fi
-SDL_NATIVE_EGL=0
-if [[ "$GPU_DISPLAY_MODE" == "sdl-egl" && "$STABLE_DISPLAY" != "1" && "$SDL" == "1" ]]; then
-    # 中文注释：QEMU SDL backend 仍使用 `-display sdl,gl=on`，这里只通过环境
-    # 开关让 SDL 父窗口里的 GL surface 改由 native EGL 子窗口承载。这样
-    # DGame 仍能用 xdotool 显示/隐藏 SDL 父窗口，同时 fb-shm 能发布 dma-buf。
-    SDL_NATIVE_EGL=1
-    export QEMU_SDL_NATIVE_EGL=1
-else
-    unset QEMU_SDL_NATIVE_EGL
-fi
+# 中文注释：`sdl-egl` 只保留为旧配置的兼容名字。QEMU 11 会在官方 SDL
+# backend 内探测 EGL 并设置 SDL hint，因此启动器只负责生成统一的
+# `-display sdl,gl=on`，不再传递私有环境变量或维护额外 X11 子窗口。
 GPU_GL_DISPLAY=0
 if [[ "$STABLE_DISPLAY" != "1" && ( "$SDL" == "1" || "$GPU_EGL_HEADLESS" == "1" ) ]]; then
     GPU_GL_DISPLAY=1

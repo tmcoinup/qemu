@@ -24,7 +24,7 @@
 
 #include "qemu/osdep.h"
 
-#include "block/aio-wait.h"
+#include "qemu/aio-wait.h"
 #include "chardev/char-io.h"
 #include "monitor-internal.h"
 #include "qapi/error.h"
@@ -130,9 +130,33 @@ static void monitor_qmp_cleanup_queue_and_resume(MonitorQMP *mon)
 
 }
 
-static void monitor_qmp_iothread_quiesce(void *opaque)
+static void monitor_qmp_detach_frontend(void *opaque)
 {
-    /* 空回调仅作为主线程等待 monitor I/O 线程完成既有 callback 的同步点。 */
+    MonitorQMP *mon = opaque;
+
+    /*
+     * 中文注释：chardev frontend 及其 GSource 尚不支持跨线程修改。这个函数
+     * 必须在 frontend 当前所属的 AioContext 中运行；I/O 线程模式下，主线程
+     * 通过 aio_wait_bh_oneshot() 同步等待它完成，因而既能等当前 callback
+     * 退出，也能保证解绑后不会再有 callback 访问即将释放的 MonitorQMP。
+     */
+    if (mon->common.resume_bh) {
+        qemu_bh_delete(mon->common.resume_bh);
+        mon->common.resume_bh = NULL;
+    }
+    qemu_mutex_lock(&mon->common.mon_lock);
+    mon->common.skip_flush = true;
+    monitor_cancel_out_watch(&mon->common);
+    qemu_mutex_unlock(&mon->common.mon_lock);
+
+    qemu_chr_fe_set_handlers(&mon->common.chr, NULL, NULL, NULL,
+                             NULL, NULL, NULL, true);
+    qemu_chr_fe_set_open(&mon->common.chr, false);
+
+    qemu_mutex_lock(&mon->common.mon_lock);
+    /* handlers 解绑会重置 gcontext，再检查一次以清理竞态中的晚到 source。 */
+    monitor_cancel_out_watch(&mon->common);
+    qemu_mutex_unlock(&mon->common.mon_lock);
 }
 
 static void monitor_qmp_transient_destroy_bh(void *opaque)
@@ -162,30 +186,14 @@ static void monitor_qmp_transient_destroy_bh(void *opaque)
     }
 
     /*
-     * retire BH 固定在主 AioContext：先取消可延迟执行的 resume BH 并解绑
-     * frontend，再禁止 flush、取消正确 context 上的 out_watch。随后用空 BH
-     * 等待 monitor I/O 线程越过所有旧 callback，最后才析构 chardev/QOM。
+     * retire BH 固定在主 AioContext，但 frontend 的解绑必须回到其所属线程。
+     * 同步 BH 同时充当 callback 栅栏；完成后主线程才可析构 chardev/QOM。
      */
-    if (mon->common.resume_bh) {
-        qemu_bh_delete(mon->common.resume_bh);
-        mon->common.resume_bh = NULL;
-    }
-    qemu_mutex_lock(&mon->common.mon_lock);
-    mon->common.skip_flush = true;
-    monitor_cancel_out_watch(&mon->common);
-    qemu_mutex_unlock(&mon->common.mon_lock);
-
-    qemu_chr_fe_set_handlers(&mon->common.chr, NULL, NULL, NULL,
-                             NULL, NULL, NULL, true);
-    qemu_chr_fe_set_open(&mon->common.chr, false);
-    qemu_mutex_lock(&mon->common.mon_lock);
-    /* handlers 解绑会把 gcontext 重置为默认值，再查一次可捕获竞态中的晚 source。 */
-    monitor_cancel_out_watch(&mon->common);
-    qemu_mutex_unlock(&mon->common.mon_lock);
-
     if (mon->common.use_io_thread) {
         aio_wait_bh_oneshot(iothread_get_aio_context(mon_iothread),
-                            monitor_qmp_iothread_quiesce, NULL);
+                            monitor_qmp_detach_frontend, mon);
+    } else {
+        monitor_qmp_detach_frontend(mon);
     }
     {
         QEMU_LOCK_GUARD(&mon->qmp_queue_lock);

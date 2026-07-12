@@ -251,6 +251,17 @@ typedef struct DisplayChangeListenerOps {
     /* optional */
     void (*dpy_gl_scanout_dmabuf)(DisplayChangeListener *dcl,
                                   QemuDmaBuf *dmabuf);
+    /*
+     * 可选：旁路 dma-buf 通知。
+     *
+     * 普通 dpy_gl_scanout_dmabuf() 表示显示设备已经把主 scanout 切换成
+     * dma-buf，窗口 DCL 可以据此改变自己的显示状态。这个回调只用于
+     * “主显示仍是 texture/surface，但同一帧额外导出了 dma-buf”的场景，
+     * 例如 fb-shm GPU 推流。窗口后端不实现它，避免旁路句柄覆盖本地窗口
+     * 原本稳定的 texture scanout。
+     */
+    void (*dpy_gl_scanout_dmabuf_update)(DisplayChangeListener *dcl,
+                                         QemuDmaBuf *dmabuf);
     /* optional */
     void (*dpy_gl_cursor_dmabuf)(DisplayChangeListener *dcl,
                                  QemuDmaBuf *dmabuf, bool have_hot,
@@ -265,6 +276,13 @@ typedef struct DisplayChangeListenerOps {
     void (*dpy_gl_update)(DisplayChangeListener *dcl,
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
+    /* optional - notified when @paused on the DCL flips.
+     * Backends use this to release window/GPU resources (e.g. SDL hides
+     * its window) and to refresh on resume.  The base console layer has
+     * already stopped invoking dpy_refresh when paused; this hook is
+     * just for backend-specific cleanup. */
+    void (*dpy_set_paused)(DisplayChangeListener *dcl, bool paused);
+
 } DisplayChangeListenerOps;
 
 struct DisplayChangeListener {
@@ -272,6 +290,7 @@ struct DisplayChangeListener {
     const DisplayChangeListenerOps *ops;
     DisplayState *ds;
     QemuConsole *con;
+    bool paused;          /* skip dpy_refresh() while true             */
 
     QLIST_ENTRY(DisplayChangeListener) next;
 };
@@ -308,6 +327,14 @@ void update_displaychangelistener(DisplayChangeListener *dcl,
                                   uint64_t interval);
 void unregister_displaychangelistener(DisplayChangeListener *dcl);
 
+/*
+ * Pause / resume every DisplayChangeListener whose ops->dpy_name matches
+ * @name (e.g. "sdl2", "fb-shm").  Returns the number of listeners that
+ * actually flipped state, or -1 with *errp set if @name is unknown.
+ */
+int qemu_displaychangelistener_set_paused(const char *name, bool paused,
+                                          Error **errp);
+
 bool dpy_ui_info_supported(const QemuConsole *con);
 const QemuUIInfo *dpy_get_ui_info(const QemuConsole *con);
 int dpy_set_ui_info(QemuConsole *con, QemuUIInfo *info, bool delay);
@@ -332,6 +359,8 @@ void dpy_gl_scanout_texture(QemuConsole *con,
                             void *d3d_tex2d);
 void dpy_gl_scanout_dmabuf(QemuConsole *con,
                            QemuDmaBuf *dmabuf);
+void dpy_gl_scanout_dmabuf_update(QemuConsole *con,
+                                  QemuDmaBuf *dmabuf);
 void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
                           bool have_hot, uint32_t hot_x, uint32_t hot_y);
 void dpy_gl_cursor_position(QemuConsole *con,
@@ -347,6 +376,7 @@ void dpy_gl_ctx_destroy(QemuConsole *con, QEMUGLContext ctx);
 int dpy_gl_ctx_make_current(QemuConsole *con, QEMUGLContext ctx);
 
 bool console_has_gl(QemuConsole *con);
+int qemu_console_get_graphic_flags(QemuConsole *con);
 
 typedef uint32_t console_ch_t;
 
@@ -397,6 +427,9 @@ QemuConsole *qemu_console_lookup_by_device(DeviceState *dev, uint32_t head);
 QemuConsole *qemu_console_lookup_by_device_name(const char *device_id,
                                                 uint32_t head, Error **errp);
 QEMUCursor *qemu_console_get_cursor(QemuConsole *con);
+void qemu_console_record_absolute_input(QemuConsole *con,
+                                        InputAxis axis,
+                                        int value);
 bool qemu_console_is_visible(QemuConsole *con);
 bool qemu_console_is_graphic(QemuConsole *con);
 bool qemu_console_is_fixedsize(QemuConsole *con);

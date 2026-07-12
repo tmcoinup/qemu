@@ -617,6 +617,52 @@
             '*poll-shrink': 'int' } }
 
 ##
+# @FbShmProperties:
+#
+# Properties for the ``fb-shm`` user-creatable object.
+#
+# Coexists with any ``-display`` backend: registers a
+# DisplayChangeListener on the primary graphic console and exports the
+# (optionally cropped) framebuffer through host-native shared memory
+# plus a doorbell, identical to the ``-display fb-shm`` form.  GPU
+# scanout
+# clients may additionally subscribe to dma-buf / D3D11 shared texture
+# metadata (see ``include/ui/fb-shm-abi.h`` for the wire format).  Use
+# this when you want SDL/GTK/VNC for live debugging *and* a parallel
+# low-latency stream path for ffmpeg / NVENC.
+#
+# @path: control socket path (default
+#     ``/run/qemu/fb-${id}.sock``).
+#
+# @x: ROI x offset within the guest surface (default 0).
+#
+# @y: ROI y offset within the guest surface (default 0).
+#
+# @width: ROI width; 0 means "track the full surface width"
+#     (default 0).
+#
+# @height: ROI height; 0 means "track the full surface height"
+#     (default 0).
+#
+# @rate: target frame rate in Hz, clamped to ``[1, 240]``
+#     (default 30).
+#
+# @cursor: blend the guest cursor onto the published frame
+#     (default off; reserved for future use).
+#
+# Since: 9.2
+##
+{ 'struct': 'FbShmProperties',
+  'data': { '*path'   : 'str',
+            '*x'      : 'uint32',
+            '*y'      : 'uint32',
+            '*width'  : 'uint32',
+            '*height' : 'uint32',
+            '*rate'   : 'uint32',
+            '*cursor' : 'bool' },
+  'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } }
+
+##
 # @MainLoopProperties:
 #
 # Properties for the main-loop object.
@@ -1207,6 +1253,7 @@
     { 'name': 'cryptodev-vhost-user',
       'if': 'CONFIG_VHOST_CRYPTO' },
     'dbus-vmstate',
+    { 'name': 'fb-shm', 'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } },
     'filter-buffer',
     'filter-dump',
     'filter-mirror',
@@ -1285,6 +1332,9 @@
       'cryptodev-vhost-user':       { 'type': 'CryptodevVhostUserProperties',
                                       'if': 'CONFIG_VHOST_CRYPTO' },
       'dbus-vmstate':               'DBusVMStateProperties',
+      'fb-shm':                     { 'type': 'FbShmProperties',
+                                      'if': { 'any': [ 'CONFIG_LINUX',
+                                                       'CONFIG_WIN32' ] } },
       'filter-buffer':              'FilterBufferProperties',
       'filter-dump':                'FilterDumpProperties',
       'filter-mirror':              'FilterMirrorProperties',

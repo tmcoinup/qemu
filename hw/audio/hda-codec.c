@@ -122,8 +122,9 @@ static void hda_codec_parse_fmt(uint32_t format, struct audsettings *as)
  * HDA codec vendor ID. Windows reads this over the HDA verb interface and
  * uses it to label the audio device. The upstream default 0x1af4 = Red Hat,
  * which shows up in guest as "Red Hat High Definition Audio" — a textbook
- * virtualization tell. Switch to 0x10ec = Realtek so it looks like a common
- * retail motherboard codec instead.
+ * virtualization tell. Pose as a common Realtek codec (0x10ec); together
+ * with the guest-side controller FriendlyName rewrite this avoids linking
+ * the audio codec identity back to QEMU/virtio.
  */
 #define QEMU_HDA_ID_VENDOR  0x10ec
 #define QEMU_HDA_PCM_FORMATS (AC_SUPPCM_BITS_16 |       \

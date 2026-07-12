@@ -43,6 +43,14 @@ struct sdl2_console {
     int idle_counter;
     int ignore_hotkeys;
     bool gui_keysym;
+    /*
+     * 输入门控：键鼠事件只在窗口同时拥有 X11 输入焦点(FOCUS_GAINED)
+     * 和鼠标焦点(ENTER, 即指针在窗内) 时才下发给 guest。
+     * 任一条件失守 -> 把当前所有按下的键 lift 掉, 后续事件丢弃,
+     * 防止"窗外按键打到 guest"以及焦点切换时 guest 卡键。
+     */
+    bool has_input_focus;
+    bool has_mouse_focus;
     SDL_GLContext winctx;
     QKbdState *kbd;
     bool has_dmabuf;
@@ -52,8 +60,53 @@ struct sdl2_console {
     egl_fb win_fb;
     bool y0_top;
     bool scanout_mode;
+    bool native_egl;
+    uintptr_t native_egl_window;
+    uintptr_t native_egl_colormap;
+    EGLContext ectx;
+    EGLSurface esurface;
+    bool logged_native_egl_visual;
+    bool logged_scanout_texture;
+    bool logged_scanout_flush;
+    bool warned_missing_scanout_fb;
+    bool warned_native_egl_blit;
 #endif
 };
+
+/*
+ * Centred destination rectangle for a gw*gh guest surface inside a ww*wh
+ * window.  The guest is shown at its native resolution and is never magnified
+ * beyond 1:1: a larger window is letterboxed / pillarboxed (black borders)
+ * instead of upscaling, while a smaller window shrinks the image to fit,
+ * preserving the aspect ratio (so nothing is ever clipped).  Used for both the
+ * GL viewport and the absolute-pointer mapping so the guest cursor stays
+ * aligned with the visible picture.
+ */
+static inline void sdl2_gfx_dst_rect(int ww, int wh, int gw, int gh,
+                                     int *px, int *py, int *pw, int *ph)
+{
+    double scale;
+    int dw, dh;
+
+    if (gw < 1 || gh < 1) {
+        *px = 0;
+        *py = 0;
+        *pw = ww;
+        *ph = wh;
+        return;
+    }
+
+    scale = MIN((double)ww / gw, (double)wh / gh);
+    if (scale > 1.0) {
+        scale = 1.0;            /* never magnify past the native resolution */
+    }
+    dw = (int)(gw * scale + 0.5);
+    dh = (int)(gh * scale + 0.5);
+    *pw = dw;
+    *ph = dh;
+    *px = (ww - dw) / 2;
+    *py = (wh - dh) / 2;
+}
 
 void sdl2_window_create(struct sdl2_console *scon);
 void sdl2_window_destroy(struct sdl2_console *scon);
@@ -95,13 +148,14 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
                              uint32_t x, uint32_t y,
                              uint32_t w, uint32_t h,
                              void *d3d_tex2d);
-void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
-                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+#ifdef CONFIG_GBM
 void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
                             QemuDmaBuf *dmabuf);
 void sdl2_gl_release_dmabuf(DisplayChangeListener *dcl,
                             QemuDmaBuf *dmabuf);
-bool sdl2_gl_has_dmabuf(DisplayChangeListener *dcl);
+#endif
+void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
+                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void sdl2_gl_console_init(struct sdl2_console *scon);
 
 #endif /* SDL2_H */

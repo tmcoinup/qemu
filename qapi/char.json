@@ -273,6 +273,11 @@
 # @websocket: enable websocket protocol on server sockets
 #     (default: false) (Since: 3.1)
 #
+# @multi: keep a server socket open for multiple concurrent QMP
+#     clients.  This is only valid for socket chardevs used by a QMP
+#     monitor.
+#     (default: false) (Since: 11.0)
+#
 # @reconnect-ms: For a client socket, if a socket is disconnected,
 #     then attempt a reconnect after the given number of milliseconds.
 #     Setting this to zero disables this function.
@@ -290,6 +295,7 @@
             '*telnet': 'bool',
             '*tn3270': 'bool',
             '*websocket': 'bool',
+            '*multi': 'bool',
             '*reconnect-ms': 'int' },
   'base': 'ChardevCommon' }
 

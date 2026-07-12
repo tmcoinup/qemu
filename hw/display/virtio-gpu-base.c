@@ -60,11 +60,24 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
     size_t output_idx;
     VirtIOGPUOutputList *node;
     qemu_edid_info info = {
-        .width_mm = g->req_state[scanout].width_mm,
-        .height_mm = g->req_state[scanout].height_mm,
+        /* stealth (patch 0009): width/height_mm + vendor/name/serial 从
+         * g->conf 透传，cmdline -device edid-width-mm/edid-height-mm/
+         * edid-vendor/edid-name/edid-serial 覆盖 edid-generate.c 历史默认。
+         * 字符串 NULL 时回落 ("SAM"/"S24F350"/...)；mm=0 时按 req_state 走。 */
+        .width_mm = g->conf.edid_width_mm
+                        ? g->conf.edid_width_mm
+                        : g->req_state[scanout].width_mm,
+        .height_mm = g->conf.edid_height_mm
+                         ? g->conf.edid_height_mm
+                         : g->req_state[scanout].height_mm,
         .prefx = g->req_state[scanout].width,
         .prefy = g->req_state[scanout].height,
+        .maxx = g->conf.xmax,
+        .maxy = g->conf.ymax,
         .refresh_rate = g->req_state[scanout].refresh_rate,
+        .vendor = g->conf.edid_vendor,
+        .name = g->conf.edid_name,
+        .serial = g->conf.edid_serial,
     };
 
     for (output_idx = 0, node = g->conf.outputs;

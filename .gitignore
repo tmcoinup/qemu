@@ -1,5 +1,7 @@
 /GNUmakefile
 /build/
+# 本地 Windows 交叉编译目录：包含可再生的对象文件、运行时与安装包，不纳入源码版本库。
+/build-win64-vmate/
 /.cache/
 /.vscode/
 *.pyc
@@ -20,3 +22,11 @@ GTAGS
 *.swp
 *.patch
 *.gcov
+/.claude/settings.local.json
+!deploy/driver-signing/patches/*.patch
+.claude/scheduled_tasks.lock
+
+# deploy: 固件二进制备份（脚本按 unix 时间戳自动生成，勿入库）
+deploy/firmware/*.fd.bak.*
+# deploy: 个人临时命令草稿
+deploy/scripts/tmp.txt

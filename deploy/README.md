@@ -1,4 +1,11 @@
-# QEMU v11.0.0 反虚拟化化 + vGPU 拆分工程（DNF TP 可玩目标）
+# gmate（QEMU v11.0.2）反虚拟化 + vGPU 拆分工程
+
+`gmate` 的默认生产路径始终是 NVIDIA mdev/vGPU：主入口仍为
+`deploy/start-vm.sh`，默认分配 vGPU 并挂载 `vfio-pci,sysfsdev=<mdev>`。
+从 `qemu-9.2.0` 合入的鼠标位置查询、零拷贝 `fb-shm`、硬件池、真机优化、
+VLAN 和 virtio-vga 工具链完整保留在 QEMU 核心及 `deploy/scripts/`，作为可选
+兼容能力，不会替换 vGPU 默认启动流程。方案边界见
+[`docs/STEALTH-APPROACHES.md`](docs/STEALTH-APPROACHES.md)。
 
 ## 入口脚本（host）
 
@@ -64,7 +71,7 @@ host:   /dev/shm/nv-shmem-vmN ◄───────────────�
 |------|------|
 | `target/i386/cpu.h` | 新字段 `stealth_hypervisor` (X86CPU) |
 | `target/i386/cpu.c` | 新属性 `x-hv-stealth`；gate `FEAT_1_ECX` 里的 HYPERVISOR bit；新增三个 CPU 模型 `Core-i5-4590` / `Core-i5-6500` / `Core-i3-8100` |
-| `hw/smbios/smbios.c` | type 17 新增 `memtype` / `typedetail` / `width` / `totalwidth` 选项，把 DDR 类型/宽度/同步属性真填进 SMBIOS |
+| `hw/smbios/smbios.c` | type 17 新增 `memtype` / `typedetail` / `width` / `totalwidth` / `rank` / `voltage` 选项，把 DDR 类型、位宽、Rank、同步属性和电压显式填进 SMBIOS；未指定时保持 QEMU 11 默认语义 |
 | `hw/nvme/nvme.h` + `hw/nvme/ctrl.c` | NVMe 新增 `model=` 属性（默认 `QEMU NVMe Ctrl` 覆盖为 SSD 真实型号） |
 | `hw/ide/atapi.c` | ATAPI INQUIRY 不再硬编码 `QEMU`/`QEMU DVD-ROM`。`-device ide-cd,model=...` 给出值时按空格拆分成 `vendor(8)+product(16)` 填入 SCSI INQUIRY 响应，Windows 里光驱显示真实型号如 `TSSTcorp CDDVDW SH-224DB` |
 | `target/i386/cpu.c` | 新增 CPUID leaf `0x16` (Processor Frequency Info) 处理：从 tsc-freq 派生 base/max MHz + 100 MHz bus clock，让 Windows `Win32_Processor.CurrentClockSpeed` 与 brand string 一致（原 fallback=0 / OVMF 显示 2.00 GHz）|

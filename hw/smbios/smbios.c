@@ -155,7 +155,21 @@ static struct {
     uint16_t type_detail;
     uint16_t data_width;
     uint16_t total_width;
+    uint8_t rank;
+    uint16_t voltage_mv;
 } type17;
+
+/* stealth: allow SMBIOS type 16 Physical Memory Array to advertise a
+ * larger maximum capacity and a higher slot count than the currently
+ * populated DIMM count. Real retail boards (e.g. B350-PLUS: 64 GB max,
+ * 4 DIMM slots) always report an upper bound that exceeds the installed
+ * DIMMs, so anti-cheat can use `MaxCapacity == InstalledCapacity` as a
+ * VM tell. Extra slots past the populated DIMMs are emitted as
+ * size=0 ("No Module Installed") type 17 entries. */
+static struct {
+    uint64_t max_capacity_kb;  /* 0 = default to ram_size */
+    uint16_t num_devices;      /* 0 = default to dimm_cnt */
+} type16;
 
 static QEnumLookup type41_kind_lookup = {
     .array = (const char *const[]) {
@@ -531,6 +545,23 @@ static const QemuOptDesc qemu_smbios_type11_opts[] = {
     { /* end of list */ }
 };
 
+static const QemuOptDesc qemu_smbios_type16_opts[] = {
+    {
+        .name = "type",
+        .type = QEMU_OPT_NUMBER,
+        .help = "SMBIOS element type",
+    },{
+        .name = "max-capacity",
+        .type = QEMU_OPT_SIZE,
+        .help = "physical memory array maximum capacity (bytes, e.g. 64G)",
+    },{
+        .name = "num-devices",
+        .type = QEMU_OPT_NUMBER,
+        .help = "total DIMM slots (populated + empty)",
+    },
+    { /* end of list */ }
+};
+
 static const QemuOptDesc qemu_smbios_type17_opts[] = {
     {
         .name = "type",
@@ -580,6 +611,14 @@ static const QemuOptDesc qemu_smbios_type17_opts[] = {
         .name = "totalwidth",
         .type = QEMU_OPT_NUMBER,
         .help = "total width in bits (data+ECC; defaults to data width)",
+    },{
+        .name = "rank",
+        .type = QEMU_OPT_NUMBER,
+        .help = "rank count (0=unknown)",
+    },{
+        .name = "voltage",
+        .type = QEMU_OPT_NUMBER,
+        .help = "minimum, maximum and configured voltage in millivolts",
     },
     { /* end of list */ }
 };
@@ -841,7 +880,10 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance,
 
     t->thread_count = (threads_per_socket > 255) ? 0xFF : threads_per_socket;
 
-    t->processor_characteristics = cpu_to_le16(0x02); /* Unknown */
+    /* stealth: 64-bit capable + multi-core + hw thread + execute protection
+     * + enhanced virtualization + power/performance control — all bits a
+     * real Ryzen firmware reports. */
+    t->processor_characteristics = cpu_to_le16(0xFC);
     t->processor_family2 = cpu_to_le16(type4.processor_family);
 
     if (tbl_len == SMBIOS_TYPE_4_LEN_V30) {
@@ -1028,28 +1070,95 @@ static void smbios_build_type_11_table(void)
 static void smbios_build_type_16_table(unsigned dimm_cnt)
 {
     uint64_t size_kb;
+    unsigned slots = type16.num_devices > dimm_cnt ?
+                     type16.num_devices : dimm_cnt;
 
     SMBIOS_BUILD_TABLE_PRE(16, T16_BASE, true); /* required */
 
-    t->location = 0x01; /* Other */
+    t->location = 0x03; /* System board or motherboard */
     t->use = 0x03; /* System memory */
-    t->error_correction = 0x06; /* Multi-bit ECC (for Microsoft, per SeaBIOS) */
-    size_kb = QEMU_ALIGN_UP(current_machine->ram_size, KiB) / KiB;
+    /*
+     * Stealth: Multi-bit ECC (0x06) is implausible on a Ryzen 3 1200 / B350
+     * consumer board with HyperX (non-ECC) DDR4 — that combination would
+     * never report ECC. Use 0x03 (None) to match the consumer profile.
+     * The original 0x06 was a SeaBIOS/Windows-on-Hyper-V workaround that
+     * doesn't apply to real Win10/11 guests booting via OVMF.
+     */
+    t->error_correction = 0x03; /* None — consumer DDR4 is non-ECC */
+    size_kb = type16.max_capacity_kb ? type16.max_capacity_kb :
+              QEMU_ALIGN_UP(current_machine->ram_size, KiB) / KiB;
     if (size_kb < MAX_T16_STD_SZ) {
         t->maximum_capacity = cpu_to_le32(size_kb);
         t->extended_maximum_capacity = cpu_to_le64(0);
     } else {
         t->maximum_capacity = cpu_to_le32(MAX_T16_STD_SZ);
-        t->extended_maximum_capacity = cpu_to_le64(current_machine->ram_size);
+        t->extended_maximum_capacity = cpu_to_le64(size_kb * KiB);
     }
     t->memory_error_information_handle = cpu_to_le16(0xFFFE); /* Not provided */
-    t->number_of_memory_devices = cpu_to_le16(dimm_cnt);
+    t->number_of_memory_devices = cpu_to_le16(slots);
 
     SMBIOS_BUILD_TABLE_POST;
 }
 
 #define MAX_T17_STD_SZ 0x7FFF /* (32G - 1M), in Megabytes */
 #define MAX_T17_EXT_SZ 0x80000000 /* 2P, in Megabytes */
+
+/*
+ * stealth: build the Type 17 device-locator string. If loc_pfx contains
+ * "%C", substitute the channel letter (A for an even DIMM index, B for odd)
+ * and emit it verbatim, e.g. loc_pfx="DIMM_%C2" -> "DIMM_A2"/"DIMM_B2",
+ * matching real dual-channel desktop board SMBIOS dumps. Otherwise keep the
+ * legacy "<pfx> <instance>" form so unmodified callers are unaffected.
+ */
+static void smbios_type17_locator(char *buf, size_t buflen, unsigned instance)
+{
+    const char *pct = type17.loc_pfx ? strstr(type17.loc_pfx, "%C") : NULL;
+
+    if (pct) {
+        int pre_len = pct - type17.loc_pfx;
+        snprintf(buf, buflen, "%.*s%c%s", pre_len, type17.loc_pfx,
+                 (instance & 1) ? 'B' : 'A', pct + 2);
+    } else {
+        char channel = 'A' + (instance & 1);
+        unsigned rank = (instance >> 1) + 1;
+
+        snprintf(buf, buflen, "%s_%c%u", type17.loc_pfx,
+                 channel, rank);
+    }
+}
+
+/*
+ * stealth: pick this DIMM's serial number. type17.serial may be a
+ * '|'-delimited list with one serial per populated slot, because real boards
+ * never repeat a serial across DIMMs -- a single shared serial is an obvious
+ * fabricated-SMBIOS tell. Returns the instance-th token, clamped to the last
+ * token, so a plain (non-delimited) serial keeps the legacy "same for every
+ * slot" behavior.
+ */
+static void smbios_type17_serial(char *buf, size_t buflen, unsigned instance)
+{
+    const char *tok = type17.serial ? type17.serial : "";
+    const char *p = tok;
+    unsigned idx = 0;
+    size_t len;
+
+    while (*p) {
+        if (*p == '|') {
+            if (idx == instance) {
+                break;
+            }
+            idx++;
+            tok = p + 1;
+        }
+        p++;
+    }
+    len = p - tok;
+    if (len >= buflen) {
+        len = buflen - 1;
+    }
+    memcpy(buf, tok, len);
+    buf[len] = '\0';
+}
 
 static void smbios_build_type_17_table(unsigned instance, uint64_t size)
 {
@@ -1078,35 +1187,92 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
     }
     t->form_factor = 0x09; /* DIMM */
     t->device_set = 0; /* Not in a set */
-    /*
-     * Real desktop BIOSes label DIMM slots with channel letters so tools
-     * like CPU-Z / AIDA / HWiNFO detect dual-channel operation. Lay them
-     * out as A1, B1, A2, B2, ... — even instances to channel A, odd to B.
-     */
+    smbios_type17_locator(loc_str, sizeof(loc_str), instance);
+    SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
+    /* Dual-channel support: substitute "%C" in bank string with channel
+     * letter based on DIMM index (A for even, B for odd). This allows a
+     * single -smbios type=17,bank="P0 CHANNEL %C" override to produce
+     * "P0 CHANNEL A" for DIMM 0 and "P0 CHANNEL B" for DIMM 1, matching
+     * real dual-channel Ryzen board SMBIOS dumps. */
     {
-        char ch = 'A' + (instance & 1);
-        unsigned rank = (instance >> 1) + 1;
-        char bank_str[32];
-        snprintf(loc_str, sizeof(loc_str), "%s_%c%u",
-                 type17.loc_pfx, ch, rank);
-        snprintf(bank_str, sizeof(bank_str), "%s_Channel%c-DIMM%u",
-                 type17.bank, ch, rank);
-        SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
+        char bank_str[128];
+        const char *pct;
+        const char *bank = type17.bank ? type17.bank : "BANK";
+
+        if ((pct = strstr(bank, "%C")) != NULL) {
+            int pre_len = pct - bank;
+            snprintf(bank_str, sizeof(bank_str), "%.*s%c%s",
+                     pre_len, bank,
+                     (instance & 1) ? 'B' : 'A', pct + 2);
+        } else {
+            char channel = 'A' + (instance & 1);
+            unsigned rank = (instance >> 1) + 1;
+
+            snprintf(bank_str, sizeof(bank_str), "%s_Channel%c-DIMM%u",
+                     bank, channel, rank);
+        }
         SMBIOS_TABLE_SET_STR(17, bank_locator_str, bank_str);
     }
-    t->memory_type = type17.memtype ? type17.memtype : 0x07; /* default RAM */
+    t->memory_type = type17.memtype ? type17.memtype : 0x07; /* RAM */
     t->type_detail = cpu_to_le16(type17.type_detail ?
-                                 type17.type_detail : 0x02); /* default Other */
+                                 type17.type_detail : 0x02); /* Other */
     t->speed = cpu_to_le16(type17.speed);
     SMBIOS_TABLE_SET_STR(17, manufacturer_str, type17.manufacturer);
-    SMBIOS_TABLE_SET_STR(17, serial_number_str, type17.serial);
+    {
+        char serial_str[128];
+        smbios_type17_serial(serial_str, sizeof(serial_str), instance);
+        SMBIOS_TABLE_SET_STR(17, serial_number_str, serial_str);
+    }
     SMBIOS_TABLE_SET_STR(17, asset_tag_number_str, type17.asset);
     SMBIOS_TABLE_SET_STR(17, part_number_str, type17.part);
-    t->attributes = 0; /* Unknown */
-    t->configured_clock_speed = t->speed; /* reuse value for max speed */
-    t->minimum_voltage = cpu_to_le16(0); /* Unknown */
-    t->maximum_voltage = cpu_to_le16(0); /* Unknown */
-    t->configured_voltage = cpu_to_le16(0); /* Unknown */
+    t->attributes = type17.rank;
+    t->configured_clock_speed = t->speed;
+    t->minimum_voltage = cpu_to_le16(type17.voltage_mv);
+    t->maximum_voltage = cpu_to_le16(type17.voltage_mv);
+    t->configured_voltage = cpu_to_le16(type17.voltage_mv);
+
+    SMBIOS_BUILD_TABLE_POST;
+}
+
+/* stealth: emit an unpopulated DIMM slot (Size = 0 means "No Module
+ * Installed") so SMBIOS type 17 count matches the advertised slot
+ * count in type 16. */
+static void smbios_build_type_17_empty_table(unsigned instance)
+{
+    char loc_str[128];
+
+    SMBIOS_BUILD_TABLE_PRE(17, T17_BASE + instance, true); /* required */
+
+    t->physical_memory_array_handle = cpu_to_le16(0x1000); /* Type 16 above */
+    t->memory_error_information_handle = cpu_to_le16(0xFFFE); /* Not provided */
+    t->total_width = cpu_to_le16(0xFFFF); /* unknown */
+    t->data_width = cpu_to_le16(0xFFFF); /* unknown */
+    t->size = cpu_to_le16(0); /* 0 = No Module Installed */
+    t->form_factor = 0x09; /* DIMM */
+    t->device_set = 0;
+    smbios_type17_locator(loc_str, sizeof(loc_str), instance);
+    SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
+    {
+        char bank_str[128];
+        const char *pct;
+        if (type17.bank && (pct = strstr(type17.bank, "%C")) != NULL) {
+            int pre_len = pct - type17.bank;
+            snprintf(bank_str, sizeof(bank_str), "%.*s%c%s",
+                     pre_len, type17.bank,
+                     (instance & 1) ? 'B' : 'A', pct + 2);
+            SMBIOS_TABLE_SET_STR(17, bank_locator_str, bank_str);
+        } else {
+            SMBIOS_TABLE_SET_STR(17, bank_locator_str, type17.bank);
+        }
+    }
+    t->memory_type = 0x02; /* unknown */
+    t->type_detail = cpu_to_le16(0x0004); /* unknown */
+    t->speed = cpu_to_le16(0);
+    t->attributes = 0;
+    t->configured_clock_speed = cpu_to_le16(0);
+    t->minimum_voltage = cpu_to_le16(0);
+    t->maximum_voltage = cpu_to_le16(0);
+    t->configured_voltage = cpu_to_le16(0);
 
     SMBIOS_BUILD_TABLE_POST;
 }
@@ -1344,6 +1510,11 @@ static bool smbios_get_tables_ep(MachineState *ms,
                              mc->smbios_memory_device_size) /
                mc->smbios_memory_device_size;
 
+    /* stealth: include unpopulated slots in the handle-space reservation
+     * so T17_BASE + total_slots never collides with T19_BASE. */
+    unsigned total_slots = type16.num_devices > dimm_cnt ?
+                           type16.num_devices : dimm_cnt;
+
     /*
      * The offset determines if we need to keep additional space between
      * table 17 and table 19 header handle numbers so that they do
@@ -1351,13 +1522,16 @@ static bool smbios_get_tables_ep(MachineState *ms,
      * memory and DIMM like chunks of 16 GiB, the default space between
      * the two tables (T19_BASE - T17_BASE = 512) is not enough.
      */
-    offset = (dimm_cnt > (T19_BASE - T17_BASE)) ? \
-             dimm_cnt - (T19_BASE - T17_BASE) : 0;
+    offset = (total_slots > (T19_BASE - T17_BASE)) ? \
+             total_slots - (T19_BASE - T17_BASE) : 0;
 
     smbios_build_type_16_table(dimm_cnt);
 
     for (i = 0; i < dimm_cnt; i++) {
         smbios_build_type_17_table(i, GET_DIMM_SZ);
+    }
+    for (i = dimm_cnt; i < total_slots; i++) {
+        smbios_build_type_17_empty_table(i);
     }
 
     for (i = 0; i < mem_array_size; i++) {
@@ -1760,6 +1934,18 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
                 return;
             }
             return;
+        case 16: {
+            uint64_t bytes;
+            if (!qemu_opts_validate(opts, qemu_smbios_type16_opts, errp)) {
+                return;
+            }
+            bytes = qemu_opt_get_size(opts, "max-capacity", 0);
+            if (bytes) {
+                type16.max_capacity_kb = bytes / KiB;
+            }
+            type16.num_devices = qemu_opt_get_number(opts, "num-devices", 0);
+            return;
+        }
         case 17:
             if (!qemu_opts_validate(opts, qemu_smbios_type17_opts, errp)) {
                 return;
@@ -1775,6 +1961,8 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
             type17.type_detail = qemu_opt_get_number(opts, "typedetail", 0);
             type17.data_width = qemu_opt_get_number(opts, "width", 0);
             type17.total_width = qemu_opt_get_number(opts, "totalwidth", 0);
+            type17.rank = qemu_opt_get_number(opts, "rank", 0);
+            type17.voltage_mv = qemu_opt_get_number(opts, "voltage", 0);
             return;
         case 41: {
             struct type41_instance *t41_i;

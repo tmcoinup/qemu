@@ -43,6 +43,19 @@ struct USBHIDState {
     uint32_t usb_version;
     char *display;
     uint32_t head;
+    /* stealth (patch 0010): per-instance USB descriptor 覆盖。
+     * cmdline -device usb-kbd,vendorid=0x046D,productid=0xC31C,
+     *                  manufacturer=Logitech,product='Logitech USB Keyboard K120'
+     * 让每台 VM 的 USB 键鼠 VID/PID/字符串都不同——配合 stealth-lib.sh 的
+     * KBD_POOL / MOUSE_POOL / TABLET_POOL，多账号同主机反指纹不再同样。
+     * 0 / NULL 表示不覆盖，保持 desc_* 静态默认 (Microsoft / HUION)。 */
+    uint16_t vendorid;
+    uint16_t productid;
+    char *manufacturer;
+    char *product;
+    /* 内部：若 vendorid/productid 任一非 0，分配一份 USBDesc 副本写回 .id；
+     * unrealize 时 g_free。dev->usb_desc 指向这份副本而不是 const 静态。 */
+    USBDesc *patched_desc;
 };
 
 #define TYPE_USB_HID "usb-hid"
@@ -60,20 +73,29 @@ enum {
     STR_SERIAL_MOUSE,
     STR_SERIAL_TABLET,
     STR_SERIAL_KEYBOARD,
+    STR_MANUFACTURER_TABLET,   /* HUION (绘王) — tablet 用 256C VID, 字符串得跟 VID 对得上 */
 };
 
 static const USBDescStrings desc_strings = {
-    [STR_MANUFACTURER]     = "QEMU",
-    [STR_PRODUCT_MOUSE]    = "QEMU USB Mouse",
-    [STR_PRODUCT_TABLET]   = "QEMU USB Tablet",
-    [STR_PRODUCT_KEYBOARD] = "QEMU USB Keyboard",
-    [STR_SERIAL_COMPAT]    = "42",
-    [STR_CONFIG_MOUSE]     = "HID Mouse",
-    [STR_CONFIG_TABLET]    = "HID Tablet",
-    [STR_CONFIG_KEYBOARD]  = "HID Keyboard",
-    [STR_SERIAL_MOUSE]     = "89126",
-    [STR_SERIAL_TABLET]    = "28754",
-    [STR_SERIAL_KEYBOARD]  = "68284",
+    /*
+     * Stealth: real USB HID peripherals always identify as a vendor brand.
+     * "QEMU"-prefixed strings are a one-line VM tell visible to anything
+     * that walks SetupAPI / WMI Win32_PnPEntity. Microsoft Wired Keyboard 600
+     * and Microsoft USB Optical Mouse are the most common bundled-with-PC
+     * peripherals — generic enough not to invite product-specific HID quirks.
+     */
+    [STR_MANUFACTURER]         = "Microsoft",
+    [STR_PRODUCT_MOUSE]        = "Microsoft USB Optical Mouse",
+    [STR_PRODUCT_TABLET]       = "HUION PenTablet",
+    [STR_PRODUCT_KEYBOARD]     = "Microsoft Wired Keyboard 600",
+    [STR_SERIAL_COMPAT]        = "42",
+    [STR_CONFIG_MOUSE]         = "HID Mouse",
+    [STR_CONFIG_TABLET]        = "HID Tablet",
+    [STR_CONFIG_KEYBOARD]      = "HID Keyboard",
+    [STR_SERIAL_MOUSE]         = "89126",
+    [STR_SERIAL_TABLET]        = "28754",
+    [STR_SERIAL_KEYBOARD]      = "68284",
+    [STR_MANUFACTURER_TABLET]  = "HUION",
 };
 
 static const USBDescIface desc_iface_mouse = {
@@ -366,14 +388,40 @@ static const USBDescMSOS desc_msos_suspend = {
     .SelectiveSuspendEnabled = true,
 };
 
+/*
+ * Stealth: 0x0627 ("Adomax Technology Co., Ltd") is the QEMU-default USB
+ * HID VID — anything that cross-references USB IDs (lsusb -v, USB.org
+ * online lookup, or anti-cheat databases of well-known peripheral pairs)
+ * sees Adomax+0x0001 and concludes "QEMU virtual HID". Switch to real
+ * Microsoft VID 0x045E with retail PIDs that match the iProduct strings:
+ *   - Mouse:    045E:00CB (Microsoft USB Optical Mouse)
+ *   - Keyboard: 045E:0750 (Microsoft Wired Keyboard 600)
+ * Tablet 用 HUION (绘王) 256C:006D — 国内深圳厂, 淘宝入门款 H420 数位板,
+ * 比 Wacom 草根, 不会引来"为什么家用机插 Wacom 专业板"这类二级怀疑.
+ * 绝对坐标 USB pointer 报为 graphics tablet 而非 virtual mouse.
+ */
+/*
+ * bcdDevice: 真硬件设备版本号在 USB ID 数据库里都不为 0。bcdDevice=0 是
+ * QEMU 默认值，对 anti-cheat 而言是一个 telltale（"无版本号的 USB HID =
+ * 必然虚拟"）。改为公开报告的真实硬件 firmware revision：
+ *   - Microsoft USB Optical Mouse 045E:00CB → bcdDevice 0x0163
+ *   - Microsoft Wired Keyboard 600 045E:0750 → bcdDevice 0x0163
+ *   - HUION H420 256C:006D → bcdDevice 0x0100
+ *
+ * iSerialNumber: 真实 OEM mouse/keyboard 都不暴露 serial 字符串（iSerialNumber=0）。
+ * 之前给的 "68284" / "89126" / "28754" 这类 4-5 位 random 数 string 在 lsusb -v
+ * / WMI Win32_PnPEntity.PNPDeviceID 里会被 anti-cheat 拿来 fingerprint。
+ * 设 0 让 OS 不查询 serial（descriptor 里 iSerial=0 即"无 serial"，
+ * USB spec 合法）。
+ */
 static const USBDesc desc_mouse = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
-        .bcdDevice         = 0,
+        .idVendor          = 0x045E,
+        .idProduct         = 0x00CB,
+        .bcdDevice         = 0x0163,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_MOUSE,
-        .iSerialNumber     = STR_SERIAL_MOUSE,
+        .iSerialNumber     = 0,
     },
     .full = &desc_device_mouse,
     .str  = desc_strings,
@@ -382,12 +430,12 @@ static const USBDesc desc_mouse = {
 
 static const USBDesc desc_mouse2 = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
-        .bcdDevice         = 0,
+        .idVendor          = 0x045E,
+        .idProduct         = 0x00CB,
+        .bcdDevice         = 0x0163,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_MOUSE,
-        .iSerialNumber     = STR_SERIAL_MOUSE,
+        .iSerialNumber     = 0,
     },
     .full = &desc_device_mouse,
     .high = &desc_device_mouse2,
@@ -397,12 +445,12 @@ static const USBDesc desc_mouse2 = {
 
 static const USBDesc desc_tablet = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
-        .bcdDevice         = 0,
-        .iManufacturer     = STR_MANUFACTURER,
+        .idVendor          = 0x256C,
+        .idProduct         = 0x006D,
+        .bcdDevice         = 0x0100,
+        .iManufacturer     = STR_MANUFACTURER_TABLET,
         .iProduct          = STR_PRODUCT_TABLET,
-        .iSerialNumber     = STR_SERIAL_TABLET,
+        .iSerialNumber     = 0,
     },
     .full = &desc_device_tablet,
     .str  = desc_strings,
@@ -411,12 +459,12 @@ static const USBDesc desc_tablet = {
 
 static const USBDesc desc_tablet2 = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
-        .bcdDevice         = 0,
-        .iManufacturer     = STR_MANUFACTURER,
+        .idVendor          = 0x256C,
+        .idProduct         = 0x006D,
+        .bcdDevice         = 0x0100,
+        .iManufacturer     = STR_MANUFACTURER_TABLET,
         .iProduct          = STR_PRODUCT_TABLET,
-        .iSerialNumber     = STR_SERIAL_TABLET,
+        .iSerialNumber     = 0,
     },
     .full = &desc_device_tablet,
     .high = &desc_device_tablet2,
@@ -426,12 +474,12 @@ static const USBDesc desc_tablet2 = {
 
 static const USBDesc desc_keyboard = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
-        .bcdDevice         = 0,
+        .idVendor          = 0x045E,
+        .idProduct         = 0x0750,
+        .bcdDevice         = 0x0163,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_KEYBOARD,
-        .iSerialNumber     = STR_SERIAL_KEYBOARD,
+        .iSerialNumber     = 0,
     },
     .full = &desc_device_keyboard,
     .str  = desc_strings,
@@ -440,12 +488,12 @@ static const USBDesc desc_keyboard = {
 
 static const USBDesc desc_keyboard2 = {
     .id = {
-        .idVendor          = 0x0627,
-        .idProduct         = 0x0001,
-        .bcdDevice         = 0,
+        .idVendor          = 0x045E,
+        .idProduct         = 0x0750,
+        .bcdDevice         = 0x0163,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT_KEYBOARD,
-        .iSerialNumber     = STR_SERIAL_KEYBOARD,
+        .iSerialNumber     = 0,
     },
     .full = &desc_device_keyboard,
     .high = &desc_device_keyboard2,
@@ -693,6 +741,11 @@ static void usb_hid_unrealize(USBDevice *dev)
     USBHIDState *us = USB_HID(dev);
 
     hid_free(&us->hid);
+    /* stealth (patch 0010): 释放 VID/PID 覆盖时分配的 USBDesc 副本 */
+    if (us->patched_desc) {
+        g_free(us->patched_desc);
+        us->patched_desc = NULL;
+    }
 }
 
 static void usb_hid_initfn(USBDevice *dev, int kind,
@@ -700,24 +753,61 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
                            Error **errp)
 {
     USBHIDState *us = USB_HID(dev);
+    const USBDesc *selected;
     switch (us->usb_version) {
     case 1:
-        dev->usb_desc = usb1;
+        selected = usb1;
         break;
     case 2:
-        dev->usb_desc = usb2;
+        selected = usb2;
         break;
     default:
-        dev->usb_desc = NULL;
+        selected = NULL;
     }
-    if (!dev->usb_desc) {
+    if (!selected) {
         error_setg(errp, "Invalid usb version %d for usb hid device",
                    us->usb_version);
         return;
     }
 
-    usb_desc_create_serial(dev);
+    /* stealth (patch 0010): VID/PID 覆盖。
+     * 任一非零就 g_memdup() 出一份可写副本，patch .id 后挂到 dev->usb_desc。
+     * 字符串覆盖在 usb_desc_init() 之后用 usb_desc_set_string() 写入设备的
+     * per-instance strings list（不动 const desc_strings 静态表）。 */
+    if (us->vendorid || us->productid) {
+        us->patched_desc = g_memdup2(selected, sizeof(*selected));
+        if (us->vendorid) {
+            us->patched_desc->id.idVendor = us->vendorid;
+        }
+        if (us->productid) {
+            us->patched_desc->id.idProduct = us->productid;
+        }
+        dev->usb_desc = us->patched_desc;
+    } else {
+        dev->usb_desc = selected;
+    }
+
+    /* stealth: 真实 OEM 鼠/键/平板的 USB descriptor 不暴露 serial 字符串
+     * (iSerialNumber=0，见上文 desc_mouse / desc_keyboard / desc_tablet)。
+     * usb_desc_create_serial() 在没有 dev->serial 时 assert(index != 0)，
+     * 因此裸 usb-kbd/usb-mouse/usb-tablet（无 serial= 属性）会直接崩溃。
+     * 仅当 descriptor 真正声明了 serial 索引时才生成 serial 字符串；
+     * iSerialNumber==0 时无可写入的 descriptor 槽，dev->serial 也无意义。 */
+    if (dev->usb_desc->id.iSerialNumber != 0) {
+        usb_desc_create_serial(dev);
+    }
     usb_desc_init(dev);
+
+    /* 字符串覆盖：iManufacturer / iProduct 索引从 desc.id 读出，向 device
+     * 的 per-instance strings 写入；usb_desc_set_string 内部 g_free 旧值。 */
+    if (us->manufacturer && dev->usb_desc->id.iManufacturer) {
+        usb_desc_set_string(dev, dev->usb_desc->id.iManufacturer,
+                            us->manufacturer);
+    }
+    if (us->product && dev->usb_desc->id.iProduct) {
+        usb_desc_set_string(dev, dev->usb_desc->id.iProduct, us->product);
+    }
+
     us->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
     hid_init(&us->hid, kind, usb_hid_changed);
     if (us->display && us->hid.s) {
@@ -797,6 +887,11 @@ static const Property usb_tablet_properties[] = {
         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
         DEFINE_PROP_STRING("display", USBHIDState, display),
         DEFINE_PROP_UINT32("head", USBHIDState, head, 0),
+        /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */
+        DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
+        DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
+        DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
+        DEFINE_PROP_STRING("product", USBHIDState, product),
 };
 
 static void usb_tablet_class_initfn(ObjectClass *klass, const void *data)
@@ -805,7 +900,7 @@ static void usb_tablet_class_initfn(ObjectClass *klass, const void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_tablet_realize;
-    uc->product_desc   = "QEMU USB Tablet";
+    uc->product_desc   = "HUION PenTablet";
     dc->vmsd = &vmstate_usb_ptr;
     device_class_set_props(dc, usb_tablet_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
@@ -819,6 +914,11 @@ static const TypeInfo usb_tablet_info = {
 
 static const Property usb_mouse_properties[] = {
         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
+        /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */
+        DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
+        DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
+        DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
+        DEFINE_PROP_STRING("product", USBHIDState, product),
 };
 
 static void usb_mouse_class_initfn(ObjectClass *klass, const void *data)
@@ -827,7 +927,7 @@ static void usb_mouse_class_initfn(ObjectClass *klass, const void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_mouse_realize;
-    uc->product_desc   = "QEMU USB Mouse";
+    uc->product_desc   = "Microsoft USB Optical Mouse";
     dc->vmsd = &vmstate_usb_ptr;
     device_class_set_props(dc, usb_mouse_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
@@ -842,6 +942,11 @@ static const TypeInfo usb_mouse_info = {
 static const Property usb_keyboard_properties[] = {
         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
         DEFINE_PROP_STRING("display", USBHIDState, display),
+        /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */
+        DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
+        DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
+        DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
+        DEFINE_PROP_STRING("product", USBHIDState, product),
 };
 
 static void usb_keyboard_class_initfn(ObjectClass *klass, const void *data)
@@ -850,7 +955,7 @@ static void usb_keyboard_class_initfn(ObjectClass *klass, const void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_keyboard_realize;
-    uc->product_desc   = "QEMU USB Keyboard";
+    uc->product_desc   = "Microsoft Wired Keyboard 600";
     dc->vmsd = &vmstate_usb_kbd;
     device_class_set_props(dc, usb_keyboard_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);

@@ -38,9 +38,45 @@
 #include "chardev/char-io.h"
 #include "chardev/char-socket.h"
 
+#define TCP_MULTI_CLIENT_BACKLOG 64
+
 static gboolean socket_reconnect_timeout(gpointer opaque);
 static void tcp_chr_telnet_init(Chardev *chr);
 static char *qemu_chr_compute_filename(SocketChardev *s);
+
+static void tcp_chr_source_destroy_unref(GSource **sourcep)
+{
+    GSource *source = *sourcep;
+
+    if (!source) {
+        return;
+    }
+
+    /*
+     * Source callbacks may race with chardev teardown.  Publish NULL before
+     * calling into GLib so a re-entrant cancel path does not destroy/unref the
+     * same GSource twice.
+     */
+    *sourcep = NULL;
+    g_source_destroy(source);
+    g_source_unref(source);
+}
+
+static void tcp_chr_source_unref_current(GSource **sourcep)
+{
+    GSource *source = *sourcep;
+
+    if (!source) {
+        return;
+    }
+
+    /*
+     * Used from the source's own callback.  Returning G_SOURCE_REMOVE lets
+     * GLib destroy the attached source; we only release our stored reference.
+     */
+    *sourcep = NULL;
+    g_source_unref(source);
+}
 
 static void tcp_chr_change_state(SocketChardev *s, TCPChardevState state)
 {
@@ -59,11 +95,7 @@ static void tcp_chr_change_state(SocketChardev *s, TCPChardevState state)
 
 static void tcp_chr_reconn_timer_cancel(SocketChardev *s)
 {
-    if (s->reconnect_timer) {
-        g_source_destroy(s->reconnect_timer);
-        g_source_unref(s->reconnect_timer);
-        s->reconnect_timer = NULL;
-    }
+    tcp_chr_source_destroy_unref(&s->reconnect_timer);
 }
 
 static void qemu_chr_socket_restart_timer(Chardev *chr)
@@ -338,11 +370,7 @@ static GSource *tcp_chr_add_watch(Chardev *chr, GIOCondition cond)
 
 static void remove_hup_source(SocketChardev *s)
 {
-    if (s->hup_source != NULL) {
-        g_source_destroy(s->hup_source);
-        g_source_unref(s->hup_source);
-        s->hup_source = NULL;
-    }
+    tcp_chr_source_destroy_unref(&s->hup_source);
 }
 
 static void char_socket_yank_iochannel(void *opaque)
@@ -465,7 +493,7 @@ static void tcp_chr_disconnect_locked(Chardev *chr)
     trace_chr_socket_disconnect(chr, chr->label);
     tcp_chr_free_connection(chr);
 
-    if (s->listener) {
+    if (s->listener && !s->is_multi) {
         qio_net_listener_set_client_func_full(s->listener, tcp_chr_accept,
                                               chr, NULL, chr->gcontext);
     }
@@ -646,18 +674,15 @@ static void tcp_chr_connect(void *opaque)
 
 static void tcp_chr_telnet_destroy(SocketChardev *s)
 {
-    if (s->telnet_source) {
-        g_source_destroy(s->telnet_source);
-        g_source_unref(s->telnet_source);
-        s->telnet_source = NULL;
-    }
+    tcp_chr_source_destroy_unref(&s->telnet_source);
 }
 
 static void tcp_chr_update_read_handler(Chardev *chr)
 {
     SocketChardev *s = SOCKET_CHARDEV(chr);
 
-    if (s->listener && s->state == TCP_CHARDEV_STATE_DISCONNECTED) {
+    if (s->listener && !s->is_multi &&
+        s->state == TCP_CHARDEV_STATE_DISCONNECTED) {
         /*
          * It's possible that chardev context is changed in
          * qemu_chr_be_update_read_handlers().  Reset it for QIO net
@@ -711,8 +736,7 @@ static gboolean tcp_chr_telnet_init_io(QIOChannel *ioc,
 end:
     g_free(s->telnet_init);
     s->telnet_init = NULL;
-    g_source_unref(s->telnet_source);
-    s->telnet_source = NULL;
+    tcp_chr_source_unref_current(&s->telnet_source);
     return G_SOURCE_REMOVE;
 }
 
@@ -1192,8 +1216,7 @@ static gboolean socket_reconnect_timeout(gpointer opaque)
     SocketChardev *s = SOCKET_CHARDEV(opaque);
 
     qemu_mutex_lock(&chr->chr_write_lock);
-    g_source_unref(s->reconnect_timer);
-    s->reconnect_timer = NULL;
+    tcp_chr_source_unref_current(&s->reconnect_timer);
     qemu_mutex_unlock(&chr->chr_write_lock);
 
     if (chr->be_open) {
@@ -1213,6 +1236,7 @@ static int qmp_chardev_open_socket_server(Chardev *chr,
 {
     SocketChardev *s = SOCKET_CHARDEV(chr);
     char *name;
+    int backlog = TCP_MULTI_CLIENT_BACKLOG;
     if (is_telnet) {
         s->do_telnetopt = 1;
     }
@@ -1226,7 +1250,10 @@ static int qmp_chardev_open_socket_server(Chardev *chr,
         goto skip_listen;
     }
 
-    if (qio_net_listener_open_sync(s->listener, s->addr, 1, errp) < 0) {
+    if (!s->is_multi) {
+        backlog = 1;
+    }
+    if (qio_net_listener_open_sync(s->listener, s->addr, backlog, errp) < 0) {
         object_unref(OBJECT(s->listener));
         s->listener = NULL;
         return -1;
@@ -1236,7 +1263,13 @@ static int qmp_chardev_open_socket_server(Chardev *chr,
     s->addr = qio_net_listener_get_local_address(s->listener, 0, errp);
 
 skip_listen:
-    if (is_waitconnect) {
+    if (s->is_multi) {
+        /*
+         * multi=on 时 listener 只负责保活和持续 accept，真正的每客户端
+         * QMP monitor 由 monitor/qmp-multi.c 在 monitor 初始化后安装回调。
+         * 这里不接 tcp_chr_accept，否则 socket chardev 会退回单连接语义。
+         */
+    } else if (is_waitconnect) {
         tcp_chr_accept_server_sync(chr);
     } else {
         qio_net_listener_set_client_func_full(s->listener,
@@ -1337,6 +1370,34 @@ static bool qmp_chardev_validate_socket(ChardevSocket *sock,
         }
     }
 
+    if (sock->has_multi && sock->multi) {
+        bool is_server = !sock->has_server || sock->server;
+
+        if (!is_server) {
+            error_setg(errp, "'multi' option requires server mode");
+            return false;
+        }
+        if (sock->has_wait && sock->wait) {
+            error_setg(errp, "'multi' option is incompatible with 'wait=on'");
+            return false;
+        }
+        if (sock->has_telnet && sock->telnet) {
+            error_setg(errp, "'multi' option is incompatible with 'telnet'");
+            return false;
+        }
+        if (sock->has_tn3270 && sock->tn3270) {
+            error_setg(errp, "'multi' option is incompatible with 'tn3270'");
+            return false;
+        }
+        if (sock->has_websocket && sock->websocket) {
+            error_setg(errp, "'multi' option is incompatible with 'websocket'");
+            return false;
+        }
+        if (sock->tls_creds || sock->tls_authz) {
+            error_setg(errp, "'multi' option is incompatible with TLS");
+            return false;
+        }
+    }
     return true;
 }
 
@@ -1351,6 +1412,7 @@ static bool tcp_chr_open(Chardev *chr, ChardevBackend *backend, Error **errp)
     bool is_tn3270      = sock->has_tn3270  ? sock->tn3270  : false;
     bool is_waitconnect = sock->has_wait    ? sock->wait    : false;
     bool is_websock     = sock->has_websocket ? sock->websocket : false;
+    bool is_multi       = sock->has_multi ? sock->multi : false;
     int64_t reconnect_ms = sock->has_reconnect_ms ? sock->reconnect_ms : 0;
     SocketAddress *addr;
 
@@ -1359,6 +1421,7 @@ static bool tcp_chr_open(Chardev *chr, ChardevBackend *backend, Error **errp)
     s->is_tn3270 = is_tn3270;
     s->is_websock = is_websock;
     s->do_nodelay = do_nodelay;
+    s->is_multi = is_multi;
     if (sock->tls_creds) {
         Object *creds;
         creds = object_resolve_path_component(
@@ -1478,6 +1541,8 @@ static void tcp_chr_parse(QemuOpts *opts, ChardevBackend *backend, Error **errp)
     sock->tn3270 = qemu_opt_get_bool(opts, "tn3270", false);
     sock->has_websocket = qemu_opt_get(opts, "websocket");
     sock->websocket = qemu_opt_get_bool(opts, "websocket", false);
+    sock->has_multi = qemu_opt_get(opts, "multi");
+    sock->multi = qemu_opt_get_bool(opts, "multi", false);
     /*
      * We have different default to QMP for 'wait' when 'server'
      * is set, hence we can't just check for existence of 'wait'
@@ -1547,6 +1612,34 @@ static void tcp_chr_listener_cleanup(Chardev *chr)
         qio_net_listener_set_client_func_full(s->listener, NULL, NULL,
                                               NULL, chr->gcontext);
     }
+}
+
+bool qemu_chr_socket_is_multi(Chardev *chr)
+{
+    if (!chr) {
+        return false;
+    }
+
+    if (!object_dynamic_cast(OBJECT(chr), TYPE_CHARDEV_SOCKET)) {
+        return false;
+    }
+
+    return SOCKET_CHARDEV(chr)->is_multi;
+}
+
+void qemu_chr_socket_set_multi_client_func(Chardev *chr,
+                                           QIONetListenerClientFunc func,
+                                           gpointer data,
+                                           GDestroyNotify notify,
+                                           GMainContext *context)
+{
+    SocketChardev *s = SOCKET_CHARDEV(chr);
+
+    assert(s->is_multi);
+    assert(s->listener);
+
+    qio_net_listener_set_client_func_full(s->listener, func, data, notify,
+                                          context);
 }
 
 static void char_socket_class_init(ObjectClass *oc, const void *data)

@@ -52,6 +52,10 @@ typedef struct QemuGraphicConsole {
     QEMUCursor *cursor;
     int cursor_x, cursor_y;
     bool cursor_on;
+    bool cursor_position_valid;
+    int input_cursor_x, input_cursor_y;
+    bool input_cursor_x_valid, input_cursor_y_valid;
+    bool input_cursor_position_valid;
 } QemuGraphicConsole;
 
 typedef QemuConsoleClass QemuGraphicConsoleClass;
@@ -79,6 +83,17 @@ static bool console_compatible_with(QemuConsole *con,
 static QemuConsole *qemu_graphic_console_lookup_unused(void);
 static void dpy_set_ui_info_timer(void *opaque);
 
+static int qemu_console_cursor_u32_to_int(uint32_t value)
+{
+    /*
+     * GL cursor paths use unsigned 32 bit coordinates while the legacy
+     * DisplayChangeListener cursor callback still takes int.
+     * 这里钳住超出 int 范围的值，
+     * 避免 host 查询和旧前端收到截断值。
+     */
+    return value > INT_MAX ? INT_MAX : (int)value;
+}
+
 static void gui_update(void *opaque)
 {
     uint64_t interval = GUI_REFRESH_INTERVAL_IDLE;
@@ -91,6 +106,9 @@ static void gui_update(void *opaque)
     ds->refreshing = false;
 
     QLIST_FOREACH(dcl, &ds->listeners, next) {
+        if (dcl->paused) {
+            continue;
+        }
         dcl_interval = dcl->update_interval ?
             dcl->update_interval : GUI_REFRESH_INTERVAL_DEFAULT;
         if (interval > dcl_interval) {
@@ -554,6 +572,16 @@ bool console_has_gl(QemuConsole *con)
     return con->gl != NULL;
 }
 
+int qemu_console_get_graphic_flags(QemuConsole *con)
+{
+    if (!con || !QEMU_IS_GRAPHIC_CONSOLE(con) ||
+        !con->hw_ops || !con->hw_ops->get_flags) {
+        return GRAPHIC_FLAGS_NONE;
+    }
+
+    return con->hw_ops->get_flags(con->hw);
+}
+
 static bool displaychangelistener_has_dmabuf(DisplayChangeListener *dcl)
 {
     if (dcl->ops->dpy_has_dmabuf) {
@@ -567,12 +595,25 @@ static bool displaychangelistener_has_dmabuf(DisplayChangeListener *dcl)
     return false;
 }
 
+static bool displaychangelistener_accepts_gl(DisplayChangeListener *dcl)
+{
+    /*
+     * fb-shm 这类非窗口 DCL 可能早于 SDL/GTK display 初始化。此时 console
+     * 还没有 GL provider，但 DCL 本身已经能接收后续的 GL scanout 回调。
+     * 允许它先注册到 listener 链表；display 初始化完成后，真正的 texture
+     * scanout/update 会再次广播给它。
+     */
+    return g_strcmp0(dcl->ops->dpy_name, "fb-shm") == 0 &&
+           (dcl->ops->dpy_gl_scanout_texture ||
+            dcl->ops->dpy_gl_scanout_dmabuf);
+}
+
 static bool console_compatible_with(QemuConsole *con,
                                     DisplayChangeListener *dcl, Error **errp)
 {
     int flags;
 
-    flags = con->hw_ops->get_flags ? con->hw_ops->get_flags(con->hw) : 0;
+    flags = qemu_console_get_graphic_flags(con);
 
     if (console_has_gl(con) &&
         !con->gl->ops->dpy_gl_ctx_is_compatible_dcl(con->gl, dcl)) {
@@ -583,6 +624,9 @@ static bool console_compatible_with(QemuConsole *con,
 
     if (flags & GRAPHIC_FLAGS_GL &&
         !console_has_gl(con)) {
+        if (displaychangelistener_accepts_gl(dcl)) {
+            return false;
+        }
         error_setg(errp, "The console requires a GL context.");
         return false;
 
@@ -876,10 +920,68 @@ static void dpy_refresh(DisplayState *s)
     DisplayChangeListener *dcl;
 
     QLIST_FOREACH(dcl, &s->listeners, next) {
+        if (dcl->paused) {
+            continue;
+        }
         if (dcl->ops->dpy_refresh) {
             dcl->ops->dpy_refresh(dcl);
         }
     }
+}
+
+int qemu_displaychangelistener_set_paused(const char *name, bool paused,
+                                          Error **errp)
+{
+    DisplayState *ds = get_alloc_displaystate();
+    DisplayChangeListener *dcl;
+    int matched = 0;
+    int flipped = 0;
+
+    if (!name || !*name) {
+        error_setg(errp, "display name required");
+        return -1;
+    }
+
+    /* Match by prefix so e.g. "sdl2" hits both "sdl2-2d" and "sdl2-gl",
+     * and "fb" hits "fb-shm".  An exact match wins, but is not required. */
+    QLIST_FOREACH(dcl, &ds->listeners, next) {
+        const char *dcl_name = dcl->ops->dpy_name ? dcl->ops->dpy_name : "";
+        if (!g_str_has_prefix(dcl_name, name)) {
+            continue;
+        }
+        matched++;
+        if (dcl->paused == paused) {
+            continue;
+        }
+        dcl->paused = paused;
+        flipped++;
+        if (dcl->ops->dpy_set_paused) {
+            dcl->ops->dpy_set_paused(dcl, paused);
+        }
+    }
+
+    if (!matched) {
+        error_setg(errp,
+                   "no DisplayChangeListener whose dpy_name starts with '%s'",
+                   name);
+        return -1;
+    }
+
+    /* Recompute the gui timer interval since one of the contributors may
+     * have just gone silent (or come back). */
+    gui_setup_refresh(ds);
+
+    /*
+     * On resume, fire the timer immediately so the just-unpaused listener
+     * does not sit through the leftover IDLE interval (set when every DCL
+     * was paused).  Without this, a pause-then-resume sequence with no
+     * other active listener stalls for up to GUI_REFRESH_INTERVAL_IDLE
+     * (3s) before frames start flowing again.
+     */
+    if (flipped > 0 && !paused && ds->gui_timer) {
+        timer_mod(ds->gui_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
+    }
+    return flipped;
 }
 
 void dpy_text_cursor(QemuConsole *con, int x, int y)
@@ -942,9 +1044,16 @@ void dpy_mouse_set(QemuConsole *c, int x, int y, bool on)
     DisplayState *s = c->ds;
     DisplayChangeListener *dcl;
 
+    /*
+     * 客户机通过显卡硬件光标通道上报位置。
+     * 这里保存的是 host 内部状态，
+     * 只供 QMP/显示前端读取。
+     * 不会新增任何 guest 可见的接口。
+     */
     con->cursor_x = x;
     con->cursor_y = y;
     con->cursor_on = on;
+    con->cursor_position_valid = true;
     if (!qemu_console_is_visible(c)) {
         return;
     }
@@ -1065,11 +1174,41 @@ void dpy_gl_scanout_dmabuf(QemuConsole *con,
     }
 }
 
+void dpy_gl_scanout_dmabuf_update(QemuConsole *con,
+                                  QemuDmaBuf *dmabuf)
+{
+    DisplayState *s = con->ds;
+    DisplayChangeListener *dcl;
+
+    /*
+     * 中文注释：SDL/GTK 这类窗口后端仍以 texture scanout 作为主显示状态；
+     * fb-shm 这类旁路消费者只需要同一帧的 dma-buf 句柄。这里只通知明确
+     * 实现 sideband 回调的 DCL，不复用 dpy_gl_scanout_dmabuf()，避免本地
+     * 窗口被旁路 dma-buf 覆盖，导致固件/主板阶段原本可见的 texture 画面
+     * 变成黑屏。
+     */
+    QLIST_FOREACH(dcl, &s->listeners, next) {
+        if (con != dcl->con) {
+            continue;
+        }
+        if (dcl->ops->dpy_gl_scanout_dmabuf_update) {
+            dcl->ops->dpy_gl_scanout_dmabuf_update(dcl, dmabuf);
+        }
+    }
+}
+
 void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
                           bool have_hot, uint32_t hot_x, uint32_t hot_y)
 {
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+
+    /*
+     * VFIO/GL 光标使用独立的 dmabuf 表示可见性。位置由
+     * dpy_gl_cursor_position() 单独更新。
+     * 因此这里只同步 on/off 状态。
+     */
+    QEMU_GRAPHIC_CONSOLE(con)->cursor_on = dmabuf != NULL;
 
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1085,8 +1224,18 @@ void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
 void dpy_gl_cursor_position(QemuConsole *con,
                             uint32_t pos_x, uint32_t pos_y)
 {
+    QemuGraphicConsole *graphic = QEMU_GRAPHIC_CONSOLE(con);
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+
+    /*
+     * GL scanout 的光标移动此前只通知显示前端。
+     * 同步到图形 console 后，host-side QMP 查询
+     * 才能在 VFIO/GL 场景拿到同一份最新坐标。
+     */
+    graphic->cursor_x = qemu_console_cursor_u32_to_int(pos_x);
+    graphic->cursor_y = qemu_console_cursor_u32_to_int(pos_y);
+    graphic->cursor_position_valid = true;
 
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1324,6 +1473,124 @@ static QemuConsole *qemu_graphic_console_lookup_unused(void)
 QEMUCursor *qemu_console_get_cursor(QemuConsole *con)
 {
     return QEMU_IS_GRAPHIC_CONSOLE(con) ? QEMU_GRAPHIC_CONSOLE(con)->cursor : NULL;
+}
+
+static int qemu_console_abs_to_pixel(int value, int pixels)
+{
+    int upper;
+
+    if (pixels <= 1) {
+        return 0;
+    }
+
+    upper = pixels - 1;
+    value = CLAMP(value, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX);
+    return ((int64_t)value * upper + INPUT_EVENT_ABS_MAX / 2) /
+           INPUT_EVENT_ABS_MAX;
+}
+
+void qemu_console_record_absolute_input(QemuConsole *con,
+                                        InputAxis axis,
+                                        int value)
+{
+    QemuGraphicConsole *graphic;
+    int width, height;
+
+    if (!con) {
+        con = qemu_console_lookup_default();
+    }
+    if (!con || !QEMU_IS_GRAPHIC_CONSOLE(con)) {
+        return;
+    }
+
+    width = qemu_console_get_width(con, 0);
+    height = qemu_console_get_height(con, 0);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    graphic = QEMU_GRAPHIC_CONSOLE(con);
+    switch (axis) {
+    case INPUT_AXIS_X:
+        graphic->input_cursor_x = qemu_console_abs_to_pixel(value, width);
+        graphic->input_cursor_x_valid = true;
+        break;
+    case INPUT_AXIS_Y:
+        graphic->input_cursor_y = qemu_console_abs_to_pixel(value, height);
+        graphic->input_cursor_y_valid = true;
+        break;
+    default:
+        return;
+    }
+    graphic->input_cursor_position_valid =
+        graphic->input_cursor_x_valid && graphic->input_cursor_y_valid;
+}
+
+GuestMousePosition *qmp_query_guest_mouse_position(const char *device,
+                                                   bool has_head,
+                                                   int64_t head,
+                                                   Error **errp)
+{
+    QemuConsole *con;
+    QemuGraphicConsole *graphic;
+    GuestMousePosition *position;
+
+    if (device) {
+        if (!has_head) {
+            head = 0;
+        }
+        if (head < 0 || head > UINT32_MAX) {
+            error_setg(errp, "head must be in the range 0..%u", UINT32_MAX);
+            return NULL;
+        }
+        con = qemu_console_lookup_by_device_name(device, head, errp);
+        if (!con) {
+            return NULL;
+        }
+    } else {
+        if (has_head) {
+            error_setg(errp, "'head' must be specified together with 'device'");
+            return NULL;
+        }
+        con = qemu_console_lookup_default();
+        if (!con) {
+            error_setg(errp,
+                       "There is no console to query guest mouse position from");
+            return NULL;
+        }
+    }
+
+    if (!QEMU_IS_GRAPHIC_CONSOLE(con)) {
+        error_setg(errp, "Console is not a graphic console");
+        return NULL;
+    }
+
+    /*
+     * 纯 host-side 查询：优先返回显示后端已经观察到的硬件光标；
+     * Win10/DNF 这类软件光标路径可能永远不会触发 cursor_position_valid，
+     * 因此再回退到 QMP input-send-event 注入的最近一次绝对鼠标位置。
+     * 这些状态只保存在 QEMU 进程内，不新增 guest 可见设备、寄存器或 agent 命令。
+     */
+    graphic = QEMU_GRAPHIC_CONSOLE(con);
+    position = g_new0(GuestMousePosition, 1);
+    if (graphic->cursor_position_valid) {
+        position->x = graphic->cursor_x;
+        position->y = graphic->cursor_y;
+        position->visible = graphic->cursor_on;
+        position->valid = true;
+    } else if (graphic->input_cursor_position_valid) {
+        position->x = graphic->input_cursor_x;
+        position->y = graphic->input_cursor_y;
+        position->visible = true;
+        position->valid = true;
+    } else {
+        position->x = 0;
+        position->y = 0;
+        position->visible = false;
+        position->valid = false;
+    }
+
+    return position;
 }
 
 bool qemu_console_is_visible(QemuConsole *con)

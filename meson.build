@@ -4538,6 +4538,17 @@ if have_tools
              dependencies: [qemuutil, rt],
              install: true)
 
+  if host_os in ['linux', 'windows']
+    executable('qemu-fb-shm-stream',
+               files('tools/fb-shm-stream/main.c',
+                     'tools/fb-shm-stream/platform.c',
+                     'tools/fb-shm-stream/ffmpeg.c',
+                     'tools/fb-shm-stream/pace.c'),
+               include_directories: include_directories('include'),
+               dependencies: [socket],
+               install: true)
+  endif
+
   if have_vhost_user
     subdir('contrib/vhost-user-blk')
     subdir('contrib/vhost-user-bridge')

@@ -8,3 +8,20 @@ host/ovmf-build/
 # Byte-compiled stuff from any python tool run from here.
 __pycache__/
 *.pyc
+
+# Driver signing private keys and pfx (secrets)
+driver-signing/certs/*.key
+driver-signing/certs/*.pfx
+driver-signing/out/viogpudo-original.sys
+driver-signing/out/viogpudo-unsigned.cat
+
+# EfiGuard upstream zip extract (regenerable)
+efiguard/EfiGuard-v1.4/
+
+# Generated PPM dumps / screenshots
+*.ppm
+*.png
+*.dmp
+
+# guest-stealth self-contained drop built by package.sh (regenerable single EXE)
+guest-stealth/dist/

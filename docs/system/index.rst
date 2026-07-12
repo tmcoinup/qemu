@@ -14,6 +14,7 @@ or Hypervisor.Framework.
 
    introduction
    invocation
+   fb-shm
    device-emulation
    keys
    mux-chardev

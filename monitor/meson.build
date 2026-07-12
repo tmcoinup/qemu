@@ -1,4 +1,4 @@
-qmp_ss.add(files('monitor.c', 'qmp.c', 'qmp-cmds-control.c'))
+qmp_ss.add(files('monitor.c', 'qmp.c', 'qmp-cmds-control.c', 'qmp-multi.c'))
 
 system_ss.add(files(
   'fds.c',

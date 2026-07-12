@@ -2098,6 +2098,32 @@ static void virtio_pci_device_plugged(DeviceState *d, Error **errp)
     }
     config[PCI_INTERRUPT_PIN] = 1;
 
+    /*
+     * deploy stealth override: PCI vendor/device/subsystem/revision id.
+     *
+     * Applied AFTER both legacy and modern paths so we win the race
+     * against virtio-pci's own default stamping. Primary VEN/DEV override
+     * is used by the self-signed driver path (PCI\VEN_10DE&DEV_1C81).
+     */
+    if (proxy->x_pci_vendor_id != UINT32_MAX) {
+        pci_set_word(config + PCI_VENDOR_ID,
+                     (uint16_t)proxy->x_pci_vendor_id);
+    }
+    if (proxy->x_pci_device_id != UINT32_MAX) {
+        pci_set_word(config + PCI_DEVICE_ID,
+                     (uint16_t)proxy->x_pci_device_id);
+    }
+    if (proxy->x_subsys_vendor_id != UINT32_MAX) {
+        pci_set_word(config + PCI_SUBSYSTEM_VENDOR_ID,
+                     (uint16_t)proxy->x_subsys_vendor_id);
+    }
+    if (proxy->x_subsys_device_id != UINT32_MAX) {
+        pci_set_word(config + PCI_SUBSYSTEM_ID,
+                     (uint16_t)proxy->x_subsys_device_id);
+    }
+    if (proxy->x_pci_revision != UINT32_MAX) {
+        pci_config_set_revision(config, (uint8_t)proxy->x_pci_revision);
+    }
 
     if (modern) {
         struct virtio_pci_cap cap = {
@@ -2441,6 +2467,16 @@ static const Property virtio_pci_properties[] = {
                     VIRTIO_PCI_FLAG_INIT_FLR_BIT, true),
     DEFINE_PROP_BIT("aer", VirtIOPCIProxy, flags,
                     VIRTIO_PCI_FLAG_AER_BIT, false),
+    DEFINE_PROP_UINT32("x-pci-sub-vendor-id", VirtIOPCIProxy,
+                       x_subsys_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-device-id", VirtIOPCIProxy,
+                       x_subsys_device_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-revision", VirtIOPCIProxy,
+                       x_pci_revision, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-vendor-id", VirtIOPCIProxy,
+                       x_pci_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-device-id", VirtIOPCIProxy,
+                       x_pci_device_id, UINT32_MAX),
 };
 
 static void virtio_pci_dc_realize(DeviceState *qdev, Error **errp)
@@ -2695,4 +2731,3 @@ static void virtio_pci_register_types(void)
 }
 
 type_init(virtio_pci_register_types)
-

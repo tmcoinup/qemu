@@ -131,8 +131,18 @@ struct virtio_gpu_base_conf {
     uint32_t flags;
     uint32_t xres;
     uint32_t yres;
+    uint32_t xmax;
+    uint32_t ymax;
     uint64_t hostmem;
     VirtIOGPUOutputList *outputs;
+    /* stealth (patch 0009): EDID 字符串覆盖；NULL 时回落到 edid-generate.c
+     * 历史默认 ("SAM"/"S24F350"/"H4ZK500001VL")。让 -device virtio-vga
+     * edid-vendor=AOC,edid-name=24G2E5,edid-serial=... 实际注入显示器 EDID。 */
+    char *edid_vendor;
+    char *edid_name;
+    char *edid_serial;
+    uint32_t edid_width_mm;
+    uint32_t edid_height_mm;
 };
 
 struct virtio_gpu_ctrl_command {
@@ -176,11 +186,19 @@ struct VirtIOGPUBaseClass {
     DEFINE_PROP_BIT("edid", _state, _conf.flags, \
                     VIRTIO_GPU_FLAG_EDID_ENABLED, true), \
     DEFINE_PROP_UINT32("xres", _state, _conf.xres, 1280), \
-    DEFINE_PROP_UINT32("yres", _state, _conf.yres, 800)
+    DEFINE_PROP_UINT32("yres", _state, _conf.yres, 800), \
+    DEFINE_PROP_UINT32("xmax", _state, _conf.xmax, 0), \
+    DEFINE_PROP_UINT32("ymax", _state, _conf.ymax, 0), \
+    DEFINE_PROP_STRING("edid-vendor", _state, _conf.edid_vendor), \
+    DEFINE_PROP_STRING("edid-name", _state, _conf.edid_name), \
+    DEFINE_PROP_STRING("edid-serial", _state, _conf.edid_serial), \
+    DEFINE_PROP_UINT32("edid-width-mm", _state, _conf.edid_width_mm, 0), \
+    DEFINE_PROP_UINT32("edid-height-mm", _state, _conf.edid_height_mm, 0)
 
 typedef struct VGPUDMABuf {
     QemuDmaBuf *buf;
     uint32_t scanout_id;
+    bool owns_fd;
     QTAILQ_ENTRY(VGPUDMABuf) next;
 } VGPUDMABuf;
 
@@ -380,6 +398,21 @@ int virtio_gpu_update_dmabuf(VirtIOGPU *g,
                              struct virtio_gpu_simple_resource *res,
                              struct virtio_gpu_framebuffer *fb,
                              struct virtio_gpu_rect *r);
+int virtio_gpu_update_dmabuf_fd(VirtIOGPU *g,
+                                uint32_t scanout_id,
+                                int dmabuf_fd,
+                                uint32_t width,
+                                uint32_t height,
+                                uint32_t stride,
+                                uint32_t x,
+                                uint32_t y,
+                                uint32_t backing_width,
+                                uint32_t backing_height,
+                                uint32_t fourcc,
+                                uint64_t modifier,
+                                bool y0_top,
+                                bool owns_fd);
+void virtio_gpu_clear_dmabuf(VirtIOGPU *g, uint32_t scanout_id);
 
 void virtio_gpu_update_scanout(VirtIOGPU *g,
                                uint32_t scanout_id,

@@ -849,6 +849,62 @@
 { 'command': 'query-mice', 'returns': ['MouseInfo'] }
 
 ##
+# @GuestMousePosition:
+#
+# Host-side cursor position for a graphic console.
+#
+# @x: X coordinate in the guest display coordinate space.
+#
+# @y: Y coordinate in the guest display coordinate space.
+#
+# @visible: true if the guest currently marks the hardware cursor
+#     visible, or if the position comes from the host absolute input
+#     fallback.
+#
+# @valid: true if @x and @y can be used as a current host-side cursor
+#     position.  QEMU first uses the guest-reported hardware cursor.
+#     If the guest does not report one, QEMU falls back to the most
+#     recent absolute pointer position injected through
+#     input-send-event.
+#     When false, @x and @y are only placeholders.
+#
+# Since: 9.2
+##
+{ 'struct': 'GuestMousePosition',
+  'data': { 'x': 'int', 'y': 'int',
+            'visible': 'bool', 'valid': 'bool' } }
+
+##
+# @query-guest-mouse-position:
+#
+# Return the latest host-side cursor position for a graphic console.
+#
+# This is a host-side QMP query only.  It does not create any new
+# guest-visible device, register, or guest agent command.  Guest
+# hardware cursor state is preferred.  If it is not available, the
+# command returns the most recent absolute pointer position injected
+# through input-send-event.
+#
+# @device: display device ID.  If omitted, the primary graphic console
+#     is used.
+#
+# @head: display head to use together with @device.  Defaults to 0.
+#
+# Returns: @GuestMousePosition
+#
+# Since: 9.2
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-guest-mouse-position" }
+#     <- { "return": { "x": 640, "y": 360,
+#                      "visible": true, "valid": true } }
+##
+{ 'command': 'query-guest-mouse-position',
+  'data': { '*device': 'str', '*head': 'int' },
+  'returns': 'GuestMousePosition' }
+
+##
 # @QKeyCode:
 #
 # An enumeration of key name.
@@ -1479,6 +1535,49 @@
   'data'    : { '*grab-mod'   : 'HotKeyMod' } }
 
 ##
+# @DisplayFbShm:
+#
+# Cross-host framebuffer export backend.  The guest framebuffer is
+# exported through host-native shared memory; GPU scanout clients may
+# additionally subscribe to dma-buf / D3D11 shared texture metadata.
+# External consumers connect to the control socket and receive either
+# Linux fds or Win32 object names, then read frames in BGR0 / 32bpp
+# with a seqlock pattern (see include/ui/fb-shm-abi.h).
+#
+# @id: backend identifier used to derive default paths
+#     (default: "qemu-${pid}").
+#
+# @path: control socket path (default:
+#     "/run/qemu/fb-${id}.sock").
+#
+# @x: ROI x offset within the guest surface (default 0).
+#
+# @y: ROI y offset within the guest surface (default 0).
+#
+# @width: ROI width; 0 means "track full surface width" (default 0).
+#
+# @height: ROI height; 0 means "track full surface height"
+#     (default 0).
+#
+# @rate: target frame rate in Hz, clamped to [1, 240]
+#     (default 30).
+#
+# @cursor: blend the guest cursor onto the frame before publishing
+#     (default off; reserved for future use).
+#
+# Since: 9.2
+##
+{ 'struct'  : 'DisplayFbShm',
+  'data'    : { '*id'     : 'str',
+                '*path'   : 'str',
+                '*x'      : 'uint32',
+                '*y'      : 'uint32',
+                '*width'  : 'uint32',
+                '*height' : 'uint32',
+                '*rate'   : 'uint32',
+                '*cursor' : 'bool' } }
+
+##
 # @DisplayType:
 #
 # Display (user interface) type.
@@ -1513,6 +1612,12 @@
 #
 # @dbus: Start a D-Bus service for the display.  (Since 7.0)
 #
+# @fb-shm: Cross-host zero-copy framebuffer export through shared
+#     memory plus a host-native doorbell.  Linux clients receive
+#     memfd/eventfd via SCM_RIGHTS; Windows clients receive named file
+#     mapping/event objects.  Supports rectangular region-of-interest
+#     cropping.  (Since 9.2)
+#
 # Since: 2.12
 ##
 { 'enum'    : 'DisplayType',
@@ -1525,7 +1630,8 @@
     { 'name': 'curses', 'if': 'CONFIG_CURSES' },
     { 'name': 'cocoa', 'if': 'CONFIG_COCOA' },
     { 'name': 'spice-app', 'if': 'CONFIG_SPICE' },
-    { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' }
+    { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' },
+    { 'name': 'fb-shm', 'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } }
   ]
 }
 
@@ -1563,7 +1669,9 @@
       'egl-headless': { 'type': 'DisplayEGLHeadless',
                         'if': 'CONFIG_OPENGL' },
       'dbus': { 'type': 'DisplayDBus', 'if': 'CONFIG_DBUS_DISPLAY' },
-      'sdl': { 'type': 'DisplaySDL', 'if': 'CONFIG_SDL' }
+      'sdl': { 'type': 'DisplaySDL', 'if': 'CONFIG_SDL' },
+      'fb-shm': { 'type': 'DisplayFbShm',
+                  'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } }
   }
 }
 
@@ -1614,6 +1722,57 @@
   'base': {'type': 'DisplayReloadType'},
   'discriminator': 'type',
   'data': { 'vnc': 'DisplayReloadOptionsVNC' } }
+
+##
+# @display-pause:
+#
+# Pause every DisplayChangeListener whose backend name matches @name.
+# A paused listener stops receiving ``dpy_refresh`` ticks (so its
+# per-frame work disappears from the host CPU/GPU budget) but stays
+# registered so guest input and other sinks keep functioning.
+# Backends with a ``dpy_set_paused`` hook also take their own action
+# (e.g. SDL hides its window).  Pair with @display-resume.
+#
+# @name: backend name (matches ``DisplayChangeListenerOps.dpy_name``,
+#     for example ``sdl2`` or ``fb-shm``).
+#
+# Errors:
+#     - if no listener with that name is registered, GenericError.
+#
+# Since: 9.2
+#
+# .. qmp-example::
+#
+#     -> { "execute": "display-pause",
+#          "arguments": { "name": "sdl2" } }
+#     <- { "return": {} }
+##
+{ 'command': 'display-pause',
+  'data': { 'name': 'str' } }
+
+##
+# @display-resume:
+#
+# Reverse of @display-pause.  The listener immediately resumes
+# receiving refresh ticks.  Backends with a ``dpy_set_paused`` hook
+# also undo whatever they did on pause (e.g. SDL re-shows the window
+# and triggers a full redraw).  No-op if not currently paused.
+#
+# @name: backend name (matches ``DisplayChangeListenerOps.dpy_name``).
+#
+# Errors:
+#     - if no listener with that name is registered, GenericError.
+#
+# Since: 9.2
+#
+# .. qmp-example::
+#
+#     -> { "execute": "display-resume",
+#          "arguments": { "name": "sdl2" } }
+#     <- { "return": {} }
+##
+{ 'command': 'display-resume',
+  'data': { 'name': 'str' } }
 
 ##
 # @display-reload:

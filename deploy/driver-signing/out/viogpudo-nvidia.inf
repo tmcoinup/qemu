@@ -1,0 +1,77 @@
+; viogpudo-nvidia.inf
+;
+; Modified copy of upstream virtio-win `viogpudo.inf` for stealth guests
+; running with QEMU PCI IDs overridden to VEN_10DE&DEV_1C81 (GTX 1050).
+;
+; Hardware ID bindings point at the NVIDIA PCI IDs, so pnputil will only
+; match this INF when QEMU exposes VEN_10DE&DEV_1C81. Paired with the
+; backdated cert chain under deploy/driver-signing/certs/, the resulting
+; viogpudo.cat + viogpudo.sys load on a guest with testsigning=off.
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Display
+ClassGuid={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%PROVIDER%
+DriverVer=02/01/2024,100.93.0.0
+CatalogFile=viogpudo.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir   = 12
+VioGpuDod.Copy   = 12
+
+[SourceDisksNames]
+1 = %DiskId1%,,,""
+
+[SourceDisksFiles]
+viogpudo.sys  = 1,,
+
+[Manufacturer]
+%PROVIDER% = VioGpuDod,NTamd64.10.0...17134
+
+; --- NVIDIA-branded PCI bindings ------------------------------------------
+; QEMU primary IDs are overridden to 10DE:1C81 via x-pci-vendor-id /
+; x-pci-device-id on the virtio-vga-gl device; subsys is 1C8110DE. Windows
+; Plug and Play rank the most specific match first, so list both.
+[VioGpuDod.NTamd64.10.0...17134]
+%VIOGPUDOD.DeviceDesc% = VioGpuDod_Install, PCI\VEN_10DE&DEV_1C81&SUBSYS_1C8110DE&REV_A1
+%VIOGPUDOD.DeviceDesc% = VioGpuDod_Install, PCI\VEN_10DE&DEV_1C81&SUBSYS_1C8110DE
+%VIOGPUDOD.DeviceDesc% = VioGpuDod_Install, PCI\VEN_10DE&DEV_1C81
+
+[VioGpuDod_Install]
+FeatureScore = F8
+CopyFiles    = VioGpuDod.Copy
+AddReg       = VioGpuDod.AddReg
+
+[VioGpuDod.Copy]
+viogpudo.sys
+
+[VioGpuDod_Install.Services]
+AddService = VioGpuDod, 0x00000002, VioGpuDod_Service_Install
+
+[VioGpuDod_Service_Install]
+DisplayName    = %VIOGPUDOD.SvcDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\viogpudo.sys
+
+[VioGpuDod.AddReg]
+HKR,, DriverDesc,                    0,  "%VIOGPUDOD.DeviceDesc%"
+HKR,, ProviderName,                  0,  "NVIDIA"
+HKR,, MatchingDeviceId,              0,  "PCI\VEN_10DE&DEV_1C81"
+HKR,"HardwareInformation", AdapterString, 0, "NVIDIA GeForce GTX 1050"
+HKR,"HardwareInformation", ChipType,      0, "GeForce GTX 1050"
+HKR,"HardwareInformation", DacType,       0, "Integrated RAMDAC"
+HKR,"HardwareInformation", BiosString,    0, "Version 86.07.48.00.38"
+HKR,"HardwareInformation", MemorySize,    %REG_BINARY%, 00,00,00,80
+HKR,"HardwareInformation", qwMemorySize,  %REG_QWORD%,  0x0000000080000000
+
+[Strings]
+REG_BINARY            = 0x00000001
+REG_QWORD             = 0x0000000B
+PROVIDER              = "NVIDIA"
+DiskId1               = "NVIDIA GeForce Driver Disk"
+VIOGPUDOD.DeviceDesc  = "NVIDIA GeForce GTX 1050"
+VIOGPUDOD.SvcDesc     = "NVIDIA GeForce GTX 1050 Display Driver"

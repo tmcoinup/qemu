@@ -68,6 +68,7 @@ struct SocketChardev {
     bool is_listen;
     bool is_telnet;
     bool is_tn3270;
+    bool is_multi;
     GSource *telnet_source;
     TCPChardevTelnetInit *telnet_init;
 
@@ -83,5 +84,12 @@ typedef struct SocketChardev SocketChardev;
 
 DECLARE_INSTANCE_CHECKER(SocketChardev, SOCKET_CHARDEV,
                          TYPE_CHARDEV_SOCKET)
+
+bool qemu_chr_socket_is_multi(Chardev *chr);
+void qemu_chr_socket_set_multi_client_func(Chardev *chr,
+                                           QIONetListenerClientFunc func,
+                                           gpointer data,
+                                           GDestroyNotify notify,
+                                           GMainContext *context);
 
 #endif /* CHAR_SOCKET_H */

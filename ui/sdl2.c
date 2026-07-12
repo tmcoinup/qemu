@@ -714,6 +714,13 @@ static void handle_windowevent(SDL_Event *ev)
         break;
     case SDL_WINDOWEVENT_FOCUS_GAINED:
         scon->has_input_focus = true;
+        /*
+         * 中文注释：GL scanout 的窗口 back buffer 在最小化、隐藏或被窗口管理器
+         * 重新合成后可能被清成黑色。guest 若此时没有提交新帧，普通
+         * graphic_hw_update() 不会触发 dpy_gl_update()，窗口就会一直黑到下一帧。
+         * 焦点回来时主动 replay 当前 scanout，保证 idle 桌面也能恢复显示。
+         */
+        sdl2_redraw(scon);
         /* fall through */
     case SDL_WINDOWEVENT_ENTER:
         if (ev->window.event == SDL_WINDOWEVENT_ENTER) {
@@ -928,10 +935,20 @@ static void sdl2_set_paused(DisplayChangeListener *dcl, bool paused)
         return;
     }
     if (paused) {
+        scon->hidden = true;
         SDL_HideWindow(scon->real_window);
     } else {
+        scon->hidden = false;
         SDL_ShowWindow(scon->real_window);
         graphic_hw_invalidate(dcl->con);
+        /*
+         * 中文注释：display-resume 可能发生在 guest 桌面完全静止时。对
+         * virtio-gpu-gl/virgl 来说，当前画面在 texture scanout 里，不在传统
+         * DisplaySurface 里；只 invalidate 不一定马上产生新的 GL flush。
+         * 这里直接重绘一次已缓存的 scanout，避免 SDL 窗口恢复后停在黑色
+         * back buffer。
+         */
+        sdl2_redraw(scon);
     }
 }
 

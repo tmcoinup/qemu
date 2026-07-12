@@ -10,18 +10,21 @@
 #   1. 按当前显卡 PCI SUBSYS 自动选定伪装型号（GPU 池映射表）
 #   2. 重写 Class\{4d36e968}\NNNN + Enum\PCI + Enum\DISPLAY 注册表覆盖
 #      → Win32_VideoController / 设备管理器 / 显示器名 全部对齐到伪装型号
-#   3. 装开机自刷计划任务（StealthGPU-RefreshName / -ForceDisplayFreq）
+#   3. 普通模式会装开机自刷计划任务；-FirstLogon 模式会跳过并清理这些任务。
 #   4. 清掉可能残留的 RunOnce 入口（兼容旧 clone 注入；本地一键无此入口也无害）
 #   5. 完成后重启，让覆盖完整生效
 #
-# 一键用法：双击同目录的 respawn-stealth.bat（自动 UAC 提权）。
+# 一键用法：发布版双击 respawn-stealth.exe（自动 UAC 提权，并内嵌本脚本）。
+# 历史调试入口仍可双击同目录的 respawn-stealth.bat。
 # 手动用法（管理员 PowerShell）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\respawn-stealth-local.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\respawn-stealth-local.ps1 -NoReboot
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\respawn-stealth-local.ps1 -FirstLogon
 
 param(
     [switch]$NoReboot,          # 跑完不自动重启（默认跑完会重启）
-    [int]   $RebootDelay = 8    # 自动重启倒计时（秒）；期间可 Ctrl+C 取消
+    [int]   $RebootDelay = 8,   # 自动重启倒计时（秒）；期间可 Ctrl+C 取消
+    [switch]$FirstLogon         # OOBE 后一次性执行：不安装每次开机/登录的自刷任务
 )
 
 $ErrorActionPreference = 'Continue'
@@ -30,11 +33,53 @@ try { chcp 65001 | Out-Null } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
+function Enable-RespawnDisplayDevices {
+    # apply-gpu-spoof 早期版本或 QEMU 异常退出，可能让显示适配器停在设备管理器 Code 22。
+    # 这里作为外层 EXE/本地脚本的兜底：不依赖 Status OK，所有非正常 Display 设备都尝试启用一次。
+    try {
+        $displayDevices = @(Get-PnpDevice -Class 'Display' -ErrorAction SilentlyContinue |
+            Where-Object { $_.InstanceId -and $_.Status -ne 'Unknown' })
+    } catch {
+        Write-Host ("  (显示适配器状态检查失败: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
+        return
+    }
+
+    foreach ($dev in $displayDevices) {
+        $problem = ''
+        try { $problem = [string]$dev.Problem } catch {}
+
+        $needsEnable = $false
+        if ($dev.Status -ne 'OK') { $needsEnable = $true }
+        if ($problem -eq '22' -or $problem -match 'CM_PROB_DISABLED|DISABLED') { $needsEnable = $true }
+        if (-not $needsEnable) { continue }
+
+        $label = [string]$dev.FriendlyName
+        if ([string]::IsNullOrWhiteSpace($label)) { $label = [string]$dev.InstanceId }
+
+        Write-Host ("  启用显示适配器: " + $label + " [" + $dev.Status + "/" + $problem + "]") -ForegroundColor Yellow
+        try {
+            Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction Stop
+            Start-Sleep -Milliseconds 800
+        } catch {
+            Write-Host ("  (启用失败: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
+        }
+    }
+}
+
+function Clear-RespawnScheduledTasks {
+    foreach ($taskName in 'StealthGPU-RefreshName', 'StealthGPU-ForceDisplayFreq') {
+        try {
+            schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null
+        } catch {}
+    }
+}
+
 Write-Host "=== respawn-stealth (本地版): 重新对齐 GPU spoof ===" -ForegroundColor Cyan
 
 # --- 0) 管理员自检 ----------------------------------------------------------
-# 经 respawn-stealth.bat 进来时已是管理员；这里兜底直接双击/右键运行本 .ps1
-# （非管理员）的情况：用 RunAs 重新提权拉起自己，原进程退出。
+# 经 respawn-stealth.exe / respawn-stealth.bat 进来时已是管理员；
+# 这里兜底直接双击/右键运行本 .ps1（非管理员）的情况：
+# 用 RunAs 重新提权拉起自己，原进程退出。
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $pr = New-Object Security.Principal.WindowsPrincipal($id)
 if (-not $pr.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
@@ -77,11 +122,25 @@ $log = Join-Path $logDir 'respawn.log'
 
 # --- 3) 跑 apply-gpu-spoof -AutoDetect（按当前 PCI subsys 自动选型号）-------
 Write-Host "  运行 apply-gpu-spoof.ps1 -AutoDetect ...（日志 -> $log）" -ForegroundColor Cyan
-& powershell -NoProfile -ExecutionPolicy Bypass -File $spoof -AutoDetect 2>&1 |
+if ($FirstLogon) {
+    Write-Host "  FirstLogon: 只执行一次，不安装 StealthGPU 开机/登录自刷任务" -ForegroundColor Cyan
+    Clear-RespawnScheduledTasks
+}
+$spoofArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $spoof, '-AutoDetect')
+if ($FirstLogon) { $spoofArgs += '-SkipTask' }
+& powershell @spoofArgs 2>&1 |
     Tee-Object -FilePath $log
 $rc = $LASTEXITCODE
+if ($FirstLogon) {
+    Clear-RespawnScheduledTasks
+}
 
-# --- 4) 清除可能残留的 RunOnce 入口 -----------------------------------------
+# --- 4) 兜底启用 Display 设备 ----------------------------------------------
+# 如果上一次运行因为 QEMU/GLX 崩溃在 PnP 刷新中断，显卡可能残留为 Code 22。
+# apply 脚本已经会处理一次；这里再兜底一次，确保自动重启前不是“已禁用”状态。
+Enable-RespawnDisplayDevices
+
+# --- 5) 清除可能残留的 RunOnce 入口 -----------------------------------------
 # 旧 clone 流程曾经往 SOFTWARE\...\RunOnce 注入 *StealthRespawn 走 HTTP 拉本脚本；
 # 本地一键不需要它，存在就顺手删掉，不存在也无害。
 $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
@@ -89,7 +148,7 @@ foreach ($name in '*StealthRespawn', 'StealthRespawn') {
     Remove-ItemProperty -Path $runOnce -Name $name -ErrorAction SilentlyContinue
 }
 
-# --- 5) 收尾 / 重启 ---------------------------------------------------------
+# --- 6) 收尾 / 重启 ---------------------------------------------------------
 if ($rc -ne 0) {
     Write-Host ""
     Write-Host "WARN: apply-gpu-spoof.ps1 退出码 = $rc —— 可能没找到伪装显卡节点。" -ForegroundColor Yellow

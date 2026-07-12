@@ -100,6 +100,20 @@ test_texture_export_warning_is_strict_only() {
         || fail "texture dma-buf export fallback must warn only for strict GPU clients"
 }
 
+test_gl_context_failure_does_not_destroy_bad_context() {
+    require_text "gl_ctx_unusable" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "GLXBadContext" "$REPO_ROOT/ui/fb-shm.c"
+    awk '
+        /^static void fb_shm_gl_release\(FbShmDisplay \*d\)/ { in_func = 1 }
+        in_func && /d->gl_ctx && !d->gl_ctx_unusable/ { guarded_destroy = 1 }
+        in_func && /dpy_gl_ctx_destroy/ { saw_destroy = 1 }
+        in_func && /^}/ {
+            exit guarded_destroy && saw_destroy ? 0 : 1
+        }
+    ' "$REPO_ROOT/ui/fb-shm.c" \
+        || fail "fb-shm must not destroy a GL context after make-current failure"
+}
+
 test_native_streamer_has_both_platforms() {
     require_text "OpenFileMappingA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
     require_text "OpenEventA" "$REPO_ROOT/tools/fb-shm-stream/platform.c"
@@ -185,6 +199,7 @@ test_qemu_backend_has_win32_mapping
 test_backend_drops_idle_listener_rate
 test_gl_readback_drains_pbo_before_rate_gate
 test_texture_export_warning_is_strict_only
+test_gl_context_failure_does_not_destroy_bad_context
 test_native_streamer_has_both_platforms
 test_windows_scripts_are_native
 test_docs_cover_windows_packaging

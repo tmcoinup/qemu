@@ -247,69 +247,75 @@ if [[ -n "${EXTRA_ISO:-}" ]]; then
 fi
 
 # -------------------------------------------------------------------
-# Network backend: bridge (LAN-attached) vs user-mode NAT.
-#
-# Bridge mode puts the guest on the host's LAN with its own DHCP lease,
-# which matters for DNF because anti-cheat treats 10.0.2.x / 192.168.76.x
-# NAT subnets as virtual-machine signals. User mode is kept as the default
-# fallback for hosts without bridge setup.
+# Network backend: 显式 VLAN 使用预创建 access TAP；未传 VLAN 时逐行保留
+# 原 bridge/user-mode NAT 逻辑。两条路径不能共用 qemu-bridge-helper：该 helper
+# 只收到 bridge 名，不知道 VID，连接后再改 PVID 还会产生首包串 VLAN 的竞态。
 # -------------------------------------------------------------------
-if [[ -n "${BRIDGE:-}" ]]; then
-    _bridge_fail=""
-    if ! ip link show "$BRIDGE" &>/dev/null; then
-        _bridge_fail="bridge '$BRIDGE' does not exist"
-    elif ! grep -q "^allow $BRIDGE" /etc/qemu/bridge.conf 2>/dev/null; then
-        _bridge_fail="/etc/qemu/bridge.conf missing 'allow $BRIDGE'"
+if [[ -n "${VLAN_ID:-}" ]]; then
+    NET_ARGS=(
+        -netdev "tap,id=net0,ifname=$VLAN_TAP_IF,script=no,downscript=$SV_VLAN_DOWNSCRIPT"
+    )
+    echo ">> network:     access VLAN $VLAN_ID via $VLAN_TAP_IF on br0 (guest receives untagged frames)"
+else
+    # 以下无 VLAN 分支保持历史行为：br0 可用则桥接；普通模式下不可用时仍按
+    # STRICT_STEALTH/ALLOW_NAT_FALLBACK 的原规则决定报错或回退 NAT。
+    if [[ -n "${BRIDGE:-}" ]]; then
+        _bridge_fail=""
+        if ! ip link show "$BRIDGE" &>/dev/null; then
+            _bridge_fail="bridge '$BRIDGE' does not exist"
+        elif ! grep -q "^allow $BRIDGE" /etc/qemu/bridge.conf 2>/dev/null; then
+            _bridge_fail="/etc/qemu/bridge.conf missing 'allow $BRIDGE'"
+        fi
+        if [[ -n "$_bridge_fail" ]]; then
+            # STRICT_STEALTH=1：桥接失败即 fail-fast，绝不静默回退 user-mode NAT——
+            # NAT 的 10.0.2.x 子网本身就是 VM 特征，对隐身验收是致命漏判。默认（兼容
+            # 启动）仍回退 NAT 但打醒目标记；ALLOW_NAT_FALLBACK=1 在 strict 下显式放行。
+            if [[ "${STRICT_STEALTH:-0}" == "1" && "${ALLOW_NAT_FALLBACK:-0}" != "1" ]]; then
+                echo "ERROR: $_bridge_fail" >&2
+                echo "       STRICT_STEALTH=1 拒绝回退 user-mode NAT（NAT 子网是 VM 特征）。" >&2
+                echo "       修桥: sudo deploy/scripts/setup-bridge.sh UPLINK=<iface>；" >&2
+                echo "       或显式放行: ALLOW_NAT_FALLBACK=1 deploy/scripts/start-vm.sh ..." >&2
+                exit 1
+            fi
+            echo ">> WARN: $_bridge_fail"
+            echo ">>       falling back to user-mode NAT. Run 'sudo deploy/scripts/setup-bridge.sh'"
+            echo ">>       (with UPLINK=<iface> for a LAN bridge) to enable bridge mode."
+            BRIDGE=""
+            STEALTH_NET_FALLBACK=1
+        fi
     fi
-    if [[ -n "$_bridge_fail" ]]; then
-        # STRICT_STEALTH=1：桥接失败即 fail-fast，绝不静默回退 user-mode NAT——
-        # NAT 的 10.0.2.x 子网本身就是 VM 特征，对隐身验收是致命漏判。默认（兼容
-        # 启动）仍回退 NAT 但打醒目标记；ALLOW_NAT_FALLBACK=1 在 strict 下显式放行。
-        if [[ "${STRICT_STEALTH:-0}" == "1" && "${ALLOW_NAT_FALLBACK:-0}" != "1" ]]; then
-            echo "ERROR: $_bridge_fail" >&2
-            echo "       STRICT_STEALTH=1 拒绝回退 user-mode NAT（NAT 子网是 VM 特征）。" >&2
-            echo "       修桥: sudo deploy/scripts/setup-bridge.sh UPLINK=<iface>；" >&2
-            echo "       或显式放行: ALLOW_NAT_FALLBACK=1 deploy/scripts/start-vm.sh ..." >&2
+    if [[ -n "${BRIDGE:-}" ]]; then
+        # Pick the first qemu-bridge-helper we find with cap_net_admin (or suid).
+        # The source-built QEMU defaults to /usr/local/libexec/qemu-bridge-helper
+        # which won't exist on a stock Ubuntu host — passing helper= explicitly
+        # removes that entire class of "-netdev bridge: failed to launch helper"
+        # errors. setup-bridge.sh also symlinks that path for safety.
+        BRIDGE_HELPER=""
+        for h in /usr/lib/qemu/qemu-bridge-helper \
+                 /usr/libexec/qemu-bridge-helper \
+                 /usr/local/libexec/qemu-bridge-helper \
+                 "$REPO_ROOT/build/qemu-bridge-helper"; do
+            if [[ -x "$h" ]] && { getcap "$h" 2>/dev/null | grep -q cap_net_admin || [[ -u "$h" ]]; }; then
+                BRIDGE_HELPER="$h"; break
+            fi
+        done
+        if [[ -z "$BRIDGE_HELPER" ]]; then
+            echo "ERROR: no qemu-bridge-helper with cap_net_admin/suid found." >&2
+            echo "       Run 'sudo deploy/scripts/setup-bridge.sh' (it installs the apt package + grants caps)." >&2
             exit 1
         fi
-        echo ">> WARN: $_bridge_fail"
-        echo ">>       falling back to user-mode NAT. Run 'sudo deploy/scripts/setup-bridge.sh'"
-        echo ">>       (with UPLINK=<iface> for a LAN bridge) to enable bridge mode."
-        BRIDGE=""
-        STEALTH_NET_FALLBACK=1
-    fi
-fi
-if [[ -n "${BRIDGE:-}" ]]; then
-    # Pick the first qemu-bridge-helper we find with cap_net_admin (or suid).
-    # The source-built QEMU defaults to /usr/local/libexec/qemu-bridge-helper
-    # which won't exist on a stock Ubuntu host — passing helper= explicitly
-    # removes that entire class of "-netdev bridge: failed to launch helper"
-    # errors. setup-bridge.sh also symlinks that path for safety.
-    BRIDGE_HELPER=""
-    for h in /usr/lib/qemu/qemu-bridge-helper \
-             /usr/libexec/qemu-bridge-helper \
-             /usr/local/libexec/qemu-bridge-helper \
-             "$REPO_ROOT/build/qemu-bridge-helper"; do
-        if [[ -x "$h" ]] && { getcap "$h" 2>/dev/null | grep -q cap_net_admin || [[ -u "$h" ]]; }; then
-            BRIDGE_HELPER="$h"; break
+        NET_ARGS=(
+            -netdev "bridge,id=net0,br=$BRIDGE,helper=$BRIDGE_HELPER"
+        )
+        echo ">> network:     bridge=$BRIDGE via $BRIDGE_HELPER (guest gets LAN IP via DHCP)"
+    else
+        NET_ARGS=(
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_FWD_PORT-:22,hostfwd=tcp:127.0.0.1:$RDP_FWD_PORT-:3389
+        )
+        echo ">> network:     user-mode NAT (SSH 127.0.0.1:$SSH_FWD_PORT, RDP 127.0.0.1:$RDP_FWD_PORT)"
+        if [[ "${STEALTH_NET_FALLBACK:-0}" == "1" ]]; then
+            echo ">> ⚠⚠ 本次为 user-mode NAT 回退（非 stealth 桥接）：10.0.2.x 子网是 VM 特征，勿用于隐身验收。"
         fi
-    done
-    if [[ -z "$BRIDGE_HELPER" ]]; then
-        echo "ERROR: no qemu-bridge-helper with cap_net_admin/suid found." >&2
-        echo "       Run 'sudo deploy/scripts/setup-bridge.sh' (it installs the apt package + grants caps)." >&2
-        exit 1
-    fi
-    NET_ARGS=(
-        -netdev "bridge,id=net0,br=$BRIDGE,helper=$BRIDGE_HELPER"
-    )
-    echo ">> network:     bridge=$BRIDGE via $BRIDGE_HELPER (guest gets LAN IP via DHCP)"
-else
-    NET_ARGS=(
-        -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_FWD_PORT-:22,hostfwd=tcp:127.0.0.1:$RDP_FWD_PORT-:3389
-    )
-    echo ">> network:     user-mode NAT (SSH 127.0.0.1:$SSH_FWD_PORT, RDP 127.0.0.1:$RDP_FWD_PORT)"
-    if [[ "${STEALTH_NET_FALLBACK:-0}" == "1" ]]; then
-        echo ">> ⚠⚠ 本次为 user-mode NAT 回退（非 stealth 桥接）：10.0.2.x 子网是 VM 特征，勿用于隐身验收。"
     fi
 fi
 

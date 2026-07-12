@@ -3,13 +3,16 @@
 _cli_instance=""
 _cli_iso=""
 _cli_reroll=0
+_cli_bridge_seen=0
+_cli_vlan_id_seen=0
 while (( $# > 0 )); do
     case "$1" in
         -h|--help) _usage 0 ;;
         --iso=*)      _cli_iso="${1#*=}" ;;
         --disk=*)     DISK="${1#*=}" ;;
-        --bridge=*)   BRIDGE="${1#*=}" ;;
+        --bridge=*)   BRIDGE="${1#*=}"; _cli_bridge_seen=1 ;;
         --no-bridge)  NO_BRIDGE=1 ;;
+        --vlan-id=*)  VLAN_ID="${1#*=}"; _cli_vlan_id_seen=1 ;;
         --qemu=*)     QEMU="${1#*=}" ;;
         --ram=*)      RAM="${1#*=}" ;;
         --cpus=*)     CPUS="${1#*=}" ;;
@@ -73,6 +76,71 @@ if ! [[ "$INSTANCE" =~ ^[0-9]+$ ]] || (( INSTANCE < 1 )); then
     exit 2
 fi
 
+# VLAN 是运行时网络选择，不写入硬件身份 profile。CLI 值会覆盖同名环境变量，
+# 但显式空参数必须报错，避免 `--vlan-id=` 被误当成“未启用 VLAN”后接入普通 LAN。
+: "${VLAN_ID:=}"
+if [[ "$_cli_vlan_id_seen" == "1" && -z "$VLAN_ID" ]]; then
+    echo "ERROR: --vlan-id 不能为空；合法范围为 1..4094" >&2
+    exit 2
+fi
+if [[ -n "$VLAN_ID" ]]; then
+    _vlan_id_raw="$VLAN_ID"
+    if ! _vlan_id_normalized="$(vlan_validate_id "$VLAN_ID")"; then
+        echo "ERROR: VLAN_ID 必须是 [1,4094] 的整数 (实际: '$_vlan_id_raw')" >&2
+        exit 2
+    fi
+    VLAN_ID="$_vlan_id_normalized"
+    if [[ "${NO_BRIDGE:-0}" == "1" ]]; then
+        echo "ERROR: --vlan-id 依赖宿主 bridge，不能和 --no-bridge 同时使用" >&2
+        exit 2
+    fi
+    if [[ "$_cli_bridge_seen" == "1" && "${BRIDGE:-}" != "br0" ]]; then
+        echo "ERROR: --vlan-id 只支持单一 br0；可省略 --bridge 或显式写 --bridge=br0" >&2
+        exit 2
+    fi
+fi
+if [[ -n "$VLAN_ID" ]]; then
+    # 显式 VLAN 固定复用唯一的 VLAN-aware br0。QEMU bridge backend 本身没有
+    # IEEE 802.1Q 参数，后续会切到预创建的 persistent TAP；这里禁止环境变量
+    # 偷换其它 bridge，避免把 access TAP 接进错误广播域。
+    BRIDGE="${BRIDGE:-br0}"
+    if [[ "$BRIDGE" != "br0" ]]; then
+        echo "ERROR: VLAN 模式固定使用 br0（实际 BRIDGE='$BRIDGE'）" >&2
+        exit 2
+    fi
+    if ! VLAN_TAP_IF="$(vlan_tap_name "$INSTANCE")"; then
+        echo "ERROR: VLAN 模式实例号必须为 1..10 位正整数，才能生成安全 TAP 名" >&2
+        exit 2
+    fi
+
+fi
+
+# 所有网络模式共用实例生命周期锁。stop-vm 会在清 socket/TPM/TAP 前取得同一
+# 把锁，因此旧 VM 的迟到收尾不会误删同实例新 VM 的资源。DRY_RUN 仍严格不创建
+# 锁文件；正常启动稍后把 fd 交给异步 guard，跨 inhibit/QEMU exec 持有。
+if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    command -v flock >/dev/null 2>&1 || {
+        echo "ERROR: 启动 VM 需要 util-linux 的 flock" >&2
+        exit 1
+    }
+    if ! SV_INSTANCE_LOCK="$(sv_instance_lock_path "$INSTANCE")"; then
+        echo "ERROR: 无法创建当前用户的私有实例锁目录" >&2
+        exit 1
+    fi
+    exec 8>"$SV_INSTANCE_LOCK"
+    if ! flock -n 8; then
+        echo "ERROR: 实例 $INSTANCE 已在启动或运行" >&2
+        exit 1
+    fi
+    SV_INSTANCE_LOCKED=1
+fi
+
+# VLAN 宿主预检仍早于 VM_DIR/profile/TPM；先持有实例锁可确保同实例第二个
+# 启动器不会在第一个启动器的 prepare 前并发通过这段检查。
+if [[ -n "$VLAN_ID" ]] && ! sv_vlan_preflight; then
+    exit 1
+fi
+
 # RAM 默认值故意不在这里钉死：profile.MEM_TOTAL_MB 可能提供持久化值，
 # 所以推迟到 profile 加载之后再解析（见下方 "RAM 解析" 块）。
 # 显式 --ram= / 环境 RAM= 在 CLI 解析阶段已赋值，会被那里当最高优先级保留。
@@ -91,8 +159,8 @@ _gpu_zerocopy_explicit=0
 : "${GPU_RENDERNODE:=}"
 # GPU 零拷贝元数据依赖 virtio-gpu blob resource + host-visible memory。
 # 中文注释：普通本地游戏窗口默认保持历史 SDL/GLX + texture scanout 路径，
-# 避免实验 native EGL / blob resource 改变 guest 渲染性能。只有显式选择
-# GPU 推流显示后端时，才默认打开零拷贝；环境变量或 CLI 仍可强制覆盖。
+# 避免 native EGL 实验路径在宿主驱动上反复触发 EGL_BAD_ACCESS。只有显式
+# 选择 GPU 推流显示后端时，才默认打开零拷贝；环境变量或 CLI 仍可强制覆盖。
 if [[ "$_gpu_zerocopy_explicit" == "0" ]]; then
     case "$GPU_DISPLAY" in
         sdl-egl|egl-headless) GPU_ZEROCOPY=1 ;;

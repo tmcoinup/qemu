@@ -107,8 +107,13 @@ typedef struct Session {
 } Session;
 
 #if defined(__GNUC__)
+/*
+ * MinGW 的 `printf` 属性默认按微软格式检查，而函数实现调用的是遵循 GNU
+ * 语义的 vfprintf()。显式使用 gnu_printf，确保 Linux 与 Windows 交叉编译
+ * 都能检查格式串，并避免 -Wsuggest-attribute=format 产生误报。
+ */
 void fb_shm_stream_die(const char *fmt, ...)
-    __attribute__((format(printf, 1, 2)));
+    __attribute__((format(gnu_printf, 1, 2)));
 #else
 void fb_shm_stream_die(const char *fmt, ...);
 #endif

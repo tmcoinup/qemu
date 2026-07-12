@@ -2,12 +2,12 @@
 # clone-from-base.sh —— 用 _base/ 里的某个基础镜像快速创建一个新 instance。
 #
 # 用法：
-#   deploy/scripts/clone-from-base.sh <BASE_NAME> <NEW_INSTANCE>
+#   deploy/scripts/clone-from-base.sh <BASE_NAME|BASE_QCOW2> <NEW_INSTANCE>
 #
 # 例：
 #   deploy/scripts/clone-from-base.sh win10-ltsc-shallow 4
-#       -> /home/ubuntu/images/vms/4/disk.qcow2 (qcow2 backed by base)
-#       -> /home/ubuntu/images/vms/4/profile (重新随机硬件身份)
+#       -> $VMS_DIR/4/disk.qcow2 (qcow2 backed by base)
+#       -> $VMS_DIR/4/profile (重新随机硬件身份)
 #
 # 工作机制：
 #   - qcow2 backing-file: 新 disk 只存增量，base 共享只读
@@ -30,14 +30,43 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-BASE_NAME="${1:-}"
-NEW_INSTANCE="${2:-}"
+CLI_IMAGE_ROOT=""
+CLI_VMS_DIR=""
+CLI_BASE_DIR=""
+CLI_QEMU_IMG=""
+POS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --image-root=*) CLI_IMAGE_ROOT="${1#*=}" ;;
+        --vms-dir=*)    CLI_VMS_DIR="${1#*=}" ;;
+        --base-dir=*)   CLI_BASE_DIR="${1#*=}" ;;
+        --qemu-img=*)   CLI_QEMU_IMG="${1#*=}" ;;
+        --*) echo "ERROR: 未知 flag: $1" >&2; exit 2 ;;
+        *) POS+=("$1") ;;
+    esac
+    shift
+done
 
-if [[ -z "$BASE_NAME" || -z "$NEW_INSTANCE" ]]; then
-    echo "usage: $0 <BASE_NAME> <NEW_INSTANCE>" >&2
+BASE_ARG="${POS[0]:-}"
+NEW_INSTANCE="${POS[1]:-}"
+if (( ${#POS[@]} > 2 )); then
+    echo "ERROR: 参数过多: ${POS[*]:2}" >&2
+    exit 2
+fi
+
+IMAGE_ROOT="${CLI_IMAGE_ROOT:-${IMAGE_ROOT:-/home/ubuntu/images}}"
+IMAGE_ROOT="${IMAGE_ROOT%/}"
+[[ -n "$IMAGE_ROOT" ]] || IMAGE_ROOT="/"
+VMS_DIR="${CLI_VMS_DIR:-${VMS_DIR:-$IMAGE_ROOT/vms}}"
+VMS_DIR="${VMS_DIR%/}"
+[[ -n "$VMS_DIR" ]] || VMS_DIR="/"
+BASE_DIR="${CLI_BASE_DIR:-${BASE_DIR:-$VMS_DIR/_base}}"
+
+if [[ -z "$BASE_ARG" || -z "$NEW_INSTANCE" ]]; then
+    echo "usage: $0 <BASE_NAME|BASE_QCOW2> <NEW_INSTANCE>" >&2
     echo "" >&2
     echo "可用 base:" >&2
-    ls /home/ubuntu/images/vms/_base/*.qcow2 2>/dev/null | sed 's|.*/||;s|\.qcow2$||;s|^|  - |' >&2
+    ls "$BASE_DIR"/*.qcow2 2>/dev/null | sed 's|.*/||;s|\.qcow2$||;s|^|  - |' >&2
     exit 2
 fi
 if ! [[ "$NEW_INSTANCE" =~ ^[0-9]+$ ]]; then
@@ -45,13 +74,20 @@ if ! [[ "$NEW_INSTANCE" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 
-BASE_FILE="/home/ubuntu/images/vms/_base/${BASE_NAME}.qcow2"
+if [[ -f "$BASE_ARG" ]]; then
+    BASE_FILE="$(readlink -f "$BASE_ARG")"
+    BASE_NAME="$(basename "$BASE_FILE")"
+    BASE_NAME="${BASE_NAME%.qcow2}"
+else
+    BASE_NAME="$BASE_ARG"
+    BASE_FILE="$BASE_DIR/${BASE_NAME}.qcow2"
+fi
 if [[ ! -f "$BASE_FILE" ]]; then
     echo "ERROR: $BASE_FILE 不存在" >&2
     exit 1
 fi
 
-VM_DIR="/home/ubuntu/images/vms/${NEW_INSTANCE}"
+VM_DIR="$VMS_DIR/${NEW_INSTANCE}"
 DISK="$VM_DIR/disk.qcow2"
 PROFILE="$VM_DIR/profile"
 OVMF_VARS="$VM_DIR/ovmf-vars.fd"
@@ -71,40 +107,37 @@ mkdir -p "$VM_DIR"
 # 历史 bug：devpkey 失败后 set -e+pipefail 中途退出，
 # 跳过末尾 chown，留下 root:root，
 # start-vm.sh 报 "profile: Permission denied"。
-ORIG_USER="${SUDO_USER:-ubuntu}"
+ORIG_USER="${SUDO_USER:-}"
+if [[ -z "$ORIG_USER" && -n "${PKEXEC_UID:-}" ]]; then
+    ORIG_USER="$(id -nu "$PKEXEC_UID" 2>/dev/null || true)"
+fi
+ORIG_USER="${ORIG_USER:-ubuntu}"
 ORIG_GROUP="$(id -gn "$ORIG_USER" 2>/dev/null || echo "$ORIG_USER")"
 trap 'chown -R "${ORIG_USER}:${ORIG_GROUP}" "$VM_DIR" 2>/dev/null || true' EXIT
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-QEMU_IMG="$REPO_ROOT/build/qemu-img"
-[[ -x "$QEMU_IMG" ]] || QEMU_IMG=qemu-img
-
-# guest 启动后 FirstLogonCommands Order=10 会去 host 8765 拉 respawn-stealth.ps1
-# (apply-gpu-spoof 自动按 PCI subsys 重对齐 GPU 注册表覆盖)。host 重启后这个
-# server 容易忘开，连不上就静默 fail。这里检测如果 8765 没监听就在后台起一份。
-if ! ss -tln 2>/dev/null | grep -q ':8765\b'; then
-    HTTP_SERVE="$REPO_ROOT/deploy/scripts/serve-stealth-http.py"
-    if [[ -f "$HTTP_SERVE" ]]; then
-        ORIG_USER="${SUDO_USER:-ubuntu}"
-        echo ">> 起 stealth HTTP server (8765) 让 guest FirstLogon 能拉 respawn-stealth.ps1"
-        sudo -u "$ORIG_USER" nohup python3 "$HTTP_SERVE" 8765 \
-            > /tmp/serve-http.log 2>&1 &
-        disown 2>/dev/null || true
-        sleep 1
-    fi
+if [[ -n "$CLI_QEMU_IMG" ]]; then
+    QEMU_IMG="$CLI_QEMU_IMG"
 fi
+: "${QEMU_IMG:=$REPO_ROOT/build/qemu-img}"
+[[ -x "$QEMU_IMG" ]] || QEMU_IMG=qemu-img
 
 echo ">> base:        $BASE_FILE"
 echo ">> 创建增量盘:  $DISK"
 "$QEMU_IMG" create -f qcow2 -F qcow2 -b "$BASE_FILE" "$DISK" >/dev/null
 ls -la "$DISK"
 
-# 重新随机 stealth 身份（保证 multi-clone 之间硬件 fingerprint 不同）
-echo ">> 重新随机 stealth profile..."
+# 重新随机 stealth 身份（保证 multi-clone 之间硬件 fingerprint 不同）。
+# 如果上层（例如 VMate UI）已经预写了 profile，则优先复用；只有 NVMe 容量
+# 跟 base 不一致时才重抽，避免做出 disk size / model size 矛盾的克隆。
+echo ">> 准备 stealth profile..."
 source "$(dirname "$0")/stealth-lib.sh"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-QEMU_IMG="$REPO_ROOT/build/qemu-img"
+if [[ -n "$CLI_QEMU_IMG" ]]; then
+    QEMU_IMG="$CLI_QEMU_IMG"
+fi
+: "${QEMU_IMG:=$REPO_ROOT/build/qemu-img}"
 [[ -x "$QEMU_IMG" ]] || QEMU_IMG=qemu-img
 
 # 先读 base 容量，让 pick_profile 重抽 NVMe 直到选定 model 的容量 = base 容量。
@@ -116,20 +149,36 @@ BASE_BYTES=$("$QEMU_IMG" info --output=json "$BASE_FILE" \
     | python3 -c 'import sys, json; print(json.load(sys.stdin)["virtual-size"])')
 echo ">> base 容量: $BASE_BYTES bytes ($(numfmt --to=iec --suffix=B $BASE_BYTES))"
 
-# 最多 100 次重抽——理论上 NVMe pool 里至少 1 条跟 base 容量匹配的 model
-for _i in $(seq 1 100); do
-    stealth_pick_profile
+if stealth_have_profile "$PROFILE"; then
+    stealth_load_profile "$PROFILE"
     if [[ "${NVME_SIZE_BYTES:-0}" == "$BASE_BYTES" ]]; then
+        echo ">> 复用已有 profile: $PROFILE"
         echo ">> profile NVMe = $NVME_MODEL (size $NVME_SIZE_BYTES) ✓ 匹配 base"
-        break
+    else
+        echo ">> WARN: 已有 profile.NVME_SIZE_BYTES=${NVME_SIZE_BYTES:-0} 与 base=$BASE_BYTES 不一致"
+        echo "        将重抽容量匹配的 profile，避免 Windows 自动修复和硬盘指纹矛盾"
+        rm -f "$PROFILE"
     fi
-done
+fi
+
+if ! stealth_have_profile "$PROFILE"; then
+    # 最多 100 次重抽——理论上 NVMe pool 里至少 1 条跟 base 容量匹配的 model
+    for _i in $(seq 1 100); do
+        stealth_pick_profile
+        if [[ "${NVME_SIZE_BYTES:-0}" == "$BASE_BYTES" ]]; then
+            echo ">> profile NVMe = $NVME_MODEL (size $NVME_SIZE_BYTES) ✓ 匹配 base"
+            break
+        fi
+    done
+fi
 if [[ "${NVME_SIZE_BYTES:-0}" != "$BASE_BYTES" ]]; then
     echo ">> WARN: NVMe pool 里找不到容量 = $BASE_BYTES bytes 的 model"
     echo "        NTFS 不一致，guest 可能进 Automatic Repair。建议检查 NVME_POOL 是否含该容量"
 fi
 
-stealth_save_profile "$PROFILE"
+if [[ ! -f "$PROFILE" ]]; then
+    stealth_save_profile "$PROFILE"
+fi
 echo ">> profile -> $PROFILE"
 stealth_print_profile 2>&1
 # pick 已经 export 全部字段；下面 qcow2 resize 直接读 $NVME_SIZE_BYTES / $NVME_MODEL
@@ -163,10 +212,10 @@ if [[ -x "$DEVPKEY_FIX" ]]; then
         # 留下 root:root 且没注入 OOBE unattend 的半成品 VM。
         # GPU DEVPKEY 即便没离线写入，首启脚本也会按新
         # PCI subsys 重对齐 GPU 注册表。
-        if ! "$DEVPKEY_FIX" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /'; then
+        if ! VMS_DIR="$VMS_DIR" DISK="$DISK" "$DEVPKEY_FIX" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /'; then
             echo "   WARN: host-fix-gpu-devpkey.sh 失败"
             echo "         非致命，继续 clone。"
-            echo "         GPU 名首启由 respawn-stealth.ps1"
+            echo "         GPU 名首启由 D:\\工具\\respawn-stealth.exe"
             echo "         兜底重对齐。"
             echo "         若反复失败，多半是 base 处于"
             echo "         Fast Startup/hiberfile。"
@@ -184,7 +233,7 @@ fi
 NUMLOCK_FIX="$SCRIPT_DIR/host-fix-numlock.sh"
 if [[ -x "$NUMLOCK_FIX" && $EUID -eq 0 ]]; then
     echo ">> 修 NumLock 默认状态（DEFAULT hive InitialKeyboardIndicators=ON）..."
-    "$NUMLOCK_FIX" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /' || \
+    VMS_DIR="$VMS_DIR" DISK="$DISK" "$NUMLOCK_FIX" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /' || \
         echo "   WARN: host-fix-numlock.sh 失败，可在 guest 内跑 vm-prep.ps1 兜底"
 fi
 
@@ -196,14 +245,14 @@ fi
 UNATTEND_INJ="$SCRIPT_DIR/host-inject-unattend.sh"
 if [[ -x "$UNATTEND_INJ" && $EUID -eq 0 ]]; then
     echo ">> 注入 OOBE unattend.xml（首启自动以 Administrator 登录进 desktop）..."
-    "$UNATTEND_INJ" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /' || \
+    VMS_DIR="$VMS_DIR" DISK="$DISK" "$UNATTEND_INJ" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /' || \
         echo "   WARN: host-inject-unattend.sh 失败，guest 首启会停在 OOBE"
 fi
 
 # --- 5) RunOnce 不再 inject —— SOFTWARE hive 离线写 + .LOG truncate 会被
-#        Windows 启动 reject (0xc0000001)。respawn-stealth.ps1 已搬进
-#        deploy/autounattend/autounattend.xml 的 FirstLogonCommands Order=10，
-#        OOBE 走完 unattend 后第一次 logon 自动跑，不需要动注册表 hive。
+#        Windows 启动 reject (0xc0000001)。GPU 重对齐由 autounattend 的
+#        FirstLogonCommands Order=10 调 D:\工具\respawn-stealth.exe 执行一次，
+#        不再依赖 host HTTP / 固定 IP。
 
 # --- 6) 目录所有权由顶部的 EXIT trap 统一 chown 回 ORIG_USER。
 #        无论成功还是中途失败，都只在 trap 中处理。
@@ -216,7 +265,7 @@ echo "=== Done ==="
 echo "  instance:  $NEW_INSTANCE"
 echo "  disk:      $DISK (qcow2 backed by base $BASE_NAME)"
 echo "  size:      $TARGET_BYTES bytes (Win 看到的容量)"
-echo "  GPU 重对齐: respawn-stealth.ps1 经 autounattend FirstLogonCommands 拉起"
+echo "  GPU 重对齐: D:\\工具\\respawn-stealth.exe 经 autounattend FirstLogonCommands 拉起一次"
 echo ""
 echo "下一步 — 启动:"
 echo "  deploy/scripts/start-vm.sh $NEW_INSTANCE"
@@ -229,8 +278,8 @@ echo "克隆出的 VM 会复用 base 系统盘内容（Win + shallow stealth + D
 echo "硬件身份新（CPU/主板/GPU/MAC/UUID/NVMe SN 全随机），且**首次开机**会自动："
 echo "  1. 走 unattend.xml → 跳过 OOBE 区域/账户/EULA 等所有交互"
 echo "     → AutoLogon Administrator/123456 直接进 desktop"
-echo "  2. FirstLogonCommands → 启 RDP / 关 NLA / 注册 ms-gamingoverlay / 拉 respawn-stealth.ps1"
-echo "  3. respawn-stealth.ps1 按新 PCI subsys 选 GPU 名 → 重启"
+echo "  2. FirstLogonCommands → 启 RDP / 关 NLA / 注册 ms-gamingoverlay / 跑本地 respawn"
+echo "  3. 本地 respawn 按新 PCI subsys 选 GPU 名 → 重启"
 echo "  4. 重启后设备管理器显示 profile.GPU_NAME（不是 base 那个老型号）"
 echo ""
 echo "⚠️ 没有 sysprep —— Win SID/MachineGUID 与 base 同源；多机并发跑会有"

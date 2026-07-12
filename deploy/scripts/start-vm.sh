@@ -16,6 +16,8 @@
 #     ./start-vm.sh 1 --headless            # VNC 远程 + fb-shm（无本地窗口）
 #     ./start-vm.sh 1 --no-fb-shm           # 关推流，仅 SDL（回历史行为）
 #     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
+#     ./start-vm.sh 1 --vlan-id=11          # 在单一 br0 上动态接入 access VLAN 11
+#                                          # 不传 VLAN 参数时完全保持原有 br0 默认网络
 #     ./start-vm.sh 1 --reroll              # 重新随机硬件身份
 #     ./start-vm.sh 1 --fb-shm-roi=0,0,1920,1080 --fb-shm-rate=60
 #     ./start-vm.sh 1 --proxy               # 启用 QEMU 原生 QMP multi-client
@@ -61,6 +63,14 @@
 #     SDL=1                SDL 窗口开关（默认 1） (flag: --sdl / --no-sdl)
 #     HEADLESS=1           关 SDL 启 VNC                          (flag: --headless)
 #     BRIDGE=br0           桥接网卡名字                          (flag: --bridge=br0)
+#     VLAN_ID=11           access VLAN ID，合法范围 1..4094      (flag: --vlan-id=11)
+#                          首次会检测单 br0/helper；缺配置且有本地 TTY 时，显示
+#                          自动识别的 UPLINK，输入 `SETUP <网卡>` 后 sudo 初始化一次。
+#                          无 TTY/取消/无法唯一识别时 fail closed，并提示手动命令；
+#                          SSH 默认不自动执行（显式 VLAN_SETUP_ALLOW_SSH=1 才询问）。
+#                          成功后任意 VID 动态创建 TAP，无需新 bridge 或再次初始化。
+#                          交换机 native LAN untagged、业务 VLAN tagged；Windows/Linux
+#                          guest 收无标签帧；不传 VLAN 时原行为完全不变。
 #     ISO=<path>           安装 ISO 路径                         (flag: --iso=<path>)
 #     DISK=<path>          qcow2 磁盘路径                        (flag: --disk=<path>)
 #     QEMU=<path>          qemu-system-x86_64 二进制路径         (flag: --qemu=<path>)
@@ -132,6 +142,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # When running from deploy/scripts/, the QEMU repo root is two levels up.
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/stealth-lib.sh"
+source "$HERE/lib/vlan-network.sh"
+source "$HERE/lib/sv-vlan-preflight.sh"
+source "$HERE/lib/sv-instance-lock.sh"
 
 _usage() {
     sed -n '2,/^# --*$/p' "$0" | sed -e 's/^# *//' -e 's/^#$//' >&2

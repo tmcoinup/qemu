@@ -98,6 +98,8 @@ struct Monitor {
     bool is_qmp;
     bool skip_flush;
     bool use_io_thread;
+    bool in_list;
+    QEMUBH *resume_bh;
 
     char *mon_cpu_path;
     QTAILQ_ENTRY(Monitor) entry;
@@ -151,6 +153,15 @@ typedef struct {
     QemuMutex qmp_queue_lock;
     /* Input queue that holds all the parsed QMP requests */
     GQueue *qmp_requests;
+    /*
+     * transient monitor 只服务于 multi QMP 的单次连接。断连清理必须等待已经
+     * 出队的请求完成，避免 dispatcher 持有悬空 MonitorQMP 指针。
+     */
+    unsigned int active_requests;
+    bool transient;
+    bool transient_closing;
+    bool transient_destroy_scheduled;
+    QEMUBH *transient_destroy_bh;
 } MonitorQMP;
 
 /**
@@ -173,7 +184,8 @@ void monitor_data_init(Monitor *mon, bool is_qmp, bool skip_flush,
                        bool use_io_thread);
 void monitor_data_destroy(Monitor *mon);
 int monitor_can_read(void *opaque);
-void monitor_list_append(Monitor *mon);
+void monitor_cancel_out_watch(Monitor *mon);
+bool monitor_list_append(Monitor *mon);
 void monitor_fdsets_cleanup(void);
 
 void qmp_send_response(MonitorQMP *mon, const QDict *rsp);

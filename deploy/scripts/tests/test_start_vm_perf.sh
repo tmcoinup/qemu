@@ -165,8 +165,78 @@ r2 = json.loads(s2.readline())
 assert r1.get("id") == "one" and "return" in r1, r1
 assert r2.get("id") == "two" and "return" in r2, r2
 
-s1.write(b'{"execute":"quit","id":"quit"}\n')
+def execute(stream, command, ident):
+    stream.write(json.dumps({"execute": command, "id": ident}).encode() + b"\n")
+    while True:
+        response = json.loads(stream.readline())
+        if response.get("id") == ident:
+            assert "return" in response, response
+            return response["return"]
+
+def wait_for_child_count(stream, tag, expected=1):
+    # 中文注释：HUP、dispatcher 收尾和主线程 retire BH 都是异步的；通过常驻
+    # c1 轮询，确认短连接对应的 monitor/chardev 真正回收到基线。
+    for attempt in range(200):
+        entries = execute(stream, "query-chardev", f"{tag}-{attempt}")
+        children = [
+            entry for entry in entries
+            if entry.get("label", "").startswith("qmp-multi-")
+        ]
+        if len(children) == expected:
+            return children
+        time.sleep(0.01)
+    raise AssertionError(f"{tag}: QMP child count did not return to {expected}")
+
+# 中文注释：c1 保持常驻，反复创建并关闭第二个 client，模拟 VMate 的
+# query-status 短连接。每个 transient child 都必须删除，不能按连接数增长。
+s2.close()
 c2.close()
+wait_for_child_count(s1, "initial-close")
+for index in range(32):
+    client, stream = connect_qmp(f"short-{index}")
+    status = execute(stream, "query-status", f"short-status-{index}")
+    assert "status" in status, status
+    stream.close()
+    client.close()
+    wait_for_child_count(s1, f"short-close-{index}")
+
+# 中文注释：覆盖“命令已提交但不读响应就断开”的竞态。query-qmp-schema
+# 响应足够大，能触发 dispatcher active request 与 socket HUP 并行收尾。
+for index in range(16):
+    client, stream = connect_qmp(f"active-{index}")
+    stream.write(json.dumps({
+        "execute": "query-qmp-schema",
+        "id": f"active-schema-{index}",
+    }).encode() + b"\n")
+    stream.close()
+    client.close()
+    wait_for_child_count(s1, f"active-close-{index}")
+
+# 半包 JSON 断开必须同样释放 parser/monitor，且不能影响常驻连接。
+for index in range(8):
+    client, stream = connect_qmp(f"partial-{index}")
+    stream.write(b'{"execute":"query-status"')
+    stream.close()
+    client.close()
+    wait_for_child_count(s1, f"partial-close-{index}")
+
+children = execute(s1, "query-chardev", "retire-count")
+children = [
+    entry for entry in children
+    if entry.get("label", "").startswith("qmp-multi-")
+]
+assert len(children) == 1, children
+
+# 中文注释：quit 不能只写完就立刻关 socket；在慢宿主或并发测试时，
+# QEMU 可能还没从 socket 读到完整命令，父 shell 随后 wait 就会卡住。
+# 读到 quit 响应后再关闭，确保临时 QEMU 进入退出流程。
+c1.settimeout(2.0)
+s1.write(b'{"execute":"quit","id":"quit"}\n')
+while True:
+    quit_resp = json.loads(s1.readline())
+    if quit_resp.get("id") == "quit":
+        assert "return" in quit_resp, quit_resp
+        break
 c1.close()
 PY
 
@@ -247,6 +317,40 @@ test_cpu_pm_keeps_upstream_default_dry_run() {
         || fail "QEMU_CPU_PM=1 must explicitly enable cpu-pm"
 }
 
+test_phenom_cpu_masks_missing_3dnow() {
+    local out="$1"
+
+    (
+        source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+        CPU_CUR_MHZ=3200
+        CPU_VENDOR=AuthenticAMD
+        CPU_QEMU_ARG="phenom,model-id=AMD Phenom(tm) II X4 955 Processor"
+        # 中文注释：用可控 flags 模拟新 AMD 宿主缺 3DNow 的情况，验证旧
+        # Phenom/Athlon II profile 启动时会主动关闭 QEMU phenom 的 3DNow 位。
+        STEALTH_HOST_CPU_FLAGS="fpu sse sse2"
+        stealth_qemu_cpu_arg
+    ) > "$out"
+    grep -F -- ",-3dnow," "$out" >/dev/null \
+        || fail "phenom CPU arg must mask missing 3dnow"
+    grep -F -- ",-3dnowext," "$out" >/dev/null \
+        || fail "phenom CPU arg must mask missing 3dnowext"
+
+    (
+        source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+        CPU_CUR_MHZ=3200
+        CPU_VENDOR=AuthenticAMD
+        CPU_QEMU_ARG="phenom,model-id=AMD Phenom(tm) II X4 955 Processor"
+        STEALTH_HOST_CPU_FLAGS="fpu sse sse2 3dnow 3dnowext"
+        stealth_qemu_cpu_arg
+    ) > "$out"
+    if grep -F -- ",-3dnow," "$out" >/dev/null; then
+        fail "phenom CPU arg must not mask 3dnow when host supports it"
+    fi
+    if grep -F -- ",-3dnowext," "$out" >/dev/null; then
+        fail "phenom CPU arg must not mask 3dnowext when host supports it"
+    fi
+}
+
 test_gl_display_keeps_historical_default_dry_run() {
     local out="$1"
     local vga_line
@@ -254,6 +358,14 @@ test_gl_display_keeps_historical_default_dry_run() {
     DISPLAY=:0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9886 \
         "$START_VM" --no-fb-shm --no-bridge > "$out"
 
+    # 中文注释：native EGL 通过环境变量传给 QEMU，DRY_RUN argv 不会打印该环境。
+    # 这里静态钉住默认 GPU_DISPLAY=sdl，避免以后默认再次切回 sdl-egl 后漏测。
+    grep -F -- ': "${GPU_DISPLAY:=sdl}"' "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh" >/dev/null \
+        || fail "default GPU_DISPLAY must stay on stable SDL/GLX"
+    grep -Fx -- "sdl,gl=on,show-cursor=off" "$out" >/dev/null \
+        || fail "default SDL dry-run must keep the SDL/GL window display"
+    grep -Fx -- "egl-headless" "$out" >/dev/null \
+        && fail "default SDL dry-run must not select egl-headless"
     vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
     [[ -n "$vga_line" ]] \
         || fail "default SDL dry-run did not keep virtio-vga-gl"
@@ -368,6 +480,7 @@ main() {
     test_custom_image_root_dry_run "$image_root" "$out"
     test_qemu_service_cpu_flags_dry_run "$out"
     test_cpu_pm_keeps_upstream_default_dry_run "$out"
+    test_phenom_cpu_masks_missing_3dnow "$out"
     test_gl_display_keeps_historical_default_dry_run "$out"
     test_gpu_headless_display_dry_run "$out"
     test_hotkey_capture_option_removed "$out"

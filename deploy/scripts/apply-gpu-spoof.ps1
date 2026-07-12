@@ -9,6 +9,72 @@
     [string]$SpoofBios    = 'Version 86.07.48.00.38'
 )
 
+# zh-CN Win10 默认 console code page = 936 (GBK)，把 Write-Host 中文当 GBK 输出 → 终端乱码。
+try { chcp 65001 | Out-Null } catch {}
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
+$OutputEncoding = [System.Text.UTF8Encoding]::new()
+
+function Get-StealthDisplayDevices {
+    # 统一枚举 Display 类设备；不使用 -Status OK，因为 Code 22/已禁用设备恰好不会出现在 OK 集合里。
+    try {
+        return @(Get-PnpDevice -Class 'Display' -ErrorAction SilentlyContinue |
+            Where-Object { $_.InstanceId -and $_.Status -ne 'Unknown' })
+    } catch {
+        Write-Host ("  (Get-PnpDevice unavailable: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
+        return @()
+    }
+}
+
+function Test-StealthDisplayNeedsEnable {
+    param($Device)
+
+    if (-not $Device) { return $false }
+
+    $status = [string]$Device.Status
+    $problem = ''
+    try { $problem = [string]$Device.Problem } catch {}
+
+    if ($status -eq 'OK') { return $false }
+    # 设备管理器 Code 22 = 设备被禁用；不同 Windows/PowerShell 版本可能显示为 22 或 CM_PROB_DISABLED。
+    if ($problem -eq '22' -or $problem -match 'CM_PROB_DISABLED|DISABLED') { return $true }
+    # 某些 Win10 镜像只暴露 Status=Error，不暴露 Problem 数字；对 Display 类设备尝试 Enable 是幂等兜底。
+    if ($status -eq 'Error' -or $status -eq 'Degraded') { return $true }
+
+    return $false
+}
+
+function Enable-StealthDisplayDevices {
+    param([string]$Reason = '恢复显示适配器启用状态')
+
+    $changed = $false
+    foreach ($dev in @(Get-StealthDisplayDevices)) {
+        if (-not (Test-StealthDisplayNeedsEnable -Device $dev)) { continue }
+
+        $label = [string]$dev.FriendlyName
+        if ([string]::IsNullOrWhiteSpace($label)) { $label = [string]$dev.InstanceId }
+
+        $problem = ''
+        try { $problem = [string]$dev.Problem } catch {}
+        Write-Host ("  enabling display adapter (" + $Reason + "): " + $label + " [" + $dev.Status + "/" + $problem + "]") -ForegroundColor Yellow
+
+        try {
+            Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction Stop
+            Start-Sleep -Milliseconds 800
+            $changed = $true
+        } catch {
+            Write-Host ("  (enable failed for " + $dev.InstanceId + ": " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
+        }
+    }
+
+    return $changed
+}
+
+# 如果上一次 QEMU/guest 在 PnP 刷新中途崩溃，Windows 可能把显卡留下为 Code 22。
+# AutoDetect 前先把 Display 设备拉起，避免后续只能看到“已禁用”的旧状态。
+if (-not $ListOnly) {
+    Enable-StealthDisplayDevices -Reason 'AutoDetect 前清理 Code 22' | Out-Null
+}
+
 # -AutoDetect：从 PnP Display 设备的 SUBSYS 串查映射表，覆盖 SpoofName/Vendor/Bios/RamMb。
 # 用于 clone-from-base 之后 profile reroll，PCI subsys 变了但 base 注册表覆盖还是老 GPU。
 if ($AutoDetect) {
@@ -39,11 +105,6 @@ if ($AutoDetect) {
         Write-Host "AutoDetect: 未找到 Display 设备或缺 SUBSYS 串，沿用默认参数" -ForegroundColor Yellow
     }
 }
-
-# zh-CN Win10 默认 console code page = 936 (GBK)，把 Write-Host 中文当 GBK 输出 → 终端乱码。
-try { chcp 65001 | Out-Null } catch {}
-try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
-$OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 # apply-gpu-spoof.ps1 - run INSIDE the Win10 guest, as Administrator.
 #
@@ -636,25 +697,25 @@ $dm.dmFields = 0x5C0000
     Start-Sleep -Seconds 2
 }
 
-# ---- force PnP property cache refresh --------------------------------------
-# 设备管理器和 CM_GetDevNodeProperty 会缓存 DEVPKEY; 光改 registry 不会触发刷新.
-# 把 display 类下的设备 Disable + Enable 一轮, 强制 PnP 重读所有 property.
+# ---- nudge PnP property cache refresh --------------------------------------
+# 设备管理器和 CM_GetDevNodeProperty 会缓存 DEVPKEY；光改 registry 不会立刻刷新。
+# 旧逻辑通过 Disable + Enable 刷新，但如果 QEMU/guest 在中途崩溃，Windows 会把显卡永久留成
+# Code 22（已禁用）。这里改为只触发设备扫描，并在扫描前后主动启用非 OK 的 Display 设备；
+# 真正的属性重读交给后续 reboot 和开机自刷任务完成，避免把显示适配器留在禁用态。
 Write-Host ""
-Write-Host "Forcing PnP re-enumeration so Device Manager picks up new DEVPKEY..." -ForegroundColor Cyan
+Write-Host "Refreshing PnP state without disabling the display adapter..." -ForegroundColor Cyan
 try {
-    $gpus = Get-PnpDevice -Class 'Display' -Status OK -ErrorAction SilentlyContinue
-    foreach ($g in $gpus) {
-        try {
-            Disable-PnpDevice -InstanceId $g.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 500
-            Enable-PnpDevice  -InstanceId $g.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
-            Write-Host ("  cycled " + $g.InstanceId) -ForegroundColor Green
-        } catch {
-            Write-Host ("  (cycle failed for " + $g.InstanceId + ": " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
-        }
+    Enable-StealthDisplayDevices -Reason '最终收尾清理 Code 22' | Out-Null
+    if (Get-Command 'pnputil.exe' -ErrorAction SilentlyContinue) {
+        & pnputil.exe /scan-devices | Out-Null
+        Write-Host "  requested PnP device scan" -ForegroundColor Green
+        Start-Sleep -Milliseconds 800
+        Enable-StealthDisplayDevices -Reason 'PnP 扫描后复查' | Out-Null
+    } else {
+        Write-Host "  (pnputil.exe unavailable; reboot will refresh PnP state)" -ForegroundColor DarkYellow
     }
 } catch {
-    Write-Host ("  (Get-PnpDevice unavailable: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
+    Write-Host ("  (PnP refresh skipped: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
 }
 
 # ---- verify ----------------------------------------------------------------

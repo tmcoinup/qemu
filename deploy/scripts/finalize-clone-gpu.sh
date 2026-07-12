@@ -88,7 +88,10 @@ fi
 
 ORIG_USER="${SUDO_USER:-ubuntu}"
 ORIG_GROUP="$(id -gn "$ORIG_USER" 2>/dev/null || echo "$ORIG_USER")"
-VM_DIR="/home/ubuntu/images/vms/${INSTANCE}"
+VMS_DIR="${VMS_DIR:-/home/ubuntu/images/vms}"
+VMS_DIR="${VMS_DIR%/}"
+[[ -n "$VMS_DIR" ]] || VMS_DIR="/"
+VM_DIR="${VMS_DIR}/${INSTANCE}"
 FIX_SCRIPT="$HERE/host-fix-gpu-devpkey.sh"
 START_SCRIPT="$HERE/start-vm.sh"
 

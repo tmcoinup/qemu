@@ -1,3 +1,6 @@
+# shellcheck shell=bash disable=SC2034,SC2054
+# 中文注释：本文件由 start-vm source，数组会在后续组装片段中消费；QEMU
+# 参数中的逗号是同一个 argv 元素的一部分，不是 shell 数组分隔符。
 # -------------------------------------------------------------------
 # TPM 2.0 emulator (swtpm)
 #
@@ -18,6 +21,10 @@
 # 设 TPM=0 显式关掉（如果 OVMF 切回不支持 TPM 的旧 fd，或者想模拟"用户没在
 # BIOS 启用 fTPM"的状态——B350 / H310 / H410 入门主板出厂默认就是关的）。
 # -------------------------------------------------------------------
+# 中文注释：本文件由 start-vm source，HERE 在入口脚本中解析为绝对目录。
+# shellcheck disable=SC1091
+source "$HERE/lib/sv-swtpm-lifecycle.sh"
+
 # 内存 preflight 护栏（防 OOM-kill 连锁）—— 必须在起 swtpm daemon 之前，
 # 否则拒绝启动时会漏一个 swtpm 孤儿（见 project_swtpm_orphan_lock）。
 # prealloc 已关→VM 按需吃内存，但最坏仍会摸满 -m=${RAM}M。起 QEMU 前估算
@@ -81,19 +88,11 @@ elif command -v swtpm >/dev/null 2>&1; then
     # 活着的 QEMU 占用本实例 tpm-sock 时才清（正常重启一定满足，绝不误杀
     # 正在运行的其它实例：dir=/.../vms/N/tpm-state 是实例唯一串）。
     if ! pgrep -af 'qemu-system' 2>/dev/null | grep -qF -- "path=$TPM_SOCK"; then
-        # 注意：脚本是 set -euo pipefail；无孤儿时 grep 返回 1 会经 pipefail
-        # 传到赋值退出码触发 set -e，故必须 || true 兜底（否则正常启动全挂）。
-        _tpm_orphans=$(pgrep -af 'swtpm' 2>/dev/null | grep -F -- "dir=$TPM_STATE_DIR" | awk '{print $1}' || true)
-        if [[ -n "$_tpm_orphans" ]]; then
-            echo ">> swtpm:       清理孤儿 swtpm（持本实例 tpm-state 锁但 QEMU 已不在）: $(echo $_tpm_orphans | tr '\n' ' ')"
-            kill $_tpm_orphans 2>/dev/null || true
-            # 给 SIGTERM 至多 1s 释放 flock；仍赖着则 SIGKILL
-            for _i in 1 2 3 4 5; do
-                pgrep -af 'swtpm' 2>/dev/null | grep -qF -- "dir=$TPM_STATE_DIR" || break
-                sleep 0.2
-            done
-            pgrep -af 'swtpm' 2>/dev/null | grep -F -- "dir=$TPM_STATE_DIR" \
-                | awk '{print $1}' | xargs -r kill -9 2>/dev/null || true
+        _tpm_orphans=()
+        mapfile -t _tpm_orphans < <(sv_swtpm_instance_pids "$INSTANCE")
+        if (( ${#_tpm_orphans[@]} > 0 )); then
+            echo ">> swtpm:       清理孤儿 swtpm（持本实例 tpm-state 锁但 QEMU 已不在）: ${_tpm_orphans[*]}"
+            sv_swtpm_stop_pids "$INSTANCE" "${_tpm_orphans[@]}"
         fi
     fi
 
@@ -139,12 +138,7 @@ elif command -v swtpm >/dev/null 2>&1; then
 
     # 启动 swtpm daemon；clear-socket 避免 stale unix socket 残留
     rm -f "$TPM_SOCK"
-    swtpm socket \
-        --tpmstate dir="$TPM_STATE_DIR" \
-        --ctrl type=unixio,path="$TPM_SOCK" \
-        --tpm2 \
-        --log file="$TPM_LOG",level=20 \
-        --daemon
+    sv_swtpm_start_daemon "$TPM_STATE_DIR" "$TPM_SOCK" "$TPM_LOG"
     # 等 socket 出现（最多 2 秒）
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         [[ -S "$TPM_SOCK" ]] && break

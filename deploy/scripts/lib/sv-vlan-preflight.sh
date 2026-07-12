@@ -405,46 +405,6 @@ sv_vlan_prepare() {
     echo ">> VLAN TAP:    $VLAN_TAP_IF (VID $VLAN_ID, guest access/untagged)"
 }
 
-# 生命周期 guard 跟踪当前 shell 的 PID 与 starttime。它继承实例锁 fd8，随后
-# parent 关闭自己的副本，避免 swtpm/auto-key/pinner 等后台任务意外延长锁；最终
-# inhibit/QEMU 即便关闭未知 fd，也仍由 guard 持锁。VLAN 模式还在释放锁前清 TAP。
-sv_instance_watchdog_launch() {
-    local parent_pid parent_start tap prepared
-
-    [[ "${SV_INSTANCE_LOCKED:-0}" == "1" ]] || return 0
-    # BASHPID 在测试/调用者 subshell 中仍指向当前真实进程；顶层启动器中与 $$
-    # 相同，最终 exec inhibit/QEMU 后 PID/starttime 继续保持。
-    parent_pid="$BASHPID"
-    parent_start="$(awk '{ print $22 }' "/proc/$parent_pid/stat" 2>/dev/null)"
-    tap="${VLAN_TAP_IF:-}"
-    prepared="${SV_VLAN_PREPARED:-0}"
-    [[ -n "$parent_start" ]] || {
-        echo "ERROR: 无法读取 VLAN watchdog 的父进程 starttime。" >&2
-        return 1
-    }
-
-    (
-        # watchdog 与前台 QEMU 处于同一进程组；忽略终端广播的 HUP/INT/TERM，
-        # 否则 Ctrl+C 会同时杀掉清理者，只剩可能因 TAP fd 尚未关闭而失败的 downscript。
-        trap '' HUP INT TERM
-        while [[ -r "/proc/$parent_pid/stat" ]]; do
-            [[ "$(awk '{ print $22 }' "/proc/$parent_pid/stat" 2>/dev/null)" == "$parent_start" ]] || break
-            sleep 1
-        done
-        if [[ "$prepared" == "1" ]] \
-            && ! sv_vlan_helper_call cleanup-ifname "$tap" >/dev/null 2>&1; then
-            logger -t qemu-stealth-vlan "watchdog 清理 $tap 失败，请运行 stop-vm.sh" 2>/dev/null || true
-        fi
-    ) </dev/null >/dev/null 2>&1 &
-    SV_VLAN_WATCHDOG_PID=$!
-    # 从此只有 guard 持有实例锁；当前 shell 后续 fork 的其它后台任务不会继承。
-    exec 8>&-
-    SV_INSTANCE_LOCKED=0
-    if [[ "$prepared" == "1" ]]; then
-        echo ">> VLAN cleanup: async watchdog pid=$SV_VLAN_WATCHDOG_PID"
-    fi
-}
-
 # stop-vm.sh 使用的公共清理入口。helper 按 root-only 状态文件验证归属，因此
 # 即使实例从未使用 VLAN 或已被 downscript 清理，也只会幂等返回成功。
 sv_vlan_cleanup_instance() {

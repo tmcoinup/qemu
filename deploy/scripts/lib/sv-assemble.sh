@@ -279,7 +279,7 @@ if [[ "$BOOT" == "iso" ]]; then
                 | timeout 2 socat - UNIX-CONNECT:"$QMP_SOCK" >/dev/null 2>&1 || true
             sleep 2
         done
-    ) &
+    ) 8>&- &
     _AUTO_KEY_PID=$!
     echo ">> auto-key:    后台 daemon (pid=$_AUTO_KEY_PID) 跨过 BOOTX64.EFI 'Press any key' prompt"
 fi
@@ -297,60 +297,7 @@ sv_cpu_isolate_launch || true
 export TZ="${TZ:-Asia/Shanghai}"
 echo ">> RTC TZ:       $TZ"
 
-# 禁用 host 端 X11 DPMS / 屏保，避免 host 屏幕休眠时 SDL 窗口被冻结导致
-# guest 视为黑屏。退出时恢复原状。
-# 只有真开了 SDL 窗口才需要 inhibit host 屏保 / DPMS。
-# 纯 fb-shm（默认）/ --headless 都没本地窗口，跳过这段。
-if [[ "${SDL:-0}" == "1" && "${HEADLESS:-0}" != "1" && -n "${DISPLAY:-}" ]]; then
-    # dash-to-dock 集成（实现见 lib/sv-dock.sh）：给本实例 SDL 窗口钉唯一
-    # WM_CLASS=win10-<N> + 落 per-instance .desktop/编号图标 + 首启自动固定到
-    # 收藏。任意实例号 N 自适配；失败以 `|| true` 兜底，绝不拖垮 VM 启动。
-    sv_dock_integrate || true
-
-    if command -v xset >/dev/null 2>&1; then
-        # 记录原值，trap 退出还原
-        _xset_dpms_orig=$(xset q 2>/dev/null | awk '/DPMS is/{print $NF}')
-        _xset_ss_orig=$(xset q 2>/dev/null | awk '/Screen Saver/{f=1;next} f&&/timeout:/{print $2;exit}')
-        xset s off -dpms 2>/dev/null || true
-        echo ">> host DPMS / 屏保: 已临时关闭（VM 退出后还原）"
-        _restore_xset() {
-            [[ "${_xset_dpms_orig:-}" == "Enabled" ]] && xset +dpms 2>/dev/null || true
-            [[ -n "${_xset_ss_orig:-}" && "${_xset_ss_orig}" != "0" ]] && \
-                xset s "${_xset_ss_orig}" 2>/dev/null || true
-        }
-        trap _restore_xset EXIT INT TERM
-    fi
-
-    # GNOME mutter 自己跑 idle 计时（org.gnome.desktop.session idle-delay）,
-    # 不看 systemd-logind 的 idle hint, 所以 systemd-inhibit 拦不住 GNOME blank.
-    # gnome-session-inhibit 调 D-Bus org.gnome.SessionManager.Inhibit, mutter
-    # 会 honor 它. 链式包: gnome-session-inhibit → systemd-inhibit → qemu.
-    GNOME_INHIBIT=()
-    if [[ "${XDG_CURRENT_DESKTOP:-}" == *GNOME* ]] && \
-       [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] && \
-       command -v gnome-session-inhibit >/dev/null 2>&1; then
-        # gnome-session-inhibit 选项必须空格分开, 不接受 --key=value 写法.
-        GNOME_INHIBIT=(gnome-session-inhibit
-            --app-id "qemu-stealth-${INSTANCE}"
-            --reason "保持 guest 显示活性"
-            --inhibit idle:logout)
-        echo ">> GNOME idle: 已 inhibit (gnome-session-inhibit)"
-    fi
-
-    # 避免桌面环境 (GNOME/KDE/XFCE) 自身的待机/锁屏 — systemd-inhibit 拦截一下。
-    # 没有 systemd-inhibit 时退化成裸 exec。
-    if command -v systemd-inhibit >/dev/null 2>&1; then
-        exec "${GNOME_INHIBIT[@]}" systemd-inhibit \
-            --who="qemu-stealth-${INSTANCE}" \
-            --why="保持 guest 显示活性" \
-            --what="idle:sleep:handle-lid-switch" \
-            --mode=block \
-            -- "${CMD[@]}"
-    fi
-
-    if (( ${#GNOME_INHIBIT[@]} )); then
-        exec "${GNOME_INHIBIT[@]}" "${CMD[@]}"
-    fi
-fi
-
-exec "${CMD[@]}"
+# SDL 窗口模式需要同步管理 xset/GNOME/systemd inhibit；独立模块会在确实修改
+# 宿主显示状态时保留轻量父 shell，确保 QEMU 正常退出、ABRT 或收到信号后都能
+# 还原。其它模式仍在函数内直接 exec，不额外增加常驻进程。
+sv_display_guard_launch "${CMD[@]}" || exit $?

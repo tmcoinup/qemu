@@ -23,7 +23,15 @@
  */
 /* Ported SDL 1.2 code to 2.0 by Dave Airlie. */
 
+/*
+ * 文件规模说明：SDL backend 同时承载窗口生命周期、输入事件、抓取策略、
+ * 多 console 注册和平台相关初始化，历史上已经超过 500 行。本次只在既有窗口
+ * 生命周期边界补充 EGL->GLX 降级，避免为了一个紧密耦合的错误路径拆出新的
+ * 私有接口；后续若整体拆分，应以 window/input/display 三个状态机为边界。
+ */
+
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/cutils.h"
 #include "ui/console.h"
@@ -69,6 +77,107 @@ static Notifier mouse_mode_notifier;
 
 static void sdl_update_caption(struct sdl2_console *scon);
 
+#ifdef CONFIG_OPENGL
+/*
+ * SDL 的 EGL/GLX hint 是进程级状态，多 console 不能各自选择 provider。
+ * 第一个成功的 EGL context 一旦发布 dma-buf 能力，后续窗口就必须保持 EGL；
+ * 否则既有 console 的 context 与全局 qemu_egl_display 会互相矛盾。
+ */
+static bool sdl2_x11_egl_provider_committed;
+
+static bool sdl2_disable_failed_x11_egl(void)
+{
+#if defined(SDL_HINT_VIDEO_X11_FORCE_EGL) && defined(CONFIG_X11)
+    const char *video_driver = SDL_GetCurrentVideoDriver();
+
+    /*
+     * QEMU 11 优先让 SDL/X11 使用 EGL，以获得 dma-buf 能力；但
+     * qemu_egl_get_display() 成功并不代表 SDL 一定能为具体 X11 visual 创建
+     * EGLWindowSurface。只有当前确实是 X11 且强制 EGL hint 生效时才允许降级，
+     * 避免把 Wayland/Windows 等后端的一般性创建失败误报成 GLX 回退。
+     *
+     * 使用 OVERRIDE 是有意的：环境变量 hint 的优先级高于普通 SDL_SetHint()。
+     * 首次 EGL 已经实际失败，若不覆盖显式的 "1"，第二次创建仍会重复同一路径。
+     */
+    if (sdl2_x11_egl_provider_committed ||
+        g_strcmp0(video_driver, "x11") != 0 ||
+        !SDL_GetHintBoolean(SDL_HINT_VIDEO_X11_FORCE_EGL, SDL_FALSE)) {
+        return false;
+    }
+
+    return SDL_SetHintWithPriority(SDL_HINT_VIDEO_X11_FORCE_EGL, "0",
+                                   SDL_HINT_OVERRIDE) == SDL_TRUE;
+#else
+    return false;
+#endif
+}
+#endif
+
+static bool sdl2_window_create_once(struct sdl2_console *scon, int flags,
+                                    char **error_message)
+{
+    const char *driver = "opengl";
+    Uint32 wflags;
+
+    *error_message = NULL;
+    SDL_ClearError();
+    scon->real_window = SDL_CreateWindow("", SDL_WINDOWPOS_UNDEFINED,
+                                         SDL_WINDOWPOS_UNDEFINED,
+                                         surface_width(scon->surface),
+                                         surface_height(scon->surface),
+                                         flags);
+    if (!scon->real_window) {
+        *error_message = g_strdup(SDL_GetError());
+        return false;
+    }
+
+    /*
+     * 窗口刚创建时，SDL 不一定补发 FOCUS_GAINED/ENTER（取决于 WM 和
+     * 指针位置）；直接读取当前 flag，避免冷启动后输入门控一直为 false。
+     */
+    wflags = SDL_GetWindowFlags(scon->real_window);
+    scon->has_input_focus = !!(wflags & SDL_WINDOW_INPUT_FOCUS);
+    scon->has_mouse_focus = !!(wflags & SDL_WINDOW_MOUSE_FOCUS);
+
+    if (scon->opengl) {
+        if (scon->opts->gl == DISPLAY_GL_MODE_ES) {
+            driver = "opengles2";
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                                SDL_GL_CONTEXT_PROFILE_ES);
+        }
+
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, driver);
+        SDL_SetHint(SDL_HINT_RENDER_BATCHING, "1");
+
+        scon->winctx = SDL_GL_CreateContext(scon->real_window);
+        if (!scon->winctx ||
+            SDL_GL_MakeCurrent(scon->real_window, scon->winctx) != 0) {
+            *error_message = g_strdup(SDL_GetError());
+            if (scon->winctx) {
+                SDL_GL_DeleteContext(scon->winctx);
+                scon->winctx = NULL;
+            }
+            SDL_DestroyWindow(scon->real_window);
+            scon->real_window = NULL;
+            return false;
+        }
+        SDL_GL_SetSwapInterval(0);
+
+#ifdef CONFIG_OPENGL
+        qemu_egl_display = eglGetCurrentDisplay();
+        if (qemu_egl_display != EGL_NO_DISPLAY) {
+            sdl2_x11_egl_provider_committed = true;
+        }
+#endif
+    } else {
+        /* The SDL renderer is only used by sdl2-2D, when OpenGL is disabled */
+        scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, 0);
+    }
+
+    sdl_update_caption(scon);
+    return true;
+}
+
 static struct sdl2_console *get_scon_from_window(uint32_t window_id)
 {
     int i;
@@ -82,6 +191,8 @@ static struct sdl2_console *get_scon_from_window(uint32_t window_id)
 
 void sdl2_window_create(struct sdl2_console *scon)
 {
+    g_autofree char *first_error = NULL;
+    g_autofree char *fallback_error = NULL;
     int flags = 0;
 
     if (!scon->surface) {
@@ -103,44 +214,53 @@ void sdl2_window_create(struct sdl2_console *scon)
     }
 #endif
 
-    scon->real_window = SDL_CreateWindow("", SDL_WINDOWPOS_UNDEFINED,
-                                         SDL_WINDOWPOS_UNDEFINED,
-                                         surface_width(scon->surface),
-                                         surface_height(scon->surface),
-                                         flags);
-    /*
-     * 窗口刚创建时, SDL 不一定补发 FOCUS_GAINED/ENTER (取决于 WM 和指针位置),
-     * 直接拿 SDL 当前 flag 做初值, 避免冷启动后 sdl2_input_allowed 永远 false.
-     */
-    if (scon->real_window) {
-        Uint32 wflags = SDL_GetWindowFlags(scon->real_window);
-        scon->has_input_focus = !!(wflags & SDL_WINDOW_INPUT_FOCUS);
-        scon->has_mouse_focus = !!(wflags & SDL_WINDOW_MOUSE_FOCUS);
+    if (sdl2_window_create_once(scon, flags, &first_error)) {
+        return;
     }
-    if (scon->opengl) {
-        const char *driver = "opengl";
-
-        if (scon->opts->gl == DISPLAY_GL_MODE_ES) {
-            driver = "opengles2";
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
-                                SDL_GL_CONTEXT_PROFILE_ES);
-        }
-
-        SDL_SetHint(SDL_HINT_RENDER_DRIVER, driver);
-        SDL_SetHint(SDL_HINT_RENDER_BATCHING, "1");
-
-        scon->winctx = SDL_GL_CreateContext(scon->real_window);
-        SDL_GL_SetSwapInterval(0);
 
 #ifdef CONFIG_OPENGL
-        qemu_egl_display = eglGetCurrentDisplay();
+    if (scon->opengl && sdl2_disable_failed_x11_egl()) {
+        /*
+         * 保留 QEMU 11 的 EGL 优先策略：只有 EGL window/context 已经真实创建
+         * 失败后才关闭强制 hint，并用同一套 SDL window 参数重试 GLX。重试成功
+         * 后 qemu_egl_display 为 EGL_NO_DISPLAY，dma-buf 探测自然返回 false，
+         * texture scanout 和 fb-shm 则继续使用 SDL/GLX context。
+         */
+        /*
+         * 这是已支持的能力降级而非启动告警：宿主 EGL display 可见但 window
+         * surface 不兼容时，GLX 是 SDL/X11 的正常备用 provider。用 info 让
+         * 诊断日志保留首个失败原因，同时避免成功启动产生 warning。
+         */
+        info_report("SDL: X11 EGL initialization failed (%s); "
+                    "falling back to GLX",
+                    first_error && *first_error ? first_error :
+                    "unknown error");
+        if (sdl2_window_create_once(scon, flags, &fallback_error)) {
+            return;
+        }
+
+        error_report("SDL: GLX fallback failed after EGL failure: %s",
+                     fallback_error && *fallback_error ? fallback_error :
+                     "unknown error");
+    } else if (scon->opengl && sdl2_x11_egl_provider_committed) {
+        error_report("SDL: EGL window/context creation failed after the "
+                     "process-wide EGL provider was committed: %s",
+                     first_error && *first_error ? first_error :
+                     "unknown error");
+    } else
 #endif
-    } else {
-        /* The SDL renderer is only used by sdl2-2D, when OpenGL is disabled */
-        scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, 0);
+    {
+        error_report("SDL: window/context creation failed: %s",
+                     first_error && *first_error ? first_error :
+                     "unknown error");
     }
 
-    sdl_update_caption(scon);
+    /*
+     * 所有调用者紧接着都会创建 shader、texture 或 renderer；此时继续执行只会
+     * 把一个可诊断的 SDL 错误升级成 libepoxy assert/NULL 解引用。SDL 是用户
+     * 显式选择的 display backend，两条路径都失败时按显示初始化失败退出。
+     */
+    exit(1);
 }
 
 void sdl2_window_destroy(struct sdl2_console *scon)

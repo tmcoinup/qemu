@@ -51,8 +51,28 @@ test_qemu11_sdl_egl_replaces_private_hook() {
     fi
 }
 
+test_x11_egl_failure_falls_back_before_shader() {
+    # 中文注释：QEMU 11 的 EGL display probe 只能证明 eglGetDisplay 可用，
+    # 不能证明 SDL 能为当前 X11 visual 创建 EGLWindowSurface。创建失败后必须
+    # 用 override 关闭强制 EGL、重试 GLX；两次都失败则在 shader 前明确退出。
+    grep -F -- "static bool sdl2_disable_failed_x11_egl(void)" "$SDL2_C" \
+        >/dev/null || fail "SDL must provide an X11 EGL fallback gate"
+    grep -F -- "SDL_HINT_OVERRIDE" "$SDL2_C" >/dev/null \
+        || fail "SDL EGL fallback must override an explicit environment hint"
+    grep -F -- "falling back to GLX" "$SDL2_C" >/dev/null \
+        || fail "SDL EGL fallback must report the selected GLX path"
+    grep -F -- "sdl2_x11_egl_provider_committed" "$SDL2_C" >/dev/null \
+        || fail "SDL must not mix EGL and GLX providers across consoles"
+    grep -F -- "if (sdl2_window_create_once(scon, flags, &first_error))" \
+        "$SDL2_C" >/dev/null \
+        || fail "SDL must validate window/context creation before returning"
+    grep -F -- "exit(1);" "$SDL2_C" >/dev/null \
+        || fail "SDL must stop before shader initialization when all providers fail"
+}
+
 test_focus_gain_replays_scanout
 test_display_resume_replays_scanout
 test_qemu11_sdl_egl_replaces_private_hook
+test_x11_egl_failure_falls_back_before_shader
 
 echo "OK: SDL GL black-screen static checks passed"

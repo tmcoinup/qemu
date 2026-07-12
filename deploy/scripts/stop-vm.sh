@@ -19,8 +19,14 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# 中文注释：HERE 是运行时解析出的脚本绝对目录，静态检查器无法展开；三个库
+# 都由仓库固定路径提供，故仅在对应 source 处抑制动态路径误报。
+# shellcheck disable=SC1091
 source "$HERE/lib/sv-vlan-preflight.sh"
+# shellcheck disable=SC1091
 source "$HERE/lib/sv-instance-lock.sh"
+# shellcheck disable=SC1091
+source "$HERE/lib/sv-swtpm-lifecycle.sh"
 
 INSTANCE=1
 HARD=0
@@ -120,15 +126,29 @@ cleanup_control_sockets() {
 }
 
 acquire_instance_cleanup_lock() {
-    local lock
+    local lock attempt
 
-    # 旧 QEMU 退出会释放 launcher 锁；watchdog 最多再持有约一秒完成 TAP 清理。
-    # stop 必须在清 socket/TAP 前取得同一把锁，防止新启动器抢先创建的新资源
-    # 被本次“旧 VM 收尾”误删。等待超时说明实例已重新启动，必须停止清理。
+    # 旧 QEMU 退出后 watchdog 可能再持锁约一秒；旧版 swtpm 又可能继承同一个
+    # open-file-description。此时第一次孤儿检查会因 watchdog 仍存在而保守跳过，
+    # 但 watchdog 退出后只剩 swtpm 永久持锁。不能用单次 `flock -w`：等待期间
+    # 状态会从“活跃生命周期所有者”转换为“确定孤儿”，必须周期性重新判定。
+    #
+    # 每轮先短暂打开 FD8 并非阻塞试锁；失败后立即关闭 FD8，再扫描持有者。
+    # 若不先关闭，stop 自己会被扫描成非 swtpm 持有者，导致永远无法自愈。
+    # 活跃新启动器仍持锁时，扫描会看到它并拒绝杀 swtpm；五秒截止后安全退出，
+    # 防止本次旧 VM 收尾误删新启动器创建的 socket/TPM/TAP。
     command -v flock >/dev/null 2>&1 || return 1
     lock="$(sv_instance_lock_path "$INSTANCE")" || return 1
-    exec 8>"$lock"
-    flock -w 5 8
+    for ((attempt=0; attempt<25; attempt++)); do
+        exec 8>"$lock"
+        if flock -n 8; then
+            return 0
+        fi
+        exec 8>&-
+        stop_orphan_swtpm_holding_cleanup_lock
+        sleep 0.2
+    done
+    return 1
 }
 
 cleanup_vlan_tap() {
@@ -142,20 +162,28 @@ cleanup_vlan_tap() {
 stop_swtpm_daemon() {
     # 中文注释：swtpm 是独立 daemon，QEMU 异常退出或用户直接关闭窗口时不会自动回收。
     # 它持有本实例 tpm-state 锁会让下一次启动秒退，因此只按 vms/<N>/tpm-state 精确清理。
-    local swtpm_pat="swtpm socket --tpmstate dir=.*vms/${INSTANCE}/tpm-state"
     local -a swtpm_pids=()
 
-    mapfile -t swtpm_pids < <(pgrep -f "$swtpm_pat" 2>/dev/null || true)
+    mapfile -t swtpm_pids < <(sv_swtpm_instance_pids "$INSTANCE")
     if (( ${#swtpm_pids[@]} == 0 )); then
         return 0
     fi
     echo "→ 停止实例 ${INSTANCE} 的 swtpm: ${swtpm_pids[*]}"
-    kill "${swtpm_pids[@]}" 2>/dev/null || true
-    for ((i=0; i<5; i++)); do
-        pgrep -f "$swtpm_pat" >/dev/null 2>&1 || break
-        sleep 0.2
-    done
-    pgrep -f "$swtpm_pat" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+    sv_swtpm_stop_pids "$INSTANCE" "${swtpm_pids[@]}"
+}
+
+stop_orphan_swtpm_holding_cleanup_lock() {
+    local lock
+    local -a orphan_pids=()
+
+    lock="$(sv_instance_lock_path "$INSTANCE")" || return 0
+    mapfile -t orphan_pids < <(
+        sv_swtpm_orphan_lock_holder_pids "$INSTANCE" "$lock"
+    )
+    (( ${#orphan_pids[@]} > 0 )) || return 0
+
+    echo "→ 回收持实例锁的孤儿 swtpm: ${orphan_pids[*]}"
+    sv_swtpm_stop_pids "$INSTANCE" "${orphan_pids[@]}"
 }
 
 terminate_pid_if_known() {
@@ -173,6 +201,10 @@ if [[ -z "$PID" ]]; then
         # 不删 socket，PID 留空，下面用 QMP 路径关机。
     else
         echo "no vm instance ${INSTANCE} running (pattern: $PATTERN)"
+        # 中文注释：旧版启动器可能让 --daemon 的 swtpm 继承 FD 8，导致它在
+        # QEMU 已崩溃后独占实例锁。先仅回收“锁的全部持有者都是本实例
+        # swtpm”的确定孤儿，再竞争清理锁；若新启动器也持锁，此函数不会杀
+        # swtpm，后面的 flock 超时会安全退出并保留新启动资源。
         if ! acquire_instance_cleanup_lock; then
             echo "⚠ 实例 $INSTANCE 正在重新启动；未取得收尾锁，跳过旧资源清理" >&2
             exit 1

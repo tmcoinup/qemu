@@ -117,7 +117,8 @@ fi
 
 # 所有网络模式共用实例生命周期锁。stop-vm 会在清 socket/TPM/TAP 前取得同一
 # 把锁，因此旧 VM 的迟到收尾不会误删同实例新 VM 的资源。DRY_RUN 仍严格不创建
-# 锁文件；正常启动稍后把 fd 交给异步 guard，跨 inhibit/QEMU exec 持有。
+# 锁文件；正常启动稍后把 fd 交给异步 guard，由 guard 跨整个 inhibit/QEMU
+# 或显示守护父 shell 生命周期持有。
 if [[ "${DRY_RUN:-0}" != "1" ]]; then
     command -v flock >/dev/null 2>&1 || {
         echo "ERROR: 启动 VM 需要 util-linux 的 flock" >&2

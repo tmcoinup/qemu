@@ -146,6 +146,7 @@ REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/stealth-lib.sh"
 source "$HERE/lib/vlan-network.sh"
 source "$HERE/lib/sv-vlan-preflight.sh"
+source "$HERE/lib/sv-instance-watchdog.sh"
 source "$HERE/lib/sv-instance-lock.sh"
 
 _usage() {
@@ -165,5 +166,6 @@ source "$HERE/lib/sv-hosttune.sh"   # (可选,默认开) host 压抖动 + 按伪
 source "$HERE/lib/sv-tpm-mem.sh"    # TPM(swtpm) + DIMM 拓扑 / 内存 / SMBIOS / AMD DF
 source "$HERE/lib/sv-devices.sh"    # 平台 PCI ID + 显示/EDID + 启动序 + CDROM + 网络 + USB + 音频
 source "$HERE/lib/sv-dock.sh"       # GNOME dash-to-dock 集成：每实例独立可固定/可排序图标(SDL 窗口)
+source "$HERE/lib/sv-display-guard.sh" # SDL 生命周期：inhibit + 退出时可靠恢复宿主 DPMS/屏保
 source "$HERE/lib/sv-cpupin.sh"     # (可选,默认开) 起 VM 后 vCPU 钉进 cpuset 独占分区, 与宿主机编译隔离
-source "$HERE/lib/sv-assemble.sh"   # 组装 QEMU argv + (DRY_RUN 出参) + 守护进程 + exec
+source "$HERE/lib/sv-assemble.sh"   # 组装 argv + DRY_RUN + 守护进程 + 显示生命周期启动

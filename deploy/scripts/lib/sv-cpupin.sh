@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ---------------------------------------------------------------------------
 # sv-cpupin.sh —— (默认开) 起 VM 后把 vCPU 钉进 cgroup cpuset 独占分区, 与宿主机
 # 负载(尤其 cargo/rust 这类吃满全核的编译)在调度层隔离。提供函数
@@ -26,7 +27,11 @@ sv_cpu_isolate_launch() {
     # 后台 pinner: 轮询 QMP 拿 vCPU 线程号 → 算 VM 专属物理核 → 调 root 助手。
     # exec 后它成为 QEMU 的子进程, 共享同一终端 stdout(与现有后台守护一致); 一次性,
     # 钉完即退。所有失败都打到 stderr 且不影响 QEMU。
-    python3 - "$INSTANCE" "${CPUS:-4}" "$QMP_SOCK" "$_helper" "${QEMU_SERVICE_CPUS:-0}" <<'PY' &
+    # 实例锁 FD8 需要留给最终 setsid/inhibit 进程链，但异步 pinner 只负责等
+    # QMP/绑核，绝不能因自身超时而延长 VM 生命周期锁，因此在 Python 子进程
+    # 边界显式关闭；不依赖 bash 对函数调用重定向所使用的临时高位 FD 语义。
+    python3 8>&- - "$INSTANCE" "${CPUS:-4}" "$QMP_SOCK" "$_helper" \
+        "${QEMU_SERVICE_CPUS:-0}" <<'PY' &
 import json, os, socket, subprocess, sys, time
 
 instance, cpus, qmp_sock, helper = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]

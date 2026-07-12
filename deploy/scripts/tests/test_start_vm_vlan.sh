@@ -13,10 +13,25 @@ START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 VLAN_LIB="$REPO_ROOT/deploy/scripts/lib/vlan-network.sh"
 LOCK_LIB="$REPO_ROOT/deploy/scripts/lib/sv-instance-lock.sh"
 RUNTIME_LIB="$REPO_ROOT/deploy/scripts/lib/sv-vlan-preflight.sh"
+WATCHDOG_LIB="$REPO_ROOT/deploy/scripts/lib/sv-instance-watchdog.sh"
+TEST_OUT=""
+TEST_GUARD_PARENT=""
+TEST_GUARD_CHILD=""
 
 fail() {
     echo "FAIL: $*" >&2
     exit 1
+}
+
+cleanup_test_resources() {
+    if [[ -n "${TEST_GUARD_PARENT:-}" ]]; then
+        kill "$TEST_GUARD_PARENT" 2>/dev/null || true
+    fi
+    if [[ -n "${TEST_GUARD_CHILD:-}" ]]; then
+        kill "$TEST_GUARD_CHILD" 2>/dev/null || true
+    fi
+    rm -f "${TEST_OUT:-}"
+    rm -rf "${TEST_IMAGE_ROOT:-}"
 }
 
 assert_contains() {
@@ -157,6 +172,64 @@ test_instance_guard_holds_lock_across_parent() {
     rm -f "$lock"
 }
 
+test_watchdog_waits_for_supervisor_before_vlan_cleanup() {
+    local lock log pid_file
+
+    lock="$(sv_instance_lock_path 9918)" || fail "无法生成监督链测试锁路径"
+    log="$TEST_IMAGE_ROOT/watchdog-cleanup.log"
+    pid_file="$TEST_IMAGE_ROOT/watchdog-child.pid"
+    : >"$log"
+    (
+        # watchdog 子 shell 会继承该 mock，只记录 cleanup 调用，不触碰宿主网络。
+        # shellcheck disable=SC2317  # 由异步 watchdog 按函数名间接调用。
+        sv_vlan_helper_call() {
+            printf '%s\n' "$*" >>"$log"
+        }
+        exec 8>"$lock"
+        flock -n 8 || exit 91
+        # 以下变量由被 source 的 watchdog 函数按名称读取。
+        # shellcheck disable=SC2034
+        SV_INSTANCE_LOCKED=1
+        # shellcheck disable=SC2034
+        SV_INSTANCE_LOCK="$lock"
+        # shellcheck disable=SC2034
+        SV_VLAN_PREPARED=1
+        # shellcheck disable=SC2034
+        VLAN_TAP_IF=svtap9918
+        sv_instance_watchdog_launch
+        # 模拟父 shell 被 SIGKILL 后仍运行的 setsid/inhibit 监督进程；它继承
+        # FD8 并在 1.2 秒后退出。TAP 清理必须晚于这个时刻。
+        ( sleep 1.2 ) &
+        printf '%s\n' "$!" >"$pid_file"
+        sleep 60
+    ) &
+    TEST_GUARD_PARENT=$!
+
+    for _ in $(seq 1 50); do
+        [[ -s "$pid_file" ]] && break
+        kill -0 "$TEST_GUARD_PARENT" 2>/dev/null \
+            || fail "VLAN watchdog 监督链测试父进程提前退出"
+        sleep 0.02
+    done
+    [[ -s "$pid_file" ]] || fail "未取得模拟监督进程 PID"
+    TEST_GUARD_CHILD="$(<"$pid_file")"
+
+    kill -KILL "$TEST_GUARD_PARENT"
+    wait "$TEST_GUARD_PARENT" 2>/dev/null || true
+    TEST_GUARD_PARENT=""
+    sleep 0.3
+    [[ ! -s "$log" ]] || fail "父 shell 退出后 watchdog 过早清理运行中 VM 的 TAP"
+
+    for _ in $(seq 1 30); do
+        [[ -s "$log" ]] && break
+        sleep 0.1
+    done
+    TEST_GUARD_CHILD=""
+    grep -Fx -- "cleanup-ifname svtap9918" "$log" >/dev/null \
+        || fail "监督链退出后 watchdog 未清理 VLAN TAP"
+    rm -f "$lock"
+}
+
 test_no_vlan_keeps_original_path() {
     local out="$1"
 
@@ -173,27 +246,29 @@ test_no_vlan_keeps_original_path() {
 }
 
 main() {
-    local out
-
     [[ -x "$START_VM" && -f "$VLAN_LIB" && -f "$LOCK_LIB" \
-        && -f "$RUNTIME_LIB" ]] || fail "启动器或网络/实例锁库缺失"
+        && -f "$RUNTIME_LIB" && -f "$WATCHDOG_LIB" ]] \
+        || fail "启动器或网络/实例锁库缺失"
     # shellcheck disable=SC1090
     source "$VLAN_LIB"
     # shellcheck disable=SC1090
     source "$LOCK_LIB"
     # shellcheck disable=SC1090
     source "$RUNTIME_LIB"
-    out="$(mktemp)"
+    # shellcheck disable=SC1090
+    source "$WATCHDOG_LIB"
+    TEST_OUT="$(mktemp)"
     TEST_IMAGE_ROOT="$(mktemp -d)"
     export TEST_IMAGE_ROOT
-    trap 'rm -f "${out:-}"; rm -rf "${TEST_IMAGE_ROOT:-}"' EXIT
+    trap cleanup_test_resources EXIT
 
     test_vlan_id_and_tap_validation
-    test_vlan_cli_rejections "$out"
-    test_missing_setup_fails_before_side_effects "$out"
-    test_vlan_instance_lock "$out"
+    test_vlan_cli_rejections "$TEST_OUT"
+    test_missing_setup_fails_before_side_effects "$TEST_OUT"
+    test_vlan_instance_lock "$TEST_OUT"
     test_instance_guard_holds_lock_across_parent
-    test_no_vlan_keeps_original_path "$out"
+    test_watchdog_waits_for_supervisor_before_vlan_cleanup
+    test_no_vlan_keeps_original_path "$TEST_OUT"
     echo "PASS: start-vm VLAN 参数与无 VLAN 兼容路径"
 }
 

@@ -27,7 +27,8 @@
 #   sudo deploy/scripts/host-fix-numlock.sh <INSTANCE> [--dry-run]
 #
 # Env overrides:
-#   DISK=<path>     default /home/ubuntu/images/vms/<N>/disk.qcow2
+#   VMS_DIR=<path>  default /home/ubuntu/images/vms
+#   DISK=<path>     default $VMS_DIR/<N>/disk.qcow2
 #                   (auto-falls back to legacy win10-inst<N>.qcow2)
 #   NBD=/dev/nbdN   default /dev/nbd0
 #   MOUNT=<path>    default /mnt/win10-inst<N>
@@ -52,8 +53,11 @@ done
 ORIG_USER="${SUDO_USER:-ubuntu}"
 
 if [[ -z "${DISK:-}" ]]; then
-    if [[ -f "/home/ubuntu/images/vms/${INSTANCE}/disk.qcow2" ]]; then
-        DISK="/home/ubuntu/images/vms/${INSTANCE}/disk.qcow2"
+    VMS_DIR="${VMS_DIR:-/home/ubuntu/images/vms}"
+    VMS_DIR="${VMS_DIR%/}"
+    [[ -n "$VMS_DIR" ]] || VMS_DIR="/"
+    if [[ -f "${VMS_DIR}/${INSTANCE}/disk.qcow2" ]]; then
+        DISK="${VMS_DIR}/${INSTANCE}/disk.qcow2"
     else
         DISK="/home/ubuntu/images/win10-inst${INSTANCE}.qcow2"
     fi

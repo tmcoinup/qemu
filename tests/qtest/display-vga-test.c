@@ -160,9 +160,9 @@ static void send_absolute_mouse_input(QTestState *qts, int64_t x, int64_t y)
                      "{ 'execute': 'input-send-event',"
                      "  'arguments': { 'events': ["
                      "    { 'type': 'abs',"
-                     "      'data': { 'axis': 'x', 'value': %ld } },"
+                     "      'data': { 'axis': 'x', 'value': %" PRId64 " } },"
                      "    { 'type': 'abs',"
-                     "      'data': { 'axis': 'y', 'value': %ld } } ] } }",
+                     "      'data': { 'axis': 'y', 'value': %" PRId64 " } } ] } }",
                      x, y);
     g_assert(qdict_haskey(resp, "return"));
     qobject_unref(resp);

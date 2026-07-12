@@ -19,7 +19,8 @@
 #     / HideLocalAccountScreen / HideWirelessSetupInOOBE = true
 #   - AdministratorPassword = 123456，本地账户 Administrator 自动建
 #   - AutoLogon: Username=Administrator, LogonCount=999, Enabled=true
-#   - FirstLogonCommands: 启 RDP / 关 NLA / 注册 ms-gamingoverlay 等
+#   - FirstLogonCommands: 启 RDP / 关 NLA / 注册 ms-gamingoverlay 等；
+#     Order 10 只在 OOBE 后首次登录时执行 D:\工具\respawn-stealth.exe 一次。
 #
 # Per-instance customization:
 #   <ComputerName> = DESKTOP-<7位随机[A-Z0-9]> —— 跟全新消费级 Win10 出厂默认
@@ -33,12 +34,13 @@
 #   sudo deploy/scripts/host-inject-unattend.sh <INSTANCE>
 #
 # Env overrides:
-#   DISK=<path>     default /home/ubuntu/images/vms/<N>/disk.qcow2
+#   VMS_DIR=<path>  default /home/ubuntu/images/vms
+#   DISK=<path>     default $VMS_DIR/<N>/disk.qcow2
 #   NBD=/dev/nbdN   default /dev/nbd0
 #   MOUNT=<path>    default /mnt/win10-inst<N>
 #   UNATTEND=<path> default deploy/autounattend/autounattend.xml (脚本旁找)
 #
-# Prereqs (apt): qemu-utils ntfs-3g
+# Prereqs (apt): qemu-utils ntfs-3g python3-hivex
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -51,7 +53,10 @@ INSTANCE="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-VM_DIR="/home/ubuntu/images/vms/${INSTANCE}"
+VMS_DIR="${VMS_DIR:-/home/ubuntu/images/vms}"
+VMS_DIR="${VMS_DIR%/}"
+[[ -n "$VMS_DIR" ]] || VMS_DIR="/"
+VM_DIR="${VMS_DIR}/${INSTANCE}"
 DISK="${DISK:-$VM_DIR/disk.qcow2}"
 _NBD_PINNED="${NBD:+1}"   # 记录用户是否显式指定 NBD（忙时决定 fail-fast vs 自动选盘）
 : "${NBD:=/dev/nbd0}"
@@ -65,6 +70,7 @@ die() { log "ERROR: $*"; exit 1; }
 [[ -f "$UNATTEND" ]] || die "unattend.xml not found: $UNATTEND"
 command -v qemu-nbd >/dev/null || die "need apt: qemu-utils"
 command -v ntfsfix  >/dev/null || die "need apt: ntfs-3g"
+python3 -c 'import hivex' 2>/dev/null || die "need apt: python3-hivex"
 
 # 并发安全 (P2)：取全局 NBD 锁，串行化所有 host-*.sh 离线工具，防并发抢同一 nbd 设备。
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/nbd-lock.sh"
@@ -129,5 +135,64 @@ if ! grep -qF "<ComputerName>${COMPUTER_NAME}</ComputerName>" "$DEST"; then
     die "ComputerName 替换失败 — autounattend.xml 可能没 <ComputerName> 段"
 fi
 log "wrote 3 copies (Panther, C:\\ root, Sysprep)"
+
+SYSTEM_HIVE="$MOUNT/Windows/System32/config/SYSTEM"
+if [[ -f "$SYSTEM_HIVE" ]]; then
+    log "checking Windows setup child completion state"
+    python3 "$SCRIPT_DIR/lib/devpkey-prefixup.py" "$SYSTEM_HIVE" >/dev/null || true
+    HIVE="$SYSTEM_HIVE" python3 - <<'PY'
+import hivex
+import os
+import struct
+
+hive = os.environ["HIVE"]
+h = hivex.Hivex(hive, write=True)
+
+# 中文注释：Windows 安装/OOBE 如果在 ChildCompletion 的 setup.exe
+# 留在 1，会弹出 “The computer restarted unexpectedly...” 并拒绝继续。
+# 这里只在该路径和该值本来存在时把它改成完成态 3；正常已完成或没有
+# 该 setup 状态的 base 不做结构性改动，避免误跳过安装阶段。
+node = h.root()
+for name in ["Setup", "Status", "ChildCompletion"]:
+    child = h.node_get_child(node, name)
+    if child is None:
+        print("[inject-unattend] ChildCompletion key absent; no setup.exe state to patch")
+        raise SystemExit(0)
+    node = child
+
+target = None
+for value in h.node_values(node):
+    if h.value_key(value).lower() == "setup.exe":
+        target = value
+        break
+
+if target is None:
+    print("[inject-unattend] setup.exe ChildCompletion value absent; no patch needed")
+    raise SystemExit(0)
+
+try:
+    kind, raw = h.value_value(target)
+    current = struct.unpack("<I", raw[:4])[0] if kind == 4 and len(raw) >= 4 else None
+except Exception:
+    current = None
+
+if current == 3:
+    print("[inject-unattend] setup.exe ChildCompletion already 3")
+    raise SystemExit(0)
+
+h.node_set_value(
+    node,
+    {
+        "key": "setup.exe",
+        "t": 4,
+        "value": struct.pack("<I", 3),
+    },
+)
+h.commit(None)
+print(f"[inject-unattend] setup.exe ChildCompletion {current!r} -> 3")
+PY
+else
+    log "WARN: SYSTEM hive 不存在，跳过 ChildCompletion 修复"
+fi
 
 log "done. guest 首启走自动 OOBE → AutoLogon Administrator/123456"

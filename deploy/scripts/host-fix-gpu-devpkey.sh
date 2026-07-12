@@ -32,7 +32,8 @@
 # still running, it will invoke stop-vm.sh (as the original user) first.
 #
 # Environment overrides（不传就从 profile 自动派生）:
-#   DISK=<path>           default /home/ubuntu/images/vms/<N>/disk.qcow2
+#   VMS_DIR=<path>        default /home/ubuntu/images/vms
+#   DISK=<path>           default $VMS_DIR/<N>/disk.qcow2
 #                         (auto-falls back to legacy win10-inst<N>.qcow2 layout)
 #   NBD=/dev/nbdN         default /dev/nbd0
 #   MOUNT=<path>          default /mnt/win10-inst<N>
@@ -62,7 +63,10 @@ done
 ORIG_USER="${SUDO_USER:-ubuntu}"
 
 # VM 目录（hardware pools v2 新布局；旧 win10-inst<N>.qcow2 还在的话回退过去）
-VM_DIR="/home/ubuntu/images/vms/${INSTANCE}"
+VMS_DIR="${VMS_DIR:-/home/ubuntu/images/vms}"
+VMS_DIR="${VMS_DIR%/}"
+[[ -n "$VMS_DIR" ]] || VMS_DIR="/"
+VM_DIR="${VMS_DIR}/${INSTANCE}"
 PROFILE_FILE="${VM_DIR}/profile"
 if [[ -z "${DISK:-}" ]]; then
     if [[ -f "${VM_DIR}/disk.qcow2" ]]; then

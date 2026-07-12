@@ -50,6 +50,98 @@ sudo deploy/scripts/setup-bridge.sh
 sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
 ```
 
+### 4.1 单一 `br0` 动态接入 802.1Q VLAN
+
+首次使用 `--vlan-id=N` 时，`start-vm.sh` 会只读检测单 `br0`、VLAN filtering、
+root-owned helper 与配置。若尚未初始化且当前是本地交互终端，启动器会显示自动识别的
+物理上联和执行内容；输入完整的 `SETUP enp5s0` 后，才通过 `sudo` 初始化一次并复检。
+以后切换任意合法 VID 都不会重复建桥或再次询问。取消、UPLINK 无法唯一识别、无 TTY/CI、
+root 直接启动或 `DRY_RUN=1` 时均 fail closed，只打印下面的手动命令，不修改网络：
+
+不同实例即使同时首次确认，也会在 root 全局锁内再次复检，只有第一个迁移网络；后到者直接
+复用结果。发现遗留 `svtapN`、helper state/lock 或不同授权用户配置时不自动修复，保留现场供审计。
+
+```bash
+sudo VLAN_TRUNK=1 UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
+```
+
+无法自动识别时可先设置 `VLAN_SETUP_UPLINK=enp5s0` 再启动，但仍需完整确认。SSH 默认禁止
+自动初始化；明确承担断线风险时可设置 `VLAN_SETUP_ALLOW_SSH=1`，同样必须输入完整确认。
+该授权允许当前用户接入交换机已放行的任意合法 VID，只应授予可信的 VM 管理用户。
+
+交换机连接 `enp5s0` 的端口应配置为 trunk/hybrid：
+
+- 原有宿主 LAN（以及无 VLAN 参数的 VM）使用 native/PVID、线路上 untagged；
+- VLAN 11、20 等业务 VLAN 使用 tagged，并加入交换机端口允许列表。
+
+初始化只创建一个 VLAN-aware `br0`，不会创建 `br-vlan<N>` 或 `enp5s0.<VID>`。随后直接启动：
+
+```bash
+./deploy/scripts/start-vm.sh 1 --proxy --vlan-id=11
+./deploy/scripts/start-vm.sh 2 --vlan-id=20
+```
+
+启动器动态准备 access TAP：TAP 的 PVID 是所选 VLAN，发往 guest 的帧会去掉 tag，guest
+普通帧由宿主归入该 VLAN。因此 Windows/Linux guest 照常使用 DHCP 或静态地址，不要在
+guest 内创建 VLAN 子接口或设置 VLAN ID。不同 VID 由 bridge VLAN filtering 隔离；停止 VM
+只删 TAP，上联 tagged VID 保留复用。NetworkManager 若重置 VLAN 表，重启 VM 会自动补回。
+
+不传 `VLAN_ID`/`--vlan-id` 时完全保持原行为：`start-vm.sh 1` 走 br0/native LAN，
+`start-vm.sh 1 --no-bridge` 走 user-mode NAT，也不会触发 VLAN 检测或初始化提示。
+
+显式 VLAN 的检测、初始化或 TAP 配置失败时会报错退出，不回退 native LAN/NAT。
+
+#### 远程变更风险
+
+启动器的交互确认不能消除断网风险：首次把承载宿主 IP/默认路由的网卡并入 `br0` 时，
+交换机 native VLAN、`UPLINK` 名称或地址迁移配置有误，都可能立即中断 SSH。生产宿主应优先
+通过带外管理、本地控制台或独立管理网卡执行。只能远程操作时，先在交换机侧配置与当前 LAN
+相同的 native/PVID，并放行业务 VLAN tagged 流量，再运行上述命令；`tmux`/`screen` 只能保留
+进程，不能在网络断开后恢复错误的 bridge 配置。
+
+迁移到另一台宿主机时不要复制 `/run` 下的 TAP 运行态，也不要假定物理网卡仍叫
+`enp5s0`。应在新宿主确认真实上联名和交换机配置后，重新执行一次
+`VLAN_TRUNK=1 UPLINK=<新上联>` 初始化；VM 磁盘和 profile 的迁移方式不受 VLAN 功能影响。
+
+#### 宿主诊断命令
+
+```bash
+# br0 应存在且详细信息中显示 vlan_filtering 1
+ip -d link show dev br0
+
+# 查看 br0 当前端口；动态 TAP 只在对应 VM 启动期间出现
+ip -br link show master br0
+
+# 上联的 native VID 应带 PVID/Egress Untagged；业务 VID 应为 tagged
+bridge vlan show dev enp5s0
+
+# 把变量值替换为启动日志或上一条命令显示的 TAP；应看到所选 VID、PVID、Egress Untagged
+TAP='<启动日志中的 TAP 名称>'
+bridge vlan show dev "$TAP"
+
+# 宿主 IP 和默认路由通常应落在 br0，而不是仍留在被接管的物理上联
+ip -4 address show dev br0
+ip route show default
+
+# NetworkManager 环境下核对当前激活连接和设备归属
+nmcli -f NAME,TYPE,DEVICE connection show --active
+
+# 核对 setup-bridge.sh 保存的单桥/上联配置，以及已安装的 root-owned helper
+sudo sed -n '1,80p' /etc/qemu/stealth-vlan.conf
+ls -l /usr/local/libexec/qemu-stealth-vlan-{tap,down}
+
+# 确认当前用户拥有启动动态 TAP helper 所需的免密授权
+sudo -n -l
+
+# 可选抓包：上联应看到 VLAN 11 tagged；guest TAP 一侧应是 untagged
+sudo tcpdump -eni enp5s0 'vlan 11'
+sudo tcpdump -eni "$TAP"
+```
+
+如果 `br0`/TAP 的 VLAN 表正确但 guest 仍无地址，继续检查交换机允许列表、上游 VLAN 的
+DHCP scope 或静态网关；如果上联抓不到 `vlan <VID>`，问题通常在交换机 trunk/native 配置，
+而不是 Windows/Linux guest 网卡。
+
 ## 5. 启动器 (`start-vm.sh`)
 
 ### 5.1 显示模式（默认 SDL + fb-shm 双开）
@@ -100,7 +192,8 @@ INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` �
 | 变量/标志 | 默认 | 说明 |
 |---|---|---|
 | 位置参数 N | 1 | instance 编号；决定磁盘/profile/socket/端口 |
-| `BRIDGE` | `br0` | 桥接网卡；不存在/无授权时**默认**回退 user-mode NAT（见 `STRICT_STEALTH`） |
+| `BRIDGE` | `br0` | 单一宿主 bridge；不传 VLAN 参数时保持原有 native/untagged LAN，不存在或无授权时默认回退 user-mode NAT（见 `STRICT_STEALTH`） |
+| `VLAN_ID` / `--vlan-id=N` | 空 | 动态创建指定 VID 的 access TAP；首次缺配置仅在安全交互条件下完整确认后初始化，非交互 fail closed；Windows/Linux guest 无需 VLAN 配置 |
 | `--no-bridge` | - | 强制走 user-mode NAT（10.0.2.0/24） |
 | `STRICT_STEALTH` | 0 | 1 = 桥接失败即 fail-fast，**拒绝**静默回退 NAT（NAT 的 10.0.2.x 子网本身是 VM 特征，隐身验收致命） |
 | `ALLOW_NAT_FALLBACK` | 0 | 1 = 在 `STRICT_STEALTH=1` 下显式允许回退 NAT（回退时日志打醒目标记） |

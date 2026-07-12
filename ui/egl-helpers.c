@@ -31,6 +31,11 @@ bool qemu_egl_angle_d3d;
 
 /* ------------------------------------------------------------------ */
 
+#ifdef CONFIG_GBM
+/*
+ * 当前 EGL display 的回退逻辑只服务于下方 GBM/dma-buf 导入导出函数。
+ * Windows 构建不启用 GBM，条件化定义可避免产生无调用者的静态函数。
+ */
 static EGLDisplay qemu_egl_current_or_global_display(void)
 {
     EGLDisplay egl_display = eglGetCurrentDisplay();
@@ -41,6 +46,7 @@ static EGLDisplay qemu_egl_current_or_global_display(void)
 
     return (EGLDisplay)qemu_egl_display;
 }
+#endif
 
 const char *qemu_egl_get_error_string(void)
 {

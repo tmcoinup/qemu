@@ -1,12 +1,49 @@
+_host_cpu_flags_for_qemu_arg() {
+    if [[ -n "${STEALTH_HOST_CPU_FLAGS+x}" ]]; then
+        printf '%s\n' "$STEALTH_HOST_CPU_FLAGS"
+        return
+    fi
+    awk -F': ' '/^flags[[:space:]]*:/{print $2; exit}' /proc/cpuinfo 2>/dev/null
+}
+
+_host_has_cpu_flag_for_qemu_arg() {
+    local flag="$1"
+    local flags
+    flags="$(_host_cpu_flags_for_qemu_arg)"
+    [[ " $flags " == *" $flag "* ]]
+}
+
+_cpu_arg_with_host_feature_mask() {
+    local cpu_arg="$1"
+
+    # 中文注释：QEMU 的 phenom 模型默认带 3DNow!/3DNow!Ext；新 AMD 宿主
+    # 通常已经移除这两个 KVM 可透传特性。若不显式关掉，QEMU 会每个 vCPU
+    # 打一组 host doesn't support requested feature warning，且 guest 实际也
+    # 拿不到稳定的 3DNow 表面。只在宿主缺特性时按需追加禁用项，避免影响
+    # 能真实透传 3DNow 的老宿主。
+    if [[ "$CPU_VENDOR" == "AuthenticAMD" && "$cpu_arg" == phenom* ]]; then
+        if ! _host_has_cpu_flag_for_qemu_arg "3dnow"; then
+            [[ ",$cpu_arg," == *",-3dnow,"* ]] || cpu_arg="${cpu_arg},-3dnow"
+        fi
+        if ! _host_has_cpu_flag_for_qemu_arg "3dnowext"; then
+            [[ ",$cpu_arg," == *",-3dnowext,"* ]] || cpu_arg="${cpu_arg},-3dnowext"
+        fi
+    fi
+
+    printf '%s\n' "$cpu_arg"
+}
+
 # 给 -cpu 拼出完整字符串（含 stealth 共用旁路 + tsc-freq + vendor）
 stealth_qemu_cpu_arg() {
     local tsc_hz=$(( CPU_CUR_MHZ * 1000000 ))
+    local cpu_arg
     local extras="kvm=off,hypervisor=off,+invtsc,+tsc-deadline,enforce=off,host-phys-bits=on,tsc-freq=${tsc_hz},vendor=${CPU_VENDOR}"
     # +topoext 是 AMD 专属（CPUID leaf 0x8000001E），Intel 不能加
     if [[ "$CPU_VENDOR" == "AuthenticAMD" ]]; then
         extras="${extras},+topoext"
     fi
-    echo "${CPU_QEMU_ARG},${extras}"
+    cpu_arg="$(_cpu_arg_with_host_feature_mask "$CPU_QEMU_ARG")"
+    echo "${cpu_arg},${extras}"
 }
 
 # Escape commas in SMBIOS string values (QEMU uses ',,' to encode a literal ','

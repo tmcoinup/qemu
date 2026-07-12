@@ -24,6 +24,7 @@
 
 #include "qemu/osdep.h"
 
+#include "block/aio-wait.h"
 #include "chardev/char-io.h"
 #include "monitor-internal.h"
 #include "qapi/error.h"
@@ -129,6 +130,125 @@ static void monitor_qmp_cleanup_queue_and_resume(MonitorQMP *mon)
 
 }
 
+static void monitor_qmp_iothread_quiesce(void *opaque)
+{
+    /* 空回调仅作为主线程等待 monitor I/O 线程完成既有 callback 的同步点。 */
+}
+
+static void monitor_qmp_transient_destroy_bh(void *opaque)
+{
+    MonitorQMP *mon = opaque;
+    bool destroy;
+
+    /*
+     * 锁序与 dispatcher 保持一致：先 monitor_lock，再 qmp_queue_lock。
+     * active request 未结束时保留在 mon_list，让全局 monitor_cleanup() 在
+     * 关机竞态中仍能找到并兜底释放；最后一个请求完成后会再次调度本 BH。
+     */
+    qemu_mutex_lock(&monitor_lock);
+    qemu_mutex_lock(&mon->qmp_queue_lock);
+    mon->transient_destroy_scheduled = false;
+    monitor_qmp_cleanup_req_queue_locked(mon);
+    destroy = mon->transient_closing && mon->active_requests == 0;
+    if (destroy && mon->common.in_list) {
+        QTAILQ_REMOVE(&mon_list, &mon->common, entry);
+        mon->common.in_list = false;
+    }
+    qemu_mutex_unlock(&mon->qmp_queue_lock);
+    qemu_mutex_unlock(&monitor_lock);
+
+    if (!destroy) {
+        return;
+    }
+
+    /*
+     * retire BH 固定在主 AioContext：先取消可延迟执行的 resume BH 并解绑
+     * frontend，再禁止 flush、取消正确 context 上的 out_watch。随后用空 BH
+     * 等待 monitor I/O 线程越过所有旧 callback，最后才析构 chardev/QOM。
+     */
+    if (mon->common.resume_bh) {
+        qemu_bh_delete(mon->common.resume_bh);
+        mon->common.resume_bh = NULL;
+    }
+    qemu_mutex_lock(&mon->common.mon_lock);
+    mon->common.skip_flush = true;
+    monitor_cancel_out_watch(&mon->common);
+    qemu_mutex_unlock(&mon->common.mon_lock);
+
+    qemu_chr_fe_set_handlers(&mon->common.chr, NULL, NULL, NULL,
+                             NULL, NULL, NULL, true);
+    qemu_chr_fe_set_open(&mon->common.chr, false);
+    qemu_mutex_lock(&mon->common.mon_lock);
+    /* handlers 解绑会把 gcontext 重置为默认值，再查一次可捕获竞态中的晚 source。 */
+    monitor_cancel_out_watch(&mon->common);
+    qemu_mutex_unlock(&mon->common.mon_lock);
+
+    if (mon->common.use_io_thread) {
+        aio_wait_bh_oneshot(iothread_get_aio_context(mon_iothread),
+                            monitor_qmp_iothread_quiesce, NULL);
+    }
+    {
+        QEMU_LOCK_GUARD(&mon->qmp_queue_lock);
+        monitor_qmp_cleanup_req_queue_locked(mon);
+        assert(mon->active_requests == 0);
+    }
+    monitor_data_destroy(&mon->common);
+    g_free(mon);
+}
+
+/* 调用方必须持有 qmp_queue_lock；实际 schedule 要在解锁后执行，避免 BH 重入。 */
+static bool monitor_qmp_mark_transient_destroy_locked(MonitorQMP *mon)
+{
+    assert(mon->transient);
+    assert(mon->transient_closing);
+    if (mon->transient_destroy_scheduled) {
+        return false;
+    }
+    mon->transient_destroy_scheduled = true;
+    return true;
+}
+
+static void monitor_qmp_begin_transient_close(MonitorQMP *mon)
+{
+    bool schedule = false;
+
+    qemu_mutex_lock(&mon->qmp_queue_lock);
+    if (!mon->transient_closing) {
+        mon->transient_closing = true;
+
+        /*
+         * 未出队请求可以立即释放；已经被 dispatcher 取走的请求通过
+         * active_requests 延迟 monitor/chardev 析构。断开的 frontend 无需恢复
+         * input，避免产生一个晚于析构执行的 monitor_accept_input BH。
+         */
+        monitor_qmp_cleanup_req_queue_locked(mon);
+        schedule = monitor_qmp_mark_transient_destroy_locked(mon);
+    }
+    qemu_mutex_unlock(&mon->qmp_queue_lock);
+    if (schedule) {
+        qemu_bh_schedule(mon->transient_destroy_bh);
+    }
+}
+
+static bool monitor_qmp_request_done(MonitorQMP *mon)
+{
+    bool closing;
+    bool schedule = false;
+
+    qemu_mutex_lock(&mon->qmp_queue_lock);
+    assert(mon->active_requests > 0);
+    mon->active_requests--;
+    closing = mon->transient_closing;
+    if (closing && mon->active_requests == 0) {
+        schedule = monitor_qmp_mark_transient_destroy_locked(mon);
+    }
+    qemu_mutex_unlock(&mon->qmp_queue_lock);
+    if (schedule) {
+        qemu_bh_schedule(mon->transient_destroy_bh);
+    }
+    return closing;
+}
+
 void qmp_send_response(MonitorQMP *mon, const QDict *rsp)
 {
     const QObject *data = QOBJECT(rsp);
@@ -211,6 +331,7 @@ static QMPRequest *monitor_qmp_requests_pop_any_with_lock(void)
         qemu_mutex_lock(&qmp_mon->qmp_queue_lock);
         req_obj = g_queue_pop_head(qmp_mon->qmp_requests);
         if (req_obj) {
+            qmp_mon->active_requests++;
             /* With the lock of corresponding queue held */
             break;
         }
@@ -276,6 +397,7 @@ void coroutine_fn monitor_qmp_dispatcher_co(void *data)
     QMPRequest *req_obj;
     QDict *rsp;
     bool oob_enabled;
+    bool closing;
     MonitorQMP *mon;
 
     while ((req_obj = monitor_qmp_dispatcher_pop_any()) != NULL) {
@@ -342,11 +464,11 @@ void coroutine_fn monitor_qmp_dispatcher_co(void *data)
             qobject_unref(rsp);
         }
 
-        if (!oob_enabled) {
+        qmp_request_free(req_obj);
+        closing = monitor_qmp_request_done(mon);
+        if (!oob_enabled && !closing) {
             monitor_resume(&mon->common);
         }
-
-        qmp_request_free(req_obj);
     }
     qatomic_set(&qmp_dispatcher_co, NULL);
 }
@@ -468,6 +590,11 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
         qobject_unref(data);
         break;
     case CHR_EVENT_CLOSED:
+        if (mon->transient) {
+            monitor_qmp_begin_transient_close(mon);
+            monitor_fdsets_cleanup();
+            break;
+        }
         /*
          * Note: this is only useful when the output of the chardev
          * backend is still open.  For example, when the backend is
@@ -490,6 +617,11 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
 
 void monitor_data_destroy_qmp(MonitorQMP *mon)
 {
+    if (mon->transient_destroy_bh) {
+        qemu_bh_delete(mon->transient_destroy_bh);
+        mon->transient_destroy_bh = NULL;
+    }
+    assert(mon->active_requests == 0);
     json_message_parser_destroy(&mon->parser);
     qemu_mutex_destroy(&mon->qmp_queue_lock);
     monitor_qmp_cleanup_req_queue_locked(mon);
@@ -507,10 +639,17 @@ static void monitor_qmp_setup_handlers_bh(void *opaque)
     qemu_chr_fe_set_handlers(&mon->common.chr, monitor_can_read,
                              monitor_qmp_read, monitor_qmp_event,
                              NULL, &mon->common, context, true);
-    monitor_list_append(&mon->common);
+    if (!monitor_list_append(&mon->common)) {
+        return;
+    }
+    if (mon->transient && !qemu_chr_fe_backend_open(&mon->common.chr)) {
+        /* handler 安装前已经 HUP 时不会收到 CLOSED，入表后必须主动收尾。 */
+        monitor_qmp_event(mon, CHR_EVENT_CLOSED);
+    }
 }
 
-void monitor_init_qmp(Chardev *chr, bool pretty, Error **errp)
+static void monitor_init_qmp_internal(Chardev *chr, bool pretty,
+                                      bool transient, Error **errp)
 {
     MonitorQMP *mon = g_new0(MonitorQMP, 1);
 
@@ -525,9 +664,15 @@ void monitor_init_qmp(Chardev *chr, bool pretty, Error **errp)
                       qemu_chr_has_feature(chr, QEMU_CHAR_FEATURE_GCONTEXT));
 
     mon->pretty = pretty;
+    mon->transient = transient;
 
     qemu_mutex_init(&mon->qmp_queue_lock);
     mon->qmp_requests = g_queue_new();
+    if (transient) {
+        /* 动态销毁和 chardev/QOM 解绑必须在主 AioContext 执行。 */
+        mon->transient_destroy_bh = aio_bh_new(
+            qemu_get_aio_context(), monitor_qmp_transient_destroy_bh, mon);
+    }
 
     json_message_parser_init(&mon->parser, handle_qmp_command, mon, NULL);
     if (mon->common.use_io_thread) {
@@ -548,6 +693,21 @@ void monitor_init_qmp(Chardev *chr, bool pretty, Error **errp)
         qemu_chr_fe_set_handlers(&mon->common.chr, monitor_can_read,
                                  monitor_qmp_read, monitor_qmp_event,
                                  NULL, &mon->common, NULL, true);
-        monitor_list_append(&mon->common);
+        if (!monitor_list_append(&mon->common)) {
+            return;
+        }
+        if (mon->transient && !qemu_chr_fe_backend_open(&mon->common.chr)) {
+            monitor_qmp_event(mon, CHR_EVENT_CLOSED);
+        }
     }
+}
+
+void monitor_init_qmp(Chardev *chr, bool pretty, Error **errp)
+{
+    monitor_init_qmp_internal(chr, pretty, false, errp);
+}
+
+void monitor_init_qmp_transient(Chardev *chr, bool pretty, Error **errp)
+{
+    monitor_init_qmp_internal(chr, pretty, true, errp);
 }

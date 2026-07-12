@@ -2,246 +2,469 @@
 # ---------------------------------------------------------------------------
 # setup-bridge.sh
 #
-# Host-side one-shot: create br0, optionally enslave a physical uplink so the
-# guest gets a real LAN IP (DHCP from the upstream router), write
-# /etc/qemu/bridge.conf, and arrange for qemu-bridge-helper to have the
-# capabilities it needs.
+# 宿主侧一次性 bridge 初始化脚本。默认路径继续提供历史普通 bridge 行为；显式
+# VLAN_TRUNK=1 时则把唯一的 br0 升级为 VLAN-aware bridge，并安装普通用户启动
+# VM 所需的受限 TAP helper。两条路径都只在宿主执行，Windows/Linux 客机无差异。
 #
-# Must run as root.
+# 常用命令：
+#   sudo deploy/scripts/setup-bridge.sh
+#   sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
+#   sudo VLAN_TRUNK=1 UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
 #
-# Env:
-#   BR=br0              bridge name (default br0)
-#   UPLINK=<iface>      physical NIC to enslave (default: unset = isolated
-#                       bridge with host-side static IP 192.168.76.1/24).
-#                       Set UPLINK=enp5s0 to put the guest on your real LAN.
-#                       Disruptive: will move the IP+default route from the
-#                       uplink onto the bridge via NetworkManager.
-#   HOST_IP=            host IP on the bridge when UPLINK is unset
-#                       (default 192.168.76.1/24)
+# 环境变量：
+#   BR=br0              普通模式可覆盖 bridge 名；trunk 模式固定只能为 br0。
+#   UPLINK=enp5s0       要接入 bridge 的物理上联；trunk 模式必须提供。
+#   HOST_IP=...         无上联时 bridge 的宿主地址，默认 192.168.76.1/24。
+#   VLAN_TRUNK=0|1      1 = 单 br0 动态 access VLAN 模式；默认 0 保持旧行为。
+#   VM_USER=<用户名>    允许启动 VLAN VM 的普通用户；sudo 调用时默认原调用者。
 #
-# Examples:
-#   sudo deploy/scripts/setup-bridge.sh                       # isolated br0
-#   sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh         # LAN bridge
-#   sudo BR=br1 UPLINK=wlo1 deploy/scripts/setup-bridge.sh    # wifi master
-#
-# Idempotent: safe to re-run.
+# 旧 VLAN_ID/VLAN_IF 已被移除。每个 VID 不再创建 br-vlanN/VLAN 子接口；新 VID
+# 由 start-vm.sh 在启动时交给 root-owned TAP helper 动态加入同一个 br0。
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-BR="${BR:-br0}"
-UPLINK="${UPLINK:-}"
-HOST_IP="${HOST_IP:-192.168.76.1/24}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091  # 运行时按 setup 自身目录加载，支持仓库整体迁移。
+source "$HERE/lib/setup-bridge-runtime.sh"
+# 安全边界使用固定路径，不能接受环境变量覆盖。sudoers 永远只授权安装后的
+# root-owned helper，绝不能直接授权普通用户可写的仓库脚本。
+readonly VLAN_TAP_SOURCE="$HERE/host-vlan-tap.sh"
+readonly VLAN_DOWN_SOURCE="$HERE/host-vlan-down.sh"
+readonly VLAN_TAP_INSTALLED="/usr/local/libexec/qemu-stealth-vlan-tap"
+readonly VLAN_DOWN_INSTALLED="/usr/local/libexec/qemu-stealth-vlan-down"
+readonly VLAN_CONFIG="/etc/qemu/stealth-vlan.conf"
+readonly VLAN_SUDOERS="/etc/sudoers.d/qemu-stealth-vlan"
+readonly NETWORK_LOCK="/run/qemu-stealth-network.lock"
 
-if [[ $(id -u) -ne 0 ]]; then
-    echo "ERROR: must run as root (sudo)." >&2
-    exit 1
-fi
+# trunk 模式缺少 helper 时必须在 apt、配置文件或宿主网络发生任何变化前退出。
+setup_require_vlan_assets() {
+    [[ "$VLAN_TRUNK" == "1" ]] || return 0
 
-# -----------------------------------------------------------------------
-# Make sure the apt package that ships qemu-bridge-helper is present.
-# On Debian/Ubuntu it's part of qemu-system-common.
-# -----------------------------------------------------------------------
-if ! dpkg -s qemu-system-common >/dev/null 2>&1 \
-   && ! [[ -x /usr/lib/qemu/qemu-bridge-helper \
-        || -x /usr/libexec/qemu-bridge-helper ]]; then
-    echo ">> installing qemu-system-common (needed for qemu-bridge-helper)"
-    apt-get update -qq
-    apt-get install -y qemu-system-common
-fi
-
-# -----------------------------------------------------------------------
-# Kernel modules. Bridge networking needs both.
-# -----------------------------------------------------------------------
-for mod in tun bridge; do
-    if ! lsmod | grep -q "^$mod\b"; then
-        if modprobe "$mod" 2>/dev/null; then
-            echo ">> modprobe $mod"
-        else
-            echo "WARN: failed to modprobe $mod; bridge networking may not work." >&2
-        fi
+    [[ -f "$VLAN_TAP_SOURCE" && ! -L "$VLAN_TAP_SOURCE" ]] || {
+        setup_error "缺少 VLAN TAP helper 源文件: $VLAN_TAP_SOURCE"
+        return 1
+    }
+    [[ -f "$VLAN_DOWN_SOURCE" && ! -L "$VLAN_DOWN_SOURCE" ]] || {
+        setup_error "缺少 VLAN downscript 源文件: $VLAN_DOWN_SOURCE"
+        return 1
+    }
+}
+setup_require_root_and_lock() {
+    if [[ "$(id -u)" -ne 0 ]]; then
+        setup_error "必须以 root 运行（请使用 sudo）。"
+        return 1
     fi
-done
-# Ensure they reload on reboot
-install -d /etc/modules-load.d
-cat > /etc/modules-load.d/qemu-stealth.conf <<EOF
-tun
-bridge
-EOF
 
-# -----------------------------------------------------------------------
-# Locate qemu-bridge-helper candidates.
-#
-# There are up to THREE paths we care about:
-#   /usr/lib/qemu/qemu-bridge-helper        -> apt qemu-system-common
-#   /usr/libexec/qemu-bridge-helper         -> some distros
-#   /usr/local/libexec/qemu-bridge-helper   -> path baked into a source-built
-#                                              QEMU with default prefix
-# The source-built qemu-system-x86_64 consults the path it was compiled
-# against; if that path doesn't exist, `-netdev bridge,helper=<path>`
-# must override it. We solve both: give every candidate cap_net_admin
-# AND symlink the source-default path to the apt helper so `-netdev
-# bridge` with no explicit helper= still works.
-# -----------------------------------------------------------------------
-HELPER_CANDIDATES=(
-    /usr/lib/qemu/qemu-bridge-helper
-    /usr/libexec/qemu-bridge-helper
-    /usr/local/libexec/qemu-bridge-helper
-)
-# Also pick up an in-tree build, if present, so the in-tree binary gets caps too
-REPO_HELPER="$(cd "$(dirname "$0")/../.." && pwd)/build/qemu-bridge-helper"
-if [[ -x "$REPO_HELPER" ]]; then
-    HELPER_CANDIDATES+=("$REPO_HELPER")
-fi
+    # bridge ACL、NetworkManager profile 和 sudoers 都是全局状态；一把锁串行化
+    # 所有 setup 实例，避免并行首次安装互相覆盖。
+    exec 9>"$NETWORK_LOCK"
+    flock -x 9
 
-HELPER=""
-for h in "${HELPER_CANDIDATES[@]}"; do
-    if [[ -x "$h" && -f "$h" && ! -L "$h" ]]; then
-        HELPER="$h"
-        break
-    fi
-done
-
-if [[ -z "$HELPER" ]]; then
-    echo "ERROR: no qemu-bridge-helper found. Install it:" >&2
-    echo "       sudo apt install qemu-system-common" >&2
-    exit 1
-fi
-
-echo ">> primary helper: $HELPER"
-
-# Symlink /usr/local/libexec/qemu-bridge-helper if it is the path the
-# source-built QEMU expects but doesn't exist yet. /usr/local/libexec is
-# the default for `./configure --prefix=/usr/local` source builds.
-SRCBUILD_HELPER=/usr/local/libexec/qemu-bridge-helper
-if [[ ! -e "$SRCBUILD_HELPER" ]]; then
-    mkdir -p /usr/local/libexec
-    ln -sf "$HELPER" "$SRCBUILD_HELPER"
-    echo ">> symlinked $SRCBUILD_HELPER -> $HELPER"
-fi
-
-# -----------------------------------------------------------------------
-# /etc/qemu/bridge.conf  (QEMU ACL for qemu-bridge-helper)
-# -----------------------------------------------------------------------
-mkdir -p /etc/qemu
-if ! grep -q "^allow $BR\$" /etc/qemu/bridge.conf 2>/dev/null; then
-    echo "allow $BR" >> /etc/qemu/bridge.conf
-    echo ">> appended 'allow $BR' to /etc/qemu/bridge.conf"
-else
-    echo ">> /etc/qemu/bridge.conf already allows $BR"
-fi
-# 644 (not 640): the launcher's pre-flight grep runs as the unprivileged
-# user; 640 silently fails the check and aborts with "bridge.conf missing
-# 'allow br0'". The file only lists permitted bridge names — nothing
-# sensitive — so world-readable is fine.
-chmod 644 /etc/qemu/bridge.conf
-
-# -----------------------------------------------------------------------
-# Capability on every concrete qemu-bridge-helper binary (not the symlink).
-# Preferred: cap_net_admin+ep (no full root). Falls back to suid if setcap
-# is missing.
-# -----------------------------------------------------------------------
-_grant() {
-    local h="$1"
-    if command -v setcap >/dev/null 2>&1; then
-        if ! getcap "$h" 2>/dev/null | grep -q cap_net_admin; then
-            setcap cap_net_admin+ep "$h"
-            echo ">> set cap_net_admin+ep on $h"
-        else
-            echo ">> $h already has cap_net_admin"
-        fi
-    else
-        if [[ ! -u "$h" ]]; then
-            chmod u+s "$h"
-            echo ">> set suid on $h (fallback, setcap unavailable)"
-        fi
+    if [[ -n "$UPLINK" ]] && ! ip link show dev "$UPLINK" &>/dev/null; then
+        setup_error "上联接口 '$UPLINK' 不存在。"
+        return 1
     fi
 }
-for h in "${HELPER_CANDIDATES[@]}"; do
-    [[ -x "$h" && -f "$h" && ! -L "$h" ]] && _grant "$h"
-done
 
-# -----------------------------------------------------------------------
-# Bridge interface.
-# Prefer NetworkManager if the host is managed by it (nmcli present AND
-# NetworkManager.service active). Otherwise fall back to iproute2.
-# -----------------------------------------------------------------------
-use_nm=0
-if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
-    use_nm=1
-fi
+setup_install_base_dependencies() {
+    local -a modules=(tun bridge)
+    local mod
 
-if (( use_nm )); then
-    echo ">> using NetworkManager to manage $BR"
+    if ! dpkg -s qemu-system-common >/dev/null 2>&1 \
+        && ! [[ -x /usr/lib/qemu/qemu-bridge-helper \
+            || -x /usr/libexec/qemu-bridge-helper ]]; then
+        echo ">> installing qemu-system-common (needed for qemu-bridge-helper)"
+        apt-get update -qq
+        apt-get install -y qemu-system-common
+    fi
 
-    # Create the bridge connection if missing
-    if ! nmcli -t -f NAME con show | grep -Fxq "$BR"; then
-        nmcli con add type bridge ifname "$BR" con-name "$BR" \
-            stp no ipv4.method manual ipv4.addresses "$HOST_IP" \
+    [[ "$VLAN_TRUNK" == "1" ]] && modules+=(8021q)
+    for mod in "${modules[@]}"; do
+        if ! lsmod | grep -q "^$mod\b"; then
+            if modprobe "$mod" 2>/dev/null; then
+                echo ">> modprobe $mod"
+            else
+                echo "WARN: modprobe $mod 失败，bridge 网络可能不可用。" >&2
+            fi
+        fi
+    done
+
+    install -d -o root -g root -m 0755 /etc/modules-load.d
+    {
+        printf 'tun\nbridge\n'
+        [[ "$VLAN_TRUNK" == "1" ]] && printf '8021q\n'
+    } > /etc/modules-load.d/qemu-stealth.conf
+    chown root:root /etc/modules-load.d/qemu-stealth.conf
+    chmod 0644 /etc/modules-load.d/qemu-stealth.conf
+}
+
+# 普通无 VLAN VM 仍使用 QEMU 自带 bridge backend，因此保留历史 helper capability
+# 与 bridge.conf ACL。显式 VLAN VM 会改走预建 TAP helper，两者互不覆盖。
+setup_install_qemu_bridge_helper() {
+    local repo_helper
+    local primary=""
+    local candidate
+    local -a candidates=(
+        /usr/lib/qemu/qemu-bridge-helper
+        /usr/libexec/qemu-bridge-helper
+        /usr/local/libexec/qemu-bridge-helper
+    )
+
+    repo_helper="$(cd "$HERE/../.." && pwd)/build/qemu-bridge-helper"
+    [[ -x "$repo_helper" ]] && candidates+=("$repo_helper")
+
+    for candidate in "${candidates[@]}"; do
+        if [[ -x "$candidate" && -f "$candidate" && ! -L "$candidate" ]]; then
+            primary="$candidate"
+            break
+        fi
+    done
+    [[ -n "$primary" ]] || {
+        setup_error "找不到 qemu-bridge-helper；请安装 qemu-system-common。"
+        return 1
+    }
+    echo ">> primary helper: $primary"
+
+    if [[ ! -e /usr/local/libexec/qemu-bridge-helper ]]; then
+        install -d -o root -g root -m 0755 /usr/local/libexec
+        ln -s "$primary" /usr/local/libexec/qemu-bridge-helper
+        echo ">> linked /usr/local/libexec/qemu-bridge-helper -> $primary"
+    fi
+
+    install -d -o root -g root -m 0755 /etc/qemu
+    if ! grep -Fqx -- "allow $BR" /etc/qemu/bridge.conf 2>/dev/null; then
+        printf 'allow %s\n' "$BR" >> /etc/qemu/bridge.conf
+        echo ">> appended 'allow $BR' to /etc/qemu/bridge.conf"
+    fi
+    chmod 0644 /etc/qemu/bridge.conf
+
+    for candidate in "${candidates[@]}"; do
+        [[ -x "$candidate" && -f "$candidate" && ! -L "$candidate" ]] || continue
+        if command -v setcap >/dev/null 2>&1; then
+            if ! getcap "$candidate" 2>/dev/null | grep -q cap_net_admin; then
+                setcap cap_net_admin+ep "$candidate"
+                echo ">> set cap_net_admin+ep on $candidate"
+            fi
+        elif [[ ! -u "$candidate" ]]; then
+            chmod u+s "$candidate"
+            echo ">> set suid on $candidate (setcap unavailable)"
+        fi
+    done
+}
+
+setup_resolve_allowed_identity() {
+    local requested_user="${VM_USER:-}"
+
+    # 管理员可显式给另一普通用户安装；否则优先采用 sudo 保存的真实调用者。
+    # 直接 root 运行而未指定用户时绝不授权 UID 0，避免 downscript/helper 被迫
+    # 依赖 root VM 进程，也避免 sudoers 出现过宽或无效的调用主体。
+    if [[ -n "$requested_user" ]]; then
+        [[ "$requested_user" =~ ^[[:alnum:]_.-]+\$?$ ]] || {
+            setup_error "VM_USER 用户名 '$requested_user' 含非法字符。"
+            return 1
+        }
+        if ! ALLOWED_UID_VALUE="$(id -u -- "$requested_user" 2>/dev/null)" \
+            || ! ALLOWED_GID_VALUE="$(id -g -- "$requested_user" 2>/dev/null)"; then
+            setup_error "VM_USER='$requested_user' 不存在或无法解析 UID/GID。"
+            return 1
+        fi
+    elif [[ "${SUDO_UID:-}" =~ ^[0-9]+$ \
+        && "${SUDO_GID:-}" =~ ^[0-9]+$ \
+        && "${SUDO_UID:-0}" != "0" ]]; then
+        ALLOWED_UID_VALUE="$SUDO_UID"
+        ALLOWED_GID_VALUE="$SUDO_GID"
+    elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+        if ! ALLOWED_UID_VALUE="$(id -u -- "$SUDO_USER" 2>/dev/null)" \
+            || ! ALLOWED_GID_VALUE="$(id -g -- "$SUDO_USER" 2>/dev/null)"; then
+            setup_error "无法解析 sudo 调用用户 '$SUDO_USER'。"
+            return 1
+        fi
+    else
+        setup_error "无法确定普通 VM 用户；直接 root 运行时请显式设置 VM_USER=<用户名>。"
+        return 1
+    fi
+
+    [[ "$ALLOWED_UID_VALUE" =~ ^[0-9]+$ ]] || {
+        setup_error "无法确定启动 VM 用户的 UID。"
+        return 1
+    }
+    [[ "$ALLOWED_GID_VALUE" =~ ^[0-9]+$ ]] || {
+        setup_error "无法确定启动 VM 用户的 GID。"
+        return 1
+    }
+}
+
+# 安装副本而非符号链接，保证之后仓库内容被普通用户修改也不会改变 sudoers 授权
+# 的 root helper。配置只含白名单标量，不含 shell 代码；helper 也必须逐项解析。
+setup_install_vlan_runtime() {
+    local config_tmp
+    local sudoers_tmp
+
+    [[ "$VLAN_TRUNK" == "1" ]] || return 0
+    setup_resolve_allowed_identity
+
+    install -d -o root -g root -m 0755 /usr/local/libexec /etc/qemu /etc/sudoers.d
+    install -o root -g root -m 0755 "$VLAN_TAP_SOURCE" "$VLAN_TAP_INSTALLED"
+    install -o root -g root -m 0755 "$VLAN_DOWN_SOURCE" "$VLAN_DOWN_INSTALLED"
+
+    config_tmp="$(mktemp /etc/qemu/.stealth-vlan.conf.XXXXXX)"
+    if ! printf 'VERSION=1\nBRIDGE=br0\nUPLINK=%s\nALLOWED_UID=%s\nALLOWED_GID=%s\n' \
+        "$UPLINK" "$ALLOWED_UID_VALUE" "$ALLOWED_GID_VALUE" >"$config_tmp" \
+        || ! chown root:root "$config_tmp" \
+        || ! chmod 0644 "$config_tmp" \
+        || ! mv -f "$config_tmp" "$VLAN_CONFIG"; then
+        rm -f "$config_tmp"
+        setup_error "安装 $VLAN_CONFIG 失败。"
+        return 1
+    fi
+
+    sudoers_tmp="$(mktemp /etc/sudoers.d/.qemu-stealth-vlan.XXXXXX)"
+    if ! {
+        printf '# 仅允许 setup 时的调用用户执行严格校验过的 root-owned TAP helper。\n'
+        printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s\n' \
+            "$ALLOWED_UID_VALUE" "$VLAN_TAP_INSTALLED"
+    } >"$sudoers_tmp" \
+        || ! chmod 0440 "$sudoers_tmp" \
+        || ! visudo -cf "$sudoers_tmp" >/dev/null \
+        || ! chown root:root "$sudoers_tmp" \
+        || ! mv -f "$sudoers_tmp" "$VLAN_SUDOERS"; then
+        rm -f "$sudoers_tmp"
+        setup_error "生成或校验 $VLAN_SUDOERS 失败。"
+        return 1
+    fi
+
+    echo ">> installed root-owned VLAN helper: $VLAN_TAP_INSTALLED"
+    echo ">> installed VLAN downscript: $VLAN_DOWN_INSTALLED"
+    echo ">> VLAN runtime config: $VLAN_CONFIG (UID=$ALLOWED_UID_VALUE)"
+}
+
+# NetworkManager 迁移失败时，只恢复本次确实停用的原 active profile。
+setup_nm_restore_uplink() {
+    local slave="$1" names_var="$2" modes_var="$3" index
+    local -n names="$names_var" modes="$modes_var"
+    if [[ "${SETUP_NM_SLAVE_CREATED:-0}" == "1" ]]; then
+        nmcli connection delete "$slave" >/dev/null 2>&1 || true
+    else
+        nmcli connection down "$slave" >/dev/null 2>&1 || true
+    fi
+    for ((index=${#names[@]}-1; index>=0; index--)); do
+        nmcli connection modify "${names[index]}" \
+            connection.autoconnect "${modes[index]}" >/dev/null 2>&1 || true
+        nmcli connection up "${names[index]}" >/dev/null 2>&1 || true
+    done
+}
+
+setup_nm_activate_uplink() {
+    local bridge_name="$1" uplink="$2" slave="$3" trunk="$4"
+    SETUP_NM_SLAVE_CREATED=0
+    if ! nmcli -t -f NAME connection show | grep -Fxq "$slave"; then
+        nmcli connection add type bridge-slave ifname "$uplink" \
+            connection.master "$bridge_name" con-name "$slave" autoconnect yes || return 1
+        SETUP_NM_SLAVE_CREATED=1
+        echo ">> created NM bridge-slave '$slave'"
+    else
+        echo ">> NM bridge-slave '$slave' already exists"
+    fi
+    nmcli connection modify "$bridge_name" ipv4.method auto ipv4.addresses "" || return 1
+    nmcli connection down "$bridge_name" 2>/dev/null || true
+    nmcli connection up "$slave" || return 1
+    nmcli connection up "$bridge_name" || return 1
+    [[ "$trunk" != "1" ]] || setup_enable_vlan_runtime "$bridge_name" "$uplink"
+}
+
+# NetworkManager 1.36（Ubuntu 22.04）使用 bridge-slave 与旧 master 属性；这些
+# 属性在 Ubuntu 24.04 仍兼容。trunk 属性写入 bridge profile，重启后由 NM 恢复。
+setup_bridge_nm() {
+    local bridge_name="$1" uplink="$2" host_ip="$3" trunk="$4"
+    local slave connection original_autoconnect
+    local -a released_names=()
+    local -a released_modes=()
+
+    if ! nmcli -t -f NAME connection show | grep -Fxq "$bridge_name"; then
+        nmcli connection add type bridge ifname "$bridge_name" con-name "$bridge_name" \
+            stp no connection.autoconnect-slaves 1 \
+            ipv4.method manual ipv4.addresses "$host_ip" \
             ipv6.method ignore autoconnect yes
-        echo ">> created NM bridge connection '$BR' ($HOST_IP)"
+        echo ">> created NM bridge '$bridge_name' ($host_ip)"
     else
-        echo ">> NM bridge '$BR' already exists"
+        echo ">> NM bridge '$bridge_name' already exists"
     fi
 
-    if [[ -n "$UPLINK" ]]; then
-        # Enslave uplink: create a bridge-slave connection, then bring bridge
-        # up. On Ubuntu 22.04+ netplan hands the physical NIC to NM via a
-        # connection named `netplan-<iface>`; that connection has a higher
-        # priority on auto-activation than our new slave, so the slave
-        # reports success but the device stays owned by netplan (bridge
-        # never gets an IP). We explicitly deactivate and disable
-        # autoconnect on any conflicting existing connection before
-        # handing the device over.
-        for c in $(nmcli -t -f NAME,DEVICE con show --active | awk -F: -v d="$UPLINK" '$2==d && $1!~/bridge-slave/ {print $1}'); do
-            echo ">> releasing existing connection '$c' on $UPLINK"
-            nmcli con down "$c" || true
-            nmcli con modify "$c" connection.autoconnect no
-        done
+    if [[ "$trunk" == "1" ]]; then
+        nmcli connection modify "$bridge_name" \
+            bridge.vlan-filtering yes \
+            bridge.vlan-default-pvid 1 \
+            bridge.vlan-protocol 802.1Q
+    fi
 
-        slave="$BR-slave-$UPLINK"
-        if ! nmcli -t -f NAME con show | grep -Fxq "$slave"; then
-            nmcli con add type bridge-slave ifname "$UPLINK" master "$BR" \
-                con-name "$slave" autoconnect yes
-            echo ">> created NM bridge-slave '$slave'"
-        else
-            echo ">> NM bridge-slave '$slave' already exists"
+    if [[ -n "$uplink" ]]; then
+        slave="$bridge_name-slave-$uplink"
+        SETUP_NM_SLAVE_CREATED=0
+        # netplan 生成的物理口 profile 可能抢先自动激活。先停用并禁止这些冲突
+        # profile，再创建 bridge-slave，避免 nmcli 表面成功但设备仍未进入 br0。
+        while IFS= read -r connection; do
+            [[ -n "$connection" ]] || continue
+            if ! original_autoconnect="$(nmcli -g connection.autoconnect \
+                connection show "$connection")"; then
+                setup_nm_restore_uplink "$slave" released_names released_modes
+                return 1
+            fi
+            released_names+=("$connection")
+            released_modes+=("$original_autoconnect")
+            echo ">> releasing existing connection '$connection' on $uplink"
+            nmcli connection down "$connection" || true
+            if ! nmcli connection modify "$connection" connection.autoconnect no; then
+                setup_nm_restore_uplink "$slave" released_names released_modes
+                return 1
+            fi
+        done < <(
+            nmcli -t -f NAME,DEVICE connection show --active \
+                | awk -F: -v dev="$uplink" -v own="$slave" \
+                    '$2 == dev && $1 != own { print $1 }'
+        )
+
+        if ! setup_nm_activate_uplink "$bridge_name" "$uplink" "$slave" "$trunk"; then
+            setup_nm_restore_uplink "$slave" released_names released_modes
+            return 1
         fi
-
-        # Switch bridge IP method to auto (DHCP from upstream) when enslaving
-        nmcli con modify "$BR" ipv4.method auto ipv4.addresses ""
-        nmcli con down "$BR" 2>/dev/null || true
-        nmcli con up "$slave"
-        nmcli con up "$BR"
-        echo ">> bridge $BR up with uplink $UPLINK (DHCP from LAN)"
+        echo ">> bridge $bridge_name up with uplink $uplink (DHCP from native LAN)"
     else
-        nmcli con up "$BR" || true
-        echo ">> bridge $BR up (isolated, host IP $HOST_IP)"
+        nmcli connection up "$bridge_name" || true
+        echo ">> bridge $bridge_name up (isolated, host IP $host_ip)"
     fi
-else
-    echo ">> NetworkManager not in use; falling back to iproute2"
-    if ! ip link show "$BR" &>/dev/null; then
-        ip link add name "$BR" type bridge
-        echo ">> created bridge $BR"
-    fi
-    ip link set "$BR" up
+}
 
-    if [[ -n "$UPLINK" ]]; then
-        ip link set "$UPLINK" master "$BR"
-        # Move addresses from uplink to bridge
-        addrs=$(ip -4 -o addr show dev "$UPLINK" | awk '{print $4}')
-        for a in $addrs; do
-            ip addr del "$a" dev "$UPLINK" 2>/dev/null || true
-            ip addr add "$a" dev "$BR"
+# NetworkManager profile 是持久层；这里再次设置运行态，确保 setup 返回成功时立即
+# 满足启动器 preflight。VID 1 保持 PVID/untagged，故无 --vlan-id 的旧 VM 行为不变。
+setup_enable_vlan_runtime() {
+    local bridge_name="$1"
+    local uplink="$2"
+
+    ip link set dev "$bridge_name" type bridge \
+        vlan_filtering 1 vlan_default_pvid 1 vlan_protocol 802.1Q || return 1
+    # 已有非 VID1 的 native/PVID 时不能静默抢走未标记入站流量；这通常表示
+    # 交换机或旧 bridge 使用另一 native VLAN，应由管理员先明确迁移方案。
+    if ! setup_uplink_native_is_safe "$uplink"; then
+        setup_error "上联 $uplink 已有非 VID1 的 native/untagged VLAN，拒绝自动改写。"
+        return 1
+    fi
+    bridge vlan add dev "$uplink" vid 1 pvid untagged || return 1
+    bridge vlan add dev "$bridge_name" vid 1 pvid untagged self
+}
+
+# 无 NetworkManager 时沿用旧 iproute2 非持久 fallback。trunk 只在 br0 本体开启
+# bridge VLAN filtering，不创建 802.1Q 子接口或额外 bridge。
+setup_bridge_iproute() {
+    local bridge_name="$1"
+    local uplink="$2"
+    local host_ip="$3"
+    local trunk="$4"
+    local bridge_info
+    local address
+    local -a addresses=()
+
+    if ip link show dev "$bridge_name" &>/dev/null; then
+        bridge_info="$(ip -d -o link show dev "$bridge_name")"
+        [[ "$bridge_info" =~ [[:space:]]bridge[[:space:]]+forward_delay[[:space:]] ]] || {
+            setup_error "接口 '$bridge_name' 已存在但不是 Linux bridge。"
+            return 1
+        }
+    else
+        ip link add name "$bridge_name" type bridge
+        echo ">> created bridge $bridge_name"
+    fi
+
+    if [[ "$trunk" == "1" ]]; then
+        ip link set dev "$bridge_name" type bridge \
+            vlan_filtering 1 vlan_default_pvid 1 vlan_protocol 802.1Q
+    fi
+    ip link set dev "$bridge_name" up
+
+    if [[ -n "$uplink" ]]; then
+        ip link set dev "$uplink" master "$bridge_name"
+        ip link set dev "$uplink" up
+        mapfile -t addresses < <(ip -4 -o address show dev "$uplink" | awk '{ print $4 }')
+        for address in "${addresses[@]}"; do
+            # 先把地址加入 bridge，确保新增失败时原 uplink 地址仍在。随后若删除
+            # 原地址失败，只撤回本次新增项，避免同一地址留在两个接口。
+            if ! ip address add "$address" dev "$bridge_name"; then
+                return 1
+            fi
+            if ! ip address del "$address" dev "$uplink"; then
+                ip address del "$address" dev "$bridge_name" >/dev/null 2>&1 || true
+                return 1
+            fi
         done
-        echo ">> enslaved $UPLINK under $BR (non-persistent; consider netplan/NM)"
-    else
-        if ! ip -4 addr show dev "$BR" | grep -q "$HOST_IP"; then
-            ip addr add "$HOST_IP" dev "$BR"
-        fi
-        echo ">> bridge $BR up with $HOST_IP (isolated)"
+        [[ "$trunk" == "1" ]] && setup_enable_vlan_runtime "$bridge_name" "$uplink"
+        echo ">> enslaved $uplink under $bridge_name (non-persistent; configure NM/netplan for reboot)"
+    elif ! ip -4 -o address show dev "$bridge_name" \
+        | awk '{ print $4 }' | grep -Fqx -- "$host_ip"; then
+        ip address add "$host_ip" dev "$bridge_name"
+        echo ">> bridge $bridge_name up (isolated, host IP $host_ip)"
     fi
+}
+
+setup_main() {
+    local use_nm=0
+
+    setup_validate_inputs
+    setup_require_vlan_assets
+    setup_require_root_and_lock
+
+    # 启动器自动模式在 root 全局锁内再次核对目标用户。若另一个实例已先完成，
+    # 后到者直接成功返回；若已有配置属于不同用户或已损坏，则拒绝自动覆盖。
+    if [[ "$VLAN_TRUNK" == "1" && "$VLAN_SETUP_AUTO" == "1" ]]; then
+        setup_resolve_allowed_identity
+        if setup_vlan_config_path_exists \
+            && ! setup_vlan_config_matches_request; then
+            setup_error "已有 VLAN 配置与当前用户/上联不一致，拒绝自动覆盖；请人工审计。"
+            return 1
+        fi
+    fi
+
+    setup_install_base_dependencies
+    setup_install_qemu_bridge_helper
+
+    if setup_vlan_auto_is_fully_ready; then
+        echo ">> single br0 VLAN trunk already initialized; skip network restart."
+        return 0
+    fi
+
+    # 安装 helper/config/sudoers 放在网络迁移前：若安装失败，物理网卡仍保持原状。
+    setup_install_vlan_runtime
+
+    # helper/sudoers 缺失但 bridge 已就绪时只修复安装契约，不重启宿主网络。
+    if [[ "$VLAN_TRUNK" == "1" && "$VLAN_SETUP_AUTO" == "1" ]] \
+        && setup_vlan_topology_is_ready; then
+        echo ">> VLAN runtime repaired; existing br0 topology kept without restart."
+        return 0
+    fi
+
+    if command -v nmcli >/dev/null 2>&1 \
+        && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        use_nm=1
+    fi
+
+    if (( use_nm )); then
+        echo ">> using NetworkManager to manage $BR"
+        # shellcheck disable=SC2153  # HOST_IP 由已先执行的 setup_validate_inputs 赋值。
+        setup_bridge_nm "$BR" "$UPLINK" "$HOST_IP" "$VLAN_TRUNK"
+    else
+        echo ">> NetworkManager not active; falling back to iproute2"
+        setup_bridge_iproute "$BR" "$UPLINK" "$HOST_IP" "$VLAN_TRUNK"
+    fi
+
+    echo
+    if [[ "$VLAN_TRUNK" == "1" ]]; then
+        echo ">> done. Single br0 VLAN trunk is ready; no per-VLAN bridge is needed."
+        echo "      deploy/scripts/start-vm.sh 1 --vlan-id=11"
+    else
+        echo ">> done. Launch a guest with:"
+        echo "      BRIDGE=$BR INSTANCE=1 deploy/scripts/start-vm.sh"
+    fi
+}
+
+# 被测试 source 时只注册函数；直接执行时才允许触碰宿主。
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    setup_main "$@"
 fi
-
-echo ""
-echo ">> done. Launch a guest with:"
-echo "      BRIDGE=$BR INSTANCE=1 deploy/scripts/start-vm.sh"

@@ -61,15 +61,13 @@ static void qmp_multi_accept(QIONetListener *listener,
     int fd;
 
     /*
-     * QIONetListener 在回调返回后会释放 sioc；复制 fd 后交给 child chardev，
-     * 连接生命周期就完全由 child chardev/monitor 管理。
+     * QIONetListener 在回调返回后会释放 sioc，因此这里把已接受 socket 的
+     * 所有权直接转移给 child chardev，并把原对象标记为空，避免析构时重复
+     * 关闭。不能使用 qemu_dup()：它只面向 POSIX 文件描述符，Windows 的
+     * SOCKET 既没有该接口，也不能通过普通 dup() 正确复制。
      */
-    fd = qemu_dup(sioc->fd);
-    if (fd < 0) {
-        error_report("QMP multi-client: failed to duplicate accepted fd: %s",
-                     strerror(errno));
-        return;
-    }
+    fd = sioc->fd;
+    sioc->fd = -1;
 
     chr = qmp_multi_new_client_chardev(server, &local_err);
     if (!chr) {
@@ -85,7 +83,7 @@ static void qmp_multi_accept(QIONetListener *listener,
         return;
     }
 
-    monitor_init_qmp(chr, server->pretty, &local_err);
+    monitor_init_qmp_transient(chr, server->pretty, &local_err);
     if (local_err) {
         error_report_err(local_err);
         object_unparent(OBJECT(chr));

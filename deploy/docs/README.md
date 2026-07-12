@@ -128,7 +128,7 @@ deploy/scripts/finalize-clone-gpu.sh 2
 | 2 | `stealth_pick_profile` 重新随机硬件身份 | CPU / 主板 / GPU / MAC / UUID / NVMe SN 全换 |
 | 3 | `qemu-img resize` 匹配 profile.NVME_SIZE_BYTES | 新 profile 抽到 1TB Samsung 980 → qcow2 扩到 1TB；避免 Win Model=1TB 但 Size=512GB 的跨向量矛盾 |
 | 4 | `host-fix-gpu-devpkey.sh` 预尝试重写 DEVPKEY | sysprep base 没有新 PCI enum 时会安全 skip；首启枚举后用 `finalize-clone-gpu.sh` 一键收尾 |
-| 5 | `host-inject-runonce.sh` 注入 RunOnce | guest 首次开机自动拉 `respawn-stealth.ps1` → 走 `apply-gpu-spoof.ps1 -AutoDetect` → 按新 PCI subsys 改注册表 → 重启 |
+| 5 | `host-inject-unattend.sh` 注入 unattend | guest OOBE 后首次登录执行一次 `D:\工具\respawn-stealth.exe --firstlogon` → 按新 PCI subsys 改注册表 → 重启 |
 
 **clone 后要记的收尾命令只有一条**：
 

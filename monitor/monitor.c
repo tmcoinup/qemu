@@ -147,6 +147,29 @@ static gboolean monitor_unblocked(void *do_not_use, GIOCondition cond,
     return G_SOURCE_REMOVE;
 }
 
+/* 调用方必须持有 mon_lock，并先禁止新的 flush/out_watch。 */
+void monitor_cancel_out_watch(Monitor *mon)
+{
+    GMainContext *context = NULL;
+    GSource *source;
+
+    if (!mon->out_watch) {
+        return;
+    }
+    if (mon->use_io_thread) {
+        context = iothread_get_g_main_context(mon_iothread);
+    }
+    source = g_main_context_find_source_by_id(context, mon->out_watch);
+    if (!source && context) {
+        /* frontend 解绑后，晚到的 flush 可能把 source 挂回默认 context。 */
+        source = g_main_context_find_source_by_id(NULL, mon->out_watch);
+    }
+    if (source) {
+        g_source_destroy(source);
+    }
+    mon->out_watch = 0;
+}
+
 /* Caller must hold mon->mon_lock */
 void monitor_flush_locked(Monitor *mon)
 {
@@ -560,13 +583,13 @@ static void monitor_accept_input(void *opaque)
         MonitorHMP *hmp_mon = container_of(mon, MonitorHMP, common);
         assert(hmp_mon->rs);
         readline_restart(hmp_mon->rs);
+        qemu_chr_fe_accept_input(&mon->chr);
         qemu_mutex_unlock(&mon->mon_lock);
         readline_show_prompt(hmp_mon->rs);
     } else {
+        qemu_chr_fe_accept_input(&mon->chr);
         qemu_mutex_unlock(&mon->mon_lock);
     }
-
-    qemu_chr_fe_accept_input(&mon->chr);
 }
 
 void monitor_resume(Monitor *mon)
@@ -576,15 +599,7 @@ void monitor_resume(Monitor *mon)
     }
 
     if (qatomic_dec_fetch(&mon->suspend_cnt) == 0) {
-        AioContext *ctx;
-
-        if (mon->use_io_thread) {
-            ctx = iothread_get_aio_context(mon_iothread);
-        } else {
-            ctx = qemu_get_aio_context();
-        }
-
-        aio_bh_schedule_oneshot(ctx, monitor_accept_input, mon);
+        qemu_bh_schedule(mon->resume_bh);
     }
 
     trace_monitor_suspend(mon, -1);
@@ -597,8 +612,10 @@ int monitor_can_read(void *opaque)
     return !qatomic_read(&mon->suspend_cnt);
 }
 
-void monitor_list_append(Monitor *mon)
+bool monitor_list_append(Monitor *mon)
 {
+    bool appended = false;
+
     qemu_mutex_lock(&monitor_lock);
     /*
      * This prevents inserting new monitors during monitor_cleanup().
@@ -607,14 +624,16 @@ void monitor_list_append(Monitor *mon)
      */
     if (!monitor_destroyed) {
         QTAILQ_INSERT_HEAD(&mon_list, mon, entry);
-        mon = NULL;
+        mon->in_list = true;
+        appended = true;
     }
     qemu_mutex_unlock(&monitor_lock);
 
-    if (mon) {
+    if (!appended) {
         monitor_data_destroy(mon);
         g_free(mon);
     }
+    return appended;
 }
 
 static void monitor_iothread_init(void)
@@ -625,6 +644,8 @@ static void monitor_iothread_init(void)
 void monitor_data_init(Monitor *mon, bool is_qmp, bool skip_flush,
                        bool use_io_thread)
 {
+    AioContext *context;
+
     if (use_io_thread && !mon_iothread) {
         monitor_iothread_init();
     }
@@ -633,18 +654,36 @@ void monitor_data_init(Monitor *mon, bool is_qmp, bool skip_flush,
     mon->outbuf = g_string_new(NULL);
     mon->skip_flush = skip_flush;
     mon->use_io_thread = use_io_thread;
+    context = use_io_thread ? iothread_get_aio_context(mon_iothread)
+                            : qemu_get_aio_context();
+    mon->resume_bh = aio_bh_new(context, monitor_accept_input, mon);
 }
 
 void monitor_data_destroy(Monitor *mon)
 {
+    bool delete_chardev = false;
+
+    if (monitor_is_qmp(mon)) {
+        MonitorQMP *qmp_mon = container_of(mon, MonitorQMP, common);
+
+        /*
+         * multi QMP 为每个连接创建匿名 child chardev；普通 monitor 的
+         * chardev 由全局配置树持有，只有 transient child 应随 monitor 删除。
+         */
+        delete_chardev = qmp_mon->transient;
+    }
     g_free(mon->mon_cpu_path);
-    qemu_chr_fe_deinit(&mon->chr, false);
+    qemu_chr_fe_deinit(&mon->chr, delete_chardev);
     if (monitor_is_qmp(mon)) {
         monitor_data_destroy_qmp(container_of(mon, MonitorQMP, common));
     } else {
         readline_free(container_of(mon, MonitorHMP, common)->rs);
     }
     g_string_free(mon->outbuf, true);
+    if (mon->resume_bh) {
+        qemu_bh_delete(mon->resume_bh);
+        mon->resume_bh = NULL;
+    }
     qemu_mutex_destroy(&mon->mon_lock);
 }
 
@@ -690,6 +729,7 @@ void monitor_cleanup(void)
     while (!QTAILQ_EMPTY(&mon_list)) {
         Monitor *mon = QTAILQ_FIRST(&mon_list);
         QTAILQ_REMOVE(&mon_list, mon, entry);
+        mon->in_list = false;
         /* Permit QAPI event emission from character frontend release */
         qemu_mutex_unlock(&monitor_lock);
         monitor_flush(mon);

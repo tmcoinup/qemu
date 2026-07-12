@@ -175,6 +175,7 @@ struct FbShmDisplay {
     bool gl_scanout;
     bool gl_y0_top;
     bool gl_warned_context;
+    bool gl_ctx_unusable;
     uint32_t gl_backing_id;
     uint32_t gl_backing_w, gl_backing_h;
     uint32_t gl_x, gl_y, gl_w, gl_h;
@@ -282,6 +283,10 @@ static void fb_shm_release_slot_images(FbShmDisplay *d)
 #ifdef CONFIG_OPENGL
 static bool fb_shm_gl_make_current(FbShmDisplay *d)
 {
+    if (d->gl_ctx_unusable) {
+        return false;
+    }
+
     if (!console_has_gl(d->con)) {
         if (!d->gl_warned_context) {
             warn_report("fb-shm: GL scanout has no display GL context; "
@@ -309,6 +314,7 @@ static bool fb_shm_gl_make_current(FbShmDisplay *d)
                             "GL frames will not be exported");
                 d->gl_warned_context = true;
             }
+            d->gl_ctx_unusable = true;
             return false;
         }
     }
@@ -319,6 +325,15 @@ static bool fb_shm_gl_make_current(FbShmDisplay *d)
                         "GL frames will not be exported");
             d->gl_warned_context = true;
         }
+        /*
+         * 中文注释：某些 SDL/GLX 宿主驱动会在 make-current 失败后留下一个
+         * 非 NULL 但 GLX 侧无效的 context。若退出时继续 SDL_GL_DeleteContext，
+         * Xlib 默认错误处理器会因 GLXBadContext 直接终止 QEMU。fb-shm 只是
+         * 旁路推流通道，这里选择永久禁用本 DCL 的 GL 读回并泄漏这个坏 context
+         * 到进程退出，避免辅助通道失败带崩整台 VM。
+         */
+        d->gl_ctx_unusable = true;
+        d->gl_ctx = NULL;
         return false;
     }
 
@@ -555,7 +570,7 @@ static void fb_shm_gl_release(FbShmDisplay *d)
 {
     fb_shm_gl_release_fbos(d);
 
-    if (d->gl_ctx) {
+    if (d->gl_ctx && !d->gl_ctx_unusable) {
         dpy_gl_ctx_destroy(d->con, d->gl_ctx);
         d->gl_ctx = NULL;
     }
@@ -1032,6 +1047,11 @@ static bool fb_shm_has_gpu_clients(FbShmDisplay *d)
     return false;
 }
 
+#if defined(CONFIG_GBM) && !defined(_WIN32)
+/*
+ * 严格 GPU consumer 只参与 Linux GBM/dma-buf texture 导出降级判断。
+ * Windows 没有这条路径，因此不应生成一个永远不会调用的静态函数。
+ */
 static bool fb_shm_has_required_gpu_clients(FbShmDisplay *d)
 {
     FbShmClient *c;
@@ -1043,6 +1063,7 @@ static bool fb_shm_has_required_gpu_clients(FbShmDisplay *d)
     }
     return false;
 }
+#endif
 
 static bool fb_shm_has_shm_consumers(FbShmDisplay *d)
 {

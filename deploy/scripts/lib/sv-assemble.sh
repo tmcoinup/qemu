@@ -147,6 +147,19 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     exit 0
 fi
 
+# 显式 VLAN 到这里才产生宿主网络副作用：CMD 已完整生成，且 DRY_RUN 已经退出。
+# prepare 完成后立即启动异步 watchdog；若 watchdog 自身无法启动，则先回收 TAP
+# 再中止，不能留下一个没有生命周期所有者的 persistent 接口。
+if [[ -n "${VLAN_ID:-}" ]]; then
+    sv_vlan_prepare
+fi
+if ! sv_instance_watchdog_launch; then
+    if [[ -n "${VLAN_ID:-}" ]]; then
+        sv_vlan_cleanup_instance "$INSTANCE" >/dev/null 2>&1 || true
+    fi
+    exit 1
+fi
+
 echo ">> instance:    $INSTANCE"
 echo ">> VM 目录:     $VM_DIR"
 echo ">> QMP socket:  $QMP_SOCK"

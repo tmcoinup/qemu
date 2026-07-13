@@ -71,15 +71,23 @@
  *   frame, so multiple consumers get independent wakeups while sharing the
  *   same frame mapping.
  *   server -> client : FbShmCtlAck (32 bytes) + FbShmGpuFrame when the
- *                      client requested FB_SHM_HELLO_F_GPU_FRAMES and QEMU
- *                      has a D3D11 shared texture.  The client opens
- *                      @handle_name with ID3D11Device1::OpenSharedResourceByName.
+ *                      client requested FB_SHM_HELLO_F_GPU_FRAMES and
+ *                      FB_SHM_HELLO_F_GPU_SYNC, and QEMU has a D3D11 shared
+ *                      texture.  The client opens @handle_name with
+ *                      ID3D11Device1::OpenSharedResourceByName.
+ *   D3D11 scanout uses a keyed mutex for process handoff.  Only one
+ *                      synchronized GPU consumer is allowed per console.
+ *                      The client acquires key 0, uses the frame, releases
+ *                      key 0, then sends FB_SHM_CTL_GPU_FRAME_DONE.  QEMU
+ *                      reclaims with AcquireSync(0, 0).  EBUSY means retry
+ *                      the same sequence.  Only this console is paused;
+ *                      SDL events and other VMs keep running.
  *
- * NOTIFY_RESIZED is the only server-initiated message: when QEMU re-allocates
- * the backing store (resolution change, ROI update), it pushes a fresh
- * Linux fd pair or Windows object-name payload to every client that opted into
- * resize notifications via FB_SHM_HELLO_F_RESIZE_NOTIFY.  Clients that did
- * not set the flag observe the legacy behaviour (frozen frames after resize).
+ * Server-initiated messages are NOTIFY_RESIZED and NOTIFY_GPU_FRAME.  When
+ * QEMU re-allocates the backing store (resolution change, ROI update), it
+ * pushes a fresh Linux fd pair or Windows object-name payload to every client
+ * that opted into resize notifications via FB_SHM_HELLO_F_RESIZE_NOTIFY.
+ * Clients that did not set the flag keep the legacy frozen-after-resize view.
  */
 #define FB_SHM_CTL_HELLO          1u
 #define FB_SHM_CTL_SET_ROI        2u
@@ -87,6 +95,8 @@
 #define FB_SHM_CTL_BYE            4u
 #define FB_SHM_CTL_NOTIFY_RESIZED   5u /* server -> client; SCM_RIGHTS {memfd,evfd} */
 #define FB_SHM_CTL_NOTIFY_GPU_FRAME 6u /* server -> client; optional GPU handle */
+/* client -> server; D3D keyed-mutex ACK */
+#define FB_SHM_CTL_GPU_FRAME_DONE   7u
 
 #define FB_SHM_CTL_OK           0u
 #define FB_SHM_CTL_EINVAL       1u
@@ -98,6 +108,7 @@
 #define FB_SHM_HELLO_F_WIN32_NAMES   (1u << 1)
 #define FB_SHM_HELLO_F_GPU_FRAMES    (1u << 2)
 #define FB_SHM_HELLO_F_GPU_REQUIRED  (1u << 3)
+#define FB_SHM_HELLO_F_GPU_SYNC      (1u << 4)
 
 #define FB_SHM_WIN32_NAME_MAX 260u
 #define FB_SHM_GPU_NAME_MAX   260u
@@ -115,6 +126,7 @@ typedef struct FbShmCtlReq {
     uint32_t magic;
     uint32_t op;
     int32_t  x, y;
+    /* GPU_FRAME_DONE 用 w/h 携带 frame_seq 的低/高 32 位。 */
     uint32_t w, h;
     uint32_t rate_hz;
     uint32_t flags;          /* HELLO: FB_SHM_HELLO_F_*; otherwise reserved 0 */

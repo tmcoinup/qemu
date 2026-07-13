@@ -31,6 +31,7 @@
 #include "ui/console.h"
 #include "ui/input.h"
 #include "ui/sdl2.h"
+#include "ui/sdl2-egl.h"
 
 static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 {
@@ -130,12 +131,30 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         scon->updates = 0;
         sdl2_gl_render_surface(scon);
     }
+    if (scon->scanout_redraw_pending &&
+        !qemu_console_is_gl_blocked(dcl->con)) {
+        /* mutex 归还后重放积压的窗口 redraw。 */
+        scon->scanout_redraw_pending = false;
+        sdl2_gl_redraw(scon);
+    }
     sdl2_poll_events(scon);
 }
 
 void sdl2_gl_redraw(struct sdl2_console *scon)
 {
     assert(scon->opengl);
+
+    /*
+     * 中文注释：Windows fb-shm 临时交出 D3D11 scanout 时，
+     * SDL 仍轮询窗口和输入事件。
+     * 但 EXPOSE、焦点恢复和 resize 不能重读该 texture。
+     * 正常 dpy_gl_update() 不经过本 redraw 入口，
+     * 因此它自带的瞬时 block 不会导致误跳帧。
+     */
+    if (qemu_console_is_gl_blocked(scon->dcl.con)) {
+        scon->scanout_redraw_pending = true;
+        return;
+    }
 
     if (scon->scanout_mode) {
         /* sdl2_gl_scanout_flush actually only care about
@@ -162,13 +181,18 @@ QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
     SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
-    if (scon->opts->gl == DISPLAY_GL_MODE_ON ||
-        scon->opts->gl == DISPLAY_GL_MODE_CORE) {
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
-                            SDL_GL_CONTEXT_PROFILE_CORE);
-    } else if (scon->opts->gl == DISPLAY_GL_MODE_ES) {
+    if (sdl2_gl_provider_uses_gles() ||
+        scon->opts->gl == DISPLAY_GL_MODE_ES) {
+        /*
+         * Windows gl=on 可能已由 provider 转成 ANGLE/GLES，
+         * 必须继续同一 API。
+         */
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
                             SDL_GL_CONTEXT_PROFILE_ES);
+    } else if (scon->opts->gl == DISPLAY_GL_MODE_ON ||
+               scon->opts->gl == DISPLAY_GL_MODE_CORE) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                            SDL_GL_CONTEXT_PROFILE_CORE);
     }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, params->major_ver);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, params->minor_ver);
@@ -178,7 +202,8 @@ QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
     /* If SDL fail to create a GL context and we use the "on" flag,
      * then try to fallback to GLES.
      */
-    if (!ctx && scon->opts->gl == DISPLAY_GL_MODE_ON) {
+    if (!ctx && scon->opts->gl == DISPLAY_GL_MODE_ON &&
+        !sdl2_gl_provider_egl_committed()) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
                             SDL_GL_CONTEXT_PROFILE_ES);
         ctx = SDL_GL_CreateContext(scon->real_window);
@@ -312,6 +337,7 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     egl_fb_blit(&scon->win_fb, &scon->guest_fb, !scon->y0_top);
 
     SDL_GL_SwapWindow(scon->real_window);
+    scon->scanout_redraw_pending = false;
 }
 
 #ifdef CONFIG_GBM

@@ -27,7 +27,11 @@ if host_os == 'linux'
   system_ss.add(files('input-linux.c', 'udmabuf.c'))
 endif
 if host_os in ['linux', 'windows']
-  system_ss.add(when: pixman, if_true: files('fb-shm.c'))
+  system_ss.add(when: pixman, if_true: files(
+    'fb-shm.c',
+    'fb-shm-gpu.c',
+    'fb-shm-gpu-common.c',
+  ))
 endif
 system_ss.add(when: cocoa, if_true: files('cocoa.m'))
 
@@ -129,7 +133,10 @@ if sdl.found()
     'sdl2-input.c',
     'sdl2.c',
   ))
-  sdl_ss.add(when: opengl, if_true: files('sdl2-gl.c'))
+  sdl_ss.add(when: opengl, if_true: files(
+    'sdl2-egl.c',
+    'sdl2-gl.c',
+  ))
   sdl_ss.add(when: x11, if_true: files('x_keymap.c'))
   ui_modules += {'sdl' : sdl_ss}
 endif

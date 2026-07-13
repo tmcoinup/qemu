@@ -6,7 +6,8 @@
 
 本文档覆盖 Windows 10 / Windows 11 宿主运行 patched QEMU 的方案。目标是：
 
-- QEMU、`fb-shm`、启动脚本、推流工具在 Windows/Linux 上功能 1:1 对齐。
+- QEMU、`fb-shm`、启动脚本、推流工具在 Windows/Linux 上共用 ABI 和 SHM
+  fallback；GPU handle 能力按各自构建依赖探测，不能把可选能力描述成无条件 1:1。
 - Windows 运行时不要求用户额外安装 Python；启动、停止和推流封装均为 PowerShell 5.1 + 原生 exe。
 - 打包产物走仓库已有 NSIS installer target，安装后包含 `qemu-system-x86_64.exe` 与 `qemu-fb-shm-stream.exe`。
 
@@ -27,6 +28,12 @@ Windows 侧没有 `SCM_RIGHTS`，所以 HELLO 时如果 client 带
 `FB_SHM_HELLO_F_WIN32_NAMES`，QEMU 会在普通 ack 后追加固定长度的
 `FbShmWin32Names`，里面是 mapping 和 event 的 Win32 名称。消费端仍然按同一
 `FbShmHeader`、双缓冲、`frame_seq` seqlock 读帧。
+
+表中的 Windows GPU frame export 是可选构建能力：需要 QEMU 同时构建
+`virtio-vga-gl`、virglrenderer，以及可提供 ANGLE/D3D11 texture 的 EGL/ANGLE
+运行栈。texture 还必须支持 `SHARED_NTHANDLE|SHARED_KEYEDMUTEX`，consumer 必须
+实现 `GPU_SYNC/GPU_FRAME_DONE` 所有权协议。缺任一条件时仍有完整 SDL+SHM 路径，
+但不会产生不安全的 D3D11 shared texture 通知。
 
 ## 运行时组件
 
@@ -67,7 +74,11 @@ Windows PowerShell 5.1 是 Windows 10/11 自带组件，不算额外运行时依
 
 ## 启动 VM
 
-默认是 SDL 本地窗口 + fb-shm 推流通道同时开启：
+默认始终保留 SDL 本地窗口 + fb-shm 推流通道。启动器先用
+`qemu-system-x86_64.exe -device virtio-vga-gl,help` 做只读能力探测：存在该设备时
+选择 `sdl,gl=on`、`virtio-vga-gl` 和 `blob=true,hostmem=256M`；当前常规
+`build-win64-vmate` 未找到 virglrenderer，因此会明确提示并自动选择普通 SDL、
+`virtio-vga` 和 SHM，不会因缺少可选 GL 模块导致 VM 启动失败。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy\windows\start-vm.ps1 `
@@ -88,8 +99,11 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\start-vm.ps1 `
 | `-Headless` | `-display none` + VNC |
 | `-NoFbShm` | 关闭 fb-shm |
 | `-FbShmPath C:\qemu-run\fb-1.sock` | 指定 fb-shm 控制 socket |
-| `-FbShmRate 60` | 推流目标帧率 |
+| `-FbShmRate 60` | 配置/consumer 目标帧率；无 consumer 时 effective tick 可降至 1 Hz |
 | `-FbShmRoi 0,0,1280,720` | 只导出 ROI |
+| `-NoGpuZeroCopy` | GL 设备存在时仍保留 SDL/GL，只移除 blob/hostmem 偏好；ANGLE/renderer 仍可能从普通 texture 导出 handle，失败才回退 SHM |
+| `-GpuHostmem 512M` | 调整 virtio-gpu host-visible window；默认 `256M` |
+| `-GpuGlProbe Available|Unavailable` | 仅允许与 `-DryRun` 一起供 CI 注入探测结果；真实启动强制使用默认 `Auto`，不能越过能力检查 |
 | `-DryRun` | 只打印 QEMU 参数，不启动 |
 
 脚本默认把 fb-shm socket 放在 `C:\qemu-run\fb-<N>.sock`。Windows `AF_UNIX`
@@ -130,10 +144,22 @@ qemu-fb-shm-stream.exe --sock C:\qemu-run\fb-1.sock `
   --encoder libx264 --preset veryfast --bitrate 4M --mode auto
 ```
 
-`-Mode auto` 会请求 GPU resident frame metadata。Windows GL/ANGLE 路径可发布
-D3D11 shared texture 名称；当前内置 ffmpeg stdin backend 仍以 SHM rawvideo
-作为实际推流路径。`-Mode gpu` 用于 strict 验证 GPU export，不会把 SHM 回退
-伪装成零拷贝 GPU 编码。
+`-Mode auto` 会请求 GPU resident frame metadata。只有带 virglrenderer 且实际由
+ANGLE/D3D11 提供共享 texture 的构建才可能发布 D3D11 shared texture 名称；普通
+Windows 构建自动使用 SHM。当前内置 ffmpeg stdin backend 即使收到 metadata，仍以
+SHM rawvideo 作为实际推流路径。`-Mode gpu` 保持 strict 语义：能力或同步协议不完整
+就明确失败，不会把 SHM 回退伪装成零拷贝 GPU 编码。
+
+Windows 的原始 scanout 不能由 virgl/SDL 和外部进程无同步并发访问。native D3D
+consumer 的 HELLO 必须设置 `GPU_FRAMES|GPU_SYNC`；QEMU 刷新 D3D immediate context 后
+`ReleaseSync(0)`，consumer `AcquireSync(0)` 并在用完后 `ReleaseSync(0)`，再发送
+`GPU_FRAME_DONE`（`w/h` 为 64 位 `frame_seq` 的低/高 32 位）。QEMU 收到匹配 ACK
+并非阻塞地 `AcquireSync(0,0)` 后恢复该 GL console；`EBUSY` 要以同一序列重试。
+handoff 由 bottom half 安排在整轮 SDL/display listener 绘制之后。同一
+`QemuConsole` 只允许一个同步 D3D consumer，其它客户端继续走 SHM。断连时若 mutex
+暂未归还，10ms timer 会保持 renderer block 并异步重试；SDL 事件仍响应，收回后重放
+窗口 redraw。当前内置 streamer 没有 D3D import/GPU_SYNC，因此 Windows `auto`
+默认走 SHM，strict `gpu` 会明确拒绝，而不是发布存在竞态的 handle。
 
 ## 停止 VM
 
@@ -171,6 +197,12 @@ cd build-win64-vmate
   --enable-pixman \
   --disable-docs
 ```
+
+上述常规容器没有 Windows virglrenderer，configure 会报告 virglrenderer not found，
+所以不会构建 `virtio-vga-gl`；这是受支持的 SDL+SHM 产物。要实验 Windows GPU
+handoff，必须另外提供匹配 MinGW ABI 的 virglrenderer，并接入 ANGLE/libEGL 与
+D3D11 shared texture 支持后重新配置 `--enable-opengl --enable-virglrenderer`。
+仅强制 `-GpuGlProbe Available` 不会补齐依赖，真实启动不要使用该测试覆盖值。
 
 构建并生成 NSIS 安装包：
 

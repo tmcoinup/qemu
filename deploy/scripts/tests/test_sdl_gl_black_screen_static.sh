@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SDL2_C="$REPO_ROOT/ui/sdl2.c"
+SDL2_EGL_C="$REPO_ROOT/ui/sdl2-egl.c"
 SV_DEVICES="$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
 SV_ASSEMBLE="$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh"
 
@@ -42,7 +43,7 @@ test_display_resume_replays_scanout() {
 test_qemu11_sdl_egl_replaces_private_hook() {
     # 中文注释：QEMU 11 已在 SDL backend 内探测 X11 EGL 并设置官方 SDL hint；
     # 启动器只应传标准 display 参数，不能再维护环境变量控制的私有子窗口。
-    grep -F -- "sdl2_set_hint_x11_force_egl();" "$SDL2_C" >/dev/null \
+    grep -F -- "sdl2_gl_provider_prepare(o->gl);" "$SDL2_C" >/dev/null \
         || fail "QEMU 11 SDL backend must run its EGL capability probe"
     grep -F -- 'DISP_ARGS+=(-display sdl,gl=on,show-cursor=off)' "$SV_DEVICES" >/dev/null \
         || fail "launcher must use the official SDL/GL display option"
@@ -52,16 +53,16 @@ test_qemu11_sdl_egl_replaces_private_hook() {
 }
 
 test_x11_egl_failure_falls_back_before_shader() {
-    # 中文注释：QEMU 11 的 EGL display probe 只能证明 eglGetDisplay 可用，
-    # 不能证明 SDL 能为当前 X11 visual 创建 EGLWindowSurface。创建失败后必须
-    # 用 override 关闭强制 EGL、重试 GLX；两次都失败则在 shader 前明确退出。
-    grep -F -- "static bool sdl2_disable_failed_x11_egl(void)" "$SDL2_C" \
-        >/dev/null || fail "SDL must provide an X11 EGL fallback gate"
-    grep -F -- "SDL_HINT_OVERRIDE" "$SDL2_C" >/dev/null \
+    # 中文注释：provider 探测已经拆到独立文件，并覆盖 eglInitialize、API 绑定
+    # 与 window config。窗口/context 真正创建失败后仍须 override 环境 hint、
+    # 重试 GLX；两次都失败则在 shader 初始化前明确退出。
+    grep -F -- "bool sdl2_gl_provider_retry_native(void)" "$SDL2_EGL_C" \
+        >/dev/null || fail "SDL must provide an EGL fallback gate"
+    grep -F -- "SDL_HINT_OVERRIDE" "$SDL2_EGL_C" >/dev/null \
         || fail "SDL EGL fallback must override an explicit environment hint"
-    grep -F -- "falling back to GLX" "$SDL2_C" >/dev/null \
-        || fail "SDL EGL fallback must report the selected GLX path"
-    grep -F -- "sdl2_x11_egl_provider_committed" "$SDL2_C" >/dev/null \
+    grep -F -- "falling back to %s" "$SDL2_C" >/dev/null \
+        || fail "SDL EGL fallback must report the selected native provider"
+    grep -F -- "SDL2_GL_PROVIDER_EGL_COMMITTED" "$SDL2_EGL_C" >/dev/null \
         || fail "SDL must not mix EGL and GLX providers across consoles"
     grep -F -- "if (sdl2_window_create_once(scon, flags, &first_error))" \
         "$SDL2_C" >/dev/null \

@@ -135,6 +135,7 @@ opt-in 通过 HELLO 请求里的 `flags` 字段（原 `reserved`）：
 | `FB_SHM_HELLO_F_WIN32_NAMES (1<<1)` | Windows 消费端请求 ack 后追加 Win32 mapping/event 名称 |
 | `FB_SHM_HELLO_F_GPU_FRAMES (1<<2)` | 订阅 `NOTIFY_GPU_FRAME`：Linux 收 dma-buf fd，Windows 收 D3D11 shared texture 名称 |
 | `FB_SHM_HELLO_F_GPU_REQUIRED (1<<3)` | strict GPU 模式：不接受 SHM-only 握手 |
+| `FB_SHM_HELLO_F_GPU_SYNC (1<<4)` | Windows consumer 支持 D3D11 keyed-mutex 所有权交接和 `GPU_FRAME_DONE`；未设置时安全回退 SHM |
 
 不设这个 flag 的 client 仍然能正常 HELLO（向后兼容），只是行为退回旧版（卡帧
 + 自行重连）。
@@ -152,6 +153,26 @@ Windows client 端处理流程：
 2. 继续读取固定长度 `FbShmWin32Names`；
 3. 用 `OpenFileMappingA` / `OpenEventA` 打开新对象；
 4. 用 `MapViewOfFile` 替换旧 view，并把本地 `frame_seq` 游标清零。
+
+Windows D3D11 GPU frame 不能只收到名称就直接读取。同步 consumer 必须按以下顺序：
+
+1. HELLO 设置 `GPU_FRAMES|GPU_SYNC`；同一 `QemuConsole`（含多个 fb-shm sidecar）
+   只允许一个 D3D 同步 consumer；
+2. 当前帧的 SDL/其它 listener 完成后，QEMU 由 bottom half 执行 D3D context
+   `Flush()`、`ReleaseSync(0)` 和 `NOTIFY_GPU_FRAME`，同时仅暂停该 console 的
+   GL producer；SDL 窗口事件和其它 VM 仍持续运行；
+3. consumer `AcquireSync(0)`，完成 GPU 使用后 `ReleaseSync(0)`；
+4. consumer 发送 `GPU_FRAME_DONE`，把 64 位 `frame_seq` 拆到请求的 `w/h`
+   低/高 32 位；QEMU 非阻塞 `AcquireSync(0, 0)` 成功后恢复 producer；若回复
+   `EBUSY`，consumer 必须用同一序列重试。
+
+consumer 断连但 mutex 暂未归还时，QEMU 用 10ms timer 非阻塞重试，期间保持该
+console 的 renderer block 和上一帧 SDL 画面；窗口移动、输入、关闭仍响应，收回后
+自动重放积压 redraw。旧/内置 streamer 未声明 `GPU_SYNC`，因此默认直接使用 SHM。
+
+没有 keyed mutex、未声明 `GPU_SYNC`、序列号不匹配或 ANGLE/D3D11 不可用时都不发布
+不安全的共享 texture，普通 SDL 窗口和 SHM 路径保持可用。内置 ffmpeg stdin streamer
+尚未实现 D3D11 import，因此 Windows `auto` 使用 SHM，不能把 metadata 当作端到端零拷贝。
 
 dgame 端实现见 `dgame/client/src/adapters/capture/fb_shm/control.rs`：HELLO 之后
 跑一个 `tokio` 后台 task 多路复用控制 socket，普通 `SET_ROI` / `SET_RATE` ack

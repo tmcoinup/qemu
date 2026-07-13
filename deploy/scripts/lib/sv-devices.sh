@@ -95,8 +95,9 @@ fi
 #
 # STABLE_DISPLAY=0（默认）: 在 --sdl / --gpu-headless 模式下生效，
 #   启 virtio-vga-gl + virgl 3D 加速。
-#   普通 --sdl 与兼容名 --gpu-sdl-egl 都使用 QEMU 11 官方 SDL/GL；前者默认
-#   保持 texture scanout，后者默认加 blob resource，EGL/GLX 由 QEMU 自行探测。
+#   普通 --sdl 与兼容名 --gpu-sdl-egl 都使用 QEMU 11 官方 SDL/GL，并默认给
+#   virtio-vga-gl 加 blob/hostmem 以优先尝试 GPU handle 导出；EGL/GLX 由 QEMU
+#   自行探测，导出失败时 fb-shm 自动走 SHM fallback。
 #   --gpu-headless 则显式选择无窗口 rendernode EGL 路径。
 #
 # STABLE_DISPLAY=1: 强制 virtio-vga，不开 -gl/virgl。用于规避 virgl 长期运行后
@@ -132,10 +133,10 @@ EDID_PROPS="edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID
 if [[ "$GPU_GL_DISPLAY" == "1" ]]; then
     VGA_DEV="virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${EDID_PROPS},${GPU_STEALTH}"
     if [[ "${GPU_ZEROCOPY:-0}" == "1" ]]; then
-        # 中文注释：fb-shm 的 GPU metadata 只有在 guest 使用可共享 backing 时
-        # 才能拿到 dma-buf scanout。blob=true 打开 virtio-gpu resource blob，
-        # hostmem 暴露 host-visible window；否则 QEMU 只能收到普通 GL texture，
-        # 在缺少 EGL texture export 的宿主上会退回 CPU readback。
+        # 中文注释：blob=true 打开 virtio-gpu resource blob，hostmem 暴露
+        # host-visible window，为 Linux dma-buf 或 Windows GPU shared handle 提供
+        # 必要条件。这只是能力偏好：guest/renderer 没给可共享 backing 时，fb-shm
+        # 仍保留既有 SHM/CPU readback，不会因为零拷贝不可用而中断显示或推流。
         VGA_DEV="${VGA_DEV},blob=true,hostmem=${GPU_HOSTMEM:-256M}"
     fi
 else

@@ -56,13 +56,36 @@ test_qapi_and_meson_enable_windows() {
 }
 
 test_qemu_backend_has_win32_mapping() {
+    local gpu_backend="$REPO_ROOT/ui/fb-shm-gpu.c"
+
     require_text "CreateFileMappingA" "$REPO_ROOT/ui/fb-shm.c"
     require_text "MapViewOfFile" "$REPO_ROOT/ui/fb-shm.c"
     require_text "SetEvent" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "CreateSharedHandle" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "CreateSharedHandle" "$gpu_backend"
+    require_text "DXGI_SHARED_RESOURCE_READ" "$gpu_backend"
+    require_text "DXGI_SHARED_RESOURCE_WRITE" "$gpu_backend"
+    require_text "D3D11_RESOURCE_MISC_SHARED_NTHANDLE" "$gpu_backend"
+    require_text "D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX" "$gpu_backend"
+    require_text "IID_IDXGIKeyedMutex" "$gpu_backend"
+    require_text "GetDevice(backend->d3d_texture, &device)" "$gpu_backend"
+    require_text "GetImmediateContext(device, &context)" "$gpu_backend"
+    require_text "context->lpVtbl->Flush(context)" "$gpu_backend"
+    require_text "context->lpVtbl->Release(context)" "$gpu_backend"
+    require_text "device->lpVtbl->Release(device)" "$gpu_backend"
+    require_text "ReleaseSync(backend->d3d_mutex, 0)" "$gpu_backend"
+    require_text "AcquireSync(backend->d3d_mutex, 0, 0)" "$gpu_backend"
+    reject_text "AcquireSync(backend->d3d_mutex, 0, INFINITE)" "$gpu_backend"
+    require_text "GetCurrentProcessId" "$gpu_backend"
+    require_text "FB_SHM_GPU_FRAME_F_KEYED_MUTEX" "$gpu_backend"
+    require_text "fb_shm_gpu_backend_has_d3d_texture" \
+        "$REPO_ROOT/include/ui/fb-shm-gpu.h"
+    require_text "lpVtbl->AddRef" "$gpu_backend"
+    require_text "lpVtbl->Release" "$gpu_backend"
     require_text "dpy_gl_scanout_dmabuf" "$REPO_ROOT/ui/fb-shm.c"
     require_text "FB_SHM_CTL_NOTIFY_GPU_FRAME" "$REPO_ROOT/ui/fb-shm.c"
     require_text "SCM_RIGHTS" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "fb-shm-gpu.c" "$REPO_ROOT/ui/meson.build"
+    require_text "fb-shm-gpu-common.c" "$REPO_ROOT/ui/meson.build"
 }
 
 test_backend_drops_idle_listener_rate() {
@@ -93,20 +116,63 @@ test_gl_readback_drains_pbo_before_rate_gate() {
         || fail "fb_shm_commit_gl_frame must drain GL PBO before SHM rate gate"
 }
 
-test_texture_export_warning_is_strict_only() {
-    # 中文注释：texture-only scanout 在稳定路径下回落 SHM 是预期行为，不能用
-    # warning 误导操作者绕过 QEMU 11 官方 SDL/EGL；只有 strict GPU consumer 才警告。
+test_direct_gpu_publish_is_independent_of_gl_context() {
+    local backend="$REPO_ROOT/ui/fb-shm.c"
+
+    # 中文注释：QemuDmaBuf fd 和 Windows named D3D11 texture 已经是可直接
+    # 交给 consumer 的 backing。它们必须在 gl_guest_fb.texture 检查和共享
+    # GL context 进入之前发布；只有 Linux 普通 texture->dma-buf 可以留在
+    # current-context 阶段。顺序写反会让 GL import 失败连带禁用真正的直通句柄。
+    require_text "fb_shm_broadcast_direct_gpu_frame" "$backend"
+    require_text "fb_shm_gpu_backend_has_d3d_texture" "$backend"
+    require_text "fb_shm_broadcast_context_texture_frame" "$backend"
     awk '
-        /static void fb_shm_broadcast_texture_dmabuf_frame/ { in_func = 1 }
-        in_func && /fb_shm_has_required_gpu_clients\(d\)/ { strict_gate = 1 }
-        in_func && strict_gate && /warn_report/ { strict_warn = 1 }
-        in_func && /else if \(!d->gl_logged_texture_export\)/ { fallback_branch = 1 }
-        in_func && fallback_branch && /info_report/ { fallback_info = 1 }
-        in_func && /^}/ {
-            exit strict_gate && strict_warn && fallback_info ? 0 : 1
+        /static void fb_shm_commit_gl_frame/ { in_func = 1 }
+        in_func && /fb_shm_broadcast_direct_gpu_frame/ { saw_direct = 1 }
+        in_func && /!d->gl_guest_fb.texture/ {
+            saw_texture_gate = 1
+            if (!saw_direct) {
+                exit 1
+            }
         }
-    ' "$REPO_ROOT/ui/fb-shm.c" \
-        || fail "texture dma-buf export fallback must warn only for strict GPU clients"
+        in_func && /fb_shm_gl_context_enter/ {
+            saw_context = 1
+            if (!saw_direct) {
+                exit 1
+            }
+        }
+        in_func && /fb_shm_broadcast_context_texture_frame/ {
+            saw_context_export = 1
+            if (!saw_context) {
+                exit 1
+            }
+        }
+        in_func && /^}/ {
+            exit saw_direct && saw_texture_gate && saw_context &&
+                 saw_context_export ? 0 : 1
+        }
+    ' "$backend" || fail "direct GPU publish must precede all GL context gates"
+}
+
+test_gpu_export_failure_is_silent() {
+    local gpu_backend="$REPO_ROOT/ui/fb-shm-gpu.c"
+    local gpu_common="$REPO_ROOT/ui/fb-shm-gpu-common.c"
+
+    # 中文注释：GPU 导出是可选能力。EGL 不支持 texture dma-buf、
+    # dma-buf 多平面/非零 offset，或 ANGLE texture 无法共享时，后端必须
+    # 安静返回 false，让普通 consumer 继续 SHM，不能刷 warning/info。
+    reject_text "warn_report" "$gpu_backend"
+    reject_text "error_report" "$gpu_backend"
+    reject_text "info_report" "$gpu_backend"
+    reject_text "warn_report" "$gpu_common"
+    reject_text "error_report" "$gpu_common"
+    reject_text "info_report" "$gpu_common"
+    require_text "num_planes != 1" "$gpu_backend"
+    require_text "offsets[0] != 0" "$gpu_backend"
+    require_text "fb_shm_gpu_export_cleanup" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "fb_shm_gpu_pending_begin" "$gpu_common"
+    require_text "frame_sequence <= state->last_sequence" "$gpu_common"
+    require_text "state->pending_sequence != frame_sequence" "$gpu_common"
 }
 
 test_launcher_uses_qemu11_sdl_egl() {
@@ -116,6 +182,34 @@ test_launcher_uses_qemu11_sdl_egl() {
         "$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
     reject_text_ci "SDL_NATIVE_EGL" "$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
     reject_text_ci "SDL_NATIVE_EGL" "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh"
+}
+
+test_launchers_prefer_gpu_export_with_opt_out() {
+    local linux_cli="$REPO_ROOT/deploy/scripts/lib/sv-cli.sh"
+    local linux_devices="$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
+    local windows_launcher="$REPO_ROOT/deploy/windows/start-vm.ps1"
+
+    # 中文注释：Linux/Windows 普通 SDL 都应是“默认尝试能力、失败由 QEMU 回退
+    # SHM”。测试钉住 blob/hostmem opt-out 设计，避免以后误改回必须显式
+    # opt-in，或把移除属性偏好错做成关闭 SDL/GL/renderer texture export。
+    require_text 'GPU_ZEROCOPY=1' "$linux_cli"
+    require_text '--no-gpu-zerocopy' "$linux_cli"
+    require_text 'blob=true,hostmem=${GPU_HOSTMEM:-256M}' "$linux_devices"
+
+    require_text '[switch]$NoGpuZeroCopy' "$windows_launcher"
+    require_text '[string]$GpuHostmem = "256M"' "$windows_launcher"
+    require_text "[ValidateSet('Auto', 'Available', 'Unavailable')]" "$windows_launcher"
+    require_text "'-device' 'virtio-vga-gl,help'" "$windows_launcher"
+    require_text "'sdl,gl=on,show-cursor=off'" "$windows_launcher"
+    require_text "'sdl,show-cursor=off'" "$windows_launcher"
+    require_text "'virtio-vga-gl,edid=on" "$windows_launcher"
+    require_text "'virtio-vga,edid=on" "$windows_launcher"
+    require_text 'if (-not $NoGpuZeroCopy)' "$windows_launcher"
+    require_text '",blob=true,hostmem=$GpuHostmem"' "$windows_launcher"
+    require_text 'renderer 仍可导出 texture handle' "$windows_launcher"
+    require_text '不可用自动 SHM fallback' "$windows_launcher"
+    require_text '自动回退 SDL + virtio-vga + SHM' "$windows_launcher"
+    reject_text "Write-Warning '当前 QEMU 未提供 virtio-vga-gl" "$windows_launcher"
 }
 
 test_scanout_disable_releases_dmabuf() {
@@ -220,6 +314,94 @@ test_windows_scripts_are_native() {
     reject_text_ci "py.exe" "$REPO_ROOT/deploy/windows/stop-vm.ps1"
 }
 
+test_optional_powershell_syntax() {
+    local pwsh_bin
+    local script
+
+    pwsh_bin="$(command -v pwsh || command -v powershell || true)"
+    if [[ -z "$pwsh_bin" ]]; then
+        echo "SKIP: PowerShell not found"
+        return
+    fi
+
+    # 使用 PowerShell AST parser 做纯静态语法检查，不执行启动器中的文件操作。
+    for script in \
+        "$REPO_ROOT/deploy/windows/start-vm.ps1" \
+        "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1" \
+        "$REPO_ROOT/deploy/windows/stop-vm.ps1"; do
+        PS_SCRIPT_PATH="$script" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
+            -Command '
+                $tokens = $null
+                $errors = $null
+                [void][System.Management.Automation.Language.Parser]::ParseFile(
+                    $env:PS_SCRIPT_PATH, [ref]$tokens, [ref]$errors)
+                if ($errors.Count -gt 0) {
+                    $errors | ForEach-Object { [Console]::Error.WriteLine($_) }
+                    exit 1
+                }
+            '
+    done
+}
+
+test_optional_windows_launcher_dry_run() {
+    local pwsh_bin
+    local tmp
+    local out
+    local vga
+
+    pwsh_bin="$(command -v pwsh || command -v powershell || true)"
+    if [[ -z "$pwsh_bin" ]]; then
+        echo "SKIP: PowerShell not found for Windows launcher DRY_RUN"
+        return
+    fi
+
+    tmp="$(mktemp -d)"
+    out="$tmp/out.txt"
+    mkdir -p "$tmp/user"
+    touch "$tmp/disk.qcow2" "$tmp/code.fd" "$tmp/vars.fd"
+
+    # 中文注释：GpuGlProbe 是 DryRun/CI 的确定性注入点。测试不依赖当前宿主
+    # 是否真的有 Windows virglrenderer，也不会执行作为占位符传入的 /bin/true。
+    USERPROFILE="$tmp/user" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
+        -File "$REPO_ROOT/deploy/windows/start-vm.ps1" \
+        -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
+        -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
+        -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available -DryRun > "$out"
+    grep -Fx -- 'sdl,gl=on,show-cursor=off' "$out" >/dev/null \
+        || fail "Windows available probe must enable SDL/GL"
+    vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
+    [[ "$vga" == virtio-vga-gl,* && "$vga" == *"blob=true"* && "$vga" == *"hostmem=256M"* ]] \
+        || fail "Windows available probe must enable virtio-vga-gl blob/hostmem"
+
+    USERPROFILE="$tmp/user" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
+        -File "$REPO_ROOT/deploy/windows/start-vm.ps1" \
+        -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
+        -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
+        -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available \
+        -NoGpuZeroCopy -DryRun > "$out"
+    vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
+    [[ "$vga" == virtio-vga-gl,* && "$vga" != *"blob=true"* && "$vga" != *"hostmem="* ]] \
+        || fail "Windows -NoGpuZeroCopy must retain GL but remove blob/hostmem preference"
+    grep -F -- 'renderer 仍可导出 texture handle' "$out" >/dev/null \
+        || fail "Windows opt-out summary must preserve renderer texture export semantics"
+
+    USERPROFILE="$tmp/user" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
+        -File "$REPO_ROOT/deploy/windows/start-vm.ps1" \
+        -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
+        -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
+        -FbShmPath "$tmp/fb.sock" -GpuGlProbe Unavailable -DryRun \
+        > "$out" 2>&1
+    grep -Fx -- 'sdl,show-cursor=off' "$out" >/dev/null \
+        || fail "Windows unavailable probe must retain non-GL SDL"
+    vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
+    [[ "$vga" == virtio-vga,* && "$vga" != *"blob=true"* ]] \
+        || fail "Windows unavailable probe must fall back to virtio-vga"
+    grep -F -- '自动回退 SDL + virtio-vga + SHM' "$out" >/dev/null \
+        || fail "Windows unavailable probe must explain SHM fallback"
+
+    rm -rf "$tmp"
+}
+
 test_docs_cover_windows_packaging() {
     require_text "Windows 10 / Windows 11" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "qemu-fb-shm-stream.exe" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
@@ -228,6 +410,8 @@ test_docs_cover_windows_packaging() {
     require_text "WINDOWS-PACKAGING.md" "$REPO_ROOT/deploy/docs/README.md"
     require_text "FB-SHM-GPU-ZEROCOPY.md" "$REPO_ROOT/deploy/docs/README.md"
     require_text "NOTIFY_GPU_FRAME" "$REPO_ROOT/deploy/docs/FB-SHM-GPU-ZEROCOPY.md"
+    require_text "virglrenderer not found" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
+    require_text "ANGLE/libEGL" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "Linux/Windows" "$REPO_ROOT/docs/system/fb-shm.rst"
 }
 
@@ -238,6 +422,10 @@ test_new_files_stay_small() {
         "$REPO_ROOT/tools/fb-shm-stream/platform.c" \
         "$REPO_ROOT/tools/fb-shm-stream/ffmpeg.c" \
         "$REPO_ROOT/tools/fb-shm-stream/main.c" \
+        "$REPO_ROOT/include/ui/fb-shm-gpu.h" \
+        "$REPO_ROOT/ui/fb-shm-gpu.c" \
+        "$REPO_ROOT/ui/fb-shm-gpu-common.c" \
+        "$REPO_ROOT/tests/unit/test-fb-shm-gpu-frame.c" \
         "$REPO_ROOT/deploy/windows/start-vm.ps1" \
         "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1" \
         "$REPO_ROOT/deploy/windows/stop-vm.ps1" \
@@ -275,8 +463,10 @@ test_qapi_and_meson_enable_windows
 test_qemu_backend_has_win32_mapping
 test_backend_drops_idle_listener_rate
 test_gl_readback_drains_pbo_before_rate_gate
-test_texture_export_warning_is_strict_only
+test_direct_gpu_publish_is_independent_of_gl_context
+test_gpu_export_failure_is_silent
 test_launcher_uses_qemu11_sdl_egl
+test_launchers_prefer_gpu_export_with_opt_out
 test_scanout_disable_releases_dmabuf
 test_fb_shm_notifier_is_unregistered_before_free
 test_fb_shm_treats_shared_header_as_untrusted
@@ -285,8 +475,11 @@ test_gl_context_failure_does_not_destroy_bad_context
 test_gl_sidecar_restores_provider_context
 test_native_streamer_has_both_platforms
 test_windows_scripts_are_native
+test_optional_powershell_syntax
+test_optional_windows_launcher_dry_run
 test_docs_cover_windows_packaging
 test_new_files_stay_small
 test_optional_mingw_streamer_syntax
+bash "$SCRIPT_DIR/test_windows_gpu_sync_static.sh"
 
 echo "OK: windows fb-shm static checks passed"

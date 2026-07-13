@@ -60,6 +60,7 @@ struct sdl2_console {
     egl_fb win_fb;
     bool y0_top;
     bool scanout_mode;
+    bool scanout_redraw_pending;
 #endif
 };
 

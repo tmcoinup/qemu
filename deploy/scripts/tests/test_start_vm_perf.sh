@@ -356,80 +356,6 @@ test_phenom_cpu_masks_missing_3dnow() {
     fi
 }
 
-test_gl_display_uses_qemu11_sdl_default_dry_run() {
-    local out="$1"
-    local vga_line
-
-    DISPLAY=:0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9886 \
-        "$START_VM" --no-fb-shm --no-bridge > "$out"
-
-    # 中文注释：默认名与兼容名都必须走 QEMU 11 官方 SDL/GL 参数；EGL 由
-    # QEMU 自行探测，启动器不得再导出旧的私有开关或创建 X11 子窗口。
-    grep -F -- ': "${GPU_DISPLAY:=sdl}"' "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh" >/dev/null \
-        || fail "default GPU_DISPLAY must stay on official SDL/GL"
-    if grep -F -- "SDL_NATIVE_EGL" \
-        "$REPO_ROOT/deploy/scripts/start-vm.sh" \
-        "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh" \
-        "$REPO_ROOT/deploy/scripts/lib/sv-devices.sh" \
-        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null
-    then
-        fail "launcher must not retain the private SDL native-EGL environment hook"
-    fi
-    grep -Fx -- "sdl,gl=on,show-cursor=off" "$out" >/dev/null \
-        || fail "default SDL dry-run must keep the SDL/GL window display"
-    grep -Fx -- "egl-headless" "$out" >/dev/null \
-        && fail "default SDL dry-run must not select egl-headless"
-    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
-    [[ -n "$vga_line" ]] \
-        || fail "default SDL dry-run did not keep virtio-vga-gl"
-    [[ "$vga_line" != *"blob=true"* && "$vga_line" != *"hostmem="* ]] \
-        || fail "default SDL dry-run must keep historical texture-only device"
-
-    DISPLAY=:0 GPU_ZEROCOPY=1 GPU_HOSTMEM=512M DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9887 \
-        "$START_VM" --no-fb-shm --no-bridge > "$out"
-
-    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
-    [[ "$vga_line" == *"blob=true"* ]] \
-        || fail "GPU_ZEROCOPY=1 did not enable virtio-gpu blob resources"
-    [[ "$vga_line" == *"hostmem=512M"* ]] \
-        || fail "GPU_ZEROCOPY=1 did not honor GPU_HOSTMEM"
-
-    DISPLAY=:0 GPU_ZEROCOPY=0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9888 \
-        "$START_VM" --no-fb-shm --no-bridge > "$out"
-
-    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
-    [[ "$vga_line" != *"blob=true"* && "$vga_line" != *"hostmem="* ]] \
-        || fail "GPU_ZEROCOPY=0 should keep historical texture-only device"
-
-    DISPLAY=:0 DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9890 \
-        "$START_VM" --gpu-sdl-egl --no-fb-shm --no-bridge > "$out"
-
-    grep -Fx -- "sdl,gl=on,show-cursor=off" "$out" >/dev/null \
-        || fail "--gpu-sdl-egl compatibility name must use official SDL/GL"
-    grep -Fx -- "egl-headless" "$out" >/dev/null \
-        && fail "--gpu-sdl-egl must not select headless display"
-    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
-    [[ "$vga_line" == *"blob=true"* && "$vga_line" == *"hostmem=256M"* ]] \
-        || fail "--gpu-sdl-egl did not keep virtio-vga-gl blob/hostmem enabled"
-}
-
-test_gpu_headless_display_dry_run() {
-    local out="$1"
-    local vga_line
-
-    DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9889 \
-        "$START_VM" --gpu-headless --no-fb-shm --no-bridge > "$out"
-
-    grep -Fx -- "egl-headless" "$out" >/dev/null \
-        || fail "--gpu-headless did not select egl-headless display"
-    grep -Fx -- "sdl,gl=on,show-cursor=off" "$out" >/dev/null \
-        && fail "--gpu-headless should not create an SDL window"
-
-    vga_line="$(grep -F -- "virtio-vga-gl" "$out" || true)"
-    [[ "$vga_line" == *"blob=true"* && "$vga_line" == *"hostmem=256M"* ]] \
-        || fail "--gpu-headless did not keep virtio-vga-gl blob/hostmem enabled"
-}
-
 test_hotkey_capture_option_removed() {
     local out="$1"
 
@@ -494,8 +420,9 @@ main() {
     test_qemu_service_cpu_flags_dry_run "$out"
     test_cpu_pm_keeps_upstream_default_dry_run "$out"
     test_phenom_cpu_masks_missing_3dnow "$out"
-    test_gl_display_uses_qemu11_sdl_default_dry_run "$out"
-    test_gpu_headless_display_dry_run "$out"
+    # GPU 显示策略已拆到独立文件，避免本综合回归重新超过 500 行；保留入口调用，
+    # 让既有 CI 只执行 test_start_vm_perf.sh 时也覆盖默认 blob/hostmem 与 opt-out。
+    "$SCRIPT_DIR/test_gpu_zerocopy_launcher.sh"
     test_hotkey_capture_option_removed "$out"
     test_cpu_isolate_scripts_parse
     echo "PASS: start-vm NVMe storage portability path"

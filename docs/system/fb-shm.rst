@@ -78,6 +78,24 @@ perform a GL readback: it sends a control-plane descriptor for the same
 GPU backing object.  If the consumer cannot import that handle, it can
 ignore ``NOTIFY_GPU_FRAME`` and keep using the SHM BGR0 path.
 
+Windows D3D11 ownership is explicit.  A consumer must advertise both
+``FB_SHM_HELLO_F_GPU_FRAMES`` and ``FB_SHM_HELLO_F_GPU_SYNC``.  QEMU
+waits until the current SDL/display-listener pass has completed, then a
+bottom half flushes D3D work, releases keyed-mutex key 0, publishes one
+frame to the single synchronized consumer for that ``QemuConsole``, and
+asynchronously pauses only that console's GL producer.  The consumer
+acquires key 0, uses the texture, releases key 0, and sends
+``FB_SHM_CTL_GPU_FRAME_DONE`` with the low and high halves of
+``frame_seq`` in ``w`` and ``h``.  QEMU then re-acquires the key without
+blocking its main loop and resumes the producer.  An ``EBUSY`` response
+means the consumer must retry DONE with the same sequence.
+Textures without ``SHARED_KEYEDMUTEX``, legacy clients without the sync
+flag, and failed handoffs stay on the SDL plus SHM fallback path.
+If a synchronized consumer disconnects before the mutex is reclaimable,
+QEMU keeps that console's producer blocked and retries every 10 ms.  SDL
+window and input events remain responsive; deferred redraw is replayed
+after ownership is safe again.
+
 Data flow & ABI
 ===============
 
@@ -183,6 +201,12 @@ Opt-in is encoded in the ``flags`` field of the ``HELLO`` request
   my doorbell watch."
 * ``FB_SHM_HELLO_F_WIN32_NAMES (1<<1)`` — Windows-only: "send Win32
   mapping/event names after the ack payload."
+* ``FB_SHM_HELLO_F_GPU_FRAMES (1<<2)`` — subscribe to GPU-resident
+  frame notifications.
+* ``FB_SHM_HELLO_F_GPU_REQUIRED (1<<3)`` — reject an SHM-only strict
+  GPU session.
+* ``FB_SHM_HELLO_F_GPU_SYNC (1<<4)`` — Windows-only: the client
+  implements the D3D11 keyed-mutex and ``GPU_FRAME_DONE`` protocol.
 
 A consumer that does **not** set the flag preserves the legacy
 behaviour (frozen frames after a ROI change until it reconnects) and
@@ -225,6 +249,11 @@ seqlock reader, then pipes raw frames into ffmpeg.  It accepts
   backends that import dma-buf / D3D11 directly.  The bundled stdin
   ffmpeg backend validates the GPU export and fails rather than
   pretending the SHM path is zero-copy GPU encoding.
+
+The bundled stdin/ffmpeg consumer does not import D3D11 textures and
+therefore does not advertise ``GPU_SYNC``.  On Windows its ``auto`` mode
+uses SHM; strict ``gpu`` mode is rejected until a native D3D encoder
+backend implements keyed-mutex ownership and ``GPU_FRAME_DONE``.
 
 Encoders verified to work end-to-end on the SHM fallback path:
 

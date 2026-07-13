@@ -11,6 +11,8 @@
     默认模式是 SDL 窗口 + fb-shm 推流通道并存：
       - SDL 给本机交互使用；
       - fb-shm 完全在宿主 QEMU 进程内导出帧，对 guest 不可见；
+      - QEMU 提供 virtio-vga-gl 时，SDL 自动启用 GL + blob/hostmem；
+      - 构建缺少 virglrenderer 时退回普通 SDL，GPU handle 不可用时继续 SHM；
       - 外部使用 qemu-fb-shm-stream.exe --sock <path> --output <url> 拉流。
 #>
 
@@ -40,6 +42,11 @@ param(
     [string]$FbShmPath = "",
     [int]$FbShmRate = 60,
     [string]$FbShmRoi = "",
+
+    [switch]$NoGpuZeroCopy,
+    [string]$GpuHostmem = "256M",
+    [ValidateSet('Auto', 'Available', 'Unavailable')]
+    [string]$GpuGlProbe = 'Auto',
 
     [int]$SshForwardPort = 0,
     [int]$RdpForwardPort = 0,
@@ -91,6 +98,23 @@ function Test-WhpxEnabled {
         }
     } catch {
         Write-Verbose "跳过 WHPX feature 检查：$($_.Exception.Message)"
+    }
+}
+
+function Test-QemuVirtioGpuGl {
+    param([string]$Executable)
+
+    # 中文注释：官方 Windows 构建可以在缺少 virglrenderer 时正常产出，但不会
+    # 注册 virtio-vga-gl。直接写死该设备会让 VM 在参数解析阶段退出，所以启动前
+    # 用只读 help 探测；native exe 非零退出或输出中没有设备名都视为不可用。
+    try {
+        $probeOutput = & $Executable '-device' 'virtio-vga-gl,help' 2>&1
+        $probeExitCode = $LASTEXITCODE
+        $probeText = ($probeOutput | Out-String)
+        return ($probeExitCode -eq 0 -and $probeText -match 'virtio-vga-gl')
+    } catch {
+        Write-Verbose "virtio-vga-gl 能力探测失败：$($_.Exception.Message)"
+        return $false
     }
 }
 
@@ -154,6 +178,9 @@ if (-not $FbShmPath) {
 if ($FbShmRate -lt 1 -or $FbShmRate -gt 240) {
     throw "FbShmRate 必须在 [1,240]，实际：$FbShmRate"
 }
+if ($GpuGlProbe -ne 'Auto' -and -not $DryRun) {
+    throw 'GpuGlProbe 的 Available/Unavailable 注入仅允许与 -DryRun 一起用于 CI；真实启动必须使用 Auto 探测。'
+}
 
 Test-WhpxEnabled
 
@@ -186,14 +213,51 @@ if ($ExtraIso) {
     Add-Arg $argsList @('-drive', "file=$ExtraIso,media=cdrom,if=none,id=cd1,readonly=on", '-device', 'ide-cd,drive=cd1,bus=ide.1')
 }
 
+$localSdlRequested = -not ($Headless -or $NoSdl)
+$gpuGlDisplay = $false
+if ($localSdlRequested) {
+    switch ($GpuGlProbe) {
+        'Available' { $gpuGlDisplay = $true }
+        'Unavailable' { $gpuGlDisplay = $false }
+        default { $gpuGlDisplay = Test-QemuVirtioGpuGl -Executable $Qemu }
+    }
+}
+
 if ($Headless) {
     Add-Arg $argsList @('-display', 'none', '-vnc', "127.0.0.1:$($Instance - 1)")
 } elseif ($NoSdl) {
     Add-Arg $argsList @('-display', 'none')
+} elseif ($gpuGlDisplay) {
+    Add-Arg $argsList @('-display', 'sdl,gl=on,show-cursor=off')
 } else {
+    # 缺少 virglrenderer/virtio-vga-gl 时仍保留默认 SDL 本地窗口，只关闭 GL；
+    # fb-shm 会继续走跨构建可用的 SHM 路径。该情况是受支持的常规构建能力
+    # 降级，用普通信息而非 warning，避免正常启动产生误报警告。
+    if ($NoFbShm) {
+        Write-Host '>> 当前 QEMU 未提供 virtio-vga-gl；自动回退 SDL + virtio-vga（fb-shm 已关闭）。'
+    } else {
+        Write-Host '>> 当前 QEMU 未提供 virtio-vga-gl；自动回退 SDL + virtio-vga + SHM。'
+    }
     Add-Arg $argsList @('-display', 'sdl,show-cursor=off')
 }
-Add-Arg $argsList @('-device', 'virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080')
+
+if ($gpuGlDisplay) {
+    # 中文注释：Windows 普通 SDL 默认启用 virtio-vga-gl，并给 resource blob
+    # 预留 host-visible window。ANGLE/D3D11 能提供共享纹理时，fb-shm 可发布
+    # GPU handle；宿主 GL 栈或 guest backing 不支持时，QEMU 会自动继续 SHM。
+    $vgaDevice = 'virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080'
+    if (-not $NoGpuZeroCopy) {
+        if ($GpuHostmem -notmatch '^\d+[KkMmGgTt]?$') {
+            throw "GpuHostmem 必须是 QEMU size 值，例如 256M 或 1G，实际：$GpuHostmem"
+        }
+        $vgaDevice += ",blob=true,hostmem=$GpuHostmem"
+    }
+} else {
+    # VNC 和纯无窗口模式没有 SDL GL provider，使用普通 virtio-vga；此时即使
+    # 未传 -NoGpuZeroCopy，也不会伪装成已经具备 GPU shared-handle 导出能力。
+    $vgaDevice = 'virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080'
+}
+Add-Arg $argsList @('-device', $vgaDevice)
 
 if (-not $NoFbShm) {
     $roiSuffix = (Split-Roi $FbShmRoi) -join ''
@@ -207,7 +271,15 @@ foreach ($item in $ExtraQemuArgs) {
 Write-Host "QEMU: $Qemu"
 Write-Host "VM:   $VmRoot"
 if (-not $NoFbShm) {
-    Write-Host "fb-shm: $FbShmPath @ ${FbShmRate}Hz"
+    Write-Host "fb-shm: $FbShmPath configured=${FbShmRate}Hz"
+    Write-Host "rate:   无 consumer 时 effective 可降至 1Hz；连接后使用 configured/consumer target"
+    if ($gpuGlDisplay -and -not $NoGpuZeroCopy) {
+        Write-Host "GPU:    优先 shared handle (blob=true,hostmem=$GpuHostmem)；不可用自动 SHM fallback"
+    } elseif ($gpuGlDisplay) {
+        Write-Host 'GPU:    blob/hostmem 偏好已关闭；renderer 仍可导出 texture handle，失败才回退 SHM'
+    } else {
+        Write-Host 'GPU:    当前为非 GL 显示路径；使用 SHM fallback'
+    }
     Write-Host "拉流:  qemu-fb-shm-stream.exe --sock `"$FbShmPath`" --output rtmp://..."
 }
 

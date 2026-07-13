@@ -72,9 +72,29 @@ test_resource_export_tracks_fd_ownership() {
         || fail "export_blob fd path must set owns_fd=true"
 }
 
+test_direct_export_failure_keeps_texture_handoff() {
+    # 中文注释：virgl 直接 dma-buf 失败不等于零拷贝必然失败；
+    # SDL/EGL 或 Windows ANGLE 仍能从 texture 发布 GPU handle。
+    # 日志必须保留这层语义，并把 SHM 描述为最终兼容回退，
+    # 不能提前宣判只剩 SHM。
+    grep -F -- "keeping SDL texture path for" "$VIRGL_C" >/dev/null \
+        || fail "direct dma-buf miss must retain the texture GPU path"
+    grep -F -- "EGL/ANGLE GPU-handle attempt, with SHM fallback" \
+        "$VIRGL_C" >/dev/null \
+        || fail "direct dma-buf diagnostic must describe ordered fallback"
+    if grep -F -- "fb-shm will use SHM fallback" "$VIRGL_C" >/dev/null; then
+        fail "virgl direct-export miss must not skip texture GPU export"
+    fi
+    if grep -F -- "fb-shm GPU consumers will fall back to SHM" \
+        "$VIRGL_C" >/dev/null; then
+        fail "virgl diagnostic must not claim premature SHM fallback"
+    fi
+}
+
 test_resource_unref_releases_matching_scanouts_first
 test_disable_helper_releases_every_host_reference
 test_reset_and_set_scanout_share_disable_helper
 test_resource_export_tracks_fd_ownership
+test_direct_export_failure_keeps_texture_handoff
 
 echo "OK: virgl dma-buf lifecycle static checks passed"

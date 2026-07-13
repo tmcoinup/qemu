@@ -9,6 +9,14 @@
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
+ *
+ * 文件规模说明：这是上游既有的 virgl 命令分派、
+ * 资源生命周期、fence、scanout 与迁移实现，
+ * 修改前已超过 1700 行。
+ * 本次只调整 scanout 导出能力判定和回退诊断；
+ * 强行拆分会同时改变上游私有资源结构与回调边界，
+ * 因此保留原文件，并把新增的跨平台 GPU handle 生命周期
+ * 独立放在 ui/fb-shm-gpu.c。
  */
 
 #include "qemu/osdep.h"
@@ -603,8 +611,7 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
 #if VIRGL_VERSION_MAJOR >= 1
         static bool logged_scanout_info;
         static bool logged_dmabuf_export;
-        static bool logged_export_blob_failure;
-        static bool warned_export_blob_no_format;
+        static bool logged_export_blob_no_format;
 #endif
 
 #if VIRGL_VERSION_MAJOR >= 1
@@ -714,30 +721,24 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
                        fd_type == VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF &&
                        export_fd >= 0) {
                 close(export_fd);
-                if (!warned_export_blob_no_format) {
-                    warn_report("virtio-gpu-virgl: export_blob returned "
+                if (!logged_export_blob_no_format) {
+                    /*
+                     * export_blob 成功但元数据无法由当前
+                     * sideband ABI 无损表达时，仍可尝试 SDL/EGL
+                     * 或 ANGLE texture 导出，最终还有 SHM。
+                     * 因此这是能力信息而非告警。
+                     */
+                    info_report("virtio-gpu-virgl: export_blob returned "
                                 "dma-buf with unsupported sideband metadata "
                                 "(drm_fourcc=0x%x planes=%d virgl_format=%u "
-                                "stride=%u); not forwarding ambiguous GPU "
-                                "frame",
+                                "stride=%u); keeping texture-handle and SHM "
+                                "fallback paths",
                                 info.drm_fourcc, ext.planes,
                                 info.virgl_format, info.stride);
-                    warned_export_blob_no_format = true;
+                    logged_export_blob_no_format = true;
                 }
             } else if (export_fd >= 0) {
                 close(export_fd);
-            } else if (!logged_export_blob_failure) {
-                /*
-                 * 中文注释：没有 dma-buf 句柄时会走后面的 SHM 降级路径，
-                 * 这是受支持的运行模式；只记录 info，避免正常启动刷 warning。
-                 */
-                info_report("virtio-gpu-virgl: export_blob unavailable for "
-                            "scanout resource; fb-shm will use SHM fallback "
-                            "(ret=%d fd_type=%u fourcc=0x%x "
-                            "has_ext_dmabuf=%d info_fd=%d)",
-                            export_ret, fd_type, info.drm_fourcc,
-                            ext.has_dmabuf_export, info.fd);
-                logged_export_blob_failure = true;
             }
         }
 #endif
@@ -745,13 +746,16 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
             virtio_gpu_clear_dmabuf(g, ss.scanout_id);
             if (!logged_no_dmabuf_export) {
                 /*
-                 * 中文注释：scanout texture 继续由 QEMU 11 官方 SDL/EGL
-                 * 路径显示；fb-shm 只在 GPU 旁路导出失败时回退 SHM，属于
-                 * 正常能力降级，不应作为运行警告。
+                 * 中文注释：virgl 的直接 dma-buf
+                 * sideband 不可用时，
+                 * scanout texture 仍继续由官方 SDL 窗口显示。
+                 * fb-shm 接下来可从 SDL/EGL texture 导出 dma-buf，
+                 * 或从 Windows ANGLE texture 导出 D3D11 handle；
+                 * 只有这些 GPU handle 也不可用时才回退 SHM。
                  */
-                info_report("virtio-gpu-virgl: scanout texture has no "
-                            "dma-buf export; fb-shm GPU consumers will fall "
-                            "back to SHM on this display path");
+                info_report("virtio-gpu-virgl: direct scanout dma-buf "
+                            "unavailable; keeping SDL texture path for "
+                            "EGL/ANGLE GPU-handle attempt, with SHM fallback");
                 logged_no_dmabuf_export = true;
             }
         }

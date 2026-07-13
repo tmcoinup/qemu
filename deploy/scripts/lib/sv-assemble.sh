@@ -188,7 +188,17 @@ else
     echo ">> GUI:         无（纯 fb-shm 推流模式）"
 fi
 if [[ "$FB_SHM" == "1" ]]; then
-    echo ">> fb-shm sock: $FB_SHM_SOCK (rate=${FB_SHM_RATE} Hz${FB_SHM_ROI:+, ROI=$FB_SHM_ROI})"
+    echo ">> fb-shm sock: $FB_SHM_SOCK (configured=${FB_SHM_RATE} Hz${FB_SHM_ROI:+, ROI=$FB_SHM_ROI})"
+    # 中文注释：QEMU 启动日志中的 1Hz 是无 consumer 时的有效 DCL 节流值，
+    # 不是 -object rate 丢失；连接 consumer 后会按配置值或 SET_RATE 请求恢复。
+    echo ">>   rate 说明: 无 consumer 时 effective 可降至 1 Hz；连接后使用 configured/consumer target"
+    if [[ "${GPU_GL_DISPLAY:-0}" == "1" && "${GPU_ZEROCOPY:-0}" == "1" ]]; then
+        echo ">>   GPU handoff: 优先 GPU handle (blob=true,hostmem=${GPU_HOSTMEM});不可用自动 SHM fallback"
+    elif [[ "${GPU_GL_DISPLAY:-0}" == "1" ]]; then
+        echo ">>   GPU handoff: blob/hostmem 偏好已关闭；renderer 仍可导出 texture handle，失败才回退 SHM"
+    else
+        echo ">>   GPU handoff: 当前为非 GL 显示路径；使用 SHM fallback"
+    fi
     echo ">>   接消费端: scripts/qemu-fb-shm-stream.py --sock $FB_SHM_SOCK --output ..."
 fi
 echo ">> SSH/RDP fwd: 127.0.0.1:$SSH_FWD_PORT / 127.0.0.1:$RDP_FWD_PORT"

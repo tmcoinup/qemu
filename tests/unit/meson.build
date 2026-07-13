@@ -138,6 +138,9 @@ if have_system
     'test-fb-shm-stream-pace': [
       meson.project_source_root() / 'tools/fb-shm-stream/pace.c'
     ],
+    'test-fb-shm-gpu-frame': [
+      meson.project_source_root() / 'ui/fb-shm-gpu-common.c'
+    ],
     'test-smp-parse': [qom, meson.project_source_root() / 'hw/core/machine-smp.c'],
     'test-vmstate': [migration, io],
     'test-yank': ['socket-helpers.c', qom, io, chardev]

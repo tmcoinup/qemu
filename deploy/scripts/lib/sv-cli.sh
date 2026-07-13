@@ -159,14 +159,14 @@ _gpu_zerocopy_explicit=0
 : "${GPU_DISPLAY:=sdl}"
 : "${GPU_RENDERNODE:=}"
 # GPU 零拷贝元数据依赖 virtio-gpu blob resource + host-visible memory。
-# 中文注释：普通本地游戏窗口使用 QEMU 11 官方 SDL/GL，并默认保持 texture
-# scanout。`sdl-egl` 只作为旧配置兼容名：显示参数与 `sdl` 相同，但会默认打开
-# blob/hostmem 供 GPU consumer 使用；环境变量或 CLI 仍可显式覆盖零拷贝开关。
+# 中文注释：能力优先策略只负责给 virtio-gpu 打开 blob/hostmem，并不承诺当前
+# scanout 一定能导出 GPU handle。QEMU/virgl/ANGLE 导出失败时，fb-shm 会在同一
+# 进程内自动继续 SHM，不需要启动器重启 VM。普通 SDL/GL、兼容名 sdl-egl 与
+# egl-headless 默认尝试该能力；`--no-gpu-zerocopy` 或 GPU_ZEROCOPY=0 仅关闭
+# blob/hostmem 偏好，renderer 仍可能从普通 texture 导出 GPU handle。
+# stable、VNC 和纯无窗口路径稍后会在最终显示模式确定后自动关闭这个默认值。
 if [[ "$_gpu_zerocopy_explicit" == "0" ]]; then
-    case "$GPU_DISPLAY" in
-        sdl-egl|egl-headless) GPU_ZEROCOPY=1 ;;
-        *) GPU_ZEROCOPY=0 ;;
-    esac
+    GPU_ZEROCOPY=1
 fi
 # QMP 多客户端：PROXY=1 时启用 QEMU 原生 multi=on QMP listener，同一路径可被
 # dgame / image-search / 临时 socat 同时连接。为了兼容旧工具配置，启动脚本还会
@@ -253,6 +253,16 @@ fi
 if [[ "$SDL" == "1" && -z "${DISPLAY:-}" && ! -t 1 && "$HEADLESS" != "1" ]]; then
     echo ">> 自动降级: 无 DISPLAY 且非交互式终端 -> 关 SDL，仅 fb-shm 推流"
     SDL=0
+fi
+
+# 中文注释：默认策略只在确实存在 GL provider 的显示路径上开启 blob/hostmem。
+# stable virtio-vga、VNC 以及普通 `--no-sdl` 都没有可导出的 GL scanout，继续把
+# GPU_ZEROCOPY 留成 1 只会误导日志和运维检查。显式设置则原样保留以兼容既有
+# 自动化，但 sv-devices 仍只会给 virtio-vga-gl 注入相关属性。
+if [[ "$_gpu_zerocopy_explicit" == "0" && \
+      ( "$STABLE_DISPLAY" == "1" || \
+        ( "$SDL" != "1" && "$GPU_DISPLAY" != "egl-headless" ) ) ]]; then
+    GPU_ZEROCOPY=0
 fi
 
 # fb-shm 校验：rate 必须在 [1,240]

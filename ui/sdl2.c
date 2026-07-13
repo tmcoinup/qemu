@@ -24,10 +24,12 @@
 /* Ported SDL 1.2 code to 2.0 by Dave Airlie. */
 
 /*
- * 文件规模说明：SDL backend 同时承载窗口生命周期、输入事件、抓取策略、
- * 多 console 注册和平台相关初始化，历史上已经超过 500 行。本次只在既有窗口
- * 生命周期边界补充 EGL->GLX 降级，避免为了一个紧密耦合的错误路径拆出新的
- * 私有接口；后续若整体拆分，应以 window/input/display 三个状态机为边界。
+ * 文件规模说明：SDL backend 同时承载窗口生命周期、
+ * 输入事件、抓取策略、多 console 注册和平台相关初始化。
+ * 该历史文件已经超过 500 行。
+ * OpenGL provider 的探测、提交和 EGL->GLX 降级已拆到
+ * sdl2-egl.c；后续若继续拆分，应以
+ * window/input/display 三个状态机为边界。
  */
 
 #include "qemu/osdep.h"
@@ -37,15 +39,12 @@
 #include "ui/console.h"
 #include "ui/input.h"
 #include "ui/sdl2.h"
+#include "ui/sdl2-egl.h"
 #include "system/runstate.h"
 #include "system/runstate-action.h"
 #include "system/system.h"
 #include "qemu/log.h"
 #include "qemu-main.h"
-
-#ifdef CONFIG_X11
-#include <X11/Xlib.h>
-#endif
 
 static int sdl2_num_outputs;
 static struct sdl2_console *sdl2_console;
@@ -77,50 +76,36 @@ static Notifier mouse_mode_notifier;
 
 static void sdl_update_caption(struct sdl2_console *scon);
 
-#ifdef CONFIG_OPENGL
-/*
- * SDL 的 EGL/GLX hint 是进程级状态，多 console 不能各自选择 provider。
- * 第一个成功的 EGL context 一旦发布 dma-buf 能力，后续窗口就必须保持 EGL；
- * 否则既有 console 的 context 与全局 qemu_egl_display 会互相矛盾。
- */
-static bool sdl2_x11_egl_provider_committed;
-
-static bool sdl2_disable_failed_x11_egl(void)
-{
-#if defined(SDL_HINT_VIDEO_X11_FORCE_EGL) && defined(CONFIG_X11)
-    const char *video_driver = SDL_GetCurrentVideoDriver();
-
-    /*
-     * QEMU 11 优先让 SDL/X11 使用 EGL，以获得 dma-buf 能力；但
-     * qemu_egl_get_display() 成功并不代表 SDL 一定能为具体 X11 visual 创建
-     * EGLWindowSurface。只有当前确实是 X11 且强制 EGL hint 生效时才允许降级，
-     * 避免把 Wayland/Windows 等后端的一般性创建失败误报成 GLX 回退。
-     *
-     * 使用 OVERRIDE 是有意的：环境变量 hint 的优先级高于普通 SDL_SetHint()。
-     * 首次 EGL 已经实际失败，若不覆盖显式的 "1"，第二次创建仍会重复同一路径。
-     */
-    if (sdl2_x11_egl_provider_committed ||
-        g_strcmp0(video_driver, "x11") != 0 ||
-        !SDL_GetHintBoolean(SDL_HINT_VIDEO_X11_FORCE_EGL, SDL_FALSE)) {
-        return false;
-    }
-
-    return SDL_SetHintWithPriority(SDL_HINT_VIDEO_X11_FORCE_EGL, "0",
-                                   SDL_HINT_OVERRIDE) == SDL_TRUE;
-#else
-    return false;
-#endif
-}
-#endif
-
 static bool sdl2_window_create_once(struct sdl2_console *scon, int flags,
                                     char **error_message)
 {
-    const char *driver = "opengl";
     Uint32 wflags;
 
     *error_message = NULL;
     SDL_ClearError();
+
+    if (scon->opengl) {
+        const char *driver = "opengl";
+
+        /*
+         * SDL 在 SDL_CreateWindow(SDL_WINDOW_OPENGL) 内就会加载
+         * provider、选择 EGLConfig/GLXFBConfig，并创建 window surface。
+         * 所以 profile 与 renderer hint 必须在创建窗口前设置。
+         * 放在 SDL_GL_CreateContext 前才设置已经太晚，
+         * 会让 ES 模式按桌面 GL config 创建窗口。
+         */
+        if (scon->opts->gl == DISPLAY_GL_MODE_ES) {
+            driver = "opengles2";
+        }
+        if (sdl2_gl_provider_configure_window(scon->opts->gl) < 0) {
+            *error_message = g_strdup(SDL_GetError());
+            return false;
+        }
+
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, driver);
+        SDL_SetHint(SDL_HINT_RENDER_BATCHING, "1");
+    }
+
     scon->real_window = SDL_CreateWindow("", SDL_WINDOWPOS_UNDEFINED,
                                          SDL_WINDOWPOS_UNDEFINED,
                                          surface_width(scon->surface),
@@ -140,15 +125,6 @@ static bool sdl2_window_create_once(struct sdl2_console *scon, int flags,
     scon->has_mouse_focus = !!(wflags & SDL_WINDOW_MOUSE_FOCUS);
 
     if (scon->opengl) {
-        if (scon->opts->gl == DISPLAY_GL_MODE_ES) {
-            driver = "opengles2";
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
-                                SDL_GL_CONTEXT_PROFILE_ES);
-        }
-
-        SDL_SetHint(SDL_HINT_RENDER_DRIVER, driver);
-        SDL_SetHint(SDL_HINT_RENDER_BATCHING, "1");
-
         scon->winctx = SDL_GL_CreateContext(scon->real_window);
         if (!scon->winctx ||
             SDL_GL_MakeCurrent(scon->real_window, scon->winctx) != 0) {
@@ -164,10 +140,7 @@ static bool sdl2_window_create_once(struct sdl2_console *scon, int flags,
         SDL_GL_SetSwapInterval(0);
 
 #ifdef CONFIG_OPENGL
-        qemu_egl_display = eglGetCurrentDisplay();
-        if (qemu_egl_display != EGL_NO_DISPLAY) {
-            sdl2_x11_egl_provider_committed = true;
-        }
+        sdl2_gl_provider_context_ready();
 #endif
     } else {
         /* The SDL renderer is only used by sdl2-2D, when OpenGL is disabled */
@@ -219,30 +192,34 @@ void sdl2_window_create(struct sdl2_console *scon)
     }
 
 #ifdef CONFIG_OPENGL
-    if (scon->opengl && sdl2_disable_failed_x11_egl()) {
+    if (scon->opengl && sdl2_gl_provider_retry_native()) {
         /*
-         * 保留 QEMU 11 的 EGL 优先策略：只有 EGL window/context 已经真实创建
-         * 失败后才关闭强制 hint，并用同一套 SDL window 参数重试 GLX。重试成功
-         * 后 qemu_egl_display 为 EGL_NO_DISPLAY，dma-buf 探测自然返回 false，
-         * texture scanout 和 fb-shm 则继续使用 SDL/GLX context。
+         * 保留 QEMU 11 的 EGL 优先策略：
+         * 只有 EGL window/context 已经真实创建失败后，
+         * 才关闭强制 hint，并用同一套 SDL window 参数
+         * 重试平台原生 provider。重试成功后 qemu_egl_display
+         * 为 EGL_NO_DISPLAY，dma-buf 探测自然返回 false，
+         * texture scanout 和 fb-shm 则继续使用 SDL 的
+         * 原生 GL context。
          */
         /*
-         * 这是已支持的能力降级而非启动告警：宿主 EGL display 可见但 window
-         * surface 不兼容时，GLX 是 SDL/X11 的正常备用 provider。用 info 让
-         * 诊断日志保留首个失败原因，同时避免成功启动产生 warning。
+         * 这是已支持的能力降级而非启动告警：
+         * 宿主 EGL display 可见但 window surface 不兼容时，
+         * GLX/WGL 是 SDL 的正常备用 provider。用 info 让诊断日志
+         * 保留首个失败原因，同时避免成功启动产生 warning。
          */
-        info_report("SDL: X11 EGL initialization failed (%s); "
-                    "falling back to GLX",
+        info_report("SDL: EGL initialization failed (%s); falling back to %s",
                     first_error && *first_error ? first_error :
-                    "unknown error");
+                    "unknown error", sdl2_gl_provider_native_name());
         if (sdl2_window_create_once(scon, flags, &fallback_error)) {
             return;
         }
 
-        error_report("SDL: GLX fallback failed after EGL failure: %s",
+        error_report("SDL: %s fallback failed after EGL failure: %s",
+                     sdl2_gl_provider_native_name(),
                      fallback_error && *fallback_error ? fallback_error :
                      "unknown error");
-    } else if (scon->opengl && sdl2_x11_egl_provider_committed) {
+    } else if (scon->opengl && sdl2_gl_provider_egl_committed()) {
         error_report("SDL: EGL window/context creation failed after the "
                      "process-wide EGL provider was committed: %s",
                      first_error && *first_error ? first_error :
@@ -1143,36 +1120,6 @@ static void sdl2_display_early_init(DisplayOptions *o)
     }
 }
 
-static void sdl2_set_hint_x11_force_egl(void)
-{
-#if defined(SDL_HINT_VIDEO_X11_FORCE_EGL) && defined(CONFIG_OPENGL) && \
-    defined(CONFIG_X11)
-    Display *x_disp = XOpenDisplay(NULL);
-    EGLDisplay egl_display;
-
-    if (!x_disp) {
-        return;
-    }
-
-    /* Prefer EGL over GLX to get dma-buf support. */
-    egl_display = qemu_egl_get_display((EGLNativeDisplayType)x_disp,
-                                       EGL_PLATFORM_X11_KHR);
-
-    if (egl_display != EGL_NO_DISPLAY) {
-        /*
-         * Setting X11_FORCE_EGL hint doesn't make SDL to prefer X11 over
-         * Wayland. SDL will use Wayland driver even if XWayland presents.
-         * It's always safe to set the hint even if X11 is not used by SDL.
-         * SDL will work regardless of the hint.
-         */
-        SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
-        eglTerminate(egl_display);
-    }
-
-    XCloseDisplay(x_disp);
-#endif
-}
-
 static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
 {
     uint8_t data = 0;
@@ -1200,7 +1147,11 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
     SDL_SetHint(SDL_HINT_ALLOW_ALT_TAB_WHILE_GRABBED, "0");
 #endif
     SDL_SetHint(SDL_HINT_WINDOWS_NO_CLOSE_ON_ALT_F4, "1");
-    sdl2_set_hint_x11_force_egl();
+#ifdef CONFIG_OPENGL
+    if (display_opengl) {
+        sdl2_gl_provider_prepare(o->gl);
+    }
+#endif
     SDL_EnableScreenSaver();
     memset(&info, 0, sizeof(info));
     SDL_VERSION(&info.version);

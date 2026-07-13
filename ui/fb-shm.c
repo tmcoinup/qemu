@@ -50,11 +50,9 @@
 #include "system/system.h"
 #include "ui/console.h"
 #include "ui/fb-shm-abi.h"
+#include "ui/fb-shm-gpu.h"
 #ifdef CONFIG_OPENGL
 #include "ui/egl-helpers.h"
-#ifdef CONFIG_GBM
-#include "standard-headers/drm/drm_fourcc.h"
-#endif
 #endif
 
 #ifndef _WIN32
@@ -65,10 +63,6 @@
 # include <linux/memfd.h>
 #else
 # include <windows.h>
-# ifdef CONFIG_OPENGL
-#  include <d3d11.h>
-#  include <dxgi1_2.h>
-# endif
 #endif
 
 #ifdef CONFIG_OPENGL
@@ -123,6 +117,7 @@ struct FbShmClient {
     bool wants_win32_names;      /* HELLO requested Win32 name payload     */
     bool wants_gpu_frames;       /* HELLO 订阅 GPU resident frame 通知      */
     bool gpu_required;           /* 客户端要求 GPU 路径，不接受 SHM 回退    */
+    bool wants_gpu_sync;         /* Windows GPU sync */
     bool linked;                /* present in owner->clients              */
     bool dropping;              /* fd removed; waiting for deferred free  */
 #ifndef _WIN32
@@ -195,34 +190,91 @@ struct FbShmDisplay {
     uint32_t gl_x, gl_y, gl_w, gl_h;
     uint64_t gl_last_frame_ns;
     uint64_t shm_last_frame_ns;
-    uint64_t gpu_frame_seq;
     QEMUGLContext gl_ctx;
     egl_fb gl_guest_fb;
     egl_fb gl_blit_fb;
     QemuDmaBuf *gl_dmabuf;
+    FbShmGpuBackend *gl_gpu_backend;
+#ifdef _WIN32
+    /*
+     * 同一份 D3D11 scanout 不能交给多个进程。
+     * 每个 display 只接受一个同步 consumer，
+     * 且 DONE 前只保留一帧；旧客户端仍走 SHM。
+     */
+    FbShmClient *d3d_sync_client;
+    FbShmGpuPendingFrame d3d_pending;
+    bool d3d_gl_blocked;
+    QEMUBH *d3d_handoff_bh;
+    bool d3d_handoff_scheduled;
+    FbShmGpuFrameLayout d3d_handoff_layout;
+    QEMUTimer *d3d_reclaim_timer;
+    bool d3d_retiring;
+    bool d3d_destroying;
+#endif
     DisplaySurface *gl_slot_surface[FB_SHM_BUF_COUNT];
     bool gl_pbo_checked;
     bool gl_pbo_supported;
     bool gl_warned_pbo;
-    bool gl_warned_texture_export;
-    bool gl_logged_texture_export;
     bool gl_logged_texture_scanout;
     bool gl_logged_dmabuf_scanout;
     uint32_t gl_pbo_head;
     uint32_t gl_pbo_tail;
     FbShmGlPbo gl_pbo[FB_SHM_GL_PBO_COUNT];
-#ifdef _WIN32
-    void *gl_d3d_tex2d;
-    HANDLE gl_d3d_share_handle;
-    char *gl_d3d_name;
-    uint32_t gl_d3d_generation;
-#endif
 #endif
 
     /* control socket */
     int listen_fd;
     QLIST_HEAD(, FbShmClient) clients;
 };
+
+#if defined(_WIN32) && defined(CONFIG_OPENGL)
+/*
+ * keyed mutex 属于底层 QemuConsole scanout，
+ * 不属于某个 fb-shm 对象。
+ * console 可热添加多个 sidecar，必须跨实例仲裁；
+ * 否则两个 backend 会同时误判自己持有 key=0。
+ * 所有访问都发生在 QEMU 主线程，不需要额外锁。
+ */
+static GHashTable *fb_shm_d3d_console_owners;
+
+static FbShmDisplay *fb_shm_d3d_console_owner(FbShmDisplay *d)
+{
+    return fb_shm_d3d_console_owners ?
+           g_hash_table_lookup(fb_shm_d3d_console_owners, d->con) : NULL;
+}
+
+static bool fb_shm_d3d_console_available(FbShmDisplay *d)
+{
+    FbShmDisplay *owner = fb_shm_d3d_console_owner(d);
+
+    return !owner || owner == d;
+}
+
+static bool fb_shm_d3d_console_reserve(FbShmDisplay *d)
+{
+    if (!fb_shm_d3d_console_available(d)) {
+        return false;
+    }
+    if (!fb_shm_d3d_console_owners) {
+        fb_shm_d3d_console_owners =
+            g_hash_table_new(g_direct_hash, g_direct_equal);
+    }
+    g_hash_table_insert(fb_shm_d3d_console_owners, d->con, d);
+    return true;
+}
+
+static void fb_shm_d3d_console_release(FbShmDisplay *d)
+{
+    if (!fb_shm_d3d_console_owners ||
+        fb_shm_d3d_console_owner(d) != d) {
+        return;
+    }
+    g_hash_table_remove(fb_shm_d3d_console_owners, d->con);
+    if (!g_hash_table_size(fb_shm_d3d_console_owners)) {
+        g_clear_pointer(&fb_shm_d3d_console_owners, g_hash_table_destroy);
+    }
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -236,9 +288,6 @@ static void fb_shm_update_effective_rate(FbShmDisplay *d);
 static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
                             uint64_t now_ns);
 #ifdef CONFIG_OPENGL
-static void fb_shm_broadcast_current_gpu_frame(FbShmDisplay *d,
-                                               uint32_t w, uint32_t h,
-                                               int32_t roi_x, int32_t roi_y);
 static void fb_shm_gl_scanout_disable(DisplayChangeListener *dcl);
 #endif
 
@@ -472,18 +521,6 @@ static void fb_shm_gl_pbo_discard(FbShmDisplay *d, bool delete_buffers)
     d->gl_pbo_tail = 0;
 }
 
-#ifdef _WIN32
-static void fb_shm_gl_forget_d3d_share(FbShmDisplay *d)
-{
-    if (d->gl_d3d_share_handle) {
-        CloseHandle(d->gl_d3d_share_handle);
-        d->gl_d3d_share_handle = NULL;
-    }
-    g_clear_pointer(&d->gl_d3d_name, g_free);
-    d->gl_d3d_tex2d = NULL;
-}
-#endif
-
 static bool fb_shm_gl_pbo_finish_one(FbShmDisplay *d, FbShmGlPbo *pbo)
 {
     GLenum wait_status;
@@ -624,14 +661,84 @@ static int fb_shm_gl_pbo_issue(FbShmDisplay *d, uint32_t rw, uint32_t rh,
     return 1;
 }
 
+#ifdef _WIN32
+static void fb_shm_d3d_set_gl_blocked(FbShmDisplay *d, bool blocked)
+{
+    if (d->d3d_gl_blocked == blocked) {
+        return;
+    }
+
+    /*
+     * graphic_hw_gl_block() 自带引用计数。
+     * 这里只记录 fb-shm 持有的一份，
+     * 避免断连或析构时重复 unblock。
+     */
+    graphic_hw_gl_block(d->con, blocked);
+    d->d3d_gl_blocked = blocked;
+}
+
+#define FB_SHM_D3D_RECLAIM_RETRY_MS 10
+
+static bool fb_shm_d3d_cancel_pending(FbShmDisplay *d)
+{
+    uint64_t sequence;
+
+    if (d->d3d_handoff_scheduled) {
+        qemu_bh_cancel(d->d3d_handoff_bh);
+        d->d3d_handoff_scheduled = false;
+    }
+    if (fb_shm_gpu_pending_active(&d->d3d_pending, &sequence)) {
+        /*
+         * 断连或 scanout 切换时只做非阻塞收回。
+         * WAIT_TIMEOUT 表示 consumer 仍可能读取纹理。
+         * 此时不能丢 COM 引用后立即放开 renderer，
+         * 否则 producer 写与 consumer 读会竞态。
+         * 保留 block 并由 timer 重试；主循环不会同步等待。
+         */
+        if (!fb_shm_gpu_backend_d3d_acquire0(d->gl_gpu_backend) &&
+            fb_shm_gpu_backend_has_d3d_texture(d->gl_gpu_backend)) {
+            if (!d->d3d_destroying) {
+                d->d3d_retiring = true;
+                timer_mod(d->d3d_reclaim_timer,
+                          qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                          FB_SHM_D3D_RECLAIM_RETRY_MS);
+                return false;
+            }
+            /* 最终析构不再提交命令，可退役引用。 */
+            fb_shm_gpu_backend_reset(d->gl_gpu_backend);
+        }
+        (void)fb_shm_gpu_pending_cancel(&d->d3d_pending, sequence);
+    }
+
+    d->d3d_retiring = false;
+    timer_del(d->d3d_reclaim_timer);
+    fb_shm_d3d_set_gl_blocked(d, false);
+    if (!d->d3d_sync_client) {
+        fb_shm_d3d_console_release(d);
+    }
+    return true;
+}
+
+static void fb_shm_d3d_reclaim_timer_cb(void *opaque)
+{
+    FbShmDisplay *d = opaque;
+
+    (void)fb_shm_d3d_cancel_pending(d);
+}
+#endif
+
 static void fb_shm_gl_release_fbos(FbShmDisplay *d)
 {
     g_auto(FbShmGlContextGuard) guard = { 0 };
 
     d->gl_dmabuf = NULL;
 #ifdef _WIN32
-    fb_shm_gl_forget_d3d_share(d);
+    /* reset 前先平衡本 listener 的 GL block 引用。 */
+    if (!fb_shm_d3d_cancel_pending(d)) {
+        return;
+    }
 #endif
+    fb_shm_gpu_backend_reset(d->gl_gpu_backend);
 
     if (!d->gl_ctx || !fb_shm_gl_context_enter(d, &guard)) {
         return;
@@ -1008,6 +1115,18 @@ static void fb_shm_client_drop(FbShmClient *c)
     }
     g_clear_pointer(&c->wake_event_name, g_free);
 #endif
+#if defined(_WIN32) && defined(CONFIG_OPENGL)
+    if (c->owner && c->owner->d3d_sync_client == c) {
+        /*
+         * fd 已关闭，consumer 不会再发送 DONE。
+         * 先撤销客户端指针，再非阻塞收回纹理。
+         * mutex 未归还时，timer 保留 owner 与 block，
+         * 直到跨进程读写竞态消失。
+         */
+        c->owner->d3d_sync_client = NULL;
+        (void)fb_shm_d3d_cancel_pending(c->owner);
+    }
+#endif
     if (c->linked) {
         QLIST_REMOVE(c, next);
         c->linked = false;
@@ -1154,8 +1273,17 @@ static int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
 
 static bool fb_shm_client_accepts_gpu(const FbShmClient *c)
 {
-    return c->hello_done && c->wants_gpu_frames &&
-           !c->dropping && c->fd >= 0;
+    bool accepts = c->hello_done && c->wants_gpu_frames &&
+                   !c->dropping && c->fd >= 0;
+
+#ifdef _WIN32
+    /*
+     * Windows 原始 D3D11 texture 必须配合 keyed-mutex DONE 协议。
+     * 未声明能力的旧 streamer 不接收 GPU handle，仍走 SHM。
+     */
+    accepts = accepts && c->wants_gpu_sync;
+#endif
+    return accepts;
 }
 
 static bool fb_shm_has_gpu_clients(FbShmDisplay *d)
@@ -1169,24 +1297,6 @@ static bool fb_shm_has_gpu_clients(FbShmDisplay *d)
     }
     return false;
 }
-
-#if defined(CONFIG_GBM) && !defined(_WIN32)
-/*
- * 严格 GPU consumer 只参与 Linux GBM/dma-buf texture 导出降级判断。
- * Windows 没有这条路径，因此不应生成一个永远不会调用的静态函数。
- */
-static bool fb_shm_has_required_gpu_clients(FbShmDisplay *d)
-{
-    FbShmClient *c;
-
-    QLIST_FOREACH(c, &d->clients, next) {
-        if (fb_shm_client_accepts_gpu(c) && c->gpu_required) {
-            return true;
-        }
-    }
-    return false;
-}
-#endif
 
 static bool fb_shm_has_shm_consumers(FbShmDisplay *d)
 {
@@ -1331,32 +1441,58 @@ static void fb_shm_broadcast_gpu_frame(FbShmDisplay *d,
 static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
                                 const FbShmCtlReq *req)
 {
+    bool wants_resize;
+    bool wants_names;
+    bool wants_gpu;
+    bool gpu_required;
+    bool wants_gpu_sync;
     bool gpu_only;
+    uint32_t status;
 
     if (c->dropping || c->fd < 0) {
         return;
     }
 
-    /* Mark the client eligible for broadcasts BEFORE we send the ack: a
-     * concurrent reallocate from the refresh tick is fine, the client will
-     * just see the HELLO ack followed by a NOTIFY_RESIZED carrying the same
-     * (or newer) fds. */
-    c->hello_done = true;
-    c->wants_resize_notify =
-        (req->flags & FB_SHM_HELLO_F_RESIZE_NOTIFY) != 0;
-    c->wants_win32_names =
-        (req->flags & FB_SHM_HELLO_F_WIN32_NAMES) != 0;
-    c->wants_gpu_frames =
-        (req->flags & FB_SHM_HELLO_F_GPU_FRAMES) != 0;
-    c->gpu_required =
-        (req->flags & FB_SHM_HELLO_F_GPU_REQUIRED) != 0;
-    gpu_only = c->wants_gpu_frames && c->gpu_required;
-    fb_shm_update_effective_rate(d);
+    wants_resize = (req->flags & FB_SHM_HELLO_F_RESIZE_NOTIFY) != 0;
+    wants_names = (req->flags & FB_SHM_HELLO_F_WIN32_NAMES) != 0;
+    wants_gpu = (req->flags & FB_SHM_HELLO_F_GPU_FRAMES) != 0;
+    gpu_required = (req->flags & FB_SHM_HELLO_F_GPU_REQUIRED) != 0;
+    wants_gpu_sync = (req->flags & FB_SHM_HELLO_F_GPU_SYNC) != 0;
+    gpu_only = wants_gpu && gpu_required;
+    status = (d->shm || gpu_only) ? FB_SHM_CTL_OK : FB_SHM_CTL_EBUSY;
+
+    /*
+     * 每条连接只允许一次成功 HELLO。
+     * 禁止用第二个 HELLO 在帧在途时切换能力，
+     * 也不能借此释放唯一 consumer 配额。
+     */
+    if (c->hello_done) {
+        status = FB_SHM_CTL_EBUSY;
+    } else if ((wants_gpu_sync || gpu_required) && !wants_gpu) {
+        status = FB_SHM_CTL_EINVAL;
+    }
+
+#ifdef _WIN32
+#ifndef CONFIG_OPENGL
+    if (status == FB_SHM_CTL_OK && (wants_gpu_sync || gpu_only)) {
+        status = FB_SHM_CTL_EUNSUPPORTED;
+    }
+#else
+    if (status == FB_SHM_CTL_OK && gpu_only && !wants_gpu_sync) {
+        /* strict 模式没有同步 ACK 就不能交付纹理。 */
+        status = FB_SHM_CTL_EUNSUPPORTED;
+    } else if (status == FB_SHM_CTL_OK && wants_gpu_sync &&
+               (d->d3d_sync_client || d->d3d_retiring ||
+                !fb_shm_d3d_console_available(d))) {
+        status = FB_SHM_CTL_EBUSY;
+    }
+#endif
+#endif
 
     FbShmCtlAck ack = {
         .magic  = FB_SHM_MAGIC,
         .op     = FB_SHM_CTL_HELLO,
-        .status = (d->shm || gpu_only) ? FB_SHM_CTL_OK : FB_SHM_CTL_EBUSY,
+        .status = status,
         .shm_size = (uint32_t)d->map_size,
         .width  = d->cur_w,
         .height = d->cur_h,
@@ -1373,6 +1509,34 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
         }
     }
 #endif
+
+#if defined(_WIN32) && defined(CONFIG_OPENGL)
+    if (ack.status == FB_SHM_CTL_OK && wants_gpu_sync &&
+        !fb_shm_d3d_console_reserve(d)) {
+        ack.status = FB_SHM_CTL_EBUSY;
+    }
+#endif
+
+    if (ack.status == FB_SHM_CTL_OK) {
+        /*
+         * 能力与平台资源均成功后才发布状态。
+         * 失败 HELLO 可修正 flags 后重试，
+         * 也不会占住唯一 GPU-sync 名额。
+         */
+        c->hello_done = true;
+        c->wants_resize_notify = wants_resize;
+        c->wants_win32_names = wants_names;
+        c->wants_gpu_frames = wants_gpu;
+        c->gpu_required = gpu_required;
+        c->wants_gpu_sync = wants_gpu_sync;
+#if defined(_WIN32) && defined(CONFIG_OPENGL)
+        if (wants_gpu_sync) {
+            d->d3d_sync_client = c;
+        }
+#endif
+        fb_shm_update_effective_rate(d);
+    }
+
     if (fb_shm_send_ack(d, c, &ack, true) < 0) {
         fb_shm_client_drop(c);
     }
@@ -1486,6 +1650,60 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
     }
 }
 
+static void fb_shm_handle_gpu_frame_done(FbShmDisplay *d, FbShmClient *c,
+                                         const FbShmCtlReq *req)
+{
+    uint64_t sequence = ((uint64_t)req->h << 32) | req->w;
+    uint32_t status = FB_SHM_CTL_EUNSUPPORTED;
+
+#if defined(_WIN32) && defined(CONFIG_OPENGL)
+    uint64_t pending_sequence = 0;
+
+    if (!sequence || !c->hello_done || !c->wants_gpu_sync ||
+        d->d3d_sync_client != c ||
+        !fb_shm_gpu_pending_active(&d->d3d_pending, &pending_sequence) ||
+        sequence != pending_sequence) {
+        status = FB_SHM_CTL_EINVAL;
+    } else if (!fb_shm_gpu_backend_d3d_acquire0(d->gl_gpu_backend)) {
+        if (fb_shm_gpu_backend_has_d3d_texture(d->gl_gpu_backend)) {
+            /* ReleaseSync 尚不可见，可用原序列重试。 */
+            status = FB_SHM_CTL_EBUSY;
+        } else {
+            /* abandoned/驱动错误已撤销 backing，解除 block。 */
+            (void)fb_shm_gpu_pending_cancel(&d->d3d_pending, sequence);
+            d->d3d_retiring = false;
+            timer_del(d->d3d_reclaim_timer);
+            fb_shm_d3d_set_gl_blocked(d, false);
+            status = FB_SHM_CTL_EUNSUPPORTED;
+        }
+    } else if (fb_shm_gpu_pending_complete(&d->d3d_pending, sequence)) {
+        d->d3d_retiring = false;
+        timer_del(d->d3d_reclaim_timer);
+        fb_shm_d3d_set_gl_blocked(d, false);
+        status = FB_SHM_CTL_OK;
+    } else {
+        /* 状态不一致时也要平衡 mutex 与 GL block。 */
+        (void)fb_shm_gpu_pending_cancel(&d->d3d_pending, sequence);
+        d->d3d_retiring = false;
+        timer_del(d->d3d_reclaim_timer);
+        fb_shm_d3d_set_gl_blocked(d, false);
+        status = FB_SHM_CTL_EINVAL;
+    }
+#else
+    (void)sequence;
+#endif
+
+    FbShmCtlAck ack = {
+        .magic = FB_SHM_MAGIC,
+        .op = req->op,
+        .status = status,
+    };
+
+    if (fb_shm_send_ack(d, c, &ack, false) < 0) {
+        fb_shm_client_drop(c);
+    }
+}
+
 static void fb_shm_dispatch_request(FbShmDisplay *d, FbShmClient *c,
                                     const FbShmCtlReq *req)
 {
@@ -1507,6 +1725,9 @@ static void fb_shm_dispatch_request(FbShmDisplay *d, FbShmClient *c,
         break;
     case FB_SHM_CTL_SET_RATE:
         fb_shm_handle_set_rate(d, c, req);
+        break;
+    case FB_SHM_CTL_GPU_FRAME_DONE:
+        fb_shm_handle_gpu_frame_done(d, c, req);
         break;
     case FB_SHM_CTL_BYE:
         fb_shm_client_drop(c);
@@ -1786,303 +2007,250 @@ static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
 }
 
 #ifdef CONFIG_OPENGL
-static void fb_shm_gpu_frame_init(FbShmDisplay *d, FbShmGpuFrame *frame,
-                                  uint32_t handle_type, uint32_t flags,
-                                  uint32_t w, uint32_t h, uint32_t stride,
-                                  uint32_t fourcc, uint32_t x, uint32_t y,
-                                  uint32_t backing_w, uint32_t backing_h,
-                                  uint64_t modifier)
+static bool fb_shm_gpu_layout_init(FbShmDisplay *d,
+                                   FbShmGpuFrameLayout *layout,
+                                   uint32_t w, uint32_t h,
+                                   int32_t roi_x, int32_t roi_y)
 {
-    memset(frame, 0, sizeof(*frame));
-    frame->magic = FB_SHM_MAGIC;
-    frame->version = FB_SHM_VERSION;
-    frame->size = sizeof(*frame);
-    frame->handle_type = handle_type;
-    frame->flags = flags;
-    frame->width = w;
-    frame->height = h;
-    frame->stride = stride;
-    frame->fourcc = fourcc;
-    frame->x = x;
-    frame->y = y;
-    frame->backing_width = backing_w;
-    frame->backing_height = backing_h;
-    frame->modifier = modifier;
-
     /*
-     * GPU 帧有自己的序列号：SHM consumer 看 FbShmHeader.frame_seq，
-     * GPU consumer 看 FbShmGpuFrame.frame_seq。两条路径可以独立降级，
-     * 也方便 consumer 发现 GPU 通知是否停滞。
+     * resolve_roi() 当前只会给出非负坐标，
+     * 但 GPU sideband 是独立的安全边界，不能依赖调用顺序。
+     * 先验证符号和加法空间，最终 backing 范围由
+     * fb-shm-gpu-common.c 再做一次减法式校验。
      */
-    d->gpu_frame_seq++;
-    frame->frame_seq = d->gpu_frame_seq;
+    if (roi_x < 0 || roi_y < 0 ||
+        (uint32_t)roi_x > UINT32_MAX - d->gl_x ||
+        (uint32_t)roi_y > UINT32_MAX - d->gl_y) {
+        return false;
+    }
+
+    *layout = (FbShmGpuFrameLayout) {
+        .width = w,
+        .height = h,
+        .x = d->gl_x + (uint32_t)roi_x,
+        .y = d->gl_y + (uint32_t)roi_y,
+        .backing_width = d->gl_backing_w,
+        .backing_height = d->gl_backing_h,
+        .y0_top = d->gl_y0_top,
+    };
+    return true;
 }
 
-static void fb_shm_broadcast_dmabuf_frame(FbShmDisplay *d,
+static bool fb_shm_broadcast_dmabuf_frame(FbShmDisplay *d,
                                           QemuDmaBuf *dmabuf,
                                           uint32_t w, uint32_t h,
                                           int32_t roi_x, int32_t roi_y)
 {
+    FbShmGpuFrameLayout layout;
+    FbShmGpuExport exported = { .fd = -1 };
+    bool published = false;
+
+    if (!dmabuf || !fb_shm_has_gpu_clients(d) ||
+        !fb_shm_gpu_layout_init(d, &layout, w, h, roi_x, roi_y)) {
+        return false;
+    }
+
+    /*
+     * 平台模块负责验证单平面、zero offset、fourcc、stride
+     * 和 fd 所有权。任一条件不满足都安静返回，
+     * 普通 consumer 随后继续使用 SHM 帧。
+     */
+    if (fb_shm_gpu_export_dmabuf(d->gl_gpu_backend, dmabuf,
+                                 &layout, &exported)) {
+        fb_shm_broadcast_gpu_frame(d, &exported.frame, exported.fd);
+        published = true;
+    }
+    fb_shm_gpu_export_cleanup(&exported);
+    return published;
+}
+
+static bool fb_shm_broadcast_texture_dmabuf_frame(FbShmDisplay *d,
+                                                  uint32_t w, uint32_t h,
+                                                  int32_t roi_x,
+                                                  int32_t roi_y)
+{
+    FbShmGpuFrameLayout layout;
 #ifndef _WIN32
-    FbShmGpuFrame frame;
-    int fds[DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
-    const uint32_t *strides;
-    uint32_t num_planes;
-    int fd;
-    uint32_t flags = 0;
-    uint32_t x;
-    uint32_t y;
+    FbShmGpuExport exported = { .fd = -1 };
+    bool published = false;
 
-    if (!dmabuf || !fb_shm_has_gpu_clients(d)) {
-        return;
+    if (!fb_shm_has_gpu_clients(d) || !d->gl_backing_id ||
+        !fb_shm_gpu_layout_init(d, &layout, w, h, roi_x, roi_y)) {
+        return false;
     }
 
     /*
-     * 中文注释：fb-shm v2 的 GPU 通知一次只能传一个 fd 和一个 stride。
-     * QEMU 11 的 QemuDmaBuf 已支持多平面，因此只转发可无损表达的单平面
-     * buffer；多平面资源留给 SHM 回退，不能伪装成单平面后传出错误元数据。
+     * Linux 从当前 SDL/EGL context 导出 dma-buf。
+     * 能力或 metadata 不满足时，安静继续 SHM。
      */
-    num_planes = qemu_dmabuf_get_num_planes(dmabuf);
-    if (num_planes != 1) {
-        return;
+    if (fb_shm_gpu_export_texture(d->gl_gpu_backend, d->gl_backing_id,
+                                  &layout, &exported)) {
+        fb_shm_broadcast_gpu_frame(d, &exported.frame, exported.fd);
+        published = true;
     }
-    strides = qemu_dmabuf_get_strides(dmabuf, NULL);
-    qemu_dmabuf_dup_fds(dmabuf, fds, ARRAY_SIZE(fds));
-    fd = fds[0];
-    if (fd < 0) {
-        return;
-    }
-
-    if (qemu_dmabuf_get_y0_top(dmabuf)) {
-        flags |= FB_SHM_GPU_FRAME_F_Y0_TOP;
-    }
-    x = qemu_dmabuf_get_x(dmabuf) + (uint32_t)roi_x;
-    y = qemu_dmabuf_get_y(dmabuf) + (uint32_t)roi_y;
-    fb_shm_gpu_frame_init(d, &frame, FB_SHM_GPU_HANDLE_DMA_BUF, flags,
-                          w, h, strides[0],
-                          qemu_dmabuf_get_fourcc(dmabuf), x, y,
-                          qemu_dmabuf_get_backing_width(dmabuf),
-                          qemu_dmabuf_get_backing_height(dmabuf),
-                          qemu_dmabuf_get_modifier(dmabuf));
-    fb_shm_broadcast_gpu_frame(d, &frame, fd);
-    close(fd);
+    fb_shm_gpu_export_cleanup(&exported);
+    return published;
 #else
-    (void)d;
-    (void)dmabuf;
-    (void)w;
-    (void)h;
-    (void)roi_x;
-    (void)roi_y;
-#endif
-}
+    uint64_t pending_sequence;
 
-#if defined(CONFIG_GBM) && !defined(_WIN32)
-static void fb_shm_broadcast_texture_dmabuf_frame(FbShmDisplay *d,
-                                                  uint32_t w, uint32_t h,
-                                                  int32_t roi_x,
-                                                  int32_t roi_y)
-{
-    FbShmGpuFrame frame;
-    EGLint offsets[DMABUF_MAX_PLANES] = { 0 };
-    EGLint strides[DMABUF_MAX_PLANES] = { 0 };
-    EGLint fourcc = 0;
-    EGLuint64KHR modifier = DRM_FORMAT_MOD_INVALID;
-    int fds[DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
-    int num_planes = 0;
-    int i;
-    uint32_t flags = 0;
-
-    if (!fb_shm_has_gpu_clients(d) || !d->gl_backing_id) {
-        return;
+    if (!fb_shm_has_gpu_clients(d) || d->d3d_handoff_scheduled ||
+        fb_shm_gpu_pending_active(&d->d3d_pending, &pending_sequence) ||
+        !fb_shm_gpu_layout_init(d, &layout, w, h, roi_x, roi_y)) {
+        return false;
     }
 
     /*
-     * EGL_MESA_image_dma_buf_export 把当前 GL texture 导出成 dma-buf fd。
-     * fd 只描述 GPU backing，不做 CPU readback；consumer 负责导入到
-     * VAAPI/CUDA/DRM 等它自己的硬件编码栈。
+     * 此函数可能位于 dpy_gl_update() 遍历中。
+     * 这里只记录 metadata，并用 BH 延后 ReleaseSync。
+     * 整轮 DCL 返回后，SDL 与其它 listener 已读完本帧，
+     * 因而窗口与零拷贝可以安全共存。
      */
-    if (!egl_dmabuf_export_texture(d->gl_backing_id, fds, offsets, strides,
-                                   &fourcc, &num_planes, &modifier) ||
-        num_planes != 1) {
-        for (i = 0; i < DMABUF_MAX_PLANES; i++) {
-            if (fds[i] >= 0) {
-                close(fds[i]);
-            }
-        }
-        /*
-         * 中文注释：默认稳定路径允许 GPU metadata 不可用后继续走 SHM；这不是
-         * 运行异常。只有 consumer 明确声明 GPU_REQUIRED 时，才把它作为 warning，
-         * 避免正常 DGame/auto 预览日志里出现误导性的“需要 blob=true”提示。
-         */
-        if (fb_shm_has_required_gpu_clients(d)) {
-            if (!d->gl_warned_texture_export) {
-                warn_report("fb-shm: GL scanout is texture-only and texture "
-                            "dma-buf export is unavailable for a strict GPU "
-                            "consumer; using SHM fallback. Start "
-                            "virtio-vga-gl with blob=true,hostmem=SIZE or "
-                            "use an EGL stack with EGL_KHR_image and "
-                            "EGL_MESA_image_dma_buf_export");
-                d->gl_warned_texture_export = true;
-            }
-        } else if (!d->gl_logged_texture_export) {
-            info_report("fb-shm: GL scanout is texture-only and texture "
-                        "dma-buf export is unavailable; keeping SHM fallback");
-            d->gl_logged_texture_export = true;
-        }
-        return;
-    }
-
-    if (d->gl_y0_top) {
-        flags |= FB_SHM_GPU_FRAME_F_Y0_TOP;
-    }
-    fb_shm_gpu_frame_init(d, &frame, FB_SHM_GPU_HANDLE_DMA_BUF, flags,
-                          w, h, (uint32_t)strides[0], (uint32_t)fourcc,
-                          d->gl_x + (uint32_t)roi_x,
-                          d->gl_y + (uint32_t)roi_y,
-                          d->gl_backing_w, d->gl_backing_h,
-                          (uint64_t)modifier);
-    fb_shm_broadcast_gpu_frame(d, &frame, fds[0]);
-    close(fds[0]);
-}
-#else
-static void fb_shm_broadcast_texture_dmabuf_frame(FbShmDisplay *d,
-                                                  uint32_t w, uint32_t h,
-                                                  int32_t roi_x,
-                                                  int32_t roi_y)
-{
-    (void)d;
-    (void)w;
-    (void)h;
-    (void)roi_x;
-    (void)roi_y;
-}
+    d->d3d_handoff_layout = layout;
+    d->d3d_handoff_scheduled = true;
+    qemu_bh_schedule(d->d3d_handoff_bh);
+    return true;
 #endif
+}
 
 #ifdef _WIN32
-static char *fb_shm_win32_d3d_name(FbShmDisplay *d)
+static bool fb_shm_d3d_handoff_layout_current(FbShmDisplay *d)
 {
-    g_autofree char *safe_id = fb_shm_win32_safe_id(d->id);
+    FbShmGpuFrameLayout current;
+    uint32_t rw, rh;
+    int32_t rx, ry;
 
-    d->gl_d3d_generation++;
-    return g_strdup_printf("Local\\qemu-fb-shm-%s-d3d-%u",
-                           safe_id, d->gl_d3d_generation);
+    if (!d->gl_scanout || !d->gl_w || !d->gl_h) {
+        return false;
+    }
+    fb_shm_resolve_roi(d, d->gl_w, d->gl_h, &rw, &rh, &rx, &ry);
+    if (!fb_shm_gpu_layout_init(d, &current, rw, rh, rx, ry)) {
+        return false;
+    }
+
+    return current.width == d->d3d_handoff_layout.width &&
+           current.height == d->d3d_handoff_layout.height &&
+           current.x == d->d3d_handoff_layout.x &&
+           current.y == d->d3d_handoff_layout.y &&
+           current.backing_width == d->d3d_handoff_layout.backing_width &&
+           current.backing_height == d->d3d_handoff_layout.backing_height &&
+           current.y0_top == d->d3d_handoff_layout.y0_top;
 }
 
-static bool fb_shm_d3d_texture_share_named(ID3D11Texture2D *texture,
-                                           const char *name,
-                                           HANDLE *handle, Error **errp)
+static void fb_shm_d3d_reclaim_failed_handoff(FbShmDisplay *d)
 {
-    IDXGIResource1 *resource = NULL;
-    g_autofree gunichar2 *wide_name = NULL;
-    HRESULT hr;
-
-    wide_name = g_utf8_to_utf16(name, -1, NULL, NULL, NULL);
-    if (!wide_name) {
-        error_setg(errp, "fb-shm: invalid D3D shared texture name");
-        return false;
+    if (!fb_shm_gpu_backend_d3d_acquire0(d->gl_gpu_backend)) {
+        fb_shm_gpu_backend_reset(d->gl_gpu_backend);
     }
-
-    hr = texture->lpVtbl->QueryInterface(texture, &IID_IDXGIResource1,
-                                         (void **)&resource);
-    if (FAILED(hr)) {
-        error_setg(errp, "fb-shm: IDXGIResource1 query failed: 0x%08lx",
-                   (unsigned long)hr);
-        return false;
-    }
-
-    hr = resource->lpVtbl->CreateSharedHandle(
-        resource, NULL,
-        DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
-        (LPCWSTR)wide_name, handle);
-    resource->lpVtbl->Release(resource);
-
-    if (FAILED(hr)) {
-        error_setg(errp, "fb-shm: CreateSharedHandle failed: 0x%08lx",
-                   (unsigned long)hr);
-        return false;
-    }
-    return true;
+    fb_shm_d3d_set_gl_blocked(d, false);
 }
 
-static bool fb_shm_d3d_prepare_share(FbShmDisplay *d, void *d3d_tex2d)
+static void fb_shm_d3d_handoff_bh(void *opaque)
 {
-    ID3D11Texture2D *texture = d3d_tex2d;
-    g_autofree char *name = NULL;
-    HANDLE handle = NULL;
-    Error *err = NULL;
+    FbShmDisplay *d = opaque;
+    FbShmClient *c = d->d3d_sync_client;
+    FbShmGpuExport exported = { .fd = -1 };
+    uint64_t pending_sequence;
 
-    if (!texture) {
-        fb_shm_gl_forget_d3d_share(d);
-        return false;
-    }
-    if (d->gl_d3d_tex2d == d3d_tex2d && d->gl_d3d_name) {
-        return true;
-    }
-
-    fb_shm_gl_forget_d3d_share(d);
-    name = fb_shm_win32_d3d_name(d);
-    if (!fb_shm_d3d_texture_share_named(texture, name, &handle, &err)) {
-        warn_report_err(err);
-        return false;
+    d->d3d_handoff_scheduled = false;
+    if (!c || !fb_shm_client_accepts_gpu(c) ||
+        fb_shm_d3d_console_owner(d) != d ||
+        fb_shm_gpu_pending_active(&d->d3d_pending, &pending_sequence) ||
+        !fb_shm_gpu_backend_has_d3d_texture(d->gl_gpu_backend) ||
+        !fb_shm_d3d_handoff_layout_current(d)) {
+        return;
     }
 
     /*
-     * 共享句柄由 QEMU 持有到 scanout 切换，consumer 通过名称打开同一份
-     * D3D11 texture。这里不创建 staging texture，因此没有 GPU->CPU 拷贝。
+     * renderer block 先于 ReleaseSync，
+     * 后续 guest 更新不会碰共享 texture。
+     * SDL 暂缓重绘，但窗口事件仍持续轮询。
      */
-    d->gl_d3d_tex2d = d3d_tex2d;
-    d->gl_d3d_name = g_steal_pointer(&name);
-    d->gl_d3d_share_handle = handle;
-    return true;
-}
-
-static void fb_shm_broadcast_d3d_frame(FbShmDisplay *d,
-                                       uint32_t w, uint32_t h,
-                                       int32_t roi_x, int32_t roi_y)
-{
-    FbShmGpuFrame frame;
-    uint32_t flags = 0;
-
-    if (!fb_shm_has_gpu_clients(d) || !d->gl_d3d_name) {
+    fb_shm_d3d_set_gl_blocked(d, true);
+    if (!fb_shm_gpu_backend_d3d_release0(d->gl_gpu_backend)) {
+        fb_shm_d3d_set_gl_blocked(d, false);
         return;
     }
-    if (d->gl_y0_top) {
-        flags |= FB_SHM_GPU_FRAME_F_Y0_TOP;
-    }
-
-    fb_shm_gpu_frame_init(d, &frame, FB_SHM_GPU_HANDLE_D3D11_TEXTURE,
-                          flags, w, h, d->gl_backing_w * 4,
-                          FB_SHM_FOURCC_BGRA,
-                          d->gl_x + (uint32_t)roi_x,
-                          d->gl_y + (uint32_t)roi_y,
-                          d->gl_backing_w, d->gl_backing_h, 0);
-    if (g_strlcpy(frame.handle_name, d->gl_d3d_name,
-                  sizeof(frame.handle_name)) >= sizeof(frame.handle_name)) {
+    if (!fb_shm_gpu_export_texture(d->gl_gpu_backend, d->gl_backing_id,
+                                   &d->d3d_handoff_layout, &exported)) {
+        fb_shm_d3d_reclaim_failed_handoff(d);
         return;
     }
-    fb_shm_broadcast_gpu_frame(d, &frame, -1);
+    if (!fb_shm_gpu_pending_begin(&d->d3d_pending,
+                                  exported.frame.frame_seq)) {
+        fb_shm_gpu_export_cleanup(&exported);
+        fb_shm_d3d_reclaim_failed_handoff(d);
+        return;
+    }
+
+    if (fb_shm_send_gpu_frame(c, &exported.frame, exported.fd) < 0) {
+        if (!fb_shm_client_disconnect_errno(errno)) {
+            warn_report("fb-shm: D3D11 GPU frame send failed "
+                        "(errno=%d %s); dropping client fd=%d",
+                        errno, strerror(errno), c->fd);
+        }
+        fb_shm_gpu_export_cleanup(&exported);
+        fb_shm_client_drop(c);
+        return;
+    }
+    fb_shm_gpu_export_cleanup(&exported);
 }
 #endif
 
-static void fb_shm_broadcast_current_gpu_frame(FbShmDisplay *d,
-                                               uint32_t w, uint32_t h,
-                                               int32_t roi_x, int32_t roi_y)
+/*
+ * direct backing 不依赖 fb-shm 私有 GL context。
+ * Linux QemuDmaBuf fd 可立即广播。
+ * Windows 这里只安排 handoff BH；ReleaseSync 要等待
+ * SDL 绘制和可选 SHM/PBO 读回完成。
+ * 两者都不受 GL texture import 失败牵连。
+ */
+static bool fb_shm_broadcast_direct_gpu_frame(FbShmDisplay *d,
+                                              uint32_t w, uint32_t h,
+                                              int32_t roi_x, int32_t roi_y)
 {
     if (!fb_shm_has_gpu_clients(d)) {
-        return;
+        return false;
     }
 
     if (d->gl_dmabuf) {
-        fb_shm_broadcast_dmabuf_frame(d, d->gl_dmabuf, w, h, roi_x, roi_y);
-        return;
+        return fb_shm_broadcast_dmabuf_frame(
+            d, d->gl_dmabuf, w, h, roi_x, roi_y);
     }
+
 #ifdef _WIN32
-    if (d->gl_d3d_name) {
-        fb_shm_broadcast_d3d_frame(d, w, h, roi_x, roi_y);
-        return;
+    /*
+     * 查询只读平台缓存，不接触 EGL/GL。
+     * 确有 named D3D11 texture 时才调用导出，
+     * 避免把普通 texture scanout 当成 direct。
+     */
+    if (fb_shm_gpu_backend_has_d3d_texture(d->gl_gpu_backend)) {
+        return fb_shm_broadcast_texture_dmabuf_frame(
+            d, w, h, roi_x, roi_y);
     }
 #endif
-    fb_shm_broadcast_texture_dmabuf_frame(d, w, h, roi_x, roi_y);
+    return false;
+}
+
+/*
+ * Linux 普通 GL texture 仅在共享 context current 后，
+ * 才能通过 EGLImage 导出 dma-buf。
+ * direct dma-buf / Windows D3D11 不经过这里，
+ * 确保每个 tick 只发布一种 backing。
+ */
+static bool fb_shm_broadcast_context_texture_frame(FbShmDisplay *d,
+                                                   uint32_t w, uint32_t h,
+                                                   int32_t roi_x,
+                                                   int32_t roi_y)
+{
+#ifndef _WIN32
+    return fb_shm_broadcast_texture_dmabuf_frame(d, w, h, roi_x, roi_y);
+#else
+    (void)d;
+    (void)w;
+    (void)h;
+    (void)roi_x;
+    (void)roi_y;
+    return false;
+#endif
 }
 
 static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
@@ -2127,11 +2295,26 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     bool has_gpu_clients;
     bool has_shm_consumers;
     bool need_shm_frame;
+    bool gpu_due;
+    bool gpu_published = false;
+    bool need_context_gpu_export = false;
     Error *err = NULL;
 
     if (!d->gl_scanout || !sw || !sh) {
         return;
     }
+
+#ifdef _WIN32
+    /*
+     * ReleaseSync 到 DONE 之间由 consumer 独占 texture。
+     * 刷新 tick 仍轮询 socket/SDL 事件，
+     * 但 fb-shm 不能再做 FBO/PBO readback。
+     */
+    if (d->d3d_handoff_scheduled ||
+        fb_shm_gpu_pending_active(&d->d3d_pending, NULL)) {
+        return;
+    }
+#endif
 
     has_gpu_clients = fb_shm_has_gpu_clients(d);
     has_shm_consumers = fb_shm_has_shm_consumers(d);
@@ -2144,14 +2327,47 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     if (!has_gpu_clients && !need_shm_frame) {
         return;
     }
+
+    /*
+     * ROI 只依赖 scanout metadata 与配置，
+     * 不依赖 GL context 或 SHM mapping。
+     * 先解析 ROI；随后 GL import/context 即使失败，
+     * direct backing 仍可发布相同裁剪 metadata。
+     */
+    fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
+    now_ns = fb_shm_now_ns();
+    gpu_due = has_gpu_clients &&
+              fb_shm_rate_due(d->gpu_target_fps,
+                              &d->gl_last_frame_ns, now_ns);
+#ifndef _WIN32
+    if (gpu_due) {
+        gpu_published = fb_shm_broadcast_direct_gpu_frame(
+            d, rw, rh, rx, ry);
+    }
+    /*
+     * direct dma-buf 不可表达或为普通 texture 时，
+     * 再进入 current context 尝试 texture->dma-buf。
+     */
+    need_context_gpu_export = gpu_due && !gpu_published;
+#endif
+
+    /*
+     * 仅 SHM/PBO 或 Linux texture 导出需要私有 context。
+     * direct frame 已发布，下面的失败不会撤销通知。
+     */
+    if (gpu_published && !need_shm_frame) {
+        goto out;
+    }
+    if (!need_shm_frame && !need_context_gpu_export) {
+        goto out;
+    }
     if (!d->gl_guest_fb.texture) {
-        return;
+        goto out;
     }
     if (!fb_shm_gl_context_enter(d, &guard)) {
-        return;
+        goto out;
     }
 
-    fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
     geometry_changed = !d->shm || rw != d->cur_w || rh != d->cur_h ||
                        sw != d->cur_src_w || sh != d->cur_src_h ||
                        rx != d->cur_roi_x || ry != d->cur_roi_y;
@@ -2163,20 +2379,19 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
         fb_shm_gl_pbo_discard(d, false);
         if (fb_shm_ensure_geometry(d, rw, rh, sw, sh, rx, ry, &err) < 0) {
             warn_report_err(err);
-            return;
+            goto out;
         }
     } else {
         fb_shm_gl_pbo_drain(d);
     }
 
-    now_ns = fb_shm_now_ns();
-    if (has_gpu_clients &&
-        fb_shm_rate_due(d->gpu_target_fps, &d->gl_last_frame_ns, now_ns)) {
-        fb_shm_broadcast_current_gpu_frame(d, rw, rh, rx, ry);
+    if (need_context_gpu_export) {
+        (void)fb_shm_broadcast_context_texture_frame(d, rw, rh, rx, ry);
     }
+    now_ns = fb_shm_now_ns();
     if (!need_shm_frame ||
         !fb_shm_rate_due(d->shm_target_fps, &d->shm_last_frame_ns, now_ns)) {
-        return;
+        goto out;
     }
 
     if (d->gl_blit_fb.width != rw || d->gl_blit_fb.height != rh) {
@@ -2210,7 +2425,7 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
 
     int pbo_status = fb_shm_gl_pbo_issue(d, rw, rh, sx1, sy1, sx2, sy2);
     if (pbo_status >= 0) {
-        return;
+        goto out;
     }
 
     uint32_t cur_idx = d->active_idx;
@@ -2225,6 +2440,18 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
 
     egl_fb_read(d->gl_slot_surface[next_idx], &d->gl_blit_fb);
     fb_shm_publish_frame(d, next_idx, rw, rh);
+
+out:
+#ifdef _WIN32
+    /*
+     * D3D handoff 排在本轮 SHM/PBO 与 DCL 绘制之后。
+     * 此处只安排 BH；block、Flush、Release 与通知异步执行。
+     */
+    if (gpu_due) {
+        (void)fb_shm_broadcast_direct_gpu_frame(d, rw, rh, rx, ry);
+    }
+#endif
+    return;
 }
 
 static void fb_shm_gl_scanout_disable(DisplayChangeListener *dcl)
@@ -2260,6 +2487,13 @@ static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
         return;
     }
 
+#ifdef _WIN32
+    /* 新 scanout 不继承旧纹理的 pending/mutex 状态。 */
+    if (!fb_shm_d3d_cancel_pending(d)) {
+        return;
+    }
+#endif
+
     d->gl_scanout = true;
     d->gl_dmabuf = NULL;
     d->gl_y0_top = backing_y_0_top;
@@ -2280,17 +2514,14 @@ static void fb_shm_gl_scanout_texture(DisplayChangeListener *dcl,
         d->gl_logged_texture_scanout = true;
     }
 
-#ifdef _WIN32
-    if (!fb_shm_d3d_prepare_share(d, d3d_tex2d)) {
-        /*
-         * ANGLE 没给 D3D texture 或共享句柄创建失败时，只禁用 GPU
-         * metadata；后面的 GL texture -> PBO/SHM 回退仍然照常工作。
-         */
-        (void)0;
-    }
-#else
-    (void)d3d_tex2d;
-#endif
+    /*
+     * Windows/ANGLE 会在平台后端保留 texture COM 引用，
+     * 并创建命名 shared handle；Linux 返回 false。
+     * 这是可选能力，失败不记日志，
+     * 后续 GL texture -> PBO/SHM 兼容路径继续正常工作。
+     */
+    (void)fb_shm_gpu_backend_set_d3d_texture(
+        d->gl_gpu_backend, d3d_tex2d, backing_width, backing_height);
 
     if (!fb_shm_gl_context_enter(d, &guard)) {
         return;
@@ -2484,6 +2715,14 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     d->dcl.ops = &fb_shm_ops;
 
     d->id = cfg->id ? g_strdup(cfg->id) : fb_shm_default_id();
+#ifdef CONFIG_OPENGL
+    d->gl_gpu_backend = fb_shm_gpu_backend_new(d->id);
+#ifdef _WIN32
+    d->d3d_handoff_bh = qemu_bh_new(fb_shm_d3d_handoff_bh, d);
+    d->d3d_reclaim_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                        fb_shm_d3d_reclaim_timer_cb, d);
+#endif
+#endif
     d->sock_path = cfg->sock_path ? g_strdup(cfg->sock_path)
                                   : fb_shm_default_sock_path(d->id);
     d->cfg_x = cfg->x;
@@ -2508,6 +2747,13 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     return d;
 
 err:
+#ifdef CONFIG_OPENGL
+#ifdef _WIN32
+    qemu_bh_delete(d->d3d_handoff_bh);
+    timer_free(d->d3d_reclaim_timer);
+#endif
+    fb_shm_gpu_backend_free(d->gl_gpu_backend);
+#endif
     g_free(d->id);
     g_free(d->sock_path);
     g_free(d);
@@ -2517,6 +2763,14 @@ err:
 static void fb_shm_destroy(FbShmDisplay *d)
 {
     if (!d) return;
+#if defined(_WIN32) && defined(CONFIG_OPENGL)
+    d->d3d_destroying = true;
+    if (d->d3d_handoff_bh) {
+        qemu_bh_delete(d->d3d_handoff_bh);
+        d->d3d_handoff_bh = NULL;
+        d->d3d_handoff_scheduled = false;
+    }
+#endif
     /* drop clients first */
     FbShmClient *c, *cn;
     QLIST_FOREACH_SAFE(c, &d->clients, next, cn) {
@@ -2532,6 +2786,14 @@ static void fb_shm_destroy(FbShmDisplay *d)
     }
 #ifdef CONFIG_OPENGL
     fb_shm_gl_release(d);
+#ifdef _WIN32
+    fb_shm_d3d_console_release(d);
+#endif
+    fb_shm_gpu_backend_free(d->gl_gpu_backend);
+#ifdef _WIN32
+    timer_free(d->d3d_reclaim_timer);
+    d->d3d_reclaim_timer = NULL;
+#endif
 #endif
     fb_shm_release_mapping(d);
     g_free(d->id);
@@ -2673,6 +2935,28 @@ static void fb_shm_export_complete(UserCreatable *uc, Error **errp)
     qemu_add_machine_init_done_notifier(&o->machine_done_notifier);
 }
 
+static bool fb_shm_export_can_be_deleted(UserCreatable *uc)
+{
+#if defined(_WIN32) && defined(CONFIG_OPENGL)
+    FbShmExport *o = FB_SHM_EXPORT(uc);
+
+    if (o->display &&
+        (o->display->d3d_handoff_scheduled ||
+         o->display->d3d_retiring || o->display->d3d_gl_blocked ||
+         fb_shm_gpu_pending_active(&o->display->d3d_pending, NULL))) {
+        /*
+         * object-del 可稍后重试。
+         * mutex 未安全收回时销毁 timer/backend，
+         * 会留下回调或造成跨进程并发访问。
+         */
+        return false;
+    }
+#else
+    (void)uc;
+#endif
+    return true;
+}
+
 static void fb_shm_export_instance_finalize(Object *obj)
 {
     FbShmExport *o = FB_SHM_EXPORT(obj);
@@ -2731,6 +3015,7 @@ static void fb_shm_export_class_init(ObjectClass *oc, const void *data)
 {
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
     ucc->complete = fb_shm_export_complete;
+    ucc->can_be_deleted = fb_shm_export_can_be_deleted;
 
     object_class_property_add(oc, "path", "string",
                               fb_shm_export_get_path,

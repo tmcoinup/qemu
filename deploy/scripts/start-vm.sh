@@ -13,6 +13,7 @@
 #     ./start-vm.sh 1 --no-sdl              # 后台 daemon：关 SDL，仅推流
 #     ./start-vm.sh 1 --gpu-sdl-egl         # SDL 窗口 + QEMU 11 SDL/EGL + fb-shm GPU
 #     ./start-vm.sh 1 --gpu-headless        # EGL rendernode + fb-shm，验证 GPU 零拷贝
+#     ./start-vm.sh 1 --no-gpu-zerocopy     # 保留 SDL/GL，显式关闭 blob/hostmem 尝试
 #     ./start-vm.sh 1 --headless            # VNC 远程 + fb-shm（无本地窗口）
 #     ./start-vm.sh 1 --no-fb-shm           # 关推流，仅 SDL（回历史行为）
 #     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
@@ -90,9 +91,10 @@
 #                          (flag: --fb-shm-rate=<hz>)
 #     FB_SHM_ROI=x,y,w,h   只截 ROI 推流（省 CPU/带宽）。空 = 全屏
 #                          (flag: --fb-shm-roi=x,y,w,h)
-#     GPU_ZEROCOPY=0       普通 SDL+GL 默认保持历史 texture+SHM 路径。
-#                          设 1 或 --gpu-zerocopy 才给 virtio-vga-gl 打开
-#                          blob/hostmem，让 fb-shm GPU consumer 收到 dma-buf。
+#     GPU_ZEROCOPY=1       普通 SDL+GL 默认给 virtio-vga-gl 打开 blob/hostmem，
+#                          优先尝试 dma-buf GPU handoff；能力不可用时 QEMU 自动
+#                          回退 SHM。设 0 或 --no-gpu-zerocopy 仅关闭 blob/hostmem
+#                          偏好；renderer 仍可能从普通 texture 导出 dma-buf。
 #     GPU_HOSTMEM=256M     virtio-gpu host-visible memory window 大小。
 #                          (flag: --gpu-hostmem=SIZE)
 #     GPU_DISPLAY=sdl      GPU 显示模式；sdl=默认官方 SDL/GL，
@@ -141,7 +143,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# When running from deploy/scripts/, the QEMU repo root is two levels up.
+# 后续动态 source 的 sv-*.sh 片段会消费 REPO_ROOT；ShellCheck 无法跨这种
+# 运行时 source 边界建立变量引用关系，因此仅抑制这一处误报。
+# shellcheck disable=SC2034
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 source "$HERE/stealth-lib.sh"
 source "$HERE/lib/vlan-network.sh"

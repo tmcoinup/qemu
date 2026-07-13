@@ -92,12 +92,9 @@ Linux 启动器默认按以下顺序 fail closed：
 ## 快速开始
 
 ```bash
-# 构建 patched QEMU
+# 构建 patched QEMU；本地终端成功后自动同步并校验 root-owned helper
+# 编译脚本以普通用户运行，安装阶段可能提示一次 sudo 密码
 deploy/tools/build.sh
-
-# 一次性安装 root-owned 调优/隔离 helper
-sudo deploy/scripts/setup-host-helpers.sh
-sudo deploy/scripts/setup-host-helpers.sh check
 
 # 检查 KVM/TSC，并运行快速回归
 python3 deploy/scripts/kvm-capabilities.py --format json
@@ -114,6 +111,10 @@ deploy/scripts/stop-vm.sh 1
 生产验收前先阅读 [操作参考](USAGE.md)，并在目标宿主执行评估文档中的 KVM capability、
 客体快照和 24 小时 soak。E5-2696 v4/X99 只有主板/BIOS、TSC、CPU realize、客体枚举和
 长稳全部通过后，才能从“条件支持”提升；CPU 名称或插槽相同不能替代实测。
+
+`setup-host-helpers.sh` 是由编译入口调用的内部安全安装器，不是 VM 每次启动脚本；其
+安装内容、QEMU path/inode/SHA-256 绑定、CI/非交互策略和手工诊断方式见
+[操作参考的宿主准备章节](USAGE.md#31-编译脚本自动维护最小-root-helper)。
 
 ## 每实例资源
 

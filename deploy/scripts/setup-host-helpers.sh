@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
 # 安装宿主调优/CPU隔离 helper 的 root-owned 固定副本和最小 sudoers 授权。
+# 正常流程由 deploy/tools/build.sh 在成功编译后调用；本脚本作为可审计的特权实现
+# 独立保留，手工入口只用于 check 诊断或登记仓库外的 patched QEMU。
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT_PREFIX="${VMATE_INSTALL_ROOT:-}"
-TARGET_UID="${VMATE_TARGET_UID:-${SUDO_UID:-$(id -u)}}"
+# sudo 入口必须优先信任 sudo 自己生成的 SUDO_UID，不能让被保留的普通环境变量
+# VMATE_TARGET_UID 把 NOPASSWD 规则改发给其它 UID。临时安装根/直接 root 测试才使用覆盖值。
+TARGET_UID="${SUDO_UID:-${VMATE_TARGET_UID:-$(id -u)}}"
 LIBEXEC_DIR="$ROOT_PREFIX/usr/local/libexec"
 SUDOERS_DIR="$ROOT_PREFIX/etc/sudoers.d"
 PERF_DEST="$LIBEXEC_DIR/qemu-vmate-host-performance"
 ISO_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate"
-ISO_RUNTIME_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-runtime.sh"
+ISO_RUNTIME_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-runtime-v1.sh"
 QEMU_TRUST_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-qemu.conf"
 SUDOERS_DEST="$SUDOERS_DIR/qemu-vmate-host"
+LEGACY_PERF_SUDOERS="$SUDOERS_DIR/qemu-hostperf"
+LEGACY_ISO_SUDOERS="$SUDOERS_DIR/qemu-cpuiso"
+INSTALL_LOCK_DIR="$ROOT_PREFIX/run/qemu-vmate"
+INSTALL_LOCK_FILE="$INSTALL_LOCK_DIR/host-helper-install.lock"
 OWNER_UID=0
 OWNER_GID=0
 # 单元测试可把安装根指向临时目录；此时不提升权限，也不伪造 root 所有权。
@@ -43,18 +51,76 @@ check_regular_file() {
     }
 }
 
-check_install_directory() {
-    local metadata
-    [[ -d "$LIBEXEC_DIR" && ! -L "$LIBEXEC_DIR" ]] || return 1
-    metadata="$(stat -Lc '%u:%g:%a' "$LIBEXEC_DIR" 2>/dev/null || true)"
-    [[ "$metadata" == "$OWNER_UID:$OWNER_GID:755" ]]
+check_secure_directory() {
+    local path="$1" expected_mode="$2" metadata
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    metadata="$(stat -Lc '%u:%g:%a' "$path" 2>/dev/null || true)"
+    [[ "$metadata" == "$OWNER_UID:$OWNER_GID:$expected_mode" ]]
+}
+
+check_install_directories() {
+    check_secure_directory "$LIBEXEC_DIR" 755 &&
+        check_secure_directory "$SUDOERS_DIR" 755
+}
+
+acquire_install_lock() {
+    local lock_tmp path_meta fd_meta
+
+    command -v flock >/dev/null 2>&1 || {
+        echo "ERROR: 缺少 flock，无法串行化宿主 helper 安装" >&2
+        return 1
+    }
+    [[ ! -e "$INSTALL_LOCK_DIR" ||
+       ( -d "$INSTALL_LOCK_DIR" && ! -L "$INSTALL_LOCK_DIR" ) ]] || {
+        echo "ERROR: helper 安装锁目录不是安全普通目录: $INSTALL_LOCK_DIR" >&2
+        return 1
+    }
+    install -d -o "$OWNER_UID" -g "$OWNER_GID" -m 0700 "$INSTALL_LOCK_DIR"
+    check_secure_directory "$INSTALL_LOCK_DIR" 700 || {
+        echo "ERROR: helper 安装锁目录 owner/mode 非法" >&2
+        return 1
+    }
+
+    # 在 root-only 目录中用同文件系统 `mv -nT` 原子竞争首次创建，避免 `> lock`
+    # 跟随预置 symlink，也不会产生 hard-link 计数短暂为 2 的并发误判。
+    if [[ ! -e "$INSTALL_LOCK_FILE" && ! -L "$INSTALL_LOCK_FILE" ]]; then
+        lock_tmp="$(mktemp "$INSTALL_LOCK_DIR/.host-helper-lock.XXXXXX")"
+        install -o "$OWNER_UID" -g "$OWNER_GID" -m 0600 /dev/null "$lock_tmp"
+        mv -nT -- "$lock_tmp" "$INSTALL_LOCK_FILE"
+        rm -f -- "$lock_tmp"
+    fi
+    check_regular_file "$INSTALL_LOCK_FILE" 600 || {
+        echo "ERROR: helper 安装锁文件 owner/mode/link 非法" >&2
+        return 1
+    }
+    exec {INSTALL_LOCK_FD}<>"$INSTALL_LOCK_FILE"
+    path_meta="$(stat -Lc '%d:%i' -- "$INSTALL_LOCK_FILE")"
+    fd_meta="$(stat -Lc '%d:%i' -- "/proc/$$/fd/$INSTALL_LOCK_FD")"
+    [[ "$path_meta" == "$fd_meta" ]] || {
+        echo "ERROR: helper 安装锁在打开期间被替换" >&2
+        return 1
+    }
+    flock -x "$INSTALL_LOCK_FD"
+    check_regular_file "$INSTALL_LOCK_FILE" 600 || return 1
+    fd_meta="$(stat -Lc '%d:%i' -- "/proc/$$/fd/$INSTALL_LOCK_FD")"
+    path_meta="$(stat -Lc '%d:%i' -- "$INSTALL_LOCK_FILE")"
+    [[ "$path_meta" == "$fd_meta" ]] || return 1
+
+    # 只供临时安装根的并发测试使用：ready 在持锁后创建，FIFO 控制释放时机。
+    if [[ -n "$ROOT_PREFIX" && -n "${VMATE_TEST_LOCK_READY:-}" ]]; then
+        : > "$VMATE_TEST_LOCK_READY"
+    fi
+    if [[ -n "$ROOT_PREFIX" && -n "${VMATE_TEST_LOCK_RELEASE_FIFO:-}" ]]; then
+        IFS= read -r _ < "$VMATE_TEST_LOCK_RELEASE_FIFO"
+    fi
 }
 
 check_qemu_trust_manifest() {
+    local manifest="${1:-$QEMU_TRUST_DEST}"
     local line key value actual_meta actual_digest
     local trust_path="" trust_sha256="" trust_device="" trust_inode=""
 
-    check_regular_file "$QEMU_TRUST_DEST" 644 || return 1
+    check_regular_file "$manifest" 644 || return 1
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" == *=* ]] || return 1
         key="${line%%=*}"; value="${line#*=}"
@@ -65,7 +131,7 @@ check_qemu_trust_manifest() {
             inode) [[ -z "$trust_inode" ]] || return 1; trust_inode="$value" ;;
             *) return 1 ;;
         esac
-    done < "$QEMU_TRUST_DEST"
+    done < "$manifest"
     [[ "$trust_path" == /* && -f "$trust_path" && ! -L "$trust_path" &&
        -x "$trust_path" &&
        "$trust_sha256" =~ ^[0-9a-f]{64}$ && "$trust_device" =~ ^[0-9]+$ &&
@@ -77,9 +143,9 @@ check_qemu_trust_manifest() {
 }
 
 check_sudoers_contract() {
-    local expected actual
+    local sudoers="${1:-$SUDOERS_DEST}" expected actual
 
-    check_regular_file "$SUDOERS_DEST" 440 || return 1
+    check_regular_file "$sudoers" 440 || return 1
     expected="$(
         printf '%s\n' '# 由 qemu vmate setup-host-helpers.sh 生成；禁止环境变量注入。'
         printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s *\n' \
@@ -87,38 +153,87 @@ check_sudoers_contract() {
         printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s *\n' \
             "$TARGET_UID" "/usr/local/libexec/qemu-vmate-cpu-isolate"
     )"
-    actual="$(<"$SUDOERS_DEST")" || return 1
+    actual="$(<"$sudoers")" || return 1
     [[ "$actual" == "$expected" ]]
 }
 
+verify_installation() {
+    check_install_directories || {
+        echo "ERROR: libexec/sudoers 必须为可信 owner 的非符号链接 0755 目录" >&2
+        return 1
+    }
+    check_secure_directory "$INSTALL_LOCK_DIR" 700 || return 1
+    check_regular_file "$INSTALL_LOCK_FILE" 600 || return 1
+    check_regular_file "$PERF_DEST" 755 || return 1
+    check_regular_file "$ISO_DEST" 755 || return 1
+    check_regular_file "$ISO_RUNTIME_DEST" 755 || return 1
+    check_qemu_trust_manifest || {
+        echo "ERROR: QEMU root-owned 信任清单无效或构建产物已变化" >&2
+        return 1
+    }
+    check_sudoers_contract || {
+        echo "ERROR: sudoers 必须为可信 owner 的 0440 单链接普通文件，且内容精确匹配" >&2
+        return 1
+    }
+    [[ ! -e "$LEGACY_PERF_SUDOERS" && ! -L "$LEGACY_PERF_SUDOERS" &&
+       ! -e "$LEGACY_ISO_SUDOERS" && ! -L "$LEGACY_ISO_SUDOERS" ]] || {
+        echo "ERROR: 仍存在直接授权 Git 工作区脚本的旧 sudoers" >&2
+        return 1
+    }
+    echo "PASS: host helpers 安装契约有效"
+}
+
+usage_install() {
+    echo "用法: sudo $0 install [--qemu=/path] [内部构建摘要参数]" >&2
+}
+
 QEMU_OVERRIDE="${VMATE_QEMU_BINARY:-}"
-case "${1:-install}" in
+EXPECTED_QEMU_DEVICE=""
+EXPECTED_QEMU_INODE=""
+EXPECTED_QEMU_SHA256=""
+command="${1:-install}"
+(( $# == 0 )) || shift
+case "$command" in
     install|--install)
-        (( $# <= 2 )) || { echo "用法: sudo $0 install [--qemu=/path]" >&2; exit 2; }
-        if (( $# == 2 )); then
-            [[ "$2" == --qemu=* && -n "${2#--qemu=}" ]] \
-                || { echo "ERROR: 第二参数必须是 --qemu=/path" >&2; exit 2; }
-            QEMU_OVERRIDE="${2#--qemu=}"
+        qemu_seen=0
+        while (( $# )); do
+            case "$1" in
+                --qemu=*)
+                    if (( qemu_seen != 0 )) || [[ -z "${1#--qemu=}" ]]; then
+                        echo "ERROR: --qemu 为空或重复" >&2
+                        exit 2
+                    fi
+                    QEMU_OVERRIDE="${1#--qemu=}"; qemu_seen=1
+                    ;;
+                --expect-device=*) EXPECTED_QEMU_DEVICE="${1#--expect-device=}" ;;
+                --expect-inode=*) EXPECTED_QEMU_INODE="${1#--expect-inode=}" ;;
+                --expect-sha256=*) EXPECTED_QEMU_SHA256="${1#--expect-sha256=}" ;;
+                *) usage_install; exit 2 ;;
+            esac
+            shift
+        done
+        expected_count=0
+        [[ -z "$EXPECTED_QEMU_DEVICE" ]] || expected_count=$((expected_count + 1))
+        [[ -z "$EXPECTED_QEMU_INODE" ]] || expected_count=$((expected_count + 1))
+        [[ -z "$EXPECTED_QEMU_SHA256" ]] || expected_count=$((expected_count + 1))
+        (( expected_count == 0 || expected_count == 3 )) || {
+            echo "ERROR: 构建摘要参数必须同时提供 device、inode 与 sha256" >&2
+            exit 2
+        }
+        if (( expected_count == 3 )); then
+            [[ "$EXPECTED_QEMU_DEVICE" =~ ^[0-9]+$ &&
+               "$EXPECTED_QEMU_INODE" =~ ^[0-9]+$ &&
+               "$EXPECTED_QEMU_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+                echo "ERROR: 构建摘要参数格式非法" >&2
+                exit 2
+            }
         fi
+        acquire_install_lock
         ;;
     check|--check)
-        (( $# == 1 )) || { echo "用法: sudo $0 check" >&2; exit 2; }
-        check_install_directory || {
-            echo "ERROR: libexec 必须为可信 owner 的非符号链接 0755 目录" >&2
-            exit 1
-        }
-        check_regular_file "$PERF_DEST" 755 || exit 1
-        check_regular_file "$ISO_DEST" 755 || exit 1
-        check_regular_file "$ISO_RUNTIME_DEST" 755 || exit 1
-        check_qemu_trust_manifest || {
-            echo "ERROR: QEMU root-owned 信任清单无效或构建产物已变化" >&2
-            exit 1
-        }
-        check_sudoers_contract || {
-            echo "ERROR: sudoers 必须为可信 owner 的 0440 单链接普通文件，且内容精确匹配" >&2
-            exit 1
-        }
-        echo "PASS: host helpers 安装契约有效"
+        (( $# == 0 )) || { echo "用法: sudo $0 check" >&2; exit 2; }
+        acquire_install_lock
+        verify_installation
         exit 0
         ;;
     *) echo "用法: sudo $0 [install [--qemu=/path]|check]" >&2; exit 2 ;;
@@ -142,12 +257,105 @@ read -r QEMU_DEVICE QEMU_INODE <<<"$QEMU_META"
 QEMU_SHA256="$(sha256sum -- "$QEMU_SOURCE")"
 QEMU_SHA256="${QEMU_SHA256%% *}"
 
+if [[ -n "$EXPECTED_QEMU_DEVICE" ]] &&
+   [[ "$QEMU_DEVICE:$QEMU_INODE:$QEMU_SHA256" != \
+      "$EXPECTED_QEMU_DEVICE:$EXPECTED_QEMU_INODE:$EXPECTED_QEMU_SHA256" ]]; then
+    echo "ERROR: QEMU 在编译验证后、提权登记前发生变化；拒绝信任未验证产物" >&2
+    exit 1
+fi
+
+recheck_qemu_snapshot() {
+    local current_meta current_digest
+    current_meta="$(stat -Lc '%d:%i' -- "$QEMU_SOURCE" 2>/dev/null)" || return 1
+    current_digest="$(sha256sum -- "$QEMU_SOURCE" 2>/dev/null)" || return 1
+    [[ "$current_meta:${current_digest%% *}" == \
+       "$QEMU_DEVICE:$QEMU_INODE:$QEMU_SHA256" ]]
+}
+
+maybe_test_fail() {
+    local step="$1"
+    # 故障注入只在临时安装根生效，真实 root 部署不能被普通环境变量中断。
+    if [[ -n "$ROOT_PREFIX" && "${VMATE_TEST_FAIL_STEP:-}" == "$step" ]]; then
+        echo "TEST: 在事务步骤 $step 注入失败" >&2
+        return 1
+    fi
+}
+
+declare -a stage_files=()
+declare -a transaction_destinations=(
+    "$SUDOERS_DEST"
+    "$LEGACY_PERF_SUDOERS"
+    "$LEGACY_ISO_SUDOERS"
+    "$PERF_DEST"
+    "$ISO_RUNTIME_DEST"
+    "$QEMU_TRUST_DEST"
+    "$ISO_DEST"
+)
+declare -a transaction_backups=()
+declare -a transaction_had_original=()
+transaction_started=0
+transaction_committed=0
+transaction_backup_count=0
+
+finish_transaction() {
+    local original_status=$? index rollback_failed=0 path backup
+    trap - EXIT
+
+    if (( transaction_started && ! transaction_committed )); then
+        echo "ERROR: helper 安装事务失败，正在恢复上一版本" >&2
+        # 中文注释：sudoers 是第一个备份项，因此逆序恢复会让它最后重新生效；
+        # 在 helper/runtime/trust 全部恢复之前，普通用户无法调用混合版本。
+        for (( index=transaction_backup_count - 1; index >= 0; index-- )); do
+            path="${transaction_destinations[$index]}"
+            backup="${transaction_backups[$index]}"
+            rm -f -- "$path" 2>/dev/null || rollback_failed=1
+            if [[ "${transaction_had_original[$index]}" == "1" ]]; then
+                mv -fT -- "$backup" "$path" 2>/dev/null || rollback_failed=1
+            fi
+        done
+        if (( rollback_failed )); then
+            echo "CRITICAL: helper 安装回滚不完整；保持失败状态，禁止启动 VM" >&2
+            original_status=1
+        fi
+    fi
+
+    for path in "${stage_files[@]}" "${transaction_backups[@]}"; do
+        if [[ -n "$path" ]]; then
+            rm -f -- "$path" 2>/dev/null || true
+        fi
+    done
+    exit "$original_status"
+}
+trap finish_transaction EXIT
+
+for target_dir in "$LIBEXEC_DIR" "$SUDOERS_DIR"; do
+    [[ ! -e "$target_dir" || ( -d "$target_dir" && ! -L "$target_dir" ) ]] || {
+        echo "ERROR: 固定安装目录不是安全普通目录: $target_dir" >&2
+        exit 1
+    }
+done
 install -d -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 "$LIBEXEC_DIR" "$SUDOERS_DIR"
-install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 "$HERE/host-performance.sh" "$PERF_DEST"
-install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 "$HERE/host-cpu-isolate.sh" "$ISO_DEST"
-install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
-    "$HERE/host-cpu-isolate-runtime.sh" "$ISO_RUNTIME_DEST"
+check_install_directories || {
+    echo "ERROR: 无法建立安全的 libexec/sudoers 安装目录" >&2
+    exit 1
+}
+perf_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-host-performance.XXXXXX")"
+stage_files+=("$perf_tmp")
+iso_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-isolate.XXXXXX")"
+stage_files+=("$iso_tmp")
+runtime_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-runtime-v1.XXXXXX")"
+stage_files+=("$runtime_tmp")
 trust_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-trust.XXXXXX")"
+stage_files+=("$trust_tmp")
+sudoers_tmp="$(mktemp "$SUDOERS_DIR/.qemu-vmate-host.XXXXXX")"
+stage_files+=("$sudoers_tmp")
+
+# 全部内容先在目标文件系统内 staging，并在任何固定路径变化前完成权限、内容和
+# visudo 校验；后续 mv -T 均为同文件系统原子发布。
+install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 "$HERE/host-performance.sh" "$perf_tmp"
+install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 "$HERE/host-cpu-isolate.sh" "$iso_tmp"
+install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
+    "$HERE/host-cpu-isolate-runtime.sh" "$runtime_tmp"
 {
     printf 'path=%s\n' "$QEMU_SOURCE"
     printf 'sha256=%s\n' "$QEMU_SHA256"
@@ -156,11 +364,6 @@ trust_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-trust.XXXXXX")"
 } > "$trust_tmp"
 chown "$OWNER_UID:$OWNER_GID" "$trust_tmp" 2>/dev/null || true
 chmod 0644 "$trust_tmp"
-mv -fT -- "$trust_tmp" "$QEMU_TRUST_DEST"
-
-sudoers_tmp="$(mktemp "$SUDOERS_DIR/.qemu-vmate-host.XXXXXX")"
-cleanup() { rm -f "$sudoers_tmp"; }
-trap cleanup EXIT
 {
     echo "# 由 qemu vmate setup-host-helpers.sh 生成；禁止环境变量注入。"
     printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s *\n' "$TARGET_UID" "/usr/local/libexec/qemu-vmate-host-performance"
@@ -169,16 +372,63 @@ trap cleanup EXIT
 chown "$OWNER_UID:$OWNER_GID" "$sudoers_tmp" 2>/dev/null || true
 chmod 0440 "$sudoers_tmp"
 
+check_regular_file "$perf_tmp" 755
+check_regular_file "$iso_tmp" 755
+check_regular_file "$runtime_tmp" 755
+check_qemu_trust_manifest "$trust_tmp"
+check_sudoers_contract "$sudoers_tmp"
+
 # 测试根目录可能没有 visudo；真实系统安装必须通过语法校验。
 if [[ -z "$ROOT_PREFIX" ]]; then
     command -v visudo >/dev/null || { echo "ERROR: 缺少 visudo" >&2; exit 1; }
     visudo -cf "$sudoers_tmp" >/dev/null
 fi
-mv -fT -- "$sudoers_tmp" "$SUDOERS_DEST"
-trap - EXIT
+recheck_qemu_snapshot || {
+    echo "ERROR: QEMU 在 staging 期间发生变化；拒绝发布信任清单" >&2
+    exit 1
+}
 
-# 删除旧版直接授权 Git 工作区脚本的规则；不存在时无副作用。
-rm -f "$SUDOERS_DIR/qemu-hostperf" "$SUDOERS_DIR/qemu-cpuiso"
+# 先移走当前 sudoers，关闭部署窗口内的新 NOPASSWD 调用；旧版工作区授权也纳入
+# 同一回滚事务。所有原文件都在各自目录内改名备份，跨文件系统时仍保持原子。
+transaction_started=1
+for index in "${!transaction_destinations[@]}"; do
+    destination="${transaction_destinations[$index]}"
+    destination_dir="${destination%/*}"
+    [[ ! -d "$destination" || -L "$destination" ]] || {
+        echo "ERROR: 固定安装目标不能是目录: $destination" >&2
+        exit 1
+    }
+    backup="$(mktemp "$destination_dir/.qemu-vmate-backup.XXXXXX")"
+    rm -f -- "$backup"
+    transaction_backups[index]="$backup"
+    transaction_had_original[index]=0
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        mv -fT -- "$destination" "$backup"
+        transaction_had_original[index]=1
+    fi
+    transaction_backup_count=$((index + 1))
+done
+maybe_test_fail after_backup
+
+# versioned runtime 先发布，main helper 最后切换；即使旧 sudo 调用已在部署前启动，
+# 它仍读取旧 ABI 路径。新 sudoers 只有所有文件和 QEMU 快照都就绪后才恢复。
+mv -fT -- "$runtime_tmp" "$ISO_RUNTIME_DEST"
+maybe_test_fail after_runtime
+mv -fT -- "$trust_tmp" "$QEMU_TRUST_DEST"
+maybe_test_fail after_trust
+mv -fT -- "$perf_tmp" "$PERF_DEST"
+maybe_test_fail after_performance
+mv -fT -- "$iso_tmp" "$ISO_DEST"
+maybe_test_fail after_isolate
+recheck_qemu_snapshot || {
+    echo "ERROR: QEMU 在发布事务中发生变化；正在回滚" >&2
+    exit 1
+}
+mv -fT -- "$sudoers_tmp" "$SUDOERS_DEST"
+maybe_test_fail after_sudoers
+
+verify_installation
+transaction_committed=1
 
 echo ">> 已安装 root-owned helper:"
 echo "   $PERF_DEST"

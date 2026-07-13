@@ -151,7 +151,7 @@ stage_helper() {
     sed \
         -e "s|readonly CG_ROOT=\"/sys/fs/cgroup\"|readonly CG_ROOT=\"$cgroup_root\"|" \
         -e "s|readonly RUNTIME_DIR=\"/run/qemu-vmate-cpu-isolate\"|readonly RUNTIME_DIR=\"$stage/run\"|" \
-        -e "s|readonly RUNTIME_LIB=\"/usr/local/libexec/qemu-vmate-cpu-isolate-runtime.sh\"|readonly RUNTIME_LIB=\"$stage/runtime.sh\"|" \
+        -e "s|readonly RUNTIME_LIB=\"/usr/local/libexec/qemu-vmate-cpu-isolate-runtime-v1.sh\"|readonly RUNTIME_LIB=\"$stage/runtime.sh\"|" \
         -e "s|readonly TRUST_MANIFEST=\"/usr/local/libexec/qemu-vmate-cpu-isolate-qemu.conf\"|readonly TRUST_MANIFEST=\"$stage/trust.conf\"|" \
         -e '/^_precheck() {/,/^}/c\_precheck() { return 0; }' \
         "$ISOLATE" > "$stage/helper"

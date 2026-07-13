@@ -8,6 +8,9 @@
 # source。这里依赖主 helper 提供的 _die/_warn、CG_ROOT/VMISO、PID/TIDS 等受控变量。
 # ---------------------------------------------------------------------------
 
+# 由 source 本文件的 main helper 读取；独立 ShellCheck 看不到跨文件 ABI 握手。
+# shellcheck disable=SC2034
+readonly VMATE_CPU_ISOLATE_RUNTIME_ABI="1"
 readonly SETPRIV="/usr/bin/setpriv"
 readonly TASKSET="/usr/bin/taskset"
 readonly KILL="/bin/kill"

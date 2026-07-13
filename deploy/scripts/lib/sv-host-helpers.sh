@@ -31,7 +31,7 @@ _sv_reject_legacy_workspace_sudoers() {
           "$listing" == *"$HERE/host-cpu-isolate.sh"* ]]; then
         echo "ERROR: 检测到 sudoers 仍放行用户可写的工作区脚本。" >&2
         echo "       这会形成免密 root 提权路径；已拒绝启动。" >&2
-        echo "       请运行: sudo $HERE/setup-host-helpers.sh" >&2
+        echo "       请在仓库根目录重新运行: deploy/tools/build.sh --install-host-helpers" >&2
         return 1
     fi
 }

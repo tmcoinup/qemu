@@ -56,6 +56,7 @@ jobs:
       - name: Check newly privileged or asynchronous scripts
         run: |
           shellcheck -x -S warning \
+            deploy/tools/build.sh \
             deploy/scripts/host-cpu-isolate.sh \
             deploy/scripts/host-cpu-isolate-runtime.sh \
             deploy/scripts/host-performance.sh \

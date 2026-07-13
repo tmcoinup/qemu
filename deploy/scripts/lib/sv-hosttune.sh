@@ -83,7 +83,7 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
         echo ">> host 调优:   已是 performance + halt_poll=${_ht_halt_poll_target}ns$([[ -n "$_ht_cap_arg" ]] && echo " + 频率封顶 $(( _ht_cap_arg/1000 ))MHz")，跳过"
     elif [[ ! -x "$_ht_script" ]]; then
         echo ">> host 调优:   找不到安全的 root-owned helper: $_ht_script" >&2
-        echo ">>             请先运行: sudo $HERE/setup-host-helpers.sh" >&2
+        echo ">>             请在仓库根目录重新运行: deploy/tools/build.sh --install-host-helpers" >&2
         if [[ "${STRICT_HARDWARE:-0}" == "1" ]]; then
             echo "ERROR: 严格模式禁止回退到用户可写的仓库脚本" >&2
             exit 1

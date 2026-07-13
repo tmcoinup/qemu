@@ -197,7 +197,9 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 - 在目标 E5-2696 v4 + 准确 X99 型号上取得 BIOS 启动、KVM capability、CPU realize 和 24 小时长稳证据。
 - 在至少一台受支持 Windows 10 物理宿主上验证 WHPX patched build、驱动、显示、I/O 和关机清理。
 - Linux/Windows 11 路线必须验证 Secure Boot operational state、已注册 PK/KEK/db 和 TPM PCR/Measured Boot；仅有 Tcg2 模块不够。
-- 每台实际 Linux 宿主必须以 root 执行 helper 安装器；源码完成不代表目标机已移除旧 sudoers。
+- 每台实际 Linux 宿主必须在本地终端完成一次集成式 `deploy/tools/build.sh`，或在无人值守
+  部署中显式使用 `--install-host-helpers`；编译入口的安装与 `check` 成功才代表目标机
+  已更新 root-owned helper、QEMU 信任摘要并移除旧 sudoers。
 
 ### P1 已处理
 
@@ -254,8 +256,8 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 ### 9.1 Linux 宿主安装与静态回归
 
 ```bash
-sudo deploy/scripts/setup-host-helpers.sh
-sudo deploy/scripts/setup-host-helpers.sh check
+# 编译、可选验证、安装 root-owned helper 及 check 由同一入口串行完成
+deploy/tools/build.sh --install-host-helpers
 
 python3 deploy/scripts/kvm-capabilities.py --format json
 python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4
@@ -266,13 +268,21 @@ QEMU="$PWD/build/qemu-system-x86_64" \
   bash deploy/scripts/tests/test_c_hardware_identity.sh
 ```
 
-安装器默认把当前仓库的 `build/qemu-system-x86_64` 规范路径、device/inode 与
-SHA-256 写入 root-owned 信任清单。QEMU 每次重新编译或替换后都必须重新执行安装；
-若使用另一份 patched QEMU，则显式登记该二进制并再次检查：
+编译入口在 `ninja`、二进制检查和可选 `--verify` 成功后调用
+`setup-host-helpers.sh install --qemu=<本次构建产物>`，再执行 `check`。安装器把 QEMU
+规范路径、device/inode 与 SHA-256 写入 root-owned 信任清单，同时更新调优/隔离 helper
+固定副本和最小 sudoers。它不是每次 VM 启动运行的脚本；重新编译或修改 helper 后只需
+重新运行编译入口，宿主重启不需要重复安装。install/check 由 root-owned `flock` 串行化；
+安装先在 staging 校验全部文件，发布时暂时撤下 sudoers，并以版本化 runtime、main 最后
+切换和失败回滚避免并发覆盖或混合版本。
+
+CI/无终端构建的默认 `auto` 策略会明确跳过宿主修改；真实目标机无人值守部署必须显式
+传 `--install-host-helpers`，而纯打包任务应传 `--no-install-host-helpers`。若使用仓库外
+另一份经过审核的 patched QEMU，才直接使用低层安装器登记并检查：
 
 ```bash
-sudo VMATE_QEMU_BINARY=/absolute/path/to/qemu-system-x86_64 \
-  deploy/scripts/setup-host-helpers.sh install
+sudo deploy/scripts/setup-host-helpers.sh install \
+  --qemu=/absolute/path/to/qemu-system-x86_64
 sudo deploy/scripts/setup-host-helpers.sh check
 ```
 

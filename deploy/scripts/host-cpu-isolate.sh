@@ -52,7 +52,10 @@ readonly VMISO="$CG_ROOT/$VMISO_NAME"
 readonly RUNTIME_DIR="/run/qemu-vmate-cpu-isolate"
 readonly INSTANCE_DIR="$RUNTIME_DIR/instances"
 readonly LOCK="$RUNTIME_DIR/global.lock"
-readonly RUNTIME_LIB="/usr/local/libexec/qemu-vmate-cpu-isolate-runtime.sh"
+# ABI 路径带版本号：installer 可以先发布新 runtime、最后原子切换主 helper；已经
+# 通过 sudo 启动的旧 main 仍引用自己的旧 ABI 文件，不会在部署窗口混载新函数。
+readonly CPU_ISOLATE_RUNTIME_ABI="1"
+readonly RUNTIME_LIB="/usr/local/libexec/qemu-vmate-cpu-isolate-runtime-v1.sh"
 # 该变量由固定运行库消费；shellcheck 单文件分析看不到跨文件引用。
 # shellcheck disable=SC2034
 readonly TRUST_MANIFEST="/usr/local/libexec/qemu-vmate-cpu-isolate-qemu.conf"
@@ -258,6 +261,8 @@ _load_runtime_library() {
         || _die "CPU isolate runtime 必须为 root:root 0755 且只有一个硬链接"
     # shellcheck disable=SC1090
     source "$RUNTIME_LIB"
+    [[ "${VMATE_CPU_ISOLATE_RUNTIME_ABI:-}" == "$CPU_ISOLATE_RUNTIME_ABI" ]] \
+        || _die "CPU isolate main/runtime ABI 不匹配"
     declare -F _validate_qemu_target _apply_transaction_begin \
         _apply_transaction_exit _caller_uid _proc_start_time >/dev/null \
         || _die "CPU isolate runtime 接口不完整"

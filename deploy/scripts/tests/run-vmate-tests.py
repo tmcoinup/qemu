@@ -17,6 +17,7 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 # 快速集只包含不启动完整客机、不修改宿主网络且没有共享实例号的测试。完整集仍会
 # 自动发现全部 test_*.sh/test_*.py，但改为串行，防止旧测试共用 /tmp socket 时互撞。
 QUICK_TESTS = (
+    "test_build_host_helper_integration.sh",
     "test_build_tooling_static.sh",
     "test_component_manifest.sh",
     "test_cpu_asset_profile.sh",

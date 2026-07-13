@@ -55,10 +55,26 @@ test_cli_compatibility() {
     local help_output
 
     help_output="$("$BUILD_SCRIPT" --help)"
-    for option in --clean --reconfig --debug --jobs --verify; do
+    for option in --clean --reconfig --debug --jobs --verify \
+            --install-host-helpers --no-install-host-helpers; do
         grep -F -- "$option" <<<"$help_output" >/dev/null \
             || fail "--help 丢失既有选项 $option"
     done
+}
+
+test_host_helper_orchestration_contract() {
+    # 中文注释：行为与失败顺序由独立隔离测试执行；这里保留关键安全字面门禁，
+    # 防止后续重构重新依赖可由调用环境注入的测试安装根或隐式 QEMU 路径。
+    require_text 'INSTALL_HOST_HELPERS="${INSTALL_HOST_HELPERS:-auto}"' "$BUILD_SCRIPT"
+    require_text '"$setup" install "--qemu=$BIN"' "$BUILD_SCRIPT"
+    require_text '"--expect-device=$QEMU_TRUST_DEVICE"' "$BUILD_SCRIPT"
+    require_text '"--expect-inode=$QEMU_TRUST_INODE"' "$BUILD_SCRIPT"
+    require_text '"--expect-sha256=$QEMU_TRUST_SHA256"' "$BUILD_SCRIPT"
+    require_text '"$setup" check' "$BUILD_SCRIPT"
+    require_text 'sudo -n -- "$@"' "$BUILD_SCRIPT"
+    require_text 'host_helper_terminal_foreground' "$BUILD_SCRIPT"
+    require_text 'host_helper_container_detected' "$BUILD_SCRIPT"
+    reject_text 'sudo -n -- env ' "$BUILD_SCRIPT"
 }
 
 test_patch_script_validates_integrated_qemu11_features() {
@@ -80,6 +96,7 @@ test_shell_syntax
 test_qemu_11_baseline_and_werror
 test_python_preflight_contract
 test_cli_compatibility
+test_host_helper_orchestration_contract
 test_patch_script_validates_integrated_qemu11_features
 
 echo "OK: QEMU 11.0.2 build tooling static checks passed"

@@ -19,14 +19,19 @@ trap 'rm -rf "$tmp"' EXIT
 trusted_qemu="$tmp/trusted-qemu-system-x86_64"
 cp /bin/true "$trusted_qemu"
 chmod 0755 "$trusted_qemu"
+read -r trusted_device trusted_inode < <(stat -Lc '%d %i' "$trusted_qemu")
+trusted_sha256="$(sha256sum "$trusted_qemu")"
+trusted_sha256="${trusted_sha256%% *}"
 
 VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
-    VMATE_QEMU_BINARY="$trusted_qemu" "$SETUP" install >/dev/null
+    "$SETUP" install "--qemu=$trusted_qemu" \
+    "--expect-device=$trusted_device" "--expect-inode=$trusted_inode" \
+    "--expect-sha256=$trusted_sha256" >/dev/null
 VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" "$SETUP" check >/dev/null
 
 perf_dest="$tmp/usr/local/libexec/qemu-vmate-host-performance"
 iso_dest="$tmp/usr/local/libexec/qemu-vmate-cpu-isolate"
-runtime_dest="$tmp/usr/local/libexec/qemu-vmate-cpu-isolate-runtime.sh"
+runtime_dest="$tmp/usr/local/libexec/qemu-vmate-cpu-isolate-runtime-v1.sh"
 trust_dest="$tmp/usr/local/libexec/qemu-vmate-cpu-isolate-qemu.conf"
 sudoers="$tmp/etc/sudoers.d/qemu-vmate-host"
 
@@ -43,8 +48,97 @@ grep -F "/usr/local/libexec/qemu-vmate-host-performance" "$sudoers" >/dev/null \
     || fail "sudoers 没有固定 performance helper 路径"
 grep -F "$REPO_ROOT" "$sudoers" >/dev/null \
     && fail "sudoers 不得引用 Git 工作区"
-grep -F '/usr/local/libexec/qemu-vmate-cpu-isolate-runtime.sh' "$sudoers" >/dev/null \
+grep -F '/usr/local/libexec/qemu-vmate-cpu-isolate-runtime-v1.sh' "$sudoers" >/dev/null \
     && fail "sudoers 不得直接授权可 source 的 runtime 库"
+
+# build.sh 传入的验证后快照必须与 installer 提权后重算结果一致；任一字段不符时
+# 应在事务开始前拒绝，且原安装继续通过 check。
+if [[ "${trusted_sha256:0:1}" == "0" ]]; then
+    bad_sha256="1${trusted_sha256:1}"
+else
+    bad_sha256="0${trusted_sha256:1}"
+fi
+if VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+        "$SETUP" install "--qemu=$trusted_qemu" \
+        "--expect-device=$trusted_device" "--expect-inode=$trusted_inode" \
+        "--expect-sha256=$bad_sha256" >/dev/null 2>&1; then
+    fail "installer 接受了与 build 验证结果不同的 QEMU 摘要"
+fi
+VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" "$SETUP" check >/dev/null
+
+# 每个发布点故障都必须恢复旧 helper/runtime/trust/sudoers。替代 QEMU 使用不同内容、
+# 路径和 inode，保证 check 通过只能来自真实回滚，而不是新旧文件恰好相同。
+replacement_qemu="$tmp/replacement-qemu-system-x86_64"
+cp /bin/false "$replacement_qemu"
+chmod 0755 "$replacement_qemu"
+read -r replacement_device replacement_inode < <(stat -Lc '%d %i' "$replacement_qemu")
+replacement_sha256="$(sha256sum "$replacement_qemu")"
+replacement_sha256="${replacement_sha256%% *}"
+for fail_step in after_backup after_runtime after_trust after_performance \
+        after_isolate after_sudoers; do
+    if VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+            VMATE_TEST_FAIL_STEP="$fail_step" \
+            "$SETUP" install "--qemu=$replacement_qemu" \
+            "--expect-device=$replacement_device" \
+            "--expect-inode=$replacement_inode" \
+            "--expect-sha256=$replacement_sha256" >/dev/null 2>&1; then
+        fail "事务故障注入 $fail_step 未使安装失败"
+    fi
+    VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+        "$SETUP" check >/dev/null || fail "事务 $fail_step 回滚后旧安装无效"
+    grep -Fx "path=$(realpath -e "$trusted_qemu")" "$trust_dest" >/dev/null \
+        || fail "事务 $fail_step 没有恢复旧 QEMU 信任清单"
+done
+
+# 两个不同 QEMU 的 installer 必须由 root-owned flock 完整串行化。第一个进程在
+# 取得锁后由 FIFO 暂停；第二个进程此时必须保持等待，释放后才可覆盖为第二份清单。
+lock_ready_one="$tmp/lock-ready-one"
+lock_ready_two="$tmp/lock-ready-two"
+lock_release_fifo="$tmp/lock-release.fifo"
+mkfifo "$lock_release_fifo"
+VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+    VMATE_TEST_LOCK_READY="$lock_ready_one" \
+    VMATE_TEST_LOCK_RELEASE_FIFO="$lock_release_fifo" \
+    "$SETUP" install "--qemu=$trusted_qemu" \
+    "--expect-device=$trusted_device" "--expect-inode=$trusted_inode" \
+    "--expect-sha256=$trusted_sha256" >"$tmp/concurrent-one.log" 2>&1 &
+installer_one=$!
+for _ in {1..100}; do
+    [[ -e "$lock_ready_one" ]] && break
+    sleep 0.01
+done
+[[ -e "$lock_ready_one" ]] || fail "第一个并发 installer 未取得锁"
+
+VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+    VMATE_TEST_LOCK_READY="$lock_ready_two" \
+    "$SETUP" install "--qemu=$replacement_qemu" \
+    "--expect-device=$replacement_device" \
+    "--expect-inode=$replacement_inode" \
+    "--expect-sha256=$replacement_sha256" >"$tmp/concurrent-two.log" 2>&1 &
+installer_two=$!
+sleep 0.1
+[[ ! -e "$lock_ready_two" ]] || fail "第二个 installer 绕过了全局安装锁"
+kill -0 "$installer_two" 2>/dev/null || fail "第二个 installer 没有等待全局锁"
+printf '%s\n' release > "$lock_release_fifo"
+wait "$installer_one" || fail "第一个并发 installer 失败"
+wait "$installer_two" || fail "第二个并发 installer 失败"
+[[ -e "$lock_ready_two" ]] || fail "释放后第二个 installer 未取得锁"
+grep -Fx "path=$(realpath -e "$replacement_qemu")" "$trust_dest" >/dev/null \
+    || fail "并发安装最终清单不是锁后执行的第二份 QEMU"
+VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" "$SETUP" check >/dev/null
+rm -f "$lock_release_fifo" "$lock_ready_one" "$lock_ready_two"
+
+# 旧版直接授权工作区脚本的规则既属于 check 契约，也必须由下一次事务安全移除。
+legacy_sudoers="$tmp/etc/sudoers.d/qemu-hostperf"
+printf '%s\n' 'legacy unsafe rule' > "$legacy_sudoers"
+chmod 0440 "$legacy_sudoers"
+if VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+        "$SETUP" check >/dev/null 2>&1; then
+    fail "check 应拒绝遗留工作区 sudoers"
+fi
+VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+    "$SETUP" install "--qemu=$trusted_qemu" >/dev/null
+[[ ! -e "$legacy_sudoers" ]] || fail "安装事务没有移除遗留工作区 sudoers"
 
 if "$PERF" 123 456 >/dev/null 2>&1; then
     fail "performance helper 应拒绝多余参数"
@@ -76,8 +170,12 @@ grep -F '/tmp/qemu-cpuiso.lock' "$ISOLATE" >/dev/null \
     && fail "CPU isolate 仍使用可被普通用户置换的 /tmp 锁"
 grep -F "VMISO_NAME=\"\${VMISO_NAME" "$ISOLATE" >/dev/null \
     && fail "CPU isolate 仍接受环境覆盖 VMISO_NAME"
-grep -F 'readonly RUNTIME_LIB="/usr/local/libexec/qemu-vmate-cpu-isolate-runtime.sh"' \
+grep -F 'readonly RUNTIME_LIB="/usr/local/libexec/qemu-vmate-cpu-isolate-runtime-v1.sh"' \
     "$ISOLATE" >/dev/null || fail "CPU isolate 没有固定 root-owned runtime 路径"
+grep -F 'readonly CPU_ISOLATE_RUNTIME_ABI="1"' "$ISOLATE" >/dev/null \
+    || fail "CPU isolate main 缺少 runtime ABI 绑定"
+grep -F 'readonly VMATE_CPU_ISOLATE_RUNTIME_ABI="1"' "$ISOLATE_RUNTIME" >/dev/null \
+    || fail "CPU isolate runtime 缺少 ABI 声明"
 for required_guard in '_validate_qemu_target' "/proc/\$pid/exe" '^Uid:' '^Tgid:' \
         'CPU\ [0-9]+/(KVM|TCG)' '_validate_trusted_executable' 'sha256sum'; do
     grep -F "$required_guard" "$ISOLATE_RUNTIME" >/dev/null \
@@ -103,7 +201,7 @@ if command -v unshare >/dev/null 2>&1 && unshare -Ur true 2>/dev/null; then
     sed \
         -e "s|readonly CG_ROOT=\"/sys/fs/cgroup\"|readonly CG_ROOT=\"$fake_cgroup\"|" \
         -e "s|readonly RUNTIME_DIR=\"/run/qemu-vmate-cpu-isolate\"|readonly RUNTIME_DIR=\"$fake_runtime\"|" \
-        -e "s|readonly RUNTIME_LIB=\"/usr/local/libexec/qemu-vmate-cpu-isolate-runtime.sh\"|readonly RUNTIME_LIB=\"$runtime_copy\"|" \
+        -e "s|readonly RUNTIME_LIB=\"/usr/local/libexec/qemu-vmate-cpu-isolate-runtime-v1.sh\"|readonly RUNTIME_LIB=\"$runtime_copy\"|" \
         -e "s|readonly TRUST_MANIFEST=\"/usr/local/libexec/qemu-vmate-cpu-isolate-qemu.conf\"|readonly TRUST_MANIFEST=\"$trust_copy\"|" \
         "$ISOLATE" > "$isolate_copy"
     chmod 0755 "$isolate_copy"

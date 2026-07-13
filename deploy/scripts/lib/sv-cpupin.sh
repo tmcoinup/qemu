@@ -12,7 +12,7 @@ sv_cpu_isolate_preflight() {
     local pinner="$HERE/vm-cpu-pinner.py"
     if [[ ! -x "$helper" ]]; then
         echo "ERROR: CPU 隔离缺少安全的 root-owned helper: $helper" >&2
-        echo "       请先运行: sudo $HERE/setup-host-helpers.sh" >&2
+        echo "       请在仓库根目录重新运行: deploy/tools/build.sh --install-host-helpers" >&2
         return 1
     fi
     if declare -F _sv_root_helper_is_safe >/dev/null \
@@ -28,7 +28,7 @@ sv_cpu_isolate_preflight() {
     # QEMU 已启动后才由异步 pinner 发现；输出仅在失败时展示，正常启动保持简洁。
     if ! sudo -n "$helper" preflight >/dev/null; then
         echo "ERROR: CPU 隔离 preflight 失败（sudo/cgroup v2/cpuset 不可用）" >&2
-        echo "       可先运行: sudo $HERE/setup-host-helpers.sh check" >&2
+        echo "       可诊断运行: sudo $HERE/setup-host-helpers.sh check" >&2
         return 1
     fi
 }

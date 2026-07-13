@@ -48,6 +48,11 @@ deploy/tools/build.sh --reconfig
 deploy/tools/build.sh --debug
 deploy/tools/build.sh --jobs 8
 
+# 本地终端默认在成功构建后同步宿主 helper，并可能提示一次 sudo 密码
+# CI/后台部署需要显式强制；仅打包、不部署到当前宿主时可显式跳过
+deploy/tools/build.sh --install-host-helpers
+deploy/tools/build.sh --no-install-host-helpers
+
 # 并发快速回归；完整集为避免共享 socket 冲突而串行
 python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4
 python3 deploy/scripts/tests/run-vmate-tests.py --mode full
@@ -62,20 +67,50 @@ python3 deploy/scripts/tests/run-vmate-tests.py --mode full
 `QEMU_IMG=/abs/path/qemu-img`，或使用 `--qemu=...`。启动器默认 `QEMU_CAP_CHECK=1`，会检查
 NVMe、EDID、USB、PCI identity、fb-shm 等定制属性；不要在生产中关闭。
 
-## 3. 一次性宿主准备
+## 3. 宿主准备
 
-### 3.1 安装最小 root helper
+### 3.1 编译脚本自动维护最小 root helper
+
+`deploy/tools/build.sh` 在 `ninja`、二进制存在性检查及可选 `--verify` 全部成功后，自动调用
+`deploy/scripts/setup-host-helpers.sh`。编译脚本必须以普通用户运行，只有安装阶段通过 `sudo`
+提权；安装或校验失败会令整个编译入口返回非零，不能把“QEMU 已生成”误认为宿主已可启动。
+
+安装器不是每次启动 VM 执行的调优脚本，而是编译入口内部的安全部署模块，负责：
+
+- 把 `host-performance.sh`、`host-cpu-isolate.sh` 及其 runtime 安装到
+  `/usr/local/libexec/qemu-vmate-*`，固定为 `root:root/0755`。
+- 生成最小 `NOPASSWD:NOSETENV` sudoers，绝不授权用户可写的 Git 工作区脚本。
+- 把本次构建的 QEMU canonical path、device/inode 与 SHA-256 写入 root-owned 信任清单，
+  防止同名进程或替换后的二进制进入 CPU 隔离事务。
+- 以 `/run/qemu-vmate/host-helper-install.lock` 的 root-owned `flock` 串行化 install/check，
+  再在 root-owned staging 中完成权限、内容及 `visudo` 校验；发布时暂时撤下旧 sudoers，
+  原子切换版本化 runtime、信任清单和 main helper，任一步失败都在恢复 sudoers 前回滚。
+- 对照编译验证结束时的 QEMU device/inode/SHA-256，拒绝在等待 `sudo` 期间被替换的产物；
+  安装后立即执行 `check`，复核目录、文件、链接数、权限、sudoers 及 QEMU 摘要。
+
+本地交互终端默认 `INSTALL_HOST_HELPERS=auto`，每次成功构建都会同步，因此重新编译 QEMU
+或修改 helper 后只需再次运行 `deploy/tools/build.sh`，不再单独维护安装步骤。CI、容器、
+后台 job 和无前台终端任务默认不修改当前宿主；目标机无人值守部署须使用
+`--install-host-helpers`（认证不可用时 `sudo -n` 会立即失败），纯构建/打包使用
+`--no-install-host-helpers`。不要给用户可写的工作区 installer 配置 NOPASSWD；无人值守
+部署应由受控的 root 部署服务执行，并设置 `VMATE_TARGET_UID=<普通用户 UID>`。宿主重启
+和普通 VM 启动不需要重新安装。
+
+低层脚本只在检查故障或登记仓库之外的 patched QEMU 时手工使用：
 
 ```bash
-sudo deploy/scripts/setup-host-helpers.sh
+# 只检查当前安装契约
+sudo deploy/scripts/setup-host-helpers.sh check
+
+# 高级用法：登记另一份经过审核的 patched QEMU
+sudo deploy/scripts/setup-host-helpers.sh install \
+  --qemu=/absolute/path/to/qemu-system-x86_64
 sudo deploy/scripts/setup-host-helpers.sh check
 ```
 
-安装器把固定副本放到 `/usr/local/libexec/qemu-vmate-*`，owner/mode 为 `root:root/0755`，
-sudoers 使用 `NOPASSWD:NOSETENV`。旧版直接授权 Git 工作区脚本的 sudoers 会被删除。
-
-不要手工把用户可写的仓库脚本加入 `NOPASSWD`。默认 `HOST_TUNE=1` 和
-`CPU_ISOLATE=1` 会使用上述 helper。
+不要编辑 `/usr/local/libexec` 中的安装副本，也不要手工把用户可写的仓库脚本加入
+`NOPASSWD`。默认 `HOST_TUNE=1` 和 `CPU_ISOLATE=1` 会在 VM 生命周期内调用安装副本；
+安装器本身不会立即修改 governor 或划分 cpuset。
 
 ### 3.2 检查 KVM/TSC
 

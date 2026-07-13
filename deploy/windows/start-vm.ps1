@@ -1,216 +1,266 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Windows 10 / Windows 11 宿主启动 patched QEMU VM。
+    在 Windows 10/11 宿主上以严格 WHPX 策略启动 patched QEMU VM。
 
 .DESCRIPTION
-    这个启动器对应 Linux 侧 deploy/scripts/start-vm.sh 的 Windows 宿主版本。
-    它不依赖 Python/Bash/MSYS 运行时，只要求当前目录能找到 qemu-system-x86_64.exe，
-    并且 Windows 已启用 Windows Hypervisor Platform。
+    Windows 路线默认只接受 WHPX，不再静默退到 TCG。硬件事实来自共享
+    deploy/hardware/platforms.json 与 components.json，随机身份写入 VM 目录的 hardware-profile.json
+    后跨重启保持稳定。WHPX 在 QEMU 11 中忽略自定义 -cpu 模型，因此启动器明确
+    使用宿主 CPU 面，并只把主板/设备平台从 manifest 注入，避免虚构可控 CPUID。
 
-    默认模式是 SDL 窗口 + fb-shm 推流通道并存：
-      - SDL 给本机交互使用；
-      - fb-shm 完全在宿主 QEMU 进程内导出帧，对 guest 不可见；
-      - QEMU 提供 virtio-vga-gl 时，SDL 自动启用 GL + blob/hostmem；
-      - 构建缺少 virglrenderer 时退回普通 SDL，GPU handle 不可用时继续 SHM；
-      - 外部使用 qemu-fb-shm-stream.exe --sock <path> --output <url> 拉流。
+    Windows 原生构建目前无法提供经过验证的 TPM 2.0 + Secure Boot 组合；选择
+    Windows11 会在任何文件写入前失败，不能用“能启动”冒充满足正式前置条件。
 #>
 
 [CmdletBinding()]
 param(
+    [ValidateRange(1, 1000)]
     [int]$Instance = 1,
-
-    [string]$Qemu = "",
-    [string]$QemuImg = "",
-
-    [string]$VmRoot = "",
-    [string]$Disk = "",
-
-    [string]$OvmfCode = "",
-    [string]$OvmfVarsTemplate = "",
-    [string]$OvmfVars = "",
-
+    [string]$Qemu = '',
+    [string]$QemuImg = '',
+    [string]$VmRoot = '',
+    [string]$Disk = '',
+    [string]$OvmfCode = '',
+    [string]$OvmfVarsTemplate = '',
+    [string]$OvmfVars = '',
+    [ValidateRange(2048, 262144)]
     [int]$MemoryMiB = 8192,
+    [ValidateRange(1, 256)]
     [int]$Cpus = 4,
+    [ValidateSet('Windows10', 'Windows11', 'Linux')]
+    [string]$GuestOs = 'Windows10',
+    [string]$Iso = '',
+    [string]$ExtraIso = '',
 
-    [string]$Iso = "",
-    [string]$ExtraIso = "",
+    [string]$HardwareManifest = '',
+    [string]$ComponentManifest = '',
+    [string]$HardwareProfile = '',
+    [string]$PlatformId = '',
+    [switch]$RerollHardwareProfile,
+    [switch]$AllowHostCpuPlatformMismatch,
+
+    [switch]$AllowTcgFallback,
+    [switch]$ExposeHyperv,
+    [switch]$RequireNestedVirtualization,
 
     [switch]$NoSdl,
     [switch]$Headless,
     [switch]$NoFbShm,
-    [string]$FbShmPath = "",
+    [string]$FbShmPath = '',
+    [ValidateRange(1, 240)]
     [int]$FbShmRate = 60,
-    [string]$FbShmRoi = "",
-
+    [string]$FbShmRoi = '',
     [switch]$NoGpuZeroCopy,
-    [string]$GpuHostmem = "256M",
+    [string]$GpuHostmem = '256M',
     [ValidateSet('Auto', 'Available', 'Unavailable')]
     [string]$GpuGlProbe = 'Auto',
 
     [int]$SshForwardPort = 0,
     [int]$RdpForwardPort = 0,
-
     [switch]$DryRun,
+    [ValidateSet('GenuineIntel', 'AuthenticAMD')]
+    [string]$DryRunHostVendorId = 'GenuineIntel',
+    [string]$DryRunHostCpuName = 'Intel(R) Test CPU',
     [string[]]$ExtraQemuArgs = @()
 )
 
 $ErrorActionPreference = 'Stop'
 
-function Resolve-RepoRoot {
-    # deploy/windows/start-vm.ps1 -> repo root
-    return (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-}
+$libraryRoot = Join-Path $PSScriptRoot 'lib'
+. (Join-Path $libraryRoot 'VMate.Common.ps1')
+. (Join-Path $libraryRoot 'VMate.Preflight.ps1')
+. (Join-Path $libraryRoot 'VMate.Components.ps1')
+. (Join-Path $libraryRoot 'VMate.Profile.ps1')
+. (Join-Path $libraryRoot 'VMate.Arguments.ps1')
 
-function Find-FirstExisting {
-    param([string[]]$Paths)
-    foreach ($p in $Paths) {
-        if ($p -and (Test-Path -LiteralPath $p)) {
-            return (Resolve-Path -LiteralPath $p).Path
-        }
-    }
-    return ""
-}
-
-function Add-Arg {
-    param([System.Collections.Generic.List[string]]$List, [string[]]$Items)
-    foreach ($item in $Items) {
-        [void]$List.Add($item)
-    }
-}
-
-function Split-Roi {
+function Split-VMateRoi {
     param([string]$Value)
-    if (-not $Value) { return @() }
+
+    if (-not $Value) {
+        return ''
+    }
     if ($Value -notmatch '^\d+,\d+,\d+,\d+$') {
         throw "FbShmRoi 必须是 x,y,w,h 四个非负整数，实际：$Value"
     }
     $parts = $Value.Split(',')
-    return @(",x=$($parts[0]),y=$($parts[1]),width=$($parts[2]),height=$($parts[3])")
-}
-
-function Test-WhpxEnabled {
-    # 只做提示，不阻断：某些 Windows 版本 Get-WindowsOptionalFeature 不可用。
-    try {
-        $feature = Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -ErrorAction Stop
-        if ($feature.State -ne 'Enabled') {
-            Write-Warning 'Windows Hypervisor Platform 未启用。管理员 PowerShell 执行：Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform'
-        }
-    } catch {
-        Write-Verbose "跳过 WHPX feature 检查：$($_.Exception.Message)"
+    if ([int64]$parts[2] -eq 0 -or [int64]$parts[3] -eq 0) {
+        throw 'FbShmRoi 的宽和高必须大于零。'
     }
+    return ",x=$($parts[0]),y=$($parts[1]),width=$($parts[2]),height=$($parts[3])"
 }
 
-function Test-QemuVirtioGpuGl {
+function Test-VMateVirtioGpuGl {
     param([string]$Executable)
 
-    # 中文注释：官方 Windows 构建可以在缺少 virglrenderer 时正常产出，但不会
-    # 注册 virtio-vga-gl。直接写死该设备会让 VM 在参数解析阶段退出，所以启动前
-    # 用只读 help 探测；native exe 非零退出或输出中没有设备名都视为不可用。
     try {
         $probeOutput = & $Executable '-device' 'virtio-vga-gl,help' 2>&1
-        $probeExitCode = $LASTEXITCODE
-        $probeText = ($probeOutput | Out-String)
-        return ($probeExitCode -eq 0 -and $probeText -match 'virtio-vga-gl')
+        $probeText = $probeOutput | Out-String
+        return ($LASTEXITCODE -eq 0 -and $probeText -match 'virtio-vga-gl')
     } catch {
         Write-Verbose "virtio-vga-gl 能力探测失败：$($_.Exception.Message)"
         return $false
     }
 }
 
-$repo = Resolve-RepoRoot
-$defaultVmRoot = Join-Path $env:USERPROFILE "qemu\vms\$Instance"
-if (-not $VmRoot) { $VmRoot = $defaultVmRoot }
-if (-not $Disk) { $Disk = Join-Path $VmRoot 'disk.qcow2' }
-if (-not $SshForwardPort) { $SshForwardPort = 2200 + $Instance }
-if (-not $RdpForwardPort) { $RdpForwardPort = 33890 + $Instance }
+function Assert-VMateExtraArguments {
+    param([string[]]$Arguments)
 
-$binCandidates = @(
-    (Join-Path $repo 'build-win64\qemu-system-x86_64.exe'),
-    (Join-Path $repo 'build\qemu-system-x86_64.exe'),
-    (Join-Path $PSScriptRoot 'qemu-system-x86_64.exe'),
-    'C:\Program Files\qemu\qemu-system-x86_64.exe'
-)
-if (-not $Qemu) { $Qemu = Find-FirstExisting $binCandidates }
-if (-not $Qemu) { throw '找不到 qemu-system-x86_64.exe，请用 -Qemu 指定 patched QEMU 路径。' }
-
-$qemuDir = Split-Path -Parent $Qemu
-if (-not $QemuImg) {
-    $QemuImg = Find-FirstExisting @(
-        (Join-Path $qemuDir 'qemu-img.exe'),
-        (Join-Path $repo 'build-win64\qemu-img.exe'),
-        'C:\Program Files\qemu\qemu-img.exe'
-    )
+    # 这些参数决定持久身份或加速器安全边界。允许 ExtraQemuArgs 再次覆盖会让
+    # profile 与实际设备树分叉，因此必须由启动器的显式参数管理。
+    foreach ($argument in $Arguments) {
+        if ($argument -match '^--?(accel|cpu|uuid|smbios|rtc|machine|global)(=|$)' -or
+            $argument -match '^-M(=|$)') {
+            throw "ExtraQemuArgs 不允许覆盖保留参数：$argument"
+        }
+    }
 }
 
+Assert-VMateGuestPolicy -GuestOs $GuestOs `
+    -RequireNestedVirtualization $RequireNestedVirtualization.IsPresent
+Assert-VMateExtraArguments -Arguments $ExtraQemuArgs
+if ($GpuGlProbe -ne 'Auto' -and -not $DryRun) {
+    throw 'GpuGlProbe 的注入值仅允许和 -DryRun 一起用于测试。'
+}
+
+$repo = Get-VMateRepoRoot
+if (-not $VmRoot) {
+    $VmRoot = Join-Path $env:USERPROFILE "qemu\vms\$Instance"
+}
+if (-not $Disk) {
+    $Disk = Join-Path $VmRoot 'disk.qcow2'
+}
+if (-not $HardwareManifest) {
+    $HardwareManifest = Join-Path $repo 'deploy\hardware\platforms.json'
+}
+if (-not $ComponentManifest) {
+    $ComponentManifest = Join-Path $repo 'deploy\hardware\components.json'
+}
+if (-not $HardwareProfile) {
+    $HardwareProfile = Join-Path $VmRoot 'hardware-profile.json'
+}
+if (-not $SshForwardPort) {
+    $SshForwardPort = 2200 + $Instance
+}
+if (-not $RdpForwardPort) {
+    $RdpForwardPort = 33890 + $Instance
+}
+foreach ($port in @($SshForwardPort, $RdpForwardPort, (4440 + $Instance))) {
+    if ($port -lt 1 -or $port -gt 65535) {
+        throw "派生端口超出 [1,65535]：$port"
+    }
+}
+
+if (-not $Qemu) {
+    $Qemu = Find-VMateFirstExisting @(
+        (Join-Path $repo 'qemu-system-x86_64.exe'),
+        (Join-Path $repo 'build-win64\qemu-system-x86_64.exe'),
+        (Join-Path $repo 'build\qemu-system-x86_64.exe'),
+        (Join-Path $PSScriptRoot 'qemu-system-x86_64.exe'),
+        'C:\Program Files\qemu\qemu-system-x86_64.exe'
+    )
+}
+if (-not $Qemu) {
+    throw '找不到 qemu-system-x86_64.exe，请用 -Qemu 指定 11.0.2 patched QEMU。'
+}
+$qemuDir = Split-Path -Parent $Qemu
+if (-not $QemuImg) {
+    $QemuImg = Join-Path $qemuDir 'qemu-img.exe'
+}
 if (-not $OvmfCode) {
-    $OvmfCode = Find-FirstExisting @(
+    $OvmfCode = Find-VMateFirstExisting @(
         (Join-Path $repo 'deploy\firmware\OVMF_CODE_4M_stealth.fd'),
         (Join-Path $qemuDir 'share\qemu\edk2-x86_64-code.fd'),
         (Join-Path $qemuDir 'edk2-x86_64-code.fd')
     )
 }
-if (-not $OvmfCode) { throw '找不到 OVMF code fd，请用 -OvmfCode 指定。' }
-
+if (-not $OvmfCode) {
+    throw '找不到 OVMF code fd，请用 -OvmfCode 指定。'
+}
 if (-not $OvmfVarsTemplate) {
-    $OvmfVarsTemplate = Find-FirstExisting @(
+    $OvmfVarsTemplate = Find-VMateFirstExisting @(
         (Join-Path $qemuDir 'share\qemu\edk2-i386-vars.fd'),
         (Join-Path $qemuDir 'edk2-i386-vars.fd')
     )
 }
-if (-not $OvmfVarsTemplate) { throw '找不到 OVMF vars 模板，请用 -OvmfVarsTemplate 指定。' }
-
-New-Item -ItemType Directory -Force -Path $VmRoot | Out-Null
-if (-not $OvmfVars) { $OvmfVars = Join-Path $VmRoot 'OVMF_VARS.fd' }
-if (-not (Test-Path -LiteralPath $OvmfVars)) {
-    Copy-Item -LiteralPath $OvmfVarsTemplate -Destination $OvmfVars -Force
+if (-not $OvmfVarsTemplate) {
+    throw '找不到 OVMF vars 模板，请用 -OvmfVarsTemplate 指定。'
 }
-if (-not (Test-Path -LiteralPath $Disk)) {
-    throw "磁盘不存在：$Disk。请先创建 qcow2，或用 -Disk 指向已有镜像。"
+if (-not (Test-Path -LiteralPath $Disk -PathType Leaf)) {
+    throw "磁盘不存在：$Disk"
 }
 
+Assert-VMateWhpxReady -Qemu $Qemu `
+    -AllowTcgFallback $AllowTcgFallback.IsPresent -DryRun $DryRun.IsPresent
+$hostCpu = Get-VMateHostCpuIdentity -DryRun $DryRun.IsPresent `
+    -DryRunVendorId $DryRunHostVendorId -DryRunName $DryRunHostCpuName
+$manifest = Read-VMateHardwareManifest -Path $HardwareManifest
+$components = Read-VMateComponentManifest -Path $ComponentManifest
+$profileLock = $null
+if (-not $DryRun) {
+    # 锁必须在读取已有 profile 前取得，并保持到前台 QEMU 退出。这样并发 reroll
+    # 不能让“内存身份 A 启动、磁盘身份 B 持久化”，同一实例也不会抢占磁盘/端口。
+    $profileLock = Enter-VMateProfileCommitLock -Instance $Instance
+}
+try {
+Assert-VMateStorageCapacity -QemuImg $QemuImg -Disk $Disk `
+    -ExpectedBytes ([int64]$components.storage.raw_bytes) -DryRun $DryRun.IsPresent
+$selection = Prepare-VMateHardwareProfile -Manifest $manifest -Components $components `
+    -Path $HardwareProfile -PlatformId $PlatformId -HostCpu $hostCpu `
+    -Instance $Instance -MemoryMiB $MemoryMiB -Cpus $Cpus `
+    -AllowHostCpuPlatformMismatch $AllowHostCpuPlatformMismatch.IsPresent `
+    -Reroll $RerollHardwareProfile.IsPresent
+$profile = $selection.Profile
+$platform = $selection.Platform
+
+if (-not $OvmfVars) {
+    $OvmfVars = Join-Path $VmRoot 'OVMF_VARS.fd'
+}
+$runRoot = ''
 if (-not $FbShmPath) {
-    # Windows AF_UNIX 路径长度限制较短，默认放到短目录，避免用户目录过长。
     $runRoot = 'C:\qemu-run'
-    New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
     $FbShmPath = Join-Path $runRoot "fb-$Instance.sock"
 }
-if ($FbShmRate -lt 1 -or $FbShmRate -gt 240) {
-    throw "FbShmRate 必须在 [1,240]，实际：$FbShmRate"
-}
-if ($GpuGlProbe -ne 'Auto' -and -not $DryRun) {
-    throw 'GpuGlProbe 的 Available/Unavailable 注入仅允许与 -DryRun 一起用于 CI；真实启动必须使用 Auto 探测。'
-}
 
-Test-WhpxEnabled
-
-$QmpPort = 4440 + $Instance
-$argsList = [System.Collections.Generic.List[string]]::new()
-Add-Arg $argsList @(
-    '-name', "win10-$Instance,debug-threads=on",
+$qmpPort = 4440 + $Instance
+$arguments = [System.Collections.Generic.List[string]]::new()
+Add-VMateArgument $arguments @(
+    '-name', "$($GuestOs.ToLowerInvariant())-$Instance,debug-threads=on",
+    '-nodefaults',
     '-machine', 'q35,vmport=off,smm=on,hpet=off',
-    '-accel', 'whpx',
-    '-accel', 'tcg',
+    '-accel', (Get-VMateWhpxAccelerator -ExposeHyperv $ExposeHyperv.IsPresent)
+)
+if ($AllowTcgFallback) {
+    Add-VMateArgument $arguments @('-accel', 'tcg,thread=multi')
+}
+Add-VMateArgument $arguments @(
+    '-cpu', $(if ($AllowTcgFallback) { 'max' } else { 'host' }),
+    '-uuid', ([string]$profile.identity.uuid),
     '-m', $MemoryMiB.ToString(),
     '-smp', "cpus=$Cpus,cores=$Cpus,threads=1,sockets=1",
+    '-rtc', (Get-VMateRtcArgument -GuestOs $GuestOs),
     '-drive', "if=pflash,format=raw,readonly=on,file=$OvmfCode",
     '-drive', "if=pflash,format=raw,file=$OvmfVars",
-    '-device', 'pcie-root-port,id=rp1,slot=1,bus=pcie.0,hotplug=off,x-speed=8,x-width=4',
-    '-device', 'pcie-root-port,id=rp2,slot=2,bus=pcie.0,hotplug=off,x-speed=2_5,x-width=1',
-    '-drive', "file=$Disk,if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap",
-    '-device', 'nvme,id=nvmectl0,bus=rp1,drive=nvm0,use-samsung-id=on,serial=S5H9NS0N900001,model-number=Samsung SSD 970 PRO 512GB,firmware-rev=1B2QEXP7',
-    '-device', 'qemu-xhci,id=xhci,bus=rp2',
-    '-device', 'usb-kbd,bus=xhci.0,vendorid=0x046d,productid=0xc31c,manufacturer=Logitech,product=USB Keyboard',
-    '-device', 'usb-tablet,bus=xhci.0,vendorid=0x046d,productid=0xc077,manufacturer=Logitech,product=USB Optical Mouse',
-    '-nic', "user,model=e1000e,hostfwd=tcp:127.0.0.1:$SshForwardPort-:22,hostfwd=tcp:127.0.0.1:$RdpForwardPort-:3389",
-    '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off"
+    '-qmp', "tcp:127.0.0.1:$qmpPort,server=on,wait=off"
 )
+Add-VMateArgument $arguments (New-VMateSmbiosArguments `
+    -Platform $platform -Profile $profile)
+Add-VMateArgument $arguments (New-VMateChipsetArguments -Platform $platform)
+Add-VMateArgument $arguments (New-VMatePlatformDeviceArguments `
+    -Platform $platform -Profile $profile -Components $components -Disk $Disk `
+    -SshForwardPort $SshForwardPort -RdpForwardPort $RdpForwardPort)
 
 if ($Iso) {
-    Add-Arg $argsList @('-drive', "file=$Iso,media=cdrom,if=none,id=cd0,readonly=on", '-device', 'ide-cd,drive=cd0,bus=ide.0,bootindex=1')
+    Add-VMateArgument $arguments @(
+        '-drive', "file=$Iso,media=cdrom,if=none,id=cd0,readonly=on",
+        '-device', 'ide-cd,drive=cd0,bus=ide.0,bootindex=1'
+    )
 }
 if ($ExtraIso) {
-    Add-Arg $argsList @('-drive', "file=$ExtraIso,media=cdrom,if=none,id=cd1,readonly=on", '-device', 'ide-cd,drive=cd1,bus=ide.1')
+    Add-VMateArgument $arguments @(
+        '-drive', "file=$ExtraIso,media=cdrom,if=none,id=cd1,readonly=on",
+        '-device', 'ide-cd,drive=cd1,bus=ide.1'
+    )
 }
 
 $localSdlRequested = -not ($Headless -or $NoSdl)
@@ -219,73 +269,82 @@ if ($localSdlRequested) {
     switch ($GpuGlProbe) {
         'Available' { $gpuGlDisplay = $true }
         'Unavailable' { $gpuGlDisplay = $false }
-        default { $gpuGlDisplay = Test-QemuVirtioGpuGl -Executable $Qemu }
+        default { $gpuGlDisplay = Test-VMateVirtioGpuGl -Executable $Qemu }
     }
 }
-
 if ($Headless) {
-    Add-Arg $argsList @('-display', 'none', '-vnc', "127.0.0.1:$($Instance - 1)")
+    Add-VMateArgument $arguments @('-display', 'none', '-vnc', "127.0.0.1:$($Instance - 1)")
 } elseif ($NoSdl) {
-    Add-Arg $argsList @('-display', 'none')
+    Add-VMateArgument $arguments @('-display', 'none')
 } elseif ($gpuGlDisplay) {
-    Add-Arg $argsList @('-display', 'sdl,gl=on,show-cursor=off')
+    Add-VMateArgument $arguments @('-display', 'sdl,gl=on,show-cursor=off')
 } else {
-    # 缺少 virglrenderer/virtio-vga-gl 时仍保留默认 SDL 本地窗口，只关闭 GL；
-    # fb-shm 会继续走跨构建可用的 SHM 路径。该情况是受支持的常规构建能力
-    # 降级，用普通信息而非 warning，避免正常启动产生误报警告。
-    if ($NoFbShm) {
-        Write-Host '>> 当前 QEMU 未提供 virtio-vga-gl；自动回退 SDL + virtio-vga（fb-shm 已关闭）。'
-    } else {
-        Write-Host '>> 当前 QEMU 未提供 virtio-vga-gl；自动回退 SDL + virtio-vga + SHM。'
+    $fallbackLabel = if ($NoFbShm) { 'SDL + virtio-vga' } else {
+        'SDL + virtio-vga + SHM'
     }
-    Add-Arg $argsList @('-display', 'sdl,show-cursor=off')
+    Write-Host ">> virtio-vga-gl 不可用；自动选择 $fallbackLabel。"
+    Add-VMateArgument $arguments @('-display', 'sdl,show-cursor=off')
 }
 
+$monitorEdid = Get-VMateMonitorEdidSuffix -Components $components -Profile $profile
 if ($gpuGlDisplay) {
-    # 中文注释：Windows 普通 SDL 默认启用 virtio-vga-gl，并给 resource blob
-    # 预留 host-visible window。ANGLE/D3D11 能提供共享纹理时，fb-shm 可发布
-    # GPU handle；宿主 GL 栈或 guest backing 不支持时，QEMU 会自动继续 SHM。
-    $vgaDevice = 'virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080'
+    $vgaDevice = 'virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080' +
+        $monitorEdid
     if (-not $NoGpuZeroCopy) {
         if ($GpuHostmem -notmatch '^\d+[KkMmGgTt]?$') {
-            throw "GpuHostmem 必须是 QEMU size 值，例如 256M 或 1G，实际：$GpuHostmem"
+            throw "GpuHostmem 不是合法 QEMU size：$GpuHostmem"
         }
         $vgaDevice += ",blob=true,hostmem=$GpuHostmem"
     }
 } else {
-    # VNC 和纯无窗口模式没有 SDL GL provider，使用普通 virtio-vga；此时即使
-    # 未传 -NoGpuZeroCopy，也不会伪装成已经具备 GPU shared-handle 导出能力。
-    $vgaDevice = 'virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080'
+    $vgaDevice = 'virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080' +
+        $monitorEdid
 }
-Add-Arg $argsList @('-device', $vgaDevice)
+Add-VMateArgument $arguments @('-device', $vgaDevice)
 
 if (-not $NoFbShm) {
-    $roiSuffix = (Split-Roi $FbShmRoi) -join ''
-    Add-Arg $argsList @('-object', "fb-shm,id=stealth-$Instance,path=$FbShmPath,rate=$FbShmRate$roiSuffix")
+    $roiSuffix = Split-VMateRoi $FbShmRoi
+    Add-VMateArgument $arguments @(
+        '-object', "fb-shm,id=vmate-$Instance,path=$FbShmPath,rate=$FbShmRate$roiSuffix"
+    )
 }
+Add-VMateArgument $arguments $ExtraQemuArgs
 
-foreach ($item in $ExtraQemuArgs) {
-    [void]$argsList.Add($item)
-}
-
-Write-Host "QEMU: $Qemu"
-Write-Host "VM:   $VmRoot"
-if (-not $NoFbShm) {
-    Write-Host "fb-shm: $FbShmPath configured=${FbShmRate}Hz"
-    Write-Host "rate:   无 consumer 时 effective 可降至 1Hz；连接后使用 configured/consumer target"
-    if ($gpuGlDisplay -and -not $NoGpuZeroCopy) {
-        Write-Host "GPU:    优先 shared handle (blob=true,hostmem=$GpuHostmem)；不可用自动 SHM fallback"
-    } elseif ($gpuGlDisplay) {
-        Write-Host 'GPU:    blob/hostmem 偏好已关闭；renderer 仍可导出 texture handle，失败才回退 SHM'
-    } else {
-        Write-Host 'GPU:    当前为非 GL 显示路径；使用 SHM fallback'
+if (-not $DryRun) {
+    # 到这里所有会消费 manifest/profile 的 SMBIOS、PCI、GPU 与 ROI 参数均已
+    # 构造并校验成功；此后才允许原子提交身份或生成 reroll 备份。
+    [void](Commit-VMateHardwareProfile -Selection $selection `
+        -Path $HardwareProfile -Lock $profileLock)
+    New-Item -ItemType Directory -Force -Path $VmRoot | Out-Null
+    if (-not (Test-Path -LiteralPath $OvmfVars)) {
+        Copy-Item -LiteralPath $OvmfVarsTemplate -Destination $OvmfVars `
+            -ErrorAction Stop
     }
-    Write-Host "拉流:  qemu-fb-shm-stream.exe --sock `"$FbShmPath`" --output rtmp://..."
+    if ($runRoot) {
+        New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
+    }
+}
+
+Write-Host "QEMU:     $Qemu"
+Write-Host "VM:       $VmRoot"
+Write-Host "Profile:  $HardwareProfile (platform=$($platform.id))"
+Write-Host "Parts:    $($components.catalog_revision) / $($components.storage.id)"
+Write-Host "CPU:      WHPX host / $($hostCpu.name)"
+Write-Host "Accel:    $(Get-VMateWhpxAccelerator -ExposeHyperv $ExposeHyperv.IsPresent)"
+if (-not $NoFbShm) {
+    Write-Host "fb-shm:   $FbShmPath configured=${FbShmRate}Hz"
 }
 
 if ($DryRun) {
-    $argsList | ForEach-Object { Write-Output $_ }
-    exit 0
+    $arguments | ForEach-Object { Write-Output $_ }
+} else {
+    & $Qemu @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "QEMU 异常退出，exit code=$LASTEXITCODE"
+    }
 }
-
-& $Qemu @argsList
+} finally {
+    if ($null -ne $profileLock -and $profileLock.Acquired -eq $true) {
+        Exit-VMateProfileCommitLock -Lock $profileLock
+    }
+}

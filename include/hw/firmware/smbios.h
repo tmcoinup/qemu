@@ -46,6 +46,27 @@ struct smbios_phys_mem_area {
     uint64_t length;
 };
 
+/*
+ * Q35 的 SPD EEPROM 与 SMBIOS Type 17 必须来自同一份配置，否则客体会
+ * 同时读到两个不同的 DDR 世代/频率。这里仅公开生成 SPD 所需的只读快照。
+ */
+#define SMBIOS_MEMORY_TYPE_DDR3 0x18
+#define SMBIOS_MEMORY_TYPE_DDR4 0x1a
+
+typedef struct SmbiosMemoryDeviceConfig {
+    /*
+     * 中文注释：SPD 描述 DIMM 自身的额定能力，而不是主板训练后的工作频率。
+     * SMBIOS Type 17 的 Speed 对应 rated_speed；Configured Memory Speed
+     * 只供 SMBIOS 报告，绝不能拿去改写 SPD 的 tCKmin。
+     */
+    uint16_t rated_speed;
+    uint16_t configured_speed;
+    uint16_t type_detail;
+    uint16_t voltage;
+    uint8_t memory_type;
+    uint8_t rank;
+} SmbiosMemoryDeviceConfig;
+
 /* SMBIOS Entry Point
  * There are two types of entry points defined in the SMBIOS specification
  * (see below). BIOS must place the entry point(s) at a 16-byte-aligned
@@ -333,6 +354,7 @@ void smbios_set_cpuid(uint32_t version, uint32_t features);
 void smbios_set_defaults(const char *manufacturer, const char *product,
                          const char *version);
 void smbios_set_default_processor_family(uint16_t processor_family);
+bool smbios_get_memory_device_config(SmbiosMemoryDeviceConfig *config);
 uint8_t *smbios_get_table_legacy(size_t *length, Error **errp);
 void smbios_get_tables(MachineState *ms,
                        SmbiosEntryPointType ep_type,

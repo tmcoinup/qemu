@@ -8,6 +8,16 @@ START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 QEMU="${QEMU:-$REPO_ROOT/build/qemu-system-x86_64}"
 QEMU_IMG="${QEMU_IMG:-$REPO_ROOT/build/qemu-img}"
 
+# 启动器子用例只验证 argv/CLI，统一注入可重复的平台能力；直接启动 TCG QEMU 的
+# C 设备测试不读取这些变量。严格 KVM/TSC 路径由专用测试覆盖。
+export STRICT_HARDWARE=0
+export STEALTH_KVM_AVAILABLE=1
+export STEALTH_KVM_TSC_CONTROL=1
+export STEALTH_KVM_GET_TSC_KHZ=1
+export STEALTH_KVM_TSC_KHZ=3600000
+export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+export STEALTH_HOST_CPU_MAX_MHZ=5000
+
 fail() {
     echo "FAIL: $*" >&2
     exit 1
@@ -87,7 +97,7 @@ test_qemu_accepts_samsung_nvme() {
         -S \
         -drive file="$img",if=none,id=nvm0,format=qcow2,cache=none,aio=threads \
         -device pcie-root-port,id=rp1,bus=pcie.0,slot=1 \
-        -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,use-samsung-id=on,serial=test123,model-number="Samsung SSD 970 EVO 1TB",firmware-rev=1B2QEXE7 \
+        -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,use-samsung-id=on,serial=test123,model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXP7,subsys-vendor-id=0x144d,subsys-id=0xa801,subnqn=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:test123 \
         -qmp unix:"$sock",server=on,wait=off \
         2> "$err" &
     qemu_pid=$!
@@ -299,6 +309,11 @@ test_qemu_service_cpu_flags_dry_run() {
     fi
     grep -F -- "QEMU_SERVICE_CPUS 必须是非负整数" "$out" >/dev/null \
         || fail "invalid --svc-cpus did not explain the validation error"
+    if DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9885 \
+        "$START_VM" --no-sdl --no-fb-shm --no-bridge --svc-cpus=9 > "$out" 2>&1
+    then
+        fail "--svc-cpus must enforce the root helper safety limit"
+    fi
 }
 
 test_cpu_pm_keeps_upstream_default_dry_run() {
@@ -385,16 +400,22 @@ test_cpu_isolate_scripts_parse() {
     bash -n "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh"
     bash -n "$REPO_ROOT/deploy/scripts/host-cpu-isolate.sh"
 
-    grep -F -- "\"\${QEMU_SERVICE_CPUS:-0}\" <<'PY' &" "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
-        || fail "cpu pinner must pass QEMU_SERVICE_CPUS as argv, not rely on export"
-    grep -F -- 'sys.argv[5]' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
-        || fail "cpu pinner Python must read service CPU count from argv"
-    grep -F -- 'read_held_vcpu_cpus' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
-        || fail "cpu pinner must separately count existing vCPU pins"
-    grep -F -- 'primary_pool_size_after_reserve' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
-        || fail "cpu pinner must check physical-primary capacity before keeping host reserve"
-    grep -F -- 'primary_pool_size_after_reserve(reserve) < vcpu_primary_demand' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
-        || fail "HOST_RESERVE_CORES=auto must shrink before assigning vCPUs to SMT siblings"
+    python3 -m py_compile "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py"
+    grep -F -- '"${QEMU_SERVICE_CPUS:-0}" "${strict_args[@]}" &' \
+        "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
+        || fail "shell wrapper must pass service CPU count and strict policy as argv"
+    grep -F -- 'read_held_cpus' "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" >/dev/null \
+        || fail "NUMA pinner must account for CPUs held by existing VMs"
+    grep -F -- '_auto_reserve' "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" >/dev/null \
+        || fail "NUMA pinner must shrink automatic host reserve when capacity is tight"
+    grep -F -- '--abort-on-failure' "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" >/dev/null \
+        || fail "strict runtime pinning failure must request guest shutdown"
+    grep -F -- 'sv_cpu_isolate_launch' "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
+        || fail "launcher lost asynchronous CPU isolation hook"
+    if grep -F -- 'sv_cpu_isolate_launch || true' \
+        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null; then
+        fail "strict CPU isolation failure must not be swallowed"
+    fi
 }
 
 main() {

@@ -30,8 +30,12 @@ void smbus_eeprom_init_one(I2CBus *bus, uint8_t address, uint8_t *eeprom_buf);
 void smbus_eeprom_init(I2CBus *bus, int nb_eeprom,
                        const uint8_t *eeprom_spd, int size);
 
-enum sdram_type { SDR = 0x4, DDR = 0x7, DDR2 = 0x8 };
+enum sdram_type { SDR = 0x4, DDR = 0x7, DDR2 = 0x8, DDR3 = 0xb, DDR4 = 0xc };
 uint8_t *spd_data_generate(enum sdram_type type, ram_addr_t size);
 uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts);
+uint8_t *spd_data_generate_ddr4_ex(uint32_t size_mb, uint32_t speed_mts,
+                                   uint8_t ranks, uint16_t voltage_mv);
+uint8_t *spd_data_generate_ddr3(uint32_t size_mb, uint32_t speed_mts,
+                                uint8_t ranks, uint16_t voltage_mv);
 
 #endif

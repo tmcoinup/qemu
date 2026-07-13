@@ -31,6 +31,7 @@
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/i2c/smbus_eeprom.h"
+#include "hw/i2c/smbus_eeprom_spd.h"
 #include "qom/object.h"
 
 //#define DEBUG
@@ -40,6 +41,18 @@
 OBJECT_DECLARE_SIMPLE_TYPE(SMBusEEPROMDevice, SMBUS_EEPROM)
 
 #define SMBUS_EEPROM_SIZE 256
+
+/*
+ * QEMU 公共头没有提供“最接近整数”的无符号除法宏。SPD 时序换算需要
+ * 就近选择 MTB，再把误差写进 FTB；用商和余数计算可避免 dividend
+ * 加半个 divisor 时发生溢出。
+ */
+static uint32_t spd_div_round_closest_u32(uint32_t dividend,
+                                          uint32_t divisor)
+{
+    return dividend / divisor +
+           (dividend % divisor >= (divisor + 1) / 2);
+}
 
 struct SMBusEEPROMDevice {
     SMBusDevice smbusdev;
@@ -204,7 +217,7 @@ void smbus_eeprom_init(I2CBus *smbus, int nb_eeprom,
 #define DDR4_SPD_SIZE 256
 #define DDR4_MTB_PS   125   /* Medium Time Base in picoseconds */
 
-static uint16_t ddr4_spd_crc16(const uint8_t *buf, size_t len)
+static uint16_t spd_crc16(const uint8_t *buf, size_t len)
 {
     uint32_t crc = 0;
     size_t i;
@@ -223,18 +236,60 @@ static uint16_t ddr4_spd_crc16(const uint8_t *buf, size_t len)
     return crc & 0xFFFF;
 }
 
-uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts)
+/*
+ * 将单条容量和 rank 数反推到每颗 DRAM 的密度编码。当前消费级画像固定
+ * 64-bit、x8 颗粒，因此 module_MB = chip_Mbit * rank；不支持的奇数容量
+ * 返回 -1，让上层不发布一份物理上不存在的 SPD。
+ */
+static int spd_density_code(uint32_t size_mb, uint8_t ranks)
+{
+    uint32_t density_mbit;
+
+    if (ranks < 1 || ranks > 4 || size_mb % ranks != 0) {
+        return -1;
+    }
+    density_mbit = size_mb / ranks;
+
+    switch (density_mbit) {
+    case 256:   return 0;
+    case 512:   return 1;
+    case 1024:  return 2;
+    case 2048:  return 3;
+    case 4096:  return 4;
+    case 8192:  return 5;
+    case 16384: return 6;
+    default:    return -1;
+    }
+}
+
+uint8_t *spd_data_generate_ddr4_ex(uint32_t size_mb, uint32_t speed_mts,
+                                    uint8_t ranks, uint16_t voltage_mv)
 {
     uint8_t *spd = g_malloc0(DDR4_SPD_SIZE);
+    SmbusEepromDdr4Density density;
     uint16_t crc;
     uint32_t tck_ps;
     uint8_t tck_mtb, tck_max_mtb;
+    int8_t tck_ftb;
     uint16_t taa_ps, trcd_ps, trp_ps, tras_ps, trc_ps;
     uint16_t taa_mtb, trcd_mtb, trp_mtb, tras_mtb, trc_mtb;
+    int density_code = spd_density_code(size_mb, ranks);
+
+    if (density_code < 0 ||
+        !smbus_eeprom_ddr4_density(density_code, &density)) {
+        g_free(spd);
+        return NULL;
+    }
+    if (!speed_mts) {
+        speed_mts = 2400;
+    }
+    if (!voltage_mv) {
+        voltage_mv = 1200;
+    }
 
     /* Derive CL/tRCD/tRP/tRAS/tRC from JEDEC table for the requested speed.
-     * Values quoted in picoseconds. */
-    tck_ps = 1000000U / (speed_mts / 2); /* speed_mts is double data rate */
+     * Values quoted in picoseconds. 未核验速率必须拒绝，既不能套 2666 时序，
+     * 也不能让 speed=1 在除法中触发进程崩溃。 */
     switch (speed_mts) {
     case 1866:
         taa_ps = 13920; trcd_ps = 13920; trp_ps = 13920;
@@ -253,14 +308,18 @@ uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts)
         tras_ps = 32000; trc_ps = 45750;
         break;
     case 2666:
-    default:
         /* DDR4-2666 CL18-18-18-38-56 JEDEC */
         taa_ps = 13500; trcd_ps = 13500; trp_ps = 13500;
         tras_ps = 28500; trc_ps = 42000;
         break;
+    default:
+        g_free(spd);
+        return NULL;
     }
-    tck_mtb      = tck_ps / DDR4_MTB_PS;
-    tck_max_mtb  = (tck_ps + 5000) / DDR4_MTB_PS;  /* generous upper bound */
+    tck_ps = 1000000U / (speed_mts / 2); /* speed_mts is double data rate */
+    tck_mtb      = spd_div_round_closest_u32(tck_ps, DDR4_MTB_PS);
+    tck_ftb      = tck_ps - tck_mtb * DDR4_MTB_PS;
+    tck_max_mtb  = tck_mtb + 1;
     taa_mtb      = taa_ps  / DDR4_MTB_PS;
     trcd_mtb     = trcd_ps / DDR4_MTB_PS;
     trp_mtb      = trp_ps  / DDR4_MTB_PS;
@@ -268,19 +327,19 @@ uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts)
     trc_mtb      = trc_ps  / DDR4_MTB_PS;
 
     /* Block 0: Base Configuration & DRAM Parameters ----------------- */
-    spd[0]  = 0x23;   /* 512B device, CRC over bytes 0-125 */
+    /* 当前设备仅实现 256B，不得声称存在不可访问的 EE1004 第二页。 */
+    spd[0]  = smbus_eeprom_ddr4_size_descriptor();
     spd[1]  = 0x10;   /* SPD revision 1.0 */
     spd[2]  = 0x0C;   /* DDR4 SDRAM */
     spd[3]  = 0x02;   /* UDIMM module type */
-    /* SDRAM density/banks: 2 BG bits (4 groups) + 2 BA bits (4 banks) +
-     * 8Gbit density = 0x85. That yields a 4GB rank @ x8. */
-    spd[4]  = 0x85;
-    /* 17 row bits (field value 5) + 10 column bits (field value 1). */
-    spd[5]  = (1 << 3) | 5;
+    /* 密度/bank 与 row/column 必须来自同一映射，防止容量几何互相冲突。 */
+    spd[4]  = density.density_banks;
+    spd[5]  = density.addressing;
     spd[6]  = 0x00;   /* Monolithic DRAM package */
-    spd[11] = 0x01;   /* VDD 1.2V operable, endurant */
-    /* Module organization: 1 rank, x8 SDRAM device. */
-    spd[12] = (0 << 3) | 0x01;
+    /* DDR4 标准工作电压是 1.2V；不一致的 manifest 不应生成 SPD。 */
+    spd[11] = voltage_mv == 1200 ? 0x01 : 0x00;
+    /* Module organization: rank 数来自 Type 17，颗粒宽度为 x8。 */
+    spd[12] = ((ranks - 1) << 3) | 0x01;
     /* Module bus width: 64-bit primary, no ECC extension. */
     spd[13] = (0 << 3) | 0x03;
     spd[14] = 0x00;   /* MTB = 125ps, FTB = 1ps */
@@ -299,23 +358,23 @@ uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts)
     spd[27] = ((trc_mtb >> 8) & 0x0F) << 4 | ((tras_mtb >> 8) & 0x0F);
     spd[28] = (uint8_t)(tras_mtb & 0xFF);
     spd[29] = (uint8_t)(trc_mtb  & 0xFF);
-    /* tRFC1 = 260ns @ 8Gbit (little-endian MTB) */
-    spd[30] = 0x20;
-    spd[31] = 0x08;
-    /* tRFC2 = 160ns */
-    spd[32] = 0x00;
-    spd[33] = 0x05;
-    /* tRFC4 = 110ns */
-    spd[34] = 0x70;
-    spd[35] = 0x03;
+    /* tRFC1/2/4 采用 125ps MTB、小端编码，并按颗粒密度分别计算。 */
+    spd[30] = density.trfc1_mtb & 0xff;
+    spd[31] = density.trfc1_mtb >> 8;
+    spd[32] = density.trfc2_mtb & 0xff;
+    spd[33] = density.trfc2_mtb >> 8;
+    spd[34] = density.trfc4_mtb & 0xff;
+    spd[35] = density.trfc4_mtb >> 8;
     spd[36] = 0x00;          /* tFAW hi nibble */
     spd[37] = (uint8_t)(21000 / DDR4_MTB_PS);   /* 21ns */
     spd[38] = (uint8_t)(5300  / DDR4_MTB_PS);   /* tRRD_S ~5.3ns */
     spd[39] = (uint8_t)(6400  / DDR4_MTB_PS);   /* tRRD_L 6.4ns */
     spd[40] = (uint8_t)(6400  / DDR4_MTB_PS);   /* tCCD_L 6.4ns */
+    /* Byte 125 是 tCKAVGmin 的 1ps fine offset，可精确表达 2400/2133。 */
+    spd[125] = tck_ftb;
 
     /* Block 0 CRC over bytes 0-125 placed at 126-127 (little-endian). */
-    crc = ddr4_spd_crc16(spd, 126);
+    crc = spd_crc16(spd, 126);
     spd[126] = (uint8_t)(crc & 0xFF);
     spd[127] = (uint8_t)(crc >> 8);
 
@@ -325,11 +384,83 @@ uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts)
     spd[130] = 0x00;   /* Reference Raw Card A, rev 0 */
     spd[131] = 0x00;
     /* Block 1 CRC over bytes 128-253 placed at 254-255. */
-    crc = ddr4_spd_crc16(spd + 128, 126);
+    crc = spd_crc16(spd + 128, 126);
     spd[254] = (uint8_t)(crc & 0xFF);
     spd[255] = (uint8_t)(crc >> 8);
 
-    (void)size_mb; /* size encoded via byte 4 density; param reserved */
+    return spd;
+}
+
+uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts)
+{
+    return spd_data_generate_ddr4_ex(size_mb, speed_mts, 1, 1200);
+}
+
+uint8_t *spd_data_generate_ddr3(uint32_t size_mb, uint32_t speed_mts,
+                                uint8_t ranks, uint16_t voltage_mv)
+{
+    uint8_t *spd;
+    uint16_t crc;
+    uint16_t tras_mtb;
+    uint16_t trc_mtb;
+    uint8_t tck_mtb;
+    int8_t tck_ftb;
+    int density_code = spd_density_code(size_mb, ranks);
+
+    if (density_code < 0) {
+        return NULL;
+    }
+    if (!speed_mts) {
+        speed_mts = 1600;
+    }
+    if (!voltage_mv) {
+        voltage_mv = 1500;
+    }
+
+    spd = g_malloc0(256);
+    tck_mtb = spd_div_round_closest_u32(2000000U,
+                                        speed_mts * DDR4_MTB_PS);
+    tck_ftb = spd_div_round_closest_u32(2000000U, speed_mts) -
+               tck_mtb * DDR4_MTB_PS;
+    tras_mtb = DIV_ROUND_UP(35000U, DDR4_MTB_PS);
+    trc_mtb = DIV_ROUND_UP(48750U, DDR4_MTB_PS);
+
+    /* DDR3 SPD 1.1、256-byte EEPROM、UDIMM。 */
+    spd[0] = 0x92;
+    spd[1] = 0x11;
+    spd[2] = DDR3;
+    spd[3] = 0x02;
+    spd[4] = density_code;
+    spd[5] = 0x21; /* 16 row / 10 column address bits */
+    /* bit0=不支持1.5V、bit1=支持1.35V；默认 1.5V 时两位均为 0。 */
+    spd[6] = voltage_mv == 1350 ? 0x02 : 0x00;
+    spd[7] = ((ranks - 1) << 3) | 0x01; /* rank + x8 */
+    spd[8] = 0x03; /* 64-bit、无 ECC */
+    spd[9] = 0x11; /* FTB 1ps */
+    spd[10] = 1;
+    spd[11] = 8;   /* MTB 125ps */
+    spd[12] = tck_mtb;
+    spd[14] = 0xfe; /* CL 5..11 */
+    spd[15] = 0x01; /* CL 12 */
+    spd[16] = DIV_ROUND_UP(13750U, DDR4_MTB_PS); /* tAA */
+    spd[17] = 0x78; /* write recovery */
+    spd[18] = spd[16]; /* tRCD */
+    spd[20] = spd[16]; /* tRP */
+    spd[21] = ((trc_mtb >> 8) << 4) | (tras_mtb >> 8);
+    spd[22] = tras_mtb & 0xff;
+    spd[23] = trc_mtb & 0xff;
+    spd[24] = 0x20; /* tRFC low */
+    spd[25] = 0x08; /* tRFC high */
+    spd[27] = 0x3c;
+    spd[28] = 0x3c;
+    spd[29] = 0x1e;
+    spd[30] = 0x1e;
+    spd[31] = 0x00;
+    spd[32] = 0x00;
+    spd[34] = tck_ftb; /* DDR3 tCKmin fine offset，单位 1ps */
+    crc = spd_crc16(spd, 126);
+    spd[126] = crc & 0xff;
+    spd[127] = crc >> 8;
     return spd;
 }
 

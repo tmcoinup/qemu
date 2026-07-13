@@ -1,3 +1,6 @@
+# shellcheck shell=bash
+# 本文件由 start-vm.sh source；这里赋值的 RAM/VLAN/profile 等变量在后续模块使用。
+# shellcheck disable=SC2034
 # ---------------------- CLI parsing ----------------------
 # First positional arg = INSTANCE. Everything else is --flag=value or --flag.
 _cli_instance=""
@@ -182,7 +185,9 @@ fi
 # Type4 自报上限), 防止 guest 实测吞吐超出该型号规格(超规格=变速器/计时异常 tell).
 # 只降不升(多 VM 取运行中最小, 绝不让任一 VM 超自身规格). HOST_TUNE=1 时才生效.
 # (flag: --freq-cap / --no-freq-cap)
-: "${CPU_FREQ_CAP:=1}"
+# 全局 scaling_max_freq 会同时影响管理核和其它 VM。默认关闭，只有明确评估过宿主
+# 调度策略后才用 --freq-cap 开启；vCPU 性能隔离优先依靠 cpuset/NUMA 放置。
+: "${CPU_FREQ_CAP:=0}"
 # CPU 亲和隔离(线程级): 起 VM 后把 QEMU 钉进 cgroup cpuset 独占分区, 每个 vCPU 独占
 # 1 个逻辑线程(非整核)——4vCPU 的 VM 只吃 4 个逻辑线程。分配器自动读取 host 拓扑，
 # 先把不同 VM 横向铺到不同物理核心，物理核心主线程用尽后才使用 SMT 兄弟线程。
@@ -294,8 +299,8 @@ fi
 
 # QEMU_SERVICE_CPUS 是隔离层参数，不影响 QEMU argv；DRY_RUN 也需要校验，防止错误配置
 # 在真正启动时才暴露。0 表示关闭辅助线程专用 CPU，保持历史行为。
-if ! [[ "$QEMU_SERVICE_CPUS" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: QEMU_SERVICE_CPUS 必须是非负整数 (实际: '$QEMU_SERVICE_CPUS')" >&2
+if ! [[ "$QEMU_SERVICE_CPUS" =~ ^[0-8]$ ]]; then
+    echo "ERROR: QEMU_SERVICE_CPUS 必须是非负整数且范围为 [0,8] (实际: '$QEMU_SERVICE_CPUS')" >&2
     exit 2
 fi
 
@@ -311,8 +316,20 @@ fi
 # VM_DIR 可显式覆盖，便于把单个实例放到独立磁盘；老版 flat 布局会按
 # IMAGE_ROOT 自动迁移到新位置。
 VM_DIR="${VM_DIR:-${VMS_DIR}/${INSTANCE}}"
-# DRY_RUN 时不建目录（P1#1：真正无副作用 dry-run，误用新实例号也不留痕）。
-[[ "${DRY_RUN:-0}" == "1" ]] || mkdir -p "$VM_DIR"
+# DRY_RUN 时不建目录。真实实例目录包含磁盘、TPM 私钥/状态、NVRAM 和 profile，
+# 必须归当前用户且为 0700；符号链接会扩大权限收紧/证书写入的作用域，直接拒绝。
+if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    if [[ -L "$VM_DIR" ]]; then
+        echo "ERROR: VM_DIR 不能是符号链接: $VM_DIR" >&2
+        exit 1
+    fi
+    mkdir -p "$VM_DIR"
+    if [[ "$(stat -c '%u' "$VM_DIR" 2>/dev/null)" != "$(id -u)" ]]; then
+        echo "ERROR: VM_DIR 必须归当前用户所有: $VM_DIR" >&2
+        exit 1
+    fi
+    chmod 0700 "$VM_DIR"
+fi
 : "${DISK:=$VM_DIR/disk.qcow2}"
 : "${QEMU:=$REPO_ROOT/build/qemu-system-x86_64}"
 : "${QEMU_IMG:=$REPO_ROOT/build/qemu-img}"

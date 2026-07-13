@@ -56,6 +56,12 @@ struct MCHPCIState {
     uint64_t above_4g_mem_size;
     uint64_t pci_hole64_size;
     uint16_t ext_tseg_mbytes;
+    /* 仅覆盖 PCI 配置空间身份；寄存器和行为仍保持 Q35/P35。 */
+    uint32_t x_pci_vendor_id;
+    uint32_t x_pci_device_id;
+    uint32_t x_pci_revision;
+    uint32_t x_pci_sub_vendor_id;
+    uint32_t x_pci_sub_device_id;
 };
 
 struct Q35PCIHost {

@@ -555,6 +555,10 @@ typedef struct NvmeParams {
     bool     use_samsung_id;
     char     *model_number;
     char     *firmware_rev;
+    char     *subnqn;
+    uint16_t subsystem_vendor_id;
+    uint16_t subsystem_id;
+    bool     implicit_subsystem;
     uint8_t  zasl;
     bool     auto_transition_zones;
     bool     legacy_cmb;

@@ -73,7 +73,6 @@ enum {
     STR_SERIAL_MOUSE,
     STR_SERIAL_TABLET,
     STR_SERIAL_KEYBOARD,
-    STR_MANUFACTURER_TABLET,   /* HUION (绘王) — tablet 用 256C VID, 字符串得跟 VID 对得上 */
 };
 
 static const USBDescStrings desc_strings = {
@@ -86,7 +85,7 @@ static const USBDescStrings desc_strings = {
      */
     [STR_MANUFACTURER]         = "Microsoft",
     [STR_PRODUCT_MOUSE]        = "Microsoft USB Optical Mouse",
-    [STR_PRODUCT_TABLET]       = "HUION PenTablet",
+    [STR_PRODUCT_TABLET]       = "QEMU USB Tablet",
     [STR_PRODUCT_KEYBOARD]     = "Microsoft Wired Keyboard 600",
     [STR_SERIAL_COMPAT]        = "42",
     [STR_CONFIG_MOUSE]         = "HID Mouse",
@@ -95,7 +94,6 @@ static const USBDescStrings desc_strings = {
     [STR_SERIAL_MOUSE]         = "89126",
     [STR_SERIAL_TABLET]        = "28754",
     [STR_SERIAL_KEYBOARD]      = "68284",
-    [STR_MANUFACTURER_TABLET]  = "HUION",
 };
 
 static const USBDescIface desc_iface_mouse = {
@@ -396,9 +394,8 @@ static const USBDescMSOS desc_msos_suspend = {
  * Microsoft VID 0x045E with retail PIDs that match the iProduct strings:
  *   - Mouse:    045E:00CB (Microsoft USB Optical Mouse)
  *   - Keyboard: 045E:0750 (Microsoft Wired Keyboard 600)
- * Tablet 用 HUION (绘王) 256C:006D — 国内深圳厂, 淘宝入门款 H420 数位板,
- * 比 Wacom 草根, 不会引来"为什么家用机插 Wacom 专业板"这类二级怀疑.
- * 绝对坐标 USB pointer 报为 graphics tablet 而非 virtual mouse.
+ * Tablet 例外：当前 report descriptor 只是绝对坐标指针，并不实现任何
+ * 品牌数位笔协议，所以保留 0627:0001 与 QEMU USB Tablet 名称。
  */
 /*
  * bcdDevice: 真硬件设备版本号在 USB ID 数据库里都不为 0。bcdDevice=0 是
@@ -406,7 +403,7 @@ static const USBDescMSOS desc_msos_suspend = {
  * 必然虚拟"）。改为公开报告的真实硬件 firmware revision：
  *   - Microsoft USB Optical Mouse 045E:00CB → bcdDevice 0x0163
  *   - Microsoft Wired Keyboard 600 045E:0750 → bcdDevice 0x0163
- *   - HUION H420 256C:006D → bcdDevice 0x0100
+ *   - 通用 usb-tablet 保留 bcdDevice 0，明确表示没有厂商固件版本
  *
  * iSerialNumber: 真实 OEM mouse/keyboard 都不暴露 serial 字符串（iSerialNumber=0）。
  * 之前给的 "68284" / "89126" / "28754" 这类 4-5 位 random 数 string 在 lsusb -v
@@ -445,10 +442,14 @@ static const USBDesc desc_mouse2 = {
 
 static const USBDesc desc_tablet = {
     .id = {
-        .idVendor          = 0x256C,
-        .idProduct         = 0x006D,
-        .bcdDevice         = 0x0100,
-        .iManufacturer     = STR_MANUFACTURER_TABLET,
+        /*
+         * usb-tablet 只实现通用绝对坐标指针，没有数位笔压力、倾角和厂商
+         * report protocol，因此必须保留 QEMU 公共 VID/PID，不能冒充 HUION。
+         */
+        .idVendor          = 0x0627,
+        .idProduct         = 0x0001,
+        .bcdDevice         = 0x0000,
+        .iManufacturer     = 0,
         .iProduct          = STR_PRODUCT_TABLET,
         .iSerialNumber     = 0,
     },
@@ -459,10 +460,10 @@ static const USBDesc desc_tablet = {
 
 static const USBDesc desc_tablet2 = {
     .id = {
-        .idVendor          = 0x256C,
-        .idProduct         = 0x006D,
-        .bcdDevice         = 0x0100,
-        .iManufacturer     = STR_MANUFACTURER_TABLET,
+        .idVendor          = 0x0627,
+        .idProduct         = 0x0001,
+        .bcdDevice         = 0x0000,
+        .iManufacturer     = 0,
         .iProduct          = STR_PRODUCT_TABLET,
         .iSerialNumber     = 0,
     },
@@ -770,6 +771,13 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
         return;
     }
 
+    if (kind == HID_TABLET &&
+        (us->vendorid || us->productid || us->manufacturer || us->product)) {
+        error_setg(errp, "usb-tablet emulates only a generic absolute "
+                         "pointer; branded tablet descriptors are unsupported");
+        return;
+    }
+
     /* stealth (patch 0010): VID/PID 覆盖。
      * 任一非零就 g_memdup() 出一份可写副本，patch .id 后挂到 dev->usb_desc。
      * 字符串覆盖在 usb_desc_init() 之后用 usb_desc_set_string() 写入设备的
@@ -900,7 +908,7 @@ static void usb_tablet_class_initfn(ObjectClass *klass, const void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_tablet_realize;
-    uc->product_desc   = "HUION PenTablet";
+    uc->product_desc   = "QEMU USB Tablet";
     dc->vmsd = &vmstate_usb_ptr;
     device_class_set_props(dc, usb_tablet_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);

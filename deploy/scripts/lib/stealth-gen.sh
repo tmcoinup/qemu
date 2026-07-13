@@ -15,11 +15,15 @@ _monitor_serial() {
     echo "${prefix}${rest}"
 }
 
-# USB HID serial: prefix + 6-8 字符。短，因为很多廉价键鼠 iSerialNumber
-# 描述符只有 6~10 字符或干脆为空。
+# USB HID serial 只用于 profile 内部稳定标识，当前 C descriptor 明确不向 guest
+# 暴露 iSerialNumber。组件 ID 可能包含长横线和小写字母，不能直接拼入序列号；
+# 先压成最多 4 位大写字母数字前缀，再追加 6 位随机值，保持短且可读。
 _usb_hid_serial() {
-    local prefix="$1"
+    local prefix="${1^^}"
     local rest
+    prefix="${prefix//[^A-Z0-9]/}"
+    prefix="${prefix:0:4}"
+    [[ -n "$prefix" ]] || prefix="HID"
     rest=$(LC_ALL=C tr -dc 'A-Z0-9' </dev/urandom 2>/dev/null | head -c 6)
     [[ -z "$rest" ]] && rest=$(printf '%06X' $RANDOM)
     echo "${prefix}${rest}"

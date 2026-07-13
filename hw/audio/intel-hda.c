@@ -197,6 +197,12 @@ struct IntelHDAState {
     uint32_t debug;
     OnOffAuto msi;
     bool old_msi_addr;
+    /* 仅覆盖 PCI 身份；流、CORB/RIRB 与 MSI 行为仍是 Intel HDA。 */
+    uint32_t x_pci_vendor_id;
+    uint32_t x_pci_device_id;
+    uint32_t x_pci_revision;
+    uint32_t x_pci_sub_vendor_id;
+    uint32_t x_pci_sub_device_id;
 };
 
 #define TYPE_INTEL_HDA_GENERIC "intel-hda-generic"
@@ -1093,6 +1099,37 @@ static void intel_hda_realize(PCIDevice *pci, Error **errp)
     Error *err = NULL;
     int ret;
 
+    /* x-pci-* 是 ID 兼容层，不会模拟其他厂商音频控制器的寄存器。 */
+    if ((d->x_pci_vendor_id != UINT32_MAX &&
+         d->x_pci_vendor_id > UINT16_MAX) ||
+        (d->x_pci_device_id != UINT32_MAX &&
+         d->x_pci_device_id > UINT16_MAX) ||
+        (d->x_pci_revision != UINT32_MAX &&
+         d->x_pci_revision > UINT8_MAX) ||
+        (d->x_pci_sub_vendor_id != UINT32_MAX &&
+         d->x_pci_sub_vendor_id > UINT16_MAX) ||
+        (d->x_pci_sub_device_id != UINT32_MAX &&
+         d->x_pci_sub_device_id > UINT16_MAX)) {
+        error_setg(errp, "intel-hda x-pci identity value is out of range");
+        return;
+    }
+    if (d->x_pci_vendor_id != UINT32_MAX) {
+        pci_config_set_vendor_id(conf, d->x_pci_vendor_id);
+    }
+    if (d->x_pci_device_id != UINT32_MAX) {
+        pci_config_set_device_id(conf, d->x_pci_device_id);
+    }
+    if (d->x_pci_revision != UINT32_MAX) {
+        pci_config_set_revision(conf, d->x_pci_revision);
+    }
+    if (d->x_pci_sub_vendor_id != UINT32_MAX) {
+        pci_set_word(conf + PCI_SUBSYSTEM_VENDOR_ID,
+                     d->x_pci_sub_vendor_id);
+    }
+    if (d->x_pci_sub_device_id != UINT32_MAX) {
+        pci_set_word(conf + PCI_SUBSYSTEM_ID, d->x_pci_sub_device_id);
+    }
+
     d->name = object_get_typename(OBJECT(d));
 
     pci_config_set_interrupt_pin(conf, 1);
@@ -1218,6 +1255,16 @@ static const Property intel_hda_properties[] = {
     DEFINE_PROP_UINT32("debug", IntelHDAState, debug, 0),
     DEFINE_PROP_ON_OFF_AUTO("msi", IntelHDAState, msi, ON_OFF_AUTO_AUTO),
     DEFINE_PROP_BOOL("old_msi_addr", IntelHDAState, old_msi_addr, false),
+    DEFINE_PROP_UINT32("x-pci-vendor-id", IntelHDAState, x_pci_vendor_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-device-id", IntelHDAState, x_pci_device_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-revision", IntelHDAState, x_pci_revision,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-vendor-id", IntelHDAState,
+                       x_pci_sub_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-device-id", IntelHDAState,
+                       x_pci_sub_device_id, UINT32_MAX),
 };
 
 static void intel_hda_class_init(ObjectClass *klass, const void *data)

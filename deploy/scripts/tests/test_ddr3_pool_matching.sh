@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 验证 DDR3 家用平台硬件池：CPU / 主板 / 内存必须按 socket 成套出现。
+# DDR3 物料仍用于读取历史 profile，但当前 Q35 平台层不能可信表达 AM3/AM3+、
+# FM2+ 或 LGA1155 整机。因此本测试确保 DDR3 不会重新泄漏到新 VM 随机池。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,29 +12,6 @@ fail() {
 }
 
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
-
-socket_has_board() {
-    local socket="$1" row
-    for row in "${BOARD_POOL[@]}"; do
-        [[ "${row%%|*}" == "$socket" ]] && return 0
-    done
-    return 1
-}
-
-cpu_memory_limit() {
-    local name="$1"
-    CPU_NAME="$name" CPU_MODEL="" _cpu_max_mem
-}
-
-socket_has_memory_under_limit() {
-    local socket="$1" limit="$2" row rated sockets
-    for row in "${MEM_POOL[@]}"; do
-        IFS='|' read -r _ _ _ rated sockets <<<"$row"
-        [[ "$rated" =~ ^[0-9]+$ ]] || continue
-        [[ ",$sockets," == *",$socket,"* ]] && (( rated <= limit )) && return 0
-    done
-    return 1
-}
 
 is_known_memory_product_pair() {
     local key="$1|$2|$3|$4"
@@ -53,61 +31,48 @@ is_known_memory_product_pair() {
     esac
 }
 
-is_known_no_igpu_consumer_ddr3_cpu() {
-    local name="$1"
-    case "$name" in
-        "AMD Athlon(tm) II X2 250 Processor" \
-        |"AMD Athlon(tm) II X4 640 Processor" \
-        |"AMD Phenom(tm) II X4 955 Processor" \
-        |"AMD FX(tm)-4100 Quad-Core Processor" \
-        |"AMD FX(tm)-4300 Quad-Core Processor" \
-        |"AMD Athlon(tm) X4 860K Quad Core Processor" \
-        |"Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz" \
-        |"Intel(R) Core(TM) i5-2550K CPU @ 3.40GHz" \
-        |"Intel(R) Core(TM) i5-3350P CPU @ 3.10GHz")
-            return 0 ;;
-        *)
-            return 1 ;;
-    esac
-}
-
+# CPU_POOL/BOARD_POOL 是 manifest 的 enabled 兼容视图；旧 socket 出现在这里就
+# 代表随机器又能生成行为上不成立的 DDR3 整机，必须阻断。
 for row in "${CPU_POOL[@]}"; do
-    [[ "$row" != *"Xeon"* ]] || fail "DDR3 家用池不得引入 Xeon/E 系列 CPU: $row"
-    [[ "$row" != *" E3-"* ]] || fail "DDR3 家用池不得引入 E3 CPU: $row"
-done
-
-ddr3_cpu_count=0
-for row in "${CPU_POOL[@]}"; do
-    IFS='|' read -r _ _ name _ _ _ _ socket <<<"$row"
+    IFS='|' read -r _ _ _ _ _ _ _ socket <<<"$row"
     case "$socket" in
         AM3|AM3+|FM2+|LGA1155)
-            ddr3_cpu_count=$((ddr3_cpu_count + 1))
-            is_known_no_igpu_consumer_ddr3_cpu "$name" \
-                || fail "DDR3 CPU 不在无核显家用白名单: $name"
-            limit="$(cpu_memory_limit "$name")"
-            socket_has_board "$socket" || fail "CPU $name 的 socket=$socket 缺少主板"
-            socket_has_memory_under_limit "$socket" "$limit" \
-                || fail "CPU $name 的 socket=$socket 缺少 <=${limit}MT/s 的 DDR3 内存"
-            ;;
+            fail "DDR3 CPU 泄漏到新 VM 随机池: $row" ;;
     esac
 done
-(( ddr3_cpu_count >= 4 )) || fail "DDR3 CPU 数量过少: $ddr3_cpu_count"
+for row in "${BOARD_POOL[@]}"; do
+    socket="${row%%|*}"
+    case "$socket" in
+        AM3|AM3+|FM2+|LGA1155)
+            fail "DDR3 主板泄漏到新 VM 随机池: $row" ;;
+    esac
+done
 
+# 历史 profile 仍可能引用这些真实 DIMM part，因此物料目录不能在迁移期间被删掉，
+# 同时也不能混入未经核验的自造容量。
+ddr3_material_count=0
 for row in "${MEM_POOL[@]}"; do
     fields="$(awk -F'|' '{print NF}' <<<"$row")"
     (( fields == 5 )) || fail "MEM_POOL 必须是 5 字段: $row"
     IFS='|' read -r mfr part_2g part_4g rated sockets <<<"$row"
-    [[ "$rated" =~ ^[0-9]+$ ]] || fail "MEM_POOL 速率不是整数: $row"
-    [[ -n "$sockets" ]] || fail "MEM_POOL 缺 socket 列: $row"
+    [[ "$rated" =~ ^[0-9]+$ && -n "$sockets" ]] || fail "内存速率/socket 无效: $row"
     is_known_memory_product_pair "$mfr" "$part_2g" "$part_4g" "$rated" \
-        || fail "MEM_POOL 包含未核验的内存型号组合: $row"
+        || fail "MEM_POOL 包含未核验型号: $row"
+    if [[ ",$sockets," == *",AM3,"* || ",$sockets," == *",AM3+,"* \
+        || ",$sockets," == *",FM2+,"* || ",$sockets," == *",LGA1155,"* ]]; then
+        ddr3_material_count=$((ddr3_material_count + 1))
+    fi
+done
+(( ddr3_material_count >= 4 )) || fail "历史 DDR3 物料被意外删除"
+
+# 当前所有可随机 bundle 都必须明确报告 DDR4；compatibility AMD 条目也使用 DDR4，
+# 但因为 enabled=false 不进入 CPU_POOL。
+for row in "${PLATFORM_POOL[@]}"; do
+    IFS='|' read -r platform_id enabled _ _ _ _ <<<"$row"
+    [[ "$enabled" == true ]] || continue
+    stealth_platform_load "$platform_id"
+    [[ "$MEM_TYPE" == DDR4 && "$MEM_VOLTAGE_MV" == 1200 ]] \
+        || fail "enabled 平台不是 DDR4 1.2V: $platform_id"
 done
 
-for row in "${CPU_POOL[@]}"; do
-    IFS='|' read -r _ _ name _ _ _ _ socket <<<"$row"
-    limit="$(cpu_memory_limit "$name")"
-    socket_has_memory_under_limit "$socket" "$limit" \
-        || fail "CPU $name 的 socket=$socket 缺少 <=${limit}MT/s 的内存"
-done
-
-echo "OK: DDR3 consumer pool matching checks passed"
+echo "OK: DDR3 legacy materials are isolated from enabled platforms"

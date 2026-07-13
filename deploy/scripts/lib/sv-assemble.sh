@@ -34,11 +34,13 @@ CMD=(
     -drive if=pflash,format=raw,file="$OVMF_VARS"
 
     # --- CPU: hidden hypervisor, hidden KVM, invtsc ---
-    # CPU 完整 -cpu 串由 stealth_qemu_cpu_arg 拼出（包含 family/model/stepping
-    # 覆盖、tsc-freq、vendor、AMD 专属 +topoext 等）。CPU 型号从 profile 随机，
-    # 池子里有 AMD Ryzen3-1200/2300X 与 Intel i3-9100F/9100/G6400/G5400。
+    # CPU 完整 -cpu 串由 stealth_qemu_cpu_arg 拼出（包含 family/model/stepping、
+    # tsc-freq 和 vendor）。只有 platform manifest 中 enabled 且通过宿主 KVM
+    # 实现探测的完整 Intel 整机 bundle 才能进入新 VM profile。
     -cpu "$(stealth_qemu_cpu_arg)"
-    -smp cpus=$CPUS,cores=$CPUS,threads=1,sockets=1,maxcpus=$CPUS
+    # 完整 SKU 的核心/线程拓扑来自 platform manifest。选择阶段已经要求 CPUS 等于
+    # CPU_THREADS；这里再次用整数除法构造 threads-per-core，不能把 2C/4T CPU 写成 4C。
+    -smp "cpus=$CPUS,cores=${CPU_CORES},threads=$(( CPU_THREADS / CPU_CORES )),sockets=1,maxcpus=$CPUS"
 
     # --- Memory: backed by memfd, 拓扑由 MEMORY_ARGS 数组动态决定 ---
     # share=on（关键）：让 host 进程地址空间和 KVM 给 guest 的 page 是同一份。
@@ -46,9 +48,7 @@ CMD=(
     # 与 guest 实际 RAM 分叉——VMI（memflow / LibVMI）会读到全零，无法工作。
     # share=on 对 guest 完全不可见（反作弊看不到任何差别），是 VMI 必须的前提。
     #
-    # MEMORY_ARGS 在 CMD 数组之前按 NUM_DIMMS 拼好：
-    #   NUM_DIMMS=1 (RAM ≤ 4GB)：1× full-size memfd + 1 NUMA node
-    #   NUM_DIMMS=2 (RAM > 4GB)：2× half-size memfd + 2 NUMA node (dual-channel)
+    # MEMORY_ARGS 始终使用一个 guest NUMA node；DIMM/双通道只由 SMBIOS/SPD 表达。
     "${MEMORY_ARGS[@]}"
 
     # --- Random identifiers ---
@@ -78,6 +78,7 @@ CMD=(
     # 非热插拔端口,不会出现该图标。冷插(开机即在)的设备不受影响,USB 设备热插拔
     # 走 usb 总线也不受影响,纯去指纹。
     # PCI ID 按平台注入 (见上方 ROOT_PORT_ARGS / PLATFORM_VENDOR)。
+    "${CHIPSET_GLOBAL_ARGS[@]}"
     "${ROOT_PORT_ARGS[@]}"
 
     # --- TPM 2.0 (swtpm emulator, tpm-crb 风格——现代主板默认走 CRB 而不是 TIS) ---
@@ -90,19 +91,19 @@ CMD=(
     # 不放 DF stub —— 否则会出现 "Intel CPU 但有 AMD DF" 的矛盾。
     "${AMD_DF_ARGS[@]}"
 
-    # --- Storage: 随机 Samsung NVMe (model/firmware/SN 来自 profile) ---
+    # --- Storage: 经 component manifest 核验的 Samsung NVMe bundle ---
     # emulated NVMe 的 DMA helpers 仍要求 BlockBackend 留在主 AioContext；
     # 这里保持 cache=none,aio=threads 的稳定路径，避免 iothread 触发断言。
     -drive file="$DISK",if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap
     # bootindex=3 (装系统时 NVMe 空，让位给 helper image=1 / Win ISO=2)；
     # 装好系统后 OVMF NVRAM 把 Windows Boot Manager 推到最高，bootindex 不再决定顺序。
-    -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,serial="$NVME_SERIAL",use-samsung-id=on,bootindex=3,model-number="$NVME_MODEL",firmware-rev="$NVME_FIRMWARE"
+    -device "nvme,id=nvmectl0,bus=rp1,drive=nvm0,serial=${NVME_SERIAL},use-samsung-id=on,bootindex=3,model-number=${NVME_MODEL},firmware-rev=${NVME_FIRMWARE},subsys-vendor-id=${NVME_SUBSYS_VEN},subsys-id=${NVME_SUBSYS_DEV},subnqn=${NVME_SUBNQN}"
 
     "${CDROM_ARGS[@]}"
 
     # --- Network: e1000e emulation (Intel 82574L) w/ random MAC ---
     "${NET_ARGS[@]}"
-    -device e1000e,netdev=net0,mac=$MAC_OVERRIDE,bus=rp2
+    -device "e1000e,netdev=net0,mac=${MAC_OVERRIDE},bus=rp2,subsys_ven=${NIC_SUBSYSTEM_VEN},subsys=${NIC_SUBSYSTEM_DEV}"
 
     # --- USB: xHCI + 键盘 + 鼠标 ---
     # usb-kbd: DirectInput/Raw Input 兼容 (DNF/腾讯反作弊只读 USB HID, 不读 PS/2).
@@ -110,8 +111,8 @@ CMD=(
     #   SDL 抓鼠标，Ctrl+Shift+G 释放)
     # 默认 usb-tablet (绝对坐标，鼠标可自由出入 SDL 窗口)
     # 经 patch 0010 后 vendorid/productid/manufacturer/product 从 profile 的
-    # KBD/MOUSE/TABLET 字段注入，每台 VM 看到不同品牌键鼠。serial 不传：真实 OEM
-    # 鼠键 descriptor 的 iSerialNumber=0（不暴露 serial），见 hw/usb/dev-hid.c。
+    # KBD/MOUSE/TABLET 字段注入；品牌、VID/PID、bcdDevice 必须来自同一组件条目。
+    # serial 不传：当前核验的 OEM 鼠键 descriptor 的 iSerialNumber=0。
     -device "qemu-xhci,id=xhci,bus=rp3,${XHCI_ID}"
     "${KBD_DEVICE_ARG[@]}"
     "${POINTER_DEVICE_ARG[@]}"
@@ -120,8 +121,8 @@ CMD=(
     # unconditionally -- passes driver probe in guest without requiring
     # ALSA/PipeWire on the host. ---
     -audiodev none,id=aud0
-    -device intel-hda,id=hda0
-    -device hda-duplex,bus=hda0.0,cad=0,audiodev=aud0
+    -device "ich9-intel-hda,id=hda0,x-pci-vendor-id=${AUDIO_CONTROLLER_PCI_VEN},x-pci-device-id=${AUDIO_CONTROLLER_PCI_DEV},x-pci-revision=${AUDIO_CONTROLLER_REV:-$LPC_REV},x-pci-sub-vendor-id=${BOARD_SUBSYS_VEN},x-pci-sub-device-id=${BOARD_SUBSYS_DEV}"
+    -device "hda-duplex,bus=hda0.0,cad=0,audiodev=aud0,x-identity-compat=on,x-codec-id=${AUDIO_CODEC_ID},x-codec-revision=${AUDIO_CODEC_REVISION},x-codec-subsystem-id=${AUDIO_CODEC_SUBSYSTEM_ID}"
 
     # --- Display ---
     "${DISP_ARGS[@]}"
@@ -220,12 +221,15 @@ if [[ "$BOOT" == "iso" ]]; then
     echo ">> 若 chainload helper 自动 work, 上面步骤可跳, 直接进 Setup。"
     echo ">> ======================================="
 fi
-# 磁盘信息：现盘字节数 + profile 报的容量 + NVMe 型号——3 个值必须自洽。
+# 磁盘信息：qemu-img virtual-size 已在持久化副作用前校验；宿主分配量只用于
+# 运维观察，不能拿 qcow2 容器的 stat 大小冒充 guest 可见容量。
 echo ">> disk:        $DISK"
-echo ">>   actual    : $(stat -c%s "$DISK") bytes (qcow2 sparse on-host)"
-echo ">>   advertised: ${NVME_SIZE_BYTES:-?} bytes = ${NVME_MODEL:-?}"
+echo ">>   virtual   : ${DISK_VIRTUAL_SIZE:-?} bytes (guest-visible, profile verified)"
+echo ">>   allocated : ${DISK_HOST_ALLOCATED_BYTES:-?} bytes (sparse on-host)"
+echo ">>   identity  : ${NVME_SIZE_BYTES:-?} bytes = ${NVME_MODEL:-?}"
 # 内存信息：总量 + DIMM 拓扑 (1 单通道 / 2 双通道) + 厂商 + part number + memfd backend。
-# memfd 是 share=on 让 VMI（memflow）能 mmap 同一份物理页。NUMA node 数 = DIMM 数。
+# memfd 是 share=on 让 VMI（memflow）能 mmap 同一份物理页。消费级单路平台始终
+# 只有一个 guest NUMA node；DIMM 数只通过 SMBIOS/SPD 表达，不能伪造 NUMA 节点。
 # 主板物理 2 卡槽（T16_NUM_DEVICES=2）始终不变，4GB 时一个槽空。
 if (( PER_DIMM_MB >= 4096 )); then
     _mem_part_used="$MEM_PART_4G"
@@ -233,10 +237,10 @@ else
     _mem_part_used="$MEM_PART_2G"
 fi
 if (( NUM_DIMMS == 1 )); then
-    echo ">> 内存:        ${RAM} MiB 单通道 (1× ${PER_DIMM_MB} MiB memfd, NUMA 1 node)"
+    echo ">> 内存:        ${RAM} MiB 单通道 (1× ${PER_DIMM_MB} MiB DIMM, 1 memfd, NUMA 1 node)"
     echo ">>   卡槽布局 : 2 卡槽 / 占用 1 / 空 1"
 else
-    echo ">> 内存:        ${RAM} MiB 双通道 (2× ${PER_DIMM_MB} MiB memfd, NUMA 2 node)"
+    echo ">> 内存:        ${RAM} MiB 双通道 (2× ${PER_DIMM_MB} MiB DIMM, 1 memfd, NUMA 1 node)"
     echo ">>   卡槽布局 : 2 卡槽 / 全部占用"
 fi
 echo ">>   DIMM 厂商 : ${MEM_MFR:-?}"
@@ -251,7 +255,7 @@ fi
 # CPU 信息：profile 选定的型号 + 实际给 guest 的 vCPU 拓扑
 echo ">> CPU:         ${CPU_NAME:-?}"
 echo ">>   QEMU 串   : $(stealth_qemu_cpu_arg)"
-echo ">>   拓扑      : ${CPUS} vCPU (cores=${CPUS}, threads=1, sockets=1, maxcpus=${CPUS})"
+echo ">>   拓扑      : ${CPUS} vCPU (cores=${CPU_CORES}, threads=$(( CPU_THREADS / CPU_CORES )), sockets=1, maxcpus=${CPUS})"
 
 # 整份 stealth profile（含 CPU / 主板 / GPU / NVMe / 内存 / 网卡 / 声卡 /
 # 键鼠 / 显示器 / UUID 等）。这里才打，因为 VGA_DEV、USB_RELATIVE_MOUSE、
@@ -297,8 +301,9 @@ fi
 # CPU 亲和隔离(默认开): 后台 pinner 等 QEMU/QMP 起来后, 把 vCPU 钉进 cgroup cpuset
 # 独占分区, 与宿主机其它负载(尤其 cargo/rust 编译吃满全核)在调度层隔离, 治宿主机满
 # 载时 VM 卡顿/掉帧/ACE 计时异常。必须在 exec QEMU 前 fork(否则本进程已被替换);
-# 内部自带 CPU_ISOLATE/DRY_RUN 守卫与失败兜底, 绝不阻断启动。
-sv_cpu_isolate_launch || true
+# 同步前置条件已在加载 sv-cpupin.sh 时验证；严格模式的后台 pinner 若仍在 QMP、
+# cgroup 或 taskset 阶段失败，会主动请求 QMP quit，不能静默以未隔离状态继续。
+sv_cpu_isolate_launch
 
 # QEMU's `-rtc base=localtime` calls libc localtime() which honours $TZ.
 # Pin to Asia/Shanghai so the VM RTC reflects Beijing time regardless of

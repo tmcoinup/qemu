@@ -1,28 +1,59 @@
 # -------------------------------------------------------------------
-# 平台一致性 (P0#3)：芯片组级设备 (PCIe 根端口 / xHCI) 的 PCI ID 必须跟随
-# CPU 厂商。否则 Intel CPU profile 会暴露 AMD 300 系桥 / xHCI，SetupAPI /
-# lspci / HWiNFO 跨表 walk 立刻发现 CPU、主板、南桥、USB 不属于同一平台。
-#   AMD  : 根端口 = Family 17h Internal PCIe GPP 1022:1453（4 口同 ID，与真
-#          实 Zen GPP 一致）；xHCI = 300 系 USB3.1 1022:43BB
-#   Intel: 根端口 = 300 系 PCH Root Port 8086:A338..A33B（端口 #1-4 顺序）；
-#          xHCI = 300 系 PCH USB3.1 8086:A36D
-# DF stub 仅 AMD 才加（见上）；Intel 的 uncore 由 q35 的 Intel host bridge
-# (00:00.0) 体现，无需补 stub。源码默认值仍是 AMD，未注入时行为不变。
+# 芯片组级设备身份来自同一个 platform manifest，不能再按 CPU 厂商粗略二分。
+# Intel 同一组 PCH root port 的 device id 连续；AMD GPP 多个 function 共用 ID。
 # -------------------------------------------------------------------
 case "$CPU_VENDOR" in
     GenuineIntel) PLATFORM_VENDOR="intel" ;;
-    *)            PLATFORM_VENDOR="amd"   ;;
+    AuthenticAMD) PLATFORM_VENDOR="amd" ;;
+    *) echo "ERROR: 不支持的 CPU_VENDOR=$CPU_VENDOR" >&2; exit 2 ;;
 esac
 
+# MCH/PCH 四个设备必须与同一平台 manifest 一起变化。C 层属性只覆盖 PCI
+# configuration identity，底层行为仍是 Q35/ICH9；因此 AMD compatibility bundle
+# 不会进入严格池。板卡 subsystem 先统一使用平台已审计的 ASUS 标识，避免回落到
+# Red Hat/1af4 默认值；更细的逐功能 subsystem 需有实机 lspci 快照后再扩充 schema。
+CHIPSET_GLOBAL_ARGS=(
+    -global "q35-pcihost.x-pci-mch-vendor-id=${MCH_PCI_VEN:?platform 缺 MCH_PCI_VEN}"
+    -global "q35-pcihost.x-pci-mch-device-id=${MCH_PCI_DEV:?platform 缺 MCH_PCI_DEV}"
+    -global "q35-pcihost.x-pci-mch-revision=${MCH_REV:?platform 缺 MCH_REV}"
+    -global "q35-pcihost.x-pci-mch-sub-vendor-id=${BOARD_SUBSYS_VEN:?platform 缺 BOARD_SUBSYS_VEN}"
+    -global "q35-pcihost.x-pci-mch-sub-device-id=${BOARD_SUBSYS_DEV:?platform 缺 BOARD_SUBSYS_DEV}"
+    -global "ICH9-LPC.x-pci-vendor-id=${LPC_PCI_VEN:?platform 缺 LPC_PCI_VEN}"
+    -global "ICH9-LPC.x-pci-device-id=${LPC_PCI_DEV:?platform 缺 LPC_PCI_DEV}"
+    -global "ICH9-LPC.x-pci-revision=${LPC_REV:?platform 缺 LPC_REV}"
+    -global "ICH9-LPC.x-pci-sub-vendor-id=${BOARD_SUBSYS_VEN}"
+    -global "ICH9-LPC.x-pci-sub-device-id=${BOARD_SUBSYS_DEV}"
+    -global "ICH9-SMB.x-pci-vendor-id=${SMBUS_PCI_VEN:?platform 缺 SMBUS_PCI_VEN}"
+    -global "ICH9-SMB.x-pci-device-id=${SMBUS_PCI_DEV:?platform 缺 SMBUS_PCI_DEV}"
+    -global "ICH9-SMB.x-pci-revision=${SMBUS_REV:?platform 缺 SMBUS_REV}"
+    -global "ICH9-SMB.x-pci-sub-vendor-id=${BOARD_SUBSYS_VEN}"
+    -global "ICH9-SMB.x-pci-sub-device-id=${BOARD_SUBSYS_DEV}"
+    -global "ich9-ahci.x-pci-vendor-id=${AHCI_PCI_VEN:?platform 缺 AHCI_PCI_VEN}"
+    -global "ich9-ahci.x-pci-device-id=${AHCI_PCI_DEV:?platform 缺 AHCI_PCI_DEV}"
+    -global "ich9-ahci.x-pci-revision=${AHCI_REV:?platform 缺 AHCI_REV}"
+    -global "ich9-ahci.x-pci-sub-vendor-id=${BOARD_SUBSYS_VEN}"
+    -global "ich9-ahci.x-pci-sub-device-id=${BOARD_SUBSYS_DEV}"
+)
+
+RP_VEN="${ROOT_PORT_PCI_VEN:?platform 缺 ROOT_PORT_PCI_VEN}"
+RP_REV="${ROOT_PORT_REV:?platform 缺 ROOT_PORT_REV}"
+_rp_base="${ROOT_PORT_PCI_DEV:?platform 缺 ROOT_PORT_PCI_DEV}"
+RP_DEV=("$_rp_base" "$_rp_base" "$_rp_base" "$_rp_base")
 if [[ "$PLATFORM_VENDOR" == "intel" ]]; then
-    RP_VEN="0x8086"; RP_REV="0xf0"
-    RP_DEV=("0xa338" "0xa339" "0xa33a" "0xa33b")
-    XHCI_ID="x-pci-vendor-id=0x8086,x-pci-device-id=0xa36d,x-pci-revision=0x10"
-else
-    RP_VEN="0x1022"; RP_REV="0x00"
-    RP_DEV=("0x1453" "0x1453" "0x1453" "0x1453")
-    XHCI_ID="x-pci-vendor-id=0x1022,x-pci-device-id=0x43bb,x-pci-revision=0x01"
+    for _rp_i in 0 1 2 3; do
+        printf -v 'RP_DEV[_rp_i]' '0x%04x' "$(( _rp_base + _rp_i ))"
+    done
 fi
+XHCI_ID="x-pci-vendor-id=${XHCI_PCI_VEN:?platform 缺 XHCI_PCI_VEN},x-pci-device-id=${XHCI_PCI_DEV:?platform 缺 XHCI_PCI_DEV},x-pci-revision=${XHCI_REV:?platform 缺 XHCI_REV}"
+
+case "${NVME_MAX_PCIE_GENERATION:-0}" in
+    1) _nvme_link_speed="2_5" ;;
+    2) _nvme_link_speed="5" ;;
+    3) _nvme_link_speed="8" ;;
+    4) _nvme_link_speed="16" ;;
+    *) echo "ERROR: NVME_MAX_PCIE_GENERATION 非法" >&2; exit 2 ;;
+esac
+_nvme_link_width="${NVME_LANES:-4}"
 
 # 4 口根端口（hotplug=off 见下方 QEMU_ARGS 处的说明），ID 按平台注入。
 #
@@ -43,7 +74,7 @@ ROOT_PORT_ARGS=(
 "x-pci-vendor-id=${RP_VEN},x-pci-device-id=${RP_DEV[0]},"\
 "x-pci-revision=${RP_REV}"
     -device "pcie-root-port,id=rp1,slot=1,bus=pcie.0,"\
-"hotplug=off,x-speed=8,x-width=4,x-pci-vendor-id=${RP_VEN},"\
+"hotplug=off,x-speed=${_nvme_link_speed},x-width=${_nvme_link_width},x-pci-vendor-id=${RP_VEN},"\
 "x-pci-device-id=${RP_DEV[1]},x-pci-revision=${RP_REV}"
     -device "pcie-root-port,id=rp2,slot=2,bus=pcie.0,"\
 "hotplug=off,x-speed=2_5,x-width=1,x-pci-vendor-id=${RP_VEN},"\
@@ -130,6 +161,10 @@ fi
 
 # 选 virtio-vga 或 virtio-vga-gl + 注入 profile 的 EDID 字符串（patch 0009 新选项）
 EDID_PROPS="edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID_SERIAL},edid-width-mm=${EDID_WIDTH_MM},edid-height-mm=${EDID_HEIGHT_MM}"
+EDID_PROPS+=",edid-product-id=${EDID_PRODUCT_ID},edid-manufacture-week=${EDID_MANUFACTURE_WEEK},edid-manufacture-year=${EDID_MANUFACTURE_YEAR}"
+EDID_PROPS+=",edid-video-input=${EDID_VIDEO_INPUT},edid-min-vfreq-hz=${EDID_MIN_VFREQ_HZ},edid-max-vfreq-hz=${EDID_MAX_VFREQ_HZ}"
+EDID_PROPS+=",edid-min-hfreq-khz=${EDID_MIN_HFREQ_KHZ},edid-max-hfreq-khz=${EDID_MAX_HFREQ_KHZ},edid-max-pixel-clock-mhz=${EDID_MAX_PIXEL_CLOCK_MHZ}"
+EDID_PROPS+=",edid-secondary-xres=${EDID_SECONDARY_XRES},edid-secondary-yres=${EDID_SECONDARY_YRES},edid-secondary-refresh-rate=${EDID_SECONDARY_REFRESH_RATE}"
 if [[ "$GPU_GL_DISPLAY" == "1" ]]; then
     VGA_DEV="virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080,${EDID_PROPS},${GPU_STEALTH}"
     if [[ "${GPU_ZEROCOPY:-0}" == "1" ]]; then
@@ -316,8 +351,8 @@ else
 fi
 
 # -------------------------------------------------------------------
-# 构造 MEMORY_ARGS：根据 NUM_DIMMS 决定 1 backend 还是 2 backend，
-# 对应 1 个 NUMA node（单通道）还是 2 个 NUMA node（双通道）。
+# 构造 MEMORY_ARGS：消费级单路平台无论插一条还是两条 DIMM，都只有一个 NUMA
+# node。内存通道/DIMM 数属于 SMBIOS/SPD 拓扑，不能错误映射成 guest NUMA node。
 #
 # prealloc=off（2026-05-25）：prealloc=on 会在开机即把整块 -m 摸一遍、钉死
 # host 物理内存（实测 guest 常只用一半），多 VM 并发时直接把 32G host 逼到
@@ -326,21 +361,10 @@ fi
 # 还可换出，多开稳得多。（首次访问页有极微延迟，反作弊无感。）
 # -------------------------------------------------------------------
 MEMORY_ARGS=(-m "${RAM}M")
-if (( NUM_DIMMS == 1 )); then
-    # 1 条 DIMM 占满总量，单 NUMA node 把所有 vCPU 都挂上
-    MEMORY_ARGS+=(
-        -object "memory-backend-memfd,id=mem0,size=${RAM}M,share=on,prealloc=off"
-        -numa "node,nodeid=0,memdev=mem0,cpus=0-$((CPUS-1))"
-    )
-else
-    # 2 条 DIMM 各占一半，双 NUMA node 配对 dual-channel 拓扑
-    MEMORY_ARGS+=(
-        -object "memory-backend-memfd,id=mem0,size=${PER_DIMM_MB}M,share=on,prealloc=off"
-        -object "memory-backend-memfd,id=mem1,size=${PER_DIMM_MB}M,share=on,prealloc=off"
-        -numa "node,nodeid=0,memdev=mem0,cpus=0-$((CPUS/2-1))"
-        -numa "node,nodeid=1,memdev=mem1,cpus=$((CPUS/2))-$((CPUS-1))"
-    )
-fi
+MEMORY_ARGS+=(
+    -object "memory-backend-memfd,id=mem0,size=${RAM}M,share=on,prealloc=off"
+    -numa "node,nodeid=0,memdev=mem0,cpus=0-$((CPUS-1))"
+)
 
 # -------------------------------------------------------------------
 # 构造 KBD_DEVICE_ARG / POINTER_DEVICE_ARG（patch 0010 新选项）
@@ -363,7 +387,9 @@ if [[ "${USB_RELATIVE_MOUSE:-0}" == "1" ]]; then
         -device "usb-mouse,bus=xhci.0,vendorid=${MOUSE_VID},productid=${MOUSE_PID},manufacturer=${MOUSE_MFR},product=${MOUSE_PRODUCT}"
     )
 else
+    # usb-tablet 只实现通用绝对坐标指针，没有压力、倾角和品牌 report protocol。
+    # C 层会拒绝品牌覆盖；这里显式保留通用描述，避免冒充 HUION/VEIKK/XP-Pen。
     POINTER_DEVICE_ARG=(
-        -device "usb-tablet,bus=xhci.0,vendorid=${TABLET_VID},productid=${TABLET_PID},manufacturer=${TABLET_MFR},product=${TABLET_PRODUCT}"
+        -device "usb-tablet,bus=xhci.0"
     )
 fi

@@ -12,8 +12,8 @@
 # 控制 socket 在 $VM_DIR/tpm-sock，QEMU 通过 -tpmdev emulator + -device tpm-crb
 # 把 TPM 设备暴露给 guest。SecureBoot + TPM 2.0 → 现代裸金属画像完整。
 #
-# 缺 swtpm 时优雅降级（不致命）：跳过 TPM 设备，但打 WARN——这时反作弊会判
-# "无 TPM"，建议 apt install swtpm swtpm-tools 后再启动。
+# 缺 swtpm/swtpm-tools 时：兼容模式告警并跳过；STRICT_HARDWARE=1 默认直接拒绝，
+# 不能把请求了 TPM 的 profile 静默启动成无 TPM 客机。
 # -------------------------------------------------------------------
 # TPM 默认启用（2026-05 stealth OVMF 已加 -D TPM2_ENABLE=TRUE 重 build，
 # Tcg2Dxe / Tcg2Pei / Tcg2ConfigDxe / Tcg2PlatformDxe 模块全在）。
@@ -24,6 +24,8 @@
 # 中文注释：本文件由 start-vm source，HERE 在入口脚本中解析为绝对目录。
 # shellcheck disable=SC1091
 source "$HERE/lib/sv-swtpm-lifecycle.sh"
+# shellcheck source=sv-tpm-private-ca.sh
+source "$HERE/lib/sv-tpm-private-ca.sh"
 
 # 内存 preflight 护栏（防 OOM-kill 连锁）—— 必须在起 swtpm daemon 之前，
 # 否则拒绝启动时会漏一个 swtpm 孤儿（见 project_swtpm_orphan_lock）。
@@ -62,7 +64,9 @@ fi
 TPM_ARGS=()
 if [[ "${TPM:-1}" == "0" ]]; then
     : # 显式禁用
-elif command -v swtpm >/dev/null 2>&1; then
+elif command -v swtpm >/dev/null 2>&1 \
+    && command -v swtpm_setup >/dev/null 2>&1 \
+    && command -v swtpm_localca >/dev/null 2>&1; then
     TPM_STATE_DIR="$VM_DIR/tpm-state"
     TPM_SOCK="$VM_DIR/tpm-sock"
     TPM_LOG="$VM_DIR/tpm.log"
@@ -76,7 +80,26 @@ elif command -v swtpm >/dev/null 2>&1; then
         )
         echo ">> swtpm:       [DRY_RUN] 跳过 init/daemon，仅输出 TPM 设备参数"
     else
-    mkdir -p "$TPM_STATE_DIR"
+    # state、CA 与配置全部限制在当前实例。系统级 /var/lib/swtpm-localca 保持
+    # root/tss 所有，绝不递归 chown 给启动 VM 的普通用户。
+    if ! sv_tpm_prepare_private_ca "$VM_DIR"; then
+        echo "ERROR: 无法准备每实例 swtpm 私有 CA" >&2
+        exit 1
+    fi
+    # 启动参数、runtime 登记和 stop/reaper 必须共享同一个规范化 state 路径。
+    # 这里同时验证 VM_DIR/state 的 owner、权限和符号链接，避免 daemon 在校验
+    # 路径与实际写入路径之间产生别名。
+    if ! TPM_STATE_DIR="$(sv_swtpm_prepare_state_dir "$VM_DIR/tpm-state")"; then
+        echo "ERROR: TPM state 目录不是当前用户的私有规范目录: $VM_DIR/tpm-state" >&2
+        exit 1
+    fi
+    if ! TPM_SOCK="$(sv_swtpm_peer_path "$VM_DIR/tpm-sock" "$TPM_STATE_DIR" tpm-sock)" \
+        || ! TPM_LOG="$(sv_swtpm_peer_path "$VM_DIR/tpm.log" "$TPM_STATE_DIR" tpm.log)"; then
+        echo "ERROR: TPM socket/log 必须位于经过校验的 VM_DIR 内且不能是符号链接" >&2
+        exit 1
+    fi
+    TPM_SETUP_CONFIG="$VM_DIR/tpm-config/swtpm_setup.conf"
+    TPM_CA_DIR="$VM_DIR/tpm-ca"
 
     # --- 清理上一轮被 SIGKILL 留下的孤儿 swtpm（关键护栏）---
     # QEMU 被强杀(KILL)时它的 swtpm daemon 不会被回收，会继续持有本实例
@@ -84,23 +107,42 @@ elif command -v swtpm >/dev/null 2>&1; then
     # "ready"），但 QEMU 发 CMD_INIT 抢不到锁 → tpm.log "Could not lock
     # access to lockfile" → "TPM result for CMD_INIT: 0x9 operation failed"，
     # QEMU 秒退（exit status 1）；每次重试还会再叠加一个孤儿。
-    # 这里在起 daemon 前按本实例 tpm-state 精确匹配清掉旧 swtpm——仅当没有
-    # 活着的 QEMU 占用本实例 tpm-sock 时才清（正常重启一定满足，绝不误杀
-    # 正在运行的其它实例：dir=/.../vms/N/tpm-state 是实例唯一串）。
-    if ! pgrep -af 'qemu-system' 2>/dev/null | grep -qF -- "path=$TPM_SOCK"; then
-        _tpm_orphans=()
-        mapfile -t _tpm_orphans < <(sv_swtpm_instance_pids "$INSTANCE")
-        if (( ${#_tpm_orphans[@]} > 0 )); then
-            echo ">> swtpm:       清理孤儿 swtpm（持本实例 tpm-state 锁但 QEMU 已不在）: ${_tpm_orphans[*]}"
-            sv_swtpm_stop_pids "$INSTANCE" "${_tpm_orphans[@]}"
+    # 这里在起 daemon 前按 runtime 登记的 canonical state 精确清理。登记可能
+    # 指向上一轮使用的另一个自定义 VM_DIR，因此不能只检查本轮目标目录。
+    _registered_tpm_state=""
+    _tpm_runtime_file="$(sv_swtpm_runtime_state_file "$INSTANCE")" || {
+        echo "ERROR: 无法解析 swtpm 私有 runtime 状态文件" >&2
+        exit 1
+    }
+    if [[ -e "$_tpm_runtime_file" || -L "$_tpm_runtime_file" ]]; then
+        if ! _registered_tpm_state="$(sv_swtpm_read_registered_state_dir "$INSTANCE")"; then
+            echo "ERROR: swtpm runtime 状态文件类型、权限或路径校验失败: $_tpm_runtime_file" >&2
+            exit 1
         fi
     fi
+    _tpm_state_candidates=("$TPM_STATE_DIR")
+    if [[ -n "$_registered_tpm_state" && "$_registered_tpm_state" != "$TPM_STATE_DIR" ]]; then
+        _tpm_state_candidates+=("$_registered_tpm_state")
+    fi
+    for _candidate_state in "${_tpm_state_candidates[@]}"; do
+        _candidate_sock="${_candidate_state%/*}/tpm-sock"
+        if pgrep -af 'qemu-system' 2>/dev/null | grep -qF -- "path=$_candidate_sock"; then
+            continue
+        fi
+        _tpm_orphans=()
+        mapfile -t _tpm_orphans < <(
+            sv_swtpm_instance_pids "$INSTANCE" "$_candidate_state"
+        )
+        if (( ${#_tpm_orphans[@]} > 0 )); then
+            echo ">> swtpm:       清理孤儿 swtpm（state=$_candidate_state）: ${_tpm_orphans[*]}"
+            sv_swtpm_stop_pids "$INSTANCE" "$_candidate_state" "${_tpm_orphans[@]}"
+        fi
+    done
 
     # 首次启动 / state 不完整时初始化 TPM 2.0 state（manufacturer info、EK 证书）。
     # 完整初始化产出 ~6KB permall（含 RSA EK + ECC EK + Platform cert + sha256 PCR banks）；
-    # 1.5KB 左右的"空 init"代表 swtpm_localca 创证书阶段失败（多半是
-    # /var/lib/swtpm-localca/ 只 root 能写）—— Windows 加载 TPM 驱动时找不到 EK
-    # 就报 "tpm.msc: 找不到兼容的 TPM"，必须重 init。
+    # 1.5KB 左右的"空 init"代表证书创建阶段失败；Windows 加载 TPM 驱动时
+    # 找不到 EK 会报无兼容 TPM，因此必须重建并在严格模式验证完整产物。
     _need_tpm_init=0
     if [[ ! -f "$TPM_STATE_DIR/tpm2-00.permall" ]]; then
         _need_tpm_init=1
@@ -112,33 +154,40 @@ elif command -v swtpm >/dev/null 2>&1; then
     fi
 
     if (( _need_tpm_init )); then
-        # 防御性：swtpm_localca statedir 默认 0750 swtpm:root；ubuntu 没权限会
-        # 静默跳过证书创建。提前修一次（如果是 root 跑的就跳过，sudo 才有意义）。
-        if [[ -d /var/lib/swtpm-localca && ! -w /var/lib/swtpm-localca ]]; then
-            echo ">> swtpm:       /var/lib/swtpm-localca 不可写，尝试 sudo chown ubuntu"
-            if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
-                sudo chown -R "$(id -u):$(id -g)" /var/lib/swtpm-localca 2>/dev/null || true
-            else
-                echo ">> WARN: 没有免密 sudo，跑 'sudo chown -R \$(id -u):\$(id -g) /var/lib/swtpm-localca' 一次后重启"
-            fi
-        fi
-
         echo ">> swtpm:       初始化 TPM 2.0 state at $TPM_STATE_DIR"
         if ! swtpm_setup --tpm2 --tpmstate "$TPM_STATE_DIR" \
+                --config "$TPM_SETUP_CONFIG" \
                 --create-ek-cert --create-platform-cert --lock-nvram \
                 --overwrite 2>&1 | tail -5; then
-            echo ">> WARN: swtpm_setup 失败；guest tpm.msc 会报找不到 TPM"
+            echo ">> WARN: swtpm_setup 失败；guest 将无法获得完整 TPM" >&2
+            if [[ "${STRICT_HARDWARE:-0}" == "1" ]]; then
+                echo "ERROR: 严格模式拒绝无完整 EK/Platform certificate 的 TPM" >&2
+                exit 1
+            fi
         fi
         # 二次确认大小：成功 init 应该 > 3KB
         if [[ -f "$TPM_STATE_DIR/tpm2-00.permall" ]]; then
             _sz=$(stat -c%s "$TPM_STATE_DIR/tpm2-00.permall")
             echo ">> swtpm:       permall=${_sz} bytes (含 EK + Platform cert 应 > 3000)"
         fi
+        if [[ ! -f "$TPM_STATE_DIR/tpm2-00.permall" ]] \
+            || (( $(stat -c%s "$TPM_STATE_DIR/tpm2-00.permall" 2>/dev/null || echo 0) < 3000 )); then
+            echo "ERROR: swtpm 初始化未生成完整 EK/Platform certificate state" >&2
+            if [[ "${STRICT_HARDWARE:-0}" == "1" ]]; then
+                exit 1
+            fi
+        fi
+        # swtpm_localca 生成的公开证书可能遵循系统 umask；目录本身已是 0700，
+        # 再统一去掉 group/other 位，确保备份或目录迁移后仍保持最小权限。
+        chmod -R go-rwx "$TPM_STATE_DIR" "$TPM_CA_DIR" "$VM_DIR/tpm-config"
     fi
 
     # 启动 swtpm daemon；clear-socket 避免 stale unix socket 残留
     rm -f "$TPM_SOCK"
-    sv_swtpm_start_daemon "$TPM_STATE_DIR" "$TPM_SOCK" "$TPM_LOG"
+    if ! sv_swtpm_start_daemon "$INSTANCE" "$TPM_STATE_DIR" "$TPM_SOCK" "$TPM_LOG"; then
+        echo "ERROR: swtpm daemon 启动或 runtime state 登记失败" >&2
+        exit 1
+    fi
     # 等 socket 出现（最多 2 秒）
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         [[ -S "$TPM_SOCK" ]] && break
@@ -146,6 +195,16 @@ elif command -v swtpm >/dev/null 2>&1; then
     done
     if [[ ! -S "$TPM_SOCK" ]]; then
         echo ">> WARN: swtpm 启动超时（2s），跳过 TPM——guest 将看不到 TPM 设备" >&2
+        _tpm_failed_pids=()
+        mapfile -t _tpm_failed_pids < <(
+            sv_swtpm_instance_pids "$INSTANCE" "$TPM_STATE_DIR"
+        )
+        sv_swtpm_stop_pids "$INSTANCE" "$TPM_STATE_DIR" "${_tpm_failed_pids[@]}"
+        sv_swtpm_unregister_state_dir "$INSTANCE" "$TPM_STATE_DIR" || true
+        if [[ "${STRICT_HARDWARE:-0}" == "1" ]]; then
+            echo "ERROR: 严格模式拒绝 TPM daemon 启动失败" >&2
+            exit 1
+        fi
     else
         TPM_ARGS=(
             -chardev "socket,id=chrtpm,path=$TPM_SOCK"
@@ -156,33 +215,18 @@ elif command -v swtpm >/dev/null 2>&1; then
     fi
     fi
 else
-    echo ">> WARN: swtpm 未安装，guest 将无 TPM 2.0；反作弊会判 sandbox。建议：" >&2
+    echo ">> WARN: swtpm/swtpm-tools 未完整安装，guest 将无 TPM 2.0。建议：" >&2
     echo ">>       sudo apt install swtpm swtpm-tools && 重启此脚本" >&2
+    if [[ "${STRICT_HARDWARE:-0}" == "1" ]]; then
+        echo "ERROR: 严格模式且 TPM=1，不能静默跳过 TPM" >&2
+        exit 1
+    fi
 fi
 
-# -------------------------------------------------------------------
-# DIMM 拓扑决策（裸金属"双卡槽主板"画像）：
-#
-# - RAM ≤ 4096 MiB：1 条 DIMM 占满，**1 个卡槽空**（最常见的低端配置）；
-# - RAM > 4096 MiB：2 条 DIMM 各占总量一半，双通道。
-#
-# SMBIOS Type 16 num-devices **固定 2**（主板物理卡槽数不变，跟 BOARD_POOL
-# 的 B350/H310 入门主板真实拓扑一致）。Type 17 由 QEMU 按 `-object
-# memory-backend-*` 数量自动克隆——1 backend = 1 Type 17 记录 = 1 个
-# Win32_PhysicalMemory；空槽不会单独 emit。
-#
-# MEM_PER_DIMM_MB 影响 stealth_smbios_args 选 2GB/4GB part 号：
-#   < 4096 → MEM_PART_2G   ≥ 4096 → MEM_PART_4G
-# -------------------------------------------------------------------
-if (( RAM <= 4096 )); then
-    NUM_DIMMS=1
-    PER_DIMM_MB=$RAM
-else
-    NUM_DIMMS=2
-    PER_DIMM_MB=$(( RAM / 2 ))
-fi
-export MEM_PER_DIMM_MB="$PER_DIMM_MB"
-export T16_NUM_DEVICES=2   # 物理双卡槽不变，即便只插 1 条
+# DIMM 拓扑与合法容量由可单测的 manifest 解析器统一计算。
+# shellcheck source=stealth-memory-topology.sh
+source "$HERE/lib/stealth-memory-topology.sh"
+stealth_resolve_memory_topology
 
 # Override default PCI subsystem IDs for devices that don't set their own.
 # **2026-05 修复**：之前 hardcoded ASUS B350-PLUS (1043:8694) 无视 BOARD_MFR；

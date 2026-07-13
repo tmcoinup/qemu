@@ -148,6 +148,23 @@ Section "Tools" SectionTools
     File "${BINDIR}\qemu-io.exe"
 SectionEnd
 
+!ifdef CONFIG_VMATE_RUNTIME
+; 下游 x86_64 构建才定义此开关。保留 deploy 相对目录，使 PowerShell 模块向上
+; 定位安装根目录后，仍能找到 deploy\hardware 下的两个共享事实源。
+Section "VMate Runtime (required)" SectionVMateRuntime
+    SectionIn RO
+    SetOutPath "$INSTDIR"
+    File "${BINDIR}\qemu-img.exe"
+    File "${BINDIR}\qemu-fb-shm-stream.exe"
+    SetOutPath "$INSTDIR\deploy\windows"
+    File /r "${BINDIR}\deploy\windows\*.*"
+    SetOutPath "$INSTDIR\deploy\hardware"
+    File /r "${BINDIR}\deploy\hardware\*.*"
+    SetOutPath "$INSTDIR\deploy\docs"
+    File /r "${BINDIR}\deploy\docs\*.*"
+SectionEnd
+!endif
+
 SectionGroup "System Emulations" SectionSystem
 
 !include "${BINDIR}\system-emulations.nsh"
@@ -212,6 +229,10 @@ Section "Uninstall"
     Delete "$INSTDIR\openbios-*"
     Delete "$INSTDIR\qemu-img.exe"
     Delete "$INSTDIR\qemu-io.exe"
+!ifdef CONFIG_VMATE_RUNTIME
+    Delete "$INSTDIR\qemu-fb-shm-stream.exe"
+    RMDir /r "$INSTDIR\deploy"
+!endif
     Delete "$INSTDIR\qemu.exe"
     Delete "$INSTDIR\qemu-system-*.exe"
     RMDir /r "$INSTDIR\dtb"
@@ -232,6 +253,9 @@ SectionEnd
     !insertmacro MUI_DESCRIPTION_TEXT ${SectionSystem}  "System emulation."
 !include "${BINDIR}\system-mui-text.nsh"
     !insertmacro MUI_DESCRIPTION_TEXT ${SectionTools} "Tools."
+!ifdef CONFIG_VMATE_RUNTIME
+    !insertmacro MUI_DESCRIPTION_TEXT ${SectionVMateRuntime} "VMate WHPX launcher, hardware catalogs, snapshot and streaming tools."
+!endif
 !ifdef DLLDIR
     !insertmacro MUI_DESCRIPTION_TEXT ${SectionDll}   "Runtime Libraries (DLL)."
 !endif

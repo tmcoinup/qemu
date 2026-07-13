@@ -6,6 +6,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 
+# 本用例只检查显示 argv，不应随 CI 宿主是 AMD/Intel 或是否开放 /dev/kvm 而变化。
+# 显式进入兼容 dry-run，并注入一个 manifest 中真实启用的 Intel 候选。
+export STRICT_HARDWARE=0
+export STEALTH_KVM_AVAILABLE=1
+export STEALTH_KVM_TSC_CONTROL=1
+export STEALTH_KVM_GET_TSC_KHZ=1
+export STEALTH_KVM_TSC_KHZ=3600000
+export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+export STEALTH_HOST_CPU_MAX_MHZ=5000
+
 fail() {
     echo "FAIL: $*" >&2
     exit 1

@@ -27,9 +27,8 @@ stealth_print_profile() {
     fi
 
     # ---- 显卡 / 显示器 ----
-    # virtio-vga 主 ID 留 1AF4:1050（virtio），subsys 改成 GPU_PCI_VEN:DEV 让 PCI
-    # 树看见 NVIDIA / AMD 子系统；nvapi64.dll shim 把 WMI 名也对齐。
-    # EDID 由 patch 0009 加的 edid-vendor/edid-name/edid-serial cmdline 选项从 profile 注入。
+    # 本分支不做 GPU passthrough/vGPU，客体主设备仍是 virtio；GPU_POOL 的名称只为
+    # 旧显示标签兼容，不应在摘要中冒充已实现的物理显卡。EDID 则来自完整组件目录。
     local vga_kind
     if [[ "${VGA_DEV:-virtio-vga}" == virtio-vga-gl* ]]; then
         vga_kind="virtio-vga-gl (virgl 3D)"
@@ -45,17 +44,16 @@ stealth_print_profile() {
     fi
 
     # ---- 网卡 / 声卡 ----
-    local nic_line="e1000e (Intel 82574L PCIe Gigabit)  MAC=${NIC_MAC}"
-    local audio_line="Intel ICH9 HDA + hda-duplex codec (audiodev=none, 类 Realtek ALC892)"
+    local nic_line="e1000e (Intel 82574L add-in, subsystem ${NIC_SUBSYSTEM_VEN}:${NIC_SUBSYSTEM_DEV})  MAC=${NIC_MAC}"
+    local audio_line="${AUDIO_CONTROLLER_PCI_VEN}:${AUDIO_CONTROLLER_PCI_DEV} HDA + ${AUDIO_CODEC} 协议身份（通用 duplex 拓扑）"
 
     # ---- 键盘 / 鼠标 ----
-    # 从 profile 读 VID/PID/manufacturer/product/serial，配合 patch 0010
-    # 让 -device usb-kbd vendorid= productid= manufacturer= product= serialnumber=
-    # 把这些值实际注入 USB 描述符（不再编译期写死 Microsoft）。
-    local kbd_line="usb-kbd → ${KBD_PRODUCT} (USB ${KBD_VID/0x/}:${KBD_PID/0x/})"
+    # 键鼠目录与 C 内固定 report/config descriptor 一一对应，且 iSerialNumber=0。
+    # tablet 明确为 QEMU 通用绝对指针，不能打印历史 HUION profile 字段。
+    local kbd_line="usb-kbd → ${KBD_PRODUCT} (USB ${KBD_VID/0x/}:${KBD_PID/0x/}, bcd=${KBD_BCD_DEVICE})"
     local mouse_line
     if [[ "${USB_RELATIVE_MOUSE:-0}" == "1" ]]; then
-        mouse_line="usb-mouse → ${MOUSE_PRODUCT} (USB ${MOUSE_VID/0x/}:${MOUSE_PID/0x/}, 相对坐标)"
+        mouse_line="usb-mouse → ${MOUSE_PRODUCT} (USB ${MOUSE_VID/0x/}:${MOUSE_PID/0x/}, bcd=${MOUSE_BCD_DEVICE}, 相对坐标)"
     else
         mouse_line="usb-tablet → ${TABLET_PRODUCT} (USB ${TABLET_VID/0x/}:${TABLET_PID/0x/}, 绝对坐标)"
     fi
@@ -70,10 +68,10 @@ stealth_print_profile() {
   System SN: $SYSTEM_SERIAL   SKU=$SYSTEM_SKU
   BIOS     : $BIOS_VENDOR $BIOS_VERSION ($BIOS_DATE)
   Chassis  : $CHASSIS_TYPE  SN=$CHASSIS_SERIAL
-  GPU      : $GPU_NAME ($GPU_VENDOR, ${GPU_PCI_VEN}:${GPU_PCI_DEV} rev=${GPU_REV}, ${GPU_RAM_MB}MB, BIOS=$GPU_BIOS)
+  GPU      : virtio display；旧标签=$GPU_NAME（${GPU_IDENTITY_FIDELITY}，不计真机化）
   Display  : ${vga_kind}, EDID 1920×1080
-  显示器   : ${EDID_VENDOR} ${EDID_NAME}  ~${diag_inch}\" (${EDID_WIDTH_MM}×${EDID_HEIGHT_MM} mm)  SN=${EDID_SERIAL}
-  NVMe     : $NVME_MODEL  fw=$NVME_FIRMWARE  SN=$NVME_SERIAL  size=$(printf '%.1f' "$(echo "$NVME_SIZE_BYTES / 1024^3" | bc -l 2>/dev/null || echo 0)") GiB ($NVME_SIZE_BYTES B)
+  显示器   : ${EDID_VENDOR}:${EDID_PRODUCT_ID} ${EDID_NAME}  ~${diag_inch}\" (${EDID_WIDTH_MM}×${EDID_HEIGHT_MM} mm)  SN=${EDID_SERIAL}
+  NVMe     : $NVME_MODEL  fw=$NVME_FIRMWARE  PCI=${NVME_PCI_VEN}:${NVME_PCI_DEV}/${NVME_SUBSYS_VEN}:${NVME_SUBSYS_DEV}  SN=$NVME_SERIAL  size=$(printf '%.1f' "$(echo "$NVME_SIZE_BYTES / 1024^3" | bc -l 2>/dev/null || echo 0)") GiB
   Memory   : ${mem_line}
   网卡     : ${nic_line}
   声卡     : ${audio_line}

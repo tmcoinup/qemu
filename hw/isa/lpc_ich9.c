@@ -711,6 +711,41 @@ static void ich9_lpc_realize(PCIDevice *d, Error **errp)
     ISABus *isa_bus;
     uint32_t irq;
 
+    /*
+     * 该实验属性只用于同族 Intel PCH 的 PCI ID 兼容，不改变 ICH9 的 ACPI、
+     * LPC 与中断路由语义；超出字段宽度的值直接拒绝，避免静默截断。
+     */
+    if ((lpc->x_pci_vendor_id != UINT32_MAX &&
+         lpc->x_pci_vendor_id > UINT16_MAX) ||
+        (lpc->x_pci_device_id != UINT32_MAX &&
+         lpc->x_pci_device_id > UINT16_MAX) ||
+        (lpc->x_pci_revision != UINT32_MAX &&
+         lpc->x_pci_revision > UINT8_MAX) ||
+        (lpc->x_pci_sub_vendor_id != UINT32_MAX &&
+         lpc->x_pci_sub_vendor_id > UINT16_MAX) ||
+        (lpc->x_pci_sub_device_id != UINT32_MAX &&
+         lpc->x_pci_sub_device_id > UINT16_MAX)) {
+        error_setg(errp, "ICH9-LPC x-pci identity value is out of range");
+        return;
+    }
+    if (lpc->x_pci_vendor_id != UINT32_MAX) {
+        pci_config_set_vendor_id(d->config, lpc->x_pci_vendor_id);
+    }
+    if (lpc->x_pci_device_id != UINT32_MAX) {
+        pci_config_set_device_id(d->config, lpc->x_pci_device_id);
+    }
+    if (lpc->x_pci_revision != UINT32_MAX) {
+        pci_config_set_revision(d->config, lpc->x_pci_revision);
+    }
+    if (lpc->x_pci_sub_vendor_id != UINT32_MAX) {
+        pci_set_word(d->config + PCI_SUBSYSTEM_VENDOR_ID,
+                     lpc->x_pci_sub_vendor_id);
+    }
+    if (lpc->x_pci_sub_device_id != UINT32_MAX) {
+        pci_set_word(d->config + PCI_SUBSYSTEM_ID,
+                     lpc->x_pci_sub_device_id);
+    }
+
     if ((lpc->smi_host_features & BIT_ULL(ICH9_LPC_SMI_F_CPU_HOT_UNPLUG_BIT)) &&
         !(lpc->smi_host_features & BIT_ULL(ICH9_LPC_SMI_F_CPU_HOTPLUG_BIT))) {
         /*
@@ -844,6 +879,16 @@ static const Property ich9_lpc_properties[] = {
                      pm.swsmi_timer_enabled, true),
     DEFINE_PROP_BOOL("x-smi-periodic-timer", ICH9LPCState,
                      pm.periodic_timer_enabled, true),
+    DEFINE_PROP_UINT32("x-pci-vendor-id", ICH9LPCState, x_pci_vendor_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-device-id", ICH9LPCState, x_pci_device_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-revision", ICH9LPCState, x_pci_revision,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-vendor-id", ICH9LPCState,
+                       x_pci_sub_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-device-id", ICH9LPCState,
+                       x_pci_sub_device_id, UINT32_MAX),
 };
 
 static void ich9_send_gpe(AcpiDeviceIf *adev, AcpiEventStatusBits ev)

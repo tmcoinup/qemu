@@ -29,8 +29,17 @@ endif
 if host_os in ['linux', 'windows']
   system_ss.add(when: pixman, if_true: files(
     'fb-shm.c',
+    'fb-shm-control.c',
+    'fb-shm-control-request.c',
+    'fb-shm-display.c',
+    'fb-shm-gl-context.c',
+    'fb-shm-gl-export.c',
+    'fb-shm-gl-frame.c',
     'fb-shm-gpu.c',
     'fb-shm-gpu-common.c',
+    'fb-shm-listener.c',
+    'fb-shm-mapping.c',
+    'fb-shm-qom.c',
   ))
 endif
 system_ss.add(when: cocoa, if_true: files('cocoa.m'))

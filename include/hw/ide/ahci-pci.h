@@ -19,6 +19,12 @@ struct AHCIPCIState {
 
     AHCIState ahci;
     IRQState irq;
+    /* 仅覆盖 PCI 身份；端口与寄存器行为仍是 ICH9 AHCI。 */
+    uint32_t x_pci_vendor_id;
+    uint32_t x_pci_device_id;
+    uint32_t x_pci_revision;
+    uint32_t x_pci_sub_vendor_id;
+    uint32_t x_pci_sub_device_id;
 };
 
 #endif

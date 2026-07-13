@@ -68,6 +68,13 @@ struct ICH9LPCState {
     Notifier machine_ready;
 
     qemu_irq gsi[IOAPIC_NUM_PINS];
+
+    /* 仅覆盖 PCI 身份；LPC/ACPI/中断路由行为仍是 ICH9。 */
+    uint32_t x_pci_vendor_id;
+    uint32_t x_pci_device_id;
+    uint32_t x_pci_revision;
+    uint32_t x_pci_sub_vendor_id;
+    uint32_t x_pci_sub_device_id;
 };
 
 #define ICH9_MASK(bit, ms_bit, ls_bit) \

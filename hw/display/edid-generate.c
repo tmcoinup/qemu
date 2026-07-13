@@ -286,27 +286,20 @@ static void edid_desc_text(uint8_t *desc, uint8_t type,
     desc[5 + len] = '\n';
 }
 
-static void edid_desc_ranges(uint8_t *desc)
+static void edid_desc_ranges(uint8_t *desc, const qemu_edid_info *info)
 {
     edid_desc_type(desc, 0xfd);
 
     /*
-     * Stealth: Samsung S24F350F datasheet limits.
-     *   vfreq        50 -> 75  Hz
-     *   hfreq        30 -> 83  kHz
-     *   max dot clock         170 MHz
-     *
-     * The previous wide-open 50-125 / 30-160 / 2550 MHz range is itself
-     * a virtual-display fingerprint — physical monitors have narrow,
-     * spec-bounded scan limits.
+     * 扫描范围属于具体面板规格，不能在 AOC/BenQ/Dell profile 中继续写死
+     * Samsung S24F350F 的数值。调用方未提供时，生成器会根据首选 DTD
+     * 算出保守且内部自洽的范围。
      */
-    desc[5] =  50;
-    desc[6] =  75;
-
-    desc[7] =  30;
-    desc[8] =  83;
-
-    desc[9] = 170 / 10;
+    desc[5] = info->min_vfreq_hz;
+    desc[6] = info->max_vfreq_hz;
+    desc[7] = info->min_hfreq_khz;
+    desc[8] = info->max_hfreq_khz;
+    desc[9] = DIV_ROUND_UP(info->max_pixel_clock_mhz, 10);
 
     /* no extended timing information */
     desc[10] = 0x01;
@@ -504,6 +497,34 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     }
 
     generate_timings(&timings, refresh_rate, info->prefx, info->prefy);
+    if (!info->product_id) {
+        /* 默认 Samsung 画像保留真实产品码；其他画像必须由 manifest 提供。 */
+        info->product_id = !strcmp(info->vendor, "SAM") &&
+                           !strncmp(info->name, "S24F350", 7) ? 0x0f65 : 1;
+    }
+    if (!info->manufacture_year) {
+        info->manufacture_year = 2020;
+    }
+    if (!info->video_input) {
+        info->video_input = 0x80; /* digital，接口类型未声明 */
+    }
+    if (!info->min_vfreq_hz) {
+        info->min_vfreq_hz = MIN(48U, DIV_ROUND_UP(refresh_rate, 1000));
+    }
+    if (!info->max_vfreq_hz) {
+        info->max_vfreq_hz = MAX(60U, DIV_ROUND_UP(refresh_rate, 1000));
+    }
+    if (!info->min_hfreq_khz) {
+        info->min_hfreq_khz = 30;
+    }
+    if (!info->max_hfreq_khz) {
+        uint64_t line_rate = (uint64_t)refresh_rate *
+                             (info->prefy + timings.yblank);
+        info->max_hfreq_khz = DIV_ROUND_UP(line_rate, 1000000) + 5;
+    }
+    if (!info->max_pixel_clock_mhz) {
+        info->max_pixel_clock_mhz = DIV_ROUND_UP(timings.clock, 100) + 10;
+    }
     if (info->prefx >= 4096 || info->prefy >= 4096 || timings.clock >= 65536) {
         large_screen = 1;
     }
@@ -538,14 +559,8 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     uint16_t vendor_id = ((((info->vendor[0] - '@') & 0x1f) << 10) |
                           (((info->vendor[1] - '@') & 0x1f) <<  5) |
                           (((info->vendor[2] - '@') & 0x1f) <<  0));
-    /*
-     * deploy stealth: avoid the recognizable 0x1234 "QEMU Monitor"
-     * product code. SAM:0x0F65 is the real product code Samsung's
-     * S24F350F panel reports — confirmed against multiple Linux EDID
-     * dumps in the wild — so MONITOR\SAM0F65 is a plausible HardwareID
-     * for the spoofed name "Samsung S24F350F".
-     */
-    uint16_t model_nr = 0x0F65;
+    /* product code 来自 profile；仅默认 Samsung 画像回落到 0x0F65。 */
+    uint16_t model_nr = info->product_id;
     /*
      * EDID byte 12-15 is a 32-bit binary serial. atoi() on a Samsung-style
      * alphanumeric serial like "H4ZK500001VL" returns 0 because parsing
@@ -573,9 +588,9 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     stw_le_p(edid + 10, model_nr);
     stl_le_p(edid + 12, serial_nr);
 
-    /* manufacture week 32, year 2018 — within S24F350F production span */
-    edid[16] = 32;
-    edid[17] = 2018 - 1990;
+    edid[16] = info->manufacture_week;
+    edid[17] = info->manufacture_year >= 1990 ?
+               MIN(info->manufacture_year - 1990, 255) : 0;
 
     /* edid version */
     edid[18] = 1;
@@ -584,12 +599,7 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
 
     /* =============== basic display parameters =============== */
 
-    /*
-     * video input: digital, 8 bpc, HDMI-a.
-     * S24F350F's only digital input is HDMI; reporting DisplayPort on
-     * a budget Samsung 1080p panel is implausible.
-     */
-    edid[20] = 0xa3;
+    edid[20] = info->video_input;
 
     /* screen size: undefined */
     edid[21] = width_mm / 10;
@@ -626,20 +636,17 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
                          width_mm, height_mm);
         desc = edid_desc_next(edid, dta, desc);
 
-        /*
-         * DTD2: 1600×900 (16:9)。这一描述符槽原本放 Established-Timings-III
-         * (0xF7)，但我们已不发 generic standard timings（见 edid_fill_modes：
-         * 16:9 的 std timing 会被 Windows 误读成 16:10）。这里放一条 1600×900
-         * 精确 DTD，仿真实显示器常见的次级 detailed timing 增强 EDID 真实性。
-         * 注意：Windows/viogpudo 的分辨率下拉只采纳【首条 DTD + CEA VIC +
-         * established】，不采纳第二条 DTD，所以 1600×900 不会出现在下拉里
-         * （这是已知的 Windows EDID 行为，非本代码缺陷）。仅当 maxx/maxy 放得下
-         * 1600×900 时发。
-         */
-        if ((!info->maxx || info->maxx >= 1600) &&
-            (!info->maxy || info->maxy >= 900)) {
-            generate_timings(&timings2, refresh_rate, 1600, 900);
-            edid_desc_timing(desc, &timings2, 1600, 900, width_mm, height_mm);
+        /* 第二条 DTD 只有 manifest 明确声明时才发布，避免所有品牌共用 1600×900。 */
+        if (info->secondary_x && info->secondary_y &&
+            (!info->maxx || info->maxx >= info->secondary_x) &&
+            (!info->maxy || info->maxy >= info->secondary_y)) {
+            uint32_t secondary_refresh = info->secondary_refresh_rate ?
+                                         info->secondary_refresh_rate :
+                                         refresh_rate;
+            generate_timings(&timings2, secondary_refresh,
+                             info->secondary_x, info->secondary_y);
+            edid_desc_timing(desc, &timings2, info->secondary_x,
+                             info->secondary_y, width_mm, height_mm);
             desc = edid_desc_next(edid, dta, desc);
         }
     }
@@ -651,7 +658,7 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
      * so dta descriptor offsets don't move any more.
      */
 
-    edid_desc_ranges(desc);
+    edid_desc_ranges(desc, info);
     desc = edid_desc_next(edid, dta, desc);
 
     if (desc && info->name) {

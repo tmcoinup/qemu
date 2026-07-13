@@ -1,0 +1,100 @@
+name: VMate hardware consistency
+
+on:
+  push:
+    branches: [vmate]
+  pull_request:
+    paths:
+      - 'deploy/**'
+      - 'hw/**'
+      - 'include/hw/**'
+      - 'scripts/nsis.py'
+      - '.github/workflows/vmate-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell51:
+    name: Windows PowerShell 5.1 runtime checks
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run native PowerShell 5.1 compatibility and transaction tests
+        shell: powershell
+        run: |
+          $powershell51 = Join-Path $env:SystemRoot `
+            'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $powershell51 -NoLogo -NoProfile -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File deploy/scripts/tests/test_windows_powershell51.ps1 `
+            -RepoRoot '${{ github.workspace }}'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell 5.1 tests failed: $LASTEXITCODE"
+          }
+
+  launcher-tests:
+    name: Launcher and manifest tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install static-analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes jq shellcheck
+      - name: Validate shell and Python syntax
+        run: |
+          find deploy/scripts deploy/tools -type f -name '*.sh' -print0 \
+            | xargs -0 -r -n1 bash -n
+          python3 -m compileall -q \
+            deploy/scripts/kvm-capabilities.py \
+            deploy/scripts/vm-cpu-pinner.py \
+            deploy/scripts/tests/run-vmate-tests.py
+      - name: Check newly privileged or asynchronous scripts
+        run: |
+          shellcheck -x -S warning \
+            deploy/scripts/host-cpu-isolate.sh \
+            deploy/scripts/host-cpu-isolate-runtime.sh \
+            deploy/scripts/host-performance.sh \
+            deploy/scripts/setup-host-helpers.sh \
+            deploy/scripts/stop-vm.sh \
+            deploy/scripts/lib/sv-host-capabilities.sh \
+            deploy/scripts/lib/sv-host-helpers.sh \
+            deploy/scripts/lib/sv-cpupin.sh
+      - name: Run isolated regression tests in parallel
+        run: python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4
+
+  qemu-build:
+    name: QEMU x86_64 build with warnings as errors
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install minimal QEMU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential libglib2.0-dev libpixman-1-dev ninja-build \
+            pkg-config python3-venv python3-setuptools python3-wheel
+      - name: Configure a minimal x86_64 system build
+        run: |
+          mkdir build-ci
+          cd build-ci
+          ../configure \
+            --target-list=x86_64-softmmu \
+            --enable-werror \
+            --disable-docs
+      - name: Compile
+        run: |
+          ninja -C build-ci -j2 \
+            qemu-system-x86_64 \
+            tests/unit/test-smbus-eeprom-spd
+      - name: Run DDR4 SPD density unit test
+        run: build-ci/tests/unit/test-smbus-eeprom-spd --tap
+      - name: Run C hardware identity checks
+        env:
+          QEMU: ${{ github.workspace }}/build-ci/qemu-system-x86_64
+        run: bash deploy/scripts/tests/test_c_hardware_identity.sh

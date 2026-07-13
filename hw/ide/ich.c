@@ -61,6 +61,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/pci.h"
 #include "migration/vmstate.h"
@@ -69,6 +70,7 @@
 #include "system/dma.h"
 #include "hw/ide/pci.h"
 #include "hw/ide/ahci-pci.h"
+#include "hw/core/qdev-properties.h"
 #include "ahci-internal.h"
 
 #define ICH9_MSI_CAP_OFFSET     0x80
@@ -128,6 +130,38 @@ static void pci_ich9_ahci_realize(PCIDevice *dev, Error **errp)
     d = ICH9_AHCI(dev);
     int ret;
 
+    /* x-pci-* 仅覆盖配置空间身份，AHCI 端口/寄存器仍按 ICH9 实现。 */
+    if ((d->x_pci_vendor_id != UINT32_MAX &&
+         d->x_pci_vendor_id > UINT16_MAX) ||
+        (d->x_pci_device_id != UINT32_MAX &&
+         d->x_pci_device_id > UINT16_MAX) ||
+        (d->x_pci_revision != UINT32_MAX &&
+         d->x_pci_revision > UINT8_MAX) ||
+        (d->x_pci_sub_vendor_id != UINT32_MAX &&
+         d->x_pci_sub_vendor_id > UINT16_MAX) ||
+        (d->x_pci_sub_device_id != UINT32_MAX &&
+         d->x_pci_sub_device_id > UINT16_MAX)) {
+        error_setg(errp, "ich9-ahci x-pci identity value is out of range");
+        return;
+    }
+    if (d->x_pci_vendor_id != UINT32_MAX) {
+        pci_config_set_vendor_id(dev->config, d->x_pci_vendor_id);
+    }
+    if (d->x_pci_device_id != UINT32_MAX) {
+        pci_config_set_device_id(dev->config, d->x_pci_device_id);
+    }
+    if (d->x_pci_revision != UINT32_MAX) {
+        pci_config_set_revision(dev->config, d->x_pci_revision);
+    }
+    if (d->x_pci_sub_vendor_id != UINT32_MAX) {
+        pci_set_word(dev->config + PCI_SUBSYSTEM_VENDOR_ID,
+                     d->x_pci_sub_vendor_id);
+    }
+    if (d->x_pci_sub_device_id != UINT32_MAX) {
+        pci_set_word(dev->config + PCI_SUBSYSTEM_ID,
+                     d->x_pci_sub_device_id);
+    }
+
     d->ahci.ports = 6;
     ahci_realize(&d->ahci, DEVICE(dev), pci_get_address_space(dev));
 
@@ -176,6 +210,19 @@ static void pci_ich9_uninit(PCIDevice *dev)
     ahci_uninit(&d->ahci);
 }
 
+static const Property ich9_ahci_properties[] = {
+    DEFINE_PROP_UINT32("x-pci-vendor-id", AHCIPCIState, x_pci_vendor_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-device-id", AHCIPCIState, x_pci_device_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-revision", AHCIPCIState, x_pci_revision,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-vendor-id", AHCIPCIState,
+                       x_pci_sub_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-device-id", AHCIPCIState,
+                       x_pci_sub_device_id, UINT32_MAX),
+};
+
 static void ich_ahci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -189,6 +236,7 @@ static void ich_ahci_class_init(ObjectClass *klass, const void *data)
     k->class_id = PCI_CLASS_STORAGE_SATA;
     dc->vmsd = &vmstate_ich9_ahci;
     device_class_set_legacy_reset(dc, pci_ich9_reset);
+    device_class_set_props(dc, ich9_ahci_properties);
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }
 

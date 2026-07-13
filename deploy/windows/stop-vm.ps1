@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     通过 QMP 让 Windows 宿主上的 patched QEMU 优雅退出。

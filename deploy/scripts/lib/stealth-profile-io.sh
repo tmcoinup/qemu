@@ -1,20 +1,35 @@
 # ------------------------------------------------------------------
 # 持久化 / 载入
 # ------------------------------------------------------------------
+_STEALTH_PROFILE_IO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_STEALTH_PROFILE_IO_DIR/stealth-profile-verify.sh"
+source "$_STEALTH_PROFILE_IO_DIR/stealth-component-profile-verify.sh"
+
 _STEALTH_PROFILE_VARS=(
-    CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET CPU_MODEL CPU_SERIAL CPU_ASSET
+    PLATFORM_SCHEMA_VERSION PLATFORM_CATALOG_REVISION PLATFORM_ID PLATFORM_STATUS PLATFORM_RELEASE_YEAR
+    COMPONENT_SCHEMA_VERSION COMPONENT_CATALOG_REVISION
+    CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_TSC_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET CPU_MODEL CPU_SERIAL CPU_ASSET
+    CPU_CORES CPU_THREADS CPU_PHYS_BITS CPU_FEATURES CPU_SMBIOS_UPGRADE CPU_SMBIOS_VOLTAGE CPU_SMBIOS_EXT_CLOCK CPU_SMBIOS_CHARACTERISTICS
+    CPU_IGPU_PRESENT CPU_IGPU_STATE CPU_IGPU_MODEL
     BOARD_MFR BOARD_PRODUCT BOARD_FAMILY BOARD_VERSION BOARD_SERIAL BOARD_ASSET BOARD_SUBSYS_VEN BOARD_SUBSYS_DEV
-    SYSTEM_MFR SYSTEM_PRODUCT SYSTEM_FAMILY SYSTEM_VERSION SYSTEM_SERIAL SYSTEM_SKU
+    BOARD_DIMM_SLOTS BOARD_MAX_MEMORY_GIB PCH_MODEL PCIE_GENERATION
+    SYSTEM_MFR SYSTEM_PRODUCT SYSTEM_FAMILY SYSTEM_CHASSIS_TYPE SYSTEM_VERSION SYSTEM_SERIAL SYSTEM_SKU
     BIOS_VENDOR BIOS_VERSION BIOS_DATE
     CHASSIS_TYPE CHASSIS_SERIAL
-    NIC_MAC UUID
-    GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV
-    NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES
-    MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SERIAL MEM_TOTAL_MB
-    EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL
-    KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_SERIAL
-    MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT MOUSE_SERIAL
-    TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT TABLET_SERIAL
+    NIC_MAC NIC_VENDOR NIC_MODEL NIC_PCI_VEN NIC_PCI_DEV NIC_SUBSYSTEM_VEN NIC_SUBSYSTEM_DEV NIC_MAC_OUI NIC_ATTACHMENT BOARD_NIC_STATE UUID
+    ROOT_PORT_PCI_VEN ROOT_PORT_PCI_DEV ROOT_PORT_REV XHCI_PCI_VEN XHCI_PCI_DEV XHCI_REV
+    MCH_PCI_VEN MCH_PCI_DEV MCH_REV LPC_PCI_VEN LPC_PCI_DEV LPC_REV SMBUS_PCI_VEN SMBUS_PCI_DEV SMBUS_REV AHCI_PCI_VEN AHCI_PCI_DEV AHCI_REV
+    AUDIO_VENDOR AUDIO_CODEC AUDIO_CODEC_ID AUDIO_CODEC_REVISION AUDIO_CODEC_SUBSYSTEM_ID AUDIO_IDENTITY_FIDELITY AUDIO_CONTROLLER_PCI_VEN AUDIO_CONTROLLER_PCI_DEV
+    NVME_MAX_PCIE_GENERATION NVME_LANES NVME_BOOT_SUPPORTED NVME_ATTACHMENT
+    GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV GPU_IDENTITY_FIDELITY
+    NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV NVME_SUBNQN_TEMPLATE NVME_SUBNQN
+    MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_RATED_MTS MEM_CONFIGURED_MTS MEM_SERIAL MEM_TOTAL_MB MEM_TYPE MEM_CHANNELS MEM_MAX_MTS MEM_ALLOWED_MTS
+    MEM_VOLTAGE_MV MEM_RANK MEM_MODULE_MB MEM_ALLOWED_TOTAL_MB MEM_MAX_CAPACITY_MB
+    EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT
+    EDID_MIN_VFREQ_HZ EDID_MAX_VFREQ_HZ EDID_MIN_HFREQ_KHZ EDID_MAX_HFREQ_KHZ EDID_MAX_PIXEL_CLOCK_MHZ EDID_SECONDARY_XRES EDID_SECONDARY_YRES EDID_SECONDARY_REFRESH_RATE
+    KBD_COMPONENT_ID KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_SERIAL KBD_BCD_DEVICE KBD_DESCRIPTOR_FIDELITY
+    MOUSE_COMPONENT_ID MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT MOUSE_SERIAL MOUSE_BCD_DEVICE MOUSE_DESCRIPTOR_FIDELITY
+    TABLET_COMPONENT_ID TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT TABLET_SERIAL TABLET_BCD_DEVICE TABLET_DESCRIPTOR_FIDELITY
 )
 
 stealth_have_profile() { [[ -s "$1" ]]; }
@@ -111,6 +126,7 @@ _stealth_stable_mac() {
 
 stealth_load_profile() {
     local path="$1"
+    local -A _stealth_present_keys=()
 
     # 安全解析（P1#6）：绝不 source/eval profile——被篡改的 profile 否则等同
     # 执行任意 shell 代码（多个 root 脚本读 profile 后还会挂 NTFS / 写 hive）。
@@ -149,6 +165,7 @@ stealth_load_profile() {
         # %q 反转义：把每个 \X 还原为 X（不经过 shell 解析，安全）
         val="$(printf '%s' "$rawval" | sed -E 's/\\(.)/\1/g')"
         printf -v "$key" '%s' "$val"
+        _stealth_present_keys["$key"]=1
     done < "$path"
 
     # 老 profile 兼容：缺字段补默认（AMD Ryzen3-1200 + GTX 1050 + Samsung 970 PRO）
@@ -161,6 +178,46 @@ stealth_load_profile() {
     : "${CPU_PROC_FAMILY:=0x139}"
     : "${CPU_SOCKET:=AM4}"
     : "${CPU_MODEL:=Ryzen3-1200}"
+
+    # Schema 1 以前的 profile 没有整机平台 ID。继续允许读取是为了不破坏已安装
+    # Windows 的身份，但明确标为 legacy；新建 profile 必须由 manifest 生成。
+    : "${PLATFORM_SCHEMA_VERSION:=0}"
+    : "${PLATFORM_CATALOG_REVISION:=legacy}"
+    : "${PLATFORM_ID:=legacy-unversioned}"
+    : "${PLATFORM_STATUS:=legacy}"
+    : "${PLATFORM_RELEASE_YEAR:=0}"
+    : "${COMPONENT_SCHEMA_VERSION:=0}"
+    : "${COMPONENT_CATALOG_REVISION:=legacy}"
+
+    if [[ -z "${CPU_CORES:-}" || -z "${CPU_THREADS:-}" ]]; then
+        case "$CPU_NAME" in
+            *Athlon*II*X2*) CPU_CORES=2; CPU_THREADS=2 ;;
+            *)              CPU_CORES=4; CPU_THREADS=4 ;;
+        esac
+    fi
+    : "${CPU_TSC_MHZ:=$CPU_CUR_MHZ}"
+    if [[ "$CPU_VENDOR" == "AuthenticAMD" ]]; then
+        : "${CPU_PHYS_BITS:=43}"
+        : "${CPU_FEATURES:=+invtsc,+tsc-deadline,+topoext}"
+    else
+        : "${CPU_PHYS_BITS:=39}"
+        : "${CPU_FEATURES:=+invtsc,+tsc-deadline}"
+    fi
+    if [[ -z "${CPU_SMBIOS_UPGRADE:-}" ]]; then
+        case "$CPU_SOCKET" in
+            AM4)     CPU_SMBIOS_UPGRADE=0x31 ;;
+            LGA1151) CPU_SMBIOS_UPGRADE=0x32 ;;
+            LGA1155) CPU_SMBIOS_UPGRADE=0x24 ;;
+            AM3|AM3+) CPU_SMBIOS_UPGRADE=0x1B ;;
+            *)       CPU_SMBIOS_UPGRADE=0x02 ;;
+        esac
+    fi
+    : "${CPU_SMBIOS_VOLTAGE:=1200}"
+    : "${CPU_SMBIOS_EXT_CLOCK:=100}"
+    : "${CPU_SMBIOS_CHARACTERISTICS:=0x00FC}"
+    : "${CPU_IGPU_PRESENT:=0}"
+    : "${CPU_IGPU_STATE:=absent}"
+    : "${CPU_IGPU_MODEL:=none}"
 
     # 老 profile 若缺关键硬件序列号，不能用全 0 / 固定默认值兜底；这里按
     # profile 路径或已有 UUID 稳定派生，保证格式像真实硬件且跨重启不漂移。
@@ -220,6 +277,63 @@ stealth_load_profile() {
         esac
     fi
 
+    # 老 profile 只能给出保守兼容值，不能反向声称已经通过 Schema 1 审计。
+    : "${BOARD_DIMM_SLOTS:=2}"
+    : "${BOARD_MAX_MEMORY_GIB:=32}"
+    : "${PCH_MODEL:=legacy-unknown}"
+    : "${PCIE_GENERATION:=3}"
+    : "${SYSTEM_CHASSIS_TYPE:=0x03}"
+    : "${MCH_PCI_VEN:=0x8086}"
+    : "${MCH_PCI_DEV:=0x29C0}"
+    : "${MCH_REV:=0x02}"
+    : "${LPC_PCI_VEN:=0x8086}"
+    : "${LPC_PCI_DEV:=0x2918}"
+    : "${LPC_REV:=0x02}"
+    : "${SMBUS_PCI_VEN:=0x8086}"
+    : "${SMBUS_PCI_DEV:=0x2930}"
+    : "${SMBUS_REV:=0x02}"
+    : "${AHCI_PCI_VEN:=0x8086}"
+    : "${AHCI_PCI_DEV:=0x2922}"
+    : "${AHCI_REV:=0x02}"
+    if [[ "$CPU_VENDOR" == "GenuineIntel" ]]; then
+        : "${ROOT_PORT_PCI_VEN:=0x8086}"
+        : "${ROOT_PORT_PCI_DEV:=0xA338}"
+        : "${ROOT_PORT_REV:=0xF0}"
+        : "${XHCI_PCI_VEN:=0x8086}"
+        : "${XHCI_PCI_DEV:=0xA36D}"
+        : "${XHCI_REV:=0x10}"
+        : "${AUDIO_CONTROLLER_PCI_VEN:=0x8086}"
+        : "${AUDIO_CONTROLLER_PCI_DEV:=0x293E}"
+    else
+        : "${ROOT_PORT_PCI_VEN:=0x1022}"
+        : "${ROOT_PORT_PCI_DEV:=0x1453}"
+        : "${ROOT_PORT_REV:=0x00}"
+        : "${XHCI_PCI_VEN:=0x1022}"
+        : "${XHCI_PCI_DEV:=0x43BB}"
+        : "${XHCI_REV:=0x02}"
+        : "${AUDIO_CONTROLLER_PCI_VEN:=0x1022}"
+        : "${AUDIO_CONTROLLER_PCI_DEV:=0x1457}"
+    fi
+    : "${NIC_VENDOR:=Intel}"
+    : "${NIC_MODEL:=Intel 82574L Gigabit Network Connection}"
+    : "${NIC_PCI_VEN:=0x8086}"
+    : "${NIC_PCI_DEV:=0x10D3}"
+    : "${NIC_SUBSYSTEM_VEN:=0x8086}"
+    : "${NIC_SUBSYSTEM_DEV:=0xA01F}"
+    : "${NIC_MAC_OUI:=3c:fd:fe}"
+    : "${NIC_ATTACHMENT:=add_in}"
+    : "${BOARD_NIC_STATE:=disabled_in_bios}"
+    : "${AUDIO_VENDOR:=Realtek}"
+    : "${AUDIO_CODEC:=ALC887}"
+    : "${AUDIO_CODEC_ID:=0x10ec0887}"
+    : "${AUDIO_CODEC_REVISION:=0x00100302}"
+    : "${AUDIO_CODEC_SUBSYSTEM_ID:=0x104386c7}"
+    : "${AUDIO_IDENTITY_FIDELITY:=protocol_identity_only}"
+    : "${NVME_MAX_PCIE_GENERATION:=3}"
+    : "${NVME_LANES:=4}"
+    : "${NVME_BOOT_SUPPORTED:=1}"
+    : "${NVME_ATTACHMENT:=legacy-unknown}"
+
     : "${GPU_VENDOR:=NVIDIA}"
     : "${GPU_NAME:=NVIDIA GeForce GTX 1050}"
     : "${GPU_PCI_VEN:=0x10DE}"
@@ -227,9 +341,11 @@ stealth_load_profile() {
     : "${GPU_RAM_MB:=2048}"
     : "${GPU_BIOS:=Version 86.07.48.00.38}"
     : "${GPU_REV:=0xA1}"
+    : "${GPU_IDENTITY_FIDELITY:=label_only_out_of_scope}"
 
+    : "${NVME_COMPONENT_ID:=samsung-970-pro-512gb}"
     : "${NVME_MODEL:=Samsung SSD 970 PRO 512GB}"
-    : "${NVME_FIRMWARE:=1B2QEXM7}"
+    : "${NVME_FIRMWARE:=1B2QEXP7}"
     if ! [[ "${NVME_SERIAL:-}" =~ ^S[0-9A-F]{10}N$ ]]; then
         NVME_SERIAL="S$(_stealth_stable_hex "$_identity_key-nvme" 10)N"
     fi
@@ -247,6 +363,21 @@ stealth_load_profile() {
             *)       NVME_SIZE_BYTES=512000000000 ;;
         esac
     fi
+    : "${NVME_PCI_VEN:=0x144D}"
+    : "${NVME_PCI_DEV:=0xA804}"
+    : "${NVME_SUBSYS_VEN:=0x144D}"
+    : "${NVME_SUBSYS_DEV:=0xA801}"
+    : "${NVME_SUBNQN_TEMPLATE:=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:{serial}}"
+    : "${NVME_SUBNQN:=${NVME_SUBNQN_TEMPLATE//\{serial\}/$NVME_SERIAL}}"
+
+    # 新 C 层只实现这一套已核验的 Samsung 控制器。旧 profile 若声称其它型号，
+    # 不能再用 a804 行为强行启动；要求显式 reroll，并在启动器后续检查磁盘虚拟容量。
+    if [[ "$NVME_MODEL|$NVME_FIRMWARE|$NVME_SIZE_BYTES" != \
+          "Samsung SSD 970 PRO 512GB|1B2QEXP7|512110190592" ]]; then
+        echo "ERROR: profile 使用未实现的 NVMe bundle: $NVME_MODEL / $NVME_FIRMWARE / $NVME_SIZE_BYTES" >&2
+        echo "       当前仅支持 970 PRO 512GB；请备份后显式 reroll，并确认磁盘虚拟容量。" >&2
+        return 1
+    fi
 
     : "${MEM_MFR:=Crucial}"
     : "${MEM_PART_2G:=CT2G4DFS6266}"
@@ -260,6 +391,49 @@ stealth_load_profile() {
             *)                              MEM_RATED=2666 ;;
         esac
     fi
+
+    case "$CPU_SOCKET" in
+        AM3|AM3+|FM2+|LGA1155)
+            : "${MEM_TYPE:=DDR3}"
+            : "${MEM_VOLTAGE_MV:=1500}" ;;
+        *)
+            : "${MEM_TYPE:=DDR4}"
+            : "${MEM_VOLTAGE_MV:=1200}" ;;
+    esac
+    : "${MEM_CHANNELS:=2}"
+    : "${MEM_MAX_MTS:=$MEM_RATED}"
+    : "${MEM_ALLOWED_MTS:=$MEM_MAX_MTS}"
+    # 中文注释：旧 profile 只有 MEM_RATED，兼容读取时可确定性补齐；严格的
+    # schema-1 profile 则在末尾要求两个新字段原本就存在，避免篡改后被默认值掩盖。
+    : "${MEM_RATED_MTS:=$MEM_RATED}"
+    if [[ "$MEM_RATED" != "$MEM_RATED_MTS" ]]; then
+        echo "ERROR: profile 的 MEM_RATED 与 MEM_RATED_MTS 自相矛盾" >&2
+        return 1
+    fi
+    if ! [[ "$MEM_RATED_MTS" =~ ^[0-9]+$ && "$MEM_MAX_MTS" =~ ^[0-9]+$ ]] ||
+       (( MEM_RATED_MTS <= 0 || MEM_MAX_MTS <= 0 )); then
+        echo "ERROR: profile 的内存额定值或平台上限不是正整数" >&2
+        return 1
+    fi
+    if [[ -z "${MEM_CONFIGURED_MTS:-}" ]]; then
+        if (( MEM_RATED_MTS < MEM_MAX_MTS )); then
+            MEM_CONFIGURED_MTS="$MEM_RATED_MTS"
+        else
+            MEM_CONFIGURED_MTS="$MEM_MAX_MTS"
+        fi
+    fi
+    if ! [[ "$MEM_CONFIGURED_MTS" =~ ^[0-9]+$ ]] ||
+       (( MEM_RATED_MTS <= 0 || MEM_CONFIGURED_MTS <= 0 ||
+          MEM_CONFIGURED_MTS > MEM_RATED_MTS ||
+          MEM_CONFIGURED_MTS > MEM_MAX_MTS )) ||
+       [[ ",$MEM_ALLOWED_MTS," != *",$MEM_CONFIGURED_MTS,"* ]]; then
+        echo "ERROR: profile 内存额定/配置速率不可能: rated=$MEM_RATED_MTS configured=$MEM_CONFIGURED_MTS max=$MEM_MAX_MTS allowed=$MEM_ALLOWED_MTS" >&2
+        return 1
+    fi
+    : "${MEM_RANK:=1}"
+    : "${MEM_MODULE_MB:=2048,4096}"
+    : "${MEM_ALLOWED_TOTAL_MB:=2048,4096,8192}"
+    : "${MEM_MAX_CAPACITY_MB:=$(( BOARD_MAX_MEMORY_GIB * 1024 ))}"
 
     # MEM_SERIAL 老 profile 没这字段：用 UUID 派生 8 字符十六进制，
     # 保证**同一 VM 跨重启 SN 不变**（即便没 reroll，老 VM 也不再每次启动漂移）。
@@ -278,6 +452,7 @@ stealth_load_profile() {
     # 显示器 / 键盘 / 鼠标 / 数位板：老 profile 退化为 QEMU patch 历史默认值
     # （Samsung S24F350F / Microsoft Wired Keyboard 600 / Microsoft USB Optical
     # Mouse / HUION PenTablet）。配合 patch 0009/0010 后默认仍然生效。
+    : "${EDID_COMPONENT_ID:=samsung-s24f350}"
     : "${EDID_VENDOR:=SAM}"
     : "${EDID_NAME:=S24F350}"
     : "${EDID_WIDTH_MM:=530}"
@@ -285,7 +460,20 @@ stealth_load_profile() {
     if ! [[ "${EDID_SERIAL:-}" =~ ^[A-Z0-9]{8,13}$ ]]; then
         EDID_SERIAL="${EDID_VENDOR}$(_stealth_stable_hex "$_identity_key-edid" 8)"
     fi
+    : "${EDID_PRODUCT_ID:=0x0F65}"
+    : "${EDID_MANUFACTURE_WEEK:=32}"
+    : "${EDID_MANUFACTURE_YEAR:=2018}"
+    : "${EDID_VIDEO_INPUT:=0xA3}"
+    : "${EDID_MIN_VFREQ_HZ:=50}"
+    : "${EDID_MAX_VFREQ_HZ:=75}"
+    : "${EDID_MIN_HFREQ_KHZ:=30}"
+    : "${EDID_MAX_HFREQ_KHZ:=83}"
+    : "${EDID_MAX_PIXEL_CLOCK_MHZ:=170}"
+    : "${EDID_SECONDARY_XRES:=1600}"
+    : "${EDID_SECONDARY_YRES:=900}"
+    : "${EDID_SECONDARY_REFRESH_RATE:=60000}"
 
+    : "${KBD_COMPONENT_ID:=microsoft-wired-keyboard-600}"
     : "${KBD_VID:=0x045E}"
     : "${KBD_PID:=0x0750}"
     : "${KBD_MFR:=Microsoft}"
@@ -293,7 +481,10 @@ stealth_load_profile() {
     if ! [[ "${KBD_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]]; then
         KBD_SERIAL="KB$(_stealth_stable_hex "$_identity_key-kbd" 6)"
     fi
+    : "${KBD_BCD_DEVICE:=0x0163}"
+    : "${KBD_DESCRIPTOR_FIDELITY:=fixed_template}"
 
+    : "${MOUSE_COMPONENT_ID:=microsoft-usb-optical-mouse}"
     : "${MOUSE_VID:=0x045E}"
     : "${MOUSE_PID:=0x00CB}"
     : "${MOUSE_MFR:=Microsoft}"
@@ -301,13 +492,44 @@ stealth_load_profile() {
     if ! [[ "${MOUSE_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]]; then
         MOUSE_SERIAL="MS$(_stealth_stable_hex "$_identity_key-mouse" 6)"
     fi
+    : "${MOUSE_BCD_DEVICE:=0x0163}"
+    : "${MOUSE_DESCRIPTOR_FIDELITY:=fixed_template}"
 
-    : "${TABLET_VID:=0x256C}"
-    : "${TABLET_PID:=0x006D}"
-    : "${TABLET_MFR:=HUION}"
-    : "${TABLET_PRODUCT:=HUION PenTablet}"
+    : "${TABLET_COMPONENT_ID:=qemu-generic-usb-tablet}"
+    : "${TABLET_VID:=0x0627}"
+    : "${TABLET_PID:=0x0001}"
+    : "${TABLET_MFR:=not_exposed}"
+    : "${TABLET_PRODUCT:=QEMU USB Tablet}"
     if ! [[ "${TABLET_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]]; then
         TABLET_SERIAL="TB$(_stealth_stable_hex "$_identity_key-tablet" 6)"
+    fi
+    : "${TABLET_BCD_DEVICE:=0x0000}"
+    : "${TABLET_DESCRIPTOR_FIDELITY:=generic_virtual_only}"
+
+    # 严格模式只接受由当前 schema manifest 生成且仍标为 supported 的整机身份。
+    # 旧 profile 的字段虽已补齐以便兼容启动，但这些默认值没有平台来源，不能冒充
+    # 已审计 bundle。迁移会整体改变硬件身份，因此必须由用户显式 reroll。
+    if [[ "${STRICT_HARDWARE:-0}" == "1" ]] \
+        && { [[ "$PLATFORM_SCHEMA_VERSION" != "1" ]] || [[ "$PLATFORM_STATUS" != "supported" ]]; }; then
+        echo "ERROR: 严格模式拒绝 profile 平台状态 schema=$PLATFORM_SCHEMA_VERSION status=$PLATFORM_STATUS" >&2
+        echo "       请显式运行 deploy/scripts/reroll-identity.sh <实例号> 迁移；该操作会改变硬件身份。" >&2
+        return 1
+    fi
+    if [[ "${STRICT_HARDWARE:-0}" == "1" ]] && \
+       { [[ -z "${_stealth_present_keys[MEM_RATED_MTS]:-}" ]] ||
+         [[ -z "${_stealth_present_keys[MEM_CONFIGURED_MTS]:-}" ]]; }; then
+        echo "ERROR: 严格 profile 缺少 MEM_RATED_MTS/MEM_CONFIGURED_MTS；请显式 reroll" >&2
+        return 1
+    fi
+    if [[ "${STRICT_HARDWARE:-0}" == "1" ]] \
+        && ! stealth_verify_profile_platform_binding _stealth_present_keys; then
+        echo "       profile 的平台事实已缺失或被篡改；请核对后显式 reroll 整套身份。" >&2
+        return 1
+    fi
+    if [[ "${STRICT_HARDWARE:-0}" == "1" ]] \
+        && ! stealth_verify_profile_component_binding _stealth_present_keys; then
+        echo "       profile 的可更换部件事实已缺失或被篡改；请显式 reroll 整套身份。" >&2
+        return 1
     fi
 
     local v

@@ -26,6 +26,7 @@ known_cpu() {
         |"AMD FX(tm)-4300 Quad-Core Processor" \
         |"AMD Athlon(tm) X4 860K Quad Core Processor" \
         |"Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz" \
+        |"Intel(R) Core(TM) i5-6400T CPU @ 2.20GHz" \
         |"Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz" \
         |"Intel(R) Core(TM) i5-2550K CPU @ 3.40GHz" \
         |"Intel(R) Core(TM) i5-3350P CPU @ 3.10GHz")
@@ -65,6 +66,10 @@ known_board() {
         |"LGA1155|P67A-C43 (MS-7673)" \
         |"LGA1155|P67 Pro3" \
         |"LGA1151|PRIME H310M-K" \
+        |"LGA1151|PRIME H310M-K R2.0" \
+        |"LGA1151|PRIME H310M-A R2.0" \
+        |"LGA1151|H110M-K" \
+        |"LGA1151|H110M-A/M.2" \
         |"LGA1151|PRIME B360M-A" \
         |"LGA1151|PRIME H370-A" \
         |"LGA1151|H310M PRO-VL (MS-7B75)" \
@@ -102,17 +107,17 @@ known_gpu() {
 }
 
 known_nvme() {
-    case "$1|$2" in
-        "Samsung SSD 970 PRO 512GB|512110190592" \
-        |"Samsung SSD 970 PRO 1TB|1000204886016" \
-        |"Samsung SSD 970 EVO 500GB|500107862016" \
-        |"Samsung SSD 970 EVO 1TB|1000204886016" \
-        |"Samsung SSD 970 EVO Plus 500GB|500107862016" \
-        |"Samsung SSD 970 EVO Plus 1TB|1000204886016" \
-        |"Samsung SSD 980 500GB|500107862016" \
-        |"Samsung SSD 980 1TB|1000204886016" \
-        |"Samsung SSD 960 EVO 500GB|500107862016" \
-        |"Samsung SSD 960 PRO 512GB|512110190592")
+    case "$1|$2|$3" in
+        "Samsung SSD 970 PRO 512GB|1B2QEXP7|512110190592" \
+        |"Samsung SSD 970 PRO 1TB|1B2QEXP7|1000204886016" \
+        |"Samsung SSD 970 EVO 500GB|1B2QEXE7|500107862016" \
+        |"Samsung SSD 970 EVO 1TB|1B2QEXE7|1000204886016" \
+        |"Samsung SSD 970 EVO Plus 500GB|2B2QEXM7|500107862016" \
+        |"Samsung SSD 970 EVO Plus 1TB|2B2QEXM7|1000204886016" \
+        |"Samsung SSD 980 500GB|3B4QFXO7|500107862016" \
+        |"Samsung SSD 980 1TB|3B4QFXO7|1000204886016" \
+        |"Samsung SSD 960 EVO 500GB|3B7QCXE7|500107862016" \
+        |"Samsung SSD 960 PRO 512GB|4B6QCXP7|512110190592")
             return 0 ;;
         *)
             return 1 ;;
@@ -166,6 +171,7 @@ known_usb() {
         |"MOUSE|0x09DA|0x31AC|A4TECH USB Optical Mouse OP-720" \
         |"MOUSE|0x24AE|0x1102|Rapoo USB Mouse N1162" \
         |"MOUSE|0x413C|0x301A|Dell USB Optical Mouse" \
+        |"TABLET|0x0627|0x0001|QEMU USB Tablet" \
         |"TABLET|0x256C|0x006D|HUION PenTablet" \
         |"TABLET|0x256C|0x006E|HUION H640P" \
         |"TABLET|0x2FEB|0x0001|VEIKK A30" \
@@ -181,10 +187,24 @@ for row in "${CPU_POOL[@]}"; do
     known_cpu "$name" || fail "CPU 未在真实发售目录中: $name"
     [[ "$name" != *"i3-8100F"* ]] || fail "i3-8100F 缺 Intel 官方发售规格，不得入池"
 done
+(( ${#CPU_POOL[@]} == 2 )) || fail "新 VM 只应暴露两个 enabled Intel CPU bundle"
+for row in "${CPU_POOL[@]}"; do
+    IFS='|' read -r _ vendor name _ _ part family socket <<<"$row"
+    [[ "$vendor" == GenuineIntel && "$socket" == LGA1151 ]] \
+        || fail "unsupported/legacy CPU 泄漏到随机池: $row"
+    [[ "$part" != GX80684I39100F ]] || fail "i3-9100F 使用了不存在的 GX 订购号"
+    case "$name" in
+        *i3-9100F*) [[ "$family" == 0x00CE ]] || fail "i3-9100F SMBIOS family 应为 Core i3" ;;
+        *i5-6400T*) [[ "$family" == 0x00CD ]] || fail "i5-6400T SMBIOS family 应为 Core i5" ;;
+    esac
+done
 
 for row in "${BOARD_POOL[@]}"; do
     IFS='|' read -r socket _ product _ _ _ _ _ <<<"$row"
     known_board "$socket" "$product" || fail "主板未在真实发售目录中: $socket $product"
+done
+for row in "${BOARD_POOL[@]}"; do
+    [[ "${row%%|*}" == LGA1151 ]] || fail "旧 socket 主板泄漏到随机池: $row"
 done
 
 for row in "${GPU_POOL[@]}"; do
@@ -193,8 +213,8 @@ for row in "${GPU_POOL[@]}"; do
 done
 
 for row in "${NVME_POOL[@]}"; do
-    IFS='|' read -r model _ size <<<"$row"
-    known_nvme "$model" "$size" || fail "NVMe 未在真实发售目录中: $row"
+    IFS='|' read -r _ model firmware size _ <<<"$row"
+    known_nvme "$model" "$firmware" "$size" || fail "NVMe 型号/固件/容量组合未核验: $row"
 done
 
 for row in "${MEM_POOL[@]}"; do
@@ -203,7 +223,7 @@ for row in "${MEM_POOL[@]}"; do
 done
 
 for row in "${MONITOR_POOL[@]}"; do
-    IFS='|' read -r vendor model _ _ _ <<<"$row"
+    IFS='|' read -r _ vendor model _ <<<"$row"
     known_monitor "$vendor" "$model" || fail "显示器未在真实发售目录中: $row"
 done
 
@@ -216,8 +236,10 @@ for row in "${MOUSE_POOL[@]}"; do
     known_usb MOUSE "$vid" "$pid" "$product" || fail "鼠标未在真实发售目录中: $row"
 done
 for row in "${TABLET_POOL[@]}"; do
-    IFS='|' read -r vid pid _ product _ <<<"$row"
+    IFS='|' read -r vid pid _ product _ _ fidelity <<<"$row"
     known_usb TABLET "$vid" "$pid" "$product" || fail "数位板未在真实发售目录中: $row"
+    [[ "$fidelity" == generic_virtual_only ]] \
+        || fail "虚拟 tablet 必须明确标注 fidelity 边界: $row"
 done
 
 echo "OK: hardware pool catalog checks passed"

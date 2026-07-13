@@ -1,499 +1,313 @@
-# USAGE — 操作参考
+# USAGE — Linux/KVM 操作参考
 
-> **版本基线**：本文适用于 QEMU `11.0.2` + `vmate` 分支。命令行和构建产物仍保留
-> `qemu-system-*`、`qemu-img` 等上游兼容名称；`vmate` 只表示本仓库维护分支，
-> 不改变 QMP/QGA、设备模型或管理工具依赖的 QEMU 标识。
+> **当前基线**：QEMU `11.0.2` + `vmate`，严格硬件目录 schema 1，Linux/KVM 为主路径。
+> 新 VM 只启用 Intel i3-9100F/H310 和 i5-6400T/H110 两套受控身份 bundle；底层仍是
+> Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
+> NVMe、显示器和 HID 各只有一套经过约束的组件模板，不再从十款字符串池随机拼装。
+> GPU passthrough/vGPU 不在本分支范围，virtio 显示标签不代表真实独显。
 
-主流程在 [STEALTH-WORKFLOW.md](STEALTH-WORKFLOW.md)。本文件是命令参考。
+当前能力、E5-2696 v4/X99、其它 E5 与 Windows/WHPX 的结论先看
+[硬件平台评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)。字段来源和 fidelity 见
+[Profile 字段](PROFILE-FIELDS.md)。
 
-## 1. 前置依赖（一次性）
+## 1. 宿主前提
+
+Linux 严格启动至少需要：
+
+- x86_64 Linux，BIOS 已开启 Intel VT-x/EPT 或 AMD-V/NPT，当前用户可访问 `/dev/kvm`。
+- 本仓库编译的 patched `qemu-system-x86_64` 和 `qemu-img`；不能用 stock QEMU 代替。
+- OVMF、swtpm/swtpm-tools、Python 3、`jq`、`socat`、`flock`。
+- 默认 host tune/CPU isolate 所需的 root-owned helper。
+- 4 个可用逻辑 CPU；当前启用客体 SKU 都是完整 4C/4T，不支持任意改成其它线程数。
+
+Ubuntu 可从以下依赖起步；完整构建依赖仍以 `configure` 检查结果为准：
 
 ```bash
-sudo apt install -y build-essential ninja-build python3-venv python3-pip \
-    python3-setuptools pkg-config libglib2.0-dev libpixman-1-dev \
-    libsdl2-dev libspice-server-dev libvirglrenderer-dev libepoxy-dev \
-    libslirp-dev libseccomp-dev libssh-dev ovmf \
-    socat jq imagemagick ffmpeg sshpass faketime osslsigncode chntpw libguestfs-tools
+sudo apt update
+sudo apt install -y build-essential ninja-build meson pkg-config python3 \
+  libglib2.0-dev libpixman-1-dev libslirp-dev libsdl2-dev libepoxy-dev \
+  libvirglrenderer-dev libspice-server-dev ovmf swtpm swtpm-tools \
+  jq socat util-linux
 ```
 
-必备文件：
-- `/home/ubuntu/images/win10.iso` 或 `/home/ubuntu/images/win10_ltsc.iso`
-- `/usr/share/OVMF/OVMF_CODE_4M.fd` / `OVMF_VARS_4M.fd`（启动器首跑会拷贝模板到 `/home/ubuntu/images/vms/<N>/ovmf-vars.fd`）
+本分支不做 GPU passthrough/vGPU，因此 VT-d/IOMMU 不是当前功能前提。它仍可用于宿主其它
+用途，但不能据此提高本项目 GPU 真机化评级。
 
-## 2. 构建 QEMU 11.0.2 + vmate
+AMD/B350 compatibility bundle 默认禁用。AMD 物理宿主在 `STRICT_HARDWARE=1` 下目前可能
+直接得到“无可用整机平台”，这是预期的 fail-closed 行为。
+
+## 2. 构建与静态回归
 
 ```bash
-deploy/tools/build.sh                 # 增量构建
-deploy/tools/build.sh --clean         # 先 rm -rf build/ 再从零编译
-deploy/tools/build.sh --reconfig      # 保留 build/ 但强制重跑 configure
-deploy/tools/build.sh --debug         # 带调试符号
-deploy/tools/build.sh --jobs 8        # 限制 ninja 并行度
-deploy/tools/build.sh --verify        # 完后跑 verify-stealth.sh
+# 增量构建 patched QEMU
+deploy/tools/build.sh
+
+# 常用构建选项
+deploy/tools/build.sh --clean
+deploy/tools/build.sh --reconfig
+deploy/tools/build.sh --debug
+deploy/tools/build.sh --jobs 8
+
+# 并发快速回归；完整集为避免共享 socket 冲突而串行
+python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4
+python3 deploy/scripts/tests/run-vmate-tests.py --mode full
 ```
 
-输出：`build/qemu-system-x86_64`。
+默认二进制路径为：
 
-迁移到其它 host 时不要使用系统自带 QEMU。启动器会做 patched QEMU 能力预检；
-路径和二进制位置配置见 [PORTABILITY.md](PORTABILITY.md)。
+- `$REPO/build/qemu-system-x86_64`
+- `$REPO/build/qemu-img`
 
-## 3. 主机调优（建议每次开机跑一次）
+迁移到其它目录时可传 `QEMU=/abs/path/qemu-system-x86_64`、
+`QEMU_IMG=/abs/path/qemu-img`，或使用 `--qemu=...`。启动器默认 `QEMU_CAP_CHECK=1`，会检查
+NVMe、EDID、USB、PCI identity、fb-shm 等定制属性；不要在生产中关闭。
+
+## 3. 一次性宿主准备
+
+### 3.1 安装最小 root helper
 
 ```bash
-sudo deploy/scripts/host-performance.sh
-# governor=performance / hugepages / THP=madvise / KVM halt_poll 可配置 /
-# 停 irqbalance / NVMe scheduler=none
+sudo deploy/scripts/setup-host-helpers.sh
+sudo deploy/scripts/setup-host-helpers.sh check
 ```
 
-## 4. 桥接（多 VM 上 LAN）
+安装器把固定副本放到 `/usr/local/libexec/qemu-vmate-*`，owner/mode 为 `root:root/0755`，
+sudoers 使用 `NOPASSWD:NOSETENV`。旧版直接授权 Git 工作区脚本的 sudoers 会被删除。
+
+不要手工把用户可写的仓库脚本加入 `NOPASSWD`。默认 `HOST_TUNE=1` 和
+`CPU_ISOLATE=1` 会使用上述 helper。
+
+### 3.2 检查 KVM/TSC
 
 ```bash
-# 隔离 br0（host 和 guest 互通，但 guest 拿不到上游 LAN 的 IP）
-sudo deploy/scripts/setup-bridge.sh
+python3 deploy/scripts/kvm-capabilities.py --format json
+lscpu -e=CPU,NODE,SOCKET,CORE,ONLINE,MAXMHZ,MINMHZ
+```
 
-# 把物理 NIC 接入 br0，guest 拿上游 DHCP（推荐）
+严格模式会读取 `KVM_CAP_TSC_CONTROL`、`KVM_CAP_GET_TSC_KHZ` 和实际 vCPU TSC。没有 TSC
+scaling 时，目标 profile 必须匹配宿主实测 TSC；选中后还会用 `enforce=on` 实际创建最小
+QEMU/KVM vCPU。商品名、插槽或“同属 Intel”都不能替代这两个门禁。
+
+### 3.3 桥接网络
+
+```bash
+# 创建 br0；指定物理上联后 guest 可从真实 LAN 获取地址
 sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
+
+# 生产模式拒绝 bridge 失败后回落到 10.0.2.x SLIRP
+STRICT_STEALTH=1 deploy/scripts/start-vm.sh 1
 ```
 
-### 4.1 单一 `br0` 动态接入 802.1Q VLAN
+默认 `BRIDGE=br0`，但 `STRICT_STEALTH=0` 为兼容默认；bridge 不存在时可能明确告警并回落到
+user-mode NAT。生产验收应显式设置 `STRICT_STEALTH=1`，不要用 NAT 结果代表物理 LAN 行为。
 
-首次使用 `--vlan-id=N` 时，`start-vm.sh` 会只读检测单 `br0`、VLAN filtering、
-root-owned helper 与配置。若尚未初始化且当前是本地交互终端，启动器会显示自动识别的
-物理上联和执行内容；输入完整的 `SETUP enp5s0` 后，才通过 `sudo` 初始化一次并复检。
-以后切换任意合法 VID 都不会重复建桥或再次询问。取消、UPLINK 无法唯一识别、无 TTY/CI、
-root 直接启动或 `DRY_RUN=1` 时均 fail closed，只打印下面的手动命令，不修改网络：
-
-不同实例即使同时首次确认，也会在 root 全局锁内再次复检，只有第一个迁移网络；后到者直接
-复用结果。发现遗留 `svtapN`、helper state/lock 或不同授权用户配置时不自动修复，保留现场供审计。
+VLAN access TAP 示例：
 
 ```bash
+# 首次为单一 VLAN-aware br0 准备 trunk；远程执行可能断 SSH，优先用带外控制台
 sudo VLAN_TRUNK=1 UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
+
+deploy/scripts/start-vm.sh 1 --vlan-id=11
+deploy/scripts/start-vm.sh 2 --vlan-id=20
 ```
 
-无法自动识别时可先设置 `VLAN_SETUP_UPLINK=enp5s0` 再启动，但仍需完整确认。SSH 默认禁止
-自动初始化；明确承担断线风险时可设置 `VLAN_SETUP_ALLOW_SSH=1`，同样必须输入完整确认。
-该授权允许当前用户接入交换机已放行的任意合法 VID，只应授予可信的 VM 管理用户。
+guest 侧收到 untagged 帧，不需要创建 VLAN 子接口。显式 VLAN 预检失败会停止，不回退到
+native LAN 或 NAT。只需要隔离功能测试时可用 `--no-bridge` 明确选择 SLIRP。
 
-交换机连接 `enp5s0` 的端口应配置为 trunk/hybrid：
+## 4. 创建与启动 VM
 
-- 原有宿主 LAN（以及无 VLAN 参数的 VM）使用 native/PVID、线路上 untagged；
-- VLAN 11、20 等业务 VLAN 使用 tagged，并加入交换机端口允许列表。
-
-初始化只创建一个 VLAN-aware `br0`，不会创建 `br-vlan<N>` 或 `enp5s0.<VID>`。随后直接启动：
+### 4.1 首次安装
 
 ```bash
-./deploy/scripts/start-vm.sh 1 --proxy --vlan-id=11
-./deploy/scripts/start-vm.sh 2 --vlan-id=20
+# instance 1；首次生成 profile 和 512GB 稀疏 qcow2，并从 ISO 安装
+deploy/scripts/start-vm.sh 1 \
+  --iso=/home/ubuntu/images/win10_ltsc.iso
+
+# 附加自动应答/驱动 ISO
+EXTRA_ISO=/home/ubuntu/images/autounattend-vm1.iso \
+  deploy/scripts/start-vm.sh 1 \
+  --iso=/home/ubuntu/images/win10_ltsc.iso
 ```
 
-启动器动态准备 access TAP：TAP 的 PVID 是所选 VLAN，发往 guest 的帧会去掉 tag，guest
-普通帧由宿主归入该 VLAN。因此 Windows/Linux guest 照常使用 DHCP 或静态地址，不要在
-guest 内创建 VLAN 子接口或设置 VLAN ID。不同 VID 由 bridge VLAN filtering 隔离；停止 VM
-只删 TAP，上联 tagged VID 保留复用。NetworkManager 若重置 VLAN 表，重启 VM 会自动补回。
+新 profile 默认 8192 MiB，拓扑为 2×4 GiB DDR4、双通道、**一个 guest NUMA node**。
+DIMM 数只通过 SMBIOS/SPD 表达；双 DIMM 从不等于双 NUMA。
 
-不传 `VLAN_ID`/`--vlan-id` 时完全保持原行为：`start-vm.sh 1` 走 br0/native LAN，
-`start-vm.sh 1 --no-bridge` 走 user-mode NAT，也不会触发 VLAN 检测或初始化提示。
+首次磁盘是 qcow2 稀疏文件，但 guest-visible virtual-size 必须精确等于组件模板中的
+`NVME_SIZE_BYTES=512110190592`。启动器每次用 `qemu-img info` 校验，不按宿主文件大小猜容量，
+也不会静默 resize 不匹配的历史磁盘或 base image。
 
-显式 VLAN 的检测、初始化或 TAP 配置失败时会报错退出，不回退 native LAN/NAT。
-
-#### 远程变更风险
-
-启动器的交互确认不能消除断网风险：首次把承载宿主 IP/默认路由的网卡并入 `br0` 时，
-交换机 native VLAN、`UPLINK` 名称或地址迁移配置有误，都可能立即中断 SSH。生产宿主应优先
-通过带外管理、本地控制台或独立管理网卡执行。只能远程操作时，先在交换机侧配置与当前 LAN
-相同的 native/PVID，并放行业务 VLAN tagged 流量，再运行上述命令；`tmux`/`screen` 只能保留
-进程，不能在网络断开后恢复错误的 bridge 配置。
-
-迁移到另一台宿主机时不要复制 `/run` 下的 TAP 运行态，也不要假定物理网卡仍叫
-`enp5s0`。应在新宿主确认真实上联名和交换机配置后，重新执行一次
-`VLAN_TRUNK=1 UPLINK=<新上联>` 初始化；VM 磁盘和 profile 的迁移方式不受 VLAN 功能影响。
-
-#### 宿主诊断命令
+### 4.2 日常启动与关机
 
 ```bash
-# br0 应存在且详细信息中显示 vlan_filtering 1
-ip -d link show dev br0
-
-# 查看 br0 当前端口；动态 TAP 只在对应 VM 启动期间出现
-ip -br link show master br0
-
-# 上联的 native VID 应带 PVID/Egress Untagged；业务 VID 应为 tagged
-bridge vlan show dev enp5s0
-
-# 把变量值替换为启动日志或上一条命令显示的 TAP；应看到所选 VID、PVID、Egress Untagged
-TAP='<启动日志中的 TAP 名称>'
-bridge vlan show dev "$TAP"
-
-# 宿主 IP 和默认路由通常应落在 br0，而不是仍留在被接管的物理上联
-ip -4 address show dev br0
-ip route show default
-
-# NetworkManager 环境下核对当前激活连接和设备归属
-nmcli -f NAME,TYPE,DEVICE connection show --active
-
-# 核对 setup-bridge.sh 保存的单桥/上联配置，以及已安装的 root-owned helper
-sudo sed -n '1,80p' /etc/qemu/stealth-vlan.conf
-ls -l /usr/local/libexec/qemu-stealth-vlan-{tap,down}
-
-# 确认当前用户拥有启动动态 TAP helper 所需的免密授权
-sudo -n -l
-
-# 可选抓包：上联应看到 VLAN 11 tagged；guest TAP 一侧应是 untagged
-sudo tcpdump -eni enp5s0 'vlan 11'
-sudo tcpdump -eni "$TAP"
-```
-
-如果 `br0`/TAP 的 VLAN 表正确但 guest 仍无地址，继续检查交换机允许列表、上游 VLAN 的
-DHCP scope 或静态网关；如果上联抓不到 `vlan <VID>`，问题通常在交换机 trunk/native 配置，
-而不是 Windows/Linux guest 网卡。
-
-## 5. 启动器 (`start-vm.sh`)
-
-### 5.1 显示模式（默认 SDL + fb-shm 双开）
-
-`fb-shm` 是 `-object fb-shm,...` 用户可创建对象，在主显示控制台上注册一条独立
-DCL，与 `-display sdl/none/...` 完全解耦 —— 所以默认两条通道并存：
-
-| 命令 | 本地窗口 | 远程 | 推流通道 |
-|---|---|---|---|
-| `start-vm.sh 1`                       | **SDL** | 无 | **fb-shm @ `/tmp/qemu-stealth-1.fb`** |
-| `start-vm.sh 1 --headless`            | 无 | VNC :5900+N-1 | + fb-shm |
-| `start-vm.sh 1 --no-sdl`              | 无 | 无 | fb-shm（后台 daemon）|
-| `start-vm.sh 1 --no-fb-shm`           | SDL | 无 | — |
-| `start-vm.sh 1 --headless --no-fb-shm`| 无 | VNC | — |
-
-无 `DISPLAY` 又非交互终端时（`nohup ... &`）自动降级 `--no-sdl`，避免 SDL crash。
-
-### 5.2 常见调用
-
-```bash
-# 最简（默认 SDL 窗口 + fb-shm 推流并存，可同时直接玩 + 录屏）
+# 从已有磁盘启动
 deploy/scripts/start-vm.sh 1
-# 另开一个终端开始拉流：
-qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
-    --output /tmp/vm1.mp4 --encoder libx264 --preset veryfast --mode auto
 
-# 后台 daemon：关 SDL，仅 fb-shm 推流
-deploy/scripts/start-vm.sh 1 --no-sdl
+# 原生 QMP multi-client，并保留 .qmp.proxy 兼容别名
+deploy/scripts/start-vm.sh 1 --proxy
 
-# 远程登录 + 推流：VNC 看实时画面，fb-shm 推 RTMP
-deploy/scripts/start-vm.sh 1 --headless
-qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
-    --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M --mode auto
+# 优雅 ACPI 关机；等待 120 秒
+deploy/scripts/stop-vm.sh 1 --wait=120
 
-# 只推 ROI（省 CPU/带宽）
-deploy/scripts/start-vm.sh 1 --fb-shm-roi=0,0,1280,720 --fb-shm-rate=30
-
-# 装系统时挂 ISO
-deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
-
-# 反正向 OOBE 自动跳过：再挂一张 autounattend 副 ISO
-EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
-    deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
+# 跳过 ACPI，直接发 QMP quit
+deploy/scripts/stop-vm.sh 1 --hard
 ```
 
-INSTANCE 用位置参数即可（`./start-vm.sh 2`），同时设 `INSTANCE=` 环境变量也允许，但若两者不一致会警告并以位置参数为准。
+每个 instance 有独立磁盘、profile、OVMF NVRAM、TPM state 和 socket。默认位置：
 
-| 变量/标志 | 默认 | 说明 |
-|---|---|---|
-| 位置参数 N | 1 | instance 编号；决定磁盘/profile/socket/端口 |
-| `BRIDGE` | `br0` | 单一宿主 bridge；不传 VLAN 参数时保持原有 native/untagged LAN，不存在或无授权时默认回退 user-mode NAT（见 `STRICT_STEALTH`） |
-| `VLAN_ID` / `--vlan-id=N` | 空 | 动态创建指定 VID 的 access TAP；首次缺配置仅在安全交互条件下完整确认后初始化，非交互 fail closed；Windows/Linux guest 无需 VLAN 配置 |
-| `--no-bridge` | - | 强制走 user-mode NAT（10.0.2.0/24） |
-| `STRICT_STEALTH` | 0 | 1 = 桥接失败即 fail-fast，**拒绝**静默回退 NAT（NAT 的 10.0.2.x 子网本身是 VM 特征，隐身验收致命） |
-| `ALLOW_NAT_FALLBACK` | 0 | 1 = 在 `STRICT_STEALTH=1` 下显式允许回退 NAT（回退时日志打醒目标记） |
-| `DRY_RUN` | 0 | 1 = 仅打印组装好的 QEMU argv 后退出；不落盘、不起守护、不 exec（调试/回归基准用） |
-| `IMAGE_ROOT` | `/home/ubuntu/images` | VM 数据根目录；迁移到其它 host/挂载点时改这里即可 |
-| `VMS_DIR` | `$IMAGE_ROOT/vms` | 多实例目录；每台 VM 默认在 `$VMS_DIR/<N>` |
-| `VM_DIR` | `$VMS_DIR/<N>` | 单实例目录覆盖；用于把某台 VM 放到独立盘 |
-| `QEMU` | `build/qemu-system-x86_64` | QEMU 二进制；迁移时必须指向 patched QEMU，不能用 stock QEMU |
-| `QEMU_IMG` | `build/qemu-img` | 创建/克隆 qcow2 用的 qemu-img |
-| `QEMU_CAP_CHECK` | 1 | 1 = 启动前检查 QEMU 是否带 NVMe/EDID/USB/fb-shm 等 stealth 属性；缺失则 fail-fast，防止误用 stock QEMU 破坏真机模拟 |
-| `STABLE_DISPLAY` | **0** | 仅 `--sdl` 模式生效：0 = `virtio-vga-gl` + QEMU 11 官方 SDL/OpenGL 路径（X11 上优先探测 EGL，必要时由 SDL 回退）；1 = `virtio-vga` 无 GL，规避 virgl BSOD |
-| `GPU_SELFSIGNED` | **0** | 0 = PCI 主 ID 留 `1AF4:1050` + subsys 改 NVIDIA `1C8110DE`，搭配 stock virtio-win + apply-gpu-spoof.ps1 = 通过 ACE。1 = 把主 ID 也改 `10DE:1C81`，需要 patched viogpudo + 伪 NVIDIA CA，**ACE 会判异常 13-131106-0** |
-| `GPU_ZEROCOPY` | **1（GL 模式）** | 普通 SDL+GL、`--gpu-sdl-egl` 与 `--gpu-headless` 默认给 `virtio-vga-gl` 加 `blob=true,hostmem=GPU_HOSTMEM`，优先尝试 GPU handle；导出不可用时 QEMU 自动继续 SHM。`0` / `--no-gpu-zerocopy` 仅关闭 blob/hostmem 偏好，renderer 仍可能导出普通 texture；stable、VNC 和普通 `--no-sdl` 默认不注入 |
-| `GPU_HOSTMEM` | `256M` | virtio-gpu host-visible memory window 大小，常用 `256M`-`1G`；flag: `--gpu-hostmem=SIZE` |
-| `GPU_DISPLAY` | `sdl` | GPU 显示策略。`sdl` 使用 QEMU 11 官方 SDL/OpenGL 后端；X11 环境会显式按 X11 platform 探测 EGL，避免把 X11 display 误当成 Wayland。`sdl-egl` 是启用 GPU 导出参数的兼容入口，仍复用同一个官方 SDL 窗口和 context，不再创建额外 native EGL 子窗口；`egl-headless` 通过 `--gpu-headless` 启用无窗口 rendernode EGL |
-| `GPU_RENDERNODE` | 空 | `egl-headless` 的 render node 路径，空值让 QEMU 自动选择；常用 `/dev/dri/renderD128`，flag: `--gpu-rendernode=PATH` |
-| `USB_RELATIVE_MOUSE` | 0 | 1 = `usb-mouse` 相对坐标（更像真鼠）；默认 `usb-tablet` 绝对坐标 |
-| **`FB_SHM`** | **1** | **默认开**：始终带 `-object fb-shm,...` 共享内存推流通道。`--no-fb-shm` 关 |
-| `FB_SHM_SOCK` | `/tmp/qemu-stealth-<N>.fb` | 控制 socket 路径 (flag: `--fb-shm-sock=…`) |
-| `FB_SHM_RATE` | 60 | 配置/consumer 目标帧率 Hz，[1,240]（flag: `--fb-shm-rate=…`）；无 consumer 时 QEMU 可把内部 effective DCL tick 降至 1 Hz，日志中的 `rate=1Hz` 不表示配置丢失 |
-| `FB_SHM_ROI` | `` | 子区域 `x,y,w,h`；空 = 全屏 (flag: `--fb-shm-roi=…`) |
-| **`SDL`** | **1** | **默认开**：SDL 窗口；`--no-sdl` 关；`--headless` 自动关 |
-| `HEADLESS` | 0 | 1 = 关 SDL 改 VNC（与 fb-shm 并存）(flag: `--headless`) |
-| `RAM` | 4096 | 单位 MB（4GB 双通道 = 2×2GB） |
-| `MEM_PER_DIMM_MB` | RAM/2 | DIMM 总量自动除 2 凑双通道 SPD |
-| `MEM_GUARD` | 1 | 启动前内存护栏：可用物理(MemAvailable)+SwapFree 不足以再容下本 VM 的 `-m`+2GiB 余量就 WARN；连 RAM+swap 都装不下则**拒绝启动**（防 OOM-kill 误伤其它在跑的 VM）。`0` = 关闭检查 |
-| `MEM_FORCE` | 0 | 1 = 越过 `MEM_GUARD` 的硬拒绝强行启动（风险自负） |
-| `HOST_TUNE` | **1** | 起 VM 前自动跑 `host-performance.sh`：governor=performance + `KVM_HALT_POLL_NS`（默认 0）+ THP defrag=never。多开时防宿主编译抢 vCPU 主要靠 `CPU_ISOLATE` 的 cpuset 独占分区；如需旧低延迟 busy-poll 策略，可显式 `KVM_HALT_POLL_NS=500000`。只动 host 侧旋钮，guest CPUID/tsc-freq/拓扑全不变。已调优自动跳过免重复 sudo；DRY_RUN 下严格 no-op。`0` / `--no-host-tune` = 跳过 |
-| `CPU_FREQ_CAP` | **1** | （需 `HOST_TUNE=1`）把 host `scaling_max_freq` 封顶到本实例伪装 CPU 的 `CPU_MAX_MHZ`（= SMBIOS Type4 自报 `max-speed`，如 Ryzen3-1200=3400）。host(5800) boost 4.6GHz 远超伪装规格，固定 `tsc-freq` 下 guest 实测吞吐就会超该型号上限 = **变速器/计时异常 tell**。**只降不升**：多 VM 并发自然收敛到运行中最小值，绝不让任一 VM 跑出超自身规格的速度。`0` / `--no-freq-cap` = 满 boost 不封顶 |
-| `CPU_ISOLATE` | **1** | 起 VM 后把 QEMU 钉进 cgroup v2 cpuset 独占分区，**线程级**隔离 vCPU：每个 vCPU 独占 1 个逻辑线程（非整颗物理核），4vCPU 的 VM 只吃 4 个逻辑线程。分配器优先把多台 VM 横向铺到不同物理核心，主线程耗尽后才使用 SMT 兄弟。`0` / `--no-cpu-isolate` = 关 |
-| `HOST_RESERVE_CORES` | **auto** | 给宿主机预留物理核心；auto 默认 `max(2, ceil(物理核心数/8))`，多开需求过高时自动缩小预留以保证 VM 先铺不同物理核心。显式 N = 硬预留 N 颗，`0` = 使用整机逻辑 CPU 池（仅 `CPU_ISOLATE=1` 生效） |
-| `QEMU_SERVICE_CPUS` / `QEMU_SVC_CPUS` | **0** | 给 QEMU main/IO/SDL/fb-shm worker 等非 vCPU 辅助线程额外预留 N 个逻辑 CPU；默认 0 保持旧行为。常用 `--svc-cpu`（等价 1）/ `--svc-cpus=N` / `--no-svc-cpus`，长兼容别名 `--qemu-service-cpu` / `--qemu-service-cpus=N` |
-| `DISPLAY` | `:0` | X11 显示，未设默认本地 :0；HEADLESS=1 时忽略 |
-| `EXTRA_ISO=PATH` | - | 副 CDROM（autounattend.xml / 驱动盘 等） |
-| `--iso=PATH` | - | 主启动 ISO（装系统） |
-| `--reroll` | - | 删掉 `vms/<N>/profile` 重新随机一次硬件身份 |
-| `CPU_MODEL` | profile 写入 | `Ryzen3-1200`（默认）/ `Ryzen3-2300X`（Win11 LTSC 兼容）。第一次 reroll 时持久化到 profile，之后不用每次设 |
+| 资源 | 路径 |
+|---|---|
+| VM 目录 | `/home/ubuntu/images/vms/<N>/` |
+| 磁盘 | `disk.qcow2` |
+| 硬件身份 | `profile` |
+| UEFI NVRAM | `ovmf-vars.fd` |
+| TPM | `tpm-state/`、`tpm-sock` |
+| QMP/HMP | `/tmp/qemu-stealth-<N>.qmp`、`.mon` |
+| fb-shm | `/tmp/qemu-stealth-<N>.fb` |
 
-> **内存按需分配（`prealloc=off`）**：memfd 后端不再开机就把整块 `-m` 摸一遍钉死 host
-> 物理内存——guest 用多少才占多少，未触及页不占、配 `mem-lock=off` 还可换出。多 VM 并发
-> 时配合 `MEM_GUARD` 防 OOM。advertised 容量 / DIMM SMBIOS 完全不变（纯 host 侧分配策略，
-> **零反检测影响**）。host 为 32GiB 时，3×8GiB VM 已贴上限，第 4 台务必看护栏提示。
+用 `IMAGE_ROOT`、`VMS_DIR` 或 `VM_DIR` 可迁移数据路径；细节见
+[可移植性](PORTABILITY.md)。
 
-> **host 计时抖动调优（`HOST_TUNE=1`，默认开）**：start-vm.sh 起 VM 前自动跑
-> `host-performance.sh`，把 CPU governor 钉到 `performance`、halt_poll 写成
-> `KVM_HALT_POLL_NS`（默认 0）、
-> THP `defrag=never`。这些压低 vCPU 服务延迟的方差——ACE「游戏计时异常」(13-131130-8)
-> 这类反作弊时钟检测对抖动尖刺敏感。**只动 host 侧**：guest 的 CPUID / 品牌串 /
-> `tsc-freq` / vCPU 拓扑全不变，零反检测影响。已调优自动跳过（不每次 sudo）；后台/无 tty
-> 且无免密 sudo 时只 WARN 不阻断启动。`--no-host-tune` 跳过。
-> ⚠ 旧版 `host-performance.sh` 默认预留 32GiB hugepage——但内存后端是 `memfd`，**不用**
-> 显式 hugepage 池，预留只会白锁 host 内存重新招回 OOM。现已默认关，仅 `HUGEPAGES=N`
-> 且后端换 hugetlbfs 时才开。
->
-> **频率封顶（`CPU_FREQ_CAP=1`，默认开）**：host(Ryzen7 5800)的 boost 能到 4.6GHz，
-> 而 VM 伪装的是 Ryzen3-1200（自报 boost 3.4GHz）。guest 的 TSC 被钉死在 3.1GHz，但 CPU
-> 实际以 host 频率执行指令——若 host 跑 4.4GHz，guest「单位 TSC tick 内干的活」就远超这颗
-> CPU 该有的量，等于一台超频/变速的机器，正是 `13-131130-8` 计时异常的来源之一。把
-> `scaling_max_freq` 压到 `CPU_MAX_MHZ`（伪装 CPU 上限）后，guest 再也跑不出超规格速度，
-> 且固定频率顺带把抖动也压平。**多 VM 取运行中最小**：scaling_max_freq=当前在跑各 VM
-> `CPU_MAX_MHZ` 的最小值（每次启动按实际在跑集合重算，可升可降），保证任一 VM 都不超自身
-> 规格。低规格 VM 停机不触发重算，高规格 VM 要到下次启动/手动调才回升。
->
-> **免密 sudo**：频率封顶要写 `scaling_max_freq`（root）。已装 `/etc/sudoers.d/qemu-hostperf`
-> 仅给 `host-performance.sh` 免密（其余 sudo 仍要密码），所以 start-vm 自动调优**不再提示
-> 输密码**。手动也可：`sudo deploy/scripts/host-performance.sh <封顶kHz>`（cap 走位置参数）。
->
-> **CPU 亲和隔离（`CPU_ISOLATE=1`，默认开，线程级）**：频率封顶只解决「跑多快」，解决不了
-> 「vCPU 抢不抢得到核」。宿主机一跑满核（如 `cargo build` 默认 `nproc` 个并行任务塞满全部
-> 16 线程），QEMU 的 vCPU 线程只是普通 CFS 线程，要和几十个编译线程抢同一批核 → guest 该跑
-> 时抢不到 → 卡顿/掉帧/鼠标延迟/ACE 计时异常。`start-vm` 起 VM 后由后台 pinner 等 QMP 报出
-> vCPU 线程号，调 `host-cpu-isolate.sh` 把 QEMU 钉进 cgroup v2 cpuset **独占分区**：
-> - **线程级**——每个 vCPU 独占 1 个逻辑线程（不是整颗物理核）。4vCPU 的 VM 默认只占
->   4 个逻辑线程；分配顺序优先遍历可用物理核心的第一个逻辑线程，主线程耗尽后才使用 SMT 兄弟。
-> - 分区 `cpuset.cpus.partition=root` → 这些线程从 root cgroup 的 effective 摘走，宿主机
->   一切进程（桌面 / 编译）被内核挤到其余线程，**物理上碰不到 VM 的线程**；vCPU 永不被抢占。
-> - **多 VM**：所有实例共用同一 `vmiso` 分区并按已占线程错开（flock 串行）。`HOST_RESERVE_CORES=auto`
->   会在多开需求较高时自动缩小宿主机预留，让 VM 优先横向铺到不同物理核心。分区随起停**动态伸缩**，
->   某台停机即把它的线程还给宿主机（`stop-vm.sh` 自动调 `release`）。
-> - **辅助线程专用 CPU**：`--svc-cpu` / `QEMU_SVC_CPUS=1` 会额外分配 1 个逻辑 CPU，并把 QEMU
->   main loop、IO、SDL、fb-shm worker 等非 vCPU 线程收窄到这组 CPU。vCPU 满载时，显示/IO 路径
->   不再和 vCPU 抢同一条调度队列；日志应出现 `>> qemu svc`。`--svc-cpus=N` 可加大数量。
-> - 代价：线程级下宿主机用到兄弟线程时与 vCPU 共享物理核执行单元（SMT 争用，**只掉吞吐不掉
->   调度**）。想要更强隔离可调高 `HOST_RESERVE_CORES`，或减少每台 VM 的 `--cpus=` 并配 `--svc-cpu`。
-> - 纯运行态（cgroup v2，不重启），`guest` 完全无感知（零反检测影响）。免密 sudo 走
->   `/etc/sudoers.d/qemu-cpuiso`（仅 `host-cpu-isolate.sh`）。`--no-cpu-isolate` 关；
->   查看状态 `sudo deploy/scripts/host-cpu-isolate.sh status`。
->
-> **CPU 按宿主机自动匹配**：新建 VM 选伪装 CPU 时硬过滤**同厂商**（AMD 宿主机只挑 AMD、
-> 反之亦然——`enforce=off` 下宿主机微架构特性会透过 KVM 暴露，伪装异厂商即矛盾）+ 频率
-> ≤宿主机单核上限（自报规格本机真实可达）。CPU 再按 socket 配套对应主板。无核显约束下
-> CPU 池全 4C/4T（桌面 2C/4T 全带核显）。
+正式启动 swtpm 时，启动器会把经过 `realpath` 规范化、owner/type/mode 校验的
+`tpm-state` 路径登记到当前用户的私有 runtime 目录。之后直接执行
+`deploy/scripts/stop-vm.sh <N>` 即可停止使用自定义 `VM_DIR` 的实例，无需重复传入路径。
+runtime 文件损坏、变成符号链接或权限向 group/other 开放时，stop 会拒绝模糊匹配和误杀；
+没有 runtime 文件的旧实例仍兼容默认 `$VMS_DIR/<N>/tpm-state` 布局。
 
-每个 INSTANCE 的资源分配（默认 `IMAGE_ROOT=/home/ubuntu/images`，可迁移，见 [PORTABILITY.md](PORTABILITY.md)）：
-- 磁盘：`$VMS_DIR/<N>/disk.qcow2`（不存在则按 profile 的 NVMe 容量创建 sparse qcow2）
-- profile：`$VMS_DIR/<N>/profile`
-- OVMF NVRAM：`$VMS_DIR/<N>/ovmf-vars.fd`
-- QMP socket：`/tmp/qemu-stealth-<N>.qmp`
-- HMP socket：`/tmp/qemu-stealth-<N>.mon`
-- VNC 显示：`<N-1>`（端口 5900+N-1）
-- SSH 转发：`127.0.0.1:1002<N+2>`
-- RDP 转发：`127.0.0.1:1338<N+8>`
-
-## 6. 一键全套 stealth
-
-见 [STEALTH-WORKFLOW.md](STEALTH-WORKFLOW.md)。两步：
+### 4.3 无副作用预检
 
 ```bash
-# Step 1 (guest 内, 首次)
-irm http://<host-on-br0>:8765/vm-bootstrap.ps1 | iex
-
-# Step 2 (host)
-deploy/scripts/install-stealth.sh <INSTANCE>
+STRICT_HARDWARE=1 DRY_RUN=1 \
+  deploy/scripts/start-vm.sh 99 \
+  --qemu="$PWD/build/qemu-system-x86_64" \
+  --no-host-tune --no-cpu-isolate --no-bridge
 ```
 
-## 6.4 QMP 多客户端（QEMU 原生 multi=on）
+`DRY_RUN=1` 不创建 profile、磁盘、OVMF vars、TPM state 或守护进程，但仍执行 patched QEMU
+能力检查、KVM/TSC 检查和实际 CPU realize smoke。首次 dry-run 因为不创建磁盘，不能代替
+已有 qcow2 容量校验；要验容量应显式传入匹配的 `--disk=/path/test.qcow2`。
 
-普通 `-qmp unix:...,server=on` 是**单连接** chardev：dgame 一长期挂着，
-image-search / 任何脚本去 connect 就 ECONNREFUSED。本分支给 QMP socket
-加了 `multi=on`，`start-vm.sh --proxy` 会直接启用原生多客户端 listener：
+## 5. 当前默认值
+
+| 变量/标志 | 默认 | 当前语义 |
+|---|---:|---|
+| `STRICT_HARDWARE` | `1` | 平台、组件、KVM/TSC、CPU realize、TPM 等硬件面 fail closed |
+| `STEALTH_TSC_POLICY` | `auto` | 有 scaling 用 profile TSC；无 scaling 按宿主实测约束 |
+| `CPUS` | `4` | 必须等于所选 SKU 的完整 4 个线程 |
+| `MEM_TOTAL_MB` | 新 profile `8192` | 2/4/8 GiB 由 manifest 约束；新建默认 2×4 GiB |
+| `TPM` | `1` | swtpm 2.0 + CRB；严格模式下缺失/初始化失败不降级 |
+| `HOST_TUNE` | `1` | governor=performance、`halt_poll`、THP defrag；不停止 irqbalance |
+| `CPU_FREQ_CAP` | **`0`** | 默认不全局封顶；`--freq-cap` 才按目标 CPU 上限启用 |
+| `CPU_ISOLATE` | `1` | 异步 NUMA-aware pinner + cgroup cpuset |
+| `QEMU_SERVICE_CPUS` | `0` | `--svc-cpu` 分配 1 个辅助线程逻辑 CPU |
+| `MEM_GUARD` | `1` | 可用内存不足时告警或拒绝；`MEM_FORCE=1` 显式越过硬拒绝 |
+| `SDL` / `FB_SHM` | `1` / `1` | 默认本地 SDL/GL 窗口与 fb-shm 同时启用 |
+| `STABLE_DISPLAY` | `0` | 默认 virtio-vga-gl；设 1 改用无 GL 稳定路径 |
+| `GPU_DISPLAY` | `sdl` | 还支持 `sdl-egl` 兼容名和 `egl-headless` |
+| `QEMU_CAP_CHECK` | `1` | 拒绝缺少定制设备属性的 QEMU |
+| `STRICT_STEALTH` | `0` | 网络兼容默认；生产应显式设 1 禁止 NAT fallback |
+| `PROXY` | `0` | `--proxy` 启用 QMP 原生 multi-client |
+
+`CPU_FREQ_CAP=0` 是有意的默认值：全局 `scaling_max_freq` 会同时影响管理核和其它 VM，尤其
+不适合未经评估的高核/双路 E5。优先用 NUMA/cpuset 放置；只有确认宿主调度策略后才使用
+`--freq-cap`。
+
+宿主内存使用单个 `memory-backend-memfd,share=on,prealloc=off`，按需占用物理页，不预留无效
+hugepage 池。`share=on` 供 VMI 读取同一份 guest RAM；它不改变客体报告的内存容量。
+
+## 6. 显示与 fb-shm
+
+| 命令 | 本地窗口 | 远程显示 | fb-shm |
+|---|---|---|---|
+| `start-vm.sh 1` | SDL/GL | 无 | 开 |
+| `start-vm.sh 1 --headless` | 无 | VNC | 开 |
+| `start-vm.sh 1 --no-sdl` | 无 | 无 | 开 |
+| `start-vm.sh 1 --no-fb-shm` | SDL/GL | 无 | 关 |
+| `start-vm.sh 1 --gpu-headless` | 无 | EGL rendernode | 开 |
+
+无 `DISPLAY` 且非交互终端时，默认 SDL 会自动关闭，仅保留 fb-shm。消费端示例：
 
 ```bash
-# 起 VM，同时启用 QMP 原生 multi-client
-deploy/scripts/start-vm.sh 2 --proxy
-
-# 新旧路径都能连：.qmp 是原生 multi socket，.qmp.proxy 是兼容 symlink
-#   推荐:         /tmp/qemu-stealth-2.qmp
-#   dgame:        --qmp /tmp/qemu-stealth-2.qmp.proxy
-#   image-search: 把 src/qmp.rs 里的 socket path 改后缀
-#   socat:        socat - UNIX-CONNECT:/tmp/qemu-stealth-2.qmp.proxy
+build/qemu-fb-shm-stream \
+  --sock /tmp/qemu-stealth-1.fb \
+  --output /tmp/vm1.mp4 \
+  --encoder libx264 --preset veryfast --mode auto
 ```
 
-原生工作机制：
+GPU handle 只是一条传帧优化；导出不可用时会回落到 SHM。无论路径为何，客体仍是 virtio
+显示设备，不能把日志中的 GPU handoff、旧 NVIDIA/AMD 标签或注册表名称当作物理 GPU 证据。
 
-* socket listener 持续 accept，每个 client 创建独立 QMP monitor；
-* 每个 client 独立做 `qmp_capabilities`，命令响应天然回到发起连接；
-* 事件（RESET/SHUTDOWN/...）沿用 QEMU monitor 事件广播，发给所有已握手 client；
-* OOB 命令（`exec-oob`）沿用原 QMP monitor 支持；
-* 不再需要 Python `qmp-proxy.py` 常驻进程。
-
-实测：4 个并发 client 各自 `query-status`，id 全部正确路由；3 个 listener
-触发一次 `system_reset` 全部收到 `RESET` event。
-
-注意：fb-shm 截图比 QMP screendump 快 10-100×，长期方案是把 image-search 改成
-直接走 fb-shm（看 [FB-SHM.md](FB-SHM.md)）。
-
-## 6.5 运行时切换显示通道
-
-启动后想隐藏 SDL 窗口只留推流（节省 ~3-7% CPU）/ 反向：
+## 7. Profile 与内存变更
 
 ```bash
-deploy/scripts/ctl-vm.sh 1 stream-only    # SDL 隐 + fb-shm 跑
-deploy/scripts/ctl-vm.sh 1 sdl-only       # SDL 显 + fb-shm 暂停
-deploy/scripts/ctl-vm.sh 1 sdl-hide       # 仅隐 SDL
-deploy/scripts/ctl-vm.sh 1 sdl-show       # 仅显 SDL
-deploy/scripts/ctl-vm.sh 1 fb-off         # 卸载 fb-shm（删 socket）
-deploy/scripts/ctl-vm.sh 1 fb-on 60       # 重装 fb-shm
-deploy/scripts/ctl-vm.sh 1 status         # 查询当前状态
+# 查看，不要 source
+sed -n '1,220p' /home/ubuntu/images/vms/1/profile
+
+# 使用 manifest 允许的配置；重启后生效
+deploy/scripts/set-vm-memory.sh 1 4G
+deploy/scripts/set-vm-memory.sh 1 8G
+
+# 重新生成整套平台/组件绑定和唯一值
+deploy/scripts/reroll-identity.sh 1
+# 或下一次启动时
+deploy/scripts/start-vm.sh 1 --reroll
 ```
 
-底层走 QMP：`display-pause` / `display-resume`（DCL 暂停）+ `object-del` /
-`object-add`（fb-shm 卸载/重装）。详见 [FB-SHM.md](FB-SHM.md)。
+`--ram=`/`RAM=` 是本次启动覆盖，仍必须属于平台允许值。长期变更应写入 profile，避免容量
+在重启间漂移。严格模式拒绝过时 manifest revision 和 legacy profile；reroll 会改变 UUID、
+序列号和 MAC，可能触发 Windows 重新激活，应先备份并在测试实例验证。
 
-## 7. 多 VM
+## 8. E5/X99 宿主验收
 
-每个 INSTANCE 独立装。比如：
+E5 v3/v4 + X99/C612 只能标记为条件支持。E5-2696 v4 是 OEM 定制 SKU，必须先核对准确主板
+型号、PCB revision、BIOS/微码、供电、散热和内存类型；“LGA2011-3 能插上”不等于受支持。
 
 ```bash
-# Terminal A (装 VM1，挂 autounattend 全自动)
-EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
-    deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
+sudo dmidecode --type 0,2,4,16,17
+grep -E 'vendor_id|model name|microcode|flags' /proc/cpuinfo | head -40
+cat /sys/module/kvm_intel/parameters/ept 2>/dev/null
+python3 deploy/scripts/kvm-capabilities.py --format json
 
-# Terminal B (装 VM2)
-EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
-    deploy/scripts/start-vm.sh 2 --iso=/home/ubuntu/images/win10_ltsc.iso
-
-# 装好后给两个分别跑一次 stealth 安装
-deploy/scripts/install-stealth.sh 1
-deploy/scripts/install-stealth.sh 2
-
-# 同时跑（生产 daemon；nohup 无 DISPLAY 自动降级 --no-sdl，仅推流）
-nohup deploy/scripts/start-vm.sh 1 > /tmp/qemu1.log 2>&1 &
-nohup deploy/scripts/start-vm.sh 2 > /tmp/qemu2.log 2>&1 &
-
-# 给两台分别拉一路 NVENC 推流（不同 RTMP key / UDP 端口）
-qemu-fb-shm-stream --sock /tmp/qemu-stealth-1.fb \
-    --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc --bitrate 6M --mode auto &
-qemu-fb-shm-stream --sock /tmp/qemu-stealth-2.fb \
-    --output 'rtmp://ingest/live/vm2' --encoder h264_nvenc --bitrate 6M --mode auto &
-
-# 或者用编排器一次起多 VM 消费端
-scripts/qemu-fb-shm-multivm.py --config multivm.yaml
+# 在目标机执行真正的严格 CPU realize，但不写实例状态
+STRICT_HARDWARE=1 DRY_RUN=1 \
+  deploy/scripts/start-vm.sh 99 \
+  --qemu="$PWD/build/qemu-system-x86_64" \
+  --no-host-tune --no-cpu-isolate --no-bridge
 ```
 
-注意 RAM：每台默认 4GB（2×2GB 双通道），宿主要够。
+无 TSC scaling 且实际 vCPU TSC 约为 2200 MHz 时，当前候选只剩 i5-6400T/H110；是否真的
+可用仍由随后 Broadwell→Skylake named-model 的 QEMU/KVM realize 决定。任何 warning、
+unsupported、CPUID 缺失或 TSC 设置失败都表示不支持，不能改成 `enforce=off` 绕过。
 
-## 7.1. 基础镜像克隆（快速创建新 VM）
+单路 X99 是一个宿主 NUMA 场景；双路 C612 应让每台 4-vCPU VM 优先放在一个 node，容量不足
+而跨 node 只能算退化运行。高核心数提高多 VM 容量，不保证单台 4-vCPU VM 更快。
 
-适合先装好 1 台「干净系统 + 浅层 stealth」当模板，后续不再走 ISO 装系统：
+## 9. 客体快照与长稳
+
+Linux 客体内：
 
 ```bash
-# 把已经装好的 instance 2 固化为 base（VM 必须先关机）
-deploy/scripts/seal-base.sh 2 win10-ltsc-shallow
-# -> /home/ubuntu/images/vms/_base/win10-ltsc-shallow.qcow2 （只读）
-
-# 用 base 克隆出新 instance 4（增量盘，硬件身份重新随机）
-deploy/scripts/clone-from-base.sh win10-ltsc-shallow 4
-# -> /home/ubuntu/images/vms/4/disk.qcow2  (qcow2 backed by base)
-# -> /home/ubuntu/images/vms/4/profile     (新随机 CPU/主板/GPU/MAC)
-
-# 直接启动
-deploy/scripts/start-vm.sh 4
+sudo deploy/scripts/guest/collect-hardware-snapshot.sh /tmp/vmate-hardware-linux
 ```
 
-或不通过 seal/clone，直接在 `start-vm.sh` 加 `BASE_IMAGE=`：
+至少核对 CPU/核心线程、SMBIOS 0/1/2/3/4/16/17、PCI 主/子系统 ID、PCIe link、NVMe
+Identify/容量/firmware/SubNQN、NIC OUI、USB descriptor、EDID、TPM 和启动 warning。
+
+宿主侧 24 小时 QMP soak：
 
 ```bash
-BASE_IMAGE=/home/ubuntu/images/vms/_base/win10-ltsc-shallow.qcow2 \
-    deploy/scripts/start-vm.sh 5
-# 首次启动前自动建增量盘
+python3 deploy/scripts/soak-vm.py \
+  --qmp /tmp/qemu-stealth-1.qmp \
+  --pid "$(pgrep -n -f 'qemu-system-x86_64.*win10-1')" \
+  --duration 24h --interval 30 \
+  --output /var/tmp/vmate-soak-1.jsonl
 ```
 
-⚠️ 没有 sysprep 的话克隆出的 VM 与 base 共享 SID/MachineGUID；
-单机用没问题，多机并发 / 域加入会冲突。需要彻底干净就在 base 里跑 `sysprep /generalize /oobe` 后再 seal-base.sh。
+soak 通过仍不等于性能通过。E5/X99 还应记录 idle、单 VM 满载、多 VM 满载下的 scheduler
+latency、NUMA remote access、磁盘/网络 P99、RSS、温度和功耗。
 
-## 8. 停机
+## 10. 历史文档说明
 
-```bash
-deploy/scripts/stop-vm.sh <INSTANCE>
-# = ACPI shutdown → 等 30s → QMP quit → 再等 5s → SIGTERM → SIGKILL
-# 确认停机后还会收摊本实例的 swtpm daemon、旧版 Python qmp-proxy
-# 残留进程和 .qmp.proxy 兼容别名：swtpm 是脱离 qemu 的 --daemon，
-# 不显式停会一直持 tpm-state NVRAM 锁，下次启动新 QEMU CMD_INIT
-# 抢不到锁报 0x9 秒退（见 docs/DEBUG.md）。
-```
-
-> 直接 `kill -9` qemu 或关 SDL 窗口**不会**清 swtpm；但 `start-vm.sh` 起 daemon 前有
-> preflight reaper 会按实例自动清掉孤儿 swtpm（无活 qemu 占用本实例 tpm-sock 时才清，
-> 跨实例零误杀），所以即便硬杀过，下次 `start-vm.sh <N>` 也能自愈。
-
-## 9. 重置硬件身份
-
-```bash
-deploy/scripts/reroll-identity.sh <INSTANCE>
-# 或单次：deploy/scripts/start-vm.sh <N> --reroll
-```
-
-## 10. QMP / HMP 调试
-
-```bash
-# QMP（JSON）：截图、发按键、savevm/loadvm、query-* 等
-deploy/scripts/qmp-frame.sh <N> screenshot /tmp/vm.png
-deploy/scripts/qmp-frame.sh <N> sendkey ctrl-alt-del
-
-# HMP（人话）
-socat - unix-connect:/tmp/qemu-stealth-<N>.mon
-(qemu) info status
-(qemu) info pci
-```
-
-## 11. RDP
-
-```bash
-deploy/scripts/rdp-connect.sh <N>
-# 等价于 xfreerdp /v:127.0.0.1:1338<N+8> /u:Administrator /p:123456 /size:1600x900
-```
-
-## 12. 自检
-
-```bash
-deploy/scripts/verify-stealth.sh
-# 离线扫源码 + 二进制，检查 CPUID / 字符串 / SMBIOS 是否符合预期
-```
-
-## 13. 故障排查
-
-详见 [STEALTH-WORKFLOW.md](STEALTH-WORKFLOW.md) 第 6 节，以及 [DEBUG.md](DEBUG.md)。
-
-常见操作：
-
-```bash
-# 抓 guest 内 minidump
-sshpass -p 123456 scp Administrator@<guest>:'C:/Windows/Minidump/*.dmp' /tmp/
-
-# 简易解析 dump (host)
-deploy/efiguard/analyze-minidump.sh /tmp/<dump>.dmp
-
-# offline 改 ESP（guest 关机后）
-sudo qemu-nbd --connect=/dev/nbd0 /home/ubuntu/images/vms/<N>/disk.qcow2
-sudo mount /dev/nbd0p1 /mnt/esp
-# ... 改文件 ...
-sudo umount /mnt/esp
-sudo qemu-nbd --disconnect /dev/nbd0
-
-# offline 改注册表 (Windows partition is /dev/nbd0p3)
-sudo mount /dev/nbd0p3 /mnt/winsys
-sudo hivexsh -w /mnt/winsys/Windows/System32/config/SYSTEM
-> cd ControlSet001\Enum\PCI\...
-```
+`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md`、`ACE-SHALLOW-STEALTH.md` 以及旧审计中仍可能
+保留 AMD/B350、深层 GPU、多个 NVMe/显示器/HID 随机池等历史流程。它们不能覆盖当前
+`platforms.json`、`components.json`、启动器和 2026-07-13 硬件评估；新部署以本页和当前
+manifest 为准。

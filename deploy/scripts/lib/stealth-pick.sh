@@ -6,15 +6,23 @@
 # ------------------------------------------------------------------
 _host_cpu_vendor() {
     local v
+    if [[ -n "${STEALTH_HOST_CPU_VENDOR:-}" ]]; then
+        printf '%s\n' "$STEALTH_HOST_CPU_VENDOR"
+        return
+    fi
     v="$(awk -F': ' '/^vendor_id/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
     case "$v" in
         GenuineIntel) echo GenuineIntel ;;
         AuthenticAMD) echo AuthenticAMD ;;
-        *)            echo "${v:-AuthenticAMD}" ;;
+        *)            echo "${v:-unknown}" ;;
     esac
 }
 _host_cpu_max_mhz() {
     local khz mhz
+    if [[ "${STEALTH_HOST_CPU_MAX_MHZ:-}" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$STEALTH_HOST_CPU_MAX_MHZ"
+        return
+    fi
     khz="$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || echo '')"
     if [[ "$khz" =~ ^[0-9]+$ ]]; then echo $(( khz / 1000 )); return; fi
     mhz="$(awk -F'@ ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null \
@@ -23,79 +31,86 @@ _host_cpu_max_mhz() {
     echo 99999
 }
 
+_host_required_tsc_mhz() {
+    # 宿主预检确认没有 VMX TSC scaling 时，通过该变量传入实际 invariant TSC。
+    # 空值代表硬件可以缩放或尚未要求精确匹配；非法值必须立即失败，不能忽略后
+    # 继续选择一个必然无法启动的 profile。
+    if [[ -z "${STEALTH_REQUIRED_TSC_MHZ:-}" ]]; then
+        return 0
+    fi
+    if ! [[ "$STEALTH_REQUIRED_TSC_MHZ" =~ ^[0-9]+$ ]] || (( STEALTH_REQUIRED_TSC_MHZ <= 0 )); then
+        echo "ERROR: STEALTH_REQUIRED_TSC_MHZ 必须是正整数 MHz" >&2
+        return 1
+    fi
+    printf '%s\n' "$STEALTH_REQUIRED_TSC_MHZ"
+}
+
+_gen_platform_nic_mac() {
+    # 板载网卡型号已经由平台清单绑定，MAC OUI 必须来自同一个供应商。此前从混合
+    # OUI 池随机会产生“Realtek RTL8111H 使用 Intel OUI”的跨字段矛盾。
+    if ! [[ "${NIC_MAC_OUI:-}" =~ ^([0-9a-f]{2}:){2}[0-9a-f]{2}$ ]]; then
+        echo "ERROR: 平台网卡没有受审计 OUI: ${NIC_MAC_OUI:-empty}" >&2
+        return 1
+    fi
+    printf '%s:%02x:%02x:%02x\n' "$NIC_MAC_OUI" "$(_rand 0 255)" "$(_rand 0 255)" "$(_rand 0 255)"
+}
+
 # ------------------------------------------------------------------
 # 公开：随机生成一份完整 profile 并 export
 # ------------------------------------------------------------------
 stealth_pick_profile() {
     _rng_init
 
-    # 1. 先选 CPU —— host-aware：
-    #    · 硬过滤**同厂商**：AMD 宿主机不伪装 Intel、反之亦然。enforce=off 下宿主机
-    #      微架构特性(MSR/CPUID leaf)会透过 KVM 暴露，伪装异厂商 = 立刻矛盾。
-    #    · 频率过滤 CPU_MAX_MHZ ≤ 宿主机单核上限：自报规格在本机真实可达，避免
-    #      "自报远超宿主机能给"的缺口（与未来 E5-2696 v4 宿主机对齐更干净）。
-    #    无频率匹配则放宽到仅同厂商；再无(异厂商池)则全池兜底并告警。
-    local _host_ven _host_max
+    # 1. 按完整平台 bundle 选择，不再把 CPU、主板和 BIOS 独立抽签。
+    #    下面四个条件全部是硬约束：同 CPU 厂商、SKU 完整线程数等于 CPUS、SKU
+    #    最大频率不超过宿主可达上限、无 TSC scaling 时 TSC 精确相等。任一条件
+    #    无候选都明确失败；严禁历史上的“放宽到同厂商任意型号”静默回退。
+    local _host_ven _host_max _required_tsc
     _host_ven="$(_host_cpu_vendor)"
     _host_max="$(_host_cpu_max_mhz)"
-    local _cand_vf=() _cand_v=() _ci _cv _cmx
-    for (( _ci=0; _ci<${#CPU_POOL[@]}; _ci++ )); do
-        IFS='|' read -r _ _cv _ _cmx _ _ _ _ <<<"${CPU_POOL[$_ci]}"
-        [[ "$_cv" == "$_host_ven" ]] || continue
-        _cand_v+=("$_ci")
-        if [[ "$_cmx" =~ ^[0-9]+$ && "$_host_max" =~ ^[0-9]+$ ]] && (( _cmx <= _host_max )); then
-            _cand_vf+=("$_ci")
+    _required_tsc="$(_host_required_tsc_mhz)" || return 1
+    local -a _candidates=()
+    local entry _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz
+    for entry in "${PLATFORM_POOL[@]}"; do
+        IFS='|' read -r _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz <<<"$entry"
+        [[ "$_enabled" == "true" && "$_vendor" == "$_host_ven" ]] || continue
+        [[ "${CPUS:-4}" =~ ^[0-9]+$ ]] || {
+            echo "ERROR: CPUS 必须是正整数" >&2
+            return 1
+        }
+        (( _threads == CPUS && _max_mhz <= _host_max )) || continue
+        if [[ -n "$_required_tsc" ]] && (( _tsc_mhz != _required_tsc )); then
+            continue
         fi
+        _candidates+=("$_platform_id")
     done
-    local -a _pick
-    if   (( ${#_cand_vf[@]} > 0 )); then _pick=("${_cand_vf[@]}")
-    elif (( ${#_cand_v[@]}  > 0 )); then _pick=("${_cand_v[@]}")
-    else
-        echo ">> WARN: CPU 池里无与宿主机($_host_ven)同厂商型号，回退全池(可能厂商不一致)" >&2
-        _pick=(); for (( _ci=0; _ci<${#CPU_POOL[@]}; _ci++ )); do _pick+=("$_ci"); done
-    fi
-    local cpu_i="${_pick[$(( (RANDOM * 32768 + RANDOM) % ${#_pick[@]} ))]}"
-    IFS='|' read -r CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET <<<"${CPU_POOL[$cpu_i]}"
-    # 兼容老 profile 的 CPU_MODEL 字段：保留它指向 QEMU 模型主名（不带 family/model 覆盖）
-    CPU_MODEL="${CPU_QEMU_ARG%%,*}"
-
-    # 2. 主板：从 BOARD_POOL 里挑 socket 匹配的
-    local matched=()
-    local entry
-    for entry in "${BOARD_POOL[@]}"; do
-        local sock="${entry%%|*}"
-        if [[ "$sock" == "$CPU_SOCKET" ]]; then
-            matched+=("$entry")
-        fi
-    done
-    if (( ${#matched[@]} == 0 )); then
-        echo "ERROR: 没有 socket=$CPU_SOCKET 的主板可选" >&2
+    if (( ${#_candidates[@]} == 0 )); then
+        echo "ERROR: 无可用整机平台：vendor=$_host_ven CPUS=${CPUS:-4} host_max=${_host_max}MHz required_tsc=${_required_tsc:-scalable}" >&2
         return 1
     fi
-    local b_i=$(( (RANDOM * 32768 + RANDOM) % ${#matched[@]} ))
-    IFS='|' read -r _ BOARD_MFR BOARD_PRODUCT BOARD_FAMILY BOARD_VERSION SERIAL_FN BOARD_SUBSYS_VEN BOARD_SUBSYS_DEV <<<"${matched[$b_i]}"
+    local selected_platform="${_candidates[$(( (RANDOM * 32768 + RANDOM) % ${#_candidates[@]} ))]}"
+    stealth_platform_load "$selected_platform" || return 1
+
+    # 平台事实来自 manifest；这里只生成每台 VM 唯一、且之后会持久化的序列号。
     BOARD_SERIAL="$($SERIAL_FN)"
     BOARD_ASSET="$(_rand 1000000000 9999999999)"
 
     SYSTEM_MFR="$BOARD_MFR"
-    local m=${#SYSTEM_PRODUCT_POOL[@]}
-    SYSTEM_PRODUCT="${SYSTEM_PRODUCT_POOL[$((RANDOM % m))]}"
-    local f=${#SYSTEM_FAMILY_POOL[@]}
-    SYSTEM_FAMILY="${SYSTEM_FAMILY_POOL[$((RANDOM % f))]}"
     SYSTEM_VERSION="$BOARD_VERSION"
     SYSTEM_SERIAL="$($SERIAL_FN)"
     SYSTEM_SKU="SKU$(_rand 100000 999999)"
 
-    local v=${#BIOS_VERSION_POOL[@]}
-    BIOS_VERSION="${BIOS_VERSION_POOL[$((RANDOM % v))]}"
-    local d=${#BIOS_DATE_POOL[@]}
-    BIOS_DATE="${BIOS_DATE_POOL[$((RANDOM % d))]}"
-
-    local c=${#CHASSIS_POOL[@]}
-    CHASSIS_TYPE="${CHASSIS_POOL[$((RANDOM % c))]}"
+    # SMBIOS Type 3 是整机身份，不再从全局机箱池独立抽签。当前 schema
+    # 只允许 DMTF Desktop(0x03)；保留历史文本值以兼容 SMBIOS 参数生成器。
+    case "$SYSTEM_CHASSIS_TYPE" in
+        0x03) CHASSIS_TYPE="Desktop" ;;
+        *)
+            echo "ERROR: 平台 $PLATFORM_ID 包含不支持的 chassis type: $SYSTEM_CHASSIS_TYPE" >&2
+            return 1 ;;
+    esac
     CHASSIS_SERIAL="$($SERIAL_FN)"
 
-    NIC_MAC="$(_gen_mac)"
+    NIC_MAC="$(_gen_platform_nic_mac)" || return 1
     UUID="$(_gen_uuid)"
     CPU_SERIAL="$(_rand 1000000000 9999999999)"
     # CPU asset tag 会进入 SMBIOS Type 4；和 CPU_SERIAL 一起持久化，避免每次启动变化。
@@ -105,38 +120,54 @@ stealth_pick_profile() {
     local gpu_n=${#GPU_POOL[@]}
     local gpu_i=$(( (RANDOM * 32768 + RANDOM) % gpu_n ))
     IFS='|' read -r GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV <<<"${GPU_POOL[$gpu_i]}"
+    # 本分支明确不做 GPU passthrough/vGPU；这些字段只供既有显示标签兼容，不能
+    # 计入严格物理硬件实现。持久化 fidelity 字段，避免摘要把标签误报为真实设备。
+    GPU_IDENTITY_FIDELITY="label_only_out_of_scope"
 
     # 4. NVMe
     local nv_n=${#NVME_POOL[@]}
     local nv_i=$(( (RANDOM * 32768 + RANDOM) % nv_n ))
-    IFS='|' read -r NVME_MODEL NVME_FIRMWARE NVME_SIZE_BYTES <<<"${NVME_POOL[$nv_i]}"
+    IFS='|' read -r NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE NVME_SIZE_BYTES \
+        NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV \
+        NVME_SUBNQN_TEMPLATE <<<"${NVME_POOL[$nv_i]}"
     NVME_SERIAL="$(_nvme_serial)"
+    NVME_SUBNQN="${NVME_SUBNQN_TEMPLATE//\{serial\}/$NVME_SERIAL}"
 
     # 5. 内存厂家 / part / 持久化序列号
-    # MEM_POOL 第 5 列是适配 socket 列表；再用 _cpu_max_mem 按 CPU 内存控制器
-    # 上限过滤颗粒额定速率，避免 Sandy Bridge/AM3 平台抽到 DDR3-1600/1866 后
-    # 虽然 SMBIOS 降速展示但物料本身超出官方常规支持范围。
+    # MEM_POOL 第 5 列是适配 socket 列表。JEDEC DDR4 高频颗粒可以在低速平台
+    # 自动降频，因此不再错误地要求“颗粒额定速率 <= 控制器上限”；最终报告速率
+    # 由 manifest 的 MEM_MAX_MTS 与颗粒额定值取最小值。
     local mem_matched=()
-    local _mem_max
-    _mem_max="$(_cpu_max_mem)"
     for entry in "${MEM_POOL[@]}"; do
         local _mmfr _m2g _m4g _mrated _msockets
         IFS='|' read -r _mmfr _m2g _m4g _mrated _msockets <<<"$entry"
         if ! [[ "$_mrated" =~ ^[0-9]+$ ]]; then
             continue
         fi
-        if [[ -z "${_msockets:-}" || ",$_msockets," == *",$CPU_SOCKET,"* ]] \
-            && (( _mrated <= _mem_max )); then
+        if [[ -z "${_msockets:-}" || ",$_msockets," == *",$CPU_SOCKET,"* ]]; then
             mem_matched+=("$entry")
         fi
     done
     if (( ${#mem_matched[@]} == 0 )); then
-        echo "ERROR: 没有 socket=$CPU_SOCKET 且速率<=${_mem_max}MT/s 的内存可选" >&2
+        echo "ERROR: 没有 socket=$CPU_SOCKET、type=$MEM_TYPE 的内存可选" >&2
         return 1
     fi
     local mp_i=$(( (RANDOM * 32768 + RANDOM) % ${#mem_matched[@]} ))
     local MEM_SOCKETS
     IFS='|' read -r MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SOCKETS <<<"${mem_matched[$mp_i]}"
+    # 中文注释：DIMM 料号的额定速率与主板训练后的配置速率是两个不同事实。
+    # H110 上的 DDR4-2400/2666 条会训练为 2133，但 SPD/Type17 Speed 仍须保留
+    # 料号额定能力；Configured Memory Speed 才报告 2133。
+    MEM_RATED_MTS="$MEM_RATED"
+    if (( MEM_RATED_MTS < MEM_MAX_MTS )); then
+        MEM_CONFIGURED_MTS="$MEM_RATED_MTS"
+    else
+        MEM_CONFIGURED_MTS="$MEM_MAX_MTS"
+    fi
+    if [[ ",$MEM_ALLOWED_MTS," != *",$MEM_CONFIGURED_MTS,"* ]]; then
+        echo "ERROR: 内存配置速率 $MEM_CONFIGURED_MTS 不在平台允许集合 $MEM_ALLOWED_MTS" >&2
+        return 1
+    fi
     # DIMM serial 在 pick 阶段一次性生成，写到 profile 持久化——避免之前每次
     # 启动 stealth_smbios_args 里 _rand 一遍导致 Win32_PhysicalMemory.SerialNumber
     # 重启就变（反作弊"硬件指纹漂移"检测的明显信号）。
@@ -148,47 +179,69 @@ stealth_pick_profile() {
     # RAM>4096 自动拆成 2 条 4GB DIMM 走双通道，两条 SN 各自唯一。老 profile 缺
     # 字段仍退回 4096 (见 stealth_load_profile)，不擅自升级既有 VM 的硬件画像；
     # 个别 VM 要改容量：deploy/scripts/set-vm-memory.sh <N> <size>，启动命令不变。
-    MEM_TOTAL_MB="${MEM_TOTAL_MB:-8192}"
+    MEM_TOTAL_MB="${MEM_TOTAL_MB:-$PLATFORM_DEFAULT_MEMORY_MIB}"
+    if [[ ",$MEM_ALLOWED_TOTAL_MB," != *",$MEM_TOTAL_MB,"* ]]; then
+        echo "ERROR: 平台 $PLATFORM_ID 不允许 ${MEM_TOTAL_MB}MiB；允许值=$MEM_ALLOWED_TOTAL_MB" >&2
+        return 1
+    fi
 
     # 6. 显示器（EDID）
     local mo_n=${#MONITOR_POOL[@]}
     local mo_i=$(( (RANDOM * 32768 + RANDOM) % mo_n ))
     local mo_prefix
-    IFS='|' read -r EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM mo_prefix <<<"${MONITOR_POOL[$mo_i]}"
+    IFS='|' read -r EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM \
+        EDID_HEIGHT_MM mo_prefix EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK \
+        EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT EDID_MIN_VFREQ_HZ \
+        EDID_MAX_VFREQ_HZ EDID_MIN_HFREQ_KHZ EDID_MAX_HFREQ_KHZ \
+        EDID_MAX_PIXEL_CLOCK_MHZ EDID_SECONDARY_XRES EDID_SECONDARY_YRES \
+        EDID_SECONDARY_REFRESH_RATE <<<"${MONITOR_POOL[$mo_i]}"
     EDID_SERIAL="$(_monitor_serial "$mo_prefix")"
 
     # 7. 键盘 USB HID
     local kbd_n=${#KBD_POOL[@]}
     local kbd_i=$(( (RANDOM * 32768 + RANDOM) % kbd_n ))
-    local kbd_prefix
-    IFS='|' read -r KBD_VID KBD_PID KBD_MFR KBD_PRODUCT kbd_prefix <<<"${KBD_POOL[$kbd_i]}"
-    KBD_SERIAL="$(_usb_hid_serial "$kbd_prefix")"
+    IFS='|' read -r KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_COMPONENT_ID \
+        KBD_BCD_DEVICE KBD_DESCRIPTOR_FIDELITY <<<"${KBD_POOL[$kbd_i]}"
+    KBD_SERIAL="$(_usb_hid_serial "$KBD_COMPONENT_ID")"
 
     # 8. 鼠标 USB HID（相对坐标场景）
     local mou_n=${#MOUSE_POOL[@]}
     local mou_i=$(( (RANDOM * 32768 + RANDOM) % mou_n ))
-    local mou_prefix
-    IFS='|' read -r MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT mou_prefix <<<"${MOUSE_POOL[$mou_i]}"
-    MOUSE_SERIAL="$(_usb_hid_serial "$mou_prefix")"
+    IFS='|' read -r MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT \
+        MOUSE_COMPONENT_ID MOUSE_BCD_DEVICE MOUSE_DESCRIPTOR_FIDELITY \
+        <<<"${MOUSE_POOL[$mou_i]}"
+    MOUSE_SERIAL="$(_usb_hid_serial "$MOUSE_COMPONENT_ID")"
 
     # 9. 数位板 USB HID（绝对坐标场景，自动化默认）
     local tab_n=${#TABLET_POOL[@]}
     local tab_i=$(( (RANDOM * 32768 + RANDOM) % tab_n ))
-    local tab_prefix
-    IFS='|' read -r TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT tab_prefix <<<"${TABLET_POOL[$tab_i]}"
-    TABLET_SERIAL="$(_usb_hid_serial "$tab_prefix")"
+    IFS='|' read -r TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT \
+        TABLET_COMPONENT_ID TABLET_BCD_DEVICE TABLET_DESCRIPTOR_FIDELITY \
+        <<<"${TABLET_POOL[$tab_i]}"
+    TABLET_SERIAL="$(_usb_hid_serial "$TABLET_COMPONENT_ID")"
 
-    export CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET CPU_MODEL CPU_SERIAL CPU_ASSET
+    export PLATFORM_SCHEMA_VERSION PLATFORM_CATALOG_REVISION PLATFORM_ID PLATFORM_STATUS PLATFORM_RELEASE_YEAR
+    export COMPONENT_SCHEMA_VERSION COMPONENT_CATALOG_REVISION
+    export CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_TSC_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET CPU_MODEL CPU_SERIAL CPU_ASSET
+    export CPU_CORES CPU_THREADS CPU_PHYS_BITS CPU_FEATURES CPU_SMBIOS_UPGRADE CPU_SMBIOS_VOLTAGE CPU_SMBIOS_EXT_CLOCK CPU_SMBIOS_CHARACTERISTICS
+    export CPU_IGPU_PRESENT CPU_IGPU_STATE CPU_IGPU_MODEL
     export BOARD_MFR BOARD_PRODUCT BOARD_FAMILY BOARD_VERSION BOARD_SERIAL BOARD_ASSET BOARD_SUBSYS_VEN BOARD_SUBSYS_DEV
-    export SYSTEM_MFR SYSTEM_PRODUCT SYSTEM_FAMILY SYSTEM_VERSION SYSTEM_SERIAL SYSTEM_SKU
+    export BOARD_DIMM_SLOTS BOARD_MAX_MEMORY_GIB PCH_MODEL PCIE_GENERATION
+    export SYSTEM_MFR SYSTEM_PRODUCT SYSTEM_FAMILY SYSTEM_CHASSIS_TYPE SYSTEM_VERSION SYSTEM_SERIAL SYSTEM_SKU
     export BIOS_VENDOR BIOS_VERSION BIOS_DATE
     export CHASSIS_TYPE CHASSIS_SERIAL
     export NIC_MAC UUID
-    export GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV
-    export NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES
-    export MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SERIAL MEM_TOTAL_MB
-    export EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL
-    export KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_SERIAL
-    export MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT MOUSE_SERIAL
-    export TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT TABLET_SERIAL
+    export GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV GPU_IDENTITY_FIDELITY
+    export NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV NVME_SUBNQN_TEMPLATE NVME_SUBNQN
+    export MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_RATED_MTS MEM_CONFIGURED_MTS MEM_SERIAL MEM_TOTAL_MB MEM_TYPE MEM_CHANNELS MEM_MAX_MTS MEM_ALLOWED_MTS
+    export MEM_VOLTAGE_MV MEM_RANK MEM_MODULE_MB MEM_ALLOWED_TOTAL_MB MEM_MAX_CAPACITY_MB
+    export ROOT_PORT_PCI_VEN ROOT_PORT_PCI_DEV ROOT_PORT_REV XHCI_PCI_VEN XHCI_PCI_DEV XHCI_REV
+    export MCH_PCI_VEN MCH_PCI_DEV MCH_REV LPC_PCI_VEN LPC_PCI_DEV LPC_REV SMBUS_PCI_VEN SMBUS_PCI_DEV SMBUS_REV AHCI_PCI_VEN AHCI_PCI_DEV AHCI_REV
+    export NIC_VENDOR NIC_MODEL NIC_PCI_VEN NIC_PCI_DEV NIC_SUBSYSTEM_VEN NIC_SUBSYSTEM_DEV NIC_MAC_OUI NIC_ATTACHMENT BOARD_NIC_STATE
+    export AUDIO_VENDOR AUDIO_CODEC AUDIO_CODEC_ID AUDIO_CODEC_REVISION AUDIO_CODEC_SUBSYSTEM_ID AUDIO_IDENTITY_FIDELITY AUDIO_CONTROLLER_PCI_VEN AUDIO_CONTROLLER_PCI_DEV
+    export EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT
+    export EDID_MIN_VFREQ_HZ EDID_MAX_VFREQ_HZ EDID_MIN_HFREQ_KHZ EDID_MAX_HFREQ_KHZ EDID_MAX_PIXEL_CLOCK_MHZ EDID_SECONDARY_XRES EDID_SECONDARY_YRES EDID_SECONDARY_REFRESH_RATE
+    export KBD_COMPONENT_ID KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_SERIAL KBD_BCD_DEVICE KBD_DESCRIPTOR_FIDELITY
+    export MOUSE_COMPONENT_ID MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT MOUSE_SERIAL MOUSE_BCD_DEVICE MOUSE_DESCRIPTOR_FIDELITY
+    export TABLET_COMPONENT_ID TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT TABLET_SERIAL TABLET_BCD_DEVICE TABLET_DESCRIPTOR_FIDELITY
 }

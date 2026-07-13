@@ -62,7 +62,10 @@ static struct {
 
 static struct {
     const char *manufacturer, *version, *serial, *asset, *sku;
-} type3;
+    uint8_t chassis_type;
+} type3 = {
+    .chassis_type = 0x02, /* Unknown */
+};
 
 /*
  * SVVP requires max_speed and current_speed to be set and not being
@@ -77,11 +80,21 @@ static struct {
     uint64_t max_speed;
     uint64_t current_speed;
     uint64_t processor_id;
+    uint16_t external_clock;
+    uint16_t processor_characteristics;
+    uint8_t voltage;
+    uint8_t processor_upgrade;
 } type4 = {
     .max_speed = DEFAULT_CPU_SPEED,
     .current_speed = DEFAULT_CPU_SPEED,
     .processor_id = 0,
     .processor_family = 0x01, /* Other */
+    /*
+     * 未提供整机清单时宁可报告 Unknown，也不能把所有平台伪装成 AM4。
+     * 启动器可用 type=4 的同名参数注入主板固件实际会报告的值。
+     */
+    .processor_upgrade = 0x02, /* Unknown */
+    .processor_characteristics = 0,
 };
 
 struct type8_instance {
@@ -109,7 +122,15 @@ static struct {
 static struct {
     const char *loc_pfx, *bank, *manufacturer, *serial, *asset, *part;
     uint16_t speed;
-} type17;
+    uint16_t configured_speed;
+    uint16_t type_detail;
+    uint16_t voltage;
+    uint8_t memory_type;
+    uint8_t rank;
+} type17 = {
+    /* 未指定 DDR 世代时保持 Unknown，避免 Windows 通用启动路径谎报 DDR4。 */
+    .memory_type = 0x02,
+};
 
 /* stealth: allow SMBIOS type 16 Physical Memory Array to advertise a
  * larger maximum capacity and a higher slot count than the currently
@@ -294,6 +315,10 @@ static const QemuOptDesc qemu_smbios_type3_opts[] = {
         .name = "sku",
         .type = QEMU_OPT_STRING,
         .help = "SKU number",
+    },{
+        .name = "chassis-type",
+        .type = QEMU_OPT_NUMBER,
+        .help = "system enclosure type enum from the SMBIOS specification",
     },
     { /* end of list */ }
 };
@@ -343,6 +368,22 @@ static const QemuOptDesc qemu_smbios_type4_opts[] = {
         .name = "processor-id",
         .type = QEMU_OPT_NUMBER,
         .help = "processor id",
+    }, {
+        .name = "voltage",
+        .type = QEMU_OPT_NUMBER,
+        .help = "processor voltage byte in SMBIOS Type 4 encoding",
+    }, {
+        .name = "external-clock",
+        .type = QEMU_OPT_NUMBER,
+        .help = "processor reference clock in MHz",
+    }, {
+        .name = "processor-upgrade",
+        .type = QEMU_OPT_NUMBER,
+        .help = "processor socket/upgrade enum from the SMBIOS specification",
+    }, {
+        .name = "processor-characteristics",
+        .type = QEMU_OPT_NUMBER,
+        .help = "processor characteristics bitmap from the SMBIOS specification",
     },
     { /* end of list */ }
 };
@@ -498,6 +539,26 @@ static const QemuOptDesc qemu_smbios_type17_opts[] = {
         .name = "speed",
         .type = QEMU_OPT_NUMBER,
         .help = "maximum capable speed",
+    },{
+        .name = "configured-speed",
+        .type = QEMU_OPT_NUMBER,
+        .help = "configured operating speed",
+    },{
+        .name = "memory-type",
+        .type = QEMU_OPT_NUMBER,
+        .help = "SMBIOS memory type enum (for example 0x18 DDR3 or 0x1a DDR4)",
+    },{
+        .name = "type-detail",
+        .type = QEMU_OPT_NUMBER,
+        .help = "SMBIOS memory type detail bitmap",
+    },{
+        .name = "rank",
+        .type = QEMU_OPT_NUMBER,
+        .help = "number of ranks in each populated memory device",
+    },{
+        .name = "voltage",
+        .type = QEMU_OPT_NUMBER,
+        .help = "configured memory voltage in millivolts",
     },
     { /* end of list */ }
 };
@@ -685,7 +746,7 @@ static void smbios_build_type_3_table(void)
     SMBIOS_BUILD_TABLE_PRE(3, T3_BASE, true); /* required */
 
     SMBIOS_TABLE_SET_STR(3, manufacturer_str, type3.manufacturer);
-    t->type = 0x01; /* Other */
+    t->type = type3.chassis_type;
     SMBIOS_TABLE_SET_STR(3, version_str, type3.version);
     SMBIOS_TABLE_SET_STR(3, serial_number_str, type3.serial);
     SMBIOS_TABLE_SET_STR(3, asset_tag_number_str, type3.asset);
@@ -719,7 +780,13 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance,
     SMBIOS_BUILD_TABLE_PRE_SIZE(4, T4_BASE + instance,
                                 true, tbl_len); /* required */
 
-    snprintf(sock_str, sizeof(sock_str), "%s%2x", type4.sock_pfx, instance);
+    /* 单路消费级主板通常直接报告 AM4/LGAxxxx；仅多路系统追加十进制序号。 */
+    if (ms->smp.sockets == 1) {
+        snprintf(sock_str, sizeof(sock_str), "%s", type4.sock_pfx);
+    } else {
+        snprintf(sock_str, sizeof(sock_str), "%s %u", type4.sock_pfx,
+                 instance);
+    }
     SMBIOS_TABLE_SET_STR(4, socket_designation_str, sock_str);
     t->processor_type = 0x03; /* CPU */
     t->processor_family = 0xfe; /* use Processor Family 2 field */
@@ -732,15 +799,16 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance,
         t->processor_id[1] = cpu_to_le32(type4.processor_id >> 32);
     }
     SMBIOS_TABLE_SET_STR(4, processor_version_str, type4.version);
-    /* stealth: AMD Ryzen 3 1200 nominal core voltage ~1.25V.
-     * Bit 7 set means "legacy current voltage" in 0.1V units. */
-    t->voltage = 0x8D; /* legacy bit + 13 -> 1.3V */
-    t->external_clock = cpu_to_le16(100); /* 100 MHz reference clock (AM4) */
+    /*
+     * 这些字段由整机 manifest 决定。旧实现固定 AM4/1.3V/100MHz，导致
+     * Intel、AM3 与 FM2+ profile 在同一张 Type 4 表里出现确定性矛盾。
+     */
+    t->voltage = type4.voltage;
+    t->external_clock = cpu_to_le16(type4.external_clock);
     t->max_speed = cpu_to_le16(type4.max_speed);
     t->current_speed = cpu_to_le16(type4.current_speed);
     t->status = 0x41; /* Socket populated, CPU enabled */
-    /* stealth: Socket AM4 (SMBIOS spec value 0x38). */
-    t->processor_upgrade = 0x38;
+    t->processor_upgrade = type4.processor_upgrade;
     t->l1_cache_handle = cpu_to_le16(0xFFFF); /* N/A */
     t->l2_cache_handle = cpu_to_le16(0xFFFF); /* N/A */
     t->l3_cache_handle = cpu_to_le16(0xFFFF); /* N/A */
@@ -756,10 +824,8 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance,
 
     t->thread_count = (threads_per_socket > 255) ? 0xFF : threads_per_socket;
 
-    /* stealth: 64-bit capable + multi-core + hw thread + execute protection
-     * + enhanced virtualization + power/performance control — all bits a
-     * real Ryzen firmware reports. */
-    t->processor_characteristics = cpu_to_le16(0xFC);
+    t->processor_characteristics =
+        cpu_to_le16(type4.processor_characteristics);
     t->processor_family2 = cpu_to_le16(type4.processor_family);
 
     if (tbl_len == SMBIOS_TYPE_4_LEN_V30) {
@@ -1013,10 +1079,9 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
             SMBIOS_TABLE_SET_STR(17, bank_locator_str, type17.bank);
         }
     }
-    /* stealth: DDR4 + Synchronous so HWiNFO shows "类型 DDR4" and Windows
-     * reports SMBIOSMemoryType=0x1A instead of the RDRAM default. */
-    t->memory_type = 0x1A; /* DDR4 */
-    t->type_detail = cpu_to_le16(0x80); /* Synchronous */
+    /* DDR 世代与颗粒特征必须跟 SPD 和主板 manifest 使用同一份配置。 */
+    t->memory_type = type17.memory_type;
+    t->type_detail = cpu_to_le16(type17.type_detail);
     t->speed = cpu_to_le16(type17.speed);
     SMBIOS_TABLE_SET_STR(17, manufacturer_str, type17.manufacturer);
     {
@@ -1026,12 +1091,16 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
     }
     SMBIOS_TABLE_SET_STR(17, asset_tag_number_str, type17.asset);
     SMBIOS_TABLE_SET_STR(17, part_number_str, type17.part);
-    t->attributes = 1; /* Rank 1 (single-rank) */
-    t->configured_clock_speed = t->speed;
-    /* stealth: DDR4 JEDEC 1.20V nominal. */
-    t->minimum_voltage = cpu_to_le16(1200);
-    t->maximum_voltage = cpu_to_le16(1200);
-    t->configured_voltage = cpu_to_le16(1200);
+    t->attributes = type17.rank & 0x0f;
+    /*
+     * 中文注释：额定速率与平台实际配置速率必须分别进入 SMBIOS 字段。
+     * 例如 DDR4-2400 DIMM 插在 H110/i5-6400T 上时，Speed=2400，
+     * Configured Memory Speed=2133；把两者都写成 2133 会伪造 DIMM 能力。
+     */
+    t->configured_clock_speed = cpu_to_le16(type17.configured_speed);
+    t->minimum_voltage = cpu_to_le16(type17.voltage);
+    t->maximum_voltage = cpu_to_le16(type17.voltage);
+    t->configured_voltage = cpu_to_le16(type17.voltage);
 
     SMBIOS_BUILD_TABLE_POST;
 }
@@ -1186,6 +1255,27 @@ void smbios_set_default_processor_family(uint16_t processor_family)
     if (type4.processor_family <= 0x01) {
         type4.processor_family = processor_family;
     }
+}
+
+bool smbios_get_memory_device_config(SmbiosMemoryDeviceConfig *config)
+{
+    g_return_val_if_fail(config != NULL, false);
+
+    *config = (SmbiosMemoryDeviceConfig) {
+        .memory_type = type17.memory_type,
+        .rank = type17.rank,
+        .rated_speed = type17.speed,
+        .configured_speed = type17.configured_speed,
+        .type_detail = type17.type_detail,
+        .voltage = type17.voltage,
+    };
+
+    /*
+     * SPD 生成器目前只实现消费级 DDR3/DDR4 UDIMM。其他 SMBIOS 类型仍可
+     * 正常生成 Type 17，但 Q35 不应凭空制造一个错误世代的 EEPROM。
+     */
+    return type17.memory_type == SMBIOS_MEMORY_TYPE_DDR3 ||
+           type17.memory_type == SMBIOS_MEMORY_TYPE_DDR4;
 }
 
 void smbios_set_defaults(const char *manufacturer, const char *product,
@@ -1639,6 +1729,13 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
             save_opt(&type3.serial, opts, "serial");
             save_opt(&type3.asset, opts, "asset");
             save_opt(&type3.sku, opts, "sku");
+            if (qemu_opt_get_number(opts, "chassis-type", 0x02) >
+                UINT8_MAX) {
+                error_setg(errp, "SMBIOS Type 3 chassis-type is out of range");
+                return;
+            }
+            type3.chassis_type = qemu_opt_get_number(opts, "chassis-type",
+                                                      0x02);
             return;
         case 4:
             if (!qemu_opts_validate(opts, qemu_smbios_type4_opts, errp)) {
@@ -1663,6 +1760,24 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
                 type4.current_speed > UINT16_MAX) {
                 error_setg(errp, "SMBIOS CPU speed is too large (> %d)",
                            UINT16_MAX);
+                return;
+            }
+            type4.voltage = qemu_opt_get_number(opts, "voltage", 0);
+            type4.external_clock = qemu_opt_get_number(opts,
+                                                        "external-clock", 0);
+            type4.processor_upgrade = qemu_opt_get_number(opts,
+                                                           "processor-upgrade",
+                                                           0x02);
+            type4.processor_characteristics =
+                qemu_opt_get_number(opts, "processor-characteristics", 0);
+            if (qemu_opt_get_number(opts, "voltage", 0) > UINT8_MAX ||
+                qemu_opt_get_number(opts, "external-clock", 0) > UINT16_MAX ||
+                qemu_opt_get_number(opts, "processor-upgrade", 0x02) >
+                    UINT8_MAX ||
+                qemu_opt_get_number(opts, "processor-characteristics", 0) >
+                    UINT16_MAX) {
+                error_setg(errp, "SMBIOS Type 4 numeric field is out of range");
+                return;
             }
             return;
         case 8:
@@ -1730,6 +1845,32 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
             save_opt(&type17.asset, opts, "asset");
             save_opt(&type17.part, opts, "part");
             type17.speed = qemu_opt_get_number(opts, "speed", 0);
+            /*
+             * 中文注释：保持旧调用者兼容；未提供 configured-speed 时沿用
+             * speed。VMate 新启动器始终显式传两者，避免降频平台含混。
+             */
+            type17.configured_speed = qemu_opt_get_number(
+                opts, "configured-speed", type17.speed);
+            type17.memory_type = qemu_opt_get_number(opts, "memory-type",
+                                                      0x02);
+            type17.type_detail = qemu_opt_get_number(opts, "type-detail", 0);
+            type17.rank = qemu_opt_get_number(opts, "rank", 0);
+            type17.voltage = qemu_opt_get_number(opts, "voltage", 0);
+            if (qemu_opt_get_number(opts, "speed", 0) > UINT16_MAX ||
+                qemu_opt_get_number(opts, "configured-speed",
+                                    type17.speed) > UINT16_MAX ||
+                qemu_opt_get_number(opts, "memory-type", 0x02) > UINT8_MAX ||
+                qemu_opt_get_number(opts, "type-detail", 0) > UINT16_MAX ||
+                qemu_opt_get_number(opts, "rank", 0) > 0x0f ||
+                qemu_opt_get_number(opts, "voltage", 0) > UINT16_MAX) {
+                error_setg(errp, "SMBIOS Type 17 numeric field is out of range");
+                return;
+            }
+            if (type17.speed && type17.configured_speed > type17.speed) {
+                error_setg(errp, "SMBIOS Type 17 configured-speed cannot "
+                           "exceed rated speed");
+                return;
+            }
             return;
         case 41: {
             struct type41_instance *t41_i;

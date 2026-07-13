@@ -78,6 +78,19 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
         .vendor = g->conf.edid_vendor,
         .name = g->conf.edid_name,
         .serial = g->conf.edid_serial,
+        .product_id = g->conf.edid_product_id,
+        .manufacture_week = g->conf.edid_manufacture_week,
+        .manufacture_year = g->conf.edid_manufacture_year,
+        .video_input = g->conf.edid_video_input,
+        .min_vfreq_hz = g->conf.edid_min_vfreq_hz,
+        .max_vfreq_hz = g->conf.edid_max_vfreq_hz,
+        .min_hfreq_khz = g->conf.edid_min_hfreq_khz,
+        .max_hfreq_khz = g->conf.edid_max_hfreq_khz,
+        .max_pixel_clock_mhz = g->conf.edid_max_pixel_clock_mhz,
+        .secondary_x = g->conf.edid_secondary_x,
+        .secondary_y = g->conf.edid_secondary_y,
+        .secondary_refresh_rate =
+            g->conf.edid_secondary_refresh_rate,
     };
 
     for (output_idx = 0, node = g->conf.outputs;
@@ -204,6 +217,33 @@ virtio_gpu_base_device_realize(DeviceState *qdev,
 
     if (g->conf.max_outputs > VIRTIO_GPU_MAX_SCANOUTS) {
         error_setg(errp, "invalid max_outputs > %d", VIRTIO_GPU_MAX_SCANOUTS);
+        return false;
+    }
+
+    /*
+     * EDID 字段最终会压缩到 8/16 bit，必须在 realize 阶段拒绝越界，不能
+     * 依赖 C 的隐式截断生成另一台显示器的产品码或生产日期。
+     */
+    if (g->conf.edid_product_id > UINT16_MAX ||
+        g->conf.edid_manufacture_week > 54 ||
+        (g->conf.edid_manufacture_year &&
+         (g->conf.edid_manufacture_year < 1990 ||
+          g->conf.edid_manufacture_year > 2245)) ||
+        g->conf.edid_video_input > UINT8_MAX ||
+        g->conf.edid_min_vfreq_hz > UINT8_MAX ||
+        g->conf.edid_max_vfreq_hz > UINT8_MAX ||
+        g->conf.edid_min_hfreq_khz > UINT8_MAX ||
+        g->conf.edid_max_hfreq_khz > UINT8_MAX ||
+        g->conf.edid_max_pixel_clock_mhz > 2550) {
+        error_setg(errp, "EDID profile field is out of range");
+        return false;
+    }
+    if ((g->conf.edid_min_vfreq_hz && g->conf.edid_max_vfreq_hz &&
+         g->conf.edid_min_vfreq_hz > g->conf.edid_max_vfreq_hz) ||
+        (g->conf.edid_min_hfreq_khz && g->conf.edid_max_hfreq_khz &&
+         g->conf.edid_min_hfreq_khz > g->conf.edid_max_hfreq_khz) ||
+        (!!g->conf.edid_secondary_x != !!g->conf.edid_secondary_y)) {
+        error_setg(errp, "EDID profile range/timing pair is inconsistent");
         return false;
     }
 

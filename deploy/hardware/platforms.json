@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-07-13.4",
+  "defaults": {
+    "vcpus": 4,
+    "memory_total_mib": 8192
+  },
+  "fidelity": {
+    "supported_semantics": "launch_candidate_after_runtime_preflight",
+    "machine_model": "q35",
+    "chipset_identity_scope": "pci_configuration_identity_only",
+    "target_pch_behavior": "not_emulated",
+    "target_pch_bdf_equivalent": false,
+    "bdf_layout": {
+      "mch": "00:00.0",
+      "lpc": "00:1f.0",
+      "ahci": "00:1f.2",
+      "smbus": "00:1f.3",
+      "linux_root_ports": ["00:01.0", "00:02.0", "00:03.0", "00:04.0"],
+      "linux_hda": "00:05.0",
+      "windows_root_ports": ["00:01.0", "00:02.0", "00:03.0"],
+      "windows_hda": "00:04.0"
+    }
+  },
+  "platforms": [
+    {
+      "id": "amd-am4-r3-1200-asus-prime-b350-plus",
+      "enabled": false,
+      "status": "compatibility",
+      "release_year": 2017,
+      "cpu": {
+        "qemu_arg": "Ryzen3-1200",
+        "vendor_id": "AuthenticAMD",
+        "name": "AMD Ryzen 3 1200 Quad-Core Processor",
+        "max_mhz": 3400,
+        "current_mhz": 3100,
+        "tsc_mhz": 3100,
+        "part": "YD1200BBM4KAE",
+        "socket": "AM4",
+        "cores": 4,
+        "threads": 4,
+        "phys_bits": 43,
+        "features": "+invtsc,+tsc-deadline,+topoext",
+        "integrated_gpu": { "present": false, "profile_state": "absent", "model": "none" },
+        "smbios": { "family": "0x0139", "upgrade": "0x31", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC" }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "PRIME B350-PLUS",
+        "family": "PRIME",
+        "version": "Rev X.0x",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "AMD B350",
+        "pcie_generation": 3,
+        "dimm_slots": 4,
+        "max_memory_gib": 64
+      },
+      "memory": { "type": "DDR4", "channels": 2, "max_mts": 2667, "allowed_mts": [2133, 2400, 2666], "voltage_mv": 1200, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192] },
+      "devices": {
+        "chipset": { "mch": ["0x8086", "0x29C0", "0x02"], "lpc": ["0x8086", "0x2918", "0x02"], "smbus": ["0x8086", "0x2930", "0x02"], "ahci": ["0x8086", "0x2922", "0x02"] },
+        "root_port": { "pci_vendor": "0x1022", "pci_device": "0x1453", "revision": "0x00" },
+        "xhci": { "pci_vendor": "0x1022", "pci_device": "0x43BB", "revision": "0x02" },
+        "nvme": { "max_pcie_generation": 3, "lanes": 4, "boot_supported": true, "attachment": "m2_socket" },
+        "nic": { "vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios" },
+        "audio": { "vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x104386c7", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x1022", "controller_pci_device": "0x1457" }
+      },
+      "bios": { "vendor": "American Megatrends Inc.", "version": "6203", "date": "08/15/2023" },
+      "system": { "product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03" },
+      "source_refs": [
+        "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_bios/",
+        "https://www.asus.com/uk/supportonly/prime%20b350-plus/helpdesk_cpu/"
+      ]
+    },
+    {
+      "id": "amd-am4-r3-2300x-asus-prime-b350-plus",
+      "enabled": false,
+      "status": "compatibility",
+      "release_year": 2018,
+      "cpu": {
+        "qemu_arg": "Ryzen3-2300X",
+        "vendor_id": "AuthenticAMD",
+        "name": "AMD Ryzen 3 2300X Quad-Core Processor",
+        "max_mhz": 4000,
+        "current_mhz": 3500,
+        "tsc_mhz": 3500,
+        "part": "YD230XBBM4KAF",
+        "socket": "AM4",
+        "cores": 4,
+        "threads": 4,
+        "phys_bits": 43,
+        "features": "+invtsc,+tsc-deadline,+topoext",
+        "integrated_gpu": { "present": false, "profile_state": "absent", "model": "none" },
+        "smbios": { "family": "0x0139", "upgrade": "0x31", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC" }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "PRIME B350-PLUS",
+        "family": "PRIME",
+        "version": "Rev X.0x",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "AMD B350",
+        "pcie_generation": 3,
+        "dimm_slots": 4,
+        "max_memory_gib": 64
+      },
+      "memory": { "type": "DDR4", "channels": 2, "max_mts": 2933, "allowed_mts": [2133, 2400, 2666, 2933], "voltage_mv": 1200, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192] },
+      "devices": {
+        "chipset": { "mch": ["0x8086", "0x29C0", "0x02"], "lpc": ["0x8086", "0x2918", "0x02"], "smbus": ["0x8086", "0x2930", "0x02"], "ahci": ["0x8086", "0x2922", "0x02"] },
+        "root_port": { "pci_vendor": "0x1022", "pci_device": "0x1453", "revision": "0x00" },
+        "xhci": { "pci_vendor": "0x1022", "pci_device": "0x43BB", "revision": "0x02" },
+        "nvme": { "max_pcie_generation": 3, "lanes": 4, "boot_supported": true, "attachment": "m2_socket" },
+        "nic": { "vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios" },
+        "audio": { "vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x104386c7", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x1022", "controller_pci_device": "0x1457" }
+      },
+      "bios": { "vendor": "American Megatrends Inc.", "version": "6203", "date": "08/15/2023" },
+      "system": { "product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03" },
+      "source_refs": [
+        "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_bios/",
+        "https://www.asus.com/uk/supportonly/prime%20b350-plus/helpdesk_cpu/"
+      ]
+    },
+    {
+      "id": "intel-lga1151-i3-9100f-asus-prime-h310m-a-r2",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2019,
+      "cpu": {
+        "qemu_arg": "Skylake-Client-IBRS,family=6,model=158,stepping=10,model-id=Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz",
+        "max_mhz": 4200,
+        "current_mhz": 3600,
+        "tsc_mhz": 3600,
+        "part": "BX80684I39100F",
+        "socket": "LGA1151",
+        "cores": 4,
+        "threads": 4,
+        "phys_bits": 39,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": { "present": false, "profile_state": "fused_off", "model": "none" },
+        "smbios": { "family": "0x00CE", "upgrade": "0x32", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC" }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "PRIME H310M-A R2.0",
+        "family": "PRIME",
+        "version": "Rev X.0x",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "Intel H310",
+        "pcie_generation": 3,
+        "dimm_slots": 2,
+        "max_memory_gib": 32
+      },
+      "memory": { "type": "DDR4", "channels": 2, "max_mts": 2400, "allowed_mts": [2133, 2400], "voltage_mv": 1200, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192] },
+      "devices": {
+        "chipset": { "mch": ["0x8086", "0x3E1F", "0x08"], "lpc": ["0x8086", "0xA303", "0x10"], "smbus": ["0x8086", "0xA323", "0x10"], "ahci": ["0x8086", "0xA352", "0x10"] },
+        "root_port": { "pci_vendor": "0x8086", "pci_device": "0xA338", "revision": "0xF0" },
+        "xhci": { "pci_vendor": "0x8086", "pci_device": "0xA36D", "revision": "0x10" },
+        "nvme": { "max_pcie_generation": 2, "lanes": 2, "boot_supported": true, "attachment": "m2_socket" },
+        "nic": { "vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios" },
+        "audio": { "vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x104386c7", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0xA348" }
+      },
+      "bios": { "vendor": "American Megatrends Inc.", "version": "1003", "date": "08/28/2019" },
+      "system": { "product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03" },
+      "source_refs": [
+        "https://www.asus.com/supportonly/prime%20h310m-a%20r2.0/helpdesk_cpu/",
+        "https://www.asus.com/supportonly/prime%20h310m-a%20r2.0/helpdesk_bios/",
+        "https://dlcdnets.asus.com/pub/ASUS/mb/LGA1151/PRIME_H310M-A_R2.0/E15471_PRIME_H310M-A_R2.0_UM_V2_WEB.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga1151-i5-6400t-asus-h110m-a-m2",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2015,
+      "cpu": {
+        "qemu_arg": "Skylake-Client-IBRS,family=6,model=94,stepping=3,model-id=Intel(R) Core(TM) i5-6400T CPU @ 2.20GHz",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i5-6400T CPU @ 2.20GHz",
+        "max_mhz": 2800,
+        "current_mhz": 2200,
+        "tsc_mhz": 2200,
+        "part": "BX80662I56400T",
+        "socket": "LGA1151",
+        "cores": 4,
+        "threads": 4,
+        "phys_bits": 39,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": { "present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics 530" },
+        "smbios": { "family": "0x00CD", "upgrade": "0x32", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC" }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "H110M-A/M.2",
+        "family": "H110M-A/M.2",
+        "version": "Rev X.0x",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "Intel H110",
+        "pcie_generation": 3,
+        "dimm_slots": 2,
+        "max_memory_gib": 32
+      },
+      "memory": { "type": "DDR4", "channels": 2, "max_mts": 2133, "allowed_mts": [2133], "voltage_mv": 1200, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192] },
+      "devices": {
+        "chipset": { "mch": ["0x8086", "0x191F", "0x07"], "lpc": ["0x8086", "0xA143", "0x31"], "smbus": ["0x8086", "0xA123", "0x31"], "ahci": ["0x8086", "0xA102", "0x31"] },
+        "root_port": { "pci_vendor": "0x8086", "pci_device": "0xA110", "revision": "0xF1" },
+        "xhci": { "pci_vendor": "0x8086", "pci_device": "0xA12F", "revision": "0x31" },
+        "nvme": { "max_pcie_generation": 2, "lanes": 4, "boot_supported": true, "attachment": "m2_socket" },
+        "nic": { "vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios" },
+        "audio": { "vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x104386c7", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0xA170" }
+      },
+      "bios": { "vendor": "American Megatrends Inc.", "version": "4202", "date": "03/15/2019" },
+      "system": { "product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03" },
+      "source_refs": [
+        "https://www.asus.com/us/supportonly/h110m-a-m-2/helpdesk_cpu/",
+        "https://www.asus.com/us/supportonly/h110m-a-m-2/helpdesk_bios/",
+        "https://dlcdnet.asus.com/pub/ASUS/mb/LGA1151/H110M-A_M2/E11483_H110M-A_M2_UM_WEB_041816.pdf"
+      ]
+    }
+  ]
+}

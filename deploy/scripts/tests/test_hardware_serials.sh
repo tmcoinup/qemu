@@ -12,6 +12,14 @@ fail() {
 
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
 
+# 序列号测试只验证格式与持久化，不应随 CI 机器是 AMD/Intel 而变化。这里显式
+# 注入支持 TSC scaling 的 Intel 能力，仍然走真实 enabled bundle 选择路径。
+# 选择器通过全局变量名读取这些注入值，显式导出也固定子进程测试环境。
+export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+export STEALTH_HOST_CPU_MAX_MHZ=5000
+export STEALTH_REQUIRED_TSC_MHZ=
+export CPUS=4
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

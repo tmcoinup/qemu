@@ -28,6 +28,20 @@ VM_DIR=/mnt/fastssd/vm1 ./deploy/scripts/start-vm.sh 1 --proxy
 
 `DISK` 仍可单独覆盖；未指定时默认是 `$VM_DIR/disk.qcow2`。
 
+`VM_DIR` 必须是当前用户所有的私有真实目录，不能是符号链接。启动 swtpm 前，
+`tpm-state` 会被规范化为 canonical path 并登记在当前用户的私有 runtime 目录；
+因此关机不需要再次提供原路径：
+
+```bash
+deploy/scripts/stop-vm.sh 1 --wait=120
+```
+
+stop/reaper 会同时验证 runtime 文件、state 目录 owner/type/mode 及 swtpm 的
+`/proc/<pid>/exe`/argv，只有全部指向同一个 canonical state_dir 才会发信号。
+若迁移时直接复制了正在运行主机的临时 runtime 文件，应删除该临时文件并在新主机
+重新启动实例；不要手工把 runtime 文件改成宽权限或软链接。未登记的旧版默认布局仍按
+`$VMS_DIR/<INSTANCE>/tpm-state` 兼容解析。
+
 ### 2. QEMU / qemu-img 可配置
 
 迁移 host 后不要用系统自带 stock QEMU。启动器默认使用仓库内构建产物：

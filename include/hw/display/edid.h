@@ -9,11 +9,23 @@ typedef struct qemu_edid_info {
     const char *serial;
     uint16_t    width_mm;
     uint16_t    height_mm;
+    uint16_t    product_id;
+    uint16_t    manufacture_year;
+    uint8_t     manufacture_week;
+    uint8_t     video_input;
+    uint8_t     min_vfreq_hz;
+    uint8_t     max_vfreq_hz;
+    uint8_t     min_hfreq_khz;
+    uint8_t     max_hfreq_khz;
+    uint16_t    max_pixel_clock_mhz;
     uint32_t    prefx;
     uint32_t    prefy;
     uint32_t    maxx;
     uint32_t    maxy;
     uint32_t    refresh_rate;
+    uint32_t    secondary_x;
+    uint32_t    secondary_y;
+    uint32_t    secondary_refresh_rate;
 } qemu_edid_info;
 
 void qemu_edid_generate(uint8_t *edid, size_t size,

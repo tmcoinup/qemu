@@ -182,6 +182,17 @@ static const Property q35_host_props[] = {
     DEFINE_PROP_BOOL(PCI_HOST_PROP_SMM_RANGES, Q35PCIHost,
                      mch.has_smm_ranges, true),
     DEFINE_PROP_BOOL("x-pci-hole64-fix", Q35PCIHost, pci_hole64_fix, true),
+    /* MCH 是嵌入式子对象，宿主桥代理属性才可由 -global 稳定覆盖。 */
+    DEFINE_PROP_UINT32("x-pci-mch-vendor-id", Q35PCIHost,
+                       mch.x_pci_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-mch-device-id", Q35PCIHost,
+                       mch.x_pci_device_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-mch-revision", Q35PCIHost,
+                       mch.x_pci_revision, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-mch-sub-vendor-id", Q35PCIHost,
+                       mch.x_pci_sub_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-mch-sub-device-id", Q35PCIHost,
+                       mch.x_pci_sub_device_id, UINT32_MAX),
 };
 
 static void q35_host_class_init(ObjectClass *klass, const void *data)
@@ -209,6 +220,12 @@ static void q35_host_initfn(Object *obj)
                           "pci-conf-data", 4);
 
     object_initialize_child(OBJECT(s), "mch", &s->mch, TYPE_MCH_PCI_DEVICE);
+    /* 嵌入式 MCH 会被 object_initialize 清零，手工恢复 x-pci 未覆盖哨兵。 */
+    s->mch.x_pci_vendor_id = UINT32_MAX;
+    s->mch.x_pci_device_id = UINT32_MAX;
+    s->mch.x_pci_revision = UINT32_MAX;
+    s->mch.x_pci_sub_vendor_id = UINT32_MAX;
+    s->mch.x_pci_sub_device_id = UINT32_MAX;
     qdev_prop_set_int32(DEVICE(&s->mch), "addr", PCI_DEVFN(0, 0));
     qdev_prop_set_bit(DEVICE(&s->mch), "multifunction", false);
     /* mch's object_initialize resets the default value, set it again */
@@ -572,6 +589,41 @@ static void mch_realize(PCIDevice *d, Error **errp)
         return;
     }
 
+    /*
+     * x-pci-* 是“PCI ID 兼容层”，只覆盖配置空间身份，不会把 P35/Q35
+     * 寄存器模型变成另一个芯片组。manifest 必须只选择行为兼容的 Intel ID。
+     */
+    if ((mch->x_pci_vendor_id != UINT32_MAX &&
+         mch->x_pci_vendor_id > UINT16_MAX) ||
+        (mch->x_pci_device_id != UINT32_MAX &&
+         mch->x_pci_device_id > UINT16_MAX) ||
+        (mch->x_pci_revision != UINT32_MAX &&
+         mch->x_pci_revision > UINT8_MAX) ||
+        (mch->x_pci_sub_vendor_id != UINT32_MAX &&
+         mch->x_pci_sub_vendor_id > UINT16_MAX) ||
+        (mch->x_pci_sub_device_id != UINT32_MAX &&
+         mch->x_pci_sub_device_id > UINT16_MAX)) {
+        error_setg(errp, "mch x-pci identity value is out of range");
+        return;
+    }
+    if (mch->x_pci_vendor_id != UINT32_MAX) {
+        pci_config_set_vendor_id(d->config, mch->x_pci_vendor_id);
+    }
+    if (mch->x_pci_device_id != UINT32_MAX) {
+        pci_config_set_device_id(d->config, mch->x_pci_device_id);
+    }
+    if (mch->x_pci_revision != UINT32_MAX) {
+        pci_config_set_revision(d->config, mch->x_pci_revision);
+    }
+    if (mch->x_pci_sub_vendor_id != UINT32_MAX) {
+        pci_set_word(d->config + PCI_SUBSYSTEM_VENDOR_ID,
+                     mch->x_pci_sub_vendor_id);
+    }
+    if (mch->x_pci_sub_device_id != UINT32_MAX) {
+        pci_set_word(d->config + PCI_SUBSYSTEM_ID,
+                     mch->x_pci_sub_device_id);
+    }
+
     /* setup pci memory mapping */
     pc_pci_as_mapping_init(mch->system_memory, mch->pci_address_space);
 
@@ -661,6 +713,16 @@ static const Property mch_props[] = {
     DEFINE_PROP_UINT16("extended-tseg-mbytes", MCHPCIState, ext_tseg_mbytes,
                        64),
     DEFINE_PROP_BOOL("smbase-smram", MCHPCIState, has_smram_at_smbase, true),
+    DEFINE_PROP_UINT32("x-pci-vendor-id", MCHPCIState, x_pci_vendor_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-device-id", MCHPCIState, x_pci_device_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-revision", MCHPCIState, x_pci_revision,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-vendor-id", MCHPCIState,
+                       x_pci_sub_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-device-id", MCHPCIState,
+                       x_pci_sub_device_id, UINT32_MAX),
 };
 
 static void mch_class_init(ObjectClass *klass, const void *data)

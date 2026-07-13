@@ -1,9 +1,11 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# start-vm.sh ——— 一键启动隐身 QEMU/KVM Windows 客机
+# start-vm.sh ——— 基于版本化硬件清单启动 QEMU/KVM 客机
 #
-# 客机伪装成裸金属：随机 AM4 主板（ASRock/MSI/ASUS 池）+ AMD Ryzen 3 + 8GB
-# DDR4 双通道 + Samsung 970 PRO 512GB NVMe + virtio-gpu 改名 GTX 1050。
+# 新 VM 只从 platforms.json 中 enabled 的完整 Intel CPU/主板/PCH bundle 选型，
+# 再绑定 components.json 中核验过的 SSD、EDID 与 HID 模板。生产默认会检查
+# KVM/TSC 真能力并实际 realize 目标 vCPU；任一跨字段矛盾都会 fail closed。
+# GPU 仍是 virtio 显示路径，本分支不做显卡直通/vGPU，也不承诺等价于真实独显。
 #
 # 用法（最简）：
 #     ./start-vm.sh 1                       # 启动 instance 1，桥接 br0
@@ -34,14 +36,12 @@
 # 默认值（90% 情况都不用改）：
 #     BRIDGE=br0           桥接 br0（不存在自动回退到 user-mode NAT）
 #     STABLE_DISPLAY=0     SDL 模式默认 virtio-vga-gl + virgl 3D；fb-shm 同步推流
-#     GPU_SELFSIGNED=0     PCI 主 ID 留 1AF4:1050 + subsys 改 NVIDIA 1C8110DE
-#                          (子系统级 NVIDIA 改名，搭配 stock virtio-win 0.1.266
-#                          + apply-gpu-spoof.ps1 注册表覆盖 = 通过 ACE 13-131106-0)
-#     CPU_MODEL            读 profile，首次生成默认 Ryzen3-1200
+#     GPU_SELFSIGNED=0     PCI 主 ID 保留 virtio；GPU 标签字段明确属于范围外兼容层
+#     STRICT_HARDWARE=1    KVM/TSC 能力、完整平台与 CPU realize 默认严格门禁
 #
-# 硬件身份只在首次启动时随机一次，写到
+# 平台 bundle 与每机唯一身份只在首次启动时选择/生成一次，写到
 #     /home/ubuntu/images/vms/<N>/profile
-# 之后所有启动复用，让 Windows / 反作弊看见永远同一台机器。
+# 之后所有启动复用，避免 Windows 激活与客体硬件枚举在重启间漂移。
 # 想换身份: deploy/scripts/reroll-identity.sh <N>  或者直接删 profile 文件。
 #
 # 显示后端 — 两条独立通道，默认全开：
@@ -60,8 +60,8 @@
 #                          用于 fb-shm dma-buf/GPU metadata 路径。
 #
 # 环境变量（不常用，默认就好）：
-#     RAM=8192             客机内存 MiB（默认 8192）
-#     CPUS=4               vCPU 数量（默认 4，cores=4 threads=1 sockets=1）
+#     RAM=8192             客机内存 MiB（默认取 profile，当前 bundle 为 8192）
+#     CPUS=4               必须等于所选 SKU 完整线程数（当前均为 4C/4T）
 #     SDL=1                SDL 窗口开关（默认 1） (flag: --sdl / --no-sdl)
 #     HEADLESS=1           关 SDL 启 VNC                          (flag: --headless)
 #     BRIDGE=br0           桥接网卡名字                          (flag: --bridge=br0)
@@ -80,10 +80,9 @@
 #     STABLE_DISPLAY=1     强制 virtio-vga（无 GL），用于回避个别环境的 virgl
 #                          长跑 TDR/BSOD。--no-sdl/--headless 无窗口 GL context，
 #                          也会走 stable virtio-vga。
-#     GPU_SELFSIGNED=1     PCI 主 ID 改成 NVIDIA 10DE:1C81。 ⚠️ 需要 patched
-#                          viogpudo + 伪 NVIDIA CA 链；ACE/腾讯反作弊判异常
-#                          (13-131106-0)。只用于轻反作弊场景。
-#     CPU_MODEL=Ryzen3-2300X  覆盖 profile 写入的 CPU 型号（一般不用）
+#     GPU_SELFSIGNED=1     历史兼容开关；会改显示 PCI 主 ID，但不会改变 virtio 行为，
+#                          本分支不把该模式计入硬件真实性或受支持 GPU 能力。
+#     STRICT_HARDWARE=1    设 0 仅供诊断/兼容 dry-run，不计入真机化支持
 #     FB_SHM_SOCK=<path>   fb-shm 控制 socket 路径
 #                          默认 /tmp/qemu-stealth-<N>.fb
 #                          (flag: --fb-shm-sock=<path>)
@@ -114,8 +113,8 @@
 #                          governor=performance + KVM_HALT_POLL_NS(默认 0) + THP
 #                          defrag=never。防编译抢 vCPU 主要靠 CPU_ISOLATE/cpuset；
 #                          需要旧低延迟 busy-poll 可显式 KVM_HALT_POLL_NS=500000。
-#     CPU_FREQ_CAP=1       把 host scaling_max_freq 封顶到本实例伪装 CPU 的上限
-#                          (CPU_MAX_MHZ=SMBIOS Type4 max-speed)（默认 1，需 HOST_TUNE=1）
+#     CPU_FREQ_CAP=0       默认不改宿主全局频率；设 1 才按本实例 CPU 上限封顶
+#                          (CPU_MAX_MHZ=SMBIOS Type4 max-speed，需 HOST_TUNE=1）
 #                          (flag: --freq-cap / --no-freq-cap)
 #                          防 guest 实测吞吐超出该型号规格(超规格=变速器/计时异常 tell)。
 #                          只降不升：多 VM 并发收敛到运行中最小，绝不让任一 VM 超自身规格。
@@ -163,7 +162,11 @@ _usage() {
 # 共享 $@ 与全局变量，与单文件版逐字节等价；DRY_RUN argv harness 校验）。
 # ------------------------------------------------------------------
 source "$HERE/lib/sv-cli.sh"        # CLI 解析 + 默认值 + 目录 / RANDOM 种子
+source "$HERE/lib/sv-host-helpers.sh" # 拒绝工作区 sudoers，仅信任 root-owned helper
+source "$HERE/lib/sv-cpupin.sh"     # 在任何持久化写入前预检 helper；稍后异步等待 vCPU
 source "$HERE/lib/sv-portability.sh" # 迁移 host 预检：路径/QEMU 能力，不做隐身降级
+source "$HERE/lib/sv-host-capabilities.sh" # KVM/TSC 真能力；供 profile 做硬约束
+source "$HERE/lib/sv-disk.sh"      # qcow2 创建 + guest 可见容量与组件清单严格核对
 source "$HERE/lib/sv-identity.sh"   # 启动源 + 硬件身份 profile + OVMF + ACPI 表
 source "$HERE/lib/sv-hosttune.sh"   # (可选,默认开) host 压抖动 + 按伪装 CPU 封顶频率
                                     #   ↑ 必须在 identity 之后: 频率封顶要用 CPU_MAX_MHZ
@@ -171,5 +174,4 @@ source "$HERE/lib/sv-tpm-mem.sh"    # TPM(swtpm) + DIMM 拓扑 / 内存 / SMBIOS
 source "$HERE/lib/sv-devices.sh"    # 平台 PCI ID + 显示/EDID + 启动序 + CDROM + 网络 + USB + 音频
 source "$HERE/lib/sv-dock.sh"       # GNOME dash-to-dock 集成：每实例独立可固定/可排序图标(SDL 窗口)
 source "$HERE/lib/sv-display-guard.sh" # SDL 生命周期：inhibit + 退出时可靠恢复宿主 DPMS/屏保
-source "$HERE/lib/sv-cpupin.sh"     # (可选,默认开) 起 VM 后 vCPU 钉进 cpuset 独占分区, 与宿主机编译隔离
 source "$HERE/lib/sv-assemble.sh"   # 组装 argv + DRY_RUN + 守护进程 + 显示生命周期启动

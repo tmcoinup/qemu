@@ -22,10 +22,12 @@
 
 #include "qemu/osdep.h"
 #include "qemu/range.h"
+#include "qapi/error.h"
 #include "hw/i2c/pm_smbus.h"
 #include "hw/pci/pci.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
+#include "hw/core/qdev-properties.h"
 
 #include "hw/southbridge/ich9.h"
 #include "qom/object.h"
@@ -39,6 +41,13 @@ struct ICH9SMBState {
     bool irq_enabled;
 
     PMSMBus smb;
+
+    /* 仅覆盖 PCI 身份；SMBus host controller 行为仍是 ICH9。 */
+    uint32_t x_pci_vendor_id;
+    uint32_t x_pci_device_id;
+    uint32_t x_pci_revision;
+    uint32_t x_pci_sub_vendor_id;
+    uint32_t x_pci_sub_device_id;
 };
 
 static const VMStateDescription vmstate_ich9_smbus = {
@@ -90,6 +99,37 @@ static void ich9_smbus_realize(PCIDevice *d, Error **errp)
 {
     ICH9SMBState *s = ICH9_SMB_DEVICE(d);
 
+    if ((s->x_pci_vendor_id != UINT32_MAX &&
+         s->x_pci_vendor_id > UINT16_MAX) ||
+        (s->x_pci_device_id != UINT32_MAX &&
+         s->x_pci_device_id > UINT16_MAX) ||
+        (s->x_pci_revision != UINT32_MAX &&
+         s->x_pci_revision > UINT8_MAX) ||
+        (s->x_pci_sub_vendor_id != UINT32_MAX &&
+         s->x_pci_sub_vendor_id > UINT16_MAX) ||
+        (s->x_pci_sub_device_id != UINT32_MAX &&
+         s->x_pci_sub_device_id > UINT16_MAX)) {
+        error_setg(errp, "ICH9-SMB x-pci identity value is out of range");
+        return;
+    }
+    if (s->x_pci_vendor_id != UINT32_MAX) {
+        pci_config_set_vendor_id(d->config, s->x_pci_vendor_id);
+    }
+    if (s->x_pci_device_id != UINT32_MAX) {
+        pci_config_set_device_id(d->config, s->x_pci_device_id);
+    }
+    if (s->x_pci_revision != UINT32_MAX) {
+        pci_config_set_revision(d->config, s->x_pci_revision);
+    }
+    if (s->x_pci_sub_vendor_id != UINT32_MAX) {
+        pci_set_word(d->config + PCI_SUBSYSTEM_VENDOR_ID,
+                     s->x_pci_sub_vendor_id);
+    }
+    if (s->x_pci_sub_device_id != UINT32_MAX) {
+        pci_set_word(d->config + PCI_SUBSYSTEM_ID,
+                     s->x_pci_sub_device_id);
+    }
+
     /* TODO? D31IP.SMIP in chipset configuration space */
     pci_config_set_interrupt_pin(d->config, 0x01); /* interrupt pin 1 */
 
@@ -103,6 +143,20 @@ static void ich9_smbus_realize(PCIDevice *d, Error **errp)
     s->smb.set_irq = ich9_smb_set_irq;
     s->smb.opaque = s;
 }
+
+static const Property ich9_smb_properties[] = {
+    /* x-pci-* 仅是配置空间 ID 兼容层，不改变 ICH9 SMBus 寄存器语义。 */
+    DEFINE_PROP_UINT32("x-pci-vendor-id", ICH9SMBState, x_pci_vendor_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-device-id", ICH9SMBState, x_pci_device_id,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-revision", ICH9SMBState, x_pci_revision,
+                       UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-vendor-id", ICH9SMBState,
+                       x_pci_sub_vendor_id, UINT32_MAX),
+    DEFINE_PROP_UINT32("x-pci-sub-device-id", ICH9SMBState,
+                       x_pci_sub_device_id, UINT32_MAX),
+};
 
 static void build_ich9_smb_aml(AcpiDevAmlIf *adev, Aml *scope)
 {
@@ -126,6 +180,7 @@ static void ich9_smb_class_init(ObjectClass *klass, const void *data)
     dc->desc = "ICH9 SMBUS Bridge";
     k->realize = ich9_smbus_realize;
     k->config_write = ich9_smbus_write_config;
+    device_class_set_props(dc, ich9_smb_properties);
     /*
      * Reason: part of ICH9 southbridge, needs to be wired up by
      * pc_q35_init()

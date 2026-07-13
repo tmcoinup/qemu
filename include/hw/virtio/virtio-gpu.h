@@ -146,6 +146,18 @@ struct virtio_gpu_base_conf {
     char *edid_serial;
     uint32_t edid_width_mm;
     uint32_t edid_height_mm;
+    uint32_t edid_product_id;
+    uint32_t edid_manufacture_week;
+    uint32_t edid_manufacture_year;
+    uint32_t edid_video_input;
+    uint32_t edid_min_vfreq_hz;
+    uint32_t edid_max_vfreq_hz;
+    uint32_t edid_min_hfreq_khz;
+    uint32_t edid_max_hfreq_khz;
+    uint32_t edid_max_pixel_clock_mhz;
+    uint32_t edid_secondary_x;
+    uint32_t edid_secondary_y;
+    uint32_t edid_secondary_refresh_rate;
 };
 
 struct virtio_gpu_ctrl_command {
@@ -196,7 +208,29 @@ struct VirtIOGPUBaseClass {
     DEFINE_PROP_STRING("edid-name", _state, _conf.edid_name), \
     DEFINE_PROP_STRING("edid-serial", _state, _conf.edid_serial), \
     DEFINE_PROP_UINT32("edid-width-mm", _state, _conf.edid_width_mm, 0), \
-    DEFINE_PROP_UINT32("edid-height-mm", _state, _conf.edid_height_mm, 0)
+    DEFINE_PROP_UINT32("edid-height-mm", _state, _conf.edid_height_mm, 0), \
+    DEFINE_PROP_UINT32("edid-product-id", _state, _conf.edid_product_id, 0), \
+    DEFINE_PROP_UINT32("edid-manufacture-week", _state, \
+                       _conf.edid_manufacture_week, 0), \
+    DEFINE_PROP_UINT32("edid-manufacture-year", _state, \
+                       _conf.edid_manufacture_year, 0), \
+    DEFINE_PROP_UINT32("edid-video-input", _state, _conf.edid_video_input, 0), \
+    DEFINE_PROP_UINT32("edid-min-vfreq-hz", _state, \
+                       _conf.edid_min_vfreq_hz, 0), \
+    DEFINE_PROP_UINT32("edid-max-vfreq-hz", _state, \
+                       _conf.edid_max_vfreq_hz, 0), \
+    DEFINE_PROP_UINT32("edid-min-hfreq-khz", _state, \
+                       _conf.edid_min_hfreq_khz, 0), \
+    DEFINE_PROP_UINT32("edid-max-hfreq-khz", _state, \
+                       _conf.edid_max_hfreq_khz, 0), \
+    DEFINE_PROP_UINT32("edid-max-pixel-clock-mhz", _state, \
+                       _conf.edid_max_pixel_clock_mhz, 0), \
+    DEFINE_PROP_UINT32("edid-secondary-xres", _state, \
+                       _conf.edid_secondary_x, 0), \
+    DEFINE_PROP_UINT32("edid-secondary-yres", _state, \
+                       _conf.edid_secondary_y, 0), \
+    DEFINE_PROP_UINT32("edid-secondary-refresh-rate", _state, \
+                       _conf.edid_secondary_refresh_rate, 0)
 
 typedef struct VGPUDMABuf {
     QemuDmaBuf *buf;

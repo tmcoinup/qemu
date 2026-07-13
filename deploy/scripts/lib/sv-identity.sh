@@ -17,22 +17,32 @@ fi
 # Windows from re-activating every boot and what stops XignCode3 from
 # noticing the motherboard serial flipping between sessions.
 #
-# **重要顺序**：profile 必须在磁盘创建**之前**加载，因为 qcow2 大小
-# 要按 profile.NVME_SIZE_BYTES 来——profile 抽到 "Samsung 980 1TB"
-# 就建 1TB qcow2、抽到 "970 PRO 512GB" 就建 512GB，Win32_DiskDrive
-# Model 和 Size 才会自洽。历史上这俩 block 顺序反了，profile 1TB +
-# 实盘 512GB 的反作弊指纹隐患由此而来。
+# **重要顺序**：profile 必须在磁盘创建**之前**加载，因为 qcow2 虚拟容量
+# 要与 component manifest 中核验过的 NVME_SIZE_BYTES 完全相等。不能只看
+# qcow2 容器文件的宿主逻辑大小；稀疏文件的容器大小与 guest 可见容量不是一回事。
 # -------------------------------------------------------------------
+_profile_needs_save=0
 if (( _cli_reroll )); then
-    echo ">> --reroll: regenerating hardware identity for instance $INSTANCE"
-    rm -f "$PROFILE_FILE"
-fi
-
-if stealth_have_profile "$PROFILE_FILE"; then
+    # 不能先删旧 profile：目标 CPU 若无法在当前宿主 realize，旧 VM 身份仍应保持
+    # 可恢复。新身份先只存在当前进程内存，完成严格 smoke 后再原子替换。
+    echo ">> --reroll: preparing replacement hardware identity for instance $INSTANCE"
+    stealth_pick_profile
+    _profile_needs_save=1
+elif stealth_have_profile "$PROFILE_FILE"; then
     stealth_load_profile "$PROFILE_FILE"
     echo ">> profile:     loaded from $PROFILE_FILE"
 else
     stealth_pick_profile
+    _profile_needs_save=1
+fi
+
+# profile 只描述目标整机；最终还必须由当前宿主真实创建同型号 vCPU。该检查发生在
+# qcow2、OVMF VARS、socket 等任何持久化写入之前，失败不会留下半初始化实例。
+sv_validate_cpu_realize
+
+# realize 成功后才允许提交 profile。stealth_save_profile 内部使用同目录临时文件、
+# chmod 0600 和原子 rename；reroll 写入失败时旧文件仍在，避免身份半更新。
+if (( _profile_needs_save )); then
     if [[ "${DRY_RUN:-0}" == "1" ]]; then
         echo ">> profile:     [DRY_RUN] 生成内存身份，未落盘 $PROFILE_FILE"
     else
@@ -40,6 +50,7 @@ else
         echo ">> profile:     NEW identity saved to $PROFILE_FILE"
     fi
 fi
+unset _profile_needs_save
 
 # -------------------------------------------------------------------
 # RAM 解析（必须在 profile 加载之后）。优先级：
@@ -61,39 +72,15 @@ fi
 
 # -------------------------------------------------------------------
 # Per-instance disk creation —— qcow2 大小**对齐 profile.NVME_SIZE_BYTES**。
-# 之前硬编码 512000000000（512 GB），但 profile 抽到 "Samsung 980 1TB" 时
-# Windows WMI 看 Model=1TB / Size=476 GiB 跨向量矛盾。现在按 profile 字段建。
+# 组件目录当前只允许 C 层完整实现过的 970 PRO 512GB 组合；以后扩目录时，
+# 同一个校验会继续阻止型号、固件、PCI 身份和 guest 可见容量互相矛盾。
 #
-# qcow2 是 thin/sparse 的——1TB 镜像首次只占 ~200KB host 空间，guest 写多少
-# 实际才占多少；不必担心 1TB 镜像吃光物理盘。
+# qcow2 是 thin/sparse 的，创建时只占少量宿主空间，guest 写入后才按需分配。
 #
-# BASE_IMAGE 克隆模式：从 base 镜像派生增量层，size 跟 base 一致，与
-# NVME_SIZE_BYTES 无关（克隆场景下用户自负 size 一致性）。
+# BASE_IMAGE 克隆模式：从 base 镜像派生增量层，虚拟容量继承 base。创建后仍会
+# 用 qemu-img info 做 fail-closed 校验，容量不符就拒绝启动，不能由调用者自负。
 # -------------------------------------------------------------------
-if [[ ! -f "$DISK" ]]; then
-    if [[ "${DRY_RUN:-0}" == "1" ]]; then
-        echo ">> disk:        [DRY_RUN] 跳过创建 $DISK"
-    elif [[ -n "${BASE_IMAGE:-}" ]]; then
-        if [[ ! -f "$BASE_IMAGE" ]]; then
-            echo "ERROR: BASE_IMAGE='$BASE_IMAGE' 不存在" >&2
-            exit 1
-        fi
-        echo ">> 从 base 镜像克隆: $BASE_IMAGE"
-        echo ">>   -> $DISK (qcow2 增量层)"
-        "$QEMU_IMG" create -f qcow2 \
-            -F qcow2 -b "$BASE_IMAGE" "$DISK" >/dev/null
-    else
-        # 此时 profile 已加载，NVME_SIZE_BYTES 一定有值（pick_profile 写、
-        # 或 load_profile 按 NVME_MODEL 兜底推导）。再加 : 兜底防御退化路径。
-        : "${NVME_SIZE_BYTES:=512000000000}"
-        size_gib=$(( NVME_SIZE_BYTES / 1024 / 1024 / 1024 ))
-        echo ">> creating fresh qcow2 at $DISK"
-        echo ">>   model     : ${NVME_MODEL:-unknown}"
-        echo ">>   raw bytes : $NVME_SIZE_BYTES  (~${size_gib} GiB Windows-side)"
-        "$QEMU_IMG" create -f qcow2 -o preallocation=off,cluster_size=65536 \
-            "$DISK" "$NVME_SIZE_BYTES"
-    fi
-fi
+sv_prepare_disk
 
 # -------------------------------------------------------------------
 # Port/socket allocation (offset by INSTANCE)

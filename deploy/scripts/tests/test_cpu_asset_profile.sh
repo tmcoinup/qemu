@@ -12,6 +12,14 @@ fail() {
 
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
 
+# 单元测试不应依赖执行 CI 的物理 CPU 厂商。注入一个支持 TSC scaling 的 Intel
+# 宿主视图，使正式选择器仍按 enabled manifest 生成完整 profile。
+# 选择器通过全局变量名读取这些注入值，显式导出避免子进程视图漂移。
+export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+export STEALTH_HOST_CPU_MAX_MHZ=5000
+export STEALTH_REQUIRED_TSC_MHZ=
+export CPUS=4
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

@@ -80,19 +80,20 @@ Ryzen3-1200=3.1GHz），但**指令是按 host 真实频率执行的**。host(58
 「单位 TSC tick 内干的活」远超这颗 CPU 该有的量 = 一台超频/变速的机器 → 直接踩 `13-131130-8`。
 ⚠ 注意：单开 `governor=performance` 反而**加重**②（把 host 顶到满 boost），必须同时封顶频率。
 
-**修复**：`start-vm.sh` 默认 `HOST_TUNE=1` + `CPU_FREQ_CAP=1`，起 VM 前自动跑
+**修复**：`start-vm.sh` 默认 `HOST_TUNE=1`、`CPU_FREQ_CAP=0`，起 VM 前自动跑
 `host-performance.sh`：governor=performance + 可配置 halt_poll + THP defrag=never（治①），
-并把 `scaling_max_freq` 封顶到本实例 `CPU_MAX_MHZ`（治②，**只降不升**）。手动：
+但不会默认改变全机频率上限。确认单/多 VM 的全局影响后，可用 `--freq-cap` 显式把
+`scaling_max_freq` 封顶到在跑实例最小 `CPU_MAX_MHZ`（治②，**只降不升**）。手动：
 ```bash
-sudo deploy/scripts/host-performance.sh 3400000   # 位置参数=封顶 kHz(3400MHz=伪装 CPU 上限)
-# 已装 /etc/sudoers.d/qemu-hostperf → 仅此脚本免密；start-vm 自动调优不再提示输密码。
+sudo /usr/local/libexec/qemu-vmate-host-performance 3400000 0
+# 参数依次为封顶 kHz（0=不封顶）和 halt_poll ns；helper 固定 root-owned 并使用 NOSETENV。
 # 多 VM 并发时 start-vm 自动取「在跑各 VM CPU_MAX_MHZ 最小值」做全局封顶(任一都不超规格)。
 ```
 **验证调优是否生效**：
 ```bash
 cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort -u   # performance
 cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq  | sort -u   # =CPU_MAX_MHZ*1000(如3400000)
-cat /sys/module/kvm/parameters/halt_poll_ns                          # 默认 0；低延迟诊断可 KVM_HALT_POLL_NS=500000
+cat /sys/module/kvm/parameters/halt_poll_ns                          # 默认 0；启动器低延迟诊断可设 KVM_HALT_POLL_NS=500000
 cat /sys/kernel/mm/transparent_hugepage/defrag                       # [never]
 grep -m4 MHz /proc/cpuinfo                                           # 应 ≤ 封顶值, 不再 4.4G
 cat /proc/sys/vm/nr_hugepages                                        # 必须仍是 0(memfd 不预留)

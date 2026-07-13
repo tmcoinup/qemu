@@ -13,6 +13,15 @@ START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 TAP_SOURCE="$REPO_ROOT/deploy/scripts/host-vlan-tap.sh"
 DOWN_SOURCE="$REPO_ROOT/deploy/scripts/host-vlan-down.sh"
 
+# namespace 用例只核对网络 argv；固定一个启用平台，避免物理 runner CPU 影响结果。
+export STRICT_HARDWARE=0
+export STEALTH_KVM_AVAILABLE=1
+export STEALTH_KVM_TSC_CONTROL=1
+export STEALTH_KVM_GET_TSC_KHZ=1
+export STEALTH_KVM_TSC_KHZ=3600000
+export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+export STEALTH_HOST_CPU_MAX_MHZ=5000
+
 for file in "$START_VM" "$TAP_SOURCE" "$DOWN_SOURCE"; do
     [[ -x "$file" ]] || { echo "FAIL: 缺少可执行文件 $file" >&2; exit 1; }
 done

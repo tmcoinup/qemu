@@ -34,6 +34,7 @@
 #include "hw/char/parallel-isa.h"
 #include "hw/core/loader.h"
 #include "hw/i2c/smbus_eeprom.h"
+#include "hw/firmware/smbios.h"
 #include "hw/rtc/mc146818rtc.h"
 #include "system/tcg.h"
 #include "system/kvm.h"
@@ -125,6 +126,55 @@ static int ehci_create_ich9_with_companions(PCIBus *bus, int slot)
         pci_realize_and_unref(uhci, bus, &error_fatal);
     }
     return 0;
+}
+
+/*
+ * 按 SMBIOS Type 17 与实际 RAM 分块生成 SPD。SPD 地址空间最多提供
+ * 0x50..0x57 八个槽；超过该上限的配置继续启动，但不发布半套 EEPROM，
+ * 避免客体读到“SMBIOS 有 9 条、SPD 只有 8 条”的自相矛盾状态。
+ */
+static void pc_q35_init_spd(PCMachineState *pcms, MachineState *machine,
+                            MachineClass *mc)
+{
+    SmbiosMemoryDeviceConfig config;
+    uint64_t module_size = mc->smbios_memory_device_size;
+    unsigned int dimm_count;
+    unsigned int i;
+    uint8_t *spd_images[8] = { 0 };
+
+    if (!smbios_get_memory_device_config(&config) || !config.rated_speed ||
+        !config.rank || !config.voltage || !module_size) {
+        return;
+    }
+
+    dimm_count = DIV_ROUND_UP(machine->ram_size, module_size);
+    if (!dimm_count || dimm_count > 8) {
+        return;
+    }
+
+    for (i = 0; i < dimm_count; i++) {
+        uint64_t remaining = machine->ram_size - i * module_size;
+        uint32_t size_mb = MIN(remaining, module_size) / MiB;
+        if (config.memory_type == SMBIOS_MEMORY_TYPE_DDR3) {
+            spd_images[i] = spd_data_generate_ddr3(size_mb,
+                                                   config.rated_speed,
+                                                   config.rank,
+                                                   config.voltage);
+        } else {
+            spd_images[i] = spd_data_generate_ddr4_ex(
+                size_mb, config.rated_speed, config.rank, config.voltage);
+        }
+        if (!spd_images[i]) {
+            /* 奇数容量等不可由 x8 UDIMM 表达的组合不应生成虚假 SPD。 */
+            while (i > 0) {
+                g_free(spd_images[--i]);
+            }
+            return;
+        }
+    }
+    for (i = 0; i < dimm_count; i++) {
+        smbus_eeprom_init_one(pcms->smbus, 0x50 + i, spd_images[i]);
+    }
 }
 
 /* PC hardware initialisation */
@@ -309,19 +359,13 @@ static void pc_q35_init(MachineState *machine)
     if (pcms->smbus_enabled) {
         PCIDevice *smb;
 
-        /* TODO: Populate SPD eeprom data.  */
         smb = pci_create_simple_multifunction(pcms->pcibus,
                                               PCI_DEVFN(ICH9_SMB_DEV,
                                                         ICH9_SMB_FUNC),
                                               TYPE_ICH9_SMB_DEVICE);
         pcms->smbus = I2C_BUS(qdev_get_child_bus(DEVICE(smb), "i2c"));
 
-        /* Populate two DDR4-2666 DIMM SPDs at 0x50/0x51 so guest tools
-         * (HWiNFO/CPU-Z) can decode realistic timings. */
-        smbus_eeprom_init_one(pcms->smbus, 0x50,
-                              spd_data_generate_ddr4(4096, 2666));
-        smbus_eeprom_init_one(pcms->smbus, 0x51,
-                              spd_data_generate_ddr4(4096, 2666));
+        pc_q35_init_spd(pcms, machine, mc);
     }
 
     /* the rest devices to which pci devfn is automatically assigned */

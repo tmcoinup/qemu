@@ -62,6 +62,20 @@ QMP="/tmp/qemu-stealth-${INSTANCE}.qmp"
 MON="/tmp/qemu-stealth-${INSTANCE}.mon"
 FB="/tmp/qemu-stealth-${INSTANCE}.fb"
 
+# 优先读取 start-vm 原子登记的 canonical TPM state。这样 stop 无需操作者再次
+# 传入自定义 VM_DIR，也能精确找到 daemon；没有登记时才回退旧版默认目录。
+TPM_STATE_DIR=""
+refresh_swtpm_state_dir() {
+    local resolved
+
+    resolved="$(sv_swtpm_resolve_instance_state_dir "$INSTANCE" "${VM_DIR:-}")" \
+        || return 1
+    TPM_STATE_DIR="$resolved"
+}
+if ! refresh_swtpm_state_dir; then
+    echo "⚠ 实例 $INSTANCE 的 swtpm runtime 状态不安全；将拒绝按模糊路径清理 TPM" >&2
+fi
+
 # 进程名兼容：新版 "win10-${INSTANCE}"（2026-05 改名）与旧版
 # "win10-ryzen3-${INSTANCE}"。实例号后要求边界字符 [, ]（-name 后总跟
 # ",debug-threads=on" 或后续参数），避免实例 1 误匹配实例 10。
@@ -142,6 +156,12 @@ acquire_instance_cleanup_lock() {
     for ((attempt=0; attempt<25; attempt++)); do
         exec 8>"$lock"
         if flock -n 8; then
+            # stop 等锁期间，新启动器可能刚把同一实例切到另一个自定义 VM_DIR。
+            # 取得锁后重读登记，避免使用竞争前缓存的旧 state_dir。
+            if ! refresh_swtpm_state_dir; then
+                exec 8>&-
+                return 1
+            fi
             return 0
         fi
         exec 8>&-
@@ -159,31 +179,61 @@ cleanup_vlan_tap() {
     fi
 }
 
+release_cpu_isolation() {
+    local helper="/usr/local/libexec/qemu-vmate-cpu-isolate"
+
+    # QEMU 正常退出或崩溃后 pid 会自动离开 cgroup.procs，但 root partition 和
+    # 实例登记不会自行消失。无 VM 快速路径与正常关机路径都必须调用同一收尾函数，
+    # 否则一次崩溃就可能让专属 CPU 永久不再回到宿主调度集合。多 VM 安全判断由
+    # root helper 内部完成；失败仅保留状态供下次 stop 重试，不掩盖关机结果。
+    if [[ -x "$helper" ]]; then
+        sudo -n "$helper" release "$INSTANCE" 2>/dev/null || true
+    fi
+}
+
 stop_swtpm_daemon() {
     # 中文注释：swtpm 是独立 daemon，QEMU 异常退出或用户直接关闭窗口时不会自动回收。
-    # 它持有本实例 tpm-state 锁会让下一次启动秒退，因此只按 vms/<N>/tpm-state 精确清理。
+    # 它持有本实例 tpm-state 锁会让下一次启动秒退；这里只按 runtime 登记的
+    # canonical state_dir 精确清理，自定义 VM_DIR 不再依赖目录名猜测。
     local -a swtpm_pids=()
 
-    mapfile -t swtpm_pids < <(sv_swtpm_instance_pids "$INSTANCE")
+    if [[ -z "$TPM_STATE_DIR" ]]; then
+        echo "⚠ 缺少可信 swtpm state_dir，跳过 daemon 清理" >&2
+        return 1
+    fi
+    mapfile -t swtpm_pids < <(
+        sv_swtpm_instance_pids "$INSTANCE" "$TPM_STATE_DIR"
+    )
     if (( ${#swtpm_pids[@]} == 0 )); then
+        sv_swtpm_unregister_state_dir "$INSTANCE" "$TPM_STATE_DIR" || true
         return 0
     fi
     echo "→ 停止实例 ${INSTANCE} 的 swtpm: ${swtpm_pids[*]}"
-    sv_swtpm_stop_pids "$INSTANCE" "${swtpm_pids[@]}"
+    sv_swtpm_stop_pids "$INSTANCE" "$TPM_STATE_DIR" "${swtpm_pids[@]}"
+    swtpm_pids=()
+    mapfile -t swtpm_pids < <(
+        sv_swtpm_instance_pids "$INSTANCE" "$TPM_STATE_DIR"
+    )
+    if (( ${#swtpm_pids[@]} > 0 )); then
+        echo "⚠ 实例 $INSTANCE 的 swtpm 仍未退出，保留 runtime 状态供重试" >&2
+        return 1
+    fi
+    sv_swtpm_unregister_state_dir "$INSTANCE" "$TPM_STATE_DIR"
 }
 
 stop_orphan_swtpm_holding_cleanup_lock() {
     local lock
     local -a orphan_pids=()
 
+    [[ -n "$TPM_STATE_DIR" ]] || return 0
     lock="$(sv_instance_lock_path "$INSTANCE")" || return 0
     mapfile -t orphan_pids < <(
-        sv_swtpm_orphan_lock_holder_pids "$INSTANCE" "$lock"
+        sv_swtpm_orphan_lock_holder_pids "$INSTANCE" "$TPM_STATE_DIR" "$lock"
     )
     (( ${#orphan_pids[@]} > 0 )) || return 0
 
     echo "→ 回收持实例锁的孤儿 swtpm: ${orphan_pids[*]}"
-    sv_swtpm_stop_pids "$INSTANCE" "${orphan_pids[@]}"
+    sv_swtpm_stop_pids "$INSTANCE" "$TPM_STATE_DIR" "${orphan_pids[@]}"
 }
 
 terminate_pid_if_known() {
@@ -213,6 +263,7 @@ if [[ -z "$PID" ]]; then
         cleanup_control_sockets
         stop_swtpm_daemon
         cleanup_vlan_tap
+        release_cpu_isolation
         exit 0
     fi
 else
@@ -286,7 +337,8 @@ fi
 
 # swtpm daemon 随 VM 收摊（关键：否则孤儿在源头累积）。
 # swtpm 是 --daemon，PPID 已脱离 qemu，qemu 退出后它不会自己死，会一直持
-# 有 vms/N/tpm-state 的 NVRAM 锁；下次 start 时新 QEMU CMD_INIT 抢不到锁
+# 有 runtime 登记的 canonical tpm-state NVRAM 锁；下次 start 时新 QEMU
+# CMD_INIT 抢不到锁
 # 报 "0x9 operation failed" 秒退（详见 memory project_swtpm_orphan_lock，
 # start-vm.sh 已有 preflight reaper 兜底，这里在源头清干净，二者对称）。
 stop_swtpm_daemon
@@ -299,12 +351,8 @@ if pkill -f "qmp-proxy\.py ${INSTANCE}\b" 2>/dev/null; then
 fi
 rm -f "${QMP}.proxy" 2>/dev/null || true
 
-# CPU 亲和隔离收摊: 释放本实例的 cpuset 独占分区 → 专属物理核还给宿主机。
-# release 内部会判断分区里是否还有别的在跑 VM, 空了才真正拆分区还核(多 VM 安全)。
-# QEMU 已死 → 它的 pid 自动从 cgroup.procs 移除, 所以现在调最干净。失败不阻断。
-if [[ -x "$HERE/host-cpu-isolate.sh" ]]; then
-    sudo -n "$HERE/host-cpu-isolate.sh" release "$INSTANCE" 2>/dev/null || true
-fi
+# CPU 亲和隔离收摊：QEMU 已死后释放本实例登记，并按剩余 VM 安全收缩/拆除分区。
+release_cpu_isolation
 
 cleanup_control_sockets
 echo "instance=${INSTANCE} stopped"

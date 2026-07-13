@@ -193,7 +193,42 @@ struct HDAAudioState {
     /* properties */
     uint32_t debug;
     bool     mixer;
+
+    /*
+     * 这些字段只覆盖 HDA 协议对来宾报告的身份，不会把通用 QEMU
+     * 节点拓扑变成某款真实 Codec。调用方必须显式开启兼容模式，避免
+     * 仅凭一个 Realtek ID 就误认为已经完整仿真了对应芯片。
+     */
+    uint32_t codec_id;
+    uint32_t codec_revision;
+    uint32_t codec_subsystem_id;
+    bool identity_compat;
 };
+
+#define HDA_AUDIO_ID_UNSET UINT32_MAX
+
+/*
+ * 按 HDA 参数类型选择可配置身份；未配置时返回原描述表中的值，确保
+ * 老机器类型及迁移配置保持原行为。函数组和根节点的 subsystem ID
+ * 都经过这里，避免来宾从两个查询路径看到互相冲突的身份。
+ */
+static uint32_t hda_audio_identity_param(const HDAAudioState *a,
+                                         uint32_t parameter,
+                                         uint32_t fallback)
+{
+    switch (parameter) {
+    case AC_PAR_VENDOR_ID:
+        return a->codec_id == HDA_AUDIO_ID_UNSET ? fallback : a->codec_id;
+    case AC_PAR_REV_ID:
+        return a->codec_revision == HDA_AUDIO_ID_UNSET ?
+            fallback : a->codec_revision;
+    case AC_PAR_SUBSYSTEM_ID:
+        return a->codec_subsystem_id == HDA_AUDIO_ID_UNSET ?
+            fallback : a->codec_subsystem_id;
+    default:
+        return fallback;
+    }
+}
 
 static inline uint32_t hda_bytes_per_second(HDAAudioStream *st)
 {
@@ -483,10 +518,13 @@ static void hda_audio_command(HDACodecDevice *hda, uint32_t nid, uint32_t data)
         if (param == NULL) {
             goto fail;
         }
-        hda_codec_response(hda, true, param->val);
+        hda_codec_response(hda, true,
+                           hda_audio_identity_param(a, payload, param->val));
         break;
     case AC_VERB_GET_SUBSYSTEM_ID:
-        hda_codec_response(hda, true, a->desc->iid);
+        hda_codec_response(hda, true,
+                           hda_audio_identity_param(a, AC_PAR_SUBSYSTEM_ID,
+                                                    a->desc->iid));
         break;
 
     /* all functions */
@@ -641,6 +679,28 @@ static void hda_audio_init(HDACodecDevice *hda,
     const desc_node *node;
     const desc_param *param;
     uint32_t i, type;
+
+    /*
+     * ALC887 等真实 Codec 拥有比本设备复杂得多的节点、功放和插孔拓扑。
+     * 身份覆盖必须由启动器明确承认“仅兼容身份”，否则严格拒绝启动，
+     * 防止生成 ID 看似真实、能力却与真实硬件不一致的虚假画像。
+     */
+    if (!a->identity_compat &&
+        (a->codec_id != HDA_AUDIO_ID_UNSET ||
+         a->codec_revision != HDA_AUDIO_ID_UNSET ||
+         a->codec_subsystem_id != HDA_AUDIO_ID_UNSET)) {
+        error_setg(errp, "HDA codec identity overrides require "
+                   "x-identity-compat=on because the node topology remains "
+                   "the generic QEMU codec");
+        return;
+    }
+
+    if (a->codec_id != HDA_AUDIO_ID_UNSET &&
+        (!(a->codec_id >> 16) || !(a->codec_id & 0xffff))) {
+        error_setg(errp, "x-codec-id must contain non-zero 16-bit vendor "
+                   "and device identifiers");
+        return;
+    }
 
     if (!audio_be_check(&a->audio_be, errp)) {
         return;
@@ -806,6 +866,14 @@ static const Property hda_audio_properties[] = {
     DEFINE_AUDIO_PROPERTIES(HDAAudioState, audio_be),
     DEFINE_PROP_UINT32("debug", HDAAudioState, debug,   0),
     DEFINE_PROP_BOOL("mixer", HDAAudioState, mixer,  true),
+    DEFINE_PROP_UINT32("x-codec-id", HDAAudioState, codec_id,
+                       HDA_AUDIO_ID_UNSET),
+    DEFINE_PROP_UINT32("x-codec-revision", HDAAudioState, codec_revision,
+                       HDA_AUDIO_ID_UNSET),
+    DEFINE_PROP_UINT32("x-codec-subsystem-id", HDAAudioState,
+                       codec_subsystem_id, HDA_AUDIO_ID_UNSET),
+    DEFINE_PROP_BOOL("x-identity-compat", HDAAudioState, identity_compat,
+                     false),
 };
 
 static void hda_audio_init_output(HDACodecDevice *hda, Error **errp)

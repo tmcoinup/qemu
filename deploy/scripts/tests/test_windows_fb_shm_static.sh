@@ -58,9 +58,9 @@ test_qapi_and_meson_enable_windows() {
 test_qemu_backend_has_win32_mapping() {
     local gpu_backend="$REPO_ROOT/ui/fb-shm-gpu.c"
 
-    require_text "CreateFileMappingA" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "MapViewOfFile" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "SetEvent" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "CreateFileMappingA" "$REPO_ROOT/ui/fb-shm-mapping.c"
+    require_text "MapViewOfFile" "$REPO_ROOT/ui/fb-shm-mapping.c"
+    require_text "SetEvent" "$REPO_ROOT/ui/fb-shm-display.c"
     require_text "CreateSharedHandle" "$gpu_backend"
     require_text "DXGI_SHARED_RESOURCE_READ" "$gpu_backend"
     require_text "DXGI_SHARED_RESOURCE_WRITE" "$gpu_backend"
@@ -81,9 +81,9 @@ test_qemu_backend_has_win32_mapping() {
         "$REPO_ROOT/include/ui/fb-shm-gpu.h"
     require_text "lpVtbl->AddRef" "$gpu_backend"
     require_text "lpVtbl->Release" "$gpu_backend"
-    require_text "dpy_gl_scanout_dmabuf" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "FB_SHM_CTL_NOTIFY_GPU_FRAME" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "SCM_RIGHTS" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "dpy_gl_scanout_dmabuf" "$REPO_ROOT/ui/fb-shm-display.c"
+    require_text "FB_SHM_CTL_NOTIFY_GPU_FRAME" "$REPO_ROOT/ui/fb-shm-control.c"
+    require_text "SCM_RIGHTS" "$REPO_ROOT/ui/fb-shm-control.c"
     require_text "fb-shm-gpu.c" "$REPO_ROOT/ui/meson.build"
     require_text "fb-shm-gpu-common.c" "$REPO_ROOT/ui/meson.build"
 }
@@ -93,11 +93,11 @@ test_backend_drops_idle_listener_rate() {
     # 若不重算 DCL rate，GL/SDL 主显示路径会继续被 60Hz graphic_hw_update()
     # 旁路拖慢，游戏帧率会从 58/59 掉到 30 多。
     awk '
-        /static int fb_shm_ensure_geometry/ { in_func = 1 }
+        /^int fb_shm_ensure_geometry/ { in_func = 1 }
         in_func && /fb_shm_broadcast_resize\(d\)/ { saw_resize = 1 }
         in_func && saw_resize && /fb_shm_update_effective_rate\(d\)/ { saw_rate = 1 }
         in_func && /^}/ { exit saw_rate ? 0 : 1 }
-    ' "$REPO_ROOT/ui/fb-shm.c" \
+    ' "$REPO_ROOT/ui/fb-shm-mapping.c" \
         || fail "fb_shm_ensure_geometry must recompute idle listener rate after mapping"
 }
 
@@ -112,19 +112,20 @@ test_gl_readback_drains_pbo_before_rate_gate() {
             exit saw_drain ? 0 : 1
         }
         in_func && /^}/ { exit 1 }
-    ' "$REPO_ROOT/ui/fb-shm.c" \
+    ' "$REPO_ROOT/ui/fb-shm-gl-frame.c" \
         || fail "fb_shm_commit_gl_frame must drain GL PBO before SHM rate gate"
 }
 
 test_direct_gpu_publish_is_independent_of_gl_context() {
-    local backend="$REPO_ROOT/ui/fb-shm.c"
+    local backend="$REPO_ROOT/ui/fb-shm-gl-frame.c"
 
     # 中文注释：QemuDmaBuf fd 和 Windows named D3D11 texture 已经是可直接
     # 交给 consumer 的 backing。它们必须在 gl_guest_fb.texture 检查和共享
     # GL context 进入之前发布；只有 Linux 普通 texture->dma-buf 可以留在
     # current-context 阶段。顺序写反会让 GL import 失败连带禁用真正的直通句柄。
     require_text "fb_shm_broadcast_direct_gpu_frame" "$backend"
-    require_text "fb_shm_gpu_backend_has_d3d_texture" "$backend"
+    require_text "fb_shm_gpu_backend_has_d3d_texture" \
+        "$REPO_ROOT/ui/fb-shm-gl-export.c"
     require_text "fb_shm_broadcast_context_texture_frame" "$backend"
     awk '
         /static void fb_shm_commit_gl_frame/ { in_func = 1 }
@@ -169,7 +170,7 @@ test_gpu_export_failure_is_silent() {
     reject_text "info_report" "$gpu_common"
     require_text "num_planes != 1" "$gpu_backend"
     require_text "offsets[0] != 0" "$gpu_backend"
-    require_text "fb_shm_gpu_export_cleanup" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "fb_shm_gpu_export_cleanup" "$REPO_ROOT/ui/fb-shm-gl-export.c"
     require_text "fb_shm_gpu_pending_begin" "$gpu_common"
     require_text "frame_sequence <= state->last_sequence" "$gpu_common"
     require_text "state->pending_sequence != frame_sequence" "$gpu_common"
@@ -197,7 +198,7 @@ test_launchers_prefer_gpu_export_with_opt_out() {
     require_text 'blob=true,hostmem=${GPU_HOSTMEM:-256M}' "$linux_devices"
 
     require_text '[switch]$NoGpuZeroCopy' "$windows_launcher"
-    require_text '[string]$GpuHostmem = "256M"' "$windows_launcher"
+    require_text "[string]\$GpuHostmem = '256M'" "$windows_launcher"
     require_text "[ValidateSet('Auto', 'Available', 'Unavailable')]" "$windows_launcher"
     require_text "'-device' 'virtio-vga-gl,help'" "$windows_launcher"
     require_text "'sdl,gl=on,show-cursor=off'" "$windows_launcher"
@@ -206,9 +207,8 @@ test_launchers_prefer_gpu_export_with_opt_out() {
     require_text "'virtio-vga,edid=on" "$windows_launcher"
     require_text 'if (-not $NoGpuZeroCopy)' "$windows_launcher"
     require_text '",blob=true,hostmem=$GpuHostmem"' "$windows_launcher"
-    require_text 'renderer 仍可导出 texture handle' "$windows_launcher"
-    require_text '不可用自动 SHM fallback' "$windows_launcher"
-    require_text '自动回退 SDL + virtio-vga + SHM' "$windows_launcher"
+    require_text "'SDL + virtio-vga + SHM'" "$windows_launcher"
+    require_text 'virtio-vga-gl 不可用；自动选择' "$windows_launcher"
     reject_text "Write-Warning '当前 QEMU 未提供 virtio-vga-gl" "$windows_launcher"
 }
 
@@ -222,32 +222,32 @@ test_scanout_disable_releases_dmabuf() {
 test_fb_shm_notifier_is_unregistered_before_free() {
     # 中文注释：machine ready 回调可能在 object-add 内同步执行；无论回调是否
     # 已执行，finalize 都必须依据独立注册标志摘掉全局 notifier 节点。
-    require_text "bool notifier_registered;" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "if (o->notifier_registered)" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "qemu_remove_machine_init_done_notifier" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "bool notifier_registered;" "$REPO_ROOT/ui/fb-shm-qom.c"
+    require_text "if (o->notifier_registered)" "$REPO_ROOT/ui/fb-shm-qom.c"
+    require_text "qemu_remove_machine_init_done_notifier" "$REPO_ROOT/ui/fb-shm-qom.c"
 }
 
 test_fb_shm_treats_shared_header_as_untrusted() {
     # producer 的 slot 指针和 active index 必须来自私有状态；共享 header 只
     # 是对 consumer 的输出，不能反向参与 QEMU 宿主地址计算。
-    require_text "fb_shm_restore_private_layout" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "uint32_t active_idx;" "$REPO_ROOT/ui/fb-shm.c"
-    reject_text "d->hdr->buf_offset" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "fb_shm_restore_private_layout" "$REPO_ROOT/ui/fb-shm-mapping.c"
+    require_text "uint32_t active_idx;" "$REPO_ROOT/ui/fb-shm-internal.h"
+    reject_text "d->hdr->buf_offset" "$REPO_ROOT/ui/fb-shm-mapping.c"
     reject_text "qatomic_load_acquire(&d->hdr->active_idx)" \
-        "$REPO_ROOT/ui/fb-shm.c"
+        "$REPO_ROOT/ui/fb-shm-mapping.c"
 }
 
 test_fb_shm_buffers_stream_requests() {
     # SOCK_STREAM 的合法短读必须累计到完整控制帧；每轮上限避免 flood 饿死
     # QEMU 主事件循环。
-    require_text "request_buf[sizeof(FbShmCtlReq)]" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "FB_SHM_MAX_REQS_PER_TICK" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "fb_shm_dispatch_request" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "request_buf[sizeof(FbShmCtlReq)]" "$REPO_ROOT/ui/fb-shm-internal.h"
+    require_text "FB_SHM_MAX_REQS_PER_TICK" "$REPO_ROOT/ui/fb-shm-internal.h"
+    require_text "fb_shm_dispatch_request" "$REPO_ROOT/ui/fb-shm-listener.c"
 }
 
 test_gl_context_failure_does_not_destroy_bad_context() {
-    require_text "gl_ctx_unusable" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "GLXBadContext" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "gl_ctx_unusable" "$REPO_ROOT/ui/fb-shm-gl-context.c"
+    require_text "GLXBadContext" "$REPO_ROOT/ui/fb-shm-gl-context.c"
     awk '
         /^static void fb_shm_gl_release\(FbShmDisplay \*d\)/ { in_func = 1 }
         in_func && /d->gl_ctx && !d->gl_ctx_unusable/ { guarded_destroy = 1 }
@@ -255,7 +255,7 @@ test_gl_context_failure_does_not_destroy_bad_context() {
         in_func && /^}/ {
             exit guarded_destroy && saw_destroy ? 0 : 1
         }
-    ' "$REPO_ROOT/ui/fb-shm.c" \
+    ' "$REPO_ROOT/ui/fb-shm-gl-context.c" \
         || fail "fb-shm must not destroy a GL context after make-current failure"
 }
 
@@ -269,16 +269,16 @@ test_gl_sidecar_restores_provider_context() {
     require_text "QEMUGLContextState" "$REPO_ROOT/include/ui/console.h"
     require_text "dpy_gl_ctx_save_current" "$REPO_ROOT/include/ui/console.h"
     require_text "dpy_gl_ctx_restore_current" "$REPO_ROOT/include/ui/console.h"
-    require_text "FbShmGlContextGuard" "$REPO_ROOT/ui/fb-shm.c"
-    require_text "g_auto(FbShmGlContextGuard)" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "FbShmGlContextGuard" "$REPO_ROOT/ui/fb-shm-internal.h"
+    require_text "g_auto(FbShmGlContextGuard)" "$REPO_ROOT/ui/fb-shm-gl-frame.c"
     require_text "dpy_gl_ctx_restore_current(d->con, &guard->previous)" \
-        "$REPO_ROOT/ui/fb-shm.c"
+        "$REPO_ROOT/ui/fb-shm-gl-context.c"
     require_text "SDL_GL_GetCurrentWindow" "$REPO_ROOT/ui/sdl2-gl.c"
     require_text "state->draw" "$REPO_ROOT/ui/sdl2-gl.c"
     # context create 与 make-current 两个失败出口都必须恢复外层完整快照。
     failure_restores="$(grep -c \
         '(void)dpy_gl_ctx_restore_current(d->con, &previous)' \
-        "$REPO_ROOT/ui/fb-shm.c")"
+        "$REPO_ROOT/ui/fb-shm-gl-context.c")"
     [[ "$failure_restores" -ge 2 ]] \
         || fail "fb-shm GL create/make failure paths must restore provider binding"
     reject_text_ci "egl_provider_make_current" \
@@ -299,7 +299,9 @@ test_native_streamer_has_both_platforms() {
 test_windows_scripts_are_native() {
     require_text "-object" "$REPO_ROOT/deploy/windows/start-vm.ps1"
     require_text "fb-shm" "$REPO_ROOT/deploy/windows/start-vm.ps1"
-    require_text "-accel', 'whpx" "$REPO_ROOT/deploy/windows/start-vm.ps1"
+    require_text "'-accel', (Get-VMateWhpxAccelerator" "$REPO_ROOT/deploy/windows/start-vm.ps1"
+    require_text "return 'whpx,hyperv=off,kernel-irqchip=off'" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
     require_text "qemu-fb-shm-stream.exe" "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1"
     require_text "[ValidateSet('auto', 'gpu', 'shm')]" "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1"
     require_text "BeginConnect" "$REPO_ROOT/deploy/windows/stop-vm.ps1"
@@ -328,7 +330,16 @@ test_optional_powershell_syntax() {
     for script in \
         "$REPO_ROOT/deploy/windows/start-vm.ps1" \
         "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1" \
-        "$REPO_ROOT/deploy/windows/stop-vm.ps1"; do
+        "$REPO_ROOT/deploy/windows/stop-vm.ps1" \
+        "$REPO_ROOT/deploy/windows/collect-hardware-snapshot.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Common.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Components.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Manifest.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Memory.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.ProfileStore.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Profile.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Arguments.ps1"; do
         PS_SCRIPT_PATH="$script" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
             -Command '
                 $tokens = $null
@@ -366,7 +377,8 @@ test_optional_windows_launcher_dry_run() {
         -File "$REPO_ROOT/deploy/windows/start-vm.ps1" \
         -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
         -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
-        -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available -DryRun > "$out"
+        -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available \
+        -AllowHostCpuPlatformMismatch -DryRun > "$out"
     grep -Fx -- 'sdl,gl=on,show-cursor=off' "$out" >/dev/null \
         || fail "Windows available probe must enable SDL/GL"
     vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
@@ -378,25 +390,23 @@ test_optional_windows_launcher_dry_run() {
         -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
         -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
         -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available \
-        -NoGpuZeroCopy -DryRun > "$out"
+        -NoGpuZeroCopy -AllowHostCpuPlatformMismatch -DryRun > "$out"
     vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
     [[ "$vga" == virtio-vga-gl,* && "$vga" != *"blob=true"* && "$vga" != *"hostmem="* ]] \
         || fail "Windows -NoGpuZeroCopy must retain GL but remove blob/hostmem preference"
-    grep -F -- 'renderer 仍可导出 texture handle' "$out" >/dev/null \
-        || fail "Windows opt-out summary must preserve renderer texture export semantics"
-
     USERPROFILE="$tmp/user" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
         -File "$REPO_ROOT/deploy/windows/start-vm.ps1" \
         -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
         -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
         -FbShmPath "$tmp/fb.sock" -GpuGlProbe Unavailable -DryRun \
+        -AllowHostCpuPlatformMismatch \
         > "$out" 2>&1
     grep -Fx -- 'sdl,show-cursor=off' "$out" >/dev/null \
         || fail "Windows unavailable probe must retain non-GL SDL"
     vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
     [[ "$vga" == virtio-vga,* && "$vga" != *"blob=true"* ]] \
         || fail "Windows unavailable probe must fall back to virtio-vga"
-    grep -F -- '自动回退 SDL + virtio-vga + SHM' "$out" >/dev/null \
+    grep -F -- '自动选择 SDL + virtio-vga + SHM' "$out" >/dev/null \
         || fail "Windows unavailable probe must explain SHM fallback"
 
     rm -rf "$tmp"
@@ -423,12 +433,21 @@ test_new_files_stay_small() {
         "$REPO_ROOT/tools/fb-shm-stream/ffmpeg.c" \
         "$REPO_ROOT/tools/fb-shm-stream/main.c" \
         "$REPO_ROOT/include/ui/fb-shm-gpu.h" \
-        "$REPO_ROOT/ui/fb-shm-gpu.c" \
-        "$REPO_ROOT/ui/fb-shm-gpu-common.c" \
+        "$REPO_ROOT"/ui/fb-shm*.c \
+        "$REPO_ROOT/ui/fb-shm-internal.h" \
         "$REPO_ROOT/tests/unit/test-fb-shm-gpu-frame.c" \
         "$REPO_ROOT/deploy/windows/start-vm.ps1" \
         "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1" \
         "$REPO_ROOT/deploy/windows/stop-vm.ps1" \
+        "$REPO_ROOT/deploy/windows/collect-hardware-snapshot.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Common.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Components.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Manifest.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Memory.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.ProfileStore.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Profile.ps1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Arguments.ps1" \
         "$REPO_ROOT/deploy/docs/FB-SHM-GPU-ZEROCOPY.md" \
         "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"; do
         local lines

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ---------------------------------------------------------------------------
 # sv-hosttune.sh —— 起 VM 前的 host 侧调度/时钟抖动调优 + CPU 频率封顶（默认开）
 #
@@ -32,7 +33,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
 fi
 
 if [[ "${HOST_TUNE:-1}" == "1" ]]; then
-    _ht_script="$HERE/host-performance.sh"
+    _ht_script="${SV_HOST_PERF_HELPER:-/usr/local/libexec/qemu-vmate-host-performance}"
     _ht_need=0
     _ht_halt_poll_target="${KVM_HALT_POLL_NS:-0}"
     [[ "$_ht_halt_poll_target" =~ ^[0-9]+$ ]] || _ht_halt_poll_target=0
@@ -80,22 +81,30 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
 
     if (( _ht_need == 0 )); then
         echo ">> host 调优:   已是 performance + halt_poll=${_ht_halt_poll_target}ns$([[ -n "$_ht_cap_arg" ]] && echo " + 频率封顶 $(( _ht_cap_arg/1000 ))MHz")，跳过"
-    elif [[ ! -f "$_ht_script" ]]; then
-        echo ">> host 调优:   ⚠ 找不到 $_ht_script，跳过（HOST_TUNE=0 可静默）" >&2
+    elif [[ ! -x "$_ht_script" ]]; then
+        echo ">> host 调优:   找不到安全的 root-owned helper: $_ht_script" >&2
+        echo ">>             请先运行: sudo $HERE/setup-host-helpers.sh" >&2
+        if [[ "${STRICT_HARDWARE:-0}" == "1" ]]; then
+            echo "ERROR: 严格模式禁止回退到用户可写的仓库脚本" >&2
+            exit 1
+        fi
     else
         _ht_msg="$([[ -n "$_ht_cap_arg" ]] && echo "（封顶 $(( _ht_cap_arg/1000 ))MHz）")"
         # 取 root 顺序：已 root 直接跑 → sudo -n(NOPASSWD 免密) → 有 tty 交互 → 否则 WARN。
         if [[ $EUID -eq 0 ]]; then
             echo ">> host 调优:   应用 host-performance.sh${_ht_msg} ..."
-            bash "$_ht_script" $_ht_cap_arg || echo ">> host 调优:   ⚠ 部分失败（不阻断启动）" >&2
-        elif sudo -n "$_ht_script" $_ht_cap_arg 2>/dev/null; then
+            "$_ht_script" "${_ht_cap_arg:-0}" "$_ht_halt_poll_target" \
+                || echo ">> host 调优:   ⚠ 部分失败（不阻断启动）" >&2
+        elif sudo -n -- "$_ht_script" "${_ht_cap_arg:-0}" \
+                "$_ht_halt_poll_target" 2>/dev/null; then
             echo ">> host 调优:   ✓ sudo(免密)已应用 host-performance.sh${_ht_msg}"
         elif [[ -t 0 || -t 1 ]]; then
             echo ">> host 调优:   需 sudo 应用 host-performance.sh${_ht_msg}（NOPASSWD 未配会提示输密；--no-host-tune 关）..."
-            sudo "$_ht_script" $_ht_cap_arg || echo ">> host 调优:   ⚠ sudo 失败/取消（不阻断启动）" >&2
+            sudo -- "$_ht_script" "${_ht_cap_arg:-0}" "$_ht_halt_poll_target" \
+                || echo ">> host 调优:   ⚠ sudo 失败/取消（不阻断启动）" >&2
         else
             echo ">> host 调优:   ⚠ 需 sudo 但无 tty 且无免密，跳过" >&2
-            echo ">>             手动: sudo $_ht_script ${_ht_cap_arg}（或配 NOPASSWD / HOST_TUNE=0）" >&2
+            echo ">>             手动: sudo $_ht_script ${_ht_cap_arg:-0} $_ht_halt_poll_target（或配 NOPASSWD / HOST_TUNE=0）" >&2
         fi
     fi
 fi

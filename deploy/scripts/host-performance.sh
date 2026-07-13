@@ -15,19 +15,31 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-# 频率封顶上限可走 (1) 位置参数 $1 或 (2) 环境变量 CPU_MAX_KHZ。位置参数优先，
-# 这样 NOPASSWD sudoers 能按脚本路径放行(任意参数)，不必为传 env 开 setenv。
-CPU_MAX_KHZ="${1:-${CPU_MAX_KHZ:-}}"
-# KVM halt polling 是“低唤醒延迟换空闲 CPU 忙等”。多开 + cpuset 隔离后，防编译
-# 抢核主要靠独占分区，不再默认用 500us 忙等；需要旧低延迟策略时可显式传
-# KVM_HALT_POLL_NS=500000。
-KVM_HALT_POLL_NS="${KVM_HALT_POLL_NS:-0}"
+# sudoers 放行的是固定 root helper；固定 PATH 并只读取位置参数，避免调用者环境中的
+# 同名程序或 CPU_MAX_KHZ/KVM_HALT_POLL_NS/HUGEPAGES 改变 root 写 sysfs 的行为。
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# root helper 会被 sudoers 免密放行，因此参数必须在任何写 sysfs 之前完整校验。
+# 第一个参数是频率上限（0=不封顶），第二个是 halt poll ns；拒绝额外参数和环境注入。
+(( $# <= 2 )) || { echo "ERROR: 用法: $0 [CPU_MAX_KHZ|0] [KVM_HALT_POLL_NS]" >&2; exit 2; }
+CPU_MAX_KHZ="${1:-0}"
+KVM_HALT_POLL_NS="${2:-0}"
+if ! [[ "$CPU_MAX_KHZ" =~ ^[0-9]+$ ]] || \
+   (( CPU_MAX_KHZ != 0 && (CPU_MAX_KHZ < 100000 || CPU_MAX_KHZ > 10000000) )); then
+    echo "ERROR: CPU_MAX_KHZ 必须是 0 或 [100000,10000000] 的整数 kHz" >&2
+    exit 2
+fi
+if ! [[ "$KVM_HALT_POLL_NS" =~ ^[0-9]+$ ]] || (( KVM_HALT_POLL_NS > 10000000 )); then
+    echo "ERROR: KVM_HALT_POLL_NS 必须是 [0,10000000] 的整数 ns" >&2
+    exit 2
+fi
 
 if [[ $EUID -ne 0 ]]; then
     echo "rerunning with sudo..."
     # 直接以脚本路径(非 'bash 脚本')重入 sudo，命令名=脚本本身，匹配
-    # /etc/sudoers.d/qemu-hostperf 的 NOPASSWD 规则；参数($@)原样带过去。
-    exec sudo "$0" "$@"
+    # /etc/sudoers.d/qemu-vmate-host 的固定 helper NOPASSWD 规则；参数原样带过去。
+    exec sudo -- "$0" "$@"
 fi
 
 # 1) CPU governor -> performance：固定高频，消除 vm-exit 间降频导致的服务延迟
@@ -46,7 +58,7 @@ echo ">> governor   : performance$([[ $_gov_changed == 0 ]] && echo '（本就�
 #     的破绽。把 scaling_max_freq 压到伪装 CPU 上限后，guest 再也跑不出超规格的
 #     速度；governor=performance 下这也就是实际钉死频率，顺带压平频率波动抖动。
 #     CPU_MAX_KHZ 由 start-vm.sh 按当前实例 CPU_MAX_MHZ 传入；留空=不封顶。
-if [[ -n "${CPU_MAX_KHZ:-}" && "${CPU_MAX_KHZ}" =~ ^[0-9]+$ ]] && (( CPU_MAX_KHZ > 0 )); then
+if (( CPU_MAX_KHZ > 0 )); then
     _cap="$CPU_MAX_KHZ"
     _hwmin=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq 2>/dev/null || echo 0)
     _hwmax=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null || echo 0)
@@ -84,11 +96,13 @@ if [[ -w /sys/module/kvm/parameters/halt_poll_ns ]]; then
     fi
 fi
 
-# 4) irqbalance：停掉，避免 IRQ 在核间迁移带来的不确定延迟。
-if systemctl stop irqbalance 2>/dev/null; then
-    echo ">> irqbalance : stopped"
+# 4) irqbalance：保持运行。旧实现全局停止服务，会让高核数 E5 的存储/网络 IRQ
+# 长期堆在少数 CPU 上。vCPU 隔离由 cpuset 完成；后续需要定向 IRQ 时应给
+# irqbalance 配置 banned CPU，而不是关闭整个宿主的负载均衡器。
+if systemctl is-active --quiet irqbalance 2>/dev/null; then
+    echo ">> irqbalance : active（保留；不做全局停服）"
 else
-    echo ">> irqbalance : 已停 / 未装"
+    echo ">> irqbalance : 未运行 / 未安装（不主动改变）"
 fi
 
 # 5) NVMe I/O 调度器 -> none：qcow2 I/O 延迟更可预测。
@@ -97,20 +111,16 @@ for d in /sys/block/nvme*n*/queue/scheduler; do
 done
 echo ">> nvme sched : none"
 
-# 6) (可选, 默认关) 显式 2MiB hugepage 预留。
+# 6) 不预留显式 2MiB hugepage。
 #    ⚠ 当前内存后端是 memory-backend-memfd —— 它不使用 /proc/sys/vm 的显式
 #    hugepage 池！在这里预留只会把 host 物理内存白白锁走（旧默认 16384*2MiB
 #    =32GiB 几乎等于整机内存），直接把刚修好的 OOM 又招回来（还会冲击正在跑的
-#    VM）。所以默认 0 = 不预留。仅当你把后端换成 hugetlbfs
-#    (mem-path=/dev/hugepages) 时，才显式 HUGEPAGES=<页数> 打开。
-if [[ "${HUGEPAGES:-0}" =~ ^[0-9]+$ ]] && (( ${HUGEPAGES:-0} > 0 )); then
-    if [[ -w /proc/sys/vm/nr_hugepages ]]; then
-        echo "$HUGEPAGES" > /proc/sys/vm/nr_hugepages
-        echo ">> hugepages  : reserved $HUGEPAGES x 2MiB ($(( HUGEPAGES*2 )) MiB) —— 务必确保后端走 hugetlbfs!"
-    fi
-else
-    echo ">> hugepages  : 跳过（memfd 后端不用显式池；设 HUGEPAGES=N 且换 hugetlbfs 才开）"
-fi
+#    VM）。所以本 helper 固定不预留；只有未来把后端换成 hugetlbfs 并增加管理员
+#    侧容量策略后，才应通过另一条受限接口启用。
+# 当前启动器固定使用 memfd，显式 hugetlb 池既不会被客体使用，又允许免密调用者
+# 大量锁走宿主内存。因此 root helper 不再接受 HUGEPAGES 环境开关；若未来切换到
+# hugetlbfs，应设计带容量上限的独立管理员配置，而不是扩张此 sudo 接口。
+echo ">> hugepages  : 跳过（memfd 后端不使用显式 hugetlb 池）"
 
 # 注：不在 KVM guest 里关 CPU 漏洞缓解（mitigations）——会让 guest 读 IA32_ARCH_CAP
 # 时露馅，增加被识别为「异常裸机」的风险。host 侧缓解保持原样。

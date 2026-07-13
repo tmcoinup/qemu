@@ -227,6 +227,14 @@
 #define NVME_VF_OFFSET 0x1
 #define NVME_VF_STRIDE 1
 
+/*
+ * Samsung 970 PRO 官方控制器规范给出的固定身份组合：主 PCI ID
+ * 144d:a804、子系统 144d:a801。当前设备只对这一套已经核实的画像提供
+ * Samsung 兼容模式，避免 960/970 EVO/980 等不同控制器共用同一个 ID。
+ */
+#define NVME_SAMSUNG_970PRO_MODEL "Samsung SSD 970 PRO 512GB"
+#define NVME_SAMSUNG_970PRO_FIRMWARE "1B2QEXP7"
+
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
         (trace_##trace)(__VA_ARGS__); \
@@ -8567,6 +8575,56 @@ static const MemoryRegionOps nvme_cmb_ops = {
     },
 };
 
+/*
+ * 严格校验 Samsung 身份的所有互相关联字段。QEMU 实现的仍是通用 NVMe
+ * 行为，所以这里只接受项目已经验证并统一使用的 970 PRO 512GB 画像；
+ * 未知型号必须先补充独立的 PCI/固件/能力映射，不能靠字符串后缀猜测。
+ */
+static bool nvme_check_samsung_profile(const NvmeParams *params, Error **errp)
+{
+    const char *model = params->model_number ? params->model_number :
+                        NVME_SAMSUNG_970PRO_MODEL;
+    const char *firmware = params->firmware_rev ? params->firmware_rev :
+                           NVME_SAMSUNG_970PRO_FIRMWARE;
+
+    if (params->use_samsung_id && params->use_intel_id) {
+        error_setg(errp, "use-samsung-id and use-intel-id are mutually "
+                         "exclusive");
+        return false;
+    }
+    if (!params->use_samsung_id) {
+        return true;
+    }
+    if (strcmp(model, NVME_SAMSUNG_970PRO_MODEL)) {
+        error_setg(errp, "unsupported Samsung model-number '%s'; the strict "
+                         "profile only supports '%s'",
+                   model, NVME_SAMSUNG_970PRO_MODEL);
+        return false;
+    }
+    if (strcmp(firmware, NVME_SAMSUNG_970PRO_FIRMWARE)) {
+        error_setg(errp, "firmware-rev '%s' does not match Samsung model "
+                         "'%s' (expected '%s')",
+                   firmware, model, NVME_SAMSUNG_970PRO_FIRMWARE);
+        return false;
+    }
+    if (params->subsystem_vendor_id &&
+        params->subsystem_vendor_id != PCI_SUBVENDOR_ID_SAMSUNG_970PRO) {
+        error_setg(errp, "subsys-vendor-id must be 0x%04x for the strict "
+                         "Samsung 970 PRO profile",
+                   PCI_SUBVENDOR_ID_SAMSUNG_970PRO);
+        return false;
+    }
+    if (params->subsystem_id &&
+        params->subsystem_id != PCI_SUBDEVICE_ID_SAMSUNG_970PRO) {
+        error_setg(errp, "subsys-id must be 0x%04x for the strict Samsung "
+                         "970 PRO profile",
+                   PCI_SUBDEVICE_ID_SAMSUNG_970PRO);
+        return false;
+    }
+
+    return true;
+}
+
 static bool nvme_check_params(NvmeCtrl *n, Error **errp)
 {
     NvmeParams *params = &n->params;
@@ -8600,6 +8658,34 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
 
     if (!params->serial) {
         error_setg(errp, "serial property not set");
+        return false;
+    }
+    if (strlen(params->serial) > sizeof(n->id_ctrl.sn) ||
+        (params->model_number &&
+         strlen(params->model_number) > sizeof(n->id_ctrl.mn)) ||
+        (params->firmware_rev &&
+         strlen(params->firmware_rev) > sizeof(n->id_ctrl.fr))) {
+        error_setg(errp, "NVMe serial/model/firmware exceeds Identify "
+                         "Controller field width");
+        return false;
+    }
+
+    if (params->subnqn && n->subsys) {
+        error_setg(errp, "subnqn cannot be used together with an explicit "
+                         "nvme-subsys device");
+        return false;
+    }
+    if (params->subnqn && !g_str_has_prefix(params->subnqn, "nqn.")) {
+        error_setg(errp, "subnqn must start with 'nqn.'");
+        return false;
+    }
+    if (params->subnqn && strlen(params->subnqn) >=
+                          sizeof(n->id_ctrl.subnqn)) {
+        error_setg(errp, "subnqn is too long");
+        return false;
+    }
+
+    if (!nvme_check_samsung_profile(params, errp)) {
         return false;
     }
 
@@ -8953,11 +9039,14 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
 
     if (n->params.use_samsung_id) {
         pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_SAMSUNG);
-        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_SAMSUNG_NVME);
+        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_SAMSUNG_970PRO);
         pci_set_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID,
-                     PCI_SUBVENDOR_ID_SAMSUNG_970EVO);
+                     n->params.subsystem_vendor_id ?
+                     n->params.subsystem_vendor_id :
+                     PCI_SUBVENDOR_ID_SAMSUNG_970PRO);
         pci_set_word(pci_conf + PCI_SUBSYSTEM_ID,
-                     PCI_SUBDEVICE_ID_SAMSUNG_970EVO);
+                     n->params.subsystem_id ? n->params.subsystem_id :
+                     PCI_SUBDEVICE_ID_SAMSUNG_970PRO);
     } else if (n->params.use_intel_id) {
         pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
         pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
@@ -9089,21 +9178,32 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     return true;
 }
 
+static void nvme_samsung_subnqn(NvmeCtrl *n, char *buf, size_t size)
+{
+    const char *model = n->params.model_number ? n->params.model_number :
+                        "Samsung-NVMe";
+    g_autofree char *token = g_strdup(model);
+    char *p;
+
+    /* NQN 不允许空格；保留型号信息并把其他分隔符归一成 '-'。 */
+    for (p = token; *p; p++) {
+        if (!g_ascii_isalnum(*p) && *p != '.' && *p != '-') {
+            *p = '-';
+        }
+    }
+    snprintf(buf, size, "nqn.1994-11.com.samsung:nvme:%s:M.2:%s",
+             token, n->params.serial);
+}
+
 static void nvme_init_subnqn(NvmeCtrl *n)
 {
     NvmeSubsystem *subsys = n->subsys;
     NvmeIdCtrl *id = &n->id_ctrl;
 
-    if (!subsys) {
-        if (n->params.use_samsung_id) {
-            /* Samsung-style NQN format used by real 970 EVO controllers */
-            snprintf((char *)id->subnqn, sizeof(id->subnqn),
-                     "nqn.1994-11.com.samsung:nvme:970EVO:%s:%s",
-                     "M.2", n->params.serial);
-        } else {
-            snprintf((char *)id->subnqn, sizeof(id->subnqn),
-                     "nqn.2019-08.org.qemu:%s", n->params.serial);
-        }
+    if (n->params.implicit_subsystem && n->params.subnqn) {
+        pstrcpy((char *)id->subnqn, sizeof(id->subnqn), n->params.subnqn);
+    } else if (n->params.implicit_subsystem && n->params.use_samsung_id) {
+        nvme_samsung_subnqn(n, (char *)id->subnqn, sizeof(id->subnqn));
     } else {
         pstrcpy((char *)id->subnqn, sizeof(id->subnqn), (char*)subsys->subnqn);
     }
@@ -9130,7 +9230,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
                   n->params.model_number, ' ');
     } else if (n->params.use_samsung_id) {
         strpadcpy((char *)id->mn, sizeof(id->mn),
-                  "Samsung SSD 970 PRO 512GB", ' ');
+                  NVME_SAMSUNG_970PRO_MODEL, ' ');
     } else {
         strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe Ctrl", ' ');
     }
@@ -9138,7 +9238,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
         strpadcpy((char *)id->fr, sizeof(id->fr),
                   n->params.firmware_rev, ' ');
     } else if (n->params.use_samsung_id) {
-        strpadcpy((char *)id->fr, sizeof(id->fr), "1B2QEXE7", ' ');
+        strpadcpy((char *)id->fr, sizeof(id->fr),
+                  NVME_SAMSUNG_970PRO_FIRMWARE, ' ');
     } else {
         strpadcpy((char *)id->fr, sizeof(id->fr), QEMU_VERSION, ' ');
     }
@@ -9273,6 +9374,7 @@ static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
         }
 
         n->subsys = NVME_SUBSYS(dev);
+        n->params.implicit_subsystem = true;
     } else {
         NvmeIdCtrl *id = &n->id_ctrl;
         uint32_t ctratt = le32_to_cpu(id->ctratt);
@@ -9287,6 +9389,7 @@ static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
         }
 
         id->ctratt = cpu_to_le32(ctratt);
+        n->params.implicit_subsystem = false;
     }
 
     cntlid = nvme_subsys_register_ctrl(n, errp);
@@ -9437,6 +9540,10 @@ static const Property nvme_props[] = {
     DEFINE_PROP_BOOL("use-samsung-id", NvmeCtrl, params.use_samsung_id, false),
     DEFINE_PROP_STRING("model-number", NvmeCtrl, params.model_number),
     DEFINE_PROP_STRING("firmware-rev", NvmeCtrl, params.firmware_rev),
+    DEFINE_PROP_STRING("subnqn", NvmeCtrl, params.subnqn),
+    DEFINE_PROP_UINT16("subsys-vendor-id", NvmeCtrl,
+                       params.subsystem_vendor_id, 0),
+    DEFINE_PROP_UINT16("subsys-id", NvmeCtrl, params.subsystem_id, 0),
     DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),
     DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, params.ioeventfd, false),
     DEFINE_PROP_BOOL("dbcs", NvmeCtrl, params.dbcs, true),

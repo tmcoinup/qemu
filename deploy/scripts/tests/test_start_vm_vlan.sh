@@ -18,6 +18,15 @@ TEST_OUT=""
 TEST_GUARD_PARENT=""
 TEST_GUARD_CHILD=""
 
+# 网络回归不验证 CPU 选型；固定兼容 dry-run 平台，避免测试结果依赖 runner 厂商。
+export STRICT_HARDWARE=0
+export STEALTH_KVM_AVAILABLE=1
+export STEALTH_KVM_TSC_CONTROL=1
+export STEALTH_KVM_GET_TSC_KHZ=1
+export STEALTH_KVM_TSC_KHZ=3600000
+export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+export STEALTH_HOST_CPU_MAX_MHZ=5000
+
 fail() {
     echo "FAIL: $*" >&2
     exit 1

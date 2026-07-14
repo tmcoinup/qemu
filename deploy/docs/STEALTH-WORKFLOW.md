@@ -51,6 +51,16 @@ deploy/driver-signing/scripts/sign-backdated.sh \
 # 启动到 ISO 安装
 deploy/scripts/start-vm.sh 2 --iso=/path/to/win10_ltsc.iso
 
+# AMD 宿主没有 enabled 整机候选时，只能显式接受 Q35/ICH9 compatibility；
+# 这不会关闭 KVM/TSC/CPU realize/磁盘及所请求 TPM 等门禁，也不代表真实 B350 machine
+deploy/scripts/start-vm.sh 2 \
+  --platform-id=amd-am4-r3-2300x-asus-prime-b350-plus \
+  --allow-platform-compatibility \
+  --iso=/path/to/win10_ltsc.iso
+
+# 无 manifest 元数据的旧 profile 仅允许显式诊断，不能计入支持范围
+STRICT_HARDWARE=0 deploy/scripts/start-vm.sh 1 --allow-legacy-profile
+
 # 想全自动跳过 OOBE：附加 autounattend ISO
 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
     deploy/scripts/start-vm.sh 2 --iso=/path/to/win10_ltsc.iso

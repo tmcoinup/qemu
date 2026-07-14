@@ -19,7 +19,26 @@ STEALTH_KVM_TSC_CONTROL=1
 STEALTH_KVM_GET_TSC_KHZ=1
 STEALTH_KVM_TSC_KHZ=2200000
 STEALTH_KVM_ERROR=
+STEALTH_HOST_CPU_PHYS_BITS=48
 source "$REPO_ROOT/deploy/scripts/lib/sv-host-capabilities.sh"
+
+# host-phys-bits-limit 只有在物理宿主位宽不少于 profile 目标时才会精确得到
+# 目标 CPUID；不足或严格模式下无法探测都必须早于 QEMU/磁盘写入失败。
+CPU_PHYS_BITS=43
+sv_validate_cpu_phys_bits || fail "48-bit 宿主应能实现 43-bit profile"
+STEALTH_HOST_CPU_PHYS_BITS=42
+if sv_validate_cpu_phys_bits >/dev/null 2>&1; then
+    fail "宿主物理地址位宽不足时未拒绝"
+fi
+STEALTH_HOST_CPU_PHYS_BITS=0
+if sv_validate_cpu_phys_bits >/dev/null 2>&1; then
+    fail "严格模式无法探测宿主地址位宽时未拒绝"
+fi
+STRICT_HARDWARE=0
+sv_validate_cpu_phys_bits >/dev/null 2>&1 \
+    || fail "非严格诊断模式应允许未知宿主地址位宽"
+STRICT_HARDWARE=1
+STEALTH_HOST_CPU_PHYS_BITS=48
 
 PLATFORM_ID=test-platform
 CPU_NAME='Test CPU'

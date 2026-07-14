@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # 验证 E5/Broadwell 无 TSC scaling 时的启动门禁，不需要真实 /dev/kvm。
+# 各测试用命令替换/子 shell 构造互斥 TSC 宿主视图；同名变量在场景间重新赋值
+# 是隔离设计，子 shell 赋值本就不应传播到下一场景。
+# shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -92,8 +95,10 @@ test_cpu_arg_uses_manifest_phys_bits_and_features() {
     export STEALTH_HOST_CPU_FLAGS=""
 
     actual="$(stealth_qemu_cpu_arg)"
-    [[ "$actual" == *"host-phys-bits=off,phys-bits=39"* ]] \
-        || fail "CPU 参数没有使用 manifest phys-bits"
+    [[ "$actual" == *"host-phys-bits=on,host-phys-bits-limit=39"* ]] \
+        || fail "CPU 参数没有通过 host limit 固定 manifest phys-bits"
+    [[ "$actual" != *",phys-bits="* ]] \
+        || fail "CPU 参数仍直接写 phys-bits，会在宿主位宽不同时产生 warning"
     [[ "$actual" == *"enforce=on"* && "$actual" == *"-hle,-rtm"* ]] \
         || fail "严格模式或 manifest 特性没有进入 CPU 参数"
 }

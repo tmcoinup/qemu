@@ -11,9 +11,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 STOP_VM="$REPO_ROOT/deploy/scripts/stop-vm.sh"
 LOCK_LIB="$REPO_ROOT/deploy/scripts/lib/sv-instance-lock.sh"
+PROCESS_LIB="$REPO_ROOT/deploy/scripts/lib/sv-qemu-process.sh"
 SWTPM_LIB="$REPO_ROOT/deploy/scripts/lib/sv-swtpm-lifecycle.sh"
 INSTANCE=9987654321
 FAKE_SWTPM_PID=""
+FAKE_QEMU_PIDS=()
 TRANSIENT_HOLDER_PID=""
 TEST_OUT=""
 TEST_TMP_DIR=""
@@ -31,6 +33,9 @@ cleanup_test_resources() {
     fi
     if [[ -n "${TRANSIENT_HOLDER_PID:-}" ]]; then
         kill "$TRANSIENT_HOLDER_PID" 2>/dev/null || true
+    fi
+    if (( ${#FAKE_QEMU_PIDS[@]} > 0 )); then
+        kill "${FAKE_QEMU_PIDS[@]}" 2>/dev/null || true
     fi
     if declare -F sv_swtpm_runtime_state_file >/dev/null 2>&1; then
         rm -f -- "$(sv_swtpm_runtime_state_file "$INSTANCE" 2>/dev/null || true)"
@@ -103,6 +108,95 @@ test_argument_validation() {
     grep -F -- "--wait 必须" "$out" >/dev/null \
         || fail "非法 wait 未给出数值错误"
     expect_arg_failure "$out" 12345678901
+}
+
+test_qemu_instance_name_matching() {
+    local pattern
+
+    pattern="$(sv_qemu_instance_pattern "$INSTANCE")" \
+        || fail "无法生成 QEMU 实例进程匹配器"
+    [[ "win10-${INSTANCE},debug-threads=on" =~ $pattern ]] \
+        || fail "公共匹配器未识别当前 QEMU 进程名"
+    [[ "win10-ryzen3-${INSTANCE},debug-threads=on" =~ $pattern ]] \
+        || fail "公共匹配器未兼容历史 QEMU 进程名"
+    [[ ! "win10-${INSTANCE}0,debug-threads=on" =~ $pattern ]] \
+        || fail "公共匹配器把相邻实例号误认为当前实例"
+}
+
+test_qemu_pid_parser_uses_name_argv_pair() {
+    local fake_qemu="$TEST_TMP_DIR/qemu-system-x86_64"
+    local wanted=998765432 deceptive=9987654321 good_pid deceptive_pid
+    local -a matches=()
+
+    cp "$TEST_FAKE_SWTPM" "$fake_qemu"
+    "$fake_qemu" -name "win10-${wanted},debug-threads=on" &
+    good_pid=$!
+    "$fake_qemu" x-name "win10-${wanted}," \
+        -name "win10-${wanted},ignored=true" \
+        -name "win10-${deceptive},debug-threads=on" &
+    deceptive_pid=$!
+    FAKE_QEMU_PIDS=("$good_pid" "$deceptive_pid")
+    sleep 0.1
+
+    mapfile -t matches < <(sv_qemu_instance_pids "$wanted")
+    [[ " ${matches[*]} " == *" $good_pid "* ]] \
+        || fail "argv 解析器未识别准确的 -name 相邻值"
+    [[ " ${matches[*]} " != *" $deceptive_pid "* ]] \
+        || fail "argv 解析器被其它参数中的实例名文本欺骗"
+    mapfile -t matches < <(sv_qemu_instance_pids "$deceptive")
+    [[ " ${matches[*]} " == *" $deceptive_pid "* ]] \
+        || fail "argv 解析器未识别最后一个 -name 的真实实例名"
+    if sv_qemu_instance_pids 887654321 >/dev/null 2>&1; then
+        fail "无匹配实例时进程查询错误返回成功"
+    fi
+
+    kill "$good_pid" "$deceptive_pid" 2>/dev/null || true
+    wait "$good_pid" "$deceptive_pid" 2>/dev/null || true
+    FAKE_QEMU_PIDS=()
+}
+
+test_stop_terminates_all_matching_qemu() {
+    local stage="$TEST_TMP_DIR/stop-multi-qemu" stop_copy helper fake_qemu out lock
+    local instance=998765430 first_pid second_pid
+
+    stop_copy="$stage/stop-vm.sh"
+    helper="$stage/fake-cpu-helper"
+    fake_qemu="$stage/qemu-system-x86_64"
+    out="$stage/stop.log"
+    mkdir -p "$stage"
+    ln -s "$REPO_ROOT/deploy/scripts/lib" "$stage/lib"
+    # shellcheck disable=SC2016 # 第二条 sed 需匹配 stop 脚本中的字面量 $helper。
+    sed \
+        -e "s|local helper=\"/usr/local/libexec/qemu-vmate-cpu-isolate\"|local helper=\"$helper\"|" \
+        -e 's|sudo -n "$helper" release|"$helper" release|' \
+        "$STOP_VM" >"$stop_copy"
+    chmod 0755 "$stop_copy"
+    cp "$TEST_FAKE_SWTPM" "$fake_qemu"
+    cat >"$helper" <<'SH'
+#!/bin/sh
+exit 0
+SH
+    chmod 0755 "$helper"
+
+    "$fake_qemu" -name "win10-${instance},debug-threads=on" &
+    first_pid=$!
+    "$fake_qemu" -name "win10-${instance},debug-threads=on" &
+    second_pid=$!
+    FAKE_QEMU_PIDS=("$first_pid" "$second_pid")
+    sleep 0.1
+    "$stop_copy" "$instance" --hard --wait=1 >"$out" 2>&1 \
+        || fail "stop-vm 无法停止同实例的全部 QEMU 进程"
+    wait "$first_pid" "$second_pid" 2>/dev/null || true
+    FAKE_QEMU_PIDS=()
+    kill -0 "$first_pid" 2>/dev/null && fail "stop-vm 遗留第一个同实例 QEMU"
+    kill -0 "$second_pid" 2>/dev/null && fail "stop-vm 遗留第二个同实例 QEMU"
+    grep -F "pids=$first_pid $second_pid" "$out" >/dev/null \
+        || grep -F "pids=$second_pid $first_pid" "$out" >/dev/null \
+        || fail "stop-vm 没有报告完整同实例 PID 集合"
+    grep -F "instance=${instance} stopped" "$out" >/dev/null \
+        || fail "stop-vm 未在全部 PID 退出后报告停止"
+    lock="$(sv_instance_lock_path "$instance")" || true
+    [[ -z "$lock" ]] || rm -f -- "$lock"
 }
 
 test_cleanup_waits_for_instance_lock() {
@@ -264,6 +358,24 @@ start_fake_swtpm() {
     kill -0 "$FAKE_SWTPM_PID" 2>/dev/null || fail "无法启动假 swtpm"
 }
 
+test_swtpm_startup_abort_cleans_daemon_and_registration() {
+    local state_dir daemon_pid runtime_file
+
+    state_dir="$(make_private_state_dir "$TEST_TMP_DIR/abort-startup/vm")"
+    runtime_file="$(sv_swtpm_runtime_state_file "$INSTANCE")"
+    sv_swtpm_register_state_dir "$INSTANCE" "$state_dir" \
+        || fail "无法登记启动中止测试的 swtpm state"
+    start_fake_swtpm "$state_dir"
+    daemon_pid="$FAKE_SWTPM_PID"
+
+    sv_swtpm_stop_instance "$INSTANCE" "$state_dir" \
+        || fail "profile 提交失败路径无法精确回收 swtpm"
+    wait "$daemon_pid" 2>/dev/null || true
+    FAKE_SWTPM_PID=""
+    kill -0 "$daemon_pid" 2>/dev/null && fail "启动中止后 swtpm 仍存活"
+    [[ ! -e "$runtime_file" ]] || fail "启动中止后遗留 swtpm runtime 登记"
+}
+
 test_stop_reaps_orphan_swtpm_lock_holder() {
     local out="$1"
     local tmp_dir="$2"
@@ -409,10 +521,12 @@ test_stop_preserves_swtpm_owned_by_live_launcher() {
 }
 
 main() {
-    [[ -x "$STOP_VM" && -f "$LOCK_LIB" && -f "$SWTPM_LIB" ]] \
+    [[ -x "$STOP_VM" && -f "$LOCK_LIB" && -f "$PROCESS_LIB" && -f "$SWTPM_LIB" ]] \
         || fail "stop-vm 或生命周期库缺失"
     # shellcheck disable=SC1090
     source "$LOCK_LIB"
+    # shellcheck disable=SC1090
+    source "$PROCESS_LIB"
     # shellcheck disable=SC1090
     source "$SWTPM_LIB"
     TEST_OUT="$(mktemp)"
@@ -421,11 +535,15 @@ main() {
     build_fake_swtpm
 
     test_argument_validation "$TEST_OUT"
+    test_qemu_instance_name_matching
+    test_qemu_pid_parser_uses_name_argv_pair
+    test_stop_terminates_all_matching_qemu
     test_cleanup_waits_for_instance_lock "$TEST_OUT"
     test_crash_path_releases_cpu_isolation "$TEST_OUT"
     test_swtpm_daemon_does_not_inherit_fd8 "$TEST_TMP_DIR/swtpm-args"
     test_swtpm_matcher_rejects_argument_only_lookalike
     test_swtpm_state_path_security
+    test_swtpm_startup_abort_cleans_daemon_and_registration
     test_stop_preserves_swtpm_owned_by_live_launcher "$TEST_OUT" "$TEST_TMP_DIR"
     test_stop_rechecks_after_transient_watchdog_exits "$TEST_OUT" "$TEST_TMP_DIR"
     test_stop_reaps_orphan_swtpm_lock_holder "$TEST_OUT" "$TEST_TMP_DIR"

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # 验证版本化整机 manifest、严格候选选择、E5 v4 的 2200MHz TSC 路径，以及
 # profile 持久化。测试完全在临时目录运行，不启动 QEMU、不修改已有 VM。
+# 下方三个隔离 subshell 故意复用相同变量名构造互斥宿主视图；赋值不会跨 subshell
+# 泄漏，SC2030/SC2031 在这里正是预期语义。
+# shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -71,14 +74,59 @@ for row in "${platform_rows[@]}"; do
     done
 done
 
-# AMD bundle 默认不能加载；只有明确关闭严格模式并指定 ID 才可使用兼容层。
+# AMD bundle 默认不能加载。新的窄门禁允许调用方在保持 STRICT_HARDWARE=1 的
+# 同时显式接受 platform compatibility；旧的全局非严格直调语义暂时保留，但正常
+# 启动器不再要求关闭 KVM/TPM/CPU realize 等无关检查。
 amd_platform=amd-am4-r3-1200-asus-prime-b350-plus
 if STRICT_HARDWARE=1 stealth_platform_load "$amd_platform" 2>/dev/null; then
     fail "严格模式不应加载 AMD/Q35 兼容 bundle"
 fi
+STRICT_HARDWARE=1 ALLOW_PLATFORM_COMPATIBILITY=1 \
+    stealth_platform_load "$amd_platform" 2>/dev/null \
+    || fail "显式 compatibility 门禁不应关闭其它严格检查"
+[[ "$PLATFORM_STATUS" == compatibility ]] || fail "AMD bundle 未标 compatibility"
 STRICT_HARDWARE=0 stealth_platform_load "$amd_platform" 2>/dev/null \
     || fail "非严格模式显式指定时应允许加载 AMD 兼容 bundle"
 [[ "$PLATFORM_STATUS" == compatibility ]] || fail "AMD bundle 未标 compatibility"
+
+# 正常 profile 选择路径必须同时验证“指定 ID + 显式 compatibility + 同厂商 +
+# 完整线程数 + 频率/TSC”。没有第二把开关时，即使全局严格门禁开启也不能误选。
+if (
+    export STRICT_HARDWARE=1
+    export ALLOW_PLATFORM_COMPATIBILITY=0
+    export STEALTH_PLATFORM_ID="$amd_platform"
+    export STEALTH_HOST_CPU_VENDOR=AuthenticAMD
+    export STEALTH_HOST_CPU_MAX_MHZ=5000
+    export STEALTH_REQUIRED_TSC_MHZ=
+    export CPUS=4
+    stealth_pick_profile >/dev/null 2>&1
+); then
+    fail "显式 AMD ID 在未允许 compatibility 时被选择"
+fi
+(
+    export STRICT_HARDWARE=1
+    export ALLOW_PLATFORM_COMPATIBILITY=1
+    export STEALTH_PLATFORM_ID="$amd_platform"
+    export STEALTH_HOST_CPU_VENDOR=AuthenticAMD
+    export STEALTH_HOST_CPU_MAX_MHZ=5000
+    export STEALTH_REQUIRED_TSC_MHZ=
+    export CPUS=4
+    unset MEM_TOTAL_MB
+    stealth_pick_profile >/dev/null 2>&1
+    [[ "$PLATFORM_ID" == "$amd_platform" && "$PLATFORM_STATUS" == compatibility ]]
+) || fail "显式 AMD compatibility 平台未通过完整宿主约束选择"
+if (
+    export STRICT_HARDWARE=1
+    export ALLOW_PLATFORM_COMPATIBILITY=1
+    export STEALTH_PLATFORM_ID="$amd_platform"
+    export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+    export STEALTH_HOST_CPU_MAX_MHZ=5000
+    export STEALTH_REQUIRED_TSC_MHZ=
+    export CPUS=4
+    stealth_pick_profile >/dev/null 2>&1
+); then
+    fail "显式 AMD compatibility 平台绕过了宿主 CPU 厂商约束"
+fi
 
 # 模拟 E5 v4 2.2GHz、无 TSC scaling：TSC 维度上唯一可生成的 4C/4T
 # 候选是 i5-6400T。它仍须由上层在真实宿主进行 KVM CPU realize smoke；
@@ -116,6 +164,28 @@ stealth_save_profile "$profile"
 saved_id="$PLATFORM_ID"
 unset PLATFORM_ID CPU_TSC_MHZ MEM_ALLOWED_TOTAL_MB NIC_ATTACHMENT SYSTEM_CHASSIS_TYPE AUDIO_CODEC_ID AUDIO_IDENTITY_FIDELITY
 STRICT_HARDWARE=1 stealth_load_profile "$profile"
+
+# save 可能被 `if !` 调用，Bash 会在整个函数体抑制 errexit；因此写入、chmod、
+# rename 必须逐步显式返回失败。用 /dev/full 模拟磁盘短写，并让 mktemp 返回一个
+# 攻击者预置的符号链接，确认不会误报成功或提交截断 profile。
+failed_save_dir="$tmp_dir/failed-save"
+failed_save_profile="$failed_save_dir/profile"
+failed_save_tmp="$failed_save_dir/injected.tmp"
+mkdir -p "$failed_save_dir"
+# shellcheck disable=SC2317 # stealth_save_profile 会按命令名间接调用此测试替身。
+mktemp() {
+    ln -s /dev/full "$failed_save_tmp"
+    printf '%s\n' "$failed_save_tmp"
+}
+if stealth_save_profile "$failed_save_profile" 2>/dev/null; then
+    unset -f mktemp
+    fail "profile 短写在条件调用上下文中被误报为成功"
+fi
+unset -f mktemp
+[[ ! -e "$failed_save_profile" && ! -L "$failed_save_profile" ]] \
+    || fail "profile 短写后提交了目标文件"
+[[ ! -e "$failed_save_tmp" && ! -L "$failed_save_tmp" ]] \
+    || fail "profile 短写后遗留不安全临时文件"
 [[ "$PLATFORM_ID" == "$saved_id" && "$CPU_TSC_MHZ" == 2200 ]] \
     || fail "profile 重载后平台/TSC 漂移"
 [[ "$MEM_ALLOWED_TOTAL_MB" == 2048,4096,8192 && "$NIC_ATTACHMENT" == add_in && \
@@ -156,6 +226,13 @@ sed 's/"linux_hda": "00:05.0"/"linux_hda": "00:06.0"/' \
     "$REPO_ROOT/deploy/hardware/platforms.json" >"$bad_bdf"
 if STEALTH_PLATFORM_MANIFEST="$bad_bdf" stealth_platform_validate >/dev/null 2>&1; then
     fail "清单 BDF 与当前 Q35 启动器不一致时未被拒绝"
+fi
+
+bad_phys_bits="$tmp_dir/platforms-bad-phys-bits.json"
+sed '0,/"phys_bits": 43/s//"phys_bits": 53/' \
+    "$REPO_ROOT/deploy/hardware/platforms.json" >"$bad_phys_bits"
+if STEALTH_PLATFORM_MANIFEST="$bad_phys_bits" stealth_platform_validate >/dev/null 2>&1; then
+    fail "清单接受了 QEMU/KVM 无法实现的 53-bit CPU"
 fi
 
 # 删去 manifest 身份模拟旧 profile；严格模式必须要求用户显式 reroll，不能用

@@ -26,7 +26,9 @@ Wired Keyboard 600、Microsoft USB Optical Mouse；绝对坐标 tablet 明确标
   新 VM 再随机出这些组合。
 - 两个 AM4 bundle 保留了已核验的 CPU/主板事实，但标记为 `compatibility` 且禁用。
   当前底层仍是 Intel Q35/ICH9 行为，仅替换 PCI ID 不能成为真实 AMD B350；只有调用方
-  明确设置 `STRICT_HARDWARE=0` 并指定平台 ID 时才可加载，随机选择永远不会选中。
+  同时显式指定平台 ID 和 `ALLOW_PLATFORM_COMPATIBILITY=1` 时，正常启动器才可加载；
+  这个独立门禁不会关闭 KVM/TSC、CPU realize、profile、磁盘，或请求 `TPM=1` 时的 TPM 检查。历史内部调用
+  的 `STRICT_HARDWARE=0` 直载语义仅供诊断，随机选择永远不会选中禁用条目。
   实现真正的 AMD machine type 后才允许将其改回 `enabled=true/status=supported`。
 
 ## Schema 1 字段约束
@@ -103,9 +105,11 @@ CPU 字段：
 5. Linux 与 Windows 均应保存 `PLATFORM_ID` 和 `PLATFORM_SCHEMA_VERSION`；已有 VM
    不得在普通重启时自动换平台。
 
-严格模式会拒绝 `legacy-unversioned` 或 `status!=supported` 的旧 profile。迁移必须
-由用户显式执行 `deploy/scripts/reroll-identity.sh <实例号>`；reroll 会改变整套硬件
-身份并可能触发客体重新激活，启动器不得自动替用户执行。
+严格模式会拒绝 `legacy-unversioned`；默认也拒绝 `status!=supported`。唯一窄例外是
+schema 1 `compatibility` profile 同时携带完全相同的平台 ID 和独立 allow 开关，此时仍会
+执行全部事实绑定与运行时门禁。旧 profile 迁移必须由用户显式执行
+`deploy/scripts/reroll-identity.sh <实例号>`；reroll 会改变整套硬件身份并可能触发客体
+重新激活，启动器不得自动替用户执行。
 
 ## E5 v4 宿主说明
 

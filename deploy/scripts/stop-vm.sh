@@ -25,6 +25,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib/sv-vlan-preflight.sh"
 # shellcheck disable=SC1091
 source "$HERE/lib/sv-instance-lock.sh"
+# shellcheck source=lib/sv-qemu-process.sh
+source "$HERE/lib/sv-qemu-process.sh"
 # shellcheck disable=SC1091
 source "$HERE/lib/sv-swtpm-lifecycle.sh"
 
@@ -76,17 +78,9 @@ if ! refresh_swtpm_state_dir; then
     echo "⚠ 实例 $INSTANCE 的 swtpm runtime 状态不安全；将拒绝按模糊路径清理 TPM" >&2
 fi
 
-# 进程名兼容：新版 "win10-${INSTANCE}"（2026-05 改名）与旧版
-# "win10-ryzen3-${INSTANCE}"。实例号后要求边界字符 [, ]（-name 后总跟
-# ",debug-threads=on" 或后续参数），避免实例 1 误匹配实例 10。
-PATTERN="^([^ ]*/)?qemu-system-x86_64 .*-name win10-(ryzen3-)?${INSTANCE}[, ]"
-
-pid_of_vm() {
-    # 中文注释：QEMU 可能由 gnome-session-inhibit/systemd-inhibit 包装启动；
-    # 包装进程的参数里也包含完整 QEMU 命令。必须锚定真实 QEMU 命令行开头，
-    # 否则 QEMU 已崩溃后仍会误杀/等待包装进程，并把 stale QMP 误报成关机失败。
-    pgrep -f "$PATTERN" | head -n1
-}
+# 诊断信息与实际 PID 查询来自同一个公共 name-value 匹配器；PID 查询还会逐项
+# 解析 /proc/PID/cmdline，不能被其它 argv 中碰巧出现的名称文本欺骗。
+PATTERN="$(sv_qemu_instance_pattern "$INSTANCE")"
 
 # 发一条 QMP 命令：成功打印响应行，连不上则非零退出。
 qmp_cmd() {
@@ -126,13 +120,10 @@ qmp_alive() {
     qmp_cmd query-status >/dev/null 2>&1
 }
 
-# VM 是否还在：有 PID 用 kill -0，无 PID 退回 QMP 探活。
+# VM 是否还在：每次都重新按真实 exe + 最终 -name argv 扫描全量 PID，避免缓存
+# PID 在等待期间退出并被无关进程复用。没有可识别 PID 时才回退 QMP 探活。
 vm_alive() {
-    if [[ -n "$PID" ]]; then
-        kill -0 "$PID" 2>/dev/null
-    else
-        qmp_alive
-    fi
+    sv_qemu_instance_pids "$INSTANCE" >/dev/null 2>&1 || qmp_alive
 }
 
 cleanup_control_sockets() {
@@ -236,19 +227,24 @@ stop_orphan_swtpm_holding_cleanup_lock() {
     sv_swtpm_stop_pids "$INSTANCE" "$TPM_STATE_DIR" "${orphan_pids[@]}"
 }
 
-terminate_pid_if_known() {
-    if [[ -n "$PID" ]]; then
-        kill "$PID" 2>/dev/null || true
-    fi
+terminate_matching_qemu() {
+    local signal="${1:-TERM}"
+    local -a current_pids=()
+
+    mapfile -t current_pids < <(sv_qemu_instance_pids "$INSTANCE" || true)
+    (( ${#current_pids[@]} > 0 )) || return 1
+    # PID 集合在发信号前即时重新扫描，不使用最长等待 70 秒前缓存的 PID。
+    kill "-$signal" "${current_pids[@]}" 2>/dev/null || true
 }
 
-PID="$(pid_of_vm || true)"
+QEMU_PIDS=()
+mapfile -t QEMU_PIDS < <(sv_qemu_instance_pids "$INSTANCE" || true)
 
-if [[ -z "$PID" ]]; then
+if (( ${#QEMU_PIDS[@]} == 0 )); then
     # 没匹配到进程：可能真没跑，也可能进程名又变了但 QMP 还在。
     if qmp_alive; then
         echo "⚠ 未匹配到进程名，但 QMP socket 有响应 —— VM 仍在运行，改走 QMP-only 关机"
-        # 不删 socket，PID 留空，下面用 QMP 路径关机。
+        # 不删 socket，下面用 QMP-only 路径关机。
     else
         echo "no vm instance ${INSTANCE} running (pattern: $PATTERN)"
         # 中文注释：旧版启动器可能让 --daemon 的 swtpm 继承 FD 8，导致它在
@@ -267,21 +263,21 @@ if [[ -z "$PID" ]]; then
         exit 0
     fi
 else
-    echo "instance=${INSTANCE} pid=${PID}"
+    echo "instance=${INSTANCE} pids=${QEMU_PIDS[*]}"
 fi
 
 if [[ "$HARD" -eq 1 ]]; then
     echo "→ hard quit via QMP"
     if [[ -S "$QMP" ]]; then
-        qmp_cmd quit >/dev/null || terminate_pid_if_known
-    elif [[ -n "$PID" ]]; then
-        kill "$PID"
+        qmp_cmd quit >/dev/null || terminate_matching_qemu TERM || true
+    elif (( ${#QEMU_PIDS[@]} > 0 )); then
+        terminate_matching_qemu TERM || true
     fi
 else
     if [[ ! -S "$QMP" ]]; then
-        if [[ -n "$PID" ]]; then
+        if (( ${#QEMU_PIDS[@]} > 0 )); then
             echo "→ no QMP socket, falling back to SIGTERM"
-            kill "$PID"
+            terminate_matching_qemu TERM || true
         else
             echo "→ 无 PID 且无 QMP socket，无法关机" >&2
             exit 1
@@ -300,27 +296,24 @@ else
         done
         if vm_alive; then
             echo "→ guest did not power off within ${WAIT}s, issuing QMP quit"
-            qmp_cmd quit >/dev/null || terminate_pid_if_known
+            qmp_cmd quit >/dev/null || terminate_matching_qemu TERM || true
         fi
     fi
 fi
 
-# 收尾等待 + 强杀（仅当有 PID 时能 SIGKILL）。
-if [[ -n "$PID" ]]; then
-    for ((i=0; i<10; i++)); do
-        kill -0 "$PID" 2>/dev/null || break
-        sleep 1
-    done
-    if kill -0 "$PID" 2>/dev/null; then
-        echo "→ still alive, SIGKILL"
-        kill -9 "$PID" || true
+# 收尾每轮重扫全量实例 PID；QMP 只会控制其中一台损坏的重复实例，剩余进程
+# 仍必须等待并最终一并强杀，不能在首个 PID 退出后提前清理磁盘生命周期资源。
+for ((i=0; i<10; i++)); do
+    vm_alive || break
+    sleep 1
+done
+if vm_alive; then
+    mapfile -t QEMU_PIDS < <(sv_qemu_instance_pids "$INSTANCE" || true)
+    if (( ${#QEMU_PIDS[@]} > 0 )); then
+        echo "→ still alive, SIGKILL all matching PIDs: ${QEMU_PIDS[*]}"
+        terminate_matching_qemu KILL || true
         sleep 1
     fi
-else
-    for ((i=0; i<10; i++)); do
-        vm_alive || break
-        sleep 1
-    done
 fi
 
 # 仅在确认 VM 已停后清 socket；若仍存活则保留 QMP socket 供重试。

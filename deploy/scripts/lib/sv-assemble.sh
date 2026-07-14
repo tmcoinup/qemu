@@ -18,6 +18,9 @@ if [[ "${QEMU_CPU_PM:-0}" =~ ^(1|on|true|yes)$ ]]; then
     CPU_PM_ARG=on
 fi
 
+# QEMU 的 machine/drive/device option 是逗号分隔的单个 argv；数组中的每个配置串
+# 都有意保持为一个元素，并非用逗号分隔 shell 数组成员。
+# shellcheck disable=SC2054
 CMD=(
     "$QEMU"
 
@@ -29,14 +32,14 @@ CMD=(
     # stealth 设计；改成中性的 "win10-${INSTANCE}" 减少 host 端无意暴露
     # （不影响 guest——guest 看不到 QEMU 进程名）。debug-threads 仍开。
     -name "win10-${INSTANCE},debug-threads=on"
-    -machine q35,accel=kvm,vmport=off,smm=on,hpet=off,kernel-irqchip=split
+    -machine "q35,accel=kvm,vmport=off,smm=on,hpet=off,kernel-irqchip=split"
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
     -drive if=pflash,format=raw,file="$OVMF_VARS"
 
     # --- CPU: hidden hypervisor, hidden KVM, invtsc ---
     # CPU 完整 -cpu 串由 stealth_qemu_cpu_arg 拼出（包含 family/model/stepping、
-    # tsc-freq 和 vendor）。只有 platform manifest 中 enabled 且通过宿主 KVM
-    # 实现探测的完整 Intel 整机 bundle 才能进入新 VM profile。
+    # tsc-freq 和 vendor）。默认只有 manifest 中 enabled 且通过宿主 KVM 探测的
+    # 整机 bundle 可进入新 profile；显式 compatibility 还须独立双钥匙并保留警告。
     -cpu "$(stealth_qemu_cpu_arg)"
     # 完整 SKU 的核心/线程拓扑来自 platform manifest。选择阶段已经要求 CPUS 等于
     # CPU_THREADS；这里再次用整数除法构造 threads-per-core，不能把 2C/4T CPU 写成 4C。
@@ -131,13 +134,40 @@ CMD=(
     # 用 -qmp shorthand 而不是 -chardev/-mon：等价语义，但 memflow 的命令行解析
     # 只认 -qmp 这种 flag。这样 dgame 调试器用 memflow 直读时能找到 socket。
     "${QMP_ARGS[@]}"
-    -chardev socket,id=mon0,path=$MON_SOCK,server=on,wait=off
+    -chardev "socket,id=mon0,path=$MON_SOCK,server=on,wait=off"
     -mon chardev=mon0,mode=readline
 
     # --- Misc anti-detection knobs ---
     -msg timestamp=off
     -overcommit "mem-lock=off,cpu-pm=${CPU_PM_ARG}"
 )
+
+# 到这里，CPU realize、宿主约束、磁盘容量、所请求 TPM、内存拓扑、设备参数和
+# 完整 QEMU argv 都已成功生成。此时在真正启动 QEMU 前原子提交首次/--reroll
+# 候选；若前面任一门禁失败，旧 profile 的内容和哈希都保持不变。DRY_RUN 只报告
+# 候选，绝不写入。
+if (( ${_profile_needs_save:-0} )); then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo ">> profile:     [DRY_RUN] 生成内存身份，未落盘 $PROFILE_FILE"
+    else
+        if ! stealth_save_profile "$PROFILE_FILE"; then
+            echo "ERROR: 无法原子提交硬件 profile: $PROFILE_FILE" >&2
+            # swtpm daemon 已通过 TPM 门禁后启动。profile 写盘若失败，QEMU 不会
+            # 启动，必须精确回收本实例 daemon；失败时保留 runtime 登记供 stop
+            # 重试，绝不按宽泛进程名误杀其它实例。
+            if (( ${#TPM_ARGS[@]} > 0 )) && [[ -n "${TPM_STATE_DIR:-}" ]]; then
+                if sv_swtpm_stop_instance "$INSTANCE" "$TPM_STATE_DIR"; then
+                    rm -f -- "${TPM_SOCK:-}"
+                else
+                    echo "WARN: profile 提交失败后 swtpm 未完全退出；请运行 stop-vm.sh $INSTANCE" >&2
+                fi
+            fi
+            exit 1
+        fi
+        echo ">> profile:     NEW identity saved to $PROFILE_FILE"
+    fi
+fi
+unset _profile_needs_save
 
 # 回归/调试出参：DRY_RUN=1 时打印完整 QEMU argv（每行一个）后退出，不启动任何
 # 后台守护、不 exec。用于重构前后逐字节比对生成的命令行，确保去虚拟化参数不被

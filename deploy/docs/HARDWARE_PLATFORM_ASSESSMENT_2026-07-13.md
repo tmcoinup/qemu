@@ -1,6 +1,6 @@
 # VMate 硬件平台、真机化与兼容性评估
 
-评估日期：2026-07-13
+评估日期：2026-07-13；AMD 宿主运行补充：2026-07-14
 评估对象：`vmate` 分支当前工作树，QEMU 11.0.2
 评估范围：CPU、主板/芯片组、SMBIOS、内存/SPD、NVMe、网络、音频、USB HID、EDID、固件/TPM、宿主能力、调度、Windows/Linux 兼容性。
 明确不在本分支范围：GPU passthrough、SR-IOV GPU、vGPU，以及把 virtio 显示设备等同于真实 NVIDIA/AMD GPU 的承诺。
@@ -48,7 +48,9 @@ Intel 官方明确说明 E5-2696 v4 是由系统厂商定义规格的定制处�
 | `intel-lga1151-i5-6400t-asus-h110m-a-m2` | i5-6400T，4C/4T，目标 TSC 2200 MHz | ASUS H110M-A/M.2 / H110 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
 | 两个 Ryzen 3 + PRIME B350-PLUS 条目 | Ryzen 3 1200/2300X | AMD B350 | DDR4 | 禁用、仅 compatibility |
 
-AMD 条目禁用是正确的保守处理：当前 machine type 仍是 Intel Q35/ICH9，仅改 AMD PCI ID 不会得到 AMD B350 行为。AMD 物理宿主在严格模式下目前不会随机得到一个伪装成“完整支持”的平台。
+AMD 条目禁用是正确的保守处理：当前 machine type 仍是 Intel Q35/ICH9，仅改 AMD PCI ID 不会得到 AMD B350 行为。AMD 物理宿主默认不会随机得到一个伪装成“完整支持”的平台。2026-07-14 增加的 `--platform-id=<AMD-ID> --allow-platform-compatibility` 是显式功能入口，只放宽整机 machine fidelity；KVM/TSC、宿主厂商/线程/频率/物理地址位、CPU 无警告 realize、profile、磁盘，以及请求 `TPM=1` 时的 TPM 门禁仍保持严格。该入口能用于安装和行为验证，但不能提高 B350 真机化评级。
+
+在 Ryzen 7 5800 宿主上的瞬时 KVM 实测表明，Ryzen3-1200 与 Ryzen3-2300X 均可按 4C/4T 和目标 TSC realize。原先直接传 `phys-bits=43` 会因宿主 48 位产生 warning；启动器现改为先验证宿主位宽，再用 `host-phys-bits=on,host-phys-bits-limit=43` 固定客体值。但这仍只证明 vCPU 可创建：KVM 最终 surface 默认关闭 SVM、MONITOR/MWAIT 和 PMU，cache 模板、微码以及额外 `tsc-deadline` 尚无目标零售 Ryzen 样机快照闭环，因此 AMD CPU 也不能提升为严格等价。
 
 CPU、主板、PCH、BIOS 版本/日期、机箱类型、板载音频、网卡状态、M.2 能力和内存限制作为一个原子 bundle 选择。vCPU 必须等于 SKU 完整线程数；当前两个启用平台都固定为 4 vCPU，不支持随意生成 2C/4T、关闭部分核心或多 socket 客体。
 
@@ -80,7 +82,7 @@ Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1
 
 | 硬件面 | 已实现 | 仍然存在的边界 |
 |---|---|---|
-| CPU | 厂商、名称、family/model/stepping、物理地址位、特性、拓扑、TSC、SMBIOS Type 4；`enforce=on` realize | 命名 CPU 仍受宿主 CPUID 限制；吞吐、cache、MSR、微码与目标零售 SKU 不会自动完全一致 |
+| CPU | 厂商、名称、family/model/stepping、物理地址位、特性、拓扑、TSC、SMBIOS Type 4；宿主位宽下限门禁；`enforce=on` realize | 命名 CPU 仍受宿主 CPUID/KVM 默认属性限制；AMD compatibility 的 SVM、MONITOR/MWAIT、PMU、cache、微码与 `tsc-deadline` 尚无目标样机闭环，吞吐也不会自动一致 |
 | SMBIOS | Linux：Type 0/1/2/3/4/11/16/17，含 chassis、CPU 电压/外频/upgrade/characteristics、内存类型/rank/voltage；Windows：Type 0/1/2/3/4/16/17 子集 | Windows 尚无 Type 11，且 Type 1 SKU、Type 2/3 asset/SKU 等字段少于 Linux；两条路线都不是具体 ASUS BIOS 生成的完整 DMI 表 |
 | 内存/SPD | 合法总量、模块容量、槽位、通道、rank、电压、每 DIMM 唯一 serial；Type17 额定/配置速率分离；256B SPD 按 2/4/8Gb 生成地址几何与 tRFC；2x4 GiB 只生成两条 SPD | 当前 EEPROM 诚实声明 256B used/total，但不是完整 EE1004 512B 器件，也不是所选品牌 DIMM 的 page 1/raw dump |
 | guest NUMA | 消费级单 socket 客体始终一个 NUMA node，DIMM 数不再错误映射为 NUMA 数 | 物理双路 E5 的 host NUMA 只用于放置，不向当前 4C/4T 消费级客体暴露双 socket |
@@ -181,6 +183,8 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 
 - CPU/主板/BIOS 从独立随机改为版本化完整平台 bundle；未知 schema、禁用平台、跨厂商和无候选均 fail closed。
 - AMD B350 仅保留 compatibility 且不进入严格随机池。
+- AMD compatibility 必须由平台 ID 与独立 allow 开关共同显式选择；只放宽 Q35 machine fidelity，不再要求用 `STRICT_HARDWARE=0` 连带跳过 CPU/TPM 等门禁。
+- CPU 物理地址位改为“宿主下限预检 + `host-phys-bits-limit`”，避免 48-bit 宿主实现 39/43-bit 目标时产生 warning 或泄漏宿主值。
 - KVM/TSC 真能力探测、250 ppm 判断和选型前 TSC 过滤。
 - 选型后真实 QEMU/KVM CPU realize smoke，拒绝 warning、缺 QMP 响应和伪成功。
 - NVMe/EDID/HID 收敛到 C 行为层真正支持的单一完整组件模板。

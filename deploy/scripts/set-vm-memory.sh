@@ -3,8 +3,9 @@
 # set-vm-memory.sh —— 切换某台隐身 VM 的内存配置（4GB 单通道 <-> 8GB 双通道）
 #
 # 只改 profile 里的 MEM_TOTAL_MB 一个字段，**不碰任何其它硬件身份**
-# （CPU / 主板 / GPU / NVMe / 各类序列号全不动），也**不改启动命令**：照常
-#     ./start-vm.sh <N> [--proxy ...]
+# （CPU / 主板 / GPU / NVMe / 各类序列号全不动）。supported 实例启动命令不变；
+# compatibility 实例仍须保留创建时的平台 ID 与显式 allow 参数：
+#     ./start-vm.sh <N> [--platform-id=<id> --allow-platform-compatibility] [--proxy ...]
 # start-vm.sh 会自动读 profile.MEM_TOTAL_MB 决定内存拓扑。改完**重启 VM** 生效
 # （内存量是开机确定的硬件拓扑，不做热插拔——热插拔事件本身是 VM 特征）。
 #
@@ -38,16 +39,18 @@ case "${1:-}" in -h|--help) _usage 0 ;; esac
 
 INSTANCE="$1"; shift || true
 [[ "$INSTANCE" =~ ^[0-9]+$ ]] || _die "instance 必须是正整数（实际 '$INSTANCE'）"
-VM_DIR="/home/ubuntu/images/vms/${INSTANCE}"
+VMS_DIR="${VMS_DIR:-/home/ubuntu/images/vms}"
+VM_DIR="${VMS_DIR%/}/${INSTANCE}"
 PROFILE="$VM_DIR/profile"
 [[ -f "$PROFILE" ]] || _die "profile 不存在: $PROFILE （先 ./start-vm.sh $INSTANCE 生成硬件身份）"
 
 SIZE_ARG="${1:-}"
+START_PLATFORM_ARGS=()
 
 # size 写法 -> MiB（× 和 * 统一成 x；纯数字/带 m 后缀直接取值）
 _parse_size(){
     local s
-    s="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ' | tr '×*' 'xx')"
+    s="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ' | sed 's/[×*]/x/g')"
     case "$s" in
         --show|show|"")        echo "" ;;
         2g|1x2g|2gx1)          echo 2048 ;;
@@ -57,7 +60,27 @@ _parse_size(){
     esac
 }
 
-# 载入 profile（拿 MEM_MFR / part / SN 等，用于打印拓扑）
+# 管理脚本读取 compatibility profile 时自动恢复其已持久化的平台路由，但不会把
+# 该授权写进 profile 或关闭严格检查。白名单读取器不会执行 profile 中的文本。
+export STRICT_HARDWARE=1
+_profile_status="$(stealth_profile_get PLATFORM_STATUS "$PROFILE" || true)"
+if [[ "$_profile_status" == "compatibility" ]]; then
+    _profile_schema="$(stealth_profile_get PLATFORM_SCHEMA_VERSION "$PROFILE" || true)"
+    _profile_platform="$(stealth_profile_get PLATFORM_ID "$PROFILE" || true)"
+    if [[ "$_profile_schema" != "1" ||
+          ! "$_profile_platform" =~ ^[a-z0-9][a-z0-9-]{7,95}$ ]]; then
+        _die "compatibility profile 缺少合法 schema/platform ID"
+    fi
+    export STEALTH_PLATFORM_ID="$_profile_platform"
+    export ALLOW_PLATFORM_COMPATIBILITY=1
+    START_PLATFORM_ARGS=(
+        "--platform-id=$_profile_platform"
+        --allow-platform-compatibility
+    )
+fi
+
+# 载入 profile（拿 MEM_MFR / part / SN 等，用于打印拓扑）。compatibility 的双钥匙
+# 已在上面从当前实例的受限字段恢复，完整事实绑定仍由加载器执行。
 set +u; stealth_load_profile "$PROFILE"; set -u
 CUR="${MEM_TOTAL_MB:-}"; [[ -z "$CUR" ]] && CUR=4096   # 老 profile 无字段 = 历史默认 4GB
 
@@ -111,7 +134,7 @@ fi
 if pgrep -f "name win10-${INSTANCE}," >/dev/null 2>&1 || pgrep -f "qemu-stealth-${INSTANCE}\." >/dev/null 2>&1; then
     echo ">>"
     echo ">> 注意: VM ${INSTANCE} 似乎正在运行。改动写进 profile 后需要重启才生效:"
-    echo ">>       ./stop-vm.sh ${INSTANCE} && ./start-vm.sh ${INSTANCE} [--proxy ...]"
+    echo ">>       ./stop-vm.sh ${INSTANCE} && ./start-vm.sh ${INSTANCE} ${START_PLATFORM_ARGS[*]} [--proxy ...]"
 fi
 
 # 备份 + 原子写（字段存在则原位替换，不存在则插在 MEM_SERIAL 之后）
@@ -133,4 +156,4 @@ echo ">> 已写入 MEM_TOTAL_MB=${NEW} MiB （备份: $BAK）"
 echo ">> 改后内存配置:"
 _topo "$NEW"
 echo ">>"
-echo ">> 生效（启动命令不变）:  ./start-vm.sh ${INSTANCE} [--proxy ...]"
+echo ">> 生效:  ./start-vm.sh ${INSTANCE} ${START_PLATFORM_ARGS[*]} [--proxy ...]"

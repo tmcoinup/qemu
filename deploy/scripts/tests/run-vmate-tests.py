@@ -33,6 +33,7 @@ QUICK_TESTS = (
     "test_linux_platform_argv.sh",
     "test_memory_topology.sh",
     "test_memory_speed_fidelity.sh",
+    "test_platform_compatibility_cli.sh",
     "test_platform_manifest.sh",
     "test_soak_monitor.py",
     "test_stop_vm_instance_lock.sh",

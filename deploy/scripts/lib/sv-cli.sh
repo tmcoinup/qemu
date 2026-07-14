@@ -8,6 +8,7 @@ _cli_iso=""
 _cli_reroll=0
 _cli_bridge_seen=0
 _cli_vlan_id_seen=0
+_cli_platform_id_seen=0
 while (( $# > 0 )); do
     case "$1" in
         -h|--help) _usage 0 ;;
@@ -19,6 +20,12 @@ while (( $# > 0 )); do
         --qemu=*)     QEMU="${1#*=}" ;;
         --ram=*)      RAM="${1#*=}" ;;
         --cpus=*)     CPUS="${1#*=}" ;;
+        --platform-id=*)
+            STEALTH_PLATFORM_ID="${1#*=}"
+            _cli_platform_id_seen=1
+            ;;
+        --allow-platform-compatibility) ALLOW_PLATFORM_COMPATIBILITY=1 ;;
+        --allow-legacy-profile) ALLOW_LEGACY_PROFILE=1 ;;
         --headless)   HEADLESS=1 ;;
         --reroll)     _cli_reroll=1 ;;
         --sdl)        SDL=1 ;;
@@ -78,6 +85,51 @@ if ! [[ "$INSTANCE" =~ ^[0-9]+$ ]] || (( INSTANCE < 1 )); then
     echo "ERROR: INSTANCE 必须是正整数 (实际: '$INSTANCE')" >&2
     exit 2
 fi
+
+# 显式平台选择与 compatibility 放行是两把独立开关。`--platform-id` 可用于
+# 固定 enabled 平台；禁用平台还必须追加 `--allow-platform-compatibility`。
+# 后者只放宽 machine fidelity，不会把 STRICT_HARDWARE 改成 0，因此 KVM、TSC、
+# CPU realize、所请求 TPM、profile 和磁盘容量门禁仍会全部执行。
+: "${STEALTH_PLATFORM_ID:=}"
+: "${ALLOW_PLATFORM_COMPATIBILITY:=0}"
+: "${ALLOW_LEGACY_PROFILE:=0}"
+if [[ "$_cli_platform_id_seen" == "1" && -z "$STEALTH_PLATFORM_ID" ]]; then
+    echo "ERROR: --platform-id 不能为空" >&2
+    exit 2
+fi
+if [[ -n "$STEALTH_PLATFORM_ID" ]] &&
+   ! [[ "$STEALTH_PLATFORM_ID" =~ ^[a-z0-9][a-z0-9-]{7,95}$ ]]; then
+    echo "ERROR: --platform-id 格式非法: '$STEALTH_PLATFORM_ID'" >&2
+    exit 2
+fi
+if [[ -n "$STEALTH_PLATFORM_ID" ]] &&
+   ! stealth_platform_id_known "$STEALTH_PLATFORM_ID"; then
+    echo "ERROR: --platform-id 指向不存在的平台: '$STEALTH_PLATFORM_ID'" >&2
+    exit 2
+fi
+case "$ALLOW_PLATFORM_COMPATIBILITY" in
+    0|1) ;;
+    *)
+        echo "ERROR: ALLOW_PLATFORM_COMPATIBILITY 必须是 0 或 1" >&2
+        exit 2
+        ;;
+esac
+case "$ALLOW_LEGACY_PROFILE" in
+    0|1) ;;
+    *)
+        echo "ERROR: ALLOW_LEGACY_PROFILE 必须是 0 或 1" >&2
+        exit 2
+        ;;
+esac
+if [[ "$ALLOW_PLATFORM_COMPATIBILITY" == "1" && -z "$STEALTH_PLATFORM_ID" ]]; then
+    echo "ERROR: --allow-platform-compatibility 必须与 --platform-id=<id> 同时使用" >&2
+    exit 2
+fi
+if [[ "$ALLOW_LEGACY_PROFILE" == "1" && "${STRICT_HARDWARE:-1}" != "0" ]]; then
+    echo "ERROR: --allow-legacy-profile 仅能与显式 STRICT_HARDWARE=0 诊断模式同时使用" >&2
+    exit 2
+fi
+export STEALTH_PLATFORM_ID ALLOW_PLATFORM_COMPATIBILITY ALLOW_LEGACY_PROFILE
 
 # VLAN 是运行时网络选择，不写入硬件身份 profile。CLI 值会覆盖同名环境变量，
 # 但显式空参数必须报错，避免 `--vlan-id=` 被误当成“未启用 VLAN”后接入普通 LAN。

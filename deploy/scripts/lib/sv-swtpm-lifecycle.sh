@@ -371,4 +371,10 @@ sv_swtpm_stop_instance() {
 
     mapfile -t pids < <(sv_swtpm_instance_pids "$instance" "$state_dir")
     sv_swtpm_stop_pids "$instance" "$state_dir" "${pids[@]}"
+    pids=()
+    mapfile -t pids < <(sv_swtpm_instance_pids "$instance" "$state_dir")
+    # 仍有精确匹配的 daemon 时保留 runtime 登记，供 stop-vm 或下次启动重试；
+    # 只有确认全部退出后才删除登记，不能把仍活着的 TPM 变成不可追踪孤儿。
+    (( ${#pids[@]} == 0 )) || return 1
+    sv_swtpm_unregister_state_dir "$instance" "$state_dir"
 }

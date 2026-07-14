@@ -11,17 +11,23 @@ _STEALTH_PLATFORMS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _stealth_platform_python() {
     local action="$1"
     local platform_id="${2:-}"
+    local strict_hardware="${STRICT_HARDWARE:-1}"
+    local allow_compatibility="${ALLOW_PLATFORM_COMPATIBILITY:-0}"
 
     command -v python3 >/dev/null 2>&1 || {
         echo "ERROR: 读取整机平台清单需要 python3" >&2
         return 1
     }
 
-    python3 - "$STEALTH_PLATFORM_MANIFEST" "$action" "$platform_id" <<'PY'
+    # 中文注释：显式把两个门禁值作为 argv 传给 Python，而不是依赖 shell 函数
+    # 临时赋值是否进入子进程环境的细节。这样测试里的
+    # `ALLOW_PLATFORM_COMPATIBILITY=1 stealth_platform_load ...` 与生产 CLI
+    # 具有完全相同的语义。
+    python3 - "$STEALTH_PLATFORM_MANIFEST" "$action" "$platform_id" \
+        "$strict_hardware" "$allow_compatibility" <<'PY'
 import base64
 import datetime
 import json
-import os
 import pathlib
 import re
 import sys
@@ -136,8 +142,10 @@ def validate_platform(platform: dict, seen_ids: set[str]) -> None:
         fail(f"{where} CPU 当前频率超过最大频率")
     if cpu["threads"] < cpu["cores"] or cpu["threads"] % cpu["cores"] != 0:
         fail(f"{where} CPU 核数/线程数不可能")
-    if not 32 <= cpu["phys_bits"] <= 57:
-        fail(f"{where}.cpu.phys_bits 超出 x86 合理范围")
+    # QEMU/KVM 的 X86CPU phys-bits 属性当前上限是 52；清单若放行 53..57，
+    # 会出现“manifest 校验成功、运行时必然失败”的分层矛盾。
+    if not 32 <= cpu["phys_bits"] <= 52:
+        fail(f"{where}.cpu.phys_bits 超出 QEMU/KVM [32,52] 范围")
     if cpu["vendor_id"] == "GenuineIntel" and "+topoext" in cpu["features"]:
         fail(f"{where} Intel CPU 不得启用 AMD topoext")
     if cpu["vendor_id"] == "AuthenticAMD" and "+topoext" not in cpu["features"]:
@@ -396,6 +404,8 @@ def export_pairs(root: dict, platform: dict) -> dict[str, str]:
 manifest_path = pathlib.Path(sys.argv[1])
 action = sys.argv[2]
 wanted_id = sys.argv[3]
+strict_hardware = sys.argv[4]
+allow_compatibility = sys.argv[5]
 
 try:
     with manifest_path.open("r", encoding="utf-8") as stream:
@@ -428,6 +438,13 @@ try:
             cpu = item["cpu"]
             print("|".join((item["id"], str(item["enabled"]).lower(), cpu["vendor_id"],
                             str(cpu["max_mhz"]), str(cpu["threads"]), str(cpu["tsc_mhz"]))))
+    elif action == "status":
+        # profile 是用户可编辑输入，授权判断不能信任其中自报的 PLATFORM_STATUS。
+        # 这里只返回已经完整校验过的 manifest 真值，并且不触发 compatibility 放行。
+        selected = next((item for item in platforms if item["id"] == wanted_id), None)
+        if selected is None:
+            fail(f"平台不存在：{wanted_id}")
+        print(selected["status"])
     elif action in ("legacy_cpu", "legacy_board"):
         rows: list[str] = []
         seen_rows: set[str] = set()
@@ -454,9 +471,12 @@ try:
         if selected is None:
             fail(f"平台不存在：{wanted_id}")
         if not selected["enabled"]:
-            if selected["status"] != "compatibility" or os.environ.get("STRICT_HARDWARE", "1") != "0":
-                fail(f"平台已禁用：{wanted_id}")
-            print(f"WARN: 显式加载 Q35 ID 兼容平台，不能宣称真实 machine model：{wanted_id}",
+            explicitly_allowed = allow_compatibility == "1"
+            legacy_non_strict = strict_hardware == "0"
+            if (selected["status"] != "compatibility" or
+                    not (explicitly_allowed or legacy_non_strict)):
+                fail(f"平台已禁用：{wanted_id}；如确认接受 Q35 行为边界，需显式允许 compatibility")
+            print(f"WARN: 显式加载 Q35/ICH9 compatibility 平台，不能宣称真实目标主板行为：{wanted_id}",
                   file=sys.stderr)
         for key, value in export_pairs(root, selected).items():
             encoded = base64.b64encode(str(value).encode("utf-8")).decode("ascii")
@@ -475,6 +495,13 @@ stealth_platform_validate() {
 
 stealth_platform_index() {
     _stealth_platform_python index
+}
+
+# 返回指定平台在已校验 manifest 中的真实状态。该只读查询不执行平台加载，也不受
+# STRICT_HARDWARE 影响，专供 profile 加载器在授权前识别伪改状态。
+stealth_platform_manifest_status() {
+    local platform_id="$1"
+    _stealth_platform_python status "$platform_id"
 }
 
 stealth_platform_legacy_cpu_rows() {

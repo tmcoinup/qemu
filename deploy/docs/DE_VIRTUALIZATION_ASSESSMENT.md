@@ -62,7 +62,7 @@
 
 当前代码新增了 `Ryzen3-1200` CPU model，并且启动脚本使用：
 
-`-cpu Ryzen3-1200,kvm=off,hypervisor=off,+invtsc,+topoext,+tsc-deadline,enforce=off,host-phys-bits=on,tsc-freq=3100000000,vendor=AuthenticAMD`
+`-cpu Ryzen3-1200,kvm=off,hypervisor=off,+invtsc,+topoext,+tsc-deadline,enforce=on,host-phys-bits=on,host-phys-bits-limit=43,tsc-freq=3100000000,vendor=AuthenticAMD`
 
 相关依据：
 

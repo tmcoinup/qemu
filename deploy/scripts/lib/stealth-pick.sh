@@ -45,6 +45,51 @@ _host_required_tsc_mhz() {
     printf '%s\n' "$STEALTH_REQUIRED_TSC_MHZ"
 }
 
+# 判断显式平台 ID 是否来自已经加载并校验过的 manifest 投影视图。该函数只读，
+# 用于 CLI 在接触已有 profile 前区分“目录里不存在”与“实例已绑定另一平台”。
+stealth_platform_id_known() {
+    local wanted="$1" entry platform_id
+    for entry in "${PLATFORM_POOL[@]}"; do
+        IFS='|' read -r platform_id _ <<<"$entry"
+        [[ "$platform_id" == "$wanted" ]] && return 0
+    done
+    return 1
+}
+
+# 对已经选出或从 profile 重载的整机统一执行宿主约束。历史实现只在首次随机时
+# 过滤，导致持久化的 AMD profile 可以在伪造的 Intel/低频宿主视图下跳过厂商、
+# 线程和频率检查。现在每次启动都调用本函数，compatibility 也不能绕过这些事实。
+stealth_validate_platform_host_constraints() {
+    local host_vendor host_max_mhz required_tsc requested_cpus
+    requested_cpus="${CPUS:-4}"
+    host_vendor="$(_host_cpu_vendor)"
+    host_max_mhz="$(_host_cpu_max_mhz)"
+    required_tsc="$(_host_required_tsc_mhz)" || return 1
+
+    if ! [[ "$requested_cpus" =~ ^[0-9]+$ ]] || (( requested_cpus <= 0 )); then
+        echo "ERROR: CPUS 必须是正整数" >&2
+        return 1
+    fi
+    if [[ "${CPU_VENDOR:-}" != "$host_vendor" ]]; then
+        echo "ERROR: profile CPU 厂商与宿主不一致: platform=${CPU_VENDOR:-unknown} host=$host_vendor" >&2
+        return 1
+    fi
+    if ! [[ "${CPU_THREADS:-}" =~ ^[0-9]+$ ]] || (( CPU_THREADS != requested_cpus )); then
+        echo "ERROR: profile 要求完整 ${CPU_THREADS:-unknown} 线程，当前 CPUS=$requested_cpus" >&2
+        return 1
+    fi
+    if ! [[ "${CPU_MAX_MHZ:-}" =~ ^[0-9]+$ && "$host_max_mhz" =~ ^[0-9]+$ ]] ||
+       (( CPU_MAX_MHZ > host_max_mhz )); then
+        echo "ERROR: profile 最大频率 ${CPU_MAX_MHZ:-unknown}MHz 超过宿主可达 ${host_max_mhz:-unknown}MHz" >&2
+        return 1
+    fi
+    if [[ -n "$required_tsc" ]] &&
+       { ! [[ "${CPU_TSC_MHZ:-}" =~ ^[0-9]+$ ]] || (( CPU_TSC_MHZ != required_tsc )); }; then
+        echo "ERROR: profile TSC=${CPU_TSC_MHZ:-unknown}MHz 与宿主必需 ${required_tsc}MHz 不一致" >&2
+        return 1
+    fi
+}
+
 _gen_platform_nic_mac() {
     # 板载网卡型号已经由平台清单绑定，MAC OUI 必须来自同一个供应商。此前从混合
     # OUI 池随机会产生“Realtek RTL8111H 使用 Intel OUI”的跨字段矛盾。
@@ -62,28 +107,84 @@ stealth_pick_profile() {
     _rng_init
 
     # 1. 按完整平台 bundle 选择，不再把 CPU、主板和 BIOS 独立抽签。
-    #    下面四个条件全部是硬约束：同 CPU 厂商、SKU 完整线程数等于 CPUS、SKU
-    #    最大频率不超过宿主可达上限、无 TSC scaling 时 TSC 精确相等。任一条件
-    #    无候选都明确失败；严禁历史上的“放宽到同厂商任意型号”静默回退。
-    local _host_ven _host_max _required_tsc
+    #    默认路径只收 enabled 平台；STEALTH_PLATFORM_ID 仅用于运维人员显式固定
+    #    一个 bundle。禁用的 compatibility 条目还必须同时设置独立的
+    #    ALLOW_PLATFORM_COMPATIBILITY=1，不能靠关闭其它 KVM/TPM 严格门禁顺带放行。
+    #
+    #    无论随机还是显式选择，下面四个宿主约束都不能绕过：同 CPU 厂商、SKU
+    #    完整线程数等于 CPUS、SKU 最大频率不超过宿主可达上限、无 TSC scaling
+    #    时 TSC 精确相等。任一条件失败都明确停止，严禁回退到跨厂商 CPU。
+    local _host_ven _host_max _required_tsc _requested_platform _allow_compatibility
+    local _requested_cpus="${CPUS:-4}"
     _host_ven="$(_host_cpu_vendor)"
     _host_max="$(_host_cpu_max_mhz)"
     _required_tsc="$(_host_required_tsc_mhz)" || return 1
+    _requested_platform="${STEALTH_PLATFORM_ID:-}"
+    _allow_compatibility="${ALLOW_PLATFORM_COMPATIBILITY:-0}"
+
+    if ! [[ "$_requested_cpus" =~ ^[0-9]+$ ]] || (( _requested_cpus <= 0 )); then
+        echo "ERROR: CPUS 必须是正整数" >&2
+        return 1
+    fi
+    if [[ -n "$_requested_platform" ]] &&
+       ! [[ "$_requested_platform" =~ ^[a-z0-9][a-z0-9-]{7,95}$ ]]; then
+        echo "ERROR: STEALTH_PLATFORM_ID 格式非法: $_requested_platform" >&2
+        return 1
+    fi
+    case "$_allow_compatibility" in
+        0|1) ;;
+        *)
+            echo "ERROR: ALLOW_PLATFORM_COMPATIBILITY 必须是 0 或 1" >&2
+            return 1
+            ;;
+    esac
+
     local -a _candidates=()
+    local _requested_found=0
     local entry _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz
     for entry in "${PLATFORM_POOL[@]}"; do
         IFS='|' read -r _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz <<<"$entry"
+
+        if [[ -n "$_requested_platform" ]]; then
+            [[ "$_platform_id" == "$_requested_platform" ]] || continue
+            _requested_found=1
+            if [[ "$_enabled" != "true" && "$_allow_compatibility" != "1" ]]; then
+                echo "ERROR: 指定平台已禁用: $_platform_id" >&2
+                echo "       若确认接受 Q35/ICH9 compatibility 边界，请同时使用 --allow-platform-compatibility。" >&2
+                return 1
+            fi
+            if [[ "$_vendor" != "$_host_ven" ]]; then
+                echo "ERROR: 指定平台 CPU 厂商与宿主不一致: platform=$_vendor host=$_host_ven" >&2
+                return 1
+            fi
+            if (( _threads != _requested_cpus )); then
+                echo "ERROR: 指定平台要求完整 ${_threads} 线程，当前 CPUS=$_requested_cpus" >&2
+                return 1
+            fi
+            if (( _max_mhz > _host_max )); then
+                echo "ERROR: 指定平台最大频率 ${_max_mhz}MHz 超过宿主可达 ${_host_max}MHz" >&2
+                return 1
+            fi
+            if [[ -n "$_required_tsc" ]] && (( _tsc_mhz != _required_tsc )); then
+                echo "ERROR: 指定平台 TSC=${_tsc_mhz}MHz 与宿主必需 ${_required_tsc}MHz 不一致" >&2
+                return 1
+            fi
+            _candidates+=("$_platform_id")
+            break
+        fi
+
         [[ "$_enabled" == "true" && "$_vendor" == "$_host_ven" ]] || continue
-        [[ "${CPUS:-4}" =~ ^[0-9]+$ ]] || {
-            echo "ERROR: CPUS 必须是正整数" >&2
-            return 1
-        }
-        (( _threads == CPUS && _max_mhz <= _host_max )) || continue
+        (( _threads == _requested_cpus && _max_mhz <= _host_max )) || continue
         if [[ -n "$_required_tsc" ]] && (( _tsc_mhz != _required_tsc )); then
             continue
         fi
         _candidates+=("$_platform_id")
     done
+
+    if [[ -n "$_requested_platform" && "$_requested_found" != "1" ]]; then
+        echo "ERROR: 指定整机平台不存在: $_requested_platform" >&2
+        return 1
+    fi
     if (( ${#_candidates[@]} == 0 )); then
         echo "ERROR: 无可用整机平台：vendor=$_host_ven CPUS=${CPUS:-4} host_max=${_host_max}MHz required_tsc=${_required_tsc:-scalable}" >&2
         return 1

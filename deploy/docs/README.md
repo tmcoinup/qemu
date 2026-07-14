@@ -48,7 +48,9 @@ PCI BDF、寄存器或 PCH 行为与目标 H110/H310 等价：
 
 两个 Ryzen 3 + PRIME B350-PLUS 条目仅保留为 `compatibility`，默认禁用。当前 machine type
 仍是 Intel Q35/ICH9；只改成 AMD PCI ID 不能得到 B350 行为，因此 AMD 宿主在严格模式下
-目前没有可用新建候选，也不会静默回退到伪 AMD 整机。
+默认没有可用新建候选，也不会静默回退到伪 AMD 整机。需要先安装/功能验证时，可显式
+同时使用 `--platform-id=<AMD-ID> --allow-platform-compatibility`；该窄入口继续执行
+KVM/TSC、CPU realize、profile、磁盘，以及请求 `TPM=1` 时的 TPM 严格门禁，只接受整机 machine fidelity 不完整。
 
 ## 当前启用组件
 
@@ -75,7 +77,9 @@ Linux 启动器默认按以下顺序 fail closed：
 6. 默认 `TPM=1`；严格模式下 swtpm、状态初始化或 socket 失败都会停止。
 7. 组装单 guest NUMA node；DIMM 数和双通道只通过 SMBIOS/SPD 表达。
 
-`STRICT_HARDWARE=0` 仅用于开发和兼容诊断，不代表真机化验收结果。旧 profile 在严格模式下
+`STRICT_HARDWARE=0` 仅用于开发和兼容诊断，不代表真机化验收结果。旧 profile 即使在
+非严格模式也必须显式追加 `--allow-legacy-profile`，避免删除 manifest 元数据后静默
+绕过平台授权。旧 profile 在严格模式下
 必须显式 reroll；这会改变硬件身份并可能触发 Windows 重新激活。
 
 ## 真机化边界
@@ -102,6 +106,12 @@ python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4
 
 # 首次启动会生成并保存 profile；默认 8 GiB、4 vCPU、SDL + fb-shm
 deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
+
+# AMD 宿主的显式功能兼容路径；不是 B350 真机化验收结果
+deploy/scripts/start-vm.sh 2 \
+  --platform-id=amd-am4-r3-2300x-asus-prime-b350-plus \
+  --allow-platform-compatibility \
+  --iso=/home/ubuntu/images/win10.iso
 
 # 后续从磁盘启动；优雅关机
 deploy/scripts/start-vm.sh 1

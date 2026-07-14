@@ -12,6 +12,12 @@
 #                                           # 默认 SDL 窗口 + fb-shm 推流并存
 #                                           # 推流 socket: /tmp/qemu-stealth-1.fb
 #     ./start-vm.sh 2 --iso=/path/x.iso     # instance 2 从 ISO 装系统
+#     ./start-vm.sh 2 --platform-id=<id>     # 显式固定一个已启用整机 bundle
+#     ./start-vm.sh 2 --platform-id=<id> --allow-platform-compatibility
+#                                           # 显式接受禁用模板的 Q35 行为边界；
+#                                           # KVM/TSC/CPU/TPM 等严格门禁仍会执行
+#     STRICT_HARDWARE=0 ./start-vm.sh 1 --allow-legacy-profile
+#                                           # 仅显式诊断无 manifest 绑定的旧 profile
 #     ./start-vm.sh 1 --no-sdl              # 后台 daemon：关 SDL，仅推流
 #     ./start-vm.sh 1 --gpu-sdl-egl         # SDL 窗口 + QEMU 11 SDL/EGL + fb-shm GPU
 #     ./start-vm.sh 1 --gpu-headless        # EGL rendernode + fb-shm，验证 GPU 零拷贝
@@ -83,6 +89,14 @@
 #     GPU_SELFSIGNED=1     历史兼容开关；会改显示 PCI 主 ID，但不会改变 virtio 行为，
 #                          本分支不把该模式计入硬件真实性或受支持 GPU 能力。
 #     STRICT_HARDWARE=1    设 0 仅供诊断/兼容 dry-run，不计入真机化支持
+#     STEALTH_PLATFORM_ID= 显式平台 ID（flag: --platform-id=<id>）；已有
+#                          profile 上只做一致性断言，换平台必须另加 --reroll
+#     ALLOW_PLATFORM_COMPATIBILITY=0
+#                          设 1 或 --allow-platform-compatibility 才允许显式加载
+#                          status=compatibility 的禁用平台；不会关闭其它严格门禁
+#     ALLOW_LEGACY_PROFILE=0
+#                          旧 schema 即使 STRICT_HARDWARE=0 也默认拒绝；设 1 或
+#                          --allow-legacy-profile 才做不计入支持范围的显式诊断加载
 #     FB_SHM_SOCK=<path>   fb-shm 控制 socket 路径
 #                          默认 /tmp/qemu-stealth-<N>.fb
 #                          (flag: --fb-shm-sock=<path>)

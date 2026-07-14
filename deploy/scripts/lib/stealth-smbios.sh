@@ -104,7 +104,9 @@ _stealth_tsc_qemu_extra() {
 }
 
 # 给 -cpu 拼出完整字符串。CPU 特性、物理地址位数和拓扑全部来自 platform
-# manifest；旧 profile 缺字段时保留最小兼容默认值，但不再泄漏宿主 phys-bits。
+# manifest；旧 profile 缺字段时保留最小兼容默认值。KVM 会拿显式 phys-bits 与
+# 物理宿主比较并打印 warning，所以使用 host-phys-bits-limit 把客体稳定截到目录值；
+# 启动器会先验证宿主位宽不小于目标，因而不会泄漏更大的宿主值或静默降位。
 stealth_qemu_cpu_arg() {
     local cpu_arg
     local enforce="off"
@@ -119,7 +121,7 @@ stealth_qemu_cpu_arg() {
     fi
     tsc_extra="$(_stealth_tsc_qemu_extra)" || return 1
 
-    local extras="kvm=off,hypervisor=off,enforce=${enforce},host-phys-bits=off,phys-bits=${phys_bits},vendor=${CPU_VENDOR}"
+    local extras="kvm=off,hypervisor=off,enforce=${enforce},host-phys-bits=on,host-phys-bits-limit=${phys_bits},vendor=${CPU_VENDOR}"
     [[ -n "$features" ]] && extras="${extras},${features}"
     extras="${extras}${tsc_extra}"
     cpu_arg="$(_cpu_arg_with_host_feature_mask "$CPU_QEMU_ARG")"

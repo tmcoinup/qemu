@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ------------------------------------------------------------------
 # 持久化 / 载入
 # ------------------------------------------------------------------
@@ -32,24 +33,11 @@ _STEALTH_PROFILE_VARS=(
     TABLET_COMPONENT_ID TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT TABLET_SERIAL TABLET_BCD_DEVICE TABLET_DESCRIPTOR_FIDELITY
 )
 
-stealth_have_profile() { [[ -s "$1" ]]; }
+_STEALTH_PROFILE_IO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=stealth-profile-save.sh
+source "$_STEALTH_PROFILE_IO_DIR/stealth-profile-save.sh"
 
-stealth_save_profile() {
-    local path="$1"
-    local tmp="${path}.tmp.$$"
-    mkdir -p "$(dirname "$path")"
-    {
-        echo "# stealth hardware profile — generated $(date -Iseconds)"
-        echo "# 删除此文件 (或运行 reroll-identity.sh) 重新随机化"
-        local v
-        for v in "${_STEALTH_PROFILE_VARS[@]}"; do
-            printf '%s=%q\n' "$v" "${!v}"
-        done
-    } > "$tmp"
-    # profile 含 MAC / 序列号等可被用来篡改身份的字段；限制为仅属主可读写。
-    chmod 600 "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$path"
-}
+stealth_have_profile() { [[ -s "$1" ]]; }
 
 _stealth_is_profile_key() {
     local k="$1" w
@@ -69,6 +57,7 @@ stealth_profile_get() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" == "$want="* ]] || continue
         rawval="${line#*=}"
+        # shellcheck disable=SC2016 # 单引号内容是要识别的危险字面量，不应展开。
         if [[ "$rawval" == *'$('* || "$rawval" == *'`'* || "$rawval" == *'${'* ]]; then
             return 1
         fi
@@ -158,6 +147,7 @@ stealth_load_profile() {
             echo ">> WARN: profile 跳过未登记 key: $key" >&2
             continue
         fi
+        # shellcheck disable=SC2016 # 单引号内容是要识别的危险字面量，不应展开。
         if [[ "$rawval" == *'$('* || "$rawval" == *'`'* || "$rawval" == *'${'* ]]; then
             echo ">> WARN: profile key $key 含命令替换/参数展开构造，已拒绝" >&2
             continue
@@ -506,11 +496,75 @@ stealth_load_profile() {
     : "${TABLET_BCD_DEVICE:=0x0000}"
     : "${TABLET_DESCRIPTOR_FIDELITY:=generic_virtual_only}"
 
-    # 严格模式只接受由当前 schema manifest 生成且仍标为 supported 的整机身份。
-    # 旧 profile 的字段虽已补齐以便兼容启动，但这些默认值没有平台来源，不能冒充
-    # 已审计 bundle。迁移会整体改变硬件身份，因此必须由用户显式 reroll。
+    # profile 可由用户编辑，因此不能用其自报的 PLATFORM_STATUS 决定授权。schema 1
+    # 必须先从已校验 manifest 读取同一 PLATFORM_ID 的真实状态并逐字匹配；这样把
+    # compatibility 改写成 supported，或改写 ID 指向另一平台，都不能借非严格诊断
+    # 模式绕过双钥匙。
+    local _manifest_platform_status=""
+    if [[ "$PLATFORM_SCHEMA_VERSION" != "0" && "$PLATFORM_SCHEMA_VERSION" != "1" ]]; then
+        echo "ERROR: profile schema 不受支持: $PLATFORM_SCHEMA_VERSION" >&2
+        return 1
+    fi
+    if [[ "$PLATFORM_SCHEMA_VERSION" == "1" ]]; then
+        if ! _manifest_platform_status="$(stealth_platform_manifest_status "$PLATFORM_ID")"; then
+            echo "ERROR: profile 指向 manifest 中不存在或不可读取的平台: $PLATFORM_ID" >&2
+            return 1
+        fi
+        if [[ "$PLATFORM_STATUS" != "$_manifest_platform_status" ]]; then
+            echo "ERROR: profile 平台状态与 manifest 不一致: profile=$PLATFORM_STATUS manifest=$_manifest_platform_status" >&2
+            return 1
+        fi
+    elif [[ "$PLATFORM_STATUS" == "supported" || "$PLATFORM_STATUS" == "compatibility" ]]; then
+        # 当前受控状态只属于 schema 1。旧 schema 若自报 supported/compatibility，
+        # 无论 STRICT_HARDWARE 如何都拒绝，避免同时降级 schema 和伪改状态。
+        echo "ERROR: profile 状态 $PLATFORM_STATUS 必须来自 schema 1 manifest" >&2
+        return 1
+    elif [[ -n "${_stealth_present_keys[PLATFORM_ID]:-}" ]] \
+        && stealth_platform_manifest_status "$PLATFORM_ID" >/dev/null 2>&1; then
+        # 即使攻击者把状态改成 legacy，只要显式 ID 仍命中当前 manifest，也不能
+        # 把已绑定身份降级成无绑定旧 profile 后走非严格路径。
+        echo "ERROR: profile 平台 $PLATFORM_ID 已由 manifest 管理，不能降级 schema" >&2
+        return 1
+    fi
+    if [[ "$PLATFORM_SCHEMA_VERSION" != "1" \
+          && "${STRICT_HARDWARE:-0}" != "1" \
+          && "${ALLOW_LEGACY_PROFILE:-0}" != "1" ]]; then
+        # 删除全部 PLATFORM_* 元数据后，加载器无法区分真旧文件与被伪降级的
+        # compatibility profile。非严格模式因此也必须有独立显式授权，不能只靠
+        # STRICT_HARDWARE=0 裸加载任意无绑定身份。
+        echo "ERROR: legacy profile 的非严格诊断加载必须显式追加 --allow-legacy-profile" >&2
+        return 1
+    fi
+
+    # 严格模式默认只接受 supported。唯一例外是调用方同时给出与 profile 完全相同
+    # 的显式平台 ID，并打开独立 compatibility 门禁；这只承认其 Q35 machine 行为
+    # 边界，不会跳过下方平台/组件事实绑定、KVM、所请求 TPM 或磁盘检查。旧
+    # profile 即使被兼容默认值补齐也不满足 schema/status 条件，仍必须显式 reroll。
+    local _profile_platform_status_allowed=0
+    if [[ "$_manifest_platform_status" == "supported" ]]; then
+        _profile_platform_status_allowed=1
+    elif [[ "$_manifest_platform_status" == "compatibility" ]]; then
+        # compatibility 是独立授权维度；即使 STRICT_HARDWARE=0 也必须携带双钥匙，
+        # 否则全局诊断开关会意外变成绕过持久化平台授权的后门。
+        if [[ "$PLATFORM_SCHEMA_VERSION" != "1" ]]; then
+            echo "ERROR: compatibility profile 必须来自 schema 1 manifest" >&2
+            return 1
+        fi
+        if [[ "${ALLOW_PLATFORM_COMPATIBILITY:-0}" != "1" ||
+              -z "${STEALTH_PLATFORM_ID:-}" ]]; then
+            echo "ERROR: compatibility profile 必须同时指定相同 --platform-id 与 --allow-platform-compatibility" >&2
+            return 1
+        fi
+        if [[ "$STEALTH_PLATFORM_ID" != "$PLATFORM_ID" ]]; then
+            echo "ERROR: profile 平台 $PLATFORM_ID 与指定平台 $STEALTH_PLATFORM_ID 不一致。" >&2
+            echo "       如确需更换整机身份，请备份后显式追加 --reroll。" >&2
+            return 1
+        fi
+        _profile_platform_status_allowed=1
+    fi
     if [[ "${STRICT_HARDWARE:-0}" == "1" ]] \
-        && { [[ "$PLATFORM_SCHEMA_VERSION" != "1" ]] || [[ "$PLATFORM_STATUS" != "supported" ]]; }; then
+        && { [[ "$PLATFORM_SCHEMA_VERSION" != "1" ]] ||
+             [[ "$_profile_platform_status_allowed" != "1" ]]; }; then
         echo "ERROR: 严格模式拒绝 profile 平台状态 schema=$PLATFORM_SCHEMA_VERSION status=$PLATFORM_STATUS" >&2
         echo "       请显式运行 deploy/scripts/reroll-identity.sh <实例号> 迁移；该操作会改变硬件身份。" >&2
         return 1
@@ -521,7 +575,9 @@ stealth_load_profile() {
         echo "ERROR: 严格 profile 缺少 MEM_RATED_MTS/MEM_CONFIGURED_MTS；请显式 reroll" >&2
         return 1
     fi
-    if [[ "${STRICT_HARDWARE:-0}" == "1" ]] \
+    # schema 1 始终执行完整平台事实绑定；STRICT_HARDWARE=0 只用于旧 profile 诊断，
+    # 不能使当前 schema 信任可编辑的 ID/status 或混搭另一平台的 CPU/主板字段。
+    if [[ "$PLATFORM_SCHEMA_VERSION" == "1" ]] \
         && ! stealth_verify_profile_platform_binding _stealth_present_keys; then
         echo "       profile 的平台事实已缺失或被篡改；请核对后显式 reroll 整套身份。" >&2
         return 1
@@ -534,6 +590,7 @@ stealth_load_profile() {
 
     local v
     for v in "${_STEALTH_PROFILE_VARS[@]}"; do
+        # shellcheck disable=SC2163 # v 的值才是白名单变量名，需要间接 export。
         export "$v"
     done
 }

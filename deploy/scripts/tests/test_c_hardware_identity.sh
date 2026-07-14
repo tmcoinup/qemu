@@ -10,6 +10,18 @@ fail() {
     exit 1
 }
 
+# 静态守卫优先使用 ripgrep；精简宿主/CI 没安装 rg 时回退到 POSIX grep 的
+# 扩展正则模式。两条路径都只返回匹配状态，不把工具缺失误报成产品代码缺陷。
+search_quiet() {
+    local pattern="$1"
+    shift
+    if command -v rg >/dev/null 2>&1; then
+        rg -q -- "$pattern" "$@"
+    else
+        grep -Eq -- "$pattern" "$@"
+    fi
+}
+
 [[ -x "$QEMU" ]] || fail "缺少可执行文件: $QEMU"
 
 # Python 负责 QMP 收发和超时，避免 shell 管道在 QEMU 异常退出时挂住。
@@ -266,19 +278,19 @@ if qtree.count('dev: smbus-eeprom') != 2:
 PY
 
 # 静态守卫防止后续重构重新引入最初的跨平台硬编码。
-! rg -q 'processor_upgrade = 0x38|memory_type = 0x1A' \
+! search_quiet 'processor_upgrade = 0x38|memory_type = 0x1A' \
     "$ROOT_DIR/hw/smbios/smbios.c" \
     || fail "SMBIOS 重新引入固定 AM4/DDR4"
-! rg -q 'spd_data_generate_ddr4\(4096, 2666\)' \
+! search_quiet 'spd_data_generate_ddr4\(4096, 2666\)' \
     "$ROOT_DIR/hw/i386/pc_q35.c" \
     || fail "Q35 重新引入固定两条 DDR4 SPD"
-rg -q 'hda_audio_identity_param\(a, payload, param->val\)' \
+search_quiet 'hda_audio_identity_param\(a, payload, param->val\)' \
     "$ROOT_DIR/hw/audio/hda-codec.c" \
     || fail "HDA 参数查询未应用 Codec 身份覆盖"
-rg -q 'x-identity-compat=on because the node topology remains' \
+search_quiet 'x-identity-compat=on because the node topology remains' \
     "$ROOT_DIR/hw/audio/hda-codec.c" \
     || fail "HDA Codec 身份覆盖失去显式兼容模式保护"
-! rg -q 'PCI_DEVICE_ID_SAMSUNG_NVME[[:space:]]+0xa809' \
+! search_quiet 'PCI_DEVICE_ID_SAMSUNG_NVME[[:space:]]+0xa809' \
     "$ROOT_DIR/include/hw/pci/pci_ids.h" \
     || fail "Samsung 970 PRO 重新使用了错误的 a809 主设备 ID"
 

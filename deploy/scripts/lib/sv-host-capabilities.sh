@@ -77,6 +77,60 @@ else
 fi
 export STEALTH_REQUIRED_TSC_MHZ
 
+# KVM 的 named CPU 在 realize 时仍会读取物理宿主的地址位宽。直接传
+# `phys-bits=<目标值>` 会在 48-bit Ryzen 宿主模拟 43-bit Ryzen 3 时产生 warning；
+# 更安全的 QEMU 形式是 host-phys-bits + limit，但前提是宿主位宽不能小于目标。
+# `/proc/cpuinfo` 的 address sizes 来自宿主 CPUID；测试可用同名变量显式覆盖。
+_sv_detect_host_cpu_phys_bits() {
+    local detected="${STEALTH_HOST_CPU_PHYS_BITS:-}"
+    if [[ -z "$detected" ]]; then
+        detected="$(awk -F': ' '
+            /^address sizes[[:space:]]*:/ {
+                if (match($2, /^[0-9]+/)) {
+                    print substr($2, RSTART, RLENGTH)
+                }
+                exit
+            }
+        ' /proc/cpuinfo 2>/dev/null)"
+    fi
+    [[ -n "$detected" ]] || detected=0
+    if ! [[ "$detected" =~ ^[0-9]+$ ]] || (( detected != 0 && (detected < 32 || detected > 64) )); then
+        echo "ERROR: STEALTH_HOST_CPU_PHYS_BITS 必须为 0 或 [32,64] 整数" >&2
+        return 1
+    fi
+    printf '%s\n' "$detected"
+}
+
+if ! STEALTH_HOST_CPU_PHYS_BITS="$(_sv_detect_host_cpu_phys_bits)"; then
+    exit 2
+fi
+export STEALTH_HOST_CPU_PHYS_BITS
+
+# profile 的 CPU_PHYS_BITS 是客体应枚举到的固定事实。宿主不足时，QEMU 的
+# host-phys-bits-limit 只能悄悄降到宿主值，造成 profile/CPUID 矛盾，因此必须在
+# 持久化 profile、创建磁盘或 TPM state 之前独立拒绝。
+sv_validate_cpu_phys_bits() {
+    local target_bits="${CPU_PHYS_BITS:-40}"
+    local host_bits="${STEALTH_HOST_CPU_PHYS_BITS:-0}"
+
+    if ! [[ "$target_bits" =~ ^[0-9]+$ ]] || (( target_bits < 32 || target_bits > 52 )); then
+        echo "ERROR: profile CPU_PHYS_BITS 超出 [32,52]: $target_bits" >&2
+        return 1
+    fi
+    if (( host_bits == 0 )); then
+        if [[ "${STRICT_HARDWARE:-1}" == "1" ]]; then
+            echo "ERROR: 无法读取宿主 CPU 物理地址位宽，严格模式不能证明目标 ${target_bits} 位可实现" >&2
+            return 1
+        fi
+        echo ">> WARN: 无法读取宿主 CPU 物理地址位宽；兼容模式继续，CPUID 一致性未验证" >&2
+        return 0
+    fi
+    if (( host_bits < target_bits )); then
+        echo "ERROR: 宿主 CPU 物理地址仅 ${host_bits} 位，无法实现 profile 要求的 ${target_bits} 位" >&2
+        return 1
+    fi
+}
+
 # 在 profile 已选定后，以实际 QEMU/KVM 创建一次最小 vCPU。manifest 的厂商、TSC
 # 和线程数只说明“候选关系成立”，不能证明 Broadwell 宿主拥有 Skylake model 所需的
 # 全部 CPUID。enforce=on 会把缺失特性转成硬失败，本烟测同时拒绝 warning，防止正式

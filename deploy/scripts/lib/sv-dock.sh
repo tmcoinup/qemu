@@ -50,6 +50,16 @@ _sv_dock_write_desktop() {
     mkdir -p "$appdir" "$icodir"
     _sv_dock_make_icon "$icon" "$n" || true
     local iconref="$icon"; [[ -s "$icon" ]] || iconref=virt-manager
+    local compatibility_args=""
+    # compatibility 实例的 desktop 是在一次已授权启动中生成的，因此把同一平台
+    # 双钥匙固化到 Exec，保证用户以后点击 Dock 不会因参数丢失而误拒绝。平台 ID
+    # 已由 manifest/CLI 的受限正则校验，不含空格或 shell 元字符。
+    if [[ "${PLATFORM_STATUS:-}" == "compatibility" &&
+          "${ALLOW_PLATFORM_COMPATIBILITY:-0}" == "1" &&
+          -n "${PLATFORM_ID:-}" &&
+          "${STEALTH_PLATFORM_ID:-}" == "$PLATFORM_ID" ]]; then
+        compatibility_args=" --platform-id=${PLATFORM_ID} --allow-platform-compatibility"
+    fi
     # Exec 走 sv-dock-launch.sh（不是直接 start-vm.sh）：GNOME 正常时靠
     # StartupWMClass 把 SDL 窗口归到本图标；dash-to-dock 收藏抖动丢关联时，点击会
     # 落到 Exec —— launch 脚本先找窗口前置、绝不盲目重启，避免弹终端刷命令+双启撞盘锁。
@@ -62,7 +72,7 @@ Name[zh_CN]=Win10-${n} 虚拟机
 GenericName=QEMU Virtual Machine
 Comment=QEMU 隐身虚拟机 win10-${n}（DNF 多开）— 由 start-vm.sh 启动/匹配
 Icon=${iconref}
-Exec=${HERE}/sv-dock-launch.sh ${n} --proxy
+Exec=${HERE}/sv-dock-launch.sh ${n} --proxy${compatibility_args}
 Path=${REPO_ROOT}
 Terminal=false
 Categories=System;Emulator;
@@ -71,8 +81,9 @@ StartupWMClass=win10-${n}
 StartupNotify=false
 NoDisplay=false
 EOF
-    command -v update-desktop-database >/dev/null 2>&1 && \
+    if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "$appdir" 2>/dev/null || true
+    fi
 }
 
 # 首启把 win10-<N>.desktop 加进 GNOME 收藏（固定）。
@@ -114,6 +125,10 @@ PY
 sv_dock_integrate() {
     local n="${INSTANCE:-}"
     [[ -n "$n" ]] || return 0
+    if [[ "${PLATFORM_SCHEMA_VERSION:-0}" != "1" ]]; then
+        echo ">> WARN: legacy profile 仅供显式诊断，不创建可持久重启的 Dock 入口" >&2
+        return 0
+    fi
     export SDL_VIDEO_X11_WMCLASS="win10-${n}"
     _sv_dock_write_desktop "$n" || true
     echo ">> dash-to-dock:  WM_CLASS=win10-${n} + 桌面图标已就绪（可固定/拖动排序）"

@@ -36,21 +36,29 @@ else
     _profile_needs_save=1
 fi
 
+# 显式平台 ID 在已有实例上是“断言”，不是偷偷改身份。若 profile 已固定为另一套
+# CPU/主板，调用方必须使用 --reroll 走先烟测、后原子替换的安全迁移路径；不能仅
+# 因命令行多了一个 ID 就让 Windows 在下次启动看到整机突变。
+if [[ -n "${STEALTH_PLATFORM_ID:-}" &&
+      "${PLATFORM_ID:-}" != "$STEALTH_PLATFORM_ID" ]]; then
+    echo "ERROR: 实例 $INSTANCE 的 profile 平台为 ${PLATFORM_ID:-unknown}，与指定平台 $STEALTH_PLATFORM_ID 不一致" >&2
+    echo "       如确需更换整机身份，请备份后显式追加 --reroll。" >&2
+    exit 1
+fi
+
+# 首次选择与已有 profile 复用必须走同一套宿主约束；不能只依赖后面的 QEMU
+# realize，因为测试替身或 accelerator 默认属性未必能识别跨厂商/低频画像。
+stealth_validate_platform_host_constraints
+
 # profile 只描述目标整机；最终还必须由当前宿主真实创建同型号 vCPU。该检查发生在
 # qcow2、OVMF VARS、socket 等任何持久化写入之前，失败不会留下半初始化实例。
+sv_validate_cpu_phys_bits
 sv_validate_cpu_realize
 
-# realize 成功后才允许提交 profile。stealth_save_profile 内部使用同目录临时文件、
-# chmod 0600 和原子 rename；reroll 写入失败时旧文件仍在，避免身份半更新。
-if (( _profile_needs_save )); then
-    if [[ "${DRY_RUN:-0}" == "1" ]]; then
-        echo ">> profile:     [DRY_RUN] 生成内存身份，未落盘 $PROFILE_FILE"
-    else
-        stealth_save_profile "$PROFILE_FILE"
-        echo ">> profile:     NEW identity saved to $PROFILE_FILE"
-    fi
-fi
-unset _profile_needs_save
+# 此处只保留内存中的候选身份，不再立刻覆盖 profile。后续磁盘容量、所请求 TPM、
+# 内存、设备参数和完整 CMD 任一门禁仍可能失败；真正提交被延迟到 sv-assemble.sh
+# 完成参数组装之后、启动 QEMU 之前，避免 1TB 旧盘 reroll 到 512GB 模板时先丢
+# 旧身份、再报容量错。
 
 # -------------------------------------------------------------------
 # RAM 解析（必须在 profile 加载之后）。优先级：

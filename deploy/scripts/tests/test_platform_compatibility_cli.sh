@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证 Linux 启动器的显式 platform compatibility 窄入口。测试只在临时目录
+# 验证 Linux 启动器的自动 platform compatibility 窄入口。测试只在临时目录
 # 执行 DRY_RUN，并使用固定 QMP 替身；不会创建真实 profile、磁盘、TPM 或 VM。
 # profile 生成与 Dock 检查使用隔离 subshell，里面的临时 export 不会影响后续
 # 场景；同名变量跨 subshell 复用是测试隔离设计，不是意外覆盖。
@@ -49,17 +49,26 @@ COMMON_ENV=(
 success_log="$TMP_DIR/success.log"
 VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
     "$START_VM" 9752 \
-    --platform-id="$PLATFORM_ID" \
     --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$success_log" 2>&1 \
-    || fail "显式 AMD compatibility DRY_RUN 未通过"
-grep -F "$PLATFORM_ID" "$success_log" >/dev/null \
-    || fail "成功输出没有固定的平台 ID"
+    || fail "自动 AMD compatibility DRY_RUN 未通过"
+grep -E 'amd-am4-r3-(1200|2300x)-asus-prime-b350-plus' "$success_log" >/dev/null \
+    || fail "自动选择没有得到与 AMD 宿主匹配的 compatibility 平台"
 [[ ! -e "$IMAGE_ROOT/vms/9752/profile" && ! -e "$IMAGE_ROOT/vms/9752/disk.qcow2" ]] \
     || fail "compatibility DRY_RUN 写入了 profile 或磁盘"
 
-# 持久化 compatibility profile 后，后续启动仍须携带同一个显式 ID/allow；加载
-# 只能校验和复用身份，不能因命令行指定另一平台而静默改变 Windows 硬件画像。
+# 长 ID 仍是可选的高级固定器，便于测试或运维明确指定目标；日常启动不需要记忆。
+VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
+    "$START_VM" 9760 \
+    --platform-id="$PLATFORM_ID" \
+    --allow-platform-compatibility \
+    --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/explicit-pin.log" 2>&1 \
+    || fail "可选显式 platform ID 固定路径未通过"
+grep -F "$PLATFORM_ID" "$TMP_DIR/explicit-pin.log" >/dev/null \
+    || fail "显式固定没有选择指定平台"
+
+# 持久化 compatibility profile 后，后续启动只须携带 allow；具体 ID 已经写入
+# profile。可选 ID 仍是断言，不能静默改变 Windows 硬件画像。
 persisted_profile="$IMAGE_ROOT/vms/9753/profile"
 mkdir -p "$(dirname "$persisted_profile")"
 (
@@ -78,7 +87,6 @@ mkdir -p "$(dirname "$persisted_profile")"
 profile_hash_before="$(sha256sum "$persisted_profile")"
 VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
     "$START_VM" 9753 \
-    --platform-id="$PLATFORM_ID" \
     --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/reload.log" 2>&1 \
     || {
@@ -89,15 +97,15 @@ profile_hash_after="$(sha256sum "$persisted_profile")"
 [[ "$profile_hash_before" == "$profile_hash_after" ]] \
     || fail "普通重启改写了 compatibility profile"
 
-# 双钥匙是 compatibility profile 的生命周期不变量；全局诊断模式不能绕过。
+# 显式 allow 是 compatibility profile 的生命周期不变量；全局诊断模式不能绕过。
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" STRICT_HARDWARE=0 \
     "$START_VM" 9753 \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/non-strict-bypass.log" 2>&1; then
-    fail "STRICT_HARDWARE=0 绕过了 compatibility profile 双钥匙"
+    fail "STRICT_HARDWARE=0 绕过了 compatibility profile 显式授权"
 fi
-grep -F 'compatibility profile 必须同时指定相同 --platform-id' \
+grep -F 'compatibility profile 必须显式追加 --allow-platform-compatibility' \
     "$TMP_DIR/non-strict-bypass.log" >/dev/null \
-    || fail "非严格绕过失败没有双钥匙诊断"
+    || fail "非严格绕过失败没有 allow 诊断"
 
 # profile 是 0600 持久化文本但仍属于可编辑输入。即使攻击者把 compatibility
 # 自报状态伪改成 supported，STRICT_HARDWARE=0 也必须从 manifest 取真值并拒绝，
@@ -111,7 +119,7 @@ grep -Fx 'PLATFORM_STATUS=supported' "$tampered_profile" >/dev/null \
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" STRICT_HARDWARE=0 \
     "$START_VM" 9754 \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/tampered-status.log" 2>&1; then
-    fail "篡改后的 PLATFORM_STATUS 绕过了 manifest 双钥匙授权"
+    fail "篡改后的 PLATFORM_STATUS 绕过了 manifest compatibility 授权"
 fi
 grep -F 'profile 平台状态与 manifest 不一致' "$TMP_DIR/tampered-status.log" >/dev/null \
     || fail "状态篡改失败没有 manifest 真值诊断"
@@ -142,7 +150,7 @@ sed -i 's/^PLATFORM_SCHEMA_VERSION=1$/PLATFORM_SCHEMA_VERSION=0/' "$legacy_compa
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" STRICT_HARDWARE=0 \
     "$START_VM" 9756 \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/legacy-compat.log" 2>&1; then
-    fail "降级 schema 绕过了 compatibility 双钥匙"
+    fail "降级 schema 绕过了 compatibility 授权"
 fi
 grep -F 'profile 状态 compatibility 必须来自 schema 1 manifest' \
     "$TMP_DIR/legacy-compat.log" >/dev/null \
@@ -213,7 +221,7 @@ grep -F 'profile schema 不受支持: 99' "$TMP_DIR/unknown-schema.log" >/dev/nu
 # 已有 profile 不能只靠 QEMU smoke；每次启动都重新核对宿主厂商、频率、完整
 # 线程数，以及无 TSC scaling 时的精确频率。
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" STEALTH_HOST_CPU_VENDOR=GenuineIntel \
-    "$START_VM" 9753 --platform-id="$PLATFORM_ID" --allow-platform-compatibility \
+    "$START_VM" 9753 --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/vendor.log" 2>&1; then
     fail "已有 AMD profile 绕过了宿主 CPU 厂商约束"
 fi
@@ -221,7 +229,7 @@ grep -F 'profile CPU 厂商与宿主不一致' "$TMP_DIR/vendor.log" >/dev/null 
     || fail "跨厂商 profile 缺少准确诊断"
 
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" STEALTH_HOST_CPU_MAX_MHZ=2000 \
-    "$START_VM" 9753 --platform-id="$PLATFORM_ID" --allow-platform-compatibility \
+    "$START_VM" 9753 --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/frequency.log" 2>&1; then
     fail "已有 AMD profile 绕过了宿主最大频率约束"
 fi
@@ -229,7 +237,7 @@ grep -F '超过宿主可达 2000MHz' "$TMP_DIR/frequency.log" >/dev/null \
     || fail "宿主频率不足缺少准确诊断"
 
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" CPUS=2 \
-    "$START_VM" 9753 --platform-id="$PLATFORM_ID" --allow-platform-compatibility \
+    "$START_VM" 9753 --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/threads.log" 2>&1; then
     fail "已有 AMD profile 绕过了完整线程数约束"
 fi
@@ -238,7 +246,7 @@ grep -F 'profile 要求完整 4 线程，当前 CPUS=2' "$TMP_DIR/threads.log" >
 
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
     STEALTH_KVM_TSC_CONTROL=0 STEALTH_KVM_TSC_KHZ=3200000 \
-    "$START_VM" 9753 --platform-id="$PLATFORM_ID" --allow-platform-compatibility \
+    "$START_VM" 9753 --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/tsc.log" 2>&1; then
     fail "已有 AMD profile 绕过了无 scaling 的 TSC 约束"
 fi
@@ -274,7 +282,7 @@ fi
 grep -F '如确需更换整机身份，请备份后显式追加 --reroll' "$TMP_DIR/mismatch.log" >/dev/null \
     || fail "已有 profile 平台不一致时没有安全迁移诊断"
 
-# Dock 与管理工具属于同一次已授权实例生命周期，必须自动保留相同双钥匙，不能
+# Dock 与管理工具属于同一次已授权实例生命周期，必须自动保留 allow，不能
 # 生成一个下一次必然被 profile loader 拒绝的裸启动命令。
 (
     export HOME="$TMP_DIR/home"
@@ -282,27 +290,36 @@ grep -F '如确需更换整机身份，请备份后显式追加 --reroll' "$TMP_
     export REPO_ROOT
     export PLATFORM_STATUS=compatibility
     export PLATFORM_ID
-    export STEALTH_PLATFORM_ID="$PLATFORM_ID"
     export ALLOW_PLATFORM_COMPATIBILITY=1
     source "$REPO_ROOT/deploy/scripts/lib/sv-dock.sh"
     _sv_dock_write_desktop 9753
 )
 dock_desktop="$TMP_DIR/home/.local/share/applications/win10-9753.desktop"
-grep -F "Exec=$REPO_ROOT/deploy/scripts/sv-dock-launch.sh 9753 --proxy --platform-id=$PLATFORM_ID --allow-platform-compatibility" \
-    "$dock_desktop" >/dev/null || fail "Dock Exec 丢失 compatibility 双钥匙"
+grep -F "Exec=$REPO_ROOT/deploy/scripts/sv-dock-launch.sh 9753 --proxy --allow-platform-compatibility" \
+    "$dock_desktop" >/dev/null || fail "Dock Exec 丢失 compatibility allow"
 
 memory_log="$TMP_DIR/set-memory.log"
 VMS_DIR="$IMAGE_ROOT/vms" \
     "$REPO_ROOT/deploy/scripts/set-vm-memory.sh" 9753 4G >"$memory_log" 2>&1 \
     || fail "内存管理工具无法加载 compatibility profile"
-grep -F -- "--platform-id=$PLATFORM_ID --allow-platform-compatibility" "$memory_log" >/dev/null \
-    || fail "内存管理工具的重启提示丢失 compatibility 双钥匙"
+grep -F -- "--allow-platform-compatibility" "$memory_log" >/dev/null \
+    || fail "内存管理工具的重启提示丢失 compatibility allow"
+if grep -F -- "--platform-id=" "$memory_log" >/dev/null; then
+    fail "内存管理工具仍要求记忆 compatibility 平台 ID"
+fi
 # shellcheck disable=SC2016 # 第二个 pattern 要匹配脚本中的字面量 ${array[@]}。
 if ! grep -F 'stealth_profile_get PLATFORM_STATUS' \
         "$REPO_ROOT/deploy/scripts/install-stealth.sh" >/dev/null ||
+   ! grep -Eq '^[[:space:]]+--allow-platform-compatibility[[:space:]]*$' \
+        "$REPO_ROOT/deploy/scripts/install-stealth.sh" ||
    ! grep -F '"${RELAUNCH_PLATFORM_ARGS[@]}"' \
         "$REPO_ROOT/deploy/scripts/install-stealth.sh" >/dev/null; then
     fail "guest 安装器自动重启未传播 compatibility 参数"
+fi
+# shellcheck disable=SC2016 # pattern 要拒绝安装脚本中的平台 ID 字面量。
+if grep -F '"--platform-id=$_profile_platform"' \
+    "$REPO_ROOT/deploy/scripts/install-stealth.sh" >/dev/null; then
+    fail "guest 安装器仍传播不必要的长平台 ID"
 fi
 # shellcheck disable=SC2016 # pattern 要匹配安装脚本中的字面量 "$INSTANCE"。
 grep -F 'sv_qemu_instance_pids "$INSTANCE"' \
@@ -330,7 +347,6 @@ grep -F -- '--allow-platform-compatibility' "$missing_allow_log" >/dev/null \
 warning_log="$TMP_DIR/warning.log"
 if VMATE_QEMU_STUB_MODE=warning "${COMMON_ENV[@]}" \
     "$START_VM" 9752 \
-    --platform-id="$PLATFORM_ID" \
     --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$warning_log" 2>&1; then
     fail "compatibility 入口错误地跳过了 CPU warning 门禁"
@@ -342,7 +358,6 @@ grep -F '选定 CPU 无法由当前 KVM 宿主无警告实现' "$warning_log" >/
 phys_bits_log="$TMP_DIR/phys-bits.log"
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" STEALTH_HOST_CPU_PHYS_BITS=42 \
     "$START_VM" 9752 \
-    --platform-id="$PLATFORM_ID" \
     --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$phys_bits_log" 2>&1; then
     fail "42-bit 宿主错误地实现了 43-bit Ryzen profile"
@@ -350,15 +365,29 @@ fi
 grep -F '无法实现 profile 要求的 43 位' "$phys_bits_log" >/dev/null \
     || fail "物理地址位宽失败缺少准确诊断"
 
-# 单独写 allow 而没有具体平台 ID 不是明确授权，CLI 应在访问宿主前拒绝。
-missing_id_log="$TMP_DIR/missing-id.log"
-if "${COMMON_ENV[@]}" "$START_VM" 9752 \
-    --allow-platform-compatibility \
-    --no-sdl --no-fb-shm --no-bridge >"$missing_id_log" 2>&1; then
-    fail "没有平台 ID 的 compatibility 开关被接受"
+# AMD 宿主未给 allow 时仍不能自动把 compatibility 当成 supported 随机池。
+if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
+    "$START_VM" 9761 \
+    --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/no-allow-auto.log" 2>&1; then
+    fail "AMD 宿主在没有 allow 时自动选择了 compatibility 平台"
 fi
-grep -F '必须与 --platform-id=<id> 同时使用' "$missing_id_log" >/dev/null \
-    || fail "compatibility 缺平台 ID 时没有可操作诊断"
+grep -F '无可用整机平台' "$TMP_DIR/no-allow-auto.log" >/dev/null \
+    || fail "AMD 自动选择缺少 allow 时没有准确诊断"
+grep -F '请追加 --allow-platform-compatibility' "$TMP_DIR/no-allow-auto.log" >/dev/null \
+    || fail "存在可用 compatibility 平台时没有提示 allow 参数"
+
+# 若宿主约束连 compatibility 也无法满足，追加 allow 不会解决问题，此时不能给出
+# 误导性建议。用频率明显不足的 Intel 宿主视图覆盖 COMMON_ENV 中的 AMD 值。
+if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
+    STEALTH_HOST_CPU_VENDOR=GenuineIntel STEALTH_HOST_CPU_MAX_MHZ=1000 \
+    "$START_VM" 9762 \
+    --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/no-compatible-fallback.log" 2>&1; then
+    fail "不满足任何平台约束的宿主错误选中了整机平台"
+fi
+if grep -F -- '--allow-platform-compatibility' \
+    "$TMP_DIR/no-compatible-fallback.log" >/dev/null; then
+    fail "没有可用 compatibility 平台时给出了无效 allow 建议"
+fi
 
 unknown_id=amd-am4-r3-9999x-does-not-exist
 if "${COMMON_ENV[@]}" "$START_VM" 9752 \
@@ -369,4 +398,4 @@ fi
 grep -F -- "--platform-id 指向不存在的平台: '$unknown_id'" "$TMP_DIR/unknown-id.log" >/dev/null \
     || fail "不存在的平台 ID 没有准确诊断"
 
-echo "OK: explicit platform compatibility CLI checks passed"
+echo "OK: automatic platform compatibility CLI checks passed"

@@ -51,10 +51,9 @@ deploy/driver-signing/scripts/sign-backdated.sh \
 # 启动到 ISO 安装
 deploy/scripts/start-vm.sh 2 --iso=/path/to/win10_ltsc.iso
 
-# AMD 宿主没有 enabled 整机候选时，只能显式接受 Q35/ICH9 compatibility；
+# AMD 宿主没有可用 supported 整机候选时，可显式接受 Q35/ICH9 compatibility；
 # 这不会关闭 KVM/TSC/CPU realize/磁盘及所请求 TPM 等门禁，也不代表真实 B350 machine
 deploy/scripts/start-vm.sh 2 \
-  --platform-id=amd-am4-r3-2300x-asus-prime-b350-plus \
   --allow-platform-compatibility \
   --iso=/path/to/win10_ltsc.iso
 
@@ -65,6 +64,11 @@ STRICT_HARDWARE=0 deploy/scripts/start-vm.sh 1 --allow-legacy-profile
 EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
     deploy/scripts/start-vm.sh 2 --iso=/path/to/win10_ltsc.iso
 ```
+
+`--allow-platform-compatibility` 会按宿主 CPU vendor、`CPUS`、最大频率和 TSC 约束
+自动匹配整机：始终优先 `supported`，仅在没有可用 `supported` 候选时回退到
+`compatibility`。已有 profile 复用其 `PLATFORM_ID`；`--platform-id` 仅用于高级固定或
+一致性断言。该 allow 不等于 `STRICT_HARDWARE=0`，其它严格门禁仍保留。
 
 启动器会自动：
 - 在 `/home/ubuntu/images/vms/<N>/disk.qcow2` 创建空白 512GB 盘

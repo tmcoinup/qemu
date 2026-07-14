@@ -32,7 +32,7 @@ profile 是每行一个 `KEY=VALUE` 的受限数据文件，不是 shell 脚本�
 | `PLATFORM_SCHEMA_VERSION` | 整机 manifest schema；当前为 `1` |
 | `PLATFORM_CATALOG_REVISION` | `platforms.json` 修订号 |
 | `PLATFORM_ID` | 被选中的完整整机 bundle ID |
-| `PLATFORM_STATUS` | 默认随机新 profile 必须是 `supported`；显式双开关可持久化 `compatibility`，但不表示目标 PCH machine/BDF 等价 |
+| `PLATFORM_STATUS` | 默认新 profile 优先选择 `supported`；显式 allow 授权后可在无 supported 候选时持久化 `compatibility`，但不表示目标 PCH machine/BDF 等价 |
 | `PLATFORM_RELEASE_YEAR` | 整机模板年代约束 |
 | `COMPONENT_SCHEMA_VERSION` | 组件 manifest schema；当前为 `1` |
 | `COMPONENT_CATALOG_REVISION` | `components.json` 修订号 |
@@ -42,9 +42,12 @@ profile 是每行一个 `KEY=VALUE` 的受限数据文件，不是 shell 脚本�
 - `intel-lga1151-i3-9100f-asus-prime-h310m-a-r2`
 - `intel-lga1151-i5-6400t-asus-h110m-a-m2`
 
-AMD/B350 条目为禁用的 `compatibility` 资料，不进入随机池。只有同时指定完全相同的
-`--platform-id` 和 `--allow-platform-compatibility` 才能生成或重载这类 profile；独立
-allow 不会关闭 KVM/TSC、CPU realize、组件绑定、磁盘，或请求 `TPM=1` 时的 TPM 严格门禁。
+AMD/B350 条目为禁用的 `compatibility` 资料，不进入默认候选池。显式传入
+`--allow-platform-compatibility` 后，启动器按宿主 CPU vendor、`CPUS`、最大频率和 TSC
+约束自动匹配：优先使用 `supported`，仅在没有可用 `supported` 候选时回退到
+`compatibility`。已有 profile 复用其 `PLATFORM_ID`；`--platform-id` 可选，只用于高级固定
+或一致性断言。allow 不会把 `STRICT_HARDWARE` 改成 `0`，也不会关闭 KVM/TSC、
+CPU realize、组件绑定、磁盘，或请求 `TPM=1` 时的 TPM 严格门禁。
 
 ## CPU
 
@@ -242,4 +245,5 @@ deploy/scripts/start-vm.sh 1 --reroll
 `--allow-legacy-profile` 明确授权，而且这不代表旧的 AMD/B350、混合 NVMe/EDID/HID
 画像已通过审计。迁移到当前严格目录应显式 reroll，并在测试实例上先验证激活、驱动和磁盘容量。
 新建的 schema 1 AMD compatibility profile 与 legacy profile 不同：它会完整绑定目录事实，
-但仍须每次用同一平台 ID 和 allow 开关启动，且不能计为真实 B350 machine 验收。
+后续启动会复用其 `PLATFORM_ID`，但仍须每次显式携带 allow 开关，且不能计为真实
+B350 machine 验收。

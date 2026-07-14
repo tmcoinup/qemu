@@ -60,7 +60,6 @@ if [[ -r "$PROFILE_FILE" ]]; then
             exit 1
         fi
         RELAUNCH_PLATFORM_ARGS=(
-            "--platform-id=$_profile_platform"
             --allow-platform-compatibility
         )
     fi

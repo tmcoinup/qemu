@@ -107,9 +107,9 @@ stealth_pick_profile() {
     _rng_init
 
     # 1. 按完整平台 bundle 选择，不再把 CPU、主板和 BIOS 独立抽签。
-    #    默认路径只收 enabled 平台；STEALTH_PLATFORM_ID 仅用于运维人员显式固定
-    #    一个 bundle。禁用的 compatibility 条目还必须同时设置独立的
-    #    ALLOW_PLATFORM_COMPATIBILITY=1，不能靠关闭其它 KVM/TPM 严格门禁顺带放行。
+    #    默认路径只收 enabled 平台；ALLOW_PLATFORM_COMPATIBILITY=1 会把受审计的
+    #    compatibility 条目加入宿主匹配候选。STEALTH_PLATFORM_ID 是可选固定器，
+    #    不再要求操作者记忆长 ID；已有 profile 仍由其持久化 ID 固定身份。
     #
     #    无论随机还是显式选择，下面四个宿主约束都不能绕过：同 CPU 厂商、SKU
     #    完整线程数等于 CPUS、SKU 最大频率不超过宿主可达上限、无 TSC scaling
@@ -139,9 +139,9 @@ stealth_pick_profile() {
             ;;
     esac
 
-    local -a _candidates=()
+    local -a _candidates=() _supported_candidates=() _compatibility_candidates=()
     local _requested_found=0
-    local entry _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz
+    local entry _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz _platform_status
     for entry in "${PLATFORM_POOL[@]}"; do
         IFS='|' read -r _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz <<<"$entry"
 
@@ -173,13 +173,31 @@ stealth_pick_profile() {
             break
         fi
 
-        [[ "$_enabled" == "true" && "$_vendor" == "$_host_ven" ]] || continue
+        if [[ "$_enabled" != "true" ]]; then
+            _platform_status="$(stealth_platform_manifest_status "$_platform_id")" || return 1
+            [[ "$_platform_status" == "compatibility" ]] || continue
+        fi
+        [[ "$_vendor" == "$_host_ven" ]] || continue
         (( _threads == _requested_cpus && _max_mhz <= _host_max )) || continue
         if [[ -n "$_required_tsc" ]] && (( _tsc_mhz != _required_tsc )); then
             continue
         fi
-        _candidates+=("$_platform_id")
+        if [[ "$_enabled" == "true" ]]; then
+            _supported_candidates+=("$_platform_id")
+        else
+            _compatibility_candidates+=("$_platform_id")
+        fi
     done
+
+    # allow 表示“严格候选不存在时允许降级”，不是强制或随机降级。未来同厂商若
+    # 同时存在 supported/compatibility，必须始终优先受支持平台。
+    if [[ -z "$_requested_platform" ]]; then
+        if (( ${#_supported_candidates[@]} > 0 )); then
+            _candidates=("${_supported_candidates[@]}")
+        elif [[ "$_allow_compatibility" == "1" ]]; then
+            _candidates=("${_compatibility_candidates[@]}")
+        fi
+    fi
 
     if [[ -n "$_requested_platform" && "$_requested_found" != "1" ]]; then
         echo "ERROR: 指定整机平台不存在: $_requested_platform" >&2
@@ -187,6 +205,12 @@ stealth_pick_profile() {
     fi
     if (( ${#_candidates[@]} == 0 )); then
         echo "ERROR: 无可用整机平台：vendor=$_host_ven CPUS=${CPUS:-4} host_max=${_host_max}MHz required_tsc=${_required_tsc:-scalable}" >&2
+        # 只有 flag 确实能解锁一个满足当前宿主约束的模板时才给出提示；厂商、线程、
+        # 频率或 TSC 本身不匹配时不建议无效参数，避免让用户反复盲试。
+        if [[ "$_allow_compatibility" != "1" &&
+              ${#_compatibility_candidates[@]} -gt 0 ]]; then
+            echo "       检测到匹配宿主的 compatibility 平台；若接受 Q35/ICH9 行为边界，请追加 --allow-platform-compatibility。" >&2
+        fi
         return 1
     fi
     local selected_platform="${_candidates[$(( (RANDOM * 32768 + RANDOM) % ${#_candidates[@]} ))]}"

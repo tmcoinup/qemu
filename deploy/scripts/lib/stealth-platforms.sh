@@ -476,7 +476,7 @@ try:
             if (selected["status"] != "compatibility" or
                     not (explicitly_allowed or legacy_non_strict)):
                 fail(f"平台已禁用：{wanted_id}；如确认接受 Q35 行为边界，需显式允许 compatibility")
-            print(f"WARN: 显式加载 Q35/ICH9 compatibility 平台，不能宣称真实目标主板行为：{wanted_id}",
+            print(f"WARN: 加载 Q35/ICH9 compatibility 平台，不能宣称真实目标主板行为：{wanted_id}",
                   file=sys.stderr)
         for key, value in export_pairs(root, selected).items():
             encoded = base64.b64encode(str(value).encode("utf-8")).decode("ascii")

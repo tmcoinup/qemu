@@ -4,8 +4,8 @@
 #
 # 只改 profile 里的 MEM_TOTAL_MB 一个字段，**不碰任何其它硬件身份**
 # （CPU / 主板 / GPU / NVMe / 各类序列号全不动）。supported 实例启动命令不变；
-# compatibility 实例仍须保留创建时的平台 ID 与显式 allow 参数：
-#     ./start-vm.sh <N> [--platform-id=<id> --allow-platform-compatibility] [--proxy ...]
+# compatibility 实例仍须保留显式 allow 参数；平台 ID 已由 profile 固定：
+#     ./start-vm.sh <N> [--allow-platform-compatibility] [--proxy ...]
 # start-vm.sh 会自动读 profile.MEM_TOTAL_MB 决定内存拓扑。改完**重启 VM** 生效
 # （内存量是开机确定的硬件拓扑，不做热插拔——热插拔事件本身是 VM 特征）。
 #
@@ -71,16 +71,14 @@ if [[ "$_profile_status" == "compatibility" ]]; then
           ! "$_profile_platform" =~ ^[a-z0-9][a-z0-9-]{7,95}$ ]]; then
         _die "compatibility profile 缺少合法 schema/platform ID"
     fi
-    export STEALTH_PLATFORM_ID="$_profile_platform"
     export ALLOW_PLATFORM_COMPATIBILITY=1
     START_PLATFORM_ARGS=(
-        "--platform-id=$_profile_platform"
         --allow-platform-compatibility
     )
 fi
 
-# 载入 profile（拿 MEM_MFR / part / SN 等，用于打印拓扑）。compatibility 的双钥匙
-# 已在上面从当前实例的受限字段恢复，完整事实绑定仍由加载器执行。
+# 载入 profile（拿 MEM_MFR / part / SN 等，用于打印拓扑）。compatibility allow
+# 已恢复；具体平台由 profile 固定，完整事实绑定仍由加载器执行。
 set +u; stealth_load_profile "$PROFILE"; set -u
 CUR="${MEM_TOTAL_MB:-}"; [[ -z "$CUR" ]] && CUR=4096   # 老 profile 无字段 = 历史默认 4GB
 

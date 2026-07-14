@@ -48,7 +48,7 @@ Intel 官方明确说明 E5-2696 v4 是由系统厂商定义规格的定制处�
 | `intel-lga1151-i5-6400t-asus-h110m-a-m2` | i5-6400T，4C/4T，目标 TSC 2200 MHz | ASUS H110M-A/M.2 / H110 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
 | 两个 Ryzen 3 + PRIME B350-PLUS 条目 | Ryzen 3 1200/2300X | AMD B350 | DDR4 | 禁用、仅 compatibility |
 
-AMD 条目禁用是正确的保守处理：当前 machine type 仍是 Intel Q35/ICH9，仅改 AMD PCI ID 不会得到 AMD B350 行为。AMD 物理宿主默认不会随机得到一个伪装成“完整支持”的平台。2026-07-14 增加的 `--platform-id=<AMD-ID> --allow-platform-compatibility` 是显式功能入口，只放宽整机 machine fidelity；KVM/TSC、宿主厂商/线程/频率/物理地址位、CPU 无警告 realize、profile、磁盘，以及请求 `TPM=1` 时的 TPM 门禁仍保持严格。该入口能用于安装和行为验证，但不能提高 B350 真机化评级。
+AMD 条目禁用是正确的保守处理：当前 machine type 仍是 Intel Q35/ICH9，仅改 AMD PCI ID 不会得到 AMD B350 行为。AMD 物理宿主默认不会随机得到一个伪装成“完整支持”的平台。2026-07-14 增加的 `--allow-platform-compatibility` 是显式功能入口：启动器按宿主 CPU vendor、`CPUS`、最大频率和 TSC 约束自动匹配，始终优先 `supported`，仅在没有可用 `supported` 候选时回退到 `compatibility`。已有 profile 复用其 `PLATFORM_ID`；`--platform-id` 只是可选的高级固定或一致性断言。该 allow 只放宽整机 machine fidelity，不会把 `STRICT_HARDWARE` 改成 `0`；KVM/TSC、宿主厂商/线程/频率/物理地址位、CPU 无警告 realize、profile、磁盘，以及请求 `TPM=1` 时的 TPM 门禁仍保持严格。该入口能用于安装和行为验证，但不能提高 B350 真机化评级。
 
 在 Ryzen 7 5800 宿主上的瞬时 KVM 实测表明，Ryzen3-1200 与 Ryzen3-2300X 均可按 4C/4T 和目标 TSC realize。原先直接传 `phys-bits=43` 会因宿主 48 位产生 warning；启动器现改为先验证宿主位宽，再用 `host-phys-bits=on,host-phys-bits-limit=43` 固定客体值。但这仍只证明 vCPU 可创建：KVM 最终 surface 默认关闭 SVM、MONITOR/MWAIT 和 PMU，cache 模板、微码以及额外 `tsc-deadline` 尚无目标零售 Ryzen 样机快照闭环，因此 AMD CPU 也不能提升为严格等价。
 
@@ -183,7 +183,7 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 
 - CPU/主板/BIOS 从独立随机改为版本化完整平台 bundle；未知 schema、禁用平台、跨厂商和无候选均 fail closed。
 - AMD B350 仅保留 compatibility 且不进入严格随机池。
-- AMD compatibility 必须由平台 ID 与独立 allow 开关共同显式选择；只放宽 Q35 machine fidelity，不再要求用 `STRICT_HARDWARE=0` 连带跳过 CPU/TPM 等门禁。
+- AMD compatibility 只需独立 allow 开关显式授权，再按宿主约束自动匹配；平台 ID 只作可选的高级固定或一致性断言。该入口只放宽 Q35 machine fidelity，不再要求用 `STRICT_HARDWARE=0` 连带跳过 CPU/TPM 等门禁。
 - CPU 物理地址位改为“宿主下限预检 + `host-phys-bits-limit`”，避免 48-bit 宿主实现 39/43-bit 目标时产生 warning 或泄漏宿主值。
 - KVM/TSC 真能力探测、250 ppm 判断和选型前 TSC 过滤。
 - 选型后真实 QEMU/KVM CPU realize smoke，拒绝 warning、缺 QMP 响应和伪成功。

@@ -39,7 +39,7 @@ CMD=(
     # --- CPU: hidden hypervisor, hidden KVM, invtsc ---
     # CPU 完整 -cpu 串由 stealth_qemu_cpu_arg 拼出（包含 family/model/stepping、
     # tsc-freq 和 vendor）。默认只有 manifest 中 enabled 且通过宿主 KVM 探测的
-    # 整机 bundle 可进入新 profile；显式 compatibility 还须独立双钥匙并保留警告。
+    # 整机 bundle 可进入新 profile；compatibility 还须独立 allow 授权并保留警告。
     -cpu "$(stealth_qemu_cpu_arg)"
     # 完整 SKU 的核心/线程拓扑来自 platform manifest。选择阶段已经要求 CPUS 等于
     # CPU_THREADS；这里再次用整数除法构造 threads-per-core，不能把 2C/4T CPU 写成 4C。

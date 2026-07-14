@@ -2,8 +2,9 @@
 # ---------------------------------------------------------------------------
 # start-vm.sh ——— 基于版本化硬件清单启动 QEMU/KVM 客机
 #
-# 新 VM 只从 platforms.json 中 enabled 的完整 Intel CPU/主板/PCH bundle 选型，
-# 再绑定 components.json 中核验过的 SSD、EDID 与 HID 模板。生产默认会检查
+# 新 VM 默认只从 platforms.json 中 enabled 的完整 CPU/主板/PCH bundle 选型；
+# 显式允许 compatibility 时仍先选 supported，无匹配才按宿主能力回退受审计模板。
+# 随后绑定 components.json 中核验过的 SSD、EDID 与 HID 模板。生产默认会检查
 # KVM/TSC 真能力并实际 realize 目标 vCPU；任一跨字段矛盾都会 fail closed。
 # GPU 仍是 virtio 显示路径，本分支不做显卡直通/vGPU，也不承诺等价于真实独显。
 #
@@ -13,9 +14,11 @@
 #                                           # 推流 socket: /tmp/qemu-stealth-1.fb
 #     ./start-vm.sh 2 --iso=/path/x.iso     # instance 2 从 ISO 装系统
 #     ./start-vm.sh 2 --platform-id=<id>     # 显式固定一个已启用整机 bundle
-#     ./start-vm.sh 2 --platform-id=<id> --allow-platform-compatibility
-#                                           # 显式接受禁用模板的 Q35 行为边界；
+#     ./start-vm.sh 2 --allow-platform-compatibility
+#                                           # 自动匹配宿主并接受 Q35 行为边界；
 #                                           # KVM/TSC/CPU/TPM 等严格门禁仍会执行
+#     ./start-vm.sh 2 --platform-id=<id> --allow-platform-compatibility
+#                                           # 高级用法：固定/断言具体兼容平台
 #     STRICT_HARDWARE=0 ./start-vm.sh 1 --allow-legacy-profile
 #                                           # 仅显式诊断无 manifest 绑定的旧 profile
 #     ./start-vm.sh 1 --no-sdl              # 后台 daemon：关 SDL，仅推流
@@ -90,10 +93,11 @@
 #                          本分支不把该模式计入硬件真实性或受支持 GPU 能力。
 #     STRICT_HARDWARE=1    设 0 仅供诊断/兼容 dry-run，不计入真机化支持
 #     STEALTH_PLATFORM_ID= 显式平台 ID（flag: --platform-id=<id>）；已有
-#                          profile 上只做一致性断言，换平台必须另加 --reroll
+#                          profile 上只做一致性断言；可选，换平台须另加 --reroll
 #     ALLOW_PLATFORM_COMPATIBILITY=0
-#                          设 1 或 --allow-platform-compatibility 才允许显式加载
-#                          status=compatibility 的禁用平台；不会关闭其它严格门禁
+#                          设 1 或使用同名 flag 后，按厂商、线程、频率、TSC 自动
+#                          匹配；优先 supported，无匹配才回退 compatibility。
+#                          不会关闭 KVM/CPU/TPM/profile/磁盘等其它严格门禁
 #     ALLOW_LEGACY_PROFILE=0
 #                          旧 schema 即使 STRICT_HARDWARE=0 也默认拒绝；设 1 或
 #                          --allow-legacy-profile 才做不计入支持范围的显式诊断加载

@@ -86,9 +86,9 @@ if ! [[ "$INSTANCE" =~ ^[0-9]+$ ]] || (( INSTANCE < 1 )); then
     exit 2
 fi
 
-# 显式平台选择与 compatibility 放行是两把独立开关。`--platform-id` 可用于
-# 固定 enabled 平台；禁用平台还必须追加 `--allow-platform-compatibility`。
-# 后者只放宽 machine fidelity，不会把 STRICT_HARDWARE 改成 0，因此 KVM、TSC、
+# `--allow-platform-compatibility` 允许选择 status=compatibility 的受审计平台；
+# 未给 `--platform-id` 时按宿主约束自动选择，给出 ID 时则固定/断言具体平台。
+# 它只放宽 machine fidelity，不会把 STRICT_HARDWARE 改成 0，因此 KVM、TSC、
 # CPU realize、所请求 TPM、profile 和磁盘容量门禁仍会全部执行。
 : "${STEALTH_PLATFORM_ID:=}"
 : "${ALLOW_PLATFORM_COMPATIBILITY:=0}"
@@ -121,10 +121,6 @@ case "$ALLOW_LEGACY_PROFILE" in
         exit 2
         ;;
 esac
-if [[ "$ALLOW_PLATFORM_COMPATIBILITY" == "1" && -z "$STEALTH_PLATFORM_ID" ]]; then
-    echo "ERROR: --allow-platform-compatibility 必须与 --platform-id=<id> 同时使用" >&2
-    exit 2
-fi
 if [[ "$ALLOW_LEGACY_PROFILE" == "1" && "${STRICT_HARDWARE:-1}" != "0" ]]; then
     echo "ERROR: --allow-legacy-profile 仅能与显式 STRICT_HARDWARE=0 诊断模式同时使用" >&2
     exit 2

@@ -33,27 +33,43 @@ sudo apt install -y build-essential ninja-build meson pkg-config python3 \
 本分支不做 GPU passthrough/vGPU，因此 VT-d/IOMMU 不是当前功能前提。它仍可用于宿主其它
 用途，但不能据此提高本项目 GPU 真机化评级。
 
-AMD/B350 compatibility bundle 默认禁用。AMD 物理宿主不显式指定平台时会得到
+AMD/B350 compatibility bundle 默认禁用。AMD 物理宿主未授权兼容平台时会得到
 “无可用整机平台”，这是预期的 fail-closed 行为，不是 ISO、AMD-V 或 TSC 故障。
+若宿主能匹配可用的 `compatibility` 模板，但只是尚未授权，报错会明确提示追加
+`--allow-platform-compatibility`；若追加该 flag 也没有候选，则不会误导性地给出此提示。
 
 若当前目标只是先在 AMD 宿主安装/运行 Windows 10，并明确接受“Ryzen/B350 字段 +
 Q35/ICH9 machine 行为”不等于真实 B350，可使用窄范围兼容入口：
 
 ```bash
 deploy/scripts/start-vm.sh 2 \
-  --platform-id=amd-am4-r3-2300x-asus-prime-b350-plus \
   --allow-platform-compatibility \
   --iso=/home/ubuntu/images/win10.iso
 ```
 
-后续手工启动同一实例时继续携带相同两个平台参数；本次授权生成的 Dock 入口、guest
-安装器自动重启和内存管理提示会自动传播它们。`--allow-platform-compatibility` **不会**
-把 `STRICT_HARDWARE` 改成 `0`：宿主 CPU 厂商、完整线程数、频率、物理地址位、KVM/TSC、
-CPU 无警告 realize、profile 绑定、磁盘容量，以及请求 `TPM=1` 时的 TPM 仍然 fail closed。它只允许加载清单中
-`status=compatibility/enabled=false` 的指定整机。不能把这一运行结果计为 B350 真机化支持；
+新建 profile 时，启动器按宿主 CPU vendor、`CPUS`、最大频率和 TSC 约束自动匹配：
+始终优先选择 `supported`，只在没有可用 `supported` 候选时回退到已授权的
+`compatibility`。已有 profile 会复用其持久化的 `PLATFORM_ID`，不会在普通重启时重新抽选；
+后续手工启动兼容 profile 时只需继续携带 `--allow-platform-compatibility`，Dock 入口、
+guest 安装器自动重启和内存管理提示也会自动传播该授权。
+
+`--platform-id` 保留为高级选项：新建时可固定特定候选，已有 profile 上则断言与持久化
+ID 一致。例如：
+
+```bash
+deploy/scripts/start-vm.sh 2 \
+  --allow-platform-compatibility \
+  --platform-id=amd-am4-r3-2300x-asus-prime-b350-plus \
+  --iso=/home/ubuntu/images/win10.iso
+```
+
+`--allow-platform-compatibility` **不会**把 `STRICT_HARDWARE` 改成 `0`：宿主 CPU 厂商、
+完整线程数、频率、物理地址位、KVM/TSC、CPU 无警告 realize、profile 绑定、磁盘容量，
+以及请求 `TPM=1` 时的 TPM 仍然 fail closed。它只允许自动选择或重载清单中
+`status=compatibility/enabled=false` 的匹配整机。不能把这一运行结果计为 B350 真机化支持；
 当前 KVM CPU surface 的 SVM、MONITOR/MWAIT、PMU、cache、微码也缺少目标 Ryzen 样机快照闭环。
 
-旧 schema profile 不具备 manifest 绑定，不能用来替代上述双钥匙。即使显式设置
+旧 schema profile 不具备 manifest 绑定，不能用来替代上述兼容授权。即使显式设置
 `STRICT_HARDWARE=0`，加载器仍默认拒绝；只有排障时才可再追加
 `--allow-legacy-profile`。该选项只表示操作者明确接受“无法验证平台来源”的诊断风险，
 严格模式会拒绝它，Dock/安装器等正式生命周期也不应依赖该路径。
@@ -251,8 +267,8 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | 变量/标志 | 默认 | 当前语义 |
 |---|---:|---|
 | `STRICT_HARDWARE` | `1` | 平台、组件、KVM/TSC、CPU realize、TPM 等硬件面 fail closed |
-| `STEALTH_PLATFORM_ID` / `--platform-id` | 空 | 显式固定平台；已有 profile 上只断言一致，换平台必须 `--reroll` |
-| `ALLOW_PLATFORM_COMPATIBILITY` / `--allow-platform-compatibility` | `0` | 只放行指定 compatibility 平台，不关闭其它严格门禁 |
+| `STEALTH_PLATFORM_ID` / `--platform-id` | 空 | 可选高级固定；已有 profile 上只断言一致，换平台必须 `--reroll` |
+| `ALLOW_PLATFORM_COMPATIBILITY` / `--allow-platform-compatibility` | `0` | 允许宿主自动匹配 compatibility；优先 supported，不关闭其它严格门禁 |
 | `ALLOW_LEGACY_PROFILE` / `--allow-legacy-profile` | `0` | 仅配合 `STRICT_HARDWARE=0` 显式诊断无 manifest 绑定旧 profile |
 | `STEALTH_TSC_POLICY` | `auto` | 有 scaling 用 profile TSC；无 scaling 按宿主实测约束 |
 | `CPUS` | `4` | 必须等于所选 SKU 的完整 4 个线程 |

@@ -499,7 +499,7 @@ stealth_load_profile() {
     # profile 可由用户编辑，因此不能用其自报的 PLATFORM_STATUS 决定授权。schema 1
     # 必须先从已校验 manifest 读取同一 PLATFORM_ID 的真实状态并逐字匹配；这样把
     # compatibility 改写成 supported，或改写 ID 指向另一平台，都不能借非严格诊断
-    # 模式绕过双钥匙。
+    # 模式绕过显式 compatibility 授权。
     local _manifest_platform_status=""
     if [[ "$PLATFORM_SCHEMA_VERSION" != "0" && "$PLATFORM_SCHEMA_VERSION" != "1" ]]; then
         echo "ERROR: profile schema 不受支持: $PLATFORM_SCHEMA_VERSION" >&2
@@ -536,26 +536,25 @@ stealth_load_profile() {
         return 1
     fi
 
-    # 严格模式默认只接受 supported。唯一例外是调用方同时给出与 profile 完全相同
-    # 的显式平台 ID，并打开独立 compatibility 门禁；这只承认其 Q35 machine 行为
-    # 边界，不会跳过下方平台/组件事实绑定、KVM、所请求 TPM 或磁盘检查。旧
-    # profile 即使被兼容默认值补齐也不满足 schema/status 条件，仍必须显式 reroll。
+    # 严格模式默认只接受 supported。compatibility 必须有独立 allow 授权；可选的
+    # 平台 ID 只做精确断言，未提供时使用 profile 已持久化的 manifest ID。这只承认
+    # Q35 machine 行为边界，不会跳过下方平台/组件事实绑定、KVM、所请求 TPM 或
+    # 磁盘检查。旧 profile 即使被兼容默认值补齐也仍须显式 reroll。
     local _profile_platform_status_allowed=0
     if [[ "$_manifest_platform_status" == "supported" ]]; then
         _profile_platform_status_allowed=1
     elif [[ "$_manifest_platform_status" == "compatibility" ]]; then
-        # compatibility 是独立授权维度；即使 STRICT_HARDWARE=0 也必须携带双钥匙，
+        # compatibility 是独立授权维度；即使 STRICT_HARDWARE=0 也必须显式 allow，
         # 否则全局诊断开关会意外变成绕过持久化平台授权的后门。
         if [[ "$PLATFORM_SCHEMA_VERSION" != "1" ]]; then
             echo "ERROR: compatibility profile 必须来自 schema 1 manifest" >&2
             return 1
         fi
-        if [[ "${ALLOW_PLATFORM_COMPATIBILITY:-0}" != "1" ||
-              -z "${STEALTH_PLATFORM_ID:-}" ]]; then
-            echo "ERROR: compatibility profile 必须同时指定相同 --platform-id 与 --allow-platform-compatibility" >&2
+        if [[ "${ALLOW_PLATFORM_COMPATIBILITY:-0}" != "1" ]]; then
+            echo "ERROR: compatibility profile 必须显式追加 --allow-platform-compatibility" >&2
             return 1
         fi
-        if [[ "$STEALTH_PLATFORM_ID" != "$PLATFORM_ID" ]]; then
+        if [[ -n "${STEALTH_PLATFORM_ID:-}" && "$STEALTH_PLATFORM_ID" != "$PLATFORM_ID" ]]; then
             echo "ERROR: profile 平台 $PLATFORM_ID 与指定平台 $STEALTH_PLATFORM_ID 不一致。" >&2
             echo "       如确需更换整机身份，请备份后显式追加 --reroll。" >&2
             return 1

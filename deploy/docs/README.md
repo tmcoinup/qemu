@@ -49,8 +49,14 @@ PCI BDF、寄存器或 PCH 行为与目标 H110/H310 等价：
 两个 Ryzen 3 + PRIME B350-PLUS 条目仅保留为 `compatibility`，默认禁用。当前 machine type
 仍是 Intel Q35/ICH9；只改成 AMD PCI ID 不能得到 B350 行为，因此 AMD 宿主在严格模式下
 默认没有可用新建候选，也不会静默回退到伪 AMD 整机。需要先安装/功能验证时，可显式
-同时使用 `--platform-id=<AMD-ID> --allow-platform-compatibility`；该窄入口继续执行
-KVM/TSC、CPU realize、profile、磁盘，以及请求 `TPM=1` 时的 TPM 严格门禁，只接受整机 machine fidelity 不完整。
+使用 `--allow-platform-compatibility`。启动器按宿主 CPU vendor、`CPUS`、最大频率和
+TSC 约束自动匹配：始终优先选择 `supported`，只在没有可用 `supported` 候选时回退到
+`compatibility`。已有 profile 继续复用持久化的 `PLATFORM_ID`；`--platform-id` 仅作高级固定或
+一致性断言。该窄入口不会把 `STRICT_HARDWARE` 改成 `0`，仍继续执行 KVM/TSC、
+CPU realize、profile、磁盘，以及请求 `TPM=1` 时的 TPM 严格门禁，只接受整机
+machine fidelity 不完整。
+若没有 `supported` 匹配，但宿主确实能匹配某个 `compatibility` 模板，启动器会明确
+提示追加 `--allow-platform-compatibility`；若该 allow 也无法找到候选，则不会误导性地给出此提示。
 
 ## 当前启用组件
 
@@ -109,7 +115,6 @@ deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
 
 # AMD 宿主的显式功能兼容路径；不是 B350 真机化验收结果
 deploy/scripts/start-vm.sh 2 \
-  --platform-id=amd-am4-r3-2300x-asus-prime-b350-plus \
   --allow-platform-compatibility \
   --iso=/home/ubuntu/images/win10.iso
 

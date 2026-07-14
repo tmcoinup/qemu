@@ -51,14 +51,12 @@ _sv_dock_write_desktop() {
     _sv_dock_make_icon "$icon" "$n" || true
     local iconref="$icon"; [[ -s "$icon" ]] || iconref=virt-manager
     local compatibility_args=""
-    # compatibility 实例的 desktop 是在一次已授权启动中生成的，因此把同一平台
-    # 双钥匙固化到 Exec，保证用户以后点击 Dock 不会因参数丢失而误拒绝。平台 ID
-    # 已由 manifest/CLI 的受限正则校验，不含空格或 shell 元字符。
+    # compatibility 实例的 desktop 是在一次已授权启动中生成的，因此把 allow
+    # 固化到 Exec。具体平台已经写入 profile，后续启动无需重复长 ID，加载器仍会
+    # 用 manifest 真值和完整事实绑定防止 profile 被篡改。
     if [[ "${PLATFORM_STATUS:-}" == "compatibility" &&
-          "${ALLOW_PLATFORM_COMPATIBILITY:-0}" == "1" &&
-          -n "${PLATFORM_ID:-}" &&
-          "${STEALTH_PLATFORM_ID:-}" == "$PLATFORM_ID" ]]; then
-        compatibility_args=" --platform-id=${PLATFORM_ID} --allow-platform-compatibility"
+          "${ALLOW_PLATFORM_COMPATIBILITY:-0}" == "1" ]]; then
+        compatibility_args=" --allow-platform-compatibility"
     fi
     # Exec 走 sv-dock-launch.sh（不是直接 start-vm.sh）：GNOME 正常时靠
     # StartupWMClass 把 SDL 窗口归到本图标；dash-to-dock 收藏抖动丢关联时，点击会

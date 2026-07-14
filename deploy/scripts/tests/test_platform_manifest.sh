@@ -89,8 +89,8 @@ STRICT_HARDWARE=0 stealth_platform_load "$amd_platform" 2>/dev/null \
     || fail "非严格模式显式指定时应允许加载 AMD 兼容 bundle"
 [[ "$PLATFORM_STATUS" == compatibility ]] || fail "AMD bundle 未标 compatibility"
 
-# 正常 profile 选择路径必须同时验证“指定 ID + 显式 compatibility + 同厂商 +
-# 完整线程数 + 频率/TSC”。没有第二把开关时，即使全局严格门禁开启也不能误选。
+# 显式 ID 的高级选择路径必须验证“compatibility allow + 同厂商 + 完整线程数 +
+# 频率/TSC”。没有 allow 时，即使全局严格门禁开启也不能误选。
 if (
     export STRICT_HARDWARE=1
     export ALLOW_PLATFORM_COMPATIBILITY=0
@@ -128,6 +128,32 @@ if (
     fail "显式 AMD compatibility 平台绕过了宿主 CPU 厂商约束"
 fi
 
+# allow 是受支持候选缺失时的回退授权，不是强制降级。构造一个同时含 AMD
+# supported 与 compatibility 的有效临时目录；无论随机数为何，都必须选择前者。
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+priority_manifest="$tmp_dir/platforms-supported-priority.json"
+sed \
+    -e '0,/"enabled": false/s//"enabled": true/' \
+    -e '0,/"status": "compatibility"/s//"status": "supported"/' \
+    "$REPO_ROOT/deploy/hardware/platforms.json" >"$priority_manifest"
+(
+    export STEALTH_PLATFORM_MANIFEST="$priority_manifest"
+    export STRICT_HARDWARE=1
+    export ALLOW_PLATFORM_COMPATIBILITY=1
+    unset STEALTH_PLATFORM_ID MEM_TOTAL_MB
+    export STEALTH_HOST_CPU_VENDOR=AuthenticAMD
+    export STEALTH_HOST_CPU_MAX_MHZ=5000
+    export STEALTH_REQUIRED_TSC_MHZ=
+    export CPUS=4
+    mapfile -t PLATFORM_POOL < <(stealth_platform_index)
+    for _ in 1 2 3 4; do
+        stealth_pick_profile >/dev/null 2>&1
+        [[ "$PLATFORM_ID" == "$amd_platform" ]] \
+            || fail "存在匹配 supported 平台时错误回退 compatibility: $PLATFORM_ID"
+    done
+) || fail "supported 优先于 compatibility 的回退策略失效"
+
 # 模拟 E5 v4 2.2GHz、无 TSC scaling：TSC 维度上唯一可生成的 4C/4T
 # 候选是 i5-6400T。它仍须由上层在真实宿主进行 KVM CPU realize smoke；
 # 本单元测试不得被解读为 E5 严格兼容性证明。
@@ -157,8 +183,6 @@ fi
 export CPUS=4
 unset MEM_TOTAL_MB
 stealth_pick_profile
-tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
 profile="$tmp_dir/hardware.profile"
 stealth_save_profile "$profile"
 saved_id="$PLATFORM_ID"

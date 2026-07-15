@@ -80,13 +80,19 @@ static int sdl2_gl_make_window_current(struct sdl2_console *scon)
 
 static void sdl2_gl_swap_window(struct sdl2_console *scon)
 {
+    bool presented = true;
+
     if (scon->native_egl) {
         if (!eglSwapBuffers(qemu_egl_display, scon->esurface)) {
             error_report("sdl2-egl: eglSwapBuffers failed: %s",
                          qemu_egl_get_error_string());
+            presented = false;
         }
     } else {
         SDL_GL_SwapWindow(scon->real_window);
+    }
+    if (presented) {
+        sdl2_note_present(scon);
     }
 }
 

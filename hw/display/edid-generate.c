@@ -17,51 +17,22 @@ static const struct edid_mode {
     uint32_t dta;
 } modes[] = {
     /*
-     * Stealth: 我们的 stealth profile 模拟 24" 1080p 16:9 显示器
-     * (Samsung S24F350F / AOC 24G2E5 / BenQ GW2480 等)。EDID 只暴露一个
-     * 真实 1080p 显示器在 Windows 分辨率下拉里该有的【正常 1080p 列表】：
-     * 16:9 主档 + 4:3 兼容档，不带任何 16:10 / 5:4 这类"非 1080p 面板"特征，
-     * 更不带 > native 的 1920×1200。
-     *
-     * Win10 现代"显示设置"分辨率下拉【实测最终呈现】：
-     *   1920×1080 / 1280×720 / 1024×768 / 800×600
-     *   (640×480 在 established 里但现代下拉默认不列出)
-     *
-     * 注：另有一条 1600×900 第二 DTD（见 qemu_edid_generate 的 DTD2），仿真实
-     * 显示器常见的次级 detailed timing 以增强 EDID 真实性。但 Windows/viogpudo
-     * 的下拉只采纳【首条 DTD + CEA VIC + established】三类，不采纳第二条 DTD、
-     * 也不采纳 generic standard timings（16:9 会被 Windows 误读成 16:10 冒出
-     * 1920×1200 等幻影），所以 1600×900 不会出现在下拉里。要让它出现就得改
-     * viogpudo 驱动 → 丢 WHQL → 关 DSE（testsigning/EfiGuard），与"全浅层 +
-     * testsigning 关闭"的 ACE-安全约束冲突，故【不做】。
-     *
-     * 原 generic 表里被砍掉的：
-     *  - 4K / 5K (3840×2160 / 5120×2160) → 1080p panel 不可能支持
-     *  - 1920×1200 / 1680×1050 / 1280×800 → 16:10 工作站/笔记本特征
-     *  - 1280×1024 / 1280×960 → 5:4 传统 LCD（非 16:9 面板特征）
-     *
-     * 保留（下拉可见）：
-     *  - 1920×1080 16:9 (native, CEA-861 VIC 16)
-     *  - 1280×720  16:9 (720p, CEA-861 VIC 4)
-     *  - 1024×768 / 800×600 / 640×480 (4:3 established，真实显示器普遍带，
-     *    且现代下拉只露到 800×600，不会把列表搞脏)
+     * Keep the base standard-timing slots unused.  The signed viogpudo
+     * shipped with this tree interprets the EDID 1.3 16:9 aspect code as
+     * 16:10, turning a 1920-wide standard timing into a bogus 1920x1200
+     * mode.  CTA and Established Timings III do not take that parser path.
      */
+    { .xres = 1920,   .yres = 1080,   .dta = 16 },
+    { .xres = 1280,   .yres =  720,   .dta =  4 },
 
-    /*
-     * dta/CEA-861 extension timings (@ 60 Hz) — 16:9 主档。
-     * 16:9 模式【只】走 DTD + CEA-861 VIC，绝不进 generic standard-timing 槽：
-     * Windows/viogpudo 会把 standard-timing 里 16:9 (aspect bits=11) 的模式
-     * 误读成 16:10，于是 1920→1920×1200 / 1600→1600×1000 / 1280→1280×800
-     * 全冒成幻影档（这正是"1920×1200 又出现"的根因）。
-     */
-    { .xres = 1920,   .yres = 1080,   .dta =  16 },   /* VIC 16, native 16:9 (= DTD1) */
-    { .xres = 1280,   .yres =  720,   .dta =   4 },   /* VIC 4,  720p  16:9 */
-
-    /* 1600×900 (16:9) 没有 CEA VIC、也不在 Est-Timings-III 位图里；作为次级
-     * detailed timing 走第二条 DTD（见 qemu_edid_generate），仅增强 EDID 真实性，
-     * Windows 下拉不会列出它（详见本表顶部注释），故不进本表。 */
-
-    /* established timings (4:3 兼容档，@ 60Hz) */
+    /* Established Timings III modes accepted by the legacy driver. */
+    { .xres = 1680,   .yres = 1050,   .xtra3 = 9, .bit = 5 },
+    { .xres = 1440,   .yres =  900,   .xtra3 = 8, .bit = 5 },
+    { .xres = 1360,   .yres =  768,   .xtra3 = 8, .bit = 7 },
+    { .xres = 1280,   .yres = 1024,   .xtra3 = 7, .bit = 1 },
+    { .xres = 1280,   .yres =  960,   .xtra3 = 7, .bit = 3 },
+    { .xres = 1280,   .yres =  768,   .xtra3 = 7, .bit = 6 },
+    /* Base established timings (all at 60 Hz). */
     { .xres = 1024,   .yres =  768,   .byte  = 36,   .bit = 3 },
     { .xres =  800,   .yres =  600,   .byte  = 35,   .bit = 0 },
     { .xres =  640,   .yres =  480,   .byte  = 35,   .bit = 5 },
@@ -79,13 +50,7 @@ typedef struct Timings {
     uint64_t clock;
 } Timings;
 
-/*
- * Stealth: real CEA-861 / VESA DMT timings for common modes. The "thin
- * air" formula below produces blanking values that don't line up with
- * any hardware monitor (e.g. ~173 MHz dot clock for 1080p instead of
- * the standard 148.5 MHz), which is detectable when an EDID parser
- * cross-checks DTD math against expected VIC entries.
- */
+/* Use standard CEA-861 / VESA DMT timings for known common modes. */
 struct std_timing {
     uint32_t xres, yres, refresh;
     uint32_t xfront, xsync, xblank;
@@ -97,8 +62,6 @@ static const struct std_timing known_timings[] = {
     { 1920, 1080, 60000,  88,  44, 280,  4,  5, 45 },
     /* 1280x720@60    CEA-861 VIC 4,    74.250 MHz */
     { 1280,  720, 60000, 110,  40, 370,  5,  5, 30 },
-    /* 1600x900@60    VESA CVT-RB,      97.750 MHz (DTD2) */
-    { 1600,  900, 60000,  48,  32, 160,  3,  5, 26 },
     /* 1024x768@60    VESA DMT,         65.000 MHz */
     { 1024,  768, 60000,  24, 136, 320,  3,  6, 38 },
     /*  800x600@60    VESA DMT,         40.000 MHz */
@@ -160,49 +123,13 @@ static void edid_ext_dta_mode(uint8_t *dta, uint8_t nr)
     dta[4]++;
 }
 
-static int edid_std_mode(uint8_t *mode, uint32_t xres, uint32_t yres)
-{
-    uint32_t aspect;
-
-    if (xres == 0 || yres == 0) {
-        mode[0] = 0x01;
-        mode[1] = 0x01;
-        return 0;
-
-    } else if (xres * 10 == yres * 16) {
-        aspect = 0;
-    } else if (xres * 3 == yres * 4) {
-        aspect = 1;
-    } else if (xres * 4 == yres * 5) {
-        aspect = 2;
-    } else if (xres * 9 == yres * 16) {
-        aspect = 3;
-    } else {
-        return -1;
-    }
-
-    if ((xres / 8) - 31 > 255) {
-        return -1;
-    }
-
-    mode[0] = (xres / 8) - 31;
-    mode[1] = ((aspect << 6) | (60 - 60));
-    return 0;
-}
-
 static void edid_fill_modes(uint8_t *edid, uint8_t *xtra3, uint8_t *dta,
                             uint32_t maxx, uint32_t maxy)
 {
     const struct edid_mode *mode;
     int i;
 
-    /*
-     * Stealth: 不再发 generic standard timings。Windows/viogpudo 会把
-     * standard-timing 里 16:9 (aspect bits=11) 的模式误读成 16:10，于是
-     * 1920→1920×1200 / 1600→1600×1000 / 1280→1280×800 全冒成幻影档。
-     * 16:9 模式改走 DTD (native + 1600×900) 与 CEA-861 VIC，4:3 兼容档走
-     * established bitmap —— 这里只处理 established / xtra3 / dta(CEA)。
-     */
+    /* Fill only established and CTA bitmaps; base standard timings stay off. */
     for (i = 0; i < ARRAY_SIZE(modes); i++) {
         mode = modes + i;
 
@@ -222,9 +149,10 @@ static void edid_fill_modes(uint8_t *edid, uint8_t *xtra3, uint8_t *dta,
         }
     }
 
-    /* 8 个 standard-timing 槽 (byte 38..53) 全部标记为未用 (0x01 0x01)。 */
+    /* Mark all eight base standard-timing slots unused. */
     for (i = 38; i < 54; i += 2) {
-        edid_std_mode(edid + i, 0, 0);
+        edid[i] = 0x01;
+        edid[i + 1] = 0x01;
     }
 }
 
@@ -286,27 +214,20 @@ static void edid_desc_text(uint8_t *desc, uint8_t type,
     desc[5 + len] = '\n';
 }
 
-static void edid_desc_ranges(uint8_t *desc)
+static void edid_desc_ranges(uint8_t *desc, uint8_t min_v, uint8_t max_v,
+                             uint8_t min_h, uint8_t max_h,
+                             uint16_t max_clock)
 {
     edid_desc_type(desc, 0xfd);
 
-    /*
-     * Stealth: Samsung S24F350F datasheet limits.
-     *   vfreq        50 -> 75  Hz
-     *   hfreq        30 -> 83  kHz
-     *   max dot clock         170 MHz
-     *
-     * The previous wide-open 50-125 / 30-160 / 2550 MHz range is itself
-     * a virtual-display fingerprint — physical monitors have narrow,
-     * spec-bounded scan limits.
-     */
-    desc[5] =  50;
-    desc[6] =  75;
+    /* Vertical frequency in Hz and horizontal frequency in kHz. */
+    desc[5] = min_v;
+    desc[6] = max_v;
+    desc[7] = min_h;
+    desc[8] = max_h;
 
-    desc[7] =  30;
-    desc[8] =  83;
-
-    desc[9] = 170 / 10;
+    /* Maximum pixel clock in 10 MHz units. */
+    desc[9] = MIN(max_clock, 2550) / 10;
 
     /* no extended timing information */
     desc[10] = 0x01;
@@ -314,6 +235,14 @@ static void edid_desc_ranges(uint8_t *desc)
     /* padding */
     desc[11] = '\n';
     memset(desc + 12, ' ', 6);
+}
+
+/* Established Timings III descriptor, revision 1.0. */
+static void edid_desc_xtra3_std(uint8_t *desc)
+{
+    edid_desc_type(desc, 0xf7);
+    desc[5] = 10;
+    memset(desc + 6, 0, 12);
 }
 
 static void edid_desc_dummy(uint8_t *desc)
@@ -393,11 +322,6 @@ static void edid_colorspace(uint8_t *edid,
     edid[34] = white_y >> 2;
 }
 
-static uint32_t qemu_edid_dpi_from_mm(uint32_t mm, uint32_t res)
-{
-    return res * 254 / 10 / mm;
-}
-
 uint32_t qemu_edid_dpi_to_mm(uint32_t dpi, uint32_t res)
 {
     return res * 254 / 10 / dpi;
@@ -448,39 +372,50 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
                         qemu_edid_info *info)
 {
     Timings timings;
-    Timings timings2;
     uint8_t *desc = edid + 54;
     uint8_t *xtra3 = NULL;
     uint8_t *dta = NULL;
     uint8_t *did = NULL;
+    const char *vendor;
+    const char *name;
     uint32_t width_mm, height_mm;
-    /*
-     * Stealth: 60 Hz preferred timing, not 75. Real Samsung S24F350F's
-     * preferred mode in the EDID is 1920x1080@60 — 75 Hz at 1080p is
-     * uncommon enough to be a tell on its own.
-     */
+    uint16_t product_id;
+    uint16_t year;
+    uint16_t max_clock;
+    uint8_t week;
+    uint8_t video_input;
+    uint8_t range_min_v, range_max_v;
+    uint8_t range_min_h, range_max_h;
     uint32_t refresh_rate = info->refresh_rate ? info->refresh_rate : 60000;
     uint32_t dpi = 100; /* if no width_mm/height_mm */
     uint32_t large_screen = 0;
 
     /* =============== set defaults  =============== */
 
-    if (!info->vendor || strlen(info->vendor) != 3) {
-        info->vendor = "SAM";
+    vendor = info->vendor;
+    if (!vendor || strlen(vendor) != 3) {
+        vendor = "RHT";
     }
-    if (!info->name) {
-        info->name = "S24F350";
+    name = info->name ? info->name : "QEMU Monitor";
+    product_id = info->product_id ? info->product_id : 0x1234;
+    week = info->week && info->week <= 54 ? info->week : 42;
+    year = info->year >= 1990 && info->year <= 2245 ? info->year : 2014;
+    video_input = info->video_input ? info->video_input : 0xa5;
+
+    range_min_v = info->range_min_v ? info->range_min_v : 50;
+    range_max_v = info->range_max_v ? info->range_max_v : 125;
+    if (range_min_v > range_max_v) {
+        range_min_v = 50;
+        range_max_v = 125;
     }
-    if (!info->serial) {
-        /*
-         * Real monitors always carry a 0xff serial-number descriptor;
-         * a missing one is itself a fingerprint. Default to a 12-char
-         * Samsung-format serial. (atoi() of this is also non-zero, so
-         * the binary serial slot at edid[12..15] gets a non-default
-         * value too.)
-         */
-        info->serial = "H4ZK500001VL";
+    range_min_h = info->range_min_h ? info->range_min_h : 30;
+    range_max_h = info->range_max_h ? info->range_max_h : 160;
+    if (range_min_h > range_max_h) {
+        range_min_h = 30;
+        range_max_h = 160;
     }
+    max_clock = info->max_clock ? MIN(info->max_clock, 2550) : 2550;
+
     if (!info->prefx) {
         info->prefx = 1920;
     }
@@ -490,14 +425,6 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     if (info->width_mm && info->height_mm) {
         width_mm = info->width_mm;
         height_mm = info->height_mm;
-        dpi = qemu_edid_dpi_from_mm(width_mm, info->prefx);
-    } else if (info->prefx == 1920 && info->prefy == 1080) {
-        /* Stealth: 24" 16:9 ≈ 530 × 300 mm — matches Samsung S24F350F.
-         * The earlier 100 dpi default produced ~488 × 274 mm, closer
-         * to a 22" panel and inconsistent with the spoofed model. */
-        width_mm = 530;
-        height_mm = 300;
-        dpi = qemu_edid_dpi_from_mm(width_mm, info->prefx);
     } else {
         width_mm = qemu_edid_dpi_to_mm(dpi, info->prefx);
         height_mm = qemu_edid_dpi_to_mm(dpi, info->prefy);
@@ -535,25 +462,13 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     edid[7] = 0x00;
 
     /* manufacturer id, product code, serial number */
-    uint16_t vendor_id = ((((info->vendor[0] - '@') & 0x1f) << 10) |
-                          (((info->vendor[1] - '@') & 0x1f) <<  5) |
-                          (((info->vendor[2] - '@') & 0x1f) <<  0));
+    uint16_t vendor_id = ((((vendor[0] - '@') & 0x1f) << 10) |
+                          (((vendor[1] - '@') & 0x1f) <<  5) |
+                          (((vendor[2] - '@') & 0x1f) <<  0));
     /*
-     * deploy stealth: avoid the recognizable 0x1234 "QEMU Monitor"
-     * product code. SAM:0x0F65 is the real product code Samsung's
-     * S24F350F panel reports — confirmed against multiple Linux EDID
-     * dumps in the wild — so MONITOR\SAM0F65 is a plausible HardwareID
-     * for the spoofed name "Samsung S24F350F".
-     */
-    uint16_t model_nr = 0x0F65;
-    /*
-     * EDID byte 12-15 is a 32-bit binary serial. atoi() on a Samsung-style
-     * alphanumeric serial like "H4ZK500001VL" returns 0 because parsing
-     * stops at the first non-digit. A zero binary serial paired with a
-     * non-zero string serial is a self-inconsistent EDID — strict parsers
-     * (read-edid, edid-decode --check) flag it. Hash the alphanumeric
-     * serial via djb2 so the binary slot is deterministic, non-zero, and
-     * cannot collide with the obviously-default 0x01A5C3D2 either.
+     * EDID byte 12-15 is a 32-bit binary serial.  Hash alphanumeric serial
+     * descriptors so the binary and textual forms are both non-zero and
+     * stable even when atoi() cannot parse the text.
      */
     uint32_t serial_nr;
     if (info->serial) {
@@ -567,15 +482,15 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
             serial_nr = h ? h : 0xC0DECAFE;
         }
     } else {
-        serial_nr = 0x01A5C3D2;
+        serial_nr = 0;
     }
     stw_be_p(edid +  8, vendor_id);
-    stw_le_p(edid + 10, model_nr);
+    stw_le_p(edid + 10, product_id);
     stl_le_p(edid + 12, serial_nr);
 
-    /* manufacture week 32, year 2018 — within S24F350F production span */
-    edid[16] = 32;
-    edid[17] = 2018 - 1990;
+    /* Manufacture week and year. */
+    edid[16] = week;
+    edid[17] = year - 1990;
 
     /* edid version */
     edid[18] = 1;
@@ -584,16 +499,13 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
 
     /* =============== basic display parameters =============== */
 
-    /*
-     * video input: digital, 8 bpc, HDMI-a.
-     * S24F350F's only digital input is HDMI; reporting DisplayPort on
-     * a budget Samsung 1080p panel is implausible.
-     */
-    edid[20] = 0xa3;
+    edid[20] = video_input;
 
     /* screen size: undefined */
-    edid[21] = width_mm / 10;
-    edid[22] = height_mm / 10;
+    /* EDID stores the coarse base size in centimetres; round the exact DTD
+     * millimetres to the nearest centimetre like physical monitor EDIDs do. */
+    edid[21] = (MIN(width_mm, 2550) + 5) / 10;
+    edid[22] = (MIN(height_mm, 2550) + 5) / 10;
 
     /* display gamma: 2.2 */
     edid[23] = 220 - 100;
@@ -620,42 +532,31 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     /* =============== descriptor blocks =============== */
 
     if (!large_screen) {
-        /* DTD1: native (preferred) timing。The DTD section has only 12 bits
-         * to store the resolution。 */
+        /* The DTD section has only 12 bits to store the resolution. */
         edid_desc_timing(desc, &timings, info->prefx, info->prefy,
                          width_mm, height_mm);
         desc = edid_desc_next(edid, dta, desc);
-
-        /*
-         * DTD2: 1600×900 (16:9)。这一描述符槽原本放 Established-Timings-III
-         * (0xF7)，但我们已不发 generic standard timings（见 edid_fill_modes：
-         * 16:9 的 std timing 会被 Windows 误读成 16:10）。这里放一条 1600×900
-         * 精确 DTD，仿真实显示器常见的次级 detailed timing 增强 EDID 真实性。
-         * 注意：Windows/viogpudo 的分辨率下拉只采纳【首条 DTD + CEA VIC +
-         * established】，不采纳第二条 DTD，所以 1600×900 不会出现在下拉里
-         * （这是已知的 Windows EDID 行为，非本代码缺陷）。仅当 maxx/maxy 放得下
-         * 1600×900 时发。
-         */
-        if ((!info->maxx || info->maxx >= 1600) &&
-            (!info->maxy || info->maxy >= 900)) {
-            generate_timings(&timings2, refresh_rate, 1600, 900);
-            edid_desc_timing(desc, &timings2, 1600, 900, width_mm, height_mm);
-            desc = edid_desc_next(edid, dta, desc);
-        }
     }
 
-    /* xtra3 保持 NULL：不再发 Established-Timings-III / generic std timings。 */
+    /*
+     * The legacy Windows driver consumes this bitmap but ignores secondary
+     * DTDs, so do not invent a 1600x900 DTD that cannot enter its mode list.
+     */
+    xtra3 = desc;
+    edid_desc_xtra3_std(xtra3);
+    desc = edid_desc_next(edid, dta, desc);
     edid_fill_modes(edid, xtra3, dta, info->maxx, info->maxy);
     /*
      * dta video data block is finished at thus point,
      * so dta descriptor offsets don't move any more.
      */
 
-    edid_desc_ranges(desc);
+    edid_desc_ranges(desc, range_min_v, range_max_v,
+                     range_min_h, range_max_h, max_clock);
     desc = edid_desc_next(edid, dta, desc);
 
-    if (desc && info->name) {
-        edid_desc_text(desc, 0xfc, info->name);
+    if (desc && name) {
+        edid_desc_text(desc, 0xfc, name);
         desc = edid_desc_next(edid, dta, desc);
     }
 

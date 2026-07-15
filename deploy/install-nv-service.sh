@@ -18,6 +18,9 @@
 #
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
+# shellcheck source=lib/vm-storage.sh
+source ./lib/vm-storage.sh
+vm_storage_init
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
@@ -40,9 +43,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Discover guest IP via $VM_ROOT/configs/
+# Discover guest IP via the VM's instances/vmN/vm.conf.
 if [[ -z "$IP_OVERRIDE" ]]; then
-    conf="${VM_ROOT:-/home/ubuntu/images/vms}/configs/vm${VM_ID}.conf"
+    conf=$(vm_storage_config_path "$VM_ID")
     [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }
     # shellcheck source=/dev/null
     source "$conf"
@@ -59,7 +62,7 @@ HOST_IP=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | 
 BASE_URL="http://${HOST_IP}:8080"
 
 # Stage latest .ps1 + binaries to staging
-DEPLOY=/home/ubuntu/images/staging
+DEPLOY=$STAGE_DIR
 cp -f guest/install-nv-service.ps1 "$DEPLOY/install-nv-service.ps1"
 
 # Sanity: HTTP server up + all assets present

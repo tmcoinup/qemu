@@ -135,12 +135,19 @@ struct virtio_gpu_base_conf {
     uint32_t ymax;
     uint64_t hostmem;
     VirtIOGPUOutputList *outputs;
-    /* stealth (patch 0009): EDID 字符串覆盖；NULL 时回落到 edid-generate.c
-     * 历史默认 ("SAM"/"S24F350"/"H4ZK500001VL")。让 -device virtio-vga
-     * edid-vendor=AOC,edid-name=24G2E5,edid-serial=... 实际注入显示器 EDID。 */
+    /* Optional EDID identity, physical dimensions, and range metadata. */
     char *edid_vendor;
     char *edid_name;
     char *edid_serial;
+    uint16_t edid_product_id;
+    uint8_t edid_week;
+    uint16_t edid_year;
+    uint8_t edid_video_input;
+    uint8_t edid_range_min_v;
+    uint8_t edid_range_max_v;
+    uint8_t edid_range_min_h;
+    uint8_t edid_range_max_h;
+    uint16_t edid_max_clock;
     uint32_t edid_width_mm;
     uint32_t edid_height_mm;
 };
@@ -192,6 +199,15 @@ struct VirtIOGPUBaseClass {
     DEFINE_PROP_STRING("edid-vendor", _state, _conf.edid_vendor), \
     DEFINE_PROP_STRING("edid-name", _state, _conf.edid_name), \
     DEFINE_PROP_STRING("edid-serial", _state, _conf.edid_serial), \
+    DEFINE_PROP_UINT16("edid-product-id", _state, _conf.edid_product_id, 0), \
+    DEFINE_PROP_UINT8("edid-week", _state, _conf.edid_week, 0), \
+    DEFINE_PROP_UINT16("edid-year", _state, _conf.edid_year, 0), \
+    DEFINE_PROP_UINT8("edid-video-input", _state, _conf.edid_video_input, 0), \
+    DEFINE_PROP_UINT8("edid-range-min-v", _state, _conf.edid_range_min_v, 0), \
+    DEFINE_PROP_UINT8("edid-range-max-v", _state, _conf.edid_range_max_v, 0), \
+    DEFINE_PROP_UINT8("edid-range-min-h", _state, _conf.edid_range_min_h, 0), \
+    DEFINE_PROP_UINT8("edid-range-max-h", _state, _conf.edid_range_max_h, 0), \
+    DEFINE_PROP_UINT16("edid-max-clock", _state, _conf.edid_max_clock, 0), \
     DEFINE_PROP_UINT32("edid-width-mm", _state, _conf.edid_width_mm, 0), \
     DEFINE_PROP_UINT32("edid-height-mm", _state, _conf.edid_height_mm, 0)
 

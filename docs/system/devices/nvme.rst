@@ -18,9 +18,10 @@ Adding NVMe Devices
 Controller Emulation
 --------------------
 
-The QEMU emulated NVMe controller implements version 1.4 of the NVM Express
-specification. All mandatory features are implement with a couple of exceptions
-and limitations:
+By default, the QEMU emulated NVMe controller reports version 1.4 of the NVM
+Express specification. Vendor identity options can select an older reported
+revision and a compatible subset of capabilities. All mandatory default
+features are implemented with a couple of exceptions and limitations:
 
   * Accounting numbers in the SMART/Health log page are reset when the device
     is power cycled.
@@ -52,6 +53,22 @@ parameters.
   Since QEMU 5.2, the device uses a QEMU allocated "Red Hat" PCI Device and
   Vendor ID. Set this to ``on`` to revert to the unallocated Intel ID
   previously used.
+
+``use-samsung-id`` (default: ``off``)
+  Advertise the Samsung consumer NVMe PCI identity, NVMe revision 1.3 and a
+  PCIe Gen3 x4 link. An automatically created subsystem derives a stable
+  Samsung-style NQN from the Identify model and serial.
+
+``use-wd-id`` (default: ``off``)
+  Advertise the first-generation WD Black PCI identity (``15b7:5001``,
+  subsystem ``1b4b:1093``), NVMe revision 1.2.0 and a PCIe Gen3 x4 link.
+  NVMe 1.2.0 permits an empty SUBNQN, so an automatic subsystem does not
+  invent an unverified WD NQN; an explicitly configured subsystem keeps its
+  configured NQN.
+
+  Samsung and WD identities are mutually exclusive. Either one overrides the
+  legacy Intel identity default injected by old machine-type compatibility.
+  The WD identity does not support SR-IOV.
 
 ``ocp`` (default: ``off``)
   The Open Compute Project defines the Datacenter NVMe SSD Specification that

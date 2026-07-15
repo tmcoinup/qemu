@@ -99,3 +99,11 @@ ls -la "$bin"
 echo
 echo "  display backends:"
 "$bin" -display help 2>&1 | sed 's/^/    /'
+echo
+echo "  TPM backends/devices:"
+"$bin" -tpmdev help 2>&1 | sed 's/^/    /' || true
+"$bin" -device help 2>&1 | grep -E 'name "tpm-(crb|tis)"' | sed 's/^/    /'
+if ! command -v swtpm >/dev/null 2>&1 || \
+   ! command -v swtpm_setup >/dev/null 2>&1; then
+    echo "[build-qemu] WARN: QEMU TPM 已内建，但运行 VM 还需要: sudo apt install swtpm swtpm-tools" >&2
+fi

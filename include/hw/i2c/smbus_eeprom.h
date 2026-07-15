@@ -25,6 +25,9 @@
 
 #include "system/ram_addr.h"
 #include "hw/i2c/i2c.h"
+#include "qapi/error.h"
+
+#define SMBUS_EEPROM_MAX_SLOTS 8
 
 void smbus_eeprom_init_one(I2CBus *bus, uint8_t address, uint8_t *eeprom_buf);
 void smbus_eeprom_init(I2CBus *bus, int nb_eeprom,
@@ -32,6 +35,9 @@ void smbus_eeprom_init(I2CBus *bus, int nb_eeprom,
 
 enum sdram_type { SDR = 0x4, DDR = 0x7, DDR2 = 0x8 };
 uint8_t *spd_data_generate(enum sdram_type type, ram_addr_t size);
-uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts);
+uint8_t *spd_data_generate_ddr3(uint32_t size_mb, uint32_t speed_mts,
+                                Error **errp);
+uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts,
+                                Error **errp);
 
 #endif

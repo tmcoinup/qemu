@@ -554,6 +554,7 @@ typedef struct NvmeParams {
     uint8_t  vsl;
     bool     use_intel_id;
     bool     use_samsung_id;
+    bool     use_wd_id;
     char     *model_number;
     char     *firmware_rev;
     uint8_t  zasl;
@@ -639,6 +640,7 @@ typedef struct NvmeCtrl {
     DECLARE_BITMAP(changed_nsids, NVME_CHANGED_NSID_SIZE);
 
     NvmeSubsystem   *subsys;
+    bool            subsys_auto;
 
     NvmeNamespace   namespace;
     NvmeNamespace   *namespaces[NVME_MAX_NAMESPACES + 1];

@@ -1,0 +1,31 @@
+name: "${COMPOSE_PROJECT_NAME:-fastapi-dls}"
+
+services:
+  fastapi-dls:
+    image: "${DLS_IMAGE:-collinwebdesigns/fastapi-dls:2.0.3}"
+    restart: unless-stopped
+    init: true
+    environment:
+      TZ: "${TZ:-UTC}"
+      DLS_URL: "${DLS_URL:?set DLS_URL in .env}"
+      DLS_PORT: "${DLS_PORT:-443}"
+      LEASE_EXPIRE_DAYS: "${LEASE_EXPIRE_DAYS:-90}"
+      DATABASE: sqlite:////app/database/db.sqlite
+      CERT_PATH: /app/cert
+    ports:
+      - "${LISTEN_ADDRESS:-0.0.0.0}:${HOST_PORT:-443}:443/tcp"
+    volumes:
+      # fastapi-dls 首次启动会在这里生成内部 CA 和签名私钥，因此必须可写。
+      - ./state/cert:/app/cert
+      - ./state/database:/app/database
+    healthcheck:
+      test: ["CMD-SHELL", "curl --insecure --fail --silent https://127.0.0.1/-/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"

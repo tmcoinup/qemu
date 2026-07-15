@@ -21,12 +21,11 @@ GTAGS
 *.depend_raw
 *.swp
 *.patch
+!deploy/host/ovmf-mdev-fastboot.patch
+!deploy/host/ovmf-security-modules.patch
 *.gcov
 /.claude/settings.local.json
-!deploy/driver-signing/patches/*.patch
 .claude/scheduled_tasks.lock
 
-# deploy: 固件二进制备份（脚本按 unix 时间戳自动生成，勿入库）
-deploy/firmware/*.fd.bak.*
-# deploy: 个人临时命令草稿
-deploy/scripts/tmp.txt
+# deploy: 宿主特定 GPU BDF/profile（从 .example 复制）
+deploy/host/vgpu-host.conf

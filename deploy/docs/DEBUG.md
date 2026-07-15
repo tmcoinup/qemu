@@ -18,10 +18,7 @@
 
 ### GDB attach 到 QEMU 进程
 ```bash
-# gmate vGPU 主路径
-sudo gdb -p "$(cat /home/ubuntu/images/vms/run/vm${VM_ID}.pid)"
-# qemu-9.2 兼容工具链（deploy/scripts）
-sudo gdb -p "$(cat deploy/run/vm${VM_ID}.pid)"
+sudo gdb -p "$(cat /home/ubuntu/images/vms/instances/vm${VM_ID}/run/qemu.pid)"
 (gdb) info threads
 (gdb) thread N
 (gdb) bt
@@ -37,10 +34,7 @@ sudo gdb -p "$(cat deploy/run/vm${VM_ID}.pid)"
 
 ### QMP 监控
 ```bash
-# gmate vGPU 主路径
-socat - unix-connect:/home/ubuntu/images/vms/run/vm${VM_ID}.qmp
-# qemu-9.2 兼容工具链（deploy/scripts）
-socat - unix-connect:deploy/run/vm${VM_ID}.qmp
+socat - unix-connect:/home/ubuntu/images/vms/instances/vm${VM_ID}/run/qmp.sock
 {"execute":"qmp_capabilities"}
 {"execute":"query-cpu-model-expansion","arguments":{"type":"full","model":{"name":"Core-i5-6500"}}}
 ```
@@ -60,62 +54,6 @@ cat /sys/module/kvm/parameters/tdp_mmu          # 应该 1 (加速 EPT)
 cat /sys/module/kvm_intel/parameters/ept        # 1
 cat /sys/module/kvm_intel/parameters/flexpriority# 1
 ```
-
-## qemu-9.2 兼容启动器：ACE 反作弊 / 计时检测侧
-
-> 本节中的 `start-vm.sh` 和 `host-performance.sh` 指
-> `deploy/scripts/` 下的兼容工具链，不会改变 gmate 默认的 vGPU 启动路径。
-
-### `游戏计时异常` → `(13-131130-8)`
-```
-检测到游戏计时异常。请关闭并卸载变速器等可能影响游戏计时的软件，重启后重试。
-(13-131130-8)
-```
-**注意先分清两个 ACE 码**：`13-131106-0` 是 **GPU PCI 主 ID** 异常（深层 `GPU_SELFSIGNED=1`
-改 `10DE:1C81` 才会触发，浅层不碰）；`13-131130-8` 是 **计时（timing）异常**，跟 GPU 无关，
-矛头指向 vCPU 服务延迟 / 时钟进度的方差。
-
-**两类根因，都在 host 侧（非 guest 配置）**：
-
-① **调度/时钟抖动**——
-- `governor=powersave`：核在 vm-exit 之间降频，每次 exit 服务延迟忽高忽低；
-- `halt_poll_ns` 太短（默认 200000）：guest HLT 后唤醒落在 poll 窗外 → IPI 唤醒延迟尖刺；
-- THP `defrag=madvise/always`：khugepaged / 同步整理 stall 把 vCPU 冻住几毫秒 → 计时跳变。
-这些都会让 ACE 读到的帧/tick 计时方差超阈值，误判成「变速器」。
-
-② **超规格频率（关键，易漏）**——guest 的 TSC 被钉死在伪装 CPU 的 `tsc-freq`（如
-Ryzen3-1200=3.1GHz），但**指令是按 host 真实频率执行的**。host(5800) governor=performance
-能 boost 到 4.4GHz+，而伪装 CPU 自报的 SMBIOS Type4 `max-speed` 只有 3400MHz。于是 guest
-「单位 TSC tick 内干的活」远超这颗 CPU 该有的量 = 一台超频/变速的机器 → 直接踩 `13-131130-8`。
-⚠ 注意：单开 `governor=performance` 反而**加重**②（把 host 顶到满 boost），必须同时封顶频率。
-
-**修复**：`start-vm.sh` 默认 `HOST_TUNE=1` + `CPU_FREQ_CAP=1`，起 VM 前自动跑
-`host-performance.sh`：governor=performance + 可配置 halt_poll + THP defrag=never（治①），
-并把 `scaling_max_freq` 封顶到本实例 `CPU_MAX_MHZ`（治②，**只降不升**）。手动：
-```bash
-sudo deploy/scripts/host-performance.sh 3400000   # 位置参数=封顶 kHz(3400MHz=伪装 CPU 上限)
-# 已装 /etc/sudoers.d/qemu-hostperf → 仅此脚本免密；start-vm 自动调优不再提示输密码。
-# 多 VM 并发时 start-vm 自动取「在跑各 VM CPU_MAX_MHZ 最小值」做全局封顶(任一都不超规格)。
-```
-**验证调优是否生效**：
-```bash
-cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort -u   # performance
-cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq  | sort -u   # =CPU_MAX_MHZ*1000(如3400000)
-cat /sys/module/kvm/parameters/halt_poll_ns                          # 默认 0；低延迟诊断可 KVM_HALT_POLL_NS=500000
-cat /sys/kernel/mm/transparent_hugepage/defrag                       # [never]
-grep -m4 MHz /proc/cpuinfo                                           # 应 ≤ 封顶值, 不再 4.4G
-cat /proc/sys/vm/nr_hugepages                                        # 必须仍是 0(memfd 不预留)
-```
-**绝不能动的反检测命脉**（动了反而更可疑，且与计时检测无关）：`-cpu` 的
-`tsc-freq=`/`+invtsc`/`+tsc-deadline`、`kvm=off`/`hypervisor=off`/`vendor=`、vCPU 数/拓扑
-（`cores=N` 对应伪 N 核）、`-rtc clock=vm,driftfix=slew`。`-overcommit cpu-pm`
-默认保持 `off`，与 QEMU 上游默认一致，避免把 host CPU power management 能力交给
-guest 后影响宿主调度统计；只有单 VM 低延迟实验需要时，才用 `QEMU_CPU_PM=1`
-显式打开。
-
-> 若调优后仍报 `13-131130-8`：排查 host 是否被别的重负载抢核（`pidstat`/`perf kvm stat`），
-> 或 vCPU 超额订阅（运行的 VM 总 vCPU > host 逻辑核）。本机 8c/16t，单 VM 4 vCPU，
-> ≤4 台不超订。考虑给 VM 做 vCPU pinning 进一步降抖动（尚未默认开启）。
 
 ## swtpm / TPM 侧
 
@@ -151,6 +89,103 @@ sudo journalctl -fu nvidia-vgpu-mgr
 # unlock 的 profile 是否生效
 sudo grep -i 'profile override\|vdev_id' /var/log/syslog
 ```
+
+### VM3 严格 GTX 1050 的最小诊断
+
+先在 guest 的本地 console 管理员 PowerShell 查硬件身份、驱动绑定和当前模式：
+
+```powershell
+$gpus = @(Get-CimInstance Win32_VideoController |
+  Where-Object { $_.PNPDeviceID -like 'PCI\VEN_10DE*' })
+$gpus | Format-List Name,PNPDeviceID,DriverVersion,ConfigManagerErrorCode,
+  AdapterRAM,CurrentHorizontalResolution,CurrentVerticalResolution
+
+Get-CimInstance Win32_SystemDriver -Filter "Name='nvlddmkm'" |
+  Format-List Name,State,StartMode,PathName
+
+$smi = (Get-Command nvidia-smi.exe -ErrorAction Stop).Source
+& $smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+```
+
+VM3 严格 GTX 1050 的最小通过条件是：
+
+- 只有一个当前 NVIDIA display controller；
+- `Name` 是 `NVIDIA GeForce GTX 1050`；
+- `PNPDeviceID` 以
+  `PCI\VEN_10DE&DEV_1C81&SUBSYS_11C01028` 开头；
+- `DriverVersion=31.0.15.3833`、`ConfigManagerErrorCode=0`，
+  `nvlddmkm` 是 `Running`；
+- `nvidia-smi` 报告 GTX 1050、538.33 和 2048 MiB；
+- 脱离 RDP 后的本地 console 是 1920×1080 @ 59/60 Hz。
+
+Host 侧只核对这个 VM 的稳定 UUID，不要用全局 `nvidia-257` 名称判定
+per-mdev 结果：
+
+```bash
+vm=3
+conf="/home/ubuntu/images/vms/instances/vm${vm}/vm.conf"
+uuid=$(sed -n 's/^VM_UUID=//p' "$conf")
+
+sed -n '/^GPU_PROFILE=/p;/^SPOOF_MODE=/p;/^VGPU_MDEV_INTERNAL_PCI_IDENTITY=/p;
+         /^VGPU_MDEV_FRL_ENABLED=/p;/^VGPU_PATCHED_DRIVER_VERSION=/p' "$conf"
+
+sudo sed -n "/^\[mdev\.\"${uuid}\"\]/,/^\[/p" \
+  /etc/vgpu_unlock/profile_override.toml
+nvidia-smi vgpu -q
+sudo journalctl -b -u nvidia-vgpu-mgr.service --no-pager |
+  rg -i "$uuid|Virtual Device Id|Guest NVIDIA Driver Information|license state"
+```
+
+应看到 `SPOOF_MODE=A`、内部 PCI 开关为 `1`、`frl_enabled=0`、
+`pci_id=0x1C8111C0` 和 `pci_device_id=0x1C81`。Host 仍可能报
+`License Status: Unlicensed`；严格 GeForce 身份下 NVIDIA 控制面板不显示 vGPU
+激活页也是预期行为。当前帧率边界看 `Frame Rate Limit: N/A` 和实际动态
+workload，不要把 `Unlicensed` 文字自动等同于 3 FPS。Backing resource 仍应是
+`nvidia-257/2048MB`，它不会因 guest 显示 GTX 1050 而改变。
+
+### Basic Display Adapter / 分辨率减少的 off 安全恢复
+
+如果 A 模式已暴露 `DEV_1C81`，但 patched 538.33 还没有预置或绑定，Windows
+会回退到 Microsoft Basic Display Adapter，分辨率和可选模式随之减少。这时先修
+驱动绑定，不要先强行添加自定义分辨率。
+
+1. 让 Windows 完整关机，不要休眠或只在 guest 中点“重启”。无法操作桌面时，
+   host 可先用 `./deploy/stop-vm.sh 3` 优雅关机。
+2. 用一次性 off 模式启动：
+
+   ```bash
+   ./deploy/start-vm.sh 3 --no-spoof --no-monitor-sync
+   ```
+
+   `--no-spoof` 只影响这次启动，不会改写只读 `vm.conf`；它会让外层 PCI 和
+   per-mdev 内部身份暂时回到驱动恢复路径，并不带入 VM3 的 FRL 覆盖。
+3. 在 off 启动中先验证原生 538.33 能 Code 0，然后完整关机。不要手工删除当前
+   NVIDIA device，也不要用未校验的 INF 覆盖 Driver Store。
+4. 回到 host 运行统一的一键收尾；把新生成的 GTX1050 ZIP 完整解压，只运行其中
+   唯一的 EXE：
+
+   ```bash
+   ./deploy/finish-vgpu-install.sh 3
+   ```
+
+   工具核验 V3 driver receipt 后会自行恢复严格身份并冷启动。最终启动不要再手工
+   加 `--spoof`；启动器会在磁盘干净离线时同步 EDID。第一次尚未建立 NVIDIA
+   显示器缓存时，先让 Windows 完成一次枚举和完整关机，下一次冷启动再完成同步。
+
+如果 Code 0 已恢复且 NVIDIA 已列出 1920×1080，但当前模式仍不对，应在
+本地 console 的 Windows 显示设置或 NVIDIA 控制面板中选择 1920×1080 @ 60 Hz；
+不要根据 RDP 会话里的模式列表改 EDID。
+
+### RDP 只用于临时调试
+
+RDP 可用于传文件、运行一次性安装器和查看非显示会话状态，但不能作为
+最终分辨率、模式列表或帧率验收环境。RDP 可引入 Microsoft Remote Display /
+Indirect Display 设备，切换 Windows session，并通过编码和网络独立限制画面频率。
+
+最终验收前应断开 RDP，回到 QEMU SDL 本地 console，再结合 guest
+`Win32_VideoController` / `nvidia-smi` 和 host `nvidia-smi vgpu -q` 判定。WinRM
+Session 0 可用来查静态 PnP identity、驱动版本和 Code 0，但它也不能代替
+本地 console 的分辨率与动态帧率验收。
 
 ## fastapi-dls 侧
 

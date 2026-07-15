@@ -1,0 +1,41 @@
+# Tesla V100 host resource example for deploy/start-vm.sh.
+#
+# Copy this file to deploy/host/vgpu-host.conf, or point
+# VGPU_HOST_CONFIG at another readable file.  The example is intentionally
+# not enabled in the repository because the exact V100 SKU and BDF must be
+# confirmed on the target host.
+
+# "auto" searches all /sys/class/mdev_bus parents and succeeds only when the
+# selected profile is unique.  On a multi-V100 host, replace it with the
+# explicit domain:bus:slot.function, for example 0000:65:00.0.
+VGPU_MGPU=auto
+
+# Common 16 GiB PCIe V100, 2 GiB Q-series graphics vGPU.
+VGPU_RESOURCE_PROFILE='V100-2Q'
+VGPU_RESOURCE_FB_MB=2048
+VGPU_TOTAL_FB_MB=16384
+
+# Other 2 GiB Q-series names (select exactly one for the installed SKU):
+#   PCIe 32 GiB : V100D-2Q       (VGPU_TOTAL_FB_MB=32768)
+#   SXM2 16 GiB : V100X-2Q       (VGPU_TOTAL_FB_MB=16384)
+#   SXM2 32 GiB : V100DX-2Q      (VGPU_TOTAL_FB_MB=32768)
+#   V100S       : V100S-2Q       (set total from nvidia-smi)
+#   FHHL        : V100L-2Q       (VGPU_TOTAL_FB_MB=16384)
+
+# Check both NVIDIA's available_instances and the per-parent framebuffer sum.
+VGPU_CAPACITY_CHECK=both
+
+# intervaltime/vgaintervaltime are undocumented R535 plugin parameters that
+# have only been verified on this project's RTX 2080 host.  Keep them disabled
+# until the physical V100 console path has been tested.
+VGPU_CONSOLE_INTERVAL_US=0
+
+# Official V100 hosts do not load vgpu_unlock, so no per-mdev marketing-name
+# backend exists.  Do not make mdev allocation depend on its config file.
+VGPU_MDEV_IDENTITY_MODE=off
+
+# A genuine V100 does not need vgpu_unlock or the RTX6000 profile override.
+# Keep the real vGPU PCI identity for initial driver validation.  Per-VM config
+# or CLI --spoof-mode may override this later if consumer-card spoofing is
+# deliberately required.
+SPOOF_MODE=off

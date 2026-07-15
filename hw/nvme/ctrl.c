@@ -88,6 +88,18 @@
  *   Identify Controller data structure in CMIC (Controller Multi-path I/O and
  *   Namespace Sharing Capabilities).
  *
+ * - `use-samsung-id`
+ *   Advertises the Samsung PCI identity and NVMe revision 1.3. For an
+ *   automatically created subsystem, SUBNQN is derived from the model number
+ *   and serial reported by Identify Controller. An explicitly configured
+ *   subsystem keeps its configured NQN.
+ *
+ * - `use-wd-id`
+ *   Advertises the first-generation WD Black PCI identity, PCIe Gen3 x4
+ *   link and NVMe revision 1.2.0. An empty SUBNQN is permitted by that
+ *   revision and avoids inventing an unverified vendor NQN; an explicitly
+ *   configured subsystem keeps its configured NQN.
+ *
  * - `aerl`
  *   The Asynchronous Event Request Limit (AERL). Indicates the maximum number
  *   of concurrently outstanding Asynchronous Event Request commands support
@@ -216,11 +228,17 @@
 #define NVME_MAX_IOQPAIRS 0xffff
 #define NVME_DB_SIZE  4
 #define NVME_SPEC_VER 0x00010400
+#define NVME_SAMSUNG_SPEC_VER 0x00010300
+#define NVME_WD_SPEC_VER 0x00010200
+#define NVME_NQN_MAX_LEN 223
+#define NVME_SAMSUNG_NQN_PREFIX "nqn.1994-11.com.samsung:nvme:"
 #define NVME_CMB_BIR 2
 #define NVME_PMR_BIR 4
 #define NVME_TEMPERATURE 0x143
 #define NVME_TEMPERATURE_WARNING 0x157
 #define NVME_TEMPERATURE_CRITICAL 0x175
+#define NVME_WD_TEMPERATURE_WARNING 0x166
+#define NVME_WD_TEMPERATURE_CRITICAL 0x169
 #define NVME_NUM_FW_SLOTS 1
 #define NVME_DEFAULT_MAX_ZA_SIZE (128 * KiB)
 #define NVME_VF_RES_GRANULARITY 1
@@ -6421,7 +6439,8 @@ defaults:
         }
 
         if (NVME_TEMP_THSEL(dw11) == NVME_TEMP_THSEL_OVER) {
-            result = NVME_TEMPERATURE_WARNING;
+            result = n->params.use_wd_id ? NVME_WD_TEMPERATURE_WARNING :
+                                           NVME_TEMPERATURE_WARNING;
         }
 
         break;
@@ -8571,6 +8590,22 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
 {
     NvmeParams *params = &n->params;
 
+    if (params->use_samsung_id && params->use_wd_id) {
+        error_setg(errp, "use-samsung-id and use-wd-id are mutually exclusive");
+        return false;
+    }
+    if (params->use_samsung_id || params->use_wd_id) {
+        /* Old machine types inject use-intel-id through compat properties. */
+        params->use_intel_id = false;
+    }
+    if (params->use_wd_id) {
+        params->mdts = 5;
+        if (params->sriov_max_vfs) {
+            error_setg(errp, "use-wd-id is incompatible with SR-IOV");
+            return false;
+        }
+    }
+
     if (params->num_queues) {
         warn_report("num_queues is deprecated; please use max_ioqpairs "
                     "instead");
@@ -8735,7 +8770,9 @@ static void nvme_init_state(NvmeCtrl *n)
     n->sq = g_new0(NvmeSQueue *, n->params.max_ioqpairs + 1);
     n->cq = g_new0(NvmeCQueue *, n->params.max_ioqpairs + 1);
     n->temperature = NVME_TEMPERATURE;
-    n->features.temp_thresh_hi = NVME_TEMPERATURE_WARNING;
+    n->features.temp_thresh_hi = n->params.use_wd_id ?
+                                 NVME_WD_TEMPERATURE_WARNING :
+                                 NVME_TEMPERATURE_WARNING;
     n->starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     n->aer_reqs = g_new0(NvmeRequest *, n->params.aerl + 1);
     QTAILQ_INIT(&n->aer_queue);
@@ -8958,6 +8995,14 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
                      PCI_SUBVENDOR_ID_SAMSUNG_970EVO);
         pci_set_word(pci_conf + PCI_SUBSYSTEM_ID,
                      PCI_SUBDEVICE_ID_SAMSUNG_970EVO);
+    } else if (n->params.use_wd_id) {
+        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_SANDISK);
+        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_WD_BLACK_NVME);
+        pci_set_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID,
+                     PCI_SUBVENDOR_ID_MARVELL_WD_BLACK_NVME);
+        pci_set_word(pci_conf + PCI_SUBSYSTEM_ID,
+                     PCI_SUBDEVICE_ID_MARVELL_WD_BLACK_NVME);
+        pci_config_set_revision(pci_conf, 0x00);
     } else if (n->params.use_intel_id) {
         pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
         pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
@@ -8978,7 +9023,7 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     nvme_add_pm_capability(pci_dev, 0x60);
     pcie_endpoint_cap_init(pci_dev, 0x80);
 
-    if (n->params.use_samsung_id) {
+    if (n->params.use_samsung_id || n->params.use_wd_id) {
         /*
          * Stealth: a real Samsung 9xx / 980 consumer NVMe negotiates PCIe 3.0
          * x4 (8 GT/s, x4). pcie_endpoint_cap_init() leaves the endpoint at the
@@ -8987,7 +9032,7 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
          * claims a Gen3 part — CrystalDiskInfo / Device Manager "PCI link
          * speed" / anti-cheat see an impossible link and flag the VM. Every
          * model in the deploy NVMe pool is Gen3 x4, so advertise that.
-         * (Keep in sync with deploy/scripts/lib/stealth-pools.sh.)
+         * (Keep in sync with deploy/lib/hardware-profiles.sh.)
          */
         pcie_cap_fill_link_ep_usp(pci_dev, QEMU_PCI_EXP_LNK_X4,
                                   QEMU_PCI_EXP_LNK_8GT, false);
@@ -9097,21 +9142,92 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     return true;
 }
 
+/*
+ * Derive a valid, deterministic Samsung NQN from the model and serial that
+ * are actually exposed in Identify Controller.  Components are restricted to
+ * lower-case ASCII letters, digits, and dashes; the hash distinguishes input
+ * strings that normalize to the same component.  The fixed field sizes keep
+ * the completed NQN well below the specification's 223-byte maximum.
+ */
+static void nvme_samsung_nqn_component(char *dst, size_t dst_size,
+                                       const uint8_t *src, size_t src_size,
+                                       const char *fallback)
+{
+    size_t end = src_size;
+    size_t out = 0;
+    bool separator = false;
+
+    while (end && (src[end - 1] == ' ' || src[end - 1] == '\0')) {
+        end--;
+    }
+
+    for (size_t i = 0; i < end && out < dst_size - 1; i++) {
+        uint8_t c = src[i];
+
+        if (g_ascii_isalnum(c)) {
+            if (separator && out < dst_size - 1) {
+                dst[out++] = '-';
+            }
+            separator = false;
+            if (out < dst_size - 1) {
+                dst[out++] = g_ascii_tolower(c);
+            }
+        } else {
+            separator = out != 0;
+        }
+    }
+
+    if (!out) {
+        pstrcpy(dst, dst_size, fallback);
+        return;
+    }
+    dst[out] = '\0';
+}
+
+static uint32_t nvme_samsung_nqn_hash(const NvmeIdCtrl *id)
+{
+    uint32_t hash = 2166136261U;
+
+    for (size_t i = 0; i < sizeof(id->mn); i++) {
+        hash = (hash ^ id->mn[i]) * 16777619U;
+    }
+    for (size_t i = 0; i < sizeof(id->sn); i++) {
+        hash = (hash ^ id->sn[i]) * 16777619U;
+    }
+
+    return hash;
+}
+
+static void nvme_init_samsung_subnqn(NvmeIdCtrl *id)
+{
+    char model[sizeof(id->mn) + 1];
+    char serial[sizeof(id->sn) + 1];
+    int len;
+
+    nvme_samsung_nqn_component(model, sizeof(model), id->mn, sizeof(id->mn),
+                               "model");
+    nvme_samsung_nqn_component(serial, sizeof(serial), id->sn, sizeof(id->sn),
+                               "serial");
+    len = snprintf((char *)id->subnqn, sizeof(id->subnqn),
+                   NVME_SAMSUNG_NQN_PREFIX "%s:%s:%08" PRIx32,
+                   model, serial, nvme_samsung_nqn_hash(id));
+
+    assert(len > 0 && len <= NVME_NQN_MAX_LEN &&
+           (size_t)len < sizeof(id->subnqn));
+}
+
 static void nvme_init_subnqn(NvmeCtrl *n)
 {
     NvmeSubsystem *subsys = n->subsys;
     NvmeIdCtrl *id = &n->id_ctrl;
 
-    if (!subsys) {
-        if (n->params.use_samsung_id) {
-            /* Samsung-style NQN format used by real 970 EVO controllers */
-            snprintf((char *)id->subnqn, sizeof(id->subnqn),
-                     "nqn.1994-11.com.samsung:nvme:970EVO:%s:%s",
-                     "M.2", n->params.serial);
-        } else {
-            snprintf((char *)id->subnqn, sizeof(id->subnqn),
-                     "nqn.2019-08.org.qemu:%s", n->params.serial);
-        }
+    if (n->params.use_samsung_id && (!subsys || n->subsys_auto)) {
+        nvme_init_samsung_subnqn(id);
+    } else if (n->params.use_wd_id && (!subsys || n->subsys_auto)) {
+        memset(id->subnqn, 0, sizeof(id->subnqn));
+    } else if (!subsys) {
+        snprintf((char *)id->subnqn, sizeof(id->subnqn),
+                 "nqn.2019-08.org.qemu:%s", n->params.serial);
     } else {
         pstrcpy((char *)id->subnqn, sizeof(id->subnqn), (char*)subsys->subnqn);
     }
@@ -9124,12 +9240,26 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     uint64_t cap = ldq_le_p(&n->bar.cap);
     NvmeSecCtrlEntry *sctrl = nvme_sctrl(n);
     uint32_t ctratt = le32_to_cpu(id->ctratt);
+    uint32_t spec_ver = n->params.use_samsung_id ?
+                        NVME_SAMSUNG_SPEC_VER :
+                        n->params.use_wd_id ? NVME_WD_SPEC_VER : NVME_SPEC_VER;
     uint16_t oacs;
 
     memcpy(n->cse.acs, nvme_cse_acs_default, sizeof(n->cse.acs));
     memcpy(n->cse.iocs.nvm, nvme_cse_iocs_nvm_default, sizeof(n->cse.iocs.nvm));
     memcpy(n->cse.iocs.zoned, nvme_cse_iocs_zoned_default,
            sizeof(n->cse.iocs.zoned));
+    if (n->params.use_wd_id) {
+        n->cse.acs[NVME_ADM_CMD_NS_ATTACHMENT] = 0;
+        n->cse.acs[NVME_ADM_CMD_DIRECTIVE_SEND] = 0;
+        n->cse.acs[NVME_ADM_CMD_DIRECTIVE_RECV] = 0;
+        n->cse.iocs.nvm[NVME_CMD_WRITE_ZEROES] = 0;
+        n->cse.iocs.nvm[NVME_CMD_VERIFY] = 0;
+        n->cse.iocs.nvm[NVME_CMD_COPY] = 0;
+        n->cse.iocs.nvm[NVME_CMD_COMPARE] = 0;
+        n->cse.iocs.nvm[NVME_CMD_IO_MGMT_RECV] = 0;
+        n->cse.iocs.nvm[NVME_CMD_IO_MGMT_SEND] = 0;
+    }
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
@@ -9141,6 +9271,9 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     } else if (n->params.use_samsung_id) {
         strpadcpy((char *)id->mn, sizeof(id->mn),
                   "Samsung SSD 970 PRO 512GB", ' ');
+    } else if (n->params.use_wd_id) {
+        strpadcpy((char *)id->mn, sizeof(id->mn),
+                  "WDC WDS512G1X0C-00ENX0", ' ');
     } else {
         strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe Ctrl", ' ');
     }
@@ -9149,6 +9282,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
                   n->params.firmware_rev, ' ');
     } else if (n->params.use_samsung_id) {
         strpadcpy((char *)id->fr, sizeof(id->fr), "1B2QEXE7", ' ');
+    } else if (n->params.use_wd_id) {
+        strpadcpy((char *)id->fr, sizeof(id->fr), "B35900WD", ' ');
     } else {
         strpadcpy((char *)id->fr, sizeof(id->fr), QEMU_VERSION, ' ');
     }
@@ -9158,18 +9293,25 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 
     id->oaes = cpu_to_le32(NVME_OAES_NS_ATTR);
 
-    ctratt |= NVME_CTRATT_ELBAS;
+    if (!n->params.use_wd_id) {
+        ctratt |= NVME_CTRATT_ELBAS;
+    }
     if (n->params.ctratt.mem) {
         ctratt |= NVME_CTRATT_MEM;
     }
     id->ctratt = cpu_to_le32(ctratt);
 
-    id->rab = 6;
+    id->rab = n->params.use_wd_id ? 2 : 6;
 
     if (n->params.use_samsung_id) {
         /* Samsung IEEE OUI 00-25-38 (Samsung Electronics) */
         id->ieee[0] = 0x38;
         id->ieee[1] = 0x25;
+        id->ieee[2] = 0x00;
+    } else if (n->params.use_wd_id) {
+        /* SanDisk/Western Digital IEEE OUI 00-1B-44. */
+        id->ieee[0] = 0x44;
+        id->ieee[1] = 0x1b;
         id->ieee[2] = 0x00;
     } else if (n->params.use_intel_id) {
         id->ieee[0] = 0xb3;
@@ -9181,13 +9323,18 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
         id->ieee[2] = 0x52;
     }
 
-    id->mdts = n->params.mdts;
-    id->ver = cpu_to_le32(NVME_SPEC_VER);
+    id->mdts = n->params.use_wd_id ? 5 : n->params.mdts;
+    id->ver = cpu_to_le32(spec_ver);
 
-    oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DIRECTIVES |
-           NVME_OACS_SECURITY;
+    if (n->params.use_wd_id) {
+        /* Keep reserved/post-1.2 capability bits clear for this controller. */
+        oacs = NVME_OACS_FORMAT | NVME_OACS_SECURITY;
+    } else {
+        oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DIRECTIVES |
+               NVME_OACS_SECURITY;
+    }
 
-    if (n->params.dbcs) {
+    if (n->params.dbcs && !n->params.use_wd_id) {
         oacs |= NVME_OACS_DBCS;
 
         n->cse.acs[NVME_ADM_CMD_DBBUF_CONFIG] = NVME_CMD_EFF_CSUPP;
@@ -9201,7 +9348,9 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 
     id->oacs = cpu_to_le16(oacs);
 
-    id->cntrltype = 0x1;
+    if (!n->params.use_wd_id) {
+        id->cntrltype = 0x1;
+    }
 
     /*
      * Because the controller always completes the Abort command immediately,
@@ -9217,19 +9366,30 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->acl = 3;
     id->aerl = n->params.aerl;
     id->frmw = (NVME_NUM_FW_SLOTS << 1) | NVME_FRMW_SLOT1_RO;
-    id->lpa = NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED;
+    id->lpa = n->params.use_wd_id ? NVME_LPA_CSE :
+              NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED;
 
-    /* recommended default value (~70 C) */
-    id->wctemp = cpu_to_le16(NVME_TEMPERATURE_WARNING);
-    id->cctemp = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
+    if (n->params.use_wd_id) {
+        id->wctemp = cpu_to_le16(NVME_WD_TEMPERATURE_WARNING);
+        id->cctemp = cpu_to_le16(NVME_WD_TEMPERATURE_CRITICAL);
+    } else {
+        /* recommended default value (~70 C) */
+        id->wctemp = cpu_to_le16(NVME_TEMPERATURE_WARNING);
+        id->cctemp = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
+    }
 
     id->sqes = (NVME_SQES << 4) | NVME_SQES;
     id->cqes = (NVME_CQES << 4) | NVME_CQES;
-    id->nn = cpu_to_le32(NVME_MAX_NAMESPACES);
-    id->oncs = cpu_to_le16(NVME_ONCS_WRITE_ZEROES | NVME_ONCS_TIMESTAMP |
-                           NVME_ONCS_FEATURES | NVME_ONCS_DSM |
-                           NVME_ONCS_COMPARE | NVME_ONCS_COPY |
-                           NVME_ONCS_NVMCSA | NVME_ONCS_NVMAFC);
+    id->nn = cpu_to_le32(n->params.use_wd_id ? 1 : NVME_MAX_NAMESPACES);
+    if (n->params.use_wd_id) {
+        id->oncs = cpu_to_le16(NVME_ONCS_FEATURES | NVME_ONCS_DSM);
+    } else {
+        id->oncs = cpu_to_le16(NVME_ONCS_WRITE_ZEROES |
+                               NVME_ONCS_TIMESTAMP | NVME_ONCS_FEATURES |
+                               NVME_ONCS_DSM | NVME_ONCS_COMPARE |
+                               NVME_ONCS_COPY | NVME_ONCS_NVMCSA |
+                               NVME_ONCS_NVMAFC);
+    }
 
     /*
      * NOTE: If this device ever supports a command set that does NOT use 0x0
@@ -9238,12 +9398,17 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
      *
      * See comment in nvme_io_cmd.
      */
-    id->vwc = NVME_VWC_NSID_BROADCAST_SUPPORT | NVME_VWC_PRESENT;
+    id->vwc = n->params.use_wd_id ? NVME_VWC_PRESENT :
+              NVME_VWC_NSID_BROADCAST_SUPPORT | NVME_VWC_PRESENT;
 
-    id->ocfs = cpu_to_le16(NVME_OCFS_COPY_FORMAT_0 | NVME_OCFS_COPY_FORMAT_1 |
-                            NVME_OCFS_COPY_FORMAT_2 | NVME_OCFS_COPY_FORMAT_3);
-    id->sgls = cpu_to_le32(NVME_CTRL_SGLS_SUPPORT_NO_ALIGN |
-                           NVME_CTRL_SGLS_MPTR_SGL);
+    if (!n->params.use_wd_id) {
+        id->ocfs = cpu_to_le16(NVME_OCFS_COPY_FORMAT_0 |
+                               NVME_OCFS_COPY_FORMAT_1 |
+                               NVME_OCFS_COPY_FORMAT_2 |
+                               NVME_OCFS_COPY_FORMAT_3);
+        id->sgls = cpu_to_le32(NVME_CTRL_SGLS_SUPPORT_NO_ALIGN |
+                               NVME_CTRL_SGLS_MPTR_SGL);
+    }
 
     nvme_init_subnqn(n);
 
@@ -9255,13 +9420,15 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     NVME_CAP_SET_CQR(cap, 1);
     NVME_CAP_SET_TO(cap, 0xf);
     NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_NCSS);
-    NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_IOCSS);
+    if (!n->params.use_wd_id) {
+        NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_IOCSS);
+    }
     NVME_CAP_SET_MPSMAX(cap, 4);
     NVME_CAP_SET_CMBS(cap, n->params.cmb_size_mb ? 1 : 0);
     NVME_CAP_SET_PMRS(cap, n->pmr.dev ? 1 : 0);
     stq_le_p(&n->bar.cap, cap);
 
-    stl_le_p(&n->bar.vs, NVME_SPEC_VER);
+    stl_le_p(&n->bar.vs, spec_ver);
     n->bar.intmc = n->bar.intms = 0;
 
     if (pci_is_vf(pci_dev) && !sctrl->scs) {
@@ -9276,6 +9443,7 @@ static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
     if (!n->subsys) {
         DeviceState *dev = qdev_new(TYPE_NVME_SUBSYS);
 
+        n->subsys_auto = true;
         qdev_prop_set_string(dev, "nqn", n->params.serial);
 
         if (!qdev_realize(dev, NULL, errp)) {
@@ -9338,6 +9506,7 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
          */
         n->params.serial = g_strdup(pn->params.serial);
         n->subsys = pn->subsys;
+        n->subsys_auto = pn->subsys_auto;
 
         /*
          * Assigning this link (strong link) causes an `object_unref` later in
@@ -9446,6 +9615,7 @@ static const Property nvme_props[] = {
     DEFINE_PROP_UINT8("vsl", NvmeCtrl, params.vsl, 7),
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
     DEFINE_PROP_BOOL("use-samsung-id", NvmeCtrl, params.use_samsung_id, false),
+    DEFINE_PROP_BOOL("use-wd-id", NvmeCtrl, params.use_wd_id, false),
     DEFINE_PROP_STRING("model-number", NvmeCtrl, params.model_number),
     DEFINE_PROP_STRING("firmware-rev", NvmeCtrl, params.firmware_rev),
     DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),

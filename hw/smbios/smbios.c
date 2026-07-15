@@ -91,7 +91,9 @@ static struct {
     uint64_t current_speed;
     uint64_t processor_id;
     uint16_t external_clock;        /* MHz; 0 = Unknown */
+    uint16_t processor_characteristics; /* SMBIOS Type 4 bit mask */
     uint8_t voltage;                /* SMBIOS encoding, bit7=1 | tenths-of-volt */
+    uint8_t processor_upgrade;      /* SMBIOS processor-upgrade enum */
 } type4 = {
     .max_speed = DEFAULT_CPU_SPEED,
     .current_speed = DEFAULT_CPU_SPEED,
@@ -103,7 +105,9 @@ static struct {
      * (SMBIOS voltage encoding: bit7=1 + tenths-of-volt, so 0x8C = 1.2V.)
      */
     .external_clock = 100,
+    .processor_characteristics = 0xFC,
     .voltage = 0x8C,
+    .processor_upgrade = 0x01, /* Other */
 };
 
 /* type 7 instance for parsing */
@@ -403,6 +407,14 @@ static const QemuOptDesc qemu_smbios_type4_opts[] = {
         .name = "voltage",
         .type = QEMU_OPT_NUMBER,
         .help = "voltage byte (bit7=1 | tenths-of-volt, e.g. 0x8C = 1.2V)",
+    }, {
+        .name = "processor-upgrade",
+        .type = QEMU_OPT_NUMBER,
+        .help = "processor upgrade (socket) type (SMBIOS enum)",
+    }, {
+        .name = "processor-characteristics",
+        .type = QEMU_OPT_NUMBER,
+        .help = "processor characteristics bit mask (SMBIOS enum)",
     },
     { /* end of list */ }
 };
@@ -859,7 +871,7 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance,
     t->max_speed = cpu_to_le16(type4.max_speed);
     t->current_speed = cpu_to_le16(type4.current_speed);
     t->status = 0x41; /* Socket populated, CPU enabled */
-    t->processor_upgrade = 0x01; /* Other */
+    t->processor_upgrade = type4.processor_upgrade;
     /*
      * Point at the matching type 7 (Cache Information) records if they
      * were emitted. Windows Win32_Processor.L[123]CacheSize follows these
@@ -880,10 +892,8 @@ static void smbios_build_type_4_table(MachineState *ms, unsigned instance,
 
     t->thread_count = (threads_per_socket > 255) ? 0xFF : threads_per_socket;
 
-    /* stealth: 64-bit capable + multi-core + hw thread + execute protection
-     * + enhanced virtualization + power/performance control — all bits a
-     * real Ryzen firmware reports. */
-    t->processor_characteristics = cpu_to_le16(0xFC);
+    t->processor_characteristics =
+        cpu_to_le16(type4.processor_characteristics);
     t->processor_family2 = cpu_to_le16(type4.processor_family);
 
     if (tbl_len == SMBIOS_TYPE_4_LEN_V30) {
@@ -1104,17 +1114,53 @@ static void smbios_build_type_16_table(unsigned dimm_cnt)
 #define MAX_T17_EXT_SZ 0x80000000 /* 2P, in Megabytes */
 
 /*
- * stealth: build the Type 17 device-locator string. If loc_pfx contains
- * "%C", substitute the channel letter (A for an even DIMM index, B for odd)
- * and emit it verbatim, e.g. loc_pfx="DIMM_%C2" -> "DIMM_A2"/"DIMM_B2",
- * matching real dual-channel desktop board SMBIOS dumps. Otherwise keep the
- * legacy "<pfx> <instance>" form so unmodified callers are unaffected.
+ * Copy the instance-th item from a pipe-delimited list.  If the list is
+ * shorter than the number of instances, reuse its last item.  Returning
+ * false for a plain string lets callers retain their legacy formatting.
+ */
+static bool smbios_type17_list_item(char *buf, size_t buflen,
+                                    const char *list, unsigned instance)
+{
+    const char *item = list;
+    const char *end;
+    unsigned idx = 0;
+    size_t len;
+
+    if (!list || !strchr(list, '|')) {
+        return false;
+    }
+    if (!buflen) {
+        return true;
+    }
+
+    while ((end = strchr(item, '|')) && idx < instance) {
+        item = end + 1;
+        idx++;
+    }
+    if (!end) {
+        end = item + strlen(item);
+    }
+
+    len = MIN((size_t)(end - item), buflen - 1);
+    memcpy(buf, item, len);
+    buf[len] = '\0';
+    return true;
+}
+
+/*
+ * Build the Type 17 device-locator string.  A pipe-delimited loc_pfx supplies
+ * exact per-slot names.  Otherwise, if loc_pfx contains "%C", substitute the
+ * channel letter (A for an even DIMM index, B for odd), e.g.
+ * loc_pfx="DIMM_%C2" -> "DIMM_A2"/"DIMM_B2".  Plain prefixes retain the
+ * existing "<prefix>_<channel><rank>" formatting.
  */
 static void smbios_type17_locator(char *buf, size_t buflen, unsigned instance)
 {
     const char *pct = type17.loc_pfx ? strstr(type17.loc_pfx, "%C") : NULL;
 
-    if (pct) {
+    if (smbios_type17_list_item(buf, buflen, type17.loc_pfx, instance)) {
+        return;
+    } else if (pct) {
         int pre_len = pct - type17.loc_pfx;
         snprintf(buf, buflen, "%.*s%c%s", pre_len, type17.loc_pfx,
                  (instance & 1) ? 'B' : 'A', pct + 2);
@@ -1189,27 +1235,29 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
     t->device_set = 0; /* Not in a set */
     smbios_type17_locator(loc_str, sizeof(loc_str), instance);
     SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
-    /* Dual-channel support: substitute "%C" in bank string with channel
-     * letter based on DIMM index (A for even, B for odd). This allows a
-     * single -smbios type=17,bank="P0 CHANNEL %C" override to produce
-     * "P0 CHANNEL A" for DIMM 0 and "P0 CHANNEL B" for DIMM 1, matching
-     * real dual-channel Ryzen board SMBIOS dumps. */
+    /*
+     * A pipe-delimited bank value supplies exact per-slot names.  Otherwise,
+     * preserve the existing "%C" channel substitution and prefix behavior.
+     */
     {
         char bank_str[128];
-        const char *pct;
         const char *bank = type17.bank ? type17.bank : "BANK";
+        const char *pct = strstr(bank, "%C");
 
-        if ((pct = strstr(bank, "%C")) != NULL) {
-            int pre_len = pct - bank;
-            snprintf(bank_str, sizeof(bank_str), "%.*s%c%s",
-                     pre_len, bank,
-                     (instance & 1) ? 'B' : 'A', pct + 2);
-        } else {
-            char channel = 'A' + (instance & 1);
-            unsigned rank = (instance >> 1) + 1;
+        if (!smbios_type17_list_item(bank_str, sizeof(bank_str), bank,
+                                     instance)) {
+            if (pct) {
+                int pre_len = pct - bank;
+                snprintf(bank_str, sizeof(bank_str), "%.*s%c%s",
+                         pre_len, bank,
+                         (instance & 1) ? 'B' : 'A', pct + 2);
+            } else {
+                char channel = 'A' + (instance & 1);
+                unsigned rank = (instance >> 1) + 1;
 
-            snprintf(bank_str, sizeof(bank_str), "%s_Channel%c-DIMM%u",
-                     bank, channel, rank);
+                snprintf(bank_str, sizeof(bank_str), "%s_Channel%c-DIMM%u",
+                         bank, channel, rank);
+            }
         }
         SMBIOS_TABLE_SET_STR(17, bank_locator_str, bank_str);
     }
@@ -1254,8 +1302,12 @@ static void smbios_build_type_17_empty_table(unsigned instance)
     SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
     {
         char bank_str[128];
-        const char *pct;
-        if (type17.bank && (pct = strstr(type17.bank, "%C")) != NULL) {
+        const char *pct = type17.bank ? strstr(type17.bank, "%C") : NULL;
+
+        if (smbios_type17_list_item(bank_str, sizeof(bank_str), type17.bank,
+                                    instance)) {
+            SMBIOS_TABLE_SET_STR(17, bank_locator_str, bank_str);
+        } else if (pct) {
             int pre_len = pct - type17.bank;
             snprintf(bank_str, sizeof(bank_str), "%.*s%c%s",
                      pre_len, type17.bank,
@@ -1708,6 +1760,7 @@ static bool save_opt_list(size_t *ndest, char ***dest, QemuOpts *opts,
 void smbios_entry_add(QemuOpts *opts, Error **errp)
 {
     const char *val;
+    uint64_t num;
 
     val = qemu_opt_get(opts, "file");
     if (val) {
@@ -1874,6 +1927,25 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
                                                        type4.external_clock);
             type4.voltage = qemu_opt_get_number(opts, "voltage",
                                                 type4.voltage);
+            num = qemu_opt_get_number(opts, "processor-upgrade",
+                                      type4.processor_upgrade);
+            if (num > UINT8_MAX) {
+                error_setg(errp,
+                           "SMBIOS processor upgrade is too large (> %d)",
+                           UINT8_MAX);
+                return;
+            }
+            type4.processor_upgrade = num;
+            num = qemu_opt_get_number(opts, "processor-characteristics",
+                                      type4.processor_characteristics);
+            if (num > UINT16_MAX) {
+                error_setg(errp,
+                           "SMBIOS processor characteristics are too large "
+                           "(> %d)",
+                           UINT16_MAX);
+                return;
+            }
+            type4.processor_characteristics = num;
             return;
         case 7: {
             if (!qemu_opts_validate(opts, qemu_smbios_type7_opts, errp)) {

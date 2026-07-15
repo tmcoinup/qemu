@@ -1,0 +1,45 @@
+# Add the generic OVMF security services that are present in newer OVMF builds.
+#
+# Keep RngDxe's BaseRngLib override: the platform-wide OVMF RngLib instance is
+# timer based, while upstream wires the generic protocol provider to the CPU RNG.
+# VirtioRngDxe remains installed as a separate, device-backed protocol provider.
+--- a/OvmfPkg/OvmfPkgX64.dsc
++++ b/OvmfPkg/OvmfPkgX64.dsc
+@@ -1084,11 +1084,21 @@
+   SecurityPkg/Tcg/TdTcg2Dxe/TdTcg2Dxe.inf {
+     <LibraryClasses>
+       HashLib|SecurityPkg/Library/HashLibTdx/HashLibTdx.inf
+       NULL|SecurityPkg/Library/HashInstanceLibSha384/HashInstanceLibSha384.inf
+   }
+ !endif
+ 
++  #
++  # Generic UEFI security services
++  #
++  SecurityPkg/Tcg/MemoryOverwriteControl/TcgMor.inf
++  SecurityPkg/Hash2DxeCrypto/Hash2DxeCrypto.inf
++  SecurityPkg/RandomNumberGenerator/RngDxe/RngDxe.inf {
++    <LibraryClasses>
++      RngLib|MdePkg/Library/BaseRngLib/BaseRngLib.inf
++  }
++
+   #
+   # TPM support
+   #
+ !include OvmfPkg/Include/Dsc/OvmfTpmComponentsDxe.dsc.inc
+--- a/OvmfPkg/OvmfPkgX64.fdf
++++ b/OvmfPkg/OvmfPkgX64.fdf
+@@ -254,6 +254,13 @@
+ INF  MdeModulePkg/Universal/Metronome/Metronome.inf
+ INF  PcAtChipsetPkg/PcatRealTimeClockRuntimeDxe/PcatRealTimeClockRuntimeDxe.inf
+ 
++#
++# Generic UEFI security services
++#
++INF SecurityPkg/Tcg/MemoryOverwriteControl/TcgMor.inf
++INF SecurityPkg/Hash2DxeCrypto/Hash2DxeCrypto.inf
++INF SecurityPkg/RandomNumberGenerator/RngDxe/RngDxe.inf
++
+ INF  OvmfPkg/VirtioPciDeviceDxe/VirtioPciDeviceDxe.inf
+ INF  OvmfPkg/Virtio10Dxe/Virtio10.inf
+ INF  OvmfPkg/VirtioBlkDxe/VirtioBlk.inf

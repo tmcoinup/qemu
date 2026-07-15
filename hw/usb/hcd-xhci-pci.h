@@ -41,9 +41,11 @@ typedef struct XHCIPciState {
     OnOffAuto msi;
     OnOffAuto msix;
     bool conditional_intr_mapping;
-    /* stealth: 可选 PCI ID 覆盖。0xFFFFFFFF = 沿用 class_init 的默认值
-     * (qemu-xhci 默认 AMD 1022:43BB)。启动脚本按平台 (AMD/Intel) 注入，
-     * 让 xHCI 控制器与 CPU/主板画像同厂商，避免跨表矛盾。 */
+    /*
+     * Optional platform PCI identity. 0xFFFFFFFF keeps the class default
+     * (Red Hat 1B36:000D for qemu-xhci). Launch scripts inject an AMD or
+     * Intel identity to match the selected CPU and mainboard profile.
+     */
     uint32_t stealth_vendor_id;
     uint32_t stealth_device_id;
     uint32_t stealth_revision;

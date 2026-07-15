@@ -14,12 +14,12 @@
        reinstall via the patched INF.
 
 .EXAMPLE
-  .\inf-patch.ps1 -Profile gtx1050_2gb `
+  .\inf-patch.ps1 -Profile all_2gb `
                   -DriverRoot 'C:\NVIDIA\DisplayDriver\553.74\International\Display.Driver'
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('gtx1050_2gb','gt1030_2gb')]
+    [Parameter(Mandatory)][ValidateSet('all_2gb','gtx750ti_2gb','gtx1050_2gb','gt1030_2gb')]
     [string]$Profile,
     [Parameter(Mandatory)][string]$DriverRoot,
     [switch]$SkipReinstall
@@ -31,10 +31,16 @@ if (-not ([Security.Principal.WindowsPrincipal] `
     throw 'Must run as Administrator'
 }
 
-$targets = @{
+$targetCatalog = @{
+    'gtx750ti_2gb' = @{ Hex = '1380'; Name = 'NVIDIA GeForce GTX 750 Ti' }
     'gtx1050_2gb' = @{ Hex = '1C81'; Name = 'NVIDIA GeForce GTX 1050' }
     'gt1030_2gb'  = @{ Hex = '1D01'; Name = 'NVIDIA GeForce GT 1030' }
-}[$Profile]
+}
+$targets = if ($Profile -eq 'all_2gb') {
+    @($targetCatalog.Values)
+} else {
+    @($targetCatalog[$Profile])
+}
 
 $infs = Get-ChildItem -Path $DriverRoot -Filter 'nvdm*.inf' -Recurse
 if ($infs.Count -eq 0) { throw "No nvdm*.inf found in $DriverRoot" }
@@ -45,25 +51,31 @@ foreach ($inf in $infs) {
     if (-not (Test-Path $bak)) { Copy-Item $inf.FullName $bak }
 
     $text = Get-Content -Raw -LiteralPath $inf.FullName
-    $strTag  = "NVIDIA_DEV.$($targets.Hex)"
-    $strLine = "$strTag = `"$($targets.Name)`""
+    foreach ($target in $targets) {
+        $strTag  = "NVIDIA_DEV.$($target.Hex)"
+        $strLine = "$strTag = `"$($target.Name)`""
 
-    # 1) Append to [Strings]
-    if ($text -notmatch [regex]::Escape($strTag)) {
+        # 1) Append to [Strings]
+        if ($text -notmatch [regex]::Escape($strTag)) {
+            $text = [regex]::Replace(
+                $text, '(\r?\n\[Strings\]\r?\n)',
+                "`$1$strLine`r`n", 'IgnoreCase')
+        }
+
+        # 2) Append entries under every [NVIDIA_Devices.NTamd64.*] section
+        $devBlock = "%NVIDIA_DEV.$($target.Hex)% = Section400, PCI\VEN_10DE&DEV_$($target.Hex)"
+        $targetHex = $target.Hex
         $text = [regex]::Replace(
-            $text, '(\r?\n\[Strings\]\r?\n)',
-            "`$1$strLine`r`n", 'IgnoreCase')
+            $text,
+            '(?ms)(^\[NVIDIA_Devices\.NTamd64[^\]]*\]\r?\n)(.*?)(?=^\[|\z)',
+            { param($m)
+              if ($m.Groups[2].Value -match [regex]::Escape("DEV_$targetHex")) {
+                  $m.Value
+              } else {
+                  $m.Groups[1].Value + $devBlock + "`r`n" + $m.Groups[2].Value
+              }
+            })
     }
-
-    # 2) Append entries under every [NVIDIA_Devices.NTamd64.*] section
-    $devBlock = "%NVIDIA_DEV.$($targets.Hex)% = Section400, PCI\VEN_10DE&DEV_$($targets.Hex)"
-    $text = [regex]::Replace(
-        $text,
-        '(\[NVIDIA_Devices\.NTamd64[^\]]*\]\r?\n)',
-        { param($m)
-          if ($m.Value -match [regex]::Escape("DEV_$($targets.Hex)")) { $m.Value }
-          else { $m.Value + $devBlock + "`r`n" }
-        })
 
     Set-Content -LiteralPath $inf.FullName -Value $text -Encoding ASCII -NoNewline
 }

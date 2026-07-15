@@ -71,6 +71,7 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     SDL_RenderClear(scon->real_renderer);
     SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
     SDL_RenderPresent(scon->real_renderer);
+    sdl2_note_present(scon);
 }
 
 void sdl2_2d_switch(DisplayChangeListener *dcl,

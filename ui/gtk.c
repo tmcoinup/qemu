@@ -772,7 +772,10 @@ static void gd_resize_event(GtkGLArea *area,
     double pw = width, ph = height;
     double sx = vc->gfx.scale_x, sy = vc->gfx.scale_y;
     GdkWindow *window = gtk_widget_get_window(GTK_WIDGET(area));
-    const int gs = gdk_window_get_scale_factor(window);
+    GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(area));
+    GdkMonitor *monitor = window ?
+        gdk_display_get_monitor_at_window(display, window) : NULL;
+    const int gs = monitor ? gdk_monitor_get_scale_factor(monitor) : 1;
 
     if (!vc->s->free_scale && !vc->s->full_screen) {
         pw /= sx;
@@ -797,7 +800,8 @@ void gd_update_monitor_refresh_rate(VirtualConsole *vc, GtkWidget *widget)
     if (win) {
         GdkDisplay *dpy = gtk_widget_get_display(widget);
         GdkMonitor *monitor = gdk_display_get_monitor_at_window(dpy, win);
-        refresh_rate = gdk_monitor_get_refresh_rate(monitor); /* [mHz] */
+        refresh_rate = monitor ?
+            gdk_monitor_get_refresh_rate(monitor) : 0; /* [mHz] */
     } else {
         refresh_rate = 0;
     }
@@ -1046,6 +1050,9 @@ static gboolean gd_motion_event(GtkWidget *widget, GdkEventMotion *motion,
         int xr = (int)motion->x_root;
         int yr = (int)motion->y_root;
 
+        if (!monitor) {
+            return TRUE;
+        }
         gdk_monitor_get_geometry(monitor, &geometry);
 
         /* In relative mode check to see if client pointer hit

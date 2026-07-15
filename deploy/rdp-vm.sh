@@ -22,6 +22,9 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
+# shellcheck source=lib/vm-storage.sh
+source "$here/lib/vm-storage.sh"
+vm_storage_init
 
 VM_ID="${1:-}"
 IP_OVERRIDE="${2:-}"
@@ -46,7 +49,7 @@ EOF
     exit 2
 fi
 
-CONF="${VM_ROOT:-/home/ubuntu/images/vms}/configs/vm${VM_ID}.conf"
+CONF=$(vm_storage_config_path "$VM_ID")
 [[ -f "$CONF" ]] || { echo "$CONF 不存在" >&2; exit 1; }
 # shellcheck source=/dev/null
 source "$CONF"

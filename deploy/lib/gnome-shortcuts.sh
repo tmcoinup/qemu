@@ -202,7 +202,10 @@ gnome_super_shortcuts_restore_state() {
 
 gnome_super_shortcuts_restore_stale() {
     local state_file
-    for state_file in /tmp/qemu-stream-client-"$(id -u)"-*.gnome-super; do
+    for state_file in \
+        /tmp/qemu-stream-client-"$(id -u)"-*.gnome-super \
+        /tmp/qemu-sdl-"$(id -u)"-*.gnome-super
+    do
         [[ -e "$state_file" ]] || continue
         gnome_super_shortcuts_restore_state "$state_file"
     done

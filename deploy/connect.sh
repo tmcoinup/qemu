@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 #
-# connect.sh — connect host viewer to guest.
+# connect.sh — legacy ivshmem/relay viewer (not used by default vGPU display).
 #
-# Transport: native DXGI Desktop Duplication → 32x32 dirty-tile raw
+# Default `start-vm.sh` uses vGPU display=on + QEMU SDL (`--gtk` is optional) and does not call
+# this script.  This helper remains for `--legacy-shmem` / `--rdp` debugging.
+#
+# Legacy transport: native DXGI Desktop Duplication → 32x32 dirty-tile raw
 # BGRA → ivshmem ring → host SDL2 viewer (stream-client/stream_client_dda).
 # Input flows back through ivshmem input ring → relay → loopback
 # AudioSvcHost → Win32 SendInput.

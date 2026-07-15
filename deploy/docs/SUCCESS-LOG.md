@@ -1,8 +1,37 @@
-# vGPU 16.4 + patcher → guest 显示 GT 1030 全流程心得
+# vGPU 16.4 guest 身份验证记录
 
-记录日期 2026-04-23。本机 Ubuntu 24.04 + Xeon E5-2696 v4 + RTX 2080 魔改 16GB + AMD RX 570。
+## 2026-07-15：VM3 严格 GTX 1050 身份已验证
 
-## 成功状态
+本次是 VM3 的当前验证结果，不是将底层物理 GPU 或 mdev 资源改成了
+GTX 1050。Guest 可见身份、驱动绑定、显示模式和 host FRL 状态分别验收：
+
+| 项 | VM3 已验证值 |
+|---|---|
+| Guest 产品名 | `NVIDIA GeForce GTX 1050` / GP107 |
+| QEMU 外层 PCI identity | `10DE:1C81`, subsystem `1028:11C0` |
+| NVIDIA 内部 per-mdev identity | `vdev_id=0x1C8111C0`, `pdev_id=0x1C81` |
+| Guest driver | GRID 538.33 / `31.0.15.3833`, `nvlddmkm` Running, Device Manager Code 0 |
+| Guest 显存 | 2048 MiB |
+| 本地 console 分辨率 | 1920×1080 @ 59/60 Hz |
+| Host license 状态 | `Unlicensed`；GeForce 身份下 NVIDIA 控制面板不显示 vGPU 激活页 |
+| Host frame-rate limiter | per-mdev `frl_enabled=0`；`nvidia-smi vgpu -q` 显示 `Frame Rate Limit: N/A` |
+| 动态画面抽查 | WinSAT 动态 workload 下 SDL Present 观察值明确高于 3 FPS |
+| Host backing resource | 仍是 `nvidia-257/2048MB` mdev；未改变物理 GPU、调度份额或计算能力 |
+
+GPU-Z 已同时报告 `DEV_1C81 / SUBSYS_11C01028`、GP107、2048 MB 和 538.33；
+Windows 不再回退到 Microsoft Basic Display Adapter，并恢复了 1920×1080 模式。
+`Unlicensed` 没有被伪造成 `Licensed`；本次解决的是客户机严格消费卡身份与
+3 FPS 限制，不是 NVIDIA 正式授权状态。
+
+上述动态抽查只足以排除“被固定在 3 FPS”，不是完整 GPU 跑分，也不代表
+所有 workload 都能持续 60 FPS。REGION console、SDL Present 频率和
+guest 实际渲染帧率仍是三个不同的量。
+
+## 2026-04-23 历史 GT 1030 成功状态
+
+以下 GT 1030 / `DEV_1D01` 内容是 2026-04-23 的历史记录，用于保留当时的
+patcher 经验；它不是 2026-07-15 VM3 的当前配置或 GTX 1050 验收标准。
+当时主机为 Ubuntu 24.04 + Xeon E5-2696 v4 + RTX 2080 魔改 16GB + AMD RX 570。
 
 | 项 | 值 |
 |----|----|
@@ -165,22 +194,26 @@ ls /sys/bus/pci/devices/0000:04:00.0/mdev_supported_types/   # nvidia-257 RTX600
 
 ## 光驱伪装 (2026-04-23 补)
 
-Q35 machine 自带板载 ICH9-AHCI (`VEN_8086&DEV_2922`)，其 `ide.0` bus 默认被 QEMU 自动挂一个空 ATAPI CDROM。Windows Device Manager 里显示 `QEMU QEMU DVD-ROM`，是最明显的虚拟化指纹之一。
+Q35 machine 自带板载 ICH9-AHCI (`VEN_8086&DEV_2922`)，QEMU 默认会在其空闲 AHCI 端口（当前拓扑为 `ide.2`）自动挂一个空 ATAPI CDROM。Windows Device Manager 里显示 `QEMU QEMU DVD-ROM`，是最明显的虚拟化指纹之一。
 
 `-device ide-cd,model=...` 属性已有，但 **ATA/ATAPI INQUIRY 响应走硬编码** (`hw/ide/atapi.c:801-802`)，不读 `s->drive_model_str`。
 
 源码补丁：把 cmd_inquiry 里的 `padstr8(buf+8, 8, "QEMU")` / `padstr8(buf+16, 16, "QEMU DVD-ROM")` 改成读 `s->drive_model_str` 并按首个空格拆分成 vendor(8 byte) + product(16 byte)。
 
-启动脚本：
+启动脚本（2026-07-13 调整）：普通启动不再挂空光驱，并通过
+`-global ide-cd.bootindex=-1` 抑制 QEMU 自动创建默认 CD-ROM；只有
+`--install` 会向 guest 暴露光驱。
 
 ```bash
-# start-vm.sh - 任何模式都挂一个 ide-cd 到板载 ide.0 bus
--drive if=none,id=odd0,media=cdrom,readonly=on       # 生产 (空壳)
--drive if=none,id=odd0,media=cdrom,readonly=on,file=$ISO   # install
+# start-vm.sh - 普通模式：抑制 QEMU 默认空光驱，不创建 ide-cd 设备
+-global ide-cd.bootindex=-1
+
+# start-vm.sh --install：挂安装介质到板载 ide.0 bus
+-drive if=none,id=odd0,media=cdrom,readonly=on,file=$ISO
 -device ide-cd,drive=odd0,bus=ide.0,model=TSSTcorp CDDVDW SH-224DB,serial=R8PG6VCD${VM_ID}23456
 ```
 
-结果：
+安装模式的光驱身份：
 - `SCSI\CDROM&VEN_TSSTCORP&PROD_CDDVDW_SH-224DB` （InstanceId）
 - Win32_CDROMDrive Caption = `TSSTcorp CDDVDW SH-224DB`
 

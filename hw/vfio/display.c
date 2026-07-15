@@ -34,7 +34,145 @@
 #define pwrite_field(_fd, _reg, _ptr, _fld)                             \
     (sizeof(_ptr->_fld) !=                                              \
      pwrite(_fd, &(_ptr->_fld), sizeof(_ptr->_fld),                     \
-            _reg->offset + offsetof(typeof(*_ptr), _fld)))
+           _reg->offset + offsetof(typeof(*_ptr), _fld)))
+
+#define VFIO_REGION_MAX_DIRTY_RUNS       32
+#define VFIO_REGION_FULL_UPDATE_PERCENT  50
+#define VFIO_REGION_FULL_MOTION_PERCENT  75
+#define VFIO_REGION_FULL_MOTION_STREAK    8
+#define VFIO_REGION_COMPARE_BYPASS_FRAMES 60
+
+typedef struct VFIORegionDirtyRun {
+    uint32_t y;
+    uint32_t height;
+} VFIORegionDirtyRun;
+
+static void vfio_display_region_shadow_reset(VFIODisplay *dpy)
+{
+    g_clear_pointer(&dpy->region.shadow, g_free);
+    dpy->region.shadow_size = 0;
+    dpy->region.shadow_width = 0;
+    dpy->region.shadow_height = 0;
+    dpy->region.shadow_stride = 0;
+    dpy->region.shadow_row_bytes = 0;
+    dpy->region.shadow_format = 0;
+    dpy->region.full_motion_streak = 0;
+    dpy->region.compare_bypass_frames = 0;
+    dpy->region.shadow_valid = false;
+}
+
+static bool vfio_display_region_shadow_prepare(
+    VFIODisplay *dpy, const struct vfio_device_gfx_plane_info *plane,
+    pixman_format_code_t format)
+{
+    uint32_t bytes_per_pixel = DIV_ROUND_UP(PIXMAN_FORMAT_BPP(format), 8);
+    size_t row_bytes;
+    size_t shadow_size;
+
+    if (!bytes_per_pixel || plane->width > SIZE_MAX / bytes_per_pixel) {
+        return false;
+    }
+    row_bytes = plane->width * bytes_per_pixel;
+    if (row_bytes > plane->stride ||
+        (plane->height && plane->stride > plane->size / plane->height) ||
+        (plane->height && row_bytes > SIZE_MAX / plane->height)) {
+        return false;
+    }
+    shadow_size = row_bytes * plane->height;
+
+    if (dpy->region.shadow &&
+        dpy->region.shadow_size == shadow_size &&
+        dpy->region.shadow_width == plane->width &&
+        dpy->region.shadow_height == plane->height &&
+        dpy->region.shadow_stride == plane->stride &&
+        dpy->region.shadow_row_bytes == row_bytes &&
+        dpy->region.shadow_format == format) {
+        return true;
+    }
+
+    vfio_display_region_shadow_reset(dpy);
+    dpy->region.shadow = g_try_malloc(shadow_size);
+    if (!dpy->region.shadow) {
+        return false;
+    }
+    dpy->region.shadow_size = shadow_size;
+    dpy->region.shadow_width = plane->width;
+    dpy->region.shadow_height = plane->height;
+    dpy->region.shadow_stride = plane->stride;
+    dpy->region.shadow_row_bytes = row_bytes;
+    dpy->region.shadow_format = format;
+    return true;
+}
+
+static void vfio_display_region_shadow_copy(VFIODisplay *dpy,
+                                            const uint8_t *source)
+{
+    uint32_t y;
+
+    for (y = 0; y < dpy->region.shadow_height; y++) {
+        memcpy(dpy->region.shadow + y * dpy->region.shadow_row_bytes,
+               source + y * dpy->region.shadow_stride,
+               dpy->region.shadow_row_bytes);
+    }
+    dpy->region.shadow_valid = true;
+}
+
+/*
+ * NVIDIA 535 exposes a pull-only system-memory console REGION without a frame
+ * sequence or damage metadata.  Exact row comparisons let us keep polling at
+ * low latency while avoiding redundant GL uploads and compositor presents for
+ * an unchanged desktop.  High-motion content temporarily bypasses comparison
+ * so games do not pay the extra scan/copy cost on every frame.
+ */
+static bool vfio_display_region_find_updates(
+    VFIODisplay *dpy, const uint8_t *source,
+    VFIORegionDirtyRun runs[VFIO_REGION_MAX_DIRTY_RUNS],
+    uint32_t *run_count, uint32_t *dirty_rows, bool *too_many_runs)
+{
+    uint32_t y;
+    uint32_t run_start = 0;
+    bool in_run = false;
+
+    *run_count = 0;
+    *dirty_rows = 0;
+    *too_many_runs = false;
+
+    for (y = 0; y < dpy->region.shadow_height; y++) {
+        const uint8_t *src = source + y * dpy->region.shadow_stride;
+        uint8_t *shadow = dpy->region.shadow +
+                          y * dpy->region.shadow_row_bytes;
+        bool changed = memcmp(src, shadow,
+                              dpy->region.shadow_row_bytes) != 0;
+
+        if (changed) {
+            memcpy(shadow, src, dpy->region.shadow_row_bytes);
+            (*dirty_rows)++;
+            if (!in_run) {
+                run_start = y;
+                in_run = true;
+            }
+        } else if (in_run) {
+            if (*run_count < VFIO_REGION_MAX_DIRTY_RUNS) {
+                runs[*run_count].y = run_start;
+                runs[*run_count].height = y - run_start;
+                (*run_count)++;
+            } else {
+                *too_many_runs = true;
+            }
+            in_run = false;
+        }
+    }
+    if (in_run) {
+        if (*run_count < VFIO_REGION_MAX_DIRTY_RUNS) {
+            runs[*run_count].y = run_start;
+            runs[*run_count].height = y - run_start;
+            (*run_count)++;
+        } else {
+            *too_many_runs = true;
+        }
+    }
+    return *dirty_rows != 0;
+}
 
 
 static void vfio_display_edid_link_up(void *opaque)
@@ -408,6 +546,11 @@ static void vfio_display_region_update(void *opaque)
         .flags = VFIO_GFX_PLANE_TYPE_REGION
     };
     pixman_format_code_t format;
+    VFIORegionDirtyRun runs[VFIO_REGION_MAX_DIRTY_RUNS];
+    const uint8_t *source;
+    uint32_t run_count;
+    uint32_t dirty_rows;
+    bool too_many_runs;
     int ret;
 
     ret = ioctl(vdev->vbasedev.fd, VFIO_DEVICE_QUERY_GFX_PLANE, &plane);
@@ -417,6 +560,7 @@ static void vfio_display_region_update(void *opaque)
         return;
     }
     if (!plane.drm_format || !plane.size) {
+        vfio_display_region_shadow_reset(dpy);
         if (dpy->ramfb) {
             ramfb_display_update(dpy->con, dpy->ramfb);
             dpy->region.surface = NULL;
@@ -434,14 +578,17 @@ static void vfio_display_region_update(void *opaque)
         vfio_region_exit(&dpy->region.buffer);
         vfio_region_finalize(&dpy->region.buffer);
         dpy->region.surface = NULL;
+        vfio_display_region_shadow_reset(dpy);
     }
 
     if (dpy->region.surface &&
         (surface_width(dpy->region.surface) != plane.width ||
          surface_height(dpy->region.surface) != plane.height ||
-         surface_format(dpy->region.surface) != format)) {
+         surface_format(dpy->region.surface) != format ||
+         surface_stride(dpy->region.surface) != plane.stride)) {
         /* size changed */
         dpy->region.surface = NULL;
+        vfio_display_region_shadow_reset(dpy);
     }
 
     if (!dpy->region.buffer.size) {
@@ -472,13 +619,67 @@ static void vfio_display_region_update(void *opaque)
         dpy_gfx_replace_surface(dpy->con, dpy->region.surface);
     }
 
-    /* full screen update */
-    dpy_gfx_update(dpy->con, 0, 0,
-                   surface_width(dpy->region.surface),
-                   surface_height(dpy->region.surface));
+    source = dpy->region.buffer.mmaps[0].mmap;
+    if (!vfio_display_region_shadow_prepare(dpy, &plane, format)) {
+        /* Invalid metadata or allocation failure: preserve old fail-open. */
+        dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
+        return;
+    }
+
+    if (!dpy->region.shadow_valid) {
+        vfio_display_region_shadow_copy(dpy, source);
+        dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
+        return;
+    }
+
+    if (dpy->region.compare_bypass_frames) {
+        dpy->region.compare_bypass_frames--;
+        if (!dpy->region.compare_bypass_frames) {
+            vfio_display_region_shadow_copy(dpy, source);
+        }
+        dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
+        return;
+    }
+
+    if (!vfio_display_region_find_updates(dpy, source, runs, &run_count,
+                                          &dirty_rows, &too_many_runs)) {
+        dpy->region.full_motion_streak = 0;
+        return;
+    }
+
+    if ((uint64_t)dirty_rows * 100 >=
+        (uint64_t)plane.height * VFIO_REGION_FULL_MOTION_PERCENT) {
+        dpy->region.full_motion_streak++;
+        if (dpy->region.full_motion_streak >=
+            VFIO_REGION_FULL_MOTION_STREAK) {
+            dpy->region.full_motion_streak = 0;
+            dpy->region.compare_bypass_frames =
+                VFIO_REGION_COMPARE_BYPASS_FRAMES;
+        }
+    } else {
+        dpy->region.full_motion_streak = 0;
+    }
+
+    if (too_many_runs ||
+        (uint64_t)dirty_rows * 100 >=
+        (uint64_t)plane.height * VFIO_REGION_FULL_UPDATE_PERCENT) {
+        dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
+        return;
+    }
+    /*
+     * Keep a single display update per refresh.  The GL listener can batch
+     * several texture uploads before its final swap, but SDL's 2D listener
+     * presents immediately on every update and would otherwise present once
+     * per dirty run.  A vertical bounding box preserves most of the upload
+     * saving without creating an avoidable present storm.
+     */
+    dpy_gfx_update(dpy->con, 0, runs[0].y, plane.width,
+                   runs[run_count - 1].y + runs[run_count - 1].height -
+                   runs[0].y);
     return;
 
 err:
+    vfio_display_region_shadow_reset(dpy);
     vfio_region_exit(&dpy->region.buffer);
     vfio_region_finalize(&dpy->region.buffer);
 }
@@ -504,6 +705,7 @@ static bool vfio_display_region_init(VFIOPCIDevice *vdev, Error **errp)
 
 static void vfio_display_region_exit(VFIODisplay *dpy)
 {
+    vfio_display_region_shadow_reset(dpy);
     if (!dpy->region.buffer.size) {
         return;
     }

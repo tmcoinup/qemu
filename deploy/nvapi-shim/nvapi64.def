@@ -1,3 +1,0 @@
-LIBRARY nvapi64
-EXPORTS
-    nvapi_QueryInterface

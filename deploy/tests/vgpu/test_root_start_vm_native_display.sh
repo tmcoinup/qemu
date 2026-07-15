@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# Validate the native vGPU implementation without allocating an
+# mdev, starting QEMU, or creating the legacy shared-memory transport.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+START_VM="$REPO_ROOT/deploy/start-vm.sh"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+require_text() {
+    local needle=$1 file=$2
+
+    grep -F -- "$needle" "$file" >/dev/null \
+        || fail "missing '$needle' in $(basename "$file")"
+}
+
+reject_text() {
+    local needle=$1 file=$2
+
+    if grep -F -- "$needle" "$file" >/dev/null; then
+        fail "unexpected '$needle' in $(basename "$file")"
+    fi
+}
+
+require_native_vfio() {
+    local file=$1 line
+
+    line="$(grep -F -- 'vfio-pci-nohotplug\,' "$file" || true)"
+    [[ -n "$line" ]] || fail "native vfio-pci-nohotplug device is missing"
+    [[ "$line" == *"display=on"* ]] || fail "native vGPU does not enable display"
+    [[ "$line" == *"ramfb=on"* ]] || fail "native vGPU does not enable ramfb"
+    [[ "$line" == *"rombar=0"* ]] || fail "native vGPU must keep its EFI ROM hidden"
+    [[ "$line" == *"enable-migration=off"* ]] \
+        || fail "native vGPU lost its migration safety setting"
+}
+
+require_no_legacy_transport() {
+    local file=$1
+
+    reject_text 'ivshmem-plain' "$file"
+    reject_text 'memory-backend-file\,id=ivshm' "$file"
+    reject_text 'vnc=' "$file"
+    reject_text 'stream_client_dda' "$file"
+    reject_text 'stream-client/' "$file"
+}
+
+require_tpm2() {
+    local file=$1
+
+    require_text 'TPM: 2.0 / CRB' "$file"
+    require_text 'socket\,id=chrtpm\,path=' "$file"
+    require_text 'emulator\,id=tpm0\,chardev=chrtpm' "$file"
+    require_text 'tpm-crb\,tpmdev=tpm0' "$file"
+}
+
+TMP_DIR="$(mktemp -d)"
+VM_ROOT="$TMP_DIR/vms"
+# Keep the ID high enough to avoid real instances, but within the launcher's
+# twelve-digit deterministic dry-run UUID suffix.
+VM_ID=$((900000000 + $$ % 90000000))
+DRY_MDEV_UUID="00000000-0000-0000-0000-$(printf '%012d' "$VM_ID")"
+SHMEM_PATH="/dev/shm/nv-shmem-vm${VM_ID}"
+
+cleanup() {
+    rm -rf -- "$TMP_DIR"
+}
+trap cleanup EXIT
+
+[[ -x "$START_VM" ]] || fail "start-vm.sh is missing or not executable"
+[[ ! -e "$SHMEM_PATH" ]] || fail "test VM id collides with existing shared memory"
+[[ ! -e "/sys/bus/mdev/devices/$DRY_MDEV_UUID" ]] \
+    || fail "test VM id collides with an existing mdev"
+
+mkdir -p "$VM_ROOT/instances/vm${VM_ID}/log" \
+    "$VM_ROOT/instances/vm${VM_ID}/run" "$VM_ROOT/run"
+touch "$VM_ROOT/instances/vm${VM_ID}/disk.qcow2"
+touch "$VM_ROOT/instances/vm${VM_ID}/nvram.fd"
+touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd"
+
+cat >"$VM_ROOT/instances/vm${VM_ID}/vm.conf" <<EOF
+VM_ID=$VM_ID
+VM_UUID=3b5a3617-dd9b-42a1-9010-487ffdc145bf
+RTC_CONTRACT=localtime
+PLATFORM=i5-4590
+CPU_MODEL=Core-i5-4590
+TSC_FREQ=3300000000
+BOARD_BRAND=Gigabyte
+BOARD_MODEL="GA-H97-D3H"
+BIOS_VER=F7
+BIOS_DATE=09/19/2015
+SYS_SN=RT2SKDF1B
+MB_SN=NPVUW09WOV3Z
+CHASSIS_SN=1N6YC2GT
+MEM_BRAND=Kingston
+MEM_MODEL=KVR16N11S8/4
+MEM_SPEED=1600
+MEM_TYPE_BYTE=0x18
+MEM_WIDTH=64
+MEM_SN=BIK6QG9Q5A9L
+SSD_BRAND=Crucial
+SSD_MODEL="P3 Plus 512GB"
+SSD_SN=XHP8TAQ3W42IH793
+GPU_PROFILE=gtx1050_2gb
+GPU_PCI_VID=0x10DE
+GPU_PCI_DID=0x1C81
+GPU_SUB_VID=0x1028
+GPU_SUB_DID=0x086B
+VM_MAC=00:24:D7:9E:2E:E2
+SPOOF_MODE=off
+EOF
+
+# Capability probes are the only fake-QEMU calls permitted. An accidental
+# attempt to launch the VM exits 99 and fails the test before touching hardware.
+cat >"$TMP_DIR/qemu-system-x86_64" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$FAKE_QEMU_TRACE"
+if [ "$#" -eq 2 ] && [ "$1" = -display ] && [ "$2" = help ]; then
+    printf '%s\n' gtk sdl
+    exit 0
+fi
+if [ "$#" -eq 2 ] && [ "$1" = -device ] \
+        && [ "$2" = vfio-pci-nohotplug,help ]; then
+    printf '  ramfb=<bool>\n'
+    exit 0
+fi
+echo "unexpected fake QEMU invocation: $*" >&2
+exit 99
+EOF
+chmod +x "$TMP_DIR/qemu-system-x86_64"
+: >"$TMP_DIR/qemu.trace"
+
+run_start_vm() {
+    local output=$1
+    local -a optional_env=()
+    shift
+
+    if [[ -n "${TEST_VGPU_HOST_CONFIG:-}" ]]; then
+        optional_env+=("VGPU_HOST_CONFIG=$TEST_VGPU_HOST_CONFIG")
+    fi
+    env -i \
+        HOME="${HOME:-/tmp}" \
+        PATH=/usr/bin:/bin \
+        DISPLAY=:99 \
+        VM_ROOT="$VM_ROOT" \
+        QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \
+        OVMF_CODE="$TMP_DIR/OVMF_CODE.fd" \
+        OVMF_VARS="$TMP_DIR/OVMF_VARS.fd" \
+        REPAIR_DISPLAY_VARS=off \
+        FAKE_QEMU_TRACE="$TMP_DIR/qemu.trace" \
+        "${optional_env[@]}" \
+        "$START_VM" "$VM_ID" --dry-run "$@" >"$output" 2>"${output%.out}.err"
+}
+
+SDL_OUT="$TMP_DIR/sdl.out"
+GTK_OUT="$TMP_DIR/gtk.out"
+RDP_OUT="$TMP_DIR/rdp.out"
+RESCUE_OUT="$TMP_DIR/rescue.out"
+MISSING_RTC_OUT="$TMP_DIR/missing-rtc.out"
+V100_OUT="$TMP_DIR/v100.out"
+NO_TPM_OUT="$TMP_DIR/no-tpm.out"
+
+run_start_vm "$SDL_OUT"
+require_text "模式=vgpu-sdl" "$SDL_OUT"
+require_text 'ide-cd.bootindex=-1' "$SDL_OUT"
+reject_text 'id=odd0' "$SDL_OUT"
+reject_text 'media=cdrom' "$SDL_OUT"
+reject_text 'ide-cd\,drive=' "$SDL_OUT"
+reject_text 'scsi-cd' "$SDL_OUT"
+require_text 'vGPU resource: nvidia-257/2048MB' "$SDL_OUT"
+require_native_vfio "$SDL_OUT"
+require_tpm2 "$SDL_OUT"
+require_text 'sdl\,gl=on' "$SDL_OUT"
+require_text 'processor-upgrade=0x2D' "$SDL_OUT"
+require_text 'rank=1\,voltage=1200' "$SDL_OUT"
+require_text 'firmware-rev=1.0' "$SDL_OUT"
+require_text 'qemu-xhci\,id=xhci\,bus=pcie.0\,addr=0x6\,x-pci-vendor-id=0x8086\,x-pci-device-id=0x8CB1\,x-pci-revision=0x01' "$SDL_OUT"
+require_text 'i8042=off' "$SDL_OUT"
+require_text '旧 vm.conf 缺少 SSD PCIe 链路元数据' "${SDL_OUT%.out}.err"
+require_text '旧 vm.conf 缺少 xHCI PCI identity；保留历史按 CPU_MODEL 推导行为，不改写 guest tuple' \
+    "${SDL_OUT%.out}.err"
+require_text '键盘: Microsoft Wired Keyboard 600 / usb-kbd / USB 045E:0750' \
+    "$SDL_OUT"
+require_text '鼠标: HUION PenTablet / usb-tablet 绝对坐标 / USB 256C:006D' \
+    "$SDL_OUT"
+require_text 'usb-kbd\,bus=xhci.0\,vendorid=0x045E\,productid=0x0750\,manufacturer=Microsoft\,product=Microsoft\ Wired\ Keyboard\ 600' \
+    "$SDL_OUT"
+require_text 'usb-tablet\,bus=xhci.0\,vendorid=0x256C\,productid=0x006D\,manufacturer=HUION\,product=HUION\ PenTablet' \
+    "$SDL_OUT"
+if grep -F -- 'usb-kbd\,' "$SDL_OUT" | grep -Fq -- 'serial=' ||
+        grep -F -- 'usb-tablet\,' "$SDL_OUT" | grep -Fq -- 'serial='; then
+    fail 'legacy USB HID fallback invented a descriptor serial number'
+fi
+reject_text 'show-cursor=on' "$SDL_OUT"
+reject_text 'gtk\,gl=on' "$SDL_OUT"
+require_no_legacy_transport "$SDL_OUT"
+
+run_start_vm "$GTK_OUT" --gtk
+require_text "模式=vgpu-gtk" "$GTK_OUT"
+require_native_vfio "$GTK_OUT"
+require_tpm2 "$GTK_OUT"
+require_text 'gtk\,gl=on\,show-cursor=on\,grab-on-hover=on' "$GTK_OUT"
+require_no_legacy_transport "$GTK_OUT"
+
+run_start_vm "$RESCUE_OUT" --rescue-sdl
+require_text '模式=rescue-sdl' "$RESCUE_OUT"
+require_text 'VGA\,id=rescue-vga\,bus=pcie.0\,addr=0x2' "$RESCUE_OUT"
+require_text 'sdl\,gl=off' "$RESCUE_OUT"
+require_text '标准显卡 -> SDL 本地救援（无 vGPU/VNC/RDP）' "$RESCUE_OUT"
+require_text 'base=localtime\,clock=host\,driftfix=slew' "$RESCUE_OUT"
+require_text 'kvm-pit.lost_tick_policy=delay' "$RESCUE_OUT"
+reject_text 'vfio-pci' "$RESCUE_OUT"
+reject_text 'vnc=' "$RESCUE_OUT"
+reject_text 'id=odd0' "$RESCUE_OUT"
+reject_text 'media=cdrom' "$RESCUE_OUT"
+
+# Configs created before RTC_CONTRACT was persisted must retain the production
+# local-RTC behavior.  In particular, absence of the field is not evidence that
+# the guest opted into the short-lived UTC compatibility contract.
+cp -- "$VM_ROOT/instances/vm${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.with-rtc"
+sed -i '/^RTC_CONTRACT=/d' "$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+run_start_vm "$MISSING_RTC_OUT" --rescue-sdl
+require_text 'base=localtime\,clock=host\,driftfix=slew' "$MISSING_RTC_OUT"
+require_text 'kvm-pit.lost_tick_policy=delay' "$MISSING_RTC_OUT"
+reject_text 'base=utc\,clock=host' "$MISSING_RTC_OUT"
+mv -- "$TMP_DIR/vm.conf.with-rtc" "$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+
+run_start_vm "$RDP_OUT" --rdp
+require_text "模式=rdp" "$RDP_OUT"
+require_text 'vfio-pci\,sysfsdev=' "$RDP_OUT"
+require_text 'display=off' "$RDP_OUT"
+require_text "vnc=:${VM_ID}" "$RDP_OUT"
+require_text 'memory-backend-file\,id=ivshm' "$RDP_OUT"
+require_text 'size=67108864' "$RDP_OUT"
+require_text 'ivshmem-plain\,memdev=ivshm' "$RDP_OUT"
+require_tpm2 "$RDP_OUT"
+reject_text 'vfio-pci-nohotplug' "$RDP_OUT"
+
+run_start_vm "$NO_TPM_OUT" --rdp --no-tpm
+require_text 'TPM: disabled (explicit)' "$NO_TPM_OUT"
+reject_text 'socket\,id=chrtpm\,path=' "$NO_TPM_OUT"
+reject_text 'tpm-crb\,tpmdev=tpm0' "$NO_TPM_OUT"
+
+# A host resource preset can select a V100 mdev by sysfs name while the VM's
+# guest-visible identity remains the catalog's GTX 1050.  Dry-run deliberately
+# does not require the physical V100 to be present.
+cat >"$TMP_DIR/vgpu-host-v100.conf" <<'EOF'
+VGPU_MGPU=auto
+VGPU_RESOURCE_PROFILE=V100-2Q
+VGPU_RESOURCE_FB_MB=2048
+VGPU_TOTAL_FB_MB=16384
+VGPU_CONSOLE_INTERVAL_US=0
+EOF
+TEST_VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-v100.conf"
+run_start_vm "$V100_OUT"
+require_text 'vGPU resource: V100-2Q/2048MB' "$V100_OUT"
+require_text 'GPU identity: gtx1050_2gb / NVIDIA GeForce GTX 1050' "$V100_OUT"
+require_native_vfio "$V100_OUT"
+require_tpm2 "$V100_OUT"
+require_no_legacy_transport "$V100_OUT"
+unset TEST_VGPU_HOST_CONFIG
+
+cat >"$TMP_DIR/vgpu-host-bad-fb.conf" <<'EOF'
+VGPU_RESOURCE_PROFILE=V100-4Q
+VGPU_RESOURCE_FB_MB=4096
+VGPU_TOTAL_FB_MB=16384
+EOF
+TEST_VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-bad-fb.conf"
+if run_start_vm "$TMP_DIR/bad-fb.out" 2>"$TMP_DIR/bad-fb.err"; then
+    fail 'host resource framebuffer diverged from the guest identity'
+fi
+require_text 'guest 显存 2048MB 与宿主 mdev 4096MB 不一致' \
+    "$TMP_DIR/bad-fb.err"
+unset TEST_VGPU_HOST_CONFIG
+
+# GTK, the two native SDL runs (default + V100 preset), each perform two read-only
+# capability probes. RDP does not need either probe, and dry-run must never
+# make a final QEMU invocation.
+[[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 6 ]] \
+    || fail "fake QEMU saw an unexpected invocation"
+
+[[ -z "$(find "$VM_ROOT/run" -mindepth 1 -print -quit)" ]] \
+    || fail "dry-run created runtime state"
+[[ -z "$(find "$VM_ROOT/instances/vm${VM_ID}/run" -mindepth 1 -print -quit)" ]] \
+    || fail "dry-run created per-instance TPM/runtime state"
+[[ ! -e "$VM_ROOT/instances/vm${VM_ID}/tpm" ]] \
+    || fail "dry-run created persistent TPM state"
+[[ ! -e "$SHMEM_PATH" ]] || fail "dry-run created legacy shared memory"
+[[ ! -e "/sys/bus/mdev/devices/$DRY_MDEV_UUID" ]] || fail "dry-run created an mdev"
+grep -Fq 'QEMU_LOG=$(vm_storage_log_path "$VM_ID")' "$START_VM" \
+    || fail "QEMU log no longer resolves inside the VM bundle"
+grep -Fq '2> >(tee -a "$QEMU_LOG" >&2)' "$START_VM" \
+    || fail "foreground/native QEMU modes no longer retain stderr logs"
+
+echo "PASS: root start-vm native SDL/GTK and legacy RDP dry-run argv"

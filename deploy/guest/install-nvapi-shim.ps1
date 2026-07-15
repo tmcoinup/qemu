@@ -11,7 +11,7 @@
     2. Take ownership of C:\Windows\System32\nvapi64.dll (TrustedInstaller
        is default owner).
     3. Rename original → nvapi64_orig.dll; drop shim as nvapi64.dll.
-    4. Verify shim loads by running a sanity check.
+    4. Validate PE architecture and required shim markers before replacing.
     5. Reboot recommended (NVIDIA service caches DLL handles).
 
   Rollback: .\install-nvapi-shim.ps1 -Uninstall
@@ -19,6 +19,10 @@
 [CmdletBinding()]
 param(
     [string]$BaseUrl = 'http://192.168.30.127:8080',
+    [string]$X64Path = '',
+    [string]$X86Path = '',
+    [string]$ExpectedX64Sha256 = '',
+    [string]$ExpectedX86Sha256 = '',
     [switch]$Uninstall
 )
 
@@ -34,13 +38,57 @@ $ErrorActionPreference = 'Stop'
 # loads SysWOW64\nvapi.dll (confirmed in-guest), so a 64-bit-only install
 # leaves 鲁大师 seeing real RTX 2080 specs.
 $arches = @(
-    @{ label='x64'; sys='C:\Windows\System32'; name='nvapi64.dll'; backup='nvapi64_orig.dll'; scratch='C:\nv\nvapi64.shim.dll' },
-    @{ label='x86'; sys='C:\Windows\SysWOW64'; name='nvapi.dll';   backup='nvapi_orig.dll';   scratch='C:\nv\nvapi.shim.dll'   }
+    @{ label='x64'; machine=0x8664; sys='C:\Windows\System32'; name='nvapi64.dll'; backup='nvapi64_orig.dll'; scratch='C:\nv\nvapi64.shim.dll'; source=$X64Path; expected=$ExpectedX64Sha256 },
+    @{ label='x86'; machine=0x014c; sys='C:\Windows\SysWOW64'; name='nvapi.dll';   backup='nvapi_orig.dll';   scratch='C:\nv\nvapi.shim.dll'; source=$X86Path; expected=$ExpectedX86Sha256 }
 )
 
 function Take-Own($f) {
     & cmd /c takeown /f "`"$f`"" /a 2>&1 | Out-Null
     & cmd /c icacls "`"$f`"" /grant 'Administrators:(F)' 2>&1 | Out-Null
+}
+
+function Assert-ShimImage($Path, [int]$ExpectedMachine) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 4096 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+        throw "Downloaded shim is not a valid PE image: $Path"
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+    if ($peOffset -lt 0x40 -or $peOffset + 6 -gt $bytes.Length -or
+        $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
+        $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+        throw "Downloaded shim has an invalid PE header: $Path"
+    }
+    $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+    if ($machine -ne $ExpectedMachine) {
+        throw ('Downloaded shim machine 0x{0:x4} does not match expected 0x{1:x4}: {2}' `
+            -f $machine, $ExpectedMachine, $Path)
+    }
+    $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+    foreach ($marker in @(
+        'IdentityGpuName', 'nvapi_Direct_GetMethod', 'nvapi_QueryInterface'
+    )) {
+        if (-not $ascii.Contains($marker)) {
+            throw "Downloaded shim is missing required marker '$marker': $Path"
+        }
+    }
+}
+
+function Assert-OriginalNvidiaImage($Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Original NVIDIA NVAPI image is missing: $Path"
+    }
+    $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($version.CompanyName -notmatch '\ANVIDIA(?: Corporation)?\z' -or
+        [string]$signature.Status -cne 'Valid' -or
+        $null -eq $signature.SignerCertificate -or
+        $signature.SignerCertificate.Subject -notmatch 'NVIDIA') {
+        throw "Original NVAPI image does not have a valid NVIDIA signature: $Path"
+    }
+    $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Path))
+    if ($ascii.Contains('IdentityGpuName')) {
+        throw "Refusing to use another identity shim as the original NVAPI image: $Path"
+    }
 }
 
 if ($Uninstall) {
@@ -59,6 +107,13 @@ if ($Uninstall) {
     return
 }
 
+foreach ($a in $arches) {
+    if ([string]$a.expected -notmatch '\A[0-9A-Fa-f]{64}\z') {
+        throw "Expected$($a.label)Sha256 must be supplied as 64 hexadecimal characters."
+    }
+    $a.expected = ([string]$a.expected).ToUpperInvariant()
+}
+
 New-Item -Type Directory -Force 'C:\nv' | Out-Null
 $ProgressPreference = 'SilentlyContinue'
 $pending = @()
@@ -70,16 +125,29 @@ foreach ($a in $arches) {
     $url    = "$BaseUrl/$($a.name)"
     Write-Host "[$($a.label)] install $target (<- $url)" -Fore Cyan
 
-    # pull shim
-    Invoke-WebRequest $url -OutFile $a.scratch -UseBasicParsing
+    # Pull the compatibility-path asset or copy the already manifest-verified
+    # immutable asset supplied by apply-vm-profile.ps1.
+    if ([string]::IsNullOrWhiteSpace([string]$a.source)) {
+        Invoke-WebRequest $url -OutFile $a.scratch -UseBasicParsing
+    } else {
+        Copy-Item -LiteralPath ([string]$a.source) -Destination $a.scratch -Force
+    }
+    Assert-ShimImage $a.scratch $a.machine
+    $scratchHash = (Get-FileHash -LiteralPath $a.scratch -Algorithm SHA256).Hash
+    if ($scratchHash -cne $a.expected) {
+        throw "Downloaded/local shim SHA256 mismatch for $($a.label): actual $scratchHash, expected $($a.expected)"
+    }
     "  scratch size: $((Get-Item $a.scratch).Length) bytes"
 
     # backup original once
     if (-not (Test-Path $backup)) {
+        Assert-OriginalNvidiaImage $target
         Take-Own $target
         Copy-Item $target $backup -Force
+        Assert-OriginalNvidiaImage $backup
         "  backup -> $backup"
     } else {
+        Assert-OriginalNvidiaImage $backup
         "  backup $backup already exists"
     }
 
@@ -88,6 +156,10 @@ foreach ($a in $arches) {
     Take-Own $target
     try {
         Copy-Item $a.scratch $target -Force -ErrorAction Stop
+        $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+        if ($targetHash -cne $scratchHash) {
+            throw "Installed shim hash mismatch: $target"
+        }
         "  direct copy OK"
     }
     catch [System.IO.IOException] {

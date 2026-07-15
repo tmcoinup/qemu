@@ -287,6 +287,7 @@ typedef struct DisplayChangeListenerOps {
 
 struct DisplayChangeListener {
     uint64_t update_interval;
+    uint64_t update_interval_ns;
     const DisplayChangeListenerOps *ops;
     DisplayState *ds;
     QemuConsole *con;
@@ -325,6 +326,8 @@ DisplayState *init_displaystate(void);
 void register_displaychangelistener(DisplayChangeListener *dcl);
 void update_displaychangelistener(DisplayChangeListener *dcl,
                                   uint64_t interval);
+void update_displaychangelistener_ns(DisplayChangeListener *dcl,
+                                     uint64_t interval_ns);
 void unregister_displaychangelistener(DisplayChangeListener *dcl);
 
 /*

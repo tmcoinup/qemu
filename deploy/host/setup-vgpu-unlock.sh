@@ -71,7 +71,12 @@ LIB_DST="$INSTALL_DIR/libvgpu_unlock_rs.so"
 echo "[3/4] 安装产物与 profile_override.toml 到 $INSTALL_DIR / /etc/vgpu_unlock/"
 sudo_run install -d -m 0755 "$INSTALL_DIR" /etc/vgpu_unlock
 sudo_run install -m 0644 "$LIB_SRC" "$LIB_DST"
-sudo_run install -m 0644 "$here/profile_override.toml" /etc/vgpu_unlock/profile_override.toml
+if sudo_run test -e /etc/vgpu_unlock/profile_override.toml; then
+    echo "[3/4] preserving existing profile_override.toml (includes runtime per-mdev identities)"
+else
+    sudo_run install -m 0644 "$here/profile_override.toml" \
+        /etc/vgpu_unlock/profile_override.toml
+fi
 
 echo "[4/4] 注入 LD_PRELOAD 到 nvidia-vgpu-mgr.service"
 sudo_run install -d -m 0755 /etc/systemd/system/nvidia-vgpu-mgr.service.d

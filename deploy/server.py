@@ -4,7 +4,7 @@ server.py — 给 guest 拉脚本/binary 的 HTTP 文件服务器。
 
   默认 serve  $STAGE_DIR        (默认 /home/ubuntu/images/staging)
   默认端口    8080
-  UTF-8       目录列表中文不乱码
+  仅下载      禁止目录列表和私密 staging 资产
   并发        多线程，长下载不阻塞短脚本
 
 启动时自动 sync deploy/guest/*.ps1 → staging/，把 git 跟踪的源同步到
@@ -18,14 +18,19 @@ HTTP staging 区，guest 内 `irm | iex` 就能拉到最新版本。
     python3 server.py --bind 127.0.0.1
 """
 import argparse
+import functools
 import http.server
 import os
 import shutil
 import socketserver
 import sys
+import tempfile
+import urllib.parse
+from http import HTTPStatus
 
 DEFAULT_PORT = 8080
-DEFAULT_DIR  = os.environ.get('STAGE_DIR', '/home/ubuntu/images/staging')
+DEFAULT_IMAGE_ROOT = os.environ.get('IMAGE_ROOT', '/home/ubuntu/images')
+DEFAULT_DIR  = os.environ.get('STAGE_DIR', os.path.join(DEFAULT_IMAGE_ROOT, 'staging'))
 DEFAULT_BIND = '0.0.0.0'
 
 # 项目内 PowerShell 源（git 跟踪），server 启动时 sync 到 staging。
@@ -33,24 +38,60 @@ SCRIPT_SRC   = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'guest')
 
 
 class Utf8Handler(http.server.SimpleHTTPRequestHandler):
-    """SimpleHTTPRequestHandler + UTF-8 让目录列表/文件名中文不乱码。"""
+    """A download-only handler that keeps private staging files private."""
+
+    @staticmethod
+    def _has_protected_component(parts):
+        for part in parts:
+            lowered = part.lower()
+            if part.startswith('.'):
+                return True
+            if lowered.endswith('.tok'):
+                return True
+            if lowered.startswith('vgpuguestfinish'):
+                return True
+        return False
+
+    def _request_is_protected(self):
+        """Reject private names before and after filesystem resolution.
+
+        Checking both forms prevents URL encoding and an in-tree symlink with a
+        harmless-looking name from exposing a token or the token-bearing guest
+        finisher.
+        """
+        request_path = urllib.parse.urlsplit(self.path).path
+        decoded = urllib.parse.unquote(request_path, errors='replace')
+        request_parts = [part for part in decoded.split('/') if part]
+        if self._has_protected_component(request_parts):
+            return True
+
+        root = os.path.realpath(self.directory or os.getcwd())
+        translated = self.translate_path(self.path)
+        resolved = os.path.realpath(translated)
+        try:
+            if os.path.commonpath((root, resolved)) != root:
+                return True
+        except ValueError:
+            return True
+
+        relative = os.path.relpath(resolved, root)
+        if relative == os.curdir:
+            return False
+        return self._has_protected_component(relative.split(os.sep))
 
     def send_head(self):
+        if self._request_is_protected():
+            self.send_error(HTTPStatus.FORBIDDEN, 'Protected staging asset')
+            return None
         path = self.translate_path(self.path)
         if os.path.isdir(path):
-            f = super().list_directory(path)
-            if f:
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.end_headers()
-            return f
+            self.send_error(HTTPStatus.FORBIDDEN, 'Directory listing is disabled')
+            return None
         return super().send_head()
 
-    def end_headers(self):
-        mimetype = self.guess_type(self.path)
-        if mimetype:
-            self.send_header('Content-Type', f'{mimetype}; charset=utf-8')
-        super().end_headers()
+    def list_directory(self, path):
+        self.send_error(HTTPStatus.FORBIDDEN, 'Directory listing is disabled')
+        return None
 
     def log_message(self, fmt, *args):
         sys.stderr.write(f'[{self.address_string()}] {fmt % args}\n')
@@ -62,24 +103,61 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+def _same_content(first, second):
+    try:
+        if os.path.getsize(first) != os.path.getsize(second):
+            return False
+        with open(first, 'rb') as left, open(second, 'rb') as right:
+            while True:
+                left_chunk = left.read(1024 * 1024)
+                right_chunk = right.read(1024 * 1024)
+                if left_chunk != right_chunk:
+                    return False
+                if not left_chunk:
+                    return True
+    except OSError:
+        return False
+
+
+def _copy_atomically(src, dst):
+    stage_dir = os.path.dirname(dst)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f'.{os.path.basename(dst)}.', suffix='.tmp', dir=stage_dir)
+    os.close(descriptor)
+    try:
+        shutil.copy2(src, temporary)
+        with open(temporary, 'rb') as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, dst)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
 def sync_scripts(stage_dir):
     """把 deploy/guest/*.ps1 同步到 staging — 这样改 ps1 后只要重启 server，
     guest `irm` 拿的就是最新版本，无需手动 cp。"""
     if not os.path.isdir(SCRIPT_SRC):
-        return
+        return []
     synced = []
-    for name in os.listdir(SCRIPT_SRC):
+    for name in sorted(os.listdir(SCRIPT_SRC)):
         if not name.endswith('.ps1'):
             continue
         src = os.path.join(SCRIPT_SRC, name)
         dst = os.path.join(stage_dir, name)
-        if (not os.path.exists(dst) or
-                os.path.getmtime(src) > os.path.getmtime(dst)):
-            shutil.copy2(src, dst)
-            synced.append(name)
+        if not os.path.isfile(src) or os.path.islink(src):
+            continue
+        if (os.path.isfile(dst) and not os.path.islink(dst) and
+                _same_content(src, dst)):
+            continue
+        _copy_atomically(src, dst)
+        synced.append(name)
     if synced:
         print(f'[server] synced {len(synced)} ps1 from deploy/guest/: '
               + ', '.join(synced), flush=True)
+    return synced
 
 
 def main():
@@ -103,13 +181,12 @@ def main():
     os.makedirs(args.dir, exist_ok=True)
     if not args.no_sync:
         sync_scripts(args.dir)
-    os.chdir(args.dir)
-
     print(f'[server] serving {args.dir}  on  http://{args.bind}:{port}/',
           flush=True)
     print(f'[server] e.g.    irm http://<host>:{port}/setup-winrm.ps1 | iex',
           flush=True)
-    httpd = ThreadedServer((args.bind, port), Utf8Handler)
+    handler = functools.partial(Utf8Handler, directory=args.dir)
+    httpd = ThreadedServer((args.bind, port), handler)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

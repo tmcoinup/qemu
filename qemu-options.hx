@@ -2838,11 +2838,15 @@ DEF("smbios", HAS_ARG, QEMU_OPTION_smbios,
     "-smbios type=4[,sock_pfx=str][,manufacturer=str][,version=str][,serial=str]\n"
     "              [,asset=str][,part=str][,max-speed=%d][,current-speed=%d]\n"
     "              [,processor-family=%d][,processor-id=%d]\n"
+    "              [,external-clock=%d][,voltage=%d][,processor-upgrade=%d]\n"
+    "              [,processor-characteristics=%d]\n"
     "                specify SMBIOS type 4 fields\n"
     "-smbios type=8[,external_reference=str][,internal_reference=str][,connector_type=%d][,port_type=%d]\n"
     "                specify SMBIOS type 8 fields\n"
     "-smbios type=11[,value=str][,path=filename]\n"
     "                specify SMBIOS type 11 fields\n"
+    "-smbios type=16[,max-capacity=size][,num-devices=%d]\n"
+    "                specify SMBIOS type 16 fields\n"
     "-smbios type=17[,loc_pfx=str][,bank=str][,manufacturer=str][,serial=str]\n"
     "               [,asset=str][,part=str][,speed=%d]\n"
     "                specify SMBIOS type 17 fields\n"
@@ -2865,8 +2869,13 @@ SRST
 ``-smbios type=3[,manufacturer=str][,version=str][,serial=str][,asset=str][,sku=str]``
     Specify SMBIOS type 3 fields
 
-``-smbios type=4[,sock_pfx=str][,manufacturer=str][,version=str][,serial=str][,asset=str][,part=str][,processor-family=%d][,processor-id=%d]``
-    Specify SMBIOS type 4 fields
+``-smbios type=4[,sock_pfx=str][,manufacturer=str][,version=str][,serial=str][,asset=str][,part=str][,processor-family=%d][,processor-id=%d][,external-clock=%d][,voltage=%d][,processor-upgrade=%d][,processor-characteristics=%d]``
+    Specify SMBIOS type 4 fields. ``processor-upgrade`` is the SMBIOS
+    processor-upgrade (socket) enumeration byte and defaults to 1 (Other).
+    ``processor-characteristics`` is the 16-bit SMBIOS processor
+    characteristics bit mask and defaults to 0xFC.
+    ``voltage`` uses the SMBIOS byte encoding; for example, 0x8C denotes
+    1.2 V when bit 7 is set.
 
 ``-smbios type=9[,slot_designation=str][,slot_type=%d][,slot_data_bus_width=%d][,current_usage=%d][,slot_length=%d][,slot_id=%d][,slot_characteristics1=%d][,slot_characteristics12=%d][,pci_device=str]``
     Specify SMBIOS type 9 fields
@@ -2910,8 +2919,19 @@ SRST
               String 3: myapp:some extra data
 
 
+``-smbios type=16[,max-capacity=size][,num-devices=%d]``
+    Specify SMBIOS type 16 fields. ``max-capacity`` sets the physical memory
+    array capacity in bytes and accepts standard size suffixes such as ``G``.
+    ``num-devices`` sets the total number of DIMM slots, including empty ones.
+
+
 ``-smbios type=17[,loc_pfx=str][,bank=str][,manufacturer=str][,serial=str][,asset=str][,part=str][,speed=%d]``
-    Specify SMBIOS type 17 fields
+    Specify SMBIOS type 17 fields. ``loc_pfx`` and ``bank`` may be
+    pipe-delimited lists of exact per-slot names, for example
+    ``loc_pfx='DIMM_A1|DIMM_B1'``.  Instance N uses item N; if there are fewer
+    items than slots, the final item is reused.  Values without a pipe keep
+    the existing prefix/channel/rank formatting and ``%C`` channel
+    substitution behavior.
 
 ``-smbios type=41[,designation=str][,kind=str][,instance=%d][,pcidev=str]``
     Specify SMBIOS type 41 fields

@@ -174,7 +174,8 @@ def restore_state(state_file):
 def restore_stale():
     uid = os.getuid()
     for name in os.listdir("/tmp"):
-        if name.startswith(f"qemu-stream-client-{uid}-") and name.endswith(".gnome-super"):
+        if (name.startswith(f"qemu-stream-client-{uid}-") or
+                name.startswith(f"qemu-sdl-{uid}-")) and name.endswith(".gnome-super"):
             restore_state(os.path.join("/tmp", name))
     return 0
 

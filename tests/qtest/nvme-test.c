@@ -14,6 +14,7 @@
 #include "libqos/qgraph.h"
 #include "libqos/pci.h"
 #include "block/nvme.h"
+#include "hw/pci/pci_regs.h"
 
 typedef struct QNvme QNvme;
 
@@ -88,6 +89,44 @@ static void nvmetest_reg_read_test(void *obj, void *data, QGuestAllocator *alloc
     g_assert_cmpint(NVME_CAP_MQES(cap), ==, 0x7ff);
     g_assert_cmpint(NVME_CAP_MPSMAX(cap), ==, 0x4);
 
+    qpci_iounmap(pdev, bar);
+}
+
+static void nvmetest_wd_identity_test(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QNvme *nvme = obj;
+    QPCIDevice *pdev = &nvme->dev;
+    QPCIBar bar;
+    uint8_t exp_cap;
+    uint32_t link_cap;
+    uint16_t link_status;
+    uint64_t cap;
+
+    g_assert_cmphex(qpci_config_readw(pdev, PCI_VENDOR_ID), ==, 0x15b7);
+    g_assert_cmphex(qpci_config_readw(pdev, PCI_DEVICE_ID), ==, 0x5001);
+    g_assert_cmphex(qpci_config_readw(pdev, PCI_SUBSYSTEM_VENDOR_ID),
+                    ==, 0x1b4b);
+    g_assert_cmphex(qpci_config_readw(pdev, PCI_SUBSYSTEM_ID), ==, 0x1093);
+    g_assert_cmphex(qpci_config_readb(pdev, PCI_REVISION_ID), ==, 0x00);
+
+    exp_cap = qpci_find_capability(pdev, PCI_CAP_ID_EXP, 0);
+    g_assert_cmphex(exp_cap, !=, 0);
+    link_cap = qpci_config_readl(pdev, exp_cap + PCI_EXP_LNKCAP);
+    g_assert_cmphex(link_cap & PCI_EXP_LNKCAP_SLS,
+                    ==, PCI_EXP_LNKCAP_SLS_8_0GB);
+    g_assert_cmpuint((link_cap & PCI_EXP_LNKCAP_MLW) >> 4, ==, 4);
+    link_status = qpci_config_readw(pdev, exp_cap + PCI_EXP_LNKSTA);
+    g_assert_cmphex(link_status & PCI_EXP_LNKSTA_CLS,
+                    ==, PCI_EXP_LNKSTA_CLS_8_0GB);
+    g_assert_cmphex(link_status & PCI_EXP_LNKSTA_NLW,
+                    ==, PCI_EXP_LNKSTA_NLW_X4);
+
+    qpci_device_enable(pdev);
+    bar = qpci_iomap(pdev, 0, NULL);
+    cap = qpci_io_readq(pdev, bar, NVME_REG_CAP);
+    g_assert_cmphex(NVME_CAP_CSS(cap), ==, NVME_CAP_CSS_NCSS);
+    g_assert_cmphex(qpci_io_readl(pdev, bar, NVME_REG_VS), ==, 0x00010200);
     qpci_iounmap(pdev, bar);
 }
 
@@ -168,6 +207,10 @@ static void nvme_register_nodes(void)
     });
 
     qos_add_test("reg-read", "nvme", nvmetest_reg_read_test, NULL);
+    qos_add_test("wd-identity", "nvme", nvmetest_wd_identity_test,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "use-wd-id=on"
+    });
 }
 
 libqos_init(nvme_register_nodes);

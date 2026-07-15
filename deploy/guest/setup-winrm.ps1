@@ -46,12 +46,25 @@ Remove-ItemProperty -Path $wl -Name 'AutoLogonCount' -EA 0   # 删掉 -> 持久
 
 Write-Host '[4/5] Enable RDP (3389) + relax NLA so freerdp can connect' -Fore Cyan
 # 默认 base 把 RDP 也启了，需要人工进 guest 装 driver / 调试时 freerdp3 直连。
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+$terminalServer = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+$winStations = "$terminalServer\WinStations"
+$rdpTcp = "$winStations\RDP-Tcp"
+Set-ItemProperty -Path $terminalServer `
     -Name 'fDenyTSConnections' -Value 0 -Type DWord
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+Set-ItemProperty -Path $rdpTcp `
     -Name 'UserAuthentication' -Value 0 -Type DWord -EA 0
+# TermService uses this computer certificate store when creating the RDP TLS
+# listener.  Some stripped/recovered images lose the value and then log LSM
+# event 17 / 0x80070005 while running without an rdp-tcp listener.
+Set-ItemProperty -Path $winStations -Name 'SelfSignedCertStore' `
+    -Value 'Remote Desktop' -Type String
 Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -EA 0
 Enable-NetFirewallRule -DisplayGroup '远程桌面'      -EA 0
+Get-NetFirewallRule -Name 'RemoteDesktop*' -EA 0 | Enable-NetFirewallRule
+Set-Service -Name CertPropSvc -StartupType Manual -EA 0
+Set-Service -Name SessionEnv  -StartupType Manual -EA 0
+Start-Service CertPropSvc -EA 0
+Start-Service SessionEnv  -EA 0
 Set-Service -Name TermService -StartupType Automatic -EA 0
 Start-Service TermService -EA 0
 

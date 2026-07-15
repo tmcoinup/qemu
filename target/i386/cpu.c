@@ -786,11 +786,64 @@ static const CPUCaches legacy_intel_cache_info = {
     },
 };
 
+/* Desktop Haswell cache layout used by the Core-i5-4590 model. */
+static const CPUCaches desktop_hsw_cache_info = {
+    .l1d_cache = &(CPUCacheInfo) {
+        .type = DATA_CACHE,
+        .level = 1,
+        .size = 32 * KiB,
+        .self_init = 1,
+        .line_size = 64,
+        .associativity = 8,
+        .sets = 64,
+        .partitions = 1,
+        .no_invd_sharing = true,
+        .share_level = CPU_TOPOLOGY_LEVEL_CORE,
+    },
+    .l1i_cache = &(CPUCacheInfo) {
+        .type = INSTRUCTION_CACHE,
+        .level = 1,
+        .size = 32 * KiB,
+        .self_init = 1,
+        .line_size = 64,
+        .associativity = 8,
+        .sets = 64,
+        .partitions = 1,
+        .no_invd_sharing = true,
+        .share_level = CPU_TOPOLOGY_LEVEL_CORE,
+    },
+    .l2_cache = &(CPUCacheInfo) {
+        .type = UNIFIED_CACHE,
+        .level = 2,
+        .size = 256 * KiB,
+        .self_init = 1,
+        .line_size = 64,
+        .associativity = 8,
+        .sets = 512,
+        .partitions = 1,
+        .no_invd_sharing = true,
+        .share_level = CPU_TOPOLOGY_LEVEL_CORE,
+    },
+    .l3_cache = &(CPUCacheInfo) {
+        .type = UNIFIED_CACHE,
+        .level = 3,
+        .size = 6 * MiB,
+        .line_size = 64,
+        .associativity = 12,
+        .sets = 8192,
+        .partitions = 1,
+        .lines_per_tag = 1,
+        .self_init = true,
+        .inclusive = true,
+        .complex_indexing = true,
+        .share_level = CPU_TOPOLOGY_LEVEL_DIE,
+    },
+};
+
 /*
- * Desktop Haswell / Skylake-S / Coffee Lake family cache layout. Used by the
- * Core-i5-4590 / Core-i5-6500 / Core-i3-8100 models so Windows
- * Win32_Processor.L2CacheSize/L3CacheSize reflect real chip values (256 KB
- * per-core L2, 6 MB shared L3) instead of 0 or QEMU's legacy 4/16 MB default.
+ * Desktop Skylake-S / Coffee Lake cache layout used by the Core-i5-6500 and
+ * Core-i3-8100 models.  Both have a 4-way 256 KiB private L2 and a 12-way
+ * 6 MiB shared L3.
  */
 static const CPUCaches desktop_skl_cache_info = {
     .l1d_cache = &(CPUCacheInfo) {
@@ -4724,16 +4777,15 @@ static const X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT3_ABM | CPUID_EXT3_LAHF_LM,
         .features[FEAT_7_0_EBX] =
             CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
-            CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
-            CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
-            CPUID_7_0_EBX_RTM,
+            CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID,
         .features[FEAT_XSAVE] =
             CPUID_XSAVE_XSAVEOPT,
         .features[FEAT_6_EAX] =
             CPUID_6_EAX_ARAT,
         .xlevel = 0x80000008,
         .model_id = "Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz",
-        .cache_info = &desktop_skl_cache_info,
+        .cache_info = &desktop_hsw_cache_info,
         .versions = (X86CPUVersionDefinition[]) {
             { .version = 1 },
             { /* end of list */ }
@@ -4820,9 +4872,9 @@ static const X86CPUDefinition builtin_x86_defs[] = {
             CPUID_EXT3_ABM | CPUID_EXT3_LAHF_LM | CPUID_EXT3_3DNOWPREFETCH,
         .features[FEAT_7_0_EBX] =
             CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
-            CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
             CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
-            CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
+            CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
             CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_CLFLUSHOPT,
         .features[FEAT_7_0_ECX] =
             CPUID_7_0_ECX_PKU,

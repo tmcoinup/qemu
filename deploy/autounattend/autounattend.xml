@@ -1,4 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal answer file for the deploy/start-vm.sh install mode.
+
+  The windowsPE pass anchors/caches this answer file and sets zh-CN setup UI.
+  Product key, edition, target disk, and partitioning remain interactive.
+
+  Deliberately omitted:
+    * DiskConfiguration / ImageInstall: never wipe or select a disk silently.
+    * ProductKey/Key value: no edition-selecting setup key is supplied.
+    * LocalAccounts: Administrator is a built-in account, not a new account.
+    * WinRM/RDP/network setup and persistent scripts/tasks.
+
+  The ComputerName marker below is replaced with a stable per-VM
+  DESKTOP-XXXXXXX name before the generated answer ISO is published.
+-->
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
     <settings pass="windowsPE">
         <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -12,76 +27,19 @@
             <UserLocale>zh-CN</UserLocale>
         </component>
         <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <DiskConfiguration>
-                <Disk wcm:action="add">
-                    <DiskID>0</DiskID>
-                    <WillWipeDisk>true</WillWipeDisk>
-                    <CreatePartitions>
-                        <CreatePartition wcm:action="add">
-                            <Order>1</Order>
-                            <Type>EFI</Type>
-                            <Size>500</Size>
-                        </CreatePartition>
-                        <CreatePartition wcm:action="add">
-                            <Order>2</Order>
-                            <Type>MSR</Type>
-                            <Size>16</Size>
-                        </CreatePartition>
-                        <CreatePartition wcm:action="add">
-                            <Order>3</Order>
-                            <Type>Primary</Type>
-                            <Extend>true</Extend>
-                        </CreatePartition>
-                    </CreatePartitions>
-                    <ModifyPartitions>
-                        <ModifyPartition wcm:action="add">
-                            <Order>1</Order>
-                            <PartitionID>1</PartitionID>
-                            <Format>FAT32</Format>
-                            <Label>System</Label>
-                        </ModifyPartition>
-                        <ModifyPartition wcm:action="add">
-                            <Order>2</Order>
-                            <PartitionID>2</PartitionID>
-                        </ModifyPartition>
-                        <ModifyPartition wcm:action="add">
-                            <Order>3</Order>
-                            <PartitionID>3</PartitionID>
-                            <Format>NTFS</Format>
-                            <Label>Windows</Label>
-                            <Letter>C</Letter>
-                        </ModifyPartition>
-                    </ModifyPartitions>
-                </Disk>
-                <WillShowUI>OnError</WillShowUI>
-            </DiskConfiguration>
-            <ImageInstall>
-                <OSImage>
-                    <InstallTo>
-                        <DiskID>0</DiskID>
-                        <PartitionID>3</PartitionID>
-                    </InstallTo>
-                    <InstallToAvailablePartition>false</InstallToAvailablePartition>
-                    <WillShowUI>OnError</WillShowUI>
-                    <InstallFrom>
-                        <MetaData wcm:action="add">
-                            <Key>/IMAGE/NAME</Key>
-                            <Value>Windows 10 Enterprise LTSC 2021</Value>
-                        </MetaData>
-                    </InstallFrom>
-                </OSImage>
-            </ImageInstall>
             <UserData>
                 <AcceptEula>true</AcceptEula>
-                <FullName>Administrator</FullName>
-                <Organization>Home</Organization>
+                <!-- Do not provide Key: always show the normal key/edition UI. -->
+                <ProductKey>
+                    <WillShowUI>Always</WillShowUI>
+                </ProductKey>
             </UserData>
         </component>
     </settings>
 
     <settings pass="specialize">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <ComputerName>DESKTOP-PC</ComputerName>
+            <ComputerName>__COMPUTER_NAME__</ComputerName>
             <RegisteredOrganization>Home</RegisteredOrganization>
             <RegisteredOwner>Administrator</RegisteredOwner>
             <TimeZone>China Standard Time</TimeZone>
@@ -93,98 +51,48 @@
             <UILanguageFallback>en-US</UILanguageFallback>
             <UserLocale>zh-CN</UserLocale>
         </component>
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Description>Enable NumLock at the Windows sign-in screen</Description>
+                    <Path>reg.exe add "HKU\.DEFAULT\Control Panel\Keyboard" /v InitialKeyboardIndicators /t REG_SZ /d 2 /f</Path>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
     </settings>
 
     <settings pass="oobeSystem">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <TimeZone>China Standard Time</TimeZone>
             <OOBE>
                 <HideEULAPage>true</HideEULAPage>
                 <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
                 <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                 <HideLocalAccountScreen>true</HideLocalAccountScreen>
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-                <NetworkLocation>Home</NetworkLocation>
                 <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>
             <UserAccounts>
                 <AdministratorPassword>
-                    <Value>123456</Value>
+                    <Value></Value>
                     <PlainText>true</PlainText>
                 </AdministratorPassword>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value>123456</Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local Administrator</Description>
-                        <DisplayName>Administrator</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>Administrator</Name>
-                    </LocalAccount>
-                </LocalAccounts>
             </UserAccounts>
             <AutoLogon>
                 <Password>
-                    <Value>123456</Value>
+                    <Value></Value>
                     <PlainText>true</PlainText>
                 </Password>
                 <Username>Administrator</Username>
-                <LogonCount>999</LogonCount>
+                <LogonCount>1</LogonCount>
                 <Enabled>true</Enabled>
             </AutoLogon>
             <FirstLogonCommands>
                 <SynchronousCommand wcm:action="add">
                     <Order>1</Order>
-                    <Description>Enable RDP</Description>
-                    <CommandLine>reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>2</Order>
-                    <Description>Allow RDP firewall</Description>
-                    <CommandLine>powershell -NoProfile -Command "Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'"</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>3</Order>
-                    <Description>Disable RDP NLA so xfreerdp can connect with plaintext password</Description>
-                    <CommandLine>reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>4</Order>
-                    <Description>Disable IE first run wizard</Description>
-                    <CommandLine>reg add "HKLM\Software\Policies\Microsoft\Internet Explorer\Main" /v DisableFirstRunCustomize /t REG_DWORD /d 1 /f</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>5</Order>
-                    <Description>Disable Windows Update auto-restart</Description>
-                    <CommandLine>reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" /v NoAutoRebootWithLoggedOnUsers /t REG_DWORD /d 1 /f</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>6</Order>
-                    <Description>Register no-op handler for ms-gamingoverlay (LTSC has no Game Bar)</Description>
-                    <CommandLine>reg add "HKCR\ms-gamingoverlay" /ve /d "URL:ms-gamingoverlay" /f</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>7</Order>
-                    <Description>ms-gamingoverlay: URL Protocol marker</Description>
-                    <CommandLine>reg add "HKCR\ms-gamingoverlay" /v "URL Protocol" /t REG_SZ /d "" /f</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>8</Order>
-                    <Description>ms-gamingoverlay: silent no-op command (cmd /c exit)</Description>
-                    <CommandLine>reg add "HKCR\ms-gamingoverlay\shell\open\command" /ve /d "cmd.exe /c exit" /f</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>9</Order>
-                    <Description>Disable Game DVR / GameBar (suppress overlay-trigger source)</Description>
-                    <CommandLine>reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /v AllowGameDVR /t REG_DWORD /d 0 /f</CommandLine>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>10</Order>
-                    <Description>Stealth respawn: run local D drive EXE once after OOBE</Description>
-                    <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$exe='D:\工具\respawn-stealth.exe'; if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe -ArgumentList '--firstlogon' -Wait } else { $log=Join-Path $env:WINDIR 'Temp\respawn-firstlogon.log'; ('missing firstlogon respawn exe: ' + $exe) | Out-File -FilePath $log -Encoding UTF8 -Append }"</CommandLine>
+                    <Description>Enable NumLock for Administrator</Description>
+                    <CommandLine>reg.exe add "HKCU\Control Panel\Keyboard" /v InitialKeyboardIndicators /t REG_SZ /d 2 /f</CommandLine>
                 </SynchronousCommand>
             </FirstLogonCommands>
         </component>

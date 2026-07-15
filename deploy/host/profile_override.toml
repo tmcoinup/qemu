@@ -15,33 +15,34 @@
 # x-pci-vendor-id / x-pci-device-id / x-pci-sub-* 覆盖（见 start-vm.sh）。
 
 [profile.nvidia-257]
+# 安装阶段保留 driver 原生 GRID 名称。start-vm.sh 会按稳定 mdev UUID
+# 原子维护 [mdev."UUID"] 的 card_name/adapter_name；这里不能写全局名称，
+# 否则所有使用 nvidia-257 的 VM 都会被污染成同一型号。
 num_displays = 4
 display_width = 1920
 display_height = 1200
 max_pixels = 9216000
-framebuffer = 0x80000000             # 2 GB
-framebuffer_reservation = 0x10000000 # 约 256 MB host overhead
+# nvidia-257 原生 2Q 分配是 1856 MiB framebuffer + 192 MiB reservation。
+# 两者之和才是 guest 应报告的 2048 MiB；写成 2048+256 会让
+# GPU-Z 误报 2304 MB。
+framebuffer = 0x74000000             # 1856 MiB
+framebuffer_reservation = 0x0c000000 # 192 MiB
 
 # ⚠️  不要覆写 pci_id / pci_device_id。
 # 保持 NVIDIA driver 默认报告的 Quadro RTX 6000 (0x10DE:0x1E30) 让 guest 里
-# GRID Windows 驱动 INF (nvdm*.inf) 能按原生 PCI\VEN_10DE&DEV_1E30 匹配上、
-# 正常装上。消费卡伪装 (GTX 1050 / GT 1030) 放到 guest 的 inf-patch.ps1 那
-# 步做：
+# GRID Windows 驱动 INF (nvgridsw.inf) 能按原生 PCI\VEN_10DE&DEV_1E30 匹配上、
+# 正常装上。消费卡产品名由 start-vm.sh 按 mdev UUID 在 host 端同步。完整 PCI ID 改写
+# 只有在 patched INF 和 catalog 已完成测试后才能启用；当前旧 inf-patch.ps1
+# 不能直接处理稳定的 538.33 nvgridsw.inf。目标流程是：
 #   1) 装完 GRID 驱动
-#   2) inf-patch.ps1 在 INF [Strings]/[NVIDIA_Devices] 段加 DEV_1C81/DEV_1D01
-#   3) 关 VM 再用 start-vm.sh 的默认 (SPOOF=1) 启动 → QEMU x-pci-device-id 把
-#      PCI config space 的 DEV 改成 1C81/1D01 → Windows 用修改后的 INF 里新
-#      加的 DEV_1C81/DEV_1D01 条目 bind 同一份 driver。
+#   2) inf-patch.ps1 在 INF [Strings]/[NVIDIA_Devices] 段加对应消费卡 DEV
+#   3) 完成签名和冷启动绑定验证后，关 VM 并显式传 start-vm.sh --spoof → QEMU
+#      x-pci-device-id 把 PCI config space 的 DEV 改成所选型号 → Windows 用修改后
+#      的 INF 新条目 bind 同一份 driver。当前默认是方案 B，不会改 PCI ID。
 #
-# 如果后面要强行伪装到 vGPU 驱动内部 (而非仅 PCI config)，再把下面两行解
-# 注释；但值必须是 0x10DE_XXXX 的完整 32-bit (高 16 vendor + 低 16 device)。
-#pci_id = 0x10DE1C81
-#pci_device_id = 0x10DE1C81
-
-# 备用: 4 GB profile (nvidia-259 = 4Q) 伪装 GT 1030
-# 需要时解注释并确保总显存不超 16 GB 上限
-#[profile.nvidia-259]
-#num_displays = 4
-#framebuffer = 0x100000000            # 4 GB
-#pci_id = 0x10DE1D01                  # 10DE:1D01 = GT 1030
-#pci_device_id = 0x10DE1D01
+# 如果后面要实验性地修改 vGPU manager 内部身份 (而非仅 PCI
+# config)，对应的 vgpu_unlock 结构值是 vdev_id=0x1C8111C0
+# (device+subdevice) 和 pdev_id=0x1C81。这可能破坏 RM/许可初始化，
+# 默认不启用。
+#pci_id = 0x1C8111C0
+#pci_device_id = 0x1C81

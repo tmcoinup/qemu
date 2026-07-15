@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install-vgpu-driver-gui.sh — GRID 553.24 driver install via AutoLogon+RunOnce。
+# install-vgpu-driver-gui.sh — GRID 538.33 driver install via AutoLogon+RunOnce。
 #
 # 为什么有这个：silent install (`-s -clean -noreboot`) 在 SYSTEM session
 # (pypsrp) 跑永远 -436207360；pnputil /add-driver 也只注册 INF 不拷 sys 文件。
@@ -15,17 +15,32 @@
 #
 # 前置:
 #   - guest WinRM 通 (Administrator/123456)
-#   - $STAGE_DIR/553.24.exe 已 staged
+#   - $STAGE_DIR/553.24.exe 已 staged；这是兼容旧脚本的文件名，内容必须为
+#     已验证的 538.33 / DriverVersion 31.0.15.3833
 #   - server.py 在 8080 跑 (server 已自动 sync deploy/guest/install-driver-runonce.ps1)
+#
+# 成功后默认删除 guest 中的 installer/RunOnce/flag 临时文件；排障时可临时设
+# KEEP_GUEST_INSTALLER=1 保留。
 #
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source ./lib/vgpu-driver-assets.sh
+# shellcheck source=lib/vm-storage.sh
+source ./lib/vm-storage.sh
+vm_storage_init
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
 GUEST_USER=${GUEST_USER:-Administrator}
 GUEST_PASS=${GUEST_PASS:-123456}
 TIMEOUT_INSTALL=${TIMEOUT_INSTALL:-600}    # poll done flag 总秒数 (10 min)
+# 成功后默认删除 guest 中的一次性安装器/arm 脚本/flag；仅排障时设 1 保留。
+KEEP_GUEST_INSTALLER=${KEEP_GUEST_INSTALLER:-0}
+[[ "$KEEP_GUEST_INSTALLER" == 0 || "$KEEP_GUEST_INSTALLER" == 1 ]] || {
+    echo "KEEP_GUEST_INSTALLER 必须是 0 或 1" >&2
+    exit 2
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,8 +53,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Fail before touching the guest if the historically misnamed asset was replaced
+# by a real 553.24 (R550) installer or any other unverified package.
+vgpu_verify_driver_assets exe
+
 if [[ -z "$IP_OVERRIDE" ]]; then
-    conf="${VM_ROOT:-/home/ubuntu/images/vms}/configs/vm${VM_ID}.conf"
+    conf=$(vm_storage_config_path "$VM_ID")
     [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }
     # shellcheck source=/dev/null
     source "$conf"
@@ -78,7 +97,7 @@ New-Item -Path C:\nv -ItemType Directory -Force | Out-Null
 
 # 拉 setup.exe (如果不在)
 if (-not (Test-Path 'C:\nv\553.24.exe') -or (Get-Item 'C:\nv\553.24.exe').Length -lt 500000000) {{
-    Write-Host '  pulling 553.24.exe...'
+    Write-Host '  pulling 538.33 package (legacy asset name 553.24.exe)...'
     Invoke-WebRequest '{base}/553.24.exe' -OutFile C:\nv\553.24.exe -UseBasicParsing
 }}
 
@@ -161,12 +180,24 @@ fi
 
 echo "[gui-install] setup.exe 退出码: $EXIT_CODE"
 
-# ── cleanup AutoLogon + verify ─────────────────────────────────────────
-python3 - "$IP" "$GUEST_USER" "$GUEST_PASS" <<'PYEOF'
+# ── cleanup AutoLogon / transient files + verify ───────────────────────
+python3 - "$IP" "$GUEST_USER" "$GUEST_PASS" "$EXIT_CODE" \
+    "$KEEP_GUEST_INSTALLER" <<'PYEOF'
 import sys
 from pypsrp.client import Client
-ip, user, pw = sys.argv[1:4]
+ip, user, pw, exit_code, keep_installer = sys.argv[1:6]
 c = Client(ip, username=user, password=pw, ssl=False, auth='ntlm')
+cleanup_transient = exit_code == '0' and keep_installer == '0'
+cleanup_ps = r"""
+Write-Host 'cleaning one-shot driver installer artifacts'
+Remove-Item 'C:\nv\install-driver-runonce.ps1' -Force -EA 0
+Remove-Item 'C:\nv\drv-done.flag' -Force -EA 0
+Remove-Item 'C:\nv\553.24.exe' -Force -EA 0
+Remove-Item 'C:\nv\553.24-dd.zip' -Force -EA 0
+Remove-Item 'C:\nv\553.24-dd' -Recurse -Force -EA 0
+""" if cleanup_transient else r"""
+Write-Host 'keeping installer artifacts (failed/non-zero install or KEEP_GUEST_INSTALLER=1)'
+"""
 ps = r"""
 # 清 AutoLogon (RunOnce 已自动清)
 $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
@@ -181,6 +212,8 @@ Set-ItemProperty -Path $wukey -Name 'ExcludeWUDriversInQualityUpdate' -Type DWor
 $dskey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching'
 New-Item -Path $dskey -Force | Out-Null
 Set-ItemProperty -Path $dskey -Name 'SearchOrderConfig' -Type DWord -Value 0
+
+""" + cleanup_ps + r"""
 
 Write-Host '=== driver state ==='
 'nvlddmkm.sys: ' + (Test-Path 'C:\Windows\System32\drivers\nvlddmkm.sys')

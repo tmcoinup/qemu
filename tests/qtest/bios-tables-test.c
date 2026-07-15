@@ -95,10 +95,14 @@ typedef struct {
     SmbiosEntryPoint smbios_ep_table;
     uint16_t smbios_cpu_max_speed;
     uint16_t smbios_cpu_curr_speed;
+    uint16_t smbios_cpu_external_clock;
+    uint8_t smbios_cpu_voltage;
+    uint8_t smbios_cpu_processor_upgrade;
     uint8_t smbios_core_count;
     uint16_t smbios_core_count2;
     uint8_t smbios_thread_count;
     uint16_t smbios_thread_count2;
+    int type17_count;
     uint8_t *required_struct_types;
     int required_struct_types_len;
     int type4_count;
@@ -677,6 +681,29 @@ static void smbios_cpu_test(test_data *data, uint32_t addr,
         g_assert_cmpuint(speed, ==, expected_speed[i]);
     }
 
+    if (data->smbios_cpu_external_clock) {
+        uint16_t external_clock = qtest_readw(data->qts, addr +
+            offsetof(struct smbios_type_4, external_clock));
+
+        g_assert_cmpuint(external_clock, ==,
+                         data->smbios_cpu_external_clock);
+    }
+
+    if (data->smbios_cpu_voltage) {
+        uint8_t voltage = qtest_readb(data->qts, addr +
+            offsetof(struct smbios_type_4, voltage));
+
+        g_assert_cmpuint(voltage, ==, data->smbios_cpu_voltage);
+    }
+
+    if (data->smbios_cpu_processor_upgrade) {
+        uint8_t processor_upgrade = qtest_readb(data->qts, addr +
+            offsetof(struct smbios_type_4, processor_upgrade));
+
+        g_assert_cmpuint(processor_upgrade, ==,
+                         data->smbios_cpu_processor_upgrade);
+    }
+
     core_count = qtest_readb(data->qts,
                     addr + offsetof(struct smbios_type_4, core_count));
 
@@ -725,7 +752,7 @@ static void test_smbios_structs(test_data *data, SmbiosEntryPointType ep_type)
     DECLARE_BITMAP(struct_bitmap, SMBIOS_MAX_TYPE+1) = { 0 };
 
     SmbiosEntryPoint *ep_table = &data->smbios_ep_table;
-    int i = 0, len, max_len = 0, type4_count = 0;
+    int i = 0, len, max_len = 0, type4_count = 0, type17_count = 0;
     uint8_t type, prv, crt;
     uint64_t addr;
 
@@ -752,6 +779,9 @@ static void test_smbios_structs(test_data *data, SmbiosEntryPointType ep_type)
         if (type == 4) {
             smbios_cpu_test(data, addr, ep_type);
             type4_count++;
+        }
+        if (type == 17) {
+            type17_count++;
         }
 
         /* seek to end of unformatted string area of this struct ("\0\0") */
@@ -797,6 +827,9 @@ static void test_smbios_structs(test_data *data, SmbiosEntryPointType ep_type)
     }
 
     smbios_type4_count_test(data, type4_count);
+    if (data->type17_count) {
+        g_assert_cmpint(type17_count, ==, data->type17_count);
+    }
 }
 
 static void test_acpi_load_tables(test_data *data)
@@ -1037,6 +1070,42 @@ static void test_acpi_q35_tcg(void)
     data.smbios_cpu_curr_speed = 2600;
     test_acpi_one("-smbios type=4,max-speed=3000,current-speed=2600", &data);
     free_test_data(&data);
+}
+
+static void test_acpi_q35_smbios_type4_options(void)
+{
+    test_data data = {
+        .machine = MACHINE_Q35,
+        .arch = "x86",
+        .required_struct_types = base_required_struct_types,
+        .required_struct_types_len = ARRAY_SIZE(base_required_struct_types),
+        .smbios_cpu_processor_upgrade = 0x01,
+    };
+
+    /* The upstream-compatible default remains "Other" (0x01). */
+    test_smbios(NULL, &data);
+
+    data.smbios_cpu_max_speed = 3000;
+    data.smbios_cpu_curr_speed = 2600;
+    data.smbios_cpu_external_clock = 100;
+    data.smbios_cpu_voltage = 0x8d;
+    data.smbios_cpu_processor_upgrade = 0x38;
+    test_smbios("-smbios type=4,max-speed=3000,current-speed=2600,"
+                "external-clock=100,voltage=0x8d,processor-upgrade=0x38",
+                &data);
+}
+
+static void test_acpi_q35_9_2_smbios_memory_device_size(void)
+{
+    test_data data = {
+        .machine = "pc-q35-9.2",
+        .arch = "x86",
+        .required_struct_types = base_required_struct_types,
+        .required_struct_types_len = ARRAY_SIZE(base_required_struct_types),
+        .type17_count = 2,
+    };
+
+    test_smbios("-m 8G", &data);
 }
 
 static void test_acpi_q35_kvm_type4_count(void)
@@ -2761,6 +2830,10 @@ int main(int argc, char *argv[])
         }
         if (qtest_has_machine(MACHINE_Q35)) {
             qtest_add_func("acpi/q35", test_acpi_q35_tcg);
+            qtest_add_func("acpi/q35/smbios-type4-options",
+                           test_acpi_q35_smbios_type4_options);
+            qtest_add_func("acpi/q35/smbios-9.2-memory-device-size",
+                           test_acpi_q35_9_2_smbios_memory_device_size);
             qtest_add_func("acpi/q35/oem-fields", test_acpi_q35_oem_fields);
             if (tpm_model_is_available("-machine q35", "tpm-tis")) {
                 qtest_add_func("acpi/q35/tpm2-tis", test_acpi_q35_tcg_tpm2_tis);

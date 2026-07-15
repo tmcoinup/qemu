@@ -1,0 +1,48 @@
+# Real monitor profiles backed by decoded EDID samples from linuxhw/EDID.
+# schema: key|vendor|product_id|edid_name|display_name|manufacturer|width_mm|height_mm|native_x|native_y|refresh_hz|min_v|max_v|min_h|max_h|max_clock_mhz|video_input|year|week|serial_prefix|mode_set
+# source: Digital/Samsung/SAM0D20/0830D265BA32
+samsung-s24f350|SAM|0x0D20|S24F350|Samsung S24F350|Samsung|521|293|1920|1080|60|50|75|30|81|170|0x80|2018|33|H4ZK|fhd-standard
+# source: Digital/Samsung/SAM0D2C/02E9C8791131
+samsung-c24f390|SAM|0x0D2C|C24F390|Samsung C24F390|Samsung|521|293|1920|1080|60|50|72|30|81|170|0x80|2018|19|HTQK|fhd-standard
+# source: Digital/Samsung/SAM0B43/239BC45CDE69
+samsung-s24d300|SAM|0x0B43|S24D300|Samsung S24D300|Samsung|531|299|1920|1080|60|50|75|30|81|170|0x80|2017|43|XAZZ|fhd-standard
+# source: Digital/Samsung/SAM100E/01B35D54DAAD
+samsung-s24r35x|SAM|0x100E|S24R35x|Samsung S24R35x|Samsung|527|296|1920|1080|60|50|75|30|85|180|0x80|2020|50|H4TN|fhd-standard
+# source: Digital/Dell/DELD0D8/1020CE1C8615
+dell-p2419h|DEL|0xD0D8|DELL P2419H|Dell P2419H|Dell|527|296|1920|1080|60|56|76|30|83|170|0x80|2018|51|CC3P|fhd-standard
+# source: Digital/Dell/DELA0DA/1AE01EB64801
+dell-p2417h|DEL|0xA0DA|DELL P2417H|Dell P2417H|Dell|527|296|1920|1080|60|56|76|30|83|170|0xA5|2018|31|KH0N|fhd-standard
+# source: Digital/Dell/DELF113/1875E76119BF (EDID name shortened to its model token)
+dell-se2419hr|DEL|0xF113|SE2419HR|Dell SE2419HR|Dell|527|296|1920|1080|60|48|76|30|84|180|0x80|2020|18|5B10|fhd-standard
+# source: Digital/Dell/DELD082/05A2295A963D
+dell-se2416h|DEL|0xD082|DELL SE2416H|Dell SE2416H|Dell|527|296|1920|1080|60|56|76|30|83|170|0x80|2018|1|P7HT|fhd-standard
+# source: Digital/BenQ/BNQ78E7/0D43A6559616
+benq-gw2480|BNQ|0x78E7|BenQ GW2480|BenQ GW2480|BenQ|527|296|1920|1080|60|50|76|30|83|170|0x80|2018|35|19J0|fhd-standard
+# source: Digital/BenQ/BNQ78ED/0F90BE570127
+benq-gl2480|BNQ|0x78ED|BenQ GL2480|BenQ GL2480|BenQ|531|298|1920|1080|60|50|76|30|83|210|0x80|2019|42|ETFA|fhd-standard
+# source: Digital/BenQ/BNQ78CE/0798EE316224
+benq-gl2460|BNQ|0x78CE|BenQ GL2460|BenQ GL2460|BenQ|531|299|1920|1080|60|50|76|30|83|180|0x80|2018|29|ET|fhd-standard
+# source: Digital/AOC/AOC2401/0368D9D89593 (EDID token 24B1W; mainland retail model 24B1H)
+aoc-24b1w|AOC|0x2401|24B1W|AOC 24B1H|AOC|521|293|1920|1080|60|50|76|30|83|170|0x80|2018|39|GMXJ|fhd-standard
+# source: Digital/AOC/AOC2470/034C1D58753A
+aoc-2470w|AOC|0x2470|2470W|AOC 2470W|AOC|521|293|1920|1080|60|50|76|30|83|170|0x80|2019|15|GGJK|fhd-standard
+# source: Digital/HKC/HKC2496/11DC1229409B
+hkc-24e4|HKC|0x2496|24E4|HKC 24E4|HKC|527|296|1920|1080|60|48|144|30|160|340|0x80|2023|9|0000|fhd-standard
+# source: Digital/HKC/HKC2413/02170FAD35F0
+hkc-24n1a|HKC|0x2413|24N1A|HKC 24N1A|HKC|527|296|1920|1080|60|48|75|30|85|180|0x80|2022|34|0000|fhd-standard
+# source: Digital/Mi/XMI23C3/01B9C995D956; mainland retail model RMMNT238NF
+redmi-rmmnt238nf|XMI|0x23C3|Mi Monitor|Redmi RMMNT238NF|Redmi|527|293|1920|1080|60|50|75|15|100|190|0x80|2020|20|2920|fhd-standard
+# source: Digital/Philips/PHLC155/0EFB4891D5DB
+philips-243v7|PHL|0xC155|PHL 243V7|Philips 243V7|Philips|527|296|1920|1080|60|50|76|30|83|170|0x80|2018|32|UK01|fhd-standard
+# source: Digital/Philips/PHLC219/110AA1212DBD
+philips-242v8|PHL|0xC219|PHL 242V8|Philips 242V8|Philips|527|296|1920|1080|60|48|76|30|83|180|0x80|2020|32|UHB2|fhd-standard
+# source: Digital/Lenovo/LEN61A6/3D5776276F27
+lenovo-t24i-10|LEN|0x61A6|T24i-10|Lenovo T24i-10|Lenovo|527|296|1920|1080|60|50|75|15|83|170|0xA5|2018|3|VT99|fhd-standard
+# source: Digital/Lenovo/LEN66AE/009C14CB2E05
+lenovo-d24-20|LEN|0x66AE|D24-20|Lenovo D24-20|Lenovo|527|296|1920|1080|60|48|75|30|83|210|0x80|2020|34|U760|fhd-standard
+# source: Digital/ASUS/AUS24D1/23336B577916
+asus-va24e|AUS|0x24D1|ASUS VA24E|ASUS VA24E|ASUS|527|296|1920|1080|60|48|75|24|84|180|0x80|2019|51|KCLM|fhd-standard
+# source: Digital/Acer/ACR046F/3AA6301DEF5C
+acer-r240hy|ACR|0x046F|R240HY|Acer R240HY|Acer|527|296|1920|1080|60|56|75|31|75|180|0x80|2018|40|T4BA|fhd-standard
+# source: Digital/ViewSonic/VSC7B32/1A8A5330CF3D (EDID name shortened to its model token)
+viewsonic-va2419|VSC|0x7B32|VA2419|ViewSonic VA2419 Series|ViewSonic|527|296|1920|1080|60|50|75|24|82|170|0x80|2017|39|ULP1|fhd-standard

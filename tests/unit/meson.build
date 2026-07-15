@@ -49,6 +49,7 @@ tests = {
   'test-interval-tree': [],
   'test-fifo': [],
   'test-envlist': [],
+  'test-edid': [meson.project_source_root() / 'hw/display/edid-generate.c'],
 }
 
 if have_system or have_tools

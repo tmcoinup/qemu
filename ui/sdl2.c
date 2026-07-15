@@ -55,15 +55,90 @@ static int gui_fullscreen;
 static int gui_grab_code = KMOD_LALT | KMOD_LCTRL;
 static SDL_Cursor *sdl_cursor_normal;
 static SDL_Cursor *sdl_cursor_hidden;
+static SDL_Cursor *sdl_cursor_windows;
+static bool sdl2_framebuffer_cursor;
 static int absolute_enabled;
 static bool guest_cursor;
 static int guest_x, guest_y;
 static SDL_Cursor *guest_sprite;
 static Notifier mouse_mode_notifier;
 
-#define SDL2_REFRESH_INTERVAL_BUSY 10
-#define SDL2_MAX_IDLE_COUNT (2 * GUI_REFRESH_INTERVAL_DEFAULT \
-                             / SDL2_REFRESH_INTERVAL_BUSY + 1)
+/* Optional project-local GNOME/Wayland shortcut guard.  XWayland cannot
+ * inhibit compositor shortcuts such as Super and Alt+Tab itself, so the
+ * launcher supplies a helper that temporarily disables those bindings while
+ * this SDL window owns both keyboard and mouse focus. */
+static const char *sdl2_gnome_guard_script;
+static char *sdl2_gnome_guard_state;
+static bool sdl2_gnome_guard_active;
+
+static bool sdl2_env_enabled(const char *name)
+{
+    const char *value = g_getenv(name);
+
+    return value &&
+           (g_ascii_strcasecmp(value, "1") == 0 ||
+            g_ascii_strcasecmp(value, "yes") == 0 ||
+            g_ascii_strcasecmp(value, "true") == 0 ||
+            g_ascii_strcasecmp(value, "on") == 0);
+}
+
+static bool sdl2_gnome_guard_run(const char *action)
+{
+    gchar *argv[] = {
+        (gchar *)sdl2_gnome_guard_script,
+        (gchar *)action,
+        sdl2_gnome_guard_state,
+        NULL,
+    };
+    GError *err = NULL;
+    gint status = 0;
+    bool ok;
+
+    if (!sdl2_gnome_guard_script || !sdl2_gnome_guard_state) {
+        return false;
+    }
+    ok = g_spawn_sync(NULL, argv, NULL,
+                      G_SPAWN_STDOUT_TO_DEV_NULL |
+                      G_SPAWN_STDERR_TO_DEV_NULL,
+                      NULL, NULL, NULL, NULL, &status, &err);
+    if (ok) {
+        ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    if (!ok) {
+        warn_report("sdl2: GNOME shortcut guard %s failed: %s",
+                    action, err ? err->message : "unknown error");
+    }
+    g_clear_error(&err);
+    return ok;
+}
+
+static void sdl2_gnome_guard_restore(void)
+{
+    if (sdl2_gnome_guard_active && sdl2_gnome_guard_run("restore")) {
+        sdl2_gnome_guard_active = false;
+    }
+}
+
+static void sdl2_gnome_guard_set(bool want)
+{
+    if (want && !sdl2_gnome_guard_active) {
+        if (sdl2_gnome_guard_run("tame")) {
+            sdl2_gnome_guard_active = true;
+        }
+    } else if (!want) {
+        sdl2_gnome_guard_restore();
+    }
+}
+
+static void sdl2_gnome_guard_update(struct sdl2_console *scon)
+{
+    sdl2_gnome_guard_set(scon && scon->has_input_focus &&
+                         (scon->has_mouse_focus || gui_grab) &&
+                         !scon->hidden);
+}
+
+/* 60 Hz expressed exactly enough for the nanosecond absolute GUI timer. */
+#define SDL2_REFRESH_INTERVAL_ACTIVE_NS 16666667ULL
 
 /* introduced in SDL 2.0.10 */
 #ifndef SDL_HINT_RENDER_BATCHING
@@ -258,6 +333,167 @@ static void sdl2_window_sync_native_egl_child(struct sdl2_console *scon)
 
 static void sdl_update_caption(struct sdl2_console *scon);
 
+#ifdef CONFIG_SDL_IMAGE
+static uint16_t sdl2_cursor_le16(const uint8_t *p)
+{
+    return p[0] | (p[1] << 8);
+}
+
+static uint32_t sdl2_cursor_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static SDL_Cursor *sdl2_load_windows_cursor(const char *path)
+{
+    gchar *contents = NULL;
+    gsize size = 0;
+    const uint8_t *entry = NULL;
+    uint8_t *single = NULL;
+    SDL_RWops *rw = NULL;
+    SDL_Surface *surface = NULL;
+    SDL_Cursor *cursor = NULL;
+    uint16_t count, hot_x = 0, hot_y = 0;
+    int best_score = INT_MAX;
+    int i;
+
+    if (!path || !g_file_get_contents(path, &contents, &size, NULL) ||
+        size < 22 || size > INT_MAX) {
+        goto out;
+    }
+    if (sdl2_cursor_le16((uint8_t *)contents) != 0 ||
+        sdl2_cursor_le16((uint8_t *)contents + 2) != 2) {
+        goto out;
+    }
+    count = sdl2_cursor_le16((uint8_t *)contents + 4);
+    if (!count || count > (size - 6) / 16) {
+        goto out;
+    }
+
+    for (i = 0; i < count; i++) {
+        const uint8_t *candidate = (uint8_t *)contents + 6 + i * 16;
+        uint32_t bytes = sdl2_cursor_le32(candidate + 8);
+        uint32_t offset = sdl2_cursor_le32(candidate + 12);
+        int width = candidate[0] ? candidate[0] : 256;
+        int height = candidate[1] ? candidate[1] : 256;
+        int score = ABS(width - 32) + ABS(height - 32);
+
+        if (offset > size || bytes > size - offset) {
+            continue;
+        }
+        if (score < best_score) {
+            entry = candidate;
+            best_score = score;
+        }
+    }
+    if (!entry) {
+        goto out;
+    }
+
+    hot_x = sdl2_cursor_le16(entry + 4);
+    hot_y = sdl2_cursor_le16(entry + 6);
+    single = g_malloc(size);
+    memcpy(single, contents, size);
+    single[4] = 1;
+    single[5] = 0;
+    memcpy(single + 6, entry, 16);
+    rw = SDL_RWFromConstMem(single, size);
+    if (!rw) {
+        goto out;
+    }
+    surface = IMG_LoadCUR_RW(rw);
+    if (surface && surface->w == 32 && surface->h == 32) {
+        cursor = SDL_CreateColorCursor(surface, hot_x, hot_y);
+    }
+
+out:
+    if (surface) {
+        SDL_FreeSurface(surface);
+    }
+    if (rw) {
+        SDL_RWclose(rw);
+    }
+    g_free(single);
+    g_free(contents);
+    return cursor;
+}
+#endif
+
+/* REGION-based NVIDIA mdev display does not expose a separate hardware
+ * cursor plane.  Use the 32x32 Windows default aero arrow while the absolute
+ * pointer is inside the guest instead of leaking the Ubuntu cursor theme.
+ * The simple bitmap below remains only as a no-SDL_image/decode fallback. */
+static SDL_Cursor *sdl2_create_windows_cursor(void)
+{
+#ifdef CONFIG_SDL_IMAGE
+    SDL_Cursor *aero_cursor = sdl2_load_windows_cursor(
+        g_getenv("QEMU_SDL_WINDOWS_CURSOR"));
+
+    if (aero_cursor) {
+        info_report("sdl2: loaded 32x32 Windows cursor from %s",
+                    g_getenv("QEMU_SDL_WINDOWS_CURSOR"));
+        return aero_cursor;
+    }
+#endif
+
+    static const char *shape[] = {
+        "X",
+        "XX",
+        "XOX",
+        "XOOX",
+        "XOOOX",
+        "XOOOOX",
+        "XOOOOOX",
+        "XOOOOOOX",
+        "XOOOOOOOX",
+        "XOOOOOOOOX",
+        "XOOOOOOOOOX",
+        "XOOOOOOOOOOX",
+        "XOOOOOXXXXXXX",
+        "XOOOXOX",
+        "XOOX XOX",
+        "XOX  XOX",
+        "XX   XOX",
+        "X     XOX",
+        "      XOX",
+        "      XOX",
+        "      XOX",
+        "      XXX",
+    };
+    SDL_Surface *surface;
+    SDL_Cursor *cursor;
+    Uint32 black, white, transparent;
+    int x, y;
+
+    surface = SDL_CreateRGBSurfaceWithFormat(0, 24, 32, 32,
+                                              SDL_PIXELFORMAT_ARGB8888);
+    if (!surface) {
+        return NULL;
+    }
+    transparent = SDL_MapRGBA(surface->format, 0, 0, 0, 0);
+    black = SDL_MapRGBA(surface->format, 0, 0, 0, 255);
+    white = SDL_MapRGBA(surface->format, 255, 255, 255, 255);
+    SDL_FillRect(surface, NULL, transparent);
+    if (SDL_LockSurface(surface) == 0) {
+        for (y = 0; y < ARRAY_SIZE(shape); y++) {
+            Uint32 *row = (Uint32 *)((uint8_t *)surface->pixels +
+                                     y * surface->pitch);
+            for (x = 0; shape[y][x] != '\0'; x++) {
+                if (shape[y][x] == 'X') {
+                    row[x] = black;
+                } else if (shape[y][x] == 'O') {
+                    row[x] = white;
+                }
+            }
+        }
+        SDL_UnlockSurface(surface);
+    }
+    cursor = SDL_CreateColorCursor(surface, 0, 0);
+    SDL_FreeSurface(surface);
+    return cursor;
+}
+
 static struct sdl2_console *get_scon_from_window(uint32_t window_id)
 {
     int i;
@@ -450,6 +686,8 @@ static void sdl_update_caption(struct sdl2_console *scon)
     char win_title[1024];
     char icon_title[1024];
     const char *status = "";
+    const char *cursor_status = sdl2_framebuffer_cursor ?
+                                " | Cursor: framebuffer (host hidden)" : "";
 
     if (!runstate_is_running()) {
         status = " [Stopped]";
@@ -472,11 +710,24 @@ static void sdl_update_caption(struct sdl2_console *scon)
     }
 
     if (qemu_name) {
-        snprintf(win_title, sizeof(win_title), "QEMU (%s-%d)%s", qemu_name,
-                 scon->idx, status);
+        if (scon->present_fps_valid) {
+            snprintf(win_title, sizeof(win_title),
+                     "QEMU (%s-%d) | SDL Present %.1f FPS%s%s", qemu_name,
+                     scon->idx, scon->present_fps, cursor_status, status);
+        } else {
+            snprintf(win_title, sizeof(win_title), "QEMU (%s-%d)%s%s",
+                     qemu_name, scon->idx, cursor_status, status);
+        }
         snprintf(icon_title, sizeof(icon_title), "QEMU (%s)", qemu_name);
     } else {
-        snprintf(win_title, sizeof(win_title), "QEMU%s", status);
+        if (scon->present_fps_valid) {
+            snprintf(win_title, sizeof(win_title),
+                     "QEMU | SDL Present %.1f FPS%s%s",
+                     scon->present_fps, cursor_status, status);
+        } else {
+            snprintf(win_title, sizeof(win_title), "QEMU%s%s",
+                     cursor_status, status);
+        }
         snprintf(icon_title, sizeof(icon_title), "QEMU");
     }
 
@@ -485,18 +736,77 @@ static void sdl_update_caption(struct sdl2_console *scon)
     }
 }
 
-static void sdl_hide_cursor(struct sdl2_console *scon)
+static void sdl2_present_rate_tick(struct sdl2_console *scon)
 {
+    int64_t now_us = g_get_monotonic_time();
+    int64_t elapsed_us;
+
+    if (!scon->fps_window_start_us) {
+        scon->fps_window_start_us = now_us;
+        return;
+    }
+    elapsed_us = now_us - scon->fps_window_start_us;
+    if (elapsed_us >= G_USEC_PER_SEC) {
+        scon->present_fps = (double)scon->fps_frame_count * G_USEC_PER_SEC /
+                            elapsed_us;
+        scon->fps_frame_count = 0;
+        scon->fps_window_start_us = now_us;
+        scon->present_fps_valid = true;
+        sdl_update_caption(scon);
+    }
+}
+
+void sdl2_note_present(struct sdl2_console *scon)
+{
+    if (!scon->fps_window_start_us) {
+        scon->fps_window_start_us = g_get_monotonic_time();
+    }
+    scon->fps_frame_count++;
+    sdl2_present_rate_tick(scon);
+}
+
+/* Apply the cursor policy while the pointer is active inside the guest. */
+static void sdl_apply_active_cursor(struct sdl2_console *scon)
+{
+    bool absolute = qemu_input_is_absolute(scon->dcl.con) ||
+                    absolute_enabled;
+
     if (scon->opts->has_show_cursor && scon->opts->show_cursor) {
+        return;
+    }
+
+    /*
+     * NVIDIA's VFIO REGION ABI exposes only the primary XRGB surface, not
+     * the Windows hardware-cursor plane.  The normal absolute/tablet mode
+     * therefore needs the host-side arrow below.  Some games instead draw
+     * their own cursor into that primary framebuffer; in that mode hide all
+     * SDL cursor sprites so the game's original shape is not covered.
+     */
+    if (sdl2_framebuffer_cursor) {
+        SDL_SetRelativeMouseMode(absolute ? SDL_FALSE : SDL_TRUE);
+        SDL_SetCursor(sdl_cursor_hidden);
+        SDL_ShowCursor(SDL_DISABLE);
+        return;
+    }
+
+    if (guest_cursor && guest_sprite) {
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+        SDL_SetCursor(guest_sprite);
+        SDL_ShowCursor(SDL_ENABLE);
+        return;
+    }
+
+    if (absolute) {
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+        SDL_SetCursor(sdl_cursor_windows ? sdl_cursor_windows
+                                         : sdl_cursor_normal);
+        SDL_ShowCursor(SDL_ENABLE);
         return;
     }
 
     SDL_ShowCursor(SDL_DISABLE);
     SDL_SetCursor(sdl_cursor_hidden);
-
-    if (!qemu_input_is_absolute(scon->dcl.con)) {
-        SDL_SetRelativeMouseMode(SDL_TRUE);
-    }
+    SDL_SetRelativeMouseMode(SDL_TRUE);
 }
 
 static void sdl_show_cursor(struct sdl2_console *scon)
@@ -505,17 +815,8 @@ static void sdl_show_cursor(struct sdl2_console *scon)
         return;
     }
 
-    if (!qemu_input_is_absolute(scon->dcl.con)) {
-        SDL_SetRelativeMouseMode(SDL_FALSE);
-    }
-
-    if (guest_cursor &&
-        (gui_grab || qemu_input_is_absolute(scon->dcl.con) || absolute_enabled)) {
-        SDL_SetCursor(guest_sprite);
-    } else {
-        SDL_SetCursor(sdl_cursor_normal);
-    }
-
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+    SDL_SetCursor(sdl_cursor_normal);
     SDL_ShowCursor(SDL_ENABLE);
 }
 
@@ -534,13 +835,10 @@ static void sdl_grab_start(struct sdl2_console *scon)
     if (!(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_INPUT_FOCUS)) {
         return;
     }
-    if (guest_cursor) {
-        SDL_SetCursor(guest_sprite);
-        if (!qemu_input_is_absolute(scon->dcl.con) && !absolute_enabled) {
-            SDL_WarpMouseInWindow(scon->real_window, guest_x, guest_y);
-        }
-    } else {
-        sdl_hide_cursor(scon);
+    sdl_apply_active_cursor(scon);
+    if (!sdl2_framebuffer_cursor && guest_cursor &&
+        !qemu_input_is_absolute(scon->dcl.con) && !absolute_enabled) {
+        SDL_WarpMouseInWindow(scon->real_window, guest_x, guest_y);
     }
     SDL_SetWindowGrab(scon->real_window, SDL_TRUE);
     gui_grab = 1;
@@ -680,14 +978,20 @@ static void *sdl2_win32_get_hwnd(struct sdl2_console *scon)
 }
 
 /*
- * 输入门控：键鼠事件只在窗口同时拥有 X11 输入焦点和鼠标焦点(指针在窗内)
- * 时才允许下发到 guest。任一条件失守, 上层 handle_xxx 直接丢事件。
- * 焦点状态在 handle_windowevent() 里随 FOCUS_GAINED/LOST 和 ENTER/LEAVE 维护,
- * 丢失瞬间统一调 sdl2_release_modifiers() 抬起全键, 避免 guest 卡键。
+ * Keyboard focus and pointer focus are independent in SDL/XWayland.  In
+ * particular, a focused window may receive key events without a preceding
+ * SDL_WINDOWEVENT_ENTER, so requiring SDL_WINDOW_MOUSE_FOCUS here can make a
+ * perfectly focused QEMU window silently discard every key press.
  */
-static bool sdl2_input_allowed(struct sdl2_console *scon)
+static bool sdl2_keyboard_input_allowed(struct sdl2_console *scon)
 {
-    return scon && scon->has_input_focus && scon->has_mouse_focus;
+    return scon && scon->has_input_focus;
+}
+
+static bool sdl2_pointer_input_allowed(struct sdl2_console *scon)
+{
+    return scon && scon->has_input_focus &&
+           (scon->has_mouse_focus || gui_grab);
 }
 static void handle_keydown(SDL_Event *ev)
 {
@@ -698,9 +1002,9 @@ static void handle_keydown(SDL_Event *ev)
     if (!scon) {
         return;
     }
-    /* 焦点 / 指针不在窗内时, KEYDOWN 一律丢. KEYUP 走 handle_keyup,
-     * 由 qkbd_state_key_event 的 suspicious-keyup 过滤天然抹掉. */
-    if (!sdl2_input_allowed(scon)) {
+    /* Keyboard input follows the window's input focus.  KEYUP always reaches
+     * qkbd_state below so focus transitions cannot leave a guest key stuck. */
+    if (!sdl2_keyboard_input_allowed(scon)) {
         return;
     }
 
@@ -745,6 +1049,18 @@ static void handle_keydown(SDL_Event *ev)
             } else if (!gui_fullscreen) {
                 sdl_grab_end(scon);
             }
+            break;
+        case SDL_SCANCODE_C:
+            sdl2_framebuffer_cursor = !sdl2_framebuffer_cursor;
+            if (gui_grab) {
+                sdl_apply_active_cursor(scon);
+            } else {
+                sdl_show_cursor(scon);
+            }
+            info_report("sdl2: framebuffer cursor mode %s",
+                        sdl2_framebuffer_cursor ? "enabled" : "disabled");
+            sdl_update_caption(scon);
+            scon->gui_keysym = true;
             break;
         case SDL_SCANCODE_0:
             sdl2_window_resize(scon);
@@ -810,7 +1126,7 @@ static void handle_textinput(SDL_Event *ev)
     if (!con) {
         return;
     }
-    if (!sdl2_input_allowed(scon)) {
+    if (!sdl2_keyboard_input_allowed(scon)) {
         return;
     }
 
@@ -828,9 +1144,9 @@ static void handle_mousemotion(SDL_Event *ev)
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
         return;
     }
-    /* grab=on 时 SDL 把指针锁在窗内, sdl2_input_allowed 自然为真;
+    /* grab=on 时 SDL 把指针锁在窗内, pointer gate 自然为真;
      * grab=off 且指针在窗外/无焦点时, 不把鼠标位置写进 guest. */
-    if (!sdl2_input_allowed(scon)) {
+    if (!sdl2_pointer_input_allowed(scon)) {
         return;
     }
 
@@ -870,7 +1186,7 @@ static void handle_mousebutton(SDL_Event *ev)
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
         return;
     }
-    if (!sdl2_input_allowed(scon)) {
+    if (!sdl2_pointer_input_allowed(scon)) {
         return;
     }
 
@@ -903,7 +1219,7 @@ static void handle_mousewheel(SDL_Event *ev)
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
         return;
     }
-    if (!sdl2_input_allowed(scon)) {
+    if (!sdl2_pointer_input_allowed(scon)) {
         return;
     }
 
@@ -991,6 +1307,8 @@ static void handle_windowevent(SDL_Event *ev)
         break;
     case SDL_WINDOWEVENT_FOCUS_GAINED:
         scon->has_input_focus = true;
+        scon->has_mouse_focus = !!(SDL_GetWindowFlags(scon->real_window) &
+                                   SDL_WINDOW_MOUSE_FOCUS);
         win32_kbd_set_grab(gui_grab);
         if (qemu_console_is_graphic(scon->dcl.con)) {
             win32_kbd_set_window(sdl2_win32_get_hwnd(scon));
@@ -1002,6 +1320,9 @@ static void handle_windowevent(SDL_Event *ev)
          * 焦点回来时主动 replay 当前 scanout，保证 idle 桌面也能恢复显示。
          */
         sdl2_redraw(scon);
+        if (gui_grab && scon->has_input_focus) {
+            sdl_apply_active_cursor(scon);
+        }
         /* fall through */
     case SDL_WINDOWEVENT_ENTER:
         if (ev->window.event == SDL_WINDOWEVENT_ENTER) {
@@ -1018,6 +1339,7 @@ static void handle_windowevent(SDL_Event *ev)
          * key is released.
          */
         scon->ignore_hotkeys = get_mod_state();
+        sdl2_gnome_guard_update(scon);
         break;
     case SDL_WINDOWEVENT_FOCUS_LOST:
         /* X11 输入焦点丢失 (alt-tab / WM 切窗 / 无 WM 时其他 client grab):
@@ -1029,23 +1351,33 @@ static void handle_windowevent(SDL_Event *ev)
         }
         if (gui_grab && !gui_fullscreen) {
             sdl_grab_end(scon);
+        } else {
+            sdl_show_cursor(scon);
         }
+        sdl2_gnome_guard_update(scon);
         break;
     case SDL_WINDOWEVENT_LEAVE:
         /* 鼠标离开窗口: 用户要求"窗外按键不进 guest", 同样抬掉按下的键.
          * 不动 gui_grab (grab 状态下指针锁在窗内, 不会触发 LEAVE). */
         scon->has_mouse_focus = false;
         sdl2_release_modifiers(scon);
+        sdl2_gnome_guard_update(scon);
         break;
     case SDL_WINDOWEVENT_RESTORED:
 #ifdef CONFIG_OPENGL
         sdl2_window_sync_native_egl_child(scon);
 #endif
         sdl2_redraw(scon);
-        update_displaychangelistener(&scon->dcl, GUI_REFRESH_INTERVAL_DEFAULT);
+        update_displaychangelistener_ns(
+            &scon->dcl, SDL2_REFRESH_INTERVAL_ACTIVE_NS);
+        if (gui_grab && scon->has_input_focus) {
+            sdl_apply_active_cursor(scon);
+        }
         break;
     case SDL_WINDOWEVENT_MINIMIZED:
         update_displaychangelistener(&scon->dcl, 500);
+        sdl_show_cursor(scon);
+        sdl2_gnome_guard_set(false);
         break;
     case SDL_WINDOWEVENT_CLOSE:
         if (qemu_console_is_graphic(scon->dcl.con)) {
@@ -1066,13 +1398,21 @@ static void handle_windowevent(SDL_Event *ev)
         break;
     case SDL_WINDOWEVENT_SHOWN:
         scon->hidden = false;
+        update_displaychangelistener_ns(
+            &scon->dcl, SDL2_REFRESH_INTERVAL_ACTIVE_NS);
 #ifdef CONFIG_OPENGL
         sdl2_window_sync_native_egl_child(scon);
 #endif
         sdl2_redraw(scon);
+        if (gui_grab && scon->has_input_focus) {
+            sdl_apply_active_cursor(scon);
+        }
         break;
     case SDL_WINDOWEVENT_HIDDEN:
         scon->hidden = true;
+        update_displaychangelistener(&scon->dcl, 500);
+        sdl_show_cursor(scon);
+        sdl2_gnome_guard_set(false);
         break;
     }
 }
@@ -1082,6 +1422,9 @@ void sdl2_poll_events(struct sdl2_console *scon)
     SDL_Event ev1, *ev = &ev1;
     bool allow_close = true;
     int idle = 1;
+
+    /* Keep the title truthful when REGION frame dedup suppresses every swap. */
+    sdl2_present_rate_tick(scon);
 
     if (scon->last_vm_running != runstate_is_running()) {
         scon->last_vm_running = runstate_is_running();
@@ -1135,16 +1478,13 @@ void sdl2_poll_events(struct sdl2_console *scon)
         }
     }
 
-    if (idle) {
-        if (scon->idle_counter < SDL2_MAX_IDLE_COUNT) {
-            scon->idle_counter++;
-            if (scon->idle_counter >= SDL2_MAX_IDLE_COUNT) {
-                scon->dcl.update_interval = GUI_REFRESH_INTERVAL_DEFAULT;
-            }
-        }
-    } else {
+    if (!idle) {
         scon->idle_counter = 0;
-        scon->dcl.update_interval = SDL2_REFRESH_INTERVAL_BUSY;
+    }
+    if (!scon->hidden && scon->real_window &&
+        !(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
+        scon->dcl.update_interval = 0;
+        scon->dcl.update_interval_ns = SDL2_REFRESH_INTERVAL_ACTIVE_NS;
     }
 }
 
@@ -1152,26 +1492,30 @@ static void sdl_mouse_warp(DisplayChangeListener *dcl,
                            int x, int y, bool on)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    bool was_guest_cursor = guest_cursor;
 
     if (!qemu_console_is_graphic(scon->dcl.con)) {
         return;
     }
 
+    guest_cursor = on;
+    guest_x = x, guest_y = y;
+
     if (on) {
-        if (!guest_cursor) {
+        if (!was_guest_cursor && !gui_grab) {
             sdl_show_cursor(scon);
         }
         if (gui_grab || qemu_input_is_absolute(scon->dcl.con) || absolute_enabled) {
-            SDL_SetCursor(guest_sprite);
-            if (!qemu_input_is_absolute(scon->dcl.con) && !absolute_enabled) {
+            sdl_apply_active_cursor(scon);
+            if (!sdl2_framebuffer_cursor &&
+                !qemu_input_is_absolute(scon->dcl.con) && !absolute_enabled) {
                 SDL_WarpMouseInWindow(scon->real_window, x, y);
             }
         }
-    } else if (gui_grab) {
-        sdl_hide_cursor(scon);
+    } else if (gui_grab || qemu_input_is_absolute(scon->dcl.con) ||
+               absolute_enabled) {
+        sdl_apply_active_cursor(scon);
     }
-    guest_cursor = on;
-    guest_x = x, guest_y = y;
 }
 
 static void sdl_mouse_define(DisplayChangeListener *dcl,
@@ -1179,7 +1523,11 @@ static void sdl_mouse_define(DisplayChangeListener *dcl,
 {
 
     if (guest_sprite) {
+        if (SDL_GetCursor() == guest_sprite) {
+            SDL_SetCursor(sdl_cursor_hidden);
+        }
         SDL_FreeCursor(guest_sprite);
+        guest_sprite = NULL;
     }
 
     if (guest_sprite_surface) {
@@ -1202,7 +1550,7 @@ static void sdl_mouse_define(DisplayChangeListener *dcl,
     }
     if (guest_cursor &&
         (gui_grab || qemu_input_is_absolute(dcl->con) || absolute_enabled)) {
-        SDL_SetCursor(guest_sprite);
+        sdl_apply_active_cursor(container_of(dcl, struct sdl2_console, dcl));
     }
 }
 
@@ -1211,6 +1559,12 @@ static void sdl_cleanup(void)
     if (guest_sprite) {
         SDL_FreeCursor(guest_sprite);
     }
+    if (sdl_cursor_windows) {
+        SDL_FreeCursor(sdl_cursor_windows);
+        sdl_cursor_windows = NULL;
+    }
+    sdl2_gnome_guard_restore();
+    g_clear_pointer(&sdl2_gnome_guard_state, g_free);
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
@@ -1366,6 +1720,20 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
 
     assert(o->type == DISPLAY_TYPE_SDL);
 
+    if (sdl2_env_enabled("QEMU_SDL_TAME_GNOME")) {
+        sdl2_gnome_guard_script = g_getenv("GNOME_SUPER_GUARD");
+        if (sdl2_gnome_guard_script &&
+            g_file_test(sdl2_gnome_guard_script, G_FILE_TEST_IS_EXECUTABLE)) {
+            sdl2_gnome_guard_state = g_strdup_printf(
+                "%s/qemu-sdl-%u-%ld.gnome-super", g_get_tmp_dir(),
+                (unsigned)getuid(), (long)getpid());
+        } else {
+            warn_report("sdl2: QEMU_SDL_TAME_GNOME requested but "
+                        "GNOME_SUPER_GUARD is not executable");
+            sdl2_gnome_guard_script = NULL;
+        }
+    }
+
     if (SDL_GetHintBoolean("QEMU_ENABLE_SDL_LOGGING", SDL_FALSE)) {
         SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
     }
@@ -1434,6 +1802,8 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
             sdl2_gl_console_init(&sdl2_console[i]);
         }
 #endif
+        sdl2_console[i].dcl.update_interval_ns =
+            SDL2_REFRESH_INTERVAL_ACTIVE_NS;
         register_displaychangelistener(&sdl2_console[i].dcl);
 
 #if defined(SDL_VIDEO_DRIVER_WINDOWS) || defined(SDL_VIDEO_DRIVER_X11)
@@ -1469,6 +1839,11 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
 
     sdl_cursor_hidden = SDL_CreateCursor(&data, &data, 8, 1, 0, 0);
     sdl_cursor_normal = SDL_GetCursor();
+    sdl_cursor_windows = sdl2_create_windows_cursor();
+
+    if (sdl2_num_outputs > 0) {
+        sdl2_gnome_guard_update(&sdl2_console[0]);
+    }
 
     if (gui_fullscreen) {
         sdl_grab_start(&sdl2_console[0]);

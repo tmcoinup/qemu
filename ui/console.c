@@ -64,8 +64,10 @@ OBJECT_DEFINE_TYPE(QemuGraphicConsole, qemu_graphic_console, QEMU_GRAPHIC_CONSOL
 
 struct DisplayState {
     QEMUTimer *gui_timer;
-    uint64_t last_update;
-    uint64_t update_interval;
+    int64_t last_update_ns;
+    int64_t next_update_ns;
+    uint64_t update_interval_ns;
+    bool update_interval_precise;
     bool refreshing;
 
     QLIST_HEAD(, DisplayChangeListener) listeners;
@@ -96,11 +98,18 @@ static int qemu_console_cursor_u32_to_int(uint32_t value)
 
 static void gui_update(void *opaque)
 {
-    uint64_t interval = GUI_REFRESH_INTERVAL_IDLE;
-    uint64_t dcl_interval;
+    uint64_t interval_ns = (uint64_t)GUI_REFRESH_INTERVAL_IDLE * SCALE_MS;
+    uint64_t dcl_interval_ns;
+    uint64_t old_interval_ns;
+    int64_t deadline_ns;
+    int64_t now_ns;
+    int64_t next_ns;
+    bool precise = false;
     DisplayState *ds = opaque;
     DisplayChangeListener *dcl;
 
+    deadline_ns = ds->next_update_ns;
+    old_interval_ns = ds->update_interval_ns;
     ds->refreshing = true;
     dpy_refresh(ds);
     ds->refreshing = false;
@@ -109,18 +118,55 @@ static void gui_update(void *opaque)
         if (dcl->paused) {
             continue;
         }
-        dcl_interval = dcl->update_interval ?
-            dcl->update_interval : GUI_REFRESH_INTERVAL_DEFAULT;
-        if (interval > dcl_interval) {
-            interval = dcl_interval;
+        if (dcl->update_interval_ns) {
+            dcl_interval_ns = dcl->update_interval_ns;
+        } else {
+            dcl_interval_ns = (dcl->update_interval ?
+                dcl->update_interval : GUI_REFRESH_INTERVAL_DEFAULT) *
+                SCALE_MS;
+        }
+        if (interval_ns > dcl_interval_ns) {
+            interval_ns = dcl_interval_ns;
+            precise = dcl->update_interval_ns != 0;
+        } else if (interval_ns == dcl_interval_ns &&
+                   dcl->update_interval_ns) {
+            precise = true;
         }
     }
-    if (ds->update_interval != interval) {
-        ds->update_interval = interval;
-        trace_console_refresh(interval);
+    if (ds->update_interval_ns != interval_ns) {
+        ds->update_interval_ns = interval_ns;
+        trace_console_refresh(interval_ns / SCALE_MS);
     }
-    ds->last_update = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-    timer_mod(ds->gui_timer, ds->last_update + interval);
+
+    now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    ds->last_update_ns = now_ns;
+    if (!interval_ns) {
+        interval_ns = SCALE_MS;
+    }
+
+    if (!precise || !ds->update_interval_precise ||
+        old_interval_ns != interval_ns || deadline_ns <= 0) {
+        next_ns = now_ns + interval_ns;
+    } else {
+        /*
+         * Precise listeners are paced from the previous deadline, not from
+         * the end of REGION/GL work.  If work overran, skip expired slots
+         * instead of issuing a burst of catch-up refreshes.
+         */
+        next_ns = deadline_ns + interval_ns;
+        if (next_ns <= now_ns) {
+            uint64_t missed = (now_ns - next_ns) / interval_ns + 1;
+
+            if (missed > (INT64_MAX - next_ns) / interval_ns) {
+                next_ns = now_ns + interval_ns;
+            } else {
+                next_ns += missed * interval_ns;
+            }
+        }
+    }
+    ds->update_interval_precise = precise;
+    ds->next_update_ns = next_ns;
+    timer_mod_ns(ds->gui_timer, next_ns);
 }
 
 static void gui_setup_refresh(DisplayState *ds)
@@ -135,8 +181,12 @@ static void gui_setup_refresh(DisplayState *ds)
     }
 
     if (need_timer && ds->gui_timer == NULL) {
-        ds->gui_timer = timer_new_ms(QEMU_CLOCK_REALTIME, gui_update, ds);
-        timer_mod(ds->gui_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
+        int64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+
+        ds->gui_timer = timer_new_ns(QEMU_CLOCK_REALTIME, gui_update, ds);
+        ds->last_update_ns = now_ns;
+        ds->next_update_ns = now_ns;
+        timer_mod_ns(ds->gui_timer, now_ns);
     }
     if (!need_timer && ds->gui_timer != NULL) {
         timer_free(ds->gui_timer);
@@ -752,10 +802,28 @@ void update_displaychangelistener(DisplayChangeListener *dcl,
                                   uint64_t interval)
 {
     DisplayState *ds = dcl->ds;
+    uint64_t interval_ns = (interval ? interval :
+                            GUI_REFRESH_INTERVAL_DEFAULT) * SCALE_MS;
 
     dcl->update_interval = interval;
-    if (!ds->refreshing && ds->update_interval > interval) {
-        timer_mod(ds->gui_timer, ds->last_update + interval);
+    dcl->update_interval_ns = 0;
+    if (!ds->refreshing && ds->update_interval_ns > interval_ns) {
+        ds->next_update_ns = ds->last_update_ns + interval_ns;
+        timer_mod_ns(ds->gui_timer, ds->next_update_ns);
+    }
+}
+
+void update_displaychangelistener_ns(DisplayChangeListener *dcl,
+                                     uint64_t interval_ns)
+{
+    DisplayState *ds = dcl->ds;
+
+    assert(interval_ns);
+    dcl->update_interval = 0;
+    dcl->update_interval_ns = interval_ns;
+    if (!ds->refreshing && ds->update_interval_ns > interval_ns) {
+        ds->next_update_ns = ds->last_update_ns + interval_ns;
+        timer_mod_ns(ds->gui_timer, ds->next_update_ns);
     }
 }
 
@@ -979,7 +1047,8 @@ int qemu_displaychangelistener_set_paused(const char *name, bool paused,
      * (3s) before frames start flowing again.
      */
     if (flipped > 0 && !paused && ds->gui_timer) {
-        timer_mod(ds->gui_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME));
+        ds->next_update_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        timer_mod_ns(ds->gui_timer, ds->next_update_ns);
     }
     return flipped;
 }

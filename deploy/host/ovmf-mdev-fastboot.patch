@@ -1,0 +1,85 @@
+# Backport edk2 ce4c76e46d to Ubuntu edk2 2024.02.
+# With an mdev assigned, KVM honors guest MTRRs. Enabling write-back before
+# the main FV LZMA decompression removes roughly 80 seconds of uncached boot.
+--- a/OvmfPkg/Sec/SecMain.c
++++ b/OvmfPkg/Sec/SecMain.c
+@@ -30,6 +30,8 @@
+ #include <Ppi/MpInitLibDep.h>
+ #include <Library/TdxHelperLib.h>
+ #include <Library/CcProbeLib.h>
++#include <Register/Intel/ArchitecturalMsr.h>
++#include <Register/Intel/Cpuid.h>
+ #include "AmdSev.h"
+ 
+ #define SEC_IDT_ENTRY_COUNT  34
+@@ -744,6 +746,32 @@
+   return;
+ }
+ 
++//
++// Enable MTRR early, set default type to write back.  With an mdev assigned,
++// KVM honors guest MTRRs; leaving them disabled makes the main FV LZMA
++// decompression run uncached and can add roughly 80 seconds to OVMF boot.
++// Backported from upstream edk2 ce4c76e46d.
++//
++STATIC
++VOID
++SecMtrrSetup (
++  VOID
++  )
++{
++  CPUID_VERSION_INFO_EDX           Edx;
++  MSR_IA32_MTRR_DEF_TYPE_REGISTER  DefType;
++
++  AsmCpuid (CPUID_VERSION_INFO, NULL, NULL, NULL, &Edx.Uint32);
++  if (!Edx.Bits.MTRR) {
++    return;
++  }
++
++  DefType.Uint64    = AsmReadMsr64 (MSR_IA32_MTRR_DEF_TYPE);
++  DefType.Bits.Type = 6; // write back
++  DefType.Bits.E    = 1;
++  AsmWriteMsr64 (MSR_IA32_MTRR_DEF_TYPE, DefType.Uint64);
++}
++
+ VOID
+ EFIAPI
+ SecCoreStartupWithStack (
+@@ -943,6 +971,11 @@
+   DisableApicTimerInterrupt ();
+ 
+   //
++  // Initialize MTRR before decompressing the main firmware volume.
++  //
++  SecMtrrSetup ();
++
++  //
+   // Initialize Debug Agent to support source level debug in SEC/PEI phases before memory ready.
+   //
+   InitializeDebugAgent (DEBUG_AGENT_INIT_PREMEM_SEC, &SecCoreData, SecStartupPhase2);
+--- a/OvmfPkg/Library/PlatformInitLib/MemDetect.c
++++ b/OvmfPkg/Library/PlatformInitLib/MemDetect.c
+@@ -1085,18 +1085,18 @@
+     MtrrGetAllMtrrs (&MtrrSettings);
+ 
+     //
+-    // MTRRs disabled, fixed MTRRs disabled, default type is uncached
++    // See SecMtrrSetup(), default type should be write back
+     //
+-    ASSERT ((MtrrSettings.MtrrDefType & BIT11) == 0);
++    ASSERT ((MtrrSettings.MtrrDefType & BIT11) != 0);
+     ASSERT ((MtrrSettings.MtrrDefType & BIT10) == 0);
+-    ASSERT ((MtrrSettings.MtrrDefType & 0xFF) == 0);
++    ASSERT ((MtrrSettings.MtrrDefType & 0xFF) == MTRR_CACHE_WRITE_BACK);
+ 
+     //
+     // flip default type to writeback
+     //
+-    SetMem (&MtrrSettings.Fixed, sizeof MtrrSettings.Fixed, 0x06);
++    SetMem (&MtrrSettings.Fixed, sizeof MtrrSettings.Fixed, MTRR_CACHE_WRITE_BACK);
+     ZeroMem (&MtrrSettings.Variables, sizeof MtrrSettings.Variables);
+-    MtrrSettings.MtrrDefType |= BIT11 | BIT10 | 6;
++    MtrrSettings.MtrrDefType |= BIT10;
+     MtrrSetAllMtrrs (&MtrrSettings);
+ 
+     //

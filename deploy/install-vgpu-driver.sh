@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
 # install-vgpu-driver.sh — host one-liner to (re-)install the
-# NVIDIA vGPU 17.4 GRID driver (553.24 DCH) inside the guest.
+# NVIDIA vGPU 16.x GRID driver (538.33 DCH) inside the guest.
 #
 # When the GeForce DCH driver lands via Windows Update on a vGPU
 # guest, NVIDIA's anti-VM check trips and the device goes Error 43.
 # The fix is to wipe every NVIDIA driver/device, push the GRID
-# 553.24 .exe via HTTP, and run its silent installer.
+# 538.33 .exe via HTTP, and run its silent installer.
 #
-# Driver asset must be staged at /home/ubuntu/images/staging/553.24.exe
-# (already cp'd from ~/Downloads/vGPU17.4/Guest_Drivers/553.24_*.exe).
+# Compatibility note: the current script still requests the historical staging
+# name /home/ubuntu/images/staging/553.24.exe.  That file must contain the
+# verified 538.33 package (DriverVersion 31.0.15.3833), not a real 553.24 EXE.
 #
 # Usage:
 #   ./install-vgpu-driver.sh              # vm1 default
@@ -19,6 +20,11 @@
 #
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source ./lib/vgpu-driver-assets.sh
+# shellcheck source=lib/vm-storage.sh
+source ./lib/vm-storage.sh
+vm_storage_init
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
@@ -37,8 +43,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Fail before wiping the guest if either historically misnamed asset is not the
+# exact 538.33 baseline verified with this host driver.
+vgpu_verify_driver_assets all
+
 if [[ -z "$IP_OVERRIDE" ]]; then
-    conf="${VM_ROOT:-/home/ubuntu/images/vms}/configs/vm${VM_ID}.conf"
+    conf=$(vm_storage_config_path "$VM_ID")
     [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }
     # shellcheck source=/dev/null
     source "$conf"
@@ -59,7 +69,7 @@ for asset in 553.24.exe 553.24-display-driver.zip; do
     if ! curl -sfI "$BASE_URL/$asset" >/dev/null 2>&1; then
         echo "[install-vgpu] $BASE_URL/$asset not reachable"
         if [[ "$asset" == "553.24.exe" ]]; then
-            echo "  → cp ~/Downloads/vGPU17.4/Guest_Drivers/553.24_*.exe \\"
+            echo "  → cp ~/Downloads/vGPU16.4/Guest_Drivers/538.33_*.exe \\"
             echo "       /home/ubuntu/images/staging/553.24.exe"
         else
             echo "  → 7z x /home/ubuntu/images/staging/553.24.exe -o/tmp/553.24 -y && \\"
@@ -145,15 +155,15 @@ Get-Process -EA 0 | Where-Object {{
 Start-Sleep -Seconds 2
 Remove-Item C:\nv\553.24.exe -Force -EA 0
 
-Write-Host '[4/6] Pull 553.24 installer ({base}/553.24.exe)' -Fore Cyan
+Write-Host '[4/6] Pull 538.33 installer (legacy URL {base}/553.24.exe)' -Fore Cyan
 Invoke-WebRequest "{base}/553.24.exe" -OutFile C:\nv\553.24.exe -UseBasicParsing
 "  $((Get-Item C:\nv\553.24.exe).Length) bytes"
 
-Write-Host '[5/6] Run silent install (-s -clean -noreboot)' -Fore Cyan
+Write-Host '[5/6] Run 538.33 silent install (-s -clean -noreboot)' -Fore Cyan
 $p = Start-Process C:\nv\553.24.exe -ArgumentList '-s','-clean','-noreboot' -Wait -PassThru
 "  installer exit code: $($p.ExitCode)"
 
-# 实测：GRID 553.24 silent install 在 fresh LTSC 上 self-extract 阶段
+# 实测：GRID 538.33 silent install 在 fresh LTSC 上 self-extract 阶段
 # 直接退 -436207360（连 setup.log 都不生成），原因不明（疑似 InstallShield
 # runtime 缺 / SmartScreen 阻断）。用 pnputil 直接装 INF 作 fallback —
 # host 端预解压 Display.Driver/ 打成 zip 给 guest 拉，绕过 setup.exe。
@@ -173,7 +183,7 @@ if ($p.ExitCode -ne 0 -or -not (Test-Path 'C:\Windows\System32\drivers\nvlddmkm.
 }}
 
 Write-Host '[5.5/6] Block Windows Update from replacing the NVIDIA driver' -Fore Cyan
-# Without this, WU silently swaps GRID 553.24 → GeForce DCH 32.0.15.6094
+# Without this, WU silently swaps GRID 538.33 → GeForce DCH 32.0.15.6094
 # (post-2024-08-14 build) which trips NVIDIA anti-VM and the device goes
 # back to Error 43.
 #   ExcludeWUDriversInQualityUpdate=1 = WU 永不下 driver 包

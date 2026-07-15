@@ -1,0 +1,37 @@
+# New-VM monitor identities common in the mainland-China market.
+#
+# One monitor-profiles.tsv key per line.  create-vm.sh accepts only this pool;
+# legacy VMs may still load any entry from the full catalog.  Every entry here
+# is a real 23.8/24-inch 1920x1080 FHD monitor (commonly called "1K" in China).
+
+# Samsung
+samsung-s24f350
+samsung-c24f390
+samsung-s24d300
+samsung-s24r35x
+
+# Dell
+dell-p2419h
+dell-p2417h
+dell-se2419hr
+dell-se2416h
+
+# BenQ
+benq-gw2480
+
+# AOC
+aoc-24b1w
+aoc-2470w
+
+# Philips
+philips-243v7
+
+# Lenovo
+lenovo-t24i-10
+lenovo-d24-20
+
+# ASUS
+asus-va24e
+
+# Redmi / Xiaomi
+redmi-rmmnt238nf

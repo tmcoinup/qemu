@@ -6,12 +6,20 @@
 param(
     [string]$TargetName = 'GeForce GTX 1050',
     [string]$Vendor = '',
-    # Windows 看到的 PCI Device ID 会随 GPU_SPOOF 改变：
-    #   GPU_SPOOF=0/subsys → DEV_1E30 (GRID/RTX6000)
-    #   GPU_SPOOF=1 + gtx1050_2gb → DEV_1C81
-    #   GPU_SPOOF=1 + gt1030_2gb  → DEV_1D01
+    [ValidateRange(1,10000)][int]$CoreClockMHz = 1354,
+    [ValidateRange(1,10000)][int]$BoostClockMHz = 1455,
+    [ValidateRange(1,10000)][int]$MemoryClockMHz = 1752,
+    [ValidateRange(1,1024)][int]$MemoryBusBits = 128,
+    [ValidateRange(1,1000000)][int]$MemoryBandwidthMBps = 112000,
+    [ValidateSet(2048)][int]$VramMB = 2048,
+    # Windows 看到的 PCI Device ID 取决于启动模式：
+    #   SPOOF_MODE=off/B → DEV_1E30 (GRID/RTX6000)
+    #   SPOOF_MODE=A + gtx750ti_2gb → DEV_1380
+    #   SPOOF_MODE=A + gtx1050_2gb → DEV_1C81
+    #   SPOOF_MODE=A + gt1030_2gb  → DEV_1D01
     [string[]]$DeviceIdMatch = @(
         'VEN_10DE&DEV_1E30',
+        'VEN_10DE&DEV_1380',
         'VEN_10DE&DEV_1C81',
         'VEN_10DE&DEV_1D01'
     )
@@ -29,6 +37,9 @@ if ([string]::IsNullOrWhiteSpace($Vendor)) {
     $to = "$Vendor $TargetName"
 }
 $to = $to.Trim()
+if ($to -notmatch '\A[\x20-\x7E]{1,31}\z') {
+    throw 'Final GPU name must contain 1-31 printable ASCII characters.'
+}
 # 要替换掉的 GRID 原始名（覆盖 1Q/2Q/3Q/4Q/8Q 几个常见 profile）。
 # 优先长串 ("NVIDIA GRID RTX6000-2Q") 先于短串 ("GRID RTX6000") 匹配，
 # 否则命中短的会在 to 前留一个多余的 "NVIDIA " (→ "NVIDIA NVIDIA GeForce...")。
@@ -40,6 +51,28 @@ W ("  TargetName = $TargetName")
 W ("  Vendor     = $Vendor")
 W ("  Final 'to' = $to")
 W ("  DeviceIds  = $($DeviceIdMatch -join ', ')")
+W ("  VRAM       = $VramMB MB")
+W ("  Clocks     = core $CoreClockMHz / boost $BoostClockMHz / memory $MemoryClockMHz MHz")
+
+# The forwarding NVAPI shim reads this per-guest key.  MemoryClockKHz uses
+# twice the visible DDR command clock because the existing consumers divide
+# the NVAPI value by two when rendering it.
+$specKey = 'HKLM:\SOFTWARE\NVIDIA Corporation\Global\NvAPI'
+New-Item -Path $specKey -Force | Out-Null
+New-ItemProperty -Path $specKey -Name IdentityGpuName -Value $to `
+    -PropertyType String -Force | Out-Null
+$spec = @{
+    IdentityVramMB = $VramMB
+    IdentityCoreClockKHz = $CoreClockMHz * 1000
+    IdentityBoostClockKHz = $BoostClockMHz * 1000
+    IdentityMemoryClockKHz = $MemoryClockMHz * 2000
+    IdentityMemoryBusBits = $MemoryBusBits
+    IdentityMemoryBandwidthMBps = $MemoryBandwidthMBps
+}
+foreach ($item in $spec.GetEnumerator()) {
+    New-ItemProperty -Path $specKey -Name $item.Key -Value $item.Value `
+        -PropertyType DWord -Force | Out-Null
+}
 
 function RewriteKey($path) {
     if (-not (Test-Path $path)) { return }

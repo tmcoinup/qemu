@@ -55,6 +55,7 @@
 #include "hw/usb/usb.h"
 #include "hw/usb/hcd-uhci.h"
 #include "qapi/error.h"
+#include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "system/numa.h"
 #include "hw/hyperv/vmbus-bridge.h"
@@ -125,6 +126,77 @@ static int ehci_create_ich9_with_companions(PCIBus *bus, int slot)
         pci_realize_and_unref(uhci, bus, &error_fatal);
     }
     return 0;
+}
+
+typedef enum PCQ35SpdType {
+    PC_Q35_SPD_DDR3,
+    PC_Q35_SPD_DDR4,
+} PCQ35SpdType;
+
+static PCQ35SpdType pc_q35_spd_type_from_env(void)
+{
+    const char *value = getenv("QEMU_SPD_TYPE");
+
+    if (!value || !strcmp(value, "DDR4")) {
+        return PC_Q35_SPD_DDR4;
+    }
+    if (!strcmp(value, "DDR3")) {
+        return PC_Q35_SPD_DDR3;
+    }
+
+    error_report("QEMU_SPD_TYPE must be exactly DDR3 or DDR4 "
+                 "(got '%s')", value);
+    exit(EXIT_FAILURE);
+}
+
+static uint32_t pc_q35_spd_uint_from_env(const char *name,
+                                         uint32_t default_value)
+{
+    const char *value = getenv(name);
+    unsigned int parsed;
+
+    if (!value) {
+        return default_value;
+    }
+
+    if (!*value || strspn(value, "0123456789") != strlen(value) ||
+        qemu_strtoui(value, NULL, 10, &parsed) < 0) {
+        error_report("%s must be a non-empty unsigned decimal integer "
+                     "(got '%s')", name, value);
+        exit(EXIT_FAILURE);
+    }
+
+    return parsed;
+}
+
+static void pc_q35_init_spd(I2CBus *smbus)
+{
+    PCQ35SpdType type = pc_q35_spd_type_from_env();
+    uint32_t module_mb = pc_q35_spd_uint_from_env("QEMU_SPD_MODULE_MB",
+                                                   4096);
+    uint32_t speed_mts = pc_q35_spd_uint_from_env(
+        "QEMU_SPD_SPEED_MT", type == PC_Q35_SPD_DDR3 ? 1600 : 2666);
+    uint32_t slots = pc_q35_spd_uint_from_env("QEMU_SPD_SLOTS", 2);
+    uint32_t i;
+
+    if (slots < 1 || slots > SMBUS_EEPROM_MAX_SLOTS) {
+        error_report("QEMU_SPD_SLOTS must be between 1 and %u "
+                     "(got %u)", SMBUS_EEPROM_MAX_SLOTS, slots);
+        exit(EXIT_FAILURE);
+    }
+
+    for (i = 0; i < slots; i++) {
+        uint8_t *spd;
+
+        if (type == PC_Q35_SPD_DDR3) {
+            spd = spd_data_generate_ddr3(module_mb, speed_mts,
+                                         &error_fatal);
+        } else {
+            spd = spd_data_generate_ddr4(module_mb, speed_mts,
+                                         &error_fatal);
+        }
+        smbus_eeprom_init_one(smbus, 0x50 + i, spd);
+    }
 }
 
 /* PC hardware initialisation */
@@ -316,12 +388,11 @@ static void pc_q35_init(MachineState *machine)
                                               TYPE_ICH9_SMB_DEVICE);
         pcms->smbus = I2C_BUS(qdev_get_child_bus(DEVICE(smb), "i2c"));
 
-        /* Populate two DDR4-2666 DIMM SPDs at 0x50/0x51 so guest tools
-         * (HWiNFO/CPU-Z) can decode realistic timings. */
-        smbus_eeprom_init_one(pcms->smbus, 0x50,
-                              spd_data_generate_ddr4(4096, 2666));
-        smbus_eeprom_init_one(pcms->smbus, 0x51,
-                              spd_data_generate_ddr4(4096, 2666));
+        /*
+         * Default to two 4 GiB DDR4-2666 modules. Strict environment
+         * overrides let the launcher keep SPD aligned with its profile.
+         */
+        pc_q35_init_spd(pcms->smbus);
     }
 
     /* the rest devices to which pci devfn is automatically assigned */
@@ -415,6 +486,7 @@ DEFINE_Q35_MACHINE(10, 0);
 static void pc_q35_machine_9_2_options(MachineClass *m)
 {
     pc_q35_machine_10_0_options(m);
+    m->smbios_memory_device_size = 4 * GiB;
     compat_props_add(m->compat_props, hw_compat_9_2, hw_compat_9_2_len);
     compat_props_add(m->compat_props, pc_compat_9_2, pc_compat_9_2_len);
 }

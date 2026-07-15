@@ -19,6 +19,9 @@
 #
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
+# shellcheck source=lib/vm-storage.sh
+source ./lib/vm-storage.sh
+vm_storage_init
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
@@ -40,7 +43,7 @@ done
 [[ -n "$ACTION" ]] || { echo "missing action (stop|start|restart|status)" >&2; exit 2; }
 
 if [[ -z "$IP_OVERRIDE" ]]; then
-    conf="${VM_ROOT:-/home/ubuntu/images/vms}/configs/vm${VM_ID}.conf"
+    conf=$(vm_storage_config_path "$VM_ID")
     [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }
     # shellcheck source=/dev/null
     source "$conf"

@@ -6,7 +6,7 @@
 # The driver itself (ivshmem.inf + ivshmem.sys + ivshmem.cat) is NOT
 # tracked in this repo — it ships as a pre-signed third-party blob from
 # the Looking Glass project. Place the three files under
-#   /home/ubuntu/images/staging/ivshmem-driver/
+#   $STAGE_DIR/ivshmem-driver/ (默认 /home/ubuntu/images/staging/ivshmem-driver)
 # before running this script (or set IVSHMEM_DRIVER_DIR=/path).
 #
 # Where to get the driver:
@@ -24,13 +24,16 @@
 #
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
+# shellcheck source=lib/vm-storage.sh
+source ./lib/vm-storage.sh
+vm_storage_init
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
 GUEST_USER=${GUEST_USER:-Administrator}
 GUEST_PASS=${GUEST_PASS:-123456}
 UNINSTALL=0
-DRIVER_DIR="${IVSHMEM_DRIVER_DIR:-/home/ubuntu/images/staging/ivshmem-driver}"
+DRIVER_DIR="${IVSHMEM_DRIVER_DIR:-$STAGE_DIR/ivshmem-driver}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -68,7 +71,7 @@ fi
 
 # Discover guest IP
 if [[ -z "$IP_OVERRIDE" ]]; then
-    conf="${VM_ROOT:-/home/ubuntu/images/vms}/configs/vm${VM_ID}.conf"
+    conf=$(vm_storage_config_path "$VM_ID")
     [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }
     # shellcheck source=/dev/null
     source "$conf"
@@ -84,7 +87,7 @@ HOST_IP=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | 
 [[ -n "$HOST_IP" ]] || HOST_IP="192.168.30.127"
 
 # Stage driver under staging/ so http.server picks it up
-DEPLOY=/home/ubuntu/images/staging
+DEPLOY=$STAGE_DIR
 if [[ $UNINSTALL -eq 0 ]]; then
     mkdir -p "$DEPLOY/ivshmem-driver"
     if [[ "$(readlink -f "$DRIVER_DIR")" != "$(readlink -f "$DEPLOY/ivshmem-driver")" ]]; then

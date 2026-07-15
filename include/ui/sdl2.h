@@ -42,13 +42,14 @@ struct sdl2_console {
     int updates;
     int idle_counter;
     int ignore_hotkeys;
+    int64_t fps_window_start_us;
+    uint32_t fps_frame_count;
+    double present_fps;
+    bool present_fps_valid;
     bool gui_keysym;
-    /*
-     * 输入门控：键鼠事件只在窗口同时拥有 X11 输入焦点(FOCUS_GAINED)
-     * 和鼠标焦点(ENTER, 即指针在窗内) 时才下发给 guest。
-     * 任一条件失守 -> 把当前所有按下的键 lift 掉, 后续事件丢弃,
-     * 防止"窗外按键打到 guest"以及焦点切换时 guest 卡键。
-     */
+    /* Keyboard follows input focus.  Pointer events additionally require
+     * mouse focus (or an active grab); SDL/XWayland does not guarantee that
+     * keyboard focus and mouse-enter events arrive together. */
     bool has_input_focus;
     bool has_mouse_focus;
     SDL_GLContext winctx;
@@ -112,6 +113,7 @@ void sdl2_window_create(struct sdl2_console *scon);
 void sdl2_window_destroy(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
+void sdl2_note_present(struct sdl2_console *scon);
 
 void sdl2_process_key(struct sdl2_console *scon,
                       SDL_KeyboardEvent *ev);

@@ -94,7 +94,7 @@ Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1
 | EDID | 单一 S24F350 深层字段成套生成，含校验和与时序 | 仍由 virtio 显示设备提供；没有真实显示器 DDC 时序、HDCP 和厂商扩展行为 |
 | USB HID | Microsoft VID/PID/bcdDevice/字符串与模板绑定；品牌 tablet 被拒绝 | HID report/config descriptor 只对当前固定模板负责，扩展新品牌必须新增完整模板 |
 | 固件/TPM | OVMF、per-VM NVRAM、swtpm 2.0、CRB、EK/Platform cert、严格模式 fail closed | OVMF 不是 ASUS AMI 固件；Linux 路线未证明 Secure Boot 已处于 `SecureBoot=1, SetupMode=0` |
-| 显示/GPU | virtio-vga(-gl)、SDL/EGL、fb-shm、SHM/GPU handle fallback；Linux 默认还会把池中 GPU 的 subsystem/revision 作为兼容性覆盖，显式 `GPU_SELFSIGNED=1` 可再覆盖主 VEN/DEV | 底层始终是 virtio，不是所标 NVIDIA/AMD 设备；名称与所有 PCI identity override 均为 `label_only_out_of_scope`，GPU passthrough/vGPU 明确不做且不计入真机化 |
+| 显示/GPU | virtio-vga(-gl)、SDL/EGL、fb-shm、SHM/GPU handle fallback；物理主 ID 固定为 stock VioGpuDod 可绑定的 `1AF4:1050`，profile 只提供 subsystem/revision 与用户态逻辑身份；非零 `GPU_SELFSIGNED` 在任何 host 副作用前 fail-closed | 底层始终是 virtio，不是所标 NVIDIA/AMD 设备；浅层 `10DE:1C82` 投影不增加 Windows guest Direct3D、CUDA 或 NVENC，GPU passthrough/vGPU 明确不做且不计入真机化 |
 
 当前实际 root bus 地址由 C 层 `query-pci` 回归锁定：
 
@@ -365,6 +365,6 @@ python3 deploy/scripts/soak-vm.py \
 - E5-2696 v4 是 OEM 定制 SKU，没有标准 ARK；二手市场标签、ES/QS 状态、改微码 BIOS 和主板魔改均超出项目可验证范围。
 - WHPX 暴露宿主 CPU 面，严格真机化只能支持 manifest 中与宿主精确同名的 SKU；放宽 mismatch 就必须降低真实性评级。
 - TPM emulator 与真实离散/固件 TPM 的证书链、抗篡改和厂商实现不等价。
-- 任何基于虚拟化的方案都不能承诺绕过第三方安全产品、反作弊、许可证或设备认证；验收应以合法业务兼容性、稳定性和可审计一致性为准。
+- 任何基于虚拟化的方案都不能承诺绕过第三方安全产品、仿真机、许可证或设备认证；验收应以合法业务兼容性、稳定性和可审计一致性为准。
 
 最终判断：**当前代码已经把“会随机出不存在硬件”的主要结构性问题收敛为 fail-closed 的有限真实目录（DIMM 仍是明确降级的受限兼容池），也为 E5/X99 提供了正确的软件判定路径；但 E5-2696 v4/X99、双路 E5 和 Windows/WHPX 都必须以目标实机结果收口。在这些证据产生前，最准确的发布标签是“Linux/KVM 条件支持，Windows/WHPX 受限支持，非 GPU 硬件身份高一致性”，而不是“全平台完成”。**

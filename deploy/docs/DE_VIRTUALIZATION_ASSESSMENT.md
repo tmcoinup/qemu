@@ -17,7 +17,7 @@
 
 评估对象：当前工作树，基于 `v9.2.0` tag 的 `qemu-9.2.0` 分支，以及当前未提交改动。
 
-评估结论：当前项目没有完成"全面去虚拟化"。它已经覆盖了一批常见的用户态静态特征，尤其是 CPU 型号、CPUID hypervisor/KVM leaves、部分 SMBIOS、部分 ACPI OEM 字符串、NVMe 字段、EDID 和 virtio-gpu 的可见 ID 改写。但整体仍是"特定启动脚本 + 客机侧修补 + 局部 QEMU patch"的组合，不是一个默认全局隐身的 QEMU 构建。对内核态、PCI/ACPI/USB 枚举、硬件画像一致性、驱动栈一致性和反作弊级别检测，仍有多个高置信残留点。
+评估结论：当前项目没有完成"全面去虚拟化"。它已经覆盖了一批常见的用户态静态特征，尤其是 CPU 型号、CPUID hypervisor/KVM leaves、部分 SMBIOS、部分 ACPI OEM 字符串、NVMe 字段、EDID 和 virtio-gpu 的可见 ID 改写。但整体仍是"特定启动脚本 + 客机侧修补 + 局部 QEMU patch"的组合，不是一个默认全局隐身的 QEMU 构建。对内核态、PCI/ACPI/USB 枚举、硬件画像一致性、驱动栈一致性和仿真机级别检测，仍有多个高置信残留点。
 
 > **2026-04-25 后续修复进度**（本评估正文之后追加，详见文末"更新记录"）
 > P0 / P1 中除"Q35/ICH9 平台矛盾"外，其余条目（Red Hat root-port、qemu-xhci、USB HID descriptor、ACPI `QEMU0002`、e1000e subsystem、EDID atoi 序列号一致性、SMBIOS Type16 ECC）已在源码中修复并在 VM2 客机内验证通过。
@@ -252,7 +252,7 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 原因说明：消费级 B350/Ryzen 3 1200 常见配置不应默认报告 Multi-bit ECC。多条 DIMM 共用同一 serial 也不自然。profile 声称身份稳定，但部分字段每次生成时变化，会造成硬件指纹漂移。
 
-影响：HWiNFO、WMI、SMBIOS dump、反作弊硬件指纹系统可以发现 DIMM 序列号重复、ECC 与 Type17 宽度不匹配、重启后资产字段变化等问题。
+影响：HWiNFO、WMI、SMBIOS dump、仿真机硬件指纹系统可以发现 DIMM 序列号重复、ECC 与 Type17 宽度不匹配、重启后资产字段变化等问题。
 
 结论：SMBIOS 是“有伪装”，但还不是高一致性硬件画像。
 
@@ -418,7 +418,7 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 同时执行过最小 KVM 启动路径，使用项目脚本中的 CPU 参数，QEMU 能启动且没有明显启动警告。
 
-重要限制：这些验证只覆盖 CPU、部分 ACPI header、NVMe 属性注册和启动可用性。它没有验证 PCI primary IDs、USB descriptors、ACPI namespace、SMBIOS/SPD 一致性、guest registry、驱动栈、EfiGuard 成功率、DXGI/NVAPI 覆盖面和反作弊内核态检测面。
+重要限制：这些验证只覆盖 CPU、部分 ACPI header、NVMe 属性注册和启动可用性。它没有验证 PCI primary IDs、USB descriptors、ACPI namespace、SMBIOS/SPD 一致性、guest registry、驱动栈、EfiGuard 成功率、DXGI/NVAPI 覆盖面和仿真机内核态检测面。
 
 结论：验证脚本通过只能说明“局部 patch 生效”，不能证明“全面去虚拟化完成”。
 
@@ -428,7 +428,7 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 如果验收标准是“中等强度检测，包括 WMI、SetupAPI、PCI config、ACPI namespace、SMBIOS dump、EDID dump、SPD 读取、驱动栈检查”，当前项目未完成，主要短板是 PCI/USB/ACPI 和硬件画像一致性。
 
-如果验收标准是“反作弊/内核态级别检测或对抗性检测”，当前项目明显未完成。GPU 仍是 virtio，EfiGuard/DSE 反而新增高风险特征，Q35/ICH9 与 Ryzen/B350 矛盾非常明显。
+如果验收标准是“仿真机/内核态级别检测或对抗性检测”，当前项目明显未完成。GPU 仍是 virtio，EfiGuard/DSE 反而新增高风险特征，Q35/ICH9 与 Ryzen/B350 矛盾非常明显。
 
 ## 建议的后续完善优先级
 
@@ -495,9 +495,9 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 **重新构建 / 复现：** `deploy/tools/build.sh && stop-vm.sh 2 && INSTANCE=2 BRIDGE=br0 STABLE_DISPLAY=1 GPU_SELFSIGNED=1 nohup ./deploy/scripts/start-vm.sh 2 > /tmp/qemu-stealth-2.log 2>&1 &`
 
-### 2026-04-26：ACE 反作弊实测 + "浅层 stealth" 路径定型
+### 2026-04-26：ACE 仿真机实测 + "浅层 stealth" 路径定型
 
-**触发事件：** 用户在 VM2（已经过 P0/P1 修复）跑腾讯系游戏，ACE 安全中心弹窗
+**触发事件：** 用户在 VM2（已经过 P0/P1 修复）跑系游戏，ACE 安全中心弹窗
 `检测到系统环境异常 (13-131106-0) 请关闭并卸载可能影响游戏安全的软件`。
 
 **根因：** 不是源码 P0/P1 修补造成的（后者只是删 Red Hat/QEMU 字符串 leak），而是
@@ -518,7 +518,7 @@ massgrave.dev/get），与本评估的去虚拟化无关；记录在 commit log�
 |---|---|
 | `deploy/scripts/destealth-revert.ps1` | 客机内一键回退：还原 `bootmgfw.efi.original`、删 `EfiGuardDxe.efi`、清 Trusted Root 里的伪 NVIDIA 根、卸 patched viogpudo INF/oem*.inf、删 `C:\stealth\efiguard|nv-driver|driver-signing\`、`bcdedit` 复位 |
 | `deploy/scripts/shallow-stealth.ps1` | 客机内浅层 stealth：拉 stock virtio-win 0.1.266 viogpudo（**MS-WHQL 签名**）→ `pnputil /add-driver /install` 绑到 PCI 1AF4:1050 → 跑 `apply-gpu-spoof.ps1` 注册表覆盖（DeviceDesc / FriendlyName / DriverDesc / DEVPKEY → "NVIDIA GeForce GTX 1050"）→ `nvapi64.dll` shim 进 System32 |
-| `deploy/scripts/stock-viogpudo/{viogpudo.sys,viogpudo.cat,viogpudo.inf}` | 从 virtio-win.iso 抽出的 w10/amd64 stock 版，通过 host 8765 HTTP 提供给客机 |
+| `deploy/scripts/stock-viogpudo/{viogpudo.sys,viogpudo.cat,viogpudo.inf}` | 从 virtio-win.iso 抽出的 w10/amd64 stock 版；当前构建时内嵌进 `respawn-stealth.exe`，HTTP 仅保留为历史调试入口 |
 | `deploy/autounattend/autounattend.xml` + `autounattend-vm2.iso` | OOBE 自动化 ISO：分区、Administrator/123456、AutoLogon×999、zh-CN、CST 时区、enable RDP（不装 OpenSSH，避免 Add-WindowsCapability 联网卡死） |
 
 **启动器调整（`deploy/scripts/start-vm.sh`）：**
@@ -545,6 +545,6 @@ massgrave.dev/get），与本评估的去虚拟化无关；记录在 commit log�
 | Trusted Root 中 NVIDIA 相关根证书 | 无 |
 | ACE 安全中心 13-131106-0 | 不再触发 |
 
-**结论：** "Q35/ICH9 平台矛盾"在 ACE 类反作弊场景下并未导致 13-131106-0 触发；ACE 在
+**结论：** "Q35/ICH9 平台矛盾"在 ACE 类仿真机场景下并未导致 13-131106-0 触发；ACE 在
 13 系列环境异常上**首要扫描黑名单驱动 + 启动链完整性 + Trusted Root 异常**，而不是
-PCI 拓扑矛盾。这把 P0 #1 的实战优先级降到了 P2（除非要面对内核态/反作弊深查）。
+PCI 拓扑矛盾。这把 P0 #1 的实战优先级降到了 P2（除非要面对内核态/仿真机深查）。

@@ -96,7 +96,11 @@ function Test-VMateVirtioGpuGl {
     try {
         $probeOutput = & $Executable '-device' 'virtio-vga-gl,help' 2>&1
         $probeText = $probeOutput | Out-String
-        return ($LASTEXITCODE -eq 0 -and $probeText -match 'virtio-vga-gl')
+        # GL 设备存在但缺少部署所需属性时也必须回退到已完成严格预检的
+        # virtio-vga，避免启动到一半才因未知属性退出。
+        return ($LASTEXITCODE -eq 0 -and
+            $probeText -match 'virtio-vga-gl' -and
+            $probeText -match 'edid-fixed-native')
     } catch {
         Write-Verbose "virtio-vga-gl 能力探测失败：$($_.Exception.Message)"
         return $false
@@ -288,7 +292,9 @@ if ($Headless) {
 
 $monitorEdid = Get-VMateMonitorEdidSuffix -Components $components -Profile $profile
 if ($gpuGlDisplay) {
-    $vgaDevice = 'virtio-vga-gl,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080' +
+    # 本项目显式固定 profile native mode；QEMU 属性默认关闭，其他调用方不受影响。
+    $vgaDevice = 'virtio-vga-gl,edid=on,edid-fixed-native=on,' +
+        'xres=1920,yres=1080,xmax=1920,ymax=1080' +
         $monitorEdid
     if (-not $NoGpuZeroCopy) {
         if ($GpuHostmem -notmatch '^\d+[KkMmGgTt]?$') {
@@ -297,7 +303,8 @@ if ($gpuGlDisplay) {
         $vgaDevice += ",blob=true,hostmem=$GpuHostmem"
     }
 } else {
-    $vgaDevice = 'virtio-vga,edid=on,xres=1920,yres=1080,xmax=1920,ymax=1080' +
+    $vgaDevice = 'virtio-vga,edid=on,edid-fixed-native=on,' +
+        'xres=1920,yres=1080,xmax=1920,ymax=1080' +
         $monitorEdid
 }
 Add-VMateArgument $arguments @('-device', $vgaDevice)

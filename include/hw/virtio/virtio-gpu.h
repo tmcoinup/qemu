@@ -137,6 +137,12 @@ struct virtio_gpu_base_conf {
     VirtIOGPUOutputList *outputs;
 
     /*
+     * 默认关闭，保持上游动态 EDID 行为。
+     * deploy 开启后才固定到对应 output，避免 SDL 尺寸回写。
+     */
+    bool edid_fixed_native;
+
+    /*
      * 中文注释：这些字段提供整块 virtio-gpu 的 EDID 默认画像；NULL 字符串
      * 或 0 尺寸会回落到 QEMU 11 的原生生成逻辑。QEMU 11 新增的 outputs
      * 列表仍保留，并可按输出覆盖这里的默认名称。
@@ -200,6 +206,8 @@ struct VirtIOGPUBaseClass {
     DEFINE_PROP_VIRTIO_GPU_OUTPUT_LIST("outputs", _state, _conf.outputs), \
     DEFINE_PROP_BIT("edid", _state, _conf.flags, \
                     VIRTIO_GPU_FLAG_EDID_ENABLED, true), \
+    DEFINE_PROP_BOOL("edid-fixed-native", _state, \
+                     _conf.edid_fixed_native, false), \
     DEFINE_PROP_UINT32("xres", _state, _conf.xres, 1280), \
     DEFINE_PROP_UINT32("yres", _state, _conf.yres, 800), \
     DEFINE_PROP_UINT32("xmax", _state, _conf.xmax, 0), \

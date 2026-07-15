@@ -2,6 +2,14 @@
 # 本文件由 start-vm.sh source；这里赋值的 RAM/VLAN/profile 等变量在后续模块使用。
 # shellcheck disable=SC2034
 # ---------------------- CLI parsing ----------------------
+# 历史 GPU_SELFSIGNED 会把 virtio-gpu 的物理主 ID 改成 10DE/1002，并要求已删除的
+# 自签驱动链。必须在解析任何实例目录、检查 helper 或执行 host 调优之前拒绝它，
+# 防止旧 systemd unit 虽然最终启动失败，却先修改 governor/halt_poll 等宿主状态。
+if [[ "${GPU_SELFSIGNED:-0}" != "0" ]]; then
+    echo "ERROR: GPU_SELFSIGNED 深层/自签路径已移除；请保持物理 PCI 1AF4:1050" >&2
+    exit 2
+fi
+
 # First positional arg = INSTANCE. Everything else is --flag=value or --flag.
 _cli_instance=""
 _cli_iso=""
@@ -46,6 +54,8 @@ while (( $# > 0 )); do
         --no-proxy)      PROXY=0 ;;
         --host-tune)     HOST_TUNE=1 ;;
         --no-host-tune)  HOST_TUNE=0 ;;
+        --numlock)      GUEST_NUMLOCK=1 ;;
+        --no-numlock)   GUEST_NUMLOCK=0 ;;
         --freq-cap)      CPU_FREQ_CAP=1 ;;
         --no-freq-cap)   CPU_FREQ_CAP=0 ;;
         --cpu-isolate)    CPU_ISOLATE=1 ;;
@@ -229,6 +239,16 @@ fi
 # 只动 host 侧, 零反检测硬件身份影响.
 # 已调优则自动跳过(免每次 sudo); DRY_RUN 下严格 no-op. (flag: --host-tune/--no-host-tune)
 : "${HOST_TUNE:=1}"
+# QEMU 的 usb-kbd 直接读取 guest HID LED 报告，仅在明确 OFF 时异步注入一次
+# NumLock。默认开启；设 0 只关闭该策略，不改变物理 host 键盘状态。
+: "${GUEST_NUMLOCK:=1}"
+case "$GUEST_NUMLOCK" in
+    0|1) ;;
+    *)
+        echo "ERROR: GUEST_NUMLOCK 必须是 0 或 1" >&2
+        exit 2
+        ;;
+esac
 # CPU 频率封顶: 把 host scaling_max_freq 压到本实例伪装 CPU 的 CPU_MAX_MHZ(SMBIOS
 # Type4 自报上限), 防止 guest 实测吞吐超出该型号规格(超规格=变速器/计时异常 tell).
 # 只降不升(多 VM 取运行中最小, 绝不让任一 VM 超自身规格). HOST_TUNE=1 时才生效.

@@ -15,7 +15,7 @@
 #   - 源 VM 必须先关机（lsof 检查）
 #   - sysprep / 清掉 SID 等是 Windows 侧的事，本脚本不做 — 如果不 sysprep，
 #     克隆出的 VM 会复用 SID/MachineGUID。仅做单机用途时可以忽略。
-#   - **默认会先清理源 disk 的腾讯/WeGame 设备身份**（qimei / 登录态 / SDK 缓存 +
+#   - **默认会先清理源 disk 的/WeGame 设备身份**（qimei / 登录态 / SDK 缓存 +
 #     注册表 Tencent 键，见 host-clean-tencent.sh），避免所有 clone 共享同一个
 #     qimei 被 ACE 判同机/多开。这一步会改源 disk（清空其 WeGame 登录态 —— base
 #     本该如此）。需要保留源 disk 原样请加 --no-clean。
@@ -98,7 +98,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # 虚拟容量（base 的 NTFS 只覆盖 base 容量，clone 盘大了尾段没分区 / 小了越界）。
 # 它靠"重抽 profile 最多 100 次直到匹配"实现——但前提是 NVME_POOL 里**确实存在**
 # 一个该容量的型号。若不存在，100 次全落空，fallback 成 size 矛盾的 profile
-# → guest 进 "Preparing Automatic Repair" + 反作弊看到"型号容量≠裸盘容量"。
+# → guest 进 "Preparing Automatic Repair" + 仿真机看到"型号容量≠裸盘容量"。
 # 与其等到克隆时才 WARN，不如现在就拦下：base 一旦封死，后面每次克隆都中招。
 # ----------------------------------------------------------------------
 source "$SCRIPT_DIR/stealth-lib.sh"   # 取 NVME_POOL（库顶部纯定义，无副作用）
@@ -125,17 +125,17 @@ if (( ${#_nvme_match[@]} == 0 )); then
 fi
 echo ">> NVMe 容量护栏 ✓ 池里 ${#_nvme_match[@]} 个型号匹配该容量: ${_nvme_match[*]}"
 
-# 先清腾讯/WeGame 设备身份，再 convert —— 这样 base 天生干净且仍然压缩紧凑。
+# 先清/WeGame 设备身份，再 convert —— 这样 base 天生干净且仍然压缩紧凑。
 # 失败就 abort：宁可不出 base，也不出一个所有 clone 共享同一 qimei 的"漏指纹" base。
 if (( CLEAN )); then
-    echo ">> 清理源 disk 的腾讯/WeGame 设备身份（qimei / 登录态 / SDK 缓存 + 注册表）..."
+    echo ">> 清理源 disk 的/WeGame 设备身份（qimei / 登录态 / SDK 缓存 + 注册表）..."
     if ! sudo "$SCRIPT_DIR/host-clean-tencent.sh" "$SRC_INSTANCE" --disk "$SRC_DISK" 2>&1 | sed 's/^/    /'; then
-        echo "ERROR: 腾讯身份清理失败 —— 拒绝产出可能泄露 qimei 的 base" >&2
+        echo "ERROR: 身份清理失败 —— 拒绝产出可能泄露 qimei 的 base" >&2
         echo "  排查 host-clean-tencent.sh 后重跑；确认无需清理时加 --no-clean" >&2
         exit 1
     fi
 else
-    echo ">> --no-clean：跳过腾讯身份清理（源 disk 原样固化为 base）"
+    echo ">> --no-clean：跳过身份清理（源 disk 原样固化为 base）"
 fi
 
 echo ">> 源 disk: $SRC_DISK ($(numfmt --to=iec --suffix=B "$(stat -c%s "$SRC_DISK")"))"

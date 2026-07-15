@@ -4,8 +4,20 @@
 # 设计目标：
 #   1. 用户只需要把 respawn-stealth.exe 拷进 guest，不能再要求旁边带 .ps1/.bat。
 #   2. EXE 带 requireAdministrator manifest，双击时由 Windows 直接弹 UAC。
-#   3. PowerShell payload 从仓库真源即时嵌入，避免 dist 里的脚本副本长期漂移。
+#   3. 脚本与 stock 驱动从仓库真源即时嵌入，避免 dist 副本长期漂移或 CAT/SYS 混版。
 set -euo pipefail
+
+# 可复现构建不能继承当前时间、时区或本机语言环境。SOURCE_DATE_EPOCH 允许发布流水线
+# 指定自己的纪元；本地直接运行时使用 Unix epoch。最终 PE 仍通过链接器参数把 COFF
+# 时间戳写成 0，这个环境变量主要约束 ImageMagick 等可能读取构建时间的辅助工具。
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
+if [[ ! "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: SOURCE_DATE_EPOCH 必须是非负整数: $SOURCE_DATE_EPOCH" >&2
+    exit 1
+fi
+export SOURCE_DATE_EPOCH
+export TZ=UTC
+export LC_ALL=C
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
@@ -15,9 +27,27 @@ OUT_DIR="${OUT_DIR:-$HERE/dist}"
 OUT_EXE="$OUT_DIR/respawn-stealth.exe"
 
 RESPAWN_SRC="$HERE/respawn-stealth-local.ps1"
+POWER_POLICY_SRC="$HERE/configure-power-policy.ps1"
 SPOOF_SRC="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
+PROFILE_HELPER_SRC="$REPO_ROOT/deploy/scripts/persist-gpu-profile.ps1"
+TRANSACTION_HELPER_SRC="$REPO_ROOT/deploy/scripts/gpu-profile-transaction.ps1"
+REFRESH_HELPER_SRC="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
+HARDWARE_ID_PLAN_SRC="$REPO_ROOT/deploy/scripts/gpu-hardware-id-plan.ps1"
+HARDWARE_ID_PROJECTOR_SRC="$REPO_ROOT/deploy/scripts/project-gpu-hardware-id.ps1"
+DISPLAY_HELPER_SRC="$REPO_ROOT/deploy/scripts/force-displayfreq.ps1"
+DRIVER_INSTALL_SRC="$HERE/install-display-driver.ps1"
+NVAPI_INSTALL_SRC="$HERE/install-nvapi-system.ps1"
+NVAPI_TRANSACTION_SRC="$HERE/nvapi-system-transaction.ps1"
+DRIVER_SRC_DIR="${DRIVER_SRC_DIR:-$REPO_ROOT/deploy/scripts/stock-viogpudo}"
+NVAPI_SRC_DIR="${NVAPI_SRC_DIR:-$REPO_ROOT/deploy/nvapi-shim}"
 SRC="$LAUNCHER/respawn-stealth-launcher.c"
+PAYLOAD_SECURITY_SRC="$LAUNCHER/payload-security.c"
+PAYLOAD_ENVIRONMENT_SRC="$LAUNCHER/payload-environment.c"
+LAUNCHER_ARGUMENTS_SRC="$LAUNCHER/launcher-arguments.c"
 MANIFEST="$LAUNCHER/respawn-stealth.exe.manifest"
+
+NVAPI_X86_SHA256="5ad43a193ccf0c3dacc769f4267d394502708fc1a5191d9b1338ba8485ea9c94"
+NVAPI_X64_SHA256="311b95768f8bbd18fb30f0e1144c9f2c50cc4f8433b870768c4a439f57844f56"
 
 need_tool() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -30,9 +60,75 @@ need_tool x86_64-w64-mingw32-gcc
 need_tool x86_64-w64-mingw32-windres
 need_tool xxd
 need_tool convert
+need_tool llvm-readobj
 
 [[ -f "$RESPAWN_SRC" ]] || { echo "ERROR: 找不到 $RESPAWN_SRC" >&2; exit 1; }
+[[ -f "$POWER_POLICY_SRC" ]] || { echo "ERROR: 找不到 $POWER_POLICY_SRC" >&2; exit 1; }
 [[ -f "$SPOOF_SRC" ]]   || { echo "ERROR: 找不到 $SPOOF_SRC" >&2; exit 1; }
+[[ -f "$PROFILE_HELPER_SRC" ]] || { echo "ERROR: 找不到 $PROFILE_HELPER_SRC" >&2; exit 1; }
+[[ -f "$TRANSACTION_HELPER_SRC" ]] || { echo "ERROR: 找不到 $TRANSACTION_HELPER_SRC" >&2; exit 1; }
+[[ -f "$REFRESH_HELPER_SRC" ]] || { echo "ERROR: 找不到 $REFRESH_HELPER_SRC" >&2; exit 1; }
+[[ -f "$HARDWARE_ID_PLAN_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PLAN_SRC" >&2; exit 1; }
+[[ -f "$HARDWARE_ID_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PROJECTOR_SRC" >&2; exit 1; }
+[[ -f "$DISPLAY_HELPER_SRC" ]] || { echo "ERROR: 找不到 $DISPLAY_HELPER_SRC" >&2; exit 1; }
+[[ -f "$DRIVER_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_INSTALL_SRC" >&2; exit 1; }
+[[ -f "$NVAPI_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_INSTALL_SRC" >&2; exit 1; }
+[[ -f "$NVAPI_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_TRANSACTION_SRC" >&2; exit 1; }
+[[ -f "$PAYLOAD_SECURITY_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_SECURITY_SRC" >&2; exit 1; }
+[[ -f "$PAYLOAD_ENVIRONMENT_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_ENVIRONMENT_SRC" >&2; exit 1; }
+[[ -f "$LAUNCHER_ARGUMENTS_SRC" ]] || { echo "ERROR: 找不到 $LAUNCHER_ARGUMENTS_SRC" >&2; exit 1; }
+
+# stock 驱动的 SYS/CAT/INF 必须来自同一发布包。构建时先锁定三者摘要，既避免
+# 误把深层自签版打进浅层 EXE，也能在源文件被截断或 CAT/SYS 混版时立即失败。
+verify_driver_file() {
+    local file_name="$1"
+    local expected_hash="$2"
+    local path="$DRIVER_SRC_DIR/$file_name"
+    local actual_hash
+
+    [[ -f "$path" ]] || { echo "ERROR: 找不到 $path" >&2; exit 1; }
+    actual_hash="$(sha256sum "$path" | awk '{print $1}')"
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+        echo "ERROR: $file_name SHA-256 不匹配: $actual_hash" >&2
+        exit 1
+    fi
+}
+
+verify_driver_file viogpudo.sys 04e873ad57387a518ad8ccae5116989c63170503c14b9cca0b2067e63876af89
+verify_driver_file viogpudo.cat b5122b2e060ec0c2f0157afcdc64c728ec31646819055c8b79ae3f4227472078
+verify_driver_file viogpudo.inf 48abd56644386e1f0d85c54cd64db93e62a4eb33bc7acb2613f237c6e1c6a0ee
+
+# NVAPI shim 没有厂商签名，固定 SHA-256 就是发布链的信任根。除摘要外还检查
+# COFF Machine、DLL flag 与唯一导出名，避免把同名错架构文件打进单 EXE。
+verify_nvapi_file() {
+    local file_name="$1"
+    local expected_hash="$2"
+    local expected_machine="$3"
+    local path="$NVAPI_SRC_DIR/$file_name"
+    local actual_hash metadata export_count all_export_count
+
+    [[ -f "$path" ]] || { echo "ERROR: 找不到 $path" >&2; exit 1; }
+    actual_hash="$(sha256sum "$path" | awk '{print $1}')"
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+        echo "ERROR: $file_name SHA-256 不匹配: $actual_hash" >&2
+        exit 1
+    fi
+
+    metadata="$(llvm-readobj --file-headers --coff-exports "$path")"
+    grep -F "Machine: $expected_machine" <<<"$metadata" >/dev/null \
+        || { echo "ERROR: $file_name PE Machine 不匹配" >&2; exit 1; }
+    grep -F 'IMAGE_FILE_DLL (0x2000)' <<<"$metadata" >/dev/null \
+        || { echo "ERROR: $file_name 缺少 IMAGE_FILE_DLL" >&2; exit 1; }
+    export_count="$(grep -c '^  Name: nvapi_QueryInterface$' <<<"$metadata" || true)"
+    all_export_count="$(grep -c '^Export {$' <<<"$metadata" || true)"
+    if [[ "$export_count" != 1 || "$all_export_count" != 1 ]]; then
+        echo "ERROR: $file_name 必须只导出 nvapi_QueryInterface" >&2
+        exit 1
+    fi
+}
+
+verify_nvapi_file nvapi.dll "$NVAPI_X86_SHA256" 'IMAGE_FILE_MACHINE_I386 (0x14C)'
+verify_nvapi_file nvapi64.dll "$NVAPI_X64_SHA256" 'IMAGE_FILE_MACHINE_AMD64 (0x8664)'
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$OUT_DIR"
@@ -68,19 +164,52 @@ make_icon_png() {
         -fill 'rgba(255,255,255,0.72)' \
         -draw "rectangle $((cx-stroke/2)),$((top+stroke*2)) $((cx+stroke/2)),$((bottom-stroke*3))" \
         -draw "rectangle $((left+inset)),$((mid_y-stroke/2)) $((right-inset)),$((mid_y+stroke/2))" \
+        -strip \
         "$out"
 }
 
 for size in 16 32 48 64 128 256; do
     make_icon_png "$size" "$BUILD_DIR/icon-${size}.png"
 done
-convert "$BUILD_DIR"/icon-*.png "$BUILD_DIR/respawn-stealth.ico"
+# PNG 的像素内容相同时，ImageMagick 默认仍可能写入 date:create/date:modify。
+# 上面的 -strip 移除这些动态块；合成 ICO 时再清理一次，避免未来版本继承新元数据。
+convert "$BUILD_DIR"/icon-*.png -strip "$BUILD_DIR/respawn-stealth.ico"
 
 # xxd 生成 C header，保留原始 UTF-8/BOM 字节；EXE 运行时原样释放脚本。
 xxd -i -n payload_respawn_ps1 "$RESPAWN_SRC" \
     > "$BUILD_DIR/payload_respawn_ps1.h"
+xxd -i -n payload_configure_power_policy_ps1 "$POWER_POLICY_SRC" \
+    > "$BUILD_DIR/payload_configure_power_policy_ps1.h"
 xxd -i -n payload_apply_gpu_spoof_ps1 "$SPOOF_SRC" \
     > "$BUILD_DIR/payload_apply_gpu_spoof_ps1.h"
+xxd -i -n payload_persist_gpu_profile_ps1 "$PROFILE_HELPER_SRC" \
+    > "$BUILD_DIR/payload_persist_gpu_profile_ps1.h"
+xxd -i -n payload_gpu_profile_transaction_ps1 "$TRANSACTION_HELPER_SRC" \
+    > "$BUILD_DIR/payload_gpu_profile_transaction_ps1.h"
+xxd -i -n payload_refresh_gpu_name_ps1 "$REFRESH_HELPER_SRC" \
+    > "$BUILD_DIR/payload_refresh_gpu_name_ps1.h"
+xxd -i -n payload_gpu_hardware_id_plan_ps1 "$HARDWARE_ID_PLAN_SRC" \
+    > "$BUILD_DIR/payload_gpu_hardware_id_plan_ps1.h"
+xxd -i -n payload_project_gpu_hardware_id_ps1 "$HARDWARE_ID_PROJECTOR_SRC" \
+    > "$BUILD_DIR/payload_project_gpu_hardware_id_ps1.h"
+xxd -i -n payload_force_displayfreq_ps1 "$DISPLAY_HELPER_SRC" \
+    > "$BUILD_DIR/payload_force_displayfreq_ps1.h"
+xxd -i -n payload_install_display_driver_ps1 "$DRIVER_INSTALL_SRC" \
+    > "$BUILD_DIR/payload_install_display_driver_ps1.h"
+xxd -i -n payload_install_nvapi_system_ps1 "$NVAPI_INSTALL_SRC" \
+    > "$BUILD_DIR/payload_install_nvapi_system_ps1.h"
+xxd -i -n payload_nvapi_system_transaction_ps1 "$NVAPI_TRANSACTION_SRC" \
+    > "$BUILD_DIR/payload_nvapi_system_transaction_ps1.h"
+xxd -i -n payload_viogpudo_sys "$DRIVER_SRC_DIR/viogpudo.sys" \
+    > "$BUILD_DIR/payload_viogpudo_sys.h"
+xxd -i -n payload_viogpudo_cat "$DRIVER_SRC_DIR/viogpudo.cat" \
+    > "$BUILD_DIR/payload_viogpudo_cat.h"
+xxd -i -n payload_viogpudo_inf "$DRIVER_SRC_DIR/viogpudo.inf" \
+    > "$BUILD_DIR/payload_viogpudo_inf.h"
+xxd -i -n payload_nvapi_x86_dll "$NVAPI_SRC_DIR/nvapi.dll" \
+    > "$BUILD_DIR/payload_nvapi_x86_dll.h"
+xxd -i -n payload_nvapi_x64_dll "$NVAPI_SRC_DIR/nvapi64.dll" \
+    > "$BUILD_DIR/payload_nvapi_x64_dll.h"
 
 # Windows 资源里嵌入 UAC manifest；windres 的相对路径以 launcher 目录为基准。
 cat > "$BUILD_DIR/respawn-stealth.generated.rc" <<EOF
@@ -107,8 +236,12 @@ x86_64-w64-mingw32-gcc \
     -mconsole \
     -static \
     -static-libgcc \
+    -Wl,--no-insert-timestamp \
     -I "$BUILD_DIR" \
     "$SRC" \
+    "$PAYLOAD_SECURITY_SRC" \
+    "$PAYLOAD_ENVIRONMENT_SRC" \
+    "$LAUNCHER_ARGUMENTS_SRC" \
     "$BUILD_DIR/respawn-stealth.res" \
     -lshell32 -ladvapi32 -luser32 \
     -o "$OUT_EXE"

@@ -8,7 +8,7 @@ Linux 宿主通过 `SCM_RIGHTS` 拿 `memfd/eventfd`，Windows 10/11 宿主通过
 支持 GL/dma-buf/D3D scanout 的宿主还会按需发布 GPU resident frame metadata：
 Linux 是 `dma-buf` fd，Windows 是 D3D11 shared texture 名称。旧共享内存路径
 保留为默认可用推流回退。
-反作弊看不到任何额外 PCI 设备 / 驱动，与 NVIDIA-spoof virtio-gpu + ACE 浅层
+仿真机看不到任何额外 PCI 设备 / 驱动，与 NVIDIA-spoof virtio-gpu + ACE 浅层
 stealth 完全兼容。
 
 底层 ABI 与 `-display fb-shm` / `-object fb-shm` 的 QEMU 文档：

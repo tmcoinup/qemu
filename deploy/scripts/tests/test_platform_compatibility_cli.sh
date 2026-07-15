@@ -3,7 +3,8 @@
 # 执行 DRY_RUN，并使用固定 QMP 替身；不会创建真实 profile、磁盘、TPM 或 VM。
 # profile 生成与 Dock 检查使用隔离 subshell，里面的临时 export 不会影响后续
 # 场景；同名变量跨 subshell 复用是测试隔离设计，不是意外覆盖。
-# shellcheck disable=SC2030,SC2031
+# shellcheck disable=SC1091,SC2030,SC2031
+# 测试从临时环境按绝对仓库路径加载库，SC1091 无法静态跟随这种运行时路径。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -307,28 +308,23 @@ grep -F -- "--allow-platform-compatibility" "$memory_log" >/dev/null \
 if grep -F -- "--platform-id=" "$memory_log" >/dev/null; then
     fail "内存管理工具仍要求记忆 compatibility 平台 ID"
 fi
-# shellcheck disable=SC2016 # 第二个 pattern 要匹配脚本中的字面量 ${array[@]}。
-if ! grep -F 'stealth_profile_get PLATFORM_STATUS' \
-        "$REPO_ROOT/deploy/scripts/install-stealth.sh" >/dev/null ||
-   ! grep -Eq '^[[:space:]]+--allow-platform-compatibility[[:space:]]*$' \
-        "$REPO_ROOT/deploy/scripts/install-stealth.sh" ||
-   ! grep -F '"${RELAUNCH_PLATFORM_ARGS[@]}"' \
-        "$REPO_ROOT/deploy/scripts/install-stealth.sh" >/dev/null; then
-    fail "guest 安装器自动重启未传播 compatibility 参数"
-fi
-# shellcheck disable=SC2016 # pattern 要拒绝安装脚本中的平台 ID 字面量。
-if grep -F '"--platform-id=$_profile_platform"' \
-    "$REPO_ROOT/deploy/scripts/install-stealth.sh" >/dev/null; then
-    fail "guest 安装器仍传播不必要的长平台 ID"
-fi
-# shellcheck disable=SC2016 # pattern 要匹配安装脚本中的字面量 "$INSTANCE"。
-grep -F 'sv_qemu_instance_pids "$INSTANCE"' \
-    "$REPO_ROOT/deploy/scripts/install-stealth.sh" >/dev/null \
-    || fail "guest 安装器未复用 QEMU 实例进程公共匹配器"
-# shellcheck disable=SC2016 # pattern 要拒绝安装脚本中的历史字面量 ${INSTANCE}。
-if grep -F 'name win10-ryzen3-${INSTANCE}' \
-    "$REPO_ROOT/deploy/scripts/install-stealth.sh" >/dev/null; then
-    fail "guest 安装器仍硬编码历史 QEMU 进程名"
+# 旧 host 安装器曾负责二次重启并传播 compatibility 参数；当前自签/深层路径
+# 已彻底退役，因此这里改验“无副作用 fail-fast”。这样旧自动化不会静默启动一个
+# PCI 主 ID 错误的 VM，也不会再通过 SSH 修改 guest。
+legacy_installer="$REPO_ROOT/deploy/scripts/install-stealth.sh"
+legacy_installer_log="$TMP_DIR/legacy-installer.log"
+legacy_installer_status=0
+"$legacy_installer" 9753 --allow-platform-compatibility \
+    >"$legacy_installer_log" 2>&1 || legacy_installer_status=$?
+[[ "$legacy_installer_status" -eq 64 ]] \
+    || fail "退役 guest 安装器没有以约定退出码 64 拒绝执行"
+grep -F '已退役，未对 host 或 guest 做任何修改' "$legacy_installer_log" >/dev/null \
+    || fail "退役 guest 安装器缺少无副作用迁移诊断"
+grep -F 'deploy/guest-stealth/package.sh' "$legacy_installer_log" >/dev/null \
+    || fail "退役 guest 安装器没有指向统一 EXE 流程"
+if grep -F -e 'sv_qemu_instance_pids' -e 'start-vm.sh' -e 'ssh ' -e 'scp ' \
+        "$legacy_installer" >&2; then
+    fail "退役 guest 安装器仍保留 host/guest 变更动作"
 fi
 
 # 仅指定禁用 ID 不够；必须有第二个、名称明确的 compatibility 开关。

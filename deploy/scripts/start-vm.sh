@@ -1,4 +1,6 @@
 #!/bin/bash
+# shellcheck disable=SC1091
+# 所有启动模块都按运行时计算出的绝对 HERE 路径加载，静态分析器无法解析该路径。
 # ---------------------------------------------------------------------------
 # start-vm.sh ——— 基于版本化硬件清单启动 QEMU/KVM 客机
 #
@@ -44,8 +46,9 @@
 #
 # 默认值（90% 情况都不用改）：
 #     BRIDGE=br0           桥接 br0（不存在自动回退到 user-mode NAT）
-#     STABLE_DISPLAY=0     SDL 模式默认 virtio-vga-gl + virgl 3D；fb-shm 同步推流
-#     GPU_SELFSIGNED=0     PCI 主 ID 保留 virtio；GPU 标签字段明确属于范围外兼容层
+#     STABLE_DISPLAY=0     SDL 默认 virtio-vga-gl，供宿主 GL/推流使用；当前
+#                          Windows VioGpuDod 仍是 Display-Only，不获得客体 Direct3D
+#                          PCI 主 ID 固定保留 virtio；历史自签/深层开关已移除
 #     STRICT_HARDWARE=1    KVM/TSC 能力、完整平台与 CPU realize 默认严格门禁
 #
 # 平台 bundle 与每机唯一身份只在首次启动时选择/生成一次，写到
@@ -86,11 +89,9 @@
 #     DISK=<path>          qcow2 磁盘路径                        (flag: --disk=<path>)
 #     QEMU=<path>          qemu-system-x86_64 二进制路径         (flag: --qemu=<path>)
 #     EXTRA_ISO=<path>     副 CDROM（autounattend.xml / 驱动盘 等）
-#     STABLE_DISPLAY=1     强制 virtio-vga（无 GL），用于回避个别环境的 virgl
+#     STABLE_DISPLAY=1     强制 virtio-vga（关闭宿主 GL），用于回避个别环境的 virgl
 #                          长跑 TDR/BSOD。--no-sdl/--headless 无窗口 GL context，
 #                          也会走 stable virtio-vga。
-#     GPU_SELFSIGNED=1     历史兼容开关；会改显示 PCI 主 ID，但不会改变 virtio 行为，
-#                          本分支不把该模式计入硬件真实性或受支持 GPU 能力。
 #     STRICT_HARDWARE=1    设 0 仅供诊断/兼容 dry-run，不计入真机化支持
 #     STEALTH_PLATFORM_ID= 显式平台 ID（flag: --platform-id=<id>）；已有
 #                          profile 上只做一致性断言；可选，换平台须另加 --reroll
@@ -131,6 +132,9 @@
 #                          governor=performance + KVM_HALT_POLL_NS(默认 0) + THP
 #                          defrag=never。防编译抢 vCPU 主要靠 CPU_ISOLATE/cpuset；
 #                          需要旧低延迟 busy-poll 可显式 KVM_HALT_POLL_NS=500000。
+#     GUEST_NUMLOCK=1      QEMU 从 usb-kbd 的 guest LED 回报确认状态，只在明确
+#                          OFF 时异步开启 NumLock；不修改 Windows 注册表或 host XKB。
+#                          (flag: --numlock / --no-numlock)
 #     CPU_FREQ_CAP=0       默认不改宿主全局频率；设 1 才按本实例 CPU 上限封顶
 #                          (CPU_MAX_MHZ=SMBIOS Type4 max-speed，需 HOST_TUNE=1）
 #                          (flag: --freq-cap / --no-freq-cap)

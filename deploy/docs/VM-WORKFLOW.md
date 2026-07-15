@@ -4,23 +4,20 @@
 
 ---
 
-## 阶段 0：host 端启动一次性 HTTP 服务
+## 阶段 0：host 端生成统一离线 EXE
 
-guest 内装机阶段会通过 HTTP 拉 `vm-prep.ps1` / `shallow-stealth.ps1`。clone 首启 GPU
-重对齐只执行 `D:\工具\respawn-stealth.exe`，不再需要 host 上有 `192.168.30.33:8765`。
-仅当装机阶段（A）需要 guest 拉脚本时手动跑一次：
+全新系统和 clone 都只运行 `respawn-stealth.exe`。显示驱动、签名 CAT/INF、安装器和
+初始化脚本已经内嵌，不需要启动 `serve-stealth-http.py`：
 
 ```bash
-# 先看是否已经在跑（避免重复起 / 端口冲突）
-ss -tlnp | grep 8765 || nohup python3 /home/ubuntu/projects/qemu/deploy/scripts/serve-stealth-http.py 8765 \
-    &> /tmp/serve-http.log &
-# 验证
-curl -sI http://192.168.30.33:8765/vm-prep.ps1            # HTTP 200
-curl -sI http://192.168.30.33:8765/shallow-stealth.ps1    # HTTP 200
+bash deploy/guest-stealth/package.sh
+sha256sum deploy/guest-stealth/dist/respawn-stealth.exe
 ```
 
-服务监听 `192.168.30.33:8765`（host 在 br0 上的 IP）。如果装机阶段 guest 端跑
-`irm` 报 404，**99% 是这里漏起了** 或 URL 打错。clone 阶段不再依赖它。
+每次修改 `respawn-stealth-local.ps1`、`apply-gpu-spoof.ps1`、安装器或 stock 驱动后，
+都必须重新构建并替换 guest 中的旧 EXE。`deploy/scripts/respawn-stealth.ps1` 与
+`shallow-stealth.ps1` 已改为无副作用 fail-fast 迁移提示，不能再作为调试入口；当前
+流程也不需要 HTTP server。
 
 ---
 
@@ -37,7 +34,11 @@ rm -rf /home/ubuntu/images/vms/1/{disk.qcow2,profile,ovmf-vars.fd,tpm-state}
     --iso=/mnt/disk2/iso/Win10_22H2_Chinese_Simplified_x64v1.iso
 ```
 
-启动日志会显示 `=== stealth profile ===`，记下里面的 GPU 型号（比如 `NVIDIA GeForce GTX 750 Ti`）—— **不用记**，shallow-stealth.ps1 后面自动按 PCI subsys 查表。
+启动日志会显示 `=== stealth profile ===`，GPU 型号不用手记；EXE 会按 PCI SUBSYS 自动查表。
+
+启动器默认给 `usb-kbd` 加 `x-force-numlock-on=on`。QEMU 等 Windows 用 HID
+`SET_REPORT` 明确回报 NumLock OFF 后才异步送一次 NumLock；已是 ON 时不会翻转，
+也不修改 Windows 注册表或 Linux XKB。临时关闭策略可传 `--no-numlock`。
 
 ### A.2 装机选项
 
@@ -45,49 +46,46 @@ rm -rf /home/ubuntu/images/vms/1/{disk.qcow2,profile,ovmf-vars.fd,tpm-state}
 - OOBE 阶段：选"中国 / 简体中文 / 微软拼音"，账号选**离线账号**（Shift+F10 → `oobe\BypassNRO` 跳过强制微软账号）
 - 进系统后**不要急着干别的**，先跑 Windows Update 直到 build = 19045.5856 或更新（让系统稳定）
 
-### A.3 跑 vm-prep.ps1（系统级 setup）
+### A.3 拷入并运行统一 EXE
 
-进 guest 后**右键开始 → Windows PowerShell (管理员)**，跑：
-
-```powershell
-irm http://192.168.30.33:8765/vm-prep.ps1 | iex
-```
-
-这一步做的事：
-- 关 Fast Startup + 删 hiberfil.sys
-- NumLock 永久 ON
-- 关 Defender 实时扫 + 切 small minidump
-- 永不息屏 / 不睡眠
-- 抑制 ms-gamingoverlay 弹窗（DNF 启动友好）
-- **不装 OpenSSH**（你不需要）
-- **不改 Administrator 密码**（你不需要）
-
-### A.4 重启一次（让 Fast Startup 关、NumLock 设置完整落地）
+把阶段 0 生成的 `deploy/guest-stealth/dist/respawn-stealth.exe` 通过现有数据盘、ISO、
+共享目录或其它离线传输方式拷入 guest，推荐固定为 `D:\工具\respawn-stealth.exe`。
+然后在**本地 SDL 控制台**的管理员 PowerShell 运行：
 
 ```powershell
-shutdown /r /t 0
+powercfg -h off
+Start-Process -FilePath 'D:\工具\respawn-stealth.exe' -Wait
 ```
 
-### A.5 跑 shallow-stealth.ps1（GPU spoof）
+EXE 会先判断真实 `Service`。克隆机已是 `VioGpuDod` 时跳过安装；全新机则校验
+内嵌 SYS/CAT/INF 的摘要与微软签名，执行 `pnputil /install`，确认绑定成功后才做
+GPU/显示器初始化。任何一步失败都会停止，不会把 BasicDisplay 只改一个 GTX 名字。
 
-重启进系统后，再次开管理员 PowerShell：
+### A.4 等 EXE 自动重启
+
+默认约 8 秒后自动重启，让 VioGpuDod、实时 EDID 和名称覆盖一起生效。调试时若用了
+`-NoReboot`，检查日志后再手动执行 `shutdown /r /t 0`。
+
+### A.5 验证真实驱动和分辨率
+
+重启后在 SDL 控制台运行：
 
 ```powershell
-irm http://192.168.30.33:8765/shallow-stealth.ps1 | iex
+Get-PnpDevice -Class Display -PresentOnly | ForEach-Object {
+    $_
+    Get-PnpDeviceProperty -InstanceId $_.InstanceId `
+        -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath
+}
+Get-CimInstance Win32_VideoController |
+    Format-List Name,DriverVersion,CurrentHorizontalResolution,CurrentVerticalResolution
 ```
 
-它会自动：
-1. 下载 stock virtio-win viogpudo（MS-WHQL 签）
-2. `pnputil` 安装
-3. 探测当前 PCI subsys → 查 GPU 池映射表 → 选对应型号
-4. 下载 apply-gpu-spoof.ps1 → 改注册表 → 替换 nvapi64.dll
-5. 提示回车自动重启
-
-回车，重启。
+期望 PCI 显示设备 `Service=VioGpuDod`、INF 为 `oem*.inf`，显示设置可选
+1920×1080。设备名称显示 NVIDIA 不是驱动成功的证据；真实判断必须看 Service。
 
 ### A.6 host 端跑 host-fix-gpu-devpkey.sh（修"驱动程序提供商"显示）
 
-shallow-stealth 跑完重启后，guest 关机一次（Win10 → 开始 → 关机），然后 **host 端**：
+统一 EXE 跑完并重启后，guest 再关机一次（Win10 → 开始 → 关机），然后 **host 端**：
 
 ```bash
 # 等 guest 真关机（看不见 QEMU 进程）
@@ -133,7 +131,7 @@ guest 内 PowerShell：
 Get-Tpm | Select-Object TpmPresent, TpmReady
 # 都应 True
 
-# 反作弊红线（必须全 False / 否）
+# 仿真机红线（必须全 False / 否）
 (Get-CimInstance Win32_BIOS).Manufacturer -eq 'American Megatrends Inc.'   # True
 (Get-CimInstance Win32_Processor).HypervisorPresent                         # False
 [Regex]::Match((Get-CimInstance Win32_ComputerSystem | Out-String), 'BOCHS|BXPC').Success  # False
@@ -145,7 +143,10 @@ Get-Tpm | Select-Object TpmPresent, TpmReady
 
 ## 阶段 B：密封 base
 
-> 💡 封 base 前可选（**推荐**）：把**离线一键重对齐脚本**打包进 base，让每个 clone 自带、host 连不上也能本地重对齐 GPU。两条 `iwr` 命令搞定，见文末「客机本地一键重对齐 GPU」。
+> 💡 封 base 前推荐把已核验哈希的
+> `deploy/guest-stealth/dist/respawn-stealth.exe` 离线放到
+> `D:\工具\respawn-stealth.exe`。clone 首次登录可直接运行统一 EXE，不需要 `iwr`、
+> HTTP 服务或在 guest 安装下载工具。
 
 ### B.1 sysprep（强烈建议）
 
@@ -164,7 +165,7 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown
 
 跑完自动关机。
 
-> **不 sysprep 也能 clone**，但多 VM 的 MachineGUID/SID 全相同，反作弊跨账号容易关联。生产 VM 建议 sysprep；只跑 1 个号自玩可以不做。
+> **不 sysprep 也能 clone**，但多 VM 的 MachineGUID/SID 全相同，仿真机跨账号容易关联。生产 VM 建议 sysprep；只跑 1 个号自玩可以不做。
 
 ### B.2 host 端密封成只读 base
 
@@ -201,7 +202,7 @@ ls -la /home/ubuntu/images/vms/_base/
 sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-dnf-v1 2
 ```
 
-> ⚠️ **一定要带 sudo**。脚本要挂 NTFS 写 unattend.xml + 改 per-user NTUSER NumLock 状态，没 root 会跳过部分步骤；并且 clone 完目录权限会变 `root:root` 让普通用户的 `start-vm.sh` 写不了 OVMF NVRAM（脚本最后会 `chown` 回去）。
+> ⚠️ **一定要带 sudo**。脚本要挂 NTFS 写 unattend.xml，没 root 会跳过部分步骤；并且 clone 完目录权限会变 `root:root` 让普通用户的 `start-vm.sh` 写不了 OVMF NVRAM（脚本最后会 `chown` 回去）。
 >
 > **重要原则**：除 per-user `NTUSER.DAT` 外，**绝不离线改 boot-critical hive**（SYSTEM / SOFTWARE / DEFAULT）—— Win10 22H2 incremental log 协议下，离线改 hive 即使 `.LOG1/.LOG2` 一起处理，启动也几乎必然 `0xc0000001`。所以所有 guest 启动后才要的注册表改动统一走 `deploy/autounattend/autounattend.xml` 的 `<FirstLogonCommands>`。
 >
@@ -211,8 +212,7 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 1. 创建 qcow2 增量层 `vms/2/disk.qcow2` backed by base
 2. `stealth_pick_profile` reroll 硬件身份（新 CPU / 主板 / GPU / MAC / UUID / NVMe SN），NVMe 容量强制等于 base 容量避免 NTFS 错位
 3. `host-fix-gpu-devpkey.sh` 在 sysprep base 上自动 skip（无 PCI enum）；首启枚举后再跑 `finalize-clone-gpu.sh`
-4. `host-fix-numlock.sh` 改 per-user `NTUSER.DAT` 的 `InitialKeyboardIndicators=0x80000002`
-5. **`host-inject-unattend.sh`** 把 `deploy/autounattend/autounattend.xml` 写到 guest 三处：
+4. **`host-inject-unattend.sh`** 把 `deploy/autounattend/autounattend.xml` 写到 guest 三处：
    - `%WINDIR%\Panther\Unattend\unattend.xml`（OOBE 主搜索路径）
    - `C:\unattend.xml`（备用）
 
@@ -251,7 +251,10 @@ STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 deploy/scripts/finalize-clone-gpu.sh 2 --r
    - Order 4-5: 关 IE wizard / 关 Windows Update 自动重启
    - Order 6-9: 注册 ms-gamingoverlay no-op handler + 关 GameDVR
    - **Order 10: `D:\工具\respawn-stealth.exe --firstlogon`**
-5. `respawn-stealth.exe` 调内嵌 payload（按 PCI subsys 查表）→ 改注册表 + 替换 nvapi64.dll → 自动重启；`--firstlogon` 模式不安装后续开机自刷任务
+5. `respawn-stealth.exe` 先验证物理 `1AF4:1050`/stock VioGpuDod，再按 PCI subsys
+   提交浅层逻辑 ID；事务发布 x86 SysWOW64 + x64 System32 NVAPI，使 GPU-Z 2.70
+   可直接双击；随后自动重启。`--firstlogon` 跳过名称/显示模式自刷，但保留一条
+   SYSTEM HardwareID 投影任务；不安装第三方服务
 6. 重启后桌面就绪，Device Manager 显示 profile.GPU_NAME（可能跟 base 的 VM1 不同）
 
 整个过程从 `start-vm.sh` 到稳定桌面 **~5-8 分钟**，全程不需要鼠标键盘。
@@ -313,27 +316,29 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 
 ---
 
-## 客机本地一键重对齐 GPU（`deploy/guest-stealth/`，离线、无需 host HTTP）
+## 客机离线统一安装与重对齐（`deploy/guest-stealth/`）
 
 阶段 C 的 GPU 重对齐（首启 `FirstLogonCommands` Order=10 / C.2.1 兜底）只走
 `D:\工具\respawn-stealth.exe --firstlogon`。`FirstLogonCommands` 是 OOBE 后首次登录
-执行一次，不是每次开机执行；`--firstlogon` 也会跳过持久计划任务。迁移到其它主机时
-不要求对方有相同 host IP 或 HTTP 服务。
+执行一次，不是每次开机执行；`--firstlogon` 跳过名称/显示模式任务，只保留必要的
+`StealthGPU-ProjectHardwareId` 内置任务。迁移到其它主机时不要求对方有相同 host IP
+或 HTTP 服务。
 
 ### 文件
 
 | 文件 | 作用 |
 |---|---|
-| `dist/respawn-stealth.exe` | **发布入口**：单文件拷进 guest，双击 → UAC 提权 → 释放内嵌脚本 → 执行 |
-| `respawn-stealth-local.ps1` | 本地主逻辑：磁盘上定位 `apply-gpu-spoof.ps1` → `-AutoDetect` → 清 RunOnce → 重启；源码调试用 |
+| `dist/respawn-stealth.exe` | **唯一发布入口**：内嵌驱动三件套、安装器与初始化脚本 |
+| `install-display-driver.ps1` | 用真实 Service 做幂等判断；全新机安装，克隆机跳过 |
+| `respawn-stealth-local.ps1` | 串联驱动、`apply-gpu-spoof -AutoDetect`、清 RunOnce 与重启 |
 | `README.md` | 该目录自带的简要说明 |
 | `package.sh` | host 上打一个默认只含 `respawn-stealth.exe` 的 `dist/`（已 gitignore）|
 
-行为：按当前显卡 PCI SUBSYS 自动查 GPU 池表选型号 → 改 `Class\{4d36e968}` +
-`Enum\PCI` + `Enum\DISPLAY` 注册表覆盖 → 完成后重启。EXE 内嵌所需脚本，
-运行时释放到 `C:\ProgramData\StealthGPU\respawn-exe\`，不依赖 host HTTP。
+行为：先核验/绑定 `VioGpuDod` → 仅新装系统清模式缓存 → 按 PCI SUBSYS 查 GPU 池
+→ 改 `Class\{4d36e968}` + `Enum\PCI` + `Enum\DISPLAY` → 重启。所有依赖释放到
+`C:\ProgramData\StealthGPU\respawn-exe\`，不依赖网络。
 
-### 打包进 base（可选，封 base 前做一次）
+### 打包进 base（必需，封 base 前做一次）
 
 host 上先生成单文件 EXE：
 
@@ -344,8 +349,8 @@ bash deploy/guest-stealth/package.sh
 封 base 前（阶段 A 末、B.1 sysprep 之前），只把
 `deploy/guest-stealth/dist/respawn-stealth.exe` 拷进 guest，固定放到
 `D:\工具\respawn-stealth.exe`。
-EXE 自带 `respawn-stealth-local.ps1` 和 `apply-gpu-spoof.ps1`，运行时释放到
-`C:\ProgramData\StealthGPU\respawn-exe\`，不依赖 `C:\stealth\apply-gpu-spoof.ps1`。
+EXE 自带 stock `viogpudo.sys/.cat/.inf`、安装器、respawn 和 apply 脚本，运行时
+释放到 `C:\ProgramData\StealthGPU\respawn-exe\`，不依赖旁边任何文件。
 
 拷完照常 sysprep + `seal-base.sh` 封 base，之后每个 clone 首次登录都会执行这份 EXE 一次。
 
@@ -356,7 +361,8 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 
 ### 什么时候用它
 
-- **C.2.1 的离线兜底**：clone 进桌面后 GPU 名还是 base 老型号 → 执行 `D:\工具\respawn-stealth.exe --firstlogon` 即可。
+- **全新 VM 初始化**：没有 VioGpuDod 时自动安装签名驱动，再完成名称和模式初始化。
+- **C.2.1 的离线兜底**：clone 进桌面后 GPU 名还是 base 老型号 → 执行 `D:\工具\respawn-stealth.exe --firstlogon`。
 - **随时重抽身份后重跑**：任何时候想按当前 PCI subsys 重新对齐 GPU 注册表覆盖，客机内双击一下就行（可反复跑，幂等）。
 - **断网环境**：客机不通 host / 不通网时唯一可用的重对齐手段。
 
@@ -366,13 +372,13 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 
 | 阶段 | 在哪跑 | 命令 | 干啥 |
 |---|---|---|---|
-| 0 | host | `nohup python3 deploy/scripts/serve-stealth-http.py 8765 &` | 起 HTTP 服务（仅装机阶段需要；clone 首启不依赖 HTTP）|
+| 0 | host | `bash deploy/guest-stealth/package.sh` | 构建内嵌驱动与脚本的统一离线 EXE |
 | A.1 | host | `deploy/scripts/start-vm.sh 1 --iso=...` | 启动装机 |
-| A.3 | guest | `irm .../vm-prep.ps1 \| iex` | 系统级 setup（NumLock / Fast Startup / Defender / minidump）|
-| A.5 | guest | `irm .../shallow-stealth.ps1 \| iex` | GPU spoof（viogpudo 装 + 注册表改名 + nvapi shim）|
+| A.3 | guest | `D:\工具\respawn-stealth.exe` | 离线安装 VioGpuDod + GPU/显示器初始化 + 重启 |
+| A.5 | guest | 查询 `DEVPKEY_Device_Service` | 验证真实 Service，而不是只看 GTX 名称 |
 | A.6 | host | `sudo .../host-fix-gpu-devpkey.sh 1` | 改 DEVPKEY 让"驱动程序提供商"显示 NVIDIA |
 | A.7 | guest | 手动装 wegame / DNF / 实际游戏环境 | — |
-| A 末 | guest | `respawn-stealth.exe` 放进 `D:\工具\` | 可选：把离线一键 EXE 打包进 base，FirstLogon 会优先跑它 |
+| A 末 | guest | 最新 EXE 保留在 `D:\工具\` | 必需：clone FirstLogon 固定从这里执行 |
 | B.1 | guest | `sysprep /generalize /oobe /shutdown` | 清 SID/MachineGUID 让 clone 独立 |
 | B.2 | host | `deploy/scripts/seal-base.sh 1 <name>` | 密封 base |
 | B.3 | host | `chmod -w _base/<name>.qcow2` | 物理锁 base |
@@ -385,10 +391,11 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 
 | 脚本 | 何时**不**用跑 |
 |---|---|
-| `apply-gpu-spoof.ps1` | 永远不直接跑——它被 shallow-stealth / respawn-stealth 自动调 |
-| `vm-bootstrap.ps1` | 我们改用 vm-prep.ps1 了；vm-bootstrap 那套 OpenSSH + autologin 你不需要 |
-| `install-stealth-guest.ps1` | 深层方案 A 用，浅层（我们走的）用不上 |
-| `destealth-revert.ps1` | 想撤 stealth 时跑（一般不需要） |
+| `apply-gpu-spoof.ps1` | 永远不直接跑——它由 respawn-stealth 自动调用 |
+| `shallow-stealth.ps1` / `respawn-stealth.ps1` | 已退役；只返回无副作用迁移诊断，不能执行安装 |
+| `vm-bootstrap.ps1` | 历史 OpenSSH + autologin 初始化入口，默认流程不用 |
+| `install-stealth.sh` / `install-stealth-guest.ps1` | 历史深层自签流程；当前浅层模式禁止运行 |
+| `destealth-revert.ps1` | 已退役且只会 fail-fast；历史版本会误删当前浅层模式依赖的 stock VioGpuDod，禁止在健康客机运行 |
 | `diag-gpu-props.ps1` | 排查 GPU 改名失败时用 |
 | `fix-ms-gamingoverlay.ps1` | autounattend.xml 已经把这套逻辑内置了，不用单跑 |
 | **`host-inject-runonce.sh`** | **已 deprecated** —— 离线写 SOFTWARE hive 会让 Win10 22H2 启动 `0xc0000001`。等价命令搬进 autounattend FirstLogonCommands Order=10 |
@@ -397,16 +404,18 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 
 | 症状 | 原因 | 修法 |
 |---|---|---|
-| `irm apply-gpu-spoof.ps1 \| iex` 报"赋值表达式无效" | 该脚本有 `param()`，`iex` 不支持参数化 | 不要直接跑——它会被 shallow-stealth / respawn-stealth 自动调 |
+| `irm apply-gpu-spoof.ps1 \| iex` 报"赋值表达式无效" | 该脚本有 `param()`，`iex` 不支持参数化 | 不要直接跑；重新构建并运行统一 EXE |
 | host offline 改 hive 时报 "Windows is hibernated" | Fast Startup 没关 | guest 内 `powercfg -h off` + `shutdown /s /t 0`，**别**用 GUI "关机"或 `shutdown /r` |
 | clone 完启动报 `Recovery 0xc0000001 / Your PC couldn't start properly` | 离线改了 boot-critical hive（SYSTEM/SOFTWARE/DEFAULT）—— Win10 22H2 incremental log 协议下，无论 LOG 保留 / truncate / restore 都崩 | 唯一解：boot-critical hive 一概不离线动；guest 启动后要的注册表改动写进 `autounattend.xml` 的 `<FirstLogonCommands>` |
 | 设备管理器驱动程序提供商还是 `Red Hat, Inc.` | clone 首启后 Windows 按 `viogpudo.inf` 重新写回 Provider，覆盖了 clone 阶段预写 | guest 关机，host 端 `deploy/scripts/finalize-clone-gpu.sh <N>`；脚本会自动 sudo 提权 |
 | clone 完 host 端报 `ControlSet001\Enum\PCI 不存在` | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不是 bug —— 脚本自动 skip；guest 首次登录后 FirstLogonCommand Order=10 会重对齐 GPU |
 | clone VM 进桌面后 GPU 名还是 base 老型号 | 首次登录那次 FirstLogonCommand Order=10 没自动跑，或 `D:\工具\respawn-stealth.exe` 不存在 | guest 管理员 PS：`Start-Process -FilePath 'D:\工具\respawn-stealth.exe' -ArgumentList '--firstlogon' -Wait` |
-| `irm` 报 404 或 connection refused | 装机阶段 HTTP 服务没起，或还在使用旧 HTTP 兼容命令 | clone 首启不要走 `irm`；装机阶段检查 URL 和 `ss -tlnp \| grep 8765` |
+| 新 VM 显示 GTX 但分辨率锁在 1280×800、下拉灰色 | 运行的是旧 EXE，只把 Microsoft Basic Display Adapter 改了名 | 替换最新 EXE，在 SDL 控制台运行；确认 Service=`VioGpuDod` 后重启 |
+| `display-driver-install.log` 报摘要/签名错误 | SYS/CAT/INF 混版或 EXE payload 损坏 | host 重新运行 `package.sh`，不要手工替换释放目录里的驱动 |
+| RDP 中分辨率下拉灰色 | 远程会话分辨率由 RDP 客户端控制 | 退出 RDP，在本地 SDL 控制台验证 VioGpuDod 和 1920×1080 |
 | guest 卡 "区域设置 / 让我们设置你的设备" 等 OOBE 画面 | unattend.xml 没写进 disk（host-inject-unattend.sh 跑失败 / autounattend.xml 缺组件）| host 端 `sudo deploy/scripts/host-inject-unattend.sh <N>` 离线补一份，再重启 guest |
 | `Get-Tpm` 全 False | OVMF 没编 TPM2_ENABLE，或 swtpm permall 太小 | host 跑 `deploy/tools/build-ovmf.sh` + `sudo chown -R ubuntu /var/lib/swtpm-localca` |
-| 小键盘灯不亮、数字键失灵 | NumLock 默认 OFF | guest 内跑 vm-prep.ps1 / 或 host 端跑 `host-fix-numlock.sh <N>`（VM 关机） |
+| guest 数字键仍是 Home/方向键 | 使用旧 QEMU、传了 `--no-numlock`，或 Windows 尚未回报 HID LED | 用当前 `build/qemu-system-x86_64` 启动；QMP 查询 `kbd0` 的 `x-numlock-led-known/on` |
 
 ## 下一步
 

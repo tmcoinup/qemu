@@ -110,7 +110,7 @@ if command -v swtpm >/dev/null 2>&1; then
         echo "FAIL: QEMU 没编 CONFIG_TPM_EMULATOR——guest 无法挂 swtpm"; exit 1
     fi
 else
-    echo "WARN: swtpm 未装；start-vm.sh 会优雅降级（无 TPM）但反作弊会判 sandbox"
+    echo "WARN: swtpm 未装；start-vm.sh 会优雅降级（无 TPM）但仿真机会判 sandbox"
 fi
 # OVMF Tcg2 模块自检：Ubuntu 默认 ovmf 包不编 TPM2_ENABLE，guest tpm.msc
 # 会"找不到兼容的 TPM"。我们自编的 stealth fd 应该有 Tcg2 模块。
@@ -295,7 +295,7 @@ if [[ -f "$SSDT_AML" ]]; then
         echo "FAIL: ssdt-thermal.aml 长度 $sz 太短（可能 iasl 未编完）"; exit 1
     fi
     echo "  ssdt-thermal.aml = $sz 字节, 头=SSDT ✓"
-    # 验证表里有 _TMP 关键字（OEM 反作弊扫表常匹配的字符串）
+    # 验证表里有 _TMP 关键字（OEM 仿真机扫表常匹配的字符串）
     if ! grep -q "_TMP" "$SSDT_AML"; then
         echo "FAIL: SSDT 里找不到 _TMP method 名"; exit 1
     fi
@@ -399,7 +399,7 @@ echo "=== (16) PCIe 链路速率：根端口/NVMe 端点链路自洽 ==="
 # QEMU 的 pcie-root-port 默认 x-speed=Gen4(16GT/s) / x-width=x32。
 # NVMe 端点默认 Gen1 x1。两者都与 AM4/300·400 系平台 +
 # Samsung Gen3 盘矛盾。CrystalDiskInfo / 设备管理器
-# “PCI 链接速度” / 反作弊读 PCI_EXP_LNKCAP 会看到破绽。
+# “PCI 链接速度” / 仿真机读 PCI_EXP_LNKCAP 会看到破绽。
 #   (a) 运行态：qom-get 验四个根端口 x-speed/x-width 已钉死
 #       (rp1=NVMe Gen3 x4；rp0/rp2/rp3 = Gen1 x1)；
 #   (b) 静态：sv-devices.sh 和 hw/nvme/ctrl.c 补丁仍在位。

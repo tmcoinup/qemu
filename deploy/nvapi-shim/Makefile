@@ -1,19 +1,42 @@
-# Cross-compile nvapi64.dll for Windows from Ubuntu host.
-CC     := x86_64-w64-mingw32-gcc
-CFLAGS := -Os -Wall -Wextra -fno-stack-protector -ffreestanding \
-          -fno-ident -mwindows
-LDFLAGS := -shared -Wl,--kill-at -static-libgcc \
-           -Wl,--subsystem,windows -Wl,--enable-stdcall-fixup
-LIBS   := -lkernel32 -luser32
+# 从同一套源文件生成 Windows x86/x64 NVAPI DLL。
+#
+# GPU-Z/HWiNFO 可能由外层进程或内嵌 helper 选择任一位数，只生成 nvapi64.dll
+# 并不能覆盖 32 位调用链。两个目标都使用 -Werror，禁止用告警掩盖 ABI 问题。
+CC32 ?= i686-w64-mingw32-gcc
+CC64 ?= x86_64-w64-mingw32-gcc
 
-all: nvapi64.dll
+SOURCES := nvapi_shim.c nvapi_identity.c nvapi_pci.c nvapi_gpu_specs.c \
+           nvapi_gpu_details.c nvapi_gpu_legacy_clocks.c \
+           nvapi_gpu_legacy_clocks_fill.c nvapi_gpu_pstates.c \
+           nvapi_gpu_pstates_fill.c \
+           nvapi_identity_contract.c
+HEADERS := nvapi_types.h nvapi_identity.h nvapi_gpu_specs.h \
+           nvapi_gpu_details.h nvapi_gpu_legacy_clocks.h \
+           nvapi_gpu_pstates.h nvapi_shim_internal.h \
+           nvapi_identity_contract.h
+CFLAGS := -std=c11 -Os -Wall -Wextra -Werror -fno-ident
+LDFLAGS := -shared -static-libgcc -Wl,--subsystem,windows \
+           -Wl,--no-undefined -Wl,--no-insert-timestamp
+LDLIBS := -ladvapi32 -lkernel32
 
-nvapi64.dll: nvapi64.c nvapi64.def
-	$(CC) $(CFLAGS) -o $@ nvapi64.c nvapi64.def $(LDFLAGS) $(LIBS)
-	@ls -l $@
-	@x86_64-w64-mingw32-objdump -p $@ | grep -E '^\s+\[.*\]' | head -10 || true
+all: nvapi.dll nvapi64.dll
+
+nvapi.dll: $(SOURCES) $(HEADERS) nvapi.def
+	@command -v "$(CC32)" >/dev/null || { \
+		echo "ERROR: 缺少 $(CC32)，请安装 gcc-mingw-w64-i686" >&2; exit 127; \
+	}
+	$(CC32) $(CFLAGS) -o $@ $(SOURCES) nvapi.def $(LDFLAGS) $(LDLIBS)
+
+nvapi64.dll: $(SOURCES) $(HEADERS) nvapi64.def
+	@command -v "$(CC64)" >/dev/null || { \
+		echo "ERROR: 缺少 $(CC64)，请安装 gcc-mingw-w64-x86-64" >&2; exit 127; \
+	}
+	$(CC64) $(CFLAGS) -o $@ $(SOURCES) nvapi64.def $(LDFLAGS) $(LDLIBS)
+
+check: all
+	./test-build.sh
 
 clean:
-	rm -f nvapi64.dll
+	rm -f nvapi.dll nvapi64.dll
 
-.PHONY: all clean
+.PHONY: all check clean

@@ -49,6 +49,14 @@ tests = {
   'test-interval-tree': [],
   'test-fifo': [],
   'test-envlist': [],
+  'test-usb-hid-numlock': [
+    meson.project_source_root() / 'hw/usb/hid-numlock.c',
+  ],
+  'test-virtio-gpu-edid-fixed-native': [
+    meson.project_source_root() / 'hw/display/virtio-gpu-base.c',
+    meson.project_source_root() / 'hw/display/edid-generate.c',
+    pixman,
+  ],
 }
 
 if have_system or have_tools

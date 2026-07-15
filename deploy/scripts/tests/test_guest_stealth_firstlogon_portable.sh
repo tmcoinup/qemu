@@ -31,6 +31,16 @@ reject_text() {
 
 require_text 'D:\工具\respawn-stealth.exe' "$UNATTEND"
 require_text "--firstlogon" "$UNATTEND"
+require_text '-Wait -PassThru' "$UNATTEND"
+require_text '-PathType Leaf' "$UNATTEND"
+require_text '-ErrorAction Stop' "$UNATTEND"
+require_text 'if ($p.ExitCode -ne 0) { exit $p.ExitCode }' "$UNATTEND"
+require_text 'exit 44' "$UNATTEND"
+require_text 'exit 45' "$UNATTEND"
+require_text 'exit 46' "$UNATTEND"
+require_text '[switch]$Unattended' "$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
+reject_text 'if (-not $NoReboot) { Read-Host' \
+    "$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
 reject_text '192.168.30.33:8765/respawn-stealth.ps1' "$UNATTEND"
 reject_text 'irm http://192.168.30.33:8765/respawn-stealth.ps1 | iex' "$UNATTEND"
 reject_text 'C:\stealth\respawn-stealth-local.ps1' "$UNATTEND"

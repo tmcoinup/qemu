@@ -384,9 +384,10 @@ python3 deploy/scripts/soak-vm.py \
 soak 通过仍不等于性能通过。E5/X99 还应记录 idle、单 VM 满载、多 VM 满载下的 scheduler
 latency、NUMA remote access、磁盘/网络 P99、RSS、温度和功耗。
 
-## 10. 历史文档说明
+## 10. 当前 GPU 文档与历史资料
 
-`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md`、`ACE-SHALLOW-STEALTH.md` 以及旧审计中仍可能
-保留 AMD/B350、深层 GPU、多个 NVMe/显示器/HID 随机池等历史流程。它们不能覆盖当前
-`platforms.json`、`components.json`、启动器和 2026-07-13 硬件评估；新部署以本页和当前
-manifest 为准。
+`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md` 和 `ACE-SHALLOW-STEALTH.md` 是当前 guest
+浅层 GPU 流程：物理 `1AF4:1050`、stock VioGpuDod、用户态逻辑身份和固定摘要的
+x86 SysWOW64 + x64 System32 用户态 shim，使 GPU-Z
+2.70 可直接双击；旧审计中的自签驱动、EfiGuard、主 PCI ID 覆盖或真实 NVIDIA
+转发器只描述历史快照，不能覆盖当前 manifest、启动器和上述三份文档。

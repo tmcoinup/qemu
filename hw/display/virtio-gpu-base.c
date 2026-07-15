@@ -59,6 +59,7 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
 {
     size_t output_idx;
     VirtIOGPUOutputList *node;
+    VirtIOGPUOutput *output = NULL;
     qemu_edid_info info = {
         /* stealth (patch 0009): width/height_mm + vendor/name/serial 从
          * g->conf 透传，cmdline -device edid-width-mm/edid-height-mm/
@@ -95,9 +96,28 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
 
     for (output_idx = 0, node = g->conf.outputs;
          output_idx <= scanout && node; output_idx++, node = node->next) {
-        if (output_idx == scanout && node->value && node->value->name) {
-            info.name = node->value->name;
+        if (output_idx == scanout) {
+            output = node->value;
+            if (output && output->name) {
+                info.name = output->name;
+            }
             break;
+        }
+    }
+
+    /*
+     * 上游默认仍使用 req_state。
+     * display-info/UI resize 可以继续更新它。
+     * deploy opt-in 后，多头读取本 scanout 的 outputs[]。
+     * 全局 xres/yres 只属于主输出，不能复制给其他头。
+     */
+    if (g->conf.edid_fixed_native) {
+        if (output && output->has_xres && output->has_yres) {
+            info.prefx = output->xres;
+            info.prefy = output->yres;
+        } else if (scanout == 0 && g->conf.xres && g->conf.yres) {
+            info.prefx = g->conf.xres;
+            info.prefy = g->conf.yres;
         }
     }
 

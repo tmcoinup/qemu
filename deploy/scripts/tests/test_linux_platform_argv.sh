@@ -70,14 +70,18 @@ nic_line="$(grep -F -- 'e1000e,netdev=net0' "$TMP_DIR/argv")"
     && "$nic_line" == *"subsys=0xA01F"* ]] \
     || fail "Intel 82574L 的 OUI/subsystem 未绑定平台"
 
-assert_fixed "usb-kbd,bus=xhci.0,vendorid=0x045E,productid=0x0750,manufacturer=Microsoft,product=Microsoft Wired Keyboard 600"
+assert_fixed "usb-kbd,id=kbd0,bus=xhci.0,vendorid=0x045E,productid=0x0750,manufacturer=Microsoft,product=Microsoft Wired Keyboard 600,x-force-numlock-on=on"
 assert_fixed "usb-tablet,bus=xhci.0"
 assert_fixed "ich9-intel-hda,id=hda0,x-pci-vendor-id=0x8086"
 assert_fixed "hda-duplex,bus=hda0.0,cad=0,audiodev=aud0,x-identity-compat=on,x-codec-id=0x10ec0887,x-codec-revision=0x00100302,x-codec-subsystem-id=0x104386c7"
 assert_fixed "edid-vendor=SAM,edid-name=S24F350"
+assert_fixed "edid-fixed-native=on"
 assert_fixed "edid-product-id=0x0F65,edid-manufacture-week=32,edid-manufacture-year=2018"
 assert_fixed "edid-min-vfreq-hz=50,edid-max-vfreq-hz=75"
 assert_fixed "edid-secondary-xres=1600,edid-secondary-yres=900,edid-secondary-refresh-rate=60000"
+grep -F -- "'edid-fixed-native='" \
+    "$REPO_ROOT/deploy/scripts/lib/sv-portability.sh" >/dev/null \
+    || fail "Linux QEMU 能力门禁没有检查固定 EDID native mode 属性"
 type17_line="$(grep -F -- 'type=17,loc_pfx=DIMM_%C2' "$TMP_DIR/argv")"
 if grep -Fx -- 'ICH9-LPC.x-pci-device-id=0xA303' "$TMP_DIR/argv" >/dev/null; then
     [[ "$type17_line" =~ speed=(2400|2666),configured-speed=2400 ]] \

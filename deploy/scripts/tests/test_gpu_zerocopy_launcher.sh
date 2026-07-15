@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # 验证 Linux 启动器的 GPU handoff 默认策略；全程 DRY_RUN，不启动 guest。
+# shellcheck disable=SC2016
+# `${FB_SHM_RATE}` 是断言目标源码中的字面文本，不应在测试 shell 中展开。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -30,7 +32,7 @@ run_dry() {
     # 组装。DISPLAY 显式给出，避免非交互测试环境触发“无 DISPLAY 自动关 SDL”。
     DISPLAY=:0 DRY_RUN=1 TPM=0 HOST_TUNE=0 CPU_ISOLATE=0 \
         QEMU_CAP_CHECK=0 INSTANCE="$instance" \
-        "$START_VM" --no-bridge "$@" > "$out"
+        "$START_VM" --no-bridge "$@" > "$out" 2>&1
 }
 
 vga_arg() {
@@ -48,6 +50,8 @@ test_default_sdl_prefers_gpu_handoff() {
     vga="$(vga_arg "$out")"
     [[ "$vga" == virtio-vga-gl,* ]] \
         || fail "default SDL must use virtio-vga-gl"
+    [[ "$vga" == *",edid-fixed-native=on,"* ]] \
+        || fail "virtio-vga-gl must explicitly fix the profile native mode"
     [[ "$vga" == *",blob=true,"* && "$vga" == *",hostmem=256M"* ]] \
         || fail "default SDL must enable blob/hostmem capability preference"
     grep -F -- 'configured=${FB_SHM_RATE} Hz' \
@@ -59,6 +63,9 @@ test_default_sdl_prefers_gpu_handoff() {
     grep -F -- '不可用自动 SHM fallback' \
         "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
         || fail "launcher summary must explain automatic SHM fallback"
+    grep -F -- 'Windows VioGpuDod 仍无客体 3D' \
+        "$REPO_ROOT/deploy/scripts/lib/stealth-print.sh" >/dev/null \
+        || fail "profile summary must not describe host virgl as Windows guest 3D"
 }
 
 test_explicit_blob_preference_disable_keeps_sdl_gl() {
@@ -100,6 +107,8 @@ test_non_gl_modes_are_safe_exceptions() {
     vga="$(vga_arg "$out")"
     [[ "$vga" == virtio-vga,* && "$vga" != *"blob=true"* ]] \
         || fail "stable display must not advertise a GPU handoff path"
+    [[ "$vga" == *",edid-fixed-native=on,"* ]] \
+        || fail "virtio-vga must explicitly fix the profile native mode"
 
     run_dry 9915 "$out" --headless
     grep -Fx -- 'none' "$out" >/dev/null \
@@ -133,18 +142,45 @@ test_explicit_gpu_display_modes() {
         || fail "default capability preference must honor --gpu-hostmem"
 }
 
+test_removed_selfsigned_mode_fails_closed() {
+    local out="$1"
+    local helper="${out}.host-helper"
+    local marker="${out}.host-side-effect"
+
+    if GPU_SELFSIGNED=1 run_dry 9919 "$out"; then
+        fail "removed self-signed primary PCI mode unexpectedly launched"
+    fi
+    grep -F 'GPU_SELFSIGNED 深层/自签路径已移除' "$out" >/dev/null \
+        || fail "removed self-signed mode did not provide migration diagnosis"
+
+    # 再跑一次非 DRY_RUN，并注入一个只会写 marker 的 host 调优 helper。旧环境变量
+    # 必须在 sv-cli 阶段退出，因此 helper 绝不能被调用；这覆盖“启动失败但宿主已被
+    # 改 governor/halt_poll”的副作用回归。
+    printf '%s\n' '#!/usr/bin/env bash' ': > "$SIDE_EFFECT_MARKER"' > "$helper"
+    chmod 0755 "$helper"
+    rm -f "$marker"
+    if GPU_SELFSIGNED=1 HOST_TUNE=1 SV_HOST_PERF_HELPER="$helper" \
+            SIDE_EFFECT_MARKER="$marker" "$START_VM" 9919 --no-bridge \
+            > "$out" 2>&1; then
+        fail "removed self-signed mode unexpectedly passed non-dry preflight"
+    fi
+    [[ ! -e "$marker" ]] \
+        || fail "removed self-signed mode modified host state before rejection"
+}
+
 main() {
     local out
 
     [[ -x "$START_VM" ]] || fail "missing executable: $START_VM"
     out="$(mktemp)"
-    trap 'rm -f "${out:-}"' EXIT
+    trap 'rm -f "${out:-}" "${out:-}.host-helper" "${out:-}.host-side-effect"' EXIT
 
     test_default_sdl_prefers_gpu_handoff "$out"
     test_explicit_blob_preference_disable_keeps_sdl_gl "$out"
     test_environment_disable_is_honored "$out"
     test_non_gl_modes_are_safe_exceptions "$out"
     test_explicit_gpu_display_modes "$out"
+    test_removed_selfsigned_mode_fails_closed "$out"
     echo "PASS: GPU zero-copy launcher policy"
 }
 

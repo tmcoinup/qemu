@@ -43,6 +43,11 @@ stealth_pick_profile
     || fail "通用 tablet 被误标为品牌硬件"
 [[ "$GPU_IDENTITY_FIDELITY" == label_only_out_of_scope ]] \
     || fail "GPU 未明确标记为本分支范围外"
+[[ "$GPU_MEMORY_TYPE" == GDDR5 && "$GPU_MEMORY_BUS_WIDTH_BITS" =~ ^(64|128)$ ]] \
+    || fail "GPU 显存类型/位宽未从 GPU_POOL 完整投影"
+(( GPU_BASE_CLOCK_KHZ > 0 && GPU_BOOST_CLOCK_KHZ >= GPU_BASE_CLOCK_KHZ &&
+   GPU_MEMORY_CLOCK_KHZ > 0 && (GPU_SLI_SUPPORTED == 0 || GPU_SLI_SUPPORTED == 1) )) \
+    || fail "GPU 时钟/SLI 字段不满足基本约束"
 
 profile="$TMP_DIR/profile"
 stealth_save_profile "$profile"
@@ -63,6 +68,17 @@ assert_tamper_fails NVME_PCI_DEV 0xA809
 assert_tamper_fails EDID_PRODUCT_ID 0x0001
 assert_tamper_fails KBD_VID 0x046D
 assert_tamper_fails TABLET_DESCRIPTOR_FIDELITY branded
+assert_tamper_fails GPU_MEMORY_BUS_WIDTH_BITS 256
+assert_tamper_fails GPU_BOOST_CLOCK_KHZ 9999999
+
+# 严格 profile 必须在磁盘上真实携带 schema-2 guest 所需全部规格；
+# loader 为旧 profile 生成的诊断默认不能绕过 present-keys 门禁。
+missing_gpu_specs="$TMP_DIR/profile-missing-gpu-specs"
+grep -Ev '^GPU_(MEMORY_TYPE|MEMORY_BUS_WIDTH_BITS|BASE_CLOCK_KHZ|BOOST_CLOCK_KHZ|MEMORY_CLOCK_KHZ|SLI_SUPPORTED)=' \
+    "$profile" >"$missing_gpu_specs"
+if STRICT_HARDWARE=1 stealth_load_profile "$missing_gpu_specs" >/dev/null 2>&1; then
+    fail "严格 profile 缺少 GPU 规格字段时未拒绝"
+fi
 
 # 未知 schema 必须拒绝，不能让脚本猜测新目录语义。
 bad_manifest="$TMP_DIR/components-bad.json"

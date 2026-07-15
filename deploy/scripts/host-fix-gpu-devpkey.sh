@@ -196,7 +196,7 @@ if ! mount -t ntfs-3g -o rw,remove_hiberfile "$SYSPART" "$MOUNT" 2> "$MOUNT_ERR"
 [fix-devpkey]   3) host 重跑本脚本
 [fix-devpkey]
 [fix-devpkey] 副作用：hibernation 被禁用、hiberfil.sys 被删；shutdown /s 变成真正 power-off。
-[fix-devpkey] 这跟 stealth 反作弊语义一致——hibernation 唤醒后 TPM/PCI 状态不一定能恢复。
+[fix-devpkey] 这跟 stealth 仿真机语义一致——hibernation 唤醒后 TPM/PCI 状态不一定能恢复。
 
 EOF
     fi

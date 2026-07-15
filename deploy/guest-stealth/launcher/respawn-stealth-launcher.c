@@ -8,12 +8,31 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <wchar.h>
 
+#include "payload-environment.h"
+#include "payload-security.h"
+#include "launcher-arguments.h"
 #include "payload_respawn_ps1.h"
+#include "payload_configure_power_policy_ps1.h"
 #include "payload_apply_gpu_spoof_ps1.h"
+#include "payload_persist_gpu_profile_ps1.h"
+#include "payload_gpu_profile_transaction_ps1.h"
+#include "payload_refresh_gpu_name_ps1.h"
+#include "payload_gpu_hardware_id_plan_ps1.h"
+#include "payload_project_gpu_hardware_id_ps1.h"
+#include "payload_force_displayfreq_ps1.h"
+#include "payload_install_display_driver_ps1.h"
+#include "payload_install_nvapi_system_ps1.h"
+#include "payload_nvapi_system_transaction_ps1.h"
+#include "payload_viogpudo_sys.h"
+#include "payload_viogpudo_cat.h"
+#include "payload_viogpudo_inf.h"
+#include "payload_nvapi_x86_dll.h"
+#include "payload_nvapi_x64_dll.h"
 
 #ifndef ARRAY_LEN
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
@@ -21,6 +40,31 @@
 
 #define PATH_BUF_LEN 4096
 #define CMD_BUF_LEN 32760
+
+/*
+ * 中文注释：所有运行依赖都从一个 EXE 释放，来宾不再访问 host HTTP。驱动三件套
+ * 必须保持原始字节，才能保留 Microsoft WHCP 的 PE/CAT 签名与文件关联；两份
+ * NVAPI DLL 则由构建器和来宾系统发布 helper 用固定摘要、PE 架构做双重验收。
+ */
+static const EmbeddedPayload embedded_payloads[] = {
+    { L"respawn-stealth-local.ps1", payload_respawn_ps1, (DWORD)sizeof(payload_respawn_ps1) },
+    { L"configure-power-policy.ps1", payload_configure_power_policy_ps1, (DWORD)sizeof(payload_configure_power_policy_ps1) },
+    { L"apply-gpu-spoof.ps1", payload_apply_gpu_spoof_ps1, (DWORD)sizeof(payload_apply_gpu_spoof_ps1) },
+    { L"persist-gpu-profile.ps1", payload_persist_gpu_profile_ps1, (DWORD)sizeof(payload_persist_gpu_profile_ps1) },
+    { L"gpu-profile-transaction.ps1", payload_gpu_profile_transaction_ps1, (DWORD)sizeof(payload_gpu_profile_transaction_ps1) },
+    { L"refresh-gpu-name.ps1", payload_refresh_gpu_name_ps1, (DWORD)sizeof(payload_refresh_gpu_name_ps1) },
+    { L"gpu-hardware-id-plan.ps1", payload_gpu_hardware_id_plan_ps1, (DWORD)sizeof(payload_gpu_hardware_id_plan_ps1) },
+    { L"project-gpu-hardware-id.ps1", payload_project_gpu_hardware_id_ps1, (DWORD)sizeof(payload_project_gpu_hardware_id_ps1) },
+    { L"force-displayfreq.ps1", payload_force_displayfreq_ps1, (DWORD)sizeof(payload_force_displayfreq_ps1) },
+    { L"install-display-driver.ps1", payload_install_display_driver_ps1, (DWORD)sizeof(payload_install_display_driver_ps1) },
+    { L"install-nvapi-system.ps1", payload_install_nvapi_system_ps1, (DWORD)sizeof(payload_install_nvapi_system_ps1) },
+    { L"nvapi-system-transaction.ps1", payload_nvapi_system_transaction_ps1, (DWORD)sizeof(payload_nvapi_system_transaction_ps1) },
+    { L"viogpudo.sys", payload_viogpudo_sys, (DWORD)sizeof(payload_viogpudo_sys) },
+    { L"viogpudo.cat", payload_viogpudo_cat, (DWORD)sizeof(payload_viogpudo_cat) },
+    { L"viogpudo.inf", payload_viogpudo_inf, (DWORD)sizeof(payload_viogpudo_inf) },
+    { L"nvapi.dll", payload_nvapi_x86_dll, (DWORD)sizeof(payload_nvapi_x86_dll) },
+    { L"nvapi64.dll", payload_nvapi_x64_dll, (DWORD)sizeof(payload_nvapi_x64_dll) },
+};
 
 static int append_char(wchar_t *buf, size_t cap, size_t *len, wchar_t ch)
 {
@@ -137,55 +181,13 @@ static int confirm_admin_run(void)
      */
     answer = MessageBoxW(
         NULL,
-        L"respawn-stealth 将以管理员权限修改 HKLM 注册表、PnP 显卡信息和计划任务，"
+        L"respawn-stealth 将以管理员权限配置不息屏/不睡眠电源方案、安装或检查"
+        L"显示驱动，并修改 HKLM 注册表、PnP 显卡信息和计划任务，"
         L"完成后默认会重启。\n\n是否继续？",
         L"respawn-stealth 管理员确认",
         MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2 | MB_SETFOREGROUND);
 
     return answer == IDYES;
-}
-
-static wchar_t ascii_lower(wchar_t ch)
-{
-    if (ch >= L'A' && ch <= L'Z') {
-        return ch + (L'a' - L'A');
-    }
-    return ch;
-}
-
-static int arg_equals_ci(const wchar_t *arg, const wchar_t *expected)
-{
-    while (*arg && *expected) {
-        if (ascii_lower(*arg) != ascii_lower(*expected)) {
-            return 0;
-        }
-        arg++;
-        expected++;
-    }
-    return *arg == L'\0' && *expected == L'\0';
-}
-
-static int is_launcher_arg(const wchar_t *arg)
-{
-    return arg_equals_ci(arg, L"--firstlogon") ||
-           arg_equals_ci(arg, L"-firstlogon") ||
-           arg_equals_ci(arg, L"/firstlogon") ||
-           arg_equals_ci(arg, L"--no-confirm") ||
-           arg_equals_ci(arg, L"-no-confirm") ||
-           arg_equals_ci(arg, L"/no-confirm") ||
-           arg_equals_ci(arg, L"--auto") ||
-           arg_equals_ci(arg, L"-auto") ||
-           arg_equals_ci(arg, L"/auto");
-}
-
-static int has_launcher_autorun_arg(int argc, wchar_t **argv)
-{
-    for (int i = 1; i < argc; i++) {
-        if (is_launcher_arg(argv[i])) {
-            return 1;
-        }
-    }
-    return 0;
 }
 
 static int elevate_self(int argc, wchar_t **argv)
@@ -234,23 +236,20 @@ static int elevate_self(int argc, wchar_t **argv)
     return (int)code;
 }
 
-static int ensure_dir(const wchar_t *path)
-{
-    if (CreateDirectoryW(path, NULL)) {
-        return 1;
-    }
-    return GetLastError() == ERROR_ALREADY_EXISTS;
-}
-
 static int build_work_dir(wchar_t *out, size_t cap)
 {
     wchar_t program_data[PATH_BUF_LEN];
-    DWORD n = GetEnvironmentVariableW(L"ProgramData", program_data,
-                                      (DWORD)ARRAY_LEN(program_data));
     size_t len = 0;
 
-    if (n == 0 || n >= ARRAY_LEN(program_data)) {
-        wcscpy(program_data, L"C:\\ProgramData");
+    /*
+     * 中文注释：提权进程不能信任调用用户继承的 ProgramData 环境变量，否则用户可在
+     * UAC 前把管理员 payload 引向自选目录。CSIDL_COMMON_APPDATA 由 Windows shell
+     * 解析真实公共数据目录；查询失败时直接停止，不使用字符串默认值掩盖异常。
+     */
+    if (SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL,
+                         SHGFP_TYPE_CURRENT, program_data) != S_OK) {
+        fwprintf(stderr, L"无法查询 Windows 公共应用数据目录。\n");
+        return 0;
     }
 
     out[0] = L'\0';
@@ -277,50 +276,39 @@ static int join_path(wchar_t *out, size_t cap, const wchar_t *dir, const wchar_t
     return append_text(out, cap, &len, name);
 }
 
-static int write_payload(const wchar_t *path, const unsigned char *data, unsigned int len)
-{
-    HANDLE file;
-    DWORD written = 0;
-
-    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                       FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) {
-        fwprintf(stderr, L"写入 payload 失败: %ls，错误=%lu\n", path, GetLastError());
-        return 0;
-    }
-
-    if (!WriteFile(file, data, (DWORD)len, &written, NULL) || written != len) {
-        fwprintf(stderr, L"payload 写入不完整: %ls，错误=%lu\n", path, GetLastError());
-        CloseHandle(file);
-        return 0;
-    }
-
-    CloseHandle(file);
-    return 1;
-}
-
-static void find_powershell(wchar_t *out, size_t cap)
+static int find_powershell(wchar_t *out, size_t cap)
 {
     wchar_t sysdir[PATH_BUF_LEN];
+    DWORD attributes;
+    UINT count;
     size_t len = 0;
 
     out[0] = L'\0';
-    if (GetSystemDirectoryW(sysdir, (UINT)ARRAY_LEN(sysdir)) > 0) {
-        append_text(out, cap, &len, sysdir);
-        if (len > 0 && out[len - 1] != L'\\') {
-            append_char(out, cap, &len, L'\\');
-        }
-        append_text(out, cap, &len, L"WindowsPowerShell\\v1.0\\powershell.exe");
-        if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) {
-            return;
-        }
+    count = GetSystemDirectoryW(sysdir, (UINT)ARRAY_LEN(sysdir));
+    if (count == 0 || count >= ARRAY_LEN(sysdir) ||
+        !append_text(out, cap, &len, sysdir) ||
+        (len > 0 && out[len - 1] != L'\\' &&
+         !append_char(out, cap, &len, L'\\')) ||
+        !append_text(out, cap, &len,
+                     L"WindowsPowerShell\\v1.0\\powershell.exe")) {
+        fwprintf(stderr, L"无法生成 System32 Windows PowerShell 路径。\n");
+        return 0;
     }
-
-    wcscpy(out, L"powershell.exe");
+    attributes = GetFileAttributesW(out);
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        /* 不能回退到裸 powershell.exe，否则当前目录或继承 PATH 可劫持提权执行。 */
+        fwprintf(stderr, L"System32 Windows PowerShell 不存在或路径不安全: %ls\n",
+                 out);
+        return 0;
+    }
+    return 1;
 }
 
 static int run_payload(int argc, wchar_t **argv, const wchar_t *work_dir,
-                       const wchar_t *script_path, int firstlogon)
+                       const wchar_t *root_dir, const wchar_t *script_path,
+                       int autorun, int firstlogon)
 {
     wchar_t powershell[PATH_BUF_LEN];
     wchar_t cmd[CMD_BUF_LEN];
@@ -328,8 +316,11 @@ static int run_payload(int argc, wchar_t **argv, const wchar_t *work_dir,
     PROCESS_INFORMATION pi;
     DWORD code = 1;
     size_t len = 0;
+    wchar_t *environment = NULL;
 
-    find_powershell(powershell, ARRAY_LEN(powershell));
+    if (!find_powershell(powershell, ARRAY_LEN(powershell))) {
+        return 1;
+    }
 
     cmd[0] = L'\0';
     if (!append_quoted_arg(cmd, ARRAY_LEN(cmd), &len, powershell) ||
@@ -342,6 +333,11 @@ static int run_payload(int argc, wchar_t **argv, const wchar_t *work_dir,
         return 1;
     }
 
+    if (autorun &&
+        !append_quoted_arg(cmd, ARRAY_LEN(cmd), &len, L"-Unattended")) {
+        fwprintf(stderr, L"PowerShell Unattended 参数过长。\n");
+        return 1;
+    }
     if (firstlogon &&
         !append_quoted_arg(cmd, ARRAY_LEN(cmd), &len, L"-FirstLogon")) {
         fwprintf(stderr, L"PowerShell FirstLogon 参数过长。\n");
@@ -349,7 +345,7 @@ static int run_payload(int argc, wchar_t **argv, const wchar_t *work_dir,
     }
 
     for (int i = 1; i < argc; i++) {
-        if (is_launcher_arg(argv[i])) {
+        if (launcher_arg_is_control(argv[i])) {
             continue;
         }
         if (!append_quoted_arg(cmd, ARRAY_LEN(cmd), &len, argv[i])) {
@@ -362,15 +358,23 @@ static int run_payload(int argc, wchar_t **argv, const wchar_t *work_dir,
     ZeroMemory(&pi, sizeof(pi));
     si.cb = sizeof(si);
 
+    environment = payload_build_environment(root_dir, work_dir);
+    if (environment == NULL) {
+        return 1;
+    }
+
     /*
      * 不隐藏窗口：脚本会打印进度、失败原因和日志路径。等待子进程结束，
      * 这样调用者能拿到真实退出码，bat/调试终端也不会提前返回。
      */
-    if (!CreateProcessW(powershell, cmd, NULL, NULL, FALSE, 0, NULL, work_dir,
+    if (!CreateProcessW(powershell, cmd, NULL, NULL, FALSE,
+                        CREATE_UNICODE_ENVIRONMENT, environment, work_dir,
                         &si, &pi)) {
         fwprintf(stderr, L"启动 PowerShell 失败，错误=%lu\n", GetLastError());
+        payload_free_environment(environment);
         return 1;
     }
+    payload_free_environment(environment);
 
     WaitForSingleObject(pi.hProcess, INFINITE);
     if (!GetExitCodeProcess(pi.hProcess, &code)) {
@@ -386,11 +390,14 @@ int wmain(int argc, wchar_t **argv)
     wchar_t work_dir[PATH_BUF_LEN];
     wchar_t root_dir[PATH_BUF_LEN];
     wchar_t respawn_path[PATH_BUF_LEN];
-    wchar_t spoof_path[PATH_BUF_LEN];
+    HANDLE payload_lock = INVALID_HANDLE_VALUE;
+    int code = 1;
     int autorun = 0;
+    int firstlogon = 0;
 
     SetConsoleOutputCP(CP_UTF8);
-    autorun = has_launcher_autorun_arg(argc, argv);
+    autorun = launcher_args_request_autorun(argc, argv);
+    firstlogon = launcher_args_request_firstlogon(argc, argv);
 
     if (!is_admin()) {
         return elevate_self(argc, argv);
@@ -422,25 +429,35 @@ int wmain(int argc, wchar_t **argv)
         }
     }
 
-    if (!ensure_dir(root_dir) || !ensure_dir(work_dir)) {
-        fwprintf(stderr, L"创建工作目录失败: %ls，错误=%lu\n", work_dir, GetLastError());
+    if (!payload_secure_directory(root_dir)) {
+        fwprintf(stderr, L"创建或保护 payload 根目录失败: %ls\n", root_dir);
+        return 1;
+    }
+
+    payload_lock = payload_acquire_lock(root_dir);
+    if (payload_lock == INVALID_HANDLE_VALUE) {
         return 1;
     }
 
     if (!join_path(respawn_path, ARRAY_LEN(respawn_path), work_dir,
-                   L"respawn-stealth-local.ps1") ||
-        !join_path(spoof_path, ARRAY_LEN(spoof_path), work_dir,
-                   L"apply-gpu-spoof.ps1")) {
+                   L"respawn-stealth-local.ps1")) {
         fwprintf(stderr, L"生成 payload 文件路径失败。\n");
-        return 1;
+        goto out;
     }
 
-    if (!write_payload(respawn_path, payload_respawn_ps1, payload_respawn_ps1_len) ||
-        !write_payload(spoof_path, payload_apply_gpu_spoof_ps1,
-                       payload_apply_gpu_spoof_ps1_len)) {
-        return 1;
+    if (!payload_publish_bundle(root_dir, work_dir, embedded_payloads,
+                                ARRAY_LEN(embedded_payloads))) {
+        goto out;
     }
 
-    SetCurrentDirectoryW(work_dir);
-    return run_payload(argc, argv, work_dir, respawn_path, autorun);
+    if (!SetCurrentDirectoryW(work_dir)) {
+        fwprintf(stderr, L"设置 payload 工作目录失败，错误=%lu\n", GetLastError());
+        goto out;
+    }
+    code = run_payload(argc, argv, work_dir, root_dir, respawn_path,
+                       autorun, firstlogon);
+
+out:
+    CloseHandle(payload_lock);
+    return code;
 }

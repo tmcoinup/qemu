@@ -216,11 +216,28 @@ HUION、VEIKK 或 XP-Pen。
 ## GPU 字段及范围声明
 
 `GPU_VENDOR`、`GPU_NAME`、`GPU_PCI_VEN`、`GPU_PCI_DEV`、`GPU_RAM_MB`、`GPU_BIOS`、
-`GPU_REV` 是历史显示标签兼容字段。`GPU_IDENTITY_FIDELITY` 必须为
-`label_only_out_of_scope`。
+`GPU_REV` 是历史显示标签兼容字段。下列字段与同一 `GPU_POOL` 行绑定，
+用于 guest schema-2 用户态身份快照：
+
+| host profile | guest 注册表 | 单位 / 约束 |
+|---|---|---|
+| `GPU_MEMORY_TYPE` | `SpoofMemoryType` | 当前池为 `GDDR5` |
+| `GPU_MEMORY_BUS_WIDTH_BITS` | `SpoofMemoryBusWidthBits` | bit；32–1024 的 2 次幂，当前型号为 64/128 |
+| `GPU_BASE_CLOCK_KHZ` | `SpoofBaseClockKHz` | kHz；100000–5000000 |
+| `GPU_BOOST_CLOCK_KHZ` | `SpoofBoostClockKHz` | kHz；100000–5000000，且不小于 base |
+| `GPU_MEMORY_CLOCK_KHZ` | `SpoofMemoryClockKHz` | NVAPI clock-domain kHz；100000–10000000 |
+| `GPU_SLI_SUPPORTED` | `SpoofSliSupported` | 仅允许 `0`；浅层实现为单 GPU、非 SLI |
+
+GTX 1050 Ti bundle 固定为 `GDDR5 / 128 bit / 1290000 / 1392000 /
+3504000 kHz / SLI=0`。其中 memory clock 按 NVAPI 口径保存；GPU-Z 显示为
+1752 MHz，不应把包装标注的 7 Gbps 写入该字段。严格 profile 缺少任一
+新字段都会 fail-closed；旧 profile 的运行时补值只服务显式非严格诊断。
+
+`GPU_IDENTITY_FIDELITY` 仍必须为 `label_only_out_of_scope`。
 
 本分支不做 GPU passthrough 或 vGPU；virtio-vga(-gl) 的主设备、驱动和行为不会因为这些
-标签变成真实 NVIDIA/AMD GPU。这组字段不得计入真机化完成度或硬件支持承诺。
+标签变成真实 NVIDIA/AMD GPU。显存与时钟也是用户态查询投影，不代表
+客体可以访问该容量或达到该频率。这组字段不得计入真机化完成度或硬件支持承诺。
 
 ## 生命周期操作
 

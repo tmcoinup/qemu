@@ -1,10 +1,10 @@
 ﻿# fix-ms-gamingoverlay.ps1
 #
-# 抑制 Win10 LTSC 上启动腾讯系网游 (CrossFire/DNF) 时弹的
+# 抑制 Win10 LTSC 上启动系网游 (CrossFire/DNF) 时弹的
 #   "需要使用新应用以打开此 ms-gamingoverlay 链接" 对话框。
 #
 # 现象：游戏调 ms-gamingoverlay: URI 唤起 Xbox Game Bar，LTSC 删了
-# Game Bar，URI handler 找不到 → 系统弹窗。跟反作弊无关。
+# Game Bar，URI handler 找不到 → 系统弹窗。跟仿真机无关。
 #
 # 用法（管理员 PowerShell）:
 #     irm http://192.168.30.33:8765/fix-ms-gamingoverlay.ps1 | iex

@@ -244,7 +244,10 @@ stealth_pick_profile() {
     # 3. GPU
     local gpu_n=${#GPU_POOL[@]}
     local gpu_i=$(( (RANDOM * 32768 + RANDOM) % gpu_n ))
-    IFS='|' read -r GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV <<<"${GPU_POOL[$gpu_i]}"
+    IFS='|' read -r GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB \
+        GPU_BIOS GPU_REV GPU_MEMORY_TYPE GPU_MEMORY_BUS_WIDTH_BITS \
+        GPU_BASE_CLOCK_KHZ GPU_BOOST_CLOCK_KHZ GPU_MEMORY_CLOCK_KHZ \
+        GPU_SLI_SUPPORTED <<<"${GPU_POOL[$gpu_i]}"
     # 本分支明确不做 GPU passthrough/vGPU；这些字段只供既有显示标签兼容，不能
     # 计入严格物理硬件实现。持久化 fidelity 字段，避免摘要把标签误报为真实设备。
     GPU_IDENTITY_FIDELITY="label_only_out_of_scope"
@@ -295,11 +298,11 @@ stealth_pick_profile() {
     fi
     # DIMM serial 在 pick 阶段一次性生成，写到 profile 持久化——避免之前每次
     # 启动 stealth_smbios_args 里 _rand 一遍导致 Win32_PhysicalMemory.SerialNumber
-    # 重启就变（反作弊"硬件指纹漂移"检测的明显信号）。
+    # 重启就变（仿真机"硬件指纹漂移"检测的明显信号）。
     MEM_SERIAL="$(_mem_serial)"
 
     # 内存总量 (MiB) 也钉进 profile，跟其它硬件身份一样跨重启稳定——否则启动时
-    # 忘了带 --ram 就回退脚本默认值，"内存 4GB↔8GB 来回漂移"本身就是反作弊判定
+    # 忘了带 --ram 就回退脚本默认值，"内存 4GB↔8GB 来回漂移"本身就是仿真机判定
     # 硬件指纹变化的信号。新 VM 默认 8192 (8GB 双通道 2×4GB)——start-vm.sh 见
     # RAM>4096 自动拆成 2 条 4GB DIMM 走双通道，两条 SN 各自唯一。老 profile 缺
     # 字段仍退回 4096 (见 stealth_load_profile)，不擅自升级既有 VM 的硬件画像；
@@ -357,6 +360,7 @@ stealth_pick_profile() {
     export CHASSIS_TYPE CHASSIS_SERIAL
     export NIC_MAC UUID
     export GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV GPU_IDENTITY_FIDELITY
+    export GPU_MEMORY_TYPE GPU_MEMORY_BUS_WIDTH_BITS GPU_BASE_CLOCK_KHZ GPU_BOOST_CLOCK_KHZ GPU_MEMORY_CLOCK_KHZ GPU_SLI_SUPPORTED
     export NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV NVME_SUBNQN_TEMPLATE NVME_SUBNQN
     export MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_RATED_MTS MEM_CONFIGURED_MTS MEM_SERIAL MEM_TOTAL_MB MEM_TYPE MEM_CHANNELS MEM_MAX_MTS MEM_ALLOWED_MTS
     export MEM_VOLTAGE_MV MEM_RANK MEM_MODULE_MB MEM_ALLOWED_TOTAL_MB MEM_MAX_CAPACITY_MB

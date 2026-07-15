@@ -15,7 +15,11 @@ source "$_STEALTH_COMPONENT_VERIFY_DIR/stealth-components.sh"
 _STEALTH_COMPONENT_BOUND_PROFILE_VARS=(
     COMPONENT_SCHEMA_VERSION NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE
     NVME_SIZE_BYTES NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV
-    NVME_SUBNQN_TEMPLATE NVME_SUBNQN GPU_IDENTITY_FIDELITY
+    NVME_SUBNQN_TEMPLATE NVME_SUBNQN
+    GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV
+    GPU_MEMORY_TYPE GPU_MEMORY_BUS_WIDTH_BITS GPU_BASE_CLOCK_KHZ
+    GPU_BOOST_CLOCK_KHZ GPU_MEMORY_CLOCK_KHZ GPU_SLI_SUPPORTED
+    GPU_IDENTITY_FIDELITY
     EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM
     EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT
     EDID_MIN_VFREQ_HZ EDID_MAX_VFREQ_HZ EDID_MIN_HFREQ_KHZ EDID_MAX_HFREQ_KHZ
@@ -58,6 +62,17 @@ stealth_verify_profile_component_binding() (
         'expected[NVME_SUBNQN_TEMPLATE]' <<<"$row"
     serial="${NVME_SERIAL:-}"
     expected[NVME_SUBNQN]="${expected[NVME_SUBNQN_TEMPLATE]//\{serial\}/$serial}"
+
+    # GPU_POOL 的 PCI VEN/DEV 是 guest SUBSYS 反查与 host profile 的共同
+    # 主键。先取整行权威 bundle，再让下方逐字段比较名称、显存、
+    # BIOS、位宽和时钟；不允许仅修改型号文字后继续通过严格加载。
+    row="$(stealth_gpu_profile_row "${GPU_PCI_VEN:-}" "${GPU_PCI_DEV:-}")" || return 1
+    IFS='|' read -r 'expected[GPU_VENDOR]' 'expected[GPU_NAME]' \
+        'expected[GPU_PCI_VEN]' 'expected[GPU_PCI_DEV]' 'expected[GPU_RAM_MB]' \
+        'expected[GPU_BIOS]' 'expected[GPU_REV]' 'expected[GPU_MEMORY_TYPE]' \
+        'expected[GPU_MEMORY_BUS_WIDTH_BITS]' 'expected[GPU_BASE_CLOCK_KHZ]' \
+        'expected[GPU_BOOST_CLOCK_KHZ]' 'expected[GPU_MEMORY_CLOCK_KHZ]' \
+        'expected[GPU_SLI_SUPPORTED]' <<<"$row"
 
     row="$(stealth_component_rows monitor)" || return 1
     IFS='|' read -r 'expected[EDID_COMPONENT_ID]' 'expected[EDID_VENDOR]' \

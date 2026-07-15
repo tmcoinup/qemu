@@ -66,7 +66,7 @@ sv_validate_cpu_realize
 #   2. profile.MEM_TOTAL_MB         ← 持久化值，跨重启稳定（推荐，扩容走这里）
 #   3. 4096                         ← 都没有时的历史兜底（老 profile 缺字段）
 # 把内存总量当硬件身份的一部分钉在 profile 里，避免"忘带 --ram → 4GB↔8GB 漂移"
-# 被反作弊当成硬件指纹变化。要把某台 VM 扩到 8GB：在它的 profile 写 MEM_TOTAL_MB=8192
+# 被仿真机当成硬件指纹变化。要把某台 VM 扩到 8GB：在它的 profile 写 MEM_TOTAL_MB=8192
 # （8192=2×4GB 双通道，两条 DIMM SN 各自唯一）。
 # -------------------------------------------------------------------
 if [[ -z "${RAM:-}" && -n "${MEM_TOTAL_MB:-}" ]]; then
@@ -111,12 +111,9 @@ MAC_OVERRIDE="$NIC_MAC"
 # Per-instance VARS copy so each VM has its own NVRAM.
 #
 # Stealth build: the custom OVMF_CODE_4M_stealth.fd at deploy/firmware/
-# adds PCI VEN_10DE:DEV_1C81 to QemuVideoDxe's whitelist so UEFI boot
-# display still works when virtio-vga is spoofed as NVIDIA GTX 1050
-# (GPU_SELFSIGNED=1 path). Without it OVMF can't find a matching GOP
-# driver and you stare at "Display output is not active" until
-# viogpudo.sys loads inside Windows. Falls back to Ubuntu's stock
-# OVMF_CODE_4M.fd if the stealth build is missing.
+# 历史构建曾额外加入深层 NVIDIA whitelist；当前显示主 ID 固定为 virtio，
+# 不再启用该路径。保留此固件选择仅用于既有 TPM/平台构建兼容，缺失时仍回退
+# Ubuntu stock OVMF_CODE_4M.fd。
 # -------------------------------------------------------------------
 STEALTH_OVMF="$(dirname "$0")/../firmware/OVMF_CODE_4M_stealth.fd"
 # OVMF_CODE 可被 env 覆盖：
@@ -142,13 +139,13 @@ fi
 # -------------------------------------------------------------------
 # 伪 BGRT (Boot Graphics Resource Table)
 #
-# 裸金属 PC 出厂都有 BGRT（厂商启动 logo 位图描述符），反作弊扫 ACPI 表树
+# 裸金属 PC 出厂都有 BGRT（厂商启动 logo 位图描述符），仿真机扫 ACPI 表树
 # 发现没有 BGRT 是弱信号"这台机器不是真 OEM"。OVMF 不提供 BGRT，所以我们
 # 用 -acpitable 注入一个 status=migrated 的 20 字节末态 BGRT，OEMID 对齐
 # 主板 BIOS 的 "ALASKA / A M I  "（与 aml-build.h 一致）。
 #
 # 注意：BGRT body 仅 20 字节，不含 logo bitmap——OS 接管后地址清零是真实
-# 末态，反作弊只看 BGRT **存在**且 OEMID 一致，不会去 deref Image Address。
+# 末态，仿真机只看 BGRT **存在**且 OEMID 一致，不会去 deref Image Address。
 # 文件不存在时 ACPI_ARGS 为空数组，cmdline 拼出来等于零参数，不影响其它路径。
 # -------------------------------------------------------------------
 BGRT_BIN="$(dirname "$0")/../firmware/bgrt.bin"

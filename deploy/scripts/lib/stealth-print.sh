@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+
 stealth_print_profile() {
     # ---- 内存 ----
     # 取 NUM_DIMMS / PER_DIMM_MB（由 start-vm.sh 按 "RAM≤4096→1条 / >4096→2条" 决策）。
@@ -31,9 +33,12 @@ stealth_print_profile() {
     # 旧显示标签兼容，不应在摘要中冒充已实现的物理显卡。EDID 则来自完整组件目录。
     local vga_kind
     if [[ "${VGA_DEV:-virtio-vga}" == virtio-vga-gl* ]]; then
-        vga_kind="virtio-vga-gl (virgl 3D)"
+        # virtio-vga-gl 能让 QEMU/SDL 在宿主侧使用 GL，也能服务支持 virgl 的
+        # Linux 客体；当前 Windows 客体绑定的是 VioGpuDod Display-Only 驱动，
+        # 因此这里明确拆开两层能力，不能把 host GL 误报成 Windows Direct3D。
+        vga_kind="virtio-vga-gl（宿主 GL/virgl；Windows VioGpuDod 仍无客体 3D）"
     else
-        vga_kind="virtio-vga (stable, 无 GL)"
+        vga_kind="virtio-vga（宿主 GL 关闭；Windows VioGpuDod 为 Display-Only）"
     fi
     # 显示器对角线：sqrt(w²+h²) 毫米 → 英寸（÷25.4）
     local diag_inch
@@ -58,17 +63,24 @@ stealth_print_profile() {
         mouse_line="usb-tablet → ${TABLET_PRODUCT} (USB ${TABLET_VID/0x/}:${TABLET_PID/0x/}, 绝对坐标)"
     fi
 
+    # GPU profile 的 VEN/DEV 是浅层用户态投影目标，不是 virtio-gpu 的物理配置头。
+    # 两者同时打印，避免把“GPU-Z 应显示 10DE:1C82”误读成 stock 驱动也能绑定该 ID。
+    local logical_gpu_id="${GPU_PCI_VEN#0x}:${GPU_PCI_DEV#0x}"
+    # PnP 的 SUBSYS 字符串固定按 device 后接 vendor 打印，和规范化 VEN:DEV 顺序
+    # 相反。把两种顺序并列输出，避免用户把 carrier 字段误当物理主 PCI ID。
+    local gpu_carrier_subsys="${GPU_PCI_DEV#0x}${GPU_PCI_VEN#0x}"
+
     cat >&2 <<EOF
 === stealth profile ===
   CPU      : $CPU_NAME ($CPU_VENDOR, socket $CPU_SOCKET, QEMU=$CPU_QEMU_ARG)
   Board    : $BOARD_MFR / $BOARD_PRODUCT ($BOARD_VERSION)
   Board SN : $BOARD_SERIAL
-  PCI subs : $BOARD_SUBSYS_VEN:$BOARD_SUBSYS_DEV
+  Board PCI: subsystem $BOARD_SUBSYS_VEN:$BOARD_SUBSYS_DEV
   System   : $SYSTEM_MFR / $SYSTEM_PRODUCT / $SYSTEM_FAMILY
   System SN: $SYSTEM_SERIAL   SKU=$SYSTEM_SKU
   BIOS     : $BIOS_VENDOR $BIOS_VERSION ($BIOS_DATE)
   Chassis  : $CHASSIS_TYPE  SN=$CHASSIS_SERIAL
-  GPU      : virtio display；旧标签=$GPU_NAME（${GPU_IDENTITY_FIDELITY}，不计真机化）
+  GPU      : virtio display；物理=1AF4:1050；carrier=SUBSYS_${gpu_carrier_subsys}；浅层用户态=$GPU_NAME / PCI $logical_gpu_id（${GPU_IDENTITY_FIDELITY}）
   Display  : ${vga_kind}, EDID 1920×1080
   显示器   : ${EDID_VENDOR}:${EDID_PRODUCT_ID} ${EDID_NAME}  ~${diag_inch}\" (${EDID_WIDTH_MM}×${EDID_HEIGHT_MM} mm)  SN=${EDID_SERIAL}
   NVMe     : $NVME_MODEL  fw=$NVME_FIRMWARE  PCI=${NVME_PCI_VEN}:${NVME_PCI_DEV}/${NVME_SUBSYS_VEN}:${NVME_SUBSYS_DEV}  SN=$NVME_SERIAL  size=$(printf '%.1f' "$(echo "$NVME_SIZE_BYTES / 1024^3" | bc -l 2>/dev/null || echo 0)") GiB

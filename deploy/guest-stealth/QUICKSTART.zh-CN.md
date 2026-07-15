@@ -1,0 +1,165 @@
+# guest-stealth 傻瓜式使用教程（Windows 10 guest）
+
+本教程用于正式 guest。你只需要复制并运行一个文件：
+`respawn-stealth.exe`。驱动、初始化脚本和 x86/x64 身份查询库已经内嵌，不需要安装
+RDP、QEMU guest agent、PowerShell 模块、NVIDIA 驱动或其它第三方软件。
+
+## 先看清楚它能做什么
+
+这套方案是“浅层身份投影”，不是显卡直通：
+
+- QEMU 设备的真实主 PCI ID 仍是 `1AF4:1050`，设备实例仍绑定 stock
+  `VioGpuDod` Display-Only 驱动。
+- GPU-Z 等用户态硬件查询程序看到的逻辑型号按 profile 投影为
+  `NVIDIA GeForce GTX 1050 Ti`，逻辑 VEN/DEV 为 `10DE:1C82`。
+- 它不会给 Windows guest 增加 Direct3D、CUDA、NVENC 或 NVIDIA 3D 性能。
+  host 侧 virgl/GL 加速也不会因此变成 guest 内的 NVIDIA 3D 加速。
+- **不要安装 NVIDIA 官方驱动。** `10DE:1C82` 只是逻辑查询结果，真实设备不是可由
+  NVIDIA 驱动接管的 GTX 1050 Ti；强行安装只会破坏现有显示链路。
+
+如果你需要真正的 guest 3D/CUDA，应另外设计 GPU/VFIO 直通方案，不能使用本教程
+代替。
+
+## 一键安装
+
+1. 在 Linux host 确认 VM 使用本项目兼容的 `1AF4:1050` + `VioGpuDod` 配置启动。
+2. 只把下面这个文件复制到 Windows 10 guest 的任意本地目录：
+
+   ```text
+   deploy/guest-stealth/dist/respawn-stealth.exe
+   ```
+
+   推荐在 guest 中固定为 `D:\工具\respawn-stealth.exe`，方便克隆和以后重复运行。
+3. 双击 `respawn-stealth.exe`，在 Windows UAC 对话框中选择“是”。
+4. 保持窗口开启。程序会先把当前 Windows 活动电源方案设为不息屏、不睡眠、不休眠，
+   然后完成驱动检查、身份事务和系统级 x86/x64 查询库发布；不要中途关机或结束进程。
+5. 程序成功后会自动重启 Windows。重新登录后即可直接打开已有的 GPU-Z 或其它硬件
+   查询软件；不需要 helper、旁置 DLL、环境变量或常驻调试服务。
+
+重复运行同一个最新版 EXE 是安全的：已绑定 `VioGpuDod` 时会走幂等快速路径，不会
+无意义地重复安装显示驱动。
+
+一次只运行一个最新版统一 EXE，并等待它完全退出。不要同时运行另一个 EXE，也不要
+把 `C:\ProgramData\StealthGPU` 中释放出的 helper 与旧版平铺调试脚本并发执行；统一
+EXE 内部会串行化整包事务，手工绕过入口则不属于受支持的并发方式。
+
+电源设置同时覆盖 AC/DC、普通显示超时、锁屏显示超时、空闲/无人值守睡眠、主动
+S1–S3、混合睡眠、Windows 休眠和快速启动。它通过 Windows 内置 PowrProf 与
+`powercfg.exe` 修改当前活动方案，不安装电源服务或常驻程序。如果以后手工切换到
+另一套电源方案，应重新运行一次统一 EXE，让新活动方案也收敛到同一设置。
+
+## 成功后应该看到什么
+
+以项目内 GTX 1050 Ti profile 为例，GPU-Z 2.70 应显示以下逻辑查询值：
+
+| 字段 | 期望值 |
+| --- | --- |
+| Name | NVIDIA GeForce GTX 1050 Ti |
+| GPU / Device ID | GP107 / `10DE 1C82 - 10DE 1C82` |
+| Shaders / ROPs / TMUs | 768 / 32 / 48 |
+| Memory | 4096 MB GDDR5，128 bit |
+| GPU Clock | 1290 MHz（Boost 1392 MHz） |
+| Memory Clock / Bandwidth | 1752 MHz / 112.1 GB/s |
+
+这些数值来自当前 profile 的一致性投影，不代表 guest 拥有同等显存、频率或运算能力。
+物理 PCI 配置空间、设备实例路径、`Service` 和实际显示驱动不会被伪装成 NVIDIA
+设备。
+
+不用安装 GPU-Z 也能做底层快速检查。以管理员身份打开 Windows PowerShell，执行：
+
+```powershell
+$display = Get-PnpDevice -Class Display -PresentOnly |
+    Where-Object InstanceId -Like 'PCI\VEN_1AF4&DEV_1050*' |
+    Select-Object -First 1
+$display | Format-List FriendlyName,Status,InstanceId
+Get-PnpDeviceProperty -InstanceId $display.InstanceId `
+    -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath,
+        DEVPKEY_Device_HardwareIds
+```
+
+应同时满足：
+
+- `Status` 为 `OK`，`Service` 为 `VioGpuDod`；
+- `InstanceId` 仍以物理 `PCI\VEN_1AF4&DEV_1050` 开头；
+- `HardwareIds` 第一项是 profile 的逻辑 `10DE:1C82`，后续项保留物理
+  `1AF4:1050`。
+
+## 复制前后校验 EXE
+
+每次重新构建都会产生新的 SHA-256，不要照抄旧版本摘要。在 Linux host 记录当前
+发布物摘要：
+
+```bash
+sha256sum deploy/guest-stealth/dist/respawn-stealth.exe
+```
+
+复制进 guest 后，用 Windows 自带 PowerShell 重新计算：
+
+```powershell
+Get-FileHash 'D:\工具\respawn-stealth.exe' -Algorithm SHA256
+```
+
+两边摘要必须完全相同。不同就重新复制，不要运行损坏或来源不明的 EXE。
+
+## 失败时怎么处理
+
+先查看正式部署日志：
+
+```text
+C:\ProgramData\StealthGPU\power-policy.log
+C:\ProgramData\StealthGPU\display-driver-install.log
+C:\ProgramData\StealthGPU\gpu-hardware-id-projection.log
+C:\ProgramData\StealthGPU\respawn.log
+```
+
+常见处理方式：
+
+- 窗口再次黑屏并显示 `[Stopped]`：这是 guest 进入 ACPI S3，不是 QEMU 退出。查看
+  `power-policy.log`；若运行 EXE 后又手工切换过电源方案，重新运行最新版 EXE。
+- GPU-Z 为空或仍显示旧值：先完整重启；仍异常时关闭所有 GPU-Z 窗口，再重复运行
+  最新 `respawn-stealth.exe`。程序会恢复未完成的身份事务后重新部署。
+- 日志提示物理 PCI ID 不是 `1AF4:1050`：当前 VM 启动配置不兼容，应修正 host 配置，
+  不要在 guest 中强行绕过门禁。
+- 日志提示设备没有绑定 `VioGpuDod`：让统一 EXE 完成内嵌 stock 驱动安装；不要手工
+  改名，也不要安装 NVIDIA 驱动。
+- 日志提示未知 `nvapi.dll`/`nvapi64.dll`：系统可能已有真实 NVIDIA 或第三方同名库。
+  installer 会故意拒绝覆盖。先确认该 guest 的用途和原驱动来源，不要强制删除。
+- 日志提示 payload 目录 Owner 不受信：确认
+  `C:\ProgramData\StealthGPU\respawn-exe` 内没有用户文件后，以管理员身份删除该目录，
+  再运行 EXE；不要用 `takeown` 原地放行。
+
+需要观察完整输出但暂不自动重启时，可在管理员 PowerShell 中执行：
+
+```powershell
+Start-Process -FilePath 'D:\工具\respawn-stealth.exe' `
+    -ArgumentList '-NoReboot' -Wait
+```
+
+检查完毕后仍应手动重启一次。
+
+## 只撤销逻辑 HardwareID 投影
+
+以下操作只撤销计划任务维护的逻辑 HardwareID 首项，不是 NVIDIA/VFIO 驱动卸载器。
+先确认所有 `respawn-stealth.exe` 窗口和进程已经退出，再以管理员身份执行；不要让
+该手工回滚与统一 EXE 并发：
+
+```powershell
+& 'C:\ProgramData\StealthGPU\project-gpu-hardware-id.ps1' -Mode Rollback
+Unregister-ScheduledTask -TaskName 'StealthGPU-ProjectHardwareId' -Confirm:$false
+```
+
+需要恢复整个 guest 时，优先使用部署前的 VM 快照。不要直接删除身份注册表 journal，
+否则会破坏下次运行时的自动恢复依据。
+
+## 正式包不会安装的调试组件
+
+VM2 验收期间可以临时使用 RDP、USB/FAT 载荷、HTTP、探针或其它调试入口，但它们不
+属于正式发布物，也不会被 `respawn-stealth.exe` 安装。普通双击正式 EXE 后，guest
+新增的持久内容是项目脚本和内嵌 stock 驱动包、必要的 x86/x64 用户态身份库，以及
+`RefreshName`、`ForceDisplayFreq`、`ProjectHardwareId` 三条轻量计划任务；仅当设备尚未
+绑定兼容驱动时，程序才会安装 Windows 显示所必需的 `VioGpuDod` 内核驱动。封装镜像的
+`--firstlogon` 路径会抑制前两条辅助任务，只保留 HardwareID 投影任务。两种路径都不
+新增 RDP、QGA、HTTP、网络或调试服务，默认 host 发布目录也只保留单个
+`respawn-stealth.exe`。
+
+完整实现、验证命令和源码调试方式见 [`README.md`](./README.md)。

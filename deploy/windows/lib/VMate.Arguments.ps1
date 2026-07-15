@@ -244,7 +244,9 @@ function New-VMatePlatformDeviceArguments {
         # subsystem/OUI 已作为同一 manifest 设备原子校验，不能在此另写常量。
         '-device', "e1000e,id=nic0,netdev=net0,bus=rp2,mac=$($Profile.identity.mac),subsys_ven=$nicSubVendor,subsys=$nicSubDevice",
         '-device', "qemu-xhci,id=xhci,bus=rp3,x-pci-vendor-id=$xhciVendor,x-pci-device-id=$xhciDevice,x-pci-revision=$xhciRevision",
-        '-device', "usb-kbd,bus=xhci.0,vendorid=$keyboardVendor,productid=$keyboardProduct,manufacturer=$keyboardManufacturer,product=$keyboardName",
+        # 中文注释：与 Linux 启动器保持同一键盘实例名和 NumLock 策略。QEMU 只会在
+        # guest 明确回报 LED 为 OFF 时异步补发一次按键，不会在未知状态下盲目切换。
+        '-device', "usb-kbd,id=kbd0,bus=xhci.0,vendorid=$keyboardVendor,productid=$keyboardProduct,manufacturer=$keyboardManufacturer,product=$keyboardName,x-force-numlock-on=on",
         '-device', "usb-mouse,bus=xhci.0,vendorid=$mouseVendor,productid=$mouseProduct,manufacturer=$mouseManufacturer,product=$mouseName",
         # 00:04.0 是 manifest 的 Windows Q35 观测布局；显式 pin 地址，避免设备
         # 顺序变化后 QEMU 自动分配到其它槽位而清单仍误报一致。

@@ -4,7 +4,7 @@
  * 动机
  * ----
  * QEMU 默认 DSDT 不带 \_SB.TZxx / Fan 设备；裸金属桌面机出厂 ACPI 都至少有
- * 一个 ThermalZone（CPU package thermal）+ 一个 chassis Fan。反作弊扫描
+ * 一个 ThermalZone（CPU package thermal）+ 一个 chassis Fan。仿真机扫描
  * `Get-CimInstance Win32_TemperatureProbe` / `Win32_Fan` 全空，或解析 ACPI 表
  * 树找不到 `_TZ` 域，都是弱 VM 指纹。
  *

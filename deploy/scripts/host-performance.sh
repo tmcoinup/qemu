@@ -5,7 +5,7 @@
 # Host 侧一次性调优（每次 host 重启后失效，需重跑）。需要 sudo。
 #
 # 目标：压低 KVM 的调度 / 时钟抖动。ACE「游戏计时异常」(13-131130-8) 这类
-# 反作弊时钟检测对 vCPU 服务延迟的方差很敏感——host governor=powersave 让核在
+# 仿真机时钟检测对 vCPU 服务延迟的方差很敏感——host governor=powersave 让核在
 # vm-exit 间降频、halt_poll 太短导致 vCPU 唤醒延迟尖刺、THP 同步整理会把 vCPU
 # 冻住几毫秒，这些都会被读成「计时异常」。本脚本只动 host 侧旋钮，guest 看到的
 # CPUID / 品牌串 / tsc-freq / 拓扑全部不变 → 零反检测影响。

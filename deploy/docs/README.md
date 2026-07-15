@@ -153,7 +153,10 @@ deploy/scripts/stop-vm.sh 1
 - [验证](VERIFY.md)：静态与客体侧核对入口。
 - [fb-shm GPU 导出](FB-SHM-GPU-ZEROCOPY.md)：跨平台 handle、同步协议与回退边界。
 - [Windows 打包与启动](WINDOWS-PACKAGING.md)：Windows/WHPX 路线。
+- [Guest GPU 浅层工作流](STEALTH-WORKFLOW.md)：当前 `1AF4:1050`、stock VioGpuDod 与
+  双架构系统 NVAPI 的唯一受支持流程。
+- [GPU 身份方案边界](STEALTH-APPROACHES.md)：当前浅层实现、3D 能力边界与历史方案差异。
+- [ACE 浅层边界](ACE-SHALLOW-STEALTH.md)：不使用自签名、EfiGuard 或内核伪装的约束。
 
-`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md`、`ACE-SHALLOW-STEALTH.md`、旧审计和旧 GPU
-深层流程只作为历史资料；其中的随机池、GPU 伪装和检测对抗结论不能覆盖当前 manifest、
-当前启动器或本次硬件平台评估。
+旧审计和旧 GPU 深层流程只作为历史资料；其中的自签名、主 PCI ID 覆盖、随机池和
+检测对抗结论不能覆盖上述当前浅层文档、当前 manifest 或启动器。

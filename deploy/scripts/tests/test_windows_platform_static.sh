@@ -92,6 +92,11 @@ test_static_policy_markers() {
         "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
     require_text 'Assert-VMateQemuDeviceCapabilities -Qemu $Qemu' \
         "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
+    require_text "'virtio-vga-gl,edid=on,edid-fixed-native=on,'" "$LAUNCHER"
+    require_text "'virtio-vga,edid=on,edid-fixed-native=on,'" "$LAUNCHER"
+    require_text "\$probeText -match 'edid-fixed-native'" "$LAUNCHER"
+    require_text "'edid-fixed-native'" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
     require_text "'-accel', 'tcg,thread=multi'" "$LAUNCHER"
     require_text '[System.IO.File]::Replace($temporary, $Path, $backup)' \
         "$REPO_ROOT/deploy/windows/lib/VMate.ProfileStore.ps1"
@@ -154,8 +159,10 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
         grep -F -- 'bus=pcie.0,addr=0x3' | grep -F -- 'x-pci-device-id=0xa33a' \
         >/dev/null \
         || fail "rp3 must use the third Intel root-port ID"
-    grep -F -- 'usb-kbd,bus=xhci.0,vendorid=0x045e,productid=0x0750' \
+    grep -F -- 'usb-kbd,id=kbd0,bus=xhci.0,vendorid=0x045e,productid=0x0750' \
         "$out" >/dev/null || fail "Microsoft keyboard ID is missing"
+    grep -F -- 'x-force-numlock-on=on' "$out" >/dev/null \
+        || fail "QEMU guest NumLock force-on policy is missing"
     grep -F -- 'usb-mouse,bus=xhci.0,vendorid=0x045e,productid=0x00cb' \
         "$out" >/dev/null || fail "Microsoft mouse ID is missing"
     grep -F -- 'type=0,vendor=American Megatrends Inc.' "$out" >/dev/null \
@@ -208,6 +215,7 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
     grep -F -- 'speed=2400,configured-speed=2400,memory-type=0x1a' \
         "$out" >/dev/null || fail "H310 内存额定/配置速率未分离"
     grep -F -- 'edid-vendor=SAM,edid-name=S24F350' "$out" | \
+        grep -F -- 'edid-fixed-native=on' | \
         grep -F -- 'edid-product-id=0x0f65' | \
         grep -F -- 'edid-manufacture-year=2018' | \
         grep -F -- 'edid-secondary-refresh-rate=60000' >/dev/null \

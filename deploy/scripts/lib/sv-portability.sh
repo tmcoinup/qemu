@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ---------------------------------------------------------------------------
 # Host portability preflight.
 #
@@ -58,6 +59,7 @@ _sv_check_qemu_caps() {
 
     help="$(_sv_qemu_device_help virtio-vga)"
     _sv_qemu_help_has_all "$help" \
+        'edid-fixed-native=' \
         'edid-vendor=' 'edid-name=' 'edid-serial=' \
         'edid-width-mm=' 'edid-height-mm=' \
         'x-pci-sub-vendor-id=' 'x-pci-sub-device-id=' \
@@ -74,6 +76,7 @@ _sv_check_qemu_caps() {
     if [[ "$_sv_need_gl_display" == "1" ]]; then
         help="$(_sv_qemu_device_help virtio-vga-gl)"
         _sv_qemu_help_has_all "$help" \
+            'edid-fixed-native=' \
             'edid-vendor=' 'edid-name=' 'edid-serial=' \
             'edid-width-mm=' 'edid-height-mm=' \
             || _sv_die_missing_qemu_feature "virtio-vga-gl EDID 属性"
@@ -99,6 +102,11 @@ _sv_check_qemu_caps() {
             'vendorid=' 'productid=' 'manufacturer=' 'product=' \
             || _sv_die_missing_qemu_feature "$_dev USB 身份属性"
     done
+    if [[ "${GUEST_NUMLOCK:-1}" == "1" ]]; then
+        help="$(_sv_qemu_device_help usb-kbd)"
+        _sv_qemu_help_has_all "$help" 'x-force-numlock-on=' \
+            || _sv_die_missing_qemu_feature "usb-kbd guest NumLock 状态机"
+    fi
 
     help="$(_sv_qemu_device_help pcie-root-port)"
     _sv_qemu_help_has_all "$help" \

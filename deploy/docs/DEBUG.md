@@ -55,16 +55,16 @@ cat /sys/module/kvm_intel/parameters/ept        # 1
 cat /sys/module/kvm_intel/parameters/flexpriority# 1
 ```
 
-## ACE 反作弊 / 计时检测侧
+## ACE 仿真机 / 计时检测侧
 
 ### `游戏计时异常` → `(13-131130-8)`
 ```
 检测到游戏计时异常。请关闭并卸载变速器等可能影响游戏计时的软件，重启后重试。
 (13-131130-8)
 ```
-**注意先分清两个 ACE 码**：`13-131106-0` 是 **GPU PCI 主 ID** 异常（深层 `GPU_SELFSIGNED=1`
-改 `10DE:1C81` 才会触发，浅层不碰）；`13-131130-8` 是 **计时（timing）异常**，跟 GPU 无关，
-矛头指向 vCPU 服务延迟 / 时钟进度的方差。
+**注意先分清两个 ACE 码**：`13-131106-0` 是 **GPU PCI 主 ID** 异常（历史深层模式把
+物理主 ID 改成 `10DE` 时会触发；该模式现已删除并由启动器明确拒绝）；`13-131130-8`
+是 **计时（timing）异常**，跟 GPU 无关，矛头指向 vCPU 服务延迟 / 时钟进度的方差。
 
 **两类根因，都在 host 侧（非 guest 配置）**：
 
@@ -157,25 +157,33 @@ curl -k https://<HOST_IP>/-/leases | jq
 ## Guest 侧 (Windows)
 
 ```powershell
-# Event Log 看 NVIDIA 驱动加载
-Get-WinEvent -LogName 'Application','System' -MaxEvents 200 |
-    Where-Object { $_.ProviderName -match 'nvlddmkm|NVLoad|NVDisplay' }
+# 当前浅层模式只应有一个在线 PCI 显示设备，物理 ID 保持 1AF4:1050。
+$display = Get-PnpDevice -Class Display -PresentOnly
+$display | Format-List FriendlyName,Status,Problem,InstanceId
+$display | ForEach-Object {
+    Get-PnpDeviceProperty -InstanceId $_.InstanceId `
+        -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath
+}
 
-# nvidia-smi
-nvidia-smi -q | findstr /i "license"
+Get-CimInstance Win32_VideoController |
+    Format-List Name,AdapterCompatibility,DriverVersion,PNPDeviceID
+Get-CimInstance Win32_SystemDriver -Filter "Name='VioGpuDod'" |
+    Format-List Name,State,Started,PathName
+Get-AuthenticodeSignature "$env:WINDIR\System32\drivers\viogpudo.sys" |
+    Format-List Status,SignerCertificate
 
-# Device Manager (pnputil 视角)
-pnputil /enum-drivers | Select-String -Context 0,5 NVIDIA
+Get-Content 'C:\ProgramData\StealthGPU\display-driver-install.log' -Tail 100
+Get-Content 'C:\ProgramData\StealthGPU\nvapi-system-install.log' -Tail 100
+Get-Content 'C:\ProgramData\StealthGPU\respawn.log' -Tail 100
 ```
 
-## 内存里记录的「复用老经验」
+## 当前 Display-Only 路径的判断原则
 
-- Windows 启动后先等 RDP 可连 (通常 60–90s 后 3389 端口才 listen)；
-  装完 GRID 驱动后 listener 会因为 WDDM 切换短暂重启，
-  内存 `project_rdp_wddm_black` 记载连续断 3 次 Ctrl-Alt-Del 可踢 capture 还原。
-- NVIDIA driver install 走 Express 模式最稳；Custom 经常漏装 `nvlddmkm.sys`。
-- guest 里装完驱动后如果 RDP 黑屏，按 memory `project_vm1_rdp_broken`
-  首先用 `Get-Service TermService,UmRdpService` 确认服务在跑，
-  然后 `Test-Path HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters`
-  ServiceDll 是否完整；如果 Parameters 整个不见了就是 RDP 栈损坏，
-  只能 DISM + chkdsk 或重装。
+- 驱动成功标准是物理 `PCI\VEN_1AF4&DEV_1050`、`Service=VioGpuDod`、Problem=0，
+  不是 `nvlddmkm`、`nvidia-smi` 或 NVIDIA 服务；当前流程不会安装这些组件。
+- 显示模式必须在 SDL 本地控制台验证。RDP 会接管会话分辨率，不能用 RDP 下灰掉的
+  分辨率控件判断 VioGpuDod 是否失败。
+- 安装器返回 34 表示活动驱动未通过固定 stock 摘要/WHCP/服务路径验证。不要关闭签名
+  强制或恢复自签名；先备份，按日志清理异常旧驱动，再运行最新统一 EXE。
+- WMI/GPU-Z 名称正确不代表存在 guest 3D。stock VioGpuDod 是 Display-Only，预期没有
+  Direct3D、CUDA、NVENC/NVDEC 或 NVIDIA 频率/显存管理。

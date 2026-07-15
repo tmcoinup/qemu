@@ -127,9 +127,12 @@ function Assert-VMateQemuDeviceCapabilities {
         'e1000e' = @('subsys_ven', 'subsys')
         'nvme' = @('use-samsung-id', 'model-number', 'firmware-rev',
             'subsys-vendor-id', 'subsys-id', 'subnqn')
-        'usb-kbd' = @('vendorid', 'productid', 'manufacturer', 'product')
+        # 中文注释：Windows 启动参数默认启用 guest LED 驱动的 NumLock 策略；能力
+        # 门禁必须先验证自定义 QEMU 属性，避免拼好命令后才以 unknown property 退出。
+        'usb-kbd' = @('vendorid', 'productid', 'manufacturer', 'product',
+            'x-force-numlock-on')
         'usb-mouse' = @('vendorid', 'productid', 'manufacturer', 'product')
-        'virtio-vga' = @('edid-vendor', 'edid-product-id',
+        'virtio-vga' = @('edid-fixed-native', 'edid-vendor', 'edid-product-id',
             'edid-secondary-refresh-rate')
     }
     foreach ($entry in $required.GetEnumerator()) {

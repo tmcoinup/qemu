@@ -93,13 +93,13 @@ known_board() {
 }
 
 known_gpu() {
-    case "$1|$2|$3|$4|$5" in
-        "NVIDIA|NVIDIA GeForce GTX 750 Ti|0x10DE|0x1380|2048" \
-        |"NVIDIA|NVIDIA GeForce GT 1030|0x10DE|0x1D01|2048" \
-        |"NVIDIA|NVIDIA GeForce GTX 1050|0x10DE|0x1C81|2048" \
-        |"NVIDIA|NVIDIA GeForce GTX 1050 Ti|0x10DE|0x1C82|4096" \
-        |"AMD|AMD Radeon RX 550|0x1002|0x699F|2048" \
-        |"AMD|AMD Radeon RX 560|0x1002|0x67FF|4096")
+    case "$*" in
+        "NVIDIA NVIDIA GeForce GTX 750 Ti 0x10DE 0x1380 2048 GDDR5 128 1020000 1085000 2700000 0" \
+        |"NVIDIA NVIDIA GeForce GT 1030 0x10DE 0x1D01 2048 GDDR5 64 1227000 1468000 3004000 0" \
+        |"NVIDIA NVIDIA GeForce GTX 1050 0x10DE 0x1C81 2048 GDDR5 128 1354000 1455000 3504000 0" \
+        |"NVIDIA NVIDIA GeForce GTX 1050 Ti 0x10DE 0x1C82 4096 GDDR5 128 1290000 1392000 3504000 0" \
+        |"AMD AMD Radeon RX 550 0x1002 0x699F 2048 GDDR5 128 1100000 1183000 3500000 0" \
+        |"AMD AMD Radeon RX 560 0x1002 0x67FF 4096 GDDR5 128 1175000 1275000 3500000 0")
             return 0 ;;
         *)
             return 1 ;;
@@ -208,8 +208,11 @@ for row in "${BOARD_POOL[@]}"; do
 done
 
 for row in "${GPU_POOL[@]}"; do
-    IFS='|' read -r vendor name ven dev ram _ _ <<<"$row"
-    known_gpu "$vendor" "$name" "$ven" "$dev" "$ram" || fail "显卡未在真实发售目录中: $row"
+    IFS='|' read -r vendor name ven dev ram _ _ memory_type bus_width \
+        base_clock boost_clock memory_clock sli_supported <<<"$row"
+    known_gpu "$vendor" "$name" "$ven" "$dev" "$ram" "$memory_type" \
+        "$bus_width" "$base_clock" "$boost_clock" "$memory_clock" "$sli_supported" \
+        || fail "显卡完整规格未在已审计目录中: $row"
 done
 
 for row in "${NVME_POOL[@]}"; do

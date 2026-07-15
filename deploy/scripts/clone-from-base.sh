@@ -12,7 +12,7 @@
 # 工作机制：
 #   - qcow2 backing-file: 新 disk 只存增量，base 共享只读
 #   - profile 一定是新随机的（CPU/主板/GPU/MAC/UUID/NVMe SN 全部新），
-#     这样多份克隆给反作弊看是各自独立的硬件
+#     这样多份克隆给仿真机看是各自独立的硬件
 #   - OVMF NVRAM 也是从 /usr/share/OVMF/OVMF_VARS_4M.fd 重新拷贝
 #
 # 之后启动：
@@ -227,17 +227,7 @@ if [[ -x "$DEVPKEY_FIX" ]]; then
     fi
 fi
 
-# --- 3) NumLock 修复：sysprep generalize 会把 .DEFAULT hive 的
-#        InitialKeyboardIndicators 重置成 0x80000000（启动主动写 LED=OFF）。
-#        host-fix-numlock.sh 离线把它改回 0x80000002（LED=ON）。
-NUMLOCK_FIX="$SCRIPT_DIR/host-fix-numlock.sh"
-if [[ -x "$NUMLOCK_FIX" && $EUID -eq 0 ]]; then
-    echo ">> 修 NumLock 默认状态（DEFAULT hive InitialKeyboardIndicators=ON）..."
-    VMS_DIR="$VMS_DIR" DISK="$DISK" "$NUMLOCK_FIX" "$NEW_INSTANCE" 2>&1 | sed 's/^/    /' || \
-        echo "   WARN: host-fix-numlock.sh 失败，可在 guest 内跑 vm-prep.ps1 兜底"
-fi
-
-# --- 4) Unattend 注入：sysprep'd base 首启会进 OOBE 区域设置等交互界面。
+# --- 3) Unattend 注入：sysprep'd base 首启会进 OOBE 区域设置等交互界面。
 #        deploy/autounattend/autounattend.xml 含 SkipMachineOOBE/SkipUserOOBE
 #        + AutoLogon Administrator/123456 + ms-gamingoverlay handler 等，
 #        放进 %WINDIR%\Panther\Unattend\unattend.xml 让 OOBE 自动跑完直接
@@ -249,12 +239,12 @@ if [[ -x "$UNATTEND_INJ" && $EUID -eq 0 ]]; then
         echo "   WARN: host-inject-unattend.sh 失败，guest 首启会停在 OOBE"
 fi
 
-# --- 5) RunOnce 不再 inject —— SOFTWARE hive 离线写 + .LOG truncate 会被
+# --- 4) RunOnce 不再 inject —— SOFTWARE hive 离线写 + .LOG truncate 会被
 #        Windows 启动 reject (0xc0000001)。GPU 重对齐由 autounattend 的
 #        FirstLogonCommands Order=10 调 D:\工具\respawn-stealth.exe 执行一次，
 #        不再依赖 host HTTP / 固定 IP。
 
-# --- 6) 目录所有权由顶部的 EXIT trap 统一 chown 回 ORIG_USER。
+# --- 5) 目录所有权由顶部的 EXIT trap 统一 chown 回 ORIG_USER。
 #        无论成功还是中途失败，都只在 trap 中处理。
 #        这里只打印结果说明，不再重复 chown。
 echo ">> 目录所有权将 → ${ORIG_USER}:${ORIG_GROUP}"

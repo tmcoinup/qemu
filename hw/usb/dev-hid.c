@@ -29,10 +29,12 @@
 #include "migration/vmstate.h"
 #include "desc.h"
 #include "qapi/error.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/input/hid.h"
 #include "hw/usb/hid.h"
+#include "hw/usb/hid-numlock.h"
 #include "hw/core/qdev-properties.h"
 #include "qom/object.h"
 
@@ -56,6 +58,17 @@ struct USBHIDState {
     /* 内部：若 vendorid/productid 任一非 0，分配一份 USBDesc 副本写回 .id；
      * unrealize 时 g_free。dev->usb_desc 指向这份副本而不是 const 静态。 */
     USBDesc *patched_desc;
+
+    /*
+     * opt-in NumLock 强制开启状态。
+     * 状态机仅接受 guest 的 SET_REPORT；
+     * BH 用于避免 USB 设备重入。
+     */
+    USBHIDNumLockState numlock;
+    QEMUBH *numlock_bh;
+
+    /* 仅用于区分迁移流是否携带了可选 NumLock 子段。 */
+    bool numlock_migration_loaded;
 };
 
 #define TYPE_USB_HID "usb-hid"
@@ -614,10 +627,69 @@ static void usb_hid_changed(HIDState *hs)
     usb_wakeup(us->intr, 0);
 }
 
+static void usb_keyboard_force_numlock_bh(void *opaque)
+{
+    USBHIDState *us = opaque;
+
+    /*
+     * LED 可能在 BH 执行前已变为 ON，或设备已 reset。
+     * 再次检查完整状态，避免注入过期的翻转键。
+     */
+    if (!usb_hid_numlock_should_inject(&us->numlock)) {
+        return;
+    }
+
+    if (hid_keyboard_send_key_click(&us->hid, Q_KEY_CODE_NUM_LOCK)) {
+        /*
+         * click 已原子进入 HID 队列；pending 继续等待 guest 的 ON 确认。
+         * 迁移时保存该位，目的端不能再加入第二个 click。
+         */
+        us->numlock.injection_attempted = true;
+    } else {
+        /*
+         * 队列满时不能只加入按下事件。
+         * 放弃本次 pending，允许后续 OFF 报告再触发；
+         * 这里不自旋重调度，以免卡住主循环。
+         */
+        us->numlock.force_pending = false;
+        us->numlock.injection_attempted = false;
+    }
+}
+
+static void usb_keyboard_numlock_report(USBHIDState *us, bool led_on)
+{
+    USBHIDNumLockAction action =
+        usb_hid_numlock_report(&us->numlock, led_on);
+
+    if (!us->numlock_bh) {
+        return;
+    }
+
+    switch (action) {
+    case USB_HID_NUMLOCK_ACTION_SCHEDULE:
+        qemu_bh_schedule(us->numlock_bh);
+        break;
+    case USB_HID_NUMLOCK_ACTION_CANCEL:
+        qemu_bh_cancel(us->numlock_bh);
+        break;
+    case USB_HID_NUMLOCK_ACTION_NONE:
+        break;
+    }
+}
+
+static void usb_keyboard_numlock_reset(USBHIDState *us)
+{
+    if (us->numlock_bh) {
+        qemu_bh_cancel(us->numlock_bh);
+    }
+    usb_hid_numlock_reset(&us->numlock);
+}
+
 static void usb_hid_handle_reset(USBDevice *dev)
 {
     USBHIDState *us = USB_HID(dev);
 
+    usb_keyboard_numlock_reset(us);
     hid_reset(&us->hid);
 }
 
@@ -666,6 +738,11 @@ static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
     case HID_SET_REPORT:
         if (hs->kind == HID_KEYBOARD) {
             p->actual_length = hid_keyboard_write(hs, data, length);
+            if (p->actual_length > 0) {
+                /* 只信任 guest 报告，不猜测初始状态。 */
+                usb_keyboard_numlock_report(
+                    us, (data[0] & HID_KBD_LED_NUM_LOCK) != 0);
+            }
         } else {
             goto fail;
         }
@@ -741,6 +818,11 @@ static void usb_hid_unrealize(USBDevice *dev)
 {
     USBHIDState *us = USB_HID(dev);
 
+    usb_keyboard_numlock_reset(us);
+    if (us->numlock_bh) {
+        qemu_bh_delete(us->numlock_bh);
+        us->numlock_bh = NULL;
+    }
     hid_free(&us->hid);
     /* stealth (patch 0010): 释放 VID/PID 覆盖时分配的 USBDesc 副本 */
     if (us->patched_desc) {
@@ -836,7 +918,19 @@ static void usb_mouse_realize(USBDevice *dev, Error **errp)
 
 static void usb_keyboard_realize(USBDevice *dev, Error **errp)
 {
+    USBHIDState *us = USB_HID(dev);
+
     usb_hid_initfn(dev, HID_KEYBOARD, &desc_keyboard, &desc_keyboard2, errp);
+    if (us->numlock.force_on && us->hid.s) {
+        /*
+         * SET_REPORT 位于 USB 控制器调用栈内。
+         * guarded BH 将注入推迟到主循环安全点，
+         * 并启用设备重入保护。
+         */
+        us->numlock_bh = qemu_bh_new_guarded(
+            usb_keyboard_force_numlock_bh, us,
+            &DEVICE(dev)->mem_reentrancy_guard);
+    }
 }
 
 static int usb_ptr_post_load(void *opaque, int version_id)
@@ -847,6 +941,117 @@ static int usb_ptr_post_load(void *opaque, int version_id)
         hid_pointer_activate(&s->hid);
     }
     return 0;
+}
+
+static int usb_keyboard_pre_load(void *opaque)
+{
+    USBHIDState *us = opaque;
+
+    /*
+     * loadvm 可能复用当前设备实例，不能让旧运行态混入迁移流。
+     * 子段若存在，会在主 post_load 之前重新填充这些字段。
+     */
+    usb_keyboard_numlock_reset(us);
+    us->numlock_migration_loaded = false;
+    return 0;
+}
+
+static bool usb_keyboard_numlock_migration_needed(void *opaque)
+{
+    USBHIDState *us = opaque;
+
+    /*
+     * 属性默认关闭时不发送新子段，保持既有 usb-kbd v1 迁移流。
+     * 显式启用后即使运行态全为零也要发送：led_known=false 是有意义的
+     * “尚未收到 guest 报告”，不能在新版本之间被误判成旧迁移流。
+     */
+    return us->numlock.force_on;
+}
+
+static int usb_keyboard_numlock_subsection_post_load(void *opaque,
+                                                      int version_id)
+{
+    USBHIDState *us = opaque;
+
+    us->numlock_migration_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_usb_kbd_numlock = {
+    .name = "usb-kbd/numlock-startup",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = usb_keyboard_numlock_subsection_post_load,
+    .needed = usb_keyboard_numlock_migration_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(numlock.led_known, USBHIDState),
+        VMSTATE_BOOL(numlock.led_on, USBHIDState),
+        VMSTATE_BOOL(numlock.force_pending, USBHIDState),
+        VMSTATE_BOOL(numlock.injection_attempted, USBHIDState),
+        VMSTATE_BOOL(numlock.startup_completed, USBHIDState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool usb_keyboard_post_load(void *opaque, int version_id, Error **errp)
+{
+    USBHIDState *us = opaque;
+    bool hid_led_on = (us->hid.kbd.leds & HID_KBD_LED_NUM_LOCK) != 0;
+    bool subsection_loaded = us->numlock_migration_loaded;
+
+    /* marker 只服务本次 load，确保后续 loadvm 能正确识别旧流。 */
+    us->numlock_migration_loaded = false;
+
+    if (!subsection_loaded) {
+        if (us->numlock.force_on) {
+            /*
+             * 旧迁移流没有一次性锁存，无法判断 OFF 是启动状态还是用户操作。
+             * 采用保守兼容策略：以已迁移的 HID LED 为准，并视为本周期已完成，
+             * 避免目的端迁移完成后擅自翻转用户状态。
+             */
+            us->numlock.led_known = true;
+            us->numlock.led_on = hid_led_on;
+            us->numlock.startup_completed = true;
+        }
+        return true;
+    }
+
+    /* 子段只应出现在源端和目的端都显式启用功能时。 */
+    if (!us->numlock.force_on) {
+        error_setg(errp, "usb-kbd NumLock migration state requires "
+                   "x-force-numlock-on=on on the destination");
+        return false;
+    }
+
+    /*
+     * hid.kbd.leds 已由主 usb-kbd 状态恢复；收到报告后两份事实必须一致。
+     * led_known=false 本身是合法状态，但不能同时携带任何派生运行态。
+     */
+    if ((!us->numlock.led_known &&
+         (us->numlock.led_on || us->numlock.force_pending ||
+          us->numlock.injection_attempted ||
+          us->numlock.startup_completed)) ||
+        (us->numlock.led_known && us->numlock.led_on != hid_led_on)) {
+        error_setg(errp, "usb-kbd NumLock migration state disagrees with "
+                   "the migrated HID LED report");
+        return false;
+    }
+
+    if ((us->numlock.injection_attempted &&
+         !us->numlock.force_pending) ||
+        (us->numlock.force_pending &&
+         (us->numlock.led_on || us->numlock.startup_completed)) ||
+        (us->numlock.led_on && !us->numlock.startup_completed)) {
+        error_setg(errp, "usb-kbd NumLock migration state has an invalid "
+                   "pending/completed combination");
+        return false;
+    }
+
+    /* 仅恢复源端尚未执行的 BH；已入队的 click 会随 HID 队列迁移。 */
+    if (usb_hid_numlock_should_inject(&us->numlock) && us->numlock_bh) {
+        qemu_bh_schedule(us->numlock_bh);
+    }
+    return true;
 }
 
 static const VMStateDescription vmstate_usb_ptr = {
@@ -865,10 +1070,16 @@ static const VMStateDescription vmstate_usb_kbd = {
     .name = "usb-kbd",
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_load = usb_keyboard_pre_load,
+    .post_load_errp = usb_keyboard_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_USB_DEVICE(dev, USBHIDState),
         VMSTATE_HID_KEYBOARD_DEVICE(hid, USBHIDState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_usb_kbd_numlock,
+        NULL
     }
 };
 
@@ -950,12 +1161,43 @@ static const TypeInfo usb_mouse_info = {
 static const Property usb_keyboard_properties[] = {
         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
         DEFINE_PROP_STRING("display", USBHIDState, display),
+        DEFINE_PROP_BOOL("x-force-numlock-on", USBHIDState,
+                         numlock.force_on, false),
         /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */
         DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
         DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
         DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
         DEFINE_PROP_STRING("product", USBHIDState, product),
 };
+
+static bool usb_keyboard_get_numlock_led_known(Object *obj, Error **errp)
+{
+    USBHIDState *us = USB_HID(obj);
+
+    return us->numlock.led_known;
+}
+
+static bool usb_keyboard_get_numlock_led_on(Object *obj, Error **errp)
+{
+    USBHIDState *us = USB_HID(obj);
+
+    return us->numlock.led_on;
+}
+
+static bool usb_keyboard_get_numlock_force_pending(Object *obj, Error **errp)
+{
+    USBHIDState *us = USB_HID(obj);
+
+    return us->numlock.force_pending;
+}
+
+static bool usb_keyboard_get_numlock_startup_completed(Object *obj,
+                                                        Error **errp)
+{
+    USBHIDState *us = USB_HID(obj);
+
+    return us->numlock.startup_completed;
+}
 
 static void usb_keyboard_class_initfn(ObjectClass *klass, const void *data)
 {
@@ -966,6 +1208,17 @@ static void usb_keyboard_class_initfn(ObjectClass *klass, const void *data)
     uc->product_desc   = "Microsoft Wired Keyboard 600";
     dc->vmsd = &vmstate_usb_kbd;
     device_class_set_props(dc, usb_keyboard_properties);
+    /* 只读运行态用于判断 LED 报告及待确认注入。 */
+    object_class_property_add_bool(klass, "x-numlock-led-known",
+                                   usb_keyboard_get_numlock_led_known, NULL);
+    object_class_property_add_bool(klass, "x-numlock-led-on",
+                                   usb_keyboard_get_numlock_led_on, NULL);
+    object_class_property_add_bool(klass, "x-numlock-force-pending",
+                                   usb_keyboard_get_numlock_force_pending,
+                                   NULL);
+    object_class_property_add_bool(klass, "x-numlock-startup-completed",
+                                   usb_keyboard_get_numlock_startup_completed,
+                                   NULL);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
 }
 

@@ -1,148 +1,178 @@
-# ACE/腾讯反作弊兼容路径（浅层 stealth）
+# 浅层 GPU 身份投影：当前设计与约束
 
-> 实测 2026-04-26：DNF / WeGame 等腾讯系 ACE 反作弊在此配置下连续 1 小时游戏未触发
-> `13-131106-0`。**这是当前 VM2 的工作配置，ACE 类游戏首选这条路径。**
+本文解释当前浅层 GPU 方案的设计边界。它不是另一套安装流程；实际部署仍只使用
+`deploy/guest-stealth/package.sh` 生成的统一离线 `respawn-stealth.exe`。操作步骤见
+[`STEALTH-WORKFLOW.md`](STEALTH-WORKFLOW.md)，实现细节见
+[`guest-stealth/README.md`](../guest-stealth/README.md)。
 
----
+第三方软件的检测规则会变化，本项目不能承诺某个特定产品必然接受当前环境。本文只
+说明可以审计的技术事实，不把显示名称或一次测试结果当成兼容性保证。
 
-## 思路
+## 1. 为什么采用浅层方案
 
-ACE 13 系列环境异常会重点扫：
+当前原则是让内核驱动绑定保持真实、稳定、可验证，同时把应用需要的展示身份限制在
+用户态：
 
-| 扫描点 | 浅层方案 |
-|---|---|
-| **黑名单内核驱动**（WinRing0 / RTCore64 / GPU-Z driver / EneIo / iqvw64 等） | 不装这类工具；保持 `Get-CimInstance Win32_SystemDriver` 全是 MS/AMD/Intel/NVIDIA |
-| **测试签名 / nointegritychecks** | `bcdedit testsigning No`，无 `nointegritychecks` |
-| **bootmgr.efi / winload.efi 哈希** | 原版微软签名，无 EfiGuard 替换 |
-| **PatchGuard 状态** | 启用，无 patch |
-| **Trusted Root 异常根证书** | 只保留 Microsoft / 真 NVIDIA / 真 AMD 等公认 CA，无伪造根 |
-| **驱动 Authenticode 签名链** | viogpudo 走 stock virtio-win = MS Hardware Compatibility Publisher 链 |
-| **Hyper-V / VBS / HVCI** | 全关 |
+- 物理主 PCI ID 固定为 virtio-gpu 的 `1AF4:1050`。
+- Windows 只绑定 stock Microsoft-WHQL `VioGpuDod`。
+- GTX 1050 Ti 的逻辑 `10DE:1C82` 不冒充物理总线枚举结果。
+- 名称、逻辑 PCI 字段和 NVAPI 查询结果来自注册表与固定摘要的系统用户态 DLL。
+- 不改变 Windows 启动链、代码完整性策略或信任根。
+- 客体尽量不安装软件；除 stock 显示驱动外，不增加 NVIDIA 软件栈或常驻服务。
 
-GPU-Z / WMI / Device Manager 想看到「NVIDIA GeForce GTX 1050」，靠的是：
+这样做的直接好处是 stock 驱动仍能按照它支持的硬件 ID 正常绑定。把物理主 ID 直接改成
+`10DE:1C82` 并不会让 `VioGpuDod` 变成 NVIDIA 驱动，反而会破坏原有匹配关系，可能出现
+驱动无法启动或 Code 43。
 
-1. **PCI Subsystem ID**：QEMU 启动器已把 `x-pci-sub-vendor-id=0x10DE,x-pci-sub-device-id=0x1C81` 打到 virtio-vga 上
-2. **注册表覆盖**：`apply-gpu-spoof.ps1` 改 `Class\{4d36e968-...}` 和 `Enum\PCI\...` 下的 `DeviceDesc / FriendlyName / DriverDesc / DEVPKEY`
-3. **NVAPI shim**：`nvapi64.dll` 替换 `C:\Windows\System32\nvapi64.dll`，让查 NVIDIA 私有接口的程序（GPU-Z、N卡控制面板检测脚本）拿到伪造的 1050 信息
+## 2. 三层身份模型
 
-整条链不需要任何非 WHQL 驱动、非微软的根证书或 boot chain 修改。
+### 2.1 物理层：保持 `1AF4:1050`
 
----
+PCI InstanceId、配置空间和内核驱动匹配仍基于：
 
-## 一次性宿主机准备
-
-```bash
-# QEMU stealth 构建
-deploy/tools/build.sh
-
-# 桥接（让 guest 拿宿主 LAN DHCP IP）
-sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
-
-# stock virtio-win 资源（已 ship 在 deploy/scripts/stock-viogpudo/）
-ls deploy/scripts/stock-viogpudo/
-#   viogpudo.sys  viogpudo.cat  viogpudo.inf
-
-# HTTP 服务器（一次起好，多 VM 共用）
-nohup python3 deploy/scripts/serve-stealth-http.py 8765 &> /tmp/serve-http.log &
+```text
+PCI\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1
 ```
 
----
+其中主 Vendor/Device `1AF4:1050` 决定 stock `VioGpuDod` 的驱动绑定；SUBSYS
+`1C8210DE` 只用于选择对应用户态 profile。统一 EXE 会先校验所有在线 PCI 显示设备
+的物理主 ID，发现非 `1AF4:1050` 就停止。
 
-## 装一个新 VM2
+真实成功条件不是“设备名称看起来像 GTX”，而是：
+
+- PnP 状态正常；
+- Problem 为 0；
+- `DEVPKEY_Device_Service` 为 `VioGpuDod`；
+- 已绑定的驱动包通过固定摘要和 Microsoft WHCP 签名检查。
+
+### 2.2 注册表层：投影 `10DE:1C82`
+
+驱动确认成功后，初始化脚本根据 SUBSYS 写入版本化的
+`HKLM\SOFTWARE\StealthGPU` 身份。GTX 1050 Ti profile 的逻辑值为：
+
+| 字段 | 逻辑值 |
+| --- | --- |
+| 名称 | `NVIDIA GeForce GTX 1050 Ti` |
+| Vendor ID | `10DE`（十进制 `4318`） |
+| Device ID | `1C82`（十进制 `7298`） |
+| Revision | `A1` |
+| 模式 | shallow user projection |
+
+这些值供名称刷新和用户态查询使用。专用 projector 仅把 SetupAPI HardwareID 排成
+“逻辑首项 + 完整物理数组”；它不改变 PnP InstanceId、PCI 配置空间或驱动绑定。
+
+### 2.3 进程层：双架构系统 NVAPI
+
+统一 EXE 内含 PE32 `nvapi.dll` 和 PE32+ `nvapi64.dll`。GPU-Z 2.70 主程序是 32 位，
+所以前者事务发布到 `SysWOW64`；后者发布到 `System32`，覆盖其 x64 辅助组件。
+installer 不写 GPU-Z 原始目录或 PATH，也不会覆盖未知同名 DLL。两份文件只是用户态
+身份查询层，没有服务、驱动、控制面板或 NVIDIA 运行时安装包。
+
+## 3. 唯一部署入口
+
+host 在仓库根目录构建：
 
 ```bash
-# 1. 装系统（autounattend 自动跳过 OOBE）
-EXTRA_ISO=/home/ubuntu/images/autounattend-vm2.iso \
-    deploy/scripts/start-vm.sh 2 --iso=/home/ubuntu/images/win10_ltsc.iso
-
-# 2. 装完进桌面后（Administrator / 123456 自动登录），管理员 PowerShell 跑：
-#    irm http://192.168.30.<host>:8765/shallow-stealth.ps1 | iex
-#
-#    会做：
-#      - 拉 stock viogpudo (MS-WHQL 签名)
-#      - pnputil /add-driver /install 绑到 PCI 1AF4:1050
-#      - 拉 apply-gpu-spoof.ps1 + nvapi64.dll
-#      - 跑 spoof 改注册表为 NVIDIA GeForce GTX 1050
-#      - 装 StealthGPU-RefreshName 计划任务（开机后 2s 重新覆盖）
-#      - reboot
-
-# 3. 重启完直接进游戏
+bash deploy/guest-stealth/package.sh
+sha256sum deploy/guest-stealth/dist/respawn-stealth.exe
 ```
 
----
+把生成的 `deploy/guest-stealth/dist/respawn-stealth.exe` 离线复制到 Windows 客体，
+推荐路径为 `D:\工具\respawn-stealth.exe`。客体只运行这个 EXE；它会按以下顺序完成：
 
-## 日常启动
+1. 安全释放和验证内嵌 payload；
+2. 对物理 `1AF4:1050` 做前置门禁；
+3. 仅在需要时安装 stock Microsoft-WHQL `VioGpuDod`；
+4. 再次验证真实驱动服务；
+5. 提交注册表浅层身份；
+6. 事务发布双架构系统 NVAPI，未知目标 fail-closed；
+7. 注册内置计划任务并同步提交 fake-first HardwareID；
+8. 重启使驱动、EDID 和名称初始化完整生效。
 
-VM2 第一次跑完 shallow-stealth.ps1 之后，每次只需要：
+当前部署不启动 HTTP 服务，不从网络下载或管道执行脚本，也不要求用户安装 NVIDIA
+驱动、控制面板或其它 GPU 工具。GPU-Z 若用于验证，应使用用户自行核验来源的单文件
+版本；统一 EXE 初始化后可直接双击，不依赖专用 helper。
 
-```bash
-deploy/scripts/start-vm.sh 2
-```
+## 4. 明确禁止的深层行为
 
-不带任何 `INSTANCE=` / `BRIDGE=` / `STABLE_DISPLAY=` / `GPU_SELFSIGNED=`：
+当前方案不使用，也不提供以下行为的回退入口：
 
-- BRIDGE 默认 `br0`
-- STABLE_DISPLAY 默认 `1`（virtio-vga，无 GL，ACE 友好，且不会因为 virgl bug 长时间运行 BSOD）
-- GPU_SELFSIGNED 默认 `0`（PCI 主 ID 留 1AF4:1050，stock 驱动可绑）
-- CPU_MODEL 从 `vms/<N>/profile` 读取（首次随机生成，AMD Ryzen3-1200/2300X 或 Intel i3-9100F/G6400/G5400 等）
+- 自签名证书或自签名显示驱动；
+- patched `viogpudo`；
+- EfiGuard 或任何 boot manager / winload 替换；
+- 非标准 Trusted Root；
+- 测试签名、禁用代码完整性或 PatchGuard 修改；
+- GPU 深层主 PCI ID 模式；
+- 覆盖真实 NVIDIA 或其它未知摘要的 System32/SysWOW64 NVAPI；
+- 把用户态 NVAPI shim 误称为 NVIDIA 驱动或 3D 运行时。
 
----
+历史版本中出现过这些实验性路径。它们只可作为不可执行的历史背景，不是当前工作流、
+故障修复步骤或兼容性备选项。
 
-## 验证
+## 5. 3D 加速边界
 
-进 VM 跑：
+浅层身份投影不增加 Windows 客体的 3D 能力。stock `VioGpuDod` 是 Display-Only
+驱动，负责显示扫描输出，不提供 GTX 1050 Ti 的渲染或计算接口。因此当前模式没有：
+
+- guest Direct3D 加速；
+- CUDA；
+- NVENC/NVDEC；
+- NVIDIA 内核驱动、控制面板或真实显存/频率管理。
+
+host 侧 EGL、virgl、GL texture scanout 或 GPU handle 成功，只说明 QEMU 在宿主侧的
+显示处理路径；它不会把 Windows `VioGpuDod` 变成支持 virgl 3D 的客体驱动。NVAPI
+shim 同样只回答身份查询，不参与渲染。
+
+## 6. GPU-Z 2.70 验证边界
+
+初始化完成并重启后，普通用户直接双击 `GPU-Z.2.70.0.exe`。工具来源与
+Authenticode 签名仍由用户负责核验，不需要旁置 DLL、PowerShell helper 或环境变量。
+
+系统搜索路径和 SetupAPI fake-first 共同解决当前 GPU-Z 路径；若工具改读 PCI 配置空间，
+仍会看到物理 `1AF4:1050`，而未实现的 NVAPI 私有接口也可能使部分字段为空。该版本必须在
+真实 Windows 客体做端到端测试，不能仅凭静态单元测试承诺所有字段或第三方检测结果。
+
+## 7. 审计检查
+
+在 SDL 本地控制台检查：
 
 ```powershell
-# Win32_VideoController
-Get-CimInstance Win32_VideoController | Select Name,VideoProcessor,AdapterCompatibility,DriverVersion,Status
+$display = Get-PnpDevice -Class Display -PresentOnly
+$display | Format-List FriendlyName,Status,Problem,InstanceId
 
-# 期望：
-#   Name                 : NVIDIA GeForce GTX 1050
-#   AdapterCompatibility : NVIDIA
-#   DriverVersion        : 100.100.104.26600   (stock 0.1.266)
-#   Status               : OK
+$display | ForEach-Object {
+    Get-PnpDeviceProperty -InstanceId $_.InstanceId `
+        -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath
+}
 
-# 测试模式
-bcdedit /enum '{current}' | Select-String testsigning
-# 期望：testsigning             No
-
-# 启动链（应该是原版）
-mountvol S: /S
-Get-FileHash S:\EFI\Microsoft\Boot\bootmgfw.efi -Algorithm SHA256
-mountvol S: /D
-# 期望：和 Microsoft 原版 bootmgr 哈希一致（绝不应等于 EfiGuard Loader.efi 的哈希）
-
-# Trusted Root 中 NVIDIA 相关
-Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -match 'NVIDIA' }
-# 期望：空
+$identityRoot = 'HKLM:\SOFTWARE\StealthGPU'
+$currentIdentity = (Get-ItemProperty -LiteralPath $identityRoot `
+    -Name CurrentIdentity).CurrentIdentity
+if ($currentIdentity -notmatch '^[0-9A-F]{32}$') {
+    throw 'CurrentIdentity 不是有效的已提交身份指针'
+}
+Get-ItemProperty -LiteralPath (Join-Path $identityRoot "Identities\$currentIdentity") |
+    Format-List IdentitySchemaVersion,IdentityMode,SpoofName,SpoofPciVendorId,
+        SpoofPciDeviceId,SpoofRevisionId,SpoofMemoryType,
+        SpoofMemoryBusWidthBits,SpoofBaseClockKHz,SpoofBoostClockKHz,
+        SpoofMemoryClockKHz,SpoofSliSupported
 ```
 
-GPU-Z 打开后应该看到 `NVIDIA GeForce GTX 1050`、Subvendor `NVIDIA`、Device ID `10DE 1C81`。NVAPI 可见的核心频率/显存/驱动版本由 `nvapi64.dll` shim 提供。
+期望同时看到物理 InstanceId `1AF4:1050`、HardwareID 逻辑首项 `10DE:1C82`、第二项
+物理 `1AF4:1050`、服务 `VioGpuDod` 和注册表逻辑 `10DE:1C82/A1`。GTX 1050 Ti
+还应是 schema 2、`GDDR5/128 bit`、`1290000/1392000/3504000` kHz 与
+`SLI=0`。如果只有名称正确而服务不是 `VioGpuDod`，应视为失败并重新运行最新
+统一 EXE，而不是继续叠加名称覆盖或安装深层驱动。
 
----
+还应核对 `SysWOW64\nvapi.dll` 和 `System32\nvapi64.dll` 与 ProgramData payload 摘要
+一致。出现其它摘要时必须视为冲突，不能强制覆盖。
 
-## 故障定位
+## 8. 结论
 
-| 症状 | 原因 | 处理 |
-|---|---|---|
-| `Win32_VideoController.Name = "Microsoft Basic Display Adapter"` | stock virtio-win 没装上，或装了但 `apply-gpu-spoof.ps1` 没执行覆盖 | 重跑 `irm .../shallow-stealth.ps1 \| iex` |
-| GPU 设备 `Problem = CM_PROB_FAILED_POST_START`（code 43） | 误用了 `GPU_SELFSIGNED=1` 启动器，但 guest 里是 stock viogpudo | 关 VM，去掉 `GPU_SELFSIGNED=1` 重启；或装 patched viogpudo（=深层路径，丢 ACE） |
-| Device Manager 驱动程序提供商显示「未知」或 `Red Hat, Inc.` | DEVPKEY `{a8b865dd-...}\0009` 槽位需 TrustedInstaller 权限 + DEVPROP 类型 0xFFFF0012 才能写对；clone 首启还会被 `viogpudo.inf` 写回 Red Hat | 关 VM，host 跑 `deploy/scripts/finalize-clone-gpu.sh 2`（会自动 sudo 提权） |
-| ACE 仍报 13-131106-0 | 系统里有黑名单驱动 / 测试模式开了 / 装过 EfiGuard 没回退干净 | 跑 `irm .../destealth-revert.ps1 \| iex` 全部回退，再走浅层 |
+当前浅层方案的准确表述是：
 
----
+> 物理 PCI 与内核驱动保持 `1AF4:1050 + stock VioGpuDod`；SetupAPI HardwareID 使用
+> profile 逻辑首项和完整物理尾部，双架构 NVAPI 通过标准系统搜索支持 GPU-Z 直接运行。
 
-## 与深层路径的关系
-
-| | 浅层（本文档） | 深层（`STEALTH-WORKFLOW.md` §3b） |
-|---|---|---|
-| GPU PCI 主 ID | 1AF4:1050（virtio） | 10DE:1C81（NVIDIA） |
-| viogpudo.sys 签名 | MS-WHQL（stock 0.1.266） | 伪 NVIDIA Driver Signer（patched） |
-| EfiGuard | 不装 | 装（替换 bootmgfw） |
-| Trusted Root 多余根证书 | 无 | 加伪 NVIDIA Code Signing Root |
-| GPU-Z 看到 1050 | ✅（注册表 + nvapi shim） | ✅（PCI 主 ID + 注册表 + nvapi shim） |
-| testsigning | No | No |
-| ACE 13-131106-0 | **过** | **不过** |
-| 适用场景 | 腾讯 ACE / 网易 NP / 一般用户态防 VM 检测 | 不打 ACE 系，对抗内核态 PCI 主 ID 检查 |
-
-两条路径共用同一份启动器和身份 profile，靠 `GPU_SELFSIGNED` 开关切换。
+它解决的是用户态身份兼容和显示名称一致性，不是 NVIDIA 硬件仿真、驱动移植或客体
+3D 加速。所有部署都从统一离线 EXE 进入，不恢复早期深层路径。

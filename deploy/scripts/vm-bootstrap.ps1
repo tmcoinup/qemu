@@ -12,12 +12,11 @@
 #   5. Disable Defender real-time scanning + AutoReboot, switch crash dump
 #      to small (256KB minidump fits any pagefile).
 #
-# Host serves this file via the simple http.server in install-stealth.sh's
-# pre-flight, and the user runs:
+# 这是仅在确实需要 SSH 管理 guest 时才运行的可选工具；当前 GPU 浅层流程不依赖
+# OpenSSH，也不会由已退役的 install-stealth.sh 自动调用。若仍需此工具，可自行从
+# 可信介质复制到 guest 后本地执行，避免把 HTTP 流式脚本作为默认安装面。
 #
-#     irm http://<host>:8765/vm-bootstrap.ps1 | iex
-#
-# After this finishes, host can run install-stealth.sh <INSTANCE>.
+# 完成后，GPU 初始化仍只使用 deploy/guest-stealth/package.sh 生成的统一 EXE。
 
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -71,7 +70,7 @@ Set-ItemProperty $cc CrashDumpEnabled    3 -Type DWord -Force
 Set-ItemProperty $cc AlwaysKeepMemoryDump 1 -Type DWord -Force -EA 0
 
 Write-Host '=== suppress ms-gamingoverlay popup (LTSC has no Xbox Game Bar) ===' -Fore Cyan
-# CrossFire / DNF 等腾讯系网游启动时调 ms-gamingoverlay: URI 唤起 Xbox Game Bar，
+# CrossFire / DNF 等系网游启动时调 ms-gamingoverlay: URI 唤起 Xbox Game Bar，
 # LTSC 没装 Game Bar -> Shell 弹 "需要使用新应用以打开此 ms-gamingoverlay 链接"。
 # 两步根治: 注册 no-op handler 吃掉 URI + 关 Game DVR / GameBar 触发源。
 $gov = 'Registry::HKEY_CLASSES_ROOT\ms-gamingoverlay'
@@ -94,32 +93,11 @@ foreach ($k in @(
     Set-ItemProperty -Path $k.Path -Name $k.Name -Type DWord -Value $k.Value -EA 0
 }
 
-# NumLock — host SDL 不反向同步 LED, guest 默认 OFF 时小键盘 7 进的是 Home.
-# 把 guest 永久钉在 ON: .DEFAULT (登陆前 Welcome screen 阶段) + HKCU (登陆后) +
-# 当前会话立即按一次校准. "2147483650" = 0x80000002 = NumLock ON + 启动时
-# 主动写 LED, 缺高位光留 "2" 的话只在用户 first-time 才生效.
 # 永不息屏 — guest 默认 monitor=10min/sleep=30min, SDL 窗口闲置就黑.
 # powercfg 一次到位, 影响 active scheme 的 Default values.
 Write-Host '=== disabling guest monitor / sleep / hibernate / disk timeouts ===' -Fore Cyan
 foreach ($k in 'monitor-timeout-ac','monitor-timeout-dc','standby-timeout-ac','standby-timeout-dc','hibernate-timeout-ac','hibernate-timeout-dc','disk-timeout-ac','disk-timeout-dc') {
     powercfg /change $k 0 2>$null
-}
-
-Write-Host '=== forcing NumLock ON (host SDL no LED sync workaround) ===' -Fore Cyan
-$ki = 'InitialKeyboardIndicators'
-Set-ItemProperty -Path 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Keyboard' -Name $ki -Value '2147483650' -Type String -Force -EA 0
-Set-ItemProperty -Path 'HKCU:\Control Panel\Keyboard' -Name $ki -Value '2147483650' -Type String -Force -EA 0
-Add-Type -Name Kb -Namespace W -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, uint flags, System.IntPtr extra);
-[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern short GetKeyState(int vKey);
-'@ -EA 0
-$VK_NUMLOCK = 0x90
-if (([W.Kb]::GetKeyState($VK_NUMLOCK) -band 1) -eq 0) {
-    [W.Kb]::keybd_event([byte]$VK_NUMLOCK, 0, 0, [System.IntPtr]::Zero)
-    [W.Kb]::keybd_event([byte]$VK_NUMLOCK, 0, 2, [System.IntPtr]::Zero)
-    Write-Host '  toggled NumLock ON (was OFF)' -Fore Green
-} else {
-    Write-Host '  NumLock already ON' -Fore Gray
 }
 
 Write-Host ''
@@ -129,4 +107,4 @@ Get-NetIPAddress -AddressFamily IPv4 |
     Format-Table IPAddress,InterfaceAlias -AutoSize
 $tcp = Get-NetTCPConnection -LocalPort 22 -State Listen -EA 0
 Write-Host ('sshd listening: ' + ($tcp.Count -gt 0)) -Fore Green
-Write-Host 'Host can now: deploy/scripts/install-stealth.sh <INSTANCE>' -Fore Yellow
+Write-Host 'GPU 下一步：把最新 respawn-stealth.exe 复制到本机并本地运行' -Fore Yellow

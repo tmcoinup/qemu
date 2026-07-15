@@ -6,13 +6,87 @@
     [string]$SpoofName    = 'NVIDIA GeForce GTX 1050',
     [string]$SpoofVendor  = 'NVIDIA',           # 'NVIDIA' / 'AMD'
     [int]   $SpoofRamMb   = 2048,               # 显存 MB（注册表 HardwareInformation.MemorySize）
-    [string]$SpoofBios    = 'Version 86.07.48.00.38'
+    [string]$SpoofBios    = 'Version 86.07.48.00.38',
+    [ValidateSet('GDDR5')][string]$SpoofMemoryType = 'GDDR5', [ValidateRange(32, 1024)][ValidateScript({ ($_ -band ($_ - 1)) -eq 0 })][int]$SpoofMemoryBusWidthBits = 128,
+    [ValidateRange(100000, 5000000)][int]$SpoofBaseClockKHz = 1354000, [ValidateRange(100000, 5000000)][int]$SpoofBoostClockKHz = 1455000,
+    [ValidateRange(100000, 10000000)][int]$SpoofMemoryClockKHz = 3504000, [ValidateSet(0)][int]$SpoofSliSupported = 0,
+    # 正式 respawn 显式传入同一受保护 payload 目录，使双架构 NVAPI 发布与
+    # schema-2 identity 共用下方 durable try/finally。默认空值保留 standalone
+    # apply 的旧行为：只更新身份，不要求同目录存在系统 NVAPI 发布物。
+    [string]$NvapiPayloadDir = ''
 )
 
+$ErrorActionPreference = 'Stop'
 # zh-CN Win10 默认 console code page = 936 (GBK)，把 Write-Host 中文当 GBK 输出 → 终端乱码。
 try { chcp 65001 | Out-Null } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
+$powershellExe = Join-Path $PSHOME 'powershell.exe'
+
+# 三个辅助脚本是可独立测试、可独立分发的源码文件。主脚本只从自己的同目录
+# 读取它们，避免重新引入难以做 AST 检查的超长内嵌 here-string。除只读 ListOnly 外，
+# 在修改任何设备状态前先确认 payload 完整，防止安装到一半才发现辅助脚本缺失。
+$refreshHelperSource = Join-Path $PSScriptRoot 'refresh-gpu-name.ps1'; $displayModeHelperSource = Join-Path $PSScriptRoot 'force-displayfreq.ps1'
+$identityHelperSource = Join-Path $PSScriptRoot 'persist-gpu-profile.ps1'; $transactionHelperSource = Join-Path $PSScriptRoot 'gpu-profile-transaction.ps1'
+$missingHelper = @($refreshHelperSource, $displayModeHelperSource, $identityHelperSource,
+    $transactionHelperSource) |
+    Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
+if (-not $ListOnly -and $missingHelper) {
+    throw ("缺少同目录辅助脚本: " + $missingHelper)
+}
+
+# NVAPI 文件存在性要在 Stage 之前检查，避免明显残缺的正式 payload 先改注册表。
+# 摘要、PE 架构、系统目录与目标 allowlist 仍由 installer 在最终提交点重新验证，
+# 因而这里不能替代安装器自己的安全门禁。
+$nvapiPayloadRoot = ''; $nvapiInstallerSource = ''
+if (-not $ListOnly -and -not [string]::IsNullOrWhiteSpace($NvapiPayloadDir)) {
+    $nvapiPayloadRoot = [IO.Path]::GetFullPath($NvapiPayloadDir)
+    $nvapiInstallerSource = Join-Path $nvapiPayloadRoot 'install-nvapi-system.ps1'
+    $missingNvapiPayload = @('install-nvapi-system.ps1',
+        'nvapi-system-transaction.ps1', 'nvapi.dll', 'nvapi64.dll') |
+        ForEach-Object { Join-Path $nvapiPayloadRoot $_ } |
+        Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) } |
+        Select-Object -First 1
+    if ($missingNvapiPayload) {
+        throw ('正式 NVAPI payload 不完整：' + $missingNvapiPayload)
+    }
+}
+
+function Copy-HelperIfDifferent {
+    # legacy 安装可能直接从 ProgramData 中运行主脚本，此时源和持久化目标是同一文件。
+    # Windows 路径不区分大小写；先比较规范化绝对路径，相同就复用，避免 Copy-Item
+    # 报“无法覆盖自身”。路径不同才原样复制，从而继续保留 helper 的 UTF-8 BOM。
+    param([string]$Source, [string]$Destination)
+    $sourceFullPath = [System.IO.Path]::GetFullPath($Source)
+    $destinationFullPath = [System.IO.Path]::GetFullPath($Destination)
+    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($sourceFullPath, $destinationFullPath)) {
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+    }
+}
+
+function Remove-ScheduledTaskIfPresent {
+    # 旧实现直接调用 schtasks.exe /Delete。任务首次安装时本来就不存在，schtasks
+    # 会把“找不到文件”写到 stderr；在本脚本的严格错误模式下，这条可忽略信息会被
+    # PowerShell 提升为终止错误，进而错误回滚已经通过验证的 GPU identity 事务。
+    # 改用 Windows 内置 ScheduledTasks API：完整枚举成功后只匹配根目录同名项，
+    # 存在时才删除并复读。查询、删除或复读的真故障继续 fail-closed，不能把任务
+    # 服务/CIM 故障误判成“任务不存在”，也不能在旧任务仍可见时继续身份提交。
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    $matches = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+            [string]$_.TaskPath -ieq '\' -and [string]$_.TaskName -ieq $TaskName
+        })
+    if ($matches.Count -gt 1) { throw ('根目录存在多个同名计划任务：' + $TaskName) }
+    if ($matches.Count -eq 0) { return }
+    Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' `
+        -Confirm:$false -ErrorAction Stop
+    $remaining = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+            [string]$_.TaskPath -ieq '\' -and [string]$_.TaskName -ieq $TaskName
+        })
+    if ($remaining.Count -ne 0) {
+        throw ('计划任务删除后仍可见：' + $TaskName)
+    }
+}
 
 function Get-StealthDisplayDevices {
     # 统一枚举 Display 类设备；不使用 -Status OK，因为 Code 22/已禁用设备恰好不会出现在 OK 集合里。
@@ -69,22 +143,40 @@ function Enable-StealthDisplayDevices {
     return $changed
 }
 
-# 如果上一次 QEMU/guest 在 PnP 刷新中途崩溃，Windows 可能把显卡留下为 Code 22。
-# AutoDetect 前先把 Display 设备拉起，避免后续只能看到“已禁用”的旧状态。
-if (-not $ListOnly) {
-    Enable-StealthDisplayDevices -Reason 'AutoDetect 前清理 Code 22' | Out-Null
-}
+$identityTransactionId = $null; $identityTransactionCompleted = $false
+$nvapiTransactionPrepared = $false; $identityCompletionUnresolved = $false
+try {
+    if (-not $ListOnly) {
+        # Recover helper 内含 fail-closed 旧任务屏障；屏障失败会在 Stage 前终止。
+        $recovery = & $identityHelperSource -RecoverPending
+        if ($null -ne $recovery) {
+            Write-Host ('Recovered unfinished GPU identity transaction: ' +
+                $recovery.Action + '/' + $recovery.IdentityId) -ForegroundColor Yellow
+        }
+        if (-not [string]::IsNullOrWhiteSpace($nvapiInstallerSource)) {
+            # identity journal 先裁决 CurrentIdentity，再让 NVAPI durable receipt 按
+            # 同一 pointer Finalize/Rollback；新 reader 同时严格支持完整 schema-1/2。
+            $recoverNvapiArgs = @('-NoProfile', '-NonInteractive',
+                '-ExecutionPolicy', 'Bypass', '-File', $nvapiInstallerSource,
+                '-Action', 'Recover')
+            & $powershellExe @recoverNvapiArgs
+            if ($LASTEXITCODE -ne 0) {
+                throw ('系统 NVAPI 中断事务恢复失败，退出码=' + $LASTEXITCODE)
+            }
+        }
+    }
 
-# -AutoDetect：从 PnP Display 设备的 SUBSYS 串查映射表，覆盖 SpoofName/Vendor/Bios/RamMb。
+# -AutoDetect：从 PnP Display 设备的 SUBSYS 串查整个 GPU bundle。显存类型/
+# 位宽与三组时钟必须和名称、PCI ID 同时切换，不允许沿用上一台 clone 的值。
 # 用于 clone-from-base 之后 profile reroll，PCI subsys 变了但 base 注册表覆盖还是老 GPU。
 if ($AutoDetect) {
     $gpuMap = @{
-        '138010DE' = @{ Name='NVIDIA GeForce GTX 750 Ti';  Vendor='NVIDIA'; Bios='Version 82.07.41.00.32';    RamMb=2048 }
-        '1D0110DE' = @{ Name='NVIDIA GeForce GT 1030';     Vendor='NVIDIA'; Bios='Version 86.08.46.00.81';    RamMb=2048 }
-        '1C8110DE' = @{ Name='NVIDIA GeForce GTX 1050';    Vendor='NVIDIA'; Bios='Version 86.07.48.00.38';    RamMb=2048 }
-        '1C8210DE' = @{ Name='NVIDIA GeForce GTX 1050 Ti'; Vendor='NVIDIA'; Bios='Version 86.07.48.00.A0';    RamMb=4096 }
-        '699F1002' = @{ Name='AMD Radeon RX 550';          Vendor='AMD';    Bios='016.011.000.029.000000';   RamMb=2048 }
-        '67FF1002' = @{ Name='AMD Radeon RX 560';          Vendor='AMD';    Bios='016.011.000.029.000000';   RamMb=4096 }
+        '138010DE' = @{ Name='NVIDIA GeForce GTX 750 Ti';  Vendor='NVIDIA'; Bios='Version 82.07.41.00.32';  RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1020000; BoostClockKHz=1085000; MemoryClockKHz=2700000; SliSupported=0 }
+        '1D0110DE' = @{ Name='NVIDIA GeForce GT 1030';     Vendor='NVIDIA'; Bios='Version 86.08.46.00.81';  RamMb=2048; MemoryType='GDDR5'; BusWidthBits=64;  BaseClockKHz=1227000; BoostClockKHz=1468000; MemoryClockKHz=3004000; SliSupported=0 }
+        '1C8110DE' = @{ Name='NVIDIA GeForce GTX 1050';    Vendor='NVIDIA'; Bios='Version 86.07.48.00.38';  RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1354000; BoostClockKHz=1455000; MemoryClockKHz=3504000; SliSupported=0 }
+        '1C8210DE' = @{ Name='NVIDIA GeForce GTX 1050 Ti'; Vendor='NVIDIA'; Bios='Version 86.07.48.00.A0';  RamMb=4096; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1290000; BoostClockKHz=1392000; MemoryClockKHz=3504000; SliSupported=0 }
+        '699F1002' = @{ Name='AMD Radeon RX 550';          Vendor='AMD';    Bios='016.011.000.029.000000'; RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1100000; BoostClockKHz=1183000; MemoryClockKHz=3500000; SliSupported=0 }
+        '67FF1002' = @{ Name='AMD Radeon RX 560';          Vendor='AMD';    Bios='016.011.000.029.000000'; RamMb=4096; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1175000; BoostClockKHz=1275000; MemoryClockKHz=3500000; SliSupported=0 }
     }
     $gpuDev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
               Where-Object { $_.Status -ne 'Unknown' } |
@@ -93,17 +185,45 @@ if ($AutoDetect) {
         $subsys = $matches[1].ToUpper()
         if ($gpuMap.ContainsKey($subsys)) {
             $cfg = $gpuMap[$subsys]
-            $SpoofName   = $cfg.Name
-            $SpoofVendor = $cfg.Vendor
-            $SpoofBios   = $cfg.Bios
-            $SpoofRamMb  = $cfg.RamMb
+            $SpoofName = $cfg.Name; $SpoofVendor = $cfg.Vendor; $SpoofBios = $cfg.Bios; $SpoofRamMb = $cfg.RamMb
+            $SpoofMemoryType = $cfg.MemoryType; $SpoofMemoryBusWidthBits = $cfg.BusWidthBits; $SpoofBaseClockKHz = $cfg.BaseClockKHz
+            $SpoofBoostClockKHz = $cfg.BoostClockKHz; $SpoofMemoryClockKHz = $cfg.MemoryClockKHz; $SpoofSliSupported = $cfg.SliSupported
             Write-Host "AutoDetect: subsys=$subsys -> $($cfg.Name)" -ForegroundColor Cyan
         } else {
-            Write-Host "AutoDetect: subsys=$subsys 未在已知池中，沿用默认 $SpoofName" -ForegroundColor Yellow
+            # 未知 SUBSYS 不能回落到默认 1050，否则名称、逻辑 PCI ID 与显存会拼成
+            # 一个不存在的型号。明确失败，让外层 respawn 保留日志并停止安装 shim。
+            throw "AutoDetect: subsys=$subsys 未在已知 GPU 池中，拒绝伪造默认型号"
         }
     } else {
-        Write-Host "AutoDetect: 未找到 Display 设备或缺 SUBSYS 串，沿用默认参数" -ForegroundColor Yellow
+        throw "AutoDetect: 未找到在线 Display 设备或 InstanceId 缺少 SUBSYS，拒绝继续"
     }
+}
+
+if (-not $ListOnly) {
+    # clone 的 Class\NNNN 可能仍写着 base 上一代 profile 名。必须在 helper 提交
+    # 新 SpoofName 之前先捕获旧值，后面才能把旧名加入 target needle；否则旧 GTX
+    # 切到新 GTX/AMD 时会找不到 Class 目标，而配置已经先变成新型号。
+    # refresh helper 的只读模式使用与 NVAPI 相同的 pointer/schema 双重校验；旧版
+    # root.SpoofName 只是兼容镜像，不能再参与 target 选择，否则并发更新时会混入旧名。
+    $previousIdentity = & $refreshHelperSource -ReadIdentityOnly -AllowMissing
+    $previousSpoofName = if ($null -ne $previousIdentity) { $previousIdentity.SpoofName } else { $null }
+
+    # 这是所有 PnP/显卡/监视器写入前的物理门禁。helper 会确认唯一在线设备确实由
+    # stock VioGpuDod 驱动且主 ID 为 1AF4:1050，再以 schema-last 方式提交逻辑
+    # 10DE:1C82 等身份。深层 10DE/1002 旧机在此即失败，不会留下半套 Class/Enum 修改。
+    Write-Host "Preflighting and staging shallow user-mode PCI identity..." `
+        -ForegroundColor Cyan
+    $stageReceipt = & $identityHelperSource -Stage -SpoofName $SpoofName -SpoofVendor $SpoofVendor `
+        -SpoofBios $SpoofBios -SpoofRamMb $SpoofRamMb -SpoofMemoryType $SpoofMemoryType -SpoofMemoryBusWidthBits $SpoofMemoryBusWidthBits -SpoofBaseClockKHz $SpoofBaseClockKHz -SpoofBoostClockKHz $SpoofBoostClockKHz -SpoofMemoryClockKHz $SpoofMemoryClockKHz -SpoofSliSupported $SpoofSliSupported
+    if ($null -eq $stageReceipt -or [string]::IsNullOrWhiteSpace($stageReceipt.NewIdentityId)) {
+        throw '身份写者没有返回 durable Stage receipt'
+    }
+    $identityTransactionId = [string]$stageReceipt.NewIdentityId
+    $stagedIdentity = & $refreshHelperSource -ReadIdentityOnly -StagedIdentityId $identityTransactionId
+
+    # 物理门禁通过后才允许修复 Code 22。禁用设备仍可被 PresentOnly/Enum 注册表识别，
+    # 因而不需要为了 AutoDetect 提前改变设备状态。
+    Enable-StealthDisplayDevices -Reason '浅层物理门禁通过后清理 Code 22' | Out-Null
 }
 
 # apply-gpu-spoof.ps1 - run INSIDE the Win10 guest, as Administrator.
@@ -122,16 +242,17 @@ if ($AutoDetect) {
 #      DeviceDesc from display.inf on every init, so we re-apply the spoof
 #      strings a couple of seconds after every boot. Pass -SkipTask to omit.
 #
-# IMPORTANT followup:
+# OPTIONAL legacy diagnostic:
 #   Device Manager's "驱动程序提供商 / 驱动程序说明" (Driver Provider / Desc)
 #   on the Driver tab read the DEVPKEY storage under
 #     Enum\PCI\<hwid>\<inst>\Properties\{a8b865dd-...}\0009|0004\00000000
 #   which is locked to TrustedInstaller AND must use DEVPROP type 0xFFFF0012,
-#   not REG_SZ. Both the ACL and the type field can only be fixed reliably
-#   offline. After running this script, shut down the VM and run on the host:
+#   not REG_SZ. The shallow one-click path does not require this cosmetic field:
+#   GPU-Z/WMI/SetupAPI identity and the VioGpuDod binding are verified separately.
+#   Only when diagnosing that legacy Driver-tab field may an operator shut down
+#   the VM and optionally run this host-side offline helper:
 #     sudo deploy/scripts/host-fix-gpu-devpkey.sh <INSTANCE>
-#   (see USAGE.md §7.7). Without that step you'll see "驱动程序提供商: 未知"
-#   even though WMI / Class\ fields are already NVIDIA.
+#   This helper is outside the required guest deployment and does not add 3D.
 #
 # Usage (PowerShell as Admin):
 #   powershell -ExecutionPolicy Bypass -File .\apply-gpu-spoof.ps1
@@ -144,130 +265,8 @@ $spoofName    = $SpoofName
 $spoofVendor  = $SpoofVendor                             # Win32_VideoController.AdapterCompatibility / DxDiag 制造商
 $spoofBios    = $SpoofBios                               # HardwareInformation.BiosString (随机 NVIDIA/AMD)
 $spoofRamMb   = $SpoofRamMb                              # HardwareInformation.MemorySize (字节 = $spoofRamMb * 1MB)
-# Monitor 字段必须和 EDID 协调一致:
-#   QEMU edid-generate.c 现在把 EDID 上报为 SAM:0x0F65 + week32/2018,
-#   PnP HardwareID 自动变成 MONITOR\SAM0F65 — 这是真实 Samsung S24F350F
-#   面板的产品码. 注册表里的可读名也对齐到同一个具体型号.
-$monitorName  = 'Samsung S24F350F'
-$monitorMfg   = 'Samsung Electronics Co., Ltd.'
-$monitorHwId  = 'MONITOR\SAM0F65'                        # PnP HardwareID 主键
-$monitorPNP   = 'SAM0F65'                                # Enum\DISPLAY 子键名
 $classGuid    = '{4d36e968-e325-11ce-bfc1-08002be10318}'   # Display adapters
-$monClassGuid = '{4d36e96e-e325-11ce-bfc1-08002be10318}'   # Monitors
 $classRoot    = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $classGuid
-$monClassRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $monClassGuid
-$enumRoot     = 'HKLM:\SYSTEM\CurrentControlSet\Enum\PCI'
-$displayEnum  = 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY'
-
-# DEVPROPKEY fmtid for driver-related PnP properties (DEVPKEY_Device_Driver*):
-#   pid 4 = DriverDesc    pid 9 = DriverProvider
-#   pid 3 = DriverVersion pid 2 = DriverDate
-# Device Manager 的"驱动程序"选项卡读的是这一组, 不是 Class\...\ProviderName.
-$fmtDev       = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
-
-function Convert-ToRegPath {
-    param([string]$PSPath)
-    $r = $PSPath
-    $r = $r -replace '^Microsoft\.PowerShell\.Core\\Registry::', ''
-    $r = $r -replace '^HKEY_LOCAL_MACHINE', 'HKLM'
-    $r = $r -replace '^HKLM:', 'HKLM'
-    return $r
-}
-
-# --- TrustedInstaller ACL 穿透: SeTakeOwnership + SeRestorePrivilege + Take-RegOwnership ---
-# Enum\PCI\<hwid>\<inst>\Properties\{a8b865dd-...} 子树默认 owner=TrustedInstaller,
-# Admin/SYSTEM 连读都不行. 光 reg.exe /f 穿不过去, 必须先启 token 特权再 SetOwner.
-if (-not ('StealthPriv' -as [type])) {
-    Add-Type -Namespace Stealth -Name Priv -MemberDefinition @'
-[DllImport("advapi32.dll", SetLastError=true)]
-public static extern bool OpenProcessToken(System.IntPtr h, uint da, out System.IntPtr tok);
-[DllImport("advapi32.dll", SetLastError=true)]
-public static extern bool LookupPrivilegeValue(string sys, string name, out long luid);
-[DllImport("advapi32.dll", SetLastError=true)]
-public static extern bool AdjustTokenPrivileges(System.IntPtr tok, bool dis, ref TOKEN_PRIVILEGES np, uint bl, System.IntPtr pp, System.IntPtr rl);
-[DllImport("kernel32.dll")] public static extern System.IntPtr GetCurrentProcess();
-[DllImport("kernel32.dll")] public static extern bool CloseHandle(System.IntPtr h);
-[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-public struct TOKEN_PRIVILEGES {
-    public uint Count; public long Luid; public uint Attr;
-}
-public static bool Enable(string name) {
-    System.IntPtr tok;
-    if (!OpenProcessToken(GetCurrentProcess(), 0x28, out tok)) return false;
-    long luid;
-    if (!LookupPrivilegeValue(null, name, out luid)) { CloseHandle(tok); return false; }
-    TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES();
-    tp.Count = 1; tp.Luid = luid; tp.Attr = 2;
-    bool ok = AdjustTokenPrivileges(tok, false, ref tp, 0, System.IntPtr.Zero, System.IntPtr.Zero);
-    CloseHandle(tok);
-    return ok;
-}
-'@ -ErrorAction SilentlyContinue
-}
-try { [Stealth.Priv]::Enable('SeTakeOwnershipPrivilege') | Out-Null } catch {}
-try { [Stealth.Priv]::Enable('SeRestorePrivilege')       | Out-Null } catch {}
-try { [Stealth.Priv]::Enable('SeBackupPrivilege')        | Out-Null } catch {}
-
-function Take-RegOwnership {
-    # 给 Admin 拿下 owner 并授 FullControl, 调用者保证 Enable 了 SeTakeOwnership/SeRestore.
-    param([string]$HiveRelPath)   # e.g. 'SYSTEM\CurrentControlSet\Enum\PCI\...'
-    try {
-        $admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
-        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-            $HiveRelPath,
-            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-            [System.Security.AccessControl.RegistryRights]::TakeOwnership)
-        if (-not $key) { return $false }
-        $acl = $key.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Owner)
-        $acl.SetOwner($admins)
-        $key.SetAccessControl($acl)
-        $key.Close()
-
-        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
-            $HiveRelPath,
-            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-            [System.Security.AccessControl.RegistryRights]::ChangePermissions)
-        if (-not $key) { return $false }
-        $acl = $key.GetAccessControl()
-        $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-            $admins, 'FullControl',
-            ([System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'),
-            'None', 'Allow')
-        $acl.AddAccessRule($rule)
-        $key.SetAccessControl($acl)
-        $key.Close()
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Set-DevProp {
-    # 关键: reg.exe 只能写 REG_SZ (type 0x1), 而 DEVPKEY 存储期望
-    # DEVPROP_TYPE_STRING (type 0xFFFF0012). 类型不对 SetupDiGetDeviceProperty
-    # 返回失败, Device Manager "驱动程序提供商" 显示 "未知".
-    #
-    # - Class\{4d36e968-...}\NNNN\Properties\{fmtid}\... 这一路历史上不严格,
-    #   reg.exe REG_SZ 落得下去, Class 子键也不是 DNF 查询的主路径, 保留.
-    # - Enum\PCI\<hwid>\<inst>\Properties\{fmtid}\...\00000000 才是 Device Manager
-    #   Driver 选项卡读的那一份, 这里必须保持 vk.type=0xFFFF0012, 由
-    #   host-fix-gpu-devpkey.sh 在 host 侧 offline 写. 我们在这里 *绝对不能*
-    #   用 reg.exe /t REG_SZ /f 去写: /f 会把 vk.type 重置成 0x1, 把 host-fix
-    #   的成果抹掉, 重启后 "未知" 又回来.
-    param([string]$DevPath, [string]$Fmtid, [string]$PidHex, [string]$Value)
-    # 路径里带 Enum\PCI = 交给 host-fix, 这里 skip
-    if ($DevPath -match 'Enum\\PCI\\') { return }
-    $propKey = $DevPath + '\Properties\' + $Fmtid + '\' + $PidHex
-    $r = Convert-ToRegPath $propKey
-    & reg.exe add "$r" /v "00000000" /t REG_SZ /d $Value /f 2>$null | Out-Null
-    $q = & reg.exe query "$r" /v "00000000" 2>$null
-    if ($LASTEXITCODE -eq 0 -and $q) { return }
-    $propRoot = ($r -replace '^HKLM\\', '') -replace '\\\d{4}$', ''
-    $taken = Take-RegOwnership $propRoot
-    if ($taken) {
-        & reg.exe add "$r" /v "00000000" /t REG_SZ /d $Value /f 2>$null | Out-Null
-    }
-}
 
 # Chinese localized needles built from char codes - keeps the source ASCII
 # so Windows PowerShell 5.1 parses it correctly regardless of codepage.
@@ -284,10 +283,7 @@ $fakeNeedles = @(
 # 不再是 "Red Hat VirtIO GPU DOD" 而是上一代 spoof 写进去的型号名（比如 base 里抽到了
 # AMD Radeon RX 560）。把"上次 spoof 名字"读出来加进 needle 池，让 clone 后的 AutoDetect
 # 能识别"上一代 spoof 留下的 Class 项 = 我应该重写的目标"。
-$prevSpoof = $null
-try {
-    $prevSpoof = (Get-ItemProperty 'HKLM:\SOFTWARE\StealthGPU' -ErrorAction SilentlyContinue).SpoofName
-} catch {}
+$prevSpoof = $previousSpoofName
 if ($prevSpoof -and $prevSpoof.Trim()) {
     $fakeNeedles = $fakeNeedles + '|' + [regex]::Escape($prevSpoof)
 }
@@ -332,259 +328,69 @@ if (-not $targets) {
     exit 1
 }
 
-# ---- patch class subkey(s) -------------------------------------------------
-foreach ($t in $targets) {
-    Write-Host ""
-    Write-Host ("Patching class " + $t.Sub + " (was: " + $t.Desc + ")") -ForegroundColor Cyan
-    # ChipType (GPU-Z 等读 HardwareInformation.ChipType): 用 SpoofName 去掉 vendor 前缀作为芯片型号
-    $chipType = $spoofName -replace '^(NVIDIA|AMD)\s+', ''
-    # MemorySize: $spoofRamMb * 1MB. byte[] little-endian QWORD.
-    $memBytes = [BitConverter]::GetBytes([UInt64]$spoofRamMb * 1MB)
-
-    Set-ItemProperty -Path $t.Path -Name "DriverDesc"   -Type String -Value $spoofName
-    Set-ItemProperty -Path $t.Path -Name "ProviderName" -Type String -Value $spoofVendor
-    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.AdapterString" -Type String -Value $spoofName
-    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.ChipType"      -Type String -Value $chipType
-    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.DacType"       -Type String -Value "Integrated RAMDAC"
-    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.BiosString"    -Type String -Value $spoofBios
-    Set-ItemProperty -Path $t.Path -Name "HardwareInformation.MemorySize" -Type Binary -Value $memBytes[0..3]
-    if (Get-ItemProperty -Path $t.Path -Name "HardwareInformation.qwMemorySize" -ErrorAction SilentlyContinue) {
-        Remove-ItemProperty -Path $t.Path -Name "HardwareInformation.qwMemorySize"
-    }
-    New-ItemProperty -Path $t.Path -Name "HardwareInformation.qwMemorySize" -PropertyType QWord -Value ([UInt64]$spoofRamMb * 1MB) | Out-Null
-    # PnP properties on class subkey (fallback for Driver tab)
-    Set-DevProp -DevPath $t.Path -Fmtid $fmtDev -PidHex '0004' -Value $spoofName
-    Set-DevProp -DevPath $t.Path -Fmtid $fmtDev -PidHex '0009' -Value $spoofVendor
-    Write-Host ("  -> DriverDesc now: " + (Get-ItemProperty -Path $t.Path -Name DriverDesc).DriverDesc) -ForegroundColor Green
+# ---- strict active Enum/Class projection, then pointer commit -------------
+$activeEnumPath = 'HKLM:\SYSTEM\CurrentControlSet\Enum\' + $stagedIdentity.SourceInstanceId
+$activeDriver = [string](Get-ItemPropertyValue -Path $activeEnumPath -Name Driver -ErrorAction Stop)
+$activeDriverMatch = [regex]::Match($activeDriver,
+    '^\{4d36e968-e325-11ce-bfc1-08002be10318\}\\([0-9]{4})$',
+    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+if (-not $activeDriverMatch.Success) { throw ('active Display Driver 绑定非法：' + $activeDriver) }
+$activeSubkey = $activeDriverMatch.Groups[1].Value
+$targets = @($targets | Where-Object { $_.Sub -ceq $activeSubkey })
+if ($targets.Count -ne 1) {
+    throw ('选中的 Class target 不是 SourceInstanceId 唯一绑定子键：' + $activeSubkey)
 }
 
-# ---- patch Enum\PCI FriendlyName + DeviceDesc ------------------------------
-$targetSubs = $targets | ForEach-Object { $_.Sub }
-Write-Host ""
-Write-Host "Scanning Enum\PCI for nodes bound to the patched class subkey(s)..." -ForegroundColor Cyan
-$matchedEnum = @()
-Get-ChildItem $enumRoot -ErrorAction SilentlyContinue | ForEach-Object {
-    $venDev = $_
-    Get-ChildItem $venDev.PSPath -ErrorAction SilentlyContinue | ForEach-Object {
-        $inst = $_
-        $drv = (Get-ItemProperty -Path $inst.PSPath -Name Driver -ErrorAction SilentlyContinue).Driver
-        if ($drv) {
-            foreach ($s in $targetSubs) {
-                $needle = $classGuid + '\' + $s
-                if ($drv -like ("*" + $needle + "*")) {
-                    $matchedEnum += [pscustomobject]@{
-                        Path = $inst.PSPath
-                        Short = ($venDev.PSChildName + '\' + $inst.PSChildName)
-                    }
-                }
-            }
-        }
+# reader 必须先于 CurrentIdentity pointer 发布。deferred installer 在任何系统
+# DLL Move 前写 durable receipt，并保留旧双架构备份；此后无论 Commit/Complete
+# 在哪里失败，outer finally 都能先恢复旧 pointer、再恢复历史 reader。
+if (-not [string]::IsNullOrWhiteSpace($nvapiInstallerSource)) {
+    Write-Host 'Preparing durable dual-architecture NVAPI projection...' `
+        -ForegroundColor Cyan
+    $nvapiInstallArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy',
+        'Bypass', '-File', $nvapiInstallerSource, '-Action', 'Install',
+        '-PayloadDir', $nvapiPayloadRoot, '-TransactionId', $identityTransactionId,
+        '-DeferFinalize')
+    & $powershellExe @nvapiInstallArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw ('系统 NVAPI 身份投影准备失败，退出码=' + $LASTEXITCODE)
     }
+    $nvapiTransactionPrepared = $true
+    Write-Host '  -> dual-architecture reader prepared before pointer commit' `
+        -ForegroundColor Green
 }
+Write-Host ("Committing strictly verified active Class " + $activeSubkey + "...") `
+    -ForegroundColor Cyan
+& $identityHelperSource -CommitIdentity $identityTransactionId
+$committedIdentity = & $refreshHelperSource -ReadIdentityOnly
+if ($committedIdentity.IdentityId -cne $identityTransactionId) {
+    throw 'CurrentIdentity 提交后严格回读不是本事务 ID'
+}
+Write-Host ("  -> active Enum/Class committed as " + $spoofName) -ForegroundColor Green
 
-if (-not $matchedEnum) {
-    Write-Host "  (no matching Enum\PCI node found)" -ForegroundColor Yellow
-} else {
-    foreach ($m in $matchedEnum) {
-        Set-ItemProperty -Path $m.Path -Name FriendlyName -Type String -Value $spoofName
-        Set-ItemProperty -Path $m.Path -Name DeviceDesc   -Type String -Value $spoofName
-        # Mfg -> DxDiag "制造商" 字段的真正来源 (INF Provider string, burned into PnP at install)
-        Set-ItemProperty -Path $m.Path -Name Mfg          -Type String -Value $spoofVendor
-        # DEVPKEY_Device_DriverDesc / DriverProvider -> 设备管理器"驱动程序"选项卡.
-        # Set-DevProp 检测到 Enum\PCI 路径会 skip, 这一条 DEVPKEY 要靠
-        # host-fix-gpu-devpkey.sh 在 host 侧 offline 写 0xFFFF0012 才能生效.
-        Set-DevProp -DevPath $m.Path -Fmtid $fmtDev -PidHex '0004' -Value $spoofName
-        Set-DevProp -DevPath $m.Path -Fmtid $fmtDev -PidHex '0009' -Value $spoofVendor
-        Write-Host ("  " + $m.Short + " -> " + $spoofName + " (Mfg=" + $spoofVendor + ", DriverProvider=" + $spoofVendor + ")") -ForegroundColor Green
-    }
-}
+# Monitor 节点统一由最终 strict refresh 处理；避免在 durable transaction 之外
+# 维护第二套广扫写入。Monitor profile 固定，不参与 GPU identity commit。
 
-# ---- patch Monitor class ---------------------------------------------------
-# Monitor 的来源 (按检测路径的高频顺序):
-#   1) Enum\DISPLAY\<PNPID>\<inst>\{DeviceDesc, FriendlyName, Mfg, HardwareID,
-#      CompatibleIDs}            -> Device Manager / Win32_DesktopMonitor /
-#                                    DxDiag 显示器制造商/型号
-#   2) Class\{4d36e96e-...}\NNNN\{DriverDesc, ProviderName} -> 已装的监视器
-#                                    INF 驱动 (没装就只有 generic 那一份)
-#
-# EDID (我们的 hw/display/edid-generate.c 改动) 已经把厂商/产品码上报为
-# SAM:0x0F65, 实际 PnP 出的 HardwareID 就是 MONITOR\SAM0F65 — 对应真实
-# Samsung S24F350F. 没装专用 INF 时 Windows 会用 display.inf 的 generic
-# 节点, 注册表里 DeviceDesc 落 "Generic PnP Monitor". 这里直接覆写到
-# "Samsung S24F350F" + Mfg = "Samsung Electronics Co., Ltd.", WMI 和
-# DxDiag 就一致了.
-Write-Host ""
-Write-Host "Patching Monitor (DISPLAY enum + {4d36e96e-...} class)..." -ForegroundColor Cyan
-Get-ChildItem $displayEnum -ErrorAction SilentlyContinue | ForEach-Object {
-    $pnp = $_
-    Get-ChildItem $pnp.PSPath -ErrorAction SilentlyContinue | ForEach-Object {
-        $inst = $_
-        Set-ItemProperty -Path $inst.PSPath -Name DeviceDesc   -Type String -Value $monitorName
-        Set-ItemProperty -Path $inst.PSPath -Name FriendlyName -Type String -Value $monitorName
-        Set-ItemProperty -Path $inst.PSPath -Name Mfg          -Type String -Value $monitorMfg
-        # HardwareID/CompatibleIDs 是 PnP 在第一次发现 EDID 时根据上报的
-        # 厂商:产品码自动写的, 但只有当前枚举的 PNPID 跟我们 EDID 一致
-        # (SAM0F65) 时才能匹配 -- 给非匹配 PNPID 节点 (留下来的旧 EDID
-        # 缓存) 一并刷成 SAM0F65 让残留枚举也对齐.
-        Set-ItemProperty -Path $inst.PSPath -Name HardwareID `
-            -Type MultiString -Value @($monitorHwId)
-        Set-ItemProperty -Path $inst.PSPath -Name CompatibleIDs `
-            -Type MultiString -Value @('MONITOR\Default_Monitor')
-        Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0004' -Value $monitorName
-        Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0009' -Value $monitorMfg
-        Write-Host ("  " + $pnp.PSChildName + "\" + $inst.PSChildName + " -> " + $monitorName) -ForegroundColor Green
-    }
-}
-Get-ChildItem $monClassRoot -ErrorAction SilentlyContinue |
-    Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
-        $p = $_.PSPath
-        if (Get-ItemProperty -Path $p -Name DriverDesc -ErrorAction SilentlyContinue) {
-            Set-ItemProperty -Path $p -Name DriverDesc   -Type String -Value $monitorName
-            Set-ItemProperty -Path $p -Name ProviderName -Type String -Value $monitorMfg
-            Set-DevProp -DevPath $p -Fmtid $fmtDev -PidHex '0004' -Value $monitorName
-            Set-DevProp -DevPath $p -Fmtid $fmtDev -PidHex '0009' -Value $monitorMfg
-            Write-Host ("  Class\{4d36e96e-...}\" + $_.PSChildName + " -> " + $monitorName) -ForegroundColor Green
-        }
-    }
+# 显示模式脚本无论是否带 -SkipTask 都会在当前会话同步执行；以下状态只决定当当前
+# 进程位于 Session 0 等无交互会话时，是否确实存在一个可在下次登录重试的延后任务。
+$displayTaskInstalled = $displayModeDeferred = $displayModeFailed = $false
+$displayModeSummary = '尚未执行显示模式验收'
 
 # ---- install boot-time refresh task ----------------------------------------
 if (-not $SkipTask) {
     Write-Host ""
     Write-Host "Installing boot-time refresh task (defeats BasicDisplay clobber)..." -ForegroundColor Cyan
 
-    $taskName  = 'StealthGPU-RefreshName'
-    $scriptDir = 'C:\ProgramData\StealthGPU'
+    $taskName = 'StealthGPU-RefreshName'; $scriptDir = Split-Path -Parent $PSScriptRoot
     $scriptPath = Join-Path $scriptDir 'refresh-gpu-name.ps1'
     New-Item -Path $scriptDir -ItemType Directory -Force | Out-Null
 
-    # 把当前 spoof 配置持久化到 HKLM:\SOFTWARE\StealthGPU，让开机后的 refresh
-    # 任务读到当前 VM 实际选定的 GPU（不再硬编码 GTX 1050）。
-    New-Item -Path 'HKLM:\SOFTWARE\StealthGPU' -Force | Out-Null
-    Set-ItemProperty -Path 'HKLM:\SOFTWARE\StealthGPU' -Name SpoofName    -Type String -Value $spoofName
-    Set-ItemProperty -Path 'HKLM:\SOFTWARE\StealthGPU' -Name SpoofVendor  -Type String -Value $spoofVendor
-    Set-ItemProperty -Path 'HKLM:\SOFTWARE\StealthGPU' -Name SpoofBios    -Type String -Value $spoofBios
-    Set-ItemProperty -Path 'HKLM:\SOFTWARE\StealthGPU' -Name SpoofRamMb   -Type DWord  -Value $spoofRamMb
+    # 原样复制带 UTF-8 BOM 的独立源码，确保 Windows PowerShell 5.1 不按本地代码页误读。
+    Copy-HelperIfDifferent -Source $refreshHelperSource -Destination $scriptPath
 
-    $body = @'
-$ErrorActionPreference = 'SilentlyContinue'
-# 从 HKLM:\SOFTWARE\StealthGPU 读出本 VM 选定的 spoof 名称（apply-gpu-spoof.ps1
-# 安装时写入），缺省回退到 GTX 1050 兼容老安装。
-$cfg = Get-ItemProperty 'HKLM:\SOFTWARE\StealthGPU' -ErrorAction SilentlyContinue
-$spoofName    = if ($cfg.SpoofName)   { $cfg.SpoofName }   else { 'NVIDIA GeForce GTX 1050' }
-$spoofVendor  = if ($cfg.SpoofVendor) { $cfg.SpoofVendor } else { 'NVIDIA' }
-$spoofBios    = if ($cfg.SpoofBios)   { $cfg.SpoofBios }   else { 'Version 86.07.48.00.38' }
-$spoofRamMb   = if ($cfg.SpoofRamMb)  { [int]$cfg.SpoofRamMb } else { 2048 }
-$chipType     = $spoofName -replace '^(NVIDIA|AMD)\s+', ''
-$memBytes     = [BitConverter]::GetBytes([UInt64]$spoofRamMb * 1MB)
-$monitorName  = 'Samsung S24F350F'
-$monitorMfg   = 'Samsung Electronics Co., Ltd.'
-$monitorHwId  = 'MONITOR\SAM0F65'
-$classGuid    = '{4d36e968-e325-11ce-bfc1-08002be10318}'
-$monClassGuid = '{4d36e96e-e325-11ce-bfc1-08002be10318}'
-$fmtDev       = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
-$classRoot    = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $classGuid
-$monClassRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $monClassGuid
-$enumRoot     = 'HKLM:\SYSTEM\CurrentControlSet\Enum\PCI'
-$displayEnum  = 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY'
+    Remove-ScheduledTaskIfPresent -TaskName $taskName
 
-# SYSTEM-context refresh task. 主 spoof 脚本已经在首轮安装时把
-# Enum\PCI\...\Properties\{a8b865dd-...} 的 owner 改为 Administrators + FullControl,
-# 所以这里 reg.exe add 直接能落; 不用再 Take-RegOwnership (而且内嵌 @'...'@ Add-Type
-# 会和本文件的外层 heredoc 终结符冲突, 放在主脚本里就够了).
-
-function Set-DevProp {
-    # Enum\PCI\...\Properties\{a8b865dd-...} 由 host-fix-gpu-devpkey.sh 独占.
-    # reg.exe /f 会把 vk.type 从 0xFFFF0012 重置回 0x1, 让 Device Manager 的
-    # "驱动程序提供商" 再次变成 "未知", 所以这里对 Enum\PCI 路径直接 skip.
-    param([string]$DevPath, [string]$Fmtid, [string]$PidHex, [string]$Value)
-    if ($DevPath -match 'Enum\\PCI\\') { return }
-    $propKey = $DevPath + '\Properties\' + $Fmtid + '\' + $PidHex
-    $r = $propKey -replace '^Microsoft\.PowerShell\.Core\\Registry::', '' `
-                  -replace '^HKEY_LOCAL_MACHINE', 'HKLM' `
-                  -replace '^HKLM:', 'HKLM'
-    & reg.exe add "$r" /v "00000000" /t REG_SZ /d $Value /f 2>$null | Out-Null
-}
-
-# -- GPU: Enum\PCI FriendlyName/DeviceDesc/Mfg + DEVPKEY_Device_Driver{Desc,Provider} --
-foreach ($ven in Get-ChildItem $enumRoot) {
-    if ($ven.PSChildName -notlike 'VEN_1AF4*' -and
-        $ven.PSChildName -notlike 'VEN_1B36*' -and
-        $ven.PSChildName -notlike 'VEN_1234*') { continue }
-    foreach ($inst in Get-ChildItem $ven.PSPath) {
-        $drv = (Get-ItemProperty -Path $inst.PSPath -Name Driver).Driver
-        if ($drv -like ('*' + $classGuid + '*')) {
-            Set-ItemProperty -Path $inst.PSPath -Name FriendlyName -Type String -Value $spoofName
-            Set-ItemProperty -Path $inst.PSPath -Name DeviceDesc   -Type String -Value $spoofName
-            Set-ItemProperty -Path $inst.PSPath -Name Mfg          -Type String -Value $spoofVendor
-            Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0004' -Value $spoofName
-            Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0009' -Value $spoofVendor
-        }
-    }
-}
-
-# -- Services\VioGpuDod\Video\DeviceDesc is Windows' own cache of the INF
-#    DeviceDesc, and 鲁大师 / some third-party tools read it directly.
-#    If we leave it referencing "@oem2.inf,%viogpudod.devicedesc%;Red Hat VirtIO..."
-#    the "Red Hat" tail survives every registry sweep. Overwrite with a plain
-#    resolved string so there is nothing for Windows to re-lookup. --
-$vgdVideo = 'HKLM:\SYSTEM\CurrentControlSet\Services\VioGpuDod\Video'
-if (Test-Path $vgdVideo) {
-    Set-ItemProperty -Path $vgdVideo -Name DeviceDesc -Type String -Value $spoofName -EA 0
-}
-
-# -- GPU: Class\{4d36e968-...} DriverDesc/ProviderName/HardwareInformation.* --
-foreach ($sub in Get-ChildItem $classRoot) {
-    if ($sub.PSChildName -notmatch '^\d{4}$') { continue }
-    $p  = $sub.PSPath
-    $dd = (Get-ItemProperty -Path $p -Name DriverDesc).DriverDesc
-    if ($dd) {
-        Set-ItemProperty -Path $p -Name DriverDesc   -Type String -Value $spoofName
-        Set-ItemProperty -Path $p -Name ProviderName -Type String -Value $spoofVendor
-        Set-ItemProperty -Path $p -Name 'HardwareInformation.AdapterString' -Type String -Value $spoofName
-        Set-ItemProperty -Path $p -Name 'HardwareInformation.ChipType'      -Type String -Value $chipType
-        Set-ItemProperty -Path $p -Name 'HardwareInformation.DacType'       -Type String -Value 'Integrated RAMDAC'
-        Set-ItemProperty -Path $p -Name 'HardwareInformation.BiosString'    -Type String -Value $spoofBios
-        Set-ItemProperty -Path $p -Name 'HardwareInformation.MemorySize' -Type Binary -Value $memBytes[0..3]
-        New-ItemProperty -Path $p -Name 'HardwareInformation.qwMemorySize' -PropertyType QWord -Value ([UInt64]$spoofRamMb * 1MB) -Force | Out-Null
-        Set-DevProp -DevPath $p -Fmtid $fmtDev -PidHex '0004' -Value $spoofName
-        Set-DevProp -DevPath $p -Fmtid $fmtDev -PidHex '0009' -Value $spoofVendor
-    }
-}
-
-# -- Monitor: Enum\DISPLAY and Class\{4d36e96e-...} --
-foreach ($pnp in Get-ChildItem $displayEnum) {
-    foreach ($inst in Get-ChildItem $pnp.PSPath) {
-        Set-ItemProperty -Path $inst.PSPath -Name DeviceDesc   -Type String -Value $monitorName
-        Set-ItemProperty -Path $inst.PSPath -Name FriendlyName -Type String -Value $monitorName
-        Set-ItemProperty -Path $inst.PSPath -Name Mfg          -Type String -Value $monitorMfg
-        Set-ItemProperty -Path $inst.PSPath -Name HardwareID `
-            -Type MultiString -Value @($monitorHwId)
-        Set-ItemProperty -Path $inst.PSPath -Name CompatibleIDs `
-            -Type MultiString -Value @('MONITOR\Default_Monitor')
-        Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0004' -Value $monitorName
-        Set-DevProp -DevPath $inst.PSPath -Fmtid $fmtDev -PidHex '0009' -Value $monitorMfg
-    }
-}
-foreach ($sub in Get-ChildItem $monClassRoot) {
-    if ($sub.PSChildName -notmatch '^\d{4}$') { continue }
-    $p = $sub.PSPath
-    $dd = (Get-ItemProperty -Path $p -Name DriverDesc).DriverDesc
-    if ($dd) {
-        Set-ItemProperty -Path $p -Name DriverDesc   -Type String -Value $monitorName
-        Set-ItemProperty -Path $p -Name ProviderName -Type String -Value $monitorMfg
-        Set-DevProp -DevPath $p -Fmtid $fmtDev -PidHex '0004' -Value $monitorName
-        Set-DevProp -DevPath $p -Fmtid $fmtDev -PidHex '0009' -Value $monitorMfg
-    }
-}
-'@
-    # Write refresh script as UTF-8 with BOM so PS 5.1 on any codepage parses it
-    $bom   = [byte[]](0xEF,0xBB,0xBF)
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-    [System.IO.File]::WriteAllBytes($scriptPath, $bom + $bytes)
-
-    schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null
-
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    $action = New-ScheduledTaskAction -Execute $powershellExe `
         -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $scriptPath + '"')
     $trigBoot  = New-ScheduledTaskTrigger -AtStartup
     $trigLogon = New-ScheduledTaskTrigger -AtLogOn
@@ -598,91 +404,35 @@ foreach ($sub in Get-ChildItem $monClassRoot) {
     Write-Host ("  -> installed " + $scriptPath) -ForegroundColor Green
     Write-Host ("  -> task '" + $taskName + "' registered (AtStartup + AtLogOn, SYSTEM)") -ForegroundColor Green
 
-    # ---- 立刻 SYSTEM 上下文跑一遍, 穿 Properties\{a8b865dd-...} 的 ACL ----
-    Write-Host "  -> running task once now as SYSTEM to apply ACL-restricted keys..." -ForegroundColor Cyan
-    schtasks.exe /Run /TN $taskName | Out-Null
-    Start-Sleep -Seconds 3
-    Write-Host "  -> done (refresh script logged to " $scriptDir ")" -ForegroundColor Green
-
-    # ---- user-session task: force 1920x1080@60Hz via ChangeDisplaySettingsEx ----
-    # viogpudo 不填 dmDisplayFrequency, "高级显示设置" 里有源信号 -1×-1
-    # / 刷新率 1.000 Hz. ChangeDisplaySettingsEx 必须在交互会话里跑
-    # (Session 0 的 SYSTEM 没桌面, EnumDisplaySettings 全返 0). 用
-    # 当前登录用户 (autologon Administrator) 跑.
-    Write-Host ""
-    Write-Host "Installing user-session task to force 1920x1080@60Hz..." -ForegroundColor Cyan
-    $freqTask   = 'StealthGPU-ForceDisplayFreq'
-    $freqScript = Join-Path $scriptDir 'force-displayfreq.ps1'
-
-    $freqBody = @'
-# Force the active display mode to 1920x1080@60Hz so 高级显示设置 stops
-# showing 有源信号 -1×-1 / 刷新率 1.000 Hz. Idempotent; if the mode is
-# already correct, ChangeDisplaySettingsEx returns DISP_CHANGE_SUCCESSFUL
-# without flicker.
-$ErrorActionPreference = 'SilentlyContinue'
-Add-Type -ErrorAction Stop @"
-using System;
-using System.Runtime.InteropServices;
-public class StDisp {
-    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-    public struct DEVMODE {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmDeviceName;
-        public ushort dmSpecVersion;
-        public ushort dmDriverVersion;
-        public ushort dmSize;
-        public ushort dmDriverExtra;
-        public uint   dmFields;
-        public int    dmPositionX;
-        public int    dmPositionY;
-        public uint   dmDisplayOrientation;
-        public uint   dmDisplayFixedOutput;
-        public short  dmColor;
-        public short  dmDuplex;
-        public short  dmYResolution;
-        public short  dmTTOption;
-        public short  dmCollate;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmFormName;
-        public ushort dmLogPixels;
-        public uint   dmBitsPerPel;
-        public uint   dmPelsWidth;
-        public uint   dmPelsHeight;
-        public uint   dmDisplayFlags;
-        public uint   dmDisplayFrequency;
-        public uint   dmICMMethod;
-        public uint   dmICMIntent;
-        public uint   dmMediaType;
-        public uint   dmDitherType;
-        public uint   dmReserved1;
-        public uint   dmReserved2;
-        public uint   dmPanningWidth;
-        public uint   dmPanningHeight;
-    }
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
-    public static extern int EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
-    public static extern int ChangeDisplaySettings(ref DEVMODE devMode, uint flags);
 }
-"@
 
-$dm = New-Object StDisp+DEVMODE
-$dm.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($dm)
-$rc = [StDisp]::EnumDisplaySettings($null, -1, [ref]$dm)
-if ($rc -eq 0) { exit 0 }   # session has no display (Session 0 fallback) — give up
+# ---- prepare verified 1920x1080@60Hz mode switch ---------------------------
+# viogpudo 若未正确填充显示模式，Windows“高级显示设置”可能显示有源信号 -1×-1、
+# 刷新率 1.000Hz。ChangeDisplaySettings 只能操作当前交互桌面，Session 0 中的 SYSTEM
+# 进程无法代替用户切换；因此辅助脚本用明确退出码区分“已验证”“需重启”“无交互桌面”
+# 和真正失败，主脚本再依据是否安装了登录任务决定能否安全延后，绝不把未验证写成成功。
+$freqTask = 'StealthGPU-ForceDisplayFreq'
+if ($SkipTask) {
+    # FirstLogon 会传 -SkipTask；只创建本次运行所需的临时脚本，执行后立即删除，
+    # 不留下计划任务或永久辅助文件，保持“一次性执行”的原有约定。
+    $freqScript = Join-Path ([System.IO.Path]::GetTempPath()) `
+        ('stealth-display-mode-' + $PID + '.ps1')
+    $freqLog = ''
+} else {
+    $freqScript = Join-Path $scriptDir 'force-displayfreq.ps1'
+    $freqLog = Join-Path $scriptDir 'force-displayfreq.log'
+}
 
-$dm.dmPelsWidth        = 1920
-$dm.dmPelsHeight       = 1080
-$dm.dmBitsPerPel       = 32
-$dm.dmDisplayFrequency = 60
-# DM_PELSWIDTH(0x80000) | DM_PELSHEIGHT(0x100000) | DM_BITSPERPEL(0x40000) | DM_DISPLAYFREQUENCY(0x400000)
-$dm.dmFields = 0x5C0000
-[StDisp]::ChangeDisplaySettings([ref]$dm, 0) | Out-Null
-'@
-    $freqBytes = [System.Text.Encoding]::UTF8.GetBytes($freqBody)
-    [System.IO.File]::WriteAllBytes($freqScript, $bom + $freqBytes)
+# 原样复制独立显示模式 helper；临时模式与持久任务模式共用同一份受测源码。
+Copy-HelperIfDifferent -Source $displayModeHelperSource -Destination $freqScript
 
-    schtasks.exe /Delete /TN $freqTask /F 2>$null | Out-Null
-    $freqAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
-        -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $freqScript + '"')
+if (-not $SkipTask) {
+    Write-Host ""
+    Write-Host "Installing user-session task to enforce and verify 1920x1080@60Hz..." -ForegroundColor Cyan
+    Remove-ScheduledTaskIfPresent -TaskName $freqTask
+    $freqAction = New-ScheduledTaskAction -Execute $powershellExe `
+        -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+            $freqScript + '" -LogPath "' + $freqLog + '"')
     $freqTrig = New-ScheduledTaskTrigger -AtLogOn -User 'Administrator'
     $freqPrincipal = New-ScheduledTaskPrincipal -UserId 'Administrator' `
         -LogonType Interactive -RunLevel Highest
@@ -690,11 +440,17 @@ $dm.dmFields = 0x5C0000
         -DontStopIfGoingOnBatteries
     $freqSched = New-ScheduledTask -Action $freqAction -Trigger $freqTrig `
         -Principal $freqPrincipal -Settings $freqSettings
-    Register-ScheduledTask -TaskName $freqTask -InputObject $freqSched -Force | Out-Null
-    Write-Host ("  -> task '" + $freqTask + "' registered (AtLogOn, Administrator/Interactive)") -ForegroundColor Green
-    Write-Host "  -> running once now in current user session..." -ForegroundColor Cyan
-    schtasks.exe /Run /TN $freqTask | Out-Null
-    Start-Sleep -Seconds 2
+    try {
+        Register-ScheduledTask -TaskName $freqTask -InputObject $freqSched `
+            -Force -ErrorAction Stop | Out-Null
+        $displayTaskInstalled = $true
+        Write-Host ("  -> task '" + $freqTask + "' registered (AtLogOn, Administrator/Interactive)") -ForegroundColor Green
+        Write-Host ("  -> task result log: " + $freqLog) -ForegroundColor Green
+    } catch {
+        Write-Host ("  -> display-mode task registration failed: " + $_.Exception.Message) -ForegroundColor Red
+    }
+} else {
+    Write-Host "  -SkipTask: 不安装显示模式任务；将在当前会话同步切换并验收。" -ForegroundColor Cyan
 }
 
 # ---- nudge PnP property cache refresh --------------------------------------
@@ -718,28 +474,210 @@ try {
     Write-Host ("  (PnP refresh skipped: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
 }
 
+# 最后一次 PnP scan 可能回填 Class 安装状态，因此用同一个已提交
+# CurrentIdentity 快照同步恢复旧浅层 MatchingDeviceId 与名称镜像。
+# 这一步不修改 Enum\PCI HardwareID/CompatibleIDs，也不改 PCI 配置空间。
+Write-Host "Reapplying profile-derived shallow Class identity after the final device scan..." -ForegroundColor Cyan
+try {
+    & $refreshHelperSource
+    Write-Host "  -> shallow Class identity refreshed" -ForegroundColor Green
+} catch {
+    Write-Host ("FAIL: shallow Class identity refresh failed: " + $_.Exception.Message) -ForegroundColor Red
+    exit 25
+}
+
+# ---- synchronously apply and verify the current session mode ----------------
+# 不再用 schtasks /Run 异步触发后固定 sleep 两秒：那样既拿不到任务退出码，也无法证明
+# 切换发生在当前交互桌面。这里直接启动子 PowerShell 并等待结束，逐行转发原生返回码、
+# 切换前模式和切换后模式；因此外层 respawn 能用本脚本退出码决定是否继续重启。
+Write-Host ""
+Write-Host "Applying and verifying current display mode synchronously..." -ForegroundColor Cyan
+$displayArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $freqScript)
+if (-not [string]::IsNullOrWhiteSpace($freqLog)) {
+    $displayArgs += @('-LogPath', $freqLog)
+}
+
+$displayOutput = @()
+$displayModeRc = 24
+try {
+    $displayOutput = @(& $powershellExe @displayArgs 2>&1)
+    $displayModeRc = $LASTEXITCODE
+} catch {
+    $displayOutput = @('无法启动显示模式辅助脚本：' + $_.Exception.Message)
+}
+foreach ($line in $displayOutput) {
+    Write-Host ('  ' + [string]$line)
+}
+Write-Host ("  -> display-mode helper exit code: " + $displayModeRc) -ForegroundColor Cyan
+
+# -SkipTask/FirstLogon 没有后续登录任务，所以“无交互桌面”必须作为失败上抛；普通模式
+# 只有在任务确实注册成功时才允许明确延后。RESTART 表示请求已持久化，外层既有重启
+# 流程可以完成它，但当前会话仍标记为“尚未验证”，不伪装成即时成功。
+switch ($displayModeRc) {
+    0 {
+        $displayModeSummary = '已同步验证：1920x1080@60Hz'
+    }
+    10 {
+        if ($displayTaskInstalled) {
+            $displayModeDeferred = $true
+            $displayModeSummary = '当前无交互桌面；已明确延后到 Administrator 下次交互登录验收'
+        } else {
+            $displayModeFailed = $true
+            $displayModeFailureCode = 10
+            $displayModeSummary = '失败：当前无交互桌面，且没有已注册的登录任务可安全延后'
+        }
+    }
+    11 {
+        $displayModeFailed = $true
+        $displayModeFailureCode = 11
+        $displayModeSummary = 'ChangeDisplaySettings 要求重启；请求已持久化，当前模式尚未验证'
+    }
+    default {
+        $displayModeFailed = $true
+        $displayModeFailureCode = if ($displayModeRc -gt 0) { $displayModeRc } else { 24 }
+        $displayModeSummary = ('失败：显示模式辅助脚本退出码=' + $displayModeRc)
+    }
+}
+
+if ($SkipTask) {
+    # 临时辅助脚本已完成唯一一次同步调用；清理失败不会改变刚才取得的验收结果。
+    Remove-Item -LiteralPath $freqScript -Force -ErrorAction SilentlyContinue
+}
+
 # ---- verify ----------------------------------------------------------------
 Write-Host ""
 Write-Host "Verifying via WMI..." -ForegroundColor Cyan
-Get-WmiObject Win32_VideoController | Select-Object Name, VideoProcessor, AdapterRAM, DriverVersion | Format-List
-
-Write-Host "Verifying Enum\PCI DriverProvider DEVPKEY (should be NVIDIA)..." -ForegroundColor Cyan
-foreach ($m in $matchedEnum) {
-    $r = (Convert-ToRegPath ($m.Path + '\Properties\' + $fmtDev + '\0009'))
-    Write-Host ("  " + $r)
-    $q = & reg.exe query "$r" /v "00000000" 2>&1
-    foreach ($line in $q) { Write-Host "    $line" }
-}
-
-Write-Host "Done. The scheduled task re-applies the spoof within ~2s of every boot," -ForegroundColor Yellow
-Write-Host "so Device Manager and WMI stay NVIDIA even after reboot."                  -ForegroundColor Yellow
+Get-WmiObject Win32_VideoController |
+    Select-Object Name, VideoProcessor, AdapterRAM, DriverVersion,
+        CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate |
+    Format-List
 
 Write-Host ""
-Write-Host "=============== NEXT STEP (required!) ===============" -ForegroundColor Red
-Write-Host "Device Manager Driver tab 'Driver Provider' will still show 未知 until"    -ForegroundColor Red
-Write-Host "you shut down this VM and run on the HOST:"                                 -ForegroundColor Red
-Write-Host "    sudo deploy/scripts/host-fix-gpu-devpkey.sh <INSTANCE>"                 -ForegroundColor Red
-Write-Host "The DEVPKEY slot under Enum\PCI\...\Properties\{a8b865dd-...} needs an"    -ForegroundColor Red
-Write-Host "offline fix (TrustedInstaller ACL + DEVPROP type 0xFFFF0012) which cannot"  -ForegroundColor Red
-Write-Host "be done reliably from inside the guest."                                    -ForegroundColor Red
-Write-Host "=====================================================" -ForegroundColor Red
+if ($SkipTask) {
+    Write-Host "Done. -SkipTask kept this run one-shot; no refresh/display task was installed." -ForegroundColor Yellow
+} else {
+    Write-Host "Done. Scheduled tasks refresh the spoof at boot/logon and verify display mode at logon." -ForegroundColor Yellow
+}
+if ($displayModeFailed) {
+    Write-Host ("DISPLAY MODE: " + $displayModeSummary) -ForegroundColor Red
+} elseif ($displayModeDeferred) {
+    Write-Host ("DISPLAY MODE DEFERRED: " + $displayModeSummary) -ForegroundColor Yellow
+} else {
+    Write-Host ("DISPLAY MODE: " + $displayModeSummary) -ForegroundColor Green
+}
+
+if ($displayModeFailed) {
+    # 把辅助脚本的稳定退出码原样交给 respawn；调用方因此不会在模式验收失败后继续
+    # 打印“全部成功”。退出码 11 明确交给外层执行重启后的第二阶段验收。
+    exit $displayModeFailureCode
+}
+
+try {
+    & $identityHelperSource -CompleteIdentity $identityTransactionId
+    $identityTransactionCompleted = $true
+} catch {
+    $completeError = $_.Exception
+    try {
+        # Complete 的 durable 顺序是 State=Completed 后再清 Pending。调用异常不能
+        # 直接假定“未完成”。先只读 State：Committed 交给 outer finally 严格执行
+        # pointer→DLL rollback；Completed 才允许清理 Pending 并保留新 reader。
+        $completeInspection = & $identityHelperSource -InspectIdentity $identityTransactionId
+    } catch {
+        # 无法裁决时绝不能先删 NVAPI receipt/backup。保留新 reader（兼容 schema-1/2）
+        # 和两份 durable journal，让下次启动先恢复 identity、再按 pointer 恢复 NVAPI。
+        $identityCompletionUnresolved = $true
+        throw ('CompleteIdentity 失败且 durable 裁决失败：' + $completeError.Message +
+            '；resolver=' + $_.Exception.Message)
+    }
+    $resolvedState = [string]$completeInspection.State
+    if ($resolvedState -ceq 'Completed') {
+        try {
+            $completeResolution = & $identityHelperSource -RollbackIdentity `
+                $identityTransactionId
+            if ([string]$completeResolution.Action -cne 'Completed' -and
+                [string]$completeResolution.State -cne 'Completed') {
+                throw 'Completed 清理返回了非 Completed 状态'
+            }
+        } catch {
+            $identityCompletionUnresolved = $true
+            throw ('CompleteIdentity 已持久完成但 Pending 清理失败：' +
+                $_.Exception.Message)
+        }
+        $identityTransactionCompleted = $true
+        Write-Warning ('CompleteIdentity 返回异常，但 durable journal 已裁决为 Completed：' +
+            $completeError.Message)
+    } elseif (@('Prepared','Committed','RolledBack') -ccontains $resolvedState) {
+        throw $completeError
+    } else {
+        $identityCompletionUnresolved = $true
+        throw ('CompleteIdentity inspect 返回未知状态：' + $resolvedState)
+    }
+}
+if ($nvapiTransactionPrepared) {
+    # Complete 已清除 PendingIdentity 并把事务标为 Completed；此后收据只负责验证
+    # 两个新 reader 后删除旧备份。Finalize 失败不会倒退已完成身份，收据留待下次 Recover。
+    $nvapiFinalizeArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy',
+        'Bypass', '-File', $nvapiInstallerSource, '-Action', 'Finalize',
+        '-TransactionId', $identityTransactionId)
+    & $powershellExe @nvapiFinalizeArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw ('系统 NVAPI 身份投影 Finalize 失败，退出码=' + $LASTEXITCODE)
+    }
+    $nvapiTransactionPrepared = $false
+    Write-Host '  -> dual-architecture NVAPI/identity transaction finalized' `
+        -ForegroundColor Green
+}
+
+# Driver-tab DEVPKEY 只是与浅层身份验收分离的历史诊断项。只有 identity
+# 和可选 NVAPI reader 全部提交后才打印成功；不再用红色“必须修 host”把
+# 一键流程不需要的外观字段误报为失败。
+Write-Host ""
+Write-Host "Shallow GPU identity completed; no host-side offline fix is required." `
+    -ForegroundColor Green
+Write-Host "Optional diagnostic only: if the legacy Device Manager Driver Provider field" `
+    -ForegroundColor DarkCyan
+Write-Host "is the specific field under investigation, inspect host-fix-gpu-devpkey.sh." `
+    -ForegroundColor DarkCyan
+} finally {
+    if (-not [string]::IsNullOrWhiteSpace($identityTransactionId) -and
+        -not $identityTransactionCompleted -and -not $identityCompletionUnresolved) {
+        Write-Warning ('GPU identity transaction failed; restoring durable journal ' +
+            $identityTransactionId)
+        $rollbackErrors = New-Object Collections.Generic.List[string]
+        $identityRollbackResolution = $null
+        try {
+            # 顺序不可交换：新 reader 严格兼容 schema-1/2，先把 pointer 恢复旧版；
+            # 历史 old reader 未必认识 schema-2，只能在 pointer 已旧后再恢复 DLL。
+            $identityRollbackResolution = & $identityHelperSource `
+                -RollbackIdentity $identityTransactionId
+        } catch {
+            $rollbackErrors.Add($_.Exception.Message)
+        }
+        if ($null -eq $identityRollbackResolution -and $rollbackErrors.Count -eq 0) {
+            $rollbackErrors.Add('identity Rollback 没有返回 durable 裁决结果')
+        }
+        if ($null -ne $identityRollbackResolution -and $nvapiTransactionPrepared) {
+            $rollbackAction = [string]$identityRollbackResolution.Action
+            $rollbackState = [string]$identityRollbackResolution.State
+            $nvapiRecoveryAction = if ($rollbackAction -ceq 'Completed' -or
+                $rollbackState -ceq 'Completed') { 'Finalize' } else { 'Rollback' }
+            try {
+                $nvapiRecoveryArgs = @('-NoProfile', '-NonInteractive',
+                    '-ExecutionPolicy', 'Bypass', '-File', $nvapiInstallerSource,
+                    '-Action', $nvapiRecoveryAction, '-TransactionId',
+                    $identityTransactionId)
+                & $powershellExe @nvapiRecoveryArgs
+                if ($LASTEXITCODE -ne 0) {
+                    throw ('NVAPI ' + $nvapiRecoveryAction + ' 退出码=' + $LASTEXITCODE)
+                }
+                $nvapiTransactionPrepared = $false
+                if ($nvapiRecoveryAction -ceq 'Finalize') {
+                    $identityTransactionCompleted = $true
+                }
+            } catch { $rollbackErrors.Add($_.Exception.Message) }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            throw ('GPU/NVAPI 跨组件回滚失败：' + ($rollbackErrors -join ' | '))
+        }
+    }
+}

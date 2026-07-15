@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# host-clean-tencent.sh — 离线清空 Win10 guest 里的腾讯/WeGame 身份缓存，
+# host-clean-tencent.sh — 离线清空 Win10 guest 里的/WeGame 身份缓存，
 # 让一份镜像可以当"多 DNF" base 克隆：每台 clone 首启按自己的随机硬件重新
 # 生成设备指纹，而不是共享 base 里那一份。
 #
 # 为什么必须清（跨 clone 关联向量）：
-#   - %AppData%\Roaming\Tencent\qimei\   = 腾讯跨 App **设备唯一 ID**（QIMEI）。
+#   - %AppData%\Roaming\Tencent\qimei\   = 跨 App **设备唯一 ID**（QIMEI）。
 #     base 不清 → 所有 clone 上报同一个 qimei → ACE/WeGame 直接判同机/多开。
 #   - CTLogin / TXSSO / WGLogin / TCLSCore / libsdk = 登录态 / SSO token / SDK
 #     设备缓存；rail / WeGame(Local) / ConnectedDevicesPlatform 同理。
@@ -13,7 +13,7 @@
 #   注册表里还有一份镜像（HKCU\Software\Tencent + HKLM\SOFTWARE\[WOW6432Node\]
 #   Tencent），不删的话 qimei 会从注册表恢复而不是按新硬件重算 —— 一起删。
 #
-# **不碰**的东西（避免破坏功能 / 反作弊语义）：
+# **不碰**的东西（避免破坏功能 / 仿真机语义）：
 #   - AntiCheatExpert(ACE)：ACE 每次启动按硬件 live 生成指纹，删它的程序/状态会
 #     要求重下、且可能破坏 ACE 完整性（见 feedback_no_driver_mod_ace）。
 #   - AppData\...\Microsoft：shell/字体/.NET 等 per-user 必需状态，整删会坏配置。
@@ -328,4 +328,4 @@ else
     log "=== 注册表：--no-registry，跳过 ==="
 fi
 
-log "done. base 现在不含腾讯设备身份；每台 clone 首启按自己硬件重建 qimei。"
+log "done. base 现在不含设备身份；每台 clone 首启按自己硬件重建 qimei。"

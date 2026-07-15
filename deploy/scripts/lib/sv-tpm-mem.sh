@@ -6,7 +6,7 @@
 #
 # 为什么必须装：Win10 21H2+ / Win11 全面铺 TPM 2.0；裸金属 UEFI 都会探到。
 # Get-Tpm 返回 "Compatible TPM not found" 或 tpm.msc 空白，配合其它指纹
-# 反作弊立刻判 sandbox / VM。
+# 仿真机立刻判 sandbox / VM。
 #
 # 实现：host 端 swtpm 后台 daemon，per-instance 状态目录在 $VM_DIR/tpm-state，
 # 控制 socket 在 $VM_DIR/tpm-sock，QEMU 通过 -tpmdev emulator + -device tpm-crb

@@ -49,7 +49,7 @@ CMD=(
     # share=on（关键）：让 host 进程地址空间和 KVM 给 guest 的 page 是同一份。
     # 原本写 share=off 会触发 KVM 的 COW 路径，host 进程读到的是初始 prealloc 零页，
     # 与 guest 实际 RAM 分叉——VMI（memflow / LibVMI）会读到全零，无法工作。
-    # share=on 对 guest 完全不可见（反作弊看不到任何差别），是 VMI 必须的前提。
+    # share=on 对 guest 完全不可见（仿真机看不到任何差别），是 VMI 必须的前提。
     #
     # MEMORY_ARGS 始终使用一个 guest NUMA node；DIMM/双通道只由 SMBIOS/SPD 表达。
     "${MEMORY_ARGS[@]}"
@@ -109,8 +109,8 @@ CMD=(
     -device "e1000e,netdev=net0,mac=${MAC_OVERRIDE},bus=rp2,subsys_ven=${NIC_SUBSYSTEM_VEN},subsys=${NIC_SUBSYSTEM_DEV}"
 
     # --- USB: xHCI + 键盘 + 鼠标 ---
-    # usb-kbd: DirectInput/Raw Input 兼容 (DNF/腾讯反作弊只读 USB HID, 不读 PS/2).
-    # USB_RELATIVE_MOUSE=1: usb-mouse (相对坐标，更像真鼠标，反作弊友好；
+    # usb-kbd: DirectInput/Raw Input 兼容 (DNF/仿真机只读 USB HID, 不读 PS/2).
+    # USB_RELATIVE_MOUSE=1: usb-mouse (相对坐标，更像真鼠标，仿真机友好；
     #   SDL 抓鼠标，Ctrl+Shift+G 释放)
     # 默认 usb-tablet (绝对坐标，鼠标可自由出入 SDL 窗口)
     # 经 patch 0010 后 vendorid/productid/manufacturer/product 从 profile 的

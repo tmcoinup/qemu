@@ -33,6 +33,26 @@ import sys
 qemu = sys.argv[1]
 
 
+# 这个属性是部署层 opt-in，QEMU 自身必须继续默认关闭。直接检查真实设备帮助，
+# 同时覆盖属性已注册到 QOM 和默认值没有破坏通用调用方两个条件。
+device_help = subprocess.run(
+    [qemu, "-device", "virtio-vga,help"],
+    text=True, capture_output=True, timeout=15, check=False,
+)
+fixed_native_help = next(
+    (
+        line for line in (device_help.stdout + device_help.stderr).splitlines()
+        if "edid-fixed-native=<bool>" in line
+    ),
+    "",
+)
+if device_help.returncode != 0 or "(default: off)" not in fixed_native_help:
+    raise SystemExit(
+        "virtio-vga edid-fixed-native 属性缺失或没有默认关闭:\n"
+        f"{device_help.stdout}{device_help.stderr}"
+    )
+
+
 def run_qmp(extra_args, timeout=15):
     command = [
         qemu, "-machine", "q35", "-accel", "tcg", "-display", "none",
@@ -231,14 +251,29 @@ valid = run_qmp([
         "type=17,memory-type=0x1a,type-detail=0x80,rank=1,voltage=1200,"
         "speed=2666,configured-speed=2133"
     ),
-    "-device", (
-        "virtio-vga,edid-product-id=0x0f65,edid-manufacture-week=32,"
-        "edid-manufacture-year=2018,edid-video-input=0xa3,"
-        "edid-min-vfreq-hz=50,edid-max-vfreq-hz=75,"
-        "edid-min-hfreq-khz=30,edid-max-hfreq-khz=83,"
-        "edid-max-pixel-clock-mhz=170,edid-secondary-xres=1600,"
-        "edid-secondary-yres=900,edid-secondary-refresh-rate=60000"
-    ),
+    # JSON 设备语法避免 outputs 数组中的逗号被传统 -device 解析器拆开。
+    # 两个头使用不同的尺寸，真实 QOM realize 会覆盖多头配置和 opt-in 属性。
+    "-device", json.dumps({
+        "driver": "virtio-vga",
+        "edid-fixed-native": True,
+        "max_outputs": 2,
+        "outputs": [
+            {"name": "primary", "xres": 1920, "yres": 1080},
+            {"name": "secondary", "xres": 1600, "yres": 900},
+        ],
+        "edid-product-id": 0x0F65,
+        "edid-manufacture-week": 32,
+        "edid-manufacture-year": 2018,
+        "edid-video-input": 0xA3,
+        "edid-min-vfreq-hz": 50,
+        "edid-max-vfreq-hz": 75,
+        "edid-min-hfreq-khz": 30,
+        "edid-max-hfreq-khz": 83,
+        "edid-max-pixel-clock-mhz": 170,
+        "edid-secondary-xres": 1600,
+        "edid-secondary-yres": 900,
+        "edid-secondary-refresh-rate": 60000,
+    }, separators=(",", ":")),
     "-device", (
         "nvme,serial=S123,use-samsung-id=on,"
         "model-number=Samsung SSD 970 PRO 512GB,firmware-rev=1B2QEXP7,"
@@ -275,6 +310,10 @@ qtree = next(
 )
 if qtree.count('dev: smbus-eeprom') != 2:
     raise SystemExit("8GiB/4GiB-per-DIMM 应生成且只生成两条 SPD EEPROM")
+if "edid-fixed-native = true" not in qtree:
+    raise SystemExit("virtio-vga 没有 realize 显式 EDID native mode 策略")
+if "max_outputs = 2" not in qtree or "outputs = <omitted>, <omitted>" not in qtree:
+    raise SystemExit("virtio-vga 两个独立 output 没有完成 QOM realize")
 PY
 
 # 静态守卫防止后续重构重新引入最初的跨平台硬编码。
@@ -293,5 +332,33 @@ search_quiet 'x-identity-compat=on because the node topology remains' \
 ! search_quiet 'PCI_DEVICE_ID_SAMSUNG_NVME[[:space:]]+0xa809' \
     "$ROOT_DIR/include/hw/pci/pci_ids.h" \
     || fail "Samsung 970 PRO 重新使用了错误的 a809 主设备 ID"
+
+# QEMU 默认必须保持 req_state 动态行为；只有启动器显式 opt-in 后才按对应
+# outputs[n] 固定 native mode，且只有 scanout 0 能回退到全局 xres/yres。
+# UI resize 对 display-info 的更新仍保留，不能用禁用窗口反馈掩盖问题。
+search_quiet 'DEFINE_PROP_BOOL\("edid-fixed-native".*' \
+    "$ROOT_DIR/include/hw/virtio/virtio-gpu.h" \
+    || fail "virtio-gpu 缺少显式 EDID native mode 属性"
+search_quiet '_conf\.edid_fixed_native, false' \
+    "$ROOT_DIR/include/hw/virtio/virtio-gpu.h" \
+    || fail "edid-fixed-native 没有保持默认关闭"
+search_quiet '\.prefx = g->req_state\[scanout\]\.width' \
+    "$ROOT_DIR/hw/display/virtio-gpu-base.c" \
+    || fail "默认 EDID 首选宽度不再来自 req_state"
+search_quiet '\.prefy = g->req_state\[scanout\]\.height' \
+    "$ROOT_DIR/hw/display/virtio-gpu-base.c" \
+    || fail "默认 EDID 首选高度不再来自 req_state"
+search_quiet 'output && output->has_xres && output->has_yres' \
+    "$ROOT_DIR/hw/display/virtio-gpu-base.c" \
+    || fail "opt-in EDID 没有按 scanout 读取独立 output 尺寸"
+search_quiet 'else if \(scanout == 0 && g->conf\.xres && g->conf\.yres\)' \
+    "$ROOT_DIR/hw/display/virtio-gpu-base.c" \
+    || fail "全局 EDID 尺寸回退没有限制到 scanout 0"
+search_quiet 'g->req_state\[idx\]\.width = info->width' \
+    "$ROOT_DIR/hw/display/virtio-gpu-base.c" \
+    || fail "virtio-gpu UI resize 不再更新 display-info 宽度"
+search_quiet 'g->req_state\[idx\]\.height = info->height' \
+    "$ROOT_DIR/hw/display/virtio-gpu-base.c" \
+    || fail "virtio-gpu UI resize 不再更新 display-info 高度"
 
 echo "PASS: C 层硬件身份参数化、校验与失败路径"

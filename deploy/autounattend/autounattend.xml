@@ -183,8 +183,8 @@
                 </SynchronousCommand>
                 <SynchronousCommand wcm:action="add">
                     <Order>10</Order>
-                    <Description>Stealth respawn: run local D drive EXE once after OOBE</Description>
-                    <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$exe='D:\工具\respawn-stealth.exe'; if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe -ArgumentList '--firstlogon' -Wait } else { $log=Join-Path $env:WINDIR 'Temp\respawn-firstlogon.log'; ('missing firstlogon respawn exe: ' + $exe) | Out-File -FilePath $log -Encoding UTF8 -Append }"</CommandLine>
+                    <Description>Offline display driver install and stealth initialization from local EXE</Description>
+                    <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$exe='D:\工具\respawn-stealth.exe'; $log=Join-Path $env:WINDIR 'Temp\respawn-firstlogon.log'; if (Test-Path -LiteralPath $exe -PathType Leaf) { try { $p=Start-Process -FilePath $exe -ArgumentList '--firstlogon' -Wait -PassThru -ErrorAction Stop; if ($null -eq $p) { exit 45 }; if ($p.ExitCode -ne 0) { exit $p.ExitCode } } catch { ('failed to launch firstlogon respawn exe: ' + $_.Exception.Message) | Out-File -FilePath $log -Encoding UTF8 -Append; exit 46 } } else { ('missing firstlogon respawn exe: ' + $exe) | Out-File -FilePath $log -Encoding UTF8 -Append; exit 44 }"</CommandLine>
                 </SynchronousCommand>
             </FirstLogonCommands>
         </component>

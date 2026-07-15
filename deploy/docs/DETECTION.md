@@ -1,4 +1,4 @@
-# 虚拟化检测面 (DNF TP / 常见反作弊) 全量清单
+# 虚拟化检测面 (DNF TP / 常见仿真机) 全量清单
 
 最后更新 2026-04-23。按检测层从低到高排列，每项都给出「物理机会看到什么 / VM 默认会看到什么 / 本项目如何堵」。
 
@@ -16,7 +16,7 @@
 
 ### 残留风险
 
-- **MSR 列表**。TP 不怎么读 MSR，但硬核反作弊会读 IA32_PERF_STATUS / IA32_MPERF。KVM 模拟粒度够，通常过检。
+- **MSR 列表**。TP 不怎么读 MSR，但硬核仿真机会读 IA32_PERF_STATUS / IA32_MPERF。KVM 模拟粒度够，通常过检。
 - **时间精度**。`rdtsc` + `rdpmc` 做 timing attack 可能显出 vm-exit 尖峰。无成本修法仅限于「用物理 cpu pin + 关 hpet」，延迟建模超出本工程范围。
 
 ## Layer 1 — SMBIOS / DMI
@@ -56,8 +56,8 @@ QEMU 默认 FADT/FACP 里 Hypervisor Present Flag = 0 (除非 `+hypervisor`)，�
 
 | 设备 | 物理机 | QEMU 默认 | 本项目 |
 |-----|--------|-----------|--------|
-| GPU VID/DID | NVIDIA 10DE:1C81 (1050) | 10DE:RTX2080原值 | vgpu_unlock-rs `vdev_id` + QEMU `x-pci-vendor-id` 双改 |
-| GPU 子系统 VID/DID | 厂商 OEM ID | 覆盖原值 | `x-pci-sub-vendor-id` + `x-pci-sub-device-id` |
+| GPU 物理主 VID/DID | NVIDIA `10DE:1C82`（1050 Ti） | virtio `1AF4:1050` | 固定保留 `1AF4:1050`，供 stock VioGpuDod 绑定；不再覆盖主 ID |
+| GPU 子系统 / 用户态逻辑 ID | 厂商 OEM ID | virtio 默认值 | PnP 原始顺序为 `SUBSYS_1C8210DE`（device `1C82`、vendor `10DE`）；注册表与系统 NVAPI 规范化投影为 `10DE:1C82` |
 | NIC 设备 | Intel I217-LM / Realtek | e1000 / virtio-net ⚠️ | `e1000e` (仿 Intel) + 真 Intel OUI MAC |
 | AHCI / NVMe ID | Samsung / WDC / Kingston... | 0x8086:0x2922 (AHCI) | `-device nvme,serial=...,model=...`；本项目直接 NVMe + 真实 serial/model |
 | RTC/IDE/PIT 类设备存在 | 物理机也存在 | 一样 | 不改动 |

@@ -6,18 +6,16 @@
 # 做的事：
 #   1. 关 Fast Startup + 删 hiberfil.sys      ← 让 offline 改 hive 不被 NTFS 阻
 #   2. 关 hibernation 计划任务                  ← 防 Windows Update 偷偷再开
-#   3. NumLock 永久 ON (.DEFAULT + HKCU + 当前会话即时切换)
-#   4. 永不息屏 / 不睡眠 / 不关磁盘 (powercfg)
-#   5. 关 Defender 实时扫 + 关 AutoReboot + 切 small minidump
-#   6. 抑制 ms-gamingoverlay 弹窗（DNF/CF 启动时不弹"需要新应用打开"）
+#   3. 永不息屏 / 不睡眠 / 不关磁盘 (powercfg)
+#   4. 关 Defender 实时扫 + 关 AutoReboot + 切 small minidump
+#   5. 抑制 ms-gamingoverlay 弹窗（DNF/CF 启动时不弹"需要新应用打开"）
 #
 # 跑法（guest 管理员 PowerShell）：
 #
 #     irm http://192.168.30.33:8765/vm-prep.ps1 | iex
 #
-# 跑完重启一次，让 Fast Startup / NumLock 设置完整生效。
-# 跑完后建议接着 `irm http://192.168.30.33:8765/shallow-stealth.ps1 | iex`
-# 把 GPU spoof 装上。
+# 跑完重启一次，让 Fast Startup 设置完整生效。GPU 浅层初始化不要再通过 HTTP
+# 执行松散脚本；只运行 deploy/guest-stealth/package.sh 产出的 respawn-stealth.exe。
 
 $ErrorActionPreference = 'Continue'
 try { chcp 65001 | Out-Null } catch {}
@@ -67,28 +65,7 @@ foreach ($k in @(
     Set-ItemProperty -Path $k.Path -Name $k.Name -Type DWord -Value $k.Value -EA 0
 }
 
-Write-Host '=== NumLock 永久 ON ===' -ForegroundColor Cyan
-$ki = 'InitialKeyboardIndicators'
-# .DEFAULT = 登录前 Welcome 屏；HKCU = 登录后用户态；当前会话再 toggle 一次即时生效。
-# "2147483650" = 0x80000002 = NumLock ON + 启动时主动写 LED（双向同步给 host SDL）
-Set-ItemProperty -Path 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Keyboard' `
-    -Name $ki -Value '2147483650' -Type String -Force -EA 0
-Set-ItemProperty -Path 'HKCU:\Control Panel\Keyboard' `
-    -Name $ki -Value '2147483650' -Type String -Force -EA 0
-Add-Type -Name Kb -Namespace W -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, uint flags, System.IntPtr extra);
-[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern short GetKeyState(int vKey);
-'@ -EA 0
-$VK_NUMLOCK = 0x90
-if (([W.Kb]::GetKeyState($VK_NUMLOCK) -band 1) -eq 0) {
-    [W.Kb]::keybd_event([byte]$VK_NUMLOCK, 0, 0, [System.IntPtr]::Zero)
-    [W.Kb]::keybd_event([byte]$VK_NUMLOCK, 0, 2, [System.IntPtr]::Zero)
-    Write-Host '  toggled NumLock ON (was OFF)' -ForegroundColor Green
-} else {
-    Write-Host '  NumLock already ON' -ForegroundColor Gray
-}
-
 Write-Host ''
 Write-Host '=== vm-prep done ===' -ForegroundColor Green
-Write-Host '下一步：irm http://192.168.30.33:8765/shallow-stealth.ps1 | iex' -ForegroundColor Yellow
-Write-Host '完成后建议重启一次确保 Fast Startup / NumLock 完整生效' -ForegroundColor Yellow
+Write-Host 'GPU 下一步：把最新 respawn-stealth.exe 复制到本机并本地运行' -ForegroundColor Yellow
+Write-Host '完成后建议重启一次确保 Fast Startup 设置完整生效' -ForegroundColor Yellow

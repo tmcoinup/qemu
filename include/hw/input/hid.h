@@ -7,6 +7,13 @@
 #define HID_TABLET    2
 #define HID_KEYBOARD  3
 
+/* USB HID 键盘 Output Report 的标准 LED 位。 */
+#define HID_KBD_LED_NUM_LOCK     0x01
+#define HID_KBD_LED_CAPS_LOCK    0x02
+#define HID_KBD_LED_SCROLL_LOCK  0x04
+#define HID_KBD_LED_COMPOSE      0x08
+#define HID_KBD_LED_KANA         0x10
+
 typedef struct HIDPointerEvent {
     int32_t xdx, ydy; /* relative iff it's a mouse, otherwise absolute */
     int32_t dz, buttons_state;
@@ -58,6 +65,14 @@ void hid_pointer_activate(HIDState *hs);
 int hid_pointer_poll(HIDState *hs, uint8_t *buf, int len);
 int hid_keyboard_poll(HIDState *hs, uint8_t *buf, int len);
 int hid_keyboard_write(HIDState *hs, uint8_t *buf, int len);
+
+/*
+ * 向指定 HID 键盘原子加入一次按下/释放。
+ * 与全局输入路由不同，
+ * 该接口不会在多键盘场景中误选其他设备；
+ * 返回 false 表示队列空间不足或键码无效。
+ */
+bool hid_keyboard_send_key_click(HIDState *hs, QKeyCode qcode);
 
 extern const VMStateDescription vmstate_hid_keyboard_device;
 

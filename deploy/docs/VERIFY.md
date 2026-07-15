@@ -1,6 +1,6 @@
 ﻿# 验证矩阵 — DNF 检测面清单
 
-本文档列出 DNF 反作弊（XignCode3）和常见中国市场 VM 检测器会做的探测，以及本部署包是如何封堵的。
+本文档列出 DNF 仿真机（XignCode3）和常见中国市场 VM 检测器会做的探测，以及本部署包是如何封堵的。
 
 ## 指令 / CPU 级别
 
@@ -108,7 +108,7 @@ NVMe 池（5 款）每条都带真实 advertised 字节数，profile 抽中后 q
 
 ## ACPI BGRT / SSDT
 
-裸金属固件常有 BGRT (boot logo) + 至少一个 ThermalZone。空缺会被反作弊视为 VM 信号。本部署：
+裸金属固件常有 BGRT (boot logo) + 至少一个 ThermalZone。空缺会被仿真机视为 VM 信号。本部署：
 
 | 表 | 文件 | 内容 |
 |---|---|---|
@@ -175,7 +175,8 @@ NVMe 池（5 款）每条都带真实 advertised 字节数，profile 抽中后 q
 | e1000e subsystem 默认               | `8086:0000`（Intel + 0）        | `1043:86C0`（ASUS PRIME B350）               | `hw/net/e1000e.c` `e1000e_properties`            |
 | SMBIOS Type16 `error_correction`    | `0x06` Multi-bit ECC            | `0x03` None（消费级 DDR4 一致）              | `hw/smbios/smbios.c`                             |
 | SMBIOS Type16 `location`            | `0x01` Other                    | `0x03` System board                          | 同上                                              |
-| virtio-gpu PCI VEN:DEV              | `1AF4:1050`（Red Hat）          | `10DE:1C81`（NVIDIA GTX 1050，仅 `GPU_SELFSIGNED=1`） | `x-pci-vendor-id`/`x-pci-device-id` 透传到 virtio-vga |
+| virtio-gpu 物理 PCI VEN:DEV         | `1AF4:1050`（virtio）           | 始终保持 `1AF4:1050`，供 stock VioGpuDod 绑定          | 启动器拒绝已删除的深层主 ID 开关 |
+| virtio-gpu SUBSYS / 用户态逻辑 ID   | virtio 默认值                   | `SUBSYS_1C8210DE` / 逻辑 `10DE:1C82`（GTX 1050 Ti）    | QEMU subsystem 属性 + 统一 EXE 浅层投影 |
 
 ### 仍残留（需要更换 machine type 或更大改动）
 
@@ -183,23 +184,23 @@ NVMe 池（5 款）每条都带真实 advertised 字节数，profile 抽中后 q
 |--------------------------------|------------------------------|-------------------------------------|----------------------------------------------|
 | Q35 host bridge / LPC / SMBus / HDA controller | Intel `8086:29C0` / `2918` / `2930` / `2668` | AMD B350 chipset (e.g. `1022:43B7` / `1022:790E`) | 需新 machine type 或重写 `hw/i386/pc_q35.c`  |
 | ACPI DSDT 方法名               | QEMU 默认                     | BIOS 厂商特定                        | 侵入 `hw/i386/acpi-build.c`，改动大          |
-| viogpudo.sys 内部串            | `Red Hat VIOGPU WDDM DOD`     | `NVIDIA GeForce GTX 1050`           | 已用 patched `viogpudo.sys`（mm260 源码改 + backdated NVIDIA-fake CA 签）覆盖；详见 `feedback_vm2_gpu_recovery.md` |
+| stock viogpudo.sys 内部串      | `Red Hat VIOGPU WDDM DOD`     | 保持原版，不做内核字符串补丁         | 这是 Microsoft-WHQL stock 驱动的真实边界；名称只在用户态投影 |
 
-### 客机端（装完系统后必做）
+### 客机端（只做必要初始化）
 
 | 任务                                                          | 方法                                                                                     |
 |---------------------------------------------------------------|------------------------------------------------------------------------------------------|
-| GPU 改名为 GeForce GTX 1050（WMI / DxDiag / 任务管理器）      | 以管理员身份跑 `deploy/scripts/apply-gpu-spoof.ps1`                                       |
-| 关闭 Memory Integrity（HVCI）                                 | Windows 安全中心 → 设备安全 → 内核隔离 → 关                                                |
-| 关闭 Virtualization-Based Security                            | `bcdedit /set hypervisorlaunchtype off` + 重启                                            |
-| 移除 Hyper-V 可选组件                                         | `Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All`              |
-| 不要装 virtio-win guest tools                                 | 会引入 `qemu-ga.exe` 和 Red Hat 签名的驱动                                                 |
-| 不要装 SPICE guest tools                                      | 同上类型的暴露                                                                             |
+| GPU 驱动核验与浅层身份初始化（WMI / Device Manager）          | 只运行 `deploy/guest-stealth/package.sh` 生成的统一 `respawn-stealth.exe`                  |
+| 保持 Windows 代码完整性与安全功能原状                         | 当前流程使用固定摘要、Microsoft-WHCP 签名的 stock 驱动；不要求关闭 HVCI/VBS、Hyper-V 或驱动签名强制 |
+| 最小化 guest 附加软件                                         | 不为 GPU 身份安装完整 virtio-win/SPICE tools、NVIDIA 驱动、控制面板或常驻硬件工具          |
+| 检查逻辑身份                                                   | 统一 EXE 成功并重启后，直接双击用户自行核验来源的 GPU-Z 2.70；无需 helper 或旁置 DLL       |
 
 ### 进阶（前面全做完 DNF 还是报 0x403 时再处理）
 
-* **驱动二进制名**——`viogpudo.sys` 在属性里写着 "Red Hat VirtIO"。重命名得先关驱动签名强制，有风险
-* **`NvAPI_Initialize()` / `nvml.dll`**——没有真 NVIDIA 运行时。如果 XignCode 把"查询失败"本身当信号，主机端伪造无法修
+* **stock 驱动边界**——`viogpudo.sys` 的内部产品字符串属于原签名二进制，禁止重命名、修改或关闭签名强制。
+* **`NvAPI_Initialize()` / `nvml.dll`**——系统搜索 shim 只覆盖已实现的 NVAPI 身份查询，
+  没有真实 NVIDIA 内核运行时、NVML、Direct3D、CUDA 或 NVENC；原始 PCI 查询仍会看到
+  物理 virtio 身份。
 * **RDTSC 确定性**——已经设了 `+invtsc`；更深的时序探测仍可能看到虚拟化抖动
 
 ## 运行时验证命令

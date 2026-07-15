@@ -1,3 +1,9 @@
+# shellcheck shell=bash
+# 本文件由 start-vm.sh source，设备参数数组会在后续 sv-assemble.sh 中消费，故
+# 单文件分析得到的 SC2034 是跨模块误报。QEMU 的逗号属性串、相邻反斜线片段及
+# 已严格校验为整数的端口变量也刻意保持为单个 argv，分别对应 SC2054/SC2140/
+# SC2206；集中说明并抑制这些既有误报，避免真正的新 warning 淹没在历史噪声中。
+# shellcheck disable=SC2034,SC2054,SC2140,SC2206
 # -------------------------------------------------------------------
 # 芯片组级设备身份来自同一个 platform manifest，不能再按 CPU 厂商粗略二分。
 # Intel 同一组 PCH root port 的 device id 连续；AMD GPP 多个 function 共用 ID。
@@ -85,23 +91,21 @@ ROOT_PORT_ARGS=(
 )
 
 # -------------------------------------------------------------------
-# Guest display: virtio-gpu-gl for 3D accel (DNF needs DirectX).
-# We label it as a GTX 1050-class adapter only at the SMBIOS level;
-# real GPU driver spoofing requires guest-side INF tweak documented in
-# NOTES-GPU.md. virtio-gpu accepts OpenGL via VirGL and Mesa d3d->gl.
-# Fallback to qxl-vga if HEADLESS is set.
+# Guest display 使用 virtio-gpu-gl 给宿主 SDL/EGL 与支持 virgl 的客体提供 GL
+# 路径。当前 Windows 使用 stock VioGpuDod Display-Only 驱动，并没有 Mesa
+# virgl/Direct3D 渲染栈；浅层名称与 PCI 投影也不会增加 Direct3D、CUDA 或 NVENC。
 # -------------------------------------------------------------------
 # GPU subsystem spoof: 主 ID 留 1AF4:1050 (virtio) 让 stock virtio-win 绑定，
 # subsys 改成 profile 选定的 GPU (NVIDIA / AMD)。
-# apply-gpu-spoof.ps1 + nvapi64.dll shim 在 guest 里把 WMI / Device Manager 的
-# 显示名也对齐到 profile.GPU_NAME。
+# apply-gpu-spoof.ps1 与双架构系统搜索 NVAPI 在 guest 用户态把
+# 可投影字段对齐到 profile.GPU_NAME；它们不会改变内核看到的物理主 ID。
 GPU_STEALTH="x-pci-sub-vendor-id=${GPU_PCI_VEN},x-pci-sub-device-id=${GPU_PCI_DEV},x-pci-revision=${GPU_REV}"
 
-# GPU_SELFSIGNED=1：把 PCI 主 ID 也改成 NVIDIA / AMD（深层 stealth，
-# ⚠️ ACE 反作弊会判异常 13-131106-0；只用于无 ACE 类反作弊场景）。
-# 需要 guest 里事先装好 patched viogpudo.sys + 伪 NVIDIA/AMD CA 链。
-if [[ "${GPU_SELFSIGNED:-0}" == "1" ]]; then
-    GPU_STEALTH="${GPU_STEALTH},x-pci-vendor-id=${GPU_PCI_VEN},x-pci-device-id=${GPU_PCI_DEV}"
+# sv-cli 已在所有宿主副作用前拒绝历史深层开关。这里保留第二道门禁，防止开发者在
+# 单独 source 设备模块或未来重排模块时，意外恢复主 VEN/DEV 覆盖。
+if [[ "${GPU_SELFSIGNED:-0}" != "0" ]]; then
+    echo "ERROR: GPU_SELFSIGNED 深层/自签路径已移除；请保持物理 PCI 1AF4:1050" >&2
+    exit 2
 fi
 
 # 显示后端选择
@@ -125,15 +129,17 @@ fi
 #                : -display egl-headless   (rendernode EGL，给 fb-shm 走 GPU 导出)
 #
 # STABLE_DISPLAY=0（默认）: 在 --sdl / --gpu-headless 模式下生效，
-#   启 virtio-vga-gl + virgl 3D 加速。
+#   启 virtio-vga-gl，给宿主显示/推流或支持 virgl 的非 Windows 客体使用 GL；
+#   stock VioGpuDod 下的 Windows 客体仍是 Display-Only。
 #   普通 --sdl 与兼容名 --gpu-sdl-egl 都使用 QEMU 11 官方 SDL/GL，并默认给
 #   virtio-vga-gl 加 blob/hostmem 以优先尝试 GPU handle 导出；EGL/GLX 由 QEMU
 #   自行探测，导出失败时 fb-shm 自动走 SHM fallback。
 #   --gpu-headless 则显式选择无窗口 rendernode EGL 路径。
 #
-# STABLE_DISPLAY=1: 强制 virtio-vga，不开 -gl/virgl。用于规避 virgl 长期运行后
+# STABLE_DISPLAY=1: 强制 virtio-vga，不开宿主 -gl/virgl。用于规避 virgl 长期运行后
 #   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
-#   INTERNAL_ERROR"）。代价是没有 GL 加速，guest 的 DirectX 回退到 WARP。
+#   INTERNAL_ERROR"）。它只改变 QEMU 的宿主显示/推流路径；Windows stock
+#   VioGpuDod 在 0/1 两种模式下都没有客体 Direct3D，应用均只能走 WARP 等回退。
 #   (注：--no-sdl/--headless 没有窗口 GL context，仍然走 stable 路径)
 STABLE_DISPLAY=${STABLE_DISPLAY:-0}
 GPU_DISPLAY_MODE=${GPU_DISPLAY:-sdl}
@@ -160,7 +166,9 @@ if [[ "$FB_SHM" == "1" ]]; then
 fi
 
 # 选 virtio-vga 或 virtio-vga-gl + 注入 profile 的 EDID 字符串（patch 0009 新选项）
-EDID_PROPS="edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID_SERIAL},edid-width-mm=${EDID_WIDTH_MM},edid-height-mm=${EDID_HEIGHT_MM}"
+# 固定 native mode 是本部署画像的显式 opt-in；普通 QEMU 调用方仍保留随
+# display-info/UI resize 更新 EDID 的上游行为。
+EDID_PROPS="edid-fixed-native=on,edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID_SERIAL},edid-width-mm=${EDID_WIDTH_MM},edid-height-mm=${EDID_HEIGHT_MM}"
 EDID_PROPS+=",edid-product-id=${EDID_PRODUCT_ID},edid-manufacture-week=${EDID_MANUFACTURE_WEEK},edid-manufacture-year=${EDID_MANUFACTURE_YEAR}"
 EDID_PROPS+=",edid-video-input=${EDID_VIDEO_INPUT},edid-min-vfreq-hz=${EDID_MIN_VFREQ_HZ},edid-max-vfreq-hz=${EDID_MAX_VFREQ_HZ}"
 EDID_PROPS+=",edid-min-hfreq-khz=${EDID_MIN_HFREQ_KHZ},edid-max-hfreq-khz=${EDID_MAX_HFREQ_KHZ},edid-max-pixel-clock-mhz=${EDID_MAX_PIXEL_CLOCK_MHZ}"
@@ -205,12 +213,18 @@ if [[ -n "$FB_SHM_OBJ" ]]; then
     DISP_ARGS+=(-object "$FB_SHM_OBJ")
 fi
 
-# 键盘走 USB HID (usb-kbd) — DirectInput / Raw Input 类游戏 (DNF / 腾讯反作弊)
+# 键盘走 USB HID (usb-kbd) — DirectInput / Raw Input 类游戏 (DNF / 仿真机)
 # 只读 USB keyboard, PS/2 keyboard 在它们眼里不存在 → 游戏内按键完全无响应.
 # q35 i8042 控制器仍默认带, 但没东西往那里发 scancode 就是空通道, 不影响.
-# NumLock 状态由 hive 的 InitialKeyboardIndicators=2147483650 在 Welcome 阶段
-# 钉 ON (vm-bootstrap.ps1 / host-fix-numlock.sh 保证), 不依赖 SDL LED 双向同步.
-KBD_HINT='USB keyboard (DirectInput/Raw Input 兼容); NumLock 由 hive 钉 ON'
+# opt-in QEMU 策略直接看 Windows 回传的 HID LED 位：只有明确 OFF 才异步送一次
+# NumLock，不使用延时猜测或盲 toggle，因此开机、登录和重复运行都不会反向关闭。
+KBD_NUMLOCK_PROP=""
+if [[ "${GUEST_NUMLOCK:-1}" == "1" ]]; then
+    KBD_NUMLOCK_PROP=',x-force-numlock-on=on'
+    KBD_HINT='USB keyboard (DirectInput/Raw Input 兼容); guest NumLock 自动 ON'
+else
+    KBD_HINT='USB keyboard (DirectInput/Raw Input 兼容); guest NumLock 自动策略已关闭'
+fi
 
 # -------------------------------------------------------------------
 # Boot order
@@ -358,7 +372,7 @@ fi
 # host 物理内存（实测 guest 常只用一半），多 VM 并发时直接把 32G host 逼到
 # OOM-kill。prealloc 是纯 host 侧分配策略，guest 看到的 RAM 容量/SMBIOS 不
 # 变 → 零反检测影响。改 lazy 后未触及的 guest 页不占物理内存，配 mem-lock=off
-# 还可换出，多开稳得多。（首次访问页有极微延迟，反作弊无感。）
+# 还可换出，多开稳得多。（首次访问页有极微延迟，仿真机无感。）
 # -------------------------------------------------------------------
 MEMORY_ARGS=(-m "${RAM}M")
 MEMORY_ARGS+=(
@@ -380,7 +394,7 @@ MEMORY_ARGS+=(
 # 移除 serial= 让配置与行为一致。
 # -------------------------------------------------------------------
 KBD_DEVICE_ARG=(
-    -device "usb-kbd,bus=xhci.0,vendorid=${KBD_VID},productid=${KBD_PID},manufacturer=${KBD_MFR},product=${KBD_PRODUCT}"
+    -device "usb-kbd,id=kbd0,bus=xhci.0,vendorid=${KBD_VID},productid=${KBD_PID},manufacturer=${KBD_MFR},product=${KBD_PRODUCT}${KBD_NUMLOCK_PROP}"
 )
 if [[ "${USB_RELATIVE_MOUSE:-0}" == "1" ]]; then
     POINTER_DEVICE_ARG=(

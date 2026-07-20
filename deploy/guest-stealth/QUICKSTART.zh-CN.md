@@ -1,7 +1,8 @@
 # guest-stealth 傻瓜式使用教程（Windows 10 guest）
 
 本教程用于正式 guest。你只需要复制并运行一个文件：
-`respawn-stealth.exe`。驱动、初始化脚本和 x86/x64 身份查询库已经内嵌，不需要安装
+`respawn-stealth.exe`。芯片组识别 INF、显示驱动、初始化脚本和 x86/x64 身份查询库
+已经内嵌，不需要安装
 RDP、QEMU guest agent、PowerShell 模块、NVIDIA 驱动或其它第三方软件。
 
 ## 先看清楚它能做什么
@@ -31,22 +32,26 @@ RDP、QEMU guest agent、PowerShell 模块、NVIDIA 驱动或其它第三方软�
 
    推荐在 guest 中固定为 `D:\工具\respawn-stealth.exe`，方便克隆和以后重复运行。
 3. 双击 `respawn-stealth.exe`，在 Windows UAC 对话框中选择“是”。
-4. 保持窗口开启。程序会先把当前 Windows 活动电源方案设为不息屏、不睡眠、不休眠，
-   然后完成驱动检查、身份事务和系统级 x86/x64 查询库发布；不要中途关机或结束进程。
+4. 保持窗口开启。程序会先把当前 Windows 台式机电源页面的“屏幕”和“睡眠”都设为
+   “从不”，同时关闭休眠，再自动修复 A123/A323 SMBus 的 Code 28，然后完成显示
+   驱动检查、身份事务和系统级 x86/x64 查询库发布；不要中途关机或结束进程。
 5. 程序成功后会自动重启 Windows。重新登录后即可直接打开已有的 GPU-Z 或其它硬件
    查询软件；不需要 helper、旁置 DLL、环境变量或常驻调试服务。
 
 重复运行同一个最新版 EXE 是安全的：已绑定 `VioGpuDod` 时会走幂等快速路径，不会
-无意义地重复安装显示驱动。
+无意义地重复安装显示驱动；SMBus 已正常进入 System 类时也会跳过 `pnputil`。
 
 一次只运行一个最新版统一 EXE，并等待它完全退出。不要同时运行另一个 EXE，也不要
 把 `C:\ProgramData\StealthGPU` 中释放出的 helper 与旧版平铺调试脚本并发执行；统一
 EXE 内部会串行化整包事务，手工绕过入口则不属于受支持的并发方式。
 
-电源设置同时覆盖 AC/DC、普通显示超时、锁屏显示超时、空闲/无人值守睡眠、主动
-S1–S3、混合睡眠、Windows 休眠和快速启动。它通过 Windows 内置 PowrProf 与
-`powercfg.exe` 修改当前活动方案，不安装电源服务或常驻程序。如果以后手工切换到
-另一套电源方案，应重新运行一次统一 EXE，让新活动方案也收敛到同一设置。
+电源设置同时覆盖 AC/DC、普通显示超时、锁屏显示超时、空闲/无人值守睡眠、混合
+睡眠、Windows 休眠和快速启动。`ALLOWSTANDBY=1` 会保留正常台式机的 S1–S3 能力，
+所以设置页仍显示“睡眠”区块；自动超时保持为 0，因此“屏幕”和“睡眠”均显示
+“从不”。VM 是台式机且没有电池设备，页面只显示“接通电源”是正常结果。它通过
+Windows 内置 PowrProf 与 `powercfg.exe` 修改当前活动方案，不安装电源服务或常驻
+程序。如果以后手工切换到另一套电源方案，应重新运行一次统一 EXE，让新活动方案也
+收敛到同一设置。
 
 ## 成功后应该看到什么
 
@@ -75,6 +80,13 @@ $display | Format-List FriendlyName,Status,InstanceId
 Get-PnpDeviceProperty -InstanceId $display.InstanceId `
     -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath,
         DEVPKEY_Device_HardwareIds
+$smbus = Get-PnpDevice -PresentOnly | Where-Object {
+    $_.InstanceId -match '^PCI\\VEN_8086&DEV_(A123|A323)&'
+}
+$smbus | Format-List FriendlyName,Status,Class,Problem,InstanceId
+Get-PnpDeviceProperty -InstanceId $smbus.InstanceId `
+    -KeyName DEVPKEY_Device_ProblemCode,DEVPKEY_Device_DriverInfPath,
+        DEVPKEY_Device_Service
 ```
 
 应同时满足：
@@ -83,6 +95,8 @@ Get-PnpDeviceProperty -InstanceId $display.InstanceId `
 - `InstanceId` 仍以物理 `PCI\VEN_1AF4&DEV_1050` 开头；
 - `HardwareIds` 第一项是 profile 的逻辑 `10DE:1C82`，后续项保留物理
   `1AF4:1050`。
+- SMBus 为 `Status=OK`、`Class=System`、ProblemCode `0`，INF 为 `oem*.inf`；
+  `Service` 为空是 Intel NO_DRV 识别包的正常结果。
 
 ## 复制前后校验 EXE
 
@@ -107,6 +121,7 @@ Get-FileHash 'D:\工具\respawn-stealth.exe' -Algorithm SHA256
 
 ```text
 C:\ProgramData\StealthGPU\power-policy.log
+C:\ProgramData\StealthGPU\chipset-device-install.log
 C:\ProgramData\StealthGPU\display-driver-install.log
 C:\ProgramData\StealthGPU\gpu-hardware-id-projection.log
 C:\ProgramData\StealthGPU\respawn.log
@@ -122,6 +137,9 @@ C:\ProgramData\StealthGPU\respawn.log
   不要在 guest 中强行绕过门禁。
 - 日志提示设备没有绑定 `VioGpuDod`：让统一 EXE 完成内嵌 stock 驱动安装；不要手工
   改名，也不要安装 NVIDIA 驱动。
+- 设备管理器仍显示“SM 总线控制器”Code 28：查看
+  `chipset-device-install.log`；不要安装来源不明的 SMBus `.sys`，本项目使用的是
+  Microsoft WHCP 签名的 Intel NO_DRV 识别 INF。
 - 日志提示未知 `nvapi.dll`/`nvapi64.dll`：系统可能已有真实 NVIDIA 或第三方同名库。
   installer 会故意拒绝覆盖。先确认该 guest 的用途和原驱动来源，不要强制删除。
 - 日志提示 payload 目录 Owner 不受信：确认
@@ -155,10 +173,11 @@ Unregister-ScheduledTask -TaskName 'StealthGPU-ProjectHardwareId' -Confirm:$fals
 
 VM2 验收期间可以临时使用 RDP、USB/FAT 载荷、HTTP、探针或其它调试入口，但它们不
 属于正式发布物，也不会被 `respawn-stealth.exe` 安装。普通双击正式 EXE 后，guest
-新增的持久内容是项目脚本和内嵌 stock 驱动包、必要的 x86/x64 用户态身份库，以及
+新增的持久内容是项目脚本、内嵌 Intel 识别 INF、stock 显示驱动包、必要的 x86/x64
+用户态身份库，以及
 `RefreshName`、`ForceDisplayFreq`、`ProjectHardwareId` 三条轻量计划任务；仅当设备尚未
 绑定兼容驱动时，程序才会安装 Windows 显示所必需的 `VioGpuDod` 内核驱动。封装镜像的
-`--firstlogon` 路径会抑制前两条辅助任务，只保留 HardwareID 投影任务。两种路径都不
+`--firstlogon` 路径会保留 RefreshName 和 HardwareID，只抑制交互显示模式任务。两种路径都不
 新增 RDP、QGA、HTTP、网络或调试服务，默认 host 发布目录也只保留单个
 `respawn-stealth.exe`。
 

@@ -51,6 +51,17 @@ grep -F "$REPO_ROOT" "$sudoers" >/dev/null \
 grep -F '/usr/local/libexec/qemu-vmate-cpu-isolate-runtime-v1.sh' "$sudoers" >/dev/null \
     && fail "sudoers 不得直接授权可 source 的 runtime 库"
 
+# 即使错误产物带执行位，installer 也不能把 0 字节文件登记为可信 QEMU；
+# 拒绝必须发生在发布事务前，原有安装随后仍应完整通过 check。
+empty_qemu="$tmp/empty-qemu-system-x86_64"
+: > "$empty_qemu"
+chmod 0755 "$empty_qemu"
+if VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+        "$SETUP" install "--qemu=$empty_qemu" >/dev/null 2>&1; then
+    fail "installer 接受了 0 字节 QEMU"
+fi
+VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" "$SETUP" check >/dev/null
+
 # build.sh 传入的验证后快照必须与 installer 提权后重算结果一致；任一字段不符时
 # 应在事务开始前拒绝，且原安装继续通过 check。
 if [[ "${trusted_sha256:0:1}" == "0" ]]; then

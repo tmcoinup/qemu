@@ -16,7 +16,8 @@
  * schema-1 没有型号细节六字段。升级窗口和 durable rollback 仍可能短暂读到一份
  * 完整 schema-1，因此 reader 按仓库受控 NVIDIA PCI 型号池补入编译期常量。
  * 这些值只填缺失扩展字段；名称、PCI、显存容量、VBIOS 和物理来源仍必须从
- * schema-1 的全部 16 个公共字段严格读取并交叉校验，未知设备一律 fail-closed。
+ * schema-1 的全部 16 个公共字段严格读取，并与同一 canonical 型号交叉校验，
+ * 未知设备或混合字段一律 fail-closed。
  */
 struct nvapi_legacy_extension_defaults {
     NvU32 memory_bus_width_bits;

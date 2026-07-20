@@ -13,8 +13,10 @@ fail() {
 }
 
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/fixtures/catalog-cpu-preflight-stub.sh"
 
-[[ "$(stealth_component_validate)" == 2026-07-13.1 ]] \
+[[ "$(stealth_component_validate)" == 2026-07-19.3 ]] \
     || fail "component catalog revision 错误"
 (( ${#NVME_POOL[@]} == 1 && ${#MONITOR_POOL[@]} == 1 )) \
     || fail "严格 SSD/显示器目录没有收敛为唯一深层模板"
@@ -32,13 +34,20 @@ stealth_pick_profile
 [[ "$NVME_MODEL|$NVME_FIRMWARE|$NVME_PCI_DEV|$NVME_SUBSYS_DEV" == \
    "Samsung SSD 970 PRO 512GB|1B2QEXP7|0xA804|0xA801" ]] \
     || fail "NVMe bundle 与官方 970 PRO 控制器规格不符"
-[[ "$NVME_SUBNQN" == *":$NVME_SERIAL" ]] || fail "subnqn 未绑定 NVMe serial"
+[[ "$NVME_SUBNQN" == "nqn.2014-08.org.nvmexpress:uuid:$UUID" ]] \
+    || fail "subnqn 未使用持久 UUID: $NVME_SUBNQN"
+(( ${#NVME_SUBNQN} <= 223 )) || fail "subnqn 超过 NVMe 223 字节上限"
 [[ "$EDID_VENDOR|$EDID_PRODUCT_ID|$EDID_NAME" == "SAM|0x0F65|S24F350" ]] \
     || fail "EDID 深层模板不一致"
+[[ "$EDID_WIDTH_MM|$EDID_HEIGHT_MM|$EDID_MIN_VFREQ_HZ|$EDID_MAX_HFREQ_KHZ|$EDID_MAX_PIXEL_CLOCK_MHZ" == \
+   "521|293|56|81|149" ]] || fail "EDID 型号规格不一致"
 [[ "$KBD_VID:$KBD_PID:$KBD_BCD_DEVICE" == "0x045E:0x0750:0x0163" ]] \
     || fail "键盘 descriptor 不一致"
 [[ "$MOUSE_VID:$MOUSE_PID:$MOUSE_BCD_DEVICE" == "0x045E:0x00CB:0x0163" ]] \
     || fail "鼠标 descriptor 不一致"
+[[ "$KBD_DESCRIPTOR_FIDELITY|$MOUSE_DESCRIPTOR_FIDELITY" == \
+   "identity_only_generic_report|identity_only_generic_report" ]] \
+    || fail "键鼠被错误标记成真实 report descriptor"
 [[ "$TABLET_DESCRIPTOR_FIDELITY" == generic_virtual_only ]] \
     || fail "通用 tablet 被误标为品牌硬件"
 [[ "$GPU_IDENTITY_FIDELITY" == label_only_out_of_scope ]] \
@@ -65,11 +74,19 @@ assert_tamper_fails() {
 }
 
 assert_tamper_fails NVME_PCI_DEV 0xA809
+assert_tamper_fails COMPONENT_CATALOG_REVISION forged
+assert_tamper_fails NVME_SUBNQN nqn.2014-08.org.nvmexpress:uuid:00000000-0000-4000-8000-000000000000
 assert_tamper_fails EDID_PRODUCT_ID 0x0001
 assert_tamper_fails KBD_VID 0x046D
 assert_tamper_fails TABLET_DESCRIPTOR_FIDELITY branded
 assert_tamper_fails GPU_MEMORY_BUS_WIDTH_BITS 256
 assert_tamper_fails GPU_BOOST_CLOCK_KHZ 9999999
+assert_tamper_fails NVME_MODEL "''"
+assert_tamper_fails EDID_VENDOR "''"
+assert_tamper_fails KBD_VID "''"
+assert_tamper_fails GPU_IDENTITY_FIDELITY "''"
+assert_tamper_fails MEM_RATED_MTS "''"
+assert_tamper_fails MEM_CONFIGURED_MTS "''"
 
 # 严格 profile 必须在磁盘上真实携带 schema-2 guest 所需全部规格；
 # loader 为旧 profile 生成的诊断默认不能绕过 present-keys 门禁。

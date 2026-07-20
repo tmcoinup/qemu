@@ -14,6 +14,7 @@
 #include "libqos/libqos-pc.h"
 #include "libqos/usb.h"
 #include "libqtest.h"
+#include <glib/gstdio.h>
 
 #define USB_KBD_PATH "/machine/peripheral/kbd0"
 

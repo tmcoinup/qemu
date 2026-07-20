@@ -14,7 +14,6 @@
 #include "nvapi_gpu_pstates.h"
 #include "nvapi_gpu_specs.h"
 #include "nvapi_types.h"
-
 static int expect_status(const char *name, NvAPI_Status actual,
                          NvAPI_Status expected)
 {
@@ -25,7 +24,6 @@ static int expect_status(const char *name, NvAPI_Status actual,
             (int)expected);
     return 0;
 }
-
 static struct nvapi_identity_contract_input valid_identity_contract(void)
 {
     struct nvapi_identity_contract_input input = {
@@ -39,7 +37,78 @@ static struct nvapi_identity_contract_input valid_identity_contract(void)
     };
     return input;
 }
-
+struct canonical_model_fixture {
+    const char *name;
+    const char *bios;
+    const char *source_instance_id;
+    NvU32 pci_device_id;
+    NvU32 revision_id;
+    NvU32 ram_mb;
+    NvU32 memory_bus_width_bits;
+    NvU32 base_clock_khz;
+    NvU32 boost_clock_khz;
+    NvU32 memory_clock_khz;
+};
+static void apply_canonical_model(
+    struct nvapi_identity_contract_input *input,
+    const struct canonical_model_fixture *model)
+{
+    input->name = model->name;
+    input->bios = model->bios;
+    input->source_instance_id = model->source_instance_id;
+    input->pci_device_id = model->pci_device_id;
+    input->subsystem_device_id = model->pci_device_id;
+    input->revision_id = model->revision_id;
+    input->ram_mb = model->ram_mb;
+    input->memory_bus_width_bits = model->memory_bus_width_bits;
+    input->base_clock_khz = model->base_clock_khz;
+    input->boost_clock_khz = model->boost_clock_khz;
+    input->memory_clock_khz = model->memory_clock_khz;
+}
+static int test_all_canonical_schema2_models(void)
+{
+    static const struct canonical_model_fixture models[] = {
+        { "NVIDIA GeForce GTX 750 Ti", "Version 82.07.41.00.32",
+          "PCI\\VEN_1AF4&DEV_1050&SUBSYS_138010DE&REV_A2\\00", 0x1380u,
+          0xa2u, 2048u, 128u, 1020000u, 1085000u, 2700000u },
+        { "NVIDIA GeForce GT 1030", "Version 86.08.46.00.81",
+          "PCI\\VEN_1AF4&DEV_1050&SUBSYS_1D0110DE&REV_A1\\00", 0x1d01u,
+          0xa1u, 2048u, 64u, 1227000u, 1468000u, 3004000u },
+        { "NVIDIA GeForce GTX 1050", "Version 86.07.48.00.38",
+          "PCI\\VEN_1AF4&DEV_1050&SUBSYS_1C8110DE&REV_A1\\00", 0x1c81u,
+          0xa1u, 2048u, 128u, 1354000u, 1455000u, 3504000u },
+        { "NVIDIA GeForce GTX 1050 Ti", "Version 86.07.48.00.A0",
+          "PCI\\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1\\00", 0x1c82u,
+          0xa1u, 4096u, 128u, 1290000u, 1392000u, 3504000u },
+    };
+    size_t index;
+    int valid = 1;
+    for (index = 0u; index < sizeof(models) / sizeof(models[0]); ++index) {
+        struct nvapi_identity_contract_input input = valid_identity_contract();
+        struct nvapi_gpu_identity identity;
+        apply_canonical_model(&input, &models[index]);
+        if (!nvapi_build_validated_identity(&input, &identity) ||
+            identity.pci_device_id != models[index].pci_device_id ||
+            identity.vram_kib != models[index].ram_mb * 1024u ||
+            identity.ram_bus_width_bits != models[index].memory_bus_width_bits ||
+            strcmp(identity.bios, models[index].bios + 8) != 0) {
+            fprintf(stderr, "canonical schema-2 型号未通过: %s\n",
+                    models[index].name);
+            valid = 0;
+        }
+    }
+    return valid;
+}
+static int expect_rejected_identity(
+    const char *reason, const struct nvapi_identity_contract_input *input)
+{
+    struct nvapi_gpu_identity identity;
+    if (!nvapi_build_validated_identity(input, &identity)) {
+        return 1;
+    }
+    fprintf(stderr, "混合 GPU bundle 未被拒绝: %s\n", reason);
+    return 0;
+}
 int main(void)
 {
     int valid = 1;
@@ -47,6 +116,10 @@ int main(void)
     char bios[NVAPI_SHORT_STRING_MAX];
     NvU32 bios_revision = 0;
     NvU32 bios_oem_revision = 0;
+    NvU32 carrier_device_id = 0;
+    NvU32 carrier_subsystem_id = 0;
+    NvU32 carrier_revision_id = 0;
+    NvU32 carrier_external_device_id = 0;
     struct nvapi_clock_frequencies clocks = { 0 };
     struct nvapi_perf_clocks_info_v1 perf_clocks = { 0 };
     struct nvapi_legacy_clocks_gpu_z_v1 legacy_clocks_gpu_z = { 0 };
@@ -56,7 +129,6 @@ int main(void)
     struct nvapi_identity_contract_input contract;
     struct nvapi_gpu_identity identity;
     struct nvapi_legacy_extension_defaults legacy_defaults;
-
     valid &= expect_status("NVAPI_API_NOT_INITIALIZED",
                            NVAPI_API_NOT_INITIALIZED, -4);
     valid &= expect_status("NVAPI_NVIDIA_DEVICE_NOT_FOUND",
@@ -68,7 +140,6 @@ int main(void)
     valid &= expect_status("NVAPI_EXPECTED_LOGICAL_GPU_HANDLE",
                            NVAPI_EXPECTED_LOGICAL_GPU_HANDLE, -100);
     valid &= expect_status("NVAPI_NOT_SUPPORTED", NVAPI_NOT_SUPPORTED, -104);
-
     if (NVAPI_GPU_BUS_TYPE_PCI_EXPRESS != 3u) {
         fprintf(stderr, "PCI Express bus type 不是 3\n");
         valid = 0;
@@ -98,7 +169,6 @@ int main(void)
         fprintf(stderr, "SubsystemId 高低字组合错误\n");
         valid = 0;
     }
-
     if (!nvapi_parse_vbios("Version 86.07.48.00.A0", bios,
                            &bios_revision, &bios_oem_revision) ||
         strcmp(bios, "86.07.48.00.A0") != 0 ||
@@ -117,7 +187,6 @@ int main(void)
         fprintf(stderr, "短 VBIOS/token 字符串未被安全拒绝\n");
         valid = 0;
     }
-
     contract = valid_identity_contract();
     if (!nvapi_build_validated_identity(&contract, &identity) ||
         strcmp(identity.name, "NVIDIA GeForce GTX 1050 Ti") != 0 ||
@@ -125,6 +194,17 @@ int main(void)
         identity.ram_bus_width_bits != 128u ||
         identity.vbios_revision != UINT32_C(0x86074800)) {
         fprintf(stderr, "有效 schema-2 身份没有通过可执行契约\n");
+        valid = 0;
+    }
+    valid &= test_all_canonical_schema2_models();
+    nvapi_build_carrier_pci_identifiers(
+        &identity, &carrier_device_id, &carrier_subsystem_id,
+        &carrier_revision_id, &carrier_external_device_id);
+    if (carrier_device_id != UINT32_C(0x10501af4) ||
+        carrier_subsystem_id != UINT32_C(0x1c8210de) ||
+        carrier_revision_id != 0xa1u ||
+        carrier_external_device_id != 0x1c82u) {
+        fprintf(stderr, "NVAPI 枚举键没有与唯一 virtio 承载设备保持一致\n");
         valid = 0;
     }
     contract = valid_identity_contract();
@@ -150,6 +230,18 @@ int main(void)
     contract.vendor = "nvidia";
     if (nvapi_build_validated_identity(&contract, &identity)) {
         fprintf(stderr, "非 canonical NVIDIA 厂商名未被拒绝\n");
+        valid = 0;
+    }
+    contract = valid_identity_contract();
+    contract.name = "Red Hat Red Hat VirtIO GPU DOD controller";
+    if (nvapi_build_validated_identity(&contract, &identity)) {
+        fprintf(stderr, "Red Hat/VirtIO 品牌名称未被 NVAPI reader 拒绝\n");
+        valid = 0;
+    }
+    contract = valid_identity_contract();
+    contract.name = "NVIDIA red hat virtio carrier";
+    if (nvapi_build_validated_identity(&contract, &identity)) {
+        fprintf(stderr, "大小写变体的 Red Hat/VirtIO 品牌名称未被拒绝\n");
         valid = 0;
     }
     contract = valid_identity_contract();
@@ -188,6 +280,18 @@ int main(void)
         fprintf(stderr, "完整 schema-1 GTX 1050 快照未通过 reader\n");
         valid = 0;
     }
+    /* schema-1 缺扩展字段可由默认值补齐，但公共字段仍必须属于同一型号。 */
+    contract.name = "NVIDIA GeForce GTX 1050 Ti";
+    valid &= expect_rejected_identity("schema-1 name", &contract);
+    contract.name = "NVIDIA GeForce GTX 1050"; contract.bios = "Version 86.07.48.00.A0";
+    valid &= expect_rejected_identity("schema-1 VBIOS", &contract);
+    contract.bios = "Version 86.07.48.00.38";
+    contract.ram_mb = 4096u;
+    valid &= expect_rejected_identity("schema-1 RAM", &contract);
+    contract.ram_mb = 2048u;
+    contract.revision_id = 0xa2u;
+    contract.source_instance_id = "PCI\\VEN_1AF4&DEV_1050&SUBSYS_1C8110DE&REV_A2\\00";
+    valid &= expect_rejected_identity("schema-1 revision", &contract);
     if (nvapi_get_legacy_extension_defaults(0x10deu, 0xffffu,
                                              &legacy_defaults) ||
         nvapi_get_legacy_extension_defaults(0x1002u, 0x699fu,
@@ -209,27 +313,34 @@ int main(void)
         valid = 0;
     }
     contract = valid_identity_contract();
-    contract.memory_bus_width_bits = 96u;
-    if (nvapi_build_validated_identity(&contract, &identity)) {
-        fprintf(stderr, "非二次幂显存位宽未被拒绝\n");
-        valid = 0;
-    }
+    contract.name = "NVIDIA GeForce GTX 1050";
+    valid &= expect_rejected_identity("name", &contract);
     contract = valid_identity_contract();
-    contract.ram_mb = 1048577u;
-    if (nvapi_build_validated_identity(&contract, &identity)) {
-        fprintf(stderr, "超过 PowerShell 契约的显存上限未被拒绝\n");
-        valid = 0;
-    }
+    contract.bios = "Version 86.07.48.00.38";
+    valid &= expect_rejected_identity("VBIOS", &contract);
+    contract = valid_identity_contract();
+    contract.ram_mb = 2048u;
+    valid &= expect_rejected_identity("RAM", &contract);
+    contract = valid_identity_contract();
+    contract.memory_bus_width_bits = 64u;
+    valid &= expect_rejected_identity("memory bus", &contract);
+    contract = valid_identity_contract();
+    contract.base_clock_khz = 1354000u;
+    valid &= expect_rejected_identity("base clock", &contract);
+    contract = valid_identity_contract();
+    contract.boost_clock_khz = 1455000u;
+    valid &= expect_rejected_identity("boost clock", &contract);
+    contract = valid_identity_contract();
+    contract.memory_clock_khz = 3004000u;
+    valid &= expect_rejected_identity("memory clock", &contract);
+    contract = valid_identity_contract();
+    contract.revision_id = 0xa2u;
+    contract.source_instance_id = "PCI\\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A2\\00";
+    valid &= expect_rejected_identity("revision", &contract);
     contract = valid_identity_contract();
     contract.sli_supported = 1u;
     if (nvapi_build_validated_identity(&contract, &identity)) {
         fprintf(stderr, "未实现的 SLI profile 被单卡 shim 错误接受\n");
-        valid = 0;
-    }
-    contract = valid_identity_contract();
-    contract.base_clock_khz = 99999u;
-    if (nvapi_build_validated_identity(&contract, &identity)) {
-        fprintf(stderr, "越界核心时钟未被拒绝\n");
         valid = 0;
     }
     contract = valid_identity_contract();
@@ -238,7 +349,6 @@ int main(void)
         fprintf(stderr, "pointer 与 IdentityId 不一致未被拒绝\n");
         valid = 0;
     }
-
     clocks.version = NVAPI_CLOCK_FREQUENCIES_VERSION_3;
     clocks.clock_type_and_reserved = NVAPI_CLOCK_TYPE_BOOST;
     valid &= expect_status("boost clocks",
@@ -260,7 +370,6 @@ int main(void)
     valid &= expect_status("reserved clock bits",
         nvapi_fill_clock_frequencies(&clocks, 1290000u, 1392000u, 3504000u),
         NVAPI_INVALID_ARGUMENT);
-
     /* GPU-Z 2.70 使用 V2 时钟结构，必须与独立 probe 的 V3 结果完全一致。 */
     memset(&clocks, 0, sizeof(clocks));
     clocks.version = NVAPI_CLOCK_FREQUENCIES_VERSION_2;
@@ -276,7 +385,6 @@ int main(void)
         fprintf(stderr, "GPU-Z V2 显存时钟结构错误\n");
         valid = 0;
     }
-
     /* GPU-Z 的实际显存字段来自私有 GetPerfClocks，而不是 modern API。 */
     perf_clocks.version = NVAPI_PERF_CLOCKS_VERSION_1;
     valid &= expect_status("GPU-Z GetPerfClocks base",

@@ -96,22 +96,10 @@ echo "=== (4) NVMe properties registered ==="
 "$QEMU" -device nvme,help 2>&1 | grep -E 'samsung|model-number|firmware-rev'
 
 echo
-echo "=== (5) TPM 2.0 emulator (swtpm) + OVMF Tcg2 模块 ==="
-if command -v swtpm >/dev/null 2>&1; then
-    echo "  swtpm        = $(swtpm --version | head -1)"
-    echo "  swtpm_setup  = $(command -v swtpm_setup)"
-    # QEMU `-tpmdev help` 退出码 = 1（QEMU 把 help 看作异常终止），
-    # 在 `set -o pipefail` 下会把整条 pipeline 拉成 fail。先 capture 输出
-    # 再独立 grep，绕开 pipefail 的退出码取最大语义。
-    tpm_help_out="$("$QEMU" -tpmdev help 2>&1 || true)"
-    if grep -qi emulator <<<"$tpm_help_out"; then
-        echo "  -tpmdev emulator: supported"
-    else
-        echo "FAIL: QEMU 没编 CONFIG_TPM_EMULATOR——guest 无法挂 swtpm"; exit 1
-    fi
-else
-    echo "WARN: swtpm 未装；start-vm.sh 会优雅降级（无 TPM）但仿真机会判 sandbox"
-fi
+echo "=== (5) 动态 TPM 平台目录 + swtpm/QEMU 前端 ==="
+# shellcheck source=lib/verify-tpm-platforms.sh
+source "$HERE/lib/verify-tpm-platforms.sh"
+verify_tpm_platforms "$QEMU"
 # OVMF Tcg2 模块自检：Ubuntu 默认 ovmf 包不编 TPM2_ENABLE，guest tpm.msc
 # 会"找不到兼容的 TPM"。我们自编的 stealth fd 应该有 Tcg2 模块。
 EDK2_BUILD="${EDK2_BUILD:-$HOME/src/edk2/Build/OvmfX64/RELEASE_GCC5/X64}"
@@ -180,7 +168,14 @@ echo "=== (9) NVMe 池：MODEL ↔ SIZE 自洽 ==="
 source "$HERE/stealth-lib.sh"
 bad_nvme=0
 for row in "${NVME_POOL[@]}"; do
-    IFS='|' read -r m fw sz <<<"$row"
+    # components.json 的 storage 投影视图以 component_id 开头；容量判断必须读取
+    # 后续的真实 model/firmware/raw_bytes，不能把稳定 ID 当成型号而跳过校验。
+    IFS='|' read -r component_id m fw sz _ <<<"$row"
+    if [[ -z "$component_id" || -z "$m" || -z "$fw" ]]; then
+        echo "FAIL: storage 组件缺少 ID/model/firmware: $row"
+        bad_nvme=$((bad_nvme + 1))
+        continue
+    fi
     if [[ -z "$sz" ]]; then
         echo "FAIL: 缺 RAW_BYTES 字段: $row"; bad_nvme=$((bad_nvme + 1)); continue
     fi
@@ -271,14 +266,14 @@ source "$HERE/stealth-lib.sh"
 bad_pool=0
 for row in "${MONITOR_POOL[@]}"; do
     n=$(awk -F'|' '{print NF}' <<<"$row")
-    if (( n != 5 )); then echo "FAIL MONITOR_POOL: 字段数 $n != 5: $row"; bad_pool=$((bad_pool+1)); fi
+    if (( n != 18 )); then echo "FAIL MONITOR_POOL: 字段数 $n != 18: $row"; bad_pool=$((bad_pool+1)); fi
 done
 for row in "${KBD_POOL[@]}" "${MOUSE_POOL[@]}" "${TABLET_POOL[@]}"; do
     n=$(awk -F'|' '{print NF}' <<<"$row")
-    if (( n != 5 )); then echo "FAIL HID pool: 字段数 $n != 5: $row"; bad_pool=$((bad_pool+1)); fi
+    if (( n != 7 )); then echo "FAIL HID pool: 字段数 $n != 7: $row"; bad_pool=$((bad_pool+1)); fi
 done
 if (( bad_pool > 0 )); then exit 1; fi
-echo "  MONITOR_POOL=${#MONITOR_POOL[@]}  KBD=${#KBD_POOL[@]}  MOUSE=${#MOUSE_POOL[@]}  TABLET=${#TABLET_POOL[@]} 全部 5 字段"
+echo "  MONITOR_POOL=${#MONITOR_POOL[@]}（18 字段） KBD=${#KBD_POOL[@]} MOUSE=${#MOUSE_POOL[@]} TABLET=${#TABLET_POOL[@]}（7 字段）"
 
 echo
 echo "=== (13) 伪 SSDT 热区表 ==="
@@ -463,8 +458,11 @@ rm -f "$P16SOCK"
 SVDEV="$HERE/lib/sv-devices.sh"; CTRL="$REPO_ROOT/hw/nvme/ctrl.c"
 if [[ -f "$SVDEV" ]]; then
     svdev_flat="$(tr -d '\n\t\\"' < "$SVDEV")"
-    grep -Eq 'id=rp1.*x-speed=8,x-width=4' <<<"$svdev_flat" \
-        || { echo "FAIL: sv-devices.sh rp1 未钉 NVMe Gen3 x4"; exit 1; }
+    # rp1 现由组件目录的 NVME_MAX_PCIE_GENERATION/NVME_LANES 生成，不能再
+    # 用历史硬编码字面量做静态断言；运行态检查已验证当前目录会得到 Gen3 x4。
+    grep -Eq 'id=rp1.*x-speed=[$][{]_nvme_link_speed[}],x-width=[$][{]_nvme_link_width[}]' \
+        <<<"$svdev_flat" \
+        || { echo "FAIL: sv-devices.sh rp1 未绑定组件目录的 NVMe 链路参数"; exit 1; }
     grep -Eq 'id=rp2.*x-speed=2_5,x-width=1' <<<"$svdev_flat" \
         || { echo "FAIL: sv-devices.sh rp2 未钉 82574L Gen1 x1"; exit 1; }
     echo "  sv-devices.sh: 根端口 x-speed/x-width 静态校验通过"

@@ -332,14 +332,7 @@ test_optional_powershell_syntax() {
         "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1" \
         "$REPO_ROOT/deploy/windows/stop-vm.ps1" \
         "$REPO_ROOT/deploy/windows/collect-hardware-snapshot.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Common.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Components.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Manifest.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Memory.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.ProfileStore.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Profile.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Arguments.ps1"; do
+        "$REPO_ROOT"/deploy/windows/lib/*.ps1; do
         PS_SCRIPT_PATH="$script" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
             -Command '
                 $tokens = $null
@@ -369,7 +362,9 @@ test_optional_windows_launcher_dry_run() {
     tmp="$(mktemp -d)"
     out="$tmp/out.txt"
     mkdir -p "$tmp/user"
-    touch "$tmp/disk.qcow2" "$tmp/code.fd" "$tmp/vars.fd"
+    touch "$tmp/disk.qcow2"
+    printf 'firmware-code' >"$tmp/code.fd"
+    printf 'firmware-vars' >"$tmp/vars.fd"
 
     # 中文注释：GpuGlProbe 是 DryRun/CI 的确定性注入点。测试不依赖当前宿主
     # 是否真的有 Windows virglrenderer，也不会执行作为占位符传入的 /bin/true。
@@ -378,7 +373,8 @@ test_optional_windows_launcher_dry_run() {
         -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
         -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
         -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available \
-        -AllowHostCpuPlatformMismatch -DryRun > "$out"
+        -DryRunHostCpuName 'Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz' \
+        -DryRun > "$out"
     grep -Fx -- 'sdl,gl=on,show-cursor=off' "$out" >/dev/null \
         || fail "Windows available probe must enable SDL/GL"
     vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
@@ -390,7 +386,9 @@ test_optional_windows_launcher_dry_run() {
         -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
         -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
         -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available \
-        -NoGpuZeroCopy -AllowHostCpuPlatformMismatch -DryRun > "$out"
+        -NoGpuZeroCopy \
+        -DryRunHostCpuName 'Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz' \
+        -DryRun > "$out"
     vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
     [[ "$vga" == virtio-vga-gl,* && "$vga" != *"blob=true"* && "$vga" != *"hostmem="* ]] \
         || fail "Windows -NoGpuZeroCopy must retain GL but remove blob/hostmem preference"
@@ -399,7 +397,7 @@ test_optional_windows_launcher_dry_run() {
         -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
         -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
         -FbShmPath "$tmp/fb.sock" -GpuGlProbe Unavailable -DryRun \
-        -AllowHostCpuPlatformMismatch \
+        -DryRunHostCpuName 'Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz' \
         > "$out" 2>&1
     grep -Fx -- 'sdl,show-cursor=off' "$out" >/dev/null \
         || fail "Windows unavailable probe must retain non-GL SDL"
@@ -416,7 +414,7 @@ test_docs_cover_windows_packaging() {
     require_text "Windows 10 / Windows 11" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "qemu-fb-shm-stream.exe" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "NOTIFY_GPU_FRAME" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
-    require_text "ninja installer" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
+    require_text "make -j4 installer" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "WINDOWS-PACKAGING.md" "$REPO_ROOT/deploy/docs/README.md"
     require_text "FB-SHM-GPU-ZEROCOPY.md" "$REPO_ROOT/deploy/docs/README.md"
     require_text "NOTIFY_GPU_FRAME" "$REPO_ROOT/deploy/docs/FB-SHM-GPU-ZEROCOPY.md"
@@ -440,14 +438,7 @@ test_new_files_stay_small() {
         "$REPO_ROOT/deploy/windows/stream-fb-shm.ps1" \
         "$REPO_ROOT/deploy/windows/stop-vm.ps1" \
         "$REPO_ROOT/deploy/windows/collect-hardware-snapshot.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Common.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Components.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Manifest.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Memory.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.ProfileStore.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Profile.ps1" \
-        "$REPO_ROOT/deploy/windows/lib/VMate.Arguments.ps1" \
+        "$REPO_ROOT"/deploy/windows/lib/*.ps1 \
         "$REPO_ROOT/deploy/docs/FB-SHM-GPU-ZEROCOPY.md" \
         "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"; do
         local lines

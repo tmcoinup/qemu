@@ -127,9 +127,12 @@ static struct {
     uint16_t voltage;
     uint8_t memory_type;
     uint8_t rank;
+    uint8_t device_width_bits;
+    bool spd_ee1004;
 } type17 = {
     /* 未指定 DDR 世代时保持 Unknown，避免 Windows 通用启动路径谎报 DDR4。 */
     .memory_type = 0x02,
+    .device_width_bits = 8,
 };
 
 /* stealth: allow SMBIOS type 16 Physical Memory Array to advertise a
@@ -556,9 +559,17 @@ static const QemuOptDesc qemu_smbios_type17_opts[] = {
         .type = QEMU_OPT_NUMBER,
         .help = "number of ranks in each populated memory device",
     },{
+        .name = "device-width",
+        .type = QEMU_OPT_NUMBER,
+        .help = "DRAM component width in bits (4, 8, 16 or 32)",
+    },{
         .name = "voltage",
         .type = QEMU_OPT_NUMBER,
         .help = "configured memory voltage in millivolts",
+    },{
+        .name = "spd-ee1004",
+        .type = QEMU_OPT_BOOL,
+        .help = "publish a 512-byte DDR4 EE1004 SPD device",
     },
     { /* end of list */ }
 };
@@ -1257,22 +1268,32 @@ void smbios_set_default_processor_family(uint16_t processor_family)
     }
 }
 
-bool smbios_get_memory_device_config(SmbiosMemoryDeviceConfig *config)
+bool smbios_get_memory_device_config(unsigned int instance,
+                                     SmbiosMemoryDeviceConfig *config)
 {
     g_return_val_if_fail(config != NULL, false);
 
     *config = (SmbiosMemoryDeviceConfig) {
+        .manufacturer = type17.manufacturer,
+        .part_number = type17.part,
         .memory_type = type17.memory_type,
         .rank = type17.rank,
+        .device_width_bits = type17.device_width_bits,
         .rated_speed = type17.speed,
         .configured_speed = type17.configured_speed,
         .type_detail = type17.type_detail,
         .voltage = type17.voltage,
+        .spd_ee1004 = type17.spd_ee1004,
     };
+    smbios_type17_serial(config->serial_number,
+                         sizeof(config->serial_number), instance);
 
     /*
-     * SPD 生成器目前只实现消费级 DDR3/DDR4 UDIMM。其他 SMBIOS 类型仍可
-     * 正常生成 Type 17，但 Q35 不应凭空制造一个错误世代的 EEPROM。
+     * SPD 生成器只实现消费级 DDR3/DDR4 UDIMM。
+     * 其他 SMBIOS 类型仍可正常生成 Type 17，
+     * 但 Q35 不应凭空制造一个错误世代的 EEPROM。
+     * 身份字段也随 instance 投影，确保双 DIMM 的 SPD
+     * 与 Type 17 使用各自唯一序列号。
      */
     return type17.memory_type == SMBIOS_MEMORY_TYPE_DDR3 ||
            type17.memory_type == SMBIOS_MEMORY_TYPE_DDR4;
@@ -1855,13 +1876,18 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
                                                       0x02);
             type17.type_detail = qemu_opt_get_number(opts, "type-detail", 0);
             type17.rank = qemu_opt_get_number(opts, "rank", 0);
+            type17.device_width_bits = qemu_opt_get_number(
+                opts, "device-width", 8);
             type17.voltage = qemu_opt_get_number(opts, "voltage", 0);
+            type17.spd_ee1004 = qemu_opt_get_bool(opts, "spd-ee1004",
+                                                  false);
             if (qemu_opt_get_number(opts, "speed", 0) > UINT16_MAX ||
                 qemu_opt_get_number(opts, "configured-speed",
                                     type17.speed) > UINT16_MAX ||
                 qemu_opt_get_number(opts, "memory-type", 0x02) > UINT8_MAX ||
                 qemu_opt_get_number(opts, "type-detail", 0) > UINT16_MAX ||
                 qemu_opt_get_number(opts, "rank", 0) > 0x0f ||
+                qemu_opt_get_number(opts, "device-width", 8) > UINT8_MAX ||
                 qemu_opt_get_number(opts, "voltage", 0) > UINT16_MAX) {
                 error_setg(errp, "SMBIOS Type 17 numeric field is out of range");
                 return;
@@ -1869,6 +1895,19 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
             if (type17.speed && type17.configured_speed > type17.speed) {
                 error_setg(errp, "SMBIOS Type 17 configured-speed cannot "
                            "exceed rated speed");
+                return;
+            }
+            if (type17.device_width_bits != 4 &&
+                type17.device_width_bits != 8 &&
+                type17.device_width_bits != 16 &&
+                type17.device_width_bits != 32) {
+                error_setg(errp, "SMBIOS Type 17 device-width must be "
+                           "4, 8, 16 or 32");
+                return;
+            }
+            if (type17.spd_ee1004 &&
+                type17.memory_type != SMBIOS_MEMORY_TYPE_DDR4) {
+                error_setg(errp, "SMBIOS Type 17 spd-ee1004 requires DDR4");
                 return;
             }
             return;

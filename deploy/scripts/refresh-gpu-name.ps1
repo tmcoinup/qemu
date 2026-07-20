@@ -302,7 +302,9 @@ function Assert-GpuIdentityStrings {
     # PowerShell 接受、GPU-Z/NVAPI 却拒绝整份身份。
     param([string]$Name, [string]$Vendor, [string]$Bios)
     if (-not (@('NVIDIA', 'AMD') -ccontains $Vendor) -or
-        $Name -cnotmatch '\A[\x20-\x7E]{1,63}\z') {
+        $Name -cnotmatch '\A[\x20-\x7E]{1,63}\z' -or
+        -not $Name.StartsWith(($Vendor + ' '), [System.StringComparison]::Ordinal) -or
+        $Name -match '(?i)\b(?:Red Hat|VirtIO)\b') {
         throw 'GPU 名称或 canonical 厂商不满足 schema-2 字符串约束'
     }
     if ($Vendor -ceq 'NVIDIA') {

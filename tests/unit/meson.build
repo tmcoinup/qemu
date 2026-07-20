@@ -49,6 +49,9 @@ tests = {
   'test-interval-tree': [],
   'test-fifo': [],
   'test-envlist': [],
+  'test-sdl2-pointer': [
+    meson.project_source_root() / 'ui/sdl2-pointer.c',
+  ],
   'test-usb-hid-numlock': [
     meson.project_source_root() / 'hw/usb/hid-numlock.c',
   ],
@@ -150,7 +153,8 @@ if have_system
       meson.project_source_root() / 'ui/fb-shm-gpu-common.c'
     ],
     'test-smbus-eeprom-spd': [
-      meson.project_source_root() / 'hw/i2c/smbus_eeprom_spd.c'
+      meson.project_source_root() / 'hw/i2c/smbus_eeprom_spd.c',
+      meson.project_source_root() / 'hw/i2c/smbus_eeprom_spd_data.c',
     ],
     'test-smp-parse': [qom, meson.project_source_root() / 'hw/core/machine-smp.c'],
     'test-vmstate': [migration, io],

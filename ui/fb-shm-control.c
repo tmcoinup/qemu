@@ -145,8 +145,8 @@ static char *fb_shm_win32_event_name(FbShmDisplay *d, FbShmClient *c)
     return g_strdup_printf("Local\\qemu-fb-shm-%s-client-%p", safe_id, c);
 }
 
-static bool fb_shm_win32_ensure_client_event(FbShmDisplay *d, FbShmClient *c,
-                                             Error **errp)
+bool fb_shm_win32_ensure_client_event(FbShmDisplay *d, FbShmClient *c,
+                                      Error **errp)
 {
     if (c->wake_event) {
         return true;

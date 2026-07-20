@@ -12,10 +12,12 @@ function Get-VMateMemoryPartCatalog {
         [pscustomobject]@{
             Type = 'DDR4'; ModuleMiB = 2048
             PartNumber = 'M378A5644EB0-CRC'; RatedMts = 2400
+            Rank = 1; DeviceWidthBits = 16; SpdEe1004 = $true
         },
         [pscustomobject]@{
             Type = 'DDR4'; ModuleMiB = 4096
             PartNumber = 'M378A5244CB0-CRC'; RatedMts = 2400
+            Rank = 1; DeviceWidthBits = 16; SpdEe1004 = $true
         }
     )
 }
@@ -52,6 +54,9 @@ function Get-VMateMemoryModulePlan {
                 ModuleCount = $count
                 PartNumber = [string]$part.PartNumber
                 RatedMts = [int]$part.RatedMts
+                Rank = [int]$part.Rank
+                DeviceWidthBits = [int]$part.DeviceWidthBits
+                SpdEe1004 = [bool]$part.SpdEe1004
             }
         }
     }
@@ -82,6 +87,9 @@ function Get-VMateMemoryRateFacts {
         RatedMts = [int]$ratedMts
         ConfiguredMts = [int](($compatible | Measure-Object -Maximum).Maximum)
         ModuleMiB = [int]$matches[0].ModuleMiB
+        Rank = [int]$matches[0].Rank
+        DeviceWidthBits = [int]$matches[0].DeviceWidthBits
+        SpdEe1004 = [bool]$matches[0].SpdEe1004
     }
 }
 
@@ -115,6 +123,9 @@ function Assert-VMateMemoryRateFacts {
     if ($ratedMts -ne $facts.RatedMts -or
         $configuredMts -ne $facts.ConfiguredMts -or
         $configuredMts -gt $ratedMts -or
+        $facts.Rank -ne [int]$Platform.memory.rank -or
+        $facts.DeviceWidthBits -notin @(4, 8, 16, 32) -or
+        -not $facts.SpdEe1004 -or
         [int]$Profile.configuration.memory_module_mib -ne $plan.ModuleMiB -or
         [int]$Profile.configuration.memory_module_count -ne $plan.ModuleCount -or
         [string]$Profile.identity.memory_part -ne $plan.PartNumber) {
@@ -142,6 +153,10 @@ function Assert-VMateRequestedTopology {
         throw "内存 ${MemoryMiB}MiB 超过平台上限 ${maximumMemoryMiB}MiB。"
     }
     [void](Get-VMateMemoryModulePlan -Platform $Platform -MemoryMiB $MemoryMiB)
+    $platformTopology = "$([int]$Platform.cpu.cores)C$([int]$Platform.cpu.threads)T"
+    if ($platformTopology -notin @('2C2T', '2C4T', '4C4T')) {
+        throw "平台 CPU 拓扑只允许 2C2T、2C4T 或 4C4T；当前 $platformTopology。"
+    }
     if ($Cpus -ne [int]$Platform.cpu.threads) {
         throw "vCPU=$Cpus 与平台 $($Platform.id) 的完整线程数 $($Platform.cpu.threads) 不一致。"
     }

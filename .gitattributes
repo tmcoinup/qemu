@@ -11,3 +11,5 @@ Cargo.lock      diff=toml merge=binary
 # 中文注释：该 INF 与已签名 CAT 配套，必须保留原始 CRLF 字节；禁止 Git
 # 把回车视作尾随空白，否则常规 diff --check 会误报且规范化会破坏签名。
 deploy/scripts/stock-viogpudo/viogpudo.inf -text -whitespace
+deploy/scripts/stock-intel-chipset-inf/CannonLake-HSystem.inf -text -whitespace
+deploy/scripts/stock-intel-chipset-inf/SunrisePoint-HSystem.inf -text -whitespace

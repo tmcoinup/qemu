@@ -13,7 +13,7 @@ _stealth_write_profile_body() {
 
     generated_at="$(date -Iseconds)" || return 1
     printf '# stealth hardware profile — generated %s\n' "$generated_at" || return 1
-    printf '# 删除此文件 (或运行 reroll-identity.sh) 重新随机化\n' || return 1
+    printf '# 不要删除此文件；使用 start-vm.sh <实例> --reroll 原子更新身份\n' || return 1
     for v in "${_STEALTH_PROFILE_VARS[@]}"; do
         [[ -v $v ]] || {
             echo "ERROR: 保存 profile 时缺少变量: $v" >&2

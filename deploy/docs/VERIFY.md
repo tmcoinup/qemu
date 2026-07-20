@@ -42,69 +42,60 @@
 
 ## 存储
 
-NVMe 池（5 款）每条都带真实 advertised 字节数，profile 抽中后 qcow2 同步建对应大小，**Model ↔ Size 自洽**：
+当前严格组件目录只启用一个 NVMe 模板。profile 固化组件 ID 后，qcow2 必须使用
+同一条目的精确 advertised 字节数，保证 **Model ↔ Firmware ↔ Size** 自洽：
 
-| Model                            | Firmware | RAW_BYTES         | Win 看到容量 |
-|----------------------------------|----------|--------------------|--------------|
-| Samsung SSD 970 PRO 512GB        | 1B2QEXM7 | 512,110,190,592   | ~476.9 GiB    |
-| Samsung SSD 970 EVO Plus 500GB   | 2B2QEXM7 | 500,107,862,016   | ~465.7 GiB    |
-| Samsung SSD 980 PRO 500GB        | 5B2QGXA7 | 500,107,862,016   | ~465.7 GiB    |
-| Samsung SSD 980 1TB              | 3B4QFXO7 | 1,000,204,886,016 | ~931.5 GiB    |
-| Samsung SSD 990 PRO 1TB          | 3B2QJXD7 | 1,000,204,886,016 | ~931.5 GiB    |
+| Model | Firmware | RAW_BYTES | Windows 可见容量 |
+|---|---|---:|---:|
+| Samsung SSD 970 PRO 512GB | 1B2QEXP7 | 512,110,190,592 | ~476.9 GiB |
 
 | 字段                  | 值                                   |
 |-----------------------|--------------------------------------|
-| PCI vendor/device     | 144D:A809（Samsung）                 |
+| PCI vendor/device     | 144D:A804（Samsung 970 PRO 参考寄存器） |
 | 子 vendor/device      | 144D:A801（970 PRO 级）              |
 | Identify Ctrl `MN`    | profile 抽中型号                      |
 | Identify Ctrl `FR`    | profile 抽中固件                      |
 | IEEE OUI              | 00:25:38（Samsung）—— `use-samsung-id=on` |
-| SUBNQN                | `nqn.1994-11.com.samsung:nvme:...`   |
+| SUBNQN                | `nqn.2014-08.org.nvmexpress:uuid:...` |
 
 ## 显示器（EDID 池，patch 0009）
 
-`MONITOR_POOL` 10 条 24" 1920×1080 显示器；profile 抽 1 条写 EDID。Guest 端
-`Get-CimInstance Win32_DesktopMonitor` 会看到对应型号。
+当前严格目录只启用一条 24" 1920×1080 模板。型号规格来自 Samsung 文档，
+但 product/date/serial 等没有 raw EDID 样机，因此明确标记为合成身份。
 
 | EDID Vendor | Name         | 尺寸 (mm) | 备注          |
 |-------------|--------------|-----------|---------------|
-| SAM         | S24F350      | 530×300   | Samsung 三星  |
-| SAM         | C24F390      | 530×300   | 三星曲面      |
-| AOC         | 24G2E5       | 530×300   | AOC 冠捷      |
-| AOC         | 22B1H        | 485×275   | AOC 21.5"     |
-| BNQ         | GW2480       | 530×300   | BenQ 明基     |
-| DEL         | SE2419HR     | 527×296   | Dell OEM 捆绑 |
-| HKC         | SG24A1       | 530×300   | **HKC 国产**   |
-| HKC         | M24A1F       | 530×300   | HKC 国产      |
-| GSM         | 24MK430      | 527×296   | LG 乐金       |
-| PHL         | 246E9QJ      | 530×300   | Philips 飞利浦|
+| SAM         | S24F350      | 521×293   | 型号规格已核验；EDID 身份字段为合成值 |
 
 实现：patch 0009 给 virtio-vga 加 `edid-vendor=` / `edid-name=` / `edid-serial=` / `edid-width-mm=` / `edid-height-mm=` cmdline 选项，start-vm.sh 从 profile.EDID_* 注入。
 
 ## 键盘 / 鼠标 / 数位板（USB HID 池，patch 0010）
 
-每 VM 独立抽。Guest 端 `Get-CimInstance Win32_USBHub`、设备管理器、`lsusb` 都看到 profile 选定的品牌。
+当前目录各启用一个固定身份；不再从未经核验的品牌池随机拼接。
 
 | 池          | 数量 | 包含品牌 |
 |-------------|-----|----------|
-| KBD_POOL    | 5   | Microsoft / Logitech / **A4Tech 双飞燕** / **Rapoo 雷柏** / Dell |
-| MOUSE_POOL  | 5   | Microsoft / Logitech / A4Tech / Rapoo / Dell |
-| TABLET_POOL | 4   | HUION 绘王 / HUION H640P / **VEIKK** / **XP-Pen 国产** |
+| KBD_POOL    | 1   | Microsoft Wired Keyboard 600（通用 QEMU report） |
+| MOUSE_POOL  | 1   | Microsoft USB Optical Mouse（通用 QEMU report） |
+| TABLET_POOL | 1   | QEMU USB Tablet（纯虚拟设备） |
 
-实现：patch 0010 给 usb-kbd/mouse/tablet 加 `vendorid=` / `productid=` / `manufacturer=` / `product=` cmdline 选项；`serial=` 走 USBDevice 父级。start-vm.sh 从 profile.{KBD,MOUSE,TABLET}_* 注入。
+实现只投影 VID/PID/名称；键鼠没有原始 descriptor 抓取，且不向 guest 暴露 serial，
+所以不能把 `identity_only_generic_report` 宣称成对应实体设备的完整实现。
 
-## TPM 2.0
+## 动态 TPM
 
 | 字段 | 值 |
 |---|---|
-| QEMU 设备 | `-device tpm-crb,tpmdev=tpm0` (CRB 现代主板风格，不是老 TIS) |
+| 策略 | `TPM=auto` 跟随 profile；H310 与禁用的 B350 兼容条目为 TPM 2.0 + CRB，H110 因缺板级 PTT 证据为 `none` |
+| QEMU 设备 | TPM 2.0 可用 `tpm-crb`/`tpm-tis`；TPM 1.2 只用 `tpm-tis` |
 | 后端 | `-tpmdev emulator,id=tpm0,chardev=chrtpm` + swtpm 后台 daemon |
-| State 目录 | `$VM_DIR/tpm-state/` (含 `tpm2-00.permall` 主存储) |
+| State 目录 | 2.0：`$VM_DIR/tpm-state/tpm2-00.permall`；1.2：`$VM_DIR/tpm12-state/tpm-00.permall` |
+| State 绑定 | 0600 `platform-binding` 记录平台、实现、版本、前端和 PCR bank；不匹配时保留旧密钥并拒绝启动 |
 | Control sock | `$VM_DIR/tpm-sock` (unixio chardev) |
-| 首启 init | `swtpm_setup --tpm2 --create-ek-cert --create-platform-cert --lock-nvram` |
-| OVMF 要求 | **必须**含 Tcg2Dxe/Pei/ConfigDxe/PlatformDxe 模块。Ubuntu 默认 `ovmf` 包**没编** TPM2 模块；本部署用 `deploy/tools/build-ovmf.sh` 重 build (`-D TPM2_ENABLE=TRUE`)，产出 `deploy/firmware/OVMF_CODE_4M_stealth.fd` |
+| 首启 init | 2.0 带 `swtpm_setup --tpm2`；1.2 不带 `--tpm2`；两者都按 profile 设置 PCR bank |
+| OVMF 要求 | 当前 TPM 2.0 平台使用含 Tcg2Dxe/Pei/ConfigDxe/PlatformDxe 的固件；本部署可用 `deploy/tools/build-ovmf.sh` 以 `-D TPM2_ENABLE=TRUE` 构建 `deploy/firmware/OVMF_CODE_4M_stealth.fd` |
 | Guest 端验证 | `Get-Tpm` 应返回 `TpmPresent=True, TpmReady=True` |
-| 常见坑 | (1) `/var/lib/swtpm-localca/` 只 root 可写 → EK cert 创建失败，permall 只 ~1.3KB；start-vm.sh 现自动 chown 修复，完整 init 后 permall ≥ 3KB。(2) OVMF 不含 Tcg2 → Get-Tpm 全 False；用 build-ovmf.sh 重 build。 |
+| 常见坑 | (1) 不得修改系统 `/var/lib/swtpm-localca` 权限；启动器使用每实例私有 CA。(2) 更换主板或 TPM 版本时绑定会拒绝复用旧 state，应先备份并按迁移流程处理。(3) 当前 TPM 2.0 profile 所用 OVMF 若不含 Tcg2，`Get-Tpm` 可能无法 ready。 |
 
 ## ACPI BGRT / SSDT
 
@@ -220,7 +211,7 @@ QEMU=/home/ubuntu/projects/qemu/build/qemu-system-x86_64 \
 | 2 | QMP query-cpu-model-expansion: hypervisor/kvm=False, invtsc/topoext/svm/sha-ni 在 |
 | 3 | ACPI OEM 字符串 `ALASKA` / `A M I` baked in |
 | 4 | NVMe `use-samsung-id` / `model-number` / `firmware-rev` 支持 |
-| 5 | TPM 2.0：swtpm 可用 + QEMU `-tpmdev emulator` 编进去 |
+| 5 | 动态 TPM：清单能力/版本/前端一致，swtpm 可用，QEMU 含对应 TIS/CRB 前端 |
 | 6 | BGRT 伪表 (`firmware/bgrt.bin`, 20 字节) |
 | 7 | BOARD_POOL 每条 8 字段 (含 SUBSYS_VEN / SUBSYS_DEV) |
 | 8 | CPU_POOL 全部无 iGPU |
@@ -238,7 +229,7 @@ QEMU=/home/ubuntu/projects/qemu/build/qemu-system-x86_64 \
 [Regex]::Match((Get-WmiObject Win32_ComputerSystem|Out-String),"BOCHS|BXPC").Success  # False
 (Get-WmiObject Win32_Processor).HypervisorPresent                           # False
 
-# TPM 2.0
+# TPM（版本应与当前 profile 的 TPM_VERSION 一致）
 (Get-Tpm).TpmPresent                                                        # True
 (Get-Tpm).TpmReady                                                          # True
 

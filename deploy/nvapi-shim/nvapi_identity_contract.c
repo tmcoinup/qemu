@@ -7,6 +7,82 @@
 
 #define NVIDIA_PCI_VENDOR_ID UINT32_C(0x10DE)
 
+/*
+ * NVAPI 只能投影仓库 GPU_POOL 中完整的 NVIDIA 硬件 bundle。不能仅按
+ * VEN/DEV 接受任意名称、显存或 VBIOS，否则一份被部分覆盖的 schema 快照
+ * 会组合成现实中不存在的显卡。BDF 属于实际 virtio carrier 的证明，不在
+ * 这里固定；其余型号规格必须逐项命中本表。
+ */
+struct nvapi_canonical_model {
+    const char *name;
+    const char *vendor;
+    const char *bios;
+    const char *memory_type;
+    NvU32 pci_device_id;
+    NvU32 revision_id;
+    NvU32 ram_mb;
+    NvU32 memory_bus_width_bits;
+    NvU32 base_clock_khz;
+    NvU32 boost_clock_khz;
+    NvU32 memory_clock_khz;
+    NvU32 sli_supported;
+};
+
+static const struct nvapi_canonical_model g_canonical_models[] = {
+    { "NVIDIA GeForce GTX 750 Ti", "NVIDIA", "Version 82.07.41.00.32",
+      "GDDR5", UINT32_C(0x1380), UINT32_C(0xa2), 2048u, 128u,
+      1020000u, 1085000u, 2700000u, 0u },
+    { "NVIDIA GeForce GT 1030", "NVIDIA", "Version 86.08.46.00.81",
+      "GDDR5", UINT32_C(0x1d01), UINT32_C(0xa1), 2048u, 64u,
+      1227000u, 1468000u, 3004000u, 0u },
+    { "NVIDIA GeForce GTX 1050", "NVIDIA", "Version 86.07.48.00.38",
+      "GDDR5", UINT32_C(0x1c81), UINT32_C(0xa1), 2048u, 128u,
+      1354000u, 1455000u, 3504000u, 0u },
+    { "NVIDIA GeForce GTX 1050 Ti", "NVIDIA", "Version 86.07.48.00.A0",
+      "GDDR5", UINT32_C(0x1c82), UINT32_C(0xa1), 4096u, 128u,
+      1290000u, 1392000u, 3504000u, 0u },
+};
+
+static const struct nvapi_canonical_model *find_canonical_model(
+    NvU32 pci_vendor_id, NvU32 pci_device_id)
+{
+    size_t index;
+
+    if (pci_vendor_id != NVIDIA_PCI_VENDOR_ID) {
+        return NULL;
+    }
+    for (index = 0u; index < sizeof(g_canonical_models) /
+             sizeof(g_canonical_models[0]); ++index) {
+        if (g_canonical_models[index].pci_device_id == pci_device_id) {
+            return &g_canonical_models[index];
+        }
+    }
+    return NULL;
+}
+
+static int matches_canonical_model(
+    const struct nvapi_identity_contract_input *input)
+{
+    const struct nvapi_canonical_model *model;
+
+    if (input == NULL || input->name == NULL || input->vendor == NULL ||
+        input->bios == NULL || input->memory_type == NULL) {
+        return 0;
+    }
+    model = find_canonical_model(input->pci_vendor_id, input->pci_device_id);
+    return model != NULL && strcmp(input->name, model->name) == 0 &&
+        strcmp(input->vendor, model->vendor) == 0 &&
+        strcmp(input->bios, model->bios) == 0 &&
+        strcmp(input->memory_type, model->memory_type) == 0 &&
+        input->revision_id == model->revision_id &&
+        input->ram_mb == model->ram_mb &&
+        input->memory_bus_width_bits == model->memory_bus_width_bits &&
+        input->base_clock_khz == model->base_clock_khz &&
+        input->boost_clock_khz == model->boost_clock_khz &&
+        input->memory_clock_khz == model->memory_clock_khz &&
+        input->sli_supported == model->sli_supported;
+}
+
 static int is_upper_hex_digit(char value)
 {
     return (value >= '0' && value <= '9') ||
@@ -112,42 +188,60 @@ static int copy_printable_ascii(char *output, size_t capacity,
     return 1;
 }
 
+static int contains_ascii_case_insensitive(const char *text,
+                                           const char *needle)
+{
+    size_t needle_length;
+    const char *cursor;
+
+    if (text == NULL || needle == NULL || needle[0] == '\0') {
+        return 0;
+    }
+    needle_length = strlen(needle);
+    for (cursor = text; *cursor != '\0'; ++cursor) {
+        size_t index;
+        for (index = 0; index < needle_length; ++index) {
+            unsigned char left = (unsigned char)cursor[index];
+            unsigned char right = (unsigned char)needle[index];
+            if (left == '\0') {
+                return 0;
+            }
+            if (left >= 'A' && left <= 'Z') {
+                left = (unsigned char)(left - 'A' + 'a');
+            }
+            if (right >= 'A' && right <= 'Z') {
+                right = (unsigned char)(right - 'A' + 'a');
+            }
+            if (left != right) {
+                break;
+            }
+        }
+        if (index == needle_length) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int nvapi_get_legacy_extension_defaults(
     NvU32 pci_vendor_id, NvU32 pci_device_id,
     struct nvapi_legacy_extension_defaults *defaults)
 {
-    if (defaults == NULL || pci_vendor_id != NVIDIA_PCI_VENDOR_ID) {
+    const struct nvapi_canonical_model *model;
+
+    if (defaults == NULL) {
+        return 0;
+    }
+    model = find_canonical_model(pci_vendor_id, pci_device_id);
+    if (model == NULL) {
         return 0;
     }
     memset(defaults, 0, sizeof(*defaults));
-    switch (pci_device_id) {
-    case UINT32_C(0x1380): /* GeForce GTX 750 Ti */
-        defaults->memory_bus_width_bits = 128u;
-        defaults->base_clock_khz = 1020000u;
-        defaults->boost_clock_khz = 1085000u;
-        defaults->memory_clock_khz = 2700000u;
-        return 1;
-    case UINT32_C(0x1d01): /* GeForce GT 1030 */
-        defaults->memory_bus_width_bits = 64u;
-        defaults->base_clock_khz = 1227000u;
-        defaults->boost_clock_khz = 1468000u;
-        defaults->memory_clock_khz = 3004000u;
-        return 1;
-    case UINT32_C(0x1c81): /* GeForce GTX 1050 */
-        defaults->memory_bus_width_bits = 128u;
-        defaults->base_clock_khz = 1354000u;
-        defaults->boost_clock_khz = 1455000u;
-        defaults->memory_clock_khz = 3504000u;
-        return 1;
-    case UINT32_C(0x1c82): /* GeForce GTX 1050 Ti */
-        defaults->memory_bus_width_bits = 128u;
-        defaults->base_clock_khz = 1290000u;
-        defaults->boost_clock_khz = 1392000u;
-        defaults->memory_clock_khz = 3504000u;
-        return 1;
-    default:
-        return 0;
-    }
+    defaults->memory_bus_width_bits = model->memory_bus_width_bits;
+    defaults->base_clock_khz = model->base_clock_khz;
+    defaults->boost_clock_khz = model->boost_clock_khz;
+    defaults->memory_clock_khz = model->memory_clock_khz;
+    return 1;
 }
 
 int nvapi_build_validated_identity(
@@ -170,6 +264,9 @@ int nvapi_build_validated_identity(
         strcmp(input->expected_token, input->identity_id) != 0 ||
         !copy_printable_ascii(identity->name, sizeof(identity->name),
                               input->name) ||
+        strncmp(input->name, "NVIDIA ", 7u) != 0 ||
+        contains_ascii_case_insensitive(input->name, "Red Hat") ||
+        contains_ascii_case_insensitive(input->name, "VirtIO") ||
         !copy_printable_ascii(identity->vendor, sizeof(identity->vendor),
                               input->vendor) ||
         strcmp(input->vendor, "NVIDIA") != 0 ||
@@ -198,6 +295,7 @@ int nvapi_build_validated_identity(
         input->boost_clock_khz > 5000000u ||
         input->memory_clock_khz < 100000u ||
         input->memory_clock_khz > 10000000u ||
+        !matches_canonical_model(input) ||
         (input->schema == STEALTH_GPU_LEGACY_SCHEMA_VERSION &&
          (!nvapi_get_legacy_extension_defaults(input->pci_vendor_id,
                                                input->pci_device_id,

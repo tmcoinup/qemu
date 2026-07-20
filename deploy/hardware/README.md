@@ -5,30 +5,62 @@
 芯片组和板载设备字段。禁止重新采用“先随机 CPU、再按 socket 随机主板、最后从
 全局池随机 BIOS”的方式；这种独立抽签会生成现实中不存在的跨代组合。
 
-`components.json` 是可更换部件事实源。SSD、显示器和 USB HID 只有在 C 设备模型
-能够同时表达型号、固件、PCI/EDID/descriptor 深层字段时才可设为 `enabled=true`。
-当前严格目录刻意只启用 Samsung 970 PRO 512GB、Samsung S24F350、Microsoft
-Wired Keyboard 600、Microsoft USB Optical Mouse；绝对坐标 tablet 明确标为
-`generic_virtual_only`，GPU 明确标为 `out_of_scope_virtual_display`。
+默认 `supported` 池包含 G4900（2C2T）、G5400（2C4T）、i3-9100F（4C4T）
+和 i5-6400T（4C4T）；每项都与对应 ASUS 主板、DDR4 速率、BIOS 和设备身份绑定。
+
+`components.json` 是原生 NVMe、显示器和 USB HID 的可更换部件事实源。各条目必须用
+fidelity/status 字段明确区分已核验字段与未采集的实机行为。当前 NVMe SSD 有厂商
+文档但没有设备快照；
+S24F350 的型号规格已核验，但 EDID 身份字段是合成值；Microsoft 键鼠只有目录身份
+标签，仍使用 QEMU 通用 report descriptor，标为 `unverified_catalog_identity` /
+`identity_only_generic_report`。绝对坐标 tablet 标为 `generic_virtual_only`，GPU
+标为 `out_of_scope_virtual_display`。
+
+`storage-compatibility.json` 独立保存无原生 NVMe boot 的老主板可用的 SATA 启动盘：
+Samsung 840 PRO、850 PRO、860 PRO 512GB。每项将稳定 ID、型号、零售料号、固件、
+容量和接口绑定为一个整体；资料来自 Samsung 官方产品页和固件目录，但没有对应实物的
+ATA IDENTIFY capture，不能把目录生成的 Identify 字段表述成样机原始转储。
+
+`household-compatibility.json` 是显式兜底目录，和默认 `platforms.json` 分开：
+它只包含家用桌面 Guest CPU，并按 E5 v1/v2/v3/v4、AMD K10/Zen 等宿主类
+映射到完整的 CPU、主板、内存、芯片组、固件和启动盘组合。这里的 E5 名称只用于
+识别宿主代际；任何 Xeon/E3/E5/E7、EPYC、Opteron 或 Threadripper 都不能成为
+Guest CPU。
+该目录只有在 `--allow-platform-compatibility` 下、且正常 supported 候选均无法
+由当前 KVM 创建时才参与选择。
+
+K10 的 Athlon II/Phenom II 条目按 Family 10h CPUID 保留 `invtsc`，不暴露后代
+`topoext`。3DNow!/3DNow!Ext 是该代真实能力，目录不会永久关闭；若执行宿主已经
+移除相应 KVM 位，启动器只在最终 QEMU 参数中按宿主实情动态追加禁用项。
 
 ## 设计边界
 
 - `status=supported` 只表示平台可在宿主运行时门禁通过后成为启动器候选，不表示目标
-  H110/H310/B350 machine、BDF 或寄存器行为已实现。当前启用 Intel 条目仍属于 Q35
+  H81/H110/H310/B350 machine、BDF 或寄存器行为已实现。当前启用 Intel 条目仍属于 Q35
   configuration-space identity compatibility。
+- 主板/整机/机箱序号与 asset tag 都是格式受控的合成值，不是厂商实机采集值；
+  MAC 仅核验厂商 OUI 并合成后缀，PCI subsystem 也没有 `lspci -nnvv` 样机快照闭环。
 - 清单描述一块可实际组装并由厂商 BIOS 支持的消费级主板平台。
 - 显卡直通和 vGPU 不属于本分支，因此显卡仍是独立显示策略，不作为平台真实性承诺。
-- NVMe 是可更换部件；平台只绑定主板所能提供的 PCIe 代际、lane 数和 UEFI 启动能力。
+- 存储是可更换部件；平台只绑定主板所能提供的 PCIe 代际、lane 数、UEFI 启动能力
+  和启动盘池。运行时按 `NVME_BOOT_SUPPORTED` 自动选择 NVMe 或 SATA/AHCI，不能
+  根据 CPU 型号推断。
 - USB 键鼠、显示器等外设不属于板载平台，可继续从独立目录选择，但不得伪造尚未实现的
   深层 HID/EDID 行为。
-- AM3、AM3+、FM2+、LGA1155 暂不进入清单。当前 Q35/平台设备层不能同时表达这些
-  芯片组的 PCI root、USB、音频和 DDR3 行为；保留旧 profile 的加载兼容性，但禁止
-  新 VM 再随机出这些组合。
-- 两个 AM4 bundle 保留了已核验的 CPU/主板事实，但标记为 `compatibility` 且禁用。
+- AM3、AM3+、FM2+、LGA1155 仍不进入默认 supported 清单。它们只存在于独立
+  household compatibility 目录，并明确保留 Q35 configuration-identity 边界；
+  新 VM 必须显式授权，不能把这些条目宣传成对应物理芯片组的完整行为模型。
+- H81/Haswell 是窄例外：仅当宿主 CPUID 精确分类为 E5 v3/v4 时，G3220、
+  i3-4130、i5-4570 三个家用型号进入默认正常 CPU 池；H81/PCH 仍只具有 Q35
+  configuration identity，不宣称目标芯片组行为等价。
+- Ryzen 3 1200 的 AM4 bundle 保留了已核验的 CPU/主板事实，但标记为
+  `compatibility` 且禁用。Ryzen 3 2300X 因 ASUS 官方 CPU 支持表无该板型搭配，
+  已移出目录。
   当前底层仍是 Intel Q35/ICH9 行为，仅替换 PCI ID 不能成为真实 AMD B350；调用方
   显式设置 `ALLOW_PLATFORM_COMPATIBILITY=1` 后，启动器按宿主 CPU vendor、`CPUS`、
-  最大频率和 TSC 约束自动匹配。选择器始终优先 `supported`，只在没有可用
-  `supported` 候选时回退到 `compatibility`。已有 profile 复用其 `PLATFORM_ID`；
+  最大频率和 TSC 约束自动匹配。E5 v3/v4 先选择宿主专用正常池；其它宿主
+  优先普通 `supported`，只在没有可用正常候选时回退到 `compatibility`。
+  已有 profile 复用其 `PLATFORM_ID`；
   `STEALTH_PLATFORM_ID`/`--platform-id` 只用于可选的高级固定或一致性断言。
   这个独立门禁不会把 `STRICT_HARDWARE` 改成 `0`，也不会关闭 KVM/TSC、CPU realize、
   profile、磁盘，或请求 `TPM=1` 时的 TPM 检查。历史内部调用的 `STRICT_HARDWARE=0`
@@ -75,10 +107,33 @@ CPU 字段：
 - `source_refs` 至少包含 CPU 支持表和 BIOS 发布页。新增平台时必须人工打开来源核验，
   不能用本仓库自己的白名单证明本仓库自己的数据。
 
+TPM 字段：
+
+- `tpm` 随整机平台绑定，选择平台后统一导出 `TPM_CAPABILITY`、`TPM_SUPPORTED`、
+  `TPM_IMPLEMENTATION`、`TPM_VERSION`、`TPM_FRONTEND` 和 `TPM_PCR_BANKS`。启动器
+  不得再独立随机 TPM 版本或实现，否则会把 Intel PTT、AMD fTPM 与错误的主板组合。
+- `capability` 描述目标平台具有 `firmware` 固件 TPM、`discrete` 独立模块能力或
+  `none`；`implementation` 进一步区分 `intel-ptt`、`amd-ftpm`、
+  `discrete-module` 和 `none`。固件实现必须与 CPU 厂商一致。
+- `supported` 是 TPM 能力状态，与平台对象顶层的启动候选 `status/enabled` 含义不同。
+  因此 AM4 compatibility 平台可以禁用为启动候选，同时仍如实记录主板支持 AMD fTPM。
+- `version` 只允许 `none`、`1.2`、`2.0`；`pcr_banks` 只允许 `sha1` 和 `sha256`。
+  TPM 1.2 只能使用 `sha1`，`tpm-crb` 只能承载 TPM 2.0。不支持 TPM 时，能力、实现、
+  版本和前端必须全部为 `none`，PCR bank 必须为空。
+- `emulation_frontend`（即启动器采用的 TPM interface/frontend）是本项目提供给客体的
+  仿真选择，用来在 `tpm-tis`、`tpm-crb` 与 `none` 之间生成一致的 QEMU 参数；
+  它不是目标主板上的物理接口、排针类型或固件内部连接方式，也不得据此宣称已模拟
+  主板 TPM 电气拓扑。当前 H310 和兼容性 B350 条目选择 TPM 2.0
+  `tpm-crb`/`sha256`；H110M-A/M.2 因缺少板级 PTT 证据而 fail closed 为 `none`。
+- `support_source_ref` 与 `version_source_ref` 必须是两条不同的 ASUS/Intel 官方
+  HTTPS 证据：前者核验具体主板/芯片组是否提供 fTPM/PTT，后者核验该实现对应
+  的 TPM 版本。不能只用一篇通用 TPM 文章同时替代型号支持和版本依据。
+
 设备字段：
 
 - `root_port` 与 `xhci` 代表该代平台可见的控制器身份。
-- `chipset` 必须完整给出 MCH、LPC、SMBus 和 AHCI 的 vendor/device/revision 三元组。
+- `chipset` 必须完整给出 MCH、LPC、SMBus 和 AHCI 的 vendor/device/revision 三元组；
+  MCH 仅用于声明目标/兼容边界，不得覆盖 Q35 启动所需的原生 `8086:29c0`。
   AM4 compatibility 条目故意记录底层 Q35/ICH9 三元组，用来明确暴露兼容边界，不能
   把它解释成已实现 B350 行为。
 - PCI ID 可注入不改变地址拓扑：Linux 当前有 `00:01.0`–`00:04.0` 四个 Q35 root port，
@@ -98,6 +153,12 @@ CPU 字段：
 - `nvme` 是总线能力而不是某一块 SSD 的型号；SSD model、firmware、容量仍需在存储
   目录中成套选择。`attachment=m2_socket` 是物理插槽硬约束，避免在只有一个已被
   独显占用的 x16 插槽上同时虚构一块 x4 NVMe 转接卡。
+- `NVME_BOOT_SUPPORTED=false` 时，household 平台必须把
+  `PLATFORM_BOOT_MODEL`/`PLATFORM_BOOT_FIRMWARE` 写成
+  `storage-compatibility-pool` 策略标记，并绑定
+  `PLATFORM_BOOT_STORAGE_POOL_ID=samsung-sata-pro-512gb`。实际 Guest 可见的
+  SATA ID、型号、料号、固件、容量、接口和独立序列号由 `BOOT_STORAGE_*` 首次
+  随机后持久化；普通重启按所存 ID 重建，不得重新抽签，也不得复用 `NVME_*`。
 
 ## 变更流程
 
@@ -116,12 +177,22 @@ CPU 字段：
 `deploy/scripts/reroll-identity.sh <实例号>`；reroll 会改变整套硬件身份并可能触发客体
 重新激活，启动器不得自动替用户执行。
 
-## E5 v4 宿主说明
+## E5 v1-v4 宿主映射说明
 
-`intel-lga1151-i5-6400t-asus-h110m-a-m2` 的 TSC 是 2200 MHz，因此它是无 VMX TSC
-scaling 的 2.2 GHz Broadwell-EP/E5 v4 宿主在 TSC 维度上唯一可用的 4C/4T 候选。
-这不等于已证明 E5 v4 能实现完整 `Skylake-Client-IBRS` CPUID：选中后还必须在
-目标宿主上通过 KVM CPU realize smoke，任一特性缺失都要 fail-closed。未完成该实机
-smoke 前，E5-2696 v4/X99 只能评为条件支持。选择器仅在宿主供应商、vCPU 数、
-频率和强制 TSC 条件全部满足时产生它；没有候选时明确失败，不得回退到任意
-Intel SKU。
+- E5 v1 宿主 → Sandy Bridge 家用 DDR3 Guest；E5 v2 宿主 → Ivy Bridge
+  家用 DDR3 Guest；E5 v3/v4 宿主 → Haswell 家用 DDR3 Guest。E5 v3/v4
+  对应的实际 Guest 候选仅为 G3220（2C2T）、i3-4130（2C4T）和
+  i5-4570（4C4T），它们是无需 compatibility 参数的正常池；不允许缩核，
+  也绝不把 E5 品牌串透传给 Guest。E5 v1/v2 仍是显式兜底。
+- H61/B75/H81 等老主板没有原生 NVMe boot，运行时会把系统盘真正切到
+  SATA/AHCI，并从受控的 Samsung 840/850/860 PRO 512GB 池首次随机一套完整身份；
+  后续重启复用同一 `BOOT_STORAGE_COMPONENT_ID`。NVMe 仅作为 data-only 能力。
+- 带核显的 SKU 固定为 `disabled_in_bios`，本分支不创建仅改 PCI ID 的假 Intel/
+  AMD iGPU，因此 Windows 设备管理器不会枚举一块无法由 QEMU 实现的核显。
+- 无 TSC scaling 或宿主频率低于目标 SKU 时，E5 v3/v4 正常池可沿用宿主
+  TSC/受限执行性能并给出警告；其它候选仍要求显式 compatibility。CPU feature
+  必须以 `enforce=on` 通过真实 KVM realize，不能用 `enforce=off` 掩盖缺失指令。
+- 2026-07-19 已在 E5-2696 v4/JGINYUE X99-TI D4 PLUS、QEMU 8.2.2 上实测 G3220 2C2T、
+  i3-4130 2C4T、i5-4570 4C4T 三个 Haswell 家用模型均能无 warning 创建 vCPU；
+  该结果只证明瞬时 CPU realize；客体枚举与长稳尚未完成，E5 v3 仍由每次启动的
+  真实 KVM realize 决定。

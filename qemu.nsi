@@ -150,7 +150,7 @@ SectionEnd
 
 !ifdef CONFIG_VMATE_RUNTIME
 ; 下游 x86_64 构建才定义此开关。保留 deploy 相对目录，使 PowerShell 模块向上
-; 定位安装根目录后，仍能找到 deploy\hardware 下的两个共享事实源。
+; 定位安装根目录后，仍能找到 deploy\hardware 下的三个共享事实源。
 Section "VMate Runtime (required)" SectionVMateRuntime
     SectionIn RO
     SetOutPath "$INSTDIR"
@@ -160,6 +160,8 @@ Section "VMate Runtime (required)" SectionVMateRuntime
     File /r "${BINDIR}\deploy\windows\*.*"
     SetOutPath "$INSTDIR\deploy\hardware"
     File /r "${BINDIR}\deploy\hardware\*.*"
+    SetOutPath "$INSTDIR\deploy\firmware"
+    File /r "${BINDIR}\deploy\firmware\*.*"
     SetOutPath "$INSTDIR\deploy\docs"
     File /r "${BINDIR}\deploy\docs\*.*"
 SectionEnd
@@ -173,6 +175,11 @@ SectionGroupEnd
 
 !ifdef DLLDIR
 Section "Libraries (DLL)" SectionDll
+!ifdef CONFIG_VMATE_RUNTIME
+    ; VMate 的必需 EXE 使用 MinGW 动态运行库。禁止取消 DLL section，
+    ; 避免安装器生成脚本齐全、但进程在加载阶段即失败的半套 runtime。
+    SectionIn RO
+!endif
     SetOutPath "$INSTDIR"
     File "${DLLDIR}\*.dll"
 SectionEnd

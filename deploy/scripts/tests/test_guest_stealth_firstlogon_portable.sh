@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 UNATTEND="$REPO_ROOT/deploy/autounattend/autounattend.xml"
 CLONE="$REPO_ROOT/deploy/scripts/clone-from-base.sh"
+CLONE_POSTPROCESS="$REPO_ROOT/deploy/scripts/lib/clone-postprocess.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -48,6 +49,7 @@ reject_text 'C:\stealth\respawn-firstlogon.log' "$UNATTEND"
 
 reject_text 'serve-stealth-http.py' "$CLONE"
 reject_text '让 guest FirstLogon 能拉 respawn-stealth.ps1' "$CLONE"
-require_text 'D:\\工具\\respawn-stealth.exe' "$CLONE"
+require_text 'clone_postprocess_guest' "$CLONE"
+require_text 'D:\\工具\\respawn-stealth.exe' "$CLONE_POSTPROCESS"
 
 echo "OK: guest stealth FirstLogon runs D drive EXE once without fixed HTTP"

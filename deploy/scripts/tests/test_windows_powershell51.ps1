@@ -57,7 +57,7 @@ try {
         -ComponentManifest (Join-Path $RepoRoot 'deploy/hardware/components.json') `
         -PlatformId 'intel-lga1151-i3-9100f-asus-prime-h310m-a-r2' `
         -FbShmPath (Join-Path $testRoot 'fb.sock') -GpuGlProbe Unavailable `
-        -AllowHostCpuPlatformMismatch -DryRun)
+        -DryRunHostCpuName 'Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz' -DryRun)
     if ($output -notcontains 'whpx,hyperv=off,kernel-irqchip=off' -or
         @($output | Where-Object {
                 $_ -like 'intel-hda,id=hda,bus=pcie.0,addr=0x4,*'

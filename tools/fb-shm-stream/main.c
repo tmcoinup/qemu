@@ -292,9 +292,10 @@ int main(int argc, char **argv)
     fb_shm_stream_set_sock_nonblock(s.sock);
 
     if (s.shm_ready) {
-        fprintf(stderr, "[fb-shm] connected: %ux%u shm=%zuB\n",
+        fprintf(stderr, "[fb-shm] connected: %ux%u shm=%" PRIu64 "B\n",
                 fb_shm_stream_header(&s)->width,
-                fb_shm_stream_header(&s)->height, s.map.size);
+                fb_shm_stream_header(&s)->height,
+                (uint64_t)s.map.size);
     } else {
         fprintf(stderr, "[fb-shm] connected: waiting for GPU frames\n");
     }

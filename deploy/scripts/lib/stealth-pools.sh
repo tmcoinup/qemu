@@ -46,27 +46,87 @@ GPU_POOL=(
 mapfile -t NVME_POOL < <(stealth_component_rows storage)
 
 # ------------------------------------------------------------------
-# 内存 part / 厂商池 —— 低端 4G 总量典型搭配。
-# Format: MFR|PART_2G|PART_4G|RATED_MTS|SOCKETS
+# 内存 part / 厂商池 —— 低端 4G/8G 总量典型搭配。
+# Format:
+# MFR|PART_2G|PART_4G|RATED_MTS|SOCKETS|
+# RANK_2G|DEVICE_WIDTH_2G|RANK_4G|DEVICE_WIDTH_4G
 # ------------------------------------------------------------------
 # 增 RATED_MTS 列(2026-05-26)：颗粒额定速率(JEDEC/型号编码)。**报告速率 = min(本列,
 # CPU 平台内存上限)** —— 见 stealth-smbios.sh::_cpu_max_mem。这样既不会出现"i3-9100F
 # (官方 DDR4-2400)却报 2666"、也不会"2400 颗粒报 2666"，CPU/主板/内存频率三者配套。
 # 速率随颗粒(随机)+CPU(随机)而变 = 规格随机但永不超平台。
 MEM_POOL=(
-    # DDR4：AM4 / LGA1151 / LGA1200
-    "Crucial|CT2G4DFS6266|CT4G4DFS8266|2666|AM4,LGA1151,LGA1200"
-    "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400|AM4,LGA1151,LGA1200"
-    "Kingston|KVR24N17S6/2|KVR24N17S8/4|2400|AM4,LGA1151,LGA1200"
-    "Crucial|CT2G4DFS624A|CT4G4DFS824A|2400|AM4,LGA1151,LGA1200"
-    "SK hynix|HMA425U6AFR6N-UH|HMA851U6AFR6N-UH|2400|AM4,LGA1151,LGA1200"
-    # DDR3：只保留能核验到 2G/4G 成对真实型号的 1333/1600 桌面 UDIMM。
-    # AM3 / Sandy Bridge 这类 CPU 上限为 1333，选择阶段会按 _cpu_max_mem 自动过滤。
-    "Kingston|KVR16N11S6/2|KVR16N11S8/4|1600|AM3+,FM2+,LGA1155"
-    "Crucial|CT25664BA160B|CT51264BA160B|1600|AM3+,FM2+,LGA1155"
-    "SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600|AM3+,FM2+,LGA1155"
-    "Kingston|KVR13N9S6/2|KVR13N9S8/4|1333|AM3,AM3+,FM2+,LGA1155"
+    # 活动 DDR4：型号/容量/rank/device-width 均有厂商或平台验证文档。
+    # Samsung: https://download.semiconductor.samsung.com/resources/data-sheet/M378A5244CB0-CRC00.pdf
+    # Kingston: https://www.kingston.com/dataSheets/KVR24N17S8_4.pdf
+    # Crucial 2GB: https://www.intel.com/content/dam/www/public/us/en/documents/platform-memory/ddr4-2133-n-ecc-udimm-validation-results.pdf
+    "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400|AM4,LGA1151,LGA1200|1|16|1|16"
+    "Kingston|KVR24N17S6/2|KVR24N17S8/4|2400|AM4,LGA1151,LGA1200|1|16|1|8"
+    "Crucial|CT2G4DFS624A|CT4G4DFS824A|2400|AM4,LGA1151,LGA1200|1|16|1|8"
+    # 活动 DDR3：供 Sandy/Ivy/Haswell 家用 compatibility bundle 使用。
+    # 这些通用 UDIMM 的几何已有厂商或 Intel 平台验证资料；具体训练速率仍由
+    # bundle 的 MEM_MAX_MTS/MEM_ALLOWED_MTS 约束，不能跨代选到 DDR4 平台。
+    "Kingston|KVR16N11S6/2|KVR16N11S8/4|1600|AM3+,FM2+,LGA1150,LGA1155|1|16|1|8"
+    "SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600|AM3+,FM2+,LGA1150,LGA1155|1|8|2|8"
+    "Kingston|KVR13N9S6/2|KVR13N9S8/4|1333|AM3,AM3+,FM2+,LGA1150,LGA1155|1|16|1|8"
 )
+
+# 已核验但当前不作为新 profile 候选的物料。只供 legacy 诊断/迁移读取。
+MEM_DORMANT_POOL=(
+    # 当前留空；保留数组供 legacy 读取接口稳定。
+)
+
+# 这些行只记录迁移诊断所需的旧物料事实，绝不作为新 VM 或严格 profile 的
+# 合法候选。Hynix DDR4 缺精确 2GB 一手资料；Crucial DDR3 base SKU 缺完整
+# 物料修订后缀，无法固定 rank/芯片布局。
+MEM_QUARANTINED_POOL=(
+    "SK hynix|HMA425U6AFR6N-UH|HMA851U6AFR6N-UH|2400|AM4,LGA1151,LGA1200|1|16|1|16"
+    "Crucial|CT25664BA160B|CT51264BA160B|1600|AM3+,FM2+,LGA1155|1|8|2|8"
+)
+
+_stealth_memory_geometry_in_pool() {
+    local pool_name="$1"
+    shift
+    local wanted_mfr="$1" wanted_2g="$2" wanted_4g="$3" wanted_rate="$4"
+    local -n pool="$pool_name"
+    local row mfr part_2g part_4g rate _sockets
+    local rank_2g width_2g rank_4g width_4g
+
+    for row in "${pool[@]}"; do
+        IFS='|' read -r mfr part_2g part_4g rate _sockets \
+            rank_2g width_2g rank_4g width_4g <<<"$row"
+        if [[ "$mfr|$part_2g|$part_4g|$rate" == \
+              "$wanted_mfr|$wanted_2g|$wanted_4g|$wanted_rate" ]]; then
+            printf '%s|%s|%s|%s\n' \
+                "$rank_2g" "$width_2g" "$rank_4g" "$width_4g"
+            return 0
+        fi
+    done
+    return 1
+}
+
+stealth_memory_catalog_geometry() {
+    _stealth_memory_geometry_in_pool MEM_POOL "$@"
+}
+
+stealth_memory_legacy_catalog_geometry() {
+    _stealth_memory_geometry_in_pool MEM_DORMANT_POOL "$@" ||
+        _stealth_memory_geometry_in_pool MEM_QUARANTINED_POOL "$@"
+}
+
+stealth_memory_catalog_contains() {
+    local geometry
+
+    geometry="$(stealth_memory_catalog_geometry "$1" "$2" "$3" "$4")" \
+        || return 1
+    [[ "$geometry" == "$5|$6|$7|$8" ]]
+}
+
+stealth_memory_profile_catalog_contains() {
+    # schema-1 严格绑定只接受活动池；dormant/quarantine/退役料号必须显式
+    # 迁移或 reroll，不能继续冒充当前已核验目录。
+    stealth_memory_catalog_contains "$@"
+}
 
 # EDID/HID 也必须与 C descriptor 同源。当前仅启用完整 Samsung EDID、Microsoft
 # 键鼠模板和明确标为虚拟通用绝对指针的 tablet；未实现深层 descriptor 的品牌不随机。

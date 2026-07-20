@@ -2,20 +2,20 @@
 # ---------------------------------------------------------------------------
 # setup-bridge.sh
 #
-# 宿主侧一次性 bridge 初始化脚本。默认路径继续提供历史普通 bridge 行为；显式
-# VLAN_TRUNK=1 时则把唯一的 br0 升级为 VLAN-aware bridge，并安装普通用户启动
-# VM 所需的受限 TAP helper。两条路径都只在宿主执行，Windows/Linux 客机无差异。
+# 宿主侧一次性 bridge 初始化脚本。默认把唯一的 br0 配成 VLAN-aware bridge，并
+# 安装普通用户启动 VM 所需的受限 TAP helper；显式 VLAN_TRUNK=0 才保留历史普通
+# bridge 行为。两条路径都只在宿主执行，Windows/Linux 客机无差异。
 #
 # 常用命令：
 #   sudo deploy/scripts/setup-bridge.sh
-#   sudo UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
-#   sudo VLAN_TRUNK=1 UPLINK=enp5s0 deploy/scripts/setup-bridge.sh
+#   sudo UPLINK=enp3s0 deploy/scripts/setup-bridge.sh
+#   sudo VLAN_TRUNK=0 UPLINK=enp3s0 deploy/scripts/setup-bridge.sh
 #
 # 环境变量：
 #   BR=br0              普通模式可覆盖 bridge 名；trunk 模式固定只能为 br0。
-#   UPLINK=enp5s0       要接入 bridge 的物理上联；trunk 模式必须提供。
+#   UPLINK=enp3s0       要接入 bridge 的物理上联；trunk 模式缺省时安全自动探测。
 #   HOST_IP=...         无上联时 bridge 的宿主地址，默认 192.168.76.1/24。
-#   VLAN_TRUNK=0|1      1 = 单 br0 动态 access VLAN 模式；默认 0 保持旧行为。
+#   VLAN_TRUNK=0|1      1 = 单 br0 动态 access VLAN 模式（默认）；0 = 旧普通模式。
 #   VM_USER=<用户名>    允许启动 VLAN VM 的普通用户；sudo 调用时默认原调用者。
 #
 # 旧 VLAN_ID/VLAN_IF 已被移除。每个 VID 不再创建 br-vlanN/VLAN 子接口；新 VID
@@ -240,8 +240,13 @@ setup_install_vlan_runtime() {
 
 # NetworkManager 迁移失败时，只恢复本次确实停用的原 active profile。
 setup_nm_restore_uplink() {
-    local slave="$1" names_var="$2" modes_var="$3" index
+    local bridge_name="$1" slave="$2" names_var="$3" modes_var="$4" index
     local -n names="$names_var" modes="$modes_var"
+    # 激活已经开始后，先停掉可能仍在 DHCP/linkdown 状态的 controller，避免
+    # 回滚物理口后遗留第二条 br0 默认路由。
+    if [[ "${SETUP_NM_BRIDGE_RESTARTED:-0}" == "1" ]]; then
+        nmcli connection down "$bridge_name" >/dev/null 2>&1 || true
+    fi
     if [[ "${SETUP_NM_SLAVE_CREATED:-0}" == "1" ]]; then
         nmcli connection delete "$slave" >/dev/null 2>&1 || true
     else
@@ -257,23 +262,36 @@ setup_nm_restore_uplink() {
 setup_nm_activate_uplink() {
     local bridge_name="$1" uplink="$2" slave="$3" trunk="$4"
     SETUP_NM_SLAVE_CREATED=0
+    SETUP_NM_BRIDGE_RESTARTED=0
     if ! nmcli -t -f NAME connection show | grep -Fxq "$slave"; then
         nmcli connection add type bridge-slave ifname "$uplink" \
-            connection.master "$bridge_name" con-name "$slave" autoconnect yes || return 1
+            connection.master "$bridge_name" con-name "$slave" autoconnect no || return 1
         SETUP_NM_SLAVE_CREATED=1
         echo ">> created NM bridge-slave '$slave'"
     else
         echo ">> NM bridge-slave '$slave' already exists"
     fi
-    nmcli connection modify "$bridge_name" ipv4.method auto ipv4.addresses "" || return 1
+    # port 永久不独立 autoconnect；它只随 controller 激活。旧脚本可能留下 yes，
+    # 因而重跑时也必须收敛为 no，否则 down br0 后 port 会反向拉起 master。
+    nmcli connection modify "$slave" connection.autoconnect no || return 1
+
+    # controller 是唯一激活入口。若先 `up` port，NetworkManager 会同时按
+    # autoconnect-slaves 再激活一次同一 port，第一份请求就会以
+    # “base network connection was interrupted” 失败。port 不独立自启动，
+    # 避免旧的 active br0 或重跑时的 down/up 再次制造竞争。
+    nmcli connection modify "$bridge_name" \
+        connection.autoconnect yes \
+        connection.autoconnect-slaves 1 \
+        ipv4.method auto ipv4.addresses "" || return 1
     nmcli connection down "$bridge_name" 2>/dev/null || true
-    nmcli connection up "$slave" || return 1
+    SETUP_NM_BRIDGE_RESTARTED=1
     nmcli connection up "$bridge_name" || return 1
     [[ "$trunk" != "1" ]] || setup_enable_vlan_runtime "$bridge_name" "$uplink"
 }
 
-# NetworkManager 1.36（Ubuntu 22.04）使用 bridge-slave 与旧 master 属性；这些
-# 属性在 Ubuntu 24.04 仍兼容。trunk 属性写入 bridge profile，重启后由 NM 恢复。
+# NetworkManager 1.36–1.54 仍兼容 bridge-slave、旧 master/autoconnect-slaves
+# 属性；使用这些别名可同时覆盖 Ubuntu 22.04 和当前新宿主。trunk 属性写入
+# bridge profile，重启后由 NM 恢复。
 setup_bridge_nm() {
     local bridge_name="$1" uplink="$2" host_ip="$3" trunk="$4"
     local slave connection original_autoconnect
@@ -300,23 +318,26 @@ setup_bridge_nm() {
     if [[ -n "$uplink" ]]; then
         slave="$bridge_name-slave-$uplink"
         SETUP_NM_SLAVE_CREATED=0
+        SETUP_NM_BRIDGE_RESTARTED=0
         # netplan 生成的物理口 profile 可能抢先自动激活。先停用并禁止这些冲突
         # profile，再创建 bridge-slave，避免 nmcli 表面成功但设备仍未进入 br0。
         while IFS= read -r connection; do
             [[ -n "$connection" ]] || continue
             if ! original_autoconnect="$(nmcli -g connection.autoconnect \
                 connection show "$connection")"; then
-                setup_nm_restore_uplink "$slave" released_names released_modes
+                setup_nm_restore_uplink \
+                    "$bridge_name" "$slave" released_names released_modes
                 return 1
             fi
             released_names+=("$connection")
             released_modes+=("$original_autoconnect")
             echo ">> releasing existing connection '$connection' on $uplink"
-            nmcli connection down "$connection" || true
             if ! nmcli connection modify "$connection" connection.autoconnect no; then
-                setup_nm_restore_uplink "$slave" released_names released_modes
+                setup_nm_restore_uplink \
+                    "$bridge_name" "$slave" released_names released_modes
                 return 1
             fi
+            nmcli connection down "$connection" || true
         done < <(
             nmcli -t -f NAME,DEVICE connection show --active \
                 | awk -F: -v dev="$uplink" -v own="$slave" \
@@ -324,7 +345,8 @@ setup_bridge_nm() {
         )
 
         if ! setup_nm_activate_uplink "$bridge_name" "$uplink" "$slave" "$trunk"; then
-            setup_nm_restore_uplink "$slave" released_names released_modes
+            setup_nm_restore_uplink \
+                "$bridge_name" "$slave" released_names released_modes
             return 1
         fi
         echo ">> bridge $bridge_name up with uplink $uplink (DHCP from native LAN)"

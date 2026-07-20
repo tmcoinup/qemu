@@ -249,12 +249,12 @@ function Read-ValidatedIdentitySnapshot {
     $vendorId = switch -CaseSensitive ($snapshot.SpoofVendor) {
         'NVIDIA' { 0x10DE; break }; 'AMD' { 0x1002; break }; default { -1 }
     }
+    $validName = $snapshot.SpoofName -cmatch '\A[\x20-\x7E]{1,63}\z' -and $snapshot.SpoofName.StartsWith(($snapshot.SpoofVendor + ' '), [System.StringComparison]::Ordinal) -and $snapshot.SpoofName -cnotmatch '(?i)\b(?:Red Hat|VirtIO)\b'
     $validBios = if ($snapshot.SpoofVendor -ceq 'NVIDIA') {
         $snapshot.SpoofBios -cmatch '\AVersion [0-9A-F]{2}(?:\.[0-9A-F]{2}){4}\z'
     } else { $snapshot.SpoofBios -cmatch '\A[0-9]{3}(?:\.[0-9]{3}){3}\.[0-9]{6}\z' }
     if ($schemaAfter -ne $schemaBefore -or $snapshot.IdentityId -cne $ExpectedId -or
-        $snapshot.IdentityMode -cne 'shallow-user-projection' -or
-        $snapshot.SpoofName -cnotmatch '\A[\x20-\x7E]{1,63}\z' -or $vendorId -lt 0 -or
+        $snapshot.IdentityMode -cne 'shallow-user-projection' -or -not $validName -or $vendorId -lt 0 -or
         -not $validBios -or -not $source.Success -or
         $snapshot.SpoofPciVendorId -ne $vendorId -or
         $snapshot.SpoofPciDeviceId -lt 1 -or $snapshot.SpoofPciDeviceId -gt 0xFFFF -or

@@ -133,7 +133,7 @@ check_qemu_trust_manifest() {
         esac
     done < "$manifest"
     [[ "$trust_path" == /* && -f "$trust_path" && ! -L "$trust_path" &&
-       -x "$trust_path" &&
+       -s "$trust_path" && -x "$trust_path" &&
        "$trust_sha256" =~ ^[0-9a-f]{64}$ && "$trust_device" =~ ^[0-9]+$ &&
        "$trust_inode" =~ ^[0-9]+$ ]] || return 1
     actual_meta="$(stat -Lc '%d:%i' -- "$trust_path" 2>/dev/null)" || return 1
@@ -247,9 +247,9 @@ QEMU_SOURCE="$(realpath -e -- "$QEMU_SOURCE" 2>/dev/null)" || {
     echo "ERROR: 找不到可信 QEMU；请先构建或设置 VMATE_QEMU_BINARY" >&2
     exit 1
 }
-[[ -f "$QEMU_SOURCE" && -x "$QEMU_SOURCE" && "$QEMU_SOURCE" != *$'\n'* &&
-   "$QEMU_SOURCE" != *$'\r'* ]] || {
-    echo "ERROR: 可信 QEMU 必须是可执行普通文件且路径不能含换行" >&2
+[[ -f "$QEMU_SOURCE" && -s "$QEMU_SOURCE" && -x "$QEMU_SOURCE" &&
+   "$QEMU_SOURCE" != *$'\n'* && "$QEMU_SOURCE" != *$'\r'* ]] || {
+    echo "ERROR: 可信 QEMU 必须是非空可执行普通文件且路径不能含换行" >&2
     exit 1
 }
 QEMU_META="$(stat -Lc '%d %i' -- "$QEMU_SOURCE")"

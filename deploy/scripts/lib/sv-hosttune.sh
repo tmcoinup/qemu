@@ -89,7 +89,13 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
             exit 1
         fi
     else
-        _ht_msg="$([[ -n "$_ht_cap_arg" ]] && echo "（封顶 $(( _ht_cap_arg/1000 ))MHz）")"
+        # 中文注释：本文件由启用 `set -e` 的启动器 source。关闭频率封顶时，
+        # `[[ -n "" ]] && echo ...` 的命令替换会返回 1，并让启动器在没有任何
+        # 错误文本的情况下提前退出；用显式分支确保普通空消息路径返回成功。
+        _ht_msg=""
+        if [[ -n "$_ht_cap_arg" ]]; then
+            _ht_msg="（封顶 $(( _ht_cap_arg / 1000 ))MHz）"
+        fi
         # 取 root 顺序：已 root 直接跑 → sudo -n(NOPASSWD 免密) → 有 tty 交互 → 否则 WARN。
         if [[ $EUID -eq 0 ]]; then
             echo ">> host 调优:   应用 host-performance.sh${_ht_msg} ..."

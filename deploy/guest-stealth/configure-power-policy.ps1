@@ -1,4 +1,4 @@
-﻿# configure-power-policy.ps1 —— 为正式 guest 严格禁止息屏、S3 与休眠。
+﻿# configure-power-policy.ps1 —— 为正式 guest 禁止自动息屏/睡眠，同时保留桌面 S3。
 #
 # 统一 EXE 会在任何 GPU/PnP 修改之前调用本脚本。写入和回读都使用 Windows 自带
 # PowrProf API，避开 powercfg /query 的本地化文本；只有“删除 hiberfil.sys”使用
@@ -147,12 +147,13 @@ public static class StealthPowerPolicyNative
             "DC power setting is policy-protected or inaccessible");
     }
 
-    public static void WriteZero(Guid scheme, Guid subgroup, Guid setting)
+    public static void WriteValue(
+        Guid scheme, Guid subgroup, Guid setting, uint value)
     {
         RequireSuccess(PowerWriteACValueIndex(IntPtr.Zero, ref scheme,
-            ref subgroup, ref setting, 0), "PowerWriteACValueIndex failed");
+            ref subgroup, ref setting, value), "PowerWriteACValueIndex failed");
         RequireSuccess(PowerWriteDCValueIndex(IntPtr.Zero, ref scheme,
-            ref subgroup, ref setting, 0), "PowerWriteDCValueIndex failed");
+            ref subgroup, ref setting, value), "PowerWriteDCValueIndex failed");
     }
 
     public static uint ReadAc(Guid scheme, Guid subgroup, Guid setting)
@@ -191,28 +192,29 @@ public static class StealthPowerPolicyNative
     Add-Type -TypeDefinition $source -Language CSharp -ErrorAction Stop
 }
 
-function New-StrictPowerSettings {
-    # 不能只写 STANDBYIDLE：它仅阻止空闲超时，用户或程序仍可主动请求 S3。
-    # ALLOWSTANDBY=0 才禁止 S1/S2/S3；其余项覆盖锁屏显示、无人值守与混合睡眠。
+function New-DesktopPowerSettings {
+    # STANDBYIDLE=0 让 Windows“睡眠”下拉显示“从不”；ALLOWSTANDBY=1 则保留
+    # 台式机正常的 S1/S2/S3 能力和“睡眠”区块。两者必须分别写入，不能再用
+    # ALLOWSTANDBY=0 隐藏整块页面。
     $videoSubGroup = [guid]'7516b95f-f776-4464-8c53-06167f40cc99'
     $sleepSubGroup = [guid]'238c9fa8-0aad-41ed-83f4-97be242c8f20'
     return @(
         [pscustomobject]@{ Label = '自动关闭显示器'; SubGroup = $videoSubGroup
-            Setting = [guid]'3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e' },
+            Setting = [guid]'3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e'; Value = [uint32]0 },
         [pscustomobject]@{ Label = '锁屏后关闭显示器'; SubGroup = $videoSubGroup
-            Setting = [guid]'8ec4b3a5-6868-48c2-be75-4f3044be88a7' },
+            Setting = [guid]'8ec4b3a5-6868-48c2-be75-4f3044be88a7'; Value = [uint32]0 },
         [pscustomobject]@{ Label = '空闲自动进入 S3'; SubGroup = $sleepSubGroup
-            Setting = [guid]'29f6c1db-86da-48c5-9fdb-f2b67b1f44da' },
+            Setting = [guid]'29f6c1db-86da-48c5-9fdb-f2b67b1f44da'; Value = [uint32]0 },
         [pscustomobject]@{ Label = '无人值守自动睡眠'; SubGroup = $sleepSubGroup
-            Setting = [guid]'7bc4a2f9-d8fc-4469-b07b-33eb785aaca0' },
-        [pscustomobject]@{ Label = '允许主动 S1/S2/S3'; SubGroup = $sleepSubGroup
-            Setting = [guid]'abfc2519-3608-4c2a-94ea-171b0ed546ab' },
+            Setting = [guid]'7bc4a2f9-d8fc-4469-b07b-33eb785aaca0'; Value = [uint32]0 },
+        [pscustomobject]@{ Label = '保留台式机 S1/S2/S3'; SubGroup = $sleepSubGroup
+            Setting = [guid]'abfc2519-3608-4c2a-94ea-171b0ed546ab'; Value = [uint32]1 },
         [pscustomobject]@{ Label = '混合睡眠'; SubGroup = $sleepSubGroup
-            Setting = [guid]'94ac6d29-73ce-41a6-809f-6363ba21b47e' }
+            Setting = [guid]'94ac6d29-73ce-41a6-809f-6363ba21b47e'; Value = [uint32]0 }
     )
 }
 
-function Assert-StrictPowerSettings {
+function Assert-DesktopPowerSettings {
     param(
         [Parameter(Mandatory = $true)][guid]$Scheme,
         [Parameter(Mandatory = $true)][object[]]$Settings
@@ -223,10 +225,12 @@ function Assert-StrictPowerSettings {
             $Scheme, $setting.SubGroup, $setting.Setting)
         $dc = [StealthPowerPolicyNative]::ReadDc(
             $Scheme, $setting.SubGroup, $setting.Setting)
-        if ($ac -ne 0 -or $dc -ne 0) {
-            throw ($setting.Label + ' 回读不为禁用：AC=' + $ac + '，DC=' + $dc)
+        if ($ac -ne $setting.Value -or $dc -ne $setting.Value) {
+            throw ($setting.Label + ' 回读值错误：期望=' + $setting.Value +
+                '，AC=' + $ac + '，DC=' + $dc)
         }
-        Write-Host ('  已验证 ' + $setting.Label + '：AC/DC=0') -ForegroundColor Green
+        Write-Host ('  已验证 ' + $setting.Label + '：AC/DC=' + $setting.Value) `
+            -ForegroundColor Green
     }
 }
 
@@ -234,18 +238,18 @@ try {
     Assert-PowerPolicyAdministrator
     Initialize-PowerPolicyNativeApi
     $powerCfg = Resolve-SystemPowerCfg
-    $settings = @(New-StrictPowerSettings)
+    $settings = @(New-DesktopPowerSettings)
     $sessionPower = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power'
     $appliedScheme = $null
 
-    Write-Host '=== 配置 guest 电源策略：严格禁止息屏、S3 和休眠 ===' `
+    Write-Host '=== 配置 guest 电源策略：屏幕/睡眠均为“从不”，保留桌面 S3 ===' `
         -ForegroundColor Cyan
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         $scheme = [StealthPowerPolicyNative]::GetActiveScheme()
         foreach ($setting in $settings) {
             [StealthPowerPolicyNative]::EnsureWritable($setting.Setting)
-            [StealthPowerPolicyNative]::WriteZero(
-                $scheme, $setting.SubGroup, $setting.Setting)
+            [StealthPowerPolicyNative]::WriteValue(
+                $scheme, $setting.SubGroup, $setting.Setting, $setting.Value)
         }
 
         # 修改方案后必须重新激活才会向内核广播。若另一个进程在写入期间切换方案，
@@ -264,7 +268,7 @@ try {
         Set-ItemProperty -LiteralPath $sessionPower -Name 'HiberbootEnabled' `
             -Type DWord -Value 0 -Force -ErrorAction Stop
 
-        Assert-StrictPowerSettings -Scheme $scheme -Settings $settings
+        Assert-DesktopPowerSettings -Scheme $scheme -Settings $settings
         $hiberboot = Get-ItemPropertyValue -LiteralPath $sessionPower `
             -Name 'HiberbootEnabled' -ErrorAction Stop
         if ([uint32]$hiberboot -ne 0) { throw 'HiberbootEnabled 回读不为 0。' }
@@ -282,7 +286,7 @@ try {
     }
 
     if ($null -eq $appliedScheme) {
-        throw '活动电源方案连续三次变化，无法证明当前方案已禁用睡眠。'
+        throw '活动电源方案连续三次变化，无法证明自动睡眠已禁用且桌面 S3 已保留。'
     }
     Write-Host ('  已固定活动电源方案：' + $appliedScheme) -ForegroundColor Green
     Write-Host '  Windows hiberfil、休眠和快速启动已关闭。' -ForegroundColor Green

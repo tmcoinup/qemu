@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证正式单 EXE 会在任何 GPU/PnP 修改前关闭 guest 的息屏、S3 与休眠策略。
+# 验证正式单 EXE 会在任何 GPU/PnP 修改前把屏幕/睡眠设为“从不”，同时保留桌面 S3。
 # shellcheck disable=SC2016
 # 单引号中的 `$` 属于待匹配 PowerShell 源码，不能由 Bash 提前展开。
 set -euo pipefail
@@ -56,7 +56,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
         $env:POWER_HELPER, [ref]$tokens, [ref]$errors)
     if ($errors.Count -gt 0) { throw "helper AST 不可用" }
     foreach ($name in "Invoke-PowerCfgChecked", "Initialize-PowerPolicyNativeApi",
-            "New-StrictPowerSettings") {
+            "New-DesktopPowerSettings") {
         $definition = $ast.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -71,10 +71,19 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
         if ($null -eq ("StealthPowerPolicyNative" -as [type])) {
             throw "PowrProf P/Invoke 桥没有成功编译"
         }
-        $settings = @(New-StrictPowerSettings)
+        $settings = @(New-DesktopPowerSettings)
         if ($settings.Count -ne 6 -or
             @($settings.Setting | Select-Object -Unique).Count -ne 6) {
-            throw "严格电源矩阵不是六项唯一设置"
+            throw "桌面电源矩阵不是六项唯一设置"
+        }
+        $allowStandbyGuid = [guid]"abfc2519-3608-4c2a-94ea-171b0ed546ab"
+        $allowStandby = @($settings | Where-Object Setting -eq $allowStandbyGuid)
+        if ($allowStandby.Count -ne 1 -or $allowStandby[0].Value -ne 1) {
+            throw "ALLOWSTANDBY 必须为 1，以保留正常桌面 S3 和睡眠区块"
+        }
+        $disabled = @($settings | Where-Object Setting -ne $allowStandbyGuid)
+        if (@($disabled | Where-Object { $_.Value -ne 0 }).Count -ne 0) {
+            throw "屏幕、自动睡眠和混合睡眠设置必须保持为 0（从不）"
         }
     }
 
@@ -95,7 +104,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
 ' || fail "电源策略 P/Invoke/矩阵/退出码动态测试失败"
 
 # 高权限 helper 只能执行 System32 的 inbox 工具，并拒绝重解析点。禁止新增网络、
-# 服务或计划任务，保证“关闭睡眠”不会扩大正式 guest 的安装面。
+# 服务或计划任务，保证电源页面修复不会扩大正式 guest 的安装面。
 grep -F '[Environment]::SystemDirectory' "$POWER_HELPER" >/dev/null \
     || fail "helper 没有从可信 System32 定位 powercfg"
 grep -F "Join-Path \$systemDirectory 'powercfg.exe'" "$POWER_HELPER" >/dev/null \
@@ -162,10 +171,11 @@ grep -F "exit 49" "$RESPAWN" >/dev/null || fail "power helper 失败没有专用
 grep -F 'power-policy.log' "$RESPAWN" >/dev/null || fail "主脚本没有电源策略日志"
 
 for doc in "$README" "$QUICKSTART"; do
-    rg -i '不息屏|禁止息屏|关闭显示器' "$doc" >/dev/null \
-        || fail "教程缺少正式 EXE 禁止息屏说明: $doc"
-    rg -i '不睡眠|禁止.*睡眠|S3' "$doc" >/dev/null \
-        || fail "教程缺少正式 EXE 禁止睡眠说明: $doc"
+    rg -i '屏幕' "$doc" >/dev/null && rg -i '睡眠' "$doc" >/dev/null && \
+        rg -i '从不' "$doc" >/dev/null \
+        || fail "教程缺少屏幕/睡眠均为“从不”的说明: $doc"
+    rg -i '保留.*S[123]|保留.*S1.S3|ALLOWSTANDBY' "$doc" >/dev/null \
+        || fail "教程缺少保留桌面睡眠能力的说明: $doc"
 done
 grep -F 'test_guest_stealth_power_policy.sh' "$RUNNER" >/dev/null \
     || fail "新电源策略测试没有加入 quick 并发测试集"
@@ -181,4 +191,4 @@ respawn_code_lines="$(awk '!/^[[:space:]]*($|#)/ { count++ } END { print count +
 [[ "$(wc -l < "$LAUNCHER")" -le 500 ]] \
     || fail "respawn-stealth-launcher.c 超过 500 行"
 
-echo "OK: guest-stealth 在 GPU/PnP 前幂等禁止息屏、S3 与休眠"
+echo "OK: guest-stealth 在 GPU/PnP 前将屏幕/睡眠设为从不并保留桌面 S3"

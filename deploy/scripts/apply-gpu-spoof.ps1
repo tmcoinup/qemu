@@ -1,7 +1,7 @@
 ﻿param(
     [string]$Subkey = "",
     [switch]$ListOnly,
-    [switch]$SkipTask,                          # skip the scheduled-task install step
+    [switch]$SkipTask,                          # 仅跳过交互式显示模式任务；名称刷新始终保留
     [switch]$AutoDetect,                        # 自动按 PCI subsys 查 GPU 池映射；clone 后用
     [string]$SpoofName    = 'NVIDIA GeForce GTX 1050',
     [string]$SpoofVendor  = 'NVIDIA',           # 'NVIDIA' / 'AMD'
@@ -10,9 +10,10 @@
     [ValidateSet('GDDR5')][string]$SpoofMemoryType = 'GDDR5', [ValidateRange(32, 1024)][ValidateScript({ ($_ -band ($_ - 1)) -eq 0 })][int]$SpoofMemoryBusWidthBits = 128,
     [ValidateRange(100000, 5000000)][int]$SpoofBaseClockKHz = 1354000, [ValidateRange(100000, 5000000)][int]$SpoofBoostClockKHz = 1455000,
     [ValidateRange(100000, 10000000)][int]$SpoofMemoryClockKHz = 3504000, [ValidateSet(0)][int]$SpoofSliSupported = 0,
-    # 正式 respawn 显式传入同一受保护 payload 目录，使双架构 NVAPI 发布与
-    # schema-2 identity 共用下方 durable try/finally。默认空值保留 standalone
-    # apply 的旧行为：只更新身份，不要求同目录存在系统 NVAPI 发布物。
+    # 正式 respawn 显式传入同一受保护 payload 目录，使 NVAPI + ADL 系统投影与
+    # schema-2 identity 共用下方 durable try/finally。参数名保留旧调用兼容，
+    # 同时接受更准确的 -GpuApiPayloadDir 别名。
+    [Alias('GpuApiPayloadDir')]
     [string]$NvapiPayloadDir = ''
 )
 
@@ -35,20 +36,22 @@ if (-not $ListOnly -and $missingHelper) {
     throw ("缺少同目录辅助脚本: " + $missingHelper)
 }
 
-# NVAPI 文件存在性要在 Stage 之前检查，避免明显残缺的正式 payload 先改注册表。
-# 摘要、PE 架构、系统目录与目标 allowlist 仍由 installer 在最终提交点重新验证，
-# 因而这里不能替代安装器自己的安全门禁。
-$nvapiPayloadRoot = ''; $nvapiInstallerSource = ''
+# 两个厂商读取层的文件存在性要在 Stage 前检查；摘要、PE 架构和系统目标 allowlist
+# 仍由统一 coordinator 的双重只读 Preflight 验证。
+$gpuApiPayloadRoot = ''; $gpuApiCoordinatorSource = ''
 if (-not $ListOnly -and -not [string]::IsNullOrWhiteSpace($NvapiPayloadDir)) {
-    $nvapiPayloadRoot = [IO.Path]::GetFullPath($NvapiPayloadDir)
-    $nvapiInstallerSource = Join-Path $nvapiPayloadRoot 'install-nvapi-system.ps1'
-    $missingNvapiPayload = @('install-nvapi-system.ps1',
-        'nvapi-system-transaction.ps1', 'nvapi.dll', 'nvapi64.dll') |
-        ForEach-Object { Join-Path $nvapiPayloadRoot $_ } |
+    $gpuApiPayloadRoot = [IO.Path]::GetFullPath($NvapiPayloadDir)
+    $gpuApiCoordinatorSource = Join-Path $gpuApiPayloadRoot 'install-gpu-api-system.ps1'
+    $missingGpuApiPayload = @(
+        'install-gpu-api-system.ps1', 'install-nvapi-system.ps1',
+        'nvapi-system-transaction.ps1', 'install-adl-system.ps1',
+        'adl-system-transaction.ps1', 'nvapi.dll', 'nvapi64.dll',
+        'atiadlxy.dll', 'atiadlxx32.dll', 'atiadlxx.dll'
+    ) | ForEach-Object { Join-Path $gpuApiPayloadRoot $_ } |
         Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) } |
         Select-Object -First 1
-    if ($missingNvapiPayload) {
-        throw ('正式 NVAPI payload 不完整：' + $missingNvapiPayload)
+    if ($missingGpuApiPayload) {
+        throw ('正式 GPU API payload 不完整：' + $missingGpuApiPayload)
     }
 }
 
@@ -144,7 +147,7 @@ function Enable-StealthDisplayDevices {
 }
 
 $identityTransactionId = $null; $identityTransactionCompleted = $false
-$nvapiTransactionPrepared = $false; $identityCompletionUnresolved = $false
+$gpuApiTransactionPrepared = $false; $identityCompletionUnresolved = $false
 try {
     if (-not $ListOnly) {
         # Recover helper 内含 fail-closed 旧任务屏障；屏障失败会在 Stage 前终止。
@@ -153,15 +156,15 @@ try {
             Write-Host ('Recovered unfinished GPU identity transaction: ' +
                 $recovery.Action + '/' + $recovery.IdentityId) -ForegroundColor Yellow
         }
-        if (-not [string]::IsNullOrWhiteSpace($nvapiInstallerSource)) {
-            # identity journal 先裁决 CurrentIdentity，再让 NVAPI durable receipt 按
-            # 同一 pointer Finalize/Rollback；新 reader 同时严格支持完整 schema-1/2。
-            $recoverNvapiArgs = @('-NoProfile', '-NonInteractive',
-                '-ExecutionPolicy', 'Bypass', '-File', $nvapiInstallerSource,
+        if (-not [string]::IsNullOrWhiteSpace($gpuApiCoordinatorSource)) {
+            # identity journal 先裁决 CurrentIdentity，再让两套 reader receipt 按
+            # 同一 pointer Finalize/Rollback。
+            $recoverGpuApiArgs = @('-NoProfile', '-NonInteractive',
+                '-ExecutionPolicy', 'Bypass', '-File', $gpuApiCoordinatorSource,
                 '-Action', 'Recover')
-            & $powershellExe @recoverNvapiArgs
+            & $powershellExe @recoverGpuApiArgs
             if ($LASTEXITCODE -ne 0) {
-                throw ('系统 NVAPI 中断事务恢复失败，退出码=' + $LASTEXITCODE)
+                throw ('系统 GPU API 中断事务恢复失败，退出码=' + $LASTEXITCODE)
             }
         }
     }
@@ -178,10 +181,17 @@ if ($AutoDetect) {
         '699F1002' = @{ Name='AMD Radeon RX 550';          Vendor='AMD';    Bios='016.011.000.029.000000'; RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1100000; BoostClockKHz=1183000; MemoryClockKHz=3500000; SliSupported=0 }
         '67FF1002' = @{ Name='AMD Radeon RX 560';          Vendor='AMD';    Bios='016.011.000.029.000000'; RamMb=4096; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1175000; BoostClockKHz=1275000; MemoryClockKHz=3500000; SliSupported=0 }
     }
-    $gpuDev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
-              Where-Object { $_.Status -ne 'Unknown' } |
-              Select-Object -First 1
-    if ($gpuDev -and $gpuDev.InstanceId -match 'SUBSYS_([0-9A-Fa-f]{8})') {
+    # RDP 登录后 Windows 会同时枚举 ROOT\RDPINDIRECTDISPLAY 一类远程显示节点。
+    # 不能再取 Display 列表第一项；只允许唯一在线的 stock virtio PCI 设备参与
+    # SUBSYS 映射，既避免 RDP 节点干扰，也继续对多显卡/异常物理身份 fail closed。
+    $gpuDevices = @(Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Status -ne 'Unknown' -and [string]$_.InstanceId -match '^PCI\\VEN_1AF4&DEV_1050&SUBSYS_[0-9A-Fa-f]{8}(?:&|\\)'
+        })
+    if ($gpuDevices.Count -ne 1) {
+        throw ('AutoDetect: 唯一在线 stock 1AF4:1050 Display 设备数=' + $gpuDevices.Count + '，拒绝继续')
+    }
+    if ($gpuDevices[0].InstanceId -match 'SUBSYS_([0-9A-Fa-f]{8})') {
         $subsys = $matches[1].ToUpper()
         if ($gpuMap.ContainsKey($subsys)) {
             $cfg = $gpuMap[$subsys]
@@ -195,7 +205,7 @@ if ($AutoDetect) {
             throw "AutoDetect: subsys=$subsys 未在已知 GPU 池中，拒绝伪造默认型号"
         }
     } else {
-        throw "AutoDetect: 未找到在线 Display 设备或 InstanceId 缺少 SUBSYS，拒绝继续"
+        throw "AutoDetect: stock Display InstanceId 缺少 SUBSYS，拒绝继续"
     }
 }
 
@@ -341,22 +351,22 @@ if ($targets.Count -ne 1) {
     throw ('选中的 Class target 不是 SourceInstanceId 唯一绑定子键：' + $activeSubkey)
 }
 
-# reader 必须先于 CurrentIdentity pointer 发布。deferred installer 在任何系统
-# DLL Move 前写 durable receipt，并保留旧双架构备份；此后无论 Commit/Complete
-# 在哪里失败，outer finally 都能先恢复旧 pointer、再恢复历史 reader。
-if (-not [string]::IsNullOrWhiteSpace($nvapiInstallerSource)) {
-    Write-Host 'Preparing durable dual-architecture NVAPI projection...' `
+# reader 必须先于 CurrentIdentity pointer 发布。coordinator 会在任何 Move 前对
+# NVAPI + ADL 五个目标完成全量只读预检，再分别落 durable receipt；此后无论
+# Commit/Complete 在哪里失败，outer finally 都能先恢复旧 pointer、再恢复 readers。
+if (-not [string]::IsNullOrWhiteSpace($gpuApiCoordinatorSource)) {
+    Write-Host 'Preparing durable NVIDIA + AMD hardware API projections...' `
         -ForegroundColor Cyan
-    $nvapiInstallArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy',
-        'Bypass', '-File', $nvapiInstallerSource, '-Action', 'Install',
-        '-PayloadDir', $nvapiPayloadRoot, '-TransactionId', $identityTransactionId,
+    $gpuApiInstallArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy',
+        'Bypass', '-File', $gpuApiCoordinatorSource, '-Action', 'Install',
+        '-PayloadDir', $gpuApiPayloadRoot, '-TransactionId', $identityTransactionId,
         '-DeferFinalize')
-    & $powershellExe @nvapiInstallArgs
+    & $powershellExe @gpuApiInstallArgs
     if ($LASTEXITCODE -ne 0) {
-        throw ('系统 NVAPI 身份投影准备失败，退出码=' + $LASTEXITCODE)
+        throw ('系统 GPU API 身份投影准备失败，退出码=' + $LASTEXITCODE)
     }
-    $nvapiTransactionPrepared = $true
-    Write-Host '  -> dual-architecture reader prepared before pointer commit' `
+    $gpuApiTransactionPrepared = $true
+    Write-Host '  -> NVIDIA/AMD readers prepared before pointer commit' `
         -ForegroundColor Green
 }
 Write-Host ("Committing strictly verified active Class " + $activeSubkey + "...") `
@@ -377,34 +387,32 @@ $displayTaskInstalled = $displayModeDeferred = $displayModeFailed = $false
 $displayModeSummary = '尚未执行显示模式验收'
 
 # ---- install boot-time refresh task ----------------------------------------
-if (-not $SkipTask) {
-    Write-Host ""
-    Write-Host "Installing boot-time refresh task (defeats BasicDisplay clobber)..." -ForegroundColor Cyan
+# 名称刷新是 Red Hat/VirtIO 泄漏的系统级长期兜底，FirstLogon 也必须安装。
+# -SkipTask 只控制需要交互桌面的显示模式任务，不能再关闭本 SYSTEM 任务。
+Write-Host ""; Write-Host "Installing boot-time refresh task (defeats BasicDisplay clobber)..." -ForegroundColor Cyan
 
-    $taskName = 'StealthGPU-RefreshName'; $scriptDir = Split-Path -Parent $PSScriptRoot
-    $scriptPath = Join-Path $scriptDir 'refresh-gpu-name.ps1'
-    New-Item -Path $scriptDir -ItemType Directory -Force | Out-Null
+$taskName = 'StealthGPU-RefreshName'; $scriptDir = Split-Path -Parent $PSScriptRoot
+$scriptPath = Join-Path $scriptDir 'refresh-gpu-name.ps1'
+New-Item -Path $scriptDir -ItemType Directory -Force | Out-Null
 
-    # 原样复制带 UTF-8 BOM 的独立源码，确保 Windows PowerShell 5.1 不按本地代码页误读。
-    Copy-HelperIfDifferent -Source $refreshHelperSource -Destination $scriptPath
+# 原样复制带 UTF-8 BOM 的独立源码，确保 Windows PowerShell 5.1 不按本地代码页误读。
+Copy-HelperIfDifferent -Source $refreshHelperSource -Destination $scriptPath
 
-    Remove-ScheduledTaskIfPresent -TaskName $taskName
+Remove-ScheduledTaskIfPresent -TaskName $taskName
 
-    $action = New-ScheduledTaskAction -Execute $powershellExe `
-        -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $scriptPath + '"')
-    $trigBoot  = New-ScheduledTaskTrigger -AtStartup
-    $trigLogon = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
-    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries -StartWhenAvailable
-    $task = New-ScheduledTask -Action $action -Trigger @($trigBoot, $trigLogon) `
-        -Principal $principal -Settings $settings
-    Register-ScheduledTask -TaskName $taskName -InputObject $task -Force | Out-Null
+$action = New-ScheduledTaskAction -Execute $powershellExe `
+    -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $scriptPath + '"')
+$trigBoot  = New-ScheduledTaskTrigger -AtStartup
+$trigLogon = New-ScheduledTaskTrigger -AtLogOn
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -StartWhenAvailable
+$task = New-ScheduledTask -Action $action -Trigger @($trigBoot, $trigLogon) `
+    -Principal $principal -Settings $settings
+Register-ScheduledTask -TaskName $taskName -InputObject $task -Force | Out-Null
 
-    Write-Host ("  -> installed " + $scriptPath) -ForegroundColor Green
-    Write-Host ("  -> task '" + $taskName + "' registered (AtStartup + AtLogOn, SYSTEM)") -ForegroundColor Green
-
-}
+Write-Host ("  -> installed " + $scriptPath) -ForegroundColor Green
+Write-Host ("  -> task '" + $taskName + "' registered (AtStartup + AtLogOn, SYSTEM)") -ForegroundColor Green
 
 # ---- prepare verified 1920x1080@60Hz mode switch ---------------------------
 # viogpudo 若未正确填充显示模式，Windows“高级显示设置”可能显示有源信号 -1×-1、
@@ -427,8 +435,7 @@ if ($SkipTask) {
 Copy-HelperIfDifferent -Source $displayModeHelperSource -Destination $freqScript
 
 if (-not $SkipTask) {
-    Write-Host ""
-    Write-Host "Installing user-session task to enforce and verify 1920x1080@60Hz..." -ForegroundColor Cyan
+    Write-Host ""; Write-Host "Installing user-session task to enforce and verify 1920x1080@60Hz..." -ForegroundColor Cyan
     Remove-ScheduledTaskIfPresent -TaskName $freqTask
     $freqAction = New-ScheduledTaskAction -Execute $powershellExe `
         -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
@@ -458,8 +465,7 @@ if (-not $SkipTask) {
 # 旧逻辑通过 Disable + Enable 刷新，但如果 QEMU/guest 在中途崩溃，Windows 会把显卡永久留成
 # Code 22（已禁用）。这里改为只触发设备扫描，并在扫描前后主动启用非 OK 的 Display 设备；
 # 真正的属性重读交给后续 reboot 和开机自刷任务完成，避免把显示适配器留在禁用态。
-Write-Host ""
-Write-Host "Refreshing PnP state without disabling the display adapter..." -ForegroundColor Cyan
+Write-Host ""; Write-Host "Refreshing PnP state without disabling the display adapter..." -ForegroundColor Cyan
 try {
     Enable-StealthDisplayDevices -Reason '最终收尾清理 Code 22' | Out-Null
     if (Get-Command 'pnputil.exe' -ErrorAction SilentlyContinue) {
@@ -490,8 +496,7 @@ try {
 # 不再用 schtasks /Run 异步触发后固定 sleep 两秒：那样既拿不到任务退出码，也无法证明
 # 切换发生在当前交互桌面。这里直接启动子 PowerShell 并等待结束，逐行转发原生返回码、
 # 切换前模式和切换后模式；因此外层 respawn 能用本脚本退出码决定是否继续重启。
-Write-Host ""
-Write-Host "Applying and verifying current display mode synchronously..." -ForegroundColor Cyan
+Write-Host ""; Write-Host "Applying and verifying current display mode synchronously..." -ForegroundColor Cyan
 $displayArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $freqScript)
 if (-not [string]::IsNullOrWhiteSpace($freqLog)) {
     $displayArgs += @('-LogPath', $freqLog)
@@ -545,8 +550,7 @@ if ($SkipTask) {
 }
 
 # ---- verify ----------------------------------------------------------------
-Write-Host ""
-Write-Host "Verifying via WMI..." -ForegroundColor Cyan
+Write-Host ""; Write-Host "Verifying via WMI..." -ForegroundColor Cyan
 Get-WmiObject Win32_VideoController |
     Select-Object Name, VideoProcessor, AdapterRAM, DriverVersion,
         CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate |
@@ -583,8 +587,8 @@ try {
         # pointer→DLL rollback；Completed 才允许清理 Pending 并保留新 reader。
         $completeInspection = & $identityHelperSource -InspectIdentity $identityTransactionId
     } catch {
-        # 无法裁决时绝不能先删 NVAPI receipt/backup。保留新 reader（兼容 schema-1/2）
-        # 和两份 durable journal，让下次启动先恢复 identity、再按 pointer 恢复 NVAPI。
+        # 无法裁决时绝不能先删 reader receipt/backup。保留兼容 schema-1/2 的新
+        # readers 与 durable journals，让下次启动先恢复 identity、再按 pointer 恢复。
         $identityCompletionUnresolved = $true
         throw ('CompleteIdentity 失败且 durable 裁决失败：' + $completeError.Message +
             '；resolver=' + $_.Exception.Message)
@@ -613,23 +617,23 @@ try {
         throw ('CompleteIdentity inspect 返回未知状态：' + $resolvedState)
     }
 }
-if ($nvapiTransactionPrepared) {
+if ($gpuApiTransactionPrepared) {
     # Complete 已清除 PendingIdentity 并把事务标为 Completed；此后收据只负责验证
-    # 两个新 reader 后删除旧备份。Finalize 失败不会倒退已完成身份，收据留待下次 Recover。
-    $nvapiFinalizeArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy',
-        'Bypass', '-File', $nvapiInstallerSource, '-Action', 'Finalize',
+    # 两套新 reader 后删除旧备份。Finalize 失败不会倒退已完成身份，收据留待 Recover。
+    $gpuApiFinalizeArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy',
+        'Bypass', '-File', $gpuApiCoordinatorSource, '-Action', 'Finalize',
         '-TransactionId', $identityTransactionId)
-    & $powershellExe @nvapiFinalizeArgs
+    & $powershellExe @gpuApiFinalizeArgs
     if ($LASTEXITCODE -ne 0) {
-        throw ('系统 NVAPI 身份投影 Finalize 失败，退出码=' + $LASTEXITCODE)
+        throw ('系统 GPU API 身份投影 Finalize 失败，退出码=' + $LASTEXITCODE)
     }
-    $nvapiTransactionPrepared = $false
-    Write-Host '  -> dual-architecture NVAPI/identity transaction finalized' `
+    $gpuApiTransactionPrepared = $false
+    Write-Host '  -> NVAPI + ADL + identity transaction finalized' `
         -ForegroundColor Green
 }
 
 # Driver-tab DEVPKEY 只是与浅层身份验收分离的历史诊断项。只有 identity
-# 和可选 NVAPI reader 全部提交后才打印成功；不再用红色“必须修 host”把
+# 和可选 GPU API readers 全部提交后才打印成功；不再用红色“必须修 host”把
 # 一键流程不需要的外观字段误报为失败。
 Write-Host ""
 Write-Host "Shallow GPU identity completed; no host-side offline fix is required." `
@@ -656,28 +660,29 @@ Write-Host "is the specific field under investigation, inspect host-fix-gpu-devp
         if ($null -eq $identityRollbackResolution -and $rollbackErrors.Count -eq 0) {
             $rollbackErrors.Add('identity Rollback 没有返回 durable 裁决结果')
         }
-        if ($null -ne $identityRollbackResolution -and $nvapiTransactionPrepared) {
+        if ($null -ne $identityRollbackResolution -and $gpuApiTransactionPrepared) {
             $rollbackAction = [string]$identityRollbackResolution.Action
             $rollbackState = [string]$identityRollbackResolution.State
-            $nvapiRecoveryAction = if ($rollbackAction -ceq 'Completed' -or
+            $gpuApiRecoveryAction = if ($rollbackAction -ceq 'Completed' -or
                 $rollbackState -ceq 'Completed') { 'Finalize' } else { 'Rollback' }
             try {
-                $nvapiRecoveryArgs = @('-NoProfile', '-NonInteractive',
-                    '-ExecutionPolicy', 'Bypass', '-File', $nvapiInstallerSource,
-                    '-Action', $nvapiRecoveryAction, '-TransactionId',
+                $gpuApiRecoveryArgs = @('-NoProfile', '-NonInteractive',
+                    '-ExecutionPolicy', 'Bypass', '-File', $gpuApiCoordinatorSource,
+                    '-Action', $gpuApiRecoveryAction, '-TransactionId',
                     $identityTransactionId)
-                & $powershellExe @nvapiRecoveryArgs
+                & $powershellExe @gpuApiRecoveryArgs
                 if ($LASTEXITCODE -ne 0) {
-                    throw ('NVAPI ' + $nvapiRecoveryAction + ' 退出码=' + $LASTEXITCODE)
+                    throw ('GPU API ' + $gpuApiRecoveryAction +
+                        ' 退出码=' + $LASTEXITCODE)
                 }
-                $nvapiTransactionPrepared = $false
-                if ($nvapiRecoveryAction -ceq 'Finalize') {
+                $gpuApiTransactionPrepared = $false
+                if ($gpuApiRecoveryAction -ceq 'Finalize') {
                     $identityTransactionCompleted = $true
                 }
             } catch { $rollbackErrors.Add($_.Exception.Message) }
         }
         if ($rollbackErrors.Count -gt 0) {
-            throw ('GPU/NVAPI 跨组件回滚失败：' + ($rollbackErrors -join ' | '))
+            throw ('GPU identity/API 跨组件回滚失败：' + ($rollbackErrors -join ' | '))
         }
     }
 }

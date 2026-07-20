@@ -20,7 +20,7 @@ sv_tpm_prepare_private_ca() (
     local setup_config="$config_dir/swtpm_setup.conf"
     local localca_config="$config_dir/swtpm-localca.conf"
     local localca_options="$config_dir/swtpm-localca.options"
-    local localca_tool manufacturer version model
+    local localca_tool manufacturer version model pcr_banks
 
     # 配置格式按行解析，拒绝换行路径；也拒绝预置符号链接，防止把权限收紧或 CA
     # 文件写到实例目录以外。NUL 无法存在于 shell 变量，无需单独检查。
@@ -44,6 +44,14 @@ sv_tpm_prepare_private_ca() (
     manufacturer="$(_sv_tpm_safe_label "${BOARD_MFR:-ASUSTeK}")"
     version="$(_sv_tpm_safe_label "${BOARD_VERSION:-1}")"
     model="$(_sv_tpm_safe_label "${BOARD_PRODUCT:-Desktop}")"
+    pcr_banks="${TPM_PCR_BANKS:-sha256}"
+    case "$pcr_banks" in
+        sha1|sha256|sha1,sha256|sha256,sha1) ;;
+        *)
+            echo "ERROR: TPM_PCR_BANKS 仅接受 sha1/sha256 的无重复逗号列表" >&2
+            return 1
+            ;;
+    esac
 
     # 子 shell 的 umask 不会污染后续 QEMU 启动；生成工具后续创建的 CA 私钥也会
     # 继承私有目录边界。显式 chmod 覆盖已有目录的宽松历史权限。
@@ -55,7 +63,7 @@ sv_tpm_prepare_private_ca() (
         printf 'create_certs_tool = %s\n' "$localca_tool"
         printf 'create_certs_tool_config = %s\n' "$localca_config"
         printf 'create_certs_tool_options = %s\n' "$localca_options"
-        printf 'active_pcr_banks = sha256\n'
+        printf 'active_pcr_banks = %s\n' "$pcr_banks"
     } >"$setup_config"
     {
         printf 'statedir = %s\n' "$ca_dir"

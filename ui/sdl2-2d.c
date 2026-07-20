@@ -34,8 +34,9 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
     DisplaySurface *surf = scon->surface;
     SDL_Rect rect, dst;
+    SDL2Rect guest_dst;
+    SDL2Size output;
     size_t surface_data_offset;
-    int ow, oh, dx, dy, dw, dh;
     assert(!scon->opengl);
 
     if (!scon->texture) {
@@ -56,17 +57,20 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     /*
      * Show the guest at its native resolution (1:1) centred in the window and
      * letterbox the surplus with black borders instead of upscaling it.  The
-     * destination rectangle is placed by sdl2_gfx_dst_rect() rather than via
+     * destination rectangle is placed by sdl2_guest_dst_rect() rather than via
      * SDL_RenderSetLogicalSize(), which would scale the guest up to fill the
      * window.
      */
-    SDL_GetRendererOutputSize(scon->real_renderer, &ow, &oh);
-    sdl2_gfx_dst_rect(ow, oh, surface_width(surf), surface_height(surf),
-                      &dx, &dy, &dw, &dh);
-    dst.x = dx;
-    dst.y = dy;
-    dst.w = dw;
-    dst.h = dh;
+    if (!sdl2_current_render_size(scon, &output)) {
+        return;
+    }
+    guest_dst = sdl2_guest_dst_rect(
+        output,
+        (SDL2Size) { surface_width(surf), surface_height(surf) });
+    dst.x = guest_dst.x;
+    dst.y = guest_dst.y;
+    dst.w = guest_dst.width;
+    dst.h = guest_dst.height;
     SDL_SetRenderDrawColor(scon->real_renderer, 0, 0, 0, 255);
     SDL_RenderClear(scon->real_renderer);
     SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);

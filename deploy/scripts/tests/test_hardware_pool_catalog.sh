@@ -18,13 +18,14 @@ source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
 known_cpu() {
     case "$1" in
         "AMD Ryzen 3 1200 Quad-Core Processor" \
-        |"AMD Ryzen 3 2300X Quad-Core Processor" \
         |"AMD Athlon(tm) II X2 250 Processor" \
         |"AMD Athlon(tm) II X4 640 Processor" \
         |"AMD Phenom(tm) II X4 955 Processor" \
         |"AMD FX(tm)-4100 Quad-Core Processor" \
         |"AMD FX(tm)-4300 Quad-Core Processor" \
         |"AMD Athlon(tm) X4 860K Quad Core Processor" \
+        |"Intel(R) Celeron(R) G4900 CPU @ 3.10GHz" \
+        |"Intel(R) Pentium(R) Gold G5400 CPU @ 3.70GHz" \
         |"Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz" \
         |"Intel(R) Core(TM) i5-6400T CPU @ 2.20GHz" \
         |"Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz" \
@@ -126,15 +127,23 @@ known_nvme() {
 
 known_memory() {
     case "$1|$2|$3|$4" in
-        "Crucial|CT2G4DFS6266|CT4G4DFS8266|2666" \
-        |"Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400" \
+        "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400" \
         |"Kingston|KVR24N17S6/2|KVR24N17S8/4|2400" \
         |"Crucial|CT2G4DFS624A|CT4G4DFS824A|2400" \
-        |"SK hynix|HMA425U6AFR6N-UH|HMA851U6AFR6N-UH|2400" \
         |"Kingston|KVR16N11S6/2|KVR16N11S8/4|1600" \
-        |"Crucial|CT25664BA160B|CT51264BA160B|1600" \
         |"SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600" \
         |"Kingston|KVR13N9S6/2|KVR13N9S8/4|1333")
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+known_memory_spd_brand() {
+    # 与 hw/i2c/smbus_eeprom_spd.c 的 JEP106 映射保持同步。新增品牌时必须先
+    # 补齐并单测其模组厂商码，不能只让 SMBIOS 显示字符串而留下空 SPD 身份。
+    case "$1" in
+        "Crucial"|"Samsung"|"Kingston"|"SK hynix")
             return 0 ;;
         *)
             return 1 ;;
@@ -187,13 +196,17 @@ for row in "${CPU_POOL[@]}"; do
     known_cpu "$name" || fail "CPU 未在真实发售目录中: $name"
     [[ "$name" != *"i3-8100F"* ]] || fail "i3-8100F 缺 Intel 官方发售规格，不得入池"
 done
-(( ${#CPU_POOL[@]} == 2 )) || fail "新 VM 只应暴露两个 enabled Intel CPU bundle"
+(( ${#CPU_POOL[@]} == 4 )) || fail "新 VM 应暴露四个 enabled Intel CPU bundle"
 for row in "${CPU_POOL[@]}"; do
     IFS='|' read -r _ vendor name _ _ part family socket <<<"$row"
     [[ "$vendor" == GenuineIntel && "$socket" == LGA1151 ]] \
         || fail "unsupported/legacy CPU 泄漏到随机池: $row"
     [[ "$part" != GX80684I39100F ]] || fail "i3-9100F 使用了不存在的 GX 订购号"
     case "$name" in
+        *Celeron*G4900*) [[ "$family" == 0x00C7 ]] \
+            || fail "G4900 SMBIOS family 应为 Dual-Core Celeron" ;;
+        *Pentium*G5400*) [[ "$family" == 0x000B ]] \
+            || fail "G5400 SMBIOS family 应为 Pentium" ;;
         *i3-9100F*) [[ "$family" == 0x00CE ]] || fail "i3-9100F SMBIOS family 应为 Core i3" ;;
         *i5-6400T*) [[ "$family" == 0x00CD ]] || fail "i5-6400T SMBIOS family 应为 Core i5" ;;
     esac
@@ -221,9 +234,32 @@ for row in "${NVME_POOL[@]}"; do
 done
 
 for row in "${MEM_POOL[@]}"; do
-    IFS='|' read -r mfr part_2g part_4g rated _ <<<"$row"
+    IFS='|' read -r mfr part_2g part_4g rated _ \
+        rank_2g width_2g rank_4g width_4g <<<"$row"
     known_memory "$mfr" "$part_2g" "$part_4g" "$rated" || fail "内存未在真实发售目录中: $row"
+    known_memory_spd_brand "$mfr" || fail "内存品牌缺少 SPD JEP106 映射: $mfr"
+    [[ "$rank_2g" =~ ^[1-4]$ && "$rank_4g" =~ ^[1-4]$ ]] \
+        || fail "内存 rank 非法: $row"
+    [[ "$width_2g" == 4 || "$width_2g" == 8 || "$width_2g" == 16 ]] \
+        || fail "2GB 内存 device-width 非法: $row"
+    [[ "$width_4g" == 4 || "$width_4g" == 8 || "$width_4g" == 16 ]] \
+        || fail "4GB 内存 device-width 非法: $row"
 done
+(( ${#MEM_POOL[@]} == 6 )) \
+    || fail "新 VM 活动内存池应为三组 DDR4 + 三组 DDR3 已核验物料"
+(( ${#MEM_DORMANT_POOL[@]} == 0 )) \
+    || fail "已启用 household compatibility 后 DDR3 不应继续留在 dormant 池"
+for row in "${MEM_DORMANT_POOL[@]}"; do
+    IFS='|' read -r mfr part_2g part_4g rated _ \
+        rank_2g width_2g rank_4g width_4g <<<"$row"
+    known_memory "$mfr" "$part_2g" "$part_4g" "$rated" \
+        || fail "dormant 内存未在已核验目录中: $row"
+    known_memory_spd_brand "$mfr" || fail "dormant 内存品牌缺少 SPD 映射: $mfr"
+    [[ "$rank_2g|$width_2g|$rank_4g|$width_4g" =~ ^[1-4]\|(4|8|16)\|[1-4]\|(4|8|16)$ ]] \
+        || fail "dormant 内存几何非法: $row"
+done
+(( ${#MEM_QUARANTINED_POOL[@]} == 2 )) \
+    || fail "证据不足的内存没有完整隔离"
 
 for row in "${MONITOR_POOL[@]}"; do
     IFS='|' read -r _ vendor model _ <<<"$row"

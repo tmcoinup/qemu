@@ -8,6 +8,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # shellcheck source=../stealth-lib.sh
 # shellcheck disable=SC1091  # 仓库可整体迁移，运行时按测试文件绝对目录加载。
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/fixtures/catalog-cpu-preflight-stub.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -57,6 +59,38 @@ for profile_var in "${_STEALTH_PROFILE_VARS[@]}"; do
 done
 if STRICT_HARDWARE=1 stealth_load_profile "$incomplete" >/dev/null 2>&1; then
     fail "严格 profile 缺少速率字段时未拒绝"
+fi
+
+# 早期 schema-1 曾发布 CT2G4DFS6266/CT4G4DFS8266 组合。前者不可核验，
+# 因此整组不能继续通过 strict；保留文件只用于提示迁移/reroll。
+retired="$TMP_DIR/retired-memory.profile"
+sed -e 's/^MEM_MFR=.*/MEM_MFR=Crucial/' \
+    -e 's/^MEM_PART_2G=.*/MEM_PART_2G=CT2G4DFS6266/' \
+    -e 's/^MEM_PART_4G=.*/MEM_PART_4G=CT4G4DFS8266/' \
+    -e 's/^MEM_RATED=.*/MEM_RATED=2666/' \
+    -e 's/^MEM_RATED_MTS=.*/MEM_RATED_MTS=2666/' \
+    -e '/^MEM_RANK_2G=/d' \
+    -e '/^MEM_DEVICE_WIDTH_2G=/d' \
+    -e '/^MEM_RANK_4G=/d' \
+    -e '/^MEM_DEVICE_WIDTH_4G=/d' \
+    "$profile" >"$retired"
+for profile_var in "${_STEALTH_PROFILE_VARS[@]}"; do
+    unset "$profile_var" || true
+done
+if STRICT_HARDWARE=1 stealth_load_profile "$retired" >/dev/null 2>&1; then
+    fail "不可核验的历史 Crucial 组合仍被 strict 接受"
+fi
+
+# 新 profile 已持久化四项几何；只删除其中一项属于不完整篡改，不能按旧
+# profile 规则静默回填。
+partial_geometry="$TMP_DIR/partial-geometry.profile"
+grep -v '^MEM_DEVICE_WIDTH_4G=' "$profile" >"$partial_geometry"
+for profile_var in "${_STEALTH_PROFILE_VARS[@]}"; do
+    unset "$profile_var" || true
+done
+if STRICT_HARDWARE=1 stealth_load_profile "$partial_geometry" \
+    >/dev/null 2>&1; then
+    fail "schema-1 profile 的部分 DIMM 几何缺失时未拒绝"
 fi
 
 # 配置速率高于 DIMM 额定值在物理上不可能，参数生成器必须 fail-closed。

@@ -1,7 +1,7 @@
 # VMate 硬件平台、真机化与兼容性评估
 
-评估日期：2026-07-13；AMD 宿主运行补充：2026-07-14
-评估对象：`vmate` 分支当前工作树，QEMU 11.0.2
+评估日期：2026-07-13；AMD 宿主运行补充：2026-07-14；硬件池合法性复核：2026-07-19
+评估对象：`V-11` 分支当前工作树，QEMU 11.0.2
 评估范围：CPU、主板/芯片组、SMBIOS、内存/SPD、NVMe、网络、音频、USB HID、EDID、固件/TPM、宿主能力、调度、Windows/Linux 兼容性。
 明确不在本分支范围：GPU passthrough、SR-IOV GPU、vGPU，以及把 virtio 显示设备等同于真实 NVIDIA/AMD GPU 的承诺。
 
@@ -25,13 +25,13 @@ Intel 官方明确说明 E5-2696 v4 是由系统厂商定义规格的定制处�
 
 | 分项 | 完成度 | 判断 |
 |---|---:|---|
-| 本分支声明范围内的功能实现 | 84% | 平台清单、严格门禁、设备参数、持久化、测试与验收工具已经形成闭环；缺实机结果和若干行为层 |
+| 本分支声明范围内的功能实现 | 84% | 平台清单、严格门禁、设备参数、持久化、测试与验收工具已经形成闭环；仍缺客体枚举、长稳和若干行为层实机结果 |
 | 随机硬件跨字段一致性 | 88% | 平台与主要可更换组件已改为完整 bundle；DIMM 仍是按 socket/速率过滤的受限兼容池，目标 PCH 与实际 Q35 BDF/行为也仍不成套 |
 | 客体可枚举身份一致性 | 76% | SMBIOS、PCI ID、SPD、NVMe Identify、EDID、USB 描述符主要字段可对齐；PCI 地址拓扑仍明确暴露 Q35 |
 | 真实硬件行为等价度 | 50% | PCI ID 可换，但 H310/H110、ALC887、Samsung 固件行为及 PCH BDF 仍由 Q35/ICH9/通用 QEMU 模型实现 |
-| Linux/KVM 生产就绪度 | 78% | 是主路径；能力探测、CPU realize、TPM、NUMA/cpuset、桥接与长稳工具齐全，但缺目标 E5 实测 |
+| Linux/KVM 生产就绪度 | 80% | 是主路径；能力探测、CPU realize、TPM、NUMA/cpuset、桥接与长稳工具齐全；目标 E5 的三款 CPU 已通过瞬时 KVM realize，客体与长稳仍待验收 |
 | Windows/WHPX 生产就绪度 | 55% | Win10/普通 Linux guest 可条件运行；宿主 SKU 门禁很窄，Win11、nested、桥接仍未闭环 |
-| E5-2696 v4/X99 置信度 | 50% | 软件门禁已实现，物理主板兼容、TSC、CPUID realize、24 小时长稳均缺目标实机证据 |
+| E5-2696 v4/X99 置信度 | 60% | 已取得目标机 BIOS 启动、普通用户 KVM 权限和三款 Haswell 家用 CPU 的无警告 realize；厂商组合认证、客体枚举、TSC 快照与 24 小时长稳仍缺 |
 | **总体（本分支非 GPU 范围）** | **70%** | 可进入受控实机验收，不应标记为“所有硬件平台生产支持”或“目标主板 machine 等价” |
 
 如果把“真机化”定义为客体中所有可观测行为都与一台真实 OEM PC 相同，则完成度会低于上述总体值。虚拟固件、虚拟显示设备、设备时序、未实现寄存器、ACPI/电源模型和高权限计时侧信道都可能揭示虚拟化；本项目只能减少自相矛盾，不能消除虚拟化事实。
@@ -46,11 +46,11 @@ Intel 官方明确说明 E5-2696 v4 是由系统厂商定义规格的定制处�
 |---|---|---|---|---|
 | `intel-lga1151-i3-9100f-asus-prime-h310m-a-r2` | i3-9100F，4C/4T，目标 TSC 3600 MHz | ASUS PRIME H310M-A R2.0 / H310 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
 | `intel-lga1151-i5-6400t-asus-h110m-a-m2` | i5-6400T，4C/4T，目标 TSC 2200 MHz | ASUS H110M-A/M.2 / H110 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
-| 两个 Ryzen 3 + PRIME B350-PLUS 条目 | Ryzen 3 1200/2300X | AMD B350 | DDR4 | 禁用、仅 compatibility |
+| `amd-am4-r3-1200-asus-prime-b350-plus` | Ryzen 3 1200 | AMD B350 | DDR4 | 禁用、仅 compatibility |
 
 AMD 条目禁用是正确的保守处理：当前 machine type 仍是 Intel Q35/ICH9，仅改 AMD PCI ID 不会得到 AMD B350 行为。AMD 物理宿主默认不会随机得到一个伪装成“完整支持”的平台。2026-07-14 增加的 `--allow-platform-compatibility` 是显式功能入口：启动器按宿主 CPU vendor、`CPUS`、最大频率和 TSC 约束自动匹配，始终优先 `supported`，仅在没有可用 `supported` 候选时回退到 `compatibility`。已有 profile 复用其 `PLATFORM_ID`；`--platform-id` 只是可选的高级固定或一致性断言。该 allow 只放宽整机 machine fidelity，不会把 `STRICT_HARDWARE` 改成 `0`；KVM/TSC、宿主厂商/线程/频率/物理地址位、CPU 无警告 realize、profile、磁盘，以及请求 `TPM=1` 时的 TPM 门禁仍保持严格。该入口能用于安装和行为验证，但不能提高 B350 真机化评级。
 
-在 Ryzen 7 5800 宿主上的瞬时 KVM 实测表明，Ryzen3-1200 与 Ryzen3-2300X 均可按 4C/4T 和目标 TSC realize。原先直接传 `phys-bits=43` 会因宿主 48 位产生 warning；启动器现改为先验证宿主位宽，再用 `host-phys-bits=on,host-phys-bits-limit=43` 固定客体值。但这仍只证明 vCPU 可创建：KVM 最终 surface 默认关闭 SVM、MONITOR/MWAIT 和 PMU，cache 模板、微码以及额外 `tsc-deadline` 尚无目标零售 Ryzen 样机快照闭环，因此 AMD CPU 也不能提升为严格等价。
+在 Ryzen 7 5800 宿主上的瞬时 KVM 实测表明，Ryzen3-1200 可按 4C/4T 和目标 TSC realize。Ryzen 3 2300X 已在 2026-07-19 复核中移出目录：ASUS PRIME B350-PLUS 官方 CPU 支持表没有该 SKU，不能继续把它称为厂商支持搭配。KVM realize 仍只证明 vCPU 可创建，不能把 AMD/Q35 compatibility 提升为真实 B350 行为等价。
 
 CPU、主板、PCH、BIOS 版本/日期、机箱类型、板载音频、网卡状态、M.2 能力和内存限制作为一个原子 bundle 选择。vCPU 必须等于 SKU 完整线程数；当前两个启用平台都固定为 4 vCPU，不支持随意生成 2C/4T、关闭部分核心或多 socket 客体。
 
@@ -60,15 +60,15 @@ CPU、主板、PCH、BIOS 版本/日期、机箱类型、板载音频、网卡�
 
 - 存储：唯一启用 Samsung SSD 970 PRO 512GB，固定 model、firmware、容量、PCI/subsystem、Gen3 x4、IEEE OUI 和 SubNQN 模板。
 - 显示器：唯一启用 Samsung S24F350，固定 EISA vendor、product ID、尺寸、制造时间、频率范围、pixel clock 和第二时序。
-- 键盘：Microsoft Wired Keyboard 600，`045e:0750`、`bcdDevice=0x0163`、固定描述符模板、不暴露 serial。
-- 鼠标：Microsoft USB Optical Mouse，`045e:00cb`、`bcdDevice=0x0163`、固定描述符模板、不暴露 serial。
+- 键盘：Microsoft Wired Keyboard 600，`045e:0750`、`bcdDevice=0x0163`；只绑定身份字段，report descriptor 仍是通用实现，不暴露 serial。
+- 鼠标：Microsoft USB Optical Mouse，`045e:00cb`、`bcdDevice=0x0163`；只绑定身份字段，report descriptor 仍是通用实现，不暴露 serial。
 - 绝对指针：保留 `0627:0001` 通用 QEMU USB Tablet，不再冒充 HUION/VEIKK/XP-Pen，因为当前 report descriptor 没有品牌数位笔的压力、倾角和协议。
 
 这种方案牺牲了“看起来随机”的型号数量，但消除了把 Samsung EDID 深层字段套到 AOC、把 Microsoft bcdDevice 套到 Logitech、把 970 PRO 控制器套到 980 等更严重的矛盾。对真实性而言，**一个完整模板优于十个只改字符串的模板**。
 
-DIMM 是目前需要单独说明的例外：Linux 仍从手写物料池按 socket、内存代际、额定速率和容量组合过滤，Windows 也只内置两个 Samsung `*-CRC` 料号。它们比任意字符串拼装更受控，但尚未像 `components.json` 一样具备 catalog revision、逐料号 `source_refs`、原始 SPD hash 和 profile digest 绑定，因此应称为“受限兼容池”，不能称为证据绑定的真实组件目录。
+DIMM 是目前需要单独说明的例外：新 VM 活动池只保留 Samsung、Kingston、Crucial 三组有型号级资料的 DDR4-2400；三个当前不可达的 DDR3 组合转入 dormant；缺精确 2GB 一手资料的 Hynix DDR4 和缺完整物料修订后缀的 Crucial DDR3 转入 quarantine。活动池仍按 socket/JEDEC 能力适配，不等于每块主板的 QVL 逐料号认证，也没有原始 SPD capture，因此应称为“型号已核验、板级 QVL 未闭环”。
 
-Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1.3、Samsung Phoenix 控制器和 512GB 容量；该来源支持产品/接口/控制器事实，但项目中的具体 PCI ID 仍应以真实样机 `lspci -nnvv` 快照复核。[Samsung 970 PRO 官方数据表](https://download.semiconductor.samsung.com/resources/data-sheet/Samsung_NVMe_SSD_970_PRO_Data_Sheet_Rev.1.0.pdf)
+Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1.3、Samsung Phoenix 控制器和 512GB 容量；另一份 Samsung 型号寄存器文档给出 `144d:a804 / 144d:a801`，但项目仍明确标记缺真实样机 capture。SubNQN 已改成 NVMe 标准 UUID 格式，不再使用 Samsung 反向域名模板。[Samsung 970 PRO 官方数据表](https://download.semiconductor.samsung.com/resources/data-sheet/Samsung_NVMe_SSD_970_PRO_Data_Sheet_Rev.1.0.pdf)
 
 ### 3.3 身份持久化与完整性
 
@@ -84,15 +84,15 @@ Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1
 |---|---|---|
 | CPU | 厂商、名称、family/model/stepping、物理地址位、特性、拓扑、TSC、SMBIOS Type 4；宿主位宽下限门禁；`enforce=on` realize | 命名 CPU 仍受宿主 CPUID/KVM 默认属性限制；AMD compatibility 的 SVM、MONITOR/MWAIT、PMU、cache、微码与 `tsc-deadline` 尚无目标样机闭环，吞吐也不会自动一致 |
 | SMBIOS | Linux：Type 0/1/2/3/4/11/16/17，含 chassis、CPU 电压/外频/upgrade/characteristics、内存类型/rank/voltage；Windows：Type 0/1/2/3/4/16/17 子集 | Windows 尚无 Type 11，且 Type 1 SKU、Type 2/3 asset/SKU 等字段少于 Linux；两条路线都不是具体 ASUS BIOS 生成的完整 DMI 表 |
-| 内存/SPD | 合法总量、模块容量、槽位、通道、rank、电压、每 DIMM 唯一 serial；Type17 额定/配置速率分离；256B SPD 按 2/4/8Gb 生成地址几何与 tRFC；2x4 GiB 只生成两条 SPD | 当前 EEPROM 诚实声明 256B used/total，但不是完整 EE1004 512B 器件，也不是所选品牌 DIMM 的 page 1/raw dump |
+| 内存/SPD | 合法总量、模块容量、槽位、通道、rank、电压、每 DIMM 唯一 serial；Type17 额定/配置速率分离；DDR4 为 512B EE1004，支持 0x36/0x37 页选择，并按 2/4/8/16Gb 生成地址几何、tRFC 与目录品牌 page 1 身份；2x4 GiB 只生成两条 SPD | SPD 是由 profile/目录字段生成的 JEDEC 数据，不是具体 DIMM 的原始 raw dump/XMP |
 | guest NUMA | 消费级单 socket 客体始终一个 NUMA node，DIMM 数不再错误映射为 NUMA 数 | 物理双路 E5 的 host NUMA 只用于放置，不向当前 4C/4T 消费级客体暴露双 socket |
-| MCH/LPC/SMBus/AHCI | PCI vendor/device/revision/subsystem 可由平台注入 | C 代码明确只是 PCI configuration identity；寄存器、端口、固定功能与 BDF 仍是 Q35/ICH9 |
+| MCH/LPC/SMBus/AHCI | LPC/SMBus/AHCI 的 PCI identity 可由平台注入；Linux MCH 保留 Q35 原生 `8086:29c0` | EDK2 Q35 PlatformPei 依赖原生 MCH 识别 machine；目标 H110/H310 MCH ID 只保留为 profile 证据。其余覆盖也只是 configuration identity，寄存器、端口、固定功能与 BDF 仍是 Q35/ICH9 |
 | PCIe/root port/xHCI | 平台 ID、revision、链路速度/宽度、hotplug 状态可约束 | 设备行为和地址分配仍是 QEMU pcie-root-port/qemu-xhci，不是 H110/H310 silicon/拓扑 |
 | NVMe | 970 PRO model/firmware/容量、144d:a804、subsystem、OUI、SubNQN、Gen3 x4；非法型号 fail closed | 控制器命令、SMART、热管理、功耗、错误恢复仍是通用 QEMU NVMe，不是 Phoenix 固件 |
 | NIC | Intel 82574L/e1000e、Intel subsystem、Intel OUI；主板板载 NIC 明示为 BIOS disabled、另插扩展卡 | Windows 默认 user-mode NAT；网络拓扑和性能不像物理 LAN，Linux 应优先 bridge/TAP |
 | 音频 | Linux 可传 controller vendor/device/revision/subsystem 与 ALC887 codec ID/revision/subsystem；Windows 覆盖 controller vendor/device 和 codec 三元组 | Windows controller revision/subsystem 尚未与 Linux 对齐；manifest 已诚实标记 `protocol_identity_only`，widget、插孔和板级布线不等价 |
 | EDID | 单一 S24F350 深层字段成套生成，含校验和与时序 | 仍由 virtio 显示设备提供；没有真实显示器 DDC 时序、HDCP 和厂商扩展行为 |
-| USB HID | Microsoft VID/PID/bcdDevice/字符串与模板绑定；品牌 tablet 被拒绝 | HID report/config descriptor 只对当前固定模板负责，扩展新品牌必须新增完整模板 |
+| USB HID | Microsoft VID/PID/bcdDevice/字符串绑定；品牌 tablet 被拒绝 | 键鼠 report/config descriptor 仍是通用实现，不能称为 Microsoft 原始描述符 |
 | 固件/TPM | OVMF、per-VM NVRAM、swtpm 2.0、CRB、EK/Platform cert、严格模式 fail closed | OVMF 不是 ASUS AMI 固件；Linux 路线未证明 Secure Boot 已处于 `SecureBoot=1, SetupMode=0` |
 | 显示/GPU | virtio-vga(-gl)、SDL/EGL、fb-shm、SHM/GPU handle fallback；物理主 ID 固定为 stock VioGpuDod 可绑定的 `1AF4:1050`，profile 只提供 subsystem/revision 与用户态逻辑身份；非零 `GPU_SELFSIGNED` 在任何 host 副作用前 fail-closed | 底层始终是 virtio，不是所标 NVIDIA/AMD 设备；浅层 `10DE:1C82` 投影不增加 Windows guest Direct3D、CUDA 或 NVENC，GPU passthrough/vGPU 明确不做且不计入真机化 |
 
@@ -116,7 +116,7 @@ Windows 少一个空 root port，所以无显式 `addr` 的 HDA 自动地址与 
 | Windows/WHPX | Windows 11 | 明确拒绝 | 当前原生路线没有经过验证的 TPM 2.0 + Secure Boot，启动器在写文件前 fail closed |
 | Windows/WHPX | Linux x86_64 | 条件功能支持 | UTC RTC 已区分；仍受精确宿主 SKU、WHPX 和 user-mode NAT 限制 |
 | Windows/WHPX | 任意 nested Hyper-V/WSL2/KVM 场景 | 明确拒绝 | 当前启动器不承诺 WHPX nested；`-RequireNestedVirtualization` 会提前失败 |
-| 任意宿主 | TCG fallback | 仅显式功能模式 | Linux 主路径不应回退；Windows 必须显式 `-AllowTcgFallback`，此时 CPU 改为 `max`，不计入真机化或性能支持 |
+| 任意宿主 | TCG fallback | 仅显式功能模式 | Linux 主路径不应回退；Windows 必须显式 `-AllowTcgFallback`，且保留已审计家用 named model，不计入性能支持 |
 
 QEMU 官方将 WHPX 定义为 Windows Hypervisor Platform 的加速后端，要求安装 HypervisorPlatform；x86_64 从 Windows 10 2004 开始测试，并列出 MMIO 指令、VGA 和中断等已知限制。[QEMU WHPX 文档](https://www.qemu.org/docs/master/system/whpx.html)
 
@@ -130,10 +130,10 @@ Windows 11 对 VM 仍要求 UEFI/Secure Boot、TPM 2.0、至少 4GB 内存和两
 
 | 宿主 CPU 类别 | 常见物理平台 | KVM 基础能力 | 当前 Linux 严格 VMate | 当前 Windows 严格 VMate |
 |---|---|---|---|---|
-| E5 v1 / Sandy Bridge-EP | LGA2011、X79/C60x、DDR3 | 有 VT-x/EPT 的 SKU 可运行 KVM | 通常无 TSC/CPUID 合格候选；必须实测，不能与 X99 混装 | 不支持：没有精确同名启用 SKU |
-| E5 v2 / Ivy Bridge-EP | LGA2011、X79/C60x、DDR3 | 代表 SKU 支持 VT-x/EPT | 与 v1 类似；当前平台清单不含适配它的 guest bundle | 不支持 |
-| E5 v3 / Haswell-EP | LGA2011-3、X99/C612、DDR4 | 一般适合作 KVM 宿主 | 条件支持；先过 TSC 候选，再过 Skylake target realize | 不支持 |
-| E5 v4 / Broadwell-EP | LGA2011-3、X99/C612、DDR4 | 一般适合作 KVM 宿主 | 当前最有希望的 E5 路线；无 scaling 且实际 TSC≈2200 MHz 时只会选 i5-6400T bundle，realize 决定最终结果 | 不支持 |
+| E5 v1 / Sandy Bridge-EP | LGA2011、X79/C60x、DDR3 | 有 VT-x/EPT 的 SKU 可运行 KVM | 有 Sandy 家用 DDR3 池；仅在 `--allow-platform-compatibility` 下逐项预检 | 不支持：没有精确同名启用 SKU |
+| E5 v2 / Ivy Bridge-EP | LGA2011、X79/C60x、DDR3 | 代表 SKU 支持 VT-x/EPT | 有 Ivy 家用 DDR3 池；仅在显式 compatibility 授权下逐项预检 | 不支持 |
+| E5 v3 / Haswell-EP | LGA2011-3、X99/C612、DDR4 | 一般适合作 KVM 宿主 | 默认使用 G3220/i3-4130/i5-4570 家用池；每台宿主仍须真实 KVM realize | 不支持 |
+| E5 v4 / Broadwell-EP | LGA2011-3、X99/C612、DDR4 | 一般适合作 KVM 宿主 | 同一 Haswell 默认池已在目标 E5-2696 v4 上通过瞬时 realize；完整启动仍保留每次预检 | 不支持 |
 | E5 v3/v4 双路 | 双路 C612 服务器/工作站板 | KVM + 多 NUMA node | 条件支持；pinner 优先把单 VM 放入一个 node，容量不足才跨 node；尚无双路实机长稳证据 | 不支持 |
 
 Intel 的 E5-2697 v2 ARK 页面可作为 v2 家族代表，确认 FCLGA2011、最大 2 路、VT-x/EPT、VT-d 和 PCIe 3.0；它不能证明任意 v2 SKU或主板组合。[Intel E5-2697 v2 规格](https://www.intel.com/content/www/us/en/products/sku/75283/intel-xeon-processor-e52697-v2-30m-cache-2-70-ghz/specifications.html)
@@ -158,14 +158,31 @@ ASUS X99-E 官方 CPU 支持表列出许多 E5 v3/v4，并按最低 BIOS 版本�
 当前策略：
 
 - 有 TSC control：可请求 profile TSC，仍需 QEMU/KVM realize 成功。
-- 无 TSC control：目标和实际 vCPU TSC 必须在 250 ppm 内；选平台时还会先做 MHz 精确过滤。
-- E5 实际 TSC 为 2200 MHz 时，当前 4C/4T 候选只有 i5-6400T/H110。
-- 选中后以 `-cpu ...,enforce=on` 创建最小 4-vCPU Q35/KVM 实例；退出码、QMP quit 和 stderr 任一异常/警告都会拒绝。
-- 因此“选择到了 i5-6400T”不等于通过；Broadwell-EP 是否能实现项目配置的 Skylake-Client CPUID，以这次 smoke 为准。
+- 无 TSC control：除下述 E5 v3/v4 受控原生 TSC 例外外，目标和实际 vCPU TSC
+  必须在 250 ppm 内；选平台时还会先做 MHz 精确过滤。
+- E5 v3/v4 的正常层是 G3220 2C2T、i3-4130 2C4T、i5-4570 4C4T；无 TSC scaling 时保留宿主原生 invariant TSC，并明确警告这只是可启动兼容，不是消费级时钟行为等价。
+- 选中后以 `-cpu ...,enforce=on` 创建与 SKU 完整线程数一致的最小 Q35/KVM 实例；退出码、QMP quit 和 stderr 任一异常/警告都会拒绝。
+- 目录命中仍不等于通过；当前 Broadwell-EP 宿主是否能实现该次家用 named-model，以每次 smoke 为准。
 
 QEMU 官方建议不需要迁移时使用 host passthrough 以获得最完整性能和宿主特性；本项目为了固定客体身份选择 named model，必然牺牲部分宿主覆盖面，并必须自行做 compatibility check。[QEMU/KVM CPU model 文档](https://www.qemu.org/docs/master/system/qemu-cpu-models.html)
 
-### 6.4 单路与双路性能判断
+### 6.4 2026-07-19 目标 E5 瞬时证据
+
+对用户提供的 `E5-2696 v4` 主机做了只读探测和临时 QMP realize。DMI 为
+`JGINYUE X99-TI D4 PLUS`、AMI BIOS `5.11`（`09/19/2024`）；宿主是单路
+22C/44T、CPUID family 6/model 79/stepping 1、46 位物理地址，普通 `ubuntu`
+用户属于 `kvm` 组并可访问 `/dev/kvm`。系统 QEMU 为 8.2.2。
+
+目录中的 G3220 2C2T、i3-4130 2C4T、i5-4570 4C4T 均使用完整
+`Haswell-v4` 参数、`enforce=on` 和 `host-phys-bits-limit=39` 创建临时 KVM
+vCPU：三次退出码均为 0，均收到 QMP quit 响应，stderr 中
+warning/error/failed/unsupported 计数均为 0。该证据只关闭 CPU realize 项；
+它不等于主板厂商认证、Windows 设备枚举或 24 小时稳定性证明。
+
+两块显示卡也只读确认：RTX 2080 为 `boot_vga=1` 且使用 `nvidia` 驱动，
+RX 580 为 `boot_vga=0` 且使用 `amdgpu`。本分支不做 GPU 直通，未修改两卡配置。
+
+### 6.5 单路与双路性能判断
 
 - X99 是单路场景；高核心 E5 的优势主要是多 VM 容量，不代表单个 4-vCPU VM 会自动更快。
 - 双路 C612 的核心和内存分属不同 NUMA node。当前 pinner 先选可容纳 vCPU + service CPU 的单一 node，并优先物理主线程、后用 SMT；这是正确默认。
@@ -198,7 +215,7 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 
 ### P0 仍需实机完成
 
-- 在目标 E5-2696 v4 + 准确 X99 型号上取得 BIOS 启动、KVM capability、CPU realize 和 24 小时长稳证据。
+- 在已验证瞬时 CPU realize 的 E5-2696 v4 主机上继续取得厂商 CPU/BIOS/内存组合证据、完整 KVM/TSC JSON、客体枚举和 24 小时长稳结果。
 - 在至少一台受支持 Windows 10 物理宿主上验证 WHPX patched build、驱动、显示、I/O 和关机清理。
 - Linux/Windows 11 路线必须验证 Secure Boot operational state、已注册 PK/KEK/db 和 TPM PCR/Measured Boot；仅有 Tcg2 模块不够。
 - 每台实际 Linux 宿主必须在本地终端完成一次集成式 `deploy/tools/build.sh`，或在无人值守
@@ -213,13 +230,13 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 - profile 安全解析、平台/组件事实绑定、持久化序列号和显式 legacy reroll。
 - Linux bridge/TAP/VLAN 严格失败策略；NAT fallback 会明确标注。
 - Windows/Linux 客体硬件快照采集器、异步测试调度器和 QMP soak monitor。
-- DIMM Type 17 已把料号额定速率与平台训练后的配置速率分开，Q35 SPD 只使用额定速率；DDR4 256B 容量声明、2/4/8/16Gb 地址几何和 tRFC 均有 C 单测。
+- DIMM Type 17 已把料号额定速率与平台训练后的配置速率分开，Q35 SPD 只使用额定速率；DDR4 512B EE1004 容量声明、页选择、2/4/8/16Gb 地址几何、tRFC 和硬件目录品牌身份均有回归测试。
 - 自定义 `VM_DIR` 的 canonical TPM state 会原子登记在用户私有 runtime；stop/reaper 不再硬编码 `*/vms/<instance>`，并有自定义路径、旧默认路径、恶意 symlink 和孤儿锁回归。
 
 ### P1 剩余
 
 - 实现真正 H110/H310 machine behavior，或继续把相关字段明确标为 identity compatibility，不能提升为“芯片组仿真完成”。
-- 实现完整 EE1004 512B/page-select，并签入与具体 DIMM 料号对应的 page 1 manufacturer/serial/part raw SPD；当前 256B 是自洽的基础 SPD，不是品牌 DIMM 原始镜像。
+- 如需宣称具体 DIMM 原始镜像，仍应把带 `source_refs` 与 hash 的 raw SPD/XMP 迁入版本化组件目录；当前实现只按目录字段生成标准 SPD 和 page 1 身份。
 - 把 Linux/Windows DIMM 手写兼容池迁入带 revision、`source_refs`、原始 SPD hash 和 profile digest 的版本化组件目录。
 - ALC887 完整 codec widget/插孔模型和可选真实音频 backend。
 - Windows TAP/bridge 后端；当前 SLIRP NAT 既影响性能，也与物理 LAN 拓扑不同。
@@ -295,7 +312,67 @@ sudo deploy/scripts/setup-host-helpers.sh check
 
 正式 CI 还应以 `--enable-werror` 配置一个干净 build 目录；复用旧 build 成功不能证明没有新增 warning。
 
-### 9.2 E5/X99 宿主预检
+### 9.2 2026-07-17 新宿主与全新 VM2 实录
+
+本轮在 Ubuntu 26.04 LTS、Linux `7.0.0-28-generic`、Intel Core i7-14700F 宿主上
+重新部署。宿主有 28 个在线逻辑 CPU、20 个物理核心和 39 位物理地址；KVM 实测为
+`available=true`、`tsc_control=true`、`get_tsc_khz=true`、
+`host_tsc_khz=2112000`。`/dev/kvm`、`/dev/net/tun`、OVMF、swtpm、SDL/EGL/virgl
+和 `br0` 已存在。新电脑先用以下命令补齐本机实际缺少的源码构建依赖：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  python3-venv python3-pip python3-wheel libfdt-dev libseccomp-dev
+
+deploy/tools/build.sh --verify --install-host-helpers
+python3 deploy/scripts/kvm-capabilities.py --format json
+deploy/scripts/verify-stealth.sh
+```
+
+本轮还安装了 `netpbm`、`genisoimage`、`wimtools`，分别用于 QMP PPM 截图转换、
+ISO 诊断和 WIM 版本检查；它们不是普通 VM 启动依赖。`shellcheck` 仍是可选静态检查
+工具，不应被误写为运行时必需项。全新宿主若没有 bridge，可按实际上联网卡执行：
+
+```bash
+sudo VLAN_TRUNK=1 UPLINK=enp3s0 deploy/scripts/setup-bridge.sh
+```
+
+VM2 没有复用旧系统盘；本轮重新生成 512110190592 字节虚拟容量的稀疏 qcow2、
+profile、OVMF VARS 和 TPM 状态，定位为允许安装 RDP 和其它应用的测试镜像。正式安装
+保持单一 Windows ISO 和原始 SDL 启动方式：
+
+```bash
+./deploy/scripts/start-vm.sh 2 --iso=/home/ubuntu/images/win10.iso
+```
+
+这里不追加 `--allow-platform-compatibility`。该参数不是“非 E5 模式”，只授权在没有
+`supported` 候选时加载 `status=compatibility` 的平台；已有 profile 仍固定复用其
+`PLATFORM_ID`。VM2 实际 profile 为
+`intel-lga1151-i3-9100f-asus-prime-h310m-a-r2`、`PLATFORM_STATUS=supported`，
+所以加 flag 不会改变平台或 QEMU argv，也不会放宽 KVM/TSC/CPU realize 等严格门禁。
+
+本轮迁移和安装遇到四个可复现问题，均在继续安装前收敛：
+
+1. `verify-stealth.sh` 仍按旧组件池 schema 解析；storage 行现以 component ID 开头，
+   monitor/HID 分别为 18/7 字段，NVMe root-port 链路来自组件目录变量。同步检查后
+   16 项静态验证全部通过。
+2. 新宿主不枚举 HLE/RTM，而 `Skylake-Client-IBRS` 基础模型默认请求 TSX。启动器现
+   只对宿主实际缺失的 TSX 位追加 `-hle`/`-rtm`，保留 `enforce=on`；严格 CPU
+   realize 无 unsupported warning。
+3. `CPU_FREQ_CAP=0` 时旧 host-tune 的空条件命令替换在 `set -e` 下返回 1，导致启动器
+   无错误文本提前退出；现用显式分支生成可选提示。
+4. 原 Linux argv 把 Q35 原生 MCH `8086:29c0` 覆盖为 H310 `8086:3e1f`。EDK2
+   Q35 PlatformPei 因而让全部 vCPU 进入 `CpuDeadLoop`，helper、ISO 和磁盘读取量均为
+   0，SDL 只显示 `Display output is not active`。拆分 smoke 证明只加 MCH 覆盖即可
+   复现，单独保留 LPC/SMBus/AHCI 覆盖则能读取 helper/ISO 并进入 Windows Setup。
+   Linux 启动器因此保留原生 Q35 MCH，并把目标 MCH ID 降为不投影的 profile 证据。
+
+VM2 的最终 OOBE、客体网络、RDP 和应用状态必须取得客体侧证据后再标记完成；测试镜像
+的 RDP/应用结果不提高 E5/X99、底层 machine 或生产支持评级。任何宿主或客体密码都
+不得写入本文、profile、日志或命令行。
+
+### 9.3 E5/X99 宿主预检
 
 ```bash
 lscpu -e=CPU,NODE,SOCKET,CORE,ONLINE,MAXMHZ,MINMHZ
@@ -325,7 +402,10 @@ E5-2696 v4/X99 只有在以下全部满足时才能从“条件支持”提升�
 - 客体快照与 profile/manifest 一致。
 - 24 小时 soak 无 QMP 连续失败、非 running 状态、进程退出或内核/客体关键错误。
 
-### 9.3 客体枚举快照
+本轮已满足 `/dev/kvm` 可用与三款默认 CPU 的瞬时 realize；其余条目仍须完成，
+所以发布标签继续保持“条件支持”。
+
+### 9.4 客体枚举快照
 
 Linux 客体：
 
@@ -344,7 +424,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 至少人工核对 CPU/核心线程、SMBIOS 0/1/2/3/4/16/17、PCI 主/子系统 ID、PCIe link、NVMe Identify/容量/firmware/SubNQN、NIC OUI、USB descriptor、EDID、TPM、Secure Boot、设备驱动和本次启动 warning。
 
-### 9.4 长稳
+### 9.5 长稳
 
 ```bash
 python3 deploy/scripts/soak-vm.py \
@@ -367,4 +447,4 @@ python3 deploy/scripts/soak-vm.py \
 - TPM emulator 与真实离散/固件 TPM 的证书链、抗篡改和厂商实现不等价。
 - 任何基于虚拟化的方案都不能承诺绕过第三方安全产品、仿真机、许可证或设备认证；验收应以合法业务兼容性、稳定性和可审计一致性为准。
 
-最终判断：**当前代码已经把“会随机出不存在硬件”的主要结构性问题收敛为 fail-closed 的有限真实目录（DIMM 仍是明确降级的受限兼容池），也为 E5/X99 提供了正确的软件判定路径；但 E5-2696 v4/X99、双路 E5 和 Windows/WHPX 都必须以目标实机结果收口。在这些证据产生前，最准确的发布标签是“Linux/KVM 条件支持，Windows/WHPX 受限支持，非 GPU 硬件身份高一致性”，而不是“全平台完成”。**
+最终判断：**当前代码已经把“会随机出不存在硬件”的主要结构性问题收敛为 fail-closed 的有限真实目录（DIMM 仍是明确降级的受限兼容池），也在目标 E5-2696 v4 上关闭了三款默认家用 CPU 的瞬时 realize 风险；但该 X99 主机的客体枚举/长稳、双路 E5 和 Windows/WHPX 仍必须以实机结果收口。完成这些证据前，最准确的发布标签仍是“Linux/KVM 条件支持，Windows/WHPX 受限支持，非 GPU 硬件身份高一致性”，而不是“全平台完成”。**

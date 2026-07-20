@@ -2,12 +2,18 @@ name: VMate hardware consistency
 
 on:
   push:
-    branches: [vmate]
+    branches: [vmate, V-11]
   pull_request:
     paths:
       - 'deploy/**'
       - 'hw/**'
       - 'include/hw/**'
+      - 'include/ui/**'
+      - 'qapi/**'
+      - 'ui/**'
+      - 'tools/**'
+      - 'meson.build'
+      - 'qemu.nsi'
       - 'scripts/nsis.py'
       - '.github/workflows/vmate-ci.yml'
   workflow_dispatch:
@@ -44,7 +50,15 @@ jobs:
       - name: Install static-analysis tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes jq shellcheck
+          sudo apt-get install --yes jq qemu-utils shellcheck mingw-w64 nsis
+          sudo update-alternatives --set \
+            i686-w64-mingw32-gcc /usr/bin/i686-w64-mingw32-gcc-win32
+          sudo update-alternatives --set \
+            i686-w64-mingw32-g++ /usr/bin/i686-w64-mingw32-g++-win32
+          sudo update-alternatives --set \
+            x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set \
+            x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
       - name: Validate shell and Python syntax
         run: |
           find deploy/scripts deploy/tools -type f -name '*.sh' -print0 \
@@ -53,6 +67,7 @@ jobs:
             deploy/scripts/kvm-capabilities.py \
             deploy/scripts/vm-cpu-pinner.py \
             deploy/scripts/tests/run-vmate-tests.py
+          python3 -m compileall -q deploy/scripts/lib/seal-base-publish.py
       - name: Check newly privileged or asynchronous scripts
         run: |
           shellcheck -x -S warning \
@@ -60,8 +75,16 @@ jobs:
             deploy/scripts/host-cpu-isolate.sh \
             deploy/scripts/host-cpu-isolate-runtime.sh \
             deploy/scripts/host-performance.sh \
+            deploy/scripts/start-vm.sh \
+            deploy/scripts/seal-base.sh \
+            deploy/scripts/clone-from-base.sh \
             deploy/scripts/setup-host-helpers.sh \
             deploy/scripts/stop-vm.sh \
+            deploy/scripts/lib/base-image.sh \
+            deploy/scripts/lib/base-boot-storage.sh \
+            deploy/scripts/lib/clone-lifecycle.sh \
+            deploy/scripts/lib/clone-postprocess.sh \
+            deploy/scripts/lib/sv-disk.sh \
             deploy/scripts/lib/sv-host-capabilities.sh \
             deploy/scripts/lib/sv-host-helpers.sh \
             deploy/scripts/lib/sv-cpupin.sh

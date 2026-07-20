@@ -65,6 +65,11 @@ typedef struct SmbiosMemoryDeviceConfig {
     uint16_t voltage;
     uint8_t memory_type;
     uint8_t rank;
+    uint8_t device_width_bits;
+    bool spd_ee1004;
+    const char *manufacturer;
+    const char *part_number;
+    char serial_number[128];
 } SmbiosMemoryDeviceConfig;
 
 /* SMBIOS Entry Point
@@ -354,7 +359,8 @@ void smbios_set_cpuid(uint32_t version, uint32_t features);
 void smbios_set_defaults(const char *manufacturer, const char *product,
                          const char *version);
 void smbios_set_default_processor_family(uint16_t processor_family);
-bool smbios_get_memory_device_config(SmbiosMemoryDeviceConfig *config);
+bool smbios_get_memory_device_config(unsigned int instance,
+                                     SmbiosMemoryDeviceConfig *config);
 uint8_t *smbios_get_table_legacy(size_t *length, Error **errp);
 void smbios_get_tables(MachineState *ms,
                        SmbiosEntryPointType ep_type,

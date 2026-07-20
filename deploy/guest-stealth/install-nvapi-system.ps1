@@ -2,11 +2,12 @@
 
 <#
 .SYNOPSIS
-  把仓库内独立 NVAPI 身份投影发布到 Windows 的双架构系统搜索目录。
+  把通用 NVIDIA NVAPI 身份投影发布到 Windows 的双架构系统搜索目录。
 
 .DESCRIPTION
-  GPU-Z 2.70 主程序是 32 位，直接双击时通过普通 DLL 搜索加载 nvapi.dll；因此
-  x86 文件必须位于 SysWOW64。它的内嵌 x64 辅助进程使用 System32\nvapi64.dll。
+  32 位检测工具通过普通 DLL 搜索加载 nvapi.dll，因此 x86 文件必须位于
+  SysWOW64；64 位工具使用 System32\nvapi64.dll。实现不判断调用进程，
+  所有消费者都读取同一份版本化 GPU identity。
   本脚本只发布用户态 DLL，不修改驱动、证书、BCD、代码完整性或 PCI 配置空间。
 
   为避免覆盖未来真实 NVIDIA 驱动，目标已存在时只接受当前固定摘要或仓库历史上
@@ -19,7 +20,7 @@ param(
     # 独立运行保持历史接口：只传 -PayloadDir 时安装器会在同一进程内完成发布和清理。
     # 正式 apply 链额外传 DeferFinalize/TransactionId，待 identity Complete 后再清理备份。
     [string]$PayloadDir = '',
-    [ValidateSet('Install', 'Recover', 'Finalize', 'Rollback')]
+    [ValidateSet('Preflight', 'Install', 'Recover', 'Finalize', 'Rollback')]
     [string]$Action = 'Install',
     [string]$TransactionId = '',
     [switch]$DeferFinalize
@@ -27,21 +28,25 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$ExpectedX86Hash = '5ad43a193ccf0c3dacc769f4267d394502708fc1a5191d9b1338ba8485ea9c94'
-$ExpectedX64Hash = '311b95768f8bbd18fb30f0e1144c9f2c50cc4f8433b870768c4a439f57844f56'
+$ExpectedX86Hash = '8ee7248f802b960b971724bdadb789492685b9c76fde0ac99f954768431972af'
+$ExpectedX64Hash = 'e5f446439bc8c5a86d3aac13adb1090d4bd74055a4ccd1f884ca631aa56132ab'
 
 # 这些值只用于识别仓库历史发布物，不能作为任意第三方 DLL 的放行白名单。
-# fa7412... 是早期独立 x64 浅层 shim；其余值覆盖 Git 历史中四代旧转发器。
+# fa7412... 是早期独立 x64 浅层 shim；其余值覆盖 Git 历史发布版本。
 # 它们都可安全替换为当前不依赖真实 NVIDIA 运行时的独立实现。
 $HistoricalX86Hashes = @(
+    '3405928e9d8fbcc36dc4bb97627b804893bb8f48b16ee8a662ea79346c40b601',
     'd2fa115d4ece2da0361106113f0289a5499c6e78d491567bf466b60a3a010f14',
     'a5de31d15ff0f4038ef1b54a75fbac0ab472797d3424e1468f9e6d047cc58139',
     '79b05e4707fa3b4882279995898ea99e74f584e31d10f9733c24714eb79ea80d',
     '63ecadd497f955a599e8a12ea7f45fd92915a47570be473d166ddbb3d462c13e',
     '0601d245ca7101b92299e4c2215480fa680554ee400d1a064782319747612ca0',
-    '76dffd3513ca90d994c3800c725a6d4f6b5a95bef36f44fd122f123861fd522c'
+    '76dffd3513ca90d994c3800c725a6d4f6b5a95bef36f44fd122f123861fd522c',
+    '5ad43a193ccf0c3dacc769f4267d394502708fc1a5191d9b1338ba8485ea9c94',
+    '1638720952a6187773372f29837c3bb26804eaeaf00938a8c2f42996bc4dd972'
 )
 $HistoricalX64Hashes = @(
+    'bc3fce02e8c223e335cb893c7d72db2c43dfa8a378677674854b0a52bf33de2a',
     'c0e39803f8484d9dc23559576762564bc84b44fb3c90c7562829e8c96f15a83d',
     '207e41c9eaa7641d3e2af32e99a5f874a87978b310676db325d572f8b954dd72',
     '8b32d767e69526c535cce361a9d5853fc6f21f7f348600fabfefe7f46db708cc',
@@ -50,7 +55,9 @@ $HistoricalX64Hashes = @(
     '6ddae65be9ddaf232064b5e12933b40bbf0f366b52a3b447abf4a15c254d6103',
     'f10d14acf39d10c66c38188214c0dc6a4a9dcf66d2993fd82257db7492c7258e',
     '6a46de86e767c08f215cd9526ef5527e536a244eddd78cc7a14fc45cc4f95792',
-    '5a9181a21280eb692651cd6d6530b27124f50fcbb70e2c768427af4dbe6440ff'
+    '5a9181a21280eb692651cd6d6530b27124f50fcbb70e2c768427af4dbe6440ff',
+    '311b95768f8bbd18fb30f0e1144c9f2c50cc4f8433b870768c4a439f57844f56',
+    '1d39f3dada172f62b62f801de434ceda3060caf3b0887381d0b853771f3b97cf'
 )
 
 function Get-LowerSha256 {
@@ -397,12 +404,6 @@ if (-not [Environment]::Is64BitOperatingSystem -or
     throw '当前发布流程只支持由 64 位 PowerShell 在 64 位 Windows 上运行'
 }
 
-$runningGpuZ = @(Get-Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.ProcessName -like 'GPU-Z*' })
-if ($runningGpuZ.Count -gt 0) {
-    throw '检测到正在运行的 GPU-Z；请关闭后重新运行统一 EXE，避免 DLL 更新竞态'
-}
-
 $windowsRoot = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::Windows)
 $system64 = [Environment]::GetFolderPath(
@@ -426,6 +427,26 @@ Assert-PlainDirectory -Path $windowsRoot
 Assert-PlainDirectory -Path $system64
 Assert-PlainDirectory -Path $systemX86
 
+if ($Action -ne 'Install' -and $DeferFinalize) {
+    throw '-DeferFinalize 只允许与 -Action Install 一起使用'
+}
+if ($Action -eq 'Preflight') {
+    # 协调器必须在任何系统 DLL Move 前完成两个厂商读取层的全量只读预检。
+    # 此分支不会创建 ProgramData 目录、lock、receipt、stage 或 backup。
+    if ([string]::IsNullOrWhiteSpace($PayloadDir)) { throw 'Preflight 缺少 -PayloadDir' }
+    $preflightPayloadRoot = [IO.Path]::GetFullPath($PayloadDir)
+    Assert-PlainDirectory -Path $preflightPayloadRoot
+    $preflightEntries = @(New-SystemProjectionEntries `
+        $preflightPayloadRoot $systemX86 $system64)
+    foreach ($entry in $preflightEntries) {
+        Assert-NvapiBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+        $snapshot = Get-SystemProjectionEntrySnapshot $entry
+        Write-Host ('NVAPI preflight {0}: {1}' -f $entry.Label, $snapshot.State)
+    }
+    Write-Host 'NVAPI 双架构只读预检通过。' -ForegroundColor Green
+    return
+}
+
 $programData = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::CommonApplicationData)
 if ([string]::IsNullOrWhiteSpace($programData)) { throw 'Known Folder ProgramData 为空' }
@@ -443,9 +464,6 @@ try {
         [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 } catch { throw ('另一个 NVAPI 系统投影事务正在运行：' + $_.Exception.Message) }
 try {
-if ($Action -ne 'Install' -and $DeferFinalize) {
-    throw '-DeferFinalize 只允许与 -Action Install 一起使用'
-}
 $payloadRoot = if ($Action -eq 'Install') {
     if ([string]::IsNullOrWhiteSpace($PayloadDir)) { throw 'Install 缺少 -PayloadDir' }
     [IO.Path]::GetFullPath($PayloadDir)
@@ -510,7 +528,7 @@ if ($Action -eq 'Rollback') {
         Write-Host ('系统 NVAPI {0} 已就绪：{1}  SHA-256={2}' -f
             $entry.Label, $entry.Target, $entry.ExpectedHash) -ForegroundColor Green
     }
-    Write-Host 'GPU-Z 2.70 可直接双击；无需 helper、旁置 DLL 或 NVIDIA 软件。' `
+    Write-Host '系统 NVIDIA NVAPI 已就绪；无需 helper、旁置 DLL 或厂商软件。' `
         -ForegroundColor Green
 }
 } finally { $projectionLock.Dispose() }

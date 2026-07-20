@@ -2,6 +2,7 @@
 /build/
 # 本地 Windows 交叉编译目录：包含可再生的对象文件、运行时与安装包，不纳入源码版本库。
 /build-win64-vmate/
+/build-win64-audit/
 /.cache/
 /.vscode/
 *.pyc

@@ -26,13 +26,23 @@
 #include "payload_project_gpu_hardware_id_ps1.h"
 #include "payload_force_displayfreq_ps1.h"
 #include "payload_install_display_driver_ps1.h"
+#include "payload_install_chipset_device_ps1.h"
 #include "payload_install_nvapi_system_ps1.h"
 #include "payload_nvapi_system_transaction_ps1.h"
+#include "payload_install_adl_system_ps1.h"
+#include "payload_adl_system_transaction_ps1.h"
+#include "payload_install_gpu_api_system_ps1.h"
 #include "payload_viogpudo_sys.h"
 #include "payload_viogpudo_cat.h"
 #include "payload_viogpudo_inf.h"
+#include "payload_cannonlake_hsystem_inf.h"
+#include "payload_cannonlake_h_cat.h"
+#include "payload_sunrisepoint_hsystem_inf.h"
+#include "payload_sunrisepoint_h_cat.h"
 #include "payload_nvapi_x86_dll.h"
 #include "payload_nvapi_x64_dll.h"
+#include "payload_adl_x86_dll.h"
+#include "payload_adl_x64_dll.h"
 
 #ifndef ARRAY_LEN
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
@@ -57,13 +67,24 @@ static const EmbeddedPayload embedded_payloads[] = {
     { L"project-gpu-hardware-id.ps1", payload_project_gpu_hardware_id_ps1, (DWORD)sizeof(payload_project_gpu_hardware_id_ps1) },
     { L"force-displayfreq.ps1", payload_force_displayfreq_ps1, (DWORD)sizeof(payload_force_displayfreq_ps1) },
     { L"install-display-driver.ps1", payload_install_display_driver_ps1, (DWORD)sizeof(payload_install_display_driver_ps1) },
+    { L"install-chipset-device.ps1", payload_install_chipset_device_ps1, (DWORD)sizeof(payload_install_chipset_device_ps1) },
     { L"install-nvapi-system.ps1", payload_install_nvapi_system_ps1, (DWORD)sizeof(payload_install_nvapi_system_ps1) },
     { L"nvapi-system-transaction.ps1", payload_nvapi_system_transaction_ps1, (DWORD)sizeof(payload_nvapi_system_transaction_ps1) },
+    { L"install-adl-system.ps1", payload_install_adl_system_ps1, (DWORD)sizeof(payload_install_adl_system_ps1) },
+    { L"adl-system-transaction.ps1", payload_adl_system_transaction_ps1, (DWORD)sizeof(payload_adl_system_transaction_ps1) },
+    { L"install-gpu-api-system.ps1", payload_install_gpu_api_system_ps1, (DWORD)sizeof(payload_install_gpu_api_system_ps1) },
     { L"viogpudo.sys", payload_viogpudo_sys, (DWORD)sizeof(payload_viogpudo_sys) },
     { L"viogpudo.cat", payload_viogpudo_cat, (DWORD)sizeof(payload_viogpudo_cat) },
     { L"viogpudo.inf", payload_viogpudo_inf, (DWORD)sizeof(payload_viogpudo_inf) },
+    { L"CannonLake-HSystem.inf", payload_cannonlake_hsystem_inf, (DWORD)sizeof(payload_cannonlake_hsystem_inf) },
+    { L"cannonlake-h.cat", payload_cannonlake_h_cat, (DWORD)sizeof(payload_cannonlake_h_cat) },
+    { L"SunrisePoint-HSystem.inf", payload_sunrisepoint_hsystem_inf, (DWORD)sizeof(payload_sunrisepoint_hsystem_inf) },
+    { L"sunrisepoint-h.cat", payload_sunrisepoint_h_cat, (DWORD)sizeof(payload_sunrisepoint_h_cat) },
     { L"nvapi.dll", payload_nvapi_x86_dll, (DWORD)sizeof(payload_nvapi_x86_dll) },
     { L"nvapi64.dll", payload_nvapi_x64_dll, (DWORD)sizeof(payload_nvapi_x64_dll) },
+    { L"atiadlxy.dll", payload_adl_x86_dll, (DWORD)sizeof(payload_adl_x86_dll) },
+    { L"atiadlxx32.dll", payload_adl_x86_dll, (DWORD)sizeof(payload_adl_x86_dll) },
+    { L"atiadlxx.dll", payload_adl_x64_dll, (DWORD)sizeof(payload_adl_x64_dll) },
 };
 
 static int append_char(wchar_t *buf, size_t cap, size_t *len, wchar_t ch)
@@ -181,8 +202,8 @@ static int confirm_admin_run(void)
      */
     answer = MessageBoxW(
         NULL,
-        L"respawn-stealth 将以管理员权限配置不息屏/不睡眠电源方案、安装或检查"
-        L"显示驱动，并修改 HKLM 注册表、PnP 显卡信息和计划任务，"
+        L"respawn-stealth 将以管理员权限把屏幕/睡眠设为“从不”、安装或检查"
+        L"芯片组识别 INF 与显示驱动，并修改 HKLM 注册表、PnP 显卡信息和计划任务，"
         L"完成后默认会重启。\n\n是否继续？",
         L"respawn-stealth 管理员确认",
         MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2 | MB_SETFOREGROUND);

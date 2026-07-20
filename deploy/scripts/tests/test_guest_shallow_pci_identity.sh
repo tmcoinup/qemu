@@ -72,13 +72,14 @@ Assert-Equal $amd.PciVendorId 0x1002 "AMD vendor"
 Assert-Equal $amd.PciDeviceId 0x67FF "RX 560 device"
 Assert-Equal $amd.RevisionId 0xCF "AMD revision"
 
-Assert-GpuIdentityStrings -Name ("N" * 63) -Vendor NVIDIA `
+Assert-GpuIdentityStrings -Name ("NVIDIA " + ("N" * 56)) -Vendor NVIDIA `
     -Bios "Version 86.07.48.00.A0"
 Assert-GpuIdentityStrings -Name "AMD Radeon RX 560" -Vendor AMD `
     -Bios "016.011.000.029.000000"
 foreach ($badStrings in @(
     @{ Name="NVIDIA GeForce GTX 1050 Ti"; Vendor="nvidia"; Bios="Version 86.07.48.00.A0" },
-    @{ Name="NVIDIA GeForce GTX 1050 Ti"; Vendor=" NVIDIA"; Bios="Version 86.07.48.00.A0" },
+    @{ Name="Red Hat Red Hat VirtIO GPU DOD controller"; Vendor="NVIDIA"; Bios="Version 86.07.48.00.A0" },
+    @{ Name="AMD Red Hat VirtIO GPU DOD controller"; Vendor="AMD"; Bios="016.011.000.029.000000" },
     @{ Name=("N" * 64); Vendor="NVIDIA"; Bios="Version 86.07.48.00.A0" },
     @{ Name="NVIDIA GeForce GTX 1050 Ti`n"; Vendor="NVIDIA"; Bios="Version 86.07.48.00.A0" },
     @{ Name="NVIDIA 显卡"; Vendor="NVIDIA"; Bios="Version 86.07.48.00.A0" },
@@ -498,6 +499,24 @@ rg -F 'Invoke-LegacyGpuTaskBarrier' "$IDENTITY_SCRIPT" >/dev/null \
 rg -F "Set-VerifiedRegistryValue \$classKey 'MatchingDeviceId' \$matchingId \$string" \
     "$REFRESH_SCRIPT" >/dev/null \
     || fail "没有恢复从 profile 派生的旧版浅层 MatchingDeviceId"
+for brand_contract in \
+        "Set-VerifiedRegistryValue \$enumKey 'FriendlyName' \$Config.SpoofName \$string" \
+        "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$Config.SpoofName \$string" \
+        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$Config.SpoofVendor \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'DriverDesc' \$Config.SpoofName \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$Config.SpoofVendor \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'HardwareInformation.AdapterString' \$Config.SpoofName \$string"; do
+    rg -F "$brand_contract" "$REFRESH_SCRIPT" >/dev/null \
+        || fail "GPU 显示品牌兜底缺少：$brand_contract"
+done
+for refresh_task_contract in \
+        "\$taskName = 'StealthGPU-RefreshName'" \
+        'New-ScheduledTaskTrigger -AtStartup' \
+        'New-ScheduledTaskTrigger -AtLogOn' \
+        "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest"; do
+    rg -F "$refresh_task_contract" "$APPLY_SCRIPT" >/dev/null \
+        || fail "GPU 显示品牌开机/登录恢复缺少：$refresh_task_contract"
+done
 if rg -F -e '$sourceEnumPath -Name HardwareID' \
         -e '$sourceEnumPath -Name CompatibleIDs' "$REFRESH_SCRIPT" >&2; then
     fail "refresh 不得绕过专用 projector 写 Enum\\PCI HardwareID/CompatibleIDs"

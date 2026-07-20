@@ -219,6 +219,10 @@ bool fb_shm_has_shm_consumers(FbShmDisplay *d);
 void fb_shm_update_effective_rate(FbShmDisplay *d);
 int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
                     const FbShmCtlAck *ack, bool include_handles);
+#ifdef _WIN32
+bool fb_shm_win32_ensure_client_event(FbShmDisplay *d, FbShmClient *c,
+                                      Error **errp);
+#endif
 int fb_shm_send_gpu_frame(FbShmClient *c,
                           const FbShmGpuFrame *frame, int gpu_fd);
 bool fb_shm_client_disconnect_errno(int err);

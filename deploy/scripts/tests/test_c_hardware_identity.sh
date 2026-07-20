@@ -27,8 +27,12 @@ search_quiet() {
 # Python 负责 QMP 收发和超时，避免 shell 管道在 QEMU 异常退出时挂住。
 python3 - "$QEMU" <<'PY'
 import json
+import os
+import socket
 import subprocess
 import sys
+import tempfile
+import time
 
 qemu = sys.argv[1]
 
@@ -202,20 +206,27 @@ must_fail(
 )
 must_fail([
     "-device",
-    "nvme,serial=S123,use-samsung-id=on,"
+    "nvme,serial=S123N123456789,use-samsung-id=on,"
     "model-number=Samsung SSD 970 PRO 512GB,firmware-rev=1B2QEXM7",
 ], "does not match Samsung model")
 must_fail([
     "-device",
-    "nvme,serial=S123,use-samsung-id=on,"
+    "nvme,serial=S123N123456789,use-samsung-id=on,"
     "model-number=Samsung SSD 980 500GB,firmware-rev=3B4QFXO7",
 ], "unsupported Samsung model-number")
 must_fail([
     "-device",
-    "nvme,serial=S123,use-samsung-id=on,"
+    "nvme,serial=S123N123456789,use-samsung-id=on,"
     "model-number=Samsung SSD 970 PRO 512GB,firmware-rev=1B2QEXP7,"
     "subsys-id=0xa802",
 ], "subsys-id must be 0xa801")
+must_fail([
+    "-device", "nvme,serial=S123,use-samsung-id=on",
+], "serial must match S###N#########")
+must_fail([
+    "-device",
+    "nvme,serial=S123,subnqn=nqn." + ("a" * 220),
+], "223-byte limit")
 must_fail([
     "-device", "qemu-xhci,id=xhci",
     "-device",
@@ -231,6 +242,12 @@ must_fail([
     ),
 ], "configured-speed cannot exceed rated speed")
 must_fail([
+    "-smbios", (
+        "type=17,memory-type=0x1a,rank=1,device-width=12,"
+        "voltage=1200,speed=2400"
+    ),
+], "device-width must be 4, 8, 16 or 32")
+must_fail([
     "-audiodev", "none,id=audtest",
     "-device", "ich9-intel-hda,id=hda",
     "-device", (
@@ -245,11 +262,14 @@ valid = run_qmp([
     "-smbios", "type=3,chassis-type=0x07",
     "-smbios", (
         "type=4,voltage=0x8c,external-clock=100,processor-upgrade=0x31,"
-        "processor-characteristics=0xfc"
+        "processor-characteristics=0xec"
     ),
     "-smbios", (
-        "type=17,memory-type=0x1a,type-detail=0x80,rank=1,voltage=1200,"
-        "speed=2666,configured-speed=2133"
+        "type=17,memory-type=0x1a,type-detail=0x80,rank=1,"
+        "device-width=16,voltage=1200,"
+        "speed=2400,configured-speed=2133,manufacturer=Samsung,"
+        "serial=00112233|44556677,part=M378A5244CB0-CRC,"
+        "spd-ee1004=on"
     ),
     # JSON 设备语法避免 outputs 数组中的逗号被传统 -device 解析器拆开。
     # 两个头使用不同的尺寸，真实 QOM realize 会覆盖多头配置和 opt-in 属性。
@@ -265,20 +285,21 @@ valid = run_qmp([
         "edid-manufacture-week": 32,
         "edid-manufacture-year": 2018,
         "edid-video-input": 0xA3,
-        "edid-min-vfreq-hz": 50,
+        "edid-min-vfreq-hz": 56,
         "edid-max-vfreq-hz": 75,
         "edid-min-hfreq-khz": 30,
-        "edid-max-hfreq-khz": 83,
-        "edid-max-pixel-clock-mhz": 170,
+        "edid-max-hfreq-khz": 81,
+        "edid-max-pixel-clock-mhz": 149,
         "edid-secondary-xres": 1600,
         "edid-secondary-yres": 900,
         "edid-secondary-refresh-rate": 60000,
     }, separators=(",", ":")),
     "-device", (
-        "nvme,serial=S123,use-samsung-id=on,"
+        "nvme,serial=S123N123456789,use-samsung-id=on,"
         "model-number=Samsung SSD 970 PRO 512GB,firmware-rev=1B2QEXP7,"
         "subsys-vendor-id=0x144d,subsys-id=0xa801,"
-        "subnqn=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:S123"
+        "subnqn=nqn.2014-08.org.nvmexpress:uuid:"
+        "01234567-89ab-4cde-8f01-23456789abcd"
     ),
     "-audiodev", "none,id=audtest",
     "-device", "ich9-intel-hda,id=hda",
@@ -310,10 +331,120 @@ qtree = next(
 )
 if qtree.count('dev: smbus-eeprom') != 2:
     raise SystemExit("8GiB/4GiB-per-DIMM 应生成且只生成两条 SPD EEPROM")
+if qtree.count('dev: ee1004-page-selector') != 2:
+    raise SystemExit("DDR4 SPD 必须生成 EE1004 的 0x36/0x37 页选择器")
 if "edid-fixed-native = true" not in qtree:
     raise SystemExit("virtio-vga 没有 realize 显式 EDID native mode 策略")
 if "max_outputs = 2" not in qtree or "outputs = <omitted>, <omitted>" not in qtree:
     raise SystemExit("virtio-vga 两个独立 output 没有完成 QOM realize")
+
+
+def test_ee1004_protocol():
+    """通过 ICH9 SMBus 寄存器验证真实 SPA/RPA 与跨页读取。"""
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "qtest.sock")
+        command = [
+            qemu, "-machine", "q35", "-accel", "tcg", "-display", "none",
+            "-nodefaults", "-S", "-m", "8G",
+            "-smbios", (
+                "type=17,memory-type=0x1a,rank=1,device-width=16,"
+                "voltage=1200,speed=2400,configured-speed=2133,"
+                "manufacturer=Samsung,serial=00112233|44556677,"
+                "part=M378A5244CB0-CRC,spd-ee1004=on"
+            ),
+            "-qtest", f"unix:{path},server=on,wait=off",
+        ]
+        proc = subprocess.Popen(
+            command, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            for _ in range(100):
+                if os.path.exists(path):
+                    break
+                if proc.poll() is not None:
+                    raise SystemExit(
+                        f"EE1004 qtest 启动失败:\n{proc.stderr.read()}"
+                    )
+                time.sleep(0.02)
+            else:
+                raise SystemExit("EE1004 qtest socket 创建超时")
+
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.connect(path)
+            stream = connection.makefile("rwb", buffering=0)
+
+            def qtest(command_line):
+                stream.write(f"{command_line}\n".encode())
+                reply = stream.readline().decode().strip()
+                if not reply.startswith("OK"):
+                    raise SystemExit(
+                        f"qtest 命令失败: {command_line!r}: {reply!r}"
+                    )
+                return reply
+
+            def outb(port, value):
+                qtest(f"outb 0x{port:x} 0x{value:x}")
+
+            def inb(port):
+                return int(qtest(f"inb 0x{port:x}").split()[1], 0)
+
+            # 给 00:1f.3 的 ICH9 SMBus 分配 I/O BAR 并启用 host controller。
+            qtest("outl 0xcf8 0x8000fb20")
+            qtest("outl 0xcfc 0x0000b101")
+            qtest("outl 0xcf8 0x8000fb04")
+            qtest("outw 0xcfc 0x0001")
+            qtest("outl 0xcf8 0x8000fb40")
+            qtest("outb 0xcfc 0x01")
+            base = 0xB100
+
+            def finish_transaction():
+                inb(base)  # 第一次读取触发 QEMU 延迟执行 SMBus transaction。
+                return inb(base)
+
+            def begin(address, read, protocol, command_byte=None):
+                outb(base, 0xFF)
+                outb(base + 4, (address << 1) | int(read))
+                if command_byte is not None:
+                    outb(base + 3, command_byte)
+                outb(base + 2, 0x40 | (protocol << 2))
+                status = finish_transaction()
+                return status, inb(base + 5)
+
+            def expect_ok(result, value=None):
+                status, actual = result
+                if status != 0x02 or (value is not None and actual != value):
+                    raise SystemExit(
+                        f"EE1004 transaction 错误: status={status:#x}, "
+                        f"value={actual:#x}, expected={value!r}"
+                    )
+
+            # page 0 offset 63 读完后指针为 64；Quick Write 选择 page 1
+            # 不得重置指针，因此立即读取必须得到 byte 320 的 Samsung ID。
+            expect_ok(begin(0x50, True, 2, 63))
+            expect_ok(begin(0x37, False, 0))
+            expect_ok(begin(0x50, True, 1), 0x80)
+            if begin(0x36, True, 1)[0] != 0x04:
+                raise SystemExit("RPA 在 page 1 时没有 NACK")
+            expect_ok(begin(0x50, True, 2, 65), 0xCE)
+
+            expect_ok(begin(0x36, False, 1, 0))
+            expect_ok(begin(0x36, True, 1))
+            expect_ok(begin(0x50, True, 2, 0), 0x23)
+            if begin(0x37, True, 1)[0] != 0x04:
+                raise SystemExit("0x37 读操作必须始终 NACK")
+            stream.close()
+            connection.close()
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+test_ee1004_protocol()
 PY
 
 # 静态守卫防止后续重构重新引入最初的跨平台硬编码。
@@ -332,6 +463,10 @@ search_quiet 'x-identity-compat=on because the node topology remains' \
 ! search_quiet 'PCI_DEVICE_ID_SAMSUNG_NVME[[:space:]]+0xa809' \
     "$ROOT_DIR/include/hw/pci/pci_ids.h" \
     || fail "Samsung 970 PRO 重新使用了错误的 a809 主设备 ID"
+! search_quiet 'nqn\.1994-11\.com\.samsung' "$ROOT_DIR/hw/nvme/ctrl.c" || fail "NVMe 兜底 NQN 冒用了 Samsung 反向域名"
+search_quiet 'nqn\.2019-08\.org\.qemu:nvme:' "$ROOT_DIR/hw/nvme/ctrl.c" || fail "NVMe 兜底 NQN 没有使用 QEMU 自有命名空间"
+search_quiet 'info->vendor = "RHT"' "$ROOT_DIR/hw/display/edid-generate.c" || fail "通用 EDID 默认路径仍冒用显示器品牌"
+! search_quiet 'info->vendor = "SAM"' "$ROOT_DIR/hw/display/edid-generate.c" || fail "通用 EDID 默认路径仍硬编码 Samsung"
 
 # QEMU 默认必须保持 req_state 动态行为；只有启动器显式 opt-in 后才按对应
 # outputs[n] 固定 native mode，且只有 scanout 0 能回退到全局 xres/yres。

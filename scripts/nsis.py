@@ -21,14 +21,109 @@ VMATE_RUNTIME_FILES = (
     "deploy/windows/lib/VMate.Components.ps1",
     "deploy/windows/lib/VMate.Preflight.ps1",
     "deploy/windows/lib/VMate.Manifest.ps1",
+    "deploy/windows/lib/VMate.Manifest.Validation.ps1",
     "deploy/windows/lib/VMate.Memory.ps1",
     "deploy/windows/lib/VMate.ProfileStore.ps1",
     "deploy/windows/lib/VMate.Profile.ps1",
+    "deploy/windows/lib/VMate.Compatibility.ps1",
     "deploy/windows/lib/VMate.Arguments.ps1",
+    "deploy/windows/lib/VMate.ExtraArguments.ps1",
     "deploy/hardware/platforms.json",
+    "deploy/hardware/host-compatibility.json",
     "deploy/hardware/components.json",
+    "deploy/firmware/OVMF_CODE_4M_stealth.fd",
     "deploy/docs/WINDOWS-PACKAGING.md",
 )
+
+VMATE_RUNTIME_BINARIES = (
+    "qemu-system-x86_64.exe",
+    "qemu-img.exe",
+    "qemu-fb-shm-stream.exe",
+)
+
+# 严格闭包检查只能跳过 Windows 自带的 DLL。其余依赖必须能在 staging 根目录
+# 或 MinGW sysroot 中解析，否则安装后的程序可能在进入 main() 前就加载失败。
+WINDOWS_SYSTEM_DLLS = frozenset({
+    "advapi32.dll",
+    "bcrypt.dll",
+    "cfgmgr32.dll",
+    "comctl32.dll",
+    "comdlg32.dll",
+    "crypt32.dll",
+    "dnsapi.dll",
+    "dwmapi.dll",
+    "dwrite.dll",
+    "gdi32.dll",
+    "hid.dll",
+    "imm32.dll",
+    "iphlpapi.dll",
+    "kernel32.dll",
+    "msimg32.dll",
+    "msvcrt.dll",
+    "ncrypt.dll",
+    "netapi32.dll",
+    "ntdll.dll",
+    "ole32.dll",
+    "oleaut32.dll",
+    "opengl32.dll",
+    "pdh.dll",
+    "powrprof.dll",
+    "psapi.dll",
+    "rpcrt4.dll",
+    "secur32.dll",
+    "setupapi.dll",
+    "shell32.dll",
+    "shlwapi.dll",
+    "user32.dll",
+    "userenv.dll",
+    "uxtheme.dll",
+    "version.dll",
+    "wininet.dll",
+    "winmm.dll",
+    "winspool.drv",
+    "wldap32.dll",
+    "ws2_32.dll",
+    "wtsapi32.dll",
+})
+
+
+def validate_vmate_runtime_binaries(install_root):
+    """拒绝缺少启动器必需原生程序的 VMate staging。"""
+    missing = [
+        name for name in VMATE_RUNTIME_BINARIES
+        if not os.path.isfile(os.path.join(install_root, name))
+    ]
+    if missing:
+        raise RuntimeError(
+            "incomplete VMate Windows binaries: missing " + ", ".join(missing)
+        )
+
+
+def write_system_emulation_sections(executables, nsh, muinsh, vmate_runtime):
+    """生成 system emulator sections，并固定 VMate 的 x86_64 主程序。"""
+    for path in sorted(executables):
+        exe = os.path.basename(path)
+        arch = exe[12:-4]
+        nsh.write(
+            '\n                Section "{0}" Section_{0}\n'.format(arch)
+        )
+        if vmate_runtime and arch == "x86_64":
+            # VMate launcher 固定查找 console 版 x86_64 主程序；下游安装包不能
+            # 允许用户取消该 section 后留下只有脚本、没有 QEMU 的半套 runtime。
+            nsh.write("                SectionIn RO\n")
+        nsh.write(
+            '                SetOutPath "$INSTDIR"\n'
+            '                File "${BINDIR}\\%s"\n'
+            "                SectionEnd\n" % exe
+        )
+        if arch.endswith("w"):
+            desc = arch[:-1] + " emulation (GUI)."
+        else:
+            desc = arch + " emulation."
+        muinsh.write(
+            "\n                !insertmacro MUI_DESCRIPTION_TEXT "
+            "${Section_%s} \"%s\"\n" % (arch, desc)
+        )
 
 
 def signcode(path):
@@ -86,7 +181,33 @@ def stage_vmate_runtime(srcdir, install_root):
     return True
 
 
-def find_deps(exe_or_dll, search_path, analyzed_deps):
+def build_dependency_index(search_paths):
+    """按 Windows 大小写规则索引多个 DLL 搜索目录。
+
+    Meson fallback 子项目会把 DLL（例如 libslirp-0.dll）安装到 staging 根
+    目录，而 MinGW 发行版 DLL 位于单独 sysroot。staging 放在前面，使实际随
+    本次构建安装的库优先于同名的系统副本。
+    """
+    dependency_index = {}
+    for search_path in search_paths:
+        for entry in os.scandir(search_path):
+            name = entry.name.casefold()
+            if entry.is_file() and name.endswith(".dll"):
+                dependency_index.setdefault(name, entry.path)
+    return dependency_index
+
+
+def is_windows_system_dependency(dependency):
+    """判断未随包分发的依赖是否由受支持 Windows 系统提供。"""
+    normalized = dependency.casefold()
+    return (
+        normalized in WINDOWS_SYSTEM_DLLS
+        or normalized.startswith("api-ms-win-")
+        or normalized.startswith("ext-ms-win-")
+    )
+
+
+def find_deps(exe_or_dll, dependency_index, analyzed_deps, strict=False):
     deps = [exe_or_dll]
     output = subprocess.check_output(["objdump", "-p", exe_or_dll], text=True)
     output = output.split("\n")
@@ -95,17 +216,26 @@ def find_deps(exe_or_dll, search_path, analyzed_deps):
             continue
 
         dep = line.split("DLL Name: ")[1].strip()
-        if dep in analyzed_deps:
+        normalized = dep.casefold()
+        if normalized in analyzed_deps:
             continue
 
-        dll = os.path.join(search_path, dep)
-        if not os.path.exists(dll):
-            # assume it's a Windows provided dll, skip it
+        dll = dependency_index.get(normalized)
+        if dll is None:
+            analyzed_deps.add(normalized)
+            if strict and not is_windows_system_dependency(dep):
+                raise RuntimeError(
+                    "unresolved Windows DLL dependency '%s' required by '%s'"
+                    % (dep, os.path.basename(exe_or_dll))
+                )
+            # 上游通用安装包保持兼容；VMate runtime 则只允许明确的系统 DLL。
             continue
 
-        analyzed_deps.add(dep)
+        analyzed_deps.add(normalized)
         # locate the dll dependencies recursively
-        analyzed_deps, rdeps = find_deps(dll, search_path, analyzed_deps)
+        analyzed_deps, rdeps = find_deps(
+            dll, dependency_index, analyzed_deps, strict
+        )
         deps.extend(rdeps)
 
     return analyzed_deps, deps
@@ -132,12 +262,8 @@ def main():
         vmate_runtime = False
         if args.cpu == "x86_64":
             vmate_runtime = stage_vmate_runtime(args.srcdir, install_root)
-        if vmate_runtime and not os.path.isfile(
-            os.path.join(install_root, "qemu-fb-shm-stream.exe")
-        ):
-            raise RuntimeError(
-                "VMate Runtime requires installed qemu-fb-shm-stream.exe"
-            )
+        if vmate_runtime:
+            validate_vmate_runtime_binaries(install_root)
         with open(
             os.path.join(destdir + prefix, "system-emulations.nsh"),
             "w",
@@ -147,33 +273,21 @@ def main():
             "w",
             encoding="utf-8",
         ) as muinsh:
-            for exe in sorted(glob.glob(
-                os.path.join(destdir + prefix, "qemu-system-*.exe")
-            )):
-                exe = os.path.basename(exe)
-                arch = exe[12:-4]
-                nsh.write(
-                    """
-                Section "{0}" Section_{0}
-                SetOutPath "$INSTDIR"
-                File "${{BINDIR}}\\{1}"
-                SectionEnd
-                """.format(
-                        arch, exe
-                    )
-                )
-                if arch.endswith('w'):
-                    desc = arch[:-1] + " emulation (GUI)."
-                else:
-                    desc = arch + " emulation."
+            write_system_emulation_sections(
+                glob.glob(os.path.join(
+                    destdir + prefix, "qemu-system-*.exe"
+                )),
+                nsh,
+                muinsh,
+                vmate_runtime,
+            )
 
-                muinsh.write(
-                    """
-                !insertmacro MUI_DESCRIPTION_TEXT ${{Section_{0}}} "{1}"
-                """.format(arch, desc))
-
-        search_path = args.dlldir
-        print("Searching '%s' for the dependent dlls ..." % search_path)
+        search_paths = (install_root, args.dlldir)
+        print(
+            "Searching '%s' for the dependent dlls ..."
+            % "', '".join(search_paths)
+        )
+        dependency_index = build_dependency_index(search_paths)
         dlldir = os.path.join(destdir + prefix, "dll")
         os.mkdir(dlldir)
 
@@ -182,7 +296,9 @@ def main():
             signcode(exe)
 
             # find all dll dependencies
-            analyzed_deps, deps = find_deps(exe, search_path, analyzed_deps)
+            analyzed_deps, deps = find_deps(
+                exe, dependency_index, analyzed_deps, strict=vmate_runtime
+            )
             deps = set(deps)
             deps.remove(exe)
 

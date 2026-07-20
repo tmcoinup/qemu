@@ -41,6 +41,7 @@ static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 
     scon->scanout_mode = scanout;
     if (!scon->scanout_mode) {
+        scon->guest_fb.dmabuf = NULL;
         egl_fb_destroy(&scon->guest_fb);
         if (scon->surface) {
             surface_gl_destroy_texture(scon->gls, scon->surface);
@@ -51,22 +52,34 @@ static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 
 static void sdl2_gl_render_surface(struct sdl2_console *scon)
 {
-    int ww, wh, dx, dy, dw, dh;
+    SDL2Rect dst;
+    SDL2Rect viewport;
+    SDL2Size output;
 
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
-    SDL_GetWindowSize(scon->real_window, &ww, &wh);
+    if (!sdl2_current_render_size(scon, &output)) {
+        return;
+    }
     /*
      * Show the guest at its native resolution (1:1) centred in the window and
-     * letterbox the surplus instead of upscaling it (sdl2_gfx_dst_rect()).
+     * letterbox the surplus instead of upscaling it (sdl2_guest_dst_rect()).
      * surface_gl_render_texture() clears the whole framebuffer first, so the
-     * area outside the viewport is left as the (black) border.
+     * area outside the viewport keeps its normal dark border.
      */
-    sdl2_gfx_dst_rect(ww, wh,
-                      surface_width(scon->surface),
-                      surface_height(scon->surface),
-                      &dx, &dy, &dw, &dh);
-    glViewport(dx, dy, dw, dh);
+    dst = sdl2_guest_dst_rect(
+        output,
+        (SDL2Size) {
+            surface_width(scon->surface),
+            surface_height(scon->surface),
+        });
+    /*
+     * SDL input and SDL_RenderCopy use a top-left origin, while OpenGL uses
+     * bottom-left.  Convert the centered rectangle explicitly so an odd-sized
+     * border stays on the same side in rendering and pointer mapping.
+     */
+    viewport = sdl2_gl_viewport(output, dst);
+    glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
     surface_gl_render_texture(scon->gls, scon->surface);
     SDL_GL_SwapWindow(scon->real_window);
@@ -293,6 +306,16 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
 
     assert(scon->opengl);
+    if (!backing_id || !backing_width || !backing_height ||
+        x >= backing_width || y >= backing_height || !w || !h ||
+        backing_width > INT_MAX || backing_height > INT_MAX ||
+        x > INT_MAX || y > INT_MAX || w > INT_MAX || h > INT_MAX) {
+        sdl2_gl_scanout_disable(dcl);
+        return;
+    }
+
+    w = MIN(w, backing_width - x);
+    h = MIN(h, backing_height - y);
     scon->x = x;
     scon->y = y;
     scon->w = w;
@@ -304,13 +327,56 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
     sdl2_set_scanout_mode(scon, true);
     egl_fb_setup_for_tex(&scon->guest_fb, backing_width, backing_height,
                          backing_id, false);
+    scon->guest_fb.dmabuf = NULL;
+}
+
+/*
+ * Draw only the scanout's visible sub-rectangle.  egl_fb_blit() deliberately
+ * handles a whole texture (or metadata carried by a dma-buf), while the SDL
+ * listener also receives plain texture scanouts whose backing allocation is
+ * larger than the visible guest region.
+ */
+static void sdl2_gl_blit_scanout(struct sdl2_console *scon,
+                                 SDL2Size output, SDL2Rect dst)
+{
+    SDL2Rect source = sdl2_gl_scanout_source_rect(
+        (SDL2Size) {
+            scon->guest_fb.width,
+            scon->guest_fb.height,
+        },
+        (SDL2Rect) {
+            scon->x,
+            scon->y,
+            scon->w,
+            scon->h,
+        },
+        scon->y0_top);
+    SDL2Rect viewport = sdl2_gl_viewport(output, dst);
+
+    if (!source.width || !source.height) {
+        return;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, scon->guest_fb.framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glViewport(0, 0, output.width, output.height);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBlitFramebuffer(source.x, source.y,
+                      source.x + source.width,
+                      source.y + source.height,
+                      viewport.x, viewport.y,
+                      viewport.x + viewport.width,
+                      viewport.y + viewport.height,
+                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
 }
 
 void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
-    int ww, wh, dx, dy, dw, dh;
+    SDL2Size guest;
+    SDL2Size output;
+    SDL2Rect dst;
 
     assert(scon->opengl);
     if (!scon->scanout_mode) {
@@ -319,22 +385,23 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     if (!scon->guest_fb.framebuffer) {
         return;
     }
+    if (!sdl2_current_guest_size(scon, &guest) ||
+        !sdl2_current_render_size(scon, &output)) {
+        return;
+    }
 
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
-    SDL_GetWindowSize(scon->real_window, &ww, &wh);
     /*
-     * 中文注释：virgl 的纹理扫描输出也按来宾原生分辨率居中，窗口空间
-     * 不足时才等比缩小。这里继续使用 QEMU 11 的 egl_fb_blit()，因为它
-     * 会正确处理 dmabuf 的有效区域和 Y 轴方向；只把目标 framebuffer
-     * 的尺寸与偏移改成居中的 letterbox 矩形。
+     * 中文注释：
+     * virgl 的纹理扫描输出按可见子区域原生分辨率居中，
+     * drawable 空间不足时才等比缩小。
+     * 渲染和输入使用同一个目标矩形；
+     * backing texture 更大时也不会显示或映射隐藏区域。
      */
-    sdl2_gfx_dst_rect(ww, wh,
-                      scon->guest_fb.width, scon->guest_fb.height,
-                      &dx, &dy, &dw, &dh);
+    dst = sdl2_guest_dst_rect(output, guest);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    egl_fb_setup_default(&scon->win_fb, dw, dh, dx, dy);
-    egl_fb_blit(&scon->win_fb, &scon->guest_fb, !scon->y0_top);
+    sdl2_gl_blit_scanout(scon, output, dst);
 
     SDL_GL_SwapWindow(scon->real_window);
     scon->scanout_redraw_pending = false;
@@ -357,10 +424,12 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
         return;
     }
 
-    sdl2_gl_scanout_texture(dcl, qemu_dmabuf_get_texture(dmabuf), false,
-                            qemu_dmabuf_get_width(dmabuf),
-                            qemu_dmabuf_get_height(dmabuf),
-                            0, 0,
+    sdl2_gl_scanout_texture(dcl, qemu_dmabuf_get_texture(dmabuf),
+                            qemu_dmabuf_get_y0_top(dmabuf),
+                            qemu_dmabuf_get_backing_width(dmabuf),
+                            qemu_dmabuf_get_backing_height(dmabuf),
+                            qemu_dmabuf_get_x(dmabuf),
+                            qemu_dmabuf_get_y(dmabuf),
                             qemu_dmabuf_get_width(dmabuf),
                             qemu_dmabuf_get_height(dmabuf),
                             NULL);
@@ -373,6 +442,11 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
 void sdl2_gl_release_dmabuf(DisplayChangeListener *dcl,
                             QemuDmaBuf *dmabuf)
 {
+    struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+
+    if (scon->guest_fb.dmabuf == dmabuf) {
+        scon->guest_fb.dmabuf = NULL;
+    }
     egl_dmabuf_release_texture(dmabuf);
 }
 

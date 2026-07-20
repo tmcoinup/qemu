@@ -1,6 +1,7 @@
 ﻿#Requires -Version 5.1
 
 . (Join-Path $PSScriptRoot 'VMate.Manifest.ps1')
+. (Join-Path $PSScriptRoot 'VMate.Compatibility.ps1')
 . (Join-Path $PSScriptRoot 'VMate.Memory.ps1')
 . (Join-Path $PSScriptRoot 'VMate.ProfileStore.ps1')
 
@@ -38,30 +39,33 @@ function Get-VMateSecureIndex {
 
 function New-VMateRandomHex {
     param([int]$Bytes)
-
     $data = New-Object byte[] $Bytes
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     try {
-        $rng.GetBytes($data)
+        do {
+            $rng.GetBytes($data)
+            $value = ([BitConverter]::ToString($data)).Replace('-', '')
+        } while ($value -match '^(0+|F+)$')
+        return $value
     } finally {
         $rng.Dispose()
     }
-    return ([BitConverter]::ToString($data)).Replace('-', '')
 }
 
 function New-VMateRandomDigits {
     param([int]$Length)
-
-    $builder = [System.Text.StringBuilder]::new()
-    for ($index = 0; $index -lt $Length; $index++) {
-        [void]$builder.Append((Get-VMateSecureIndex -Count 10))
-    }
-    return $builder.ToString()
+    do {
+        $builder = [System.Text.StringBuilder]::new()
+        for ($index = 0; $index -lt $Length; $index++) {
+            [void]$builder.Append((Get-VMateSecureIndex -Count 10))
+        }
+        $value = $builder.ToString()
+    } while ($value -match '^0+$')
+    return $value
 }
 
 function Get-VMatePlatformDigest {
     param([object]$Platform)
-
     $json = $Platform | ConvertTo-Json -Depth 64 -Compress
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -72,62 +76,20 @@ function Get-VMatePlatformDigest {
     }
 }
 
-function Select-VMatePlatform {
-    param(
-        [object]$Manifest,
-        [string]$PlatformId = '',
-        [string]$HostVendorId = '',
-        [string]$HostCpuName = '',
-        [bool]$AllowHostCpuPlatformMismatch = $false
-    )
-
-    $enabled = @($Manifest.platforms | Where-Object {
-        $_.enabled -eq $true -and [string]$_.status -eq 'supported' -and
-        [string]$_.devices.audio.controller_pci_vendor -eq '0x8086'
-    })
-    foreach ($platform in $enabled) {
-        Assert-VMatePlatformShape -Platform $platform
-    }
-    if ($PlatformId) {
-        $matches = @($enabled | Where-Object { $_.id -eq $PlatformId })
-        if ($matches.Count -ne 1) {
-            throw "平台 '$PlatformId' 不存在、已禁用或 ID 不唯一。"
-        }
-        $manifestCpu = ([string]$matches[0].cpu.name -replace '\s+', ' ').Trim()
-        $hostCpu = ($HostCpuName -replace '\s+', ' ').Trim()
-        if (-not $AllowHostCpuPlatformMismatch -and $manifestCpu -ne $hostCpu) {
-            throw "WHPX 无法应用平台 CPU '$manifestCpu'，宿主实际为 '$hostCpu'；仅功能模式可显式使用 -AllowHostCpuPlatformMismatch。"
-        }
-        return $matches[0]
-    }
-
-    # Windows 构建当前只提供 ICH9 HDA 行为层；AMD HDA 即使改 PCI ID 也不是
-    # 同一控制器，不能进入 Windows 候选。WHPX 的 -cpu 又不会塑造自定义 CPU，
-    # 自动选择时至少保证平台与宿主 CPU 厂商一致，精确型号记录为 whpx-host。
-    $candidates = @($enabled | Where-Object {
-        if ($AllowHostCpuPlatformMismatch) {
-            return (-not $HostVendorId -or $_.cpu.vendor_id -eq $HostVendorId)
-        }
-        $manifestCpu = ([string]$_.cpu.name -replace '\s+', ' ').Trim()
-        $hostCpu = ($HostCpuName -replace '\s+', ' ').Trim()
-        return ($_.cpu.vendor_id -eq $HostVendorId -and $manifestCpu -eq $hostCpu)
-    })
-    if ($candidates.Count -eq 0) {
-        throw "共享清单没有与 WHPX 宿主 CPU '$HostCpuName' 精确匹配的启用平台。"
-    }
-    return $candidates[(Get-VMateSecureIndex -Count $candidates.Count)]
-}
-
 function New-VMateMacAddress {
     param([object]$Platform)
-
     # Windows 路线使用 manifest 声明的 Intel 82574L 独立网卡；OUI 与 PCI/
     # subsystem 必须来自同一设备条目，后三字节再由 CSPRNG 生成并持久化。
     $nic = $Platform.devices.nic
+    $expectedBoardState = if (Test-VMateCompatibilityPlatform $Platform) {
+        'not_applicable'
+    } else {
+        'disabled_in_bios'
+    }
     if ([string]$nic.pci_vendor -ne '0x8086' -or
         [string]$nic.pci_device -ne '0x10D3' -or
         [string]$nic.attachment -ne 'add_in' -or
-        [string]$nic.board_nic_state -ne 'disabled_in_bios') {
+        [string]$nic.board_nic_state -ne $expectedBoardState) {
         throw "平台 '$($Platform.id)' 的 NIC 不能由当前 e1000e 独立网卡路线表达。"
     }
     $oui = ([string]$nic.mac_oui).Replace('-', ':').ToUpperInvariant()
@@ -148,7 +110,7 @@ function New-VMateHardwareProfile {
         [int]$Instance,
         [int]$MemoryMiB,
         [int]$Cpus,
-        [bool]$AllowHostCpuPlatformMismatch
+        [bool]$PlatformCompatibility
     )
 
     $memoryPlan = Get-VMateMemoryModulePlan -Platform $Platform `
@@ -159,6 +121,7 @@ function New-VMateHardwareProfile {
     }
     $memoryPart = [string]$memoryPlan.PartNumber
     $memoryRate = Get-VMateMemoryRateFacts -Platform $Platform -PartNumber $memoryPart
+    $nvmeToken = New-VMateRandomHex -Bytes 6
     return [ordered]@{
         schema_version = 1
         manifest_schema_version = [int]$Manifest.schema_version
@@ -168,14 +131,20 @@ function New-VMateHardwareProfile {
         components = New-VMateComponentProfileBinding -Components $Components
         instance = $Instance
         created_utc = [DateTime]::UtcNow.ToString('o')
-        cpu_policy = 'whpx-host'
+        cpu_policy = if ($PlatformCompatibility) {
+            'whpx-host-compatibility'
+        } else {
+            'whpx-host'
+        }
         configuration = [ordered]@{
             memory_mib = $MemoryMiB
             memory_configured_mts = $memoryRate.ConfiguredMts
             memory_module_mib = $memoryPlan.ModuleMiB
             memory_module_count = $memoryPlan.ModuleCount
             vcpus = $Cpus
-            host_cpu_platform_mismatch_allowed = $AllowHostCpuPlatformMismatch
+            # 该标志只允许与通用 QEMU/Q35 模板一起出现；物理平台仍不允许
+            # CPU/主板混搭。重载时调用方必须再次提供显式兼容授权。
+            host_cpu_platform_mismatch_allowed = $PlatformCompatibility
         }
         host_cpu = [ordered]@{
             vendor_id = [string]$HostCpu.vendor_id
@@ -195,7 +164,8 @@ function New-VMateHardwareProfile {
             memory_manufacturer = 'Samsung'
             memory_part = $memoryPart
             memory_rated_mts = $memoryRate.RatedMts
-            nvme_serial = 'S5H9NS0N' + (New-VMateRandomDigits -Length 7)
+            nvme_serial = 'S' + $nvmeToken.Substring(0, 3) + 'N' +
+                $nvmeToken.Substring(3, 9)
             monitor_serial = [string]$Components.monitor.serial_prefix +
                 (New-VMateRandomDigits -Length 8)
         }
@@ -204,7 +174,6 @@ function New-VMateHardwareProfile {
 
 function Assert-VMateHostCpuIdentity {
     param([object]$HostCpu)
-
     foreach ($field in @('vendor_id', 'name', 'cores', 'logical_processors',
             'max_mhz')) {
         if (-not (Test-VMateJsonProperty $HostCpu $field)) {
@@ -227,6 +196,76 @@ function Assert-VMateHostCpuIdentity {
     }
 }
 
+function Assert-VMateHardwareIdentity {
+    param(
+        [object]$Identity,
+        [object]$Configuration,
+        [object]$Platform,
+        [object]$Components
+    )
+
+    $uuid = [string]$Identity.uuid
+    if ($Identity.uuid -isnot [string] -or
+        $uuid -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -or
+        $uuid -in @('00000000-0000-4000-8000-000000000000', 'ffffffff-ffff-4fff-bfff-ffffffffffff')) {
+        throw '硬件 profile 的 UUID 必须是规范的小写 RFC 4122 v4 标识。'
+    }
+    $mac = [string]$Identity.mac
+    $oui = ([string]$Platform.devices.nic.mac_oui).Replace('-', ':').ToUpperInvariant()
+    if ($Identity.mac -isnot [string] -or
+        $mac -notmatch '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' -or
+        $mac.Substring(0, 8) -ne $oui -or
+        ([Convert]::ToInt32($mac.Substring(0, 2), 16) -band 3) -ne 0 -or
+        $mac.Substring(9).Replace(':', '') -match '^(000000|FFFFFF)$') {
+        throw '硬件 profile 的 MAC 必须使用 manifest OUI、全局单播地址和非占位后缀。'
+    }
+
+    $formats = [ordered]@{
+        system_serial = '^SYS[0-9A-F]{12}$'
+        board_serial = '^MB[0-9]{12}$'
+        chassis_serial = '^CH[0-9A-F]{12}$'
+        cpu_serial = '^CPU[0-9A-F]{12}$'
+        nvme_serial = '^S[A-Z0-9]{3}N[A-Z0-9]{9}$'
+        monitor_serial = '^' + [Regex]::Escape(
+            [string]$Components.monitor.serial_prefix) + '[0-9]{8}$'
+    }
+    foreach ($entry in $formats.GetEnumerator()) {
+        $value = $Identity.($entry.Key)
+        if ($value -isnot [string] -or [string]$value -notmatch $entry.Value) {
+            throw "硬件 profile 的 $($entry.Key) 格式无效或为空。"
+        }
+    }
+    foreach ($value in @($Identity.system_serial.Substring(3),
+            $Identity.board_serial.Substring(2),
+            $Identity.chassis_serial.Substring(2),
+            $Identity.cpu_serial.Substring(3),
+            $Identity.monitor_serial.Substring(
+                ([string]$Components.monitor.serial_prefix).Length))) {
+        if ($value -match '^(0+|F+)$' -or
+            $Identity.nvme_serial -match '^S(?:000N0{9}|FFFNF{9})$') {
+            throw '硬件 profile 含全零或全 F 占位序列号。'
+        }
+    }
+
+    if ($Identity.memory_serials -isnot [System.Array]) {
+        throw '硬件 profile 的 memory_serials 必须是 JSON 数组。'
+    }
+    $memorySerials = @($Identity.memory_serials)
+    $allSerials = @($Identity.system_serial, $Identity.board_serial,
+        $Identity.chassis_serial, $Identity.cpu_serial, $Identity.nvme_serial,
+        $Identity.monitor_serial) + $memorySerials
+    $unique = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    if ($memorySerials.Count -ne [int]$Configuration.memory_module_count -or
+        @($memorySerials | Where-Object {
+                $_ -isnot [string] -or [string]$_ -notmatch '^[0-9A-F]{8}$' -or
+                [string]$_ -match '^(00000000|00000001|FFFFFFFF)$'
+            }).Count -gt 0 -or
+        @($allSerials | Where-Object { -not $unique.Add([string]$_) }).Count -gt 0) {
+        throw '硬件 profile 的序列号数量、格式或唯一性与硬件拓扑不一致。'
+    }
+}
+
 function Assert-VMateHardwareProfile {
     param(
         [object]$Profile,
@@ -237,7 +276,8 @@ function Assert-VMateHardwareProfile {
         [int]$Instance,
         [int]$MemoryMiB,
         [int]$Cpus,
-        [bool]$AllowHostCpuPlatformMismatch
+        [Alias('AllowHostCpuPlatformMismatch')]
+        [bool]$AllowPlatformCompatibility
     )
 
     Assert-VMateHostCpuIdentity -HostCpu $HostCpu
@@ -280,13 +320,22 @@ function Assert-VMateHardwareProfile {
             throw "硬件 profile 的 configuration.$field 必须是 JSON 整数。"
         }
     }
-    if ($Profile.configuration.host_cpu_platform_mismatch_allowed -isnot [bool]) {
-        throw '硬件 profile 的 host_cpu_platform_mismatch_allowed 必须是布尔值。'
+    $isCompatibility = Test-VMateCompatibilityPlatform -Platform $Platform
+    $storedCompatibility =
+        $Profile.configuration.host_cpu_platform_mismatch_allowed
+    if ($storedCompatibility -isnot [bool] -or
+        [bool]$storedCompatibility -ne $isCompatibility) {
+        throw '硬件 profile 的 compatibility 标志与所选目录类型不一致。'
+    }
+    if ($isCompatibility -and -not $AllowPlatformCompatibility) {
+        throw '已有 profile 使用通用 Q35 兼容模板；每次启动都必须显式提供 -AllowPlatformCompatibility。'
+    }
+    if ($isCompatibility) {
+        Assert-VMateHouseholdHostCpu -HostCpu $HostCpu
+        Assert-VMateHouseholdHostCpu -HostCpu $Profile.host_cpu
     }
     if ([int]$Profile.configuration.memory_mib -ne $MemoryMiB -or
-        [int]$Profile.configuration.vcpus -ne $Cpus -or
-        $Profile.configuration.host_cpu_platform_mismatch_allowed -ne
-            $AllowHostCpuPlatformMismatch) {
+        [int]$Profile.configuration.vcpus -ne $Cpus) {
         throw '内存/vCPU 与持久化 profile 不一致；请审核后显式使用 -RerollHardwareProfile。'
     }
     if ([string]$Profile.platform_digest -ne
@@ -296,9 +345,18 @@ function Assert-VMateHardwareProfile {
     Assert-VMateComponentProfileBinding -Binding $Profile.components `
         -Components $Components
     Assert-VMateHostCpuIdentity -HostCpu $Profile.host_cpu
+    if (-not $isCompatibility -and
+        -not (Test-VMateHostCpuPlatformPair $Platform $Profile.host_cpu)) {
+        throw '硬件 profile 的宿主 CPU 与 manifest 主板/Type 4 平台不匹配。'
+    }
     $profileCpuName = (([string]$Profile.host_cpu.name) -replace '\s+', ' ').Trim()
     $currentCpuName = (([string]$HostCpu.name) -replace '\s+', ' ').Trim()
-    if ([string]$Profile.cpu_policy -ne 'whpx-host' -or
+    $expectedCpuPolicy = if ($isCompatibility) {
+        'whpx-host-compatibility'
+    } else {
+        'whpx-host'
+    }
+    if ([string]$Profile.cpu_policy -ne $expectedCpuPolicy -or
         [string]$Profile.host_cpu.vendor_id -ne [string]$HostCpu.vendor_id -or
         $profileCpuName -ne $currentCpuName -or
         [int]$Profile.host_cpu.cores -ne [int]$HostCpu.cores -or
@@ -315,25 +373,16 @@ function Assert-VMateHardwareProfile {
             throw "硬件 profile 的 identity 缺少字段 '$field'。"
         }
     }
-    if ([string]$Profile.identity.uuid -notmatch
-        '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -or
-        [string]$Profile.identity.mac -notmatch '^([0-9A-F]{2}:){5}[0-9A-F]{2}$') {
-        throw '硬件 profile 的 UUID 或 MAC 格式无效。'
-    }
-    $memorySerials = @($Profile.identity.memory_serials)
-    if ($memorySerials.Count -ne
-        [int]$Profile.configuration.memory_module_count -or
-        @($memorySerials | Where-Object {
-                $_ -isnot [string] -or [string]$_ -notmatch '^[0-9A-F]{8}$'
-            }).Count -gt 0) {
-        throw '硬件 profile 的 DIMM 序列号数量或格式与模块拓扑不一致。'
-    }
+    Assert-VMateHardwareIdentity -Identity $Profile.identity `
+        -Configuration $Profile.configuration -Platform $Platform `
+        -Components $Components
     Assert-VMateMemoryRateFacts -Profile $Profile -Platform $Platform
 }
 
 function Prepare-VMateHardwareProfile {
     param(
         [object]$Manifest,
+        [object]$CompatibilityManifest = $null,
         [object]$Components,
         [string]$Path,
         [string]$PlatformId,
@@ -341,7 +390,8 @@ function Prepare-VMateHardwareProfile {
         [int]$Instance,
         [int]$MemoryMiB,
         [int]$Cpus,
-        [bool]$AllowHostCpuPlatformMismatch,
+        [Alias('AllowHostCpuPlatformMismatch')]
+        [bool]$AllowPlatformCompatibility,
         [bool]$Reroll
     )
 
@@ -360,37 +410,40 @@ function Prepare-VMateHardwareProfile {
         $PlatformId = [string]$existing.platform_id
     }
 
-    $platform = Select-VMatePlatform -Manifest $Manifest -PlatformId $PlatformId `
-        -HostVendorId ([string]$HostCpu.vendor_id) -HostCpuName ([string]$HostCpu.name) `
-        -AllowHostCpuPlatformMismatch $AllowHostCpuPlatformMismatch
+    $platformSelection = Select-VMatePlatform -Manifest $Manifest `
+        -CompatibilityManifest $CompatibilityManifest -PlatformId $PlatformId `
+        -HostCpu $HostCpu -GuestCpus $Cpus `
+        -AllowPlatformCompatibility $AllowPlatformCompatibility
+    $platform = $platformSelection.Platform
+    $catalog = $platformSelection.Catalog
     Assert-VMateRequestedTopology -Platform $platform -HostCpu $HostCpu `
         -MemoryMiB $MemoryMiB -Cpus $Cpus
     if ($null -eq $existing) {
         $attempt = 0
         do {
-            $profile = New-VMateHardwareProfile -Manifest $Manifest -Platform $platform `
+            $profile = New-VMateHardwareProfile -Manifest $catalog -Platform $platform `
                 -Components $Components `
                 -HostCpu $HostCpu -Instance $Instance -MemoryMiB $MemoryMiB -Cpus $Cpus `
-                -AllowHostCpuPlatformMismatch $AllowHostCpuPlatformMismatch
+                -PlatformCompatibility $platformSelection.IsCompatibility
             $attempt++
             $unique = Test-VMateProfileIdentityUnique -Profile $profile -Path $Path
         } while (-not $unique -and $attempt -lt 16)
         if (-not $unique) {
             throw '连续 16 次生成的身份均与现有 VM 冲突，拒绝写入 profile。'
         }
-        Assert-VMateHardwareProfile -Profile $profile -Manifest $Manifest `
+        Assert-VMateHardwareProfile -Profile $profile -Manifest $catalog `
             -Platform $platform -Components $Components -HostCpu $HostCpu `
             -Instance $Instance -MemoryMiB $MemoryMiB -Cpus $Cpus `
-            -AllowHostCpuPlatformMismatch $AllowHostCpuPlatformMismatch
+            -AllowPlatformCompatibility $AllowPlatformCompatibility
     } else {
         $profile = $existing
         if (-not (Test-VMateProfileIdentityUnique -Profile $profile -Path $Path)) {
             throw '已有 profile 的 UUID/MAC/NVMe 序列与相邻 VM 冲突。'
         }
-        Assert-VMateHardwareProfile -Profile $profile -Manifest $Manifest `
+        Assert-VMateHardwareProfile -Profile $profile -Manifest $catalog `
             -Platform $platform -Components $Components -HostCpu $HostCpu `
             -Instance $Instance -MemoryMiB $MemoryMiB -Cpus $Cpus `
-            -AllowHostCpuPlatformMismatch $AllowHostCpuPlatformMismatch
+            -AllowPlatformCompatibility $AllowPlatformCompatibility
     }
     $sourceDigest = if ($profileExists) {
         Get-VMateProfileFileDigest -Path $Path

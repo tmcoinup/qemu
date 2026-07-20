@@ -2,19 +2,18 @@
 # ---------------------------------------------------------------------------
 # reroll-identity.sh [INSTANCE ...]
 #
-# Deletes the saved hardware-identity profile(s) so the next launch of
-# start-vm.sh regenerates a random motherboard / serials / MAC
-# / UUID for those instance(s).
+# 安全门禁：旧版本会直接删除 profile，使持久 TPM state 丢失平台依据，并在
+# 下次启动时随机换板。该做法现已禁用；本脚本只定位目标并给出原子 reroll
+# 命令，不再删除任何身份或密钥文件。
 #
-# The VM qcow2 disk, OVMF NVRAM, and installed OS are untouched — only
-# the SMBIOS-side identity is re-rolled. Windows will very likely treat
-# this as a new PC and ask to re-activate, so only re-roll when you
-# deliberately want a fresh fingerprint (e.g. a new DNF ban-wave).
+# 使用 start-vm.sh --reroll 时，候选身份通过全部门禁后才原子替换 profile。
+# 若已有 TPM state，启动器会拒绝 reroll，避免新 UUID/主板序列号复用旧 TPM
+# 密钥；应新建 instance 或使用经过验证的密钥迁移/归档流程。
 #
 #  Examples:
-#     reroll-identity.sh 1          # re-roll just instance 1
-#     reroll-identity.sh 1 2 3      # re-roll three instances
-#     reroll-identity.sh --all      # re-roll every instance that has a profile
+#     reroll-identity.sh 1          # 检查 instance 1 并打印安全命令
+#     reroll-identity.sh 1 2 3      # 批量检查三个实例
+#     reroll-identity.sh --all      # 检查所有已有 profile 的实例
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -51,12 +50,16 @@ else
     done
 fi
 
+blocked=0
 for n in "${targets[@]}"; do
     f="$VMS_DIR/${n}/profile"
     if [[ -f "$f" ]]; then
-        rm -f "$f"
-        echo ">> removed $f (instance $n will re-roll on next launch)"
+        echo "ERROR: 为保护 profile 与 TPM state，已拒绝删除 $f" >&2
+        echo "       请在下次实际启动时运行: deploy/scripts/start-vm.sh $n --reroll" >&2
+        blocked=1
     else
         echo ">> instance $n had no saved profile ($f) — next launch will generate one"
     fi
 done
+
+(( blocked == 0 ))

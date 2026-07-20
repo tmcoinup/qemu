@@ -8586,6 +8586,8 @@ static bool nvme_check_samsung_profile(const NvmeParams *params, Error **errp)
                         NVME_SAMSUNG_970PRO_MODEL;
     const char *firmware = params->firmware_rev ? params->firmware_rev :
                            NVME_SAMSUNG_970PRO_FIRMWARE;
+    const char *serial = params->serial;
+    size_t i;
 
     if (params->use_samsung_id && params->use_intel_id) {
         error_setg(errp, "use-samsung-id and use-intel-id are mutually "
@@ -8605,6 +8607,25 @@ static bool nvme_check_samsung_profile(const NvmeParams *params, Error **errp)
         error_setg(errp, "firmware-rev '%s' does not match Samsung model "
                          "'%s' (expected '%s')",
                    firmware, model, NVME_SAMSUNG_970PRO_FIRMWARE);
+        return false;
+    }
+    if (!serial || strlen(serial) != 14 || serial[0] != 'S' ||
+        serial[4] != 'N') {
+        error_setg(errp, "Samsung 970 PRO serial must match "
+                         "S###N######### (14 uppercase alphanumeric bytes)");
+        return false;
+    }
+    for (i = 1; i < 14; i++) {
+        if (i != 4 && !g_ascii_isupper(serial[i]) &&
+            !g_ascii_isdigit(serial[i])) {
+            error_setg(errp, "Samsung 970 PRO serial must match "
+                             "S###N######### (14 uppercase alphanumeric bytes)");
+            return false;
+        }
+    }
+    if (!strcmp(serial, "S000N000000000") ||
+        !strcmp(serial, "SFFFNFFFFFFFFF")) {
+        error_setg(errp, "Samsung 970 PRO serial must not be a placeholder");
         return false;
     }
     if (params->subsystem_vendor_id &&
@@ -8679,9 +8700,12 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
         error_setg(errp, "subnqn must start with 'nqn.'");
         return false;
     }
-    if (params->subnqn && strlen(params->subnqn) >=
-                          sizeof(n->id_ctrl.subnqn)) {
-        error_setg(errp, "subnqn is too long");
+    /*
+     * NVMe Base Specification 4.5 把 NQN 上限定义为 223 字节；Identify
+     * Controller 的 256 字节字段大小不是可用名称长度，不能拿 sizeof 放宽。
+     */
+    if (params->subnqn && strlen(params->subnqn) > 223) {
+        error_setg(errp, "subnqn exceeds the NVMe 223-byte limit");
         return false;
     }
 
@@ -9178,21 +9202,22 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     return true;
 }
 
-static void nvme_samsung_subnqn(NvmeCtrl *n, char *buf, size_t size)
+static void nvme_qemu_subnqn(NvmeCtrl *n, char *buf, size_t size)
 {
-    const char *model = n->params.model_number ? n->params.model_number :
-                        "Samsung-NVMe";
-    g_autofree char *token = g_strdup(model);
+    g_autofree char *token = g_strdup(n->params.serial);
     char *p;
 
-    /* NQN 不允许空格；保留型号信息并把其他分隔符归一成 '-'。 */
+    /*
+     * 未显式配置 subnqn 时只能声明 QEMU 自己控制的命名空间，不能借用
+     * Samsung 的反向域名冒充厂商签发的 NQN。启动器会为硬件画像传入绑定
+     * VM UUID 的标准 NQN；此分支仅是独立使用 use-samsung-id 时的安全兜底。
+     */
     for (p = token; *p; p++) {
         if (!g_ascii_isalnum(*p) && *p != '.' && *p != '-') {
             *p = '-';
         }
     }
-    snprintf(buf, size, "nqn.1994-11.com.samsung:nvme:%s:M.2:%s",
-             token, n->params.serial);
+    snprintf(buf, size, "nqn.2019-08.org.qemu:nvme:%s", token);
 }
 
 static void nvme_init_subnqn(NvmeCtrl *n)
@@ -9203,7 +9228,7 @@ static void nvme_init_subnqn(NvmeCtrl *n)
     if (n->params.implicit_subsystem && n->params.subnqn) {
         pstrcpy((char *)id->subnqn, sizeof(id->subnqn), n->params.subnqn);
     } else if (n->params.implicit_subsystem && n->params.use_samsung_id) {
-        nvme_samsung_subnqn(n, (char *)id->subnqn, sizeof(id->subnqn));
+        nvme_qemu_subnqn(n, (char *)id->subnqn, sizeof(id->subnqn));
     } else {
         pstrcpy((char *)id->subnqn, sizeof(id->subnqn), (char*)subsys->subnqn);
     }

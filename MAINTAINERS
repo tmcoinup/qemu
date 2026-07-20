@@ -3937,10 +3937,13 @@ F: hw/i2c/core.c
 F: hw/i2c/smbus_slave.c
 F: hw/i2c/smbus_master.c
 F: hw/i2c/smbus_eeprom.c
+F: hw/i2c/smbus_eeprom_spd.c
+F: hw/i2c/smbus_eeprom_spd_data.c
 F: include/hw/i2c/i2c.h
 F: include/hw/i2c/smbus_master.h
 F: include/hw/i2c/smbus_slave.h
 F: include/hw/i2c/smbus_eeprom.h
+F: include/hw/i2c/smbus_eeprom_spd.h
 
 I3C
 M: Joe Komlodi <komlodi@google.com>

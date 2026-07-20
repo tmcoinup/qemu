@@ -7,7 +7,27 @@
 
 #include "nvapi_identity.h"
 
+#define VIRTIO_GPU_CARRIER_VENDOR_ID UINT32_C(0x1af4)
+#define VIRTIO_GPU_CARRIER_DEVICE_ID UINT32_C(0x1050)
+
 NvU32 nvapi_pack_pci_identifier(NvU32 device_id, NvU32 vendor_id)
 {
     return ((device_id & 0xffffu) << 16) | (vendor_id & 0xffffu);
+}
+
+/*
+ * NVAPI 枚举项不是第二个虚拟设备，而是 SourceInstanceId 所指向的 virtio 显卡
+ * 的用户态视图。主 PCI 键因此必须使用承载设备的 1AF4:1050；QEMU 已真实投影
+ * subsystem/revision，所以其余定位字段仍与 PCI 配置空间逐项一致。
+ */
+void nvapi_build_carrier_pci_identifiers(
+    const struct nvapi_gpu_identity *identity, NvU32 *device_id,
+    NvU32 *subsystem_id, NvU32 *revision_id, NvU32 *external_device_id)
+{
+    *device_id = nvapi_pack_pci_identifier(VIRTIO_GPU_CARRIER_DEVICE_ID,
+                                            VIRTIO_GPU_CARRIER_VENDOR_ID);
+    *subsystem_id = nvapi_pack_pci_identifier(
+        identity->subsystem_device_id, identity->subsystem_vendor_id);
+    *revision_id = identity->revision_id;
+    *external_device_id = identity->pci_device_id;
 }

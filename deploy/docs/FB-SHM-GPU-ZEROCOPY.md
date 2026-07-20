@@ -1,6 +1,6 @@
 # fb-shm 零拷贝 GPU 推流设计说明
 
-> **版本基线**：QEMU `11.0.2` + `vmate` 分支。本文所称 SDL/EGL 是 QEMU 11
+> **版本基线**：QEMU `11.0.2` + `V-11` 分支。本文所称 SDL/EGL 是 QEMU 11
 > 官方 SDL/OpenGL 集成路径；旧版定制 native EGL 子窗口实现已不再作为当前架构。
 
 本文档给代码审核和运维使用，说明本仓库当前 `fb-shm` 的 GPU 零拷贝导出能力、

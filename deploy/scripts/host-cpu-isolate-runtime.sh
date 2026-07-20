@@ -76,8 +76,8 @@ _validate_trust_manifest() {
     # preflight 必须在 QEMU 启动前发现“重编译后忘记重装清单”，不能只检查配置格式
     # 而把失败推迟到异步 pinner。canonical path 的文件也拒绝被 symlink 替换。
     [[ -f "$TRUSTED_QEMU_PATH" && ! -L "$TRUSTED_QEMU_PATH" &&
-       -x "$TRUSTED_QEMU_PATH" ]] \
-        || _die "信任清单中的 QEMU 不再是可执行普通文件"
+       -s "$TRUSTED_QEMU_PATH" && -x "$TRUSTED_QEMU_PATH" ]] \
+        || _die "信任清单中的 QEMU 不再是非空可执行普通文件"
     metadata="$(stat -Lc '%d %i' -- "$TRUSTED_QEMU_PATH" 2>/dev/null)" \
         || _die "无法读取信任清单中的 QEMU inode"
     read -r device inode <<<"$metadata"

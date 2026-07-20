@@ -11,6 +11,8 @@ fail() {
 }
 
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/fixtures/catalog-cpu-preflight-stub.sh"
 
 # 序列号测试只验证格式与持久化，不应随 CI 机器是 AMD/Intel 而变化。这里显式
 # 注入支持 TSC scaling 的 Intel 能力，仍然走真实 enabled bundle 选择路径。
@@ -70,12 +72,19 @@ assert_serials_reasonable() {
     [[ "${CHASSIS_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]] || fail "$label CHASSIS_SERIAL 异常: ${CHASSIS_SERIAL:-}"
     [[ "${NIC_MAC:-}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || fail "$label NIC_MAC 异常: ${NIC_MAC:-}"
     [[ "${NIC_MAC:-}" != 52:54:00:* ]] || fail "$label NIC_MAC 使用了 QEMU OUI: ${NIC_MAC:-}"
+    [[ "${NIC_MAC:-}" == "${NIC_MAC_OUI:-}":* ]] \
+        || fail "$label NIC_MAC 未使用平台 OUI: ${NIC_MAC:-}/${NIC_MAC_OUI:-}"
     assert_mac_is_global_unicast "$label" "${NIC_MAC:-}"
-    [[ "${NVME_SERIAL:-}" =~ ^S[0-9A-F]{10}N$ ]] || fail "$label NVME_SERIAL 异常: ${NVME_SERIAL:-}"
+    [[ "${NVME_SERIAL:-}" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{9}$ ]] \
+        || fail "$label NVME_SERIAL 异常: ${NVME_SERIAL:-}"
     [[ "${MEM_SERIAL:-}" =~ ^[0-9A-F]{8}$ ]] || fail "$label MEM_SERIAL 异常: ${MEM_SERIAL:-}"
-    [[ "${MEM_SERIAL:-}" != "00000000" && "${MEM_SERIAL:-}" != "00000001" ]] \
+    [[ "${MEM_SERIAL:-}" != "00000000" && "${MEM_SERIAL:-}" != "00000001" &&
+       "${MEM_SERIAL:-}" != "FFFFFFFF" ]] \
         || fail "$label MEM_SERIAL 是明显占位值: ${MEM_SERIAL:-}"
-    [[ "${EDID_SERIAL:-}" =~ ^[A-Z0-9]{8,13}$ ]] || fail "$label EDID_SERIAL 异常: ${EDID_SERIAL:-}"
+    [[ "${EDID_SERIAL:-}" =~ ^H4ZK[A-Z0-9]{8}$ ]] \
+        || fail "$label EDID_SERIAL 异常: ${EDID_SERIAL:-}"
+    [[ "${NVME_SUBNQN:-}" == "nqn.2014-08.org.nvmexpress:uuid:${UUID:-}" ]] \
+        || fail "$label NVME_SUBNQN 未绑定 UUID: ${NVME_SUBNQN:-}"
     [[ "${KBD_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]] || fail "$label KBD_SERIAL 异常: ${KBD_SERIAL:-}"
     [[ "${MOUSE_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]] || fail "$label MOUSE_SERIAL 异常: ${MOUSE_SERIAL:-}"
     [[ "${TABLET_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]] || fail "$label TABLET_SERIAL 异常: ${TABLET_SERIAL:-}"
@@ -93,16 +102,20 @@ assert_serials_reasonable() {
 
     # NVMe Identify Controller 的 SN 字段是 20 字节 ASCII；QEMU 会右侧空格补齐。
     assert_ascii_len "$label NVME_SERIAL(NVMe SN[20])" "${NVME_SERIAL:-}" 1 20
-    # EDID #FF serial descriptor 最多 13 个 ASCII/字母数字字符。
-    assert_ascii_len "$label EDID_SERIAL(EDID #FF)" "${EDID_SERIAL:-}" 1 13
+    # 当前生成器保留换行终止符，因此 S24F350 模板固定使用 12 个字符。
+    assert_ascii_len "$label EDID_SERIAL(EDID #FF)" "${EDID_SERIAL:-}" 12 12
     # USB HID serial 当前只保存在 profile，设备参数未暴露给 guest；仍限制为短 ASCII。
     assert_ascii_len "$label KBD_SERIAL(profile)" "${KBD_SERIAL:-}" 1 64
     assert_ascii_len "$label MOUSE_SERIAL(profile)" "${MOUSE_SERIAL:-}" 1 64
     assert_ascii_len "$label TABLET_SERIAL(profile)" "${TABLET_SERIAL:-}" 1 64
 
     local mem_serial2
-    mem_serial2="$(printf '%s' "${MEM_SERIAL}-dimm2" | sha256sum | head -c 8 | tr '[:lower:]' '[:upper:]')"
-    [[ "$mem_serial2" != "$MEM_SERIAL" ]] || fail "$label 双通道 DIMM SN 重复: $MEM_SERIAL"
+    mem_serial2="$(_stealth_memory_slot_serial "$MEM_SERIAL" 2)" ||
+        fail "$label 无法派生第二条 DIMM SN"
+    [[ "$mem_serial2" != "$MEM_SERIAL" &&
+       "$mem_serial2" != "00000000" && "$mem_serial2" != "00000001" &&
+       "$mem_serial2" != "FFFFFFFF" ]] ||
+        fail "$label 双通道 DIMM SN 重复或为占位值: $mem_serial2"
 }
 
 test_random_profile_serials() {
@@ -140,7 +153,67 @@ test_missing_serials_are_repaired_stably() {
     [[ "$first_mem" == "$second_mem" ]] || fail "修复 DIMM SN 不稳定: $first_mem != $second_mem"
 }
 
+test_strict_profile_rejects_invalid_identity() {
+    local profile="$TMP_DIR/strict-identity.profile"
+    local bad key value
+
+    stealth_pick_profile
+    stealth_save_profile "$profile"
+    unset_profile_vars
+    STRICT_HARDWARE=1 stealth_load_profile "$profile" ||
+        fail "合法身份无法严格重载"
+
+    while IFS='|' read -r key value; do
+        bad="$TMP_DIR/strict-bad-$key.profile"
+        sed "s|^${key}=.*|${key}=${value}|" "$profile" >"$bad"
+        unset_profile_vars
+        if STRICT_HARDWARE=1 stealth_load_profile "$bad" >/dev/null 2>&1; then
+            fail "严格模式接受非法身份字段: $key=$value"
+        fi
+    done <<'CASES'
+UUID|00000000-0000-4000-8000-000000000000
+CPU_SERIAL|0000000000
+BOARD_ASSET|0000000000
+NIC_MAC|ff:ff:ff:ff:ff:ff
+NVME_SERIAL|S0000000000N
+NVME_SUBNQN|nqn.2014-08.org.nvmexpress:uuid:00000000-0000-4000-8000-000000000000
+MEM_SERIAL|00000000
+EDID_SERIAL|H4ZK123456789
+KBD_SERIAL|UNKNOWN
+CASES
+
+    bad="$TMP_DIR/strict-missing-cpu-serial.profile"
+    grep -v '^CPU_SERIAL=' "$profile" >"$bad"
+    unset_profile_vars
+    if STRICT_HARDWARE=1 stealth_load_profile "$bad" >/dev/null 2>&1; then
+        fail "严格模式接受缺少 CPU_SERIAL 的 profile"
+    fi
+}
+
+test_strict_profile_accepts_legacy_hid_tokens() {
+    local current="$TMP_DIR/current-hid.profile"
+    local legacy="$TMP_DIR/legacy-hid.profile"
+
+    stealth_pick_profile
+    stealth_save_profile "$current"
+    sed \
+        -e 's/^KBD_SERIAL=.*/KBD_SERIAL=MICR12GZ9Q/' \
+        -e 's/^MOUSE_SERIAL=.*/MOUSE_SERIAL=MICRAB7Y2X/' \
+        -e 's/^TABLET_SERIAL=.*/TABLET_SERIAL=QEMU9Z8Y7X/' \
+        "$current" >"$legacy"
+    chmod 600 "$legacy"
+
+    unset_profile_vars
+    STRICT_HARDWARE=1 stealth_load_profile "$legacy" ||
+        fail "严格模式拒绝旧生成器的合法 HID 字母数字 token"
+    [[ "$KBD_SERIAL|$MOUSE_SERIAL|$TABLET_SERIAL" == \
+       "MICR12GZ9Q|MICRAB7Y2X|QEMU9Z8Y7X" ]] ||
+        fail "加载旧 HID token 时发生了身份漂移"
+}
+
 test_random_profile_serials
 test_missing_serials_are_repaired_stably
+test_strict_profile_rejects_invalid_identity
+test_strict_profile_accepts_legacy_hid_tokens
 
 echo "OK: hardware serial checks passed"

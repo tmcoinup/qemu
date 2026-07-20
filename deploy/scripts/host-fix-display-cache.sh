@@ -62,11 +62,10 @@ EDID_NAME="$(stealth_profile_get EDID_NAME "$PROFILE" || true)"
 EDID_SERIAL="$(stealth_profile_get EDID_SERIAL "$PROFILE" || true)"
 EDID_WIDTH_MM="$(stealth_profile_get EDID_WIDTH_MM "$PROFILE" || true)"
 EDID_HEIGHT_MM="$(stealth_profile_get EDID_HEIGHT_MM "$PROFILE" || true)"
-EDID_VENDOR="${EDID_VENDOR:-SAM}"
-EDID_NAME="${EDID_NAME:-S24F350}"
-EDID_SERIAL="${EDID_SERIAL:-H4ZK500001VL}"
-EDID_WIDTH_MM="${EDID_WIDTH_MM:-530}"
-EDID_HEIGHT_MM="${EDID_HEIGHT_MM:-300}"
+[[ "$EDID_VENDOR" == SAM && "$EDID_NAME" == S24F350 &&
+   "$EDID_SERIAL" =~ ^H4ZK[A-Z0-9]{8}$ &&
+   "$EDID_WIDTH_MM" == 521 && "$EDID_HEIGHT_MM" == 293 ]] ||
+    die "profile 的 S24F350 EDID 身份缺失或与受控组件目录不一致"
 log "实例 ${INSTANCE} 显示器: ${EDID_VENDOR} ${EDID_NAME} sn=${EDID_SERIAL} ${EDID_WIDTH_MM}x${EDID_HEIGHT_MM}mm"
 
 # ---- 2) 生成与设备一致的 16:9 EDID（qemu-edid 用当前 edid-generate.c）----

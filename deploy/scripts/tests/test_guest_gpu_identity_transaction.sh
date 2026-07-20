@@ -136,7 +136,7 @@ function New-TransactionFixture {
     $config.Children["Identities\" + $IdentityId] = $identity
     if ($OldPointerPresent) {
         $config.Children["Identities\" + $oldId] = $oldIdentity
-        Set-CompleteIdentityValues $oldIdentity $oldId 2 $source "OLD GPU" $true
+        Set-CompleteIdentityValues $oldIdentity $oldId 2 $source "NVIDIA OLD GPU" $true
     }
     Set-FakeValue $transaction TransactionSchemaVersion 1 $dword
     Set-FakeValue $transaction TransactionId $IdentityId $string
@@ -144,7 +144,7 @@ function New-TransactionFixture {
     Set-FakeValue $transaction PreviousPointerPresent ([int]$OldPointerPresent) $dword
     if ($OldPointerPresent) { Set-FakeValue $transaction PreviousIdentityId $oldId $string }
     Set-FakeValue $transaction PreviousSpoofNamePresent ([int]$OldPointerPresent) $dword
-    if ($OldPointerPresent) { Set-FakeValue $transaction PreviousSpoofName "OLD GPU" $string }
+    if ($OldPointerPresent) { Set-FakeValue $transaction PreviousSpoofName "NVIDIA OLD GPU" $string }
     Set-FakeValue $transaction ClassSubkey "0001" $string
     Set-CompleteIdentityValues $identity $IdentityId 2 $source `
         "NVIDIA GeForce GTX 1050 Ti" $true
@@ -242,7 +242,7 @@ function Assert-RolledBack($Fixture) {
     if ([string]$Fixture.Transaction.Values.State -cne "RolledBack") { throw "事务未标记 RolledBack" }
     if ($Fixture.OldPointerPresent) {
         if ([string]$Fixture.Config.Values.CurrentIdentity -cne $Fixture.OldId -or
-            [string]$Fixture.Config.Values.SpoofName -cne "OLD GPU") {
+            [string]$Fixture.Config.Values.SpoofName -cne "NVIDIA OLD GPU") {
             throw "旧 pointer/mirror 未恢复"
         }
     } elseif ($Fixture.Config.Values.ContainsKey("CurrentIdentity") -or
@@ -279,7 +279,7 @@ Set-FakeValue $script:fixture.Transaction PreviousIdentitySchemaVersion 1 `
     ([Microsoft.Win32.RegistryValueKind]::DWord)
 Set-FakeValue $script:fixture.Config CurrentIdentity $script:fixture.OldId `
     ([Microsoft.Win32.RegistryValueKind]::String)
-Set-FakeValue $script:fixture.Config SpoofName "OLD GPU" `
+Set-FakeValue $script:fixture.Config SpoofName "NVIDIA OLD GPU" `
     ([Microsoft.Win32.RegistryValueKind]::String)
 $receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
 if ([int]$receipt.PreviousIdentitySchemaVersion -ne 1) {
@@ -315,7 +315,7 @@ $script:fixture = New-TransactionFixture "88888888888888888888888888888888" $tru
 Set-LegacyPreviousIdentity $script:fixture $true
 Set-FakeValue $script:fixture.Config CurrentIdentity $script:fixture.OldId `
     ([Microsoft.Win32.RegistryValueKind]::String)
-Set-FakeValue $script:fixture.Config SpoofName "OLD GPU" `
+Set-FakeValue $script:fixture.Config SpoofName "NVIDIA OLD GPU" `
     ([Microsoft.Win32.RegistryValueKind]::String)
 $result = Invoke-RecoverOrRollback -Recover
 if ($result.Action -cne "RolledBack") { throw "schema-1 提交前故障没有回滚" }
@@ -515,30 +515,30 @@ if($null -eq $guard){throw "缺少 durable outer finally"}
 $body=$guard.Body.Extent.Text
 foreach($marker in @(
     "No fake adapter auto-detected", "-CommitIdentity", "exit 25",
-    "exit `$displayModeFailureCode", "& `$powershellExe @nvapiInstallArgs",
-    "-CompleteIdentity `$identityTransactionId", "& `$powershellExe @nvapiFinalizeArgs"
+    "exit `$displayModeFailureCode", "& `$powershellExe @gpuApiInstallArgs",
+    "-CompleteIdentity `$identityTransactionId", "& `$powershellExe @gpuApiFinalizeArgs"
 )) { if(-not $body.Contains($marker)){throw ("outer transaction 未覆盖："+$marker)} }
 ' >/dev/null
 
-# 跨组件提交顺序必须是 reader Install(receipt 保留) → pointer Commit →
+# 跨组件提交顺序必须是 GPU API coordinator Install(receipt 保留) → pointer Commit →
 # identity Complete → reader Finalize。前三步任何失败时，finally 必须先由仍兼容
 # schema-1/2 的新 reader 承接旧 pointer，再恢复可能只懂旧 schema 的历史 DLL。
-nvapi_install_line="$(rg -n -F '& $powershellExe @nvapiInstallArgs' "$APPLY_SCRIPT" | cut -d: -f1)"
+gpu_api_install_line="$(rg -n -F '& $powershellExe @gpuApiInstallArgs' "$APPLY_SCRIPT" | cut -d: -f1)"
 commit_line="$(rg -n -F '& $identityHelperSource -CommitIdentity $identityTransactionId' "$APPLY_SCRIPT" | cut -d: -f1)"
 complete_line="$(rg -n -F '& $identityHelperSource -CompleteIdentity $identityTransactionId' "$APPLY_SCRIPT" | cut -d: -f1)"
-nvapi_finalize_line="$(rg -n -F '& $powershellExe @nvapiFinalizeArgs' "$APPLY_SCRIPT" | cut -d: -f1)"
-nvapi_rollback_line="$(rg -n -F '& $powershellExe @nvapiRecoveryArgs' "$APPLY_SCRIPT" | cut -d: -f1)"
+gpu_api_finalize_line="$(rg -n -F '& $powershellExe @gpuApiFinalizeArgs' "$APPLY_SCRIPT" | cut -d: -f1)"
+gpu_api_rollback_line="$(rg -n -F '& $powershellExe @gpuApiRecoveryArgs' "$APPLY_SCRIPT" | cut -d: -f1)"
 identity_rollback_line="$(rg -n -F -- '-RollbackIdentity $identityTransactionId' \
     "$APPLY_SCRIPT" | tail -1 | cut -d: -f1)"
-[[ -n "$nvapi_install_line" && -n "$commit_line" && -n "$complete_line" && \
-    -n "$nvapi_finalize_line" && "$nvapi_install_line" -lt "$commit_line" && \
-    "$commit_line" -lt "$complete_line" && "$complete_line" -lt "$nvapi_finalize_line" ]] \
-    || fail "生产 apply 未遵守 NVAPI Install → identity Commit/Complete → Finalize 顺序"
-[[ -n "$nvapi_rollback_line" && -n "$identity_rollback_line" && \
-    "$identity_rollback_line" -lt "$nvapi_rollback_line" ]] \
-    || fail "apply finally 未在历史 NVAPI reader 之前恢复旧 identity pointer"
-rg -F "throw ('系统 NVAPI 身份投影准备失败" "$APPLY_SCRIPT" >/dev/null \
-    || fail "NVAPI Install 非零退出没有进入跨组件 finally"
+[[ -n "$gpu_api_install_line" && -n "$commit_line" && -n "$complete_line" && \
+    -n "$gpu_api_finalize_line" && "$gpu_api_install_line" -lt "$commit_line" && \
+    "$commit_line" -lt "$complete_line" && "$complete_line" -lt "$gpu_api_finalize_line" ]] \
+    || fail "生产 apply 未遵守 GPU API Install → identity Commit/Complete → Finalize 顺序"
+[[ -n "$gpu_api_rollback_line" && -n "$identity_rollback_line" && \
+    "$identity_rollback_line" -lt "$gpu_api_rollback_line" ]] \
+    || fail "apply finally 未在历史 GPU API readers 之前恢复旧 identity pointer"
+rg -F "throw ('系统 GPU API 身份投影准备失败" "$APPLY_SCRIPT" >/dev/null \
+    || fail "GPU API coordinator Install 非零退出没有进入跨组件 finally"
 
 recover_line="$(rg -n -F '& $identityHelperSource -RecoverPending' "$APPLY_SCRIPT" | cut -d: -f1)"
 stage_line="$(rg -n -F '& $identityHelperSource -Stage -SpoofName' "$APPLY_SCRIPT" | cut -d: -f1)"

@@ -9,7 +9,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stddef.h>
+#include <stdint.h>
 
+#include "carrier_validation.h"
 #include "nvapi_identity.h"
 #include "nvapi_identity_contract.h"
 
@@ -127,6 +129,7 @@ static int load_and_validate_identity(
     char memory_type[32];
     char source_instance[256];
     char identity_mode[32];
+    struct stealth_gpu_carrier carrier;
 
     ZeroMemory(&input, sizeof(input));
     if (!read_registry_dword(key, "IdentitySchemaVersion", &schema) ||
@@ -206,9 +209,19 @@ static int load_and_validate_identity(
     input.bus_id = (NvU32)bus_id;
     input.slot_id = (NvU32)slot_id;
     input.function_id = (NvU32)function_id;
-    if (!nvapi_build_validated_identity(&input, identity)) {
+    if (!nvapi_build_validated_identity(&input, identity) ||
+        !stealth_validate_virtio_gpu_carrier_windows(
+            source_instance, (uint32_t)bus_id, (uint32_t)slot_id,
+            (uint32_t)function_id, &carrier)) {
         return 0;
     }
+
+    /*
+     * bus/slot 已与 CM 的实际 devnode 比对；回写已验证值，避免后续 NVAPI
+     * 查询意外使用 profile 中未绑定到当前 Windows 实例的 BDF。
+     */
+    identity->bus_id = (NvU32)carrier.bus_id;
+    identity->slot_id = (NvU32)carrier.slot_id;
 
     *initial_schema = schema;
     return 1;

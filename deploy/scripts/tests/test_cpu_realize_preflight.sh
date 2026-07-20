@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 验证严格模式会真实 realize 选定 CPU，并拒绝缺特性 warning 或伪成功进程。
+# shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -54,6 +55,60 @@ chmod +x "$QEMU"
 
 VMATE_QEMU_STUB_MODE=good sv_validate_cpu_realize \
     || fail "合法 QMP/vCPU 烟测被拒绝"
+
+# root clone 必须用最终普通用户视角执行能力探测和 QEMU。受控 sudo 替身保留当前
+# UID，但严格记录 `-u USER --` 边界并执行真实 helper/QEMU，可检测调用链退回 root。
+FAKE_BIN="$TMP_DIR/fake-bin"
+SUDO_LOG="$TMP_DIR/sudo-user.log"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == -u && "${3:-}" == -- ]] || exit 90
+{
+    printf 'user=%s command=' "$2"
+    printf ' %q' "${@:4}"
+    printf '\n'
+    printf 'arg=%s\n' "${@:4}"
+} >>"${CPU_PREFLIGHT_SUDO_LOG:?}"
+shift 3
+exec "$@"
+EOF
+chmod +x "$FAKE_BIN/sudo"
+export CPU_PREFLIGHT_SUDO_LOG="$SUDO_LOG"
+
+SV_CPU_REALIZE_USER="$(id -un)"
+PATH="$FAKE_BIN:$PATH" \
+VMATE_QEMU_STUB_MODE=good \
+    sv_validate_cpu_realize ||
+    fail "最终 VM 用户视角的 QEMU CPU smoke 被拒绝"
+unset SV_CPU_REALIZE_USER
+grep -F "user=$(id -un)" "$SUDO_LOG" >/dev/null ||
+    fail "CPU smoke 未通过目标用户 sudo runner"
+grep -F "arg=$QEMU" "$SUDO_LOG" >/dev/null ||
+    fail "目标用户 runner 未执行自定义 QEMU"
+
+CAP_HERE="$TMP_DIR/capability helper"
+mkdir -p "$CAP_HERE"
+cat >"$CAP_HERE/kvm-capabilities.py" <<'EOF'
+print("STEALTH_KVM_AVAILABLE=1")
+print("STEALTH_KVM_TSC_CONTROL=1")
+print("STEALTH_KVM_GET_TSC_KHZ=1")
+print("STEALTH_KVM_TSC_KHZ=2200000")
+print("STEALTH_KVM_ERROR=''")
+EOF
+(
+    unset STEALTH_KVM_AVAILABLE STEALTH_KVM_TSC_CONTROL
+    unset STEALTH_KVM_GET_TSC_KHZ STEALTH_KVM_TSC_KHZ STEALTH_KVM_ERROR
+    HERE="$CAP_HERE"
+    STRICT_HARDWARE=1
+    SV_HOST_CAPABILITIES_USER="$(id -un)"
+    PATH="$FAKE_BIN:$PATH"
+    source "$REPO_ROOT/deploy/scripts/lib/sv-host-capabilities.sh"
+    [[ "$STEALTH_KVM_AVAILABLE" == 1 ]]
+) || fail "最终 VM 用户视角的 KVM 能力探测失败"
+grep -F "arg=$CAP_HERE/kvm-capabilities.py" "$SUDO_LOG" >/dev/null ||
+    fail "KVM 能力 helper 未通过目标用户 sudo runner"
 
 if VMATE_QEMU_STUB_MODE=warning sv_validate_cpu_realize >/dev/null 2>&1; then
     fail "CPU 缺特性 warning 未被拒绝"

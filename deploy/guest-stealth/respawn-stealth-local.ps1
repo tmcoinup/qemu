@@ -2,23 +2,25 @@
 #
 # 跟 deploy/scripts/respawn-stealth.ps1 的区别：
 #   - **不连接 host HTTP 服务**；安装与初始化所需内容全部来自当前 EXE。
-#   - 显示驱动、安装脚本和 apply-gpu-spoof.ps1 全由 EXE 释放到本机磁盘，
+#   - 芯片组 INF、显示驱动、安装脚本和 apply-gpu-spoof.ps1 全由 EXE 释放到本机磁盘，
 #     纯本地运行，断网/host 关机也能跑。
 #   - 设计成可反复运行：每次按当前 PCI subsys 自动选 GPU 型号并重写注册表覆盖。
 #
 # 它做的事：
-#   1. 用 Windows 内置 powercfg 把当前活动方案设为不息屏、不睡眠、不休眠。
-#   2. 验证并幂等安装 EXE 内嵌的 Microsoft WHCP stock viogpudo；已绑定的
+#   1. 用 Windows 内置电源 API 把“屏幕/睡眠”设为“从不”，保留桌面 S3 并关闭休眠。
+#   2. 为 A123/A323 幂等安装 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF，
+#      清除 SMBus Code 28；它不包含 SYS，也不改变 QEMU ICH9 的真实行为。
+#   3. 验证并幂等安装 EXE 内嵌的 Microsoft WHCP stock viogpudo；已绑定的
 #      克隆机完全跳过 pnputil，全新机若驱动失败则停止，绝不只改一个假名字。
-#   3. 按当前显卡 PCI SUBSYS 自动选定伪装型号，并持久化统一用户态 PCI 身份。
-#   4. 重写 Class\{4d36e968}\NNNN + Enum\PCI + Enum\DISPLAY 注册表覆盖
+#   4. 按当前显卡 PCI SUBSYS 自动选定伪装型号，并持久化统一用户态 PCI 身份。
+#   5. 重写 Class\{4d36e968}\NNNN + Enum\PCI + Enum\DISPLAY 注册表覆盖
 #      → Win32_VideoController / 设备管理器 / 显示器名 全部对齐到伪装型号
-#   5. 把独立 x86/x64 NVAPI 身份投影事务发布到 SysWOW64/System32，使 GPU-Z 2.70
+#   6. 把独立 x86/x64 NVAPI 身份投影事务发布到 SysWOW64/System32，使 GPU-Z 2.70
 #      可直接双击；不安装 NVIDIA 软件，也不修改内核驱动或签名链。
-#   6. 普通模式保留名称/显示模式任务；-FirstLogon 跳过它们，但两种模式都会只用
-#      Windows 内置任务计划保留 HardwareID 投影，不安装第三方服务或常驻程序。
-#   7. 清掉可能残留的 RunOnce 入口（兼容旧 clone 注入；本地一键无此入口也无害）
-#   8. 完成后重启，让驱动、实时 EDID 与覆盖完整生效。
+#   7. 两种模式都保留名称刷新与 HardwareID 投影任务；-FirstLogon 只跳过需要
+#      交互桌面的显示模式任务，不安装第三方服务或常驻程序。
+#   8. 清掉可能残留的 RunOnce 入口（兼容旧 clone 注入；本地一键无此入口也无害）
+#   9. 完成后重启，让驱动、实时 EDID 与覆盖完整生效。
 #
 # 一键用法：发布版双击 respawn-stealth.exe（自动 UAC 提权，并内嵌本脚本）。
 # 手动用法（管理员 PowerShell）：
@@ -29,7 +31,7 @@
 param(
     [switch]$NoReboot,          # 跑完不自动重启（默认跑完会重启）
     [int]   $RebootDelay = 8,   # 自动重启倒计时（秒）；期间可 Ctrl+C 取消
-    [switch]$FirstLogon,        # OOBE 后执行：仅保留必要的 HardwareID 投影任务
+    [switch]$FirstLogon,        # OOBE 后执行：保留名称/HardwareID 任务，跳过显示模式任务
     [switch]$Unattended,        # launcher 自动模式：失败必须返回退出码，禁止 Read-Host
     # 中文注释：仅由一次性恢复任务传入。驱动绑定或显示模式若要求重启，需要真正
     # 跨过 Windows 启动边界后再次验证；任务只在整个二阶段成功后删除，失败则保留。
@@ -86,13 +88,10 @@ function Enable-RespawnDisplayDevices {
     }
 }
 
-function Clear-RespawnScheduledTasks {
-    # FirstLogon 仍清理旧名称和交互显示模式任务；HardwareID 任务在 NVAPI 成功后
-    # 重新注册，因此不放进这个“最终清理”列表。每项都要停止、删除并复读确认；
-    # 否则旧任务可能在部署完成后继续修改 Class/显示模式。
-    foreach ($taskName in 'StealthGPU-RefreshName', 'StealthGPU-ForceDisplayFreq') {
-        Remove-ScheduledTaskVerified -TaskName $taskName
-    }
+function Clear-RespawnDisplayModeTask {
+    # FirstLogon 只清理依赖交互桌面的显示模式任务。名称刷新与 HardwareID 投影
+    # 都是 SYSTEM 级长期一致性保障，必须跨重启保留。
+    Remove-ScheduledTaskVerified -TaskName 'StealthGPU-ForceDisplayFreq'
 }
 
 function Get-RootScheduledTaskExact {
@@ -324,6 +323,39 @@ function Register-RespawnResumeTask {
         -InputObject $task -Force -ErrorAction Stop | Out-Null
 }
 
+function Restart-RespawnForPendingWork {
+    param(
+        [Parameter(Mandatory = $true)] [int]$PendingExitCode,
+        [Parameter(Mandatory = $true)] [string]$Reason, [Parameter(Mandatory = $true)] [string]$ShutdownComment,
+        [Parameter(Mandatory = $true)] [int]$RegistrationFailureCode,
+        [Parameter(Mandatory = $true)] [int]$ShutdownFailureCode)
+
+    # 芯片组 INF、显示驱动和显示模式共用同一跨启动边界协议。集中处理可以保证三条
+    # 路径都遵守“NoReboot 返回原状态；先注册恢复任务，再安排重启”的顺序。
+    Write-Host $Reason -ForegroundColor Yellow
+    if ($NoReboot) {
+        Write-Host '当前为 -NoReboot：请手动重启后再次运行本程序完成验证。' `
+            -ForegroundColor Yellow
+        exit $PendingExitCode
+    }
+    try {
+        Register-RespawnResumeTask -KeepFirstLogon:$FirstLogon
+    } catch {
+        Write-Host ('FAIL: 无法创建重启后二阶段恢复任务：' +
+            $_.Exception.Message) -ForegroundColor Red
+        exit $RegistrationFailureCode
+    }
+    Write-Host "已创建一次性恢复任务，${RebootDelay}s 后重启继续验证。" `
+        -ForegroundColor Green
+    & $shutdownExe /r /t $RebootDelay /f /c $ShutdownComment
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'FAIL: Windows 拒绝安排重启；恢复任务已保留，可手动重启。' `
+            -ForegroundColor Red
+        exit $ShutdownFailureCode
+    }
+    exit 0
+}
+
 function Wait-ResumeDisplayDeviceReady {
     # AtLogOn 早于显示类设备就绪时不能立即消费掉唯一恢复机会。最多等待 30 秒，
     # 只读轮询物理 1AF4:1050；超时返回失败且保留任务，下次登录可再次尝试。
@@ -393,20 +425,21 @@ if ($ResumeAfterReboot) {
 # 因此这里与它刚验证过 Owner/DACL/非重解析点的 StealthGPU 根始终是同一路径。
 $logDir = Split-Path -Parent $PSScriptRoot
 New-Item -ItemType Directory -Force -Path $logDir -ErrorAction SilentlyContinue | Out-Null
+$chipsetLog = Join-Path $logDir 'chipset-device-install.log'
 $driverLog = Join-Path $logDir 'display-driver-install.log'
 $powerPolicyLog = Join-Path $logDir 'power-policy.log'
 $projectionLog = Join-Path $logDir 'gpu-hardware-id-projection.log'
 $log = Join-Path $logDir 'respawn.log'
 
-# --- 2) 在任何 GPU/PnP 修改前禁止 guest 自动息屏、睡眠和休眠 ----------------
+# --- 2) 在任何 GPU/PnP 修改前配置正常台式机的“从不”电源策略 -----------------
 # 策略逻辑独立成 helper，主流程只从原子发布且受 DACL 保护的同包目录执行。失败时
-# 不回滚为“允许睡眠”，而是停止后续 GPU 操作；再次运行会幂等收敛剩余设置。
+# 不回滚为旧设置，而是停止后续 GPU 操作；再次运行会幂等收敛剩余设置。
 $powerPolicy = Join-Path $PSScriptRoot 'configure-power-policy.ps1'
 if (-not (Test-Path -LiteralPath $powerPolicy -PathType Leaf)) {
     Write-Host 'FAIL: EXE payload 缺少 configure-power-policy.ps1。' -ForegroundColor Red
     exit 48
 }
-Write-Host "  配置 guest 不息屏/不睡眠策略...（日志 -> $powerPolicyLog）" `
+Write-Host "  配置 guest 屏幕/睡眠均为“从不”...（日志 -> $powerPolicyLog）" `
     -ForegroundColor Cyan
 $powerArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', $powerPolicy)
@@ -416,7 +449,36 @@ if ($LASTEXITCODE -ne 0) {
     exit 49
 }
 
-# --- 3) 停止旧投影，并在任何驱动/PnP 操作前恢复 physical-only --------------
+# --- 3) 在任何 GPU/PnP 修改前修复 A123/A323 SMBus Code 28 -----------------
+# Intel 包是 Microsoft WHCP 签名的 NO_DRV 识别 INF：只绑定 System/null driver
+# 并设置正确名称，没有内核 SYS。已正常绑定或目标不存在时 helper 会幂等跳过。
+$chipsetInstaller = Join-Path $PSScriptRoot 'install-chipset-device.ps1'
+if (-not (Test-Path -LiteralPath $chipsetInstaller -PathType Leaf)) {
+    Write-Host 'FAIL: EXE payload 缺少 install-chipset-device.ps1。' `
+        -ForegroundColor Red
+    exit 55
+}
+Write-Host "  检查/安装 EXE 内嵌芯片组识别 INF...（日志 -> $chipsetLog）" `
+    -ForegroundColor Cyan
+$chipsetArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', $chipsetInstaller, '-DriverDir', $PSScriptRoot)
+& $powershellExe @chipsetArgs 2>&1 | Tee-Object -FilePath $chipsetLog
+$chipsetRc = $LASTEXITCODE
+if ($chipsetRc -eq 30) {
+    Restart-RespawnForPendingWork -PendingExitCode 30 -Reason `
+        '芯片组识别 INF 已提交，但 Windows 要求重启后完成绑定。' `
+        -ShutdownComment 'Intel 芯片组识别 INF 已提交，重启后继续 stealth 初始化' `
+        -RegistrationFailureCode 56 -ShutdownFailureCode 57
+}
+if ($chipsetRc -ne 0) {
+    Write-Host "FAIL: 芯片组识别 INF 初始化失败，退出码 = $chipsetRc。" `
+        -ForegroundColor Red
+    Write-Host "      已停止后续 GPU/PnP 操作；请查看 $chipsetLog。" `
+        -ForegroundColor Red
+    exit $chipsetRc
+}
+
+# --- 4) 停止旧投影，并在任何 GPU/PnP 操作前恢复 physical-only --------------
 $projectorSource = Join-Path $PSScriptRoot 'project-gpu-hardware-id.ps1'
 $planSource = Join-Path $PSScriptRoot 'gpu-hardware-id-plan.ps1'
 foreach ($requiredProjectionFile in $projectorSource, $planSource) {
@@ -447,7 +509,7 @@ try {
     exit 38
 }
 
-# --- 4) 先确保真实显示驱动已绑定（不走 HTTP）-------------------------------
+# --- 5) 先确保真实显示驱动已绑定（不走 HTTP）-------------------------------
 # install-display-driver.ps1 与 SYS/CAT/INF 都由同一个 EXE 释放到 PSScriptRoot。
 # 该脚本通过未被 FriendlyName spoof 影响的 Service 字段判断真实绑定：克隆机
 # 已是 VioGpuDod 时立即跳过；全新机才验证摘要、签名并调用 pnputil /install。
@@ -463,33 +525,10 @@ $driverArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
 & $powershellExe @driverArgs 2>&1 | Tee-Object -FilePath $driverLog
 $driverRc = $LASTEXITCODE
 if ($driverRc -eq 30) {
-    Write-Host ''
-    Write-Host '显示驱动已提交，但 Windows 要求重启后才能完成绑定。' `
-        -ForegroundColor Yellow
-    if ($NoReboot) {
-        Write-Host '当前为 -NoReboot：请手动重启后再次运行本程序完成验证。' `
-            -ForegroundColor Yellow
-        exit 30
-    }
-
-    try {
-        Register-RespawnResumeTask -KeepFirstLogon:$FirstLogon
-    } catch {
-        Write-Host ("FAIL: 无法创建重启后二阶段恢复任务：" + $_.Exception.Message) `
-            -ForegroundColor Red
-        exit 31
-    }
-
-    Write-Host "已创建一次性恢复任务，${RebootDelay}s 后重启继续验证。" `
-        -ForegroundColor Green
-    & $shutdownExe /r /t $RebootDelay /f /c `
-        'VioGpuDod 安装已提交，重启后继续验证并完成 stealth 初始化'
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host 'FAIL: Windows 拒绝安排重启；恢复任务已保留，可手动重启。' `
-            -ForegroundColor Red
-        exit 32
-    }
-    exit 0
+    Restart-RespawnForPendingWork -PendingExitCode 30 `
+        -Reason '显示驱动已提交，但 Windows 要求重启后才能完成绑定。' `
+        -ShutdownComment 'VioGpuDod 安装已提交，重启后继续验证并完成 stealth 初始化' `
+        -RegistrationFailureCode 31 -ShutdownFailureCode 32
 }
 if ($driverRc -ne 0) {
     Write-Host ""
@@ -498,7 +537,7 @@ if ($driverRc -ne 0) {
     exit $driverRc
 }
 
-# --- 5) 本地定位 apply-gpu-spoof.ps1（不走 HTTP）----------------------------
+# --- 6) 本地定位 apply-gpu-spoof.ps1（不走 HTTP）----------------------------
 # 生产 EXE 已把同一构建的脚本整包原子发布到 PSScriptRoot。缺失时必须停止，不能回退
 # 执行历史 C:\stealth 或根目录中可能混版、可能由普通用户预置的脚本。
 $spoof = Join-Path $PSScriptRoot 'apply-gpu-spoof.ps1'
@@ -511,12 +550,12 @@ if (-not (Test-Path -LiteralPath $spoof -PathType Leaf)) {
 }
 Write-Host "  使用本地 spoof 脚本: $spoof" -ForegroundColor Green
 
-# --- 6) 跑 apply，并在其 identity 事务完成前发布 NVAPI --------------------
+# --- 7) 跑 apply，并在其 identity 事务完成前发布 NVAPI --------------------
 Write-Host "  运行 apply-gpu-spoof.ps1 -AutoDetect ...（日志 -> $log）" -ForegroundColor Cyan
 if ($FirstLogon) {
-    Write-Host '  FirstLogon: 跳过名称/显示模式任务；最终仅保留 HardwareID 投影任务' `
+    Write-Host '  FirstLogon: 保留名称/HardwareID 任务，仅跳过交互式显示模式任务' `
         -ForegroundColor Cyan
-    Clear-RespawnScheduledTasks
+    Clear-RespawnDisplayModeTask
 }
 $spoofArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $spoof,
     '-AutoDetect', '-NvapiPayloadDir', $PSScriptRoot)
@@ -525,46 +564,25 @@ if ($FirstLogon) { $spoofArgs += '-SkipTask' }
     Tee-Object -FilePath $log
 $rc = $LASTEXITCODE
 if ($FirstLogon) {
-    Clear-RespawnScheduledTasks
+    Clear-RespawnDisplayModeTask
 }
 
 # 显示模式辅助程序用 11 表示 ChangeDisplaySettings 已把目标模式持久化，但驱动
 # 要求重启后才能真正应用。与驱动 3010 一样，这不是“当前已经成功”；普通模式会
 # 安排一次性二阶段验证，-NoReboot 则把明确状态返回给调用者。
 if ($rc -eq 11) {
-    Write-Host ''
-    Write-Host '显示模式已持久化，但需要重启后再次验证 1920×1080。' `
-        -ForegroundColor Yellow
-    if ($NoReboot) {
-        Write-Host '当前为 -NoReboot：请手动重启后再次运行本程序完成验证。' `
-            -ForegroundColor Yellow
-        exit 11
-    }
-
-    try {
-        Register-RespawnResumeTask -KeepFirstLogon:$FirstLogon
-    } catch {
-        Write-Host ("FAIL: 无法创建显示模式二阶段恢复任务：" + $_.Exception.Message) `
-            -ForegroundColor Red
-        exit 33
-    }
-
-    & $shutdownExe /r /t $RebootDelay /f /c `
-        '显示模式已持久化，重启后继续验证 1920x1080'
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host 'FAIL: Windows 拒绝安排重启；恢复任务已保留，可手动重启。' `
-            -ForegroundColor Red
-        exit 34
-    }
-    exit 0
+    Restart-RespawnForPendingWork -PendingExitCode 11 `
+        -Reason '显示模式已持久化，但需要重启后再次验证 1920×1080。' `
+        -ShutdownComment '显示模式已持久化，重启后继续验证 1920x1080' `
+        -RegistrationFailureCode 33 -ShutdownFailureCode 34
 }
 
-# --- 7) 兜底启用 Display 设备 ----------------------------------------------
+# --- 8) 兜底启用 Display 设备 ----------------------------------------------
 # 如果上一次运行因为 QEMU/GLX 崩溃在 PnP 刷新中断，显卡可能残留为 Code 22。
 # apply 脚本已经会处理一次；这里再兜底一次，确保自动重启前不是“已禁用”状态。
 Enable-RespawnDisplayDevices
 
-# --- 8) 清除可能残留的 RunOnce 入口 -----------------------------------------
+# --- 9) 清除可能残留的 RunOnce 入口 -----------------------------------------
 # 旧 clone 流程曾经往 SOFTWARE\...\RunOnce 注入 *StealthRespawn 走 HTTP 拉本脚本；
 # 本地一键不需要它，存在就顺手删掉，不存在也无害。
 $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
@@ -572,7 +590,7 @@ foreach ($name in '*StealthRespawn', 'StealthRespawn') {
     Remove-ItemProperty -Path $runOnce -Name $name -ErrorAction SilentlyContinue
 }
 
-# --- 9) 检查 apply 结果 -----------------------------------------------------
+# --- 10) 检查 apply 结果 ----------------------------------------------------
 if ($rc -ne 0) {
     Write-Host ""
     Write-Host "WARN: apply-gpu-spoof.ps1 退出码 = $rc —— 可能没找到伪装显卡节点。" -ForegroundColor Yellow
@@ -582,7 +600,7 @@ if ($rc -ne 0) {
     exit $rc
 }
 
-# --- 10) identity+NVAPI 完整后才提交 fake-first HardwareID -----------------
+# --- 11) identity+NVAPI 完整后才提交 fake-first HardwareID -----------------
 # apply 只有在双架构 installer 成功并 Complete identity 后才返回 0；因此此处开始
 # 暴露 10DE/1002 首项时，GPU-Z 的系统 reader 与 schema 已经是同一发布版本。
 try {

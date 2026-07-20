@@ -41,13 +41,13 @@ _sv_check_qemu_caps() {
 
     [[ "${QEMU_CAP_CHECK:-1}" == "1" ]] || return 0
 
-    [[ -x "$QEMU" ]] || {
-        echo "ERROR: QEMU 不存在或不可执行: $QEMU" >&2
+    [[ -f "$QEMU" && -s "$QEMU" && -x "$QEMU" ]] || {
+        echo "ERROR: QEMU 不存在、为空或不可执行: $QEMU" >&2
         echo "       迁移 host 后先跑 deploy/tools/build.sh，或传 QEMU=/path/to/qemu。" >&2
         exit 1
     }
-    [[ -x "$QEMU_IMG" ]] || {
-        echo "ERROR: qemu-img 不存在或不可执行: $QEMU_IMG" >&2
+    [[ -f "$QEMU_IMG" && -s "$QEMU_IMG" && -x "$QEMU_IMG" ]] || {
+        echo "ERROR: qemu-img 不存在、为空或不可执行: $QEMU_IMG" >&2
         echo "       迁移 host 后先跑 deploy/tools/build.sh，或传 QEMU_IMG=/path/to/qemu-img。" >&2
         exit 1
     }

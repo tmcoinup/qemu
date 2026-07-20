@@ -314,7 +314,7 @@ foreach ($command in $ast.FindAll({
 ' >/dev/null || fail "projector 引入 PnP 重扫、网络、服务或应用专用命令"
 
 # 正式执行顺序：先确认不息屏/不睡眠 -> 停旧任务/physical-only -> apply 内部 PnP
-# scan、identity 与 NVAPI 原子窗口 -> 注册 SYSTEM task -> 同步 fake-first。
+# scan、identity 与 GPU API 原子窗口 -> 注册 SYSTEM task -> 同步 fake-first。
 # FirstLogon 的旧任务清理列表不得删除最终任务。
 power_line="$(rg -n -F '& $powershellExe @powerArgs' "$RESPAWN" | cut -d: -f1)"
 restore_line="$(rg -n -F "'-Mode', 'RestorePhysical'" "$RESPAWN" | head -1 | cut -d: -f1)"
@@ -328,22 +328,22 @@ apply_line="$(rg -n -F '& $powershellExe @projectionArgs' "$RESPAWN" | cut -d: -
     || fail "无法定位 HardwareID 正式执行顺序"
 (( power_line < restore_line && restore_line < physical_gate_line && physical_gate_line < driver_line && \
     driver_line < spoof_line && spoof_line < register_line && register_line < apply_line )) \
-    || fail "HardwareID 投影没有严格位于 PnP scan/NVAPI 成功之后"
+    || fail "HardwareID 投影没有严格位于 PnP scan/GPU API 成功之后"
 rg -F "'-AutoDetect', '-NvapiPayloadDir', \$PSScriptRoot" "$RESPAWN" >/dev/null \
-    || fail "正式 apply 没有接收同包 NVAPI payload"
-nvapi_install_line="$(rg -n -F '& $powershellExe @nvapiInstallArgs' "$APPLY" | cut -d: -f1)"
+    || fail "正式 apply 没有接收同包 GPU API payload"
+gpu_api_install_line="$(rg -n -F '& $powershellExe @gpuApiInstallArgs' "$APPLY" | cut -d: -f1)"
 identity_complete_line="$(rg -n -F '& $identityHelperSource -CompleteIdentity' \
     "$APPLY" | cut -d: -f1)"
-nvapi_finalize_line="$(rg -n -F '& $powershellExe @nvapiFinalizeArgs' \
+gpu_api_finalize_line="$(rg -n -F '& $powershellExe @gpuApiFinalizeArgs' \
     "$APPLY" | cut -d: -f1)"
 host_optional_success_line="$(rg -n -F 'no host-side offline fix is required' \
     "$APPLY" | cut -d: -f1)"
-[[ -n "$nvapi_install_line" && -n "$identity_complete_line" && \
-    -n "$nvapi_finalize_line" && -n "$host_optional_success_line" && \
-    "$nvapi_install_line" -lt "$identity_complete_line" && \
-    "$identity_complete_line" -lt "$nvapi_finalize_line" && \
-    "$nvapi_finalize_line" -lt "$host_optional_success_line" ]] \
-    || fail "NVAPI/identity 未完整 Finalize 就误报 host-fix 可选成功"
+[[ -n "$gpu_api_install_line" && -n "$identity_complete_line" && \
+    -n "$gpu_api_finalize_line" && -n "$host_optional_success_line" && \
+    "$gpu_api_install_line" -lt "$identity_complete_line" && \
+    "$identity_complete_line" -lt "$gpu_api_finalize_line" && \
+    "$gpu_api_finalize_line" -lt "$host_optional_success_line" ]] \
+    || fail "GPU API/identity 未完整 Finalize 就误报 host-fix 可选成功"
 rg -F -- "-KeyName 'DEVPKEY_Device_HardwareIds'" "$RESPAWN" >/dev/null \
     || fail "无 CurrentIdentity 场景没有用 SetupAPI 做 physical-only 门禁"
 
@@ -359,9 +359,13 @@ for contract in \
     rg -F -- "$contract" "$RESPAWN" >/dev/null \
         || fail "HardwareID task 缺少契约: $contract"
 done
-clear_body="$(sed -n '/^function Clear-RespawnScheduledTasks {/,/^}/p' "$RESPAWN")"
+clear_body="$(sed -n '/^function Clear-RespawnDisplayModeTask {/,/^}/p' "$RESPAWN")"
 [[ "$clear_body" != *'StealthGPU-ProjectHardwareId'* ]] \
     || fail "FirstLogon 最终清理会误删必要的 HardwareID task"
+[[ "$clear_body" != *'StealthGPU-RefreshName'* ]] \
+    || fail "FirstLogon 最终清理会误删必要的名称刷新 task"
+[[ "$clear_body" == *'StealthGPU-ForceDisplayFreq'* ]] \
+    || fail "FirstLogon 没有清理交互式显示模式 task"
 [[ "$clear_body" == *'Remove-ScheduledTaskVerified'* ]] \
     || fail "FirstLogon 旧任务清理没有停止/删除/复读确认"
 

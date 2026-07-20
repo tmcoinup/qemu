@@ -13,9 +13,14 @@ _STEALTH_COMPONENT_VERIFY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_STEALTH_COMPONENT_VERIFY_DIR/stealth-components.sh"
 
 _STEALTH_COMPONENT_BOUND_PROFILE_VARS=(
-    COMPONENT_SCHEMA_VERSION NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE
+    COMPONENT_SCHEMA_VERSION COMPONENT_CATALOG_REVISION
+    NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE
     NVME_SIZE_BYTES NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV
     NVME_SUBNQN_TEMPLATE NVME_SUBNQN
+    BOOT_STORAGE_CATALOG_REVISION BOOT_STORAGE_COMPONENT_ID
+    BOOT_STORAGE_MANUFACTURER BOOT_STORAGE_MODEL BOOT_STORAGE_PART_NUMBER
+    BOOT_STORAGE_FIRMWARE BOOT_STORAGE_SIZE_BYTES BOOT_STORAGE_INTERFACE
+    BOOT_STORAGE_SERIAL
     GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV
     GPU_MEMORY_TYPE GPU_MEMORY_BUS_WIDTH_BITS GPU_BASE_CLOCK_KHZ
     GPU_BOOST_CLOCK_KHZ GPU_MEMORY_CLOCK_KHZ GPU_SLI_SUPPORTED
@@ -35,23 +40,32 @@ _STEALTH_COMPONENT_BOUND_PROFILE_VARS=(
 
 stealth_verify_profile_component_binding() (
     local present_array_name="$1"
+    local explicit_empty_array_name="${2:-}"
+    local migration_kind="${3:-none}"
+    local legacy_boot_serial="${4:-}"
     local -n present_keys="$present_array_name"
-    local field profile_value expected_value row serial
+    local field profile_value expected_value row
     local -A profile_values=() expected=()
+    if [[ -n "$explicit_empty_array_name" ]]; then
+        # shellcheck disable=SC2178 # 参数明确指向调用方的关联数组。
+        local -n explicit_empty_keys="$explicit_empty_array_name"
+    fi
 
-    [[ -n "${present_keys[COMPONENT_CATALOG_REVISION]:-}" ]] || {
-        echo "ERROR: 严格 profile 缺少 COMPONENT_CATALOG_REVISION" >&2
-        return 1
-    }
     for field in "${_STEALTH_COMPONENT_BOUND_PROFILE_VARS[@]}"; do
         if [[ -z "${present_keys[$field]:-}" ]] || ! [[ -v $field ]]; then
             echo "ERROR: 严格 profile 缺少部件绑定字段: $field" >&2
             return 1
         fi
-        profile_values["$field"]="${!field}"
+        if [[ -n "$explicit_empty_array_name" &&
+              -n "${explicit_empty_keys[$field]:-}" ]]; then
+            profile_values["$field"]=
+        else
+            profile_values["$field"]="${!field}"
+        fi
     done
 
     expected[COMPONENT_SCHEMA_VERSION]=1
+    expected[COMPONENT_CATALOG_REVISION]="$(stealth_component_validate)" || return 1
     expected[GPU_IDENTITY_FIDELITY]=label_only_out_of_scope
 
     row="$(stealth_component_rows storage)" || return 1
@@ -60,8 +74,84 @@ stealth_verify_profile_component_binding() (
         'expected[NVME_PCI_VEN]' 'expected[NVME_PCI_DEV]' \
         'expected[NVME_SUBSYS_VEN]' 'expected[NVME_SUBSYS_DEV]' \
         'expected[NVME_SUBNQN_TEMPLATE]' <<<"$row"
-    serial="${NVME_SERIAL:-}"
-    expected[NVME_SUBNQN]="${expected[NVME_SUBNQN_TEMPLATE]//\{serial\}/$serial}"
+    expected[NVME_SUBNQN]="${expected[NVME_SUBNQN_TEMPLATE]//\{uuid\}/${UUID:-}}"
+
+    # 启动盘按平台绑定的 pool 独立重建。SATA 分支绝不读取 NVME_MODEL/FIRMWARE/
+    # SIZE/SERIAL；NVMe 分支则要求 BOOT_* 与同一 component 完全相同，避免两个
+    # 持久化名称描述同一个 Guest 设备时发生分叉。
+    case "${PLATFORM_BOOT_STORAGE_POOL_ID:-}" in
+        component-nvme)
+            [[ "${PLATFORM_BOOT_STORAGE:-}" == nvme ]] || {
+                echo "ERROR: component-nvme 池只能用于 NVMe 启动" >&2
+                return 1
+            }
+            [[ "${profile_values[BOOT_STORAGE_CATALOG_REVISION]}" =~ \
+                ^[0-9]{4}-[0-9]{2}-[0-9]{2}\.[0-9]+$ ]] || {
+                echo "ERROR: BOOT_STORAGE_CATALOG_REVISION 格式非法" >&2
+                return 1
+            }
+            expected[BOOT_STORAGE_CATALOG_REVISION]="${profile_values[BOOT_STORAGE_CATALOG_REVISION]}"
+            expected[BOOT_STORAGE_COMPONENT_ID]="${expected[NVME_COMPONENT_ID]}"
+            expected[BOOT_STORAGE_MANUFACTURER]=Samsung
+            expected[BOOT_STORAGE_MODEL]="${expected[NVME_MODEL]}"
+            expected[BOOT_STORAGE_PART_NUMBER]=component-catalog
+            expected[BOOT_STORAGE_FIRMWARE]="${expected[NVME_FIRMWARE]}"
+            expected[BOOT_STORAGE_SIZE_BYTES]="${expected[NVME_SIZE_BYTES]}"
+            expected[BOOT_STORAGE_INTERFACE]=nvme
+            [[ "${profile_values[BOOT_STORAGE_SERIAL]}" == "${NVME_SERIAL:-}" ]] || {
+                echo "ERROR: NVMe BOOT_STORAGE_SERIAL 与 NVME_SERIAL 不一致" >&2
+                return 1
+            }
+            expected[BOOT_STORAGE_SERIAL]="${profile_values[BOOT_STORAGE_SERIAL]}"
+            ;;
+        samsung-sata-pro-512gb)
+            [[ "${PLATFORM_BOOT_STORAGE:-}" == sata-ahci ]] || {
+                echo "ERROR: samsung-sata-pro-512gb 池只能用于 SATA/AHCI 启动" >&2
+                return 1
+            }
+            stealth_storage_compat_load \
+                "${profile_values[BOOT_STORAGE_COMPONENT_ID]}" >/dev/null || return 1
+            [[ "${profile_values[BOOT_STORAGE_CATALOG_REVISION]}" =~ \
+                ^[0-9]{4}-[0-9]{2}-[0-9]{2}\.[0-9]+$ ]] || {
+                echo "ERROR: BOOT_STORAGE_CATALOG_REVISION 格式非法" >&2
+                return 1
+            }
+            # 目录 revision 只用于诊断/迁移；扩池或修订说明不能让既有 VM
+            # 失效。条目事实仍按稳定 ID 重建并逐字段严格比较。
+            expected[BOOT_STORAGE_CATALOG_REVISION]="${profile_values[BOOT_STORAGE_CATALOG_REVISION]}"
+            expected[BOOT_STORAGE_COMPONENT_ID]="$BOOT_STORAGE_COMPONENT_ID"
+            expected[BOOT_STORAGE_MANUFACTURER]="$BOOT_STORAGE_MANUFACTURER"
+            expected[BOOT_STORAGE_MODEL]="$BOOT_STORAGE_MODEL"
+            expected[BOOT_STORAGE_PART_NUMBER]="$BOOT_STORAGE_PART_NUMBER"
+            expected[BOOT_STORAGE_FIRMWARE]="$BOOT_STORAGE_FIRMWARE"
+            expected[BOOT_STORAGE_SIZE_BYTES]="$BOOT_STORAGE_SIZE_BYTES"
+            expected[BOOT_STORAGE_INTERFACE]="$BOOT_STORAGE_INTERFACE"
+            if [[ "$migration_kind" == legacy-sata-v1 ]]; then
+                if ! [[ "${profile_values[BOOT_STORAGE_SERIAL]}" =~ \
+                        ^S[0-9A-F]{10}N$ ]] ||
+                   [[ "${profile_values[BOOT_STORAGE_SERIAL]}" != \
+                        "$legacy_boot_serial" ||
+                      "$legacy_boot_serial" == S0000000000N ||
+                      "$legacy_boot_serial" == SFFFFFFFFFFN ]]; then
+                    echo "ERROR: 迁移后的 SATA BOOT_STORAGE_SERIAL 未严格保留旧序号" >&2
+                    return 1
+                fi
+            elif ! [[ "${profile_values[BOOT_STORAGE_SERIAL]}" =~ \
+                        ^S([A-Z0-9]{14}|[A-Z0-9]{3}N[A-Z0-9]{9})$ ]] ||
+                 [[ "${profile_values[BOOT_STORAGE_SERIAL]}" == S00000000000000 ||
+                    "${profile_values[BOOT_STORAGE_SERIAL]}" == SFFFFFFFFFFFFFF ||
+                    "${profile_values[BOOT_STORAGE_SERIAL]}" == S000N000000000 ||
+                    "${profile_values[BOOT_STORAGE_SERIAL]}" == SFFFNFFFFFFFFF ]]; then
+                echo "ERROR: SATA BOOT_STORAGE_SERIAL 格式非法或为占位值" >&2
+                return 1
+            fi
+            expected[BOOT_STORAGE_SERIAL]="${profile_values[BOOT_STORAGE_SERIAL]}"
+            ;;
+        *)
+            echo "ERROR: 未知启动盘池: ${PLATFORM_BOOT_STORAGE_POOL_ID:-empty}" >&2
+            return 1
+            ;;
+    esac
 
     # GPU_POOL 的 PCI VEN/DEV 是 guest SUBSYS 反查与 host profile 的共同
     # 主键。先取整行权威 bundle，再让下方逐字段比较名称、显存、

@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
+MANIFEST="$REPO_ROOT/deploy/hardware/platforms.json"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -39,15 +40,38 @@ env \
     "$START_VM" 9741 --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/argv"
 
 assert_fixed "__DRY_RUN_ARGV__"
-assert_fixed "cpus=4,cores=4,threads=1,sockets=1,maxcpus=4"
+cpu_arg="$(awk '$0 == "-cpu" { getline; print; exit }' "$TMP_DIR/argv")"
+topology="$(
+    python3 - "$MANIFEST" "$cpu_arg" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    platforms = json.load(stream)["platforms"]
+matches = [
+    item["cpu"] for item in platforms
+    if sys.argv[2].startswith(item["cpu"]["qemu_arg"] + ",")
+]
+if len(matches) != 1:
+    raise SystemExit(f"effective -cpu 未唯一匹配 manifest: {len(matches)}")
+print(f"{matches[0]['cores']}:{matches[0]['threads']}")
+PY
+)" || fail "无法从所选 manifest bundle 解析 CPU 拓扑"
+IFS=: read -r cpu_cores cpu_threads <<<"$topology"
+assert_fixed "cpus=4,cores=${cpu_cores},threads=$((cpu_threads / cpu_cores)),sockets=1,maxcpus=4"
 assert_fixed "memory-backend-memfd,id=mem0,size=8192M,share=on,prealloc=off"
 assert_fixed "node,nodeid=0,memdev=mem0,cpus=0-3"
 [[ "$(grep -Fc -- 'node,nodeid=' "$TMP_DIR/argv")" == 1 ]] \
     || fail "消费级单路平台必须且只能生成一个 guest NUMA node"
+if grep -E -- 'release=5\.14|^type=3,.*asset=|^type=17,.*asset=9876543210' "$TMP_DIR/argv" >/dev/null; then
+    fail "SMBIOS 注入了无清单证据的 BIOS release 或重复 asset 占位值"
+fi
 
-# 北桥、南桥、SMBus、AHCI 由同一个 Intel platform bundle 提供，不能留下 QEMU
-# 默认厂商，也不能混入仅用于 compatibility 文档的 AMD 平台。
-assert_fixed "q35-pcihost.x-pci-mch-vendor-id=0x8086"
+# MCH 保留 Q35 原生 8086:29c0。覆盖其 device ID 会让 EDK2 在 PlatformPei
+# CpuDeadLoop，连 helper/ISO 都不会读取；PCH 三项仍由 Intel platform bundle 投影。
+if grep -F -- "q35-pcihost.x-pci-mch-" "$TMP_DIR/argv" >/dev/null; then
+    fail "Linux 启动参数不得覆盖 OVMF 用于识别 Q35 machine 的 MCH identity"
+fi
 assert_fixed "ICH9-LPC.x-pci-vendor-id=0x8086"
 assert_fixed "ICH9-SMB.x-pci-vendor-id=0x8086"
 assert_fixed "ich9-ahci.x-pci-vendor-id=0x8086"
@@ -57,11 +81,14 @@ assert_fixed "ich9-ahci.x-pci-vendor-id=0x8086"
 # 可更换件必须是 components.json 唯一启用的原子 bundle；这里同时核对深层字段，
 # 防止只改显示名称却保留错误固件、subsystem、NQN、EDID 或 USB VID/PID。
 nvme_line="$(grep -F -- 'nvme,id=nvmectl0' "$TMP_DIR/argv")"
+uuid="$(awk '$0 == "-uuid" { getline; print; exit }' "$TMP_DIR/argv")"
+[[ "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+    || fail "QEMU argv 缺少规范的 UUID v4: $uuid"
 [[ "$nvme_line" == *"model-number=Samsung SSD 970 PRO 512GB"* \
     && "$nvme_line" == *"firmware-rev=1B2QEXP7"* \
     && "$nvme_line" == *"subsys-vendor-id=0x144D"* \
     && "$nvme_line" == *"subsys-id=0xA801"* \
-    && "$nvme_line" == *"subnqn=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:S"* ]] \
+    && "$nvme_line" == *"subnqn=nqn.2014-08.org.nvmexpress:uuid:$uuid"* ]] \
     || fail "NVMe 参数没有完整绑定 970 PRO bundle"
 
 nic_line="$(grep -F -- 'e1000e,netdev=net0' "$TMP_DIR/argv")"
@@ -77,12 +104,16 @@ assert_fixed "hda-duplex,bus=hda0.0,cad=0,audiodev=aud0,x-identity-compat=on,x-c
 assert_fixed "edid-vendor=SAM,edid-name=S24F350"
 assert_fixed "edid-fixed-native=on"
 assert_fixed "edid-product-id=0x0F65,edid-manufacture-week=32,edid-manufacture-year=2018"
-assert_fixed "edid-min-vfreq-hz=50,edid-max-vfreq-hz=75"
+assert_fixed "edid-min-vfreq-hz=56,edid-max-vfreq-hz=75"
 assert_fixed "edid-secondary-xres=1600,edid-secondary-yres=900,edid-secondary-refresh-rate=60000"
 grep -F -- "'edid-fixed-native='" \
     "$REPO_ROOT/deploy/scripts/lib/sv-portability.sh" >/dev/null \
     || fail "Linux QEMU 能力门禁没有检查固定 EDID native mode 属性"
 type17_line="$(grep -F -- 'type=17,loc_pfx=DIMM_%C2' "$TMP_DIR/argv")"
+[[ "$type17_line" =~ device-width=(8|16) ]] \
+    || fail "Type 17 没有投影硬件目录核验后的 DRAM 位宽: $type17_line"
+[[ "$type17_line" == *"spd-ee1004=on"* ]] \
+    || fail "DDR4 Type 17 没有启用完整 EE1004 SPD 身份页: $type17_line"
 if grep -Fx -- 'ICH9-LPC.x-pci-device-id=0xA303' "$TMP_DIR/argv" >/dev/null; then
     [[ "$type17_line" =~ speed=(2400|2666),configured-speed=2400 ]] \
         || fail "H310 必须使用 2400MT/s 配置速率: $type17_line"

@@ -61,10 +61,11 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
     VirtIOGPUOutputList *node;
     VirtIOGPUOutput *output = NULL;
     qemu_edid_info info = {
-        /* stealth (patch 0009): width/height_mm + vendor/name/serial 从
-         * g->conf 透传，cmdline -device edid-width-mm/edid-height-mm/
-         * edid-vendor/edid-name/edid-serial 覆盖 edid-generate.c 历史默认。
-         * 字符串 NULL 时回落 ("SAM"/"S24F350"/...)；mm=0 时按 req_state 走。 */
+        /*
+         * width/height_mm 与完整 EDID 身份从 g->conf 透传；受控启动器必须显式
+         * 提供品牌字段。字符串 NULL 时回落到通用 QEMU 标识，mm=0 时按
+         * req_state 和默认 DPI 计算，不能生成半套 Samsung 混合身份。
+         */
         .width_mm = g->conf.edid_width_mm
                         ? g->conf.edid_width_mm
                         : g->req_state[scanout].width_mm,

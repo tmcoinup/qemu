@@ -71,9 +71,28 @@ QEMU 向客体提供的显示设备主 ID 是 `1AF4:1050`。这是驱动绑定�
 64 位工具。GPU-Z 2.70 主程序是 PE32，因此统一 EXE 将 x86 文件事务发布到 SysWOW64，
 并把 x64 文件发布到 System32 供内嵌辅助组件使用。
 
+两个架构都只枚举一个 NVAPI 物理句柄。`NvAPI_GPU_GetPCIIdentifiers` 使用同一块
+OS 显示适配器的承载主键 `1AF4:1050`，并复用 QEMU 已真实写入 PCI 配置空间的
+subsystem、revision 和 BDF；名称、显存、时钟及外部产品号仍来自 NVIDIA profile。
+因此同时使用 SetupAPI/PCI 与 NVAPI 的系统级硬件扫描器会把两条信息合并到一个设备，
+不会再把 `Red Hat VirtIO` 承载层和 NVIDIA 用户态身份误列成两块显卡。
+DLL 初始化会用 SetupAPI 与 Configuration Manager 重新绑定 `SourceInstanceId`：
+唯一在线 `1AF4:1050` devnode、`VioGpuDod`、完整物理 HardwareID 回退条目和实际
+BDF 必须全部与 snapshot 一致；否则不枚举厂商 API 设备。AMD ADL 同样把验证后的
+真实 UDID、PNP 和 Driver path 返回给调用方，不再合成第二个 AMD PNP 实例。
+此外，启动/登录刷新会逐项回读 `FriendlyName`、`DeviceDesc`、`Mfg`、
+`DriverDesc`、`ProviderName` 和 `HardwareInformation.AdapterString`；身份名称必须
+以 canonical 厂商开头，并显式拒绝 `Red Hat`/`VirtIO`。即使第三方工具再次拆分枚举，
+通过 Windows SetupAPI/WMI 显示的承载项也仍使用 profile 中的 NVIDIA 名称。
+AMD RX 550/RX 560 使用相同的 SUBSYS、身份事务、名称刷新和 HardwareID 投影链路，
+对应字段写为 `AMD Radeon ...` / `AMD`。NVAPI 是 NVIDIA 专用接口；AMD profile
+不会伪造 NVAPI 句柄，而是明确返回“无 NVIDIA 设备”，因此不会额外枚举一张 N 卡。
+
 这个机制具有明确边界：
 
 - 只接受当前或历史 VMate 固定摘要，拒绝覆盖真实 NVIDIA/未知 DLL；
+- 直接忽略 Windows 显示字段、只按原始 PCI `1AF4` 厂商数据库命名的工具仍可能显示
+  `Red Hat`；彻底改变该层需要非 stock 驱动，本分支为保持 WHQL `VioGpuDod` 不这样做；
 - 不修改工具原目录；
 - 不修改全局 `PATH`；
 - 不创建全局 NVAPI 安装标记；
@@ -91,7 +110,7 @@ QEMU 向客体提供的显示设备主 ID 是 `1AF4:1050`。这是驱动绑定�
 身份持久化、名称同步和双架构系统 NVAPI 发布。
 
 当前发布流程不再使用 host HTTP 提供松散脚本，也不安装 NVIDIA 驱动或常驻服务。
-系统级内容只增加两份固定摘要的用户态 DLL、项目脚本和一条 Windows 内置计划任务；
+系统级内容只增加两份固定摘要的用户态 DLL、项目脚本和两条 Windows 内置计划任务；
 历史脚本入口仅保留为明确报错的退役入口，不能作为兼容安装路径。
 
 ## 图形能力边界

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-13.1",
+  "catalog_revision": "2026-07-19.3",
   "scope": {
     "gpu": "out_of_scope_virtual_display",
     "tablet": "generic_virtual_absolute_pointer"
@@ -13,6 +13,8 @@
       "model": "Samsung SSD 970 PRO 512GB",
       "firmware": "1B2QEXP7",
       "raw_bytes": 512110190592,
+      "verification_status": "vendor_document_reference",
+      "identity_fidelity": "model_register_reference_no_device_capture",
       "pci": {
         "vendor": "0x144D",
         "device": "0xA804",
@@ -23,9 +25,11 @@
         "pcie_generation": 3,
         "lanes": 4,
         "ieee_oui": "00:25:38",
-        "subnqn_template": "nqn.1994-11.com.samsung:nvme:970-PRO:M.2:{serial}"
+        "subnqn_template": "nqn.2014-08.org.nvmexpress:uuid:{uuid}",
+        "nqn_fidelity": "standards_compliant_synthetic_uuid"
       },
       "source_refs": [
+        "https://download.semiconductor.samsung.com/resources/data-sheet/Samsung_NVMe_SSD_970_PRO_Data_Sheet_Rev.1.0.pdf",
         "https://images.samsung.com/is/content/samsung/p5/ru/ssd/info/docs/SSD_970PRO_RU.pdf"
       ]
     }
@@ -39,24 +43,25 @@
       "product_id": "0x0F65",
       "name": "S24F350",
       "serial_prefix": "H4ZK",
-      "width_mm": 530,
-      "height_mm": 300,
+      "width_mm": 521,
+      "height_mm": 293,
       "manufacture_week": 32,
       "manufacture_year": 2018,
       "video_input": "0xA3",
       "range": {
-        "min_vfreq_hz": 50,
+        "min_vfreq_hz": 56,
         "max_vfreq_hz": 75,
         "min_hfreq_khz": 30,
-        "max_hfreq_khz": 83,
-        "max_pixel_clock_mhz": 170
+        "max_hfreq_khz": 81,
+        "max_pixel_clock_mhz": 149
       },
       "secondary_timing": {
         "xres": 1600,
         "yres": 900,
         "refresh_millihz": 60000
       },
-      "evidence": "official_model_spec_plus_reference_edid",
+      "evidence": "official_model_specs_no_raw_edid",
+      "identity_fidelity": "synthetic_edid_identity_fields",
       "source_refs": [
         "https://www.samsung.com/ie/business/monitors/flat/led-ls24f350fhuxen/",
         "https://images.samsung.com/is/content/samsung/p5/at/pdf/display_datenblaetter/Datenblatt_LCD_SamsungMonitorS24F350FHU_LED.pdf"
@@ -74,7 +79,8 @@
         "manufacturer": "Microsoft",
         "product": "Microsoft Wired Keyboard 600",
         "serial_exposed": false,
-        "descriptor_fidelity": "fixed_template"
+        "verification_status": "unverified_catalog_identity",
+        "descriptor_fidelity": "identity_only_generic_report"
       }
     ],
     "mice": [
@@ -87,7 +93,8 @@
         "manufacturer": "Microsoft",
         "product": "Microsoft USB Optical Mouse",
         "serial_exposed": false,
-        "descriptor_fidelity": "fixed_template"
+        "verification_status": "unverified_catalog_identity",
+        "descriptor_fidelity": "identity_only_generic_report"
       }
     ],
     "tablets": [
@@ -100,6 +107,7 @@
         "manufacturer": "not_exposed",
         "product": "QEMU USB Tablet",
         "serial_exposed": false,
+        "verification_status": "qemu_native_virtual_device",
         "descriptor_fidelity": "generic_virtual_only"
       }
     ]

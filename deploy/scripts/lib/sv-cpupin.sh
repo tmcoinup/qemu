@@ -27,8 +27,9 @@ sv_cpu_isolate_preflight() {
     # 同步确认 sudoers、cgroup v2 与 cpuset controller。这样常见部署错误不会等到
     # QEMU 已启动后才由异步 pinner 发现；输出仅在失败时展示，正常启动保持简洁。
     if ! sudo -n "$helper" preflight >/dev/null; then
-        echo "ERROR: CPU 隔离 preflight 失败（sudo/cgroup v2/cpuset 不可用）" >&2
-        echo "       可诊断运行: sudo $HERE/setup-host-helpers.sh check" >&2
+        echo "ERROR: CPU 隔离 preflight 失败（sudo/cgroup/cpuset 或 QEMU 信任清单无效）" >&2
+        echo "       构建已变化时请在仓库根目录运行: deploy/tools/build.sh --install-host-helpers" >&2
+        echo "       仅诊断运行: sudo $HERE/setup-host-helpers.sh check" >&2
         return 1
     fi
 }

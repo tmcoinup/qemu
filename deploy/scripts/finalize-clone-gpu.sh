@@ -120,6 +120,8 @@ else
 fi
 
 sudo -u "$ORIG_USER" env \
+    VMS_DIR="$VMS_DIR" \
+    IMAGE_ROOT="${IMAGE_ROOT:-}" \
     DISPLAY="${DISPLAY:-:1}" \
     STABLE_DISPLAY="${STABLE_DISPLAY:-0}" \
     HOST_RESERVE_CORES="${HOST_RESERVE_CORES:-auto}" \

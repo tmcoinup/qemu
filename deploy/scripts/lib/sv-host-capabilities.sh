@@ -34,7 +34,18 @@ _sv_probe_kvm_capabilities() {
 
     local helper="$HERE/kvm-capabilities.py"
     local output
-    if output="$(python3 "$helper" --format shell 2>/dev/null)"; then
+    local -a probe_command=(python3 "$helper" --format shell)
+    if [[ -n "${SV_HOST_CAPABILITIES_USER:-}" ]]; then
+        command -v sudo >/dev/null 2>&1 || {
+            echo "ERROR: 无法以最终 VM 用户探测 KVM：缺少 sudo" >&2
+            exit 1
+        }
+        probe_command=(
+            sudo -u "$SV_HOST_CAPABILITIES_USER" --
+            "${probe_command[@]}"
+        )
+    fi
+    if output="$("${probe_command[@]}" 2>/dev/null)"; then
         eval "$output"
     else
         # helper 在失败时仍输出经过单引号转义的固定赋值；保留错误用于诊断。
@@ -45,6 +56,32 @@ _sv_probe_kvm_capabilities() {
         : "${STEALTH_KVM_TSC_KHZ:=0}"
         : "${STEALTH_KVM_ERROR:=KVM 能力探测失败}"
     fi
+}
+
+# CPU smoke 默认直接执行 QEMU；root clone 可指定最终普通用户，使可执行文件权限、
+# /dev/kvm ACL 和 sudo 降权后的真实启动视角完全一致。这里只包装命令执行，不改变
+# profile 的 CPU 参数与 QMP 成功判据。
+_sv_run_cpu_realize_qemu() {
+    local cpu_arg="$1"
+    local -a realize_command=(
+        timeout 10 "$QEMU"
+        -machine "q35,accel=kvm,vmport=off"
+        -cpu "$cpu_arg"
+        -smp "cpus=$CPUS,cores=${CPU_CORES},threads=$(( CPU_THREADS / CPU_CORES )),sockets=1"
+        -m 128M -display none -nodefaults -S -qmp stdio -monitor none
+    )
+
+    if [[ -n "${SV_CPU_REALIZE_USER:-}" ]]; then
+        command -v sudo >/dev/null 2>&1 || {
+            echo "ERROR: 无法以最终 VM 用户执行 CPU smoke：缺少 sudo" >&2
+            return 1
+        }
+        realize_command=(
+            sudo -u "$SV_CPU_REALIZE_USER" --
+            "${realize_command[@]}"
+        )
+    fi
+    "${realize_command[@]}"
 }
 
 _sv_probe_kvm_capabilities
@@ -144,11 +181,7 @@ sv_validate_cpu_realize() {
         printf '%s\n' \
             '{"execute":"qmp_capabilities","id":"vmate-cap"}' \
             '{"execute":"quit","id":"vmate-quit"}'
-    } | timeout 10 "$QEMU" \
-        -machine q35,accel=kvm,vmport=off \
-        -cpu "$cpu_arg" \
-        -smp "cpus=$CPUS,cores=${CPU_CORES},threads=$(( CPU_THREADS / CPU_CORES )),sockets=1" \
-        -m 128M -display none -nodefaults -S -qmp stdio -monitor none 2>&1)"; then
+    } | _sv_run_cpu_realize_qemu "$cpu_arg" 2>&1)"; then
         status=0
     else
         status=$?

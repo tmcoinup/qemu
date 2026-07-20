@@ -47,16 +47,90 @@ COMMON_ENV=(
     QEMU_IMG=/bin/true
 )
 
+# E5 v3/v4 的 Haswell 家用 CPU 是默认正常层，不再依赖 compatibility 参数。
+# 主板/PCH 仍保留 Q35 identity 边界，启动器必须真实切到 DDR3/SATA 组合。
+E5_ENV=(
+    env
+    STEALTH_HOST_PROBE_TEST_MODE=1
+    IMAGE_ROOT="$IMAGE_ROOT"
+    DRY_RUN=1
+    TPM=0
+    HOST_TUNE=0
+    CPU_ISOLATE=0
+    QEMU_CAP_CHECK=0
+    STRICT_HARDWARE=1
+    STEALTH_KVM_AVAILABLE=1
+    STEALTH_KVM_TSC_CONTROL=0
+    STEALTH_KVM_GET_TSC_KHZ=1
+    STEALTH_KVM_TSC_KHZ=2194916
+    STEALTH_REQUIRED_TSC_MHZ=2195
+    STEALTH_HOST_CPU_VENDOR=GenuineIntel
+    STEALTH_HOST_CPU_FAMILY=6
+    STEALTH_HOST_CPU_MODEL=79
+    STEALTH_HOST_CPU_MODEL_NAME="Intel(R) Xeon(R) CPU E5-2696 v4 @ 2.20GHz"
+    STEALTH_HOST_CPU_MAX_MHZ=3700
+    STEALTH_HOST_CPU_CORES=22
+    STEALTH_HOST_CPU_ONLINE_THREADS=44
+    STEALTH_HOST_CPU_PHYS_BITS=46
+    QEMU="$QEMU_STUB"
+    QEMU_IMG=/bin/true
+)
+
+e5_default_log="$TMP_DIR/e5-default.log"
+VMATE_QEMU_STUB_MODE=good "${E5_ENV[@]}" \
+    "$START_VM" 9763 \
+    --no-sdl --no-fb-shm --no-bridge >"$e5_default_log" 2>&1 \
+    || {
+        sed -n '1,100p' "$e5_default_log" >&2
+        fail "E5-2696 v4 无参数正常池 DRY_RUN 未通过"
+    }
+grep -E 'compat-haswell-(i3-4130|i5-4570)-h81' \
+    "$e5_default_log" >/dev/null ||
+    fail "E5-2696 v4 没有选择 Haswell 家用正常池"
+grep -F 'ide-hd,bus=ide.2,unit=0' "$e5_default_log" >/dev/null ||
+    {
+        sed -n '1,100p' "$e5_default_log" >&2
+        fail "E5-2696 v4 H81/DDR3 组合没有自动切换 SATA"
+    }
+grep -F 'memory-type=0x18' "$e5_default_log" >/dev/null ||
+    fail "E5-2696 v4 正常池没有投影 DDR3"
+if grep -F 'nvme,id=nvmectl0' "$e5_default_log" >/dev/null; then
+    fail "E5-2696 v4 H81 正常池错误使用 NVMe 启动"
+fi
+[[ ! -e "$IMAGE_ROOT/vms/9763/profile" ]] ||
+    fail "E5 正常池 DRY_RUN 写入了 profile"
+
 success_log="$TMP_DIR/success.log"
 VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
     "$START_VM" 9752 \
     --allow-platform-compatibility \
     --no-sdl --no-fb-shm --no-bridge >"$success_log" 2>&1 \
     || fail "自动 AMD compatibility DRY_RUN 未通过"
-grep -E 'amd-am4-r3-(1200|2300x)-asus-prime-b350-plus' "$success_log" >/dev/null \
+grep -F 'amd-am4-r3-1200-asus-prime-b350-plus' "$success_log" >/dev/null \
     || fail "自动选择没有得到与 AMD 宿主匹配的 compatibility 平台"
 [[ ! -e "$IMAGE_ROOT/vms/9752/profile" && ! -e "$IMAGE_ROOT/vms/9752/disk.qcow2" ]] \
     || fail "compatibility DRY_RUN 写入了 profile 或磁盘"
+
+# B350 的 M.2 lane 取决于 CPU：Athlon 200GE 只能协商 Gen3 x2，
+# Ryzen 3 1200 则是 Gen3 x4；两者不能继续共用同一个 root-port 几何。
+for household_id in \
+    compat-zen-athlon-200ge-b350 \
+    compat-zen-ryzen3-1200-b350; do
+    lane_log="$TMP_DIR/${household_id}.log"
+    VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
+        STEALTH_HOST_PROBE_TEST_MODE=1 \
+        STEALTH_HOST_CPU_FAMILY=25 STEALTH_HOST_CPU_MODEL=1 \
+        "$START_VM" 9764 \
+        --platform-id="$household_id" --allow-platform-compatibility \
+        --cpus=4 --no-sdl --no-fb-shm --no-bridge >"$lane_log" 2>&1 ||
+        fail "$household_id DRY_RUN 未通过"
+done
+grep -F 'x-speed=8,x-width=2' \
+    "$TMP_DIR/compat-zen-athlon-200ge-b350.log" >/dev/null ||
+    fail "Athlon 200GE 未投影 PCIe 3.0 x2 M.2"
+grep -F 'x-speed=8,x-width=4' \
+    "$TMP_DIR/compat-zen-ryzen3-1200-b350.log" >/dev/null ||
+    fail "Ryzen 3 1200 未投影 PCIe 3.0 x4 M.2"
 
 # 长 ID 仍是可选的高级固定器，便于测试或运维明确指定目标；日常启动不需要记忆。
 VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
@@ -74,6 +148,8 @@ persisted_profile="$IMAGE_ROOT/vms/9753/profile"
 mkdir -p "$(dirname "$persisted_profile")"
 (
     source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/fixtures/catalog-cpu-preflight-stub.sh"
     export STRICT_HARDWARE=1
     export ALLOW_PLATFORM_COMPATIBILITY=1
     export STEALTH_PLATFORM_ID="$PLATFORM_ID"
@@ -272,7 +348,7 @@ reroll_hash_after="$(sha256sum "$persisted_profile")"
     || fail "reroll 在磁盘门禁失败前覆盖了旧 profile"
 rm -f "$IMAGE_ROOT/vms/9753/disk.qcow2"
 
-mismatched_platform=amd-am4-r3-2300x-asus-prime-b350-plus
+mismatched_platform=intel-lga1151-i3-9100f-asus-prime-h310m-a-r2
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
     "$START_VM" 9753 \
     --platform-id="$mismatched_platform" \
@@ -372,18 +448,17 @@ grep -F '无可用整机平台' "$TMP_DIR/no-allow-auto.log" >/dev/null \
 grep -F '请追加 --allow-platform-compatibility' "$TMP_DIR/no-allow-auto.log" >/dev/null \
     || fail "存在可用 compatibility 平台时没有提示 allow 参数"
 
-# 若宿主约束连 compatibility 也无法满足，追加 allow 不会解决问题，此时不能给出
-# 误导性建议。用频率明显不足的 Intel 宿主视图覆盖 COMMON_ENV 中的 AMD 值。
+# household 目录允许在 Guest 中按固定消费级型号降频执行；即使宿主自报最大频率
+# 很低，未授权路径也必须给出 allow 提示，保证始终存在明确的型号兜底入口。
 if VMATE_QEMU_STUB_MODE=good "${COMMON_ENV[@]}" \
     STEALTH_HOST_CPU_VENDOR=GenuineIntel STEALTH_HOST_CPU_MAX_MHZ=1000 \
     "$START_VM" 9762 \
     --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/no-compatible-fallback.log" 2>&1; then
-    fail "不满足任何平台约束的宿主错误选中了整机平台"
+    fail "未授权的低频宿主错误选中了 compatibility 平台"
 fi
-if grep -F -- '--allow-platform-compatibility' \
-    "$TMP_DIR/no-compatible-fallback.log" >/dev/null; then
-    fail "没有可用 compatibility 平台时给出了无效 allow 建议"
-fi
+grep -F -- '--allow-platform-compatibility' \
+    "$TMP_DIR/no-compatible-fallback.log" >/dev/null \
+    || fail "低频宿主没有得到 household 型号兜底的 allow 提示"
 
 unknown_id=amd-am4-r3-9999x-does-not-exist
 if "${COMMON_ENV[@]}" "$START_VM" 9752 \

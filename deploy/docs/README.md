@@ -1,8 +1,8 @@
 # VMate 部署文档
 
-> 当前维护基线：QEMU `11.0.2`，分支 `vmate`，硬件目录修订日期
-> `2026-07-13`。`vmate` 是仓库分支名；QEMU 可执行文件、QMP/QGA 协议和设备模型名称
-> 继续沿用上游名称。
+> 当前维护基线：QEMU `11.0.2`，分支 `V-11`，硬件目录修订日期
+> `2026-07-19`。`V-11` 与 `G-11` 是独立分支；QEMU 可执行文件、QMP/QGA 协议和
+> 设备模型名称继续沿用上游名称。
 
 VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 GPU 硬件身份高度一致，
 但底层仍是 Q35/ICH9/QEMU 设备行为的条件可用方案**。它通过有限、可审计的整机和组件目录
@@ -29,31 +29,50 @@ VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 
   Q35 machine 行为边界和两个启动器实际生成的 BDF。
 - [`deploy/hardware/components.json`](../hardware/components.json)：NVMe、显示器 EDID、键盘、
   鼠标和通用绝对指针模板。
-- 每台 VM 的 `vms/<N>/profile`：从上述目录选出整套事实后，持久化平台 ID、目录修订号、
-  UUID、MAC 和序列号；字段见 [Profile 字段](PROFILE-FIELDS.md)。
+- [`deploy/hardware/household-compatibility.json`](../hardware/household-compatibility.json)：
+  Linux 家用跨代候选与完整 CPU/主板/内存事实。
+- [`deploy/hardware/storage-compatibility.json`](../hardware/storage-compatibility.json)：
+  不支持 NVMe 启动的平台使用的 SATA 启动盘组合。
+- [`deploy/hardware/host-compatibility.json`](../hardware/host-compatibility.json)：
+  Linux/KVM 的显式宿主兼容模板和 Windows 未来恢复该能力时的共享格式。Windows
+  当前不能兑现完整 CPUID/TSC 绑定及等价 WHPX realize，因此启动器 fail-closed。
+- 每台 VM 的 Linux `vms/<N>/profile` 或 Windows `hardware-profile.json`：从上述
+  目录选出整套事实后持久化平台 ID、目录修订号、UUID、MAC 和序列号。两种格式目前
+  不能跨宿主直接互换；Linux 字段见 [Profile 字段](PROFILE-FIELDS.md)，Windows
+  边界见 [Windows 打包与启动](WINDOWS-PACKAGING.md)。
 
 旧的独立 CPU/主板/BIOS 随机池和“十款 NVMe/显示器/HID 任意组合”不再是当前实现。
 型号数量少是有意设计：一个行为和深层字段能对齐的完整模板，比多个只替换字符串的模板可信。
 
 ## 当前启用整机
 
-新 profile 只从 `enabled=true` 且 `status=supported` 的整机 bundle 中选择。这里的
+新 profile 优先从已启用且 `status=supported` 的主清单或 household registry
+整机 bundle 中选择。这里的
 `supported` 严格表示“通过运行时宿主门禁后可成为启动器候选”，不表示 Q35 machine、
 PCI BDF、寄存器或 PCH 行为与目标 H110/H310 等价：
 
 | Platform ID | CPU | 主板 / PCH | 内存 | 状态 |
 |---|---|---|---|---|
 | `intel-lga1151-i3-9100f-asus-prime-h310m-a-r2` | i3-9100F，4C/4T | ASUS PRIME H310M-A R2.0 / H310 | DDR4，2/4/8 GiB | 启用候选；Q35 identity compatibility |
+| `intel-lga1151-celeron-g4900-asus-prime-h310m-a-r2` | G4900，2C/2T | ASUS PRIME H310M-A R2.0 / H310 | DDR4，2/4/8 GiB | 启用候选；Q35 identity compatibility |
+| `intel-lga1151-pentium-g5400-asus-prime-h310m-a-r2` | G5400，2C/4T | ASUS PRIME H310M-A R2.0 / H310 | DDR4，2/4/8 GiB | 启用候选；Q35 identity compatibility |
 | `intel-lga1151-i5-6400t-asus-h110m-a-m2` | i5-6400T，4C/4T | ASUS H110M-A/M.2 / H110 | DDR4，2/4/8 GiB | 启用候选；Q35 identity compatibility |
+| `compat-haswell-g3220-h81` | G3220，2C/2T | ASUS H81M-K / H81 | DDR3，2/4/8 GiB | E5 v3/v4 默认正常池；Q35 identity compatibility |
+| `compat-haswell-i3-4130-h81` | i3-4130，2C/4T | ASUS H81M-K / H81 | DDR3，2/4/8 GiB | E5 v3/v4 默认正常池；Q35 identity compatibility |
+| `compat-haswell-i5-4570-h81` | i5-4570，4C/4T | ASUS H81M-K / H81 | DDR3，2/4/8 GiB | E5 v3/v4 默认正常池；Q35 identity compatibility |
 
-两个 Ryzen 3 + PRIME B350-PLUS 条目仅保留为 `compatibility`，默认禁用。当前 machine type
+三个 H81 条目保留历史 `compat-` ID 以兼容已有 profile；授权依据 registry 中的
+`PLATFORM_STATUS=supported`，不依据 ID 文本。旧 revision 的同 ID
+`compatibility` profile 会在内存中单向提升，文件不会被改写。
+
+Ryzen 3 1200 + PRIME B350-PLUS 条目仅保留为 `compatibility`，默认禁用。当前 machine type
 仍是 Intel Q35/ICH9；只改成 AMD PCI ID 不能得到 B350 行为，因此 AMD 宿主在严格模式下
 默认没有可用新建候选，也不会静默回退到伪 AMD 整机。需要先安装/功能验证时，可显式
 使用 `--allow-platform-compatibility`。启动器按宿主 CPU vendor、`CPUS`、最大频率和
 TSC 约束自动匹配：始终优先选择 `supported`，只在没有可用 `supported` 候选时回退到
 `compatibility`。已有 profile 继续复用持久化的 `PLATFORM_ID`；`--platform-id` 仅作高级固定或
 一致性断言。该窄入口不会把 `STRICT_HARDWARE` 改成 `0`，仍继续执行 KVM/TSC、
-CPU realize、profile、磁盘，以及请求 `TPM=1` 时的 TPM 严格门禁，只接受整机
+CPU realize、profile、磁盘，以及平台自动启用或请求 `TPM=1` 时的 TPM 严格门禁，只接受整机
 machine fidelity 不完整。
 若没有 `supported` 匹配，但宿主确实能匹配某个 `compatibility` 模板，启动器会明确
 提示追加 `--allow-platform-compatibility`；若该 allow 也无法找到候选，则不会误导性地给出此提示。
@@ -62,25 +81,30 @@ machine fidelity 不完整。
 
 | 类别 | 唯一启用模板 | 关键约束 |
 |---|---|---|
-| NVMe | Samsung SSD 970 PRO 512GB | `144d:a804`、subsystem `144d:a801`、`1B2QEXP7`、512110190592 B、Gen3 x4 |
-| 显示器 | Samsung S24F350 | `SAM/0F65`、530×300 mm、制造周/年、频率范围和第二时序成套绑定 |
-| 键盘 | Microsoft Wired Keyboard 600 | `045e:0750`、`bcdDevice=0163`、固定描述符、不暴露序列号 |
-| 鼠标 | Microsoft USB Optical Mouse | `045e:00cb`、`bcdDevice=0163`、固定描述符、不暴露序列号 |
+| NVMe | Samsung SSD 970 PRO 512GB | 型号/容量/Gen3 x4 有官方数据表；寄存器参考为 `144d:a804`、subsystem `144d:a801`，明确标记缺实机 capture；NQN 使用标准 UUID 格式 |
+| 显示器 | Samsung S24F350 | 官方 521×293 mm、56–75 Hz、30–81 kHz；产品码/制造时间/序列前缀明确标为合成 EDID 身份 |
+| 键盘 | Microsoft Wired Keyboard 600 | `045e:0750`、`bcdDevice=0163`；只绑定品牌身份，report descriptor 仍是通用实现；不暴露序列号 |
+| 鼠标 | Microsoft USB Optical Mouse | `045e:00cb`、`bcdDevice=0163`；只绑定品牌身份，report descriptor 仍是通用实现；不暴露序列号 |
 | 绝对指针 | QEMU USB Tablet | `0627:0001`，明确为通用虚拟设备，不冒充品牌数位板 |
 
 组件型号本身不再随机；每台 VM 仍会生成并持久化 UUID、MAC、主板/系统/机箱/CPU/DIMM、
 NVMe 和 EDID 序列号。键鼠模板声明不暴露 USB serial，profile 内的稳定派生值不会送进描述符。
+新 VM 的活动 DIMM 池包含 Samsung、Kingston、Crucial 三组 DDR4-2400，以及供
+Sandy/Ivy/Haswell household bundle 使用的 Kingston、SK hynix DDR3-1333/1600。
+缺精确料号或修订证据的 Hynix DDR4 和 Crucial DDR3 位于 quarantine，不会被严格
+profile 或随机选择接受。
 
 ## 严格启动链
 
 Linux 启动器默认按以下顺序 fail closed：
 
 1. 检查 patched QEMU、KVM 和 TSC 能力。
-2. 按宿主 CPU 厂商、完整 4 线程 SKU、宿主最大频率和 TSC 约束选择整机 bundle。
+2. 按宿主 CPU 厂商、目标 SKU 的完整 2/4 线程拓扑、宿主最大频率和 TSC 约束选择整机 bundle。
 3. 用实际 QEMU/KVM 和 `enforce=on` 创建最小 vCPU，拒绝 warning、unsupported 或失败。
 4. 校验 profile 的 platform/component schema、目录修订号及每个绑定字段。
-5. 校验 qcow2 的 guest 可见虚拟容量等于 `NVME_SIZE_BYTES`。
-6. 默认 `TPM=1`；严格模式下 swtpm、状态初始化或 socket 失败都会停止。
+5. 校验 qcow2 的 guest 可见虚拟容量等于实际启动盘的 `BOOT_STORAGE_SIZE_BYTES`。
+6. 默认 `TPM=auto`，按主板 profile 选择支持状态、1.2/2.0 和 TIS/CRB；严格模式下
+   swtpm、状态初始化、state 绑定或 socket 失败都会停止。`TPM=0` 可显式关闭。
 7. 组装单 guest NUMA node；DIMM 数和双通道只通过 SMBIOS/SPD 表达。
 
 `STRICT_HARDWARE=0` 仅用于开发和兼容诊断，不代表真机化验收结果。旧 profile 即使在
@@ -92,11 +116,11 @@ Linux 启动器默认按以下顺序 fail closed：
 
 | 硬件面 | 可见身份 | 行为边界 |
 |---|---|---|
-| CPU/SMBIOS/内存 | 平台字段、拓扑、Type 0/1/2/3/4/16/17；DIMM 额定/配置速率分离，256B SPD 的密度几何与 tRFC 可成套校验 | cache、MSR、微码、性能和时序仍受宿主及 KVM 限制；SPD 不是完整 EE1004/品牌 raw dump |
+| CPU/SMBIOS/内存 | 平台字段、拓扑、Type 0/1/2/3/4/16/17；DIMM 额定/配置速率分离；DDR4 使用 512B EE1004 与 0x36/0x37 页选择，并把硬件目录中的品牌、料号和唯一序列号投影到 SPD page 1 | cache、MSR、微码、性能和时序仍受宿主及 KVM 限制；SPD 是按目录字段生成的标准数据，不是具体 DIMM 的原始 raw dump/XMP |
 | 芯片组/PCIe/xHCI | vendor/device/revision/subsystem 与链路可注入 | 实现仍是 Q35/ICH9/QEMU 控制器；Linux 为 root port `00:01.0`–`00:04.0`、HDA `00:05.0`，Windows 少一个空端口、HDA 为 `00:04.0`，均不承诺 H110/H310 BDF/silicon 等价 |
 | NVMe | Identify、容量、PCI/subsystem、SubNQN 可绑定 | SMART、热管理、功耗和错误恢复仍是通用 QEMU NVMe |
 | 音频 | HDA controller 和 ALC887 codec 身份 | `protocol_identity_only`，widget、插孔和板级布线不等价 |
-| EDID/HID | 当前单一模板深层字段一致 | 只对现有固定模板负责，新增品牌必须同时实现描述符/行为 |
+| EDID/HID | EDID 型号规格成套；HID 仅绑定 VID/PID/名称 | EDID 产品码/制造信息是明确标注的合成值；键鼠 report descriptor 仍是通用实现 |
 | 显示/GPU | virtio-vga(-gl)、SDL/EGL、fb-shm 可用 | `label_only_out_of_scope`，不是 NVIDIA/AMD 物理 GPU |
 
 ## 快速开始
@@ -138,7 +162,8 @@ deploy/scripts/stop-vm.sh 1
 - `$IMAGE_ROOT/vms/<N>/disk.qcow2`：容量必须与组件模板一致的稀疏磁盘。
 - `$IMAGE_ROOT/vms/<N>/profile`：0600 硬件身份文件。
 - `$IMAGE_ROOT/vms/<N>/ovmf-vars.fd`：独立 UEFI NVRAM。
-- `$IMAGE_ROOT/vms/<N>/tpm-state/`、`tpm-sock`：独立 TPM 2.0 状态和 socket。
+- `$IMAGE_ROOT/vms/<N>/tpm-state/` 或 `tpm12-state/`、`tpm-sock`：按 profile
+  版本隔离的 TPM 状态和 socket；`platform-binding` 防止旧密钥被另一平台复用。
 - `/tmp/qemu-stealth-<N>.qmp`：QMP；`--proxy` 时启用原生 multi-client。
 - `/tmp/qemu-stealth-<N>.fb`：默认启用的 fb-shm 通道。
 
@@ -149,12 +174,16 @@ deploy/scripts/stop-vm.sh 1
 - [硬件平台、E5/X99 与兼容性评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)：当前结论和验收矩阵。
 - [Profile 字段](PROFILE-FIELDS.md)：schema、目录绑定、字段和 fidelity。
 - [操作参考](USAGE.md)：Linux 构建、启动、网络、调优和验收命令。
+- [开发与跨平台验证依赖](DEVELOPMENT-DEPENDENCIES.md)：Ubuntu 运行、构建、固件、
+  完整回归和 Windows 工件的分组依赖与自检。
 - [可移植性](PORTABILITY.md)：迁移 `IMAGE_ROOT`、QEMU 路径和宿主能力。
 - [验证](VERIFY.md)：静态与客体侧核对入口。
 - [fb-shm GPU 导出](FB-SHM-GPU-ZEROCOPY.md)：跨平台 handle、同步协议与回退边界。
 - [Windows 打包与启动](WINDOWS-PACKAGING.md)：Windows/WHPX 路线。
 - [Guest GPU 浅层工作流](STEALTH-WORKFLOW.md)：当前 `1AF4:1050`、stock VioGpuDod 与
-  双架构系统 NVAPI 的唯一受支持流程。
+  系统厂商 API 的唯一受支持流程。
+- [GPU 厂商 API 系统兼容层](GPU-VENDOR-API.md)：NVIDIA NVAPI、AMD ADL、统一身份
+  读取合同、跨组件事务和能力边界。
 - [GPU 身份方案边界](STEALTH-APPROACHES.md)：当前浅层实现、3D 能力边界与历史方案差异。
 - [ACE 浅层边界](ACE-SHALLOW-STEALTH.md)：不使用自签名、EfiGuard 或内核伪装的约束。
 

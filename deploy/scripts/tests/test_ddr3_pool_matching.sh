@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# DDR3 物料仍用于读取历史 profile，但当前 Q35 平台层不能可信表达 AM3/AM3+、
-# FM2+ 或 LGA1155 整机。因此本测试确保 DDR3 不会重新泄漏到新 VM 随机池。
+# DDR3 物料供显式 household compatibility 整机使用；默认 enabled 平台仍必须
+# 保持 DDR4。测试同时阻止 DDR3 跨 socket 泄漏到 LGA1151/AM4。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,16 +13,13 @@ fail() {
 
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
 
-is_known_memory_product_pair() {
+is_known_active_memory_product_pair() {
     local key="$1|$2|$3|$4"
     case "$key" in
-        "Crucial|CT2G4DFS6266|CT4G4DFS8266|2666" \
-        |"Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400" \
+        "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400" \
         |"Kingston|KVR24N17S6/2|KVR24N17S8/4|2400" \
         |"Crucial|CT2G4DFS624A|CT4G4DFS824A|2400" \
-        |"SK hynix|HMA425U6AFR6N-UH|HMA851U6AFR6N-UH|2400" \
         |"Kingston|KVR16N11S6/2|KVR16N11S8/4|1600" \
-        |"Crucial|CT25664BA160B|CT51264BA160B|1600" \
         |"SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600" \
         |"Kingston|KVR13N9S6/2|KVR13N9S8/4|1333")
             return 0 ;;
@@ -48,22 +45,43 @@ for row in "${BOARD_POOL[@]}"; do
     esac
 done
 
-# 历史 profile 仍可能引用这些真实 DIMM part，因此物料目录不能在迁移期间被删掉，
-# 同时也不能混入未经核验的自造容量。
-ddr3_material_count=0
+# 活动池只允许六组有型号级依据的 DDR4/DDR3。DDR3 只绑定老家用 socket，
+# 不会被默认 LGA1151/AM4 bundle 抽到。
+active_count=0
 for row in "${MEM_POOL[@]}"; do
     fields="$(awk -F'|' '{print NF}' <<<"$row")"
-    (( fields == 5 )) || fail "MEM_POOL 必须是 5 字段: $row"
-    IFS='|' read -r mfr part_2g part_4g rated sockets <<<"$row"
+    (( fields == 9 )) || fail "MEM_POOL 必须是 9 字段: $row"
+    IFS='|' read -r mfr part_2g part_4g rated sockets \
+        rank_2g width_2g rank_4g width_4g <<<"$row"
     [[ "$rated" =~ ^[0-9]+$ && -n "$sockets" ]] || fail "内存速率/socket 无效: $row"
-    is_known_memory_product_pair "$mfr" "$part_2g" "$part_4g" "$rated" \
+    [[ "$rank_2g" =~ ^[1-4]$ && "$rank_4g" =~ ^[1-4]$ ]] \
+        || fail "内存 rank 无效: $row"
+    [[ "$width_2g" =~ ^(4|8|16)$ && "$width_4g" =~ ^(4|8|16)$ ]] \
+        || fail "内存 device-width 无效: $row"
+    is_known_active_memory_product_pair "$mfr" "$part_2g" "$part_4g" "$rated" \
         || fail "MEM_POOL 包含未核验型号: $row"
-    if [[ ",$sockets," == *",AM3,"* || ",$sockets," == *",AM3+,"* \
-        || ",$sockets," == *",FM2+,"* || ",$sockets," == *",LGA1155,"* ]]; then
-        ddr3_material_count=$((ddr3_material_count + 1))
+    if (( rated <= 1600 )); then
+        [[ ",$sockets," != *",AM4,"* && ",$sockets," != *",LGA1151,"* &&
+           ",$sockets," != *",LGA1200,"* ]] \
+            || fail "DDR3 物料错误绑定到 DDR4 socket: $row"
+    fi
+    active_count=$((active_count + 1))
+done
+(( active_count == 6 )) || fail "活动内存池应为三组 DDR4 + 三组 DDR3"
+
+# 三组已核验 DDR3 已因家用 compatibility bundle 转为活动物料。
+(( ${#MEM_DORMANT_POOL[@]} == 0 )) || fail "DDR3 不应继续留在 dormant 目录"
+
+# 两组证据不足项必须明确隔离，不能被 geometry/strict contains 当成活动目录。
+(( ${#MEM_QUARANTINED_POOL[@]} == 2 )) || fail "quarantine 目录数量错误"
+for row in "${MEM_QUARANTINED_POOL[@]}"; do
+    IFS='|' read -r mfr part_2g part_4g rated _ \
+        rank_2g width_2g rank_4g width_4g <<<"$row"
+    if stealth_memory_catalog_contains "$mfr" "$part_2g" "$part_4g" "$rated" \
+        "$rank_2g" "$width_2g" "$rank_4g" "$width_4g"; then
+        fail "quarantine 内存被活动目录接受: $row"
     fi
 done
-(( ddr3_material_count >= 4 )) || fail "历史 DDR3 物料被意外删除"
 
 # 当前所有可随机 bundle 都必须明确报告 DDR4；compatibility AMD 条目也使用 DDR4，
 # 但因为 enabled=false 不进入 CPU_POOL。
@@ -75,4 +93,4 @@ for row in "${PLATFORM_POOL[@]}"; do
         || fail "enabled 平台不是 DDR4 1.2V: $platform_id"
 done
 
-echo "OK: DDR3 legacy materials are isolated from enabled platforms"
+echo "OK: DDR3 household materials remain isolated from default enabled platforms"

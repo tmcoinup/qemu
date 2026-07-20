@@ -7,10 +7,17 @@
 新 profile 的事实源只有：
 
 - [`deploy/hardware/platforms.json`](../hardware/platforms.json)：整机平台。
+- [`deploy/hardware/household-compatibility.json`](../hardware/household-compatibility.json)：
+  E5/AMD 宿主可塑造的家用 CPU 完整兼容组合。
+- [`deploy/hardware/host-compatibility.json`](../hardware/host-compatibility.json)：
+  仅限 2C2T/2C4T/4C4T 家用物理宿主的 generic Q35 host 模板。
 - [`deploy/hardware/components.json`](../hardware/components.json)：NVMe、EDID 和 USB HID。
+- [`deploy/hardware/storage-compatibility.json`](../hardware/storage-compatibility.json)：
+  无原生 NVMe boot 的老主板可用的消费级 SATA 启动盘完整组合。
 
-当前两份 manifest 都是 schema 1；目录修订号分别为 `2026-07-13.4` 和
-`2026-07-13.1`。修订号是 profile 绑定的一部分，不应手工伪造。
+当前目录都是 schema 1；整机为 `2026-07-19.6`，household 为
+`2026-07-19.6`，组件为 `2026-07-19.3`，SATA 启动盘为 `2026-07-19.1`。
+修订号用于绑定或迁移诊断，不应手工伪造。
 
 ## 格式与安全
 
@@ -19,8 +26,9 @@ profile 是每行一个 `KEY=VALUE` 的受限数据文件，不是 shell 脚本�
 - 保存器只写白名单字段，使用临时文件原子替换，并将权限设为 0600。
 - 加载器逐行解析，不 `source`、不 `eval`；未登记 key 会跳过。
 - 包含命令替换、反引号或参数展开构造的值会被拒绝。
-- `STRICT_HARDWARE=1` 时，schema、目录修订号、平台/组件 ID 以及事实字段必须与当前
-  manifest 完全一致；缺字段、篡改和 legacy profile 都会失败。
+- `STRICT_HARDWARE=1` 时，schema、平台/组件 ID 及其事实字段必须按对应 manifest
+  重建校验；缺字段、篡改和未授权 legacy profile 都会失败。SATA 目录修订号仅用于
+  诊断/迁移，扩池不会使已持久化且条目事实未变的旧 VM 失效。
 
 序列号类字段允许每实例不同；平台事实字段不能脱离其 bundle 单独更改。profile 变化还可能
 触发 Windows 激活或设备重枚举，生产环境不要直接编辑。
@@ -32,20 +40,44 @@ profile 是每行一个 `KEY=VALUE` 的受限数据文件，不是 shell 脚本�
 | `PLATFORM_SCHEMA_VERSION` | 整机 manifest schema；当前为 `1` |
 | `PLATFORM_CATALOG_REVISION` | `platforms.json` 修订号 |
 | `PLATFORM_ID` | 被选中的完整整机 bundle ID |
-| `PLATFORM_STATUS` | 默认新 profile 优先选择 `supported`；显式 allow 授权后可在无 supported 候选时持久化 `compatibility`，但不表示目标 PCH machine/BDF 等价 |
+| `PLATFORM_STATUS` | E5 v3/v4 的 Haswell 家用正常池及普通启用整机为 `supported`；其余候选需显式 allow 才可持久化 `compatibility`。两种状态都不表示目标 PCH machine/BDF 等价 |
 | `PLATFORM_RELEASE_YEAR` | 整机模板年代约束 |
+| `PLATFORM_CPU_SOURCE` | `manifest`、`named-household-compatibility` 或受限 `host-passthrough` |
+| `PLATFORM_MACHINE_MODEL`、`PLATFORM_IDENTITY_SCOPE`、`PLATFORM_DEVICE_IDENTITY_SCOPE`、`PLATFORM_SMBIOS_POLICY` | Q35、SMBIOS 和设备身份的实现边界 |
+| `PLATFORM_HOST_CLASSES` | household 候选允许的 E5 v1-v4/K10/Zen 宿主类 |
+| `PLATFORM_BOOT_STORAGE_POOL_ID` | 平台绑定的启动盘池；当前为 `component-nvme` 或 `samsung-sata-pro-512gb` |
+| `PLATFORM_BOOT_STORAGE` | 主板能力决定的实际启动总线：`nvme` 或 `sata-ahci` |
+| `PLATFORM_BOOT_MODEL`、`PLATFORM_BOOT_FIRMWARE` | 平台策略标记；NVMe 为 `component`，SATA 为 `storage-compatibility-pool`，不是 Guest 可见型号/固件 |
+| `PLATFORM_STORAGE_SWITCH_REQUIRED`、`NVME_ROLE` | 是否必须切换到 SATA，以及 NVMe 是 boot 或 data-only |
 | `COMPONENT_SCHEMA_VERSION` | 组件 manifest schema；当前为 `1` |
 | `COMPONENT_CATALOG_REVISION` | `components.json` 修订号 |
 
-当前启用的 `PLATFORM_ID` 只有：
+TPM 也是整机平台事实，不再由启动器固定成同一种设备：
 
+| 字段 | 含义 |
+|---|---|
+| `TPM_CAPABILITY` | 主板能力：`firmware`、`discrete` 或 `none` |
+| `TPM_SUPPORTED` | 当前平台是否支持 TPM，保存为 `1`/`0` |
+| `TPM_IMPLEMENTATION` | `intel-ptt`、`amd-ftpm`、`discrete-module` 或 `none` |
+| `TPM_VERSION` | 客体应看到的 `1.2`、`2.0` 或 `none` |
+| `TPM_FRONTEND` | QEMU 前端：`tpm-tis`、`tpm-crb` 或 `none` |
+| `TPM_PCR_BANKS` | 逗号分隔 PCR bank；TPM 1.2 仅允许 `sha1` |
+
+新 profile 会持久化以上六项并参与 manifest 事实校验。升级前已经存在的 schema-1
+profile 若六项全部缺失，加载器只按同一个 `PLATFORM_ID` 从已校验目录补齐；若只缺一部分，
+则按截断或篡改处理并拒绝。`TPM=auto` 只决定本次是否启用平台声明的 TPM，不会改写这些事实。
+
+当前启用的 `PLATFORM_ID` 有：
+
+- `intel-lga1151-celeron-g4900-asus-prime-h310m-a-r2`
+- `intel-lga1151-pentium-g5400-asus-prime-h310m-a-r2`
 - `intel-lga1151-i3-9100f-asus-prime-h310m-a-r2`
 - `intel-lga1151-i5-6400t-asus-h110m-a-m2`
 
-AMD/B350 条目为禁用的 `compatibility` 资料，不进入默认候选池。显式传入
-`--allow-platform-compatibility` 后，启动器按宿主 CPU vendor、`CPUS`、最大频率和 TSC
-约束自动匹配：优先使用 `supported`，仅在没有可用 `supported` 候选时回退到
-`compatibility`。已有 profile 复用其 `PLATFORM_ID`；`--platform-id` 可选，只用于高级固定
+AMD/B350 与独立 household 条目为 `compatibility`，不进入默认候选池。显式传入
+`--allow-platform-compatibility` 后，启动器按宿主 vendor、CPUID 代际和完整拓扑匹配：
+优先使用 `supported`，仅在没有可用正常候选时回退。已有 profile 复用其
+`PLATFORM_ID`；`--platform-id` 可选，只用于高级固定
 或一致性断言。allow 不会把 `STRICT_HARDWARE` 改成 `0`，也不会关闭 KVM/TSC、
 CPU realize、组件绑定、磁盘，或请求 `TPM=1` 时的 TPM 严格门禁。
 
@@ -56,7 +88,7 @@ CPU realize、组件绑定、磁盘，或请求 `TPM=1` 时的 TPM 严格门禁�
 | `CPU_QEMU_ARG` | manifest 中的 QEMU named-model、family/model/stepping 和 model-id 前缀 |
 | `CPU_MODEL` | `CPU_QEMU_ARG` 的模型主名，用于摘要和兼容逻辑 |
 | `CPU_VENDOR`、`CPU_NAME` | CPUID vendor 与品牌串；映射到客体处理器名称 |
-| `CPU_CORES`、`CPU_THREADS` | 完整 SKU 拓扑；当前均为 4C/4T，`CPUS` 必须等于完整线程数 |
+| `CPU_CORES`、`CPU_THREADS` | 完整 SKU 拓扑；只允许 2C2T、2C4T、4C4T，`CPUS` 必须等于完整线程数 |
 | `CPU_MAX_MHZ`、`CPU_CUR_MHZ` | SMBIOS Type 4 最大/当前频率 |
 | `CPU_TSC_MHZ` | 目标 invariant TSC；受 KVM TSC scaling/实测频率硬约束 |
 | `CPU_PHYS_BITS` | 客体物理地址位数 |
@@ -69,6 +101,7 @@ CPU realize、组件绑定、磁盘，或请求 `TPM=1` 时的 TPM 严格门禁�
 | `CPU_SMBIOS_EXT_CLOCK` | SMBIOS Type 4 external clock，单位 MHz |
 | `CPU_SMBIOS_CHARACTERISTICS` | SMBIOS Type 4 characteristics 位图 |
 | `CPU_IGPU_PRESENT`、`CPU_IGPU_STATE`、`CPU_IGPU_MODEL` | 核显是否存在、熔断/BIOS 禁用状态和型号 |
+| `CPU_HOST_FAMILY`、`CPU_HOST_MODEL`、`CPU_HOST_STEPPING`、`CPU_HOST_CORES`、`CPU_HOST_ONLINE_THREADS`、`CPU_HOST_PHYS_BITS`、`CPU_HOST_TSC_KHZ`、`CPU_HOST_FINGERPRINT` | 仅 host-passthrough profile 使用的当前宿主强绑定；任一变化都拒绝重载 |
 | `CPU_SERIAL`、`CPU_ASSET` | 每实例持久化的 Type 4 serial/asset tag |
 
 宿主厂商、最大频率和 TSC 只是候选过滤。严格启动还会用最终 `-cpu` 串和 `enforce=on`
@@ -131,30 +164,63 @@ H110/H310 固定功能布局”。
 `protocol_identity_only` 表示只对协议身份和主要枚举字段负责，不承诺真实 ALC887 widget、
 插孔检测、放大器、板级布线或声音路径。
 
-## NVMe 与磁盘容量
+## 启动盘、SATA/NVMe 与磁盘容量
 
-平台提供连接能力，组件提供具体物料，二者会同时校验：
+平台只提供连接和启动能力，具体 Guest 可见启动盘由独立组件绑定。启动器根据主板
+`NVME_BOOT_SUPPORTED` 自动选择路径：值为 `1` 时使用 NVMe；值为 `0` 时切换到
+SATA/AHCI，不根据宿主或 Guest CPU 名称猜测存储能力。
 
 | 字段组 | 字段 | 含义 |
 |---|---|---|
 | 平台 M.2 | `NVME_MAX_PCIE_GENERATION`、`NVME_LANES` | 主板插槽最大 PCIe 代际/通道数 |
 | 平台 M.2 | `NVME_BOOT_SUPPORTED`、`NVME_ATTACHMENT` | 是否可启动及 `m2_socket` 连接方式 |
+| 启动盘目录 | `BOOT_STORAGE_CATALOG_REVISION`、`BOOT_STORAGE_COMPONENT_ID` | 所选启动盘目录修订号与稳定条目 ID |
+| 启动盘物料 | `BOOT_STORAGE_MANUFACTURER`、`BOOT_STORAGE_MODEL`、`BOOT_STORAGE_PART_NUMBER` | Guest 可见厂商/型号及对应零售料号 |
+| 启动盘 Identify | `BOOT_STORAGE_FIRMWARE`、`BOOT_STORAGE_SERIAL` | Guest 可见固件与每实例独立持久化序列号 |
+| 启动盘几何 | `BOOT_STORAGE_SIZE_BYTES`、`BOOT_STORAGE_INTERFACE` | qcow2 guest-visible 容量与实际接口 |
 | 组件绑定 | `NVME_COMPONENT_ID` | 当前唯一为 `samsung-970-pro-512gb` |
 | Identify | `NVME_MODEL`、`NVME_FIRMWARE`、`NVME_SERIAL` | 当前型号、固件 `1B2QEXP7` 和每实例 serial |
-| 容量 | `NVME_SIZE_BYTES` | 当前 `512110190592`；必须等于 qcow2 guest-visible virtual-size |
+| 容量 | `NVME_SIZE_BYTES` | 当前 NVMe component 容量为 `512110190592`；仅在 NVMe 作为启动盘时等于 qcow2 virtual-size |
 | PCI | `NVME_PCI_VEN`、`NVME_PCI_DEV` | 当前 `144d:a804` |
 | PCI subsystem | `NVME_SUBSYS_VEN`、`NVME_SUBSYS_DEV` | 当前 `144d:a801` |
-| NQN | `NVME_SUBNQN_TEMPLATE`、`NVME_SUBNQN` | Samsung 模板和代入 serial 后的最终 SubNQN |
+| NQN | `NVME_SUBNQN_TEMPLATE`、`NVME_SUBNQN` | NVMe 标准 UUID 模板和代入持久 UUID 后的最终 SubNQN；不冒用厂商域名命名权 |
 
-主板链路能力可以低于 SSD 的 Gen3 x4 额定能力，例如 H310 模板为 Gen2 x2；这是可解释的
-降速连接。不能把 970 PRO 的字符串与其它控制器 PCI ID、容量或固件混用。
+原生 NVMe 路径的 `BOOT_STORAGE_*` 与同一 `NVME_*` component 镜像并交叉校验。
+主板链路能力可以低于 SSD 的 Gen3 x4 额定能力，例如 H310 模板为 Gen2 x2；这是
+可解释的降速连接。不能把 970 PRO 的字符串与其它控制器 PCI ID、容量或固件混用。
+
+无原生 NVMe boot 的 H61/B75/H81/AM3 平台从 `samsung-sata-pro-512gb` 池等概率选择
+一个完整组合：
+
+| ID | Guest 型号 | 料号 | 固件 | 接口 / 容量 |
+|---|---|---|---|---|
+| `samsung-840-pro-512gb-sata` | Samsung SSD 840 PRO 512GB | `MZ-7PD512BW` | `DXM06B0Q` | SATA 6 Gb/s / `512110190592` |
+| `samsung-850-pro-512gb-sata` | Samsung SSD 850 PRO 512GB | `MZ-7KE512BW` | `EXM04B6Q` | SATA 6 Gb/s / `512110190592` |
+| `samsung-860-pro-512gb-sata` | Samsung SSD 860 PRO 512GB | `MZ-76P512BW` | `RVM02B6Q` | SATA 6 Gb/s / `512110190592` |
+
+选择只发生在首次创建 profile 或显式 reroll；所选 ID、型号、料号、固件、容量、接口和
+独立 SATA serial 会作为 `BOOT_STORAGE_*` 原子持久化。普通重启按保存的 ID 从目录重建
+并逐字段比较，不会再次抽签。SATA QEMU 参数和磁盘容量校验不读取或复用
+`NVME_COMPONENT_ID`、`NVME_MODEL`、`NVME_FIRMWARE`、`NVME_SIZE_BYTES` 或
+`NVME_SERIAL`。
+
+独立 `BOOT_STORAGE_*` 发布前的 schema-1 profile 默认拒绝加载。只有全部新字段与
+pool ID 在原文件中都缺失、平台 revision 早于其所属目录的 cutoff，并且旧
+860 PRO/RVM02B6Q 序号/NQN 元组精确匹配时，`--migrate-storage-profile` 才允许
+只读内存迁移。旧 ATA Identify serial 会原样保留；规范化后的 NVMe 身份及全部
+启动盘目录事实仍执行当前严格绑定。加载器不会改写原 profile。
+
+三项 SATA bundle 的型号、零售料号、接口和固件来自 Samsung 官方产品/固件资料，并声明
+SATA 1.5/3/6 Gb/s 向下兼容；当前没有对应实物的 ATA IDENTIFY capture。因此 fidelity
+仅为 `vendor-document-model-and-firmware-no-device-capture`，不能把生成的 Identify
+内容描述成样机原始转储。
 
 ## 内存、DIMM、SPD 与 NUMA
 
 | 字段 | 含义 |
 |---|---|
 | `MEM_TOTAL_MB` | 持久化总内存；新 profile 默认 8192 MiB |
-| `MEM_TYPE`、`MEM_CHANNELS` | 当前 DDR4、双通道能力 |
+| `MEM_TYPE`、`MEM_CHANNELS` | 随平台选择 DDR3/DDR4；当前目录均支持双通道 |
 | `MEM_ALLOWED_TOTAL_MB` | 当前平台允许的总量：`2048,4096,8192` |
 | `MEM_MODULE_MB` | 允许的单条容量：`2048,4096` |
 | `MEM_MAX_CAPACITY_MB` | 主板最大内存容量 |
@@ -162,7 +228,9 @@ H110/H310 固定功能布局”。
 | `MEM_MFR`、`MEM_PART_2G`、`MEM_PART_4G` | DIMM 厂商及 2/4 GiB part number |
 | `MEM_RATED`、`MEM_RATED_MTS` | DIMM 料号额定 MT/s；两字段保持相等，前者仅为旧 profile 兼容名 |
 | `MEM_CONFIGURED_MTS` | 主板/CPU 训练后的实际 MT/s，必须属于平台允许集合且不高于额定值 |
-| `MEM_VOLTAGE_MV`、`MEM_RANK` | SMBIOS Type 17 电压和 rank |
+| `MEM_VOLTAGE_MV`、`MEM_RANK` | SMBIOS Type 17 电压；`MEM_RANK` 仅供旧 profile 回退 |
+| `MEM_RANK_2G`、`MEM_DEVICE_WIDTH_2G` | 2 GiB 料号核验后的 rank 和单颗 DRAM 位宽 |
+| `MEM_RANK_4G`、`MEM_DEVICE_WIDTH_4G` | 4 GiB 料号核验后的 rank 和单颗 DRAM 位宽 |
 | `MEM_SERIAL` | 第一条 DIMM 的持久化 8 位十六进制 serial |
 
 运行时由这些字段派生拓扑，不另存 `NUM_DIMMS`/`PER_DIMM_MB`：
@@ -178,9 +246,19 @@ SMBIOS Type 17 的 `Speed` 使用 `MEM_RATED_MTS`，`Configured Memory Speed` �
 i5-6400T 上仍报告 `Speed=2400`，但 `Configured Memory Speed=2133`。Windows JSON profile
 使用同义字段 `identity.memory_rated_mts` 与 `configuration.memory_configured_mts`。
 
-当前 DDR4 SPD 只实现可访问的 256 字节 page 0 地址空间，byte 0 因而声明 256B used/
-256B total，并按 2/4/8Gb 颗粒生成地址几何和 tRFC。它不是完整 EE1004 512B 器件，也不包含
-所选品牌 DIMM 的原始 page 1 厂商/序列号/料号 dump；这些身份目前由 SMBIOS Type 17 表达。
+DDR4 SPD 实现完整 512 字节 EE1004 地址空间和 0x36/0x37 页选择，byte 0 声明
+384B used/512B total，并按 2/4/8/16Gb 颗粒生成地址几何和 tRFC。page 1 的 JEP106
+模组厂商码、唯一序列号和料号与 SMBIOS Type 17 使用同一份 profile 输入；当前覆盖硬件目录
+中的 Crucial、Samsung、Kingston 和 SK hynix。该数据是按目录字段生成的标准 SPD，不是
+具体 DIMM 的原始 raw dump，也不声明 XMP。只有取得官方精确 SPD 的 Samsung 模板写入
+已核验 raw-card；其余短料号使用 JEDEC `ZZ`（未知）值，避免把批次相关 PCB revision
+伪造成固定事实。
+
+DDR3 继续使用标准 256 字节 SPD，模组厂商码、序列号和料号位于同一页；同样覆盖目录中的
+Crucial、Kingston 和 SK hynix，并按具体 2/4 GiB 料号生成 rank、颗粒位宽与时序。
+
+迁移/快照目标必须使用与源端相同的 `spd-ee1004` 设备配置，这与其它 QEMU 设备拓扑参数
+相同；已访问 SPD 的 256B/512B 状态错配会直接拒绝加载。
 
 第二条 DIMM serial 由 `sha256("${MEM_SERIAL}-dimm2")` 前 8 位稳定派生。双 DIMM 不等于
 双 NUMA；当前消费级单 socket 客体始终只创建一个 guest NUMA node。宿主双路 E5 的 NUMA
@@ -195,8 +273,9 @@ i5-6400T 上仍报告 `Speed=2400`，但 `Configured Memory Speed=2133`。Window
 | 范围限制 | `EDID_MIN_VFREQ_HZ`、`EDID_MAX_VFREQ_HZ`、`EDID_MIN_HFREQ_KHZ`、`EDID_MAX_HFREQ_KHZ`、`EDID_MAX_PIXEL_CLOCK_MHZ` |
 | 第二时序 | `EDID_SECONDARY_XRES`、`EDID_SECONDARY_YRES`、`EDID_SECONDARY_REFRESH_RATE` |
 
-当前组件固定为 `samsung-s24f350`：`SAM/0F65`、530×300 mm、2018 年第 32 周、
-50–75 Hz、30–83 kHz、170 MHz，第二时序 1600×900@60 Hz。只有 `EDID_SERIAL`
+当前组件固定为 `samsung-s24f350`：`SAM/0F65`、521×293 mm、2018 年第 32 周、
+56–75 Hz、30–81 kHz、149 MHz，第二时序 1600×900@60 Hz。尺寸和扫描范围来自
+官方规格；产品码、制造时间与序列前缀没有原始 EDID 快照，因此仅作为合成身份。只有 `EDID_SERIAL`
 按实例生成；其它字段必须整体一致。
 
 ## USB HID
@@ -205,8 +284,8 @@ i5-6400T 上仍报告 `Speed=2400`，但 `Configured Memory Speed=2133`。Window
 
 | 设备 | 字段 | 当前模板 / fidelity |
 |---|---|---|
-| 键盘 | `KBD_COMPONENT_ID`、`KBD_VID`、`KBD_PID`、`KBD_MFR`、`KBD_PRODUCT`、`KBD_SERIAL`、`KBD_BCD_DEVICE`、`KBD_DESCRIPTOR_FIDELITY` | Microsoft Wired Keyboard 600，`045e:0750/0163`，`fixed_template` |
-| 鼠标 | `MOUSE_COMPONENT_ID`、`MOUSE_VID`、`MOUSE_PID`、`MOUSE_MFR`、`MOUSE_PRODUCT`、`MOUSE_SERIAL`、`MOUSE_BCD_DEVICE`、`MOUSE_DESCRIPTOR_FIDELITY` | Microsoft USB Optical Mouse，`045e:00cb/0163`，`fixed_template` |
+| 键盘 | `KBD_COMPONENT_ID`、`KBD_VID`、`KBD_PID`、`KBD_MFR`、`KBD_PRODUCT`、`KBD_SERIAL`、`KBD_BCD_DEVICE`、`KBD_DESCRIPTOR_FIDELITY` | Microsoft Wired Keyboard 600，`045e:0750/0163`，`identity_only_generic_report` |
+| 鼠标 | `MOUSE_COMPONENT_ID`、`MOUSE_VID`、`MOUSE_PID`、`MOUSE_MFR`、`MOUSE_PRODUCT`、`MOUSE_SERIAL`、`MOUSE_BCD_DEVICE`、`MOUSE_DESCRIPTOR_FIDELITY` | Microsoft USB Optical Mouse，`045e:00cb/0163`，`identity_only_generic_report` |
 | 绝对指针 | `TABLET_COMPONENT_ID`、`TABLET_VID`、`TABLET_PID`、`TABLET_MFR`、`TABLET_PRODUCT`、`TABLET_SERIAL`、`TABLET_BCD_DEVICE`、`TABLET_DESCRIPTOR_FIDELITY` | QEMU USB Tablet，`0627:0001/0000`，`generic_virtual_only` |
 
 键盘和鼠标模板声明 `serial_exposed=false`，启动器不会把 profile 中的稳定派生 serial 送入
@@ -248,19 +327,21 @@ sed -n '1,220p' /home/ubuntu/images/vms/1/profile
 # 改为 manifest 允许的 8 GiB；只改变 MEM_TOTAL_MB，重启生效
 deploy/scripts/set-vm-memory.sh 1 8G
 
-# 显式重新生成整套身份；会改变 UUID/序列号/MAC，并可能触发 Windows 重新激活
-deploy/scripts/reroll-identity.sh 1
-# 也可在下一次启动时执行
+# 显式原子重新生成身份；会改变 UUID/序列号/MAC，并可能触发 Windows 重新激活
 deploy/scripts/start-vm.sh 1 --reroll
 ```
 
 启动器会先把 reroll 结果保留在进程内存，依次通过宿主约束、CPU realize、磁盘容量、
 所请求 TPM、内存/设备参数和完整 QEMU argv 组装后才原子替换 profile。尤其是旧 1TB
-磁盘与当前 512GB NVMe 模板不符时，启动会失败但旧 profile 哈希保持不变。
+磁盘与当前所选 512GB 启动盘模板不符时，启动会失败但旧 profile 哈希保持不变。
+若已有 TPM state，reroll 会在生成候选前拒绝，避免新 UUID/主板序列号复用旧 EK/NVRAM；
+更换身份、主板型号或 TPM 版本应新建 instance，或先执行经过验证的密钥迁移/归档。
+`reroll-identity.sh` 不再删除 profile，只会提示上述安全命令。
 
 非严格模式会为部分旧 profile 提供兼容默认值，但必须另加
 `--allow-legacy-profile` 明确授权，而且这不代表旧的 AMD/B350、混合 NVMe/EDID/HID
-画像已通过审计。迁移到当前严格目录应显式 reroll，并在测试实例上先验证激活、驱动和磁盘容量。
+画像已通过审计。无 TPM state 时可显式 reroll；已有 state 时应新建 instance 或先迁移密钥，
+并在测试实例上验证激活、驱动和磁盘容量。
 新建的 schema 1 AMD compatibility profile 与 legacy profile 不同：它会完整绑定目录事实，
 后续启动会复用其 `PLATFORM_ID`，但仍须每次显式携带 allow 开关，且不能计为真实
 B350 machine 验收。

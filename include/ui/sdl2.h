@@ -22,6 +22,7 @@
 #endif
 
 #include "ui/kbd-state.h"
+#include "ui/sdl2-pointer.h"
 #ifdef CONFIG_OPENGL
 # include "ui/egl-helpers.h"
 #endif
@@ -51,13 +52,25 @@ struct sdl2_console {
      */
     bool has_input_focus;
     bool has_mouse_focus;
+    bool fullscreen;
+    bool saved_grab;
+    bool absolute_enabled;
+    uint32_t mouse_button_state;
+    bool guest_cursor;
+    int guest_x;
+    int guest_y;
+    SDL2AxisScale window_to_render_x;
+    SDL2AxisScale window_to_render_y;
+    SDL2AxisScale render_to_guest_x;
+    SDL2AxisScale render_to_guest_y;
+    SDL_Surface *guest_sprite_surface;
+    SDL_Cursor *guest_sprite;
     SDL_GLContext winctx;
     QKbdState *kbd;
     bool has_dmabuf;
 #ifdef CONFIG_OPENGL
     QemuGLShader *gls;
     egl_fb guest_fb;
-    egl_fb win_fb;
     bool y0_top;
     bool scanout_mode;
     bool scanout_redraw_pending;
@@ -65,38 +78,60 @@ struct sdl2_console {
 };
 
 /*
- * Centred destination rectangle for a gw*gh guest surface inside a ww*wh
- * window.  The guest is shown at its native resolution and is never magnified
- * beyond 1:1: a larger window is letterboxed / pillarboxed (black borders)
- * instead of upscaling, while a smaller window shrinks the image to fit,
- * preserving the aspect ratio (so nothing is ever clipped).  Used for both the
- * GL viewport and the absolute-pointer mapping so the guest cursor stays
- * aligned with the visible picture.
+ * Keep pointer mapping on the same dimensions as the active SDL renderer.
+ * GL scanout can expose a sub-rectangle of a larger backing texture, so input
+ * follows the visible scanout dimensions rather than the backing allocation.
+ * Surface mode and the 2D renderer use the DisplaySurface dimensions.
  */
-static inline void sdl2_gfx_dst_rect(int ww, int wh, int gw, int gh,
-                                     int *px, int *py, int *pw, int *ph)
+static inline bool sdl2_current_guest_size(const struct sdl2_console *scon,
+                                           SDL2Size *guest)
 {
-    double scale;
-    int dw, dh;
+    SDL2Size surface = { 0 };
+    SDL2Size scanout = { 0 };
+    bool scanout_mode = false;
 
-    if (gw < 1 || gh < 1) {
-        *px = 0;
-        *py = 0;
-        *pw = ww;
-        *ph = wh;
-        return;
+    if (scon->surface) {
+        surface.width = surface_width(scon->surface);
+        surface.height = surface_height(scon->surface);
+    }
+#ifdef CONFIG_OPENGL
+    if (scon->opengl && scon->scanout_mode) {
+        scanout_mode = true;
+        scanout.width = scon->w;
+        scanout.height = scon->h;
+    }
+#endif
+    return sdl2_select_guest_size(scanout_mode, surface, scanout, guest);
+}
+
+/*
+ * Return the pixel dimensions of the active rendering target.  SDL mouse
+ * events use logical window coordinates, while a high-DPI renderer or GL
+ * drawable can contain more pixels; callers explicitly bridge the two spaces.
+ */
+static inline bool sdl2_current_render_size(const struct sdl2_console *scon,
+                                            SDL2Size *render)
+{
+    if (!scon || !scon->real_window || !render) {
+        return false;
     }
 
-    scale = MIN((double)ww / gw, (double)wh / gh);
-    if (scale > 1.0) {
-        scale = 1.0;            /* never magnify past the native resolution */
+    *render = (SDL2Size) { 0 };
+    if (scon->opengl) {
+        SDL_GL_GetDrawableSize(scon->real_window,
+                               &render->width, &render->height);
+    } else if (scon->real_renderer &&
+               SDL_GetRendererOutputSize(scon->real_renderer,
+                                         &render->width,
+                                         &render->height) != 0) {
+        *render = (SDL2Size) { 0 };
     }
-    dw = (int)(gw * scale + 0.5);
-    dh = (int)(gh * scale + 0.5);
-    *pw = dw;
-    *ph = dh;
-    *px = (ww - dw) / 2;
-    *py = (wh - dh) / 2;
+
+    if (render->width <= 0 || render->height <= 0) {
+        SDL_GetWindowSize(scon->real_window,
+                          &render->width, &render->height);
+    }
+    return render->width > 0 && render->height > 0;
 }
 
 void sdl2_window_create(struct sdl2_console *scon);
@@ -104,6 +139,8 @@ void sdl2_window_destroy(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
 
+bool sdl2_input_allowed(const struct sdl2_console *scon);
+void sdl2_sync_text_input(struct sdl2_console *consoles, int num_outputs);
 void sdl2_process_key(struct sdl2_console *scon,
                       SDL_KeyboardEvent *ev);
 void sdl2_release_modifiers(struct sdl2_console *scon);

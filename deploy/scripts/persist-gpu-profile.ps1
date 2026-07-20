@@ -198,8 +198,10 @@ function Assert-GpuIdentityStrings {
     if (-not (@('NVIDIA', 'AMD') -ccontains $Vendor)) {
         throw ('GPU 厂商必须精确为 NVIDIA 或 AMD，实际：' + $Vendor)
     }
-    if ($Name -cnotmatch '\A[\x20-\x7E]{1,63}\z') {
-        throw 'GPU 名称必须是 1..63 字节的可打印 ASCII，且不得含首尾空白之外的非 ASCII 字符'
+    if ($Name -cnotmatch '\A[\x20-\x7E]{1,63}\z' -or
+        -not $Name.StartsWith(($Vendor + ' '), [System.StringComparison]::Ordinal) -or
+        $Name -match '(?i)\b(?:Red Hat|VirtIO)\b') {
+        throw 'GPU 名称必须以 canonical 厂商开头，且不得包含 Red Hat/VirtIO 品牌'
     }
     if ($Vendor -ceq 'NVIDIA') {
         if ($Bios -cnotmatch '\AVersion [0-9A-F]{2}(?:\.[0-9A-F]{2}){4}\z') {

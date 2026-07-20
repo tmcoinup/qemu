@@ -447,11 +447,8 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     uint8_t *dta = NULL;
     uint8_t *did = NULL;
     uint32_t width_mm, height_mm;
-    /*
-     * Stealth: 60 Hz preferred timing, not 75. Real Samsung S24F350F's
-     * preferred mode in the EDID is 1920x1080@60 — 75 Hz at 1080p is
-     * uncommon enough to be a tell on its own.
-     */
+    bool samsung_s24f350;
+    /* 未显式指定刷新率时使用现代桌面显示器通用的 60 Hz。 */
     uint32_t refresh_rate = info->refresh_rate ? info->refresh_rate : 60000;
     uint32_t dpi = 100; /* if no width_mm/height_mm */
     uint32_t large_screen = 0;
@@ -459,21 +456,14 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     /* =============== set defaults  =============== */
 
     if (!info->vendor || strlen(info->vendor) != 3) {
-        info->vendor = "SAM";
+        info->vendor = "RHT";
     }
     if (!info->name) {
-        info->name = "S24F350";
+        info->name = "QEMU Monitor";
     }
-    if (!info->serial) {
-        /*
-         * Real monitors always carry a 0xff serial-number descriptor;
-         * a missing one is itself a fingerprint. Default to a 12-char
-         * Samsung-format serial. (atoi() of this is also non-zero, so
-         * the binary serial slot at edid[12..15] gets a non-default
-         * value too.)
-         */
-        info->serial = "H4ZK500001VL";
-    }
+    samsung_s24f350 = !strcmp(info->vendor, "SAM") &&
+                      !strcmp(info->name, "S24F350") &&
+                      info->serial && !strncmp(info->serial, "H4ZK", 4);
     if (!info->prefx) {
         info->prefx = 1920;
     }
@@ -484,12 +474,9 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
         width_mm = info->width_mm;
         height_mm = info->height_mm;
         dpi = qemu_edid_dpi_from_mm(width_mm, info->prefx);
-    } else if (info->prefx == 1920 && info->prefy == 1080) {
-        /* Stealth: 24" 16:9 ≈ 530 × 300 mm — matches Samsung S24F350F.
-         * The earlier 100 dpi default produced ~488 × 274 mm, closer
-         * to a 22" panel and inconsistent with the spoofed model. */
-        width_mm = 530;
-        height_mm = 300;
+    } else if (samsung_s24f350) {
+        width_mm = 521;
+        height_mm = 293;
         dpi = qemu_edid_dpi_from_mm(width_mm, info->prefx);
     } else {
         width_mm = qemu_edid_dpi_to_mm(dpi, info->prefx);
@@ -498,32 +485,45 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
 
     generate_timings(&timings, refresh_rate, info->prefx, info->prefy);
     if (!info->product_id) {
-        /* 默认 Samsung 画像保留真实产品码；其他画像必须由 manifest 提供。 */
-        info->product_id = !strcmp(info->vendor, "SAM") &&
-                           !strncmp(info->name, "S24F350", 7) ? 0x0f65 : 1;
+        info->product_id = samsung_s24f350 ? 0x0f65 : 1;
+    }
+    if (!info->manufacture_week) {
+        info->manufacture_week = samsung_s24f350 ? 32 : 42;
     }
     if (!info->manufacture_year) {
-        info->manufacture_year = 2020;
+        info->manufacture_year = samsung_s24f350 ? 2018 : 2014;
     }
     if (!info->video_input) {
-        info->video_input = 0x80; /* digital，接口类型未声明 */
+        info->video_input = samsung_s24f350 ? 0xa3 : 0xa5;
     }
     if (!info->min_vfreq_hz) {
-        info->min_vfreq_hz = MIN(48U, DIV_ROUND_UP(refresh_rate, 1000));
+        info->min_vfreq_hz = samsung_s24f350 ?
+                             56 : MIN(48U, DIV_ROUND_UP(refresh_rate, 1000));
     }
     if (!info->max_vfreq_hz) {
-        info->max_vfreq_hz = MAX(60U, DIV_ROUND_UP(refresh_rate, 1000));
+        info->max_vfreq_hz = samsung_s24f350 ?
+                             75 : MAX(60U, DIV_ROUND_UP(refresh_rate, 1000));
     }
     if (!info->min_hfreq_khz) {
         info->min_hfreq_khz = 30;
     }
     if (!info->max_hfreq_khz) {
-        uint64_t line_rate = (uint64_t)refresh_rate *
-                             (info->prefy + timings.yblank);
-        info->max_hfreq_khz = DIV_ROUND_UP(line_rate, 1000000) + 5;
+        if (samsung_s24f350) {
+            info->max_hfreq_khz = 81;
+        } else {
+            uint64_t line_rate = (uint64_t)refresh_rate *
+                                 (info->prefy + timings.yblank);
+            info->max_hfreq_khz = DIV_ROUND_UP(line_rate, 1000000) + 5;
+        }
     }
     if (!info->max_pixel_clock_mhz) {
-        info->max_pixel_clock_mhz = DIV_ROUND_UP(timings.clock, 100) + 10;
+        info->max_pixel_clock_mhz = samsung_s24f350 ?
+                                    149 : DIV_ROUND_UP(timings.clock, 100) + 10;
+    }
+    if (samsung_s24f350 && !info->secondary_x && !info->secondary_y) {
+        info->secondary_x = 1600;
+        info->secondary_y = 900;
+        info->secondary_refresh_rate = 60000;
     }
     if (info->prefx >= 4096 || info->prefy >= 4096 || timings.clock >= 65536) {
         large_screen = 1;
@@ -559,16 +559,12 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     uint16_t vendor_id = ((((info->vendor[0] - '@') & 0x1f) << 10) |
                           (((info->vendor[1] - '@') & 0x1f) <<  5) |
                           (((info->vendor[2] - '@') & 0x1f) <<  0));
-    /* product code 来自 profile；仅默认 Samsung 画像回落到 0x0F65。 */
+    /* 受控启动器会显式传入产品码；通用 QEMU 路径使用非品牌默认值。 */
     uint16_t model_nr = info->product_id;
     /*
-     * EDID byte 12-15 is a 32-bit binary serial. atoi() on a Samsung-style
-     * alphanumeric serial like "H4ZK500001VL" returns 0 because parsing
-     * stops at the first non-digit. A zero binary serial paired with a
-     * non-zero string serial is a self-inconsistent EDID — strict parsers
-     * (read-edid, edid-decode --check) flag it. Hash the alphanumeric
-     * serial via djb2 so the binary slot is deterministic, non-zero, and
-     * cannot collide with the obviously-default 0x01A5C3D2 either.
+     * 字母数字序列无法直接用 atoi 写入 32-bit binary serial，因此对显式
+     * 字符串做稳定哈希；通用默认路径没有实机序号证据，保持为 0 且不生成
+     * 0xff 文本描述符。
      */
     uint32_t serial_nr;
     if (info->serial) {
@@ -582,7 +578,7 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
             serial_nr = h ? h : 0xC0DECAFE;
         }
     } else {
-        serial_nr = 0x01A5C3D2;
+        serial_nr = 0;
     }
     stw_be_p(edid +  8, vendor_id);
     stw_le_p(edid + 10, model_nr);

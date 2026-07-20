@@ -21,7 +21,7 @@ stealth_print_profile() {
         local sn_disp="${MEM_SERIAL:-?}"
         if (( NUM_DIMMS == 2 )); then
             # 双通道时两条 DIMM 各自唯一 SN（第 2 条由 MEM_SERIAL 确定性派生），打印出来便于核对
-            sn_disp="${MEM_SERIAL:-?}+$(printf '%s' "${MEM_SERIAL}-dimm2" | sha256sum | head -c 8 | tr '[:lower:]' '[:upper:]')"
+            sn_disp="${MEM_SERIAL:-?}+$(_stealth_memory_slot_serial "$MEM_SERIAL" 2)"
         fi
         mem_line="${MEM_MFR}  ${RAM} MiB = ${NUM_DIMMS}× $(( PER_DIMM_MB / 1024 )).$(( (PER_DIMM_MB % 1024) * 10 / 1024 )) GiB  part=${part_used}  SN=${sn_disp}  (${slot_layout})"
     else
@@ -69,6 +69,12 @@ stealth_print_profile() {
     # PnP 的 SUBSYS 字符串固定按 device 后接 vendor 打印，和规范化 VEN:DEV 顺序
     # 相反。把两种顺序并列输出，避免用户把 carrier 字段误当物理主 PCI ID。
     local gpu_carrier_subsys="${GPU_PCI_DEV#0x}${GPU_PCI_VEN#0x}"
+    local storage_line
+    if [[ "${PLATFORM_BOOT_STORAGE:-nvme}" == sata-ahci ]]; then
+        storage_line="SATA/AHCI ${BOOT_STORAGE_MODEL}  fw=${BOOT_STORAGE_FIRMWARE}  SN=${BOOT_STORAGE_SERIAL}  size=$(printf '%.1f' "$(echo "$BOOT_STORAGE_SIZE_BYTES / 1024^3" | bc -l 2>/dev/null || echo 0)") GiB"
+    else
+        storage_line="NVMe $BOOT_STORAGE_MODEL  fw=$BOOT_STORAGE_FIRMWARE  PCI=${NVME_PCI_VEN}:${NVME_PCI_DEV}/${NVME_SUBSYS_VEN}:${NVME_SUBSYS_DEV}  SN=$BOOT_STORAGE_SERIAL  size=$(printf '%.1f' "$(echo "$BOOT_STORAGE_SIZE_BYTES / 1024^3" | bc -l 2>/dev/null || echo 0)") GiB"
+    fi
 
     cat >&2 <<EOF
 === stealth profile ===
@@ -79,11 +85,12 @@ stealth_print_profile() {
   System   : $SYSTEM_MFR / $SYSTEM_PRODUCT / $SYSTEM_FAMILY
   System SN: $SYSTEM_SERIAL   SKU=$SYSTEM_SKU
   BIOS     : $BIOS_VENDOR $BIOS_VERSION ($BIOS_DATE)
+  TPM      : ${TPM_IMPLEMENTATION:-none} / ${TPM_VERSION:-none} / ${TPM_FRONTEND:-none} (PCR=${TPM_PCR_BANKS:-none})
   Chassis  : $CHASSIS_TYPE  SN=$CHASSIS_SERIAL
   GPU      : virtio display；物理=1AF4:1050；carrier=SUBSYS_${gpu_carrier_subsys}；浅层用户态=$GPU_NAME / PCI $logical_gpu_id（${GPU_IDENTITY_FIDELITY}）
   Display  : ${vga_kind}, EDID 1920×1080
   显示器   : ${EDID_VENDOR}:${EDID_PRODUCT_ID} ${EDID_NAME}  ~${diag_inch}\" (${EDID_WIDTH_MM}×${EDID_HEIGHT_MM} mm)  SN=${EDID_SERIAL}
-  NVMe     : $NVME_MODEL  fw=$NVME_FIRMWARE  PCI=${NVME_PCI_VEN}:${NVME_PCI_DEV}/${NVME_SUBSYS_VEN}:${NVME_SUBSYS_DEV}  SN=$NVME_SERIAL  size=$(printf '%.1f' "$(echo "$NVME_SIZE_BYTES / 1024^3" | bc -l 2>/dev/null || echo 0)") GiB
+  Storage  : ${storage_line}
   Memory   : ${mem_line}
   网卡     : ${nic_line}
   声卡     : ${audio_line}

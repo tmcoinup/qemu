@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-07-19.3",
+  "identity_scope": "generic_q35_host_passthrough_compatibility",
+  "machine_model": "q35",
+  "defaults": {
+    "vcpus": 4,
+    "memory_total_mib": 8192
+  },
+  "selection_policy": {
+    "requires_explicit_allow": true,
+    "physical_platform_claim": false,
+    "cpu_vendor_must_match_host": true,
+    "cpu_model_source": "host_passthrough",
+    "guest_cpu_class": "household_only",
+    "server_brand_policy": "reject",
+    "host_topology_policy": "exact_up_to_4_threads",
+    "profile_binding": "vendor_brand_family_model_stepping_phys_bits_tsc_topology",
+    "tsc_policy": "host_default_no_tsc_freq",
+    "kvm_realize_required": true
+  },
+  "smbios_policy": {
+    "type0": "runtime_firmware_default",
+    "type1_to_type3": "generic_virtual_platform",
+    "type4": "host_name_vendor_and_guest_topology",
+    "unknown_physical_fields": "omit"
+  },
+  "common": {
+    "status": "compatibility",
+    "release_year": 2009,
+    "board": {
+      "manufacturer": "QEMU",
+      "product": "Standard PC (Q35 + ICH9, 2009)",
+      "family": "Q35 Virtual Platform",
+      "version": "pc-q35",
+      "serial_fn": "_serial_qemu",
+      "subsystem_vendor": "0x1B36",
+      "subsystem_device": "0x0001",
+      "pch": "QEMU Q35/ICH9",
+      "pcie_generation": 3,
+      "dimm_slots": 4,
+      "max_memory_gib": 128
+    },
+    "memory": {
+      "type": "DDR4",
+      "channels": 2,
+      "max_mts": 2400,
+      "allowed_mts": [2133, 2400],
+      "voltage_mv": 1200,
+      "rank": 1,
+      "module_mib": [2048, 4096],
+      "allowed_total_mib": [2048, 4096, 8192]
+    },
+    "devices": {
+      "identity_scope": "explicit_virtual_compatibility",
+      "chipset": {
+        "mch": ["0x8086", "0x29C0", "0x02"],
+        "lpc": ["0x8086", "0x2918", "0x02"],
+        "smbus": ["0x8086", "0x2930", "0x02"],
+        "ahci": ["0x8086", "0x2922", "0x02"]
+      },
+      "root_port": {
+        "pci_vendor": "0x1B36",
+        "pci_device": "0x000C",
+        "revision": "0x00"
+      },
+      "xhci": {
+        "pci_vendor": "0x1B36",
+        "pci_device": "0x000D",
+        "revision": "0x01"
+      },
+      "nvme": {
+        "max_pcie_generation": 3,
+        "lanes": 4,
+        "boot_supported": true,
+        "attachment": "pcie_root_port"
+      },
+      "nic": {
+        "vendor": "Intel",
+        "model": "Intel 82574L Gigabit Network Connection",
+        "pci_vendor": "0x8086",
+        "pci_device": "0x10D3",
+        "subsystem_vendor": "0x8086",
+        "subsystem_device": "0xA01F",
+        "mac_oui": "3c:fd:fe",
+        "attachment": "add_in",
+        "board_nic_state": "not_applicable"
+      },
+      "audio": {
+        "vendor": "QEMU",
+        "codec": "Generic HDA Codec",
+        "codec_id": "0x1AF40022",
+        "codec_revision": "0x00100101",
+        "codec_subsystem_id": "0x1AF40022",
+        "identity_fidelity": "generic_virtual_protocol",
+        "controller_pci_vendor": "0x8086",
+        "controller_pci_device": "0x293E"
+      }
+    },
+    "bios": {
+      "mode": "runtime_firmware_default"
+    },
+    "system": {
+      "manufacturer": "QEMU",
+      "product": "Standard PC (Q35 + ICH9, 2009)",
+      "family": "Q35 Virtual Platform",
+      "version": "pc-q35",
+      "chassis_type": "0x03"
+    },
+    "tpm": {
+      "capability": "none",
+      "supported": false,
+      "implementation": "none",
+      "version": "none",
+      "emulation_frontend": "none",
+      "pcr_banks": []
+    }
+  },
+  "templates": [
+    {
+      "id": "compat-host-intel-q35",
+      "vendor_id": "GenuineIntel",
+      "cpu_policy": {
+        "qemu_model": "host",
+        "feature_policy": "host_default",
+        "integrated_gpu_state": "not_exposed"
+      }
+    },
+    {
+      "id": "compat-host-amd-q35",
+      "vendor_id": "AuthenticAMD",
+      "cpu_policy": {
+        "qemu_model": "host",
+        "feature_policy": "host_default",
+        "integrated_gpu_state": "not_exposed"
+      }
+    }
+  ]
+}

@@ -23,6 +23,8 @@
 #                                           # 高级用法：固定/断言具体兼容平台
 #     STRICT_HARDWARE=0 ./start-vm.sh 1 --allow-legacy-profile
 #                                           # 仅显式诊断无 manifest 绑定的旧 profile
+#     ./start-vm.sh 1 --migrate-storage-profile
+#                                           # 显式允许旧 schema-1 启动盘字段内存迁移
 #     ./start-vm.sh 1 --no-sdl              # 后台 daemon：关 SDL，仅推流
 #     ./start-vm.sh 1 --gpu-sdl-egl         # SDL 窗口 + QEMU 11 SDL/EGL + fb-shm GPU
 #     ./start-vm.sh 1 --gpu-headless        # EGL rendernode + fb-shm，验证 GPU 零拷贝
@@ -32,7 +34,7 @@
 #     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
 #     ./start-vm.sh 1 --vlan-id=11          # 在单一 br0 上动态接入 access VLAN 11
 #                                          # 不传 VLAN 参数时完全保持原有 br0 默认网络
-#     ./start-vm.sh 1 --reroll              # 重新随机硬件身份
+#     ./start-vm.sh 1 --reroll              # 原子重抽身份；已有 TPM state 时拒绝
 #     ./start-vm.sh 1 --fb-shm-roi=0,0,1920,1080 --fb-shm-rate=60
 #     ./start-vm.sh 1 --proxy               # 启用 QEMU 原生 QMP multi-client
 #                                           # 兼容别名: /tmp/qemu-stealth-1.qmp.proxy
@@ -54,7 +56,8 @@
 # 平台 bundle 与每机唯一身份只在首次启动时选择/生成一次，写到
 #     /home/ubuntu/images/vms/<N>/profile
 # 之后所有启动复用，避免 Windows 激活与客体硬件枚举在重启间漂移。
-# 想换身份: deploy/scripts/reroll-identity.sh <N>  或者直接删 profile 文件。
+# 想换身份应先完整备份实例；TPM state 已与平台绑定，随机到不同平台时会拒绝复用
+# 旧密钥，建议新建 instance 或按明确的密钥迁移流程处理，不能只删除 profile。
 #
 # 显示后端 — 两条独立通道，默认全开：
 #     SDL 窗口（默认开）   本地交互窗口；DNF 等需要直接玩游戏的场景用。
@@ -73,7 +76,9 @@
 #
 # 环境变量（不常用，默认就好）：
 #     RAM=8192             客机内存 MiB（默认取 profile，当前 bundle 为 8192）
-#     CPUS=4               必须等于所选 SKU 完整线程数（当前均为 4C/4T）
+#     CPUS=4               必须等于所选 SKU 完整线程数（当前候选为 2 或 4）
+#     TPM=auto             跟随 profile 的主板 TPM 能力/版本/前端；1=强制要求，
+#                          0=显式关闭。平台事实仍固定在 profile，不会独立随机。
 #     SDL=1                SDL 窗口开关（默认 1） (flag: --sdl / --no-sdl)
 #     HEADLESS=1           关 SDL 启 VNC                          (flag: --headless)
 #     BRIDGE=br0           桥接网卡名字                          (flag: --bridge=br0)
@@ -102,6 +107,9 @@
 #     ALLOW_LEGACY_PROFILE=0
 #                          旧 schema 即使 STRICT_HARDWARE=0 也默认拒绝；设 1 或
 #                          --allow-legacy-profile 才做不计入支持范围的显式诊断加载
+#     ALLOW_STORAGE_PROFILE_MIGRATION=0
+#                          设 1 或使用 --migrate-storage-profile，才允许已知旧
+#                          schema-1 profile 在内存补齐启动盘字段；不会改写 profile
 #     FB_SHM_SOCK=<path>   fb-shm 控制 socket 路径
 #                          默认 /tmp/qemu-stealth-<N>.fb
 #                          (flag: --fb-shm-sock=<path>)
@@ -175,7 +183,8 @@ source "$HERE/lib/sv-instance-watchdog.sh"
 source "$HERE/lib/sv-instance-lock.sh"
 
 _usage() {
-    sed -n '2,/^# --*$/p' "$0" | sed -e 's/^# *//' -e 's/^#$//' >&2
+    # 跳过 shebang/shellcheck 和首个分隔线，从真正的启动器说明打印到尾部分隔线。
+    sed -n '5,/^# --*$/p' "$0" | sed -e 's/^# *//' -e 's/^#$//' >&2
     exit "${1:-2}"
 }
 
@@ -185,9 +194,10 @@ _usage() {
 # ------------------------------------------------------------------
 source "$HERE/lib/sv-cli.sh"        # CLI 解析 + 默认值 + 目录 / RANDOM 种子
 source "$HERE/lib/sv-host-helpers.sh" # 拒绝工作区 sudoers，仅信任 root-owned helper
-source "$HERE/lib/sv-cpupin.sh"     # 在任何持久化写入前预检 helper；稍后异步等待 vCPU
 source "$HERE/lib/sv-portability.sh" # 迁移 host 预检：路径/QEMU 能力，不做隐身降级
+source "$HERE/lib/sv-cpupin.sh"     # 在其它宿主预检后校验 helper；稍后异步等待 vCPU
 source "$HERE/lib/sv-host-capabilities.sh" # KVM/TSC 真能力；供 profile 做硬约束
+source "$HERE/lib/base-image.sh"   # root-owned base/backing 的运行期快速完整性门禁
 source "$HERE/lib/sv-disk.sh"      # qcow2 创建 + guest 可见容量与组件清单严格核对
 source "$HERE/lib/sv-identity.sh"   # 启动源 + 硬件身份 profile + OVMF + ACPI 表
 source "$HERE/lib/sv-hosttune.sh"   # (可选,默认开) host 压抖动 + 按伪装 CPU 封顶频率

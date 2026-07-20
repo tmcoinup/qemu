@@ -14,16 +14,19 @@ function Get-VMateHostCpuIdentity {
     param(
         [bool]$DryRun,
         [string]$DryRunVendorId = 'GenuineIntel',
-        [string]$DryRunName = 'Intel(R) Test CPU'
+        [string]$DryRunName = 'Intel(R) Test CPU',
+        [int]$DryRunCores = 4,
+        [int]$DryRunLogicalProcessors = 4,
+        [int]$DryRunMaxMhz = 3600
     )
 
     if ($DryRun) {
         return [pscustomobject]@{
             vendor_id = $DryRunVendorId
             name = $DryRunName
-            cores = 8
-            logical_processors = 16
-            max_mhz = 3600
+            cores = $DryRunCores
+            logical_processors = $DryRunLogicalProcessors
+            max_mhz = $DryRunMaxMhz
         }
     }
     if ($env:OS -ne 'Windows_NT') {
@@ -115,11 +118,207 @@ function Assert-VMateQemuVersion {
     }
 }
 
+function Assert-VMateQemuSmbiosCapabilities {
+    param([string]$Qemu)
+
+    # 中文注释：-smbios 没有独立 help 接口，且上游帮助文本不会列出本分支的
+    # 深层字段。用临时 vmstate dump 让 QEMU 的真实 QemuOpts 解析器消费与启动器
+    # 同构的 Type 4/17 canary；-dump-vmstate 在客体执行前退出，不创建 NVRAM。
+    $type4 = 'type=4,sock_pfx=LGA1151,manufacturer=Intel(R) Corporation,' +
+        'version=VMate Canary,serial=CPU-CANARY,part=CPU-PART,' +
+        'max-speed=3600,current-speed=3600,processor-family=0x00CE,' +
+        'voltage=140,external-clock=100,processor-upgrade=0x31,' +
+        'processor-characteristics=0x00EC'
+    $type17 = 'type=17,loc_pfx=DIMM_%C2,bank=P0 CHANNEL %C,' +
+        'manufacturer=Samsung,serial=CANARY01|CANARY02,part=DDR4-CANARY,' +
+        'speed=2400,configured-speed=2133,memory-type=0x1a,' +
+        'type-detail=0x80,rank=1,voltage=1200,device-width=16,' +
+        'spd-ee1004=on'
+    $dumpPath = [System.IO.Path]::GetTempFileName()
+    try {
+        try {
+            $output = & $Qemu '-nodefaults' '-machine' 'q35,accel=tcg' `
+                '-display' 'none' '-smbios' $type4 '-smbios' $type17 `
+                '-dump-vmstate' $dumpPath 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+        } catch {
+            throw "QEMU SMBIOS Type 4/17 能力探测失败：$($_.Exception.Message)"
+        }
+        if ($exitCode -ne 0) {
+            throw "QEMU 无法解析完整 SMBIOS Type 4/17 参数（exit code=$exitCode）：$($output.Trim())"
+        }
+        if (-not (Test-Path -LiteralPath $dumpPath -PathType Leaf) -or
+            (Get-Item -LiteralPath $dumpPath).Length -eq 0) {
+            throw 'QEMU SMBIOS Type 4/17 探针未生成 vmstate 输出。'
+        }
+    } finally {
+        if (Test-Path -LiteralPath $dumpPath) {
+            Remove-Item -LiteralPath $dumpPath -Force
+        }
+    }
+}
+
+function Assert-VMateWritableDirectoryTarget {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+
+    try {
+        $target = [System.IO.Path]::GetFullPath($Path)
+        $probeRoot = $target
+        while (-not (Test-Path -LiteralPath $probeRoot)) {
+            $parent = Split-Path -Parent $probeRoot
+            if (-not $parent -or $parent -eq $probeRoot) {
+                throw '找不到已存在的父目录。'
+            }
+            $probeRoot = $parent
+        }
+        if (-not (Test-Path -LiteralPath $probeRoot -PathType Container)) {
+            throw "父路径不是目录：$probeRoot"
+        }
+        $probe = Join-Path $probeRoot `
+            ('.vmate-write-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            $stream = [System.IO.File]::Open(
+                $probe, [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $stream.Dispose()
+        } finally {
+            if (Test-Path -LiteralPath $probe) {
+                Remove-Item -LiteralPath $probe -Force
+            }
+        }
+    } catch {
+        throw "$Label 不可写：$Path；$($_.Exception.Message)"
+    }
+}
+
+function Assert-VMateReadableNonEmptyFile {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Label 不是可读文件：$Path"
+    }
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            [System.IO.Path]::GetFullPath($Path), [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $length = $stream.Length
+    } catch {
+        throw "$Label 不可读：$Path；$($_.Exception.Message)"
+    } finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
+    if ($length -eq 0) {
+        throw "$Label 为空文件：$Path"
+    }
+}
+
+function Assert-VMateOvmfStorageReady {
+    param(
+        [string]$Template,
+        [string]$Vars
+    )
+
+    $templatePath = [System.IO.Path]::GetFullPath($Template)
+    $varsPath = [System.IO.Path]::GetFullPath($Vars)
+    if ($templatePath.Equals(
+            $varsPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'OVMF vars 目标不能与只读模板使用同一个文件。'
+    }
+    Assert-VMateReadableNonEmptyFile -Path $templatePath `
+        -Label 'OVMF vars 模板'
+    $templateLength = (Get-Item -LiteralPath $templatePath).Length
+    if (Test-Path -LiteralPath $varsPath) {
+        if (-not (Test-Path -LiteralPath $varsPath -PathType Leaf)) {
+            throw "已有 OVMF vars 不是文件：$Vars"
+        }
+        try {
+            $varsStream = [System.IO.File]::Open(
+                $varsPath, [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            $varsLength = $varsStream.Length
+            $varsStream.Dispose()
+        } catch {
+            throw "已有 OVMF vars 不可读写：$Vars；$($_.Exception.Message)"
+        }
+        if ($varsLength -ne $templateLength) {
+            throw "已有 OVMF vars 与模板长度不同：$varsLength != $templateLength"
+        }
+        return
+    }
+    Assert-VMateWritableDirectoryTarget -Path (Split-Path -Parent $varsPath) `
+        -Label 'OVMF vars 目标父目录'
+}
+
+function Get-VMateMonitorEdidCapabilityProperties {
+    # 中文注释：此列表是 Windows 显示器目录投影与 QEMU 能力门禁之间的单一
+    # 契约。普通 virtio-vga 严格预检和可选 virtio-vga-gl 探针必须复用它，
+    # 防止新增 EDID 字段时只更新正式 argv 而遗漏其中一条显示路径。
+    return @(
+        'edid-fixed-native',
+        'edid-vendor',
+        'edid-name',
+        'edid-serial',
+        'edid-width-mm',
+        'edid-height-mm',
+        'edid-product-id',
+        'edid-manufacture-week',
+        'edid-manufacture-year',
+        'edid-video-input',
+        'edid-min-vfreq-hz',
+        'edid-max-vfreq-hz',
+        'edid-min-hfreq-khz',
+        'edid-max-hfreq-khz',
+        'edid-max-pixel-clock-mhz',
+        'edid-secondary-xres',
+        'edid-secondary-yres',
+        'edid-secondary-refresh-rate'
+    )
+}
+
+function Test-VMateQemuHelpProperties {
+    param(
+        [string]$HelpOutput,
+        [string[]]$Properties
+    )
+
+    foreach ($property in $Properties) {
+        $propertyPattern = '(?m)^\s*{0}\s*=' -f [regex]::Escape($property)
+        if ($HelpOutput -notmatch $propertyPattern) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Assert-VMateQemuDeviceCapabilities {
     param([string]$Qemu)
 
+    $chipsetIdentityProperties = @(
+        'x-pci-vendor-id',
+        'x-pci-device-id',
+        'x-pci-revision',
+        'x-pci-sub-vendor-id',
+        'x-pci-sub-device-id'
+    )
+    $monitorEdidProperties = @(Get-VMateMonitorEdidCapabilityProperties)
     $required = [ordered]@{
-        'pcie-root-port' = @('x-pci-vendor-id', 'x-pci-device-id', 'x-pci-revision')
+        # 中文注释：物理平台会通过 -global 覆盖 Q35 南桥三类功能的完整 PCI
+        # 身份。三个 QOM type 必须逐一证明五项 patched 属性，不能只因机器能
+        # 创建默认 ICH9 设备就判定当前二进制兼容。
+        'ICH9-LPC' = $chipsetIdentityProperties
+        'ICH9-SMB' = $chipsetIdentityProperties
+        'ich9-ahci' = $chipsetIdentityProperties
+        'pcie-root-port' = @('x-pci-vendor-id', 'x-pci-device-id',
+            'x-pci-revision', 'x-speed', 'x-width')
         'qemu-xhci' = @('x-pci-vendor-id', 'x-pci-device-id', 'x-pci-revision')
         'intel-hda' = @('x-pci-vendor-id', 'x-pci-device-id')
         'hda-duplex' = @('x-identity-compat', 'x-codec-id',
@@ -132,8 +331,11 @@ function Assert-VMateQemuDeviceCapabilities {
         'usb-kbd' = @('vendorid', 'productid', 'manufacturer', 'product',
             'x-force-numlock-on')
         'usb-mouse' = @('vendorid', 'productid', 'manufacturer', 'product')
-        'virtio-vga' = @('edid-fixed-native', 'edid-vendor', 'edid-product-id',
-            'edid-secondary-refresh-rate')
+        # 中文注释：Get-VMateMonitorEdidSuffix 会把目录中的完整显示器身份与
+        # 时序投影到 virtio-vga。门禁必须与该函数字段集合保持一致，不能仅
+        # 验证少量代表字段后让 unknown property 延迟到正式启动。
+        'virtio-vga' = @($monitorEdidProperties + @(
+                'xres', 'yres', 'xmax', 'ymax'))
     }
     foreach ($entry in $required.GetEnumerator()) {
         try {
@@ -145,9 +347,78 @@ function Assert-VMateQemuDeviceCapabilities {
             throw "QEMU 不提供所需设备：$($entry.Key)"
         }
         foreach ($property in $entry.Value) {
-            if ($helpOutput -notmatch [regex]::Escape($property)) {
+            $propertyPattern = '(?m)^\s*{0}\s*=' -f [regex]::Escape($property)
+            if ($helpOutput -notmatch $propertyPattern) {
                 throw "QEMU 设备 $($entry.Key) 缺少 patched 属性：$property"
             }
+        }
+    }
+}
+
+function Get-VMateQemuCapabilityOutput {
+    param(
+        [string]$Qemu,
+        [string[]]$Arguments,
+        [string]$Capability,
+        [int[]]$AllowedExitCodes = @(0)
+    )
+
+    try {
+        $output = & $Qemu @Arguments 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+    } catch {
+        throw "QEMU $Capability 能力探测失败：$($_.Exception.Message)"
+    }
+    if ($exitCode -notin $AllowedExitCodes) {
+        throw "QEMU 不提供所需 $Capability 能力（探测 exit code=$exitCode）。"
+    }
+    return $output
+}
+
+function Assert-VMateQemuRuntimeCapabilities {
+    param(
+        [string]$Qemu,
+        [bool]$RequireFbShm,
+        [bool]$RequireSdl,
+        [bool]$RequireVnc
+    )
+
+    # 中文注释：Windows 启动器当前固定使用 user netdev；这不是可选回退。
+    # 在创建 profile/NVRAM 前证明 backend 存在，避免裁剪版 QEMU 到启动末段
+    # 才因 “invalid backend type” 失败。
+    $netdevOutput = Get-VMateQemuCapabilityOutput -Qemu $Qemu `
+        -Arguments @('-netdev', 'help') -Capability 'user netdev'
+    if ($netdevOutput -notmatch '(?m)^\s*user\s*$') {
+        throw 'QEMU 缺少 Windows 启动器所需的 user netdev backend。'
+    }
+
+    if ($RequireFbShm) {
+        $fbShmOutput = Get-VMateQemuCapabilityOutput -Qemu $Qemu `
+            -Arguments @('-object', 'fb-shm,help') -Capability 'fb-shm object'
+        foreach ($property in @('path', 'rate', 'x', 'y', 'width', 'height')) {
+            $propertyPattern = '(?m)^\s*{0}\s*=' -f [regex]::Escape($property)
+            if ($fbShmOutput -notmatch $propertyPattern) {
+                throw "QEMU fb-shm object 缺少所需属性：$property"
+            }
+        }
+    }
+
+    if ($RequireSdl) {
+        $displayOutput = Get-VMateQemuCapabilityOutput -Qemu $Qemu `
+            -Arguments @('-display', 'help') -Capability 'SDL display'
+        if ($displayOutput -notmatch '(?m)^\s*sdl\s*$') {
+            throw 'QEMU 缺少 Windows 本地显示所需的 SDL display backend。'
+        }
+    }
+
+    if ($RequireVnc) {
+        # 中文注释：VNC 不是 -display backend，必须通过独立的 -vnc help
+        # 探针验证。只查顶层 -help 文本容易把文档占位符误判成已编译能力。
+        $vncOutput = Get-VMateQemuCapabilityOutput -Qemu $Qemu `
+            -Arguments @('-vnc', 'help') -Capability 'headless VNC' `
+            -AllowedExitCodes @(1)
+        if ($vncOutput -notmatch '(?im)^\s*vnc options:\s*$') {
+            throw 'QEMU 缺少 Windows headless 模式所需的 VNC server。'
         }
     }
 }
@@ -156,14 +427,21 @@ function Assert-VMateWhpxReady {
     param(
         [string]$Qemu,
         [bool]$AllowTcgFallback,
-        [bool]$DryRun
+        [bool]$DryRun,
+        [bool]$RequireFbShm = $false,
+        [bool]$RequireSdl = $false,
+        [bool]$RequireVnc = $false
     )
 
     if ($DryRun) {
         return
     }
     Assert-VMateQemuVersion -Qemu $Qemu
+    Assert-VMateQemuSmbiosCapabilities -Qemu $Qemu
     Assert-VMateQemuDeviceCapabilities -Qemu $Qemu
+    Assert-VMateQemuRuntimeCapabilities -Qemu $Qemu `
+        -RequireFbShm $RequireFbShm -RequireSdl $RequireSdl `
+        -RequireVnc $RequireVnc
     $build = Get-VMateWindowsBuild
     if ($build -lt 19041) {
         throw "WHPX x86_64 要求 Windows 10 2004/build 19041 或更新版本，实际：$build"

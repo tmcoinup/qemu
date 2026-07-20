@@ -91,8 +91,8 @@ Get-CimInstance Win32_VideoController |
 # 等 guest 真关机（看不见 QEMU 进程）
 ps -ef | grep "win10-1" | grep -v grep
 
-# 修 DEVPKEY
-echo 123456 | sudo -S /home/ubuntu/projects/qemu/deploy/scripts/host-fix-gpu-devpkey.sh 1
+# 修 DEVPKEY；由 sudo 通过终端安全读取宿主密码，不要把密码写进命令或脚本
+sudo /home/ubuntu/projects/qemu/deploy/scripts/host-fix-gpu-devpkey.sh 1
 ```
 
 这一步把"驱动程序提供商"从 `Red Hat, Inc.` 改成 `NVIDIA`（设备管理器 → GPU → 属性 → 驱动程序）。
@@ -169,20 +169,30 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown
 
 ### B.2 host 端密封成只读 base
 
+`seal-base.sh` 必须由实际 VM 普通用户执行，不要给它整体加 `sudo`：
+
 ```bash
 /home/ubuntu/projects/qemu/deploy/scripts/seal-base.sh 1 win10-shallow-dnf-v1
 ```
 
-`seal-base.sh` 会把 `vms/1/disk.qcow2` 复制（不是移动）到 `_base/win10-shallow-dnf-v1.qcow2`。
-
-### B.3 物理锁 base（防意外写）
+如果源实例仍是受支持的旧启动盘 profile，显式允许只读内存迁移：
 
 ```bash
-chmod -w /home/ubuntu/images/vms/_base/win10-shallow-dnf-v1.qcow2
-ls -la /home/ubuntu/images/vms/_base/
+deploy/scripts/seal-base.sh 1 win10-shallow-dnf-v1 \
+  --migrate-storage-profile
 ```
 
-### B.4 关于 VM1 本身
+脚本会持有与 start/stop 相同的实例锁，严格校验 profile、启动盘容量和 qcow2，
+把源盘压缩转换到同目录 staging，复核镜像完整性后以 no-replace 方式发布，并自动
+把最终 base 设为 `root:root/0444`。不再需要手工 `chmod -w`。每次 clone 还会
+在实例目录内建立 `.base.qcow2` hard-link pin；原 `_base` 目录项以后被移动或
+删除时，既有实例仍引用原 inode。为保持零拷贝 thin clone，base 和实例目录必须
+位于同一文件系统。
+
+默认清理会修改源 `disk.qcow2` 中的应用缓存；需要保持源盘字节内容不变时必须显式
+使用 `--no-clean`。无论哪种模式，convert 都不会移动或替换源盘。
+
+### B.3 关于 VM1 本身
 
 密封完，VM1 那份 disk.qcow2 还在原位置。你有 3 个选择：
 
@@ -202,38 +212,27 @@ ls -la /home/ubuntu/images/vms/_base/
 sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-dnf-v1 2
 ```
 
-> ⚠️ **一定要带 sudo**。脚本要挂 NTFS 写 unattend.xml，没 root 会跳过部分步骤；并且 clone 完目录权限会变 `root:root` 让普通用户的 `start-vm.sh` 写不了 OVMF NVRAM（脚本最后会 `chown` 回去）。
+> ⚠️ **一定要带 sudo**。脚本要离线挂载 Windows 系统盘；不带 sudo 会在任何
+> 文件写入前立即失败。脚本只会把本事务创建或替换的目录项归还给原始用户，
+> 不再递归改属已有实例目录。
 >
 > **重要原则**：除 per-user `NTUSER.DAT` 外，**绝不离线改 boot-critical hive**（SYSTEM / SOFTWARE / DEFAULT）—— Win10 22H2 incremental log 协议下，离线改 hive 即使 `.LOG1/.LOG2` 一起处理，启动也几乎必然 `0xc0000001`。所以所有 guest 启动后才要的注册表改动统一走 `deploy/autounattend/autounattend.xml` 的 `<FirstLogonCommands>`。
 >
 > **注意**：clone 阶段调 `host-fix-gpu-devpkey.sh` 会打印 `ControlSet001\Enum\PCI 不存在 — sysprep base 未首启的预期状态 / 跳过离线 DEVPKEY 覆盖`。这是**正确**行为：sysprep generalize 清掉了 PCI enum，新 clone 必须开机一次让 Windows 重新枚举才会有这些键。GPU 名最终由 guest 首次登录后 FirstLogonCommands Order=10 跑本地 respawn 重对齐。
 
 自动做完：
-1. 创建 qcow2 增量层 `vms/2/disk.qcow2` backed by base
-2. `stealth_pick_profile` reroll 硬件身份（新 CPU / 主板 / GPU / MAC / UUID / NVMe SN），NVMe 容量强制等于 base 容量避免 NTFS 错位
-3. `host-fix-gpu-devpkey.sh` 在 sysprep base 上自动 skip（无 PCI enum）；首启枚举后再跑 `finalize-clone-gpu.sh`
+1. 复用合法的 UI 预置 profile；否则重抽完整身份，并让实际 `BOOT_STORAGE_*`
+   （NVMe 或 SATA/AHCI）容量逐字节等于 base。
+2. 创建使用相对 backing 路径的 qcow2 增量层和全新 OVMF NVRAM；发布前后都会复核
+   格式、容量、backing inode 和 patched QEMU 能力。
+3. `host-fix-gpu-devpkey.sh` 在 sysprep base 上可自动 skip；首启枚举后再运行
+   `finalize-clone-gpu.sh`。
 4. **`host-inject-unattend.sh`** 把 `deploy/autounattend/autounattend.xml` 写到 guest 三处：
    - `%WINDIR%\Panther\Unattend\unattend.xml`（OOBE 主搜索路径）
    - `C:\unattend.xml`（备用）
-
-### C.2 首启后 GPU Provider 一键收尾
-
-clone 首启后 Windows 会重新枚举显示设备，并按 stock `viogpudo.inf` 把设备管理器 → GPU → 驱动程序 → 驱动程序提供商写回 `Red Hat, Inc.`。等 guest 第一次进桌面、本地 respawn 完成 GPU 名重对齐并重启/关机后，在 host 跑：
-
-```bash
-deploy/scripts/finalize-clone-gpu.sh 2
-```
-
-普通用户直接跑即可；脚本会自动 `sudo -E` 提权，因为底层需要 qemu-nbd + ntfs-3g 离线挂载 Windows 盘。若希望修完后自动启动：
-
-```bash
-STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 deploy/scripts/finalize-clone-gpu.sh 2 --restart -- --proxy
-```
    - `%WINDIR%\System32\Sysprep\unattend.xml`（备用）
-   - per-instance 把 `<ComputerName>` 替换成 `DESKTOP-<7位随机[A-Z0-9]>`（仿全新消费级
-     Win10 默认主机名）。**不用 `*`** —— `*` 会让 OOBE 拿 `RegisteredOwner`(Administrator)
-     当前缀生成 `ADMINIS-XXXXXXX`，暴露 sysprep 模板身份。随机后缀天然唯一，多机不撞名
-7. chown vms/<N>/ 回原用户
+5. per-instance 把 `<ComputerName>` 替换成 `DESKTOP-<7位随机[A-Z0-9]>`。
+6. 精确归还本次 disk/profile/OVMF（以及新建目录）的所有权，再提交事务。
 
 ### C.2 启动新 VM
 
@@ -244,7 +243,7 @@ STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 deploy/scripts/finalize-clone-gpu.sh 2 --r
 **guest 内 0 手动操作** ——OOBE 自动跑完 unattend.xml：
 
 1. **OOBE specialize 阶段**（首启）：处理 `<settings pass="specialize">`，应用 `ComputerName=DESKTOP-XXXXXXX`（host-inject 注入的随机名）+ 时区 + 输入法等，重启
-2. **OOBE oobeSystem 阶段**（第二启）：自动跳 `SkipMachineOOBE / SkipUserOOBE / HideEULAPage / HideLocalAccountScreen / ...` 全套画面，建/激活 Administrator/123456 账号
+2. **OOBE oobeSystem 阶段**（第二启）：自动跳 `SkipMachineOOBE / SkipUserOOBE / HideEULAPage / HideLocalAccountScreen / ...` 全套画面，建立隔离测试镜像的默认 Administrator 账号；该默认口令不得复用于宿主或生产环境
 3. **AutoLogon Administrator**：`<AutoLogon Enabled=true LogonCount=999>` 自动登录到桌面
 4. **`<FirstLogonCommands>` Order 1→10 顺序跑**：
    - Order 1-3: Enable RDP + 防火墙放行 + 关 NLA
@@ -253,8 +252,8 @@ STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 deploy/scripts/finalize-clone-gpu.sh 2 --r
    - **Order 10: `D:\工具\respawn-stealth.exe --firstlogon`**
 5. `respawn-stealth.exe` 先验证物理 `1AF4:1050`/stock VioGpuDod，再按 PCI subsys
    提交浅层逻辑 ID；事务发布 x86 SysWOW64 + x64 System32 NVAPI，使 GPU-Z 2.70
-   可直接双击；随后自动重启。`--firstlogon` 跳过名称/显示模式自刷，但保留一条
-   SYSTEM HardwareID 投影任务；不安装第三方服务
+   可直接双击；随后自动重启。`--firstlogon` 保留 SYSTEM 名称刷新与 HardwareID
+   投影任务，只跳过交互式显示模式任务；不安装第三方服务
 6. 重启后桌面就绪，Device Manager 显示 profile.GPU_NAME（可能跟 base 的 VM1 不同）
 
 整个过程从 `start-vm.sh` 到稳定桌面 **~5-8 分钟**，全程不需要鼠标键盘。
@@ -277,14 +276,33 @@ Test-Path C:\stealth\respawn.log
 Get-WinEvent -LogName 'Microsoft-Windows-Shell-Core/Operational' -MaxEvents 20 | Where-Object Message -Match 'FirstLogon'
 ```
 
-### C.3 sysprep 与 OOBE
+### C.3 首启后 GPU Provider 一键收尾
+
+clone 首启后 Windows 会重新枚举显示设备，并按 stock `viogpudo.inf` 把设备管理器 →
+GPU → 驱动程序 → 驱动程序提供商写回 `Red Hat, Inc.`。等 guest 第一次进桌面、
+本地 respawn 完成 GPU 名重对齐并重启/关机后，在 host 跑：
+
+```bash
+deploy/scripts/finalize-clone-gpu.sh 2
+```
+
+普通用户直接跑即可；脚本会自动 `sudo -E` 提权，因为底层需要 qemu-nbd + ntfs-3g
+离线挂载 Windows 盘。若希望修完后自动启动：
+
+```bash
+STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 \
+  deploy/scripts/finalize-clone-gpu.sh 2 --restart -- --proxy
+```
+
+### C.4 sysprep 与 OOBE
 
 - 阶段 B.1 sysprep **已做**：clone 的 VM 第一次开机自动走 OOBE，**unattend.xml 自动跳过所有画面**直接 AutoLogon 进桌面。每个 VM 走完后有**独立 SID/MachineGUID**（stealth 友好）。
 - 阶段 B.1 sysprep **没做**：clone 的 VM 直接登录到 base 的 Administrator，**多 VM 的 MachineGUID 相同**，stealth 弱一点。两种都通，但生产 VM 建议 sysprep。
 
-### C.4 验证
+### C.5 验证
 
-跟阶段 A.8 一样的命令在 VM2 内跑一遍。GPU 应该是**不同于 VM1 的型号**（因为 profile reroll 了）。
+跟阶段 A.8 一样的命令在 VM2 内跑一遍。未预置 profile 时，clone 会生成新的完整
+profile；预置 profile 时则应与该 profile 的身份一致。
 
 ---
 
@@ -303,7 +321,6 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 # 3. sysprep + 关机
 # 4. host 密封新 base
 /home/ubuntu/projects/qemu/deploy/scripts/seal-base.sh 99 win10-shallow-dnf-v2
-chmod -w /home/ubuntu/images/vms/_base/win10-shallow-dnf-v2.qcow2
 
 # 5. 清临时 VM
 rm -rf /home/ubuntu/images/vms/99
@@ -320,8 +337,8 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 
 阶段 C 的 GPU 重对齐（首启 `FirstLogonCommands` Order=10 / C.2.1 兜底）只走
 `D:\工具\respawn-stealth.exe --firstlogon`。`FirstLogonCommands` 是 OOBE 后首次登录
-执行一次，不是每次开机执行；`--firstlogon` 跳过名称/显示模式任务，只保留必要的
-`StealthGPU-ProjectHardwareId` 内置任务。迁移到其它主机时不要求对方有相同 host IP
+执行一次，不是每次开机执行；`--firstlogon` 保留 `StealthGPU-RefreshName` 与
+`StealthGPU-ProjectHardwareId`，只跳过交互式显示模式任务。迁移到其它主机时不要求对方有相同 host IP
 或 HTTP 服务。
 
 ### 文件
@@ -381,9 +398,9 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 | A 末 | guest | 最新 EXE 保留在 `D:\工具\` | 必需：clone FirstLogon 固定从这里执行 |
 | B.1 | guest | `sysprep /generalize /oobe /shutdown` | 清 SID/MachineGUID 让 clone 独立 |
 | B.2 | host | `deploy/scripts/seal-base.sh 1 <name>` | 密封 base |
-| B.3 | host | `chmod -w _base/<name>.qcow2` | 物理锁 base |
-| C.1 | host | `sudo .../clone-from-base.sh <name> 2` | clone qcow2 增量 + reroll profile + 注 unattend.xml |
+| C.1 | host | `sudo .../clone-from-base.sh <name> 2` | clone qcow2 增量 + 复用/生成 profile + 注 unattend.xml |
 | C.2 | host | `.../start-vm.sh 2` | 启动新 VM；**guest 内 0 手动操作**；Order 10 优先执行 `D:\工具\respawn-stealth.exe --firstlogon` |
+| C.3 | host | `.../finalize-clone-gpu.sh 2` | 首启后修正 DriverProvider |
 | C 兜底 | guest | `D:\工具\respawn-stealth.exe --firstlogon` | **离线**本地重对齐 GPU（=不连 host 的 respawn-stealth）|
 | D | host + guest | 滚版本（见上） | 升级 base |
 

@@ -8,6 +8,11 @@
 # qemu-bridge-helper 启动路径、输出和回退策略不受影响。
 # ---------------------------------------------------------------------------
 
+# shellcheck disable=SC1091  # 运行时按当前库目录加载共享只读探测函数。
+_SV_VLAN_PREFLIGHT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_SV_VLAN_PREFLIGHT_DIR/uplink-detect.sh"
+unset _SV_VLAN_PREFLIGHT_DIR
+
 SV_VLAN_HELPER="/usr/local/libexec/qemu-stealth-vlan-tap"
 SV_VLAN_DOWNSCRIPT="/usr/local/libexec/qemu-stealth-vlan-down"
 SV_VLAN_CONFIG="/etc/qemu/stealth-vlan.conf"
@@ -56,7 +61,7 @@ sv_vlan_preflight_once() {
             SV_VLAN_PREFLIGHT_CODE="helper_missing"
         fi
         echo "ERROR: VLAN helper 未安装或不是 root-owned 只读副本: $SV_VLAN_HELPER" >&2
-        echo "       请先运行: sudo VLAN_TRUNK=1 UPLINK=<物理网卡> deploy/scripts/setup-bridge.sh" >&2
+        echo "       请先运行: sudo deploy/scripts/setup-bridge.sh" >&2
         return 1
     fi
     if ! sv_vlan_trusted_executable "$SV_VLAN_DOWNSCRIPT"; then
@@ -72,7 +77,7 @@ sv_vlan_preflight_once() {
     if ! actual="$(sv_vlan_helper_call check "$INSTANCE" "$VLAN_ID")"; then
         SV_VLAN_PREFLIGHT_CODE="helper_check_failed"
         echo "ERROR: VLAN $VLAN_ID 的单 br0 宿主预检失败。" >&2
-        echo "       请先运行: sudo VLAN_TRUNK=1 UPLINK=<物理网卡> deploy/scripts/setup-bridge.sh" >&2
+        echo "       请先运行: sudo deploy/scripts/setup-bridge.sh" >&2
         return 1
     fi
     if [[ "$actual" != "$VLAN_TAP_IF" ]]; then
@@ -133,26 +138,26 @@ sv_vlan_candidate_valid() {
         && "${BASH_REMATCH[1]}" != "br0" ]]; then
         return 1
     fi
-    [[ ! -d "/sys/class/net/$candidate/wireless" ]]
+    [[ ! -d "$SV_VLAN_SYS_CLASS_NET/$candidate/wireless" ]]
 }
 
 sv_vlan_candidate_is_physical() {
     local candidate="$1" details
 
     sv_vlan_candidate_valid "$candidate" || return 1
-    [[ -e "/sys/class/net/$candidate/device" ]] || return 1
+    [[ -e "$SV_VLAN_SYS_CLASS_NET/$candidate/device" ]] || return 1
+    [[ "$(cat -- "$SV_VLAN_SYS_CLASS_NET/$candidate/type" 2>/dev/null || true)" == "1" \
+        && "$(cat -- "$SV_VLAN_SYS_CLASS_NET/$candidate/carrier" \
+            2>/dev/null || true)" == "1" ]] || return 1
     details="$(ip -d -o link show dev "$candidate" 2>/dev/null)" || return 1
     [[ ! "$details" =~ [[:space:]]vlan[[:space:]]+protocol[[:space:]] \
         && ! "$details" =~ [[:space:]]macvlan[[:space:]] \
         && ! "$details" =~ [[:space:]]macvtap[[:space:]] ]]
 }
 
-# 只在能唯一确定时返回候选：显式覆盖 → root 配置 → 唯一默认路由物理口 →
-# br0 下唯一物理口 → 唯一 carrier-up 物理口。Wi-Fi、TAP/veth/VLAN 等不猜测。
+# 只在能唯一确定时返回候选：显式覆盖 → root 配置 → 共享拓扑探测。
+# Wi-Fi、TAP/veth/VLAN 等不猜测。
 sv_vlan_detect_uplink() {
-    local candidate line
-    local -a candidates=()
-
     if [[ -n "${VLAN_SETUP_UPLINK:-}" ]]; then
         # 显式覆盖只省略“唯一候选”推断，不放宽物理口/Wi-Fi/link-kind 校验。
         # 这样 veth、dummy 或 VLAN 子接口即使名字合法，也不能被确认流程接管。
@@ -164,44 +169,8 @@ sv_vlan_detect_uplink() {
         printf '%s\n' "$SV_VLAN_CONFIG_UPLINK"
         return 0
     fi
-
-    while IFS= read -r candidate; do
-        sv_vlan_candidate_is_physical "$candidate" && candidates+=("$candidate")
-    done < <(ip -4 route show default 2>/dev/null | awk '
-        { for (i=1; i<NF; i++) if ($i == "dev") print $(i+1) }
-    ' | sort -u)
-    if (( ${#candidates[@]} == 1 )); then
-        printf '%s\n' "${candidates[0]}"
-        return 0
-    elif (( ${#candidates[@]} > 1 )); then
-        return 1
-    fi
-
-    candidates=()
-    while IFS= read -r line; do
-        candidate="${line#*: }"
-        candidate="${candidate%%:*}"
-        candidate="${candidate%%@*}"
-        sv_vlan_candidate_is_physical "$candidate" && candidates+=("$candidate")
-    done < <(ip -o link show master br0 2>/dev/null || true)
-    if (( ${#candidates[@]} == 1 )); then
-        printf '%s\n' "${candidates[0]}"
-        return 0
-    elif (( ${#candidates[@]} > 1 )); then
-        return 1
-    fi
-
-    candidates=()
-    for line in /sys/class/net/*/device; do
-        [[ -e "$line" ]] || continue
-        candidate="${line%/device}"
-        candidate="${candidate##*/}"
-        [[ "$(cat "/sys/class/net/$candidate/carrier" 2>/dev/null || true)" == "1" ]] \
-            && sv_vlan_candidate_is_physical "$candidate" \
-            && candidates+=("$candidate")
-    done
-    (( ${#candidates[@]} == 1 )) || return 1
-    printf '%s\n' "${candidates[0]}"
+    uplink_detect_from_topology \
+        sv_vlan_candidate_is_physical br0 "$SV_VLAN_SYS_CLASS_NET"
 }
 
 sv_vlan_uplink_has_native_conflict() {
@@ -352,7 +321,7 @@ sv_vlan_preflight() {
     fi
     if ! sv_vlan_can_offer_setup; then
         echo "       当前为 DRY_RUN/非交互/root/CI，或 SSH 未显式允许；不会自动修改网络。" >&2
-        echo "       手动执行: sudo VLAN_TRUNK=1 UPLINK=<物理网卡> deploy/scripts/setup-bridge.sh" >&2
+        echo "       手动执行: sudo deploy/scripts/setup-bridge.sh" >&2
         return 1
     fi
     if ! uplink="$(sv_vlan_detect_uplink)"; then

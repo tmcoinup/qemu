@@ -1,8 +1,9 @@
 # Windows 打包与启动方案
 
-> **版本基线**：当前维护目标为 QEMU `11.0.2` + `vmate` 分支。安装包继续保留
+> **版本基线**：当前维护目标为 QEMU `11.0.2` + `V-11` 分支；`V-11` 与
+> `G-11` 是相互独立的两条维护线。安装包继续保留
 > `qemu-system-x86_64.exe`、`qemu-img.exe` 等上游兼容文件名，避免破坏脚本、
-> QMP 管理工具和既有自动化；`vmate` 用于标识本仓库维护分支和下游构建来源。
+> QMP 管理工具和既有自动化；VMate 用于标识本仓库的下游构建来源。
 
 本文档覆盖 Windows 10 / Windows 11 宿主运行 patched QEMU 的方案。Windows 10
 和 Linux 客体属于当前可启动范围；Windows 11 客体需要 TPM 2.0 与可验证的 Secure
@@ -42,13 +43,14 @@ Windows 侧没有 `SCM_RIGHTS`，所以 HELLO 时如果 client 带
 安装目录需要有这些文件：
 
 - `qemu-system-x86_64.exe`：patched QEMU 主程序。
-- `qemu-img.exe`：可选，用于维护 qcow2 镜像。
+- `qemu-img.exe`：启动必需；启动器核验其为 11.0.2，并检查 qcow2 格式与虚拟容量。
 - `qemu-fb-shm-stream.exe`：原生 fb-shm 消费端，不依赖 Python。
 - `deploy/windows/start-vm.ps1`：Windows 启动程序。
 - `deploy/windows/stream-fb-shm.ps1`：Windows 推流封装。
 - `deploy/windows/stop-vm.ps1`：通过 QMP 发 `quit` 的停止脚本。
 - `deploy/windows/lib/*.ps1`：profile、WHPX 预检和 QEMU 参数模块。
 - `deploy/hardware/platforms.json`：Linux/Windows 共用的版本化整机事实源。
+- `deploy/hardware/host-compatibility.json`：显式宿主透传兼容模式的通用 Q35 模板。
 - `deploy/hardware/components.json`：SSD、显示器与 HID 的关联部件目录。
 - `ffmpeg.exe`：只有推流/录制时需要；建议放到 PATH。
 
@@ -66,21 +68,36 @@ Windows PowerShell 5.1 是 Windows 10/11 自带组件，不算额外运行时依
 
    启动器会同时检查 Windows build、`HypervisorPresent`、QEMU `11.0.2` 版本和
    `-accel help` 中的 WHPX。任何确定性失败都会终止；只有显式
-   `-AllowTcgFallback` 才允许软件 TCG 进入候选列表。该模式把 `-cpu` 改为 TCG
-   可用的 `max`；如果真的回退，CPU/SMBIOS 不再满足真机一致性，只用于救援启动。
+   `-AllowTcgFallback` 才允许软件 TCG 进入候选列表。该模式仍使用所选清单的
+   家用 CPU named model，禁止通用 `max`；软件执行性能不计入生产支持。
 
 3. 准备 VM 目录和磁盘，例如：
 
    ```powershell
    New-Item -ItemType Directory -Force C:\qemu\vms\1 | Out-Null
-   qemu-img.exe create -f qcow2 C:\qemu\vms\1\disk.qcow2 120G
+   qemu-img.exe create -f qcow2 C:\qemu\vms\1\disk.qcow2 512110190592
    ```
 
-4. 确认 OVMF 固件存在。启动脚本会按顺序查找：
+   当前组件目录把启动盘固定为 `512110190592` bytes。其它容量会在启动前被拒绝；
+   不能使用近似的 `120G`/`512G` 示例替代目录中的精确字节数。
+
+4. 确认 OVMF code 和 vars 模板都存在。磁盘启动时，启动脚本会按顺序查找 code：
 
    - `deploy\firmware\OVMF_CODE_4M_stealth.fd`
+   - NSIS 标准布局的 `share\edk2-x86_64-code.fd`
    - QEMU 安装目录下的 `share\qemu\edk2-x86_64-code.fd`
    - QEMU 安装目录下的 `edk2-x86_64-code.fd`
+
+   使用 `-Iso` 安装客体时，默认只在后三个位置选择标准 edk2 code。stealth OVMF
+   的 ISO9660 路径不能可靠读取 Windows hybrid ISO；只有显式传入 `-OvmfCode`
+   才会覆盖这项保护。安装包虽然携带磁盘启动使用的 stealth 固件，默认 ISO
+   路径仍与源码版一致地使用标准 edk2。
+
+   vars 模板按顺序查找：
+
+   - NSIS 标准布局的 `share\edk2-i386-vars.fd`
+   - QEMU 安装目录下的 `share\qemu\edk2-i386-vars.fd`
+   - QEMU 安装目录下的 `edk2-i386-vars.fd`
 
 ## 启动 VM
 
@@ -93,10 +110,11 @@ Windows PowerShell 5.1 是 Windows 10/11 自带组件，不算额外运行时依
 可更换件统一从 `deploy/hardware/components.json` 读取。profile 同时固化 component
 schema、`catalog_revision`、目录摘要以及 SSD/显示器/键盘/鼠标 ID；目录被篡改、组件
 被替换或旧 profile 缺少绑定时都会 fail-closed。当前唯一启用组合是 Samsung 970 PRO
-512GB（`144d:a804`、subsystem `144d:a801`、`1B2QEXP7`、序列绑定 NQN）、Samsung
-S24F350 深层 EDID、Microsoft 045e:0750 键盘和 045e:00cb 鼠标。真实启动还会调用同
-目录的 `qemu-img.exe`，要求 qcow2 的虚拟容量精确等于目录中的 `512110190592` bytes；
-不能只改型号字符串却保留不匹配容量。
+512GB（`144d:a804`、subsystem `144d:a801`、`1B2QEXP7`、UUID 绑定 NQN）、Samsung
+S24F350 深层 EDID、Microsoft 045e:0750 键盘和 045e:00cb 鼠标。真实启动还会调用
+同目录的 11.0.2 `qemu-img.exe`，要求磁盘格式为 qcow2，且虚拟容量精确等于目录中的
+`512110190592` bytes；同容量 raw 文件和不匹配容量都会拒绝，不能只改型号字符串却
+保留不匹配存储事实。
 
 这些字段按真实 bundle 原子组合：主板 PCI subsystem、M.2 插槽链路、SSD 端点、NIC
 subsystem/OUI、USB descriptor 和 EDID 不会各自独立乱抽。ALC887 当前明确标记为
@@ -105,8 +123,10 @@ subsystem/OUI、USB descriptor 和 EDID 不会各自独立乱抽。ALC887 当前
 
 WHPX 在 QEMU 11 中忽略自定义 `-cpu` 模型，所以 Windows 路线明确传入
 `-cpu host`，SMBIOS Type 4 也使用宿主 CPU 名称。严格模式只允许宿主 CPU 名称与
-manifest CPU SKU 精确相同；E5 等没有对应平台的宿主会拒绝真机 profile。显式
-`-AllowHostCpuPlatformMismatch` 可以进入仅功能模式，但不能宣称 CPU/主板物理匹配。
+manifest CPU SKU 精确相同；E5 等没有对应平台的宿主会拒绝真机 profile。
+`-AllowPlatformCompatibility` 与旧名 `-AllowHostCpuPlatformMismatch` 只保留
+参数兼容，当前均在任何 profile/NVRAM 写入前 fail-closed：Windows 尚不能验证共享
+manifest 要求的 family/model/stepping、物理地址位、TSC 绑定和等价 WHPX realize。
 默认加速器是 `whpx,hyperv=off,kernel-irqchip=off`；需要 Hyper-V
 enlightenments 时必须显式传 `-ExposeHyperv`。WHPX 不支持本项目所需的嵌套虚拟化，
 `-RequireNestedVirtualization` 会直接失败。
@@ -137,7 +157,7 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\start-vm.ps1 `
 | `-HardwareProfile path` | 覆盖持久化 profile 路径 |
 | `-PlatformId id` | 首次创建时选择指定的启用平台 |
 | `-RerollHardwareProfile` | 备份并重建全部随机身份 |
-| `-AllowHostCpuPlatformMismatch` | 接受 WHPX 宿主 CPU 与平台不匹配，仅用于功能模式 |
+| `-AllowPlatformCompatibility` | 预留参数，当前 fail-closed；旧名 `-AllowHostCpuPlatformMismatch` 同样拒绝 |
 | `-AllowTcgFallback` | 显式接受 WHPX 失败后使用软件 TCG |
 | `-ExposeHyperv` | 使用 `whpx,hyperv=auto` 暴露 enlightenments |
 | `-GuestOs Windows10|Linux` | 选择 RTC/客体前置策略；Windows11 当前拒绝 |
@@ -151,10 +171,19 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\start-vm.ps1 `
 | `-NoGpuZeroCopy` | GL 设备存在时仍保留 SDL/GL，只移除 blob/hostmem 偏好；ANGLE/renderer 仍可能从普通 texture 导出 handle，失败才回退 SHM |
 | `-GpuHostmem 512M` | 调整 virtio-gpu host-visible window；默认 `256M` |
 | `-GpuGlProbe Available|Unavailable` | 仅允许与 `-DryRun` 一起供 CI 注入探测结果；真实启动强制使用默认 `Auto`，不能越过能力检查 |
+| `-ExtraQemuArgs @(...)` | 追加经过 Windows 宿主边界校验的高级 QEMU 参数 |
 | `-DryRun` | 只打印 QEMU 参数，不启动 |
 
 脚本默认把 fb-shm socket 放在 `C:\qemu-run\fb-<N>.sock`。Windows `AF_UNIX`
 路径长度限制比 Linux 更敏感，短路径能避免用户目录过长导致 connect 失败。
+
+`ExtraQemuArgs` 按已经分词的选项、backend 和属性逐层校验，不对路径或 ID 做全局
+关键词匹配。Windows 合法的 `user/socket/stream/dgram`、只使用 `ifname` 的
+TAP-Win32、AF_UNIX socket、`aio=native|threads` 与 `cache=none` 均可保留；
+KVM/Xen、POSIX 生命周期选项、bridge/passt/vhost/VFIO、`io_uring` 和宿主原始
+块设备等会在调用 QEMU 前拒绝。本分支不允许 GPU 直通。`-m`、`-smp`、`-numa`
+和 `-set` 与既有 `-accel/-cpu/-uuid/-smbios/-rtc/-machine/-global` 一样属于
+profile/身份保留边界，不能通过额外参数覆盖。
 
 ## 推流或录制
 
@@ -226,13 +255,26 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\stop-vm.ps1 -Instance 1
 
 ## 打包方式
 
+开发宿主的完整包清单、`makensis`/MinGW/Podman 自检和 rootless 限制见
+[开发与跨平台验证依赖](DEVELOPMENT-DEPENDENCIES.md)。
+
 推荐使用仓库现有的 Fedora win64 cross 容器。这个 Dockerfile 已包含
 `mingw64-gcc`、`mingw64-glib2`、`mingw64-pixman`、`mingw64-SDL2`、
 `mingw32-nsis` 等 Windows 构建与 NSIS installer 依赖：
 
 ```bash
-podman build -t qemu-win64-cross -f tests/docker/dockerfiles/fedora-win64-cross.docker .
+podman build --build-arg USER="$USER" --build-arg UID="$(id -u)" \
+  -t qemu-win64-cross -f tests/docker/dockerfiles/fedora-win64-cross.docker .
+podman run --rm -it --userns=keep-id \
+  --user "$USER" -v "$PWD:/work" -w /work qemu-win64-cross bash
 ```
+
+Fedora/RHEL 等启用 SELinux 的宿主应把 bind mount 写成
+`-v "$PWD:/work:Z"`；Ubuntu/AppArmor 宿主保持上例即可。构建目录会直接留在宿主
+工作树，避免把 installer 只留在一次性容器层。
+
+镜像没有 MinGW 系统版 slirp；configure 会按锁定的 `subprojects/slirp.wrap`
+联网获取并构建。离线环境必须预先准备 Meson `subprojects/packagecache`。
 
 进入容器后配置 Windows x86_64 目标。源码版本变化时必须删除或重新配置旧 build
 目录；`scripts/nsis.py` 会把源码 `VERSION` 与输出文件名比较，并拒绝旧配置请求的
@@ -244,10 +286,13 @@ cd build-win64-vmate
 ../configure \
   --cross-prefix=x86_64-w64-mingw32- \
   --target-list=x86_64-softmmu \
+  --enable-tools \
   --enable-sdl \
+  --enable-vnc \
   --enable-slirp \
   --enable-whpx \
   --enable-pixman \
+  --disable-rust \
   --disable-docs
 ```
 
@@ -260,9 +305,12 @@ D3D11 shared texture 支持后重新配置 `--enable-opengl --enable-virglrender
 构建并生成 NSIS 安装包：
 
 ```bash
-ninja
-ninja installer
+ninja -j4 qemu-system-x86_64.exe qemu-img.exe qemu-fb-shm-stream.exe
+make -j4 installer
 ```
+
+QEMU 11 的安装包入口是 Makefile 包装目标；不要沿用旧文档中的
+`ninja installer`，该目标在当前构建目录中不存在。
 
 输出文件名由 Meson 生成，形如：
 
@@ -273,8 +321,11 @@ build-win64-vmate/qemu-setup-11.0.2.exe
 `scripts/nsis.py` 会先执行 `make install DESTDIR=...`，再分析 exe/dll 依赖并复制
 MinGW DLL，最后调用 `makensis`。`qemu-fb-shm-stream.exe` 已加入 Meson
 install 目标。x86_64 下游源码还会生成不可取消的 `VMate Runtime` section，把
-`qemu-img.exe`、`qemu-fb-shm-stream.exe`、`deploy/windows`、两个 hardware manifest
-和本说明按原相对目录装入 `$INSTDIR`；因此自定义安装目录也能直接运行 launcher。
+`qemu-img.exe`、`qemu-fb-shm-stream.exe`、`deploy/windows`、三个 hardware manifest、
+磁盘启动使用的 stealth OVMF 和本说明按原相对目录装入 `$INSTDIR`；因此自定义安装
+目录也能直接运行 launcher。
+VMate runtime 启用时，`qemu-system-x86_64.exe` 的 system-emulation section 同样为
+只读必选项；打包阶段也会拒绝缺少上述任一原生程序的半套 staging。
 普通上游源码没有 `deploy/windows/start-vm.ps1` 时不会定义该 section，原 NSIS
 打包内容保持不变；检测到入口但运行文件不完整则打包阶段直接失败。
 
@@ -296,6 +347,6 @@ install 目标。x86_64 下游源码还会生成不可取消的 `VMate Runtime` 
 - NVENC/QSV/AMF/libx264 选择器的确定性注入测试
 - NSIS 11.0.2 文件名门禁和 fb-shm 跨平台静态回归
 
-这些测试不等于真实 Windows WHPX 验收。本机没有 MinGW/NSIS 完整 Windows cross
-环境时，无法实际产出安装包或验证 WHPX 长稳；发布前仍要在目标 Windows 版本完成
-启动、重启、profile 读取、编码器回退和至少 24 小时压力测试。
+这些测试不等于真实 Windows WHPX 验收。即使 Linux 开发机已具备 MinGW、NSIS 和
+cross 容器环境，也不能在 Linux 上验证 WHPX 长稳；发布前仍要实际生成安装包，并在
+目标 Windows 版本完成启动、重启、profile 读取、编码器回退和至少 24 小时压力测试。

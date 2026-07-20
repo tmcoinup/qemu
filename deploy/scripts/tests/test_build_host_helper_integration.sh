@@ -34,13 +34,25 @@ cat > "$fake_bin/pkg-config" <<'EOF'
 exit 0
 EOF
 
+cat > "$fake_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+# build/helper 组合测试不验证宿主 Python wheel；对应契约由
+# test_build_tooling_static.sh 覆盖。消费 heredoc 后返回成功，保持本用例隔离。
+[[ "${1:-}" == "-" ]] || exec /usr/bin/python3 "$@"
+cat >/dev/null
+EOF
+
 cat > "$fake_bin/ninja" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' 'ninja' >> "$FAKE_EVENT_LOG"
 [[ "${FAKE_NINJA_FAIL:-0}" == "0" ]] || exit 31
 if [[ "${FAKE_NO_BINARY:-0}" == "0" ]]; then
-    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > qemu-system-x86_64
+    if [[ "${FAKE_EMPTY_BINARY:-0}" == "1" ]]; then
+        : > qemu-system-x86_64
+    else
+        printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > qemu-system-x86_64
+    fi
     chmod 0755 qemu-system-x86_64
 fi
 EOF
@@ -113,7 +125,7 @@ else
     exec "$FAKE_BUILD"
 fi
 EOF
-chmod 0755 "$fake_bin/pkg-config" "$fake_bin/ninja" \
+chmod 0755 "$fake_bin/pkg-config" "$fake_bin/python3" "$fake_bin/ninja" \
     "$fake_bin/systemd-detect-virt" "$fake_bin/sudo" \
     "$fake_repo/deploy/scripts/setup-host-helpers.sh" \
     "$fake_repo/deploy/scripts/setup-host-helpers-real.sh" \
@@ -140,6 +152,7 @@ run_build() {
         CI=1 INSTALL_HOST_HELPERS="${INSTALL_HOST_HELPERS:-auto}" \
         FAKE_NINJA_FAIL="${FAKE_NINJA_FAIL:-0}" \
         FAKE_NO_BINARY="${FAKE_NO_BINARY:-0}" \
+        FAKE_EMPTY_BINARY="${FAKE_EMPTY_BINARY:-0}" \
         FAKE_VERIFY_FAIL="${FAKE_VERIFY_FAIL:-0}" \
         FAKE_INSTALL_FAIL="${FAKE_INSTALL_FAIL:-0}" \
         FAKE_CHECK_FAIL="${FAKE_CHECK_FAIL:-0}" \
@@ -157,7 +170,7 @@ run_build_pty() {
         PTY_BACKGROUND="$background" FAKE_CONTAINER="$container" \
         VMATE_INSTALL_ROOT="$tmp/poison-root" VMATE_QEMU_BINARY=/bin/false \
         VMATE_TARGET_UID=4242 INSTALL_HOST_HELPERS=auto \
-        FAKE_NINJA_FAIL=0 FAKE_NO_BINARY=0 FAKE_VERIFY_FAIL=0 \
+        FAKE_NINJA_FAIL=0 FAKE_NO_BINARY=0 FAKE_EMPTY_BINARY=0 FAKE_VERIFY_FAIL=0 \
         FAKE_INSTALL_FAIL=0 FAKE_CHECK_FAIL=0 \
         timeout 20 script -qefc "$tmp/pty-runner.sh" /dev/null \
         >"$output_log" 2>&1
@@ -243,6 +256,13 @@ assert_not_complete
 reset_case
 if FAKE_NO_BINARY=1 run_build --install-host-helpers; then
     fail "缺少 QEMU 二进制时 build.sh 仍返回成功"
+fi
+assert_events 'ninja'
+assert_not_complete
+
+reset_case
+if FAKE_EMPTY_BINARY=1 run_build --install-host-helpers; then
+    fail "空 QEMU 二进制时 build.sh 仍返回成功"
 fi
 assert_events 'ninja'
 assert_not_complete

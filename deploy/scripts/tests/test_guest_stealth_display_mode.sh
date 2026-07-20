@@ -212,6 +212,9 @@ sync_line="$(grep -n '& \$powershellExe @displayArgs' "$SPOOF" | cut -d: -f1)"
     || fail "显示模式同步验收没有发生在最终 PnP 扫描之后"
 grep -F 'if ($displayTaskInstalled)' "$SPOOF" >/dev/null \
     || fail "无交互桌面延后语义没有检查登录任务是否实际安装"
+refresh_section="$(sed -n '/^# ---- install boot-time refresh task/,/^# ---- prepare verified/p' "$SPOOF")"
+[[ "$refresh_section" != *'$SkipTask'* && "$refresh_section" == *'Register-ScheduledTask'* ]] \
+    || fail "名称刷新任务没有在 FirstLogon/-SkipTask 下无条件保留"
 grep -F 'exit $displayModeFailureCode' "$SPOOF" >/dev/null \
     || fail "显示模式失败退出码没有传播给调用方"
 if grep -nE '\[StDisp\]::ChangeDisplaySettings.*(Out-Null|> *\$null)' "$MODE_SCRIPT" >&2; then

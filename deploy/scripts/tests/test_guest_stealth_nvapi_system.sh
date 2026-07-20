@@ -67,7 +67,11 @@ for old_hash in \
     79b05e4707fa3b4882279995898ea99e74f584e31d10f9733c24714eb79ea80d \
     8b32d767e69526c535cce361a9d5853fc6f21f7f348600fabfefe7f46db708cc \
     63ecadd497f955a599e8a12ea7f45fd92915a47570be473d166ddbb3d462c13e \
-    585ef928f54548ed2ac9eae1dfcdd5b12e4fd8a9ab5f7d94257ca01df68cdf81; do
+    585ef928f54548ed2ac9eae1dfcdd5b12e4fd8a9ab5f7d94257ca01df68cdf81 \
+    5ad43a193ccf0c3dacc769f4267d394502708fc1a5191d9b1338ba8485ea9c94 \
+    311b95768f8bbd18fb30f0e1144c9f2c50cc4f8433b870768c4a439f57844f56 \
+    1638720952a6187773372f29837c3bb26804eaeaf00938a8c2f42996bc4dd972 \
+    1d39f3dada172f62b62f801de434ceda3060caf3b0887381d0b853771f3b97cf; do
     grep -F "$old_hash" "$INSTALLER" >/dev/null \
         || fail "上一版系统 NVAPI 摘要未转入 historical allowlist: $old_hash"
 done
@@ -388,8 +392,9 @@ grep -F '$movedHash -cne $Entry.ObservedHash' "$INSTALLER" >/dev/null \
     || fail "提交没有核对原子移走实体与预检快照"
 grep -F '拒绝覆盖未知 NVAPI DLL' "$INSTALLER" >/dev/null \
     || fail "installer 没有 fail-closed 保护真实/未知 NVAPI"
-grep -F "ProcessName -like 'GPU-Z*'" "$INSTALLER" >/dev/null \
-    || fail "更新前没有拒绝正在运行的 GPU-Z"
+if rg -n 'Get-Process|ProcessName' "$INSTALLER" >&2; then
+    fail "系统级 NVAPI 发布不得按 GPU-Z 或其它检测工具进程名特判"
+fi
 grep -F '[IO.FileShare]::None' "$INSTALLER" >/dev/null \
     || fail "系统 NVAPI installer 没有跨进程排他锁"
 
@@ -419,7 +424,7 @@ final_line="$(grep -n '^if (\$NoReboot)' "$RESPAWN" | tail -n 1 | cut -d: -f1)"
     -n "$projection_call_line" && -n "$final_line" ]] \
     || fail "无法定位 apply、HardwareID 与最终成功顺序"
 (( spoof_call_line < projection_call_line && projection_call_line < final_line )) \
-    || fail "HardwareID 没有位于 identity+NVAPI 成功之后、最终成功之前"
+    || fail "HardwareID 没有位于 identity+GPU API 成功之后、最终成功之前"
 
 # 跨组件升级必须由 apply 自己收口：reader Prepare 在 pointer Commit 前，
 # identity Complete 后才 Finalize；失败 finally 先恢复旧 pointer，再恢复历史 reader。
@@ -445,36 +450,36 @@ APPLY_PATH="$APPLY" pwsh -NoLogo -NoProfile -NonInteractive -Command '
     $body = $guard.Body.Extent.Text
     $finally = $guard.Finally.Extent.Text
     foreach ($marker in @(
-        "& `$powershellExe @nvapiInstallArgs",
+        "& `$powershellExe @gpuApiInstallArgs",
         "-CommitIdentity `$identityTransactionId",
         "-CompleteIdentity `$identityTransactionId",
         "`$completeInspection = & `$identityHelperSource -InspectIdentity",
         "`$completeResolution = & `$identityHelperSource -RollbackIdentity",
         "`$resolvedState -ceq",
-        "& `$powershellExe @nvapiFinalizeArgs")) {
+        "& `$powershellExe @gpuApiFinalizeArgs")) {
         if (-not $body.Contains($marker)) {
-            throw ("NVAPI/identity 原子窗口缺少：" + $marker)
+            throw ("GPU API/identity 原子窗口缺少：" + $marker)
         }
     }
-    $installOffset = $body.IndexOf("& `$powershellExe @nvapiInstallArgs")
+    $installOffset = $body.IndexOf("& `$powershellExe @gpuApiInstallArgs")
     $commitOffset = $body.IndexOf("-CommitIdentity `$identityTransactionId")
     $completeOffset = $body.IndexOf("-CompleteIdentity `$identityTransactionId")
-    $finalizeOffset = $body.IndexOf("& `$powershellExe @nvapiFinalizeArgs")
+    $finalizeOffset = $body.IndexOf("& `$powershellExe @gpuApiFinalizeArgs")
     if (-not ($installOffset -lt $commitOffset -and
         $commitOffset -lt $completeOffset -and
         $completeOffset -lt $finalizeOffset)) {
         throw "Prepare → Commit → Complete → Finalize 顺序错误"
     }
-    $dllRollbackOffset = $finally.IndexOf("& `$powershellExe @nvapiRecoveryArgs")
+    $readerRollbackOffset = $finally.IndexOf("& `$powershellExe @gpuApiRecoveryArgs")
     $identityRollbackOffset = $finally.IndexOf("-RollbackIdentity `$identityTransactionId")
-    if ($dllRollbackOffset -lt 0 -or $identityRollbackOffset -lt 0 -or
-        $identityRollbackOffset -ge $dllRollbackOffset) {
+    if ($readerRollbackOffset -lt 0 -or $identityRollbackOffset -lt 0 -or
+        $identityRollbackOffset -ge $readerRollbackOffset) {
         throw "失败路径没有先恢复旧 pointer、再恢复历史 reader"
     }
     if (-not $finally.Contains("-not `$identityCompletionUnresolved")) {
         throw "Complete 状态无法裁决时仍会破坏两份 durable journal"
     }
-' || fail "NVAPI 与 identity 的顺序/失败回滚契约测试失败"
+' || fail "GPU API coordinator 与 identity 的顺序/失败回滚契约测试失败"
 IDENTITY_HELPER_PATH="$IDENTITY_HELPER" \
 pwsh -NoLogo -NoProfile -NonInteractive -Command '
     $tokens=$null; $errors=$null

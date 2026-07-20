@@ -36,18 +36,27 @@ HARDWARE_ID_PLAN_SRC="$REPO_ROOT/deploy/scripts/gpu-hardware-id-plan.ps1"
 HARDWARE_ID_PROJECTOR_SRC="$REPO_ROOT/deploy/scripts/project-gpu-hardware-id.ps1"
 DISPLAY_HELPER_SRC="$REPO_ROOT/deploy/scripts/force-displayfreq.ps1"
 DRIVER_INSTALL_SRC="$HERE/install-display-driver.ps1"
+CHIPSET_INSTALL_SRC="$HERE/install-chipset-device.ps1"
 NVAPI_INSTALL_SRC="$HERE/install-nvapi-system.ps1"
 NVAPI_TRANSACTION_SRC="$HERE/nvapi-system-transaction.ps1"
+ADL_INSTALL_SRC="$HERE/install-adl-system.ps1"
+ADL_TRANSACTION_SRC="$HERE/adl-system-transaction.ps1"
+GPU_API_INSTALL_SRC="$HERE/install-gpu-api-system.ps1"
 DRIVER_SRC_DIR="${DRIVER_SRC_DIR:-$REPO_ROOT/deploy/scripts/stock-viogpudo}"
+CHIPSET_INF_SRC_DIR="${CHIPSET_INF_SRC_DIR:-$REPO_ROOT/deploy/scripts/stock-intel-chipset-inf}"
 NVAPI_SRC_DIR="${NVAPI_SRC_DIR:-$REPO_ROOT/deploy/nvapi-shim}"
+ADL_SRC_DIR="${ADL_SRC_DIR:-$REPO_ROOT/deploy/adl-shim}"
+ADL_EXPORTS_SRC="$ADL_SRC_DIR/adl-required-exports.txt"
 SRC="$LAUNCHER/respawn-stealth-launcher.c"
 PAYLOAD_SECURITY_SRC="$LAUNCHER/payload-security.c"
 PAYLOAD_ENVIRONMENT_SRC="$LAUNCHER/payload-environment.c"
 LAUNCHER_ARGUMENTS_SRC="$LAUNCHER/launcher-arguments.c"
 MANIFEST="$LAUNCHER/respawn-stealth.exe.manifest"
 
-NVAPI_X86_SHA256="5ad43a193ccf0c3dacc769f4267d394502708fc1a5191d9b1338ba8485ea9c94"
-NVAPI_X64_SHA256="311b95768f8bbd18fb30f0e1144c9f2c50cc4f8433b870768c4a439f57844f56"
+NVAPI_X86_SHA256="8ee7248f802b960b971724bdadb789492685b9c76fde0ac99f954768431972af"
+NVAPI_X64_SHA256="e5f446439bc8c5a86d3aac13adb1090d4bd74055a4ccd1f884ca631aa56132ab"
+ADL_X86_SHA256="86aca99433da976135f68b4b2904c04eaee370d97104b5a1622ad59f8731b1dd"
+ADL_X64_SHA256="99b7e84b404bfa5140218549b4a49d68ebdfddb181ad9fdd72dcac296d799a62"
 
 need_tool() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -72,8 +81,13 @@ need_tool llvm-readobj
 [[ -f "$HARDWARE_ID_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PROJECTOR_SRC" >&2; exit 1; }
 [[ -f "$DISPLAY_HELPER_SRC" ]] || { echo "ERROR: 找不到 $DISPLAY_HELPER_SRC" >&2; exit 1; }
 [[ -f "$DRIVER_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_INSTALL_SRC" >&2; exit 1; }
+[[ -f "$CHIPSET_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $CHIPSET_INSTALL_SRC" >&2; exit 1; }
 [[ -f "$NVAPI_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_INSTALL_SRC" >&2; exit 1; }
 [[ -f "$NVAPI_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_TRANSACTION_SRC" >&2; exit 1; }
+[[ -f "$ADL_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $ADL_INSTALL_SRC" >&2; exit 1; }
+[[ -f "$ADL_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $ADL_TRANSACTION_SRC" >&2; exit 1; }
+[[ -f "$GPU_API_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $GPU_API_INSTALL_SRC" >&2; exit 1; }
+[[ -f "$ADL_EXPORTS_SRC" ]] || { echo "ERROR: 找不到 $ADL_EXPORTS_SRC" >&2; exit 1; }
 [[ -f "$PAYLOAD_SECURITY_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_SECURITY_SRC" >&2; exit 1; }
 [[ -f "$PAYLOAD_ENVIRONMENT_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_ENVIRONMENT_SRC" >&2; exit 1; }
 [[ -f "$LAUNCHER_ARGUMENTS_SRC" ]] || { echo "ERROR: 找不到 $LAUNCHER_ARGUMENTS_SRC" >&2; exit 1; }
@@ -97,6 +111,31 @@ verify_driver_file() {
 verify_driver_file viogpudo.sys 04e873ad57387a518ad8ccae5116989c63170503c14b9cca0b2067e63876af89
 verify_driver_file viogpudo.cat b5122b2e060ec0c2f0157afcdc64c728ec31646819055c8b79ae3f4227472078
 verify_driver_file viogpudo.inf 48abd56644386e1f0d85c54cd64db93e62a4eb33bc7acb2613f237c6e1c6a0ee
+
+# 两套 Intel 芯片组 INF 都是 Microsoft WHCP 签名的 NO_DRV 识别包。正式构建只接受
+# Microsoft Update Catalog 锁定版本的原始字节，不能用同名自签包或另一 OEM 版本。
+verify_chipset_file() {
+    local file_name="$1"
+    local expected_hash="$2"
+    local path="$CHIPSET_INF_SRC_DIR/$file_name"
+    local actual_hash
+
+    [[ -f "$path" ]] || { echo "ERROR: 找不到 $path" >&2; exit 1; }
+    actual_hash="$(sha256sum "$path" | awk '{print $1}')"
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+        echo "ERROR: $file_name SHA-256 不匹配: $actual_hash" >&2
+        exit 1
+    fi
+}
+
+verify_chipset_file CannonLake-HSystem.inf \
+    0793ffcb29ba4dd13e62ec1c406884193cbf893d95e0b49840da609d8447a123
+verify_chipset_file cannonlake-h.cat \
+    9e457455e44a4215610c1160c6b3cbe345a4ee8e2af621e51ef6d1079870dba2
+verify_chipset_file SunrisePoint-HSystem.inf \
+    4d931028bc5d6f1d28ec05f80e1b365d42a3d0ff00b0aeebe582c07dc83a1f70
+verify_chipset_file sunrisepoint-h.cat \
+    d22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b
 
 # NVAPI shim 没有厂商签名，固定 SHA-256 就是发布链的信任根。除摘要外还检查
 # COFF Machine、DLL flag 与唯一导出名，避免把同名错架构文件打进单 EXE。
@@ -129,6 +168,42 @@ verify_nvapi_file() {
 
 verify_nvapi_file nvapi.dll "$NVAPI_X86_SHA256" 'IMAGE_FILE_MACHINE_I386 (0x14C)'
 verify_nvapi_file nvapi64.dll "$NVAPI_X64_SHA256" 'IMAGE_FILE_MACHINE_AMD64 (0x8664)'
+
+# ADL 同样是系统级厂商 API，而不是 GPU-Z 的旁置补丁。构建时除摘要和架构外，
+# 逐项核对公开导出清单，防止 32/64 位任一产物漏掉通用检测工具所需的入口。
+verify_adl_file() {
+    local file_name="$1"
+    local expected_hash="$2"
+    local expected_machine="$3"
+    local path="$ADL_SRC_DIR/$file_name"
+    local actual_hash metadata expected_count actual_count symbol
+
+    [[ -f "$path" ]] || { echo "ERROR: 找不到 $path" >&2; exit 1; }
+    actual_hash="$(sha256sum "$path" | awk '{print $1}')"
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+        echo "ERROR: $file_name SHA-256 不匹配: $actual_hash" >&2
+        exit 1
+    fi
+    metadata="$(llvm-readobj --file-headers --coff-exports "$path")"
+    grep -F "Machine: $expected_machine" <<<"$metadata" >/dev/null \
+        || { echo "ERROR: $file_name PE Machine 不匹配" >&2; exit 1; }
+    grep -F 'IMAGE_FILE_DLL (0x2000)' <<<"$metadata" >/dev/null \
+        || { echo "ERROR: $file_name 缺少 IMAGE_FILE_DLL" >&2; exit 1; }
+
+    expected_count=0
+    while IFS= read -r symbol; do
+        [[ -n "$symbol" && "$symbol" != \#* ]] || continue
+        expected_count=$((expected_count + 1))
+        [[ "$(grep -Fxc "  Name: $symbol" <<<"$metadata" || true)" -eq 1 ]] \
+            || { echo "ERROR: $file_name 缺少唯一 ADL 导出: $symbol" >&2; exit 1; }
+    done < "$ADL_EXPORTS_SRC"
+    actual_count="$(grep -c '^Export {$' <<<"$metadata" || true)"
+    [[ "$actual_count" -eq "$expected_count" ]] \
+        || { echo "ERROR: $file_name ADL 导出数量不匹配" >&2; exit 1; }
+}
+
+verify_adl_file atiadlxy.dll "$ADL_X86_SHA256" 'IMAGE_FILE_MACHINE_I386 (0x14C)'
+verify_adl_file atiadlxx.dll "$ADL_X64_SHA256" 'IMAGE_FILE_MACHINE_AMD64 (0x8664)'
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$OUT_DIR"
@@ -196,20 +271,42 @@ xxd -i -n payload_force_displayfreq_ps1 "$DISPLAY_HELPER_SRC" \
     > "$BUILD_DIR/payload_force_displayfreq_ps1.h"
 xxd -i -n payload_install_display_driver_ps1 "$DRIVER_INSTALL_SRC" \
     > "$BUILD_DIR/payload_install_display_driver_ps1.h"
+xxd -i -n payload_install_chipset_device_ps1 "$CHIPSET_INSTALL_SRC" \
+    > "$BUILD_DIR/payload_install_chipset_device_ps1.h"
 xxd -i -n payload_install_nvapi_system_ps1 "$NVAPI_INSTALL_SRC" \
     > "$BUILD_DIR/payload_install_nvapi_system_ps1.h"
 xxd -i -n payload_nvapi_system_transaction_ps1 "$NVAPI_TRANSACTION_SRC" \
     > "$BUILD_DIR/payload_nvapi_system_transaction_ps1.h"
+xxd -i -n payload_install_adl_system_ps1 "$ADL_INSTALL_SRC" \
+    > "$BUILD_DIR/payload_install_adl_system_ps1.h"
+xxd -i -n payload_adl_system_transaction_ps1 "$ADL_TRANSACTION_SRC" \
+    > "$BUILD_DIR/payload_adl_system_transaction_ps1.h"
+xxd -i -n payload_install_gpu_api_system_ps1 "$GPU_API_INSTALL_SRC" \
+    > "$BUILD_DIR/payload_install_gpu_api_system_ps1.h"
 xxd -i -n payload_viogpudo_sys "$DRIVER_SRC_DIR/viogpudo.sys" \
     > "$BUILD_DIR/payload_viogpudo_sys.h"
 xxd -i -n payload_viogpudo_cat "$DRIVER_SRC_DIR/viogpudo.cat" \
     > "$BUILD_DIR/payload_viogpudo_cat.h"
 xxd -i -n payload_viogpudo_inf "$DRIVER_SRC_DIR/viogpudo.inf" \
     > "$BUILD_DIR/payload_viogpudo_inf.h"
+xxd -i -n payload_cannonlake_hsystem_inf \
+    "$CHIPSET_INF_SRC_DIR/CannonLake-HSystem.inf" \
+    > "$BUILD_DIR/payload_cannonlake_hsystem_inf.h"
+xxd -i -n payload_cannonlake_h_cat "$CHIPSET_INF_SRC_DIR/cannonlake-h.cat" \
+    > "$BUILD_DIR/payload_cannonlake_h_cat.h"
+xxd -i -n payload_sunrisepoint_hsystem_inf \
+    "$CHIPSET_INF_SRC_DIR/SunrisePoint-HSystem.inf" \
+    > "$BUILD_DIR/payload_sunrisepoint_hsystem_inf.h"
+xxd -i -n payload_sunrisepoint_h_cat "$CHIPSET_INF_SRC_DIR/sunrisepoint-h.cat" \
+    > "$BUILD_DIR/payload_sunrisepoint_h_cat.h"
 xxd -i -n payload_nvapi_x86_dll "$NVAPI_SRC_DIR/nvapi.dll" \
     > "$BUILD_DIR/payload_nvapi_x86_dll.h"
 xxd -i -n payload_nvapi_x64_dll "$NVAPI_SRC_DIR/nvapi64.dll" \
     > "$BUILD_DIR/payload_nvapi_x64_dll.h"
+xxd -i -n payload_adl_x86_dll "$ADL_SRC_DIR/atiadlxy.dll" \
+    > "$BUILD_DIR/payload_adl_x86_dll.h"
+xxd -i -n payload_adl_x64_dll "$ADL_SRC_DIR/atiadlxx.dll" \
+    > "$BUILD_DIR/payload_adl_x64_dll.h"
 
 # Windows 资源里嵌入 UAC manifest；windres 的相对路径以 launcher 目录为基准。
 cat > "$BUILD_DIR/respawn-stealth.generated.rc" <<EOF

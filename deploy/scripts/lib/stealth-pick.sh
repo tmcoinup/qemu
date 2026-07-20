@@ -1,3 +1,6 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034 # 本文件导出字段供后续已 source 模块和启动器使用。
+
 # ------------------------------------------------------------------
 # host-aware 选择助手：VM 伪装 CPU 要贴合**宿主机**真实能力。
 #   _host_cpu_vendor   -> AuthenticAMD / GenuineIntel（读 /proc/cpuinfo）
@@ -48,12 +51,94 @@ _host_required_tsc_mhz() {
 # 判断显式平台 ID 是否来自已经加载并校验过的 manifest 投影视图。该函数只读，
 # 用于 CLI 在接触已有 profile 前区分“目录里不存在”与“实例已绑定另一平台”。
 stealth_platform_id_known() {
-    local wanted="$1" entry platform_id
-    for entry in "${PLATFORM_POOL[@]}"; do
-        IFS='|' read -r platform_id _ <<<"$entry"
-        [[ "$platform_id" == "$wanted" ]] && return 0
-    done
-    return 1
+    stealth_platform_registry_is_id "$1"
+}
+
+# Guest CPU 类别是独立于“宿主能否实现”的硬门禁。E5/EPYC 宿主可以承载
+# 家用命名模型，但不能因为 compatibility 或 host-passthrough 把服务器品牌串
+# 暴露给 Guest。显式检查 CPU_NAME 与完整 QEMU 串，可同时挡住清单篡改和
+# `-cpu host` 错接；严格 profile 还会在后续做目录逐字段绑定。
+stealth_validate_guest_cpu_class() {
+    local identity="${CPU_NAME:-}|${CPU_QEMU_ARG:-}"
+    local lowered="${identity,,}"
+    local qemu_base="${CPU_QEMU_ARG%%,*}"
+
+    if [[ "$lowered" =~ (xeon|epyc|opteron|threadripper) ]] ||
+       [[ "$lowered" =~ (^|[^[:alnum:]])e(3|5|7)[-[:space:]]*[0-9]{3,} ]] ||
+       [[ "$lowered" =~ (^|[^[:alnum:]])e-[0-9]{4,5}[[:alnum:]]* ]]; then
+        echo "ERROR: Guest CPU 只允许家用型号，拒绝服务器/E 系列: ${CPU_NAME:-unknown}" >&2
+        return 1
+    fi
+    case "${CPU_VENDOR:-}" in
+        GenuineIntel)
+            [[ "$lowered" =~ (core|pentium|celeron|atom|processor[[:space:]][nu][0-9]) ]] \
+                || {
+                    echo "ERROR: 无法证明 Intel Guest CPU 属于家用系列: ${CPU_NAME:-unknown}" >&2
+                    return 1
+                }
+            ;;
+        AuthenticAMD)
+            [[ "$lowered" =~ (ryzen|athlon|phenom|sempron|amd[[:space:]]fx|a[0-9]+-) ]] \
+                || {
+                    echo "ERROR: 无法证明 AMD Guest CPU 属于家用系列: ${CPU_NAME:-unknown}" >&2
+                    return 1
+                }
+            ;;
+        *)
+            echo "ERROR: Guest CPU 厂商不受支持: ${CPU_VENDOR:-unknown}" >&2
+            return 1
+            ;;
+    esac
+    case "${qemu_base,,}" in
+        host)
+            if [[ "${CPU_QEMU_ARG:-}" != host ||
+                  "${PLATFORM_CPU_SOURCE:-}" != host-passthrough ]]; then
+                echo "ERROR: 非受控平台或附加属性不得使用 -cpu host" >&2
+                return 1
+            fi
+            if ! declare -F stealth_host_platform_binding_is_current \
+                    >/dev/null 2>&1 ||
+               ! stealth_host_platform_binding_is_current; then
+                echo "ERROR: -cpu host 只允许显式授权且经 registry 绑定的 schema-1 家用宿主模板" >&2
+                return 1
+            fi
+            ;;
+        max)
+            echo "ERROR: Guest 家用 CPU 不得使用通用 -cpu max 基型" >&2
+            return 1
+            ;;
+        sandybridge-ibrs|ivybridge-ibrs|haswell-v4|skylake-client-ibrs|phenom|ryzen3-1200)
+            ;;
+        *)
+            echo "ERROR: Guest CPU 未使用已审计家用 QEMU named-model: ${qemu_base:-empty}" >&2
+            return 1
+            ;;
+    esac
+
+    # 本分支没有 Intel/AMD 物理 iGPU 设备模型，也不做 GPU 直通。带核显 SKU
+    # 只能采用“固件中禁用”的完整平台状态，使 Windows 设备管理器不枚举一块
+    # 仅改 PCI ID 的假核显；无核显和受控 host 模板分别使用 absent/not_exposed。
+    case "${CPU_IGPU_PRESENT:-}" in
+        1)
+            [[ "${CPU_IGPU_STATE:-}" == disabled_in_bios &&
+               -n "${CPU_IGPU_MODEL:-}" && "${CPU_IGPU_MODEL:-}" != none ]] || {
+                echo "ERROR: 带核显家用 CPU 必须使用 disabled_in_bios 设备策略" >&2
+                return 1
+            }
+            ;;
+        0)
+            [[ "${CPU_IGPU_STATE:-}" == absent ||
+               "${CPU_IGPU_STATE:-}" == fused_off ||
+               "${CPU_IGPU_STATE:-}" == not_exposed ]] || {
+                echo "ERROR: 无核显 CPU 的设备状态非法: ${CPU_IGPU_STATE:-unknown}" >&2
+                return 1
+            }
+            ;;
+        *)
+            echo "ERROR: CPU_IGPU_PRESENT 必须是 0 或 1" >&2
+            return 1
+            ;;
+    esac
 }
 
 # 对已经选出或从 profile 重载的整机统一执行宿主约束。历史实现只在首次随机时
@@ -66,12 +151,31 @@ stealth_validate_platform_host_constraints() {
     host_max_mhz="$(_host_cpu_max_mhz)"
     required_tsc="$(_host_required_tsc_mhz)" || return 1
 
+    stealth_validate_guest_cpu_class || return 1
     if ! [[ "$requested_cpus" =~ ^[0-9]+$ ]] || (( requested_cpus <= 0 )); then
         echo "ERROR: CPUS 必须是正整数" >&2
         return 1
     fi
+    if ! [[ "${CPU_CORES:-}" =~ ^[0-9]+$ &&
+            "${CPU_THREADS:-}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: profile CPU 核心/线程字段必须是正整数" >&2
+        return 1
+    fi
+    case "${CPU_CORES}:${CPU_THREADS}" in
+        2:2|2:4|4:4)
+            ;;
+        *)
+            echo "ERROR: Guest CPU 拓扑只允许 2C2T、2C4T 或 4C4T；当前 ${CPU_CORES}C${CPU_THREADS}T" >&2
+            return 1
+            ;;
+    esac
     if [[ "${CPU_VENDOR:-}" != "$host_vendor" ]]; then
         echo "ERROR: profile CPU 厂商与宿主不一致: platform=${CPU_VENDOR:-unknown} host=$host_vendor" >&2
+        return 1
+    fi
+    if [[ "${PLATFORM_CPU_SOURCE:-}" == named-household-compatibility ]] &&
+       ! stealth_household_compat_host_class_consistent; then
+        echo "ERROR: household CPU 池与当前宿主 CPUID 代际不匹配: ${PLATFORM_HOST_CLASSES:-unknown}" >&2
         return 1
     fi
     if ! [[ "${CPU_THREADS:-}" =~ ^[0-9]+$ ]] || (( CPU_THREADS != requested_cpus )); then
@@ -80,13 +184,40 @@ stealth_validate_platform_host_constraints() {
     fi
     if ! [[ "${CPU_MAX_MHZ:-}" =~ ^[0-9]+$ && "$host_max_mhz" =~ ^[0-9]+$ ]] ||
        (( CPU_MAX_MHZ > host_max_mhz )); then
-        echo "ERROR: profile 最大频率 ${CPU_MAX_MHZ:-unknown}MHz 超过宿主可达 ${host_max_mhz:-unknown}MHz" >&2
-        return 1
+        if declare -F _stealth_household_runtime_variance_allowed >/dev/null 2>&1 &&
+           _stealth_household_runtime_variance_allowed &&
+           [[ "${CPU_MAX_MHZ:-}" =~ ^[0-9]+$ && "$host_max_mhz" =~ ^[0-9]+$ ]]; then
+            if [[ "${_STEALTH_FREQ_COMPAT_WARNED:-0}" != 1 ]]; then
+                echo ">> WARN: 家用 CPU 型号上限 ${CPU_MAX_MHZ}MHz 高于宿主 ${host_max_mhz}MHz；Guest 保留型号信息，执行性能受宿主限制" >&2
+                _STEALTH_FREQ_COMPAT_WARNED=1
+            fi
+        else
+            echo "ERROR: profile 最大频率 ${CPU_MAX_MHZ:-unknown}MHz 超过宿主可达 ${host_max_mhz:-unknown}MHz" >&2
+            return 1
+        fi
     fi
     if [[ -n "$required_tsc" ]] &&
        { ! [[ "${CPU_TSC_MHZ:-}" =~ ^[0-9]+$ ]] || (( CPU_TSC_MHZ != required_tsc )); }; then
-        echo "ERROR: profile TSC=${CPU_TSC_MHZ:-unknown}MHz 与宿主必需 ${required_tsc}MHz 不一致" >&2
-        return 1
+        case "${STEALTH_TSC_POLICY:-auto}" in
+            host|omit)
+                ;;
+            auto)
+                if declare -F _stealth_household_unscaled_tsc_allowed >/dev/null 2>&1 &&
+                   _stealth_household_unscaled_tsc_allowed; then
+                    if [[ "${_STEALTH_TSC_COMPAT_WARNED:-0}" != 1 ]]; then
+                        echo ">> WARN: 家用 CPU 的 TSC 无法在当前宿主缩放；Guest 将沿用宿主 ${required_tsc}MHz TSC" >&2
+                        _STEALTH_TSC_COMPAT_WARNED=1
+                    fi
+                else
+                    echo "ERROR: profile TSC=${CPU_TSC_MHZ:-unknown}MHz 与宿主必需 ${required_tsc}MHz 不一致" >&2
+                    return 1
+                fi
+                ;;
+            *)
+                echo "ERROR: profile TSC=${CPU_TSC_MHZ:-unknown}MHz 与宿主必需 ${required_tsc}MHz 不一致" >&2
+                return 1
+                ;;
+        esac
     fi
 }
 
@@ -97,7 +228,13 @@ _gen_platform_nic_mac() {
         echo "ERROR: 平台网卡没有受审计 OUI: ${NIC_MAC_OUI:-empty}" >&2
         return 1
     fi
-    printf '%s:%02x:%02x:%02x\n' "$NIC_MAC_OUI" "$(_rand 0 255)" "$(_rand 0 255)" "$(_rand 0 255)"
+    local suffix
+    while :; do
+        suffix="$(_hex 6)"
+        [[ "$suffix" != "000000" && "$suffix" != "ffffff" ]] && break
+    done
+    printf '%s:%s:%s:%s\n' "$NIC_MAC_OUI" \
+        "${suffix:0:2}" "${suffix:2:2}" "${suffix:4:2}"
 }
 
 # ------------------------------------------------------------------
@@ -106,115 +243,22 @@ _gen_platform_nic_mac() {
 stealth_pick_profile() {
     _rng_init
 
-    # 1. 按完整平台 bundle 选择，不再把 CPU、主板和 BIOS 独立抽签。
-    #    默认路径只收 enabled 平台；ALLOW_PLATFORM_COMPATIBILITY=1 会把受审计的
-    #    compatibility 条目加入宿主匹配候选。STEALTH_PLATFORM_ID 是可选固定器，
-    #    不再要求操作者记忆长 ID；已有 profile 仍由其持久化 ID 固定身份。
-    #
-    #    无论随机还是显式选择，下面四个宿主约束都不能绕过：同 CPU 厂商、SKU
-    #    完整线程数等于 CPUS、SKU 最大频率不超过宿主可达上限、无 TSC scaling
-    #    时 TSC 精确相等。任一条件失败都明确停止，严禁回退到跨厂商 CPU。
-    local _host_ven _host_max _required_tsc _requested_platform _allow_compatibility
+    # 1. 按完整整机 bundle 选择。E5 v3/v4 先使用专属正常家用 CPU 池，
+    #    其它宿主再走普通物理 supported；显式 compatibility 才加入其余家用
+    #    型号和受限 host 模板。每层都逐个执行真实 KVM realize。
     local _requested_cpus="${CPUS:-4}"
-    _host_ven="$(_host_cpu_vendor)"
-    _host_max="$(_host_cpu_max_mhz)"
-    _required_tsc="$(_host_required_tsc_mhz)" || return 1
-    _requested_platform="${STEALTH_PLATFORM_ID:-}"
-    _allow_compatibility="${ALLOW_PLATFORM_COMPATIBILITY:-0}"
-
-    if ! [[ "$_requested_cpus" =~ ^[0-9]+$ ]] || (( _requested_cpus <= 0 )); then
-        echo "ERROR: CPUS 必须是正整数" >&2
+    if [[ "$_requested_cpus" != 2 && "$_requested_cpus" != 4 ]]; then
+        echo "ERROR: 家用 Guest 的 CPUS 只允许 2 或 4（2C2T/2C4T/4C4T）" >&2
         return 1
     fi
-    if [[ -n "$_requested_platform" ]] &&
-       ! [[ "$_requested_platform" =~ ^[a-z0-9][a-z0-9-]{7,95}$ ]]; then
-        echo "ERROR: STEALTH_PLATFORM_ID 格式非法: $_requested_platform" >&2
-        return 1
-    fi
-    case "$_allow_compatibility" in
+    case "${ALLOW_PLATFORM_COMPATIBILITY:-0}" in
         0|1) ;;
         *)
             echo "ERROR: ALLOW_PLATFORM_COMPATIBILITY 必须是 0 或 1" >&2
             return 1
             ;;
     esac
-
-    local -a _candidates=() _supported_candidates=() _compatibility_candidates=()
-    local _requested_found=0
-    local entry _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz _platform_status
-    for entry in "${PLATFORM_POOL[@]}"; do
-        IFS='|' read -r _platform_id _enabled _vendor _max_mhz _threads _tsc_mhz <<<"$entry"
-
-        if [[ -n "$_requested_platform" ]]; then
-            [[ "$_platform_id" == "$_requested_platform" ]] || continue
-            _requested_found=1
-            if [[ "$_enabled" != "true" && "$_allow_compatibility" != "1" ]]; then
-                echo "ERROR: 指定平台已禁用: $_platform_id" >&2
-                echo "       若确认接受 Q35/ICH9 compatibility 边界，请同时使用 --allow-platform-compatibility。" >&2
-                return 1
-            fi
-            if [[ "$_vendor" != "$_host_ven" ]]; then
-                echo "ERROR: 指定平台 CPU 厂商与宿主不一致: platform=$_vendor host=$_host_ven" >&2
-                return 1
-            fi
-            if (( _threads != _requested_cpus )); then
-                echo "ERROR: 指定平台要求完整 ${_threads} 线程，当前 CPUS=$_requested_cpus" >&2
-                return 1
-            fi
-            if (( _max_mhz > _host_max )); then
-                echo "ERROR: 指定平台最大频率 ${_max_mhz}MHz 超过宿主可达 ${_host_max}MHz" >&2
-                return 1
-            fi
-            if [[ -n "$_required_tsc" ]] && (( _tsc_mhz != _required_tsc )); then
-                echo "ERROR: 指定平台 TSC=${_tsc_mhz}MHz 与宿主必需 ${_required_tsc}MHz 不一致" >&2
-                return 1
-            fi
-            _candidates+=("$_platform_id")
-            break
-        fi
-
-        if [[ "$_enabled" != "true" ]]; then
-            _platform_status="$(stealth_platform_manifest_status "$_platform_id")" || return 1
-            [[ "$_platform_status" == "compatibility" ]] || continue
-        fi
-        [[ "$_vendor" == "$_host_ven" ]] || continue
-        (( _threads == _requested_cpus && _max_mhz <= _host_max )) || continue
-        if [[ -n "$_required_tsc" ]] && (( _tsc_mhz != _required_tsc )); then
-            continue
-        fi
-        if [[ "$_enabled" == "true" ]]; then
-            _supported_candidates+=("$_platform_id")
-        else
-            _compatibility_candidates+=("$_platform_id")
-        fi
-    done
-
-    # allow 表示“严格候选不存在时允许降级”，不是强制或随机降级。未来同厂商若
-    # 同时存在 supported/compatibility，必须始终优先受支持平台。
-    if [[ -z "$_requested_platform" ]]; then
-        if (( ${#_supported_candidates[@]} > 0 )); then
-            _candidates=("${_supported_candidates[@]}")
-        elif [[ "$_allow_compatibility" == "1" ]]; then
-            _candidates=("${_compatibility_candidates[@]}")
-        fi
-    fi
-
-    if [[ -n "$_requested_platform" && "$_requested_found" != "1" ]]; then
-        echo "ERROR: 指定整机平台不存在: $_requested_platform" >&2
-        return 1
-    fi
-    if (( ${#_candidates[@]} == 0 )); then
-        echo "ERROR: 无可用整机平台：vendor=$_host_ven CPUS=${CPUS:-4} host_max=${_host_max}MHz required_tsc=${_required_tsc:-scalable}" >&2
-        # 只有 flag 确实能解锁一个满足当前宿主约束的模板时才给出提示；厂商、线程、
-        # 频率或 TSC 本身不匹配时不建议无效参数，避免让用户反复盲试。
-        if [[ "$_allow_compatibility" != "1" &&
-              ${#_compatibility_candidates[@]} -gt 0 ]]; then
-            echo "       检测到匹配宿主的 compatibility 平台；若接受 Q35/ICH9 行为边界，请追加 --allow-platform-compatibility。" >&2
-        fi
-        return 1
-    fi
-    local selected_platform="${_candidates[$(( (RANDOM * 32768 + RANDOM) % ${#_candidates[@]} ))]}"
-    stealth_platform_load "$selected_platform" || return 1
+    stealth_select_platform_bundle || return 1
 
     # 平台事实来自 manifest；这里只生成每台 VM 唯一、且之后会持久化的序列号。
     BOARD_SERIAL="$($SERIAL_FN)"
@@ -259,20 +303,67 @@ stealth_pick_profile() {
         NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV \
         NVME_SUBNQN_TEMPLATE <<<"${NVME_POOL[$nv_i]}"
     NVME_SERIAL="$(_nvme_serial)"
-    NVME_SUBNQN="${NVME_SUBNQN_TEMPLATE//\{serial\}/$NVME_SERIAL}"
+    NVME_SUBNQN="${NVME_SUBNQN_TEMPLATE//\{uuid\}/$UUID}"
+
+    # 启动盘是独立部件身份：NVMe 平台镜像实际 NVMe component；老式主板则从
+    # 独立消费级 SATA 目录抽取 840/850/860 PRO 完整组合。这里只抽签一次，
+    # BOOT_STORAGE_COMPONENT_ID 及所有 Guest 可见字段随后写入 profile。
+    case "${PLATFORM_BOOT_STORAGE:-}" in
+        nvme)
+            [[ "${PLATFORM_BOOT_STORAGE_POOL_ID:-}" == component-nvme ]] || {
+                echo "ERROR: NVMe 平台没有绑定 component-nvme 启动盘池" >&2
+                return 1
+            }
+            BOOT_STORAGE_CATALOG_REVISION="$COMPONENT_CATALOG_REVISION"
+            BOOT_STORAGE_COMPONENT_ID="$NVME_COMPONENT_ID"
+            BOOT_STORAGE_MANUFACTURER=Samsung
+            BOOT_STORAGE_MODEL="$NVME_MODEL"
+            BOOT_STORAGE_PART_NUMBER=component-catalog
+            BOOT_STORAGE_FIRMWARE="$NVME_FIRMWARE"
+            BOOT_STORAGE_SIZE_BYTES="$NVME_SIZE_BYTES"
+            BOOT_STORAGE_INTERFACE=nvme
+            BOOT_STORAGE_SERIAL="$NVME_SERIAL"
+            ;;
+        sata-ahci)
+            [[ "${PLATFORM_BOOT_STORAGE_POOL_ID:-}" == samsung-sata-pro-512gb ]] || {
+                echo "ERROR: SATA 平台没有绑定 samsung-sata-pro-512gb 启动盘池" >&2
+                return 1
+            }
+            local boot_storage_id
+            boot_storage_id="$(stealth_storage_compat_pick_id)" || return 1
+            stealth_storage_compat_load "$boot_storage_id" || return 1
+            BOOT_STORAGE_SERIAL="$(_boot_storage_serial)"
+            ;;
+        *)
+            echo "ERROR: 无法为未知启动总线选择启动盘: ${PLATFORM_BOOT_STORAGE:-empty}" >&2
+            return 1
+            ;;
+    esac
 
     # 5. 内存厂家 / part / 持久化序列号
-    # MEM_POOL 第 5 列是适配 socket 列表。JEDEC DDR4 高频颗粒可以在低速平台
+    # MEM_POOL 第 5 列是适配 socket 列表，后四列是两个容量各自的
+    # rank/device-width。JEDEC DDR4 高频颗粒可以在低速平台
     # 自动降频，因此不再错误地要求“颗粒额定速率 <= 控制器上限”；最终报告速率
     # 由 manifest 的 MEM_MAX_MTS 与颗粒额定值取最小值。
     local mem_matched=()
+    local entry
     for entry in "${MEM_POOL[@]}"; do
         local _mmfr _m2g _m4g _mrated _msockets
-        IFS='|' read -r _mmfr _m2g _m4g _mrated _msockets <<<"$entry"
+        local _mr2 _mw2 _mr4 _mw4
+        IFS='|' read -r _mmfr _m2g _m4g _mrated _msockets \
+            _mr2 _mw2 _mr4 _mw4 <<<"$entry"
         if ! [[ "$_mrated" =~ ^[0-9]+$ ]]; then
             continue
         fi
-        if [[ -z "${_msockets:-}" || ",$_msockets," == *",$CPU_SOCKET,"* ]]; then
+        if [[ "${PLATFORM_CPU_SOURCE:-}" == host-passthrough ]]; then
+            # generic Q35 host 模板没有可证明的物理 socket；它明确声明自己的
+            # 虚拟内存代际，因此按额定速率目录区分 DDR3/DDR4，不能拿空 socket
+            # 去误匹配任意 DIMM。
+            if [[ "$MEM_TYPE" == DDR4 && "$_mrated" -ge 2133 ]] ||
+               [[ "$MEM_TYPE" == DDR3 && "$_mrated" -le 2133 ]]; then
+                mem_matched+=("$entry")
+            fi
+        elif [[ -z "${_msockets:-}" || ",$_msockets," == *",$CPU_SOCKET,"* ]]; then
             mem_matched+=("$entry")
         fi
     done
@@ -282,7 +373,9 @@ stealth_pick_profile() {
     fi
     local mp_i=$(( (RANDOM * 32768 + RANDOM) % ${#mem_matched[@]} ))
     local MEM_SOCKETS
-    IFS='|' read -r MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SOCKETS <<<"${mem_matched[$mp_i]}"
+    IFS='|' read -r MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SOCKETS \
+        MEM_RANK_2G MEM_DEVICE_WIDTH_2G MEM_RANK_4G MEM_DEVICE_WIDTH_4G \
+        <<<"${mem_matched[$mp_i]}"
     # 中文注释：DIMM 料号的额定速率与主板训练后的配置速率是两个不同事实。
     # H110 上的 DDR4-2400/2666 条会训练为 2133，但 SPD/Type17 Speed 仍须保留
     # 料号额定能力；Configured Memory Speed 才报告 2133。
@@ -349,6 +442,7 @@ stealth_pick_profile() {
     TABLET_SERIAL="$(_usb_hid_serial "$TABLET_COMPONENT_ID")"
 
     export PLATFORM_SCHEMA_VERSION PLATFORM_CATALOG_REVISION PLATFORM_ID PLATFORM_STATUS PLATFORM_RELEASE_YEAR
+    export TPM_CAPABILITY TPM_SUPPORTED TPM_IMPLEMENTATION TPM_VERSION TPM_FRONTEND TPM_PCR_BANKS
     export COMPONENT_SCHEMA_VERSION COMPONENT_CATALOG_REVISION
     export CPU_QEMU_ARG CPU_VENDOR CPU_NAME CPU_MAX_MHZ CPU_CUR_MHZ CPU_TSC_MHZ CPU_PART CPU_PROC_FAMILY CPU_SOCKET CPU_MODEL CPU_SERIAL CPU_ASSET
     export CPU_CORES CPU_THREADS CPU_PHYS_BITS CPU_FEATURES CPU_SMBIOS_UPGRADE CPU_SMBIOS_VOLTAGE CPU_SMBIOS_EXT_CLOCK CPU_SMBIOS_CHARACTERISTICS
@@ -362,8 +456,13 @@ stealth_pick_profile() {
     export GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV GPU_IDENTITY_FIDELITY
     export GPU_MEMORY_TYPE GPU_MEMORY_BUS_WIDTH_BITS GPU_BASE_CLOCK_KHZ GPU_BOOST_CLOCK_KHZ GPU_MEMORY_CLOCK_KHZ GPU_SLI_SUPPORTED
     export NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV NVME_SUBNQN_TEMPLATE NVME_SUBNQN
+    export BOOT_STORAGE_CATALOG_REVISION BOOT_STORAGE_COMPONENT_ID
+    export BOOT_STORAGE_MANUFACTURER BOOT_STORAGE_MODEL BOOT_STORAGE_PART_NUMBER
+    export BOOT_STORAGE_FIRMWARE BOOT_STORAGE_SIZE_BYTES BOOT_STORAGE_INTERFACE
+    export BOOT_STORAGE_SERIAL
     export MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_RATED_MTS MEM_CONFIGURED_MTS MEM_SERIAL MEM_TOTAL_MB MEM_TYPE MEM_CHANNELS MEM_MAX_MTS MEM_ALLOWED_MTS
     export MEM_VOLTAGE_MV MEM_RANK MEM_MODULE_MB MEM_ALLOWED_TOTAL_MB MEM_MAX_CAPACITY_MB
+    export MEM_RANK_2G MEM_DEVICE_WIDTH_2G MEM_RANK_4G MEM_DEVICE_WIDTH_4G
     export ROOT_PORT_PCI_VEN ROOT_PORT_PCI_DEV ROOT_PORT_REV XHCI_PCI_VEN XHCI_PCI_DEV XHCI_REV
     export MCH_PCI_VEN MCH_PCI_DEV MCH_REV LPC_PCI_VEN LPC_PCI_DEV LPC_REV SMBUS_PCI_VEN SMBUS_PCI_DEV SMBUS_REV AHCI_PCI_VEN AHCI_PCI_DEV AHCI_REV
     export NIC_VENDOR NIC_MODEL NIC_PCI_VEN NIC_PCI_DEV NIC_SUBSYSTEM_VEN NIC_SUBSYSTEM_DEV NIC_MAC_OUI NIC_ATTACHMENT BOARD_NIC_STATE

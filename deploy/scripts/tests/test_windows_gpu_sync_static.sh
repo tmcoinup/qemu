@@ -301,6 +301,13 @@ test_object_delete_waits_for_safe_reclaim() {
     require_text "ucc->can_be_deleted = fb_shm_export_can_be_deleted" "$FB_SHM_QOM"
 }
 
+test_win32_event_helper_is_shared_internally() {
+    require_text "bool fb_shm_win32_ensure_client_event(" "$FB_SHM_INTERNAL"
+    require_text "bool fb_shm_win32_ensure_client_event(" "$FB_SHM_CONTROL"
+    reject_text "static bool fb_shm_win32_ensure_client_event(" "$FB_SHM_CONTROL"
+    require_text "fb_shm_win32_ensure_client_event(d, c, &err)" "$FB_SHM_REQUEST"
+}
+
 test_sources_do_not_use_unwrap() {
     local file
     local unwrap_pattern='(^|[^[:alnum:]_])unwrap[[:space:]]*\('
@@ -329,6 +336,7 @@ test_pending_frame_stops_all_texture_access
 test_disconnect_reclaims_with_timer_without_unsafe_unblock
 test_sdl_defers_redraw_but_keeps_polling
 test_object_delete_waits_for_safe_reclaim
+test_win32_event_helper_is_shared_internally
 test_sources_do_not_use_unwrap
 test_script_stays_small
 

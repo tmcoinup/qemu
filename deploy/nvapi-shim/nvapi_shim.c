@@ -294,13 +294,12 @@ static NvAPI_Status __cdecl NvAPI_GPU_GetPCIIdentifiers(
         return NVAPI_NVIDIA_DEVICE_NOT_FOUND;
     }
 
-    *device_id = nvapi_pack_pci_identifier(identity->pci_device_id,
-                                            identity->pci_vendor_id);
-    *subsystem_id = nvapi_pack_pci_identifier(
-        identity->subsystem_device_id, identity->subsystem_vendor_id);
-    *revision_id = identity->revision_id;
-    /* 真实 NVAPI 对普通 GeForce 返回不带厂商号的 16 位外部设备号。 */
-    *external_device_id = identity->pci_device_id;
+    /*
+     * 返回 OS 可见承载设备的 PCI 键，让 SetupAPI/NVAPI 双通道扫描把本句柄合并
+     * 到同一块显示适配器；型号、显存和时钟仍由其余 NVAPI 接口读取 profile。
+     */
+    nvapi_build_carrier_pci_identifiers(identity, device_id, subsystem_id,
+                                        revision_id, external_device_id);
     return NVAPI_OK;
 }
 
@@ -346,9 +345,14 @@ static NvAPI_Status __cdecl NvAPI_SYS_GetDriverAndBranchVersion(
     if (read_initialize_references() <= 0) {
         return NVAPI_API_NOT_INITIALIZED;
     }
-    *version = 54633u;
-    copy_short_string(branch, "r545_99");
-    return NVAPI_OK;
+    /*
+     * 此 API 的成功结果是“实际显示驱动版本与 branch”。本层没有 NVIDIA
+     * display driver，也没有可信来源可报告该值；保留 QueryInterface 入口并
+     * 明确返回 NOT_SUPPORTED，避免把固定伪版本混入通用检测结果。
+     */
+    *version = 0u;
+    branch[0] = '\0';
+    return NVAPI_NOT_SUPPORTED;
 }
 
 /*

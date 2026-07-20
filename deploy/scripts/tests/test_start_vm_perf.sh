@@ -36,15 +36,16 @@ import sys
 import time
 
 sock_path = sys.argv[1]
-client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 for _ in range(50):
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         client.connect(sock_path)
         break
-    except FileNotFoundError:
+    except (FileNotFoundError, ConnectionRefusedError):
+        client.close()
         time.sleep(0.1)
 else:
-    raise SystemExit("QMP socket did not appear")
+    raise SystemExit("QMP socket did not become ready")
 
 # QMP sends a greeting first; read it before enabling capabilities.
 client.recv(4096)
@@ -97,7 +98,7 @@ test_qemu_accepts_samsung_nvme() {
         -S \
         -drive file="$img",if=none,id=nvm0,format=qcow2,cache=none,aio=threads \
         -device pcie-root-port,id=rp1,bus=pcie.0,slot=1 \
-        -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,use-samsung-id=on,serial=test123,model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXP7,subsys-vendor-id=0x144d,subsys-id=0xa801,subnqn=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:test123 \
+        -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,use-samsung-id=on,serial=SEBDN56D159B5A,model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXP7,subsys-vendor-id=0x144d,subsys-id=0xa801,subnqn=nqn.2014-08.org.nvmexpress:uuid:01234567-89ab-4cde-8f01-23456789abcd \
         -qmp unix:"$sock",server=on,wait=off \
         2> "$err" &
     qemu_pid=$!
@@ -144,15 +145,16 @@ import time
 sock_path = sys.argv[1]
 
 def connect_qmp(name):
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     for _ in range(50):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             client.connect(sock_path)
             break
-        except FileNotFoundError:
+        except (FileNotFoundError, ConnectionRefusedError):
+            client.close()
             time.sleep(0.1)
     else:
-        raise SystemExit(f"{name}: QMP socket did not appear")
+        raise SystemExit(f"{name}: QMP socket did not become ready")
     stream = client.makefile("rwb", buffering=0)
     greeting = json.loads(stream.readline())
     assert "QMP" in greeting, greeting

@@ -34,6 +34,7 @@ while (( $# > 0 )); do
             ;;
         --allow-platform-compatibility) ALLOW_PLATFORM_COMPATIBILITY=1 ;;
         --allow-legacy-profile) ALLOW_LEGACY_PROFILE=1 ;;
+        --migrate-storage-profile) ALLOW_STORAGE_PROFILE_MIGRATION=1 ;;
         --headless)   HEADLESS=1 ;;
         --reroll)     _cli_reroll=1 ;;
         --sdl)        SDL=1 ;;
@@ -103,6 +104,7 @@ fi
 : "${STEALTH_PLATFORM_ID:=}"
 : "${ALLOW_PLATFORM_COMPATIBILITY:=0}"
 : "${ALLOW_LEGACY_PROFILE:=0}"
+: "${ALLOW_STORAGE_PROFILE_MIGRATION:=0}"
 if [[ "$_cli_platform_id_seen" == "1" && -z "$STEALTH_PLATFORM_ID" ]]; then
     echo "ERROR: --platform-id 不能为空" >&2
     exit 2
@@ -131,11 +133,19 @@ case "$ALLOW_LEGACY_PROFILE" in
         exit 2
         ;;
 esac
+case "$ALLOW_STORAGE_PROFILE_MIGRATION" in
+    0|1) ;;
+    *)
+        echo "ERROR: ALLOW_STORAGE_PROFILE_MIGRATION 必须是 0 或 1" >&2
+        exit 2
+        ;;
+esac
 if [[ "$ALLOW_LEGACY_PROFILE" == "1" && "${STRICT_HARDWARE:-1}" != "0" ]]; then
     echo "ERROR: --allow-legacy-profile 仅能与显式 STRICT_HARDWARE=0 诊断模式同时使用" >&2
     exit 2
 fi
 export STEALTH_PLATFORM_ID ALLOW_PLATFORM_COMPATIBILITY ALLOW_LEGACY_PROFILE
+export ALLOW_STORAGE_PROFILE_MIGRATION
 
 # VLAN 是运行时网络选择，不写入硬件身份 profile。CLI 值会覆盖同名环境变量，
 # 但显式空参数必须报错，避免 `--vlan-id=` 被误当成“未启用 VLAN”后接入普通 LAN。

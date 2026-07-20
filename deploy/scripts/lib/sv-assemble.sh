@@ -18,6 +18,10 @@ if [[ "${QEMU_CPU_PM:-0}" =~ ^(1|on|true|yes)$ ]]; then
     CPU_PM_ARG=on
 fi
 
+# shellcheck source=stealth-storage.sh
+source "$HERE/lib/stealth-storage.sh"
+stealth_build_boot_storage_args || exit 2
+
 # QEMU 的 machine/drive/device option 是逗号分隔的单个 argv；数组中的每个配置串
 # 都有意保持为一个元素，并非用逗号分隔 shell 数组成员。
 # shellcheck disable=SC2054
@@ -84,7 +88,7 @@ CMD=(
     "${CHIPSET_GLOBAL_ARGS[@]}"
     "${ROOT_PORT_ARGS[@]}"
 
-    # --- TPM 2.0 (swtpm emulator, tpm-crb 风格——现代主板默认走 CRB 而不是 TIS) ---
+    # --- TPM（swtpm emulator；版本和 TIS/CRB 前端由整机 profile 决定）---
     # 空数组时（swtpm 不可用）此处展开为零参数，不影响。
     "${TPM_ARGS[@]}"
 
@@ -94,13 +98,10 @@ CMD=(
     # 不放 DF stub —— 否则会出现 "Intel CPU 但有 AMD DF" 的矛盾。
     "${AMD_DF_ARGS[@]}"
 
-    # --- Storage: 经 component manifest 核验的 Samsung NVMe bundle ---
-    # emulated NVMe 的 DMA helpers 仍要求 BlockBackend 留在主 AioContext；
-    # 这里保持 cache=none,aio=threads 的稳定路径，避免 iothread 触发断言。
-    -drive file="$DISK",if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap
-    # bootindex=3 (装系统时 NVMe 空，让位给 helper image=1 / Win ISO=2)；
-    # 装好系统后 OVMF NVRAM 把 Windows Boot Manager 推到最高，bootindex 不再决定顺序。
-    -device "nvme,id=nvmectl0,bus=rp1,drive=nvm0,serial=${NVME_SERIAL},use-samsung-id=on,bootindex=3,model-number=${NVME_MODEL},firmware-rev=${NVME_FIRMWARE},subsys-vendor-id=${NVME_SUBSYS_VEN},subsys-id=${NVME_SUBSYS_DEV},subnqn=${NVME_SUBNQN}"
+    # --- Storage: 平台能力决定 NVMe boot 或 SATA/AHCI boot ---
+    # bootindex=3：安装时让位给 helper image=1 / Windows ISO=2；安装完成后由
+    # OVMF NVRAM 中的 Windows Boot Manager 决定优先级。
+    "${BOOT_STORAGE_ARGS[@]}"
 
     "${CDROM_ARGS[@]}"
 
@@ -256,7 +257,7 @@ fi
 echo ">> disk:        $DISK"
 echo ">>   virtual   : ${DISK_VIRTUAL_SIZE:-?} bytes (guest-visible, profile verified)"
 echo ">>   allocated : ${DISK_HOST_ALLOCATED_BYTES:-?} bytes (sparse on-host)"
-echo ">>   identity  : ${NVME_SIZE_BYTES:-?} bytes = ${NVME_MODEL:-?}"
+echo ">>   identity  : ${BOOT_STORAGE_SIZE_BYTES:-?} bytes = ${BOOT_STORAGE_MODEL:-?}"
 # 内存信息：总量 + DIMM 拓扑 (1 单通道 / 2 双通道) + 厂商 + part number + memfd backend。
 # memfd 是 share=on 让 VMI（memflow）能 mmap 同一份物理页。消费级单路平台始终
 # 只有一个 guest NUMA node；DIMM 数只通过 SMBIOS/SPD 表达，不能伪造 NUMA 节点。
@@ -277,7 +278,10 @@ echo ">>   DIMM 厂商 : ${MEM_MFR:-?}"
 echo ">>   part 号   : ${_mem_part_used:-?}"
 if (( NUM_DIMMS == 2 )); then
     # 双通道：每条 DIMM 各自唯一 SN（第 2 条由 MEM_SERIAL 确定性派生），核对用
-    _mem_sn2=$(printf '%s' "${MEM_SERIAL}-dimm2" | sha256sum | head -c 8 | tr '[:lower:]' '[:upper:]')
+    _mem_sn2="$(_stealth_memory_slot_serial "$MEM_SERIAL" 2)" || {
+        echo "ERROR: 无法派生合法的第二条 DIMM 序列号" >&2
+        exit 1
+    }
     echo ">>   SN        : ${MEM_SERIAL:-?} (DIMM_A2) / ${_mem_sn2} (DIMM_B2)  ← 两条各自唯一"
 else
     echo ">>   SN        : ${MEM_SERIAL:-?}"

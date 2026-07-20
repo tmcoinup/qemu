@@ -2,7 +2,7 @@
 > QEMU `v9.2.0` / `qemu-9.2.0` 分支当时的工作树。正文中的“当前”“本分支”和文件行号
 > 均只描述该历史快照，**不代表现在的 QEMU 11 代码状态**。
 >
-> 当前维护基线已经升级为 QEMU `v11.0.2` + `vmate` 分支。本文部分内容已过期，且超过
+> 当前维护基线已经升级为 QEMU `v11.0.2` + `V-11` 分支。本文部分内容已过期，且超过
 > 单文件 500 行约束，因此保留超限文件仅为追溯历史，**请勿继续追加，也不得用作当前验收结论**。
 > 现行信息见：
 > - 最新复审结论：`deploy/docs/DE_VIRTUALIZATION_AUDIT_2026-05-23.md`
@@ -256,42 +256,22 @@ SMBIOS 已经改成 DDR4/Kingston/双通道风格，但仍有多个一致性问�
 
 结论：SMBIOS 是“有伪装”，但还不是高一致性硬件画像。
 
-### 8. DDR4 SPD 生成器与 SMBIOS 容量不一致
+### 8. DDR4 SPD 与 SMBIOS 一致性（已修复）
 
-项目新增了 DDR4 SPD 生成器，但当前实现忽略 `size_mb` 参数，且默认 SPD 内容和 SMBIOS 4GB DIMM 设定可能冲突。
+Q35 现在按 SMBIOS Type 17 和实际 RAM 分块生成每条 DIMM 的 SPD；容量、rank、电压和
+额定速率共同决定 page 0，厂商、料号和每 DIMM 唯一序列号则写入 page 1。DDR4 设备实现
+512B EE1004 地址空间及 0x36/0x37 页选择，DIMM 数量也随实际拓扑生成，不再固定为两条。
 
-相关依据：
+当前边界是 SPD 由 profile 和硬件目录字段生成，并非具体实物 DIMM 的原始 raw dump/XMP。
 
-| 位置 | 问题 |
-| --- | --- |
-| `hw/i2c/smbus_eeprom.c:228` | `spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts)` 接收容量参数 |
-| `hw/i2c/smbus_eeprom.c:334` | `(void)size_mb`，实际忽略容量 |
-| `hw/i386/pc_q35.c:318` | 调用 `spd_data_generate_ddr4(4096, 2666)` |
-| `hw/i386/pc_q35.c:320` | 固定两个 SPD EEPROM |
+### 9. EDID 数字序列号与字符串序列号（已修复）
 
-原因说明：SPD byte 4 当前按固定 density 编码，未由 `size_mb` 推导。DDR4 SPD page/容量/part/serial 与 SMBIOS Type17 之间没有形成严格一致模型。
+受控启动器显式传入 S24F350 的完整组件字段；生成器对字母数字 serial 计算稳定、
+非零的 binary serial，避免文本描述符与 12–15 字节互相矛盾。未传入品牌字段的
+通用 QEMU 路径恢复为 `RHT`/`QEMU Monitor`，不再默认冒用 Samsung 身份。
 
-影响：读取 SMBus SPD 的工具可能看到与 SMBIOS 不一致的容量、空 manufacturer/serial/part，或只有两个 SPD 设备而 SMBIOS 报告更多 DIMM。
-
-结论：SPD 是当前比较明显的不完整点，尤其在内存检测较严格的环境中。
-
-### 9. EDID 数字序列号与字符串序列号不一致
-
-当前未提交的 EDID 改动将默认 serial 字符串设为 Samsung 风格，如 `H4ZK500001VL`。但 EDID 12-15 字节的数字 serial 使用 `atoi(info->serial)` 得出。
-
-相关依据：
-
-| 位置 | 问题 |
-| --- | --- |
-| `hw/display/edid-generate.c:462` | 注释声称 `atoi()` 非零 |
-| `hw/display/edid-generate.c:533` | `serial_nr = info->serial ? atoi(info->serial) : 0x01A5C3D2` |
-| `hw/display/edid-generate.c:536` | 写入 EDID binary serial |
-
-原因说明：`atoi("H4ZK500001VL")` 返回 0，因为字符串以字母开头。结果是 EDID binary serial 为 0，而 descriptor 中的字符串 serial 非零。
-
-影响：普通显示器工具未必检查这个字段，但更严格的 EDID parser 可以发现同一 EDID 内部不一致。
-
-结论：显示器伪装接近完成，但这里存在明确 bug。
+当前边界仍是：型号尺寸与扫描范围来自官方规格，product/date/serial 没有 raw EDID
+样机证据，目录已用 `synthetic_edid_identity_fields` 明示这一点。
 
 ### 10. 网络默认行为可能退回 SLIRP NAT
 

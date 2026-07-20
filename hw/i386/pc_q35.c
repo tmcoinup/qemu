@@ -142,7 +142,7 @@ static void pc_q35_init_spd(PCMachineState *pcms, MachineState *machine,
     unsigned int i;
     uint8_t *spd_images[8] = { 0 };
 
-    if (!smbios_get_memory_device_config(&config) || !config.rated_speed ||
+    if (!smbios_get_memory_device_config(0, &config) || !config.rated_speed ||
         !config.rank || !config.voltage || !module_size) {
         return;
     }
@@ -155,25 +155,48 @@ static void pc_q35_init_spd(PCMachineState *pcms, MachineState *machine,
     for (i = 0; i < dimm_count; i++) {
         uint64_t remaining = machine->ram_size - i * module_size;
         uint32_t size_mb = MIN(remaining, module_size) / MiB;
+        SmbusEepromSpdConfig spd_config;
+
+        if (!smbios_get_memory_device_config(i, &config)) {
+            break;
+        }
+        spd_config = (SmbusEepromSpdConfig) {
+            .manufacturer = config.manufacturer,
+            .part_number = config.part_number,
+            .serial_number = config.serial_number,
+            .size_mb = size_mb,
+            .speed_mts = config.rated_speed,
+            .voltage_mv = config.voltage,
+            .ranks = config.rank,
+            .device_width_bits = config.device_width_bits,
+            .ee1004 = config.spd_ee1004,
+        };
         if (config.memory_type == SMBIOS_MEMORY_TYPE_DDR3) {
-            spd_images[i] = spd_data_generate_ddr3(size_mb,
-                                                   config.rated_speed,
-                                                   config.rank,
-                                                   config.voltage);
+            spd_images[i] = spd_data_generate_ddr3(&spd_config);
         } else {
-            spd_images[i] = spd_data_generate_ddr4_ex(
-                size_mb, config.rated_speed, config.rank, config.voltage);
+            spd_images[i] = spd_data_generate_ddr4(&spd_config);
         }
         if (!spd_images[i]) {
-            /* 奇数容量等不可由 x8 UDIMM 表达的组合不应生成虚假 SPD。 */
-            while (i > 0) {
-                g_free(spd_images[--i]);
-            }
-            return;
+            break;
         }
     }
-    for (i = 0; i < dimm_count; i++) {
-        smbus_eeprom_init_one(pcms->smbus, 0x50 + i, spd_images[i]);
+    if (i != dimm_count) {
+        /*
+         * 容量、身份或时序不能准确编码时，
+         * 不发布一套半真半假的 SPD。
+         */
+        while (i > 0) {
+            g_free(spd_images[--i]);
+        }
+        return;
+    }
+    if (config.memory_type == SMBIOS_MEMORY_TYPE_DDR4 &&
+        config.spd_ee1004) {
+        smbus_ee1004_init(pcms->smbus, dimm_count, spd_images);
+    } else {
+        for (i = 0; i < dimm_count; i++) {
+            smbus_eeprom_init_one(pcms->smbus, 0x50 + i, spd_images[i]);
+        }
     }
 }
 

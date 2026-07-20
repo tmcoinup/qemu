@@ -52,6 +52,8 @@ for helper_file in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 refresh-g
 done
 strings -a "$EXE" | grep -F 'install-display-driver.ps1' >/dev/null \
     || fail "EXE 未包含离线显示驱动安装 payload 文件名"
+strings -a "$EXE" | grep -F 'install-chipset-device.ps1' >/dev/null \
+    || fail "EXE 未包含芯片组识别 INF 安装 payload 文件名"
 strings -a "$EXE" | grep -F 'install-nvapi-system.ps1' >/dev/null \
     || fail "EXE 未包含双架构系统 NVAPI 安装 payload 文件名"
 strings -a "$EXE" | grep -F 'nvapi-system-transaction.ps1' >/dev/null \
@@ -62,6 +64,11 @@ fi
 for driver_file in viogpudo.sys viogpudo.cat viogpudo.inf; do
     strings -a "$EXE" | grep -F "$driver_file" >/dev/null \
         || fail "EXE 未包含内嵌驱动文件名: $driver_file"
+done
+for chipset_file in CannonLake-HSystem.inf cannonlake-h.cat \
+        SunrisePoint-HSystem.inf sunrisepoint-h.cat; do
+    strings -a "$EXE" | grep -F "$chipset_file" >/dev/null \
+        || fail "EXE 未包含芯片组 payload 文件名: $chipset_file"
 done
 for nvapi_file in nvapi.dll nvapi64.dll; do
     strings -a "$EXE" | grep -F "$nvapi_file" >/dev/null \
@@ -82,9 +89,9 @@ strings -a -el "$EXE" | grep -F -- '-FirstLogon' >/dev/null \
 strings -a -el "$EXE" | grep -F -- '-Unattended' >/dev/null \
     || fail "EXE 自动模式未禁止 guest 错误路径交互等待"
 strings -a "$EXE" | grep -F -- '-SkipTask' >/dev/null \
-    || fail "EXE 内嵌脚本 FirstLogon 模式未使用 -SkipTask"
+    || fail "EXE 内嵌脚本 FirstLogon 模式未跳过交互式显示任务"
 strings -a "$EXE" | grep -F 'StealthGPU-RefreshName' >/dev/null \
-    || fail "EXE 内嵌脚本缺少清理 StealthGPU-RefreshName 的逻辑"
+    || fail "EXE 内嵌脚本缺少持久名称刷新任务"
 strings -a "$EXE" | grep -F 'StealthGPU-ProjectHardwareId' >/dev/null \
     || fail "EXE 未包含正式 HardwareID 投影任务"
 if strings -a "$EXE" | grep -F 'live-vm2-e2e' >&2; then
@@ -222,6 +229,7 @@ payloads = (
     root / "deploy/guest-stealth/respawn-stealth-local.ps1",
     root / "deploy/guest-stealth/configure-power-policy.ps1",
     root / "deploy/guest-stealth/install-display-driver.ps1",
+    root / "deploy/guest-stealth/install-chipset-device.ps1",
     root / "deploy/guest-stealth/install-nvapi-system.ps1",
     root / "deploy/guest-stealth/nvapi-system-transaction.ps1",
     root / "deploy/scripts/apply-gpu-spoof.ps1",
@@ -234,6 +242,10 @@ payloads = (
     root / "deploy/scripts/stock-viogpudo/viogpudo.sys",
     root / "deploy/scripts/stock-viogpudo/viogpudo.cat",
     root / "deploy/scripts/stock-viogpudo/viogpudo.inf",
+    root / "deploy/scripts/stock-intel-chipset-inf/CannonLake-HSystem.inf",
+    root / "deploy/scripts/stock-intel-chipset-inf/cannonlake-h.cat",
+    root / "deploy/scripts/stock-intel-chipset-inf/SunrisePoint-HSystem.inf",
+    root / "deploy/scripts/stock-intel-chipset-inf/sunrisepoint-h.cat",
     root / "deploy/nvapi-shim/nvapi.dll",
     root / "deploy/nvapi-shim/nvapi64.dll",
 )
@@ -247,6 +259,8 @@ PY
 for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 refresh-gpu-name.ps1 \
         gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1 \
         force-displayfreq.ps1 configure-power-policy.ps1 \
+        install-chipset-device.ps1 CannonLake-HSystem.inf cannonlake-h.cat \
+        SunrisePoint-HSystem.inf sunrisepoint-h.cat \
         install-nvapi-system.ps1 nvapi-system-transaction.ps1 \
         nvapi.dll nvapi64.dll; do
     grep -F "$helper_name" "$REPO_ROOT/deploy/guest-stealth/package.sh" >/dev/null \
@@ -258,22 +272,25 @@ if strings -a "$EXE" | grep -F 'http://192.168.30.33:8765' >&2; then
 fi
 
 # package.sh 是用户最终生成“傻瓜单文件”的正式入口。用隔离仓库副本运行真实构建，
-# 并故意注入四个错误目录变量，证明它不会把 EXE 写到调用者指定的旁路目录，也不会
-# 从旁路驱动/NVAPI 目录取输入。测试副本的 scripts/nvapi-shim 只读链接回真源，所有
-# dist/build 写入仍限制在 mktemp 下，不污染并行测试共享的正式发布目录。
+# 并故意注入六个错误目录变量，证明它不会把 EXE 写到调用者指定的旁路目录，也不会
+# 从旁路驱动/芯片组/NVAPI/ADL 目录取输入。测试副本的四个只读输入目录链接回真源，
+# 所有 dist/build 写入仍限制在 mktemp 下，不污染并行测试共享的正式发布目录。
 PACKAGE_REPO="$TMP_DIR/package-repo"
 mkdir -p "$PACKAGE_REPO/deploy"
 cp -a "$REPO_ROOT/deploy/guest-stealth" "$PACKAGE_REPO/deploy/guest-stealth"
 rm -rf "$PACKAGE_REPO/deploy/guest-stealth/dist"
 ln -s "$REPO_ROOT/deploy/scripts" "$PACKAGE_REPO/deploy/scripts"
 ln -s "$REPO_ROOT/deploy/nvapi-shim" "$PACKAGE_REPO/deploy/nvapi-shim"
+ln -s "$REPO_ROOT/deploy/adl-shim" "$PACKAGE_REPO/deploy/adl-shim"
 poison_out="$TMP_DIR/poison-out"
 poison_build="$TMP_DIR/poison-build"
 env -u INCLUDE_LEGACY_SCRIPTS \
     OUT_DIR="$poison_out" \
     BUILD_DIR="$poison_build" \
     DRIVER_SRC_DIR="$TMP_DIR/missing-driver" \
+    CHIPSET_INF_SRC_DIR="$TMP_DIR/missing-chipset" \
     NVAPI_SRC_DIR="$TMP_DIR/missing-nvapi" \
+    ADL_SRC_DIR="$TMP_DIR/missing-adl" \
     "$PACKAGE_REPO/deploy/guest-stealth/package.sh" >/dev/null
 
 PACKAGE_DIST="$PACKAGE_REPO/deploy/guest-stealth/dist"
@@ -323,6 +340,17 @@ if DRIVER_SRC_DIR="$BAD_DRIVER_DIR" \
    BUILD_DIR="$TMP_DIR/bad-build" \
        "$REPO_ROOT/deploy/guest-stealth/build-exe.sh" >/dev/null 2>&1; then
     fail "构建器没有拒绝 SHA-256 不匹配的 viogpudo.sys"
+fi
+
+# 芯片组 INF/CAT 同样是签名闭包；任一原始字节变化都必须在 C 编译前失败。
+BAD_CHIPSET_DIR="$TMP_DIR/tampered-chipset"
+cp -a "$REPO_ROOT/deploy/scripts/stock-intel-chipset-inf" "$BAD_CHIPSET_DIR"
+printf '\0' >> "$BAD_CHIPSET_DIR/CannonLake-HSystem.inf"
+if CHIPSET_INF_SRC_DIR="$BAD_CHIPSET_DIR" \
+   OUT_DIR="$TMP_DIR/bad-chipset-out" \
+   BUILD_DIR="$TMP_DIR/bad-chipset-build" \
+       "$REPO_ROOT/deploy/guest-stealth/build-exe.sh" >/dev/null 2>&1; then
+    fail "构建器没有拒绝 SHA-256 不匹配的 CannonLake-HSystem.inf"
 fi
 
 # 两种架构的 shim 都是完整发布输入；任一文件被改动时，构建器必须在生成 EXE

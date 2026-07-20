@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Windows/WHPX 平台、身份持久化、严格门禁和编码器选择回归。
 #
-# 测试只使用 PowerShell DryRun 或直接调用无宿主副作用的 profile 函数，不要求
-# Windows/WHPX 运行环境。真实 WHPX 启动仍必须在 Windows 物理宿主做验收。
+# 仅用无副作用 DryRun/profile 函数；真实 WHPX 仍须在 Windows 物理宿主验收。
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LAUNCHER="$REPO_ROOT/deploy/windows/start-vm.ps1"
@@ -12,19 +10,16 @@ STREAMER="$REPO_ROOT/deploy/windows/stream-fb-shm.ps1"
 MANIFEST="$REPO_ROOT/deploy/hardware/platforms.json"
 COMPONENTS="$REPO_ROOT/deploy/hardware/components.json"
 PLATFORM_ID="intel-lga1151-i3-9100f-asus-prime-h310m-a-r2"
-
 fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
-
 require_text() {
     local needle="$1"
     local file="$2"
     grep -F -- "$needle" "$file" >/dev/null \
         || fail "missing '$needle' in $file"
 }
-
 pwsh_bin() {
     command -v pwsh || command -v powershell || true
 }
@@ -37,6 +32,7 @@ test_windows_powershell_files_have_bom() {
             || fail "Windows PowerShell 5.1 UTF-8 BOM missing: $file"
     done < <(find "$REPO_ROOT/deploy/windows" -type f -name '*.ps1' -print0)
     for file in \
+        "$REPO_ROOT/deploy/scripts/tests/test_windows_manifest_integrity.ps1" \
         "$REPO_ROOT/deploy/scripts/tests/test_windows_profile_integrity.ps1" \
         "$REPO_ROOT/deploy/scripts/tests/test_windows_powershell51.ps1"; do
         signature="$(od -An -tx1 -N3 "$file" | tr -d ' \n')"
@@ -48,13 +44,17 @@ test_windows_powershell_files_have_bom() {
 prepare_vm_files() {
     local root="$1"
     mkdir -p "$root/user"
-    touch "$root/disk.qcow2" "$root/code.fd" "$root/vars.fd"
+    printf 'firmware-fixture' | tee "$root/disk.qcow2" "$root/code.fd" >"$root/vars.fd"
 }
 
 run_launcher_dry() {
     local shell_bin="$1"
     local root="$2"
     local platform_id="${VMATE_TEST_PLATFORM_ID:-$PLATFORM_ID}"
+    local host_cpu='Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz'
+    if [[ "$platform_id" == *'-i5-6400t-'* ]]; then
+        host_cpu='Intel(R) Core(TM) i5-6400T CPU @ 2.20GHz'
+    fi
     shift 2
     USERPROFILE="$root/user" "$shell_bin" -NoLogo -NoProfile -NonInteractive \
         -File "$LAUNCHER" -Qemu /bin/true -VmRoot "$root/vm" \
@@ -62,18 +62,18 @@ run_launcher_dry() {
         -OvmfVarsTemplate "$root/vars.fd" -HardwareManifest "$MANIFEST" \
         -ComponentManifest "$COMPONENTS" \
         -PlatformId "$platform_id" -FbShmPath "$root/fb.sock" \
-        -GpuGlProbe Unavailable -AllowHostCpuPlatformMismatch -DryRun "$@"
+        -GpuGlProbe Unavailable -DryRunHostCpuName "$host_cpu" -DryRun "$@"
 }
 
 test_static_policy_markers() {
     require_text "[switch]\$AllowTcgFallback" "$LAUNCHER"
-    require_text "[switch]\$AllowHostCpuPlatformMismatch" "$LAUNCHER"
+    require_text "[switch]\$AllowPlatformCompatibility" "$LAUNCHER"
     require_text "[switch]\$RequireNestedVirtualization" "$LAUNCHER"
     require_text "[string]\$HardwareManifest = ''" "$LAUNCHER"
     require_text "[string]\$ComponentManifest = ''" "$LAUNCHER"
     require_text "deploy\\hardware\\platforms.json" "$LAUNCHER"
     require_text "deploy\\hardware\\components.json" "$LAUNCHER"
-    require_text "'-cpu', \$(if (\$AllowTcgFallback) { 'max' } else { 'host' })" "$LAUNCHER"
+    require_text "'-cpu', \$guestCpuArgument" "$LAUNCHER"
     require_text "'-uuid'" "$LAUNCHER"
     require_text "'-rtc'" "$LAUNCHER"
     require_text "New-VMateSmbiosArguments" "$LAUNCHER"
@@ -94,7 +94,7 @@ test_static_policy_markers() {
         "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
     require_text "'virtio-vga-gl,edid=on,edid-fixed-native=on,'" "$LAUNCHER"
     require_text "'virtio-vga,edid=on,edid-fixed-native=on,'" "$LAUNCHER"
-    require_text "\$probeText -match 'edid-fixed-native'" "$LAUNCHER"
+    require_text "Test-VMateQemuHelpProperties -HelpOutput \$probeText" "$LAUNCHER"
     require_text "'edid-fixed-native'" \
         "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
     require_text "'-accel', 'tcg,thread=multi'" "$LAUNCHER"
@@ -139,7 +139,7 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
     grep -F -- 'nvme,id=nvmectl0' "$out" | \
         grep -F -- 'model-number=Samsung SSD 970 PRO 512GB' | \
         grep -F -- 'subsys-vendor-id=0x144d,subsys-id=0xa801' | \
-        grep -F -- 'subnqn=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:' >/dev/null \
+        grep -F -- 'subnqn=nqn.2014-08.org.nvmexpress:uuid:' >/dev/null \
         || fail "catalog-backed Samsung NVMe identity is missing"
     grep -F -- 'intel-hda,id=hda,bus=pcie.0,addr=0x4,x-pci-vendor-id=0x8086' \
         "$out" >/dev/null || fail "manifest HDA controller BDF/identity is missing"
@@ -170,10 +170,11 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
     grep -F -- 'type=3,manufacturer=ASUSTeK COMPUTER INC.' "$out" | \
         grep -F -- 'chassis-type=0x03' >/dev/null \
         || fail "SMBIOS desktop chassis type is missing"
-    grep -F -- 'type=4,sock_pfx=CPU,manufacturer=Intel(R) Corporation' "$out" >/dev/null \
-        || fail "SMBIOS Type 4 host CPU policy is missing"
-    grep -Fx -- 'q35-pcihost.x-pci-mch-device-id=0x3e1f' "$out" >/dev/null \
-        || fail "manifest MCH identity is missing"
+    grep -F -- 'type=4,sock_pfx=LGA1151,manufacturer=Intel(R) Corporation' "$out" >/dev/null \
+        || fail "SMBIOS Type 4 manifest CPU pairing is missing"
+    if grep -F -- 'q35-pcihost.x-pci-mch-' "$out" >/dev/null; then
+        fail "Windows 不得覆盖 OVMF 用于识别 Q35 machine 的 MCH identity"
+    fi
     grep -Fx -- 'ICH9-LPC.x-pci-device-id=0xa303' "$out" >/dev/null \
         || fail "manifest LPC identity is missing"
     grep -Fx -- 'ICH9-SMB.x-pci-device-id=0xa323' "$out" >/dev/null \
@@ -184,12 +185,11 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
     [[ "$uuid" =~ ^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$ ]] \
         || fail "invalid dry-run UUID: $uuid"
     [[ ! -e "$tmp/vm" ]] || fail "DryRun created VM/profile/OVMF state"
-
     run_launcher_dry "$shell_bin" "$tmp" -AllowTcgFallback >"$out"
     grep -Fx -- 'tcg,thread=multi' "$out" >/dev/null \
         || fail "explicit TCG fallback was not appended"
-    grep -Fx -- 'max' "$out" >/dev/null \
-        || fail "TCG fallback must use a TCG-compatible CPU model"
+    grep -F -- 'model-id=Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz' "$out" >/dev/null \
+        || fail "TCG fallback must preserve the audited household CPU model"
     run_launcher_dry "$shell_bin" "$tmp" -ExposeHyperv >"$out"
     grep -Fx -- 'whpx,hyperv=auto' "$out" >/dev/null \
         || fail "explicit Hyper-V exposure was not applied"
@@ -210,7 +210,7 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
         -DryRun >"$out"
     grep -F -- 'processor-family=0x00CE,voltage=140,external-clock=100' \
         "$out" >/dev/null || fail "strict SMBIOS Type 4 facts are missing"
-    grep -F -- 'memory-type=0x1a,type-detail=0x80,rank=1,voltage=1200' \
+    grep -F -- 'memory-type=0x1a,type-detail=0x80,rank=1,voltage=1200,device-width=16,spd-ee1004=on' \
         "$out" >/dev/null || fail "SMBIOS/SPD memory facts are missing"
     grep -F -- 'speed=2400,configured-speed=2400,memory-type=0x1a' \
         "$out" >/dev/null || fail "H310 内存额定/配置速率未分离"
@@ -235,8 +235,10 @@ test_profile_transaction_and_integrity() {
     "$shell_bin" -NoLogo -NoProfile -NonInteractive \
         -File "$REPO_ROOT/deploy/scripts/tests/test_windows_profile_integrity.ps1" \
         -RepoRoot "$REPO_ROOT"
+    "$shell_bin" -NoLogo -NoProfile -NonInteractive \
+        -File "$REPO_ROOT/deploy/scripts/tests/test_windows_manifest_integrity.ps1" \
+        -RepoRoot "$REPO_ROOT"
 }
-
 test_manifest_status_and_fidelity_fail_closed() {
     local shell_bin="$1"
     local tmp bad_status bad_fidelity bad_bdf candidate
@@ -266,7 +268,6 @@ test_manifest_status_and_fidelity_fail_closed() {
     done
     rm -rf "$tmp"
 }
-
 test_unsupported_guest_policies_fail_before_writes() {
     local shell_bin="$1"
     local tmp
@@ -277,10 +278,11 @@ test_unsupported_guest_policies_fail_before_writes() {
         -Disk "$tmp/disk.qcow2" -OvmfCode "$tmp/code.fd" \
         -OvmfVarsTemplate "$tmp/vars.fd" -HardwareManifest "$MANIFEST" \
         -PlatformId "$PLATFORM_ID" -FbShmPath "$tmp/fb.sock" \
-        -GpuGlProbe Unavailable -DryRun >"$tmp/out" 2>&1; then
+        -GpuGlProbe Unavailable \
+        -DryRunHostCpuName 'Intel(R) Core(TM) i5-6500' -DryRun >"$tmp/out" 2>&1; then
         fail "WHPX host/manifest CPU mismatch unexpectedly passed strict mode"
     fi
-    require_text 'AllowHostCpuPlatformMismatch' "$tmp/out"
+    require_text '平台 CPU' "$tmp/out"
     if run_launcher_dry "$shell_bin" "$tmp" -GuestOs Windows11 \
         >"$tmp/out" 2>&1; then
         fail "Windows 11 unexpectedly bypassed TPM/Secure Boot gate"
@@ -375,6 +377,9 @@ test_nsis_rejects_stale_version() {
         "$REPO_ROOT/scripts/nsis.py"
     require_text '"deploy/windows/lib/VMate.Manifest.ps1"' \
         "$REPO_ROOT/scripts/nsis.py"
+    require_text '"deploy/windows/lib/VMate.Manifest.Validation.ps1"' \
+        "$REPO_ROOT/scripts/nsis.py"
+    require_text '"deploy/firmware/OVMF_CODE_4M_stealth.fd"' "$REPO_ROOT/scripts/nsis.py"
     require_text '"deploy/windows/lib/VMate.ProfileStore.ps1"' \
         "$REPO_ROOT/scripts/nsis.py"
     require_text 'Section "VMate Runtime (required)" SectionVMateRuntime' \
@@ -450,19 +455,23 @@ test_optional_nsis_runtime_syntax() (
     mkdir -p "$tmp/keymaps" "$tmp/share"
     touch "$tmp/keymaps/en-us" "$tmp/share/placeholder" \
         "$tmp/qemu-img.exe" "$tmp/qemu-io.exe" \
-        "$tmp/qemu-fb-shm-stream.exe" "$tmp/system-emulations.nsh" \
+        "$tmp/qemu-fb-shm-stream.exe" "$tmp/qemu-system-x86_64.exe" \
         "$tmp/system-mui-text.nsh"
     SRC_ROOT="$REPO_ROOT" STAGE_ROOT="$tmp" python3 - <<'PY'
 import importlib.util
 import os
-
 root = os.environ["SRC_ROOT"]
-spec = importlib.util.spec_from_file_location(
-    "qemu_nsis", os.path.join(root, "scripts/nsis.py"))
+staging = os.environ["STAGE_ROOT"]
+spec = importlib.util.spec_from_file_location("qemu_nsis",
+    os.path.join(root, "scripts/nsis.py"))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-if not module.stage_vmate_runtime(root, os.environ["STAGE_ROOT"]):
-    raise SystemExit("VMate runtime staging unexpectedly disabled")
+assert module.stage_vmate_runtime(root, staging)
+module.validate_vmate_runtime_binaries(staging)
+with open(os.path.join(staging, "system-emulations.nsh"), "w") as nsh, \
+        open(os.path.join(staging, "system-mui-text.nsh"), "w") as mui:
+    module.write_system_emulation_sections(
+        [os.path.join(staging, "qemu-system-x86_64.exe")], nsh, mui, True)
 PY
     output="$($nsis -V3 -NOCD -DW64 -DCONFIG_VMATE_RUNTIME=y \
         -DSRCDIR="$REPO_ROOT" -DBINDIR="$tmp" \
@@ -488,5 +497,4 @@ else
 fi
 test_nsis_rejects_stale_version
 test_optional_nsis_runtime_syntax
-
 echo 'OK: Windows platform/profile/preflight static checks passed'

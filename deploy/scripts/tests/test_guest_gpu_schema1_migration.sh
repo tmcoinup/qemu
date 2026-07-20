@@ -143,6 +143,10 @@ Set-FakeValue $fixture.Version SpoofRamMb "4096" `
     ([Microsoft.Win32.RegistryValueKind]::String)
 Assert-HintRejected $fixture 1 "schema-1 common 字段类型错误未拒绝"
 $fixture = New-LegacyFixture
+Set-FakeValue $fixture.Version SpoofName "Red Hat Red Hat VirtIO GPU DOD controller" `
+    ([Microsoft.Win32.RegistryValueKind]::String)
+Assert-HintRejected $fixture 1 "Red Hat/VirtIO legacy 品牌泄漏未拒绝"
+$fixture = New-LegacyFixture
 Assert-HintRejected $fixture 2 "非 schema-1 参数进入 migration hint"
 ' >/dev/null
 

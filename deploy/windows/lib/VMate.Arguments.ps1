@@ -46,20 +46,37 @@ function New-VMateSmbiosArguments {
     $board = $Platform.board
     $bios = $Platform.bios
     $system = $Platform.system
+    $isCompatibility = Test-VMateCompatibilityPlatform -Platform $Platform
     $cpuManufacturer = if ([string]$hostCpu.vendor_id -eq 'AuthenticAMD') {
         'Advanced Micro Devices, Inc.'
     } else {
         'Intel(R) Corporation'
     }
 
-    $type0 = 'type=0,vendor={0},version={1},date={2},uefi=on' -f
-        (ConvertTo-VMateQemuString ([string]$bios.vendor)),
-        (ConvertTo-VMateQemuString ([string]$bios.version)),
-        (ConvertTo-VMateQemuString ([string]$bios.date))
+    $type0 = if ($isCompatibility) {
+        # 通用模板没有可证明的固件版本/日期；让正在使用的 OVMF 自己提供 Type 0，
+        # 不能为了填满字段而伪造一个固定 BIOS。
+        $null
+    } else {
+        'type=0,vendor={0},version={1},date={2},uefi=on' -f
+            (ConvertTo-VMateQemuString ([string]$bios.vendor)),
+            (ConvertTo-VMateQemuString ([string]$bios.version)),
+            (ConvertTo-VMateQemuString ([string]$bios.date))
+    }
+    $systemManufacturer = if ($isCompatibility) {
+        [string]$system.manufacturer
+    } else {
+        [string]$board.manufacturer
+    }
+    $systemVersion = if ($isCompatibility) {
+        [string]$system.version
+    } else {
+        [string]$board.version
+    }
     $type1 = 'type=1,manufacturer={0},product={1},version={2},serial={3},uuid={4},family={5}' -f
-        (ConvertTo-VMateQemuString ([string]$board.manufacturer)),
+        (ConvertTo-VMateQemuString $systemManufacturer),
         (ConvertTo-VMateQemuString ([string]$system.product)),
-        (ConvertTo-VMateQemuString ([string]$board.version)),
+        (ConvertTo-VMateQemuString $systemVersion),
         (ConvertTo-VMateQemuString ([string]$identity.system_serial)),
         ([string]$identity.uuid),
         (ConvertTo-VMateQemuString ([string]$system.family))
@@ -70,8 +87,8 @@ function New-VMateSmbiosArguments {
         (ConvertTo-VMateQemuString ([string]$identity.board_serial))
     [void](Assert-VMateHexId $system.chassis_type 'system.chassis_type')
     $type3 = 'type=3,manufacturer={0},version={1},serial={2},chassis-type={3}' -f
-        (ConvertTo-VMateQemuString ([string]$board.manufacturer)),
-        (ConvertTo-VMateQemuString ([string]$board.version)),
+        (ConvertTo-VMateQemuString $systemManufacturer),
+        (ConvertTo-VMateQemuString $systemVersion),
         (ConvertTo-VMateQemuString ([string]$identity.chassis_serial)),
         ([string]$system.chassis_type)
     if ($Profile.configuration.host_cpu_platform_mismatch_allowed -eq $true) {
@@ -113,6 +130,8 @@ function New-VMateSmbiosArguments {
     $allowedMts = @($Platform.memory.allowed_mts | ForEach-Object { [int]$_ })
     $memoryRatedMts = [int]$identity.memory_rated_mts
     $memoryConfiguredMts = [int]$Profile.configuration.memory_configured_mts
+    $memoryFacts = Get-VMateMemoryRateFacts -Platform $Platform `
+        -PartNumber ([string]$identity.memory_part)
     if ($allowedMts.Count -eq 0 -or $memoryRatedMts -le 0 -or
         $memoryConfiguredMts -le 0 -or $memoryConfiguredMts -gt $memoryRatedMts -or
         $memoryConfiguredMts -notin $allowedMts) {
@@ -132,19 +151,25 @@ function New-VMateSmbiosArguments {
     $encodedSerials = @($serials | ForEach-Object {
         ConvertTo-VMateQemuString ([string]$_)
     }) -join '|'
-    $type17 = 'type=17,loc_pfx=DIMM_%C2,bank=P0 CHANNEL %C,manufacturer={0},serial={1},part={2},speed={3},configured-speed={4},memory-type={5},type-detail=0x80,rank={6},voltage={7}' -f
+    $type17 = 'type=17,loc_pfx=DIMM_%C2,bank=P0 CHANNEL %C,manufacturer={0},serial={1},part={2},speed={3},configured-speed={4},memory-type={5},type-detail=0x80,rank={6},voltage={7},device-width={8}' -f
         (ConvertTo-VMateQemuString ([string]$identity.memory_manufacturer)),
         $encodedSerials,
         (ConvertTo-VMateQemuString ([string]$identity.memory_part)),
         $memoryRatedMts,
         $memoryConfiguredMts,
         $memoryType,
-        ([int]$Platform.memory.rank),
-        ([int]$Platform.memory.voltage_mv)
+        ([int]$memoryFacts.Rank),
+        ([int]$Platform.memory.voltage_mv),
+        ([int]$memoryFacts.DeviceWidthBits)
+    if ($memoryFacts.SpdEe1004) {
+        $type17 += ',spd-ee1004=on'
+    }
 
     $arguments = [System.Collections.Generic.List[string]]::new()
     foreach ($value in @($type0, $type1, $type2, $type3, $type4, $type16, $type17)) {
-        Add-VMateArgument $arguments @('-smbios', $value)
+        if ($null -ne $value) {
+            Add-VMateArgument $arguments @('-smbios', $value)
+        }
     }
     return $arguments.ToArray()
 }
@@ -165,6 +190,7 @@ function New-VMatePlatformDeviceArguments {
     $storage = $Components.storage
     $keyboard = $Components.keyboard
     $mouse = $Components.mouse
+    $isCompatibility = Test-VMateCompatibilityPlatform -Platform $Platform
     $rootVendor = Assert-VMateHexId $rootPort.pci_vendor 'devices.root_port.pci_vendor'
     $rootDevice = Assert-VMateHexId $rootPort.pci_device 'devices.root_port.pci_device'
     $rootRevision = Assert-VMateHexId $rootPort.revision 'devices.root_port.revision'
@@ -189,9 +215,14 @@ function New-VMatePlatformDeviceArguments {
     if ($audioVendor -ne '0x8086') {
         throw "Windows ICH9 HDA 行为层不能表达非 Intel 控制器：$audioVendor"
     }
+    $expectedAudioFidelity = if ($isCompatibility) {
+        'generic_virtual_protocol'
+    } else {
+        'protocol_identity_only'
+    }
     if ([string]$Platform.devices.audio.identity_fidelity -ne
-        'protocol_identity_only') {
-        throw '当前 hda-duplex 只允许 protocol_identity_only，不能声称完整 Codec 节点拓扑。'
+        $expectedAudioFidelity) {
+        throw "平台音频 identity_fidelity 必须是 '$expectedAudioFidelity'，不能声称未实现的 Codec 拓扑。"
     }
     $codecId = Assert-VMateHexId $Platform.devices.audio.codec_id `
         'devices.audio.codec_id'
@@ -223,7 +254,7 @@ function New-VMatePlatformDeviceArguments {
     $nvmeSpeed = Get-VMatePcieSpeed -Generation ([int]$nvme.max_pcie_generation)
     $nvmeWidth = [int]$nvme.lanes
     $nvmeSubnqn = Get-VMateNvmeSubnqn -Components $Components `
-        -Serial ([string]$Profile.identity.nvme_serial)
+        -Uuid ([string]$Profile.identity.uuid)
     $storageModel = ConvertTo-VMateQemuString ([string]$storage.model)
     $storageFirmware = ConvertTo-VMateQemuString ([string]$storage.firmware)
     $keyboardManufacturer = ConvertTo-VMateQemuString ([string]$keyboard.manufacturer)
@@ -233,6 +264,16 @@ function New-VMatePlatformDeviceArguments {
     $arguments = [System.Collections.Generic.List[string]]::new()
     $commonPort = 'hotplug=off,x-pci-vendor-id={0},x-pci-revision={1}' -f
         $rootVendor, $rootRevision
+    $audioController = if ($isCompatibility) {
+        'ich9-intel-hda,id=hda,bus=pcie.0,addr=0x4'
+    } else {
+        "intel-hda,id=hda,bus=pcie.0,addr=0x4,x-pci-vendor-id=$audioVendor,x-pci-device-id=$audioDevice"
+    }
+    $audioCodec = if ($isCompatibility) {
+        'hda-duplex,bus=hda.0'
+    } else {
+        "hda-duplex,bus=hda.0,x-identity-compat=on,x-codec-id=$codecId,x-codec-revision=$codecRevision,x-codec-subsystem-id=$codecSubsystem"
+    }
     Add-VMateArgument $arguments @(
         '-device', "pcie-root-port,id=rp1,slot=1,bus=pcie.0,addr=0x1,x-speed=$nvmeSpeed,x-width=$nvmeWidth,$commonPort,x-pci-device-id=$($rootDevices[0])",
         '-device', "pcie-root-port,id=rp2,slot=2,bus=pcie.0,addr=0x2,x-speed=2_5,x-width=1,$commonPort,x-pci-device-id=$($rootDevices[1])",
@@ -250,8 +291,8 @@ function New-VMatePlatformDeviceArguments {
         '-device', "usb-mouse,bus=xhci.0,vendorid=$mouseVendor,productid=$mouseProduct,manufacturer=$mouseManufacturer,product=$mouseName",
         # 00:04.0 是 manifest 的 Windows Q35 观测布局；显式 pin 地址，避免设备
         # 顺序变化后 QEMU 自动分配到其它槽位而清单仍误报一致。
-        '-device', "intel-hda,id=hda,bus=pcie.0,addr=0x4,x-pci-vendor-id=$audioVendor,x-pci-device-id=$audioDevice",
-        '-device', "hda-duplex,bus=hda.0,x-identity-compat=on,x-codec-id=$codecId,x-codec-revision=$codecRevision,x-codec-subsystem-id=$codecSubsystem"
+        '-device', $audioController,
+        '-device', $audioCodec
     )
     return $arguments.ToArray()
 }
@@ -260,13 +301,20 @@ function New-VMateChipsetArguments {
     param([object]$Platform)
 
     $arguments = [System.Collections.Generic.List[string]]::new()
+    if (Test-VMateCompatibilityPlatform -Platform $Platform) {
+        # generic Q35 兼容模板使用 machine 自身的 ICH9 身份。物理平台所需的
+        # PCH/subsystem 覆盖在这里必须完全禁用，否则又会形成品牌混搭。
+        return $arguments.ToArray()
+    }
     $chipset = $Platform.devices.chipset
     $subVendor = Assert-VMateHexId $Platform.board.subsystem_vendor `
         'board.subsystem_vendor'
     $subDevice = Assert-VMateHexId $Platform.board.subsystem_device `
         'board.subsystem_device'
+    # 中文注释：Q35 MCH 的 8086:29c0 是 EDK2 PlatformPei 识别 machine type
+    # 的启动契约。把清单中的 H310/H110 MCH ID 注入 q35-pcihost 会使 OVMF
+    # 在固件早期 CpuDeadLoop；这里只投影可安全覆盖的 PCH 功能。
     $definitions = @(
-        @('mch', 'q35-pcihost', 'x-pci-mch-'),
         @('lpc', 'ICH9-LPC', 'x-pci-'),
         @('smbus', 'ICH9-SMB', 'x-pci-'),
         @('ahci', 'ich9-ahci', 'x-pci-')

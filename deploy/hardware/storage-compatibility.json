@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-07-19.1",
+  "identity_scope": "consumer-sata-boot-compatibility",
+  "selection_policy": {
+    "platform_boot_bus": "sata-ahci",
+    "qemu_driver": "ide-hd",
+    "selection": "uniform-random-on-profile-create",
+    "persist_selected_bundle": true,
+    "reload_binding": "catalog-id-and-all-visible-fields",
+    "consumer_only": true
+  },
+  "profiles": [
+    {
+      "id": "samsung-860-pro-512gb-sata",
+      "manufacturer": "Samsung",
+      "series": "860 PRO",
+      "model": "Samsung SSD 860 PRO 512GB",
+      "part_number": "MZ-76P512BW",
+      "firmware": "RVM02B6Q",
+      "capacity_label": "512GB",
+      "capacity_bytes": 512110190592,
+      "interface": "SATA 6 Gb/s",
+      "compatible_link_rates_gbps": [1.5, 3, 6],
+      "form_factor": "2.5-inch",
+      "protocol": "ATA",
+      "consumer_class": true,
+      "identity_fidelity": "vendor-document-model-and-firmware-no-device-capture",
+      "source_refs": [
+        "https://www.samsung.com/us/business/support/owners/product/860-pro-series-512gb/",
+        "https://semiconductor.samsung.com/consumer-storage/support/tools/"
+      ]
+    },
+    {
+      "id": "samsung-850-pro-512gb-sata",
+      "manufacturer": "Samsung",
+      "series": "850 PRO",
+      "model": "Samsung SSD 850 PRO 512GB",
+      "part_number": "MZ-7KE512BW",
+      "firmware": "EXM04B6Q",
+      "capacity_label": "512GB",
+      "capacity_bytes": 512110190592,
+      "interface": "SATA 6 Gb/s",
+      "compatible_link_rates_gbps": [1.5, 3, 6],
+      "form_factor": "2.5-inch",
+      "protocol": "ATA",
+      "consumer_class": true,
+      "identity_fidelity": "vendor-document-model-and-firmware-no-device-capture",
+      "source_refs": [
+        "https://www.samsung.com/us/business/support/owners/product/850-pro-series-512gb/",
+        "https://semiconductor.samsung.com/consumer-storage/support/tools/"
+      ]
+    },
+    {
+      "id": "samsung-840-pro-512gb-sata",
+      "manufacturer": "Samsung",
+      "series": "840 PRO",
+      "model": "Samsung SSD 840 PRO 512GB",
+      "part_number": "MZ-7PD512BW",
+      "firmware": "DXM06B0Q",
+      "capacity_label": "512GB",
+      "capacity_bytes": 512110190592,
+      "interface": "SATA 6 Gb/s",
+      "compatible_link_rates_gbps": [1.5, 3, 6],
+      "form_factor": "2.5-inch",
+      "protocol": "ATA",
+      "consumer_class": true,
+      "identity_fidelity": "vendor-document-model-and-firmware-no-device-capture",
+      "source_refs": [
+        "https://www.samsung.com/us/business/support/owners/product/840-pro-series-512gb/",
+        "https://semiconductor.samsung.com/consumer-storage/support/tools/"
+      ]
+    }
+  ]
+}

@@ -18,11 +18,35 @@ fi
 # noticing the motherboard serial flipping between sessions.
 #
 # **重要顺序**：profile 必须在磁盘创建**之前**加载，因为 qcow2 虚拟容量
-# 要与 component manifest 中核验过的 NVME_SIZE_BYTES 完全相等。不能只看
+# 要与所选 boot component 中核验过的 BOOT_STORAGE_SIZE_BYTES 完全相等。不能只看
 # qcow2 容器文件的宿主逻辑大小；稀疏文件的容器大小与 guest 可见容量不是一回事。
 # -------------------------------------------------------------------
 _profile_needs_save=0
 if (( _cli_reroll )); then
+    # 持久 TPM state 属于原主板实例。即使随机到同型号，重新生成 UUID/主板
+    # 序列号却复用旧 EK/NVRAM 也会制造物理生命周期矛盾；随机到另一型号则会
+    # 直接破坏版本/前端绑定。因此没有显式密钥迁移流程时，必须在生成候选前
+    # fail closed，旧 profile 与 state 都保持原样。
+    _reroll_has_tpm_identity=0
+    for _tpm_identity_path in \
+        "$VM_DIR/tpm-state/platform-binding" \
+        "$VM_DIR/tpm-state/tpm2-00.permall" \
+        "$VM_DIR/tpm12-state/platform-binding" \
+        "$VM_DIR/tpm12-state/tpm-00.permall"; do
+        if [[ -e "$_tpm_identity_path" || -L "$_tpm_identity_path" ]]; then
+            _reroll_has_tpm_identity=1
+            break
+        fi
+    done
+    if (( _reroll_has_tpm_identity )); then
+        _reroll_platform_id="$(
+            stealth_profile_get PLATFORM_ID "$PROFILE_FILE" 2>/dev/null || true
+        )"
+        echo "ERROR: 实例已有 TPM state，拒绝 reroll 硬件身份" >&2
+        echo "       current platform=${_reroll_platform_id:-unknown}；旧 profile/state 未修改。" >&2
+        echo "       请新建 instance，或先执行经过验证的 TPM 密钥迁移/归档流程。" >&2
+        exit 1
+    fi
     # 不能先删旧 profile：目标 CPU 若无法在当前宿主 realize，旧 VM 身份仍应保持
     # 可恢复。新身份先只存在当前进程内存，完成严格 smoke 后再原子替换。
     echo ">> --reroll: preparing replacement hardware identity for instance $INSTANCE"
@@ -79,7 +103,7 @@ fi
 # 真实运行参数（不是默认 fallback）。
 
 # -------------------------------------------------------------------
-# Per-instance disk creation —— qcow2 大小**对齐 profile.NVME_SIZE_BYTES**。
+# Per-instance disk creation —— qcow2 大小**对齐 profile.BOOT_STORAGE_SIZE_BYTES**。
 # 组件目录当前只允许 C 层完整实现过的 970 PRO 512GB 组合；以后扩目录时，
 # 同一个校验会继续阻止型号、固件、PCI 身份和 guest 可见容量互相矛盾。
 #

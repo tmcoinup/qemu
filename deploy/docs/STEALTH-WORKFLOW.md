@@ -5,7 +5,7 @@
 
 本流程坚持“客体尽量不安装软件”：不在客体下载脚本，不修改启动链，也不安装自签名、
 补丁或 NVIDIA 显示驱动。为满足 GPU-Z 2.70 直接双击，额外内容仅为两份固定摘要的
-无签名用户态 NVAPI shim、项目脚本和一条 Windows 内置计划任务；没有服务、控制面板、
+无签名用户态 NVAPI shim、项目脚本和两条 Windows 内置计划任务；没有服务、控制面板、
 运行时安装包或第三方常驻进程。
 
 详细实现与文件职责见 [`guest-stealth/README.md`](../guest-stealth/README.md)，完整 VM

@@ -198,8 +198,13 @@ main() {
     command -v visudo >/dev/null 2>&1 || fail "缺少 visudo"
     if (( EUID != 0 )); then
         command -v unshare >/dev/null 2>&1 || fail "缺少 unshare"
-        [[ "${SV_AUTOONCE_USERNS:-0}" == "1" ]] \
-            || exec unshare -Ur -- env SV_AUTOONCE_USERNS=1 bash "$0"
+        if [[ "${SV_AUTOONCE_USERNS:-0}" != "1" ]]; then
+            if ! unshare -Ur -- true >/dev/null 2>&1; then
+                echo "SKIP: 当前内核未开放非特权 user namespace"
+                return 0
+            fi
+            exec unshare -Ur -- env SV_AUTOONCE_USERNS=1 bash "$0"
+        fi
     fi
 
     TEST_ROOT="$(mktemp -d)"

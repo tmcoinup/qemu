@@ -103,9 +103,28 @@ test_cpu_arg_uses_manifest_phys_bits_and_features() {
         || fail "严格模式或 manifest 特性没有进入 CPU 参数"
 }
 
+test_intel_cpu_arg_masks_only_missing_tsx_features() {
+    local actual
+    export CPU_QEMU_ARG="Skylake-Client-IBRS"
+    export CPU_VENDOR="GenuineIntel"
+    export CPU_PHYS_BITS=39
+    export CPU_FEATURES="+invtsc"
+    export CPU_TSC_MHZ=2200
+    export STEALTH_KVM_TSC_CONTROL=0
+    export STEALTH_KVM_TSC_KHZ=2200000
+    export STRICT_HARDWARE=1
+    export STEALTH_TSC_POLICY=auto
+    export STEALTH_HOST_CPU_FLAGS="fpu hle"
+
+    actual="$(stealth_qemu_cpu_arg)"
+    [[ "$actual" == *"-rtm"* && "$actual" != *"-hle"* ]] \
+        || fail "Intel CPU 应只禁用宿主缺失的 TSX 子特性: $actual"
+}
+
 test_scaling_accepts_profile_frequency
 test_without_scaling_requires_250ppm_match
 test_strict_mode_rejects_e5_mismatch
 test_compatibility_mode_omits_impossible_frequency
 test_cpu_arg_uses_manifest_phys_bits_and_features
+test_intel_cpu_arg_masks_only_missing_tsx_features
 echo "PASS: TSC policy"

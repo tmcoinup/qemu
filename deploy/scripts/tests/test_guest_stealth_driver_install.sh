@@ -323,8 +323,8 @@ grep -F 'if ($driverRc -eq 30)' "$RESPAWN" >/dev/null \
     || fail "respawn 没有识别驱动待重启退出码 30"
 grep -F 'Register-RespawnResumeTask -KeepFirstLogon:$FirstLogon' \
     "$RESPAWN" >/dev/null || fail "respawn 没有注册重启后二阶段任务"
-grep -F "exit 30" "$RESPAWN" >/dev/null \
-    || fail "-NoReboot 路径没有保留待重启退出码 30"
+grep -F 'Restart-RespawnForPendingWork -PendingExitCode 30' "$RESPAWN" >/dev/null \
+    || fail "-NoReboot 路径没有通过统一重启 helper 保留退出码 30"
 register_line="$(grep -n 'Register-RespawnResumeTask -KeepFirstLogon' \
     "$RESPAWN" | head -n 1 | cut -d: -f1)"
 driver_shutdown_line="$(grep -n "VioGpuDod 安装已提交" "$RESPAWN" | \

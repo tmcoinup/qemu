@@ -82,21 +82,21 @@ fi
 
 # ---------- 基础依赖预检 ----------
 missing_bin=()
-for tool in ninja pkg-config python3; do
+for tool in bzip2 ninja pkg-config python3; do
     command -v "$tool" >/dev/null 2>&1 || missing_bin+=("$tool")
 done
 missing_pkg=()
-for pkg in glib-2.0 pixman-1; do
+for pkg in glib-2.0 pixman-1 zlib; do
     pkg-config --exists "$pkg" 2>/dev/null || missing_pkg+=("$pkg")
 done
 if (( ${#missing_bin[@]} + ${#missing_pkg[@]} )); then
     echo "FAIL: 缺少依赖"
     (( ${#missing_bin[@]} )) && echo "  可执行文件: ${missing_bin[*]}"
     (( ${#missing_pkg[@]} )) && echo "  pkg-config: ${missing_pkg[*]}"
-    echo "  修复: sudo apt install build-essential ninja-build pkg-config \\"
+    echo "  修复: sudo apt install build-essential bzip2 ninja-build pkg-config \\"
     echo "         python3-venv python3-pip libglib2.0-dev libpixman-1-dev \\"
     echo "         libsdl2-dev libspice-server-dev libvirglrenderer-dev libepoxy-dev \\"
-    echo "         libslirp-dev libseccomp-dev ovmf"
+    echo "         zlib1g-dev libslirp-dev libseccomp-dev ovmf"
     exit 1
 fi
 
@@ -197,8 +197,8 @@ echo ">> ninja -j$JOBS"
 ninja -j"$JOBS"
 
 BIN="$REPO_ROOT/build/qemu-system-x86_64"
-if [[ ! -x "$BIN" ]]; then
-    echo "FAIL: $BIN 未生成" >&2
+if [[ ! -f "$BIN" || ! -s "$BIN" || ! -x "$BIN" ]]; then
+    echo "FAIL: $BIN 未生成有效的非空可执行文件" >&2
     exit 1
 fi
 

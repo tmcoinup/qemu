@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-07-19.6",
+  "identity_scope": "household_cpu_catalog_q35_identity_compatibility",
+  "selection_policy": {
+    "compatibility_requires_explicit_allow": true,
+    "supported_requires_explicit_allow": false,
+    "host_supported_classes": ["e5-v3", "e5-v4"],
+    "priority": "host_supported_then_static_supported_then_same_generation_compatibility_then_cross_generation_compatibility",
+    "selection": "uniform_random_exact_threads",
+    "guest_threads_must_equal_sku_threads": true,
+    "allowed_topologies": ["2C2T", "2C4T", "4C4T"],
+    "guest_segment": "household_desktop_only",
+    "forbidden_guest_brand_tokens": [
+      "Xeon", "E3", "E5", "E7", "Xeon E", "EPYC", "Opteron", "Threadripper"
+    ],
+    "server_brand_host_passthrough": "deny",
+    "same_vendor_required": true,
+    "cross_generation_compatibility_last_resort": true,
+    "cross_generation_keeps_runtime_constraints": true,
+    "storage_policy_must_be_honored": true,
+    "qemu_realize_required": true,
+    "target_pch_behavior": "not_emulated"
+  },
+  "host_classes": [
+    {"id": "e5-v1", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [45], "guest_generations": ["sandy-bridge"]},
+    {"id": "e5-v2", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [62], "guest_generations": ["ivy-bridge"]},
+    {"id": "e5-v3", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [63], "guest_generations": ["haswell"]},
+    {"id": "e5-v4", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [79], "guest_generations": ["haswell"]},
+    {"id": "amd-k10", "vendor_id": "AuthenticAMD", "cpuid_families": [16], "cpuid_models": [2, 4, 5, 6, 8, 10], "guest_generations": ["k10"]},
+    {"id": "amd-zen", "vendor_id": "AuthenticAMD", "cpuid_families": [23, 25, 26], "cpuid_models": [], "guest_generations": ["zen"]}
+  ],
+  "platform_profiles": [
+    {
+      "id": "asus-p8h61-m-le-usb3-ddr3",
+      "release_year": 2011,
+      "guest_generation": "sandy-bridge",
+      "board": {"manufacturer": "ASUSTeK COMPUTER INC.", "product": "P8H61-M LE/USB3", "family": "P8H61-M LE/USB3", "version": "Rev X.0x", "serial_fn": "_serial_asus", "subsystem_vendor": "0x1043", "subsystem_device": "0x844D", "pch": "Intel H61", "pcie_generation": 2, "dimm_slots": 2, "max_memory_gib": 16},
+      "memory": {"type": "DDR3", "channels": 2, "max_mts": 1333, "allowed_mts": [1066, 1333], "voltage_mv": 1500, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192]},
+      "storage": {"boot_bus": "sata-ahci", "boot_model": "storage-compatibility-pool", "boot_firmware": "storage-compatibility-pool", "nvme_role": "data-only", "runtime_switch_required": true, "source_refs": []},
+      "devices": {
+        "chipset": {"mch": ["0x8086", "0x0100", "0x09"], "lpc": ["0x8086", "0x1C5C", "0x05"], "smbus": ["0x8086", "0x1C22", "0x05"], "ahci": ["0x8086", "0x1C02", "0x05"]},
+        "root_port": {"pci_vendor": "0x8086", "pci_device": "0x1C10", "revision": "0xB5"},
+        "xhci": {"pci_vendor": "0x1B21", "pci_device": "0x1042", "revision": "0x00"},
+        "nvme": {"max_pcie_generation": 2, "lanes": 4, "boot_supported": false, "attachment": "pcie_add_in"},
+        "nic": {"vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios"},
+        "audio": {"vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x10438445", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0x1C20"}
+      },
+      "bios": {"vendor": "American Megatrends Inc.", "version": "4601", "date": "05/22/2014"},
+      "system": {"product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03"},
+      "tpm": {"capability": "none", "supported": false, "implementation": "none", "version": "none", "emulation_frontend": "none", "pcr_banks": [], "support_source_ref": "https://www.asus.com/us/supportonly/p8h61-m%20leusb3/helpdesk_manual/", "version_source_ref": "https://www.asus.com/us/supportonly/p8h61-m%20leusb3/helpdesk_manual/"},
+      "source_refs": ["https://www.asus.com/us/supportonly/p8h61-m%20leusb3/helpdesk_cpu/", "https://www.asus.com/us/supportonly/p8h61-m%20leusb3/helpdesk_bios/", "https://dlcdnets.asus.com/pub/ASUS/mb/LGA1155/P8H61-M_LE_USB3/E6477_P8H61-M_LE_USB3.pdf"]
+    },
+    {
+      "id": "asus-p8b75-m-ddr3",
+      "release_year": 2012,
+      "guest_generation": "ivy-bridge",
+      "board": {"manufacturer": "ASUSTeK COMPUTER INC.", "product": "P8B75-M", "family": "P8B75-M", "version": "Rev X.0x", "serial_fn": "_serial_asus", "subsystem_vendor": "0x1043", "subsystem_device": "0x84CA", "pch": "Intel B75", "pcie_generation": 3, "dimm_slots": 4, "max_memory_gib": 32},
+      "memory": {"type": "DDR3", "channels": 2, "max_mts": 1600, "allowed_mts": [1333, 1600], "voltage_mv": 1500, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192]},
+      "storage": {"boot_bus": "sata-ahci", "boot_model": "storage-compatibility-pool", "boot_firmware": "storage-compatibility-pool", "nvme_role": "data-only", "runtime_switch_required": true, "source_refs": []},
+      "devices": {
+        "chipset": {"mch": ["0x8086", "0x0150", "0x09"], "lpc": ["0x8086", "0x1E49", "0x04"], "smbus": ["0x8086", "0x1E22", "0x04"], "ahci": ["0x8086", "0x1E02", "0x04"]},
+        "root_port": {"pci_vendor": "0x8086", "pci_device": "0x1E10", "revision": "0xC4"},
+        "xhci": {"pci_vendor": "0x8086", "pci_device": "0x1E31", "revision": "0x04"},
+        "nvme": {"max_pcie_generation": 2, "lanes": 4, "boot_supported": false, "attachment": "pcie_add_in"},
+        "nic": {"vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios"},
+        "audio": {"vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x104384CA", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0x1E20"}
+      },
+      "bios": {"vendor": "American Megatrends Inc.", "version": "1701", "date": "09/12/2014"},
+      "system": {"product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03"},
+      "tpm": {"capability": "none", "supported": false, "implementation": "none", "version": "none", "emulation_frontend": "none", "pcr_banks": [], "support_source_ref": "https://www.asus.com/ca-en/supportonly/p8b75-m/helpdesk_manual/", "version_source_ref": "https://www.asus.com/ca-en/supportonly/p8b75-m/helpdesk_manual/"},
+      "source_refs": ["https://www.asus.com/us/supportonly/p8b75-m/helpdesk_cpu/", "https://www.asus.com/us/supportonly/p8b75-m/helpdesk_bios/", "https://dlcdnets.asus.com/pub/ASUS/mb/LGA1155/P8B75-M/E7437_P8B75-M.pdf"]
+    },
+    {
+      "id": "asus-h81m-k-ddr3",
+      "release_year": 2013,
+      "guest_generation": "haswell",
+      "board": {"manufacturer": "ASUSTeK COMPUTER INC.", "product": "H81M-K", "family": "H81M-K", "version": "Rev X.0x", "serial_fn": "_serial_asus", "subsystem_vendor": "0x1043", "subsystem_device": "0x8534", "pch": "Intel H81", "pcie_generation": 3, "dimm_slots": 2, "max_memory_gib": 16},
+      "memory": {"type": "DDR3", "channels": 2, "max_mts": 1600, "allowed_mts": [1333, 1600], "voltage_mv": 1500, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192]},
+      "storage": {"boot_bus": "sata-ahci", "boot_model": "storage-compatibility-pool", "boot_firmware": "storage-compatibility-pool", "nvme_role": "data-only", "runtime_switch_required": true, "source_refs": []},
+      "devices": {
+        "chipset": {"mch": ["0x8086", "0x0C00", "0x06"], "lpc": ["0x8086", "0x8C5C", "0x05"], "smbus": ["0x8086", "0x8C22", "0x05"], "ahci": ["0x8086", "0x8C02", "0x05"]},
+        "root_port": {"pci_vendor": "0x8086", "pci_device": "0x8C10", "revision": "0xD5"},
+        "xhci": {"pci_vendor": "0x8086", "pci_device": "0x8C31", "revision": "0x05"},
+        "nvme": {"max_pcie_generation": 2, "lanes": 4, "boot_supported": false, "attachment": "pcie_add_in"},
+        "nic": {"vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios"},
+        "audio": {"vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x10438534", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0x8C20"}
+      },
+      "bios": {"vendor": "American Megatrends Inc.", "version": "3802", "date": "01/23/2024"},
+      "system": {"product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03"},
+      "tpm": {"capability": "none", "supported": false, "implementation": "none", "version": "none", "emulation_frontend": "none", "pcr_banks": [], "support_source_ref": "https://www.asus.com/supportonly/h81m-k/helpdesk_manual/", "version_source_ref": "https://www.asus.com/supportonly/h81m-k/helpdesk_manual/"},
+      "source_refs": ["https://www.asus.com/supportonly/h81m-k/helpdesk_cpu/", "https://www.asus.com/us/supportonly/h81m-k/helpdesk_bios/", "https://dlcdnets.asus.com/pub/ASUS/mb/LGA1150/H81M-K/E8601_H81M-K.pdf"]
+    },
+    {
+      "id": "asus-m5a78l-m-usb3-ddr3",
+      "release_year": 2011,
+      "guest_generation": "k10",
+      "board": {"manufacturer": "ASUSTeK COMPUTER INC.", "product": "M5A78L-M/USB3", "family": "M5A78L-M/USB3", "version": "Rev X.0x", "serial_fn": "_serial_asus", "subsystem_vendor": "0x1043", "subsystem_device": "0x8443", "pch": "AMD 760G/SB710", "pcie_generation": 2, "dimm_slots": 4, "max_memory_gib": 32},
+      "memory": {"type": "DDR3", "channels": 2, "max_mts": 1333, "allowed_mts": [1066, 1333], "voltage_mv": 1500, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192]},
+      "storage": {"boot_bus": "sata-ahci", "boot_model": "storage-compatibility-pool", "boot_firmware": "storage-compatibility-pool", "nvme_role": "data-only", "runtime_switch_required": true, "source_refs": []},
+      "devices": {
+        "chipset": {"mch": ["0x8086", "0x29C0", "0x02"], "lpc": ["0x8086", "0x2918", "0x02"], "smbus": ["0x8086", "0x2930", "0x02"], "ahci": ["0x8086", "0x2922", "0x02"]},
+        "root_port": {"pci_vendor": "0x1022", "pci_device": "0x9603", "revision": "0x00"},
+        "xhci": {"pci_vendor": "0x1B21", "pci_device": "0x1042", "revision": "0x00"},
+        "nvme": {"max_pcie_generation": 2, "lanes": 4, "boot_supported": false, "attachment": "pcie_add_in"},
+        "nic": {"vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios"},
+        "audio": {"vendor": "Realtek", "codec": "ALC892", "codec_id": "0x10ec0892", "codec_revision": "0x00100302", "codec_subsystem_id": "0x10438443", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x1002", "controller_pci_device": "0x4383"}
+      },
+      "bios": {"vendor": "American Megatrends Inc.", "version": "2101", "date": "08/05/2015"},
+      "system": {"product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03"},
+      "tpm": {"capability": "none", "supported": false, "implementation": "none", "version": "none", "emulation_frontend": "none", "pcr_banks": [], "support_source_ref": "https://dlcdnets.asus.com/pub/ASUS/mb/SocketAM3%2B/M5A78L-M_USB3/E8017_M5A78L-M-USB3.pdf", "version_source_ref": "https://dlcdnets.asus.com/pub/ASUS/mb/SocketAM3%2B/M5A78L-M_USB3/E8017_M5A78L-M-USB3.pdf"},
+      "source_refs": ["https://www.asus.com/supportonly/m5a78lmusb3/helpdesk_cpu/", "https://www.asus.com/us/supportonly/m5a78l-m-usb3/helpdesk_bios/", "https://dlcdnets.asus.com/pub/ASUS/mb/SocketAM3%2B/M5A78L-M_USB3/E8017_M5A78L-M-USB3.pdf"]
+    },
+    {
+      "id": "asus-prime-b350-plus-ddr4",
+      "release_year": 2017,
+      "guest_generation": "zen",
+      "board": {"manufacturer": "ASUSTeK COMPUTER INC.", "product": "PRIME B350-PLUS", "family": "PRIME", "version": "Rev X.0x", "serial_fn": "_serial_asus", "subsystem_vendor": "0x1043", "subsystem_device": "0x8694", "pch": "AMD B350", "pcie_generation": 3, "dimm_slots": 4, "max_memory_gib": 64},
+      "memory": {"type": "DDR4", "channels": 2, "max_mts": 2667, "allowed_mts": [2133, 2400, 2666], "voltage_mv": 1200, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192]},
+      "storage": {"boot_bus": "nvme", "boot_model": "component", "boot_firmware": "component", "nvme_role": "boot", "runtime_switch_required": false, "source_refs": []},
+      "devices": {
+        "chipset": {"mch": ["0x8086", "0x29C0", "0x02"], "lpc": ["0x8086", "0x2918", "0x02"], "smbus": ["0x8086", "0x2930", "0x02"], "ahci": ["0x8086", "0x2922", "0x02"]},
+        "root_port": {"pci_vendor": "0x1022", "pci_device": "0x1453", "revision": "0x00"},
+        "xhci": {"pci_vendor": "0x1022", "pci_device": "0x43BB", "revision": "0x02"},
+        "nvme": {"max_pcie_generation": 3, "lanes": 4, "boot_supported": true, "attachment": "m2_socket"},
+        "nic": {"vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios"},
+        "audio": {"vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x104386c7", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x1022", "controller_pci_device": "0x1457"}
+      },
+      "bios": {"vendor": "American Megatrends Inc.", "version": "6203", "date": "08/15/2023"},
+      "system": {"product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03"},
+      "tpm": {"capability": "firmware", "supported": true, "implementation": "amd-ftpm", "version": "2.0", "emulation_frontend": "tpm-crb", "pcr_banks": ["sha256"], "support_source_ref": "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_bios/", "version_source_ref": "https://www.asus.com/us/support/faq/1055973/"},
+      "source_refs": ["https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_cpu/", "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_bios/", "https://dlcdnets.asus.com/pub/ASUS/mb/SocketAM4/PRIME_B350-PLUS/T12581_PRIME_B350-PLUS_UM_v2_WEB.pdf", "https://dlcdnets.asus.com/pub/ASUS/mb/SocketAM4/PRIME_B350-PLUS/E13723_PRIME_B350-PLUS_UM_V3_WEB_20171114.pdf"]
+    },
+    {
+      "id": "asus-prime-b350-plus-athlon-ddr4",
+      "release_year": 2017,
+      "guest_generation": "zen",
+      "board": {"manufacturer": "ASUSTeK COMPUTER INC.", "product": "PRIME B350-PLUS", "family": "PRIME", "version": "Rev X.0x", "serial_fn": "_serial_asus", "subsystem_vendor": "0x1043", "subsystem_device": "0x8694", "pch": "AMD B350", "pcie_generation": 3, "dimm_slots": 4, "max_memory_gib": 64},
+      "memory": {"type": "DDR4", "channels": 2, "max_mts": 2667, "allowed_mts": [2133, 2400, 2666], "voltage_mv": 1200, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192]},
+      "storage": {"boot_bus": "nvme", "boot_model": "component", "boot_firmware": "component", "nvme_role": "boot", "runtime_switch_required": false, "source_refs": []},
+      "devices": {
+        "chipset": {"mch": ["0x8086", "0x29C0", "0x02"], "lpc": ["0x8086", "0x2918", "0x02"], "smbus": ["0x8086", "0x2930", "0x02"], "ahci": ["0x8086", "0x2922", "0x02"]},
+        "root_port": {"pci_vendor": "0x1022", "pci_device": "0x1453", "revision": "0x00"},
+        "xhci": {"pci_vendor": "0x1022", "pci_device": "0x43BB", "revision": "0x02"},
+        "nvme": {"max_pcie_generation": 3, "lanes": 2, "boot_supported": true, "attachment": "m2_socket"},
+        "nic": {"vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios"},
+        "audio": {"vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x104386c7", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x1022", "controller_pci_device": "0x1457"}
+      },
+      "bios": {"vendor": "American Megatrends Inc.", "version": "6203", "date": "08/15/2023"},
+      "system": {"product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03"},
+      "tpm": {"capability": "firmware", "supported": true, "implementation": "amd-ftpm", "version": "2.0", "emulation_frontend": "tpm-crb", "pcr_banks": ["sha256"], "support_source_ref": "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_bios/", "version_source_ref": "https://www.asus.com/us/support/faq/1055973/"},
+      "source_refs": ["https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_cpu/", "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_bios/", "https://dlcdnets.asus.com/pub/ASUS/mb/SocketAM4/PRIME_B350-PLUS/T12581_PRIME_B350-PLUS_UM_v2_WEB.pdf", "https://dlcdnets.asus.com/pub/ASUS/mb/SocketAM4/PRIME_B350-PLUS/E13723_PRIME_B350-PLUS_UM_V3_WEB_20171114.pdf"]
+    },
+    {
+      "id": "asus-p8b75-m-g2020-ddr3-1333",
+      "release_year": 2012,
+      "guest_generation": "ivy-bridge",
+      "board": {"manufacturer": "ASUSTeK COMPUTER INC.", "product": "P8B75-M", "family": "P8B75-M", "version": "Rev X.0x", "serial_fn": "_serial_asus", "subsystem_vendor": "0x1043", "subsystem_device": "0x84CA", "pch": "Intel B75", "pcie_generation": 3, "dimm_slots": 4, "max_memory_gib": 32},
+      "memory": {"type": "DDR3", "channels": 2, "max_mts": 1333, "allowed_mts": [1333], "voltage_mv": 1500, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192]},
+      "storage": {"boot_bus": "sata-ahci", "boot_model": "storage-compatibility-pool", "boot_firmware": "storage-compatibility-pool", "nvme_role": "data-only", "runtime_switch_required": true, "source_refs": []},
+      "devices": {
+        "chipset": {"mch": ["0x8086", "0x0150", "0x09"], "lpc": ["0x8086", "0x1E49", "0x04"], "smbus": ["0x8086", "0x1E22", "0x04"], "ahci": ["0x8086", "0x1E02", "0x04"]},
+        "root_port": {"pci_vendor": "0x8086", "pci_device": "0x1E10", "revision": "0xC4"},
+        "xhci": {"pci_vendor": "0x8086", "pci_device": "0x1E31", "revision": "0x04"},
+        "nvme": {"max_pcie_generation": 2, "lanes": 4, "boot_supported": false, "attachment": "pcie_add_in"},
+        "nic": {"vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios"},
+        "audio": {"vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x104384CA", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0x1E20"}
+      },
+      "bios": {"vendor": "American Megatrends Inc.", "version": "1701", "date": "09/12/2014"},
+      "system": {"product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03"},
+      "tpm": {"capability": "none", "supported": false, "implementation": "none", "version": "none", "emulation_frontend": "none", "pcr_banks": [], "support_source_ref": "https://www.asus.com/ca-en/supportonly/p8b75-m/helpdesk_manual/", "version_source_ref": "https://www.asus.com/ca-en/supportonly/p8b75-m/helpdesk_manual/"},
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/71070/intel-pentium-processor-g2020-3m-cache-2-90-ghz/specifications.html", "https://www.asus.com/us/supportonly/p8b75-m/helpdesk_cpu/", "https://www.asus.com/us/supportonly/p8b75-m/helpdesk_bios/", "https://dlcdnets.asus.com/pub/ASUS/mb/LGA1155/P8B75-M/E7437_P8B75-M.pdf"]
+    },
+    {
+      "id": "asus-h81m-k-g3220-ddr3-1333",
+      "release_year": 2013,
+      "guest_generation": "haswell",
+      "board": {"manufacturer": "ASUSTeK COMPUTER INC.", "product": "H81M-K", "family": "H81M-K", "version": "Rev X.0x", "serial_fn": "_serial_asus", "subsystem_vendor": "0x1043", "subsystem_device": "0x8534", "pch": "Intel H81", "pcie_generation": 3, "dimm_slots": 2, "max_memory_gib": 16},
+      "memory": {"type": "DDR3", "channels": 2, "max_mts": 1333, "allowed_mts": [1333], "voltage_mv": 1500, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192]},
+      "storage": {"boot_bus": "sata-ahci", "boot_model": "storage-compatibility-pool", "boot_firmware": "storage-compatibility-pool", "nvme_role": "data-only", "runtime_switch_required": true, "source_refs": []},
+      "devices": {
+        "chipset": {"mch": ["0x8086", "0x0C00", "0x06"], "lpc": ["0x8086", "0x8C5C", "0x05"], "smbus": ["0x8086", "0x8C22", "0x05"], "ahci": ["0x8086", "0x8C02", "0x05"]},
+        "root_port": {"pci_vendor": "0x8086", "pci_device": "0x8C10", "revision": "0xD5"},
+        "xhci": {"pci_vendor": "0x8086", "pci_device": "0x8C31", "revision": "0x05"},
+        "nvme": {"max_pcie_generation": 2, "lanes": 4, "boot_supported": false, "attachment": "pcie_add_in"},
+        "nic": {"vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios"},
+        "audio": {"vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x10438534", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0x8C20"}
+      },
+      "bios": {"vendor": "American Megatrends Inc.", "version": "3802", "date": "01/23/2024"},
+      "system": {"product": "System Product Name", "family": "To be filled by O.E.M.", "chassis_type": "0x03"},
+      "tpm": {"capability": "none", "supported": false, "implementation": "none", "version": "none", "emulation_frontend": "none", "pcr_banks": [], "support_source_ref": "https://www.asus.com/supportonly/h81m-k/helpdesk_manual/", "version_source_ref": "https://www.asus.com/supportonly/h81m-k/helpdesk_manual/"},
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/77773/intel-pentium-processor-g3220-3m-cache-3-00-ghz/specifications.html", "https://www.asus.com/supportonly/h81m-k/helpdesk_cpu/", "https://www.asus.com/us/supportonly/h81m-k/helpdesk_bios/", "https://dlcdnets.asus.com/pub/ASUS/mb/LGA1150/H81M-K/E8601_H81M-K.pdf"]
+    }
+  ],
+  "candidates": [
+    {
+      "id": "compat-sandy-g630-p8h61",
+      "enabled": true, "status": "compatibility", "host_classes": ["e5-v1"], "profile_id": "asus-p8h61-m-le-usb3-ddr3",
+      "cpu": {
+        "qemu_arg": "SandyBridge-IBRS,family=6,model=42,stepping=7,aes=off,avx=off,model-id=Intel(R) Pentium(R) CPU G630 @ 2.70GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Pentium(R) CPU G630 @ 2.70GHz",
+        "max_mhz": 2700, "current_mhz": 2700, "tsc_mhz": 2700, "part": "BX80623G630", "socket": "LGA1155", "cores": 2, "threads": 2, "phys_bits": 36, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics"},
+        "smbios": {"family": "0x000B", "upgrade": "0x25", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://ark.intel.com/content/www/us/en/ark/products/53483/intel-pentium-processor-g630-3m-cache-2-70-ghz.html", "https://www.asus.com/us/supportonly/p8h61-m%20leusb3/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-sandy-i3-2120-p8h61",
+      "enabled": true, "status": "compatibility", "host_classes": ["e5-v1"], "profile_id": "asus-p8h61-m-le-usb3-ddr3",
+      "cpu": {
+        "qemu_arg": "SandyBridge-IBRS,family=6,model=42,stepping=7,aes=off,model-id=Intel(R) Core(TM) i3-2120 CPU @ 3.30GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Core(TM) i3-2120 CPU @ 3.30GHz",
+        "max_mhz": 3300, "current_mhz": 3300, "tsc_mhz": 3300, "part": "BX80623I32120", "socket": "LGA1155", "cores": 2, "threads": 4, "phys_bits": 36, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics 2000"},
+        "smbios": {"family": "0x00CE", "upgrade": "0x25", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC"}
+      },
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/53426/intel-core-i32120-processor-3m-cache-3-30-ghz/specifications.html", "https://www.asus.com/us/supportonly/p8h61-m%20leusb3/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-sandy-i5-2400-p8h61",
+      "enabled": true, "status": "compatibility", "host_classes": ["e5-v1"], "profile_id": "asus-p8h61-m-le-usb3-ddr3",
+      "cpu": {
+        "qemu_arg": "SandyBridge-IBRS,family=6,model=42,stepping=7,model-id=Intel(R) Core(TM) i5-2400 CPU @ 3.10GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Core(TM) i5-2400 CPU @ 3.10GHz",
+        "max_mhz": 3400, "current_mhz": 3100, "tsc_mhz": 3100, "part": "BX80623I52400", "socket": "LGA1155", "cores": 4, "threads": 4, "phys_bits": 36, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics 2000"},
+        "smbios": {"family": "0x00CD", "upgrade": "0x25", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/52207/intel-core-i52400-processor-6m-cache-up-to-3-40-ghz/specifications.html", "https://www.asus.com/us/supportonly/p8h61-m%20leusb3/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-ivy-g2020-p8b75",
+      "enabled": true, "status": "compatibility", "host_classes": ["e5-v2"], "profile_id": "asus-p8b75-m-g2020-ddr3-1333",
+      "cpu": {
+        "qemu_arg": "IvyBridge-IBRS,family=6,model=58,stepping=9,aes=off,avx=off,f16c=off,rdrand=off,model-id=Intel(R) Pentium(R) CPU G2020 @ 2.90GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Pentium(R) CPU G2020 @ 2.90GHz",
+        "max_mhz": 2900, "current_mhz": 2900, "tsc_mhz": 2900, "part": "BX80637G2020", "socket": "LGA1155", "cores": 2, "threads": 2, "phys_bits": 36, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics for 3rd Generation Intel Processors"},
+        "smbios": {"family": "0x000B", "upgrade": "0x25", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/71070/intel-pentium-processor-g2020-3m-cache-2-90-ghz/specifications.html", "https://www.asus.com/us/supportonly/p8b75-m/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-ivy-i3-3220-p8b75",
+      "enabled": true, "status": "compatibility", "host_classes": ["e5-v2"], "profile_id": "asus-p8b75-m-ddr3",
+      "cpu": {
+        "qemu_arg": "IvyBridge-IBRS,family=6,model=58,stepping=9,aes=off,rdrand=off,model-id=Intel(R) Core(TM) i3-3220 CPU @ 3.30GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Core(TM) i3-3220 CPU @ 3.30GHz",
+        "max_mhz": 3300, "current_mhz": 3300, "tsc_mhz": 3300, "part": "BX80637I33220", "socket": "LGA1155", "cores": 2, "threads": 4, "phys_bits": 36, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics 2500"},
+        "smbios": {"family": "0x00CE", "upgrade": "0x25", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC"}
+      },
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/65693/intel-core-i33220-processor-3m-cache-3-30-ghz/specifications.html", "https://www.asus.com/us/supportonly/p8b75-m/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-ivy-i5-3470-p8b75",
+      "enabled": true, "status": "compatibility", "host_classes": ["e5-v2"], "profile_id": "asus-p8b75-m-ddr3",
+      "cpu": {
+        "qemu_arg": "IvyBridge-IBRS,family=6,model=58,stepping=9,model-id=Intel(R) Core(TM) i5-3470 CPU @ 3.20GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Core(TM) i5-3470 CPU @ 3.20GHz",
+        "max_mhz": 3600, "current_mhz": 3200, "tsc_mhz": 3200, "part": "BX80637I53470", "socket": "LGA1155", "cores": 4, "threads": 4, "phys_bits": 36, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics 2500"},
+        "smbios": {"family": "0x00CD", "upgrade": "0x25", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/68316/intel-core-i53470-processor-6m-cache-up-to-3-60-ghz/specifications.html", "https://www.asus.com/us/supportonly/p8b75-m/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-haswell-g3220-h81",
+      "enabled": true, "status": "supported", "host_classes": ["e5-v3", "e5-v4"], "profile_id": "asus-h81m-k-g3220-ddr3-1333",
+      "cpu": {
+        "qemu_arg": "Haswell-v4,family=6,model=60,stepping=3,aes=off,avx=off,avx2=off,bmi1=off,bmi2=off,f16c=off,fma=off,model-id=Intel(R) Pentium(R) CPU G3220 @ 3.00GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Pentium(R) CPU G3220 @ 3.00GHz",
+        "max_mhz": 3000, "current_mhz": 3000, "tsc_mhz": 3000, "part": "BX80646G3220", "socket": "LGA1150", "cores": 2, "threads": 2, "phys_bits": 39, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics"},
+        "smbios": {"family": "0x000B", "upgrade": "0x2A", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/77773/intel-pentium-processor-g3220-3m-cache-3-00-ghz/specifications.html", "https://www.asus.com/supportonly/h81m-k/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-haswell-i3-4130-h81",
+      "enabled": true, "status": "supported", "host_classes": ["e5-v3", "e5-v4"], "profile_id": "asus-h81m-k-ddr3",
+      "cpu": {
+        "qemu_arg": "Haswell-v4,family=6,model=60,stepping=3,model-id=Intel(R) Core(TM) i3-4130 CPU @ 3.40GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Core(TM) i3-4130 CPU @ 3.40GHz",
+        "max_mhz": 3400, "current_mhz": 3400, "tsc_mhz": 3400, "part": "BX80646I34130", "socket": "LGA1150", "cores": 2, "threads": 4, "phys_bits": 39, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics 4400"},
+        "smbios": {"family": "0x00CE", "upgrade": "0x2A", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC"}
+      },
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/77480/intel-core-i34130-processor-3m-cache-3-40-ghz/specifications.html", "https://www.asus.com/supportonly/h81m-k/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-haswell-i5-4570-h81",
+      "enabled": true, "status": "supported", "host_classes": ["e5-v3", "e5-v4"], "profile_id": "asus-h81m-k-ddr3",
+      "cpu": {
+        "qemu_arg": "Haswell-v4,family=6,model=60,stepping=3,model-id=Intel(R) Core(TM) i5-4570 CPU @ 3.20GHz", "vendor_id": "GenuineIntel", "name": "Intel(R) Core(TM) i5-4570 CPU @ 3.20GHz",
+        "max_mhz": 3600, "current_mhz": 3200, "tsc_mhz": 3200, "part": "BX80646I54570", "socket": "LGA1150", "cores": 4, "threads": 4, "phys_bits": 39, "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Intel HD Graphics 4600"},
+        "smbios": {"family": "0x00CD", "upgrade": "0x2A", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.intel.com/content/www/us/en/products/sku/75043/intel-core-i54570-processor-6m-cache-up-to-3-60-ghz/specifications.html", "https://www.asus.com/supportonly/h81m-k/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-k10-athlon-ii-x2-250-m5a78l",
+      "enabled": true, "status": "compatibility", "host_classes": ["amd-k10"], "profile_id": "asus-m5a78l-m-usb3-ddr3",
+      "cpu": {
+        "qemu_arg": "phenom,family=16,model=6,stepping=3,model-id=AMD Athlon(tm) II X2 250 Processor", "vendor_id": "AuthenticAMD", "name": "AMD Athlon(tm) II X2 250 Processor",
+        "max_mhz": 3000, "current_mhz": 3000, "tsc_mhz": 3000, "part": "ADX250OCK23GM", "socket": "AM3", "cores": 2, "threads": 2, "phys_bits": 48, "features": "+invtsc",
+        "integrated_gpu": {"present": false, "profile_state": "absent", "model": "none"},
+        "smbios": {"family": "0x001D", "upgrade": "0x20", "voltage_mv": 1400, "external_clock_mhz": 200, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.amd.com/content/dam/amd/en/documents/archived-tech-docs/programmer-references/31116.pdf", "https://www.amd.com/content/dam/amd/en/documents/archived-tech-docs/datasheets/40036.pdf", "https://www.amd.com/content/dam/amd/en/documents/archived-tech-docs/revision-guides/41322_10h_Rev_Gd.pdf", "https://www.asus.com/supportonly/m5a78lmusb3/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-k10-phenom-ii-x4-955-m5a78l",
+      "enabled": true, "status": "compatibility", "host_classes": ["amd-k10"], "profile_id": "asus-m5a78l-m-usb3-ddr3",
+      "cpu": {
+        "qemu_arg": "phenom,family=16,model=4,stepping=3,model-id=AMD Phenom(tm) II X4 955 Processor", "vendor_id": "AuthenticAMD", "name": "AMD Phenom(tm) II X4 955 Processor",
+        "max_mhz": 3200, "current_mhz": 3200, "tsc_mhz": 3200, "part": "HDZ955FBK4DGM", "socket": "AM3", "cores": 4, "threads": 4, "phys_bits": 48, "features": "+invtsc",
+        "integrated_gpu": {"present": false, "profile_state": "absent", "model": "none"},
+        "smbios": {"family": "0x0085", "upgrade": "0x20", "voltage_mv": 1400, "external_clock_mhz": 200, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.amd.com/content/dam/amd/en/documents/archived-tech-docs/programmer-references/31116.pdf", "https://www.amd.com/content/dam/amd/en/documents/archived-tech-docs/datasheets/40036.pdf", "https://www.amd.com/content/dam/amd/en/documents/archived-tech-docs/revision-guides/41322_10h_Rev_Gd.pdf", "https://www.asus.com/supportonly/m5a78lmusb3/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-zen-athlon-200ge-b350",
+      "enabled": true, "status": "compatibility", "host_classes": ["amd-zen"], "profile_id": "asus-prime-b350-plus-athlon-ddr4",
+      "cpu": {
+        "qemu_arg": "Ryzen3-1200,family=23,model=17,stepping=0,model-id=AMD Athlon 200GE with Radeon Vega Graphics", "vendor_id": "AuthenticAMD", "name": "AMD Athlon 200GE with Radeon Vega Graphics",
+        "max_mhz": 3200, "current_mhz": 3200, "tsc_mhz": 3200, "part": "YD200GC6M2OFB", "socket": "AM4", "cores": 2, "threads": 4, "phys_bits": 43, "features": "+invtsc,+tsc-deadline,+topoext",
+        "integrated_gpu": {"present": true, "profile_state": "disabled_in_bios", "model": "Radeon Vega 3 Graphics"},
+        "smbios": {"family": "0x006B", "upgrade": "0x31", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC"}
+      },
+      "source_refs": ["https://www.amd.com/en/support/downloads/drivers.html/processors/athlon/athlon-200-series/amd-athlon-200ge.html", "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_cpu/"]
+    },
+    {
+      "id": "compat-zen-ryzen3-1200-b350",
+      "enabled": true, "status": "compatibility", "host_classes": ["amd-zen"], "profile_id": "asus-prime-b350-plus-ddr4",
+      "cpu": {
+        "qemu_arg": "Ryzen3-1200,family=23,model=1,stepping=1,model-id=AMD Ryzen 3 1200 Quad-Core Processor", "vendor_id": "AuthenticAMD", "name": "AMD Ryzen 3 1200 Quad-Core Processor",
+        "max_mhz": 3400, "current_mhz": 3100, "tsc_mhz": 3100, "part": "YD1200BBM4KAE", "socket": "AM4", "cores": 4, "threads": 4, "phys_bits": 43, "features": "+invtsc,+tsc-deadline,+topoext",
+        "integrated_gpu": {"present": false, "profile_state": "absent", "model": "none"},
+        "smbios": {"family": "0x006B", "upgrade": "0x31", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.amd.com/en/support/downloads/drivers.html/processors/ryzen/ryzen-1000-series/amd-ryzen-3-1200.html", "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_cpu/"]
+    }
+  ]
+}

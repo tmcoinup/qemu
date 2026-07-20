@@ -1,18 +1,56 @@
 # NVMe Identify Controller 的 SN 字段是 20 字节 ASCII，QEMU 会按规范右侧空格补齐。
-# 这里生成 Samsung 常见的 S<10 hex>N 可读形态，并用 _hex 取满 40 bit，
-# 比 RANDOM*RANDOM 的有效空间更宽，批量克隆时更不容易撞号。
-_nvme_serial() { echo "S$(_hex 10 | tr a-f A-F)N"; }
+# Samsung 970 PRO 规格给出的模式是 S###N#########；变量位使用大写十六进制，
+# 得到 48 bit 随机空间，同时保持 N 位于官方规定的第 5 个字符。
+_nvme_serial() {
+    local prefix suffix
+    while :; do
+        prefix="$(_hex 3 | tr '[:lower:]' '[:upper:]')"
+        suffix="$(_hex 9 | tr '[:lower:]' '[:upper:]')"
+        if [[ "$prefix$suffix" != "000000000000" &&
+              "$prefix$suffix" != "FFFFFFFFFFFF" ]]; then
+            printf 'S%sN%s\n' "$prefix" "$suffix"
+            return 0
+        fi
+    done
+}
 
-# DIMM serial: 8 大写十六进制（Kingston / Crucial / Samsung / Hynix 都用这格式）
-_mem_serial() { printf '%08X\n' $(( (RANDOM << 16) | RANDOM )); }
+# SATA ATA Identify serial 与 NVMe Identify serial 是两个不同设备身份。老实现
+# 在 SATA 分支复用 NVME_SERIAL，会把 970 PRO 部件身份投影到 840/850/860 PRO。
+# 新建 profile 为独立 SATA 启动盘生成 15 字符 Samsung 风格序号并持久化。
+_boot_storage_serial() {
+    local serial
+    while :; do
+        serial="S$(_hex 14 | tr '[:lower:]' '[:upper:]')"
+        if [[ "$serial" != S00000000000000 &&
+              "$serial" != SFFFFFFFFFFFFFF ]]; then
+            printf '%s\n' "$serial"
+            return 0
+        fi
+    done
+}
+
+# DIMM serial: 8 大写十六进制。排除 SMBIOS/工具常用的未提供占位值。
+_mem_serial() {
+    local serial
+    while :; do
+        serial="$(_hex 8 | tr '[:lower:]' '[:upper:]')"
+        if [[ "$serial" != "00000000" && "$serial" != "00000001" &&
+              "$serial" != "FFFFFFFF" ]]; then
+            printf '%s\n' "$serial"
+            return 0
+        fi
+    done
+}
 
 # 显示器 serial: prefix + 8 字符随机字母数字（Samsung "H4ZK500001VL" 风格）
 _monitor_serial() {
     local prefix="$1"
     local rest
-    rest=$(LC_ALL=C tr -dc 'A-Z0-9' </dev/urandom 2>/dev/null | head -c 8)
-    [[ -z "$rest" ]] && rest=$(printf '%08X' $((RANDOM * RANDOM)))
-    echo "${prefix}${rest}"
+    while :; do
+        rest="$(_hex 8 | tr '[:lower:]' '[:upper:]')"
+        [[ "$rest" != "00000000" && "$rest" != "FFFFFFFF" ]] && break
+    done
+    printf '%s\n' "${prefix}${rest}"
 }
 
 # USB HID serial 只用于 profile 内部稳定标识，当前 C descriptor 明确不向 guest
@@ -24,30 +62,22 @@ _usb_hid_serial() {
     prefix="${prefix//[^A-Z0-9]/}"
     prefix="${prefix:0:4}"
     [[ -n "$prefix" ]] || prefix="HID"
-    rest=$(LC_ALL=C tr -dc 'A-Z0-9' </dev/urandom 2>/dev/null | head -c 6)
-    [[ -z "$rest" ]] && rest=$(printf '%06X' $RANDOM)
-    echo "${prefix}${rest}"
-}
-
-# NIC OUI 池：Intel/Realtek/ASUS。永不用 52:54:00（QEMU/KVM 注册块）。
-_gen_mac() {
-    local ouis=(
-        "00:1b:21" "00:1e:67" "00:a0:c9" "3c:fd:fe" "54:bf:64" "a0:36:9f"
-        "1c:1b:0d" "00:e0:4c" "4c:cc:6a"
-        "24:4b:fe" "a8:a1:59"
-    )
-    local n=${#ouis[@]}
-    local i=$(( (RANDOM * 32768 + RANDOM) % n ))
-    printf "%s:%02x:%02x:%02x\n" \
-        "${ouis[$i]}" $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256))
+    while :; do
+        rest="$(_hex 6 | tr '[:lower:]' '[:upper:]')"
+        [[ "$rest" != "000000" && "$rest" != "FFFFFF" ]] && break
+    done
+    printf '%s\n' "${prefix}${rest}"
 }
 
 _gen_uuid() {
-    printf '%08x-%04x-%04x-%04x-%04x%08x\n' \
-        $((RANDOM * RANDOM)) \
-        $((RANDOM & 0xffff)) \
-        $(((RANDOM & 0x0fff) | 0x4000)) \
-        $(((RANDOM & 0x3fff) | 0x8000)) \
-        $((RANDOM & 0xffff)) \
-        $((RANDOM * RANDOM))
+    local hex variant
+    while :; do
+        hex="$(_hex 32)"
+        [[ "$hex" != "00000000000000000000000000000000" &&
+           "$hex" != "ffffffffffffffffffffffffffffffff" ]] && break
+    done
+    variant=$(( 8 + (16#${hex:16:1} % 4) ))
+    printf '%s-%s-4%s-%x%s-%s\n' \
+        "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
+        "$variant" "${hex:17:3}" "${hex:20:12}"
 }

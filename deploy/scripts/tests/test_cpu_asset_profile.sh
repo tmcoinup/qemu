@@ -11,6 +11,8 @@ fail() {
 }
 
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/fixtures/catalog-cpu-preflight-stub.sh"
 
 # 单元测试不应依赖执行 CI 的物理 CPU 厂商。注入一个支持 TSC scaling 的 Intel
 # 宿主视图，使正式选择器仍按 enabled manifest 生成完整 profile。

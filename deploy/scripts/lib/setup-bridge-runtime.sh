@@ -6,6 +6,11 @@
 # 表，不写接口；调用方确认安全后才设置 VID 1 native/PVID。
 # ---------------------------------------------------------------------------
 
+# shellcheck disable=SC1091  # 运行时按当前库目录加载共享只读探测函数。
+_SETUP_BRIDGE_RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_SETUP_BRIDGE_RUNTIME_DIR/uplink-detect.sh"
+unset _SETUP_BRIDGE_RUNTIME_DIR
+
 # setup-bridge.sh 的错误输出统一走 stderr，便于启动器复检时保留 stdout 契约。
 setup_error() {
     echo "ERROR: $*" >&2
@@ -21,15 +26,46 @@ setup_validate_ifname() {
     [[ "$name" != "." && "$name" != ".." ]]
 }
 
+# 自动模式绝不按 enp*/eth* 名称猜测。候选必须是可验证的有线物理设备，
+# 且不能已被 br0 以外的 controller 接管；Wi-Fi 和虚拟 link kind 均需显式处理。
+setup_uplink_candidate_is_physical() {
+    local candidate="$1"
+    local bridge_name="${2:-${BR:-br0}}"
+    local sys_class_net="${3:-/sys/class/net}"
+    local details
+
+    setup_validate_ifname "$candidate" || return 1
+    [[ "$candidate" != "$bridge_name" && "$candidate" != "lo" \
+        && "$candidate" != svtap* && "$candidate" != tap* \
+        && "$candidate" != vnet* ]] || return 1
+    [[ -e "$sys_class_net/$candidate/device" \
+        && ! -d "$sys_class_net/$candidate/wireless" ]] || return 1
+    # 只自动接管 carrier-up 的 ARPHRD_ETHER(1)。物理口的 stale linkdown
+    # default route、InfiniBand/WWAN 等非 Ethernet 设备必须由管理员显式处理。
+    [[ "$(cat -- "$sys_class_net/$candidate/type" 2>/dev/null || true)" == "1" \
+        && "$(cat -- "$sys_class_net/$candidate/carrier" 2>/dev/null || true)" == "1" ]] \
+        || return 1
+    details="$(ip -d -o link show dev "$candidate" 2>/dev/null)" || return 1
+    if [[ "$details" =~ [[:space:]]master[[:space:]]+([^[:space:]]+) \
+        && "${BASH_REMATCH[1]}" != "$bridge_name" ]]; then
+        return 1
+    fi
+    [[ ! "$details" =~ [[:space:]]vlan[[:space:]]+protocol[[:space:]] \
+        && ! "$details" =~ [[:space:]]macvlan[[:space:]] \
+        && ! "$details" =~ [[:space:]]macvtap[[:space:]] ]]
+}
+
 # 所有用户输入必须在 root 检查、flock、文件安装和网络修改之前完成校验。这样旧
 # 参数或拼写错误只返回退出码 2，不会留下半套宿主配置。
 setup_validate_inputs() {
+    local uplink_auto=0
+
     if [[ -v VLAN_ID || -v VLAN_IF ]]; then
-        setup_error "VLAN_ID/VLAN_IF 已废弃；请改用 VLAN_TRUNK=1，并在启动 VM 时传 --vlan-id=N。"
+        setup_error "VLAN_ID/VLAN_IF 已废弃；setup 默认启用 trunk，请在启动 VM 时传 --vlan-id=N。"
         return 2
     fi
 
-    VLAN_TRUNK="${VLAN_TRUNK:-0}"
+    VLAN_TRUNK="${VLAN_TRUNK:-1}"
     VLAN_SETUP_AUTO="${VLAN_SETUP_AUTO:-0}"
     UPLINK="${UPLINK:-}"
     HOST_IP="${HOST_IP:-192.168.76.1/24}"
@@ -63,10 +99,15 @@ setup_validate_inputs() {
             setup_error "VLAN_TRUNK=1 固定使用单一 br0，不能设置 BR='$BR'。"
             return 2
         }
-        [[ -n "$UPLINK" ]] || {
-            setup_error "VLAN_TRUNK=1 必须提供 UPLINK=<物理网卡>。"
-            return 2
-        }
+        if [[ -z "$UPLINK" ]]; then
+            if ! UPLINK="$(uplink_detect_from_topology \
+                setup_uplink_candidate_is_physical "$BR")"; then
+                setup_error "无法唯一识别安全的物理上联；请显式设置 UPLINK=<网卡>。"
+                return 2
+            fi
+            uplink_auto=1
+        fi
+        (( uplink_auto == 0 )) || echo ">> auto-detected uplink: $UPLINK"
     fi
 }
 

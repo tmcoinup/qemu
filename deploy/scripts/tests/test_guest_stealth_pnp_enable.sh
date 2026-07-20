@@ -22,6 +22,12 @@ grep -F 'if (-not $ListOnly)' "$SPOOF" >/dev/null \
     || fail "apply-gpu-spoof.ps1 的开头启用兜底必须避开 -ListOnly 只读模式"
 grep -F 'pnputil.exe /scan-devices' "$SPOOF" >/dev/null \
     || fail "apply-gpu-spoof.ps1 没有使用非禁用式 PnP 扫描"
+grep -F 'Get-PnpDevice -Class Display -PresentOnly' "$SPOOF" >/dev/null \
+    || fail "AutoDetect 没有限制为当前实际存在的 Display 设备"
+grep -F "'^PCI\\\\VEN_1AF4&DEV_1050&SUBSYS_" "$SPOOF" >/dev/null \
+    || fail "AutoDetect 没有排除 RDP/非 stock Display 节点"
+grep -F 'if ($gpuDevices.Count -ne 1)' "$SPOOF" >/dev/null \
+    || fail "AutoDetect 没有对零个或多个物理 Display 节点 fail closed"
 
 if grep -nE "Get-PnpDevice.*-Class[[:space:]]+'?Display'?.*-Status[[:space:]]+OK" "$SPOOF" >&2; then
     fail "Display 枚举不能限制为 -Status OK，否则 Code 22 设备会被漏掉"

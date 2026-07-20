@@ -16,6 +16,14 @@ sv_swtpm_path_is_plain() {
     [[ -n "$path" && "$path" != *$'\n'* && "$path" != *$'\r'* ]]
 }
 
+sv_swtpm_state_dir_name_is_valid() {
+    local state_name="$1"
+
+    # TPM 2.0 沿用历史目录名，保证已安装系统的 NVRAM 和密钥连续；TPM 1.2
+    # 必须使用独立目录，防止切换版本时把两种不兼容的 permall 当成同一状态。
+    [[ "$state_name" == "tpm-state" || "$state_name" == "tpm12-state" ]]
+}
+
 sv_swtpm_private_directory() {
     local directory="$1"
     local owner mode permissions
@@ -33,7 +41,7 @@ sv_swtpm_canonical_state_dir() {
     local canonical parent
 
     sv_swtpm_path_is_plain "$requested" || return 1
-    [[ "${requested##*/}" == "tpm-state" ]] || return 1
+    sv_swtpm_state_dir_name_is_valid "${requested##*/}" || return 1
     [[ -d "$requested" && ! -L "$requested" ]] || return 1
     canonical="$(realpath -e -- "$requested" 2>/dev/null)" || return 1
     parent="${canonical%/*}"
@@ -47,15 +55,16 @@ sv_swtpm_canonical_state_dir() {
 
 sv_swtpm_prepare_state_dir() {
     local requested="$1"
-    local requested_parent canonical_parent canonical
+    local requested_parent canonical_parent canonical state_name
 
     sv_swtpm_path_is_plain "$requested" || return 1
-    [[ "${requested##*/}" == "tpm-state" ]] || return 1
+    state_name="${requested##*/}"
+    sv_swtpm_state_dir_name_is_valid "$state_name" || return 1
     requested_parent="${requested%/*}"
     [[ -n "$requested_parent" && ! -L "$requested_parent" ]] || return 1
     canonical_parent="$(realpath -e -- "$requested_parent" 2>/dev/null)" || return 1
     sv_swtpm_private_directory "$canonical_parent" || return 1
-    canonical="$canonical_parent/tpm-state"
+    canonical="$canonical_parent/$state_name"
 
     # 不跟随既有符号链接。旧版本创建的、仍归当前用户所有的目录只收紧权限，
     # 这样升级后仍可使用原 TPM NVRAM，同时满足私钥与证书不得旁路 VM_DIR 的约束。
@@ -212,9 +221,18 @@ sv_swtpm_start_daemon() {
     local state_dir="$2"
     local socket_path="$3"
     local log_path="$4"
+    local version="${5:-2.0}"
     local canonical_state canonical_socket canonical_log
+    local -a version_args=()
 
     canonical_state="$(sv_swtpm_canonical_state_dir "$state_dir")" || return 1
+    # 旧调用省略 version 时仍保持 TPM 2.0。显式版本还必须与隔离目录匹配，
+    # 避免参数遗漏导致 libtpms 用错误格式打开另一版本的永久状态。
+    case "$version:${canonical_state##*/}" in
+        1.2:tpm12-state) ;;
+        2.0:tpm-state) version_args=(--tpm2) ;;
+        *) return 1 ;;
+    esac
     canonical_socket="$(sv_swtpm_peer_path "$socket_path" "$canonical_state" tpm-sock)" \
         || return 1
     canonical_log="$(sv_swtpm_peer_path "$log_path" "$canonical_state" tpm.log)" \
@@ -226,7 +244,7 @@ sv_swtpm_start_daemon() {
     if ! swtpm socket \
         --tpmstate dir="$canonical_state" \
         --ctrl type=unixio,path="$canonical_socket" \
-        --tpm2 \
+        "${version_args[@]}" \
         --log file="$canonical_log",level=20 \
         --daemon 8>&-; then
         sv_swtpm_unregister_state_dir "$instance" "$canonical_state" || true

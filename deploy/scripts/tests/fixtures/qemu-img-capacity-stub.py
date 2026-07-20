@@ -32,7 +32,21 @@ def main() -> int:
             print("not-json")
             return 0
         disk = pathlib.Path(arguments[-1])
-        print(json.dumps({"virtual-size": int(disk.read_text(encoding="ascii"))}))
+        backing = os.environ.get("VMATE_QEMU_IMG_BACKING", "")
+        backing_format = os.environ.get("VMATE_QEMU_IMG_BACKING_FORMAT", "")
+        data_file = os.environ.get("VMATE_QEMU_IMG_DATA_FILE", "")
+        payload: dict[str, object] = {
+            "format": os.environ.get("VMATE_QEMU_IMG_FORMAT", "qcow2"),
+            "virtual-size": int(disk.read_text(encoding="ascii")),
+        }
+        if backing:
+            payload["full-backing-filename"] = backing
+            payload["backing-filename-format"] = backing_format
+        if data_file:
+            payload["format-specific"] = {"data": {"data-file": data_file}}
+        print(
+            json.dumps(payload)
+        )
         return 0
 
     return 2

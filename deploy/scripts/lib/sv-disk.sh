@@ -11,8 +11,8 @@ sv_prepare_disk() {
     # 用型号字符串猜容量，更不能对历史镜像静默 resize。
     : "${DISK:?缺少 DISK}"
     : "${QEMU_IMG:?缺少 QEMU_IMG}"
-    : "${NVME_SIZE_BYTES:?profile 缺 NVME_SIZE_BYTES}"
-    : "${NVME_MODEL:?profile 缺 NVME_MODEL}"
+    : "${BOOT_STORAGE_SIZE_BYTES:?profile 缺 BOOT_STORAGE_SIZE_BYTES}"
+    : "${BOOT_STORAGE_MODEL:?profile 缺 BOOT_STORAGE_MODEL}"
 
     if [[ ! -f "$DISK" ]]; then
         if [[ "${DRY_RUN:-0}" == "1" ]]; then
@@ -27,37 +27,86 @@ sv_prepare_disk() {
             "$QEMU_IMG" create -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$DISK" >/dev/null
         else
             local size_gib
-            size_gib=$(( NVME_SIZE_BYTES / 1024 / 1024 / 1024 ))
+            size_gib=$(( BOOT_STORAGE_SIZE_BYTES / 1024 / 1024 / 1024 ))
             echo ">> creating fresh qcow2 at $DISK"
-            echo ">>   model     : $NVME_MODEL"
-            echo ">>   raw bytes : $NVME_SIZE_BYTES  (~${size_gib} GiB Windows-side)"
+            echo ">>   model     : $BOOT_STORAGE_MODEL"
+            echo ">>   raw bytes : $BOOT_STORAGE_SIZE_BYTES  (~${size_gib} GiB Windows-side)"
             "$QEMU_IMG" create -f qcow2 -o preallocation=off,cluster_size=65536 \
-                "$DISK" "$NVME_SIZE_BYTES"
+                "$DISK" "$BOOT_STORAGE_SIZE_BYTES"
         fi
     fi
 
     # qemu-img 的 virtual-size 才是 Windows/Linux guest 看到的块设备容量。每次
     # 启动都校验，覆盖历史磁盘、外部 base image 和 profile 被手工修改的情况。
     if [[ -f "$DISK" ]]; then
-        local disk_info_json
+        local disk_info_json disk_fields backing_file backing_format
+        local disk_format has_external_data allow_legacy_backing expected_pin
+        local -a disk_field_array=()
         if ! disk_info_json=$("$QEMU_IMG" info --output=json "$DISK"); then
             echo "ERROR: 无法读取磁盘元数据: $DISK" >&2
             return 1
         fi
-        if ! DISK_VIRTUAL_SIZE=$(python3 -c \
-            'import json, sys; value=json.load(sys.stdin).get("virtual-size"); print(value if isinstance(value, int) else "")' \
-            <<<"$disk_info_json"); then
+        if ! disk_fields=$(python3 -c '
+import json
+import os
+import sys
+
+disk = sys.argv[1]
+info = json.load(sys.stdin)
+size = info.get("virtual-size")
+disk_format = info.get("format")
+backing = info.get("full-backing-filename") or info.get("backing-filename") or ""
+backing_format = info.get("backing-filename-format") or ""
+external = info.get("format-specific", {}).get("data", {}).get("data-file") or ""
+if not isinstance(size, int):
+    raise ValueError("invalid virtual size")
+if not isinstance(backing, str) or "\n" in backing:
+    raise ValueError("invalid backing path")
+if backing and not os.path.isabs(backing):
+    backing = os.path.realpath(os.path.join(os.path.dirname(disk), backing))
+print(size)
+print(disk_format)
+print(backing)
+print(backing_format)
+print(int(bool(external)))
+' "$DISK" <<<"$disk_info_json"); then
             echo "ERROR: qemu-img 返回了无法解析的 JSON: $DISK" >&2
             return 1
         fi
+        mapfile -t disk_field_array <<<"$disk_fields"
+        DISK_VIRTUAL_SIZE="${disk_field_array[0]:-}"
+        disk_format="${disk_field_array[1]:-}"
+        backing_file="${disk_field_array[2]:-}"
+        backing_format="${disk_field_array[3]:-}"
+        has_external_data="${disk_field_array[4]:-}"
         if [[ ! "$DISK_VIRTUAL_SIZE" =~ ^[0-9]+$ ]]; then
             echo "ERROR: qemu-img 未返回有效 virtual-size: $DISK" >&2
             return 1
         fi
-        if [[ "$DISK_VIRTUAL_SIZE" != "$NVME_SIZE_BYTES" ]]; then
+        if [[ "$disk_format" != qcow2 ]]; then
+            echo "ERROR: 实例 disk 必须是 qcow2，实际格式为 $disk_format: $DISK" >&2
+            return 1
+        fi
+        if [[ "$has_external_data" != 0 ]]; then
+            echo "ERROR: 实例 disk 不得依赖 external data file: $DISK" >&2
+            return 1
+        fi
+        if [[ -n "$backing_file" ]]; then
+            if [[ "$backing_format" != qcow2 ]]; then
+                echo "ERROR: 实例 disk 的 backing 声明格式必须是 qcow2: $DISK" >&2
+                return 1
+            fi
+            allow_legacy_backing=1
+            expected_pin="$(realpath -m -- "$(dirname "$DISK")/.base.qcow2")"
+            [[ "$backing_file" == "$expected_pin" ]] && allow_legacy_backing=0
+            base_image_require_trusted_backing_qcow2_fast \
+                "$QEMU_IMG" "$backing_file" "$DISK_VIRTUAL_SIZE" \
+                "$allow_legacy_backing" || return 1
+        fi
+        if [[ "$DISK_VIRTUAL_SIZE" != "$BOOT_STORAGE_SIZE_BYTES" ]]; then
             echo "ERROR: 磁盘虚拟容量与硬件 profile 不一致" >&2
             echo "       disk=$DISK virtual-size=$DISK_VIRTUAL_SIZE" >&2
-            echo "       profile.NVME_SIZE_BYTES=$NVME_SIZE_BYTES model=$NVME_MODEL" >&2
+            echo "       profile.BOOT_STORAGE_SIZE_BYTES=$BOOT_STORAGE_SIZE_BYTES model=$BOOT_STORAGE_MODEL" >&2
             echo "       请换用匹配容量的 base image，或显式重建该实例磁盘。" >&2
             return 1
         fi

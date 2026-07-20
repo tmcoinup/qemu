@@ -40,4 +40,14 @@ const struct nvapi_gpu_identity *nvapi_identity_get(void);
 /* NVAPI 使用“设备号高 16 位、厂商号低 16 位”的 PCI 组合格式。 */
 NvU32 nvapi_pack_pci_identifier(NvU32 device_id, NvU32 vendor_id);
 
+/*
+ * GetPCIIdentifiers 的主 PCI 键必须对应 Windows 中实际承载画面的同一设备。
+ * 否则同时使用 SetupAPI 与 NVAPI 的硬件工具会把一个 virtio 显示适配器拆成两张卡。
+ * subsystem/revision 仍取 profile，因为 QEMU 已把它们写入真实 PCI 配置空间；
+ * external_device_id 保留逻辑 NVIDIA 型号，供只关心产品型号的 NVAPI 消费者使用。
+ */
+void nvapi_build_carrier_pci_identifiers(
+    const struct nvapi_gpu_identity *identity, NvU32 *device_id,
+    NvU32 *subsystem_id, NvU32 *revision_id, NvU32 *external_device_id);
+
 #endif

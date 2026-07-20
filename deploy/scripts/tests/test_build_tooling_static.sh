@@ -51,6 +51,13 @@ test_python_preflight_contract() {
     require_text 'python3-setuptools python3-wheel' "$BUILD_SCRIPT"
 }
 
+test_required_native_dependencies_are_preflighted() {
+    require_text 'for tool in bzip2 ninja pkg-config python3' "$BUILD_SCRIPT"
+    require_text 'for pkg in glib-2.0 pixman-1 zlib' "$BUILD_SCRIPT"
+    require_text 'build-essential bzip2 ninja-build' "$BUILD_SCRIPT"
+    require_text 'zlib1g-dev' "$BUILD_SCRIPT"
+}
+
 test_cli_compatibility() {
     local help_output
 
@@ -92,11 +99,138 @@ test_patch_script_validates_integrated_qemu11_features() {
     require_text '以 QEMU 9.2.0 上下文保存，仅用于' "$PATCH_SCRIPT"
 }
 
+test_vmate_nsis_runtime_is_closed() {
+    REPO_ROOT="$REPO_ROOT" python3 - <<'PY'
+import importlib.util
+import io
+import os
+import tempfile
+
+root = os.environ["REPO_ROOT"]
+spec = importlib.util.spec_from_file_location(
+    "qemu_nsis", os.path.join(root, "scripts", "nsis.py")
+)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory() as staging:
+    for name in module.VMATE_RUNTIME_BINARIES:
+        open(os.path.join(staging, name), "wb").close()
+    module.validate_vmate_runtime_binaries(staging)
+    for missing in module.VMATE_RUNTIME_BINARIES:
+        path = os.path.join(staging, missing)
+        os.unlink(path)
+        try:
+            module.validate_vmate_runtime_binaries(staging)
+        except RuntimeError as error:
+            if missing not in str(error):
+                raise SystemExit("missing binary was not named: " + missing)
+        else:
+            raise SystemExit("VMate staging accepted a missing binary: " + missing)
+        open(path, "wb").close()
+
+with tempfile.TemporaryDirectory() as staging:
+    install_root = os.path.join(staging, "install")
+    sysroot = os.path.join(staging, "sysroot")
+    os.mkdir(install_root)
+    os.mkdir(sysroot)
+    fixture_paths = {
+        "qemu-system-x86_64.exe": install_root,
+        "libslirp-0.dll": install_root,
+        "libglib-2.0-0.dll": sysroot,
+        "broken.exe": install_root,
+    }
+    for name, directory in fixture_paths.items():
+        open(os.path.join(directory, name), "wb").close()
+    outputs = {
+        "qemu-system-x86_64.exe": (
+            "DLL Name: KERNEL32.dll\nDLL Name: libslirp-0.dll\n"
+        ),
+        "libslirp-0.dll": "DLL Name: libglib-2.0-0.dll\n",
+        "libglib-2.0-0.dll": "DLL Name: api-ms-win-core-path-l1-1-0.dll\n",
+        "broken.exe": "DLL Name: missing-third-party.dll\n",
+    }
+    original_check_output = module.subprocess.check_output
+
+    def fake_check_output(command, text):
+        if command[:2] != ["objdump", "-p"] or not text:
+            raise AssertionError("unexpected objdump invocation")
+        return outputs[os.path.basename(command[-1])]
+
+    module.subprocess.check_output = fake_check_output
+    try:
+        index = module.build_dependency_index((install_root, sysroot))
+        _, dependencies = module.find_deps(
+            os.path.join(install_root, "qemu-system-x86_64.exe"),
+            index,
+            set(),
+            strict=True,
+        )
+        names = {os.path.basename(path).casefold() for path in dependencies}
+        expected = {
+            "qemu-system-x86_64.exe",
+            "libslirp-0.dll",
+            "libglib-2.0-0.dll",
+        }
+        if names != expected:
+            raise SystemExit("staging-root DLL closure was not collected")
+        try:
+            module.find_deps(
+                os.path.join(install_root, "broken.exe"),
+                index,
+                set(),
+                strict=True,
+            )
+        except RuntimeError as error:
+            if "missing-third-party.dll" not in str(error):
+                raise SystemExit("unresolved DLL was not named")
+        else:
+            raise SystemExit("VMate dependency closure accepted a missing DLL")
+    finally:
+        module.subprocess.check_output = original_check_output
+
+nsh = io.StringIO()
+mui = io.StringIO()
+module.write_system_emulation_sections(
+    ["/tmp/qemu-system-x86_64w.exe", "/tmp/qemu-system-x86_64.exe"],
+    nsh,
+    mui,
+    True,
+)
+generated = nsh.getvalue()
+required = 'Section "x86_64" Section_x86_64\n                SectionIn RO'
+if required not in generated:
+    raise SystemExit("VMate x86_64 NSIS section is not read-only")
+gui = generated.split('Section "x86_64w" Section_x86_64w', 1)[1]
+if "SectionIn RO" in gui:
+    raise SystemExit("optional GUI emulator unexpectedly became read-only")
+plain_nsh = io.StringIO()
+module.write_system_emulation_sections(
+    ["/tmp/qemu-system-x86_64.exe"], plain_nsh, io.StringIO(), False
+)
+if "SectionIn RO" in plain_nsh.getvalue():
+    raise SystemExit("upstream x86_64 emulator unexpectedly became read-only")
+
+with open(os.path.join(root, "qemu.nsi"), encoding="utf-8") as source:
+    installer = source.read()
+dll_section = installer.split(
+    'Section "Libraries (DLL)" SectionDll', 1
+)[1].split("SectionEnd", 1)[0]
+if not (
+    "!ifdef CONFIG_VMATE_RUNTIME" in dll_section
+    and "SectionIn RO" in dll_section
+):
+    raise SystemExit("VMate DLL section is not read-only")
+PY
+}
+
 test_shell_syntax
 test_qemu_11_baseline_and_werror
 test_python_preflight_contract
+test_required_native_dependencies_are_preflighted
 test_cli_compatibility
 test_host_helper_orchestration_contract
 test_patch_script_validates_integrated_qemu11_features
+test_vmate_nsis_runtime_is_closed
 
 echo "OK: QEMU 11.0.2 build tooling static checks passed"

@@ -14,16 +14,15 @@ case "$CPU_VENDOR" in
     *) echo "ERROR: 不支持的 CPU_VENDOR=$CPU_VENDOR" >&2; exit 2 ;;
 esac
 
-# MCH/PCH 四个设备必须与同一平台 manifest 一起变化。C 层属性只覆盖 PCI
-# configuration identity，底层行为仍是 Q35/ICH9；因此 AMD compatibility bundle
-# 不会进入严格池。板卡 subsystem 先统一使用平台已审计的 ASUS 标识，避免回落到
-# Red Hat/1af4 默认值；更细的逐功能 subsystem 需有实机 lspci 快照后再扩充 schema。
+# PCH 三个设备继续使用同一平台 manifest。MCH 必须保留 Q35 原生
+# 8086:29c0：EDK2 的 Q35 PlatformPei 依赖 host bridge device ID 识别 machine，
+# 在固件早期把它覆盖为 H110/H310 ID 会让全部 vCPU 进入 CpuDeadLoop，helper 与
+# Windows ISO 的读取量均为 0。这个约束不是显示问题，也不能靠更换 OVMF 或按键绕过。
+# 因而 profile 中的目标 MCH 只作为平台证据保留，不投影到可启动 Linux argv；
+# 客体枚举会诚实暴露 Q35 MCH。LPC/SMBus/AHCI 的 configuration identity 覆盖已
+# 通过 OVMF + chainload smoke，不影响早期平台识别。板卡 subsystem 仍统一使用
+# 平台已审计的 ASUS 标识；底层行为始终是 Q35/ICH9。
 CHIPSET_GLOBAL_ARGS=(
-    -global "q35-pcihost.x-pci-mch-vendor-id=${MCH_PCI_VEN:?platform 缺 MCH_PCI_VEN}"
-    -global "q35-pcihost.x-pci-mch-device-id=${MCH_PCI_DEV:?platform 缺 MCH_PCI_DEV}"
-    -global "q35-pcihost.x-pci-mch-revision=${MCH_REV:?platform 缺 MCH_REV}"
-    -global "q35-pcihost.x-pci-mch-sub-vendor-id=${BOARD_SUBSYS_VEN:?platform 缺 BOARD_SUBSYS_VEN}"
-    -global "q35-pcihost.x-pci-mch-sub-device-id=${BOARD_SUBSYS_DEV:?platform 缺 BOARD_SUBSYS_DEV}"
     -global "ICH9-LPC.x-pci-vendor-id=${LPC_PCI_VEN:?platform 缺 LPC_PCI_VEN}"
     -global "ICH9-LPC.x-pci-device-id=${LPC_PCI_DEV:?platform 缺 LPC_PCI_DEV}"
     -global "ICH9-LPC.x-pci-revision=${LPC_REV:?platform 缺 LPC_REV}"
@@ -45,7 +44,8 @@ RP_VEN="${ROOT_PORT_PCI_VEN:?platform 缺 ROOT_PORT_PCI_VEN}"
 RP_REV="${ROOT_PORT_REV:?platform 缺 ROOT_PORT_REV}"
 _rp_base="${ROOT_PORT_PCI_DEV:?platform 缺 ROOT_PORT_PCI_DEV}"
 RP_DEV=("$_rp_base" "$_rp_base" "$_rp_base" "$_rp_base")
-if [[ "$PLATFORM_VENDOR" == "intel" ]]; then
+if [[ "$PLATFORM_VENDOR" == "intel" &&
+      "${PLATFORM_DEVICE_IDENTITY_SCOPE:-}" != explicit_virtual_compatibility ]]; then
     for _rp_i in 0 1 2 3; do
         printf -v 'RP_DEV[_rp_i]' '0x%04x' "$(( _rp_base + _rp_i ))"
     done
@@ -318,7 +318,7 @@ else
             if [[ "${STRICT_STEALTH:-0}" == "1" && "${ALLOW_NAT_FALLBACK:-0}" != "1" ]]; then
                 echo "ERROR: $_bridge_fail" >&2
                 echo "       STRICT_STEALTH=1 拒绝回退 user-mode NAT（NAT 子网是 VM 特征）。" >&2
-                echo "       修桥: sudo deploy/scripts/setup-bridge.sh UPLINK=<iface>；" >&2
+                echo "       修桥: sudo UPLINK=<iface> deploy/scripts/setup-bridge.sh；" >&2
                 echo "       或显式放行: ALLOW_NAT_FALLBACK=1 deploy/scripts/start-vm.sh ..." >&2
                 exit 1
             fi

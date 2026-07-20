@@ -5,6 +5,11 @@
 > 详见 `deploy/docs/REFACTOR_2026-05-23.md`（D/E 节 + 迭代说明）。
 > 仅保留两个 P2：`apply-gpu-spoof.ps1` 拆分（需 pwsh + 测试 VM）、平台 machine-type 层
 > 改造（长期）。本快照保留作历史评审记录。
+>
+> **2026-07-20 更正**：本文记录的 xHCI PCI ID override 已被撤销。Windows
+> `USBXHCI.SYS` 会按硬件 ID 选择厂商/型号 quirk，而 `qemu-xhci` 不具备对应 PCH
+> 行为；现行实现固定上游 `1B36:000D rev01 / SUBSYS 1AF4:1100`。下文相关条目仅是
+> 历史状态，不作为当前建议。
 
 ## 范围与结论
 

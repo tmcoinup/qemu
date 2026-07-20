@@ -99,7 +99,8 @@ clone 会以最终 VM 普通用户执行与 start 相同的完整设备能力预
 - NVMe：`use-samsung-id` / `model-number` / `firmware-rev`
 - virtio-vga：EDID 字符串和 PCI subsystem override
 - USB HID：`vendorid` / `productid` / `manufacturer` / `product`
-- PCIe root-port / xHCI：平台 PCI ID 和链路属性 override
+- PCIe root-port：平台 PCI ID 和链路属性 override
+- qemu-xhci：固定上游行为身份，不提供 PCI ID override
 - fb-shm / memfd object
 
 缺失时 fail-fast，避免误用 stock QEMU 让 guest 看到 Red Hat NVMe、默认显示器或默认 USB 设备。只有非隐身调试才建议跳过：

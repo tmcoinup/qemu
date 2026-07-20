@@ -185,7 +185,6 @@ function New-VMatePlatformDeviceArguments {
     )
 
     $rootPort = $Platform.devices.root_port
-    $xhci = $Platform.devices.xhci
     $nvme = $Platform.devices.nvme
     $storage = $Components.storage
     $keyboard = $Components.keyboard
@@ -201,9 +200,6 @@ function New-VMatePlatformDeviceArguments {
     $rootDevices = @(0, 1, 2 | ForEach-Object {
         '0x{0:x4}' -f ($rootDeviceBase + $_)
     })
-    $xhciVendor = Assert-VMateHexId $xhci.pci_vendor 'devices.xhci.pci_vendor'
-    $xhciDevice = Assert-VMateHexId $xhci.pci_device 'devices.xhci.pci_device'
-    $xhciRevision = Assert-VMateHexId $xhci.revision 'devices.xhci.revision'
     $audioVendor = Assert-VMateHexId $Platform.devices.audio.controller_pci_vendor `
         'devices.audio.controller_pci_vendor'
     $audioDevice = Assert-VMateHexId $Platform.devices.audio.controller_pci_device `
@@ -284,7 +280,9 @@ function New-VMatePlatformDeviceArguments {
         # Intel Gigabit CT Desktop Adapter 按独立扩展卡建模；板载 NIC 状态和
         # subsystem/OUI 已作为同一 manifest 设备原子校验，不能在此另写常量。
         '-device', "e1000e,id=nic0,netdev=net0,bus=rp2,mac=$($Profile.identity.mac),subsys_ven=$nicSubVendor,subsys=$nicSubDevice",
-        '-device', "qemu-xhci,id=xhci,bus=rp3,x-pci-vendor-id=$xhciVendor,x-pci-device-id=$xhciDevice,x-pci-revision=$xhciRevision",
+        # qemu-xhci 的 PCI ID 是 USBXHCI.SYS 选择硬件 quirk 的行为契约。保留
+        # 上游完整身份，不能把 manifest 的 Intel/AMD PCH ID 套到虚拟寄存器模型。
+        '-device', 'qemu-xhci,id=xhci,bus=rp3',
         # 中文注释：与 Linux 启动器保持同一键盘实例名和 NumLock 策略。QEMU 只会在
         # guest 明确回报 LED 为 OFF 时异步补发一次按键，不会在未知状态下盲目切换。
         '-device', "usb-kbd,id=kbd0,bus=xhci.0,vendorid=$keyboardVendor,productid=$keyboardProduct,manufacturer=$keyboardManufacturer,product=$keyboardName,x-force-numlock-on=on",

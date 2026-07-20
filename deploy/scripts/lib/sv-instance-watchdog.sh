@@ -44,7 +44,7 @@ sv_instance_lock_has_other_users() {
 # parent 保留同一 FD，使最终 setsid/inhibit 监督链至少有一个进程继承：即使
 # 轻量父 shell 遭 SIGKILL/OOM，仍在等待 QEMU 的监督进程会继续阻止同实例
 # 并发启动（systemd-inhibit 可能主动关闭传给 QEMU 本体的未知 FD）。
-# auto-key/pinner 在各自调用点显式关闭 FD8，不能意外延长生命周期。VLAN 模式
+# pinner 在调用点显式关闭 FD8，不能意外延长生命周期。VLAN 模式
 # 仍由 guard 在释放自己那一份锁前清 TAP。
 sv_instance_watchdog_launch() {
     local parent_pid parent_start tap prepared lock_path

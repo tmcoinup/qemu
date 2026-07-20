@@ -41,15 +41,6 @@ typedef struct XHCIPciState {
     OnOffAuto msi;
     OnOffAuto msix;
     bool conditional_intr_mapping;
-
-    /*
-     * 中文注释：可选的 PCI 标识覆盖；0xFFFFFFFF 表示沿用具体 xHCI
-     * 类型在 class_init 中设置的默认值。启动脚本可按 CPU/主板平台注入，
-     * 未设置时不会改变 QEMU 11 的设备行为。
-     */
-    uint32_t stealth_vendor_id;
-    uint32_t stealth_device_id;
-    uint32_t stealth_revision;
 } XHCIPciState;
 
 #endif

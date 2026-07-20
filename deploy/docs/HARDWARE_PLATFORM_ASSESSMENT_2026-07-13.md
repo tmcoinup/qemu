@@ -87,7 +87,7 @@ Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1
 | 内存/SPD | 合法总量、模块容量、槽位、通道、rank、电压、每 DIMM 唯一 serial；Type17 额定/配置速率分离；DDR4 为 512B EE1004，支持 0x36/0x37 页选择，并按 2/4/8/16Gb 生成地址几何、tRFC 与目录品牌 page 1 身份；2x4 GiB 只生成两条 SPD | SPD 是由 profile/目录字段生成的 JEDEC 数据，不是具体 DIMM 的原始 raw dump/XMP |
 | guest NUMA | 消费级单 socket 客体始终一个 NUMA node，DIMM 数不再错误映射为 NUMA 数 | 物理双路 E5 的 host NUMA 只用于放置，不向当前 4C/4T 消费级客体暴露双 socket |
 | MCH/LPC/SMBus/AHCI | LPC/SMBus/AHCI 的 PCI identity 可由平台注入；Linux MCH 保留 Q35 原生 `8086:29c0` | EDK2 Q35 PlatformPei 依赖原生 MCH 识别 machine；目标 H110/H310 MCH ID 只保留为 profile 证据。其余覆盖也只是 configuration identity，寄存器、端口、固定功能与 BDF 仍是 Q35/ICH9 |
-| PCIe/root port/xHCI | 平台 ID、revision、链路速度/宽度、hotplug 状态可约束 | 设备行为和地址分配仍是 QEMU pcie-root-port/qemu-xhci，不是 H110/H310 silicon/拓扑 |
+| PCIe/root port/xHCI | root port 的平台 ID、revision、链路速度/宽度、hotplug 状态可约束；xHCI 平台字段仅记录事实 | 设备行为和地址分配仍是 QEMU pcie-root-port/qemu-xhci；xHCI 固定上游行为身份，不伪装 H110/H310 silicon/拓扑 |
 | NVMe | 970 PRO model/firmware/容量、144d:a804、subsystem、OUI、SubNQN、Gen3 x4；非法型号 fail closed | 控制器命令、SMART、热管理、功耗、错误恢复仍是通用 QEMU NVMe，不是 Phoenix 固件 |
 | NIC | Intel 82574L/e1000e、Intel subsystem、Intel OUI；主板板载 NIC 明示为 BIOS disabled、另插扩展卡 | Windows 默认 user-mode NAT；网络拓扑和性能不像物理 LAN，Linux 应优先 bridge/TAP |
 | 音频 | Linux 可传 controller vendor/device/revision/subsystem 与 ALC887 codec ID/revision/subsystem；Windows 覆盖 controller vendor/device 和 codec 三元组 | Windows controller revision/subsystem 尚未与 Linux 对齐；manifest 已诚实标记 `protocol_identity_only`，widget、插孔和板级布线不等价 |
@@ -224,7 +224,8 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 
 ### P1 已处理
 
-- MCH/LPC/SMBus/AHCI/HDA/root port/xHCI PCI 身份可参数化并有非法值失败测试。
+- MCH/LPC/SMBus/AHCI/HDA/root port PCI 身份可参数化并有非法值失败测试；xHCI
+  平台身份只保留为 manifest/profile 事实，运行时固定上游完整身份。
 - SMBIOS Type 3/4/17 深层字段、DDR3/DDR4 SPD、合法 DIMM 拓扑和单 guest NUMA node。
 - NUMA-aware vCPU/service thread pinner、cgroup v2 cpuset、多 VM 避让和管理核预留。
 - profile 安全解析、平台/组件事实绑定、持久化序列号和显式 legacy reroll。

@@ -23,7 +23,6 @@ require_text() {
 pwsh_bin() {
     command -v pwsh || command -v powershell || true
 }
-
 test_windows_powershell_files_have_bom() {
     local file signature
     while IFS= read -r -d '' file; do
@@ -159,6 +158,7 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
         grep -F -- 'bus=pcie.0,addr=0x3' | grep -F -- 'x-pci-device-id=0xa33a' \
         >/dev/null \
         || fail "rp3 must use the third Intel root-port ID"
+    grep -Fx -- 'qemu-xhci,id=xhci,bus=rp3' "$out" >/dev/null || fail "qemu-xhci behavior ID must not be overridden"
     grep -F -- 'usb-kbd,id=kbd0,bus=xhci.0,vendorid=0x045e,productid=0x0750' \
         "$out" >/dev/null || fail "Microsoft keyboard ID is missing"
     grep -F -- 'x-force-numlock-on=on' "$out" >/dev/null \

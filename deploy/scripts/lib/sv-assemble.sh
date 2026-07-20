@@ -110,6 +110,9 @@ CMD=(
     -device "e1000e,netdev=net0,mac=${MAC_OVERRIDE},bus=rp2,subsys_ven=${NIC_SUBSYSTEM_VEN},subsys=${NIC_SUBSYSTEM_DEV}"
 
     # --- USB: xHCI + 键盘 + 鼠标 ---
+    # xHCI 的 PCI ID 会触发 Windows USBXHCI.SYS 内部的厂商硬件 quirk，不能像
+    # 展示字符串一样投影 manifest 的 Intel/AMD PCH ID。底层行为是 qemu-xhci，
+    # 因此保留其上游完整身份；profile 中的 XHCI_* 只记录目标平台事实。
     # usb-kbd: DirectInput/Raw Input 兼容 (DNF/仿真机只读 USB HID, 不读 PS/2).
     # USB_RELATIVE_MOUSE=1: usb-mouse (相对坐标，更像真鼠标，仿真机友好；
     #   SDL 抓鼠标，Ctrl+Shift+G 释放)
@@ -117,7 +120,7 @@ CMD=(
     # 经 patch 0010 后 vendorid/productid/manufacturer/product 从 profile 的
     # KBD/MOUSE/TABLET 字段注入；品牌、VID/PID、bcdDevice 必须来自同一组件条目。
     # serial 不传：当前核验的 OEM 鼠键 descriptor 的 iSerialNumber=0。
-    -device "qemu-xhci,id=xhci,bus=rp3,${XHCI_ID}"
+    -device "qemu-xhci,id=xhci,bus=rp3"
     "${KBD_DEVICE_ARG[@]}"
     "${POINTER_DEVICE_ARG[@]}"
 
@@ -310,26 +313,11 @@ if [[ "$PROXY" == "1" ]]; then
     fi
 fi
 
-# ISO 装系统：BOOTX64.EFI 启动后会显示 "Press any key to boot from CD or DVD"
-# prompt 5 秒。SDL 后端在 virtio-vga 切 mode 时偶发 "Display output is not
-# active" 占位字遮住 prompt，用户来不及按键。后台 daemon 在启动后 18-60 秒
-# 持续 QMP send-key spc 几次，确保 prompt 被吃掉、Setup 自动进入。Setup 进
-# graphics 模式后 spc 不响应（Setup UI 不绑定 spc），无副作用。
+# ISO 启动绝不能按固定延时向 guest 注入按键。BOOTX64.EFI 的提示窗口结束后，
+# 同一个空格会落到 Windows Setup 当前控件上；循环注入会表现为安装页面持续
+# 自动跳转。提示出现时由用户手动按一次键，确保输入只发生在明确可见的目标上。
 if [[ "$BOOT" == "iso" ]]; then
-    (
-        # 等 OVMF + chainload 跑到 BOOTX64.EFI 大约要 15-18 秒
-        sleep 16
-        # 每 2 秒 send 一次, 共 ~22 次 = 44 秒，覆盖 BOOTX64.EFI 5 秒 prompt
-        # 窗口的多个 retry。Setup 真正起来后 spc 也是 noop。
-        for _i in $(seq 1 22); do
-            [[ -S "$QMP_SOCK" ]] || break
-            printf '{"execute":"qmp_capabilities"}{"execute":"human-monitor-command","arguments":{"command-line":"sendkey spc"}}\n' \
-                | timeout 2 socat - UNIX-CONNECT:"$QMP_SOCK" >/dev/null 2>&1 || true
-            sleep 2
-        done
-    ) 8>&- &
-    _AUTO_KEY_PID=$!
-    echo ">> auto-key:    后台 daemon (pid=$_AUTO_KEY_PID) 跨过 BOOTX64.EFI 'Press any key' prompt"
+    echo ">> input safety: 不自动注入按键；看到光盘启动提示后手动按一次空格"
 fi
 
 # CPU 亲和隔离(默认开): 后台 pinner 等 QEMU/QMP 起来后, 把 vCPU 钉进 cgroup cpuset

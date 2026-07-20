@@ -157,7 +157,7 @@
 | 面                                  | 修改前                          | 修改后                                       | 实现路径                                         |
 |-------------------------------------|---------------------------------|----------------------------------------------|--------------------------------------------------|
 | 显示器 EDID 厂商 / 产品名           | `RHT` / `QEMU Monitor`          | `SAM` / `Samsung S24F350F`（`SAM0F65`）      | `hw/display/edid-generate.c`（含 atoi 序列号 bug 修复，djb2 hash 兜底） |
-| qemu-xhci PCI VEN:DEV               | `1B36:000D`（Red Hat）          | `1022:43BB`（AMD 300 系列 USB 3.1 xHCI）     | `hw/usb/hcd-xhci-pci.c`                          |
+| qemu-xhci 完整 PCI 身份             | 可能继承全局主板 SUBSYS          | 固定 `1B36:000D rev01 / SUBSYS 1AF4:1100`    | `hw/usb/hcd-xhci-pci.c` + `verify-stealth.sh` step 15 |
 | pcie-root-port PCI VEN:DEV          | `1B36:000C`（Red Hat）          | `1022:1453`（AMD Family 17h Internal PCIe GPP）| `hw/pci-bridge/gen_pcie_root_port.c`             |
 | USB HID 描述符 manufacturer 串      | `QEMU`                          | `Microsoft`                                  | `hw/usb/dev-hid.c` `desc_strings[STR_MANUFACTURER]` |
 | USB HID 产品串（mouse/kbd/tablet）  | `QEMU USB Mouse/Tablet/Keyboard`| `Microsoft USB Optical Mouse` / `Microsoft Wired Keyboard 600` / `Microsoft USB Tablet` | 同上 + `usb_*_class_initfn` 的 `product_desc` |

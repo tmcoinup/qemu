@@ -319,7 +319,6 @@ function Assert-VMateQemuDeviceCapabilities {
         'ich9-ahci' = $chipsetIdentityProperties
         'pcie-root-port' = @('x-pci-vendor-id', 'x-pci-device-id',
             'x-pci-revision', 'x-speed', 'x-width')
-        'qemu-xhci' = @('x-pci-vendor-id', 'x-pci-device-id', 'x-pci-revision')
         'intel-hda' = @('x-pci-vendor-id', 'x-pci-device-id')
         'hda-duplex' = @('x-identity-compat', 'x-codec-id',
             'x-codec-revision', 'x-codec-subsystem-id')

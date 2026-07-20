@@ -50,7 +50,6 @@ if [[ "$PLATFORM_VENDOR" == "intel" &&
         printf -v 'RP_DEV[_rp_i]' '0x%04x' "$(( _rp_base + _rp_i ))"
     done
 fi
-XHCI_ID="x-pci-vendor-id=${XHCI_PCI_VEN:?platform 缺 XHCI_PCI_VEN},x-pci-device-id=${XHCI_PCI_DEV:?platform 缺 XHCI_PCI_DEV},x-pci-revision=${XHCI_REV:?platform 缺 XHCI_REV}"
 
 case "${NVME_MAX_PCIE_GENERATION:-0}" in
     1) _nvme_link_speed="2_5" ;;

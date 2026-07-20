@@ -117,11 +117,15 @@ Linux 启动器默认按以下顺序 fail closed：
 | 硬件面 | 可见身份 | 行为边界 |
 |---|---|---|
 | CPU/SMBIOS/内存 | 平台字段、拓扑、Type 0/1/2/3/4/16/17；DIMM 额定/配置速率分离；DDR4 使用 512B EE1004 与 0x36/0x37 页选择，并把硬件目录中的品牌、料号和唯一序列号投影到 SPD page 1 | cache、MSR、微码、性能和时序仍受宿主及 KVM 限制；SPD 是按目录字段生成的标准数据，不是具体 DIMM 的原始 raw dump/XMP |
-| 芯片组/PCIe/xHCI | vendor/device/revision/subsystem 与链路可注入 | 实现仍是 Q35/ICH9/QEMU 控制器；Linux 为 root port `00:01.0`–`00:04.0`、HDA `00:05.0`，Windows 少一个空端口、HDA 为 `00:04.0`，均不承诺 H110/H310 BDF/silicon 等价 |
+| 芯片组/PCIe/xHCI | 芯片组与 root port 身份/链路可注入；xHCI 平台字段仅留作事实 | 实现仍是 Q35/ICH9/QEMU 控制器；`qemu-xhci` 固定与行为匹配的 `1B36:000D rev01 / SUBSYS 1AF4:1100`；Linux 为 root port `00:01.0`–`00:04.0`、HDA `00:05.0`，Windows 少一个空端口、HDA 为 `00:04.0`，均不承诺 H110/H310 BDF/silicon 等价 |
 | NVMe | Identify、容量、PCI/subsystem、SubNQN 可绑定 | SMART、热管理、功耗和错误恢复仍是通用 QEMU NVMe |
 | 音频 | HDA controller 和 ALC887 codec 身份 | `protocol_identity_only`，widget、插孔和板级布线不等价 |
 | EDID/HID | EDID 型号规格成套；HID 仅绑定 VID/PID/名称 | EDID 产品码/制造信息是明确标注的合成值；键鼠 report descriptor 仍是通用实现 |
 | 显示/GPU | virtio-vga(-gl)、SDL/EGL、fb-shm 可用 | `label_only_out_of_scope`，不是 NVIDIA/AMD 物理 GPU |
+
+xHCI 的 USB 链路/设备电源管理属于正常真机行为；本项目只禁止把通用虚拟控制器冒充为
+需要不同厂商 workaround 的 PCH。详细边界见 `PROFILE-FIELDS.md` 的
+“xHCI 电源管理边界”。
 
 ## 快速开始
 

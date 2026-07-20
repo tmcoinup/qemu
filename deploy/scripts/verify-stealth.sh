@@ -346,17 +346,17 @@ rm -f "$RPSOCK"
 [[ $RC -eq 0 ]] || exit 1
 
 echo
-echo "=== (15) 平台一致性：root-port / xHCI PCI ID 可按平台覆盖 (P0#3) ==="
-# 验证新加的 x-pci-vendor-id/device-id/revision 覆盖属性：默认沿用 AMD
-# (1022:1453 / 1022:43bb)，注入后变 Intel 300 系 PCH (8086:a338 / 8086:a36d)。
-# 设备直接挂 pcie.0 顶层，使 query-pci 无需固件枚举即可读到 vendor/device。
+echo "=== (15) 行为身份：root-port 可覆盖，qemu-xhci 固定官方 PCI ID ==="
+# root-port 可按平台覆盖；xHCI 必须固定与虚拟模型匹配的上游完整身份。刻意注入
+# ASUS 的全局 subsystem 默认值，验证 qemu-xhci 不会继承它。
+# 设备直接挂 pcie.0 顶层，使 query-pci 无需固件枚举即可读取完整身份。
 P15SOCK="/tmp/verify-stealth-p15.qmp"; P15ERR="/tmp/verify-stealth-p15.err"; rm -f "$P15SOCK"
+QEMU_PCI_SUBSYS_VEN=0x1043 QEMU_PCI_SUBSYS_DEV=0x8694 \
 "$QEMU" -machine q35,accel=tcg -m 256M -nographic -S -display none -nodefaults \
     -qmp unix:$P15SOCK,server=on,wait=off \
     -device pcie-root-port,id=rpa,bus=pcie.0,addr=0x2,chassis=1 \
     -device pcie-root-port,id=rpi,bus=pcie.0,addr=0x3,chassis=2,x-pci-vendor-id=0x8086,x-pci-device-id=0xa338,x-pci-revision=0xf0 \
-    -device qemu-xhci,id=xa,bus=pcie.0,addr=0x4 \
-    -device qemu-xhci,id=xi,bus=pcie.0,addr=0x5,x-pci-vendor-id=0x8086,x-pci-device-id=0xa36d 2>"$P15ERR" &
+    -device qemu-xhci,id=xhci,bus=pcie.0,addr=0x4 2>"$P15ERR" &
 P15PID=$!
 for _ in $(seq 1 50); do [[ -S "$P15SOCK" ]] && break; sleep 0.1; done
 if python3 - "$P15SOCK" <<'PY'
@@ -368,20 +368,32 @@ f.write(b'{"execute":"query-pci"}\n'); r = json.loads(f.readline())
 ids = {}
 for bus in r["return"]:
     for d in bus["devices"]:
-        ids[d["slot"]] = (d["id"]["vendor"], d["id"]["device"])
-want = {2: (0x1022, 0x1453), 3: (0x8086, 0xa338),
-        4: (0x1022, 0x43bb), 5: (0x8086, 0xa36d)}
+        identity = d["id"]
+        ids[d["slot"]] = (
+            identity["vendor"], identity["device"],
+            identity["subsystem-vendor"], identity["subsystem"],
+        )
+want = {
+    2: (0x1022, 0x1453),
+    3: (0x8086, 0xa338),
+    4: (0x1b36, 0x000d, 0x1af4, 0x1100),
+}
 label = {2: "AMD root-port(default)", 3: "Intel root-port(override)",
-         4: "AMD xHCI(default)",      5: "Intel xHCI(override)"}
+         4: "QEMU xHCI(behavior ID)"}
 bad = []
-for slot, (wv, wd) in want.items():
-    gv, gd = ids.get(slot, (0, 0))
-    print(f"  slot {slot} {label[slot]:28s} {gv:#06x}:{gd:#06x}  期望 {wv:#06x}:{wd:#06x}")
-    if (gv, gd) != (wv, wd):
+for slot, expected in want.items():
+    actual = ids.get(slot, ())
+    shown_actual = ":".join(f"{value:04x}" for value in actual)
+    shown_expected = ":".join(f"{value:04x}" for value in expected)
+    print(
+        f"  slot {slot} {label[slot]:28s} {shown_actual}"
+        f"  期望 {shown_expected}"
+    )
+    if actual[:len(expected)] != expected:
         bad.append(slot)
 if bad:
-    print("FAIL: PCI ID 覆盖未生效:", bad); sys.exit(1)
-print("OK: 默认 AMD / 覆盖 Intel 均生效")
+    print("FAIL: PCI 行为身份不符合契约:", bad); sys.exit(1)
+print("OK: root-port 展示覆盖与 qemu-xhci 行为身份均正确")
 PY
 then RC=0; else RC=1; fi
 kill "$P15PID" 2>/dev/null || true

@@ -114,11 +114,6 @@ _sv_check_qemu_caps() {
         'x-speed=' 'x-width=' \
         || _sv_die_missing_qemu_feature "pcie-root-port 平台 ID / 链路属性"
 
-    help="$(_sv_qemu_device_help qemu-xhci)"
-    _sv_qemu_help_has_all "$help" \
-        'x-pci-vendor-id=' 'x-pci-device-id=' 'x-pci-revision=' \
-        || _sv_die_missing_qemu_feature "qemu-xhci 平台 ID 属性"
-
     if [[ "${FB_SHM:-1}" == "1" ]]; then
         help="$("$QEMU" -object help 2>&1)"
         _sv_qemu_help_has_all "$help" 'fb-shm' 'memory-backend-memfd' \

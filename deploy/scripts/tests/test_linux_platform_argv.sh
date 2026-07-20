@@ -97,6 +97,7 @@ nic_line="$(grep -F -- 'e1000e,netdev=net0' "$TMP_DIR/argv")"
     && "$nic_line" == *"subsys=0xA01F"* ]] \
     || fail "Intel 82574L 的 OUI/subsystem 未绑定平台"
 
+assert_fixed "qemu-xhci,id=xhci,bus=rp3"
 assert_fixed "usb-kbd,id=kbd0,bus=xhci.0,vendorid=0x045E,productid=0x0750,manufacturer=Microsoft,product=Microsoft Wired Keyboard 600,x-force-numlock-on=on"
 assert_fixed "usb-tablet,bus=xhci.0"
 assert_fixed "ich9-intel-hda,id=hda0,x-pci-vendor-id=0x8086"

@@ -132,11 +132,25 @@ CPU realize、组件绑定、磁盘，或请求 `TPM=1` 时的 TPM 严格门禁�
 | `SMBUS_PCI_VEN`、`SMBUS_PCI_DEV`、`SMBUS_REV` | SMBus controller PCI 身份 |
 | `AHCI_PCI_VEN`、`AHCI_PCI_DEV`、`AHCI_REV` | AHCI controller PCI 身份 |
 | `ROOT_PORT_PCI_VEN`、`ROOT_PORT_PCI_DEV`、`ROOT_PORT_REV` | PCIe root port 基础身份；各端口按规则派生 device ID |
-| `XHCI_PCI_VEN`、`XHCI_PCI_DEV`、`XHCI_REV` | xHCI controller PCI 身份 |
+| `XHCI_PCI_VEN`、`XHCI_PCI_DEV`、`XHCI_REV` | 目标平台 xHCI 事实；不投影到行为不同的 `qemu-xhci` PCI ID |
 
-这些字段描述 PCI configuration identity；底层寄存器和行为仍是 Q35/ICH9、QEMU root port
-和 qemu-xhci，不等同于真实 H110/H310 silicon。这个行为边界是整份目录的全局事实，写在
+除明确标为“目标平台事实”的 xHCI 字段外，这些字段描述 PCI configuration identity；
+底层寄存器和行为仍是 Q35/ICH9、QEMU root port 和 qemu-xhci，不等同于真实
+H110/H310 silicon。xHCI 始终使用与虚拟模型匹配的上游
+`1B36:000D rev01 / SUBSYS 1AF4:1100`。这个行为边界是整份目录的全局事实，写在
 `platforms.json.fidelity`，不作为每实例随机字段重复保存：
+
+### xHCI 电源管理边界
+
+xHCI 参与的是 USB 子系统的正常电源管理，包括 USB 链路 `U0/U1/U2/U3`、设备挂起/
+恢复和远程唤醒；控制器自身的 PCI `D0/D3` 状态及整机睡眠/唤醒仍由 PCIe、ACPI 和
+操作系统电源框架协同完成，并不是“整机通过 USB 管理电源”。
+
+Windows `USBXHCI.SYS` 会根据控制器硬件身份选择厂商/型号 workaround。只覆盖
+vendor/device/revision 并不会让 `qemu-xhci` 获得 Intel A12F 的复位、LPM 或电源转换
+语义，因此不能投影 `8086:A12F`。固定上游完整身份不会禁用 USB 电源管理，而是让客体
+使用与虚拟寄存器模型匹配的通用 xHCI 路径。背景可参考 Microsoft 的
+[USB 3.0 驱动栈架构](https://learn.microsoft.com/windows-hardware/drivers/usbcon/usb-3-0-driver-stack-architecture)。
 
 | 启动器 | 当前 Q35 root bus BDF |
 |---|---|

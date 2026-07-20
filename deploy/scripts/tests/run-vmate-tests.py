@@ -34,6 +34,7 @@ QUICK_TESTS = (
     "test_guest_gpu_manufacturer_projection.sh",
     "test_guest_gpu_schema1_migration.sh",
     "test_guest_numlock_launcher.sh",
+    "test_iso_boot_input_safety.sh",
     "test_guest_shallow_pci_identity.sh",
     "test_guest_shallow_pci_runtime_helpers.sh",
     "test_guest_gpu_hardware_id_projection.sh",
@@ -88,6 +89,7 @@ QUICK_TESTS = (
     "test_windows_preflight_capabilities.sh",
     "test_windows_smbios_storage_preflight.sh",
     "test_windows_platform_static.sh",
+    "test_xhci_identity_safety.sh",
 )
 
 

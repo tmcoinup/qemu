@@ -254,7 +254,12 @@ function ConvertTo-ValidatedConfig {
     $gpuRaw = Get-PropertyValue $Raw 'gpu' 'top-level'
     Assert-AllowedProperties $gpuRaw @(
         'profile', 'name', 'coreClockMHz', 'boostClockMHz', 'memoryClockMHz',
-        'memoryBusBits', 'memoryBandwidthMBps', 'vramMB', 'expectedPnpId'
+        'memoryBusBits', 'memoryBandwidthMBps', 'vramMB', 'expectedPnpId',
+        'nvapiPciVendorId', 'nvapiPciDeviceId', 'nvapiPciSubVendorId',
+        'nvapiPciSubDeviceId', 'nvapiPciRevisionId',
+        'memoryType', 'memoryMaker', 'cudaCores', 'shaderSubPipes',
+        'ropCount', 'tmuCount', 'architecture', 'implementation', 'chipRevision',
+        'pcieWidth', 'vbiosVersion'
     ) 'gpu'
     $expectedPnpId = ConvertTo-RequiredString `
         (Get-PropertyValue $gpuRaw 'expectedPnpId' 'gpu') `
@@ -268,6 +273,21 @@ function ConvertTo-ValidatedConfig {
             'gpu.profile' 64 '^[a-z0-9][a-z0-9_-]*$'
         Name = ConvertTo-RequiredString `
             (Get-PropertyValue $gpuRaw 'name' 'gpu') 'gpu.name' 31
+        NvapiPciVendorId = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'nvapiPciVendorId' 'gpu') `
+            'gpu.nvapiPciVendorId' 1 65535
+        NvapiPciDeviceId = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'nvapiPciDeviceId' 'gpu') `
+            'gpu.nvapiPciDeviceId' 1 65535
+        NvapiPciSubVendorId = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'nvapiPciSubVendorId' 'gpu') `
+            'gpu.nvapiPciSubVendorId' 1 65535
+        NvapiPciSubDeviceId = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'nvapiPciSubDeviceId' 'gpu') `
+            'gpu.nvapiPciSubDeviceId' 1 65535
+        NvapiPciRevisionId = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'nvapiPciRevisionId' 'gpu') `
+            'gpu.nvapiPciRevisionId' 0 255
         CoreClockMHz = ConvertTo-RequiredInt `
             (Get-PropertyValue $gpuRaw 'coreClockMHz' 'gpu') `
             'gpu.coreClockMHz' 1 10000
@@ -286,7 +306,61 @@ function ConvertTo-ValidatedConfig {
         VramMB = ConvertTo-RequiredInt `
             (Get-PropertyValue $gpuRaw 'vramMB' 'gpu') `
             'gpu.vramMB' 2048 2048
+        MemoryType = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'memoryType' 'gpu') `
+            'gpu.memoryType' 1 255
+        MemoryMaker = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'memoryMaker' 'gpu') `
+            'gpu.memoryMaker' 1 255
+        CudaCores = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'cudaCores' 'gpu') `
+            'gpu.cudaCores' 1 1000000
+        ShaderSubPipes = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'shaderSubPipes' 'gpu') `
+            'gpu.shaderSubPipes' 1 65535
+        RopCount = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'ropCount' 'gpu') `
+            'gpu.ropCount' 1 65535
+        TmuCount = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'tmuCount' 'gpu') `
+            'gpu.tmuCount' 1 1000000
+        Architecture = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'architecture' 'gpu') `
+            'gpu.architecture' 1 65535
+        Implementation = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'implementation' 'gpu') `
+            'gpu.implementation' 1 65535
+        ChipRevision = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'chipRevision' 'gpu') `
+            'gpu.chipRevision' 0 65535
+        PcieWidth = ConvertTo-RequiredInt `
+            (Get-PropertyValue $gpuRaw 'pcieWidth' 'gpu') `
+            'gpu.pcieWidth' 1 32
+        VbiosVersion = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'vbiosVersion' 'gpu') `
+            'gpu.vbiosVersion' 64 '^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){4}$'
         ExpectedPnpId = $expectedPnpId
+    }
+    if ($gpu.BoostClockMHz -lt $gpu.CoreClockMHz) {
+        throw 'gpu.boostClockMHz must not be lower than gpu.coreClockMHz.'
+    }
+    if ($gpu.MemoryType -ne 8) {
+        throw "Invalid 'gpu.memoryType' value '$($gpu.MemoryType)' (only the audited GDDR5 enum 8 is supported)."
+    }
+    if (@(1, 2, 4, 8, 16, 32) -notcontains $gpu.PcieWidth) {
+        throw "Invalid 'gpu.pcieWidth' value '$($gpu.PcieWidth)' (expected a physical lane count)."
+    }
+    if ($gpu.TmuCount -ne $gpu.ShaderSubPipes * 8) {
+        throw 'gpu.tmuCount must equal gpu.shaderSubPipes * 8 for the audited profiles.'
+    }
+    $rawMemoryKHz = [int64]$gpu.MemoryClockMHz * 2000
+    $derivedBandwidthMBps = [int64]$rawMemoryKHz * 2 *
+        $gpu.MemoryBusBits / 8000
+    $bandwidthDifference = [Math]::Abs(
+        $derivedBandwidthMBps - [int64]$gpu.MemoryBandwidthMBps
+    )
+    if ($bandwidthDifference * 100 -gt [int64]$gpu.MemoryBandwidthMBps) {
+        throw "GPU memory clock/bus/bandwidth mismatch: profile $($gpu.MemoryBandwidthMBps) MB/s, derived $derivedBandwidthMBps MB/s (GDDR5 tolerance is 1%)."
     }
 
     $monitorRaw = Get-PropertyValue $Raw 'monitor' 'top-level' -Optional
@@ -695,12 +769,28 @@ function Invoke-GpuPatch {
     )
     $arguments = @{
         TargetName = $Gpu.Name
+        NvapiPciVendorId = $Gpu.NvapiPciVendorId
+        NvapiPciDeviceId = $Gpu.NvapiPciDeviceId
+        NvapiPciSubVendorId = $Gpu.NvapiPciSubVendorId
+        NvapiPciSubDeviceId = $Gpu.NvapiPciSubDeviceId
+        NvapiPciRevisionId = $Gpu.NvapiPciRevisionId
         CoreClockMHz = $Gpu.CoreClockMHz
         BoostClockMHz = $Gpu.BoostClockMHz
         MemoryClockMHz = $Gpu.MemoryClockMHz
         MemoryBusBits = $Gpu.MemoryBusBits
         MemoryBandwidthMBps = $Gpu.MemoryBandwidthMBps
         VramMB = $Gpu.VramMB
+        MemoryType = $Gpu.MemoryType
+        MemoryMaker = $Gpu.MemoryMaker
+        CudaCores = $Gpu.CudaCores
+        ShaderSubPipes = $Gpu.ShaderSubPipes
+        RopCount = $Gpu.RopCount
+        TmuCount = $Gpu.TmuCount
+        Architecture = $Gpu.Architecture
+        Implementation = $Gpu.Implementation
+        ChipRevision = $Gpu.ChipRevision
+        PcieWidth = $Gpu.PcieWidth
+        VbiosVersion = $Gpu.VbiosVersion
     }
     & $PatchPath @arguments
     Write-Pass "GPU identity patch completed for '$($Gpu.Name)'."
@@ -943,13 +1033,32 @@ function Test-GpuState {
     $specPath = 'HKLM:\SOFTWARE\NVIDIA Corporation\Global\NvAPI'
     $specKey = Get-Item -Path $specPath -ErrorAction SilentlyContinue
     $spec = Get-ItemProperty -Path $specPath -ErrorAction SilentlyContinue
+    $expectedMemoryRawKHz = [int64]$Gpu.MemoryClockMHz * 2000
     $expectedSpecs = [ordered]@{
         IdentityVramMB = $Gpu.VramMB
+        IdentityPciVendorId = $Gpu.NvapiPciVendorId
+        IdentityPciDeviceId = $Gpu.NvapiPciDeviceId
+        IdentityPciSubVendorId = $Gpu.NvapiPciSubVendorId
+        IdentityPciSubDeviceId = $Gpu.NvapiPciSubDeviceId
+        IdentityPciRevisionId = $Gpu.NvapiPciRevisionId
         IdentityCoreClockKHz = $Gpu.CoreClockMHz * 1000
         IdentityBoostClockKHz = $Gpu.BoostClockMHz * 1000
-        IdentityMemoryClockKHz = $Gpu.MemoryClockMHz * 2000
+        IdentityMemoryClockNVAPIKHz = $expectedMemoryRawKHz
+        IdentityMemoryClockKHz = $expectedMemoryRawKHz
         IdentityMemoryBusBits = $Gpu.MemoryBusBits
         IdentityMemoryBandwidthMBps = $Gpu.MemoryBandwidthMBps
+        IdentityMemoryType = $Gpu.MemoryType
+        IdentityMemoryMaker = $Gpu.MemoryMaker
+        IdentityCudaCores = $Gpu.CudaCores
+        IdentityShaderSubPipes = $Gpu.ShaderSubPipes
+        IdentityRopCount = $Gpu.RopCount
+        IdentityTmuCount = $Gpu.TmuCount
+        IdentityRayTracingCores = 0
+        IdentityTensorCores = 0
+        IdentityArchitecture = $Gpu.Architecture
+        IdentityImplementation = $Gpu.Implementation
+        IdentityChipRevision = $Gpu.ChipRevision
+        IdentityPcieWidth = $Gpu.PcieWidth
     }
     $badSpecs = @()
     $nameProperty = @(if ($null -ne $spec) {
@@ -966,6 +1075,30 @@ function Test-GpuState {
     if ($null -eq $actualName -or $actualName -cne [string]$Gpu.Name -or
         $actualNameKind -cne 'String') {
         $badSpecs += "IdentityGpuName='$actualName'/$actualNameKind (expected '$($Gpu.Name)'/String)"
+    }
+    $vbiosProperty = @(if ($null -ne $spec) {
+        $spec.PSObject.Properties | Where-Object {
+            $_.Name -eq 'IdentityVbiosVersion'
+        }
+    })
+    $actualVbios = if ($vbiosProperty.Count -eq 1) {
+        [string]$vbiosProperty[0].Value
+    } else {
+        $null
+    }
+    $actualVbiosKind = if ($null -ne $specKey) {
+        try {
+            [string]($specKey.GetValueKind('IdentityVbiosVersion'))
+        } catch {
+            $null
+        }
+    } else {
+        $null
+    }
+    if ($null -eq $actualVbios -or
+        $actualVbios -cne [string]$Gpu.VbiosVersion -or
+        $actualVbiosKind -cne 'String') {
+        $badSpecs += "IdentityVbiosVersion='$actualVbios'/$actualVbiosKind (expected '$($Gpu.VbiosVersion)'/String)"
     }
     foreach ($item in $expectedSpecs.GetEnumerator()) {
         # The output of an if statement is enumerated by the PowerShell 5.1

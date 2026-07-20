@@ -22,6 +22,25 @@
 #   --no-repair-display-vars  不自动修复已失效的 ConOut
 #   --no-tpm           显式关闭 TPM（最高优先级）
 #   --no-monitor-sync  跳过 host 离线 EDID 缓存同步（默认按需同步一次）
+#   --production-migration-source
+#                      仅本次启动已由精确 host-state/contract 锁定的
+#                      legacy A 源 VM；不写入 vm.conf，也不放宽正常 A 护栏
+#   --proxy           启用 QEMU 原生 QMP 多客户端；并创建 .proxy 兼容别名
+#   --no-proxy        关闭 QMP 多客户端（默认）
+#   --cpu-isolate      CPU 隔离 required 模式（默认；保留为显式兼容参数）
+#   --cpu-isolate-auto CPU 隔离 auto 模式（不可用时显式降级继续）
+#   --no-cpu-isolate   关闭 CPU 隔离
+#   --svc-cpus <N>     QEMU 主循环/显示/IO 专用逻辑 CPU 数（默认 1）
+#   --stream <URL>      启用 fb-shm 区域推流；必须给显式目标 URL/绝对文件
+#   --stream-roi X,Y,W,H  固定推流区域（默认完整主显示）
+#   --stream-rate <Hz>  捕获/编码帧率 1..240（默认 30）
+#   --stream-encoder <name>  ffmpeg 编码器（默认 libx264）
+#   --stream-bitrate <rate>  视频码率（默认 6M）
+#   --stream-preset <name>   编码器 preset（默认 veryfast）
+#   --stream-gop <frames>    GOP 帧数（默认 60）
+#   --stream-container <name> 显式 ffmpeg muxer
+#   --stream-mode auto|shm|gpu  G-11 默认 shm；R535 拒绝严格 gpu 模式
+#   --no-stream         关闭环境变量配置的推流
 #   --dry-run          只打印最终 QEMU argv，不分配 mdev/不启动
 #   --no-tame-gnome    不让 viewer 动态处理 GNOME/IBus 宿主快捷键
 #   --tame-gnome       强制让鼠标在 viewer 内时临时关闭宿主 Super/Alt+Tab 快捷键
@@ -58,6 +77,15 @@
 #   TPM               TPM 开关（0/1）；显式环境值覆盖主板 profile
 #                     新配置按 BOARD_TPM_VERSION 自动选择；旧配置仍默认 TPM 2.0
 #   MEM_GUARD/MEM_FORCE  prealloc 内存护栏及显式风险旁路
+#   PROXY            QMP 原生多客户端开关（0/1，默认 0）
+#   CPU_ISOLATION    auto|required|off（默认 required）
+#   CPU_ISOLATION_AUTO_INSTALL  缺 helper/依赖时自动安装（0/1，默认 1）
+#   QEMU_SERVICE_CPUS  非 vCPU 服务线程专用逻辑 CPU 数（默认 1）
+#   HOST_RESERVE_CORES auto 或宿主保留物理核数（默认 auto）
+#   STREAM_OUTPUT    显式网络 URL 或绝对输出文件；非空时启用区域推流
+#   STREAM_ROI       X,Y,W,H；STREAM_RATE/ENCODER/BITRATE/PRESET/GOP/CONTAINER
+#   STREAM_MODE      shm|auto|gpu（默认 shm；当前 R535 产品路径拒绝 gpu）
+#   QEMU_FB_SHM_STREAM_BIN  qemu-fb-shm-stream 路径
 #   VGPU_GUEST_FINISH_TARGET  finish-vgpu-install.sh 的一次性 rescue 提示；
 #                     仅 rescue-sdl/gtk 接受，正常启动绝不注入 guest
 
@@ -113,6 +141,8 @@ source "$here/lib/input-profiles.sh"
 input_profile_validate_catalog
 # shellcheck source=lib/vm-tpm.sh
 source "$here/lib/vm-tpm.sh"
+# shellcheck source=lib/cpu-isolation.sh
+source "$here/lib/cpu-isolation.sh"
 # shellcheck source=lib/windows-unattend.sh
 source "$here/lib/windows-unattend.sh"
 
@@ -130,6 +160,11 @@ elif [[ "$VGPU_HOST_CONFIG_WAS_SET" == 1 ]]; then
     echo "[start-vm] VGPU_HOST_CONFIG 不存在或不可读: $VGPU_HOST_CONFIG" >&2
     exit 1
 fi
+# Host policy is sourced before vm.conf and therefore participates in the real
+# shell precedence.  Capture spoof inputs only now so the pre-storage guard
+# sees exactly what the later parser would inherit.
+SPOOF_MODE_ENV_VALUE=${SPOOF_MODE-}
+SPOOF_ENV_VALUE=${SPOOF-}
 
 # shellcheck source=lib/vgpu-mdev.sh
 source "$here/lib/vgpu-mdev.sh"
@@ -139,21 +174,47 @@ source "$here/lib/vgpu-profiles.sh"
 source "$here/lib/gnome-shortcuts.sh"
 
 VM_ID="${1:-}"
-[[ -z "$VM_ID" || ! "$VM_ID" =~ ^[1-9][0-9]*$ ]] && {
-    echo "usage: $0 <vm_id> [--install [iso]|--manual-oobe|--native|--gtk|--sdl|--vgpu-gtk|--vgpu-sdl|--rescue-sdl|--rescue-gtk|--rdp|--legacy-shmem|--no-gpu|--vnc :N|--no-tpm|--dry-run|--extra \"...\"]" >&2
+if ! vm_storage_id_is_supported "$VM_ID"; then
+    echo "usage: $0 <vm_id> [--install [iso]|--native|--gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate|--stream URL|--stream-roi X,Y,W,H|--no-tpm|--dry-run|--extra \"...\"]" >&2
+    echo "vm_id must be in 1..2147483647" >&2
     exit 2
-}
+fi
+REQUESTED_VM_ID=$VM_ID
 shift
 
 # --dry-run 在常规参数解析之前就要可见，避免为了“只看 argv”而 bootstrap
 # VM、磁盘或 runtime 目录。已有 VM 才能 dry-run；缺 config 时不给它猜配置。
 EARLY_DRY_RUN="${DRY_RUN:-0}"
+EARLY_SPOOF_MODE_OVERRIDE=""
+EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED=0
 EARLY_ARGS=( "$@" )
 for ((early_i = 0; early_i < ${#EARLY_ARGS[@]}; early_i += 1)); do
     case "${EARLY_ARGS[$early_i]}" in
         --dry-run) EARLY_DRY_RUN=1 ;;
+        --production-migration-source)
+            ((EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED == 0)) || {
+                echo "[start-vm] --production-migration-source may appear only once" >&2
+                exit 2
+            }
+            EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED=1
+            ;;
+        --no-spoof) EARLY_SPOOF_MODE_OVERRIDE=off ;;
+        --spoof-name-only) EARLY_SPOOF_MODE_OVERRIDE=B ;;
+        --spoof) EARLY_SPOOF_MODE_OVERRIDE=A ;;
+        --spoof-mode)
+            if ((early_i + 1 < ${#EARLY_ARGS[@]})); then
+                EARLY_SPOOF_MODE_OVERRIDE=${EARLY_ARGS[$((early_i + 1))]}
+            else
+                echo "[start-vm] --spoof-mode requires A, B or off" >&2
+                exit 2
+            fi
+            ((early_i += 1))
+            ;;
         # These options consume their next token even when it starts with `--`.
-        --vnc|--spoof-mode|--shmem|--width|--height|--extra)
+        --vnc|--shmem|--width|--height|--svc-cpus|--extra|\
+        --stream|--stream-output|--stream-roi|--stream-rate|\
+        --stream-encoder|--stream-bitrate|--stream-preset|--stream-gop|\
+        --stream-container|--stream-mode|--stream-start-timeout)
             ((early_i += 1))
             ;;
         # --install consumes only a following non-option ISO path.
@@ -166,6 +227,427 @@ for ((early_i = 0; early_i < ${#EARLY_ARGS[@]}; early_i += 1)); do
     esac
 done
 unset EARLY_ARGS early_i
+
+strict_a_start_disabled() {
+    echo "[start-vm] strict-A startup is disabled: the legacy GTX 1050 path has no production-signature attestation and may depend on a modified/self-signed driver." >&2
+    echo "[start-vm] Keep B/off. For migration, use --no-spoof --no-monitor-sync and install an unmodified NVIDIA/Microsoft production-signed driver." >&2
+    exit 2
+}
+
+# Reject a persisted or CLI-requested A mode before creating runtime/storage
+# paths or taking locks.  This is a deliberately small parser for the generated
+# literal vm.conf assignments; the full sourced value is checked again below.
+# A caller can still select B/off explicitly to enter the production-driver
+# migration path.
+normalize_early_spoof_value() {
+    local value=$1
+    value=${value%$'\r'}
+    value=$(sed -E \
+        's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//' \
+        <<<"$value")
+    if [[ "$value" == \"*\" && "$value" == *\" && ${#value} -ge 2 ]]; then
+        value=${value:1:${#value}-2}
+    elif [[ "$value" == \'*\' && "$value" == *\' && ${#value} -ge 2 ]]; then
+        value=${value:1:${#value}-2}
+    fi
+    printf '%s\n' "$value"
+}
+
+production_migration_source_die() {
+    echo "[start-vm] production-migration-source rejected: $*" >&2
+    exit 2
+}
+
+start_vm_sha256_upper() {
+    sha256sum -- "$1" | awk '{print toupper($1)}'
+}
+
+production_migration_literal_assignment() {
+    local field=$1 value
+    local -a lines=()
+
+    mapfile -t lines < <(
+        sed -n -E "s/^[[:space:]]*${field}=//p" \
+            <<<"$EARLY_CONF_SNAPSHOT"
+    )
+    ((${#lines[@]} == 1)) \
+        || production_migration_source_die \
+            "vm.conf must contain exactly one simple ${field}= literal"
+    value=$(normalize_early_spoof_value "${lines[0]}")
+    [[ -n "$value" ]] \
+        || production_migration_source_die \
+            "vm.conf ${field} literal is empty"
+    printf '%s\n' "$value"
+}
+
+production_migration_require_private_node() {
+    local path=$1 kind=$2 expected_mode=$3 expected_uid=$4
+    local actual_mode actual_uid
+
+    case "$kind" in
+        directory)
+            [[ -d "$path" && ! -L "$path" ]] \
+                || production_migration_source_die \
+                    "package directory is missing or unsafe: $path"
+            ;;
+        file)
+            [[ -f "$path" && ! -L "$path" &&
+               "$(stat -c %h -- "$path")" == 1 ]] \
+                || production_migration_source_die \
+                    "package file is missing, linked or unsafe: $path"
+            ;;
+        *)
+            production_migration_source_die \
+                "internal package-node type is invalid"
+            ;;
+    esac
+    actual_mode=$(stat -c %a -- "$path")
+    actual_uid=$(stat -c %u -- "$path")
+    [[ "$actual_mode" == "$expected_mode" &&
+       "$actual_uid" == "$expected_uid" ]] \
+        || production_migration_source_die \
+            "package node owner/mode mismatch: $path"
+}
+
+production_migration_source_authorize() {
+    local config_uuid config_profile config_mode uuid_lower
+    local package_root package_dir state contract exe config_uid
+    local root_fd_path root_inode migration_id contract_sha
+    local expected_exe_sha expected_exe_bytes expected_gpu_name
+
+    ((EARLY_CONF_PRESENT)) \
+        || production_migration_source_die \
+            "an existing immutable vm.conf is required"
+    [[ "$EARLY_EFFECTIVE_SPOOF_MODE" == A ]] \
+        || production_migration_source_die \
+            "the switch is valid only for the exact legacy A source mode"
+    for dependency in jq sha256sum awk stat realpath flock; do
+        command -v "$dependency" >/dev/null 2>&1 \
+            || production_migration_source_die \
+                "missing verification dependency: $dependency"
+    done
+
+    config_uuid=$(production_migration_literal_assignment VM_UUID)
+    config_profile=$(production_migration_literal_assignment GPU_PROFILE)
+    config_mode=$(production_migration_literal_assignment SPOOF_MODE)
+    [[ "$config_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] \
+        || production_migration_source_die \
+            "vm.conf VM_UUID is invalid"
+    [[ "$config_profile" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] \
+        || production_migration_source_die \
+            "vm.conf GPU_PROFILE is invalid"
+    [[ "$config_mode" == A ]] \
+        || production_migration_source_die \
+            "vm.conf itself is not the captured A source"
+    [[ "$EARLY_CONF_FILE_SHA256" =~ ^[0-9A-F]{64}$ ]] \
+        || production_migration_source_die \
+            "could not pin the source config hash"
+
+    uuid_lower=${config_uuid,,}
+    package_root="$STAGE_DIR/VgpuProductionMigration"
+    package_dir="$package_root/vm${REQUESTED_VM_ID}-${uuid_lower}"
+    state="$package_dir/host-state.json"
+    contract="$package_dir/migration-contract.json"
+    exe="$package_dir/VgpuProductionMigration.exe"
+    config_uid=$(stat -c %u -- "$EARLY_CONF")
+
+    production_migration_require_private_node \
+        "$package_root" directory 700 "$config_uid"
+    # The packager locks this canonical private directory inode exclusively.
+    # Holding a shared lock makes every JSON/EXE check one immutable package
+    # observation and prevents a concurrent --replace publication.
+    exec {PRODUCTION_MIGRATION_LOCK_FD}<"$package_root" \
+        || production_migration_source_die \
+            "could not open the private package root"
+    root_fd_path="/proc/self/fd/$PRODUCTION_MIGRATION_LOCK_FD"
+    root_inode=$(stat -Lc '%d:%i' -- "$package_root")
+    [[ -d "$root_fd_path" &&
+       "$(stat -Lc '%d:%i' -- "$root_fd_path")" == "$root_inode" ]] \
+        || production_migration_source_die \
+            "package root changed before locking"
+    flock -s "$PRODUCTION_MIGRATION_LOCK_FD"
+    [[ "$(stat -Lc '%d:%i' -- "$package_root")" == "$root_inode" ]] \
+        || production_migration_source_die \
+            "package root changed while waiting for its lock"
+
+    production_migration_require_private_node \
+        "$package_dir" directory 700 "$config_uid"
+    production_migration_require_private_node \
+        "$state" file 600 "$config_uid"
+    production_migration_require_private_node \
+        "$contract" file 600 "$config_uid"
+    production_migration_require_private_node \
+        "$exe" file 600 "$config_uid"
+    [[ "$(realpath -e -- "$package_dir")" == "$package_dir" &&
+       "$(stat -c %s -- "$state")" -le 65536 &&
+       "$(stat -c %s -- "$contract")" -le 65536 ]] \
+        || production_migration_source_die \
+            "package path or JSON size is unsafe"
+
+    jq -e \
+        --argjson vmId "$REQUESTED_VM_ID" \
+        --arg vmUuid "$uuid_lower" \
+        --arg gpuProfile "$config_profile" \
+        --arg sourceConfigSha256 "$EARLY_CONF_FILE_SHA256" '
+        (keys | sort) == [
+            "archiveSha256", "exeBytes", "exeSha256", "gpuName",
+            "gpuProfile", "guestContractSha256", "migrationId",
+            "requiredHostModeAfterReceipt", "schemaVersion",
+            "sourceCatalogSha256", "sourceConfigSha256", "sourceHostMode",
+            "sourceInfSha256", "vmId", "vmUuid"
+        ] and
+        .schemaVersion == 1 and .vmId == $vmId and
+        .vmUuid == $vmUuid and .gpuProfile == $gpuProfile and
+        (.gpuName | type == "string" and
+          startswith("NVIDIA ") and length >= 8 and length <= 64) and
+        .sourceHostMode == "A" and
+        .sourceConfigSha256 == $sourceConfigSha256 and
+        .requiredHostModeAfterReceipt == "B" and
+        (.migrationId | test("^[0-9A-F]{32}$")) and
+        (.guestContractSha256 | test("^[0-9A-F]{64}$")) and
+        (.exeSha256 | test("^[0-9A-F]{64}$")) and
+        (.exeBytes | type == "number" and . > 268435456 and
+          . < 2147483648 and floor == .) and
+        .archiveSha256 ==
+          "A3D7AD8B8082D6AC6214565B4766B5190A819BC9B7574765B14897E0DB809690" and
+        .sourceInfSha256 ==
+          "67A240E1D464CF97DABFEC1A7CECF000EAA9DDFD702F32BA2C8771F17905DC2B" and
+        .sourceCatalogSha256 ==
+          "56B07BD93280BBDA761CB5C9A3A13262C3605320D7286953989E2A5B16D5EC6F"
+    ' "$state" >/dev/null \
+        || production_migration_source_die \
+            "host-state does not exactly match this VM/config/source mode"
+
+    migration_id=$(jq -er .migrationId "$state")
+    contract_sha=$(jq -er .guestContractSha256 "$state")
+    expected_exe_sha=$(jq -er .exeSha256 "$state")
+    expected_exe_bytes=$(jq -er .exeBytes "$state")
+    expected_gpu_name=$(jq -er .gpuName "$state")
+    [[ "$(start_vm_sha256_upper "$contract")" == "$contract_sha" ]] \
+        || production_migration_source_die \
+            "migration-contract hash does not match host-state"
+
+    jq -e \
+        --argjson vmId "$REQUESTED_VM_ID" \
+        --arg vmUuid "${config_uuid^^}" \
+        --arg gpuProfile "$config_profile" \
+        --arg gpuName "$expected_gpu_name" \
+        --arg migrationId "$migration_id" '
+        (keys | sort) == [
+            "driver", "gpuName", "gpuProfile", "gpuz", "legacyPnpId",
+            "migrationId", "nativePnpId", "schemaVersion", "vmId", "vmUuid"
+        ] and
+        (.driver | keys | sort) == [
+            "archiveBytes", "archiveName", "archiveSha256",
+            "catalogRelativePath", "catalogSha256", "driverVersion",
+            "infRelativePath", "infSha256"
+        ] and
+        (.gpuz | keys | sort) == ["name", "sha256"] and
+        .schemaVersion == 1 and .vmId == $vmId and
+        .vmUuid == $vmUuid and .gpuProfile == $gpuProfile and
+        .gpuName == $gpuName and .migrationId == $migrationId and
+        (.legacyPnpId |
+          test("^PCI\\\\VEN_10DE&DEV_[0-9A-F]{4}&SUBSYS_[0-9A-F]{8}$")) and
+        .nativePnpId == "PCI\\VEN_10DE&DEV_1E30" and
+        .driver.archiveName == "538.33-display-driver.zip" and
+        .driver.archiveBytes == 860703853 and
+        .driver.archiveSha256 ==
+          "A3D7AD8B8082D6AC6214565B4766B5190A819BC9B7574765B14897E0DB809690" and
+        .driver.infRelativePath == "Display.Driver/nvgridsw.inf" and
+        .driver.infSha256 ==
+          "67A240E1D464CF97DABFEC1A7CECF000EAA9DDFD702F32BA2C8771F17905DC2B" and
+        .driver.catalogRelativePath == "Display.Driver/nvgridsw.cat" and
+        .driver.catalogSha256 ==
+          "56B07BD93280BBDA761CB5C9A3A13262C3605320D7286953989E2A5B16D5EC6F" and
+        .driver.driverVersion == "31.0.15.3833" and
+        .gpuz.name == "GpuZProfile.exe" and
+        (.gpuz.sha256 | test("^[0-9A-F]{64}$"))
+    ' "$contract" >/dev/null \
+        || production_migration_source_die \
+            "migration-contract identity/production-driver tuple is invalid"
+
+    [[ "$(stat -c %s -- "$exe")" == "$expected_exe_bytes" &&
+       "$(start_vm_sha256_upper "$exe")" == "$expected_exe_sha" ]] \
+        || production_migration_source_die \
+            "migration EXE does not match host-state"
+    [[ "$(stat -Lc '%d:%i' -- "$package_root")" == "$root_inode" ]] \
+        || production_migration_source_die \
+            "package root changed during verification"
+    exec {PRODUCTION_MIGRATION_LOCK_FD}<&-
+
+    PRODUCTION_MIGRATION_SOURCE_AUTHORIZED=1
+    PRODUCTION_MIGRATION_EXPECTED_CONFIG_SHA256=$EARLY_CONF_FILE_SHA256
+    PRODUCTION_MIGRATION_EXPECTED_UUID=$uuid_lower
+    PRODUCTION_MIGRATION_EXPECTED_PROFILE=$config_profile
+    PRODUCTION_MIGRATION_EXPECTED_GPU_NAME=$expected_gpu_name
+    PRODUCTION_MIGRATION_EXPECTED_ID=$migration_id
+    PRODUCTION_MIGRATION_STATE_PATH=$state
+}
+
+EARLY_CONF=$(vm_storage_config_path "$VM_ID") || exit $?
+EARLY_CONF_PRESENT=0
+EARLY_CONF_SNAPSHOT=""
+EARLY_CONF_FILE_SHA256=""
+if [[ -e "$EARLY_CONF" || -L "$EARLY_CONF" ]]; then
+    [[ -f "$EARLY_CONF" && ! -L "$EARLY_CONF" && -r "$EARLY_CONF" ]] || {
+        echo "[start-vm] vm.conf must be a readable regular non-symlink file: $EARLY_CONF" >&2
+        exit 2
+    }
+    if ((EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED)); then
+        EARLY_CONF_STAT_BEFORE=$(stat -Lc '%d:%i:%s:%Y:%Z' -- "$EARLY_CONF")
+        EARLY_CONF_SHA_BEFORE=$(start_vm_sha256_upper "$EARLY_CONF")
+    fi
+    EARLY_CONF_SNAPSHOT=$(<"$EARLY_CONF")
+    if ((EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED)); then
+        EARLY_CONF_SHA_AFTER=$(start_vm_sha256_upper "$EARLY_CONF")
+        EARLY_CONF_STAT_AFTER=$(stat -Lc '%d:%i:%s:%Y:%Z' -- "$EARLY_CONF")
+        [[ "$EARLY_CONF_SHA_BEFORE" == "$EARLY_CONF_SHA_AFTER" &&
+           "$EARLY_CONF_STAT_BEFORE" == "$EARLY_CONF_STAT_AFTER" ]] \
+            || production_migration_source_die \
+                "vm.conf changed while its immutable snapshot was captured"
+        EARLY_CONF_FILE_SHA256=$EARLY_CONF_SHA_AFTER
+        unset EARLY_CONF_SHA_BEFORE EARLY_CONF_SHA_AFTER \
+            EARLY_CONF_STAT_BEFORE EARLY_CONF_STAT_AFTER
+    fi
+    EARLY_CONF_PRESENT=1
+fi
+
+# vm.conf may describe this requested instance but may never redirect storage,
+# locks, QMP paths or device state to another numeric instance.
+if ((EARLY_CONF_PRESENT)); then
+    if ! awk '
+        /^[[:space:]]*(#|$)/ { next }
+        {
+            if ($0 ~ /(^|[^[:alnum:]_])(VM_ID|SPOOF_MODE|SPOOF)([^[:alnum:]_]|$)/ &&
+                    $0 !~ /^[[:space:]]*(VM_ID|SPOOF_MODE|SPOOF)=/) {
+                exit 2
+            }
+        }
+    ' <<<"$EARLY_CONF_SNAPSHOT"; then
+        echo "[start-vm] vm.conf identity controls must use simple literal VM_ID/SPOOF_MODE/SPOOF assignments: $EARLY_CONF" >&2
+        exit 2
+    fi
+    mapfile -t EARLY_VM_ID_LINES < <(
+        sed -n -E 's/^[[:space:]]*VM_ID=//p' <<<"$EARLY_CONF_SNAPSHOT"
+    )
+    ((${#EARLY_VM_ID_LINES[@]} <= 1)) || {
+        echo "[start-vm] duplicate VM_ID assignments in $EARLY_CONF" >&2
+        exit 2
+    }
+    if ((${#EARLY_VM_ID_LINES[@]} == 1)); then
+        EARLY_CONFIG_VM_ID=$(
+            normalize_early_spoof_value "${EARLY_VM_ID_LINES[0]}"
+        )
+        if ! vm_storage_id_is_supported "$EARLY_CONFIG_VM_ID" ||
+                [[ "$EARLY_CONFIG_VM_ID" != "$REQUESTED_VM_ID" ]]; then
+            echo "[start-vm] vm.conf VM_ID must exactly match requested vm${REQUESTED_VM_ID}: ${EARLY_CONFIG_VM_ID:-<empty>}" >&2
+            exit 2
+        fi
+    fi
+fi
+
+# Reproduce the later shell precedence against one immutable in-memory
+# snapshot: caller environment, then config assignments, then legacy SPOOF,
+# with the last CLI selector taking final precedence.
+EARLY_EFFECTIVE_SPOOF_MODE=${SPOOF_MODE_ENV_VALUE:-B}
+EARLY_EFFECTIVE_LEGACY_SPOOF=$SPOOF_ENV_VALUE
+EARLY_LEGACY_STRICT_MARKER=0
+if ((EARLY_CONF_PRESENT)); then
+    mapfile -t EARLY_SPOOF_MODE_LINES < <(
+        sed -n -E 's/^[[:space:]]*SPOOF_MODE=//p' \
+            <<<"$EARLY_CONF_SNAPSHOT"
+    )
+    ((${#EARLY_SPOOF_MODE_LINES[@]} <= 1)) || {
+        echo "[start-vm] duplicate SPOOF_MODE assignments in $EARLY_CONF" >&2
+        exit 2
+    }
+    if ((${#EARLY_SPOOF_MODE_LINES[@]} == 1)); then
+        EARLY_EFFECTIVE_SPOOF_MODE=$(
+            normalize_early_spoof_value "${EARLY_SPOOF_MODE_LINES[0]}"
+        )
+        [[ -n "$EARLY_EFFECTIVE_SPOOF_MODE" ]] ||
+            EARLY_EFFECTIVE_SPOOF_MODE=B
+    fi
+
+    mapfile -t EARLY_SPOOF_LINES < <(
+        sed -n -E 's/^[[:space:]]*SPOOF=//p' \
+            <<<"$EARLY_CONF_SNAPSHOT"
+    )
+    ((${#EARLY_SPOOF_LINES[@]} <= 1)) || {
+        echo "[start-vm] duplicate legacy SPOOF assignments in $EARLY_CONF" >&2
+        exit 2
+    }
+    if ((${#EARLY_SPOOF_LINES[@]} == 1)); then
+        EARLY_EFFECTIVE_LEGACY_SPOOF=$(
+            normalize_early_spoof_value "${EARLY_SPOOF_LINES[0]}"
+        )
+    fi
+
+    # Completion-era fields are evidence that this disk/config may still carry
+    # the disabled modified/self-signed driver flow.  A plain full-consumer
+    # target or required-version field is not evidence: new safe B configs
+    # intentionally record those future requirements.
+    if grep -Eq \
+            '^[[:space:]]*(VGPU_MDEV_INTERNAL_PCI_IDENTITY=['"'"'"]?1['"'"'"]?([[:space:]]|$)|VGPU_MDEV_FRL_ENABLED=|VGPU_PATCHED_DRIVER_(VERSION|INF)=)' \
+            <<<"$EARLY_CONF_SNAPSHOT"; then
+        EARLY_LEGACY_STRICT_MARKER=1
+    fi
+fi
+
+if [[ -n "$EARLY_SPOOF_MODE_OVERRIDE" ]]; then
+    EARLY_EFFECTIVE_SPOOF_MODE=$EARLY_SPOOF_MODE_OVERRIDE
+else
+    if [[ -n "$EARLY_EFFECTIVE_LEGACY_SPOOF" ]]; then
+        case "$EARLY_EFFECTIVE_LEGACY_SPOOF" in
+            1) EARLY_EFFECTIVE_SPOOF_MODE=A ;;
+            0) EARLY_EFFECTIVE_SPOOF_MODE=off ;;
+            *)
+                echo "[start-vm] effective legacy SPOOF must be 0 or 1" >&2
+                exit 2
+                ;;
+        esac
+    fi
+    if ((EARLY_LEGACY_STRICT_MARKER)); then
+        EARLY_EFFECTIVE_SPOOF_MODE=A
+    fi
+fi
+
+PRODUCTION_MIGRATION_SOURCE_AUTHORIZED=0
+PRODUCTION_MIGRATION_EXPECTED_CONFIG_SHA256=""
+PRODUCTION_MIGRATION_EXPECTED_UUID=""
+PRODUCTION_MIGRATION_EXPECTED_PROFILE=""
+PRODUCTION_MIGRATION_EXPECTED_GPU_NAME=""
+PRODUCTION_MIGRATION_EXPECTED_ID=""
+PRODUCTION_MIGRATION_STATE_PATH=""
+if ((EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED)); then
+    production_migration_source_authorize
+    echo "[start-vm] production-migration-source authorized for this invocation only: migration ${PRODUCTION_MIGRATION_EXPECTED_ID}"
+fi
+readonly PRODUCTION_MIGRATION_SOURCE_AUTHORIZED \
+    PRODUCTION_MIGRATION_EXPECTED_CONFIG_SHA256 \
+    PRODUCTION_MIGRATION_EXPECTED_UUID \
+    PRODUCTION_MIGRATION_EXPECTED_PROFILE \
+    PRODUCTION_MIGRATION_EXPECTED_GPU_NAME \
+    PRODUCTION_MIGRATION_EXPECTED_ID \
+    PRODUCTION_MIGRATION_STATE_PATH
+
+case "$EARLY_EFFECTIVE_SPOOF_MODE" in
+    A)
+        [[ "$PRODUCTION_MIGRATION_SOURCE_AUTHORIZED" == 1 ]] \
+            || strict_a_start_disabled
+        ;;
+    B|off) ;;
+    *)
+        echo "[start-vm] early SPOOF_MODE must be A, B or off: $EARLY_EFFECTIVE_SPOOF_MODE" >&2
+        exit 2
+        ;;
+esac
+unset EARLY_VM_ID_LINES EARLY_CONFIG_VM_ID \
+    EARLY_SPOOF_MODE_LINES EARLY_SPOOF_LINES \
+    EARLY_EFFECTIVE_LEGACY_SPOOF EARLY_LEGACY_STRICT_MARKER \
+    EARLY_EFFECTIVE_SPOOF_MODE \
+    EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED
+
 if [[ "$EARLY_DRY_RUN" != 1 ]]; then
     # Shared for the complete QEMU lifetime.  The explicit storage migrator
     # takes this lock exclusively, so a VM cannot start halfway through moves.
@@ -187,7 +669,7 @@ fi
 
 # Source vm conf 先 — 让里面的 SPOOF / GUEST_MEM_MB / VNC_DISPLAY 等
 # per-VM 默认值优先于脚本默认，但仍然能被 env / CLI 覆盖。
-CONF=$(vm_storage_config_path "$VM_ID")
+CONF=$EARLY_CONF
 DISK_PATH=$(vm_storage_disk_path "$VM_ID")
 
 # 配置不存在时先生成并载入；磁盘必须等 CLI 完整解析出 MODE 后再创建，
@@ -199,13 +681,29 @@ if [[ ! -f "$CONF" ]]; then
     fi
     echo "[start-vm] $CONF 不存在，自动 ./create-vm.sh ${VM_ID}"
     VM_START_LOCK_HELD=1 "$here/create-vm.sh" "$VM_ID"
+    CONF=$(vm_storage_config_path "$VM_ID")
+    [[ -f "$CONF" && ! -L "$CONF" && -r "$CONF" ]] || {
+        echo "[start-vm] create-vm did not publish a safe readable vm.conf: $CONF" >&2
+        exit 2
+    }
+    EARLY_CONF_SNAPSHOT=$(<"$CONF")
 fi
 # Guest-visible controller identity must come from vm.conf, never from a
 # caller environment accidentally inherited by the launcher.
 unset XHCI_PCI_VENDOR_ID XHCI_PCI_DEVICE_ID XHCI_PCI_REVISION \
     XHCI_PCI_BUS XHCI_PCI_ADDR
 # shellcheck source=/dev/null
-source "$CONF"
+source /dev/stdin <<<"$EARLY_CONF_SNAPSHOT"
+CONFIG_VM_ID_AFTER_SOURCE=${VM_ID-}
+if [[ -n "$CONFIG_VM_ID_AFTER_SOURCE" &&
+      "$CONFIG_VM_ID_AFTER_SOURCE" != "$REQUESTED_VM_ID" ]]; then
+    echo "[start-vm] sourced vm.conf changed VM_ID away from requested vm${REQUESTED_VM_ID}" >&2
+    exit 2
+fi
+VM_ID=$REQUESTED_VM_ID
+readonly VM_ID
+unset EARLY_CONF EARLY_CONF_PRESENT EARLY_CONF_SNAPSHOT
+unset CONFIG_VM_ID_AFTER_SOURCE
 
 [[ "${VM_UUID:-}" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
     echo "[start-vm] VM_UUID 缺失或非法: ${VM_UUID:-<缺失>}" >&2
@@ -451,16 +949,17 @@ GFX_BACKEND="${GFX_BACKEND:-sdl}"
 INSTALL_GFX_BACKEND="${INSTALL_GFX_BACKEND:-gtk}"
 
 # SPOOF_MODE:  A | B | off
-#   A   = 外部 QEMU PCI tuple 改成消费卡；可选 per-mdev internal tuple。
-#         当前只有 GTX 1050 + locked 538.33/V3 receipt 是 audited 路径。
-#   B   = host per-mdev name-only，PCI 保留 RTX 6000 真身；所有 profile
-#         都可使用，也是未完成 consumer driver staging 时的安全模式。
+#   A   = legacy 外部/内部消费卡 tuple；当前无生产签名 attestation，
+#         所有带 vGPU 的 A 启动都会 fail-closed。
+#   B   = 系统 PCI/PnP 保留原生 vGPU endpoint；消费卡名称/规格由目录
+#         应用，GPU-Z 的消费级 PCI tuple 仅在 app-local NVAPI 中呈现。
+#         所有已审计 profile 均使用这个生产签名安全模式。
 #   off = 完全无 spoof（装 GRID 驱动 / 调试时用）
 #
 # vm.conf 在调用者环境之后载入，因此临时切换请使用优先级最高的 CLI 参数；
 # 没有配置值时才回退到环境和默认 B。
-# 新 GTX 1050 配置先持久化 B；finish-vgpu-install.sh 验证 V3 driver receipt
-# 后才原子持久化 A。CLI --spoof 不能绕过该 full-consumer policy。
+# 新配置一律持久化 B/name-only，不再生成 legacy full-consumer 或 patched
+# driver marker。当前 strict finisher 和 CLI --spoof 都不能建立可启动的 A。
 # 旧字段 SPOOF=0/1 仍兼容（SPOOF=1→A, SPOOF=0→off）。
 SPOOF_MODE=${SPOOF_MODE:-B}
 if [[ -n "${SPOOF:-}" ]]; then
@@ -494,6 +993,23 @@ DISPLAY_WIDTH="${DISPLAY_WIDTH:-1920}"
 DISPLAY_HEIGHT="${DISPLAY_HEIGHT:-1080}"
 REPAIR_DISPLAY_VARS="${REPAIR_DISPLAY_VARS:-auto}"
 DRY_RUN="${DRY_RUN:-0}"
+PROXY="${PROXY:-0}"
+CPU_ISOLATION="${CPU_ISOLATION:-}"
+QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-1}"
+HOST_RESERVE_CORES="${HOST_RESERVE_CORES:-auto}"
+CPU_ISOLATION_QMP_TIMEOUT="${CPU_ISOLATION_QMP_TIMEOUT:-90}"
+STREAM_OUTPUT="${STREAM_OUTPUT:-}"
+STREAM_ROI="${STREAM_ROI:-}"
+STREAM_RATE="${STREAM_RATE:-30}"
+STREAM_ENCODER="${STREAM_ENCODER:-libx264}"
+STREAM_BITRATE="${STREAM_BITRATE:-6M}"
+STREAM_PRESET="${STREAM_PRESET:-veryfast}"
+STREAM_GOP="${STREAM_GOP:-60}"
+STREAM_CONTAINER="${STREAM_CONTAINER:-}"
+STREAM_MODE="${STREAM_MODE:-shm}"
+STREAM_START_TIMEOUT="${STREAM_START_TIMEOUT:-15}"
+STREAM_ENABLED=0
+[[ -n "$STREAM_OUTPUT" ]] && STREAM_ENABLED=1
 NATIVE_FULLSCREEN=0
 VGPU_ROMBAR="${VGPU_ROMBAR:-}"
 VGPU_ROMFILE="${VGPU_ROMFILE:-}"
@@ -505,6 +1021,15 @@ TPM_CLI_DISABLED=0
 # RTC_CONTRACT=utc 的短期过渡配置才允许做一次 utc-compat 迁移救援。
 RTC_MODE="${RTC_MODE:-${RTC_CONTRACT:-localtime}}"
 VM_RTC_TZ="${VM_RTC_TZ:-Asia/Shanghai}"
+
+require_cli_value() {
+    local option=$1 remaining=$2
+
+    ((remaining >= 2)) || {
+        echo "$option 需要一个参数" >&2
+        exit 2
+    }
+}
 
 while (( $# > 0 )); do
     case "$1" in
@@ -545,6 +1070,40 @@ while (( $# > 0 )); do
         --no-tpm) TPM=0; TPM_CLI_DISABLED=1; shift ;;
         --monitor-sync) MONITOR_SYNC=1; shift ;;
         --no-monitor-sync) MONITOR_SYNC=0; shift ;;
+        # Authorization was decided by the pre-storage verifier from the same
+        # immutable argv/config snapshot.  The full parser only consumes the
+        # process-local flag; vm.conf/environment values cannot create it.
+        --production-migration-source) shift ;;
+        --proxy) PROXY=1; shift ;;
+        --no-proxy) PROXY=0; shift ;;
+        --cpu-isolate) CPU_ISOLATION=required; shift ;;
+        --cpu-isolate-auto) CPU_ISOLATION=auto; shift ;;
+        --no-cpu-isolate) CPU_ISOLATION=off; shift ;;
+        --svc-cpus)
+            require_cli_value "$1" "$#"
+            QEMU_SERVICE_CPUS="$2"; shift 2 ;;
+        --stream|--stream-output)
+            require_cli_value "$1" "$#"
+            STREAM_OUTPUT="$2"; STREAM_ENABLED=1; shift 2 ;;
+        --stream-roi)
+            require_cli_value "$1" "$#"; STREAM_ROI="$2"; shift 2 ;;
+        --stream-rate)
+            require_cli_value "$1" "$#"; STREAM_RATE="$2"; shift 2 ;;
+        --stream-encoder)
+            require_cli_value "$1" "$#"; STREAM_ENCODER="$2"; shift 2 ;;
+        --stream-bitrate)
+            require_cli_value "$1" "$#"; STREAM_BITRATE="$2"; shift 2 ;;
+        --stream-preset)
+            require_cli_value "$1" "$#"; STREAM_PRESET="$2"; shift 2 ;;
+        --stream-gop)
+            require_cli_value "$1" "$#"; STREAM_GOP="$2"; shift 2 ;;
+        --stream-container)
+            require_cli_value "$1" "$#"; STREAM_CONTAINER="$2"; shift 2 ;;
+        --stream-mode)
+            require_cli_value "$1" "$#"; STREAM_MODE="$2"; shift 2 ;;
+        --stream-start-timeout)
+            require_cli_value "$1" "$#"; STREAM_START_TIMEOUT="$2"; shift 2 ;;
+        --no-stream) STREAM_ENABLED=0; STREAM_OUTPUT=""; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --tame-gnome) TAME_GNOME=1; shift ;;
         --no-tame-gnome) TAME_GNOME=0; shift ;;
@@ -611,43 +1170,40 @@ if [[ -v VGPU_MDEV_FRL_ENABLED ]]; then
             exit 2
             ;;
     esac
-    # A persistent VM3 FRL setting must not make the established --no-spoof
-    # driver-install/recovery path unusable.  In off mode the per-mdev entry is
-    # removed by allocate_vgpu(), so both identity and FRL return to inherited
-    # profile behavior for that boot.
-    if [[ "$SPOOF_MODE" != off ]]; then
+    # A legacy FRL marker must not leak into the supported B/off migration
+    # paths.  Only A ever requested an override; A itself is rejected below.
+    if [[ "$SPOOF_MODE" == A ]]; then
         VGPU_MDEV_FRL_OVERRIDE_ACTIVE=1
     fi
 fi
 
-VGPU_AUDITED_STRICT_GTX1050=0
-if [[ "$SPOOF_MODE" == A && "${GPU_PROFILE:-}" == gtx1050_2gb &&
-      "${GPU_NAME:-}" == 'NVIDIA GeForce GTX 1050' &&
-      "${GPU_PCI_VID:-}" == 0x10DE && "${GPU_PCI_DID:-}" == 0x1C81 &&
-      "${GPU_SUB_VID:-}" == 0x1028 && "${GPU_SUB_DID:-}" == 0x11C0 &&
-      "$VGPU_MDEV_INTERNAL_PCI_ACTIVE" == 1 &&
-      "$VGPU_MDEV_FRL_OVERRIDE_ACTIVE" == 1 &&
-      "${VGPU_MDEV_FRL_ENABLED:-}" == 0 &&
-      "${VGPU_PATCHED_DRIVER_VERSION:-}" == 31.0.15.3833 ]]; then
-    VGPU_AUDITED_STRICT_GTX1050=1
-fi
-if [[ "$SPOOF_MODE" == A &&
-      ( "${VGPU_IDENTITY_TARGET:-}" == full-consumer ||
-        "${GPU_PROFILE:-}" == gtx1050_2gb ) &&
-      "$VGPU_AUDITED_STRICT_GTX1050" != 1 ]]; then
+if [[ "$PRODUCTION_MIGRATION_SOURCE_AUTHORIZED" == 1 ]]; then
+    [[ "$SPOOF_MODE" == A ]] \
+        || production_migration_source_die \
+            "the authorized source invocation may not switch away from A"
     case "$MODE" in
-        rescue-sdl|rescue-gtk|no-gpu|install)
-            # These paths do not attach the NVIDIA mdev.  They must remain
-            # available so the one-click finisher can repair a half-migrated
-            # A/full-consumer config instead of being blocked by its own gate.
-            echo "[start-vm] WARN: full-consumer A 尚未完成 V3 驱动收尾；仅允许无 vGPU 救援" >&2
-            ;;
+        native|vgpu-sdl|vgpu-gtk) ;;
         *)
-            echo "[start-vm] full-consumer A 尚未完成 V3 驱动收尾；拒绝直接启动 Basic Display 路径" >&2
-            echo "[start-vm] 先保留 B/off，然后运行: ./deploy/finish-vgpu-install.sh $VM_ID" >&2
-            exit 2
+            production_migration_source_die \
+                "only the normal native vGPU display may boot the A source"
             ;;
     esac
+    [[ "${VM_UUID,,}" == "$PRODUCTION_MIGRATION_EXPECTED_UUID" &&
+       "${GPU_PROFILE:-}" == "$PRODUCTION_MIGRATION_EXPECTED_PROFILE" &&
+       "${GPU_NAME:-}" == "$PRODUCTION_MIGRATION_EXPECTED_GPU_NAME" ]] \
+        || production_migration_source_die \
+            "sourced VM UUID/profile/name no longer match host-state"
+    CURRENT_PRODUCTION_MIGRATION_CONFIG_SHA=$(
+        start_vm_sha256_upper "$CONF"
+    ) || production_migration_source_die \
+        "could not re-read the source config"
+    [[ "$CURRENT_PRODUCTION_MIGRATION_CONFIG_SHA" == \
+       "$PRODUCTION_MIGRATION_EXPECTED_CONFIG_SHA256" ]] \
+        || production_migration_source_die \
+            "vm.conf changed after source authorization"
+    unset CURRENT_PRODUCTION_MIGRATION_CONFIG_SHA
+elif [[ "$SPOOF_MODE" == A ]]; then
+    strict_a_start_disabled
 fi
 
 case "$RTC_MODE" in
@@ -675,6 +1231,121 @@ case "$MODE" in
         esac
         ;;
 esac
+
+stream_config_error() {
+    echo "[start-vm] 推流参数错误: $*" >&2
+    exit 2
+}
+
+stream_validate_uint() {
+    local label=$1 value=$2 min=$3 max=$4
+
+    [[ "$value" =~ ^[0-9]+$ ]] ||
+        stream_config_error "$label 必须是 ${min}..${max} 的整数"
+    ((10#$value >= min && 10#$value <= max)) ||
+        stream_config_error "$label 超出范围 ${min}..${max}"
+}
+
+stream_validate_token() {
+    local label=$1 value=$2
+
+    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] ||
+        stream_config_error "$label 只能包含字母、数字、点、下划线和连字符"
+}
+
+stream_validate_output() {
+    local output=$1 lower authority hostport host ch i
+
+    (( ${#output} > 0 && ${#output} <= 1024 )) ||
+        stream_config_error "output 不能为空或超过 1024 字节"
+    for ((i = 0; i < ${#output}; i++)); do
+        ch=${output:i:1}
+        case "$ch" in
+            [A-Za-z0-9]|.|_|-|~|:|/|'?'|'#'|@|'!'|+|,|%|=|'&'|'['|']')
+                ;;
+            *) stream_config_error "output 含空白、控制字符或不安全字符" ;;
+        esac
+    done
+
+    lower=${output,,}
+    if [[ "$output" == /* ]]; then
+        [[ "$output" != "/" ]] ||
+            stream_config_error "本地 output 不能是根目录"
+        [[ ! -e "$output" && ! -L "$output" ]] ||
+            stream_config_error "本地 output 已存在；拒绝覆盖"
+        return
+    fi
+    case "$lower" in
+        rtmp://*|rtmps://*|srt://*|udp://*|rtp://*) ;;
+        *) stream_config_error "output 必须是显式网络 URL 或绝对本地路径" ;;
+    esac
+    if [[ "$lower" =~ (^|[\?\&])(listen(=(1|true))?|mode=listener)($|[\&\#]) ]]; then
+        stream_config_error "禁止 listener 模式；推流只能主动连接显式目标"
+    fi
+    authority=${output#*://}
+    authority=${authority%%/*}
+    authority=${authority%%\?*}
+    [[ -n "$authority" ]] ||
+        stream_config_error "output URL 缺少目标主机"
+    hostport=${authority##*@}
+    if [[ "$hostport" == \[*\]* ]]; then
+        host=${hostport#\[}
+        host=${host%%\]*}
+    else
+        host=${hostport%%:*}
+    fi
+    case "${host,,}" in
+        ""|"*"|"0.0.0.0"|"::"|"[::]")
+            stream_config_error "禁止 wildcard/listener 目标主机"
+            ;;
+    esac
+}
+
+STREAM_ROI_X=""
+STREAM_ROI_Y=""
+STREAM_ROI_W=""
+STREAM_ROI_H=""
+if ((STREAM_ENABLED)); then
+    case "$MODE" in
+        vgpu-sdl|vgpu-gtk) ;;
+        *)
+            stream_config_error "--stream 仅支持 G-11 native vGPU SDL/GTK 模式"
+            ;;
+    esac
+    stream_validate_output "$STREAM_OUTPUT"
+    stream_validate_uint "rate" "$STREAM_RATE" 1 240
+    stream_validate_token "encoder" "$STREAM_ENCODER"
+    [[ "$STREAM_BITRATE" =~ ^[1-9][0-9]{0,8}[KkMmGg]?$ ]] ||
+        stream_config_error "bitrate 格式非法"
+    stream_validate_token "preset" "$STREAM_PRESET"
+    stream_validate_uint "gop" "$STREAM_GOP" 1 1000
+    [[ -z "$STREAM_CONTAINER" ]] ||
+        stream_validate_token "container" "$STREAM_CONTAINER"
+    STREAM_MODE=${STREAM_MODE,,}
+    case "$STREAM_MODE" in
+        auto|shm) ;;
+        gpu)
+            stream_config_error \
+                "R535 VFIO display REGION 不导出 DMA-BUF；严格 GPU 零拷贝模式不可用，请用 shm/auto"
+            ;;
+        *) stream_config_error "mode 必须是 auto、shm 或 gpu" ;;
+    esac
+    stream_validate_uint "start-timeout" "$STREAM_START_TIMEOUT" 1 60
+    if [[ -n "$STREAM_ROI" ]]; then
+        IFS=, read -r STREAM_ROI_X STREAM_ROI_Y STREAM_ROI_W \
+            STREAM_ROI_H stream_roi_extra <<<"$STREAM_ROI"
+        [[ -z "${stream_roi_extra:-}" && -n "$STREAM_ROI_H" ]] ||
+            stream_config_error "ROI 必须是 X,Y,W,H"
+        stream_validate_uint "ROI X" "$STREAM_ROI_X" 0 16383
+        stream_validate_uint "ROI Y" "$STREAM_ROI_Y" 0 16383
+        stream_validate_uint "ROI W" "$STREAM_ROI_W" 1 16384
+        stream_validate_uint "ROI H" "$STREAM_ROI_H" 1 16384
+        ((10#$STREAM_ROI_X + 10#$STREAM_ROI_W <= 16384 &&
+          10#$STREAM_ROI_Y + 10#$STREAM_ROI_H <= 16384)) ||
+            stream_config_error "ROI 坐标和尺寸不能超过 16384x16384"
+        unset stream_roi_extra
+    fi
+fi
 
 # The reusable guest finisher has no per-VM data embedded in it.  During its
 # one rescue boot only, pass the configured target through an SMBIOS OEM
@@ -704,6 +1375,26 @@ if [[ -n "$VGPU_GUEST_FINISH_TARGET" ]]; then
     unset guest_finish_gpu_name_re guest_finish_gpu_name_lower
 fi
 
+# A portable GPU-Z/profile EXE is deliberately not bound to one VM.  For B
+# mode it still needs an authoritative way to distinguish the three consumer
+# identities, because every one of them retains the same native DEV_1E30 PnP
+# endpoint.  Publish the already validated host intent as one read-only SMBIOS
+# Type 11 string.  The guest verifies its own SMBIOS UUID, the complete catalog
+# digest, PnP tuple and driver version before making any persistent change.
+#
+# This is automatic on every B/native start; it is not a second host-side
+# commit step.  A/off are intentionally omitted so the portable guest tool
+# fails closed on legacy or disabled identity paths.
+VGPU_PORTABLE_PROFILE_CLAIM=""
+if [[ "$SPOOF_MODE" == B ]]; then
+    VGPU_PROFILE_CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
+    [[ "$VGPU_PROFILE_CATALOG_SHA256" =~ ^[0-9A-F]{64}$ ]] || {
+        echo "[start-vm] 无法计算 portable vGPU profile catalog 摘要" >&2
+        exit 1
+    }
+    VGPU_PORTABLE_PROFILE_CLAIM="G11_VGPU_PROFILE_V1|${GPU_PROFILE}|${VM_UUID,,}|${VGPU_PROFILE_CATALOG_SHA256}|10DE:1E30|31.0.15.3833"
+fi
+
 if [[ -z "$VGPU_ROMBAR" ]]; then
     # native 用 ramfb 提供固件画面，不向 OVMF 暴露 NVIDIA ROM，避免 EFI
     # GOP 半初始化；Windows GRID 驱动已实测可直接接管。旧模式保持 auto。
@@ -719,6 +1410,26 @@ fi
 }
 [[ "$DRY_RUN" == 0 || "$DRY_RUN" == 1 ]] || {
     echo "DRY_RUN 必须是 0 或 1" >&2; exit 2;
+}
+[[ "$PROXY" == 0 || "$PROXY" == 1 ]] || {
+    echo "PROXY 必须是 0 或 1" >&2; exit 2;
+}
+cpu_isolation_normalize_mode || {
+    echo "CPU_ISOLATION 必须是 auto、required 或 off" >&2; exit 2;
+}
+[[ "$QEMU_SERVICE_CPUS" =~ ^[0-9]+$ && "$QEMU_SERVICE_CPUS" -le 64 ]] || {
+    echo "QEMU_SERVICE_CPUS/--svc-cpus 必须是 0..64" >&2; exit 2;
+}
+[[ "$HOST_RESERVE_CORES" == auto || "$HOST_RESERVE_CORES" =~ ^[0-9]+$ ]] || {
+    echo "HOST_RESERVE_CORES 必须是 auto 或非负整数" >&2; exit 2;
+}
+[[ "$CPU_ISOLATION_QMP_TIMEOUT" =~ ^[1-9][0-9]*$ &&
+   "$CPU_ISOLATION_QMP_TIMEOUT" -le 300 ]] || {
+    echo "CPU_ISOLATION_QMP_TIMEOUT 必须是 1..300 秒" >&2; exit 2;
+}
+cpu_isolation_ensure_ready || {
+    echo "[start-vm] 默认 required CPU 隔离准备失败；VM 未启动" >&2
+    exit 1
 }
 [[ "$INSTALL_UNATTENDED" == 0 || "$INSTALL_UNATTENDED" == 1 ]] || {
     echo "INSTALL_UNATTENDED 必须是 0 或 1" >&2; exit 2;
@@ -1073,6 +1784,59 @@ check_memory_capacity
 [[ -r "$OVMF_CODE" ]] || { echo "OVMF_CODE 不存在或不可读: $OVMF_CODE" >&2; exit 1; }
 [[ -r "$OVMF_VARS" ]] || { echo "OVMF_VARS 不存在或不可读: $OVMF_VARS" >&2; exit 1; }
 
+STREAM_HELPER="$here/fb-shm-stream.sh"
+STREAM_BIN="${QEMU_FB_SHM_STREAM_BIN:-$here/../build/qemu-fb-shm-stream}"
+STREAM_SOCKET="$(vm_storage_instance_run_dir "$VM_ID")/fb-shm.sock"
+if ((STREAM_ENABLED)); then
+    [[ "$STREAM_SOCKET" == /* && ${#STREAM_SOCKET} -lt 104 &&
+       "$STREAM_SOCKET" != *,* && "$STREAM_SOCKET" != *$'\n'* &&
+       "$STREAM_SOCKET" != *$'\r'* ]] ||
+        stream_config_error "fb-shm socket 路径必须是无逗号的短绝对路径"
+    if ! "$QEMU_BIN" -object fb-shm,help 2>&1 |
+            grep -q '^  path=<string>'; then
+        echo "[start-vm] QEMU 未编译可并行 SDL/GTK 的 fb-shm object" >&2
+        exit 1
+    fi
+    if [[ "$DRY_RUN" != 1 ]]; then
+        [[ -x "$STREAM_HELPER" ]] || {
+            echo "[start-vm] 推流生命周期 helper 不可执行: $STREAM_HELPER" >&2
+            exit 1
+        }
+        [[ -x "$STREAM_BIN" && -f "$STREAM_BIN" ]] || {
+            echo "[start-vm] streamer 不可执行: $STREAM_BIN" >&2
+            echo "[start-vm] 先构建: ninja -C build qemu-fb-shm-stream" >&2
+            exit 1
+        }
+        command -v ffmpeg >/dev/null 2>&1 || {
+            echo "[start-vm] 推流需要 ffmpeg: sudo apt install ffmpeg" >&2
+            exit 1
+        }
+        if ! ffmpeg -hide_banner -encoders 2>/dev/null |
+                awk -v encoder="$STREAM_ENCODER" \
+                    '$2 == encoder { found = 1 } END { exit !found }'; then
+            echo "[start-vm] 当前 ffmpeg 不提供编码器: $STREAM_ENCODER" >&2
+            exit 1
+        fi
+        if ! STREAM_ENCODER_PROBE=$(
+            timeout 10 ffmpeg -v error -nostdin \
+                -f lavfi -i color=size=128x128:rate=1 \
+                -frames:v 1 -an \
+                -c:v "$STREAM_ENCODER" -b:v "$STREAM_BITRATE" \
+                -g "$STREAM_GOP" -pix_fmt yuv420p \
+                -preset "$STREAM_PRESET" -f null - 2>&1
+        ); then
+            echo "[start-vm] 编码器运行时自检失败: $STREAM_ENCODER" >&2
+            printf '%s\n' "$STREAM_ENCODER_PROBE" | tail -5 >&2
+            exit 1
+        fi
+        unset STREAM_ENCODER_PROBE
+        [[ ! -L "$STREAM_SOCKET" ]] || {
+            echo "[start-vm] 拒绝符号链接 fb-shm socket: $STREAM_SOCKET" >&2
+            exit 1
+        }
+    fi
+fi
+
 VM_PATTERN="qemu-system-x86_64.*-name[[:space:]]+vm${VM_ID}([,[:space:]]|$)"
 vm_is_running() {
     pgrep -f "$VM_PATTERN" >/dev/null 2>&1
@@ -1101,14 +1865,30 @@ TPM_LIFECYCLE_STARTED=0
 if [[ "$DRY_RUN" != 1 && ${#TPM_ARGS[@]} -gt 0 ]]; then
     TPM_LIFECYCLE_STARTED=1
 fi
+STREAM_SIDECAR_OWNED=0
+QMP_PROXY_ALIAS_OWNED=0
 cleanup_started_tpm() {
+    if [[ "${QMP_PROXY_ALIAS_OWNED:-0}" == 1 ]]; then
+        QMP_PROXY_ALIAS_OWNED=0
+        if [[ -L "${QMP_PROXY_SOCK:-}" &&
+              "$(readlink -- "$QMP_PROXY_SOCK" 2>/dev/null || true)" == "${QMP_SOCK:-}" ]]; then
+            rm -f -- "$QMP_PROXY_SOCK" 2>/dev/null || \
+                echo "[start-vm] WARN: QMP alias 清理失败: $QMP_PROXY_SOCK" >&2
+        fi
+    fi
+    if [[ "${STREAM_SIDECAR_OWNED:-0}" == 1 ]]; then
+        STREAM_SIDECAR_OWNED=0
+        "$STREAM_HELPER" stop "$VM_ID" >/dev/null 2>&1 || \
+            echo "[start-vm] WARN: vm${VM_ID} 推流 sidecar 未能安全回收" >&2
+    fi
+    cpu_isolation_cleanup "$VM_ID" "${CPU_ISOLATION_STATE_FILE:-}"
     if [[ "${TPM_LIFECYCLE_STARTED:-0}" == 1 ]]; then
         TPM_LIFECYCLE_STARTED=0
         vm_tpm_cleanup "$VM_ID" || \
             echo "[start-vm] WARN: vm${VM_ID} swtpm 未能安全回收" >&2
     fi
 }
-(( TPM_LIFECYCLE_STARTED == 0 )) || trap cleanup_started_tpm EXIT
+trap cleanup_started_tpm EXIT
 
 case "$MODE" in
     vgpu-gtk) WINDOW_BACKEND=gtk ;;
@@ -1131,6 +1911,24 @@ if [[ "$MODE" == vgpu-gtk || "$MODE" == vgpu-sdl ]]; then
         exit 1
     fi
 fi
+case "$MODE" in
+    rdp|vgpu-gtk|vgpu-sdl)
+        if ! VGPU_ROOT_PORT_HELP=$(
+                "$QEMU_BIN" -device pcie-root-port,help 2>&1
+            ); then
+            echo "[start-vm] QEMU 缺 pcie-root-port 支持" >&2
+            exit 1
+        fi
+        for root_port_prop in x-speed x-width x-pci-vendor-id \
+                x-pci-device-id x-pci-revision; do
+            if ! grep -q "^  ${root_port_prop}=" <<<"$VGPU_ROOT_PORT_HELP"; then
+                echo "[start-vm] QEMU pcie-root-port 缺 ${root_port_prop} 支持" >&2
+                exit 1
+            fi
+        done
+        unset VGPU_ROOT_PORT_HELP root_port_prop
+        ;;
+esac
 
 if [[ "$MODE" == vgpu-sdl ]]; then
     case "${QEMU_SDL_DISABLE_IBUS,,}" in
@@ -1308,6 +2106,8 @@ case "$CPU_MODEL" in
         CPU_SMBIOS_FAMILY=205 # DMTF: Intel Core i5
         CPU_SOCKET_UPGRADE=0x2D # SMBIOS: Socket LGA1150
         XHCI_DEVICE_ID=0x8CB1   # Intel 9 Series xHCI (H97)
+        GPU_ROOT_PORT_DEVICE_ID=0x0C01 # Haswell PCIe x16 controller
+        GPU_ROOT_PORT_REVISION=0x06
         CPU_L2_ASSOC=7          # SMBIOS: 8-way
         CPU_BRAND_STRING='Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz'
         ;;
@@ -1316,6 +2116,8 @@ case "$CPU_MODEL" in
         CPU_SMBIOS_FAMILY=205 # DMTF: Intel Core i5
         CPU_SOCKET_UPGRADE=0x32 # SMBIOS: Socket LGA1151
         XHCI_DEVICE_ID=0xA12F   # Intel 100 Series/C230 xHCI
+        GPU_ROOT_PORT_DEVICE_ID=0x1901 # Skylake PCIe x16 controller
+        GPU_ROOT_PORT_REVISION=0x07
         CPU_L2_ASSOC=5          # SMBIOS: 4-way
         CPU_BRAND_STRING='Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz'
         ;;
@@ -1324,6 +2126,8 @@ case "$CPU_MODEL" in
         CPU_SMBIOS_FAMILY=206 # DMTF: Intel Core i3
         CPU_SOCKET_UPGRADE=0x32 # SMBIOS: Socket LGA1151
         XHCI_DEVICE_ID=0xA36D   # Intel 300 Series xHCI
+        GPU_ROOT_PORT_DEVICE_ID=0x1901 # 6th-10th Gen PCIe x16 controller
+        GPU_ROOT_PORT_REVISION=0x07
         CPU_L2_ASSOC=5          # SMBIOS: 4-way
         CPU_BRAND_STRING='Intel(R) Core(TM) i3-8100 CPU @ 3.60GHz'
         ;;
@@ -1332,6 +2136,8 @@ case "$CPU_MODEL" in
         CPU_SMBIOS_FAMILY=1 # Other
         CPU_SOCKET_UPGRADE=0x01 # Other
         XHCI_DEVICE_ID=0xA36D
+        GPU_ROOT_PORT_DEVICE_ID=0x1901
+        GPU_ROOT_PORT_REVISION=0x07
         CPU_L2_ASSOC=5
         CPU_BRAND_STRING='Intel(R) Core(TM) CPU'
         ;;
@@ -1459,6 +2265,9 @@ SMBIOS+=( -smbios "type=11,value=To Be Filled By O.E.M." )
 if [[ -n "$VGPU_GUEST_FINISH_TARGET" ]]; then
     SMBIOS+=( -smbios "type=11,value=QEMU_VGPU_TARGET=${VGPU_GUEST_FINISH_TARGET}" )
 fi
+if [[ -n "$VGPU_PORTABLE_PROFILE_CLAIM" ]]; then
+    SMBIOS+=( -smbios "type=11,value=${VGPU_PORTABLE_PROFILE_CLAIM}" )
+fi
 # Type 16 报告物理主板的全部插槽/最大容量；Type 17 另外报告
 # 两条已安装 DIMM 及其余空槽。定位器、bank 和 serial 都用 | 分隔。
 SMBIOS+=( -smbios "type=16,max-capacity=${MEM_MAX_CAPACITY_GB}G,num-devices=${MEM_BOARD_SLOTS}" )
@@ -1530,6 +2339,27 @@ fi
 
 # ─── 图形 / vGPU ──────────────────────────────────────────────────────────
 GFX_ARGS=()
+
+attach_vgpu_root_port() {
+    local gpu_link_width
+
+    case "$GPU_PROFILE" in
+        gt1030_2gb)               gpu_link_width=4 ;;
+        gtx750ti_2gb|gtx1050_2gb) gpu_link_width=16 ;;
+        *)
+            echo "[start-vm] GPU profile 缺少 PCIe 链路拓扑: $GPU_PROFILE" >&2
+            return 1
+            ;;
+    esac
+    # VFIO turns a PCIe endpoint directly attached to pcie.0 into an RC
+    # integrated endpoint and clears its Link Capability/Status registers.
+    # A real desktop GPU sits below a root port.  Keep the bridge at the old
+    # 00:10.0 location and put the GPU at 01:00.0 so the endpoint retains its
+    # PCIe capability.  GTX 750 Ti/1050 use x16; GT 1030 is electrically x4.
+    GFX_ARGS+=(
+        -device "pcie-root-port,id=gpu-root-port,bus=pcie.0,addr=0x10,port=0x10,chassis=1,slot=1,hotplug=off,x-speed=8,x-width=${gpu_link_width},x-pci-vendor-id=0x8086,x-pci-device-id=${GPU_ROOT_PORT_DEVICE_ID},x-pci-revision=${GPU_ROOT_PORT_REVISION}"
+    )
+}
 
 allocate_vgpu() {
     local mdev_identity_name=""
@@ -1674,10 +2504,11 @@ case "$MODE" in
         # 旧兼容路径: vGPU + 侧挂 std-vga 供前期登录；进系统后由 relay/viewer 接管
         allocate_vgpu || exit 1
         if [[ -n "$MDEV_UUID" ]]; then
+            attach_vgpu_root_port || exit 1
             # enable-migration=off: NVIDIA vGPU 驱动不支持 vfio migration
             # uapi。QEMU 11 默认开 migration 会让 guest 内 HAL 读 PCI 寄存器
             # 时拿到坏数据 → Windows HAL_INITIALIZATION_FAILED BSoD。
-            vfio_opts="sysfsdev=/sys/bus/mdev/devices/${MDEV_UUID},display=off,enable-migration=off,bus=pcie.0,addr=0x10"
+            vfio_opts="sysfsdev=/sys/bus/mdev/devices/${MDEV_UUID},display=off,enable-migration=off,bus=gpu-root-port,addr=0x0"
             [[ "$VGPU_ROMBAR" != auto ]] && vfio_opts+=",rombar=${VGPU_ROMBAR}"
             [[ -n "$VGPU_ROMFILE" ]] && vfio_opts+=",romfile=${VGPU_ROMFILE}"
             if [[ "$SPOOF_MODE" == "A" ]]; then
@@ -1700,11 +2531,12 @@ case "$MODE" in
         # 驱动起来前的画面；驱动就绪后自动切到 vGPU framebuffer。
         # guest 不再需要 ivshmem.sys / NvStreamSvc / AudioSvcHost。
         allocate_vgpu || exit 1
+        attach_vgpu_root_port || exit 1
         vfio_opts="sysfsdev=/sys/bus/mdev/devices/${MDEV_UUID},display=on,ramfb=on,enable-migration=off"
         # NVIDIA 535 mdev 没有 VFIO_GFX_EDID_REGION；传 xres/yres 会让
         # QEMU 直接报 "need edid support"。native 窗口跟随 guest scanout
         # 分辨率，--width/--height 只保留给旧 external viewer。
-        vfio_opts+=",bus=pcie.0,addr=0x10"
+        vfio_opts+=",bus=gpu-root-port,addr=0x0"
         [[ "$VGPU_ROMBAR" != auto ]] && vfio_opts+=",rombar=${VGPU_ROMBAR}"
         [[ -n "$VGPU_ROMFILE" ]] && vfio_opts+=",romfile=${VGPU_ROMFILE}"
         if [[ "$SPOOF_MODE" == "A" ]]; then
@@ -1726,7 +2558,15 @@ start_vm_timing_mark devices-ready
 PIDFILE=$(vm_storage_run_preferred_path "$VM_ID" pid)
 MON_SOCK=$(vm_storage_run_preferred_path "$VM_ID" mon)
 QMP_SOCK=$(vm_storage_run_preferred_path "$VM_ID" qmp)
+QMP_PROXY_SOCK="${QMP_SOCK}.proxy"
+QMP_ARGS=( -qmp "unix:${QMP_SOCK},server,nowait" )
+if [[ "$PROXY" == 1 ]]; then
+    # 本分支 QEMU 原生为每个连接创建独立 QMP monitor；不再启动 Python
+    # 中转进程。保留 -qmp shorthand，供依赖 QEMU argv 的工具识别。
+    QMP_ARGS=( -qmp "unix:${QMP_SOCK},server,nowait,multi=on" )
+fi
 MDEV_FILE=$(vm_storage_run_preferred_path "$VM_ID" mdev)
+CPU_ISOLATION_STATE_FILE="$(dirname "$QMP_SOCK")/cpu-isolation.state"
 if [[ -n "${MDEV_UUID:-}" && "$DRY_RUN" != 1 ]]; then
     printf '%s\n' "$MDEV_UUID" >"$MDEV_FILE"
     cleanup_native_mdev() {
@@ -1779,6 +2619,41 @@ if [[ "${IVSHMEM_SIZE_MB:-0}" -gt 0 ]]; then
     echo "  ivshmem: ${IVSHMEM_PATH} (${IVSHMEM_SIZE_MB} MB) → guest PCI 00:12.0 (stealth subsys=0x10DE:0x1551)"
 fi
 
+STREAM_QEMU_ARGS=()
+STREAM_HELPER_ARGS=()
+if ((STREAM_ENABLED)); then
+    STREAM_RATE=$((10#$STREAM_RATE))
+    STREAM_GOP=$((10#$STREAM_GOP))
+    STREAM_START_TIMEOUT=$((10#$STREAM_START_TIMEOUT))
+    stream_object="fb-shm,id=stream-vm${VM_ID},path=${STREAM_SOCKET},rate=${STREAM_RATE}"
+    if [[ -n "$STREAM_ROI" ]]; then
+        STREAM_ROI_X=$((10#$STREAM_ROI_X))
+        STREAM_ROI_Y=$((10#$STREAM_ROI_Y))
+        STREAM_ROI_W=$((10#$STREAM_ROI_W))
+        STREAM_ROI_H=$((10#$STREAM_ROI_H))
+        stream_object+=",x=${STREAM_ROI_X},y=${STREAM_ROI_Y},width=${STREAM_ROI_W},height=${STREAM_ROI_H}"
+    fi
+    STREAM_QEMU_ARGS=( -object "$stream_object" )
+    STREAM_HELPER_ARGS=(
+        start "$VM_ID"
+        --sock "$STREAM_SOCKET"
+        --output "$STREAM_OUTPUT"
+        --rate "$STREAM_RATE"
+        --encoder "$STREAM_ENCODER"
+        --bitrate "$STREAM_BITRATE"
+        --preset "$STREAM_PRESET"
+        --gop "$STREAM_GOP"
+        --mode "$STREAM_MODE"
+        --start-timeout "$STREAM_START_TIMEOUT"
+        --stream-bin "$STREAM_BIN"
+    )
+    [[ -z "$STREAM_ROI" ]] ||
+        STREAM_HELPER_ARGS+=( --roi "$STREAM_ROI" )
+    [[ -z "$STREAM_CONTAINER" ]] ||
+        STREAM_HELPER_ARGS+=( --container "$STREAM_CONTAINER" )
+    unset stream_object
+fi
+
 INPUT_ARGS=(
     -device "qemu-xhci,id=xhci,bus=${XHCI_PCI_BUS},addr=${XHCI_PCI_ADDR},x-pci-vendor-id=${XHCI_PCI_VENDOR_ID},x-pci-device-id=${XHCI_PCI_DEVICE_ID},x-pci-revision=${XHCI_PCI_REVISION}"
     -device "usb-kbd,bus=xhci.0,vendorid=${KBD_VID},productid=${KBD_PID},manufacturer=${KBD_MFR},product=${KBD_PRODUCT}"
@@ -1786,7 +2661,12 @@ INPUT_ARGS=(
 )
 
 echo "启动 VM ${VM_ID} 模式=${MODE}"
+if [[ "$PROXY" == 1 ]]; then
+    echo "  QMP multi: native multi-client on ${QMP_SOCK}"
+    echo "  QMP alias: ${QMP_PROXY_SOCK}"
+fi
 echo "  CPU: ${CPU_MODEL}@${TSC_FREQ}Hz"
+cpu_isolation_print_plan
 echo "  主板: ${BOARD_BRAND} ${BOARD_MODEL} / ${VM_UUID}"
 echo "  内存: ${MEM_SLOTS} x ${MEM_MODULE_MB} MiB ${MEM_MODEL} (${MEM_FAMILY:-unknown}@${MEM_SPEED})"
 if [[ "$SSD_INTERFACE" == nvme ]]; then
@@ -1801,16 +2681,12 @@ case "$SPOOF_MODE" in
     A)
         echo "  GPU target: ${GPU_NAME} (name + consumer PCI ID spoof)" ;;
     B)
-        echo "  GPU name target: ${GPU_NAME} (name-only; PCI identity remains host mdev)" ;;
+        echo "  GPU name target: ${GPU_NAME} (system PCI identity remains host mdev; catalog PCI tuple is app-local to GPU-Z/NVAPI)" ;;
     off)
         echo "  GPU target: disabled (profile metadata ${GPU_PROFILE} is not applied)" ;;
 esac
 if (( VGPU_MDEV_INTERNAL_PCI_ACTIVE )); then
-    if (( VGPU_AUDITED_STRICT_GTX1050 )); then
-        echo "  vGPU internal PCI identity: ENABLED audited GTX1050 (vdev_id=${VGPU_MDEV_INTERNAL_VDEV_ID}, pdev_id=${VGPU_MDEV_INTERNAL_PDEV_ID})"
-    else
-        echo "  vGPU internal PCI identity: ENABLED experimental (vdev_id=${VGPU_MDEV_INTERNAL_VDEV_ID}, pdev_id=${VGPU_MDEV_INTERNAL_PDEV_ID})"
-    fi
+    echo "  vGPU internal PCI identity: unexpected legacy state (strict-A guard should have rejected it)"
 elif [[ "$VGPU_MDEV_INTERNAL_PCI_IDENTITY" == 1 ]]; then
     echo "  vGPU internal PCI identity: inactive (requires SPOOF_MODE=A; name-only cleanup remains active)"
 else
@@ -1844,6 +2720,21 @@ case "$MODE" in
     rdp|no-gpu)
         echo "  VNC display: ${VNC_DISPLAY}  (hostport=$((5900 + ${VNC_DISPLAY#:})))" ;;
 esac
+if ((STREAM_ENABLED)); then
+    if [[ "$STREAM_OUTPUT" == /* ]]; then
+        STREAM_TARGET_LABEL=local-file
+    else
+        STREAM_TARGET_LABEL="${STREAM_OUTPUT%%:*}://..."
+    fi
+    echo "  推流: fb-shm ${STREAM_RATE}Hz mode=${STREAM_MODE} encoder=${STREAM_ENCODER} target=${STREAM_TARGET_LABEL}"
+    if [[ -n "$STREAM_ROI" ]]; then
+        echo "  推流 ROI: ${STREAM_ROI_W}x${STREAM_ROI_H}@${STREAM_ROI_X},${STREAM_ROI_Y}"
+    else
+        echo "  推流 ROI: full primary display"
+    fi
+    [[ "$STREAM_ENCODER" != *nvenc* ]] ||
+        echo "  推流说明: NVENC 接收 SHM rawvideo 后仍有 GPU upload，不是零拷贝"
+fi
 
 case "$RTC_MODE" in
     localtime)
@@ -1884,16 +2775,20 @@ QEMU_CMD=(
     "${NET_ARGS[@]}"
     "${DRIVE_ARGS[@]}"
     "${GFX_ARGS[@]}"
+    "${STREAM_QEMU_ARGS[@]}"
     "${INPUT_ARGS[@]}"
     -device intel-hda,bus=pcie.0,addr=0x7 -device hda-duplex
     "${IVSHMEM_ARGS[@]}"
     -monitor "unix:${MON_SOCK},server,nowait"
-    -qmp "unix:${QMP_SOCK},server,nowait"
+    "${QMP_ARGS[@]}"
     -pidfile "$PIDFILE"
     $EXTRA
 )
 
 [[ "$NATIVE_FULLSCREEN" == 1 ]] && QEMU_CMD+=( -full-screen )
+# required 模式从暂停状态启动；root helper 完成 cgroup + TID 绑核后
+# pinner 才通过 QMP cont 放行 guest，保证 guest 不会先无隔离运行。
+[[ "$CPU_ISOLATION" == required ]] && QEMU_CMD+=( -S )
 
 if [[ "$DRY_RUN" == 1 ]]; then
     echo "[start-vm] DRY_RUN QEMU argv (每行一个参数):"
@@ -1901,11 +2796,31 @@ if [[ "$DRY_RUN" == 1 ]]; then
     exit 0
 fi
 
+# 兼容旧工具写死的 `.proxy` 路径。真正的并发由主 QMP listener 的
+# multi=on 提供；软链接创建失败不影响主 socket。无论本次是否启用，都先
+# 清掉可能残留的旧别名，避免 --no-proxy 后仍误导工具使用单客户端 socket。
+if ! rm -f -- "$QMP_PROXY_SOCK" 2>/dev/null; then
+    echo "[start-vm] WARN: 无法清理旧 QMP alias: $QMP_PROXY_SOCK" >&2
+elif [[ "$PROXY" == 1 ]]; then
+    if ln -s -- "$QMP_SOCK" "$QMP_PROXY_SOCK" 2>/dev/null; then
+        QMP_PROXY_ALIAS_OWNED=1
+        echo "[start-vm] QMP alias: $QMP_PROXY_SOCK -> $QMP_SOCK"
+    else
+        echo "[start-vm] WARN: QMP alias 创建失败: $QMP_PROXY_SOCK" >&2
+    fi
+fi
+
 QEMU_LOG=$(vm_storage_log_path "$VM_ID")
 mkdir -p "$(dirname "$QEMU_LOG")"
 : > "$QEMU_LOG"
 start_vm_timing_mark qemu-launch
 printf '%s\n' "${START_VM_TIMING_LINES[@]}" >>"$QEMU_LOG"
+
+if ! cpu_isolation_launch "$VM_ID" 4 "$QMP_SOCK" "$PIDFILE" \
+        "$CPU_ISOLATION_STATE_FILE"; then
+    echo "[start-vm] required CPU 隔离无法启动" >&2
+    exit 1
+fi
 
 # 非 rdp 模式都是"QEMU 直接挂前台显示"——install/vgpu-gtk/vgpu-sdl 都让 QEMU 自己
 # 弹窗（-display sdl/gtk），no-gpu 走旧 VNC 远程。这些路径不需要一条龙
@@ -1917,6 +2832,80 @@ printf '%s\n' "${START_VM_TIMING_LINES[@]}" >>"$QEMU_LOG"
 if [[ "$MODE" != "rdp" ]]; then
     [[ "$MODE" == "no-gpu" ]] && \
         echo "[start-vm] no-gpu: 用 vncviewer localhost:$((5900 + ${VNC_DISPLAY#:})) 连"
+    if ((STREAM_ENABLED)); then
+        STREAM_QEMU_PID=""
+        terminate_stream_qemu() {
+            local pid=${STREAM_QEMU_PID:-} i
+
+            [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+                for ((i = 0; i < 50; i++)); do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 0.1
+                done
+            fi
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "[start-vm] QEMU 未在 TERM 后退出，发送 KILL" >&2
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+            wait "$pid" 2>/dev/null || true
+            STREAM_QEMU_PID=""
+        }
+        stream_signal_exit() {
+            local rc=$1 signal_name=$2
+
+            trap - INT TERM
+            echo "[start-vm] 收到 ${signal_name}，停止 vm${VM_ID} 推流和 QEMU" >&2
+            terminate_stream_qemu
+            exit "$rc"
+        }
+
+        # sidecar 要等 fb-shm socket，因此 QEMU 必须先后台启动；本脚本仍
+        # wait QEMU，保持原来“关闭窗口即退出并回收资源”的前台生命周期。
+        "${QEMU_CMD[@]}" 2> >(tee -a "$QEMU_LOG" >&2) &
+        STREAM_QEMU_PID=$!
+        trap 'stream_signal_exit 130 INT' INT
+        trap 'stream_signal_exit 143 TERM' TERM
+        echo "[start-vm] QEMU pid=${STREAM_QEMU_PID}；等待 fb-shm sidecar"
+
+        sleep 0.1
+        if ! kill -0 "$STREAM_QEMU_PID" 2>/dev/null; then
+            set +e
+            wait "$STREAM_QEMU_PID"
+            qemu_rc=$?
+            set -e
+            STREAM_QEMU_PID=""
+            echo "[start-vm] QEMU 在推流连接前退出 (rc=${qemu_rc})" >&2
+            tail -30 "$QEMU_LOG" | sed 's/^/  /' >&2
+            exit "$qemu_rc"
+        fi
+
+        STREAM_SIDECAR_OWNED=1
+        if "$STREAM_HELPER" "${STREAM_HELPER_ARGS[@]}"; then
+            :
+        else
+            stream_rc=$?
+            echo "[start-vm] 推流 sidecar 启动失败 (rc=${stream_rc})；停止本次 QEMU" >&2
+            terminate_stream_qemu
+            exit "$stream_rc"
+        fi
+
+        echo "[start-vm] vm${VM_ID} 推流已连接；status: ${STREAM_HELPER} status ${VM_ID}"
+        set +e
+        wait "$STREAM_QEMU_PID"
+        qemu_rc=$?
+        set -e
+        STREAM_QEMU_PID=""
+        trap - INT TERM
+        if "$STREAM_HELPER" stop "$VM_ID"; then
+            STREAM_SIDECAR_OWNED=0
+        else
+            echo "[start-vm] WARN: vm${VM_ID} 推流 sidecar 停止失败" >&2
+        fi
+        exit "$qemu_rc"
+    fi
+
     # 不能 exec：EXIT trap 负责回收 mdev 与独立 swtpm daemon。
     set +e
     "${QEMU_CMD[@]}" 2> >(tee -a "$QEMU_LOG" >&2)
@@ -2100,11 +3089,7 @@ PY
             echo "[setup-task] !! 当前 A 模式下驱动未正确绑定；不在运行中的显示设备上重装。"
             echo "[setup-task]    恢复：./stop-vm.sh ${VM_ID}"
             echo "[setup-task]          ./start-vm.sh ${VM_ID} --no-spoof --no-monitor-sync"
-            if [[ "${GPU_PROFILE:-}" == gtx1050_2gb ]]; then
-                echo "[setup-task]    GTX1050 收尾：./finish-vgpu-install.sh ${VM_ID}"
-            else
-                echo "[setup-task]    当前 profile 没有 audited consumer-ID 包，保持 B/name-only。"
-            fi
+            echo "[setup-task]    当前生产路径统一保持 B/name-only；不要恢复 legacy consumer-ID driver。"
         else
             echo "[setup-task] SPOOF_MODE=${SPOOF_MODE} (PCI 真身)，跑 setup-guest 装 driver"
             ./setup-guest.sh "$VM_ID" "${SG_ARGS[@]}" || echo "[setup-task] setup-guest 失败"

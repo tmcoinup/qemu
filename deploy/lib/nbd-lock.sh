@@ -83,7 +83,10 @@ _nbd_dev_is_free() {
     [[ "$(cat "/sys/block/$name/size" 2>/dev/null || echo 0)" == "0" ]]
 }
 
-# 连接 qcow2 到 NBD。用法: nbd_connect NBD_VARNAME "$DISK"
+# 连接 qcow2 到 NBD。用法:
+#   nbd_connect NBD_VARNAME "$DISK" [read-write|read-only|snapshot]
+# 第三个参数默认 read-write；snapshot 使用 qemu-nbd 的一次性外部 COW 层，
+# 允许文件系统做可写性/clean-shutdown 探测而不向底层 qcow2 写任何字节。
 #   · 先 nbd_guard_disk（防镜像被 QEMU 双挂损坏）。
 #   · 目标设备 busy 时：调用方显式传了 NBD= (_NBD_PINNED=1) → fail-fast，**绝不强断**；
 #     否则自动 nbd_pick_free 选空闲盘，并经 nameref **就地更新**调用方 NBD（下游
@@ -91,8 +94,18 @@ _nbd_dev_is_free() {
 #   · 仅 connect 成功才置 _NBD_CONNECTED=1 + 记 _NBD_DEV —— 这样即便 busy fail-fast
 #     退出触发 EXIT trap，nbd_disconnect_if_owned 也不会去断别人的连接。
 nbd_connect() {
-    local _vn="$1" disk="$2"
+    local _vn="$1" disk="$2" access_mode="${3:-read-write}"
     local -n _dev="$_vn"
+    local -a access_args=()
+    case "$access_mode" in
+        read-write) ;;
+        read-only) access_args=(--read-only) ;;
+        snapshot) access_args=(--snapshot) ;;
+        *)
+            echo "ERROR: invalid nbd access mode: $access_mode" >&2
+            exit 2
+            ;;
+    esac
     nbd_guard_disk "$disk"
     if ! _nbd_dev_is_free "$_dev"; then
         if [[ "${_NBD_PINNED:-}" == "1" ]]; then
@@ -105,7 +118,7 @@ nbd_connect() {
         echo ">> nbd: 默认 $_dev 忙，自动改用空闲设备 $_free" >&2
         _dev="$_free"
     fi
-    qemu-nbd --connect="$_dev" --format=qcow2 "$disk"
+    qemu-nbd "${access_args[@]}" --connect="$_dev" --format=qcow2 "$disk"
     _NBD_CONNECTED=1
     _NBD_DEV="$_dev"
 }

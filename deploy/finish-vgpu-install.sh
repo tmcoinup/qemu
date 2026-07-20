@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One host command + one guest EXE.  Audited GTX 1050 configs also receive a
-# locked 538.33 driver bundle and are switched to strict identity only after a
-# V3 guest receipt has been verified offline.
+# One host command + one guest EXE for legacy B-mode token/RTC preparation.
+# The old GTX 1050 strict-A path is intentionally disabled because it modifies
+# an INF and self-signs the replacement catalog.
 # No RDP, VNC, WinRM, guest HTTP download, or guest IP discovery is used.
 set -euo pipefail
 umask 077
@@ -26,15 +26,15 @@ Token selection:
 
 Options:
   --rescue-gtk           Use a local GTK rescue window instead of SDL
-  --build-only           Prepare the reusable EXE and, for audited GTX 1050,
-                         the complete VgpuGuestFinish-GTX1050.zip
+  --build-only           Prepare the reusable EXE for supported B-mode targets
+                         (GTX 1050 strict-A is disabled)
   --keep-package         Compatibility no-op; the reusable host EXE is kept
   --no-final-start       Prepare/migrate, but do not start the final vGPU boot
   -h, --help             Show this help
 
-Normal use is one command on the host. Keep this terminal open. GTX 1050 users
-copy and extract the generated ZIP, then run its EXE once as Administrator;
-name-only profiles copy the small shared EXE.
+Normal use is one command on the host. Keep this terminal open. B-mode
+name-only profiles copy the small shared EXE. GTX 1050 strict-A refuses before
+building anything until a matching production-signed driver is available.
 EOF
 }
 
@@ -99,8 +99,6 @@ done
 
 [[ -n "$VM_ID" ]] || { usage; exit 2; }
 
-vm_storage_prepare
-vm_storage_prepare_instance "$VM_ID"
 INSTANCE_DIR=$(vm_storage_instance_dir "$VM_ID")
 CONF=$(vm_storage_config_path "$VM_ID")
 DISK=$(vm_storage_disk_path "$VM_ID")
@@ -185,7 +183,13 @@ if (( STRICT_GTX1050 )); then
        "${GPU_PCI_VID:-}" == 0x10DE && "${GPU_PCI_DID:-}" == 0x1C81 &&
        "${GPU_SUB_VID:-}" == 0x1028 && "${GPU_SUB_DID:-}" == 0x11C0 ]] \
         || die "gtx1050_2gb strict policy does not match the audited 10DE:1C81 / 1028:11C0 tuple"
+    die "GTX 1050 strict-A finish is disabled: the legacy flow modifies INF and self-signs its catalog. Keep this VM in B mode until a matching NVIDIA/Microsoft production-signed driver is available; no guest package or A/internal/FRL marker was written."
 fi
+
+# Only a flow that survived the production-signature policy may create the
+# storage roots and per-instance run/log/backup directories used by rescue.
+vm_storage_prepare
+vm_storage_prepare_instance "$VM_ID"
 
 # The rescue window can stay open while a file is transferred manually.  Do
 # not let a profile edit during that interval be validated against the old
@@ -535,7 +539,7 @@ if (( STRICT_GTX1050 )); then
     strict_tmp="$(dirname "$CONF")/.$(basename "$CONF").gtx1050.$$.$RANDOM"
     cleanup_strict_tmp() { rm -f -- "$strict_tmp"; }
     trap cleanup_strict_tmp EXIT
-    awk '!/^(GPU_PROFILE|GPU_NAME|GPU_PCI_VID|GPU_PCI_DID|GPU_SUB_VID|GPU_SUB_DID|GPU_REV|GPU_VRAM_MB|GPU_VBIOS|GPU_CORE_MHZ|GPU_BOOST_MHZ|GPU_MEMORY_MHZ|GPU_MEMORY_BUS_BITS|GPU_MEMORY_BANDWIDTH_MBPS|GPU_MEMORY_TYPE|GPU_MEMORY_MAKER|VGPU_MDEV_PROFILE|VGPU_FB_MB|SPOOF_MODE|VGPU_IDENTITY_TARGET|VGPU_MDEV_INTERNAL_PCI_IDENTITY|VGPU_MDEV_FRL_ENABLED|VGPU_PATCHED_DRIVER_INF|VGPU_PATCHED_DRIVER_VERSION|VGPU_PATCHED_DRIVER_REQUIRED_VERSION)=/' \
+    awk '!/^(GPU_PROFILE|GPU_NAME|GPU_PCI_VID|GPU_PCI_DID|GPU_SUB_VID|GPU_SUB_DID|GPU_REV|GPU_VRAM_MB|GPU_VBIOS|GPU_CORE_MHZ|GPU_BOOST_MHZ|GPU_MEMORY_MHZ|GPU_MEMORY_BUS_BITS|GPU_MEMORY_BANDWIDTH_MBPS|GPU_MEMORY_TYPE|GPU_MEMORY_MAKER|GPU_MEMORY_TYPE_NVAPI|GPU_MEMORY_MAKER_NVAPI|GPU_CUDA_CORES|GPU_SHADER_SUBPIPES|GPU_ROP_COUNT|GPU_TMU_COUNT|GPU_ARCHITECTURE|GPU_IMPLEMENTATION|GPU_CHIP_REVISION|GPU_PCIE_WIDTH|VGPU_MDEV_PROFILE|VGPU_FB_MB|SPOOF_MODE|VGPU_IDENTITY_TARGET|VGPU_MDEV_INTERNAL_PCI_IDENTITY|VGPU_MDEV_FRL_ENABLED|VGPU_PATCHED_DRIVER_INF|VGPU_PATCHED_DRIVER_VERSION|VGPU_PATCHED_DRIVER_REQUIRED_VERSION)=/' \
         "$CONF" >"$strict_tmp"
     cat >>"$strict_tmp" <<EOF
 
@@ -556,6 +560,16 @@ GPU_MEMORY_BUS_BITS=$GPU_MEMORY_BUS_BITS
 GPU_MEMORY_BANDWIDTH_MBPS=$GPU_MEMORY_BANDWIDTH_MBPS
 GPU_MEMORY_TYPE=$GPU_MEMORY_TYPE
 GPU_MEMORY_MAKER=$GPU_MEMORY_MAKER
+GPU_MEMORY_TYPE_NVAPI=$GPU_MEMORY_TYPE_NVAPI
+GPU_MEMORY_MAKER_NVAPI=$GPU_MEMORY_MAKER_NVAPI
+GPU_CUDA_CORES=$GPU_CUDA_CORES
+GPU_SHADER_SUBPIPES=$GPU_SHADER_SUBPIPES
+GPU_ROP_COUNT=$GPU_ROP_COUNT
+GPU_TMU_COUNT=$GPU_TMU_COUNT
+GPU_ARCHITECTURE=$GPU_ARCHITECTURE
+GPU_IMPLEMENTATION=$GPU_IMPLEMENTATION
+GPU_CHIP_REVISION=$GPU_CHIP_REVISION
+GPU_PCIE_WIDTH=$GPU_PCIE_WIDTH
 VGPU_MDEV_PROFILE=$VGPU_MDEV_PROFILE
 VGPU_FB_MB=2048
 VGPU_IDENTITY_TARGET=full-consumer
@@ -574,6 +588,12 @@ EOF
             'GPU_NAME="NVIDIA GeForce GTX 1050"' \
             'GPU_PCI_VID=0x10DE' 'GPU_PCI_DID=0x1C81' \
             'GPU_SUB_VID=0x1028' 'GPU_SUB_DID=0x11C0' \
+            'GPU_VBIOS="Version 86.07.39.40.F4"' \
+            'GPU_MEMORY_TYPE_NVAPI=8' 'GPU_MEMORY_MAKER_NVAPI=1' \
+            'GPU_CUDA_CORES=640' 'GPU_SHADER_SUBPIPES=5' \
+            'GPU_ROP_COUNT=32' 'GPU_TMU_COUNT=40' 'GPU_ARCHITECTURE=0x130' \
+            'GPU_IMPLEMENTATION=7' 'GPU_CHIP_REVISION=0x11' \
+            'GPU_PCIE_WIDTH=16' \
             'VGPU_IDENTITY_TARGET=full-consumer' 'SPOOF_MODE=A' \
             'VGPU_MDEV_INTERNAL_PCI_IDENTITY=1' 'VGPU_MDEV_FRL_ENABLED=0' \
             "VGPU_PATCHED_DRIVER_VERSION=$GTX1050_DRIVER_VERSION"; do

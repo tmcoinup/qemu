@@ -122,12 +122,28 @@ jq -e '
     .gpu.profile == "gtx750ti_2gb" and
     .gpu.name == "NVIDIA GeForce GTX 750 Ti" and
     .gpu.expectedPnpId == "PCI\\VEN_10DE&DEV_1E30" and
+    .gpu.nvapiPciVendorId == 4318 and
+    .gpu.nvapiPciDeviceId == 4992 and
+    .gpu.nvapiPciSubVendorId == 4318 and
+    .gpu.nvapiPciSubDeviceId == 4992 and
+    .gpu.nvapiPciRevisionId == 162 and
     .gpu.coreClockMHz == 1020 and
     .gpu.boostClockMHz == 1085 and
     .gpu.memoryClockMHz == 1350 and
     .gpu.memoryBusBits == 128 and
     .gpu.memoryBandwidthMBps == 86400 and
     .gpu.vramMB == 2048 and
+    .gpu.memoryType == 8 and
+    .gpu.memoryMaker == 1 and
+    .gpu.cudaCores == 640 and
+    .gpu.shaderSubPipes == 5 and
+    .gpu.ropCount == 16 and
+    .gpu.tmuCount == 40 and
+    .gpu.architecture == 272 and
+    .gpu.implementation == 7 and
+    .gpu.chipRevision == 18 and
+    .gpu.pcieWidth == 16 and
+    .gpu.vbiosVersion == "82.07.41.00.32" and
     .monitor.profile == "asus-va24e" and
     .monitor.serial == "KCLMC045CE2A"
 ' "$profile" >/dev/null
@@ -192,17 +208,90 @@ if IMAGE_ROOT="$image_root" STAGE_DIR="$stage_dir" \
     exit 1
 fi
 
-# Explicit persisted values win over catalog defaults.  This also exercises
-# every upper bound that is accepted by the guest validator.
+# Every catalog model must survive the same host -> JSON staging path.  These
+# expectations are independent of the catalog row so an accidental edit to a
+# non-default profile cannot make a load-equals-source test pass by itself.
+while IFS='|' read -r matrix_profile matrix_name matrix_core matrix_boost \
+        matrix_memory matrix_bus matrix_bandwidth matrix_cuda matrix_rops \
+        matrix_tmus matrix_arch matrix_impl matrix_revision matrix_width matrix_vbios \
+        matrix_pci_vendor matrix_pci_device matrix_pci_subvendor \
+        matrix_pci_subdevice matrix_pci_revision; do
+    write_base_conf
+    sed -i "s/^GPU_PROFILE=.*/GPU_PROFILE=$matrix_profile/" "$conf"
+    run_stage >/dev/null
+    jq -e \
+        --arg profile "$matrix_profile" \
+        --arg name "$matrix_name" \
+        --arg vbios "$matrix_vbios" \
+        --argjson core "$matrix_core" \
+        --argjson boost "$matrix_boost" \
+        --argjson memory "$matrix_memory" \
+        --argjson bus "$matrix_bus" \
+        --argjson bandwidth "$matrix_bandwidth" \
+        --argjson cuda "$matrix_cuda" \
+        --argjson rops "$matrix_rops" \
+        --argjson tmus "$matrix_tmus" \
+        --argjson architecture "$matrix_arch" \
+        --argjson implementation "$matrix_impl" \
+        --argjson revision "$matrix_revision" \
+        --argjson width "$matrix_width" \
+        --argjson pciVendor "$matrix_pci_vendor" \
+        --argjson pciDevice "$matrix_pci_device" \
+        --argjson pciSubVendor "$matrix_pci_subvendor" \
+        --argjson pciSubDevice "$matrix_pci_subdevice" \
+        --argjson pciRevision "$matrix_pci_revision" '
+        .gpu.profile == $profile and
+        .gpu.name == $name and
+        .gpu.nvapiPciVendorId == $pciVendor and
+        .gpu.nvapiPciDeviceId == $pciDevice and
+        .gpu.nvapiPciSubVendorId == $pciSubVendor and
+        .gpu.nvapiPciSubDeviceId == $pciSubDevice and
+        .gpu.nvapiPciRevisionId == $pciRevision and
+        .gpu.coreClockMHz == $core and
+        .gpu.boostClockMHz == $boost and
+        .gpu.memoryClockMHz == $memory and
+        .gpu.memoryBusBits == $bus and
+        .gpu.memoryBandwidthMBps == $bandwidth and
+        .gpu.memoryType == 8 and
+        .gpu.cudaCores == $cuda and
+        .gpu.ropCount == $rops and
+        .gpu.tmuCount == $tmus and
+        .gpu.architecture == $architecture and
+        .gpu.implementation == $implementation and
+        .gpu.chipRevision == $revision and
+        .gpu.pcieWidth == $width and
+        .gpu.vbiosVersion == $vbios
+    ' "$profile" >/dev/null
+done <<'EOF'
+gtx750ti_2gb|NVIDIA GeForce GTX 750 Ti|1020|1085|1350|128|86400|640|16|40|272|7|18|16|82.07.41.00.32|4318|4992|4318|4992|162
+gt1030_2gb|NVIDIA GeForce GT 1030|1227|1468|1502|64|48100|384|16|24|304|8|17|4|86.08.46.00.81|4318|7425|4163|34297|161
+gtx1050_2gb|NVIDIA GeForce GTX 1050|1354|1455|1752|128|112000|640|32|40|304|7|17|16|86.07.39.40.F4|4318|7297|4136|4544|161
+EOF
+write_base_conf
+run_stage >/dev/null
+
+# Explicit persisted values win over catalog defaults.  Exercise the numeric
+# upper bounds that remain independent of the GDDR5 coherence contract.
 cat >>"$conf" <<'EOF'
 VGPU_MDEV_PROFILE=nvidia-257
 GPU_NAME="  VM2 ASCII override  "
 GPU_CORE_MHZ=10000
 GPU_BOOST_MHZ=10000
 GPU_MEMORY_MHZ=10000
-GPU_MEMORY_BUS_BITS=1024
-GPU_MEMORY_BANDWIDTH_MBPS=1000000
+GPU_MEMORY_BUS_BITS=128
+GPU_MEMORY_BANDWIDTH_MBPS=640000
 GPU_VRAM_MB=2048
+GPU_VBIOS="Version AA.BB.CC.DD.EE"
+GPU_MEMORY_TYPE_NVAPI=8
+GPU_MEMORY_MAKER_NVAPI=255
+GPU_CUDA_CORES=1000000
+GPU_SHADER_SUBPIPES=65535
+GPU_ROP_COUNT=65535
+GPU_TMU_COUNT=524280
+GPU_ARCHITECTURE=0xFFFF
+GPU_IMPLEMENTATION=65535
+GPU_CHIP_REVISION=0xFFFF
+GPU_PCIE_WIDTH=32
 EOF
 
 override_output=$(IMAGE_ROOT="$image_root" STAGE_DIR="$stage_dir" \
@@ -211,12 +300,28 @@ jq -e '
     .spoofMode == "B" and
     .gpu.name == "VM2 ASCII override" and
     .gpu.expectedPnpId == "PCI\\VEN_10DE&DEV_1E30" and
+    .gpu.nvapiPciVendorId == 4318 and
+    .gpu.nvapiPciDeviceId == 4992 and
+    .gpu.nvapiPciSubVendorId == 4318 and
+    .gpu.nvapiPciSubDeviceId == 4992 and
+    .gpu.nvapiPciRevisionId == 162 and
     .gpu.coreClockMHz == 10000 and
     .gpu.boostClockMHz == 10000 and
     .gpu.memoryClockMHz == 10000 and
-    .gpu.memoryBusBits == 1024 and
-    .gpu.memoryBandwidthMBps == 1000000 and
-    .gpu.vramMB == 2048
+    .gpu.memoryBusBits == 128 and
+    .gpu.memoryBandwidthMBps == 640000 and
+    .gpu.vramMB == 2048 and
+    .gpu.memoryType == 8 and
+    .gpu.memoryMaker == 255 and
+    .gpu.cudaCores == 1000000 and
+    .gpu.shaderSubPipes == 65535 and
+    .gpu.ropCount == 65535 and
+    .gpu.tmuCount == 524280 and
+    .gpu.architecture == 65535 and
+    .gpu.implementation == 65535 and
+    .gpu.chipRevision == 65535 and
+    .gpu.pcieWidth == 32 and
+    .gpu.vbiosVersion == "AA.BB.CC.DD.EE"
 ' "$profile" >/dev/null
 rg -Fq "http://10.20.30.40:18080/vm2-manifest.json" <<<"$override_output"
 assert_manifest "$stage_dir" 2 false
@@ -240,6 +345,26 @@ declare -a bad_overrides=(
     'GPU_MEMORY_BUS_BITS=1025'
     'GPU_MEMORY_BANDWIDTH_MBPS=1000001'
     'GPU_VRAM_MB=2049'
+    'GPU_MEMORY_TYPE_NVAPI=7'
+    'GPU_MEMORY_TYPE_NVAPI=256'
+    'GPU_MEMORY_MAKER_NVAPI=256'
+    'GPU_CUDA_CORES=1000001'
+    'GPU_SHADER_SUBPIPES=65536'
+    'GPU_ROP_COUNT=65536'
+    'GPU_TMU_COUNT=1000001'
+    'GPU_TMU_COUNT=40
+GPU_SHADER_SUBPIPES=6'
+    'GPU_ARCHITECTURE=0x0'
+    'GPU_ARCHITECTURE=0x10000'
+    'GPU_IMPLEMENTATION=65536'
+    'GPU_CHIP_REVISION=0x10000'
+    'GPU_PCIE_WIDTH=33'
+    'GPU_PCIE_WIDTH=3'
+    'GPU_CORE_MHZ=10000
+GPU_BOOST_MHZ=9999'
+    'GPU_MEMORY_BANDWIDTH_MBPS=500000'
+    'GPU_VBIOS="Version 86.07.39.40"'
+    'GPU_VBIOS="86.07.39.40.F4"'
 )
 for override in "${bad_overrides[@]}"; do
     cp "$tmp/good.conf" "$conf"

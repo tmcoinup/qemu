@@ -50,6 +50,27 @@ typedef enum StreamMode {
     STREAM_MODE_SHM,
 } StreamMode;
 
+/*
+ * Stable GPU capability/error classes.  Keep these independent from a
+ * particular encoder library so callers and tests can distinguish an invalid
+ * producer frame from a consumer that was built without a native import path.
+ */
+typedef enum FbShmStreamGpuStatus {
+    FB_SHM_STREAM_GPU_OK = 0,
+    FB_SHM_STREAM_GPU_E_BACKEND_NOT_BUILT,
+    FB_SHM_STREAM_GPU_E_WIRE,
+    FB_SHM_STREAM_GPU_E_GEOMETRY,
+    FB_SHM_STREAM_GPU_E_LAYOUT,
+    FB_SHM_STREAM_GPU_E_FLAGS,
+    FB_SHM_STREAM_GPU_E_HANDLE_TYPE,
+    FB_SHM_STREAM_GPU_E_HANDLE_MISSING,
+    FB_SHM_STREAM_GPU_E_PLATFORM_HANDLE,
+    FB_SHM_STREAM_GPU_E_HANDLE_NAME,
+    FB_SHM_STREAM_GPU_E_SYNC_UNSAFE,
+} FbShmStreamGpuStatus;
+
+#define FB_SHM_STREAM_EXIT_GPU_UNAVAILABLE 3
+
 typedef struct Options {
     const char *sock;
     const char *output;
@@ -62,6 +83,7 @@ typedef struct Options {
     int rate;
     int max_frames;
     bool has_roi;
+    bool print_capabilities;
     int roi_x;
     int roi_y;
     uint32_t roi_w;
@@ -86,17 +108,52 @@ typedef struct Mapping {
 #endif
 } Mapping;
 
+typedef union ControlPayload {
+    FbShmWin32Names names;
+    FbShmGpuFrame gpu;
+} ControlPayload;
+
+/*
+ * AF_UNIX is a byte stream even when the producer uses one sendmsg() per
+ * record.  Preserve partial ACK/payload reads and SCM_RIGHTS until one whole
+ * control record has been assembled.
+ */
+typedef struct ControlRx {
+    FbShmCtlAck ack;
+    size_t ack_bytes;
+    ControlPayload payload;
+    size_t payload_size;
+    size_t payload_bytes;
+    bool initialized;
+#ifndef _WIN32
+    int fds[2];
+    size_t nfds;
+#endif
+} ControlRx;
+
+typedef struct FfmpegProcess {
+    FILE *input;
+#ifdef _WIN32
+    HANDLE process;
+#else
+    int pid;
+#endif
+} FfmpegProcess;
+
 typedef struct Session {
     FbShmStreamSocket sock;
     Mapping map;
-    FILE *ffmpeg;
+    ControlRx control_rx;
+    FfmpegProcess *ffmpeg;
     uint8_t *frame;
     size_t frame_cap;
     uint64_t last_seq;
     FbShmGpuFrame gpu_frame;
     bool gpu_frame_ready;
     bool gpu_logged;
+    bool gpu_error_logged;
     bool shm_ready;
+    FbShmStreamGpuStatus gpu_error;
 #ifndef _WIN32
     int gpu_fd;
 #endif
@@ -121,19 +178,32 @@ void fb_shm_stream_die(const char *fmt, ...);
 int fb_shm_stream_send_all(FbShmStreamSocket fd, const void *buf, size_t len);
 int fb_shm_stream_recv_all(FbShmStreamSocket fd, void *buf, size_t len);
 FbShmCtlReq fb_shm_stream_ctl_req(uint32_t op);
-void fb_shm_stream_ctl_expect_ok(FbShmStreamSocket fd, uint32_t op);
+void fb_shm_stream_ctl_expect_ok(Session *s, uint32_t op);
 
 void fb_shm_stream_close_mapping(Mapping *m);
 FbShmStreamSocket fb_shm_stream_connect_unix_socket(const char *path);
 void fb_shm_stream_set_sock_nonblock(FbShmStreamSocket fd);
 void fb_shm_stream_close_socket(FbShmStreamSocket fd);
 void fb_shm_stream_cleanup_network(void);
+void fb_shm_stream_control_init(Session *s);
 void fb_shm_stream_hello(Session *s, StreamMode mode);
 bool fb_shm_stream_try_control(Session *s);
 void fb_shm_stream_close_gpu_frame(Session *s);
 
-FILE *fb_shm_stream_open_ffmpeg(const Options *o, const FbShmHeader *hdr);
-void fb_shm_stream_close_ffmpeg(FILE *ffmpeg);
+FbShmStreamGpuStatus fb_shm_stream_gpu_backend_probe(void);
+bool fb_shm_stream_gpu_backend_available(void);
+FbShmStreamGpuStatus
+fb_shm_stream_gpu_validate_frame(const FbShmGpuFrame *frame,
+                                 bool has_native_handle);
+const char *fb_shm_stream_gpu_status_code(FbShmStreamGpuStatus status);
+const char *fb_shm_stream_gpu_status_message(FbShmStreamGpuStatus status);
+void fb_shm_stream_gpu_print_capabilities(FILE *stream);
+
+bool fb_shm_stream_ffmpeg_options_valid(const Options *o);
+const char *fb_shm_stream_ffmpeg_output_kind(const char *output);
+FfmpegProcess *fb_shm_stream_open_ffmpeg(const Options *o,
+                                         const FbShmHeader *hdr);
+void fb_shm_stream_close_ffmpeg(FfmpegProcess *ffmpeg);
 
 uint64_t fb_shm_stream_monotonic_ns(void);
 void fb_shm_stream_pacer_reset(StreamPacer *p, uint32_t fps);

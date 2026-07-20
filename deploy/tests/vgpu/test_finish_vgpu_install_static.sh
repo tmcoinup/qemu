@@ -9,6 +9,8 @@ BUILDER="$REPO_ROOT/deploy/guest/vgpu-finish/build.sh"
 SOURCE="$REPO_ROOT/deploy/guest/vgpu-finish/vgpu_guest_finish.c"
 MANIFEST="$REPO_ROOT/deploy/guest/vgpu-finish/vgpu_guest_finish.manifest"
 RTC_MIGRATOR="$REPO_ROOT/deploy/host/migrate-windows-local-rtc.sh"
+DRIVER_STAGER="$REPO_ROOT/deploy/guest/stage-patched-vgpu-driver.ps1"
+LEGACY_DRIVER_INSTALLER="$REPO_ROOT/deploy/guest/install-patched-driver.ps1"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 require_text() {
@@ -95,6 +97,19 @@ reject_text 'WinRM port' "$HOST"
 require_text "--proto '=https'" "$HOST"
 require_text 'https://127.0.0.1/-/client-token' "$HOST"
 reject_text 'http://' "$HOST"
+require_text 'GTX 1050 strict-A finish is disabled' "$HOST"
+require_text 'DISABLED: the legacy pre-stager was removed' \
+    "$DRIVER_STAGER"
+require_text 'DISABLED: the legacy patched-driver installer was removed' \
+    "$LEGACY_DRIVER_INSTALLER"
+for retired_driver_entry in "$DRIVER_STAGER" "$LEGACY_DRIVER_INSTALLER"; do
+    reject_text 'New-SelfSignedCertificate' "$retired_driver_entry"
+    reject_text 'Set-AuthenticodeSignature' "$retired_driver_entry"
+    reject_text 'New-FileCatalog' "$retired_driver_entry"
+    reject_text 'Import-Certificate' "$retired_driver_entry"
+    reject_text 'pnputil' "$retired_driver_entry"
+    reject_text 'bcdedit' "$retired_driver_entry"
+done
 
 require_text 'VGPU_GUEST_FINISH_TARGET_ENV=' "$START"
 require_text 'type=11,value=QEMU_VGPU_TARGET=${VGPU_GUEST_FINISH_TARGET}' "$START"
@@ -472,10 +487,9 @@ run_finish_rtc_case missing 31 '' no
 run_finish_rtc_case localtime 32 localtime no
 run_finish_rtc_case explicit-utc 33 utc yes
 
-# A generated full-consumer GTX 1050 target stays B until the bundled guest
-# stager returns a V3 receipt.  After the fake offline verifier succeeds, the
-# host must atomically persist the complete A/internal/FRL policy and must not
-# copy another VM's dynamic oemN.inf number.
+# A generated full-consumer GTX 1050 target must now fail before building or
+# launching anything.  The legacy self-signed driver flow may not create a ZIP
+# or persist A/internal/FRL completion markers.
 STRICT_ROOT="$TMP_DIR/strict-gtx1050"
 STRICT_CONF="$STRICT_ROOT/instances/vm35/vm.conf"
 STRICT_START="$STRICT_ROOT/start.trace"
@@ -496,7 +510,8 @@ RTC_CONTRACT=localtime
 EOF
 touch "$STRICT_ROOT/instances/vm35/disk.qcow2" \
     "$STRICT_START" "$STRICT_MIGRATE"
-env -i \
+strict_before=$(sha256sum "$STRICT_CONF")
+if env -i \
     HOME="${HOME:-/tmp}" \
     PATH="$HARNESS/bin:/usr/bin:/bin" \
     VM_ROOT="$STRICT_ROOT" \
@@ -505,27 +520,24 @@ env -i \
     FAKE_MIGRATE_TRACE="$STRICT_MIGRATE" \
     "$HARNESS/deploy/finish-vgpu-install.sh" 35 \
         --token-file "$TOKEN" --no-final-start \
-        >"$STRICT_ROOT/finish.out" 2>"$STRICT_ROOT/finish.err"
-require_text 'VgpuGuestFinish-GTX1050.zip' "$STRICT_ROOT/finish.out"
-require_text '--expected-driver-profile gtx1050_2gb' "$STRICT_MIGRATE"
-require_text '--expected-driver-version 31.0.15.3833' "$STRICT_MIGRATE"
-require_text '--expected-patched-inf-sha256 c7e38910c800fc9f5e72ec4d3613594a64b3e7b0465114e81a167ead43d42e4f' \
-    "$STRICT_MIGRATE"
-for strict_line in \
-        'VGPU_IDENTITY_TARGET=full-consumer' 'SPOOF_MODE=A' \
-        'VGPU_MDEV_INTERNAL_PCI_IDENTITY=1' 'VGPU_MDEV_FRL_ENABLED=0' \
-        'VGPU_PATCHED_DRIVER_REQUIRED_VERSION=31.0.15.3833' \
-        'VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833'; do
-    [[ "$(grep -Fxc "$strict_line" "$STRICT_CONF")" -eq 1 ]] \
-        || fail "strict config did not persist exactly once: $strict_line"
-done
-reject_text 'VGPU_PATCHED_DRIVER_INF=' "$STRICT_CONF"
-compgen -G "$STRICT_ROOT/instances/vm35/backups/config/vm.conf.before-gtx1050-full-*" \
-    >/dev/null || fail 'strict config transition did not create a backup'
+        >"$STRICT_ROOT/finish.out" 2>"$STRICT_ROOT/finish.err"; then
+    fail 'strict GTX 1050 finish did not reject the legacy self-signed path'
+fi
+require_text 'GTX 1050 strict-A finish is disabled' "$STRICT_ROOT/finish.err"
+[[ "$(sha256sum "$STRICT_CONF")" == "$strict_before" &&
+   ! -s "$STRICT_START" && ! -s "$STRICT_MIGRATE" &&
+   ! -e "$STRICT_ROOT/staging/VgpuGuestFinish.exe" &&
+   ! -e "$STRICT_ROOT/staging/VgpuGuestFinish-GTX1050.zip" &&
+   ! -e "$STRICT_ROOT/instances/vm35/log" &&
+   ! -e "$STRICT_ROOT/instances/vm35/run" &&
+   ! -e "$STRICT_ROOT/instances/vm35/backups" &&
+   ! -e "$STRICT_ROOT/bases" &&
+   ! -e "$STRICT_ROOT/run" &&
+   ! -e "$STRICT_ROOT/assets" ]] \
+    || fail 'strict GTX 1050 rejection changed config or published/launched an artifact'
 
-# A pre-policy legacy GTX 1050 config may contain only GPU_PROFILE.  It must
-# receive the strict ZIP (never the small EXE), and the V3 transition must
-# persist the exact audited catalog tuple needed by the next cold boot.
+# A pre-policy legacy GTX 1050 config must hit the same fail-closed guard after
+# catalog derivation, without being rewritten or receiving a strict ZIP.
 LEGACY_STRICT_ROOT="$TMP_DIR/legacy-strict-gtx1050"
 LEGACY_STRICT_CONF="$LEGACY_STRICT_ROOT/instances/vm36/vm.conf"
 LEGACY_STRICT_START="$LEGACY_STRICT_ROOT/start.trace"
@@ -539,7 +551,8 @@ RTC_CONTRACT=localtime
 EOF
 touch "$LEGACY_STRICT_ROOT/instances/vm36/disk.qcow2" \
     "$LEGACY_STRICT_START" "$LEGACY_STRICT_MIGRATE"
-env -i \
+legacy_strict_before=$(sha256sum "$LEGACY_STRICT_CONF")
+if env -i \
     HOME="${HOME:-/tmp}" \
     PATH="$HARNESS/bin:/usr/bin:/bin" \
     VM_ROOT="$LEGACY_STRICT_ROOT" \
@@ -548,20 +561,24 @@ env -i \
     FAKE_MIGRATE_TRACE="$LEGACY_STRICT_MIGRATE" \
     "$HARNESS/deploy/finish-vgpu-install.sh" 36 \
         --token-file "$TOKEN" --no-final-start \
-        >"$LEGACY_STRICT_ROOT/finish.out" 2>"$LEGACY_STRICT_ROOT/finish.err"
+        >"$LEGACY_STRICT_ROOT/finish.out" 2>"$LEGACY_STRICT_ROOT/finish.err"; then
+    fail 'legacy strict GTX 1050 config bypassed the production-signature guard'
+fi
 require_text 'completed the audited GTX 1050 tuple from GPU_PROFILE' \
     "$LEGACY_STRICT_ROOT/finish.out"
-require_text 'VgpuGuestFinish-GTX1050.zip' "$LEGACY_STRICT_ROOT/finish.out"
-require_text '--expected-driver-profile gtx1050_2gb' "$LEGACY_STRICT_MIGRATE"
-for strict_line in \
-        'GPU_PROFILE=gtx1050_2gb' \
-        'GPU_NAME="NVIDIA GeForce GTX 1050"' \
-        'GPU_PCI_VID=0x10DE' 'GPU_PCI_DID=0x1C81' \
-        'GPU_SUB_VID=0x1028' 'GPU_SUB_DID=0x11C0' \
-        'VGPU_IDENTITY_TARGET=full-consumer' 'SPOOF_MODE=A'; do
-    [[ "$(grep -Fxc "$strict_line" "$LEGACY_STRICT_CONF")" -eq 1 ]] \
-        || fail "legacy strict config did not persist exactly once: $strict_line"
-done
+require_text 'GTX 1050 strict-A finish is disabled' \
+    "$LEGACY_STRICT_ROOT/finish.err"
+[[ "$(sha256sum "$LEGACY_STRICT_CONF")" == "$legacy_strict_before" &&
+   ! -s "$LEGACY_STRICT_START" && ! -s "$LEGACY_STRICT_MIGRATE" &&
+   ! -e "$LEGACY_STRICT_ROOT/staging/VgpuGuestFinish.exe" &&
+   ! -e "$LEGACY_STRICT_ROOT/staging/VgpuGuestFinish-GTX1050.zip" &&
+   ! -e "$LEGACY_STRICT_ROOT/instances/vm36/log" &&
+   ! -e "$LEGACY_STRICT_ROOT/instances/vm36/run" &&
+   ! -e "$LEGACY_STRICT_ROOT/instances/vm36/backups" &&
+   ! -e "$LEGACY_STRICT_ROOT/bases" &&
+   ! -e "$LEGACY_STRICT_ROOT/run" &&
+   ! -e "$LEGACY_STRICT_ROOT/assets" ]] \
+    || fail 'legacy strict rejection changed config or published/launched an artifact'
 
 # A manual rescue may remain open for minutes.  If vm.conf changes during that
 # time, the old marker intent must not be accepted and the migrator must not run.

@@ -1,8 +1,32 @@
 # vGPU 16.4 guest 身份验证记录
 
-## 2026-07-15：VM3 严格 GTX 1050 身份已验证
+> **历史记录，不是当前操作指南。** 本页 VM3 strict-A 结果依赖修改 INF、VM 本地
+> 自签 catalog 和私有根，现已判定不符合生产签名要求。相关入口已禁用、产物已归档；
+> 不得复现这些证书/Driver Store 步骤。VM3 的 legacy A 已使用生产迁移流程切回
+> 未修改 GRID 538.33 + B/native；受支持的最终状态是 B。
 
-本次是 VM3 的当前验证结果，不是将底层物理 GPU 或 mdev 资源改成了
+## 2026-07-20：VM3 生产签名 B/native FINAL PASS
+
+| 项 | 当前 VM3 已验证值 |
+|---|---|
+| Device Manager | `NVIDIA GeForce GTX 1050`，只有一张 present Display，Code 0 |
+| Guest 原生 PnP | vGPU `DEV_1E30`；不再使用 strict-A `DEV_1C81` 驱动绑定 |
+| Guest driver | 原始 GRID 538.33 / `31.0.15.3833` / 动态 `oem2.inf` |
+| 数字签名者 | `Microsoft Windows Hardware Compatibility Publisher` |
+| BCD | `testsigning=false`、`nointegritychecks=false` |
+| 分辨率 | 1920×1080 |
+| GPU-Z | 2.70，显示 GTX 1050 / 2 GB / GDDR5 / WHQL |
+| legacy 清理 | 旧自签 package、私有测试证书和一次性续跑任务已移除 |
+
+`oem2.inf` 仅是 VM3 当时的 Windows 动态编号，不能作为其他 VM 的固定条件。
+GPU-Z 的 WHQL 文本不是签名链证明；签名结论来自实际 DriverStore catalog、加载中
+内核文件和 WHCP/Authenticode 验证。详细操作见
+[G11-QUICKSTART.md](G11-QUICKSTART.md)。
+
+## 2026-07-15：VM3 严格 GTX 1050 历史实验（已禁用）
+
+本节是 VM3 当时的 strict-A 实验记录，不是当前配置，也不是将底层物理 GPU 或
+mdev 资源改成了
 GTX 1050。Guest 可见身份、驱动绑定、显示模式和 host FRL 状态分别验收：
 
 | 项 | VM3 已验证值 |
@@ -154,17 +178,12 @@ ls /sys/bus/pci/devices/0000:04:00.0/mdev_supported_types/   # nvidia-257 RTX600
 - **`enable-migration=off`** — NVIDIA 550+ 不支持 QEMU 11 默认开的 vfio migration v2 uapi，不关会 HAL_INITIALIZATION_FAILED
 - **`-vga none`** — 不挂 std-vga，guest Device Manager 不出现"Microsoft 基本显示适配器"；代价是 OVMF 启动到 Windows 登录的过程 VNC 看不到（已 RDP / WinRM 时不需要）
 
-### Guest 侧 (INF patch + 自签 cat)
+### Guest 侧历史实验（已禁用，禁止复现）
 
-1. 宿主 sed 在 `nvgridsw.inf` 加 DEV_1D01 entry（14393 和 17098 两个 section 各一条，复用 Section019/020 driver install block）
-2. 宿主 HTTP server 把 patched Display.Driver 目录 zip 起来
-3. Guest WinRM 触发一个 Scheduled Task (SYSTEM 权限) 跑 PowerShell:
-   - `New-SelfSignedCertificate -Subject 'CN=vGPU-Patch-Signer' -Type CodeSigning ...`
-   - Import 自签证书到 `LocalMachine\Root` + `LocalMachine\TrustedPublisher`
-   - `New-FileCatalog` 根据 patched INF 重新生成 `nvgridsw.cat`
-   - `Set-AuthenticodeSignature` 签 cat
-   - `pnputil /add-driver nvgridsw.inf /install`
-4. `bcdedit /set testsigning off` + `/set nointegritychecks off` 可以保持关闭（签名走自签链）
+历史实验曾修改 `nvgridsw.inf`、生成本地证书、导入 Root/TrustedPublisher、重建
+catalog 并用 `pnputil` 安装。即使 BCD 测试选项关闭，这仍是私有根自签内核驱动，
+不等于 NVIDIA/Microsoft 生产签名。当前两个 guest stager 会在任何上述动作前
+无条件拒绝；不要从旧日志恢复命令。
 
 ## 踩过的坑 (对未来的你)
 
@@ -177,7 +196,7 @@ ls /sys/bus/pci/devices/0000:04:00.0/mdev_supported_types/   # nvidia-257 RTX600
 | 5 | patcher 只支持 `.run`，我们只有 `.deb` | 全程 | 手工把 .deb 解包的 source tree 映射到 patcher 的 TARGET/kernel/ 相对路径 (用 `-p2`) |
 | 6 | vgpuConfig.xml 里 RTX 2080 (0x1E82) 不在支持列表 | vgpu-mgr 启动 | vcfgclone Quadro RTX 6000 block |
 | 7 | patcher 不自动启 nvidia-vgpud | 第一次重启后 mdev_supported_types 不出现 | `systemctl enable --now nvidia-vgpud` |
-| 8 | guest INF 修改后 nvgridsw.cat hash 失配 | pnputil /add-driver 拒绝 | New-FileCatalog 重签 + 自签证书装 Root+TrustedPublisher |
+| 8 | guest INF 修改后 vendor catalog 失效 | 正式签名验证拒绝 | 不重签、不导入私有根；迁移到原始 GRID 538.33 + B/native |
 | 9 | WinRM session 装 NVIDIA driver 时 timeout (WDDM 重启断 WinRM) | 远程 Invoke-Command pnputil /add-driver /install | 改用 Scheduled Task SYSTEM 跑 + 外层轮询 |
 | 10 | pnputil /add-driver 在 WinRM session 下取不到 `\\tsclient\nv` | 远程 Copy-Item 失败 | 宿主起 `python3 -m http.server 8080`，guest `Invoke-WebRequest` 下载 |
 

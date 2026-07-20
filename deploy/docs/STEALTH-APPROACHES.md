@@ -1,4 +1,4 @@
-# NVIDIA vGPU 身份模式：off / B / 已审计 GTX 1050 A
+# NVIDIA vGPU 身份模式：off / B / legacy GTX 1050 A（禁用）
 
 本分支只有一条 NVIDIA mdev/vGPU VM 链路：
 
@@ -18,13 +18,12 @@ PCI ID。最终目标由另一个字段记录：
 
 | `GPU_PROFILE` | 初始模式 | `VGPU_IDENTITY_TARGET` | 收尾后的模式 |
 |---|---|---|---|
-| `gtx1050_2gb` | B | `full-consumer` | V3 回执通过后自动持久化严格 A |
+| `gtx1050_2gb` | B | `name-only` | B |
 | `gtx750ti_2gb` | B | `name-only` | B |
 | `gt1030_2gb` | B | `name-only` | B |
 
-`full-consumer` 是目标，不是“驱动已就绪”的证明。GTX 1050 未完成 V3 driver receipt
-时，启动器会拒绝用 CLI `--spoof` 绕过 gate，以免进入 Microsoft Basic Display
-Adapter/低分辨率路径。不要手工修改只读 `vm.conf` 提前切 A。
+strict-A 不再是交付目标。启动器拒绝新的 CLI/持久化 A；legacy A 实例使用生产迁移
+包回到 B/native，marker 不能绕过 gate。不要手工修改只读 `vm.conf`。
 
 ## 共同的 host backing resource
 
@@ -76,7 +75,7 @@ B 的明确边界是：
 - 核心数、时钟、显存类型与总线宽度仍来自 backing vGPU；
 - B/off 按原生 vGPU 授权合同验收，token/DLS 正常时 host 应为 `Licensed`。
 
-## 已审计 GTX 1050 严格 A
+## legacy GTX 1050 严格 A（禁用）
 
 严格 GTX 1050 同时对齐四层信息：
 
@@ -85,7 +84,7 @@ B 的明确边界是：
 | host resource | `nvidia-257 / 2048 MB` | sysfs、host 启动摘要 |
 | QEMU 外部 PCI | `10DE:1C81`，subvendor `1028`，subdevice `11C0` | Windows PnP/GPU-Z |
 | NVIDIA internal | `pci_id=0x1C8111C0`、`pci_device_id=0x1C81` | vGPU manager `Virtual Device Id` |
-| guest driver | patched 538.33 / `31.0.15.3833` / Code 0 | Driver Store、设备管理器 |
+| guest driver | 修改 INF/自签 538.33，不符合当前生产签名要求 | legacy 记录 |
 
 Windows PnP 的精确目标为：
 
@@ -97,7 +96,7 @@ PCI\VEN_10DE&DEV_1C81&SUBSYS_11C01028
 拼接。不能写成 `1028:11C0` 以外的厂商 tuple，也不能只改外部 PCI 而遗漏 NVIDIA
 internal identity。
 
-严格模式最终配置由收尾脚本写入：
+历史实验曾写入：
 
 ```text
 VGPU_IDENTITY_TARGET=full-consumer
@@ -107,38 +106,26 @@ VGPU_MDEV_FRL_ENABLED=0
 VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833
 ```
 
-Windows 实际发布名是动态 `oemN.inf`。V3 marker 会验证本机实际编号，但不会把另一台
-VM 的编号持久化进配置。
+这些字段当前不会由收尾脚本写入。不要从 VM3 或历史 `oemN.inf` 复制。
 
-## 从 B 安全推进到严格 A
+## strict-A 当前禁用
 
-基础 GRID driver 已装好、Windows 完整关机后，在宿主只运行：
+GTX1050 历史推进路径会修改 INF、重建 catalog 并使用 VM 本地自签证书，现已在
+生成 guest 包、启动 VM 或写 marker 前硬拒绝。不要恢复旧 ZIP、导入私有根或手工
+持久化 A/internal/FRL。三款 profile 的受支持策略均为 B。VM3 的 legacy A 已通过
+生产迁移回执提交为 B/native，并完成 Code 0、WHCP signer 和 GPU-Z 验收；尚未
+迁移的其他旧 A 实例仍由启动和封装门禁隔离。
 
-```bash
-./deploy/finish-vgpu-install.sh <vm_id>
-```
-
-GTX 1050 会生成/复用：
-
-```text
-/home/ubuntu/images/staging/VgpuGuestFinish-GTX1050.zip
-```
-
-在救援 Windows 中将 ZIP 全部解压，只运行其中的 `VgpuGuestFinish.exe`。EXE 会先
-fail-closed 校验、重建/签名 catalog，并 add-only 预暂存精确支持
-`DEV_1C81&SUBSYS_11C01028` 的 locked 538.33；随后完成 token、名称、休眠与关机，
-写出 `QEMU_VGPU_PREPARED_V3` receipt。
-
-宿主离线核对 UUID、GPU、token、driver profile/version、动态 `oemN.inf` 和 patched
-INF hash。只有 V3 全部通过后才原子持久化 A/internal/FRL0、处理 RTC/EDID 并冷启动。
-GTX 750 Ti、GT 1030 仍使用普通收尾 EXE 并保持 B。
+未来只有取得与 `DEV_1C81&SUBSYS_11C01028`、目标版本匹配且未经修改的
+NVIDIA/Microsoft 正式生产签名驱动后，才能设计只做验证、不改 INF/不重签的
+strict-A transition。
 
 ## License 与 FRL 是两个状态
 
 | 路径 | License 验收 | FRL 验收 |
 |---|---|---|
 | off/B | token/DLS 正常时应为 `Licensed` | 按原生 vGPU profile/license 合同 |
-| GTX1050 严格 A | 当前 host 如实为 `Unlicensed` | `Frame Rate Limit: N/A` |
+| legacy GTX1050 严格 A（禁用） | 历史记录为 `Unlicensed` | 历史记录为 `N/A` |
 
 严格消费身份下 NVIDIA 控制面板授权页会消失；这不等于“已经激活”。同样，
 `frl_enabled=0` 只关闭该 UUID 的 frame-rate limiter，不会把 `Unlicensed` 改成
@@ -171,7 +158,7 @@ journalctl -b -u nvidia-vgpu-mgr -u nvidia-vgpud --no-pager | \
 - off：PnP 为原生 `DEV_1E30`，用于安装/恢复；
 - B：PnP 仍为 `DEV_1E30`，marketing name 等于配置，driver 538.33/Code 0，并按
   原生合同验收 Licensed；
-- GTX1050 A：名称为 `NVIDIA GeForce GTX 1050`，PnP 精确为
+- legacy GTX1050 A（禁用）：历史名称为 `NVIDIA GeForce GTX 1050`，PnP 精确为
   `DEV_1C81&SUBSYS_11C01028`，driver `31.0.15.3833`、Code 0、约 2 GB；host
   backing label 可仍为 GT 1030，license/FRL 如实为 `Unlicensed / N/A`。
 
@@ -187,8 +174,9 @@ Remote Display Adapter，其设备数量、动态分辨率与编码 FPS 不能�
 ./deploy/start-vm.sh <vm_id> --no-spoof --no-monitor-sync
 ```
 
-不要卸载设备或删除 patched `oemN.inf`。先在原生 `DEV_1E30` 路径确认 538.33/Code 0，
-再重跑 `finish-vgpu-install.sh`；若不再需要严格身份，让傻瓜软件明确将 VM 切回 B。
+不要自动卸载设备或删除现有 `oemN.inf`，避免让 VM 失去显示。先在原生
+`DEV_1E30` 路径安装并确认未经修改、具有 NVIDIA/Microsoft 生产签名的
+538.33/Code 0，再保持 B；不要重跑 strict 收尾。
 
 完整驱动流程见 [DRIVER-INSTALL.md](DRIVER-INSTALL.md)，一键操作与恢复见
 [VGPU-RECOVERY-RUNBOOK.md](VGPU-RECOVERY-RUNBOOK.md)，授权/FRL 语义见

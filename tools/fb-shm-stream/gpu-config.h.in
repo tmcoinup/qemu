@@ -1,0 +1,18 @@
+/*
+ * qemu-fb-shm-stream optional GPU dependency probes.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#ifndef QEMU_TOOLS_FB_SHM_STREAM_GPU_CONFIG_H
+#define QEMU_TOOLS_FB_SHM_STREAM_GPU_CONFIG_H
+
+#mesondefine FB_SHM_STREAM_HAVE_LIBAVCODEC
+#mesondefine FB_SHM_STREAM_HAVE_LIBAVUTIL
+#mesondefine FB_SHM_STREAM_HAVE_LIBAVFORMAT
+#mesondefine FB_SHM_STREAM_HAVE_LIBDRM
+#mesondefine FB_SHM_STREAM_HAVE_LIBVA
+#mesondefine FB_SHM_STREAM_HAVE_CUDA
+#mesondefine FB_SHM_STREAM_HAVE_FFNVCODEC
+
+#endif /* QEMU_TOOLS_FB_SHM_STREAM_GPU_CONFIG_H */

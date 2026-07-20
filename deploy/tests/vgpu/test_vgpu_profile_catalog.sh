@@ -8,7 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 PROFILE_LIB="$REPO_ROOT/deploy/lib/vgpu-profiles.sh"
 CREATE_VM="$REPO_ROOT/deploy/create-vm.sh"
+FINISH_VGPU="$REPO_ROOT/deploy/finish-vgpu-install.sh"
 PATCH_GRID="$REPO_ROOT/deploy/guest/patch-grid-strings.ps1"
+APPLY_PROFILE="$REPO_ROOT/deploy/guest/apply-vm-profile.ps1"
+SETUP_GUEST="$REPO_ROOT/deploy/setup-guest.sh"
 INF_PATCH="$REPO_ROOT/deploy/guest/spoof-inf/inf-patch.ps1"
 
 fail() {
@@ -34,7 +37,10 @@ declare -A SEEN_PCI_IDS=()
 test_catalog() {
     local row fields key mdev_profile name vid did subvid subdid rev
     local vram_mb vbios core_mhz boost_mhz memory_mhz bus_bits
-    local bandwidth_mbps ram_type ram_maker pci_id did_hex loaded
+    local bandwidth_mbps ram_type ram_maker memory_type_nvapi
+    local memory_maker_nvapi cuda_cores shader_subpipes rop_count tmu_count
+    local architecture implementation chip_revision pcie_width
+    local pci_id did_hex loaded registry_name
 
     ((${#VGPU_PROFILE_CATALOG[@]} > 0)) || fail "vGPU profile catalog is empty"
     grep -Fq "'all_2gb'" "$INF_PATCH" \
@@ -42,12 +48,14 @@ test_catalog() {
 
     for row in "${VGPU_PROFILE_CATALOG[@]}"; do
         fields="$(awk -F'|' '{ print NF }' <<<"$row")"
-        assert_eq 17 "$fields" "catalog field count"
+        assert_eq 27 "$fields" "catalog field count"
 
         IFS='|' read -r \
             key mdev_profile name vid did subvid subdid rev vram_mb vbios \
             core_mhz boost_mhz memory_mhz bus_bits bandwidth_mbps ram_type \
-            ram_maker <<<"$row"
+            ram_maker memory_type_nvapi memory_maker_nvapi cuda_cores \
+            shader_subpipes rop_count tmu_count architecture implementation \
+            chip_revision pcie_width <<<"$row"
 
         [[ -n "$key" ]] || fail "catalog contains an empty profile key"
         [[ -z "${SEEN_KEYS[$key]+present}" ]] \
@@ -61,6 +69,67 @@ test_catalog() {
 
         assert_eq 2048 "$vram_mb" "$key catalog VRAM"
         assert_eq nvidia-257 "$mdev_profile" "$key catalog mdev profile"
+        assert_eq GDDR5 "$ram_type" "$key catalog memory type"
+        assert_eq Samsung "$ram_maker" "$key catalog memory maker"
+        assert_eq 8 "$memory_type_nvapi" "$key NVAPI memory type"
+        assert_eq 1 "$memory_maker_nvapi" "$key NVAPI memory maker"
+        local raw_memory_khz=$((memory_mhz * 2000))
+        local derived_bandwidth=$((raw_memory_khz * 2 * bus_bits / 8000))
+        local bandwidth_difference=$((derived_bandwidth - bandwidth_mbps))
+        (( bandwidth_difference >= 0 )) || \
+            bandwidth_difference=$((-bandwidth_difference))
+        (( bandwidth_difference * 100 <= bandwidth_mbps )) ||
+            fail "$key memory clock/bus/bandwidth exceeds one-percent tolerance"
+
+        case "$key" in
+            gtx750ti_2gb)
+                assert_eq 1020 "$core_mhz" "$key core clock"
+                assert_eq 1085 "$boost_mhz" "$key boost clock"
+                assert_eq 1350 "$memory_mhz" "$key displayed memory clock"
+                assert_eq 128 "$bus_bits" "$key memory bus"
+                assert_eq 86400 "$bandwidth_mbps" "$key bandwidth"
+                assert_eq 640 "$cuda_cores" "$key CUDA cores"
+                assert_eq 5 "$shader_subpipes" "$key shader subpipes"
+                assert_eq 16 "$rop_count" "$key ROP count"
+                assert_eq 40 "$tmu_count" "$key TMU count"
+                assert_eq 0x110 "$architecture" "$key architecture"
+                assert_eq 7 "$implementation" "$key implementation"
+                assert_eq 0x12 "$chip_revision" "$key chip revision"
+                assert_eq 16 "$pcie_width" "$key PCIe width"
+                ;;
+            gt1030_2gb)
+                assert_eq 1227 "$core_mhz" "$key core clock"
+                assert_eq 1468 "$boost_mhz" "$key boost clock"
+                assert_eq 1502 "$memory_mhz" "$key displayed memory clock"
+                assert_eq 64 "$bus_bits" "$key memory bus"
+                assert_eq 48100 "$bandwidth_mbps" "$key bandwidth"
+                assert_eq 384 "$cuda_cores" "$key CUDA cores"
+                assert_eq 3 "$shader_subpipes" "$key shader subpipes"
+                assert_eq 16 "$rop_count" "$key ROP count"
+                assert_eq 24 "$tmu_count" "$key TMU count"
+                assert_eq 0x130 "$architecture" "$key architecture"
+                assert_eq 8 "$implementation" "$key implementation"
+                assert_eq 0x11 "$chip_revision" "$key chip revision"
+                assert_eq 4 "$pcie_width" "$key PCIe width"
+                ;;
+            gtx1050_2gb)
+                assert_eq 'Version 86.07.39.40.F4' "$vbios" \
+                    "$key corrected Dell VBIOS"
+                assert_eq 1354 "$core_mhz" "$key core clock"
+                assert_eq 1455 "$boost_mhz" "$key boost clock"
+                assert_eq 1752 "$memory_mhz" "$key displayed memory clock"
+                assert_eq 128 "$bus_bits" "$key memory bus"
+                assert_eq 112000 "$bandwidth_mbps" "$key bandwidth"
+                assert_eq 640 "$cuda_cores" "$key CUDA cores"
+                assert_eq 5 "$shader_subpipes" "$key shader subpipes"
+                assert_eq 32 "$rop_count" "$key ROP count"
+                assert_eq 40 "$tmu_count" "$key TMU count"
+                assert_eq 0x130 "$architecture" "$key architecture"
+                assert_eq 7 "$implementation" "$key implementation"
+                assert_eq 0x11 "$chip_revision" "$key chip revision"
+                assert_eq 16 "$pcie_width" "$key PCIe width"
+                ;;
+        esac
 
         did_hex="${did#0x}"
         grep -Fq "VEN_10DE&DEV_${did_hex^^}" "$PATCH_GRID" \
@@ -71,8 +140,93 @@ test_catalog() {
             || fail "$key PCI device is missing from guest INF target map"
 
         vgpu_profile_load "$key" || fail "cannot load catalog profile: $key"
-        loaded="$GPU_PROFILE|$VGPU_MDEV_PROFILE|$GPU_NAME|$GPU_PCI_VID|$GPU_PCI_DID|$GPU_SUB_VID|$GPU_SUB_DID|$GPU_REV|$GPU_VRAM_MB|$GPU_VBIOS|$GPU_CORE_MHZ|$GPU_BOOST_MHZ|$GPU_MEMORY_MHZ|$GPU_MEMORY_BUS_BITS|$GPU_MEMORY_BANDWIDTH_MBPS|$GPU_MEMORY_TYPE|$GPU_MEMORY_MAKER"
+        loaded="$GPU_PROFILE|$VGPU_MDEV_PROFILE|$GPU_NAME|$GPU_PCI_VID|$GPU_PCI_DID|$GPU_SUB_VID|$GPU_SUB_DID|$GPU_REV|$GPU_VRAM_MB|$GPU_VBIOS|$GPU_CORE_MHZ|$GPU_BOOST_MHZ|$GPU_MEMORY_MHZ|$GPU_MEMORY_BUS_BITS|$GPU_MEMORY_BANDWIDTH_MBPS|$GPU_MEMORY_TYPE|$GPU_MEMORY_MAKER|$GPU_MEMORY_TYPE_NVAPI|$GPU_MEMORY_MAKER_NVAPI|$GPU_CUDA_CORES|$GPU_SHADER_SUBPIPES|$GPU_ROP_COUNT|$GPU_TMU_COUNT|$GPU_ARCHITECTURE|$GPU_IMPLEMENTATION|$GPU_CHIP_REVISION|$GPU_PCIE_WIDTH"
         assert_eq "$row" "$loaded" "$key loaded profile"
+    done
+
+    # Catalog validation itself must fail closed on a plausible-looking row
+    # whose displayed clock and bandwidth cannot describe the same GDDR5 bus.
+    local original_catalog=("${VGPU_PROFILE_CATALOG[@]}")
+    VGPU_PROFILE_CATALOG=(
+        "${original_catalog[0]%|86400|GDDR5|Samsung|8|1|640|5|16|40|0x110|7|0x12|16}|64000|GDDR5|Samsung|8|1|640|5|16|40|0x110|7|0x12|16"
+    )
+    if vgpu_profile_validate_catalog >/dev/null 2>&1; then
+        fail "catalog validator accepted an incoherent memory bandwidth"
+    fi
+    VGPU_PROFILE_CATALOG=(
+        "${original_catalog[0]/|1020|1085|/|1086|1085|}"
+    )
+    if vgpu_profile_validate_catalog >/dev/null 2>&1; then
+        fail "catalog validator accepted boost below core"
+    fi
+    VGPU_PROFILE_CATALOG=(
+        "${original_catalog[0]%|16}|3"
+    )
+    if vgpu_profile_validate_catalog >/dev/null 2>&1; then
+        fail "catalog validator accepted a non-lane PCIe width"
+    fi
+    VGPU_PROFILE_CATALOG=(
+        "${original_catalog[0]/|640|5|16|40|/|640|5|16|41|}"
+    )
+    if vgpu_profile_validate_catalog >/dev/null 2>&1; then
+        fail "catalog validator accepted an incoherent TMU count"
+    fi
+    VGPU_PROFILE_CATALOG=("${original_catalog[@]}")
+    vgpu_profile_validate_catalog ||
+        fail "catalog validator did not recover after the negative case"
+
+    for registry_name in \
+            IdentityMemoryClockNVAPIKHz \
+            IdentityPciVendorId IdentityPciDeviceId \
+            IdentityPciSubVendorId IdentityPciSubDeviceId \
+            IdentityPciRevisionId \
+            IdentityMemoryType IdentityMemoryMaker IdentityCudaCores \
+            IdentityShaderSubPipes IdentityRopCount IdentityTmuCount IdentityArchitecture \
+            IdentityImplementation IdentityChipRevision IdentityPcieWidth \
+            IdentityVbiosVersion; do
+        grep -Fq "$registry_name" "$PATCH_GRID" \
+            || fail "registry writer lacks $registry_name"
+        grep -Fq "$registry_name" "$APPLY_PROFILE" \
+            || fail "staged verifier lacks $registry_name"
+    done
+    for patch_parameter in \
+            MemoryType MemoryMaker CudaCores ShaderSubPipes RopCount TmuCount \
+            NvapiPciVendorId NvapiPciDeviceId NvapiPciSubVendorId \
+            NvapiPciSubDeviceId NvapiPciRevisionId \
+            Architecture Implementation ChipRevision PcieWidth \
+            VbiosVersion; do
+        [[ $(grep -Fc -- "-$patch_parameter" "$SETUP_GUEST") -ge 2 ]] \
+            || fail "legacy sync does not persist $patch_parameter in both its immediate and startup writes"
+    done
+    grep -Fq 'NVAPI identity registry write verified' "$PATCH_GRID" \
+        && fail "registry writer still reports the removed pre-contract message"
+    grep -Fq 'NVAPI identity registry contract committed' "$PATCH_GRID" \
+        || fail "common legacy/staged writer does not commit a complete contract"
+    grep -Fq 'IdentityProfileKey' "$PATCH_GRID" \
+        || fail "registry writer omits the catalog profile key"
+    grep -Fq 'IdentityContractVersion' "$PATCH_GRID" \
+        || fail "registry writer omits the fail-closed completion marker"
+    grep -Fq '$memoryRawClockKHz = [int64]$MemoryClockMHz * 2000' \
+        "$PATCH_GRID" || fail "registry writer lacks the audited GDDR5 raw clock"
+    grep -Fq '$expectedMemoryRawKHz = [int64]$Gpu.MemoryClockMHz * 2000' \
+        "$APPLY_PROFILE" || fail "staged verifier lacks the audited GDDR5 raw clock"
+    grep -Fq 'patch-grid-strings.ps1 failed with exit code $LASTEXITCODE' \
+        "$SETUP_GUEST" || fail "legacy identity sync ignores the registry writer exit code"
+    grep -Fq 'install-nvapi-shim.ps1 failed with exit code $LASTEXITCODE' \
+        "$SETUP_GUEST" || fail "legacy identity sync ignores the shim installer exit code"
+    grep -Fq 'out, streams, had_errors = c.execute_ps(ps)' \
+        "$SETUP_GUEST" || fail "legacy identity sync discards the WinRM error flag"
+    grep -Fq 'if had_errors or errors:' \
+        "$SETUP_GUEST" || fail "legacy identity sync does not fail on WinRM errors"
+    for strict_line in \
+            'GPU_VBIOS="Version 86.07.39.40.F4"' \
+            'GPU_MEMORY_TYPE_NVAPI=8' 'GPU_MEMORY_MAKER_NVAPI=1' \
+            'GPU_CUDA_CORES=640' 'GPU_SHADER_SUBPIPES=5' \
+            'GPU_ROP_COUNT=32' 'GPU_TMU_COUNT=40' 'GPU_ARCHITECTURE=0x130' \
+            'GPU_IMPLEMENTATION=7' 'GPU_CHIP_REVISION=0x11' \
+            'GPU_PCIE_WIDTH=16'; do
+        grep -Fq "$strict_line" "$FINISH_VGPU" \
+            || fail "strict GTX 1050 finish persistence lacks $strict_line"
     done
 }
 
@@ -84,7 +238,10 @@ export VM_ROOT
 test_create_profile() {
     local key="$1" vm_id="$2" order="$3" conf
     local expected_name expected_vid expected_did expected_subvid expected_subdid
-    local expected_core expected_boost expected_memory expected_target
+    local expected_core expected_boost expected_memory
+    local expected_vbios expected_memory_type_nvapi expected_memory_maker_nvapi
+    local expected_cuda expected_subpipes expected_rops expected_tmus expected_architecture
+    local expected_implementation expected_chip_revision expected_pcie_width
 
     vgpu_profile_load "$key" || fail "required test profile is absent: $key"
     expected_name="$GPU_NAME"
@@ -95,12 +252,17 @@ test_create_profile() {
     expected_core="$GPU_CORE_MHZ"
     expected_boost="$GPU_BOOST_MHZ"
     expected_memory="$GPU_MEMORY_MHZ"
-    case "$key" in
-        gtx1050_2gb) expected_target=full-consumer ;;
-        gtx750ti_2gb|gt1030_2gb) expected_target=name-only ;;
-        *) fail "$key has no test identity policy" ;;
-    esac
-
+    expected_vbios="$GPU_VBIOS"
+    expected_memory_type_nvapi="$GPU_MEMORY_TYPE_NVAPI"
+    expected_memory_maker_nvapi="$GPU_MEMORY_MAKER_NVAPI"
+    expected_cuda="$GPU_CUDA_CORES"
+    expected_subpipes="$GPU_SHADER_SUBPIPES"
+    expected_rops="$GPU_ROP_COUNT"
+    expected_tmus="$GPU_TMU_COUNT"
+    expected_architecture="$GPU_ARCHITECTURE"
+    expected_implementation="$GPU_IMPLEMENTATION"
+    expected_chip_revision="$GPU_CHIP_REVISION"
+    expected_pcie_width="$GPU_PCIE_WIDTH"
     if [[ "$order" == "option-first" ]]; then
         "$CREATE_VM" --gpu-profile "$key" "$vm_id" \
             >"$TMP_DIR/create-$vm_id.out" 2>"$TMP_DIR/create-$vm_id.err"
@@ -120,20 +282,19 @@ test_create_profile() {
         unset VGPU_MDEV_PROFILE VGPU_FB_MB GPU_NAME GPU_VRAM_MB
         unset GPU_PCI_VID GPU_PCI_DID GPU_SUB_VID GPU_SUB_DID
         unset GPU_CORE_MHZ GPU_BOOST_MHZ GPU_MEMORY_MHZ
+        unset GPU_VBIOS GPU_MEMORY_TYPE_NVAPI GPU_MEMORY_MAKER_NVAPI
+        unset GPU_CUDA_CORES GPU_SHADER_SUBPIPES GPU_ROP_COUNT GPU_TMU_COUNT
+        unset GPU_ARCHITECTURE GPU_IMPLEMENTATION GPU_CHIP_REVISION
+        unset GPU_PCIE_WIDTH
         # shellcheck disable=SC1090
         source "$conf"
 
         assert_eq "$key" "${GPU_PROFILE-}" "$key conf profile key"
         assert_eq B "${SPOOF_MODE-}" "$key safe default spoof mode"
-        assert_eq "$expected_target" "${VGPU_IDENTITY_TARGET-}" \
+        assert_eq name-only "${VGPU_IDENTITY_TARGET-}" \
             "$key identity target"
-        if [[ "$key" == gtx1050_2gb ]]; then
-            assert_eq 31.0.15.3833 \
-                "${VGPU_PATCHED_DRIVER_REQUIRED_VERSION-}" \
-                "$key required patched driver"
-        elif [[ -v VGPU_PATCHED_DRIVER_REQUIRED_VERSION ]]; then
+        [[ ! -v VGPU_PATCHED_DRIVER_REQUIRED_VERSION ]] || \
             fail "$key unexpectedly requires a patched full-consumer driver"
-        fi
         [[ ! -v VGPU_MDEV_INTERNAL_PCI_IDENTITY ]] || \
             fail "$key new config enabled internal PCI identity"
         [[ ! -v VGPU_MDEV_FRL_ENABLED ]] || \
@@ -153,6 +314,24 @@ test_create_profile() {
         assert_eq "$expected_core" "${GPU_CORE_MHZ-}" "$key conf core clock"
         assert_eq "$expected_boost" "${GPU_BOOST_MHZ-}" "$key conf boost clock"
         assert_eq "$expected_memory" "${GPU_MEMORY_MHZ-}" "$key conf memory clock"
+        assert_eq "$expected_vbios" "${GPU_VBIOS-}" "$key conf VBIOS"
+        assert_eq "$expected_memory_type_nvapi" "${GPU_MEMORY_TYPE_NVAPI-}" \
+            "$key conf NVAPI memory type"
+        assert_eq "$expected_memory_maker_nvapi" "${GPU_MEMORY_MAKER_NVAPI-}" \
+            "$key conf NVAPI memory maker"
+        assert_eq "$expected_cuda" "${GPU_CUDA_CORES-}" "$key conf CUDA cores"
+        assert_eq "$expected_subpipes" "${GPU_SHADER_SUBPIPES-}" \
+            "$key conf shader subpipes"
+        assert_eq "$expected_rops" "${GPU_ROP_COUNT-}" "$key conf ROP count"
+        assert_eq "$expected_tmus" "${GPU_TMU_COUNT-}" "$key conf TMU count"
+        assert_eq "$expected_architecture" "${GPU_ARCHITECTURE-}" \
+            "$key conf architecture"
+        assert_eq "$expected_implementation" "${GPU_IMPLEMENTATION-}" \
+            "$key conf implementation"
+        assert_eq "$expected_chip_revision" "${GPU_CHIP_REVISION-}" \
+            "$key conf chip revision"
+        assert_eq "$expected_pcie_width" "${GPU_PCIE_WIDTH-}" \
+            "$key conf PCIe width"
     )
 }
 
@@ -280,7 +459,7 @@ test_force_missing_gpu_profile_fails() {
     fi
     after_hash=$(sha256sum "$conf" | awk '{print $1}')
     assert_eq "$before_hash" "$after_hash" "missing GPU profile preserved config"
-    grep -Fq '拒绝 --force 随机换卡' \
+    grep -Fq '拒绝 --force 自动换卡' \
         "$TMP_DIR/create-force-missing-gpu.err" || \
         fail "missing GPU_PROFILE refusal was not clear"
     chmod 0644 "$conf"

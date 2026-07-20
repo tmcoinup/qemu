@@ -4539,11 +4539,40 @@ if have_tools
              install: true)
 
   if host_os in ['linux', 'windows']
+    fb_shm_stream_gpu_conf = configuration_data()
+    fb_shm_stream_gpu_conf.set10(
+      'FB_SHM_STREAM_HAVE_LIBAVCODEC',
+      dependency('libavcodec', required: false).found())
+    fb_shm_stream_gpu_conf.set10(
+      'FB_SHM_STREAM_HAVE_LIBAVUTIL',
+      dependency('libavutil', required: false).found())
+    fb_shm_stream_gpu_conf.set10(
+      'FB_SHM_STREAM_HAVE_LIBAVFORMAT',
+      dependency('libavformat', required: false).found())
+    fb_shm_stream_gpu_conf.set10(
+      'FB_SHM_STREAM_HAVE_LIBDRM',
+      host_os == 'linux' and dependency('libdrm', required: false).found())
+    fb_shm_stream_gpu_conf.set10(
+      'FB_SHM_STREAM_HAVE_LIBVA',
+      host_os == 'linux' and dependency('libva', required: false).found())
+    fb_shm_stream_gpu_conf.set10(
+      'FB_SHM_STREAM_HAVE_CUDA',
+      host_os == 'linux' and dependency('cuda', required: false).found())
+    fb_shm_stream_gpu_conf.set10(
+      'FB_SHM_STREAM_HAVE_FFNVCODEC',
+      host_os == 'linux' and dependency('ffnvcodec', required: false).found())
+    fb_shm_stream_gpu_config_h = configure_file(
+      input: 'tools/fb-shm-stream/gpu-config.h.in',
+      output: 'fb-shm-stream-gpu-config.h',
+      configuration: fb_shm_stream_gpu_conf)
+
     executable('qemu-fb-shm-stream',
                files('tools/fb-shm-stream/main.c',
                      'tools/fb-shm-stream/platform.c',
                      'tools/fb-shm-stream/ffmpeg.c',
+                     'tools/fb-shm-stream/gpu.c',
                      'tools/fb-shm-stream/pace.c'),
+               fb_shm_stream_gpu_config_h,
                include_directories: include_directories('include'),
                dependencies: [socket],
                install: true)

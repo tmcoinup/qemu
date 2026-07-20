@@ -134,6 +134,14 @@ validate_positive_int() {
         fail_config "$name 超出范围 ${minimum}..${maximum}: $value"
 }
 
+validate_hex_word() {
+    local name=$1 value=$2 minimum=$3
+    [[ "$value" =~ ^0x[0-9A-Fa-f]{1,4}$ ]] || \
+        fail_config "$name 必须是 0x0000..0xFFFF 的十六进制整数: $value"
+    (( value >= minimum )) || \
+        fail_config "$name 必须不小于 0x$(printf '%X' "$minimum"): $value"
+}
+
 valid_ipv4() {
     local address=$1 octet
     local -a octets=()
@@ -170,6 +178,17 @@ configured_gpu_memory_mhz=${GPU_MEMORY_MHZ:-}
 configured_gpu_memory_bus_bits=${GPU_MEMORY_BUS_BITS:-}
 configured_gpu_memory_bandwidth_mbps=${GPU_MEMORY_BANDWIDTH_MBPS:-}
 configured_gpu_vram_mb=${GPU_VRAM_MB:-}
+configured_gpu_vbios=${GPU_VBIOS:-}
+configured_gpu_memory_type_nvapi=${GPU_MEMORY_TYPE_NVAPI:-}
+configured_gpu_memory_maker_nvapi=${GPU_MEMORY_MAKER_NVAPI:-}
+configured_gpu_cuda_cores=${GPU_CUDA_CORES:-}
+configured_gpu_shader_subpipes=${GPU_SHADER_SUBPIPES:-}
+configured_gpu_rop_count=${GPU_ROP_COUNT:-}
+configured_gpu_tmu_count=${GPU_TMU_COUNT:-}
+configured_gpu_architecture=${GPU_ARCHITECTURE:-}
+configured_gpu_implementation=${GPU_IMPLEMENTATION:-}
+configured_gpu_chip_revision=${GPU_CHIP_REVISION:-}
+configured_gpu_pcie_width=${GPU_PCIE_WIDTH:-}
 configured_monitor_profile=${MONITOR_PROFILE:-}
 configured_monitor_serial=${MONITOR_SERIAL:-}
 configured_vm_uuid=${VM_UUID:-}
@@ -190,6 +209,17 @@ GPU_MEMORY_MHZ=${configured_gpu_memory_mhz:-$GPU_MEMORY_MHZ}
 GPU_MEMORY_BUS_BITS=${configured_gpu_memory_bus_bits:-$GPU_MEMORY_BUS_BITS}
 GPU_MEMORY_BANDWIDTH_MBPS=${configured_gpu_memory_bandwidth_mbps:-$GPU_MEMORY_BANDWIDTH_MBPS}
 GPU_VRAM_MB=${configured_gpu_vram_mb:-$GPU_VRAM_MB}
+GPU_VBIOS=${configured_gpu_vbios:-$GPU_VBIOS}
+GPU_MEMORY_TYPE_NVAPI=${configured_gpu_memory_type_nvapi:-$GPU_MEMORY_TYPE_NVAPI}
+GPU_MEMORY_MAKER_NVAPI=${configured_gpu_memory_maker_nvapi:-$GPU_MEMORY_MAKER_NVAPI}
+GPU_CUDA_CORES=${configured_gpu_cuda_cores:-$GPU_CUDA_CORES}
+GPU_SHADER_SUBPIPES=${configured_gpu_shader_subpipes:-$GPU_SHADER_SUBPIPES}
+GPU_ROP_COUNT=${configured_gpu_rop_count:-$GPU_ROP_COUNT}
+GPU_TMU_COUNT=${configured_gpu_tmu_count:-$GPU_TMU_COUNT}
+GPU_ARCHITECTURE=${configured_gpu_architecture:-$GPU_ARCHITECTURE}
+GPU_IMPLEMENTATION=${configured_gpu_implementation:-$GPU_IMPLEMENTATION}
+GPU_CHIP_REVISION=${configured_gpu_chip_revision:-$GPU_CHIP_REVISION}
+GPU_PCIE_WIDTH=${configured_gpu_pcie_width:-$GPU_PCIE_WIDTH}
 if [[ -n "$configured_mdev_profile" && "$configured_mdev_profile" != nvidia-257 ]]; then
     fail_config "VGPU_MDEV_PROFILE 在 B 模式下必须为 nvidia-257: $configured_mdev_profile"
 fi
@@ -219,6 +249,50 @@ validate_positive_int GPU_MEMORY_BUS_BITS "$GPU_MEMORY_BUS_BITS" 1 1024
 validate_positive_int GPU_MEMORY_BANDWIDTH_MBPS \
     "$GPU_MEMORY_BANDWIDTH_MBPS" 1 1000000
 validate_positive_int GPU_VRAM_MB "$GPU_VRAM_MB" 2048 2048
+validate_positive_int GPU_MEMORY_TYPE_NVAPI "$GPU_MEMORY_TYPE_NVAPI" 8 8
+validate_positive_int GPU_MEMORY_MAKER_NVAPI "$GPU_MEMORY_MAKER_NVAPI" 1 255
+validate_positive_int GPU_CUDA_CORES "$GPU_CUDA_CORES" 1 1000000
+validate_positive_int GPU_SHADER_SUBPIPES "$GPU_SHADER_SUBPIPES" 1 65535
+validate_positive_int GPU_ROP_COUNT "$GPU_ROP_COUNT" 1 65535
+validate_positive_int GPU_TMU_COUNT "$GPU_TMU_COUNT" 1 1000000
+validate_hex_word GPU_ARCHITECTURE "$GPU_ARCHITECTURE" 1
+validate_positive_int GPU_IMPLEMENTATION "$GPU_IMPLEMENTATION" 1 65535
+validate_hex_word GPU_CHIP_REVISION "$GPU_CHIP_REVISION" 0
+validate_positive_int GPU_PCIE_WIDTH "$GPU_PCIE_WIDTH" 1 32
+(( GPU_BOOST_MHZ >= GPU_CORE_MHZ )) || \
+    fail_config "GPU_BOOST_MHZ 不能低于 GPU_CORE_MHZ"
+(( GPU_TMU_COUNT == GPU_SHADER_SUBPIPES * 8 )) || \
+    fail_config "GPU_TMU_COUNT 必须等于 GPU_SHADER_SUBPIPES * 8"
+case "$GPU_PCIE_WIDTH" in
+    1|2|4|8|16|32) ;;
+    *) fail_config "GPU_PCIE_WIDTH 必须是 1/2/4/8/16/32" ;;
+esac
+# The current catalog is deliberately GDDR5-only.  GPU-Z 2.70 renders half
+# of the raw NVAPI memory-domain clock, so display MHz -> raw kHz is *2000.
+# Reject inconsistent per-VM overrides instead of publishing a mixed profile.
+GPU_MEMORY_RAW_KHZ=$((GPU_MEMORY_MHZ * 2000))
+GPU_DERIVED_BANDWIDTH_MBPS=$(( \
+    GPU_MEMORY_RAW_KHZ * 2 * GPU_MEMORY_BUS_BITS / 8000 \
+))
+GPU_BANDWIDTH_DIFFERENCE=$(( \
+    GPU_DERIVED_BANDWIDTH_MBPS - GPU_MEMORY_BANDWIDTH_MBPS \
+))
+(( GPU_BANDWIDTH_DIFFERENCE >= 0 )) || \
+    GPU_BANDWIDTH_DIFFERENCE=$((-GPU_BANDWIDTH_DIFFERENCE))
+(( GPU_BANDWIDTH_DIFFERENCE * 100 <= GPU_MEMORY_BANDWIDTH_MBPS )) || \
+    fail_config "GPU memory clock/bus/bandwidth 不一致（GDDR5 容差 1%，推导 ${GPU_DERIVED_BANDWIDTH_MBPS} MB/s）"
+[[ "$GPU_VBIOS" == 'Version '* ]] || \
+    fail_config "GPU_VBIOS 必须以 'Version ' 开头: $GPU_VBIOS"
+GPU_VBIOS_VERSION=${GPU_VBIOS#Version }
+[[ "$GPU_VBIOS_VERSION" =~ ^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){4}$ ]] || \
+    fail_config "GPU_VBIOS 必须包含五段十六进制版本号: $GPU_VBIOS"
+GPU_ARCHITECTURE_DECIMAL=$((GPU_ARCHITECTURE))
+GPU_CHIP_REVISION_DECIMAL=$((GPU_CHIP_REVISION))
+GPU_PCI_VID_DECIMAL=$((GPU_PCI_VID))
+GPU_PCI_DID_DECIMAL=$((GPU_PCI_DID))
+GPU_SUB_VID_DECIMAL=$((GPU_SUB_VID))
+GPU_SUB_DID_DECIMAL=$((GPU_SUB_DID))
+GPU_REV_DECIMAL=$((GPU_REV))
 validate_positive_int MONITOR_NATIVE_X "$MONITOR_NATIVE_X" 320 16384
 validate_positive_int MONITOR_NATIVE_Y "$MONITOR_NATIVE_Y" 200 16384
 validate_positive_int MONITOR_REFRESH_HZ "$MONITOR_REFRESH_HZ" 1 1000
@@ -293,12 +367,28 @@ jq -n \
     --arg gpuProfile "$GPU_PROFILE" \
     --arg gpuName "$GPU_NAME" \
     --arg expectedPnpId "$EXPECTED_PNP_ID" \
+    --argjson nvapiPciVendorId "$GPU_PCI_VID_DECIMAL" \
+    --argjson nvapiPciDeviceId "$GPU_PCI_DID_DECIMAL" \
+    --argjson nvapiPciSubVendorId "$GPU_SUB_VID_DECIMAL" \
+    --argjson nvapiPciSubDeviceId "$GPU_SUB_DID_DECIMAL" \
+    --argjson nvapiPciRevisionId "$GPU_REV_DECIMAL" \
     --argjson coreClockMHz "$GPU_CORE_MHZ" \
     --argjson boostClockMHz "$GPU_BOOST_MHZ" \
     --argjson memoryClockMHz "$GPU_MEMORY_MHZ" \
     --argjson memoryBusBits "$GPU_MEMORY_BUS_BITS" \
     --argjson memoryBandwidthMBps "$GPU_MEMORY_BANDWIDTH_MBPS" \
     --argjson vramMB "$GPU_VRAM_MB" \
+    --argjson memoryType "$GPU_MEMORY_TYPE_NVAPI" \
+    --argjson memoryMaker "$GPU_MEMORY_MAKER_NVAPI" \
+    --argjson cudaCores "$GPU_CUDA_CORES" \
+    --argjson shaderSubPipes "$GPU_SHADER_SUBPIPES" \
+    --argjson ropCount "$GPU_ROP_COUNT" \
+    --argjson tmuCount "$GPU_TMU_COUNT" \
+    --argjson architecture "$GPU_ARCHITECTURE_DECIMAL" \
+    --argjson implementation "$GPU_IMPLEMENTATION" \
+    --argjson chipRevision "$GPU_CHIP_REVISION_DECIMAL" \
+    --argjson pcieWidth "$GPU_PCIE_WIDTH" \
+    --arg vbiosVersion "$GPU_VBIOS_VERSION" \
     --arg monitorProfile "$MONITOR_PROFILE" \
     --arg monitorSerial "$MONITOR_SERIAL" \
     --arg monitorDisplayName "$MONITOR_DISPLAY_NAME" \
@@ -314,12 +404,28 @@ jq -n \
             profile: $gpuProfile,
             name: $gpuName,
             expectedPnpId: $expectedPnpId,
+            nvapiPciVendorId: $nvapiPciVendorId,
+            nvapiPciDeviceId: $nvapiPciDeviceId,
+            nvapiPciSubVendorId: $nvapiPciSubVendorId,
+            nvapiPciSubDeviceId: $nvapiPciSubDeviceId,
+            nvapiPciRevisionId: $nvapiPciRevisionId,
             coreClockMHz: $coreClockMHz,
             boostClockMHz: $boostClockMHz,
             memoryClockMHz: $memoryClockMHz,
             memoryBusBits: $memoryBusBits,
             memoryBandwidthMBps: $memoryBandwidthMBps,
-            vramMB: $vramMB
+            vramMB: $vramMB,
+            memoryType: $memoryType,
+            memoryMaker: $memoryMaker,
+            cudaCores: $cudaCores,
+            shaderSubPipes: $shaderSubPipes,
+            ropCount: $ropCount,
+            tmuCount: $tmuCount,
+            architecture: $architecture,
+            implementation: $implementation,
+            chipRevision: $chipRevision,
+            pcieWidth: $pcieWidth,
+            vbiosVersion: $vbiosVersion
         },
         monitor: {
             profile: $monitorProfile,

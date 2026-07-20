@@ -37,6 +37,28 @@ require_native_vfio() {
     [[ "$line" == *"rombar=0"* ]] || fail "native vGPU must keep its EFI ROM hidden"
     [[ "$line" == *"enable-migration=off"* ]] \
         || fail "native vGPU lost its migration safety setting"
+    [[ "$line" == *"bus=gpu-root-port"* && "$line" == *"addr=0x0"* ]] \
+        || fail "native vGPU is not attached below its PCIe root port"
+    [[ "$line" != *"bus=pcie.0"* ]] \
+        || fail "native vGPU is still attached directly to the root complex"
+}
+
+require_vgpu_root_port() {
+    local file=$1 expected_width=${2:-16} line
+
+    line="$(grep -F -- 'pcie-root-port\,' "$file" || true)"
+    [[ -n "$line" ]] || fail "vGPU PCIe root port is missing"
+    [[ "$line" == *"id=gpu-root-port"* ]] \
+        || fail "vGPU PCIe root port has no stable bus id"
+    [[ "$line" == *"bus=pcie.0"* && "$line" == *"addr=0x10"* ]] \
+        || fail "vGPU PCIe root port moved from its reserved root-bus address"
+    [[ "$line" == *"hotplug=off"* ]] \
+        || fail "desktop GPU root port unexpectedly permits hotplug"
+    [[ "$line" == *"x-speed=8"* &&
+       "$line" == *"x-width=${expected_width}"* ]] \
+        || fail "vGPU root port does not advertise PCIe 3.0 x${expected_width}"
+    [[ "$line" == *"x-pci-vendor-id=0x8086"* ]] \
+        || fail "vGPU root port does not use the platform's Intel identity"
 }
 
 require_no_legacy_transport() {
@@ -128,6 +150,20 @@ if [ "$#" -eq 2 ] && [ "$1" = -device ] \
     printf '  ramfb=<bool>\n'
     exit 0
 fi
+if [ "$#" -eq 2 ] && [ "$1" = -device ] \
+        && [ "$2" = pcie-root-port,help ]; then
+    printf '%s\n' \
+        '  x-speed=<PCIELinkSpeed>' \
+        '  x-width=<PCIELinkWidth>' \
+        '  x-pci-vendor-id=<uint32>' \
+        '  x-pci-device-id=<uint32>' \
+        '  x-pci-revision=<uint32>'
+    exit 0
+fi
+if [ "$#" -eq 2 ] && [ "$1" = -object ] && [ "$2" = fb-shm,help ]; then
+    printf 'fb-shm options:\n  path=<string>\n  rate=<uint32>\n'
+    exit 0
+fi
 echo "unexpected fake QEMU invocation: $*" >&2
 exit 99
 EOF
@@ -163,6 +199,8 @@ RESCUE_OUT="$TMP_DIR/rescue.out"
 MISSING_RTC_OUT="$TMP_DIR/missing-rtc.out"
 V100_OUT="$TMP_DIR/v100.out"
 NO_TPM_OUT="$TMP_DIR/no-tpm.out"
+STREAM_OUT="$TMP_DIR/stream.out"
+GT1030_OUT="$TMP_DIR/gt1030.out"
 
 run_start_vm "$SDL_OUT"
 require_text "模式=vgpu-sdl" "$SDL_OUT"
@@ -173,6 +211,9 @@ reject_text 'ide-cd\,drive=' "$SDL_OUT"
 reject_text 'scsi-cd' "$SDL_OUT"
 require_text 'vGPU resource: nvidia-257/2048MB' "$SDL_OUT"
 require_native_vfio "$SDL_OUT"
+require_vgpu_root_port "$SDL_OUT"
+require_text 'x-pci-device-id=0x0C01' "$SDL_OUT"
+require_text 'x-pci-revision=0x06' "$SDL_OUT"
 require_tpm2 "$SDL_OUT"
 require_text 'sdl\,gl=on' "$SDL_OUT"
 require_text 'processor-upgrade=0x2D' "$SDL_OUT"
@@ -191,6 +232,7 @@ require_text 'usb-kbd\,bus=xhci.0\,vendorid=0x045E\,productid=0x0750\,manufactur
     "$SDL_OUT"
 require_text 'usb-tablet\,bus=xhci.0\,vendorid=0x256C\,productid=0x006D\,manufacturer=HUION\,product=HUION\ PenTablet' \
     "$SDL_OUT"
+reject_text 'multi=on' "$SDL_OUT"
 if grep -F -- 'usb-kbd\,' "$SDL_OUT" | grep -Fq -- 'serial=' ||
         grep -F -- 'usb-tablet\,' "$SDL_OUT" | grep -Fq -- 'serial='; then
     fail 'legacy USB HID fallback invented a descriptor serial number'
@@ -199,12 +241,66 @@ reject_text 'show-cursor=on' "$SDL_OUT"
 reject_text 'gtk\,gl=on' "$SDL_OUT"
 require_no_legacy_transport "$SDL_OUT"
 
-run_start_vm "$GTK_OUT" --gtk
+run_start_vm "$GTK_OUT" --gtk --proxy
 require_text "模式=vgpu-gtk" "$GTK_OUT"
 require_native_vfio "$GTK_OUT"
+require_vgpu_root_port "$GTK_OUT"
 require_tpm2 "$GTK_OUT"
 require_text 'gtk\,gl=on\,show-cursor=on\,grab-on-hover=on' "$GTK_OUT"
+require_text "unix:${VM_ROOT}/instances/vm${VM_ID}/run/qmp.sock\\,server\\,nowait\\,multi=on" \
+    "$GTK_OUT"
+require_text "QMP multi: native multi-client on ${VM_ROOT}/instances/vm${VM_ID}/run/qmp.sock" \
+    "$GTK_OUT"
+require_text "QMP alias: ${VM_ROOT}/instances/vm${VM_ID}/run/qmp.sock.proxy" \
+    "$GTK_OUT"
+[[ ! -e "$VM_ROOT/instances/vm${VM_ID}/run/qmp.sock.proxy" &&
+   ! -L "$VM_ROOT/instances/vm${VM_ID}/run/qmp.sock.proxy" ]] \
+    || fail "--proxy dry-run created a QMP compatibility alias"
 require_no_legacy_transport "$GTK_OUT"
+
+# GT 1030 is a PCIe 3.0 x4 card even though the physical desktop slot is x16.
+# Exercise the profile-specific root-port width without allocating an mdev.
+cp -- "$VM_ROOT/instances/vm${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.gtx1050"
+sed -i 's/^GPU_PROFILE=.*/GPU_PROFILE=gt1030_2gb/' \
+    "$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+run_start_vm "$GT1030_OUT"
+require_native_vfio "$GT1030_OUT"
+require_vgpu_root_port "$GT1030_OUT" 4
+reject_text 'x-width=16' "$GT1030_OUT"
+mv -- "$TMP_DIR/vm.conf.gtx1050" "$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+
+run_start_vm "$STREAM_OUT" \
+    --stream 'rtmp://ingest.example/live/supersecret' \
+    --stream-roi 100,50,1280,720 --stream-rate 60 \
+    --stream-encoder h264_nvenc --stream-bitrate 8M --stream-mode shm
+require_text 'fb-shm\,id=stream-vm' "$STREAM_OUT"
+require_text 'rate=60\,x=100\,y=50\,width=1280\,height=720' "$STREAM_OUT"
+require_text '推流: fb-shm 60Hz mode=shm encoder=h264_nvenc target=rtmp://...' \
+    "$STREAM_OUT"
+require_text '推流 ROI: 1280x720@100,50' "$STREAM_OUT"
+require_text 'NVENC 接收 SHM rawvideo 后仍有 GPU upload，不是零拷贝' \
+    "$STREAM_OUT"
+reject_text 'supersecret' "$STREAM_OUT"
+
+if run_start_vm "$TMP_DIR/stream-listener.out" \
+        --stream 'srt://0.0.0.0:9000?mode=listener'; then
+    fail 'stream listener/wildcard target was accepted'
+fi
+require_text '禁止 listener 模式' "$TMP_DIR/stream-listener.err"
+
+if run_start_vm "$TMP_DIR/stream-gpu.out" \
+        --stream 'rtmp://ingest.example/live/vm' --stream-mode gpu; then
+    fail 'R535 strict GPU zero-copy mode was accepted'
+fi
+require_text 'R535 VFIO display REGION 不导出 DMA-BUF' \
+    "$TMP_DIR/stream-gpu.err"
+
+if run_start_vm "$TMP_DIR/stream-rescue.out" --rescue-sdl \
+        --stream 'rtmp://ingest.example/live/vm'; then
+    fail 'streaming was accepted outside native vGPU mode'
+fi
+require_text '仅支持 G-11 native vGPU SDL/GTK 模式' \
+    "$TMP_DIR/stream-rescue.err"
 
 run_start_vm "$RESCUE_OUT" --rescue-sdl
 require_text '模式=rescue-sdl' "$RESCUE_OUT"
@@ -233,6 +329,8 @@ run_start_vm "$RDP_OUT" --rdp
 require_text "模式=rdp" "$RDP_OUT"
 require_text 'vfio-pci\,sysfsdev=' "$RDP_OUT"
 require_text 'display=off' "$RDP_OUT"
+require_text 'bus=gpu-root-port\,addr=0x0' "$RDP_OUT"
+require_vgpu_root_port "$RDP_OUT"
 require_text "vnc=:${VM_ID}" "$RDP_OUT"
 require_text 'memory-backend-file\,id=ivshm' "$RDP_OUT"
 require_text 'size=67108864' "$RDP_OUT"
@@ -260,6 +358,7 @@ run_start_vm "$V100_OUT"
 require_text 'vGPU resource: V100-2Q/2048MB' "$V100_OUT"
 require_text 'GPU identity: gtx1050_2gb / NVIDIA GeForce GTX 1050' "$V100_OUT"
 require_native_vfio "$V100_OUT"
+require_vgpu_root_port "$V100_OUT"
 require_tpm2 "$V100_OUT"
 require_no_legacy_transport "$V100_OUT"
 unset TEST_VGPU_HOST_CONFIG
@@ -277,10 +376,10 @@ require_text 'guest 显存 2048MB 与宿主 mdev 4096MB 不一致' \
     "$TMP_DIR/bad-fb.err"
 unset TEST_VGPU_HOST_CONFIG
 
-# GTK, the two native SDL runs (default + V100 preset), each perform two read-only
-# capability probes. RDP does not need either probe, and dry-run must never
-# make a final QEMU invocation.
-[[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 6 ]] \
+# Every vGPU run probes the root-port link/identity properties.  Native runs
+# also probe their display backend and ramfb support; streamed SDL adds the
+# fb-shm object probe.  Invalid stream configurations fail before any probe.
+[[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 18 ]] \
     || fail "fake QEMU saw an unexpected invocation"
 
 [[ -z "$(find "$VM_ROOT/run" -mindepth 1 -print -quit)" ]] \

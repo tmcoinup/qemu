@@ -6,7 +6,9 @@
 
 - Windows 安装 ISO 放在 `/home/ubuntu/images/iso`；省略启动参数时默认文件名为
   `win10.iso`；
-- guest 驱动和安装脚本放在 `/home/ubuntu/images/staging`，由 8080 HTTP 服务分发；
+- guest 驱动和安装产物放在 `/home/ubuntu/images/staging`；新的
+  `VgpuPortable.exe` 完全离线并注入 base，不依赖 8080 HTTP，只有明确标记的
+  legacy 调试流程才使用 staging HTTP；
 - VM 的实例目录、共享 base、host 资源和全局控制文件才属于 `VM_ROOT`，默认是
   `/home/ubuntu/images/vms`。
 
@@ -67,7 +69,7 @@
 | `vms/run/` | 否 | 不要手工删除锁 | 全局锁、每 VM 协调锁和迁移清单 |
 | `assets/` | 建议 | 可从仓库/模板恢复 | host 窗口资源 |
 | `iso/` | 按需 | 未挂载时可删 | Windows 安装介质，不属于 `VM_ROOT` |
-| `staging/` | 可重建 | 未安装时可清理 | 不是系统盘；驱动版本仍必须校验 |
+| `staging/` | 可重建 | 未安装时可清理 | 不是系统盘；portable EXE 从这里安全注入 base，驱动版本仍必须校验 |
 
 备份一台 VM 时可以直接保存整个 bundle；至少必须包含：
 

@@ -8,8 +8,9 @@
 #          ./create-vm.sh --list-gpu-profiles
 #          ./create-vm.sh --list-monitor-profiles
 #
-# 随机挑选一套「平台 + 主板 + 内存 + SSD + NVIDIA 2GB 显卡 + 真实显示器」，
-# 生成 UUID / 各种序列号 / MAC，写入实例自己的 vm.conf 后仅作只读。
+# 挑选一套「平台 + 主板 + 内存 + SSD + NVIDIA 2GB 显卡 + 真实显示器」；
+# 未显式指定显卡时使用已审计的 GTX 1050 2GB 默认策略。生成 UUID /
+# 各种序列号 / MAC，写入实例自己的 vm.conf 后仅作只读。
 # start-vm.sh 只读这个文件，确保同一个 VM 每次开机表现一致。
 
 set -euo pipefail
@@ -88,8 +89,9 @@ while (( $# > 0 )); do
     esac
 done
 
-if [[ -z "$VM_ID" || ! "$VM_ID" =~ ^[1-9][0-9]*$ ]]; then
+if ! vm_storage_id_is_supported "$VM_ID"; then
     echo "usage: $0 <vm_id> [--force] [--platform PLATFORM] [--ssd-profile PROFILE] [--gpu-profile PROFILE] [--monitor-profile PROFILE]" >&2
+    echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
 
@@ -148,6 +150,9 @@ OLD_VGPU_PATCHED_DRIVER_VERSION_SET=0
 OLD_VGPU_PATCHED_DRIVER_VERSION=""
 OLD_VGPU_PATCHED_DRIVER_INF_SET=0
 OLD_VGPU_PATCHED_DRIVER_INF=""
+GPUZ_PACKAGE_ENABLED=1
+OLD_GPUZ_PACKAGE_ENABLED_SET=0
+OLD_GPUZ_PACKAGE_ENABLED=""
 EXISTING_DISK=$(vm_storage_disk_path "$VM_ID")
 if (( FORCE )) && [[ -f "$CONF" ]]; then
     mapfile -d '' -t OLD_IDENTITY < <(
@@ -178,6 +183,7 @@ if (( FORCE )) && [[ -f "$CONF" ]]; then
         unset VGPU_MDEV_INTERNAL_PCI_IDENTITY VGPU_MDEV_FRL_ENABLED
         unset VGPU_PATCHED_DRIVER_REQUIRED_VERSION
         unset VGPU_PATCHED_DRIVER_VERSION VGPU_PATCHED_DRIVER_INF
+        unset GPUZ_PACKAGE_ENABLED
         # shellcheck source=/dev/null
         source "$CONF"
         printf '%s\0' \
@@ -193,9 +199,11 @@ if (( FORCE )) && [[ -f "$CONF" ]]; then
             "${VGPU_PATCHED_DRIVER_VERSION+x}" \
             "${VGPU_PATCHED_DRIVER_VERSION:-}" \
             "${VGPU_PATCHED_DRIVER_INF+x}" \
-            "${VGPU_PATCHED_DRIVER_INF:-}"
+            "${VGPU_PATCHED_DRIVER_INF:-}" \
+            "${GPUZ_PACKAGE_ENABLED+x}" \
+            "${GPUZ_PACKAGE_ENABLED:-}"
     )
-    if (( ${#OLD_GPU_POLICY[@]} != 13 )); then
+    if (( ${#OLD_GPU_POLICY[@]} != 15 )); then
         echo "无法安全读取旧 vm.conf 的 GPU policy，拒绝 --force" >&2
         exit 1
     fi
@@ -212,11 +220,23 @@ if (( FORCE )) && [[ -f "$CONF" ]]; then
     OLD_VGPU_PATCHED_DRIVER_VERSION=${OLD_GPU_POLICY[10]}
     OLD_VGPU_PATCHED_DRIVER_INF_SET=${OLD_GPU_POLICY[11]}
     OLD_VGPU_PATCHED_DRIVER_INF=${OLD_GPU_POLICY[12]}
+    OLD_GPUZ_PACKAGE_ENABLED_SET=${OLD_GPU_POLICY[13]}
+    OLD_GPUZ_PACKAGE_ENABLED=${OLD_GPU_POLICY[14]}
     unset OLD_GPU_POLICY
+
+    if [[ "$OLD_GPUZ_PACKAGE_ENABLED_SET" == x ]]; then
+        case "$OLD_GPUZ_PACKAGE_ENABLED" in
+            0|1) GPUZ_PACKAGE_ENABLED=$OLD_GPUZ_PACKAGE_ENABLED ;;
+            *)
+                echo "旧 vm.conf 的 GPUZ_PACKAGE_ENABLED 非法，必须是 0 或 1，拒绝 --force" >&2
+                exit 1
+                ;;
+        esac
+    fi
 
     if (( ! GPU_PROFILE_EXPLICIT )); then
         [[ -n "$OLD_GPU_PROFILE" ]] || {
-            echo "旧 vm.conf 缺少 GPU_PROFILE，拒绝 --force 随机换卡；请显式传 --gpu-profile" >&2
+            echo "旧 vm.conf 缺少 GPU_PROFILE，拒绝 --force 自动换卡；请显式传 --gpu-profile" >&2
             exit 1
         }
         case "$OLD_SPOOF_MODE" in
@@ -407,31 +427,20 @@ fi
 
 OUI=${INTEL_OUIS[$((RANDOM % ${#INTEL_OUIS[@]}))]}
 if [[ -z "$GPU_PROFILE_REQUEST" ]]; then
-    mapfile -t GPU_PROFILE_REQUESTS < <(vgpu_profile_keys)
-    GPU_PROFILE_REQUEST=${GPU_PROFILE_REQUESTS[$((RANDOM % ${#GPU_PROFILE_REQUESTS[@]}))]}
+    GPU_PROFILE_REQUEST=gtx1050_2gb
 fi
 vgpu_profile_load "$GPU_PROFILE_REQUEST"
 
-# New VMs always boot in the driver-safe B mode.  The target records whether
-# this identity has a reviewed full-consumer driver path available; it does
-# not silently enable A mode before that driver is actually staged and bound.
+# New VMs always use the production-driver-safe B mode.  The consumer name,
+# specs and app-local NVAPI PCI presentation come from the audited catalog;
+# Windows PnP remains the native DEV_1E30 required by the unmodified GRID
+# package.  Do not persist any legacy patched-driver/full-consumer marker in a
+# new instance.
 SPOOF_MODE=B
+VGPU_IDENTITY_TARGET=name-only
 unset VGPU_MDEV_INTERNAL_PCI_IDENTITY VGPU_MDEV_FRL_ENABLED
 unset VGPU_PATCHED_DRIVER_REQUIRED_VERSION
 unset VGPU_PATCHED_DRIVER_VERSION VGPU_PATCHED_DRIVER_INF
-case "$GPU_PROFILE" in
-    gtx1050_2gb)
-        VGPU_IDENTITY_TARGET=full-consumer
-        VGPU_PATCHED_DRIVER_REQUIRED_VERSION=31.0.15.3833
-        ;;
-    gtx750ti_2gb|gt1030_2gb)
-        VGPU_IDENTITY_TARGET=name-only
-        ;;
-    *)
-        echo "GPU profile 缺少安全 identity policy: $GPU_PROFILE" >&2
-        exit 1
-        ;;
-esac
 
 if (( PRESERVE_OLD_GPU_POLICY )); then
     [[ -z "$OLD_SPOOF_MODE" ]] || SPOOF_MODE=$OLD_SPOOF_MODE
@@ -602,9 +611,12 @@ SSD_LOGICAL_BLOCK_SIZE=${SSD_LOGICAL_BLOCK_SIZE}
 SSD_PHYSICAL_BLOCK_SIZE=${SSD_PHYSICAL_BLOCK_SIZE}
 SSD_SN="${SSD_SN}"
 
+# 通用 GPU-Z 封装生命周期开关。设为 0 时批量封装应跳过这个实例；
+# --force 会保留并校验旧值，不会把已淘汰实例静默重新启用。
+GPUZ_PACKAGE_ENABLED=${GPUZ_PACKAGE_ENABLED}
 GPU_PROFILE=${GPU_PROFILE}
-# B 始终是新 VM 的安全启动模式。VGPU_IDENTITY_TARGET 记录最终身份策略；
-# full-consumer 仍须先满足 required driver policy，不能据此自动切 A。
+# 新 VM 统一使用 B/name-only：系统 PnP 保持原版生产签名驱动所需的
+# DEV_1E30，消费级 PCI tuple 只在受验收的应用本地 NVAPI 层呈现。
 ${GPU_POLICY_CONFIG}
 VGPU_MDEV_PROFILE=${VGPU_MDEV_PROFILE}
 VGPU_FB_MB=2048
@@ -623,6 +635,16 @@ GPU_MEMORY_BUS_BITS=${GPU_MEMORY_BUS_BITS}
 GPU_MEMORY_BANDWIDTH_MBPS=${GPU_MEMORY_BANDWIDTH_MBPS}
 GPU_MEMORY_TYPE=${GPU_MEMORY_TYPE}
 GPU_MEMORY_MAKER=${GPU_MEMORY_MAKER}
+GPU_MEMORY_TYPE_NVAPI=${GPU_MEMORY_TYPE_NVAPI}
+GPU_MEMORY_MAKER_NVAPI=${GPU_MEMORY_MAKER_NVAPI}
+GPU_CUDA_CORES=${GPU_CUDA_CORES}
+GPU_SHADER_SUBPIPES=${GPU_SHADER_SUBPIPES}
+GPU_ROP_COUNT=${GPU_ROP_COUNT}
+GPU_TMU_COUNT=${GPU_TMU_COUNT}
+GPU_ARCHITECTURE=${GPU_ARCHITECTURE}
+GPU_IMPLEMENTATION=${GPU_IMPLEMENTATION}
+GPU_CHIP_REVISION=${GPU_CHIP_REVISION}
+GPU_PCIE_WIDTH=${GPU_PCIE_WIDTH}
 # VGPU_MDEV_PROFILE 是旧 RTX 宿主 fallback；真实宿主资源可由
 # deploy/host/vgpu-host.conf 的 VGPU_RESOURCE_PROFILE 覆盖。
 # 运行时由 start-vm.sh 动态分配 MDEV_UUID（mdev 回池）

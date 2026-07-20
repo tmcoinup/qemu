@@ -1,48 +1,25 @@
 /*
- * Native fb-shm ffmpeg pipe.
+ * Native fb-shm ffmpeg process.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * 推流工具只负责输出 rawvideo 给 ffmpeg，编码器选择、封装格式和远端 URL
- * 仍由 ffmpeg 处理。这样 Windows/Linux 共享同一套参数，不需要 Python。
+ * Frames still use ffmpeg's CPU rawvideo input.  Launch ffmpeg directly with
+ * an argv vector (or CreateProcess on Windows); never interpolate user
+ * options or an output URL into a shell command.
  */
 
 #include "common.h"
 
 #ifdef _WIN32
-#define FB_SHM_STREAM_POPEN _popen
-#define FB_SHM_STREAM_PCLOSE _pclose
-#define FB_SHM_STREAM_POPEN_MODE "wb"
+#include <fcntl.h>
 #else
-#define FB_SHM_STREAM_POPEN popen
-#define FB_SHM_STREAM_PCLOSE pclose
-#define FB_SHM_STREAM_POPEN_MODE "w"
+#include <signal.h>
+#include <sys/wait.h>
 #endif
 
 static const char *fb_shm_stream_fourcc_name(uint32_t fourcc)
 {
     return fourcc == FB_SHM_FOURCC_BGRA ? "bgra" : "bgr0";
-}
-
-static void fb_shm_stream_quote_arg(char *dst, size_t dst_len,
-                                    const char *src)
-{
-    size_t pos = 0;
-
-    if (dst_len == 0) {
-        return;
-    }
-    dst[pos++] = '"';
-    for (const char *p = src; *p && pos + 3 < dst_len; p++) {
-        if (*p == '"') {
-            dst[pos++] = '\\';
-        }
-        dst[pos++] = *p;
-    }
-    if (pos + 1 < dst_len) {
-        dst[pos++] = '"';
-    }
-    dst[pos] = 0;
 }
 
 static const char *fb_shm_stream_guess_container(const Options *o)
@@ -70,31 +47,375 @@ static const char *fb_shm_stream_guess_container(const Options *o)
     return "";
 }
 
-FILE *fb_shm_stream_open_ffmpeg(const Options *o, const FbShmHeader *hdr)
+static bool fb_shm_stream_name_safe(const char *value)
 {
-    char out_q[1024];
-    char cmd[4096];
-    const char *container = fb_shm_stream_guess_container(o);
-    uint32_t fps = hdr->target_fps ? hdr->target_fps : 30;
+    const unsigned char *p = (const unsigned char *)value;
 
-    fb_shm_stream_quote_arg(out_q, sizeof(out_q), o->output);
-    snprintf(cmd, sizeof(cmd),
-             "ffmpeg -hide_banner -loglevel warning "
-             "-f rawvideo -pix_fmt %s -video_size %ux%u -framerate %u -i - "
-             "-c:v %s -b:v %s -g %d -pix_fmt yuv420p -preset %s %s%s%s",
-             fb_shm_stream_fourcc_name(hdr->fourcc), hdr->width,
-             hdr->height, fps, o->encoder, o->bitrate, o->gop, o->preset,
-             container[0] ? "-f " : "", container[0] ? container : "",
-             container[0] ? " " : "");
-    strncat(cmd, out_q, sizeof(cmd) - strlen(cmd) - 1);
-
-    fprintf(stderr, "[fb-shm] ffmpeg: %s\n", cmd);
-    return FB_SHM_STREAM_POPEN(cmd, FB_SHM_STREAM_POPEN_MODE);
+    if (!p || !*p || *p == '-') {
+        return false;
+    }
+    for (; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') ||
+              (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') ||
+              *p == '_' || *p == '-' || *p == '.')) {
+            return false;
+        }
+    }
+    return true;
 }
 
-void fb_shm_stream_close_ffmpeg(FILE *ffmpeg)
+static bool fb_shm_stream_bitrate_safe(const char *value)
 {
-    if (ffmpeg) {
-        FB_SHM_STREAM_PCLOSE(ffmpeg);
+    const unsigned char *p = (const unsigned char *)value;
+
+    if (!p || !(*p >= '1' && *p <= '9')) {
+        return false;
     }
+    while (*p >= '0' && *p <= '9') {
+        p++;
+    }
+    if (*p == 'k' || *p == 'K' || *p == 'm' || *p == 'M' ||
+        *p == 'g' || *p == 'G') {
+        p++;
+    }
+    return *p == '\0';
+}
+
+bool fb_shm_stream_ffmpeg_options_valid(const Options *o)
+{
+    const unsigned char *p;
+
+    if (!o || !o->output || !*o->output || o->output[0] == '-' ||
+        !fb_shm_stream_name_safe(o->encoder) ||
+        !fb_shm_stream_name_safe(o->preset) ||
+        !fb_shm_stream_bitrate_safe(o->bitrate) ||
+        o->gop <= 0 || o->gop > 1000 ||
+        (o->container && *o->container &&
+         !fb_shm_stream_name_safe(o->container))) {
+        return false;
+    }
+    for (p = (const unsigned char *)o->output; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const char *fb_shm_stream_ffmpeg_output_kind(const char *output)
+{
+    if (!output) {
+        return "invalid";
+    }
+    if (!strncmp(output, "rtmps://", 8)) {
+        return "rtmps";
+    }
+    if (!strncmp(output, "rtmp://", 7)) {
+        return "rtmp";
+    }
+    if (!strncmp(output, "udp://", 6)) {
+        return "udp";
+    }
+    if (!strncmp(output, "rtp://", 6)) {
+        return "rtp";
+    }
+    if (!strncmp(output, "srt://", 6)) {
+        return "srt";
+    }
+    return "file";
+}
+
+static size_t fb_shm_stream_ffmpeg_argv(const Options *o,
+                                        const FbShmHeader *hdr,
+                                        const char **argv,
+                                        char dims[32],
+                                        char fps_buf[16],
+                                        char gop_buf[16])
+{
+    const char *container = fb_shm_stream_guess_container(o);
+    uint32_t fps = hdr->target_fps ? hdr->target_fps : 30;
+    size_t n = 0;
+
+    snprintf(dims, 32, "%ux%u", hdr->width, hdr->height);
+    snprintf(fps_buf, 16, "%u", fps);
+    snprintf(gop_buf, 16, "%d", o->gop);
+
+    argv[n++] = "ffmpeg";
+    argv[n++] = "-hide_banner";
+    argv[n++] = "-loglevel";
+    argv[n++] = "warning";
+    argv[n++] = "-nostdin";
+    argv[n++] = "-f";
+    argv[n++] = "rawvideo";
+    argv[n++] = "-pix_fmt";
+    argv[n++] = fb_shm_stream_fourcc_name(hdr->fourcc);
+    argv[n++] = "-video_size";
+    argv[n++] = dims;
+    argv[n++] = "-framerate";
+    argv[n++] = fps_buf;
+    argv[n++] = "-i";
+    argv[n++] = "-";
+    argv[n++] = "-c:v";
+    argv[n++] = o->encoder;
+    argv[n++] = "-b:v";
+    argv[n++] = o->bitrate;
+    argv[n++] = "-g";
+    argv[n++] = gop_buf;
+    argv[n++] = "-pix_fmt";
+    argv[n++] = "yuv420p";
+    argv[n++] = "-preset";
+    argv[n++] = o->preset;
+    if (container[0]) {
+        argv[n++] = "-f";
+        argv[n++] = container;
+    }
+    argv[n++] = o->output;
+    argv[n] = NULL;
+    return n;
+}
+
+#ifdef _WIN32
+typedef struct FbShmStreamString {
+    char *data;
+    size_t len;
+    size_t cap;
+} FbShmStreamString;
+
+static bool fb_shm_stream_string_append(FbShmStreamString *s,
+                                         char ch, size_t count)
+{
+    size_t need = s->len + count + 1;
+
+    if (need > s->cap) {
+        size_t cap = s->cap ? s->cap : 256;
+        char *next;
+
+        while (cap < need) {
+            if (cap > SIZE_MAX / 2) {
+                return false;
+            }
+            cap *= 2;
+        }
+        next = realloc(s->data, cap);
+        if (!next) {
+            return false;
+        }
+        s->data = next;
+        s->cap = cap;
+    }
+    memset(s->data + s->len, ch, count);
+    s->len += count;
+    s->data[s->len] = '\0';
+    return true;
+}
+
+/*
+ * Quote one argument according to the Microsoft C runtime parsing rules.
+ * CreateProcess does not invoke cmd.exe, so shell metacharacters remain data.
+ */
+static bool fb_shm_stream_windows_quote(FbShmStreamString *s,
+                                         const char *arg)
+{
+    const char *p = arg;
+
+    if (s->len && !fb_shm_stream_string_append(s, ' ', 1)) {
+        return false;
+    }
+    if (!fb_shm_stream_string_append(s, '"', 1)) {
+        return false;
+    }
+    while (*p) {
+        size_t slashes = 0;
+
+        while (*p == '\\') {
+            slashes++;
+            p++;
+        }
+        if (*p == '"') {
+            if (!fb_shm_stream_string_append(s, '\\', slashes * 2 + 1) ||
+                !fb_shm_stream_string_append(s, '"', 1)) {
+                return false;
+            }
+            p++;
+        } else if (!*p) {
+            if (!fb_shm_stream_string_append(s, '\\', slashes * 2)) {
+                return false;
+            }
+        } else {
+            if (!fb_shm_stream_string_append(s, '\\', slashes) ||
+                !fb_shm_stream_string_append(s, *p++, 1)) {
+                return false;
+            }
+        }
+    }
+    return fb_shm_stream_string_append(s, '"', 1);
+}
+
+static FfmpegProcess *fb_shm_stream_spawn_ffmpeg(const char *const *argv)
+{
+    SECURITY_ATTRIBUTES security = {
+        .nLength = sizeof(security),
+        .bInheritHandle = TRUE,
+    };
+    STARTUPINFOA startup = {
+        .cb = sizeof(startup),
+        .dwFlags = STARTF_USESTDHANDLES,
+        .hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE),
+        .hStdError = GetStdHandle(STD_ERROR_HANDLE),
+    };
+    PROCESS_INFORMATION process = { 0 };
+    FbShmStreamString command = { 0 };
+    FfmpegProcess *ffmpeg = NULL;
+    HANDLE input_read = NULL;
+    HANDLE input_write = NULL;
+    int input_fd = -1;
+
+    for (size_t i = 0; argv[i]; i++) {
+        if (!fb_shm_stream_windows_quote(&command, argv[i])) {
+            goto fail;
+        }
+    }
+    if (!CreatePipe(&input_read, &input_write, &security, 0) ||
+        !SetHandleInformation(input_write, HANDLE_FLAG_INHERIT, 0)) {
+        goto fail;
+    }
+    startup.hStdInput = input_read;
+    if (!CreateProcessA(NULL, command.data, NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW, NULL, NULL, &startup, &process)) {
+        goto fail;
+    }
+    CloseHandle(input_read);
+    input_read = NULL;
+    CloseHandle(process.hThread);
+
+    input_fd = _open_osfhandle((intptr_t)input_write, _O_BINARY);
+    if (input_fd < 0) {
+        TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hProcess);
+        goto fail;
+    }
+    input_write = NULL;
+    ffmpeg = calloc(1, sizeof(*ffmpeg));
+    if (!ffmpeg) {
+        _close(input_fd);
+        TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hProcess);
+        goto fail;
+    }
+    ffmpeg->input = _fdopen(input_fd, "wb");
+    if (!ffmpeg->input) {
+        _close(input_fd);
+        TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hProcess);
+        free(ffmpeg);
+        ffmpeg = NULL;
+        goto fail;
+    }
+    ffmpeg->process = process.hProcess;
+
+fail:
+    if (input_read) {
+        CloseHandle(input_read);
+    }
+    if (input_write) {
+        CloseHandle(input_write);
+    }
+    free(command.data);
+    return ffmpeg;
+}
+#else
+static FfmpegProcess *fb_shm_stream_spawn_ffmpeg(const char *const *argv)
+{
+    FfmpegProcess *ffmpeg;
+    int input_pipe[2];
+    pid_t pid;
+
+    if (pipe(input_pipe) < 0) {
+        return NULL;
+    }
+    (void)fcntl(input_pipe[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(input_pipe[1], F_SETFD, FD_CLOEXEC);
+
+    pid = fork();
+    if (pid < 0) {
+        close(input_pipe[0]);
+        close(input_pipe[1]);
+        return NULL;
+    }
+    if (pid == 0) {
+        if (input_pipe[0] != STDIN_FILENO) {
+            if (dup2(input_pipe[0], STDIN_FILENO) < 0) {
+                _exit(126);
+            }
+            close(input_pipe[0]);
+        } else if (fcntl(STDIN_FILENO, F_SETFD, 0) < 0) {
+            _exit(126);
+        }
+        close(input_pipe[1]);
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+
+    close(input_pipe[0]);
+    ffmpeg = calloc(1, sizeof(*ffmpeg));
+    if (!ffmpeg) {
+        close(input_pipe[1]);
+        kill(pid, SIGTERM);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        return NULL;
+    }
+    ffmpeg->input = fdopen(input_pipe[1], "w");
+    if (!ffmpeg->input) {
+        close(input_pipe[1]);
+        kill(pid, SIGTERM);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        free(ffmpeg);
+        return NULL;
+    }
+    ffmpeg->pid = pid;
+    return ffmpeg;
+}
+#endif
+
+FfmpegProcess *fb_shm_stream_open_ffmpeg(const Options *o,
+                                         const FbShmHeader *hdr)
+{
+    const char *argv[32];
+    const char *container;
+    char dims[32];
+    char fps[16];
+    char gop[16];
+
+    if (!fb_shm_stream_ffmpeg_options_valid(o)) {
+        fprintf(stderr, "[fb-shm] invalid ffmpeg option\n");
+        return NULL;
+    }
+    container = fb_shm_stream_guess_container(o);
+    (void)fb_shm_stream_ffmpeg_argv(o, hdr, argv, dims, fps, gop);
+    fprintf(stderr,
+            "[fb-shm] ffmpeg: encoder=%s container=%s output=%s\n",
+            o->encoder, container[0] ? container : "auto",
+            fb_shm_stream_ffmpeg_output_kind(o->output));
+    return fb_shm_stream_spawn_ffmpeg(argv);
+}
+
+void fb_shm_stream_close_ffmpeg(FfmpegProcess *ffmpeg)
+{
+    if (!ffmpeg) {
+        return;
+    }
+    if (ffmpeg->input) {
+        fclose(ffmpeg->input);
+    }
+#ifdef _WIN32
+    WaitForSingleObject(ffmpeg->process, INFINITE);
+    CloseHandle(ffmpeg->process);
+#else
+    while (waitpid((pid_t)ffmpeg->pid, NULL, 0) < 0 && errno == EINTR) {
+    }
+#endif
+    free(ffmpeg);
 }

@@ -108,6 +108,8 @@ typedef struct FbShmDisplay FbShmDisplay;
 struct FbShmClient {
     FbShmDisplay *owner;
     int fd;
+    FbShmCtlReq rx_req;          /* SOCK_STREAM request reassembly         */
+    size_t rx_bytes;
     bool hello_done;            /* HELLO seen → eligible for broadcasts   */
     bool wants_resize_notify;   /* HELLO opted into NOTIFY_RESIZED        */
     bool wants_win32_names;      /* HELLO requested Win32 name payload     */
@@ -924,6 +926,60 @@ static uint32_t fb_shm_rate_interval_ms(uint32_t rate)
 }
 
 #ifndef _WIN32
+/*
+ * Send one logical control record completely.  SCM_RIGHTS belongs to the
+ * first byte written; after a short send, the remaining bytes must therefore
+ * be retried without attaching the descriptors a second time.
+ *
+ * Client sockets are deliberately non-blocking.  EAGAIN still drops the
+ * client instead of stalling the QEMU main loop, but an ordinary short send
+ * no longer corrupts the next control record.
+ */
+static int fb_shm_sendmsg_all(int fd, const struct msghdr *msg)
+{
+    g_autofree struct iovec *iov = NULL;
+    struct msghdr cur = *msg;
+    size_t iov_index = 0;
+    size_t total = 0;
+
+    iov = g_memdup2(msg->msg_iov, sizeof(*iov) * msg->msg_iovlen);
+    cur.msg_iov = iov;
+
+    for (size_t i = 0; i < msg->msg_iovlen; i++) {
+        total += msg->msg_iov[i].iov_len;
+    }
+
+    while (total > 0) {
+        ssize_t sent;
+
+        do {
+            sent = sendmsg(fd, &cur, MSG_NOSIGNAL);
+        } while (sent < 0 && errno == EINTR);
+        if (sent <= 0) {
+            return -1;
+        }
+
+        total -= sent;
+        cur.msg_control = NULL;
+        cur.msg_controllen = 0;
+
+        while (sent > 0 && iov_index < msg->msg_iovlen) {
+            if ((size_t)sent < iov[iov_index].iov_len) {
+                iov[iov_index].iov_base =
+                    (uint8_t *)iov[iov_index].iov_base + sent;
+                iov[iov_index].iov_len -= sent;
+                sent = 0;
+            } else {
+                sent -= iov[iov_index].iov_len;
+                iov_index++;
+            }
+        }
+        cur.msg_iov = iov + iov_index;
+        cur.msg_iovlen = msg->msg_iovlen - iov_index;
+    }
+    return 0;
+}
+
 static int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
                            const FbShmCtlAck *ack, bool include_handles)
 {
@@ -937,6 +993,7 @@ static int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
     int nfds = (include_handles && d->memfd >= 0 && d->wake_eventfd >= 0) ? 2 : 0;
 
     if (nfds > 0) {
+        memset(cbuf, 0, sizeof(cbuf));
         msg.msg_control = cbuf;
         msg.msg_controllen = CMSG_SPACE(sizeof(int) * nfds);
         struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
@@ -945,11 +1002,7 @@ static int fb_shm_send_ack(FbShmDisplay *d, FbShmClient *c,
         cm->cmsg_len = CMSG_LEN(sizeof(int) * nfds);
         memcpy(CMSG_DATA(cm), fds, sizeof(int) * nfds);
     }
-    ssize_t r;
-    do {
-        r = sendmsg(c->fd, &msg, MSG_NOSIGNAL);
-    } while (r < 0 && errno == EINTR);
-    return (r == (ssize_t)sizeof(*ack)) ? 0 : -1;
+    return fb_shm_sendmsg_all(c->fd, &msg);
 }
 #else
 static int fb_shm_send_bytes(int fd, const void *buf, size_t len)
@@ -1132,8 +1185,6 @@ static int fb_shm_send_gpu_frame(FbShmClient *c,
         .msg_iov = iov,
         .msg_iovlen = G_N_ELEMENTS(iov),
     };
-    ssize_t r;
-
     if (gpu_fd >= 0) {
         memset(cbuf, 0, sizeof(cbuf));
         msg.msg_control = cbuf;
@@ -1146,11 +1197,7 @@ static int fb_shm_send_gpu_frame(FbShmClient *c,
         memcpy(CMSG_DATA(cm), &gpu_fd, sizeof(gpu_fd));
     }
 
-    do {
-        r = sendmsg(c->fd, &msg, MSG_NOSIGNAL);
-    } while (r < 0 && errno == EINTR);
-
-    return r == (ssize_t)(sizeof(ack) + sizeof(*frame)) ? 0 : -1;
+    return fb_shm_sendmsg_all(c->fd, &msg);
 }
 #else
 static int fb_shm_send_gpu_frame(FbShmClient *c,
@@ -1363,50 +1410,77 @@ static void fb_shm_client_read(void *opaque)
 {
     FbShmClient *c = opaque;
     FbShmDisplay *d = c->owner;
-    FbShmCtlReq req;
-    ssize_t r;
 
     if (c->dropping || c->fd < 0 || !d) {
         return;
     }
 
-    do {
-        r = recv(c->fd, (char *)&req, sizeof(req), 0);
-    } while (r < 0 && errno == EINTR);
-    if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-        fb_shm_client_drop(c);
-        return;
-    }
-    if (r != (ssize_t)sizeof(req) || req.magic != FB_SHM_MAGIC) {
-        FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = 0,
-                            .status = FB_SHM_CTL_EINVAL };
-        if (fb_shm_send_ack(d, c, &ack, false) < 0) {
-            fb_shm_client_drop(c);
-        }
-        return;
-    }
+    for (;;) {
+        FbShmCtlReq req;
+        ssize_t r;
 
-    switch (req.op) {
-    case FB_SHM_CTL_HELLO:
-        fb_shm_handle_hello(d, c, &req);
-        break;
-    case FB_SHM_CTL_SET_ROI:
-        fb_shm_handle_set_roi(d, c, &req);
-        break;
-    case FB_SHM_CTL_SET_RATE:
-        fb_shm_handle_set_rate(d, c, &req);
-        break;
-    case FB_SHM_CTL_BYE:
-        fb_shm_client_drop(c);
-        break;
-    default: {
-        FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req.op,
-                            .status = FB_SHM_CTL_EUNSUPPORTED };
-        if (fb_shm_send_ack(d, c, &ack, false) < 0) {
+        do {
+            r = recv(c->fd, (uint8_t *)&c->rx_req + c->rx_bytes,
+                     sizeof(c->rx_req) - c->rx_bytes, 0);
+        } while (r < 0 && errno == EINTR);
+        if (r == 0 ||
+            (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
             fb_shm_client_drop(c);
+            return;
         }
-        break;
-    }
+        if (r < 0) {
+            return;
+        }
+
+        c->rx_bytes += r;
+        if (c->rx_bytes < sizeof(c->rx_req)) {
+            return;
+        }
+
+        req = c->rx_req;
+        c->rx_bytes = 0;
+        if (req.magic != FB_SHM_MAGIC) {
+            FbShmCtlAck ack = {
+                .magic = FB_SHM_MAGIC,
+                .op = 0,
+                .status = FB_SHM_CTL_EINVAL,
+            };
+
+            if (fb_shm_send_ack(d, c, &ack, false) < 0) {
+                fb_shm_client_drop(c);
+            }
+            return;
+        }
+
+        switch (req.op) {
+        case FB_SHM_CTL_HELLO:
+            fb_shm_handle_hello(d, c, &req);
+            break;
+        case FB_SHM_CTL_SET_ROI:
+            fb_shm_handle_set_roi(d, c, &req);
+            break;
+        case FB_SHM_CTL_SET_RATE:
+            fb_shm_handle_set_rate(d, c, &req);
+            break;
+        case FB_SHM_CTL_BYE:
+            fb_shm_client_drop(c);
+            return;
+        default: {
+            FbShmCtlAck ack = {
+                .magic = FB_SHM_MAGIC,
+                .op = req.op,
+                .status = FB_SHM_CTL_EUNSUPPORTED,
+            };
+
+            if (fb_shm_send_ack(d, c, &ack, false) < 0) {
+                fb_shm_client_drop(c);
+            }
+            break;
+        }
+        }
+        if (c->dropping) {
+            return;
+        }
     }
 }
 

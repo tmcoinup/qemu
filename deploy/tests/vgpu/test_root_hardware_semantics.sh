@@ -406,10 +406,42 @@ if [ "$#" -eq 2 ] && [ "$1" = -device ] \
     printf '  ramfb=<bool>\n'
     exit 0
 fi
+if [ "$#" -eq 2 ] && [ "$1" = -device ] \
+        && [ "$2" = pcie-root-port,help ]; then
+    printf '%s\n' \
+        '  x-speed=<PCIELinkSpeed>' \
+        '  x-width=<PCIELinkWidth>' \
+        '  x-pci-vendor-id=<uint32>' \
+        '  x-pci-device-id=<uint32>' \
+        '  x-pci-revision=<uint32>'
+    exit 0
+fi
 echo "unexpected fake QEMU invocation: $*" >&2
 exit 99
 EOF
 chmod +x "$TMP_DIR/qemu-system-x86_64"
+
+# Root lifecycle entry points use the same signed 32-bit VM ID contract as the
+# guest manifest/launcher.  Oversized IDs must fail before creating storage.
+range_root="$TMP_DIR/id-range-root"
+if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin VM_ROOT="$range_root" \
+        "$CREATE_VM" 2147483648 \
+        >"$TMP_DIR/create-oversized.out" 2>"$TMP_DIR/create-oversized.err"; then
+    fail 'create-vm accepted an ID beyond 2147483647'
+fi
+require_text '1..2147483647' "$TMP_DIR/create-oversized.err" \
+    "create-vm ID range"
+[[ ! -e "$range_root" && ! -L "$range_root" ]] ||
+    fail 'create-vm oversized ID created storage'
+if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin VM_ROOT="$range_root" \
+        "$START_VM" 2147483648 \
+        >"$TMP_DIR/start-oversized.out" 2>"$TMP_DIR/start-oversized.err"; then
+    fail 'start-vm accepted an ID beyond 2147483647'
+fi
+require_text '1..2147483647' "$TMP_DIR/start-oversized.err" \
+    "start-vm ID range"
+[[ ! -e "$range_root" && ! -L "$range_root" ]] ||
+    fail 'start-vm oversized ID created storage'
 
 create_vm() {
     local id=$1 platform=$2 ssd_profile=$3 output=$4
@@ -1007,56 +1039,79 @@ source "$VM_ROOT/instances/vm${gpu_id}/vm.conf"
 run_start "$gpu_id" "$TMP_DIR/gpu-b.out" "$TMP_DIR/gpu-b.err" --no-tpm
 require_text 'PCI identity remains host mdev' "$TMP_DIR/gpu-b.out" \
     "SPOOF_MODE=B identity explanation"
+require_text 'pcie-root-port\,id=gpu-root-port\,bus=pcie.0\,addr=0x10' \
+    "$TMP_DIR/gpu-b.out" "vGPU PCIe root port"
+require_text 'x-speed=8\,x-width=16\,x-pci-vendor-id=0x8086\,x-pci-device-id=0x1901\,x-pci-revision=0x07' \
+    "$TMP_DIR/gpu-b.out" "B360 GPU root-port PCIe 3.0 x16 identity"
+require_text 'bus=gpu-root-port\,addr=0x0' "$TMP_DIR/gpu-b.out" \
+    "vGPU downstream endpoint"
 reject_text "x-pci-device-id=${GPU_PCI_DID}" "$TMP_DIR/gpu-b.out" \
     "SPOOF_MODE=B consumer PCI device"
 reject_text "x-pci-sub-device-id=${GPU_SUB_DID}" "$TMP_DIR/gpu-b.out" \
     "SPOOF_MODE=B consumer PCI subsystem"
 
-# A freshly generated full-consumer target must not enter A before the audited
-# driver receipt has been recorded; otherwise it would boot Basic Display.
+# No A marker or CLI override is currently a production-signature attestation.
+# Every A request must fail closed.
 if run_start "$gpu_id" "$TMP_DIR/gpu-a-unprepared.out" \
         "$TMP_DIR/gpu-a-unprepared.err" --no-tpm --spoof-mode A; then
-    fail 'unprepared full-consumer GTX 1050 entered A mode'
+    fail 'legacy full-consumer GTX 1050 entered A mode'
 fi
-require_text 'full-consumer A 尚未完成 V3 驱动收尾' \
-    "$TMP_DIR/gpu-a-unprepared.err" "unprepared A-mode refusal"
+require_text 'strict-A startup is disabled' \
+    "$TMP_DIR/gpu-a-unprepared.err" "A-mode production-signature refusal"
 
-# The same half-migrated policy must still permit a no-vGPU rescue, otherwise
-# finish-vgpu-install.sh would tell the user to invoke itself and then be
-# rejected by start-vm.sh before its EXE could repair the guest.
+# Rescue must explicitly select off/B; retaining A even on a no-vGPU command is
+# ambiguous and must not bypass the early guard.
+if run_start "$gpu_id" "$TMP_DIR/gpu-a-rescue-reject.out" \
+        "$TMP_DIR/gpu-a-rescue-reject.err" --no-tpm --rescue-sdl \
+        --spoof-mode A; then
+    fail 'rescue mode bypassed the strict-A startup guard'
+fi
+require_text 'strict-A startup is disabled' \
+    "$TMP_DIR/gpu-a-rescue-reject.err" "A-mode rescue refusal"
 run_start "$gpu_id" "$TMP_DIR/gpu-a-rescue.out" \
-    "$TMP_DIR/gpu-a-rescue.err" --no-tpm --rescue-sdl --spoof-mode A
-require_text '仅允许无 vGPU 救援' "$TMP_DIR/gpu-a-rescue.err" \
-    "unprepared A-mode rescue allowance"
+    "$TMP_DIR/gpu-a-rescue.err" --no-tpm --rescue-sdl --no-spoof
 require_text '标准显卡 -> SDL 本地救援' "$TMP_DIR/gpu-a-rescue.out" \
-    "unprepared A-mode rescue display"
+    "explicit off-mode rescue display"
 reject_text 'vfio-pci-nohotplug' "$TMP_DIR/gpu-a-rescue.out" \
-    "unprepared A-mode rescue vGPU attachment"
+    "off-mode rescue vGPU attachment"
 
-# Positive control: the complete receipt-derived policy really does add both
-# the outer PCI tuple and the internal vdev/pdev pair.
-VGPU_MDEV_INTERNAL_PCI_IDENTITY=1 VGPU_MDEV_FRL_ENABLED=0 \
-VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833 \
-    run_start "$gpu_id" "$TMP_DIR/gpu-a.out" "$TMP_DIR/gpu-a.err" \
-        --no-tpm --spoof-mode A
-require_text "x-pci-device-id=${GPU_PCI_DID}" "$TMP_DIR/gpu-a.out" \
-    "SPOOF_MODE=A consumer PCI device"
-require_text "x-pci-sub-device-id=${GPU_SUB_DID}" "$TMP_DIR/gpu-a.out" \
-    "SPOOF_MODE=A consumer PCI subsystem"
-require_text 'vGPU internal PCI identity: ENABLED audited GTX1050 (vdev_id=0x1C8111C0, pdev_id=0x1C81)' \
-    "$TMP_DIR/gpu-a.out" "audited A-mode internal PCI identity"
-require_text 'vGPU frame-rate limiter: per-mdev frl_enabled=0' \
-    "$TMP_DIR/gpu-a.out" "audited per-mdev FRL disable"
+# Even the complete legacy tuple/internal/FRL/version marker set is not proof of
+# a production-signed guest driver.
+if VGPU_MDEV_INTERNAL_PCI_IDENTITY=1 VGPU_MDEV_FRL_ENABLED=0 \
+        VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833 \
+        run_start "$gpu_id" "$TMP_DIR/gpu-a-markers.out" \
+            "$TMP_DIR/gpu-a-markers.err" --no-tpm --spoof-mode A; then
+    fail 'legacy completion markers bypassed the strict-A startup guard'
+fi
+require_text 'strict-A startup is disabled' "$TMP_DIR/gpu-a-markers.err" \
+    "legacy marker A-mode refusal"
 
-# The second-stage RM/licensing experiment is deliberately independent from
-# outer A-mode PCI spoofing.  One explicit environment variable enables the
-# exact NVIDIA DEV_16:SUBDEV_16 / DEV_16 pair; B mode remains name-only.
-VGPU_MDEV_INTERNAL_PCI_IDENTITY=1 VGPU_MDEV_FRL_ENABLED=0 \
-VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833 \
-    run_start "$gpu_id" "$TMP_DIR/gpu-a-internal.out" \
-        "$TMP_DIR/gpu-a-internal.err" --no-tpm --spoof-mode A
-require_text 'vGPU internal PCI identity: ENABLED audited GTX1050 (vdev_id=0x1C8111C0, pdev_id=0x1C81)' \
-    "$TMP_DIR/gpu-a-internal.out" "explicit A-mode internal PCI identity"
+# The last real spoof CLI selector wins.  A token consumed as --extra's value
+# must never be mistaken for a recovery override.
+run_start "$gpu_id" "$TMP_DIR/gpu-spoof-order-off.out" \
+    "$TMP_DIR/gpu-spoof-order-off.err" --no-tpm --spoof --no-spoof
+require_text 'GPU target: disabled' "$TMP_DIR/gpu-spoof-order-off.out" \
+    "last off selector"
+if run_start "$gpu_id" "$TMP_DIR/gpu-spoof-order-a.out" \
+        "$TMP_DIR/gpu-spoof-order-a.err" --no-tpm --no-spoof --spoof; then
+    fail 'a trailing --spoof did not override the earlier recovery selector'
+fi
+require_text 'strict-A startup is disabled' "$TMP_DIR/gpu-spoof-order-a.err" \
+    "last A selector refusal"
+
+extra_value_a_id=$next_id
+next_id=$((next_id + 1))
+rewrite_conf "$gpu_id" "$extra_value_a_id" 2.0
+chmod u+w "$VM_ROOT/instances/vm${extra_value_a_id}/vm.conf"
+sed -i 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
+    "$VM_ROOT/instances/vm${extra_value_a_id}/vm.conf"
+chmod 444 "$VM_ROOT/instances/vm${extra_value_a_id}/vm.conf"
+if run_start "$extra_value_a_id" "$TMP_DIR/gpu-extra-value.out" \
+        "$TMP_DIR/gpu-extra-value.err" --no-tpm --extra --no-spoof; then
+    fail '--extra value was mistaken for an off-mode recovery selector'
+fi
+require_text 'strict-A startup is disabled' "$TMP_DIR/gpu-extra-value.err" \
+    "--extra spoof-token isolation"
 
 VGPU_MDEV_INTERNAL_PCI_IDENTITY=1 \
     run_start "$gpu_id" "$TMP_DIR/gpu-b-internal.out" \
@@ -1068,22 +1123,21 @@ reject_text 'vdev_id=' "$TMP_DIR/gpu-b-internal.out" \
 
 if VGPU_MDEV_INTERNAL_PCI_IDENTITY=2 \
         run_start "$gpu_id" "$TMP_DIR/gpu-invalid-internal.out" \
-            "$TMP_DIR/gpu-invalid-internal.err" --no-tpm --spoof-mode A; then
+            "$TMP_DIR/gpu-invalid-internal.err" --no-tpm --spoof-mode B; then
     fail 'invalid VGPU_MDEV_INTERNAL_PCI_IDENTITY value was accepted'
 fi
 require_text 'VGPU_MDEV_INTERNAL_PCI_IDENTITY 必须是 0 或 1' \
     "$TMP_DIR/gpu-invalid-internal.err" "internal PCI identity input validation"
 
-VGPU_MDEV_INTERNAL_PCI_IDENTITY=1 VGPU_MDEV_FRL_ENABLED=0 \
-VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833 \
-    run_start "$gpu_id" "$TMP_DIR/gpu-a-frl.out" \
-        "$TMP_DIR/gpu-a-frl.err" --no-tpm --spoof-mode A
-require_text 'vGPU frame-rate limiter: per-mdev frl_enabled=0' \
-    "$TMP_DIR/gpu-a-frl.out" "explicit per-mdev FRL disable"
+# A persisted legacy FRL marker must not leak into either supported B or off.
+VGPU_MDEV_FRL_ENABLED=0 \
+    run_start "$gpu_id" "$TMP_DIR/gpu-b-frl.out" \
+        "$TMP_DIR/gpu-b-frl.err" --no-tpm --spoof-mode B
+require_text 'vGPU frame-rate limiter: inherited from resource profile' \
+    "$TMP_DIR/gpu-b-frl.out" "B-mode FRL inheritance"
+reject_text 'per-mdev frl_enabled=0' "$TMP_DIR/gpu-b-frl.out" \
+    "B-mode stale FRL override"
 
-# A persisted FRL override is an A/B identity feature.  --no-spoof is the
-# established driver install/recovery path and must temporarily inherit the
-# resource profile instead of becoming impossible to start.
 VGPU_MDEV_FRL_ENABLED=0 \
     run_start "$gpu_id" "$TMP_DIR/gpu-off-frl.out" \
         "$TMP_DIR/gpu-off-frl.err" --no-tpm --spoof-mode off
@@ -1094,11 +1148,186 @@ reject_text 'per-mdev frl_enabled=0' "$TMP_DIR/gpu-off-frl.out" \
 
 if VGPU_MDEV_FRL_ENABLED=2 \
         run_start "$gpu_id" "$TMP_DIR/gpu-invalid-frl.out" \
-            "$TMP_DIR/gpu-invalid-frl.err" --no-tpm --spoof-mode A; then
+            "$TMP_DIR/gpu-invalid-frl.err" --no-tpm --spoof-mode B; then
     fail 'invalid VGPU_MDEV_FRL_ENABLED value was accepted'
 fi
 require_text 'VGPU_MDEV_FRL_ENABLED 必须是 0 或 1' \
     "$TMP_DIR/gpu-invalid-frl.err" "per-mdev FRL input validation"
+
+# A persisted A config must be rejected before the launcher creates global or
+# per-instance runtime/storage paths.
+strict_guard_root="$TMP_DIR/strict-start-zero-write"
+strict_guard_id=456
+mkdir -p "$strict_guard_root/instances/vm${strict_guard_id}"
+printf 'SPOOF_MODE=A\n' \
+    >"$strict_guard_root/instances/vm${strict_guard_id}/vm.conf"
+if VM_ROOT="$strict_guard_root" \
+        "$START_VM" "$strict_guard_id" \
+        >"$TMP_DIR/strict-start-zero-write.out" \
+        2>"$TMP_DIR/strict-start-zero-write.err"; then
+    fail 'persisted A config passed the pre-storage startup guard'
+fi
+require_text 'strict-A startup is disabled' \
+    "$TMP_DIR/strict-start-zero-write.err" "pre-storage A-mode refusal"
+for forbidden in \
+        "$strict_guard_root/run" \
+        "$strict_guard_root/assets" \
+        "$strict_guard_root/bases" \
+        "$strict_guard_root/instances/vm${strict_guard_id}/run" \
+        "$strict_guard_root/instances/vm${strict_guard_id}/log" \
+        "$strict_guard_root/instances/vm${strict_guard_id}/backups"; do
+    [[ ! -e "$forbidden" && ! -L "$forbidden" ]] ||
+        fail "strict-A preflight created forbidden path: $forbidden"
+done
+
+legacy_spoof_root="$TMP_DIR/legacy-spoof-zero-write"
+legacy_spoof_id=458
+mkdir -p "$legacy_spoof_root/instances/vm${legacy_spoof_id}"
+printf '%s\n' 'SPOOF_MODE=B' 'SPOOF=1' \
+    >"$legacy_spoof_root/instances/vm${legacy_spoof_id}/vm.conf"
+if VM_ROOT="$legacy_spoof_root" \
+        "$START_VM" "$legacy_spoof_id" \
+        >"$TMP_DIR/legacy-spoof-zero-write.out" \
+        2>"$TMP_DIR/legacy-spoof-zero-write.err"; then
+    fail 'legacy SPOOF=1 did not override SPOOF_MODE=B in preflight'
+fi
+require_text 'strict-A startup is disabled' \
+    "$TMP_DIR/legacy-spoof-zero-write.err" "legacy SPOOF preflight refusal"
+[[ ! -e "$legacy_spoof_root/run" && ! -L "$legacy_spoof_root/run" ]] ||
+    fail 'legacy SPOOF preflight created a run directory'
+
+env_spoof_root="$TMP_DIR/env-spoof-zero-write"
+env_spoof_id=459
+mkdir -p "$env_spoof_root/instances/vm${env_spoof_id}"
+printf '%s\n' 'SPOOF_MODE=B' \
+    >"$env_spoof_root/instances/vm${env_spoof_id}/vm.conf"
+if env VM_ROOT="$env_spoof_root" SPOOF=1 \
+        "$START_VM" "$env_spoof_id" \
+        >"$TMP_DIR/env-spoof-zero-write.out" \
+        2>"$TMP_DIR/env-spoof-zero-write.err"; then
+    fail 'caller SPOOF=1 bypassed the pre-storage A guard'
+fi
+require_text 'strict-A startup is disabled' \
+    "$TMP_DIR/env-spoof-zero-write.err" "environment SPOOF preflight refusal"
+[[ ! -e "$env_spoof_root/run" && ! -L "$env_spoof_root/run" ]] ||
+    fail 'environment SPOOF preflight created a run directory'
+
+spaced_a_root="$TMP_DIR/spaced-a-zero-write"
+spaced_a_id=460
+mkdir -p "$spaced_a_root/instances/vm${spaced_a_id}"
+printf '  SPOOF_MODE=A\n' \
+    >"$spaced_a_root/instances/vm${spaced_a_id}/vm.conf"
+if VM_ROOT="$spaced_a_root" \
+        "$START_VM" "$spaced_a_id" \
+        >"$TMP_DIR/spaced-a-zero-write.out" \
+        2>"$TMP_DIR/spaced-a-zero-write.err"; then
+    fail 'leading whitespace hid A from the pre-storage guard'
+fi
+require_text 'strict-A startup is disabled' \
+    "$TMP_DIR/spaced-a-zero-write.err" "spaced A preflight refusal"
+[[ ! -e "$spaced_a_root/run" && ! -L "$spaced_a_root/run" ]] ||
+    fail 'spaced A preflight created a run directory'
+
+symlink_conf_root="$TMP_DIR/symlink-conf-zero-write"
+symlink_conf_id=461
+mkdir -p "$symlink_conf_root/instances/vm${symlink_conf_id}"
+printf 'SPOOF_MODE=B\n' >"$symlink_conf_root/outside.conf"
+ln -s "$symlink_conf_root/outside.conf" \
+    "$symlink_conf_root/instances/vm${symlink_conf_id}/vm.conf"
+if VM_ROOT="$symlink_conf_root" \
+        "$START_VM" "$symlink_conf_id" --no-spoof \
+        >"$TMP_DIR/symlink-conf-zero-write.out" \
+        2>"$TMP_DIR/symlink-conf-zero-write.err"; then
+    fail 'explicit off mode bypassed vm.conf symlink validation'
+fi
+require_text 'regular non-symlink file' \
+    "$TMP_DIR/symlink-conf-zero-write.err" "symlink config refusal"
+[[ ! -e "$symlink_conf_root/run" && ! -L "$symlink_conf_root/run" ]] ||
+    fail 'symlink config preflight created a run directory'
+
+vm_id_mismatch_root="$TMP_DIR/vm-id-mismatch-zero-write"
+vm_id_mismatch_requested=462
+mkdir -p \
+    "$vm_id_mismatch_root/instances/vm${vm_id_mismatch_requested}"
+printf '%s\n' 'VM_ID=463' 'SPOOF_MODE=B' \
+    >"$vm_id_mismatch_root/instances/vm${vm_id_mismatch_requested}/vm.conf"
+if VM_ROOT="$vm_id_mismatch_root" \
+        "$START_VM" "$vm_id_mismatch_requested" \
+        >"$TMP_DIR/vm-id-mismatch-zero-write.out" \
+        2>"$TMP_DIR/vm-id-mismatch-zero-write.err"; then
+    fail 'vm.conf redirected the requested VM ID'
+fi
+require_text 'must exactly match requested vm462' \
+    "$TMP_DIR/vm-id-mismatch-zero-write.err" "vm.conf ID mismatch refusal"
+[[ ! -e "$vm_id_mismatch_root/run" && ! -L "$vm_id_mismatch_root/run" ]] ||
+    fail 'vm.conf ID mismatch created a run directory'
+
+vm_id_oversized_root="$TMP_DIR/vm-id-oversized-zero-write"
+vm_id_oversized_requested=464
+mkdir -p \
+    "$vm_id_oversized_root/instances/vm${vm_id_oversized_requested}"
+printf '%s\n' 'VM_ID=2147483648' 'SPOOF_MODE=B' \
+    >"$vm_id_oversized_root/instances/vm${vm_id_oversized_requested}/vm.conf"
+if VM_ROOT="$vm_id_oversized_root" \
+        "$START_VM" "$vm_id_oversized_requested" \
+        >"$TMP_DIR/vm-id-oversized-zero-write.out" \
+        2>"$TMP_DIR/vm-id-oversized-zero-write.err"; then
+    fail 'vm.conf supplied an oversized VM ID'
+fi
+require_text 'must exactly match requested vm464' \
+    "$TMP_DIR/vm-id-oversized-zero-write.err" "vm.conf oversized ID refusal"
+[[ ! -e "$vm_id_oversized_root/run" && ! -L "$vm_id_oversized_root/run" ]] ||
+    fail 'vm.conf oversized ID created a run directory'
+
+host_spoof_root="$TMP_DIR/host-spoof-zero-write"
+host_spoof_id=465
+host_spoof_conf="$TMP_DIR/host-spoof.conf"
+mkdir -p "$host_spoof_root/instances/vm${host_spoof_id}"
+printf '%s\n' "VM_ID=$host_spoof_id" 'SPOOF_MODE=B' \
+    >"$host_spoof_root/instances/vm${host_spoof_id}/vm.conf"
+printf 'SPOOF=1\n' >"$host_spoof_conf"
+if VM_ROOT="$host_spoof_root" VGPU_HOST_CONFIG="$host_spoof_conf" \
+        "$START_VM" "$host_spoof_id" \
+        >"$TMP_DIR/host-spoof-zero-write.out" \
+        2>"$TMP_DIR/host-spoof-zero-write.err"; then
+    fail 'host config SPOOF=1 bypassed the pre-storage guard'
+fi
+require_text 'strict-A startup is disabled' \
+    "$TMP_DIR/host-spoof-zero-write.err" "host config SPOOF refusal"
+[[ ! -e "$host_spoof_root/run" && ! -L "$host_spoof_root/run" ]] ||
+    fail 'host config SPOOF preflight created a run directory'
+
+legacy_marker_root="$TMP_DIR/legacy-marker-zero-write"
+legacy_marker_id=457
+mkdir -p "$legacy_marker_root/instances/vm${legacy_marker_id}"
+printf '%s\n' \
+    'SPOOF_MODE=B' \
+    'VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833' \
+    >"$legacy_marker_root/instances/vm${legacy_marker_id}/vm.conf"
+if VM_ROOT="$legacy_marker_root" \
+        "$START_VM" "$legacy_marker_id" \
+        >"$TMP_DIR/legacy-marker-zero-write.out" \
+        2>"$TMP_DIR/legacy-marker-zero-write.err"; then
+    fail 'legacy completion marker passed without an explicit B/off override'
+fi
+require_text 'strict-A startup is disabled' \
+    "$TMP_DIR/legacy-marker-zero-write.err" "legacy marker preflight refusal"
+for forbidden in \
+        "$legacy_marker_root/run" \
+        "$legacy_marker_root/assets" \
+        "$legacy_marker_root/bases" \
+        "$legacy_marker_root/instances/vm${legacy_marker_id}/run" \
+        "$legacy_marker_root/instances/vm${legacy_marker_id}/log" \
+        "$legacy_marker_root/instances/vm${legacy_marker_id}/backups"; do
+    [[ ! -e "$forbidden" && ! -L "$forbidden" ]] ||
+        fail "legacy-marker preflight created forbidden path: $forbidden"
+done
+
+require_text 'source /dev/stdin <<<"$EARLY_CONF_SNAPSHOT"' "$START_VM" \
+    "pinned vm.conf snapshot source"
+if grep -F 'source "$CONF"' "$START_VM" >/dev/null; then
+    fail 'start-vm reopens vm.conf instead of sourcing the pinned snapshot'
+fi
 
 if QEMU_SDL_DISABLE_IBUS=invalid \
         run_start "$gpu_id" "$TMP_DIR/gpu-invalid-sdl-ibus.out" \

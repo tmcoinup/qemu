@@ -1,22 +1,26 @@
-======================================================================
-``-display fb-shm`` — zero-copy framebuffer streaming (Linux/Windows)
-======================================================================
+============================================================================
+``-display fb-shm`` — shared-memory streaming and optional GPU handle export
+============================================================================
 
 The ``fb-shm`` display backend exports the (optionally cropped) guest
-framebuffer through host shared memory plus a doorbell event, and can
-also publish GPU-resident scanout handles to clients that explicitly
-request them.  Linux hosts use ``memfd`` + ``eventfd`` for the SHM
-path and ``dma-buf`` fds for GPU frames.  Windows hosts use a named
-file mapping plus a per-client Win32 event for SHM, and named D3D11
-shared textures for GPU frames.
+framebuffer through host shared memory plus a doorbell event.  The generic
+QEMU producer can also publish a GPU-resident scanout handle when the
+underlying display path supplies one and a client explicitly requests it.
+On Linux, the SHM path uses ``memfd`` + ``eventfd`` and the optional GPU
+transport uses a ``dma-buf`` fd.  Windows source code provides named file
+mapping/event transport and a named-D3D11-texture notification, but that
+code is cross-compile validated only.  The current D3D11 notification has
+no keyed-mutex or fence protocol and is not safe for asynchronous native
+encoding.
 
 It was designed for three workloads that don't fit the existing
 backends well:
 
 * **Real-time encoding to NVENC / QSV / x264** (RTMP, RTP, UDP, SRT or
   local file) where the encoder lives in a *different* process than
-  QEMU and ffmpeg's ``-vaapi``/``-cuda`` upload is the only host-side
-  CPU work we tolerate.
+  QEMU.  The current reference consumer feeds ffmpeg a CPU ``rawvideo``
+  stream; selecting NVENC or QSV changes the encoding stage but does not
+  make that transport zero-copy.
 * **Multi-VM fan-out** where one host streams several guests and each
   guest needs its own deterministic CPU/GPU budget.
 * **Anti-cheat sensitive guests** where in-guest detection of a
@@ -27,6 +31,30 @@ backends well:
 .. contents::
    :local:
 
+Scope and G-11 product boundary
+===============================
+
+This document describes the generic QEMU backend and its wire protocol.
+That protocol capability is broader than the supported G-11 product:
+
+* G-11 is a **Linux-host / Windows-guest** NVIDIA vGPU product.  A Windows
+  host is not a supported G-11 deployment.
+* The accepted R535 vGPU stack exposes its console through a system-memory
+  VFIO display ``REGION``.  It does not provide a DMA-BUF scanout to
+  ``fb-shm``.
+* Consequently, the current G-11 stream is a complete BGR0 frame (or a
+  complete configured ROI) in SHM, copied by the consumer and written to
+  ffmpeg's ``rawvideo`` stdin.  A later NVENC upload and hardware encode do
+  not make this path GPU zero-copy.
+* The current ``qemu-fb-shm-stream`` binary has no native DMA-BUF/D3D11
+  import-and-encode backend.  ``--print-capabilities`` reports
+  ``gpu.zero-copy=no`` and ``gpu.status=GPU_E_BACKEND_NOT_BUILT``.
+  ``--mode gpu`` is strict and exits with status 3 before connecting;
+  it never silently falls back to SHM.
+* With the current binary, ``--mode auto`` and ``--mode shm`` both use the
+  full-frame SHM path.  ``auto`` does not subscribe to GPU notifications
+  when the native backend probe fails.
+
 Architecture
 ============
 
@@ -34,7 +62,7 @@ Architecture
 
     +------------------- QEMU process ------------------+
     |                                                   |
-    |  guest GPU device (virtio-gpu / std-vga / qxl)    |
+    |  guest GPU / display device                       |
     |              |                                    |
     |              v                                    |
     |       DisplaySurface or GL/dma-buf/D3D scanout    |
@@ -50,19 +78,19 @@ Architecture
             |  AF_UNIX control      |
             |  socket               |
             v                       v
-    +-- consumer process (per VM) ------------+
-    |  receive mapping/event handles or names |
+    +-- current reference consumer (per VM) --+
+    |  receive SHM mapping/event              |
     |  mmap / MapViewOfFile                   |
-    |  for ever:                              |
-    |    poll(evfd) or control socket         |
-    |    SHM: seqlock-read shm[active_idx]    |
-    |    GPU: import dma-buf / D3D11 texture  |
+    |  poll, then seqlock-read and memcpy     |
     |                                         |
-    |  ffmpeg                                 |
+    |  ffmpeg rawvideo stdin                  |
     |    -f rawvideo -pix_fmt bgr0 -i -        |
-    |    -c:v h264_nvenc -preset p1 -tune ll  |
-    |    -f flv  rtmp://ingest/live/X         |
+    |    -c:v h264_nvenc ...  (GPU upload)    |
     +-----------------------------------------+
+
+The GPU-export branch in this diagram is a generic producer capability.
+The current reference consumer validates its descriptors but does not have
+the native import-and-encode backend needed to consume them.
 
 Producer side (QEMU) work per frame:
 
@@ -73,10 +101,12 @@ Producer side (QEMU) work per frame:
 3. Two atomic stores (``active_idx``, ``frame_seq``) and one doorbell
    signal (``eventfd`` on Linux, ``SetEvent`` on Windows).
 
-There is no host-side encoding inside QEMU.  In GPU mode QEMU does not
-perform a GL readback: it sends a control-plane descriptor for the same
-GPU backing object.  If the consumer cannot import that handle, it can
-ignore ``NOTIFY_GPU_FRAME`` and keep using the SHM BGR0 path.
+There is no host-side encoding inside QEMU.  When a generic producer
+receives a suitable GPU scanout, its GPU notification describes that
+backing object without performing a GL readback.  This is not the G-11
+R535 path, which starts from the system-memory VFIO display REGION.  A
+consumer without native handle import can ignore ``NOTIFY_GPU_FRAME`` and
+keep using SHM, but that fallback is explicitly not GPU zero-copy.
 
 Data flow & ABI
 ===============
@@ -218,26 +248,46 @@ Reference consumer
 seqlock reader, then pipes raw frames into ffmpeg.  It accepts
 ``--mode auto|gpu|shm``:
 
-* ``auto`` (default) asks QEMU for GPU frame notifications but keeps
-  the SHM rawvideo ffmpeg path as the working stream path.
-* ``shm`` disables GPU notifications and preserves the historical ABI.
-* ``gpu`` refuses SHM fallback and is intended for native GPU encoder
-  backends that import dma-buf / D3D11 directly.  The bundled stdin
-  ffmpeg backend validates the GPU export and fails rather than
-  pretending the SHM path is zero-copy GPU encoding.
+* ``auto`` (default) uses the SHM rawvideo path in the current build.  It
+  subscribes to GPU notifications only when a native handle-import encoder
+  probe succeeds; the current probe does not.
+* ``shm`` explicitly selects the same full-frame SHM path and disables GPU
+  notifications.
+* ``gpu`` is strict: because no native DMA-BUF/D3D11 import-and-encode
+  backend is implemented, it reports ``GPU_E_BACKEND_NOT_BUILT`` and exits
+  with status 3 before opening the control socket.  It never treats ffmpeg's
+  CPU ``rawvideo`` pipe as a zero-copy fallback.
 
-Encoders verified to work end-to-end on the SHM fallback path:
+Run ``qemu-fb-shm-stream --print-capabilities`` before selecting strict
+GPU mode.  For the current consumer the decisive output is::
 
-* ``h264_nvenc`` / ``hevc_nvenc`` — recommended for 1080p60 fan-out;
-  one session per VM.
-* ``h264_qsv``   / ``hevc_qsv``   — Intel iGPU, all sessions share a
-  ring; great for ~16 light streams.
-* ``libx264``                     — CPU fallback for hosts without
-  HW encoders (use ``--preset veryfast`` and pin one core per VM).
+    gpu.zero-copy=no
+    gpu.backend=none
+    gpu.native-handle-import=no
+    gpu.status=GPU_E_BACKEND_NOT_BUILT
+
+The optional dependency lines in that output describe libraries discovered
+at build time; their presence does not enable a native GPU encoder in the
+current implementation.
+
+ffmpeg encoders usable after the SHM/rawvideo transport include:
+
+``libx264`` with the ``veryfast`` preset is the safe default.  Hardware
+encoders must be selected explicitly and validated against the host driver.
+
+* ``h264_nvenc`` / ``hevc_nvenc`` — raw frames are still copied through
+  CPU memory and uploaded before hardware encoding.
+* ``h264_qsv`` / ``hevc_qsv`` — likewise requires an upload from the
+  SHM/rawvideo input.
+* ``libx264`` — CPU encoding (use ``--preset veryfast`` and budget CPU
+  capacity per VM).
+
+Encoder availability and session limits depend on the host ffmpeg build,
+driver and hardware.  Hardware encoding alone is not evidence of zero-copy.
 
 Examples::
 
-    # local preview to ffplay/mpv
+    # SHM/rawvideo -> NVENC upload -> UDP output
     qemu-fb-shm-stream --sock /run/qemu/fb-qemu-12345.sock \
         --output 'udp://127.0.0.1:5000?pkt_size=1316' \
         --encoder h264_nvenc --bitrate 8M --mode auto
@@ -303,8 +353,9 @@ box.  The control socket's accept queue is sized at 16; each connecting
 consumer receives its own ``SCM_RIGHTS`` copy of the (refcounted) memfd
 and eventfd, so:
 
-* All consumers ``mmap`` the **same physical pages** — zero extra
-  memory cost regardless of how many you attach.
+* All consumers ``mmap`` the **same physical SHM pages**, so QEMU does not
+  allocate another producer buffer per subscriber.  Individual consumers
+  may still allocate their own frame copy and encoder buffers.
 * The eventfd doorbell is shared.  Every ``select`` / ``poll`` fires on
   every QEMU commit; the first reader drains the counter and the rest
   see ``EAGAIN`` but have already woken up.  Correctness comes from the
@@ -317,7 +368,7 @@ Example: live RTMP push *and* local archival recording in parallel::
 
     # QEMU started with -object fb-shm,id=cap,path=/run/qemu/fb-vm1.sock
 
-    # consumer A: NVENC -> RTMP
+    # consumer A: SHM/rawvideo -> NVENC upload -> RTMP
     qemu-fb-shm-stream --sock /run/qemu/fb-vm1.sock \
         --output 'rtmp://ingest/live/vm1' --encoder h264_nvenc &
 
@@ -423,11 +474,14 @@ alternatives in that mode:
   reads from there.  Requires ``ivshmem-plain`` plus the guest helper.
 * NVIDIA NVFBC + a guest-side capture daemon — works on RTX and
   Quadro/Tesla parts (consumer cards need ``nvidia-patch``); strict
-  vendor coupling but truly zero-copy.
+  vendor coupling and can keep capture/encode on the GPU only when paired
+  with appropriate native encoder interop.  It is not a G-11 accepted path.
 
 ``fb-shm`` is the right choice when the guest uses an emulated
 display device (``virtio-gpu``, ``-vga std/qxl``).  Looking Glass is
-the right choice when the guest owns the GPU.
+the usual choice when the guest exclusively owns a fully passed-through GPU.
+That full-passthrough case differs from the G-11 R535 mdev console, which
+does expose the system-memory VFIO display REGION used by G-11.
 
 Limitations & roadmap
 =====================
@@ -439,15 +493,22 @@ Known gaps in the v9.2 implementation:
   the existing ``query-mice`` / ``input-send-event`` paths if needed.
 * Only the primary graphic console (index 0) is exported.  Multi-head
   guests need one ``fb-shm`` instance per head.
-* ABI v1 always publishes ``BGR0``.  ``NV12`` / ``DMA-BUF`` paths are
-  on the roadmap (``DisplayFbShm.format``).
-* Linux and Windows hosts are supported.  FreeBSD/macOS would need a
-  POSIX-shm or mach shared-memory fallback.
+* The ABI v1 SHM plane always publishes full ``BGR0`` frames.  Optional
+  GPU-handle notifications are a separate control-plane path; the current
+  reference consumer does not encode those handles.
+* The generic Linux implementation is exercised.  The Windows producer and
+  consumer sources are cross-compile checked only, and the current D3D11
+  shared-texture notification lacks safe keyed-mutex/fence synchronization.
+  Windows host operation is therefore not claimed as supported.
+* G-11 specifically supports a Linux host and Windows guest; it does not
+  support a Windows host.  FreeBSD/macOS would need another shared-memory
+  transport and have no G-11 lifecycle.
 
 See also
 ========
 
 * `<../include/ui/fb-shm-abi.h>`_ — wire format reference.
-* ``qemu-fb-shm-stream`` — native Linux/Windows consumer.
+* ``qemu-fb-shm-stream`` — reference consumer; Linux is exercised and
+  Windows is cross-compile checked only.
 * ``scripts/qemu-fb-shm-multivm.py`` — multi-VM orchestrator.
 * ``scripts/qemu-fb-shm-spawn.sh`` — example QEMU launcher.

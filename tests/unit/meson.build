@@ -139,10 +139,24 @@ if have_system
     'test-fb-shm-stream-pace': [
       meson.project_source_root() / 'tools/fb-shm-stream/pace.c'
     ],
+    'test-fb-shm-stream-gpu': [
+      meson.project_source_root() / 'tools/fb-shm-stream/gpu.c'
+    ],
+    'test-fb-shm-stream-ffmpeg': [
+      meson.project_source_root() / 'tools/fb-shm-stream/ffmpeg.c'
+    ],
     'test-smp-parse': [qom, meson.project_source_root() / 'hw/core/machine-smp.c'],
     'test-vmstate': [migration, io],
     'test-yank': ['socket-helpers.c', qom, io, chardev]
   }
+  if host_os != 'windows'
+    tests += {
+      'test-fb-shm-stream-control': [
+        meson.project_source_root() / 'tools/fb-shm-stream/platform.c',
+        meson.project_source_root() / 'tools/fb-shm-stream/gpu.c',
+      ],
+    }
+  endif
   if config_host_data.get('CONFIG_INOTIFY1')
     tests += {'test-util-filemonitor': []}
   endif

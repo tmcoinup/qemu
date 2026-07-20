@@ -25,6 +25,8 @@ source "$here/lib/vm-storage.sh"
 vm_storage_init
 # shellcheck source=lib/vm-tpm.sh
 source "$here/lib/vm-tpm.sh"
+# shellcheck source=lib/cpu-isolation.sh
+source "$here/lib/cpu-isolation.sh"
 # shellcheck source=lib/vgpu-mdev.sh
 source "$here/lib/vgpu-mdev.sh"
 
@@ -45,8 +47,13 @@ vm_storage_validate_instance_tree "$VM_ID"
 
 PID_FILE=$(vm_storage_run_path "$VM_ID" pid)
 QMP_FILE=$(vm_storage_run_path "$VM_ID" qmp)
+QMP_PROXY_FILE="${QMP_FILE}.proxy"
 MON_FILE=$(vm_storage_run_path "$VM_ID" mon)
 MDEV_FILE=$(vm_storage_run_path "$VM_ID" mdev)
+CPU_ISOLATION_STATE_FILE="$(dirname "$QMP_FILE")/cpu-isolation.state"
+STREAM_HELPER="$here/fb-shm-stream.sh"
+STREAM_PID_FILE="$(dirname "$QMP_FILE")/fb-shm-stream.pid"
+STREAM_STATE_PREFIX="$(dirname "$QMP_FILE")/fb-shm-stream"
 MDEV_UUID=""
 VM_PATTERN="qemu-system-x86_64.*-name[[:space:]]+vm${VM_ID}([,[:space:]]|$)"
 
@@ -149,7 +156,19 @@ find_vm_ip() {
 
 cleanup_run() {
     local mdev_dir rc=0
-    rm -f "$PID_FILE" "$QMP_FILE" "$MON_FILE" 2>/dev/null || true
+    if [[ -e "$STREAM_PID_FILE" || -e "${STREAM_STATE_PREFIX}.starttime" ||
+          -e "${STREAM_STATE_PREFIX}.ready" ||
+          -e "${STREAM_STATE_PREFIX}.socket" ]]; then
+        if [[ ! -x "$STREAM_HELPER" ]]; then
+            echo "[down] 推流 helper 缺失，保留 sidecar 状态: ${STREAM_STATE_PREFIX}.*" >&2
+            rc=1
+        elif ! "$STREAM_HELPER" stop "$VM_ID"; then
+            echo "[down] vm${VM_ID} 推流 sidecar 清理失败" >&2
+            rc=1
+        fi
+    fi
+    rm -f "$PID_FILE" "$QMP_FILE" "$QMP_PROXY_FILE" "$MON_FILE" \
+        2>/dev/null || true
     # 只回收该 VM 记录/命令行里的 mdev，绝不遍历删除其它 VM。
     if [[ -n "$MDEV_UUID" ]]; then
         mdev_dir="/sys/bus/mdev/devices/$MDEV_UUID"
@@ -169,6 +188,13 @@ cleanup_run() {
     # 三元组精确匹配并回收；持久 TPM NVRAM/EK 状态永不删除。
     if ! vm_tpm_cleanup "$VM_ID"; then
         echo "[down] vm${VM_ID} swtpm 清理失败，保留 runtime 证据" >&2
+        rc=1
+    fi
+    if cpu_isolation_release_vm "$VM_ID"; then
+        rm -f -- "$CPU_ISOLATION_STATE_FILE" \
+            "$CPU_ISOLATION_STATE_FILE".tmp.* 2>/dev/null || true
+    else
+        echo "[down] vm${VM_ID} CPU 隔离分区清理失败" >&2
         rc=1
     fi
     return "$rc"

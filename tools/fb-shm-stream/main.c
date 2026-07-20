@@ -13,10 +13,12 @@
 static void fb_shm_stream_usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s --sock PATH --output URL [--encoder h264_nvenc]\n"
-            "          [--preset p1] [--bitrate 6M] [--gop 60]\n"
+            "usage: %s --sock PATH --output URL [--encoder libx264]\n"
+            "          [--preset veryfast] [--bitrate 6M] [--gop 60]\n"
             "          [--roi x,y,w,h] [--rate Hz] [--container muxer]\n"
-            "          [--mode auto|gpu|shm]\n",
+            "          [--mode auto|gpu|shm]\n"
+            "       %s --print-capabilities\n",
+            argv0,
             argv0);
     exit(2);
 }
@@ -36,11 +38,71 @@ static StreamMode fb_shm_stream_parse_mode(const char *value)
     return STREAM_MODE_AUTO;
 }
 
+static int fb_shm_stream_parse_uint_arg(const char *name, const char *value,
+                                        long min, long max)
+{
+    char *end = NULL;
+    long parsed;
+
+    if (!value || value[0] < '0' || value[0] > '9') {
+        fb_shm_stream_die("%s must be an integer in %ld..%ld",
+                          name, min, max);
+    }
+    parsed = strtol(value, &end, 10);
+    if (!end || *end || parsed < min || parsed > max) {
+        fb_shm_stream_die("%s must be an integer in %ld..%ld",
+                          name, min, max);
+    }
+    return (int)parsed;
+}
+
+static void fb_shm_stream_parse_roi_arg(Options *o, const char *value)
+{
+    unsigned long fields[4];
+    const char *p = value;
+
+    for (size_t i = 0; i < 4; i++) {
+        char *end = NULL;
+        unsigned long max = i < 2 ? 16383 : 16384;
+
+        if (!p || *p < '0' || *p > '9') {
+            fb_shm_stream_die(
+                "--roi must be X,Y,W,H within 16384x16384");
+        }
+        fields[i] = strtoul(p, &end, 10);
+        if (!end || end == p || fields[i] > max ||
+            (i >= 2 && fields[i] == 0)) {
+            fb_shm_stream_die(
+                "--roi must be X,Y,W,H within 16384x16384");
+        }
+        if (i < 3) {
+            if (*end != ',') {
+                fb_shm_stream_die(
+                    "--roi must be X,Y,W,H within 16384x16384");
+            }
+            p = end + 1;
+        } else if (*end) {
+            fb_shm_stream_die(
+                "--roi must be X,Y,W,H within 16384x16384");
+        }
+    }
+    if (fields[0] + fields[2] > 16384 ||
+        fields[1] + fields[3] > 16384) {
+        fb_shm_stream_die("--roi must be X,Y,W,H within 16384x16384");
+    }
+
+    o->roi_x = (int)fields[0];
+    o->roi_y = (int)fields[1];
+    o->roi_w = (uint32_t)fields[2];
+    o->roi_h = (uint32_t)fields[3];
+    o->has_roi = true;
+}
+
 static Options fb_shm_stream_parse_args(int argc, char **argv)
 {
     Options o = {
-        .encoder = "h264_nvenc",
-        .preset = "p1",
+        .encoder = "libx264",
+        .preset = "veryfast",
         .bitrate = "6M",
         .mode = STREAM_MODE_AUTO,
         .gop = 60,
@@ -65,20 +127,24 @@ static Options fb_shm_stream_parse_args(int argc, char **argv)
         } else if (!strcmp(a, "--mode") && v) {
             o.mode = fb_shm_stream_parse_mode(argv[++i]);
         } else if (!strcmp(a, "--gop") && v) {
-            o.gop = atoi(argv[++i]);
+            o.gop = fb_shm_stream_parse_uint_arg("--gop", argv[++i],
+                                                 1, 1000);
         } else if (!strcmp(a, "--rate") && v) {
-            o.rate = atoi(argv[++i]);
+            o.rate = fb_shm_stream_parse_uint_arg("--rate", argv[++i],
+                                                  1, 240);
         } else if (!strcmp(a, "--max-frames") && v) {
-            o.max_frames = atoi(argv[++i]);
+            o.max_frames = fb_shm_stream_parse_uint_arg(
+                "--max-frames", argv[++i], 1, 100000000);
+        } else if (!strcmp(a, "--print-capabilities")) {
+            o.print_capabilities = true;
         } else if (!strcmp(a, "--roi") && v) {
-            if (sscanf(argv[++i], "%d,%d,%u,%u", &o.roi_x, &o.roi_y,
-                       &o.roi_w, &o.roi_h) != 4) {
-                fb_shm_stream_die("--roi must be x,y,w,h");
-            }
-            o.has_roi = true;
+            fb_shm_stream_parse_roi_arg(&o, argv[++i]);
         } else {
             fb_shm_stream_usage(argv[0]);
         }
+    }
+    if (o.print_capabilities) {
+        return o;
     }
     if (!o.sock || !o.output) {
         fb_shm_stream_usage(argv[0]);
@@ -86,8 +152,7 @@ static Options fb_shm_stream_parse_args(int argc, char **argv)
     return o;
 }
 
-static void fb_shm_stream_request_roi_rate(const Options *o,
-                                           FbShmStreamSocket fd)
+static void fb_shm_stream_request_roi_rate(const Options *o, Session *s)
 {
     if (o->has_roi) {
         FbShmCtlReq req = fb_shm_stream_ctl_req(FB_SHM_CTL_SET_ROI);
@@ -96,19 +161,19 @@ static void fb_shm_stream_request_roi_rate(const Options *o,
         req.y = o->roi_y;
         req.w = o->roi_w;
         req.h = o->roi_h;
-        if (fb_shm_stream_send_all(fd, &req, sizeof(req)) < 0) {
+        if (fb_shm_stream_send_all(s->sock, &req, sizeof(req)) < 0) {
             fb_shm_stream_die("SET_ROI send failed");
         }
-        fb_shm_stream_ctl_expect_ok(fd, FB_SHM_CTL_SET_ROI);
+        fb_shm_stream_ctl_expect_ok(s, FB_SHM_CTL_SET_ROI);
     }
     if (o->rate > 0) {
         FbShmCtlReq req = fb_shm_stream_ctl_req(FB_SHM_CTL_SET_RATE);
 
         req.rate_hz = (uint32_t)o->rate;
-        if (fb_shm_stream_send_all(fd, &req, sizeof(req)) < 0) {
+        if (fb_shm_stream_send_all(s->sock, &req, sizeof(req)) < 0) {
             fb_shm_stream_die("SET_RATE send failed");
         }
-        fb_shm_stream_ctl_expect_ok(fd, FB_SHM_CTL_SET_RATE);
+        fb_shm_stream_ctl_expect_ok(s, FB_SHM_CTL_SET_RATE);
     }
 }
 
@@ -229,6 +294,7 @@ static void fb_shm_stream_init_session(Session *s)
     s->map.eventfd = -1;
     s->gpu_fd = -1;
 #endif
+    fb_shm_stream_control_init(s);
 }
 
 static void fb_shm_stream_log_gpu_frame(Session *s)
@@ -246,6 +312,59 @@ static void fb_shm_stream_log_gpu_frame(Session *s)
     s->gpu_logged = true;
 }
 
+static void fb_shm_stream_log_gpu_error(Session *s)
+{
+    if (s->gpu_error == FB_SHM_STREAM_GPU_OK || s->gpu_error_logged) {
+        return;
+    }
+    fprintf(stderr, "[fb-shm] gpu-error[%s]: %s\n",
+            fb_shm_stream_gpu_status_code(s->gpu_error),
+            fb_shm_stream_gpu_status_message(s->gpu_error));
+    s->gpu_error_logged = true;
+}
+
+static bool fb_shm_stream_roi_is_applied(const Options *o,
+                                         const FbShmHeader *hdr)
+{
+    uint32_t x;
+    uint32_t y;
+    uint32_t w;
+    uint32_t h;
+
+    if (!o->has_roi) {
+        return true;
+    }
+    if (!hdr->src_width || !hdr->src_height) {
+        return false;
+    }
+
+    x = o->roi_x < 0 ? 0 : (uint32_t)o->roi_x;
+    y = o->roi_y < 0 ? 0 : (uint32_t)o->roi_y;
+    if (x >= hdr->src_width) {
+        x = hdr->src_width - 1;
+    }
+    if (y >= hdr->src_height) {
+        y = hdr->src_height - 1;
+    }
+    w = o->roi_w;
+    h = o->roi_h;
+    if (w > hdr->src_width - x) {
+        w = hdr->src_width - x;
+    }
+    if (h > hdr->src_height - y) {
+        h = hdr->src_height - y;
+    }
+    if (!w) {
+        w = 1;
+    }
+    if (!h) {
+        h = 1;
+    }
+
+    return hdr->roi_x == (int32_t)x && hdr->roi_y == (int32_t)y &&
+           hdr->width == w && hdr->height == h;
+}
+
 static void fb_shm_stream_update_latest_frame(Session *s, const Options *o,
                                               StreamPacer *pacer,
                                               bool *have_frame,
@@ -253,6 +372,16 @@ static void fb_shm_stream_update_latest_frame(Session *s, const Options *o,
 {
     const FbShmHeader *hdr = fb_shm_stream_header(s);
     size_t len;
+
+    /*
+     * SET_ROI is acknowledged before the display refresh applies the new
+     * geometry.  Do not briefly open an encoder for the old dimensions: a
+     * local file would then need an unsafe overwrite when the requested ROI
+     * arrives one tick later.
+     */
+    if (!fb_shm_stream_roi_is_applied(o, hdr)) {
+        return;
+    }
 
     if (fb_shm_stream_ensure_ffmpeg(s, o, hdr)) {
         /*
@@ -284,11 +413,25 @@ int main(int argc, char **argv)
     size_t frame_len = 0;
     int frames = 0;
 
+    if (o.print_capabilities) {
+        fb_shm_stream_gpu_print_capabilities(stdout);
+        return 0;
+    }
+    if (o.mode == STREAM_MODE_GPU &&
+        !fb_shm_stream_gpu_backend_available()) {
+        FbShmStreamGpuStatus status = fb_shm_stream_gpu_backend_probe();
+
+        fprintf(stderr, "[fb-shm] gpu-error[%s]: %s\n",
+                fb_shm_stream_gpu_status_code(status),
+                fb_shm_stream_gpu_status_message(status));
+        return FB_SHM_STREAM_EXIT_GPU_UNAVAILABLE;
+    }
+
     fb_shm_stream_init_session(&s);
     fb_shm_stream_pacer_reset(&pacer, 30);
     s.sock = fb_shm_stream_connect_unix_socket(o.sock);
     fb_shm_stream_hello(&s, o.mode);
-    fb_shm_stream_request_roi_rate(&o, s.sock);
+    fb_shm_stream_request_roi_rate(&o, &s);
     fb_shm_stream_set_sock_nonblock(s.sock);
 
     if (s.shm_ready) {
@@ -305,6 +448,7 @@ int main(int argc, char **argv)
 
         fb_shm_stream_drain_control(&s);
         fb_shm_stream_log_gpu_frame(&s);
+        fb_shm_stream_log_gpu_error(&s);
         if (o.mode == STREAM_MODE_GPU && !s.gpu_frame_ready) {
 #ifdef _WIN32
             Sleep(10);
@@ -312,16 +456,6 @@ int main(int argc, char **argv)
             usleep(10000);
 #endif
             continue;
-        }
-        if (o.mode == STREAM_MODE_GPU) {
-            /*
-             * 这里故意不静默降级到 SHM：GPU strict 模式用于验证 QEMU
-             * 是否真的发布了 dma-buf/D3D 共享纹理。当前 ffmpeg stdin
-             * 后端不能导入这些句柄，真正编码应由后续 libav/NVENC/AMF
-             * GPU backend 接管。
-             */
-            fb_shm_stream_die("GPU frame export is available, but this "
-                              "streamer build has no native GPU encoder");
         }
         if (s.shm_ready) {
             fb_shm_stream_update_latest_frame(&s, &o, &pacer, &have_frame,
@@ -339,7 +473,7 @@ int main(int argc, char **argv)
             continue;
         }
 
-        if (fwrite(s.frame, 1, frame_len, s.ffmpeg) != frame_len) {
+        if (fwrite(s.frame, 1, frame_len, s.ffmpeg->input) != frame_len) {
             break;
         }
         frames++;

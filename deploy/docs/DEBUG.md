@@ -33,7 +33,15 @@ sudo gdb -p "$(cat /home/ubuntu/images/vms/instances/vm${VM_ID}/run/qemu.pid)"
 ```
 
 ### QMP 监控
+
+需要两个或更多 host 工具同时连接时，启动 VM 加 `--proxy`。这是 QMP 并发
+开关，不是 HTTP/SOCKS 或 guest 网络代理：
+
 ```bash
+# 终端 1
+./deploy/start-vm.sh "$VM_ID" --proxy
+
+# 终端 2（也可使用同目录下的 qmp.sock.proxy 兼容别名）
 socat - unix-connect:/home/ubuntu/images/vms/instances/vm${VM_ID}/run/qmp.sock
 {"execute":"qmp_capabilities"}
 {"execute":"query-cpu-model-expansion","arguments":{"type":"full","model":{"name":"Core-i5-6500"}}}
@@ -90,8 +98,9 @@ sudo journalctl -fu nvidia-vgpu-mgr
 sudo grep -i 'profile override\|vdev_id' /var/log/syslog
 ```
 
-### VM3 严格 GTX 1050 的最小诊断
+### VM3 legacy 严格 GTX 1050 快照诊断（只读）
 
+以下仅用于识别并安全回退历史自签 VM3，不是当前通过条件，也不得据此恢复 strict-A。
 先在 guest 的本地 console 管理员 PowerShell 查硬件身份、驱动绑定和当前模式：
 
 ```powershell
@@ -107,7 +116,7 @@ $smi = (Get-Command nvidia-smi.exe -ErrorAction Stop).Source
 & $smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 ```
 
-VM3 严格 GTX 1050 的最小通过条件是：
+历史快照曾记录：
 
 - 只有一个当前 NVIDIA display controller；
 - `Name` 是 `NVIDIA GeForce GTX 1050`；
@@ -136,16 +145,15 @@ sudo journalctl -b -u nvidia-vgpu-mgr.service --no-pager |
   rg -i "$uuid|Virtual Device Id|Guest NVIDIA Driver Information|license state"
 ```
 
-应看到 `SPOOF_MODE=A`、内部 PCI 开关为 `1`、`frl_enabled=0`、
+历史自签状态可能看到 `SPOOF_MODE=A`、内部 PCI 开关为 `1`、`frl_enabled=0`、
 `pci_id=0x1C8111C0` 和 `pci_device_id=0x1C81`。Host 仍可能报
-`License Status: Unlicensed`；严格 GeForce 身份下 NVIDIA 控制面板不显示 vGPU
-激活页也是预期行为。当前帧率边界看 `Frame Rate Limit: N/A` 和实际动态
-workload，不要把 `Unlicensed` 文字自动等同于 3 FPS。Backing resource 仍应是
-`nvidia-257/2048MB`，它不会因 guest 显示 GTX 1050 而改变。
+`License Status: Unlicensed`，控制面板可能没有 vGPU 激活页。这些只说明旧状态，
+不是生产合规或已激活。Backing resource 仍是 `nvidia-257/2048MB`，它不会因 guest
+显示 GTX 1050 而改变。当前支持路径应按下节恢复到正式签名 driver + B/Licensed。
 
 ### Basic Display Adapter / 分辨率减少的 off 安全恢复
 
-如果 A 模式已暴露 `DEV_1C81`，但 patched 538.33 还没有预置或绑定，Windows
+如果历史 A 模式已暴露 `DEV_1C81`，但匹配驱动不合规或没有绑定，Windows
 会回退到 Microsoft Basic Display Adapter，分辨率和可选模式随之减少。这时先修
 驱动绑定，不要先强行添加自定义分辨率。
 
@@ -161,16 +169,10 @@ workload，不要把 `Unlicensed` 文字自动等同于 3 FPS。Backing resource
    per-mdev 内部身份暂时回到驱动恢复路径，并不带入 VM3 的 FRL 覆盖。
 3. 在 off 启动中先验证原生 538.33 能 Code 0，然后完整关机。不要手工删除当前
    NVIDIA device，也不要用未校验的 INF 覆盖 Driver Store。
-4. 回到 host 运行统一的一键收尾；把新生成的 GTX1050 ZIP 完整解压，只运行其中
-   唯一的 EXE：
-
-   ```bash
-   ./deploy/finish-vgpu-install.sh 3
-   ```
-
-   工具核验 V3 driver receipt 后会自行恢复严格身份并冷启动。最终启动不要再手工
-   加 `--spoof`；启动器会在磁盘干净离线时同步 EDID。第一次尚未建立 NVIDIA
-   显示器缓存时，先让 Windows 完成一次枚举和完整关机，下一次冷启动再完成同步。
+4. 保持 off/B，不运行历史 GTX1050 strict ZIP/finish。先取得与目标 PnP/版本匹配的
+   NVIDIA/Microsoft 正式生产签名驱动；在此之前不要恢复 A/internal/FRL marker。
+   启动器会在磁盘干净离线时同步 EDID。第一次尚未建立 NVIDIA 显示器缓存时，先让
+   Windows 完成一次枚举和完整关机，下一次冷启动再完成同步。
 
 如果 Code 0 已恢复且 NVIDIA 已列出 1920×1080，但当前模式仍不对，应在
 本地 console 的 Windows 显示设置或 NVIDIA 控制面板中选择 1920×1080 @ 60 Hz；

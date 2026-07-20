@@ -93,16 +93,57 @@ if [[ -r "$conf" ]]; then
     # shellcheck source=/dev/null
     source "$conf"
 fi
-if [[ -z "${GPU_NAME:-}" || -z "${GPU_CORE_MHZ:-}" ||
-      -z "${GPU_BOOST_MHZ:-}" || -z "${GPU_MEMORY_MHZ:-}" ||
-      -z "${GPU_MEMORY_BUS_BITS:-}" ||
-      -z "${GPU_MEMORY_BANDWIDTH_MBPS:-}" ]]; then
-    vgpu_profile_load "${GPU_PROFILE:-gt1030_2gb}"
-fi
+configured_gpu_profile=${GPU_PROFILE:-gt1030_2gb}
+configured_gpu_name=${GPU_NAME:-}
+configured_gpu_core_mhz=${GPU_CORE_MHZ:-}
+configured_gpu_boost_mhz=${GPU_BOOST_MHZ:-}
+configured_gpu_memory_mhz=${GPU_MEMORY_MHZ:-}
+configured_gpu_memory_bus_bits=${GPU_MEMORY_BUS_BITS:-}
+configured_gpu_memory_bandwidth_mbps=${GPU_MEMORY_BANDWIDTH_MBPS:-}
+configured_gpu_vram_mb=${GPU_VRAM_MB:-}
+configured_gpu_vbios=${GPU_VBIOS:-}
+configured_gpu_memory_type_nvapi=${GPU_MEMORY_TYPE_NVAPI:-}
+configured_gpu_memory_maker_nvapi=${GPU_MEMORY_MAKER_NVAPI:-}
+configured_gpu_cuda_cores=${GPU_CUDA_CORES:-}
+configured_gpu_shader_subpipes=${GPU_SHADER_SUBPIPES:-}
+configured_gpu_rop_count=${GPU_ROP_COUNT:-}
+configured_gpu_tmu_count=${GPU_TMU_COUNT:-}
+configured_gpu_architecture=${GPU_ARCHITECTURE:-}
+configured_gpu_implementation=${GPU_IMPLEMENTATION:-}
+configured_gpu_chip_revision=${GPU_CHIP_REVISION:-}
+configured_gpu_pcie_width=${GPU_PCIE_WIDTH:-}
+vgpu_profile_load "$configured_gpu_profile"
+GPU_NAME=${configured_gpu_name:-$GPU_NAME}
+GPU_CORE_MHZ=${configured_gpu_core_mhz:-$GPU_CORE_MHZ}
+GPU_BOOST_MHZ=${configured_gpu_boost_mhz:-$GPU_BOOST_MHZ}
+GPU_MEMORY_MHZ=${configured_gpu_memory_mhz:-$GPU_MEMORY_MHZ}
+GPU_MEMORY_BUS_BITS=${configured_gpu_memory_bus_bits:-$GPU_MEMORY_BUS_BITS}
+GPU_MEMORY_BANDWIDTH_MBPS=${configured_gpu_memory_bandwidth_mbps:-$GPU_MEMORY_BANDWIDTH_MBPS}
+GPU_VRAM_MB=${configured_gpu_vram_mb:-$GPU_VRAM_MB}
+GPU_VBIOS=${configured_gpu_vbios:-$GPU_VBIOS}
+GPU_MEMORY_TYPE_NVAPI=${configured_gpu_memory_type_nvapi:-$GPU_MEMORY_TYPE_NVAPI}
+GPU_MEMORY_MAKER_NVAPI=${configured_gpu_memory_maker_nvapi:-$GPU_MEMORY_MAKER_NVAPI}
+GPU_CUDA_CORES=${configured_gpu_cuda_cores:-$GPU_CUDA_CORES}
+GPU_SHADER_SUBPIPES=${configured_gpu_shader_subpipes:-$GPU_SHADER_SUBPIPES}
+GPU_ROP_COUNT=${configured_gpu_rop_count:-$GPU_ROP_COUNT}
+GPU_TMU_COUNT=${configured_gpu_tmu_count:-$GPU_TMU_COUNT}
+GPU_ARCHITECTURE=${configured_gpu_architecture:-$GPU_ARCHITECTURE}
+GPU_IMPLEMENTATION=${configured_gpu_implementation:-$GPU_IMPLEMENTATION}
+GPU_CHIP_REVISION=${configured_gpu_chip_revision:-$GPU_CHIP_REVISION}
+GPU_PCIE_WIDTH=${configured_gpu_pcie_width:-$GPU_PCIE_WIDTH}
 [[ -n "$GPU_NAME_OVERRIDE" ]] && GPU_NAME=$GPU_NAME_OVERRIDE
 : "${GPU_VRAM_MB:=2048}"
 if [[ "$GPU_VRAM_MB" != 2048 ]]; then
     echo "[setup-guest] vGPU identity 只允许 2048MB，当前 ${GPU_VRAM_MB}MB" >&2
+    exit 2
+fi
+if [[ "$GPU_VBIOS" != 'Version '* ]]; then
+    echo "[setup-guest] GPU_VBIOS 必须以 'Version ' 开头: $GPU_VBIOS" >&2
+    exit 2
+fi
+GPU_VBIOS_VERSION=${GPU_VBIOS#Version }
+if [[ ! "$GPU_VBIOS_VERSION" =~ ^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){4}$ ]]; then
+    echo "[setup-guest] GPU_VBIOS 必须包含五段十六进制版本号: $GPU_VBIOS" >&2
     exit 2
 fi
 
@@ -191,14 +232,27 @@ if [[ $SKIP_STEALTH -eq 0 ]]; then
     PATCH_SHA256=$(sha256sum guest/patch-grid-strings.ps1 | awk '{print toupper($1)}')
     INSTALLER_SHA256=$(sha256sum guest/install-nvapi-shim.ps1 | awk '{print toupper($1)}')
     python3 - "$IP" "$HOST_IP" "$GPU_NAME" \
+        "$((GPU_PCI_VID))" "$((GPU_PCI_DID))" \
+        "$((GPU_SUB_VID))" "$((GPU_SUB_DID))" "$((GPU_REV))" \
         "$GPU_CORE_MHZ" "$GPU_BOOST_MHZ" "$GPU_MEMORY_MHZ" \
         "$GPU_MEMORY_BUS_BITS" "$GPU_MEMORY_BANDWIDTH_MBPS" \
-        "$GPU_VRAM_MB" "$SHIM64_SHA256" "$SHIM32_SHA256" \
+        "$GPU_VRAM_MB" "$GPU_MEMORY_TYPE_NVAPI" \
+        "$GPU_MEMORY_MAKER_NVAPI" "$GPU_CUDA_CORES" \
+        "$GPU_SHADER_SUBPIPES" "$GPU_ROP_COUNT" "$GPU_TMU_COUNT" \
+        "$GPU_ARCHITECTURE" \
+        "$GPU_IMPLEMENTATION" "$GPU_CHIP_REVISION" "$GPU_PCIE_WIDTH" \
+        "$GPU_VBIOS_VERSION" "$SHIM64_SHA256" "$SHIM32_SHA256" \
         "$PATCH_SHA256" "$INSTALLER_SHA256" \
         "$((1 - SKIP_NVAPI_SHIM))" <<'PYEOF'
 import sys
 from pypsrp.client import Client
-ip, host, gpu, core, boost, memory, bus, bandwidth, vram, shim64_sha, shim32_sha, patch_sha, installer_sha, install_shim = sys.argv[1:15]
+(
+    ip, host, gpu, pci_vendor, pci_device, pci_subvendor, pci_subdevice,
+    pci_revision, core, boost, memory, bus, bandwidth, vram,
+    memory_type, memory_maker, cuda_cores, shader_subpipes, rop_count, tmu_count,
+    architecture, implementation, chip_revision, pcie_width, vbios_version,
+    shim64_sha, shim32_sha, patch_sha, installer_sha, install_shim,
+) = sys.argv[1:31]
 c = Client(ip, username='Administrator', password='123456', ssl=False, auth='ntlm')
 ps = fr'''
 $ProgressPreference = 'SilentlyContinue'
@@ -208,9 +262,22 @@ if ((Get-FileHash -LiteralPath C:\nv\patch-grid-strings.ps1 -Algorithm SHA256).H
     throw 'patch-grid-strings.ps1 SHA256 mismatch'
 }}
 & powershell.exe -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 `
-    -TargetName '{gpu}' -CoreClockMHz {core} -BoostClockMHz {boost} `
+    -TargetName '{gpu}' `
+    -NvapiPciVendorId {pci_vendor} -NvapiPciDeviceId {pci_device} `
+    -NvapiPciSubVendorId {pci_subvendor} `
+    -NvapiPciSubDeviceId {pci_subdevice} `
+    -NvapiPciRevisionId {pci_revision} `
+    -CoreClockMHz {core} -BoostClockMHz {boost} `
     -MemoryClockMHz {memory} -MemoryBusBits {bus} `
-    -MemoryBandwidthMBps {bandwidth} -VramMB {vram}
+    -MemoryBandwidthMBps {bandwidth} -VramMB {vram} `
+    -MemoryType {memory_type} -MemoryMaker {memory_maker} `
+    -CudaCores {cuda_cores} -ShaderSubPipes {shader_subpipes} `
+    -RopCount {rop_count} -TmuCount {tmu_count} -Architecture {architecture} `
+    -Implementation {implementation} -ChipRevision {chip_revision} `
+    -PcieWidth {pcie_width} -VbiosVersion '{vbios_version}'
+if ($LASTEXITCODE -ne 0) {{
+    throw "patch-grid-strings.ps1 failed with exit code $LASTEXITCODE"
+}}
 if ({install_shim} -eq 1) {{
     Invoke-WebRequest 'http://{host}:8080/install-nvapi-shim.ps1' `
         -OutFile C:\nv\install-nvapi-shim.ps1 -UseBasicParsing
@@ -220,6 +287,9 @@ if ({install_shim} -eq 1) {{
     & powershell.exe -ExecutionPolicy Bypass -File C:\nv\install-nvapi-shim.ps1 `
         -BaseUrl 'http://{host}:8080' `
         -ExpectedX64Sha256 '{shim64_sha}' -ExpectedX86Sha256 '{shim32_sha}'
+    if ($LASTEXITCODE -ne 0) {{
+        throw "install-nvapi-shim.ps1 failed with exit code $LASTEXITCODE"
+    }}
     # 安装器脚本只需运行一次；实际 shim DLL/备份留在系统目录。
     Remove-Item C:\nv\install-nvapi-shim.ps1 -Force -ErrorAction SilentlyContinue
 }} else {{
@@ -233,7 +303,7 @@ if ({install_shim} -eq 1) {{
 $tn = 'RefreshGridNames'
 Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA 0
 $a = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 -TargetName "{gpu}" -CoreClockMHz {core} -BoostClockMHz {boost} -MemoryClockMHz {memory} -MemoryBusBits {bus} -MemoryBandwidthMBps {bandwidth} -VramMB {vram}'
+    -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 -TargetName "{gpu}" -NvapiPciVendorId {pci_vendor} -NvapiPciDeviceId {pci_device} -NvapiPciSubVendorId {pci_subvendor} -NvapiPciSubDeviceId {pci_subdevice} -NvapiPciRevisionId {pci_revision} -CoreClockMHz {core} -BoostClockMHz {boost} -MemoryClockMHz {memory} -MemoryBusBits {bus} -MemoryBandwidthMBps {bandwidth} -VramMB {vram} -MemoryType {memory_type} -MemoryMaker {memory_maker} -CudaCores {cuda_cores} -ShaderSubPipes {shader_subpipes} -RopCount {rop_count} -TmuCount {tmu_count} -Architecture {architecture} -Implementation {implementation} -ChipRevision {chip_revision} -PcieWidth {pcie_width} -VbiosVersion "{vbios_version}"'
 # AtStartup only — running again at logon causes Device Manager to
 # flicker (registry edits trigger a PnP rescan, which redraws the
 # whole 设备管理器 UI). One pass at boot is enough; cold-start PnP
@@ -249,9 +319,13 @@ Register-ScheduledTask -TaskName $tn -Action $a -Trigger $tBoot `
 "=== final state ==="
 Get-CimInstance Win32_VideoController | Format-Table Name, Status -AutoSize | Out-String
 '''
-out, streams, _ = c.execute_ps(ps)
+out, streams, had_errors = c.execute_ps(ps)
 print(out)
-for e in (streams.error or []): print(f'[err] {e}', file=sys.stderr)
+errors = list(streams.error or [])
+for error in errors:
+    print(f'[err] {error}', file=sys.stderr)
+if had_errors or errors:
+    raise SystemExit(1)
 PYEOF
 fi
 

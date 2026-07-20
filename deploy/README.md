@@ -25,6 +25,7 @@ TPM 2.0 使用 `tpm-crb`，不支持 TPM 的 profile 自动关闭；显式 `--no
 |---|---|---|
 | native SDL | `./deploy/start-vm.sh N` | 默认；QEMU 直接显示 NVIDIA vGPU framebuffer |
 | native GTK | `./deploy/start-vm.sh N --gtk` | 与默认模式使用同一 vGPU 数据通路 |
+| native + ROI 推流 | `./deploy/start-vm.sh N --stream URL [--stream-roi X,Y,W,H]` | 保留 SDL/GTK 窗口，并行输出显式网络目标或本地文件 |
 | stream/relay | `./deploy/start-vm.sh N --legacy-shmem` | vGPU 桌面经 guest relay 和共享内存送到外部 SDL viewer |
 | RDP 别名 | `./deploy/start-vm.sh N --rdp` | 与 `--legacy-shmem` 相同，保留现有调用方式 |
 
@@ -48,6 +49,14 @@ base 克隆，并覆盖“真实 RTX6000-2Q PCI 身份装驱动 → 对齐消费
 [`docs/VGPU-LICENSING.md`](docs/VGPU-LICENSING.md)。
 已有 VM 的休眠恢复、离线 EDID 与设备管理器名称持久化见
 [`docs/VGPU-RECOVERY-RUNBOOK.md`](docs/VGPU-RECOVERY-RUNBOOK.md)。
+G-11 的 host/guest、驱动、推流和零拷贝支持边界统一记录在
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)；其中明确区分 upstream QEMU
+源码能力和本分支已经验收的产品能力。
+
+第一次处理现有 vGPU VM，直接按
+[`docs/G11-QUICKSTART.md`](docs/G11-QUICKSTART.md) 的中文傻瓜教程操作。当前
+主流程是一个无 VM 绑定的离线 `VgpuPortable.exe`、一次性安全注入 Windows base，
+再从 base 克隆任意 B/native VM；历史 A → B 才保留按 VM 迁移和关机提交。
 
 ## 入口脚本（host）
 
@@ -57,10 +66,21 @@ base 克隆，并覆盖“真实 RTX6000-2Q PCI 身份装驱动 → 对齐消费
 | `./deploy/start-vm.sh <vm_id> --install [iso] --manual-oobe` | 同一安全建盘语义，但不挂应答 ISO，完整手动完成 OOBE |
 | `./deploy/start-vm.sh <vm_id> --spoof-name-only` | 通用安全 B：保留 PCI 真身，host 按 mdev UUID 提供每 VM 产品名，前台打开 QEMU SDL 原生窗口 |
 | `./deploy/start-vm.sh <vm_id> --gtk --spoof-name-only` | 同一条 B 路径，改用 QEMU GTK 窗口 |
-| `./deploy/start-vm.sh <vm_id>` | 缺配置时自动生成身份，缺盘时严格从公共 base clone；新配置先用 B，已完成 GTX1050 收尾的配置自动用严格 A |
+| `./deploy/start-vm.sh <vm_id>` | 缺配置时自动生成身份，缺盘时严格从公共 base clone；默认 required CPU 隔离，成功后才放行 guest；新配置及当前支持的三款 profile 均保持 B，legacy GTX1050 strict-A transition 已禁用 |
+| `./deploy/start-vm.sh <vm_id> --proxy` | 启用 QEMU 原生 QMP 多客户端；主 `qmp.sock` 与 `.proxy` 兼容别名均可供多个 host 工具并发连接，不是 HTTP/SOCKS 或 guest 网络代理 |
 | `./deploy/start-vm.sh <vm_id> --no-tpm` | 明确关闭该主板 profile 的 TPM；只用于兼容/诊断 |
+| `./deploy/start-vm.sh <vm_id> --cpu-isolate` | 与默认行为相同：CPU 隔离 required，vCPU 1:1 绑核完成前 guest 保持暂停，失败即终止 |
+| `./deploy/start-vm.sh <vm_id> --stream URL --stream-roi X,Y,W,H` | native SDL/GTK 加固定 ROI 网络推流；默认 `libx264` + SHM，不创建监听端口 |
+| `./deploy/fb-shm-stream.sh {status\|health\|stop} <vm_id>` | 查看或单独停止该 VM 的编码 sidecar；正常关 VM 会自动回收 |
 | `./deploy/start-vm.sh <vm_id> --legacy-shmem` | 旧 ivshmem + guest relay + 外部 SDL viewer 路径；`--rdp` 是兼容别名 |
-| `./deploy/finish-vgpu-install.sh <vm_id>` | 一键收尾；GTX1050 生成专用 ZIP，EXE 先预暂存 locked 538.33，再经 V3 回执启用 A/internal/FRL；其他型号保持 B |
+| `./deploy/package-vgpu-one-click.sh` | 推荐主入口：生成同时包含全部已审计 profile、无 VM ID/UUID、完全离线的 `VgpuPortable.exe` |
+| `sudo ./deploy/install-vgpu-portable-to-base.sh` | 停止所有 VM 后，把 portable EXE 写入 base 的私有临时副本，验证 NTFS/qcow2 后归档旧 base 并原子替换 |
+| `./deploy/clone-vgpu-base.sh <vm_id> --gpu-profile PROFILE [--start]` | 创建新的 B/native 配置和 UUID，从已验签的 portable base 克隆独立系统盘；guest 安装后无需 host commit |
+| `./deploy/package-vgpu-one-click.sh <vm_id>` | legacy 兼容入口：A 生成按 VM 绑定的完整生产驱动迁移 EXE；B 生成旧的按 VM 绑定 GPU-Z 包 |
+| `./deploy/package-gpuz-profile.sh <vm_id> [...]` | legacy B 的 VM/UUID 绑定 GPU-Z 打包器；新 base/clone 不使用 |
+| `./deploy/package-vgpu-production-migration.sh <vm_id>` | 为 legacy A 实例生成一个 VM/UUID/型号绑定的 guest EXE，内嵌未修改 GRID 538.33 与 GPU-Z 子包 |
+| `sudo ./deploy/commit-vgpu-production-migration.sh <vm_id>` | guest EXE 完整关机后，从一次性 NBD snapshot 只读核验 staged 回执，再原子提交 B/native 配置；不写 Windows 磁盘或 BCD |
+| `./deploy/finish-vgpu-install.sh <vm_id>` | legacy B 模式 token/RTC 收尾；GTX1050 strict-A 自签路径已硬禁用，会在生成 guest 包或写 marker 前拒绝 |
 | `./deploy/stop-vm.sh <vm_id>` | 关 VM (另一终端用 / start-vm.sh 退出后兜底) |
 | `./deploy/report-vm-boot-timing.sh <vm_id>` | 只读汇总本次 host boot 里的 vGPU start、display init、guest driver 和 license 时间；不依赖 guest IP |
 | `./deploy/service.sh <vm_id> {stop\|start\|status\|restart}` | 仅旧 relay 路径使用的 guest 服务控制 |
@@ -70,26 +90,46 @@ base 克隆，并覆盖“真实 RTX6000-2Q PCI 身份装驱动 → 对齐消费
 `start-vm.sh N --install [ISO]`。完整自动创建规则和 guest 最小化边界见
 [`docs/VGPU-VM-CREATION.md`](docs/VGPU-VM-CREATION.md)。
 
+只允许正式生产签名、明确禁止自签名/测试签名的 guest，应使用
+[`docs/GPUZ-ONE-CLICK.md`](docs/GPUZ-ONE-CLICK.md) 的 portable B/native 流程。
+默认产物为
+`$STAGE_DIR/VgpuPortable/VgpuPortable.exe`，同时内嵌 GTX 750 Ti、GT 1030、
+GTX 1050 三套已审计 profile，不含 VM ID/UUID，也不依赖 HTTP。每次
+`start-vm.sh` 会按新 clone 的配置自动发布只读 SMBIOS profile/UUID/catalog
+声明；guest 严格核对声明、原生 `DEV_1E30`、Code 0、538.33、生产签名链、BCD 和
+单 Display 后才应用对应型号。因此同一个 EXE 可放进 base 供任意 VM 克隆使用，
+但不能在 guest 内任意选型号。正常 B/native portable 安装后没有人工 host
+commit。
+
+base 注入必须在全部 VM 停止、Windows 完整关机且 NTFS 非 dirty/hibernated 时
+执行。脚本不直接挂载 live base，只修改临时副本并在完整验证后原子替换。历史
+GTX1050 严格收尾会修改 INF/使用本地自签 catalog，不属于生产路径，不能用开启
+`testsigning` 或安装私有根证书来绕过；旧 A 实例继续按 VM/UUID 绑定迁移。
+
+VM3 已按
+[`docs/VGPU-PRODUCTION-MIGRATION.md`](docs/VGPU-PRODUCTION-MIGRATION.md)
+完成 B/native 迁移：未修改 GRID 538.33 提供真实 NVIDIA/Microsoft 签名链，
+设备管理器为 GTX 1050、Code 0，GPU-Z 2.70 为同一型号且显示 WHQL。旧自签 driver
+package 和私有测试证书已在生产驱动验收后移除。新增 GPU 型号先审计唯一 identity
+catalog，不按 VM 编号写分支，也不能靠猜测字段、BCD 测试选项或自签内核驱动适配。
+
 ## 工作流
 
 **首次部署 / driver 未装**：用 vGPU 真 PCI ID 启动，安装与 host vGPU
 branch/profile 兼容的 GRID guest 驱动。驱动接管前仍可从 `ramfb` 窗口操作。当前
 稳定基线是 host 535.161.05 + guest 538.33；staging 中历史误名为 `553.24` 的
-资产必须先按新建教程核对 hash 和 INF DriverVersion。驱动装好后，用一个宿主命令
-完成其余收尾：
+资产必须先按新建教程核对 hash 和 INF DriverVersion。驱动装好后，非 GTX1050
+strict-A 的 legacy B 模式可用一个宿主命令完成 token/RTC 收尾：
 
 ```bash
 # Windows 已装好 GRID driver 并完整关机后，在宿主执行一次
 ./deploy/finish-vgpu-install.sh 1
 ```
 
-GTX1050 会生成私有的
-`/home/ubuntu/images/staging/VgpuGuestFinish-GTX1050.zip`。把 ZIP 传入救援 Windows、
-“全部解压”，只运行其中的 `VgpuGuestFinish.exe`：它先 fail-closed 校验、签名并
-add-only 预暂存 538.33/DEV_1C81，再完成 token、名称、休眠和关机。宿主只有在离线
-验证 V3 回执后才把配置切到 A、内部 `DEV_1C81`、`frl_enabled=0` 并冷启动；动态
-`oemN.inf` 不会硬编码。其他 profile 仍生成/复用小 EXE并保持 B。不需要 RDP、VNC、
-WinRM 或 guest HTTP，需要 GTK 时加 `--rescue-gtk`。
+GTX1050 strict-A 旧流程会修改 INF 并自签 catalog，现已硬拒绝。旧 A 实例改用
+`package-vgpu-production-migration.sh`：Windows 用户只运行一个 EXE 一次，首次
+关机后宿主核验回执并提交 B；开机任务自动绑定锁定的原始 538.33、验证 Code 0/
+生产签名并应用 GPU-Z profile。不能用私有根、自签 catalog 或 BCD 测试选项替代。
 
 **日常使用**：
 ```bash
@@ -127,10 +167,10 @@ damage/帧序号）。
 
 `--gtk` 使用同一条 vGPU REGION 数据通路，但 GTK 标题目前没有 FPS 计数器；看不到
 `SDL Present` 不表示帧率为 0。Wayland 下 GTK 由 GDK frame clock/合成器调度，体感
-可能比 SDL 均匀。B/off 模式仍应检查 DLS 和 `Licensed`。严格 GTX1050 A 的控制面板
-授权页会消失，host 仍可能报告 `Unlicensed`；这不等于已激活。该模式验收
-`Frame Rate Limit: N/A`、Code 0、538.33 和精确 PCI tuple。静止桌面标题为 0 FPS
-是去重，不是限帧；动态测试只能证明是否仍被 3 FPS 锁住，不能替代性能跑分。
+可能比 SDL 均匀。当前三款 profile 都保持 B/off，并检查 DLS、`Licensed`、Code 0
+和正式签名 driver。历史 strict GTX1050 A 曾报告 `Unlicensed / FRL N/A`，但该
+自签 transition 已禁用，不是当前验收路径。静止桌面标题为 0 FPS 是去重，不是
+限帧；动态测试只能证明是否仍被 3 FPS 锁住，不能替代性能跑分。
 
 NVIDIA REGION 还会逐行精确对比可见像素：静止桌面不再重复上传
 纹理或 Present，小范围变化只上传连续脏行；连续全屏动态会
@@ -143,11 +183,12 @@ NVIDIA REGION 还会逐行精确对比可见像素：静止桌面不再重复上
 ```bash
 ./deploy/start-vm.sh 1 --no-spoof          # off：装 driver / 调试用
 ./deploy/start-vm.sh 1 --spoof-name-only   # B：PCI 真身 + name spoof，driver 最稳
-./deploy/start-vm.sh 1 --spoof              # A：仅调试；full-consumer 未完成 V3 回执会拒绝
+./deploy/start-vm.sh 1 --spoof              # legacy A 诊断：当前无可用生产签名 transition，会拒绝
 ```
 
-新 GTX1050 配置先写 B 和 `VGPU_IDENTITY_TARGET=full-consumer`；一键收尾成功后才
-原子持久化 A。GTX750Ti/GT1030 继续 name-only B。不要直接向只读配置 `echo`。
+新 GTX1050、GTX750Ti、GT1030 配置统一写
+`SPOOF_MODE=B` 与 `VGPU_IDENTITY_TARGET=name-only`。不要直接向只读配置
+`echo`。
 
 默认数据通路：
 ```
@@ -192,6 +233,7 @@ deploy/
 ├── create-vm.sh              # 一次性生成 instances/vmN/vm.conf
 ├── migrate-vm-storage.sh     # 前两代布局 → 每 VM bundle（默认只检查）
 ├── start-vm.sh               # NVIDIA mdev/vGPU 唯一启动入口和实现
+├── fb-shm-stream.sh           # 每 VM ROI/编码推流 sidecar 生命周期
 ├── finish-vgpu-install.sh     # 新装一次性收尾：单 EXE、token、休眠、RTC/EDID
 ├── stop-vm.sh                # NVIDIA mdev/vGPU 唯一停止入口和实现
 ├── connect.sh                # vGPU stream/relay 模式的外部 SDL viewer 入口
@@ -200,10 +242,13 @@ deploy/
 │   ├── vgpu/                 # 本分支部署与生命周期测试
 │   └── qemu/                 # 本分支依赖的 QEMU 源码静态测试
 ├── lib/
+│   ├── cpu-isolation.sh      # QMP vCPU TID 获取与 CPU 隔离启动/回滚
 │   ├── vm-storage.sh         # VM/ISO/config/base/NVRAM 统一路径解析
 │   ├── vm-tpm.sh             # swtpm TPM 1.2/2.0 生命周期与精确清理
 │   └── vgpu-mdev.sh          # mdev 动态分配/回收（带 16 GB 上限检查）
 ├── host/
+│   ├── cpu-isolate.sh        # 固定 cgroup v2 产品分区的 root helper
+│   ├── install-cpu-isolation.sh # 安装 root-owned helper 与受限 sudoers
 │   ├── netplan-br0.yaml      # 宿主网桥配置示例
 │   ├── setup-bridge.sh       # qemu-bridge-helper setuid + /etc/qemu/bridge.conf
 │   ├── setup-vgpu-unlock.sh  # 编译 vgpu_unlock-rs + LD_PRELOAD 注入 systemd
@@ -239,8 +284,15 @@ deploy/
    栈提供 VFIO REGION display，不提供 DMA-BUF；guest GRID 驱动必须与该 host
    branch 和所选 profile 兼容。
 4. 物理显示靠 AMD RX 570，不要让 Ubuntu desktop 动 NVIDIA 卡。
-5. 安装 TPM/应答 ISO 运行时：`sudo apt install swtpm swtpm-tools xorriso`。默认启动会 fail-closed；
+5. 安装 TPM/应答 ISO/推流运行时：
+   `sudo apt install swtpm swtpm-tools xorriso ffmpeg`。默认 TPM 启动会 fail-closed；
    不会因缺包而悄悄启动成一台无 TPM 的 VM。
+6. CPU 隔离依赖 `sudo`、`python3`、`util-linux`（`taskset`/`flock`）、
+   `diffutils` 以及 cgroup v2 `cpuset` controller。`sudo` 是自动安装的提权入口，
+   必须预先可用。默认 `required`，首次普通启动会用 `SUDO_PASSWORD`（当前默认
+   `123456`）自动补装其余缺少的软件包、root helper 和 sudoers；也可提前执行
+   `sudo ./deploy/host/install-cpu-isolation.sh`。
+   `--cpu-isolate-auto` 是显式允许降级，`--no-cpu-isolate` 才是明确关闭。
 
 ### 1. vgpu_unlock-rs + profile_override
 
@@ -325,9 +377,9 @@ license 留到第 8 节统一收尾。
 
 ### 7. 消费卡身份策略
 
-所有新配置先使用 B：`--spoof-name-only` 保留 `DEV_1E30`，并按稳定 mdev UUID 注入
-消费卡名称。GTX750Ti/GT1030 目前一直使用这条路径。GTX1050 完成下一节后会由脚本
-自动切为严格 A，以后只需：
+所有新配置及当前支持的三款 profile 都使用 B：`--spoof-name-only` 保留
+`DEV_1E30`，并按稳定 mdev UUID 注入消费卡名称。GTX1050 也不会由脚本自动切 A，
+日常只需：
 
 ```bash
 ./start-vm.sh 1
@@ -338,9 +390,12 @@ license 留到第 8 节统一收尾。
 正常 host-only 路径不需要它。per-mdev 覆写只改产品名，不会改变物理 GPU 的
 核心数、频率、总线位宽、调度份额或真实性能。
 
-严格 A 当前只审计 GTX1050：`10DE:1C81 / SUBSYS_11C01028`、538.33、Code 0、
-2048 MB。底层资源仍是 `nvidia-257`，host type 名可能仍显示 GT1030，规格字段也
-不等于真实 GP107。完整构建与签名边界见 [`docs/DRIVER-INSTALL.md`](docs/DRIVER-INSTALL.md)。
+严格 A 的历史实验只覆盖 GTX1050，但其修改 INF/自签 catalog 的 transition 已禁用；
+受支持状态保持 B。VM3 已迁移并验收为 B/native 成品；底层资源仍是
+`nvidia-257`，因此原始 PnP 身份是 vGPU 的 `DEV_1E30`，而不是消费卡
+`DEV_1C81`。设备管理器名称和 GPU-Z app-local profile 显示 GTX 1050，但不会伪造
+底层资源为真实 GP107。生产签名边界见
+[`docs/DRIVER-INSTALL.md`](docs/DRIVER-INSTALL.md)。
 
 这里不需要 RDP、ivshmem driver 或抓屏 relay。vGPU stream/relay 模式才使用
 `./start-vm.sh 1 --legacy-shmem`（`--rdp` 同义）。
@@ -351,9 +406,10 @@ license 留到第 8 节统一收尾。
 ./finish-vgpu-install.sh 1
 ```
 
-GTX1050 传入并完整解压 `VgpuGuestFinish-GTX1050.zip`，再以管理员运行其中唯一
-EXE；其他 profile 使用小 EXE。严格 GTX1050 验收 Code 0、538.33、精确 PCI tuple
-和 FRL N/A；B/off 才要求 DLS `Licensed`。完整矩阵见
+GTX1050 strict-A 旧自签 ZIP 已禁用并归档；受支持状态保持 B。VM3 已完成迁移，
+启动时不再走被隔离的 strict-A 路径。其他 B profile 可使用小 EXE 做 legacy
+token/RTC 收尾。
+B/off 继续按 DLS `Licensed` 验收。完整矩阵见
 [`docs/VGPU-LICENSING.md`](docs/VGPU-LICENSING.md)。
 
 ### 9. 装 DNF 实测

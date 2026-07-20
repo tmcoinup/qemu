@@ -70,9 +70,15 @@ vm_storage_prepare() {
         "$VM_ASSET_DIR" "$VM_BASE_ARCHIVE_DIR"
 }
 
+vm_storage_id_is_supported() {
+    local id=${1:-}
+    [[ "$id" =~ ^[1-9][0-9]*$ && ${#id} -le 10 ]] || return 1
+    ((10#$id <= 2147483647))
+}
+
 vm_storage_validate_id() {
-    [[ "${1:-}" =~ ^[1-9][0-9]*$ ]] || {
-        echo "invalid VM id for storage path: ${1:-<empty>}" >&2
+    vm_storage_id_is_supported "${1:-}" || {
+        echo "invalid VM id for storage path (expected 1..2147483647): ${1:-<empty>}" >&2
         return 2
     }
 }

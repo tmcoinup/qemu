@@ -1,12 +1,10 @@
 <#
 .SYNOPSIS
-  Install the NVAPI shim DLL in guest. After this, NVAPI clients (鲁大师,
-  GPU-Z, HWiNFO, game engines) query our override for a handful of GPU
-  spec functions; we return spoofed GT 1030 values instead of the
-  physical RTX 2080's.
+  Install the NVAPI shim DLL in guest, either system-wide or beside one
+  explicitly selected application executable.
 
 .DESCRIPTION
-  Flow:
+  System-wide flow (the backward-compatible default):
     1. Download nvapi64.dll (our shim) from host HTTP server.
     2. Take ownership of C:\Windows\System32\nvapi64.dll (TrustedInstaller
        is default owner).
@@ -14,7 +12,18 @@
     4. Validate PE architecture and required shim markers before replacing.
     5. Reboot recommended (NVIDIA service caches DLL handles).
 
-  Rollback: .\install-nvapi-shim.ps1 -Uninstall
+  App-local flow (-ApplicationExe):
+    1. Detect the selected executable's PE architecture.
+    2. Validate and stage only the matching shim.
+    3. Copy the matching, Authenticode-verified NVIDIA system NVAPI DLL
+       beside the application as nvapi64_orig.dll or nvapi_orig.dll.
+    4. Install the shim beside the application without modifying System32
+       or SysWOW64. Existing local DLLs are never adopted unless they form
+       a complete, validated pair from an earlier app-local installation.
+
+  Rollback:
+    .\install-nvapi-shim.ps1 -ApplicationExe C:\Tools\GPU-Z.exe -Uninstall
+    .\install-nvapi-shim.ps1 -Uninstall
 #>
 [CmdletBinding()]
 param(
@@ -23,6 +32,7 @@ param(
     [string]$X86Path = '',
     [string]$ExpectedX64Sha256 = '',
     [string]$ExpectedX86Sha256 = '',
+    [string]$ApplicationExe = '',
     [switch]$Uninstall
 )
 
@@ -47,18 +57,29 @@ function Take-Own($f) {
     & cmd /c icacls "`"$f`"" /grant 'Administrators:(F)' 2>&1 | Out-Null
 }
 
-function Assert-ShimImage($Path, [int]$ExpectedMachine) {
+function Get-PeMachine($Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "PE image is missing: $Path"
+    }
     $bytes = [IO.File]::ReadAllBytes($Path)
-    if ($bytes.Length -lt 4096 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
-        throw "Downloaded shim is not a valid PE image: $Path"
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+        throw "File is not a valid PE image: $Path"
     }
     $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
     if ($peOffset -lt 0x40 -or $peOffset + 6 -gt $bytes.Length -or
         $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
         $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
-        throw "Downloaded shim has an invalid PE header: $Path"
+        throw "File has an invalid PE header: $Path"
     }
-    $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+    return [int][BitConverter]::ToUInt16($bytes, $peOffset + 4)
+}
+
+function Assert-ShimImage($Path, [int]$ExpectedMachine) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 4096) {
+        throw "Downloaded shim is not a valid PE image: $Path"
+    }
+    $machine = Get-PeMachine $Path
     if ($machine -ne $ExpectedMachine) {
         throw ('Downloaded shim machine 0x{0:x4} does not match expected 0x{1:x4}: {2}' `
             -f $machine, $ExpectedMachine, $Path)
@@ -73,22 +94,388 @@ function Assert-ShimImage($Path, [int]$ExpectedMachine) {
     }
 }
 
-function Assert-OriginalNvidiaImage($Path) {
+function Assert-OriginalNvidiaImage($Path, [int]$ExpectedMachine = 0) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Original NVIDIA NVAPI image is missing: $Path"
     }
+    if ($ExpectedMachine -and (Get-PeMachine $Path) -ne $ExpectedMachine) {
+        throw ('Original NVAPI machine does not match expected 0x{0:x4}: {1}' `
+            -f $ExpectedMachine, $Path)
+    }
     $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $signerSubject = if ($null -ne $signature.SignerCertificate) {
+        [string]$signature.SignerCertificate.Subject
+    } else {
+        ''
+    }
+    $isSelfIssued = $null -ne $signature.SignerCertificate -and
+        $signerSubject -ceq [string]$signature.SignerCertificate.Issuer
+    # Production NVIDIA display-driver binaries can carry either NVIDIA's
+    # own Authenticode signature or Microsoft's WHCP signature after driver
+    # attestation.  Both are valid originals when the signed image also has
+    # NVIDIA's exact CompanyName and the expected PE architecture.
+    $trustedSigner = $signerSubject -match 'NVIDIA' -or
+        $signerSubject -match '\ACN=Microsoft Windows Hardware Compatibility Publisher(?:,|$)'
     if ($version.CompanyName -notmatch '\ANVIDIA(?: Corporation)?\z' -or
         [string]$signature.Status -cne 'Valid' -or
         $null -eq $signature.SignerCertificate -or
-        $signature.SignerCertificate.Subject -notmatch 'NVIDIA') {
-        throw "Original NVAPI image does not have a valid NVIDIA signature: $Path"
+        $isSelfIssued -or
+        -not $trustedSigner) {
+        throw "Original NVAPI image does not have a valid NVIDIA/WHCP signature: $Path"
     }
     $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Path))
     if ($ascii.Contains('IdentityGpuName')) {
         throw "Refusing to use another identity shim as the original NVAPI image: $Path"
     }
+}
+
+function Get-SystemNvapiPath($Arch) {
+    if ([string]::IsNullOrWhiteSpace($env:windir)) {
+        throw 'The Windows directory is unavailable.'
+    }
+    if ($Arch.label -eq 'x64') {
+        if (-not [Environment]::Is64BitOperatingSystem) {
+            throw 'A 64-bit application requires 64-bit Windows.'
+        }
+        if ([Environment]::Is64BitProcess) {
+            $systemDirectory = Join-Path $env:windir 'System32'
+        } else {
+            # Sysnative bypasses WOW64 file-system redirection when a caller
+            # intentionally launches this script in 32-bit PowerShell.
+            $systemDirectory = Join-Path $env:windir 'Sysnative'
+        }
+    } elseif ([Environment]::Is64BitOperatingSystem) {
+        $systemDirectory = Join-Path $env:windir 'SysWOW64'
+    } else {
+        $systemDirectory = Join-Path $env:windir 'System32'
+    }
+    return Join-Path $systemDirectory $Arch.name
+}
+
+function Assert-ApplicationStopped($ApplicationPath) {
+    foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
+        $processPath = $null
+        try {
+            $processPath = $process.Path
+        } catch {
+            continue
+        }
+        if (-not [string]::IsNullOrWhiteSpace($processPath) -and
+            [string]::Equals(
+                [IO.Path]::GetFullPath($processPath),
+                [IO.Path]::GetFullPath($ApplicationPath),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "Close the selected application before changing its local NVAPI files: $ApplicationPath"
+        }
+    }
+}
+
+function Assert-AppLocalPathIsRegular($ApplicationItem) {
+    if ($ApplicationItem.PSProvider.Name -cne 'FileSystem') {
+        throw "ApplicationExe must use the file-system provider: $($ApplicationItem.PSPath)"
+    }
+    if (($ApplicationItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "ApplicationExe must not be a reparse point: $($ApplicationItem.FullName)"
+    }
+    $directory = $ApplicationItem.Directory
+    while ($null -ne $directory) {
+        if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "ApplicationExe must not be below a reparse-point directory: $($directory.FullName)"
+        }
+        $directory = $directory.Parent
+    }
+}
+
+function Get-AppLocalPairState($Target, $Backup, [int]$ExpectedMachine) {
+    $targetExists = Test-Path -LiteralPath $Target
+    $backupExists = Test-Path -LiteralPath $Backup
+    if ($targetExists -xor $backupExists) {
+        throw "Conflicting pre-existing local NVAPI files; expected both or neither: $Target, $Backup"
+    }
+    if (-not $targetExists) {
+        return 'absent'
+    }
+    if (-not (Test-Path -LiteralPath $Target -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $Backup -PathType Leaf)) {
+        throw "Conflicting pre-existing local NVAPI path is not a regular file: $Target, $Backup"
+    }
+    foreach ($path in @($Target, $Backup)) {
+        $attributes = (Get-Item -LiteralPath $path).Attributes
+        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Conflicting pre-existing local NVAPI file is a reparse point: $path"
+        }
+    }
+    try {
+        Assert-ShimImage $Target $ExpectedMachine
+        Assert-OriginalNvidiaImage $Backup $ExpectedMachine
+    } catch {
+        throw "Conflicting pre-existing local NVAPI pair was not installed by this shim: $($_.Exception.Message)"
+    }
+    return 'installed'
+}
+
+function Stage-VerifiedShim($Arch, $Destination) {
+    if ([string]$Arch.expected -notmatch '\A[0-9A-Fa-f]{64}\z') {
+        throw "Expected$($Arch.label)Sha256 must be supplied as 64 hexadecimal characters."
+    }
+    $expectedHash = ([string]$Arch.expected).ToUpperInvariant()
+    if ([string]::IsNullOrWhiteSpace([string]$Arch.source)) {
+        $url = "$BaseUrl/$($Arch.name)"
+        Invoke-WebRequest $url -OutFile $Destination -UseBasicParsing | Out-Null
+    } else {
+        Copy-Item -LiteralPath ([string]$Arch.source) -Destination $Destination
+    }
+    Assert-ShimImage $Destination $Arch.machine
+    $actualHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
+    if ($actualHash -cne $expectedHash) {
+        throw "Downloaded/local shim SHA256 mismatch for $($Arch.label): actual $actualHash, expected $expectedHash"
+    }
+    return $actualHash
+}
+
+function Assert-AppLocalPairContent(
+    $Target,
+    $Backup,
+    [int]$ExpectedMachine,
+    $ExpectedShimHash,
+    $ExpectedOriginalHash
+) {
+    $null = Get-AppLocalPairState $Target $Backup $ExpectedMachine
+    if ((Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash -cne $ExpectedShimHash -or
+        (Get-FileHash -LiteralPath $Backup -Algorithm SHA256).Hash -cne $ExpectedOriginalHash) {
+        throw 'Installed app-local NVAPI pair failed final hash verification.'
+    }
+}
+
+function Install-NewAppLocalPair(
+    $Target,
+    $Backup,
+    $StagedShim,
+    $StagedOriginal,
+    [int]$ExpectedMachine,
+    $ExpectedShimHash,
+    $ExpectedOriginalHash
+) {
+    $backupInstalled = $false
+    $targetInstalled = $false
+    try {
+        Move-Item -LiteralPath $StagedOriginal -Destination $Backup -ErrorAction Stop
+        $backupInstalled = $true
+        Move-Item -LiteralPath $StagedShim -Destination $Target -ErrorAction Stop
+        $targetInstalled = $true
+        Assert-AppLocalPairContent `
+            $Target $Backup $ExpectedMachine $ExpectedShimHash $ExpectedOriginalHash
+    } catch {
+        $installError = $_.Exception.Message
+        $rollbackErrors = @()
+        if ($targetInstalled -and (Test-Path -LiteralPath $Target)) {
+            try {
+                Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
+            } catch {
+                $rollbackErrors += $_.Exception.Message
+            }
+        }
+        if ($backupInstalled -and (Test-Path -LiteralPath $Backup)) {
+            try {
+                Remove-Item -LiteralPath $Backup -Force -ErrorAction Stop
+            } catch {
+                $rollbackErrors += $_.Exception.Message
+            }
+        }
+        if ($rollbackErrors.Count) {
+            throw "App-local NVAPI installation failed ($installError); rollback also failed: $($rollbackErrors -join '; ')"
+        }
+        throw "App-local NVAPI installation failed; newly created files were rolled back: $installError"
+    }
+}
+
+function Update-AppLocalPair(
+    $Target,
+    $Backup,
+    $StagedShim,
+    $StagedOriginal,
+    [int]$ExpectedMachine,
+    $ExpectedShimHash,
+    $ExpectedOriginalHash
+) {
+    $token = [Guid]::NewGuid().ToString('N')
+    $oldTarget = "$Target.$token.rollback"
+    $oldBackup = "$Backup.$token.rollback"
+    $targetMoved = $false
+    $backupMoved = $false
+    $newTargetInstalled = $false
+    $newBackupInstalled = $false
+    try {
+        Move-Item -LiteralPath $Target -Destination $oldTarget -ErrorAction Stop
+        $targetMoved = $true
+        Move-Item -LiteralPath $Backup -Destination $oldBackup -ErrorAction Stop
+        $backupMoved = $true
+        Move-Item -LiteralPath $StagedOriginal -Destination $Backup -ErrorAction Stop
+        $newBackupInstalled = $true
+        Move-Item -LiteralPath $StagedShim -Destination $Target -ErrorAction Stop
+        $newTargetInstalled = $true
+        Assert-AppLocalPairContent `
+            $Target $Backup $ExpectedMachine $ExpectedShimHash $ExpectedOriginalHash
+    } catch {
+        $installError = $_.Exception.Message
+        $rollbackErrors = @()
+        if ($newTargetInstalled -and (Test-Path -LiteralPath $Target)) {
+            try {
+                Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
+            } catch {
+                $rollbackErrors += $_.Exception.Message
+            }
+        }
+        if ($newBackupInstalled -and (Test-Path -LiteralPath $Backup)) {
+            try {
+                Remove-Item -LiteralPath $Backup -Force -ErrorAction Stop
+            } catch {
+                $rollbackErrors += $_.Exception.Message
+            }
+        }
+        if ($backupMoved -and -not (Test-Path -LiteralPath $Backup)) {
+            try {
+                Move-Item -LiteralPath $oldBackup -Destination $Backup -ErrorAction Stop
+            } catch {
+                $rollbackErrors += $_.Exception.Message
+            }
+        }
+        if ($targetMoved -and -not (Test-Path -LiteralPath $Target)) {
+            try {
+                Move-Item -LiteralPath $oldTarget -Destination $Target -ErrorAction Stop
+            } catch {
+                $rollbackErrors += $_.Exception.Message
+            }
+        }
+        if ($rollbackErrors.Count) {
+            throw "App-local NVAPI update failed ($installError); rollback also failed: $($rollbackErrors -join '; ')"
+        }
+        throw "App-local NVAPI update failed; prior files were restored: $installError"
+    }
+    foreach ($path in @($oldTarget, $oldBackup)) {
+        try {
+            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "App-local NVAPI was updated, but a rollback file remains: $path"
+        }
+    }
+}
+
+function Remove-AppLocalPair($Target, $Backup) {
+    $token = [Guid]::NewGuid().ToString('N')
+    $removedTarget = "$Target.$token.remove"
+    $removedBackup = "$Backup.$token.remove"
+    Move-Item -LiteralPath $Target -Destination $removedTarget -ErrorAction Stop
+    try {
+        Move-Item -LiteralPath $Backup -Destination $removedBackup -ErrorAction Stop
+    } catch {
+        $removeError = $_.Exception.Message
+        Move-Item -LiteralPath $removedTarget -Destination $Target -ErrorAction Stop
+        throw "App-local NVAPI uninstall failed; the installed pair was restored: $removeError"
+    }
+    foreach ($path in @($removedTarget, $removedBackup)) {
+        try {
+            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "App-local NVAPI is disabled, but a renamed cleanup file remains: $path"
+        }
+    }
+}
+
+function Invoke-AppLocalMode($ApplicationPath, [switch]$Remove) {
+    if (-not (Test-Path -LiteralPath $ApplicationPath -PathType Leaf)) {
+        throw "Application executable is missing: $ApplicationPath"
+    }
+    $applicationItem = Get-Item -LiteralPath $ApplicationPath
+    Assert-AppLocalPathIsRegular $applicationItem
+    if ($applicationItem.Extension -ine '.exe') {
+        throw "ApplicationExe must identify an .exe file: $ApplicationPath"
+    }
+    $resolvedApplication = $applicationItem.FullName
+    $applicationMachine = Get-PeMachine $resolvedApplication
+    $arch = @($arches | Where-Object {
+        [int]$_.machine -eq $applicationMachine
+    })
+    if ($arch.Count -ne 1) {
+        throw ('Unsupported application PE machine 0x{0:x4}: {1}' `
+            -f $applicationMachine, $resolvedApplication)
+    }
+    $arch = $arch[0]
+    $applicationDirectory = $applicationItem.DirectoryName
+    $windowsDirectory = [IO.Path]::GetFullPath($env:windir).TrimEnd('\')
+    $fullApplicationDirectory = [IO.Path]::GetFullPath($applicationDirectory).TrimEnd('\')
+    if ($fullApplicationDirectory.Equals(
+            $windowsDirectory,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or $fullApplicationDirectory.StartsWith(
+            "$windowsDirectory\",
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'ApplicationExe must not be inside the Windows directory in app-local mode.'
+    }
+
+    $target = Join-Path $applicationDirectory $arch.name
+    $backup = Join-Path $applicationDirectory $arch.backup
+    Assert-ApplicationStopped $resolvedApplication
+    $state = Get-AppLocalPairState $target $backup $arch.machine
+
+    if ($Remove) {
+        Write-Host "[app-local/$($arch.label)] uninstall beside $resolvedApplication" -Fore Cyan
+        if ($state -eq 'absent') {
+            Write-Host '  no managed app-local NVAPI pair is installed'
+            return
+        }
+        Remove-AppLocalPair $target $backup
+        Write-Host '  removed the validated app-local shim and original DLL'
+        return
+    }
+
+    $systemOriginal = Get-SystemNvapiPath $arch
+    Assert-OriginalNvidiaImage $systemOriginal $arch.machine
+    $token = [Guid]::NewGuid().ToString('N')
+    $stagedShim = Join-Path $applicationDirectory ".$($arch.name).$token.new"
+    $stagedOriginal = Join-Path $applicationDirectory ".$($arch.backup).$token.new"
+    Write-Host "[app-local/$($arch.label)] install beside $resolvedApplication" -Fore Cyan
+    try {
+        $shimHash = Stage-VerifiedShim $arch $stagedShim
+        Copy-Item -LiteralPath $systemOriginal -Destination $stagedOriginal
+        Assert-OriginalNvidiaImage $stagedOriginal $arch.machine
+        $originalHash = (Get-FileHash -LiteralPath $stagedOriginal -Algorithm SHA256).Hash
+
+        # Recheck after staging so a concurrent file creation becomes a
+        # conflict rather than an overwrite.
+        $currentState = Get-AppLocalPairState $target $backup $arch.machine
+        if ($currentState -cne $state) {
+            throw 'App-local NVAPI files changed while the installation was being staged.'
+        }
+        if ($state -eq 'installed' -and
+            (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ceq $shimHash -and
+            (Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash -ceq $originalHash) {
+            Write-Host '  matching app-local NVAPI pair is already installed'
+            return
+        }
+        if ($state -eq 'absent') {
+            Install-NewAppLocalPair `
+                $target $backup $stagedShim $stagedOriginal `
+                $arch.machine $shimHash $originalHash
+        } else {
+            Update-AppLocalPair `
+                $target $backup $stagedShim $stagedOriginal `
+                $arch.machine $shimHash $originalHash
+        }
+        Write-Host "  installed $target"
+        Write-Host "  original  $backup"
+    } finally {
+        Remove-Item -LiteralPath $stagedShim, $stagedOriginal -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# App-local mode returns before all system-wide mutation code below.
+if (-not [string]::IsNullOrWhiteSpace($ApplicationExe)) {
+    Invoke-AppLocalMode $ApplicationExe -Remove:$Uninstall
+    return
 }
 
 if ($Uninstall) {

@@ -7,7 +7,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 image_root="$tmp/images"
-conf_dir="$image_root/vms/instances/vm2"
+conf_dir="$image_root/vms/G-11/vm2"
 stage_dir="$image_root/staging"
 conf="$conf_dir/vm.conf"
 mkdir -p "$conf_dir"
@@ -426,7 +426,7 @@ rg -Fxq -- '18080' "$serve_args"
 # A process interrupted during publication may expose complete new files, but
 # the old manifest must remain as the commit point and reject their hashes.
 atomic_root="$tmp/atomic-images"
-atomic_conf_dir="$atomic_root/vms/instances/vm2"
+atomic_conf_dir="$atomic_root/vms/G-11/vm2"
 atomic_stage="$atomic_root/staging"
 mkdir -p "$atomic_conf_dir"
 cp "$tmp/good.conf" "$atomic_conf_dir/vm.conf"
@@ -475,7 +475,7 @@ assert_manifest "$atomic_stage" 2 false
 
 # The global staging lock must delay a second publisher until it is released.
 lock_root="$tmp/lock-images"
-lock_conf_dir="$lock_root/vms/instances/vm2"
+lock_conf_dir="$lock_root/vms/G-11/vm2"
 lock_stage="$lock_root/staging"
 mkdir -p "$lock_conf_dir" "$lock_stage"
 cp "$tmp/good.conf" "$lock_conf_dir/vm.conf"

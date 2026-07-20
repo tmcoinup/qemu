@@ -37,6 +37,7 @@ replace_json() {
 }
 
 TMP_DIR="$(mktemp -d)"
+IMAGE_ROOT="$TMP_DIR"
 VM_ROOT="$TMP_DIR/vms"
 STAGE_DIR="$TMP_DIR/staging"
 EMPTY_VGPU_CONFIG="$TMP_DIR/vgpu-host.conf"
@@ -88,6 +89,7 @@ chmod +x "$TMP_DIR/qemu-system-x86_64"
 env -i \
     HOME="${HOME:-/tmp}" \
     PATH=/usr/bin:/bin \
+    IMAGE_ROOT="$IMAGE_ROOT" \
     VM_ROOT="$VM_ROOT" \
     STAGE_DIR="$STAGE_DIR" \
     "$CREATE_VM" "$VM_ID" \
@@ -96,7 +98,7 @@ env -i \
         --gpu-profile gtx1050_2gb \
         --monitor-profile dell-se2416h >"$TMP_DIR/create.out"
 
-CONF="$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+CONF="$VM_ROOT/vm${VM_ID}/vm.conf"
 chmod u+w "$CONF"
 sed -i 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' "$CONF"
 chmod 0444 "$CONF"
@@ -217,6 +219,7 @@ run_start() {
         HOME="${HOME:-/tmp}" \
         PATH=/usr/bin:/bin \
         DISPLAY=:99 \
+        IMAGE_ROOT="$IMAGE_ROOT" \
         VM_ROOT="$VM_ROOT" \
         STAGE_DIR="$STAGE_DIR" \
         QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \

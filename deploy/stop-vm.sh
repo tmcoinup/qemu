@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # stop-vm.sh — NVIDIA mdev/vGPU VM 停止脚本
 #
-# 用法: ./stop-vm.sh <vm_id> [--force]
+# 用法: ./stop-vm.sh <vm_id> [--vm-dir ABS|--instances-dir ABS] [--force]
 #
-#   ./stop-vm.sh              优雅关机 (QMP system_powerdown，WinRM 冗余)
-#   ./stop-vm.sh --force      guest 不响应时强杀：SIGTERM→SIGKILL→清 run/mdev/swtpm
+#   ./stop-vm.sh 2             优雅关机 (QMP system_powerdown，WinRM 冗余)
+#   ./stop-vm.sh 2 --force     guest 不响应时强杀：SIGTERM→SIGKILL→清 run/mdev/swtpm
 #
 # 兼容 Ctrl+C：用户在 stop-vm.sh 等 QEMU 退出那几十秒里按 Ctrl+C，脚本会退出
 # 但 VM 不会被意外杀掉 —— 再次 `./stop-vm.sh` 继续关即可。
@@ -16,13 +16,95 @@ cd "$here"
 VM_ID=${VM_ID:-1}
 GUEST_IP_HINT=${GUEST_IP:-}
 GUEST_USER=${GUEST_USER:-Administrator}
-GUEST_PASS=${GUEST_PASS:-123456}
+GUEST_PASS=${GUEST_PASS:-}
 FORCE=0
-SUDO_PW=${SUDO_PASSWORD:-123456}
-VM_ROOT=${VM_ROOT:-${IMAGE_ROOT:-/home/ubuntu/images}/vms}
+SUDO_PW=${SUDO_PASSWORD:-}
 # shellcheck source=lib/vm-storage.sh
 source "$here/lib/vm-storage.sh"
+STORAGE_SELECTION_EXPLICIT=0
+if [[ -v VM_INSTANCE_DIR || -v VM_INSTANCES_DIR || -v VM_ROOT ]]; then
+    STORAGE_SELECTION_EXPLICIT=1
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force)     FORCE=1; shift ;;
+        --vm-dir)
+            [[ $# -ge 2 ]] || { echo "--vm-dir 需要一个绝对路径" >&2; exit 2; }
+            [[ -z "${VM_DIR_CLI:-}" ]] || { echo "--vm-dir 只能指定一次" >&2; exit 2; }
+            VM_DIR_CLI=$2
+            STORAGE_SELECTION_EXPLICIT=1
+            shift 2
+            ;;
+        --vm-dir=*)
+            [[ -z "${VM_DIR_CLI:-}" ]] || { echo "--vm-dir 只能指定一次" >&2; exit 2; }
+            VM_DIR_CLI=${1#*=}
+            [[ -n "$VM_DIR_CLI" ]] || { echo "--vm-dir 需要一个绝对路径" >&2; exit 2; }
+            STORAGE_SELECTION_EXPLICIT=1
+            shift
+            ;;
+        --instances-dir)
+            [[ $# -ge 2 ]] || { echo "--instances-dir 需要一个绝对路径" >&2; exit 2; }
+            [[ -z "${INSTANCES_DIR_CLI:-}" ]] || { echo "--instances-dir 只能指定一次" >&2; exit 2; }
+            INSTANCES_DIR_CLI=$2
+            STORAGE_SELECTION_EXPLICIT=1
+            shift 2
+            ;;
+        --instances-dir=*)
+            [[ -z "${INSTANCES_DIR_CLI:-}" ]] || { echo "--instances-dir 只能指定一次" >&2; exit 2; }
+            INSTANCES_DIR_CLI=${1#*=}
+            [[ -n "$INSTANCES_DIR_CLI" ]] || { echo "--instances-dir 需要一个绝对路径" >&2; exit 2; }
+            STORAGE_SELECTION_EXPLICIT=1
+            shift
+            ;;
+        -h|--help)   sed -n '3,9p' "$here/stop-vm.sh"; exit 0 ;;
+        [0-9]*)      VM_ID="$1"; shift ;;       # bare number → vm id
+        *) echo "unknown arg: $1"; exit 2 ;;
+    esac
+done
+
+if ! vm_storage_id_is_supported "$VM_ID"; then
+    echo "VM_ID 必须是正整数: $VM_ID" >&2
+    exit 2
+fi
+if [[ -n "${VM_DIR_CLI:-}" && -n "${INSTANCES_DIR_CLI:-}" ]]; then
+    echo "--vm-dir 与 --instances-dir 不能同时使用" >&2
+    exit 2
+elif [[ -n "${VM_DIR_CLI:-}" ]]; then
+    vm_storage_select_instance_dir "$VM_ID" "$VM_DIR_CLI"
+elif [[ -n "${INSTANCES_DIR_CLI:-}" ]]; then
+    vm_storage_select_instances_dir "$INSTANCES_DIR_CLI"
+elif [[ -n "${VM_INSTANCE_DIR:-}" ]]; then
+    vm_storage_select_instance_dir "$VM_ID" "$VM_INSTANCE_DIR"
+elif [[ -n "${VM_INSTANCES_DIR:-}" ]]; then
+    vm_storage_select_instances_dir "$VM_INSTANCES_DIR"
+fi
 vm_storage_init
+
+# During the one-time namespace migration, ID-only stop must still find an
+# already-running pre-namespace G-11 bundle.  Start never does this fallback.
+if (( ! STORAGE_SELECTION_EXPLICIT )); then
+    SELECTED_VM_DIR=$(vm_storage_instance_dir "$VM_ID")
+    PRE_NAMESPACE_VM_DIR=$(vm_storage_pre_namespace_instance_dir "$VM_ID")
+    if [[ ! -e "$SELECTED_VM_DIR/vm.conf" &&
+          ( -e "$PRE_NAMESPACE_VM_DIR/vm.conf" ||
+            -e "$PRE_NAMESPACE_VM_DIR/disk.qcow2" ||
+            -e "$PRE_NAMESPACE_VM_DIR/nvram.fd" ||
+            -e "$PRE_NAMESPACE_VM_DIR/tpm" ) ]]; then
+        vm_storage_select_instance_dir "$VM_ID" "$PRE_NAMESPACE_VM_DIR"
+        vm_storage_init
+        echo "[down] 使用待迁移的旧 G-11 bundle: $PRE_NAMESPACE_VM_DIR"
+    fi
+fi
+
+# A VM configuration describes guest hardware only.  Freeze every selected
+# host storage path before any helper reads VM metadata.
+readonly IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VM_INSTANCES_DIR \
+    VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK \
+    VM_SHARED_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR VM_NVRAM_DIR \
+    VM_CONTROL_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR \
+    VM_DISK_ARCHIVE_DIR VM_BASE_ARCHIVE_DIR VM_NVRAM_BACKUP_DIR
+
 # shellcheck source=lib/vm-tpm.sh
 source "$here/lib/vm-tpm.sh"
 # shellcheck source=lib/cpu-isolation.sh
@@ -30,19 +112,6 @@ source "$here/lib/cpu-isolation.sh"
 # shellcheck source=lib/vgpu-mdev.sh
 source "$here/lib/vgpu-mdev.sh"
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --force)     FORCE=1; shift ;;
-        -h|--help)   sed -n '3,9p' "$0"; exit 0 ;;
-        [0-9]*)      VM_ID="$1"; shift ;;       # bare number → vm id
-        *) echo "unknown arg: $1"; exit 2 ;;
-    esac
-done
-
-if [[ ! "$VM_ID" =~ ^[1-9][0-9]*$ ]]; then
-    echo "VM_ID 必须是正整数: $VM_ID" >&2
-    exit 2
-fi
 vm_storage_validate_instance_tree "$VM_ID"
 
 PID_FILE=$(vm_storage_run_path "$VM_ID" pid)
@@ -145,12 +214,17 @@ mdev_in_use_by_qemu() {
 }
 
 find_vm_ip() {
-    local conf
+    local conf vm_mac mac_lc
     conf=$(vm_storage_config_path "$VM_ID") || return
     [[ -f "$conf" ]] || return 1
-    # shellcheck source=/dev/null
-    source "$conf"
-    local mac_lc=${VM_MAC,,}
+    vm_mac=$(sed -n \
+        's/^[[:space:]]*VM_MAC=\([0-9A-Fa-f:][0-9A-Fa-f:]*\)[[:space:]]*$/\1/p' \
+        "$conf")
+    [[ "$vm_mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || {
+        echo "[down] vm.conf 中缺少合法 VM_MAC，跳过 IP 探测: $conf" >&2
+        return 1
+    }
+    mac_lc=${vm_mac,,}
     ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" '$3=="br0" && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}'
 }
 
@@ -221,14 +295,23 @@ if (( ! FORCE )); then
         echo "[down] QMP unavailable" >&2
     fi
     GUEST_IP=${GUEST_IP_HINT:-$(find_vm_ip || true)}
-    if [[ -n "$GUEST_IP" ]]; then
+    if [[ -n "$GUEST_IP" && -n "$GUEST_PASS" ]]; then
         echo "[down] WinRM → ${GUEST_IP}: shutdown /s"
-        python3 - <<PY 2>/dev/null || echo "[down] WinRM unreachable"
+        export GUEST_IP GUEST_USER GUEST_PASS
+        python3 - <<'PY' 2>/dev/null || echo "[down] WinRM unreachable"
+import os
 from pypsrp.client import Client
-Client('${GUEST_IP}', username='${GUEST_USER}', password='${GUEST_PASS}', ssl=False, auth='ntlm') \
+Client(os.environ['GUEST_IP'], username=os.environ['GUEST_USER'],
+       password=os.environ['GUEST_PASS'], ssl=False, auth='ntlm') \
   .execute_ps('shutdown /s /t 3 /f /c "stop-vm.sh"')
 PY
         GRACEFUL_SENT=1
+    elif [[ -n "$GUEST_IP" ]]; then
+        echo "[down] GUEST_PASS 未通过环境变量提供，跳过 WinRM 冗余关机"
+        if (( ! GRACEFUL_SENT )); then
+            echo "[down] QMP 不可用且没有 guest 凭据，自动 --force"
+            FORCE=1
+        fi
     elif (( ! GRACEFUL_SENT )); then
         echo "[down] QMP 不可用且 guest IP 未知，自动 --force"
         FORCE=1

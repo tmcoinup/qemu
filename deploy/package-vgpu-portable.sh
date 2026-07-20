@@ -90,7 +90,6 @@ done
 vgpu_profile_validate_catalog ||
     die "GPU identity catalog validation failed"
 vm_storage_init
-vm_storage_prepare
 
 if [[ -z "$GPUZ_SOURCE" ]]; then
     GPUZ_SOURCE=$(gpuz_asset_default_source) ||

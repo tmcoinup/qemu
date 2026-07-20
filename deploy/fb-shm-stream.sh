@@ -148,7 +148,6 @@ esac
 [[ "$VM_ID" =~ ^[1-9][0-9]*$ ]] || usage
 shift 2
 
-VM_ROOT=${VM_ROOT:-${IMAGE_ROOT:-/home/ubuntu/images}/vms}
 # shellcheck source=lib/vm-storage.sh
 source "$HERE/lib/vm-storage.sh"
 vm_storage_init

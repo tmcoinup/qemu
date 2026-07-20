@@ -762,6 +762,7 @@ void sdl2_note_present(struct sdl2_console *scon)
         scon->fps_window_start_us = g_get_monotonic_time();
     }
     scon->fps_frame_count++;
+    scon->presented_since_refresh = true;
     sdl2_present_rate_tick(scon);
 }
 
@@ -1786,6 +1787,14 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
         }
         sdl2_console[i].idx = i;
         sdl2_console[i].opts = o;
+        /*
+         * fixed is the launcher/default policy: keep the visible SDL swap
+         * cadence at 60 Hz even when the guest framebuffer is unchanged.
+         * dynamic preserves the old damage-driven Present behaviour for
+         * later optimisation and A/B comparison.
+         */
+        sdl2_console[i].fixed_present =
+            g_strcmp0(g_getenv("QEMU_SDL_PRESENT_MODE"), "dynamic") != 0;
 #ifdef CONFIG_OPENGL
         sdl2_console[i].opengl = display_opengl;
         sdl2_console[i].dcl.ops = display_opengl ? &dcl_gl_ops : &dcl_2d_ops;

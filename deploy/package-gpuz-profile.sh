@@ -156,7 +156,6 @@ python3 -c 'import json' >/dev/null 2>&1 \
 vgpu_profile_validate_catalog \
     || die "GPU identity catalog validation failed"
 vm_storage_init
-vm_storage_prepare
 GPUZ_SOURCE_RESOLVED=0
 resolve_gpuz_source_once() {
     ((GPUZ_SOURCE_RESOLVED == 0)) || return 0
@@ -747,7 +746,8 @@ trap cleanup_work EXIT
 # enables monitor rescue.  A validated transport-only fallback is therefore
 # added only to this temporary copy.  The live vm.conf is never edited.
 FAKE_IMAGE_ROOT="$WORK_ROOT/image-root"
-FAKE_CONF_DIR="$FAKE_IMAGE_ROOT/vms/instances/vm${VM_ID}"
+FAKE_VM_ROOT="$FAKE_IMAGE_ROOT/vms/G-11"
+FAKE_CONF_DIR="$FAKE_VM_ROOT/vm${VM_ID}"
 FAKE_STAGE="$FAKE_IMAGE_ROOT/staging"
 STAGE_TRANSFER="$WORK_ROOT/stage-transfer"
 mkdir -p "$FAKE_CONF_DIR" "$FAKE_STAGE" "$STAGE_TRANSFER"
@@ -759,16 +759,22 @@ printf '\nSPOOF_MODE=B\nMONITOR_PROFILE=%q\nMONITOR_SERIAL=%q\n' \
     >>"$FAKE_CONF_DIR/vm.conf"
 chmod 0400 "$FAKE_CONF_DIR/vm.conf"
 
+env -u VM_INSTANCE_DIR -u VM_INSTANCE_ID \
+    -u VM_DISK_ARCHIVE_DIR -u VM_BASE_ARCHIVE_DIR \
+    -u VM_NVRAM_BACKUP_DIR -u ISO_DIR \
 IMAGE_ROOT="$FAKE_IMAGE_ROOT" \
-VM_ROOT="$FAKE_IMAGE_ROOT/vms" \
-VM_INSTANCES_DIR="$FAKE_IMAGE_ROOT/vms/instances" \
-VM_CONFIG_DIR="$FAKE_IMAGE_ROOT/vms/configs" \
-VM_DISK_DIR="$FAKE_IMAGE_ROOT/vms/disks" \
-VM_BASE_DIR="$FAKE_IMAGE_ROOT/vms/bases" \
-VM_NVRAM_DIR="$FAKE_IMAGE_ROOT/vms/nvram" \
-VM_RUN_DIR="$FAKE_IMAGE_ROOT/vms/run" \
-VM_LOG_DIR="$FAKE_IMAGE_ROOT/vms/log" \
-VM_ASSET_DIR="$FAKE_IMAGE_ROOT/vms/assets" \
+VM_ROOT="$FAKE_VM_ROOT" \
+VM_INSTANCES_DIR="$FAKE_VM_ROOT" \
+VM_SHARED_DIR="$FAKE_VM_ROOT/shared" \
+VM_CONFIG_DIR="$FAKE_VM_ROOT/legacy/configs" \
+VM_DISK_DIR="$FAKE_VM_ROOT/legacy/disks" \
+VM_BASE_DIR="$FAKE_VM_ROOT/shared/bases" \
+VM_NVRAM_DIR="$FAKE_VM_ROOT/legacy/nvram" \
+VM_CONTROL_DIR="$FAKE_VM_ROOT/control" \
+VM_RUN_DIR="$FAKE_VM_ROOT/control" \
+VM_LOG_DIR="$FAKE_VM_ROOT/legacy/log" \
+VM_ASSET_DIR="$FAKE_VM_ROOT/shared/assets" \
+VM_STORAGE_COMPAT_FALLBACK=0 \
 STAGE_DIR="$FAKE_STAGE" \
     "$here/stage-vm-profile.sh" "$VM_ID" \
     --transfer-dir "$STAGE_TRANSFER" >/dev/null

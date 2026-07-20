@@ -46,6 +46,8 @@ struct sdl2_console {
     uint32_t fps_frame_count;
     double present_fps;
     bool present_fps_valid;
+    bool fixed_present;
+    bool presented_since_refresh;
     bool gui_keysym;
     /* Keyboard follows input focus.  Pointer events additionally require
      * mouse focus (or an active grab); SDL/XWayland does not guarantee that

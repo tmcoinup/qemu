@@ -13,13 +13,18 @@ TPM 2.0 使用 `tpm-crb`，不支持 TPM 的 profile 自动关闭；显式 `--no
 本分支只有 NVIDIA mdev/vGPU 一套 VM 生命周期，启动和停止入口固定为：
 
 ```bash
-./deploy/start-vm.sh <vm_id> [options]
-./deploy/stop-vm.sh <vm_id> [--force]
+./deploy/start-vm.sh <vm_id> [--vm-dir ABS|--instances-dir ABS] [options]
+./deploy/stop-vm.sh <vm_id> [--vm-dir ABS|--instances-dir ABS] [--force]
 ```
 
 `start-vm.sh` 直接实现 vGPU 的配置、磁盘、mdev、TPM、QEMU 和显示生命周期；
 `stop-vm.sh` 负责同一 VM 的优雅关机、强制停止和资源回收。以下显示方式均属于
 这一生命周期内部的运行模式：
+
+默认 G-11 bundle 是 `/home/ubuntu/images/vms/G-11/vm<ID>`。先用
+`./deploy/start-vm.sh ID --print-paths` 无副作用核对；完整默认/指定路径和停机
+迁移教程见
+[`docs/STORAGE-PATHS-QUICKSTART.md`](docs/STORAGE-PATHS-QUICKSTART.md)。
 
 | 显示模式 | 启动方式 | 说明 |
 |---|---|---|
@@ -62,6 +67,8 @@ G-11 的 host/guest、驱动、推流和零拷贝支持边界统一记录在
 
 | 命令 | 干什么 |
 |---|---|
+| `./deploy/vmctl.sh {path\|start\|stop\|status} <vm_id> [...]` | 路径感知的傻瓜封装；默认路径与 `--vm-dir`/`--instances-dir` 都透传到唯一生命周期入口 |
+| `./deploy/vmctl.sh migrate [--check\|--apply]` | 旧 G-11 `instances/vmN` 到新命名空间的一键检查/迁移 |
 | `./deploy/start-vm.sh <vm_id> --install [iso]` | 缺配置时自动生成身份，缺盘时固定建空盘；挂 Windows ISO + 最小应答 ISO，默认跳过 OOBE，以空密码 `Administrator` 首次登录并设置中国时区和 NumLock；RTC 由宿主处理 |
 | `./deploy/start-vm.sh <vm_id> --install [iso] --manual-oobe` | 同一安全建盘语义，但不挂应答 ISO，完整手动完成 OOBE |
 | `./deploy/start-vm.sh <vm_id> --spoof-name-only` | 通用安全 B：保留 PCI 真身，host 按 mdev UUID 提供每 VM 产品名，前台打开 QEMU SDL 原生窗口 |
@@ -143,7 +150,7 @@ GTX1050 strict-A 旧流程会修改 INF 并自签 catalog，现已硬拒绝。�
 默认 SDL 窗口使用 QEMU 原生输入。GNOME/Wayland 下，窗口聚焦且鼠标位于
 窗口内时会临时把 `Super`、`Alt+Tab` 等宿主快捷键交给 guest；离开或失焦
 立即恢复，可用 `--no-tame-gnome` 禁用。由于 NVIDIA 535 REGION 接口没有
-独立 cursor plane，窗口内从 `$VM_ROOT/assets/aero_arrow.cur` 选择 32×32 帧，
+独立 cursor plane，窗口内从 `$VM_ROOT/shared/assets/aero_arrow.cur` 选择 32×32 帧，
 显示该 guest 自带的 Windows 默认箭头；资源缺失时才使用内置 fallback。
 这个 REGION 不包含 guest 的 shape/hotspot/visible 元数据，因此桌面硬件
 光标无法自动跟随 I-beam/缩放箭头变化。游戏把自定义光标画入主
@@ -230,8 +237,8 @@ host keyboard/mouse ─QEMU native input────────┘→ guest
 ```
 deploy/
 ├── README.md                 # 本文件
-├── create-vm.sh              # 一次性生成 instances/vmN/vm.conf
-├── migrate-vm-storage.sh     # 前两代布局 → 每 VM bundle（默认只检查）
+├── create-vm.sh              # 一次性生成 G-11/vmN/vm.conf
+├── migrate-g11-layout.sh     # 旧 instances/vmN → G-11/vmN（默认只检查）
 ├── start-vm.sh               # NVIDIA mdev/vGPU 唯一启动入口和实现
 ├── fb-shm-stream.sh           # 每 VM ROI/编码推流 sidecar 生命周期
 ├── finish-vgpu-install.sh     # 新装一次性收尾：单 EXE、token、休眠、RTC/EDID
@@ -271,7 +278,8 @@ deploy/
 ```
 
 运行数据位于 `/home/ubuntu/images/{iso,staging,vms}`；每台 VM 的系统盘、NVRAM、
-配置、运行态和日志集中在 `vms/instances/vmN/`，公共 base 单独共享。完整目录树见
+配置、运行态和日志集中在 `vms/G-11/vmN/`，公共 base 位于
+`vms/G-11/shared/bases/`。完整目录树见
 [`docs/STORAGE-LAYOUT.md`](docs/STORAGE-LAYOUT.md)。
 
 ## 一次完整部署顺序
@@ -288,10 +296,10 @@ deploy/
    `sudo apt install swtpm swtpm-tools xorriso ffmpeg`。默认 TPM 启动会 fail-closed；
    不会因缺包而悄悄启动成一台无 TPM 的 VM。
 6. CPU 隔离依赖 `sudo`、`python3`、`util-linux`（`taskset`/`flock`）、
-   `diffutils` 以及 cgroup v2 `cpuset` controller。`sudo` 是自动安装的提权入口，
-   必须预先可用。默认 `required`，首次普通启动会用 `SUDO_PASSWORD`（当前默认
-   `123456`）自动补装其余缺少的软件包、root helper 和 sudoers；也可提前执行
-   `sudo ./deploy/host/install-cpu-isolation.sh`。
+   `diffutils` 以及 cgroup v2 `cpuset` controller。`sudo` 是提权入口，必须预先
+   可用。默认 `required`；建议先交互执行 `sudo -v`，再提前执行
+   `sudo ./deploy/host/install-cpu-isolation.sh`。无人值守确需凭据时，只能通过
+   批准的安全渠道或运行时环境变量提供，不得写入仓库、配置或命令历史。
    `--cpu-isolate-auto` 是显式允许降级，`--no-cpu-isolate` 才是明确关闭。
 
 ### 1. vgpu_unlock-rs + profile_override
@@ -334,7 +342,7 @@ Compose、持久数据、证书、备份和地址迁移见
 ./create-vm.sh --list-monitor-profiles
 # 日常可跳过；start-vm 会在配置不存在时自动随机生成
 ./create-vm.sh 2 --gpu-profile gtx1050_2gb --monitor-profile dell-p2419h
-# 每个 VM 的平台/主板/内存/GPU/显示器身份/序列号/MAC 全部写入 instances/vmN/vm.conf
+# 每个 VM 的平台/主板/内存/GPU/显示器身份/序列号/MAC 全部写入 G-11/vmN/vm.conf
 # B150/B360 从 Samsung 970 PRO、WD Black 两款 512GB PCIe 3.0 x4 NVMe 中选择；DDR3/H97 从 Samsung、Crucial、Kingston、Intel、Western Digital 的七款 512GB SATA 池选择。
 # 键盘与绝对坐标鼠标指针也会写入配置并显示；默认 PS/2 输入会关闭，避免重复枚举。
 # 显示器先等概率抽品牌、再抽具体型号；品牌/型号也以

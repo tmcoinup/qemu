@@ -149,7 +149,13 @@ void sdl2_2d_refresh(DisplayChangeListener *dcl)
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
 
     assert(!scon->opengl);
+    scon->presented_since_refresh = false;
     graphic_hw_update(dcl->con);
+    if (scon->fixed_present && !scon->presented_since_refresh &&
+        !scon->hidden && scon->real_window &&
+        !(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
+        sdl2_2d_redraw(scon);
+    }
     sdl2_poll_events(scon);
 }
 

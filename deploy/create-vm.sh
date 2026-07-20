@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# create-vm.sh — 一次性生成 $VM_ROOT/instances/vmN/vm.conf。
+# create-vm.sh — 一次性生成 G-11 的 $VM_ROOT/vmN/vm.conf。
 #
 #   用法:  ./create-vm.sh <vm_id> [--platform PLATFORM] [--ssd-profile PROFILE]
 #                                  [--gpu-profile PROFILE] [--monitor-profile PROFILE]
@@ -94,6 +94,7 @@ if ! vm_storage_id_is_supported "$VM_ID"; then
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
+vm_storage_require_namespace_ready "$VM_ID"
 
 mkdir -p "$VM_RUN_DIR"
 exec {STORAGE_LOCK_FD}>"$VM_RUN_DIR/.storage.lock"
@@ -547,7 +548,7 @@ trap cleanup_create_vm EXIT
 
 cat > "$CONF_TMP" <<EOF
 # === 自动生成于 $(date -Iseconds) ===
-# instances/vm${VM_ID}/vm.conf — 只读，任何时候修改都可能让 guest 内 license/driver
+# vm${VM_ID}/vm.conf — 只读，任何时候修改都可能让 guest 内 license/driver
 # / Windows 激活等失效。更换硬件指纹请用新 VM_ID + --force。
 
 VM_ID=${VM_ID}

@@ -9,8 +9,8 @@
 - guest 驱动和安装产物放在 `/home/ubuntu/images/staging`；新的
   `VgpuPortable.exe` 完全离线并注入 base，不依赖 8080 HTTP，只有明确标记的
   legacy 调试流程才使用 staging HTTP；
-- VM 的实例目录、共享 base、host 资源和全局控制文件才属于 `VM_ROOT`，默认是
-  `/home/ubuntu/images/vms`。
+- G-11 的实例目录、共享 base、host 资源和全局控制文件才属于 `VM_ROOT`，默认是
+  `/home/ubuntu/images/vms/G-11`。V-11 使用独立分支和独立数据布局。
 
 生产 vGPU 工具链使用“一个 VM 一个目录，共享资源集中管理”的布局：
 
@@ -18,19 +18,20 @@
 /home/ubuntu/images/                    # IMAGE_ROOT
 ├── iso/                                # 只读安装介质 (*.iso)
 ├── staging/                            # 驱动、token、guest 脚本；不是 VM 镜像
-└── vms/                                # VM_ROOT
-    ├── bases/
-    │   ├── win10-base.qcow2           # 公共、独立的克隆基线
-    │   └── archive/                    # promote-base 归档的旧 base
-    ├── assets/aero_arrow.cur           # host UI 资源
-    ├── run/                             # 实例目录外的稳定协调区
-    │   ├── .storage.lock               # 全局存储锁
-    │   ├── vmN.start.lock              # 每 VM 启动锁
-    │   ├── vmN.disk.lock               # 每 VM 写操作锁
-    │   ├── vmN.tpm.lock                # 每 VM swtpm 生命周期锁
-    │   └── storage-migration-*.tsv      # 迁移清单
-    └── instances/
-        └── vmN/
+└── vms/
+    ├── N/                              # V-11 旧/现行数字实例；G-11 不碰
+    └── G-11/                           # G-11 VM_ROOT
+        ├── shared/
+        │   ├── bases/
+        │   │   ├── win10-base.qcow2   # 公共、独立的克隆基线
+        │   │   └── archive/
+        │   └── assets/aero_arrow.cur  # host UI 资源
+        ├── control/                    # 全局协调区，不是某台 VM 的 runtime
+        │   ├── .storage.lock
+        │   ├── vmN.start.lock
+        │   ├── vmN.disk.lock
+        │   └── vmN.tpm.lock
+        └── vmN/                        # 一台 G-11 VM 的完整独立 bundle
             ├── vm.conf                 # 持久硬件身份和启动配置（0444）
             ├── disk.qcow2              # 该 VM 唯一的可写系统盘
             ├── nvram.fd                # 该 VM 的 UEFI 变量
@@ -40,7 +41,7 @@
             ├── log/
             │   ├── qemu.log            # 所有启动模式的 QEMU stderr
             │   └── swtpm.log
-            ├── run/                    # 可重建的 pid/socket/mdev recovery；安装时的 autounattend.iso
+            ├── run/                    # 可重建的 pid/socket/mdev recovery
             │   ├── qemu.pid
             │   ├── qmp.sock
             │   ├── monitor.sock
@@ -59,31 +60,31 @@
 
 | 分类 | 是否必须备份 | 是否可直接删除 | 说明 |
 |---|---:|---:|---|
-| `instances/vmN/vm.conf` | 是 | 否 | UUID、MAC、硬件身份与 GPU profile |
-| `instances/vmN/disk.qcow2` | 是 | 否 | Windows 和用户数据；每台 VM 独立可写 |
-| `bases/` | 建议 | 否 | 新实例的公共来源；`delete-vm.sh` 不会删除 |
-| `instances/vmN/nvram.fd` | 是 | 否 | UEFI boot entries，应与配置/磁盘成组备份 |
-| `instances/vmN/tpm/` | 是 | 否 | 持久 TPM NVRAM、EK/Platform cert 与私有 CA；删除等同更换物理 TPM |
-| `instances/vmN/run/` | 否 | 停机后可清理 | socket、PID、mdev recovery |
-| `instances/vmN/log/` | 按需 | 是 | 该 VM 的排障日志 |
-| `vms/run/` | 否 | 不要手工删除锁 | 全局锁、每 VM 协调锁和迁移清单 |
-| `assets/` | 建议 | 可从仓库/模板恢复 | host 窗口资源 |
+| `vmN/vm.conf` | 是 | 否 | UUID、MAC、硬件身份与 GPU profile |
+| `vmN/disk.qcow2` | 是 | 否 | Windows 和用户数据；每台 VM 独立可写 |
+| `shared/bases/` | 建议 | 否 | 新实例的公共来源；`delete-vm.sh` 不会删除 |
+| `vmN/nvram.fd` | 是 | 否 | UEFI boot entries，应与配置/磁盘成组备份 |
+| `vmN/tpm/` | 是 | 否 | 持久 TPM NVRAM、EK/Platform cert 与私有 CA；删除等同更换物理 TPM |
+| `vmN/run/` | 否 | 停机后可清理 | socket、PID、mdev recovery |
+| `vmN/log/` | 按需 | 是 | 该 VM 的排障日志 |
+| `control/` | 否 | 不要手工删除锁 | 全局锁和每 VM 协调锁 |
+| `shared/assets/` | 建议 | 可从仓库/模板恢复 | host 窗口资源 |
 | `iso/` | 按需 | 未挂载时可删 | Windows 安装介质，不属于 `VM_ROOT` |
 | `staging/` | 可重建 | 未安装时可清理 | 不是系统盘；portable EXE 从这里安全注入 base，驱动版本仍必须校验 |
 
 备份一台 VM 时可以直接保存整个 bundle；至少必须包含：
 
 ```text
-instances/vmN/vm.conf
-instances/vmN/disk.qcow2
-instances/vmN/nvram.fd
-instances/vmN/tpm/
+vmN/vm.conf
+vmN/disk.qcow2
+vmN/nvram.fd
+vmN/tpm/
 ```
 
-`bases/win10-base.qcow2` 必须是既没有 backing file、也没有 qcow2 external
+`shared/bases/win10-base.qcow2` 必须是既没有 backing file、也没有 qcow2 external
 data-file 的 standalone qcow2。
 `create-disk.sh` 会先验证 base 格式、backing 和一致性，再复制到同目录临时文件；
-只有 `qemu-img check` 成功才原子发布为 `instances/vmN/disk.qcow2`。失败或中断不会
+只有 `qemu-img check` 成功才原子发布为 `vmN/disk.qcow2`。失败或中断不会
 留下一个被后续启动器误认成有效系统盘的最终文件。
 
 `start-vm.sh N` 缺盘时使用严格的 `create-disk.sh N --from-base`，base 缺失就拒绝；
@@ -92,73 +93,39 @@ data-file 的 standalone qcow2。
 每次非 dry-run 启动还会用 `qemu-img` 核对实例盘 virtual-size 和
 `vm.conf` 的 `SSD_SIZE_BYTES`；不等时拒绝启动，不会静默 resize 或改分区。
 
-## 从前两代布局迁移
+## 从旧 G-11 布局迁移
 
-启动器可以读取最早的平铺布局、上一版按类型分类布局和当前实例布局；新文件只写入
-`instances/vmN/`。迁移器把前两代来源统一到实例目录：
+旧 G-11 bundle 位于 `/home/ubuntu/images/vms/instances/vmN`；新布局把整个 bundle
+原子移动到 `/home/ubuntu/images/vms/G-11/vmN`。旧共享 `bases/`、`assets/`
+分别归入 `G-11/shared/bases/`、`G-11/shared/assets/`。旧根 `run/` 不是 VM
+bundle：迁移器只把旧迁移清单保存在 `G-11/control/history/`，并删除经过确认的
+空锁文件；任何未知或非空条目都会阻止迁移。
 
-| 旧路径 | 新路径 |
-|---|---|
-| `vms/win10-vmN.qcow2` 或 `vms/disks/win10-vmN.qcow2` | `vms/instances/vmN/disk.qcow2` |
-| `vms/win10-vmN.qcow2.*` 或 `vms/disks/archive/win10-vmN.qcow2.*` | `vms/instances/vmN/backups/disks/` |
-| `vms/configs/vmN.conf` | `vms/instances/vmN/vm.conf` |
-| `vms/win10-base.qcow2` | `vms/bases/win10-base.qcow2` |
-| `vms/win10-base.qcow2.*` | `vms/bases/archive/` |
-| `vms/vmN_VARS.fd` 或 `vms/nvram/vmN_VARS.fd` | `vms/instances/vmN/nvram.fd` |
-| 两代 NVRAM 备份路径 | `vms/instances/vmN/backups/nvram/` |
-| `vms/log/vmN.log` | `vms/instances/vmN/log/qemu.log` |
-| `images/*.iso` | `images/iso/` |
+`/home/ubuntu/images/vms/<N>` 是 V-11 的数字实例候选，迁移器明确忽略，绝不会
+把它与同 ID 的 G-11 bundle 合并。
 
-先做只读检查：
+先执行完全只读的检查：
 
 ```bash
 cd /home/ubuntu/projects/qemu
-./deploy/migrate-vm-storage.sh --check
+./deploy/migrate-g11-layout.sh --check
 ```
 
-迁移必须停掉所有生产 vGPU VM：
+当前 VM、swtpm、NBD、打开文件、权限、目标冲突、symlink、非 standalone qcow2
+或跨文件系统任一项不安全时，check 都会报告 `BLOCKED`。先正常停止所有 G-11 VM；
+确认 check 为 `CHECK OK` 后才执行：
 
 ```bash
-# 先在各 guest 正常关机；必要时按数字 ID 停止
-./deploy/stop-vm.sh 1
-
-# 确认 check 不再报告 QEMU、mdev、打开文件、backing 或目标冲突
-./deploy/migrate-vm-storage.sh --check
-
-# 显式执行；同一文件系统内使用原子 rename，不复制 512 GB 表观容量
-./deploy/migrate-vm-storage.sh --apply
+./deploy/migrate-g11-layout.sh --apply
 ```
 
-迁移器具备以下保护：
+`--apply` 同时取得旧、新两代全局锁，目录移动使用同文件系统原子 rename；中途失败
+会反向恢复已完成的 bundle rename。旧迁移清单保存在新 `control/history/`，可重建
+的空锁文件不作为 VM 数据迁移。不要为了通过检查而在线移动 qcow2、NVRAM、TPM
+或删除仍被占用的锁。
 
-- 默认只是 check，只有 `--apply` 才移动；
-- `--apply` 在生成计划前先取得独占 `.storage.lock`，避免验证后由其它生命周期脚本
-  创建同名目标；移动中断时会按已完成顺序反向回滚；
-- 三代路径中同一逻辑文件存在多份且不是同一 inode 时拒绝选择；
-- QEMU、忙碌的 start/disk lock、mdev recovery record、PID/socket 残留或任一打开文件存在时拒绝；
-- PID、QMP、monitor 和 mdev recovery 不做 rename；它们必须在停机时由
-  `stop-vm.sh` 清理，下次启动会直接在实例 `run/` 中重建；
-- 每个待移动的 qcow2 都必须能被严格解析；metadata 损坏或伪装成 `.qcow2` 的
-  raw 文件会阻断，而不是当成“无 backing”放行；
-- 待移动 qcow2 只允许 standalone；相对或绝对 backing 都会阻断，避免换目录后
-  相对路径改义；external data-file 同样会阻断，避免链断裂或多台 VM 共享可写
-  payload；
-- `file:`、`json:`、网络 block protocol 等非普通 POSIX backing/data-file 引用
-  不做猜测解析，直接 fail-closed；
-- 扫描 `IMAGE_ROOT` 以及显式配置在其外部的 `VM_DISK_DIR`、`VM_BASE_DIR` 和归档
-  目录；任何 overlay 依赖待移动文件时阻断，即使该 overlay 属于不会被迁移的
-  旧数字目录布局；
-- 通过 `qemu-img info --backing-chain` 检查完整递归链，不只看第一层；链中的
-  qcow2/raw 层或 external data-file 只要指向本次任一计划源（包括 ISO），就阻断；
-- 扫描会跟随托管目录内的文件/目录 symlink，并在循环或 metadata 无法验证时阻断；
-  待迁移的 ISO、NVRAM、qcow2 等源文件本身若是 symlink 也拒绝移动，防止相对链接
-  换目录后失效；
-- 只允许同一文件系统原子移动，拒绝隐式跨盘复制；
-- 写入全局 `vms/run/storage-migration-*.tsv` 清单，重复执行是幂等的；
-- 不删除旧 base 或 NVRAM 备份，只把它们归档。
-
-任一 VM 仍在运行时，`--check` 报告 blocked 是正确结果；不要为了整理目录在线
-`mv` 已打开的 qcow2、NVRAM、配置或日志。
+完整逐步教程、指定路径和停机示例见
+[`STORAGE-PATHS-QUICKSTART.md`](STORAGE-PATHS-QUICKSTART.md)。
 
 `promote-base.sh` 替换公共 base 时会取得独占存储锁，因此要求所有生产 VM 停止；
 它还会扫描所有托管目录中的 overlay。即使 base 文件当前缺失，只要某个 overlay
@@ -172,8 +139,8 @@ cd /home/ubuntu/projects/qemu
 ## 唯一受管理布局
 
 `deploy/create-vm.sh`、`deploy/create-disk.sh`、`deploy/start-vm.sh` 和
-`deploy/stop-vm.sh` 统一管理 `instances/vmN/`。旧数字目录（如 `vms/<N>/` 和
-`vms/_base/`）不属于本分支生命周期，迁移器不会自动移动或删除其中的数据。
+`deploy/stop-vm.sh` 统一管理 `$VM_ROOT/vmN/`。旧数字目录（如 `vms/<N>/` 和
+`vms/_base/`）不属于 G-11 生命周期，迁移器不会自动移动或删除其中的数据。
 
 ## 自定义根目录
 
@@ -183,19 +150,22 @@ cd /home/ubuntu/projects/qemu
 IMAGE_ROOT=/home/ubuntu/images
 ISO_DIR=$IMAGE_ROOT/iso
 STAGE_DIR=$IMAGE_ROOT/staging
-VM_ROOT=$IMAGE_ROOT/vms
-VM_INSTANCES_DIR=$VM_ROOT/instances
-VM_BASE_DIR=$VM_ROOT/bases
-VM_ASSET_DIR=$VM_ROOT/assets
-VM_RUN_DIR=$VM_ROOT/run                  # 全局锁/清单，不是实例 runtime
+VM_ROOT=$IMAGE_ROOT/vms/G-11
+VM_INSTANCES_DIR=$VM_ROOT
+VM_SHARED_DIR=$VM_ROOT/shared
+VM_BASE_DIR=$VM_SHARED_DIR/bases
+VM_ASSET_DIR=$VM_SHARED_DIR/assets
+VM_CONTROL_DIR=$VM_ROOT/control
+VM_RUN_DIR=$VM_CONTROL_DIR               # 兼容变量名；不是实例 runtime
 
-# 下面是前两代布局的兼容读取/迁移来源；新文件不再写入这些目录。
-VM_CONFIG_DIR=$VM_ROOT/configs
-VM_DISK_DIR=$VM_ROOT/disks
-VM_NVRAM_DIR=$VM_ROOT/nvram
-VM_LOG_DIR=$VM_ROOT/log
+# 仅供显式兼容/迁移工具使用；正常启动默认不回退到这些目录。
+VM_CONFIG_DIR=$VM_ROOT/legacy/configs
+VM_DISK_DIR=$VM_ROOT/legacy/disks
+VM_NVRAM_DIR=$VM_ROOT/legacy/nvram
+VM_LOG_DIR=$VM_ROOT/legacy/log
 ```
 
-把整套数据放到其它挂载点时，优先只覆盖 `IMAGE_ROOT` 或 `VM_ROOT`；只把实例放到
-独立磁盘时显式设置 `VM_INSTANCES_DIR`。旧自动化若只设置 `VM_DISK_DIR`，脚本仍会
-把它当作实例磁盘挂载点并保留旧 base/NVRAM 解析语义，但新部署不要依赖该兼容行为。
+日常优先使用命令行：`--vm-dir ABS` 精确选择单台 bundle，
+`--instances-dir ABS` 选择一组 bundle 的父目录，`--print-paths` 只读确认。整套
+G-11 数据换根时才覆盖 `VM_ROOT`。旧 `VM_DISK_DIR` 的多重兼容语义不属于新部署
+入口，不要继续依赖。

@@ -60,10 +60,10 @@ sudo apt install -y sudo python3 util-linux diffutils swtpm swtpm-tools xorriso 
 `util-linux` 提供默认 CPU 隔离需要的 `taskset` 与 `flock`，`diffutils`
 提供安装副本一致性检查使用的 `cmp`；宿主还必须使用 cgroup v2 并暴露
 `cpuset` controller。CPU 隔离默认是 fail-closed 的 `required` 模式。
-`sudo` 是自动安装的提权入口，必须预先可用；首次启动发现其余 CPU 软件包、
-root helper 或 sudoers 缺失时，会通过 `SUDO_PASSWORD`（当前宿主默认
-`123456`）自动补装。密码只送入 sudo stdin，不进入命令行或日志。自动安装
-失败时 VM 不会启动。
+`sudo` 是提权入口，必须预先可用。建议先交互执行 `sudo -v`，并在首次启动前
+完成 root helper 和 sudoers 安装。无人值守确需凭据时，只能通过批准的安全渠道
+或运行时环境变量提供；不得把宿主机密码写入仓库、配置或命令历史。前置安装失败时
+VM 不会启动。
 
 最短的新实例路径：
 
@@ -222,11 +222,12 @@ gtx1050_2gb
 
 ```bash
 rg '^(GPU_PROFILE|GPU_NAME|GPU_PCI_DID|GPU_SUB_DID|VGPU_MDEV_PROFILE|VGPU_FB_MB|MONITOR_PROFILE|MONITOR_BRAND_NAME|MONITOR_MODEL_NAME|MONITOR_NATIVE_[XY])=' \
-  "/home/ubuntu/images/vms/instances/vm${VM_ID}/vm.conf"
+  "/home/ubuntu/images/vms/G-11/vm${VM_ID}/vm.conf"
 ```
 
-实例布局下配置位于 `vms/instances/vm${VM_ID}/vm.conf`，系统盘位于
-`vms/instances/vm${VM_ID}/disk.qcow2`。完整目录说明见
+默认布局下配置位于 `vms/G-11/vm${VM_ID}/vm.conf`，系统盘位于
+`vms/G-11/vm${VM_ID}/disk.qcow2`。自定义路径请先用
+`start-vm.sh "$VM_ID" --print-paths` 核对。完整目录说明见
 [`STORAGE-LAYOUT.md`](STORAGE-LAYOUT.md)。
 
 ### 1-2. 自动建配置、空盘并安装 Windows
@@ -395,7 +396,7 @@ nvidia-smi -q | Select-String 'License Status'
 
 预期结果：
 
-- `Name` 等于 `instances/vmN/vm.conf` 中的 `GPU_NAME`；
+- `Name` 等于 `G-11/vmN/vm.conf` 中的 `GPU_NAME`；
 - 三款当前 profile 都保持 B，为原生 `DEV_1E30&SUBSYS_132610DE`、Code 0、
   Licensed；marketing name 等于配置；
 - 显存均约 2 GB。
@@ -422,11 +423,12 @@ shutdown /s /t 0
 ./deploy/promote-base.sh "$VM_ID"
 ```
 
-已完成存储分类迁移时，新 base 写入 `vms/bases/win10-base.qcow2`，旧 base
-归档到 `vms/bases/archive/`。若机器上仍只有旧平铺
-`vms/win10-base.qcow2`，`promote-base.sh` 会保留这个发布路径，避免在制作 base
-时顺带改变存储位置；应先按
-[`STORAGE-LAYOUT.md`](STORAGE-LAYOUT.md) 停机迁移，再制作分类后的 base。
+已完成 G-11 存储迁移时，新 base 写入
+`vms/G-11/shared/bases/win10-base.qcow2`，旧 base 归档到
+`vms/G-11/shared/bases/archive/`。旧平铺 `vms/win10-base.qcow2` 不属于新 G-11
+默认布局，也不会被普通启动偷偷采用；应先按
+[`STORAGE-LAYOUT.md`](STORAGE-LAYOUT.md) 停机、备份并完成受控迁移，再制作或
+替换新布局下的 base。
 
 base 中必须只保留未经修改且具有 NVIDIA/Microsoft 生产签名的 GRID driver 和
 token；不得包含 patched driver、自签 catalog、私有根或测试签名配置。制作前必须
@@ -452,8 +454,9 @@ NTFS、活动持有者、backing/data-file 和被其他 qcow2 依赖的 base。�
 
 ## 路线二：从合格 base 新建普通实例
 
-已有按上面流程验收过的 `vms/bases/win10-base.qcow2` 后，不要为每台 VM 重装
-Windows 和 NVIDIA 驱动：
+已有按上面流程验收过的
+`vms/G-11/shared/bases/win10-base.qcow2` 后，不要为每台 VM 重装 Windows 和
+NVIDIA 驱动：
 
 该 base 必须是 standalone qcow2；`create-disk.sh` 会验证无 backing、执行
 `qemu-img check`，并通过临时文件原子发布克隆盘。校验失败不会留下最终盘名。

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Do not let a caller's storage selection escape the per-test temporary roots.
+unset IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VM_INSTANCES_DIR
+unset VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK
+unset VM_SHARED_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR VM_NVRAM_DIR
+unset VM_CONTROL_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR
+unset VM_DISK_ARCHIVE_DIR VM_BASE_ARCHIVE_DIR VM_NVRAM_BACKUP_DIR
+
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 packager="$root/deploy/package-gpuz-profile.sh"
 guest_entry="$root/deploy/guest/apply-gpuz-profile.ps1"
@@ -37,7 +44,7 @@ create_vm() {
     VM_ROOT="$vm_root" IMAGE_ROOT="$image_root" STAGE_DIR="$stage_dir" \
         bash "$root/deploy/create-vm.sh" "$vm_id" \
         --gpu-profile "$profile" >/dev/null
-    touch "$vm_root/instances/vm${vm_id}/disk.qcow2"
+    touch "$vm_root/vm${vm_id}/disk.qcow2"
 }
 
 package_vm() {
@@ -58,7 +65,7 @@ vm_config_value() {
             }
             print value
         }
-    ' "$root_dir/instances/vm${vm_id}/vm.conf"
+    ' "$root_dir/vm${vm_id}/vm.conf"
 }
 
 generic_namespace() {
@@ -528,6 +535,9 @@ done <<'EOF'
 5|gt1030_2gb|NVIDIA GeForce GT 1030|PCI\VEN_10DE&DEV_1E30
 6|gtx1050_2gb|NVIDIA GeForce GTX 1050|PCI\VEN_10DE&DEV_1E30
 EOF
+[[ -d "$vm_root/shared/bases" && -d "$vm_root/control" &&
+   ! -e "$vm_root/instances" ]] ||
+    fail "temporary VM storage did not use vmN/shared/bases/control layout"
 
 # An explicit stable EXE name is supported when it shares the trusted output
 # parent with the expanded host bundle.
@@ -608,8 +618,8 @@ VM_ROOT="$disabled_vm_root" IMAGE_ROOT="$disabled_image" \
 STAGE_DIR="$disabled_stage" \
     bash "$root/deploy/create-vm.sh" 73 \
     --gpu-profile gtx1050_2gb >/dev/null
-touch "$disabled_vm_root/instances/vm73/disk.qcow2"
-disabled_conf="$disabled_vm_root/instances/vm73/vm.conf"
+touch "$disabled_vm_root/vm73/disk.qcow2"
+disabled_conf="$disabled_vm_root/vm73/vm.conf"
 chmod 0600 "$disabled_conf"
 sed -i '/^GPUZ_PACKAGE_ENABLED=/d' "$disabled_conf"
 printf '\nGPUZ_PACKAGE_ENABLED=0\n' >>"$disabled_conf"
@@ -639,11 +649,11 @@ fi
 symlink_image="$tmp/symlink-images"
 symlink_vm_root="$tmp/symlink-vms"
 symlink_stage="$tmp/symlink-staging"
-mkdir -p "$symlink_vm_root/instances" "$tmp/symlink-target/vm75"
+mkdir -p "$symlink_vm_root" "$tmp/symlink-target/vm75"
 printf 'VM_ID=75\nGPUZ_PACKAGE_ENABLED=0\n' \
     >"$tmp/symlink-target/vm75/vm.conf"
 ln -s "$tmp/symlink-target/vm75" \
-    "$symlink_vm_root/instances/vm75"
+    "$symlink_vm_root/vm75"
 if VM_ROOT="$symlink_vm_root" IMAGE_ROOT="$symlink_image" \
         STAGE_DIR="$symlink_stage" \
         bash "$packager" --all --output-root "$tmp/symlink-output" \
@@ -657,7 +667,7 @@ fi
 # directory/CLI identity remains authoritative and must exactly match the
 # persisted instance identity before any output path is prepared.
 create_vm 74 gtx1050_2gb
-mismatched_id_conf="$vm_root/instances/vm74/vm.conf"
+mismatched_id_conf="$vm_root/vm74/vm.conf"
 chmod 0600 "$mismatched_id_conf"
 sed -i 's/^VM_ID=.*/VM_ID=456/' "$mismatched_id_conf"
 chmod 0444 "$mismatched_id_conf"
@@ -682,9 +692,9 @@ for partial_id_profile in '71 gtx1050_2gb' '72 gt1030_2gb'; do
     STAGE_DIR="$partial_stage" \
         bash "$root/deploy/create-vm.sh" "$partial_id" \
         --gpu-profile "$partial_profile" >/dev/null
-    touch "$partial_vm_root/instances/vm${partial_id}/disk.qcow2"
+    touch "$partial_vm_root/vm${partial_id}/disk.qcow2"
 done
-partial_bad_conf="$partial_vm_root/instances/vm71/vm.conf"
+partial_bad_conf="$partial_vm_root/vm71/vm.conf"
 chmod 0600 "$partial_bad_conf"
 sed -i \
     -e 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
@@ -712,7 +722,7 @@ assert_single_exe "$partial_good_namespace/.host-bundle" 72 \
 # it unless both the installed PnP package and loaded kernel image are
 # production-signed and normal code-integrity boot is active.
 create_vm 64 gtx1050_2gb
-a_conf="$vm_root/instances/vm64/vm.conf"
+a_conf="$vm_root/vm64/vm.conf"
 chmod 0600 "$a_conf"
 sed -i \
     -e 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
@@ -729,7 +739,7 @@ assert_profile_bundle "$a_bundle" 64 gtx1050_2gb \
 
 # A non-GTX1050 profile must remain B-only.
 create_vm 65 gt1030_2gb
-bad_a_conf="$vm_root/instances/vm65/vm.conf"
+bad_a_conf="$vm_root/vm65/vm.conf"
 chmod 0600 "$bad_a_conf"
 sed -i \
     -e 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
@@ -745,7 +755,7 @@ fi
 # A GTX 1050 must still refuse the current VM3-like incomplete state when the
 # explicit full-consumer completion marker is absent.
 create_vm 67 gtx1050_2gb
-incomplete_a_conf="$vm_root/instances/vm67/vm.conf"
+incomplete_a_conf="$vm_root/vm67/vm.conf"
 chmod 0600 "$incomplete_a_conf"
 sed -i \
     -e 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
@@ -761,7 +771,7 @@ fi
 # Legacy sparse B configs inherit catalog overlays and ignore stale consumer
 # PCI tuples because B retains the native DEV_1E30 endpoint.
 create_vm 66 gt1030_2gb
-sparse_conf="$vm_root/instances/vm66/vm.conf"
+sparse_conf="$vm_root/vm66/vm.conf"
 chmod 0600 "$sparse_conf"
 sed -i -E \
     -e '/^(GPU_NAME|GPU_VRAM_MB|GPU_VBIOS|GPU_CORE_MHZ|GPU_BOOST_MHZ|GPU_MEMORY_MHZ|GPU_MEMORY_BUS_BITS|GPU_MEMORY_BANDWIDTH_MBPS|GPU_MEMORY_TYPE|GPU_MEMORY_MAKER|GPU_MEMORY_TYPE_NVAPI|GPU_MEMORY_MAKER_NVAPI|GPU_CUDA_CORES|GPU_SHADER_SUBPIPES|GPU_ROP_COUNT|GPU_TMU_COUNT|GPU_ARCHITECTURE|GPU_IMPLEMENTATION|GPU_CHIP_REVISION|GPU_PCIE_WIDTH|MONITOR_PROFILE|MONITOR_SERIAL)=/d' \
@@ -793,7 +803,7 @@ if package_vm 4 "$arbitrary" 2>/dev/null; then
 fi
 grep -Fxq user-data "$arbitrary/sentinel" ||
     fail "arbitrary output sentinel changed"
-if package_vm 4 "$vm_root/instances/vm4/output" 2>/dev/null; then
+if package_vm 4 "$vm_root/vm4/output" 2>/dev/null; then
     fail "packager accepted output inside the VM instance"
 fi
 if package_vm 4 "$root/deploy/.forbidden-gpuz-output" 2>/dev/null; then
@@ -856,7 +866,7 @@ assert_single_exe "$closed_output_bundle" 4
 # same VM without leaving another guest-facing candidate, but cannot be
 # silently repurposed for another VM.
 unchanged_content_hash=$(file_sha256 "$tmp/bundle-vm4.exe")
-vm4_conf="$vm_root/instances/vm4/vm.conf"
+vm4_conf="$vm_root/vm4/vm.conf"
 chmod 0600 "$vm4_conf"
 printf '\n# Host-only lifecycle note; not part of the guest payload.\n' >>"$vm4_conf"
 chmod 0444 "$vm4_conf"

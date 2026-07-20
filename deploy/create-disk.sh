@@ -19,9 +19,9 @@
 #   SIZE_BYTES=123456 ./create-disk.sh 1  # 精确字节数
 #
 # 环境变量:
-#   VM_ROOT          /home/ubuntu/images/vms
-#   VM_INSTANCES_DIR $VM_ROOT/instances
-#   VM_BASE_DIR      $VM_ROOT/bases
+#   VM_ROOT          /home/ubuntu/images/vms/G-11
+#   VM_INSTANCES_DIR $VM_ROOT
+#   VM_BASE_DIR      $VM_ROOT/shared/bases
 #   SIZE_BYTES       精确字节数（覆盖 CLI 的 GB 参数）
 
 set -euo pipefail
@@ -65,6 +65,7 @@ if [[ -z "$VM_ID" || ! "$VM_ID" =~ ^[1-9][0-9]*$ ]]; then
     echo "usage: $0 <vm_id> [size_gb=512] [--blank|--from-base]" >&2
     exit 2
 fi
+vm_storage_require_namespace_ready "$VM_ID"
 if ((FORCE_BLANK && REQUIRE_BASE)); then
     echo "--blank 与 --from-base 不能同时使用" >&2
     exit 2

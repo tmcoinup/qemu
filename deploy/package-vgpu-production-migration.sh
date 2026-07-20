@@ -397,7 +397,8 @@ trap cleanup EXIT
 # Build the existing, independently hash-manifested B/native GPU-Z profile
 # against an isolated config copy.  The live vm.conf and disk are never edited.
 fake_image="$work/image"
-fake_instance="$fake_image/vms/instances/vm${VM_ID}"
+fake_vm_root="$fake_image/vms/G-11"
+fake_instance="$fake_vm_root/vm${VM_ID}"
 mkdir -p "$fake_instance"
 awk '
     !/^[[:space:]]*(export[[:space:]]+)?(SPOOF|SPOOF_MODE|VGPU_IDENTITY_TARGET|VGPU_MDEV_INTERNAL_PCI_IDENTITY|VGPU_MDEV_FRL_ENABLED|VGPU_PATCHED_DRIVER_INF|VGPU_PATCHED_DRIVER_VERSION|VGPU_PATCHED_DRIVER_REQUIRED_VERSION|GPUZ_PACKAGE_ENABLED)=/
@@ -406,16 +407,22 @@ printf '\nSPOOF_MODE=B\nVGPU_IDENTITY_TARGET=name-only\nGPUZ_PACKAGE_ENABLED=1\n
     >>"$fake_instance/vm.conf"
 install -m 0600 /dev/null "$fake_instance/disk.qcow2"
 fake_gpuz_root="$work/gpuz"
+env -u VM_INSTANCE_DIR -u VM_INSTANCE_ID \
+    -u VM_DISK_ARCHIVE_DIR -u VM_BASE_ARCHIVE_DIR \
+    -u VM_NVRAM_BACKUP_DIR -u ISO_DIR \
 IMAGE_ROOT="$fake_image" \
-VM_ROOT="$fake_image/vms" \
-VM_INSTANCES_DIR="$fake_image/vms/instances" \
-VM_CONFIG_DIR="$fake_image/vms/configs" \
-VM_DISK_DIR="$fake_image/vms/disks" \
-VM_BASE_DIR="$fake_image/vms/bases" \
-VM_NVRAM_DIR="$fake_image/vms/nvram" \
-VM_RUN_DIR="$fake_image/vms/run" \
-VM_LOG_DIR="$fake_image/vms/log" \
-VM_ASSET_DIR="$fake_image/vms/assets" \
+VM_ROOT="$fake_vm_root" \
+VM_INSTANCES_DIR="$fake_vm_root" \
+VM_SHARED_DIR="$fake_vm_root/shared" \
+VM_CONFIG_DIR="$fake_vm_root/legacy/configs" \
+VM_DISK_DIR="$fake_vm_root/legacy/disks" \
+VM_BASE_DIR="$fake_vm_root/shared/bases" \
+VM_NVRAM_DIR="$fake_vm_root/legacy/nvram" \
+VM_CONTROL_DIR="$fake_vm_root/control" \
+VM_RUN_DIR="$fake_vm_root/control" \
+VM_LOG_DIR="$fake_vm_root/legacy/log" \
+VM_ASSET_DIR="$fake_vm_root/shared/assets" \
+VM_STORAGE_COMPAT_FALLBACK=0 \
 STAGE_DIR="$fake_image/staging" \
     "$here/package-gpuz-profile.sh" "$VM_ID" \
         --output-root "$fake_gpuz_root" \

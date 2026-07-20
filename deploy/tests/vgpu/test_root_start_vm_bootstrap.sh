@@ -123,6 +123,7 @@ run_start() {
         PATH=/usr/bin:/bin \
         LANG=en_US.utf8 \
         DISPLAY=:99 \
+        IMAGE_ROOT="$TMP_DIR" \
         VM_ROOT="$vm_root" \
         QEMU_IMG="$TMP_DIR/qemu-img" \
         QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \
@@ -142,14 +143,14 @@ run_start() {
 # --install must create a blank image even when a qualified public base exists.
 INSTALL_ROOT="$TMP_DIR/install-vms"
 INSTALL_ID=910001
-mkdir -p "$INSTALL_ROOT/bases"
-printf 'base-must-not-be-copied\n' >"$INSTALL_ROOT/bases/win10-base.qcow2"
+mkdir -p "$INSTALL_ROOT/shared/bases"
+printf 'base-must-not-be-copied\n' >"$INSTALL_ROOT/shared/bases/win10-base.qcow2"
 printf 'windows-iso\n' >"$TMP_DIR/windows.iso"
 run_start "$INSTALL_ROOT" "$INSTALL_ID" \
     "$TMP_DIR/install.out" "$TMP_DIR/install.err" \
     --install "$TMP_DIR/windows.iso"
-INSTALL_DISK="$INSTALL_ROOT/instances/vm${INSTALL_ID}/disk.qcow2"
-[[ -f "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf" ]] || \
+INSTALL_DISK="$INSTALL_ROOT/vm${INSTALL_ID}/disk.qcow2"
+[[ -f "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf" ]] || \
     fail "install bootstrap did not create vm.conf"
 [[ -f "$INSTALL_DISK" ]] || fail "install bootstrap did not create a disk"
 [[ ! -s "$INSTALL_DISK" ]] || fail "install bootstrap copied the public base"
@@ -171,19 +172,19 @@ require_text '安装模式自动创建空盘' "$TMP_DIR/install.out"
 require_text '  键盘:' "$TMP_DIR/install.out"
 require_text '  鼠标:' "$TMP_DIR/install.out"
 require_text 'KBD_PRODUCT=' \
-    "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf"
+    "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf"
 require_text 'TABLET_PRODUCT=' \
-    "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf"
+    "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf"
 require_text 'XHCI_PCI_VENDOR_ID=0x8086' \
-    "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf"
+    "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf"
 require_text 'XHCI_PCI_DEVICE_ID=0x' \
-    "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf"
+    "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf"
 require_text 'XHCI_PCI_REVISION=0x01' \
-    "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf"
+    "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf"
 require_text 'XHCI_PCI_BUS=pcie.0' \
-    "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf"
+    "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf"
 require_text 'XHCI_PCI_ADDR=0x6' \
-    "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf"
+    "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf"
 reject_text '旧 vm.conf 缺少 xHCI PCI identity' "$TMP_DIR/install.err"
 require_text 'usb-kbd\,bus=xhci.0\,vendorid=0x' "$TMP_DIR/qemu.trace"
 require_text 'usb-tablet\,bus=xhci.0\,vendorid=0x' "$TMP_DIR/qemu.trace"
@@ -192,20 +193,20 @@ require_text 'i8042=off' "$TMP_DIR/qemu.trace"
 require_text '-rtc base=localtime\,clock=host\,driftfix=slew' "$TMP_DIR/qemu.trace"
 require_text 'kvm-pit.lost_tick_policy=delay' "$TMP_DIR/qemu.trace"
 require_text 'RTC_CONTRACT=localtime' \
-    "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf"
+    "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf"
 
 # Stable mdev identity requires VM_UUID uniqueness across instance configs.
 DUPLICATE_ID=910099
-mkdir -p "$INSTALL_ROOT/instances/vm${DUPLICATE_ID}"
-cp "$INSTALL_ROOT/instances/vm${INSTALL_ID}/vm.conf" \
-    "$INSTALL_ROOT/instances/vm${DUPLICATE_ID}/vm.conf"
+mkdir -p "$INSTALL_ROOT/vm${DUPLICATE_ID}"
+cp "$INSTALL_ROOT/vm${INSTALL_ID}/vm.conf" \
+    "$INSTALL_ROOT/vm${DUPLICATE_ID}/vm.conf"
 if run_start "$INSTALL_ROOT" "$INSTALL_ID" \
         "$TMP_DIR/duplicate-uuid.out" "$TMP_DIR/duplicate-uuid.err" \
         --dry-run --no-gpu; then
     fail "start-vm accepted duplicate stable VM_UUID values"
 fi
 require_text '重复 VM_UUID=' "$TMP_DIR/duplicate-uuid.err"
-rm -rf -- "$INSTALL_ROOT/instances/vm${DUPLICATE_ID}"
+rm -rf -- "$INSTALL_ROOT/vm${DUPLICATE_ID}"
 
 # An existing qcow2 whose virtual size no longer matches the immutable SSD
 # identity must fail before QEMU starts.
@@ -238,8 +239,8 @@ require_text 'id=answer0' "$TMP_DIR/qemu.trace"
 # interactive and must not build or attach the answer medium.
 MANUAL_ROOT="$TMP_DIR/manual-vms"
 MANUAL_ID=910010
-mkdir -p "$MANUAL_ROOT/bases"
-printf 'base-must-not-be-copied\n' >"$MANUAL_ROOT/bases/win10-base.qcow2"
+mkdir -p "$MANUAL_ROOT/shared/bases"
+printf 'base-must-not-be-copied\n' >"$MANUAL_ROOT/shared/bases/win10-base.qcow2"
 run_start "$MANUAL_ROOT" "$MANUAL_ID" \
     "$TMP_DIR/manual.out" "$TMP_DIR/manual.err" \
     --install "$TMP_DIR/windows.iso" --manual-oobe
@@ -254,12 +255,12 @@ require_text '手动 OOBE' "$TMP_DIR/manual.out"
 # same blank-disk guarantee.
 DEFAULT_ROOT="$TMP_DIR/default-vms"
 DEFAULT_ID=910004
-mkdir -p "$DEFAULT_ROOT/bases" "$TMP_DIR/iso"
-printf 'base-must-not-be-copied\n' >"$DEFAULT_ROOT/bases/win10-base.qcow2"
+mkdir -p "$DEFAULT_ROOT/shared/bases" "$TMP_DIR/iso"
+printf 'base-must-not-be-copied\n' >"$DEFAULT_ROOT/shared/bases/win10-base.qcow2"
 printf 'default-windows-iso\n' >"$TMP_DIR/iso/win10.iso"
 run_start "$DEFAULT_ROOT" "$DEFAULT_ID" \
     "$TMP_DIR/default.out" "$TMP_DIR/default.err" --install
-[[ ! -s "$DEFAULT_ROOT/instances/vm${DEFAULT_ID}/disk.qcow2" ]] || \
+[[ ! -s "$DEFAULT_ROOT/vm${DEFAULT_ID}/disk.qcow2" ]] || \
     fail "default-ISO install bootstrap copied the public base"
 require_text "$TMP_DIR/iso/win10.iso" "$TMP_DIR/qemu.trace"
 
@@ -273,19 +274,19 @@ if run_start "$BAD_ISO_ROOT" "$BAD_ISO_ID" \
     fail "install bootstrap accepted a missing ISO"
 fi
 require_text 'ISO 不存在' "$TMP_DIR/bad-iso.err"
-[[ ! -e "$BAD_ISO_ROOT/instances/vm${BAD_ISO_ID}/disk.qcow2" ]] || \
+[[ ! -e "$BAD_ISO_ROOT/vm${BAD_ISO_ID}/disk.qcow2" ]] || \
     fail "missing ISO still published a blank disk"
 
 # A normal first start must clone the public base and must not invoke
 # qemu-img create. --no-gpu keeps this lifecycle test away from real mdev sysfs.
 CLONE_ROOT="$TMP_DIR/clone-vms"
 CLONE_ID=910002
-mkdir -p "$CLONE_ROOT/bases"
-printf 'qualified-base\n' >"$CLONE_ROOT/bases/win10-base.qcow2"
+mkdir -p "$CLONE_ROOT/shared/bases"
+printf 'qualified-base\n' >"$CLONE_ROOT/shared/bases/win10-base.qcow2"
 run_start "$CLONE_ROOT" "$CLONE_ID" \
     "$TMP_DIR/clone.out" "$TMP_DIR/clone.err" --no-gpu
-CLONE_DISK="$CLONE_ROOT/instances/vm${CLONE_ID}/disk.qcow2"
-cmp "$CLONE_ROOT/bases/win10-base.qcow2" "$CLONE_DISK" || \
+CLONE_DISK="$CLONE_ROOT/vm${CLONE_ID}/disk.qcow2"
+cmp "$CLONE_ROOT/shared/bases/win10-base.qcow2" "$CLONE_DISK" || \
     fail "normal bootstrap did not clone the public base"
 if grep -Fq 'create -f qcow2' "$TMP_DIR/qemu-img.trace"; then
     fail "normal bootstrap created a blank disk instead of cloning the base"
@@ -304,44 +305,44 @@ reject_text 'scsi-cd' "$TMP_DIR/qemu.trace"
 # equal --install/--dry-run must not affect bootstrap or lock behavior.
 LAST_MODE_ROOT="$TMP_DIR/last-mode-vms"
 LAST_MODE_ID=910005
-mkdir -p "$LAST_MODE_ROOT/bases"
-printf 'last-mode-base\n' >"$LAST_MODE_ROOT/bases/win10-base.qcow2"
+mkdir -p "$LAST_MODE_ROOT/shared/bases"
+printf 'last-mode-base\n' >"$LAST_MODE_ROOT/shared/bases/win10-base.qcow2"
 run_start "$LAST_MODE_ROOT" "$LAST_MODE_ID" \
     "$TMP_DIR/last-mode.out" "$TMP_DIR/last-mode.err" \
     --install "$TMP_DIR/windows.iso" --no-gpu
-cmp "$LAST_MODE_ROOT/bases/win10-base.qcow2" \
-    "$LAST_MODE_ROOT/instances/vm${LAST_MODE_ID}/disk.qcow2" || \
+cmp "$LAST_MODE_ROOT/shared/bases/win10-base.qcow2" \
+    "$LAST_MODE_ROOT/vm${LAST_MODE_ID}/disk.qcow2" || \
     fail "final --no-gpu mode did not override earlier --install disk intent"
 
 EXTRA_ROOT="$TMP_DIR/extra-vms"
 EXTRA_ID=910006
-mkdir -p "$EXTRA_ROOT/bases"
-printf 'extra-base\n' >"$EXTRA_ROOT/bases/win10-base.qcow2"
+mkdir -p "$EXTRA_ROOT/shared/bases"
+printf 'extra-base\n' >"$EXTRA_ROOT/shared/bases/win10-base.qcow2"
 run_start "$EXTRA_ROOT" "$EXTRA_ID" \
     "$TMP_DIR/extra.out" "$TMP_DIR/extra.err" \
     --extra --install --no-gpu
-cmp "$EXTRA_ROOT/bases/win10-base.qcow2" \
-    "$EXTRA_ROOT/instances/vm${EXTRA_ID}/disk.qcow2" || \
+cmp "$EXTRA_ROOT/shared/bases/win10-base.qcow2" \
+    "$EXTRA_ROOT/vm${EXTRA_ID}/disk.qcow2" || \
     fail "--extra value was mistaken for install mode"
 
 EXTRA_DRY_ROOT="$TMP_DIR/extra-dry-vms"
 EXTRA_DRY_ID=910007
-mkdir -p "$EXTRA_DRY_ROOT/bases"
-printf 'extra-dry-base\n' >"$EXTRA_DRY_ROOT/bases/win10-base.qcow2"
+mkdir -p "$EXTRA_DRY_ROOT/shared/bases"
+printf 'extra-dry-base\n' >"$EXTRA_DRY_ROOT/shared/bases/win10-base.qcow2"
 run_start "$EXTRA_DRY_ROOT" "$EXTRA_DRY_ID" \
     "$TMP_DIR/extra-dry.out" "$TMP_DIR/extra-dry.err" \
     --extra --dry-run --no-gpu
-[[ -f "$EXTRA_DRY_ROOT/instances/vm${EXTRA_DRY_ID}/disk.qcow2" ]] || \
+[[ -f "$EXTRA_DRY_ROOT/vm${EXTRA_DRY_ID}/disk.qcow2" ]] || \
     fail "--extra value was mistaken for dry-run mode"
 
 FINAL_INSTALL_ROOT="$TMP_DIR/final-install-vms"
 FINAL_INSTALL_ID=910008
-mkdir -p "$FINAL_INSTALL_ROOT/bases"
-printf 'final-install-base\n' >"$FINAL_INSTALL_ROOT/bases/win10-base.qcow2"
+mkdir -p "$FINAL_INSTALL_ROOT/shared/bases"
+printf 'final-install-base\n' >"$FINAL_INSTALL_ROOT/shared/bases/win10-base.qcow2"
 run_start "$FINAL_INSTALL_ROOT" "$FINAL_INSTALL_ID" \
     "$TMP_DIR/final-install.out" "$TMP_DIR/final-install.err" \
     --no-gpu --install "$TMP_DIR/windows.iso"
-[[ ! -s "$FINAL_INSTALL_ROOT/instances/vm${FINAL_INSTALL_ID}/disk.qcow2" ]] || \
+[[ ! -s "$FINAL_INSTALL_ROOT/vm${FINAL_INSTALL_ID}/disk.qcow2" ]] || \
     fail "final --install mode did not create a blank disk"
 
 # Without --install or a base, retain the generated identity for a later retry
@@ -354,9 +355,9 @@ if run_start "$EMPTY_ROOT" "$EMPTY_ID" \
 fi
 require_text '没有可克隆的公共 base' "$TMP_DIR/empty.err"
 require_text '--install' "$TMP_DIR/empty.err"
-[[ -f "$EMPTY_ROOT/instances/vm${EMPTY_ID}/vm.conf" ]] || \
+[[ -f "$EMPTY_ROOT/vm${EMPTY_ID}/vm.conf" ]] || \
     fail "missing-base refusal did not retain the generated identity"
-[[ ! -e "$EMPTY_ROOT/instances/vm${EMPTY_ID}/disk.qcow2" ]] || \
+[[ ! -e "$EMPTY_ROOT/vm${EMPTY_ID}/disk.qcow2" ]] || \
     fail "missing-base refusal still created a disk"
 
 echo "PASS: root start-vm intent-aware blank/base bootstrap"

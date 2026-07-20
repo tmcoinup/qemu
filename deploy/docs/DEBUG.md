@@ -1,5 +1,9 @@
 # 调试与日志
 
+下列绝对路径是默认 G-11 布局。使用自定义 bundle 时，先运行
+`./deploy/start-vm.sh "$VM_ID" --vm-dir /abs/path/vmN --print-paths`，再使用输出的
+`VM_RUN`、`VM_LOG` 和 `VM_CONFIG`，不要猜路径。
+
 ## QEMU 侧
 
 ### 结构化 trace
@@ -18,7 +22,7 @@
 
 ### GDB attach 到 QEMU 进程
 ```bash
-sudo gdb -p "$(cat /home/ubuntu/images/vms/instances/vm${VM_ID}/run/qemu.pid)"
+sudo gdb -p "$(cat /home/ubuntu/images/vms/G-11/vm${VM_ID}/run/qemu.pid)"
 (gdb) info threads
 (gdb) thread N
 (gdb) bt
@@ -42,7 +46,7 @@ sudo gdb -p "$(cat /home/ubuntu/images/vms/instances/vm${VM_ID}/run/qemu.pid)"
 ./deploy/start-vm.sh "$VM_ID" --proxy
 
 # 终端 2（也可使用同目录下的 qmp.sock.proxy 兼容别名）
-socat - unix-connect:/home/ubuntu/images/vms/instances/vm${VM_ID}/run/qmp.sock
+socat - unix-connect:/home/ubuntu/images/vms/G-11/vm${VM_ID}/run/qmp.sock
 {"execute":"qmp_capabilities"}
 {"execute":"query-cpu-model-expansion","arguments":{"type":"full","model":{"name":"Core-i5-6500"}}}
 ```
@@ -70,7 +74,7 @@ cat /sys/module/kvm_intel/parameters/flexpriority# 1
 qemu-system-x86_64: tpm-emulator: TPM result for CMD_INIT: 0x9 operation failed
 ```
 **根因**：被强杀(SIGKILL / OOM-kill)的 qemu 留下的 swtpm `--daemon`（PPID 已脱离
-qemu）仍持 `vms/<N>/tpm-state` 的 NVRAM flock。新 swtpm 能应答控制通道（start-vm 打印
+qemu）仍持 `vms/G-11/vmN/tpm/state` 的 NVRAM flock。新 swtpm 能应答控制通道（start-vm 打印
 "TPM 2.0 ready"），但 QEMU 发 CMD_INIT 时抢不到锁。`tpm.log` 实锤：
 ```
 SWTPM_NVRAM_Lock_Dir: Could not lock access to lockfile: Resource temporarily unavailable
@@ -78,13 +82,14 @@ SWTPM_NVRAM_Lock_Dir: Could not lock access to lockfile: Resource temporarily un
 失败重试还会再叠加孤儿（曾累计到 3 个）。
 
 **自愈**：`start-vm.sh` 起 daemon 前有 preflight reaper（无活 qemu 占用本实例 tpm-sock
-时按 `dir=.../vms/<N>/tpm-state` 精确清理，跨实例零误杀），所以正常重跑
+时按 `dir=.../vms/G-11/vmN/tpm/state` 精确清理，跨实例零误杀），所以正常重跑
 `start-vm.sh <N>` 即恢复；`stop-vm.sh <N>` 停机时也会一并收 swtpm。
 
 **手动兜底**：
 ```bash
-pkill -f 'swtpm socket --tpmstate dir=.*vms/<N>/tpm-state'   # 只清这一实例
-# ⚠ 绝不删 vms/<N>/tpm-state/tpm2-00.permall —— 那是真 TPM 持久态(EK/Platform cert)，
+vm=3
+pkill -f "swtpm socket --tpmstate dir=.*/vms/G-11/vm${vm}/tpm/state,"
+# ⚠ 绝不删 vms/G-11/vmN/tpm/state/tpm2-00.permall —— 那是真 TPM 持久态(EK/Platform cert)，
 #   删了 guest BitLocker / 证明链会崩
 ```
 
@@ -132,7 +137,7 @@ per-mdev 结果：
 
 ```bash
 vm=3
-conf="/home/ubuntu/images/vms/instances/vm${vm}/vm.conf"
+conf="/home/ubuntu/images/vms/G-11/vm${vm}/vm.conf"
 uuid=$(sed -n 's/^VM_UUID=//p' "$conf")
 
 sed -n '/^GPU_PROFILE=/p;/^SPOOF_MODE=/p;/^VGPU_MDEV_INTERNAL_PCI_IDENTITY=/p;

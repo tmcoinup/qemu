@@ -18,7 +18,6 @@ set -euo pipefail
 here="$(dirname "$(readlink -f "$0")")"
 cd "$here"
 
-export VM_ROOT="${VM_ROOT:-${IMAGE_ROOT:-/home/ubuntu/images}/vms}"
 # shellcheck source=lib/vm-storage.sh
 source "$here/lib/vm-storage.sh"
 vm_storage_init

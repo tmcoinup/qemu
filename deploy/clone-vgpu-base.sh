@@ -78,6 +78,7 @@ done
     usage >&2
     exit 2
 }
+vm_storage_require_namespace_ready "$VM_ID"
 vgpu_profile_validate_catalog ||
     die "GPU profile catalog validation failed"
 vgpu_profile_load "$GPU_PROFILE_REQUEST" ||

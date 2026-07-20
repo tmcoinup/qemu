@@ -2,6 +2,10 @@
 # start-vm.sh — NVIDIA mdev/vGPU VM 启动器
 #
 # 用法: ./start-vm.sh <vm_id> [options]
+#   --vm-dir <abs>     当前 VM 的完整 bundle 路径（末级必须为 vm<vm_id>）
+#   --instances-dir <abs>
+#                      VM bundle 父目录；当前 VM 自动使用其中的 vm<vm_id>
+#   --print-paths      只打印最终路径并退出，不创建目录、不启动 VM
 #   --install [iso]    安装模式；缺盘时自动建空盘，不会复制公共 base
 #                      (NO_VFIO 旁路 vfio-pci；iso 默认 $IMAGE_ROOT/iso/win10.iso)
 #                      默认仅跳过 OOBE；密钥/版本/磁盘分区仍手动选择
@@ -51,9 +55,10 @@
 #   QEMU_IMG         qemu-img 路径（默认 build/qemu-img）
 #   OVMF_CODE        OVMF_CODE.fd 路径 (默认 host/OVMF_CODE_4M_stealth.fd)
 #   OVMF_VARS        OVMF_VARS.fd 模板
-#   VM_INSTANCES_DIR 每 VM bundle 根目录 (默认 $VM_ROOT/instances)
-#   VM_BASE_DIR      公共 base 目录 (默认 $VM_ROOT/bases)
-#   VM_DISK_DIR/VM_NVRAM_DIR 旧分类布局兼容读取目录
+#   VM_ROOT          G-11 根目录 (默认 $IMAGE_ROOT/vms/G-11)
+#   VM_INSTANCE_DIR  当前 VM 的完整 bundle 路径（等价于 --vm-dir）
+#   VM_INSTANCES_DIR 每 VM bundle 父目录 (默认 $VM_ROOT)
+#   VM_BASE_DIR      公共 base 目录 (默认 $VM_ROOT/shared/bases)
 #   ISO_DIR          Windows ISO 目录 (默认 $IMAGE_ROOT/iso)
 #   INSTALL_UNATTENDED  安装时自动附加 OOBE 应答 ISO (0/1，默认 1)
 #   INSTALL_UNATTEND_TEMPLATE  最小应答 XML 模板
@@ -64,6 +69,8 @@
 #   INSTALL_GFX_BACKEND  install 窗口后端 (gtk|sdl，默认 gtk)
 #   QEMU_SDL_DISABLE_IBUS auto|0|1；默认 auto，在宿主 IBus 会话中隔离
 #                     SDL 的宿主输入法（guest 仍接收原始键盘事件）
+#   QEMU_SDL_PRESENT_MODE fixed|dynamic；默认 fixed，SDL 固定 60Hz Present；
+#                     dynamic 保留旧的按画面变化 Present 行为
 #   DISPLAY_WIDTH/HEIGHT  旧 external viewer 窗口大小 (默认 1920x1080)
 #   VGPU_ROMBAR      vGPU ROM BAR 策略 (auto|0|1；native 默认 0)
 #   VGPU_ROMFILE     可选的缓存 vGPU option ROM 文件 (诊断用)
@@ -124,16 +131,174 @@ VGPU_GUEST_FINISH_TARGET_ENV=${VGPU_GUEST_FINISH_TARGET-}
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
 
-# Default sudo password (memory: user_sudo_password.md).  Export so the
-# mdev sysfs-write helper in lib/vgpu-mdev.sh sees it without prompting.
-export SUDO_PASSWORD="${SUDO_PASSWORD:-123456}"
-
-# 所有 VM bundle 和共享 base/control/assets 的 root。
-# Env VM_ROOT 可以覆盖（多机/多盘场景）。
-export VM_ROOT="${VM_ROOT:-${IMAGE_ROOT:-/home/ubuntu/images}/vms}"
 # shellcheck source=lib/vm-storage.sh
 source "$here/lib/vm-storage.sh"
+
+VM_ID="${1:-}"
+if ! vm_storage_id_is_supported "$VM_ID"; then
+    echo "usage: $0 <vm_id> [--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso]|--native|--gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate|--stream URL|--stream-roi X,Y,W,H|--no-tpm|--dry-run|--extra \"...\"]" >&2
+    echo "vm_id must be in 1..2147483647" >&2
+    exit 2
+fi
+REQUESTED_VM_ID=$VM_ID
+shift
+
+# Storage affects the first vm.conf read and every lock path, so extract these
+# options before vm_storage_init.  Value-taking runtime options are copied as
+# an inseparable pair so an --extra/--stream value cannot be mistaken for a
+# storage selector.
+VM_DIR_CLI=""
+INSTANCES_DIR_CLI=""
+PRINT_PATHS=0
+START_VM_ARGS=()
+while (( $# > 0 )); do
+    case "$1" in
+        --vm-dir|--instances-dir)
+            storage_option=$1
+            (( $# >= 2 )) || {
+                echo "$storage_option 需要一个绝对路径" >&2
+                exit 2
+            }
+            storage_value=$2
+            if [[ "$storage_option" == --vm-dir ]]; then
+                [[ -z "$VM_DIR_CLI" ]] || {
+                    echo "--vm-dir 只能指定一次" >&2
+                    exit 2
+                }
+                VM_DIR_CLI=$storage_value
+            else
+                [[ -z "$INSTANCES_DIR_CLI" ]] || {
+                    echo "--instances-dir 只能指定一次" >&2
+                    exit 2
+                }
+                INSTANCES_DIR_CLI=$storage_value
+            fi
+            shift 2
+            ;;
+        --vm-dir=*|--instances-dir=*)
+            storage_option=${1%%=*}
+            storage_value=${1#*=}
+            [[ -n "$storage_value" ]] || {
+                echo "$storage_option 需要一个绝对路径" >&2
+                exit 2
+            }
+            if [[ "$storage_option" == --vm-dir ]]; then
+                [[ -z "$VM_DIR_CLI" ]] || {
+                    echo "--vm-dir 只能指定一次" >&2
+                    exit 2
+                }
+                VM_DIR_CLI=$storage_value
+            else
+                [[ -z "$INSTANCES_DIR_CLI" ]] || {
+                    echo "--instances-dir 只能指定一次" >&2
+                    exit 2
+                }
+                INSTANCES_DIR_CLI=$storage_value
+            fi
+            shift
+            ;;
+        --print-paths)
+            (( PRINT_PATHS == 0 )) || {
+                echo "--print-paths 只能指定一次" >&2
+                exit 2
+            }
+            PRINT_PATHS=1
+            shift
+            ;;
+        --install)
+            START_VM_ARGS+=( "$1" )
+            shift
+            if (( $# > 0 )) && [[ "$1" != --* ]]; then
+                START_VM_ARGS+=( "$1" )
+                shift
+            fi
+            ;;
+        --vnc|--spoof-mode|--shmem|--svc-cpus|--stream|--stream-output|\
+        --stream-roi|--stream-rate|--stream-encoder|--stream-bitrate|\
+        --stream-preset|--stream-gop|--stream-container|--stream-mode|\
+        --stream-start-timeout|--width|--height|--extra)
+            storage_option=$1
+            (( $# >= 2 )) || {
+                echo "$storage_option 需要一个参数" >&2
+                exit 2
+            }
+            START_VM_ARGS+=( "$1" "$2" )
+            shift 2
+            ;;
+        *)
+            START_VM_ARGS+=( "$1" )
+            shift
+            ;;
+    esac
+done
+set -- "${START_VM_ARGS[@]}"
+unset START_VM_ARGS storage_option storage_value
+
+if [[ -n "$VM_DIR_CLI" && -n "$INSTANCES_DIR_CLI" ]]; then
+    echo "--vm-dir 与 --instances-dir 不能同时使用" >&2
+    exit 2
+elif [[ -n "$VM_DIR_CLI" ]]; then
+    vm_storage_select_instance_dir "$VM_ID" "$VM_DIR_CLI"
+elif [[ -n "$INSTANCES_DIR_CLI" ]]; then
+    vm_storage_select_instances_dir "$INSTANCES_DIR_CLI"
+elif [[ -n "${VM_INSTANCE_DIR:-}" ]]; then
+    vm_storage_select_instance_dir "$VM_ID" "$VM_INSTANCE_DIR"
+elif [[ -n "${VM_INSTANCES_DIR:-}" ]]; then
+    vm_storage_select_instances_dir "$VM_INSTANCES_DIR"
+fi
 vm_storage_init
+
+SELECTED_VM_DIR=$(vm_storage_instance_dir "$VM_ID")
+PRE_NAMESPACE_VM_DIR=$(vm_storage_pre_namespace_instance_dir "$VM_ID")
+G11_MIGRATION_REQUIRED=0
+if vm_storage_namespace_migration_required "$VM_ID"; then
+    G11_MIGRATION_REQUIRED=1
+fi
+
+if (( PRINT_PATHS )); then
+    printf 'VM_ID=%s\n' "$VM_ID"
+    printf 'VM_DIR=%s\n' "$SELECTED_VM_DIR"
+    printf 'VM_CONFIG=%s\n' "$(vm_storage_config_path "$VM_ID")"
+    printf 'VM_DISK=%s\n' "$(vm_storage_disk_path "$VM_ID")"
+    printf 'VM_NVRAM=%s\n' "$(vm_storage_nvram_path "$VM_ID")"
+    printf 'VM_TPM=%s\n' "$SELECTED_VM_DIR/tpm"
+    printf 'VM_RUN=%s\n' "$(vm_storage_instance_run_dir "$VM_ID")"
+    printf 'VM_LOG=%s\n' "$(vm_storage_instance_log_dir "$VM_ID")"
+    printf 'VM_BACKUPS=%s\n' "$SELECTED_VM_DIR/backups"
+    printf 'VM_BASE=%s\n' "$(vm_storage_base_path)"
+    printf 'VM_CONTROL=%s\n' "$VM_RUN_DIR"
+    if (( G11_MIGRATION_REQUIRED )); then
+        printf 'LEGACY_G11_DIR=%s\n' "$PRE_NAMESPACE_VM_DIR"
+        printf 'MIGRATION_REQUIRED=1\n'
+    else
+        printf 'MIGRATION_REQUIRED=0\n'
+    fi
+    exit 0
+fi
+
+if (( G11_MIGRATION_REQUIRED )); then
+    echo "[start-vm] 发现尚未迁移的旧 G-11 bundle，拒绝创建同 ID 的第二份 VM:" >&2
+    echo "  old: $PRE_NAMESPACE_VM_DIR" >&2
+    echo "  new: $SELECTED_VM_DIR" >&2
+    echo "[start-vm] 先停止所有 G-11 VM，再运行 ./deploy/migrate-g11-layout.sh --check/--apply" >&2
+    exit 1
+fi
+unset PRE_NAMESPACE_VM_DIR G11_MIGRATION_REQUIRED
+
+# vm.conf and host policy files may describe guest hardware, but they may not
+# redirect storage after the CLI selection and early config lookup are fixed.
+readonly IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VM_INSTANCES_DIR \
+    VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK \
+    VM_SHARED_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR VM_NVRAM_DIR \
+    VM_CONTROL_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR \
+    VM_DISK_ARCHIVE_DIR VM_BASE_ARCHIVE_DIR VM_NVRAM_BACKUP_DIR
+readonly SELECTED_VM_DIR
+
+# Only export credentials when the caller supplied them through the process
+# environment.  This repository never supplies a host password fallback.
+if [[ -v SUDO_PASSWORD ]]; then
+    export SUDO_PASSWORD
+fi
 # shellcheck source=lib/hardware-profiles.sh
 source "$here/lib/hardware-profiles.sh"
 # shellcheck source=lib/input-profiles.sh
@@ -146,7 +311,7 @@ source "$here/lib/cpu-isolation.sh"
 # shellcheck source=lib/windows-unattend.sh
 source "$here/lib/windows-unattend.sh"
 
-# 宿主资源配置与 instances/vmN/vm.conf 的 guest-visible identity 分开。正版
+# 宿主资源配置与 vmN/vm.conf 的 guest-visible identity 分开。正版
 # Tesla V100 可在这里选 V100-2Q/V100D-2Q；vm.conf 仍可保持
 # GTX 750 Ti/GT 1030/GTX 1050 等身份。显式指定的配置丢失时应
 # 立即报错，默认本地文件不存在则保持旧行为。
@@ -172,15 +337,6 @@ source "$here/lib/vgpu-mdev.sh"
 source "$here/lib/vgpu-profiles.sh"
 # shellcheck source=lib/gnome-shortcuts.sh
 source "$here/lib/gnome-shortcuts.sh"
-
-VM_ID="${1:-}"
-if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--install [iso]|--native|--gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate|--stream URL|--stream-roi X,Y,W,H|--no-tpm|--dry-run|--extra \"...\"]" >&2
-    echo "vm_id must be in 1..2147483647" >&2
-    exit 2
-fi
-REQUESTED_VM_ID=$VM_ID
-shift
 
 # --dry-run 在常规参数解析之前就要可见，避免为了“只看 argv”而 bootstrap
 # VM、磁盘或 runtime 目录。已有 VM 才能 dry-run；缺 config 时不给它猜配置。
@@ -976,6 +1132,7 @@ UNATTEND_ISO=""
 TAME_GNOME="${TAME_GNOME:-auto}"
 QEMU_SDL_WINDOWS_CURSOR="${QEMU_SDL_WINDOWS_CURSOR:-$VM_ASSET_DIR/aero_arrow.cur}"
 QEMU_SDL_DISABLE_IBUS="${QEMU_SDL_DISABLE_IBUS:-auto}"
+QEMU_SDL_PRESENT_MODE="${QEMU_SDL_PRESENT_MODE:-fixed}"
 
 should_tame_gnome_super() {
     local mode=${TAME_GNOME,,}
@@ -1931,6 +2088,16 @@ case "$MODE" in
 esac
 
 if [[ "$MODE" == vgpu-sdl ]]; then
+    case "${QEMU_SDL_PRESENT_MODE,,}" in
+        fixed|dynamic)
+            QEMU_SDL_PRESENT_MODE="${QEMU_SDL_PRESENT_MODE,,}"
+            export QEMU_SDL_PRESENT_MODE
+            ;;
+        *)
+            echo "QEMU_SDL_PRESENT_MODE 必须是 fixed 或 dynamic: $QEMU_SDL_PRESENT_MODE" >&2
+            exit 2
+            ;;
+    esac
     case "${QEMU_SDL_DISABLE_IBUS,,}" in
         auto)
             [[ "${XMODIFIERS:-}" == *@im=ibus* ]] && \
@@ -1951,6 +2118,13 @@ if [[ "$MODE" == vgpu-sdl ]]; then
         export IBUS_ADDRESS=/nonexistent
         if [[ "$DRY_RUN" != 1 ]]; then
             echo "[start-vm] SDL host IBus 已隔离（避免键鼠热拔插触发 SDL2 崩溃）"
+        fi
+    fi
+    if [[ "$DRY_RUN" != 1 ]]; then
+        if [[ "$QEMU_SDL_PRESENT_MODE" == fixed ]]; then
+            echo "[start-vm] SDL Present 模式：固定 60Hz（默认）"
+        else
+            echo "[start-vm] SDL Present 模式：动态（仅画面变化时 Present）"
         fi
     fi
 
@@ -2661,6 +2835,9 @@ INPUT_ARGS=(
 )
 
 echo "启动 VM ${VM_ID} 模式=${MODE}"
+echo "  VM 目录: $(vm_storage_instance_dir "$VM_ID")"
+echo "  配置: ${CONF}"
+echo "  磁盘: ${DISK}"
 if [[ "$PROXY" == 1 ]]; then
     echo "  QMP multi: native multi-client on ${QMP_SOCK}"
     echo "  QMP alias: ${QMP_PROXY_SOCK}"
@@ -2917,7 +3094,7 @@ fi
 # ───────── 旧 rdp/legacy-shmem 兼容模式：QEMU 后台 + setup + viewer
 #
 # 流程：
-#   1. QEMU fork 到后台，stderr → instances/vmN/log/qemu.log（用 tail -f 跟）
+#   1. QEMU fork 到后台，stderr → vmN/log/qemu.log（用 tail -f 跟）
 #   2. 后台 setup-task：等 WinRM 起 → 探 NvDisplayContainer 服务，没装就跑
 #      setup-guest.sh，已装但 stopped 就 Start-Service
 #   3. 前台拉 stream_client_dda viewer，等 ring magic（最长 5 分钟，覆盖

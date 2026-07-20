@@ -25,13 +25,13 @@ V3 收尾后的已审计 GTX 1050 A，以及始终不变的 host backing hardwar
 | 字段 | 物理机 | QEMU 默认 | 本项目 |
 |-----|--------|-----------|--------|
 | Type 0 vendor | AMI / Phoenix / Insyde | "SeaBIOS" ⚠️ | `-smbios type=0,vendor="American Megatrends Inc."` |
-| Type 1 manufacturer/product | ASUS / MSI / Gigabyte 等 | "QEMU"/"Standard PC" ⚠️ | `create-vm.sh` 随机池，写入 `instances/vmN/vm.conf` 后每次启动一致 |
+| Type 1 manufacturer/product | ASUS / MSI / Gigabyte 等 | "QEMU"/"Standard PC" ⚠️ | `create-vm.sh` 随机池，写入 `G-11/vmN/vm.conf` 后每次启动一致 |
 | Type 1 UUID | 厂固化 | 启动新 uuid | 配置里固化 `VM_UUID` |
-| Type 2 serial | 主板 SN | 空 | 从 `instances/vmN/vm.conf` 的 `MB_SN` 填 |
+| Type 2 serial | 主板 SN | 空 | 从 `G-11/vmN/vm.conf` 的 `MB_SN` 填 |
 | Type 17 memory_type | 0x18 / 0x1A / 0x22 (DDR3/4/5) | **0x07 (RAM)** ⚠️ | `memtype=0x1A` (CLI) + 新 QEMU opts (本仓库 patch) |
 | Type 17 type_detail | 0x80 (Synchronous) | **0x02 (Other)** ⚠️ | `typedetail=0x80` (本仓库 patch) |
 | Type 17 data_width/total_width | 64 / 64 (no ECC) | **0xFFFF / 0xFFFF** ⚠️ | `width=64,totalwidth=64` (本仓库 patch) |
-| Type 17 manufacturer/part/serial | Kingston / KVR... | 空 | `instances/vmN/vm.conf` 随机池 |
+| Type 17 manufacturer/part/serial | Kingston / KVR... | 空 | `G-11/vmN/vm.conf` 随机池 |
 | Type 3 chassis | 机箱 SN | 空 | `CHASSIS_SN` |
 
 验证命令 (guest):

@@ -383,6 +383,7 @@ assert_platform() {
 }
 
 TMP_DIR="$(mktemp -d)"
+export IMAGE_ROOT="$TMP_DIR"
 VM_ROOT="$TMP_DIR/vms"
 EMPTY_VGPU_CONFIG="$TMP_DIR/vgpu-host.conf"
 
@@ -424,7 +425,8 @@ chmod +x "$TMP_DIR/qemu-system-x86_64"
 # Root lifecycle entry points use the same signed 32-bit VM ID contract as the
 # guest manifest/launcher.  Oversized IDs must fail before creating storage.
 range_root="$TMP_DIR/id-range-root"
-if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin VM_ROOT="$range_root" \
+if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$range_root" \
         "$CREATE_VM" 2147483648 \
         >"$TMP_DIR/create-oversized.out" 2>"$TMP_DIR/create-oversized.err"; then
     fail 'create-vm accepted an ID beyond 2147483647'
@@ -433,7 +435,8 @@ require_text '1..2147483647' "$TMP_DIR/create-oversized.err" \
     "create-vm ID range"
 [[ ! -e "$range_root" && ! -L "$range_root" ]] ||
     fail 'create-vm oversized ID created storage'
-if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin VM_ROOT="$range_root" \
+if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$range_root" \
         "$START_VM" 2147483648 \
         >"$TMP_DIR/start-oversized.out" 2>"$TMP_DIR/start-oversized.err"; then
     fail 'start-vm accepted an ID beyond 2147483647'
@@ -449,6 +452,7 @@ create_vm() {
     env -i \
         HOME="${HOME:-/tmp}" \
         PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$IMAGE_ROOT" \
         VM_ROOT="$VM_ROOT" \
         "$CREATE_VM" "$id" \
         --platform "$platform" \
@@ -463,6 +467,7 @@ create_vm_default_ssd() {
     env -i \
         HOME="${HOME:-/tmp}" \
         PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$IMAGE_ROOT" \
         VM_ROOT="$VM_ROOT" \
         "$CREATE_VM" "$id" \
         --platform "$platform" \
@@ -489,6 +494,7 @@ run_start() {
         HOME="${HOME:-/tmp}" \
         PATH=/usr/bin:/bin \
         DISPLAY=:99 \
+        IMAGE_ROOT="$IMAGE_ROOT" \
         VM_ROOT="$VM_ROOT" \
         QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \
         OVMF_CODE="$TMP_DIR/OVMF_CODE.fd" \
@@ -502,8 +508,8 @@ run_start() {
 
 rewrite_conf() {
     local source_id=$1 target_id=$2 tpm_value=$3
-    local source_conf="$VM_ROOT/instances/vm${source_id}/vm.conf"
-    local target_dir="$VM_ROOT/instances/vm${target_id}"
+    local source_conf="$VM_ROOT/vm${source_id}/vm.conf"
+    local target_dir="$VM_ROOT/vm${target_id}"
     local target_conf="$target_dir/vm.conf"
 
     mkdir -p "$target_dir"
@@ -611,7 +617,7 @@ for platform in i5-4590 i5-6500 i3-8100; do
         "$platform create summary B-mode identity"
     require_text '  键盘:' "$output" "$platform create keyboard summary"
     require_text '  鼠标:' "$output" "$platform create pointer summary"
-    conf="$VM_ROOT/instances/vm${id}/vm.conf"
+    conf="$VM_ROOT/vm${id}/vm.conf"
     [[ -r "$conf" ]] || fail "$platform did not create vm.conf"
     # shellcheck source=/dev/null
     source "$conf"
@@ -694,7 +700,7 @@ done
 # tuple that changes the fixed root-bus topology.
 partial_xhci_id=$next_id
 next_id=$((next_id + 1))
-partial_xhci_conf="$VM_ROOT/instances/vm${partial_xhci_id}/vm.conf"
+partial_xhci_conf="$VM_ROOT/vm${partial_xhci_id}/vm.conf"
 rewrite_conf "${PLATFORM_IDS[i3-8100]}" "$partial_xhci_id" 2.0
 chmod u+w "$partial_xhci_conf"
 sed -i \
@@ -713,7 +719,7 @@ require_text 'XHCI_PCI_VENDOR_ID/XHCI_PCI_DEVICE_ID/XHCI_PCI_REVISION/XHCI_PCI_B
 
 invalid_xhci_id=$next_id
 next_id=$((next_id + 1))
-invalid_xhci_conf="$VM_ROOT/instances/vm${invalid_xhci_id}/vm.conf"
+invalid_xhci_conf="$VM_ROOT/vm${invalid_xhci_id}/vm.conf"
 rewrite_conf "${PLATFORM_IDS[i3-8100]}" "$invalid_xhci_id" 2.0
 chmod u+w "$invalid_xhci_conf"
 sed -i 's/^XHCI_PCI_BUS=.*/XHCI_PCI_BUS=pcie.1/' "$invalid_xhci_conf"
@@ -730,7 +736,7 @@ require_text 'vm.conf 中 xHCI PCI identity 非法' \
 # fallback), while newly generated configs remain subject to strict checks.
 legacy_storage_id=$next_id
 next_id=$((next_id + 1))
-legacy_storage_dir="$VM_ROOT/instances/vm${legacy_storage_id}"
+legacy_storage_dir="$VM_ROOT/vm${legacy_storage_id}"
 legacy_storage_conf="$legacy_storage_dir/vm.conf"
 rewrite_conf "${PLATFORM_IDS[i5-4590]}" "$legacy_storage_id" omit
 chmod u+w "$legacy_storage_conf"
@@ -763,7 +769,7 @@ require_text 'physical_block_size=512' "$TMP_DIR/legacy-storage.out" \
 
 partial_storage_id=$next_id
 next_id=$((next_id + 1))
-partial_storage_dir="$VM_ROOT/instances/vm${partial_storage_id}"
+partial_storage_dir="$VM_ROOT/vm${partial_storage_id}"
 partial_storage_conf="$partial_storage_dir/vm.conf"
 rewrite_conf "${PLATFORM_IDS[i5-4590]}" "$partial_storage_id" omit
 chmod u+w "$partial_storage_conf"
@@ -779,7 +785,7 @@ require_text 'SSD_FORM_FACTOR/SSD_PCIE_GEN/SSD_PCIE_LANES 必须同时设置' \
 
 strict_storage_id=$next_id
 next_id=$((next_id + 1))
-strict_storage_dir="$VM_ROOT/instances/vm${strict_storage_id}"
+strict_storage_dir="$VM_ROOT/vm${strict_storage_id}"
 strict_storage_conf="$strict_storage_dir/vm.conf"
 rewrite_conf "${PLATFORM_IDS[i5-4590]}" "$strict_storage_id" omit
 chmod u+w "$strict_storage_conf"
@@ -803,7 +809,8 @@ require_text '已审核拓扑不兼容' "$TMP_DIR/strict-storage.err" \
 
 # The H97 board's M.2 socket is PCIe 2.0 x2, so the QEMU controller identity
 # that advertises Samsung PCIe 3.0 x4 must not be paired with that platform.
-if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin VM_ROOT="$VM_ROOT" \
+if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
         "$CREATE_VM" 780099 --platform i5-4590 \
         --ssd-profile samsung-970-pro-512gb \
         --gpu-profile gtx1050_2gb --monitor-profile lenovo-d24-20 \
@@ -817,14 +824,14 @@ require_text '与平台 i5-4590 不兼容' "$TMP_DIR/h97-nvme.err" \
 # already persisted, but --force must not silently grow/relabel its existing
 # disk as one of the new 512 GB profiles.
 guard_id=${PLATFORM_IDS[i5-4590]}
-guard_dir="$VM_ROOT/instances/vm${guard_id}"
+guard_dir="$VM_ROOT/vm${guard_id}"
 guard_conf="$guard_dir/vm.conf"
 : >"$guard_dir/disk.qcow2"
 guard_hash=$(sha256sum "$guard_conf")
 
 capacity_guard_id=$next_id
 next_id=$((next_id + 1))
-capacity_guard_dir="$VM_ROOT/instances/vm${capacity_guard_id}"
+capacity_guard_dir="$VM_ROOT/vm${capacity_guard_id}"
 capacity_guard_conf="$capacity_guard_dir/vm.conf"
 rewrite_conf "$guard_id" "$capacity_guard_id" omit
 chmod u+w "$capacity_guard_conf"
@@ -843,7 +850,8 @@ require_text 'Samsung\ SSD\ 860\ EVO\ 500GB' \
     "$TMP_DIR/legacy-500-start.out" "removed 500 GB profile start compatibility"
 require_text '500107862016 bytes' "$TMP_DIR/legacy-500-start.out" \
     "removed 500 GB profile visible capacity"
-if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin VM_ROOT="$VM_ROOT" \
+if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
         "$CREATE_VM" "$capacity_guard_id" --force --platform i5-4590 \
         --ssd-profile samsung-850-pro-512gb \
         --gpu-profile gtx1050_2gb --monitor-profile lenovo-d24-20 \
@@ -858,11 +866,12 @@ assert_eq "$capacity_guard_hash" "$(sha256sum "$capacity_guard_conf")" \
 # Two exact-512 GB NVMe profiles still have different PCI controller IDs.
 # Never let --force swap the Windows boot controller beneath an existing disk.
 controller_guard_id=${PLATFORM_IDS[i5-6500]}
-controller_guard_dir="$VM_ROOT/instances/vm${controller_guard_id}"
+controller_guard_dir="$VM_ROOT/vm${controller_guard_id}"
 controller_guard_conf="$controller_guard_dir/vm.conf"
 : >"$controller_guard_dir/disk.qcow2"
 controller_guard_hash=$(sha256sum "$controller_guard_conf")
-if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin VM_ROOT="$VM_ROOT" \
+if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
         "$CREATE_VM" "$controller_guard_id" --force --platform i5-6500 \
         --ssd-profile wd-black-pcie-512gb \
         --gpu-profile gtx1050_2gb --monitor-profile lenovo-d24-20 \
@@ -877,7 +886,8 @@ assert_eq "$controller_guard_hash" "$(sha256sum "$controller_guard_conf")" \
 
 mkdir -p "$guard_dir/tpm/state"
 truncate -s 4096 "$guard_dir/tpm/state/tpm-00.permall"
-if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin VM_ROOT="$VM_ROOT" \
+if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
         "$CREATE_VM" "$guard_id" --force --platform i5-6500 \
         --ssd-profile samsung-860-pro-512gb \
         --gpu-profile gtx1050_2gb --monitor-profile lenovo-d24-20 \
@@ -898,7 +908,7 @@ for default_platform in i5-4590 i5-6500 i3-8100; do
     create_vm_default_ssd "$default_ssd_id" "$default_platform" \
         "$TMP_DIR/create-default-ssd-${default_platform}.out"
     # shellcheck source=/dev/null
-    source "$VM_ROOT/instances/vm${default_ssd_id}/vm.conf"
+    source "$VM_ROOT/vm${default_ssd_id}/vm.conf"
     [[ "$SSD_SIZE_BYTES" == 512110190592 ]] \
         || fail "$default_platform implicit SSD is not exact 512 GB: $SSD_SIZE_BYTES"
     case "$default_platform|$SSD_INTERFACE|$SSD_PCIE_GEN|$SSD_PCIE_LANES" in
@@ -921,7 +931,7 @@ for ssd_profile in "${expected_ssds[@]}"; do
     next_id=$((next_id + 1))
     create_out="$TMP_DIR/create-$id.out"
     create_vm "$id" i3-8100 "$ssd_profile" "$create_out"
-    conf="$VM_ROOT/instances/vm${id}/vm.conf"
+    conf="$VM_ROOT/vm${id}/vm.conf"
     # shellcheck source=/dev/null
     source "$conf"
     assert_serials "$ssd_profile"
@@ -1006,7 +1016,8 @@ reject_text 'tpm-tis\,tpmdev=tpm0' "$TMP_DIR/no-board-tpm.out" \
     "board without TPM TIS"
 
 if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin DISPLAY=:99 \
-        VM_ROOT="$VM_ROOT" QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \
+        IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+        QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \
         OVMF_CODE="$TMP_DIR/OVMF_CODE.fd" OVMF_VARS="$TMP_DIR/OVMF_VARS.fd" \
         VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" REPAIR_DISPLAY_VARS=off TPM=1 \
         "$START_VM" "$no_tpm_id" --dry-run --no-gpu \
@@ -1035,7 +1046,7 @@ require_text 'tpm-crb\,tpmdev=tpm0' "$TMP_DIR/legacy-tpm.out" \
 # host mdev and the vfio device must not receive the consumer-card PCI IDs.
 gpu_id=${PLATFORM_IDS[i3-8100]}
 # shellcheck source=/dev/null
-source "$VM_ROOT/instances/vm${gpu_id}/vm.conf"
+source "$VM_ROOT/vm${gpu_id}/vm.conf"
 run_start "$gpu_id" "$TMP_DIR/gpu-b.out" "$TMP_DIR/gpu-b.err" --no-tpm
 require_text 'PCI identity remains host mdev' "$TMP_DIR/gpu-b.out" \
     "SPOOF_MODE=B identity explanation"
@@ -1102,10 +1113,10 @@ require_text 'strict-A startup is disabled' "$TMP_DIR/gpu-spoof-order-a.err" \
 extra_value_a_id=$next_id
 next_id=$((next_id + 1))
 rewrite_conf "$gpu_id" "$extra_value_a_id" 2.0
-chmod u+w "$VM_ROOT/instances/vm${extra_value_a_id}/vm.conf"
+chmod u+w "$VM_ROOT/vm${extra_value_a_id}/vm.conf"
 sed -i 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
-    "$VM_ROOT/instances/vm${extra_value_a_id}/vm.conf"
-chmod 444 "$VM_ROOT/instances/vm${extra_value_a_id}/vm.conf"
+    "$VM_ROOT/vm${extra_value_a_id}/vm.conf"
+chmod 444 "$VM_ROOT/vm${extra_value_a_id}/vm.conf"
 if run_start "$extra_value_a_id" "$TMP_DIR/gpu-extra-value.out" \
         "$TMP_DIR/gpu-extra-value.err" --no-tpm --extra --no-spoof; then
     fail '--extra value was mistaken for an off-mode recovery selector'
@@ -1158,9 +1169,9 @@ require_text 'VGPU_MDEV_FRL_ENABLED 必须是 0 或 1' \
 # per-instance runtime/storage paths.
 strict_guard_root="$TMP_DIR/strict-start-zero-write"
 strict_guard_id=456
-mkdir -p "$strict_guard_root/instances/vm${strict_guard_id}"
+mkdir -p "$strict_guard_root/vm${strict_guard_id}"
 printf 'SPOOF_MODE=A\n' \
-    >"$strict_guard_root/instances/vm${strict_guard_id}/vm.conf"
+    >"$strict_guard_root/vm${strict_guard_id}/vm.conf"
 if VM_ROOT="$strict_guard_root" \
         "$START_VM" "$strict_guard_id" \
         >"$TMP_DIR/strict-start-zero-write.out" \
@@ -1170,21 +1181,21 @@ fi
 require_text 'strict-A startup is disabled' \
     "$TMP_DIR/strict-start-zero-write.err" "pre-storage A-mode refusal"
 for forbidden in \
-        "$strict_guard_root/run" \
-        "$strict_guard_root/assets" \
-        "$strict_guard_root/bases" \
-        "$strict_guard_root/instances/vm${strict_guard_id}/run" \
-        "$strict_guard_root/instances/vm${strict_guard_id}/log" \
-        "$strict_guard_root/instances/vm${strict_guard_id}/backups"; do
+        "$strict_guard_root/control" \
+        "$strict_guard_root/shared/assets" \
+        "$strict_guard_root/shared/bases" \
+        "$strict_guard_root/vm${strict_guard_id}/run" \
+        "$strict_guard_root/vm${strict_guard_id}/log" \
+        "$strict_guard_root/vm${strict_guard_id}/backups"; do
     [[ ! -e "$forbidden" && ! -L "$forbidden" ]] ||
         fail "strict-A preflight created forbidden path: $forbidden"
 done
 
 legacy_spoof_root="$TMP_DIR/legacy-spoof-zero-write"
 legacy_spoof_id=458
-mkdir -p "$legacy_spoof_root/instances/vm${legacy_spoof_id}"
+mkdir -p "$legacy_spoof_root/vm${legacy_spoof_id}"
 printf '%s\n' 'SPOOF_MODE=B' 'SPOOF=1' \
-    >"$legacy_spoof_root/instances/vm${legacy_spoof_id}/vm.conf"
+    >"$legacy_spoof_root/vm${legacy_spoof_id}/vm.conf"
 if VM_ROOT="$legacy_spoof_root" \
         "$START_VM" "$legacy_spoof_id" \
         >"$TMP_DIR/legacy-spoof-zero-write.out" \
@@ -1193,14 +1204,14 @@ if VM_ROOT="$legacy_spoof_root" \
 fi
 require_text 'strict-A startup is disabled' \
     "$TMP_DIR/legacy-spoof-zero-write.err" "legacy SPOOF preflight refusal"
-[[ ! -e "$legacy_spoof_root/run" && ! -L "$legacy_spoof_root/run" ]] ||
+[[ ! -e "$legacy_spoof_root/control" && ! -L "$legacy_spoof_root/control" ]] ||
     fail 'legacy SPOOF preflight created a run directory'
 
 env_spoof_root="$TMP_DIR/env-spoof-zero-write"
 env_spoof_id=459
-mkdir -p "$env_spoof_root/instances/vm${env_spoof_id}"
+mkdir -p "$env_spoof_root/vm${env_spoof_id}"
 printf '%s\n' 'SPOOF_MODE=B' \
-    >"$env_spoof_root/instances/vm${env_spoof_id}/vm.conf"
+    >"$env_spoof_root/vm${env_spoof_id}/vm.conf"
 if env VM_ROOT="$env_spoof_root" SPOOF=1 \
         "$START_VM" "$env_spoof_id" \
         >"$TMP_DIR/env-spoof-zero-write.out" \
@@ -1209,14 +1220,14 @@ if env VM_ROOT="$env_spoof_root" SPOOF=1 \
 fi
 require_text 'strict-A startup is disabled' \
     "$TMP_DIR/env-spoof-zero-write.err" "environment SPOOF preflight refusal"
-[[ ! -e "$env_spoof_root/run" && ! -L "$env_spoof_root/run" ]] ||
+[[ ! -e "$env_spoof_root/control" && ! -L "$env_spoof_root/control" ]] ||
     fail 'environment SPOOF preflight created a run directory'
 
 spaced_a_root="$TMP_DIR/spaced-a-zero-write"
 spaced_a_id=460
-mkdir -p "$spaced_a_root/instances/vm${spaced_a_id}"
+mkdir -p "$spaced_a_root/vm${spaced_a_id}"
 printf '  SPOOF_MODE=A\n' \
-    >"$spaced_a_root/instances/vm${spaced_a_id}/vm.conf"
+    >"$spaced_a_root/vm${spaced_a_id}/vm.conf"
 if VM_ROOT="$spaced_a_root" \
         "$START_VM" "$spaced_a_id" \
         >"$TMP_DIR/spaced-a-zero-write.out" \
@@ -1225,15 +1236,15 @@ if VM_ROOT="$spaced_a_root" \
 fi
 require_text 'strict-A startup is disabled' \
     "$TMP_DIR/spaced-a-zero-write.err" "spaced A preflight refusal"
-[[ ! -e "$spaced_a_root/run" && ! -L "$spaced_a_root/run" ]] ||
+[[ ! -e "$spaced_a_root/control" && ! -L "$spaced_a_root/control" ]] ||
     fail 'spaced A preflight created a run directory'
 
 symlink_conf_root="$TMP_DIR/symlink-conf-zero-write"
 symlink_conf_id=461
-mkdir -p "$symlink_conf_root/instances/vm${symlink_conf_id}"
+mkdir -p "$symlink_conf_root/vm${symlink_conf_id}"
 printf 'SPOOF_MODE=B\n' >"$symlink_conf_root/outside.conf"
 ln -s "$symlink_conf_root/outside.conf" \
-    "$symlink_conf_root/instances/vm${symlink_conf_id}/vm.conf"
+    "$symlink_conf_root/vm${symlink_conf_id}/vm.conf"
 if VM_ROOT="$symlink_conf_root" \
         "$START_VM" "$symlink_conf_id" --no-spoof \
         >"$TMP_DIR/symlink-conf-zero-write.out" \
@@ -1242,15 +1253,15 @@ if VM_ROOT="$symlink_conf_root" \
 fi
 require_text 'regular non-symlink file' \
     "$TMP_DIR/symlink-conf-zero-write.err" "symlink config refusal"
-[[ ! -e "$symlink_conf_root/run" && ! -L "$symlink_conf_root/run" ]] ||
+[[ ! -e "$symlink_conf_root/control" && ! -L "$symlink_conf_root/control" ]] ||
     fail 'symlink config preflight created a run directory'
 
 vm_id_mismatch_root="$TMP_DIR/vm-id-mismatch-zero-write"
 vm_id_mismatch_requested=462
 mkdir -p \
-    "$vm_id_mismatch_root/instances/vm${vm_id_mismatch_requested}"
+    "$vm_id_mismatch_root/vm${vm_id_mismatch_requested}"
 printf '%s\n' 'VM_ID=463' 'SPOOF_MODE=B' \
-    >"$vm_id_mismatch_root/instances/vm${vm_id_mismatch_requested}/vm.conf"
+    >"$vm_id_mismatch_root/vm${vm_id_mismatch_requested}/vm.conf"
 if VM_ROOT="$vm_id_mismatch_root" \
         "$START_VM" "$vm_id_mismatch_requested" \
         >"$TMP_DIR/vm-id-mismatch-zero-write.out" \
@@ -1259,15 +1270,15 @@ if VM_ROOT="$vm_id_mismatch_root" \
 fi
 require_text 'must exactly match requested vm462' \
     "$TMP_DIR/vm-id-mismatch-zero-write.err" "vm.conf ID mismatch refusal"
-[[ ! -e "$vm_id_mismatch_root/run" && ! -L "$vm_id_mismatch_root/run" ]] ||
+[[ ! -e "$vm_id_mismatch_root/control" && ! -L "$vm_id_mismatch_root/control" ]] ||
     fail 'vm.conf ID mismatch created a run directory'
 
 vm_id_oversized_root="$TMP_DIR/vm-id-oversized-zero-write"
 vm_id_oversized_requested=464
 mkdir -p \
-    "$vm_id_oversized_root/instances/vm${vm_id_oversized_requested}"
+    "$vm_id_oversized_root/vm${vm_id_oversized_requested}"
 printf '%s\n' 'VM_ID=2147483648' 'SPOOF_MODE=B' \
-    >"$vm_id_oversized_root/instances/vm${vm_id_oversized_requested}/vm.conf"
+    >"$vm_id_oversized_root/vm${vm_id_oversized_requested}/vm.conf"
 if VM_ROOT="$vm_id_oversized_root" \
         "$START_VM" "$vm_id_oversized_requested" \
         >"$TMP_DIR/vm-id-oversized-zero-write.out" \
@@ -1276,15 +1287,15 @@ if VM_ROOT="$vm_id_oversized_root" \
 fi
 require_text 'must exactly match requested vm464' \
     "$TMP_DIR/vm-id-oversized-zero-write.err" "vm.conf oversized ID refusal"
-[[ ! -e "$vm_id_oversized_root/run" && ! -L "$vm_id_oversized_root/run" ]] ||
+[[ ! -e "$vm_id_oversized_root/control" && ! -L "$vm_id_oversized_root/control" ]] ||
     fail 'vm.conf oversized ID created a run directory'
 
 host_spoof_root="$TMP_DIR/host-spoof-zero-write"
 host_spoof_id=465
 host_spoof_conf="$TMP_DIR/host-spoof.conf"
-mkdir -p "$host_spoof_root/instances/vm${host_spoof_id}"
+mkdir -p "$host_spoof_root/vm${host_spoof_id}"
 printf '%s\n' "VM_ID=$host_spoof_id" 'SPOOF_MODE=B' \
-    >"$host_spoof_root/instances/vm${host_spoof_id}/vm.conf"
+    >"$host_spoof_root/vm${host_spoof_id}/vm.conf"
 printf 'SPOOF=1\n' >"$host_spoof_conf"
 if VM_ROOT="$host_spoof_root" VGPU_HOST_CONFIG="$host_spoof_conf" \
         "$START_VM" "$host_spoof_id" \
@@ -1294,16 +1305,16 @@ if VM_ROOT="$host_spoof_root" VGPU_HOST_CONFIG="$host_spoof_conf" \
 fi
 require_text 'strict-A startup is disabled' \
     "$TMP_DIR/host-spoof-zero-write.err" "host config SPOOF refusal"
-[[ ! -e "$host_spoof_root/run" && ! -L "$host_spoof_root/run" ]] ||
+[[ ! -e "$host_spoof_root/control" && ! -L "$host_spoof_root/control" ]] ||
     fail 'host config SPOOF preflight created a run directory'
 
 legacy_marker_root="$TMP_DIR/legacy-marker-zero-write"
 legacy_marker_id=457
-mkdir -p "$legacy_marker_root/instances/vm${legacy_marker_id}"
+mkdir -p "$legacy_marker_root/vm${legacy_marker_id}"
 printf '%s\n' \
     'SPOOF_MODE=B' \
     'VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833' \
-    >"$legacy_marker_root/instances/vm${legacy_marker_id}/vm.conf"
+    >"$legacy_marker_root/vm${legacy_marker_id}/vm.conf"
 if VM_ROOT="$legacy_marker_root" \
         "$START_VM" "$legacy_marker_id" \
         >"$TMP_DIR/legacy-marker-zero-write.out" \
@@ -1313,12 +1324,12 @@ fi
 require_text 'strict-A startup is disabled' \
     "$TMP_DIR/legacy-marker-zero-write.err" "legacy marker preflight refusal"
 for forbidden in \
-        "$legacy_marker_root/run" \
-        "$legacy_marker_root/assets" \
-        "$legacy_marker_root/bases" \
-        "$legacy_marker_root/instances/vm${legacy_marker_id}/run" \
-        "$legacy_marker_root/instances/vm${legacy_marker_id}/log" \
-        "$legacy_marker_root/instances/vm${legacy_marker_id}/backups"; do
+        "$legacy_marker_root/control" \
+        "$legacy_marker_root/shared/assets" \
+        "$legacy_marker_root/shared/bases" \
+        "$legacy_marker_root/vm${legacy_marker_id}/run" \
+        "$legacy_marker_root/vm${legacy_marker_id}/log" \
+        "$legacy_marker_root/vm${legacy_marker_id}/backups"; do
     [[ ! -e "$forbidden" && ! -L "$forbidden" ]] ||
         fail "legacy-marker preflight created forbidden path: $forbidden"
 done

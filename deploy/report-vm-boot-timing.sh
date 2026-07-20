@@ -13,7 +13,6 @@ fi
 
 # shellcheck source=lib/vm-storage.sh
 source "$here/lib/vm-storage.sh"
-VM_ROOT=${VM_ROOT:-${IMAGE_ROOT:-/home/ubuntu/images}/vms}
 vm_storage_init
 CONF=$(vm_storage_config_path "$VM_ID")
 [[ -r "$CONF" ]] || {

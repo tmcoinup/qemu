@@ -262,10 +262,16 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         sdl2_poll_events(scon);
         return;
     }
+    scon->presented_since_refresh = false;
     graphic_hw_update(dcl->con);
     if (scon->updates && scon->real_window) {
         scon->updates = 0;
         sdl2_gl_render_surface(scon);
+    }
+    if (scon->fixed_present && !scon->presented_since_refresh &&
+        !scon->hidden && scon->real_window &&
+        !(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
+        sdl2_gl_redraw(scon);
     }
     sdl2_poll_events(scon);
 }

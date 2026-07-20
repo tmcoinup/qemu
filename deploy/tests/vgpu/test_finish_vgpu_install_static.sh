@@ -176,17 +176,17 @@ require_text 'Subsystem' "$TMP_DIR/pe.txt"
 # user supplies only a VM id.
 TEST_VM_ROOT="$TMP_DIR/vms"
 TEST_STAGE="$TMP_DIR/staging"
-mkdir -p "$TEST_VM_ROOT/instances/vm1" "$TEST_VM_ROOT/instances/vm3" \
-    "$TEST_VM_ROOT/instances/vm5" "$TEST_STAGE"
+mkdir -p "$TEST_VM_ROOT/vm1" "$TEST_VM_ROOT/vm3" \
+    "$TEST_VM_ROOT/vm5" "$TEST_STAGE"
 cp -- "$TOKEN" "$TEST_STAGE/client_configuration_token.tok"
 chmod 0644 "$TEST_STAGE/client_configuration_token.tok"
-cat >"$TEST_VM_ROOT/instances/vm3/vm.conf" <<'EOF'
+cat >"$TEST_VM_ROOT/vm3/vm.conf" <<'EOF'
 VM_ID=3
 VM_UUID=b088ce0e-ea16-40df-b349-cb775b3f345e
 GPU_NAME="NVIDIA GeForce GT 1030"
 RTC_CONTRACT=localtime
 EOF
-touch "$TEST_VM_ROOT/instances/vm3/disk.qcow2"
+touch "$TEST_VM_ROOT/vm3/disk.qcow2"
 VM_ROOT="$TEST_VM_ROOT" STAGE_DIR="$TEST_STAGE" \
     "$HOST" 3 --build-only >"$TMP_DIR/host-build.out"
 require_text "auto-selected local token: $TEST_STAGE/client_configuration_token.tok" \
@@ -206,37 +206,37 @@ require_text 'BUILD_INPUT_SHA256=' "$SHARED_META"
 first_shared_sha=$(sha256sum "$SHARED_PACKAGE" | awk '{print $1}')
 
 # A different VM using the same token must reuse the exact same public file.
-cat >"$TEST_VM_ROOT/instances/vm5/vm.conf" <<'EOF'
+cat >"$TEST_VM_ROOT/vm5/vm.conf" <<'EOF'
 VM_ID=5
 VM_UUID=55555555-bbbb-cccc-dddd-eeeeeeeeeeee
 GPU_NAME="NVIDIA GeForce GT 1030"
 RTC_CONTRACT=localtime
 EOF
-touch "$TEST_VM_ROOT/instances/vm5/disk.qcow2"
+touch "$TEST_VM_ROOT/vm5/disk.qcow2"
 VM_ROOT="$TEST_VM_ROOT" STAGE_DIR="$TEST_STAGE" \
     "$HOST" 5 --build-only >"$TMP_DIR/host-reuse.out"
 require_text 'reusing shared guest EXE for this token' "$TMP_DIR/host-reuse.out"
 [[ "$(sha256sum "$SHARED_PACKAGE" | awk '{print $1}')" == "$first_shared_sha" ]] \
     || fail "same-token VM changed the shared EXE"
-[[ ! -e "$TEST_VM_ROOT/instances/vm3/transfer/VgpuGuestFinish-vm3.exe" &&
-   ! -e "$TEST_VM_ROOT/instances/vm5/transfer/VgpuGuestFinish-vm5.exe" ]] \
+[[ ! -e "$TEST_VM_ROOT/vm3/transfer/VgpuGuestFinish-vm3.exe" &&
+   ! -e "$TEST_VM_ROOT/vm5/transfer/VgpuGuestFinish-vm5.exe" ]] \
     || fail "host still published a per-VM EXE"
 
 # Legacy VM configs that only persist GPU_PROFILE must derive the same safe
 # target from the audited catalog without rewriting vm.conf.
-cat >"$TEST_VM_ROOT/instances/vm1/vm.conf" <<'EOF'
+cat >"$TEST_VM_ROOT/vm1/vm.conf" <<'EOF'
 VM_ID=1
 VM_UUID=11111111-bbbb-cccc-dddd-eeeeeeeeeeee
 GPU_PROFILE=gt1030_2gb
 RTC_CONTRACT=localtime
 EOF
-touch "$TEST_VM_ROOT/instances/vm1/disk.qcow2"
+touch "$TEST_VM_ROOT/vm1/disk.qcow2"
 VM_ID=999 GPU_NAME='NVIDIA GeForce GTX 750 Ti' GPU_PROFILE=gt1030_2gb \
     RTC_CONTRACT=utc VM_ROOT="$TEST_VM_ROOT" STAGE_DIR="$TEST_STAGE" \
     "$HOST" 1 --build-only >"$TMP_DIR/host-legacy.out"
 require_text 'derived GPU target from GPU_PROFILE=gt1030_2gb' \
     "$TMP_DIR/host-legacy.out"
-! grep -q '^GPU_NAME=' "$TEST_VM_ROOT/instances/vm1/vm.conf" \
+! grep -q '^GPU_NAME=' "$TEST_VM_ROOT/vm1/vm.conf" \
     || fail "legacy fallback unexpectedly rewrote vm.conf"
 
 # Changing token bytes must atomically replace the shared package and cache.
@@ -253,11 +253,11 @@ require_text 'building shared guest EXE for the selected token' \
 
 # Reject unsafe/non-consumer target hints on the host, before opening a VM.
 INVALID_ROOT="$TMP_DIR/vms-invalid"
-mkdir -p "$INVALID_ROOT/instances/vm6"
-touch "$INVALID_ROOT/instances/vm6/disk.qcow2"
+mkdir -p "$INVALID_ROOT/vm6"
+touch "$INVALID_ROOT/vm6/disk.qcow2"
 for bad_name in 'NVIDIA GRID RTX6000-2Q' 'NVIDIA RTX6000' \
         'NVIDIA GeForce GTX 1050 ' 'AMD Radeon'; do
-    cat >"$INVALID_ROOT/instances/vm6/vm.conf" <<EOF
+    cat >"$INVALID_ROOT/vm6/vm.conf" <<EOF
 VM_ID=6
 VM_UUID=66666666-bbbb-cccc-dddd-eeeeeeeeeeee
 GPU_NAME="$bad_name"
@@ -274,7 +274,7 @@ done
 # The EXE keys GTX 1050 driver staging from the authenticated target name.  A
 # host config that requests that name without the matching profile must fail
 # before it can hand the user a small EXE that will inevitably reject itself.
-cat >"$INVALID_ROOT/instances/vm6/vm.conf" <<'EOF'
+cat >"$INVALID_ROOT/vm6/vm.conf" <<'EOF'
 VM_ID=6
 VM_UUID=66666666-bbbb-cccc-dddd-eeeeeeeeeeee
 GPU_NAME="NVIDIA GeForce GTX 1050"
@@ -294,14 +294,14 @@ require_text 'GPU_NAME requests strict GTX 1050 but GPU_PROFILE is missing' \
 TEST_VM_ROOT2="$TMP_DIR/vms-export"
 TEST_STAGE2="$TMP_DIR/staging-export"
 FAKE_BIN="$TMP_DIR/fake-bin"
-mkdir -p "$TEST_VM_ROOT2/instances/vm4" "$TEST_STAGE2" "$FAKE_BIN"
-cat >"$TEST_VM_ROOT2/instances/vm4/vm.conf" <<'EOF'
+mkdir -p "$TEST_VM_ROOT2/vm4" "$TEST_STAGE2" "$FAKE_BIN"
+cat >"$TEST_VM_ROOT2/vm4/vm.conf" <<'EOF'
 VM_ID=4
 VM_UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 GPU_NAME="NVIDIA GeForce GT 1030"
 RTC_CONTRACT=localtime
 EOF
-touch "$TEST_VM_ROOT2/instances/vm4/disk.qcow2"
+touch "$TEST_VM_ROOT2/vm4/disk.qcow2"
 cat >"$FAKE_BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -439,7 +439,7 @@ run_finish_rtc_case() {
     local name=$1 vm_id=$2 contract=${3:-} expect_compat=$4
     local root="$TMP_DIR/rtc-$name" conf start_trace migrate_trace
     local -a polluted_environment=()
-    conf="$root/instances/vm${vm_id}/vm.conf"
+    conf="$root/vm${vm_id}/vm.conf"
     start_trace="$root/start.trace"
     migrate_trace="$root/migrate.trace"
     mkdir -p "$(dirname "$conf")" "$root/staging"
@@ -449,7 +449,7 @@ VM_UUID=aaaaaaaa-bbbb-cccc-dddd-$(printf '%012d' "$vm_id")
 GPU_NAME="NVIDIA GeForce GT 1030"
 EOF
     [[ -z "$contract" ]] || printf 'RTC_CONTRACT=%s\n' "$contract" >>"$conf"
-    touch "$root/instances/vm${vm_id}/disk.qcow2" "$start_trace" "$migrate_trace"
+    touch "$root/vm${vm_id}/disk.qcow2" "$start_trace" "$migrate_trace"
 
     if [[ "$name" == missing ]]; then
         # Missing RTC_CONTRACT is historical localtime. An exported value must
@@ -491,7 +491,7 @@ run_finish_rtc_case explicit-utc 33 utc yes
 # launching anything.  The legacy self-signed driver flow may not create a ZIP
 # or persist A/internal/FRL completion markers.
 STRICT_ROOT="$TMP_DIR/strict-gtx1050"
-STRICT_CONF="$STRICT_ROOT/instances/vm35/vm.conf"
+STRICT_CONF="$STRICT_ROOT/vm35/vm.conf"
 STRICT_START="$STRICT_ROOT/start.trace"
 STRICT_MIGRATE="$STRICT_ROOT/migrate.trace"
 mkdir -p "$(dirname "$STRICT_CONF")" "$STRICT_ROOT/staging"
@@ -508,7 +508,7 @@ VGPU_IDENTITY_TARGET=full-consumer
 SPOOF_MODE=B
 RTC_CONTRACT=localtime
 EOF
-touch "$STRICT_ROOT/instances/vm35/disk.qcow2" \
+touch "$STRICT_ROOT/vm35/disk.qcow2" \
     "$STRICT_START" "$STRICT_MIGRATE"
 strict_before=$(sha256sum "$STRICT_CONF")
 if env -i \
@@ -528,18 +528,18 @@ require_text 'GTX 1050 strict-A finish is disabled' "$STRICT_ROOT/finish.err"
    ! -s "$STRICT_START" && ! -s "$STRICT_MIGRATE" &&
    ! -e "$STRICT_ROOT/staging/VgpuGuestFinish.exe" &&
    ! -e "$STRICT_ROOT/staging/VgpuGuestFinish-GTX1050.zip" &&
-   ! -e "$STRICT_ROOT/instances/vm35/log" &&
-   ! -e "$STRICT_ROOT/instances/vm35/run" &&
-   ! -e "$STRICT_ROOT/instances/vm35/backups" &&
-   ! -e "$STRICT_ROOT/bases" &&
-   ! -e "$STRICT_ROOT/run" &&
-   ! -e "$STRICT_ROOT/assets" ]] \
+   ! -e "$STRICT_ROOT/vm35/log" &&
+   ! -e "$STRICT_ROOT/vm35/run" &&
+   ! -e "$STRICT_ROOT/vm35/backups" &&
+   ! -e "$STRICT_ROOT/shared/bases" &&
+   ! -e "$STRICT_ROOT/control" &&
+   ! -e "$STRICT_ROOT/shared/assets" ]] \
     || fail 'strict GTX 1050 rejection changed config or published/launched an artifact'
 
 # A pre-policy legacy GTX 1050 config must hit the same fail-closed guard after
 # catalog derivation, without being rewritten or receiving a strict ZIP.
 LEGACY_STRICT_ROOT="$TMP_DIR/legacy-strict-gtx1050"
-LEGACY_STRICT_CONF="$LEGACY_STRICT_ROOT/instances/vm36/vm.conf"
+LEGACY_STRICT_CONF="$LEGACY_STRICT_ROOT/vm36/vm.conf"
 LEGACY_STRICT_START="$LEGACY_STRICT_ROOT/start.trace"
 LEGACY_STRICT_MIGRATE="$LEGACY_STRICT_ROOT/migrate.trace"
 mkdir -p "$(dirname "$LEGACY_STRICT_CONF")" "$LEGACY_STRICT_ROOT/staging"
@@ -549,7 +549,7 @@ VM_UUID=36363636-bbbb-cccc-dddd-eeeeeeeeeeee
 GPU_PROFILE=gtx1050_2gb
 RTC_CONTRACT=localtime
 EOF
-touch "$LEGACY_STRICT_ROOT/instances/vm36/disk.qcow2" \
+touch "$LEGACY_STRICT_ROOT/vm36/disk.qcow2" \
     "$LEGACY_STRICT_START" "$LEGACY_STRICT_MIGRATE"
 legacy_strict_before=$(sha256sum "$LEGACY_STRICT_CONF")
 if env -i \
@@ -572,18 +572,18 @@ require_text 'GTX 1050 strict-A finish is disabled' \
    ! -s "$LEGACY_STRICT_START" && ! -s "$LEGACY_STRICT_MIGRATE" &&
    ! -e "$LEGACY_STRICT_ROOT/staging/VgpuGuestFinish.exe" &&
    ! -e "$LEGACY_STRICT_ROOT/staging/VgpuGuestFinish-GTX1050.zip" &&
-   ! -e "$LEGACY_STRICT_ROOT/instances/vm36/log" &&
-   ! -e "$LEGACY_STRICT_ROOT/instances/vm36/run" &&
-   ! -e "$LEGACY_STRICT_ROOT/instances/vm36/backups" &&
-   ! -e "$LEGACY_STRICT_ROOT/bases" &&
-   ! -e "$LEGACY_STRICT_ROOT/run" &&
-   ! -e "$LEGACY_STRICT_ROOT/assets" ]] \
+   ! -e "$LEGACY_STRICT_ROOT/vm36/log" &&
+   ! -e "$LEGACY_STRICT_ROOT/vm36/run" &&
+   ! -e "$LEGACY_STRICT_ROOT/vm36/backups" &&
+   ! -e "$LEGACY_STRICT_ROOT/shared/bases" &&
+   ! -e "$LEGACY_STRICT_ROOT/control" &&
+   ! -e "$LEGACY_STRICT_ROOT/shared/assets" ]] \
     || fail 'legacy strict rejection changed config or published/launched an artifact'
 
 # A manual rescue may remain open for minutes.  If vm.conf changes during that
 # time, the old marker intent must not be accepted and the migrator must not run.
 CHANGED_ROOT="$TMP_DIR/config-changed"
-CHANGED_CONF="$CHANGED_ROOT/instances/vm34/vm.conf"
+CHANGED_CONF="$CHANGED_ROOT/vm34/vm.conf"
 CHANGED_START="$CHANGED_ROOT/start.trace"
 CHANGED_MIGRATE="$CHANGED_ROOT/migrate.trace"
 mkdir -p "$(dirname "$CHANGED_CONF")" "$CHANGED_ROOT/staging"
@@ -593,7 +593,7 @@ VM_UUID=34343434-bbbb-cccc-dddd-eeeeeeeeeeee
 GPU_NAME="NVIDIA GeForce GT 1030"
 RTC_CONTRACT=localtime
 EOF
-touch "$CHANGED_ROOT/instances/vm34/disk.qcow2" \
+touch "$CHANGED_ROOT/vm34/disk.qcow2" \
     "$CHANGED_START" "$CHANGED_MIGRATE"
 if env -i \
         HOME="${HOME:-/tmp}" \
@@ -618,14 +618,14 @@ require_text 'VM config changed while the rescue guest was running' \
 CACHE_ROOT="$TMP_DIR/cache-input-root"
 CACHE_STAGE="$TMP_DIR/cache-input-stage"
 CACHE_TRACE="$TMP_DIR/cache-input-build.trace"
-mkdir -p "$CACHE_ROOT/instances/vm41" "$CACHE_STAGE"
-cat >"$CACHE_ROOT/instances/vm41/vm.conf" <<'EOF'
+mkdir -p "$CACHE_ROOT/vm41" "$CACHE_STAGE"
+cat >"$CACHE_ROOT/vm41/vm.conf" <<'EOF'
 VM_ID=41
 VM_UUID=41414141-bbbb-cccc-dddd-eeeeeeeeeeee
 GPU_NAME="NVIDIA GeForce GT 1030"
 RTC_CONTRACT=localtime
 EOF
-touch "$CACHE_ROOT/instances/vm41/disk.qcow2" "$CACHE_TRACE"
+touch "$CACHE_ROOT/vm41/disk.qcow2" "$CACHE_TRACE"
 for run in first cached; do
     VM_ROOT="$CACHE_ROOT" STAGE_DIR="$CACHE_STAGE" \
         FAKE_BUILD_TRACE="$CACHE_TRACE" \

@@ -122,8 +122,9 @@ grep -q '^SKIP_MONITOR=1$' "$REPO_ROOT/deploy/setup-guest.sh" || \
 [[ $(grep -c 'SKIP_MONITOR=0' "$REPO_ROOT/deploy/setup-guest.sh") == 1 ]] || \
     fail "only --online-monitor-rescue may enable guest monitor repair"
 CREATE_VM="$REPO_ROOT/deploy/create-vm.sh"
+IMAGE_ROOT="$tmp"
 VM_ROOT="$tmp/create-vms"
-export VM_ROOT
+export IMAGE_ROOT VM_ROOT
 "$CREATE_VM" --list-monitor-profiles >"$tmp/create-list.out" || \
     fail "create-vm could not list the creation pool"
 grep -Fq 'redmi-rmmnt238nf' "$tmp/create-list.out" || \
@@ -134,7 +135,7 @@ fi
 env -u MONITOR_PROFILE "$CREATE_VM" 98101 \
     >"$tmp/create-default.out" 2>"$tmp/create-default.err" || \
     fail "create-vm default monitor selection failed"
-conf="$VM_ROOT/instances/vm98101/vm.conf"
+conf="$VM_ROOT/vm98101/vm.conf"
 [[ -f $conf ]] || fail "create-vm did not persist vm.conf"
 [[ $(stat -c '%a' "$conf") == 444 ]] || fail "created vm.conf is not read-only"
 (
@@ -161,7 +162,7 @@ if env -u MONITOR_PROFILE "$CREATE_VM" 98102 --monitor-profile hkc-24e4 \
         >"$tmp/create-rejected.out" 2>"$tmp/create-rejected.err"; then
     fail "create-vm accepted a monitor outside the mainland-China FHD pool"
 fi
-[[ ! -e $VM_ROOT/instances/vm98102/vm.conf ]] || \
+[[ ! -e $VM_ROOT/vm98102/vm.conf ]] || \
     fail "rejected monitor profile still created vm.conf"
 grep -Fq '不在中国大陆常见 FHD/1K 新建池中' "$tmp/create-rejected.err" || \
     fail "creation-pool rejection was not clear"
@@ -171,7 +172,7 @@ MONITOR_PROFILE=hkc-24e4 "$CREATE_VM" 98103 --monitor-profile redmi-rmmnt238nf \
     fail "allowed explicit monitor profile failed"
 (
     # shellcheck disable=SC1090
-    source "$VM_ROOT/instances/vm98103/vm.conf"
+    source "$VM_ROOT/vm98103/vm.conf"
     assert_eq redmi-rmmnt238nf "$MONITOR_PROFILE" "CLI monitor override"
     assert_eq Redmi "$MONITOR_BRAND_NAME" "explicit monitor brand"
     assert_eq RMMNT238NF "$MONITOR_MODEL_NAME" "explicit monitor model"

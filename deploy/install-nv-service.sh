@@ -43,7 +43,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Discover guest IP via the VM's instances/vmN/vm.conf.
+# Discover guest IP via the VM's selected vmN/vm.conf.
 if [[ -z "$IP_OVERRIDE" ]]; then
     conf=$(vm_storage_config_path "$VM_ID")
     [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }

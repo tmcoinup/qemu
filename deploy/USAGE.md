@@ -26,6 +26,18 @@ stream/relay 和 `--rdp` 只是同一 vGPU VM 的显示模式。
 ./deploy/start-vm.sh <vm_id> --rdp            # --legacy-shmem 的兼容别名
 ./deploy/start-vm.sh <vm_id> --proxy          # host QMP 多客户端（不是网络代理）
 ./deploy/start-vm.sh <vm_id> --no-tpm         # 仅诊断：关闭主板 profile 对应的 TPM
+./deploy/start-vm.sh <vm_id> --print-paths    # 只读显示默认 G-11 bundle
+./deploy/start-vm.sh <vm_id> --vm-dir /abs/path/vmN --print-paths
+                                                # 精确选择单 VM bundle
+./deploy/start-vm.sh <vm_id> --instances-dir /abs/pool --print-paths
+                                                # 选择父目录，自动追加 vmN
+./deploy/stop-vm.sh <vm_id> --vm-dir /abs/path/vmN
+./deploy/stop-vm.sh <vm_id> --instances-dir /abs/pool
+                                                # 停机必须重复启动时的路径选择器
+./deploy/vmctl.sh {path|start|stop|status} <vm_id> [...]
+                                                # 不保存凭据的日常封装
+./deploy/vmctl.sh migrate --check              # 旧 G-11 布局只读检查
+./deploy/vmctl.sh migrate --apply              # 全部 G-11 VM 停机后显式迁移
 ./deploy/package-vgpu-one-click.sh             # 推荐：生成无 VM 绑定、无 HTTP 的 VgpuPortable.exe
 sudo ./deploy/install-vgpu-portable-to-base.sh # 一次性安全注入 Windows base
 ./deploy/clone-vgpu-base.sh <vm_id> --gpu-profile PROFILE [--start] # 从 portable base 克隆
@@ -92,7 +104,7 @@ HWiNFO64 会交叉读取 x64 NVAPI 和底层 vGPU/PCI 数据，当前仍可能�
 
 它启用本分支 QEMU 的原生 `multi=on`，不启动 Python 中转进程，也不改变
 HTTP/SOCKS、VM 网卡或 guest 流量。客户端可连接主路径
-`/home/ubuntu/images/vms/instances/vm1/run/qmp.sock`；同时会创建
+`/home/ubuntu/images/vms/G-11/vm1/run/qmp.sock`；同时会创建
 `qmp.sock.proxy` 软链接兼容旧工具配置。默认不开启，环境变量 `PROXY=1` 等价；
 命令行 `--no-proxy` 可显式覆盖环境或 VM 配置。`--dry-run --proxy` 只显示最终
 QEMU 参数，不创建或删除任何 socket/软链接。
@@ -106,8 +118,8 @@ service CPU。普通启动会给 QEMU 加 `-S`，隔离完成后才放行 guest�
 
 首次普通启动若发现 root helper、sudoers 或
 `python3`/`taskset`/`flock`/`cmp` 缺失，会自动调用安装器；`sudo` 本身必须
-预先可用。启动器通过 sudo stdin 使用 `SUDO_PASSWORD`（当前宿主默认
-`123456`），密码不会进入 argv 或日志。也可提前手工安装：
+预先可用。优先提前运行 `sudo -v`；无人值守场景需要凭据时只通过批准的安全渠道
+或运行时环境变量提供，仓库没有默认密码。也可提前手工安装：
 
 ```bash
 sudo ./deploy/host/install-cpu-isolation.sh
@@ -174,24 +186,27 @@ R535 vGPU 生产端只有 system-memory VFIO display REGION，没有 DMA-BUF。
 ├── iso/                 # Windows ISO
 ├── staging/             # 驱动和 guest 安装脚本
 └── vms/
-    ├── bases/           # win10-base.qcow2 + archive/
-    ├── assets/          # host UI 共享资源
-    ├── run/             # 全局 storage/start/disk 锁和迁移清单
-    └── instances/vmN/
-        ├── vm.conf
-        ├── disk.qcow2
-        ├── nvram.fd
-        ├── tpm/state/   # 持久 TPM 1.2/2.0 NVRAM/EK 状态
-        ├── log/{qemu,swtpm}.log
-        ├── run/         # pid/qmp/monitor/mdev + swtpm socket/pid + 安装应答 ISO
-        └── backups/{disks,nvram}/
+    ├── N/               # V-11 数字实例；G-11 不读写
+    └── G-11/
+        ├── shared/
+        │   ├── bases/   # win10-base.qcow2 + archive/
+        │   └── assets/  # host UI 共享资源
+        ├── control/     # 全局 storage/start/disk/tpm 协调锁
+        └── vmN/
+            ├── vm.conf
+            ├── disk.qcow2
+            ├── nvram.fd
+            ├── tpm/state/   # 持久 TPM 1.2/2.0 NVRAM/EK 状态
+            ├── log/{qemu,swtpm}.log
+            ├── run/         # pid/qmp/monitor/mdev + swtpm socket/pid + 安装应答 ISO
+            └── backups/{disks,nvram}/
 ```
 
-旧平铺和上一版分类文件仍可读取，但新文件写入实例目录。全部 VM 停机后执行：
+旧 G-11 bundle 不会在正常启动时静默回退读取。全部 G-11 VM 停机后执行：
 
 ```bash
-./deploy/migrate-vm-storage.sh --check
-./deploy/migrate-vm-storage.sh --apply
+./deploy/migrate-g11-layout.sh --check
+./deploy/migrate-g11-layout.sh --apply
 ```
 
 迁移只接受可验证的 standalone qcow2；若任一待移动镜像带 backing、被其它
@@ -199,7 +214,7 @@ overlay 依赖或 metadata 无法解析，`--check` 会 fail-closed，必须先�
 依赖扫描也覆盖显式放在 `IMAGE_ROOT` 外的托管 disk/base 目录；`delete-vm.sh` 与
 `promote-base.sh` 采用相同的 fail-closed 规则。
 
-详细的停机保护、备份范围及历史平铺布局迁移规则见
+详细的停机保护、备份范围及旧 G-11 命名空间迁移规则见
 [`docs/STORAGE-LAYOUT.md`](docs/STORAGE-LAYOUT.md)。
 
 `start-vm.sh 1` 干的事（默认 native/SDL 模式）：
@@ -312,7 +327,7 @@ Redmi）。默认先等概率抽品牌，再在该品牌内抽具体型号，避
 GTX 750 参考版标准显存是 1GB，因此严格 2GB 池使用 GTX 750 Ti。AMD 不能加入
 这条池，因为底层是 NVIDIA GRID driver、NVIDIA mdev 和 NVAPI。
 
-`instances/vmN/vm.conf` 中的 `GPU_*` 是每 VM 的客户机身份，`VGPU_MDEV_PROFILE`
+`vms/G-11/vmN/vm.conf` 中的 `GPU_*` 是每 VM 的客户机身份，`VGPU_MDEV_PROFILE`
 是 RTX 宿主的 `nvidia-257` fallback。实际资源可由宿主配置的
 `VGPU_RESOURCE_PROFILE` 覆盖（例如 V100-2Q），但必须与当前 guest 身份同为
 2048MB。
@@ -409,7 +424,7 @@ vendor/product ID、EDID 名称、物理尺寸、生产周/年、video-input、�
 
 `create-vm.sh` 把 `MONITOR_BRAND_NAME`、`MONITOR_MODEL_NAME`、
 `MONITOR_DISPLAY_NAME`、PNP、尺寸、扫描范围、生产日期和序列号整组写入
-`instances/vmN/vm.conf`，同一 VM 重启不会重新随机。
+`vms/G-11/vmN/vm.conf`，同一 VM 重启不会重新随机。
 
 NVIDIA R535 mdev 没有 `VFIO_GFX_EDID_REGION`，`start-vm.sh` 会在 QEMU
 启动前按需离线刷新 Windows
@@ -539,7 +554,7 @@ host:                                     │ (KVM 直接 page mapping，纯 RAM
 | `./deploy/install-vgpu-driver.sh 1` | 单独重装 vGPU 驱动 |
 | `./deploy/install-ivshmem-driver.sh 1` | 旧 relay 路径：单独装 ivshmem driver |
 | `./deploy/install-nv-service.sh 1` | 旧 relay 路径：单独刷 service binary |
-| `./deploy/create-vm.sh <vm_id>` | 生成 `$VM_ROOT/instances/vmN/vm.conf`（一次性） |
+| `./deploy/create-vm.sh <vm_id>` | 生成 `$VM_ROOT/vmN/vm.conf`（一次性） |
 | `./deploy/create-disk.sh <vm_id> --from-base` | 严格克隆公共 base；不存在则失败，不退回空盘 |
 | `./deploy/finish-vgpu-install.sh <vm_id>` | legacy B 模式 token/RTC 本地救援；GTX1050 strict-A 自签收尾会在生成包前拒绝 |
 | `./deploy/sync-monitor-profile.sh 1` | 关机状态从 host 离线同步显示器 EDID；guest 无常驻组件 |
@@ -554,6 +569,6 @@ host:                                     │ (KVM 直接 page mapping，纯 RAM
   `finish-vgpu-install.sh` 由宿主离线迁移 RTC；不要写
   `RealTimeIsUniversal` 或运行旧 RTC guest 脚本。详见
   [`docs/VGPU-LICENSING.md`](docs/VGPU-LICENSING.md)。
-- **vGPU mdev 分配失败** (`mdev_allocate failed`)：多半 sudo 没暖。`SUDO_PASSWORD=123456 ./deploy/start-vm.sh 1`。
-- **磁盘满** (`/dev/nvme0n1p3 100%`)：guest qcow2 写阻塞 → boot 卡。检查 `vms/instances/vmN/backups/` 和 `vms/bases/archive/`；前两代布局尚未迁移时再检查 `vms/disks/`、`vms/nvram/` 与 `vms/` 根目录。
+- **vGPU mdev 分配失败** (`mdev_allocate failed`)：先运行 `sudo -v`；无人值守时只通过批准的安全渠道提供 `SUDO_PASSWORD`，不要写入仓库或命令历史。
+- **磁盘满** (`/dev/nvme0n1p3 100%`)：guest qcow2 写阻塞 → boot 卡。检查 `vms/G-11/vmN/backups/` 和 `vms/G-11/shared/bases/archive/`；旧 G-11 尚未迁移时再只读检查 `vms/instances/`。
 - **ivshmem 已被占** (relay 反复 `REQUEST_MMAP failed: 548`)：旧 relay 孤儿没退。NvDisplayContainer 启动会自动 kill 同名孤儿；手动可 `./deploy/service.sh 1 restart`。

@@ -98,13 +98,13 @@ trap cleanup EXIT
 [[ ! -e "/sys/bus/mdev/devices/$DRY_MDEV_UUID" ]] \
     || fail "test VM id collides with an existing mdev"
 
-mkdir -p "$VM_ROOT/instances/vm${VM_ID}/log" \
-    "$VM_ROOT/instances/vm${VM_ID}/run" "$VM_ROOT/run"
-touch "$VM_ROOT/instances/vm${VM_ID}/disk.qcow2"
-touch "$VM_ROOT/instances/vm${VM_ID}/nvram.fd"
+mkdir -p "$VM_ROOT/vm${VM_ID}/log" \
+    "$VM_ROOT/vm${VM_ID}/run" "$VM_ROOT/control"
+touch "$VM_ROOT/vm${VM_ID}/disk.qcow2"
+touch "$VM_ROOT/vm${VM_ID}/nvram.fd"
 touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd"
 
-cat >"$VM_ROOT/instances/vm${VM_ID}/vm.conf" <<EOF
+cat >"$VM_ROOT/vm${VM_ID}/vm.conf" <<EOF
 VM_ID=$VM_ID
 VM_UUID=3b5a3617-dd9b-42a1-9010-487ffdc145bf
 RTC_CONTRACT=localtime
@@ -247,27 +247,27 @@ require_native_vfio "$GTK_OUT"
 require_vgpu_root_port "$GTK_OUT"
 require_tpm2 "$GTK_OUT"
 require_text 'gtk\,gl=on\,show-cursor=on\,grab-on-hover=on' "$GTK_OUT"
-require_text "unix:${VM_ROOT}/instances/vm${VM_ID}/run/qmp.sock\\,server\\,nowait\\,multi=on" \
+require_text "unix:${VM_ROOT}/vm${VM_ID}/run/qmp.sock\\,server\\,nowait\\,multi=on" \
     "$GTK_OUT"
-require_text "QMP multi: native multi-client on ${VM_ROOT}/instances/vm${VM_ID}/run/qmp.sock" \
+require_text "QMP multi: native multi-client on ${VM_ROOT}/vm${VM_ID}/run/qmp.sock" \
     "$GTK_OUT"
-require_text "QMP alias: ${VM_ROOT}/instances/vm${VM_ID}/run/qmp.sock.proxy" \
+require_text "QMP alias: ${VM_ROOT}/vm${VM_ID}/run/qmp.sock.proxy" \
     "$GTK_OUT"
-[[ ! -e "$VM_ROOT/instances/vm${VM_ID}/run/qmp.sock.proxy" &&
-   ! -L "$VM_ROOT/instances/vm${VM_ID}/run/qmp.sock.proxy" ]] \
+[[ ! -e "$VM_ROOT/vm${VM_ID}/run/qmp.sock.proxy" &&
+   ! -L "$VM_ROOT/vm${VM_ID}/run/qmp.sock.proxy" ]] \
     || fail "--proxy dry-run created a QMP compatibility alias"
 require_no_legacy_transport "$GTK_OUT"
 
 # GT 1030 is a PCIe 3.0 x4 card even though the physical desktop slot is x16.
 # Exercise the profile-specific root-port width without allocating an mdev.
-cp -- "$VM_ROOT/instances/vm${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.gtx1050"
+cp -- "$VM_ROOT/vm${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.gtx1050"
 sed -i 's/^GPU_PROFILE=.*/GPU_PROFILE=gt1030_2gb/' \
-    "$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+    "$VM_ROOT/vm${VM_ID}/vm.conf"
 run_start_vm "$GT1030_OUT"
 require_native_vfio "$GT1030_OUT"
 require_vgpu_root_port "$GT1030_OUT" 4
 reject_text 'x-width=16' "$GT1030_OUT"
-mv -- "$TMP_DIR/vm.conf.gtx1050" "$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+mv -- "$TMP_DIR/vm.conf.gtx1050" "$VM_ROOT/vm${VM_ID}/vm.conf"
 
 run_start_vm "$STREAM_OUT" \
     --stream 'rtmp://ingest.example/live/supersecret' \
@@ -317,13 +317,13 @@ reject_text 'media=cdrom' "$RESCUE_OUT"
 # Configs created before RTC_CONTRACT was persisted must retain the production
 # local-RTC behavior.  In particular, absence of the field is not evidence that
 # the guest opted into the short-lived UTC compatibility contract.
-cp -- "$VM_ROOT/instances/vm${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.with-rtc"
-sed -i '/^RTC_CONTRACT=/d' "$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+cp -- "$VM_ROOT/vm${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.with-rtc"
+sed -i '/^RTC_CONTRACT=/d' "$VM_ROOT/vm${VM_ID}/vm.conf"
 run_start_vm "$MISSING_RTC_OUT" --rescue-sdl
 require_text 'base=localtime\,clock=host\,driftfix=slew' "$MISSING_RTC_OUT"
 require_text 'kvm-pit.lost_tick_policy=delay' "$MISSING_RTC_OUT"
 reject_text 'base=utc\,clock=host' "$MISSING_RTC_OUT"
-mv -- "$TMP_DIR/vm.conf.with-rtc" "$VM_ROOT/instances/vm${VM_ID}/vm.conf"
+mv -- "$TMP_DIR/vm.conf.with-rtc" "$VM_ROOT/vm${VM_ID}/vm.conf"
 
 run_start_vm "$RDP_OUT" --rdp
 require_text "模式=rdp" "$RDP_OUT"
@@ -382,11 +382,11 @@ unset TEST_VGPU_HOST_CONFIG
 [[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 18 ]] \
     || fail "fake QEMU saw an unexpected invocation"
 
-[[ -z "$(find "$VM_ROOT/run" -mindepth 1 -print -quit)" ]] \
+[[ -z "$(find "$VM_ROOT/control" -mindepth 1 -print -quit)" ]] \
     || fail "dry-run created runtime state"
-[[ -z "$(find "$VM_ROOT/instances/vm${VM_ID}/run" -mindepth 1 -print -quit)" ]] \
+[[ -z "$(find "$VM_ROOT/vm${VM_ID}/run" -mindepth 1 -print -quit)" ]] \
     || fail "dry-run created per-instance TPM/runtime state"
-[[ ! -e "$VM_ROOT/instances/vm${VM_ID}/tpm" ]] \
+[[ ! -e "$VM_ROOT/vm${VM_ID}/tpm" ]] \
     || fail "dry-run created persistent TPM state"
 [[ ! -e "$SHMEM_PATH" ]] || fail "dry-run created legacy shared memory"
 [[ ! -e "/sys/bus/mdev/devices/$DRY_MDEV_UUID" ]] || fail "dry-run created an mdev"

@@ -19,25 +19,26 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 IMAGE_ROOT="$TMP_DIR/images"
 VM_ROOT="$IMAGE_ROOT/vms"
 export IMAGE_ROOT VM_ROOT
-mkdir -p "$VM_ROOT/configs" "$VM_ROOT/disks" "$VM_ROOT/nvram" \
-    "$VM_ROOT/log" "$VM_ROOT/run" "$VM_ROOT/1" "$VM_ROOT/_base"
+mkdir -p "$VM_ROOT/legacy/configs" "$VM_ROOT/legacy/disks" \
+    "$VM_ROOT/legacy/nvram" "$VM_ROOT/legacy/log" \
+    "$VM_ROOT/control" "$VM_ROOT/1" "$VM_ROOT/_base"
 
 "$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/win10-vm1.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/win10-base.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/win10-base.qcow2.old" 1M
 printf 'vars\n' >"$VM_ROOT/vm1_VARS.fd"
 printf 'vars-backup\n' >"$VM_ROOT/vm1_VARS.fd.bak-display-test"
-printf 'vm1-config\n' >"$VM_ROOT/configs/vm1.conf"
-printf 'vm1-log\n' >"$VM_ROOT/log/vm1.log"
-"$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/disks/win10-vm2.qcow2" 1M
-printf 'vm2-vars\n' >"$VM_ROOT/nvram/vm2_VARS.fd"
-printf 'vm2-config\n' >"$VM_ROOT/configs/vm2.conf"
-printf 'vm2-log\n' >"$VM_ROOT/log/vm2.log"
+printf 'vm1-config\n' >"$VM_ROOT/legacy/configs/vm1.conf"
+printf 'vm1-log\n' >"$VM_ROOT/legacy/log/vm1.log"
+"$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/legacy/disks/win10-vm2.qcow2" 1M
+printf 'vm2-vars\n' >"$VM_ROOT/legacy/nvram/vm2_VARS.fd"
+printf 'vm2-config\n' >"$VM_ROOT/legacy/configs/vm2.conf"
+printf 'vm2-log\n' >"$VM_ROOT/legacy/log/vm2.log"
 printf 'iso\n' >"$IMAGE_ROOT/win10-ltsc.iso"
 "$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/1/disk.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/_base/compat.qcow2" 1M
 disk_inode=$(stat -c %i "$VM_ROOT/win10-vm1.qcow2")
-categorized_inode=$(stat -c %i "$VM_ROOT/disks/win10-vm2.qcow2")
+categorized_inode=$(stat -c %i "$VM_ROOT/legacy/disks/win10-vm2.qcow2")
 compat_disk_inode=$(stat -c %i "$VM_ROOT/1/disk.qcow2")
 compat_base_inode=$(stat -c %i "$VM_ROOT/_base/compat.qcow2")
 
@@ -48,35 +49,35 @@ grep -Fq 'CHECK ONLY: no files moved' "$TMP_DIR/check.out" \
 
 "$MIGRATE" --apply >"$TMP_DIR/apply.out"
 [[ ! -e "$VM_ROOT/win10-vm1.qcow2" ]] || fail "legacy disk remains after apply"
-[[ -f "$VM_ROOT/instances/vm1/disk.qcow2" ]] || fail "instance disk missing"
-[[ "$(stat -c %i "$VM_ROOT/instances/vm1/disk.qcow2")" == "$disk_inode" ]] \
+[[ -f "$VM_ROOT/vm1/disk.qcow2" ]] || fail "instance disk missing"
+[[ "$(stat -c %i "$VM_ROOT/vm1/disk.qcow2")" == "$disk_inode" ]] \
     || fail "same-filesystem migration did not preserve the disk inode"
-[[ "$(stat -c %i "$VM_ROOT/instances/vm2/disk.qcow2")" == "$categorized_inode" ]] \
+[[ "$(stat -c %i "$VM_ROOT/vm2/disk.qcow2")" == "$categorized_inode" ]] \
     || fail "categorized disk was not migrated into vm2"
-[[ -f "$VM_ROOT/bases/win10-base.qcow2" ]] || fail "categorized base missing"
-[[ -f "$VM_ROOT/bases/archive/win10-base.qcow2.old" ]] \
+[[ -f "$VM_ROOT/shared/bases/win10-base.qcow2" ]] || fail "categorized base missing"
+[[ -f "$VM_ROOT/shared/bases/archive/win10-base.qcow2.old" ]] \
     || fail "old base was not archived"
-[[ -f "$VM_ROOT/instances/vm1/vm.conf" ]] || fail "instance config missing"
-[[ -f "$VM_ROOT/instances/vm1/nvram.fd" ]] || fail "instance NVRAM missing"
-[[ -f "$VM_ROOT/instances/vm1/log/qemu.log" ]] || fail "instance log missing"
-[[ -f "$VM_ROOT/instances/vm1/backups/nvram/vm1_VARS.fd.bak-display-test" ]] \
+[[ -f "$VM_ROOT/vm1/vm.conf" ]] || fail "instance config missing"
+[[ -f "$VM_ROOT/vm1/nvram.fd" ]] || fail "instance NVRAM missing"
+[[ -f "$VM_ROOT/vm1/log/qemu.log" ]] || fail "instance log missing"
+[[ -f "$VM_ROOT/vm1/backups/nvram/vm1_VARS.fd.bak-display-test" ]] \
     || fail "NVRAM backup was not moved into the instance"
-[[ -f "$VM_ROOT/instances/vm2/vm.conf" &&
-   -f "$VM_ROOT/instances/vm2/nvram.fd" &&
-   -f "$VM_ROOT/instances/vm2/log/qemu.log" ]] \
+[[ -f "$VM_ROOT/vm2/vm.conf" &&
+   -f "$VM_ROOT/vm2/nvram.fd" &&
+   -f "$VM_ROOT/vm2/log/qemu.log" ]] \
     || fail "categorized-only vm2 payload was not bundled"
-[[ -d "$VM_ROOT/instances/vm1/run" &&
-   -d "$VM_ROOT/instances/vm1/backups/disks" ]] \
+[[ -d "$VM_ROOT/vm1/run" &&
+   -d "$VM_ROOT/vm1/backups/disks" ]] \
     || fail "migration did not complete the instance directory skeleton"
-[[ ! -e "$VM_ROOT/configs" && ! -e "$VM_ROOT/disks" &&
-   ! -e "$VM_ROOT/nvram" && ! -e "$VM_ROOT/log" ]] \
+[[ ! -e "$VM_ROOT/legacy/configs" && ! -e "$VM_ROOT/legacy/disks" &&
+   ! -e "$VM_ROOT/legacy/nvram" && ! -e "$VM_ROOT/legacy/log" ]] \
     || fail "migration left empty deprecated classification directories"
 [[ -f "$IMAGE_ROOT/iso/win10-ltsc.iso" ]] || fail "ISO was not classified"
 [[ "$(stat -c %i "$VM_ROOT/1/disk.qcow2")" == "$compat_disk_inode" ]] \
     || fail "numeric compatibility workflow was modified"
 [[ "$(stat -c %i "$VM_ROOT/_base/compat.qcow2")" == "$compat_base_inode" ]] \
     || fail "compatibility _base was modified"
-find "$VM_ROOT/run" -name 'storage-migration-*.tsv' -type f | grep -q . \
+find "$VM_ROOT/control" -name 'storage-migration-*.tsv' -type f | grep -q . \
     || fail "migration manifest was not written"
 
 "$MIGRATE" --apply >"$TMP_DIR/idempotent.out"
@@ -85,9 +86,9 @@ grep -Fq 'instance layout is current' "$TMP_DIR/idempotent.out" \
 
 # A destination collision must fail before moving the legacy source.
 COLLISION_ROOT="$TMP_DIR/collision/vms"
-mkdir -p "$COLLISION_ROOT/instances/vm2"
+mkdir -p "$COLLISION_ROOT/vm2"
 "$QEMU_IMG" create -q -f qcow2 "$COLLISION_ROOT/win10-vm2.qcow2" 1M
-"$QEMU_IMG" create -q -f qcow2 "$COLLISION_ROOT/instances/vm2/disk.qcow2" 2M
+"$QEMU_IMG" create -q -f qcow2 "$COLLISION_ROOT/vm2/disk.qcow2" 2M
 if IMAGE_ROOT="$TMP_DIR/collision" VM_ROOT="$COLLISION_ROOT" \
     "$MIGRATE" --apply >"$TMP_DIR/collision.out" 2>"$TMP_DIR/collision.err"; then
     fail "migration accepted conflicting disk paths"
@@ -99,7 +100,7 @@ grep -Fq 'destination already exists' "$TMP_DIR/collision.err" \
 
 # An arbitrary open descriptor must also block apply.
 HOLDER_ROOT="$TMP_DIR/holder/vms"
-mkdir -p "$HOLDER_ROOT/run"
+mkdir -p "$HOLDER_ROOT/control"
 "$QEMU_IMG" create -q -f qcow2 "$HOLDER_ROOT/win10-vm3.qcow2" 1M
 exec {HELD_FD}<"$HOLDER_ROOT/win10-vm3.qcow2"
 if IMAGE_ROOT="$TMP_DIR/holder" VM_ROOT="$HOLDER_ROOT" \
@@ -113,7 +114,7 @@ grep -Fq 'open file' "$TMP_DIR/holder.err" \
 
 # If a base is being moved, unreadable/corrupt qcow2 metadata must fail closed.
 BAD_ROOT="$TMP_DIR/bad-metadata/vms"
-mkdir -p "$BAD_ROOT/run"
+mkdir -p "$BAD_ROOT/control"
 "$QEMU_IMG" create -q -f qcow2 "$BAD_ROOT/win10-base.qcow2" 1M
 printf '\x51\x46\x49\xfb\x00' >"$BAD_ROOT/bad.qcow2"
 if IMAGE_ROOT="$TMP_DIR/bad-metadata" VM_ROOT="$BAD_ROOT" \
@@ -128,12 +129,12 @@ grep -Fq 'cannot prove qcow2 backing safety' "$TMP_DIR/bad.err" \
 # A relative backing filename would resolve from a different directory after
 # moving the overlay, so migration must refuse it instead of breaking the chain.
 REL_ROOT="$TMP_DIR/relative/vms"
-mkdir -p "$REL_ROOT/bases" "$REL_ROOT/run"
-"$QEMU_IMG" create -q -f qcow2 "$REL_ROOT/bases/win10-base.qcow2" 1M
+mkdir -p "$REL_ROOT/shared/bases" "$REL_ROOT/control"
+"$QEMU_IMG" create -q -f qcow2 "$REL_ROOT/shared/bases/win10-base.qcow2" 1M
 (
     cd "$REL_ROOT"
     "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
-        -b bases/win10-base.qcow2 win10-vm4.qcow2
+        -b shared/bases/win10-base.qcow2 win10-vm4.qcow2
 )
 if IMAGE_ROOT="$TMP_DIR/relative" VM_ROOT="$REL_ROOT" \
     "$MIGRATE" --check >"$TMP_DIR/relative.out" 2>"$TMP_DIR/relative.err"; then
@@ -147,7 +148,7 @@ grep -Fq 'planned qcow2 has a backing file' "$TMP_DIR/relative.err" \
 # An excluded compatibility overlay may still depend on a production file;
 # moving that backing file must be refused even though the overlay stays put.
 DEPEND_ROOT="$TMP_DIR/dependent/vms"
-mkdir -p "$DEPEND_ROOT/9" "$DEPEND_ROOT/run"
+mkdir -p "$DEPEND_ROOT/9" "$DEPEND_ROOT/control"
 "$QEMU_IMG" create -q -f qcow2 "$DEPEND_ROOT/win10-base.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
     -b "$DEPEND_ROOT/win10-base.qcow2" "$DEPEND_ROOT/9/disk.qcow2"
@@ -165,13 +166,13 @@ grep -Fq 'depends on a planned file that would move' "$TMP_DIR/dependent.err" \
 EXTERNAL_IMAGE_ROOT="$TMP_DIR/external-scan/images"
 EXTERNAL_VM_ROOT="$EXTERNAL_IMAGE_ROOT/vms"
 EXTERNAL_DISKS="$TMP_DIR/external-scan-disks"
-mkdir -p "$EXTERNAL_VM_ROOT/run" "$EXTERNAL_DISKS"
+mkdir -p "$EXTERNAL_VM_ROOT/control" "$EXTERNAL_DISKS"
 "$QEMU_IMG" create -q -f qcow2 "$EXTERNAL_VM_ROOT/win10-base.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
     -b "$EXTERNAL_VM_ROOT/win10-base.qcow2" \
     "$EXTERNAL_DISKS/dependent.qcow2"
 if IMAGE_ROOT="$EXTERNAL_IMAGE_ROOT" VM_ROOT="$EXTERNAL_VM_ROOT" \
-    VM_DISK_DIR="$EXTERNAL_DISKS" VM_BASE_DIR="$EXTERNAL_VM_ROOT/bases" \
+    VM_DISK_DIR="$EXTERNAL_DISKS" VM_BASE_DIR="$EXTERNAL_VM_ROOT/shared/bases" \
     "$MIGRATE" --check >"$TMP_DIR/external.out" 2>"$TMP_DIR/external.err"; then
     fail "migration ignored a dependent in an external managed disk dir"
 fi
@@ -183,7 +184,7 @@ grep -Fq 'depends on a planned file that would move' "$TMP_DIR/external.err" \
 SYMLINK_IMAGE_ROOT="$TMP_DIR/symlink-scan/images"
 SYMLINK_VM_ROOT="$SYMLINK_IMAGE_ROOT/vms"
 SYMLINK_OUTSIDE="$TMP_DIR/symlink-scan-outside"
-mkdir -p "$SYMLINK_VM_ROOT/run" "$SYMLINK_OUTSIDE"
+mkdir -p "$SYMLINK_VM_ROOT/control" "$SYMLINK_OUTSIDE"
 "$QEMU_IMG" create -q -f qcow2 "$SYMLINK_VM_ROOT/win10-base.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
     -b "$SYMLINK_VM_ROOT/win10-base.qcow2" \
@@ -201,7 +202,7 @@ grep -Fq 'depends on a planned file that would move' "$TMP_DIR/symlink.err" \
 # POSIX paths.  Lifecycle tools must fail closed unless they can prove safety.
 PROTOCOL_IMAGE_ROOT="$TMP_DIR/protocol-scan/images"
 PROTOCOL_VM_ROOT="$PROTOCOL_IMAGE_ROOT/vms"
-mkdir -p "$PROTOCOL_VM_ROOT/9" "$PROTOCOL_VM_ROOT/run"
+mkdir -p "$PROTOCOL_VM_ROOT/9" "$PROTOCOL_VM_ROOT/control"
 "$QEMU_IMG" create -q -f qcow2 "$PROTOCOL_VM_ROOT/win10-base.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
     -b "file:$PROTOCOL_VM_ROOT/win10-base.qcow2" \
@@ -217,7 +218,7 @@ grep -Fq 'unsupported backing reference' "$TMP_DIR/protocol.err" \
 # data_file would break when the qcow2 moves to disks/, so apply must refuse.
 DATA_IMAGE_ROOT="$TMP_DIR/data-file/images"
 DATA_VM_ROOT="$DATA_IMAGE_ROOT/vms"
-mkdir -p "$DATA_VM_ROOT/run"
+mkdir -p "$DATA_VM_ROOT/control"
 (
     cd "$DATA_VM_ROOT"
     "$QEMU_IMG" create -q -f qcow2 -o data_file=payload.raw \
@@ -230,14 +231,14 @@ fi
 grep -Fq 'planned qcow2 has an external data-file' "$TMP_DIR/data-file.err" \
     || fail "external-data-file refusal was not clear"
 [[ -f "$DATA_VM_ROOT/win10-vm7.qcow2" &&
-   ! -e "$DATA_VM_ROOT/instances/vm7/disk.qcow2" ]] \
+   ! -e "$DATA_VM_ROOT/vm7/disk.qcow2" ]] \
     || fail "external-data-file refusal moved the qcow2"
 
 # Relative ISO/NVRAM symlinks also change meaning after a directory move, so
 # migration rejects every source symlink rather than trying to rewrite links.
 SOURCE_LINK_IMAGE_ROOT="$TMP_DIR/source-links/images"
 SOURCE_LINK_VM_ROOT="$SOURCE_LINK_IMAGE_ROOT/vms"
-mkdir -p "$SOURCE_LINK_VM_ROOT/templates" "$SOURCE_LINK_VM_ROOT/run"
+mkdir -p "$SOURCE_LINK_VM_ROOT/templates" "$SOURCE_LINK_VM_ROOT/control"
 printf 'iso-target\n' >"$SOURCE_LINK_IMAGE_ROOT/install-target.bin"
 printf 'vars-target\n' >"$SOURCE_LINK_VM_ROOT/templates/vars.fd"
 ln -s install-target.bin "$SOURCE_LINK_IMAGE_ROOT/win10-test.iso"
@@ -257,7 +258,7 @@ grep -Fq 'source symlink move is not supported' "$TMP_DIR/source-links.err" \
 # every planned source, not only planned qcow2 files.
 RAW_IMAGE_ROOT="$TMP_DIR/raw-iso/images"
 RAW_VM_ROOT="$RAW_IMAGE_ROOT/vms"
-mkdir -p "$RAW_VM_ROOT/9" "$RAW_VM_ROOT/run"
+mkdir -p "$RAW_VM_ROOT/9" "$RAW_VM_ROOT/control"
 "$QEMU_IMG" create -q -f raw "$RAW_IMAGE_ROOT/payload.iso" 1M
 "$QEMU_IMG" create -q -f qcow2 -F raw \
     -b "$RAW_IMAGE_ROOT/payload.iso" "$RAW_VM_ROOT/9/disk.qcow2"
@@ -276,7 +277,7 @@ grep -Fq 'depends on a planned file that would move' "$TMP_DIR/raw-iso.err" \
 DIR_LINK_IMAGE_ROOT="$TMP_DIR/dir-link/images"
 DIR_LINK_VM_ROOT="$DIR_LINK_IMAGE_ROOT/vms"
 DIR_LINK_OUTSIDE="$TMP_DIR/dir-link-outside/vm9"
-mkdir -p "$DIR_LINK_VM_ROOT/run" "$DIR_LINK_OUTSIDE"
+mkdir -p "$DIR_LINK_VM_ROOT/control" "$DIR_LINK_OUTSIDE"
 "$QEMU_IMG" create -q -f qcow2 "$DIR_LINK_VM_ROOT/win10-base.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
     -b "$DIR_LINK_VM_ROOT/win10-base.qcow2" \
@@ -294,7 +295,7 @@ grep -Fq 'depends on a planned file that would move' "$TMP_DIR/dir-link.err" \
 CHAIN_IMAGE_ROOT="$TMP_DIR/recursive-chain/images"
 CHAIN_VM_ROOT="$CHAIN_IMAGE_ROOT/vms"
 CHAIN_OUTSIDE="$TMP_DIR/recursive-chain-outside"
-mkdir -p "$CHAIN_VM_ROOT/9" "$CHAIN_VM_ROOT/run" "$CHAIN_OUTSIDE"
+mkdir -p "$CHAIN_VM_ROOT/9" "$CHAIN_VM_ROOT/control" "$CHAIN_OUTSIDE"
 "$QEMU_IMG" create -q -f qcow2 "$CHAIN_VM_ROOT/win10-base.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
     -b "$CHAIN_VM_ROOT/win10-base.qcow2" "$CHAIN_OUTSIDE/middle.qcow2"
@@ -310,9 +311,9 @@ grep -Fq 'depends on a planned file that would move' "$TMP_DIR/recursive.err" \
 # Runtime PID/socket/mdev state is never renamed into an instance.  Even stale
 # state must be cleaned explicitly before moving persistent VM files.
 RUNTIME_ROOT="$TMP_DIR/runtime-state/vms"
-mkdir -p "$RUNTIME_ROOT/run"
+mkdir -p "$RUNTIME_ROOT/control"
 "$QEMU_IMG" create -q -f qcow2 "$RUNTIME_ROOT/win10-vm5.qcow2" 1M
-touch "$RUNTIME_ROOT/run/vm5.pid"
+touch "$RUNTIME_ROOT/control/vm5.pid"
 if IMAGE_ROOT="$TMP_DIR/runtime-state" VM_ROOT="$RUNTIME_ROOT" \
     "$MIGRATE" --check >"$TMP_DIR/runtime-state.out" \
     2>"$TMP_DIR/runtime-state.err"; then
@@ -326,9 +327,9 @@ grep -Fq 'runtime state must be cleaned' "$TMP_DIR/runtime-state.err" \
 # The canonical instance path and its children must be real directories, not
 # symlinks that redirect a migration outside the managed tree.
 UNSAFE_ROOT="$TMP_DIR/unsafe-instance/vms"
-mkdir -p "$UNSAFE_ROOT/instances" "$TMP_DIR/unsafe-instance-outside"
+mkdir -p "$UNSAFE_ROOT" "$TMP_DIR/unsafe-instance-outside"
 "$QEMU_IMG" create -q -f qcow2 "$UNSAFE_ROOT/win10-vm5.qcow2" 1M
-ln -s "$TMP_DIR/unsafe-instance-outside" "$UNSAFE_ROOT/instances/vm5"
+ln -s "$TMP_DIR/unsafe-instance-outside" "$UNSAFE_ROOT/vm5"
 if IMAGE_ROOT="$TMP_DIR/unsafe-instance" VM_ROOT="$UNSAFE_ROOT" \
     "$MIGRATE" --check >"$TMP_DIR/unsafe-instance.out" \
     2>"$TMP_DIR/unsafe-instance.err"; then
@@ -341,9 +342,9 @@ grep -Fq 'instance path must be a real directory' \
 # Apply takes the exclusive storage lock before it inventories or validates
 # destinations, closing the plan-to-publication race with cooperating tools.
 LOCK_ROOT="$TMP_DIR/locked-apply/vms"
-mkdir -p "$LOCK_ROOT/run"
+mkdir -p "$LOCK_ROOT/control"
 "$QEMU_IMG" create -q -f qcow2 "$LOCK_ROOT/win10-vm6.qcow2" 1M
-exec {STORAGE_HOLDER_FD}>"$LOCK_ROOT/run/.storage.lock"
+exec {STORAGE_HOLDER_FD}>"$LOCK_ROOT/control/.storage.lock"
 flock -s "$STORAGE_HOLDER_FD"
 if IMAGE_ROOT="$TMP_DIR/locked-apply" VM_ROOT="$LOCK_ROOT" \
     "$MIGRATE" --apply >"$TMP_DIR/locked-apply.out" \
@@ -358,9 +359,9 @@ grep -Fq 'another VM/storage operation holds' "$TMP_DIR/locked-apply.err" \
 
 # Per-VM disk mutation locks are also a final apply gate.
 DISK_LOCK_ROOT="$TMP_DIR/disk-locked-apply/vms"
-mkdir -p "$DISK_LOCK_ROOT/run"
+mkdir -p "$DISK_LOCK_ROOT/control"
 "$QEMU_IMG" create -q -f qcow2 "$DISK_LOCK_ROOT/win10-vm8.qcow2" 1M
-exec {DISK_LOCK_HOLDER_FD}>"$DISK_LOCK_ROOT/run/vm8.disk.lock"
+exec {DISK_LOCK_HOLDER_FD}>"$DISK_LOCK_ROOT/control/vm8.disk.lock"
 flock -x "$DISK_LOCK_HOLDER_FD"
 if IMAGE_ROOT="$TMP_DIR/disk-locked-apply" VM_ROOT="$DISK_LOCK_ROOT" \
     "$MIGRATE" --apply >"$TMP_DIR/disk-locked.out" \

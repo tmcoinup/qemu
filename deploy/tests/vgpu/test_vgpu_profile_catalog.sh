@@ -232,8 +232,9 @@ test_catalog() {
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+IMAGE_ROOT="$TMP_DIR"
 VM_ROOT="$TMP_DIR/vms"
-export VM_ROOT
+export IMAGE_ROOT VM_ROOT
 
 test_create_profile() {
     local key="$1" vm_id="$2" order="$3" conf
@@ -271,7 +272,7 @@ test_create_profile() {
             >"$TMP_DIR/create-$vm_id.out" 2>"$TMP_DIR/create-$vm_id.err"
     fi
 
-    conf="$VM_ROOT/instances/vm${vm_id}/vm.conf"
+    conf="$VM_ROOT/vm${vm_id}/vm.conf"
     [[ -f "$conf" ]] || fail "$key did not create $conf"
 
     (
@@ -336,7 +337,7 @@ test_create_profile() {
 }
 
 test_force_gpu_policy() {
-    local vm_id=102 conf="$VM_ROOT/instances/vm102/vm.conf"
+    local vm_id=102 conf="$VM_ROOT/vm102/vm.conf"
     local before_hash after_hash backup="$TMP_DIR/vm102-valid.conf"
 
     chmod 0644 "$conf"
@@ -442,7 +443,7 @@ test_force_gpu_policy() {
 }
 
 test_force_missing_gpu_profile_fails() {
-    local vm_id=101 conf="$VM_ROOT/instances/vm101/vm.conf"
+    local vm_id=101 conf="$VM_ROOT/vm101/vm.conf"
     local backup="$TMP_DIR/vm101-with-gpu.conf"
     local replacement="$TMP_DIR/vm101-without-gpu.conf" before_hash after_hash
 
@@ -468,7 +469,7 @@ test_force_missing_gpu_profile_fails() {
 }
 
 test_unknown_profile_fails() {
-    local vm_id=103 conf="$VM_ROOT/instances/vm103/vm.conf"
+    local vm_id=103 conf="$VM_ROOT/vm103/vm.conf"
 
     if "$CREATE_VM" "$vm_id" --gpu-profile definitely-not-a-gpu \
         >"$TMP_DIR/create-unknown.out" 2>"$TMP_DIR/create-unknown.err"; then
@@ -489,7 +490,7 @@ if grep -Fq 'oem6.inf' "$CREATE_VM"; then
     fail "create-vm hard-codes VM3's published OEM INF"
 fi
 
-exec {START_HOLDER_FD}>"$VM_ROOT/run/vm102.start.lock"
+exec {START_HOLDER_FD}>"$VM_ROOT/control/vm102.start.lock"
 flock -x "$START_HOLDER_FD"
 if "$CREATE_VM" 102 --force >"$TMP_DIR/create-locked.out" \
         2>"$TMP_DIR/create-locked.err"; then

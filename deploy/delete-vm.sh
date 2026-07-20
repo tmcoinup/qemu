@@ -20,8 +20,6 @@ set -euo pipefail
 here="$(dirname "$(readlink -f "$0")")"
 cd "$here"
 
-export SUDO_PASSWORD="${SUDO_PASSWORD:-123456}"
-export VM_ROOT="${VM_ROOT:-${IMAGE_ROOT:-/home/ubuntu/images}/vms}"
 # shellcheck source=lib/vm-storage.sh
 source "$here/lib/vm-storage.sh"
 # shellcheck source=lib/vgpu-mdev.sh
@@ -44,6 +42,7 @@ done
     echo "usage: $0 <vm_id> [-y]" >&2
     exit 2
 }
+vm_storage_require_namespace_ready "$VM_ID"
 INSTANCE_DIR=$(vm_storage_instance_dir "$VM_ID")
 if ! vm_storage_validate_instance_tree "$VM_ID"; then
     echo "[delete-vm] 实例目录包含 symlink/非目录，拒绝沿路径删除" >&2
@@ -271,7 +270,11 @@ fi
 for f in "${TARGETS[@]}"; do
     if rm -f "$f" 2>/dev/null; then
         echo "  rm $f"
-    elif echo "$SUDO_PASSWORD" | sudo -S -p '' rm -f "$f" 2>/dev/null; then
+    elif sudo -n rm -f "$f" 2>/dev/null; then
+        echo "  rm (sudo) $f"
+    elif [[ -n "${SUDO_PASSWORD:-}" ]] &&
+            printf '%s\n' "$SUDO_PASSWORD" |
+                sudo -S -p '' rm -f "$f" 2>/dev/null; then
         echo "  rm (sudo) $f"
     else
         echo "  !! 删除失败: $f"

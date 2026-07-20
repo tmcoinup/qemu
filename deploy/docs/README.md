@@ -3,8 +3,8 @@
 本分支只提供一套 NVIDIA mdev/vGPU VM 生命周期：
 
 ```bash
-./deploy/start-vm.sh <vm_id> [options]
-./deploy/stop-vm.sh  <vm_id> [--force]
+./deploy/start-vm.sh <vm_id> [--vm-dir ABS|--instances-dir ABS] [options]
+./deploy/stop-vm.sh  <vm_id> [--vm-dir ABS|--instances-dir ABS] [--force]
 ```
 
 `off`、`B` 和 `A` 是同一 VM 链路上的 guest 身份模式，不是不同的显示后端。
@@ -15,6 +15,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 
 | 目标 | 文档 |
 |---|---|
+| 默认/指定 VM 路径、独立 bundle 和旧 G-11 目录迁移 | [STORAGE-PATHS-QUICKSTART.md](STORAGE-PATHS-QUICKSTART.md) |
 | 第一次操作 G-11：portable EXE、base 注入、任意 VM 克隆与验收 | [G11-QUICKSTART.md](G11-QUICKSTART.md) |
 | 无 VM 绑定离线包、基础镜像安全边界和 HWiNFO 边界 | [GPUZ-ONE-CLICK.md](GPUZ-ONE-CLICK.md) |
 | HWiNFO64 x64 app-local 实验和不能承诺的字段 | [HWINFO-APP-LOCAL-EXPERIMENT.md](HWINFO-APP-LOCAL-EXPERIMENT.md) |

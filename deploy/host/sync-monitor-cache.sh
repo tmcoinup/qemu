@@ -23,7 +23,7 @@
 #       --monitor-profile dell-p2419h --serial CC3P12345678 --instance vm1
 #
 # 安全：
-#   - 只修改显式传入的 instances/vmN/disk.qcow2，不碰公共 base。
+#   - 只修改显式传入的 vmN/disk.qcow2，不碰公共 base。
 #   - 若该实例的 QEMU 进程在跑，直接拒绝（并发挂载实例盘会损坏文件系统）。
 #
 # 依赖：qemu-utils(qemu-nbd) + ntfs-3g + python3-hivex

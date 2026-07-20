@@ -99,13 +99,14 @@ START_SCRIPT="$HERE/start-vm.sh"
 [[ -d "$VM_DIR" ]] || { echo "ERROR: VM dir not found: $VM_DIR" >&2; exit 1; }
 
 echo ">> instance: $INSTANCE"
-echo ">> step 1/2: 离线修复 GPU DriverProvider / DriverDesc"
+echo ">> step 1/2: 离线修复 GPU Provider / Desc / 驱动签名关联"
 "$FIX_SCRIPT" "$INSTANCE" "${FIX_ARGS[@]}"
 
 chown -R "${ORIG_USER}:${ORIG_GROUP}" "$VM_DIR" 2>/dev/null || true
 
 if [[ "$RESTART" != 1 || "$DRY_RUN" == 1 ]]; then
-    echo ">> done: 已修复。下一次启动后设备管理器 Provider 应显示 profile.GPU_VENDOR。"
+    echo ">> done: 已修复。下次启动后 Provider 应显示 profile.GPU_VENDOR，"
+    echo ">>       Digital Signer 应恢复为 Microsoft Windows Hardware Compatibility Publisher。"
     echo ">> 如需自动重启：deploy/scripts/finalize-clone-gpu.sh $INSTANCE --restart -- --proxy"
     exit 0
 fi

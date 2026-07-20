@@ -20,15 +20,19 @@
 | `configure-power-policy.ps1` | 用 PowrProf 将屏幕/自动睡眠设为“从不”，保留桌面 S3 并关闭休眠 |
 | `install-chipset-device.ps1` | 为 A123/A323 幂等绑定 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF |
 | `install-display-driver.ps1` | 真实驱动探测与幂等安装；必须先成功，才允许执行名称覆盖 |
+| `display-driver-trust.ps1` | 校验活动 VioGpuDod、发布 INF 与内嵌 WHCP 包；仅放行缺失发布 INF 的官方恢复 |
 | `install-gpu-api-system.ps1` | 用同一 identity TransactionId 协调 NVAPI 与 ADL |
 | `install-nvapi-system.ps1` | 独立事务发布 x86/x64 NVIDIA NVAPI 用户态 shim |
 | `install-adl-system.ps1` | 独立事务发布三目标 AMD ADL/ADL2 用户态 shim |
 | `persist-gpu-profile.ps1` | 校验完整型号 bundle，并组织 schema-2 身份的 Stage/Commit/Complete/Recover |
 | `gpu-profile-transaction.ps1` | 持久化 GPU 身份 journal、指针 CAS、投影回读与崩溃恢复公共实现 |
+| `gpu-profile-registry-core.ps1` | GPU 身份事务共用的精确注册表读取、回读与 pointer CAS 基元 |
 | `refresh-gpu-name.ps1` | 在全局写锁内严格投影唯一 VioGpuDod 实例的 Enum/Class 属性 |
+| `gpu-manufacturer-projection.ps1` | 通过 Config Manager 投影常规页制造商，并在前后复核 WHCP 签名绑定 |
 | `gpu-hardware-id-plan.ps1` | 无副作用地规划“逻辑首项 + 完整物理数组”，供生产脚本与测试共用 |
 | `project-gpu-hardware-id.ps1` | 唯一的 GPU Enum `HardwareID` writer；幂等投影、验证与回滚 |
 | `respawn-stealth-local.ps1` | 串联驱动安装、`apply-gpu-spoof -AutoDetect`、收尾与重启 |
+| `respawn-restart-state.ps1` | 集中管理一次性恢复任务、显示设备就绪等待与单次重启阶段 |
 | `launcher/` | UAC manifest、payload 释放器和应用图标 |
 | `package.sh` | 清理旧发布目录并重新生成单 EXE |
 
@@ -89,8 +93,9 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
    `HiberFilePresent`。失败就停止，不会继续改显卡。
 3. 枚举 `PresentOnly` 的 `8086:A123`/`8086:A323`；已正常绑定时跳过，否则验证
    对应 INF/CAT 的固定摘要、NO_DRV 语义与 Microsoft WHCP 签名，再用 inbox
-   `pnputil /add-driver ... /install` 清除 SMBus Code 28。若要求重启，先注册一次性
-   恢复任务，重启后重新验证。
+   `pnputil /add-driver ... /install` 清除 SMBus Code 28。若要求重启，先记录
+   `ChipsetVerification` 阶段并继续完成 GPU 流程；最终一次重启后只复核该 INF，
+   不会再次运行 GPU 流程或安排第二次重启。
 4. 若存在上次正式身份，先停止旧投影任务并把 `HardwareID` 恢复为 physical-only；
    后续驱动安装和 PnP scan 因而始终只看到 stock `1AF4:1050`。
 5. 只枚举 `PresentOnly` 的 PCI 显示设备，先要求物理主 ID 全部为 `1AF4:1050`，
@@ -112,7 +117,10 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
 12. 同一份持久 `project-gpu-hardware-id.ps1` 随后同步把 HardwareID 精确写成
    `profile 逻辑首项 + 完整物理数组`。例如首项为 `10DE:1C82`，第二项起仍是
    `1AF4:1050`；设备实例路径、Service、Driver、CompatibleIDs 和 PCI 配置空间不变。
-13. 然后默认重启；不按进程区分的 NVAPI/ADL 查询会从系统目录读取同一身份。工具若调用
+13. `gpu-manufacturer-projection.ps1` 仅把设备管理器常规页制造商投影成
+    AMD/NVIDIA；投影前后都要求活动 `oemN.inf` 仍为 Red Hat、`IsSigned=True` 且
+    signer 为 Microsoft Windows Hardware Compatibility Publisher。
+14. 然后默认重启；不按进程区分的 NVAPI/ADL 查询会从系统目录读取同一身份。工具若调用
     没有可信数据源的实时遥测或厂商驱动功能，会收到明确的“不支持”结果，而不是伪造数值。
 
 因此，“设备管理器显示 GTX 1050 Ti”不再被当成成功条件。旧 EXE 能把
@@ -296,6 +304,9 @@ INCLUDE_LEGACY_SCRIPTS=1 bash deploy/guest-stealth/package.sh
 `nvapi.dll`、`nvapi64.dll`、
 `configure-power-policy.ps1`、
 `apply-gpu-spoof.ps1`、`persist-gpu-profile.ps1`、`gpu-profile-transaction.ps1`、
-`refresh-gpu-name.ps1`、
+`gpu-profile-registry-core.ps1`、
+`refresh-gpu-name.ps1`、`gpu-manufacturer-projection.ps1`、
+`gpu-manufacturer-projector.exe`、`respawn-restart-state.ps1`、
+`display-driver-trust.ps1`、
 `gpu-hardware-id-plan.ps1`、`project-gpu-hardware-id.ps1` 和
 `force-displayfreq.ps1` 放在同一 payload 目录；生产环境始终使用单 EXE。

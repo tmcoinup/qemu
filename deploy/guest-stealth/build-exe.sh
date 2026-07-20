@@ -27,15 +27,19 @@ OUT_DIR="${OUT_DIR:-$HERE/dist}"
 OUT_EXE="$OUT_DIR/respawn-stealth.exe"
 
 RESPAWN_SRC="$HERE/respawn-stealth-local.ps1"
+RESTART_STATE_SRC="$HERE/respawn-restart-state.ps1"
 POWER_POLICY_SRC="$HERE/configure-power-policy.ps1"
 SPOOF_SRC="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 PROFILE_HELPER_SRC="$REPO_ROOT/deploy/scripts/persist-gpu-profile.ps1"
 TRANSACTION_HELPER_SRC="$REPO_ROOT/deploy/scripts/gpu-profile-transaction.ps1"
+REGISTRY_CORE_SRC="$REPO_ROOT/deploy/scripts/gpu-profile-registry-core.ps1"
 REFRESH_HELPER_SRC="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
+MANUFACTURER_HELPER_SRC="$REPO_ROOT/deploy/scripts/gpu-manufacturer-projection.ps1"
 HARDWARE_ID_PLAN_SRC="$REPO_ROOT/deploy/scripts/gpu-hardware-id-plan.ps1"
 HARDWARE_ID_PROJECTOR_SRC="$REPO_ROOT/deploy/scripts/project-gpu-hardware-id.ps1"
 DISPLAY_HELPER_SRC="$REPO_ROOT/deploy/scripts/force-displayfreq.ps1"
 DRIVER_INSTALL_SRC="$HERE/install-display-driver.ps1"
+DRIVER_TRUST_SRC="$HERE/display-driver-trust.ps1"
 CHIPSET_INSTALL_SRC="$HERE/install-chipset-device.ps1"
 NVAPI_INSTALL_SRC="$HERE/install-nvapi-system.ps1"
 NVAPI_TRANSACTION_SRC="$HERE/nvapi-system-transaction.ps1"
@@ -51,6 +55,7 @@ SRC="$LAUNCHER/respawn-stealth-launcher.c"
 PAYLOAD_SECURITY_SRC="$LAUNCHER/payload-security.c"
 PAYLOAD_ENVIRONMENT_SRC="$LAUNCHER/payload-environment.c"
 LAUNCHER_ARGUMENTS_SRC="$LAUNCHER/launcher-arguments.c"
+MANUFACTURER_PROJECTOR_SRC="$LAUNCHER/gpu-manufacturer-projector.c"
 MANIFEST="$LAUNCHER/respawn-stealth.exe.manifest"
 
 NVAPI_X86_SHA256="8ee7248f802b960b971724bdadb789492685b9c76fde0ac99f954768431972af"
@@ -72,15 +77,19 @@ need_tool convert
 need_tool llvm-readobj
 
 [[ -f "$RESPAWN_SRC" ]] || { echo "ERROR: 找不到 $RESPAWN_SRC" >&2; exit 1; }
+[[ -f "$RESTART_STATE_SRC" ]] || { echo "ERROR: 找不到 $RESTART_STATE_SRC" >&2; exit 1; }
 [[ -f "$POWER_POLICY_SRC" ]] || { echo "ERROR: 找不到 $POWER_POLICY_SRC" >&2; exit 1; }
 [[ -f "$SPOOF_SRC" ]]   || { echo "ERROR: 找不到 $SPOOF_SRC" >&2; exit 1; }
 [[ -f "$PROFILE_HELPER_SRC" ]] || { echo "ERROR: 找不到 $PROFILE_HELPER_SRC" >&2; exit 1; }
 [[ -f "$TRANSACTION_HELPER_SRC" ]] || { echo "ERROR: 找不到 $TRANSACTION_HELPER_SRC" >&2; exit 1; }
+[[ -f "$REGISTRY_CORE_SRC" ]] || { echo "ERROR: 找不到 $REGISTRY_CORE_SRC" >&2; exit 1; }
 [[ -f "$REFRESH_HELPER_SRC" ]] || { echo "ERROR: 找不到 $REFRESH_HELPER_SRC" >&2; exit 1; }
+[[ -f "$MANUFACTURER_HELPER_SRC" ]] || { echo "ERROR: 找不到 $MANUFACTURER_HELPER_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PLAN_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PLAN_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PROJECTOR_SRC" >&2; exit 1; }
 [[ -f "$DISPLAY_HELPER_SRC" ]] || { echo "ERROR: 找不到 $DISPLAY_HELPER_SRC" >&2; exit 1; }
 [[ -f "$DRIVER_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_INSTALL_SRC" >&2; exit 1; }
+[[ -f "$DRIVER_TRUST_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_TRUST_SRC" >&2; exit 1; }
 [[ -f "$CHIPSET_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $CHIPSET_INSTALL_SRC" >&2; exit 1; }
 [[ -f "$NVAPI_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_INSTALL_SRC" >&2; exit 1; }
 [[ -f "$NVAPI_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_TRANSACTION_SRC" >&2; exit 1; }
@@ -91,6 +100,7 @@ need_tool llvm-readobj
 [[ -f "$PAYLOAD_SECURITY_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_SECURITY_SRC" >&2; exit 1; }
 [[ -f "$PAYLOAD_ENVIRONMENT_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_ENVIRONMENT_SRC" >&2; exit 1; }
 [[ -f "$LAUNCHER_ARGUMENTS_SRC" ]] || { echo "ERROR: 找不到 $LAUNCHER_ARGUMENTS_SRC" >&2; exit 1; }
+[[ -f "$MANUFACTURER_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $MANUFACTURER_PROJECTOR_SRC" >&2; exit 1; }
 
 # stock 驱动的 SYS/CAT/INF 必须来自同一发布包。构建时先锁定三者摘要，既避免
 # 误把深层自签版打进浅层 EXE，也能在源文件被截断或 CAT/SYS 混版时立即失败。
@@ -250,9 +260,19 @@ done
 # 上面的 -strip 移除这些动态块；合成 ICO 时再清理一次，避免未来版本继承新元数据。
 convert "$BUILD_DIR"/icon-*.png -strip "$BUILD_DIR/respawn-stealth.ico"
 
+# Windows 保留的 Manufacturer 属性只能通过 Config Manager API 设置。先构建一个
+# 极小的本地投影器，再把其 PE 原始字节作为 payload 嵌入唯一发布 EXE。
+x86_64-w64-mingw32-gcc \
+    -std=c11 -Wall -Wextra -Werror -O2 -municode -mconsole \
+    -static -static-libgcc -Wl,--no-insert-timestamp \
+    "$MANUFACTURER_PROJECTOR_SRC" -lsetupapi -lcfgmgr32 \
+    -o "$BUILD_DIR/gpu-manufacturer-projector.exe"
+
 # xxd 生成 C header，保留原始 UTF-8/BOM 字节；EXE 运行时原样释放脚本。
 xxd -i -n payload_respawn_ps1 "$RESPAWN_SRC" \
     > "$BUILD_DIR/payload_respawn_ps1.h"
+xxd -i -n payload_respawn_restart_state_ps1 "$RESTART_STATE_SRC" \
+    > "$BUILD_DIR/payload_respawn_restart_state_ps1.h"
 xxd -i -n payload_configure_power_policy_ps1 "$POWER_POLICY_SRC" \
     > "$BUILD_DIR/payload_configure_power_policy_ps1.h"
 xxd -i -n payload_apply_gpu_spoof_ps1 "$SPOOF_SRC" \
@@ -261,8 +281,15 @@ xxd -i -n payload_persist_gpu_profile_ps1 "$PROFILE_HELPER_SRC" \
     > "$BUILD_DIR/payload_persist_gpu_profile_ps1.h"
 xxd -i -n payload_gpu_profile_transaction_ps1 "$TRANSACTION_HELPER_SRC" \
     > "$BUILD_DIR/payload_gpu_profile_transaction_ps1.h"
+xxd -i -n payload_gpu_profile_registry_core_ps1 "$REGISTRY_CORE_SRC" \
+    > "$BUILD_DIR/payload_gpu_profile_registry_core_ps1.h"
 xxd -i -n payload_refresh_gpu_name_ps1 "$REFRESH_HELPER_SRC" \
     > "$BUILD_DIR/payload_refresh_gpu_name_ps1.h"
+xxd -i -n payload_gpu_manufacturer_projection_ps1 "$MANUFACTURER_HELPER_SRC" \
+    > "$BUILD_DIR/payload_gpu_manufacturer_projection_ps1.h"
+xxd -i -n payload_gpu_manufacturer_projector_exe \
+    "$BUILD_DIR/gpu-manufacturer-projector.exe" \
+    > "$BUILD_DIR/payload_gpu_manufacturer_projector_exe.h"
 xxd -i -n payload_gpu_hardware_id_plan_ps1 "$HARDWARE_ID_PLAN_SRC" \
     > "$BUILD_DIR/payload_gpu_hardware_id_plan_ps1.h"
 xxd -i -n payload_project_gpu_hardware_id_ps1 "$HARDWARE_ID_PROJECTOR_SRC" \
@@ -271,6 +298,8 @@ xxd -i -n payload_force_displayfreq_ps1 "$DISPLAY_HELPER_SRC" \
     > "$BUILD_DIR/payload_force_displayfreq_ps1.h"
 xxd -i -n payload_install_display_driver_ps1 "$DRIVER_INSTALL_SRC" \
     > "$BUILD_DIR/payload_install_display_driver_ps1.h"
+xxd -i -n payload_display_driver_trust_ps1 "$DRIVER_TRUST_SRC" \
+    > "$BUILD_DIR/payload_display_driver_trust_ps1.h"
 xxd -i -n payload_install_chipset_device_ps1 "$CHIPSET_INSTALL_SRC" \
     > "$BUILD_DIR/payload_install_chipset_device_ps1.h"
 xxd -i -n payload_install_nvapi_system_ps1 "$NVAPI_INSTALL_SRC" \

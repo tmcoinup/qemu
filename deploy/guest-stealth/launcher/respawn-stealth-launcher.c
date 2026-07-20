@@ -1,7 +1,6 @@
 #ifndef UNICODE
 #define UNICODE
 #endif
-
 #ifndef _UNICODE
 #define _UNICODE
 #endif
@@ -17,15 +16,20 @@
 #include "payload-security.h"
 #include "launcher-arguments.h"
 #include "payload_respawn_ps1.h"
+#include "payload_respawn_restart_state_ps1.h"
 #include "payload_configure_power_policy_ps1.h"
 #include "payload_apply_gpu_spoof_ps1.h"
 #include "payload_persist_gpu_profile_ps1.h"
 #include "payload_gpu_profile_transaction_ps1.h"
+#include "payload_gpu_profile_registry_core_ps1.h"
 #include "payload_refresh_gpu_name_ps1.h"
+#include "payload_gpu_manufacturer_projection_ps1.h"
+#include "payload_gpu_manufacturer_projector_exe.h"
 #include "payload_gpu_hardware_id_plan_ps1.h"
 #include "payload_project_gpu_hardware_id_ps1.h"
 #include "payload_force_displayfreq_ps1.h"
 #include "payload_install_display_driver_ps1.h"
+#include "payload_display_driver_trust_ps1.h"
 #include "payload_install_chipset_device_ps1.h"
 #include "payload_install_nvapi_system_ps1.h"
 #include "payload_nvapi_system_transaction_ps1.h"
@@ -43,7 +47,6 @@
 #include "payload_nvapi_x64_dll.h"
 #include "payload_adl_x86_dll.h"
 #include "payload_adl_x64_dll.h"
-
 #ifndef ARRAY_LEN
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 #endif
@@ -58,15 +61,20 @@
  */
 static const EmbeddedPayload embedded_payloads[] = {
     { L"respawn-stealth-local.ps1", payload_respawn_ps1, (DWORD)sizeof(payload_respawn_ps1) },
+    { L"respawn-restart-state.ps1", payload_respawn_restart_state_ps1, (DWORD)sizeof(payload_respawn_restart_state_ps1) },
     { L"configure-power-policy.ps1", payload_configure_power_policy_ps1, (DWORD)sizeof(payload_configure_power_policy_ps1) },
     { L"apply-gpu-spoof.ps1", payload_apply_gpu_spoof_ps1, (DWORD)sizeof(payload_apply_gpu_spoof_ps1) },
     { L"persist-gpu-profile.ps1", payload_persist_gpu_profile_ps1, (DWORD)sizeof(payload_persist_gpu_profile_ps1) },
     { L"gpu-profile-transaction.ps1", payload_gpu_profile_transaction_ps1, (DWORD)sizeof(payload_gpu_profile_transaction_ps1) },
+    { L"gpu-profile-registry-core.ps1", payload_gpu_profile_registry_core_ps1, (DWORD)sizeof(payload_gpu_profile_registry_core_ps1) },
     { L"refresh-gpu-name.ps1", payload_refresh_gpu_name_ps1, (DWORD)sizeof(payload_refresh_gpu_name_ps1) },
+    { L"gpu-manufacturer-projection.ps1", payload_gpu_manufacturer_projection_ps1, (DWORD)sizeof(payload_gpu_manufacturer_projection_ps1) },
+    { L"gpu-manufacturer-projector.exe", payload_gpu_manufacturer_projector_exe, (DWORD)sizeof(payload_gpu_manufacturer_projector_exe) },
     { L"gpu-hardware-id-plan.ps1", payload_gpu_hardware_id_plan_ps1, (DWORD)sizeof(payload_gpu_hardware_id_plan_ps1) },
     { L"project-gpu-hardware-id.ps1", payload_project_gpu_hardware_id_ps1, (DWORD)sizeof(payload_project_gpu_hardware_id_ps1) },
     { L"force-displayfreq.ps1", payload_force_displayfreq_ps1, (DWORD)sizeof(payload_force_displayfreq_ps1) },
     { L"install-display-driver.ps1", payload_install_display_driver_ps1, (DWORD)sizeof(payload_install_display_driver_ps1) },
+    { L"display-driver-trust.ps1", payload_display_driver_trust_ps1, (DWORD)sizeof(payload_display_driver_trust_ps1) },
     { L"install-chipset-device.ps1", payload_install_chipset_device_ps1, (DWORD)sizeof(payload_install_chipset_device_ps1) },
     { L"install-nvapi-system.ps1", payload_install_nvapi_system_ps1, (DWORD)sizeof(payload_install_nvapi_system_ps1) },
     { L"nvapi-system-transaction.ps1", payload_nvapi_system_transaction_ps1, (DWORD)sizeof(payload_nvapi_system_transaction_ps1) },
@@ -86,7 +94,6 @@ static const EmbeddedPayload embedded_payloads[] = {
     { L"atiadlxx32.dll", payload_adl_x86_dll, (DWORD)sizeof(payload_adl_x86_dll) },
     { L"atiadlxx.dll", payload_adl_x64_dll, (DWORD)sizeof(payload_adl_x64_dll) },
 };
-
 static int append_char(wchar_t *buf, size_t cap, size_t *len, wchar_t ch)
 {
     if (*len + 1 >= cap) {
@@ -457,7 +464,12 @@ int wmain(int argc, wchar_t **argv)
 
     payload_lock = payload_acquire_lock(root_dir);
     if (payload_lock == INVALID_HANDLE_VALUE) {
-        return 1;
+        DWORD lock_error = GetLastError();
+        if (!autorun) {
+            MessageBoxW(NULL, lock_error == ERROR_SHARING_VIOLATION || lock_error == ERROR_LOCK_VIOLATION ? L"已有一次自动或手动初始化正在运行，请等待其完成。" : L"无法锁定初始化目录；请检查权限、重解析点与日志。",
+                        L"respawn-stealth 启动失败", MB_ICONINFORMATION | MB_OK);
+        }
+        return lock_error == ERROR_SHARING_VIOLATION || lock_error == ERROR_LOCK_VIOLATION ? ERROR_INSTALL_ALREADY_RUNNING : 1;
     }
 
     if (!join_path(respawn_path, ARRAY_LEN(respawn_path), work_dir,
@@ -479,6 +491,10 @@ int wmain(int argc, wchar_t **argv)
                        autorun, firstlogon);
 
 out:
+    if (code != 0 && !autorun) {
+        swprintf(respawn_path, ARRAY_LEN(respawn_path), L"初始化未完成，退出码=%d。请查看 %ls 日志。", code, root_dir);
+        MessageBoxW(NULL, respawn_path, L"respawn-stealth 执行失败", MB_ICONERROR | MB_OK);
+    }
     CloseHandle(payload_lock);
     return code;
 }

@@ -9,9 +9,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 IDENTITY_SCRIPT="$REPO_ROOT/deploy/scripts/persist-gpu-profile.ps1"
 TRANSACTION_SCRIPT="$REPO_ROOT/deploy/scripts/gpu-profile-transaction.ps1"
+REGISTRY_CORE="$REPO_ROOT/deploy/scripts/gpu-profile-registry-core.ps1"
 APPLY_SCRIPT="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 REFRESH_SCRIPT="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
 PROFILE_DOC="$REPO_ROOT/deploy/docs/PROFILE-FIELDS.md"
+RUNTIME_HELPER_TEST="$SCRIPT_DIR/test_guest_shallow_pci_runtime_helpers.sh"
+TEST_RUNNER="$SCRIPT_DIR/run-vmate-tests.py"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -23,8 +26,20 @@ command -v pwsh >/dev/null 2>&1 || fail "缺少 pwsh，无法解析 PowerShell 5
     || fail "persist-gpu-profile.ps1 必须保留 UTF-8 BOM"
 [[ "$(xxd -p -l 3 "$TRANSACTION_SCRIPT")" == "efbbbf" ]] \
     || fail "gpu-profile-transaction.ps1 必须保留 UTF-8 BOM"
+[[ "$(xxd -p -l 3 "$REGISTRY_CORE")" == "efbbbf" ]] \
+    || fail "gpu-profile-registry-core.ps1 必须保留 UTF-8 BOM"
 [[ "$(xxd -p -l 3 "$REFRESH_SCRIPT")" == "efbbbf" ]] \
     || fail "refresh-gpu-name.ps1 必须保留 UTF-8 BOM"
+[[ -f "$RUNTIME_HELPER_TEST" ]] || fail "缺少浅层 PCI runtime helper 测试"
+
+# 主测试与运行时替身按职责拆开，并把物理行数/quick 接线作为回归契约。
+for test_source in "$0" "$RUNTIME_HELPER_TEST"; do
+    physical_lines="$(wc -l < "$test_source")"
+    (( physical_lines <= 500 )) \
+        || fail "$test_source 物理行数 $physical_lines 超过 500"
+done
+rg -F '"test_guest_shallow_pci_runtime_helpers.sh",' "$TEST_RUNNER" >/dev/null \
+    || fail "浅层 PCI runtime helper 测试没有加入 quick 测试集"
 
 IDENTITY_SCRIPT="$IDENTITY_SCRIPT" pwsh -NoLogo -NoProfile -NonInteractive -Command '
 $ErrorActionPreference = "Stop"
@@ -161,172 +176,6 @@ foreach ($badLocation in @(
 }
 ' >/dev/null
 
-# durable transaction helper 顶层只能定义函数/常量，可在 Linux 安全 dot-source；
-# 同时用纯 token 门禁覆盖拆分后最容易因漏打包或语法漂移而失效的入口。
-TRANSACTION_SCRIPT="$TRANSACTION_SCRIPT" pwsh -NoLogo -NoProfile -NonInteractive -Command '
-$ErrorActionPreference = "Stop"
-$tokens = $null
-$errors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile(
-    $env:TRANSACTION_SCRIPT, [ref]$tokens, [ref]$errors)
-if ($errors.Count -ne 0) {
-    throw ("PowerShell 语法错误：" + ($errors | ForEach-Object Message -join "; "))
-}
-. $env:TRANSACTION_SCRIPT
-Assert-IdentityToken "0123456789ABCDEF0123456789ABCDEF"
-foreach ($badToken in @(
-    "0123456789abcdef0123456789abcdef",
-    "0123456789ABCDEF0123456789ABCDE",
-    "0123456789ABCDEF0123456789ABCDEFF"
-)) {
-    $rejected = $false
-    try { Assert-IdentityToken $badToken } catch { $rejected = $true }
-    if (-not $rejected) { throw ("非法 transaction token 未被拒绝：" + $badToken) }
-}
-
-# Linux 没有 ScheduledTasks 模块，因此用同名函数模拟两个旧任务。成功路径必须
-# 对每个任务执行禁用/停止/删除；Stop 的注入故障必须原样上抛且禁止继续删除。
-function New-MockTask([string]$Name) {
-    return [pscustomobject]@{
-        TaskName=$Name; TaskPath="\"; State="Running"
-        Settings=[pscustomobject]@{ Enabled=$true }
-    }
-}
-$script:mockTasks = @{
-    "StealthGPU-RefreshName" = New-MockTask "StealthGPU-RefreshName"
-    "StealthGPU-ForceDisplayFreq" = New-MockTask "StealthGPU-ForceDisplayFreq"
-}
-$script:disableCount = 0; $script:stopCount = 0; $script:unregisterCount = 0
-function Get-ScheduledTask { param($ErrorAction) return @($script:mockTasks.Values) }
-function Disable-ScheduledTask {
-    param([string]$TaskName, [string]$TaskPath, $ErrorAction)
-    $script:disableCount++
-    $script:mockTasks[$TaskName].Settings.Enabled = $false
-}
-function Stop-ScheduledTask {
-    param([string]$TaskName, [string]$TaskPath, $ErrorAction)
-    $script:stopCount++
-    $script:mockTasks[$TaskName].State = "Disabled"
-}
-function Unregister-ScheduledTask {
-    param([string]$TaskName, [string]$TaskPath, [switch]$Confirm, $ErrorAction)
-    $script:unregisterCount++
-    [void]$script:mockTasks.Remove($TaskName)
-}
-Invoke-LegacyGpuTaskBarrier
-if ($script:mockTasks.Count -ne 0 -or $script:disableCount -ne 2 -or
-    $script:stopCount -ne 2 -or $script:unregisterCount -ne 2) {
-    throw "旧任务屏障成功路径没有完整停止并删除两个任务"
-}
-
-$script:mockTasks["StealthGPU-RefreshName"] = New-MockTask "StealthGPU-RefreshName"
-$script:unregisterCount = 0
-function Stop-ScheduledTask {
-    param([string]$TaskName, [string]$TaskPath, $ErrorAction)
-    throw "injected Stop-ScheduledTask failure"
-}
-$barrierRejected = $false
-try { Invoke-LegacyGpuTaskBarrier } catch { $barrierRejected = $true }
-if (-not $barrierRejected -or $script:unregisterCount -ne 0 -or
-    $script:mockTasks.Count -ne 1) {
-    throw "旧任务停止故障没有 fail-closed 阻止删除/后续 Stage"
-}
-' >/dev/null
-
-# refresh helper 同时承担严格只读 snapshot API；先做完整 AST 解析，防止 Windows
-# PowerShell 5.1 执行前才暴露语法错误。注册表主体不在 Linux 上求值。
-REFRESH_SCRIPT="$REFRESH_SCRIPT" pwsh -NoLogo -NoProfile -NonInteractive -Command '
-$tokens = $null
-$errors = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile(
-    $env:REFRESH_SCRIPT, [ref]$tokens, [ref]$errors)
-if ($errors.Count -ne 0) {
-    throw ("PowerShell 语法错误：" + ($errors | ForEach-Object Message -join "; "))
-}
-
-# 加载 strict reader/writer 的纯函数。fake RegistryKey 用于证明 Binary/QWord
-# 不会被压成 Int32，并验证错误 kind/data 会 fail-closed。
-foreach ($functionName in @(
-    "Get-ExactRegistryValue", "Get-LogicalMatchingDeviceId", "Set-VerifiedRegistryValue"
-)) {
-    $functionAst = $ast.Find({
-        param($node)
-        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq $functionName
-    }, $true)
-    if ($null -eq $functionAst) { throw ("缺少函数：" + $functionName) }
-    Invoke-Expression $functionAst.Extent.Text
-}
-if ((Get-LogicalMatchingDeviceId -VendorId 0x10DE -DeviceId 0x1C82) -cne
-        "PCI\VEN_10DE&DEV_1C82") {
-    throw "GTX 1050 Ti MatchingDeviceId 错误"
-}
-if ((Get-LogicalMatchingDeviceId -VendorId 0x1002 -DeviceId 0x67FF) -cne
-        "PCI\VEN_1002&DEV_67FF") {
-    throw "RX 560 MatchingDeviceId 错误"
-}
-$rejected = $false
-try {
-    Get-LogicalMatchingDeviceId -VendorId 0 -DeviceId 0x1C82 | Out-Null
-} catch { $rejected = $true }
-if (-not $rejected) { throw "越界 MatchingDeviceId 没有被拒绝" }
-
-$fakeKey = [pscustomobject]@{
-    Values=@{}; Kinds=@{}; CorruptName=$null; CorruptKindName=$null
-}
-$fakeKey | Add-Member ScriptMethod GetValueNames { return @($this.Values.Keys) }
-$fakeKey | Add-Member ScriptMethod GetValueKind {
-    param($Name)
-    if ($this.CorruptKindName -ceq $Name) {
-        return [Microsoft.Win32.RegistryValueKind]::String
-    }
-    return $this.Kinds[$Name]
-}
-$fakeKey | Add-Member ScriptMethod SetValue {
-    param($Name, $Value, $Kind)
-    $this.Values[$Name] = $Value
-    $this.Kinds[$Name] = $Kind
-}
-$fakeKey | Add-Member ScriptMethod GetValue {
-    param($Name, $DefaultValue, $Options)
-    $value = $this.Values[$Name]
-    if ($this.CorruptName -ceq $Name) {
-        if ($value -is [array]) {
-            $copy = @($value); $copy[0] = ([int]$copy[0] + 1) -band 0xFF
-            return [byte[]]$copy
-        }
-        return ([UInt64]$value + 1)
-    }
-    return $value
-}
-
-foreach ($binary in @(
-    [byte[]](0, 0, 0, 128),
-    [byte[]](0, 0, 0, 0, 1, 2, 3, 4)
-)) {
-    Set-VerifiedRegistryValue $fakeKey MemorySize $binary `
-        ([Microsoft.Win32.RegistryValueKind]::Binary)
-}
-foreach ($qword in @([UInt64]2147483648, [UInt64]4294967296)) {
-    Set-VerifiedRegistryValue $fakeKey qwMemorySize $qword `
-        ([Microsoft.Win32.RegistryValueKind]::QWord)
-}
-$fakeKey.CorruptName = "MemorySize"
-$rejected = $false
-try {
-    Set-VerifiedRegistryValue $fakeKey MemorySize ([byte[]](1,2,3,4)) `
-        ([Microsoft.Win32.RegistryValueKind]::Binary)
-} catch { $rejected = $true }
-if (-not $rejected) { throw "Binary 写后错误数据没有 fail-closed" }
-$fakeKey.CorruptName = $null; $fakeKey.CorruptKindName = "qwMemorySize"
-$rejected = $false
-try {
-    Set-VerifiedRegistryValue $fakeKey qwMemorySize ([UInt64]4294967296) `
-        ([Microsoft.Win32.RegistryValueKind]::QWord)
-} catch { $rejected = $true }
-if (-not $rejected) { throw "QWord 写后错误 kind 没有 fail-closed" }
-' >/dev/null
-
 for value_name in \
     IdentitySchemaVersion IdentityId SpoofPciVendorId SpoofPciDeviceId \
     SpoofSubsystemVendorId SpoofSubsystemDeviceId SpoofRevisionId \
@@ -353,7 +202,9 @@ identity_id_line="$(rg -n -F '$versionKey.SetValue('\''IdentityId'\'', $versionI
 schema_two_line="$(rg -n -F '$versionKey.SetValue('\''IdentitySchemaVersion'\'', 2' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
 flush_line="$(rg -n -F '$versionKey.Flush()' "$IDENTITY_SCRIPT" | cut -d: -f1)"
-transaction_flush_line="$(rg -n -F '$transactionKey.SetValue('\''TransactionSchemaVersion'\'', 1' \
+driver_inf_line="$(rg -n -F '$transactionKey.SetValue('\''DriverInfPath'\'', $driverInfPath' \
+    "$IDENTITY_SCRIPT" | cut -d: -f1)"
+transaction_flush_line="$(rg -n -F '$transactionKey.SetValue('\''TransactionSchemaVersion'\'', 2' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
 pending_line="$(rg -n -F '$configKey.SetValue('\''PendingIdentity'\'', $versionId' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
@@ -362,17 +213,19 @@ commit_line="$(rg -n -F 'Set-CurrentIdentityPointer $configKey $expected $true $
 mirror_line="$(rg -n -F '$configKey.SetValue('\''SpoofName'\'', $receipt.NewSpoofName' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
 [[ -n "$create_line" && -n "$schema_zero_line" && -n "$identity_id_line" && \
-    -n "$schema_two_line" && -n "$flush_line" && -n "$transaction_flush_line" && \
+    -n "$schema_two_line" && -n "$flush_line" && -n "$driver_inf_line" && \
+    -n "$transaction_flush_line" && \
     -n "$pending_line" && -n "$commit_line" && \
     -n "$mirror_line" && "$create_line" -lt "$schema_zero_line" && \
     "$schema_zero_line" -lt "$identity_id_line" && \
     "$identity_id_line" -lt "$schema_two_line" && \
     "$schema_two_line" -le "$flush_line" && \
-    "$flush_line" -lt "$transaction_flush_line" && \
+    "$flush_line" -lt "$driver_inf_line" && \
+    "$driver_inf_line" -lt "$transaction_flush_line" && \
     "$transaction_flush_line" -lt "$pending_line" && \
     "$commit_line" -lt "$mirror_line" ]] \
     || fail "身份写者没有遵守 identity/journal/Pending/CAS 提交顺序"
-[[ "$(rg -c -F '$ConfigKey.SetValue('\''CurrentIdentity'\'', $NewValue' "$TRANSACTION_SCRIPT")" -eq 1 ]] \
+[[ "$(rg -c -F '$ConfigKey.SetValue('\''CurrentIdentity'\'', $NewValue' "$REGISTRY_CORE")" -eq 1 ]] \
     || fail "durable transaction helper 中 CurrentIdentity 必须只有一个 CAS 写入点"
 rg -F "Join-Path \$PSScriptRoot 'gpu-profile-transaction.ps1'" "$IDENTITY_SCRIPT" >/dev/null \
     || fail "persist 没有从同目录加载 durable transaction helper"
@@ -380,13 +233,19 @@ rg -F 'Test-Path -LiteralPath $transactionHelperPath -PathType Leaf' "$IDENTITY_
     || fail "persist dot-source 前没有严格检查 transaction helper 文件"
 rg -F '. $transactionHelperPath' "$IDENTITY_SCRIPT" >/dev/null \
     || fail "persist 没有 dot-source transaction helper"
-for moved_function in Assert-IdentityToken Get-ExactRegistryValue \
-        Invoke-WithIdentityWriterLock Invoke-RecoverOrRollback; do
-    rg -F "function $moved_function" "$TRANSACTION_SCRIPT" >/dev/null \
-        || fail "transaction helper 缺少已拆分函数：$moved_function"
+rg -F "Join-Path \$PSScriptRoot 'gpu-profile-registry-core.ps1'" \
+        "$TRANSACTION_SCRIPT" >/dev/null \
+    || fail "transaction helper 没有加载 registry core"
+for moved_function in Assert-IdentityToken Get-ExactRegistryValue; do
+    rg -F "function $moved_function" "$REGISTRY_CORE" >/dev/null \
+        || fail "registry core 缺少已拆分函数：$moved_function"
     if rg -F "function $moved_function" "$IDENTITY_SCRIPT" >&2; then
         fail "persist 仍重复定义 transaction 函数：$moved_function"
     fi
+done
+for moved_function in Invoke-WithIdentityWriterLock Invoke-RecoverOrRollback; do
+    rg -F "function $moved_function" "$TRANSACTION_SCRIPT" >/dev/null \
+        || fail "transaction helper 缺少已拆分函数：$moved_function"
 done
 for old_task in StealthGPU-RefreshName StealthGPU-ForceDisplayFreq; do
     rg -F "'$old_task'" "$TRANSACTION_SCRIPT" >/dev/null \
@@ -494,20 +353,40 @@ commit_cas_line="$(rg -n -F 'Set-CurrentIdentityPointer $configKey $expected $tr
 rg -F 'Invoke-LegacyGpuTaskBarrier' "$IDENTITY_SCRIPT" >/dev/null \
     || fail "直接 Stage 没有 fail-closed 旧任务屏障"
 
-# 名称刷新器只能写 Display Class 软件键。GPU Enum\PCI HardwareID 的唯一例外由
-# 独立 projector 以 fake-first + 完整 physical 尾部事务处理；refresh 自身仍严禁写入。
-rg -F "Set-VerifiedRegistryValue \$classKey 'MatchingDeviceId' \$matchingId \$string" \
+# 名称刷新器只能把品牌写进 FriendlyName/HardwareInformation。其余 Enum/Class
+# 安装字段必须收敛回 stock INF，供 SetupAPI 关联微软签名的当前 driver node。
+rg -F "Set-VerifiedRegistryValue \$classKey 'MatchingDeviceId'" \
     "$REFRESH_SCRIPT" >/dev/null \
-    || fail "没有恢复从 profile 派生的旧版浅层 MatchingDeviceId"
+    || fail "没有恢复 stock VioGpuDod MatchingDeviceId"
+rg -F '$driverMatchingId $string' "$REFRESH_SCRIPT" >/dev/null \
+    || fail "MatchingDeviceId 没有使用独立的 stock 驱动匹配值"
+if rg -F "MatchingDeviceId=[pscustomobject]@{ Value=('PCI\\VEN_{0:X4}" \
+        "$TRANSACTION_SCRIPT" >&2; then
+    fail "durable transaction 仍从伪装 PCI 身份派生 MatchingDeviceId"
+fi
 for brand_contract in \
         "Set-VerifiedRegistryValue \$enumKey 'FriendlyName' \$Config.SpoofName \$string" \
-        "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$Config.SpoofName \$string" \
-        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$Config.SpoofVendor \$string" \
-        "Set-VerifiedRegistryValue \$classKey 'DriverDesc' \$Config.SpoofName \$string" \
-        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$Config.SpoofVendor \$string" \
+        "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$stockEnumDescription \$string" \
+        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$stockEnumProvider \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'DriverDesc' \$stockDriverDescription \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$stockDriverProvider \$string" \
         "Set-VerifiedRegistryValue \$classKey 'HardwareInformation.AdapterString' \$Config.SpoofName \$string"; do
     rg -F "$brand_contract" "$REFRESH_SCRIPT" >/dev/null \
         || fail "GPU 显示品牌兜底缺少：$brand_contract"
+done
+for schema_two_contract in 'if ($transactionSchema -ne 2)' StagedDriverInfPath \
+        "'DriverInfPath' -Kind \$stringKind" "'^oem[0-9]+\\.inf$'"; do
+    rg -F "$schema_two_contract" "$REFRESH_SCRIPT" >/dev/null \
+        || fail "schema-2 staged refresh 缺少 DriverInfPath 契约：$schema_two_contract"
+done
+for forbidden_install_spoof in \
+        "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$Config.SpoofName" \
+        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$Config.SpoofVendor" \
+        "Set-VerifiedRegistryValue \$classKey 'DriverDesc' \$Config.SpoofName" \
+        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$Config.SpoofVendor"; do
+    if rg -F "$forbidden_install_spoof" "$REFRESH_SCRIPT" >&2; then
+        fail "refresh 仍会破坏 WHQL driver node 关联：$forbidden_install_spoof"
+    fi
 done
 for refresh_task_contract in \
         "\$taskName = 'StealthGPU-RefreshName'" \
@@ -543,7 +422,8 @@ commit_pointer_line="$(rg -n -F '& $identityHelperSource -CommitIdentity $identi
     "$scan_line" -lt "$projection_line" ]] \
     || fail "必须先捕获旧 profile，再于设备状态和 Class/Enum 写入前执行浅层门禁"
 
-for source_file in "$IDENTITY_SCRIPT" "$TRANSACTION_SCRIPT" "$APPLY_SCRIPT" "$REFRESH_SCRIPT"; do
+for source_file in "$IDENTITY_SCRIPT" "$TRANSACTION_SCRIPT" "$REGISTRY_CORE" \
+        "$APPLY_SCRIPT" "$REFRESH_SCRIPT"; do
     code_lines="$(awk '!/^[[:space:]]*#/ && !/^[[:space:]]*$/ { count++ } END { print count + 0 }' "$source_file")"
     (( code_lines <= 500 )) || fail "$source_file 非注释代码行数 $code_lines 超过 500"
 done

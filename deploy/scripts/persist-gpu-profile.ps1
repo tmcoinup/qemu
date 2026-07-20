@@ -356,6 +356,15 @@ try {
         $classKey = $baseKey.OpenSubKey($classPath, $false)
         if ($null -eq $classKey) { throw ('active Class 子键不存在：' + $classPath) }
         try {
+            $driverInfPath = [string](Get-ExactRegistryValue $classKey 'InfPath' `
+                ([Microsoft.Win32.RegistryValueKind]::String))
+            $driverInfSection = [string](Get-ExactRegistryValue $classKey 'InfSection' `
+                ([Microsoft.Win32.RegistryValueKind]::String))
+            if ($driverInfPath -cnotmatch '^oem[0-9]+\.inf$' -or
+                $driverInfSection -cne 'VioGpuDod_Inst') {
+                throw ('active Class INF 非 stock VioGpuDod：' +
+                    $driverInfPath + '/' + $driverInfSection)
+            }
             $stageResult = Invoke-WithIdentityWriterLock {
                 $configKey = $baseKey.CreateSubKey('SOFTWARE\StealthGPU', $true)
                 $identitiesKey = $null; $transactionsKey = $null
@@ -422,9 +431,10 @@ try {
                     $transactionKey.SetValue('PreviousSpoofNamePresent', [int]$oldMirror.Present, $dword)
                     if ($oldMirror.Present) { $transactionKey.SetValue('PreviousSpoofName', $oldMirror.Value, $string) }
                     $transactionKey.SetValue('ClassSubkey', $classSubkey, $string)
+                    $transactionKey.SetValue('DriverInfPath', $driverInfPath, $string)
                     Write-ProjectionJournal $transactionKey 'Enum' $enumKey $enumPath $enumJournalNames
                     Write-ProjectionJournal $transactionKey 'Class' $classKey $classPath $classJournalNames
-                    $transactionKey.SetValue('TransactionSchemaVersion', 1, $dword); $transactionKey.Flush()
+                    $transactionKey.SetValue('TransactionSchemaVersion', 2, $dword); $transactionKey.Flush()
                     $configKey.SetValue('PendingIdentity', $versionId, $string); $configKey.Flush()
                     Assert-RegistryState $configKey 'PendingIdentity' $true $versionId $string
                     return [pscustomobject]@{ NewIdentityId=$versionId; PreviousPointerPresent=$oldPointer.Present; PreviousIdentityId=$oldPointer.Value }

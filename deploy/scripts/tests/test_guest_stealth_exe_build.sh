@@ -26,12 +26,26 @@ EXE="$OUT_DIR/respawn-stealth.exe"
 PAYLOAD_SECURITY="$REPO_ROOT/deploy/guest-stealth/launcher/payload-security.c"
 PAYLOAD_ENVIRONMENT="$REPO_ROOT/deploy/guest-stealth/launcher/payload-environment.c"
 LAUNCHER_ARGUMENTS="$REPO_ROOT/deploy/guest-stealth/launcher/launcher-arguments.c"
+MANUFACTURER_HELPER="$REPO_ROOT/deploy/scripts/gpu-manufacturer-projection.ps1"
+MANUFACTURER_PROJECTOR_SOURCE="$REPO_ROOT/deploy/guest-stealth/launcher/gpu-manufacturer-projector.c"
+MANUFACTURER_PROJECTOR_EXE="$BUILD_DIR/gpu-manufacturer-projector.exe"
 [[ -s "$EXE" ]] || fail "未生成 respawn-stealth.exe"
+[[ -s "$MANUFACTURER_PROJECTOR_EXE" ]] \
+    || fail "未生成 gpu-manufacturer-projector.exe"
 
 file "$EXE" | grep -F 'PE32+ executable' >/dev/null \
     || fail "输出不是 Windows PE64 EXE: $(file "$EXE")"
 llvm-readobj --file-headers "$EXE" | grep -F 'TimeDateStamp: 1970-01-01 00:00:00 (0x0)' >/dev/null \
     || fail "EXE 的 PE/COFF 时间戳不是可复现构建要求的 0"
+file "$MANUFACTURER_PROJECTOR_EXE" | grep -F 'PE32+ executable' >/dev/null \
+    || fail "厂商投影器不是 Windows PE64 EXE: $(file "$MANUFACTURER_PROJECTOR_EXE")"
+llvm-readobj --file-headers "$MANUFACTURER_PROJECTOR_EXE" \
+    | grep -F 'TimeDateStamp: 1970-01-01 00:00:00 (0x0)' >/dev/null \
+    || fail "厂商投影器的 PE/COFF 时间戳不是可复现构建要求的 0"
+for projector_api in SetupDiGetClassDevsW CM_Set_DevNode_PropertyW; do
+    strings -a "$MANUFACTURER_PROJECTOR_EXE" | grep -F "$projector_api" >/dev/null \
+        || fail "厂商投影器缺少 Windows API 导入: $projector_api"
+done
 
 strings -a "$EXE" | grep -F 'requireAdministrator' >/dev/null \
     || fail "EXE 未嵌入 requireAdministrator manifest"
@@ -45,13 +59,22 @@ strings -a -el "$EXE" | grep -F 'configure-power-policy.ps1' >/dev/null \
     || fail "EXE launcher 未包含电源策略 payload 文件名"
 strings -a "$EXE" | grep -F 'apply-gpu-spoof.ps1' >/dev/null \
     || fail "EXE 未包含 apply-gpu-spoof payload 文件名"
-for helper_file in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 refresh-gpu-name.ps1 \
-        gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1 force-displayfreq.ps1; do
+for manufacturer_payload in gpu-manufacturer-projection.ps1 \
+        gpu-manufacturer-projector.exe; do
+    strings -a -el "$EXE" | grep -F "$manufacturer_payload" >/dev/null \
+        || fail "EXE launcher 未包含厂商投影 payload 文件名: $manufacturer_payload"
+done
+for helper_file in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 \
+        gpu-profile-registry-core.ps1 refresh-gpu-name.ps1 \
+        gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1 \
+        force-displayfreq.ps1 respawn-restart-state.ps1; do
     strings -a "$EXE" | grep -F "$helper_file" >/dev/null \
         || fail "EXE 未包含独立 helper 文件名: $helper_file"
 done
 strings -a "$EXE" | grep -F 'install-display-driver.ps1' >/dev/null \
     || fail "EXE 未包含离线显示驱动安装 payload 文件名"
+strings -a "$EXE" | grep -F 'display-driver-trust.ps1' >/dev/null \
+    || fail "EXE 未包含显示驱动信任 helper 文件名"
 strings -a "$EXE" | grep -F 'install-chipset-device.ps1' >/dev/null \
     || fail "EXE 未包含芯片组识别 INF 安装 payload 文件名"
 strings -a "$EXE" | grep -F 'install-nvapi-system.ps1' >/dev/null \
@@ -148,6 +171,24 @@ grep -F '#include "payload_configure_power_policy_ps1.h"' \
 grep -F '{ L"configure-power-policy.ps1", payload_configure_power_policy_ps1,' \
     "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
     || fail "launcher 没有把电源策略 helper 加入实际释放表"
+grep -F '#include "payload_respawn_restart_state_ps1.h"' \
+    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
+    || fail "launcher 没有编译重启状态 helper"
+grep -F '{ L"respawn-restart-state.ps1", payload_respawn_restart_state_ps1,' \
+    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
+    || fail "launcher 没有释放重启状态 helper"
+grep -F '#include "payload_gpu_manufacturer_projection_ps1.h"' \
+    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
+    || fail "launcher 没有编译厂商投影 PowerShell payload"
+grep -F '{ L"gpu-manufacturer-projection.ps1", payload_gpu_manufacturer_projection_ps1,' \
+    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
+    || fail "launcher 没有释放厂商投影 PowerShell helper"
+grep -F '#include "payload_gpu_manufacturer_projector_exe.h"' \
+    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
+    || fail "launcher 没有编译厂商投影器 payload"
+grep -F '{ L"gpu-manufacturer-projector.exe", payload_gpu_manufacturer_projector_exe,' \
+    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
+    || fail "launcher 没有释放厂商投影器"
 grep -F 'O:BAD:P' "$PAYLOAD_SECURITY" >/dev/null \
     || fail "payload 安全描述符没有固定 Administrators Owner"
 grep -F 'OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION' \
@@ -196,7 +237,8 @@ grep -F 'COMPLUS_*' "$PAYLOAD_ENVIRONMENT" >/dev/null \
 
 for c_source in \
         "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" \
-        "$PAYLOAD_SECURITY" "$PAYLOAD_ENVIRONMENT" "$LAUNCHER_ARGUMENTS"; do
+        "$PAYLOAD_SECURITY" "$PAYLOAD_ENVIRONMENT" "$LAUNCHER_ARGUMENTS" \
+        "$MANUFACTURER_PROJECTOR_SOURCE"; do
     [[ "$(wc -l < "$c_source")" -le 500 ]] \
         || fail "$c_source 超过 500 行"
 done
@@ -218,24 +260,30 @@ fi
 
 # C 编译器应把每个数组原样放进 PE。直接查找完整二进制子串，比只看文件名更能
 # 防止 build 脚本漏掉或截断 SYS/CAT/INF；三者原始字节不变也是签名有效的前提。
-python3 - "$EXE" "$REPO_ROOT" <<'PY'
+python3 - "$EXE" "$REPO_ROOT" "$MANUFACTURER_PROJECTOR_EXE" <<'PY'
 from pathlib import Path
 import sys
 
 exe_path = Path(sys.argv[1])
 root = Path(sys.argv[2])
+manufacturer_projector_path = Path(sys.argv[3])
 exe = exe_path.read_bytes()
 payloads = (
     root / "deploy/guest-stealth/respawn-stealth-local.ps1",
+    root / "deploy/guest-stealth/respawn-restart-state.ps1",
     root / "deploy/guest-stealth/configure-power-policy.ps1",
     root / "deploy/guest-stealth/install-display-driver.ps1",
+    root / "deploy/guest-stealth/display-driver-trust.ps1",
     root / "deploy/guest-stealth/install-chipset-device.ps1",
     root / "deploy/guest-stealth/install-nvapi-system.ps1",
     root / "deploy/guest-stealth/nvapi-system-transaction.ps1",
     root / "deploy/scripts/apply-gpu-spoof.ps1",
     root / "deploy/scripts/persist-gpu-profile.ps1",
     root / "deploy/scripts/gpu-profile-transaction.ps1",
+    root / "deploy/scripts/gpu-profile-registry-core.ps1",
     root / "deploy/scripts/refresh-gpu-name.ps1",
+    root / "deploy/scripts/gpu-manufacturer-projection.ps1",
+    manufacturer_projector_path,
     root / "deploy/scripts/gpu-hardware-id-plan.ps1",
     root / "deploy/scripts/project-gpu-hardware-id.ps1",
     root / "deploy/scripts/force-displayfreq.ps1",
@@ -256,9 +304,12 @@ for payload_path in payloads:
 PY
 
 # legacy 调试发布仍应平铺全部 helper；默认发布继续只有一个 EXE。
-for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 refresh-gpu-name.ps1 \
+for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 \
+        gpu-profile-registry-core.ps1 refresh-gpu-name.ps1 \
+        gpu-manufacturer-projection.ps1 gpu-manufacturer-projector.exe \
         gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1 \
         force-displayfreq.ps1 configure-power-policy.ps1 \
+        display-driver-trust.ps1 respawn-restart-state.ps1 \
         install-chipset-device.ps1 CannonLake-HSystem.inf cannonlake-h.cat \
         SunrisePoint-HSystem.inf sunrisepoint-h.cat \
         install-nvapi-system.ps1 nvapi-system-transaction.ps1 \
@@ -294,6 +345,7 @@ env -u INCLUDE_LEGACY_SCRIPTS \
     "$PACKAGE_REPO/deploy/guest-stealth/package.sh" >/dev/null
 
 PACKAGE_DIST="$PACKAGE_REPO/deploy/guest-stealth/dist"
+PACKAGE_BUILD="$PACKAGE_REPO/build/guest-stealth-exe"
 mapfile -d '' -t package_entries < <(find "$PACKAGE_DIST" -mindepth 1 -maxdepth 1 -print0)
 [[ "${#package_entries[@]}" -eq 1 &&
    "${package_entries[0]}" == "$PACKAGE_DIST/respawn-stealth.exe" &&
@@ -313,14 +365,28 @@ if ! cmp -s "$EXE" "$PACKAGE_EXE"; then
 fi
 [[ "$direct_hash" == "$package_hash" ]] \
     || fail "逐字节相同但 SHA-256 异常不一致: direct=$direct_hash package=$package_hash"
+cmp -s "$MANUFACTURER_PROJECTOR_EXE" \
+    "$PACKAGE_BUILD/gpu-manufacturer-projector.exe" \
+    || fail "相同源码连续构建的厂商投影器不一致"
 
-# 显式 legacy 模式只供调试，但也必须平铺与 EXE 完全相同的电源 helper；仅 grep
-# package.sh 中的文件名不足以证明 cp 真正执行，因此运行一次并逐字节比较。
+# 显式 legacy 模式只供调试，但也必须平铺与 EXE 完全相同的 helper 和投影器；仅
+# grep package.sh 中的文件名不足以证明 cp 真正执行，因此运行一次并逐字节比较。
 INCLUDE_LEGACY_SCRIPTS=1 \
     "$PACKAGE_REPO/deploy/guest-stealth/package.sh" >/dev/null
 cmp -s "$REPO_ROOT/deploy/guest-stealth/configure-power-policy.ps1" \
     "$PACKAGE_DIST/configure-power-policy.ps1" \
     || fail "legacy 调试包的电源 helper 与正式源不一致"
+cmp -s "$REPO_ROOT/deploy/guest-stealth/respawn-restart-state.ps1" \
+    "$PACKAGE_DIST/respawn-restart-state.ps1" \
+    || fail "legacy 调试包的重启状态 helper 与正式源不一致"
+cmp -s "$MANUFACTURER_HELPER" \
+    "$PACKAGE_DIST/gpu-manufacturer-projection.ps1" \
+    || fail "legacy 调试包的厂商投影 helper 与正式源不一致"
+cmp -s "$PACKAGE_BUILD/gpu-manufacturer-projector.exe" \
+    "$PACKAGE_DIST/gpu-manufacturer-projector.exe" \
+    || fail "legacy 调试包的厂商投影器与本次受控构建不一致"
+file "$PACKAGE_DIST/gpu-manufacturer-projector.exe" | grep -F 'PE32+ executable' >/dev/null \
+    || fail "legacy 调试包的厂商投影器不是 Windows PE64 EXE"
 
 # 非 0/1 的调试开关属于环境污染而不是显式授权，必须在清空上次正式 dist 之前失败。
 # 失败后再次复核原 EXE 仍在，避免用户因一个拼写错误丢掉已验证发布物。
@@ -367,9 +433,10 @@ fi
 
 for source_file in \
         "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" \
-        "$PAYLOAD_SECURITY"; do
+        "$PAYLOAD_SECURITY" "$MANUFACTURER_HELPER" \
+        "$MANUFACTURER_PROJECTOR_SOURCE"; do
     [[ "$(wc -l < "$source_file")" -le 500 ]] \
-        || fail "launcher C 单文件超过 500 行: $source_file"
+        || fail "生产源单文件超过 500 行: $source_file"
 done
 
 echo "OK: guest-stealth single EXE build checks passed"

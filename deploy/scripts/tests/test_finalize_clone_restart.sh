@@ -7,6 +7,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 FINALIZE="$REPO_ROOT/deploy/scripts/finalize-clone-gpu.sh"
+HOST_FIX="$REPO_ROOT/deploy/scripts/host-fix-gpu-devpkey.sh"
+HIVE_PATCHER="$REPO_ROOT/deploy/scripts/lib/devpkey-patch.py"
+PACKAGE_HELPER="$REPO_ROOT/deploy/scripts/lib/signed-driver-package.py"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -92,5 +95,39 @@ grep -F 'VMS_DIR="$VMS_DIR"' "$FINALIZE" >/dev/null ||
     fail "生产 finalize 未显式注入 VMS_DIR"
 grep -F 'IMAGE_ROOT="${IMAGE_ROOT:-}"' "$FINALIZE" >/dev/null ||
     fail "生产 finalize 未显式注入 IMAGE_ROOT"
+grep -F 'STOCK_MATCHING_ID = r'\''PCI\VEN_1AF4&DEV_1050'\''' \
+    "$HIVE_PATCHER" >/dev/null ||
+    fail "离线修复器未固定 stock viogpudo MatchingDeviceId"
+for signed_metadata_contract in \
+        "service.casefold() == 'viogpudod'" \
+        "%viogpudod.devicedesc%;" \
+        "%vendor%;" \
+        "'DriverDesc': STOCK_DRIVER_DESCRIPTION" \
+        "'ProviderName': STOCK_DRIVER_PROVIDER" \
+        "'MatchingDeviceId': STOCK_MATCHING_ID"; do
+    grep -F "$signed_metadata_contract" "$HIVE_PATCHER" >/dev/null ||
+        fail "离线修复器缺少签名关联契约：$signed_metadata_contract"
+done
+grep -F "re.fullmatch(" "$PACKAGE_HELPER" >/dev/null ||
+    fail "签名包预检没有约束发布 INF 文件名"
+grep -F 'EXPECTED_DIGESTS' "$PACKAGE_HELPER" >/dev/null ||
+    fail "签名包预检没有固定 INF/CAT/SYS 摘要"
+grep -F 'os.link(temporary, published, follow_symlinks=False)' "$PACKAGE_HELPER" >/dev/null ||
+    fail "离线修复器没有原子无覆盖恢复缺失的 oemN.inf"
+grep -F 'get_regular_file_metadata' "$PACKAGE_HELPER" >/dev/null ||
+    fail "离线修复器没有拒绝非普通发布 INF"
+grep -F "if not published_missing:" "$PACKAGE_HELPER" >/dev/null ||
+    fail "签名包预检没有对 existing oemN.inf fail-closed"
+grep -F "f'ControlSet{current:03d}'" "$HIVE_PATCHER" "$PACKAGE_HELPER" >/dev/null ||
+    fail "离线修复仍硬编码 ControlSet001"
+grep -F 'STOCK_INF="$STOCK_INF"' "$HOST_FIX" >/dev/null ||
+    fail "host finalize 没有把受信 stock INF 传给离线修复器"
+grep -F 'updated persistent refresh helper' "$HOST_FIX" >/dev/null ||
+    fail "host finalize 没有更新客体持久化 refresh helper"
+grep -F '安装关联字段（保留微软签名链）' "$HOST_FIX" >/dev/null ||
+    fail "host finalize 没有报告签名关联修复"
 
-echo "OK: finalize clone restart preserves custom image paths and start args"
+python3 -m py_compile "$HIVE_PATCHER" "$PACKAGE_HELPER" ||
+    fail "离线修复器 Python 语法错误"
+
+echo "OK: finalize preserves start args and repairs the complete signed-driver association"

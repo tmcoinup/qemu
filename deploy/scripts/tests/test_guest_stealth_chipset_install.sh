@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 INSTALLER="$REPO_ROOT/deploy/guest-stealth/install-chipset-device.ps1"
 RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
+RESTART_HELPER="$REPO_ROOT/deploy/guest-stealth/respawn-restart-state.ps1"
 BUILD_SCRIPT="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
 PAYLOAD_DIR="$REPO_ROOT/deploy/scripts/stock-intel-chipset-inf"
@@ -16,13 +17,15 @@ fail() {
     exit 1
 }
 
-for path in "$INSTALLER" "$RESPAWN" "$BUILD_SCRIPT" "$LAUNCHER"; do
+for path in "$INSTALLER" "$RESPAWN" "$RESTART_HELPER" "$BUILD_SCRIPT" "$LAUNCHER"; do
     [[ -f "$path" ]] || fail "缺少文件: $path"
 done
-[[ "$(wc -l < "$INSTALLER")" -le 500 ]] \
-    || fail "芯片组安装器超过 500 行"
+for bounded_file in "$INSTALLER" "$RESPAWN" "$RESTART_HELPER" "$0"; do
+    [[ "$(wc -l < "$bounded_file")" -le 500 ]] \
+        || fail "芯片组/重启实现或专项测试超过 500 行: $bounded_file"
+done
 
-PS_FILES="$INSTALLER:$RESPAWN" \
+PS_FILES="$INSTALLER:$RESPAWN:$RESTART_HELPER" \
 pwsh -NoLogo -NoProfile -NonInteractive -Command '
     $failed = $false
     foreach ($path in $env:PS_FILES -split [IO.Path]::PathSeparator) {
@@ -220,7 +223,7 @@ grep -F "exit \$RestartRequiredExitCode" "$INSTALLER" >/dev/null \
 grep -F 'Needs_NO_DRV' "$INSTALLER" >/dev/null \
     || fail "安装器没有验证 null-driver 语义"
 if grep -Ei 'Invoke-WebRequest|Invoke-RestMethod|http://|https://|devcon|testsigning|nointegritychecks' \
-        "$INSTALLER" "$RESPAWN" >&2; then
+        "$INSTALLER" "$RESPAWN" "$RESTART_HELPER" >&2; then
     fail "guest 运行链引入网络、devcon 或签名绕过"
 fi
 
@@ -232,12 +235,72 @@ spoof_call="$(grep -n '^& \$powershellExe @spoofArgs' "$RESPAWN" | cut -d: -f1)"
 (( chipset_call < display_call && display_call < spoof_call )) \
     || fail "芯片组/显示驱动/GPU spoof 调用顺序错误"
 
-grep -F 'if ($chipsetRc -eq 30)' "$RESPAWN" >/dev/null \
-    || fail "外层没有处理芯片组重启请求"
-grep -F 'Register-RespawnResumeTask -KeepFirstLogon:$FirstLogon' "$RESPAWN" >/dev/null \
-    || fail "芯片组重启没有复用二阶段恢复任务"
+grep -F '$chipsetRestartRequired = $chipsetRc -eq 30' "$RESPAWN" >/dev/null \
+    || fail "外层没有记录芯片组待重启状态"
+
+# 芯片组 3010 只记账并继续 GPU 流程，不能在这里调用统一重启 helper；
+# 否则首次运行会在 GPU 初始化前退出，恢复后又触发最终重启。
+chipset_block="$(sed -n '/^\$chipsetRc = \$LASTEXITCODE$/,/^# --- 4)/p' "$RESPAWN")"
+[[ "$chipset_block" == *'继续 GPU 初始化，并合并到最终一次重启'* ]] \
+    || fail "芯片组 3010 没有合并到最终重启"
+[[ "$chipset_block" != *'Restart-RespawnForPendingWork'* ]] \
+    || fail "芯片组 3010 仍会在 GPU 流程前单独重启"
+
+# 最终重启前注册专用验证阶段。该阶段若仍收到 30 必须保留任务；成功时先删除
+# 当前任务，再在第 4 段 GPU 流程之前退出，不能再次运行 spoof 或安排重启。
+verify_start="$(grep -n '^if (.*ChipsetVerification' \
+    "$RESPAWN" | cut -d: -f1)"
+gpu_stage="$(grep -n '^# --- 4)' "$RESPAWN" | cut -d: -f1)"
+verify_body="$(sed -n "${verify_start},${gpu_stage}p" "$RESPAWN")"
+[[ -n "$verify_start" && -n "$gpu_stage" && "$verify_start" -lt "$gpu_stage" ]] \
+    || fail "芯片组只验证阶段没有位于 GPU 流程之前"
+for contract in \
+        'if ($chipsetRestartRequired)' \
+        'exit 58' \
+        'Remove-RespawnResumeTask -CurrentInstance' \
+        'exit 0'; do
+    [[ "$verify_body" == *"$contract"* ]] \
+        || fail "芯片组只验证阶段缺少契约: $contract"
+done
+[[ "$verify_body" != *'@driverArgs'* && "$verify_body" != *'@spoofArgs'* &&
+   "$verify_body" != *'$shutdownExe'* ]] \
+    || fail "芯片组只验证阶段仍会运行 GPU 流程或重启"
+
+for stage_file in "$RESPAWN" "$RESTART_HELPER"; do
+    grep -F "[ValidateSet('Full', 'ChipsetVerification')]" "$stage_file" >/dev/null \
+        || fail "恢复阶段没有 ValidateSet 限制: $stage_file"
+done
+grep -F -- "-ResumeStage 'ChipsetVerification'" "$RESPAWN" >/dev/null \
+    || fail "最终重启前没有注册芯片组只验证任务"
+grep -F "'-ResumeStage', \$ResumeStage" "$RESPAWN" >/dev/null \
+    || fail "UAC 提权没有转发非默认恢复阶段"
+grep -F '$ResumeStage' "$RESTART_HELPER" >/dev/null \
+    || fail "恢复任务命令行没有携带阶段"
+grep -F '[string]$MainScriptPath' "$RESTART_HELPER" >/dev/null \
+    || fail "恢复任务没有显式接收主脚本路径"
+if grep -F '$PSCommandPath' "$RESTART_HELPER" >&2; then
+    fail "重启 helper 不得把自身 PSCommandPath 当作恢复入口"
+fi
+grep -F -- '-MainScriptPath $respawnMainScriptPath' "$RESPAWN" >/dev/null \
+    || fail "主流程没有把入口脚本路径传给恢复任务"
+grep -F "if (\$ResumeStage -eq 'Full' -and -not (Wait-ResumeDisplayDeviceReady))" \
+        "$RESPAWN" >/dev/null \
+    || fail "芯片组只验证阶段仍被显示设备就绪检查阻塞"
+
+# -NoReboot 必须把待重启状态返回给调用者；正常路径只在 GPU 初始化结束后安排
+# 最终重启，并且任务注册严格早于 shutdown。
+grep -F 'exit 30' "$RESPAWN" >/dev/null \
+    || fail "-NoReboot 没有返回芯片组待重启状态"
+register_verify_line="$(grep -n -- "-ResumeStage 'ChipsetVerification'" \
+    "$RESPAWN" | cut -d: -f1)"
+final_shutdown_line="$(grep -n '^& \$shutdownExe /r /t \$RebootDelay' \
+    "$RESPAWN" | cut -d: -f1)"
+[[ -n "$register_verify_line" && -n "$final_shutdown_line" &&
+   "$register_verify_line" -lt "$final_shutdown_line" ]] \
+    || fail "芯片组验证任务没有在最终重启前注册"
+
 for payload in install-chipset-device.ps1 CannonLake-HSystem.inf cannonlake-h.cat \
-        SunrisePoint-HSystem.inf sunrisepoint-h.cat; do
+        SunrisePoint-HSystem.inf sunrisepoint-h.cat respawn-restart-state.ps1; do
     grep -F "$payload" "$BUILD_SCRIPT" "$LAUNCHER" >/dev/null \
         || fail "单 EXE 接线缺少 $payload"
 done

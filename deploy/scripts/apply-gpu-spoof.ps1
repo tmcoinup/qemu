@@ -29,8 +29,9 @@ $powershellExe = Join-Path $PSHOME 'powershell.exe'
 # 在修改任何设备状态前先确认 payload 完整，防止安装到一半才发现辅助脚本缺失。
 $refreshHelperSource = Join-Path $PSScriptRoot 'refresh-gpu-name.ps1'; $displayModeHelperSource = Join-Path $PSScriptRoot 'force-displayfreq.ps1'
 $identityHelperSource = Join-Path $PSScriptRoot 'persist-gpu-profile.ps1'; $transactionHelperSource = Join-Path $PSScriptRoot 'gpu-profile-transaction.ps1'
+$registryCoreSource = Join-Path $PSScriptRoot 'gpu-profile-registry-core.ps1'
 $missingHelper = @($refreshHelperSource, $displayModeHelperSource, $identityHelperSource,
-    $transactionHelperSource) |
+    $transactionHelperSource, $registryCoreSource) |
     Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
 if (-not $ListOnly -and $missingHelper) {
     throw ("缺少同目录辅助脚本: " + $missingHelper)
@@ -481,7 +482,7 @@ try {
 }
 
 # 最后一次 PnP scan 可能回填 Class 安装状态，因此用同一个已提交
-# CurrentIdentity 快照同步恢复旧浅层 MatchingDeviceId 与名称镜像。
+# CurrentIdentity 快照同步恢复 stock MatchingDeviceId 与名称镜像。
 # 这一步不修改 Enum\PCI HardwareID/CompatibleIDs，也不改 PCI 配置空间。
 Write-Host "Reapplying profile-derived shallow Class identity after the final device scan..." -ForegroundColor Cyan
 try {

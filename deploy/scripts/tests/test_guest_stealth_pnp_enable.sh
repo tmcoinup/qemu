@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SPOOF="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
+RESTART_HELPER="$REPO_ROOT/deploy/guest-stealth/respawn-restart-state.ps1"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -37,11 +38,14 @@ if grep -nF 'Disable-PnpDevice' "$SPOOF" >&2; then
     fail "apply-gpu-spoof.ps1 不应再禁用显示适配器刷新 PnP"
 fi
 
-grep -F 'function Enable-RespawnDisplayDevices' "$RESPAWN" >/dev/null \
-    || fail "respawn-stealth-local.ps1 缺少外层 Display 启用兜底"
-grep -F 'Enable-PnpDevice -InstanceId' "$RESPAWN" >/dev/null \
-    || fail "respawn-stealth-local.ps1 没有实际调用 Enable-PnpDevice"
-grep -F 'Code 22' "$RESPAWN" >/dev/null \
-    || fail "respawn-stealth-local.ps1 没有记录 Code 22 场景"
+[[ -f "$RESTART_HELPER" ]] || fail "缺少 respawn 重启状态 helper"
+grep -F 'function Enable-RespawnDisplayDevices' "$RESTART_HELPER" >/dev/null \
+    || fail "respawn 重启状态 helper 缺少外层 Display 启用兜底"
+grep -F 'Enable-PnpDevice -InstanceId' "$RESTART_HELPER" >/dev/null \
+    || fail "respawn 重启状态 helper 没有实际调用 Enable-PnpDevice"
+grep -F 'Code 22' "$RESTART_HELPER" >/dev/null \
+    || fail "respawn 重启状态 helper 没有记录 Code 22 场景"
+grep -F 'Enable-RespawnDisplayDevices' "$RESPAWN" >/dev/null \
+    || fail "respawn 主流程没有调用拆分后的 Display 启用兜底"
 
 echo "OK: guest-stealth PnP enable fallback checks passed"

@@ -4,84 +4,11 @@
 # persist-gpu-profile.ps1 严格检查后 dot-source。保持独立文件可避免身份解析、
 # 快照构建和 durable rollback 全部挤在一个超长脚本内，同时不改变事务语义。
 
-function Assert-IdentityToken {
-    param([Parameter(Mandatory = $true)][string]$Value, [string]$Field = 'IdentityId')
-    if ($Value -cnotmatch '^[0-9A-F]{32}$') {
-        throw ($Field + ' 必须是 32 位大写十六进制 GUID-N：' + $Value)
-    }
+$registryCore = Join-Path $PSScriptRoot 'gpu-profile-registry-core.ps1'
+if (-not (Test-Path -LiteralPath $registryCore -PathType Leaf)) {
+    throw ('缺少 GPU transaction registry core：' + $registryCore)
 }
-
-function Get-ExactRegistryValue {
-    param($Key, [string]$Name, [Microsoft.Win32.RegistryValueKind]$Kind)
-    if (-not (@($Key.GetValueNames()) -ccontains $Name)) { throw ('缺少注册表值：' + $Name) }
-    if ($Key.GetValueKind($Name) -ne $Kind) { throw ('注册表值类型错误：' + $Name) }
-    return $Key.GetValue($Name, $null,
-        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-}
-
-function Get-OptionalStringState {
-    param($Key, [string]$Name)
-    if (-not (@($Key.GetValueNames()) -ccontains $Name)) {
-        return [pscustomobject]@{ Present = $false; Value = $null }
-    }
-    $value = [string](Get-ExactRegistryValue -Key $Key -Name $Name `
-        -Kind ([Microsoft.Win32.RegistryValueKind]::String))
-    if ([string]::IsNullOrWhiteSpace($value) -or $value.IndexOf([char]0) -ge 0) {
-        throw ('注册表字符串为空或含 NUL：' + $Name)
-    }
-    return [pscustomobject]@{ Present = $true; Value = $value }
-}
-
-function Test-RegistryDataEqual {
-    param($Left, $Right)
-    if ($Left -is [array] -or $Right -is [array]) {
-        $a = @($Left); $b = @($Right)
-        if ($a.Count -ne $b.Count) { return $false }
-        for ($i = 0; $i -lt $a.Count; $i++) {
-            if ([string]$a[$i] -cne [string]$b[$i]) { return $false }
-        }
-        return $true
-    }
-    if ($Left -is [string] -or $Right -is [string]) {
-        return ([string]$Left -ceq [string]$Right)
-    }
-    return ($Left -eq $Right)
-}
-
-function Assert-RegistryState {
-    param($Key, [string]$Name, [bool]$Present, $Value,
-        [Microsoft.Win32.RegistryValueKind]$Kind)
-    $names = @($Key.GetValueNames())
-    if (-not $Present) {
-        if ($names -ccontains $Name) { throw ('回读发现本应不存在的值：' + $Name) }
-        return
-    }
-    $actual = Get-ExactRegistryValue -Key $Key -Name $Name -Kind $Kind
-    if (-not (Test-RegistryDataEqual -Left $actual -Right $Value)) {
-        throw ('注册表写后回读不一致：' + $Name)
-    }
-}
-
-function Set-CurrentIdentityPointer {
-    # 所有 CurrentIdentity 修改都经过同一个 compare-before-write 门。命名 mutex
-    # 串行化仓库内写者，精确 expected state 则拒绝覆盖外部或并发修改。
-    param($ConfigKey, $Expected, [bool]$NewPresent, [string]$NewValue)
-    $actual = Get-OptionalStringState -Key $ConfigKey -Name 'CurrentIdentity'
-    if ($actual.Present -ne $Expected.Present -or
-        ($actual.Present -and $actual.Value -cne $Expected.Value)) {
-        throw 'CurrentIdentity 已被并发修改，CAS 拒绝覆盖'
-    }
-    if ($NewPresent) {
-        Assert-IdentityToken -Value $NewValue -Field '新 CurrentIdentity'
-        $ConfigKey.SetValue('CurrentIdentity', $NewValue,
-            [Microsoft.Win32.RegistryValueKind]::String)
-    } else {
-        $ConfigKey.DeleteValue('CurrentIdentity', $false)
-    }
-    $ConfigKey.Flush()
-    Assert-RegistryState -Key $ConfigKey -Name 'CurrentIdentity' -Present $NewPresent `
-        -Value $NewValue -Kind ([Microsoft.Win32.RegistryValueKind]::String)
-}
+. $registryCore
 
 function Write-ProjectionJournal {
     param($TransactionKey, [string]$JournalName, $TargetKey,
@@ -205,6 +132,7 @@ $classJournalNames = @('DriverDesc', 'ProviderName', 'MatchingDeviceId',
     'HardwareInformation.DacType', 'HardwareInformation.BiosString',
     'HardwareInformation.MemorySize', 'HardwareInformation.qwMemorySize')
 $classGuid = '{4d36e968-e325-11ce-bfc1-08002be10318}'
+$stockDriverDescription = 'Red Hat VirtIO GPU DOD controller'; $stockDriverProvider = 'Red Hat, Inc.'; $stockDriverMatchingId = 'PCI\VEN_1AF4&DEV_1050'
 
 function Read-ValidatedIdentitySnapshot {
     # schema-1 是上一版完整快照，schema-2 只在其上增加显存类型/位宽、时钟和
@@ -310,16 +238,20 @@ function Read-TransactionReceipt {
         $oldPresent = [int](Get-ExactRegistryValue $transactionKey 'PreviousPointerPresent' $dword)
         $mirrorPresent = [int](Get-ExactRegistryValue $transactionKey 'PreviousSpoofNamePresent' $dword)
         $classSubkey = [string](Get-ExactRegistryValue $transactionKey 'ClassSubkey' $string)
+        $driverInfPath = if ($schema -eq 2) {
+            [string](Get-ExactRegistryValue $transactionKey 'DriverInfPath' $string)
+        } else { '' }
         $newIdentity = Read-ValidatedIdentitySnapshot $identityKey $IdentityId @(2)
         $source = $newIdentity.SourceInstanceId
         $newName = $newIdentity.SpoofName; $newVendor = $newIdentity.SpoofVendor
-        $newBios = $newIdentity.SpoofBios; $newDeviceId = $newIdentity.SpoofPciDeviceId
-        $newVendorId = $newIdentity.SpoofPciVendorId; $newRamMb = $newIdentity.SpoofRamMb
-        if ($schema -ne 1 -or $txnId -cne $IdentityId -or
+        $newBios = $newIdentity.SpoofBios; $newRamMb = $newIdentity.SpoofRamMb
+        $newVendorId = $newIdentity.SpoofPciVendorId; $newDeviceId = $newIdentity.SpoofPciDeviceId
+        if (-not (@(1,2) -ccontains $schema) -or $txnId -cne $IdentityId -or
             -not (@('Prepared','Committed','Completed','RolledBack') -ccontains $state) -or
             ($oldPresent -ne 0 -and $oldPresent -ne 1) -or
             ($mirrorPresent -ne 0 -and $mirrorPresent -ne 1) -or $classSubkey -cnotmatch '^\d{4}$' -or
-            [string]::IsNullOrWhiteSpace($source)) {
+            [string]::IsNullOrWhiteSpace($source) -or
+            ($schema -eq 2 -and $driverInfPath -cnotmatch '^oem[0-9]+\.inf$')) {
             throw ('事务凭据字段非法：' + $IdentityId)
         }
         $oldIdState = Get-OptionalStringState $transactionKey 'PreviousIdentityId'
@@ -346,15 +278,27 @@ function Read-TransactionReceipt {
         $classJournal = Read-ProjectionJournal $transactionKey 'Class' $classPath $classJournalNames
         $chipType = $newName -replace '^(NVIDIA|AMD)\s+', ''
         $memoryBytes = [BitConverter]::GetBytes([UInt64]$newRamMb * 1MB)
-        $projectedEnum = @{}
-        foreach ($name in $enumJournalNames) {
-            $value = if ($name -ceq 'Mfg') { $newVendor } else { $newName }
-            $projectedEnum[$name] = [pscustomobject]@{ Value=$value; Kind=$string }
+        $enumDescription = if ($schema -eq 2) {
+            '@' + $driverInfPath + ',%viogpudod.devicedesc%;' + $stockDriverDescription
+        } else { $newName }
+        $enumProvider = if ($schema -eq 2) {
+            '@' + $driverInfPath + ',%vendor%;' + $stockDriverProvider
+        } else { $newVendor }
+        $projectedEnum = @{
+            FriendlyName=[pscustomobject]@{ Value=$newName; Kind=$string }
+            DeviceDesc=[pscustomobject]@{ Value=$enumDescription; Kind=$string }
+            Mfg=[pscustomobject]@{ Value=$enumProvider; Kind=$string }
+        }
+        $driverDescription = if ($schema -eq 2) { $stockDriverDescription } else { $newName }
+        $driverProvider = if ($schema -eq 2) { $stockDriverProvider } else { $newVendor }
+        $matchingId = if ($schema -eq 2) { $stockDriverMatchingId } else {
+            'PCI\VEN_{0:X4}&DEV_{1:X4}' -f $newVendorId,$newDeviceId
         }
         $projectedClass = @{
-            DriverDesc=[pscustomobject]@{ Value=$newName; Kind=$string }
-            ProviderName=[pscustomobject]@{ Value=$newVendor; Kind=$string }
-            MatchingDeviceId=[pscustomobject]@{ Value=('PCI\VEN_{0:X4}&DEV_{1:X4}' -f $newVendorId,$newDeviceId); Kind=$string }
+            # 这三项参与 SetupAPI 当前 driver node 匹配，不是品牌展示字段。
+            DriverDesc=[pscustomobject]@{ Value=$driverDescription; Kind=$string }
+            ProviderName=[pscustomobject]@{ Value=$driverProvider; Kind=$string }
+            MatchingDeviceId=[pscustomobject]@{ Value=$matchingId; Kind=$string }
             'HardwareInformation.AdapterString'=[pscustomobject]@{ Value=$newName; Kind=$string }
             'HardwareInformation.ChipType'=[pscustomobject]@{ Value=$chipType; Kind=$string }
             'HardwareInformation.DacType'=[pscustomobject]@{ Value='Integrated RAMDAC'; Kind=$string }

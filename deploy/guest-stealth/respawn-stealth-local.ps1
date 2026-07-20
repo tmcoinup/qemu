@@ -10,8 +10,8 @@
 #   1. 用 Windows 内置电源 API 把“屏幕/睡眠”设为“从不”，保留桌面 S3 并关闭休眠。
 #   2. 为 A123/A323 幂等安装 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF，
 #      清除 SMBus Code 28；它不包含 SYS，也不改变 QEMU ICH9 的真实行为。
-#   3. 验证并幂等安装 EXE 内嵌的 Microsoft WHCP stock viogpudo；已绑定的
-#      克隆机完全跳过 pnputil，全新机若驱动失败则停止，绝不只改一个假名字。
+#   3. 验证并幂等安装 EXE 内嵌的 Microsoft WHCP stock viogpudo；已绑定且
+#      发布 INF 完整时跳过 pnputil，缺失发布 INF 时走官方恢复，失败则停止。
 #   4. 按当前显卡 PCI SUBSYS 自动选定伪装型号，并持久化统一用户态 PCI 身份。
 #   5. 重写 Class\{4d36e968}\NNNN + Enum\PCI + Enum\DISPLAY 注册表覆盖
 #      → Win32_VideoController / 设备管理器 / 显示器名 全部对齐到伪装型号
@@ -33,11 +33,11 @@ param(
     [int]   $RebootDelay = 8,   # 自动重启倒计时（秒）；期间可 Ctrl+C 取消
     [switch]$FirstLogon,        # OOBE 后执行：保留名称/HardwareID 任务，跳过显示模式任务
     [switch]$Unattended,        # launcher 自动模式：失败必须返回退出码，禁止 Read-Host
-    # 中文注释：仅由一次性恢复任务传入。驱动绑定或显示模式若要求重启，需要真正
-    # 跨过 Windows 启动边界后再次验证；任务只在整个二阶段成功后删除，失败则保留。
-    [switch]$ResumeAfterReboot
+    # 中文注释：仅由一次性恢复任务传入；恢复阶段区分完整续跑与芯片组只验证。
+    [switch]$ResumeAfterReboot,
+    [ValidateSet('Full', 'ChipsetVerification')]
+    [string]$ResumeStage = 'Full'
 )
-
 $ErrorActionPreference = 'Continue'
 # zh-CN Win10 默认 console code page = 936 (GBK)，会把中文 Write-Host 输出搞乱码。强制 UTF-8。
 try { chcp 65001 | Out-Null } catch {}
@@ -50,108 +50,23 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new()
 $powershellExe = Join-Path $PSHOME 'powershell.exe'
 $shutdownExe = Join-Path ([Environment]::SystemDirectory) 'shutdown.exe'
 $projectionTaskName = 'StealthGPU-ProjectHardwareId'
+$respawnMainScriptPath = [IO.Path]::GetFullPath($PSCommandPath)
 if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) {
     Write-Host "FAIL: 找不到可信 Windows PowerShell：$powershellExe" -ForegroundColor Red
     exit 9
 }
-
-function Enable-RespawnDisplayDevices {
-    # apply-gpu-spoof 早期版本或 QEMU 异常退出，可能让显示适配器停在设备管理器 Code 22。
-    # 这里作为外层 EXE/本地脚本的兜底：不依赖 Status OK，所有非正常 Display 设备都尝试启用一次。
-    try {
-        $displayDevices = @(Get-PnpDevice -Class 'Display' -ErrorAction SilentlyContinue |
-            Where-Object { $_.InstanceId -and $_.Status -ne 'Unknown' })
-    } catch {
-        Write-Host ("  (显示适配器状态检查失败: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
-        return
-    }
-
-    foreach ($dev in $displayDevices) {
-        $problem = ''
-        try { $problem = [string]$dev.Problem } catch {}
-
-        $needsEnable = $false
-        if ($dev.Status -ne 'OK') { $needsEnable = $true }
-        if ($problem -eq '22' -or $problem -match 'CM_PROB_DISABLED|DISABLED') { $needsEnable = $true }
-        if (-not $needsEnable) { continue }
-
-        $label = [string]$dev.FriendlyName
-        if ([string]::IsNullOrWhiteSpace($label)) { $label = [string]$dev.InstanceId }
-
-        Write-Host ("  启用显示适配器: " + $label + " [" + $dev.Status + "/" + $problem + "]") -ForegroundColor Yellow
-        try {
-            Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction Stop
-            Start-Sleep -Milliseconds 800
-        } catch {
-            Write-Host ("  (启用失败: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
-        }
-    }
+$restartStateHelper = Join-Path $PSScriptRoot 'respawn-restart-state.ps1'
+if (-not (Test-Path -LiteralPath $restartStateHelper -PathType Leaf)) {
+    Write-Host "FAIL: EXE payload 缺少重启状态 helper：$restartStateHelper" `
+        -ForegroundColor Red
+    exit 8
 }
-
-function Clear-RespawnDisplayModeTask {
-    # FirstLogon 只清理依赖交互桌面的显示模式任务。名称刷新与 HardwareID 投影
-    # 都是 SYSTEM 级长期一致性保障，必须跨重启保留。
-    Remove-ScheduledTaskVerified -TaskName 'StealthGPU-ForceDisplayFreq'
-}
-
-function Get-RootScheduledTaskExact {
-    param([Parameter(Mandatory = $true)][string]$TaskName)
-
-    # 不用 Get-ScheduledTask -TaskName ... -ErrorAction SilentlyContinue：它无法区分
-    # “任务不存在”和 Task Scheduler/CIM 查询失败。完整枚举若失败会直接抛错，只有
-    # 成功枚举后确实找不到根目录同名项，才可安全判定为不存在。
-    $matches = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
-            [string]$_.TaskPath -ieq '\' -and [string]$_.TaskName -ieq $TaskName
-        })
-    if ($matches.Count -gt 1) {
-        throw ('根目录存在多个同名计划任务：' + $TaskName)
-    }
-    if ($matches.Count -eq 0) { return $null }
-    return $matches[0]
-}
-
-function Remove-ScheduledTaskVerified {
-    param([Parameter(Mandatory = $true)][string]$TaskName)
-
-    # 停止、删除、复读必须 fail-closed。旧投影任务若仍在运行，可能在 physical-only
-    # 门禁之后重新写回 fake-first；一次性恢复任务若残留，则会在下次登录再次重启。
-    $task = Get-RootScheduledTaskExact -TaskName $TaskName
-    if ($null -eq $task) { return }
-
-    # 先禁用触发器，关闭“查询 Ready 后、删除前又被 AtLogOn/AtStartup 拉起”的窗口；
-    # 再停止已经 Running/Queued 的实例。只有复读到 Disabled 且无活动实例才删除定义。
-    Disable-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop | Out-Null
-    $task = Get-RootScheduledTaskExact -TaskName $TaskName
-    if ($null -eq $task) { return }
-    if ([bool]$task.Settings.Enabled) {
-        throw ('计划任务禁用后仍显示 Enabled：' + $TaskName)
-    }
-    if ([string]$task.State -imatch '^(Running|Queued)$') {
-        Stop-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
-        do {
-            Start-Sleep -Milliseconds 100
-            $task = Get-RootScheduledTaskExact -TaskName $TaskName
-        } while ($null -ne $task -and [string]$task.State -imatch '^(Running|Queued)$' -and
-            [DateTime]::UtcNow -lt $deadline)
-        if ($null -ne $task -and [string]$task.State -imatch '^(Running|Queued)$') {
-            throw ('计划任务在超时后仍有活动实例：' + $TaskName)
-        }
-    }
-    # Task Scheduler 只有 Disabled 状态明确保证“定义已禁用，且没有排队或运行实例”。
-    # Unknown/Ready 等其它状态都不能作为安全删除依据：删除定义不会终止已经启动的进程，
-    # 若在此放行，旧 SYSTEM 投影器仍可能越过 physical-only 门禁并重新写入 fake-first。
-    if ($null -ne $task -and [string]$task.State -ine 'Disabled') {
-        throw ('计划任务未进入唯一安全的 Disabled 状态：' + $TaskName +
-            '（当前=' + [string]$task.State + '）')
-    }
-    if ($null -ne $task) {
-        Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' `
-            -Confirm:$false -ErrorAction Stop
-    }
-    if ($null -ne (Get-RootScheduledTaskExact -TaskName $TaskName)) {
-        throw ('计划任务删除后仍可见：' + $TaskName)
-    }
+try {
+    . $restartStateHelper
+} catch {
+    Write-Host ("FAIL: 无法加载重启状态 helper：" + $_.Exception.Message) `
+        -ForegroundColor Red
+    exit 8
 }
 
 function Stop-GpuProjectionTask {
@@ -216,6 +131,7 @@ function Register-GpuProjectionTask {
     $payloadNames = @(
         'project-gpu-hardware-id.ps1',
         'gpu-hardware-id-plan.ps1',
+        'gpu-manufacturer-projection.ps1', 'gpu-manufacturer-projector.exe',
         'refresh-gpu-name.ps1'
     )
     foreach ($payloadName in $payloadNames) {
@@ -260,118 +176,6 @@ function Register-GpuProjectionTask {
     return $projector
 }
 
-function Remove-RespawnResumeTask {
-    param([switch]$CurrentInstance)
-
-    # 中文注释：恢复任务必须是一次性的。脚本一旦在重启后的登录会话开始执行，就先
-    # 删除触发器；但当前 PowerShell 正是该任务的 Running 实例，绝不能对自己调用
-    # Stop-ScheduledTask。自运行路径只禁用/删除定义并复读，进程本身继续二阶段验证。
-    if (-not $CurrentInstance) {
-        Remove-ScheduledTaskVerified -TaskName 'StealthGPU-ResumeRespawn'
-        return
-    }
-    $taskName = 'StealthGPU-ResumeRespawn'
-    $task = Get-RootScheduledTaskExact -TaskName $taskName
-    if ($null -eq $task) { return }
-    Disable-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop | Out-Null
-    Unregister-ScheduledTask -TaskName $taskName -TaskPath '\' `
-        -Confirm:$false -ErrorAction Stop
-    if ($null -ne (Get-RootScheduledTaskExact -TaskName $taskName)) {
-        throw ('一次性恢复任务删除后仍可见：' + $taskName)
-    }
-}
-
-function Register-RespawnResumeTask {
-    param([switch]$KeepFirstLogon)
-
-    # 中文注释：使用当前管理员的交互登录触发器，而不是启动阶段的 SYSTEM 会话。
-    # apply-gpu-spoof 后续需要枚举当前桌面显示模式；Session 0 无显示器，无法完成
-    # 1920×1080 的同步验收。任务以 Highest 运行，因此仍有安装驱动和写 HKLM 的权限。
-    $resumeUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    if ($resumeUser -match '\\SYSTEM$') {
-        $resumeUser = 'Administrator'
-    }
-
-    $scriptPath = [string]$PSCommandPath
-    if ([string]::IsNullOrWhiteSpace($scriptPath) -or
-        -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
-        throw '无法定位重启后要继续执行的 respawn 脚本。'
-    }
-
-    $resumeArgs = '-NoProfile -ExecutionPolicy Bypass -File "' +
-        $scriptPath + '" -ResumeAfterReboot -Unattended'
-    if ($KeepFirstLogon) { $resumeArgs += ' -FirstLogon' }
-
-    if ($ResumeAfterReboot) {
-        # 当前脚本正是旧任务实例；仅删定义，不能 Stop 自己，然后注册下一次重试。
-        Remove-RespawnResumeTask -CurrentInstance
-    } else {
-        Remove-RespawnResumeTask
-    }
-    $action = New-ScheduledTaskAction `
-        -Execute (Join-Path $PSHOME 'powershell.exe') -Argument $resumeArgs
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $resumeUser
-    # 登录后给 PnP/SetupAPI 留出基本初始化时间；脚本内仍有有限就绪轮询兜底。
-    $trigger.Delay = 'PT15S'
-    $principal = New-ScheduledTaskPrincipal -UserId $resumeUser `
-        -LogonType Interactive -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
-        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    $task = New-ScheduledTask -Action $action -Trigger $trigger `
-        -Principal $principal -Settings $settings
-    Register-ScheduledTask -TaskName 'StealthGPU-ResumeRespawn' `
-        -InputObject $task -Force -ErrorAction Stop | Out-Null
-}
-
-function Restart-RespawnForPendingWork {
-    param(
-        [Parameter(Mandatory = $true)] [int]$PendingExitCode,
-        [Parameter(Mandatory = $true)] [string]$Reason, [Parameter(Mandatory = $true)] [string]$ShutdownComment,
-        [Parameter(Mandatory = $true)] [int]$RegistrationFailureCode,
-        [Parameter(Mandatory = $true)] [int]$ShutdownFailureCode)
-
-    # 芯片组 INF、显示驱动和显示模式共用同一跨启动边界协议。集中处理可以保证三条
-    # 路径都遵守“NoReboot 返回原状态；先注册恢复任务，再安排重启”的顺序。
-    Write-Host $Reason -ForegroundColor Yellow
-    if ($NoReboot) {
-        Write-Host '当前为 -NoReboot：请手动重启后再次运行本程序完成验证。' `
-            -ForegroundColor Yellow
-        exit $PendingExitCode
-    }
-    try {
-        Register-RespawnResumeTask -KeepFirstLogon:$FirstLogon
-    } catch {
-        Write-Host ('FAIL: 无法创建重启后二阶段恢复任务：' +
-            $_.Exception.Message) -ForegroundColor Red
-        exit $RegistrationFailureCode
-    }
-    Write-Host "已创建一次性恢复任务，${RebootDelay}s 后重启继续验证。" `
-        -ForegroundColor Green
-    & $shutdownExe /r /t $RebootDelay /f /c $ShutdownComment
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host 'FAIL: Windows 拒绝安排重启；恢复任务已保留，可手动重启。' `
-            -ForegroundColor Red
-        exit $ShutdownFailureCode
-    }
-    exit 0
-}
-
-function Wait-ResumeDisplayDeviceReady {
-    # AtLogOn 早于显示类设备就绪时不能立即消费掉唯一恢复机会。最多等待 30 秒，
-    # 只读轮询物理 1AF4:1050；超时返回失败且保留任务，下次登录可再次尝试。
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    do {
-        try {
-            $ready = @(Get-PnpDevice -Class Display -PresentOnly -ErrorAction Stop |
-                Where-Object { [string]$_.InstanceId -match
-                    '^PCI\\VEN_1AF4&DEV_1050(?:&|\\)' })
-            if ($ready.Count -gt 0) { return $true }
-        } catch {}
-        Start-Sleep -Milliseconds 500
-    } while ([DateTime]::UtcNow -lt $deadline)
-    return $false
-}
-
 Write-Host "=== respawn-stealth (本地版): 重新对齐 GPU spoof ===" -ForegroundColor Cyan
 
 # --- 0) 管理员自检 ----------------------------------------------------------
@@ -388,6 +192,7 @@ if (-not $pr.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
     if ($FirstLogon)      { $argList += '-FirstLogon' }
     if ($Unattended)      { $argList += '-Unattended' }
     if ($ResumeAfterReboot) { $argList += '-ResumeAfterReboot' }
+    if ($ResumeStage -ne 'Full') { $argList += @('-ResumeStage', $ResumeStage) }
     try {
         Start-Process -FilePath $powershellExe -Verb RunAs -ArgumentList $argList
     } catch {
@@ -411,7 +216,7 @@ if ($ResumeAfterReboot) {
             -ForegroundColor Red
         exit 35
     }
-    if (-not (Wait-ResumeDisplayDeviceReady)) {
+    if ($ResumeStage -eq 'Full' -and -not (Wait-ResumeDisplayDeviceReady)) {
         Write-Host 'FAIL: 登录后显示设备在 30 秒内仍未就绪；保留恢复任务供下次登录。' `
             -ForegroundColor Red
         exit 39
@@ -464,18 +269,34 @@ $chipsetArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', $chipsetInstaller, '-DriverDir', $PSScriptRoot)
 & $powershellExe @chipsetArgs 2>&1 | Tee-Object -FilePath $chipsetLog
 $chipsetRc = $LASTEXITCODE
-if ($chipsetRc -eq 30) {
-    Restart-RespawnForPendingWork -PendingExitCode 30 -Reason `
-        '芯片组识别 INF 已提交，但 Windows 要求重启后完成绑定。' `
-        -ShutdownComment 'Intel 芯片组识别 INF 已提交，重启后继续 stealth 初始化' `
-        -RegistrationFailureCode 56 -ShutdownFailureCode 57
+$chipsetRestartRequired = $chipsetRc -eq 30
+if ($chipsetRestartRequired) {
+    Write-Host '芯片组识别 INF 已提交；继续 GPU 初始化，并合并到最终一次重启。' `
+        -ForegroundColor Yellow
 }
-if ($chipsetRc -ne 0) {
+if ($chipsetRc -ne 0 -and -not $chipsetRestartRequired) {
     Write-Host "FAIL: 芯片组识别 INF 初始化失败，退出码 = $chipsetRc。" `
         -ForegroundColor Red
     Write-Host "      已停止后续 GPU/PnP 操作；请查看 $chipsetLog。" `
         -ForegroundColor Red
     exit $chipsetRc
+}
+if ($ResumeAfterReboot -and $ResumeStage -eq 'ChipsetVerification') {
+    if ($chipsetRestartRequired) {
+        Write-Host 'FAIL: 芯片组只验证阶段没有跨过启动边界；保留任务供下次登录。' `
+            -ForegroundColor Red
+        exit 58
+    }
+    try {
+        Remove-RespawnResumeTask -CurrentInstance
+    } catch {
+        Write-Host ('FAIL: 芯片组验证成功，但一次性恢复任务未能删除：' +
+            $_.Exception.Message) -ForegroundColor Red
+        exit 59
+    }
+    Write-Host '=== 芯片组重启后验证完成；不再运行 GPU 流程或重复重启。===' `
+        -ForegroundColor Green
+    exit 0
 }
 
 # --- 4) 停止旧投影，并在任何 GPU/PnP 操作前恢复 physical-only --------------
@@ -512,7 +333,7 @@ try {
 # --- 5) 先确保真实显示驱动已绑定（不走 HTTP）-------------------------------
 # install-display-driver.ps1 与 SYS/CAT/INF 都由同一个 EXE 释放到 PSScriptRoot。
 # 该脚本通过未被 FriendlyName spoof 影响的 Service 字段判断真实绑定：克隆机
-# 已是 VioGpuDod 时立即跳过；全新机才验证摘要、签名并调用 pnputil /install。
+# 已是 VioGpuDod 且发布 INF 完整时跳过；缺失 INF 或全新机才验证包并调用 pnputil。
 $driverInstaller = Join-Path $PSScriptRoot 'install-display-driver.ps1'
 if (-not (Test-Path -LiteralPath $driverInstaller -PathType Leaf)) {
     Write-Host "FAIL: EXE payload 缺少 install-display-driver.ps1。" -ForegroundColor Red
@@ -528,7 +349,7 @@ if ($driverRc -eq 30) {
     Restart-RespawnForPendingWork -PendingExitCode 30 `
         -Reason '显示驱动已提交，但 Windows 要求重启后才能完成绑定。' `
         -ShutdownComment 'VioGpuDod 安装已提交，重启后继续验证并完成 stealth 初始化' `
-        -RegistrationFailureCode 31 -ShutdownFailureCode 32
+        -RegistrationFailureCode 31 -ShutdownFailureCode 32 -MainScriptPath $respawnMainScriptPath
 }
 if ($driverRc -ne 0) {
     Write-Host ""
@@ -574,7 +395,7 @@ if ($rc -eq 11) {
     Restart-RespawnForPendingWork -PendingExitCode 11 `
         -Reason '显示模式已持久化，但需要重启后再次验证 1920×1080。' `
         -ShutdownComment '显示模式已持久化，重启后继续验证 1920x1080' `
-        -RegistrationFailureCode 33 -ShutdownFailureCode 34
+        -RegistrationFailureCode 33 -ShutdownFailureCode 34 -MainScriptPath $respawnMainScriptPath
 }
 
 # --- 8) 兜底启用 Display 设备 ----------------------------------------------
@@ -648,8 +469,26 @@ if ($ResumeAfterReboot) {
 }
 
 if ($NoReboot) {
+    if ($chipsetRestartRequired) {
+        Write-Host '=== GPU 初始化完成；芯片组 INF 仍要求手动重启后复核。===' `
+            -ForegroundColor Yellow
+        exit 30
+    }
     Write-Host "=== 完成（-NoReboot：未重启；注册表覆盖将在下次重启后完全生效）===" -ForegroundColor Green
     return
+}
+
+if ($chipsetRestartRequired) {
+    try {
+        Register-RespawnResumeTask -KeepFirstLogon:$FirstLogon `
+            -ResumeStage 'ChipsetVerification' -MainScriptPath $respawnMainScriptPath
+    } catch {
+        Write-Host ('FAIL: 无法创建芯片组重启后只验证任务：' +
+            $_.Exception.Message) -ForegroundColor Red
+        exit 56
+    }
+    Write-Host '  已创建芯片组一次性验证任务；下次登录只复核 INF，不再重启。' `
+        -ForegroundColor Green
 }
 
 Write-Host "=== 完成 —— ${RebootDelay}s 后重启让覆盖生效（要取消按 Ctrl+C）===" -ForegroundColor Green

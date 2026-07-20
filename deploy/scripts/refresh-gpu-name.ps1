@@ -4,9 +4,9 @@
     [ValidatePattern('^[0-9A-F]{32}$')]
     [string]$StagedIdentityId
 )
-
 $ErrorActionPreference = 'Stop'
-
+$stockDriverDescription = 'Red Hat VirtIO GPU DOD controller'
+$stockDriverProvider = 'Red Hat, Inc.'
 function Get-ExactRegistryValue {
     # RegistryKey.GetValue 会把缺失值和空值都变成 null，也可能透明展开字符串。
     # 身份协议必须精确验证名称、类型和非空内容，因此先查 kind，再以禁止展开方式读。
@@ -15,7 +15,6 @@ function Get-ExactRegistryValue {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][Microsoft.Win32.RegistryValueKind]$Kind
     )
-
     if (-not (@($Key.GetValueNames()) -ccontains $Name)) {
         throw ('身份快照缺少注册表值：' + $Name)
     }
@@ -35,7 +34,6 @@ function Get-ExactRegistryValue {
     # 否则 4 GiB 显存 QWord 会溢出且 Binary 无法转换成 Int32。
     return $value
 }
-
 function Get-LegacyVersionedIdentityHint {
     # schema-1 的 GUID 子键只服务于一次性迁移：返回旧名称供 apply 定位原 Class，
     # 不向调用者暴露 Vendor/PCI 等旧字段，也不允许普通 refresh 把它当当前身份。
@@ -96,16 +94,16 @@ function Get-LegacyVersionedIdentityHint {
         IsLegacyMigrationHint = $true
     }
 }
-
 function Get-CurrentGpuIdentity {
     # 与 NVAPI DLL 使用同一线性化读取：pointer -> 不可变 GUID 子键 -> 重读
     # pointer/schema。旧 root-only profile 只在 apply 的首次升级探测中可视为“没有
     # previous identity”；任何已存在但损坏/变化的 pointer 都必须抛错而非回落默认值。
-    param([switch]$MissingIsAllowed, [string]$StagedId)
-
-    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-        [Microsoft.Win32.RegistryHive]::LocalMachine,
-        [Microsoft.Win32.RegistryView]::Registry64)
+    param([switch]$MissingIsAllowed, [string]$StagedId, $BaseKeyOverride)
+    $baseKey = if ($null -ne $BaseKeyOverride) { $BaseKeyOverride } else {
+        [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64)
+    }
     $rootKey = $null
     $versionKey = $null
     $transactionKey = $null
@@ -130,12 +128,20 @@ function Get-CurrentGpuIdentity {
             if ($null -eq $transactionKey) { throw ('暂存事务不存在：' + $StagedId) }
             $transactionSchema = Get-ExactRegistryValue -Key $transactionKey `
                 -Name 'TransactionSchemaVersion' -Kind $dwordKind
+            # schema-1 只保留给 transaction helper 的 Recover/Rollback 兼容路径。
+            # Commit 严禁按旧投影契约首写 Enum/Class，否则会再次破坏签名关联。
+            if ($transactionSchema -ne 2) {
+                throw ('暂存提交只接受 transaction schema-2：' + $transactionSchema)
+            }
             $transactionState = Get-ExactRegistryValue -Key $transactionKey `
                 -Name 'State' -Kind $stringKind
             $stagedClassSubkey = Get-ExactRegistryValue -Key $transactionKey `
                 -Name 'ClassSubkey' -Kind $stringKind
-            if ($transactionSchema -ne 1 -or $transactionState -cne 'Prepared' -or
-                $stagedClassSubkey -cnotmatch '^\d{4}$') {
+            $stagedDriverInfPath = Get-ExactRegistryValue -Key $transactionKey `
+                -Name 'DriverInfPath' -Kind $stringKind
+            if ($transactionState -cne 'Prepared' -or
+                $stagedClassSubkey -cnotmatch '^\d{4}$' -or
+                $stagedDriverInfPath -cnotmatch '^oem[0-9]+\.inf$') {
                 throw ('暂存事务不是完整 Prepared 状态：' + $transactionSchema + '/' +
                     $transactionState)
             }
@@ -143,7 +149,6 @@ function Get-CurrentGpuIdentity {
             if (-not $MissingIsAllowed) {
                 throw '缺少 CurrentIdentity；旧 root-only profile 不作为 refresh 身份'
             }
-
             # 仅 apply 在升级旧 EXE 状态时使用此分支，而且只取“上一名称”作为
             # Class target needle，不读取 Vendor/BIOS/RAM/显存及时钟字段。旧协议以 root schema
             # last 提交；名称/schema 双读及 pointer 再确认可拒绝恰逢新协议提交的竞态。
@@ -169,7 +174,6 @@ function Get-CurrentGpuIdentity {
                 IsLegacyMigrationHint = $true
             }
         }
-
         else {
             $initialPointer = Get-ExactRegistryValue -Key $rootKey `
                 -Name 'CurrentIdentity' -Kind $stringKind
@@ -177,12 +181,10 @@ function Get-CurrentGpuIdentity {
         if ($initialPointer -cnotmatch '^[0-9A-F]{32}$') {
             throw ('CurrentIdentity 不是 32 位大写十六进制 GUID-N：' + $initialPointer)
         }
-
         # pointer 已经过严格白名单；只允许拼接固定 Identities\ 前缀，拒绝任意路径。
         $versionPath = 'Identities\' + $initialPointer
         $versionKey = $rootKey.OpenSubKey($versionPath, $false)
         if ($null -eq $versionKey) { throw ('身份版本子键不存在：' + $versionPath) }
-
         $schemaBefore = Get-ExactRegistryValue -Key $versionKey `
             -Name 'IdentitySchemaVersion' -Kind $dwordKind
         if ($schemaBefore -eq 1) {
@@ -219,8 +221,8 @@ function Get-CurrentGpuIdentity {
         }
         if (-not [string]::IsNullOrWhiteSpace($StagedId)) {
             $snapshot['StagedClassSubkey'] = $stagedClassSubkey
+            $snapshot['StagedDriverInfPath'] = $stagedDriverInfPath
         }
-
         $finalPointerName = if ([string]::IsNullOrWhiteSpace($StagedId)) {
             'CurrentIdentity'
         } else { 'PendingIdentity' }
@@ -231,7 +233,6 @@ function Get-CurrentGpuIdentity {
         if ($finalPointer -cne $initialPointer -or $schemaAfter -ne $schemaBefore) {
             throw '读取期间 CurrentIdentity 或 schema 已变化，拒绝混合身份'
         }
-
         $expectedVendorId = switch -CaseSensitive ($snapshot.SpoofVendor) {
             'NVIDIA' { 0x10DE; break }
             'AMD' { 0x1002; break }
@@ -279,24 +280,19 @@ function Get-CurrentGpuIdentity {
         $baseKey.Dispose()
     }
 }
-
-function Get-LogicalMatchingDeviceId {
-    # 恢复旧浅层方案中供 Class 软件键消费者使用的逻辑匹配 ID。
-    # 函数只格式化 profile 中的 VEN/DEV，不写 Enum\PCI HardwareID、
-    # CompatibleIDs 或 PCI 配置空间，因此不会改变 stock 驱动选择。
-    param(
-        [Parameter(Mandatory = $true)][int]$VendorId,
-        [Parameter(Mandatory = $true)][int]$DeviceId
-    )
-
-    foreach ($word in @($VendorId, $DeviceId)) {
-        if ($word -lt 1 -or $word -gt 0xFFFF) {
-            throw ('逻辑 PCI MatchingDeviceId 字段越界：' + $word)
-        }
+function Get-StockDriverMatchingDeviceId {
+    # MatchingDeviceId 是 Windows 写入的驱动安装状态，不是品牌展示字段。它必须
+    # 保持为 stock viogpudo.inf 实际用于安装设备的模型 ID；写成 NVIDIA/AMD
+    # 的逻辑 ID 会让 SetupAPI 无法把活动节点关联回 Microsoft 签名的 INF/CAT，
+    # 设备管理器随即把 Digital Signer 显示为“未经数字签名”。
+    param([Parameter(Mandatory = $true)][string]$SourceInstanceId)
+    if ($SourceInstanceId -cnotmatch
+            '^PCI\\VEN_1AF4&DEV_1050&SUBSYS_[0-9A-F]{8}&REV_[0-9A-F]{2}(?:&|\\)') {
+        throw ('无法从非 stock VioGpuDod 设备恢复 MatchingDeviceId：' +
+            $SourceInstanceId)
     }
-    return ('PCI\VEN_{0:X4}&DEV_{1:X4}' -f $VendorId, $DeviceId)
+    return 'PCI\VEN_1AF4&DEV_1050'
 }
-
 function Assert-GpuIdentityStrings {
     # 与 schema writer 和 NVAPI C reader 使用同一字节契约，防止损坏注册表被
     # PowerShell 接受、GPU-Z/NVAPI 却拒绝整份身份。
@@ -315,7 +311,6 @@ function Assert-GpuIdentityStrings {
         throw 'AMD VBIOS 不满足 DDD.DDD.DDD.DDD.DDDDDD 约束'
     }
 }
-
 function Set-VerifiedRegistryValue {
     # 关键 Enum/Class 值必须使用 64 位 RegistryKey 直接写入，并立即回读名称、
     # 类型和内容。任何 non-terminating provider error 都不能再伪装成 refresh 成功。
@@ -337,7 +332,6 @@ function Set-VerifiedRegistryValue {
         }
     }
 }
-
 function Invoke-WithProjectionLock {
     # 与 Stage/Commit/Rollback 共用同一全局锁；计划任务因此不能在 journal
     # 恢复一半时按另一 pointer 插入写入。
@@ -354,7 +348,6 @@ function Invoke-WithProjectionLock {
         $mutex.Dispose()
     }
 }
-
 function Set-ActiveGpuProjection {
     param($Config)
     $present = @(Get-PnpDevice -Class Display -PresentOnly -ErrorAction Stop |
@@ -390,17 +383,36 @@ function Set-ActiveGpuProjection {
                 '{4d36e968-e325-11ce-bfc1-08002be10318}\' + $driverMatch.Groups[1].Value
             $classKey = $baseKey.OpenSubKey($classPath, $true)
             if ($null -eq $classKey) { throw ('active Class 子键不可写：' + $classPath) }
+            $infPath = [string](Get-ExactRegistryValue $classKey 'InfPath' $string)
+            $infSection = [string](Get-ExactRegistryValue $classKey 'InfSection' $string)
+            if ($infPath -cnotmatch '^oem[0-9]+\.inf$' -or
+                $infSection -cne 'VioGpuDod_Inst') {
+                throw ('active Class 不是受支持的 VioGpuDod INF：' +
+                    $infPath + '/' + $infSection)
+            }
+            if ($null -ne $Config.PSObject.Properties['StagedDriverInfPath'] -and
+                $infPath -cne $Config.StagedDriverInfPath) {
+                throw 'Prepared transaction 的 INF 与 active Class 已发生变化'
+            }
+            $stockEnumDescription = '@' + $infPath +
+                ',%viogpudod.devicedesc%;' + $stockDriverDescription
+            $stockEnumProvider = '@' + $infPath +
+                ',%vendor%;' + $stockDriverProvider
             $chipType = $Config.SpoofName -replace '^(NVIDIA|AMD)\s+', ''
             $memoryBytes = [BitConverter]::GetBytes([UInt64]$Config.SpoofRamMb * 1MB)
             $legacyMemory = [byte[]]$memoryBytes[0..3]
-            $matchingId = Get-LogicalMatchingDeviceId $Config.SpoofPciVendorId `
-                $Config.SpoofPciDeviceId
+            $driverMatchingId = Get-StockDriverMatchingDeviceId `
+                $Config.SourceInstanceId
             Set-VerifiedRegistryValue $enumKey 'FriendlyName' $Config.SpoofName $string
-            Set-VerifiedRegistryValue $enumKey 'DeviceDesc' $Config.SpoofName $string
-            Set-VerifiedRegistryValue $enumKey 'Mfg' $Config.SpoofVendor $string
-            Set-VerifiedRegistryValue $classKey 'DriverDesc' $Config.SpoofName $string
-            Set-VerifiedRegistryValue $classKey 'ProviderName' $Config.SpoofVendor $string
-            Set-VerifiedRegistryValue $classKey 'MatchingDeviceId' $matchingId $string
+            # DeviceDesc/Mfg 与 Class DriverDesc/ProviderName 是 SetupAPI 用来
+            # 回找当前 INF driver node 的安装状态。品牌仅投影到 FriendlyName
+            # 和 HardwareInformation；否则有效的 WHQL 包会在设备管理器里误报未签名。
+            Set-VerifiedRegistryValue $enumKey 'DeviceDesc' $stockEnumDescription $string
+            Set-VerifiedRegistryValue $enumKey 'Mfg' $stockEnumProvider $string
+            Set-VerifiedRegistryValue $classKey 'DriverDesc' $stockDriverDescription $string
+            Set-VerifiedRegistryValue $classKey 'ProviderName' $stockDriverProvider $string
+            Set-VerifiedRegistryValue $classKey 'MatchingDeviceId' `
+                $driverMatchingId $string
             Set-VerifiedRegistryValue $classKey 'HardwareInformation.AdapterString' $Config.SpoofName $string
             Set-VerifiedRegistryValue $classKey 'HardwareInformation.ChipType' $chipType $string
             Set-VerifiedRegistryValue $classKey 'HardwareInformation.DacType' 'Integrated RAMDAC' $string
@@ -416,7 +428,6 @@ function Set-ActiveGpuProjection {
         $baseKey.Dispose()
     }
 }
-
 if ($AllowMissing -and -not $ReadIdentityOnly) {
     throw '-AllowMissing 只能与 -ReadIdentityOnly 一起使用'
 }
@@ -432,7 +443,7 @@ $cfg = Invoke-WithProjectionLock {
     return $lockedConfig
 }
 if (-not [string]::IsNullOrWhiteSpace($StagedIdentityId)) { return }
-
+& (Join-Path $PSScriptRoot 'gpu-manufacturer-projection.ps1') -Vendor $cfg.SpoofVendor -InstanceId $cfg.SourceInstanceId
 # active GPU Enum/Class 已在全局 Stop 策略下精确写回并验收。以下只处理可陈旧的
 # 显示器节点；单个旧节点不可写时明确 warning 后跳过，不影响已验收的 GPU 投影。
 $monitorName  = 'Samsung S24F350F'
@@ -442,7 +453,6 @@ $monClassGuid = '{4d36e96e-e325-11ce-bfc1-08002be10318}'
 $fmtDev       = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
 $monClassRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $monClassGuid
 $displayEnum  = 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY'
-
 function Set-DevProp {
     # 本函数仅用于非关键 Monitor fallback；GPU DEVPKEY 仍由 host offline
     # projector 维护 0xFFFF0012 类型，不能用 reg.exe REG_SZ 覆盖。
@@ -453,7 +463,6 @@ function Set-DevProp {
                   -replace '^HKLM:', 'HKLM'
     & reg.exe add "$r" /v "00000000" /t REG_SZ /d $Value /f 2>$null | Out-Null
 }
-
 # 更新显示器 Enum\DISPLAY 和 Monitor Class 子键，保持名称、厂商和硬件 ID 一致。
 foreach ($pnp in @(Get-ChildItem $displayEnum -ErrorAction SilentlyContinue)) {
     foreach ($inst in @(Get-ChildItem $pnp.PSPath -ErrorAction SilentlyContinue)) {

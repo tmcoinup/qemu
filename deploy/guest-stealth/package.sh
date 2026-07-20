@@ -16,11 +16,14 @@ SCRIPTS="$(cd "$HERE/../scripts" && pwd)"
 DIST="$HERE/dist"
 CONTROLLED_BUILD_DIR="$REPO_ROOT/build/guest-stealth-exe"
 POWER_POLICY_SRC="$HERE/configure-power-policy.ps1"
+RESTART_STATE_SRC="$HERE/respawn-restart-state.ps1"
 
 SPOOF_SRC="$SCRIPTS/apply-gpu-spoof.ps1"
 PROFILE_HELPER_SRC="$SCRIPTS/persist-gpu-profile.ps1"
 TRANSACTION_HELPER_SRC="$SCRIPTS/gpu-profile-transaction.ps1"
+REGISTRY_CORE_SRC="$SCRIPTS/gpu-profile-registry-core.ps1"
 REFRESH_HELPER_SRC="$SCRIPTS/refresh-gpu-name.ps1"
+MANUFACTURER_HELPER_SRC="$SCRIPTS/gpu-manufacturer-projection.ps1"
 HARDWARE_ID_PLAN_SRC="$SCRIPTS/gpu-hardware-id-plan.ps1"
 HARDWARE_ID_PROJECTOR_SRC="$SCRIPTS/project-gpu-hardware-id.ps1"
 DISPLAY_HELPER_SRC="$SCRIPTS/force-displayfreq.ps1"
@@ -29,10 +32,13 @@ CHIPSET_INF_SRC="$SCRIPTS/stock-intel-chipset-inf"
 NVAPI_SRC="$HERE/../nvapi-shim"
 ADL_SRC="$HERE/../adl-shim"
 [[ -f "$POWER_POLICY_SRC" ]] || { echo "ERROR: 找不到 $POWER_POLICY_SRC" >&2; exit 1; }
+[[ -f "$RESTART_STATE_SRC" ]] || { echo "ERROR: 找不到 $RESTART_STATE_SRC" >&2; exit 1; }
 [[ -f "$SPOOF_SRC" ]] || { echo "ERROR: 找不到 $SPOOF_SRC" >&2; exit 1; }
 [[ -f "$PROFILE_HELPER_SRC" ]] || { echo "ERROR: 找不到 $PROFILE_HELPER_SRC" >&2; exit 1; }
 [[ -f "$TRANSACTION_HELPER_SRC" ]] || { echo "ERROR: 找不到 $TRANSACTION_HELPER_SRC" >&2; exit 1; }
+[[ -f "$REGISTRY_CORE_SRC" ]] || { echo "ERROR: 找不到 $REGISTRY_CORE_SRC" >&2; exit 1; }
 [[ -f "$REFRESH_HELPER_SRC" ]] || { echo "ERROR: 找不到 $REFRESH_HELPER_SRC" >&2; exit 1; }
+[[ -f "$MANUFACTURER_HELPER_SRC" ]] || { echo "ERROR: 找不到 $MANUFACTURER_HELPER_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PLAN_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PLAN_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PROJECTOR_SRC" >&2; exit 1; }
 [[ -f "$DISPLAY_HELPER_SRC" ]] || { echo "ERROR: 找不到 $DISPLAY_HELPER_SRC" >&2; exit 1; }
@@ -73,8 +79,10 @@ if [[ "$include_legacy_scripts" == "1" ]]; then
     # 该分支仅供源码调试，不是正式 guest 交付物。必须由调用者显式选择 1；默认值
     # 永远是 0，避免把 PowerShell、驱动或 DLL 平铺副本误交给正式 guest。
     cp "$HERE/respawn-stealth-local.ps1"  "$DIST/"
+    cp "$RESTART_STATE_SRC"               "$DIST/"
     cp "$POWER_POLICY_SRC"                "$DIST/"
     cp "$HERE/install-display-driver.ps1" "$DIST/"
+    cp "$HERE/display-driver-trust.ps1" "$DIST/"
     cp "$HERE/install-chipset-device.ps1" "$DIST/"
     cp "$HERE/install-nvapi-system.ps1"    "$DIST/"
     cp "$HERE/nvapi-system-transaction.ps1" "$DIST/"
@@ -84,7 +92,10 @@ if [[ "$include_legacy_scripts" == "1" ]]; then
     cp "$SPOOF_SRC"                       "$DIST/"
     cp "$PROFILE_HELPER_SRC"               "$DIST/"
     cp "$TRANSACTION_HELPER_SRC"           "$DIST/"
+    cp "$REGISTRY_CORE_SRC"                "$DIST/"
     cp "$REFRESH_HELPER_SRC"               "$DIST/"
+    cp "$MANUFACTURER_HELPER_SRC"          "$DIST/"
+    cp "$CONTROLLED_BUILD_DIR/gpu-manufacturer-projector.exe" "$DIST/"
     cp "$HARDWARE_ID_PLAN_SRC"             "$DIST/"
     cp "$HARDWARE_ID_PROJECTOR_SRC"        "$DIST/"
     cp "$DISPLAY_HELPER_SRC"               "$DIST/"

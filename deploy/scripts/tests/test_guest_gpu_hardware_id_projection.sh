@@ -11,6 +11,7 @@ PROJECTOR="$REPO_ROOT/deploy/scripts/project-gpu-hardware-id.ps1"
 TRANSACTION="$REPO_ROOT/deploy/scripts/gpu-profile-transaction.ps1"
 APPLY="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
+RESTART_HELPER="$REPO_ROOT/deploy/guest-stealth/respawn-restart-state.ps1"
 BUILD="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 PACKAGE="$REPO_ROOT/deploy/guest-stealth/package.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
@@ -21,10 +22,10 @@ fail() {
 }
 
 for path in "$PLAN" "$PROJECTOR" "$TRANSACTION" "$APPLY" "$RESPAWN" "$BUILD" \
-        "$PACKAGE" "$LAUNCHER"; do
+        "$RESTART_HELPER" "$PACKAGE" "$LAUNCHER"; do
     [[ -f "$path" ]] || fail "缺少 HardwareID 投影链文件: $path"
 done
-for path in "$PLAN" "$PROJECTOR" "$RESPAWN"; do
+for path in "$PLAN" "$PROJECTOR" "$RESPAWN" "$RESTART_HELPER"; do
     [[ "$(xxd -p -l 3 "$path")" == 'efbbbf' ]] \
         || fail "Windows PowerShell 中文脚本缺少 UTF-8 BOM: $path"
 done
@@ -235,8 +236,8 @@ if (-not $failed -or $script:HardwareWrites -ne 2 -or
 }
 ' >/dev/null || fail "HardwareID Apply 故障注入/自动回滚测试失败"
 
-# 三个 PowerShell 文件都必须能由 Windows PowerShell 5.1 兼容 AST 解析器接受。
-PS_FILES="$PLAN:$PROJECTOR:$RESPAWN" \
+# 四个 PowerShell 文件都必须能由 Windows PowerShell 5.1 兼容 AST 解析器接受。
+PS_FILES="$PLAN:$PROJECTOR:$RESPAWN:$RESTART_HELPER" \
 pwsh -NoLogo -NoProfile -NonInteractive -Command '
 $failed = $false
 foreach ($path in $env:PS_FILES -split [IO.Path]::PathSeparator) {
@@ -359,7 +360,7 @@ for contract in \
     rg -F -- "$contract" "$RESPAWN" >/dev/null \
         || fail "HardwareID task 缺少契约: $contract"
 done
-clear_body="$(sed -n '/^function Clear-RespawnDisplayModeTask {/,/^}/p' "$RESPAWN")"
+clear_body="$(sed -n '/^function Clear-RespawnDisplayModeTask {/,/^}/p' "$RESTART_HELPER")"
 [[ "$clear_body" != *'StealthGPU-ProjectHardwareId'* ]] \
     || fail "FirstLogon 最终清理会误删必要的 HardwareID task"
 [[ "$clear_body" != *'StealthGPU-RefreshName'* ]] \
@@ -369,7 +370,7 @@ clear_body="$(sed -n '/^function Clear-RespawnDisplayModeTask {/,/^}/p' "$RESPAW
 [[ "$clear_body" == *'Remove-ScheduledTaskVerified'* ]] \
     || fail "FirstLogon 旧任务清理没有停止/删除/复读确认"
 
-remove_body="$(sed -n '/^function Remove-ScheduledTaskVerified {/,/^}/p' "$RESPAWN")"
+remove_body="$(sed -n '/^function Remove-ScheduledTaskVerified {/,/^}/p' "$RESTART_HELPER")"
 for contract in 'Disable-ScheduledTask' 'Stop-ScheduledTask' \
         "'^(Running|Queued)$'" "-ine 'Disabled'" 'Unregister-ScheduledTask' \
         'Get-RootScheduledTaskExact'; do
@@ -380,10 +381,13 @@ done
     || fail "计划任务安全清理仍会吞掉 Task Scheduler 错误"
 rg -F 'Remove-RespawnResumeTask -CurrentInstance' "$RESPAWN" >/dev/null \
     || fail "二阶段恢复任务没有使用不自杀的自删除路径"
-rg -F "\$trigger.Delay = 'PT15S'" "$RESPAWN" >/dev/null \
+rg -F "\$trigger.Delay = 'PT15S'" "$RESTART_HELPER" >/dev/null \
     || fail "二阶段 AtLogOn 任务没有给 PnP 初始化留延迟"
-rg -F 'Wait-ResumeDisplayDeviceReady' "$RESPAWN" >/dev/null \
-    || fail "二阶段没有有限等待物理显示设备就绪"
+rg -F 'function Wait-ResumeDisplayDeviceReady' "$RESTART_HELPER" >/dev/null \
+    || fail "重启状态 helper 缺少有限等待函数"
+rg -F "if (\$ResumeStage -eq 'Full' -and -not (Wait-ResumeDisplayDeviceReady))" \
+        "$RESPAWN" >/dev/null \
+    || fail "完整二阶段没有调用有限等待函数"
 payload_lock_line="$(grep -n '^\$payloadLock = \$null' "$RESPAWN" | cut -d: -f1)"
 first_stage_line="$(grep -n '^# --- 1)' "$RESPAWN" | cut -d: -f1)"
 early_resume_body="$(sed -n "${payload_lock_line},${first_stage_line}p" "$RESPAWN")"
@@ -408,7 +412,7 @@ for payload in gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1; do
         || fail "legacy package 缺少 payload: $payload"
 done
 
-for source_file in "$PLAN" "$PROJECTOR" "$RESPAWN"; do
+for source_file in "$PLAN" "$PROJECTOR" "$RESPAWN" "$RESTART_HELPER"; do
     code_lines="$(awk '!/^[[:space:]]*($|#)/ { count++ } END { print count + 0 }' \
         "$source_file")"
     (( code_lines <= 500 )) \

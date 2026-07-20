@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# host-fix-gpu-devpkey.sh — offline fix for DEVPKEY DriverProvider / DriverDesc
-# on the virtio-gpu device of a shut-down Win10 guest.
+# host-fix-gpu-devpkey.sh — offline fix for DEVPKEY display labels and the
+# signed-driver installation association of a shut-down Win10 virtio-gpu guest.
 #
 # Why this script exists:
 #   Device Manager → GPU → 驱动程序 → 驱动程序提供商 shows "未知" unless
@@ -14,7 +14,13 @@
 #   guest, but `reg.exe add /t REG_SZ` can only produce type 0x1, and
 #   SetupDiGetDeviceProperty fails (→ "未知") if the type word is wrong.
 #
-#   This script does both offline by raw-editing the hive on qcow2.
+#   This script does both offline by raw-editing the hive on qcow2. It restores
+#   Enum DeviceDesc/Mfg and Display Class DriverDesc/ProviderName/
+#   MatchingDeviceId to the values declared by stock viogpudo.inf. Those values
+#   are driver installation state and must not follow the AMD/NVIDIA label.
+#   FriendlyName, HardwareInformation and modern pid 0004/0009 properties remain
+#   profile-facing, so Device Manager can show the selected model/provider while
+#   SetupAPI still resolves the Microsoft-signed INF/CAT driver node.
 #
 # 2026-05 改进：默认从 vms/<N>/profile **自动读** GPU_NAME / GPU_VENDOR，
 # 不再需要手工传 PROVIDER / DEVICE_DESC；NVIDIA / AMD 都识别。
@@ -135,24 +141,42 @@ fi
 log "将写入 Device Manager 字段："
 log "  驱动程序提供商 (pid 0009): $PROVIDER"
 log "  设备描述       (pid 0004): $DEVICE_DESC"
+log "  安装关联字段（保留微软签名链）: Red Hat, Inc. / VioGpuDod / PCI\\VEN_1AF4&DEV_1050"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+STOCK_INF="${SCRIPT_DIR}/stock-viogpudo/viogpudo.inf"
+STOCK_CAT="${SCRIPT_DIR}/stock-viogpudo/viogpudo.cat"
+STOCK_SYS="${SCRIPT_DIR}/stock-viogpudo/viogpudo.sys"
+REFRESH_SOURCE="${SCRIPT_DIR}/refresh-gpu-name.ps1"
+[[ -f "$STOCK_INF" ]] || die "stock viogpudo.inf not found: $STOCK_INF"
+[[ -f "$STOCK_CAT" ]] || die "stock viogpudo.cat not found: $STOCK_CAT"
+[[ -f "$STOCK_SYS" ]] || die "stock viogpudo.sys not found: $STOCK_SYS"
+[[ -f "$REFRESH_SOURCE" ]] || die "refresh helper not found: $REFRESH_SOURCE"
 
 # 1) Ensure VM is stopped (stop-vm.sh talks to a user-owned QMP socket).
 QMP_SOCK="/tmp/qemu-stealth-${INSTANCE}.qmp"
 if [[ -S "$QMP_SOCK" ]]; then
     log "instance $INSTANCE looks running, invoking stop-vm.sh as $ORIG_USER"
-    sudo -u "$ORIG_USER" "${SCRIPT_DIR}/stop-vm.sh" "$INSTANCE" --wait=120 || true
+    if ! timeout 135s sudo -u "$ORIG_USER" \
+            "${SCRIPT_DIR}/stop-vm.sh" "$INSTANCE" --wait=120; then
+        log "graceful stop failed or timed out; forcing instance $INSTANCE off"
+        sudo -u "$ORIG_USER" "${SCRIPT_DIR}/stop-vm.sh" "$INSTANCE" --hard
+    fi
     sleep 1
+    [[ ! -S "$QMP_SOCK" ]] || die "instance $INSTANCE is still running"
 fi
 
 # 2) Attach NBD + ntfsfix + mount rw.
 # 并发安全 (P2)：取全局 NBD 锁，串行化所有 host-*.sh 离线工具，防并发抢同一 nbd 设备。
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/nbd-lock.sh"
 modprobe nbd max_part=16 2>/dev/null || true
+REFRESH_TMP=""
+HIVE_WORK=""
 
 cleanup() {
     local rc=$?
+    [[ -z "$REFRESH_TMP" ]] || rm -f -- "$REFRESH_TMP"
+    [[ -z "$HIVE_WORK" ]] || rm -f -- "$HIVE_WORK"
     umount "$MOUNT" 2>/dev/null || true
     nbd_disconnect_if_owned   # 只断本脚本成功连接的设备（不误断外部）
     exit $rc
@@ -174,11 +198,17 @@ done
 log "system partition: $SYSPART"
 
 mkdir -p "$MOUNT"
-log "ntfsfix --clear-dirty $SYSPART"
-ntfsfix --clear-dirty "$SYSPART" >/dev/null
-log "mount -t ntfs-3g -o rw,remove_hiberfile $SYSPART $MOUNT"
 MOUNT_ERR=$(mktemp)
-if ! mount -t ntfs-3g -o rw,remove_hiberfile "$SYSPART" "$MOUNT" 2> "$MOUNT_ERR"; then
+if [[ $DRY -eq 1 ]]; then
+    log "DRY_RUN: mounting $SYSPART read-only"
+    MOUNT_OPTIONS="ro"
+else
+    log "ntfsfix --clear-dirty $SYSPART"
+    ntfsfix --clear-dirty "$SYSPART" >/dev/null
+    log "mount -t ntfs-3g -o rw,remove_hiberfile $SYSPART $MOUNT"
+    MOUNT_OPTIONS="rw,remove_hiberfile"
+fi
+if ! mount -t ntfs-3g -o "$MOUNT_OPTIONS" "$SYSPART" "$MOUNT" 2> "$MOUNT_ERR"; then
     cat "$MOUNT_ERR" >&2
     if grep -q "hibernated" "$MOUNT_ERR"; then
         cat >&2 <<'EOF'
@@ -205,8 +235,14 @@ EOF
 fi
 rm -f "$MOUNT_ERR"
 
-HIVE="${MOUNT}/Windows/System32/config/SYSTEM"
-[[ -f "$HIVE" ]] || die "SYSTEM hive not found at $HIVE"
+HIVE_SOURCE="${MOUNT}/Windows/System32/config/SYSTEM"
+[[ -f "$HIVE_SOURCE" ]] || die "SYSTEM hive not found at $HIVE_SOURCE"
+HIVE="$HIVE_SOURCE"
+if [[ $DRY -eq 1 ]]; then
+    HIVE_WORK="$(mktemp --tmpdir host-fix-gpu-system.XXXXXX)"
+    cp -- "$HIVE_SOURCE" "$HIVE_WORK"
+    HIVE="$HIVE_WORK"
+fi
 
 # NB: 不要 truncate .LOG1/.LOG2 —— Win10 kernel mount SYSTEM hive 时 expects
 # LOG1/LOG2 是 valid file（不是 0-byte），否则 winload reject hive → 0xc0000001
@@ -224,18 +260,41 @@ HIVE="${MOUNT}/Windows/System32/config/SYSTEM"
 # 不会丢任何数据（如果 LOG1/LOG2 里有 pending，那才是真要丢的——但本脚本只读
 # Windows 已经稳定 commit 的 PCI Properties，pending 的临时 transactions 即使
 # 丢了也无影响）。
-log "pre-fixup: 同步 hive 头 primary/secondary seq + 拉齐 end_of_last_page + 重算 checksum"
+log "pre-fixup: 同步工作 hive 头 primary/secondary seq + 拉齐 end_of_last_page + 重算 checksum"
 python3 "$SCRIPT_DIR/lib/devpkey-prefixup.py" "$HIVE"
 
-# 3b) Run the embedded Python patcher.
-log "patching $HIVE (provider=$PROVIDER, desc=$DEVICE_DESC)"
+# 3b) Verify the exact WHQL package and repair only a missing published INF.
 if [[ $DRY -eq 1 ]]; then
     DRY_RUN=1
 fi
+DRY_RUN="${DRY_RUN:-0}" HIVE="$HIVE" \
+    SUBSYS_RE="$SUBSYS_RE" WINDOWS_ROOT="${MOUNT}/Windows" \
+    STOCK_INF="$STOCK_INF" STOCK_CAT="$STOCK_CAT" STOCK_SYS="$STOCK_SYS" \
+    python3 "$SCRIPT_DIR/lib/signed-driver-package.py"
 
+# 3c) Restore signed-driver registry association and profile-facing properties.
+log "patching $HIVE (provider=$PROVIDER, desc=$DEVICE_DESC)"
 DRY_RUN="${DRY_RUN:-0}" HIVE="$HIVE" \
     PROVIDER="$PROVIDER" DEVICE_DESC="$DEVICE_DESC" \
     SUBSYS_RE="$SUBSYS_RE" \
     python3 "$SCRIPT_DIR/lib/devpkey-patch.py"
+
+PERSISTENT_ROOT="${MOUNT}/ProgramData/StealthGPU"
+PERSISTENT_REFRESH="${PERSISTENT_ROOT}/refresh-gpu-name.ps1"
+if [[ -d "$PERSISTENT_ROOT" ]]; then
+    if cmp -s "$REFRESH_SOURCE" "$PERSISTENT_REFRESH"; then
+        log "persistent refresh helper already current"
+    elif [[ $DRY -eq 1 ]]; then
+        log "DRY_RUN: would update $PERSISTENT_REFRESH"
+    else
+        REFRESH_TMP="${PERSISTENT_REFRESH}.tmp.$$"
+        cp -- "$REFRESH_SOURCE" "$REFRESH_TMP"
+        mv -f -- "$REFRESH_TMP" "$PERSISTENT_REFRESH"
+        REFRESH_TMP=""
+        log "updated persistent refresh helper (prevents boot/logon regression)"
+    fi
+else
+    log "persistent refresh directory absent; no scheduled helper to update"
+fi
 
 log "done"

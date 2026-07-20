@@ -1,4 +1,4 @@
-"""Offline fixer for DEVPKEY DriverProvider / DriverDesc on virtio-gpu.
+"""Offline fixer for virtio-gpu display metadata.
 
 Two-phase:
   Phase A (SD): for every nk under each matching instance's Properties
@@ -7,6 +7,14 @@ Two-phase:
   Phase B (type+data): for pid 0004 and 0009, ensure the '00000000'
                 value uses type 0xFFFF0012 (DEVPROP_TYPE_STRING) and
                 data = UTF-16LE(value + NUL).
+                Also restore the active VioGpuDod Enum/Class installation
+                metadata to the values declared by stock viogpudo.inf. This
+                preserves the Microsoft INF/CAT signer association while
+                FriendlyName and modern device properties keep the profile
+                display label.
+
+Package-file integrity and missing published-INF repair are handled by the
+separate signed-driver-package.py preflight before this registry writer runs.
 
 Finally: sync primary==secondary sequence + recompute regf checksum.
 """
@@ -24,8 +32,13 @@ SUBSYS_RE    = re.compile(os.environ['SUBSYS_RE'])
 DRY_RUN      = os.environ.get('DRY_RUN') == '1'
 
 FMT = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
+DISPLAY_CLASS = '{4d36e968-e325-11ce-bfc1-08002be10318}'
 HBIN_BASE = 0x1000
 DEVPROP_STRING = 0xFFFF0012
+REG_SZ = 1
+STOCK_DRIVER_DESCRIPTION = 'Red Hat VirtIO GPU DOD controller'
+STOCK_DRIVER_PROVIDER = 'Red Hat, Inc.'
+STOCK_MATCHING_ID = r'PCI\VEN_1AF4&DEV_1050'
 
 
 def utf16z(s):
@@ -49,48 +62,140 @@ def main():
         for c in h.node_children(n):
             collect(c, out)
 
-    pci = walk(root, ['ControlSet001', 'Enum', 'PCI'])
+    def required_string(node, name, label):
+        value = h.node_get_value(node, name)
+        if value is None:
+            raise RuntimeError(f'{label} missing registry value {name}')
+        try:
+            text = h.value_string(value)
+        except RuntimeError as exc:
+            raise RuntimeError(f'{label} has invalid REG_SZ {name}') from exc
+        if not isinstance(text, str) or not text:
+            raise RuntimeError(f'{label} has empty REG_SZ {name}')
+        return text
+
+    select = walk(root, ['Select'])
+    current_value = None if select is None else h.node_get_value(select, 'Current')
+    if current_value is None:
+        raise RuntimeError('SYSTEM hive lacks Select\\Current')
+    current = h.value_dword(current_value)
+    if current < 1 or current > 999:
+        raise RuntimeError(f'SYSTEM Select\\Current is invalid: {current}')
+    control_set = f'ControlSet{current:03d}'
+    print(f'  active control set: {control_set}')
+
+    pci = walk(root, [control_set, 'Enum', 'PCI'])
     if pci is None:
         # sysprep generalize 会清空 Enum\PCI；clone-from-base 后 guest 还没首启
         # 时这是预期状态。不算错——RunOnce + respawn-stealth.ps1 会在 guest
         # 首次开机后自己重做 GPU 注册表对齐，所以这里返回 0 让 clone 流程继续。
-        print('  ControlSet001\\Enum\\PCI 不存在 — sysprep base 未首启的预期状态')
+        print(f'  {control_set}\\Enum\\PCI 不存在 — sysprep base 未首启的预期状态')
         print('  跳过离线 DEVPKEY 覆盖；guest 首次开机后 RunOnce 会处理 GPU 对齐')
         sys.exit(0)
 
     targets = []
+    driver_targets = []
+    active_devices = []
     for ven in h.node_children(pci):
         vname = h.node_name(ven)
         if not SUBSYS_RE.search(vname):
             continue
         for inst in h.node_children(ven):
             iname = h.node_name(inst)
+            instance_label = f'{vname}\\{iname}'
+            service_value = h.node_get_value(inst, 'Service')
+            service = '' if service_value is None else h.value_string(service_value)
+            install_vks = {}
+            if service.casefold() == 'viogpudod':
+                active_devices.append(instance_label)
+                driver_ref = required_string(inst, 'Driver', instance_label)
+                driver_match = re.fullmatch(
+                    re.escape(DISPLAY_CLASS) + r'\\([0-9]{4})',
+                    driver_ref,
+                    re.IGNORECASE,
+                )
+                if driver_match is None:
+                    raise RuntimeError(
+                        f'{instance_label} has invalid Display Driver reference '
+                        f'{driver_ref!r}'
+                    )
+                class_node = walk(
+                    root,
+                    [
+                        control_set,
+                        'Control',
+                        'Class',
+                        DISPLAY_CLASS,
+                        driver_match.group(1),
+                    ],
+                )
+                if class_node is None:
+                    raise RuntimeError(
+                        f'{instance_label} Display Class key not found: {driver_ref}'
+                    )
+                inf_path = required_string(class_node, 'InfPath', driver_ref)
+                inf_section = required_string(class_node, 'InfSection', driver_ref)
+                if re.fullmatch(r'oem[0-9]+\.inf', inf_path, re.IGNORECASE) is None:
+                    raise RuntimeError(
+                        f'{driver_ref} has unsafe or unexpected InfPath {inf_path!r}'
+                    )
+                if inf_section.casefold() != 'viogpudod_inst':
+                    raise RuntimeError(
+                        f'{driver_ref} has unexpected InfSection {inf_section!r}'
+                    )
+                for name in ('DeviceDesc', 'Mfg'):
+                    value = h.node_get_value(inst, name)
+                    if value is None:
+                        raise RuntimeError(
+                            f'{instance_label} lacks signed-driver field {name}'
+                        )
+                    install_vks[name] = value
+                class_vks = {}
+                for name in ('DriverDesc', 'ProviderName', 'MatchingDeviceId'):
+                    value = h.node_get_value(class_node, name)
+                    if value is None:
+                        raise RuntimeError(
+                            f'{driver_ref} lacks signed-driver field {name}'
+                        )
+                    class_vks[name] = value
+                driver_targets.append({
+                    'driver_ref': driver_ref,
+                    'class_vks': class_vks,
+                    'inf_path': inf_path.casefold(),
+                })
             props = h.node_get_child(inst, 'Properties')
-            if props is None:
+            if props is None and not install_vks:
                 continue
-            fmt_n = h.node_get_child(props, FMT)
-            pid_vk = {}  # pid -> list of (name, vk_abs_offset)
-            if fmt_n is not None:
-                for pid in ['0004', '0009']:
-                    p_n = h.node_get_child(fmt_n, pid)
-                    if p_n is None:
-                        pid_vk[pid] = []
-                        continue
-                    vks = []
-                    for v in h.node_values(p_n):
-                        vks.append((h.value_key(v), v))
-                    pid_vk[pid] = vks
+            pid_vk = {}
             subtree = []
-            collect(props, subtree)
+            if props is not None:
+                fmt_n = h.node_get_child(props, FMT)
+                if fmt_n is not None:
+                    for pid in ('0004', '0009'):
+                        p_n = h.node_get_child(fmt_n, pid)
+                        pid_vk[pid] = [] if p_n is None else [
+                            (h.value_key(v), v) for v in h.node_values(p_n)
+                        ]
+                collect(props, subtree)
             targets.append({
                 'subsys': vname, 'inst': iname,
                 'inst_node': inst, 'subtree': subtree,
-                'pid_vk': pid_vk,
+                'pid_vk': pid_vk, 'install_vks': install_vks,
+                'inf_path': inf_path.casefold() if install_vks else None,
             })
             print(f'  target: {vname}\\{iname}  ({len(subtree)} Properties nk)')
+            if install_vks:
+                print(
+                    f'    signed driver: {driver_ref} / {inf_path} / {inf_section}'
+                )
 
     if not targets:
         sys.exit('no matching PCI instance found (SUBSYS_RE=%s)' % SUBSYS_RE.pattern)
+    if len(active_devices) != 1 or len(driver_targets) != 1:
+        raise RuntimeError(
+            'expected exactly one active VioGpuDod instance, got '
+            f'{active_devices!r}'
+        )
 
     del h; gc.collect()
 
@@ -250,6 +355,50 @@ def main():
                 print(f"    {t['subsys']}\\{t['inst']} pid={pid} name={vname!r} "
                       f"type 0x{old_type:08x}->0x{DEVPROP_STRING:08x}  data={newval!r}")
 
+    def write_reg_string(vk, text, label):
+        nonlocal type_fixes
+        assert vk_sig(vk) == b'vk'
+        old_type = u32(vk_type_off(vk))
+        if old_type != REG_SZ:
+            w32(vk_type_off(vk), REG_SZ)
+            type_fixes += 1
+        write_string_data(vk, text)
+        print(
+            f'    {label} type 0x{old_type:08x}->0x{REG_SZ:08x} data={text!r}'
+        )
+
+    for target in targets:
+        if not target['install_vks']:
+            continue
+        stock_enum = {
+            'DeviceDesc': (
+                f"@{target['inf_path']},%viogpudod.devicedesc%;"
+                f'{STOCK_DRIVER_DESCRIPTION}'
+            ),
+            'Mfg': (
+                f"@{target['inf_path']},%vendor%;{STOCK_DRIVER_PROVIDER}"
+            ),
+        }
+        for name, vk in target['install_vks'].items():
+            write_reg_string(
+                vk,
+                stock_enum[name],
+                f"{target['subsys']}\\{target['inst']} {name}",
+            )
+
+    stock_class = {
+        'DriverDesc': STOCK_DRIVER_DESCRIPTION,
+        'ProviderName': STOCK_DRIVER_PROVIDER,
+        'MatchingDeviceId': STOCK_MATCHING_ID,
+    }
+    for driver_target in driver_targets:
+        for name, vk in driver_target['class_vks'].items():
+            write_reg_string(
+                vk,
+                stock_class[name],
+                f"{driver_target['driver_ref']} {name}",
+            )
+
     print(f'  phase B: {type_fixes} type fixes, {data_writes} data writes')
 
     # ---- Phase C: sync regf sequence + checksum ----
@@ -266,6 +415,7 @@ def main():
     if DRY_RUN:
         print('DRY_RUN=1: not writing hive')
         return
+
     with open(HIVE, 'wb') as f:
         f.write(mm)
     print('hive written.')

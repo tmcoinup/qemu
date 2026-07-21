@@ -48,9 +48,9 @@
 #
 # 默认值（90% 情况都不用改）：
 #     BRIDGE=br0           桥接 br0（不存在自动回退到 user-mode NAT）
-#     STABLE_DISPLAY=0     SDL 默认 virtio-vga-gl，供宿主 GL/推流使用；当前
-#                          Windows VioGpuDod 仍是 Display-Only，不获得客体 Direct3D
-#                          PCI 主 ID 固定保留 virtio；历史自签/深层开关已移除
+#     STABLE_DISPLAY=1     SDL 默认 virtio-vga，不启用宿主 virgl/blob/hostmem；
+#                          优先保证 Windows 游戏长时间运行稳定。VioGpuDod 在两条
+#                          路径都只是 Display-Only，都不会提供客体 Direct3D 加速
 #     STRICT_HARDWARE=1    KVM/TSC 能力、完整平台与 CPU realize 默认严格门禁
 #
 # 平台 bundle 与每机唯一身份只在首次启动时选择/生成一次，写到
@@ -94,9 +94,9 @@
 #     DISK=<path>          qcow2 磁盘路径                        (flag: --disk=<path>)
 #     QEMU=<path>          qemu-system-x86_64 二进制路径         (flag: --qemu=<path>)
 #     EXTRA_ISO=<path>     副 CDROM（autounattend.xml / 驱动盘 等）
-#     STABLE_DISPLAY=1     强制 virtio-vga（关闭宿主 GL），用于回避个别环境的 virgl
-#                          长跑 TDR/BSOD。--no-sdl/--headless 无窗口 GL context，
-#                          也会走 stable virtio-vga。
+#     STABLE_DISPLAY=1     默认稳定路径；设 0 才显式启用 virtio-vga-gl。
+#                          --gpu-sdl-egl/--gpu-headless 在未显式设置本变量时会自动
+#                          opt-in GL；显式 STABLE_DISPLAY=1 仍保持稳定模式优先。
 #     STRICT_HARDWARE=1    设 0 仅供诊断/兼容 dry-run，不计入真机化支持
 #     STEALTH_PLATFORM_ID= 显式平台 ID（flag: --platform-id=<id>）；已有
 #                          profile 上只做一致性断言；可选，换平台须另加 --reroll
@@ -117,15 +117,15 @@
 #                          (flag: --fb-shm-rate=<hz>)
 #     FB_SHM_ROI=x,y,w,h   只截 ROI 推流（省 CPU/带宽）。空 = 全屏
 #                          (flag: --fb-shm-roi=x,y,w,h)
-#     GPU_ZEROCOPY=1       普通 SDL+GL 默认给 virtio-vga-gl 打开 blob/hostmem，
-#                          优先尝试 dma-buf GPU handoff；能力不可用时 QEMU 自动
-#                          回退 SHM。设 0 或 --no-gpu-zerocopy 仅关闭 blob/hostmem
-#                          偏好；renderer 仍可能从普通 texture 导出 dma-buf。
+#     GPU_ZEROCOPY=0       稳定路径的有效默认值；显式 GL 路径默认改为 1，给
+#                          virtio-vga-gl 打开 blob/hostmem 并尝试 dma-buf handoff。
+#                          能力不可用时 QEMU 自动回退 SHM；--no-gpu-zerocopy
+#                          只关闭 blob/hostmem 偏好。
 #     GPU_HOSTMEM=256M     virtio-gpu host-visible memory window 大小。
 #                          (flag: --gpu-hostmem=SIZE)
-#     GPU_DISPLAY=sdl      GPU 显示模式；sdl=默认官方 SDL/GL，
-#                          sdl-egl=兼容模式名（同样生成 `-display sdl,gl=on`，
-#                          由 QEMU 11 探测 EGL，并默认启用 blob/hostmem），
+#     GPU_DISPLAY=sdl      GPU 显示模式；sdl=默认普通 SDL 稳定路径，
+#                          sdl-egl=显式生成 `-display sdl,gl=on`，由 QEMU 11
+#                          探测 EGL，并默认启用 blob/hostmem，
 #                          egl-headless=无窗口 EGL。
 #                          (flag: --gpu-display=sdl|sdl-egl|egl-headless /
 #                          --gpu-sdl-egl / --gpu-headless)

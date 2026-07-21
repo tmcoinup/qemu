@@ -2,11 +2,9 @@
 
 > **当前基线**：QEMU `11.0.2` + `V-11`，严格硬件目录 schema 1，Linux/KVM 为主路径。
 > 新 VM 默认启用 Intel G4900、G5400、i3-9100F/H310 与 i5-6400T/H110 四套受控 bundle；底层仍是 Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
-> NVMe、显示器和 HID 各只有一套经过约束的组件模板，不再从十款字符串池随机拼装。
-> GPU passthrough/vGPU 不在本分支范围，virtio 显示标签不代表真实独显。
+> NVMe、显示器和 HID 各只有一套经过约束的组件模板，不再从十款字符串池随机拼装；GPU passthrough/vGPU 不在本分支范围，virtio 显示标签不代表真实独显。
 
-当前能力、E5-2696 v4/X99、其它 E5 与 Windows/WHPX 的结论先看
-[硬件平台评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)；字段来源和 fidelity 见 [Profile 字段](PROFILE-FIELDS.md)。
+当前能力、E5-2696 v4/X99、其它 E5 与 Windows/WHPX 的结论先看 [硬件平台评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)；字段来源和 fidelity 见 [Profile 字段](PROFILE-FIELDS.md)。
 
 ## 1. 宿主前提
 
@@ -115,17 +113,14 @@ sudo deploy/scripts/clone-from-base.sh win10-ltsc-shallow 2 \
   --migrate-storage-profile
 ```
 
-`seal-base.sh` 会自动校验并把最终 base 密封为 `root:root/0444`；clone 会在实例目录内建立同 inode
-的 `.base.qcow2` 只读 pin，overlay 只引用这个相对路径。因此删除或移动 `_base` 中的原目录项不会
-改变已有实例的 backing；base 与 `VMS_DIR` 必须位于同一文件系统。完成提示包含 `sudo`、实际 base
-绝对路径、`VMS_DIR`、`qemu-img`、compatibility 及迁移授权，可直接复制。seal 的 root 发布器优先使用
-文件系统 reflink；不支持时会稀疏复制到独立 root inode，密封期间需预留约一份压缩后 base 的临时空间。
+`seal-base.sh` 会校验并把最终 base 密封为 `root:root/0444`；clone 在实例目录建立同 inode 的
+`.base.qcow2` 只读 pin，overlay 只引用这个相对路径。因此删除或移动 `_base` 原目录项都不会改变已有实例的
+backing；base 与 `VMS_DIR` 必须位于同一文件系统。完成提示包含 `sudo`、base 绝对路径、`VMS_DIR`、`qemu-img`、compatibility 与迁移授权，可直接复制；seal 优先 reflink，不支持时稀疏复制到独立 root inode，密封期间需预留约一份压缩后 base 的临时空间。
 
-浏览器下载、`scp`、Windows、U 盘或移动硬盘复制会丢失 Linux owner/mode。把独立
-qcow2 复制到目标 Linux 文件系统后，仍直接执行同一条 `sudo clone-from-base.sh`：
-clone 会在稳定 FD 上完成 qcow2 全检，确认文件属于调用用户、只有一个硬链接且没有
-进程持有，然后自动密封为 `root:root/0444`，无需手工 `chown/chmod`。直接放在
-NTFS/CIFS/DrvFS 上且无法持久化 Unix 权限时会明确拒绝，应先复制到 Linux 的
+浏览器下载、`scp`、Windows 或移动介质复制会丢失 Linux owner/mode。把独立 qcow2
+复制到目标 Linux 文件系统后，仍直接执行 `sudo clone-from-base.sh`：clone 会在稳定 FD
+上全检，确认文件属于调用用户、只有一个硬链接且没有进程持有，再自动密封为
+`root:root/0444`，无需手工 `chown/chmod`。NTFS/CIFS/DrvFS 无法持久化 Unix 权限时会明确拒绝，应先复制到 Linux
 `BASE_DIR`；base 与 `VMS_DIR` 仍须位于同一文件系统，才能建立零拷贝实例 pin。
 
 升级前已有的 overlay 仍可读取普通用户拥有、无任何写权限的 legacy `0444`
@@ -388,30 +383,31 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `CPU_ISOLATE` | `1` | 异步 NUMA-aware pinner + cgroup cpuset |
 | `QEMU_SERVICE_CPUS` | `0` | `--svc-cpu` 分配 1 个辅助线程逻辑 CPU |
 | `MEM_GUARD` | `1` | 可用内存不足时告警或拒绝；`MEM_FORCE=1` 显式越过硬拒绝 |
-| `SDL` / `FB_SHM` | `1` / `1` | 默认本地 SDL/GL 窗口与 fb-shm 同时启用 |
-| `STABLE_DISPLAY` | `0` | 默认 virtio-vga-gl；设 1 改用无 GL 稳定路径 |
-| `GPU_DISPLAY` | `sdl` | 还支持 `sdl-egl` 兼容名和 `egl-headless` |
+| `SDL` / `FB_SHM` | `1` / `1` | 默认本地稳定 SDL 窗口与 fb-shm 同时启用 |
+| `STABLE_DISPLAY` | `1` | 默认 `virtio-vga`、无 virgl；设 `0` 显式启用 GL 路径 |
+| `GPU_DISPLAY` | `sdl` | `sdl-egl`/`egl-headless` 被显式选择时自动 opt-in GL |
 | `QEMU_CAP_CHECK` | `1` | 拒绝缺少定制设备属性的 QEMU |
 | `STRICT_STEALTH` | `0` | 网络兼容默认；生产应显式设 1 禁止 NAT fallback |
 | `PROXY` | `0` | `--proxy` 启用 QMP 原生 multi-client |
 
-`CPU_FREQ_CAP=0` 是有意的默认值：全局 `scaling_max_freq` 会同时影响管理核和其它 VM，尤其
-不适合未经评估的高核/双路 E5。优先用 NUMA/cpuset 放置；只有确认宿主调度策略后才使用
-`--freq-cap`。
+`CPU_FREQ_CAP=0` 是有意的默认值：全局 `scaling_max_freq` 会影响管理核和其它 VM，尤其不适合未经评估的高核/双路 E5。
+优先用 NUMA/cpuset 放置；只有确认宿主调度策略后才使用 `--freq-cap`。
 
-宿主内存使用单个 `memory-backend-memfd,share=on,prealloc=off`，按需占用物理页，不预留无效
-hugepage 池。`share=on` 供 VMI 读取同一份 guest RAM；它不改变客体报告的内存容量。
+宿主内存使用单个 `memory-backend-memfd,share=on,prealloc=off` 按需占页，不预留无效 hugepage 池；`share=on` 供 VMI 读取同一份 guest RAM，不改变客体容量。
 
 ## 6. 显示与 fb-shm
 
 | 命令 | 本地窗口 | 远程显示 | fb-shm |
 |---|---|---|---|
-| `start-vm.sh 1` | SDL/GL | 无 | 开 |
+| `start-vm.sh 1` | SDL（稳定、无 GL） | 无 | 开 |
 | `start-vm.sh 1 --headless` | 无 | VNC | 开 |
 | `start-vm.sh 1 --no-sdl` | 无 | 无 | 开 |
-| `start-vm.sh 1 --no-fb-shm` | SDL/GL | 无 | 关 |
-| `start-vm.sh 1 --gpu-headless` | 无 | EGL rendernode | 开 |
+| `start-vm.sh 1 --no-fb-shm` | SDL（稳定、无 GL） | 无 | 关 |
+| `start-vm.sh 1 --gpu-sdl-egl` | SDL/GL（显式 opt-in） | 无 | 开 |
+| `start-vm.sh 1 --gpu-headless` | 无 | EGL rendernode（显式 opt-in） | 开 |
 
+默认 `STABLE_DISPLAY=1` 用于避开 Windows 游戏长跑中的 virgl 显示不稳定；需要 GPU 导出时可设 `STABLE_DISPLAY=0`，或使用 `--gpu-sdl-egl`/`--gpu-headless`。显式 `STABLE_DISPLAY=1`
+优先：`sdl-egl` 降级为普通 SDL，`egl-headless` 拒绝启动。
 无 `DISPLAY` 且非交互终端时，默认 SDL 会自动关闭，仅保留 fb-shm。消费端示例：
 
 ```bash
@@ -421,8 +417,7 @@ build/qemu-fb-shm-stream \
   --encoder libx264 --preset veryfast --mode auto
 ```
 
-GPU handle 只是一条传帧优化；导出不可用时会回落到 SHM。无论路径为何，客体仍是 virtio
-显示设备，不能把日志中的 GPU handoff、旧 NVIDIA/AMD 标签或注册表名称当作物理 GPU 证据。
+GPU handle 只在显式 GL 路径尝试；失败回落 SHM。客体始终是 virtio 显示设备，不能把 GPU handoff 或 NVIDIA/AMD 标签当作物理 GPU 证据。
 
 ## 7. Profile 与内存变更
 
@@ -500,8 +495,5 @@ latency、NUMA remote access、磁盘/网络 P99、RSS、温度和功耗。
 
 ## 10. 当前 GPU 文档与历史资料
 
-`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md` 和 `ACE-SHALLOW-STEALTH.md` 是当前 guest
-浅层 GPU 流程：物理 `1AF4:1050`、stock VioGpuDod、用户态逻辑身份和固定摘要的
-x86 SysWOW64 + x64 System32 用户态 shim，使 GPU-Z
-2.70 可直接双击；旧审计中的自签驱动、EfiGuard、主 PCI ID 覆盖或真实 NVIDIA
-转发器只描述历史快照，不能覆盖当前 manifest、启动器和上述三份文档。
+`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md` 和 `ACE-SHALLOW-STEALTH.md` 描述当前浅层 GPU 流程：物理 `1AF4:1050`、stock VioGpuDod、用户态逻辑身份和固定摘要的 x86 SysWOW64 + x64 System32 shim，使 GPU-Z 2.70 可直接双击。
+旧审计中的自签驱动、EfiGuard、主 PCI ID 覆盖或真实 NVIDIA 转发器只代表历史快照，不能覆盖当前 manifest、启动器和上述三份文档。

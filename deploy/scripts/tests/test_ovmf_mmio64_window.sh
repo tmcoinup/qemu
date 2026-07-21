@@ -33,6 +33,7 @@ run_dry() {
         HOST_TUNE=0 \
         CPU_ISOLATE=0 \
         QEMU_CAP_CHECK=0 \
+        STABLE_DISPLAY=0 \
         STRICT_HARDWARE=0 \
         STEALTH_KVM_AVAILABLE=1 \
         STEALTH_KVM_TSC_CONTROL=1 \
@@ -72,6 +73,8 @@ assert_guard() {
 
     grep -F -- "host-phys-bits-limit=39" "$output" >/dev/null \
         || fail "$mode 用例没有覆盖现场的 39-bit CPU profile"
+    # 中文注释：默认显示现已不分配 hostmem BAR；本测试在 run_dry 中显式
+    # opt-in GL，继续验证最坏情况下 OVMF 固定窗口能容纳该 BAR。
     gpu="$(grep -E '^virtio-vga-gl,' "$output" | head -n 1)"
     [[ "$gpu" =~ hostmem=([0-9]+)M ]] \
         || fail "$mode 用例没有覆盖 virtio-vga-gl hostmem BAR"

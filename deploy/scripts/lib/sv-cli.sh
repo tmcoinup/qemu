@@ -17,6 +17,13 @@ _cli_reroll=0
 _cli_bridge_seen=0
 _cli_vlan_id_seen=0
 _cli_platform_id_seen=0
+# 中文注释：默认改为稳定显示后，显式选择 GL 后端仍必须保持原有语义。
+# 这里在 CLI 覆盖前记住环境变量是否存在；解析具体 GPU flag 时也会置位，
+# 从而区分“用户明确要 GL”和“GPU_DISPLAY=sdl 的普通默认值”。
+_stable_display_explicit=0
+_gpu_display_explicit=0
+[[ -n "${STABLE_DISPLAY+x}" ]] && _stable_display_explicit=1
+[[ -n "${GPU_DISPLAY+x}" ]] && _gpu_display_explicit=1
 while (( $# > 0 )); do
     case "$1" in
         -h|--help) _usage 0 ;;
@@ -47,9 +54,9 @@ while (( $# > 0 )); do
         --gpu-zerocopy)     GPU_ZEROCOPY=1 ;;
         --no-gpu-zerocopy)  GPU_ZEROCOPY=0 ;;
         --gpu-hostmem=*)    GPU_HOSTMEM="${1#*=}" ;;
-        --gpu-headless)     GPU_DISPLAY=egl-headless; SDL=0 ;;
-        --gpu-sdl-egl)      GPU_DISPLAY=sdl-egl; SDL=1 ;;
-        --gpu-display=*)    GPU_DISPLAY="${1#*=}" ;;
+        --gpu-headless)     GPU_DISPLAY=egl-headless; SDL=0; _gpu_display_explicit=1 ;;
+        --gpu-sdl-egl)      GPU_DISPLAY=sdl-egl; SDL=1; _gpu_display_explicit=1 ;;
+        --gpu-display=*)    GPU_DISPLAY="${1#*=}"; _gpu_display_explicit=1 ;;
         --gpu-rendernode=*) GPU_RENDERNODE="${1#*=}" ;;
         --proxy)         PROXY=1 ;;
         --no-proxy)      PROXY=0 ;;
@@ -220,7 +227,7 @@ fi
 : "${HEADLESS:=0}"
 : "${SDL:=1}"      # 默认：SDL 窗口仍然弹出（与历史行为一致）
 : "${FB_SHM:=1}"   # 默认：再额外挂一条 -object fb-shm 推流通道
-: "${STABLE_DISPLAY:=0}"
+: "${STABLE_DISPLAY:=1}"
 : "${FB_SHM_RATE:=60}"
 : "${FB_SHM_ROI:=}"
 : "${FB_SHM_SOCK:=/tmp/qemu-stealth-${INSTANCE}.fb}"
@@ -229,6 +236,20 @@ _gpu_zerocopy_explicit=0
 : "${GPU_HOSTMEM:=256M}"
 : "${GPU_DISPLAY:=sdl}"
 : "${GPU_RENDERNODE:=}"
+# 默认使用无 virgl 的长期稳定路径；显式选择 GL/EGL 后端仍是可靠的 opt-in。
+# 显式 STABLE_DISPLAY 的优先级更高，后续冲突门禁会降级或 fail closed。
+if [[ "$_stable_display_explicit" == "0" &&
+      "$_gpu_display_explicit" == "1" &&
+      ( "$GPU_DISPLAY" == "sdl-egl" || "$GPU_DISPLAY" == "egl-headless" ) ]]; then
+    STABLE_DISPLAY=0
+fi
+case "$STABLE_DISPLAY" in
+    0|1) ;;
+    *)
+        echo "ERROR: STABLE_DISPLAY 必须是 0 或 1 (实际: '$STABLE_DISPLAY')" >&2
+        exit 2
+        ;;
+esac
 # GPU 零拷贝元数据依赖 virtio-gpu blob resource + host-visible memory。
 # 中文注释：能力优先策略只负责给 virtio-gpu 打开 blob/hostmem，并不承诺当前
 # scanout 一定能导出 GPU handle。QEMU/virgl/ANGLE 导出失败时，fb-shm 会在同一

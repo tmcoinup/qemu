@@ -47,15 +47,19 @@ Linux 下 QEMU 有两种 GPU 导出来源：
    - QEMU `dup()` 该 dma-buf fd；
    - 发送 `FbShmCtlAck + FbShmGpuFrame`；
    - 通过 `SCM_RIGHTS` 附带 dma-buf fd。
-   - 普通 `./start-vm.sh <N>` 默认使用 `GPU_DISPLAY=sdl`，即 QEMU 11 官方
-     SDL/OpenGL 路径；X11 下会显式使用 X11 EGL platform 做能力探测，避免
-     EGL 把 X11 display 按 Wayland 解释。普通 SDL/GL 现在默认追加
+   - 普通 `./start-vm.sh <N>` 默认是 `STABLE_DISPLAY=1` + `GPU_DISPLAY=sdl`：
+     使用 QEMU 11 普通 SDL 和 `virtio-vga`，不启用 virgl、blob/hostmem 或 GPU
+     handle 导出，fb-shm 直接使用 SHM 路径。这是 Windows 游戏长跑的默认策略。
+   - 需要 GPU 导出时，显式设置 `STABLE_DISPLAY=0`，或使用 `--gpu-sdl-egl` /
+     `--gpu-headless`。后两个 GPU flag（以及对应的显式 `GPU_DISPLAY` 值）会在未显式
+     设置 `STABLE_DISPLAY` 时自动 opt-in GL；显式 `STABLE_DISPLAY=1` 始终优先。
+   - SDL/GL opt-in 使用 QEMU 11 官方 OpenGL 路径，并默认追加
      `blob=true,hostmem=256M`，优先给 guest/renderer 提供可共享 backing；
      `GPU_HOSTMEM=512M` 可调整 host-visible window。`--no-gpu-zerocopy` 只移除
      blob/hostmem 偏好；EGL/renderer 仍可能从普通 texture 导出 dma-buf。
    - 这是一项能力偏好而非成功保证。virglrenderer 无法导出当前 scanout 的
      dma-buf 时，QEMU 在同一运行实例内自动继续 SHM/PBO，不重启 VM、不关闭 SDL。
-   - `GPU_DISPLAY=sdl-egl` 继续保留为启动策略兼容入口，但显示实现直接复用
+   - `GPU_DISPLAY=sdl-egl` 是显式 GL 入口，显示实现直接复用
      QEMU 11 官方 SDL/EGL 窗口与 context，不再在 SDL 父窗口内创建额外 X11/EGL
      子窗口。DGame 的显示/隐藏始终操作同一个 SDL 窗口；fb-shm 从当前 EGL
      provider 对应的 texture 尝试导出 dma-buf。
@@ -192,7 +196,7 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\stream-fb-shm.ps1 `
 | `ui/fb-shm-gpu.c` | dma-buf/D3D 导出、keyed mutex 与 fd/COM/handle 生命周期 |
 | `tools/fb-shm-stream/platform.c` | `NOTIFY_RESIZED` 与 `NOTIFY_GPU_FRAME` 是否能在同一控制 socket 上正确分流 |
 | `tools/fb-shm-stream/main.c` | `--mode` 是否避免把 SHM fallback 伪装成 GPU 零拷贝 |
-| `deploy/scripts/tests/test_gpu_zerocopy_launcher.sh` | Linux 默认 blob/hostmem、显式 opt-out 与非 GL 例外是否保持一致 |
+| `deploy/scripts/tests/test_gpu_zerocopy_launcher.sh` | Linux 默认 stable、显式 GL/blob opt-in、优先级与冲突矩阵是否一致 |
 | `deploy/scripts/tests/test_windows_fb_shm_static.sh` | Windows/Linux 关键字符串和语法检查是否覆盖新路径 |
 
 ## 已验证命令
@@ -213,12 +217,12 @@ rg -n "unwrap\(" include/ui/fb-shm-abi.h ui/fb-shm.c tools/fb-shm-stream \
 
 - 内置 `qemu-fb-shm-stream` 尚未实现 native libav/NVENC/AMF/QSV GPU import backend；
 - Linux texture 到 dma-buf 的导出依赖 `CONFIG_GBM` 和 EGL 扩展；
-- 如果启动时没有 `blob=true,hostmem=SIZE`，Windows/virgl 常只给 QEMU 普通 GL
-  texture；在缺少 EGL texture export 的宿主上不会产生 `NOTIFY_GPU_FRAME`，
+- 默认 stable 路径不会添加 `blob=true,hostmem=SIZE`，因此只使用 SHM；显式 GL 后，
+  Windows/virgl 仍可能只给 QEMU 普通 GL texture；缺少 EGL texture export 时不会产生 `NOTIFY_GPU_FRAME`，
   只能继续走 SHM fallback；
-- `GPU_DISPLAY=sdl` 使用 QEMU 11 官方 SDL/OpenGL 路径；实际 EGL/GL provider
-  由 SDL 与宿主能力共同决定，因此缺少 dma-buf export 扩展时仍会走 SHM/CPU
-  fallback。启动器默认打开 blob/hostmem 只能增加成功条件；DGame UI 只有收到
+- `GPU_DISPLAY=sdl` 本身是默认普通 SDL；只有 `STABLE_DISPLAY=0` 时才使用 SDL/OpenGL。
+  实际 EGL/GL provider 由 SDL 与宿主能力共同决定，因此缺少 dma-buf export 扩展时仍会走 SHM/CPU
+  fallback。显式 GL 路径默认打开 blob/hostmem 也只能增加成功条件；DGame UI 只有收到
   实际 GPU frame 后才能显示 `G`，不能仅凭启动参数宣称零拷贝成功；
 - `--gpu-headless` 会关闭 SDL 窗口并使用 `egl-headless` display backend；这是
   fb-shm GPU 预览/转码的无窗口模式，不适合作为宿主本地交互窗口；

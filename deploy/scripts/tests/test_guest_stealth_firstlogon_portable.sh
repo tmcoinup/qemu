@@ -137,6 +137,7 @@ clone_print_completion 1 "$EXPECT_DISK" base 1 "$EXPECT_VMS_DIR" \
     "$TEST_TMP/scripts" 4 qemu qemu-img 0 0 strict 0 >"$TEST_TMP/completion-ok"
 require_text '下一步 — 启动' "$TEST_TMP/completion-ok"
 require_text '首次开机会按 unattend.xml 完成 OOBE' "$TEST_TMP/completion-ok"
+reject_text 'STABLE_DISPLAY=' "$TEST_TMP/completion-ok"
 reject_text '先修复 OOBE 注入' "$TEST_TMP/completion-ok"
 
 echo "OK: guest stealth FirstLogon runs D drive EXE once without fixed HTTP"

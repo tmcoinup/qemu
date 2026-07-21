@@ -65,6 +65,7 @@ set -euo pipefail
 printf '%s' "${VMS_DIR:-}" >"$TEST_OUT/vms-dir"
 printf '%s' "${IMAGE_ROOT:-}" >"$TEST_OUT/image-root"
 printf '%s' "${QEMU_IMG:-}" >"$TEST_OUT/qemu-img"
+printf '%s' "${STABLE_DISPLAY:-}" >"$TEST_OUT/stable-display"
 printf '%s\0' "$@" >"$TEST_OUT/start.args"
 EOF
 chmod +x "$FIXTURE_DIR/start-vm.sh"
@@ -112,7 +113,7 @@ VMS_DIR="$CUSTOM_VMS_DIR" \
 IMAGE_ROOT="$CUSTOM_IMAGE_ROOT" \
 QEMU_IMG="$CUSTOM_QEMU_IMG" \
 DISPLAY=:77 \
-STABLE_DISPLAY=1 \
+STABLE_DISPLAY=0 \
 HOST_RESERVE_CORES=3 \
 QEMU_SVC_CPUS=1 \
 QEMU_SERVICE_CPUS=2 \
@@ -124,6 +125,9 @@ DEVICE_DESC='Test Display Adapter' \
 SUBSYS_RE='^VEN_TEST&DEV_TEST$' \
     "$FIXTURE_DIR/finalize-elevation.sh" "$INSTANCE" \
     >"$TMP_DIR/elevation.log"
+
+tr '\0' '\n' <"$TEST_OUT/elevation.args" | grep -Fx 'STABLE_DISPLAY=0' >/dev/null ||
+    fail "finalize 第一次 sudo 没有保留显式 STABLE_DISPLAY=0"
 
 [[ "$(cat "$TEST_OUT/fix.vms-dir")" == "$CUSTOM_VMS_DIR" ]] ||
     fail "finalize 第一次 sudo 丢失自定义 VMS_DIR"
@@ -138,6 +142,7 @@ SUBSYS_RE='^VEN_TEST&DEV_TEST$' \
    "$(cat "$TEST_OUT/fix.subsys-re")" == '^VEN_TEST&DEV_TEST$' ]] ||
     fail "finalize 第一次 sudo 丢失 GPU 修复参数"
 
+env -u STABLE_DISPLAY \
 PATH="$FAKE_BIN:$PATH" \
 SUDO_USER="$(id -un)" \
 VMS_DIR="$CUSTOM_VMS_DIR" \
@@ -156,6 +161,8 @@ QEMU_IMG="$CUSTOM_QEMU_IMG" \
     fail "finalize 第二次 sudo 丢失自定义 IMAGE_ROOT"
 [[ "$(cat "$TEST_OUT/qemu-img")" == "$CUSTOM_QEMU_IMG" ]] ||
     fail "finalize 第二次 sudo 丢失自定义 QEMU_IMG"
+[[ ! -s "$TEST_OUT/stable-display" ]] ||
+    fail "finalize --restart 把 unset STABLE_DISPLAY 变成了显式设置"
 [[ "$(cat "$TEST_OUT/sudo-user")" == "$(id -un)" ]] ||
     fail "finalize 没有以原始用户重新启动"
 [[ "$(cat "$TEST_OUT/fix.args")" == "$INSTANCE" ]] ||
@@ -176,9 +183,29 @@ mapfile -d '' -t START_ARGV <"$TEST_OUT/start.args"
    "${#START_ARGV[@]}" == 5 ]] ||
     fail "finalize --restart 没有逐参数传播 clone/start 配置"
 
-grep -F 'VMS_DIR="$VMS_DIR"' "$FINALIZE" >/dev/null ||
+# 未显式设置 stable 时，GPU flag 必须原样穿过两个 sudo 边界，让 start-vm
+# 自己按“显式 GPU 模式自动 opt-in GL”的规则解析，finalizer 不得提前注入 1。
+env -u STABLE_DISPLAY \
+PATH="$FAKE_BIN:$PATH" \
+VMS_DIR="$CUSTOM_VMS_DIR" \
+IMAGE_ROOT="$CUSTOM_IMAGE_ROOT" \
+QEMU_IMG="$CUSTOM_QEMU_IMG" \
+    "$FIXTURE_DIR/finalize-elevation.sh" "$INSTANCE" \
+    --restart -- --gpu-sdl-egl >"$TMP_DIR/finalize-gpu-mode.log"
+if tr '\0' '\n' <"$TEST_OUT/elevation.args" | grep -q '^STABLE_DISPLAY='; then
+    fail "finalize 第一次 sudo 把 unset STABLE_DISPLAY 变成了显式设置"
+fi
+[[ ! -s "$TEST_OUT/stable-display" ]] ||
+    fail "finalize 第二次 sudo 把 unset STABLE_DISPLAY 变成了显式设置"
+mapfile -d '' -t START_ARGV <"$TEST_OUT/start.args"
+[[ "${START_ARGV[0]:-}" == "$INSTANCE" &&
+   "${START_ARGV[1]:-}" == --gpu-sdl-egl &&
+   "${#START_ARGV[@]}" == 2 ]] ||
+    fail "finalize 没有原样传播显式 GPU 显示模式"
+
+grep -F '"VMS_DIR=$VMS_DIR"' "$FINALIZE" >/dev/null ||
     fail "生产 finalize 未显式注入 VMS_DIR"
-grep -F 'IMAGE_ROOT="${IMAGE_ROOT:-}"' "$FINALIZE" >/dev/null ||
+grep -F '"IMAGE_ROOT=${IMAGE_ROOT:-}"' "$FINALIZE" >/dev/null ||
     fail "生产 finalize 未显式注入 IMAGE_ROOT"
 grep -F 'STOCK_MATCHING_ID = r'\''PCI\VEN_1AF4&DEV_1050'\''' \
     "$HIVE_PATCHER" >/dev/null ||

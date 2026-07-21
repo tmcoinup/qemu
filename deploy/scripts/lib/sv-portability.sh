@@ -65,9 +65,9 @@ _sv_check_qemu_caps() {
         'x-pci-sub-vendor-id=' 'x-pci-sub-device-id=' \
         || _sv_die_missing_qemu_feature "virtio-vga EDID / PCI subsystem 属性"
 
-    if [[ "${SDL:-0}" == "1" && "${STABLE_DISPLAY:-0}" != "1" ]]; then
+    if [[ "${SDL:-0}" == "1" && "${STABLE_DISPLAY:-1}" != "1" ]]; then
         _sv_need_gl_display=1
-    elif [[ "${GPU_DISPLAY:-sdl}" == "egl-headless" && "${STABLE_DISPLAY:-0}" != "1" ]]; then
+    elif [[ "${GPU_DISPLAY:-sdl}" == "egl-headless" && "${STABLE_DISPLAY:-1}" != "1" ]]; then
         _sv_need_gl_display=1
     else
         _sv_need_gl_display=0

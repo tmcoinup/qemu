@@ -87,8 +87,8 @@ clone_print_completion() {
     printf ' %q' "$script_dir/finalize-clone-gpu.sh" "$instance"
     printf '\n'
     echo "如需修完自动重新启动:"
-    printf '  VMS_DIR=%q QEMU_IMG=%q STABLE_DISPLAY=%q HOST_RESERVE_CORES=%q' \
-        "$vms_dir" "$qemu_img" 0 0
+    printf '  VMS_DIR=%q QEMU_IMG=%q HOST_RESERVE_CORES=%q' \
+        "$vms_dir" "$qemu_img" 0
     printf ' %q' "$script_dir/finalize-clone-gpu.sh" "$instance" \
         --restart -- "${start_forward_args[@]}" --proxy
     printf '\n'

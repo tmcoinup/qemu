@@ -288,6 +288,10 @@ grep -F 'source "$SCRIPT_DIR/lib/sv-host-capabilities.sh"' "$CLONE" >/dev/null |
 grep -F 'export CPUS QEMU STRICT_HARDWARE' \
         "$CLONE" >/dev/null ||
     fail "clone-from-base.sh 未强制保持严格创建门禁"
+grep -F "STABLE_DISPLAY=1 \\" "$LIFECYCLE" >/dev/null ||
+    fail "clone QEMU 能力预检未使用默认稳定显示"
+grep -F "GPU_ZEROCOPY=0 \\" "$LIFECYCLE" >/dev/null ||
+    fail "clone 稳定显示预检仍要求 GL blob/hostmem"
 grep -F -- '--allow-platform-compatibility) ALLOW_PLATFORM_COMPATIBILITY=1' \
         "$CLONE" >/dev/null ||
     fail "clone-from-base.sh 未接受 compatibility 创建授权"
@@ -301,6 +305,11 @@ grep -F 'start_forward_args+=("--allow-platform-compatibility")' \
 grep -F 'printf '\''  VMS_DIR=%q QEMU_IMG=%q'\'' "$vms_dir" "$qemu_img"' \
         "$CLONE_POSTPROCESS" >/dev/null ||
     fail "clone-from-base.sh 启动提示未安全传播 VMS_DIR/QEMU_IMG"
+grep -F '"$vms_dir" "$qemu_img" 0' "$CLONE_POSTPROCESS" >/dev/null ||
+    fail "clone finalize 提示未默认保持 HOST_RESERVE_CORES=0"
+if grep -F 'STABLE_DISPLAY=%q' "$CLONE_POSTPROCESS" >/dev/null; then
+    fail "clone finalize 提示不得把 unset STABLE_DISPLAY 变成显式设置"
+fi
 # shellcheck disable=SC2016 # finalize --restart 必须转发相同参数数组。
 grep -F -- '--restart -- "${start_forward_args[@]}" --proxy' \
         "$CLONE_POSTPROCESS" >/dev/null ||

@@ -9,7 +9,7 @@
 #
 # 如果希望修完后自动重启 VM：
 #
-#     STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 \
+#     STABLE_DISPLAY=1 HOST_RESERVE_CORES=0 \
 #       deploy/scripts/finalize-clone-gpu.sh 1 --restart -- --proxy
 #
 # 说明：
@@ -82,21 +82,28 @@ if [[ $EUID -ne 0 ]]; then
     if [[ ${#START_ARGS[@]} -gt 0 ]]; then
         SUDO_ARGS+=("--" "${START_ARGS[@]}")
     fi
+    SUDO_ENV=(
+        "VMS_DIR=${VMS_DIR:-}"
+        "IMAGE_ROOT=${IMAGE_ROOT:-}"
+        "QEMU_IMG=${QEMU_IMG:-}"
+        "DISPLAY=${DISPLAY:-:1}"
+        "HOST_RESERVE_CORES=${HOST_RESERVE_CORES:-auto}"
+        "QEMU_SVC_CPUS=${QEMU_SVC_CPUS:-${QEMU_SERVICE_CPUS:-0}}"
+        "QEMU_SERVICE_CPUS=${QEMU_SERVICE_CPUS:-${QEMU_SVC_CPUS:-0}}"
+        "DISK=${DISK:-}"
+        "NBD=${NBD:-}"
+        "MOUNT=${MOUNT:-}"
+        "PROVIDER=${PROVIDER:-}"
+        "DEVICE_DESC=${DEVICE_DESC:-}"
+        "SUBSYS_RE=${SUBSYS_RE:-}"
+    )
+    # 未设置时必须保持 unset，让转发的 --gpu-sdl-egl/--gpu-headless 仍能按
+    # 启动器契约显式 opt-in GL；只有调用者确实设置过时才跨 sudo 边界传播。
+    if [[ -n "${STABLE_DISPLAY+x}" ]]; then
+        SUDO_ENV+=("STABLE_DISPLAY=$STABLE_DISPLAY")
+    fi
     exec sudo -- /usr/bin/env \
-        VMS_DIR="${VMS_DIR:-}" \
-        IMAGE_ROOT="${IMAGE_ROOT:-}" \
-        QEMU_IMG="${QEMU_IMG:-}" \
-        DISPLAY="${DISPLAY:-:1}" \
-        STABLE_DISPLAY="${STABLE_DISPLAY:-0}" \
-        HOST_RESERVE_CORES="${HOST_RESERVE_CORES:-auto}" \
-        QEMU_SVC_CPUS="${QEMU_SVC_CPUS:-${QEMU_SERVICE_CPUS:-0}}" \
-        QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-${QEMU_SVC_CPUS:-0}}" \
-        DISK="${DISK:-}" \
-        NBD="${NBD:-}" \
-        MOUNT="${MOUNT:-}" \
-        PROVIDER="${PROVIDER:-}" \
-        DEVICE_DESC="${DEVICE_DESC:-}" \
-        SUBSYS_RE="${SUBSYS_RE:-}" \
+        "${SUDO_ENV[@]}" \
         "$SELF" "${SUDO_ARGS[@]}"
 fi
 
@@ -135,13 +142,18 @@ else
     printf '\n'
 fi
 
+START_ENV=(
+    "VMS_DIR=$VMS_DIR"
+    "IMAGE_ROOT=${IMAGE_ROOT:-}"
+    "QEMU_IMG=${QEMU_IMG:-}"
+    "DISPLAY=${DISPLAY:-:1}"
+    "HOST_RESERVE_CORES=${HOST_RESERVE_CORES:-auto}"
+    "QEMU_SVC_CPUS=${QEMU_SVC_CPUS:-${QEMU_SERVICE_CPUS:-0}}"
+    "QEMU_SERVICE_CPUS=${QEMU_SERVICE_CPUS:-${QEMU_SVC_CPUS:-0}}"
+)
+if [[ -n "${STABLE_DISPLAY+x}" ]]; then
+    START_ENV+=("STABLE_DISPLAY=$STABLE_DISPLAY")
+fi
 sudo -u "$ORIG_USER" env \
-    VMS_DIR="$VMS_DIR" \
-    IMAGE_ROOT="${IMAGE_ROOT:-}" \
-    QEMU_IMG="${QEMU_IMG:-}" \
-    DISPLAY="${DISPLAY:-:1}" \
-    STABLE_DISPLAY="${STABLE_DISPLAY:-0}" \
-    HOST_RESERVE_CORES="${HOST_RESERVE_CORES:-auto}" \
-    QEMU_SVC_CPUS="${QEMU_SVC_CPUS:-${QEMU_SERVICE_CPUS:-0}}" \
-    QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-${QEMU_SVC_CPUS:-0}}" \
+    "${START_ENV[@]}" \
     "$START_SCRIPT" "$INSTANCE" "${START_ARGS[@]}"

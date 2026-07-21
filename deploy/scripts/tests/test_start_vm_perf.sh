@@ -483,7 +483,7 @@ main() {
     test_cpu_pm_keeps_upstream_default_dry_run "$out"
     test_phenom_cpu_masks_missing_3dnow "$out"
     # GPU 显示策略已拆到独立文件，避免本综合回归重新超过 500 行；保留入口调用，
-    # 让既有 CI 只执行 test_start_vm_perf.sh 时也覆盖默认 blob/hostmem 与 opt-out。
+    # 让既有 CI 同时覆盖默认 stable 与显式 GL/blob/hostmem opt-in 矩阵。
     "$SCRIPT_DIR/test_gpu_zerocopy_launcher.sh"
     test_hotkey_capture_option_removed "$out"
     test_cpu_isolate_scripts_parse

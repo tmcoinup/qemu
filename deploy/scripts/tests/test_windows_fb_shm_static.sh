@@ -185,15 +185,15 @@ test_launcher_uses_qemu11_sdl_egl() {
     reject_text_ci "SDL_NATIVE_EGL" "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh"
 }
 
-test_launchers_prefer_gpu_export_with_opt_out() {
+test_launchers_keep_gpu_export_as_explicit_capability() {
     local linux_cli="$REPO_ROOT/deploy/scripts/lib/sv-cli.sh"
     local linux_devices="$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
     local windows_launcher="$REPO_ROOT/deploy/windows/start-vm.ps1"
 
-    # 中文注释：Linux/Windows 普通 SDL 都应是“默认尝试能力、失败由 QEMU 回退
-    # SHM”。测试钉住 blob/hostmem opt-out 设计，避免以后误改回必须显式
-    # opt-in，或把移除属性偏好错做成关闭 SDL/GL/renderer texture export。
-    require_text 'GPU_ZEROCOPY=1' "$linux_cli"
+    # 中文注释：Linux 默认稳定 SDL；显式 GL 和 Windows 能力探测仍可选择
+    # blob/hostmem，失败由 QEMU 回退 SHM。关闭属性偏好不能顺带关闭 renderer
+    # texture export，也不能把 Linux 的默认路径悄悄改回 virgl。
+    require_text ': "${STABLE_DISPLAY:=1}"' "$linux_cli"
     require_text '--no-gpu-zerocopy' "$linux_cli"
     require_text 'blob=true,hostmem=${GPU_HOSTMEM:-256M}' "$linux_devices"
 
@@ -476,7 +476,7 @@ test_gl_readback_drains_pbo_before_rate_gate
 test_direct_gpu_publish_is_independent_of_gl_context
 test_gpu_export_failure_is_silent
 test_launcher_uses_qemu11_sdl_egl
-test_launchers_prefer_gpu_export_with_opt_out
+test_launchers_keep_gpu_export_as_explicit_capability
 test_scanout_disable_releases_dmabuf
 test_fb_shm_notifier_is_unregistered_before_free
 test_fb_shm_treats_shared_header_as_untrusted

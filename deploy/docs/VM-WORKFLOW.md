@@ -303,13 +303,15 @@ GPU → 驱动程序 → 驱动程序提供商写回 `Red Hat, Inc.`。等 guest
 deploy/scripts/finalize-clone-gpu.sh 2
 ```
 
-普通用户直接跑即可；脚本会自动 `sudo -E` 提权，因为底层需要 qemu-nbd + ntfs-3g
-离线挂载 Windows 盘。若希望修完后自动启动：
+普通用户直接跑即可；脚本会自动 `sudo` 重执行并显式传递白名单环境，因为底层需要
+qemu-nbd + ntfs-3g 离线挂载 Windows 盘。若希望修完后自动启动：
 
 ```bash
-STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 \
+STABLE_DISPLAY=1 HOST_RESERVE_CORES=0 \
   deploy/scripts/finalize-clone-gpu.sh 2 --restart -- --proxy
 ```
+
+`STABLE_DISPLAY=1` 也是当前默认值；此处显式写出，确保 clone 收尾后仍走无 virgl 的长稳路径。
 
 ### C.4 sysprep 与 OOBE
 

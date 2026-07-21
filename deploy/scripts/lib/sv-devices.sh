@@ -127,7 +127,7 @@ fi
 #    --gpu-headless
 #                : -display egl-headless   (rendernode EGL，给 fb-shm 走 GPU 导出)
 #
-# STABLE_DISPLAY=0（默认）: 在 --sdl / --gpu-headless 模式下生效，
+# STABLE_DISPLAY=0（显式 opt-in）: 在 --sdl / --gpu-headless 模式下生效，
 #   启 virtio-vga-gl，给宿主显示/推流或支持 virgl 的非 Windows 客体使用 GL；
 #   stock VioGpuDod 下的 Windows 客体仍是 Display-Only。
 #   普通 --sdl 与兼容名 --gpu-sdl-egl 都使用 QEMU 11 官方 SDL/GL，并默认给
@@ -135,12 +135,19 @@ fi
 #   自行探测，导出失败时 fb-shm 自动走 SHM fallback。
 #   --gpu-headless 则显式选择无窗口 rendernode EGL 路径。
 #
-# STABLE_DISPLAY=1: 强制 virtio-vga，不开宿主 -gl/virgl。用于规避 virgl 长期运行后
+# STABLE_DISPLAY=1（默认）: 强制 virtio-vga，不开宿主 -gl/virgl，规避长期运行后
 #   触发的 DXGKRNL TDR/BSOD（"VIDEO_DXGKRNL_FATAL_ERROR" / "VIDEO_SCHEDULER_
 #   INTERNAL_ERROR"）。它只改变 QEMU 的宿主显示/推流路径；Windows stock
 #   VioGpuDod 在 0/1 两种模式下都没有客体 Direct3D，应用均只能走 WARP 等回退。
 #   (注：--no-sdl/--headless 没有窗口 GL context，仍然走 stable 路径)
-STABLE_DISPLAY=${STABLE_DISPLAY:-0}
+STABLE_DISPLAY=${STABLE_DISPLAY:-1}
+case "$STABLE_DISPLAY" in
+    0|1) ;;
+    *)
+        echo "ERROR: STABLE_DISPLAY 必须是 0 或 1 (实际: '$STABLE_DISPLAY')" >&2
+        exit 2
+        ;;
+esac
 GPU_DISPLAY_MODE=${GPU_DISPLAY:-sdl}
 GPU_EGL_HEADLESS=0
 if [[ "$GPU_DISPLAY_MODE" == "egl-headless" && "$STABLE_DISPLAY" != "1" ]]; then

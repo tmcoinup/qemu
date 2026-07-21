@@ -32,9 +32,9 @@ clone_lifecycle_require_qemu_caps() {
             QEMU_CAP_CHECK=1 \
             SDL=1 \
             FB_SHM=1 \
-            STABLE_DISPLAY=0 \
+            STABLE_DISPLAY=1 \
             GPU_DISPLAY=sdl \
-            GPU_ZEROCOPY=1 \
+            GPU_ZEROCOPY=0 \
             GPU_RENDERNODE= \
             GUEST_NUMLOCK=1 \
             bash "$portability_library"; then

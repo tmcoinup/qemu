@@ -22,8 +22,10 @@ _cli_platform_id_seen=0
 # 从而区分“用户明确要 GL”和“GPU_DISPLAY=sdl 的普通默认值”。
 _stable_display_explicit=0
 _gpu_display_explicit=0
+_gpu_hostmem_explicit=0
 [[ -n "${STABLE_DISPLAY+x}" ]] && _stable_display_explicit=1
 [[ -n "${GPU_DISPLAY+x}" ]] && _gpu_display_explicit=1
+[[ -n "${GPU_HOSTMEM+x}" ]] && _gpu_hostmem_explicit=1
 while (( $# > 0 )); do
     case "$1" in
         -h|--help) _usage 0 ;;
@@ -53,7 +55,7 @@ while (( $# > 0 )); do
         --fb-shm-roi=*)  FB_SHM=1; FB_SHM_ROI="${1#*=}" ;;
         --gpu-zerocopy)     GPU_ZEROCOPY=1 ;;
         --no-gpu-zerocopy)  GPU_ZEROCOPY=0 ;;
-        --gpu-hostmem=*)    GPU_HOSTMEM="${1#*=}" ;;
+        --gpu-hostmem=*)    GPU_HOSTMEM="${1#*=}"; _gpu_hostmem_explicit=1 ;;
         --gpu-headless)     GPU_DISPLAY=egl-headless; SDL=0; _gpu_display_explicit=1 ;;
         --gpu-sdl-egl)      GPU_DISPLAY=sdl-egl; SDL=1; _gpu_display_explicit=1 ;;
         --gpu-display=*)    GPU_DISPLAY="${1#*=}"; _gpu_display_explicit=1 ;;
@@ -231,8 +233,7 @@ fi
 : "${FB_SHM_RATE:=60}"
 : "${FB_SHM_ROI:=}"
 : "${FB_SHM_SOCK:=/tmp/qemu-stealth-${INSTANCE}.fb}"
-_gpu_zerocopy_explicit=0
-[[ -n "${GPU_ZEROCOPY+x}" ]] && _gpu_zerocopy_explicit=1
+: "${GPU_ZEROCOPY=0}"
 : "${GPU_HOSTMEM:=256M}"
 : "${GPU_DISPLAY:=sdl}"
 : "${GPU_RENDERNODE:=}"
@@ -250,16 +251,9 @@ case "$STABLE_DISPLAY" in
         exit 2
         ;;
 esac
-# GPU 零拷贝元数据依赖 virtio-gpu blob resource + host-visible memory。
-# 中文注释：能力优先策略只负责给 virtio-gpu 打开 blob/hostmem，并不承诺当前
-# scanout 一定能导出 GPU handle。QEMU/virgl/ANGLE 导出失败时，fb-shm 会在同一
-# 进程内自动继续 SHM，不需要启动器重启 VM。普通 SDL/GL、兼容名 sdl-egl 与
-# egl-headless 默认尝试该能力；`--no-gpu-zerocopy` 或 GPU_ZEROCOPY=0 仅关闭
-# blob/hostmem 偏好，renderer 仍可能从普通 texture 导出 GPU handle。
-# stable、VNC 和纯无窗口路径稍后会在最终显示模式确定后自动关闭这个默认值。
-if [[ "$_gpu_zerocopy_explicit" == "0" ]]; then
-    GPU_ZEROCOPY=1
-fi
+# blob/hostmem 会改变 guest 可见的 PCI BAR 布局，因此即使显式选择
+# GL 也默认使用 gl-safe；只有 --gpu-zerocopy/GPU_ZEROCOPY=1 才开启。
+# 导出失败时 fb-shm 仍可以回退到 CPU/SHM，不需要重启 VM。
 # QMP 多客户端：PROXY=1 时启用 QEMU 原生 multi=on QMP listener，同一路径可被
 # dgame / image-search / 临时 socat 同时连接。为了兼容旧工具配置，启动脚本还会
 # 建一个 ${QMP_SOCK}.proxy -> ${QMP_SOCK} 的 symlink，但不再起 Python 中转进程。
@@ -346,9 +340,6 @@ if [[ "$STABLE_DISPLAY" == "1" && "$GPU_DISPLAY" == "sdl-egl" ]]; then
     # 中文注释：stable 模式故意关闭 virtio-gpu GL；兼容名 sdl-egl 此时没有
     # 可供官方 SDL/EGL 后端绑定的 GL scanout，退回普通 SDL 稳定路径。
     GPU_DISPLAY=sdl
-    if [[ "$_gpu_zerocopy_explicit" == "0" ]]; then
-        GPU_ZEROCOPY=0
-    fi
 fi
 if [[ "$GPU_DISPLAY" == "egl-headless" && "$HEADLESS" == "1" ]]; then
     echo "ERROR: --gpu-headless/GPU_DISPLAY=egl-headless 不能和 --headless/VNC 同时使用" >&2
@@ -373,16 +364,6 @@ if [[ "$SDL" == "1" && -z "${DISPLAY:-}" && ! -t 1 && "$HEADLESS" != "1" ]]; the
     SDL=0
 fi
 
-# 中文注释：默认策略只在确实存在 GL provider 的显示路径上开启 blob/hostmem。
-# stable virtio-vga、VNC 以及普通 `--no-sdl` 都没有可导出的 GL scanout，继续把
-# GPU_ZEROCOPY 留成 1 只会误导日志和运维检查。显式设置则原样保留以兼容既有
-# 自动化，但 sv-devices 仍只会给 virtio-vga-gl 注入相关属性。
-if [[ "$_gpu_zerocopy_explicit" == "0" && \
-      ( "$STABLE_DISPLAY" == "1" || \
-        ( "$SDL" != "1" && "$GPU_DISPLAY" != "egl-headless" ) ) ]]; then
-    GPU_ZEROCOPY=0
-fi
-
 # fb-shm 校验：rate 必须在 [1,240]
 if [[ "$FB_SHM" == "1" ]]; then
     if ! [[ "$FB_SHM_RATE" =~ ^[0-9]+$ ]] || (( FB_SHM_RATE < 1 || FB_SHM_RATE > 240 )); then
@@ -399,11 +380,43 @@ if [[ "$GPU_ZEROCOPY" != "0" && "$GPU_ZEROCOPY" != "1" ]]; then
     echo "ERROR: GPU_ZEROCOPY 必须是 0 或 1 (实际: '$GPU_ZEROCOPY')" >&2
     exit 2
 fi
+# hostmem 是 PCI BAR，QEMU 要求大小为 2 的幂；限定在
+# 256 MiB..8 GiB，避免 300M 等值进入 PCI 层后触发 assertion。
+_gpu_hostmem_ok=0
+if [[ "$GPU_ZEROCOPY" == "0" && "$_gpu_hostmem_explicit" == "0" ]]; then
+    _gpu_hostmem_ok=1
+elif [[ "$GPU_HOSTMEM" =~ ^([0-9]+)([KkMmGg]?)$ && ${#BASH_REMATCH[1]} -le 10 ]]; then
+    _gpu_hostmem_n=$((10#${BASH_REMATCH[1]}))
+    case "${BASH_REMATCH[2],,}" in
+        "") _gpu_hostmem_min=268435456; _gpu_hostmem_max=8589934592 ;;
+        k)  _gpu_hostmem_min=262144;    _gpu_hostmem_max=8388608 ;;
+        m)  _gpu_hostmem_min=256;       _gpu_hostmem_max=8192 ;;
+        g)  _gpu_hostmem_min=1;         _gpu_hostmem_max=8 ;;
+    esac
+    (( _gpu_hostmem_n >= _gpu_hostmem_min && _gpu_hostmem_n <= _gpu_hostmem_max &&
+       (_gpu_hostmem_n & (_gpu_hostmem_n - 1)) == 0 )) && _gpu_hostmem_ok=1
+fi
+if [[ "$_gpu_hostmem_ok" != "1" ]]; then
+    echo "ERROR: GPU_HOSTMEM 必须是 256M..8G 内 2 的幂（如 256M/1G/8G）(实际: '$GPU_HOSTMEM')" >&2
+    exit 2
+fi
+if [[ "$_gpu_hostmem_explicit" == "1" && "$GPU_ZEROCOPY" != "1" ]]; then
+    echo "ERROR: 显式 GPU_HOSTMEM/--gpu-hostmem 需要同时启用 GPU_ZEROCOPY=1/--gpu-zerocopy" >&2
+    exit 2
+fi
+# 零拷贝不得在 stable/VNC/纯无窗口模式下被静默忽略；这些路径
+# 没有 virgl GL provider，无法消费 blob/hostmem 能力。
+if [[ "$GPU_ZEROCOPY" == "1" && ( "$STABLE_DISPLAY" == "1" ||
+      ( "$SDL" != "1" && "$GPU_DISPLAY" != "egl-headless" ) ) ]]; then
+    echo "ERROR: GPU_ZEROCOPY=1 需要显式 GL 显示（STABLE_DISPLAY=0 + SDL/EGL headless）" >&2
+    exit 2
+fi
+if [[ "$GPU_ZEROCOPY" == "1" && "$FB_SHM" != "1" ]]; then
+    echo "ERROR: GPU_ZEROCOPY=1 仅服务 fb-shm GPU handle，不能与 --no-fb-shm/FB_SHM=0 同时使用" >&2
+    exit 2
+fi
 if [[ "$GPU_ZEROCOPY" == "1" ]]; then
-    if ! [[ "$GPU_HOSTMEM" =~ ^[0-9]+([KkMmGgTt])?$ ]]; then
-        echo "ERROR: GPU_HOSTMEM 必须是 QEMU size 值，如 256M/1G (实际: '$GPU_HOSTMEM')" >&2
-        exit 2
-    fi
+    echo ">> WARN: GPU zero-copy 已显式启用；guest PCI BAR 将重排（MSI-X BAR4→BAR1，BAR4/5 host-visible=${GPU_HOSTMEM}）" >&2
 fi
 if [[ -n "$GPU_RENDERNODE" && ! -e "$GPU_RENDERNODE" ]]; then
     echo "ERROR: GPU_RENDERNODE 不存在: $GPU_RENDERNODE" >&2

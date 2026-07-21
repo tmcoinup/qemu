@@ -70,6 +70,10 @@ try {
             }).Count -ne 1) {
         throw 'Windows PowerShell 5.1 DryRun 缺少严格 WHPX 或固定 HDA BDF。'
     }
+    $vga = @($output | Where-Object { $_ -like 'virtio-vga,*' })
+    if ($vga.Count -ne 1 -or $vga[0] -match 'blob=true|hostmem=') {
+        throw 'Windows PowerShell 5.1 默认显示未保持 stable/no-blob 策略。'
+    }
     if (Test-Path -LiteralPath $vmRoot) {
         throw 'Windows PowerShell 5.1 DryRun 写入了 VM/profile 状态。'
     }

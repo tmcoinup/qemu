@@ -58,6 +58,8 @@ param(
     [ValidateRange(1, 240)]
     [int]$FbShmRate = 60,
     [string]$FbShmRoi = '',
+    [switch]$GpuGl,
+    [switch]$GpuZeroCopy,
     [switch]$NoGpuZeroCopy,
     [string]$GpuHostmem = '256M',
     [ValidateSet('Auto', 'Available', 'Unavailable')]
@@ -117,8 +119,8 @@ function Test-VMateVirtioGpuGl {
             return $false
         }
         # GL 设备必须完整接受与普通 virtio-vga 相同的 EDID/分辨率投影。
-        # 默认零拷贝还会在正式 argv 中传 blob/hostmem，因此按启动策略同步
-        # 探测；任一缺失都安全回退到已通过严格门禁的普通 virtio-vga。
+        # 显式零拷贝还会在正式 argv 中传 blob/hostmem，因此按启动策略同步
+        # 探测；任一必需能力缺失都由调用处 fail closed，不会静默换设备。
         $properties = @(Get-VMateMonitorEdidCapabilityProperties) +
             @('xres', 'yres', 'xmax', 'ymax')
         if ($RequireBlob) {
@@ -132,6 +134,24 @@ function Test-VMateVirtioGpuGl {
     }
 }
 
+function Test-VMateGpuHostmem {
+    param([string]$Value)
+
+    # hostmem 会成为 guest 可见的 PCI BAR；QEMU PCI 层要求其为 2 的幂。
+    # 先用 UInt64 TryParse 拦截超长整数，避免 PowerShell 隐式转换溢出。
+    if ($Value -notmatch '^(?<Number>\d+)(?<Unit>[KkMmGg]?)$') { return $false }
+    [uint64]$number = 0
+    if (-not [uint64]::TryParse($Matches.Number, [ref]$number)) { return $false }
+    $limits = switch ($Matches.Unit.ToLowerInvariant()) {
+        ''  { @([uint64]268435456, [uint64]8589934592) }
+        'k' { @([uint64]262144, [uint64]8388608) }
+        'm' { @([uint64]256, [uint64]8192) }
+        'g' { @([uint64]1, [uint64]8) }
+    }
+    return $number -ge $limits[0] -and $number -le $limits[1] -and
+        (($number -band ($number - 1)) -eq 0)
+}
+
 Assert-VMateGuestPolicy -GuestOs $GuestOs `
     -RequireNestedVirtualization $RequireNestedVirtualization.IsPresent
 Assert-VMateExtraArguments -Arguments $ExtraQemuArgs
@@ -140,6 +160,28 @@ if ($AllowPlatformCompatibility) {
 }
 if ($GpuGlProbe -ne 'Auto' -and -not $DryRun) {
     throw 'GpuGlProbe 的注入值仅允许和 -DryRun 一起用于测试。'
+}
+if ($GpuZeroCopy -and $NoGpuZeroCopy) {
+    throw '-GpuZeroCopy 与兼容参数 -NoGpuZeroCopy 不能同时使用。'
+}
+if (($GpuZeroCopy -or $PSBoundParameters.ContainsKey('GpuHostmem')) -and
+    -not (Test-VMateGpuHostmem -Value $GpuHostmem)) {
+    throw "GpuHostmem 必须是 256M..8G 内 2 的幂（如 256M/1G/8G），实际：$GpuHostmem"
+}
+if ($GpuZeroCopy -and -not $GpuGl) {
+    throw '-GpuZeroCopy 依赖显式 -GpuGl；默认稳定显示不暴露 blob/hostmem。'
+}
+if ($PSBoundParameters.ContainsKey('GpuHostmem') -and -not $GpuZeroCopy) {
+    throw '显式 -GpuHostmem 需要同时启用 -GpuZeroCopy。'
+}
+if ($GpuGl -and ($Headless -or $NoSdl)) {
+    throw '-GpuGl 需要本地 SDL 窗口，不能和 -Headless/-NoSdl 同时使用。'
+}
+if ($GpuZeroCopy -and $NoFbShm) {
+    throw '-GpuZeroCopy 仅服务 fb-shm GPU handle，不能与 -NoFbShm 同时使用。'
+}
+if ($GpuZeroCopy) {
+    Write-Warning "GPU zero-copy 已显式启用；guest PCI BAR 将重排（MSI-X BAR4→BAR1，BAR4/5 host-visible=$GpuHostmem）。"
 }
 
 $repo = Get-VMateRepoRoot
@@ -355,15 +397,18 @@ if ($ExtraIso) {
 
 $localSdlRequested = -not ($Headless -or $NoSdl)
 $gpuGlDisplay = $false
-if ($localSdlRequested) {
+if ($localSdlRequested -and $GpuGl) {
     switch ($GpuGlProbe) {
         'Available' { $gpuGlDisplay = $true }
         'Unavailable' { $gpuGlDisplay = $false }
         default {
             $gpuGlDisplay = Test-VMateVirtioGpuGl -Executable $Qemu `
-                -RequireBlob (-not $NoGpuZeroCopy.IsPresent)
+                -RequireBlob $GpuZeroCopy.IsPresent
         }
     }
+}
+if ($GpuGl -and -not $gpuGlDisplay) {
+    throw '已显式请求 -GpuGl，但 virtio-vga-gl 所需能力探测失败，拒绝静默换成稳定显示。'
 }
 if ($Headless) {
     Add-VMateArgument $arguments @('-display', 'none', '-vnc', "127.0.0.1:$($Instance - 1)")
@@ -372,10 +417,6 @@ if ($Headless) {
 } elseif ($gpuGlDisplay) {
     Add-VMateArgument $arguments @('-display', 'sdl,gl=on,show-cursor=off')
 } else {
-    $fallbackLabel = if ($NoFbShm) { 'SDL + virtio-vga' } else {
-        'SDL + virtio-vga + SHM'
-    }
-    Write-Host ">> virtio-vga-gl 不可用；自动选择 $fallbackLabel。"
     Add-VMateArgument $arguments @('-display', 'sdl,show-cursor=off')
 }
 
@@ -385,10 +426,7 @@ if ($gpuGlDisplay) {
     $vgaDevice = 'virtio-vga-gl,edid=on,edid-fixed-native=on,' +
         'xres=1920,yres=1080,xmax=1920,ymax=1080' +
         $monitorEdid
-    if (-not $NoGpuZeroCopy) {
-        if ($GpuHostmem -notmatch '^\d+[KkMmGgTt]?$') {
-            throw "GpuHostmem 不是合法 QEMU size：$GpuHostmem"
-        }
+    if ($GpuZeroCopy) {
         $vgaDevice += ",blob=true,hostmem=$GpuHostmem"
     }
 } else {

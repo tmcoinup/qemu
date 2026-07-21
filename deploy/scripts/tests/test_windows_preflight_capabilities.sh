@@ -48,7 +48,8 @@ test_static_contract() {
     require_text 'function Test-VMateQemuHelpProperties' "$PREFLIGHT"
     require_text "'virtio-vga' = @(\$monitorEdidProperties" "$PREFLIGHT"
     require_text "Test-VMateQemuHelpProperties -HelpOutput \$probeText" "$LAUNCHER"
-    require_text "-RequireBlob (-not \$NoGpuZeroCopy.IsPresent)" "$LAUNCHER"
+    require_text "-RequireBlob \$GpuZeroCopy.IsPresent" "$LAUNCHER"
+    require_text 'function Test-VMateGpuHostmem' "$LAUNCHER"
     require_text "'share\edk2-x86_64-code.fd'" "$LAUNCHER"
     require_text "'share\edk2-i386-vars.fd'" "$LAUNCHER"
 }
@@ -147,6 +148,15 @@ test_dynamic_capabilities() {
                 throw "启动器缺少 Test-VMateVirtioGpuGl"
             }
             . ([scriptblock]::Create($glFunction.Extent.Text))
+            $hostmemFunction = $launcherAst.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -eq "Test-VMateGpuHostmem"
+                }, $true)
+            if ($null -eq $hostmemFunction) {
+                throw "启动器缺少 Test-VMateGpuHostmem"
+            }
+            . ([scriptblock]::Create($hostmemFunction.Extent.Text))
 
             function Assert-ProbeFails {
                 param([scriptblock]$Action, [string]$Expected)
@@ -218,6 +228,17 @@ test_dynamic_capabilities() {
             if (-not (Test-VMateVirtioGpuGl -Executable $qemu `
                     -RequireBlob $false)) {
                 throw "禁用零拷贝时不应要求 blob/hostmem"
+            }
+
+            foreach ($value in @("256M", "262144K", "268435456", "1G", "8G")) {
+                if (-not (Test-VMateGpuHostmem -Value $value)) {
+                    throw "合法 hostmem 被拒绝：$value"
+                }
+            }
+            foreach ($value in @("255M", "300M", "9G", "1T", "268435455")) {
+                if (Test-VMateGpuHostmem -Value $value) {
+                    throw "非法 hostmem 被接受：$value"
+                }
             }
 
             $env:VMATE_FAKE_MISSING = ""

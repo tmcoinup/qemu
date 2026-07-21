@@ -26,12 +26,16 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu/main-loop.h"
 #include "qemu/error-report.h"
 #include "ui/console.h"
-#include "ui/input.h"
 #include "ui/sdl2.h"
 #include "ui/sdl2-egl.h"
+
+static bool sdl2_gl_make_window_current(struct sdl2_console *scon)
+{
+    return scon->real_window && scon->winctx &&
+           SDL_GL_MakeCurrent(scon->real_window, scon->winctx) == 0;
+}
 
 static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 {
@@ -56,28 +60,21 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
     SDL2Rect viewport;
     SDL2Size output;
 
-    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+    if (!sdl2_gl_make_window_current(scon)) {
+        return;
+    }
 
     if (!sdl2_current_render_size(scon, &output)) {
         return;
     }
-    /*
-     * Show the guest at its native resolution (1:1) centred in the window and
-     * letterbox the surplus instead of upscaling it (sdl2_guest_dst_rect()).
-     * surface_gl_render_texture() clears the whole framebuffer first, so the
-     * area outside the viewport keeps its normal dark border.
-     */
+    /* 原生分辨率居中，剩余区域清为深色边框。 */
     dst = sdl2_guest_dst_rect(
         output,
         (SDL2Size) {
             surface_width(scon->surface),
             surface_height(scon->surface),
         });
-    /*
-     * SDL input and SDL_RenderCopy use a top-left origin, while OpenGL uses
-     * bottom-left.  Convert the centered rectangle explicitly so an odd-sized
-     * border stays on the same side in rendering and pointer mapping.
-     */
+    /* 转换 GL 左下原点，确保渲染和指针映射对齐。 */
     viewport = sdl2_gl_viewport(output, dst);
     glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
@@ -92,11 +89,12 @@ void sdl2_gl_update(DisplayChangeListener *dcl,
 
     assert(scon->opengl);
 
-    if (!scon->real_window) {
+    if (!sdl2_gl_make_window_current(scon)) {
         return;
     }
-
-    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+    if (!scon->surface->texture) {
+        surface_gl_create_texture(scon->gls, scon->surface);
+    }
     surface_gl_update_texture(scon->gls, scon->surface, x, y, w, h);
     scon->updates++;
 }
@@ -109,7 +107,11 @@ void sdl2_gl_switch(DisplayChangeListener *dcl,
 
     assert(scon->opengl);
 
-    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+    if (scon->real_window && !sdl2_gl_make_window_current(scon)) {
+        /* 先更新指针以防 UAF；旧 GL name 由 context 回收。 */
+        scon->surface = new_surface;
+        return;
+    }
     surface_gl_destroy_texture(scon->gls, scon->surface);
 
     scon->surface = new_surface;
@@ -191,7 +193,9 @@ QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
     current_ctx = SDL_GL_GetCurrentContext();
     current_window = SDL_GL_GetCurrentWindow();
 
-    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+    if (!sdl2_gl_make_window_current(scon)) {
+        return NULL;
+    }
 
     SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
     if (sdl2_gl_provider_uses_gles() ||
@@ -212,9 +216,7 @@ QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
 
     ctx = SDL_GL_CreateContext(scon->real_window);
 
-    /* If SDL fail to create a GL context and we use the "on" flag,
-     * then try to fallback to GLES.
-     */
+    /* gl=on 创建失败时允许 SDL 回退到 GLES。 */
     if (!ctx && scon->opts->gl == DISPLAY_GL_MODE_ON &&
         !sdl2_gl_provider_egl_committed()) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
@@ -291,6 +293,15 @@ void sdl2_gl_scanout_disable(DisplayChangeListener *dcl)
     assert(scon->opengl);
     scon->w = 0;
     scon->h = 0;
+    if (!sdl2_gl_make_window_current(scon)) {
+        /*
+         * 不能把裸 FBO name 延后到可能重建的 context。
+         * 最多遗失当前一个 FBO，由窗口 context 回收，避免误删 virgl FBO。
+         */
+        scon->scanout_mode = false;
+        memset(&scon->guest_fb, 0, sizeof(scon->guest_fb));
+        return;
+    }
     sdl2_set_scanout_mode(scon, false);
 }
 
@@ -322,7 +333,10 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
     scon->h = h;
     scon->y0_top = backing_y_0_top;
 
-    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+    if (!sdl2_gl_make_window_current(scon)) {
+        sdl2_gl_scanout_disable(dcl);
+        return;
+    }
 
     sdl2_set_scanout_mode(scon, true);
     egl_fb_setup_for_tex(&scon->guest_fb, backing_width, backing_height,
@@ -390,7 +404,10 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
         return;
     }
 
-    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+    if (!sdl2_gl_make_window_current(scon)) {
+        scon->scanout_redraw_pending = true;
+        return;
+    }
 
     /*
      * 中文注释：
@@ -415,7 +432,9 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
     const int *fds;
 
     assert(scon->opengl);
-    SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
+    if (!sdl2_gl_make_window_current(scon)) {
+        return;
+    }
 
     egl_dmabuf_import_texture(dmabuf);
     if (!qemu_dmabuf_get_texture(dmabuf)) {
@@ -447,6 +466,10 @@ void sdl2_gl_release_dmabuf(DisplayChangeListener *dcl,
     if (scon->guest_fb.dmabuf == dmabuf) {
         scon->guest_fb.dmabuf = NULL;
     }
+    if (!sdl2_gl_make_window_current(scon)) {
+        /* 不能跨 context 删除；本次导入由 share group 回收。 */
+        return;
+    }
     egl_dmabuf_release_texture(dmabuf);
 }
 
@@ -466,11 +489,7 @@ void sdl2_gl_console_init(struct sdl2_console *scon)
     scon->surface = qemu_create_displaysurface(1, 1);
     sdl2_window_create(scon);
 
-    /*
-     * QEMU checks whether console supports dma-buf before switching
-     * to the console.  To break this chicken-egg problem we pre-check
-     * dma-buf availability beforehand using a dummy SDL window.
-     */
+    /* 用隐藏 SDL 窗口打破 console 与 dma-buf 能力探测的循环依赖。 */
     scon->has_dmabuf = qemu_egl_has_dmabuf();
 
     sdl2_window_destroy(scon);

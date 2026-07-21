@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # 验证 Linux 启动器默认走稳定显示，GL/GPU handoff 只能由显式选择启用；
-# 全程 DRY_RUN，不启动 guest。
-# shellcheck disable=SC2016
-# `${FB_SHM_RATE}` 是断言目标源码中的字面文本，不应在测试 shell 中展开。
+# argv/策略用例使用 DRY_RUN；唯一非 DRY_RUN 用例在 CLI 门禁处预期失败，
+# 用于证明已移除的旧模式不会先触发宿主副作用，也不会启动 guest。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -55,12 +54,15 @@ test_default_sdl_uses_stable_display() {
         || fail "default SDL must use virtio-vga without blob/hostmem"
     [[ "$vga" == *",edid-fixed-native=on,"* ]] \
         || fail "stable virtio-vga must explicitly fix the profile native mode"
+    grep -F -- 'guest PCI : 无 host-visible hostmem BAR (stable)' \
+        "$out" >/dev/null \
+        || fail "stable summary must confirm that no hostmem BAR is exposed"
     grep -F -- '当前为非 GL 显示路径；使用 SHM fallback' \
-        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
+        "$out" >/dev/null \
         || fail "default summary must report the stable SHM fallback"
 }
 
-test_explicit_gl_prefers_gpu_handoff() {
+test_explicit_gl_is_safe_by_default() {
     local out="$1"
     local vga
 
@@ -70,20 +72,36 @@ test_explicit_gl_prefers_gpu_handoff() {
     vga="$(vga_arg "$out")"
     [[ "$vga" == virtio-vga-gl,* ]] \
         || fail "STABLE_DISPLAY=0 must use virtio-vga-gl"
-    [[ "$vga" == *",blob=true,"* && "$vga" == *",hostmem=256M"* ]] \
-        || fail "explicit GL mode must enable blob/hostmem capability preference"
-    grep -F -- 'configured=${FB_SHM_RATE} Hz' \
-        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
+    [[ "$vga" != *"blob=true"* && "$vga" != *"hostmem="* ]] \
+        || fail "explicit GL must default to gl-safe without blob/hostmem"
+    grep -F -- 'guest PCI : 无 hostmem BAR；virtio GL feature 可见 (GL-safe)' \
+        "$out" >/dev/null \
+        || fail "GL-safe summary must confirm that no hostmem BAR is exposed"
+    grep -F -- 'configured=60 Hz' "$out" >/dev/null \
         || fail "launcher summary must label the configured fb-shm rate"
-    grep -F -- 'effective 可降至 1 Hz' \
-        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
+    grep -F -- 'effective 可降至 1 Hz' "$out" >/dev/null \
         || fail "launcher summary must explain the idle effective rate"
-    grep -F -- '不可用自动 SHM fallback' \
-        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
+    grep -F -- '失败才回退 SHM' "$out" >/dev/null \
         || fail "launcher summary must explain automatic SHM fallback"
     grep -F -- 'Windows VioGpuDod 仍无客体 3D' \
         "$REPO_ROOT/deploy/scripts/lib/stealth-print.sh" >/dev/null \
         || fail "profile summary must not describe host virgl as Windows guest 3D"
+}
+
+test_explicit_zerocopy_adds_blob_hostmem() {
+    local out="$1"
+    local vga
+
+    STABLE_DISPLAY=0 run_dry 9927 "$out" --gpu-zerocopy
+    grep -Fx -- 'sdl,gl=on,show-cursor=off' "$out" >/dev/null \
+        || fail "--gpu-zerocopy with explicit GL must retain SDL/GL"
+    vga="$(vga_arg "$out")"
+    [[ "$vga" == virtio-vga-gl,* && "$vga" == *",blob=true,"* &&
+       "$vga" == *",hostmem=256M"* ]] \
+        || fail "--gpu-zerocopy must explicitly add blob/hostmem"
+    grep -F -- 'guest PCI : 已重排 MSI-X BAR4→BAR1，BAR4/5 host-visible=256M' \
+        "$out" >/dev/null \
+        || fail "zero-copy summary must disclose the guest-visible BAR"
 }
 
 test_explicit_blob_preference_disable_keeps_sdl_gl() {
@@ -98,8 +116,7 @@ test_explicit_blob_preference_disable_keeps_sdl_gl() {
         || fail "blob/hostmem opt-out must retain virtio-vga-gl"
     [[ "$vga" != *"blob=true"* && "$vga" != *"hostmem="* ]] \
         || fail "--no-gpu-zerocopy must remove blob/hostmem"
-    grep -F -- 'blob/hostmem 偏好已关闭' \
-        "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
+    grep -F -- 'GPU handoff: 无 blob/hostmem' "$out" >/dev/null \
         || fail "launcher summary must distinguish property opt-out from GPU export"
 }
 
@@ -145,8 +162,9 @@ test_explicit_gpu_display_modes() {
     grep -Fx -- 'sdl,gl=on,show-cursor=off' "$out" >/dev/null \
         || fail "sdl-egl compatibility mode must use official SDL/GL"
     vga="$(vga_arg "$out")"
-    [[ "$vga" == *"blob=true"* && "$vga" == *"hostmem=256M"* ]] \
-        || fail "explicit sdl-egl mode must auto-enable GL and blob/hostmem"
+    [[ "$vga" == virtio-vga-gl,* && "$vga" != *"blob=true"* &&
+       "$vga" != *"hostmem="* ]] \
+        || fail "explicit sdl-egl mode must default to gl-safe"
 
     GPU_DISPLAY=sdl-egl run_dry 9923 "$out" --no-fb-shm
     grep -Fx -- 'sdl,gl=on,show-cursor=off' "$out" >/dev/null \
@@ -163,13 +181,15 @@ test_explicit_gpu_display_modes() {
     grep -Fx -- 'egl-headless' "$out" >/dev/null \
         || fail "GPU headless mode must select egl-headless"
     vga="$(vga_arg "$out")"
-    [[ "$vga" == virtio-vga-gl,* && "$vga" == *"blob=true"* ]] \
-        || fail "GPU headless mode must retain GPU export capability"
+    [[ "$vga" == virtio-vga-gl,* && "$vga" != *"blob=true"* &&
+       "$vga" != *"hostmem="* ]] \
+        || fail "GPU headless mode must default to GL without blob/hostmem"
 
-    STABLE_DISPLAY=0 run_dry 9918 "$out" --gpu-hostmem=512M --no-fb-shm
+    STABLE_DISPLAY=0 run_dry 9918 "$out" --gpu-zerocopy \
+        --gpu-hostmem=512M
     vga="$(vga_arg "$out")"
     [[ "$vga" == *"blob=true"* && "$vga" == *"hostmem=512M"* ]] \
-        || fail "explicit GL capability preference must honor --gpu-hostmem"
+        || fail "explicit zero-copy must honor --gpu-hostmem"
 
     if STABLE_DISPLAY=1 run_dry 9924 "$out" --gpu-headless; then
         fail "explicit stable display must reject the incompatible GPU headless mode"
@@ -182,6 +202,54 @@ test_explicit_gpu_display_modes() {
     fi
     grep -F -- 'STABLE_DISPLAY 必须是 0 或 1' "$out" >/dev/null \
         || fail "invalid STABLE_DISPLAY did not explain the accepted values"
+}
+
+test_zerocopy_conflicts_and_hostmem_validation() {
+    local out="$1"
+    local vga
+    local value bad
+
+    if run_dry 9928 "$out" --gpu-zerocopy; then
+        fail "stable display unexpectedly accepted --gpu-zerocopy"
+    fi
+    grep -F -- 'GPU_ZEROCOPY=1 需要显式 GL 显示' "$out" >/dev/null \
+        || fail "stable/zero-copy conflict lacks actionable diagnosis"
+
+    if run_dry 9929 "$out" --headless --gpu-zerocopy; then
+        fail "VNC headless unexpectedly accepted --gpu-zerocopy"
+    fi
+    grep -F -- 'GPU_ZEROCOPY=1 需要显式 GL 显示' "$out" >/dev/null \
+        || fail "VNC/zero-copy conflict lacks actionable diagnosis"
+
+    if run_dry 9930 "$out" --gpu-sdl-egl --gpu-zerocopy --no-fb-shm; then
+        fail "GPU zero-copy unexpectedly worked with fb-shm disabled"
+    fi
+    grep -F -- 'GPU_ZEROCOPY=1 仅服务 fb-shm GPU handle' "$out" >/dev/null \
+        || fail "zero-copy/fb-shm conflict lacks actionable diagnosis"
+
+    # 最小值的 M/K/裸字节等价形式与最大值都必须接受，并原样进入 argv。
+    for value in 256M 262144K 268435456 8G; do
+        STABLE_DISPLAY=0 run_dry 9931 "$out" --gpu-zerocopy \
+            --gpu-hostmem="$value"
+        vga="$(vga_arg "$out")"
+        [[ "$vga" == *",blob=true,"* && "$vga" == *",hostmem=$value"* ]] \
+            || fail "valid GPU hostmem was rejected or rewritten: $value"
+    done
+
+    if STABLE_DISPLAY=0 run_dry 9932 "$out" --gpu-hostmem=512M; then
+        fail "explicit GPU hostmem unexpectedly worked without zero-copy"
+    fi
+    grep -F -- '显式 GPU_HOSTMEM/--gpu-hostmem 需要同时启用' "$out" >/dev/null \
+        || fail "hostmem/zero-copy dependency lacks actionable diagnosis"
+
+    for bad in 255M 300M 9G 1T 268435455 invalid; do
+        if STABLE_DISPLAY=0 run_dry 9933 "$out" --gpu-zerocopy \
+                --gpu-hostmem="$bad"; then
+            fail "invalid GPU hostmem unexpectedly accepted: $bad"
+        fi
+        grep -F -- 'GPU_HOSTMEM 必须是 256M..8G 内 2 的幂' "$out" >/dev/null \
+            || fail "invalid GPU hostmem lacks bounded power-of-two diagnosis: $bad"
+    done
 }
 
 test_qemu_capability_gate_matches_display_mode() {
@@ -239,6 +307,16 @@ EOF
         || fail "explicit GL capability preflight skipped virtio-vga-gl"
 
     : >"$calls"
+    QEMU_CALL_LOG="$calls" FAKE_GL_BLOB=0 \
+        QEMU="$fake_qemu" QEMU_IMG="$fake_qemu" QEMU_CAP_CHECK=1 \
+        SDL=1 STABLE_DISPLAY=0 GPU_DISPLAY=sdl GPU_ZEROCOPY=0 \
+        GUEST_NUMLOCK=0 FB_SHM=0 \
+        bash -c 'source "$1"' _ "$PORTABILITY" >"$out" 2>&1 \
+        || fail "gl-safe capability preflight incorrectly required blob/hostmem"
+    grep -F 'virtio-vga-gl,help' "$calls" >/dev/null \
+        || fail "gl-safe capability preflight skipped virtio-vga-gl"
+
+    : >"$calls"
     if QEMU_CALL_LOG="$calls" FAKE_GL_BLOB=0 \
             QEMU="$fake_qemu" QEMU_IMG="$fake_qemu" QEMU_CAP_CHECK=1 \
             SDL=1 STABLE_DISPLAY=0 GPU_DISPLAY=sdl GPU_ZEROCOPY=1 \
@@ -285,11 +363,13 @@ main() {
         "${out:-}.fake-qemu" "${out:-}.qemu-calls"' EXIT
 
     test_default_sdl_uses_stable_display "$out"
-    test_explicit_gl_prefers_gpu_handoff "$out"
+    test_explicit_gl_is_safe_by_default "$out"
+    test_explicit_zerocopy_adds_blob_hostmem "$out"
     test_explicit_blob_preference_disable_keeps_sdl_gl "$out"
     test_environment_disable_is_honored "$out"
     test_non_gl_modes_are_safe_exceptions "$out"
     test_explicit_gpu_display_modes "$out"
+    test_zerocopy_conflicts_and_hostmem_validation "$out"
     test_qemu_capability_gate_matches_display_mode "$out"
     test_removed_selfsigned_mode_fails_closed "$out"
     echo "PASS: GPU zero-copy launcher policy"

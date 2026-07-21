@@ -26,9 +26,11 @@
 #     ./start-vm.sh 1 --migrate-storage-profile
 #                                           # 显式允许旧 schema-1 启动盘字段内存迁移
 #     ./start-vm.sh 1 --no-sdl              # 后台 daemon：关 SDL，仅推流
-#     ./start-vm.sh 1 --gpu-sdl-egl         # SDL 窗口 + QEMU 11 SDL/EGL + fb-shm GPU
-#     ./start-vm.sh 1 --gpu-headless        # EGL rendernode + fb-shm，验证 GPU 零拷贝
-#     ./start-vm.sh 1 --no-gpu-zerocopy     # 保留 SDL/GL，显式关闭 blob/hostmem 尝试
+#     ./start-vm.sh 1 --gpu-sdl-egl         # SDL/GL-safe：无 hostmem BAR，GL feature 可见
+#     ./start-vm.sh 1 --gpu-headless        # EGL rendernode + fb-shm，默认仍为 GL-safe
+#     ./start-vm.sh 1 --gpu-sdl-egl --gpu-zerocopy
+#                                           # 显式启用 blob/hostmem，重排 PCI BAR
+#     ./start-vm.sh 1 --no-gpu-zerocopy     # GL-safe 兼容开关（当前也是默认值）
 #     ./start-vm.sh 1 --headless            # VNC 远程 + fb-shm（无本地窗口）
 #     ./start-vm.sh 1 --no-fb-shm           # 关推流，仅 SDL（回历史行为）
 #     ./start-vm.sh 1 --no-bridge           # 用 user-mode NAT 而不是 br0
@@ -70,9 +72,10 @@
 #     --headless           关 SDL，开 VNC（fb-shm 仍照常）。
 #     --gpu-sdl-egl        保留 SDL 本地窗口的兼容模式名；实际仍使用 QEMU 11
 #                          官方 `-display sdl,gl=on`，由 SDL 后端自行探测 EGL。
-#                          DGame 仍可显示/隐藏窗口，fb-shm 可发布 GPU dma-buf。
+#                          默认不添加 blob/hostmem；renderer 若能从普通 texture
+#                          导出，fb-shm 仍可发布 GPU dma-buf。
 #     --gpu-headless       关 SDL，使用 egl-headless/rendernode 保留 virtio-gpu GL，
-#                          用于 fb-shm dma-buf/GPU metadata 路径。
+#                          默认同样不添加 blob/hostmem。
 #
 # 环境变量（不常用，默认就好）：
 #     RAM=8192             客机内存 MiB（默认取 profile，当前 bundle 为 8192）
@@ -117,15 +120,16 @@
 #                          (flag: --fb-shm-rate=<hz>)
 #     FB_SHM_ROI=x,y,w,h   只截 ROI 推流（省 CPU/带宽）。空 = 全屏
 #                          (flag: --fb-shm-roi=x,y,w,h)
-#     GPU_ZEROCOPY=0       稳定路径的有效默认值；显式 GL 路径默认改为 1，给
-#                          virtio-vga-gl 打开 blob/hostmem 并尝试 dma-buf handoff。
-#                          能力不可用时 QEMU 自动回退 SHM；--no-gpu-zerocopy
-#                          只关闭 blob/hostmem 偏好。
-#     GPU_HOSTMEM=256M     virtio-gpu host-visible memory window 大小。
+#     GPU_ZEROCOPY=0       所有路径默认 0；只有显式设 1 或 --gpu-zerocopy 才给
+#                          virtio-vga-gl 添加 blob/hostmem。该操作改变 guest 可见
+#                          PCI BAR 布局，且只允许与显式 GL、fb-shm 组合；导出失败仍
+#                          回退 SHM。--no-gpu-zerocopy 是保留的兼容关闭开关。
+#     GPU_HOSTMEM=256M     显式 zero-copy 的 host-visible PCI BAR 大小；必须为
+#                          256M..8G 内 2 的幂，并与 GPU_ZEROCOPY=1 同时使用。
 #                          (flag: --gpu-hostmem=SIZE)
 #     GPU_DISPLAY=sdl      GPU 显示模式；sdl=默认普通 SDL 稳定路径，
 #                          sdl-egl=显式生成 `-display sdl,gl=on`，由 QEMU 11
-#                          探测 EGL，并默认启用 blob/hostmem，
+#                          探测 EGL，默认保持 gl-safe（不带 blob/hostmem），
 #                          egl-headless=无窗口 EGL。
 #                          (flag: --gpu-display=sdl|sdl-egl|egl-headless /
 #                          --gpu-sdl-egl / --gpu-headless)

@@ -113,7 +113,8 @@ fi
 #
 # 1) fb-shm（FB_SHM=1，默认）
 #    -object fb-shm,id=stealth-${INSTANCE},path=...
-#    零拷贝共享内存推流。配合 scripts/qemu-fb-shm-stream.py → ffmpeg/NVENC。
+#    共享内存推流：consumer 直接 mmap，但源帧写入 SHM 仍可能经过 CPU/PBO
+#    拷贝。配合 scripts/qemu-fb-shm-stream.py → ffmpeg/NVENC。
 #    与下面三种 GUI 通道全部可共存（独立 DCL，互不影响）。
 #
 # 2) GUI 通道（互斥四选一）
@@ -123,16 +124,18 @@ fi
 #    --gpu-sdl-egl
 #                : -display sdl,gl=on       (兼容模式名)
 #                  QEMU 11 SDL 后端会自行探测 EGL；不再创建私有 X11 子窗口，
-#                  同时通过默认 blob/hostmem 给 fb-shm 提供 dma-buf 条件。
+#                  普通 texture 可尝试导出；只有显式 --gpu-zerocopy
+#                  才增加 blob/hostmem，为 fb-shm 提供 dma-buf 条件。
 #    --gpu-headless
 #                : -display egl-headless   (rendernode EGL，给 fb-shm 走 GPU 导出)
 #
 # STABLE_DISPLAY=0（显式 opt-in）: 在 --sdl / --gpu-headless 模式下生效，
 #   启 virtio-vga-gl，给宿主显示/推流或支持 virgl 的非 Windows 客体使用 GL；
 #   stock VioGpuDod 下的 Windows 客体仍是 Display-Only。
-#   普通 --sdl 与兼容名 --gpu-sdl-egl 都使用 QEMU 11 官方 SDL/GL，并默认给
-#   virtio-vga-gl 加 blob/hostmem 以优先尝试 GPU handle 导出；EGL/GLX 由 QEMU
-#   自行探测，导出失败时 fb-shm 自动走 SHM fallback。
+#   普通 --sdl 与兼容名 --gpu-sdl-egl 都使用 QEMU 11 官方 SDL/GL，但
+#   默认是不暴露 blob/hostmem PCI BAR 的 gl-safe；只有显式 --gpu-zerocopy
+#   才开启这组能力。gl-safe 仍会广告 virtio VIRGL/CONTEXT_INIT feature，
+#   只是 BAR 布局不因 hostmem 重排；导出失败时仍自动走 SHM fallback。
 #   --gpu-headless 则显式选择无窗口 rendernode EGL 路径。
 #
 # STABLE_DISPLAY=1（默认）: 强制 virtio-vga，不开宿主 -gl/virgl，规避长期运行后

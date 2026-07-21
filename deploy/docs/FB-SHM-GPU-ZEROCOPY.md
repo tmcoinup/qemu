@@ -50,13 +50,18 @@ Linux 下 QEMU 有两种 GPU 导出来源：
    - 普通 `./start-vm.sh <N>` 默认是 `STABLE_DISPLAY=1` + `GPU_DISPLAY=sdl`：
      使用 QEMU 11 普通 SDL 和 `virtio-vga`，不启用 virgl、blob/hostmem 或 GPU
      handle 导出，fb-shm 直接使用 SHM 路径。这是 Windows 游戏长跑的默认策略。
-   - 需要 GPU 导出时，显式设置 `STABLE_DISPLAY=0`，或使用 `--gpu-sdl-egl` /
+   - 需要 GL provider 时，显式设置 `STABLE_DISPLAY=0`，或使用 `--gpu-sdl-egl` /
      `--gpu-headless`。后两个 GPU flag（以及对应的显式 `GPU_DISPLAY` 值）会在未显式
      设置 `STABLE_DISPLAY` 时自动 opt-in GL；显式 `STABLE_DISPLAY=1` 始终优先。
-   - SDL/GL opt-in 使用 QEMU 11 官方 OpenGL 路径，并默认追加
-     `blob=true,hostmem=256M`，优先给 guest/renderer 提供可共享 backing；
-     `GPU_HOSTMEM=512M` 可调整 host-visible window。`--no-gpu-zerocopy` 只移除
-     blob/hostmem 偏好；EGL/renderer 仍可能从普通 texture 导出 dma-buf。
+   - SDL/GL opt-in 使用 QEMU 11 官方 OpenGL 路径，但默认保持 gl-safe，不追加
+     blob/hostmem；EGL/renderer 仍可能从普通 texture 导出 dma-buf。
+     gl-safe 的主 PCI ID 与 BAR 布局与 stable 同类，但 `virtio-vga-gl` 仍会
+     向 guest 广告 `VIRGL/CONTEXT_INIT` feature，不能当作完全相同的设备面。
+   - 只有显式 `--gpu-zerocopy`/`GPU_ZEROCOPY=1` 才追加
+     `blob=true,hostmem=256M`。这会把 guest MSI-X 从 BAR4 移到 BAR1，并让 BAR4/5
+     成为 64 位 host-visible window；只允许与 GL 和
+     fb-shm 同时启用。`GPU_HOSTMEM`/`--gpu-hostmem` 必须与 zero-copy 同用，且只接受
+     256M..8G 内 2 的幂；`--no-gpu-zerocopy` 保留为兼容的显式 gl-safe 开关。
    - 这是一项能力偏好而非成功保证。virglrenderer 无法导出当前 scanout 的
      dma-buf 时，QEMU 在同一运行实例内自动继续 SHM/PBO，不重启 VM、不关闭 SDL。
    - `GPU_DISPLAY=sdl-egl` 是显式 GL 入口，显示实现直接复用
@@ -106,13 +111,17 @@ SDL 窗口仍可响应移动、关闭和输入事件，但画面保持上一帧�
 纹理没有 keyed mutex、共享 handle 创建失败或同步握手不成立时，QEMU 保留 SDL 窗口并
 继续 SHM BGR0 fallback；不会发布一个可能永久阻塞或存在写读竞态的 D3D handle。
 
-`deploy/windows/start-vm.ps1` 会先探测 QEMU 是否注册 `virtio-vga-gl`：只有带
-virglrenderer 的构建才使用 `-display sdl,gl=on`、`virtio-vga-gl` 和默认
-`blob=true,hostmem=256M`。`-NoGpuZeroCopy` 只关闭这组属性偏好，ANGLE 仍可能
-导出普通 texture。当前常规 Windows cross 构建缺少 virglrenderer，会自动保留
-普通 SDL 窗口并改用 `virtio-vga` + SHM。真正的 Windows GPU handoff 还需要
-ANGLE/libEGL 提供 D3D11
-shared texture；`-NoSdl`/`-Headless` 同样不能描述成 GPU 零拷贝路径。
+`deploy/windows/start-vm.ps1` 默认直接使用普通 SDL、`virtio-vga` 与 SHM，不探测或
+启用 GL。显式 `-GpuGl` 才探测 `virtio-vga-gl` 并选择 `-display sdl,gl=on`；探测
+失败会拒绝启动，不能把显式请求静默降级。`-GpuGl` 默认仍不带 blob/hostmem，只有
+再加 `-GpuZeroCopy` 才追加默认 `blob=true,hostmem=256M`；该参数依赖 fb-shm，且
+`-GpuHostmem` 只接受 256M..8G 内 2 的幂。`-NoGpuZeroCopy` 保留为兼容的 gl-safe
+开关，ANGLE 仍可能导出普通 texture。真正的 Windows GPU handoff 还需要
+ANGLE/libEGL 提供 D3D11 shared texture；`-NoSdl`/`-Headless` 不能与 `-GpuGl`
+组合，也不能描述成 GPU 零拷贝路径。
+
+用户曾实测旧版 GL+blob/hostmem 配置可稳定运行，因此这里把 zero-copy 改成显式选择是为了
+最小化 guest PCI 暴露并便于 A/B 隔离，并不构成其导致 DNF 自动退出的因果证据。
 
 ## Consumer 模式
 
@@ -198,6 +207,7 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\stream-fb-shm.ps1 `
 | `tools/fb-shm-stream/main.c` | `--mode` 是否避免把 SHM fallback 伪装成 GPU 零拷贝 |
 | `deploy/scripts/tests/test_gpu_zerocopy_launcher.sh` | Linux 默认 stable、显式 GL/blob opt-in、优先级与冲突矩阵是否一致 |
 | `deploy/scripts/tests/test_windows_fb_shm_static.sh` | Windows/Linux 关键字符串和语法检查是否覆盖新路径 |
+| `deploy/scripts/tests/test_windows_display_policy.sh` | Windows stable、GL-safe、zero-copy 和 hostmem 边界是否一致 |
 
 ## 已验证命令
 
@@ -205,6 +215,7 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\stream-fb-shm.ps1 `
 ninja -C build qemu-system-x86_64 qemu-fb-shm-stream
 deploy/scripts/tests/test_gpu_zerocopy_launcher.sh
 deploy/scripts/tests/test_windows_fb_shm_static.sh
+deploy/scripts/tests/test_windows_display_policy.sh
 git diff --check
 rg -n "unwrap\(" include/ui/fb-shm-abi.h ui/fb-shm.c tools/fb-shm-stream \
     deploy/windows deploy/scripts/tests/test_windows_fb_shm_static.sh \
@@ -217,13 +228,13 @@ rg -n "unwrap\(" include/ui/fb-shm-abi.h ui/fb-shm.c tools/fb-shm-stream \
 
 - 内置 `qemu-fb-shm-stream` 尚未实现 native libav/NVENC/AMF/QSV GPU import backend；
 - Linux texture 到 dma-buf 的导出依赖 `CONFIG_GBM` 和 EGL 扩展；
-- 默认 stable 路径不会添加 `blob=true,hostmem=SIZE`，因此只使用 SHM；显式 GL 后，
-  Windows/virgl 仍可能只给 QEMU 普通 GL texture；缺少 EGL texture export 时不会产生 `NOTIFY_GPU_FRAME`，
-  只能继续走 SHM fallback；
+- 默认 stable 和显式 gl-safe 都不会添加 `blob=true,hostmem=SIZE`；Windows/virgl
+  仍可能给 QEMU 普通 GL texture，但缺少 EGL texture export 时不会产生
+  `NOTIFY_GPU_FRAME`，只能继续走 SHM fallback；
 - `GPU_DISPLAY=sdl` 本身是默认普通 SDL；只有 `STABLE_DISPLAY=0` 时才使用 SDL/OpenGL。
   实际 EGL/GL provider 由 SDL 与宿主能力共同决定，因此缺少 dma-buf export 扩展时仍会走 SHM/CPU
-  fallback。显式 GL 路径默认打开 blob/hostmem 也只能增加成功条件；DGame UI 只有收到
-  实际 GPU frame 后才能显示 `G`，不能仅凭启动参数宣称零拷贝成功；
+  fallback。只有显式 zero-copy 才打开 blob/hostmem，且这也只能增加成功条件；
+  DGame UI 只有收到实际 GPU frame 后才能显示 `G`，不能仅凭启动参数宣称成功；
 - `--gpu-headless` 会关闭 SDL 窗口并使用 `egl-headless` display backend；这是
   fb-shm GPU 预览/转码的无窗口模式，不适合作为宿主本地交互窗口；
 - Windows GPU export 依赖 ANGLE/D3D11 keyed-mutex texture 和实现 `GPU_SYNC/DONE`

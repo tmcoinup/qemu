@@ -131,11 +131,13 @@ manifest 要求的 family/model/stepping、物理地址位、TSC 绑定和等价
 enlightenments 时必须显式传 `-ExposeHyperv`。WHPX 不支持本项目所需的嵌套虚拟化，
 `-RequireNestedVirtualization` 会直接失败。
 
-默认始终保留 SDL 本地窗口 + fb-shm 推流通道。启动器先用
-`qemu-system-x86_64.exe -device virtio-vga-gl,help` 做只读能力探测：存在该设备时
-选择 `sdl,gl=on`、`virtio-vga-gl` 和 `blob=true,hostmem=256M`；当前常规
-`build-win64-vmate` 未找到 virglrenderer，因此会明确提示并自动选择普通 SDL、
-`virtio-vga` 和 SHM，不会因缺少可选 GL 模块导致 VM 启动失败。
+默认始终保留普通 SDL 本地窗口 + `virtio-vga` + fb-shm，不探测 GL，也不暴露
+blob/hostmem PCI BAR。显式 `-GpuGl` 才通过
+`qemu-system-x86_64.exe -device virtio-vga-gl,help` 做只读能力探测并选择
+`sdl,gl=on`、`virtio-vga-gl`；此时默认仍为 gl-safe。只有再加 `-GpuZeroCopy`
+才追加 `blob=true,hostmem=256M`。显式 GL 探测失败会 fail closed，不会静默改回
+stable。当前常规 `build-win64-vmate` 未找到 virglrenderer，因此默认 stable 可用，
+但 `-GpuGl` 会被明确拒绝。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File deploy\windows\start-vm.ps1 `
@@ -168,8 +170,10 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\start-vm.ps1 `
 | `-FbShmPath C:\qemu-run\fb-1.sock` | 指定 fb-shm 控制 socket |
 | `-FbShmRate 60` | 配置/consumer 目标帧率；无 consumer 时 effective tick 可降至 1 Hz |
 | `-FbShmRoi 0,0,1280,720` | 只导出 ROI |
-| `-NoGpuZeroCopy` | GL 设备存在时仍保留 SDL/GL，只移除 blob/hostmem 偏好；ANGLE/renderer 仍可能从普通 texture 导出 handle，失败才回退 SHM |
-| `-GpuHostmem 512M` | 调整 virtio-gpu host-visible window；默认 `256M` |
+| `-GpuGl` | 显式启用 SDL/GL + `virtio-vga-gl`；无 hostmem BAR，但 virtio GL feature 可见；能力缺失时 fail closed |
+| `-GpuZeroCopy` | 依赖 `-GpuGl` 与 fb-shm；MSI-X BAR4→BAR1，BAR4/5 改为 `hostmem=SIZE` 64 位 window |
+| `-NoGpuZeroCopy` | 保留的兼容关闭开关；与 `-GpuZeroCopy` 冲突，GL 仍可从普通 texture 尝试导出 handle |
+| `-GpuHostmem 512M` | 仅配合 `-GpuZeroCopy`；必须是 256M..8G 内 2 的幂，默认 `256M` |
 | `-GpuGlProbe Available|Unavailable` | 仅允许与 `-DryRun` 一起供 CI 注入探测结果；真实启动强制使用默认 `Auto`，不能越过能力检查 |
 | `-ExtraQemuArgs @(...)` | 追加经过 Windows 宿主边界校验的高级 QEMU 参数 |
 | `-DryRun` | 只打印 QEMU 参数，不启动 |
@@ -297,10 +301,13 @@ cd build-win64-vmate
 ```
 
 上述常规容器没有 Windows virglrenderer，configure 会报告 virglrenderer not found，
-所以不会构建 `virtio-vga-gl`；这是受支持的 SDL+SHM 产物。要实验 Windows GPU
-handoff，必须另外提供匹配 MinGW ABI 的 virglrenderer，并接入 ANGLE/libEGL 与
+所以不会构建 `virtio-vga-gl`；这是受支持的 stable SDL+SHM 产物。要使用 Windows
+GPU handoff，必须另外提供匹配 MinGW ABI 的 virglrenderer，并接入 ANGLE/libEGL 与
 D3D11 shared texture 支持后重新配置 `--enable-opengl --enable-virglrenderer`。
-仅强制 `-GpuGlProbe Available` 不会补齐依赖，真实启动不要使用该测试覆盖值。
+之后先用 `-GpuGl` 验证 gl-safe；确需 host-visible BAR 时再加 `-GpuZeroCopy`。
+`-GpuZeroCopy` 不能与 `-NoFbShm` 同用；`-GpuGlProbe Available` 只是 DryRun 测试注入，
+不会补齐真实依赖。用户曾实测旧 GL+zero-copy 配置可稳定运行，不能仅凭当前 PCI 最小化策略
+把它定性为 DNF 自动退出的根因。
 
 构建并生成 NSIS 安装包：
 

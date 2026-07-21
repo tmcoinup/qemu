@@ -190,13 +190,15 @@ test_launchers_keep_gpu_export_as_explicit_capability() {
     local linux_devices="$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
     local windows_launcher="$REPO_ROOT/deploy/windows/start-vm.ps1"
 
-    # 中文注释：Linux 默认稳定 SDL；显式 GL 和 Windows 能力探测仍可选择
-    # blob/hostmem，失败由 QEMU 回退 SHM。关闭属性偏好不能顺带关闭 renderer
-    # texture export，也不能把 Linux 的默认路径悄悄改回 virgl。
+    # 中文注释：Linux/Windows 均默认稳定 SDL；显式 GL 也保持 gl-safe，只有
+    # 再显式选择 zero-copy 才添加 blob/hostmem。关闭属性不能顺带关闭 renderer
+    # texture export，也不能把默认路径悄悄改回 virgl。
     require_text ': "${STABLE_DISPLAY:=1}"' "$linux_cli"
     require_text '--no-gpu-zerocopy' "$linux_cli"
     require_text 'blob=true,hostmem=${GPU_HOSTMEM:-256M}' "$linux_devices"
 
+    require_text '[switch]$GpuGl' "$windows_launcher"
+    require_text '[switch]$GpuZeroCopy' "$windows_launcher"
     require_text '[switch]$NoGpuZeroCopy' "$windows_launcher"
     require_text "[string]\$GpuHostmem = '256M'" "$windows_launcher"
     require_text "[ValidateSet('Auto', 'Available', 'Unavailable')]" "$windows_launcher"
@@ -205,10 +207,17 @@ test_launchers_keep_gpu_export_as_explicit_capability() {
     require_text "'sdl,show-cursor=off'" "$windows_launcher"
     require_text "'virtio-vga-gl,edid=on" "$windows_launcher"
     require_text "'virtio-vga,edid=on" "$windows_launcher"
-    require_text 'if (-not $NoGpuZeroCopy)' "$windows_launcher"
+    require_text '-RequireBlob $GpuZeroCopy.IsPresent' "$windows_launcher"
+    require_text 'if ($GpuZeroCopy)' "$windows_launcher"
     require_text '",blob=true,hostmem=$GpuHostmem"' "$windows_launcher"
-    require_text "'SDL + virtio-vga + SHM'" "$windows_launcher"
-    require_text 'virtio-vga-gl 不可用；自动选择' "$windows_launcher"
+    require_text '-GpuZeroCopy 与兼容参数 -NoGpuZeroCopy 不能同时使用' \
+        "$windows_launcher"
+    require_text '-GpuZeroCopy 依赖显式 -GpuGl' "$windows_launcher"
+    require_text '-GpuZeroCopy 仅服务 fb-shm GPU handle' "$windows_launcher"
+    require_text 'GpuHostmem 必须是 256M..8G 内 2 的幂' "$windows_launcher"
+    require_text '已显式请求 -GpuGl，但 virtio-vga-gl 所需能力探测失败' \
+        "$windows_launcher"
+    reject_text 'virtio-vga-gl 不可用；自动选择' "$windows_launcher"
     reject_text "Write-Warning '当前 QEMU 未提供 virtio-vga-gl" "$windows_launcher"
 }
 
@@ -347,69 +356,6 @@ test_optional_powershell_syntax() {
     done
 }
 
-test_optional_windows_launcher_dry_run() {
-    local pwsh_bin
-    local tmp
-    local out
-    local vga
-
-    pwsh_bin="$(command -v pwsh || command -v powershell || true)"
-    if [[ -z "$pwsh_bin" ]]; then
-        echo "SKIP: PowerShell not found for Windows launcher DRY_RUN"
-        return
-    fi
-
-    tmp="$(mktemp -d)"
-    out="$tmp/out.txt"
-    mkdir -p "$tmp/user"
-    touch "$tmp/disk.qcow2"
-    printf 'firmware-code' >"$tmp/code.fd"
-    printf 'firmware-vars' >"$tmp/vars.fd"
-
-    # 中文注释：GpuGlProbe 是 DryRun/CI 的确定性注入点。测试不依赖当前宿主
-    # 是否真的有 Windows virglrenderer，也不会执行作为占位符传入的 /bin/true。
-    USERPROFILE="$tmp/user" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
-        -File "$REPO_ROOT/deploy/windows/start-vm.ps1" \
-        -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
-        -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
-        -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available \
-        -DryRunHostCpuName 'Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz' \
-        -DryRun > "$out"
-    grep -Fx -- 'sdl,gl=on,show-cursor=off' "$out" >/dev/null \
-        || fail "Windows available probe must enable SDL/GL"
-    vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
-    [[ "$vga" == virtio-vga-gl,* && "$vga" == *"blob=true"* && "$vga" == *"hostmem=256M"* ]] \
-        || fail "Windows available probe must enable virtio-vga-gl blob/hostmem"
-
-    USERPROFILE="$tmp/user" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
-        -File "$REPO_ROOT/deploy/windows/start-vm.ps1" \
-        -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
-        -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
-        -FbShmPath "$tmp/fb.sock" -GpuGlProbe Available \
-        -NoGpuZeroCopy \
-        -DryRunHostCpuName 'Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz' \
-        -DryRun > "$out"
-    vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
-    [[ "$vga" == virtio-vga-gl,* && "$vga" != *"blob=true"* && "$vga" != *"hostmem="* ]] \
-        || fail "Windows -NoGpuZeroCopy must retain GL but remove blob/hostmem preference"
-    USERPROFILE="$tmp/user" "$pwsh_bin" -NoLogo -NoProfile -NonInteractive \
-        -File "$REPO_ROOT/deploy/windows/start-vm.ps1" \
-        -Qemu /bin/true -VmRoot "$tmp/vm" -Disk "$tmp/disk.qcow2" \
-        -OvmfCode "$tmp/code.fd" -OvmfVarsTemplate "$tmp/vars.fd" \
-        -FbShmPath "$tmp/fb.sock" -GpuGlProbe Unavailable -DryRun \
-        -DryRunHostCpuName 'Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz' \
-        > "$out" 2>&1
-    grep -Fx -- 'sdl,show-cursor=off' "$out" >/dev/null \
-        || fail "Windows unavailable probe must retain non-GL SDL"
-    vga="$(grep -E '^virtio-vga(-gl)?,' "$out" | head -n 1)"
-    [[ "$vga" == virtio-vga,* && "$vga" != *"blob=true"* ]] \
-        || fail "Windows unavailable probe must fall back to virtio-vga"
-    grep -F -- '自动选择 SDL + virtio-vga + SHM' "$out" >/dev/null \
-        || fail "Windows unavailable probe must explain SHM fallback"
-
-    rm -rf "$tmp"
-}
-
 test_docs_cover_windows_packaging() {
     require_text "Windows 10 / Windows 11" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
     require_text "qemu-fb-shm-stream.exe" "$REPO_ROOT/deploy/docs/WINDOWS-PACKAGING.md"
@@ -486,10 +432,11 @@ test_gl_sidecar_restores_provider_context
 test_native_streamer_has_both_platforms
 test_windows_scripts_are_native
 test_optional_powershell_syntax
-test_optional_windows_launcher_dry_run
 test_docs_cover_windows_packaging
 test_new_files_stay_small
 test_optional_mingw_streamer_syntax
 bash "$SCRIPT_DIR/test_windows_gpu_sync_static.sh"
+bash "$SCRIPT_DIR/test_gl_lifecycle_static.sh"
+bash "$SCRIPT_DIR/test_windows_display_policy.sh"
 
 echo "OK: windows fb-shm static checks passed"

@@ -311,7 +311,12 @@ STABLE_DISPLAY=1 HOST_RESERVE_CORES=0 \
   deploy/scripts/finalize-clone-gpu.sh 2 --restart -- --proxy
 ```
 
-`STABLE_DISPLAY=1` 也是当前默认值；此处显式写出，确保 clone 收尾后仍走无 virgl 的长稳路径。
+`STABLE_DISPLAY=1` 也是当前默认值；无论 base/clone 选择 AMD 还是 NVIDIA 逻辑
+身份，此处都保持普通 `virtio-vga`，不增加 blob/hostmem PCI BAR。需要对照 GL 时可给
+restart 透传 `--gpu-sdl-egl`，该路径默认仍为 gl-safe；只有再显式加
+`--gpu-zerocopy` 才把 MSI-X 从 BAR4 移到 BAR1，并以 BAR4/5 启用 host-visible window；`GPU_HOSTMEM` 必须是 256M..8G 内
+2 的幂。用户曾实测旧 GL+zero-copy 配置可稳定运行，因此该对照只能缩小变量，不能单独把
+zero-copy 定性为 DNF 自动退出的根因。
 
 ### C.4 sysprep 与 OOBE
 

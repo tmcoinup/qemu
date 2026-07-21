@@ -174,10 +174,32 @@ if (( ${_profile_needs_save:-0} )); then
 fi
 unset _profile_needs_save
 
+# 中文注释：DRY_RUN 也打印这段策略摘要，使回归测试验证实际选择到的分支和值，
+# 而不是只扫描脚本文本；真实启动则在 GUI 摘要之后复用同一个函数。
+sv_print_fb_shm_display_summary() {
+    [[ "$FB_SHM" == "1" ]] || return 0
+
+    echo ">> fb-shm sock: $FB_SHM_SOCK (configured=${FB_SHM_RATE} Hz${FB_SHM_ROI:+, ROI=$FB_SHM_ROI})"
+    # 中文注释：QEMU 启动日志中的 1Hz 是无 consumer 时的有效 DCL 节流值，
+    # 不是 -object rate 丢失；连接 consumer 后会按配置值或 SET_RATE 请求恢复。
+    echo ">>   rate 说明: 无 consumer 时 effective 可降至 1 Hz；连接后使用 configured/consumer target"
+    if [[ "${GPU_GL_DISPLAY:-0}" == "1" && "${GPU_ZEROCOPY:-0}" == "1" ]]; then
+        echo ">>   GPU handoff: 优先 GPU handle (blob=true,hostmem=${GPU_HOSTMEM});不可用自动 SHM fallback"
+        echo ">>   guest PCI : 已重排 MSI-X BAR4→BAR1，BAR4/5 host-visible=${GPU_HOSTMEM}"
+    elif [[ "${GPU_GL_DISPLAY:-0}" == "1" ]]; then
+        echo ">>   GPU handoff: 无 blob/hostmem；renderer 仍可导出 texture handle，失败才回退 SHM"
+        echo ">>   guest PCI : 无 hostmem BAR；virtio GL feature 可见 (GL-safe)"
+    else
+        echo ">>   GPU handoff: 当前为非 GL 显示路径；使用 SHM fallback"
+        echo ">>   guest PCI : 无 host-visible hostmem BAR (stable)"
+    fi
+}
+
 # 回归/调试出参：DRY_RUN=1 时打印完整 QEMU argv（每行一个）后退出，不启动任何
 # 后台守护、不 exec。用于重构前后逐字节比对生成的命令行，确保去虚拟化参数不被
 # 改动。仅在 DRY_RUN=1 时生效，正常启动路径完全不变。
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    sv_print_fb_shm_display_summary
     printf '__DRY_RUN_ARGV__\n'
     printf '%s\n' "${CMD[@]}"
     exit 0
@@ -224,18 +246,8 @@ elif [[ "$SDL" == "1" ]]; then
 else
     echo ">> GUI:         无（纯 fb-shm 推流模式）"
 fi
+sv_print_fb_shm_display_summary
 if [[ "$FB_SHM" == "1" ]]; then
-    echo ">> fb-shm sock: $FB_SHM_SOCK (configured=${FB_SHM_RATE} Hz${FB_SHM_ROI:+, ROI=$FB_SHM_ROI})"
-    # 中文注释：QEMU 启动日志中的 1Hz 是无 consumer 时的有效 DCL 节流值，
-    # 不是 -object rate 丢失；连接 consumer 后会按配置值或 SET_RATE 请求恢复。
-    echo ">>   rate 说明: 无 consumer 时 effective 可降至 1 Hz；连接后使用 configured/consumer target"
-    if [[ "${GPU_GL_DISPLAY:-0}" == "1" && "${GPU_ZEROCOPY:-0}" == "1" ]]; then
-        echo ">>   GPU handoff: 优先 GPU handle (blob=true,hostmem=${GPU_HOSTMEM});不可用自动 SHM fallback"
-    elif [[ "${GPU_GL_DISPLAY:-0}" == "1" ]]; then
-        echo ">>   GPU handoff: blob/hostmem 偏好已关闭；renderer 仍可导出 texture handle，失败才回退 SHM"
-    else
-        echo ">>   GPU handoff: 当前为非 GL 显示路径；使用 SHM fallback"
-    fi
     echo ">>   接消费端: scripts/qemu-fb-shm-stream.py --sock $FB_SHM_SOCK --output ..."
 fi
 echo ">> boot mode:   $BOOT"

@@ -309,6 +309,17 @@ int fb_shm_gl_pbo_issue(FbShmDisplay *d, uint32_t rw, uint32_t rh,
     glReadPixels(0, 0, rw, rh, GL_BGRA, GL_UNSIGNED_BYTE, 0);
 
     pbo->fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!pbo->fence) {
+        /* 持续失败时宁可停掉 SHM 采样，也不用同步读回阻塞主循环。 */
+        if (!d->gl_warned_pbo) {
+            warn_report("fb-shm: cannot create async GL PBO fence; "
+                        "dropping one readback frame");
+            d->gl_warned_pbo = true;
+        }
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        fb_shm_gl_pbo_forget(pbo, false);
+        return 0;
+    }
     pbo->bytes = bytes;
     pbo->w = rw;
     pbo->h = rh;

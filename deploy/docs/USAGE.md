@@ -384,8 +384,8 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `QEMU_SERVICE_CPUS` | `0` | `--svc-cpu` 分配 1 个辅助线程逻辑 CPU |
 | `MEM_GUARD` | `1` | 可用内存不足时告警或拒绝；`MEM_FORCE=1` 显式越过硬拒绝 |
 | `SDL` / `FB_SHM` | `1` / `1` | 默认本地稳定 SDL 窗口与 fb-shm 同时启用 |
-| `STABLE_DISPLAY` | `1` | 默认 `virtio-vga`、无 virgl；设 `0` 显式启用 GL 路径 |
-| `GPU_DISPLAY` | `sdl` | `sdl-egl`/`egl-headless` 被显式选择时自动 opt-in GL |
+| `STABLE_DISPLAY` | `1` | 默认 `virtio-vga`、无 virgl/blob/hostmem；设 `0` 显式启用 GL |
+| `GPU_DISPLAY` | `sdl` | `sdl-egl`/`egl-headless` 显式 opt-in GL，但默认仍为 gl-safe |
 | `QEMU_CAP_CHECK` | `1` | 拒绝缺少定制设备属性的 QEMU |
 | `STRICT_STEALTH` | `0` | 网络兼容默认；生产应显式设 1 禁止 NAT fallback |
 | `PROXY` | `0` | `--proxy` 启用 QMP 原生 multi-client |
@@ -406,8 +406,7 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `start-vm.sh 1 --gpu-sdl-egl` | SDL/GL（显式 opt-in） | 无 | 开 |
 | `start-vm.sh 1 --gpu-headless` | 无 | EGL rendernode（显式 opt-in） | 开 |
 
-默认 `STABLE_DISPLAY=1` 用于避开 Windows 游戏长跑中的 virgl 显示不稳定；需要 GPU 导出时可设 `STABLE_DISPLAY=0`，或使用 `--gpu-sdl-egl`/`--gpu-headless`。显式 `STABLE_DISPLAY=1`
-优先：`sdl-egl` 降级为普通 SDL，`egl-headless` 拒绝启动。
+默认 `STABLE_DISPLAY=1` 使用最小 PCI 显示面；`STABLE_DISPLAY=0`、`--gpu-sdl-egl` 或 `--gpu-headless` 启用 GL-safe，不带 blob/hostmem，但 guest 仍能看到 virtio `VIRGL/CONTEXT_INIT` feature，并非与 stable 完全相同。只有显式追加 `--gpu-zerocopy` 才重排 guest PCI BAR：MSI-X 从 BAR4 移到 BAR1，BAR4/5 变为 host-visible window，并且必须保留 fb-shm；`GPU_HOSTMEM` 只接受 256M..8G 内 2 的幂。显式 `STABLE_DISPLAY=1` 优先：`sdl-egl` 降级为普通 SDL，`egl-headless` 拒绝启动。用户曾实测旧 GL+zero-copy 配置可稳定运行，因此该隔离策略不能单独证明它是 DNF 退出根因。
 无 `DISPLAY` 且非交互终端时，默认 SDL 会自动关闭，仅保留 fb-shm。消费端示例：
 
 ```bash
@@ -417,7 +416,7 @@ build/qemu-fb-shm-stream \
   --encoder libx264 --preset veryfast --mode auto
 ```
 
-GPU handle 只在显式 GL 路径尝试；失败回落 SHM。客体始终是 virtio 显示设备，不能把 GPU handoff 或 NVIDIA/AMD 标签当作物理 GPU 证据。
+显式 GL 即使不带 blob/hostmem，renderer 仍可尝试从普通 texture 导出 GPU handle；失败回落 SHM。客体始终是 virtio 显示设备，不能把 GPU handoff 或 NVIDIA/AMD 标签当作物理 GPU 证据。
 
 ## 7. Profile 与内存变更
 

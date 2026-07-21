@@ -9,6 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SPOOF="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
+APPLY_SUPPORT="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 REFRESH_SCRIPT="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
 MODE_SCRIPT="$REPO_ROOT/deploy/scripts/force-displayfreq.ps1"
 RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
@@ -42,10 +43,12 @@ assert_not_contains() {
 
 # 三份生产 PowerShell 源码都必须能独立通过 AST 解析。显示模式 helper 已经是独立
 # 文件，测试直接执行该文件，不再依赖 SafeGetValue 解析嵌套动态 here-string。
-SPOOF_PATH="$SPOOF" REFRESH_SCRIPT_PATH="$REFRESH_SCRIPT" MODE_SCRIPT_PATH="$MODE_SCRIPT" \
+SPOOF_PATH="$SPOOF" APPLY_SUPPORT_PATH="$APPLY_SUPPORT" \
+REFRESH_SCRIPT_PATH="$REFRESH_SCRIPT" MODE_SCRIPT_PATH="$MODE_SCRIPT" \
 pwsh -NoLogo -NoProfile -NonInteractive -Command '
     foreach ($path in @(
         $env:SPOOF_PATH,
+        $env:APPLY_SUPPORT_PATH,
         $env:REFRESH_SCRIPT_PATH,
         $env:MODE_SCRIPT_PATH
     )) {
@@ -207,14 +210,18 @@ assert_not_contains '验收成功' "$TMP_DIR/false_success.out"
 
 # 主流程必须在 PnP 扫描之后同步调用辅助脚本；-SkipTask 无延后任务时的无桌面状态
 # 必须传播非零退出码。以下守卫防止以后又退化成异步 schtasks /Run + 静默成功。
-scan_line="$(grep -n 'pnputil.exe /scan-devices' "$SPOOF" | tail -1 | cut -d: -f1)"
-sync_line="$(grep -n '& \$powershellExe @displayArgs' "$SPOOF" | cut -d: -f1)"
+scan_line="$(grep -n '^Invoke-GpuSpoofPnpRefresh$' "$SPOOF" | cut -d: -f1)"
+sync_line="$(grep -n '^\$displayResult = Invoke-GpuSpoofDisplayModeVerification' \
+    "$SPOOF" | cut -d: -f1)"
 [[ -n "$scan_line" && -n "$sync_line" && "$sync_line" -gt "$scan_line" ]] \
     || fail "显示模式同步验收没有发生在最终 PnP 扫描之后"
-grep -F 'if ($displayTaskInstalled)' "$SPOOF" >/dev/null \
+grep -F 'if ($DisplayTaskInstalled)' "$APPLY_SUPPORT" >/dev/null \
     || fail "无交互桌面延后语义没有检查登录任务是否实际安装"
-refresh_section="$(sed -n '/^# ---- install boot-time refresh task/,/^# ---- prepare verified/p' "$SPOOF")"
-[[ "$refresh_section" != *'$SkipTask'* && "$refresh_section" == *'Register-ScheduledTask'* ]] \
+boot_register_line="$(grep -n 'Register-ScheduledTask -TaskName $taskName' \
+    "$APPLY_SUPPORT" | cut -d: -f1)"
+skip_branch_line="$(grep -n 'if ($SkipDisplayTask)' "$APPLY_SUPPORT" | head -1 | cut -d: -f1)"
+[[ -n "$boot_register_line" && -n "$skip_branch_line" && \
+   "$boot_register_line" -lt "$skip_branch_line" ]] \
     || fail "名称刷新任务没有在 FirstLogon/-SkipTask 下无条件保留"
 grep -F 'exit $displayModeFailureCode' "$SPOOF" >/dev/null \
     || fail "显示模式失败退出码没有传播给调用方"
@@ -227,15 +234,15 @@ grep -F "Join-Path \$PSScriptRoot 'refresh-gpu-name.ps1'" "$SPOOF" >/dev/null \
     || fail "主脚本没有从 PSScriptRoot 定位 refresh helper"
 grep -F "Join-Path \$PSScriptRoot 'force-displayfreq.ps1'" "$SPOOF" >/dev/null \
     || fail "主脚本没有从 PSScriptRoot 定位显示模式 helper"
-grep -F 'Copy-HelperIfDifferent -Source $refreshHelperSource' "$SPOOF" >/dev/null \
-    || fail "主脚本没有安全复制或复用独立 refresh helper"
-grep -F 'Copy-HelperIfDifferent -Source $displayModeHelperSource' "$SPOOF" >/dev/null \
-    || fail "主脚本没有安全复制或复用独立显示模式 helper"
-grep -F '[System.IO.Path]::GetFullPath($Source)' "$SPOOF" >/dev/null \
+grep -F 'Copy-GpuSpoofHelperIfDifferent -Source $RefreshHelperSource' \
+        "$APPLY_SUPPORT" >/dev/null || fail "apply support 没有安全复制 refresh helper"
+grep -F 'Copy-GpuSpoofHelperIfDifferent -Source $DisplayModeHelperSource' \
+        "$APPLY_SUPPORT" >/dev/null || fail "apply support 没有安全复制显示模式 helper"
+grep -F '[IO.Path]::GetFullPath($Source)' "$APPLY_SUPPORT" >/dev/null \
     || fail "helper 复制逻辑没有规范化源路径"
-grep -F '[System.StringComparer]::OrdinalIgnoreCase.Equals' "$SPOOF" >/dev/null \
+grep -F '[StringComparer]::OrdinalIgnoreCase.Equals' "$APPLY_SUPPORT" >/dev/null \
     || fail "helper 复制逻辑没有按 Windows 规则识别同一路径"
-if grep -F -e '$body = @' -e '$freqBody = @' "$SPOOF" >&2; then
+if grep -F -e '$body = @' -e '$freqBody = @' "$SPOOF" "$APPLY_SUPPORT" >&2; then
     fail "主脚本重新引入了落盘 helper here-string"
 fi
 
@@ -243,16 +250,20 @@ fi
 main_code_lines="$(awk '!/^[[:space:]]*($|#)/ { count++ } END { print count + 0 }' "$SPOOF")"
 [[ "$main_code_lines" -lt 500 ]] \
     || fail "apply-gpu-spoof.ps1 非空非注释代码行=$main_code_lines，必须小于 500"
+[[ "$(wc -l <"$SPOOF")" -le 500 && "$(wc -l <"$APPLY_SUPPORT")" -le 500 ]] \
+    || fail "apply 主脚本或 support helper 物理行数超过 500"
 
 # 两个 helper 含中文字符串，必须保留 UTF-8 BOM，供 Windows PowerShell 5.1 稳定读取。
-for helper in "$REFRESH_SCRIPT" "$MODE_SCRIPT"; do
+for helper in "$APPLY_SUPPORT" "$REFRESH_SCRIPT" "$MODE_SCRIPT"; do
     [[ "$(xxd -p -l 3 "$helper")" == 'efbbbf' ]] \
         || fail "$(basename "$helper") 缺少 UTF-8 BOM"
 done
 
 # helper 返回 11 表示请求已持久化但需重启；主脚本必须原样上抛给外层二阶段验收。
-grep -F '$displayModeFailureCode = 11' "$SPOOF" >/dev/null \
-    || fail "主脚本吞掉了显示 helper 的重启退出码 11"
+grep -F '$failureCode = 11' "$APPLY_SUPPORT" >/dev/null \
+    || fail "apply support 吞掉了显示 helper 的重启退出码 11"
+grep -F '$displayModeFailureCode = [int]$displayResult.FailureCode' "$SPOOF" >/dev/null \
+    || fail "主脚本没有接收 support helper 的显示失败码"
 grep -F 'exit $displayModeFailureCode' "$SPOOF" >/dev/null \
     || fail "主脚本没有统一传播显示 helper 的非零退出码"
 grep -F 'Restart-RespawnForPendingWork -PendingExitCode 11' "$RESPAWN" >/dev/null \

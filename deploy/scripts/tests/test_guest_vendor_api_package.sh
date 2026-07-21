@@ -10,6 +10,7 @@ PACKAGE="$REPO_ROOT/deploy/guest-stealth/package.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
 NVAPI_DIR="$REPO_ROOT/deploy/nvapi-shim"
 ADL_DIR="$REPO_ROOT/deploy/adl-shim"
+APPLY_SUPPORT="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -17,14 +18,17 @@ fail() {
 }
 
 for path in "$BUILD_SCRIPT" "$PACKAGE" "$LAUNCHER" \
+        "$APPLY_SUPPORT" \
         "$NVAPI_DIR/nvapi.dll" "$NVAPI_DIR/nvapi64.dll" \
         "$ADL_DIR/atiadlxy.dll" "$ADL_DIR/atiadlxx.dll"; do
     [[ -f "$path" ]] || fail "缺少统一厂商 API package 文件：$path"
 done
 
-for helper in install-nvapi-system.ps1 nvapi-system-transaction.ps1 \
+for helper in install-nvapi-system.ps1 nvapi-system-validation.ps1 \
+        nvapi-system-transaction.ps1 \
         install-adl-system.ps1 adl-system-transaction.ps1 \
-        install-gpu-api-system.ps1; do
+        install-gpu-api-system.ps1 gpu-api-identity-binding.ps1 \
+        gpu-spoof-apply-support.ps1; do
     grep -F "$helper" "$BUILD_SCRIPT" >/dev/null \
         || fail "build-exe 未嵌入 helper：$helper"
     grep -F "$helper" "$LAUNCHER" >/dev/null \
@@ -82,9 +86,11 @@ mapfile -d '' -t release_entries < <(
    ! -e "$TMP_DIR/poison-build" ]] \
     || fail "正式 package 继承了外部 ADL/输出目录"
 
-for helper in install-nvapi-system.ps1 nvapi-system-transaction.ps1 \
+for helper in install-nvapi-system.ps1 nvapi-system-validation.ps1 \
+        nvapi-system-transaction.ps1 \
         install-adl-system.ps1 adl-system-transaction.ps1 \
-        install-gpu-api-system.ps1; do
+        install-gpu-api-system.ps1 gpu-api-identity-binding.ps1 \
+        gpu-spoof-apply-support.ps1; do
     strings -a "$EXE" | grep -F "$helper" >/dev/null \
         || fail "EXE 没有实际包含 helper 文件名：$helper"
 done
@@ -96,7 +102,7 @@ done
 # 文件名只能证明释放表存在；完整原始 DLL 字节作为 PE 子串才证明 xxd/编译链没有
 # 截断、转码或从环境污染目录读取另一份二进制。
 python3 - "$EXE" "$NVAPI_DIR" "$ADL_DIR" \
-    "$REPO_ROOT/deploy/guest-stealth" <<'PY'
+    "$REPO_ROOT/deploy/guest-stealth" "$REPO_ROOT/deploy/scripts" <<'PY'
 from pathlib import Path
 import sys
 
@@ -107,10 +113,13 @@ payloads = (
     Path(sys.argv[3]) / "atiadlxy.dll",
     Path(sys.argv[3]) / "atiadlxx.dll",
     Path(sys.argv[4]) / "install-nvapi-system.ps1",
+    Path(sys.argv[4]) / "nvapi-system-validation.ps1",
     Path(sys.argv[4]) / "nvapi-system-transaction.ps1",
     Path(sys.argv[4]) / "install-adl-system.ps1",
     Path(sys.argv[4]) / "adl-system-transaction.ps1",
     Path(sys.argv[4]) / "install-gpu-api-system.ps1",
+    Path(sys.argv[4]) / "gpu-api-identity-binding.ps1",
+    Path(sys.argv[5]) / "gpu-spoof-apply-support.ps1",
 )
 for path in payloads:
     raw = path.read_bytes()

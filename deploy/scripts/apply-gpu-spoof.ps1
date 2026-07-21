@@ -10,8 +10,8 @@
     [ValidateSet('GDDR5')][string]$SpoofMemoryType = 'GDDR5', [ValidateRange(32, 1024)][ValidateScript({ ($_ -band ($_ - 1)) -eq 0 })][int]$SpoofMemoryBusWidthBits = 128,
     [ValidateRange(100000, 5000000)][int]$SpoofBaseClockKHz = 1354000, [ValidateRange(100000, 5000000)][int]$SpoofBoostClockKHz = 1455000,
     [ValidateRange(100000, 10000000)][int]$SpoofMemoryClockKHz = 3504000, [ValidateSet(0)][int]$SpoofSliSupported = 0,
-    # 正式 respawn 显式传入同一受保护 payload 目录，使 NVAPI + ADL 系统投影与
-    # schema-2 identity 共用下方 durable try/finally。参数名保留旧调用兼容，
+    # 正式 respawn 传入同时携带 NVAPI/ADL 的受保护 payload；系统目录只发布 staged
+    # vendor 对应的一组，并与 schema-2 identity 共用 durable try/finally。参数名保留旧调用兼容，
     # 同时接受更准确的 -GpuApiPayloadDir 别名。
     [Alias('GpuApiPayloadDir')]
     [string]$NvapiPayloadDir = ''
@@ -30,11 +30,18 @@ $powershellExe = Join-Path $PSHOME 'powershell.exe'
 $refreshHelperSource = Join-Path $PSScriptRoot 'refresh-gpu-name.ps1'; $displayModeHelperSource = Join-Path $PSScriptRoot 'force-displayfreq.ps1'
 $identityHelperSource = Join-Path $PSScriptRoot 'persist-gpu-profile.ps1'; $transactionHelperSource = Join-Path $PSScriptRoot 'gpu-profile-transaction.ps1'
 $registryCoreSource = Join-Path $PSScriptRoot 'gpu-profile-registry-core.ps1'
+$applySupportSource = Join-Path $PSScriptRoot 'gpu-spoof-apply-support.ps1'
 $missingHelper = @($refreshHelperSource, $displayModeHelperSource, $identityHelperSource,
-    $transactionHelperSource, $registryCoreSource) |
+    $transactionHelperSource, $registryCoreSource, $applySupportSource) |
     Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
 if (-not $ListOnly -and $missingHelper) {
     throw ("缺少同目录辅助脚本: " + $missingHelper)
+}
+if (Test-Path -LiteralPath $applySupportSource -PathType Leaf) {
+    # helper 载入本身无副作用；所有设备、任务与显示操作仍由下方事务流程显式调用。
+    . $applySupportSource
+} elseif ($AutoDetect) {
+    throw ('AutoDetect 缺少同目录辅助脚本: ' + $applySupportSource)
 }
 
 # 两个厂商读取层的文件存在性要在 Stage 前检查；摘要、PE 架构和系统目标 allowlist
@@ -44,8 +51,10 @@ if (-not $ListOnly -and -not [string]::IsNullOrWhiteSpace($NvapiPayloadDir)) {
     $gpuApiPayloadRoot = [IO.Path]::GetFullPath($NvapiPayloadDir)
     $gpuApiCoordinatorSource = Join-Path $gpuApiPayloadRoot 'install-gpu-api-system.ps1'
     $missingGpuApiPayload = @(
-        'install-gpu-api-system.ps1', 'install-nvapi-system.ps1',
-        'nvapi-system-transaction.ps1', 'install-adl-system.ps1',
+        'install-gpu-api-system.ps1', 'gpu-api-identity-binding.ps1',
+        'install-nvapi-system.ps1',
+        'nvapi-system-validation.ps1', 'nvapi-system-transaction.ps1',
+        'install-adl-system.ps1',
         'adl-system-transaction.ps1', 'nvapi.dll', 'nvapi64.dll',
         'atiadlxy.dll', 'atiadlxx32.dll', 'atiadlxx.dll'
     ) | ForEach-Object { Join-Path $gpuApiPayloadRoot $_ } |
@@ -54,97 +63,6 @@ if (-not $ListOnly -and -not [string]::IsNullOrWhiteSpace($NvapiPayloadDir)) {
     if ($missingGpuApiPayload) {
         throw ('正式 GPU API payload 不完整：' + $missingGpuApiPayload)
     }
-}
-
-function Copy-HelperIfDifferent {
-    # legacy 安装可能直接从 ProgramData 中运行主脚本，此时源和持久化目标是同一文件。
-    # Windows 路径不区分大小写；先比较规范化绝对路径，相同就复用，避免 Copy-Item
-    # 报“无法覆盖自身”。路径不同才原样复制，从而继续保留 helper 的 UTF-8 BOM。
-    param([string]$Source, [string]$Destination)
-    $sourceFullPath = [System.IO.Path]::GetFullPath($Source)
-    $destinationFullPath = [System.IO.Path]::GetFullPath($Destination)
-    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($sourceFullPath, $destinationFullPath)) {
-        Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
-    }
-}
-
-function Remove-ScheduledTaskIfPresent {
-    # 旧实现直接调用 schtasks.exe /Delete。任务首次安装时本来就不存在，schtasks
-    # 会把“找不到文件”写到 stderr；在本脚本的严格错误模式下，这条可忽略信息会被
-    # PowerShell 提升为终止错误，进而错误回滚已经通过验证的 GPU identity 事务。
-    # 改用 Windows 内置 ScheduledTasks API：完整枚举成功后只匹配根目录同名项，
-    # 存在时才删除并复读。查询、删除或复读的真故障继续 fail-closed，不能把任务
-    # 服务/CIM 故障误判成“任务不存在”，也不能在旧任务仍可见时继续身份提交。
-    param([Parameter(Mandatory = $true)][string]$TaskName)
-
-    $matches = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
-            [string]$_.TaskPath -ieq '\' -and [string]$_.TaskName -ieq $TaskName
-        })
-    if ($matches.Count -gt 1) { throw ('根目录存在多个同名计划任务：' + $TaskName) }
-    if ($matches.Count -eq 0) { return }
-    Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' `
-        -Confirm:$false -ErrorAction Stop
-    $remaining = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
-            [string]$_.TaskPath -ieq '\' -and [string]$_.TaskName -ieq $TaskName
-        })
-    if ($remaining.Count -ne 0) {
-        throw ('计划任务删除后仍可见：' + $TaskName)
-    }
-}
-
-function Get-StealthDisplayDevices {
-    # 统一枚举 Display 类设备；不使用 -Status OK，因为 Code 22/已禁用设备恰好不会出现在 OK 集合里。
-    try {
-        return @(Get-PnpDevice -Class 'Display' -ErrorAction SilentlyContinue |
-            Where-Object { $_.InstanceId -and $_.Status -ne 'Unknown' })
-    } catch {
-        Write-Host ("  (Get-PnpDevice unavailable: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
-        return @()
-    }
-}
-
-function Test-StealthDisplayNeedsEnable {
-    param($Device)
-
-    if (-not $Device) { return $false }
-
-    $status = [string]$Device.Status
-    $problem = ''
-    try { $problem = [string]$Device.Problem } catch {}
-
-    if ($status -eq 'OK') { return $false }
-    # 设备管理器 Code 22 = 设备被禁用；不同 Windows/PowerShell 版本可能显示为 22 或 CM_PROB_DISABLED。
-    if ($problem -eq '22' -or $problem -match 'CM_PROB_DISABLED|DISABLED') { return $true }
-    # 某些 Win10 镜像只暴露 Status=Error，不暴露 Problem 数字；对 Display 类设备尝试 Enable 是幂等兜底。
-    if ($status -eq 'Error' -or $status -eq 'Degraded') { return $true }
-
-    return $false
-}
-
-function Enable-StealthDisplayDevices {
-    param([string]$Reason = '恢复显示适配器启用状态')
-
-    $changed = $false
-    foreach ($dev in @(Get-StealthDisplayDevices)) {
-        if (-not (Test-StealthDisplayNeedsEnable -Device $dev)) { continue }
-
-        $label = [string]$dev.FriendlyName
-        if ([string]::IsNullOrWhiteSpace($label)) { $label = [string]$dev.InstanceId }
-
-        $problem = ''
-        try { $problem = [string]$dev.Problem } catch {}
-        Write-Host ("  enabling display adapter (" + $Reason + "): " + $label + " [" + $dev.Status + "/" + $problem + "]") -ForegroundColor Yellow
-
-        try {
-            Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction Stop
-            Start-Sleep -Milliseconds 800
-            $changed = $true
-        } catch {
-            Write-Host ("  (enable failed for " + $dev.InstanceId + ": " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
-        }
-    }
-
-    return $changed
 }
 
 $identityTransactionId = $null; $identityTransactionCompleted = $false
@@ -162,7 +80,7 @@ try {
             # 同一 pointer Finalize/Rollback。
             $recoverGpuApiArgs = @('-NoProfile', '-NonInteractive',
                 '-ExecutionPolicy', 'Bypass', '-File', $gpuApiCoordinatorSource,
-                '-Action', 'Recover')
+                '-Action', 'Recover', '-Vendor', 'Auto')
             & $powershellExe @recoverGpuApiArgs
             if ($LASTEXITCODE -ne 0) {
                 throw ('系统 GPU API 中断事务恢复失败，退出码=' + $LASTEXITCODE)
@@ -174,40 +92,15 @@ try {
 # 位宽与三组时钟必须和名称、PCI ID 同时切换，不允许沿用上一台 clone 的值。
 # 用于 clone-from-base 之后 profile reroll，PCI subsys 变了但 base 注册表覆盖还是老 GPU。
 if ($AutoDetect) {
-    $gpuMap = @{
-        '138010DE' = @{ Name='NVIDIA GeForce GTX 750 Ti';  Vendor='NVIDIA'; Bios='Version 82.07.41.00.32';  RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1020000; BoostClockKHz=1085000; MemoryClockKHz=2700000; SliSupported=0 }
-        '1D0110DE' = @{ Name='NVIDIA GeForce GT 1030';     Vendor='NVIDIA'; Bios='Version 86.08.46.00.81';  RamMb=2048; MemoryType='GDDR5'; BusWidthBits=64;  BaseClockKHz=1227000; BoostClockKHz=1468000; MemoryClockKHz=3004000; SliSupported=0 }
-        '1C8110DE' = @{ Name='NVIDIA GeForce GTX 1050';    Vendor='NVIDIA'; Bios='Version 86.07.48.00.38';  RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1354000; BoostClockKHz=1455000; MemoryClockKHz=3504000; SliSupported=0 }
-        '1C8210DE' = @{ Name='NVIDIA GeForce GTX 1050 Ti'; Vendor='NVIDIA'; Bios='Version 86.07.48.00.A0';  RamMb=4096; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1290000; BoostClockKHz=1392000; MemoryClockKHz=3504000; SliSupported=0 }
-        '699F1002' = @{ Name='AMD Radeon RX 550';          Vendor='AMD';    Bios='016.011.000.029.000000'; RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1100000; BoostClockKHz=1183000; MemoryClockKHz=3500000; SliSupported=0 }
-        '67FF1002' = @{ Name='AMD Radeon RX 560';          Vendor='AMD';    Bios='016.011.000.029.000000'; RamMb=4096; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1175000; BoostClockKHz=1275000; MemoryClockKHz=3500000; SliSupported=0 }
-    }
-    # RDP 登录后 Windows 会同时枚举 ROOT\RDPINDIRECTDISPLAY 一类远程显示节点。
-    # 不能再取 Display 列表第一项；只允许唯一在线的 stock virtio PCI 设备参与
-    # SUBSYS 映射，既避免 RDP 节点干扰，也继续对多显卡/异常物理身份 fail closed。
-    $gpuDevices = @(Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Status -ne 'Unknown' -and [string]$_.InstanceId -match '^PCI\\VEN_1AF4&DEV_1050&SUBSYS_[0-9A-Fa-f]{8}(?:&|\\)'
-        })
-    if ($gpuDevices.Count -ne 1) {
-        throw ('AutoDetect: 唯一在线 stock 1AF4:1050 Display 设备数=' + $gpuDevices.Count + '，拒绝继续')
-    }
-    if ($gpuDevices[0].InstanceId -match 'SUBSYS_([0-9A-Fa-f]{8})') {
-        $subsys = $matches[1].ToUpper()
-        if ($gpuMap.ContainsKey($subsys)) {
-            $cfg = $gpuMap[$subsys]
-            $SpoofName = $cfg.Name; $SpoofVendor = $cfg.Vendor; $SpoofBios = $cfg.Bios; $SpoofRamMb = $cfg.RamMb
-            $SpoofMemoryType = $cfg.MemoryType; $SpoofMemoryBusWidthBits = $cfg.BusWidthBits; $SpoofBaseClockKHz = $cfg.BaseClockKHz
-            $SpoofBoostClockKHz = $cfg.BoostClockKHz; $SpoofMemoryClockKHz = $cfg.MemoryClockKHz; $SpoofSliSupported = $cfg.SliSupported
-            Write-Host "AutoDetect: subsys=$subsys -> $($cfg.Name)" -ForegroundColor Cyan
-        } else {
-            # 未知 SUBSYS 不能回落到默认 1050，否则名称、逻辑 PCI ID 与显存会拼成
-            # 一个不存在的型号。明确失败，让外层 respawn 保留日志并停止安装 shim。
-            throw "AutoDetect: subsys=$subsys 未在已知 GPU 池中，拒绝伪造默认型号"
-        }
-    } else {
-        throw "AutoDetect: stock Display InstanceId 缺少 SUBSYS，拒绝继续"
-    }
+    $profile = Get-GpuSpoofAutoDetectProfile
+    $SpoofName = $profile.Name; $SpoofVendor = $profile.Vendor
+    $SpoofBios = $profile.Bios; $SpoofRamMb = $profile.RamMb
+    $SpoofMemoryType = $profile.MemoryType
+    $SpoofMemoryBusWidthBits = $profile.BusWidthBits
+    $SpoofBaseClockKHz = $profile.BaseClockKHz
+    $SpoofBoostClockKHz = $profile.BoostClockKHz
+    $SpoofMemoryClockKHz = $profile.MemoryClockKHz
+    $SpoofSliSupported = $profile.SliSupported
 }
 
 if (-not $ListOnly) {
@@ -231,10 +124,17 @@ if (-not $ListOnly) {
     }
     $identityTransactionId = [string]$stageReceipt.NewIdentityId
     $stagedIdentity = & $refreshHelperSource -ReadIdentityOnly -StagedIdentityId $identityTransactionId
+    # 厂商 API 选择只能来自已经通过 schema、VioGpuDod、SUBSYS 与 pointer 双重
+    # 校验的 staged snapshot。clone 的旧 CurrentIdentity 可能仍属于 base 厂商，
+    # 直接沿用它会在 AMD base -> NVIDIA clone 时继续发布错误的系统 reader。
+    $gpuApiVendor = [string]$stagedIdentity.SpoofVendor
+    if (@('NVIDIA', 'AMD') -cnotcontains $gpuApiVendor) {
+        throw ('staged GPU identity 返回了不支持的厂商：' + $gpuApiVendor)
+    }
 
     # 物理门禁通过后才允许修复 Code 22。禁用设备仍可被 PresentOnly/Enum 注册表识别，
     # 因而不需要为了 AutoDetect 提前改变设备状态。
-    Enable-StealthDisplayDevices -Reason '浅层物理门禁通过后清理 Code 22' | Out-Null
+    Enable-GpuSpoofDisplayDevices -Reason '浅层物理门禁通过后清理 Code 22' | Out-Null
 }
 
 # apply-gpu-spoof.ps1 - run INSIDE the Win10 guest, as Administrator.
@@ -352,22 +252,25 @@ if ($targets.Count -ne 1) {
     throw ('选中的 Class target 不是 SourceInstanceId 唯一绑定子键：' + $activeSubkey)
 }
 
-# reader 必须先于 CurrentIdentity pointer 发布。coordinator 会在任何 Move 前对
-# NVAPI + ADL 五个目标完成全量只读预检，再分别落 durable receipt；此后无论
-# Commit/Complete 在哪里失败，outer finally 都能先恢复旧 pointer、再恢复 readers。
+# reader 必须先于 CurrentIdentity pointer 发布。coordinator 以 staged identity 的
+# 厂商为唯一目标，在任何 Move 前完成目标 reader 与非目标残留的只读预检，再落
+# durable receipt；此后无论 Commit/Complete 在哪里失败，outer finally 都能先恢复
+# 旧 pointer、再恢复 reader。
 if (-not [string]::IsNullOrWhiteSpace($gpuApiCoordinatorSource)) {
-    Write-Host 'Preparing durable NVIDIA + AMD hardware API projections...' `
+    Write-Host ('Preparing durable ' + $gpuApiVendor +
+        ' hardware API projection...') `
         -ForegroundColor Cyan
     $gpuApiInstallArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy',
         'Bypass', '-File', $gpuApiCoordinatorSource, '-Action', 'Install',
         '-PayloadDir', $gpuApiPayloadRoot, '-TransactionId', $identityTransactionId,
-        '-DeferFinalize')
+        '-Vendor', $gpuApiVendor, '-DeferFinalize')
     & $powershellExe @gpuApiInstallArgs
     if ($LASTEXITCODE -ne 0) {
         throw ('系统 GPU API 身份投影准备失败，退出码=' + $LASTEXITCODE)
     }
     $gpuApiTransactionPrepared = $true
-    Write-Host '  -> NVIDIA/AMD readers prepared before pointer commit' `
+    Write-Host ('  -> ' + $gpuApiVendor +
+        ' reader prepared before pointer commit') `
         -ForegroundColor Green
 }
 Write-Host ("Committing strictly verified active Class " + $activeSubkey + "...") `
@@ -384,102 +287,17 @@ Write-Host ("  -> active Enum/Class committed as " + $spoofName) -ForegroundColo
 
 # 显示模式脚本无论是否带 -SkipTask 都会在当前会话同步执行；以下状态只决定当当前
 # 进程位于 Session 0 等无交互会话时，是否确实存在一个可在下次登录重试的延后任务。
-$displayTaskInstalled = $displayModeDeferred = $displayModeFailed = $false
-$displayModeSummary = '尚未执行显示模式验收'
-
-# ---- install boot-time refresh task ----------------------------------------
-# 名称刷新是 Red Hat/VirtIO 泄漏的系统级长期兜底，FirstLogon 也必须安装。
-# -SkipTask 只控制需要交互桌面的显示模式任务，不能再关闭本 SYSTEM 任务。
-Write-Host ""; Write-Host "Installing boot-time refresh task (defeats BasicDisplay clobber)..." -ForegroundColor Cyan
-
-$taskName = 'StealthGPU-RefreshName'; $scriptDir = Split-Path -Parent $PSScriptRoot
-$scriptPath = Join-Path $scriptDir 'refresh-gpu-name.ps1'
-New-Item -Path $scriptDir -ItemType Directory -Force | Out-Null
-
-# 原样复制带 UTF-8 BOM 的独立源码，确保 Windows PowerShell 5.1 不按本地代码页误读。
-Copy-HelperIfDifferent -Source $refreshHelperSource -Destination $scriptPath
-
-Remove-ScheduledTaskIfPresent -TaskName $taskName
-
-$action = New-ScheduledTaskAction -Execute $powershellExe `
-    -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $scriptPath + '"')
-$trigBoot  = New-ScheduledTaskTrigger -AtStartup
-$trigLogon = New-ScheduledTaskTrigger -AtLogOn
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
-$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries -StartWhenAvailable
-$task = New-ScheduledTask -Action $action -Trigger @($trigBoot, $trigLogon) `
-    -Principal $principal -Settings $settings
-Register-ScheduledTask -TaskName $taskName -InputObject $task -Force | Out-Null
-
-Write-Host ("  -> installed " + $scriptPath) -ForegroundColor Green
-Write-Host ("  -> task '" + $taskName + "' registered (AtStartup + AtLogOn, SYSTEM)") -ForegroundColor Green
-
-# ---- prepare verified 1920x1080@60Hz mode switch ---------------------------
-# viogpudo 若未正确填充显示模式，Windows“高级显示设置”可能显示有源信号 -1×-1、
-# 刷新率 1.000Hz。ChangeDisplaySettings 只能操作当前交互桌面，Session 0 中的 SYSTEM
-# 进程无法代替用户切换；因此辅助脚本用明确退出码区分“已验证”“需重启”“无交互桌面”
-# 和真正失败，主脚本再依据是否安装了登录任务决定能否安全延后，绝不把未验证写成成功。
-$freqTask = 'StealthGPU-ForceDisplayFreq'
-if ($SkipTask) {
-    # FirstLogon 会传 -SkipTask；只创建本次运行所需的临时脚本，执行后立即删除，
-    # 不留下计划任务或永久辅助文件，保持“一次性执行”的原有约定。
-    $freqScript = Join-Path ([System.IO.Path]::GetTempPath()) `
-        ('stealth-display-mode-' + $PID + '.ps1')
-    $freqLog = ''
-} else {
-    $freqScript = Join-Path $scriptDir 'force-displayfreq.ps1'
-    $freqLog = Join-Path $scriptDir 'force-displayfreq.log'
-}
-
-# 原样复制独立显示模式 helper；临时模式与持久任务模式共用同一份受测源码。
-Copy-HelperIfDifferent -Source $displayModeHelperSource -Destination $freqScript
-
-if (-not $SkipTask) {
-    Write-Host ""; Write-Host "Installing user-session task to enforce and verify 1920x1080@60Hz..." -ForegroundColor Cyan
-    Remove-ScheduledTaskIfPresent -TaskName $freqTask
-    $freqAction = New-ScheduledTaskAction -Execute $powershellExe `
-        -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
-            $freqScript + '" -LogPath "' + $freqLog + '"')
-    $freqTrig = New-ScheduledTaskTrigger -AtLogOn -User 'Administrator'
-    $freqPrincipal = New-ScheduledTaskPrincipal -UserId 'Administrator' `
-        -LogonType Interactive -RunLevel Highest
-    $freqSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries
-    $freqSched = New-ScheduledTask -Action $freqAction -Trigger $freqTrig `
-        -Principal $freqPrincipal -Settings $freqSettings
-    try {
-        Register-ScheduledTask -TaskName $freqTask -InputObject $freqSched `
-            -Force -ErrorAction Stop | Out-Null
-        $displayTaskInstalled = $true
-        Write-Host ("  -> task '" + $freqTask + "' registered (AtLogOn, Administrator/Interactive)") -ForegroundColor Green
-        Write-Host ("  -> task result log: " + $freqLog) -ForegroundColor Green
-    } catch {
-        Write-Host ("  -> display-mode task registration failed: " + $_.Exception.Message) -ForegroundColor Red
-    }
-} else {
-    Write-Host "  -SkipTask: 不安装显示模式任务；将在当前会话同步切换并验收。" -ForegroundColor Cyan
-}
+$taskSetup = Install-GpuSpoofScheduledTasks -PowerShellExe $powershellExe `
+    -ApplyScriptRoot $PSScriptRoot -RefreshHelperSource $refreshHelperSource `
+    -DisplayModeHelperSource $displayModeHelperSource -SkipDisplayTask:$SkipTask
+$displayTaskInstalled = [bool]$taskSetup.DisplayTaskInstalled
+$freqScript = [string]$taskSetup.FrequencyScript
+$freqLog = [string]$taskSetup.FrequencyLog
 
 # ---- nudge PnP property cache refresh --------------------------------------
 # 设备管理器和 CM_GetDevNodeProperty 会缓存 DEVPKEY；光改 registry 不会立刻刷新。
-# 旧逻辑通过 Disable + Enable 刷新，但如果 QEMU/guest 在中途崩溃，Windows 会把显卡永久留成
-# Code 22（已禁用）。这里改为只触发设备扫描，并在扫描前后主动启用非 OK 的 Display 设备；
-# 真正的属性重读交给后续 reboot 和开机自刷任务完成，避免把显示适配器留在禁用态。
-Write-Host ""; Write-Host "Refreshing PnP state without disabling the display adapter..." -ForegroundColor Cyan
-try {
-    Enable-StealthDisplayDevices -Reason '最终收尾清理 Code 22' | Out-Null
-    if (Get-Command 'pnputil.exe' -ErrorAction SilentlyContinue) {
-        & pnputil.exe /scan-devices | Out-Null
-        Write-Host "  requested PnP device scan" -ForegroundColor Green
-        Start-Sleep -Milliseconds 800
-        Enable-StealthDisplayDevices -Reason 'PnP 扫描后复查' | Out-Null
-    } else {
-        Write-Host "  (pnputil.exe unavailable; reboot will refresh PnP state)" -ForegroundColor DarkYellow
-    }
-} catch {
-    Write-Host ("  (PnP refresh skipped: " + $_.Exception.Message + ")") -ForegroundColor DarkYellow
-}
+# helper 只启用异常设备并请求 scan，绝不使用可能遗留 Code 22 的 Disable/Enable。
+Invoke-GpuSpoofPnpRefresh
 
 # 最后一次 PnP scan 可能回填 Class 安装状态，因此用同一个已提交
 # CurrentIdentity 快照同步恢复 stock MatchingDeviceId 与名称镜像。
@@ -494,61 +312,15 @@ try {
 }
 
 # ---- synchronously apply and verify the current session mode ----------------
-# 不再用 schtasks /Run 异步触发后固定 sleep 两秒：那样既拿不到任务退出码，也无法证明
-# 切换发生在当前交互桌面。这里直接启动子 PowerShell 并等待结束，逐行转发原生返回码、
-# 切换前模式和切换后模式；因此外层 respawn 能用本脚本退出码决定是否继续重启。
-Write-Host ""; Write-Host "Applying and verifying current display mode synchronously..." -ForegroundColor Cyan
-$displayArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $freqScript)
-if (-not [string]::IsNullOrWhiteSpace($freqLog)) {
-    $displayArgs += @('-LogPath', $freqLog)
-}
-
-$displayOutput = @()
-$displayModeRc = 24
-try {
-    $displayOutput = @(& $powershellExe @displayArgs 2>&1)
-    $displayModeRc = $LASTEXITCODE
-} catch {
-    $displayOutput = @('无法启动显示模式辅助脚本：' + $_.Exception.Message)
-}
-foreach ($line in $displayOutput) {
-    Write-Host ('  ' + [string]$line)
-}
-Write-Host ("  -> display-mode helper exit code: " + $displayModeRc) -ForegroundColor Cyan
-
-# -SkipTask/FirstLogon 没有后续登录任务，所以“无交互桌面”必须作为失败上抛；普通模式
-# 只有在任务确实注册成功时才允许明确延后。RESTART 表示请求已持久化，外层既有重启
-# 流程可以完成它，但当前会话仍标记为“尚未验证”，不伪装成即时成功。
-switch ($displayModeRc) {
-    0 {
-        $displayModeSummary = '已同步验证：1920x1080@60Hz'
-    }
-    10 {
-        if ($displayTaskInstalled) {
-            $displayModeDeferred = $true
-            $displayModeSummary = '当前无交互桌面；已明确延后到 Administrator 下次交互登录验收'
-        } else {
-            $displayModeFailed = $true
-            $displayModeFailureCode = 10
-            $displayModeSummary = '失败：当前无交互桌面，且没有已注册的登录任务可安全延后'
-        }
-    }
-    11 {
-        $displayModeFailed = $true
-        $displayModeFailureCode = 11
-        $displayModeSummary = 'ChangeDisplaySettings 要求重启；请求已持久化，当前模式尚未验证'
-    }
-    default {
-        $displayModeFailed = $true
-        $displayModeFailureCode = if ($displayModeRc -gt 0) { $displayModeRc } else { 24 }
-        $displayModeSummary = ('失败：显示模式辅助脚本退出码=' + $displayModeRc)
-    }
-}
-
-if ($SkipTask) {
-    # 临时辅助脚本已完成唯一一次同步调用；清理失败不会改变刚才取得的验收结果。
-    Remove-Item -LiteralPath $freqScript -Force -ErrorAction SilentlyContinue
-}
+# helper 同步等待子进程并把稳定退出码归一为 Success/Deferred/Failed。
+$displayResult = Invoke-GpuSpoofDisplayModeVerification `
+    -PowerShellExe $powershellExe -FrequencyScript $freqScript `
+    -FrequencyLog $freqLog -DisplayTaskInstalled $displayTaskInstalled `
+    -RemoveTemporaryScript:$SkipTask
+$displayModeDeferred = [bool]$displayResult.Deferred
+$displayModeFailed = [bool]$displayResult.Failed
+$displayModeFailureCode = [int]$displayResult.FailureCode
+$displayModeSummary = [string]$displayResult.Summary
 
 # ---- verify ----------------------------------------------------------------
 Write-Host ""; Write-Host "Verifying via WMI..." -ForegroundColor Cyan
@@ -620,16 +392,18 @@ try {
 }
 if ($gpuApiTransactionPrepared) {
     # Complete 已清除 PendingIdentity 并把事务标为 Completed；此后收据只负责验证
-    # 两套新 reader 后删除旧备份。Finalize 失败不会倒退已完成身份，收据留待 Recover。
+    # 目标 reader/非目标清理后删除旧备份。Finalize 失败不会倒退已完成身份，
+    # 收据留待下一次 Vendor=Auto Recover。
     $gpuApiFinalizeArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy',
         'Bypass', '-File', $gpuApiCoordinatorSource, '-Action', 'Finalize',
-        '-TransactionId', $identityTransactionId)
+        '-TransactionId', $identityTransactionId, '-Vendor', $gpuApiVendor)
     & $powershellExe @gpuApiFinalizeArgs
     if ($LASTEXITCODE -ne 0) {
         throw ('系统 GPU API 身份投影 Finalize 失败，退出码=' + $LASTEXITCODE)
     }
     $gpuApiTransactionPrepared = $false
-    Write-Host '  -> NVAPI + ADL + identity transaction finalized' `
+    Write-Host ('  -> ' + $gpuApiVendor +
+        ' API + identity transaction finalized') `
         -ForegroundColor Green
 }
 
@@ -670,7 +444,7 @@ Write-Host "is the specific field under investigation, inspect host-fix-gpu-devp
                 $gpuApiRecoveryArgs = @('-NoProfile', '-NonInteractive',
                     '-ExecutionPolicy', 'Bypass', '-File', $gpuApiCoordinatorSource,
                     '-Action', $gpuApiRecoveryAction, '-TransactionId',
-                    $identityTransactionId)
+                    $identityTransactionId, '-Vendor', $gpuApiVendor)
                 & $powershellExe @gpuApiRecoveryArgs
                 if ($LASTEXITCODE -ne 0) {
                     throw ('GPU API ' + $gpuApiRecoveryAction +

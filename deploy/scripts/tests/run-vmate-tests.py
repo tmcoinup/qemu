@@ -49,6 +49,8 @@ QUICK_TESTS = (
     "test_guest_stealth_power_policy.sh",
     "test_guest_stealth_firstlogon_portable.sh",
     "test_guest_vendor_api_package.sh",
+    "test_guest_vendor_api_removed_recovery.sh",
+    "test_guest_vendor_api_same_vendor.sh",
     "test_guest_vendor_api_transaction.sh",
     "test_h310_supported_cpu_catalog.sh",
     "test_hardware_pool_catalog.sh",

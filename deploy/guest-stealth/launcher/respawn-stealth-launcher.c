@@ -4,14 +4,12 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
-
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <wchar.h>
-
 #include "payload-environment.h"
 #include "payload-security.h"
 #include "launcher-arguments.h"
@@ -19,6 +17,7 @@
 #include "payload_respawn_restart_state_ps1.h"
 #include "payload_configure_power_policy_ps1.h"
 #include "payload_apply_gpu_spoof_ps1.h"
+#include "payload_gpu_spoof_apply_support_ps1.h"
 #include "payload_persist_gpu_profile_ps1.h"
 #include "payload_gpu_profile_transaction_ps1.h"
 #include "payload_gpu_profile_registry_core_ps1.h"
@@ -32,10 +31,12 @@
 #include "payload_display_driver_trust_ps1.h"
 #include "payload_install_chipset_device_ps1.h"
 #include "payload_install_nvapi_system_ps1.h"
+#include "payload_nvapi_system_validation_ps1.h"
 #include "payload_nvapi_system_transaction_ps1.h"
 #include "payload_install_adl_system_ps1.h"
 #include "payload_adl_system_transaction_ps1.h"
 #include "payload_install_gpu_api_system_ps1.h"
+#include "payload_gpu_api_identity_binding_ps1.h"
 #include "payload_viogpudo_sys.h"
 #include "payload_viogpudo_cat.h"
 #include "payload_viogpudo_inf.h"
@@ -50,10 +51,8 @@
 #ifndef ARRAY_LEN
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 #endif
-
 #define PATH_BUF_LEN 4096
 #define CMD_BUF_LEN 32760
-
 /*
  * 中文注释：所有运行依赖都从一个 EXE 释放，来宾不再访问 host HTTP。驱动三件套
  * 必须保持原始字节，才能保留 Microsoft WHCP 的 PE/CAT 签名与文件关联；两份
@@ -64,6 +63,7 @@ static const EmbeddedPayload embedded_payloads[] = {
     { L"respawn-restart-state.ps1", payload_respawn_restart_state_ps1, (DWORD)sizeof(payload_respawn_restart_state_ps1) },
     { L"configure-power-policy.ps1", payload_configure_power_policy_ps1, (DWORD)sizeof(payload_configure_power_policy_ps1) },
     { L"apply-gpu-spoof.ps1", payload_apply_gpu_spoof_ps1, (DWORD)sizeof(payload_apply_gpu_spoof_ps1) },
+    { L"gpu-spoof-apply-support.ps1", payload_gpu_spoof_apply_support_ps1, (DWORD)sizeof(payload_gpu_spoof_apply_support_ps1) },
     { L"persist-gpu-profile.ps1", payload_persist_gpu_profile_ps1, (DWORD)sizeof(payload_persist_gpu_profile_ps1) },
     { L"gpu-profile-transaction.ps1", payload_gpu_profile_transaction_ps1, (DWORD)sizeof(payload_gpu_profile_transaction_ps1) },
     { L"gpu-profile-registry-core.ps1", payload_gpu_profile_registry_core_ps1, (DWORD)sizeof(payload_gpu_profile_registry_core_ps1) },
@@ -77,10 +77,12 @@ static const EmbeddedPayload embedded_payloads[] = {
     { L"display-driver-trust.ps1", payload_display_driver_trust_ps1, (DWORD)sizeof(payload_display_driver_trust_ps1) },
     { L"install-chipset-device.ps1", payload_install_chipset_device_ps1, (DWORD)sizeof(payload_install_chipset_device_ps1) },
     { L"install-nvapi-system.ps1", payload_install_nvapi_system_ps1, (DWORD)sizeof(payload_install_nvapi_system_ps1) },
+    { L"nvapi-system-validation.ps1", payload_nvapi_system_validation_ps1, (DWORD)sizeof(payload_nvapi_system_validation_ps1) },
     { L"nvapi-system-transaction.ps1", payload_nvapi_system_transaction_ps1, (DWORD)sizeof(payload_nvapi_system_transaction_ps1) },
     { L"install-adl-system.ps1", payload_install_adl_system_ps1, (DWORD)sizeof(payload_install_adl_system_ps1) },
     { L"adl-system-transaction.ps1", payload_adl_system_transaction_ps1, (DWORD)sizeof(payload_adl_system_transaction_ps1) },
     { L"install-gpu-api-system.ps1", payload_install_gpu_api_system_ps1, (DWORD)sizeof(payload_install_gpu_api_system_ps1) },
+    { L"gpu-api-identity-binding.ps1", payload_gpu_api_identity_binding_ps1, (DWORD)sizeof(payload_gpu_api_identity_binding_ps1) },
     { L"viogpudo.sys", payload_viogpudo_sys, (DWORD)sizeof(payload_viogpudo_sys) },
     { L"viogpudo.cat", payload_viogpudo_cat, (DWORD)sizeof(payload_viogpudo_cat) },
     { L"viogpudo.inf", payload_viogpudo_inf, (DWORD)sizeof(payload_viogpudo_inf) },
@@ -104,7 +106,6 @@ static int append_char(wchar_t *buf, size_t cap, size_t *len, wchar_t ch)
     buf[*len] = L'\0';
     return 1;
 }
-
 static int append_text(wchar_t *buf, size_t cap, size_t *len, const wchar_t *text)
 {
     while (*text) {
@@ -115,7 +116,6 @@ static int append_text(wchar_t *buf, size_t cap, size_t *len, const wchar_t *tex
     }
     return 1;
 }
-
 static int append_backslashes(wchar_t *buf, size_t cap, size_t *len, size_t count)
 {
     while (count > 0) {

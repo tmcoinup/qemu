@@ -11,6 +11,7 @@ IDENTITY_SCRIPT="$REPO_ROOT/deploy/scripts/persist-gpu-profile.ps1"
 TRANSACTION_SCRIPT="$REPO_ROOT/deploy/scripts/gpu-profile-transaction.ps1"
 REGISTRY_CORE="$REPO_ROOT/deploy/scripts/gpu-profile-registry-core.ps1"
 APPLY_SCRIPT="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
+APPLY_SUPPORT="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 REFRESH_SCRIPT="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
 PROFILE_DOC="$REPO_ROOT/deploy/docs/PROFILE-FIELDS.md"
 RUNTIME_HELPER_TEST="$SCRIPT_DIR/test_guest_shallow_pci_runtime_helpers.sh"
@@ -28,6 +29,8 @@ command -v pwsh >/dev/null 2>&1 || fail "缺少 pwsh，无法解析 PowerShell 5
     || fail "gpu-profile-transaction.ps1 必须保留 UTF-8 BOM"
 [[ "$(xxd -p -l 3 "$REGISTRY_CORE")" == "efbbbf" ]] \
     || fail "gpu-profile-registry-core.ps1 必须保留 UTF-8 BOM"
+[[ "$(xxd -p -l 3 "$APPLY_SUPPORT")" == "efbbbf" ]] \
+    || fail "gpu-spoof-apply-support.ps1 必须保留 UTF-8 BOM"
 [[ "$(xxd -p -l 3 "$REFRESH_SCRIPT")" == "efbbbf" ]] \
     || fail "refresh-gpu-name.ps1 必须保留 UTF-8 BOM"
 [[ -f "$RUNTIME_HELPER_TEST" ]] || fail "缺少浅层 PCI runtime helper 测试"
@@ -393,7 +396,7 @@ for refresh_task_contract in \
         'New-ScheduledTaskTrigger -AtStartup' \
         'New-ScheduledTaskTrigger -AtLogOn' \
         "New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest"; do
-    rg -F "$refresh_task_contract" "$APPLY_SCRIPT" >/dev/null \
+    rg -F "$refresh_task_contract" "$APPLY_SUPPORT" >/dev/null \
         || fail "GPU 显示品牌开机/登录恢复缺少：$refresh_task_contract"
 done
 if rg -F -e '$sourceEnumPath -Name HardwareID' \
@@ -406,10 +409,11 @@ old_profile_line="$(rg -n -F '$previousIdentity = & $refreshHelperSource -ReadId
     "$APPLY_SCRIPT" | cut -d: -f1)"
 reuse_old_profile_line="$(rg -n -F '$prevSpoof = $previousSpoofName' \
     "$APPLY_SCRIPT" | cut -d: -f1)"
-enable_line="$(rg -n -F "Enable-StealthDisplayDevices -Reason '浅层物理门禁通过后清理 Code 22'" \
+enable_line="$(rg -n -F "Enable-GpuSpoofDisplayDevices -Reason '浅层物理门禁通过后清理 Code 22'" \
     "$APPLY_SCRIPT" | cut -d: -f1)"
-task_line="$(rg -n -F 'if (-not $SkipTask) {' "$APPLY_SCRIPT" | tail -1 | cut -d: -f1)"
-scan_line="$(rg -n -F '& pnputil.exe /scan-devices' "$APPLY_SCRIPT" | cut -d: -f1)"
+task_line="$(rg -n -F '$taskSetup = Install-GpuSpoofScheduledTasks' \
+    "$APPLY_SCRIPT" | cut -d: -f1)"
+scan_line="$(rg -n -F 'Invoke-GpuSpoofPnpRefresh' "$APPLY_SCRIPT" | cut -d: -f1)"
 projection_line="$(rg -n -F '& $refreshHelperSource' "$APPLY_SCRIPT" | tail -1 | cut -d: -f1)"
 commit_pointer_line="$(rg -n -F '& $identityHelperSource -CommitIdentity $identityTransactionId' \
     "$APPLY_SCRIPT" | cut -d: -f1)"
@@ -423,7 +427,7 @@ commit_pointer_line="$(rg -n -F '& $identityHelperSource -CommitIdentity $identi
     || fail "必须先捕获旧 profile，再于设备状态和 Class/Enum 写入前执行浅层门禁"
 
 for source_file in "$IDENTITY_SCRIPT" "$TRANSACTION_SCRIPT" "$REGISTRY_CORE" \
-        "$APPLY_SCRIPT" "$REFRESH_SCRIPT"; do
+        "$APPLY_SCRIPT" "$APPLY_SUPPORT" "$REFRESH_SCRIPT"; do
     code_lines="$(awk '!/^[[:space:]]*#/ && !/^[[:space:]]*$/ { count++ } END { print count + 0 }' "$source_file")"
     (( code_lines <= 500 )) || fail "$source_file 非注释代码行数 $code_lines 超过 500"
 done

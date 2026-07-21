@@ -1,19 +1,9 @@
 ﻿#Requires -Version 5.1
 
-<#
-.SYNOPSIS
-  把通用 NVIDIA NVAPI 身份投影发布到 Windows 的双架构系统搜索目录。
-
-.DESCRIPTION
-  32 位检测工具通过普通 DLL 搜索加载 nvapi.dll，因此 x86 文件必须位于
-  SysWOW64；64 位工具使用 System32\nvapi64.dll。实现不判断调用进程，
-  所有消费者都读取同一份版本化 GPU identity。
-  本脚本只发布用户态 DLL，不修改驱动、证书、BCD、代码完整性或 PCI 配置空间。
-
-  为避免覆盖未来真实 NVIDIA 驱动，目标已存在时只接受当前固定摘要或仓库历史上
-  明确发布过的 VMate 摘要。两个架构先全部预检和 staging，再提交；第二步失败时
-  会回滚第一步，避免留下只有一种架构的新版本。
-#>
+# 在 Windows 双架构系统目录中发布或移除 VMate NVIDIA NVAPI 投影。
+# Present 发布 SysWOW64\nvapi.dll 与 System32\nvapi64.dll；Absent 只移除摘要
+# 明确属于 VMate 的投影。真实 NVIDIA 驱动和未知同名 DLL 始终 fail-closed；
+# 两个架构共享 durable receipt，任一步失败都恢复到事务前状态。
 
 [CmdletBinding()]
 param(
@@ -22,11 +12,20 @@ param(
     [string]$PayloadDir = '',
     [ValidateSet('Preflight', 'Install', 'Recover', 'Finalize', 'Rollback')]
     [string]$Action = 'Install',
+    [ValidateSet('Present', 'Absent')][string]$DesiredState = 'Present',
     [string]$TransactionId = '',
     [switch]$DeferFinalize
 )
 
 $ErrorActionPreference = 'Stop'
+$DesiredState = if ($DesiredState -ieq 'Absent') { 'Absent' } else { 'Present' }
+
+# 文件、摘要与 PE 校验独立成 helper；正式 EXE 与 legacy 包都会和安装器一起释放。
+$validationHelper = Join-Path $PSScriptRoot 'nvapi-system-validation.ps1'
+if (-not (Test-Path -LiteralPath $validationHelper -PathType Leaf)) {
+    throw ('缺少 NVAPI validation helper：' + $validationHelper)
+}
+. $validationHelper
 
 $ExpectedX86Hash = '8ee7248f802b960b971724bdadb789492685b9c76fde0ac99f954768431972af'
 $ExpectedX64Hash = 'e5f446439bc8c5a86d3aac13adb1090d4bd74055a4ccd1f884ca631aa56132ab'
@@ -35,135 +34,21 @@ $ExpectedX64Hash = 'e5f446439bc8c5a86d3aac13adb1090d4bd74055a4ccd1f884ca631aa561
 # fa7412... 是早期独立 x64 浅层 shim；其余值覆盖 Git 历史发布版本。
 # 它们都可安全替换为当前不依赖真实 NVIDIA 运行时的独立实现。
 $HistoricalX86Hashes = @(
-    '3405928e9d8fbcc36dc4bb97627b804893bb8f48b16ee8a662ea79346c40b601',
-    'd2fa115d4ece2da0361106113f0289a5499c6e78d491567bf466b60a3a010f14',
-    'a5de31d15ff0f4038ef1b54a75fbac0ab472797d3424e1468f9e6d047cc58139',
-    '79b05e4707fa3b4882279995898ea99e74f584e31d10f9733c24714eb79ea80d',
-    '63ecadd497f955a599e8a12ea7f45fd92915a47570be473d166ddbb3d462c13e',
-    '0601d245ca7101b92299e4c2215480fa680554ee400d1a064782319747612ca0',
-    '76dffd3513ca90d994c3800c725a6d4f6b5a95bef36f44fd122f123861fd522c',
-    '5ad43a193ccf0c3dacc769f4267d394502708fc1a5191d9b1338ba8485ea9c94',
+    '3405928e9d8fbcc36dc4bb97627b804893bb8f48b16ee8a662ea79346c40b601', 'd2fa115d4ece2da0361106113f0289a5499c6e78d491567bf466b60a3a010f14',
+    'a5de31d15ff0f4038ef1b54a75fbac0ab472797d3424e1468f9e6d047cc58139', '79b05e4707fa3b4882279995898ea99e74f584e31d10f9733c24714eb79ea80d',
+    '63ecadd497f955a599e8a12ea7f45fd92915a47570be473d166ddbb3d462c13e', '0601d245ca7101b92299e4c2215480fa680554ee400d1a064782319747612ca0',
+    '76dffd3513ca90d994c3800c725a6d4f6b5a95bef36f44fd122f123861fd522c', '5ad43a193ccf0c3dacc769f4267d394502708fc1a5191d9b1338ba8485ea9c94',
     '1638720952a6187773372f29837c3bb26804eaeaf00938a8c2f42996bc4dd972'
 )
 $HistoricalX64Hashes = @(
-    'bc3fce02e8c223e335cb893c7d72db2c43dfa8a378677674854b0a52bf33de2a',
-    'c0e39803f8484d9dc23559576762564bc84b44fb3c90c7562829e8c96f15a83d',
-    '207e41c9eaa7641d3e2af32e99a5f874a87978b310676db325d572f8b954dd72',
-    '8b32d767e69526c535cce361a9d5853fc6f21f7f348600fabfefe7f46db708cc',
-    '585ef928f54548ed2ac9eae1dfcdd5b12e4fd8a9ab5f7d94257ca01df68cdf81',
-    'fa7412b4a96d053e73261a0d43b3286a82c04a4da825bc0c5ec012b628bc590e',
-    '6ddae65be9ddaf232064b5e12933b40bbf0f366b52a3b447abf4a15c254d6103',
-    'f10d14acf39d10c66c38188214c0dc6a4a9dcf66d2993fd82257db7492c7258e',
-    '6a46de86e767c08f215cd9526ef5527e536a244eddd78cc7a14fc45cc4f95792',
-    '5a9181a21280eb692651cd6d6530b27124f50fcbb70e2c768427af4dbe6440ff',
+    'bc3fce02e8c223e335cb893c7d72db2c43dfa8a378677674854b0a52bf33de2a', 'c0e39803f8484d9dc23559576762564bc84b44fb3c90c7562829e8c96f15a83d',
+    '207e41c9eaa7641d3e2af32e99a5f874a87978b310676db325d572f8b954dd72', '8b32d767e69526c535cce361a9d5853fc6f21f7f348600fabfefe7f46db708cc',
+    '585ef928f54548ed2ac9eae1dfcdd5b12e4fd8a9ab5f7d94257ca01df68cdf81', 'fa7412b4a96d053e73261a0d43b3286a82c04a4da825bc0c5ec012b628bc590e',
+    '6ddae65be9ddaf232064b5e12933b40bbf0f366b52a3b447abf4a15c254d6103', 'f10d14acf39d10c66c38188214c0dc6a4a9dcf66d2993fd82257db7492c7258e',
+    '6a46de86e767c08f215cd9526ef5527e536a244eddd78cc7a14fc45cc4f95792', '5a9181a21280eb692651cd6d6530b27124f50fcbb70e2c768427af4dbe6440ff',
     '311b95768f8bbd18fb30f0e1144c9f2c50cc4f8433b870768c4a439f57844f56',
     '1d39f3dada172f62b62f801de434ceda3060caf3b0887381d0b853771f3b97cf'
 )
-
-function Get-LowerSha256 {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-}
-
-function Get-PeMetadata {
-    # 只读取固定 PE 头字段，既不加载 DLL，也不会执行目标文件中的任何代码。
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
-        [IO.FileShare]::Read)
-    $reader = New-Object IO.BinaryReader($stream)
-    try {
-        if ($stream.Length -lt 256 -or $reader.ReadUInt16() -ne 0x5A4D) {
-            throw ('不是有效的 MZ 文件：' + $Path)
-        }
-        $stream.Position = 0x3C
-        $peOffset = [int64]$reader.ReadUInt32()
-        if ($peOffset -lt 0x40 -or $peOffset + 24 -gt $stream.Length) {
-            throw ('PE 头偏移越界：' + $Path)
-        }
-        $stream.Position = $peOffset
-        if ($reader.ReadUInt32() -ne 0x00004550) {
-            throw ('缺少 PE 签名：' + $Path)
-        }
-        $machine = $reader.ReadUInt16()
-        $null = $reader.ReadUInt16()
-        $null = $reader.ReadUInt32()
-        $null = $reader.ReadUInt32()
-        $null = $reader.ReadUInt32()
-        $optionalSize = $reader.ReadUInt16()
-        $characteristics = $reader.ReadUInt16()
-        if ($optionalSize -lt 2 -or $stream.Position + $optionalSize -gt $stream.Length) {
-            throw ('PE Optional Header 越界：' + $Path)
-        }
-        $optionalMagic = $reader.ReadUInt16()
-        return [pscustomobject]@{
-            Machine = [int]$machine
-            OptionalMagic = [int]$optionalMagic
-            IsDll = (($characteristics -band 0x2000) -ne 0)
-        }
-    } finally {
-        $reader.Dispose()
-        $stream.Dispose()
-    }
-}
-
-function Assert-PlainFile {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if ($item.PSIsContainer -or
-        (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        throw ('拒绝目录或重解析点文件：' + $Path)
-    }
-    return $item
-}
-
-function Assert-PlainDirectory {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if (-not $item.PSIsContainer -or
-        (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        throw ('拒绝非普通目录或重解析点：' + $Path)
-    }
-}
-
-function Assert-NvapiBinary {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$ExpectedHash,
-        [Parameter(Mandatory = $true)][int]$ExpectedMachine,
-        [Parameter(Mandatory = $true)][int]$ExpectedMagic
-    )
-
-    $item = Assert-PlainFile -Path $Path
-    if ($item.Length -lt 4096 -or $item.Length -gt 4MB) {
-        throw ('NVAPI 文件大小越界：' + $Path)
-    }
-    $actualHash = Get-LowerSha256 -Path $Path
-    if ($actualHash -cne $ExpectedHash) {
-        throw ('NVAPI SHA-256 不匹配：' + $Path + '，actual=' + $actualHash)
-    }
-    $pe = Get-PeMetadata -Path $Path
-    if (-not $pe.IsDll -or $pe.Machine -ne $ExpectedMachine -or
-        $pe.OptionalMagic -ne $ExpectedMagic) {
-        throw ('NVAPI PE 架构错误：{0}，Machine=0x{1:X4}，Magic=0x{2:X3}' -f
-            $Path, $pe.Machine, $pe.OptionalMagic)
-    }
-}
-
-function Test-HashInAllowList {
-    param(
-        [Parameter(Mandatory = $true)][string]$Hash,
-        [Parameter(Mandatory = $true)][string[]]$AllowedHashes
-    )
-
-    foreach ($allowed in $AllowedHashes) {
-        if ($Hash -ceq $allowed) { return $true }
-    }
-    return $false
-}
 
 function Get-SystemProjectionEntryState {
     # 该纯函数只根据目标内容分类，不做写入；测试可用临时目录覆盖所有分支。
@@ -189,7 +74,8 @@ function Get-SystemProjectionEntrySnapshot {
     if (Test-HashInAllowList -Hash $hash -AllowedHashes $Entry.HistoricalHashes) {
         return [pscustomobject]@{ State = 'ManagedHistorical'; Hash = $hash }
     }
-    throw ('拒绝覆盖未知 NVAPI DLL：' + $Entry.Target + '，SHA-256=' + $hash)
+    throw ('拒绝覆盖未知 NVAPI DLL（也不会移除）：' + $Entry.Target +
+        '，SHA-256=' + $hash)
 }
 
 function Remove-TransactionFile {
@@ -243,9 +129,24 @@ function Publish-SystemProjectionEntries {
     # 第一轮只读完两个目标的状态，保证第二架构若是未知厂商文件，第一架构目录中
     # 连 stage 都不会出现。预检结束后才进入带 finally 清理的 staging 阶段。
     foreach ($entry in $Entries) {
+        if (-not ($entry.PSObject.Properties.Name -contains 'DesiredState')) {
+            $entry | Add-Member -NotePropertyName DesiredState -NotePropertyValue 'Present'
+        } elseif ([string]::IsNullOrWhiteSpace([string]$entry.DesiredState)) {
+            $entry.DesiredState = 'Present'
+        }
         $snapshot = Get-SystemProjectionEntrySnapshot -Entry $entry
         $entry.State = $snapshot.State
         $entry.ObservedHash = $snapshot.Hash
+        if ($entry.DesiredState -ceq 'Absent') {
+            if ($entry.State -eq 'Absent') {
+                $entry.CommitAction = 'UnchangedAbsent'
+                continue
+            }
+            $entry.CommitAction = 'Removed'
+            $entry.Backup = Join-Path $entry.Directory `
+                ('.' + $entry.FileName + '.vmate-backup-' + [Guid]::NewGuid().ToString('N'))
+            continue
+        }
         if ($entry.State -eq 'Current') { continue }
         $entry.Stage = Join-Path $entry.Directory `
             ('.' + $entry.FileName + '.vmate-stage-' + [Guid]::NewGuid().ToString('N'))
@@ -269,7 +170,9 @@ function Publish-SystemProjectionEntries {
     $committed = New-Object Collections.Generic.List[object]
     try {
         foreach ($entry in $Entries) {
-            if ($entry.State -eq 'Current') { continue }
+            if ($entry.DesiredState -ceq 'Absent' -or $entry.State -eq 'Current') {
+                continue
+            }
             Copy-Item -LiteralPath $entry.Source -Destination $entry.Stage -ErrorAction Stop
             Assert-NvapiBinary -Path $entry.Stage -ExpectedHash $entry.ExpectedHash `
                 -ExpectedMachine $entry.Machine -ExpectedMagic $entry.Magic
@@ -277,7 +180,15 @@ function Publish-SystemProjectionEntries {
         }
 
         foreach ($entry in $Entries) {
-            if ($entry.State -eq 'Current') { continue }
+            if ($entry.CommitAction -ceq 'UnchangedAbsent' -or
+                ($entry.DesiredState -ceq 'Present' -and $entry.State -eq 'Current')) {
+                continue
+            }
+            if ($entry.CommitAction -ceq 'Removed') {
+                $committed.Add($entry)
+                Move-VerifiedHistoricalTarget -Entry $entry
+                continue
+            }
             if ($entry.State -eq 'Absent') {
                 # Move 在目标已由第三方创建时原子失败，不存在“先检查 absent 再覆盖”的窗口。
                 Move-NvapiFileWriteThrough $entry.Stage $entry.Target
@@ -302,10 +213,15 @@ function Publish-SystemProjectionEntries {
                 -ExpectedMachine $entry.Machine -ExpectedMagic $entry.Magic
         }
 
-        # Current 快速路径也必须参加最终核验，避免预检后被并发替换却仍打印成功。
         foreach ($entry in $Entries) {
-            Assert-NvapiBinary -Path $entry.Target -ExpectedHash $entry.ExpectedHash `
-                -ExpectedMachine $entry.Machine -ExpectedMagic $entry.Magic
+            if ([string]$entry.DesiredState -ceq 'Absent') {
+                if (Test-Path -LiteralPath $entry.Target) {
+                    throw ('NVAPI 目标应不存在：' + $entry.Target)
+                }
+            } else {
+                Assert-NvapiBinary -Path $entry.Target -ExpectedHash $entry.ExpectedHash `
+                    -ExpectedMachine $entry.Machine -ExpectedMagic $entry.Magic
+            }
         }
     } catch {
         $commitError = $_.Exception
@@ -335,6 +251,19 @@ function Publish-SystemProjectionEntries {
     if (-not $hasJournal) {
         foreach ($entry in $Entries) { Remove-TransactionFile -Path $entry.Backup }
     }
+}
+
+function Assert-SystemProjectionDesiredState {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    if ($Entry.DesiredState -ceq 'Absent') {
+        if (Test-Path -LiteralPath $Entry.Target) {
+            throw ('NVAPI 目标应不存在：' + $Entry.Target)
+        }
+        return
+    }
+    Assert-NvapiBinary -Path $Entry.Target -ExpectedHash $Entry.ExpectedHash `
+        -ExpectedMachine $Entry.Machine -ExpectedMagic $Entry.Magic
 }
 
 function Initialize-PlainDirectory {
@@ -381,6 +310,7 @@ function New-SystemProjectionEntries {
             Directory=$SystemX86; Target=(Join-Path $SystemX86 'nvapi.dll')
             ExpectedHash=$ExpectedX86Hash; HistoricalHashes=$HistoricalX86Hashes
             Machine=0x014C; Magic=0x010B; State=''; ObservedHash=''
+            DesiredState=$DesiredState
             Stage=''; Backup=''; Discard=''; CommitAction=''
         },
         [pscustomobject]@{
@@ -388,6 +318,7 @@ function New-SystemProjectionEntries {
             Directory=$System64; Target=(Join-Path $System64 'nvapi64.dll')
             ExpectedHash=$ExpectedX64Hash; HistoricalHashes=$HistoricalX64Hashes
             Machine=0x8664; Magic=0x020B; State=''; ObservedHash=''
+            DesiredState=$DesiredState
             Stage=''; Backup=''; Discard=''; CommitAction=''
         }
     )
@@ -433,15 +364,24 @@ if ($Action -ne 'Install' -and $DeferFinalize) {
 if ($Action -eq 'Preflight') {
     # 协调器必须在任何系统 DLL Move 前完成两个厂商读取层的全量只读预检。
     # 此分支不会创建 ProgramData 目录、lock、receipt、stage 或 backup。
-    if ([string]::IsNullOrWhiteSpace($PayloadDir)) { throw 'Preflight 缺少 -PayloadDir' }
-    $preflightPayloadRoot = [IO.Path]::GetFullPath($PayloadDir)
-    Assert-PlainDirectory -Path $preflightPayloadRoot
+    $preflightPayloadRoot = if ($DesiredState -ceq 'Present') {
+        if ([string]::IsNullOrWhiteSpace($PayloadDir)) {
+            throw 'Present Preflight 缺少 -PayloadDir'
+        }
+        [IO.Path]::GetFullPath($PayloadDir)
+    } else { $PSScriptRoot }
+    if ($DesiredState -ceq 'Present') {
+        Assert-PlainDirectory -Path $preflightPayloadRoot
+    }
     $preflightEntries = @(New-SystemProjectionEntries `
         $preflightPayloadRoot $systemX86 $system64)
     foreach ($entry in $preflightEntries) {
-        Assert-NvapiBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+        if ($DesiredState -ceq 'Present') {
+            Assert-NvapiBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+        }
         $snapshot = Get-SystemProjectionEntrySnapshot $entry
-        Write-Host ('NVAPI preflight {0}: {1}' -f $entry.Label, $snapshot.State)
+        Write-Host ('NVAPI preflight {0}: {1} -> {2}' -f
+            $entry.Label, $snapshot.State, $DesiredState)
     }
     Write-Host 'NVAPI 双架构只读预检通过。' -ForegroundColor Green
     return
@@ -464,11 +404,13 @@ try {
         [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 } catch { throw ('另一个 NVAPI 系统投影事务正在运行：' + $_.Exception.Message) }
 try {
-$payloadRoot = if ($Action -eq 'Install') {
-    if ([string]::IsNullOrWhiteSpace($PayloadDir)) { throw 'Install 缺少 -PayloadDir' }
+$payloadRoot = if ($Action -eq 'Install' -and $DesiredState -ceq 'Present') {
+    if ([string]::IsNullOrWhiteSpace($PayloadDir)) { throw 'Present Install 缺少 -PayloadDir' }
     [IO.Path]::GetFullPath($PayloadDir)
 } else { $PSScriptRoot }
-if ($Action -eq 'Install') { Assert-PlainDirectory -Path $payloadRoot }
+if ($Action -eq 'Install' -and $DesiredState -ceq 'Present') {
+    Assert-PlainDirectory -Path $payloadRoot
+}
 $entries = @(New-SystemProjectionEntries $payloadRoot $systemX86 $system64)
 
 if ($Action -eq 'Recover' -or $Action -eq 'Install') {
@@ -484,8 +426,10 @@ if ($Action -eq 'Recover' -or $Action -eq 'Install') {
 }
 
 if ($Action -eq 'Install') {
-    foreach ($entry in $entries) {
-        Assert-NvapiBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+    if ($DesiredState -ceq 'Present') {
+        foreach ($entry in $entries) {
+            Assert-NvapiBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+        }
     }
     if ([string]::IsNullOrWhiteSpace($TransactionId)) {
         if ($DeferFinalize) { throw 'deferred Install 必须复用 identity TransactionId' }
@@ -511,13 +455,11 @@ if ($Action -eq 'Install') {
             Rollback-NvapiProjectionReceipt $entries $receiptPath $TransactionId
         }
     } elseif ($Action -eq 'Finalize') {
-        foreach ($entry in $entries) {
-            Assert-NvapiBinary $entry.Target $entry.ExpectedHash $entry.Machine $entry.Magic
-        }
+        foreach ($entry in $entries) { Assert-SystemProjectionDesiredState $entry }
     } else {
-        # Rollback 收据已在上次调用末尾删除时无法再得知“哪一代”旧摘要；至少要求
-        # 两个目标仍是仓库当前或历史托管物，未知/真实 NVIDIA DLL 继续 fail-closed。
-        foreach ($entry in $entries) { $null = Get-SystemProjectionEntrySnapshot $entry }
+        # receipt 在第一个 Move 前落盘；不存在即证明本组件从未写入，或上次已回滚完成。
+        Write-Host ('NVAPI rollback 收据已不存在，按无写入幂等收口：' + $TransactionId) `
+            -ForegroundColor Yellow
     }
 }
 
@@ -525,10 +467,14 @@ if ($Action -eq 'Rollback') {
     Write-Host ('NVAPI 双架构 rollback 已收口：' + $TransactionId) -ForegroundColor Green
 } else {
     foreach ($entry in $entries) {
-        Write-Host ('系统 NVAPI {0} 已就绪：{1}  SHA-256={2}' -f
-            $entry.Label, $entry.Target, $entry.ExpectedHash) -ForegroundColor Green
+        if ($DesiredState -ceq 'Present') {
+            Write-Host ('系统 NVAPI {0} 已就绪：{1}  SHA-256={2}' -f
+                $entry.Label, $entry.Target, $entry.ExpectedHash) -ForegroundColor Green
+        } else {
+            Write-Host ('系统 NVAPI {0} 已移除：{1}' -f $entry.Label, $entry.Target) `
+                -ForegroundColor Green
+        }
     }
-    Write-Host '系统 NVIDIA NVAPI 已就绪；无需 helper、旁置 DLL 或厂商软件。' `
-        -ForegroundColor Green
+    Write-Host ('系统 NVIDIA NVAPI 目标状态：' + $DesiredState) -ForegroundColor Green
 }
 } finally { $projectionLock.Dispose() }

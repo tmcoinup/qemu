@@ -2,13 +2,13 @@
 
 <#
 .SYNOPSIS
-  NVAPI 双架构系统投影的持久收据与崩溃恢复状态机。
+  NVAPI 双架构系统投影与互斥移除的持久收据、崩溃恢复状态机。
 
 .DESCRIPTION
-  本文件由 install-nvapi-system.ps1 在定义完摘要、PE 与普通文件校验函数后载入。
-  journal 在第一个系统 DLL Move 前写入，记录 canonical Target/Stage/Backup/Discard；
-  因而进程被 kill 或断电落在任意原子 Move 两侧时，都能仅凭文件存在性和摘要推断
-  Prepared/Detached/Committed 状态，并幂等 Finalize 或 Rollback。
+  本文件由 install-nvapi-system.ps1 在载入 nvapi-system-validation.ps1 后载入。
+  journal 在第一个系统 DLL Move 前写入，记录 DesiredState 以及 canonical
+  Target/Stage/Backup/Discard；因而安装或移除被 kill、断电时，都能仅凭文件存在性
+  和精确摘要推断状态，并幂等 Finalize 或 Rollback。Absent 永远只接纳项目摘要。
 #>
 
 function Assert-NvapiTransactionId {
@@ -95,6 +95,35 @@ function Undo-NvapiProjectionEntry {
     $targetHash = Get-NvapiOptionalFileHash $Entry.Target
     $backupHash = Get-NvapiOptionalFileHash $Entry.Backup
     $discardHash = Get-NvapiOptionalFileHash $Entry.Discard
+    if ([string]$Entry.DesiredState -ceq 'Absent') {
+        # “原本不存在”不授权本事务删除后来出现的任何文件；这类并发变化只能
+        # fail-closed，交给后续诊断确认来源，绝不能为了完成 rollback 强制清空目标。
+        if ($Entry.CommitAction -ceq 'UnchangedAbsent') {
+            if ($targetHash -or $backupHash -or $discardHash) {
+                throw ('UnchangedAbsent NVAPI 目标在事务中发生变化：' + $Entry.Target)
+            }
+            return
+        }
+        if ($Entry.CommitAction -cne 'Removed') {
+            throw ('Absent NVAPI 回滚动作非法：' + $Entry.CommitAction)
+        }
+
+        # Removed 的合法状态只有“托管旧文件仍在目标”或“已原子分离到收据 backup”。
+        # 目标若被真实驱动或其他进程重新创建，哪怕同名，也绝不覆盖或删除。
+        if ($targetHash -ceq $Entry.ObservedHash -and -not $backupHash -and
+            -not $discardHash) {
+            return
+        }
+        if (-not $targetHash -and $backupHash -ceq $Entry.ObservedHash -and
+            -not $discardHash) {
+            Move-NvapiFileWriteThrough $Entry.Backup $Entry.Target
+            if ((Get-NvapiOptionalFileHash $Entry.Target) -cne $Entry.ObservedHash) {
+                throw ('Removed NVAPI rollback 恢复摘要非法：' + $Entry.Target)
+            }
+            return
+        }
+        throw ('Removed NVAPI 回滚状态非法，拒绝触碰未知目标：' + $Entry.Target)
+    }
     if ($Entry.CommitAction -eq '') {
         if ($targetHash -cne $Entry.ExpectedHash) {
             throw ('Unchanged NVAPI 目标在事务中发生变化：' + $Entry.Target)
@@ -152,16 +181,33 @@ function Write-NvapiProjectionReceipt {
 
     Assert-NvapiTransactionId $TransactionId
     if (Test-Path -LiteralPath $Path) { throw ('NVAPI 收据已存在：' + $Path) }
+    $desiredStates = @($Entries | ForEach-Object {
+        $value = [string]$_.DesiredState
+        if ([string]::IsNullOrWhiteSpace($value)) { 'Present' } else { $value }
+    } | Select-Object -Unique)
+    if ($desiredStates.Count -ne 1 -or
+        -not (@('Present', 'Absent') -ccontains [string]$desiredStates[0])) {
+        throw 'NVAPI 收据 DesiredState 非法或条目不一致'
+    }
+    $desiredState = [string]$desiredStates[0]
     $records = @($Entries | ForEach-Object {
+        $action = if ([string]$_.CommitAction) {
+            [string]$_.CommitAction
+        } elseif ($desiredState -ceq 'Absent') {
+            'UnchangedAbsent'
+        } else {
+            'Unchanged'
+        }
         [ordered]@{
             FileName=[string]$_.FileName; Target=[string]$_.Target
             ExpectedHash=[string]$_.ExpectedHash; PreviousHash=[string]$_.ObservedHash
-            Action=if ($_.CommitAction) { [string]$_.CommitAction } else { 'Unchanged' }
+            Action=$action
             Stage=[string]$_.Stage; Backup=[string]$_.Backup; Discard=[string]$_.Discard
         }
     })
     $document = [ordered]@{
-        SchemaVersion=2; TransactionId=$TransactionId; Entries=$records
+        SchemaVersion=3; TransactionId=$TransactionId
+        DesiredState=$desiredState; Entries=$records
     }
     $temporary = $Path + '.tmp-' + [Guid]::NewGuid().ToString('N')
     try {
@@ -186,9 +232,20 @@ function Read-NvapiProjectionReceipt {
     if ($item.Length -lt 32 -or $item.Length -gt 64KB) { throw 'NVAPI 收据大小非法' }
     $document = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
     $records = @($document.Entries)
-    if ([int]$document.SchemaVersion -ne 2 -or
+    $schemaVersion = [int]$document.SchemaVersion
+    if (-not (@(2, 3) -contains $schemaVersion) -or
         [string]$document.TransactionId -cne $TransactionId -or
         $records.Count -ne $Entries.Count) { throw 'NVAPI 收据头或条目数非法' }
+    # schema-2 是历史“只安装”收据；schema-3 才允许显式记录可逆删除。
+    # 禁止从旧文档推断 Absent，避免篡改旧 Action 后获得删除权限。
+    $desiredState = if ($schemaVersion -eq 2) {
+        'Present'
+    } else {
+        [string]$document.DesiredState
+    }
+    if (-not (@('Present', 'Absent') -ccontains $desiredState)) {
+        throw 'NVAPI 收据 DesiredState 非法'
+    }
     for ($index = 0; $index -lt $Entries.Count; $index++) {
         $entry = $Entries[$index]; $record = $records[$index]
         $sameTarget = [StringComparer]::OrdinalIgnoreCase.Equals(
@@ -200,11 +257,36 @@ function Read-NvapiProjectionReceipt {
             -not $sameTarget -or -not (Test-HashInAllowList $receiptExpected $allowedExpected)) {
             throw ('NVAPI 收据目标或发布摘要不匹配：' + $entry.FileName)
         }
+        if ($entry.PSObject.Properties.Name -contains 'DesiredState') {
+            $entry.DesiredState = $desiredState
+        } else {
+            # 历史单元测试与旧调用方构造的 entry 没有该属性；读取旧 schema 时补上
+            # 只读状态字段即可，不改变其目标、摘要或事务路径。
+            $entry | Add-Member -NotePropertyName DesiredState `
+                -NotePropertyValue $desiredState
+        }
         $entry.ExpectedHash = $receiptExpected
         $action = [string]$record.Action; $previous = [string]$record.PreviousHash
         $stage = [string]$record.Stage; $backup = [string]$record.Backup
         $discard = [string]$record.Discard
-        if ($action -eq 'Unchanged') {
+        if ($desiredState -ceq 'Absent') {
+            if ($action -ceq 'UnchangedAbsent') {
+                if ($previous -or $stage -or $backup -or $discard) {
+                    throw ('NVAPI UnchangedAbsent 收据非法：' + $entry.FileName)
+                }
+                $entry.CommitAction = 'UnchangedAbsent'
+            } elseif ($action -ceq 'Removed') {
+                if (-not (Test-HashInAllowList $previous $allowedExpected) -or
+                    $stage -or $discard -or
+                    -not (Test-NvapiTransactionPath $backup $entry.Directory `
+                        $entry.FileName 'backup')) {
+                    throw ('NVAPI Removed 收据非法：' + $entry.FileName)
+                }
+                $entry.CommitAction = 'Removed'
+            } else {
+                throw ('Absent NVAPI 收据动作非法：' + $action)
+            }
+        } elseif ($action -eq 'Unchanged') {
             if ($previous -cne $receiptExpected -or $stage -or $backup -or $discard) {
                 throw ('NVAPI Unchanged 收据非法：' + $entry.FileName)
             }
@@ -237,6 +319,23 @@ function Finalize-NvapiProjectionReceipt {
 
     $resolved = @(Read-NvapiProjectionReceipt $Entries $Path $TransactionId)
     foreach ($entry in $resolved) {
+        if ([string]$entry.DesiredState -ceq 'Absent') {
+            # Finalize 只能清理收据自己记录的 backup；目标被外部重新创建时不进行
+            # 任何删除，保留收据并报错，避免误伤真实 NVIDIA 驱动文件。
+            if (Get-NvapiOptionalFileHash $entry.Target) {
+                throw ('Absent NVAPI Finalize 发现目标重新出现：' + $entry.Target)
+            }
+            if ($entry.CommitAction -ceq 'Removed') {
+                $removedBackupHash = Get-NvapiOptionalFileHash $entry.Backup
+                # 删除 backup 后、删除 receipt 前被中断时，backup 缺失代表上次
+                # Finalize 已完成数据清理；允许本次仅删除遗留收据。存在时仍须精确匹配。
+                if ($removedBackupHash -and
+                    $removedBackupHash -cne $entry.ObservedHash) {
+                    throw ('Removed NVAPI Finalize 备份摘要不匹配：' + $entry.Backup)
+                }
+            }
+            continue
+        }
         Assert-NvapiBinary $entry.Target $entry.ExpectedHash $entry.Machine $entry.Magic
         # Unchanged 条目没有 stage/backup/discard；只有 Created/Replaced 才会生成
         # rollback 路径。Test-Path 不接受空 LiteralPath，因此必须先判空，保证已经是
@@ -248,6 +347,12 @@ function Finalize-NvapiProjectionReceipt {
     }
     foreach ($entry in $resolved) {
         Remove-TransactionFile -Path $entry.Stage
+        if ([string]$entry.DesiredState -ceq 'Absent') {
+            if ($entry.CommitAction -ceq 'Removed') {
+                Remove-TransactionFile -Path $entry.Backup
+            }
+            continue
+        }
         if ($entry.CommitAction -ne 'Replaced' -or
             -not (Test-Path -LiteralPath $entry.Backup)) { continue }
         if ((Get-NvapiOptionalFileHash $entry.Backup) -cne $entry.ObservedHash) {

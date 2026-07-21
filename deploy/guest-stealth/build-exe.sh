@@ -31,6 +31,7 @@ RESPAWN_SRC="$HERE/respawn-stealth-local.ps1"
 RESTART_STATE_SRC="$HERE/respawn-restart-state.ps1"
 POWER_POLICY_SRC="$HERE/configure-power-policy.ps1"
 SPOOF_SRC="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
+APPLY_SUPPORT_SRC="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 PROFILE_HELPER_SRC="$REPO_ROOT/deploy/scripts/persist-gpu-profile.ps1"
 TRANSACTION_HELPER_SRC="$REPO_ROOT/deploy/scripts/gpu-profile-transaction.ps1"
 REGISTRY_CORE_SRC="$REPO_ROOT/deploy/scripts/gpu-profile-registry-core.ps1"
@@ -43,10 +44,12 @@ DRIVER_INSTALL_SRC="$HERE/install-display-driver.ps1"
 DRIVER_TRUST_SRC="$HERE/display-driver-trust.ps1"
 CHIPSET_INSTALL_SRC="$HERE/install-chipset-device.ps1"
 NVAPI_INSTALL_SRC="$HERE/install-nvapi-system.ps1"
+NVAPI_VALIDATION_SRC="$HERE/nvapi-system-validation.ps1"
 NVAPI_TRANSACTION_SRC="$HERE/nvapi-system-transaction.ps1"
 ADL_INSTALL_SRC="$HERE/install-adl-system.ps1"
 ADL_TRANSACTION_SRC="$HERE/adl-system-transaction.ps1"
 GPU_API_INSTALL_SRC="$HERE/install-gpu-api-system.ps1"
+GPU_API_IDENTITY_BINDING_SRC="$HERE/gpu-api-identity-binding.ps1"
 DRIVER_SRC_DIR="${DRIVER_SRC_DIR:-$REPO_ROOT/deploy/scripts/stock-viogpudo}"
 CHIPSET_INF_SRC_DIR="${CHIPSET_INF_SRC_DIR:-$REPO_ROOT/deploy/scripts/stock-intel-chipset-inf}"
 NVAPI_SRC_DIR="${NVAPI_SRC_DIR:-$REPO_ROOT/deploy/nvapi-shim}"
@@ -81,6 +84,7 @@ need_tool llvm-readobj
 [[ -f "$RESTART_STATE_SRC" ]] || { echo "ERROR: 找不到 $RESTART_STATE_SRC" >&2; exit 1; }
 [[ -f "$POWER_POLICY_SRC" ]] || { echo "ERROR: 找不到 $POWER_POLICY_SRC" >&2; exit 1; }
 [[ -f "$SPOOF_SRC" ]]   || { echo "ERROR: 找不到 $SPOOF_SRC" >&2; exit 1; }
+[[ -f "$APPLY_SUPPORT_SRC" ]] || { echo "ERROR: 找不到 $APPLY_SUPPORT_SRC" >&2; exit 1; }
 [[ -f "$PROFILE_HELPER_SRC" ]] || { echo "ERROR: 找不到 $PROFILE_HELPER_SRC" >&2; exit 1; }
 [[ -f "$TRANSACTION_HELPER_SRC" ]] || { echo "ERROR: 找不到 $TRANSACTION_HELPER_SRC" >&2; exit 1; }
 [[ -f "$REGISTRY_CORE_SRC" ]] || { echo "ERROR: 找不到 $REGISTRY_CORE_SRC" >&2; exit 1; }
@@ -93,10 +97,12 @@ need_tool llvm-readobj
 [[ -f "$DRIVER_TRUST_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_TRUST_SRC" >&2; exit 1; }
 [[ -f "$CHIPSET_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $CHIPSET_INSTALL_SRC" >&2; exit 1; }
 [[ -f "$NVAPI_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_INSTALL_SRC" >&2; exit 1; }
+[[ -f "$NVAPI_VALIDATION_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_VALIDATION_SRC" >&2; exit 1; }
 [[ -f "$NVAPI_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $NVAPI_TRANSACTION_SRC" >&2; exit 1; }
 [[ -f "$ADL_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $ADL_INSTALL_SRC" >&2; exit 1; }
 [[ -f "$ADL_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $ADL_TRANSACTION_SRC" >&2; exit 1; }
 [[ -f "$GPU_API_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $GPU_API_INSTALL_SRC" >&2; exit 1; }
+[[ -f "$GPU_API_IDENTITY_BINDING_SRC" ]] || { echo "ERROR: 找不到 $GPU_API_IDENTITY_BINDING_SRC" >&2; exit 1; }
 [[ -f "$ADL_EXPORTS_SRC" ]] || { echo "ERROR: 找不到 $ADL_EXPORTS_SRC" >&2; exit 1; }
 [[ -f "$PAYLOAD_SECURITY_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_SECURITY_SRC" >&2; exit 1; }
 [[ -f "$PAYLOAD_ENVIRONMENT_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_ENVIRONMENT_SRC" >&2; exit 1; }
@@ -278,6 +284,8 @@ xxd -i -n payload_configure_power_policy_ps1 "$POWER_POLICY_SRC" \
     > "$BUILD_DIR/payload_configure_power_policy_ps1.h"
 xxd -i -n payload_apply_gpu_spoof_ps1 "$SPOOF_SRC" \
     > "$BUILD_DIR/payload_apply_gpu_spoof_ps1.h"
+xxd -i -n payload_gpu_spoof_apply_support_ps1 "$APPLY_SUPPORT_SRC" \
+    > "$BUILD_DIR/payload_gpu_spoof_apply_support_ps1.h"
 xxd -i -n payload_persist_gpu_profile_ps1 "$PROFILE_HELPER_SRC" \
     > "$BUILD_DIR/payload_persist_gpu_profile_ps1.h"
 xxd -i -n payload_gpu_profile_transaction_ps1 "$TRANSACTION_HELPER_SRC" \
@@ -305,6 +313,8 @@ xxd -i -n payload_install_chipset_device_ps1 "$CHIPSET_INSTALL_SRC" \
     > "$BUILD_DIR/payload_install_chipset_device_ps1.h"
 xxd -i -n payload_install_nvapi_system_ps1 "$NVAPI_INSTALL_SRC" \
     > "$BUILD_DIR/payload_install_nvapi_system_ps1.h"
+xxd -i -n payload_nvapi_system_validation_ps1 "$NVAPI_VALIDATION_SRC" \
+    > "$BUILD_DIR/payload_nvapi_system_validation_ps1.h"
 xxd -i -n payload_nvapi_system_transaction_ps1 "$NVAPI_TRANSACTION_SRC" \
     > "$BUILD_DIR/payload_nvapi_system_transaction_ps1.h"
 xxd -i -n payload_install_adl_system_ps1 "$ADL_INSTALL_SRC" \
@@ -313,6 +323,8 @@ xxd -i -n payload_adl_system_transaction_ps1 "$ADL_TRANSACTION_SRC" \
     > "$BUILD_DIR/payload_adl_system_transaction_ps1.h"
 xxd -i -n payload_install_gpu_api_system_ps1 "$GPU_API_INSTALL_SRC" \
     > "$BUILD_DIR/payload_install_gpu_api_system_ps1.h"
+xxd -i -n payload_gpu_api_identity_binding_ps1 "$GPU_API_IDENTITY_BINDING_SRC" \
+    > "$BUILD_DIR/payload_gpu_api_identity_binding_ps1.h"
 xxd -i -n payload_viogpudo_sys "$DRIVER_SRC_DIR/viogpudo.sys" \
     > "$BUILD_DIR/payload_viogpudo_sys.h"
 xxd -i -n payload_viogpudo_cat "$DRIVER_SRC_DIR/viogpudo.cat" \

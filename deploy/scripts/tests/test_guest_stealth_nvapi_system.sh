@@ -7,23 +7,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 INSTALLER="$REPO_ROOT/deploy/guest-stealth/install-nvapi-system.ps1"
+VALIDATION_HELPER="$REPO_ROOT/deploy/guest-stealth/nvapi-system-validation.ps1"
 TRANSACTION_HELPER="$REPO_ROOT/deploy/guest-stealth/nvapi-system-transaction.ps1"
 RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
 APPLY="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
+APPLY_SUPPORT="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 IDENTITY_HELPER="$REPO_ROOT/deploy/scripts/persist-gpu-profile.ps1"
 BUILD_SCRIPT="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 PACKAGE_SCRIPT="$REPO_ROOT/deploy/guest-stealth/package.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
 README="$REPO_ROOT/deploy/guest-stealth/README.md"
 NVAPI_DIR="$REPO_ROOT/deploy/nvapi-shim"
+NVAPI_CONTRACT_FIXTURE="$SCRIPT_DIR/fixtures/guest_stealth_nvapi_contract_fixture.ps1"
 
 fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
 
-for path in "$INSTALLER" "$TRANSACTION_HELPER" "$RESPAWN" "$APPLY" "$IDENTITY_HELPER" \
+for path in "$INSTALLER" "$VALIDATION_HELPER" "$TRANSACTION_HELPER" \
+        "$RESPAWN" "$APPLY" "$APPLY_SUPPORT" "$IDENTITY_HELPER" \
         "$BUILD_SCRIPT" "$PACKAGE_SCRIPT" \
+        "$NVAPI_CONTRACT_FIXTURE" \
         "$NVAPI_DIR/nvapi.dll" "$NVAPI_DIR/nvapi64.dll"; do
     [[ -f "$path" ]] || fail "缺少系统 NVAPI 链文件: $path"
 done
@@ -31,8 +36,12 @@ done
     || fail "按需 app-local helper 仍作为第二条用户路径存在"
 [[ "$(xxd -p -l 3 "$INSTALLER")" == 'efbbbf' ]] \
     || fail "install-nvapi-system.ps1 缺少 Windows PowerShell 5.1 UTF-8 BOM"
+[[ "$(xxd -p -l 3 "$VALIDATION_HELPER")" == 'efbbbf' ]] \
+    || fail "nvapi-system-validation.ps1 缺少 Windows PowerShell 5.1 UTF-8 BOM"
+[[ "$(xxd -p -l 3 "$APPLY_SUPPORT")" == 'efbbbf' ]] \
+    || fail "gpu-spoof-apply-support.ps1 缺少 Windows PowerShell 5.1 UTF-8 BOM"
 
-PS_FILES="$INSTALLER:$TRANSACTION_HELPER:$RESPAWN:$APPLY:$IDENTITY_HELPER" \
+PS_FILES="$INSTALLER:$VALIDATION_HELPER:$TRANSACTION_HELPER:$RESPAWN:$APPLY:$APPLY_SUPPORT:$IDENTITY_HELPER" \
 pwsh -NoLogo -NoProfile -NonInteractive -Command '
     $failed = $false
     foreach ($path in $env:PS_FILES -split [IO.Path]::PathSeparator) {
@@ -90,10 +99,23 @@ done
 
 # 在 Linux 临时目录执行 installer 的纯文件事务函数：覆盖 absent/current/历史托管、
 # 未知文件拒绝，以及第二架构提交失败后第一架构回滚。测试不访问宿主系统目录。
-INSTALLER_PATH="$INSTALLER" TRANSACTION_HELPER_PATH="$TRANSACTION_HELPER" \
+INSTALLER_PATH="$INSTALLER" VALIDATION_HELPER_PATH="$VALIDATION_HELPER" \
+TRANSACTION_HELPER_PATH="$TRANSACTION_HELPER" \
 X86_DLL="$NVAPI_DIR/nvapi.dll" \
 X64_DLL="$NVAPI_DIR/nvapi64.dll" TEST_ROOT="$(mktemp -d)" \
 pwsh -NoLogo -NoProfile -NonInteractive -Command '
+    $validationSource = [IO.File]::ReadAllText($env:VALIDATION_HELPER_PATH)
+    $tokens = $null
+    $errors = $null
+    $validationAst = [Management.Automation.Language.Parser]::ParseInput(
+        $validationSource, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) { throw "validation helper AST 不可用" }
+    foreach ($definition in @($validationAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst]
+    }, $true))) {
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
     $source = [IO.File]::ReadAllText($env:INSTALLER_PATH)
     $tokens = $null
     $errors = $null
@@ -101,8 +123,6 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
         $source, [ref]$tokens, [ref]$errors)
     if ($errors.Count -gt 0) { throw "installer AST 不可用" }
     foreach ($name in @(
-        "Get-LowerSha256", "Get-PeMetadata", "Assert-PlainFile",
-        "Assert-NvapiBinary", "Test-HashInAllowList",
         "Get-SystemProjectionEntryState", "Get-SystemProjectionEntrySnapshot",
         "Remove-TransactionFile", "Move-VerifiedHistoricalTarget",
         "Publish-SystemProjectionEntries")) {
@@ -399,7 +419,7 @@ grep -F '[IO.FileShare]::None' "$INSTALLER" >/dev/null \
     || fail "系统 NVAPI installer 没有跨进程排他锁"
 
 if grep -Ei 'Invoke-WebRequest|Invoke-RestMethod|https?://|takeown|icacls|bcdedit' \
-        "$INSTALLER" "$TRANSACTION_HELPER" "$RESPAWN" >&2; then
+        "$INSTALLER" "$VALIDATION_HELPER" "$TRANSACTION_HELPER" "$RESPAWN" >&2; then
     fail "系统 NVAPI 链引入网络、所有权夺取或启动/签名链修改"
 fi
 if grep -Ei 'driver-signing|EfiGuard|GPU_SELFSIGNED' "$INSTALLER" >&2; then
@@ -428,78 +448,12 @@ final_line="$(grep -n '^if (\$NoReboot)' "$RESPAWN" | tail -n 1 | cut -d: -f1)"
 
 # 跨组件升级必须由 apply 自己收口：reader Prepare 在 pointer Commit 前，
 # identity Complete 后才 Finalize；失败 finally 先恢复旧 pointer，再恢复历史 reader。
-APPLY_PATH="$APPLY" pwsh -NoLogo -NoProfile -NonInteractive -Command '
-    $tokens = $null
-    $errors = $null
-    $ast = [Management.Automation.Language.Parser]::ParseFile(
-        $env:APPLY_PATH, [ref]$tokens, [ref]$errors)
-    if ($errors.Count -gt 0) { throw "apply AST 不可用" }
-    $nvapiParameter = @($ast.ParamBlock.Parameters | Where-Object {
-        $_.Name.VariablePath.UserPath -eq "NvapiPayloadDir"
-    })
-    if ($nvapiParameter.Count -ne 1 -or $null -eq $nvapiParameter[0].DefaultValue) {
-        throw "NvapiPayloadDir 必须是保留 standalone 兼容的可选参数"
-    }
-    $guard = $ast.Find({
-        param($node)
-        $node -is [Management.Automation.Language.TryStatementAst] -and
-            $null -ne $node.Finally -and
-            $node.Finally.Extent.Text.Contains("-RollbackIdentity")
-    }, $true)
-    if ($null -eq $guard) { throw "缺少 identity durable finally" }
-    $body = $guard.Body.Extent.Text
-    $finally = $guard.Finally.Extent.Text
-    foreach ($marker in @(
-        "& `$powershellExe @gpuApiInstallArgs",
-        "-CommitIdentity `$identityTransactionId",
-        "-CompleteIdentity `$identityTransactionId",
-        "`$completeInspection = & `$identityHelperSource -InspectIdentity",
-        "`$completeResolution = & `$identityHelperSource -RollbackIdentity",
-        "`$resolvedState -ceq",
-        "& `$powershellExe @gpuApiFinalizeArgs")) {
-        if (-not $body.Contains($marker)) {
-            throw ("GPU API/identity 原子窗口缺少：" + $marker)
-        }
-    }
-    $installOffset = $body.IndexOf("& `$powershellExe @gpuApiInstallArgs")
-    $commitOffset = $body.IndexOf("-CommitIdentity `$identityTransactionId")
-    $completeOffset = $body.IndexOf("-CompleteIdentity `$identityTransactionId")
-    $finalizeOffset = $body.IndexOf("& `$powershellExe @gpuApiFinalizeArgs")
-    if (-not ($installOffset -lt $commitOffset -and
-        $commitOffset -lt $completeOffset -and
-        $completeOffset -lt $finalizeOffset)) {
-        throw "Prepare → Commit → Complete → Finalize 顺序错误"
-    }
-    $readerRollbackOffset = $finally.IndexOf("& `$powershellExe @gpuApiRecoveryArgs")
-    $identityRollbackOffset = $finally.IndexOf("-RollbackIdentity `$identityTransactionId")
-    if ($readerRollbackOffset -lt 0 -or $identityRollbackOffset -lt 0 -or
-        $identityRollbackOffset -ge $readerRollbackOffset) {
-        throw "失败路径没有先恢复旧 pointer、再恢复历史 reader"
-    }
-    if (-not $finally.Contains("-not `$identityCompletionUnresolved")) {
-        throw "Complete 状态无法裁决时仍会破坏两份 durable journal"
-    }
-' || fail "GPU API coordinator 与 identity 的顺序/失败回滚契约测试失败"
+APPLY_PATH="$APPLY" APPLY_SUPPORT_PATH="$APPLY_SUPPORT" \
 IDENTITY_HELPER_PATH="$IDENTITY_HELPER" \
-pwsh -NoLogo -NoProfile -NonInteractive -Command '
-    $tokens=$null; $errors=$null
-    $ast=[Management.Automation.Language.Parser]::ParseFile(
-        $env:IDENTITY_HELPER_PATH,[ref]$tokens,[ref]$errors)
-    if($errors.Count){throw "identity helper AST 不可用"}
-    $needle="ParameterSetName -eq " + [char]39 + "Inspect" + [char]39
-    $inspect=$ast.Find({param($node)
-        $node -is [Management.Automation.Language.IfStatementAst] -and
-        $node.Extent.Text.Contains($needle)
-    },$true)
-    if($null -eq $inspect){throw "缺少 Complete 只读 Inspect 参数集"}
-    $text=$inspect.Extent.Text
-    if(-not $text.Contains("Read-TransactionReceipt")){throw "Inspect 未读取 durable receipt"}
-    foreach($writer in @(".SetValue(",".DeleteValue(","Invoke-TransactionRollback",
-        "Set-CurrentIdentityPointer","Clear-PendingIdentity")){
-        if($text.Contains($writer)){throw ("Inspect 不是只读操作："+$writer)}
-    }
-' || fail "CompleteIdentity 只读状态裁决契约测试失败"
-for payload_name in install-nvapi-system.ps1 nvapi-system-transaction.ps1 \
+pwsh -NoLogo -NoProfile -NonInteractive -File "$NVAPI_CONTRACT_FIXTURE" \
+    || fail "GPU API coordinator/identity 顺序与只读裁决契约测试失败"
+for payload_name in install-nvapi-system.ps1 nvapi-system-validation.ps1 \
+        nvapi-system-transaction.ps1 gpu-spoof-apply-support.ps1 \
         nvapi.dll nvapi64.dll; do
     grep -F "$payload_name" "$BUILD_SCRIPT" >/dev/null \
         || fail "build-exe.sh 缺少 payload: $payload_name"
@@ -519,5 +473,13 @@ transaction_code_lines="$(awk '!/^[[:space:]]*($|#)/ { count++ } END { print cou
     "$TRANSACTION_HELPER")"
 [[ "$transaction_code_lines" -le 500 ]] \
     || fail "nvapi-system-transaction.ps1 非注释代码超过 500 行: $transaction_code_lines"
+validation_code_lines="$(awk '!/^[[:space:]]*($|#)/ { count++ } END { print count + 0 }' \
+    "$VALIDATION_HELPER")"
+[[ "$validation_code_lines" -le 500 ]] \
+    || fail "nvapi-system-validation.ps1 非注释代码超过 500 行: $validation_code_lines"
+for bounded_apply_file in "$APPLY" "$APPLY_SUPPORT"; do
+    [[ "$(wc -l <"$bounded_apply_file")" -le 500 ]] \
+        || fail "$(basename "$bounded_apply_file") 物理行数超过 500"
+done
 
 echo "OK: guest-stealth direct GPU-Z dual-architecture system NVAPI checks passed"

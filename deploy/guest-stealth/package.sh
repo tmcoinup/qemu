@@ -19,6 +19,7 @@ POWER_POLICY_SRC="$HERE/configure-power-policy.ps1"
 RESTART_STATE_SRC="$HERE/respawn-restart-state.ps1"
 
 SPOOF_SRC="$SCRIPTS/apply-gpu-spoof.ps1"
+APPLY_SUPPORT_SRC="$SCRIPTS/gpu-spoof-apply-support.ps1"
 PROFILE_HELPER_SRC="$SCRIPTS/persist-gpu-profile.ps1"
 TRANSACTION_HELPER_SRC="$SCRIPTS/gpu-profile-transaction.ps1"
 REGISTRY_CORE_SRC="$SCRIPTS/gpu-profile-registry-core.ps1"
@@ -34,6 +35,7 @@ ADL_SRC="$HERE/../adl-shim"
 [[ -f "$POWER_POLICY_SRC" ]] || { echo "ERROR: 找不到 $POWER_POLICY_SRC" >&2; exit 1; }
 [[ -f "$RESTART_STATE_SRC" ]] || { echo "ERROR: 找不到 $RESTART_STATE_SRC" >&2; exit 1; }
 [[ -f "$SPOOF_SRC" ]] || { echo "ERROR: 找不到 $SPOOF_SRC" >&2; exit 1; }
+[[ -f "$APPLY_SUPPORT_SRC" ]] || { echo "ERROR: 找不到 $APPLY_SUPPORT_SRC" >&2; exit 1; }
 [[ -f "$PROFILE_HELPER_SRC" ]] || { echo "ERROR: 找不到 $PROFILE_HELPER_SRC" >&2; exit 1; }
 [[ -f "$TRANSACTION_HELPER_SRC" ]] || { echo "ERROR: 找不到 $TRANSACTION_HELPER_SRC" >&2; exit 1; }
 [[ -f "$REGISTRY_CORE_SRC" ]] || { echo "ERROR: 找不到 $REGISTRY_CORE_SRC" >&2; exit 1; }
@@ -85,11 +87,14 @@ if [[ "$include_legacy_scripts" == "1" ]]; then
     cp "$HERE/display-driver-trust.ps1" "$DIST/"
     cp "$HERE/install-chipset-device.ps1" "$DIST/"
     cp "$HERE/install-nvapi-system.ps1"    "$DIST/"
+    cp "$HERE/nvapi-system-validation.ps1" "$DIST/"
     cp "$HERE/nvapi-system-transaction.ps1" "$DIST/"
     cp "$HERE/install-adl-system.ps1"      "$DIST/"
     cp "$HERE/adl-system-transaction.ps1" "$DIST/"
     cp "$HERE/install-gpu-api-system.ps1" "$DIST/"
+    cp "$HERE/gpu-api-identity-binding.ps1" "$DIST/"
     cp "$SPOOF_SRC"                       "$DIST/"
+    cp "$APPLY_SUPPORT_SRC"               "$DIST/"
     cp "$PROFILE_HELPER_SRC"               "$DIST/"
     cp "$TRANSACTION_HELPER_SRC"           "$DIST/"
     cp "$REGISTRY_CORE_SRC"                "$DIST/"

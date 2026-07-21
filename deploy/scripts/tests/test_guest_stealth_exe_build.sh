@@ -65,7 +65,7 @@ for manufacturer_payload in gpu-manufacturer-projection.ps1 \
         || fail "EXE launcher 未包含厂商投影 payload 文件名: $manufacturer_payload"
 done
 for helper_file in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 \
-        gpu-profile-registry-core.ps1 refresh-gpu-name.ps1 \
+        gpu-profile-registry-core.ps1 gpu-spoof-apply-support.ps1 refresh-gpu-name.ps1 \
         gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1 \
         force-displayfreq.ps1 respawn-restart-state.ps1; do
     strings -a "$EXE" | grep -F "$helper_file" >/dev/null \
@@ -79,8 +79,12 @@ strings -a "$EXE" | grep -F 'install-chipset-device.ps1' >/dev/null \
     || fail "EXE 未包含芯片组识别 INF 安装 payload 文件名"
 strings -a "$EXE" | grep -F 'install-nvapi-system.ps1' >/dev/null \
     || fail "EXE 未包含双架构系统 NVAPI 安装 payload 文件名"
+strings -a "$EXE" | grep -F 'nvapi-system-validation.ps1' >/dev/null \
+    || fail "EXE 未包含 NVAPI validation helper 文件名"
 strings -a "$EXE" | grep -F 'nvapi-system-transaction.ps1' >/dev/null \
     || fail "EXE 未包含 NVAPI durable transaction helper 文件名"
+strings -a "$EXE" | grep -F 'gpu-api-identity-binding.ps1' >/dev/null \
+    || fail "EXE 未包含 GPU API identity binding helper 文件名"
 if strings -a "$EXE" | grep -F 'launch-nvapi-tool.ps1' >&2; then
     fail "EXE 仍包含已移除的 app-local GPU-Z 启动入口"
 fi
@@ -105,7 +109,7 @@ strings -a -el "$EXE" | grep -F -- '--no-confirm' >/dev/null \
     || fail "EXE 缺少跳过确认弹窗参数"
 strings -a "$EXE" | grep -F 'Enable-RespawnDisplayDevices' >/dev/null \
     || fail "EXE 未包含 Code 22 外层启用兜底"
-strings -a "$EXE" | grep -F 'Enable-StealthDisplayDevices' >/dev/null \
+strings -a "$EXE" | grep -F 'Enable-GpuSpoofDisplayDevices' >/dev/null \
     || fail "EXE 未包含 Code 22 apply 启用兜底"
 strings -a -el "$EXE" | grep -F -- '-FirstLogon' >/dev/null \
     || fail "EXE 未把 FirstLogon 模式传给内嵌脚本"
@@ -133,12 +137,16 @@ grep -F 'payload_secure_directory(root_dir)' \
 grep -F '$logDir = Split-Path -Parent $PSScriptRoot' \
     "$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1" >/dev/null \
     || fail "respawn 日志目录没有绑定到受保护 payload 根"
-grep -F '$scriptDir = Split-Path -Parent $PSScriptRoot' \
+grep -F '$scriptDir = Split-Path -Parent $ApplyScriptRoot' \
+    "$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1" >/dev/null \
+    || fail "apply support 的持久化目录没有绑定到调用方脚本根"
+grep -F -- '-ApplyScriptRoot $PSScriptRoot' \
     "$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1" >/dev/null \
-    || fail "apply 持久化 helper 目录没有绑定到受保护 payload 根"
+    || fail "apply 没有把受保护 PSScriptRoot 交给 support helper"
 if grep -F -e "'C:\\ProgramData\\StealthGPU'" -e '"C:\\ProgramData\\StealthGPU"' \
         "$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1" \
-        "$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1" >&2; then
+        "$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1" \
+        "$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1" >&2; then
     fail "生产 PowerShell 仍硬编码 Common AppData 的默认 C: 路径"
 fi
 grep -F 'SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA' \
@@ -159,7 +167,8 @@ grep -F "'.payload.lock'" \
     || fail "重启恢复任务没有锁定受保护 payload 根"
 if grep -F -- "-Execute 'powershell.exe'" \
         "$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1" \
-        "$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1" >&2; then
+        "$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1" \
+        "$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1" >&2; then
     fail "高权限计划任务仍通过可被环境影响的裸 powershell.exe 启动"
 fi
 grep -F 'payload_publish_bundle(root_dir, work_dir' \
@@ -305,8 +314,11 @@ payloads = (
     root / "deploy/guest-stealth/display-driver-trust.ps1",
     root / "deploy/guest-stealth/install-chipset-device.ps1",
     root / "deploy/guest-stealth/install-nvapi-system.ps1",
+    root / "deploy/guest-stealth/nvapi-system-validation.ps1",
     root / "deploy/guest-stealth/nvapi-system-transaction.ps1",
+    root / "deploy/guest-stealth/gpu-api-identity-binding.ps1",
     root / "deploy/scripts/apply-gpu-spoof.ps1",
+    root / "deploy/scripts/gpu-spoof-apply-support.ps1",
     root / "deploy/scripts/persist-gpu-profile.ps1",
     root / "deploy/scripts/gpu-profile-transaction.ps1",
     root / "deploy/scripts/gpu-profile-registry-core.ps1",
@@ -334,14 +346,15 @@ PY
 
 # legacy 调试发布仍应平铺全部 helper；默认发布继续只有一个 EXE。
 for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 \
-        gpu-profile-registry-core.ps1 refresh-gpu-name.ps1 \
+        gpu-profile-registry-core.ps1 gpu-spoof-apply-support.ps1 refresh-gpu-name.ps1 \
         gpu-manufacturer-projection.ps1 gpu-manufacturer-projector.exe \
         gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1 \
         force-displayfreq.ps1 configure-power-policy.ps1 \
         display-driver-trust.ps1 respawn-restart-state.ps1 \
         install-chipset-device.ps1 CannonLake-HSystem.inf cannonlake-h.cat \
         SunrisePoint-HSystem.inf sunrisepoint-h.cat \
-        install-nvapi-system.ps1 nvapi-system-transaction.ps1 \
+        install-nvapi-system.ps1 nvapi-system-validation.ps1 \
+        nvapi-system-transaction.ps1 gpu-api-identity-binding.ps1 \
         nvapi.dll nvapi64.dll; do
     grep -F "$helper_name" "$REPO_ROOT/deploy/guest-stealth/package.sh" >/dev/null \
         || fail "legacy package 路径缺少 $helper_name"
@@ -410,6 +423,15 @@ cmp -s "$REPO_ROOT/deploy/guest-stealth/configure-power-policy.ps1" \
 cmp -s "$REPO_ROOT/deploy/guest-stealth/respawn-restart-state.ps1" \
     "$PACKAGE_DIST/respawn-restart-state.ps1" \
     || fail "legacy 调试包的重启状态 helper 与正式源不一致"
+cmp -s "$REPO_ROOT/deploy/guest-stealth/nvapi-system-validation.ps1" \
+    "$PACKAGE_DIST/nvapi-system-validation.ps1" \
+    || fail "legacy 调试包的 NVAPI validation helper 与正式源不一致"
+cmp -s "$REPO_ROOT/deploy/guest-stealth/gpu-api-identity-binding.ps1" \
+    "$PACKAGE_DIST/gpu-api-identity-binding.ps1" \
+    || fail "legacy 调试包的 GPU API identity binding helper 与正式源不一致"
+cmp -s "$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1" \
+    "$PACKAGE_DIST/gpu-spoof-apply-support.ps1" \
+    || fail "legacy 调试包的 apply support helper 与正式源不一致"
 cmp -s "$MANUFACTURER_HELPER" \
     "$PACKAGE_DIST/gpu-manufacturer-projection.ps1" \
     || fail "legacy 调试包的厂商投影 helper 与正式源不一致"

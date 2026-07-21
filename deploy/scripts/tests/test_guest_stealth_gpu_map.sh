@@ -8,6 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SPOOF="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
+APPLY_SUPPORT="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -22,6 +23,9 @@ hex4() {
 }
 
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+[[ -f "$APPLY_SUPPORT" ]] || fail "缺少 apply AutoDetect helper: $APPLY_SUPPORT"
+grep -F "Join-Path \$PSScriptRoot 'gpu-spoof-apply-support.ps1'" "$SPOOF" >/dev/null \
+    || fail "apply 没有从同目录加载 AutoDetect helper"
 
 declare -A expected
 declare -A actual
@@ -39,10 +43,10 @@ while IFS='|' read -r key name vendor bios ram memory_type bus_width base_clock 
 done < <(
     # sed 的反向引用只保证 \1..\9，字段扩展后用 Perl 的 $10/$11
     # 明确取值，避免把它们错解为“$1 后跟字面 0/1”。
-    perl -ne 'if (/^\s*'"'"'([0-9A-Fa-f]{8})'"'"'\s*=\s*\@\{\s*Name='"'"'([^'"'"']*)'"'"';\s*Vendor='"'"'([^'"'"']*)'"'"';\s*Bios='"'"'([^'"'"']*)'"'"';\s*RamMb=([0-9]+);\s*MemoryType='"'"'([^'"'"']*)'"'"';\s*BusWidthBits=([0-9]+);\s*BaseClockKHz=([0-9]+);\s*BoostClockKHz=([0-9]+);\s*MemoryClockKHz=([0-9]+);\s*SliSupported=([01])\s*\}/) { print "$1|$2|$3|$4|$5|$6|$7|$8|$9|$10|$11\n"; }' "$SPOOF"
+    perl -ne 'if (/^\s*'"'"'([0-9A-Fa-f]{8})'"'"'\s*=\s*\@\{\s*Name='"'"'([^'"'"']*)'"'"';\s*Vendor='"'"'([^'"'"']*)'"'"';\s*Bios='"'"'([^'"'"']*)'"'"';\s*RamMb=([0-9]+);\s*MemoryType='"'"'([^'"'"']*)'"'"';\s*BusWidthBits=([0-9]+);\s*BaseClockKHz=([0-9]+);\s*BoostClockKHz=([0-9]+);\s*MemoryClockKHz=([0-9]+);\s*SliSupported=([01])\s*\}/) { print "$1|$2|$3|$4|$5|$6|$7|$8|$9|$10|$11\n"; }' "$APPLY_SUPPORT"
 )
 
-[[ "${#actual[@]}" -gt 0 ]] || fail "未解析到 apply-gpu-spoof.ps1 的 gpuMap"
+[[ "${#actual[@]}" -gt 0 ]] || fail "未解析到 apply support helper 的 gpuMap"
 
 for key in "${!expected[@]}"; do
     [[ "${actual[$key]+set}" == "set" ]] \

@@ -2,14 +2,22 @@
 
 本分支保持唯一的真实显示承载设备 `PCI\VEN_1AF4&DEV_1050` 和 stock
 `VioGpuDod` 驱动，不做 GPU passthrough、vGPU 或厂商内核驱动替换。为了让不同硬件
-检测工具从用户态入口读取到同一份逻辑身份，guest 安装包同时提供 NVIDIA NVAPI 和
-AMD ADL 的系统级兼容层。
+检测工具从用户态入口读取到同一份逻辑身份，guest 安装包同时携带 NVIDIA NVAPI 和
+AMD ADL 的兼容层，但系统搜索目录只保留当前 profile 对应的一个厂商。
 
 这不是 GPU-Z、HWiNFO 或 AIDA64 的进程专用适配。DLL 不读取进程名，也不按调用者
 返回不同结果；所有调用者都读取
 `HKLM\SOFTWARE\StealthGPU\Identities\<CurrentIdentity>` 指向的同一个版本化快照。ADL
 仅在调用方显式请求 `Refresh` 时重新验证并替换其进程内快照；刷新失败会保留最后一次
 验证通过的快照，同时向该次调用返回错误。
+
+## 推荐的 clone 基线
+
+基础镜像应保持厂商中立：不需要预先运行 `respawn-stealth.exe`，也不预发布 VMate
+NVAPI/ADL 系统 DLL。clone 创建自己的宿主 GPU profile，首次启动再由注入的
+FirstLogon 命令启动一次 EXE；EXE 从当前 clone 的 PCI SUBSYS 选择 AMD/NVIDIA，必要
+重启由自身的 resume 状态自动续跑。迁移状态机仍兼容已经运行过旧版 respawn 的基础盘，
+以便现有 AMD/NVIDIA base 可以交叉克隆，但新基础盘不再主动制造这类继承状态。
 
 ## 分层关系
 
@@ -20,17 +28,22 @@ AMD ADL 的系统级兼容层。
 | NVIDIA NVAPI | `nvapi.dll` / `nvapi64.dll` | NVIDIA 型号、显存、VBIOS、时钟、PCI 载体关联 |
 | AMD ADL / ADL2 | `atiadlxy.dll` / `atiadlxx.dll` | AMD 型号、显存、VBIOS、核心信息、静态时钟、BDF |
 
-NVIDIA profile 下只有 NVAPI 枚举一张设备，ADL 返回零个 AMD adapter；AMD profile
-下行为相反。两套 DLL 始终随统一 EXE 安装，因此 profile 切换只发布一个新的
-`CurrentIdentity` 指针，不需要增删 DLL，也不会留下第二张逻辑显卡。
+NVIDIA profile 只发布 NVAPI，AMD profile 只发布 ADL。统一 EXE 仍携带两套受验
+payload，方便同一个安装包处理不同 clone；真正的发布目标来自已经完成物理载体、
+SUBSYS、schema 与 pointer 校验的 staged identity，而不是 clone 从 base 继承的旧
+`CurrentIdentity`。profile 跨厂商切换时，协调事务同时收口非目标厂商的受管残留，
+避免系统 DLL 搜索把两个厂商 API 一起装入同一进程。
 
 ## 系统搜索位置
 
-统一 EXE 发布并校验以下文件：
+统一 EXE 携带并校验以下文件；每次运行只把当前 profile 对应的一组留在系统目录：
 
 ```text
+# NVIDIA profile
 C:\Windows\SysWOW64\nvapi.dll
 C:\Windows\System32\nvapi64.dll
+
+# AMD profile
 C:\Windows\SysWOW64\atiadlxy.dll
 C:\Windows\SysWOW64\atiadlxx.dll
 C:\Windows\System32\atiadlxx.dll
@@ -40,9 +53,10 @@ C:\Windows\System32\atiadlxx.dll
 会先尝试 `atiadlxx.dll` 再回退到 `atiadlxy.dll`；同时管理两个名称可避免旧文件在
 标准回退之前截获调用。`System32\atiadlxx.dll` 则是独立的 PE32+ 实现。
 
-安装器只接受当前项目摘要或显式登记的历史项目摘要。若目标是未知 DLL，包括真实
-NVIDIA/AMD 驱动安装的厂商 DLL，所有目标会在第一次系统文件 Move 之前停止，且不修改
-所有权、ACL、签名策略或启动链。
+安装器只接受当前项目摘要或显式登记的历史项目摘要。非目标厂商文件也只有命中受管
+摘要时才允许移出系统搜索目录。若任一目标是未知 DLL，包括真实 NVIDIA/AMD 驱动安装
+的厂商 DLL，所有目标会在第一次系统文件 Move 之前停止，且不修改所有权、ACL、签名
+策略或启动链。
 
 ## 身份读取合同
 
@@ -86,25 +100,30 @@ AMD 官方 ABI 参考：
 
 ## 跨组件事务
 
-identity、NVAPI 与 ADL 使用同一个 32 位大写 GUID TransactionId，但保留三个独立
-durable journal。NVAPI 的既有两项 receipt schema 不扩成四项或五项，确保升级中的
-旧收据仍能恢复。
+identity、目标厂商 reader 与非目标厂商清理使用同一个 32 位大写 GUID
+TransactionId，但保留独立 durable journal。NVAPI 的既有两项 receipt schema 不扩成
+四项或五项，确保升级中的旧收据仍能恢复。
 
 提交顺序固定为：
 
-1. 恢复 identity、NVAPI、ADL 的遗留 journal；
-2. Stage 新 identity；
-3. 创建以 TransactionId 为 owner 的 GPU API coordinator 持久 reservation；
-4. 对全部 NVIDIA/AMD 系统目标做只读预检；
-5. 分别 Prepare NVAPI 和 ADL durable receipt；
-6. Commit `CurrentIdentity`；
-7. Complete identity；
-8. Finalize 两套 reader、删除旧备份并释放 reservation。
+1. 先以 `Vendor=Auto` 恢复 identity、NVAPI、ADL 的遗留 journal；Auto 同时校验
+   reservation、receipt、identity terminal State 和精确 pointer，不采用 base 的旧厂商值；
+2. 从当前唯一在线的 `1AF4:1050` 载体读取 SUBSYS，Stage 新 identity；
+3. 严格回读 staged identity；coordinator 再要求 schema-2、Prepared、
+   `PendingIdentity=TransactionId`、current=previous，并把 snapshot 的 `SpoofVendor`
+   作为本事务唯一厂商参数；
+4. 创建以 TransactionId 为 owner 的 GPU API coordinator 持久 reservation；
+5. 对目标厂商发布和非目标厂商受管残留做全量只读预检；
+6. Prepare 对应 durable receipt；
+7. Commit `CurrentIdentity`，再 Complete identity；
+8. 使用同一个 staged vendor Finalize，删除旧备份并释放 reservation。
 
 reservation 从 Prepare 保持到 Finalize/Rollback；任何新的 Prepare（不同或相同
-TransactionId）都不能进入该窗口。失败时先恢复旧 identity pointer，再按相反方向恢复 reader。若 identity
-已 durable 完成而 Finalize 中断，下次启动依据 `CurrentIdentity` 完成遗留收据并释放
-reservation；否则回滚两套 reader。
+TransactionId）都不能进入该窗口。失败时先恢复旧 identity pointer，再按相反方向恢复
+目标 reader 与非目标清理。若 identity 已 durable 完成而 Finalize 中断，下次启动的
+`Vendor=Auto` 只在 `Completed/current` 时 Finalize，或在
+`RolledBack/previous-pointer` 时 Rollback；Prepared/Committed、厂商不符或后续事务
+pointer 均保留 reservation 并 fail closed，避免提前或跨事务恢复。
 
 ## 能力边界
 

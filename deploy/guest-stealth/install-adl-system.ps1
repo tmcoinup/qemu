@@ -2,12 +2,15 @@
 
 <#
 .SYNOPSIS
-  把独立 AMD ADL 身份读取层原子发布到 Windows 双架构系统搜索目录。
+  原子发布或移除 Windows 双架构系统目录中的独立 AMD ADL 身份读取层。
 
 .DESCRIPTION
   同一份 x86 实现同时发布为 SysWOW64\atiadlxy.dll 与 atiadlxx.dll，覆盖不同
   硬件检测工具采用的经典 ADL 优先名称；x64 实现发布为 System32\atiadlxx.dll。
   三个目标共用一张 durable receipt，任一提交失败都会按相反顺序回滚。
+
+  DesiredState=Absent 不依赖 payload，只会移除已登记的项目投影；
+  移除同样使用先收据、后 write-through Move 到同目录 backup 的事务边界。
 
   目标只允许不存在、当前固定摘要或明确登记的历史项目摘要。真实 AMD 驱动和任何未知
   DLL 都会 fail-closed；脚本不修改目标 ACL、owner、驱动或签名策略。
@@ -19,11 +22,13 @@ param(
     [ValidateSet('Preflight', 'Install', 'Recover', 'Finalize', 'Rollback')]
     [string]$Action = 'Install',
     [string]$TransactionId = '',
+    [ValidateSet('Present', 'Absent')]
+    [string]$DesiredState = 'Present',
     [switch]$DeferFinalize
 )
 
 $ErrorActionPreference = 'Stop'
-
+$DesiredState = if ($DesiredState -eq 'Absent') { 'Absent' } else { 'Present' }
 # 当前构建的固定摘要；历史列表只含本项目已发布的独立 ADL 读取层，不能放行第三方 DLL。
 $ExpectedX86Hash = '86aca99433da976135f68b4b2904c04eaee370d97104b5a1622ad59f8731b1dd'
 $ExpectedX64Hash = '99b7e84b404bfa5140218549b4a49d68ebdfddb181ad9fdd72dcac296d799a62'
@@ -42,7 +47,6 @@ function Get-LowerSha256 {
 
 function Assert-PlainFile {
     param([Parameter(Mandatory = $true)][string]$Path)
-
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if ($item.PSIsContainer -or
         (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
@@ -53,7 +57,6 @@ function Assert-PlainFile {
 
 function Assert-PlainDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
-
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if (-not $item.PSIsContainer -or
         (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
@@ -63,7 +66,6 @@ function Assert-PlainDirectory {
 
 function Initialize-PlainDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
-
     if (-not (Test-Path -LiteralPath $Path)) {
         $null = [IO.Directory]::CreateDirectory($Path)
     }
@@ -73,7 +75,6 @@ function Initialize-PlainDirectory {
 function Get-PeMetadata {
     # 仅解析固定 PE 头，不加载或执行待发布 DLL。
     param([Parameter(Mandatory = $true)][string]$Path)
-
     $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
         [IO.FileShare]::Read)
     $reader = New-Object IO.BinaryReader($stream)
@@ -119,7 +120,6 @@ function Assert-AdlBinary {
         [Parameter(Mandatory = $true)][int]$ExpectedMachine,
         [Parameter(Mandatory = $true)][int]$ExpectedMagic
     )
-
     if ($ExpectedHash -cnotmatch '\A[0-9a-f]{64}\z') {
         throw ('ADL 构建摘要尚未注入：' + $ExpectedHash)
     }
@@ -144,7 +144,6 @@ function Test-HashInAllowList {
         [Parameter(Mandatory = $true)][string]$Hash,
         [AllowEmptyCollection()][string[]]$AllowedHashes = @()
     )
-
     foreach ($allowed in $AllowedHashes) {
         if ($Hash -ceq $allowed) { return $true }
     }
@@ -154,7 +153,6 @@ function Test-HashInAllowList {
 function Get-AdlProjectionSnapshot {
     # 只接受当前或显式历史项目摘要；真实 AMD ADL 与未知同名文件一律拒绝覆盖。
     param([Parameter(Mandatory = $true)]$Entry)
-
     if (-not (Test-Path -LiteralPath $Entry.Target)) {
         return [pscustomobject]@{ State='Absent'; Hash='' }
     }
@@ -172,7 +170,6 @@ function Get-AdlProjectionSnapshot {
 
 function Remove-TransactionFile {
     param([string]$Path)
-
     if ([string]::IsNullOrWhiteSpace($Path) -or
         -not (Test-Path -LiteralPath $Path)) { return }
     $null = Assert-PlainFile -Path $Path
@@ -188,7 +185,6 @@ if (-not (Test-Path -LiteralPath $transactionHelper -PathType Leaf)) {
 function Move-VerifiedAdlTarget {
     # 预检后先原子分离目标，再对实际被移动实体复算摘要，关闭检查/替换竞态。
     param([Parameter(Mandatory = $true)]$Entry)
-
     Move-AdlFileWriteThrough $Entry.Target $Entry.Backup
     try {
         $null = Assert-PlainFile -Path $Entry.Backup
@@ -207,11 +203,22 @@ function Move-VerifiedAdlTarget {
 
 function Publish-AdlProjection {
     param([object[]]$Entries, [string]$ReceiptPath, [string]$ReceiptId)
-
+    # 先完成全部目标分类，任一未知/真实 ADL 都会在 receipt 和
+    # 系统目录写入之前拒绝，不会出现只移除一半的交叉状态。
     foreach ($entry in $Entries) {
         $snapshot = Get-AdlProjectionSnapshot $entry
         $entry.State = $snapshot.State
         $entry.ObservedHash = $snapshot.Hash
+        if ($entry.DesiredState -ceq 'Absent') {
+            if ($entry.State -eq 'Absent') {
+                $entry.CommitAction = 'UnchangedAbsent'
+            } else {
+                $entry.CommitAction = 'Removed'
+                $entry.Backup = Join-Path $entry.Directory `
+                    ('.' + $entry.FileName + '.vmate-backup-' + [Guid]::NewGuid().ToString('N'))
+            }
+            continue
+        }
         if ($entry.State -eq 'Current') { continue }
         $suffix = [Guid]::NewGuid().ToString('N')
         $entry.Stage = Join-Path $entry.Directory `
@@ -231,12 +238,19 @@ function Publish-AdlProjection {
     Write-AdlProjectionReceipt $Entries $ReceiptPath $ReceiptId
     try {
         foreach ($entry in $Entries) {
+            if ($entry.DesiredState -ceq 'Absent') { continue }
             if ($entry.State -eq 'Current') { continue }
             Copy-Item -LiteralPath $entry.Source -Destination $entry.Stage -ErrorAction Stop
             Assert-AdlBinary $entry.Stage $entry.ExpectedHash $entry.Machine $entry.Magic
             Sync-AdlFileData $entry.Stage
         }
         foreach ($entry in $Entries) {
+            if ($entry.DesiredState -ceq 'Absent') {
+                if ($entry.CommitAction -ceq 'Removed') {
+                    Move-VerifiedAdlTarget $entry
+                }
+                continue
+            }
             if ($entry.State -eq 'Current') { continue }
             if ($entry.State -eq 'Absent') {
                 Move-AdlFileWriteThrough $entry.Stage $entry.Target
@@ -256,7 +270,13 @@ function Publish-AdlProjection {
             Assert-AdlBinary $entry.Target $entry.ExpectedHash $entry.Machine $entry.Magic
         }
         foreach ($entry in $Entries) {
-            Assert-AdlBinary $entry.Target $entry.ExpectedHash $entry.Machine $entry.Magic
+            if ($entry.DesiredState -ceq 'Absent') {
+                if (Test-Path -LiteralPath $entry.Target) {
+                    throw ('ADL 目标未按事务要求移除：' + $entry.Target)
+                }
+            } else {
+                Assert-AdlBinary $entry.Target $entry.ExpectedHash $entry.Machine $entry.Magic
+            }
         }
     } catch {
         $commitError = $_.Exception
@@ -297,7 +317,8 @@ function Get-CurrentGpuIdentityToken {
 }
 
 function New-AdlProjectionEntries {
-    param([string]$PayloadRoot, [string]$SystemX86, [string]$System64)
+    param([string]$PayloadRoot, [string]$SystemX86, [string]$System64,
+        [ValidateSet('Present', 'Absent')][string]$ProjectionState)
 
     return @(
         [pscustomobject]@{
@@ -306,6 +327,7 @@ function New-AdlProjectionEntries {
             Directory=$SystemX86; Target=(Join-Path $SystemX86 'atiadlxy.dll')
             ExpectedHash=$ExpectedX86Hash; HistoricalHashes=$HistoricalX86Hashes
             Machine=0x014C; Magic=0x010B; State=''; ObservedHash=''
+            DesiredState=$ProjectionState
             Stage=''; Backup=''; Discard=''; CommitAction=''
         },
         [pscustomobject]@{
@@ -314,6 +336,7 @@ function New-AdlProjectionEntries {
             Directory=$SystemX86; Target=(Join-Path $SystemX86 'atiadlxx.dll')
             ExpectedHash=$ExpectedX86Hash; HistoricalHashes=$HistoricalX86Hashes
             Machine=0x014C; Magic=0x010B; State=''; ObservedHash=''
+            DesiredState=$ProjectionState
             Stage=''; Backup=''; Discard=''; CommitAction=''
         },
         [pscustomobject]@{
@@ -322,6 +345,7 @@ function New-AdlProjectionEntries {
             Directory=$System64; Target=(Join-Path $System64 'atiadlxx.dll')
             ExpectedHash=$ExpectedX64Hash; HistoricalHashes=$HistoricalX64Hashes
             Machine=0x8664; Magic=0x020B; State=''; ObservedHash=''
+            DesiredState=$ProjectionState
             Stage=''; Backup=''; Discard=''; CommitAction=''
         }
     )
@@ -359,23 +383,29 @@ Assert-PlainDirectory $windowsRoot
 Assert-PlainDirectory $system64
 Assert-PlainDirectory $systemX86
 
-$payloadRoot = if ($Action -eq 'Install' -or $Action -eq 'Preflight') {
+$needsPayload = ($Action -eq 'Install' -or $Action -eq 'Preflight') -and
+    $DesiredState -ceq 'Present'
+$payloadRoot = if ($needsPayload) {
     if ([string]::IsNullOrWhiteSpace($PayloadDir)) { throw ($Action + ' 缺少 -PayloadDir') }
     [IO.Path]::GetFullPath($PayloadDir)
 } else { $PSScriptRoot }
-if ($Action -eq 'Install' -or $Action -eq 'Preflight') {
+if ($needsPayload) {
     Assert-PlainDirectory $payloadRoot
 }
-$entries = @(New-AdlProjectionEntries $payloadRoot $systemX86 $system64)
+$entries = @(New-AdlProjectionEntries $payloadRoot $systemX86 $system64 $DesiredState)
 
 if ($Action -eq 'Preflight') {
     # 只读路径：不创建 ProgramData 目录、lock、receipt 或 staging 文件。
     foreach ($entry in $entries) {
-        Assert-AdlBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+        if ($entry.DesiredState -ceq 'Present') {
+            Assert-AdlBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+        }
         $snapshot = Get-AdlProjectionSnapshot $entry
-        Write-Host ('ADL preflight {0}: {1}' -f $entry.Label, $snapshot.State)
+        Write-Host ('ADL preflight {0} -> {1}: {2}' -f
+            $entry.Label, $entry.DesiredState, $snapshot.State)
     }
-    Write-Host 'ADL 三目标只读预检通过。' -ForegroundColor Green
+    Write-Host ('ADL 三目标只读预检通过，期望状态：' + $DesiredState) `
+        -ForegroundColor Green
     return
 }
 
@@ -402,11 +432,13 @@ try {
             Write-Host 'ADL durable journal recovery completed.' -ForegroundColor Green
             return
         }
-        $entries = @(New-AdlProjectionEntries $payloadRoot $systemX86 $system64)
+        $entries = @(New-AdlProjectionEntries $payloadRoot $systemX86 $system64 $DesiredState)
     }
     if ($Action -eq 'Install') {
-        foreach ($entry in $entries) {
-            Assert-AdlBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+        if ($DesiredState -ceq 'Present') {
+            foreach ($entry in $entries) {
+                Assert-AdlBinary $entry.Source $entry.ExpectedHash $entry.Machine $entry.Magic
+            }
         }
         if ([string]::IsNullOrWhiteSpace($TransactionId)) {
             if ($DeferFinalize) { throw 'deferred ADL Install 必须复用 identity TransactionId' }
@@ -432,10 +464,17 @@ try {
             }
         } elseif ($Action -eq 'Finalize') {
             foreach ($entry in $entries) {
-                Assert-AdlBinary $entry.Target $entry.ExpectedHash $entry.Machine $entry.Magic
+                if ($entry.DesiredState -ceq 'Present') {
+                    Assert-AdlBinary $entry.Target $entry.ExpectedHash $entry.Machine $entry.Magic
+                } elseif (Test-Path -LiteralPath $entry.Target) {
+                    # 只拒绝并保留重新出现的 DLL，不扩大事务的删除权限。
+                    throw ('ADL 目标应为 Absent：' + $entry.Target)
+                }
             }
         } else {
-            foreach ($entry in $entries) { $null = Get-AdlProjectionSnapshot $entry }
+            # receipt 是任何系统 Move 的先决条件；不存在即表示从未写入或已经回滚完成。
+            Write-Host ('ADL rollback 收据已不存在，按无写入幂等收口：' +
+                $TransactionId) -ForegroundColor Yellow
         }
     }
 
@@ -443,9 +482,16 @@ try {
         Write-Host ('ADL 三目标 rollback 已收口：' + $TransactionId) `
             -ForegroundColor Green
     } else {
-        foreach ($entry in $entries) {
-            Write-Host ('系统 ADL {0} 已就绪：{1}  SHA-256={2}' -f
-                $entry.Label, $entry.Target, $entry.ExpectedHash) -ForegroundColor Green
+        if ($DesiredState -ceq 'Absent') {
+            foreach ($entry in $entries) {
+                Write-Host ('系统 ADL {0} 已移除：{1}' -f
+                    $entry.Label, $entry.Target) -ForegroundColor Green
+            }
+        } else {
+            foreach ($entry in $entries) {
+                Write-Host ('系统 ADL {0} 已就绪：{1}  SHA-256={2}' -f
+                    $entry.Label, $entry.Target, $entry.ExpectedHash) -ForegroundColor Green
+            }
         }
     }
 } finally {

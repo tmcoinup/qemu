@@ -2,13 +2,13 @@
 
 <#
 .SYNOPSIS
-  AMD ADL 三目标系统投影的持久收据与崩溃恢复状态机。
+  AMD ADL 三目标系统投影与互斥移除的持久收据、崩溃恢复状态机。
 
 .DESCRIPTION
   本文件由 install-adl-system.ps1 在定义摘要、PE 与普通文件校验函数后载入。
-  receipt 必须在第一个系统目录 Move 前写穿落盘，并完整记录三个目标的
-  Target/Stage/Backup/Discard。恢复只接受收据中的规范路径和精确摘要，
-  不会把未知或真实 AMD DLL 当作 VMate 历史发布物处理。
+  receipt 必须在第一个系统目录 Move 前写穿落盘，并完整记录 DesiredState 与三个
+  目标的 Target/Stage/Backup/Discard。恢复只接受规范路径和精确项目摘要；Absent
+  事务也不会把未知或真实 AMD DLL 当作 VMate 历史发布物处理。
 #>
 
 function Assert-AdlTransactionId {
@@ -96,6 +96,35 @@ function Undo-AdlProjectionEntry {
     $targetHash = Get-AdlOptionalFileHash $Entry.Target
     $backupHash = Get-AdlOptionalFileHash $Entry.Backup
     $discardHash = Get-AdlOptionalFileHash $Entry.Discard
+    if ([string]$Entry.DesiredState -ceq 'Absent') {
+        # 原快照为缺失时，事务没有权限删除之后由 AMD 软件或其他进程创建的文件。
+        # 发现并发变化应保留目标并停止收口，不能为了幂等而扩大删除范围。
+        if ($Entry.CommitAction -ceq 'UnchangedAbsent') {
+            if ($targetHash -or $backupHash -or $discardHash) {
+                throw ('UnchangedAbsent ADL 目标在事务中发生变化：' + $Entry.Target)
+            }
+            return
+        }
+        if ($Entry.CommitAction -cne 'Removed') {
+            throw ('Absent ADL 回滚动作非法：' + $Entry.CommitAction)
+        }
+
+        # Removed 只允许恢复收据精确记录的项目托管摘要。若同名目标已被重新创建，
+        # 一律不覆盖、不删除，保留 backup 与 receipt 供诊断。
+        if ($targetHash -ceq $Entry.ObservedHash -and -not $backupHash -and
+            -not $discardHash) {
+            return
+        }
+        if (-not $targetHash -and $backupHash -ceq $Entry.ObservedHash -and
+            -not $discardHash) {
+            Move-AdlFileWriteThrough $Entry.Backup $Entry.Target
+            if ((Get-AdlOptionalFileHash $Entry.Target) -cne $Entry.ObservedHash) {
+                throw ('Removed ADL rollback 恢复摘要非法：' + $Entry.Target)
+            }
+            return
+        }
+        throw ('Removed ADL 回滚状态非法，拒绝触碰未知目标：' + $Entry.Target)
+    }
     if ($Entry.CommitAction -eq '') {
         if ($targetHash -cne $Entry.ExpectedHash) {
             throw ('Unchanged ADL 目标在事务中发生变化：' + $Entry.Target)
@@ -151,16 +180,33 @@ function Write-AdlProjectionReceipt {
 
     Assert-AdlTransactionId $TransactionId
     if (Test-Path -LiteralPath $Path) { throw ('ADL 收据已存在：' + $Path) }
+    $desiredStates = @($Entries | ForEach-Object {
+        $value = [string]$_.DesiredState
+        if ([string]::IsNullOrWhiteSpace($value)) { 'Present' } else { $value }
+    } | Select-Object -Unique)
+    if ($desiredStates.Count -ne 1 -or
+        -not (@('Present', 'Absent') -ccontains [string]$desiredStates[0])) {
+        throw 'ADL 收据 DesiredState 非法或条目不一致'
+    }
+    $desiredState = [string]$desiredStates[0]
     $records = @($Entries | ForEach-Object {
+        $action = if ([string]$_.CommitAction) {
+            [string]$_.CommitAction
+        } elseif ($desiredState -ceq 'Absent') {
+            'UnchangedAbsent'
+        } else {
+            'Unchanged'
+        }
         [ordered]@{
             FileName=[string]$_.FileName; Target=[string]$_.Target
             ExpectedHash=[string]$_.ExpectedHash; PreviousHash=[string]$_.ObservedHash
-            Action=if ($_.CommitAction) { [string]$_.CommitAction } else { 'Unchanged' }
+            Action=$action
             Stage=[string]$_.Stage; Backup=[string]$_.Backup; Discard=[string]$_.Discard
         }
     })
     $document = [ordered]@{
-        SchemaVersion=1; TransactionId=$TransactionId; Entries=$records
+        SchemaVersion=2; TransactionId=$TransactionId
+        DesiredState=$desiredState; Entries=$records
     }
     $temporary = $Path + '.tmp-' + [Guid]::NewGuid().ToString('N')
     try {
@@ -184,9 +230,20 @@ function Read-AdlProjectionReceipt {
     if ($item.Length -lt 32 -or $item.Length -gt 64KB) { throw 'ADL 收据大小非法' }
     $document = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
     $records = @($document.Entries)
-    if ([int]$document.SchemaVersion -ne 1 -or
+    $schemaVersion = [int]$document.SchemaVersion
+    if (-not (@(1, 2) -contains $schemaVersion) -or
         [string]$document.TransactionId -cne $TransactionId -or
         $records.Count -ne $Entries.Count) { throw 'ADL 收据头或条目数非法' }
+    # schema-1 永远代表历史 Present 投影；只有 schema-2 才允许声明 Absent。
+    # 旧收据不会因兼容解析而获得删除权限。
+    $desiredState = if ($schemaVersion -eq 1) {
+        'Present'
+    } else {
+        [string]$document.DesiredState
+    }
+    if (-not (@('Present', 'Absent') -ccontains $desiredState)) {
+        throw 'ADL 收据 DesiredState 非法'
+    }
     for ($index = 0; $index -lt $Entries.Count; $index++) {
         $entry = $Entries[$index]
         $record = $records[$index]
@@ -200,13 +257,37 @@ function Read-AdlProjectionReceipt {
             -not (Test-HashInAllowList $receiptExpected $allowedExpected)) {
             throw ('ADL 收据目标或发布摘要不匹配：' + $entry.FileName)
         }
+        if ($entry.PSObject.Properties.Name -contains 'DesiredState') {
+            $entry.DesiredState = $desiredState
+        } else {
+            # 兼容旧测试/调用方构造的 entry，只补充状态字段，不修改路径与摘要集合。
+            $entry | Add-Member -NotePropertyName DesiredState `
+                -NotePropertyValue $desiredState
+        }
         $entry.ExpectedHash = $receiptExpected
         $action = [string]$record.Action
         $previous = [string]$record.PreviousHash
         $stage = [string]$record.Stage
         $backup = [string]$record.Backup
         $discard = [string]$record.Discard
-        if ($action -eq 'Unchanged') {
+        if ($desiredState -ceq 'Absent') {
+            if ($action -ceq 'UnchangedAbsent') {
+                if ($previous -or $stage -or $backup -or $discard) {
+                    throw ('ADL UnchangedAbsent 收据非法：' + $entry.FileName)
+                }
+                $entry.CommitAction = 'UnchangedAbsent'
+            } elseif ($action -ceq 'Removed') {
+                if (-not (Test-HashInAllowList $previous $allowedExpected) -or
+                    $stage -or $discard -or
+                    -not (Test-AdlTransactionPath $backup $entry.Directory `
+                        $entry.FileName 'backup')) {
+                    throw ('ADL Removed 收据非法：' + $entry.FileName)
+                }
+                $entry.CommitAction = 'Removed'
+            } else {
+                throw ('Absent ADL 收据动作非法：' + $action)
+            }
+        } elseif ($action -eq 'Unchanged') {
             if ($previous -cne $receiptExpected -or $stage -or $backup -or $discard) {
                 throw ('ADL Unchanged 收据非法：' + $entry.FileName)
             }
@@ -243,6 +324,23 @@ function Finalize-AdlProjectionReceipt {
 
     $resolved = @(Read-AdlProjectionReceipt $Entries $Path $TransactionId)
     foreach ($entry in $resolved) {
+        if ([string]$entry.DesiredState -ceq 'Absent') {
+            # 新出现的同名文件可能属于真实 AMD 软件；Finalize 不拥有它，必须保留
+            # 目标并失败，让收据继续存在，而不是静默扩大清理范围。
+            if (Get-AdlOptionalFileHash $entry.Target) {
+                throw ('Absent ADL Finalize 发现目标重新出现：' + $entry.Target)
+            }
+            if ($entry.CommitAction -ceq 'Removed') {
+                $removedBackupHash = Get-AdlOptionalFileHash $entry.Backup
+                # backup 已删而 receipt 尚存是合法的 Finalize 中断点；只在 backup
+                # 仍存在时要求精确摘要，随后即可幂等清理收据。
+                if ($removedBackupHash -and
+                    $removedBackupHash -cne $entry.ObservedHash) {
+                    throw ('Removed ADL Finalize 备份摘要不匹配：' + $entry.Backup)
+                }
+            }
+            continue
+        }
         Assert-AdlBinary $entry.Target $entry.ExpectedHash $entry.Machine $entry.Magic
         if (-not [string]::IsNullOrWhiteSpace([string]$entry.Discard) -and
             (Test-Path -LiteralPath $entry.Discard)) {
@@ -251,6 +349,12 @@ function Finalize-AdlProjectionReceipt {
     }
     foreach ($entry in $resolved) {
         Remove-TransactionFile -Path $entry.Stage
+        if ([string]$entry.DesiredState -ceq 'Absent') {
+            if ($entry.CommitAction -ceq 'Removed') {
+                Remove-TransactionFile -Path $entry.Backup
+            }
+            continue
+        }
         if ($entry.CommitAction -ne 'Replaced' -or
             -not (Test-Path -LiteralPath $entry.Backup)) { continue }
         if ((Get-AdlOptionalFileHash $entry.Backup) -cne $entry.ObservedHash) {

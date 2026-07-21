@@ -23,8 +23,8 @@ BUILD_DIR="$BUILD_DIR" \
     "$REPO_ROOT/deploy/guest-stealth/build-exe.sh" >/dev/null
 
 EXE="$OUT_DIR/respawn-stealth.exe"
-PAYLOAD_SECURITY="$REPO_ROOT/deploy/guest-stealth/launcher/payload-security.c"
-PAYLOAD_ENVIRONMENT="$REPO_ROOT/deploy/guest-stealth/launcher/payload-environment.c"
+PAYLOAD_SECURITY="$REPO_ROOT/deploy/guest-launcher-common/payload-security.c"
+PAYLOAD_ENVIRONMENT="$REPO_ROOT/deploy/guest-launcher-common/payload-environment.c"
 LAUNCHER_ARGUMENTS="$REPO_ROOT/deploy/guest-stealth/launcher/launcher-arguments.c"
 MANUFACTURER_HELPER="$REPO_ROOT/deploy/scripts/gpu-manufacturer-projection.ps1"
 MANUFACTURER_PROJECTOR_SOURCE="$REPO_ROOT/deploy/guest-stealth/launcher/gpu-manufacturer-projector.c"
@@ -228,9 +228,38 @@ grep -F 'CREATE_UNICODE_ENVIRONMENT, environment, work_dir' \
     "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
     || fail "CreateProcess 仍继承调用用户环境"
 for contract in 'L"PATH", safe_path' 'L"PSModulePath", module_path' \
-        'L"TEMP", work_dir' 'L"PROGRAMDATA", program_data'; do
+        'L"TEMP", work_dir' 'L"PROGRAMDATA", program_data' \
+        'L"COMPUTERNAME", computer_name' 'L"USERDOMAIN", user_domain' \
+        'L"USERNAME", user_name'; do
     grep -F "$contract" "$PAYLOAD_ENVIRONMENT" >/dev/null \
         || fail "最小环境缺少受控项: $contract"
+done
+for identity_api in OpenProcessToken GetTokenInformation LookupAccountSidW \
+        GetComputerNameW; do
+    grep -F "$identity_api" "$PAYLOAD_ENVIRONMENT" >/dev/null \
+        || fail "最小环境没有从可信 Windows 身份构造环境项: $identity_api"
+done
+for identity_name in COMPUTERNAME USERDOMAIN USERNAME; do
+    if grep -F "GetEnvironmentVariableW(L\"$identity_name\"" \
+            "$PAYLOAD_ENVIRONMENT" >&2; then
+        fail "管理员身份环境项仍可被提权前的继承环境污染: $identity_name"
+    fi
+done
+previous_line=0
+for contract in 'L"ALLUSERSPROFILE"' 'L"COMPUTERNAME"' 'L"COMSPEC"' \
+        'L"OS"' 'L"PATH"' 'L"PATHEXT"' 'L"PROCESSOR_ARCHITECTURE"' \
+        'L"PROGRAMDATA"' 'L"PSModulePath"' 'L"SystemDrive"' \
+        'L"SystemRoot"' 'L"TEMP"' 'L"TMP"' 'L"USERDOMAIN"' \
+        'L"USERNAME"' 'L"WINDIR"'; do
+    contract_line="$(grep -nF "$contract" "$PAYLOAD_ENVIRONMENT" \
+        | tail -n 1 | cut -d: -f1)"
+    [[ -n "$contract_line" && "$contract_line" -gt "$previous_line" ]] \
+        || fail "最小 Unicode 环境块没有按名称排序: $contract"
+    previous_line="$contract_line"
+done
+for identity_name in COMPUTERNAME USERDOMAIN USERNAME; do
+    strings -a -el "$EXE" | grep -Fx "$identity_name" >/dev/null \
+        || fail "构建后的 EXE 缺少受控身份环境项: $identity_name"
 done
 grep -F 'COMPLUS_*' "$PAYLOAD_ENVIRONMENT" >/dev/null \
     || fail "最小环境没有记录拒绝 .NET profiler 注入变量"
@@ -324,11 +353,13 @@ fi
 
 # package.sh 是用户最终生成“傻瓜单文件”的正式入口。用隔离仓库副本运行真实构建，
 # 并故意注入六个错误目录变量，证明它不会把 EXE 写到调用者指定的旁路目录，也不会
-# 从旁路驱动/芯片组/NVAPI/ADL 目录取输入。测试副本的四个只读输入目录链接回真源，
-# 所有 dist/build 写入仍限制在 mktemp 下，不污染并行测试共享的正式发布目录。
+# 从旁路驱动/芯片组/NVAPI/ADL 目录取输入。测试副本的四个大体积只读输入目录链接
+# 回真源，公共 launcher 源码则逐字节复制；所有 dist/build 写入仍限制在 mktemp 下。
 PACKAGE_REPO="$TMP_DIR/package-repo"
 mkdir -p "$PACKAGE_REPO/deploy"
 cp -a "$REPO_ROOT/deploy/guest-stealth" "$PACKAGE_REPO/deploy/guest-stealth"
+cp -a "$REPO_ROOT/deploy/guest-launcher-common" \
+    "$PACKAGE_REPO/deploy/guest-launcher-common"
 rm -rf "$PACKAGE_REPO/deploy/guest-stealth/dist"
 ln -s "$REPO_ROOT/deploy/scripts" "$PACKAGE_REPO/deploy/scripts"
 ln -s "$REPO_ROOT/deploy/nvapi-shim" "$PACKAGE_REPO/deploy/nvapi-shim"

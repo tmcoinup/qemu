@@ -121,8 +121,15 @@ sudo deploy/scripts/clone-from-base.sh win10-ltsc-shallow 2 \
 绝对路径、`VMS_DIR`、`qemu-img`、compatibility 及迁移授权，可直接复制。seal 的 root 发布器优先使用
 文件系统 reflink；不支持时会稀疏复制到独立 root inode，密封期间需预留约一份压缩后 base 的临时空间。
 
-升级前已有的 overlay 仍可读取普通用户拥有、无任何写权限的 legacy `0444` backing，启动时会给出迁移警告。
-用旧 base 创建新 clone 前，须停止所有引用它的 VM、确认无 QEMU/qemu-img 持有，再按 clone 的诊断改为 `root:root/0444`；随后会自动建立实例 pin。
+浏览器下载、`scp`、Windows、U 盘或移动硬盘复制会丢失 Linux owner/mode。把独立
+qcow2 复制到目标 Linux 文件系统后，仍直接执行同一条 `sudo clone-from-base.sh`：
+clone 会在稳定 FD 上完成 qcow2 全检，确认文件属于调用用户、只有一个硬链接且没有
+进程持有，然后自动密封为 `root:root/0444`，无需手工 `chown/chmod`。直接放在
+NTFS/CIFS/DrvFS 上且无法持久化 Unix 权限时会明确拒绝，应先复制到 Linux 的
+`BASE_DIR`；base 与 `VMS_DIR` 仍须位于同一文件系统，才能建立零拷贝实例 pin。
+
+升级前已有的 overlay 仍可读取普通用户拥有、无任何写权限的 legacy `0444`
+backing，启动时会给出迁移警告；新 clone 和实例内 pin 继续使用严格密封契约。
 
 `--platform-id` 保留为高级选项：新建时可固定特定候选，已有 profile 上则断言与持久化
 ID 一致。例如：

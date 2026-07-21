@@ -353,6 +353,63 @@ static void test_guest_size_selection(void)
         false, surface, scanout, NULL));
 }
 
+static void test_pointer_policy_before_tablet_activation(void)
+{
+    SDL2PointerPolicy policy;
+
+    /*
+     * 冷启动或 OOBE 首次启用 USB HID 前，
+     * PS/2 可能仍是 current handler。
+     * 只要 usb-tablet 仍然存在，
+     * 就继续接收位移且不能因点击自动抓鼠标。
+     */
+    policy = sdl2_pointer_policy(false, false, true);
+    g_assert_true(policy.accept_motion);
+    g_assert_false(policy.auto_grab_on_click);
+    g_assert_false(policy.relative_mode);
+    g_assert_false(policy.release_grab);
+
+    /*
+     * 覆盖旧故障状态：
+     * 启动画面已经抓取，随后 tablet 恢复。
+     * notifier 必须撤销逻辑 grab，
+     * SDL 相对模式也必须明确关闭。
+     */
+    policy = sdl2_pointer_policy(true, true, true);
+    g_assert_true(policy.accept_motion);
+    g_assert_false(policy.auto_grab_on_click);
+    g_assert_false(policy.relative_mode);
+    g_assert_true(policy.release_grab);
+
+    /*
+     * Tablet 已存在但尚未成为 current 时，
+     * 旧版本也可能已经抓住 PS/2。
+     * notifier 先要求释放 grab；
+     * 释放后的同步必须关闭 relative mode。
+     */
+    policy = sdl2_pointer_policy(true, false, true);
+    g_assert_true(policy.release_grab);
+    policy = sdl2_pointer_policy(false, false, true);
+    g_assert_false(policy.relative_mode);
+    g_assert_false(policy.release_grab);
+
+    /*
+     * 纯相对鼠标仍保持原来的“点击抓取、
+     * 抓取后使用 relative mode”。
+     */
+    policy = sdl2_pointer_policy(false, false, false);
+    g_assert_false(policy.accept_motion);
+    g_assert_true(policy.auto_grab_on_click);
+    g_assert_false(policy.relative_mode);
+    g_assert_false(policy.release_grab);
+
+    policy = sdl2_pointer_policy(true, false, false);
+    g_assert_true(policy.accept_motion);
+    g_assert_false(policy.auto_grab_on_click);
+    g_assert_true(policy.relative_mode);
+    g_assert_false(policy.release_grab);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -383,6 +440,8 @@ int main(int argc, char **argv)
                     test_relative_scaling);
     g_test_add_func("/sdl2-pointer/guest-size-selection",
                     test_guest_size_selection);
+    g_test_add_func("/sdl2-pointer/policy-before-tablet-activation",
+                    test_pointer_policy_before_tablet_activation);
 
     return g_test_run();
 }

@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SPOOF="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 REFRESH_SCRIPT="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
 MODE_SCRIPT="$REPO_ROOT/deploy/scripts/force-displayfreq.ps1"
+RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
 TMP_DIR="$(mktemp -d)"
 FAKE_RUNNER="$TMP_DIR/run-with-fake-display.ps1"
 
@@ -254,6 +255,10 @@ grep -F '$displayModeFailureCode = 11' "$SPOOF" >/dev/null \
     || fail "主脚本吞掉了显示 helper 的重启退出码 11"
 grep -F 'exit $displayModeFailureCode' "$SPOOF" >/dev/null \
     || fail "主脚本没有统一传播显示 helper 的非零退出码"
+grep -F 'Restart-RespawnForPendingWork -PendingExitCode 11' "$RESPAWN" >/dev/null \
+    || fail "外层没有把显示重启码 11 接入统一二阶段流程"
+grep -F -- '-RegistrationFailureCode 33 -ShutdownFailureCode 34' "$RESPAWN" >/dev/null \
+    || fail "显示二阶段注册/重启失败码契约不完整"
 
 # 旧 HTTP/SSH 入口已经退役。它们必须只给出迁移诊断，不能继续下载松散 helper、
 # 修改 guest 或提供一个与统一 EXE 不同的第二套执行路径。

@@ -288,12 +288,12 @@ grep -F "if (\$ResumeStage -eq 'Full' -and -not (Wait-ResumeDisplayDeviceReady))
     || fail "芯片组只验证阶段仍被显示设备就绪检查阻塞"
 
 # -NoReboot 必须把待重启状态返回给调用者；正常路径只在 GPU 初始化结束后安排
-# 最终重启，并且任务注册严格早于 shutdown。
+# 最终重启，并且任务注册严格早于统一 shutdown helper。
 grep -F 'exit 30' "$RESPAWN" >/dev/null \
     || fail "-NoReboot 没有返回芯片组待重启状态"
 register_verify_line="$(grep -n -- "-ResumeStage 'ChipsetVerification'" \
     "$RESPAWN" | cut -d: -f1)"
-final_shutdown_line="$(grep -n '^& \$shutdownExe /r /t \$RebootDelay' \
+final_shutdown_line="$(grep -n '^    Invoke-RespawnShutdown -ShutdownPath ' \
     "$RESPAWN" | cut -d: -f1)"
 [[ -n "$register_verify_line" && -n "$final_shutdown_line" &&
    "$register_verify_line" -lt "$final_shutdown_line" ]] \

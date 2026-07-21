@@ -23,6 +23,16 @@ class PublishError(RuntimeError):
     """可向入口层直接报告的受控发布失败。"""
 
 
+def invoking_user_uid() -> int:
+    """解析 sudo/pkexec 的原始普通用户，拒绝无法归属到真实用户的 root 调用。"""
+
+    for variable_name in ("SUDO_UID", "PKEXEC_UID"):
+        raw_uid = os.environ.get(variable_name, "")
+        if raw_uid.isdecimal() and int(raw_uid) != 0:
+            return int(raw_uid)
+    raise PublishError("无法确认调用方的普通用户 UID")
+
+
 def file_fingerprint(file_stat: os.stat_result) -> str:
     """编码足以绑定 inode、内容版本、owner、mode 与 link count 的字段。"""
 
@@ -211,10 +221,7 @@ def publish(
     if not PROC_FD_PATTERN.fullmatch(source_path):
         raise PublishError("源 base 必须使用 /proc/PID/fd/N 稳定引用")
 
-    sudo_uid_raw = os.environ.get("SUDO_UID", "")
-    if not sudo_uid_raw.isdecimal() or int(sudo_uid_raw) == 0:
-        raise PublishError("无法确认调用 seal 的普通用户 UID")
-    sudo_uid = int(sudo_uid_raw)
+    sudo_uid = invoking_user_uid()
     expected = parse_fingerprint(expected_fingerprint)
 
     target_path = os.path.abspath(target_path)
@@ -278,6 +285,66 @@ def publish(
                 os.close(file_descriptor)
 
 
+def adopt(source_path: str, expected_fingerprint: str) -> str:
+    """把传输落地的单链接 base inode 原地密封为 root:root 0444。"""
+
+    if os.geteuid() != 0:
+        raise PublishError("base 导入 helper 必须由 sudo 以 root 运行")
+    if not PROC_FD_PATTERN.fullmatch(source_path):
+        raise PublishError("待导入 base 必须使用 /proc/PID/fd/N 稳定引用")
+
+    invoking_uid = invoking_user_uid()
+    expected = parse_fingerprint(expected_fingerprint)
+    source_fd = -1
+    try:
+        source_fd = open_fingerprint_target(source_path)
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise PublishError("待导入 base FD 不是普通文件")
+        if stat_tuple(source_stat) != expected:
+            raise PublishError("待导入 base 在 qcow2 校验后发生变化")
+        if source_stat.st_uid != invoking_uid:
+            raise PublishError("待导入 base 不属于调用 sudo 的普通用户")
+        if source_stat.st_nlink != 1:
+            raise PublishError("待导入 base 必须是单链接文件，避免影响其它目录项")
+
+        stable_content = (
+            source_stat.st_dev,
+            source_stat.st_ino,
+            source_stat.st_size,
+            source_stat.st_mtime_ns,
+            source_stat.st_nlink,
+        )
+        # 先去掉全部写位，再移交给 root；最后重复 chmod，覆盖部分文件系统在
+        # chown 时重算 mode 的差异。全程操作稳定 FD，不重新解析用户可替换路径。
+        os.fchmod(source_fd, 0o444)
+        os.fsync(source_fd)
+        os.fchown(source_fd, 0, 0)
+        os.fchmod(source_fd, 0o444)
+        os.fsync(source_fd)
+
+        sealed_stat = os.fstat(source_fd)
+        sealed_content = (
+            sealed_stat.st_dev,
+            sealed_stat.st_ino,
+            sealed_stat.st_size,
+            sealed_stat.st_mtime_ns,
+            sealed_stat.st_nlink,
+        )
+        if sealed_content != stable_content:
+            raise PublishError("base 密封时 inode、大小或内容时间戳发生变化")
+        if (
+            sealed_stat.st_uid != 0
+            or sealed_stat.st_gid != 0
+            or stat.S_IMODE(sealed_stat.st_mode) != 0o444
+        ):
+            raise PublishError("目标文件系统无法落实 root:root 0444 密封属性")
+        return file_fingerprint(sealed_stat)
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+
+
 def fingerprint(path: str) -> str:
     """从稳定 FD 读取 fingerprint，供非特权 seal 绑定 qcow2 校验结果。"""
 
@@ -312,9 +379,14 @@ def main(arguments: Sequence[str]) -> int:
             install_signal_guards()
             print(publish(arguments[1], arguments[2], arguments[3]))
             return 0
+        if len(arguments) == 3 and arguments[0] == "adopt":
+            install_signal_guards()
+            print(adopt(arguments[1], arguments[2]))
+            return 0
         raise PublishError(
             "usage: seal-base-publish.py fingerprint PATH | "
-            "publish /proc/PID/fd/N TARGET EXPECTED_FINGERPRINT"
+            "publish /proc/PID/fd/N TARGET EXPECTED_FINGERPRINT | "
+            "adopt /proc/PID/fd/N EXPECTED_FINGERPRINT"
         )
     except (OSError, PublishError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

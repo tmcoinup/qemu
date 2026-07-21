@@ -20,7 +20,7 @@
 /*
  * Owner 固定为 Builtin Administrators。受保护 DACL 不继承 ProgramData 可能过宽
  * 的写权限：SYSTEM/Administrators 完全控制，Builtin Users 只读执行。
- * 这样普通用户可以按需运行 GPU-Z helper，但不能替换管理员随后执行的脚本。
+ * 这样普通用户可以读取发布内容，但不能替换管理员随后执行的脚本。
  */
 static const wchar_t payload_sddl[] =
     L"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)";
@@ -222,9 +222,12 @@ HANDLE payload_acquire_lock(const wchar_t *root_dir)
                        FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_OPEN_REPARSE_POINT,
                        NULL);
     if (lock == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+
         fwprintf(stderr,
                  L"获取 payload 独占锁失败；可能已有初始化正在运行，错误=%lu\n",
-                 GetLastError());
+                 error);
+        SetLastError(error);
     }
     return lock;
 }
@@ -258,7 +261,7 @@ static int create_unique_staging(wchar_t *out, size_t cap,
     attributes.lpSecurityDescriptor = security.descriptor;
 
     for (attempt = 0; attempt < 1000; attempt++) {
-        if (!build_unique_child(out, cap, root, L"respawn-stage", attempt)) {
+        if (!build_unique_child(out, cap, root, L"payload-stage", attempt)) {
             break;
         }
         if (CreateDirectoryW(out, &attributes)) {
@@ -411,7 +414,7 @@ static int move_old_directory(const wchar_t *work_dir,
     }
     for (attempt = 0; attempt < 1000; attempt++) {
         if (!build_unique_child(backup, backup_cap, root_dir,
-                                L"respawn-old", attempt)) {
+                                L"payload-old", attempt)) {
             return 0;
         }
         if (MoveFileExW(work_dir, backup, MOVEFILE_WRITE_THROUGH)) {

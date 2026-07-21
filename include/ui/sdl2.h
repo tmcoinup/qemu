@@ -55,6 +55,7 @@ struct sdl2_console {
     bool fullscreen;
     bool saved_grab;
     bool absolute_enabled;
+    bool absolute_available;
     uint32_t mouse_button_state;
     bool guest_cursor;
     int guest_x;

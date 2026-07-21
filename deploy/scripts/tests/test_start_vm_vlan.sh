@@ -248,10 +248,24 @@ test_no_vlan_keeps_original_path() {
         IMAGE_ROOT="$TEST_IMAGE_ROOT" "$START_VM" 9915 --no-sdl --no-fb-shm \
         --no-bridge >"$out" 2>&1
     assert_contains "__DRY_RUN_ARGV__" "$out"
+    assert_contains "user-mode NAT (SSH 127.0.0.1:" "$out"
     assert_contains "user,id=net0,hostfwd=" "$out"
+    assert_not_contains "SSH/RDP fwd:" "$out"
     assert_not_contains "svtap" "$out"
     assert_not_contains "qemu-stealth-vlan-down" "$out"
     assert_not_contains "VLAN helper" "$out"
+}
+
+test_bridge_log_does_not_claim_host_forwarding() {
+    local out="$1"
+
+    DRY_RUN=1 TPM=0 HOST_TUNE=0 CPU_ISOLATE=0 QEMU_CAP_CHECK=0 \
+        IMAGE_ROOT="$TEST_IMAGE_ROOT" "$START_VM" 9919 --no-sdl --no-fb-shm \
+        >"$out" 2>&1
+    assert_contains "__DRY_RUN_ARGV__" "$out"
+    assert_contains "network:     bridge=" "$out"
+    assert_not_contains "SSH/RDP fwd:" "$out"
+    assert_not_contains "hostfwd=" "$out"
 }
 
 main() {
@@ -278,6 +292,7 @@ main() {
     test_instance_guard_holds_lock_across_parent
     test_watchdog_waits_for_supervisor_before_vlan_cleanup
     test_no_vlan_keeps_original_path "$TEST_OUT"
+    test_bridge_log_does_not_claim_host_forwarding "$TEST_OUT"
     echo "PASS: start-vm VLAN 参数与无 VLAN 兼容路径"
 }
 

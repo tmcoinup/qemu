@@ -7,8 +7,9 @@
 # 两件事，都只动 host 侧旋钮，guest 的 CPUID / tsc-freq / 拓扑 / SMBIOS 全不变：
 #
 #  1) 抖动调优 (HOST_TUNE=1): governor=performance + 可配置 halt_poll +
-#     THP defrag=never。多开默认 KVM_HALT_POLL_NS=0，靠 cpuset 隔离防止宿主
-#     编译抢 vCPU；需要旧低延迟策略时显式 KVM_HALT_POLL_NS=500000。
+#     THP defrag=never + split-lock 限速策略。多开默认 KVM_HALT_POLL_NS=0，
+#     靠 cpuset 隔离防止宿主编译抢 vCPU；需要内核 split-lock DoS 防护的
+#     多租户宿主可显式设 SPLIT_LOCK_MITIGATE=1。
 #
 #  2) 频率封顶 (CPU_FREQ_CAP=1): 把 scaling_max_freq 压到「**运行中所有 VM**
 #     伪装 CPU 上限(CPU_MAX_MHZ=SMBIOS Type4 max-speed)的最小值」。host boost 远
@@ -27,6 +28,20 @@
 #     只 WARN 不阻断启动。失败一律不阻断主流程。
 # ---------------------------------------------------------------------------
 
+# 纯策略函数：让单元测试用临时文件覆盖 0/1/旧内核缺失三种情况。
+# 生产调用不传第二参数，始终读取内核固定路径；root helper 也不接受
+# 路径环境变量，因此测试接口不会扩大特权写入边界。
+sv_host_split_lock_mitigation_matches() {
+    local target="${1:-}" path="${2:-/proc/sys/kernel/split_lock_mitigate}"
+    local current
+
+    [[ "$target" == 0 || "$target" == 1 ]] || return 2
+    [[ -e "$path" ]] || return 0
+    [[ -r "$path" ]] || return 1
+    current="$(<"$path")"
+    [[ "$current" == "$target" ]]
+}
+
 # DRY_RUN：零副作用、零输出，原样返回（本文件被 source，return 即退出本步骤）。
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     return 0
@@ -37,6 +52,14 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
     _ht_need=0
     _ht_halt_poll_target="${KVM_HALT_POLL_NS:-0}"
     [[ "$_ht_halt_poll_target" =~ ^[0-9]+$ ]] || _ht_halt_poll_target=0
+    _ht_split_lock_target="${SPLIT_LOCK_MITIGATE:-0}"
+    case "$_ht_split_lock_target" in
+        0|1) ;;
+        *)
+            echo "ERROR: SPLIT_LOCK_MITIGATE 必须是 0 或 1" >&2
+            exit 2
+            ;;
+    esac
 
     # --- 抖动调优是否需要：全核 governor=performance 且 halt_poll 等于目标值 ---
     for _g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
@@ -46,6 +69,11 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
     _hp=$(cat /sys/module/kvm/parameters/halt_poll_ns 2>/dev/null || echo 0)
     [[ "$_hp" =~ ^[0-9]+$ ]] || _hp=0
     (( _hp != _ht_halt_poll_target )) && _ht_need=1
+    _ht_split_lock_supported=0
+    if [[ -e /proc/sys/kernel/split_lock_mitigate ]]; then
+        _ht_split_lock_supported=1
+        sv_host_split_lock_mitigation_matches "$_ht_split_lock_target" || _ht_need=1
+    fi
 
     # --- 频率封顶目标 = 运行中所有 VM(含本实例) CPU_MAX_MHZ 的最小值 ---
     # _ht_cap_arg: 传给 host-performance.sh 的 kHz；空=不封顶(CPU_FREQ_CAP=0)。
@@ -80,7 +108,14 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
     fi
 
     if (( _ht_need == 0 )); then
-        echo ">> host 调优:   已是 performance + halt_poll=${_ht_halt_poll_target}ns$([[ -n "$_ht_cap_arg" ]] && echo " + 频率封顶 $(( _ht_cap_arg/1000 ))MHz")，跳过"
+        _ht_ready="performance + halt_poll=${_ht_halt_poll_target}ns"
+        if (( _ht_split_lock_supported )); then
+            _ht_ready="${_ht_ready} + split_lock=${_ht_split_lock_target}"
+        fi
+        if [[ -n "$_ht_cap_arg" ]]; then
+            _ht_ready="${_ht_ready} + 频率封顶 $(( _ht_cap_arg / 1000 ))MHz"
+        fi
+        echo ">> host 调优:   已是 ${_ht_ready}，跳过"
     elif [[ ! -x "$_ht_script" ]]; then
         echo ">> host 调优:   找不到安全的 root-owned helper: $_ht_script" >&2
         echo ">>             请在仓库根目录重新运行: deploy/tools/build.sh --install-host-helpers" >&2
@@ -100,17 +135,19 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
         if [[ $EUID -eq 0 ]]; then
             echo ">> host 调优:   应用 host-performance.sh${_ht_msg} ..."
             "$_ht_script" "${_ht_cap_arg:-0}" "$_ht_halt_poll_target" \
+                "$_ht_split_lock_target" \
                 || echo ">> host 调优:   ⚠ 部分失败（不阻断启动）" >&2
         elif sudo -n -- "$_ht_script" "${_ht_cap_arg:-0}" \
-                "$_ht_halt_poll_target" 2>/dev/null; then
+                "$_ht_halt_poll_target" "$_ht_split_lock_target" 2>/dev/null; then
             echo ">> host 调优:   ✓ sudo(免密)已应用 host-performance.sh${_ht_msg}"
         elif [[ -t 0 || -t 1 ]]; then
             echo ">> host 调优:   需 sudo 应用 host-performance.sh${_ht_msg}（NOPASSWD 未配会提示输密；--no-host-tune 关）..."
             sudo -- "$_ht_script" "${_ht_cap_arg:-0}" "$_ht_halt_poll_target" \
+                "$_ht_split_lock_target" \
                 || echo ">> host 调优:   ⚠ sudo 失败/取消（不阻断启动）" >&2
         else
             echo ">> host 调优:   ⚠ 需 sudo 但无 tty 且无免密，跳过" >&2
-            echo ">>             手动: sudo $_ht_script ${_ht_cap_arg:-0} $_ht_halt_poll_target（或配 NOPASSWD / HOST_TUNE=0）" >&2
+            echo ">>             手动: sudo $_ht_script ${_ht_cap_arg:-0} $_ht_halt_poll_target $_ht_split_lock_target（或配 NOPASSWD / HOST_TUNE=0）" >&2
         fi
     fi
 fi

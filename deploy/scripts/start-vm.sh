@@ -138,10 +138,15 @@
 #     HOST_TUNE=1          起 VM 前自动跑 host-performance.sh 压计时抖动（默认 1）
 #                          (flag: --host-tune / --no-host-tune)
 #                          governor=performance + KVM_HALT_POLL_NS(默认 0) + THP
-#                          defrag=never。防编译抢 vCPU 主要靠 CPU_ISOLATE/cpuset；
+#                          defrag=never + split-lock 限速策略。防编译抢 vCPU 主要靠
+#                          CPU_ISOLATE/cpuset；
 #                          需要旧低延迟 busy-poll 可显式 KVM_HALT_POLL_NS=500000。
-#     GUEST_NUMLOCK=1      QEMU 从 usb-kbd 的 guest LED 回报确认状态，只在明确
-#                          OFF 时异步开启 NumLock；不修改 Windows 注册表或 host XKB。
+#     SPLIT_LOCK_MITIGATE=0
+#                          默认取消内核对 split-lock 触发者的故意降速；
+#                          多租户宿主如需保留 DoS 防护可设 1。需 HOST_TUNE=1。
+#     GUEST_NUMLOCK=1      QEMU 从 usb-kbd 的 guest LED 回报确认状态；每次明确
+#                          OFF 只送一个原子 click 并等待 ON，连续 OFF 不重复送键。
+#                          默认持续强制 ON；不修改 Windows 注册表或 host XKB。
 #                          (flag: --numlock / --no-numlock)
 #     CPU_FREQ_CAP=0       默认不改宿主全局频率；设 1 才按本实例 CPU 上限封顶
 #                          (CPU_MAX_MHZ=SMBIOS Type4 max-speed，需 HOST_TUNE=1）

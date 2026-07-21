@@ -1,5 +1,5 @@
-#ifndef RESPAWN_PAYLOAD_SECURITY_H
-#define RESPAWN_PAYLOAD_SECURITY_H
+#ifndef GUEST_LAUNCHER_PAYLOAD_SECURITY_H
+#define GUEST_LAUNCHER_PAYLOAD_SECURITY_H
 
 #include <windows.h>
 #include <stddef.h>

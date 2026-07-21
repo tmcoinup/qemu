@@ -5,7 +5,7 @@
 #   2. 已正确绑定且发布 INF 完整的克隆机跳过 pnputil；只有发布 INF 精确缺失时恢复；
 #   3. 只接受当前浅层方案的 PCI\VEN_1AF4&DEV_1050，绝不把 stock 包误装到
 #      历史 VEN_10DE/VEN_1002 深层身份设备上；
-#   4. 内嵌 SYS/CAT/INF 在安装前逐个做固定 SHA-256 和微软签名者校验。
+#   4. 内嵌 SYS/CAT/INF 在安装前按公共 trust helper 的固定锚逐个校验。
 #   5. pnputil=3010 时写入持久状态并返回 30；只有重启后逐张显卡
 #      完成 Service/Status/Problem/INF 四项校验，才能清除状态并报告成功。
 
@@ -16,18 +16,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
-# 这三个摘要锁定同一套 virtio-win stock 包。CAT 与 SYS 不是任意版本都能混用；
-# 固定摘要可以在 pnputil 前阻止打包错误、释放不完整或用户误替换文件。
-$ExpectedHashes = @{
-    'viogpudo.sys' = '04e873ad57387a518ad8ccae5116989c63170503c14b9cca0b2067e63876af89'
-    'viogpudo.cat' = 'b5122b2e060ec0c2f0157afcdc64c728ec31646819055c8b79ae3f4227472078'
-    'viogpudo.inf' = '48abd56644386e1f0d85c54cd64db93e62a4eb33bc7acb2613f237c6e1c6a0ee'
-}
-
-# 该证书指纹对应上面固定 SYS 中的 WHCP 签名者。仅检查 Subject 会允许本地
-# 自签根伪造同名证书；“文件摘要 + Windows 信任状态 + 签名者指纹”三项必须同时成立。
-$ExpectedWhcpSignerThumbprint = 'A5D13378E659DDC05C03EE71B432DD667A302999'
 
 # 状态键存在 HKLM，不依赖用户临时目录或 EXE 从哪个盘符运行。
 # 外层 respawn 把退出码 30 当成“需重启续跑”，不当成安装成功。
@@ -261,8 +249,8 @@ if ($activeVioStates.Count -gt 0) {
 }
 $repairMissingPublishedInf = $missingPublishedInfNames.Count -gt 0
 
-# 幂等快速路径要求所有在线 PCI Display 同时通过 PnP、WMI 签名和 INF 关联校验；
-# 因此完整克隆机无扰动跳过，深层自签或签名关联损坏的旧机不会进入此分支。
+# 幂等快速路径要求所有在线 PCI Display 通过直接 PnP 绑定校验；活动 SYS、服务和
+# 发布 INF 已在上面的 direct-trust 步骤校验，因此完整克隆机可无扰动跳过。
 $allAlreadyHealthy = Test-AllTargetStatesHealthy -States $before `
     -TargetInstanceIds $currentTargetIds -WriteProblems
 if ($allAlreadyHealthy -and -not $repairMissingPublishedInf) {
@@ -310,22 +298,34 @@ if ($pnputilCode -eq 3010) {
     exit $RestartRequiredExitCode
 }
 
-# 不 Disable/Enable 正在输出画面的显卡，避免黑屏或崩溃。PnP 扫描后用
-# 有界短轮询取代固定 3 秒空等：驱动已即时绑定时可立即继续，慢机器
-# 仍有最多约 3 秒的 PnP 收敛时间。
+# 不 Disable/Enable 正在输出画面的显卡，避免黑屏或崩溃。PnP 扫描后同时等待
+# 设备绑定与活动内核服务/发布 INF 收敛；后者使用可抛异常的 direct-trust 探针，
+# 不能在 PnP 属性先更新时立即把短暂的 Win32_SystemDriver 延迟误报为失败。
 try { & $pnputilPath /scan-devices 2>$null | Out-Null } catch {}
 $after = @()
 $afterHealthy = $false
-for ($attempt = 0; $attempt -lt 7; $attempt++) {
+$afterTrusted = $false
+$afterTrustError = ''
+$settleDeadline = [DateTime]::UtcNow.AddSeconds(10)
+do {
     $after = @(Get-PciDisplayState)
     $afterIds = @($after | ForEach-Object { [string] $_.InstanceId })
     if (Test-SameTargetSet -Expected $currentTargetIds -Actual $afterIds) {
         $afterHealthy = Test-AllTargetStatesHealthy -States $after `
             -TargetInstanceIds $currentTargetIds
-        if ($afterHealthy) { break }
+        if ($afterHealthy) {
+            try {
+                [void] (Assert-ActiveStockDriver -States $after `
+                    -SystemDirectory $systemDirectory -ThrowOnFailure)
+                $afterTrusted = $true
+                break
+            } catch {
+                $afterTrustError = $_.Exception.Message
+            }
+        }
     }
-    if ($attempt -lt 6) { Start-Sleep -Milliseconds 500 }
-}
+    Start-Sleep -Milliseconds 500
+} while ([DateTime]::UtcNow -lt $settleDeadline)
 Write-DisplayState -States $after
 
 $finalIds = @($after | ForEach-Object { [string] $_.InstanceId })
@@ -339,12 +339,15 @@ if (-not $afterHealthy) {
     Stop-DriverInstall `
         '驱动包已提交，但至少一个 PCI 显示目标未通过 VioGpuDod/PnP/INF 验证。' 28
 }
+if (-not $afterTrusted) {
+    Stop-DriverInstall `
+        ("设备绑定已收敛，但活动驱动在等待期内未通过直接信任校验: " +
+            $afterTrustError) 34
+}
 
-# 只有 pnputil 明确不要求重启时，才校验当前正在运行的 SYS/INF 并报告成功。
+# 只有 pnputil 明确不要求重启，且上面的轮询已校验当前 SYS/INF，才报告成功。
 # 3010 可能在当前 boot 暂时显示健康但仍加载旧实例，必须先写 marker、重启，再由
 # 上面的 pending 二阶段执行同一信任校验；不能在重启前误判成 modified driver。
-[void] (Assert-ActiveStockDriver -States $after `
-    -SystemDirectory $systemDirectory)
 if (-not $repairExistingVioBinding) {
     Clear-NewInstallDisplayModeCache
     Write-Host "  所有 PCI 显示目标已健康绑定 VioGpuDod；重启后将重新枚举显示模式。" `
@@ -353,7 +356,7 @@ if (-not $repairExistingVioBinding) {
     Write-Host "  缺失发布 INF 已由 pnputil 恢复，活动驱动与全部目标通过后验验证。" `
         -ForegroundColor Green
 } else {
-    Write-Host "  签名驱动 WMI/INF 关联已由 pnputil 恢复并通过完整后验验证。" `
+    Write-Host "  活动驱动绑定已由 pnputil 恢复并通过完整直接信任验证。" `
         -ForegroundColor Green
 }
 exit 0

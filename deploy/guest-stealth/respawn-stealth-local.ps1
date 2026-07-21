@@ -43,7 +43,6 @@ $ErrorActionPreference = 'Continue'
 try { chcp 65001 | Out-Null } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
-
 # 所有高权限子流程都固定到当前 Windows PowerShell 的绝对路径。
 # 不允许裸调用 `powershell`，否则当前目录或继承 PATH 中的同名程序可能
 # 在 UAC/计划任务的管理员上下文中被误执行。
@@ -68,13 +67,13 @@ try {
         -ForegroundColor Red
     exit 8
 }
-
 function Stop-GpuProjectionTask {
-    # 重跑 EXE 前必须确认旧 task 已停止且不存在，再把 HardwareID 恢复为
-    # physical-only，避免 apply-gpu-spoof 的最终 PnP scan 与旧 SYSTEM task 竞态。
-    Remove-ScheduledTaskVerified -TaskName $projectionTaskName
+    # 重跑前先阻断两个旧 SYSTEM writer，避免驱动/PnP 操作与名称或 HardwareID
+    # 投影竞态；部署/投影失败时复用同一屏障，不能留下引用混版 helper 的任务。
+    foreach ($taskName in $projectionTaskName, 'StealthGPU-RefreshName') {
+        Remove-ScheduledTaskVerified -TaskName $taskName
+    }
 }
-
 function Test-CurrentGpuIdentityExists {
     # 只判断严格 pointer 是否存在；具体 schema 和字段仍由 projector 通过
     # refresh-gpu-name.ps1 -ReadIdentityOnly 完整验证，不能回退读取旧 root mirror。
@@ -86,7 +85,6 @@ function Test-CurrentGpuIdentityExists {
         return $false
     }
 }
-
 function Assert-PhysicalDisplayHardwareIds {
     # 即使 CurrentIdentity 被删坏，也不能把残留 fake-first 带进驱动安装或 PnP scan。
     # 这里完全依赖当前在线设备与 SetupAPI，只读证明每条 HardwareID 都是 1AF4:1050。
@@ -107,13 +105,15 @@ function Assert-PhysicalDisplayHardwareIds {
         }
     }
 }
-
+function Test-PhysicalDisplayHardwareIds {
+    try { Assert-PhysicalDisplayHardwareIds; return $true }
+    catch { return $false }
+}
 function Copy-ProjectionPayload {
     param(
         [Parameter(Mandatory = $true)][string]$Source,
         [Parameter(Mandatory = $true)][string]$Destination
     )
-
     # launcher 已保护 ProgramData\StealthGPU 根目录并持有整包锁；这里仍识别源目标
     # 同路径，兼容 legacy 调试布局，避免 Copy-Item 报“无法覆盖自身”。
     $sourcePath = [IO.Path]::GetFullPath($Source)
@@ -122,17 +122,16 @@ function Copy-ProjectionPayload {
         Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
     }
 }
-
-function Register-GpuProjectionTask {
-    # 计划任务只调用受保护 ProgramData 中的本地脚本。它使用 Windows 自带
-    # Task Scheduler 和 PowerShell，不安装服务、不监听端口，也不依赖网络。
+function Publish-GpuProjectionPayload {
+    # 两个旧 writer 均停止后，先完整发布 RefreshName/HardwareID 的依赖闭包；
+    # apply 随后才能注册新任务，因此 rc=11 重启路径也不会引用缺失或混版 helper。
     $persistentRoot = Split-Path -Parent $PSScriptRoot
     New-Item -ItemType Directory -Path $persistentRoot -Force | Out-Null
     $payloadNames = @(
         'project-gpu-hardware-id.ps1',
         'gpu-hardware-id-plan.ps1',
         'gpu-manufacturer-projection.ps1', 'gpu-manufacturer-projector.exe',
-        'refresh-gpu-name.ps1'
+        'display-driver-trust.ps1', 'refresh-gpu-name.ps1'
     )
     foreach ($payloadName in $payloadNames) {
         $source = Join-Path $PSScriptRoot $payloadName
@@ -142,10 +141,14 @@ function Register-GpuProjectionTask {
         Copy-ProjectionPayload -Source $source `
             -Destination (Join-Path $persistentRoot $payloadName)
     }
-
     $projector = Join-Path $persistentRoot 'project-gpu-hardware-id.ps1'
+    return $projector
+}
+function Register-GpuProjectionTask {
+    param([Parameter(Mandatory = $true)][string]$Projector)
+    # 计划任务只调用已经完整发布到受保护 ProgramData 的本地脚本。
     $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-        '-WindowStyle Hidden -File "' + $projector + '" -Mode Apply'
+        '-WindowStyle Hidden -File "' + $Projector + '" -Mode Apply'
     $action = New-ScheduledTaskAction -Execute $powershellExe -Argument $arguments
     $triggers = @(
         (New-ScheduledTaskTrigger -AtStartup),
@@ -159,7 +162,6 @@ function Register-GpuProjectionTask {
         -Principal $principal -Settings $settings
     Register-ScheduledTask -TaskName $projectionTaskName -InputObject $task `
         -Force -ErrorAction Stop | Out-Null
-
     # 注册后复读关键安全字段；若 Windows 拒绝了 SYSTEM/Highest 或动作路径，不能
     # 把本次部署报告为成功。
     $registered = Get-ScheduledTask -TaskName $projectionTaskName -ErrorAction Stop
@@ -170,14 +172,11 @@ function Register-GpuProjectionTask {
         @($registered.Triggers).Count -ne 2 -or
         [string]$registered.Settings.MultipleInstances -ine 'IgnoreNew' -or
         [string]$registered.Actions[0].Execute -ine $powershellExe -or
-        [string]$registered.Actions[0].Arguments -notlike ('*' + $projector + '*')) {
+        [string]$registered.Actions[0].Arguments -notlike ('*' + $Projector + '*')) {
         throw 'HardwareID 投影计划任务注册后契约复核失败'
     }
-    return $projector
 }
-
 Write-Host "=== respawn-stealth (本地版): 重新对齐 GPU spoof ===" -ForegroundColor Cyan
-
 # --- 0) 管理员自检 ----------------------------------------------------------
 # 经 respawn-stealth.exe 进来时已是管理员；
 # 这里兜底直接双击/右键运行本 .ps1（非管理员）的情况：
@@ -201,7 +200,6 @@ if (-not $pr.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
     }
     return
 }
-
 # launcher 在整个初始子进程期间持有同一文件的独占句柄。重启恢复任务不经过
 # launcher，因此必须主动获取该锁；这样用户同时运行新版 EXE 时，双方只能有一个
 # 继续，不能在整目录原子换包期间混用旧主脚本与新 helper。
@@ -223,7 +221,6 @@ if ($ResumeAfterReboot) {
     }
     Write-Host '  已进入重启后二阶段验证。' -ForegroundColor Cyan
 }
-
 # --- 1) 日志目录 ------------------------------------------------------------
 # 统一写入当前 payload 的受保护父目录；不能硬编码 C:\ProgramData，因为 Windows
 # Known Folder 可以重定向到其它卷。PSScriptRoot 由 launcher 的原子发布目录决定，
@@ -235,7 +232,6 @@ $driverLog = Join-Path $logDir 'display-driver-install.log'
 $powerPolicyLog = Join-Path $logDir 'power-policy.log'
 $projectionLog = Join-Path $logDir 'gpu-hardware-id-projection.log'
 $log = Join-Path $logDir 'respawn.log'
-
 # --- 2) 在任何 GPU/PnP 修改前配置正常台式机的“从不”电源策略 -----------------
 # 策略逻辑独立成 helper，主流程只从原子发布且受 DACL 保护的同包目录执行。失败时
 # 不回滚为旧设置，而是停止后续 GPU 操作；再次运行会幂等收敛剩余设置。
@@ -298,8 +294,7 @@ if ($ResumeAfterReboot -and $ResumeStage -eq 'ChipsetVerification') {
         -ForegroundColor Green
     exit 0
 }
-
-# --- 4) 停止旧投影，并在任何 GPU/PnP 操作前恢复 physical-only --------------
+# --- 4) 停止旧投影，并在任何 GPU/PnP 操作前确认 physical-only --------------
 $projectorSource = Join-Path $PSScriptRoot 'project-gpu-hardware-id.ps1'
 $planSource = Join-Path $PSScriptRoot 'gpu-hardware-id-plan.ps1'
 foreach ($requiredProjectionFile in $projectorSource, $planSource) {
@@ -310,7 +305,10 @@ foreach ($requiredProjectionFile in $projectorSource, $planSource) {
     }
 }
 Stop-GpuProjectionTask
-if (Test-CurrentGpuIdentityExists) {
+if (Test-PhysicalDisplayHardwareIds) {
+    # 当前实例已纯物理时，不访问 sysprep/generalize 后仍残留的退役 SourceInstanceId。
+    Write-Host '  当前在线 Display 已是 stock 1AF4:1050；跳过旧身份回滚。' -ForegroundColor Cyan
+} elseif (Test-CurrentGpuIdentityExists) {
     Write-Host '  在驱动/PnP 操作前恢复 stock 1AF4:1050 HardwareID...' `
         -ForegroundColor Cyan
     $restoreArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
@@ -329,7 +327,6 @@ try {
         $_.Exception.Message) -ForegroundColor Red
     exit 38
 }
-
 # --- 5) 先确保真实显示驱动已绑定（不走 HTTP）-------------------------------
 # install-display-driver.ps1 与 SYS/CAT/INF 都由同一个 EXE 释放到 PSScriptRoot。
 # 该脚本通过未被 FriendlyName spoof 影响的 Service 字段判断真实绑定：克隆机
@@ -357,7 +354,6 @@ if ($driverRc -ne 0) {
     Write-Host "      已停止 GPU 名称伪装；请查看 $driverLog。" -ForegroundColor Red
     exit $driverRc
 }
-
 # --- 6) 本地定位 apply-gpu-spoof.ps1（不走 HTTP）----------------------------
 # 生产 EXE 已把同一构建的脚本整包原子发布到 PSScriptRoot。缺失时必须停止，不能回退
 # 执行历史 C:\stealth 或根目录中可能混版、可能由普通用户预置的脚本。
@@ -370,7 +366,13 @@ if (-not (Test-Path -LiteralPath $spoof -PathType Leaf)) {
     exit 1
 }
 Write-Host "  使用本地 spoof 脚本: $spoof" -ForegroundColor Green
-
+try {
+    $persistentProjector = Publish-GpuProjectionPayload
+} catch {
+    Write-Host ('FAIL: 无法完整发布持久 GPU 投影依赖：' + $_.Exception.Message) `
+        -ForegroundColor Red
+    exit 40
+}
 # --- 7) 跑 apply，并在其 identity 事务完成前发布 NVAPI --------------------
 Write-Host "  运行 apply-gpu-spoof.ps1 -AutoDetect ...（日志 -> $log）" -ForegroundColor Cyan
 if ($FirstLogon) {
@@ -387,7 +389,6 @@ $rc = $LASTEXITCODE
 if ($FirstLogon) {
     Clear-RespawnDisplayModeTask
 }
-
 # 显示模式辅助程序用 11 表示 ChangeDisplaySettings 已把目标模式持久化，但驱动
 # 要求重启后才能真正应用。与驱动 3010 一样，这不是“当前已经成功”；普通模式会
 # 安排一次性二阶段验证，-NoReboot 则把明确状态返回给调用者。
@@ -397,12 +398,10 @@ if ($rc -eq 11) {
         -ShutdownComment '显示模式已持久化，重启后继续验证 1920x1080' `
         -RegistrationFailureCode 33 -ShutdownFailureCode 34 -MainScriptPath $respawnMainScriptPath
 }
-
 # --- 8) 兜底启用 Display 设备 ----------------------------------------------
 # 如果上一次运行因为 QEMU/GLX 崩溃在 PnP 刷新中断，显卡可能残留为 Code 22。
 # apply 脚本已经会处理一次；这里再兜底一次，确保自动重启前不是“已禁用”状态。
 Enable-RespawnDisplayDevices
-
 # --- 9) 清除可能残留的 RunOnce 入口 -----------------------------------------
 # 旧 clone 流程曾经往 SOFTWARE\...\RunOnce 注入 *StealthRespawn 走 HTTP 拉本脚本；
 # 本地一键不需要它，存在就顺手删掉，不存在也无害。
@@ -413,6 +412,7 @@ foreach ($name in '*StealthRespawn', 'StealthRespawn') {
 
 # --- 10) 检查 apply 结果 ----------------------------------------------------
 if ($rc -ne 0) {
+    Stop-GpuProjectionTask
     Write-Host ""
     Write-Host "WARN: apply-gpu-spoof.ps1 退出码 = $rc —— 可能没找到伪装显卡节点。" -ForegroundColor Yellow
     Write-Host "      不自动重启，请翻看上面输出或 $log 排查。" -ForegroundColor Yellow
@@ -425,7 +425,7 @@ if ($rc -ne 0) {
 # apply 只有在双架构 installer 成功并 Complete identity 后才返回 0；因此此处开始
 # 暴露 10DE/1002 首项时，GPU-Z 的系统 reader 与 schema 已经是同一发布版本。
 try {
-    $persistentProjector = Register-GpuProjectionTask
+    Register-GpuProjectionTask -Projector $persistentProjector
 } catch {
     Stop-GpuProjectionTask
     Write-Host ('FAIL: HardwareID 投影任务注册失败：' + $_.Exception.Message) `
@@ -492,9 +492,9 @@ if ($chipsetRestartRequired) {
 }
 
 Write-Host "=== 完成 —— ${RebootDelay}s 后重启让覆盖生效（要取消按 Ctrl+C）===" -ForegroundColor Green
-& $shutdownExe /r /t $RebootDelay /f /c 'stealth respawn 完成，重启'
-if ($LASTEXITCODE -ne 0) {
-    Write-Host 'FAIL: Windows 拒绝安排最终重启；当前覆盖需要手动重启后才完全生效。' `
-        -ForegroundColor Red
+try {
+    Invoke-RespawnShutdown -ShutdownPath $shutdownExe -DelaySeconds $RebootDelay -Comment 'stealth respawn 完成，重启'
+} catch {
+    Write-Host ('FAIL: Windows 拒绝安排最终重启；当前覆盖需要手动重启后才完全生效。原因：' + $_.Exception.Message) -ForegroundColor Red
     exit 43
 }

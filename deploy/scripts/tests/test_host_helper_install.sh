@@ -36,6 +36,8 @@ trust_dest="$tmp/usr/local/libexec/qemu-vmate-cpu-isolate-qemu.conf"
 sudoers="$tmp/etc/sudoers.d/qemu-vmate-host"
 
 [[ "$(stat -c '%a' "$perf_dest")" == "755" ]] || fail "performance helper mode 错误"
+grep -F '/proc/sys/kernel/split_lock_mitigate' "$perf_dest" >/dev/null \
+    || fail "performance helper 缺少 split-lock 限速管理"
 [[ "$(stat -c '%a' "$iso_dest")" == "755" ]] || fail "isolate helper mode 错误"
 [[ "$(stat -c '%a' "$runtime_dest")" == "755" ]] || fail "isolate runtime mode 错误"
 [[ "$(stat -c '%a' "$trust_dest")" == "644" ]] || fail "QEMU 信任清单 mode 错误"
@@ -151,7 +153,7 @@ VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
     "$SETUP" install "--qemu=$trusted_qemu" >/dev/null
 [[ ! -e "$legacy_sudoers" ]] || fail "安装事务没有移除遗留工作区 sudoers"
 
-if "$PERF" 123 456 >/dev/null 2>&1; then
+if "$PERF" 123 456 0 unexpected >/dev/null 2>&1; then
     fail "performance helper 应拒绝多余参数"
 fi
 if "$PERF" not-a-number >/dev/null 2>&1; then
@@ -171,6 +173,9 @@ if "$ISOLATE" preflight unexpected >/dev/null 2>&1; then
 fi
 if "$PERF" 0 10000001 >/dev/null 2>&1; then
     fail "performance helper 应拒绝过大的 halt_poll"
+fi
+if "$PERF" 0 0 2 >/dev/null 2>&1; then
+    fail "performance helper 应拒绝非 0/1 的 split-lock 策略"
 fi
 
 # root helper 的锁不得位于 /tmp，也不得允许环境变量改变 cgroup/锁路径；目标进程

@@ -346,6 +346,8 @@ static void sdl_update_caption(struct sdl2_console *scon)
 
 static void sdl_hide_cursor(struct sdl2_console *scon)
 {
+    SDL2PointerPolicy policy;
+
     if (scon->opts->has_show_cursor && scon->opts->show_cursor) {
         return;
     }
@@ -353,10 +355,17 @@ static void sdl_hide_cursor(struct sdl2_console *scon)
     SDL_ShowCursor(SDL_DISABLE);
     SDL_SetCursor(sdl_cursor_hidden);
 
-    if (!qemu_input_is_absolute(scon->dcl.con) &&
-        !scon->absolute_enabled) {
-        SDL_SetRelativeMouseMode(SDL_TRUE);
-    }
+    /*
+     * SDL relative mode is process-wide and constrains the host pointer by
+     * itself.  Merely clearing SDL_WINDOW_MOUSE_GRABBED is not enough.
+     * Always write the desired state so a PS/2 -> USB tablet transition
+     * cannot leave the pointer trapped after QEMU has ended its logical grab.
+     */
+    policy = sdl2_pointer_policy(
+        grabbed_scon == scon,
+        qemu_input_is_absolute(scon->dcl.con),
+        qemu_input_has_absolute(scon->dcl.con));
+    SDL_SetRelativeMouseMode(policy.relative_mode ? SDL_TRUE : SDL_FALSE);
 }
 
 static bool sdl_console_uses_absolute_pointer(struct sdl2_console *scon)
@@ -603,17 +612,23 @@ static void sdl_mouse_mode_change(Notifier *notify, void *data)
     for (i = 0; i < sdl2_num_outputs; i++) {
         struct sdl2_console *scon = &sdl2_console[i];
         bool absolute = qemu_input_is_absolute(scon->dcl.con);
+        bool available = qemu_input_has_absolute(scon->dcl.con);
+        SDL2PointerPolicy policy;
 
-        if (absolute == scon->absolute_enabled) {
+        if (absolute == scon->absolute_enabled &&
+            available == scon->absolute_available) {
             continue;
         }
 
         sdl_release_mouse_buttons(scon);
         sdl_reset_relative_motion(scon);
         scon->absolute_enabled = absolute;
-        if (grabbed_scon == scon && !scon->fullscreen) {
+        scon->absolute_available = available;
+        policy = sdl2_pointer_policy(
+            grabbed_scon == scon, absolute, available);
+        if (policy.release_grab && !scon->fullscreen) {
             sdl_grab_end(scon);
-        } else if (grabbed_scon == scon || sdl2_input_allowed(scon)) {
+        } else {
             sdl_sync_cursor(scon);
         }
     }
@@ -956,6 +971,7 @@ static void handle_textinput(SDL_Event *ev)
 static void handle_mousemotion(SDL_Event *ev)
 {
     struct sdl2_console *scon = get_scon_from_window(ev->motion.windowID);
+    SDL2PointerPolicy policy;
 
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
         return;
@@ -966,7 +982,11 @@ static void handle_mousemotion(SDL_Event *ev)
         return;
     }
 
-    if (grabbed_scon == scon || qemu_input_is_absolute(scon->dcl.con)) {
+    policy = sdl2_pointer_policy(
+        grabbed_scon == scon,
+        qemu_input_is_absolute(scon->dcl.con),
+        qemu_input_has_absolute(scon->dcl.con));
+    if (policy.accept_motion) {
         sdl_send_mouse_event(scon,
                              ev->motion.xrel, ev->motion.yrel,
                              ev->motion.x, ev->motion.y,
@@ -979,6 +999,7 @@ static void handle_mousebutton(SDL_Event *ev)
     uint32_t buttonstate;
     SDL_MouseButtonEvent *bev;
     struct sdl2_console *scon = get_scon_from_window(ev->button.windowID);
+    SDL2PointerPolicy policy;
 
     if (!scon || !qemu_console_is_graphic(scon->dcl.con)) {
         return;
@@ -989,9 +1010,12 @@ static void handle_mousebutton(SDL_Event *ev)
 
     bev = &ev->button;
     buttonstate = scon->mouse_button_state;
+    policy = sdl2_pointer_policy(
+        grabbed_scon == scon,
+        qemu_input_is_absolute(scon->dcl.con),
+        qemu_input_has_absolute(scon->dcl.con));
 
-    if (grabbed_scon != scon &&
-        !qemu_input_is_absolute(scon->dcl.con)) {
+    if (policy.auto_grab_on_click) {
         if (ev->type == SDL_MOUSEBUTTONUP && bev->button == SDL_BUTTON_LEFT) {
             /* start grabbing all events */
             sdl_grab_start(scon);
@@ -1324,6 +1348,17 @@ static void sdl_cleanup(void)
 {
     int i;
 
+    /*
+     * 这里仅由 atexit 调用。X11/XWayland 在退出瞬间可能已通过 RandR
+     * 移除了最后一个 display；SDL2 的 X11_HideWindow 会在这种状态下
+     * 直接解引用空 display。此时也没有任何仍可安全调用的窗口/光标清理
+     * API，直接交给进程退出回收资源。
+     */
+    if (!(SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) ||
+        SDL_GetNumVideoDisplays() <= 0) {
+        return;
+    }
+
     SDL_SetCursor(sdl_cursor_normal);
     for (i = 0; i < sdl2_num_outputs; i++) {
         if (sdl2_console[i].guest_sprite) {
@@ -1580,6 +1615,8 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
     for (i = 0; i < sdl2_num_outputs; i++) {
         sdl2_console[i].absolute_enabled =
             qemu_input_is_absolute(sdl2_console[i].dcl.con);
+        sdl2_console[i].absolute_available =
+            qemu_input_has_absolute(sdl2_console[i].dcl.con);
     }
     for (i = 0; i < sdl2_num_outputs; i++) {
         if (sdl2_input_allowed(&sdl2_console[i])) {

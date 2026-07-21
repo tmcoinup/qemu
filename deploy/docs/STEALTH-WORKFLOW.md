@@ -109,7 +109,8 @@ Start-Process -FilePath 'D:\工具\respawn-stealth.exe' `
 EXE 的关键执行顺序如下：
 
 1. 从 Windows Known Folder 定位 ProgramData，把内嵌 payload 安全发布到受保护目录。
-2. 停止旧投影任务，并在任何驱动/PnP 操作前恢复 physical-only HardwareID。
+2. 停止旧投影任务，先验当前在线实例；已是 physical-only 时跳过可能退役的旧实例路径，
+   否则按旧身份严格恢复，并在任何驱动/PnP 操作前再次门禁 HardwareID。
 3. 枚举所有在线 PCI 显示设备，要求物理主 ID 全部为 `1AF4:1050`。
 4. 已绑定 `VioGpuDod` 的克隆客体走无扰动快速路径；未绑定的全新客体才校验并安装
    内嵌 stock Microsoft-WHQL 驱动。

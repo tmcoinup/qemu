@@ -28,8 +28,12 @@ grep -F '${KBD_NUMLOCK_PROP}' "$DEVICES" >/dev/null \
 grep -F "_sv_qemu_help_has_all \"\$help\" 'x-force-numlock-on='" \
         "$PORTABILITY" >/dev/null \
     || fail "启动前没有拒绝缺少 NumLock 属性的旧 QEMU"
+grep -F "'x-numlock-on-confirmed'" "$PORTABILITY" >/dev/null \
+    || fail "启动前没有拒绝仍使用一次性 NumLock 锁存的旧 QEMU"
 grep -F 'DEFINE_PROP_BOOL("x-force-numlock-on"' "$USB_HID" >/dev/null \
     || fail "QEMU usb-kbd 缺少 opt-in NumLock 属性"
+grep -F '"x-numlock-on-confirmed"' "$USB_HID" >/dev/null \
+    || fail "QEMU usb-kbd 缺少持续收敛能力标记"
 grep -F 'qemu_bh_new_guarded' "$USB_HID" >/dev/null \
     || fail "NumLock 注入没有使用 guarded BH 避免 USB 重入"
 

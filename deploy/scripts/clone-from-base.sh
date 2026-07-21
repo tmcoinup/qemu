@@ -22,10 +22,10 @@
 
 set -euo pipefail
 
-# 必须 root：脚本最后两步 (host-fix-gpu-devpkey / host-inject-unattend) 要挂 NTFS。
-# 没 root 跑完后用户得手动补跑这两步，容易漏；改成强制提示。
+# 必须 root：脚本末尾的 host-inject-unattend 要挂 NTFS。
+# 没 root 跑完后用户得手动补跑，容易漏；改成强制提示。
 if [[ $EUID -ne 0 ]]; then
-    echo "ERROR: 必须以 root 运行（脚本末尾要挂 NTFS 写 hive）" >&2
+    echo "ERROR: 必须以 root 运行（脚本末尾要挂 NTFS 注入 answer file）" >&2
     echo "" >&2
     printf '  sudo %q' "$0" >&2
     printf ' %q' "$@" >&2
@@ -132,6 +132,10 @@ else
     BASE_NAME="$BASE_ARG"
     BASE_FILE="$BASE_DIR/${BASE_NAME}.qcow2"
 fi
+if [[ -L "$BASE_FILE" ]]; then
+    echo "ERROR: base 不能是符号链接: $BASE_FILE" >&2
+    exit 1
+fi
 if [[ ! -f "$BASE_FILE" ]]; then
     echo "ERROR: $BASE_FILE 不存在" >&2
     exit 1
@@ -140,17 +144,6 @@ if ! BASE_FILE="$(readlink -e -- "$BASE_FILE")" || [[ ! -f "$BASE_FILE" ]]; then
     echo "ERROR: 无法解析 base 的真实普通文件路径: $BASE_FILE" >&2
     exit 1
 fi
-BASE_MODE="$(stat -c '%a' -- "$BASE_FILE")"
-BASE_OWNER="$(stat -c '%u' -- "$BASE_FILE")"
-if [[ "$BASE_OWNER" != 0 || "$BASE_MODE" != 444 ]]; then
-    echo "ERROR: base 必须由 seal-base.sh 密封为 root-owned 0444: $BASE_FILE" >&2
-    echo "       actual owner=$BASE_OWNER mode=$BASE_MODE" >&2
-    echo "       旧 base 请先停止所有引用它的 VM，确认无进程持有后执行：" >&2
-    printf '       sudo chown root:root -- %q && sudo chmod 0444 -- %q\n' \
-        "$BASE_FILE" "$BASE_FILE" >&2
-    exit 1
-fi
-BASE_FINGERPRINT="$(stat -c '%d:%i:%s:%y' -- "$BASE_FILE")"
 
 if [[ -n "$CLI_QEMU_IMG" ]]; then
     QEMU_IMG="$CLI_QEMU_IMG"
@@ -164,7 +157,9 @@ if [[ -z "$QEMU_IMG" || ! -f "$QEMU_IMG" || ! -x "$QEMU_IMG" ]]; then
     exit 1
 fi
 QEMU_IMG="$(readlink -e -- "$QEMU_IMG")"
-base_image_require_standalone_qcow2 "$QEMU_IMG" "$BASE_FILE"
+BASE_PUBLISH_HELPER="$SCRIPT_DIR/lib/seal-base-publish.py"
+base_image_adopt_portable_copy "$QEMU_IMG" "$BASE_PUBLISH_HELPER" "$BASE_FILE"
+BASE_FINGERPRINT="$(stat -c '%d:%i:%s:%y' -- "$BASE_FILE")"
 BASE_BYTES="$BASE_IMAGE_VIRTUAL_SIZE"
 OVMF_TEMPLATE=/usr/share/OVMF/OVMF_VARS_4M.fd
 if [[ ! -r "$OVMF_TEMPLATE" ]]; then
@@ -218,6 +213,11 @@ if ! ORIG_GROUP="$(id -gn "$ORIG_USER" 2>/dev/null)"; then
 fi
 if ! ORIG_GID="$(id -g "$ORIG_USER" 2>/dev/null)"; then
     echo "ERROR: 无法解析 clone 原始用户组 ID: $ORIG_USER" >&2
+    exit 1
+fi
+if [[ -n "${BASE_IMAGE_ADOPTED_FROM_UID:-}" &&
+      "$BASE_IMAGE_ADOPTED_FROM_UID" != "$ORIG_UID" ]]; then
+    echo "ERROR: base 导入用户与最终 VM 用户不一致" >&2
     exit 1
 fi
 

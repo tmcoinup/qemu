@@ -1,8 +1,17 @@
 ﻿# display-driver-trust.ps1 —— VioGpuDod 活动驱动与内嵌包信任校验。
 #
-# 本文件只定义函数，由 install-display-driver.ps1 从同一受保护 payload 目录加载。
+# 本文件定义统一信任锚与函数，由驱动安装器、制造商投影器从同一受保护目录加载。
 # “发布 INF 不存在”是唯一可恢复的活动驱动异常；任何已有文件摘要错误、reparse
 # 路径、服务/SYS 异常或签名者不符都继续 fail closed。
+
+# 运行时只维护这一份 stock 包信任锚。构建脚本还会在把文件嵌入 EXE 前独立复核，
+# 从而同时覆盖“源码调用方引用一致”和“最终 payload 原始字节一致”两个边界。
+$StockDisplayDriverHashes = @{
+    'viogpudo.sys' = '04e873ad57387a518ad8ccae5116989c63170503c14b9cca0b2067e63876af89'
+    'viogpudo.cat' = 'b5122b2e060ec0c2f0157afcdc64c728ec31646819055c8b79ae3f4227472078'
+    'viogpudo.inf' = '48abd56644386e1f0d85c54cd64db93e62a4eb33bc7acb2613f237c6e1c6a0ee'
+}
+$StockDisplayWhcpSignerThumbprint = 'A5D13378E659DDC05C03EE71B432DD667A302999'
 
 function Get-DevicePropertyText {
     param(
@@ -24,52 +33,22 @@ function Get-DevicePropertyText {
 
 function Get-PciDisplayState {
     # PresentOnly + PCI InstanceId 同时排除 RDP/间接显示适配器和历史 ghost 节点。
-    # FriendlyName、DeviceDesc 和 Manufacturer 属于 UI 投影，可显示 NVIDIA/AMD；
-    # 底层签名关联只由 Win32_PnPSignedDriver 与可信 INF/SYS 证明。
+    # 只采集直接 PnP 绑定，不把 Win32_PnPSignedDriver 当成信任源：该 WMI 类在
+    # Windows 10 驱动切换后会滞后，且可能对有效 WHCP 包返回 IsSigned=False。
+    # Provider/签名身份由活动 oemN.inf 与 viogpudo.sys 的固定摘要、证书直接证明。
     $devices = @(Get-PnpDevice -Class 'Display' -PresentOnly -ErrorAction Stop |
         Where-Object { $_.InstanceId -match '^PCI\\' })
-    $signedDrivers = @(Get-CimInstance -ClassName Win32_PnPSignedDriver `
-        -ErrorAction Stop)
 
     $states = @()
     foreach ($device in $devices) {
-        $signedMatches = @($signedDrivers | Where-Object {
-            [string] $_.DeviceID -ieq [string] $device.InstanceId
-        })
-        $signedDriver = if ($signedMatches.Count -eq 1) {
-            $signedMatches[0]
-        } else {
-            $null
-        }
         $states += [pscustomobject]@{
-            InstanceId      = [string] $device.InstanceId
-            Status          = [string] $device.Status
-            Problem         = [string] $device.Problem
-            Service         = Get-DevicePropertyText -InstanceId $device.InstanceId `
+            InstanceId = [string] $device.InstanceId
+            Status     = [string] $device.Status
+            Problem    = [string] $device.Problem
+            Service    = Get-DevicePropertyText -InstanceId $device.InstanceId `
                 -KeyName 'DEVPKEY_Device_Service'
-            InfPath         = Get-DevicePropertyText -InstanceId $device.InstanceId `
+            InfPath    = Get-DevicePropertyText -InstanceId $device.InstanceId `
                 -KeyName 'DEVPKEY_Device_DriverInfPath'
-            SignedMatchCount = $signedMatches.Count
-            SignedInfPath   = $(if ($null -eq $signedDriver) {
-                ''
-            } else {
-                [string] $signedDriver.InfName
-            })
-            SignedProvider  = $(if ($null -eq $signedDriver) {
-                ''
-            } else {
-                [string] $signedDriver.DriverProviderName
-            })
-            IsSigned        = $(if ($null -eq $signedDriver) {
-                $false
-            } else {
-                [bool] $signedDriver.IsSigned
-            })
-            Signer          = $(if ($null -eq $signedDriver) {
-                ''
-            } else {
-                [string] $signedDriver.Signer
-            })
         }
     }
     return @($states)
@@ -94,8 +73,6 @@ function Write-DisplayState {
         Write-Host ("  PCI       : " + $state.InstanceId) -ForegroundColor Gray
         Write-Host ("  Service   : " + $state.Service) -ForegroundColor Gray
         Write-Host ("  INF       : " + $state.InfPath) -ForegroundColor Gray
-        Write-Host ("  包 Provider: " + $state.SignedProvider) -ForegroundColor Gray
-        Write-Host ("  包 Signer : " + $state.Signer) -ForegroundColor Gray
         Write-Host ("  PnP state : " + $state.Status + " / " + $state.Problem) `
             -ForegroundColor Gray
     }
@@ -123,21 +100,6 @@ function Get-DisplayStateProblems {
         $problems += "InfPath=$($State.InfPath)"
     }
 
-    # UI DevProp 可按 profile 投影；真实包 Provider/Signer 必须继续来自 WHCP 包。
-    if ([int] $State.SignedMatchCount -ne 1) {
-        $problems += "SignedMatchCount=$($State.SignedMatchCount)"
-    } else {
-        if ($State.SignedInfPath -ine $State.InfPath) {
-            $problems += "SignedInfPath=$($State.SignedInfPath)"
-        }
-        if ($State.SignedProvider -ine 'Red Hat, Inc.') {
-            $problems += "SignedProvider=$($State.SignedProvider)"
-        }
-        if ($State.IsSigned -ne $true) { $problems += "IsSigned=$($State.IsSigned)" }
-        if ($State.Signer -ine 'Microsoft Windows Hardware Compatibility Publisher') {
-            $problems += "Signer=$($State.Signer)"
-        }
-    }
     return @($problems)
 }
 
@@ -313,7 +275,7 @@ function Assert-WhcpSignature {
     if ($signature.Status -ne 'Valid' -or
         $subject -notmatch '(?i)(^|,\s*)CN=Microsoft Windows Hardware Compatibility Publisher(,|$)' -or
         $issuer -notmatch '(?i)(^|,\s*)CN=Microsoft Windows Third Party Component CA 2014(,|$)' -or
-        $thumbprint -ine $ExpectedWhcpSignerThumbprint) {
+        $thumbprint -ine $StockDisplayWhcpSignerThumbprint) {
         throw "活动 viogpudo.sys 不是锁定的可信 Microsoft WHCP 签名"
     }
 }
@@ -351,7 +313,8 @@ function Get-PublishedInfTrustState {
 
     $publishedInf = Assert-SafePlainFile -Path $publishedPath `
         -TrustedRoot $safeInfRoot -Label "活动 INF $InfName"
-    Assert-ExactFileHash -Path $publishedInf -Expected $ExpectedHashes['viogpudo.inf'] `
+    Assert-ExactFileHash -Path $publishedInf `
+        -Expected $StockDisplayDriverHashes['viogpudo.inf'] `
         -Label "活动 INF $InfName"
     return [pscustomobject]@{
         InfName = $InfName
@@ -364,7 +327,8 @@ function Assert-ActiveStockDriver {
     param(
         [Parameter(Mandatory = $true)] [object[]] $States,
         [string] $SystemDirectory = [Environment]::SystemDirectory,
-        [switch] $AllowMissingPublishedInf
+        [switch] $AllowMissingPublishedInf,
+        [switch] $ThrowOnFailure
     )
 
     try {
@@ -395,7 +359,8 @@ function Assert-ActiveStockDriver {
         $driverPath = Join-Path (Join-Path $systemFull 'drivers') 'viogpudo.sys'
         $driverPath = Assert-SafePlainFile -Path $driverPath `
             -TrustedRoot $systemFull -Label '活动 viogpudo.sys'
-        Assert-ExactFileHash -Path $driverPath -Expected $ExpectedHashes['viogpudo.sys'] `
+        Assert-ExactFileHash -Path $driverPath `
+            -Expected $StockDisplayDriverHashes['viogpudo.sys'] `
             -Label '活动 viogpudo.sys'
         Assert-WhcpSignature -Path $driverPath
 
@@ -415,14 +380,16 @@ function Assert-ActiveStockDriver {
             MissingPublishedInfNames = [string[]] $missingInfNames
         }
     } catch {
-        Stop-DriverInstall ("活动 VioGpuDod 信任校验失败（刻意 fail closed；" +
+        $message = "活动 VioGpuDod 信任校验失败（刻意 fail closed；" +
             "只有普通缺失的 oemN.inf 可由官方 pnputil 恢复）: " +
-            $_.Exception.Message) 34
+            $_.Exception.Message
+        if ($ThrowOnFailure) { throw $message }
+        Stop-DriverInstall $message 34
     }
 }
 
 function Assert-EmbeddedDriverPayload {
-    foreach ($fileName in $ExpectedHashes.Keys) {
+    foreach ($fileName in $StockDisplayDriverHashes.Keys) {
         $path = Join-Path $DriverDir $fileName
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             Stop-DriverInstall "内嵌驱动释放不完整，缺少 $path" 21
@@ -430,7 +397,8 @@ function Assert-EmbeddedDriverPayload {
         try {
             $safePath = Assert-SafePlainFile -Path $path -TrustedRoot $DriverDir `
                 -Label "内嵌驱动 $fileName"
-            Assert-ExactFileHash -Path $safePath -Expected $ExpectedHashes[$fileName] `
+            Assert-ExactFileHash -Path $safePath `
+                -Expected $StockDisplayDriverHashes[$fileName] `
                 -Label "内嵌驱动 $fileName"
         } catch {
             Stop-DriverInstall ("内嵌驱动校验失败: $fileName (" +

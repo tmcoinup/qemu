@@ -133,6 +133,8 @@ source "$SCRIPT_DIR/lib/sv-instance-lock.sh"
 source "$SCRIPT_DIR/lib/sv-qemu-process.sh"
 # shellcheck source=lib/base-image.sh
 source "$SCRIPT_DIR/lib/base-image.sh"
+# shellcheck source=lib/sv-sudo-session.sh
+source "$SCRIPT_DIR/lib/sv-sudo-session.sh"
 
 # 与 start/stop 共用实例锁，消除“检查完停机状态后 VM 又启动”的 TOCTOU 窗口。
 command -v flock >/dev/null 2>&1 || {
@@ -246,21 +248,27 @@ BASE_PUBLISHED_FINGERPRINT=""
 BASE_FD_OPEN=0
 BASE_FD_PATH="/proc/$$/fd/9"
 BASE_PUBLISH_HELPER="$SCRIPT_DIR/lib/seal-base-publish.py"
+BASE_PUBLISH_RESULT_TMP=""
 seal_cleanup() {
     local status=$?
 
-    trap - EXIT
+    trap - EXIT HUP INT TERM
     set +e
+    sv_sudo_session_close
     if [[ "$BASE_PUBLISHED" == 1 && "$BASE_COMMITTED" != 1 ]]; then
         base_image_remove_published_fingerprint \
             "$BASE_PUBLISH_HELPER" "$BASE_PUBLISHED_FINGERPRINT" "$BASE_FILE"
     fi
     if [[ -n "$BASE_TMP" && ( -e "$BASE_TMP" || -L "$BASE_TMP" ) ]]; then
         if [[ "$BASE_FD_OPEN" == 0 || "$BASE_TMP" -ef "$BASE_FD_PATH" ]]; then
-            rm -- "$BASE_TMP"
+            rm -f -- "$BASE_TMP"
         else
             echo "WARN: seal staging 路径已被替换，保留未知目录项: $BASE_TMP" >&2
         fi
+    fi
+    if [[ -n "$BASE_PUBLISH_RESULT_TMP" &&
+          ( -e "$BASE_PUBLISH_RESULT_TMP" || -L "$BASE_PUBLISH_RESULT_TMP" ) ]]; then
+        rm -f -- "$BASE_PUBLISH_RESULT_TMP"
     fi
     [[ "$BASE_FD_OPEN" == 1 ]] && exec 9<&-
     flock -u 8 2>/dev/null || true
@@ -268,13 +276,26 @@ seal_cleanup() {
     exit "$status"
 }
 trap seal_cleanup EXIT
+seal_signal_exit() {
+    local exit_status="${1:-1}"
+
+    trap - HUP INT TERM
+    exit "$exit_status"
+}
+trap 'seal_signal_exit 129' HUP
+trap 'seal_signal_exit 130' INT
+trap 'seal_signal_exit 143' TERM
 
 # 先清/WeGame 设备身份，再 convert —— 这样 base 天生干净且仍然压缩紧凑。
 # 失败就 abort：宁可不出 base，也不出一个所有 clone 共享同一 qimei 的"漏指纹" base。
 seal_require_same_source_disk
 if (( CLEAN )); then
+    echo ">> sudo 授权（整个 seal 过程至多输入一次密码）..."
+    sv_sudo_session_open
     echo ">> 清理源 disk 的/WeGame 设备身份（qimei / 登录态 / SDK 缓存 + 注册表）..."
-    if ! sudo "$SCRIPT_DIR/host-clean-tencent.sh" "$SRC_INSTANCE" --disk "$SRC_DISK" 2>&1 | sed 's/^/    /'; then
+    if ! sv_sudo_session_run_supervised \
+            "$SCRIPT_DIR/host-clean-tencent.sh" "$SRC_INSTANCE" --disk "$SRC_DISK" \
+            > >(sed 's/^/    /') 2>&1; then
         echo "ERROR: 身份清理失败 —— 拒绝产出可能泄露 qimei 的 base" >&2
         echo "  排查 host-clean-tencent.sh 后重跑；确认无需清理时加 --no-clean" >&2
         exit 1
@@ -283,7 +304,7 @@ else
     echo ">> --no-clean：跳过身份清理（源 disk 原样固化为 base）"
 fi
 
-if ! "$QEMU_IMG" check -q "$SRC_DISK"; then
+if ! sv_sudo_session_supervise "$QEMU_IMG" check -q "$SRC_DISK"; then
     echo "ERROR: 源 disk 未通过 qemu-img check，拒绝 seal" >&2
     exit 1
 fi
@@ -292,7 +313,8 @@ echo ">> 源 disk: $SRC_DISK ($(numfmt --to=iec --suffix=B "$(stat -c%s "$SRC_DI
 echo ">> 目标 base: $BASE_FILE"
 echo ">> qemu-img convert (compress=on，把稀疏 qcow2 重写为更紧凑的形式)..."
 BASE_TMP="$(mktemp -- "$BASE_DIR/.${BASE_NAME}.qcow2.seal.XXXXXX")"
-"$QEMU_IMG" convert -p -O qcow2 -c "$SRC_DISK" "$BASE_TMP"
+sv_sudo_session_supervise \
+    "$QEMU_IMG" convert -p -O qcow2 -c "$SRC_DISK" "$BASE_TMP"
 exec 9<"$BASE_TMP"
 BASE_FD_OPEN=1
 BASE_VALIDATED_FINGERPRINT="$(
@@ -313,11 +335,30 @@ chmod 0444 "$BASE_FD_PATH"
 PUBLISH_SOURCE_FINGERPRINT="$(
     python3 "$BASE_PUBLISH_HELPER" fingerprint "$BASE_FD_PATH"
 )"
-BASE_PUBLISHED=1
-BASE_PUBLISHED_FINGERPRINT="$(
-    sudo python3 "$BASE_PUBLISH_HELPER" publish \
-        "$BASE_FD_PATH" "$BASE_FILE" "$PUBLISH_SOURCE_FINGERPRINT"
+if (( ! CLEAN )); then
+    echo ">> sudo 授权（整个 seal 过程至多输入一次密码）..."
+    sv_sudo_session_open
+else
+    sv_sudo_session_refresh
+fi
+BASE_PUBLISH_RESULT_TMP="$(
+    mktemp -- "$BASE_DIR/.${BASE_NAME}.publish-result.XXXXXX"
 )"
+BASE_PUBLISHED=1
+sv_sudo_session_run_supervised \
+    python3 "$BASE_PUBLISH_HELPER" publish \
+    "$BASE_FD_PATH" "$BASE_FILE" "$PUBLISH_SOURCE_FINGERPRINT" \
+    >"$BASE_PUBLISH_RESULT_TMP"
+mapfile -t BASE_PUBLISH_RESULT_LINES <"$BASE_PUBLISH_RESULT_TMP"
+if (( ${#BASE_PUBLISH_RESULT_LINES[@]} != 1 )) ||
+   [[ -z "${BASE_PUBLISH_RESULT_LINES[0]}" ]]; then
+    echo "ERROR: base 发布 helper 未返回唯一 fingerprint" >&2
+    exit 1
+fi
+BASE_PUBLISHED_FINGERPRINT="${BASE_PUBLISH_RESULT_LINES[0]}"
+rm -f -- "$BASE_PUBLISH_RESULT_TMP"
+BASE_PUBLISH_RESULT_TMP=""
+sv_sudo_session_close
 base_image_require_standalone_qcow2 "$QEMU_IMG" "$BASE_FILE"
 if [[ "$BASE_IMAGE_VIRTUAL_SIZE" != "$BASE_BYTES" ||
       "$(stat -c '%u:%a' -- "$BASE_FILE")" != 0:444 ||
@@ -327,7 +368,7 @@ if [[ "$BASE_IMAGE_VIRTUAL_SIZE" != "$BASE_BYTES" ||
     echo "ERROR: 无法把最终 base 密封为 root-owned 0444: $BASE_FILE" >&2
     exit 1
 fi
-rm -- "$BASE_TMP"
+rm -f -- "$BASE_TMP"
 BASE_TMP=""
 exec 9<&-
 BASE_FD_OPEN=0

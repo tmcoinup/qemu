@@ -35,6 +35,22 @@ typedef struct SDL2AxisScale {
 } SDL2AxisScale;
 
 /*
+ * Keep current-handler mode separate from device capability.  A cold start
+ * can expose PS/2 as current before an absolute USB tablet is first polled;
+ * that ordering must not capture the host pointer.
+ */
+typedef struct SDL2PointerPolicy {
+    bool accept_motion;
+    bool auto_grab_on_click;
+    bool relative_mode;
+    bool release_grab;
+} SDL2PointerPolicy;
+
+SDL2PointerPolicy sdl2_pointer_policy(bool grabbed,
+                                      bool current_absolute,
+                                      bool absolute_available);
+
+/*
  * Return the centered destination rectangle used to display a guest surface.
  * The guest is never enlarged past its native size.  A smaller window scales
  * the guest down while preserving its aspect ratio.

@@ -272,6 +272,17 @@ static void test_set_numlock_led(TestUHCI *uhci, bool enabled)
     test_uhci_control_out(uhci, TEST_USB_ADDR, setup, &leds, 1);
 }
 
+static void test_expect_one_numlock_click(TestUHCI *uhci)
+{
+    uint8_t report[TEST_HID_REPORT_SIZE];
+
+    g_assert_true(test_uhci_interrupt_in(uhci, report));
+    g_assert_cmphex(report[2], ==, TEST_HID_NUMLOCK_USAGE);
+    g_assert_true(test_uhci_interrupt_in(uhci, report));
+    g_assert_cmphex(report[2], ==, 0);
+    g_assert_false(test_uhci_interrupt_in(uhci, report));
+}
+
 static QTestState *usb_keyboard_start(bool force_numlock)
 {
     return qtest_initf(
@@ -295,6 +306,8 @@ static void test_numlock_force_defaults_off(void)
                                       "x-numlock-force-pending"));
     g_assert_false(qtest_qom_get_bool(
         qts, USB_KBD_PATH, "x-numlock-startup-completed"));
+    g_assert_false(qtest_qom_get_bool(
+        qts, USB_KBD_PATH, "x-numlock-on-confirmed"));
     qtest_quit(qts);
 }
 
@@ -317,9 +330,12 @@ static void test_numlock_force_can_be_enabled(void)
 static void test_numlock_set_report_end_to_end(void)
 {
     TestUHCI uhci = test_uhci_start();
-    uint8_t report[TEST_HID_REPORT_SIZE];
 
     test_set_address_and_configuration(&uhci);
+    /* OVMF/安装环境先报 ON，不能吞掉 Windows 接管后的 OFF。 */
+    test_set_numlock_led(&uhci, true);
+    g_assert_true(qtest_qom_get_bool(uhci.qs->qts, USB_KBD_PATH,
+                                     "x-numlock-led-on"));
     test_set_numlock_led(&uhci, false);
 
     g_assert_true(qtest_qom_get_bool(uhci.qs->qts, USB_KBD_PATH,
@@ -333,11 +349,7 @@ static void test_numlock_set_report_end_to_end(void)
 
     /* 重复 OFF 必须被 pending 去重，不能排入第二次 click。 */
     test_set_numlock_led(&uhci, false);
-    g_assert_true(test_uhci_interrupt_in(&uhci, report));
-    g_assert_cmphex(report[2], ==, TEST_HID_NUMLOCK_USAGE);
-    g_assert_true(test_uhci_interrupt_in(&uhci, report));
-    g_assert_cmphex(report[2], ==, 0);
-    g_assert_false(test_uhci_interrupt_in(&uhci, report));
+    test_expect_one_numlock_click(&uhci);
 
     test_set_numlock_led(&uhci, true);
     g_assert_true(qtest_qom_get_bool(uhci.qs->qts, USB_KBD_PATH,
@@ -346,20 +358,31 @@ static void test_numlock_set_report_end_to_end(void)
                                       "x-numlock-force-pending"));
     g_assert_true(qtest_qom_get_bool(
         uhci.qs->qts, USB_KBD_PATH, "x-numlock-startup-completed"));
+    g_assert_true(qtest_qom_get_bool(
+        uhci.qs->qts, USB_KBD_PATH, "x-numlock-on-confirmed"));
 
-    /* 初始化完成后再次 OFF 属于用户操作，不能再生成 NumLock click。 */
+    /*
+     * 未来再次 OFF 必须开启新一轮收敛，
+     * 且仍然恰好生成一个 click。
+     */
     test_set_numlock_led(&uhci, false);
     g_assert_false(qtest_qom_get_bool(uhci.qs->qts, USB_KBD_PATH,
                                       "x-numlock-led-on"));
+    g_assert_true(qtest_qom_get_bool(uhci.qs->qts, USB_KBD_PATH,
+                                     "x-numlock-force-pending"));
+    g_assert_false(qtest_qom_get_bool(
+        uhci.qs->qts, USB_KBD_PATH, "x-numlock-startup-completed"));
+    test_set_numlock_led(&uhci, false);
+    test_expect_one_numlock_click(&uhci);
+    test_set_numlock_led(&uhci, true);
     g_assert_false(qtest_qom_get_bool(uhci.qs->qts, USB_KBD_PATH,
                                       "x-numlock-force-pending"));
     g_assert_true(qtest_qom_get_bool(
         uhci.qs->qts, USB_KBD_PATH, "x-numlock-startup-completed"));
-    g_assert_false(test_uhci_interrupt_in(&uhci, report));
     test_uhci_stop(&uhci);
 }
 
-static void test_numlock_migration_preserves_manual_off(void)
+static void test_numlock_migration_on_rearms_after_off(void)
 {
     g_autofree char *socket_path = g_strdup_printf(
         "%s/qemu-usb-hid-numlock-%u-%u.sock", g_get_tmp_dir(),
@@ -368,19 +391,12 @@ static void test_numlock_migration_preserves_manual_off(void)
     g_autofree char *incoming = g_strdup_printf("-incoming %s", uri);
     TestUHCI source = test_uhci_start();
     TestUHCI destination;
-    uint8_t report[TEST_HID_REPORT_SIZE];
 
     test_set_address_and_configuration(&source);
-
-    /*
-     * 首次 ON 直接完成启动初始化，随后的 OFF 模拟用户手动关闭。
-     * 该 completed+OFF 组合必须跨迁移保存，不能在克隆目的端再次翻转。
-     */
     test_set_numlock_led(&source, true);
-    test_set_numlock_led(&source, false);
     g_assert_true(qtest_qom_get_bool(
         source.qs->qts, USB_KBD_PATH, "x-numlock-startup-completed"));
-    g_assert_false(qtest_qom_get_bool(
+    g_assert_true(qtest_qom_get_bool(
         source.qs->qts, USB_KBD_PATH, "x-numlock-led-on"));
 
     destination = test_uhci_start_with_extra(incoming);
@@ -388,7 +404,8 @@ static void test_numlock_migration_preserves_manual_off(void)
 
     /*
      * qtest 的两个进程不共享虚拟时钟基准，重启 frame scheduler 后再发 TD。
-     * 这里只停启主控制器，不产生 USB reset，也不会清除被测一次性锁存。
+     * 这里只停启主控制器，不产生 USB reset，
+     * 也不会清除被测迁移状态。
      */
     qpci_io_writew(destination.hc.dev, destination.hc.bar,
                    UHCI_USBCMD, 0);
@@ -397,7 +414,7 @@ static void test_numlock_migration_preserves_manual_off(void)
 
     g_assert_true(qtest_qom_get_bool(
         destination.qs->qts, USB_KBD_PATH, "x-numlock-led-known"));
-    g_assert_false(qtest_qom_get_bool(
+    g_assert_true(qtest_qom_get_bool(
         destination.qs->qts, USB_KBD_PATH, "x-numlock-led-on"));
     g_assert_false(qtest_qom_get_bool(
         destination.qs->qts, USB_KBD_PATH, "x-numlock-force-pending"));
@@ -405,9 +422,22 @@ static void test_numlock_migration_preserves_manual_off(void)
         destination.qs->qts, USB_KBD_PATH,
         "x-numlock-startup-completed"));
 
-    /* 迁移完成后 guest 再报告 OFF，也不能产生第二个 NumLock click。 */
+    /*
+     * ON 状态迁移后出现 OFF，
+     * 目的端必须重新收敛且只注入一次。
+     */
     test_set_numlock_led(&destination, false);
-    g_assert_false(test_uhci_interrupt_in(&destination, report));
+    g_assert_true(qtest_qom_get_bool(
+        destination.qs->qts, USB_KBD_PATH, "x-numlock-force-pending"));
+    g_assert_false(qtest_qom_get_bool(
+        destination.qs->qts, USB_KBD_PATH,
+        "x-numlock-startup-completed"));
+    test_set_numlock_led(&destination, false);
+    test_expect_one_numlock_click(&destination);
+    test_set_numlock_led(&destination, true);
+    g_assert_true(qtest_qom_get_bool(
+        destination.qs->qts, USB_KBD_PATH,
+        "x-numlock-startup-completed"));
 
     test_uhci_stop(&destination);
     test_uhci_stop_migrated_source(&source);
@@ -457,8 +487,8 @@ int main(int argc, char **argv)
                     test_numlock_force_can_be_enabled);
     g_test_add_func("/usb-hid-numlock/set-report-end-to-end",
                     test_numlock_set_report_end_to_end);
-    g_test_add_func("/usb-hid-numlock/migration-manual-off",
-                    test_numlock_migration_preserves_manual_off);
+    g_test_add_func("/usb-hid-numlock/migration-on-rearms",
+                    test_numlock_migration_on_rearms_after_off);
     g_test_add_func("/usb-hid-numlock/migration-unknown",
                     test_numlock_migration_preserves_unknown);
     return g_test_run();

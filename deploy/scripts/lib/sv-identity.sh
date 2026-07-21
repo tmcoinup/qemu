@@ -160,6 +160,18 @@ if [[ -z "${OVMF_CODE:-}" ]]; then
     fi
 fi
 
+# OVMF 会根据 CPUID 的物理地址宽度动态把 64 位 PCI MMIO 窗口放到地址空间
+# 顶端。2026-07-20 的 Windows 安装 warm reboot 现场中，固件内的 aperture
+# Base 被污染成 0xff8045e000000000，超出 G5400 的 39-bit 地址空间；
+# PciHostBridgeDxe 的 RELEASE 校验循环因此永远无法推进。这里使用 OVMF 官方
+# fw_cfg 开关固定为 Q35 默认的 32 GiB 窗口，令固件按 RAM 末端重新计算低位
+# Base，并跳过动态高地址重定位路径。当前分支不做 GPU 直通，默认最大的 BAR
+# 是 virtio-vga-gl 的 256 MiB hostmem，32 GiB 仍保留了充足余量。
+OVMF_PCI_MMIO64_MB=32768
+OVMF_MMIO64_ARGS=(
+    -fw_cfg "name=opt/ovmf/X-PciMmio64Mb,string=${OVMF_PCI_MMIO64_MB}"
+)
+
 # -------------------------------------------------------------------
 # 伪 BGRT (Boot Graphics Resource Table)
 #

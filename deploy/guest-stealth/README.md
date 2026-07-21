@@ -28,7 +28,7 @@
 | `gpu-profile-transaction.ps1` | 持久化 GPU 身份 journal、指针 CAS、投影回读与崩溃恢复公共实现 |
 | `gpu-profile-registry-core.ps1` | GPU 身份事务共用的精确注册表读取、回读与 pointer CAS 基元 |
 | `refresh-gpu-name.ps1` | 在全局写锁内严格投影唯一 VioGpuDod 实例的 Enum/Class 属性 |
-| `gpu-manufacturer-projection.ps1` | 通过 Config Manager 投影常规页制造商，并在前后复核 WHCP 签名绑定 |
+| `gpu-manufacturer-projection.ps1` | 通过 Config Manager 投影常规页制造商，并在前后直接复核 PnP/INF/SYS/WHCP |
 | `gpu-hardware-id-plan.ps1` | 无副作用地规划“逻辑首项 + 完整物理数组”，供生产脚本与测试共用 |
 | `project-gpu-hardware-id.ps1` | 唯一的 GPU Enum `HardwareID` writer；幂等投影、验证与回滚 |
 | `respawn-stealth-local.ps1` | 串联驱动安装、`apply-gpu-spoof -AutoDetect`、收尾与重启 |
@@ -85,7 +85,9 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
 
 1. EXE 从 Windows Known Folder 定位 ProgramData，拒绝重解析点或非可信 Owner；
    所有 payload 先写入受保护 staging 并逐字节复核，再整目录发布到
-   `C:\ProgramData\StealthGPU\respawn-exe\`。
+   `C:\ProgramData\StealthGPU\respawn-exe\`。管理员 PowerShell 使用受控最小
+   环境；`COMPUTERNAME` 来自 Windows API，`USERNAME/USERDOMAIN` 从当前提权
+   token 解析，既不继承用户可修改的同名变量，也满足系统 `shutdown.exe` 的环境契约。
 2. 在任何 GPU/PnP 写入前，通过 Windows PowrProf API 把当前活动方案中的“屏幕”和
    “睡眠”都设为“从不”：关闭普通及锁屏显示超时、空闲及无人值守自动睡眠和混合
    睡眠，同时设置 `ALLOWSTANDBY=1`，保留正常台式机的 S1–S3 能力与“睡眠”区块；
@@ -96,8 +98,9 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
    `pnputil /add-driver ... /install` 清除 SMBus Code 28。若要求重启，先记录
    `ChipsetVerification` 阶段并继续完成 GPU 流程；最终一次重启后只复核该 INF，
    不会再次运行 GPU 流程或安排第二次重启。
-4. 若存在上次正式身份，先停止旧投影任务并把 `HardwareID` 恢复为 physical-only；
-   后续驱动安装和 PnP scan 因而始终只看到 stock `1AF4:1050`。
+4. 先停止旧投影任务并只读检查当前在线实例；已经是 physical-only 时跳过
+   sysprep/generalize 后可能退役的旧 `SourceInstanceId`，否则按上次正式身份严格恢复，
+   再次门禁。后续驱动安装和 PnP scan 因而始终只看到 stock `1AF4:1050`。
 5. 只枚举 `PresentOnly` 的 PCI 显示设备，先要求物理主 ID 全部为 `1AF4:1050`，
    再读取不受 FriendlyName 伪装影响的
    `DEVPKEY_Device_Service`。
@@ -107,8 +110,9 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
    `pnputil /add-driver viogpudo.inf /install`。
 8. 再次读取 `Service`。没有真实变成 `VioGpuDod` 就停止，不执行 GPU 名称覆盖。
 9. 仅对本次新装驱动的系统清理旧 `GraphicsDrivers` 模式缓存；克隆机不清理。
-10. 执行 `apply-gpu-spoof.ps1 -AutoDetect -NvapiPayloadDir <受保护目录>`：按当前
-   PCI SUBSYS 对齐名称和版本化身份，并在 identity 尚未 `Complete` 时完整预检、
+10. 在旧 SYSTEM writer 已停止的窗口先完整发布持久投影依赖，再执行
+   `apply-gpu-spoof.ps1 -AutoDetect -NvapiPayloadDir <受保护目录>`：按当前 PCI
+   SUBSYS 对齐名称和版本化身份，并在 identity 尚未 `Complete` 时完整预检、
    staging NVAPI 与 ADL，再事务发布到 SysWOW64/System32。installer 失败会由同一
    durable `finally` 回滚 identity；流程不写 GPU-Z 原目录、不修改 PATH，也不安装
    NVIDIA 驱动、控制面板或服务。
@@ -118,10 +122,12 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
    `profile 逻辑首项 + 完整物理数组`。例如首项为 `10DE:1C82`，第二项起仍是
    `1AF4:1050`；设备实例路径、Service、Driver、CompatibleIDs 和 PCI 配置空间不变。
 13. `gpu-manufacturer-projection.ps1` 仅把设备管理器常规页制造商投影成
-    AMD/NVIDIA；投影前后都要求活动 `oemN.inf` 仍为 Red Hat、`IsSigned=True` 且
-    signer 为 Microsoft Windows Hardware Compatibility Publisher。
-14. 然后默认重启；不按进程区分的 NVAPI/ADL 查询会从系统目录读取同一身份。工具若调用
-    没有可信数据源的实时遥测或厂商驱动功能，会收到明确的“不支持”结果，而不是伪造数值。
+    AMD/NVIDIA；投影前后都要求活动 `Service/InfPath` 不变，并重新验证发布 INF、
+    运行中 SYS 的固定摘要与 Microsoft WHCP 证书指纹。
+14. 最后通过统一 helper 校验 System32 `shutdown.exe` 并立即核对其原生退出码，
+    再安排默认重启；不按进程区分的 NVAPI/ADL 查询会从系统目录读取同一身份。
+    工具若调用没有可信数据源的实时遥测或厂商驱动功能，会收到明确的“不支持”结果，
+    而不是伪造数值。
 
 因此，“设备管理器显示 GTX 1050 Ti”不再被当成成功条件。旧 EXE 能把
 Microsoft Basic Display Adapter 改名成 GTX，但底层仍是 BasicDisplay，UEFI 下的

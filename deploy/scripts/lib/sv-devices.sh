@@ -215,12 +215,13 @@ fi
 # 键盘走 USB HID (usb-kbd) — DirectInput / Raw Input 类游戏 (DNF / 仿真机)
 # 只读 USB keyboard, PS/2 keyboard 在它们眼里不存在 → 游戏内按键完全无响应.
 # q35 i8042 控制器仍默认带, 但没东西往那里发 scancode 就是空通道, 不影响.
-# opt-in QEMU 策略直接看 Windows 回传的 HID LED 位：只有明确 OFF 才异步送一次
-# NumLock，不使用延时猜测或盲 toggle，因此开机、登录和重复运行都不会反向关闭。
+# opt-in QEMU 策略直接看 Windows 回传的 HID LED 位：每轮只有明确 OFF 才异步
+# 送一个原子 NumLock click，并等到 ON 确认；连续 OFF 不会重复送键。这样固件、
+# Welcome 和用户会话先后写 LED 时都能收敛，不使用延时猜测或盲 toggle。
 KBD_NUMLOCK_PROP=""
 if [[ "${GUEST_NUMLOCK:-1}" == "1" ]]; then
     KBD_NUMLOCK_PROP=',x-force-numlock-on=on'
-    KBD_HINT='USB keyboard (DirectInput/Raw Input 兼容); guest NumLock 自动 ON'
+    KBD_HINT='USB keyboard (DirectInput/Raw Input 兼容); guest NumLock 强制 ON'
 else
     KBD_HINT='USB keyboard (DirectInput/Raw Input 兼容); guest NumLock 自动策略已关闭'
 fi

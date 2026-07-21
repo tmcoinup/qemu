@@ -46,6 +46,11 @@ clone 会用 hard-link 在 `VM_DIR/.base.qcow2` 固定 backing inode，所以
 `BASE_DIR` 与 `VMS_DIR` 必须在同一文件系统。迁移时应整体复制 VMS tree；
 不支持让 thin overlay 跨文件系统引用一个可被替换的外部 base 路径。
 
+单独搬运 standalone base 时，`scp`、浏览器下载、Windows/移动介质造成的 owner、
+mode 变化不需要手工修复。把文件复制到目标 Linux `BASE_DIR` 后正常执行 `sudo
+clone-from-base.sh`，clone 会校验传输已结束并自动密封。NTFS/CIFS/DrvFS 若不能
+可靠保存 Unix owner/mode，必须先复制到 Linux 文件系统；实例启动时不会放宽 pin。
+
 `VM_DIR` 必须是当前用户所有的私有真实目录，不能是符号链接。启动 swtpm 前，
 `tpm-state` 会被规范化为 canonical path 并登记在当前用户的私有 runtime 目录；
 因此关机不需要再次提供原路径：

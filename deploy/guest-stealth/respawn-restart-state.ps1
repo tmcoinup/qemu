@@ -167,6 +167,38 @@ function Register-RespawnResumeTask {
         -InputObject $task -Force -ErrorAction Stop | Out-Null
 }
 
+function Invoke-RespawnShutdown {
+    param(
+        [Parameter(Mandatory = $true)][string]$ShutdownPath,
+        [Parameter(Mandatory = $true)][int]$DelaySeconds,
+        [Parameter(Mandatory = $true)][string]$Comment
+    )
+
+    # 固定调用 System32 完整路径，并立即保存原生命令退出码。若进程根本无法
+    # 创建，PowerShell 可能保留上一条原生命令的 LASTEXITCODE，不能据此误报成功。
+    if ([string]::IsNullOrWhiteSpace($ShutdownPath) -or
+        -not (Test-Path -LiteralPath $ShutdownPath -PathType Leaf)) {
+        throw ('找不到可信的 Windows 重启程序：' + $ShutdownPath)
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    $global:LASTEXITCODE = $null
+    try {
+        $ErrorActionPreference = 'Stop'
+        & $ShutdownPath /r /t $DelaySeconds /f /c $Comment
+        $nativeExitCode = $global:LASTEXITCODE
+    } catch {
+        throw ('无法启动 Windows 重启程序：' + $_.Exception.Message)
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($null -eq $nativeExitCode) {
+        throw 'Windows 重启程序没有返回可验证的退出码。'
+    }
+    if ([int]$nativeExitCode -ne 0) {
+        throw ('shutdown.exe 返回错误码 ' + [int]$nativeExitCode)
+    }
+}
+
 function Restart-RespawnForPendingWork {
     param(
         [Parameter(Mandatory = $true)][string]$MainScriptPath,
@@ -194,9 +226,12 @@ function Restart-RespawnForPendingWork {
     }
     Write-Host "已创建一次性恢复任务，${RebootDelay}s 后重启继续验证。" `
         -ForegroundColor Green
-    & $shutdownExe /r /t $RebootDelay /f /c $ShutdownComment
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host 'FAIL: Windows 拒绝安排重启；恢复任务已保留，可手动重启。' `
+    try {
+        Invoke-RespawnShutdown -ShutdownPath $shutdownExe `
+            -DelaySeconds $RebootDelay -Comment $ShutdownComment
+    } catch {
+        Write-Host ('FAIL: Windows 拒绝安排重启；恢复任务已保留，可手动重启。' +
+            ' 原因：' + $_.Exception.Message) `
             -ForegroundColor Red
         exit $ShutdownFailureCode
     }

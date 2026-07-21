@@ -17,8 +17,14 @@ if ($PSVersionTable.PSVersion.Major -ne 5 -or
 $runtimeRoot = Join-Path $RepoRoot 'deploy/windows'
 $profileTest = Join-Path $RepoRoot `
     'deploy/scripts/tests/test_windows_profile_integrity.ps1'
+$dnfGuestRoot = Join-Path $RepoRoot 'deploy/scripts/guest'
+$dnfScripts = foreach ($name in 'dnf-fix-deps.ps1', `
+        'dnf-fix-installers.ps1', 'dnf-fix-directx.ps1') {
+    Get-Item -LiteralPath (Join-Path $dnfGuestRoot $name)
+}
 $scripts = @(Get-ChildItem -LiteralPath $runtimeRoot -Recurse -Filter '*.ps1') +
     @(Get-Item -LiteralPath $profileTest) +
+    @($dnfScripts) +
     @(Get-Item -LiteralPath $MyInvocation.MyCommand.Path)
 foreach ($script in $scripts) {
     $bytes = [System.IO.File]::ReadAllBytes($script.FullName)

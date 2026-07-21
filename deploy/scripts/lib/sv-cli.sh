@@ -244,13 +244,27 @@ fi
 # 建一个 ${QMP_SOCK}.proxy -> ${QMP_SOCK} 的 symlink，但不再起 Python 中转进程。
 : "${PROXY:=0}"
 # host 侧调度/时钟抖动调优: 起 VM 前自动跑 host-performance.sh(governor=performance
-# + KVM_HALT_POLL_NS(默认 0) + THP defrag=never)。多开时主要靠 cpuset 隔离
-# 防止宿主编译抢 vCPU；如需旧低延迟 busy-poll 策略，可显式 KVM_HALT_POLL_NS=500000。
+# + KVM_HALT_POLL_NS(默认 0) + THP defrag=never + split-lock 限速策略)。多开时主要
+# 靠 cpuset 隔离防止宿主编译抢 vCPU；如需旧低延迟 busy-poll 策略，可显式
+# KVM_HALT_POLL_NS=500000。
 # 只动 host 侧, 零反检测硬件身份影响.
 # 已调优则自动跳过(免每次 sudo); DRY_RUN 下严格 no-op. (flag: --host-tune/--no-host-tune)
 : "${HOST_TUNE:=1}"
-# QEMU 的 usb-kbd 直接读取 guest HID LED 报告，仅在明确 OFF 时异步注入一次
-# NumLock。默认开启；设 0 只关闭该策略，不改变物理 host 键盘状态。
+# Linux 的默认 split-lock mitigation 会故意让触发者等待并单核串行；KVM
+# 中的 Windows 驱动/解压路径偶发时会表现成整机卡顿。专用本地 VM 宿主默认
+# 取消该故意降速；多租户宿主如需防止恶意 split-lock DoS，显式设为 1。
+# HOST_TUNE=0 时不会修改宿主当前值。
+: "${SPLIT_LOCK_MITIGATE:=0}"
+case "$SPLIT_LOCK_MITIGATE" in
+    0|1) ;;
+    *)
+        echo "ERROR: SPLIT_LOCK_MITIGATE 必须是 0 或 1" >&2
+        exit 2
+        ;;
+esac
+# QEMU 的 usb-kbd 直接读取 guest HID LED 报告。每次明确 OFF 只异步注入一组
+# 原子 NumLock click，并等待 ON 后才允许下一轮，连续 OFF 不会造成按键连发。
+# 默认持续强制开启；设 0 允许 guest/用户自行切换，不改变物理 host 键盘状态。
 : "${GUEST_NUMLOCK:=1}"
 case "$GUEST_NUMLOCK" in
     0|1) ;;

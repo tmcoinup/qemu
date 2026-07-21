@@ -7,8 +7,9 @@
 # 目标：压低 KVM 的调度 / 时钟抖动。ACE「游戏计时异常」(13-131130-8) 这类
 # 仿真机时钟检测对 vCPU 服务延迟的方差很敏感——host governor=powersave 让核在
 # vm-exit 间降频、halt_poll 太短导致 vCPU 唤醒延迟尖刺、THP 同步整理会把 vCPU
-# 冻住几毫秒，这些都会被读成「计时异常」。本脚本只动 host 侧旋钮，guest 看到的
-# CPUID / 品牌串 / tsc-freq / 拓扑全部不变 → 零反检测影响。
+# 冻住几毫秒，split-lock mitigation 还会故意让触发者等待并串行。这些都会被
+# 读成「计时异常」或客体卡顿。本脚本只动 host 侧旋钮，guest 看到的 CPUID /
+# 品牌串 / tsc-freq / 拓扑全部不变。
 #
 # start-vm.sh 默认会在起 VM 前自动调用本脚本（HOST_TUNE=1，已调优则跳过）；
 # 也可单独手动跑：  sudo deploy/scripts/host-performance.sh
@@ -16,15 +17,21 @@
 set -euo pipefail
 
 # sudoers 放行的是固定 root helper；固定 PATH 并只读取位置参数，避免调用者环境中的
-# 同名程序或 CPU_MAX_KHZ/KVM_HALT_POLL_NS/HUGEPAGES 改变 root 写 sysfs 的行为。
+# 同名程序或 CPU_MAX_KHZ/KVM_HALT_POLL_NS/SPLIT_LOCK_MITIGATE
+# 改变 root 写 sysfs/procfs 的行为。
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 # root helper 会被 sudoers 免密放行，因此参数必须在任何写 sysfs 之前完整校验。
-# 第一个参数是频率上限（0=不封顶），第二个是 halt poll ns；拒绝额外参数和环境注入。
-(( $# <= 2 )) || { echo "ERROR: 用法: $0 [CPU_MAX_KHZ|0] [KVM_HALT_POLL_NS]" >&2; exit 2; }
+# 第一个参数是频率上限（0=不封顶），第二个是 halt poll ns，第三个是
+# split-lock mitigation 目标值（0=取消故意降速，1=保留内核防护）。拒绝额外参数与环境注入。
+(( $# <= 3 )) || {
+    echo "ERROR: 用法: $0 [CPU_MAX_KHZ|0] [KVM_HALT_POLL_NS] [SPLIT_LOCK_MITIGATE|0]" >&2
+    exit 2
+}
 CPU_MAX_KHZ="${1:-0}"
 KVM_HALT_POLL_NS="${2:-0}"
+SPLIT_LOCK_MITIGATE="${3:-0}"
 if ! [[ "$CPU_MAX_KHZ" =~ ^[0-9]+$ ]] || \
    (( CPU_MAX_KHZ != 0 && (CPU_MAX_KHZ < 100000 || CPU_MAX_KHZ > 10000000) )); then
     echo "ERROR: CPU_MAX_KHZ 必须是 0 或 [100000,10000000] 的整数 kHz" >&2
@@ -34,12 +41,39 @@ if ! [[ "$KVM_HALT_POLL_NS" =~ ^[0-9]+$ ]] || (( KVM_HALT_POLL_NS > 10000000 ));
     echo "ERROR: KVM_HALT_POLL_NS 必须是 [0,10000000] 的整数 ns" >&2
     exit 2
 fi
+case "$SPLIT_LOCK_MITIGATE" in
+    0|1) ;;
+    *)
+        echo "ERROR: SPLIT_LOCK_MITIGATE 必须是 0 或 1" >&2
+        exit 2
+        ;;
+esac
 
 if [[ $EUID -ne 0 ]]; then
     echo "rerunning with sudo..."
     # 直接以脚本路径(非 'bash 脚本')重入 sudo，命令名=脚本本身，匹配
     # /etc/sudoers.d/qemu-vmate-host 的固定 helper NOPASSWD 规则；参数原样带过去。
     exec sudo -- "$0" "$@"
+fi
+
+# 0) x86 split-lock 限速：默认取消内核对触发任务施加的故意等待和单核串行。
+#    Windows 驱动、解压或校验路径在 KVM vCPU 中触发 split lock 时，默认值 1
+#    会让客体看起来像「磁盘写入卡死」，即使宿主块设备完全空闲。值 0 仍会在
+#    kernel log 中警告，但会降低对恶意 split-lock 工作负载的 DoS 防护；需要该防护
+#    的多租户宿主可通过第三参数显式设回 1。
+_split_lock_path=/proc/sys/kernel/split_lock_mitigate
+if [[ -e "$_split_lock_path" ]]; then
+    printf '%s\n' "$SPLIT_LOCK_MITIGATE" > "$_split_lock_path"
+    _split_lock_actual="$(<"$_split_lock_path")"
+    if [[ "$_split_lock_actual" != "$SPLIT_LOCK_MITIGATE" ]]; then
+        echo "ERROR: split_lock_mitigate 写入后未达到目标值" >&2
+        exit 1
+    fi
+    echo ">> split lock : mitigate=${SPLIT_LOCK_MITIGATE}$(
+        [[ "$SPLIT_LOCK_MITIGATE" == 0 ]] && echo '（取消故意降速）' || echo '（保留内核防护）'
+    )"
+else
+    echo ">> split lock : 当前内核不提供 split_lock_mitigate，跳过"
 fi
 
 # 1) CPU governor -> performance：固定高频，消除 vm-exit 间降频导致的服务延迟

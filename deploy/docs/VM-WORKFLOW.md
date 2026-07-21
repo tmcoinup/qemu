@@ -189,6 +189,11 @@ deploy/scripts/seal-base.sh 1 win10-shallow-dnf-v1 \
 删除时，既有实例仍引用原 inode。为保持零拷贝 thin clone，base 和实例目录必须
 位于同一文件系统。
 
+从其它主机、Windows、浏览器下载或移动硬盘导入 standalone qcow2 时，只需先把
+文件复制到目标 Linux 的 `_base` 目录，再正常运行 `sudo clone-from-base.sh`。
+脚本会在 qcow2 全检后自动把调用用户拥有的单链接文件密封成 `root:root/0444`；
+复制方式造成的 owner/mode 差异不会再要求手工修复。
+
 默认清理会修改源 `disk.qcow2` 中的应用缓存；需要保持源盘字节内容不变时必须显式
 使用 `--no-clean`。无论哪种模式，convert 都不会移动或替换源盘。
 
@@ -216,23 +221,34 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 > 文件写入前立即失败。脚本只会把本事务创建或替换的目录项归还给原始用户，
 > 不再递归改属已有实例目录。
 >
-> **重要原则**：除 per-user `NTUSER.DAT` 外，**绝不离线改 boot-critical hive**（SYSTEM / SOFTWARE / DEFAULT）—— Win10 22H2 incremental log 协议下，离线改 hive 即使 `.LOG1/.LOG2` 一起处理，启动也几乎必然 `0xc0000001`。所以所有 guest 启动后才要的注册表改动统一走 `deploy/autounattend/autounattend.xml` 的 `<FirstLogonCommands>`。
+> **重要原则**：在 sysprep 后、clone 尚未完成首次枚举的阶段，**不离线改
+> boot-critical hive**（SYSTEM / SOFTWARE / DEFAULT）—— Win10 22H2
+> incremental log 协议下，此时离线改 hive 即使 `.LOG1/.LOG2` 一起处理也可能
+> 导致 `0xc0000001`。guest 启动后才要的注册表改动统一走
+> `deploy/autounattend/autounattend.xml` 的 `<FirstLogonCommands>`；首次枚举并
+> 完整关机后的 `finalize-clone-gpu.sh` 是专用、受控的离线收尾。
 >
-> **注意**：clone 阶段调 `host-fix-gpu-devpkey.sh` 会打印 `ControlSet001\Enum\PCI 不存在 — sysprep base 未首启的预期状态 / 跳过离线 DEVPKEY 覆盖`。这是**正确**行为：sysprep generalize 清掉了 PCI enum，新 clone 必须开机一次让 Windows 重新枚举才会有这些键。GPU 名最终由 guest 首次登录后 FirstLogonCommands Order=10 跑本地 respawn 重对齐。
+> **注意**：clone 阶段不会调用 `host-fix-gpu-devpkey.sh`，因此不会为了探测
+> sysprep 已清空的 `Enum\PCI` 而重写 SYSTEM hive。新 clone 首次开机由 Windows
+> 重新枚举设备，GPU 名由 FirstLogonCommands Order=10 的本地 respawn 重对齐；
+> 进入桌面并完整关机后，再按 C.3 运行离线 finalizer。
 
 自动做完：
 1. 复用合法的 UI 预置 profile；否则重抽完整身份，并让实际 `BOOT_STORAGE_*`
    （NVMe 或 SATA/AHCI）容量逐字节等于 base。
 2. 创建使用相对 backing 路径的 qcow2 增量层和全新 OVMF NVRAM；发布前后都会复核
    格式、容量、backing inode 和 patched QEMU 能力。
-3. `host-fix-gpu-devpkey.sh` 在 sysprep base 上可自动 skip；首启枚举后再运行
-   `finalize-clone-gpu.sh`。
+3. clone 阶段不离线写 SYSTEM；首启枚举后再运行 `finalize-clone-gpu.sh`。
 4. **`host-inject-unattend.sh`** 把 `deploy/autounattend/autounattend.xml` 写到 guest 三处：
    - `%WINDIR%\Panther\Unattend\unattend.xml`（OOBE 主搜索路径）
    - `C:\unattend.xml`（备用）
    - `%WINDIR%\System32\Sysprep\unattend.xml`（备用）
 5. per-instance 把 `<ComputerName>` 替换成 `DESKTOP-<7位随机[A-Z0-9]>`。
 6. 精确归还本次 disk/profile/OVMF（以及新建目录）的所有权，再提交事务。
+
+联网 OOBE 会自动检查并安装关键 ZDP，旧 base 首启可能出现数分钟的“Windows
+将稳步更新”页面并按更新要求重启。这是 Windows 客体的预期更新阶段；若每个
+clone 都重复等待，应在更新完成后重新执行 sysprep，并密封为新版 base。
 
 ### C.2 启动新 VM
 
@@ -243,7 +259,7 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 **guest 内 0 手动操作** ——OOBE 自动跑完 unattend.xml：
 
 1. **OOBE specialize 阶段**（首启）：处理 `<settings pass="specialize">`，应用 `ComputerName=DESKTOP-XXXXXXX`（host-inject 注入的随机名）+ 时区 + 输入法等，重启
-2. **OOBE oobeSystem 阶段**（第二启）：自动跳 `SkipMachineOOBE / SkipUserOOBE / HideEULAPage / HideLocalAccountScreen / ...` 全套画面，建立隔离测试镜像的默认 Administrator 账号；该默认口令不得复用于宿主或生产环境
+2. **OOBE oobeSystem 阶段**（第二启）：通过 `HideEULAPage / HideOnlineAccountScreens / HideLocalAccountScreen / ...` 隐藏交互页面，并为隔离测试镜像启用内置 Administrator；不使用 Microsoft 明确不建议用于自动化 OOBE 的 `SkipMachineOOBE`。该默认口令不得复用于宿主或生产环境
 3. **AutoLogon Administrator**：`<AutoLogon Enabled=true LogonCount=999>` 自动登录到桌面
 4. **`<FirstLogonCommands>` Order 1→10 顺序跑**：
    - Order 1-3: Enable RDP + 防火墙放行 + 关 NLA
@@ -256,7 +272,8 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
    投影任务，只跳过交互式显示模式任务；不安装第三方服务
 6. 重启后桌面就绪，Device Manager 显示 profile.GPU_NAME（可能跟 base 的 VM1 不同）
 
-整个过程从 `start-vm.sh` 到稳定桌面 **~5-8 分钟**，全程不需要鼠标键盘。
+整个过程从 `start-vm.sh` 到稳定桌面通常需要 **约 5-10 分钟**；旧 base
+触发联网 ZDP 时会更久，全程不需要鼠标键盘。
 
 #### C.2.1 兜底：FirstLogonCommands Order=10 没跑成功怎么办
 
@@ -296,7 +313,9 @@ STABLE_DISPLAY=0 HOST_RESERVE_CORES=0 \
 
 ### C.4 sysprep 与 OOBE
 
-- 阶段 B.1 sysprep **已做**：clone 的 VM 第一次开机自动走 OOBE，**unattend.xml 自动跳过所有画面**直接 AutoLogon 进桌面。每个 VM 走完后有**独立 SID/MachineGUID**（stealth 友好）。
+- 阶段 B.1 sysprep **已做**：clone 的 VM 第一次开机自动走 OOBE，
+  **unattend.xml 配置并隐藏相应页面**，随后 AutoLogon 进桌面。每个 VM
+  走完后有**独立 SID/MachineGUID**（stealth 友好）。
 - 阶段 B.1 sysprep **没做**：clone 的 VM 直接登录到 base 的 Administrator，**多 VM 的 MachineGUID 相同**，stealth 弱一点。两种都通，但生产 VM 建议 sysprep。
 
 ### C.5 验证
@@ -423,9 +442,9 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 |---|---|---|
 | `irm apply-gpu-spoof.ps1 \| iex` 报"赋值表达式无效" | 该脚本有 `param()`，`iex` 不支持参数化 | 不要直接跑；重新构建并运行统一 EXE |
 | host offline 改 hive 时报 "Windows is hibernated" | Fast Startup 没关 | guest 内 `powercfg -h off` + `shutdown /s /t 0`，**别**用 GUI "关机"或 `shutdown /r` |
-| clone 完启动报 `Recovery 0xc0000001 / Your PC couldn't start properly` | 离线改了 boot-critical hive（SYSTEM/SOFTWARE/DEFAULT）—— Win10 22H2 incremental log 协议下，无论 LOG 保留 / truncate / restore 都崩 | 唯一解：boot-critical hive 一概不离线动；guest 启动后要的注册表改动写进 `autounattend.xml` 的 `<FirstLogonCommands>` |
-| 设备管理器驱动程序提供商还是 `Red Hat, Inc.` | clone 首启后 Windows 按 `viogpudo.inf` 重新写回 Provider，覆盖了 clone 阶段预写 | guest 关机，host 端 `deploy/scripts/finalize-clone-gpu.sh <N>`；脚本会自动 sudo 提权 |
-| clone 完 host 端报 `ControlSet001\Enum\PCI 不存在` | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不是 bug —— 脚本自动 skip；guest 首次登录后 FirstLogonCommand Order=10 会重对齐 GPU |
+| clone 完启动报 `Recovery 0xc0000001 / Your PC couldn't start properly` | sysprep 后、首次枚举前离线改了 boot-critical hive（SYSTEM/SOFTWARE/DEFAULT） | 重新 clone；首启前不要离线改这些 hive，guest 启动后要做的注册表改动写进 `autounattend.xml` 的 `<FirstLogonCommands>` |
+| 设备管理器驱动程序提供商还是 `Red Hat, Inc.` | clone 阶段不预写 Provider；Windows 首次枚举按 `viogpudo.inf` 建立原始字段 | guest 完整关机，host 端运行 `deploy/scripts/finalize-clone-gpu.sh <N>`；这是首次枚举后的受控离线收尾，脚本会自动 sudo 提权 |
+| 首启前 `ControlSet001\Enum\PCI` 不存在 | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不要在 clone 阶段运行 `host-fix-gpu-devpkey.sh`；首次登录后由 FirstLogonCommand Order=10 重对齐 GPU，再完整关机运行 finalizer |
 | clone VM 进桌面后 GPU 名还是 base 老型号 | 首次登录那次 FirstLogonCommand Order=10 没自动跑，或 `D:\工具\respawn-stealth.exe` 不存在 | guest 管理员 PS：`Start-Process -FilePath 'D:\工具\respawn-stealth.exe' -ArgumentList '--firstlogon' -Wait` |
 | 新 VM 显示 GTX 但分辨率锁在 1280×800、下拉灰色 | 运行的是旧 EXE，只把 Microsoft Basic Display Adapter 改了名 | 替换最新 EXE，在 SDL 控制台运行；确认 Service=`VioGpuDod` 后重启 |
 | `display-driver-install.log` 报摘要/签名错误 | SYS/CAT/INF 混版或 EXE payload 损坏 | host 重新运行 `package.sh`，不要手工替换释放目录里的驱动 |

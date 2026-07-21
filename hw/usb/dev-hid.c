@@ -61,7 +61,8 @@ struct USBHIDState {
 
     /*
      * opt-in NumLock 强制开启状态。
-     * 状态机仅接受 guest 的 SET_REPORT；
+     * 状态机仅接受 guest 的 SET_REPORT。
+     * 每次明确 OFF 只建立一个等待 ON 的收敛轮次。
      * BH 用于避免 USB 设备重入。
      */
     USBHIDNumLockState numlock;
@@ -1037,6 +1038,24 @@ static bool usb_keyboard_post_load(void *opaque, int version_id, Error **errp)
         return false;
     }
 
+    /*
+     * v1 子段的旧实现允许 completed=true
+     * 与明确 OFF 同时存在，用它表示“用户手动关闭”。
+     * 持续强制语义下，这正是一个尚未收敛的轮次。
+     * 在目的端归一化为 pending，
+     * 并且仍只会排入一个原子 click。
+     *
+     * 没有 NumLock 子段的旧迁移流已在上方保守返回。
+     * 不能把 HID leds 的零值猜成 guest 明确回报 OFF。
+     */
+    if (us->numlock.led_known && !us->numlock.led_on &&
+        !us->numlock.force_pending &&
+        !us->numlock.injection_attempted) {
+        us->numlock.startup_completed = false;
+        us->numlock.force_pending = true;
+        us->numlock.injection_attempted = false;
+    }
+
     if ((us->numlock.injection_attempted &&
          !us->numlock.force_pending) ||
         (us->numlock.force_pending &&
@@ -1215,6 +1234,14 @@ static void usb_keyboard_class_initfn(ObjectClass *klass, const void *data)
                                    usb_keyboard_get_numlock_led_on, NULL);
     object_class_property_add_bool(klass, "x-numlock-force-pending",
                                    usb_keyboard_get_numlock_force_pending,
+                                   NULL);
+    /*
+     * 新名称准确表达持续收敛语义。
+     * 旧名称作为迁移期诊断接口别名保留。
+     * 两者都只表示最近一轮已经收到 ON 确认。
+     */
+    object_class_property_add_bool(klass, "x-numlock-on-confirmed",
+                                   usb_keyboard_get_numlock_startup_completed,
                                    NULL);
     object_class_property_add_bool(klass, "x-numlock-startup-completed",
                                    usb_keyboard_get_numlock_startup_completed,

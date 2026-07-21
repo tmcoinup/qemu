@@ -420,6 +420,45 @@ test_cpu_isolate_scripts_parse() {
     fi
 }
 
+test_host_tune_manages_split_lock_mitigation() {
+    local tmp_dir="$1"
+    local host_tune="$REPO_ROOT/deploy/scripts/lib/sv-hosttune.sh"
+    local host_perf="$REPO_ROOT/deploy/scripts/host-performance.sh"
+    local cli="$REPO_ROOT/deploy/scripts/lib/sv-cli.sh"
+    local state_file="$tmp_dir/split-lock-mitigate"
+
+    grep -F ": \"\${SPLIT_LOCK_MITIGATE:=0}\"" "$cli" >/dev/null \
+        || fail "launcher must default split-lock intentional slowdown off"
+    grep -F '/proc/sys/kernel/split_lock_mitigate' "$host_tune" >/dev/null \
+        || fail "host tune must detect the live split-lock mitigation state"
+    grep -F "\"\$_ht_split_lock_target\"" "$host_tune" >/dev/null \
+        || fail "host tune must pass the validated split-lock target to root helper"
+    grep -F "SPLIT_LOCK_MITIGATE=\"\${3:-0}\"" "$host_perf" >/dev/null \
+        || fail "root helper must consume a fixed positional split-lock target"
+
+    # DRY_RUN 会在所有宿主副作前 return，但纯策略函数已定义，
+    # 可独立覆盖当前值、需调优值与旧内核缺失三条分支。
+    printf '%s\n' 0 > "$state_file"
+    (
+        # shellcheck disable=SC1090 # 测试需从工作树计算出的绝对路径 source。
+        DRY_RUN=1 source "$host_tune"
+        sv_host_split_lock_mitigation_matches 0 "$state_file"
+    ) || fail "matching split-lock state must not request host tuning"
+    if (
+        # shellcheck disable=SC1090 # 同上，这里覆盖不匹配分支。
+        DRY_RUN=1 source "$host_tune"
+        sv_host_split_lock_mitigation_matches 1 "$state_file"
+    ); then
+        fail "mismatched split-lock state must request host tuning"
+    fi
+    rm -f "$state_file"
+    (
+        # shellcheck disable=SC1090 # 同上，这里覆盖旧内核缺少 sysctl 的分支。
+        DRY_RUN=1 source "$host_tune"
+        sv_host_split_lock_mitigation_matches 0 "$state_file"
+    ) || fail "kernels without split-lock sysctl must remain compatible"
+}
+
 main() {
     require_executable "$START_VM"
     require_executable "$QEMU"
@@ -448,6 +487,7 @@ main() {
     "$SCRIPT_DIR/test_gpu_zerocopy_launcher.sh"
     test_hotkey_capture_option_removed "$out"
     test_cpu_isolate_scripts_parse
+    test_host_tune_manages_split_lock_mitigation "$image_root"
     echo "PASS: start-vm NVMe storage portability path"
 }
 

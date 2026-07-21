@@ -32,8 +32,10 @@ typedef struct USBHIDNumLockState {
     bool injection_attempted;
 
     /*
-     * 当前 USB reset 周期的启动初始化已经完成。
-     * 完成后 OFF 被视为用户操作，不再自动翻转。
+     * 该字段名为兼容既有迁移流和 QOM 诊断接口而保留。
+     * true 表示最近一次 guest 报告已确认 ON；
+     * 后续明确 OFF 会先清除此位，
+     * 再建立新的单次注入轮次。
      */
     bool startup_completed;
 } USBHIDNumLockState;

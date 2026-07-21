@@ -236,6 +236,45 @@ if (-not $failed -or $script:HardwareWrites -ne 2 -or
 }
 ' >/dev/null || fail "HardwareID Apply 故障注入/自动回滚测试失败"
 
+# 提取 respawn 的真实 SetupAPI 门禁与只读包装器，用内存 PnP 结果证明 seal/sysprep
+# 后的新实例为纯物理时可跳过旧回滚，而 fake-first/无设备仍进入恢复或拒绝路径。
+RESPAWN="$RESPAWN" pwsh -NoLogo -NoProfile -NonInteractive -Command '
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $env:RESPAWN, [ref]$tokens, [ref]$errors)
+foreach ($functionName in @("Assert-PhysicalDisplayHardwareIds",
+        "Test-PhysicalDisplayHardwareIds")) {
+    $functionAst = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $functionName
+    }, $true)
+    if ($null -eq $functionAst) { throw ("缺少生产函数：" + $functionName) }
+    . ([scriptblock]::Create($functionAst.Extent.Text))
+}
+function Get-PnpDevice {
+    param([string]$Class, [switch]$PresentOnly, $ErrorAction)
+    if (-not $script:NoDevice) { [pscustomobject]@{ InstanceId=$script:InstanceId } }
+}
+function Get-PnpDeviceProperty {
+    param([string]$InstanceId, [string]$KeyName, $ErrorAction)
+    return [pscustomobject]@{ Data=[string[]]@($script:HardwareIds) }
+}
+$physical = @(
+    "PCI\VEN_1AF4&DEV_1050&SUBSYS_1D0110DE&REV_A1",
+    "PCI\VEN_1AF4&DEV_1050&SUBSYS_1D0110DE"
+)
+$script:InstanceId = $physical[0] + "\3&11583659&0&30"
+$script:HardwareIds = $physical
+$script:NoDevice = $false
+if (-not (Test-PhysicalDisplayHardwareIds)) { throw "纯物理实例未通过只读预检" }
+$script:HardwareIds = @("PCI\VEN_10DE&DEV_1D01&SUBSYS_1D0110DE&REV_A1") + $physical
+if (Test-PhysicalDisplayHardwareIds) { throw "fake-first 被预检误报为纯物理" }
+$script:NoDevice = $true
+if (Test-PhysicalDisplayHardwareIds) { throw "无在线设备被预检误报为纯物理" }
+' >/dev/null || fail "seal/sysprep 首启 physical-only 预检测试失败"
+
 # 四个 PowerShell 文件都必须能由 Windows PowerShell 5.1 兼容 AST 解析器接受。
 PS_FILES="$PLAN:$PROJECTOR:$RESPAWN:$RESTART_HELPER" \
 pwsh -NoLogo -NoProfile -NonInteractive -Command '
@@ -314,22 +353,37 @@ foreach ($command in $ast.FindAll({
 }
 ' >/dev/null || fail "projector 引入 PnP 重扫、网络、服务或应用专用命令"
 
-# 正式执行顺序：先确认不息屏/不睡眠 -> 停旧任务/physical-only -> apply 内部 PnP
-# scan、identity 与 GPU API 原子窗口 -> 注册 SYSTEM task -> 同步 fake-first。
+# 正式执行顺序：先确认不息屏/不睡眠 -> 停旧任务 -> 先验当前 physical-only，只有
+# 必要时才按旧 identity 恢复 -> 再次门禁 -> apply 内部 PnP scan、identity 与 GPU API
+# 原子窗口 -> 注册 SYSTEM task -> 同步 fake-first。
 # FirstLogon 的旧任务清理列表不得删除最终任务。
 power_line="$(rg -n -F '& $powershellExe @powerArgs' "$RESPAWN" | cut -d: -f1)"
 restore_line="$(rg -n -F "'-Mode', 'RestorePhysical'" "$RESPAWN" | head -1 | cut -d: -f1)"
-physical_gate_line="$(rg -n -F '    Assert-PhysicalDisplayHardwareIds' "$RESPAWN" | cut -d: -f1)"
+physical_preflight_line="$(rg -n -F 'if (Test-PhysicalDisplayHardwareIds)' \
+    "$RESPAWN" | cut -d: -f1)"
+physical_gate_line="$(rg -n -F '    Assert-PhysicalDisplayHardwareIds' \
+    "$RESPAWN" | tail -1 | cut -d: -f1)"
 driver_line="$(rg -n -F '& $powershellExe @driverArgs' "$RESPAWN" | cut -d: -f1)"
 spoof_line="$(rg -n -F '& $powershellExe @spoofArgs' "$RESPAWN" | cut -d: -f1)"
-register_line="$(rg -n -F '$persistentProjector = Register-GpuProjectionTask' "$RESPAWN" | cut -d: -f1)"
+publish_line="$(rg -n -F '$persistentProjector = Publish-GpuProjectionPayload' \
+    "$RESPAWN" | cut -d: -f1)"
+register_line="$(rg -n -F 'Register-GpuProjectionTask -Projector $persistentProjector' \
+    "$RESPAWN" | cut -d: -f1)"
 apply_line="$(rg -n -F '& $powershellExe @projectionArgs' "$RESPAWN" | cut -d: -f1)"
-[[ -n "$power_line" && -n "$restore_line" && -n "$physical_gate_line" && -n "$driver_line" && \
+[[ -n "$power_line" && -n "$physical_preflight_line" && -n "$restore_line" && \
+    -n "$physical_gate_line" && -n "$driver_line" && -n "$publish_line" && \
     -n "$spoof_line" && -n "$register_line" && -n "$apply_line" ]] \
     || fail "无法定位 HardwareID 正式执行顺序"
-(( power_line < restore_line && restore_line < physical_gate_line && physical_gate_line < driver_line && \
-    driver_line < spoof_line && spoof_line < register_line && register_line < apply_line )) \
+(( power_line < physical_preflight_line && physical_preflight_line < restore_line && \
+    restore_line < physical_gate_line && physical_gate_line < driver_line && \
+    driver_line < publish_line && publish_line < spoof_line && spoof_line < register_line && \
+    register_line < apply_line )) \
     || fail "HardwareID 投影没有严格位于 PnP scan/GPU API 成功之后"
+preflight_body="$(sed -n '/^if (Test-PhysicalDisplayHardwareIds) {/,/^try {$/p' \
+    "$RESPAWN")"
+[[ "$preflight_body" == *'} elseif (Test-CurrentGpuIdentityExists) {'* &&
+   "$preflight_body" == *"'-Mode', 'RestorePhysical'"* ]] \
+    || fail "seal/sysprep 首启没有优先接受当前 physical-only 实例"
 rg -F "'-AutoDetect', '-NvapiPayloadDir', \$PSScriptRoot" "$RESPAWN" >/dev/null \
     || fail "正式 apply 没有接收同包 GPU API payload"
 gpu_api_install_line="$(rg -n -F '& $powershellExe @gpuApiInstallArgs' "$APPLY" | cut -d: -f1)"
@@ -347,6 +401,14 @@ host_optional_success_line="$(rg -n -F 'no host-side offline fix is required' \
     || fail "GPU API/identity 未完整 Finalize 就误报 host-fix 可选成功"
 rg -F -- "-KeyName 'DEVPKEY_Device_HardwareIds'" "$RESPAWN" >/dev/null \
     || fail "无 CurrentIdentity 场景没有用 SetupAPI 做 physical-only 门禁"
+stop_projection_body="$(sed -n '/^function Stop-GpuProjectionTask {/,/^}/p' "$RESPAWN")"
+for stopped_task in '$projectionTaskName' "'StealthGPU-RefreshName'"; do
+    [[ "$stop_projection_body" == *"$stopped_task"* ]] \
+        || fail "驱动/PnP 前的旧投影任务屏障缺少：$stopped_task"
+done
+apply_failure_body="$(sed -n '/^if (\$rc -ne 0) {/,/^}/p' "$RESPAWN")"
+[[ "$apply_failure_body" == *'Stop-GpuProjectionTask'* ]] \
+    || fail "apply 失败会残留刚注册的名称刷新任务"
 
 for contract in \
         "'StealthGPU-ProjectHardwareId'" \

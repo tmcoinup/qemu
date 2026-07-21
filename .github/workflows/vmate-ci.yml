@@ -87,6 +87,7 @@ jobs:
             deploy/scripts/lib/sv-disk.sh \
             deploy/scripts/lib/sv-host-capabilities.sh \
             deploy/scripts/lib/sv-host-helpers.sh \
+            deploy/scripts/lib/sv-sudo-session.sh \
             deploy/scripts/lib/sv-cpupin.sh
       - name: Run isolated regression tests in parallel
         run: python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4

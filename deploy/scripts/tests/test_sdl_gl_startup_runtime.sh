@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 QEMU="${QEMU:-$REPO_ROOT/build/qemu-system-x86_64}"
+SDL2_C="$REPO_ROOT/ui/sdl2.c"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -12,6 +13,21 @@ fail() {
 }
 
 [[ -x "$QEMU" ]] || fail "缺少可执行 QEMU: $QEMU"
+python3 - "$SDL2_C" <<'PY'
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+start = source.index("static void sdl_cleanup(void)")
+video_guard = source.index("SDL_WasInit(SDL_INIT_VIDEO)", start)
+display_guard = source.index("SDL_GetNumVideoDisplays() <= 0", start)
+first_cleanup_call = min(
+    source.index("SDL_SetCursor(", start),
+    source.index("SDL_FreeCursor(", start),
+    source.index("SDL_QuitSubSystem(", start),
+)
+assert video_guard < first_cleanup_call
+assert display_guard < first_cleanup_call
+PY
 if [[ -z "${DISPLAY:-}" ]]; then
     echo "SKIP: 当前环境没有 X11 DISPLAY，无法运行 SDL/GL 启动测试"
     exit 0

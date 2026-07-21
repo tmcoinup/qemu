@@ -63,6 +63,8 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 PACKAGE_REPO="$TMP_DIR/package-repo"
 mkdir -p "$PACKAGE_REPO/deploy"
 cp -a "$REPO_ROOT/deploy/guest-stealth" "$PACKAGE_REPO/deploy/guest-stealth"
+cp -a "$REPO_ROOT/deploy/guest-launcher-common" \
+    "$PACKAGE_REPO/deploy/guest-launcher-common"
 rm -rf "$PACKAGE_REPO/deploy/guest-stealth/dist"
 ln -s "$REPO_ROOT/deploy/scripts" "$PACKAGE_REPO/deploy/scripts"
 ln -s "$NVAPI_DIR" "$PACKAGE_REPO/deploy/nvapi-shim"

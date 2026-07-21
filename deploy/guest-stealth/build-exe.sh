@@ -22,6 +22,7 @@ export LC_ALL=C
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 LAUNCHER="$HERE/launcher"
+LAUNCHER_COMMON="$REPO_ROOT/deploy/guest-launcher-common"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build/guest-stealth-exe}"
 OUT_DIR="${OUT_DIR:-$HERE/dist}"
 OUT_EXE="$OUT_DIR/respawn-stealth.exe"
@@ -52,8 +53,8 @@ NVAPI_SRC_DIR="${NVAPI_SRC_DIR:-$REPO_ROOT/deploy/nvapi-shim}"
 ADL_SRC_DIR="${ADL_SRC_DIR:-$REPO_ROOT/deploy/adl-shim}"
 ADL_EXPORTS_SRC="$ADL_SRC_DIR/adl-required-exports.txt"
 SRC="$LAUNCHER/respawn-stealth-launcher.c"
-PAYLOAD_SECURITY_SRC="$LAUNCHER/payload-security.c"
-PAYLOAD_ENVIRONMENT_SRC="$LAUNCHER/payload-environment.c"
+PAYLOAD_SECURITY_SRC="$LAUNCHER_COMMON/payload-security.c"
+PAYLOAD_ENVIRONMENT_SRC="$LAUNCHER_COMMON/payload-environment.c"
 LAUNCHER_ARGUMENTS_SRC="$LAUNCHER/launcher-arguments.c"
 MANUFACTURER_PROJECTOR_SRC="$LAUNCHER/gpu-manufacturer-projector.c"
 MANIFEST="$LAUNCHER/respawn-stealth.exe.manifest"
@@ -364,6 +365,7 @@ x86_64-w64-mingw32-gcc \
     -static-libgcc \
     -Wl,--no-insert-timestamp \
     -I "$BUILD_DIR" \
+    -I "$LAUNCHER_COMMON" \
     "$SRC" \
     "$PAYLOAD_SECURITY_SRC" \
     "$PAYLOAD_ENVIRONMENT_SRC" \

@@ -93,6 +93,96 @@ base_image_require_standalone_qcow2() {
     fi
 }
 
+# 浏览器下载、scp、Windows/U 盘复制都会丢失 Linux owner/mode。clone 已经由 root
+# 执行，因此在唯一安全的导入边界自动接管“调用用户拥有的单链接普通文件”：先用
+# 稳定 FD 完成 qcow2 全检和 fingerprint，再让窄权限 helper 原地密封 inode。
+# 已密封 base 直接返回；实例 pin 的运行期校验仍保持严格，不把传输兼容扩散到启动。
+base_image_adopt_portable_copy() {
+    local qemu_img="${1:-}" helper="${2:-}" image="${3:-}"
+    local owner mode links caller_uid holders
+    local source_fd source_fd_path fingerprint sealed_fingerprint
+
+    # shellcheck disable=SC2034 # clone 在解析最终 VM 用户后复核该 UID。
+    BASE_IMAGE_ADOPTED_FROM_UID=""
+
+    [[ -n "$qemu_img" && -x "$qemu_img" &&
+       -f "$helper" && ! -L "$helper" &&
+       -f "$image" && ! -L "$image" ]] || {
+        echo "ERROR: base 自动导入参数非法: ${image:-empty}" >&2
+        return 1
+    }
+    owner="$(stat -c '%u' -- "$image")"
+    mode="$(stat -c '%a' -- "$image")"
+    if [[ "$owner" == 0 && "$mode" == 444 ]]; then
+        base_image_require_standalone_qcow2 "$qemu_img" "$image"
+        return
+    fi
+    if [[ $EUID -ne 0 ]]; then
+        echo "ERROR: 自动密封传输 base 需要由普通用户通过 sudo 调用 clone" >&2
+        return 1
+    fi
+    caller_uid="${SUDO_UID:-${PKEXEC_UID:-}}"
+    if ! [[ "$caller_uid" =~ ^[1-9][0-9]*$ ]] || [[ "$owner" != "$caller_uid" ]]; then
+        echo "ERROR: 只自动接管调用 sudo 的普通用户拥有的传输 base: $image" >&2
+        echo "       actual owner=$owner caller=$caller_uid mode=$mode" >&2
+        return 1
+    fi
+    links="$(stat -c '%h' -- "$image")"
+    if [[ "$links" != 1 ]]; then
+        echo "ERROR: 未密封的传输 base 必须只有一个硬链接: $image" >&2
+        echo "       actual owner=$owner mode=$mode links=$links" >&2
+        return 1
+    fi
+    command -v lsof >/dev/null 2>&1 || {
+        echo "ERROR: base 自动导入需要 lsof 排除仍在写入的传输文件" >&2
+        return 1
+    }
+    holders="$(lsof -t "$image" 2>/dev/null || true)"
+    if [[ -n "$holders" ]]; then
+        echo "ERROR: 待导入 base 仍被进程持有，复制/下载尚未完成: $holders" >&2
+        return 1
+    fi
+
+    exec {source_fd}<"$image" || {
+        echo "ERROR: 无法打开待导入 base: $image" >&2
+        return 1
+    }
+    source_fd_path="/proc/$$/fd/$source_fd"
+    if ! fingerprint="$(python3 "$helper" fingerprint "$source_fd_path")" ||
+       ! base_image_require_standalone_qcow2 "$qemu_img" "$source_fd_path"; then
+        exec {source_fd}<&-
+        return 1
+    fi
+
+    echo ">> portable base: 检测到传输后的 owner=$owner mode=$mode，自动密封"
+    if ! sealed_fingerprint="$(
+        python3 "$helper" adopt "$source_fd_path" "$fingerprint"
+    )"; then
+        exec {source_fd}<&-
+        return 1
+    fi
+    if [[ ! "$image" -ef "$source_fd_path" ]]; then
+        echo "ERROR: base 路径在自动密封期间被替换: $image" >&2
+        exec {source_fd}<&-
+        return 1
+    fi
+    exec {source_fd}<&-
+
+    [[ -n "$sealed_fingerprint" &&
+       "$(stat -c '%u:%g:%a:%h' -- "$image")" == 0:0:444:1 ]] || {
+        echo "ERROR: base 自动密封结果不是 root:root 0444 单链接文件: $image" >&2
+        return 1
+    }
+    holders="$(lsof -t "$image" 2>/dev/null || true)"
+    if [[ -n "$holders" ]]; then
+        echo "ERROR: base 密封后出现新的外部持有者，拒绝继续 clone: $holders" >&2
+        return 1
+    fi
+    # shellcheck disable=SC2034 # clone 在解析最终 VM 用户后复核该 UID。
+    BASE_IMAGE_ADOPTED_FROM_UID="$caller_uid"
+    echo ">> portable base: 已自动导入为 root:root 0444（后续无需手工改权限）"
+}
+
 # 快速验证运行期 backing：seal 后的 base inode 必须归 root 且严格为 0444，
 # 普通 VM 用户只能读取，不能通过任一 hard-link 改写内容。这里只读取 stat 与
 # qcow2 header，不执行全盘 hash/check，适合每次 start 调用。
@@ -116,7 +206,13 @@ base_image_require_trusted_backing_qcow2_fast() {
         echo "      新 clone 会自动使用 root-owned 实例 pin；旧实例可继续启动。" >&2
     else
         echo "ERROR: backing 必须是 root-owned 0444 密封镜像: $image" >&2
-        echo "       actual owner=$owner mode=$mode；请重新运行 seal-base.sh。" >&2
+        echo "       actual owner=$owner mode=$mode" >&2
+        if [[ "${image##*/}" == .base.qcow2 ]]; then
+            echo "       这是实例 pin；请确认共享 base 内容未变后恢复 root:root 0444，" >&2
+            echo "       或从可信 base 重建实例。seal-base.sh 不会覆盖现有 pin。" >&2
+        else
+            echo "       传输来的 standalone base 请交给 sudo clone 自动导入密封。" >&2
+        fi
         return 1
     fi
     [[ -r "$image" ]] || {

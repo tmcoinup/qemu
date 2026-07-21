@@ -105,7 +105,9 @@ _sv_check_qemu_caps() {
     if [[ "${GUEST_NUMLOCK:-1}" == "1" ]]; then
         help="$(_sv_qemu_device_help usb-kbd)"
         _sv_qemu_help_has_all "$help" 'x-force-numlock-on=' \
-            || _sv_die_missing_qemu_feature "usb-kbd guest NumLock 状态机"
+            'x-numlock-on-confirmed' \
+            || _sv_die_missing_qemu_feature \
+                "usb-kbd guest NumLock 持续收敛状态机"
     fi
 
     help="$(_sv_qemu_device_help pcie-root-port)"

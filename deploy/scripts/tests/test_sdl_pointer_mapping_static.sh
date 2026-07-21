@@ -8,6 +8,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SDL2_C="$REPO_ROOT/ui/sdl2.c"
 SDL2_INPUT_C="$REPO_ROOT/ui/sdl2-input.c"
 SDL2_H="$REPO_ROOT/include/ui/sdl2.h"
+INPUT_C="$REPO_ROOT/ui/input.c"
+INPUT_H="$REPO_ROOT/include/ui/input.h"
 POINTER_C="$REPO_ROOT/ui/sdl2-pointer.c"
 POINTER_H="$REPO_ROOT/include/ui/sdl2-pointer.h"
 POINTER_TEST="$REPO_ROOT/tests/unit/test-sdl2-pointer.c"
@@ -63,6 +65,40 @@ test_windowed_absolute_pointer_never_auto_grabs() {
     ' "$SDL2_C" || fail "mouse motion must not toggle SDL grab at window edges"
     require_text "sdl_active_cursor_owner" "$SDL2_C"
     require_text "!grabbed_scon->hidden && grabbed_scon->has_input_focus" \
+        "$SDL2_C"
+}
+
+test_absolute_capability_survives_guest_handler_switches() {
+    # Windows 冷启动或 OOBE 首次启用 USB HID 前，PS/2 可能仍是 current；
+    # usb-tablet 已存在时，handler 的轮询顺序不能触发自动 mouse grab。
+    require_text "bool qemu_input_has_absolute(QemuConsole *con);" "$INPUT_H"
+    require_text "bool qemu_input_has_absolute(QemuConsole *con)" "$INPUT_C"
+    require_text "qemu_input_has_absolute(scon->dcl.con)" "$SDL2_C"
+    require_text "bool absolute_available;" "$SDL2_H"
+    require_text "sdl2_pointer_policy(" "$POINTER_C"
+    require_text "test_pointer_policy_before_tablet_activation" "$POINTER_TEST"
+
+    awk '
+        /static void handle_mousemotion/ { in_func = 1 }
+        in_func && /sdl2_pointer_policy\(/ { found = 1 }
+        in_func && /^}/ { exit found ? 0 : 1 }
+        END { if (!in_func || !found) { exit 1 } }
+    ' "$SDL2_C" \
+        || fail "tablet-capable consoles must forward transient relative motion"
+
+    awk '
+        /static void handle_mousebutton/ { in_func = 1 }
+        in_func && /policy.auto_grab_on_click/ { found = 1 }
+        in_func && /^}/ { exit found ? 0 : 1 }
+        END { if (!in_func || !found) { exit 1 } }
+    ' "$SDL2_C" \
+        || fail "tablet-capable consoles must not auto-grab on click"
+}
+
+test_relative_mode_is_explicitly_released() {
+    # SDL relative mode 是进程级约束；只清 WindowMouseGrab 无法保证释放。
+    require_text \
+        "SDL_SetRelativeMouseMode(policy.relative_mode ? SDL_TRUE : SDL_FALSE);" \
         "$SDL2_C"
 }
 
@@ -124,6 +160,8 @@ test_scanout_uses_visible_subrectangle() {
 
 test_geometry_helper_is_small_and_built
 test_windowed_absolute_pointer_never_auto_grabs
+test_absolute_capability_survives_guest_handler_switches
+test_relative_mode_is_explicitly_released
 test_coordinates_are_mapped_exactly_once
 test_button_state_is_per_console_and_released
 test_console_state_is_not_global

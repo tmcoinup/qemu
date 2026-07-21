@@ -2,9 +2,8 @@
 # finalize-clone-gpu.sh — clone 首启后的一键 GPU Provider 收尾工具。
 #
 # 使用场景：
-#   clone-from-base.sh 会在首启前预写一次 DriverProvider，但 Windows 首次
-#   枚举新显示设备时会按 viogpudo.inf 把 Provider 写回 "Red Hat, Inc."。
-#   等 clone 首次进过桌面/respawn-stealth 完成后，跑本脚本即可：
+#   clone 阶段不写 SYSTEM hive。等 Windows 首次枚举显示设备、clone 进入过
+#   桌面且 respawn-stealth 完成后，跑本脚本补齐 DriverProvider：
 #
 #     deploy/scripts/finalize-clone-gpu.sh 1
 #
@@ -14,7 +13,7 @@
 #       deploy/scripts/finalize-clone-gpu.sh 1 --restart -- --proxy
 #
 # 说明：
-#   - 可普通用户运行；脚本会用 sudo -E 重新执行自身。
+#   - 可普通用户运行；脚本会用 sudo 重新执行自身，并显式传递受支持的环境变量。
 #   - 真正离线写 Windows hive 的动作仍由 host-fix-gpu-devpkey.sh 完成。
 #   - -- 后面的参数原样传给 start-vm.sh，仅在 --restart 时生效。
 set -euo pipefail
@@ -71,8 +70,8 @@ fi
 
 if [[ $EUID -ne 0 ]]; then
     # 需要 root 的原因是 host-fix-gpu-devpkey.sh 要 qemu-nbd + ntfs-3g
-    # 挂载 Windows 系统盘。保留环境变量，方便 --restart 复用 DISPLAY /
-    # STABLE_DISPLAY / HOST_RESERVE_CORES 等启动参数。
+    # 挂载 Windows 系统盘。sudo -E 在部分 sudoers 策略下会被忽略；这里逐项传递
+    # 离线修复和 --restart 真正支持的变量，不依赖 preserve-env 策略。
     SUDO_ARGS=("$INSTANCE")
     if [[ "$RESTART" == 1 ]]; then
         SUDO_ARGS+=("--restart")
@@ -83,11 +82,25 @@ if [[ $EUID -ne 0 ]]; then
     if [[ ${#START_ARGS[@]} -gt 0 ]]; then
         SUDO_ARGS+=("--" "${START_ARGS[@]}")
     fi
-    exec sudo -E "$SELF" "${SUDO_ARGS[@]}"
+    exec sudo -- /usr/bin/env \
+        VMS_DIR="${VMS_DIR:-}" \
+        IMAGE_ROOT="${IMAGE_ROOT:-}" \
+        QEMU_IMG="${QEMU_IMG:-}" \
+        DISPLAY="${DISPLAY:-:1}" \
+        STABLE_DISPLAY="${STABLE_DISPLAY:-0}" \
+        HOST_RESERVE_CORES="${HOST_RESERVE_CORES:-auto}" \
+        QEMU_SVC_CPUS="${QEMU_SVC_CPUS:-${QEMU_SERVICE_CPUS:-0}}" \
+        QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-${QEMU_SVC_CPUS:-0}}" \
+        DISK="${DISK:-}" \
+        NBD="${NBD:-}" \
+        MOUNT="${MOUNT:-}" \
+        PROVIDER="${PROVIDER:-}" \
+        DEVICE_DESC="${DEVICE_DESC:-}" \
+        SUBSYS_RE="${SUBSYS_RE:-}" \
+        "$SELF" "${SUDO_ARGS[@]}"
 fi
 
 ORIG_USER="${SUDO_USER:-ubuntu}"
-ORIG_GROUP="$(id -gn "$ORIG_USER" 2>/dev/null || echo "$ORIG_USER")"
 VMS_DIR="${VMS_DIR:-/home/ubuntu/images/vms}"
 VMS_DIR="${VMS_DIR%/}"
 [[ -n "$VMS_DIR" ]] || VMS_DIR="/"
@@ -102,7 +115,9 @@ echo ">> instance: $INSTANCE"
 echo ">> step 1/2: 离线修复 GPU Provider / Desc / 驱动签名关联"
 "$FIX_SCRIPT" "$INSTANCE" "${FIX_ARGS[@]}"
 
-chown -R "${ORIG_USER}:${ORIG_GROUP}" "$VM_DIR" 2>/dev/null || true
+# 离线修复通过 qemu-nbd 写入现有 overlay，不会改变宿主文件的 owner。这里绝不能
+# 递归接管 VM_DIR：clone 的 `.base.qcow2` 是 root-owned 0444 的共享 base 硬链接，
+# 对它 chown 会同时解除全局 base 和其它实例 pin 的密封状态。
 
 if [[ "$RESTART" != 1 || "$DRY_RUN" == 1 ]]; then
     echo ">> done: 已修复。下次启动后 Provider 应显示 profile.GPU_VENDOR，"
@@ -123,6 +138,7 @@ fi
 sudo -u "$ORIG_USER" env \
     VMS_DIR="$VMS_DIR" \
     IMAGE_ROOT="${IMAGE_ROOT:-}" \
+    QEMU_IMG="${QEMU_IMG:-}" \
     DISPLAY="${DISPLAY:-:1}" \
     STABLE_DISPLAY="${STABLE_DISPLAY:-0}" \
     HOST_RESERVE_CORES="${HOST_RESERVE_CORES:-auto}" \

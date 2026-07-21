@@ -20,7 +20,7 @@ USBHIDNumLockAction usb_hid_numlock_report(USBHIDNumLockState *state,
 
     if (led_on) {
         /*
-         * 首次 ON 表示 guest 已经处于目标状态，启动初始化立即完成。
+         * ON 表示当前收敛轮次已经达到目标状态。
          * 若 BH 尚未执行，调用方会取消它；
          * 执行后取消为空操作。
          */
@@ -37,13 +37,15 @@ USBHIDNumLockAction usb_hid_numlock_report(USBHIDNumLockState *state,
     }
 
     /*
-     * 每个 USB reset 周期只允许启动一次。
-     * completed 后的 OFF 是用户手动关闭，不能再次干预。
-     * Windows 可能连续发送 OFF，
-     * pending 可避免多个翻转互相抵消。
+     * 固件、Windows 欢迎界面和用户会话
+     * 都可能先后写 LED。
+     * 因此较早的 ON 不能永久锁死策略。
+     * 每次新的明确 OFF 都开始一个收敛轮次。
+     * pending 会保留到 guest 回报 ON；
+     * 同一轮内连续 OFF 不会排入多个翻转键。
      */
-    if (state->force_on && !state->startup_completed &&
-        !state->force_pending) {
+    if (state->force_on && !state->force_pending) {
+        state->startup_completed = false;
         state->force_pending = true;
         state->injection_attempted = false;
         return USB_HID_NUMLOCK_ACTION_SCHEDULE;

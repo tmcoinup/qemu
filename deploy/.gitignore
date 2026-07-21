@@ -14,3 +14,6 @@ efiguard/EfiGuard-v1.4/
 
 # guest-stealth self-contained drop built by package.sh (regenerable single EXE)
 guest-stealth/dist/
+
+# Standalone DNF dependency installer built by package.sh
+guest-dnf-deps/dist/

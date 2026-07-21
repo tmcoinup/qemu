@@ -473,6 +473,28 @@ bool qemu_input_is_absolute(QemuConsole *con)
     return (s != NULL) && (s->handler->mask & INPUT_EVENT_MASK_ABS);
 }
 
+/*
+ * qemu_input_is_absolute() describes the handler which is active right now.
+ * Before guest firmware or a driver first polls a USB tablet, the earlier
+ * registered PS/2 mouse can remain current even though that tablet is already
+ * present.  Display backends need this separate capability query so guest
+ * polling order does not turn a seamless tablet into a captured host pointer.
+ */
+bool qemu_input_has_absolute(QemuConsole *con)
+{
+    QemuInputHandlerState *s;
+
+    QTAILQ_FOREACH(s, &handlers, node) {
+        if (!(s->handler->mask & INPUT_EVENT_MASK_ABS)) {
+            continue;
+        }
+        if (s->con == NULL || s->con == con) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int qemu_input_scale_axis(int value,
                           int min_in, int max_in,
                           int min_out, int max_out)

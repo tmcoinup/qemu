@@ -39,6 +39,7 @@ CMD=(
     -machine "q35,accel=kvm,vmport=off,smm=on,hpet=off,kernel-irqchip=split"
     -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
     -drive if=pflash,format=raw,file="$OVMF_VARS"
+    "${OVMF_MMIO64_ARGS[@]}"
 
     # --- CPU: hidden hypervisor, hidden KVM, invtsc ---
     # CPU 完整 -cpu 串由 stealth_qemu_cpu_arg 拼出（包含 family/model/stepping、
@@ -115,7 +116,7 @@ CMD=(
     # 因此保留其上游完整身份；profile 中的 XHCI_* 只记录目标平台事实。
     # usb-kbd: DirectInput/Raw Input 兼容 (DNF/仿真机只读 USB HID, 不读 PS/2).
     # USB_RELATIVE_MOUSE=1: usb-mouse (相对坐标，更像真鼠标，仿真机友好；
-    #   SDL 抓鼠标，Ctrl+Shift+G 释放)
+    #   SDL 抓鼠标，Ctrl+Alt+G 释放)
     # 默认 usb-tablet (绝对坐标，鼠标可自由出入 SDL 窗口)
     # 经 patch 0010 后 vendorid/productid/manufacturer/product 从 profile 的
     # KBD/MOUSE/TABLET 字段注入；品牌、VID/PID、bcdDevice 必须来自同一组件条目。
@@ -204,6 +205,7 @@ if [[ "$PROXY" == "1" ]]; then
     echo ">> QMP alias:   $QMP_PROXY_SOCK (compat symlink for old tool configs)"
 fi
 echo ">> HMP socket:  $MON_SOCK"
+echo ">> OVMF MMIO64: ${OVMF_PCI_MMIO64_MB} MiB 固定窗口（warm reboot 稳定性护栏）"
 # 显示通道
 if [[ "$HEADLESS" == "1" ]]; then
     echo ">> GUI:         VNC 127.0.0.1:$((5900+VNC_DISPLAY)) (display :$VNC_DISPLAY)"
@@ -236,7 +238,6 @@ if [[ "$FB_SHM" == "1" ]]; then
     fi
     echo ">>   接消费端: scripts/qemu-fb-shm-stream.py --sock $FB_SHM_SOCK --output ..."
 fi
-echo ">> SSH/RDP fwd: 127.0.0.1:$SSH_FWD_PORT / 127.0.0.1:$RDP_FWD_PORT"
 echo ">> boot mode:   $BOOT"
 if [[ "$BOOT" == "iso" ]]; then
     # **ISO 装系统手动操作提示**：

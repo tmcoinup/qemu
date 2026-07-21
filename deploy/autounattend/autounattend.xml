@@ -105,26 +105,12 @@
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <NetworkLocation>Home</NetworkLocation>
                 <ProtectYourPC>3</ProtectYourPC>
-                <SkipMachineOOBE>true</SkipMachineOOBE>
-                <SkipUserOOBE>true</SkipUserOOBE>
             </OOBE>
             <UserAccounts>
                 <AdministratorPassword>
                     <Value>123456</Value>
                     <PlainText>true</PlainText>
                 </AdministratorPassword>
-                <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                        <Password>
-                            <Value>123456</Value>
-                            <PlainText>true</PlainText>
-                        </Password>
-                        <Description>Local Administrator</Description>
-                        <DisplayName>Administrator</DisplayName>
-                        <Group>Administrators</Group>
-                        <Name>Administrator</Name>
-                    </LocalAccount>
-                </LocalAccounts>
             </UserAccounts>
             <AutoLogon>
                 <Password>

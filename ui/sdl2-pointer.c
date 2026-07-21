@@ -29,6 +29,18 @@ static int sdl2_saturate_int(int64_t value)
     return sdl2_clamp_i64(value, INT_MIN, INT_MAX);
 }
 
+SDL2PointerPolicy sdl2_pointer_policy(bool grabbed,
+                                      bool current_absolute,
+                                      bool absolute_available)
+{
+    return (SDL2PointerPolicy) {
+        .accept_motion = grabbed || absolute_available,
+        .auto_grab_on_click = !grabbed && !absolute_available,
+        .relative_mode = grabbed && !current_absolute,
+        .release_grab = grabbed && absolute_available,
+    };
+}
+
 /*
  * Pixel coordinates describe inclusive endpoints.  Mapping extent - 1 keeps
  * the first and last pixel aligned in both directions; rounding avoids a

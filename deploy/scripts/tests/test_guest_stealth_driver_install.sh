@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证统一 EXE 的离线驱动安装顺序、多显卡幂等校验与 3010 重启闭环。
+# 验证统一 EXE 的离线驱动安装顺序、直接信任、多显卡校验与 3010 重启闭环。
 # 下列单引号刻意阻止 Bash 展开内嵌 PowerShell/正则中的 $，中文引号只是测试文案。
 # shellcheck disable=SC2016,SC1111
 set -euo pipefail
@@ -45,6 +45,42 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
     }
     if ($failed) { exit 1 }
 ' || fail "PowerShell AST 解析失败"
+
+# 统一重启 helper 必须接受原生成功码，并把原生失败码或缺失的绝对路径转成异常；
+# Linux 的 true/false 只替代 shutdown.exe 进程，不跳过生产函数本身。
+RESTART_HELPER_PATH="$RESTART_HELPER" \
+TRUE_EXE="$(type -P true)" FALSE_EXE="$(type -P false)" \
+BAD_EXE="$REPO_ROOT/README.rst" \
+pwsh -NoLogo -NoProfile -NonInteractive -Command '
+    . $env:RESTART_HELPER_PATH
+    Invoke-RespawnShutdown -ShutdownPath $env:TRUE_EXE `
+        -DelaySeconds 1 -Comment "test"
+    $nativeFailureSeen = $false
+    try {
+        Invoke-RespawnShutdown -ShutdownPath $env:FALSE_EXE `
+            -DelaySeconds 1 -Comment "test"
+    } catch {
+        if ($_.Exception.Message -notmatch "错误码 1$") { throw }
+        $nativeFailureSeen = $true
+    }
+    if (-not $nativeFailureSeen) { throw "重启 helper 吞掉了原生失败码" }
+    $global:LASTEXITCODE = 0
+    try {
+        Invoke-RespawnShutdown -ShutdownPath $env:BAD_EXE `
+            -DelaySeconds 1 -Comment "test"
+        throw "重启 helper 沿用了陈旧的原生成功码"
+    } catch {
+        if ($_.Exception.Message -notmatch "无法启动|没有返回") { throw }
+    }
+    try {
+        Invoke-RespawnShutdown -ShutdownPath ($env:TRUE_EXE + ".missing") `
+            -DelaySeconds 1 -Comment "test"
+        throw "重启 helper 接受了不存在的程序"
+    } catch {
+        if ($_.Exception.Message -notmatch "找不到可信") { throw }
+    }
+    exit 0
+' || fail "统一重启 helper 动态退出码检查失败"
 
 # 在 Linux pwsh 下只加载纯状态判定函数，不调用 Windows PnP/注册表。
 # 用单卡、多卡和四个失败维度验证“每个目标都必须健康”的真实逻辑。
@@ -99,27 +135,14 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
             [string] $Service = "VioGpuDod",
             [string] $Status = "OK",
             [string] $Problem = "CM_PROB_NONE",
-            [string] $InfPath = "oem42.inf",
-            [int] $SignedMatchCount = 1,
-            [AllowNull()] [string] $SignedInfPath = $null,
-            [string] $SignedProvider = "Red Hat, Inc.",
-            [bool] $IsSigned = $true,
-            [string] $Signer = "Microsoft Windows Hardware Compatibility Publisher"
+            [string] $InfPath = "oem42.inf"
         )
-        if (-not $PSBoundParameters.ContainsKey("SignedInfPath")) {
-            $SignedInfPath = $InfPath
-        }
         [pscustomobject]@{
             InstanceId = $Id
             Service = $Service
             Status = $Status
             Problem = $Problem
             InfPath = $InfPath
-            SignedMatchCount = $SignedMatchCount
-            SignedInfPath = $SignedInfPath
-            SignedProvider = $SignedProvider
-            IsSigned = $IsSigned
-            Signer = $Signer
         }
     }
 
@@ -128,8 +151,8 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
     $healthyA = New-TestDisplayState -Id $idA
     $healthyB = New-TestDisplayState -Id $idB -Problem "0" -InfPath "OEM7.INF"
 
-    # 执行真实 state collector，证明 WMI 签名关联被带入后验，同时 UI
-    # DeviceDesc/Manufacturer 不属于真实驱动健康契约。
+    # 执行真实 state collector，证明它只读取直接 PnP 绑定；WMI 签名投影既可能
+    # 滞后，也可能对有效 WHCP 包返回假阴性，不能重新进入健康契约。
     $script:RequestedPropertyKeys = @()
     function Get-PnpDevice {
         [CmdletBinding()]
@@ -152,22 +175,13 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
     function Get-CimInstance {
         [CmdletBinding()]
         param([string] $ClassName)
-        if ($ClassName -ne "Win32_PnPSignedDriver") {
-            throw ("意外 CIM 类: " + $ClassName)
-        }
-        [pscustomobject]@{
-            DeviceID = $idA
-            InfName = "oem42.inf"
-            DriverProviderName = "Red Hat, Inc."
-            IsSigned = $true
-            Signer = "Microsoft Windows Hardware Compatibility Publisher"
-        }
+        throw ("PnP 状态采集不应查询 CIM 签名投影: " + $ClassName)
     }
     $collected = @(Get-PciDisplayState)
     if ($collected.Count -ne 1 -or
         -not (Test-AllTargetStatesHealthy -States $collected `
             -TargetInstanceIds @($idA))) {
-        throw "真实 state collector 没有生成完整签名后验状态"
+        throw "真实 state collector 没有生成完整 PnP 绑定状态"
     }
 
     if (-not (Test-ShallowPhysicalDisplayId -InstanceId $idA)) {
@@ -205,12 +219,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
         (New-TestDisplayState -Id $idB -Service "BasicDisplay"),
         (New-TestDisplayState -Id $idB -Status "Error"),
         (New-TestDisplayState -Id $idB -Problem "CM_PROB_FAILED_START"),
-        (New-TestDisplayState -Id $idB -InfPath "viogpudo.inf"),
-        (New-TestDisplayState -Id $idB -SignedProvider "AMD"),
-        (New-TestDisplayState -Id $idB -IsSigned $false),
-        (New-TestDisplayState -Id $idB -Signer ""),
-        (New-TestDisplayState -Id $idB -SignedInfPath "oem99.inf"),
-        (New-TestDisplayState -Id $idB -SignedMatchCount 2)
+        (New-TestDisplayState -Id $idB -InfPath "viogpudo.inf")
     )
     foreach ($badB in $badCases) {
         if (Test-AllTargetStatesHealthy -States @($healthyA, $badB) `
@@ -235,11 +244,11 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
 
     # 在临时 Windows 目录中执行完整 active-trust 函数。注册表、CIM 和签名查询
     # 只替换外部 Windows 接口，真实文件路径遍历和 SHA-256 校验仍执行生产代码。
-    $ExpectedHashes = @{
+    $StockDisplayDriverHashes = @{
         "viogpudo.sys" = "04e873ad57387a518ad8ccae5116989c63170503c14b9cca0b2067e63876af89"
         "viogpudo.inf" = "48abd56644386e1f0d85c54cd64db93e62a4eb33bc7acb2613f237c6e1c6a0ee"
     }
-    $ExpectedWhcpSignerThumbprint = "A5D13378E659DDC05C03EE71B432DD667A302999"
+    $StockDisplayWhcpSignerThumbprint = "A5D13378E659DDC05C03EE71B432DD667A302999"
     $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("vmate-active-driver-" + [Guid]::NewGuid())
     $systemDirectory = Join-Path (Join-Path $testRoot "Windows") "System32"
     $driverTarget = Join-Path (Join-Path $systemDirectory "drivers") "viogpudo.sys"
@@ -249,7 +258,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
     Copy-Item -LiteralPath $env:DRIVER_SYS -Destination $driverTarget
     Copy-Item -LiteralPath $env:DRIVER_INF -Destination $infTarget
     $script:MockDriverPath = $driverTarget
-    $script:MockSignerThumbprint = $ExpectedWhcpSignerThumbprint
+    $script:MockSignerThumbprint = $StockDisplayWhcpSignerThumbprint
 
     function Stop-DriverInstall {
         param([string] $Message, [int] $Code = 20)
@@ -306,7 +315,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
 
         # 活动 SYS/WHCP 合法时，只有发布 INF 真正不存在才返回可恢复状态；
         # 同名文件一旦存在但摘要错误，AllowMissing 也必须继续 fail closed。
-        $script:MockSignerThumbprint = $ExpectedWhcpSignerThumbprint
+        $script:MockSignerThumbprint = $StockDisplayWhcpSignerThumbprint
         Remove-Item -LiteralPath $infTarget -Force
         $missingTrust = Assert-ActiveStockDriver -States @($activeState) `
             -SystemDirectory $systemDirectory -AllowMissingPublishedInf
@@ -346,16 +355,11 @@ grep -F "Get-AuthenticodeSignature" "$TRUST_HELPER" >/dev/null \
     || fail "安装前没有验证微软签名"
 grep -F "Win32_SystemDriver" "$TRUST_HELPER" >/dev/null \
     || fail "healthy 路径没有关联当前实际加载的 VioGpuDod"
-grep -F "Win32_PnPSignedDriver" "$TRUST_HELPER" >/dev/null \
-    || fail "后验没有核对 Windows 当前签名驱动关联"
-for signed_field in 'Red Hat, Inc.' \
-        'Microsoft Windows Hardware Compatibility Publisher' \
-        SignedInfPath IsSigned; do
-    grep -F "$signed_field" "$TRUST_HELPER" >/dev/null \
-        || fail "后验缺少签名关联字段：$signed_field"
-done
-grep -F "A5D13378E659DDC05C03EE71B432DD667A302999" \
-        "$INSTALLER" "$TRUST_HELPER" >/dev/null \
+if grep -F "Get-CimInstance -ClassName Win32_PnPSignedDriver" \
+        "$TRUST_HELPER" >&2; then
+    fail "健康门禁重新依赖了不可靠的 Win32_PnPSignedDriver"
+fi
+grep -F "A5D13378E659DDC05C03EE71B432DD667A302999" "$TRUST_HELPER" >/dev/null \
     || fail "活动驱动没有锁定 WHCP 签名者"
 grep -F "Assert-SafePlainFile" "$TRUST_HELPER" >/dev/null \
     || fail "活动 SYS/INF 没有逐级拒绝 reparse point"
@@ -403,8 +407,8 @@ pending_trust_line="$(grep -n '^    \[void\] (Assert-ActiveStockDriver -States \
     "$INSTALLER" | cut -d: -f1)"
 active_trust_line="$(grep -n '^    \$activeTrust = Assert-ActiveStockDriver -States \$activeVioStates ' \
     "$INSTALLER" | cut -d: -f1)"
-post_install_trust_line="$(grep -n '^\[void\] (Assert-ActiveStockDriver -States \$after ' \
-    "$INSTALLER" | cut -d: -f1)"
+post_install_trust_line="$(grep -n 'Assert-ActiveStockDriver -States \$after ' \
+    "$INSTALLER" | tail -n 1 | cut -d: -f1)"
 pending_3010_line="$(grep -n '^if (\$pnputilCode -eq 3010)' "$INSTALLER" | cut -d: -f1)"
 healthy_success_line="$(grep -n '^if (\$allAlreadyHealthy -and -not \$repairMissingPublishedInf)' \
     "$INSTALLER" | cut -d: -f1)"
@@ -457,20 +461,23 @@ if grep -En '(^|[[:space:]])(&[[:space:]]+powershell|Start-Process[[:space:]]+po
 fi
 
 # 外层必须把 30 当成“安排重启后二阶段”，不能落入普通失败分支，也不能在
-# -NoReboot 下偷偷重启。一次性任务要先注册成功，再调用 shutdown。
+# -NoReboot 下偷偷重启。一次性任务要先注册成功，再调用统一 shutdown helper。
 grep -F 'if ($driverRc -eq 30)' "$RESPAWN" >/dev/null \
     || fail "respawn 没有识别驱动待重启退出码 30"
 grep -F 'Restart-RespawnForPendingWork -PendingExitCode 30' "$RESPAWN" >/dev/null \
     || fail "-NoReboot 路径没有通过统一重启 helper 保留退出码 30"
 register_line="$(grep -n 'Register-RespawnResumeTask -MainScriptPath \$MainScriptPath' \
     "$RESTART_HELPER" | head -n 1 | cut -d: -f1)"
-shutdown_line="$(grep -n '^    & \$shutdownExe /r ' "$RESTART_HELPER" | cut -d: -f1)"
+shutdown_line="$(grep -n '^        Invoke-RespawnShutdown -ShutdownPath ' \
+    "$RESTART_HELPER" | cut -d: -f1)"
 [[ -n "$register_line" && -n "$shutdown_line" ]] \
     || fail "无法定位驱动二阶段任务/重启调用"
 (( register_line < shutdown_line )) \
     || fail "驱动重启发生在一次性恢复任务注册之前"
 grep -F -- "-ResumeStage 'Full'" "$RESTART_HELPER" >/dev/null \
     || fail "驱动重启没有明确进入完整恢复阶段"
+grep -F 'if ([int]$nativeExitCode -ne 0)' "$RESTART_HELPER" >/dev/null \
+    || fail "统一重启 helper 没有立即核对 shutdown.exe 原生退出码"
 
 (cd "$DRIVER_DIR" && sha256sum -c - <<'HASHES'
 04e873ad57387a518ad8ccae5116989c63170503c14b9cca0b2067e63876af89  viogpudo.sys
@@ -486,8 +493,8 @@ for hash in \
     48abd56644386e1f0d85c54cd64db93e62a4eb33bc7acb2613f237c6e1c6a0ee; do
     grep -F "$hash" "$BUILD_SCRIPT" >/dev/null \
         || fail "build-exe.sh 缺少驱动摘要 $hash"
-    grep -F "$hash" "$INSTALLER" "$TRUST_HELPER" >/dev/null \
-        || fail "显示驱动安装/信任脚本缺少驱动摘要 $hash"
+    grep -F "$hash" "$TRUST_HELPER" >/dev/null \
+        || fail "公共显示驱动信任 helper 缺少摘要 $hash"
 done
 
 echo "OK: guest-stealth offline driver install checks passed"

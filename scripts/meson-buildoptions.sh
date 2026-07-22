@@ -56,6 +56,9 @@ meson_options_help() {
   printf "%s\n" '                           dtrace/ftrace/log/nop/simple/syslog/ust)'
   printf "%s\n" '  --enable-tsan            enable thread sanitizer'
   printf "%s\n" '  --enable-ubsan           enable undefined behaviour sanitizer'
+  printf "%s\n" '  --enable-vmate-launch-guard'
+  printf "%s\n" '                           Require VMate authorization before Windows system'
+  printf "%s\n" '                           emulation'
   printf "%s\n" '  --firmwarepath=VALUES    search PATH for firmware files [share/qemu-'
   printf "%s\n" '                           firmware]'
   printf "%s\n" '  --iasl=VALUE             Path to ACPI disassembler'
@@ -562,6 +565,8 @@ _meson_option_parse() {
     --disable-virglrenderer) printf "%s" -Dvirglrenderer=disabled ;;
     --enable-virtfs) printf "%s" -Dvirtfs=enabled ;;
     --disable-virtfs) printf "%s" -Dvirtfs=disabled ;;
+    --enable-vmate-launch-guard) printf "%s" -Dvmate_launch_guard=true ;;
+    --disable-vmate-launch-guard) printf "%s" -Dvmate_launch_guard=false ;;
     --enable-vmdk) printf "%s" -Dvmdk=enabled ;;
     --disable-vmdk) printf "%s" -Dvmdk=disabled ;;
     --enable-vmnet) printf "%s" -Dvmnet=enabled ;;

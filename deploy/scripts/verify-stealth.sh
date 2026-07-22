@@ -11,6 +11,17 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 QEMU="${QEMU:-$REPO_ROOT/build/qemu-system-x86_64}"
+VERIFY_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/verify-stealth.XXXXXX")"
+QPID='' RPPID='' P15PID='' P16PID=''
+
+cleanup() {
+    local pid
+    for pid in "$QPID" "$RPPID" "$P15PID" "$P16PID"; do
+        [[ -z "$pid" ]] || kill "$pid" 2>/dev/null || true
+    done
+    rm -rf -- "$VERIFY_TMP_DIR"
+}
+trap cleanup EXIT
 
 # --- stderr 安全网 (P1#4) ---------------------------------------------------
 # 仓库规则要求"运行无警告"。历史上 step(2) 在 TCG 上 realize Ryzen3-1200 会刷
@@ -41,17 +52,16 @@ echo "=== (1) CPU model registered ==="
 
 echo
 echo "=== (2) CPU model expansion (via QMP query-cpu-model-expansion) ==="
-SOCK="/tmp/verify-stealth.qmp"
-CPU_ERR="/tmp/verify-stealth-cpu.err"
+SOCK="$VERIFY_TMP_DIR/cpu.qmp"
+CPU_ERR="$VERIFY_TMP_DIR/cpu.err"
 rm -f "$SOCK"
 # 启动 vCPU 不指定 Ryzen3-1200：下面的 query-cpu-model-expansion 按名传参做静态
 # 展开，与所启 vCPU 无关。用 TCG 默认 CPU 可避免 realize 时刷 TCG 不支持特性的
 # 警告。stderr 收集到 $CPU_ERR，稍后 scan_stderr 检查。
 "$QEMU" -machine q35,accel=tcg -smp 4 -m 512M -nographic -S \
     -display none \
-    -qmp unix:$SOCK,server=on,wait=off 2>"$CPU_ERR" &
+    -qmp "unix:$SOCK,server=on,wait=off" 2>"$CPU_ERR" &
 QPID=$!
-trap 'kill $QPID 2>/dev/null; rm -f $SOCK' EXIT
 sleep 1.5
 
 python3 - "$SOCK" <<'PY'
@@ -86,6 +96,8 @@ print("OK")
 PY
 
 scan_stderr "$CPU_ERR" "CPU expansion"
+kill "$QPID" 2>/dev/null || true
+QPID=
 
 echo
 echo "=== (3) ACPI OEM strings baked into binary ==="
@@ -150,17 +162,16 @@ done
 if (( bad_rows > 0 )); then exit 1; fi
 echo "  ${#BOARD_POOL[@]} 条板子全部 8 字段（含 SUBSYS_VEN / SUBSYS_DEV）"
 
-echo
-echo "=== (8) CPU_POOL 只包含**无 iGPU** SKU ==="
-forbidden_substrings=("G6400" "G5400" "i3-9100 CPU")  # 不带 F 的 i3-9100 也算
-for row in "${CPU_POOL[@]}"; do
-    for kw in "${forbidden_substrings[@]}"; do
-        if [[ "$row" == *"$kw"* ]]; then
-            echo "FAIL: CPU_POOL 包含带 iGPU 型号: $row"; exit 1
-        fi
-    done
+printf '\n=== (8) 启用平台 CPU 的 iGPU 状态符合主板禁用策略 ===\n'
+checked_platforms=0
+for platform_row in "${PLATFORM_POOL[@]}"; do
+    IFS='|' read -r platform_id enabled _ <<<"$platform_row"
+    [[ "$enabled" == true ]] || continue
+    (stealth_platform_load "$platform_id" && stealth_validate_guest_cpu_class)
+    checked_platforms=$((checked_platforms + 1))
 done
-echo "  ${#CPU_POOL[@]} 个 CPU 全部无 iGPU"
+(( checked_platforms > 0 )) || { echo "FAIL: 没有可验证的启用平台"; exit 1; }
+echo "  $checked_platforms 个启用平台全部符合 iGPU/BIOS 禁用状态契约"
 
 echo
 echo "=== (9) NVMe 池：MODEL ↔ SIZE 自洽 ==="
@@ -201,39 +212,9 @@ echo "  ${#NVME_POOL[@]} 条 NVMe 池全部 Model ↔ Size 一致"
 
 echo
 echo "=== (10) DIMM SN 持久化 ==="
-# 拉一份临时 profile, pick → save → load → 比对 SN 是否稳定
-_tmp_prof="/tmp/verify-stealth-tmp-profile.$$"
-(
-    # 1. pick 一份 profile + save
-    source "$HERE/stealth-lib.sh"
-    stealth_pick_profile
-    stealth_save_profile "$_tmp_prof"
-    echo "  pick 时 MEM_SERIAL = $MEM_SERIAL"
-) > /tmp/verify-stealth-step.log
-cat /tmp/verify-stealth-step.log
-sn_in_file=$(grep "^MEM_SERIAL=" "$_tmp_prof" | cut -d= -f2 | tr -d "'\"")
-echo "  写入 profile 文件   = $sn_in_file"
-# 2. 模拟"重启" - 新 subshell load
-sn_load_1=$(source "$HERE/stealth-lib.sh" && stealth_load_profile "$_tmp_prof" && echo "$MEM_SERIAL")
-sn_load_2=$(source "$HERE/stealth-lib.sh" && stealth_load_profile "$_tmp_prof" && echo "$MEM_SERIAL")
-echo "  load 第 1 次        = $sn_load_1"
-echo "  load 第 2 次        = $sn_load_2"
-if [[ "$sn_in_file" == "$sn_load_1" && "$sn_load_1" == "$sn_load_2" ]]; then
-    echo "  ✓ DIMM SN 跨重启一致"
-else
-    echo "FAIL: DIMM SN 在 save→load→load 之间漂移"; rm -f "$_tmp_prof" /tmp/verify-stealth-step.log; exit 1
-fi
-# 3. 老 profile 没 MEM_SERIAL 字段 → UUID 派生稳定值
-if [[ -f "$HOME/images/vms/1/profile" ]]; then
-    sn_old_1=$(source "$HERE/stealth-lib.sh" && stealth_load_profile "$HOME/images/vms/1/profile" && echo "$MEM_SERIAL")
-    sn_old_2=$(source "$HERE/stealth-lib.sh" && stealth_load_profile "$HOME/images/vms/1/profile" && echo "$MEM_SERIAL")
-    if [[ -n "$sn_old_1" && "$sn_old_1" == "$sn_old_2" ]]; then
-        echo "  ✓ 老 profile fallback 派生稳定: $sn_old_1"
-    else
-        echo "FAIL: 老 profile fallback 不稳定 ($sn_old_1 vs $sn_old_2)"; rm -f "$_tmp_prof" /tmp/verify-stealth-step.log; exit 1
-    fi
-fi
-rm -f "$_tmp_prof" /tmp/verify-stealth-step.log
+# shellcheck source=lib/verify-profile-persistence.sh
+source "$HERE/lib/verify-profile-persistence.sh"
+verify_profile_persistence "$HERE"
 
 echo
 echo "=== (11) USB HID + EDID 自定义 prop（patch 0009/0010） ==="
@@ -301,17 +282,17 @@ else
 fi
 
 echo
-echo "=== (14) PCIe 根端口 hotplug=off（消除托盘"安全删除硬件"图标） ==="
+echo '=== (14) PCIe 根端口 hotplug=off（消除托盘"安全删除硬件"图标） ==='
 # 真机板载 NVMe/网卡/USB 走非热插拔端口。若根端口 hotplug=on（QEMU 默认），
 # Slot Capabilities 会置 HPC/HPS 位 (hw/pci/pcie.c pcie_cap_slot_init)，Windows
 # pci.sys 沿父桥上溯后把下游 NVMe/82574L/xHCI 判为可移除 → 托盘冒出"弹出 …"。
 # 这里启真实四口根端口拓扑，用 qom-get 读回每个端口的 hotplug 属性，须全为 false。
-RPSOCK="/tmp/verify-stealth-rp.qmp"
-RPERR="/tmp/verify-stealth-rp.err"
+RPSOCK="$VERIFY_TMP_DIR/root-port.qmp"
+RPERR="$VERIFY_TMP_DIR/root-port.err"
 rm -f "$RPSOCK"
 "$QEMU" -machine q35,accel=tcg -m 256M -nographic -S \
     -display none \
-    -qmp unix:$RPSOCK,server=on,wait=off \
+    -qmp "unix:$RPSOCK,server=on,wait=off" \
     -device pcie-root-port,id=rp0,slot=0,bus=pcie.0,multifunction=on,hotplug=off \
     -device pcie-root-port,id=rp1,slot=1,bus=pcie.0,hotplug=off \
     -device pcie-root-port,id=rp2,slot=2,bus=pcie.0,hotplug=off \
@@ -341,6 +322,7 @@ print("OK: 四个根端口 hotplug 全部关闭")
 PY
 then RC=0; else RC=1; fi
 kill "$RPPID" 2>/dev/null || true
+RPPID=
 scan_stderr "$RPERR" "root-port"
 rm -f "$RPSOCK"
 [[ $RC -eq 0 ]] || exit 1
@@ -350,10 +332,10 @@ echo "=== (15) 行为身份：root-port 可覆盖，qemu-xhci 固定官方 PCI I
 # root-port 可按平台覆盖；xHCI 必须固定与虚拟模型匹配的上游完整身份。刻意注入
 # ASUS 的全局 subsystem 默认值，验证 qemu-xhci 不会继承它。
 # 设备直接挂 pcie.0 顶层，使 query-pci 无需固件枚举即可读取完整身份。
-P15SOCK="/tmp/verify-stealth-p15.qmp"; P15ERR="/tmp/verify-stealth-p15.err"; rm -f "$P15SOCK"
+P15SOCK="$VERIFY_TMP_DIR/identity.qmp"; P15ERR="$VERIFY_TMP_DIR/identity.err"; rm -f "$P15SOCK"
 QEMU_PCI_SUBSYS_VEN=0x1043 QEMU_PCI_SUBSYS_DEV=0x8694 \
 "$QEMU" -machine q35,accel=tcg -m 256M -nographic -S -display none -nodefaults \
-    -qmp unix:$P15SOCK,server=on,wait=off \
+    -qmp "unix:$P15SOCK,server=on,wait=off" \
     -device pcie-root-port,id=rpa,bus=pcie.0,addr=0x2,chassis=1 \
     -device pcie-root-port,id=rpi,bus=pcie.0,addr=0x3,chassis=2,x-pci-vendor-id=0x8086,x-pci-device-id=0xa338,x-pci-revision=0xf0 \
     -device qemu-xhci,id=xhci,bus=pcie.0,addr=0x4 2>"$P15ERR" &
@@ -369,9 +351,10 @@ ids = {}
 for bus in r["return"]:
     for d in bus["devices"]:
         identity = d["id"]
-        ids[d["slot"]] = (
-            identity["vendor"], identity["device"],
-            identity["subsystem-vendor"], identity["subsystem"],
+        ids[d["slot"]] = tuple(
+            identity[key]
+            for key in ("vendor", "device", "subsystem-vendor", "subsystem")
+            if key in identity
         )
 want = {
     2: (0x1022, 0x1453),
@@ -397,6 +380,7 @@ print("OK: root-port 展示覆盖与 qemu-xhci 行为身份均正确")
 PY
 then RC=0; else RC=1; fi
 kill "$P15PID" 2>/dev/null || true
+P15PID=
 scan_stderr "$P15ERR" "platform-id"
 rm -f "$P15SOCK"
 [[ $RC -eq 0 ]] || exit 1
@@ -410,19 +394,17 @@ echo "=== (16) PCIe 链路速率：根端口/NVMe 端点链路自洽 ==="
 #   (a) 运行态：qom-get 验四个根端口 x-speed/x-width 已钉死
 #       (rp1=NVMe Gen3 x4；rp0/rp2/rp3 = Gen1 x1)；
 #   (b) 静态：sv-devices.sh 和 hw/nvme/ctrl.c 补丁仍在位。
-P16SOCK="/tmp/verify-stealth-p16.qmp"
-P16ERR="/tmp/verify-stealth-p16.err"
+P16SOCK="$VERIFY_TMP_DIR/link.qmp"
+P16ERR="$VERIFY_TMP_DIR/link.err"
 rm -f "$P16SOCK"
 "$QEMU" -machine q35,accel=tcg -m 256M -nographic -S -display none -nodefaults \
-    -qmp unix:$P16SOCK,server=on,wait=off \
-    -device "pcie-root-port,id=rp0,slot=0,bus=pcie.0,"\
-"multifunction=on,hotplug=off,x-speed=2_5,x-width=1" \
-    -device "pcie-root-port,id=rp1,slot=1,bus=pcie.0,"\
-"hotplug=off,x-speed=8,x-width=4" \
-    -device "pcie-root-port,id=rp2,slot=2,bus=pcie.0,"\
-"hotplug=off,x-speed=2_5,x-width=1" \
-    -device "pcie-root-port,id=rp3,slot=3,bus=pcie.0,"\
-"hotplug=off,x-speed=2_5,x-width=1" 2>"$P16ERR" &
+    -qmp "unix:$P16SOCK,server=on,wait=off" \
+    -device "pcie-root-port,id=rp0,slot=0,bus=pcie.0,multifunction=on,hotplug=off,\
+x-speed=2_5,x-width=1" \
+    -device "pcie-root-port,id=rp1,slot=1,bus=pcie.0,hotplug=off,x-speed=8,x-width=4" \
+    -device "pcie-root-port,id=rp2,slot=2,bus=pcie.0,hotplug=off,x-speed=2_5,x-width=1" \
+    -device "pcie-root-port,id=rp3,slot=3,bus=pcie.0,hotplug=off,x-speed=2_5,x-width=1" \
+    2>"$P16ERR" &
 P16PID=$!
 for _ in $(seq 1 50); do [[ -S "$P16SOCK" ]] && break; sleep 0.1; done
 if python3 - "$P16SOCK" <<'PY'
@@ -461,6 +443,7 @@ print("OK: 根端口链路 = NVMe Gen3 x4，其余 Gen1 x1")
 PY
 then RC=0; else RC=1; fi
 kill "$P16PID" 2>/dev/null || true
+P16PID=
 scan_stderr "$P16ERR" "pcie-link"
 rm -f "$P16SOCK"
 [[ $RC -eq 0 ]] || exit 1

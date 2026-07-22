@@ -229,8 +229,7 @@ if (-not $Qemu) {
         (Join-Path $repo 'qemu-system-x86_64.exe'),
         (Join-Path $repo 'build-win64\qemu-system-x86_64.exe'),
         (Join-Path $repo 'build\qemu-system-x86_64.exe'),
-        (Join-Path $PSScriptRoot 'qemu-system-x86_64.exe'),
-        'C:\Program Files\qemu\qemu-system-x86_64.exe'
+        (Join-Path $PSScriptRoot 'qemu-system-x86_64.exe')
     )
 }
 if (-not $Qemu) {

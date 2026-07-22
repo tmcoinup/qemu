@@ -27,6 +27,9 @@
 #include "qemu/main-loop.h"
 #include "system/replay.h"
 #include "system/system.h"
+#ifdef CONFIG_VMATE_LAUNCH_GUARD
+#include "system/vmate-launch-guard.h"
+#endif
 
 #ifdef CONFIG_SDL
 /*
@@ -68,6 +71,14 @@ int (*qemu_main)(void) = os_darwin_cfrunloop_main;
 
 int main(int argc, char **argv)
 {
+#ifdef CONFIG_VMATE_LAUNCH_GUARD
+    int guard_status = vmate_launch_guard_check(argc, argv);
+
+    if (guard_status != VMATE_LAUNCH_GUARD_CONTINUE) {
+        return guard_status;
+    }
+#endif
+
     qemu_init(argc, argv);
 
     /*

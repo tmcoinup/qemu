@@ -18,6 +18,8 @@ option('tls_priority', type : 'string', value : 'NORMAL',
        description: 'Default TLS protocol/cipher priority string')
 option('default_devices', type : 'boolean', value : true,
        description: 'Include a default selection of devices in emulators')
+option('vmate_launch_guard', type : 'boolean', value : false,
+       description: 'Require VMate authorization before Windows system emulation')
 option('audio_drv_list', type: 'array', value: ['default'],
        choices: ['alsa', 'coreaudio', 'default', 'dsound', 'jack', 'oss', 'pa', 'pipewire', 'sdl', 'sndio'],
        description: 'Set audio driver list')

@@ -135,6 +135,12 @@ rejected(
     ),
 )
 rejected(
+    "G4900 伪报为物理无核显",
+    lambda data: candidate(data, celeron)["cpu"]["integrated_gpu"].update(
+        {"present": False, "profile_state": "absent", "model": "none"}
+    ),
+)
+rejected(
     "G4900 错配 DDR4-2666",
     lambda data: candidate(data, celeron)["memory"].update(
         {"max_mts": 2666, "allowed_mts": [2133, 2400, 2666]}

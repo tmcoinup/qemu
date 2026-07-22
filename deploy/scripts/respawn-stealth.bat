@@ -1,1 +1,0 @@
-../guest-stealth/respawn-stealth.bat

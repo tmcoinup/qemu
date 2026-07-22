@@ -468,3 +468,41 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 - 当前阶段
 - 跑的命令
 - 完整输出（截图或文本）
+
+
+
+
+$ErrorActionPreference = 'Stop'
+  $dir = "$env:WINDIR\System32\Sysprep\Panther"
+  $logs = @("$dir\setupact.log", "$dir\setuperr.log") |
+      Where-Object { Test-Path $_ }
+
+  $bad = Select-String -LiteralPath $logs `
+      -Pattern 'SYSPRP Package\s+(.+?)\s+was installed for a user' |
+      ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } |
+      Sort-Object -Unique
+
+  $bad
+
+  if (-not $bad) {
+      Get-Content "$dir\setuperr.log" -Tail 60
+      throw '不是 AppX 包冲突，请保留上面的日志输出'
+  }
+
+  foreach ($fullName in $bad) {
+      $displayName = ($fullName -split '_', 2)[0]
+
+      Get-AppxPackage -AllUsers |
+          Where-Object PackageFullName -eq $fullName |
+          ForEach-Object {
+              Remove-AppxPackage -Package $_.PackageFullName -AllUsers
+          }
+
+      Get-AppxProvisionedPackage -Online |
+          Where-Object DisplayName -eq $displayName |
+          ForEach-Object {
+              Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName
+          }
+  }
+
+  & "$env:WINDIR\System32\Sysprep\Sysprep.exe" /generalize /oobe /shutdown

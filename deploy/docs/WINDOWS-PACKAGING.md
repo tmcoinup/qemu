@@ -295,6 +295,7 @@ cd build-win64-vmate
   --enable-vnc \
   --enable-slirp \
   --enable-whpx \
+  --enable-vmate-launch-guard \
   --enable-pixman \
   --disable-rust \
   --disable-docs
@@ -325,16 +326,27 @@ QEMU 11 的安装包入口是 Makefile 包装目标；不要沿用旧文档中�
 build-win64-vmate/qemu-setup-11.0.2.exe
 ```
 
+该独立 QEMU 安装器只用于 QEMU 构建闭包验证，不是 VMate 对外发布物。VMate 打包
+直接消费同一构建的运行文件，最终只发布
+`vmate-<version>-qemu-11.0.2-win64-setup.exe`；不得把 `qemu-setup-11.0.2.exe`
+嵌入后再次执行，也不得创建第二套产品、卸载项或快捷方式。
+
 `scripts/nsis.py` 会先执行 `make install DESTDIR=...`，再分析 exe/dll 依赖并复制
 MinGW DLL，最后调用 `makensis`。`qemu-fb-shm-stream.exe` 已加入 Meson
 install 目标。x86_64 下游源码还会生成不可取消的 `VMate Runtime` section，把
 `qemu-img.exe`、`qemu-fb-shm-stream.exe`、`deploy/windows`、三个 hardware manifest、
-磁盘启动使用的 stealth OVMF 和本说明按原相对目录装入 `$INSTDIR`；因此自定义安装
-目录也能直接运行 launcher。
+磁盘启动使用的 stealth OVMF 和本说明按原相对目录装入 `$INSTDIR`。未启用 guard
+的开发构建仍可用于 QEMU 自身验证；启用 guard 的 VMate 发布构建只作为统一安装器
+输入，不能从 QEMU 自定义目录或 VMate staging 目录启动。
 VMate runtime 启用时，`qemu-system-x86_64.exe` 的 system-emulation section 同样为
 只读必选项；打包阶段也会拒绝缺少上述任一原生程序的半套 staging。
 普通上游源码没有 `deploy/windows/start-vm.ps1` 时不会定义该 section，原 NSIS
 打包内容保持不变；检测到入口但运行文件不完整则打包阶段直接失败。
+
+VMate 发布构建必须启用 launch guard。生成的 `qemu-system-x86_64.exe` 要包含精确
+标记 `VMATE_QEMU_LAUNCH_GUARD_V1`，且只有精确参数
+`--vmate-launch-guard-status` 返回单行 `required`。`start-vm.ps1` 只发现 VMate
+托管的包内/仓库内 QEMU，不会回退到 `C:\Program Files\qemu` 独立安装目录。
 
 ## Python 说明
 

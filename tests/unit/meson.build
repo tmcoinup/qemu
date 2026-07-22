@@ -49,6 +49,9 @@ tests = {
   'test-interval-tree': [],
   'test-fifo': [],
   'test-envlist': [],
+  'test-vmate-launch-guard': [
+    meson.project_source_root() / 'system/vmate-launch-guard.c',
+  ],
   'test-sdl2-pointer': [
     meson.project_source_root() / 'ui/sdl2-pointer.c',
   ],

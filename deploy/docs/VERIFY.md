@@ -196,14 +196,14 @@
 
 ## 运行时验证命令
 
-### Host 端开机前自检（13 段）
+### Host 端开机前自检（16 段）
 
 ```bash
 QEMU=/home/ubuntu/projects/qemu/build/qemu-system-x86_64 \
     deploy/scripts/verify-stealth.sh
 ```
 
-13 段全过才能放行启动：
+16 段全过才能放行启动：
 
 | # | 检查项 |
 |---|--------|
@@ -214,12 +214,15 @@ QEMU=/home/ubuntu/projects/qemu/build/qemu-system-x86_64 \
 | 5 | 动态 TPM：清单能力/版本/前端一致，swtpm 可用，QEMU 含对应 TIS/CRB 前端 |
 | 6 | BGRT 伪表 (`firmware/bgrt.bin`, 20 字节) |
 | 7 | BOARD_POOL 每条 8 字段 (含 SUBSYS_VEN / SUBSYS_DEV) |
-| 8 | CPU_POOL 全部无 iGPU |
+| 8 | 启用平台 CPU 的 iGPU 状态自洽：带核显 SKU 必须由主板 BIOS 禁用 |
 | 9 | NVMe 池 Model ↔ Size 自洽（1TB model = 10^12 B，不再 512GB） |
 | 10 | DIMM SN 持久化：pick → save → load → load 全部一致；8GB 双通道时两条 DIMM SN 不重复（DIMM_A2 ≠ DIMM_B2） |
 | 11 | USB HID + EDID 自定义 prop (patch 0009/0010 编进 QEMU) |
 | 12 | 外设池 (MONITOR/KBD/MOUSE/TABLET) 字段数自洽 |
 | 13 | 伪 SSDT 热区表 (`firmware/ssdt-thermal.aml`) |
+| 14 | PCIe 根端口全部关闭 hotplug，避免 Guest 误报可安全移除设备 |
+| 15 | 行为身份自洽：root-port 可按平台覆盖，qemu-xhci 保持官方 PCI ID |
+| 16 | PCIe 链路速率/宽度与根端口、NVMe 端点契约一致 |
 
 ### Guest 端装完 Windows 后验证
 

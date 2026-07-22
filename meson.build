@@ -30,6 +30,10 @@ fs = import('fs')
 host_os = host_machine.system()
 config_host = keyval.load(meson.current_build_dir() / 'config-host.mak')
 
+if get_option('vmate_launch_guard') and host_os != 'windows'
+  error('vmate_launch_guard is only supported for Windows system emulators')
+endif
+
 # Temporary directory used for files created while
 # configure runs. Since it is in the build directory
 # we can safely blow away any previous version of it
@@ -2457,6 +2461,7 @@ config_host_data.set('CONFIG_LIBUDEV', libudev.found())
 config_host_data.set('CONFIG_LINUX', host_os == 'linux')
 config_host_data.set('CONFIG_POSIX', host_os != 'windows')
 config_host_data.set('CONFIG_WIN32', host_os == 'windows')
+config_host_data.set('CONFIG_VMATE_LAUNCH_GUARD', get_option('vmate_launch_guard'))
 config_host_data.set('CONFIG_LZO', lzo.found())
 config_host_data.set('CONFIG_MPATH', mpathpersist.found())
 config_host_data.set('CONFIG_BLKIO', blkio.found())
@@ -4262,6 +4267,8 @@ endif
 
 traceable = []
 emulators = {}
+vmate_launch_guard_sources = get_option('vmate_launch_guard') \
+  ? files('system/vmate-launch-guard.c') : []
 foreach target : target_dirs
   config_target = config_target_mak[target]
   target_name = config_target['TARGET_NAME']
@@ -4412,14 +4419,14 @@ foreach target : target_dirs
     execs = [{
       'name': 'qemu-system-' + target_name,
       'win_subsystem': 'console',
-      'sources': [main_rs, files('system/main.c')],
+      'sources': [main_rs, files('system/main.c'), vmate_launch_guard_sources],
       'dependencies': [sdl]
     }]
     if host_os == 'windows' and (sdl.found() or gtk.found())
       execs += [{
         'name': 'qemu-system-' + target_name + 'w',
         'win_subsystem': 'windows',
-        'sources': [main_rs, files('system/main.c')],
+        'sources': [main_rs, files('system/main.c'), vmate_launch_guard_sources],
         'dependencies': [sdl]
       }]
     endif

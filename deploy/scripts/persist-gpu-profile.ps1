@@ -73,8 +73,8 @@ function Get-HexByte {
 }
 
 function Get-ShallowPciIdentity {
-    # 将 PnP InstanceId 转成 NVAPI 要使用的逻辑身份。函数不访问注册表和设备，
-    # 因而可在 Linux 上用 PowerShell AST 单独提取并覆盖成功/拒绝路径。
+    # A101..A112 是物理 virtio 设备上的受控 carrier；真实 AIB 主 ID/subsystem
+    # 只写入用户态快照。未知 carrier 必须拒绝，不能回落成一块虚构的显卡。
     param(
         [Parameter(Mandatory = $true)][string]$InstanceId,
         [Parameter(Mandatory = $true)][string]$Vendor
@@ -89,13 +89,10 @@ function Get-ShallowPciIdentity {
 
     $physicalVendorId = Get-HexWord -Text $identityMatch.Groups[1].Value -FieldName '物理 Vendor ID'
     $physicalDeviceId = Get-HexWord -Text $identityMatch.Groups[2].Value -FieldName '物理 Device ID'
-    $subsystemDeviceId = Get-HexWord -Text $identityMatch.Groups[3].Value -FieldName 'Subsystem Device ID'
-    $subsystemVendorId = Get-HexWord -Text $identityMatch.Groups[4].Value -FieldName 'Subsystem Vendor ID'
+    $carrierDeviceId = Get-HexWord -Text $identityMatch.Groups[3].Value -FieldName 'Carrier Device ID'
+    $carrierVendorId = Get-HexWord -Text $identityMatch.Groups[4].Value -FieldName 'Carrier Vendor ID'
     $revisionId = Get-HexByte -Text $identityMatch.Groups[5].Value -FieldName 'Revision ID'
 
-    # 旧版浅层方案的关键约束：stock 驱动看到的物理 ID 必须仍为 virtio-gpu；
-    # 用户态逻辑主 ID则使用 profile 的 subsystem VEN/DEV。若这里接受其他物理 ID，
-    # 就可能把已经进入 Code 43 的深层设备误标为“配置成功”。
     if ($physicalVendorId -ne 0x1AF4 -or $physicalDeviceId -ne 0x1050) {
         throw ('浅层模式要求物理 PCI ID 为 1AF4:1050，实际为 {0:X4}:{1:X4}' -f
             $physicalVendorId, $physicalDeviceId)
@@ -106,21 +103,25 @@ function Get-ShallowPciIdentity {
         'AMD' { 0x1002; break }
         default { throw ("不支持的 GPU 厂商：" + $Vendor) }
     }
-    if ($subsystemDeviceId -eq 0) {
-        throw '逻辑/SUBSYS Device ID 不能为 0000'
+
+    $carrierKey = '{0:X4}:{1:X4}' -f $carrierVendorId, $carrierDeviceId
+    $logical = Get-GpuBoardLogicalPciIdentity `
+        -CarrierVendorId $carrierVendorId -CarrierDeviceId $carrierDeviceId
+    if ($null -eq $logical) {
+        throw ('未知或跨厂商的 GPU carrier：' + $carrierKey)
     }
-    if ($subsystemVendorId -ne $expectedVendorId) {
-        throw ('profile 厂商与 PCI SUBSYS 不一致：期望 {0:X4}，实际 {1:X4}' -f
-            $expectedVendorId, $subsystemVendorId)
+    if ($logical.PciVendorId -ne $expectedVendorId -or
+        $logical.RevisionId -ne $revisionId) {
+        throw ('profile 厂商或 revision 与 carrier 不一致：' + $carrierKey)
     }
 
     return [pscustomobject]@{
         InstanceId = $normalized
-        PciVendorId = $subsystemVendorId
-        PciDeviceId = $subsystemDeviceId
-        SubsystemVendorId = $subsystemVendorId
-        SubsystemDeviceId = $subsystemDeviceId
-        RevisionId = $revisionId
+        PciVendorId = [int]$logical.PciVendorId
+        PciDeviceId = [int]$logical.PciDeviceId
+        SubsystemVendorId = [int]$logical.SubsystemVendorId
+        SubsystemDeviceId = [int]$logical.SubsystemDeviceId
+        RevisionId = [int]$logical.RevisionId
     }
 }
 
@@ -336,6 +337,23 @@ try {
         throw ('应当恰好找到一个由 VioGpuDod 驱动的在线显示设备，实际数量=' + $matched.Count)
     }
     $identity = Get-ShallowPciIdentity ([string]$matched[0].InstanceId) $SpoofVendor
+    $candidate = [pscustomobject]@{
+        IdentitySchemaVersion=2; SpoofName=$SpoofName; SpoofVendor=$SpoofVendor
+        SpoofBios=$SpoofBios; SpoofRamMb=$SpoofRamMb
+        SpoofMemoryType=$SpoofMemoryType
+        SpoofMemoryBusWidthBits=$SpoofMemoryBusWidthBits
+        SpoofBaseClockKHz=$SpoofBaseClockKHz; SpoofBoostClockKHz=$SpoofBoostClockKHz
+        SpoofMemoryClockKHz=$SpoofMemoryClockKHz; SpoofSliSupported=$SpoofSliSupported
+        SpoofPciVendorId=$identity.PciVendorId; SpoofPciDeviceId=$identity.PciDeviceId
+        SpoofSubsystemVendorId=$identity.SubsystemVendorId
+        SpoofSubsystemDeviceId=$identity.SubsystemDeviceId
+        SpoofRevisionId=$identity.RevisionId
+    }
+    $sourceIdentity = [regex]::Match($identity.InstanceId,
+        '^PCI\\VEN_1AF4&DEV_1050&SUBSYS_([0-9A-F]{4})([0-9A-F]{4})&REV_([0-9A-F]{2})(?:&|\\)')
+    if (-not (Test-GpuLogicalBinding $candidate $sourceIdentity)) {
+        throw '请求的 GPU 型号规格与物理 AIB carrier 不构成已核验原子 bundle'
+    }
     $busProperty = Get-PnpDeviceProperty -InstanceId $matched[0].InstanceId `
         -KeyName 'DEVPKEY_Device_BusNumber' -ErrorAction Stop
     $addressProperty = Get-PnpDeviceProperty -InstanceId $matched[0].InstanceId `

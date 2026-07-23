@@ -111,10 +111,10 @@ try {
     Assert-VMateTest `
         ($first.Profile.configuration.host_cpu_platform_mismatch_allowed -eq $false) `
         'profile 仍持久化了宿主 CPU/manifest 主板不匹配模式。'
-    Assert-VMateTest `
-        ([string]$first.Profile.identity.nvme_serial -match
-            '^S[A-Z0-9]{3}N[A-Z0-9]{9}$') `
-        'Samsung 970 PRO 序列号不符合 14 字符 Identify SN 形态。'
+    Assert-VMateComponentSerial $components.storage `
+        ([string]$first.Profile.identity.nvme_serial) 'SSD'
+    Assert-VMateMonitorSerial $components.monitor `
+        ([string]$first.Profile.identity.monitor_serial)
 
     $lock = Enter-VMateProfileCommitLock -Instance 1
     try {
@@ -269,7 +269,7 @@ try {
                 $badIdentity.identity.nvme_serial = 'S000N000000000'
             }
             'placeholder-monitor' {
-                $badIdentity.identity.monitor_serial = 'H4ZK00000000'
+                $badIdentity.identity.monitor_serial = 'INVALID_SERIAL'
             }
         }
         Assert-VMateThrows {
@@ -279,14 +279,14 @@ try {
     }
 
     $changedManifest = $manifest | ConvertTo-Json -Depth 64 | ConvertFrom-Json
-    $changedManifest.catalog_revision = 'tampered-revision'
-    $changedPlatform = @($changedManifest.platforms | Where-Object {
-        $_.id -eq $platformId
-    })[0]
+    $changedManifest.catalog_revision = '2026-07-22.2'
+    $changedPlatform = @($changedManifest.platforms | Where-Object { $_.id -eq $platformId })[0]
+    Assert-VMateHardwareProfile $profile $changedManifest $changedPlatform $components $hostCpu 1 8192 4 $true
+    $changedPlatform.board.product = 'rewritten-selected-platform'
     Assert-VMateThrows {
         Assert-VMateHardwareProfile $profile $changedManifest $changedPlatform `
             $components $hostCpu 1 8192 4 $true
-    } 'manifest catalog_revision 变化未触发 profile 拒绝。'
+    } '已选平台事实变化未触发 profile 摘要拒绝。'
 
     # 负测不能只依赖 canonical allowlist：即使篡改者把 3072 加入 allowlist，
     # 它仍无法由 2/4GiB 同型号 DIMM 和槽位组成，manifest 与请求门禁都要拒绝。
@@ -399,11 +399,10 @@ try {
         } "TPM manifest 篡改 '$tpmMutation' 通过了 Windows 校验。"
     }
 
-    # 2/4/8GiB 必须分别映射到 1x2G、1x4G、2x4G，并生成相同数量的序列号。
+    # 容量拓扑固定；多态品牌的稳定 ID、料号和 SPD 几何必须来自同一目录条目。
     $expectedPlans = @{
-        2048 = @(2048, 1, 'M378A5644EB0-CRC')
-        4096 = @(4096, 1, 'M378A5244CB0-CRC')
-        8192 = @(4096, 2, 'M378A5244CB0-CRC')
+        2048 = @(2048, 1); 4096 = @(4096, 1)
+        8192 = @(4096, 2)
     }
     $planInstance = 10
     foreach ($memory in @(2048, 4096, 8192)) {
@@ -411,10 +410,14 @@ try {
         $selection = New-VMateTestSelection -Path $path -Instance $planInstance `
             -MemoryMiB $memory
         $expected = $expectedPlans[$memory]
+        $memoryFacts = Get-VMateMemoryRateFacts -Platform $selection.Platform `
+            -PartNumber ([string]$selection.Profile.identity.memory_part) -Manufacturer `
+            ([string]$selection.Profile.identity.memory_manufacturer) -ModuleId `
+            ([string]$selection.Profile.identity.memory_module_id)
         Assert-VMateTest `
             ($selection.Profile.configuration.memory_module_mib -eq $expected[0] -and
              $selection.Profile.configuration.memory_module_count -eq $expected[1] -and
-             $selection.Profile.identity.memory_part -eq $expected[2] -and
+             $memoryFacts.ModuleId -eq $selection.Profile.identity.memory_module_id -and
              @($selection.Profile.identity.memory_serials).Count -eq $expected[1]) `
             "${memory}MiB 的 DIMM 物料方案不一致。"
         [void](New-VMateSmbiosArguments $selection.Platform $selection.Profile)

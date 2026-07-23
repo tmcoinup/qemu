@@ -8,10 +8,14 @@ source "$_STEALTH_PROFILE_IO_DIR/stealth-gpu-profile.sh"
 source "$_STEALTH_PROFILE_IO_DIR/stealth-component-profile-verify.sh"
 # shellcheck source=stealth-storage-profile-migrate.sh
 source "$_STEALTH_PROFILE_IO_DIR/stealth-storage-profile-migrate.sh"
+# shellcheck source=stealth-storage-identity.sh
+source "$_STEALTH_PROFILE_IO_DIR/stealth-storage-identity.sh"
 # shellcheck source=stealth-tpm-profile.sh
 source "$_STEALTH_PROFILE_IO_DIR/stealth-tpm-profile.sh"
 # shellcheck source=stealth-identity-verify.sh
 source "$_STEALTH_PROFILE_IO_DIR/stealth-identity-verify.sh"
+# shellcheck source=stealth-memory-profile.sh
+source "$_STEALTH_PROFILE_IO_DIR/stealth-memory-profile.sh"
 
 _STEALTH_PROFILE_VARS=(
     PLATFORM_SCHEMA_VERSION PLATFORM_CATALOG_REVISION PLATFORM_ID PLATFORM_STATUS PLATFORM_RELEASE_YEAR
@@ -32,17 +36,23 @@ _STEALTH_PROFILE_VARS=(
     MCH_PCI_VEN MCH_PCI_DEV MCH_REV LPC_PCI_VEN LPC_PCI_DEV LPC_REV SMBUS_PCI_VEN SMBUS_PCI_DEV SMBUS_REV AHCI_PCI_VEN AHCI_PCI_DEV AHCI_REV
     AUDIO_VENDOR AUDIO_CODEC AUDIO_CODEC_ID AUDIO_CODEC_REVISION AUDIO_CODEC_SUBSYSTEM_ID AUDIO_IDENTITY_FIDELITY AUDIO_CONTROLLER_PCI_VEN AUDIO_CONTROLLER_PCI_DEV
     NVME_MAX_PCIE_GENERATION NVME_LANES NVME_BOOT_SUPPORTED NVME_ATTACHMENT
-    GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV GPU_IDENTITY_FIDELITY
+    GPU_COMPONENT_ID GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV
     GPU_MEMORY_TYPE GPU_MEMORY_BUS_WIDTH_BITS GPU_BASE_CLOCK_KHZ GPU_BOOST_CLOCK_KHZ GPU_MEMORY_CLOCK_KHZ GPU_SLI_SUPPORTED
+    GPU_BOARD_PARTNER GPU_PART_NUMBER GPU_SUBSYS_VEN GPU_SUBSYS_DEV
+    GPU_CARRIER_VEN GPU_CARRIER_DEV GPU_IDENTITY_FIDELITY
     NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV NVME_SUBNQN_TEMPLATE NVME_SUBNQN
     BOOT_STORAGE_CATALOG_REVISION BOOT_STORAGE_COMPONENT_ID BOOT_STORAGE_MANUFACTURER
     BOOT_STORAGE_MODEL BOOT_STORAGE_PART_NUMBER BOOT_STORAGE_FIRMWARE
     BOOT_STORAGE_SIZE_BYTES BOOT_STORAGE_INTERFACE BOOT_STORAGE_SERIAL
+    MEM_FAMILY_ID MEM_MODULE_ID MEM_SELECTED_MODULE_MB MEM_MODULE_COUNT MEM_SPD_EE1004
     MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_RATED_MTS MEM_CONFIGURED_MTS MEM_SERIAL MEM_TOTAL_MB MEM_TYPE MEM_CHANNELS MEM_MAX_MTS MEM_ALLOWED_MTS
     MEM_VOLTAGE_MV MEM_RANK MEM_RANK_2G MEM_DEVICE_WIDTH_2G MEM_RANK_4G MEM_DEVICE_WIDTH_4G
     MEM_MODULE_MB MEM_ALLOWED_TOTAL_MB MEM_MAX_CAPACITY_MB
-    EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT
+    EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL EDID_BINARY_SERIAL EDID_REVISION EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT
     EDID_MIN_VFREQ_HZ EDID_MAX_VFREQ_HZ EDID_MIN_HFREQ_KHZ EDID_MAX_HFREQ_KHZ EDID_MAX_PIXEL_CLOCK_MHZ EDID_SECONDARY_XRES EDID_SECONDARY_YRES EDID_SECONDARY_REFRESH_RATE
+    EDID_SECONDARY_PIXEL_CLOCK_KHZ EDID_SECONDARY_HFRONT EDID_SECONDARY_HSYNC EDID_SECONDARY_HBLANK EDID_SECONDARY_VFRONT EDID_SECONDARY_VSYNC EDID_SECONDARY_VBLANK
+    EDID_SECONDARY_HSYNC_POSITIVE EDID_SECONDARY_VSYNC_POSITIVE
+    EDID_SECONDARY_WIDTH_MM EDID_SECONDARY_HEIGHT_MM
     KBD_COMPONENT_ID KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_SERIAL KBD_BCD_DEVICE KBD_DESCRIPTOR_FIDELITY
     MOUSE_COMPONENT_ID MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT MOUSE_SERIAL MOUSE_BCD_DEVICE MOUSE_DESCRIPTOR_FIDELITY
     TABLET_COMPONENT_ID TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT TABLET_SERIAL TABLET_BCD_DEVICE TABLET_DESCRIPTOR_FIDELITY
@@ -52,7 +62,12 @@ _STEALTH_PROFILE_IO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=stealth-profile-save.sh
 source "$_STEALTH_PROFILE_IO_DIR/stealth-profile-save.sh"
 
-stealth_have_profile() { [[ -s "$1" ]]; }
+# “是否存在 profile 节点”与“内容是否有效”必须分开。空文件、目录、断裂链接
+# 都不是首次创建：调用方应进入严格 load 并失败，不能把异常节点当成不存在后
+# 自动生成一套新身份。
+stealth_have_profile() {
+    [[ -e "$1" || -L "$1" ]]
+}
 
 _stealth_is_profile_key() {
     local k="$1" w
@@ -62,24 +77,53 @@ _stealth_is_profile_key() {
     return 1
 }
 
-# 安全读取 profile 单个字段（P1#2）：供只取少数字段的 host 工具用，替代
-# `source`/`eval grep`。命中且安全则打印值并 return 0；未登记 key / 文件不可读 /
-# 未找到 / 值含命令替换·反引号·参数展开 则 return 1（绝不执行 profile 内代码）。
-stealth_profile_get() {
-    local want="$1" path="$2" line rawval
-    _stealth_is_profile_key "$want" || return 1
+# 扫描完整文件后才返回单字段，确保调用方不会看到“前一个值”，而完整 loader
+# 又看到“后一个值”。重复检查覆盖所有白名单 key，而不只覆盖本次请求的 key：
+# 只要 profile 内任一受控事实重复，整个单字段读取也必须 fail-closed。
+_stealth_profile_scan_unique_key() {
+    local path="$1" want="${2:-}" line key rawval value found=0
+    local -A seen=()
+
     [[ -r "$path" ]] || return 1
     while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" == "$want="* ]] || continue
+        [[ "$line" == *"="* ]] || continue
+        key="${line%%=*}"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        _stealth_is_profile_key "$key" || continue
+        if [[ -n "${seen[$key]:-}" ]]; then
+            echo "ERROR: profile 含重复白名单 key: $key" >&2
+            return 1
+        fi
+        seen["$key"]=1
+        [[ -n "$want" && "$key" == "$want" ]] || continue
+
         rawval="${line#*=}"
         # shellcheck disable=SC2016 # 单引号内容是要识别的危险字面量，不应展开。
         if [[ "$rawval" == *'$('* || "$rawval" == *'`'* || "$rawval" == *'${'* ]]; then
             return 1
         fi
-        printf '%s' "$rawval" | sed -E 's/\\(.)/\1/g'
-        return 0
+        if [[ "$rawval" == "''" ]]; then
+            value=""
+        else
+            value="$(printf '%s' "$rawval" | sed -E 's/\\(.)/\1/g')" ||
+                return 1
+        fi
+        found=1
     done < "$path"
-    return 1
+
+    [[ -z "$want" ]] && return 0
+    (( found == 1 )) || return 1
+    printf '%s' "$value"
+}
+
+# 安全读取 profile 单个字段（P1#2）：供只取少数字段的 host 工具用，替代
+# `source`/`eval grep`。命中且安全则打印值并 return 0；未登记 key / 文件不可读 /
+# 未找到 / 值含命令替换·反引号·参数展开 / 任一白名单 key 重复则 return 1
+# （绝不执行 profile 内代码）。
+stealth_profile_get() {
+    local want="$1" path="$2"
+    _stealth_is_profile_key "$want" || return 1
+    _stealth_profile_scan_unique_key "$path" "$want"
 }
 
 _stealth_stable_hex() {
@@ -94,24 +138,47 @@ _stealth_stable_dec_range() {
     echo $(( lo + (16#$hex % (hi - lo + 1)) ))
 }
 
+_stealth_stable_monitor_serial() {
+    local component_id="$1" key="$2" spec kind length serial decimal
+    local letters digit alnum
+    spec="$(stealth_component_monitor_serial_spec "$component_id")" || return 1
+    IFS='|' read -r kind length <<<"$spec"
+    case "$kind" in
+        samsung_h4zmc_decimal5)
+            printf -v decimal '%05d' \
+                "$(_stealth_stable_dec_range "$key-decimal" 0 99999)"
+            serial="H4ZMC${decimal}"
+            ;;
+        aoc_upper_alnum7_decimal6)
+            printf -v decimal '%06d' \
+                "$(_stealth_stable_dec_range "$key-decimal" 0 999999)"
+            letters="$(_stealth_stable_hex "$key-letters" 4 |
+                tr '0123456789ABCDEF' 'GHIJKLMNOPABCDEF')"
+            digit="$(_stealth_stable_dec_range "$key-digit" 0 9)"
+            alnum="$(_stealth_stable_hex "$key-alnum" 1)"
+            serial="${letters}${digit}${alnum}A${decimal}"
+            ;;
+        xiaomi_29200_label_slash_removed_decimal)
+            printf -v decimal '%08d' \
+                "$(_stealth_stable_dec_range "$key-decimal" 0 99999999)"
+            serial="29200${decimal}"
+            ;;
+        lenovo_urb_upper_alnum)
+            serial="URB$(_stealth_stable_hex "$key" 5)"
+            ;;
+        *)
+            echo "ERROR: 未知显示器序列号策略: $kind" >&2
+            return 1
+            ;;
+    esac
+    [[ ${#serial} -eq length ]] || return 1
+    printf '%s\n' "$serial"
+}
+
 _stealth_stable_uuid() {
     local key="$1" h
     h="$(_stealth_stable_hex "$key" 32 | tr '[:upper:]' '[:lower:]')"
     echo "${h:0:8}-${h:8:4}-4${h:12:3}-8${h:16:3}-${h:20:12}"
-}
-
-_stealth_stable_board_serial() {
-    local mfr="$1" key="$2"
-    case "$mfr" in
-        *Micro-Star*|*MSI*)
-            echo "$(_stealth_stable_hex "$key-msi" 4)$(_stealth_stable_dec_range "$key-msi-num" 100000 999999)" ;;
-        *Gigabyte*)
-            echo "SN$(_stealth_stable_dec_range "$key-giga" 10000000 99999999)" ;;
-        ASRock*)
-            echo "M80-$(_stealth_stable_hex "$key-asrock" 4)$(_stealth_stable_dec_range "$key-asrock-num" 1000 9999)" ;;
-        *)
-            echo "MB-$(_stealth_stable_hex "$key-asus" 6)$(_stealth_stable_dec_range "$key-asus-num" 10000 99999)" ;;
-    esac
 }
 
 _stealth_stable_mac() {
@@ -138,6 +205,11 @@ stealth_load_profile() {
     local -A _stealth_explicit_empty_keys=()
     local _boot_storage_migration_kind=none
     local _legacy_boot_storage_serial=
+    local _profile_hash_before _profile_hash_after
+    _STEALTH_MEMORY_PROFILE_MIGRATION_KIND=none
+    _STEALTH_STORAGE_PROFILE_MIGRATION_KIND=none
+    _STEALTH_LOADED_PROFILE_HASH=
+    _STEALTH_LOADED_PROFILE_PATH=
 
     case "${ALLOW_STORAGE_PROFILE_MIGRATION:-0}" in
         0|1) ;;
@@ -146,6 +218,18 @@ stealth_load_profile() {
             return 1
             ;;
     esac
+
+    [[ -f "$path" && ! -L "$path" ]] || {
+        echo "ERROR: profile 必须是普通文件且不能是符号链接: $path" >&2
+        return 1
+    }
+    _profile_hash_before="$(stealth_profile_sha256 "$path")" || {
+        echo "ERROR: 无法计算 profile 加载摘要: $path" >&2
+        return 1
+    }
+    # 必须在赋值任何全局 profile 变量前完成重复 key 门禁。这样失败既不会出现
+    # first-wins/last-wins 分叉，也不会把重复项之前的部分事实泄漏给调用方。
+    _stealth_profile_scan_unique_key "$path" "" || return 1
 
     # 安全解析（P1#6）：绝不 source/eval profile——被篡改的 profile 否则等同
     # 执行任意 shell 代码（多个 root 脚本读 profile 后还会挂 NTFS / 写 hive）。
@@ -197,6 +281,14 @@ stealth_load_profile() {
             unset '_stealth_explicit_empty_keys[$key]'
         fi
     done < "$path"
+    _profile_hash_after="$(stealth_profile_sha256 "$path")" || {
+        echo "ERROR: profile 解析期间不可读或被替换: $path" >&2
+        return 1
+    }
+    if [[ "$_profile_hash_after" != "$_profile_hash_before" ]]; then
+        echo "ERROR: profile 在解析期间发生变化，拒绝使用不一致快照" >&2
+        return 1
+    fi
 
     # 老 profile 兼容只补真正“缺失”的 CPU 键。显式空值仍是用户输入，不能
     # 被 := 修复后绕过平台绑定；host-passthrough 也会合法地把未知 part/socket
@@ -302,8 +394,7 @@ stealth_load_profile() {
     [[ -n "${_stealth_present_keys[CPU_IGPU_MODEL]:-}" ]] ||
         CPU_IGPU_MODEL=none
     stealth_fill_profile_tpm_facts _stealth_present_keys || return 1
-    if [[ "${STRICT_HARDWARE:-0}" == "1" &&
-          "$PLATFORM_SCHEMA_VERSION" == "1" ]]; then
+    if [[ "$PLATFORM_SCHEMA_VERSION" == "1" ]]; then
         stealth_verify_profile_identity_inputs \
             _stealth_present_keys "$_boot_storage_migration_kind" || return 1
     fi
@@ -315,6 +406,22 @@ stealth_load_profile() {
         UUID="$(_stealth_stable_uuid "$path-uuid")"
     fi
     _identity_key="$UUID"
+    if [[ "$_boot_storage_migration_kind" == samsung-970-pro-catalog-v2 ||
+          "$_boot_storage_migration_kind" == legacy-nvme-v2 ||
+          "$_boot_storage_migration_kind" == legacy-sata-v2 ]]; then
+        # 保留旧序列的全部 14 个字符，只从稳定 UUID 派生一个附加字符；相比重抽
+        # 整个序列，这会把必要的 Guest 身份变化压缩到真实规格要求的最小范围。
+        local _old_nvme_serial="${_legacy_boot_storage_serial:-$NVME_SERIAL}"
+        NVME_SERIAL="${_old_nvme_serial}$(
+            _stealth_stable_hex "$_identity_key-samsung-serial-v2" 1
+        )"
+        NVME_PCI_DEV=0xA808
+    elif [[ "$_boot_storage_migration_kind" == legacy-nvme-v1 ||
+            "$_boot_storage_migration_kind" == legacy-sata-v1 ]]; then
+        # v1 的十二字符序列稍后会由当前品牌生成器规范化；PCI device 同样必须
+        # 从历史错误 A804 切到真实 970 PRO A808，才能进入当前原子目录校验。
+        NVME_PCI_DEV=0xA808
+    fi
     if ! [[ "${CPU_SERIAL:-}" =~ ^[0-9]{10}$ ]]; then
         CPU_SERIAL="$(_stealth_stable_dec_range "$_identity_key-cpu-serial" 1000000000 9999999999)"
     fi
@@ -330,20 +437,31 @@ stealth_load_profile() {
         CPU_ASSET=$(( 1000 + (_cpu_asset_seed % 9000) ))
     fi
 
-    if ! [[ "${BOARD_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]]; then
-        BOARD_SERIAL="$(_stealth_stable_board_serial "${BOARD_MFR:-ASUSTeK COMPUTER INC.}" "$_identity_key-board")"
+    if ! stealth_board_serial_is_compatible \
+            "${BOARD_MFR:-ASUSTeK COMPUTER INC.}" "${BOARD_SERIAL:-}"; then
+        BOARD_SERIAL="$(_stealth_stable_board_serial \
+            "${BOARD_MFR:-ASUSTeK COMPUTER INC.}" "$_identity_key-board")" ||
+            return 1
     fi
     if ! [[ "${BOARD_ASSET:-}" =~ ^[0-9]{10}$ ]]; then
         BOARD_ASSET="$(_stealth_stable_dec_range "$_identity_key-board-asset" 1000000000 9999999999)"
     fi
-    if ! [[ "${SYSTEM_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]]; then
-        SYSTEM_SERIAL="$(_stealth_stable_board_serial "${SYSTEM_MFR:-${BOARD_MFR:-ASUSTeK COMPUTER INC.}}" "$_identity_key-system")"
+    if ! stealth_board_serial_is_compatible \
+            "${SYSTEM_MFR:-${BOARD_MFR:-ASUSTeK COMPUTER INC.}}" \
+            "${SYSTEM_SERIAL:-}"; then
+        SYSTEM_SERIAL="$(_stealth_stable_board_serial \
+            "${SYSTEM_MFR:-${BOARD_MFR:-ASUSTeK COMPUTER INC.}}" \
+            "$_identity_key-system")" || return 1
     fi
     if ! [[ "${SYSTEM_SKU:-}" =~ ^SKU[0-9]{6}$ ]]; then
         SYSTEM_SKU="SKU$(_stealth_stable_dec_range "$_identity_key-sku" 100000 999999)"
     fi
-    if ! [[ "${CHASSIS_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]]; then
-        CHASSIS_SERIAL="$(_stealth_stable_board_serial "${BOARD_MFR:-ASUSTeK COMPUTER INC.}" "$_identity_key-chassis")"
+    if ! stealth_board_serial_is_compatible \
+            "${BOARD_MFR:-ASUSTeK COMPUTER INC.}" \
+            "${CHASSIS_SERIAL:-}"; then
+        CHASSIS_SERIAL="$(_stealth_stable_board_serial \
+            "${BOARD_MFR:-ASUSTeK COMPUTER INC.}" \
+            "$_identity_key-chassis")" || return 1
     fi
     if ! [[ "${NIC_MAC:-}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || [[ "${NIC_MAC:-}" == 52:54:00:* ]]; then
         NIC_MAC="$(_stealth_stable_mac \
@@ -431,34 +549,26 @@ stealth_load_profile() {
     : "${GPU_RAM_MB:=2048}"
     : "${GPU_BIOS:=Version 86.07.48.00.38}"
     : "${GPU_REV:=0xA1}"
-    : "${GPU_IDENTITY_FIDELITY:=label_only_out_of_scope}"
     stealth_fill_legacy_gpu_spec_defaults || return 1
+    : "${GPU_IDENTITY_FIDELITY:=label_only_out_of_scope}"
 
     : "${NVME_COMPONENT_ID:=samsung-970-pro-512gb}"
     : "${NVME_MODEL:=Samsung SSD 970 PRO 512GB}"
     : "${NVME_FIRMWARE:=1B2QEXP7}"
-    if ! [[ "${NVME_SERIAL:-}" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{9}$ ]]; then
-        NVME_SERIAL="S$(_stealth_stable_hex "$_identity_key-nvme-prefix" 3)N$(_stealth_stable_hex "$_identity_key-nvme-suffix" 9)"
+    if ! stealth_component_storage_serial_is_valid \
+            "$NVME_COMPONENT_ID" "${NVME_SERIAL:-}" >/dev/null 2>&1; then
+        NVME_SERIAL="$(stealth_stable_nvme_serial \
+            "$NVME_COMPONENT_ID" "$_identity_key-nvme")" || return 1
     fi
 
-    # 老 profile 没 NVME_SIZE_BYTES 字段：按 NVME_MODEL 名字智能推导，
-    # 让历史磁盘容量跟广告容量自洽，避免再次出现 1TB 型号 + 512GB 实盘的 stealth 矛盾。
-    # 匹配关键词不命中时兜底 512GB（老 start-vm.sh 行为）。
-    if [[ -z "${NVME_SIZE_BYTES:-}" ]]; then
-        case "$NVME_MODEL" in
-            *1TB*)   NVME_SIZE_BYTES=1000204886016 ;;
-            *2TB*)   NVME_SIZE_BYTES=2000398934016 ;;
-            *500GB*) NVME_SIZE_BYTES=500107862016 ;;
-            *512GB*) NVME_SIZE_BYTES=512110190592 ;;
-            *256GB*) NVME_SIZE_BYTES=256060514304 ;;
-            *)       NVME_SIZE_BYTES=512000000000 ;;
-        esac
-    fi
+    # 当前目录只允许 exact 512GB；旧 profile 缺容量时也只补这一精确字节数。
+    : "${NVME_SIZE_BYTES:=512110190592}"
     : "${NVME_PCI_VEN:=0x144D}"
-    : "${NVME_PCI_DEV:=0xA804}"
+    : "${NVME_PCI_DEV:=0xA808}"
     : "${NVME_SUBSYS_VEN:=0x144D}"
     : "${NVME_SUBSYS_DEV:=0xA801}"
-    if [[ "$_boot_storage_migration_kind" == legacy-*-v1 ]]; then
+    if [[ "$_boot_storage_migration_kind" == legacy-nvme-v1 ||
+          "$_boot_storage_migration_kind" == legacy-sata-v1 ]]; then
         # v1 的厂商域名 NQN 与旧序号已经在迁移前按历史元组验证；显式迁移后
         # 内存态统一转为当前 UUID NQN，再执行无例外的身份和组件绑定。
         NVME_SUBNQN_TEMPLATE="nqn.2014-08.org.nvmexpress:uuid:{uuid}"
@@ -470,18 +580,24 @@ stealth_load_profile() {
         NVME_SUBNQN="$_expected_nvme_subnqn"
     fi
 
-    # 新 C 层只实现这一套已核验的 Samsung 控制器。旧 profile 若声称其它型号，
-    # 不能再用 a804 行为强行启动；要求显式 reroll，并在启动器后续检查磁盘虚拟容量。
-    if [[ "$NVME_MODEL|$NVME_FIRMWARE|$NVME_SIZE_BYTES" != \
-          "Samsung SSD 970 PRO 512GB|1B2QEXP7|512110190592" ]]; then
+    # 当前 C 层只接受目录中已审核的原子画像，不能把其它型号套在已知控制器上。
+    local _current_nvme_row _catalog_nvme_id _catalog_nvme_model
+    local _catalog_nvme_firmware _catalog_nvme_size
+    _current_nvme_row="$(stealth_component_storage_row \
+        "$NVME_COMPONENT_ID")" || return 1
+    IFS='|' read -r _catalog_nvme_id _catalog_nvme_model \
+        _catalog_nvme_firmware _catalog_nvme_size _ <<<"$_current_nvme_row"
+    if [[ "$NVME_COMPONENT_ID|$NVME_MODEL|$NVME_FIRMWARE|$NVME_SIZE_BYTES" != \
+          "$_catalog_nvme_id|$_catalog_nvme_model|$_catalog_nvme_firmware|$_catalog_nvme_size" ]]; then
         echo "ERROR: profile 使用未实现的 NVMe bundle: $NVME_MODEL / $NVME_FIRMWARE / $NVME_SIZE_BYTES" >&2
-        echo "       当前仅支持 970 PRO 512GB；请备份后显式 reroll，并确认磁盘虚拟容量。" >&2
+        echo "       请备份后显式 reroll，并确认磁盘虚拟容量。" >&2
         return 1
     fi
 
     stealth_apply_boot_storage_profile_migration \
         _stealth_present_keys "$_boot_storage_migration_kind" \
         "$_legacy_boot_storage_serial" || return 1
+    _STEALTH_STORAGE_PROFILE_MIGRATION_KIND="$_boot_storage_migration_kind"
     if [[ "${STRICT_HARDWARE:-0}" == "1" &&
           "$PLATFORM_SCHEMA_VERSION" == "1" &&
           "$_boot_storage_migration_kind" != none ]]; then
@@ -490,132 +606,9 @@ stealth_load_profile() {
         stealth_verify_profile_identity_inputs _stealth_present_keys || return 1
     fi
 
-    : "${MEM_MFR:=Crucial}"
-    : "${MEM_PART_2G:=CT2G4DFS624A}"
-    : "${MEM_PART_4G:=CT4G4DFS824A}"
-    # 颗粒额定速率：老 profile 缺 → 按 part number 编码推导(26=2666/24=2400/-CRC=2400)，
-    # 推不出兜 2666(与默认 Kingston HyperX 2666 一致)。报告速率再 min(CPU 平台上限)。
-    if [[ -z "${MEM_RATED:-}" ]]; then
-        case "${MEM_PART_4G:-}${MEM_PART_2G:-}" in
-            *-CRC*|*24N*|*DFS624*|*DFS824*) MEM_RATED=2400 ;;
-            *26N*|*266*|*C16F*)             MEM_RATED=2666 ;;
-            *)                              MEM_RATED=2666 ;;
-        esac
-    fi
-
-    case "$CPU_SOCKET" in
-        AM3|AM3+|FM2+|LGA1155)
-            : "${MEM_TYPE:=DDR3}"
-            : "${MEM_VOLTAGE_MV:=1500}" ;;
-        *)
-            : "${MEM_TYPE:=DDR4}"
-            : "${MEM_VOLTAGE_MV:=1200}" ;;
-    esac
-    : "${MEM_CHANNELS:=2}"
-    : "${MEM_MAX_MTS:=$MEM_RATED}"
-    : "${MEM_ALLOWED_MTS:=$MEM_MAX_MTS}"
-    # 中文注释：旧 profile 只有 MEM_RATED，兼容读取时可确定性补齐；严格的
-    # schema-1 profile 则在末尾要求两个新字段原本就存在，避免篡改后被默认值掩盖。
-    : "${MEM_RATED_MTS:=$MEM_RATED}"
-    if [[ "$MEM_RATED" != "$MEM_RATED_MTS" ]]; then
-        echo "ERROR: profile 的 MEM_RATED 与 MEM_RATED_MTS 自相矛盾" >&2
-        return 1
-    fi
-    if ! [[ "$MEM_RATED_MTS" =~ ^[0-9]+$ && "$MEM_MAX_MTS" =~ ^[0-9]+$ ]] ||
-       (( MEM_RATED_MTS <= 0 || MEM_MAX_MTS <= 0 )); then
-        echo "ERROR: profile 的内存额定值或平台上限不是正整数" >&2
-        return 1
-    fi
-    if [[ -z "${MEM_CONFIGURED_MTS:-}" ]]; then
-        if (( MEM_RATED_MTS < MEM_MAX_MTS )); then
-            MEM_CONFIGURED_MTS="$MEM_RATED_MTS"
-        else
-            MEM_CONFIGURED_MTS="$MEM_MAX_MTS"
-        fi
-    fi
-    if ! [[ "$MEM_CONFIGURED_MTS" =~ ^[0-9]+$ ]] ||
-       (( MEM_RATED_MTS <= 0 || MEM_CONFIGURED_MTS <= 0 ||
-          MEM_CONFIGURED_MTS > MEM_RATED_MTS ||
-          MEM_CONFIGURED_MTS > MEM_MAX_MTS )) ||
-       [[ ",$MEM_ALLOWED_MTS," != *",$MEM_CONFIGURED_MTS,"* ]]; then
-        echo "ERROR: profile 内存额定/配置速率不可能: rated=$MEM_RATED_MTS configured=$MEM_CONFIGURED_MTS max=$MEM_MAX_MTS allowed=$MEM_ALLOWED_MTS" >&2
-        return 1
-    fi
-    : "${MEM_RANK:=1}"
-    local _memory_geometry_key _memory_geometry_key_count=0
-    for _memory_geometry_key in \
-        MEM_RANK_2G MEM_DEVICE_WIDTH_2G MEM_RANK_4G MEM_DEVICE_WIDTH_4G; do
-        [[ -n "${_stealth_present_keys[$_memory_geometry_key]:-}" ]] &&
-            ((_memory_geometry_key_count += 1))
-    done
-    if [[ "$PLATFORM_SCHEMA_VERSION" == "1" &&
-          "$_memory_geometry_key_count" != 0 &&
-          "$_memory_geometry_key_count" != 4 ]]; then
-        echo "ERROR: schema-1 profile 的 DIMM 几何字段不完整" >&2
-        return 1
-    fi
-    if [[ "$PLATFORM_SCHEMA_VERSION" == "1" &&
-          "$_memory_geometry_key_count" == 0 ]] ||
-       [[ "$PLATFORM_SCHEMA_VERSION" != "1" &&
-          (-z "${MEM_RANK_2G:-}" || -z "${MEM_DEVICE_WIDTH_2G:-}" ||
-           -z "${MEM_RANK_4G:-}" || -z "${MEM_DEVICE_WIDTH_4G:-}") ]]; then
-        local _memory_geometry
-        if _memory_geometry="$(stealth_memory_catalog_geometry \
-                "$MEM_MFR" "$MEM_PART_2G" "$MEM_PART_4G" "$MEM_RATED")"; then
-            IFS='|' read -r \
-                MEM_RANK_2G MEM_DEVICE_WIDTH_2G \
-                MEM_RANK_4G MEM_DEVICE_WIDTH_4G <<<"$_memory_geometry"
-        elif [[ "$PLATFORM_SCHEMA_VERSION" != "1" ]] &&
-             _memory_geometry="$(stealth_memory_legacy_catalog_geometry \
-                "$MEM_MFR" "$MEM_PART_2G" "$MEM_PART_4G" "$MEM_RATED")"; then
-            IFS='|' read -r \
-                MEM_RANK_2G MEM_DEVICE_WIDTH_2G \
-                MEM_RANK_4G MEM_DEVICE_WIDTH_4G <<<"$_memory_geometry"
-        elif [[ "$PLATFORM_SCHEMA_VERSION" != "1" &&
-                "$MEM_PART_2G|$MEM_PART_4G" == \
-                "CT2G4DFS6266|CT4G4DFS8266" ]]; then
-            # 退役目录中的 2GB 料号不可核验；仅为非严格 legacy 迁移保留
-            # 4GB CT4G4DFS8266 几何，schema-1 严格 profile 一律拒绝。
-            MEM_RANK_2G=0
-            MEM_DEVICE_WIDTH_2G=0
-            MEM_RANK_4G=1
-            MEM_DEVICE_WIDTH_4G=8
-        else
-            # 非严格 legacy profile 没有目录证据时沿用历史 x8 回退；
-            # schema 1 会在下方精确目录校验中拒绝该组合。
-            MEM_RANK_2G="$MEM_RANK"
-            MEM_DEVICE_WIDTH_2G=8
-            MEM_RANK_4G="$MEM_RANK"
-            MEM_DEVICE_WIDTH_4G=8
-        fi
-    fi
-    if ! [[ "$MEM_RANK_2G" =~ ^[0-4]$ &&
-            "$MEM_RANK_4G" =~ ^[1-4]$ ]] ||
-       [[ "$MEM_RANK_2G" == 0 && "$MEM_DEVICE_WIDTH_2G" != 0 ]] ||
-       [[ "$MEM_RANK_2G" != 0 && "$MEM_DEVICE_WIDTH_2G" == 0 ]] ||
-       [[ "$MEM_DEVICE_WIDTH_2G" != 0 &&
-          "$MEM_DEVICE_WIDTH_2G" != 4 &&
-          "$MEM_DEVICE_WIDTH_2G" != 8 &&
-          "$MEM_DEVICE_WIDTH_2G" != 16 &&
-          "$MEM_DEVICE_WIDTH_2G" != 32 ]] ||
-       [[ "$MEM_DEVICE_WIDTH_4G" != 4 &&
-          "$MEM_DEVICE_WIDTH_4G" != 8 &&
-          "$MEM_DEVICE_WIDTH_4G" != 16 &&
-          "$MEM_DEVICE_WIDTH_4G" != 32 ]]; then
-        echo "ERROR: profile 的 DIMM rank/device-width 非法" >&2
-        return 1
-    fi
-    if [[ "$PLATFORM_SCHEMA_VERSION" == "1" ]] &&
-       ! stealth_memory_profile_catalog_contains \
-            "$MEM_MFR" "$MEM_PART_2G" "$MEM_PART_4G" "$MEM_RATED" \
-            "$MEM_RANK_2G" "$MEM_DEVICE_WIDTH_2G" \
-            "$MEM_RANK_4G" "$MEM_DEVICE_WIDTH_4G"; then
-        echo "ERROR: profile 的内存料号/几何不在已核验硬件目录中" >&2
-        return 1
-    fi
-    : "${MEM_MODULE_MB:=2048,4096}"
-    : "${MEM_ALLOWED_TOTAL_MB:=2048,4096,8192}"
-    : "${MEM_MAX_CAPACITY_MB:=$(( BOARD_MAX_MEMORY_GIB * 1024 ))}"
+    # 内存目录现在按实际安装 module ID 绑定；历史成对料号只作为受控迁移输入。
+    # 解析函数只更新当前进程，真正写回仍延迟到所有启动门禁通过之后。
+    stealth_resolve_loaded_memory_profile _stealth_present_keys || return 1
 
     # MEM_SERIAL 老 profile 没这字段：用 UUID 派生 8 字符十六进制，
     # 保证**同一 VM 跨重启 SN 不变**（即便没 reroll，老 VM 也不再每次启动漂移）。
@@ -626,34 +619,73 @@ stealth_load_profile() {
         MEM_SERIAL="$(_stealth_stable_hex "$_identity_key-mem" 8)"
     fi
 
-    # MEM_TOTAL_MB 老 profile 没有：留空 → start-vm.sh 退回历史默认 4096 MiB。
-    # 不擅自把老 VM 升到 8GB（改内存总量 = 改硬件画像，需用户显式 --ram= 或在
-    # profile 里写 MEM_TOTAL_MB）。新 profile 由 stealth_pick_profile 写 8192。
-    : "${MEM_TOTAL_MB:=}"
-
-    # 显示器 / 键盘 / 鼠标 / 数位板：老 profile 退化为 QEMU patch 历史默认值
-    # （Samsung S24F350F / Microsoft Wired Keyboard 600 / Microsoft USB Optical
-    # Mouse / HUION PenTablet）。配合 patch 0009/0010 后默认仍然生效。
+    # 显示器 / 键盘 / 鼠标 / 数位板：缺失字段只补当前受控目录默认值。
     : "${EDID_COMPONENT_ID:=samsung-s24f350}"
     : "${EDID_VENDOR:=SAM}"
     : "${EDID_NAME:=S24F350}"
     : "${EDID_WIDTH_MM:=521}"
     : "${EDID_HEIGHT_MM:=293}"
-    if ! [[ "${EDID_SERIAL:-}" =~ ^[A-Z0-9]{8,12}$ ]]; then
-        EDID_SERIAL="H4ZK$(_stealth_stable_hex "$_identity_key-edid" 8)"
+    if ! stealth_component_monitor_serial_is_valid \
+            "$EDID_COMPONENT_ID" "${EDID_SERIAL:-}" >/dev/null 2>&1; then
+        local _edid_attempt
+        for ((_edid_attempt = 0; _edid_attempt < 32; _edid_attempt++)); do
+            EDID_SERIAL="$(_stealth_stable_monitor_serial \
+                "$EDID_COMPONENT_ID" \
+                "$_identity_key-edid-$_edid_attempt")" || return 1
+            stealth_component_monitor_serial_is_valid \
+                "$EDID_COMPONENT_ID" "$EDID_SERIAL" >/dev/null 2>&1 && break
+        done
+        stealth_component_monitor_serial_is_valid \
+            "$EDID_COMPONENT_ID" "$EDID_SERIAL" >/dev/null 2>&1 || return 1
     fi
-    : "${EDID_PRODUCT_ID:=0x0F65}"
-    : "${EDID_MANUFACTURE_WEEK:=32}"
-    : "${EDID_MANUFACTURE_YEAR:=2018}"
-    : "${EDID_VIDEO_INPUT:=0xA3}"
-    : "${EDID_MIN_VFREQ_HZ:=56}"
+    if [[ -z "${EDID_BINARY_SERIAL:-}" ]]; then
+        EDID_BINARY_SERIAL="$(
+            stealth_component_monitor_binary_serial \
+                "$EDID_COMPONENT_ID" "$EDID_SERIAL"
+        )" || return 1
+    fi
+    if [[ -z "${EDID_REVISION:-}" ]]; then
+        EDID_REVISION="$(
+            stealth_component_monitor_revision "$EDID_COMPONENT_ID"
+        )" || return 1
+    fi
+    : "${EDID_PRODUCT_ID:=0x0D20}"
+    : "${EDID_MANUFACTURE_WEEK:=49}"
+    : "${EDID_MANUFACTURE_YEAR:=2019}"
+    : "${EDID_VIDEO_INPUT:=0x80}"
+    : "${EDID_MIN_VFREQ_HZ:=50}"
     : "${EDID_MAX_VFREQ_HZ:=75}"
     : "${EDID_MIN_HFREQ_KHZ:=30}"
     : "${EDID_MAX_HFREQ_KHZ:=81}"
-    : "${EDID_MAX_PIXEL_CLOCK_MHZ:=149}"
-    : "${EDID_SECONDARY_XRES:=1600}"
-    : "${EDID_SECONDARY_YRES:=900}"
-    : "${EDID_SECONDARY_REFRESH_RATE:=60000}"
+    : "${EDID_MAX_PIXEL_CLOCK_MHZ:=170}"
+    : "${EDID_SECONDARY_XRES:=1280}"
+    : "${EDID_SECONDARY_YRES:=720}"
+    : "${EDID_SECONDARY_REFRESH_RATE:=50000}"
+    local _edid_secondary_defaults _edid_default_clock
+    local _edid_default_hfront _edid_default_hsync _edid_default_hblank
+    local _edid_default_vfront _edid_default_vsync _edid_default_vblank
+    local _edid_default_hsync_positive _edid_default_vsync_positive
+    local _edid_default_width_mm _edid_default_height_mm
+    _edid_secondary_defaults="$(
+        stealth_component_monitor_secondary_detail "$EDID_COMPONENT_ID"
+    )" || return 1
+    IFS='|' read -r _edid_default_clock _edid_default_hfront \
+        _edid_default_hsync _edid_default_hblank _edid_default_vfront \
+        _edid_default_vsync _edid_default_vblank \
+        _edid_default_hsync_positive _edid_default_vsync_positive \
+        _edid_default_width_mm _edid_default_height_mm \
+        <<<"$_edid_secondary_defaults"
+    : "${EDID_SECONDARY_PIXEL_CLOCK_KHZ:=$_edid_default_clock}"
+    : "${EDID_SECONDARY_HFRONT:=$_edid_default_hfront}"
+    : "${EDID_SECONDARY_HSYNC:=$_edid_default_hsync}"
+    : "${EDID_SECONDARY_HBLANK:=$_edid_default_hblank}"
+    : "${EDID_SECONDARY_VFRONT:=$_edid_default_vfront}"
+    : "${EDID_SECONDARY_VSYNC:=$_edid_default_vsync}"
+    : "${EDID_SECONDARY_VBLANK:=$_edid_default_vblank}"
+    : "${EDID_SECONDARY_HSYNC_POSITIVE:=$_edid_default_hsync_positive}"
+    : "${EDID_SECONDARY_VSYNC_POSITIVE:=$_edid_default_vsync_positive}"
+    : "${EDID_SECONDARY_WIDTH_MM:=$_edid_default_width_mm}"
+    : "${EDID_SECONDARY_HEIGHT_MM:=$_edid_default_height_mm}"
 
     : "${KBD_COMPONENT_ID:=microsoft-wired-keyboard-600}"
     : "${KBD_VID:=0x045E}"
@@ -775,14 +807,18 @@ stealth_load_profile() {
         echo "       profile 的平台事实已缺失或被篡改；请核对后显式 reroll 整套身份。" >&2
         return 1
     fi
-    if [[ "${STRICT_HARDWARE:-0}" == "1" ]] \
+    if [[ "$PLATFORM_SCHEMA_VERSION" == "1" ]] \
         && ! stealth_verify_profile_component_binding \
             _stealth_present_keys _stealth_explicit_empty_keys \
             "$_boot_storage_migration_kind" "$_legacy_boot_storage_serial"; then
         echo "       profile 的可更换部件事实已缺失或被篡改；请显式 reroll 整套身份。" >&2
         return 1
     fi
+    # 非空部件请求在已有 profile 上只做一致性断言，绝不触发静默重抽。
+    stealth_assert_requested_component_profile || return 1
 
+    _STEALTH_LOADED_PROFILE_HASH="$_profile_hash_before"
+    _STEALTH_LOADED_PROFILE_PATH="$path"
     local v
     for v in "${_STEALTH_PROFILE_VARS[@]}"; do
         # shellcheck disable=SC2163 # v 的值才是白名单变量名，需要间接 export。

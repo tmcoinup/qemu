@@ -45,6 +45,10 @@ Intel 官方明确说明 E5-2696 v4 是由系统厂商定义规格的定制处�
 | Platform ID | CPU | 主板/PCH | 内存约束 | 状态 |
 |---|---|---|---|---|
 | `intel-lga1151-i3-9100f-asus-prime-h310m-a-r2` | i3-9100F，4C/4T，目标 TSC 3600 MHz | ASUS PRIME H310M-A R2.0 / H310 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
+| `intel-lga1151-celeron-g4900-asus-prime-h310m-a-r2` | Celeron G4900，2C/2T | ASUS PRIME H310M-A R2.0 / H310 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
+| `intel-lga1151-pentium-g5400-asus-prime-h310m-a-r2` | Pentium Gold G5400，2C/4T | ASUS PRIME H310M-A R2.0 / H310 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
+| `intel-lga1151-i3-9100f-msi-h310m-pro-m2-plus-ms-7c08` | i3-9100F，4C/4T，目标 TSC 3600 MHz | MSI H310M PRO-M2 PLUS (MS-7C08) / H310 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
+| `intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2` | Pentium Gold G5400，2C/4T | GIGABYTE H310M S2H 2.0 / H310 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
 | `intel-lga1151-i5-6400t-asus-h110m-a-m2` | i5-6400T，4C/4T，目标 TSC 2200 MHz | ASUS H110M-A/M.2 / H110 | DDR4，2 槽，2/4/8 GiB | 启用候选；Q35 identity compatibility |
 | `amd-am4-r3-1200-asus-prime-b350-plus` | Ryzen 3 1200 | AMD B350 | DDR4 | 禁用、仅 compatibility |
 
@@ -52,23 +56,28 @@ AMD 条目禁用是正确的保守处理：当前 machine type 仍是 Intel Q35/
 
 在 Ryzen 7 5800 宿主上的瞬时 KVM 实测表明，Ryzen3-1200 可按 4C/4T 和目标 TSC realize。Ryzen 3 2300X 已在 2026-07-19 复核中移出目录：ASUS PRIME B350-PLUS 官方 CPU 支持表没有该 SKU，不能继续把它称为厂商支持搭配。KVM realize 仍只证明 vCPU 可创建，不能把 AMD/Q35 compatibility 提升为真实 B350 行为等价。
 
-CPU、主板、PCH、BIOS 版本/日期、机箱类型、板载音频、网卡状态、M.2 能力和内存限制作为一个原子 bundle 选择。vCPU 必须等于 SKU 完整线程数；当前两个启用平台都固定为 4 vCPU，不支持随意生成 2C/4T、关闭部分核心或多 socket 客体。
+CPU、主板、PCH、BIOS 版本/日期、机箱类型、板载音频、网卡状态、M.2 能力和内存限制作为一个原子 bundle 选择。vCPU 必须等于 SKU 完整线程数；当前六个启用平台分别按 CPU SKU 固定完整线程数，不支持随意关闭部分核心或生成多 socket 客体。
 
 ### 3.2 可更换组件
 
 `deploy/hardware/components.json` 把可更换组件也收敛为已审计模板：
 
-- 存储：唯一启用 Samsung SSD 970 PRO 512GB，固定 model、firmware、容量、PCI/subsystem、Gen3 x4、IEEE OUI 和 SubNQN 模板。
-- 显示器：唯一启用 Samsung S24F350，固定 EISA vendor、product ID、尺寸、制造时间、频率范围、pixel clock 和第二时序。
+- 存储：启用 Samsung 970 PRO、Intel 760p、WD PC SN730 和 KIOXIA XG6 四款 512GB 型号；全部固定为 `512110190592` 字节，并逐项绑定 model、firmware、PCI/subsystem、Gen3 x4、IEEE OUI、序列格式和 SubNQN 模板。
+- 显示器：启用 Samsung S24F350、AOC 24B2XH、Xiaomi RMMNT238NF 和 Lenovo L24e-30，全部为 1920×1080、16:9；EISA vendor、产品码、尺寸、制造时间、频率范围、pixel clock 和第二时序按 component ID 成套绑定。没有原始 EDID 样本的身份字段明确标为合成。
 - 键盘：Microsoft Wired Keyboard 600，`045e:0750`、`bcdDevice=0x0163`；只绑定身份字段，report descriptor 仍是通用实现，不暴露 serial。
 - 鼠标：Microsoft USB Optical Mouse，`045e:00cb`、`bcdDevice=0x0163`；只绑定身份字段，report descriptor 仍是通用实现，不暴露 serial。
 - 绝对指针：保留 `0627:0001` 通用 QEMU USB Tablet，不再冒充 HUION/VEIKK/XP-Pen，因为当前 report descriptor 没有品牌数位笔的压力、倾角和协议。
 
-这种方案牺牲了“看起来随机”的型号数量，但消除了把 Samsung EDID 深层字段套到 AOC、把 Microsoft bcdDevice 套到 Logitech、把 970 PRO 控制器套到 980 等更严重的矛盾。对真实性而言，**一个完整模板优于十个只改字符串的模板**。
+这种方案只扩展已经有完整事实束和验证规则的型号，避免把 Samsung EDID 深层字段套到 AOC、把 Microsoft bcdDevice 套到 Logitech、把 970 PRO 控制器套到其他 SSD 等混搭。对真实性而言，**一个完整模板优于十个只改字符串的模板**。
 
-DIMM 是目前需要单独说明的例外：新 VM 活动池只保留 Samsung、Kingston、Crucial 三组有型号级资料的 DDR4-2400；三个当前不可达的 DDR3 组合转入 dormant；缺精确 2GB 一手资料的 Hynix DDR4 和缺完整物料修订后缀的 Crucial DDR3 转入 quarantine。活动池仍按 socket/JEDEC 能力适配，不等于每块主板的 QVL 逐料号认证，也没有原始 SPD capture，因此应称为“型号已核验、板级 QVL 未闭环”。
+DIMM 目录覆盖 Samsung、Kingston、Crucial 和 SK hynix，并把可组成完整 2/4GB
+家族的条目与单独可用的 4GB 条目分开。Linux 兼容投影只选择能完整满足容量规划的
+家族；Windows 可在合法 4/8GiB 方案中使用已核验的 Kingston 4GB 单条。活动池仍按
+代际、socket、通道、额定电压、槽位、总容量、模块容量和训练速率联合适配，不等于
+每块主板的 QVL 逐料号认证，也没有原始 SPD capture，因此应称为“型号已核验、板级
+QVL 未闭环”。
 
-Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1.3、Samsung Phoenix 控制器和 512GB 容量；另一份 Samsung 型号寄存器文档给出 `144d:a804 / 144d:a801`，但项目仍明确标记缺真实样机 capture。SubNQN 已改成 NVMe 标准 UUID 格式，不再使用 Samsung 反向域名模板。[Samsung 970 PRO 官方数据表](https://download.semiconductor.samsung.com/resources/data-sheet/Samsung_NVMe_SSD_970_PRO_Data_Sheet_Rev.1.0.pdf)
+Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1.3、Samsung Phoenix 控制器和 512GB 容量；公开 PCI 身份样本与 pci.ids 对应 `144d:a808 / 144d:a801`。项目仍明确标记缺本项目实机 capture，15 位序列号只按多样本形态合成。Intel、WD 和 KIOXIA 条目同样只采用与精确 512GB 料号相符的公开身份束。SubNQN 使用 NVMe 标准 UUID 格式，不冒用厂商命名空间。[Samsung 970 PRO 官方数据表](https://semiconductor.samsung.com/resources/data-sheet/Samsung_NVMe_SSD_970_PRO_Data_Sheet_Rev.1.0.pdf)
 
 ### 3.3 身份持久化与完整性
 
@@ -88,10 +97,10 @@ Samsung 官方数据表确认 970 PRO 512GB 是 M.2 2280、PCIe Gen3 x4、NVMe 1
 | guest NUMA | 消费级单 socket 客体始终一个 NUMA node，DIMM 数不再错误映射为 NUMA 数 | 物理双路 E5 的 host NUMA 只用于放置，不向当前 4C/4T 消费级客体暴露双 socket |
 | MCH/LPC/SMBus/AHCI | LPC/SMBus/AHCI 的 PCI identity 可由平台注入；Linux MCH 保留 Q35 原生 `8086:29c0` | EDK2 Q35 PlatformPei 依赖原生 MCH 识别 machine；目标 H110/H310 MCH ID 只保留为 profile 证据。其余覆盖也只是 configuration identity，寄存器、端口、固定功能与 BDF 仍是 Q35/ICH9 |
 | PCIe/root port/xHCI | root port 的平台 ID、revision、链路速度/宽度、hotplug 状态可约束；xHCI 平台字段仅记录事实 | 设备行为和地址分配仍是 QEMU pcie-root-port/qemu-xhci；xHCI 固定上游行为身份，不伪装 H110/H310 silicon/拓扑 |
-| NVMe | 970 PRO model/firmware/容量、144d:a804、subsystem、OUI、SubNQN、Gen3 x4；非法型号 fail closed | 控制器命令、SMART、热管理、功耗、错误恢复仍是通用 QEMU NVMe，不是 Phoenix 固件 |
+| NVMe | Samsung 970 PRO、Intel 760p、WD PC SN730、KIOXIA XG6 四个 512GB 身份的 model/firmware/容量、PCI/subsystem、OUI、SubNQN、Gen3 x4 和厂商序列形态原子绑定；非法组合 fail closed | 控制器命令、SMART、热管理、功耗、错误恢复仍是通用 QEMU NVMe，不是各厂商真实固件 |
 | NIC | Intel 82574L/e1000e、Intel subsystem、Intel OUI；主板板载 NIC 明示为 BIOS disabled、另插扩展卡 | Windows 默认 user-mode NAT；网络拓扑和性能不像物理 LAN，Linux 应优先 bridge/TAP |
 | 音频 | Linux 可传 controller vendor/device/revision/subsystem 与 ALC887 codec ID/revision/subsystem；Windows 覆盖 controller vendor/device 和 codec 三元组 | Windows controller revision/subsystem 尚未与 Linux 对齐；manifest 已诚实标记 `protocol_identity_only`，widget、插孔和板级布线不等价 |
-| EDID | 单一 S24F350 深层字段成套生成，含校验和与时序 | 仍由 virtio 显示设备提供；没有真实显示器 DDC 时序、HDCP 和厂商扩展行为 |
+| EDID | Samsung/AOC/Xiaomi/Lenovo 四款 1920×1080、16:9 模板按稳定 ID 成套生成，含校验和与时序；无 raw capture 的身份字段明确标为合成 | 仍由 virtio 显示设备提供；没有真实显示器 DDC 时序、HDCP 和厂商扩展行为 |
 | USB HID | Microsoft VID/PID/bcdDevice/字符串绑定；品牌 tablet 被拒绝 | 键鼠 report/config descriptor 仍是通用实现，不能称为 Microsoft 原始描述符 |
 | 固件/TPM | OVMF、per-VM NVRAM、swtpm 2.0、CRB、EK/Platform cert、严格模式 fail closed | OVMF 不是 ASUS AMI 固件；Linux 路线未证明 Secure Boot 已处于 `SecureBoot=1, SetupMode=0` |
 | 显示/GPU | virtio-vga(-gl)、SDL/EGL、fb-shm、SHM/GPU handle fallback；物理主 ID 固定为 stock VioGpuDod 可绑定的 `1AF4:1050`，profile 只提供 subsystem/revision 与用户态逻辑身份；非零 `GPU_SELFSIGNED` 在任何 host 副作用前 fail-closed | 底层始终是 virtio，不是所标 NVIDIA/AMD 设备；浅层 `10DE:1C82` 投影不增加 Windows guest Direct3D、CUDA 或 NVENC，GPU passthrough/vGPU 明确不做且不计入真机化 |
@@ -134,7 +143,7 @@ Windows 11 对 VM 仍要求 UEFI/Secure Boot、TPM 2.0、至少 4GB 内存和两
 | E5 v2 / Ivy Bridge-EP | LGA2011、X79/C60x、DDR3 | 代表 SKU 支持 VT-x/EPT | 有 Ivy 家用 DDR3 池；仅在显式 compatibility 授权下逐项预检 | 不支持 |
 | E5 v3 / Haswell-EP | LGA2011-3、X99/C612、DDR4 | 一般适合作 KVM 宿主 | 默认使用 G3220/i3-4130/i5-4570 家用池；每台宿主仍须真实 KVM realize | 不支持 |
 | E5 v4 / Broadwell-EP | LGA2011-3、X99/C612、DDR4 | 一般适合作 KVM 宿主 | 同一 Haswell 默认池已在目标 E5-2696 v4 上通过瞬时 realize；完整启动仍保留每次预检 | 不支持 |
-| E5 v3/v4 双路 | 双路 C612 服务器/工作站板 | KVM + 多 NUMA node | 条件支持；pinner 优先把单 VM 放入一个 node，容量不足才跨 node；尚无双路实机长稳证据 | 不支持 |
+| E5 v3/v4 双路 | 双路 C612 服务器/工作站板 | KVM + 多 NUMA node | 条件支持；ABI5 要求单 VM 留在同一 node/package，容量不足严格失败；尚无双路实机长稳证据 | 不支持 |
 
 Intel 的 E5-2697 v2 ARK 页面可作为 v2 家族代表，确认 FCLGA2011、最大 2 路、VT-x/EPT、VT-d 和 PCIe 3.0；它不能证明任意 v2 SKU或主板组合。[Intel E5-2697 v2 规格](https://www.intel.com/content/www/us/en/products/sku/75283/intel-xeon-processor-e52697-v2-30m-cache-2-70-ghz/specifications.html)
 
@@ -185,8 +194,10 @@ RX 580 为 `boot_vga=0` 且使用 `amdgpu`。本分支不做 GPU 直通，未修
 ### 6.5 单路与双路性能判断
 
 - X99 是单路场景；高核心 E5 的优势主要是多 VM 容量，不代表单个 4-vCPU VM 会自动更快。
-- 双路 C612 的核心和内存分属不同 NUMA node。当前 pinner 先选可容纳 vCPU + service CPU 的单一 node，并优先物理主线程、后用 SMT；这是正确默认。
-- 单 node 容量不足时跨 node 只是退化运行，不应作为低延迟支持配置。应减少单 VM vCPU、减少并发 VM，或重新平衡每 socket 内存。
+- 双路 C612 的核心和内存分属不同 NUMA node。ABI5 在 root helper 全局锁内按
+  `(NUMA node, package)` 选择 1:1 logical CPU；父 `/vmiso` 保存所有实例的资源并集，
+  每台 QEMU 位于 exact child。单域容量不足会 fail closed，不再跨 node 拼接 vCPU。
+- 跨 node 运行属于未支持的退化方案，ABI5 会拒绝；单 node 容量不足时应减少单 VM vCPU、减少并发 VM，或重新平衡每 socket 内存。
 - 默认全局 CPU frequency cap 已关闭，避免一台 VM 降低整台双路宿主频率；应使用 cpuset/NUMA 放置保证隔离。
 - irqbalance 保持运行。若要隔离 IRQ，应配置 banned CPUs/IRQ affinity，而不是在高核 E5 上全局停掉 irqbalance。
 
@@ -227,7 +238,8 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 - MCH/LPC/SMBus/AHCI/HDA/root port PCI 身份可参数化并有非法值失败测试；xHCI
   平台身份只保留为 manifest/profile 事实，运行时固定上游完整身份。
 - SMBIOS Type 3/4/17 深层字段、DDR3/DDR4 SPD、合法 DIMM 拓扑和单 guest NUMA node。
-- NUMA-aware vCPU/service thread pinner、cgroup v2 cpuset、多 VM 避让和管理核预留。
+- NUMA-aware vCPU/service pinner、父 partition + 每实例 child cpuset、锁内多 VM 避让、
+  严格启动 guard/sentinel、guest core/thread 到 host 完整 SMT 核的映射和管理核预留。
 - profile 安全解析、平台/组件事实绑定、持久化序列号和显式 legacy reroll。
 - Linux bridge/TAP/VLAN 严格失败策略；NAT fallback 会明确标注。
 - Windows/Linux 客体硬件快照采集器、异步测试调度器和 QMP soak monitor。
@@ -264,7 +276,12 @@ Microsoft 的 nested Hyper-V 支持条件针对 Hyper-V 管理的 VM，并要求
 按优先级建议：
 
 1. 先完成 E5/X99 实机门禁和长稳，不为通过率放宽 `enforce=on`、TSC 或 warning 拒绝条件。
-2. E5 双路上每台 4-vCPU VM 固定单 NUMA node，并按需配置 1 个 service CPU；禁止超卖后再用全局 frequency cap 掩盖调度抖动。
+2. 每台 VM 固定单 NUMA/package 域并按 vCPU:host logical CPU=1:1 分配；
+   2C2T/2C4T/4C4T exact 分别为 2/4/4 条线程。同一逻辑 CPU 不跨 VM 复用，未选
+   sibling 可由宿主或其它 VM 使用。单路 22C/44T 预留 3 核后，无 service CPU
+   的同型上限为 19/9/9 台，service CPU=1 时为 12/7/7 台；混合池先满足逻辑线程
+   总预算，再逐域检查 2C2T/4C4T 的 distinct-core 和 2C4T 的 SMT2 成组约束。
+   目标 E5 须实测 P95/P99；SMT 共享执行资源不能描述为完整物理核性能隔离。
 3. Linux 网络统一使用 bridge/TAP；生产严格模式不允许无意回落到 10.0.2.x SLIRP。
 4. 保持 `cache=none,aio=threads` 的已验证路径；若要增加 iothread，先修正和验证 NVMe BlockBackend AioContext，再做 fio/掉电恢复测试。
 5. 保持 THP `madvise`、`defrag=never`；当前 memfd backend 不使用预留 hugetlbfs 池，禁止无效地预留大量 hugepages。

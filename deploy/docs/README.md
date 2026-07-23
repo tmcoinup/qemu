@@ -1,7 +1,7 @@
 # VMate 部署文档
 
 > 当前维护基线：QEMU `11.0.2`，分支 `V-11`，硬件目录修订日期
-> `2026-07-19`。`V-11` 与 `G-11` 是独立分支；QEMU 可执行文件、QMP/QGA 协议和
+> `2026-07-23`。`V-11` 与 `G-11` 是独立分支；QEMU 可执行文件、QMP/QGA 协议和
 > 设备模型名称继续沿用上游名称。
 
 VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 GPU 硬件身份高度一致，
@@ -20,15 +20,21 @@ VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 
 | Windows 10 客体 | Linux/KVM 主验收对象 |
 | Windows 11 客体 | 有 TPM 2.0 路径，但 Secure Boot operational state 尚未闭环，不宣称正式支持 |
 | Linux 客体 | QEMU 设备功能兼容；启动器的命名、RTC 和安装流程仍偏向 Windows |
-| GPU | GPU passthrough、SR-IOV GPU、vGPU 均不在本分支范围；virtio 显示标签不计入真机化 |
+| GPU | 物理设备固定为 virtio `1AF4:1050`；当前 6 个芯片型号各含 3 个品牌板卡，共 18 个 AIB 原子身份（12 NVIDIA、6 AMD），仅作客体用户态浅层投影，不使用 passthrough、SR-IOV GPU 或 vGPU |
 
 ## 唯一事实源
 
 - [`deploy/hardware/platforms.json`](../hardware/platforms.json)：整机平台 schema、CPU、主板、
   BIOS、芯片组 PCI 身份、内存限制、网卡、音频和链路能力；顶层 `fidelity` 同时记录
   Q35 machine 行为边界和两个启动器实际生成的 BDF。
-- [`deploy/hardware/components.json`](../hardware/components.json)：NVMe、显示器 EDID、键盘、
-  鼠标和通用绝对指针模板。
+- [`deploy/hardware/components.json`](../hardware/components.json)：可更换部件入口、
+  显示器 EDID、键盘、鼠标和通用绝对指针模板。
+- [`deploy/hardware/gpu-boards.json`](../hardware/gpu-boards.json)：18 块启用 AIB
+  的品牌、料号、逻辑主 ID、真实 subsystem、VBIOS、显存/时钟及
+  `1AF4:A101`–`1AF4:A112` 内部 virtio carrier；由组件入口引用。目录不定义或
+  合成未标准化的 GPU 序列号。
+- [`deploy/hardware/storage.json`](../hardware/storage.json)：只含四款精确 512GB
+  NVMe 的型号、料号、固件、PCI/subsystem、OUI 和序列号策略；由组件入口引用。
 - [`deploy/hardware/household-compatibility.json`](../hardware/household-compatibility.json)：
   Linux 家用跨代候选与完整 CPU/主板/内存事实。
 - [`deploy/hardware/storage-compatibility.json`](../hardware/storage-compatibility.json)：
@@ -79,16 +85,21 @@ machine fidelity 不完整。
 
 ## 当前启用组件
 
-| 类别 | 唯一启用模板 | 关键约束 |
+| 类别 | 启用模板 | 关键约束 |
 |---|---|---|
-| NVMe | Samsung SSD 970 PRO 512GB | 型号/容量/Gen3 x4 有官方数据表；寄存器参考为 `144d:a804`、subsystem `144d:a801`，明确标记缺实机 capture；NQN 使用标准 UUID 格式 |
-| 显示器 | Samsung S24F350 | 官方 521×293 mm、56–75 Hz、30–81 kHz；产品码/制造时间/序列前缀明确标为合成 EDID 身份 |
+| GPU AIB | GT 1030、GTX 750 Ti、GTX 1050、GTX 1050 Ti、RX 550、RX 560 各 3 个品牌，共 18 块（12 NVIDIA、6 AMD） | 新 profile 按 21 列原子 bundle 绑定品牌/料号、逻辑 `10de`/`1002` 主 ID、真实 AIB subsystem 与 VBIOS；物理显示主 ID 始终为 virtio `1AF4:1050`，`1AF4:a101`–`1AF4:a112` 只作受控 carrier；不虚构 GPU serial |
+| NVMe | Samsung 970 PRO、Intel 760p、WD PC SN730、KIOXIA XG6（均为 512GB） | 四项容量都精确为 `512110190592` 字节；型号、固件、PCI/subsystem、OUI 和厂商序列形态绑定为一个 `x-identity-profile`，NQN 使用标准 UUID 格式 |
+| 显示器 | Samsung S24F350、AOC 24B2XH、Xiaomi RMMNT238NF、Lenovo L24e-30 | 全部固定 1920×1080、16:9；官方规格与对应 raw EDID 共同锁定产品码、日期、EDID 1.3、文本/binary serial 及型号专属 DTD |
 | 键盘 | Microsoft Wired Keyboard 600 | `045e:0750`、`bcdDevice=0163`；只绑定品牌身份，report descriptor 仍是通用实现；不暴露序列号 |
 | 鼠标 | Microsoft USB Optical Mouse | `045e:00cb`、`bcdDevice=0163`；只绑定品牌身份，report descriptor 仍是通用实现；不暴露序列号 |
 | 绝对指针 | QEMU USB Tablet | `0627:0001`，明确为通用虚拟设备，不冒充品牌数位板 |
 
-组件型号本身不再随机；每台 VM 仍会生成并持久化 UUID、MAC、主板/系统/机箱/CPU/DIMM、
-NVMe 和 EDID 序列号。键鼠模板声明不暴露 USB serial，profile 内的稳定派生值不会送进描述符。
+组件型号只从完整条目按稳定 ID 选择，禁止跨条目拼接；旧的六款 NVIDIA/AMD generic
+GPU label 只用于已有 profile 的只读回查，不进入新 VM 抽签池。每台 VM 仍会生成并持久化 UUID、
+MAC、主板/系统/机箱/CPU/DIMM、NVMe 和 EDID 序列号。键鼠模板声明不暴露 USB
+serial，profile 内的稳定派生值不会送进描述符。
+GPU 目录同样明确 `serial_exposed=false`：本项目没有 `GPU_SERIAL` 投影，也不会用
+主板、显存或其它设备序列号冒充显卡序列号。
 新 VM 的活动 DIMM 池包含 Samsung、Kingston、Crucial 三组 DDR4-2400，以及供
 Sandy/Ivy/Haswell household bundle 使用的 Kingston、SK hynix DDR3-1333/1600。
 缺精确料号或修订证据的 Hynix DDR4 和 Crucial DDR3 位于 quarantine，不会被严格
@@ -121,7 +132,7 @@ Linux 启动器默认按以下顺序 fail closed：
 | NVMe | Identify、容量、PCI/subsystem、SubNQN 可绑定 | SMART、热管理、功耗和错误恢复仍是通用 QEMU NVMe |
 | 音频 | HDA controller 和 ALC887 codec 身份 | `protocol_identity_only`，widget、插孔和板级布线不等价 |
 | EDID/HID | EDID 型号规格成套；HID 仅绑定 VID/PID/名称 | EDID 产品码/制造信息是明确标注的合成值；键鼠 report descriptor 仍是通用实现 |
-| 显示/GPU | virtio-vga(-gl)、SDL/EGL、fb-shm 可用 | `label_only_out_of_scope`，不是 NVIDIA/AMD 物理 GPU |
+| 显示/GPU | 内核枚举固定为 virtio `1AF4:1050`；`1AF4:a101`–`1AF4:a112` carrier 从 18 块逻辑 AIB bundle 中选择，用户态投影对应真实品牌组合的 subsystem、VBIOS、显存与时钟 | `audited_aib_bundle_shallow_user_projection_no_passthrough`；不改变 virtio 驱动、寄存器或 3D 能力，不代表 NVIDIA/AMD 物理 GPU，也不虚构 GPU 序列号 |
 
 xHCI 的 USB 链路/设备电源管理属于正常真机行为；本项目只禁止把通用虚拟控制器冒充为
 需要不同厂商 workaround 的 PCH。详细边界见 `PROFILE-FIELDS.md` 的
@@ -184,7 +195,9 @@ deploy/scripts/stop-vm.sh 1
 - [验证](VERIFY.md)：静态与客体侧核对入口。
 - [fb-shm GPU 导出](FB-SHM-GPU-ZEROCOPY.md)：跨平台 handle、同步协议与回退边界。
 - [Windows 打包与启动](WINDOWS-PACKAGING.md)：Windows/WHPX 路线。
-- [Guest GPU 浅层工作流](STEALTH-WORKFLOW.md)：当前 `1AF4:1050`、stock VioGpuDod 与
+- [Guest GPU 浅层工作流](STEALTH-WORKFLOW.md)：当前 `1AF4:1050`、
+  `1AF4:a101`–`1AF4:a112`
+  carrier、stock VioGpuDod 与
   系统厂商 API 的唯一受支持流程。
 - [GPU 厂商 API 系统兼容层](GPU-VENDOR-API.md)：NVIDIA NVAPI、AMD ADL、统一身份
   读取合同、跨组件事务和能力边界。

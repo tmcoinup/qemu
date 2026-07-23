@@ -38,6 +38,20 @@ _sv_qemu_device_help() {
 
 _sv_check_qemu_caps() {
     local help
+    local -a edid_properties=(
+        'edid-fixed-native='
+        'edid-managed-timing-version='
+        'edid-vendor=' 'edid-name=' 'edid-serial='
+        'edid-binary-serial=' 'edid-revision='
+        'edid-width-mm=' 'edid-height-mm='
+        'edid-product-id=' 'edid-manufacture-week='
+        'edid-manufacture-year=' 'edid-video-input='
+        'edid-min-vfreq-hz=' 'edid-max-vfreq-hz='
+        'edid-min-hfreq-khz=' 'edid-max-hfreq-khz='
+        'edid-max-pixel-clock-mhz='
+        'edid-secondary-xres=' 'edid-secondary-yres='
+        'edid-secondary-refresh-rate='
+    )
 
     [[ "${QEMU_CAP_CHECK:-1}" == "1" ]] || return 0
 
@@ -54,14 +68,12 @@ _sv_check_qemu_caps() {
 
     help="$(_sv_qemu_device_help nvme)"
     _sv_qemu_help_has_all "$help" \
-        'use-samsung-id=' 'model-number=' 'firmware-rev=' \
-        || _sv_die_missing_qemu_feature "nvme Samsung identity/model/firmware 属性"
+        'x-identity-profile=' 'model-number=' 'firmware-rev=' \
+        || _sv_die_missing_qemu_feature "NVMe 多品牌 identity/model/firmware 属性"
 
     help="$(_sv_qemu_device_help virtio-vga)"
     _sv_qemu_help_has_all "$help" \
-        'edid-fixed-native=' \
-        'edid-vendor=' 'edid-name=' 'edid-serial=' \
-        'edid-width-mm=' 'edid-height-mm=' \
+        "${edid_properties[@]}" \
         'x-pci-sub-vendor-id=' 'x-pci-sub-device-id=' \
         || _sv_die_missing_qemu_feature "virtio-vga EDID / PCI subsystem 属性"
 
@@ -76,9 +88,7 @@ _sv_check_qemu_caps() {
     if [[ "$_sv_need_gl_display" == "1" ]]; then
         help="$(_sv_qemu_device_help virtio-vga-gl)"
         _sv_qemu_help_has_all "$help" \
-            'edid-fixed-native=' \
-            'edid-vendor=' 'edid-name=' 'edid-serial=' \
-            'edid-width-mm=' 'edid-height-mm=' \
+            "${edid_properties[@]}" \
             || _sv_die_missing_qemu_feature "virtio-vga-gl EDID 属性"
         if [[ "${GPU_ZEROCOPY:-0}" == "1" ]]; then
             _sv_qemu_help_has_all "$help" 'blob=' 'hostmem=' \

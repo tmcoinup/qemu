@@ -10,6 +10,14 @@
   环境操作，使 clone AutoDetect、Code 22 修复和显示模式验收可以独立测试。
 #>
 
+$gpuBoardIdentityContractPath = Join-Path $PSScriptRoot `
+    'gpu-board-identity-contract.ps1'
+if (-not (Test-Path -LiteralPath $gpuBoardIdentityContractPath -PathType Leaf)) {
+    throw ('缺少同目录 GPU board identity contract：' +
+        $gpuBoardIdentityContractPath)
+}
+. $gpuBoardIdentityContractPath
+
 function Copy-GpuSpoofHelperIfDifferent {
     # legacy 安装可能直接从 ProgramData 中运行主脚本，此时源和持久化目标是同一文件。
     # Windows 路径不区分大小写；相同路径直接复用，路径不同才原样复制 UTF-8 BOM。
@@ -98,16 +106,8 @@ function Enable-GpuSpoofDisplayDevices {
 }
 
 function Get-GpuSpoofAutoDetectProfile {
-    # profile 是不可拆分 bundle：名称、厂商、BIOS、显存和时钟必须由同一 SUBSYS
-    # 一次返回，clone 不能把 base 的任一旧字段混进新目标身份。
-    $gpuMap = @{
-        '138010DE' = @{ Name='NVIDIA GeForce GTX 750 Ti'; Vendor='NVIDIA'; Bios='Version 82.07.41.00.32'; RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1020000; BoostClockKHz=1085000; MemoryClockKHz=2700000; SliSupported=0 }
-        '1D0110DE' = @{ Name='NVIDIA GeForce GT 1030'; Vendor='NVIDIA'; Bios='Version 86.08.46.00.81'; RamMb=2048; MemoryType='GDDR5'; BusWidthBits=64; BaseClockKHz=1227000; BoostClockKHz=1468000; MemoryClockKHz=3004000; SliSupported=0 }
-        '1C8110DE' = @{ Name='NVIDIA GeForce GTX 1050'; Vendor='NVIDIA'; Bios='Version 86.07.48.00.38'; RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1354000; BoostClockKHz=1455000; MemoryClockKHz=3504000; SliSupported=0 }
-        '1C8210DE' = @{ Name='NVIDIA GeForce GTX 1050 Ti'; Vendor='NVIDIA'; Bios='Version 86.07.48.00.A0'; RamMb=4096; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1290000; BoostClockKHz=1392000; MemoryClockKHz=3504000; SliSupported=0 }
-        '699F1002' = @{ Name='AMD Radeon RX 550'; Vendor='AMD'; Bios='016.011.000.029.000000'; RamMb=2048; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1100000; BoostClockKHz=1183000; MemoryClockKHz=3500000; SliSupported=0 }
-        '67FF1002' = @{ Name='AMD Radeon RX 560'; Vendor='AMD'; Bios='016.011.000.029.000000'; RamMb=4096; MemoryType='GDDR5'; BusWidthBits=128; BaseClockKHz=1175000; BoostClockKHz=1275000; MemoryClockKHz=3500000; SliSupported=0 }
-    }
+    # 新 profile 使用 1AF4:A101..A112 作为 stock virtio 设备的受控 carrier，
+    # 真实 AIB subsystem 只进入用户态逻辑快照，绝不能挂到物理 VioGpuDod 节点。
 
     # RDP 登录还会枚举 ROOT\RDPINDIRECTDISPLAY；只允许唯一在线 stock virtio PCI
     # Display 参与映射，避免 RDP 节点或多显卡环境制造不确定身份。
@@ -126,14 +126,31 @@ function Get-GpuSpoofAutoDetectProfile {
         throw 'AutoDetect: stock Display InstanceId 缺少 SUBSYS，拒绝继续'
     }
     $subsys = $subsysMatch.Groups[1].Value.ToUpperInvariant()
-    if (-not $gpuMap.ContainsKey($subsys)) {
+    $profile = Get-GpuBoardAutoDetectProfile -Subsys $subsys
+    if ($null -eq $profile) {
         # 未知值不能回落到默认 1050，否则名称、PCI ID 与显存会拼成不存在的型号。
         throw ('AutoDetect: subsys=' + $subsys + ' 未在已知 GPU 池中，拒绝伪造默认型号')
     }
-    $profile = $gpuMap[$subsys]
     Write-Host ('AutoDetect: subsys=' + $subsys + ' -> ' + $profile.Name) `
         -ForegroundColor Cyan
     return $profile
+}
+
+function Assert-GpuSpoofAibProfile {
+    # 手工入口也必须服从当前 physical carrier，不允许覆盖 bundle 的任一字段。
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Expected,
+        [Parameter(Mandatory = $true)][hashtable]$Actual
+    )
+    foreach ($field in @(
+            'Name', 'Vendor', 'Bios', 'RamMb', 'MemoryType', 'BusWidthBits',
+            'BaseClockKHz', 'BoostClockKHz', 'MemoryClockKHz', 'SliSupported')) {
+        if (-not $Actual.ContainsKey($field) -or
+            $Actual[$field] -cne $Expected[$field]) {
+            throw ('手工 GPU 参数与当前 AIB carrier 的 canonical bundle 不匹配：' +
+                $field)
+        }
+    }
 }
 
 function Install-GpuSpoofScheduledTasks {
@@ -142,6 +159,7 @@ function Install-GpuSpoofScheduledTasks {
         [Parameter(Mandatory = $true)][string]$PowerShellExe,
         [Parameter(Mandatory = $true)][string]$ApplyScriptRoot,
         [Parameter(Mandatory = $true)][string]$RefreshHelperSource,
+        [Parameter(Mandatory = $true)][string]$BoardIdentityContractSource,
         [Parameter(Mandatory = $true)][string]$DisplayModeHelperSource,
         [switch]$SkipDisplayTask
     )
@@ -152,7 +170,10 @@ function Install-GpuSpoofScheduledTasks {
     $taskName = 'StealthGPU-RefreshName'
     $scriptDir = Split-Path -Parent $ApplyScriptRoot
     $scriptPath = Join-Path $scriptDir 'refresh-gpu-name.ps1'
+    $contractPath = Join-Path $scriptDir 'gpu-board-identity-contract.ps1'
     New-Item -Path $scriptDir -ItemType Directory -Force | Out-Null
+    Copy-GpuSpoofHelperIfDifferent -Source $BoardIdentityContractSource `
+        -Destination $contractPath
     Copy-GpuSpoofHelperIfDifferent -Source $RefreshHelperSource -Destination $scriptPath
     Remove-GpuSpoofScheduledTaskIfPresent -TaskName $taskName
 

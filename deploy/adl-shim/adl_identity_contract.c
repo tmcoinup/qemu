@@ -2,10 +2,12 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "aib_identity_catalog.h"
 #include "adl_identity_contract.h"
 
 #define AMD_PCI_VENDOR_ID UINT32_C(0x1002)
 #define NVIDIA_PCI_VENDOR_ID UINT32_C(0x10DE)
+#define VIRTIO_PCI_VENDOR_ID UINT32_C(0x1AF4)
 
 struct amd_model_spec {
     uint32_t device_id;
@@ -109,6 +111,71 @@ static int parse_source_instance_id(const char *source,
     return 1;
 }
 
+static int aib_bundle_matches(
+    const struct adl_identity_contract_input *input,
+    const struct stealth_aib_identity *identity)
+{
+    struct stealth_aib_identity_snapshot snapshot;
+
+    /*
+     * ADL 对目录中的 12 块 NVIDIA 最终返回 ABSENT，对 6 块 AMD 返回
+     * PRESENT；两类都先执行相同的公共整行等式，不再复制品牌表。
+     */
+    snapshot.name = input->name;
+    snapshot.vendor = input->vendor;
+    snapshot.bios = input->bios;
+    snapshot.memory_type = input->memory_type;
+    snapshot.pci_vendor_id = input->pci_vendor_id;
+    snapshot.pci_device_id = input->pci_device_id;
+    snapshot.subsystem_vendor_id = input->subsystem_vendor_id;
+    snapshot.subsystem_device_id = input->subsystem_device_id;
+    snapshot.revision_id = input->revision_id;
+    snapshot.ram_mb = input->ram_mb;
+    snapshot.memory_bus_width_bits = input->memory_bus_width_bits;
+    snapshot.base_clock_khz = input->base_clock_khz;
+    snapshot.boost_clock_khz = input->boost_clock_khz;
+    snapshot.memory_clock_khz = input->memory_clock_khz;
+    snapshot.sli_supported = input->sli_supported;
+    return input->schema == STEALTH_GPU_SCHEMA_VERSION &&
+        stealth_aib_identity_snapshot_matches(identity, &snapshot);
+}
+
+static int source_matches_logical_identity(
+    const struct adl_identity_contract_input *input,
+    uint32_t source_subsystem_device, uint32_t source_subsystem_vendor,
+    uint32_t source_revision,
+    const struct stealth_aib_identity **matched_identity)
+{
+    const struct stealth_aib_identity *identity;
+
+    if (matched_identity == NULL || source_revision != input->revision_id) {
+        return 0;
+    }
+    *matched_identity = NULL;
+
+    /*
+     * schema-1 只允许 logical main/main；schema-2 只允许共享表中的
+     * 1AF4:Axxx carrier。两条路径互斥，避免迁移快照混搭。
+     */
+    if (input->schema == STEALTH_GPU_LEGACY_SCHEMA_VERSION) {
+        return input->subsystem_vendor_id == input->pci_vendor_id &&
+            input->subsystem_device_id == input->pci_device_id &&
+            source_subsystem_vendor == input->pci_vendor_id &&
+            source_subsystem_device == input->pci_device_id;
+    }
+    if (source_subsystem_vendor != VIRTIO_PCI_VENDOR_ID) {
+        return 0;
+    }
+    identity = stealth_aib_identity_find_by_carrier(
+        source_subsystem_device);
+    if (identity == NULL || source_revision != identity->revision_id ||
+        !aib_bundle_matches(input, identity)) {
+        return 0;
+    }
+    *matched_identity = identity;
+    return 1;
+}
+
 static int copy_printable_ascii(char *output, size_t capacity,
                                 const char *source)
 {
@@ -182,7 +249,8 @@ static const struct amd_model_spec *find_model(uint32_t device_id)
 static int common_snapshot_is_valid(
     const struct adl_identity_contract_input *input,
     uint32_t *source_subsystem_device, uint32_t *source_subsystem_vendor,
-    uint32_t *source_revision)
+    uint32_t *source_revision,
+    const struct stealth_aib_identity **matched_identity)
 {
     return input != NULL &&
         (input->schema == STEALTH_GPU_SCHEMA_VERSION ||
@@ -195,9 +263,10 @@ static int common_snapshot_is_valid(
         parse_source_instance_id(input->source_instance_id,
                                  source_subsystem_device,
                                  source_subsystem_vendor, source_revision) &&
-        input->subsystem_vendor_id == *source_subsystem_vendor &&
-        input->subsystem_device_id == *source_subsystem_device &&
-        input->revision_id == *source_revision &&
+        source_matches_logical_identity(input, *source_subsystem_device,
+                                        *source_subsystem_vendor,
+                                        *source_revision,
+                                        matched_identity) &&
         input->revision_id <= UINT32_C(0xff) &&
         input->bus_id <= UINT32_C(0xff) &&
         input->slot_id <= UINT32_C(0x1f) &&
@@ -211,9 +280,7 @@ static int is_normal_nvidia_profile(
         input->name != NULL && strncmp(input->name, "NVIDIA ", 7u) == 0 &&
         !contains_ascii_case_insensitive(input->name, "Red Hat") &&
         !contains_ascii_case_insensitive(input->name, "VirtIO") &&
-        input->pci_vendor_id == NVIDIA_PCI_VENDOR_ID &&
-        input->subsystem_vendor_id == NVIDIA_PCI_VENDOR_ID &&
-        input->pci_device_id == input->subsystem_device_id;
+        input->pci_vendor_id == NVIDIA_PCI_VENDOR_ID;
 }
 
 enum adl_identity_state adl_build_validated_identity(
@@ -221,6 +288,7 @@ enum adl_identity_state adl_build_validated_identity(
     struct adl_gpu_identity *identity)
 {
     const struct amd_model_spec *model;
+    const struct stealth_aib_identity *aib_identity = NULL;
     uint32_t source_subsystem_device = 0u;
     uint32_t source_subsystem_vendor = 0u;
     uint32_t source_revision = 0u;
@@ -231,38 +299,45 @@ enum adl_identity_state adl_build_validated_identity(
     memset(identity, 0, sizeof(*identity));
     if (!common_snapshot_is_valid(input, &source_subsystem_device,
                                   &source_subsystem_vendor,
-                                  &source_revision)) {
+                                  &source_revision, &aib_identity)) {
         return ADL_IDENTITY_INVALID;
-    }
-    if (is_normal_nvidia_profile(input)) {
-        return ADL_IDENTITY_ABSENT;
     }
 
     model = find_model(input->pci_device_id);
-    if (model == NULL || input->vendor == NULL ||
-        strcmp(input->vendor, "AMD") != 0 || input->name == NULL ||
-        strcmp(input->name, model->name) != 0 ||
-        contains_ascii_case_insensitive(input->name, "Red Hat") ||
-        contains_ascii_case_insensitive(input->name, "VirtIO") ||
-        input->bios == NULL ||
-        strcmp(input->bios, "016.011.000.029.000000") != 0 ||
-        input->pci_vendor_id != AMD_PCI_VENDOR_ID ||
-        input->subsystem_vendor_id != AMD_PCI_VENDOR_ID ||
-        input->subsystem_device_id != model->device_id ||
-        input->revision_id != model->revision_id ||
-        input->ram_mb != model->ram_mb ||
-        input->sli_supported != 0u) {
-        return ADL_IDENTITY_INVALID;
-    }
-
-    if (input->schema == STEALTH_GPU_SCHEMA_VERSION &&
-        (input->memory_type == NULL ||
-         strcmp(input->memory_type, "GDDR5") != 0 ||
-         input->memory_bus_width_bits != model->bus_width ||
-         input->base_clock_khz != model->base_clock_khz ||
-         input->boost_clock_khz != model->boost_clock_khz ||
-         input->memory_clock_khz != model->memory_clock_khz)) {
-        return ADL_IDENTITY_INVALID;
+    if (input->schema == STEALTH_GPU_SCHEMA_VERSION) {
+        /*
+         * schema-2 已由共享 AIB 表逐字段证明。合法 NVIDIA 板卡对 ADL
+         * 表现为 ABSENT；合法 AMD 板卡使用同一整行数据生成 PRESENT。
+         */
+        if (aib_identity == NULL) {
+            return ADL_IDENTITY_INVALID;
+        }
+        if (aib_identity->pci_vendor_id == NVIDIA_PCI_VENDOR_ID) {
+            return ADL_IDENTITY_ABSENT;
+        }
+        if (aib_identity->pci_vendor_id != AMD_PCI_VENDOR_ID ||
+            input->pci_vendor_id != AMD_PCI_VENDOR_ID || model == NULL) {
+            return ADL_IDENTITY_INVALID;
+        }
+    } else {
+        if (is_normal_nvidia_profile(input)) {
+            return ADL_IDENTITY_ABSENT;
+        }
+        if (model == NULL || input->vendor == NULL ||
+            strcmp(input->vendor, "AMD") != 0 || input->name == NULL ||
+            strcmp(input->name, model->name) != 0 ||
+            contains_ascii_case_insensitive(input->name, "Red Hat") ||
+            contains_ascii_case_insensitive(input->name, "VirtIO") ||
+            input->bios == NULL ||
+            strcmp(input->bios, "016.011.000.029.000000") != 0 ||
+            input->pci_vendor_id != AMD_PCI_VENDOR_ID ||
+            input->subsystem_vendor_id != AMD_PCI_VENDOR_ID ||
+            input->subsystem_device_id != model->device_id ||
+            input->revision_id != model->revision_id ||
+            input->ram_mb != model->ram_mb ||
+            input->sli_supported != 0u) {
+            return ADL_IDENTITY_INVALID;
+        }
     }
 
     if (!copy_printable_ascii(identity->name, sizeof(identity->name),
@@ -275,16 +350,23 @@ enum adl_identity_state adl_build_validated_identity(
         return ADL_IDENTITY_INVALID;
     }
 
-    identity->pci_vendor_id = AMD_PCI_VENDOR_ID;
-    identity->pci_device_id = model->device_id;
-    identity->subsystem_vendor_id = AMD_PCI_VENDOR_ID;
-    identity->subsystem_device_id = model->device_id;
-    identity->revision_id = model->revision_id;
-    identity->ram_mb = model->ram_mb;
-    identity->memory_bus_width_bits = model->bus_width;
-    identity->base_clock_khz = model->base_clock_khz;
-    identity->boost_clock_khz = model->boost_clock_khz;
-    identity->memory_clock_khz = model->memory_clock_khz;
+    identity->pci_vendor_id = input->pci_vendor_id;
+    identity->pci_device_id = input->pci_device_id;
+    identity->subsystem_vendor_id = input->subsystem_vendor_id;
+    identity->subsystem_device_id = input->subsystem_device_id;
+    identity->revision_id = input->revision_id;
+    identity->ram_mb = input->ram_mb;
+    if (input->schema == STEALTH_GPU_SCHEMA_VERSION) {
+        identity->memory_bus_width_bits = input->memory_bus_width_bits;
+        identity->base_clock_khz = input->base_clock_khz;
+        identity->boost_clock_khz = input->boost_clock_khz;
+        identity->memory_clock_khz = input->memory_clock_khz;
+    } else {
+        identity->memory_bus_width_bits = model->bus_width;
+        identity->base_clock_khz = model->base_clock_khz;
+        identity->boost_clock_khz = model->boost_clock_khz;
+        identity->memory_clock_khz = model->memory_clock_khz;
+    }
     identity->bus_id = input->bus_id;
     identity->slot_id = input->slot_id;
     identity->function_id = input->function_id;

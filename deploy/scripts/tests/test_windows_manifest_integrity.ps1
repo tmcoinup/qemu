@@ -62,15 +62,19 @@ Assert-VMateMutationRejected {
 
 $componentRoot = Get-Content -LiteralPath $componentPath -Raw -Encoding UTF8 |
     ConvertFrom-Json
+$storagePath = Join-Path ([IO.Path]::GetDirectoryName($componentPath)) `
+    ([string]$componentRoot.storage_catalog)
+$storageRoot = Get-Content -LiteralPath $storagePath -Raw -Encoding UTF8 |
+    ConvertFrom-Json
+$gpuBoardPath = Join-Path ([IO.Path]::GetDirectoryName($componentPath)) `
+    ([string]$componentRoot.gpu_board_catalog)
+$componentJson = [IO.File]::ReadAllText($componentPath)
+$storageJson = [IO.File]::ReadAllText($storagePath)
+$gpuBoardJson = [IO.File]::ReadAllText($gpuBoardPath)
 $componentMutations = @(
-    @{ Name = 'storage-id'; Apply = { param($c) $c.storage[0].id = 'bogus' } },
-    @{ Name = 'storage-year-type'; Apply = {
+    @{ Name = 'storage-catalog-traversal'; Apply = {
             param($c)
-            $c.storage[0].release_year = 'never'
-        } },
-    @{ Name = 'storage-size-type'; Apply = {
-            param($c)
-            $c.storage[0].raw_bytes = '512110190592'
+            $c.storage_catalog = '../storage.json'
         } },
     @{ Name = 'keyboard-id'; Apply = { param($c) $c.hid.keyboards[0].id = 'bogus' } },
     @{ Name = 'keyboard-evidence'; Apply = {
@@ -79,11 +83,26 @@ $componentMutations = @(
         } },
     @{ Name = 'tablet-scope'; Apply = { param($c) $c.scope.tablet = 'physical' } }
 )
+$storageMutations = @(
+    @{ Name = 'storage-id'; Apply = { param($s) $s.id = 'bogus' } },
+    @{ Name = 'storage-year-type'; Apply = {
+            param($s)
+            $s.release_year = 'never'
+        } },
+    @{ Name = 'storage-size-type'; Apply = {
+            param($s)
+            $s.raw_bytes = '512110190592'
+        } }
+)
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) `
     ('vmate-manifest-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $testRoot)
 try {
-foreach ($case in $componentMutations) {
+    Copy-Item -LiteralPath $storagePath `
+        -Destination (Join-Path $testRoot $componentRoot.storage_catalog)
+    Copy-Item -LiteralPath $gpuBoardPath `
+        -Destination (Join-Path $testRoot $componentRoot.gpu_board_catalog)
+    foreach ($case in $componentMutations) {
         $bad = $componentRoot | ConvertTo-Json -Depth 64 | ConvertFrom-Json
         & $case.Apply $bad
         $path = Join-Path $testRoot ($case.Name + '.json')
@@ -91,6 +110,73 @@ foreach ($case in $componentMutations) {
         Assert-VMateMutationRejected {
             [void](Read-VMateComponentManifest $path)
         } $case.Name
+    }
+    foreach ($case in $storageMutations) {
+        $bad = $storageRoot.storage[0] |
+            ConvertTo-Json -Depth 64 | ConvertFrom-Json
+        & $case.Apply $bad
+        Assert-VMateMutationRejected {
+            Assert-VMateStorageComponent $bad
+        } $case.Name
+    }
+
+    # 重复 property 必须在 ConvertFrom-Json 覆盖值前按 JSON 结构拒绝。三个用例
+    # 分别覆盖根对象、SSD 深层 nvme 对象和 AIB GPU 条目；根用例还验证转义后
+    # 等价的 property 名会像 Python object_pairs_hook 一样判为重复。
+    $duplicateCases = @(
+        @('root', '"schema_version": 1,',
+            '"schema_version": 1, "\u0073chema_version": 1,'),
+        @('storage', '"pcie_generation": 3,',
+            '"pcie_generation": 3, "pcie_generation": 3,'),
+        @('gpu', '"base_clock_khz": 1291000,',
+            '"base_clock_khz": 1291000, "base_clock_khz": 1291000,')
+    )
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    foreach ($duplicateCase in $duplicateCases) {
+        $caseRoot = Join-Path $testRoot ('duplicate-' + $duplicateCase[0])
+        [void](New-Item -ItemType Directory -Path $caseRoot)
+        $rootText = $componentJson
+        $storageText = $storageJson
+        $gpuText = $gpuBoardJson
+        switch ($duplicateCase[0]) {
+            'root' {
+                $rootText = $rootText.Replace(
+                    $duplicateCase[1], $duplicateCase[2])
+            }
+            'storage' {
+                $storageText = $storageText.Replace(
+                    $duplicateCase[1], $duplicateCase[2])
+            }
+            'gpu' {
+                $gpuText = $gpuText.Replace(
+                    $duplicateCase[1], $duplicateCase[2])
+            }
+        }
+        if ($rootText -ceq $componentJson -and
+            $storageText -ceq $storageJson -and
+            $gpuText -ceq $gpuBoardJson) {
+            throw "重复 JSON fixture '$($duplicateCase[0])' 未命中。"
+        }
+        $caseComponentPath = Join-Path $caseRoot 'components.json'
+        [IO.File]::WriteAllText($caseComponentPath, $rootText, $utf8)
+        [IO.File]::WriteAllText(
+            (Join-Path $caseRoot $componentRoot.storage_catalog),
+            $storageText, $utf8)
+        [IO.File]::WriteAllText(
+            (Join-Path $caseRoot $componentRoot.gpu_board_catalog),
+            $gpuText, $utf8)
+        $duplicateRejected = $false
+        try {
+            [void](Read-VMateComponentManifest $caseComponentPath)
+        } catch {
+            if ($_.Exception.Message -notmatch '重复 JSON property') {
+                throw "重复 JSON '$($duplicateCase[0])' 未在结构解析层拒绝：$($_.Exception.Message)"
+            }
+            $duplicateRejected = $true
+        }
+        if (-not $duplicateRejected) {
+            throw "重复 JSON '$($duplicateCase[0])' 被静默覆盖。"
+        }
     }
 } finally {
     Remove-Item -LiteralPath $testRoot -Recurse -Force

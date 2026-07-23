@@ -43,6 +43,10 @@ param(
     [string]$ComponentManifest = '',
     [string]$HardwareProfile = '',
     [string]$PlatformId = '',
+    [string]$MemoryId = '',
+    [string]$StorageId = '',
+    [string]$GpuId = '',
+    [string]$MonitorId = '',
     [switch]$RerollHardwareProfile,
     [Alias('AllowHostCpuPlatformMismatch')]
     [switch]$AllowPlatformCompatibility,
@@ -77,6 +81,7 @@ param(
     [int]$DryRunHostLogicalProcessors = 4,
     [ValidateRange(1, 100000)]
     [int]$DryRunHostMaxMhz = 3600,
+    [string]$DryRunStorageId = '',
     [string[]]$ExtraQemuArgs = @()
 )
 
@@ -89,68 +94,7 @@ $libraryRoot = Join-Path $PSScriptRoot 'lib'
 . (Join-Path $libraryRoot 'VMate.Profile.ps1')
 . (Join-Path $libraryRoot 'VMate.Arguments.ps1')
 . (Join-Path $libraryRoot 'VMate.ExtraArguments.ps1')
-
-function Split-VMateRoi {
-    param([string]$Value)
-
-    if (-not $Value) {
-        return ''
-    }
-    if ($Value -notmatch '^\d+,\d+,\d+,\d+$') {
-        throw "FbShmRoi 必须是 x,y,w,h 四个非负整数，实际：$Value"
-    }
-    $parts = $Value.Split(',')
-    if ([int64]$parts[2] -eq 0 -or [int64]$parts[3] -eq 0) {
-        throw 'FbShmRoi 的宽和高必须大于零。'
-    }
-    return ",x=$($parts[0]),y=$($parts[1]),width=$($parts[2]),height=$($parts[3])"
-}
-
-function Test-VMateVirtioGpuGl {
-    param(
-        [string]$Executable,
-        [bool]$RequireBlob
-    )
-
-    try {
-        $probeOutput = & $Executable '-device' 'virtio-vga-gl,help' 2>&1
-        $probeText = $probeOutput | Out-String
-        if ($LASTEXITCODE -ne 0 -or $probeText -notmatch 'virtio-vga-gl') {
-            return $false
-        }
-        # GL 设备必须完整接受与普通 virtio-vga 相同的 EDID/分辨率投影。
-        # 显式零拷贝还会在正式 argv 中传 blob/hostmem，因此按启动策略同步
-        # 探测；任一必需能力缺失都由调用处 fail closed，不会静默换设备。
-        $properties = @(Get-VMateMonitorEdidCapabilityProperties) +
-            @('xres', 'yres', 'xmax', 'ymax')
-        if ($RequireBlob) {
-            $properties += @('blob', 'hostmem')
-        }
-        return Test-VMateQemuHelpProperties -HelpOutput $probeText `
-            -Properties $properties
-    } catch {
-        Write-Verbose "virtio-vga-gl 能力探测失败：$($_.Exception.Message)"
-        return $false
-    }
-}
-
-function Test-VMateGpuHostmem {
-    param([string]$Value)
-
-    # hostmem 会成为 guest 可见的 PCI BAR；QEMU PCI 层要求其为 2 的幂。
-    # 先用 UInt64 TryParse 拦截超长整数，避免 PowerShell 隐式转换溢出。
-    if ($Value -notmatch '^(?<Number>\d+)(?<Unit>[KkMmGg]?)$') { return $false }
-    [uint64]$number = 0
-    if (-not [uint64]::TryParse($Matches.Number, [ref]$number)) { return $false }
-    $limits = switch ($Matches.Unit.ToLowerInvariant()) {
-        ''  { @([uint64]268435456, [uint64]8589934592) }
-        'k' { @([uint64]262144, [uint64]8388608) }
-        'm' { @([uint64]256, [uint64]8192) }
-        'g' { @([uint64]1, [uint64]8) }
-    }
-    return $number -ge $limits[0] -and $number -le $limits[1] -and
-        (($number -band ($number - 1)) -eq 0)
-}
+. (Join-Path $libraryRoot 'VMate.Display.ps1')
 
 Assert-VMateGuestPolicy -GuestOs $GuestOs `
     -RequireNestedVirtualization $RequireNestedVirtualization.IsPresent
@@ -285,7 +229,7 @@ foreach ($optionalImage in ([ordered]@{
         throw "$($optionalImage.Key) 不是可读文件：$($optionalImage.Value)"
     }
 }
-if (-not (Test-Path -LiteralPath $Disk -PathType Leaf)) {
+if (-not $DryRun -and -not (Test-Path -LiteralPath $Disk -PathType Leaf)) {
     throw "磁盘不存在：$Disk"
 }
 if (-not $DryRun) {
@@ -318,7 +262,7 @@ if ($AllowPlatformCompatibility) {
     $compatibilityManifest = Read-VMateHostCompatibilityManifest `
         -Path $HostCompatibilityManifest
 }
-$components = Read-VMateComponentManifest -Path $ComponentManifest
+$componentCatalog = Read-VMateComponentManifest -Path $ComponentManifest
 $profileLock = $null
 if (-not $DryRun) {
     # 锁必须在读取已有 profile 前取得，并保持到前台 QEMU 退出。这样并发 reroll
@@ -326,16 +270,22 @@ if (-not $DryRun) {
     $profileLock = Enter-VMateProfileCommitLock -Instance $Instance
 }
 try {
-Assert-VMateStorageCapacity -QemuImg $QemuImg -Disk $Disk `
-    -ExpectedBytes ([int64]$components.storage.raw_bytes) -DryRun $DryRun.IsPresent
+$components = Resolve-VMateComponentsForProfile -Catalog $componentCatalog `
+    -ProfilePath $HardwareProfile -Reroll $RerollHardwareProfile.IsPresent `
+    -QemuImg $QemuImg -Disk $Disk -DryRun $DryRun.IsPresent `
+    -DryRunStorageId $DryRunStorageId -StorageId $StorageId `
+    -GpuId $GpuId -MonitorId $MonitorId
 $selection = Prepare-VMateHardwareProfile -Manifest $manifest `
     -CompatibilityManifest $compatibilityManifest -Components $components `
     -Path $HardwareProfile -PlatformId $PlatformId -HostCpu $hostCpu `
     -Instance $Instance -MemoryMiB $MemoryMiB -Cpus $Cpus `
+    -MemoryId $MemoryId `
     -AllowPlatformCompatibility $AllowPlatformCompatibility.IsPresent `
     -Reroll $RerollHardwareProfile.IsPresent
 $profile = $selection.Profile
 $platform = $selection.Platform
+Assert-VMateStorageCapacity -QemuImg $QemuImg -Disk $Disk `
+    -ExpectedBytes ([int64]$components.storage.raw_bytes) -DryRun $DryRun.IsPresent
 
 $qmpPort = 4440 + $Instance
 $guestCores = $Cpus
@@ -420,18 +370,38 @@ if ($Headless) {
 }
 
 $monitorEdid = Get-VMateMonitorEdidSuffix -Components $components -Profile $profile
+$gpuCarrier = ''
+if ($null -ne $components.gpu) {
+    # 物理主 ID 始终是 virtio 1AF4:1050。新 AIB 目录只使用 1AF4:A10x
+    # 内部 carrier；旧 V3 generic profile 继续读取原主 ID carrier。
+    $carrierVendor = if (Test-VMateComponentProperty `
+            $components.gpu 'carrier_vendor') {
+        Assert-VMateHexId $components.gpu.carrier_vendor 'gpu.carrier_vendor'
+    } else {
+        Assert-VMateHexId $components.gpu.pci_vendor 'gpu.pci_vendor'
+    }
+    $carrierDevice = if (Test-VMateComponentProperty `
+            $components.gpu 'carrier_device') {
+        Assert-VMateHexId $components.gpu.carrier_device 'gpu.carrier_device'
+    } else {
+        Assert-VMateHexId $components.gpu.pci_device 'gpu.pci_device'
+    }
+    $gpuRevision = Assert-VMateHexId $components.gpu.revision 'gpu.revision'
+    $gpuCarrier = ",x-pci-sub-vendor-id=$carrierVendor," +
+        "x-pci-sub-device-id=$carrierDevice,x-pci-revision=$gpuRevision"
+}
 if ($gpuGlDisplay) {
     # 本项目显式固定 profile native mode；QEMU 属性默认关闭，其他调用方不受影响。
     $vgaDevice = 'virtio-vga-gl,edid=on,edid-fixed-native=on,' +
         'xres=1920,yres=1080,xmax=1920,ymax=1080' +
-        $monitorEdid
+        $monitorEdid + $gpuCarrier
     if ($GpuZeroCopy) {
         $vgaDevice += ",blob=true,hostmem=$GpuHostmem"
     }
 } else {
     $vgaDevice = 'virtio-vga,edid=on,edid-fixed-native=on,' +
         'xres=1920,yres=1080,xmax=1920,ymax=1080' +
-        $monitorEdid
+        $monitorEdid + $gpuCarrier
 }
 Add-VMateArgument $arguments @('-device', $vgaDevice)
 
@@ -461,7 +431,12 @@ if (-not $DryRun) {
 Write-Host "QEMU:     $Qemu"
 Write-Host "VM:       $VmRoot"
 Write-Host "Profile:  $HardwareProfile (platform=$($platform.id))"
-Write-Host "Parts:    $($components.catalog_revision) / $($components.storage.id)"
+$gpuLabel = if ($null -eq $components.gpu) {
+    'legacy-unbound'
+} else {
+    Get-VMateGpuLabel $components.gpu
+}
+Write-Host "Parts:    $($components.catalog_revision) / $($components.storage.id) / $gpuLabel / $($components.monitor.id)"
 $cpuMode = if ($AllowTcgFallback) {
     'TCG named household / strict physical bundle'
 } elseif ($profile.configuration.host_cpu_platform_mismatch_allowed) {

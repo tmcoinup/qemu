@@ -130,8 +130,16 @@ function New-VMateSmbiosArguments {
     $allowedMts = @($Platform.memory.allowed_mts | ForEach-Object { [int]$_ })
     $memoryRatedMts = [int]$identity.memory_rated_mts
     $memoryConfiguredMts = [int]$Profile.configuration.memory_configured_mts
+    $memoryModuleId = if (Test-VMateMemoryProperty `
+            $identity 'memory_module_id') {
+        [string]$identity.memory_module_id
+    } else {
+        ''
+    }
     $memoryFacts = Get-VMateMemoryRateFacts -Platform $Platform `
-        -PartNumber ([string]$identity.memory_part)
+        -PartNumber ([string]$identity.memory_part) `
+        -Manufacturer ([string]$identity.memory_manufacturer) `
+        -ModuleId $memoryModuleId
     if ($allowedMts.Count -eq 0 -or $memoryRatedMts -le 0 -or
         $memoryConfiguredMts -le 0 -or $memoryConfiguredMts -gt $memoryRatedMts -or
         $memoryConfiguredMts -notin $allowedMts) {
@@ -245,12 +253,16 @@ function New-VMatePlatformDeviceArguments {
         [int]$storage.nvme.lanes -lt [int]$nvme.lanes) {
         throw "SSD '$($storage.id)' 无法满足平台 M.2 插槽的链路能力。"
     }
-    # Samsung 970 PRO 是 Gen3 x4 端点，但会按主板 M.2 插槽能力向下协商；root
-    # port 必须报告实际插槽链路，不能因为 SSD 上限较高就把 H310/H110 改成 Gen3 x4。
+    # 目录中的三个消费级 SSD 都是 Gen3 x4 端点，但会按主板 M.2 插槽能力
+    # 向下协商；root port 必须报告实际插槽链路，不能拿端点上限覆盖主板能力。
     $nvmeSpeed = Get-VMatePcieSpeed -Generation ([int]$nvme.max_pcie_generation)
     $nvmeWidth = [int]$nvme.lanes
     $nvmeSubnqn = Get-VMateNvmeSubnqn -Components $Components `
         -Uuid ([string]$Profile.identity.uuid)
+    Assert-VMateComponentSerial $storage `
+        ([string]$Profile.identity.nvme_serial) 'SSD'
+    $storageIdentityProfile = ConvertTo-VMateQemuString `
+        ([string]$storage.identity_profile)
     $storageModel = ConvertTo-VMateQemuString ([string]$storage.model)
     $storageFirmware = ConvertTo-VMateQemuString ([string]$storage.firmware)
     $keyboardManufacturer = ConvertTo-VMateQemuString ([string]$keyboard.manufacturer)
@@ -275,7 +287,7 @@ function New-VMatePlatformDeviceArguments {
         '-device', "pcie-root-port,id=rp2,slot=2,bus=pcie.0,addr=0x2,x-speed=2_5,x-width=1,$commonPort,x-pci-device-id=$($rootDevices[1])",
         '-device', "pcie-root-port,id=rp3,slot=3,bus=pcie.0,addr=0x3,x-speed=2_5,x-width=1,$commonPort,x-pci-device-id=$($rootDevices[2])",
         '-drive', "file=$Disk,if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap",
-        '-device', "nvme,id=nvmectl0,bus=rp1,drive=nvm0,use-samsung-id=on,serial=$($Profile.identity.nvme_serial),model-number=$storageModel,firmware-rev=$storageFirmware,subsys-vendor-id=$storageSubVendor,subsys-id=$storageSubDevice,subnqn=$nvmeSubnqn",
+        '-device', "nvme,id=nvmectl0,bus=rp1,drive=nvm0,x-identity-profile=$storageIdentityProfile,serial=$($Profile.identity.nvme_serial),model-number=$storageModel,firmware-rev=$storageFirmware,subsys-vendor-id=$storageSubVendor,subsys-id=$storageSubDevice,subnqn=$nvmeSubnqn",
         '-netdev', "user,id=net0,hostfwd=tcp:127.0.0.1:$SshForwardPort-:22,hostfwd=tcp:127.0.0.1:$RdpForwardPort-:3389",
         # Intel Gigabit CT Desktop Adapter 按独立扩展卡建模；板载 NIC 状态和
         # subsystem/OUI 已作为同一 manifest 设备原子校验，不能在此另写常量。

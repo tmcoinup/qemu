@@ -29,7 +29,7 @@ sv_prepare_disk >/dev/null
 
 # 历史磁盘即使文件存在，只要 guest 可见容量不同就必须拒绝启动。
 DISK="$TMP_DIR/mismatch.qcow2"
-printf '%s' 500107862016 >"$DISK"
+printf '%s' 1000204886016 >"$DISK"
 if sv_prepare_disk >"$TMP_DIR/mismatch.out" 2>&1; then
     fail "容量不一致的历史磁盘被放行"
 fi

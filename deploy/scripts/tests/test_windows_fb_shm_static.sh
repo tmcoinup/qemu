@@ -189,6 +189,7 @@ test_launchers_keep_gpu_export_as_explicit_capability() {
     local linux_cli="$REPO_ROOT/deploy/scripts/lib/sv-cli.sh"
     local linux_devices="$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
     local windows_launcher="$REPO_ROOT/deploy/windows/start-vm.ps1"
+    local windows_display="$REPO_ROOT/deploy/windows/lib/VMate.Display.ps1"
 
     # 中文注释：Linux/Windows 均默认稳定 SDL；显式 GL 也保持 gl-safe，只有
     # 再显式选择 zero-copy 才添加 blob/hostmem。关闭属性不能顺带关闭 renderer
@@ -202,7 +203,8 @@ test_launchers_keep_gpu_export_as_explicit_capability() {
     require_text '[switch]$NoGpuZeroCopy' "$windows_launcher"
     require_text "[string]\$GpuHostmem = '256M'" "$windows_launcher"
     require_text "[ValidateSet('Auto', 'Available', 'Unavailable')]" "$windows_launcher"
-    require_text "'-device' 'virtio-vga-gl,help'" "$windows_launcher"
+    require_text ". (Join-Path \$libraryRoot 'VMate.Display.ps1')" "$windows_launcher"
+    require_text "'-device' 'virtio-vga-gl,help'" "$windows_display"
     require_text "'sdl,gl=on,show-cursor=off'" "$windows_launcher"
     require_text "'sdl,show-cursor=off'" "$windows_launcher"
     require_text "'virtio-vga-gl,edid=on" "$windows_launcher"

@@ -11,12 +11,18 @@
   E5/AMD 宿主可塑造的家用 CPU 完整兼容组合。
 - [`deploy/hardware/host-compatibility.json`](../hardware/host-compatibility.json)：
   仅限 2C2T/2C4T/4C4T 家用物理宿主的 generic Q35 host 模板。
-- [`deploy/hardware/components.json`](../hardware/components.json)：NVMe、EDID 和 USB HID。
+- [`deploy/hardware/components.json`](../hardware/components.json)：可更换部件入口、EDID
+  和 USB HID。
+- [`deploy/hardware/gpu-boards.json`](../hardware/gpu-boards.json)：6 个芯片型号各
+  3 个板卡品牌，共 18 块启用 AIB 的 21 列原子身份，由组件入口引用。
+- [`deploy/hardware/storage.json`](../hardware/storage.json)：四款精确 512GB NVMe
+  的独立事实目录，由组件入口引用。
 - [`deploy/hardware/storage-compatibility.json`](../hardware/storage-compatibility.json)：
   无原生 NVMe boot 的老主板可用的消费级 SATA 启动盘完整组合。
 
-当前目录都是 schema 1；整机为 `2026-07-19.6`，household 为
-`2026-07-19.6`，组件为 `2026-07-19.3`，SATA 启动盘为 `2026-07-19.1`。
+当前目录都是 schema 1；整机为 `2026-07-22.1`，household 为
+`2026-07-19.6`，组件、GPU AIB 与 NVMe 子目录为 `2026-07-23.3`，SATA 启动盘为
+`2026-07-19.1`。
 修订号用于绑定或迁移诊断，不应手工伪造。
 
 ## 格式与安全
@@ -192,16 +198,16 @@ SATA/AHCI，不根据宿主或 Guest CPU 名称猜测存储能力。
 | 启动盘物料 | `BOOT_STORAGE_MANUFACTURER`、`BOOT_STORAGE_MODEL`、`BOOT_STORAGE_PART_NUMBER` | Guest 可见厂商/型号及对应零售料号 |
 | 启动盘 Identify | `BOOT_STORAGE_FIRMWARE`、`BOOT_STORAGE_SERIAL` | Guest 可见固件与每实例独立持久化序列号 |
 | 启动盘几何 | `BOOT_STORAGE_SIZE_BYTES`、`BOOT_STORAGE_INTERFACE` | qcow2 guest-visible 容量与实际接口 |
-| 组件绑定 | `NVME_COMPONENT_ID` | 当前唯一为 `samsung-970-pro-512gb` |
-| Identify | `NVME_MODEL`、`NVME_FIRMWARE`、`NVME_SERIAL` | 当前型号、固件 `1B2QEXP7` 和每实例 serial |
-| 容量 | `NVME_SIZE_BYTES` | 当前 NVMe component 容量为 `512110190592`；仅在 NVMe 作为启动盘时等于 qcow2 virtual-size |
-| PCI | `NVME_PCI_VEN`、`NVME_PCI_DEV` | 当前 `144d:a804` |
-| PCI subsystem | `NVME_SUBSYS_VEN`、`NVME_SUBSYS_DEV` | 当前 `144d:a801` |
+| 组件绑定 | `NVME_COMPONENT_ID` | `samsung-970-pro-512gb`、`intel-760p-512gb`、`wd-pc-sn730-512gb` 或 `kioxia-xg6-512gb` |
+| Identify | `NVME_MODEL`、`NVME_FIRMWARE`、`NVME_SERIAL` | 所选条目的型号、固件和符合其厂商形态的每实例 serial |
+| 容量 | `NVME_SIZE_BYTES` | 四个现行 NVMe component 均为精确 `512110190592` 字节；仅在 NVMe 作为启动盘时等于 qcow2 virtual-size |
+| PCI | `NVME_PCI_VEN`、`NVME_PCI_DEV` | 依次为 `144d:a808`、`8086:f1a6`、`15b7:5006`、`1179:011a` |
+| PCI subsystem | `NVME_SUBSYS_VEN`、`NVME_SUBSYS_DEV` | 与所选条目原子绑定的 subsystem |
 | NQN | `NVME_SUBNQN_TEMPLATE`、`NVME_SUBNQN` | NVMe 标准 UUID 模板和代入持久 UUID 后的最终 SubNQN；不冒用厂商域名命名权 |
 
 原生 NVMe 路径的 `BOOT_STORAGE_*` 与同一 `NVME_*` component 镜像并交叉校验。
 主板链路能力可以低于 SSD 的 Gen3 x4 额定能力，例如 H310 模板为 Gen2 x2；这是
-可解释的降速连接。不能把 970 PRO 的字符串与其它控制器 PCI ID、容量或固件混用。
+可解释的降速连接。不能把任一品牌的字符串与其它控制器 PCI ID、容量或固件混用。
 
 无原生 NVMe boot 的 H61/B75/H81/AM3 平台从 `samsung-sata-pro-512gb` 池等概率选择
 一个完整组合：
@@ -224,6 +230,14 @@ pool ID 在原文件中都缺失、平台 revision 早于其所属目录的 cuto
 只读内存迁移。旧 ATA Identify serial 会原样保留；规范化后的 NVMe 身份及全部
 启动盘目录事实仍执行当前严格绑定。加载器不会改写原 profile。
 
+另有一个不改变 Guest 身份的窄元数据修复：`2026-07-19.6` profile 若完整绑定
+当时唯一的 `samsung-970-pro-512gb`，且只有
+`BOOT_STORAGE_PART_NUMBER=component-catalog` 这一内部占位值，加载器会把它
+规范化为 `MZ-V7P512BW`。任何其它现行 component 即使伪造旧 revision
+也不会命中；任何其它字段不一致同样拒绝。非 `DRY_RUN` 启动在全部严格门禁通过后，先创建
+`profile.pre-catalog-migration.<原文件SHA-256>` 只读恢复副本，再原子保存规范化
+结果。加载摘要、备份内容或 rename 前源摘要有任一变化都会 fail closed。
+
 三项 SATA bundle 的型号、零售料号、接口和固件来自 Samsung 官方产品/固件资料，并声明
 SATA 1.5/3/6 Gb/s 向下兼容；当前没有对应实物的 ATA IDENTIFY capture。因此 fidelity
 仅为 `vendor-document-model-and-firmware-no-device-capture`，不能把生成的 Identify
@@ -239,7 +253,9 @@ SATA 1.5/3/6 Gb/s 向下兼容；当前没有对应实物的 ATA IDENTIFY captur
 | `MEM_MODULE_MB` | 允许的单条容量：`2048,4096` |
 | `MEM_MAX_CAPACITY_MB` | 主板最大内存容量 |
 | `MEM_MAX_MTS`、`MEM_ALLOWED_MTS` | 平台控制器上限和允许速率 |
-| `MEM_MFR`、`MEM_PART_2G`、`MEM_PART_4G` | DIMM 厂商及 2/4 GiB part number |
+| `MEM_MFR`、`MEM_PART_2G`、`MEM_PART_4G` | DIMM 厂商及旧版系列视图；只有目录确有对应容量时才保存料号，否则为空 |
+| `MEM_FAMILY_ID`、`MEM_MODULE_ID` | 物料系列和当前实际 DIMM 的稳定 ID；严格校验以 `MEM_MODULE_ID` 为权威 |
+| `MEM_SELECTED_MODULE_MB`、`MEM_MODULE_COUNT`、`MEM_SPD_EE1004` | 单条容量、条数和 SPD EE1004 能力 |
 | `MEM_RATED`、`MEM_RATED_MTS` | DIMM 料号额定 MT/s；两字段保持相等，前者仅为旧 profile 兼容名 |
 | `MEM_CONFIGURED_MTS` | 主板/CPU 训练后的实际 MT/s，必须属于平台允许集合且不高于额定值 |
 | `MEM_VOLTAGE_MV`、`MEM_RANK` | SMBIOS Type 17 电压；`MEM_RANK` 仅供旧 profile 回退 |
@@ -271,6 +287,13 @@ DDR4 SPD 实现完整 512 字节 EE1004 地址空间和 0x36/0x37 页选择，by
 DDR3 继续使用标准 256 字节 SPD，模组厂商码、序列号和料号位于同一页；同样覆盖目录中的
 Crucial、Kingston 和 SK hynix，并按具体 2/4 GiB 料号生成 rank、颗粒位宽与时序。
 
+历史 `2026-07-19.6` profile 中曾把 Kingston 4 GiB 实际模块
+`KVR24N17S8/4` 与一个未使用的 2 GiB 候选一起保存。只有平台、总量、插槽数、速率、
+电压、rank、颗粒位宽和实际 2×4 GiB 拓扑全部精确命中该历史形态时，加载器才补入
+稳定 `MEM_FAMILY_ID`/`MEM_MODULE_ID`，并清空不存在的 2 GiB 系列槽位；DIMM 厂商、
+实际料号、容量、条数和序列号均不改变。其它旧内存组合继续 fail closed。保存时使用
+与启动盘元数据修复相同的只读备份和原子提交机制；`DRY_RUN` 永不改写 profile。
+
 迁移/快照目标必须使用与源端相同的 `spd-ee1004` 设备配置，这与其它 QEMU 设备拓扑参数
 相同；已访问 SPD 的 256B/512B 状态错配会直接拒绝加载。
 
@@ -282,15 +305,30 @@ Crucial、Kingston 和 SK hynix，并按具体 2/4 GiB 料号生成 rank、颗�
 
 | 字段组 | 字段 |
 |---|---|
-| 组件和基础身份 | `EDID_COMPONENT_ID`、`EDID_VENDOR`、`EDID_PRODUCT_ID`、`EDID_NAME`、`EDID_SERIAL` |
+| 组件和基础身份 | `EDID_COMPONENT_ID`、`EDID_VENDOR`、`EDID_PRODUCT_ID`、`EDID_NAME`、`EDID_SERIAL`、`EDID_BINARY_SERIAL`、`EDID_REVISION` |
 | 物理参数 | `EDID_WIDTH_MM`、`EDID_HEIGHT_MM`、`EDID_MANUFACTURE_WEEK`、`EDID_MANUFACTURE_YEAR`、`EDID_VIDEO_INPUT` |
 | 范围限制 | `EDID_MIN_VFREQ_HZ`、`EDID_MAX_VFREQ_HZ`、`EDID_MIN_HFREQ_KHZ`、`EDID_MAX_HFREQ_KHZ`、`EDID_MAX_PIXEL_CLOCK_MHZ` |
 | 第二时序 | `EDID_SECONDARY_XRES`、`EDID_SECONDARY_YRES`、`EDID_SECONDARY_REFRESH_RATE` |
+| 第二时序明细 | `EDID_SECONDARY_PIXEL_CLOCK_KHZ`、`EDID_SECONDARY_HFRONT`、`EDID_SECONDARY_HSYNC`、`EDID_SECONDARY_HBLANK`、`EDID_SECONDARY_VFRONT`、`EDID_SECONDARY_VSYNC`、`EDID_SECONDARY_VBLANK`、`EDID_SECONDARY_HSYNC_POSITIVE`、`EDID_SECONDARY_VSYNC_POSITIVE`、`EDID_SECONDARY_WIDTH_MM`、`EDID_SECONDARY_HEIGHT_MM` |
 
-当前组件固定为 `samsung-s24f350`：`SAM/0F65`、521×293 mm、2018 年第 32 周、
-56–75 Hz、30–81 kHz、149 MHz，第二时序 1600×900@60 Hz。尺寸和扫描范围来自
-官方规格；产品码、制造时间与序列前缀没有原始 EDID 快照，因此仅作为合成身份。只有 `EDID_SERIAL`
-按实例生成；其它字段必须整体一致。
+当前目录提供 `samsung-s24f350`、`aoc-24b2xh`、`xiaomi-rmmnt238nf` 和
+`lenovo-l24e-30`，全部为 1920×1080、16:9。四款均用已核验的实机 EDID 1.3
+身份和时序字段重建；生成结果不是对样机 EDID 的逐字节复制。次要 DTD 分别为
+Samsung 1280×720@50、AOC/Lenovo
+1920×1080@74.973、Xiaomi 1920×1080@75.002，并校验 pixel clock、front
+porch、sync、blanking、同步极性与 DTD image size。四款 native DTD 均为
+H+/V+；Samsung/Xiaomi 次 DTD 为 H+/V+，AOC/Lenovo 为 H+/V-。Xiaomi raw
+次 DTD 的 image size 是 160×90 mm，其余次 DTD 使用各自面板尺寸。文本序列号
+按厂商格式生成且拒绝复制证据样本；
+binary serial 按型号固定值或 AOC 十进制后六位映射计算。binary serial、revision
+和完整 DTD 明细均写入 profile；启动及离线缓存修复会按 stable ID 逐项复核，避免
+同 ID 目录修订让旧实例静默漂移。所有尺寸、扫描范围、产品码、制造时间、序列策略
+和 DTD 必须按 `EDID_COMPONENT_ID` 原子一致。
+
+当前组件目录修订为 `2026-07-23.3`。缺少上述 binary serial、revision 和完整 DTD
+字段的旧 Linux schema-1 profile 会直接拒绝加载，即使 `STRICT_HARDWARE=0` 也不会静默补齐。
+可备份后显式 `--reroll` 生成新身份，或新建实例；这项 profile ABI 更新本身不要求
+重装 Guest，但磁盘 virtual-size 仍必须精确匹配现行 512GB 目录。
 
 ## USB HID
 
@@ -308,9 +346,28 @@ HUION、VEIKK 或 XP-Pen。
 
 ## GPU 字段及范围声明
 
-`GPU_VENDOR`、`GPU_NAME`、`GPU_PCI_VEN`、`GPU_PCI_DEV`、`GPU_RAM_MB`、`GPU_BIOS`、
-`GPU_REV` 是历史显示标签兼容字段。下列字段与同一 `GPU_POOL` 行绑定，
-用于 guest schema-2 用户态身份快照：
+新 profile 从 `gpu-boards.json` 的 18 块板卡中选择一块完整 AIB，21 列字段按
+`GPU_COMPONENT_ID` 原子绑定。`GPU_PCI_VEN`/`GPU_PCI_DEV` 与
+`GPU_SUBSYS_VEN`/`GPU_SUBSYS_DEV` 是客体用户态逻辑身份；它们不会替换物理
+virtio-vga 的 `1AF4:1050`。物理节点只携带
+`GPU_CARRIER_VEN`/`GPU_CARRIER_DEV`，由 stock VioGpuDod 继续绑定。
+
+| profile 字段 | 含义 / 当前约束 |
+|---|---|
+| `GPU_COMPONENT_ID` | 18 个已审计 AIB 稳定 ID 之一；精确集合以 `gpu-boards.json` 为准 |
+| `GPU_VENDOR`、`GPU_NAME` | 逻辑芯片厂商与含板卡品牌的型号名称；当前为 12 块 NVIDIA 与 6 块 AMD |
+| `GPU_BOARD_PARTNER`、`GPU_PART_NUMBER` | 与稳定 ID 绑定的 ASUS、Colorful、GALAX、MSI、Gigabyte、EVGA 或 Sapphire 品牌/真实料号组合 |
+| `GPU_PCI_VEN`、`GPU_PCI_DEV` | 六个用户态逻辑主 ID：NVIDIA `10de:1d01/1380/1c81/1c82`，AMD `1002:699f/67ff` |
+| `GPU_SUBSYS_VEN`、`GPU_SUBSYS_DEV` | 与所选板卡原子绑定的真实逻辑 AIB subsystem；不能只按芯片主 ID 推断 |
+| `GPU_CARRIER_VEN`、`GPU_CARRIER_DEV` | 物理 virtio 节点的内部选择令牌：连续且精确为 `1af4:a101`–`1af4:a112`；不是 AIB subsystem |
+| `GPU_RAM_MB`、`GPU_BIOS`、`GPU_REV` | 与同一 AIB 绑定的逻辑显存容量、VBIOS 与 revision |
+| `GPU_IDENTITY_FIDELITY` | 新 AIB 必须为 `audited_aib_bundle_shallow_user_projection_no_passthrough` |
+
+目录全部 18 条都固定 `serial_exposed=false`。profile 和 guest schema 均没有
+`GPU_SERIAL` 字段；显卡缺少本项目可核验的标准序列接口，因此不得从其它硬件字段
+派生或虚构 GPU 序列号。
+
+下列规格字段同样与所选 21 列 AIB bundle 绑定，用于 guest schema-2 用户态身份快照：
 
 | host profile | guest 注册表 | 单位 / 约束 |
 |---|---|---|
@@ -321,15 +378,18 @@ HUION、VEIKK 或 XP-Pen。
 | `GPU_MEMORY_CLOCK_KHZ` | `SpoofMemoryClockKHz` | NVAPI clock-domain kHz；100000–10000000 |
 | `GPU_SLI_SUPPORTED` | `SpoofSliSupported` | 仅允许 `0`；浅层实现为单 GPU、非 SLI |
 
-GTX 1050 Ti bundle 固定为 `GDDR5 / 128 bit / 1290000 / 1392000 /
-3504000 kHz / SLI=0`。其中 memory clock 按 NVAPI 口径保存；GPU-Z 显示为
-1752 MHz，不应把包装标注的 7 Gbps 写入该字段。严格 profile 缺少任一
-新字段都会 fail-closed；旧 profile 的运行时补值只服务显式非严格诊断。
+GT 1030、GTX 750 Ti、GTX 1050、GTX 1050 Ti、RX 550 和 RX 560 每个芯片型号
+都精确包含 3 个不同品牌板卡；禁止把 18 块板卡的 subsystem、VBIOS、料号、显存
+或时钟交叉拼接。memory clock 按 NVAPI clock-domain 口径保存，不把包装标注的
+有效传输率直接写入该字段。严格新 profile 缺少任一 AIB 或规格字段都会
+fail-closed。
 
-`GPU_IDENTITY_FIDELITY` 仍必须为 `label_only_out_of_scope`。
+升级前的六款 NVIDIA/AMD generic profile 没有 AIB 扩展字段，加载器只按原主 ID
+在 `components.json` 中唯一回查，并保持 `label_only_out_of_scope`；
+这些条目只读兼容，不进入新 profile 选择池，也不会被自动冒充为某块品牌板卡。
 
 本分支不做 GPU passthrough 或 vGPU；virtio-vga(-gl) 的主设备、驱动和行为不会因为这些
-标签变成真实 NVIDIA/AMD GPU。显存与时钟也是用户态查询投影，不代表
+逻辑身份变成真实 NVIDIA/AMD GPU。显存与时钟也是用户态查询投影，不代表
 客体可以访问该容量或达到该频率。这组字段不得计入真机化完成度或硬件支持承诺。
 
 ## 生命周期操作

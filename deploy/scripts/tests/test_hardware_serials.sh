@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证硬件序列号 / UUID / MAC 的格式和兜底修复逻辑。
+# 验证硬件序列号 / UUID / MAC 的格式，以及 schema-1 缺字段时 fail-closed。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -65,24 +65,32 @@ assert_serials_reasonable() {
         || fail "$label UUID 格式异常: ${UUID:-}"
     [[ "${CPU_SERIAL:-}" =~ ^[0-9]{10}$ ]] || fail "$label CPU_SERIAL 异常: ${CPU_SERIAL:-}"
     [[ "${CPU_ASSET:-}" =~ ^[0-9]{4}$ ]] || fail "$label CPU_ASSET 异常: ${CPU_ASSET:-}"
-    [[ "${BOARD_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]] || fail "$label BOARD_SERIAL 异常: ${BOARD_SERIAL:-}"
+    stealth_board_serial_is_strict \
+        "${BOARD_MFR:-}" "${BOARD_SERIAL:-}" >/dev/null 2>&1 \
+        || fail "$label BOARD_SERIAL 与主板厂商规格不一致: ${BOARD_SERIAL:-}"
     [[ "${BOARD_ASSET:-}" =~ ^[0-9]{10}$ ]] || fail "$label BOARD_ASSET 异常: ${BOARD_ASSET:-}"
-    [[ "${SYSTEM_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]] || fail "$label SYSTEM_SERIAL 异常: ${SYSTEM_SERIAL:-}"
+    stealth_board_serial_is_strict \
+        "${SYSTEM_MFR:-}" "${SYSTEM_SERIAL:-}" >/dev/null 2>&1 \
+        || fail "$label SYSTEM_SERIAL 与整机厂商规格不一致: ${SYSTEM_SERIAL:-}"
     [[ "${SYSTEM_SKU:-}" =~ ^SKU[0-9]{6}$ ]] || fail "$label SYSTEM_SKU 异常: ${SYSTEM_SKU:-}"
-    [[ "${CHASSIS_SERIAL:-}" =~ ^[A-Z0-9-]{8,20}$ ]] || fail "$label CHASSIS_SERIAL 异常: ${CHASSIS_SERIAL:-}"
+    stealth_board_serial_is_strict \
+        "${BOARD_MFR:-}" "${CHASSIS_SERIAL:-}" >/dev/null 2>&1 \
+        || fail "$label CHASSIS_SERIAL 与主板厂商规格不一致: ${CHASSIS_SERIAL:-}"
     [[ "${NIC_MAC:-}" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || fail "$label NIC_MAC 异常: ${NIC_MAC:-}"
     [[ "${NIC_MAC:-}" != 52:54:00:* ]] || fail "$label NIC_MAC 使用了 QEMU OUI: ${NIC_MAC:-}"
     [[ "${NIC_MAC:-}" == "${NIC_MAC_OUI:-}":* ]] \
         || fail "$label NIC_MAC 未使用平台 OUI: ${NIC_MAC:-}/${NIC_MAC_OUI:-}"
     assert_mac_is_global_unicast "$label" "${NIC_MAC:-}"
-    [[ "${NVME_SERIAL:-}" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{9}$ ]] \
-        || fail "$label NVME_SERIAL 异常: ${NVME_SERIAL:-}"
+    stealth_component_storage_serial_is_valid \
+        "${NVME_COMPONENT_ID:-}" "${NVME_SERIAL:-}" >/dev/null 2>&1 \
+        || fail "$label NVME_SERIAL 与厂商策略不一致: ${NVME_SERIAL:-}"
     [[ "${MEM_SERIAL:-}" =~ ^[0-9A-F]{8}$ ]] || fail "$label MEM_SERIAL 异常: ${MEM_SERIAL:-}"
     [[ "${MEM_SERIAL:-}" != "00000000" && "${MEM_SERIAL:-}" != "00000001" &&
        "${MEM_SERIAL:-}" != "FFFFFFFF" ]] \
         || fail "$label MEM_SERIAL 是明显占位值: ${MEM_SERIAL:-}"
-    [[ "${EDID_SERIAL:-}" =~ ^H4ZK[A-Z0-9]{8}$ ]] \
-        || fail "$label EDID_SERIAL 异常: ${EDID_SERIAL:-}"
+    stealth_component_monitor_serial_is_valid \
+        "${EDID_COMPONENT_ID:-}" "${EDID_SERIAL:-}" >/dev/null 2>&1 \
+        || fail "$label EDID_SERIAL 与显示器品牌策略不一致: ${EDID_SERIAL:-}"
     [[ "${NVME_SUBNQN:-}" == "nqn.2014-08.org.nvmexpress:uuid:${UUID:-}" ]] \
         || fail "$label NVME_SUBNQN 未绑定 UUID: ${NVME_SUBNQN:-}"
     [[ "${KBD_SERIAL:-}" =~ ^[A-Z0-9]{4,12}$ ]] || fail "$label KBD_SERIAL 异常: ${KBD_SERIAL:-}"
@@ -102,8 +110,8 @@ assert_serials_reasonable() {
 
     # NVMe Identify Controller 的 SN 字段是 20 字节 ASCII；QEMU 会右侧空格补齐。
     assert_ascii_len "$label NVME_SERIAL(NVMe SN[20])" "${NVME_SERIAL:-}" 1 20
-    # 当前生成器保留换行终止符，因此 S24F350 模板固定使用 12 个字符。
-    assert_ascii_len "$label EDID_SERIAL(EDID #FF)" "${EDID_SERIAL:-}" 12 12
+    # 实机模板分别使用 8、10 或 13 字节的 EDID #FF 文本，均不越过上限。
+    assert_ascii_len "$label EDID_SERIAL(EDID #FF)" "${EDID_SERIAL:-}" 8 13
     # USB HID serial 当前只保存在 profile，设备参数未暴露给 guest；仍限制为短 ASCII。
     assert_ascii_len "$label KBD_SERIAL(profile)" "${KBD_SERIAL:-}" 1 64
     assert_ascii_len "$label MOUSE_SERIAL(profile)" "${MOUSE_SERIAL:-}" 1 64
@@ -126,9 +134,8 @@ test_random_profile_serials() {
     done
 }
 
-test_missing_serials_are_repaired_stably() {
+test_schema1_missing_serials_are_rejected() {
     local profile="$TMP_DIR/missing-serials.profile"
-    local first_uuid first_mac first_nvme first_mem second_uuid second_mac second_nvme second_mem
 
     stealth_pick_profile
     stealth_save_profile "$profile"
@@ -138,19 +145,9 @@ test_missing_serials_are_repaired_stably() {
     chmod 600 "$profile"
 
     unset_profile_vars
-    stealth_load_profile "$profile"
-    assert_serials_reasonable "repaired#1"
-    first_uuid="$UUID"; first_mac="$NIC_MAC"; first_nvme="$NVME_SERIAL"; first_mem="$MEM_SERIAL"
-
-    unset_profile_vars
-    stealth_load_profile "$profile"
-    assert_serials_reasonable "repaired#2"
-    second_uuid="$UUID"; second_mac="$NIC_MAC"; second_nvme="$NVME_SERIAL"; second_mem="$MEM_SERIAL"
-
-    [[ "$first_uuid" == "$second_uuid" ]] || fail "修复 UUID 不稳定: $first_uuid != $second_uuid"
-    [[ "$first_mac" == "$second_mac" ]] || fail "修复 MAC 不稳定: $first_mac != $second_mac"
-    [[ "$first_nvme" == "$second_nvme" ]] || fail "修复 NVMe SN 不稳定: $first_nvme != $second_nvme"
-    [[ "$first_mem" == "$second_mem" ]] || fail "修复 DIMM SN 不稳定: $first_mem != $second_mem"
+    if STRICT_HARDWARE=0 stealth_load_profile "$profile" >/dev/null 2>&1; then
+        fail "schema-1 profile 缺失持久序列号时被静默修复"
+    fi
 }
 
 test_strict_profile_rejects_invalid_identity() {
@@ -178,7 +175,7 @@ NIC_MAC|ff:ff:ff:ff:ff:ff
 NVME_SERIAL|S0000000000N
 NVME_SUBNQN|nqn.2014-08.org.nvmexpress:uuid:00000000-0000-4000-8000-000000000000
 MEM_SERIAL|00000000
-EDID_SERIAL|H4ZK123456789
+EDID_SERIAL|INVALID_SERIAL
 KBD_SERIAL|UNKNOWN
 CASES
 
@@ -212,7 +209,7 @@ test_strict_profile_accepts_legacy_hid_tokens() {
 }
 
 test_random_profile_serials
-test_missing_serials_are_repaired_stably
+test_schema1_missing_serials_are_rejected
 test_strict_profile_rejects_invalid_identity
 test_strict_profile_accepts_legacy_hid_tokens
 

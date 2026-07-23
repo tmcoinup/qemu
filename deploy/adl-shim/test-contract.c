@@ -32,7 +32,7 @@ static struct adl_identity_contract_input rx560_input(void)
     input.source_instance_id =
         "PCI\\VEN_1AF4&DEV_1050&SUBSYS_67FF1002&REV_CF\\4&ABC&0&00";
     input.identity_mode = "shallow-user-projection";
-    input.schema = STEALTH_GPU_SCHEMA_VERSION;
+    input.schema = STEALTH_GPU_LEGACY_SCHEMA_VERSION;
     input.pci_vendor_id = UINT32_C(0x1002);
     input.pci_device_id = UINT32_C(0x67ff);
     input.subsystem_vendor_id = UINT32_C(0x1002);
@@ -57,7 +57,7 @@ static void test_rx560(void)
     enum adl_identity_state state =
         adl_build_validated_identity(&input, &identity);
 
-    expect(state == ADL_IDENTITY_PRESENT, "RX 560 schema-2 应通过");
+    expect(state == ADL_IDENTITY_PRESENT, "RX 560 schema-1 应通过");
     expect(strcmp(identity.name, "AMD Radeon RX 560") == 0,
            "RX 560 名称");
     expect(identity.pci_vendor_id == UINT32_C(0x1002),
@@ -109,7 +109,7 @@ static void test_rx550(void)
     input.boost_clock_khz = 1183000u;
     expect(adl_build_validated_identity(&input, &identity) ==
                ADL_IDENTITY_PRESENT,
-           "RX 550 schema-2 应通过");
+           "RX 550 schema-1 应通过");
     expect(identity.compute_units == 8u, "RX 550 CU");
     expect(identity.ram_mb == 2048u, "RX 550 VRAM");
 }
@@ -154,6 +154,17 @@ static void test_nvidia_is_absent(void)
     expect(identity.name[0] == '\0', "ABSENT 不得残留 AMD identity");
 }
 
+static void test_schema2_generic_is_rejected(void)
+{
+    struct adl_identity_contract_input input = rx560_input();
+    struct adl_gpu_identity identity;
+
+    input.schema = STEALTH_GPU_SCHEMA_VERSION;
+    expect(adl_build_validated_identity(&input, &identity) ==
+               ADL_IDENTITY_INVALID,
+           "schema-2 generic 身份不得绕过共享 AIB 目录");
+}
+
 static void expect_rejected(struct adl_identity_contract_input *input,
                             const char *message)
 {
@@ -193,8 +204,8 @@ static void test_fail_closed_profiles(void)
     expect_rejected(&input, "schema/Source REV 撕裂必须拒绝");
 
     input = rx560_input();
-    input.memory_clock_khz = 7000000u;
-    expect_rejected(&input, "双倍 AMD memory clock 必须拒绝");
+    input.ram_mb = 2048u;
+    expect_rejected(&input, "schema-1 错误显存容量必须拒绝");
 
     input = rx560_input();
     input.bus_id = 256u;
@@ -250,6 +261,7 @@ int main(void)
     test_rx550();
     test_legacy_snapshot();
     test_nvidia_is_absent();
+    test_schema2_generic_is_rejected();
     test_fail_closed_profiles();
     test_initialization_policy();
 

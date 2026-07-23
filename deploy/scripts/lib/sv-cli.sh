@@ -41,6 +41,10 @@ while (( $# > 0 )); do
             STEALTH_PLATFORM_ID="${1#*=}"
             _cli_platform_id_seen=1
             ;;
+        --memory-id=*)  STEALTH_MEMORY_ID="${1#*=}" ;;
+        --storage-id=*) STEALTH_STORAGE_ID="${1#*=}" ;;
+        --gpu-id=*)     STEALTH_GPU_ID="${1#*=}" ;;
+        --monitor-id=*) STEALTH_MONITOR_ID="${1#*=}" ;;
         --allow-platform-compatibility) ALLOW_PLATFORM_COMPATIBILITY=1 ;;
         --allow-legacy-profile) ALLOW_LEGACY_PROFILE=1 ;;
         --migrate-storage-profile) ALLOW_STORAGE_PROFILE_MIGRATION=1 ;;
@@ -101,8 +105,8 @@ if [[ -n "$_cli_instance" ]]; then
     INSTANCE="$_cli_instance"
 fi
 : "${INSTANCE:=1}"
-if ! [[ "$INSTANCE" =~ ^[0-9]+$ ]] || (( INSTANCE < 1 )); then
-    echo "ERROR: INSTANCE 必须是正整数 (实际: '$INSTANCE')" >&2
+if ! [[ "$INSTANCE" =~ ^[1-9][0-9]{0,9}$ ]]; then
+    echo "ERROR: INSTANCE 必须是 1–10 位正整数且不能有前导零 (实际: '$INSTANCE')" >&2
     exit 2
 fi
 
@@ -114,6 +118,7 @@ fi
 : "${ALLOW_PLATFORM_COMPATIBILITY:=0}"
 : "${ALLOW_LEGACY_PROFILE:=0}"
 : "${ALLOW_STORAGE_PROFILE_MIGRATION:=0}"
+stealth_component_selection_init_requests
 if [[ "$_cli_platform_id_seen" == "1" && -z "$STEALTH_PLATFORM_ID" ]]; then
     echo "ERROR: --platform-id 不能为空" >&2
     exit 2
@@ -295,19 +300,19 @@ esac
 # 全局 scaling_max_freq 会同时影响管理核和其它 VM。默认关闭，只有明确评估过宿主
 # 调度策略后才用 --freq-cap 开启；vCPU 性能隔离优先依靠 cpuset/NUMA 放置。
 : "${CPU_FREQ_CAP:=0}"
-# CPU 亲和隔离(线程级): 起 VM 后把 QEMU 钉进 cgroup cpuset 独占分区, 每个 vCPU 独占
-# 1 个逻辑线程(非整核)——4vCPU 的 VM 只吃 4 个逻辑线程。分配器自动读取 host 拓扑，
-# 先把不同 VM 横向铺到不同物理核心，物理核心主线程用尽后才使用 SMT 兄弟线程。
-# 与宿主机负载(尤其 cargo/rust 编译)在调度层隔离: vCPU 永不被宿主机抢占。
-# 多 VM 自动错开线程、分区随起停伸缩、停机自动还线程。纯运行态(cgroup v2
-# partition, 不重启), 默认开。HOST_RESERVE_CORES=auto 默认自动预留
-# max(2, ceil(物理核心数/8))，并会在多开需求过高时弹性缩小；显式 N 表示硬预留。
-# 设 0 表示使用整机逻辑 CPU 池。
+# CPU 亲和按 vCPU:host logical CPU=1:1 分配：2C2T/2C4T/4C4T 的 exact 分别
+# 为 2/4/4 条线程；2C2T/4C4T 在单台 VM 内跨不同物理核，2C4T 使用两颗 SMT2 核。
+# 同一逻辑 CPU 绝不跨 VM 重复；未选 sibling 可供宿主/其它 VM 使用并共享执行资源。
+# exact 分区随 VM 起停伸缩并精确还核；纯运行态(cgroup v2)，默认开。
+# HOST_RESERVE_CORES=auto 固定为 max(2, ceil(完整 SMT2 核数×12.5%))；这里的 1/8
+# 是宿主管理核保留比例，不是 VM 数量。只在本次实例本身容量不足时缩小，不随已运行
+# VM 数量改变；显式 N 表示硬预留。
+# 设 0 只取消前缀预留，root helper 仍保证宿主至少剩 2 颗完整核。
 # (flag: --cpu-isolate / --no-cpu-isolate)
 : "${CPU_ISOLATE:=1}"
 # QEMU 辅助线程专用逻辑 CPU 数：默认 0，保持旧行为；显式启用后，root helper 会额外
-# 给本 VM 分配 N 个逻辑 CPU，并把 QEMU main loop / IO / SDL / fb-shm worker 等非 vCPU
-# 线程收窄到这些 CPU 上。这样 vCPU 仍独占自己的单核，显示/IO 线程也不再和满载 vCPU
+# 给本 VM 的 exact 额外分配 N 个唯一逻辑 CPU，并把 QEMU main / IO /
+# SDL / fb-shm 等非 vCPU 线程收窄到这些 CPU，避免它们和满载 vCPU
 # 抢同一条调度队列。常用：--svc-cpu（等价 1）或 --svc-cpus=2；长别名
 # --qemu-service-cpu / --qemu-service-cpus=N 保留兼容。环境变量也可用短名
 # QEMU_SVC_CPUS=1，显式 QEMU_SERVICE_CPUS 优先级更高。

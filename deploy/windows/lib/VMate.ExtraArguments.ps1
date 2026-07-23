@@ -10,6 +10,8 @@
     因此 Windows AF_UNIX 路径、镜像文件名和设备 ID 可以合法包含 linux、kvm、
     vfio 等文本，同时明确的 POSIX/Linux backend 会在调用 QEMU 前 fail closed。
 #>
+. (Join-Path $PSScriptRoot 'VMate.Json.ps1')
+. (Join-Path $PSScriptRoot 'VMate.ExtraArguments.Device.ps1')
 
 function Get-VMateExtraOptionToken {
     param([AllowEmptyString()][string]$Token)
@@ -100,6 +102,7 @@ function ConvertFrom-VMateQemuJsonValue {
         return $null
     }
     try {
+        Assert-VMateJsonNoDuplicateProperties $trimmed "ExtraQemuArgs -$OptionName"
         return $trimmed | ConvertFrom-Json -ErrorAction Stop
     } catch {
         throw "ExtraQemuArgs 的 -$OptionName JSON 无法解析：$($_.Exception.Message)"
@@ -357,7 +360,7 @@ function Assert-VMateExtraArguments {
 
     $reserved = @(
         'accel', 'cpu', 'uuid', 'smbios', 'rtc', 'machine', 'global',
-        'm', 'memory', 'smp', 'numa', 'set'
+        'm', 'memory', 'smp', 'numa', 'set', 'vga'
     )
     $directDenied = @(
         'enable-kvm', 'xen-domid', 'xen-attach', 'xen-domid-restrict',
@@ -452,14 +455,20 @@ function Assert-VMateExtraArguments {
             }
             'device' {
                 $value = Get-VMateExtraOptionValue $Arguments $index $option
-                $device = Get-VMateQemuBackendName -Value $value `
-                    -JsonPropertyNames @('driver')
+                $device = Get-VMateQemuDeviceDriver -Value $value
                 if ($device.StartsWith('vfio-', [StringComparison]::Ordinal) -or
                     $device.StartsWith('vhost-', [StringComparison]::Ordinal) -or
                     $device -in @('pci-assign', 'kvm-pci-assign',
                         'virtio-blk-vhost-vdpa', 'vdpa-dev',
                         'usb-mtp', 'u2f-passthru')) {
                     throw "ExtraQemuArgs 的 -device '$device' 不支持 Windows。"
+                }
+                $displayPattern =
+                    '^(?:virtio-(?:vga|gpu)(?:-[a-z0-9]+)*|qxl(?:-vga)?|' +
+                    'bochs-display|ramfb|vga|isa-(?:cirrus-)?vga|cirrus-vga|' +
+                    'ati-vga|vmware-svga|secondary-vga)$'
+                if ($device -match $displayPattern) {
+                    throw "ExtraQemuArgs 不允许追加未受管显示设备：$device"
                 }
                 break
             }

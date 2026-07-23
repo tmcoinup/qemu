@@ -553,6 +553,7 @@ typedef struct NvmeParams {
     uint8_t  vsl;
     bool     use_intel_id;
     bool     use_samsung_id;
+    char     *identity_profile;
     char     *model_number;
     char     *firmware_rev;
     char     *subnqn;

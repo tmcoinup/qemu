@@ -11,12 +11,15 @@ RDP、QEMU guest agent、PowerShell 模块、NVIDIA 驱动或其它第三方软�
 
 - QEMU 设备的真实主 PCI ID 仍是 `1AF4:1050`，设备实例仍绑定 stock
   `VioGpuDod` Display-Only 驱动。
-- GPU-Z 等用户态硬件查询程序看到的逻辑型号按 profile 投影为
-  `NVIDIA GeForce GTX 1050 Ti`，逻辑 VEN/DEV 为 `10DE:1C82`。
-- 它不会给 Windows guest 增加 Direct3D、CUDA、NVENC 或 NVIDIA 3D 性能。
-  host 侧 virgl/GL 加速也不会因此变成 guest 内的 NVIDIA 3D 加速。
-- **不要安装 NVIDIA 官方驱动。** `10DE:1C82` 只是逻辑查询结果，真实设备不是可由
-  NVIDIA 驱动接管的 GTX 1050 Ti；强行安装只会破坏现有显示链路。
+- 当前目录在 GT 1030、GTX 750 Ti、GTX 1050、GTX 1050 Ti、RX 550、RX 560
+  六个芯片型号下各提供 3 个品牌板卡，共 18 块 AIB（12 NVIDIA、6 AMD）。
+  GPU-Z 等用户态程序看到所选 profile 的逻辑型号；后文 GTX 1050 Ti 只是示例。
+- `1AF4:A101`–`1AF4:A112` 只是内部 carrier，不是物理 AIB subsystem；项目也不
+  虚构或展示没有标准可核验来源的 GPU 序列号。
+- 它不会给 Windows guest 增加 Direct3D、CUDA、NVENC、AMF 或厂商 3D 性能。
+  host 侧 virgl/GL 加速也不会因此变成 guest 内的 NVIDIA/AMD 3D 加速。
+- **不要安装 NVIDIA 或 AMD 官方显示驱动。** 逻辑 `10DE`/`1002` 身份只是查询结果，
+  真实设备不能由对应厂商驱动接管；强行安装只会破坏现有显示链路。
 
 如果你需要真正的 guest 3D/CUDA，应另外设计 GPU/VFIO 直通方案，不能使用本教程
 代替。
@@ -93,8 +96,8 @@ Get-PnpDeviceProperty -InstanceId $smbus.InstanceId `
 
 - `Status` 为 `OK`，`Service` 为 `VioGpuDod`；
 - `InstanceId` 仍以物理 `PCI\VEN_1AF4&DEV_1050` 开头；
-- `HardwareIds` 第一项是 profile 的逻辑 `10DE:1C82`，后续项保留物理
-  `1AF4:1050`。
+- `HardwareIds` 第一项是所选 profile 的逻辑主 ID（上述 NVIDIA 示例为
+  `10DE:1C82`），后续项保留物理 `1AF4:1050`。
 - SMBus 为 `Status=OK`、`Class=System`、ProblemCode `0`，INF 为 `oem*.inf`；
   `Service` 为空是 Intel NO_DRV 识别包的正常结果。
 

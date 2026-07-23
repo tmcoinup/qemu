@@ -42,32 +42,45 @@
 
 ## 存储
 
-当前严格组件目录只启用一个 NVMe 模板。profile 固化组件 ID 后，qcow2 必须使用
+当前严格组件目录启用四个 NVMe 模板，且只保留精确 512GB 规格。profile 固化组件 ID 后，qcow2 必须使用
 同一条目的精确 advertised 字节数，保证 **Model ↔ Firmware ↔ Size** 自洽：
 
 | Model | Firmware | RAW_BYTES | Windows 可见容量 |
 |---|---|---:|---:|
 | Samsung SSD 970 PRO 512GB | 1B2QEXP7 | 512,110,190,592 | ~476.9 GiB |
+| INTEL SSDPEKKW512G8 | 001C | 512,110,190,592 | ~476.9 GiB |
+| WDC PC SN730 SDBPNTY-512G-1027 | 11110000 | 512,110,190,592 | ~476.9 GiB |
+| KXG60ZNV512G KIOXIA | AGHA4101 | 512,110,190,592 | ~476.9 GiB |
 
 | 字段                  | 值                                   |
 |-----------------------|--------------------------------------|
-| PCI vendor/device     | 144D:A804（Samsung 970 PRO 参考寄存器） |
-| 子 vendor/device      | 144D:A801（970 PRO 级）              |
+| PCI vendor/device     | 随组件原子绑定：`144d:a808` / `8086:f1a6` / `15b7:5006` / `1179:011a` |
+| 子 vendor/device      | 随同一组件绑定，不允许跨品牌拼接 |
 | Identify Ctrl `MN`    | profile 抽中型号                      |
 | Identify Ctrl `FR`    | profile 抽中固件                      |
-| IEEE OUI              | 00:25:38（Samsung）—— `use-samsung-id=on` |
+| IEEE OUI              | 随组件绑定，运行时使用 `x-identity-profile=<稳定ID>` |
 | SUBNQN                | `nqn.2014-08.org.nvmexpress:uuid:...` |
 
 ## 显示器（EDID 池，patch 0009）
 
-当前严格目录只启用一条 24" 1920×1080 模板。型号规格来自 Samsung 文档，
-但 product/date/serial 等没有 raw EDID 样机，因此明确标记为合成身份。
+当前严格目录启用四条 23.8/24" 1920×1080、16:9 模板。型号规格来自各厂商
+官方文档，产品码、日期、EDID revision、文本/binary serial 和次要 DTD 由对应
+型号的 raw EDID 样本复核；随机序列值不会复制样本。
 
-| EDID Vendor | Name         | 尺寸 (mm) | 备注          |
-|-------------|--------------|-----------|---------------|
-| SAM         | S24F350      | 521×293   | 型号规格已核验；EDID 身份字段为合成值 |
+| EDID Vendor | 型号 / EDID Name | 尺寸 (mm) | 次要 raw DTD |
+|-------------|------------------|-----------|--------------|
+| SAM | LS24F350FHUXEN / S24F350 | 521×293 | 1280×720@50 |
+| AOC | 24B2XH / 24B2W1G5 | 527×296 | 1920×1080@74.973 |
+| XMI | RMMNT238NF / Mi Monitor | 527×293 | 1920×1080@75.002 |
+| LEN | L24e-30 / L24e-30 | 527×296 | 1920×1080@74.973 |
 
-实现：patch 0009 给 virtio-vga 加 `edid-vendor=` / `edid-name=` / `edid-serial=` / `edid-width-mm=` / `edid-height-mm=` cmdline 选项，start-vm.sh 从 profile.EDID_* 注入。
+实现：virtio-vga 接收完整目录字段；`edid-binary-serial=` 与
+`edid-revision=` 明确写入 EDID，型号专属刷新 key 选择已核验 pixel clock、
+front porch、sync、blanking、H/V 极性和 DTD image size。四款 native DTD
+均为 H+/V+；AOC/Lenovo 次 DTD 为 H+/V-，Samsung/Xiaomi 为 H+/V+；Xiaomi
+次 DTD 使用 raw 的 160×90 mm。Linux/Windows 启动器缺任一必需属性都会
+fail closed，并固定要求 `edid-managed-timing-version=1`，防止只有旧版
+secondary 分辨率属性、但缺少当前精确时序表的 patched QEMU 通过预检。
 
 ## 键盘 / 鼠标 / 数位板（USB HID 池，patch 0010）
 
@@ -156,7 +169,7 @@
 
 | 面                                  | 修改前                          | 修改后                                       | 实现路径                                         |
 |-------------------------------------|---------------------------------|----------------------------------------------|--------------------------------------------------|
-| 显示器 EDID 厂商 / 产品名           | `RHT` / `QEMU Monitor`          | `SAM` / `Samsung S24F350F`（`SAM0F65`）      | `hw/display/edid-generate.c`（含 atoi 序列号 bug 修复，djb2 hash 兜底） |
+| 显示器 EDID 厂商 / 产品名           | `RHT` / `QEMU Monitor`          | 按 component ID 原子选择 SAM/AOC/XMI/LEN 的 1920×1080、16:9 模板 | `components.json` + `hw/display/edid-generate.c`（binary serial 使用厂商/型号规则，不使用通用 hash） |
 | qemu-xhci 完整 PCI 身份             | 可能继承全局主板 SUBSYS          | 固定 `1B36:000D rev01 / SUBSYS 1AF4:1100`    | `hw/usb/hcd-xhci-pci.c` + `verify-stealth.sh` step 15 |
 | pcie-root-port PCI VEN:DEV          | `1B36:000C`（Red Hat）          | `1022:1453`（AMD Family 17h Internal PCIe GPP）| `hw/pci-bridge/gen_pcie_root_port.c`             |
 | USB HID 描述符 manufacturer 串      | `QEMU`                          | `Microsoft`                                  | `hw/usb/dev-hid.c` `desc_strings[STR_MANUFACTURER]` |
@@ -210,12 +223,12 @@ QEMU=/home/ubuntu/projects/qemu/build/qemu-system-x86_64 \
 | 1 | CPU 型号注册（Ryzen3-1200 alias） |
 | 2 | QMP query-cpu-model-expansion: hypervisor/kvm=False, invtsc/topoext/svm/sha-ni 在 |
 | 3 | ACPI OEM 字符串 `ALASKA` / `A M I` baked in |
-| 4 | NVMe `use-samsung-id` / `model-number` / `firmware-rev` 支持 |
+| 4 | NVMe `x-identity-profile` / `model-number` / `firmware-rev` 支持；旧 `use-samsung-id` 仅保留兼容入口 |
 | 5 | 动态 TPM：清单能力/版本/前端一致，swtpm 可用，QEMU 含对应 TIS/CRB 前端 |
 | 6 | BGRT 伪表 (`firmware/bgrt.bin`, 20 字节) |
 | 7 | BOARD_POOL 每条 8 字段 (含 SUBSYS_VEN / SUBSYS_DEV) |
 | 8 | 启用平台 CPU 的 iGPU 状态自洽：带核显 SKU 必须由主板 BIOS 禁用 |
-| 9 | NVMe 池 Model ↔ Size 自洽（1TB model = 10^12 B，不再 512GB） |
+| 9 | NVMe 池 Model ↔ Size 自洽，所有启用项均为精确 512,110,190,592 bytes |
 | 10 | DIMM SN 持久化：pick → save → load → load 全部一致；8GB 双通道时两条 DIMM SN 不重复（DIMM_A2 ≠ DIMM_B2） |
 | 11 | USB HID + EDID 自定义 prop (patch 0009/0010 编进 QEMU) |
 | 12 | 外设池 (MONITOR/KBD/MOUSE/TABLET) 字段数自洽 |

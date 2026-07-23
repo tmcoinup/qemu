@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-19.6",
+  "catalog_revision": "2026-07-22.1",
   "defaults": {
     "vcpus": 4,
     "memory_total_mib": 8192
@@ -275,6 +275,134 @@
         "https://www.asus.com/supportonly/prime%20h310m-a%20r2.0/helpdesk_cpu/",
         "https://www.asus.com/supportonly/prime%20h310m-a%20r2.0/helpdesk_bios/",
         "https://dlcdnets.asus.com/pub/ASUS/mb/LGA1151/PRIME_H310M-A_R2.0/E15471_PRIME_H310M-A_R2.0_UM_V2_WEB.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga1151-i3-9100f-msi-h310m-pro-m2-plus-ms-7c08",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2019,
+      "cpu": {
+        "qemu_arg": "Skylake-Client-IBRS,family=6,model=158,stepping=11,hle=off,rtm=off,model-id=Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz",
+        "max_mhz": 4200,
+        "current_mhz": 3600,
+        "tsc_mhz": 3600,
+        "part": "BX80684I39100F",
+        "socket": "LGA1151",
+        "cores": 4,
+        "threads": 4,
+        "phys_bits": 39,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": { "present": false, "profile_state": "fused_off", "model": "none" },
+        "smbios": { "family": "0x00CE", "upgrade": "0x32", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC" }
+      },
+      "board": {
+        "manufacturer": "Micro-Star International Co., Ltd.",
+        "product": "H310M PRO-M2 PLUS (MS-7C08)",
+        "family": "PRO Series",
+        "version": "1.0",
+        "serial_fn": "_serial_msi",
+        "subsystem_vendor": "0x1462",
+        "subsystem_device": "0x7C08",
+        "pch": "Intel H310",
+        "pcie_generation": 3,
+        "dimm_slots": 2,
+        "max_memory_gib": 32
+      },
+      "memory": { "type": "DDR4", "channels": 2, "max_mts": 2400, "allowed_mts": [2133, 2400], "voltage_mv": 1200, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192] },
+      "devices": {
+        "chipset": { "mch": ["0x8086", "0x3E1F", "0x08"], "lpc": ["0x8086", "0xA303", "0x10"], "smbus": ["0x8086", "0xA323", "0x10"], "ahci": ["0x8086", "0xA352", "0x10"] },
+        "root_port": { "pci_vendor": "0x8086", "pci_device": "0xA338", "revision": "0xF0" },
+        "xhci": { "pci_vendor": "0x8086", "pci_device": "0xA36D", "revision": "0x10" },
+        "nvme": { "max_pcie_generation": 2, "lanes": 4, "boot_supported": true, "attachment": "m2_socket" },
+        "nic": { "vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios" },
+        "audio": { "vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x1462c708", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0xA348" }
+      },
+      "bios": { "vendor": "American Megatrends Inc.", "version": "1.20", "date": "04/11/2019" },
+      "system": { "product": "MS-7C08", "family": "Default string", "chassis_type": "0x03" },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "2.0",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": ["sha256"],
+        "support_source_ref": "https://www.msi.com/Motherboard/H310M-PRO-M2-plus/Specification",
+        "version_source_ref": "https://www.msi.com/Motherboard/TPM-20-Module.html"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/190886/intel-core-i39100f-processor-6m-cache-up-to-4-20-ghz/specifications.html",
+        "https://www.intel.com/content/www/us/en/support/topics/support-and-servicing-for-processors.html",
+        "https://www.msi.com/Motherboard/H310M-PRO-M2-plus/Specification",
+        "https://www.msi.com/Motherboard/H310M-PRO-M2-PLUS/support",
+        "https://download-2.msi.com/archive/mnu_exe/mb/H310MPRO-M2PLUS100x150.pdf",
+        "https://www.msi.com/Motherboard/TPM-20-Module.html"
+      ]
+    },
+    {
+      "id": "intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2018,
+      "cpu": {
+        "qemu_arg": "Skylake-Client-IBRS,family=6,model=158,stepping=11,adx=off,avx=off,avx2=off,bmi1=off,bmi2=off,f16c=off,fma=off,hle=off,rtm=off,model-id=Intel(R) Pentium(R) Gold G5400 CPU @ 3.70GHz",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Pentium(R) Gold G5400 CPU @ 3.70GHz",
+        "max_mhz": 3700,
+        "current_mhz": 3700,
+        "tsc_mhz": 3700,
+        "part": "BX80684G5400",
+        "socket": "LGA1151",
+        "cores": 2,
+        "threads": 4,
+        "phys_bits": 39,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": { "present": true, "profile_state": "disabled_in_bios", "model": "Intel UHD Graphics 610" },
+        "smbios": { "family": "0x000B", "upgrade": "0x32", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00FC" }
+      },
+      "board": {
+        "manufacturer": "Gigabyte Technology Co., Ltd.",
+        "product": "H310M S2H 2.0",
+        "family": "H310M S2H 2.0",
+        "version": "Rev. 1.0",
+        "serial_fn": "_serial_giga",
+        "subsystem_vendor": "0x1458",
+        "subsystem_device": "0x5001",
+        "pch": "Intel H310",
+        "pcie_generation": 3,
+        "dimm_slots": 2,
+        "max_memory_gib": 32
+      },
+      "memory": { "type": "DDR4", "channels": 2, "max_mts": 2400, "allowed_mts": [2133, 2400], "voltage_mv": 1200, "rank": 1, "module_mib": [2048, 4096], "allowed_total_mib": [2048, 4096, 8192] },
+      "devices": {
+        "chipset": { "mch": ["0x8086", "0x3E1F", "0x08"], "lpc": ["0x8086", "0xA303", "0x10"], "smbus": ["0x8086", "0xA323", "0x10"], "ahci": ["0x8086", "0xA352", "0x10"] },
+        "root_port": { "pci_vendor": "0x8086", "pci_device": "0xA338", "revision": "0xF0" },
+        "xhci": { "pci_vendor": "0x8086", "pci_device": "0xA36D", "revision": "0x10" },
+        "nvme": { "max_pcie_generation": 2, "lanes": 2, "boot_supported": true, "attachment": "m2_socket" },
+        "nic": { "vendor": "Intel", "model": "Intel 82574L Gigabit Network Connection", "pci_vendor": "0x8086", "pci_device": "0x10D3", "subsystem_vendor": "0x8086", "subsystem_device": "0xA01F", "mac_oui": "3c:fd:fe", "attachment": "add_in", "board_nic_state": "disabled_in_bios" },
+        "audio": { "vendor": "Realtek", "codec": "ALC887", "codec_id": "0x10ec0887", "codec_revision": "0x00100302", "codec_subsystem_id": "0x1458a182", "identity_fidelity": "protocol_identity_only", "controller_pci_vendor": "0x8086", "controller_pci_device": "0xA348" }
+      },
+      "bios": { "vendor": "American Megatrends Inc.", "version": "F12", "date": "08/27/2019" },
+      "system": { "product": "H310M S2H 2.0", "family": "Default string", "chassis_type": "0x03" },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "2.0",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": ["sha256"],
+        "support_source_ref": "https://www.gigabyte.com/Motherboard/H310M-S2H-20-rev-10/sp",
+        "version_source_ref": "https://www.gigabyte.com/PC-Accessory/GC-TPM20_S/sp"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/129951/intel-pentium-gold-g5400-processor-4m-cache-3-70-ghz/specifications.html",
+        "https://www.intel.com/content/www/us/en/support/topics/support-and-servicing-for-processors.html",
+        "https://www.gigabyte.com/Motherboard/H310M-S2H-20-rev-10/sp",
+        "https://www.gigabyte.com/Motherboard/H310M-S2H-20-rev-10/support",
+        "https://download.gigabyte.com/FileList/Manual/mb_manual_h310m-s2h-20_e.pdf",
+        "https://www.gigabyte.com/PC-Accessory/GC-TPM20_S/sp"
       ]
     },
     {

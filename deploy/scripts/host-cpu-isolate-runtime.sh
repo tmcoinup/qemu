@@ -10,10 +10,13 @@
 
 # 由 source 本文件的 main helper 读取；独立 ShellCheck 看不到跨文件 ABI 握手。
 # shellcheck disable=SC2034
-readonly VMATE_CPU_ISOLATE_RUNTIME_ABI="1"
+readonly VMATE_CPU_ISOLATE_RUNTIME_ABI="5"
 readonly SETPRIV="/usr/bin/setpriv"
 readonly TASKSET="/usr/bin/taskset"
 readonly KILL="/bin/kill"
+readonly RMDIR="/usr/bin/rmdir"
+readonly MIGRATEPAGES="/usr/bin/migratepages"
+readonly TIMEOUT="/usr/bin/timeout"
 
 _proc_start_time() {
     local pid="$1" stat_line rest
@@ -26,6 +29,18 @@ _proc_start_time() {
     (( ${#stat_fields[@]} >= 20 )) || return 1
     [[ "${stat_fields[19]}" =~ ^[0-9]+$ ]] || return 1
     printf '%s\n' "${stat_fields[19]}"
+}
+
+_proc_generation_is_live() {
+    local pid="$1" expected="$2" stat_line rest
+    local -a fields=()
+    stat_line="$(<"/proc/$pid/stat")" || return 1
+    rest="${stat_line##*) }"
+    read -ra fields <<< "$rest"
+    (( ${#fields[@]} >= 20 )) || return 1
+    [[ "${fields[0]}" != "Z" && "${fields[0]}" != "z" \
+       && "${fields[0]}" != "X" && "${fields[0]}" != "x" \
+       && "${fields[19]}" == "$expected" ]]
 }
 
 _caller_uid() {
@@ -191,6 +206,97 @@ _run_as_caller() {
         --ambient-caps=-all --no-new-privs -- "$@"
 }
 
+# 只用于内核 sysfs/cgroup 输出的严格 cpulist 解析。通用 helper 的旧解析器会忽略
+# 非法片段，不适合验证“完整物理核”这种安全不变量；这里遇到空值、倒序范围或任意
+# 非标准字符都返回失败。
+_strict_cpu_list_to_lines() {
+    local list="$1" part start end cpu
+    local -a parts=()
+
+    [[ "$list" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || return 1
+    IFS=',' read -ra parts <<< "$list"
+    for part in "${parts[@]}"; do
+        if [[ "$part" == *-* ]]; then
+            start=$((10#${part%-*}))
+            end=$((10#${part#*-}))
+            (( start <= end )) || return 1
+            for ((cpu=start; cpu<=end; cpu++)); do
+                printf '%s\n' "$cpu"
+            done
+        else
+            printf '%s\n' "$((10#$part))"
+        fi
+    done
+}
+
+_strict_cpu_list_to_csv() {
+    local lines
+    lines="$(_strict_cpu_list_to_lines "$1")" || return 1
+    [[ -n "$lines" ]] || return 1
+    printf '%s\n' "$lines" | sort -n -u | paste -sd, -
+}
+
+# 返回两个严格 cpulist 的交集。cpuset.cpus 会保留暂时 offline 的 CPU 请求，而
+# *.effective 只呈现当前在线且由父级实际授予的部分；核验时必须区分这两层语义。
+_strict_cpu_list_intersection_csv() {
+    local left="$1" right="$2" cpu left_lines right_lines
+    local -A right_set=()
+
+    left_lines="$(_strict_cpu_list_to_lines "$left")" || return 1
+    right_lines="$(_strict_cpu_list_to_lines "$right")" || return 1
+    while IFS= read -r cpu; do
+        [[ -n "$cpu" ]] && right_set[$cpu]=1
+    done <<< "$right_lines"
+    while IFS= read -r cpu; do
+        [[ -n "$cpu" && -n "${right_set[$cpu]:-}" ]] && printf '%s\n' "$cpu"
+    done <<< "$left_lines" | sort -n -u | paste -sd, -
+}
+
+# 写入 partition 后必须核对内核实际授予的 effective/exclusive 集合。只检查请求值或
+# partition 文本会在父级约束、热插拔或兄弟分区冲突时误报成功。
+_verify_vmiso_cpu_grant() {
+    local expected="$1" expected_norm expected_online online requested
+    local effective exclusive partition
+
+    expected_norm="$(_strict_cpu_list_to_csv "$expected")" \
+        || _die "期望 cpuset 格式非法: $expected"
+    requested="$(<"$VMISO/cpuset.cpus")" || _die "无法读回 cpuset.cpus"
+    requested="$(_strict_cpu_list_to_csv "$requested")" \
+        || _die "内核返回的 cpuset.cpus 非法"
+    [[ "$requested" == "$expected_norm" ]] \
+        || _die "cpuset.cpus 未达到请求值: expected=$expected_norm actual=$requested"
+
+    online="$(< /sys/devices/system/cpu/online)" \
+        || _die "无法读取在线 CPU 列表"
+    expected_online="$(_strict_cpu_list_intersection_csv "$expected_norm" "$online")" \
+        || _die "无法计算 requested/online CPU 交集"
+    [[ -n "$expected_online" ]] || _die "期望 cpuset 没有在线 CPU"
+
+    effective="$(<"$VMISO/cpuset.cpus.effective")" \
+        || _die "无法读取 cpuset.cpus.effective"
+    effective="$(_strict_cpu_list_to_csv "$effective")" \
+        || _die "cpuset.cpus.effective 为空或非法"
+    [[ "$effective" == "$expected_online" ]] \
+        || _die "cpuset effective 不完整: expected=$expected_online actual=$effective"
+
+    if [[ -e "$VMISO/cpuset.cpus.exclusive.effective" ]]; then
+        [[ -r "$VMISO/cpuset.cpus.exclusive.effective" ]] \
+            || _die "cpuset.cpus.exclusive.effective 不可读"
+        exclusive="$(<"$VMISO/cpuset.cpus.exclusive.effective")" \
+            || _die "无法读取 cpuset.cpus.exclusive.effective"
+        exclusive="$(_strict_cpu_list_to_csv "$exclusive")" \
+            || _die "cpuset.cpus.exclusive.effective 为空或非法"
+        # 内核允许 exclusive.effective 保留 offline CPU；这正是热上线后仍维持独占
+        # 边界所需的行为，因此这里核对完整 requested 集，而不是仅核对 online 交集。
+        [[ "$exclusive" == "$expected_norm" ]] \
+            || _die "cpuset exclusive 不完整: expected=$expected_norm actual=$exclusive"
+    fi
+
+    partition="$(<"$VMISO/cpuset.cpus.partition")" \
+        || _die "无法读回 cpuset partition"
+    [[ "$partition" == "root" ]] || _die "cpuset partition 未保持 root: $partition"
+}
+
 # apply 是跨 cgroup、affinity 与状态文件的事务。先以调用者身份 SIGSTOP，使已验证的
 # 线程在敏感操作期间保持稳定；保存原 cgroup 和每线程 affinity，任一步失败即回滚。
 _apply_transaction_begin() {
@@ -201,6 +307,7 @@ _apply_transaction_begin() {
     TARGET_CALLER_GID="$(_caller_gid)"
     APPLY_SUCCESS=0; APPLY_STOPPED=0; APPLY_MOVED=0
     APPLY_STATE_WRITTEN=0; APPLY_VMISO_TOUCHED=0; APPLY_VMISO_EXISTED=0
+    APPLY_INSTANCE_CREATED=0
     APPLY_OLD_CPUS=""; APPLY_OLD_MEMS=""; APPLY_OLD_PARTITION=""
     declare -gA APPLY_AFFINITY=()
 
@@ -245,37 +352,142 @@ _apply_transaction_begin() {
 }
 
 _apply_transaction_exit() {
-    local status="$1" tid
+    local status="$1" tid rollback_failed=0 current
     trap - EXIT HUP INT TERM
     set +e
     if (( APPLY_SUCCESS == 0 )); then
-        # _state_path 在主 helper 取得全局锁后、任何状态写入前设置。
-        # shellcheck disable=SC2154
-        [[ "$APPLY_STATE_WRITTEN" == 0 ]] || rm -f -- "$_state_path"
-        if (( APPLY_MOVED )) && _target_is_unchanged; then
-            printf '%s\n' "$PID" > "$APPLY_ORIGINAL_PROCS"
+        # 先把目标移回原 cgroup；否则旧 affinity 可能不属于当前 cpuset。PID 已退出时
+        # 内核会自动把线程移除，可继续恢复分区；PID 被复用则绝不操作新进程。
+        if (( APPLY_MOVED )); then
+            if _target_is_unchanged; then
+                if printf '%s\n' "$PID" > "$APPLY_ORIGINAL_PROCS"; then
+                    APPLY_MOVED=0
+                else
+                    _warn "回滚失败：无法把 pid=$PID 移回原 cgroup"
+                    rollback_failed=1
+                fi
+            elif [[ ! -d "/proc/$PID" ]]; then
+                APPLY_MOVED=0
+            else
+                _warn "回滚失败：pid=$PID 身份已变化，拒绝操作复用 PID"
+                rollback_failed=1
+            fi
         fi
+
         if _target_is_unchanged; then
             for tid in "${!APPLY_AFFINITY[@]}"; do
-                [[ -d "/proc/$PID/task/$tid" ]] && \
-                    _run_as_caller "$TASKSET" -pc "${APPLY_AFFINITY[$tid]}" "$tid" \
-                        >/dev/null 2>&1
+                [[ -d "/proc/$PID/task/$tid" ]] || continue
+                if ! _run_as_caller "$TASKSET" -pc "${APPLY_AFFINITY[$tid]}" "$tid" \
+                        >/dev/null 2>&1; then
+                    _warn "回滚失败：无法恢复 tid=$tid affinity"
+                    rollback_failed=1
+                fi
             done
         fi
+
+        # exact child 必须先拆除，父 partition 才能安全收回到事务前并集。
+        # _instance_path 由 main 在 begin 前按已校验实例号确定。
+        # shellcheck disable=SC2154
+        if (( APPLY_INSTANCE_CREATED )); then
+            if (( APPLY_MOVED )); then
+                _warn "回滚失败：QEMU 仍在实例 child，拒绝删除"
+                rollback_failed=1
+            elif [[ -d "$_instance_path" ]]; then
+                if "$RMDIR" "$_instance_path" 2>/dev/null; then
+                    APPLY_INSTANCE_CREATED=0
+                else
+                    _warn "回滚失败：无法删除实例 child $_instance_path"
+                    rollback_failed=1
+                fi
+            else
+                APPLY_INSTANCE_CREATED=0
+            fi
+        fi
+
         if (( APPLY_VMISO_TOUCHED )); then
-            if (( APPLY_VMISO_EXISTED )); then
-                printf '%s\n' "$APPLY_OLD_CPUS" > "$VMISO/cpuset.cpus"
-                printf '%s\n' "$APPLY_OLD_MEMS" > "$VMISO/cpuset.mems"
-                printf '%s\n' "$APPLY_OLD_PARTITION" > "$VMISO/cpuset.cpus.partition"
+            if (( APPLY_MOVED || APPLY_INSTANCE_CREATED )); then
+                _warn "回滚失败：实例仍依赖 vmiso，拒绝收缩父 cpuset"
+                rollback_failed=1
+            elif (( APPLY_VMISO_EXISTED )); then
+                if ! printf '%s\n' "$APPLY_OLD_MEMS" > "$VMISO/cpuset.mems" ||
+                   ! printf '%s\n' "$APPLY_OLD_CPUS" > "$VMISO/cpuset.cpus" ||
+                   ! printf '%s\n' "$APPLY_OLD_PARTITION" > "$VMISO/cpuset.cpus.partition"; then
+                    _warn "回滚失败：无法恢复 vmiso cpuset 快照"
+                    rollback_failed=1
+                else
+                    current="$(<"$VMISO/cpuset.cpus.partition")"
+                    if [[ "$current" != "$APPLY_OLD_PARTITION" ]]; then
+                        _warn "回滚失败：vmiso partition 未恢复为 $APPLY_OLD_PARTITION"
+                        rollback_failed=1
+                    fi
+                fi
             elif [[ -d "$VMISO" ]]; then
-                printf 'member\n' > "$VMISO/cpuset.cpus.partition" 2>/dev/null
-                rmdir "$VMISO" 2>/dev/null || _warn "故障回滚后无法删除 $VMISO"
+                if grep -qw cpuset "$VMISO/cgroup.subtree_control" 2>/dev/null \
+                   && ! printf '%s\n' '-cpuset' > "$VMISO/cgroup.subtree_control" 2>/dev/null; then
+                    _warn "回滚失败：无法停用父级 cpuset controller"
+                    rollback_failed=1
+                fi
+                if ! printf 'member\n' > "$VMISO/cpuset.cpus.partition" 2>/dev/null ||
+                   [[ "$(<"$VMISO/cpuset.cpus.partition")" != "member" ]] ||
+                   ! "$RMDIR" "$VMISO" 2>/dev/null; then
+                    _warn "回滚失败：无法拆除新建的 $VMISO"
+                    rollback_failed=1
+                fi
+            fi
+        fi
+
+        # 实例登记是故障恢复凭据。只有 PID/cgroup/affinity/cpuset 全部恢复后才能删除；
+        # 任一步失败都保留它，避免管理员失去当前分配与目标身份记录。
+        # shellcheck disable=SC2154
+        if (( APPLY_STATE_WRITTEN && rollback_failed == 0 )); then
+            if ! rm -f -- "$_state_path"; then
+                _warn "回滚失败：无法删除实例登记 $_state_path"
+                rollback_failed=1
             fi
         fi
     fi
+
     if (( APPLY_STOPPED )) && _target_is_unchanged; then
-        _run_as_caller "$KILL" -CONT "$PID" >/dev/null 2>&1 \
-            || _warn "无法恢复 pid=$PID，请人工发送 SIGCONT"
+        if (( rollback_failed == 0 )); then
+            _run_as_caller "$KILL" -CONT "$PID" >/dev/null 2>&1 \
+                || { _warn "无法恢复 pid=$PID，请人工发送 SIGCONT"; rollback_failed=1; }
+        else
+            _warn "事务回滚不完整，pid=$PID 保持暂停，避免在错误隔离状态下继续运行"
+        fi
     fi
+    (( status != 0 )) || (( APPLY_SUCCESS == 1 && rollback_failed == 0 )) || status=1
     exit "$status"
+}
+
+_host_numa_node_count() {
+    local entry suffix count=0
+    for entry in /sys/devices/system/node/node[0-9]*; do
+        [[ -e "$entry" ]] || continue
+        suffix="${entry##*/node}"
+        [[ "$suffix" =~ ^[0-9]+$ ]] && count=$((count + 1))
+    done
+    printf '%s\n' "$count"
+}
+_validate_memory_locality_tool() {
+    local count
+    count="$(_host_numa_node_count)"
+    (( count <= 1 )) || [[ -x "$MIGRATEPAGES" && -x "$TIMEOUT" ]] \
+        || _die "多 NUMA 严格模式缺少 $MIGRATEPAGES，无法迁移既有 QEMU 页面"
+}
+_count_host_free_physical_cores() {
+    local allocated="$1" online cpu key blocked count=0 item
+    local -A allocated_set=() core_seen=()
+    while IFS= read -r cpu; do allocated_set[$cpu]=1; done \
+        < <(_strict_cpu_list_to_lines "$allocated")
+    online="$(< /sys/devices/system/cpu/online)" || return 1
+    while IFS= read -r cpu; do
+        key="$(_host_core_key "$cpu")" || return 1
+        [[ -z "${core_seen[$key]:-}" ]] || continue
+        core_seen[$key]=1; blocked=0
+        while IFS= read -r item; do
+            [[ -z "${allocated_set[$item]:-}" ]] || blocked=1
+        done < <(_strict_cpu_list_to_lines "$key")
+        (( blocked )) || count=$((count + 1))
+    done < <(_strict_cpu_list_to_lines "$online")
+    printf '%s\n' "$count"
 }

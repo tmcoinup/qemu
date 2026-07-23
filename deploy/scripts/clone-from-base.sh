@@ -3,8 +3,8 @@
 #
 # 用法：
 #   deploy/scripts/clone-from-base.sh <BASE_NAME|BASE_QCOW2> <NEW_INSTANCE>
-#       [--allow-platform-compatibility] [--qemu=PATH] [--cpus=2|4]
-#       [--migrate-storage-profile]
+#       [--allow-platform-compatibility] [--migrate-storage-profile] [--qemu=PATH]
+#       [--cpus=2|4] [--memory-id=ID] [--storage-id=ID] [--gpu-id=ID] [--monitor-id=ID]
 #       [--image-root=PATH|--vms-dir=PATH|--base-dir=PATH] [--qemu-img=PATH]
 #
 # 例：
@@ -51,6 +51,10 @@ while [[ $# -gt 0 ]]; do
         --qemu-img=*)   CLI_QEMU_IMG="${1#*=}" ;;
         --qemu=*)       CLI_QEMU="${1#*=}" ;;
         --cpus=*)       CLI_CPUS="${1#*=}" ;;
+        --memory-id=*)  STEALTH_MEMORY_ID="${1#*=}" ;;
+        --storage-id=*) STEALTH_STORAGE_ID="${1#*=}" ;;
+        --gpu-id=*)     STEALTH_GPU_ID="${1#*=}" ;;
+        --monitor-id=*) STEALTH_MONITOR_ID="${1#*=}" ;;
         --allow-platform-compatibility) ALLOW_PLATFORM_COMPATIBILITY=1 ;;
         --migrate-storage-profile) ALLOW_STORAGE_MIGRATION=1 ;;
         --*) echo "ERROR: 未知 flag: $1" >&2; exit 2 ;;
@@ -58,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+export STEALTH_MEMORY_ID STEALTH_STORAGE_ID STEALTH_GPU_ID STEALTH_MONITOR_ID
 
 BASE_ARG="${POS[0]:-}"
 NEW_INSTANCE="${POS[1]:-}"
@@ -75,8 +80,8 @@ VMS_DIR="${VMS_DIR%/}"
 BASE_DIR="${CLI_BASE_DIR:-${BASE_DIR:-$VMS_DIR/_base}}"
 
 if [[ -z "$BASE_ARG" || -z "$NEW_INSTANCE" ]]; then
-    echo "usage: $0 <BASE_NAME|BASE_QCOW2> <NEW_INSTANCE> [--cpus=2|4] [--qemu=PATH]" >&2
-    echo "       [--allow-platform-compatibility] [--migrate-storage-profile]" >&2
+    echo "usage: $0 <BASE_NAME|BASE_QCOW2> <NEW_INSTANCE> [--cpus=2|4] [--qemu=PATH] [--allow-platform-compatibility] [--migrate-storage-profile]" >&2
+    echo "       [--memory-id=ID] [--storage-id=ID] [--gpu-id=ID] [--monitor-id=ID]" >&2
     echo "       [--image-root=PATH] [--vms-dir=PATH] [--base-dir=PATH] [--qemu-img=PATH]" >&2
     echo "" >&2
     echo "可用 base:" >&2
@@ -232,6 +237,7 @@ clone_lifecycle_require_qemu_caps \
 HERE="$SCRIPT_DIR"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/stealth-lib.sh"
+stealth_component_selection_init_requests
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib/base-boot-storage.sh"
 # 不接受 root 调用方注入的 KVM 结果；创建必须重新证明普通用户能打开真实设备。

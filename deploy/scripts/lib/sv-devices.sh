@@ -94,11 +94,12 @@ ROOT_PORT_ARGS=(
 # 路径。当前 Windows 使用 stock VioGpuDod Display-Only 驱动，并没有 Mesa
 # virgl/Direct3D 渲染栈；浅层名称与 PCI 投影也不会增加 Direct3D、CUDA 或 NVENC。
 # -------------------------------------------------------------------
-# GPU subsystem spoof: 主 ID 留 1AF4:1050 (virtio) 让 stock virtio-win 绑定，
-# subsys 改成 profile 选定的 GPU (NVIDIA / AMD)。
+# GPU subsystem carrier：主 ID 留 1AF4:1050 让 stock virtio-win 绑定；新 AIB
+# profile 只写入保留的 1AF4:A10x 内部令牌。真实板卡 subsystem 由 Guest 用户态
+# 投影读取，绝不能直接挂到 virtio 物理设备上。
 # apply-gpu-spoof.ps1 与双架构系统搜索 NVAPI 在 guest 用户态把
 # 可投影字段对齐到 profile.GPU_NAME；它们不会改变内核看到的物理主 ID。
-GPU_STEALTH="x-pci-sub-vendor-id=${GPU_PCI_VEN},x-pci-sub-device-id=${GPU_PCI_DEV},x-pci-revision=${GPU_REV}"
+GPU_STEALTH="x-pci-sub-vendor-id=${GPU_CARRIER_VEN},x-pci-sub-device-id=${GPU_CARRIER_DEV},x-pci-revision=${GPU_REV}"
 
 # sv-cli 已在所有宿主副作用前拒绝历史深层开关。这里保留第二道门禁，防止开发者在
 # 单独 source 设备模块或未来重排模块时，意外恢复主 VEN/DEV 覆盖。
@@ -177,8 +178,55 @@ fi
 # 选 virtio-vga 或 virtio-vga-gl + 注入 profile 的 EDID 字符串（patch 0009 新选项）
 # 固定 native mode 是本部署画像的显式 opt-in；普通 QEMU 调用方仍保留随
 # display-info/UI resize 更新 EDID 的上游行为。
-EDID_PROPS="edid-fixed-native=on,edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID_SERIAL},edid-width-mm=${EDID_WIDTH_MM},edid-height-mm=${EDID_HEIGHT_MM}"
+_EXPECTED_EDID_BINARY_SERIAL="$(
+    stealth_component_monitor_binary_serial \
+        "$EDID_COMPONENT_ID" "$EDID_SERIAL"
+)" || {
+    echo "ERROR: 显示器文本序列号无法映射到品牌绑定的 EDID binary serial" >&2
+    return 1 2>/dev/null || exit 1
+}
+_EXPECTED_EDID_REVISION="$(stealth_component_monitor_revision "$EDID_COMPONENT_ID")" || {
+    echo "ERROR: 显示器 EDID revision 不在受控组件目录中" >&2
+    return 1 2>/dev/null || exit 1
+}
+_EXPECTED_EDID_SECONDARY_DETAIL="$(
+    stealth_component_monitor_secondary_detail "$EDID_COMPONENT_ID"
+)" || {
+    echo "ERROR: 显示器次要 DTD 不在受控组件目录中" >&2
+    return 1 2>/dev/null || exit 1
+}
+IFS='|' read -r _EXPECTED_EDID_SECONDARY_PIXEL_CLOCK_KHZ \
+    _EXPECTED_EDID_SECONDARY_HFRONT _EXPECTED_EDID_SECONDARY_HSYNC \
+    _EXPECTED_EDID_SECONDARY_HBLANK _EXPECTED_EDID_SECONDARY_VFRONT \
+    _EXPECTED_EDID_SECONDARY_VSYNC _EXPECTED_EDID_SECONDARY_VBLANK \
+    _EXPECTED_EDID_SECONDARY_HSYNC_POSITIVE \
+    _EXPECTED_EDID_SECONDARY_VSYNC_POSITIVE \
+    _EXPECTED_EDID_SECONDARY_WIDTH_MM _EXPECTED_EDID_SECONDARY_HEIGHT_MM \
+    <<<"$_EXPECTED_EDID_SECONDARY_DETAIL"
+if [[ "${EDID_BINARY_SERIAL:-}" != "$_EXPECTED_EDID_BINARY_SERIAL" ||
+      "${EDID_REVISION:-}" != "$_EXPECTED_EDID_REVISION" ||
+      "${EDID_SECONDARY_PIXEL_CLOCK_KHZ:-}" != \
+          "$_EXPECTED_EDID_SECONDARY_PIXEL_CLOCK_KHZ" ||
+      "${EDID_SECONDARY_HFRONT:-}" != "$_EXPECTED_EDID_SECONDARY_HFRONT" ||
+      "${EDID_SECONDARY_HSYNC:-}" != "$_EXPECTED_EDID_SECONDARY_HSYNC" ||
+      "${EDID_SECONDARY_HBLANK:-}" != "$_EXPECTED_EDID_SECONDARY_HBLANK" ||
+      "${EDID_SECONDARY_VFRONT:-}" != "$_EXPECTED_EDID_SECONDARY_VFRONT" ||
+      "${EDID_SECONDARY_VSYNC:-}" != "$_EXPECTED_EDID_SECONDARY_VSYNC" ||
+      "${EDID_SECONDARY_VBLANK:-}" != "$_EXPECTED_EDID_SECONDARY_VBLANK" ||
+      "${EDID_SECONDARY_HSYNC_POSITIVE:-}" != \
+          "$_EXPECTED_EDID_SECONDARY_HSYNC_POSITIVE" ||
+      "${EDID_SECONDARY_VSYNC_POSITIVE:-}" != \
+          "$_EXPECTED_EDID_SECONDARY_VSYNC_POSITIVE" ||
+      "${EDID_SECONDARY_WIDTH_MM:-}" != \
+          "$_EXPECTED_EDID_SECONDARY_WIDTH_MM" ||
+      "${EDID_SECONDARY_HEIGHT_MM:-}" != \
+          "$_EXPECTED_EDID_SECONDARY_HEIGHT_MM" ]]; then
+    echo "ERROR: profile 的显示器 binary serial/revision/DTD 与目录不一致" >&2
+    return 1 2>/dev/null || exit 1
+fi
+EDID_PROPS="edid-fixed-native=on,edid-managed-timing-version=1,edid-vendor=${EDID_VENDOR},edid-name=${EDID_NAME},edid-serial=${EDID_SERIAL},edid-width-mm=${EDID_WIDTH_MM},edid-height-mm=${EDID_HEIGHT_MM}"
 EDID_PROPS+=",edid-product-id=${EDID_PRODUCT_ID},edid-manufacture-week=${EDID_MANUFACTURE_WEEK},edid-manufacture-year=${EDID_MANUFACTURE_YEAR}"
+EDID_PROPS+=",edid-binary-serial=${EDID_BINARY_SERIAL},edid-revision=${EDID_REVISION}"
 EDID_PROPS+=",edid-video-input=${EDID_VIDEO_INPUT},edid-min-vfreq-hz=${EDID_MIN_VFREQ_HZ},edid-max-vfreq-hz=${EDID_MAX_VFREQ_HZ}"
 EDID_PROPS+=",edid-min-hfreq-khz=${EDID_MIN_HFREQ_KHZ},edid-max-hfreq-khz=${EDID_MAX_HFREQ_KHZ},edid-max-pixel-clock-mhz=${EDID_MAX_PIXEL_CLOCK_MHZ}"
 EDID_PROPS+=",edid-secondary-xres=${EDID_SECONDARY_XRES},edid-secondary-yres=${EDID_SECONDARY_YRES},edid-secondary-refresh-rate=${EDID_SECONDARY_REFRESH_RATE}"
@@ -306,12 +354,22 @@ fi
 # 原 bridge/user-mode NAT 逻辑。两条路径不能共用 qemu-bridge-helper：该 helper
 # 只收到 bridge 名，不知道 VID，连接后再改 PVID 还会产生首包串 VLAN 的竞态。
 # -------------------------------------------------------------------
+# HERE 由 start-vm.sh 解析为绝对目录；动态加载路径无法由 ShellCheck 静态跟随。
+# shellcheck disable=SC1091
+source "$HERE/lib/sv-network-preflight.sh"
 if [[ -n "${VLAN_ID:-}" ]]; then
     NET_ARGS=(
         -netdev "tap,id=net0,ifname=$VLAN_TAP_IF,script=no,downscript=$SV_VLAN_DOWNSCRIPT"
     )
     echo ">> network:     access VLAN $VLAN_ID via $VLAN_TAP_IF on br0 (guest receives untagged frames)"
 else
+    # DRY_RUN 只验证 argv，不能依赖执行测试的宿主拓扑。真实普通 bridge 启动则在
+    # qemu-bridge-helper 创建 TAP 前核验可信配置指定的物理上联，避免把 VM 接入一个
+    # 只有软件 TAP、稍后会因 DHCP 超时重建的空 bridge。
+    if [[ -n "${BRIDGE:-}" && "${DRY_RUN:-0}" != "1" ]]; then
+        sv_bridge_uplink_preflight \
+            "$BRIDGE" "/etc/qemu/stealth-vlan.conf" "/sys/class/net" || exit 1
+    fi
     # 以下无 VLAN 分支保持历史行为：br0 可用则桥接；普通模式下不可用时仍按
     # STRICT_STEALTH/ALLOW_NAT_FALLBACK 的原规则决定报错或回退 NAT。
     if [[ -n "${BRIDGE:-}" ]]; then

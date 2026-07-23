@@ -20,6 +20,7 @@ source "$_SL_DIR/lib/stealth-pools.sh"        # CPU/主板/GPU/NVMe/内存/外�
 source "$_SL_DIR/lib/stealth-platform-registry.sh" # 默认/家用兼容/host 平台统一路由
 source "$_SL_DIR/lib/stealth-platform-selection.sh" # supported 优先 + KVM 实现预检
 source "$_SL_DIR/lib/stealth-gen.sh"          # NVMe/DIMM/显示器/USB serial + MAC/UUID
+source "$_SL_DIR/lib/stealth-component-selection.sh" # 可选部件 ID 的过滤后精确选择
 source "$_SL_DIR/lib/stealth-pick.sh"         # stealth_pick_profile
 source "$_SL_DIR/lib/stealth-profile-verify.sh" # 严格校验 profile 与 manifest 事实绑定
 source "$_SL_DIR/lib/stealth-profile-io.sh"   # 白名单 + save / load(安全解析)

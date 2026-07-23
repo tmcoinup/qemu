@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-07-23.3",
+  "scope": "verified_exact_512gb_nvme_only",
+  "storage": [
+    {
+      "id": "samsung-970-pro-512gb",
+      "enabled": true,
+      "selection_weight": 6,
+      "release_year": 2018,
+      "manufacturer": "Samsung",
+      "part_number": "MZ-V7P512BW",
+      "identity_profile": "samsung-970-pro-512gb",
+      "model": "Samsung SSD 970 PRO 512GB",
+      "firmware": "1B2QEXP7",
+      "raw_bytes": 512110190592,
+      "verification_status": "vendor_document_and_observed_identity_reference",
+      "identity_fidelity": "audited_register_bundle_synthetic_serial",
+      "serial_policy": {
+        "kind": "samsung-970-pro",
+        "pattern": "^S[A-Z0-9]{3}N[A-Z0-9]{10}$",
+        "length": 15,
+        "format_fidelity": "observed_multi_sample_shape_synthetic_value"
+      },
+      "pci": {
+        "vendor": "0x144D",
+        "device": "0xA808",
+        "subsystem_vendor": "0x144D",
+        "subsystem_device": "0xA801"
+      },
+      "nvme": {
+        "pcie_generation": 3,
+        "lanes": 4,
+        "ieee_oui": "00:25:38",
+        "subnqn_template": "nqn.2014-08.org.nvmexpress:uuid:{uuid}",
+        "nqn_fidelity": "standards_compliant_synthetic_uuid"
+      },
+      "source_refs": [
+        "https://www.samsung.com/uk/memory-storage/nvme-ssd/970-pro-nvme-m-2-ssd-512gb-mz-v7p512bw/",
+        "https://semiconductor.samsung.com/resources/data-sheet/Samsung_NVMe_SSD_970_PRO_Data_Sheet_Rev.1.0.pdf"
+      ],
+      "identity_source_refs": [
+        "https://bbs.archlinux.org/viewtopic.php?id=277088",
+        "https://raw.githubusercontent.com/pciutils/pciids/master/pci.ids"
+      ]
+    },
+    {
+      "id": "intel-760p-512gb",
+      "enabled": true,
+      "selection_weight": 5,
+      "release_year": 2018,
+      "manufacturer": "Intel",
+      "part_number": "SSDPEKKW512G8",
+      "identity_profile": "intel-760p-512gb",
+      "model": "INTEL SSDPEKKW512G8",
+      "firmware": "001C",
+      "raw_bytes": 512110190592,
+      "verification_status": "vendor_document_and_observed_identity_reference",
+      "identity_fidelity": "audited_register_bundle_synthetic_serial",
+      "serial_policy": {
+        "kind": "intel-760p",
+        "pattern": "^BTHH[A-Z0-9]{8}512D$",
+        "length": 16,
+        "format_fidelity": "observed_multi_sample_shape_synthetic_value"
+      },
+      "pci": {
+        "vendor": "0x8086",
+        "device": "0xF1A6",
+        "subsystem_vendor": "0x8086",
+        "subsystem_device": "0x390B"
+      },
+      "nvme": {
+        "pcie_generation": 3,
+        "lanes": 4,
+        "ieee_oui": "5C:D2:E4",
+        "subnqn_template": "nqn.2014-08.org.nvmexpress:uuid:{uuid}",
+        "nqn_fidelity": "standards_compliant_synthetic_uuid"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/dam/www/public/us/en/documents/product-briefs/ssd-760p-product-brief.pdf",
+        "https://cdrdv2-public.intel.com/799333/PCN116062-00.pdf"
+      ],
+      "identity_source_refs": [
+        "https://gist.github.com/agriffis/da2d55e3f3aa633f25f8e7e4497298c1",
+        "https://bugs.debian.org/958737"
+      ]
+    },
+    {
+      "id": "wd-pc-sn730-512gb",
+      "enabled": true,
+      "selection_weight": 6,
+      "release_year": 2019,
+      "manufacturer": "Western Digital",
+      "part_number": "SDBPNTY-512G-1027",
+      "identity_profile": "wd-pc-sn730-512gb",
+      "model": "WDC PC SN730 SDBPNTY-512G-1027",
+      "firmware": "11110000",
+      "raw_bytes": 512110190592,
+      "verification_status": "vendor_document_and_observed_identity_reference",
+      "identity_fidelity": "audited_register_bundle_synthetic_serial",
+      "serial_policy": {
+        "kind": "wd-pc-sn730",
+        "pattern": "^[A-Z0-9]{12}$",
+        "length": 12,
+        "format_fidelity": "observed_vendor_variable_ascii_shape_synthetic_value"
+      },
+      "pci": {
+        "vendor": "0x15B7",
+        "device": "0x5006",
+        "subsystem_vendor": "0x15B7",
+        "subsystem_device": "0x5006"
+      },
+      "nvme": {
+        "pcie_generation": 3,
+        "lanes": 4,
+        "ieee_oui": "00:1B:44",
+        "subnqn_template": "nqn.2014-08.org.nvmexpress:uuid:{uuid}",
+        "nqn_fidelity": "standards_compliant_synthetic_uuid"
+      },
+      "source_refs": [
+        "https://documents.westerndigital.com/content/dam/doc-library/en_us/assets/public/western-digital/product/internal-drives/pc-sn730-nvme-ssd/product-brief-pc-sn730-nvme-ssd.pdf",
+        "https://documents.westerndigital.com/content/dam/doc-library/en_us/assets/public/western-digital/product/internal-drives/pc-sn730-nvme-ssd/product-manual-pc-sn730-nvme-ssd.pdf"
+      ],
+      "identity_source_refs": [
+        "https://forum.manjaro.org/t/black-screen-after-last-update/112446?page=2",
+        "https://bbs.archlinux.org/viewtopic.php?id=269333",
+        "https://lists.debian.org/debian-kernel/2022/09/msg00063.html"
+      ]
+    },
+    {
+      "id": "kioxia-xg6-512gb",
+      "enabled": true,
+      "selection_weight": 4,
+      "release_year": 2018,
+      "manufacturer": "KIOXIA",
+      "part_number": "KXG60ZNV512G",
+      "identity_profile": "kioxia-xg6-512gb",
+      "model": "KXG60ZNV512G KIOXIA",
+      "firmware": "AGHA4101",
+      "raw_bytes": 512110190592,
+      "verification_status": "vendor_document_and_observed_identity_reference",
+      "identity_fidelity": "audited_register_bundle_synthetic_serial",
+      "serial_policy": {
+        "kind": "kioxia-xg6",
+        "pattern": "^[A-Z0-9]{12}$",
+        "length": 12,
+        "format_fidelity": "observed_multi_sample_shape_synthetic_value"
+      },
+      "pci": {
+        "vendor": "0x1179",
+        "device": "0x011A",
+        "subsystem_vendor": "0x1179",
+        "subsystem_device": "0x0001"
+      },
+      "nvme": {
+        "pcie_generation": 3,
+        "lanes": 4,
+        "ieee_oui": "8C:E3:8E",
+        "subnqn_template": "nqn.2014-08.org.nvmexpress:uuid:{uuid}",
+        "nqn_fidelity": "standards_compliant_synthetic_uuid"
+      },
+      "source_refs": [
+        "https://www.kioxia.com/content/dam/kioxia/shared/business/ssd/client-ssd/asset/productbrief/cSSD-XG6-product-brief.pdf",
+        "https://europe.kioxia.com/content/dam/kioxia/en-europe/business/ssd/document/asset/datasheet/KIOXIA%20Client%20SSD_Data%20Sheet_E_2021_Ver11.21_EMEA.pdf"
+      ],
+      "identity_source_refs": [
+        "https://bugs.debian.org/1003026",
+        "https://mis.sapuraindustrial.com.my/belarc/2024-172187614695.pdf",
+        "https://www.reddit.com/r/linuxquestions/comments/kzpma4"
+      ]
+    }
+  ]
+}

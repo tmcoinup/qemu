@@ -9,6 +9,10 @@ import pathlib
 import re
 from typing import Any
 
+from board_vendor_policy import (
+    source_ref_allowed, source_ref_is_board_vendor, source_ref_is_cpu_vendor,
+    validate_board_vendor_fields,
+)
 from guest_cpu_policy import (
     forbidden_server_identity, household_brand_allowed,
     named_household_qemu_base_allowed,
@@ -86,7 +90,12 @@ def duplicate_guard(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def validate_tpm(tpm: dict[str, Any], cpu_vendor: str, where: str) -> None:
+def validate_tpm(
+    tpm: dict[str, Any],
+    cpu_vendor: str,
+    board_policy: dict[str, Any],
+    where: str,
+) -> None:
     """联合校验主板 TPM 能力与项目仿真前端。"""
     exact(tpm, {
         "capability", "supported", "implementation", "version",
@@ -117,12 +126,8 @@ def validate_tpm(tpm: dict[str, Any], cpu_vendor: str, where: str) -> None:
         require(tpm, "version_source_ref", str, where),
     )
     for source in sources:
-        if not re.fullmatch(
-            r"https://(?:www\.)?(?:asus|intel)\.com(?:/\S*)?",
-            source,
-            flags=re.IGNORECASE,
-        ):
-            fail(f"{where} 必须使用 ASUS/Intel 官方 HTTPS TPM 来源")
+        if not source_ref_allowed(source, board_policy, cpu_vendor):
+            fail(f"{where} 必须使用当前主板或 CPU 厂商的官方 HTTPS TPM 来源")
     if sources[0] == sources[1]:
         fail(f"{where} 必须分别记录平台支持与 TPM 版本证据")
     if not supported:
@@ -297,12 +302,11 @@ def validate_devices(
         require_hex(require(audio, key, str, where), f"{where}.audio.{key}")
     if (
         audio["codec"], audio["codec_id"], audio["codec_revision"],
-        audio["codec_subsystem_id"], audio["identity_fidelity"],
-    ) != (
-        "ALC887", "0x10ec0887", "0x00100302", "0x104386c7",
-        "protocol_identity_only",
-    ):
+        audio["identity_fidelity"],
+    ) != ("ALC887", "0x10ec0887", "0x00100302", "protocol_identity_only"):
         fail(f"{where}.audio 不是已审计 ALC887 协议身份")
+    if audio["codec_subsystem_id"][2:6].lower() != board["subsystem_vendor"][2:].lower():
+        fail(f"{where}.audio codec subsystem vendor 与主板厂商不一致")
 
 
 def validate_platform(
@@ -401,8 +405,7 @@ def validate_platform(
             fail(f"{where}.board.{key} 不能为空")
     for key in ("subsystem_vendor", "subsystem_device"):
         require_hex(board[key], f"{where}.board.{key}")
-    if not re.fullmatch(r"_serial_(asus|msi|giga|asr)", board["serial_fn"]):
-        fail(f"{where}.board.serial_fn 不在白名单")
+    board_policy = validate_board_vendor_fields(board, f"{where}.board")
     for key in ("pcie_generation", "dimm_slots", "max_memory_gib"):
         if require(board, key, int, f"{where}.board") <= 0:
             fail(f"{where}.board.{key} 必须为正整数")
@@ -430,23 +433,26 @@ def validate_platform(
     require_hex(chassis, f"{where}.system.chassis_type", (2,))
     if chassis != "0x03":
         fail(f"{where}.system.chassis_type 当前只允许 Desktop 0x03")
-    validate_tpm(require(platform, "tpm", dict, where), cpu["vendor_id"], f"{where}.tpm")
+    validate_tpm(
+        require(platform, "tpm", dict, where), cpu["vendor_id"], board_policy,
+        f"{where}.tpm",
+    )
 
     refs = require(platform, "source_refs", list, where)
-    official = re.compile(
-        r"https://(?:(?:www\.)?(?:asus|amd|intel)\.com|"
-        r"dlcdnets?\.asus\.com)/\S+",
-        re.IGNORECASE,
-    )
     if (
         len(refs) < 3
         or len(refs) != len(set(refs))
-        or any(not isinstance(ref, str) or not official.fullmatch(ref) for ref in refs)
+        or any(
+            not isinstance(ref, str)
+            or not source_ref_allowed(ref, board_policy, cpu["vendor_id"])
+            for ref in refs
+        )
     ):
         fail(f"{where}.source_refs 至少需要三个不重复的官方 HTTPS 来源")
-    cpu_domain = "amd.com" if cpu["vendor_id"] == "AuthenticAMD" else "intel.com"
-    if not any(cpu_domain in ref.lower() for ref in refs):
+    if not any(source_ref_is_cpu_vendor(ref, cpu["vendor_id"]) for ref in refs):
         fail(f"{where}.source_refs 缺少 CPU 厂商型号规格")
+    if not any(source_ref_is_board_vendor(ref, board_policy) for ref in refs):
+        fail(f"{where}.source_refs 缺少当前主板厂商官方资料")
     validate_h310_cpu_policy(platform, where)
     validate_platform_fact_digests(platform, where)
 

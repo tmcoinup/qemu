@@ -1,10 +1,12 @@
 # USAGE — Linux/KVM 操作参考
 
 > **当前基线**：QEMU `11.0.2` + `V-11`，严格硬件目录 schema 1，Linux/KVM 为主路径。
-> 新 VM 默认启用 Intel G4900、G5400、i3-9100F/H310 与 i5-6400T/H110 四套受控 bundle；底层仍是 Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
-> NVMe、显示器和 HID 各只有一套经过约束的组件模板，不再从十款字符串池随机拼装；GPU passthrough/vGPU 不在本分支范围，virtio 显示标签不代表真实独显。
+> 新 VM 启用六套 Intel 受控 bundle，主板覆盖 ASUS、MSI、GIGABYTE；底层仍是 Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
+> NVMe 只含 Samsung、Intel、WD、KIOXIA 四款精确 512GB 原子模板，显示器有四款 1080p/16:9 模板；新 GPU 池覆盖 6 个芯片型号，每个型号 3 个板卡品牌，共 18 块 AIB（12 NVIDIA、6 AMD）。物理显示仍为 virtio `1AF4:1050`，不使用 GPU passthrough/vGPU，也不虚构 GPU 序列号。
 
 当前能力、E5-2696 v4/X99、其它 E5 与 Windows/WHPX 的结论先看 [硬件平台评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)；字段来源和 fidelity 见 [Profile 字段](PROFILE-FIELDS.md)。
+
+DGame 的区域推流依赖最终 QEMU 叶进程的进程级 Yama 例外。`start-vm.sh` 已逐实例自动选择包内 wrapper、内置 Python wrapper 或新版 `setpriv`，无需手工降低全局 `ptrace_scope`；根因、滚动重启和验收方式见 [DGame QEMU 内存授权记录](DGAME_QEMU_MEMORY_AUTH.md)。
 
 ## 1. 宿主前提
 
@@ -16,8 +18,7 @@ Linux 严格启动至少需要：
 - 默认 host tune/CPU isolate 所需的 root-owned helper。
 - 至少 2 个可用逻辑 CPU；`CPUS` 只能为 2 或 4，并须等于所选 2C2T/2C4T/4C4T SKU 的完整线程数。
 
-新 Ubuntu host 应按用途安装依赖，不要把运行时、固件重建和 Windows 交叉打包工具混成一组。
-完整包名、命令对应关系、Podman/rootless 边界及安装后自检见 [开发与跨平台验证依赖](DEVELOPMENT-DEPENDENCIES.md)。
+新 Ubuntu host 应按用途安装依赖，不要把运行时、固件重建和 Windows 交叉打包工具混成一组。完整包名、命令对应关系、Podman/rootless 边界及安装后自检见 [开发与跨平台验证依赖](DEVELOPMENT-DEPENDENCIES.md)。
 
 Ubuntu Desktop 通常已经由 NetworkManager 管理网卡；持久化 `br0` 前先确认：
 
@@ -27,9 +28,7 @@ nmcli -t -f NAME,TYPE,DEVICE connection show --active
 ip -4 route show default
 ```
 
-如果输出不是 `active`，`setup-bridge.sh` 只会使用非持久的 iproute2 fallback。
-Ubuntu Server 若仍由 netplan/systemd-networkd 管理，不要在 SSH 中直接切 renderer；
-先准备本地/带外控制台，再执行 `sudo apt install -y network-manager` 并切换 renderer。
+如果输出不是 `active`，`setup-bridge.sh` 只会使用非持久的 iproute2 fallback。Ubuntu Server 若仍由 netplan/systemd-networkd 管理，不要在 SSH 中直接切 renderer；先准备本地/带外控制台，再执行 `sudo apt install -y network-manager` 并切换 renderer。
 
 GNOME Wayland 会话由 Mutter 决定 XWayland 窗口能否抑制 `Super`、`Alt+Tab` 等宿主快捷键。
 QEMU 会在键盘抓取前发送 `_XWAYLAND_MAY_GRAB_KEYBOARD`，为当前普通 SDL 窗口申请权限。
@@ -62,7 +61,7 @@ sudo -n /usr/local/libexec/qemu-vmate-cpu-isolate preflight
 `preflight` 会验证固定 helper/runtime、QEMU 信任清单中的 canonical path、device/inode 和
 SHA-256，并检查 cgroup v2/cpuset（缺少 subtree controller 时会尝试启用），同时准备
 root-only 的 `/run/qemu-vmate-cpu-isolate` 目录。它不会创建 `vmiso` CPU 分区、迁移进程、
-修改 governor 或启动 VM；成功时只输出 `cpu-isolate preflight passed.`。
+修改 governor 或启动 VM；成功输出包含 `abi=5 policy=logical-1to1-v1`。
 
 本分支不做 GPU passthrough/vGPU，因此 VT-d/IOMMU 不是当前功能前提。它仍可用于宿主其它
 用途，但不能据此提高本项目 GPU 真机化评级。
@@ -155,6 +154,24 @@ profile 的来源并完成备份后，可在启动时显式追加 `--migrate-sto
 不会改写 profile，也不会放宽当前 profile 的部分缺失、空值或目录事实绑定。由于
 profile 本身不是签名凭据，旧 profile 每次加载都必须继续携带该显式授权。
 
+目录升级另有两项不改变 Guest 身份的自动规范化，不需要
+`--migrate-storage-profile`，也不需要重建实例或 `--reroll`：
+
+- `2026-07-19.6` 的精确 Kingston 历史组合会把实际
+  `KVR24N17S8/4`、2×4 GiB 拓扑绑定到稳定 module ID，并移除从未暴露给 Guest 的
+  无效 2 GiB 候选；
+- `2026-07-19.6` 当时唯一的 Samsung 970 PRO component 若完整绑定，
+  `BOOT_STORAGE_PART_NUMBER=component-catalog` 会替换为真实零售料号
+  `MZ-V7P512BW`；后来加入的 Intel/WD/KIOXIA component 不能伪装成该历史格式。
+
+两项都要求旧字段与当前目录逐项精确匹配，任一字段被修改就 fail closed。`DRY_RUN=1`
+只验证并报告，不改文件；下一次非 dry-run 启动在 CPU realize、磁盘、TPM、内存拓扑
+和完整 QEMU 参数门禁全部通过后，会先把原文件保存为权限 `0400` 的
+`profile.pre-catalog-migration.<原文件SHA-256>`，再原子提交规范化 profile。
+若 profile 从加载到提交之间被外部修改，或同名恢复副本的内容、owner、mode 不匹配，
+启动会拒绝覆盖。UUID、主板/整机/机箱序列号、DIMM serial、NVMe serial/NQN、MAC
+和 TPM 绑定均保持不变。
+
 不要用 `STEALTH_HOST_CPU_VENDOR=GenuineIntel` 在 AMD 宿主强选 Intel bundle，也不要只把
 AMD 清单条目改成 `enabled=true`；两种做法都会制造跨厂商或跨芯片组矛盾。
 
@@ -218,8 +235,7 @@ NVMe、EDID、USB、PCI identity、fb-shm 等定制属性；不要在生产中�
 部署应由受控的 root 部署服务执行，并设置 `VMATE_TARGET_UID=<普通用户 UID>`。宿主重启
 和普通 VM 启动不需要重新安装。
 
-开发或测试会重链 QEMU 时，把下面三步留到所有并行构建结束后执行；第二步只是可选诊断，
-第三步启动时本来就会自动做同一项 preflight：
+开发或测试会重链 QEMU 时，把下面三步留到所有并行构建结束后执行；升级 helper ABI 或绑核策略前须安全关闭仍位于 `/vmiso` 的全部 VM，安装器检测到任何活动子分区或进程都会拒绝。第二步只是可选诊断：
 
 ```bash
 deploy/tools/build.sh --verify --install-host-helpers
@@ -380,7 +396,7 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `TPM` | `auto` | 跟随 profile 的主板能力、版本和前端；`1` 强制要求支持，`0` 显式关闭 |
 | `HOST_TUNE` | `1` | governor=performance、`halt_poll`、THP defrag；不停止 irqbalance |
 | `CPU_FREQ_CAP` | **`0`** | 默认不全局封顶；`--freq-cap` 才按目标 CPU 上限启用 |
-| `CPU_ISOLATE` | `1` | 异步 NUMA-aware pinner + cgroup cpuset |
+| `CPU_ISOLATE` | `1` | 严格启动闸门 + NUMA-aware pinner + 每实例 cgroup cpuset |
 | `QEMU_SERVICE_CPUS` | `0` | `--svc-cpu` 分配 1 个辅助线程逻辑 CPU |
 | `MEM_GUARD` | `1` | 可用内存不足时告警或拒绝；`MEM_FORCE=1` 显式越过硬拒绝 |
 | `SDL` / `FB_SHM` | `1` / `1` | 默认本地稳定 SDL 窗口与 fb-shm 同时启用 |
@@ -416,7 +432,7 @@ build/qemu-fb-shm-stream \
   --encoder libx264 --preset veryfast --mode auto
 ```
 
-显式 GL 即使不带 blob/hostmem，renderer 仍可尝试从普通 texture 导出 GPU handle；失败回落 SHM。客体始终是 virtio 显示设备，不能把 GPU handoff 或 NVIDIA/AMD 标签当作物理 GPU 证据。
+显式 GL 即使不带 blob/hostmem，renderer 仍可尝试从普通 texture 导出 GPU handle；失败回落 SHM。客体始终是 virtio 显示设备，不能把 GPU handoff、AIB 逻辑身份或 carrier 当作物理 NVIDIA/AMD GPU 证据。
 
 ## 7. Profile 与内存变更
 
@@ -465,8 +481,11 @@ E5 v1/v2 仍通过该参数进入兜底池。无 TSC scaling 时正常池会省�
 JGINYUE X99-TI D4 PLUS 已实测三个型号均可无 warning 创建 vCPU；该结果不替代
 客体枚举和长稳，E5 v3 每次启动仍以本机 KVM 预检为准。
 
-单路 X99 是一个宿主 NUMA 场景；双路 C612 应让每台 4-vCPU VM 优先放在一个 node，容量不足
-而跨 node 只能算退化运行。高核心数提高多 VM 容量，不保证单台 4-vCPU VM 更快。
+单路 X99 通常只有一个宿主 NUMA 场景；双路 C612 每台 VM 必须完整落在同一 `(NUMA node, physical package)` 域，容量不足严格拒绝。ABI5 的 `/vmiso` 父分区只保存所有 VM 的 CPU/node 并集，每台 QEMU 使用 `/vmiso/vm-N` exact child。VM 数量和实例槽位不预配置：helper 每次在全局锁内动态枚举全部 `vm-N`，按当前剩余唯一逻辑 CPU 和 Guest packing 决定能否接纳下一台；实例号允许 1–10 位正整数。
+严格模式先由 guard/sentinel 锚定 `-S` QEMU 独立进程组，父 shell 只在 pinner 完成 `ARMED → RUNNING`（child/NUMA/vCPU 绑核及 QMP `cont`）后移交；FAIL/EOF/超时或移交前父代 SIGKILL 都会终止该组。`-cpu/-smp/-numa` 等 guest 身份参数不变，实例锁保持到 QEMU 退出并完成 CPU release。
+多 NUMA 时 helper 在 QEMU 停止态用 `migratepages` 把既有页迁至最终 node，再收窄 child `cpuset.mems`；工具缺失或迁移不完整都会严格失败。
+“22C/44T、单 node、预留 3 个管理核”时剩余 19C/38T。2C2T、2C4T、4C4T 的 exact 分别只有 2、4、4 条逻辑 CPU；单台 2C2T/4C4T 的 vCPU 仍分处 2/4 颗物理核，2C4T 使用两颗完整 SMT2 核。不同 VM 可使用同核不同 sibling，但绝不复用同一逻辑 CPU。无 service CPU 的同型上限依次为 19/9/9 台，service=1 时为 12/7/7 台；混合池先满足 `2×2C2T+4×2C4T+4×4C4T+service总数≤38`，再由 helper 检查单 VM 物理核形状。VM 数量本身不固定。
+运行时以 sysfs 和单一 NUMA/package 域为准；多域必须逐域按逻辑线程预算和每台 Guest 的 distinct-core/SMT2 约束装箱，禁止跨域拼接。默认 service=0 时 QEMU 辅助线程只能在本实例的 2/4/4 条 exact logical CPU 内与 vCPU 竞争；未选 sibling 可被宿主或其它 VM 使用，因此仍须在目标 E5 实测交互尾延迟。
 
 ## 9. 客体快照与长稳
 
@@ -494,5 +513,5 @@ latency、NUMA remote access、磁盘/网络 P99、RSS、温度和功耗。
 
 ## 10. 当前 GPU 文档与历史资料
 
-`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md` 和 `ACE-SHALLOW-STEALTH.md` 描述当前浅层 GPU 流程：物理 `1AF4:1050`、stock VioGpuDod、用户态逻辑身份和固定摘要的 x86 SysWOW64 + x64 System32 shim，使 GPU-Z 2.70 可直接双击。
+`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md` 和 `ACE-SHALLOW-STEALTH.md` 描述当前浅层 GPU 流程：物理主 ID 固定为 `1AF4:1050`，subsystem 使用 `1AF4:a101`–`1AF4:a112` carrier 从 18 块 AIB bundle（12 NVIDIA、6 AMD）中选择；stock VioGpuDod 继续绑定，真实 AIB subsystem、VBIOS、显存与时钟只进入用户态逻辑身份。固定摘要的 x86 SysWOW64 + x64 System32 shim 使 GPU-Z 2.70 可直接双击；目录不生成 GPU serial。
 旧审计中的自签驱动、EfiGuard、主 PCI ID 覆盖或真实 NVIDIA 转发器只代表历史快照，不能覆盖当前 manifest、启动器和上述三份文档。

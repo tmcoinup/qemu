@@ -56,6 +56,47 @@ if [[ $EUID -ne 0 ]]; then
     exec sudo -- "$0" "$@"
 fi
 
+# power-profiles-daemon 会在首次启动时按自己的持久状态重新应用 governor/EPP。
+# 如果本 helper 先写 sysfs、daemon 稍后才由桌面会话拉起，刚设置的 performance
+# 就会被覆盖回 balanced/powersave。先启动 daemon 并通过它的公开 CLI 选择
+# performance，再执行下方原有的 sysfs 写入，保证两套控制面顺序一致。
+#
+# 没有 PPD 的服务器、精简发行版和容器仍走原 sysfs 路径；PPD 启动或切换失败也只
+# 清晰告警并返回成功，让既有 governor/frequency fallback 继续执行，不扩大 helper
+# 在不同发行版上的硬依赖。
+_vmate_set_ppd_performance() {
+    local current_profile=""
+
+    if ! command -v systemctl >/dev/null 2>&1 ||
+       ! command -v powerprofilesctl >/dev/null 2>&1; then
+        echo ">> power profile: PPD 工具未安装（继续使用 sysfs governor）"
+        return 0
+    fi
+
+    if ! systemctl start power-profiles-daemon.service; then
+        echo ">> power profile: ⚠ 无法启动 power-profiles-daemon（继续使用 sysfs governor）"
+        return 0
+    fi
+    if ! systemctl is-active --quiet power-profiles-daemon.service; then
+        echo ">> power profile: ⚠ power-profiles-daemon 启动后未处于 active（继续使用 sysfs governor）"
+        return 0
+    fi
+    if ! powerprofilesctl set performance; then
+        echo ">> power profile: ⚠ 无法切换到 performance（继续使用 sysfs governor）"
+        return 0
+    fi
+    if ! current_profile="$(powerprofilesctl get)"; then
+        echo ">> power profile: ⚠ 无法复核当前 profile（继续使用 sysfs governor）"
+        return 0
+    fi
+    if [[ "$current_profile" != "performance" ]]; then
+        echo ">> power profile: ⚠ 切换后仍为 ${current_profile:-<空>}（继续使用 sysfs governor）"
+        return 0
+    fi
+
+    echo ">> power profile: performance（daemon 已同步）"
+}
+
 # 0) x86 split-lock 限速：默认取消内核对触发任务施加的故意等待和单核串行。
 #    Windows 驱动、解压或校验路径在 KVM vCPU 中触发 split lock 时，默认值 1
 #    会让客体看起来像「磁盘写入卡死」，即使宿主块设备完全空闲。值 0 仍会在
@@ -75,6 +116,9 @@ if [[ -e "$_split_lock_path" ]]; then
 else
     echo ">> split lock : 当前内核不提供 split_lock_mitigate，跳过"
 fi
+
+# PPD 必须先完成启动与 profile 切换；否则它晚于 sysfs 写入启动时会覆盖 governor。
+_vmate_set_ppd_performance
 
 # 1) CPU governor -> performance：固定高频，消除 vm-exit 间降频导致的服务延迟
 #    忽高忽低（计时抖动的头号来源）。

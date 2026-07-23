@@ -380,7 +380,7 @@ test_server_guest_and_bad_topology_are_rejected() (
 
 test_storage_bus_follows_bundle() (
     export DISK=/tmp/vmate-household-storage.qcow2
-    export NVME_SERIAL=S123N123456789
+    export NVME_SERIAL=S123N1234567890
     export NVME_MODEL="Samsung SSD 970 PRO 512GB"
     export NVME_FIRMWARE=1B2QEXP7
     export NVME_SUBSYS_VEN=0x144D
@@ -424,7 +424,7 @@ test_storage_devices_realize_in_qemu() (
     "$qemu_img" create -q -f qcow2 "$disk" 16M
 
     export DISK="$disk"
-    export NVME_SERIAL=S123N123456789
+    export NVME_SERIAL=S123N1234567890
     export NVME_MODEL="Samsung SSD 970 PRO 512GB"
     export NVME_FIRMWARE=1B2QEXP7
     export NVME_SUBSYS_VEN=0x144D

@@ -17,8 +17,8 @@ NvU32 nvapi_pack_pci_identifier(NvU32 device_id, NvU32 vendor_id)
 
 /*
  * NVAPI 枚举项不是第二个虚拟设备，而是 SourceInstanceId 所指向的 virtio 显卡
- * 的用户态视图。主 PCI 键因此必须使用承载设备的 1AF4:1050；QEMU 已真实投影
- * subsystem/revision，所以其余定位字段仍与 PCI 配置空间逐项一致。
+ * 的用户态视图。主 PCI 键因此必须使用承载设备的 1AF4:1050；subsystem 与
+ * revision 则来自已经严格匹配 A101..A112 的逻辑板卡身份，不冒充物理主 ID。
  */
 void nvapi_build_carrier_pci_identifiers(
     const struct nvapi_gpu_identity *identity, NvU32 *device_id,

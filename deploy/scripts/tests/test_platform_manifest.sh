@@ -5,15 +5,12 @@
 # 泄漏，SC2030/SC2031 在这里正是预期语义。
 # shellcheck disable=SC2030,SC2031,SC2034,SC2153,SC2329
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-
 fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
-
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/fixtures/catalog-cpu-preflight-stub.sh"
@@ -21,15 +18,13 @@ stealth_platform_validate >/dev/null
 # JSON 索引必须同时保留可审计的兼容条目和可随机的 supported 条目；兼容条目
 # 不能因为同厂商而偷偷进入随机池。
 mapfile -t platform_rows < <(stealth_platform_index)
-(( ${#platform_rows[@]} == 5 )) || fail "平台数量应为 5，实际 ${#platform_rows[@]}"
-
+(( ${#platform_rows[@]} == 7 )) || fail "平台数量应为 7，实际 ${#platform_rows[@]}"
 # 审计白名单钉住型号、系列、料号、主板和年代。结构校验只能证明字段自洽，
 # 不能代替 DMTF/CPU 厂商/主板支持表中的外部事实。
 python3 - "$REPO_ROOT/deploy/hardware/platforms.json" <<'PY' || \
     fail "平台审计事实与清单不一致"
 import json
 import sys
-
 with open(sys.argv[1], encoding="utf-8") as stream:
     platforms = {item["id"]: item for item in json.load(stream)["platforms"]}
 expected = {
@@ -45,12 +40,18 @@ expected = {
     "intel-lga1151-pentium-g5400-asus-prime-h310m-a-r2": (
         True, "supported", 2018, "Intel(R) Pentium(R) Gold G5400 CPU @ 3.70GHz",
         "BX80684G5400", "PRIME H310M-A R2.0", "0x000B", "0x00FC", True),
+    "intel-lga1151-i3-9100f-msi-h310m-pro-m2-plus-ms-7c08": (
+        True, "supported", 2019, "Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz",
+        "BX80684I39100F", "H310M PRO-M2 PLUS (MS-7C08)", "0x00CE", "0x00EC", True),
+    "intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2": (
+        True, "supported", 2018, "Intel(R) Pentium(R) Gold G5400 CPU @ 3.70GHz",
+        "BX80684G5400", "H310M S2H 2.0", "0x000B", "0x00FC", True),
     "intel-lga1151-i5-6400t-asus-h110m-a-m2": (
         True, "supported", 2016, "Intel(R) Core(TM) i5-6400T CPU @ 2.20GHz",
         "BXC80662I56400T", "H110M-A/M.2", "0x00CD", "0x00EC", False),
 }
 if set(platforms) != set(expected):
-    raise SystemExit("平台 ID 集合不是审计后的五个 bundle")
+    raise SystemExit("平台 ID 集合不是审计后的七个 bundle")
 for platform_id, facts in expected.items():
     item = platforms[platform_id]
     cpu = item["cpu"]
@@ -61,7 +62,6 @@ for platform_id, facts in expected.items():
     if actual != facts:
         raise SystemExit(f"{platform_id}: {actual!r} != {facts!r}")
 PY
-
 enabled_count=0
 for row in "${platform_rows[@]}"; do
     IFS='|' read -r platform_id enabled vendor max_mhz threads tsc_mhz <<<"$row"
@@ -71,8 +71,7 @@ for row in "${platform_rows[@]}"; do
         || fail "平台数字字段错误: $row"
     [[ "$enabled" == true ]] && enabled_count=$((enabled_count + 1))
 done
-(( enabled_count == 4 )) || fail "随机平台应只有四个 Intel bundle"
-
+(( enabled_count == 6 )) || fail "随机平台应只有六个 Intel bundle"
 # 每个平台（包括默认不进入随机池的 compatibility 条目）都必须能完整导出，
 # 且 CPU、内存、BIOS、PCI、TPM 和板载设备字段相互约束。
 for row in "${platform_rows[@]}"; do
@@ -114,8 +113,9 @@ for row in "${platform_rows[@]}"; do
     [[ "$NVME_LANES" == 2 || "$NVME_LANES" == 4 ]] || fail "$platform_id NVMe lane 数错误"
     [[ "$NVME_ATTACHMENT" == m2_socket ]] || fail "$platform_id 没有物理 M.2 约束"
     [[ "$SYSTEM_CHASSIS_TYPE" == 0x03 ]] || fail "$platform_id chassis type 未绑定 Desktop"
-    [[ "$AUDIO_CODEC:$AUDIO_CODEC_ID:$AUDIO_CODEC_REVISION:$AUDIO_CODEC_SUBSYSTEM_ID" == \
-       "ALC887:0x10ec0887:0x00100302:0x104386c7" ]] \
+    [[ "$AUDIO_CODEC:$AUDIO_CODEC_ID:$AUDIO_CODEC_REVISION" == \
+       "ALC887:0x10ec0887:0x00100302" && \
+       "${AUDIO_CODEC_SUBSYSTEM_ID:2:4}" == "${BOARD_SUBSYS_VEN#0x}" ]] \
         || fail "$platform_id ALC887 协议身份不完整"
     [[ "$AUDIO_IDENTITY_FIDELITY" == protocol_identity_only ]] \
         || fail "$platform_id 误声称完整 ALC887 拓扑"
@@ -123,6 +123,10 @@ for row in "${platform_rows[@]}"; do
         [[ "$TPM_CAPABILITY:$TPM_SUPPORTED:$TPM_IMPLEMENTATION:$TPM_VERSION:$TPM_FRONTEND:$TPM_PCR_BANKS" == \
            "none:0:none:none:none:" ]] \
             || fail "$platform_id 在缺少板级 PTT 证据时没有 fail closed"
+    elif [[ "$TPM_CAPABILITY" == discrete ]]; then
+        [[ "$TPM_SUPPORTED:$TPM_IMPLEMENTATION:$TPM_VERSION:$TPM_FRONTEND:$TPM_PCR_BANKS" == \
+           "1:discrete-module:2.0:tpm-tis:sha256" ]] \
+            || fail "$platform_id 独立 TPM 2.0 模块能力没有完整导出"
     elif [[ "$CPU_VENDOR" == GenuineIntel ]]; then
         [[ "$TPM_CAPABILITY:$TPM_SUPPORTED:$TPM_IMPLEMENTATION:$TPM_VERSION:$TPM_FRONTEND:$TPM_PCR_BANKS" == \
            "firmware:1:intel-ptt:2.0:tpm-crb:sha256" ]] \
@@ -140,7 +144,6 @@ for row in "${platform_rows[@]}"; do
             || fail "$platform_id 芯片组 device/revision 未完整导出: $identity"
     done
 done
-
 # AMD bundle 默认不能加载。新的窄门禁允许调用方在保持 STRICT_HARDWARE=1 的
 # 同时显式接受 platform compatibility；旧的全局非严格直调语义暂时保留，但正常
 # 启动器不再要求关闭 KVM/TPM/CPU realize 等无关检查。

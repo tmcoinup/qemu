@@ -75,6 +75,25 @@ replace_profile_field() {
     chmod 0600 "$destination"
 }
 
+force_legacy_samsung_nvme_bundle() {
+    local profile="$1" uuid
+    uuid="$(stealth_profile_get UUID "$profile")" ||
+        fail "无法读取 legacy fixture UUID"
+    sed -i \
+        -e 's|^NVME_COMPONENT_ID=.*|NVME_COMPONENT_ID=samsung-970-pro-512gb|' \
+        -e 's|^NVME_MODEL=.*|NVME_MODEL=Samsung\\ SSD\\ 970\\ PRO\\ 512GB|' \
+        -e 's|^NVME_FIRMWARE=.*|NVME_FIRMWARE=1B2QEXP7|' \
+        -e 's|^NVME_SERIAL=.*|NVME_SERIAL=S123N123456789|' \
+        -e 's|^NVME_SIZE_BYTES=.*|NVME_SIZE_BYTES=512110190592|' \
+        -e 's|^NVME_PCI_VEN=.*|NVME_PCI_VEN=0x144D|' \
+        -e 's|^NVME_PCI_DEV=.*|NVME_PCI_DEV=0xA804|' \
+        -e 's|^NVME_SUBSYS_VEN=.*|NVME_SUBSYS_VEN=0x144D|' \
+        -e 's|^NVME_SUBSYS_DEV=.*|NVME_SUBSYS_DEV=0xA801|' \
+        -e 's|^NVME_SUBNQN_TEMPLATE=.*|NVME_SUBNQN_TEMPLATE=nqn.2014-08.org.nvmexpress:uuid:{uuid}|' \
+        -e "s|^NVME_SUBNQN=.*|NVME_SUBNQN=nqn.2014-08.org.nvmexpress:uuid:$uuid|" \
+        "$profile"
+}
+
 load_profile_success() {
     local profile="$1"
     unset_profile_vars
@@ -130,6 +149,7 @@ old_static_profile="$TMP_DIR/static-old.profile"
 remove_profile_fields \
     "$static_profile" "$old_static_profile" \
     "${metadata_fields[@]}" "${boot_storage_fields[@]}"
+force_legacy_samsung_nvme_bundle "$old_static_profile"
 sed -i \
     's/^PLATFORM_CATALOG_REVISION=.*/PLATFORM_CATALOG_REVISION=2026-07-13.4/' \
     "$old_static_profile"
@@ -259,6 +279,9 @@ legacy_household="$TMP_DIR/household-legacy-860.profile"
 remove_profile_fields \
     "$household_profile" "$legacy_household" \
     PLATFORM_BOOT_STORAGE_POOL_ID "${boot_storage_fields[@]}"
+# 当时唯一发布过的 NVMe 身份是 Samsung 970 PRO；先固定完整原子 bundle，
+# 再伪装旧 revision，避免多品牌随机选择污染 legacy 迁移夹具。
+force_legacy_samsung_nvme_bundle "$legacy_household"
 sed -i \
     -e 's/^PLATFORM_CATALOG_REVISION=.*/PLATFORM_CATALOG_REVISION=2026-07-19.3/' \
     -e 's/^PLATFORM_BOOT_MODEL=.*/PLATFORM_BOOT_MODEL=Samsung\\ SSD\\ 860\\ PRO\\ 512GB/' \
@@ -271,7 +294,9 @@ ALLOW_STORAGE_PROFILE_MIGRATION=0
    "$BOOT_STORAGE_COMPONENT_ID" == samsung-860-pro-512gb-sata &&
    "$BOOT_STORAGE_MODEL" == "Samsung SSD 860 PRO 512GB" &&
    "$BOOT_STORAGE_FIRMWARE" == RVM02B6Q &&
-   "$BOOT_STORAGE_SERIAL" == "$NVME_SERIAL" ]] ||
+   "$BOOT_STORAGE_SERIAL" == S123N123456789 &&
+   "${NVME_SERIAL:0:14}" == "$BOOT_STORAGE_SERIAL" &&
+   ${#NVME_SERIAL} -eq 15 && "$NVME_PCI_DEV" == 0xA808 ]] ||
     fail "旧 household 860 PRO 没有精确迁移"
 
 # 非 E5 v3/v4 正常池的 compatibility 仍是生命周期门禁。
@@ -303,7 +328,7 @@ for storage_field_and_value in \
     "BOOT_STORAGE_COMPONENT_ID=unknown-sata" \
     "BOOT_STORAGE_MODEL=Samsung\\ SSD\\ 970\\ PRO\\ 512GB" \
     "BOOT_STORAGE_FIRMWARE=BAD00000" \
-    "BOOT_STORAGE_SIZE_BYTES=500107862016" \
+    "BOOT_STORAGE_SIZE_BYTES=1000204886016" \
     "BOOT_STORAGE_INTERFACE=nvme"; do
     storage_field="${storage_field_and_value%%=*}"
     storage_value="${storage_field_and_value#*=}"
@@ -349,6 +374,11 @@ stealth_platform_registry_load compat-host-intel-q35 "$CPUS"
 SYSTEM_MFR="$BOARD_MFR"
 SYSTEM_VERSION="$BOARD_VERSION"
 CHASSIS_TYPE=Desktop
+# host-passthrough 是 QEMU generic 主板，不得沿用前一个物理 ASUS profile
+# 的标签格式；三个可见序列用不同合法值，避免构造重复身份。
+BOARD_SERIAL=MB123456789012
+SYSTEM_SERIAL=MB123456789013
+CHASSIS_SERIAL=MB123456789014
 stealth_save_profile "$host_profile"
 assert_profile_fields_present "$host_profile" "${metadata_fields[@]}"
 load_profile_success "$host_profile"

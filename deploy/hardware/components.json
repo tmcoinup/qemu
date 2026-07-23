@@ -1,70 +1,409 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-19.3",
+  "catalog_revision": "2026-07-23.3",
   "scope": {
     "gpu": "out_of_scope_virtual_display",
     "tablet": "generic_virtual_absolute_pointer"
   },
-  "storage": [
+  "gpu_board_catalog": "gpu-boards.json",
+  "storage_catalog": "storage.json",
+  "gpus": [
     {
-      "id": "samsung-970-pro-512gb",
+      "id": "nvidia-geforce-gtx-750-ti",
       "enabled": true,
-      "release_year": 2018,
-      "model": "Samsung SSD 970 PRO 512GB",
-      "firmware": "1B2QEXP7",
-      "raw_bytes": 512110190592,
-      "verification_status": "vendor_document_reference",
-      "identity_fidelity": "model_register_reference_no_device_capture",
-      "pci": {
-        "vendor": "0x144D",
-        "device": "0xA804",
-        "subsystem_vendor": "0x144D",
-        "subsystem_device": "0xA801"
-      },
-      "nvme": {
-        "pcie_generation": 3,
-        "lanes": 4,
-        "ieee_oui": "00:25:38",
-        "subnqn_template": "nqn.2014-08.org.nvmexpress:uuid:{uuid}",
-        "nqn_fidelity": "standards_compliant_synthetic_uuid"
-      },
-      "source_refs": [
-        "https://download.semiconductor.samsung.com/resources/data-sheet/Samsung_NVMe_SSD_970_PRO_Data_Sheet_Rev.1.0.pdf",
-        "https://images.samsung.com/is/content/samsung/p5/ru/ssd/info/docs/SSD_970PRO_RU.pdf"
-      ]
+      "selection_weight": 1,
+      "manufacturer": "NVIDIA",
+      "model": "NVIDIA GeForce GTX 750 Ti",
+      "pci_vendor": "0x10DE",
+      "pci_device": "0x1380",
+      "ram_mb": 2048,
+      "bios": "Version 82.07.41.00.32",
+      "revision": "0xA2",
+      "memory_type": "GDDR5",
+      "memory_bus_width_bits": 128,
+      "base_clock_khz": 1020000,
+      "boost_clock_khz": 1085000,
+      "memory_clock_khz": 2700000,
+      "sli_supported": 0,
+      "identity_fidelity": "label_only_out_of_scope"
+    },
+    {
+      "id": "nvidia-geforce-gt-1030",
+      "enabled": true,
+      "selection_weight": 1,
+      "manufacturer": "NVIDIA",
+      "model": "NVIDIA GeForce GT 1030",
+      "pci_vendor": "0x10DE",
+      "pci_device": "0x1D01",
+      "ram_mb": 2048,
+      "bios": "Version 86.08.46.00.81",
+      "revision": "0xA1",
+      "memory_type": "GDDR5",
+      "memory_bus_width_bits": 64,
+      "base_clock_khz": 1227000,
+      "boost_clock_khz": 1468000,
+      "memory_clock_khz": 3004000,
+      "sli_supported": 0,
+      "identity_fidelity": "label_only_out_of_scope"
+    },
+    {
+      "id": "nvidia-geforce-gtx-1050",
+      "enabled": true,
+      "selection_weight": 1,
+      "manufacturer": "NVIDIA",
+      "model": "NVIDIA GeForce GTX 1050",
+      "pci_vendor": "0x10DE",
+      "pci_device": "0x1C81",
+      "ram_mb": 2048,
+      "bios": "Version 86.07.48.00.38",
+      "revision": "0xA1",
+      "memory_type": "GDDR5",
+      "memory_bus_width_bits": 128,
+      "base_clock_khz": 1354000,
+      "boost_clock_khz": 1455000,
+      "memory_clock_khz": 3504000,
+      "sli_supported": 0,
+      "identity_fidelity": "label_only_out_of_scope"
+    },
+    {
+      "id": "nvidia-geforce-gtx-1050-ti",
+      "enabled": true,
+      "selection_weight": 1,
+      "manufacturer": "NVIDIA",
+      "model": "NVIDIA GeForce GTX 1050 Ti",
+      "pci_vendor": "0x10DE",
+      "pci_device": "0x1C82",
+      "ram_mb": 4096,
+      "bios": "Version 86.07.48.00.A0",
+      "revision": "0xA1",
+      "memory_type": "GDDR5",
+      "memory_bus_width_bits": 128,
+      "base_clock_khz": 1290000,
+      "boost_clock_khz": 1392000,
+      "memory_clock_khz": 3504000,
+      "sli_supported": 0,
+      "identity_fidelity": "label_only_out_of_scope"
+    },
+    {
+      "id": "amd-radeon-rx-550",
+      "enabled": true,
+      "selection_weight": 1,
+      "manufacturer": "AMD",
+      "model": "AMD Radeon RX 550",
+      "pci_vendor": "0x1002",
+      "pci_device": "0x699F",
+      "ram_mb": 2048,
+      "bios": "016.011.000.029.000000",
+      "revision": "0xCF",
+      "memory_type": "GDDR5",
+      "memory_bus_width_bits": 128,
+      "base_clock_khz": 1100000,
+      "boost_clock_khz": 1183000,
+      "memory_clock_khz": 3500000,
+      "sli_supported": 0,
+      "identity_fidelity": "label_only_out_of_scope"
+    },
+    {
+      "id": "amd-radeon-rx-560",
+      "enabled": true,
+      "selection_weight": 1,
+      "manufacturer": "AMD",
+      "model": "AMD Radeon RX 560",
+      "pci_vendor": "0x1002",
+      "pci_device": "0x67FF",
+      "ram_mb": 4096,
+      "bios": "016.011.000.029.000000",
+      "revision": "0xCF",
+      "memory_type": "GDDR5",
+      "memory_bus_width_bits": 128,
+      "base_clock_khz": 1175000,
+      "boost_clock_khz": 1275000,
+      "memory_clock_khz": 3500000,
+      "sli_supported": 0,
+      "identity_fidelity": "label_only_out_of_scope"
     }
   ],
   "monitors": [
     {
       "id": "samsung-s24f350",
       "enabled": true,
+      "selection_weight": 2,
       "release_year": 2016,
+      "manufacturer": "Samsung",
+      "model": "LS24F350FHUXEN",
       "vendor_code": "SAM",
-      "product_id": "0x0F65",
+      "product_id": "0x0D20",
       "name": "S24F350",
-      "serial_prefix": "H4ZK",
+      "serial_policy": {
+        "kind": "samsung_h4zmc_decimal5",
+        "length": 10,
+        "pattern": "^H4ZMC[0-9]{5}$",
+        "format_fidelity": "observed_raw_edid_format_synthetic_value",
+        "reserved_values": [
+          "H4ZMC01676",
+          "H4ZMC01889"
+        ]
+      },
+      "binary_serial_policy": {
+        "kind": "fixed_u32",
+        "fixed_value": "0x5A5A5055",
+        "format_fidelity": "observed_raw_edid_value"
+      },
+      "native_resolution": {
+        "x": 1920,
+        "y": 1080,
+        "aspect_ratio": "16:9"
+      },
       "width_mm": 521,
       "height_mm": 293,
-      "manufacture_week": 32,
-      "manufacture_year": 2018,
-      "video_input": "0xA3",
+      "manufacture_week": 49,
+      "manufacture_year": 2019,
+      "video_input": "0x80",
+      "edid_revision": 3,
       "range": {
-        "min_vfreq_hz": 56,
+        "min_vfreq_hz": 50,
         "max_vfreq_hz": 75,
         "min_hfreq_khz": 30,
         "max_hfreq_khz": 81,
-        "max_pixel_clock_mhz": 149
+        "max_pixel_clock_mhz": 170
       },
       "secondary_timing": {
-        "xres": 1600,
-        "yres": 900,
-        "refresh_millihz": 60000
+        "xres": 1280,
+        "yres": 720,
+        "refresh_millihz": 50000,
+        "pixel_clock_khz": 74250,
+        "hfront": 440,
+        "hsync": 40,
+        "hblank": 700,
+        "vfront": 5,
+        "vsync": 5,
+        "vblank": 30,
+        "hsync_positive": true,
+        "vsync_positive": true,
+        "width_mm": 521,
+        "height_mm": 293
       },
-      "evidence": "official_model_specs_no_raw_edid",
-      "identity_fidelity": "synthetic_edid_identity_fields",
+      "evidence": "official_specs_plus_raw_edid_capture",
+      "identity_fidelity": "audited_raw_identity_timing_fields_synthetic_edid",
       "source_refs": [
         "https://www.samsung.com/ie/business/monitors/flat/led-ls24f350fhuxen/",
         "https://images.samsung.com/is/content/samsung/p5/at/pdf/display_datenblaetter/Datenblatt_LCD_SamsungMonitorS24F350FHU_LED.pdf"
+      ],
+      "identity_source_refs": [
+        "https://raw.githubusercontent.com/linuxhw/EDID/master/Digital/Samsung/SAM0D20/03049160C517",
+        "https://raw.githubusercontent.com/bsdhw/EDID/master/Digital/Samsung/SAM0D20/8B1BA00C7940"
+      ]
+    },
+    {
+      "id": "aoc-24b2xh",
+      "enabled": true,
+      "selection_weight": 6,
+      "release_year": 2020,
+      "manufacturer": "AOC",
+      "model": "24B2XH",
+      "vendor_code": "AOC",
+      "product_id": "0x2402",
+      "name": "24B2W1G5",
+      "serial_policy": {
+        "kind": "aoc_upper_alnum7_decimal6",
+        "length": 13,
+        "pattern": "^[A-Z]{4}[0-9][A-Z0-9]A[0-9]{6}$",
+        "format_fidelity": "observed_raw_edid_format_synthetic_value",
+        "reserved_values": [
+          "UOWN9HA005249",
+          "AWDM61A005357",
+          "RSKN61A000560"
+        ]
+      },
+      "binary_serial_policy": {
+        "kind": "decimal_suffix6",
+        "fixed_value": null,
+        "format_fidelity": "observed_raw_edid_rule"
+      },
+      "native_resolution": {
+        "x": 1920,
+        "y": 1080,
+        "aspect_ratio": "16:9"
+      },
+      "width_mm": 527,
+      "height_mm": 296,
+      "manufacture_week": 39,
+      "manufacture_year": 2022,
+      "video_input": "0x80",
+      "edid_revision": 3,
+      "range": {
+        "min_vfreq_hz": 48,
+        "max_vfreq_hz": 75,
+        "min_hfreq_khz": 30,
+        "max_hfreq_khz": 85,
+        "max_pixel_clock_mhz": 180
+      },
+      "secondary_timing": {
+        "xres": 1920,
+        "yres": 1080,
+        "refresh_millihz": 74973,
+        "pixel_clock_khz": 174500,
+        "hfront": 48,
+        "hsync": 32,
+        "hblank": 160,
+        "vfront": 3,
+        "vsync": 5,
+        "vblank": 39,
+        "hsync_positive": true,
+        "vsync_positive": false,
+        "width_mm": 527,
+        "height_mm": 296
+      },
+      "evidence": "official_specs_plus_raw_edid_capture",
+      "identity_fidelity": "audited_raw_identity_timing_fields_synthetic_edid",
+      "source_refs": [
+        "https://www.aoc.com/ca-en/monitors/24b2xh",
+        "https://www.aoc.com/api/asset/pi29793?ext=pdf"
+      ],
+      "identity_source_refs": [
+        "https://raw.githubusercontent.com/linuxhw/EDID/master/Digital/AOC/AOC2402/041B0A743BED",
+        "https://bugs.kde.org/show_bug.cgi?id=494330"
+      ]
+    },
+    {
+      "id": "xiaomi-rmmnt238nf",
+      "enabled": true,
+      "selection_weight": 5,
+      "release_year": 2020,
+      "manufacturer": "Xiaomi",
+      "model": "RMMNT238NF",
+      "vendor_code": "XMI",
+      "product_id": "0x23C3",
+      "name": "Mi Monitor",
+      "serial_policy": {
+        "kind": "xiaomi_29200_label_slash_removed_decimal",
+        "length": 13,
+        "pattern": "^29200[0-9]{8}$",
+        "format_fidelity": "official_label_separator_removed_as_observed_in_raw_edid",
+        "reserved_values": [
+          "2920000167575",
+          "2920000116680"
+        ]
+      },
+      "binary_serial_policy": {
+        "kind": "fixed_u32",
+        "fixed_value": "0x00000001",
+        "format_fidelity": "observed_raw_edid_value"
+      },
+      "native_resolution": {
+        "x": 1920,
+        "y": 1080,
+        "aspect_ratio": "16:9"
+      },
+      "width_mm": 527,
+      "height_mm": 293,
+      "manufacture_week": 20,
+      "manufacture_year": 2020,
+      "video_input": "0x80",
+      "edid_revision": 3,
+      "range": {
+        "min_vfreq_hz": 50,
+        "max_vfreq_hz": 75,
+        "min_hfreq_khz": 15,
+        "max_hfreq_khz": 100,
+        "max_pixel_clock_mhz": 190
+      },
+      "secondary_timing": {
+        "xres": 1920,
+        "yres": 1080,
+        "refresh_millihz": 75002,
+        "pixel_clock_khz": 185630,
+        "hfront": 48,
+        "hsync": 40,
+        "hblank": 280,
+        "vfront": 5,
+        "vsync": 5,
+        "vblank": 45,
+        "hsync_positive": true,
+        "vsync_positive": true,
+        "width_mm": 160,
+        "height_mm": 90
+      },
+      "evidence": "official_specs_plus_raw_edid_capture",
+      "identity_fidelity": "audited_raw_identity_timing_fields_synthetic_edid",
+      "source_refs": [
+        "https://www.mi.com/tw/mi-23.8-desktop-monitor-1c/specs/",
+        "https://www.mi.com/global/support/faq/details/KA-06532/"
+      ],
+      "identity_source_refs": [
+        "https://raw.githubusercontent.com/linuxhw/EDID/master/Digital/Mi/XMI23C3/01B9C995D956",
+        "https://raw.githubusercontent.com/bsdhw/EDID/master/Digital/Mi/XMI23C3/37E31051BDD3"
+      ]
+    },
+    {
+      "id": "lenovo-l24e-30",
+      "enabled": true,
+      "selection_weight": 4,
+      "release_year": 2020,
+      "manufacturer": "Lenovo",
+      "model": "L24e-30",
+      "vendor_code": "LEN",
+      "product_id": "0x66BC",
+      "name": "L24e-30",
+      "serial_policy": {
+        "kind": "lenovo_urb_upper_alnum",
+        "length": 8,
+        "pattern": "^URB[A-Z0-9]{5}$",
+        "format_fidelity": "observed_raw_edid_format_synthetic_value",
+        "reserved_values": [
+          "URB5DT6H",
+          "URB4N2F4",
+          "URB644NY"
+        ]
+      },
+      "binary_serial_policy": {
+        "kind": "fixed_u32",
+        "fixed_value": "0x01010101",
+        "format_fidelity": "observed_raw_edid_value"
+      },
+      "native_resolution": {
+        "x": 1920,
+        "y": 1080,
+        "aspect_ratio": "16:9"
+      },
+      "width_mm": 527,
+      "height_mm": 296,
+      "manufacture_week": 5,
+      "manufacture_year": 2022,
+      "video_input": "0x80",
+      "edid_revision": 3,
+      "range": {
+        "min_vfreq_hz": 48,
+        "max_vfreq_hz": 75,
+        "min_hfreq_khz": 30,
+        "max_hfreq_khz": 83,
+        "max_pixel_clock_mhz": 180
+      },
+      "secondary_timing": {
+        "xres": 1920,
+        "yres": 1080,
+        "refresh_millihz": 74973,
+        "pixel_clock_khz": 174500,
+        "hfront": 48,
+        "hsync": 32,
+        "hblank": 160,
+        "vfront": 3,
+        "vsync": 5,
+        "vblank": 39,
+        "hsync_positive": true,
+        "vsync_positive": false,
+        "width_mm": 527,
+        "height_mm": 296
+      },
+      "evidence": "official_specs_driver_plus_raw_edid_capture",
+      "identity_fidelity": "audited_raw_identity_timing_fields_synthetic_edid",
+      "source_refs": [
+        "https://psref.lenovo.com/syspool/Sys/PDF/datasheet/Lenovo%20L24e-30_datasheet_EN.pdf",
+        "https://psref.lenovo.com/Product/Lenovo_Monitors/Lenovo_L24e30"
+      ],
+      "identity_source_refs": [
+        "https://download.lenovo.com/consumer/monitor/l24e_30_driver.zip",
+        "https://raw.githubusercontent.com/linuxhw/EDID/master/Digital/Lenovo/LEN66BC/0AC24466CB02"
       ]
     }
   ],

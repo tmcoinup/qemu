@@ -271,14 +271,10 @@ setup_nm_activate_uplink() {
     else
         echo ">> NM bridge-slave '$slave' already exists"
     fi
-    # port 永久不独立 autoconnect；它只随 controller 激活。旧脚本可能留下 yes，
-    # 因而重跑时也必须收敛为 no，否则 down br0 后 port 会反向拉起 master。
+    # 迁移事务内先禁止 port 抢先激活；成功后再写入 late-carrier 持久契约。
     nmcli connection modify "$slave" connection.autoconnect no || return 1
 
-    # controller 是唯一激活入口。若先 `up` port，NetworkManager 会同时按
-    # autoconnect-slaves 再激活一次同一 port，第一份请求就会以
-    # “base network connection was interrupted” 失败。port 不独立自启动，
-    # 避免旧的 active br0 或重跑时的 down/up 再次制造竞争。
+    # setup 期间只从 controller 激活，避免两份 activation 互相中断。
     nmcli connection modify "$bridge_name" \
         connection.autoconnect yes \
         connection.autoconnect-slaves 1 \
@@ -286,7 +282,10 @@ setup_nm_activate_uplink() {
     nmcli connection down "$bridge_name" 2>/dev/null || true
     SETUP_NM_BRIDGE_RESTARTED=1
     nmcli connection up "$bridge_name" || return 1
-    [[ "$trunk" != "1" ]] || setup_enable_vlan_runtime "$bridge_name" "$uplink"
+    if [[ "$trunk" == "1" ]]; then
+        setup_enable_vlan_runtime "$bridge_name" "$uplink" || return 1
+    fi
+    setup_nm_persist_boot_contract "$bridge_name" "$uplink"
 }
 
 # NetworkManager 1.36–1.54 仍兼容 bridge-slave、旧 master/autoconnect-slaves
@@ -458,12 +457,17 @@ setup_main() {
     # helper/sudoers 缺失但 bridge 已就绪时只修复安装契约，不重启宿主网络。
     if [[ "$VLAN_TRUNK" == "1" && "$VLAN_SETUP_AUTO" == "1" ]] \
         && setup_vlan_topology_is_ready; then
+        if setup_nm_is_active; then
+            setup_nm_persist_boot_contract "$BR" "$UPLINK" || {
+                setup_error "修复 NetworkManager bridge 启动契约失败。"
+                return 1
+            }
+        fi
         echo ">> VLAN runtime repaired; existing br0 topology kept without restart."
         return 0
     fi
 
-    if command -v nmcli >/dev/null 2>&1 \
-        && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    if setup_nm_is_active; then
         use_nm=1
     fi
 

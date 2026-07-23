@@ -81,8 +81,10 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
         .name = g->conf.edid_name,
         .serial = g->conf.edid_serial,
         .product_id = g->conf.edid_product_id,
+        .binary_serial = g->conf.edid_binary_serial,
         .manufacture_week = g->conf.edid_manufacture_week,
         .manufacture_year = g->conf.edid_manufacture_year,
+        .revision = (uint8_t)g->conf.edid_revision,
         .video_input = g->conf.edid_video_input,
         .min_vfreq_hz = g->conf.edid_min_vfreq_hz,
         .max_vfreq_hz = g->conf.edid_max_vfreq_hz,
@@ -110,9 +112,12 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
      * 上游默认仍使用 req_state。
      * display-info/UI resize 可以继续更新它。
      * deploy opt-in 后，多头读取本 scanout 的 outputs[]。
-     * 全局 xres/yres 只属于主输出，不能复制给其他头。
+     * 全局 xres/yres 只属于主输出，不能复制给其他头。固定模式的首选
+     * 时序同时锁定为 60 Hz，避免 GTK 等前端把宿主刷新率写回 req_state 后，
+     * 将受管显示器的 DTD1 漂移到型号绑定的 75 Hz 次要时序。
      */
     if (g->conf.edid_fixed_native) {
+        info.refresh_rate = 60000;
         if (output && output->has_xres && output->has_yres) {
             info.prefx = output->xres;
             info.prefy = output->yres;
@@ -257,6 +262,18 @@ virtio_gpu_base_device_realize(DeviceState *qdev,
         g->conf.edid_max_hfreq_khz > UINT8_MAX ||
         g->conf.edid_max_pixel_clock_mhz > 2550) {
         error_setg(errp, "EDID profile field is out of range");
+        return false;
+    }
+    if (g->conf.edid_revision &&
+        g->conf.edid_revision != 3 &&
+        g->conf.edid_revision != 4) {
+        error_setg(errp, "edid-revision must be 3 or 4");
+        return false;
+    }
+    if (g->conf.edid_managed_timing_version >
+        VIRTIO_GPU_EDID_MANAGED_TIMING_VERSION) {
+        error_setg(errp, "edid-managed-timing-version must be 0 or %u",
+                   VIRTIO_GPU_EDID_MANAGED_TIMING_VERSION);
         return false;
     }
     if ((g->conf.edid_min_vfreq_hz && g->conf.edid_max_vfreq_hz &&

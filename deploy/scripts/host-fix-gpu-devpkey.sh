@@ -148,10 +148,12 @@ STOCK_INF="${SCRIPT_DIR}/stock-viogpudo/viogpudo.inf"
 STOCK_CAT="${SCRIPT_DIR}/stock-viogpudo/viogpudo.cat"
 STOCK_SYS="${SCRIPT_DIR}/stock-viogpudo/viogpudo.sys"
 REFRESH_SOURCE="${SCRIPT_DIR}/refresh-gpu-name.ps1"
+CONTRACT_SOURCE="${SCRIPT_DIR}/gpu-board-identity-contract.ps1"
 [[ -f "$STOCK_INF" ]] || die "stock viogpudo.inf not found: $STOCK_INF"
 [[ -f "$STOCK_CAT" ]] || die "stock viogpudo.cat not found: $STOCK_CAT"
 [[ -f "$STOCK_SYS" ]] || die "stock viogpudo.sys not found: $STOCK_SYS"
 [[ -f "$REFRESH_SOURCE" ]] || die "refresh helper not found: $REFRESH_SOURCE"
+[[ -f "$CONTRACT_SOURCE" ]] || die "GPU board identity contract not found: $CONTRACT_SOURCE"
 
 # 1) Ensure VM is stopped (stop-vm.sh talks to a user-owned QMP socket).
 QMP_SOCK="/tmp/qemu-stealth-${INSTANCE}.qmp"
@@ -171,11 +173,13 @@ fi
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/nbd-lock.sh"
 modprobe nbd max_part=16 2>/dev/null || true
 REFRESH_TMP=""
+CONTRACT_TMP=""
 HIVE_WORK=""
 
 cleanup() {
     local rc=$?
     [[ -z "$REFRESH_TMP" ]] || rm -f -- "$REFRESH_TMP"
+    [[ -z "$CONTRACT_TMP" ]] || rm -f -- "$CONTRACT_TMP"
     [[ -z "$HIVE_WORK" ]] || rm -f -- "$HIVE_WORK"
     umount "$MOUNT" 2>/dev/null || true
     nbd_disconnect_if_owned   # 只断本脚本成功连接的设备（不误断外部）
@@ -281,7 +285,19 @@ DRY_RUN="${DRY_RUN:-0}" HIVE="$HIVE" \
 
 PERSISTENT_ROOT="${MOUNT}/ProgramData/StealthGPU"
 PERSISTENT_REFRESH="${PERSISTENT_ROOT}/refresh-gpu-name.ps1"
+PERSISTENT_CONTRACT="${PERSISTENT_ROOT}/gpu-board-identity-contract.ps1"
 if [[ -d "$PERSISTENT_ROOT" ]]; then
+    if cmp -s "$CONTRACT_SOURCE" "$PERSISTENT_CONTRACT"; then
+        log "persistent GPU board identity contract already current"
+    elif [[ $DRY -eq 1 ]]; then
+        log "DRY_RUN: would update $PERSISTENT_CONTRACT"
+    else
+        CONTRACT_TMP="${PERSISTENT_CONTRACT}.tmp.$$"
+        cp -- "$CONTRACT_SOURCE" "$CONTRACT_TMP"
+        mv -f -- "$CONTRACT_TMP" "$PERSISTENT_CONTRACT"
+        CONTRACT_TMP=""
+        log "updated persistent GPU board identity contract"
+    fi
     if cmp -s "$REFRESH_SOURCE" "$PERSISTENT_REFRESH"; then
         log "persistent refresh helper already current"
     elif [[ $DRY -eq 1 ]]; then

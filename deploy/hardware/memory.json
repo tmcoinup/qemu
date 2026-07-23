@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-07-22-memory-r1",
+  "serial_policy": {
+    "id": "jedec-spd-module-serial-u32",
+    "field_bytes": 4,
+    "text_encoding": "uppercase_hex_big_endian",
+    "pattern": "^[0-9A-F]{8}$",
+    "reserved_values": [
+      "00000000",
+      "00000001",
+      "FFFFFFFF"
+    ],
+    "identity_fidelity": "synthetic_value_in_real_jedec_spd_field"
+  },
+  "manufacturers": {
+    "Samsung": {
+      "module_jep106": ["0x80", "0xCE"],
+      "dram_jep106": ["0x80", "0xCE"],
+      "dram_jep106_fidelity": "module_vendor_is_dram_vendor"
+    },
+    "Kingston": {
+      "module_jep106": ["0x01", "0x98"],
+      "dram_jep106": null,
+      "dram_jep106_fidelity": "not_fixed_by_module_part"
+    },
+    "Crucial": {
+      "module_jep106": ["0x85", "0x9B"],
+      "dram_jep106": ["0x80", "0x2C"],
+      "dram_jep106_fidelity": "audited_module_family_mapping"
+    },
+    "SK hynix": {
+      "module_jep106": ["0x80", "0xAD"],
+      "dram_jep106": ["0x80", "0xAD"],
+      "dram_jep106_fidelity": "module_vendor_is_dram_vendor"
+    }
+  },
+  "modules": [
+    {
+      "id": "samsung-m378a5644eb0-crc-ddr4-2g",
+      "family_id": "samsung-m378a5x44-ddr4-2400",
+      "status": "active",
+      "selection_weight": 50,
+      "manufacturer": "Samsung",
+      "part_number": "M378A5644EB0-CRC",
+      "type": "DDR4",
+      "module_mib": 2048,
+      "rated_mts": 2400,
+      "voltage_mv": 1200,
+      "rank": 1,
+      "device_width_bits": 16,
+      "spd_ee1004": true,
+      "allowed_sockets": ["AM4", "LGA1151", "LGA1200"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://download.semiconductor.samsung.com/resources/product-guide/DDR4_Product_guide_May.18.pdf"
+      ]
+    },
+    {
+      "id": "samsung-m378a5244cb0-crc-ddr4-4g",
+      "family_id": "samsung-m378a5x44-ddr4-2400",
+      "status": "active",
+      "selection_weight": 50,
+      "manufacturer": "Samsung",
+      "part_number": "M378A5244CB0-CRC",
+      "type": "DDR4",
+      "module_mib": 4096,
+      "rated_mts": 2400,
+      "voltage_mv": 1200,
+      "rank": 1,
+      "device_width_bits": 16,
+      "spd_ee1004": true,
+      "allowed_sockets": ["AM4", "LGA1151", "LGA1200"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://download.semiconductor.samsung.com/resources/data-sheet/M378A5244CB0-CRC00.pdf"
+      ]
+    },
+    {
+      "id": "kingston-kvr24n17s8-4-ddr4-4g",
+      "family_id": "kingston-kvr24n17-ddr4-2400",
+      "status": "active",
+      "selection_weight": 30,
+      "manufacturer": "Kingston",
+      "part_number": "KVR24N17S8/4",
+      "type": "DDR4",
+      "module_mib": 4096,
+      "rated_mts": 2400,
+      "voltage_mv": 1200,
+      "rank": 1,
+      "device_width_bits": 8,
+      "spd_ee1004": true,
+      "allowed_sockets": ["AM4", "LGA1151", "LGA1200"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://www.kingston.com/datasheets/KVR24N17S8_4.pdf"
+      ]
+    },
+    {
+      "id": "crucial-ct2g4dfs624a-ddr4-2g",
+      "family_id": "crucial-ctxg4dfs-ddr4-2400",
+      "status": "active",
+      "selection_weight": 20,
+      "manufacturer": "Crucial",
+      "part_number": "CT2G4DFS624A",
+      "type": "DDR4",
+      "module_mib": 2048,
+      "rated_mts": 2400,
+      "voltage_mv": 1200,
+      "rank": 1,
+      "device_width_bits": 16,
+      "spd_ee1004": true,
+      "allowed_sockets": ["AM4", "LGA1151", "LGA1200"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://www.intel.com/content/dam/www/public/us/en/documents/platform-memory/ddr4-udimm-non-ecc-tested-at-2400mts.pdf"
+      ]
+    },
+    {
+      "id": "crucial-ct4g4dfs824a-ddr4-4g",
+      "family_id": "crucial-ctxg4dfs-ddr4-2400",
+      "status": "active",
+      "selection_weight": 20,
+      "manufacturer": "Crucial",
+      "part_number": "CT4G4DFS824A",
+      "type": "DDR4",
+      "module_mib": 4096,
+      "rated_mts": 2400,
+      "voltage_mv": 1200,
+      "rank": 1,
+      "device_width_bits": 8,
+      "spd_ee1004": true,
+      "allowed_sockets": ["AM4", "LGA1151", "LGA1200"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://uk.crucial.com/memory/ddr4/ct4g4dfs824a"
+      ]
+    },
+    {
+      "id": "kingston-kvr16n11s6-2-ddr3-2g",
+      "family_id": "kingston-kvr16n11-ddr3-1600",
+      "status": "active",
+      "selection_weight": 40,
+      "manufacturer": "Kingston",
+      "part_number": "KVR16N11S6/2",
+      "type": "DDR3",
+      "module_mib": 2048,
+      "rated_mts": 1600,
+      "voltage_mv": 1500,
+      "rank": 1,
+      "device_width_bits": 16,
+      "spd_ee1004": false,
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://www.kingston.com/datasheets/KVR16N11S6_2.pdf"
+      ]
+    },
+    {
+      "id": "kingston-kvr16n11s8-4-ddr3-4g",
+      "family_id": "kingston-kvr16n11-ddr3-1600",
+      "status": "active",
+      "selection_weight": 40,
+      "manufacturer": "Kingston",
+      "part_number": "KVR16N11S8/4",
+      "type": "DDR3",
+      "module_mib": 4096,
+      "rated_mts": 1600,
+      "voltage_mv": 1500,
+      "rank": 1,
+      "device_width_bits": 8,
+      "spd_ee1004": false,
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://www.kingston.com/datasheets/KVR16N11S8_4.pdf"
+      ]
+    },
+    {
+      "id": "sk-hynix-hmt325u6cfr8c-pb-ddr3-2g",
+      "family_id": "sk-hynix-hmt3x5u6cfr8c-ddr3-1600",
+      "status": "active",
+      "selection_weight": 35,
+      "manufacturer": "SK hynix",
+      "part_number": "HMT325U6CFR8C-PB",
+      "type": "DDR3",
+      "module_mib": 2048,
+      "rated_mts": 1600,
+      "voltage_mv": 1500,
+      "rank": 1,
+      "device_width_bits": 8,
+      "spd_ee1004": false,
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://product.skhynix.com/products/dram/module/module_info.jsp"
+      ]
+    },
+    {
+      "id": "sk-hynix-hmt351u6cfr8c-pb-ddr3-4g",
+      "family_id": "sk-hynix-hmt3x5u6cfr8c-ddr3-1600",
+      "status": "active",
+      "selection_weight": 35,
+      "manufacturer": "SK hynix",
+      "part_number": "HMT351U6CFR8C-PB",
+      "type": "DDR3",
+      "module_mib": 4096,
+      "rated_mts": 1600,
+      "voltage_mv": 1500,
+      "rank": 2,
+      "device_width_bits": 8,
+      "spd_ee1004": false,
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://product.skhynix.com/products/dram/module/module_info.jsp"
+      ]
+    },
+    {
+      "id": "kingston-kvr13n9s6-2-ddr3-2g",
+      "family_id": "kingston-kvr13n9-ddr3-1333",
+      "status": "active",
+      "selection_weight": 25,
+      "manufacturer": "Kingston",
+      "part_number": "KVR13N9S6/2",
+      "type": "DDR3",
+      "module_mib": 2048,
+      "rated_mts": 1333,
+      "voltage_mv": 1500,
+      "rank": 1,
+      "device_width_bits": 16,
+      "spd_ee1004": false,
+      "allowed_sockets": ["AM3", "AM3+", "FM2+", "LGA1150", "LGA1155"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://www.kingston.com/datasheets/KVR13N9S6_2.pdf"
+      ]
+    },
+    {
+      "id": "kingston-kvr13n9s8-4-ddr3-4g",
+      "family_id": "kingston-kvr13n9-ddr3-1333",
+      "status": "active",
+      "selection_weight": 25,
+      "manufacturer": "Kingston",
+      "part_number": "KVR13N9S8/4",
+      "type": "DDR3",
+      "module_mib": 4096,
+      "rated_mts": 1333,
+      "voltage_mv": 1500,
+      "rank": 1,
+      "device_width_bits": 8,
+      "spd_ee1004": false,
+      "allowed_sockets": ["AM3", "AM3+", "FM2+", "LGA1150", "LGA1155"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://www.kingston.com/datasheets/KVR13N9S8_4.pdf"
+      ]
+    },
+    {
+      "id": "sk-hynix-hma425u6afr6n-uh-ddr4-2g",
+      "family_id": "sk-hynix-hmax5xu6afr6n-ddr4-2400",
+      "status": "quarantine",
+      "selection_weight": 0,
+      "manufacturer": "SK hynix",
+      "part_number": "HMA425U6AFR6N-UH",
+      "type": "DDR4",
+      "module_mib": 2048,
+      "rated_mts": 2400,
+      "voltage_mv": 1200,
+      "rank": 1,
+      "device_width_bits": 16,
+      "spd_ee1004": true,
+      "allowed_sockets": ["AM4", "LGA1151", "LGA1200"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://product.skhynix.com/products/dram/module/module_info.jsp"
+      ]
+    },
+    {
+      "id": "sk-hynix-hma851u6afr6n-uh-ddr4-4g",
+      "family_id": "sk-hynix-hmax5xu6afr6n-ddr4-2400",
+      "status": "quarantine",
+      "selection_weight": 0,
+      "manufacturer": "SK hynix",
+      "part_number": "HMA851U6AFR6N-UH",
+      "type": "DDR4",
+      "module_mib": 4096,
+      "rated_mts": 2400,
+      "voltage_mv": 1200,
+      "rank": 1,
+      "device_width_bits": 16,
+      "spd_ee1004": true,
+      "allowed_sockets": ["AM4", "LGA1151", "LGA1200"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://product.skhynix.com/products/dram/module/module_info.jsp"
+      ]
+    },
+    {
+      "id": "crucial-ct25664ba160b-ddr3-2g",
+      "family_id": "crucial-ctx5664ba160b-ddr3-1600",
+      "status": "quarantine",
+      "selection_weight": 0,
+      "manufacturer": "Crucial",
+      "part_number": "CT25664BA160B",
+      "type": "DDR3",
+      "module_mib": 2048,
+      "rated_mts": 1600,
+      "voltage_mv": 1500,
+      "rank": 1,
+      "device_width_bits": 8,
+      "spd_ee1004": false,
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1155"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://www.crucial.com/support"
+      ]
+    },
+    {
+      "id": "crucial-ct51264ba160b-ddr3-4g",
+      "family_id": "crucial-ctx5664ba160b-ddr3-1600",
+      "status": "quarantine",
+      "selection_weight": 0,
+      "manufacturer": "Crucial",
+      "part_number": "CT51264BA160B",
+      "type": "DDR3",
+      "module_mib": 4096,
+      "rated_mts": 1600,
+      "voltage_mv": 1500,
+      "rank": 2,
+      "device_width_bits": 8,
+      "spd_ee1004": false,
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1155"],
+      "allowed_platform_channel_counts": [1, 2],
+      "source_refs": [
+        "https://www.crucial.com/support"
+      ]
+    }
+  ]
+}

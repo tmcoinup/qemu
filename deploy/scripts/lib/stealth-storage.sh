@@ -2,28 +2,39 @@
 # 依据完整平台 bundle 构造唯一的 Guest 启动盘设备。
 #
 # 老款 DDR3 主板只能从 SATA/AHCI 启动；支持原生 NVMe boot 的平台继续使用
-# 经 component catalog 绑定的 970 PRO。调用方必须先加载 profile 与 DISK 路径。
+# 经 component catalog 绑定的审核画像。调用方必须先加载 profile 与 DISK 路径。
 # shellcheck disable=SC2034 # BOOT_STORAGE_ARGS 由启动命令组装器读取。
 
 stealth_validate_boot_storage_serial() {
     local serial="${BOOT_STORAGE_SERIAL:-}"
     local LC_ALL=C
 
-    # 设备属性使用逗号分隔，序号必须在拼接 argv 的最后入口重新校验，不能依赖
-    # STRICT_HARDWARE 或 profile 加载阶段。白名单包含当前 SATA/NVMe 格式，以及
-    # 旧 profile 迁移所需的历史 S<10 hex>N；其余字符一律不得进入 -device。
-    if ! [[ "$serial" =~ ^S[0-9A-F]{14}$ ||
-            "$serial" =~ ^S[0-9A-F]{3}N[0-9A-F]{9}$ ||
-            "$serial" =~ ^S[0-9A-F]{10}N$ ]] ||
-       [[ "$serial" == S00000000000000 ||
-          "$serial" == SFFFFFFFFFFFFFF ||
-          "$serial" == S000N000000000 ||
-          "$serial" == SFFFNFFFFFFFFF ||
-          "$serial" == S0000000000N ||
-          "$serial" == SFFFFFFFFFFN ]]; then
-        echo "ERROR: BOOT_STORAGE_SERIAL 格式非法或为占位值" >&2
-        return 1
-    fi
+    # 设备属性使用逗号分隔，必须在最终 argv 入口按所选品牌重新校验。
+    case "${PLATFORM_BOOT_STORAGE:-nvme}" in
+        nvme)
+            stealth_component_storage_serial_is_valid \
+                "${BOOT_STORAGE_COMPONENT_ID:-}" "$serial" >/dev/null ||
+                return 1
+            ;;
+        sata-ahci)
+            if ! [[ "$serial" =~ ^S[0-9A-F]{14}$ ||
+                    "$serial" =~ ^S[0-9A-F]{3}N[0-9A-F]{9}$ ||
+                    "$serial" =~ ^S[0-9A-F]{10}N$ ]] ||
+               [[ "$serial" == S00000000000000 ||
+                  "$serial" == SFFFFFFFFFFFFFF ||
+                  "$serial" == S000N000000000 ||
+                  "$serial" == SFFFNFFFFFFFFF ||
+                  "$serial" == S0000000000N ||
+                  "$serial" == SFFFFFFFFFFN ]]; then
+                echo "ERROR: SATA BOOT_STORAGE_SERIAL 格式非法或为占位值" >&2
+                return 1
+            fi
+            ;;
+        *)
+            echo "ERROR: 无法校验未知启动存储总线的序列号" >&2
+            return 1
+            ;;
+    esac
 }
 
 stealth_build_boot_storage_args() {
@@ -48,7 +59,7 @@ stealth_build_boot_storage_args() {
             fi
             BOOT_STORAGE_ARGS=(
                 -drive "file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=threads,discard=unmap"
-                -device "nvme,id=nvmectl0,bus=rp1,drive=bootdisk0,serial=${BOOT_STORAGE_SERIAL:?缺少 BOOT_STORAGE_SERIAL},use-samsung-id=on,bootindex=3,model-number=${BOOT_STORAGE_MODEL:?缺少 BOOT_STORAGE_MODEL},firmware-rev=${BOOT_STORAGE_FIRMWARE:?缺少 BOOT_STORAGE_FIRMWARE},subsys-vendor-id=${NVME_SUBSYS_VEN:?缺少 NVME_SUBSYS_VEN},subsys-id=${NVME_SUBSYS_DEV:?缺少 NVME_SUBSYS_DEV},subnqn=${NVME_SUBNQN:?缺少 NVME_SUBNQN}"
+                -device "nvme,id=nvmectl0,bus=rp1,drive=bootdisk0,serial=${BOOT_STORAGE_SERIAL:?缺少 BOOT_STORAGE_SERIAL},x-identity-profile=${NVME_COMPONENT_ID:?缺少 NVME_COMPONENT_ID},bootindex=3,model-number=${BOOT_STORAGE_MODEL:?缺少 BOOT_STORAGE_MODEL},firmware-rev=${BOOT_STORAGE_FIRMWARE:?缺少 BOOT_STORAGE_FIRMWARE},subsys-vendor-id=${NVME_SUBSYS_VEN:?缺少 NVME_SUBSYS_VEN},subsys-id=${NVME_SUBSYS_DEV:?缺少 NVME_SUBSYS_DEV},subnqn=${NVME_SUBNQN:?缺少 NVME_SUBNQN}"
             )
             ;;
         sata-ahci)

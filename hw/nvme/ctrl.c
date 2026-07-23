@@ -212,6 +212,7 @@
 #include "nvme.h"
 #include "dif.h"
 #include "trace.h"
+#include "vmate-identity.h"
 
 #define NVME_MAX_IOQPAIRS 0xffff
 #define NVME_DB_SIZE  4
@@ -226,14 +227,6 @@
 #define NVME_VF_RES_GRANULARITY 1
 #define NVME_VF_OFFSET 0x1
 #define NVME_VF_STRIDE 1
-
-/*
- * Samsung 970 PRO 官方控制器规范给出的固定身份组合：主 PCI ID
- * 144d:a804、子系统 144d:a801。当前设备只对这一套已经核实的画像提供
- * Samsung 兼容模式，避免 960/970 EVO/980 等不同控制器共用同一个 ID。
- */
-#define NVME_SAMSUNG_970PRO_MODEL "Samsung SSD 970 PRO 512GB"
-#define NVME_SAMSUNG_970PRO_FIRMWARE "1B2QEXP7"
 
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
@@ -8575,75 +8568,54 @@ static const MemoryRegionOps nvme_cmb_ops = {
     },
 };
 
-/*
- * 严格校验 Samsung 身份的所有互相关联字段。QEMU 实现的仍是通用 NVMe
- * 行为，所以这里只接受项目已经验证并统一使用的 970 PRO 512GB 画像；
- * 未知型号必须先补充独立的 PCI/固件/能力映射，不能靠字符串后缀猜测。
- */
-static bool nvme_check_samsung_profile(const NvmeParams *params, Error **errp)
+static const VmateNvmeIdentity *
+nvme_vmate_identity(const NvmeParams *params)
 {
-    const char *model = params->model_number ? params->model_number :
-                        NVME_SAMSUNG_970PRO_MODEL;
-    const char *firmware = params->firmware_rev ? params->firmware_rev :
-                           NVME_SAMSUNG_970PRO_FIRMWARE;
-    const char *serial = params->serial;
-    size_t i;
+    const char *id = params->identity_profile;
 
-    if (params->use_samsung_id && params->use_intel_id) {
-        error_setg(errp, "use-samsung-id and use-intel-id are mutually "
-                         "exclusive");
+    /*
+     * use-samsung-id 是既有命令行 ABI。它继续映射到同一张严格画像，但新目录
+     * 一律传 x-identity-profile，不能再为每个品牌增加互斥布尔开关。
+     */
+    if (!id && params->use_samsung_id) {
+        id = "samsung-970-pro-512gb";
+    }
+    return vmate_nvme_identity_lookup(id);
+}
+
+/*
+ * 严格校验消费级身份的全部关联字段。QEMU 实现的仍是通用 NVMe 行为；只有
+ * 表中已经审核的型号才能覆盖 PCI/OUI，未知型号不能靠字符串猜测。
+ */
+static bool nvme_check_vmate_profile(const NvmeParams *params, Error **errp)
+{
+    const VmateNvmeIdentity *identity = nvme_vmate_identity(params);
+    const char *model;
+    const char *firmware;
+    unsigned identity_modes = !!params->identity_profile +
+                              params->use_samsung_id +
+                              params->use_intel_id;
+
+    if (identity_modes > 1) {
+        error_setg(errp, "x-identity-profile, use-samsung-id and use-intel-id "
+                         "are mutually exclusive");
         return false;
     }
-    if (!params->use_samsung_id) {
+    if (params->identity_profile && !identity) {
+        error_setg(errp, "unsupported NVMe x-identity-profile '%s'",
+                   params->identity_profile);
+        return false;
+    }
+    if (!identity) {
         return true;
     }
-    if (strcmp(model, NVME_SAMSUNG_970PRO_MODEL)) {
-        error_setg(errp, "unsupported Samsung model-number '%s'; the strict "
-                         "profile only supports '%s'",
-                   model, NVME_SAMSUNG_970PRO_MODEL);
-        return false;
-    }
-    if (strcmp(firmware, NVME_SAMSUNG_970PRO_FIRMWARE)) {
-        error_setg(errp, "firmware-rev '%s' does not match Samsung model "
-                         "'%s' (expected '%s')",
-                   firmware, model, NVME_SAMSUNG_970PRO_FIRMWARE);
-        return false;
-    }
-    if (!serial || strlen(serial) != 14 || serial[0] != 'S' ||
-        serial[4] != 'N') {
-        error_setg(errp, "Samsung 970 PRO serial must match "
-                         "S###N######### (14 uppercase alphanumeric bytes)");
-        return false;
-    }
-    for (i = 1; i < 14; i++) {
-        if (i != 4 && !g_ascii_isupper(serial[i]) &&
-            !g_ascii_isdigit(serial[i])) {
-            error_setg(errp, "Samsung 970 PRO serial must match "
-                             "S###N######### (14 uppercase alphanumeric bytes)");
-            return false;
-        }
-    }
-    if (!strcmp(serial, "S000N000000000") ||
-        !strcmp(serial, "SFFFNFFFFFFFFF")) {
-        error_setg(errp, "Samsung 970 PRO serial must not be a placeholder");
-        return false;
-    }
-    if (params->subsystem_vendor_id &&
-        params->subsystem_vendor_id != PCI_SUBVENDOR_ID_SAMSUNG_970PRO) {
-        error_setg(errp, "subsys-vendor-id must be 0x%04x for the strict "
-                         "Samsung 970 PRO profile",
-                   PCI_SUBVENDOR_ID_SAMSUNG_970PRO);
-        return false;
-    }
-    if (params->subsystem_id &&
-        params->subsystem_id != PCI_SUBDEVICE_ID_SAMSUNG_970PRO) {
-        error_setg(errp, "subsys-id must be 0x%04x for the strict Samsung "
-                         "970 PRO profile",
-                   PCI_SUBDEVICE_ID_SAMSUNG_970PRO);
-        return false;
-    }
-
-    return true;
+    model = params->model_number ? params->model_number : identity->model;
+    firmware = params->firmware_rev ? params->firmware_rev :
+                                      identity->firmware;
+    return vmate_nvme_identity_validate(identity, model, firmware,
+                                        params->serial,
+                                        params->subsystem_vendor_id,
+                                        params->subsystem_id, errp);
 }
 
 static bool nvme_check_params(NvmeCtrl *n, Error **errp)
@@ -8709,7 +8681,7 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
         return false;
     }
 
-    if (!nvme_check_samsung_profile(params, errp)) {
+    if (!nvme_check_vmate_profile(params, errp)) {
         return false;
     }
 
@@ -9052,6 +9024,7 @@ static DOEProtocol doe_spdm_prot[] = {
 static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
 {
     ERRP_GUARD();
+    const VmateNvmeIdentity *identity = nvme_vmate_identity(&n->params);
     uint8_t *pci_conf = pci_dev->config;
     uint64_t bar_size;
     unsigned msix_table_offset = 0, msix_pba_offset = 0;
@@ -9061,16 +9034,16 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     pci_conf[PCI_INTERRUPT_PIN] = pci_is_vf(pci_dev) ? 0 : 1;
     pci_config_set_prog_interface(pci_conf, 0x2);
 
-    if (n->params.use_samsung_id) {
-        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_SAMSUNG);
-        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_SAMSUNG_970PRO);
+    if (identity) {
+        pci_config_set_vendor_id(pci_conf, identity->pci_vendor);
+        pci_config_set_device_id(pci_conf, identity->pci_device);
         pci_set_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID,
                      n->params.subsystem_vendor_id ?
                      n->params.subsystem_vendor_id :
-                     PCI_SUBVENDOR_ID_SAMSUNG_970PRO);
+                     identity->subsystem_vendor);
         pci_set_word(pci_conf + PCI_SUBSYSTEM_ID,
                      n->params.subsystem_id ? n->params.subsystem_id :
-                     PCI_SUBDEVICE_ID_SAMSUNG_970PRO);
+                     identity->subsystem_device);
     } else if (n->params.use_intel_id) {
         pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
         pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
@@ -9083,19 +9056,15 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     nvme_add_pm_capability(pci_dev, 0x60);
     pcie_endpoint_cap_init(pci_dev, 0x80);
 
-    if (n->params.use_samsung_id) {
+    if (identity) {
         /*
-         * Stealth: a real Samsung 9xx / 980 consumer NVMe negotiates PCIe 3.0
-         * x4 (8 GT/s, x4). pcie_endpoint_cap_init() leaves the endpoint at the
-         * PCIe spec default of Gen1 x1 (2.5 GT/s), so without this the guest
-         * reads PCI_EXP_LNKCAP / LNKSTA = Gen1 x1 on a drive whose model string
-         * claims a Gen3 part — CrystalDiskInfo / Device Manager "PCI link
-         * speed" / anti-cheat see an impossible link and flag the VM. Every
-         * model in the deploy NVMe pool is Gen3 x4, so advertise that.
-         * (Keep in sync with deploy/scripts/lib/stealth-pools.sh.)
+         * 当前受控消费级目录全部是 PCIe Gen3 x4。端点能力必须与画像一致；
+         * pcie_endpoint_cap_init() 的 Gen1 x1 默认值不能用于这些型号。
          */
-        pcie_cap_fill_link_ep_usp(pci_dev, QEMU_PCI_EXP_LNK_X4,
-                                  QEMU_PCI_EXP_LNK_8GT, false);
+        if (identity->pcie_generation == 3 && identity->lanes == 4) {
+            pcie_cap_fill_link_ep_usp(pci_dev, QEMU_PCI_EXP_LNK_X4,
+                                      QEMU_PCI_EXP_LNK_8GT, false);
+        }
     }
     pcie_cap_flr_init(pci_dev);
     if (n->params.sriov_max_vfs) {
@@ -9222,12 +9191,13 @@ static void nvme_qemu_subnqn(NvmeCtrl *n, char *buf, size_t size)
 
 static void nvme_init_subnqn(NvmeCtrl *n)
 {
+    const VmateNvmeIdentity *identity = nvme_vmate_identity(&n->params);
     NvmeSubsystem *subsys = n->subsys;
     NvmeIdCtrl *id = &n->id_ctrl;
 
     if (n->params.implicit_subsystem && n->params.subnqn) {
         pstrcpy((char *)id->subnqn, sizeof(id->subnqn), n->params.subnqn);
-    } else if (n->params.implicit_subsystem && n->params.use_samsung_id) {
+    } else if (n->params.implicit_subsystem && identity) {
         nvme_qemu_subnqn(n, (char *)id->subnqn, sizeof(id->subnqn));
     } else {
         pstrcpy((char *)id->subnqn, sizeof(id->subnqn), (char*)subsys->subnqn);
@@ -9236,6 +9206,7 @@ static void nvme_init_subnqn(NvmeCtrl *n)
 
 static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 {
+    const VmateNvmeIdentity *identity = nvme_vmate_identity(&n->params);
     NvmeIdCtrl *id = &n->id_ctrl;
     uint8_t *pci_conf = pci_dev->config;
     uint64_t cap = ldq_le_p(&n->bar.cap);
@@ -9253,18 +9224,18 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     if (n->params.model_number) {
         strpadcpy((char *)id->mn, sizeof(id->mn),
                   n->params.model_number, ' ');
-    } else if (n->params.use_samsung_id) {
+    } else if (identity) {
         strpadcpy((char *)id->mn, sizeof(id->mn),
-                  NVME_SAMSUNG_970PRO_MODEL, ' ');
+                  identity->model, ' ');
     } else {
         strpadcpy((char *)id->mn, sizeof(id->mn), "QEMU NVMe Ctrl", ' ');
     }
     if (n->params.firmware_rev) {
         strpadcpy((char *)id->fr, sizeof(id->fr),
                   n->params.firmware_rev, ' ');
-    } else if (n->params.use_samsung_id) {
+    } else if (identity) {
         strpadcpy((char *)id->fr, sizeof(id->fr),
-                  NVME_SAMSUNG_970PRO_FIRMWARE, ' ');
+                  identity->firmware, ' ');
     } else {
         strpadcpy((char *)id->fr, sizeof(id->fr), QEMU_VERSION, ' ');
     }
@@ -9282,11 +9253,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 
     id->rab = 6;
 
-    if (n->params.use_samsung_id) {
-        /* Samsung IEEE OUI 00-25-38 (Samsung Electronics) */
-        id->ieee[0] = 0x38;
-        id->ieee[1] = 0x25;
-        id->ieee[2] = 0x00;
+    if (identity) {
+        memcpy(id->ieee, identity->ieee_oui, sizeof(id->ieee));
     } else if (n->params.use_intel_id) {
         id->ieee[0] = 0xb3;
         id->ieee[1] = 0x02;
@@ -9563,6 +9531,8 @@ static const Property nvme_props[] = {
     DEFINE_PROP_UINT8("vsl", NvmeCtrl, params.vsl, 7),
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
     DEFINE_PROP_BOOL("use-samsung-id", NvmeCtrl, params.use_samsung_id, false),
+    DEFINE_PROP_STRING("x-identity-profile", NvmeCtrl,
+                       params.identity_profile),
     DEFINE_PROP_STRING("model-number", NvmeCtrl, params.model_number),
     DEFINE_PROP_STRING("firmware-rev", NvmeCtrl, params.firmware_rev),
     DEFINE_PROP_STRING("subnqn", NvmeCtrl, params.subnqn),

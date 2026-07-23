@@ -13,7 +13,8 @@ LIBEXEC_DIR="$ROOT_PREFIX/usr/local/libexec"
 SUDOERS_DIR="$ROOT_PREFIX/etc/sudoers.d"
 PERF_DEST="$LIBEXEC_DIR/qemu-vmate-host-performance"
 ISO_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate"
-ISO_RUNTIME_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-runtime-v1.sh"
+ISO_RUNTIME_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-runtime-v5.sh"
+ISO_CGROUP_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-cgroup-v5.sh"
 QEMU_TRUST_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-qemu.conf"
 SUDOERS_DEST="$SUDOERS_DIR/qemu-vmate-host"
 LEGACY_PERF_SUDOERS="$SUDOERS_DIR/qemu-hostperf"
@@ -62,6 +63,9 @@ check_install_directories() {
     check_secure_directory "$LIBEXEC_DIR" 755 &&
         check_secure_directory "$SUDOERS_DIR" 755
 }
+
+# shellcheck source=lib/setup-host-cpu-install-guard.sh
+source "$HERE/lib/setup-host-cpu-install-guard.sh"
 
 acquire_install_lock() {
     local lock_tmp path_meta fd_meta
@@ -167,6 +171,7 @@ verify_installation() {
     check_regular_file "$PERF_DEST" 755 || return 1
     check_regular_file "$ISO_DEST" 755 || return 1
     check_regular_file "$ISO_RUNTIME_DEST" 755 || return 1
+    check_regular_file "$ISO_CGROUP_DEST" 755 || return 1
     check_qemu_trust_manifest || {
         echo "ERROR: QEMU root-owned 信任清单无效或构建产物已变化" >&2
         return 1
@@ -229,6 +234,9 @@ case "$command" in
             }
         fi
         acquire_install_lock
+        # 尚未持 CPU global.lock 时让当前已安装 helper 自动回收确认死亡的旧实例；
+        # helper 会自行串行化并拒绝活动 PID。发布窗口内仍会持锁二次复验。
+        release_stale_legacy_cpu_isolation
         ;;
     check|--check)
         (( $# == 0 )) || { echo "用法: sudo $0 check" >&2; exit 2; }
@@ -288,6 +296,7 @@ declare -a transaction_destinations=(
     "$LEGACY_ISO_SUDOERS"
     "$PERF_DEST"
     "$ISO_RUNTIME_DEST"
+    "$ISO_CGROUP_DEST"
     "$QEMU_TRUST_DEST"
     "$ISO_DEST"
 )
@@ -298,7 +307,9 @@ transaction_committed=0
 transaction_backup_count=0
 
 finish_transaction() {
-    local original_status=$? index rollback_failed=0 path backup
+    local original_status=$? index permission_index rollback_failed=0 path backup
+    # EXIT 回滚一旦开始必须完成；第二个终端信号不能打断 rm→mv 的恢复窗口。
+    trap '' HUP INT QUIT TERM
     trap - EXIT
 
     if (( transaction_started && ! transaction_committed )); then
@@ -306,11 +317,34 @@ finish_transaction() {
         # 中文注释：sudoers 是第一个备份项，因此逆序恢复会让它最后重新生效；
         # 在 helper/runtime/trust 全部恢复之前，普通用户无法调用混合版本。
         for (( index=transaction_backup_count - 1; index >= 0; index-- )); do
+            if (( index == 2 && rollback_failed )); then
+                echo "CRITICAL: helper 依赖恢复失败，保持全部 sudoers 禁用" >&2
+                for (( permission_index=0; permission_index<=2; permission_index++ )); do
+                    rm -f -- "${transaction_destinations[$permission_index]}" \
+                        2>/dev/null || true
+                done
+                break
+            fi
             path="${transaction_destinations[$index]}"
             backup="${transaction_backups[$index]}"
-            rm -f -- "$path" 2>/dev/null || rollback_failed=1
-            if [[ "${transaction_had_original[$index]}" == "1" ]]; then
-                mv -fT -- "$backup" "$path" 2>/dev/null || rollback_failed=1
+            if [[ -n "$ROOT_PREFIX" &&
+                  "${VMATE_TEST_FAIL_RESTORE_INDEX:-}" == "$index" ]]; then
+                rollback_failed=1
+                continue
+            fi
+            if [[ -e "$backup" || -L "$backup" ]]; then
+                rm -f -- "$path" 2>/dev/null || rollback_failed=1
+                if [[ "${transaction_had_original[$index]}" == "1" ]]; then
+                    mv -fT -- "$backup" "$path" 2>/dev/null || rollback_failed=1
+                else
+                    rm -f -- "$backup" 2>/dev/null || rollback_failed=1
+                fi
+            elif [[ "${transaction_had_original[$index]}" == "0" ]]; then
+                # 本项原本不存在；若新版本已发布，失败回滚应把它移除。
+                rm -f -- "$path" 2>/dev/null || rollback_failed=1
+            elif [[ ! -e "$path" && ! -L "$path" ]]; then
+                # 原文件和备份同时消失意味着无法证明旧版本仍可恢复。
+                rollback_failed=1
             fi
         done
         if (( rollback_failed )); then
@@ -319,11 +353,18 @@ finish_transaction() {
         fi
     fi
 
-    for path in "${stage_files[@]}" "${transaction_backups[@]}"; do
+    for path in "${stage_files[@]}"; do
         if [[ -n "$path" ]]; then
             rm -f -- "$path" 2>/dev/null || true
         fi
     done
+    if (( !rollback_failed )); then
+        for path in "${transaction_backups[@]}"; do
+            [[ -z "$path" ]] || rm -f -- "$path" 2>/dev/null || true
+        done
+    else
+        echo "CRITICAL: 未删除事务备份，保留现场供管理员恢复" >&2
+    fi
     exit "$original_status"
 }
 trap finish_transaction EXIT
@@ -343,8 +384,10 @@ perf_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-host-performance.XXXXXX")"
 stage_files+=("$perf_tmp")
 iso_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-isolate.XXXXXX")"
 stage_files+=("$iso_tmp")
-runtime_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-runtime-v1.XXXXXX")"
+runtime_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-runtime-v5.XXXXXX")"
 stage_files+=("$runtime_tmp")
+cgroup_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-cgroup-v5.XXXXXX")"
+stage_files+=("$cgroup_tmp")
 trust_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-trust.XXXXXX")"
 stage_files+=("$trust_tmp")
 sudoers_tmp="$(mktemp "$SUDOERS_DIR/.qemu-vmate-host.XXXXXX")"
@@ -356,6 +399,8 @@ install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 "$HERE/host-performance.sh" "$pe
 install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 "$HERE/host-cpu-isolate.sh" "$iso_tmp"
 install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
     "$HERE/host-cpu-isolate-runtime.sh" "$runtime_tmp"
+install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
+    "$HERE/host-cpu-isolate-cgroup.sh" "$cgroup_tmp"
 {
     printf 'path=%s\n' "$QEMU_SOURCE"
     printf 'sha256=%s\n' "$QEMU_SHA256"
@@ -375,6 +420,7 @@ chmod 0440 "$sudoers_tmp"
 check_regular_file "$perf_tmp" 755
 check_regular_file "$iso_tmp" 755
 check_regular_file "$runtime_tmp" 755
+check_regular_file "$cgroup_tmp" 755
 check_qemu_trust_manifest "$trust_tmp"
 check_sudoers_contract "$sudoers_tmp"
 
@@ -401,19 +447,31 @@ for index in "${!transaction_destinations[@]}"; do
     backup="$(mktemp "$destination_dir/.qemu-vmate-backup.XXXXXX")"
     rm -f -- "$backup"
     transaction_backups[index]="$backup"
-    transaction_had_original[index]=0
     if [[ -e "$destination" || -L "$destination" ]]; then
-        mv -fT -- "$destination" "$backup"
         transaction_had_original[index]=1
+    else
+        transaction_had_original[index]=0
     fi
+    # 在任何 rename 前登记本项。信号或 mv 失败时，EXIT 回滚可通过备份路径是否
+    # 存在区分“尚未移动”和“已经移动”，不会误删唯一一份旧 helper/sudoers。
     transaction_backup_count=$((index + 1))
+    if [[ "${transaction_had_original[$index]}" == "1" ]]; then
+        maybe_test_fail "before_backup_move_$index"
+        mv -fT -- "$destination" "$backup"
+        maybe_test_fail "after_backup_move_$index"
+    fi
 done
 maybe_test_fail after_backup
+acquire_cpu_runtime_lock
+refuse_active_legacy_cpu_isolation
+refuse_inflight_cpu_helpers
 
 # versioned runtime 先发布，main helper 最后切换；即使旧 sudo 调用已在部署前启动，
 # 它仍读取旧 ABI 路径。新 sudoers 只有所有文件和 QEMU 快照都就绪后才恢复。
 mv -fT -- "$runtime_tmp" "$ISO_RUNTIME_DEST"
 maybe_test_fail after_runtime
+mv -fT -- "$cgroup_tmp" "$ISO_CGROUP_DEST"
+maybe_test_fail after_cgroup
 mv -fT -- "$trust_tmp" "$QEMU_TRUST_DEST"
 maybe_test_fail after_trust
 mv -fT -- "$perf_tmp" "$PERF_DEST"

@@ -13,6 +13,9 @@ REGISTRY_CORE="$REPO_ROOT/deploy/scripts/gpu-profile-registry-core.ps1"
 APPLY_SCRIPT="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 APPLY_SUPPORT="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 REFRESH_SCRIPT="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
+GPU_CONTRACT="$REPO_ROOT/deploy/scripts/gpu-board-identity-contract.ps1"
+GPU_BOARDS="$REPO_ROOT/deploy/hardware/gpu-boards.json"
+GPU_CASE_HELPER="$SCRIPT_DIR/fixtures/gpu_board_catalog_cases.ps1"
 PROFILE_DOC="$REPO_ROOT/deploy/docs/PROFILE-FIELDS.md"
 RUNTIME_HELPER_TEST="$SCRIPT_DIR/test_guest_shallow_pci_runtime_helpers.sh"
 TEST_RUNNER="$SCRIPT_DIR/run-vmate-tests.py"
@@ -34,6 +37,8 @@ command -v pwsh >/dev/null 2>&1 || fail "缺少 pwsh，无法解析 PowerShell 5
 [[ "$(xxd -p -l 3 "$REFRESH_SCRIPT")" == "efbbbf" ]] \
     || fail "refresh-gpu-name.ps1 必须保留 UTF-8 BOM"
 [[ -f "$RUNTIME_HELPER_TEST" ]] || fail "缺少浅层 PCI runtime helper 测试"
+[[ -f "$GPU_CONTRACT" && -f "$GPU_BOARDS" && -f "$GPU_CASE_HELPER" ]] \
+    || fail "缺少离线 GPU 身份契约或测试目录 helper"
 
 # 主测试与运行时替身按职责拆开，并把物理行数/quick 接线作为回归契约。
 for test_source in "$0" "$RUNTIME_HELPER_TEST"; do
@@ -44,8 +49,12 @@ done
 rg -F '"test_guest_shallow_pci_runtime_helpers.sh",' "$TEST_RUNNER" >/dev/null \
     || fail "浅层 PCI runtime helper 测试没有加入 quick 测试集"
 
-IDENTITY_SCRIPT="$IDENTITY_SCRIPT" pwsh -NoLogo -NoProfile -NonInteractive -Command '
+IDENTITY_SCRIPT="$IDENTITY_SCRIPT" GPU_CONTRACT="$GPU_CONTRACT" \
+    GPU_BOARDS="$GPU_BOARDS" GPU_CASE_HELPER="$GPU_CASE_HELPER" \
+    pwsh -NoLogo -NoProfile -NonInteractive -Command '
 $ErrorActionPreference = "Stop"
+. $env:GPU_CONTRACT
+. $env:GPU_CASE_HELPER
 $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -74,21 +83,22 @@ function Assert-Equal($Actual, $Expected, [string]$Label) {
     }
 }
 
-$nvidia = Get-ShallowPciIdentity `
-    -InstanceId "PCI\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1\3&11583659&0&30" `
-    -Vendor "NVIDIA"
-Assert-Equal $nvidia.PciVendorId 0x10DE "NVIDIA vendor"
-Assert-Equal $nvidia.PciDeviceId 0x1C82 "1050 Ti device"
-Assert-Equal $nvidia.SubsystemVendorId 0x10DE "NVIDIA subsystem vendor"
-Assert-Equal $nvidia.SubsystemDeviceId 0x1C82 "NVIDIA subsystem device"
-Assert-Equal $nvidia.RevisionId 0xA1 "NVIDIA revision"
-
-$amd = Get-ShallowPciIdentity `
-    -InstanceId "PCI\VEN_1AF4&DEV_1050&SUBSYS_67FF1002&REV_CF\4&ABC&0&00" `
-    -Vendor "AMD"
-Assert-Equal $amd.PciVendorId 0x1002 "AMD vendor"
-Assert-Equal $amd.PciDeviceId 0x67FF "RX 560 device"
-Assert-Equal $amd.RevisionId 0xCF "AMD revision"
+$aibCases = @(Get-TestGpuBoardCases $env:GPU_BOARDS)
+Assert-TestGpuBoardCoverage $aibCases
+foreach ($case in $aibCases) {
+    $identity = Get-ShallowPciIdentity `
+        -InstanceId ("PCI\VEN_1AF4&DEV_1050&SUBSYS_" + $case.Carrier +
+            ("&REV_{0:X2}\3&AIB&0&30" -f $case.Revision)) `
+        -Vendor $case.Vendor
+    Assert-Equal $identity.PciVendorId $case.PciVendor `
+        ($case.Carrier + " logical vendor")
+    Assert-Equal $identity.PciDeviceId $case.Device ($case.Carrier + " logical device")
+    Assert-Equal $identity.SubsystemVendorId $case.SubVendor `
+        ($case.Carrier + " subsystem vendor")
+    Assert-Equal $identity.SubsystemDeviceId $case.SubDevice `
+        ($case.Carrier + " subsystem device")
+    Assert-Equal $identity.RevisionId $case.Revision ($case.Carrier + " revision")
+}
 
 Assert-GpuIdentityStrings -Name ("NVIDIA " + ("N" * 56)) -Vendor NVIDIA `
     -Bios "Version 86.07.48.00.A0"
@@ -156,9 +166,14 @@ foreach ($badProfile in @(
 
 foreach ($bad in @(
     @{ Id="PCI\VEN_10DE&DEV_1C82&SUBSYS_1C8210DE&REV_A1\1"; Vendor="NVIDIA" },
+    @{ Id="PCI\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1\1"; Vendor="NVIDIA" },
+    @{ Id="PCI\VEN_1AF4&DEV_1050&SUBSYS_67FF1002&REV_CF\1"; Vendor="AMD" },
     @{ Id="PCI\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1\1"; Vendor="AMD" },
     @{ Id="PCI\VEN_1AF4&DEV_1050&SUBSYS_000010DE&REV_A1\1"; Vendor="NVIDIA" },
     @{ Id="PCI\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1\1"; Vendor="nvidia" },
+    @{ Id="PCI\VEN_1AF4&DEV_1050&SUBSYS_A1131AF4&REV_A1\1"; Vendor="NVIDIA" },
+    @{ Id="PCI\VEN_1AF4&DEV_1050&SUBSYS_A1011AF4&REV_A2\1"; Vendor="NVIDIA" },
+    @{ Id="PCI\VEN_1AF4&DEV_1050&SUBSYS_A1011AF4&REV_A1\1"; Vendor="AMD" },
     @{ Id="PCI\VEN_1AF4&DEV_1050&REV_A1\1"; Vendor="NVIDIA" }
 )) {
     $rejected = $false
@@ -246,6 +261,19 @@ for moved_function in Assert-IdentityToken Get-ExactRegistryValue; do
         fail "persist 仍重复定义 transaction 函数：$moved_function"
     fi
 done
+rg -F 'function Test-GpuLogicalBinding' "$GPU_CONTRACT" >/dev/null \
+    || fail "共享 GPU identity contract 缺少 AIB canonical bundle 门禁"
+if ! rg -F "'gpu-board-identity-contract.ps1'" "$REGISTRY_CORE" >/dev/null ||
+   ! rg -F '. $gpuBoardIdentityContractPath' "$REGISTRY_CORE" >/dev/null; then
+    fail "registry core 没有加载共享 GPU identity contract"
+fi
+persist_bundle_line="$(rg -n -F 'Test-GpuLogicalBinding $candidate $sourceIdentity' \
+    "$IDENTITY_SCRIPT" | cut -d: -f1)"
+persist_first_write_line="$(rg -n -F '$versionKey = $identitiesKey.CreateSubKey' \
+    "$IDENTITY_SCRIPT" | cut -d: -f1)"
+[[ -n "$persist_bundle_line" && -n "$persist_first_write_line" && \
+    "$persist_bundle_line" -lt "$persist_first_write_line" ]] \
+    || fail "直接 persist Stage 没有在注册表首写前核验完整 AIB bundle"
 for moved_function in Invoke-WithIdentityWriterLock Invoke-RecoverOrRollback; do
     rg -F "function $moved_function" "$TRANSACTION_SCRIPT" >/dev/null \
         || fail "transaction helper 缺少已拆分函数：$moved_function"

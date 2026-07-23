@@ -31,8 +31,10 @@ $refreshHelperSource = Join-Path $PSScriptRoot 'refresh-gpu-name.ps1'; $displayM
 $identityHelperSource = Join-Path $PSScriptRoot 'persist-gpu-profile.ps1'; $transactionHelperSource = Join-Path $PSScriptRoot 'gpu-profile-transaction.ps1'
 $registryCoreSource = Join-Path $PSScriptRoot 'gpu-profile-registry-core.ps1'
 $applySupportSource = Join-Path $PSScriptRoot 'gpu-spoof-apply-support.ps1'
+$boardIdentityContractSource = Join-Path $PSScriptRoot 'gpu-board-identity-contract.ps1'
 $missingHelper = @($refreshHelperSource, $displayModeHelperSource, $identityHelperSource,
-    $transactionHelperSource, $registryCoreSource, $applySupportSource) |
+    $transactionHelperSource, $registryCoreSource, $applySupportSource,
+    $boardIdentityContractSource) |
     Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
 if (-not $ListOnly -and $missingHelper) {
     throw ("缺少同目录辅助脚本: " + $missingHelper)
@@ -91,8 +93,11 @@ try {
 # -AutoDetect：从 PnP Display 设备的 SUBSYS 串查整个 GPU bundle。显存类型/
 # 位宽与三组时钟必须和名称、PCI ID 同时切换，不允许沿用上一台 clone 的值。
 # 用于 clone-from-base 之后 profile reroll，PCI subsys 变了但 base 注册表覆盖还是老 GPU。
+$detectedProfile = if ($AutoDetect -or -not $ListOnly) {
+    Get-GpuSpoofAutoDetectProfile
+} else { $null }
 if ($AutoDetect) {
-    $profile = Get-GpuSpoofAutoDetectProfile
+    $profile = $detectedProfile
     $SpoofName = $profile.Name; $SpoofVendor = $profile.Vendor
     $SpoofBios = $profile.Bios; $SpoofRamMb = $profile.RamMb
     $SpoofMemoryType = $profile.MemoryType
@@ -101,6 +106,14 @@ if ($AutoDetect) {
     $SpoofBoostClockKHz = $profile.BoostClockKHz
     $SpoofMemoryClockKHz = $profile.MemoryClockKHz
     $SpoofSliSupported = $profile.SliSupported
+} elseif (-not $ListOnly) {
+    $requestedProfile = @{
+        Name=$SpoofName; Vendor=$SpoofVendor; Bios=$SpoofBios; RamMb=$SpoofRamMb
+        MemoryType=$SpoofMemoryType; BusWidthBits=$SpoofMemoryBusWidthBits
+        BaseClockKHz=$SpoofBaseClockKHz; BoostClockKHz=$SpoofBoostClockKHz
+        MemoryClockKHz=$SpoofMemoryClockKHz; SliSupported=$SpoofSliSupported
+    }
+    Assert-GpuSpoofAibProfile -Expected $detectedProfile -Actual $requestedProfile
 }
 
 if (-not $ListOnly) {
@@ -282,13 +295,14 @@ if ($committedIdentity.IdentityId -cne $identityTransactionId) {
 }
 Write-Host ("  -> active Enum/Class committed as " + $spoofName) -ForegroundColor Green
 
-# Monitor 节点统一由最终 strict refresh 处理；避免在 durable transaction 之外
-# 维护第二套广扫写入。Monitor profile 固定，不参与 GPU identity commit。
+# Monitor 节点由 Host profile → QEMU EDID → Windows PnP 唯一负责。GPU refresh
+# 不得广扫或重写显示器身份，避免覆盖当前选中的多品牌 component。
 
 # 显示模式脚本无论是否带 -SkipTask 都会在当前会话同步执行；以下状态只决定当当前
 # 进程位于 Session 0 等无交互会话时，是否确实存在一个可在下次登录重试的延后任务。
 $taskSetup = Install-GpuSpoofScheduledTasks -PowerShellExe $powershellExe `
     -ApplyScriptRoot $PSScriptRoot -RefreshHelperSource $refreshHelperSource `
+    -BoardIdentityContractSource $boardIdentityContractSource `
     -DisplayModeHelperSource $displayModeHelperSource -SkipDisplayTask:$SkipTask
 $displayTaskInstalled = [bool]$taskSetup.DisplayTaskInstalled
 $freqScript = [string]$taskSetup.FrequencyScript

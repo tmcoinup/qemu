@@ -5,6 +5,7 @@
  */
 #include "qemu/osdep.h"
 #include "system/vmate-launch-guard.h"
+#include "system/vmate-launch-guard-internal.h"
 
 static VMateLaunchGuardDecision classify(size_t argc, const char **arguments)
 {
@@ -111,12 +112,118 @@ static void test_boot_requires_authorization(void)
                     VMATE_LAUNCH_GUARD_AUTHORIZE);
 }
 
+static void assert_layout(const wchar_t *module_path,
+                          const wchar_t *expected_root)
+{
+    VMateLaunchGuardLayout layout;
+
+    g_assert_true(vmate_launch_guard_derive_layout(module_path, &layout));
+    g_assert_cmpint(wcscmp(layout.root, expected_root), ==, 0);
+    g_assert_cmpint(wcscmp(layout.libexec,
+                          L"C:\\Program Files\\VMate\\libexec"), ==, 0);
+    g_assert_cmpint(wcscmp(layout.qemu, module_path), ==, 0);
+    g_assert_cmpint(wcscmp(layout.client,
+                          L"C:\\Program Files\\VMate\\vmate-client.exe"),
+                    ==, 0);
+    vmate_launch_guard_clear_layout(&layout);
+}
+
+static void test_layout_valid(void)
+{
+    VMateLaunchGuardLayout layout;
+    const wchar_t *mixed_case =
+        L"D:\\Secure Apps\\VMate\\LiBeXeC\\QEMU-System-X86_64.Real.Exe";
+
+    assert_layout(
+        L"C:\\Program Files\\VMate\\libexec\\"
+        L"qemu-system-x86_64.real.exe",
+        L"C:\\Program Files\\VMate");
+    g_assert_true(vmate_launch_guard_derive_layout(mixed_case, &layout));
+    g_assert_cmpint(wcscmp(layout.root, L"D:\\Secure Apps\\VMate"), ==, 0);
+    g_assert_cmpint(wcscmp(layout.libexec,
+                          L"D:\\Secure Apps\\VMate\\libexec"), ==, 0);
+    g_assert_cmpint(wcscmp(layout.client,
+                          L"D:\\Secure Apps\\VMate\\vmate-client.exe"),
+                    ==, 0);
+    vmate_launch_guard_clear_layout(&layout);
+}
+
+static void test_layout_rejects_nonlocal_paths(void)
+{
+    static const wchar_t *const invalid[] = {
+        L"VMate\\libexec\\qemu-system-x86_64.real.exe",
+        L"C:VMate\\libexec\\qemu-system-x86_64.real.exe",
+        L"\\\\server\\share\\VMate\\libexec\\"
+        L"qemu-system-x86_64.real.exe",
+        L"\\\\?\\C:\\VMate\\libexec\\qemu-system-x86_64.real.exe",
+        L"\\\\.\\C:\\VMate\\libexec\\qemu-system-x86_64.real.exe",
+        L"C:/VMate/libexec/qemu-system-x86_64.real.exe",
+    };
+    size_t index;
+
+    for (index = 0; index < G_N_ELEMENTS(invalid); index++) {
+        VMateLaunchGuardLayout layout;
+
+        g_assert_false(vmate_launch_guard_derive_layout(invalid[index],
+                                                        &layout));
+    }
+}
+
+static void test_layout_rejects_noncanonical_paths(void)
+{
+    static const wchar_t *const invalid[] = {
+        L"C:\\VMate\\.\\libexec\\qemu-system-x86_64.real.exe",
+        L"C:\\Apps\\..\\VMate\\libexec\\"
+        L"qemu-system-x86_64.real.exe",
+        L"C:\\Apps\\\\VMate\\libexec\\qemu-system-x86_64.real.exe",
+        L"C:\\VMate.\\libexec\\qemu-system-x86_64.real.exe",
+        L"C:\\VMate \\libexec\\qemu-system-x86_64.real.exe",
+        L"C:\\VMate:alternate\\libexec\\"
+        L"qemu-system-x86_64.real.exe",
+    };
+    size_t index;
+
+    for (index = 0; index < G_N_ELEMENTS(invalid); index++) {
+        VMateLaunchGuardLayout layout;
+
+        g_assert_false(vmate_launch_guard_derive_layout(invalid[index],
+                                                        &layout));
+    }
+}
+
+static void test_layout_rejects_wrong_layout(void)
+{
+    static const wchar_t *const invalid[] = {
+        L"C:\\libexec\\qemu-system-x86_64.real.exe",
+        L"C:\\VMate\\bin\\qemu-system-x86_64.real.exe",
+        L"C:\\VMate\\libexec\\qemu-system-x86_64.exe",
+        L"C:\\VMate\\libexec\\qemu-system-aarch64.real.exe",
+        L"C:\\VMate\\libexec\\qemu-system-x86_64.real.exe.bak",
+    };
+    size_t index;
+
+    for (index = 0; index < G_N_ELEMENTS(invalid); index++) {
+        VMateLaunchGuardLayout layout;
+
+        g_assert_false(vmate_launch_guard_derive_layout(invalid[index],
+                                                        &layout));
+    }
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/vmate-launch-guard/status", test_exact_status);
     g_test_add_func("/vmate-launch-guard/version", test_exact_version_probes);
     g_test_add_func("/vmate-launch-guard/help", test_exact_help_probes);
-    g_test_add_func("/vmate-launch-guard/boot", test_boot_requires_authorization);
+    g_test_add_func("/vmate-launch-guard/boot",
+                    test_boot_requires_authorization);
+    g_test_add_func("/vmate-launch-guard/layout/valid", test_layout_valid);
+    g_test_add_func("/vmate-launch-guard/layout/nonlocal",
+                    test_layout_rejects_nonlocal_paths);
+    g_test_add_func("/vmate-launch-guard/layout/noncanonical",
+                    test_layout_rejects_noncanonical_paths);
+    g_test_add_func("/vmate-launch-guard/layout/wrong",
+                    test_layout_rejects_wrong_layout);
     return g_test_run();
 }

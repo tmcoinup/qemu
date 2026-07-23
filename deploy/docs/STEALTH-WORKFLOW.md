@@ -11,6 +11,11 @@
 详细实现与文件职责见 [`guest-stealth/README.md`](../guest-stealth/README.md)，完整 VM
 创建、克隆和收尾顺序见 [`VM-WORKFLOW.md`](VM-WORKFLOW.md)。
 
+当前目录包含 6 个芯片型号 × 3 个板卡品牌，共 18 块 AIB（12 NVIDIA、6 AMD）；
+carrier 连续为 `1AF4:A101`–`1AF4:A112`，物理显示主 ID 始终是
+`1AF4:1050`。下文 GTX 1050 Ti/`10DE:1C82` 仅是其中一个 NVIDIA 示例。
+本流程不做 GPU 直通，也不定义或虚构 GPU 序列号。
+
 ## 1. 当前方案的边界
 
 | 层次 | 当前实现 | 不代表什么 |

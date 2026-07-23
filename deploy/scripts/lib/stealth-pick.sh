@@ -286,23 +286,24 @@ stealth_pick_profile() {
     CPU_ASSET="$(_rand 1000 9999)"
 
     # 3. GPU
-    local gpu_n=${#GPU_POOL[@]}
-    local gpu_i=$(( (RANDOM * 32768 + RANDOM) % gpu_n ))
-    IFS='|' read -r GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB \
-        GPU_BIOS GPU_REV GPU_MEMORY_TYPE GPU_MEMORY_BUS_WIDTH_BITS \
-        GPU_BASE_CLOCK_KHZ GPU_BOOST_CLOCK_KHZ GPU_MEMORY_CLOCK_KHZ \
-        GPU_SLI_SUPPORTED <<<"${GPU_POOL[$gpu_i]}"
-    # 本分支明确不做 GPU passthrough/vGPU；这些字段只供既有显示标签兼容，不能
-    # 计入严格物理硬件实现。持久化 fidelity 字段，避免摘要把标签误报为真实设备。
-    GPU_IDENTITY_FIDELITY="label_only_out_of_scope"
+    local gpu_row
+    gpu_row="$(stealth_select_gpu_component_row)" || return 1
+    stealth_assign_gpu_profile_row "$gpu_row"
 
     # 4. NVMe
-    local nv_n=${#NVME_POOL[@]}
-    local nv_i=$(( (RANDOM * 32768 + RANDOM) % nv_n ))
+    local nvme_row
+    local nvme_manufacturer nvme_part_number nvme_identity_profile
+    local nvme_serial_kind nvme_serial_pattern nvme_serial_length nvme_weight
+    nvme_row="$(stealth_select_storage_component_row)" || return 1
     IFS='|' read -r NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE NVME_SIZE_BYTES \
         NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV \
-        NVME_SUBNQN_TEMPLATE <<<"${NVME_POOL[$nv_i]}"
-    NVME_SERIAL="$(_nvme_serial)"
+        NVME_SUBNQN_TEMPLATE nvme_manufacturer nvme_part_number \
+        nvme_identity_profile nvme_serial_kind nvme_serial_pattern \
+        nvme_serial_length nvme_weight <<<"$nvme_row"
+    [[ "$NVME_COMPONENT_ID" == "$nvme_identity_profile" ]] || return 1
+    NVME_SERIAL="$(_nvme_serial "$NVME_COMPONENT_ID")" || return 1
+    stealth_component_storage_serial_is_valid \
+        "$NVME_COMPONENT_ID" "$NVME_SERIAL" >/dev/null || return 1
     NVME_SUBNQN="${NVME_SUBNQN_TEMPLATE//\{uuid\}/$UUID}"
 
     # 启动盘是独立部件身份：NVMe 平台镜像实际 NVMe component；老式主板则从
@@ -316,9 +317,9 @@ stealth_pick_profile() {
             }
             BOOT_STORAGE_CATALOG_REVISION="$COMPONENT_CATALOG_REVISION"
             BOOT_STORAGE_COMPONENT_ID="$NVME_COMPONENT_ID"
-            BOOT_STORAGE_MANUFACTURER=Samsung
+            BOOT_STORAGE_MANUFACTURER="$nvme_manufacturer"
             BOOT_STORAGE_MODEL="$NVME_MODEL"
-            BOOT_STORAGE_PART_NUMBER=component-catalog
+            BOOT_STORAGE_PART_NUMBER="$nvme_part_number"
             BOOT_STORAGE_FIRMWARE="$NVME_FIRMWARE"
             BOOT_STORAGE_SIZE_BYTES="$NVME_SIZE_BYTES"
             BOOT_STORAGE_INTERFACE=nvme
@@ -341,93 +342,119 @@ stealth_pick_profile() {
     esac
 
     # 5. 内存厂家 / part / 持久化序列号
-    # MEM_POOL 第 5 列是适配 socket 列表，后四列是两个容量各自的
-    # rank/device-width。JEDEC DDR4 高频颗粒可以在低速平台
-    # 自动降频，因此不再错误地要求“颗粒额定速率 <= 控制器上限”；最终报告速率
-    # 由 manifest 的 MEM_MAX_MTS 与颗粒额定值取最小值。
-    local mem_matched=()
-    local entry
-    for entry in "${MEM_POOL[@]}"; do
-        local _mmfr _m2g _m4g _mrated _msockets
-        local _mr2 _mw2 _mr4 _mw4
-        IFS='|' read -r _mmfr _m2g _m4g _mrated _msockets \
-            _mr2 _mw2 _mr4 _mw4 <<<"$entry"
-        if ! [[ "$_mrated" =~ ^[0-9]+$ ]]; then
-            continue
-        fi
-        if [[ "${PLATFORM_CPU_SOURCE:-}" == host-passthrough ]]; then
-            # generic Q35 host 模板没有可证明的物理 socket；它明确声明自己的
-            # 虚拟内存代际，因此按额定速率目录区分 DDR3/DDR4，不能拿空 socket
-            # 去误匹配任意 DIMM。
-            if [[ "$MEM_TYPE" == DDR4 && "$_mrated" -ge 2133 ]] ||
-               [[ "$MEM_TYPE" == DDR3 && "$_mrated" -le 2133 ]]; then
-                mem_matched+=("$entry")
-            fi
-        elif [[ -z "${_msockets:-}" || ",$_msockets," == *",$CPU_SOCKET,"* ]]; then
-            mem_matched+=("$entry")
-        fi
-    done
-    if (( ${#mem_matched[@]} == 0 )); then
-        echo "ERROR: 没有 socket=$CPU_SOCKET、type=$MEM_TYPE 的内存可选" >&2
-        return 1
-    fi
-    local mp_i=$(( (RANDOM * 32768 + RANDOM) % ${#mem_matched[@]} ))
-    local MEM_SOCKETS
-    IFS='|' read -r MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_SOCKETS \
-        MEM_RANK_2G MEM_DEVICE_WIDTH_2G MEM_RANK_4G MEM_DEVICE_WIDTH_4G \
-        <<<"${mem_matched[$mp_i]}"
-    # 中文注释：DIMM 料号的额定速率与主板训练后的配置速率是两个不同事实。
-    # H110 上的 DDR4-2400/2666 条会训练为 2133，但 SPD/Type17 Speed 仍须保留
-    # 料号额定能力；Configured Memory Speed 才报告 2133。
-    MEM_RATED_MTS="$MEM_RATED"
-    if (( MEM_RATED_MTS < MEM_MAX_MTS )); then
-        MEM_CONFIGURED_MTS="$MEM_RATED_MTS"
-    else
-        MEM_CONFIGURED_MTS="$MEM_MAX_MTS"
-    fi
-    if [[ ",$MEM_ALLOWED_MTS," != *",$MEM_CONFIGURED_MTS,"* ]]; then
-        echo "ERROR: 内存配置速率 $MEM_CONFIGURED_MTS 不在平台允许集合 $MEM_ALLOWED_MTS" >&2
-        return 1
-    fi
-    # DIMM serial 在 pick 阶段一次性生成，写到 profile 持久化——避免之前每次
-    # 启动 stealth_smbios_args 里 _rand 一遍导致 Win32_PhysicalMemory.SerialNumber
-    # 重启就变（仿真机"硬件指纹漂移"检测的明显信号）。
-    MEM_SERIAL="$(_mem_serial)"
-
-    # 内存总量 (MiB) 也钉进 profile，跟其它硬件身份一样跨重启稳定——否则启动时
-    # 忘了带 --ram 就回退脚本默认值，"内存 4GB↔8GB 来回漂移"本身就是仿真机判定
-    # 硬件指纹变化的信号。新 VM 默认 8192 (8GB 双通道 2×4GB)——start-vm.sh 见
-    # RAM>4096 自动拆成 2 条 4GB DIMM 走双通道，两条 SN 各自唯一。老 profile 缺
-    # 字段仍退回 4096 (见 stealth_load_profile)，不擅自升级既有 VM 的硬件画像；
-    # 个别 VM 要改容量：deploy/scripts/set-vm-memory.sh <N> <size>，启动命令不变。
+    # 先固定总容量，再由共享目录同时校验 DDR 代际、socket、通道、电压、
+    # 插槽数、模块容量和训练频率。选择权威是实际安装的 module ID；family
+    # 不再被要求伪造一个并不存在的 2GiB/4GiB 配对 SKU。
     MEM_TOTAL_MB="${MEM_TOTAL_MB:-$PLATFORM_DEFAULT_MEMORY_MIB}"
     if [[ ",$MEM_ALLOWED_TOTAL_MB," != *",$MEM_TOTAL_MB,"* ]]; then
         echo "ERROR: 平台 $PLATFORM_ID 不允许 ${MEM_TOTAL_MB}MiB；允许值=$MEM_ALLOWED_TOTAL_MB" >&2
         return 1
     fi
+    local memory_socket="$CPU_SOCKET"
+    [[ "${PLATFORM_CPU_SOURCE:-}" == host-passthrough ]] && memory_socket="*"
+    local memory_candidates=()
+    mapfile -t memory_candidates < <(
+        stealth_memory_platform_module_plan_rows \
+            "$MEM_TYPE" "$memory_socket" "$MEM_CHANNELS" "$MEM_VOLTAGE_MV" \
+            "$BOARD_DIMM_SLOTS" "$MEM_TOTAL_MB" "$MEM_MODULE_MB" \
+            "$MEM_ALLOWED_MTS" "$MEM_MAX_MTS"
+    )
+    if (( ${#memory_candidates[@]} == 0 )); then
+        echo "ERROR: 没有适配 platform=$PLATFORM_ID、${MEM_TOTAL_MB}MiB 的内存物料" >&2
+        return 1
+    fi
+    local memory_row
+    memory_row="$(stealth_select_memory_module_row memory_candidates)" || return 1
+    local MEM_SOCKETS MEM_SELECTION_WEIGHT
+    local _selected_part _selected_rank _selected_device_width
+    IFS='|' read -r MEM_FAMILY_ID MEM_MODULE_ID MEM_MFR MEM_TYPE \
+        _selected_part MEM_RATED_MTS MEM_CONFIGURED_MTS MEM_VOLTAGE_MV \
+        MEM_SOCKETS _selected_rank _selected_device_width \
+        MEM_SELECTED_MODULE_MB MEM_MODULE_COUNT MEM_SELECTION_WEIGHT \
+        MEM_SPD_EE1004 <<<"$memory_row"
+
+    # 完整 family 继续保存旧的双容量兼容视图；singleton family 则把不存在的
+    # 槽位明确记为空/0。Guest 实际参数始终由上面的 MEM_MODULE_ID 决定。
+    MEM_PART_2G=""
+    MEM_PART_4G=""
+    MEM_RANK_2G=0
+    MEM_DEVICE_WIDTH_2G=0
+    MEM_RANK_4G=0
+    MEM_DEVICE_WIDTH_4G=0
+    local _legacy_memory_row
+    while IFS= read -r _legacy_memory_row; do
+        [[ "$_legacy_memory_row" == "$MEM_FAMILY_ID|"* ]] || continue
+        IFS='|' read -r _ _ _ _ MEM_PART_2G MEM_PART_4G _ _ _ _ \
+            MEM_RANK_2G MEM_DEVICE_WIDTH_2G \
+            MEM_RANK_4G MEM_DEVICE_WIDTH_4G _ <<<"$_legacy_memory_row"
+        break
+    done < <(stealth_memory_platform_candidate_rows \
+        "$MEM_TYPE" "$memory_socket" "$MEM_CHANNELS" "$MEM_VOLTAGE_MV" \
+        "$BOARD_DIMM_SLOTS" "$MEM_TOTAL_MB" "$MEM_MODULE_MB" \
+        "$MEM_ALLOWED_MTS" "$MEM_MAX_MTS")
+    if [[ -z "$MEM_PART_2G" && -z "$MEM_PART_4G" ]]; then
+        case "$MEM_SELECTED_MODULE_MB" in
+            2048)
+                MEM_PART_2G="$_selected_part"
+                MEM_RANK_2G="$_selected_rank"
+                MEM_DEVICE_WIDTH_2G="$_selected_device_width"
+                ;;
+            4096)
+                MEM_PART_4G="$_selected_part"
+                MEM_RANK_4G="$_selected_rank"
+                MEM_DEVICE_WIDTH_4G="$_selected_device_width"
+                ;;
+            *)
+                echo "ERROR: 共享目录返回不受支持的 DIMM 容量" >&2
+                return 1
+                ;;
+        esac
+    fi
+    MEM_RATED="$MEM_RATED_MTS"
+    # DIMM serial 在 pick 阶段一次性生成，写到 profile 持久化——避免之前每次
+    # 启动 stealth_smbios_args 里 _rand 一遍导致 Win32_PhysicalMemory.SerialNumber
+    # 重启就变（仿真机"硬件指纹漂移"检测的明显信号）。
+    MEM_SERIAL="$(_mem_serial)"
 
     # 6. 显示器（EDID）
-    local mo_n=${#MONITOR_POOL[@]}
-    local mo_i=$(( (RANDOM * 32768 + RANDOM) % mo_n ))
-    local mo_prefix
+    local monitor_row _mo_serial_prefix
+    monitor_row="$(stealth_select_monitor_component_row)" || return 1
     IFS='|' read -r EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM \
-        EDID_HEIGHT_MM mo_prefix EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK \
+        EDID_HEIGHT_MM _mo_serial_prefix EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK \
         EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT EDID_MIN_VFREQ_HZ \
         EDID_MAX_VFREQ_HZ EDID_MIN_HFREQ_KHZ EDID_MAX_HFREQ_KHZ \
         EDID_MAX_PIXEL_CLOCK_MHZ EDID_SECONDARY_XRES EDID_SECONDARY_YRES \
-        EDID_SECONDARY_REFRESH_RATE <<<"${MONITOR_POOL[$mo_i]}"
-    EDID_SERIAL="$(_monitor_serial "$mo_prefix")"
+        EDID_SECONDARY_REFRESH_RATE <<<"$monitor_row"
+    EDID_SERIAL="$(_monitor_serial "$EDID_COMPONENT_ID")" || return 1
+    EDID_BINARY_SERIAL="$(
+        stealth_component_monitor_binary_serial \
+            "$EDID_COMPONENT_ID" "$EDID_SERIAL"
+    )" || return 1
+    EDID_REVISION="$(stealth_component_monitor_revision \
+        "$EDID_COMPONENT_ID")" || return 1
+    local monitor_secondary_detail
+    monitor_secondary_detail="$(
+        stealth_component_monitor_secondary_detail "$EDID_COMPONENT_ID"
+    )" || return 1
+    IFS='|' read -r EDID_SECONDARY_PIXEL_CLOCK_KHZ \
+        EDID_SECONDARY_HFRONT EDID_SECONDARY_HSYNC EDID_SECONDARY_HBLANK \
+        EDID_SECONDARY_VFRONT EDID_SECONDARY_VSYNC EDID_SECONDARY_VBLANK \
+        EDID_SECONDARY_HSYNC_POSITIVE EDID_SECONDARY_VSYNC_POSITIVE \
+        EDID_SECONDARY_WIDTH_MM EDID_SECONDARY_HEIGHT_MM \
+        <<<"$monitor_secondary_detail"
 
     # 7. 键盘 USB HID
     local kbd_n=${#KBD_POOL[@]}
-    local kbd_i=$(( (RANDOM * 32768 + RANDOM) % kbd_n ))
+    local kbd_i
+    kbd_i="$(_rand 0 "$((kbd_n - 1))")" || return 1
     IFS='|' read -r KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_COMPONENT_ID \
         KBD_BCD_DEVICE KBD_DESCRIPTOR_FIDELITY <<<"${KBD_POOL[$kbd_i]}"
     KBD_SERIAL="$(_usb_hid_serial "$KBD_COMPONENT_ID")"
 
     # 8. 鼠标 USB HID（相对坐标场景）
     local mou_n=${#MOUSE_POOL[@]}
-    local mou_i=$(( (RANDOM * 32768 + RANDOM) % mou_n ))
+    local mou_i
+    mou_i="$(_rand 0 "$((mou_n - 1))")" || return 1
     IFS='|' read -r MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT \
         MOUSE_COMPONENT_ID MOUSE_BCD_DEVICE MOUSE_DESCRIPTOR_FIDELITY \
         <<<"${MOUSE_POOL[$mou_i]}"
@@ -435,7 +462,8 @@ stealth_pick_profile() {
 
     # 9. 数位板 USB HID（绝对坐标场景，自动化默认）
     local tab_n=${#TABLET_POOL[@]}
-    local tab_i=$(( (RANDOM * 32768 + RANDOM) % tab_n ))
+    local tab_i
+    tab_i="$(_rand 0 "$((tab_n - 1))")" || return 1
     IFS='|' read -r TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT \
         TABLET_COMPONENT_ID TABLET_BCD_DEVICE TABLET_DESCRIPTOR_FIDELITY \
         <<<"${TABLET_POOL[$tab_i]}"
@@ -453,13 +481,13 @@ stealth_pick_profile() {
     export BIOS_VENDOR BIOS_VERSION BIOS_DATE
     export CHASSIS_TYPE CHASSIS_SERIAL
     export NIC_MAC UUID
-    export GPU_VENDOR GPU_NAME GPU_PCI_VEN GPU_PCI_DEV GPU_RAM_MB GPU_BIOS GPU_REV GPU_IDENTITY_FIDELITY
-    export GPU_MEMORY_TYPE GPU_MEMORY_BUS_WIDTH_BITS GPU_BASE_CLOCK_KHZ GPU_BOOST_CLOCK_KHZ GPU_MEMORY_CLOCK_KHZ GPU_SLI_SUPPORTED
+    stealth_export_gpu_profile
     export NVME_COMPONENT_ID NVME_MODEL NVME_FIRMWARE NVME_SERIAL NVME_SIZE_BYTES NVME_PCI_VEN NVME_PCI_DEV NVME_SUBSYS_VEN NVME_SUBSYS_DEV NVME_SUBNQN_TEMPLATE NVME_SUBNQN
     export BOOT_STORAGE_CATALOG_REVISION BOOT_STORAGE_COMPONENT_ID
     export BOOT_STORAGE_MANUFACTURER BOOT_STORAGE_MODEL BOOT_STORAGE_PART_NUMBER
     export BOOT_STORAGE_FIRMWARE BOOT_STORAGE_SIZE_BYTES BOOT_STORAGE_INTERFACE
     export BOOT_STORAGE_SERIAL
+    export MEM_FAMILY_ID MEM_MODULE_ID MEM_SELECTED_MODULE_MB MEM_MODULE_COUNT MEM_SPD_EE1004
     export MEM_MFR MEM_PART_2G MEM_PART_4G MEM_RATED MEM_RATED_MTS MEM_CONFIGURED_MTS MEM_SERIAL MEM_TOTAL_MB MEM_TYPE MEM_CHANNELS MEM_MAX_MTS MEM_ALLOWED_MTS
     export MEM_VOLTAGE_MV MEM_RANK MEM_MODULE_MB MEM_ALLOWED_TOTAL_MB MEM_MAX_CAPACITY_MB
     export MEM_RANK_2G MEM_DEVICE_WIDTH_2G MEM_RANK_4G MEM_DEVICE_WIDTH_4G
@@ -467,8 +495,11 @@ stealth_pick_profile() {
     export MCH_PCI_VEN MCH_PCI_DEV MCH_REV LPC_PCI_VEN LPC_PCI_DEV LPC_REV SMBUS_PCI_VEN SMBUS_PCI_DEV SMBUS_REV AHCI_PCI_VEN AHCI_PCI_DEV AHCI_REV
     export NIC_VENDOR NIC_MODEL NIC_PCI_VEN NIC_PCI_DEV NIC_SUBSYSTEM_VEN NIC_SUBSYSTEM_DEV NIC_MAC_OUI NIC_ATTACHMENT BOARD_NIC_STATE
     export AUDIO_VENDOR AUDIO_CODEC AUDIO_CODEC_ID AUDIO_CODEC_REVISION AUDIO_CODEC_SUBSYSTEM_ID AUDIO_IDENTITY_FIDELITY AUDIO_CONTROLLER_PCI_VEN AUDIO_CONTROLLER_PCI_DEV
-    export EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT
+    export EDID_COMPONENT_ID EDID_VENDOR EDID_NAME EDID_WIDTH_MM EDID_HEIGHT_MM EDID_SERIAL EDID_BINARY_SERIAL EDID_REVISION EDID_PRODUCT_ID EDID_MANUFACTURE_WEEK EDID_MANUFACTURE_YEAR EDID_VIDEO_INPUT
     export EDID_MIN_VFREQ_HZ EDID_MAX_VFREQ_HZ EDID_MIN_HFREQ_KHZ EDID_MAX_HFREQ_KHZ EDID_MAX_PIXEL_CLOCK_MHZ EDID_SECONDARY_XRES EDID_SECONDARY_YRES EDID_SECONDARY_REFRESH_RATE
+    export EDID_SECONDARY_PIXEL_CLOCK_KHZ EDID_SECONDARY_HFRONT EDID_SECONDARY_HSYNC EDID_SECONDARY_HBLANK EDID_SECONDARY_VFRONT EDID_SECONDARY_VSYNC EDID_SECONDARY_VBLANK
+    export EDID_SECONDARY_HSYNC_POSITIVE EDID_SECONDARY_VSYNC_POSITIVE
+    export EDID_SECONDARY_WIDTH_MM EDID_SECONDARY_HEIGHT_MM
     export KBD_COMPONENT_ID KBD_VID KBD_PID KBD_MFR KBD_PRODUCT KBD_SERIAL KBD_BCD_DEVICE KBD_DESCRIPTOR_FIDELITY
     export MOUSE_COMPONENT_ID MOUSE_VID MOUSE_PID MOUSE_MFR MOUSE_PRODUCT MOUSE_SERIAL MOUSE_BCD_DEVICE MOUSE_DESCRIPTOR_FIDELITY
     export TABLET_COMPONENT_ID TABLET_VID TABLET_PID TABLET_MFR TABLET_PRODUCT TABLET_SERIAL TABLET_BCD_DEVICE TABLET_DESCRIPTOR_FIDELITY

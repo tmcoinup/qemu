@@ -38,74 +38,11 @@ function Test-VMateIntegerValue {
         $Value -is [int64] -or $Value -is [uint64])
 }
 
-function Assert-VMateManifestFidelity {
-    param([object]$Manifest)
-
-    if (-not (Test-VMateJsonProperty $Manifest 'fidelity')) {
-        throw '共享硬件清单缺少 fidelity；不能判断 Q35 与目标 PCH 的真实性边界。'
-    }
-    $fidelity = $Manifest.fidelity
-    $expectedText = [ordered]@{
-        supported_semantics = 'launch_candidate_after_runtime_preflight'
-        machine_model = 'q35'
-        chipset_identity_scope = 'pci_configuration_identity_only'
-        target_pch_behavior = 'not_emulated'
-        serial_identity_scope = 'synthetic_format_only_no_device_capture'
-        asset_tag_identity_scope = 'synthetic_format_only_no_device_capture'
-        mac_identity_scope = 'vendor_oui_synthetic_suffix'
-        pci_subsystem_evidence = 'catalog_reference_no_lspci_snapshot'
-    }
-    foreach ($entry in $expectedText.GetEnumerator()) {
-        if (-not (Test-VMateJsonProperty $fidelity $entry.Key) -or
-            [string]$fidelity.($entry.Key) -ne [string]$entry.Value) {
-            throw "共享清单 fidelity.$($entry.Key) 不是受控值 '$($entry.Value)'。"
-        }
-    }
-    if (-not (Test-VMateJsonProperty $fidelity 'target_pch_bdf_equivalent') -or
-        $fidelity.target_pch_bdf_equivalent -isnot [bool] -or
-        $fidelity.target_pch_bdf_equivalent -ne $false) {
-        throw '共享清单不得宣称 Q35 BDF 与目标 PCH 等价。'
-    }
-    if (-not (Test-VMateJsonProperty $fidelity 'bdf_layout')) {
-        throw '共享清单 fidelity 缺少经当前启动器验证的 bdf_layout。'
-    }
-
-    # 布局同时钉住 Linux 与 Windows 实际 Q35 枚举结果。这里不是声称目标主板
-    # 也使用这些地址，而是防止清单说明与当前启动器悄悄分叉。
-    $layout = $fidelity.bdf_layout
-    $expectedLayout = [ordered]@{
-        mch = '00:00.0'
-        lpc = '00:1f.0'
-        ahci = '00:1f.2'
-        smbus = '00:1f.3'
-        linux_root_ports = '00:01.0,00:02.0,00:03.0,00:04.0'
-        linux_hda = '00:05.0'
-        windows_root_ports = '00:01.0,00:02.0,00:03.0'
-        windows_hda = '00:04.0'
-    }
-    $actualNames = @($layout.PSObject.Properties.Name)
-    if ($actualNames.Count -ne $expectedLayout.Count) {
-        throw '共享清单 bdf_layout 字段集合不完整或包含未知字段。'
-    }
-    foreach ($entry in $expectedLayout.GetEnumerator()) {
-        if (-not (Test-VMateJsonProperty $layout $entry.Key)) {
-            throw "共享清单 bdf_layout 缺少 '$($entry.Key)'。"
-        }
-        $actual = if ($entry.Key -like '*_root_ports') {
-            @($layout.($entry.Key)) -join ','
-        } else {
-            [string]$layout.($entry.Key)
-        }
-        if ($actual -ne [string]$entry.Value) {
-            throw "共享清单 bdf_layout.$($entry.Key) 与当前 Q35 启动器不一致。"
-        }
-    }
-}
-
 function Assert-VMatePlatformTpm {
     param(
         [object]$Tpm,
         [string]$CpuVendor,
+        [object]$Board,
         [string]$PlatformId
     )
 
@@ -171,12 +108,28 @@ function Assert-VMatePlatformTpm {
         }
         $seenBanks[[string]$bank] = $true
     }
+    $boardTpmHost = switch ([string]$Board.subsystem_vendor) {
+        '0x1043' { 'www.asus.com' }
+        '0x1462' { 'www.msi.com' }
+        '0x1458' { 'www.gigabyte.com' }
+        '0x1849' { 'www.asrock.com' }
+        default { '' }
+    }
+    $cpuTpmHost = if ($CpuVendor -ceq 'AuthenticAMD') {
+        'www.amd.com'
+    } else {
+        'www.intel.com'
+    }
     foreach ($sourceField in @('support_source_ref', 'version_source_ref')) {
         $sourceValue = $Tpm.$sourceField
+        $sourceUri = $null
         if ($sourceValue -isnot [string] -or
-            $sourceValue -cnotmatch `
-                '^https://(?:www\.)?(?:asus|intel)\.com(?:/\S*)?$') {
-            throw "平台 '$PlatformId' 的 tpm.$sourceField 必须是 ASUS/Intel 官方 HTTPS 来源。"
+            -not [Uri]::TryCreate([string]$sourceValue,
+                [UriKind]::Absolute, [ref]$sourceUri) -or
+            $sourceUri.Scheme -cne 'https' -or
+            $sourceUri.DnsSafeHost.ToLowerInvariant() -notin @(
+                $boardTpmHost, $cpuTpmHost)) {
+            throw "平台 '$PlatformId' 的 tpm.$sourceField 必须是已注册厂商官方 HTTPS 来源。"
         }
     }
     if ($Tpm.support_source_ref -ceq $Tpm.version_source_ref) {
@@ -225,43 +178,6 @@ function Assert-VMatePlatformTpm {
     }
 }
 
-function Get-VMateExpectedPlatformId {
-    param(
-        [object]$Cpu,
-        [object]$Board
-    )
-
-    $name = [string]$Cpu.name
-    $vendorToken = ''
-    $cpuToken = ''
-    if ([string]$Cpu.vendor_id -eq 'AuthenticAMD' -and
-        $name -match '\bRyzen\s+(\d+)\s+([0-9A-Za-z]+)\b') {
-        $vendorToken = 'amd'
-        $cpuToken = "r$($Matches[1])-$($Matches[2].ToLowerInvariant())"
-    } elseif ([string]$Cpu.vendor_id -eq 'GenuineIntel' -and
-        $name -match '\bCore\(TM\)\s+i(\d)-([0-9A-Za-z]+)\b') {
-        $vendorToken = 'intel'
-        $cpuToken = "i$($Matches[1])-$($Matches[2].ToLowerInvariant())"
-    } elseif ([string]$Cpu.vendor_id -eq 'GenuineIntel' -and
-        $name -match '\bCeleron\(R\)\s+([A-Z]\d+)\b') {
-        $vendorToken = 'intel'
-        $cpuToken = "celeron-$($Matches[1].ToLowerInvariant())"
-    } elseif ([string]$Cpu.vendor_id -eq 'GenuineIntel' -and
-        $name -match '\bPentium\(R\)\s+Gold\s+([A-Z]\d+)\b') {
-        $vendorToken = 'intel'
-        $cpuToken = "pentium-$($Matches[1].ToLowerInvariant())"
-    } else {
-        throw "无法从 CPU 名称生成平台系列 ID：$name"
-    }
-    if ([string]$Board.manufacturer -ne 'ASUSTeK COMPUTER INC.') {
-        throw "当前已审计平台 ID 只接受 ASUSTeK 主板：$($Board.manufacturer)"
-    }
-    $product = ([string]$Board.product -replace '\.0\b', '').Replace('.', '')
-    $boardToken = ($product.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
-    return "$vendorToken-$(([string]$Cpu.socket).ToLowerInvariant())-" +
-        "$cpuToken-asus-$boardToken"
-}
-
 function Assert-VMatePlatformShape {
     param([object]$Platform)
 
@@ -284,13 +200,22 @@ function Assert-VMatePlatformShape {
     }
     Assert-VMatePlatformFacts -Platform $Platform -PlatformId $platformId
     $sources = @($Platform.source_refs)
+    $allowedSourceHosts = @(
+        'www.asus.com', 'dlcdnet.asus.com', 'dlcdnets.asus.com',
+        'www.amd.com', 'www.intel.com', 'www.msi.com',
+        'download-2.msi.com', 'www.gigabyte.com', 'download.gigabyte.com',
+        'www.asrock.com', 'download.asrock.com'
+    )
+    $invalidSources = @($sources | Where-Object {
+            $uri = $null
+            $_ -isnot [string] -or
+            -not [Uri]::TryCreate([string]$_, [UriKind]::Absolute,
+                [ref]$uri) -or $uri.Scheme -cne 'https' -or
+            $uri.DnsSafeHost.ToLowerInvariant() -notin $allowedSourceHosts
+        })
     if ($sources.Count -lt 3 -or
         @($sources | Select-Object -Unique).Count -ne $sources.Count -or
-        @($sources | Where-Object {
-                $_ -isnot [string] -or
-                [string]$_ -notmatch
-                    '^https://(?:(?:www\.)?(?:asus|amd|intel)\.com|dlcdnets?\.asus\.com)/\S+$'
-            }).Count -gt 0) {
+        $invalidSources.Count -gt 0) {
         throw "平台 '$platformId' 缺少 CPU/主板厂商官方 HTTPS 来源。"
     }
     $cpuDomain = if ([string]$Platform.cpu.vendor_id -eq 'AuthenticAMD') {
@@ -300,6 +225,19 @@ function Assert-VMatePlatformShape {
     }
     if (@($sources | Where-Object { [string]$_ -like "*$cpuDomain*" }).Count -eq 0) {
         throw "平台 '$platformId' 缺少 CPU 厂商型号规格。"
+    }
+    $boardDomain = switch ([string]$Platform.board.subsystem_vendor) {
+        '0x1043' { 'asus.com' }
+        '0x1462' { 'msi.com' }
+        '0x1458' { 'gigabyte.com' }
+        '0x1849' { 'asrock.com' }
+        default { '' }
+    }
+    if (-not $boardDomain -or
+        @($sources | Where-Object {
+                [string]$_ -like "*$boardDomain*"
+            }).Count -eq 0) {
+        throw "平台 '$platformId' 缺少对应主板厂商规格来源。"
     }
     foreach ($field in @('qemu_arg', 'vendor_id', 'name', 'part', 'socket',
             'cores', 'threads', 'smbios')) {
@@ -317,7 +255,8 @@ function Assert-VMatePlatformShape {
         throw "平台 '$platformId' 的线程数不能少于核心数。"
     }
     Assert-VMatePlatformTpm -Tpm $Platform.tpm `
-        -CpuVendor ([string]$Platform.cpu.vendor_id) -PlatformId $platformId
+        -CpuVendor ([string]$Platform.cpu.vendor_id) -Board $Platform.board `
+        -PlatformId $platformId
     foreach ($field in @('manufacturer', 'product', 'family', 'version',
             'subsystem_vendor', 'subsystem_device', 'pcie_generation',
             'dimm_slots', 'max_memory_gib')) {

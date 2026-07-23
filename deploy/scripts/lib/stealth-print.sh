@@ -68,7 +68,8 @@ stealth_print_profile() {
     local logical_gpu_id="${GPU_PCI_VEN#0x}:${GPU_PCI_DEV#0x}"
     # PnP 的 SUBSYS 字符串固定按 device 后接 vendor 打印，和规范化 VEN:DEV 顺序
     # 相反。把两种顺序并列输出，避免用户把 carrier 字段误当物理主 PCI ID。
-    local gpu_carrier_subsys="${GPU_PCI_DEV#0x}${GPU_PCI_VEN#0x}"
+    local gpu_carrier_subsys="${GPU_CARRIER_DEV#0x}${GPU_CARRIER_VEN#0x}"
+    local logical_gpu_subsys="${GPU_SUBSYS_VEN#0x}:${GPU_SUBSYS_DEV#0x}"
     local storage_line
     if [[ "${PLATFORM_BOOT_STORAGE:-nvme}" == sata-ahci ]]; then
         storage_line="SATA/AHCI ${BOOT_STORAGE_MODEL}  fw=${BOOT_STORAGE_FIRMWARE}  SN=${BOOT_STORAGE_SERIAL}  size=$(printf '%.1f' "$(echo "$BOOT_STORAGE_SIZE_BYTES / 1024^3" | bc -l 2>/dev/null || echo 0)") GiB"
@@ -87,7 +88,7 @@ stealth_print_profile() {
   BIOS     : $BIOS_VENDOR $BIOS_VERSION ($BIOS_DATE)
   TPM      : ${TPM_IMPLEMENTATION:-none} / ${TPM_VERSION:-none} / ${TPM_FRONTEND:-none} (PCR=${TPM_PCR_BANKS:-none})
   Chassis  : $CHASSIS_TYPE  SN=$CHASSIS_SERIAL
-  GPU      : virtio display；物理=1AF4:1050；carrier=SUBSYS_${gpu_carrier_subsys}；浅层用户态=$GPU_NAME / PCI $logical_gpu_id（${GPU_IDENTITY_FIDELITY}）
+  GPU      : virtio display；物理=1AF4:1050；carrier=SUBSYS_${gpu_carrier_subsys}；浅层用户态=$GPU_BOARD_PARTNER $GPU_PART_NUMBER / PCI $logical_gpu_id / subsystem $logical_gpu_subsys（${GPU_IDENTITY_FIDELITY}）
   Display  : ${vga_kind}, EDID 1920×1080
   显示器   : ${EDID_VENDOR}:${EDID_PRODUCT_ID} ${EDID_NAME}  ~${diag_inch}\" (${EDID_WIDTH_MM}×${EDID_HEIGHT_MM} mm)  SN=${EDID_SERIAL}
   Storage  : ${storage_line}

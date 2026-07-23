@@ -186,11 +186,7 @@ function Read-ValidatedIdentitySnapshot {
         -not $validBios -or -not $source.Success -or
         $snapshot.SpoofPciVendorId -ne $vendorId -or
         $snapshot.SpoofPciDeviceId -lt 1 -or $snapshot.SpoofPciDeviceId -gt 0xFFFF -or
-        $snapshot.SpoofSubsystemVendorId -ne $snapshot.SpoofPciVendorId -or
-        $snapshot.SpoofSubsystemDeviceId -ne $snapshot.SpoofPciDeviceId -or
-        [Convert]::ToInt32($source.Groups[1].Value,16) -ne $snapshot.SpoofPciDeviceId -or
-        [Convert]::ToInt32($source.Groups[2].Value,16) -ne $snapshot.SpoofPciVendorId -or
-        [Convert]::ToInt32($source.Groups[3].Value,16) -ne $snapshot.SpoofRevisionId -or
+        -not (Test-GpuLogicalBinding $snapshot $source) -or
         $snapshot.SpoofRevisionId -lt 0 -or $snapshot.SpoofRevisionId -gt 0xFF -or
         $snapshot.SpoofPciBusId -lt 0 -or $snapshot.SpoofPciBusId -gt 0xFF -or
         $snapshot.SpoofPciSlotId -lt 0 -or $snapshot.SpoofPciSlotId -gt 0x1F -or

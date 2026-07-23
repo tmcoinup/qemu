@@ -105,9 +105,9 @@ cat /proc/sys/vm/nr_hugepages                                        # 必须仍
 guest 后影响宿主调度统计；只有单 VM 低延迟实验需要时，才用 `QEMU_CPU_PM=1`
 显式打开。
 
-> 若调优后仍报 `13-131130-8`：排查 host 是否被别的重负载抢核（`pidstat`/`perf kvm stat`），
-> 或 vCPU 超额订阅（运行的 VM 总 vCPU > host 逻辑核）。本机 8c/16t，单 VM 4 vCPU，
-> ≤4 台不超订。考虑给 VM 做 vCPU pinning 进一步降抖动（尚未默认开启）。
+> 若调优后仍报 `13-131130-8`：检查 CPU isolate `status`、1:1 logical exact 和宿主
+> 重负载（`pidstat`/`perf kvm stat`）。2C2T/2C4T/4C4T 分别占 2/4/4 条唯一线程；
+> 8C/16T 在 auto 预留 2 核、service=0 时的同型上限分别为 6/3/3 台。
 
 ## swtpm / TPM 侧
 

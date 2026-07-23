@@ -41,23 +41,32 @@ env \
 
 assert_fixed "__DRY_RUN_ARGV__"
 cpu_arg="$(awk '$0 == "-cpu" { getline; print; exit }' "$TMP_DIR/argv")"
+board_subsystem_vendor="$(
+    awk -F= '$1 == "ICH9-LPC.x-pci-sub-vendor-id" { print $2; exit }' \
+        "$TMP_DIR/argv"
+)"
 topology="$(
-    python3 - "$MANIFEST" "$cpu_arg" <<'PY'
+    python3 - "$MANIFEST" "$cpu_arg" "$board_subsystem_vendor" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     platforms = json.load(stream)["platforms"]
 matches = [
-    item["cpu"] for item in platforms
+    item for item in platforms
     if sys.argv[2].startswith(item["cpu"]["qemu_arg"] + ",")
+    and item["board"]["subsystem_vendor"].lower() == sys.argv[3].lower()
 ]
 if len(matches) != 1:
-    raise SystemExit(f"effective -cpu 未唯一匹配 manifest: {len(matches)}")
-print(f"{matches[0]['cores']}:{matches[0]['threads']}")
+    raise SystemExit(f"effective CPU/board 未唯一匹配 manifest: {len(matches)}")
+item = matches[0]
+print(
+    f"{item['cpu']['cores']}:{item['cpu']['threads']}:"
+    f"{item['devices']['audio']['codec_subsystem_id']}"
+)
 PY
 )" || fail "无法从所选 manifest bundle 解析 CPU 拓扑"
-IFS=: read -r cpu_cores cpu_threads <<<"$topology"
+IFS=: read -r cpu_cores cpu_threads audio_codec_subsystem <<<"$topology"
 assert_fixed "cpus=4,cores=${cpu_cores},threads=$((cpu_threads / cpu_cores)),sockets=1,maxcpus=4"
 assert_fixed "memory-backend-memfd,id=mem0,size=8192M,share=on,prealloc=off"
 assert_fixed "node,nodeid=0,memdev=mem0,cpus=0-3"
@@ -78,18 +87,32 @@ assert_fixed "ich9-ahci.x-pci-vendor-id=0x8086"
 [[ "$(grep -Fc -- 'pcie-root-port,id=rp' "$TMP_DIR/argv")" == 4 ]] \
     || fail "平台必须生成四个经过清单约束的 root port"
 
-# 可更换件必须是 components.json 唯一启用的原子 bundle；这里同时核对深层字段，
-# 防止只改显示名称却保留错误固件、subsystem、NQN、EDID 或 USB VID/PID。
+# 可更换件必须是 components.json 中按稳定 ID 选择的原子 bundle；这里同时核对
+# 深层字段，防止只改显示名称却保留错误固件、subsystem、NQN、EDID 或 USB VID/PID。
+# shellcheck source=/dev/null
+source "$REPO_ROOT/deploy/scripts/lib/stealth-components.sh"
 nvme_line="$(grep -F -- 'nvme,id=nvmectl0' "$TMP_DIR/argv")"
 uuid="$(awk '$0 == "-uuid" { getline; print; exit }' "$TMP_DIR/argv")"
 [[ "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
     || fail "QEMU argv 缺少规范的 UUID v4: $uuid"
-[[ "$nvme_line" == *"model-number=Samsung SSD 970 PRO 512GB"* \
-    && "$nvme_line" == *"firmware-rev=1B2QEXP7"* \
-    && "$nvme_line" == *"subsys-vendor-id=0x144D"* \
-    && "$nvme_line" == *"subsys-id=0xA801"* \
+nvme_id="${nvme_line#*x-identity-profile=}"
+nvme_id="${nvme_id%%,*}"
+nvme_row="$(stealth_component_storage_row "$nvme_id")" \
+    || fail "NVMe argv 使用未知稳定 ID: $nvme_id"
+IFS='|' read -r _ nvme_model nvme_firmware _ _ _ nvme_sub_vendor \
+    nvme_sub_device _ _ _ nvme_identity_profile _ _ _ _ <<<"$nvme_row"
+nvme_serial="${nvme_line#*serial=}"
+nvme_serial="${nvme_serial%%,*}"
+[[ "$nvme_line" == *"x-identity-profile=$nvme_identity_profile"* \
+    && "$nvme_line" == *"model-number=$nvme_model"* \
+    && "$nvme_line" == *"firmware-rev=$nvme_firmware"* \
+    && "$nvme_line" == *"subsys-vendor-id=$nvme_sub_vendor"* \
+    && "$nvme_line" == *"subsys-id=$nvme_sub_device"* \
     && "$nvme_line" == *"subnqn=nqn.2014-08.org.nvmexpress:uuid:$uuid"* ]] \
-    || fail "NVMe 参数没有完整绑定 970 PRO bundle"
+    || fail "NVMe 参数没有完整绑定所选目录 bundle"
+stealth_component_storage_serial_is_valid \
+    "$nvme_id" "$nvme_serial" >/dev/null 2>&1 \
+    || fail "NVMe argv 序列号不符合所选厂商策略"
 
 nic_line="$(grep -F -- 'e1000e,netdev=net0' "$TMP_DIR/argv")"
 [[ "$nic_line" == *"mac=3c:fd:fe:"* \
@@ -101,15 +124,48 @@ assert_fixed "qemu-xhci,id=xhci,bus=rp3"
 assert_fixed "usb-kbd,id=kbd0,bus=xhci.0,vendorid=0x045E,productid=0x0750,manufacturer=Microsoft,product=Microsoft Wired Keyboard 600,x-force-numlock-on=on"
 assert_fixed "usb-tablet,bus=xhci.0"
 assert_fixed "ich9-intel-hda,id=hda0,x-pci-vendor-id=0x8086"
-assert_fixed "hda-duplex,bus=hda0.0,cad=0,audiodev=aud0,x-identity-compat=on,x-codec-id=0x10ec0887,x-codec-revision=0x00100302,x-codec-subsystem-id=0x104386c7"
-assert_fixed "edid-vendor=SAM,edid-name=S24F350"
+assert_fixed "hda-duplex,bus=hda0.0,cad=0,audiodev=aud0,x-identity-compat=on,x-codec-id=0x10ec0887,x-codec-revision=0x00100302,x-codec-subsystem-id=$audio_codec_subsystem"
 assert_fixed "edid-fixed-native=on"
-assert_fixed "edid-product-id=0x0F65,edid-manufacture-week=32,edid-manufacture-year=2018"
-assert_fixed "edid-min-vfreq-hz=56,edid-max-vfreq-hz=75"
-assert_fixed "edid-secondary-xres=1600,edid-secondary-yres=900,edid-secondary-refresh-rate=60000"
+assert_fixed "edid-managed-timing-version=1"
+display_line="$(grep -F -- 'edid-fixed-native=on' "$TMP_DIR/argv")"
+matched_monitor_id=
+while IFS='|' read -r monitor_id vendor name width height _ product week year \
+        input min_v max_v min_h max_h max_clock secondary_x secondary_y \
+        secondary_refresh; do
+    if [[ "$display_line" == *"edid-vendor=$vendor,edid-name=$name,"* &&
+          "$display_line" == *"edid-width-mm=$width,edid-height-mm=$height,"* &&
+          "$display_line" == *"edid-product-id=$product,edid-manufacture-week=$week,edid-manufacture-year=$year"* &&
+          "$display_line" == *"edid-video-input=$input,edid-min-vfreq-hz=$min_v,edid-max-vfreq-hz=$max_v"* &&
+          "$display_line" == *"edid-min-hfreq-khz=$min_h,edid-max-hfreq-khz=$max_h,edid-max-pixel-clock-mhz=$max_clock"* &&
+          "$display_line" == *"edid-secondary-xres=$secondary_x,edid-secondary-yres=$secondary_y,edid-secondary-refresh-rate=$secondary_refresh"* ]]; then
+        matched_monitor_id="$monitor_id"
+        break
+    fi
+done < <(stealth_component_rows monitor)
+[[ -n "$matched_monitor_id" ]] \
+    || fail "QEMU argv 的 EDID 深层字段没有匹配受控显示器稳定 ID"
+display_serial="${display_line#*edid-serial=}"
+display_serial="${display_serial%%,*}"
+stealth_component_monitor_serial_is_valid \
+    "$matched_monitor_id" "$display_serial" >/dev/null 2>&1 \
+    || fail "QEMU argv 的 EDID 序列号没有匹配所选显示器品牌策略"
+expected_binary_serial="$(
+    stealth_component_monitor_binary_serial \
+        "$matched_monitor_id" "$display_serial"
+)" || fail "无法按显示器品牌规则计算 EDID binary serial"
+expected_edid_revision="$(
+    stealth_component_monitor_revision "$matched_monitor_id"
+)" || fail "无法读取显示器 EDID revision"
+[[ "$display_line" == *"edid-binary-serial=$expected_binary_serial,edid-revision=$expected_edid_revision"* ]] \
+    || fail "QEMU argv 的 binary serial/revision 未与显示器模板原子绑定"
 grep -F -- "'edid-fixed-native='" \
     "$REPO_ROOT/deploy/scripts/lib/sv-portability.sh" >/dev/null \
     || fail "Linux QEMU 能力门禁没有检查固定 EDID native mode 属性"
+for property in edid-managed-timing-version edid-binary-serial edid-revision; do
+    grep -F -- "'$property='" \
+        "$REPO_ROOT/deploy/scripts/lib/sv-portability.sh" >/dev/null \
+        || fail "Linux QEMU 能力门禁没有检查 $property"
+done
 type17_line="$(grep -F -- 'type=17,loc_pfx=DIMM_%C2' "$TMP_DIR/argv")"
 [[ "$type17_line" =~ device-width=(8|16) ]] \
     || fail "Type 17 没有投影硬件目录核验后的 DRAM 位宽: $type17_line"

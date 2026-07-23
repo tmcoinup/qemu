@@ -71,15 +71,22 @@ Windows PowerShell 5.1 是 Windows 10/11 自带组件，不算额外运行时依
    `-AllowTcgFallback` 才允许软件 TCG 进入候选列表。该模式仍使用所选清单的
    家用 CPU named model，禁止通用 `max`；软件执行性能不计入生产支持。
 
-3. 准备 VM 目录和磁盘，例如：
+3. 准备 VM 目录和磁盘。Samsung 970 PRO 512GB 示例：
 
    ```powershell
    New-Item -ItemType Directory -Force C:\qemu\vms\1 | Out-Null
    qemu-img.exe create -f qcow2 C:\qemu\vms\1\disk.qcow2 512110190592
    ```
 
-   当前组件目录把启动盘固定为 `512110190592` bytes。其它容量会在启动前被拒绝；
-   不能使用近似的 `120G`/`512G` 示例替代目录中的精确字节数。
+   当前已核验 NVMe 仅保留 512GB 容量：
+
+   - Samsung 970 PRO、Intel 760p、WD PC SN730、KIOXIA XG6：
+     `512110190592` bytes
+
+   启动器读取 qcow2 的真实 `virtual-size`，在这四个 `raw_bytes` 完全相同的型号中按
+   目录权重选择；也可用 `-StorageId` 指定型号。显式型号与磁盘容量
+   不一致、或容量没有目录精确匹配时都会在 profile 写入前拒绝。不能使用近似的
+   `120G`/`512G` 示例替代目录中的精确字节数。
 
 4. 确认 OVMF code 和 vars 模板都存在。磁盘启动时，启动脚本会按顺序查找 code：
 
@@ -107,14 +114,16 @@ Windows PowerShell 5.1 是 Windows 10/11 自带组件，不算额外运行时依
 事实或内存/vCPU 发生变化时会拒绝启动。`-RerollHardwareProfile` 是破坏性显式操作，
 脚本会先保留时间戳 `.bak`。
 
-可更换件统一从 `deploy/hardware/components.json` 读取。profile 同时固化 component
-schema、`catalog_revision`、目录摘要以及 SSD/显示器/键盘/鼠标 ID；目录被篡改、组件
-被替换或旧 profile 缺少绑定时都会 fail-closed。当前唯一启用组合是 Samsung 970 PRO
-512GB（`144d:a804`、subsystem `144d:a801`、`1B2QEXP7`、UUID 绑定 NQN）、Samsung
-S24F350 深层 EDID、Microsoft 045e:0750 键盘和 045e:00cb 鼠标。真实启动还会调用
-同目录的 11.0.2 `qemu-img.exe`，要求磁盘格式为 qcow2，且虚拟容量精确等于目录中的
-`512110190592` bytes；同容量 raw 文件和不匹配容量都会拒绝，不能只改型号字符串却
-保留不匹配存储事实。
+可更换件从 `deploy/hardware/components.json` 及其引用的 `storage.json` 读取。profile
+同时固化 component schema、`catalog_revision`、目录摘要以及 SSD/显示器/键盘/鼠标
+ID；目录被篡改、组件被替换或旧 profile 缺少绑定时都会 fail-closed。当前 SSD 池包含
+Samsung 970 PRO、Intel 760p、WD PC SN730 和 KIOXIA XG6 四款 512GB 型号；显示器池包含 Samsung
+S24F350、AOC 24B2XH、Xiaomi RMMNT238NF 和 Lenovo L24e-30，全部固定为
+1920×1080、16:9。每个 SSD 的 PCI/subsystem、固件、OUI、容量和序列格式，以及每个
+显示器的 EDID 字段，均随稳定 component ID 原子绑定；键鼠仍使用 Microsoft
+045e:0750 与 045e:00cb。真实启动还会调用同目录的 11.0.2 `qemu-img.exe`，要求磁盘
+格式为 qcow2，且虚拟容量精确等于所选目录项的 `raw_bytes`；同容量 raw 文件和不匹配
+容量都会拒绝，不能只改型号字符串却保留不匹配存储事实。
 
 这些字段按真实 bundle 原子组合：主板 PCI subsystem、M.2 插槽链路、SSD 端点、NIC
 subsystem/OUI、USB descriptor 和 EDID 不会各自独立乱抽。ALC887 当前明确标记为

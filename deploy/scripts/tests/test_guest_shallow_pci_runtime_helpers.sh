@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TRANSACTION_SCRIPT="$REPO_ROOT/deploy/scripts/gpu-profile-transaction.ps1"
 REFRESH_SCRIPT="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
+GPU_CONTRACT="$REPO_ROOT/deploy/scripts/gpu-board-identity-contract.ps1"
+GPU_BOARDS="$REPO_ROOT/deploy/hardware/gpu-boards.json"
+GPU_CASE_HELPER="$SCRIPT_DIR/fixtures/gpu_board_catalog_cases.ps1"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -19,6 +22,8 @@ command -v pwsh >/dev/null 2>&1 || fail "缺少 pwsh，无法运行 PowerShell h
     || fail "gpu-profile-transaction.ps1 必须保留 UTF-8 BOM"
 [[ "$(xxd -p -l 3 "$REFRESH_SCRIPT")" == "efbbbf" ]] \
     || fail "refresh-gpu-name.ps1 必须保留 UTF-8 BOM"
+[[ -f "$GPU_CONTRACT" && -f "$GPU_BOARDS" && -f "$GPU_CASE_HELPER" ]] \
+    || fail "缺少离线 GPU 身份契约或测试目录 helper"
 
 # durable transaction helper 顶层只能定义函数/常量，可在 Linux 安全 dot-source；
 # 同时用纯 token 门禁覆盖拆分后最容易因漏打包或语法漂移而失效的入口。
@@ -94,9 +99,13 @@ if (-not $barrierRejected -or $script:unregisterCount -ne 0 -or
 
 # refresh helper 同时承担严格只读 snapshot API；先做完整 AST 解析，防止 Windows
 # PowerShell 5.1 执行前才暴露语法错误。注册表主体不在 Linux 上求值。
-REFRESH_SCRIPT="$REFRESH_SCRIPT" pwsh -NoLogo -NoProfile -NonInteractive -Command '
+REFRESH_SCRIPT="$REFRESH_SCRIPT" GPU_CONTRACT="$GPU_CONTRACT" \
+    GPU_BOARDS="$GPU_BOARDS" GPU_CASE_HELPER="$GPU_CASE_HELPER" \
+    pwsh -NoLogo -NoProfile -NonInteractive -Command '
 $tokens = $null
 $errors = $null
+. $env:GPU_CONTRACT
+. $env:GPU_CASE_HELPER
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     $env:REFRESH_SCRIPT, [ref]$tokens, [ref]$errors)
 if ($errors.Count -ne 0) {
@@ -118,12 +127,72 @@ foreach ($functionName in @(
     Invoke-Expression $functionAst.Extent.Text
 }
 foreach ($sourceId in @(
-    "PCI\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1\3&11583659&0&30",
-    "PCI\VEN_1AF4&DEV_1050&SUBSYS_67FF1002&REV_CF\4&ABC&0&00"
+    "PCI\VEN_1AF4&DEV_1050&SUBSYS_A1011AF4&REV_A1\3&11583659&0&30",
+    "PCI\VEN_1AF4&DEV_1050&SUBSYS_A1101AF4&REV_CF\4&ABC&0&00"
 )) {
     if ((Get-StockDriverMatchingDeviceId -SourceInstanceId $sourceId) -cne
             "PCI\VEN_1AF4&DEV_1050") {
         throw "stock VioGpuDod MatchingDeviceId 错误"
+    }
+}
+
+$aibCases = @(Get-TestGpuBoardCases $env:GPU_BOARDS)
+Assert-TestGpuBoardCoverage $aibCases
+$canonicalFields = @(
+    "SpoofName", "SpoofVendor", "SpoofBios", "SpoofRamMb", "SpoofMemoryType",
+    "SpoofMemoryBusWidthBits", "SpoofBaseClockKHz", "SpoofBoostClockKHz",
+    "SpoofMemoryClockKHz", "SpoofSliSupported", "SpoofPciVendorId",
+    "SpoofPciDeviceId", "SpoofSubsystemVendorId", "SpoofSubsystemDeviceId",
+    "SpoofRevisionId"
+)
+$nvidiaSnapshot = $null
+$amdSnapshot = $null
+foreach ($case in $aibCases) {
+    $snapshot = [pscustomobject]@{
+        IdentitySchemaVersion=2; SpoofName=$case.Name; SpoofVendor=$case.Vendor
+        SpoofBios=$case.Bios; SpoofRamMb=$case.RamMb
+        SpoofMemoryType=$case.MemoryType
+        SpoofMemoryBusWidthBits=$case.Width; SpoofBaseClockKHz=$case.Base
+        SpoofBoostClockKHz=$case.Boost; SpoofMemoryClockKHz=$case.Memory
+        SpoofSliSupported=$case.Sli
+        SpoofPciVendorId=$case.PciVendor; SpoofPciDeviceId=$case.Device
+        SpoofSubsystemVendorId=$case.SubVendor
+        SpoofSubsystemDeviceId=$case.SubDevice; SpoofRevisionId=$case.Revision
+    }
+    $source = [regex]::Match(
+        ("PCI\VEN_1AF4&DEV_1050&SUBSYS_" + $case.Carrier +
+            ("&REV_{0:X2}\3&AIB&0&30" -f $case.Revision)),
+        "^PCI\\VEN_1AF4&DEV_1050&SUBSYS_([0-9A-F]{4})([0-9A-F]{4})&REV_([0-9A-F]{2})(?:&|\\)")
+    if (-not (Test-GpuLogicalBinding $snapshot $source)) {
+        throw ("refresh reader 拒绝已核验 AIB carrier：" + $case.Carrier)
+    }
+    if ($case.Vendor -ceq "NVIDIA" -and $null -eq $nvidiaSnapshot) {
+        $nvidiaSnapshot = $snapshot.PSObject.Copy()
+    }
+    if ($case.Vendor -ceq "AMD" -and $null -eq $amdSnapshot) {
+        $amdSnapshot = $snapshot.PSObject.Copy()
+    }
+    foreach ($field in $canonicalFields) {
+        $original = $snapshot.$field
+        $snapshot.$field = if ($original -is [string]) {
+            [string]$original + "-MIXED"
+        } else { [int]$original + 1 }
+        if (Test-GpuLogicalBinding $snapshot $source) {
+            throw ("refresh reader 接受混搭字段：" + $case.Carrier + "/" + $field)
+        }
+        $snapshot.$field = $original
+    }
+}
+foreach ($invalid in @(
+        @{ Snapshot=$nvidiaSnapshot; Subsys="A1131AF4"; Revision="A1" },
+        @{ Snapshot=$nvidiaSnapshot; Subsys="1C8210DE"; Revision="A1" },
+        @{ Snapshot=$amdSnapshot; Subsys="699F1002"; Revision="C7" })) {
+    $source = [regex]::Match(
+        ("PCI\VEN_1AF4&DEV_1050&SUBSYS_" + $invalid.Subsys +
+            "&REV_" + $invalid.Revision + "\3&AIB&0&30"),
+        "^PCI\\VEN_1AF4&DEV_1050&SUBSYS_([0-9A-F]{4})([0-9A-F]{4})&REV_([0-9A-F]{2})(?:&|\\)")
+    if (Test-GpuLogicalBinding $invalid.Snapshot $source) {
+        throw ("refresh reader 接受未知或旧式 carrier：" + $invalid.Subsys)
     }
 }
 $rejected = $false

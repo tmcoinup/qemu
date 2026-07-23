@@ -1,50 +1,48 @@
 #!/usr/bin/env python3
-"""异步等待 QMP vCPU，并按宿主 NUMA/物理核拓扑生成绑核顺序。
-
-QEMU 进程由启动器 ``exec`` 接管，不能同步等待自身 QMP。因此该工具作为短生命周期
-后台子进程运行：发现 vCPU TID 后调用安装在 ``/usr/local/libexec`` 的 root helper，
-自身随即退出。拓扑计算保留为纯函数，便于在没有 cgroup root 权限时做单元测试。
-"""
+"""NUMA-aware QMP vCPU pinner；拓扑算法保持纯函数以便无 root 测试。"""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import pathlib
 import re
-import socket
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
+
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from vm_cpu_pinner_lifecycle import (  # noqa: E402
+    cleanup_applied_failure,
+    emit_supervisor_status,
+    ignore_lifecycle_signals, log, process_matches,
+    process_pgid, process_starttime, query_vcpus,
+    release_instance,
+    request_qmp_command, request_qmp_quit,
+    stop_bound_qemu,
+    tgid_of,
+    watch_and_release,
+)
+from vm_cpu_placement import (  # noqa: E402
+    PhysicalCore, Placement, _auto_reserve, _node_capacity, choose_placement,
+)
 
 
 CPU_NAME_RE = re.compile(r"^cpu([0-9]+)$")
+VM_CHILD_RE = re.compile(r"^vm-[1-9][0-9]{0,9}$")
 
 
 @dataclass(frozen=True)
-class PhysicalCore:
-    """同一 package/core_id 下共享执行单元的一组 SMT 线程。"""
+class PinOutcome:
+    """helper 调用结果及其绑定的 QEMU PID 代际。"""
 
-    node: int
-    package: int
-    core_id: int
-    threads: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class Placement:
-    """传给 root helper 的 CPU 优先序与允许内存节点。"""
-
-    preference: tuple[int, ...]
-    memory_nodes: tuple[int, ...]
-    spans_nodes: bool
-    reserve_cores: int
-
-
-def log(message: str) -> None:
-    print(f">> CPU 隔离:   {message}", flush=True)
+    status: int
+    pid: int | None = None
+    starttime: str | None = None
+    applied: bool = False
 
 
 def expand_list(value: str) -> list[int]:
@@ -95,8 +93,13 @@ def discover_topology(
 
     groups: dict[tuple[int, int, int], set[int]] = {}
     try:
+        online_cpus = set(
+            expand_list((cpu_root / "online").read_text(encoding="ascii"))
+        )
         entries = list(cpu_root.iterdir())
-    except OSError:
+    except (OSError, ValueError):
+        return []
+    if not online_cpus:
         return []
 
     for cpu_dir in entries:
@@ -104,15 +107,25 @@ def discover_topology(
         if match is None:
             continue
         cpu = int(match.group(1))
+        if cpu not in online_cpus:
+            continue
         topology = cpu_dir / "topology"
         package = _read_int(topology / "physical_package_id", 0)
         core_id = _read_int(topology / "core_id", cpu)
         node = _cpu_node(cpu_dir, node_root, cpu)
         siblings_path = topology / "thread_siblings_list"
         try:
-            siblings = expand_list(siblings_path.read_text(encoding="ascii"))
+            siblings = [
+                sibling
+                for sibling in expand_list(
+                    siblings_path.read_text(encoding="ascii")
+                )
+                if sibling in online_cpus
+            ]
         except (OSError, ValueError):
             siblings = [cpu]
+        if cpu not in siblings:
+            siblings.append(cpu)
         groups.setdefault((node, package, core_id), set()).update(siblings or [cpu])
 
     cores = [
@@ -123,216 +136,28 @@ def discover_topology(
     return sorted(cores, key=lambda core: (core.node, core.package, core.threads[0]))
 
 
-def _node_capacity(
-    cores: list[PhysicalCore], held: set[int]
-) -> dict[int, tuple[int, int]]:
-    """返回每个节点的（空闲主线程数，空闲逻辑线程数）。"""
-
-    capacity: dict[int, tuple[int, int]] = {}
-    for core in cores:
-        primary_free = int(core.threads[0] not in held)
-        logical_free = sum(thread not in held for thread in core.threads)
-        old_primary, old_logical = capacity.get(core.node, (0, 0))
-        capacity[core.node] = (
-            old_primary + primary_free,
-            old_logical + logical_free,
-        )
-    return capacity
-
-
-def choose_placement(
-    cores: list[PhysicalCore],
-    held_cpus: set[int],
-    vcpu_count: int,
-    service_cpu_count: int,
-    reserve_cores: int,
-) -> Placement:
-    """优先把一台 VM 完整放入单个 NUMA node，再按主线程→SMT 排序。
-
-    ``reserve_cores`` 从排序最前的物理核中扣除，通常为 node0 的管理核。若任一
-    单节点能容纳全部 vCPU/service CPU，则 memory node 也只给该节点；只有容量确实
-    不足才跨节点，并在返回值中明确标记。
-    """
-
-    if vcpu_count <= 0 or service_cpu_count < 0:
-        raise ValueError("vCPU/service CPU 数量非法")
-    reserve = max(0, min(reserve_cores, max(0, len(cores) - 1)))
-    eligible = cores[reserve:]
-    if not eligible:
-        return Placement((), (), False, reserve)
-
-    required_logical = vcpu_count + service_cpu_count
-    capacity = _node_capacity(eligible, held_cpus)
-    fitting_nodes = [
-        node
-        for node, (primary, logical) in capacity.items()
-        if primary >= vcpu_count and logical >= required_logical
-    ]
-    if fitting_nodes:
-        # 空闲主线程最多者优先；相同时选 node id 较小者，保证重启后确定性。
-        chosen = sorted(
-            fitting_nodes,
-            key=lambda node: (-capacity[node][0], -capacity[node][1], node),
-        )[0]
-        ordered_cores = [core for core in eligible if core.node == chosen]
-        memory_nodes = (chosen,)
-        spans_nodes = False
-    else:
-        ordered_cores = eligible
-        memory_nodes = tuple(sorted({core.node for core in eligible}))
-        spans_nodes = len(memory_nodes) > 1
-
-    primaries = [core.threads[0] for core in ordered_cores]
-    siblings = [thread for core in ordered_cores for thread in core.threads[1:]]
-    preference = tuple(primaries + siblings)
-    return Placement(preference, memory_nodes, spans_nodes, reserve)
-
-
-def query_vcpus(sock_path: str, timeout: float = 90.0) -> list[tuple[int, int]]:
-    """轮询 QMP ``query-cpus-fast``，返回 ``(cpu-index, thread-id)``。"""
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            client.settimeout(5)
-            client.connect(sock_path)
-            stream = client.makefile("rw", encoding="utf-8")
-            json.loads(stream.readline())
-            stream.write(json.dumps({"execute": "qmp_capabilities"}) + "\n")
-            stream.flush()
-            json.loads(stream.readline())
-            stream.write(json.dumps({"execute": "query-cpus-fast"}) + "\n")
-            stream.flush()
-            response = json.loads(stream.readline())
-            entries = response.get("return", [])
-            result = sorted(
-                (int(entry["cpu-index"]), int(entry["thread-id"]))
-                for entry in entries
-                if "thread-id" in entry
-            )
-            if result:
-                return result
-        except (OSError, TimeoutError, ValueError, json.JSONDecodeError, KeyError):
-            pass
-        finally:
-            client.close()
-        time.sleep(1)
-    return []
-
-
-def request_qmp_quit(sock_path: str, timeout: float = 10.0) -> bool:
-    """严格绑核失败时请求客机退出，避免未隔离 VM 被误当成合格实例。
-
-    pinner 与 QEMU 并发启动，失败可能早于 socket 创建，因此在短截止时间内重试。
-    QMP event 可能夹在命令响应之间，按 ``id`` 读取而不是假设下一行就是响应。
-    """
-
-    deadline = time.monotonic() + timeout
-    last_error = "QMP socket 未就绪"
-    while time.monotonic() < deadline:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            client.settimeout(2.0)
-            client.connect(sock_path)
-            stream = client.makefile("rw", encoding="utf-8")
-            greeting = json.loads(stream.readline())
-            if "QMP" not in greeting:
-                raise ValueError("缺少 QMP greeting")
-
-            for command, ident in (
-                ("qmp_capabilities", "vmate-pin-caps"),
-                ("quit", "vmate-pin-abort"),
-            ):
-                stream.write(json.dumps({"execute": command, "id": ident}) + "\n")
-                stream.flush()
-                while True:
-                    response = json.loads(stream.readline())
-                    if response.get("id") == ident:
-                        if "error" in response:
-                            raise ValueError(f"QMP {command} 失败: {response['error']}")
-                        break
-            log("严格绑核失败，已请求 QMP quit")
-            return True
-        except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
-            last_error = str(exc)
-        finally:
-            client.close()
-        time.sleep(0.25)
-    log(f"⚠ 严格绑核失败且无法请求 QMP quit: {last_error}")
-    return False
-
-
-def tgid_of(tid: int) -> int | None:
-    try:
-        lines = pathlib.Path(f"/proc/{tid}/status").read_text().splitlines()
-    except OSError:
-        return None
-    for line in lines:
-        if line.startswith("Tgid:"):
-            fields = line.split()
-            return int(fields[1]) if len(fields) > 1 else None
-    return None
-
-
-def _read_affinity(status_path: pathlib.Path) -> set[int]:
-    try:
-        lines = status_path.read_text().splitlines()
-    except OSError:
-        return set()
-    for line in lines:
-        if line.startswith("Cpus_allowed_list:"):
-            try:
-                return set(expand_list(line.split()[1]))
-            except (IndexError, ValueError):
-                return set()
-    return set()
-
-
-def read_held_cpus(current_pid: int, cgroup_name: str = "vmiso") -> set[int]:
-    """读取其它 VM 已显式收窄 affinity 的 vCPU/service CPU。"""
-
-    cgroup = pathlib.Path("/sys/fs/cgroup") / cgroup_name
-    try:
-        effective = set(expand_list((cgroup / "cpuset.cpus.effective").read_text()))
-    except (OSError, ValueError):
-        effective = set()
-    try:
-        pids = (cgroup / "cgroup.procs").read_text().splitlines()
-    except OSError:
-        return set()
-
+def read_held_cpus(
+    current_pid: int,
+    cgroup_name: str = "vmiso",
+    cgroup_root: pathlib.Path = pathlib.Path("/sys/fs/cgroup"),
+) -> set[int]:
+    """读取 ABI5 每实例 1:1 exact child cpuset，作为锁外容量排序提示。"""
+    del current_pid  # 最终排重由 root helper 锁内完成；这里只做无副作用的容量提示。
+    cgroup = cgroup_root / cgroup_name
     held: set[int] = set()
-    for pid_text in pids:
-        if not pid_text.isdigit() or int(pid_text) == current_pid:
+    try:
+        children = list(cgroup.iterdir())
+    except OSError:
+        return held
+    for child in children:
+        if not VM_CHILD_RE.fullmatch(child.name) \
+                or child.is_symlink() or not child.is_dir():
             continue
-        task_root = pathlib.Path("/proc") / pid_text / "task"
         try:
-            tasks = list(task_root.iterdir())
-        except OSError:
-            continue
-        for task in tasks:
-            affinity = _read_affinity(task / "status")
-            if affinity and (not effective or affinity != effective):
-                held.update(affinity)
+            held.update(expand_list((child / "cpuset.cpus").read_text()))
+        except (OSError, ValueError):
+            pass
     return held
-
-
-def _auto_reserve(
-    cores: list[PhysicalCore], held: set[int], vcpus: int, service_cpus: int
-) -> int:
-    default = min(max(2, (len(cores) + 7) // 8), max(0, len(cores) - 1))
-    required = vcpus + service_cpus
-    reserve = default
-    while reserve > 0:
-        capacity = _node_capacity(cores[reserve:], held)
-        total_logical = sum(value[1] for value in capacity.values())
-        max_primary = max((value[0] for value in capacity.values()), default=0)
-        total_primary = sum(value[0] for value in capacity.values())
-        if total_logical >= required and (max_primary >= vcpus or total_primary >= vcpus):
-            break
-        reserve -= 1
-    return reserve
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -342,7 +167,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("qmp_socket")
     parser.add_argument("helper")
     parser.add_argument("service_cpus", type=int, nargs="?", default=0)
+    parser.add_argument("guest_threads_per_core", type=int, nargs="?", default=1)
+    parser.add_argument("host_threads_per_core", type=int, nargs="?")
     parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--launcher-pid", type=int)
+    parser.add_argument("--launcher-starttime")
+    parser.add_argument("--launcher-pgid", type=int)
+    parser.add_argument("--status-fd", type=int)
     parser.add_argument(
         "--abort-on-failure",
         action="store_true",
@@ -351,81 +182,188 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run_pinner(args: argparse.Namespace) -> int:
+def run_pinner(args: argparse.Namespace) -> PinOutcome:
     """执行一次拓扑发现、QMP 线程查询和 root helper 调用。"""
 
-    if args.cpus <= 0 or not (0 <= args.service_cpus <= 8):
-        log("⚠ vCPU/service CPU 参数非法")
-        return 2
+    host_tpc = args.guest_threads_per_core \
+        if args.host_threads_per_core is None else args.host_threads_per_core
+    profile = (args.cpus, args.guest_threads_per_core, host_tpc)
+    if (
+        args.cpus <= 0
+        or not (0 <= args.service_cpus <= 8)
+        or not (1 <= args.guest_threads_per_core <= 8)
+        or not (1 <= host_tpc <= 8)
+        or args.cpus % args.guest_threads_per_core != 0
+        or args.cpus % host_tpc != 0
+        or profile not in {(2, 1, 1), (4, 2, 2), (4, 1, 1)}
+        or (args.launcher_pid is None) != (args.launcher_starttime is None)
+        or (args.launcher_pgid is not None
+            and (args.launcher_pid is None or args.launcher_pgid <= 0))
+        or (args.status_fd is not None
+            and (args.status_fd != 1 or not args.abort_on_failure))
+        or (args.launcher_starttime is not None
+            and not args.launcher_starttime.isdigit())
+    ):
+        log("⚠ vCPU/service CPU/threads-per-core 参数非法")
+        return PinOutcome(2)
 
     topology = discover_topology()
-    if len(topology) < 2:
-        log(f"⚠ 物理核数={len(topology)}，太少无法隔离")
-        return 1 if args.abort_on_failure else 0
-    vcpus = query_vcpus(args.qmp_socket, args.timeout)
+    if sum(len(core.threads) == 2 for core in topology) < 2:
+        log("⚠ 完整 SMT2 宿主物理核少于 2，无法隔离")
+        return PinOutcome(1 if args.abort_on_failure else 0)
+    if not emit_supervisor_status(args.status_fd, "ARMED"):
+        log("⚠ 严格启动监督管道已关闭")
+        return PinOutcome(1)
+    vcpus = query_vcpus(
+        args.qmp_socket, args.cpus, args.timeout,
+        args.launcher_pid, args.launcher_starttime,
+    )
     if not vcpus:
         log("⚠ 等不到 vCPU 线程（QMP 无响应/超时）")
-        return 1
+        return PinOutcome(1)
     pid = tgid_of(vcpus[0][1])
     if pid is None:
         log("⚠ 无法取得 QEMU pid")
-        return 1
+        return PinOutcome(1)
+    starttime = process_starttime(pid)
+    if starttime is None or any(tgid_of(tid) != pid for _index, tid in vcpus):
+        log("⚠ vCPU TID 不属于同一 QEMU 代际")
+        return PinOutcome(1)
+    if args.launcher_pgid is not None and (
+        not process_matches(args.launcher_pid, args.launcher_starttime)
+        or process_pgid(args.launcher_pid) != args.launcher_pgid
+        or process_pgid(pid) != args.launcher_pgid
+    ):
+        log("⚠ QEMU 不属于严格启动器创建的进程组")
+        return PinOutcome(1)
 
     # root helper 的 cgroup 名是固定安全边界，普通用户环境不得让发现算法读取另一
     # 个分区，否则“看到的已占 CPU”与最终写入的分区不同，会产生重复分配。
     held = read_held_cpus(pid, "vmiso")
     reserve_raw = os.environ.get("HOST_RESERVE_CORES", "auto").strip().lower()
     if reserve_raw in ("", "auto"):
-        reserve = _auto_reserve(topology, held, len(vcpus), args.service_cpus)
+        reserve = _auto_reserve(
+            topology,
+            held,
+            len(vcpus),
+            args.service_cpus,
+            args.guest_threads_per_core,
+            host_tpc,
+        )
     else:
         try:
             reserve = int(reserve_raw)
         except ValueError:
             log(f"⚠ HOST_RESERVE_CORES 非法: {reserve_raw}")
-            return 2
+            return PinOutcome(2, pid, starttime)
 
     placement = choose_placement(
-        topology, held, len(vcpus), args.service_cpus, reserve
-    )
+        topology, held, len(vcpus), args.service_cpus, reserve,
+        args.guest_threads_per_core, host_tpc)
     if not placement.preference or not placement.memory_nodes:
         log("⚠ 没有可用 CPU/NUMA node")
-        return 1
+        return PinOutcome(1, pid, starttime)
     if placement.spans_nodes:
-        log("⚠ 单个 NUMA node 容量不足，本实例将跨节点；建议降低 vCPU 或拆分 VM")
+        log("⚠ 没有单个 NUMA node 能保持完整来宾拓扑，拒绝跨节点静默降级")
+        return PinOutcome(1, pid, starttime)
 
     preference = ",".join(str(cpu) for cpu in placement.preference)
     memory_nodes = ",".join(str(node) for node in placement.memory_nodes)
     tids = ",".join(str(tid) for _index, tid in vcpus)
+    free_hint = len(set(placement.preference) - held)
     log(
-        f"pid={pid}, {len(vcpus)} vCPU, node={memory_nodes}, "
-        f"预留 {placement.reserve_cores} 颗管理核，候选 {len(placement.preference)} 线程"
+        f"pid={pid}, {len(vcpus)} vCPU, NUMA候选={memory_nodes}, "
+        f"Guest每核 {args.guest_threads_per_core} 线程，"
+        f"host每物理核映射 {host_tpc} vCPU，"
+        f"预留 {placement.reserve_cores} 颗管理核，候选池 {len(placement.preference)} 个 vCPU 位置，"
+        f"锁外空闲快照 {free_hint}，需求 {len(vcpus) + args.service_cpus}"
     )
 
     command = [
         "sudo", "-n", args.helper, "apply", args.instance, memory_nodes, str(pid),
         preference, tids, str(args.service_cpus),
+        str(args.guest_threads_per_core),
+        str(host_tpc),
     ]
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, timeout=30, check=False
+            command, capture_output=True, text=True, check=False
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log(f"⚠ 调用 root helper 失败: {exc}")
-        return 1
+        return PinOutcome(1, pid, starttime)
     for line in result.stdout.splitlines():
         if line.strip():
-            print(line.strip(), flush=True)
+            log(line.strip())
     if result.returncode != 0:
         log(f"⚠ root helper 返回 {result.returncode}: {result.stderr.strip()[:240]}")
-    return result.returncode
+    return PinOutcome(result.returncode, pid, starttime, result.returncode == 0)
+
+
+def _cleanup_strict_failure(args: argparse.Namespace, outcome: PinOutcome) -> None:
+    if not args.abort_on_failure:
+        return
+    if outcome.pid is not None and outcome.starttime is not None:
+        stopped = stop_bound_qemu(args.qmp_socket, outcome.pid, outcome.starttime)
+        if stopped:
+            release_instance(args.helper, args.instance)
+    else:
+        if args.status_fd is None:
+            request_qmp_quit(args.qmp_socket, timeout=0.5)
+        # helper 可能已落盘但尚未来得及构造 PinOutcome；无法从栈外恢复 PID。
+        # 先通过 FD8 保护的 QMP 路径请求退出，再调用幂等 release；helper 会拒绝
+        # 释放仍含活动进程的 child，既能回收部分事务，也不会把活动 CPU 错放回宿主。
+        release_instance(args.helper, args.instance)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
-    status = run_pinner(args)
-    if status != 0 and args.abort_on_failure:
-        request_qmp_quit(args.qmp_socket)
-    return status
+    # 后台任务从 QMP discovery 开始就不能被终端 HUP/TERM 截断；启动器代际消失会让
+    # discovery 主动退出，helper 成功后则由 PID/starttime 守候并完成 release。
+    ignore_lifecycle_signals()
+    outcome = PinOutcome(1)
+    try:
+        outcome = run_pinner(args)
+        if outcome.status != 0:
+            emit_supervisor_status(args.status_fd, f"FAIL run {outcome.status}")
+            _cleanup_strict_failure(args, outcome)
+            return outcome.status
+        if not outcome.applied:
+            return 0
+        if outcome.pid is None or outcome.starttime is None:
+            log("⚠ helper 成功后缺少 QEMU 代际，拒绝留下无法回收的分区")
+            emit_supervisor_status(args.status_fd, "FAIL identity 1")
+            _cleanup_strict_failure(args, outcome)
+            return 1
+
+        # 从 helper 成功开始持续持有继承的 FD8；即使 QEMU 很快退出，同实例新启动也
+        # 必须等本代完成 quit/release，旧 pinner 不可能连接或释放新代资源。
+        if args.abort_on_failure and not request_qmp_command(
+            args.qmp_socket, "cont", outcome.pid, outcome.starttime
+        ):
+            emit_supervisor_status(args.status_fd, "FAIL cont 1")
+            cleanup_applied_failure(
+                args.qmp_socket, args.helper, args.instance,
+                outcome.pid, outcome.starttime,
+            )
+            return 1
+        if not emit_supervisor_status(
+            args.status_fd, f"RUNNING {outcome.pid} {outcome.starttime}"
+        ):
+            cleanup_applied_failure(
+                args.qmp_socket, args.helper, args.instance,
+                outcome.pid, outcome.starttime,
+            )
+            return 1
+        released = watch_and_release(
+            args.helper, args.instance, outcome.pid, outcome.starttime
+        )
+        return 0 if released else 1
+    except Exception as exc:  # 最后的 fail-closed 监督边界，防止 paused VM 无人收尾。
+        log(f"⚠ CPU pinner 未预期异常: {exc}")
+        emit_supervisor_status(args.status_fd, "FAIL exception 1")
+        _cleanup_strict_failure(args, outcome)
+        return 1
 
 
 if __name__ == "__main__":

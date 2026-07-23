@@ -127,6 +127,11 @@ nmcli() {
         printf '%s\n' "${NM_AUTOCONNECT[${5:-}]:-yes}"
         return 0
     fi
+    if [[ "${1:-} ${2:-} ${3:-} ${4:-}" \
+        == "-g connection.autoconnect-slaves connection show" ]]; then
+        printf '%s\n' "${NM_AUTOCONNECT_PORTS[${5:-}]:-0}"
+        return 0
+    fi
 
     case "${1:-} ${2:-}" in
         "connection add")
@@ -247,8 +252,13 @@ test_networkmanager_trunk_create_and_rerun() {
         "controller 自动 ports 属性没有在激活 br0 前生效"
     assert_log_not_contains "$NM_LOG" "connection up br0-slave-enp5s0" \
         "不应从 port 反向激活 bridge 并触发重复 activation"
-    [[ "${NM_AUTOCONNECT[br0-slave-enp5s0]:-}" == "no" ]] \
-        || fail "bridge port 未保持 controller-only autoconnect=no"
+    assert_log_before "$NM_LOG" \
+        "connection modify br0-slave-enp5s0 connection.autoconnect yes" \
+        "connection modify br0 connection.autoconnect yes connection.autoconnect-slaves 0" \
+        "未按 port-first 顺序写入 late-carrier 启动契约"
+    [[ "${NM_AUTOCONNECT[br0-slave-enp5s0]:-}" == "yes" \
+        && "${NM_AUTOCONNECT_PORTS[br0]:-}" == "0" ]] \
+        || fail "bridge/port 未收敛为 late-carrier 安全持久状态"
     [[ "${NM_ACTIVE[br0]:-}" == "1" \
         && "${NM_ACTIVE[br0-slave-enp5s0]:-}" == "1" ]] \
         || fail "controller 激活后未一并激活 bridge port"
@@ -272,12 +282,27 @@ test_networkmanager_trunk_create_and_rerun() {
         "幂等重跑误停用了自身上联 profile"
     assert_log_not_contains "$NM_LOG" "connection up br0-slave-enp5s0" \
         "幂等重跑不应单独激活上联 port"
-    [[ "${NM_AUTOCONNECT[br0-slave-enp5s0]:-}" == "no" ]] \
-        || fail "幂等重跑把 bridge port 改回了独立 autoconnect"
+    [[ "${NM_AUTOCONNECT[br0-slave-enp5s0]:-}" == "yes" \
+        && "${NM_AUTOCONNECT_PORTS[br0]:-}" == "0" ]] \
+        || fail "幂等重跑破坏了 late-carrier 持久契约"
     assert_log_contains "$NM_LOG" "connection up br0" \
         "幂等重跑未重新确认 bridge profile"
     [[ "${NM_ACTIVE[br0-slave-enp5s0]:-}" == "1" ]] \
         || fail "幂等重跑后 controller 未恢复上联 port"
+
+    # 模拟开机时 br0 先 active、物理 carrier 后到。controller 不主动拉起尚不可用
+    # 的 port；carrier 到达后，port 自己的 autoconnect=yes 必须能补入现有 bridge。
+    NM_ACTIVE=()
+    [[ "${NM_AUTOCONNECT[br0]:-}" == "yes" ]] && NM_ACTIVE[br0]=1
+    [[ -z "${NM_ACTIVE[br0-slave-enp5s0]:-}" ]] \
+        || fail "carrier 未到时 port 不应被模拟为 active"
+    if [[ "${NM_AUTOCONNECT[br0-slave-enp5s0]:-}" == "yes" \
+        && "${NM_MASTER[br0-slave-enp5s0]:-}" == "br0" ]]; then
+        NM_ACTIVE[br0-slave-enp5s0]=1
+    fi
+    [[ "${NM_ACTIVE[br0]:-}" == "1" \
+        && "${NM_ACTIVE[br0-slave-enp5s0]:-}" == "1" ]] \
+        || fail "carrier 晚到后 port 未按持久契约加入已 active 的 br0"
 }
 
 test_networkmanager_failure_restores_uplink() {
@@ -338,6 +363,29 @@ test_networkmanager_runtime_failure_stops_bridge_before_restore() {
         "运行态故障回滚未删除新 port"
 }
 
+test_boot_contract_failure_restores_profiles() {
+    local rc
+
+    nm_reset
+    nm_seed br0 bridge br0 1
+    nm_seed br0-slave-enp5s0 bridge-slave enp5s0 1
+    NM_MASTER[br0-slave-enp5s0]=br0
+    NM_AUTOCONNECT[br0-slave-enp5s0]=no
+    NM_AUTOCONNECT_PORTS[br0]=1
+    NM_FAIL_MATCH="connection.autoconnect-slaves 0"
+
+    set +e
+    setup_nm_persist_boot_contract br0 enp5s0 >/dev/null 2>&1
+    rc=$?
+    set -e
+
+    (( rc != 0 )) || fail "持久 profile 故障未传递失败状态"
+    [[ "${NM_AUTOCONNECT[br0]:-}" == "yes" \
+        && "${NM_AUTOCONNECT[br0-slave-enp5s0]:-}" == "no" \
+        && "${NM_AUTOCONNECT_PORTS[br0]:-}" == "1" ]] \
+        || fail "持久 profile 写入失败后未精确恢复旧契约"
+}
+
 test_plain_bridge_does_not_enable_vlan_filtering() {
     local out="$1"
 
@@ -356,6 +404,8 @@ main() {
     # setup 脚本通过 BASH_SOURCE 守卫，source 只注册函数，不执行宿主操作。
     # shellcheck disable=SC1090,SC1091
     source "$SETUP_BRIDGE"
+    # 本测试的 nmcli 是内存模型，不依赖宿主 NetworkManager 服务状态。
+    setup_nm_is_active() { return 0; }
 
     NM_LOG="$(mktemp)"
     NET_LOG="$(mktemp)"
@@ -365,6 +415,7 @@ main() {
     test_networkmanager_trunk_create_and_rerun "$out"
     test_networkmanager_failure_restores_uplink "$out"
     test_networkmanager_runtime_failure_stops_bridge_before_restore "$out"
+    test_boot_contract_failure_restores_profiles
     test_plain_bridge_does_not_enable_vlan_filtering "$out"
     echo "PASS: single-br0 VLAN trunk NetworkManager runtime contract"
 }

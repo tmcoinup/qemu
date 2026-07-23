@@ -129,8 +129,14 @@ check_dll atiadlxx.dll COFF-x86-64 x86_64-w64-mingw32-objdump
 contract_test="$tmp_dir/adl-contract-test"
 "${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -Wformat=2 \
     -I../gpu-api-common -o "$contract_test" test-contract.c \
-        adl_identity_contract.c adl_init_policy.c adl_profile.c
+        adl_identity_contract.c adl_init_policy.c adl_profile.c \
+        ../gpu-api-common/aib_identity_catalog.c
 "$contract_test"
+aib_contract_test="$tmp_dir/adl-aib-contract-test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -Wformat=2 \
+    -I../gpu-api-common -o "$aib_contract_test" test-aib-carrier.c \
+        adl_identity_contract.c ../gpu-api-common/aib_identity_catalog.c
+"$aib_contract_test"
 identity_cache_test="$tmp_dir/adl-identity-cache-test"
 "${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -Wformat=2 \
     -I../gpu-api-common -o "$identity_cache_test" test-identity-cache.c \
@@ -237,6 +243,15 @@ grep -F 'source_subsystem_vendor' adl_identity_contract.c >/dev/null \
     || fail "SourceInstance SUBSYS 未交叉校验"
 grep -F 'source_revision' adl_identity_contract.c >/dev/null \
     || fail "SourceInstance REV 未交叉校验"
+grep -F 'source_matches_logical_identity' adl_identity_contract.c >/dev/null \
+    || fail "SourceInstance 未进入 legacy/AIB 原子映射校验"
+for carrier in 0xa101 0xa102 0xa103 0xa104 0xa105 0xa106 0xa107 0xa108 \
+        0xa109 0xa10a 0xa10b 0xa10c 0xa10d 0xa10e 0xa10f 0xa110 \
+        0xa111 0xa112; do
+    grep -F "UINT32_C($carrier)" \
+        ../gpu-api-common/aib_identity_catalog.c >/dev/null \
+        || fail "共享 AIB 目录缺少 carrier: $carrier"
+done
 grep -F 'ADL_ERR_NOT_SUPPORTED' adl_unsupported.c >/dev/null \
     || fail "无来源遥测没有 fail-closed"
 if grep -F 'HeapAlloc' adl_runtime.c >/dev/null; then

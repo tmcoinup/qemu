@@ -30,15 +30,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $DesiredState = if ($DesiredState -eq 'Absent') { 'Absent' } else { 'Present' }
 # 当前构建的固定摘要；历史列表只含本项目已发布的独立 ADL 读取层，不能放行第三方 DLL。
-$ExpectedX86Hash = '86aca99433da976135f68b4b2904c04eaee370d97104b5a1622ad59f8731b1dd'
-$ExpectedX64Hash = '99b7e84b404bfa5140218549b4a49d68ebdfddb181ad9fdd72dcac296d799a62'
+$ExpectedX86Hash = 'b45384a1a4568bf6c75f131ae1fd206a8844e810ffc70253003c4503fb0771e2'
+$ExpectedX64Hash = 'aff2783d5e32528c6e919d947aff097d12acadfe7e4ce5a74896dcfae11b3128'
 $HistoricalX86Hashes = @(
-    'baacab32f579313757ef29ec00b80002ef824846f8ea80128a6ea0c2f0cdab90'
+    'baacab32f579313757ef29ec00b80002ef824846f8ea80128a6ea0c2f0cdab90', '86aca99433da976135f68b4b2904c04eaee370d97104b5a1622ad59f8731b1dd', 'fff0f0bbf7c40096ef0b618b87cfc420cf67a02f194a05501c3ab38725faa3d8',
+    '154f8b6b55e8921cdd63d92d3281d686f7b8facdf3afd99f308fa01b1cf8cb07'
 )
 $HistoricalX64Hashes = @(
-    'b44b814dcc4dfa411b7a4e4e5fe38248e319cbbcc9143e5bf525b84313ddfd68'
+    'b44b814dcc4dfa411b7a4e4e5fe38248e319cbbcc9143e5bf525b84313ddfd68', '99b7e84b404bfa5140218549b4a49d68ebdfddb181ad9fdd72dcac296d799a62', '1f75802585a9fb86f38aaec3099130d29386fba9f77badf4c2e683321de68f86',
+    '6c24ff0730d775b29e2d282a1ab818e7243a723881441b28d40b8ac690c71757'
 )
-
 function Get-LowerSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
 

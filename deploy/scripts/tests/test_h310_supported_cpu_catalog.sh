@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证 PRIME H310M-A R2.0 正常 supported CPU bundle 及 QEMU feature 表面。
+# 验证多品牌 H310 正常 supported CPU 原子 bundle 及 QEMU feature 表面。
 # shellcheck disable=SC1091
 set -euo pipefail
 
@@ -32,7 +32,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     print(json.load(stream)["catalog_revision"])
 PY
-    )" "2026-07-19.6" "platform catalog revision 错误"
+    )" "2026-07-22.1" "platform catalog revision 错误"
 
     for id in \
         intel-lga1151-celeron-g4900-asus-prime-h310m-a-r2 \
@@ -69,6 +69,24 @@ PY
         "4:4:0x00EC" "i3-9100F 拓扑/SMBIOS 错误"
     assert_equal "$CPU_IGPU_PRESENT:$CPU_IGPU_STATE:$CPU_IGPU_MODEL" \
         "0:fused_off:none" "i3-9100F F 后缀核显状态错误"
+
+    stealth_platform_load intel-lga1151-i3-9100f-msi-h310m-pro-m2-plus-ms-7c08
+    assert_equal "$BOARD_MFR:$BOARD_PRODUCT:$BOARD_SUBSYS_VEN:$SERIAL_FN" \
+        "Micro-Star International Co., Ltd.:H310M PRO-M2 PLUS (MS-7C08):0x1462:_serial_msi" \
+        "MSI H310 原子主板身份错误"
+    assert_equal "$NVME_MAX_PCIE_GENERATION:$NVME_LANES:$AUDIO_CODEC_SUBSYSTEM_ID" \
+        "2:4:0x1462c708" "MSI H310 M.2/audio 事实错误"
+    assert_equal "$TPM_CAPABILITY:$TPM_IMPLEMENTATION:$TPM_VERSION:$TPM_FRONTEND" \
+        "discrete:discrete-module:2.0:tpm-tis" "MSI H310 TPM 模块事实错误"
+
+    stealth_platform_load intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2
+    assert_equal "$BOARD_MFR:$BOARD_PRODUCT:$BOARD_SUBSYS_VEN:$SERIAL_FN" \
+        "Gigabyte Technology Co., Ltd.:H310M S2H 2.0:0x1458:_serial_giga" \
+        "GIGABYTE H310 原子主板身份错误"
+    assert_equal "$NVME_MAX_PCIE_GENERATION:$NVME_LANES:$AUDIO_CODEC_SUBSYSTEM_ID" \
+        "2:2:0x1458a182" "GIGABYTE H310 M.2/audio 事实错误"
+    assert_equal "$BIOS_VERSION:$BIOS_DATE" "F12:08/27/2019" \
+        "GIGABYTE H310 BIOS 事实错误"
 }
 
 test_strict_mutations() {
@@ -184,7 +202,7 @@ from platform_manifest import load_manifest
 
 root = load_manifest(pathlib.Path(sys.argv[1]))
 for platform in root["platforms"]:
-    if platform["board"]["product"] != "PRIME H310M-A R2.0":
+    if platform["board"]["pch"] != "Intel H310":
         continue
     cpu = platform["cpu"]
     encoded = base64.b64encode(cpu["qemu_arg"].encode()).decode()

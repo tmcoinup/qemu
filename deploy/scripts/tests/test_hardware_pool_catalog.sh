@@ -75,7 +75,9 @@ known_board() {
         |"LGA1151|PRIME H370-A" \
         |"LGA1151|H310M PRO-VL (MS-7B75)" \
         |"LGA1151|B360M PRO-VH (MS-7B53)" \
+        |"LGA1151|H310M PRO-M2 PLUS (MS-7C08)" \
         |"LGA1151|H310M S2H" \
+        |"LGA1151|H310M S2H 2.0" \
         |"LGA1151|B360M D2V" \
         |"LGA1151|B360M Pro4" \
         |"LGA1151|H310CM-HDV" \
@@ -93,7 +95,7 @@ known_board() {
     esac
 }
 
-known_gpu() {
+known_legacy_gpu() {
     case "$*" in
         "NVIDIA NVIDIA GeForce GTX 750 Ti 0x10DE 0x1380 2048 GDDR5 128 1020000 1085000 2700000 0" \
         |"NVIDIA NVIDIA GeForce GT 1030 0x10DE 0x1D01 2048 GDDR5 64 1227000 1468000 3004000 0" \
@@ -110,15 +112,9 @@ known_gpu() {
 known_nvme() {
     case "$1|$2|$3" in
         "Samsung SSD 970 PRO 512GB|1B2QEXP7|512110190592" \
-        |"Samsung SSD 970 PRO 1TB|1B2QEXP7|1000204886016" \
-        |"Samsung SSD 970 EVO 500GB|1B2QEXE7|500107862016" \
-        |"Samsung SSD 970 EVO 1TB|1B2QEXE7|1000204886016" \
-        |"Samsung SSD 970 EVO Plus 500GB|2B2QEXM7|500107862016" \
-        |"Samsung SSD 970 EVO Plus 1TB|2B2QEXM7|1000204886016" \
-        |"Samsung SSD 980 500GB|3B4QFXO7|500107862016" \
-        |"Samsung SSD 980 1TB|3B4QFXO7|1000204886016" \
-        |"Samsung SSD 960 EVO 500GB|3B7QCXE7|500107862016" \
-        |"Samsung SSD 960 PRO 512GB|4B6QCXP7|512110190592")
+        |"INTEL SSDPEKKW512G8|001C|512110190592" \
+        |"WDC PC SN730 SDBPNTY-512G-1027|11110000|512110190592" \
+        |"KXG60ZNV512G KIOXIA|AGHA4101|512110190592")
             return 0 ;;
         *)
             return 1 ;;
@@ -128,7 +124,6 @@ known_nvme() {
 known_memory() {
     case "$1|$2|$3|$4" in
         "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400" \
-        |"Kingston|KVR24N17S6/2|KVR24N17S8/4|2400" \
         |"Crucial|CT2G4DFS624A|CT4G4DFS824A|2400" \
         |"Kingston|KVR16N11S6/2|KVR16N11S8/4|1600" \
         |"SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600" \
@@ -153,6 +148,9 @@ known_memory_spd_brand() {
 known_monitor() {
     case "$1|$2" in
         "SAM|S24F350" \
+        |"AOC|24B2W1G5" \
+        |"XMI|Mi Monitor" \
+        |"LEN|L24e-30" \
         |"SAM|C24F390" \
         |"AOC|24G2E5" \
         |"AOC|22B1H" \
@@ -220,18 +218,86 @@ for row in "${BOARD_POOL[@]}"; do
     [[ "${row%%|*}" == LGA1151 ]] || fail "旧 socket 主板泄漏到随机池: $row"
 done
 
+declare -A expected_gpu_rows=()
+while IFS= read -r expected_row; do
+    expected_gpu_rows["${expected_row%%|*}"]="$expected_row"
+done < <(
+    python3 - "$REPO_ROOT/deploy/hardware/gpu-boards.json" <<'PY'
+import json
+import sys
+
+keys = (
+    "id", "manufacturer", "model", "pci_vendor", "pci_device", "ram_mb",
+    "bios", "revision", "memory_type", "memory_bus_width_bits",
+    "base_clock_khz", "boost_clock_khz", "memory_clock_khz",
+    "sli_supported", "board_partner", "part_number", "subsystem_vendor",
+    "subsystem_device", "carrier_vendor", "carrier_device", "identity_fidelity",
+)
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for board in json.load(stream)["boards"]:
+        print("|".join(str(board[key]) for key in keys))
+PY
+)
+(( ${#expected_gpu_rows[@]} == 18 )) \
+    || fail "离线 GPU 板卡目录没有精确投影 18 块板卡"
+
+declare -A gpu_board_partners=()
+declare -A gpu_carriers=()
+declare -A gpu_chips=()
+declare -A gpu_chip_partners=()
 for row in "${GPU_POOL[@]}"; do
+    IFS='|' read -r stable_id vendor name ven dev ram _bios _revision \
+        memory_type bus_width base_clock boost_clock memory_clock sli_supported \
+        board_partner _part_number subsystem_ven subsystem_dev carrier_ven \
+        carrier_dev fidelity <<<"$row"
+    [[ "${expected_gpu_rows[$stable_id]:-}" == "$row" ]] \
+        || fail "AIB 显卡完整规格未在离线已审计目录中: $row"
+    case "$vendor|$ven|$carrier_ven" in
+        "NVIDIA|0x10DE|0x1AF4"|"AMD|0x1002|0x1AF4") ;;
+        *) fail "显卡厂商、逻辑主 ID 与 virtio carrier 边界错误: $row" ;;
+    esac
+    [[ "$subsystem_ven|$subsystem_dev" != "$carrier_ven|$carrier_dev" ]] \
+        || fail "真实 AIB subsystem 被错误复用为物理 carrier: $row"
+    gpu_board_partners["$board_partner"]=1
+    gpu_carriers["$carrier_ven:$carrier_dev"]=1
+    chip="$ven:$dev"
+    gpu_chips["$chip"]=$(( ${gpu_chips["$chip"]:-0} + 1 ))
+    gpu_chip_partners["$chip|$board_partner"]=1
+done
+(( ${#GPU_POOL[@]} == 18 && ${#gpu_board_partners[@]} == 7 &&
+   ${#gpu_carriers[@]} == 18 && ${#gpu_chips[@]} == 6 &&
+   ${#gpu_chip_partners[@]} == 18 && ${#LEGACY_GPU_POOL[@]} == 6 )) \
+    || fail "新池须为六芯片/每芯片三品牌的 18 块 AIB；旧六款仅供 ID 回查"
+for chip in "${!gpu_chips[@]}"; do
+    (( gpu_chips["$chip"] == 3 )) \
+        || fail "芯片 $chip 未精确绑定三块板卡"
+done
+for expected_partner in ASUS Colorful GALAX MSI Gigabyte EVGA Sapphire; do
+    [[ -n "${gpu_board_partners[$expected_partner]:-}" ]] \
+        || fail "新 AIB 池缺少品牌: $expected_partner"
+done
+for (( carrier=0xA101; carrier<=0xA112; carrier++ )); do
+    printf -v expected_carrier '0x1AF4:0x%04X' "$carrier"
+    [[ -n "${gpu_carriers[$expected_carrier]:-}" ]] \
+        || fail "新 AIB 池缺少内部 carrier: $expected_carrier"
+done
+[[ -z "${gpu_carriers[0x1AF4:0xA113]:-}" ]] \
+    || fail "未知 carrier A113 被错误加入 AIB 池"
+for row in "${LEGACY_GPU_POOL[@]}"; do
     IFS='|' read -r vendor name ven dev ram _ _ memory_type bus_width \
         base_clock boost_clock memory_clock sli_supported <<<"$row"
-    known_gpu "$vendor" "$name" "$ven" "$dev" "$ram" "$memory_type" \
-        "$bus_width" "$base_clock" "$boost_clock" "$memory_clock" "$sli_supported" \
-        || fail "显卡完整规格未在已审计目录中: $row"
+    known_legacy_gpu "$vendor" "$name" "$ven" "$dev" "$ram" "$memory_type" \
+        "$bus_width" "$base_clock" "$boost_clock" "$memory_clock" \
+        "$sli_supported" \
+        || fail "旧 GPU 兼容回查目录出现未知 generic 条目: $row"
 done
 
 for row in "${NVME_POOL[@]}"; do
     IFS='|' read -r _ model firmware size _ <<<"$row"
     known_nvme "$model" "$firmware" "$size" || fail "NVMe 型号/固件/容量组合未核验: $row"
 done
+(( ${#NVME_POOL[@]} == 4 )) \
+    || fail "NVMe 池必须包含 Samsung/Intel/Western Digital/KIOXIA 四个 512GB 原子画像"
 
 for row in "${MEM_POOL[@]}"; do
     IFS='|' read -r mfr part_2g part_4g rated _ \
@@ -245,8 +311,8 @@ for row in "${MEM_POOL[@]}"; do
     [[ "$width_4g" == 4 || "$width_4g" == 8 || "$width_4g" == 16 ]] \
         || fail "4GB 内存 device-width 非法: $row"
 done
-(( ${#MEM_POOL[@]} == 6 )) \
-    || fail "新 VM 活动内存池应为三组 DDR4 + 三组 DDR3 已核验物料"
+(( ${#MEM_POOL[@]} == 5 )) \
+    || fail "旧双料号 ABI 应为两组 DDR4 + 三组 DDR3 已核验物料"
 (( ${#MEM_DORMANT_POOL[@]} == 0 )) \
     || fail "已启用 household compatibility 后 DDR3 不应继续留在 dormant 池"
 for row in "${MEM_DORMANT_POOL[@]}"; do
@@ -265,6 +331,8 @@ for row in "${MONITOR_POOL[@]}"; do
     IFS='|' read -r _ vendor model _ <<<"$row"
     known_monitor "$vendor" "$model" || fail "显示器未在真实发售目录中: $row"
 done
+(( ${#MONITOR_POOL[@]} == 4 )) \
+    || fail "显示器池必须包含四款受控 1080p/16:9 型号"
 
 for row in "${KBD_POOL[@]}"; do
     IFS='|' read -r vid pid _ product _ <<<"$row"

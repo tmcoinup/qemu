@@ -101,14 +101,19 @@ clone 会以最终 VM 普通用户执行与 start 相同的完整设备能力预
 
 `start-vm.sh` 会 source `lib/sv-portability.sh`，默认执行 `QEMU_CAP_CHECK=1`。它会检查 patched QEMU 是否支持以下 guest-visible stealth 属性：
 
-- NVMe：`use-samsung-id` / `model-number` / `firmware-rev`
-- virtio-vga：EDID 字符串和 PCI subsystem override
+- NVMe：`x-identity-profile` / `model-number` / `firmware-rev`
+- virtio-vga：EDID 字符串、`edid-managed-timing-version` 和 PCI subsystem override
 - USB HID：`vendorid` / `productid` / `manufacturer` / `product`
 - PCIe root-port：平台 PCI ID 和链路属性 override
 - qemu-xhci：固定上游行为身份，不提供 PCI ID override
 - fb-shm / memfd object
 
 缺失时 fail-fast，避免误用 stock QEMU 让 guest 看到 Red Hat NVMe、默认显示器或默认 USB 设备。只有非隐身调试才建议跳过：
+
+受管显示启动固定传入 `edid-managed-timing-version=1`。该属性默认值为 `0`，
+保持普通 QEMU 调用方兼容；当前实现只接受显式版本 `1`，其它非零版本会在设备
+realize 阶段拒绝。这样旧 patched QEMU 即使已有 secondary 分辨率属性，也无法
+冒充包含当前多品牌精确时序表的构建。
 
 ```bash
 QEMU_CAP_CHECK=0 ./deploy/scripts/start-vm.sh 1 --no-bridge
@@ -122,10 +127,12 @@ QEMU_CAP_CHECK=0 ./deploy/scripts/start-vm.sh 1 --no-bridge
 
 ```bash
 -drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=threads,discard=unmap
--device nvme,...,drive=bootdisk0,use-samsung-id=on,model-number=...,firmware-rev=...
+-device nvme,...,drive=bootdisk0,x-identity-profile=...,model-number=...,firmware-rev=...
 ```
 
-这不影响 guest 看到的 Samsung NVMe 真机画像。
+`x-identity-profile` 把所选 Samsung、Intel、Western Digital 或 KIOXIA 型号的
+model、firmware、PCI/subsystem、OUI、链路和序列格式作为一个整体校验；旧
+`use-samsung-id=on` 只作为历史 Samsung profile 的命令行兼容入口。
 
 启动总线由主板清单的 `NVME_BOOT_SUPPORTED` 决定，而不是由宿主或 Guest CPU 名称
 推断。值为 `1` 时继续使用上述 NVMe 路径；H61/B75/H81/AM3 等值为 `0` 的家用

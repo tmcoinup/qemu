@@ -54,6 +54,8 @@ test_default_sdl_uses_stable_display() {
         || fail "default SDL must use virtio-vga without blob/hostmem"
     [[ "$vga" == *",edid-fixed-native=on,"* ]] \
         || fail "stable virtio-vga must explicitly fix the profile native mode"
+    [[ "$vga" == *",edid-managed-timing-version=1,"* ]] \
+        || fail "stable virtio-vga must require managed timing ABI v1"
     grep -F -- 'guest PCI : 无 host-visible hostmem BAR (stable)' \
         "$out" >/dev/null \
         || fail "stable summary must confirm that no hostmem BAR is exposed"
@@ -72,6 +74,8 @@ test_explicit_gl_is_safe_by_default() {
     vga="$(vga_arg "$out")"
     [[ "$vga" == virtio-vga-gl,* ]] \
         || fail "STABLE_DISPLAY=0 must use virtio-vga-gl"
+    [[ "$vga" == *",edid-managed-timing-version=1,"* ]] \
+        || fail "virtio-vga-gl must require managed timing ABI v1"
     [[ "$vga" != *"blob=true"* && "$vga" != *"hostmem="* ]] \
         || fail "explicit GL must default to gl-safe without blob/hostmem"
     grep -F -- 'guest PCI : 无 hostmem BAR；virtio GL feature 可见 (GL-safe)' \
@@ -263,16 +267,26 @@ test_qemu_capability_gate_matches_display_mode() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$QEMU_CALL_LOG"
+print_edid_help() {
+    printf '%s\n' \
+        'edid-fixed-native=' 'edid-vendor=' 'edid-name=' 'edid-serial=' \
+        'edid-managed-timing-version=' \
+        'edid-binary-serial=' 'edid-revision=' \
+        'edid-width-mm=' 'edid-height-mm=' 'edid-product-id=' \
+        'edid-manufacture-week=' 'edid-manufacture-year=' \
+        'edid-video-input=' 'edid-min-vfreq-hz=' 'edid-max-vfreq-hz=' \
+        'edid-min-hfreq-khz=' 'edid-max-hfreq-khz=' \
+        'edid-max-pixel-clock-mhz=' 'edid-secondary-xres=' \
+        'edid-secondary-yres=' 'edid-secondary-refresh-rate='
+}
 case "${2:-}" in
     nvme,help)
-        printf '%s\n' 'use-samsung-id=' 'model-number=' 'firmware-rev=' ;;
+        printf '%s\n' 'x-identity-profile=' 'model-number=' 'firmware-rev=' ;;
     virtio-vga,help)
-        printf '%s\n' 'edid-fixed-native=' 'edid-vendor=' 'edid-name=' \
-            'edid-serial=' 'edid-width-mm=' 'edid-height-mm=' \
-            'x-pci-sub-vendor-id=' 'x-pci-sub-device-id=' ;;
+        print_edid_help
+        printf '%s\n' 'x-pci-sub-vendor-id=' 'x-pci-sub-device-id=' ;;
     virtio-vga-gl,help)
-        printf '%s\n' 'edid-fixed-native=' 'edid-vendor=' 'edid-name=' \
-            'edid-serial=' 'edid-width-mm=' 'edid-height-mm='
+        print_edid_help
         if [[ "${FAKE_GL_BLOB:-0}" == 1 ]]; then
             printf '%s\n' 'blob=' 'hostmem='
         fi ;;

@@ -11,6 +11,12 @@
 
 完整装机/克隆顺序见 [`VM-WORKFLOW.md`](../docs/VM-WORKFLOW.md)。
 
+当前 host GPU 目录覆盖 6 个芯片型号，每个型号 3 个板卡品牌，共 18 块 AIB：
+12 块 NVIDIA 与 6 块 AMD。`1AF4:A101`–`1AF4:A112` 只是 profile 与物理
+virtio 节点之间的受控 carrier；Windows 中唯一真实显示主 ID 仍是 `1AF4:1050`，
+本方案不做 GPU passthrough/vGPU。GPU 目录明确不暴露或合成序列号，guest 身份
+schema 也没有 `GPU_SERIAL`。
+
 ## 发布物与源码
 
 | 文件 | 作用 |
@@ -151,6 +157,9 @@ stock `VioGpuDod` 是 Display-Only 驱动；Windows 客体不会因为显示 `10
 
 QEMU 设备属性本身仍默认关闭，以保持普通 QEMU 调用方的动态缩放兼容性；本项目
 通过启动器默认显式开启，因此正常使用 `start-vm.sh`/`start-vm.ps1` 无需额外传参。
+`respawn-stealth.exe` 只维护 GPU 的 Class/Enum 投影，不改写 `Enum\DISPLAY`、
+Monitor Class 或显示器 HardwareID；Samsung、AOC、Xiaomi、Lenovo 身份均以当前
+硬件 profile 生成的实时 QEMU EDID 为唯一事实源。
 
 ## 全新 VM 用法
 

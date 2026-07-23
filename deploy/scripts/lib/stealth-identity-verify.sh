@@ -9,6 +9,10 @@ if [[ "${_STEALTH_IDENTITY_VERIFY_LOADED:-0}" == "1" ]]; then
 fi
 _STEALTH_IDENTITY_VERIFY_LOADED=1
 
+_STEALTH_IDENTITY_VERIFY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=stealth-board-serial.sh
+source "$_STEALTH_IDENTITY_VERIFY_DIR/stealth-board-serial.sh"
+
 _stealth_identity_error() {
     printf 'ERROR: 严格 profile 身份字段非法: %s\n' "$*" >&2
     return 1
@@ -87,7 +91,7 @@ stealth_verify_profile_identity_inputs() {
     _stealth_identity_require_keys "$present_array_name" "${required[@]}" ||
         return 1
     case "$migration_kind" in
-        none|legacy-nvme-v1|legacy-nvme-v2|legacy-sata-v1|legacy-sata-v2) ;;
+        none|legacy-nvme-v1|legacy-nvme-v2|legacy-sata-v1|legacy-sata-v2|legacy-nvme-part-number-v1|samsung-970-pro-catalog-v2) ;;
         *)
             _stealth_identity_error "未知启动盘迁移身份模式 $migration_kind"
             return 1
@@ -103,16 +107,19 @@ stealth_verify_profile_identity_inputs() {
         _stealth_identity_error "CPU_SERIAL 必须是非占位十位十进制值" || return 1
     [[ "$CPU_ASSET" =~ ^[1-9][0-9]{3}$ ]] ||
         _stealth_identity_error "CPU_ASSET 必须是非占位四位十进制值" || return 1
-    [[ "$BOARD_SERIAL" =~ ^[A-Z0-9-]{8,20}$ ]] ||
-        _stealth_identity_error "BOARD_SERIAL 格式不受支持" || return 1
+    stealth_board_serial_is_compatible "$BOARD_MFR" "$BOARD_SERIAL" ||
+        _stealth_identity_error \
+            "BOARD_SERIAL 不符合 $BOARD_MFR 的厂商格式" || return 1
     [[ "$BOARD_ASSET" =~ ^[1-9][0-9]{9}$ ]] ||
         _stealth_identity_error "BOARD_ASSET 必须是非占位十位十进制值" || return 1
-    [[ "$SYSTEM_SERIAL" =~ ^[A-Z0-9-]{8,20}$ ]] ||
-        _stealth_identity_error "SYSTEM_SERIAL 格式不受支持" || return 1
+    stealth_board_serial_is_compatible "$SYSTEM_MFR" "$SYSTEM_SERIAL" ||
+        _stealth_identity_error \
+            "SYSTEM_SERIAL 不符合 $SYSTEM_MFR 的厂商格式" || return 1
     [[ "$SYSTEM_SKU" =~ ^SKU[1-9][0-9]{5}$ ]] ||
         _stealth_identity_error "SYSTEM_SKU 必须是非占位 SKU 值" || return 1
-    [[ "$CHASSIS_SERIAL" =~ ^[A-Z0-9-]{8,20}$ ]] ||
-        _stealth_identity_error "CHASSIS_SERIAL 格式不受支持" || return 1
+    stealth_board_serial_is_compatible "$BOARD_MFR" "$CHASSIS_SERIAL" ||
+        _stealth_identity_error \
+            "CHASSIS_SERIAL 不符合 $BOARD_MFR 的厂商格式" || return 1
 
     [[ "$NIC_MAC_OUI" =~ ^([0-9a-f]{2}:){2}[0-9a-f]{2}$ ]] ||
         _stealth_identity_error "NIC_MAC_OUI 必须是小写三字节 OUI" || return 1
@@ -126,7 +133,23 @@ stealth_verify_profile_identity_inputs() {
     [[ "${suffix//:/}" != "000000" && "${suffix//:/}" != "ffffff" ]] ||
         _stealth_identity_error "NIC_MAC 使用全零或全 F 占位后缀" || return 1
 
-    if [[ "$migration_kind" == legacy-*-v1 ]]; then
+    if [[ "$migration_kind" == samsung-970-pro-catalog-v2 ||
+          "$migration_kind" == legacy-nvme-v2 ||
+          "$migration_kind" == legacy-sata-v2 ]]; then
+        [[ "$NVME_SERIAL" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{9}$ &&
+           "$NVME_SERIAL" != S000N000000000 &&
+           "$NVME_SERIAL" != SFFFNFFFFFFFFF ]] ||
+            _stealth_identity_error \
+                "旧 970 PRO NVME_SERIAL 不是受支持的 14 字符目录形态" ||
+            return 1
+        [[ "$NVME_SUBNQN_TEMPLATE" == \
+            "nqn.2014-08.org.nvmexpress:uuid:{uuid}" &&
+           "$NVME_SUBNQN" == \
+            "nqn.2014-08.org.nvmexpress:uuid:$UUID" ]] ||
+            _stealth_identity_error "旧 970 PRO NQN 未绑定持久 UUID" ||
+            return 1
+    elif [[ "$migration_kind" == legacy-nvme-v1 ||
+          "$migration_kind" == legacy-sata-v1 ]]; then
         [[ "$NVME_SERIAL" =~ ^S[0-9A-F]{10}N$ ]] ||
             _stealth_identity_error "旧 NVME_SERIAL 不符合 S<10 hex>N 格式" ||
             return 1
@@ -141,12 +164,11 @@ stealth_verify_profile_identity_inputs() {
             "nqn.1994-11.com.samsung:nvme:970-PRO:M.2:$NVME_SERIAL" ]] ||
             _stealth_identity_error "旧 NVME_SUBNQN 未绑定原序号" || return 1
     else
-        [[ "$NVME_SERIAL" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{9}$ ]] ||
-            _stealth_identity_error "NVME_SERIAL 不符合 Samsung 14 字符模式" ||
+        stealth_component_storage_serial_is_valid \
+            "${NVME_COMPONENT_ID:-}" "$NVME_SERIAL" >/dev/null 2>&1 ||
+            _stealth_identity_error \
+                "NVME_SERIAL 与 NVME_COMPONENT_ID 的厂商格式不一致" ||
             return 1
-        [[ "$NVME_SERIAL" != "S000N000000000" &&
-           "$NVME_SERIAL" != "SFFFNFFFFFFFFF" ]] ||
-            _stealth_identity_error "NVME_SERIAL 是占位值" || return 1
         [[ "$NVME_SUBNQN_TEMPLATE" == \
             "nqn.2014-08.org.nvmexpress:uuid:{uuid}" ]] ||
             _stealth_identity_error "NVME_SUBNQN_TEMPLATE 不是标准 UUID NQN 模板" ||
@@ -163,8 +185,10 @@ stealth_verify_profile_identity_inputs() {
         _stealth_identity_error "MEM_SERIAL 格式错误或为占位值" || return 1
     value="$(_stealth_memory_slot_serial "$MEM_SERIAL" 2)" ||
         _stealth_identity_error "无法派生合法的第二条 DIMM 序列号" || return 1
-    [[ "$EDID_SERIAL" =~ ^H4ZK[A-Z0-9]{8}$ ]] ||
-        _stealth_identity_error "EDID_SERIAL 与 S24F350 模板不一致" || return 1
+    stealth_component_monitor_serial_is_valid \
+        "${EDID_COMPONENT_ID:-}" "$EDID_SERIAL" >/dev/null 2>&1 ||
+        _stealth_identity_error \
+            "EDID_SERIAL 与显示器稳定 ID 的品牌策略不一致" || return 1
     _stealth_identity_hid_serial_is_valid \
         "$KBD_SERIAL" "${KBD_COMPONENT_ID:-}" ||
         _stealth_identity_error \

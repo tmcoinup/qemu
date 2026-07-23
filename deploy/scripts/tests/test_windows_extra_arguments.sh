@@ -119,6 +119,12 @@ $allowed = @(
         ) },
     @{ Name = "incoming AF_UNIX"; Args = @(
             "-incoming", "unix:/tmp/linux-kvm.sock"
+        ) },
+    @{ Name = "非显示 virtio 设备"; Args = @(
+            "-device", "virtio-net-pci,id=extra-nic"
+        ) },
+    @{ Name = "显式单一 device driver"; Args = @(
+            "-device", "driver=e1000e,id=extra-nic"
         ) }
 )
 
@@ -136,6 +142,7 @@ $denied = @(
             "-set", "device.nic0.mac=52:54:00:11:22:33"
         ) },
     @{ Name = "保留大写 M"; Args = @("-M", "q35") },
+    @{ Name = "保留 legacy VGA"; Args = @("-vga", "qxl") },
     @{ Name = "KVM"; Args = @("-enable-kvm") },
     @{ Name = "Xen"; Args = @("-xen-attach") },
     @{ Name = "seccomp"; Args = @("-sandbox", "on") },
@@ -197,6 +204,45 @@ $denied = @(
         ) },
     @{ Name = "VFIO"; Args = @("-device", "vfio-pci,host=01:00.0") },
     @{ Name = "vhost device"; Args = @("-device", "vhost-vsock-pci") },
+    @{ Name = "第二个 virtio VGA"; Args = @("-device", "virtio-vga") },
+    @{ Name = "JSON virtio GPU"; Args = @(
+            "--device={`"driver`":`"virtio-gpu-pci`"}"
+        ) },
+    @{ Name = "JSON 重复 driver"; Args = @(
+            "--device={`"driver`":`"virtio-vga`",`"driver`":`"e1000e`"}"
+        ) },
+    @{ Name = "JSON 嵌套重复属性"; Args = @(
+            "--device={`"driver`":`"e1000e`",`"props`":{`"id`":`"one`",`"id`":`"two`"}}"
+        ) },
+    @{ Name = "第二个 QXL"; Args = @("-device", "qxl-vga") },
+    @{ Name = "大写 VGA driver"; Args = @("-device", "VGA") },
+    @{ Name = "小写 VGA driver inline"; Args = @("-device=vga") },
+    @{ Name = "ISA VGA"; Args = @("-device", "isa-vga") },
+    @{ Name = "ISA Cirrus VGA"; Args = @("-device", "isa-cirrus-vga") },
+    @{ Name = "positional 后追加 driver"; Args = @(
+            "-device", "e1000e,driver=virtio-vga"
+        ) },
+    @{ Name = "positional 后追加 type"; Args = @(
+            "-device", "e1000e,type=virtio-vga"
+        ) },
+    @{ Name = "positional 后追加 qom-type"; Args = @(
+            "-device", "e1000e,qom-type=virtio-vga"
+        ) },
+    @{ Name = "重复同名 driver"; Args = @(
+            "-device", "driver=e1000e,driver=virtio-vga"
+        ) },
+    @{ Name = "重复同值 driver"; Args = @(
+            "-device", "driver=e1000e,driver=e1000e"
+        ) },
+    @{ Name = "冲突 driver type"; Args = @(
+            "-device", "driver=e1000e,type=virtio-vga"
+        ) },
+    @{ Name = "冲突 driver qom-type"; Args = @(
+            "-device", "driver=e1000e,qom-type=virtio-vga"
+        ) },
+    @{ Name = "冲突 type qom-type"; Args = @(
+            "-device", "type=e1000e,qom-type=virtio-vga"
+        ) },
     @{ Name = "MTP host export"; Args = @(
             "-device", "usb-mtp,root=/tmp/share"
         ) },

@@ -32,6 +32,7 @@ RESTART_STATE_SRC="$HERE/respawn-restart-state.ps1"
 POWER_POLICY_SRC="$HERE/configure-power-policy.ps1"
 SPOOF_SRC="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 APPLY_SUPPORT_SRC="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
+BOARD_IDENTITY_CONTRACT_SRC="$REPO_ROOT/deploy/scripts/gpu-board-identity-contract.ps1"
 PROFILE_HELPER_SRC="$REPO_ROOT/deploy/scripts/persist-gpu-profile.ps1"
 TRANSACTION_HELPER_SRC="$REPO_ROOT/deploy/scripts/gpu-profile-transaction.ps1"
 REGISTRY_CORE_SRC="$REPO_ROOT/deploy/scripts/gpu-profile-registry-core.ps1"
@@ -62,10 +63,10 @@ LAUNCHER_ARGUMENTS_SRC="$LAUNCHER/launcher-arguments.c"
 MANUFACTURER_PROJECTOR_SRC="$LAUNCHER/gpu-manufacturer-projector.c"
 MANIFEST="$LAUNCHER/respawn-stealth.exe.manifest"
 
-NVAPI_X86_SHA256="8ee7248f802b960b971724bdadb789492685b9c76fde0ac99f954768431972af"
-NVAPI_X64_SHA256="e5f446439bc8c5a86d3aac13adb1090d4bd74055a4ccd1f884ca631aa56132ab"
-ADL_X86_SHA256="86aca99433da976135f68b4b2904c04eaee370d97104b5a1622ad59f8731b1dd"
-ADL_X64_SHA256="99b7e84b404bfa5140218549b4a49d68ebdfddb181ad9fdd72dcac296d799a62"
+NVAPI_X86_SHA256="3fe8586ccd9737b5f35f9688af394a117cff2c8e206b6168260d77d9102e7347"
+NVAPI_X64_SHA256="16ae2b832a3795244c24745ae577aca3697090278b3a91a0e91875884422e6d7"
+ADL_X86_SHA256="b45384a1a4568bf6c75f131ae1fd206a8844e810ffc70253003c4503fb0771e2"
+ADL_X64_SHA256="aff2783d5e32528c6e919d947aff097d12acadfe7e4ce5a74896dcfae11b3128"
 
 need_tool() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -85,6 +86,7 @@ need_tool llvm-readobj
 [[ -f "$POWER_POLICY_SRC" ]] || { echo "ERROR: 找不到 $POWER_POLICY_SRC" >&2; exit 1; }
 [[ -f "$SPOOF_SRC" ]]   || { echo "ERROR: 找不到 $SPOOF_SRC" >&2; exit 1; }
 [[ -f "$APPLY_SUPPORT_SRC" ]] || { echo "ERROR: 找不到 $APPLY_SUPPORT_SRC" >&2; exit 1; }
+[[ -f "$BOARD_IDENTITY_CONTRACT_SRC" ]] || { echo "ERROR: 找不到 $BOARD_IDENTITY_CONTRACT_SRC" >&2; exit 1; }
 [[ -f "$PROFILE_HELPER_SRC" ]] || { echo "ERROR: 找不到 $PROFILE_HELPER_SRC" >&2; exit 1; }
 [[ -f "$TRANSACTION_HELPER_SRC" ]] || { echo "ERROR: 找不到 $TRANSACTION_HELPER_SRC" >&2; exit 1; }
 [[ -f "$REGISTRY_CORE_SRC" ]] || { echo "ERROR: 找不到 $REGISTRY_CORE_SRC" >&2; exit 1; }
@@ -286,6 +288,8 @@ xxd -i -n payload_apply_gpu_spoof_ps1 "$SPOOF_SRC" \
     > "$BUILD_DIR/payload_apply_gpu_spoof_ps1.h"
 xxd -i -n payload_gpu_spoof_apply_support_ps1 "$APPLY_SUPPORT_SRC" \
     > "$BUILD_DIR/payload_gpu_spoof_apply_support_ps1.h"
+xxd -i -n payload_gpu_board_identity_contract_ps1 "$BOARD_IDENTITY_CONTRACT_SRC" \
+    > "$BUILD_DIR/payload_gpu_board_identity_contract_ps1.h"
 xxd -i -n payload_persist_gpu_profile_ps1 "$PROFILE_HELPER_SRC" \
     > "$BUILD_DIR/payload_persist_gpu_profile_ps1.h"
 xxd -i -n payload_gpu_profile_transaction_ps1 "$TRANSACTION_HELPER_SRC" \

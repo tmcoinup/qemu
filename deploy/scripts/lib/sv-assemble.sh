@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # -------------------------------------------------------------------
 # Assemble the command line
 # -------------------------------------------------------------------
@@ -9,6 +10,14 @@ if [[ "$PROXY" == "1" ]]; then
     QMP_ARGS=(-qmp "unix:$QMP_SOCK,server=on,wait=off,multi=on")
 fi
 
+# 严格 CPU 隔离时先让 QEMU 完成设备与 vCPU 线程创建，但不执行来宾指令。后台
+# pinner 在 exact child cpuset、NUMA node 和 1:1 affinity 全部验证后才发 QMP cont；
+# 失败时来宾不会在未隔离状态下抢先运行。该 host 启动闸门不改变 guest CPUID/拓扑。
+CPU_START_ARGS=()
+if [[ "${STRICT_HARDWARE:-1}" == "1" && "${CPU_ISOLATE:-1}" == "1" ]]; then
+    CPU_START_ARGS=(-S)
+fi
+
 # QEMU 文档说明 cpu-pm=on 会把 host CPU power management 能力交给 guest：
 # 这可能降低单 VM worst-case latency，但会让宿主调度/统计更难预测。默认关闭，
 # 保持和 QEMU 上游一致，也方便后续迁移到 E5/多开场景时统一按宿主策略分配。
@@ -18,7 +27,7 @@ if [[ "${QEMU_CPU_PM:-0}" =~ ^(1|on|true|yes)$ ]]; then
     CPU_PM_ARG=on
 fi
 
-# shellcheck source=stealth-storage.sh
+# shellcheck disable=SC1091 # 启动器片段由 start-vm 以动态 HERE 路径 source。
 source "$HERE/lib/stealth-storage.sh"
 stealth_build_boot_storage_args || exit 2
 
@@ -27,6 +36,7 @@ stealth_build_boot_storage_args || exit 2
 # shellcheck disable=SC2054
 CMD=(
     "$QEMU"
+    "${CPU_START_ARGS[@]}"
 
     # --- Machine / firmware ---
     # ACPI OEM IDs default to "ALASKA"/"A M I   " from our aml-build.h patch;
@@ -151,28 +161,74 @@ CMD=(
 # 完整 QEMU argv 都已成功生成。此时在真正启动 QEMU 前原子提交首次/--reroll
 # 候选；若前面任一门禁失败，旧 profile 的内容和哈希都保持不变。DRY_RUN 只报告
 # 候选，绝不写入。
-if (( ${_profile_needs_save:-0} )); then
-    if [[ "${DRY_RUN:-0}" == "1" ]]; then
-        echo ">> profile:     [DRY_RUN] 生成内存身份，未落盘 $PROFILE_FILE"
-    else
-        if ! stealth_save_profile "$PROFILE_FILE"; then
-            echo "ERROR: 无法原子提交硬件 profile: $PROFILE_FILE" >&2
-            # swtpm daemon 已通过 TPM 门禁后启动。profile 写盘若失败，QEMU 不会
-            # 启动，必须精确回收本实例 daemon；失败时保留 runtime 登记供 stop
-            # 重试，绝不按宽泛进程名误杀其它实例。
-            if (( ${#TPM_ARGS[@]} > 0 )) && [[ -n "${TPM_STATE_DIR:-}" ]]; then
-                if sv_swtpm_stop_instance "$INSTANCE" "$TPM_STATE_DIR"; then
-                    rm -f -- "${TPM_SOCK:-}"
-                else
-                    echo "WARN: profile 提交失败后 swtpm 未完全退出；请运行 stop-vm.sh $INSTANCE" >&2
-                fi
-            fi
-            exit 1
+sv_profile_commit_abort_cleanup() {
+    # swtpm daemon 已通过 TPM 门禁后启动。profile 备份或提交失败时 QEMU
+    # 不会启动，必须精确回收本实例 daemon；失败则保留 runtime 登记供 stop 重试。
+    [[ "${DRY_RUN:-0}" != "1" ]] || return 0
+    if (( ${#TPM_ARGS[@]} > 0 )) && [[ -n "${TPM_STATE_DIR:-}" ]]; then
+        if sv_swtpm_stop_instance "$INSTANCE" "$TPM_STATE_DIR"; then
+            rm -f -- "${TPM_SOCK:-}"
+        else
+            echo "WARN: profile 提交中止后 swtpm 未完全退出；请运行 stop-vm.sh $INSTANCE" >&2
         fi
-        echo ">> profile:     NEW identity saved to $PROFILE_FILE"
+    fi
+}
+
+# 已有 profile 即使不需要迁移，也可能在漫长的 CPU/磁盘/TPM preflight 期间被
+# 外部编辑。启动前必须复核本次解析的同一摘要，否则当前 QEMU 会使用旧内存快照，
+# 而下次启动读取新磁盘内容，造成跨重启身份漂移。
+if (( ${_profile_loaded_existing:-0} )); then
+    if ! [[ "${_STEALTH_LOADED_PROFILE_HASH:-}" =~ ^[0-9a-f]{64}$ ]] ||
+       [[ "${_STEALTH_LOADED_PROFILE_PATH:-}" != "$PROFILE_FILE" ]] ||
+       ! _stealth_profile_require_hash \
+           "$PROFILE_FILE" "$_STEALTH_LOADED_PROFILE_HASH"; then
+        echo "ERROR: profile 在加载后发生变化，拒绝用旧身份快照启动 QEMU" >&2
+        sv_profile_commit_abort_cleanup
+        exit 1
     fi
 fi
-unset _profile_needs_save
+
+if (( ${_profile_needs_save:-0} )); then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        if [[ "${_profile_save_reason:-new-identity}" == new-identity ]]; then
+            echo ">> profile:     [DRY_RUN] 生成新身份，未落盘 $PROFILE_FILE"
+        else
+            echo ">> profile:     [DRY_RUN] 迁移验证通过，未落盘 $PROFILE_FILE"
+        fi
+    else
+        _profile_expected_hash=
+        if [[ "${_profile_save_reason:-new-identity}" != new-identity ]]; then
+            _profile_expected_hash="${_STEALTH_LOADED_PROFILE_HASH:-}"
+            if ! [[ "$_profile_expected_hash" =~ ^[0-9a-f]{64}$ ]] ||
+               [[ "${_STEALTH_LOADED_PROFILE_PATH:-}" != "$PROFILE_FILE" ]]; then
+                echo "ERROR: 缺少迁移输入 profile 的稳定加载摘要" >&2
+                sv_profile_commit_abort_cleanup
+                exit 1
+            fi
+            _profile_migration_backup="$(
+                stealth_backup_profile_for_migration \
+                    "$PROFILE_FILE" "$_profile_expected_hash"
+            )" || {
+                echo "ERROR: 无法为迁移前 profile 创建只读恢复副本" >&2
+                sv_profile_commit_abort_cleanup
+                exit 1
+            }
+            echo ">> profile:     migration backup: $_profile_migration_backup"
+        fi
+        if ! stealth_save_profile "$PROFILE_FILE" "$_profile_expected_hash"; then
+            echo "ERROR: 无法原子提交硬件 profile: $PROFILE_FILE" >&2
+            sv_profile_commit_abort_cleanup
+            exit 1
+        fi
+        if [[ "${_profile_save_reason:-new-identity}" == new-identity ]]; then
+            echo ">> profile:     NEW identity saved to $PROFILE_FILE"
+        else
+            echo ">> profile:     migrated profile saved atomically to $PROFILE_FILE"
+        fi
+    fi
+fi
+unset _profile_needs_save _profile_save_reason _profile_migration_backup
+unset _profile_expected_hash _profile_loaded_existing
 
 # 中文注释：DRY_RUN 也打印这段策略摘要，使回归测试验证实际选择到的分支和值，
 # 而不是只扫描脚本文本；真实启动则在 GUI 摘要之后复用同一个函数。
@@ -204,6 +260,11 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     printf '%s\n' "${CMD[@]}"
     exit 0
 fi
+
+# 只包装真实启动路径；DRY_RUN 仍输出纯 QEMU argv，继续作为参数回归基线。
+# 早期 preflight 已在 profile/磁盘/TPM/host tune 前验证 wrapper；这里用完整 CMD
+# 再拒绝 -daemonize 并生成叶命令。display guard 稍后把它放进 inhibit 内层。
+sv_qemu_ptracer_build_leaf_command "${CMD[@]}" || exit 1
 
 # 显式 VLAN 到这里才产生宿主网络副作用：CMD 已完整生成，且 DRY_RUN 已经退出。
 # prepare 完成后立即启动异步 watchdog；若 watchdog 自身无法启动，则先回收 TAP
@@ -333,12 +394,11 @@ if [[ "$BOOT" == "iso" ]]; then
     echo ">> input safety: 不自动注入按键；看到光盘启动提示后手动按一次空格"
 fi
 
-# CPU 亲和隔离(默认开): 后台 pinner 等 QEMU/QMP 起来后, 把 vCPU 钉进 cgroup cpuset
-# 独占分区, 与宿主机其它负载(尤其 cargo/rust 编译吃满全核)在调度层隔离, 治宿主机满
-# 载时 VM 卡顿/掉帧/ACE 计时异常。必须在 exec QEMU 前 fork(否则本进程已被替换);
-# 同步前置条件已在加载 sv-cpupin.sh 时验证；严格模式的后台 pinner 若仍在 QMP、
-# cgroup 或 taskset 阶段失败，会主动请求 QMP quit，不能静默以未隔离状态继续。
-sv_cpu_isolate_launch
+# 兼容模式保留异步 pinner；严格模式由 display/process supervisor 先创建带 -S 的
+# QEMU 独立进程组，再等待 ARMED→RUNNING，任何失败都能直接终止该精确进程组。
+if [[ "${CPU_ISOLATE:-1}" != "1" || "${STRICT_HARDWARE:-1}" != "1" ]]; then
+    sv_cpu_isolate_launch
+fi
 
 # QEMU's `-rtc base=localtime` calls libc localtime() which honours $TZ.
 # Pin to Asia/Shanghai so the VM RTC reflects Beijing time regardless of
@@ -350,4 +410,4 @@ echo ">> RTC TZ:       $TZ"
 # SDL 窗口模式需要同步管理 xset/GNOME/systemd inhibit；独立模块会在确实修改
 # 宿主显示状态时保留轻量父 shell，确保 QEMU 正常退出、ABRT 或收到信号后都能
 # 还原。其它模式仍在函数内直接 exec，不额外增加常驻进程。
-sv_display_guard_launch "${CMD[@]}" || exit $?
+sv_display_guard_launch "${QEMU_LEAF_CMD[@]}" || exit $?

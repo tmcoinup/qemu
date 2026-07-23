@@ -117,6 +117,9 @@ function Test-VMateProfileIdentityUnique {
         } | Where-Object {
             Test-Path -LiteralPath $_ -PathType Leaf -ErrorAction SilentlyContinue
         })
+    # 旧 schema 可能没有 monitor_serial；空值不能彼此构成伪冲突，现代 profile
+    # 的必填性和品牌格式仍由 Assert-VMateHardwareProfile 单独 fail closed。
+    $monitorSerial = [string]$Profile.identity.monitor_serial
     foreach ($candidatePath in $candidatePaths) {
         if ([System.IO.Path]::GetFullPath($candidatePath) -eq $currentPath) {
             continue
@@ -133,7 +136,9 @@ function Test-VMateProfileIdentityUnique {
         if ([string]$other.identity.uuid -eq [string]$Profile.identity.uuid -or
             [string]$other.identity.mac -eq [string]$Profile.identity.mac -or
             [string]$other.identity.nvme_serial -eq
-                [string]$Profile.identity.nvme_serial) {
+                [string]$Profile.identity.nvme_serial -or
+            ($monitorSerial.Length -gt 0 -and
+             [string]$other.identity.monitor_serial -eq $monitorSerial)) {
             return $false
         }
     }

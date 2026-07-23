@@ -214,9 +214,91 @@ setup_vlan_topology_is_ready() {
     setup_uplink_vid1_is_native "$UPLINK"
 }
 
+# NetworkManager 的 controller 与 port 有两套独立的自动激活开关。安装事务中
+# 临时由 controller 带起 port；持久状态则让物理口在 carrier 晚到时自行加入
+# 已经 active 的 bridge，避免空 br0 等到 DHCP 超时后才重建。
+setup_nm_is_active() {
+    command -v nmcli >/dev/null 2>&1 \
+        && command -v systemctl >/dev/null 2>&1 \
+        && systemctl is-active --quiet NetworkManager 2>/dev/null
+}
+
+setup_nm_value_is_true() {
+    case "${1:-}" in
+        1|yes|true) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+setup_nm_value_is_false() {
+    case "${1:-}" in
+        0|no|false) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+setup_nm_profiles_match_boot_contract() {
+    local bridge_name="${1:-${BR:-br0}}"
+    local uplink="${2:-${UPLINK:-}}"
+    local slave bridge_auto port_auto auto_ports profile_names
+
+    [[ -n "$uplink" ]] || return 0
+    slave="$bridge_name-slave-$uplink"
+    profile_names="$(nmcli -t -f NAME connection show 2>/dev/null)" || return 1
+    grep -Fx -- "$bridge_name" <<<"$profile_names" >/dev/null || return 1
+    grep -Fx -- "$slave" <<<"$profile_names" >/dev/null || return 1
+    bridge_auto="$(nmcli -g connection.autoconnect \
+        connection show "$bridge_name" 2>/dev/null)" || return 1
+    port_auto="$(nmcli -g connection.autoconnect \
+        connection show "$slave" 2>/dev/null)" || return 1
+    auto_ports="$(nmcli -g connection.autoconnect-slaves \
+        connection show "$bridge_name" 2>/dev/null)" || return 1
+    setup_nm_value_is_true "$bridge_auto" \
+        && setup_nm_value_is_true "$port_auto" \
+        && setup_nm_value_is_false "$auto_ports"
+}
+
+setup_nm_boot_contract_is_ready() {
+    # iproute2 fallback 没有 NM profile 契约；运行态拓扑校验仍然必须通过。
+    setup_nm_is_active || return 0
+    setup_nm_profiles_match_boot_contract "$@"
+}
+
+setup_nm_persist_boot_contract() {
+    local bridge_name="$1" uplink="$2"
+    local slave="$bridge_name-slave-$uplink"
+    local old_bridge_auto old_port_auto old_auto_ports
+
+    old_bridge_auto="$(nmcli -g connection.autoconnect \
+        connection show "$bridge_name" 2>/dev/null)" || return 1
+    old_port_auto="$(nmcli -g connection.autoconnect \
+        connection show "$slave" 2>/dev/null)" || return 1
+    old_auto_ports="$(nmcli -g connection.autoconnect-slaves \
+        connection show "$bridge_name" 2>/dev/null)" || return 1
+
+    # 先允许 late-carrier port 自启动，再关闭 controller 的批量拉起行为；属性
+    # 修改不会 down 当前连接，也不会拆除正在使用的 QEMU TAP。
+    nmcli connection modify "$slave" connection.autoconnect yes || return 1
+    if nmcli connection modify "$bridge_name" \
+        connection.autoconnect yes connection.autoconnect-slaves 0 \
+        && setup_nm_profiles_match_boot_contract "$bridge_name" "$uplink"; then
+        return 0
+    fi
+
+    # profile 写入或复核失败时恢复精确旧值；只改持久属性，不触碰 active bridge。
+    nmcli connection modify "$bridge_name" \
+        connection.autoconnect "$old_bridge_auto" \
+        connection.autoconnect-slaves "$old_auto_ports" >/dev/null 2>&1 || true
+    nmcli connection modify "$slave" \
+        connection.autoconnect "$old_port_auto" >/dev/null 2>&1 || true
+    return 1
+}
+
 setup_vlan_auto_is_fully_ready() {
     [[ "$VLAN_TRUNK" == "1" && "$VLAN_SETUP_AUTO" == "1" ]] || return 1
-    setup_vlan_runtime_contract_matches && setup_vlan_topology_is_ready
+    setup_vlan_runtime_contract_matches \
+        && setup_vlan_topology_is_ready \
+        && setup_nm_boot_contract_is_ready "$BR" "$UPLINK"
 }
 
 setup_uplink_native_is_safe() {

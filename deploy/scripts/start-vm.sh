@@ -10,12 +10,22 @@
 # KVM/TSC 真能力并实际 realize 目标 vCPU；任一跨字段矛盾都会 fail closed。
 # GPU 仍是 virtio 显示路径，本分支不做显卡直通/vGPU，也不承诺等价于真实独显。
 #
+# 2026-07-22 DGame 区域定位修复：真实启动会把 QEMU 进程级 Yama 例外自动放在最终
+# QEMU 叶节点，再由显示守护包到 GNOME/systemd inhibit 外层。不得把 wrapper
+# 套在 start-vm.sh 或 inhibit 外面；已运行的旧 QEMU 需重启一次。完整记录见
+# deploy/docs/DGAME_QEMU_MEMORY_AUTH.md。该机制逐实例生效，不依赖 libvmi 或全局
+# kernel.yama.ptrace_scope=0。
+#
 # 用法（最简）：
 #     ./start-vm.sh 1                       # 启动 instance 1，桥接 br0
 #                                           # 默认 SDL 窗口 + fb-shm 推流并存
 #                                           # 推流 socket: /tmp/qemu-stealth-1.fb
 #     ./start-vm.sh 2 --iso=/path/x.iso     # instance 2 从 ISO 装系统
 #     ./start-vm.sh 2 --platform-id=<id>     # 显式固定一个已启用整机 bundle
+#     ./start-vm.sh 2 --memory-id=<module-id> --storage-id=<component-id> \
+#         --gpu-id=<component-id> --monitor-id=<component-id>
+#                                           # 首次 profile 固定过滤后的合法部件；
+#                                           # 空值保持原权重随机，已有 profile 仅断言
 #     ./start-vm.sh 2 --allow-platform-compatibility
 #                                           # 自动匹配宿主并接受 Q35 行为边界；
 #                                           # KVM/TSC/CPU/TPM 等严格门禁仍会执行
@@ -96,6 +106,11 @@
 #     ISO=<path>           安装 ISO 路径                         (flag: --iso=<path>)
 #     DISK=<path>          qcow2 磁盘路径                        (flag: --disk=<path>)
 #     QEMU=<path>          qemu-system-x86_64 二进制路径         (flag: --qemu=<path>)
+#                          实际启动会自动在最终 QEMU 叶节点设置进程级 Yama 例外；
+#                          多 VM 无需额外操作，也不会修改全局 ptrace_scope。
+#     DGAME_QEMU_PTRACER=  可选的 dgame_qemu_ptracer 路径；默认自动寻找包内/PATH
+#                          wrapper，再用内置 Python wrapper；util-linux 2.41+
+#                          setpriv 仅为末级回退。正常使用无需手动设置。
 #     EXTRA_ISO=<path>     副 CDROM（autounattend.xml / 驱动盘 等）
 #     STABLE_DISPLAY=1     默认稳定路径；设 0 才显式启用 virtio-vga-gl。
 #                          --gpu-sdl-egl/--gpu-headless 在未显式设置本变量时会自动
@@ -103,6 +118,12 @@
 #     STRICT_HARDWARE=1    设 0 仅供诊断/兼容 dry-run，不计入真机化支持
 #     STEALTH_PLATFORM_ID= 显式平台 ID（flag: --platform-id=<id>）；已有
 #                          profile 上只做一致性断言；可选，换平台须另加 --reroll
+#     STEALTH_MEMORY_ID=   memory.json module ID（flag: --memory-id=<id>）
+#     STEALTH_STORAGE_ID=  components.json 存储 ID（flag: --storage-id=<id>）；
+#                          当前合法候选精确限定为 512110190592 bytes
+#     STEALTH_GPU_ID=      components.json GPU 稳定 ID（flag: --gpu-id=<id>）
+#     STEALTH_MONITOR_ID=  components.json 显示器 ID（flag: --monitor-id=<id>）
+#                          四项为空时权重随机；非空须在当前平台合法候选中唯一命中
 #     ALLOW_PLATFORM_COMPATIBILITY=0
 #                          设 1 或使用同名 flag 后，按厂商、线程、频率、TSC 自动
 #                          匹配；优先 supported，无匹配才回退 compatibility。
@@ -157,20 +178,21 @@
 #                          (flag: --freq-cap / --no-freq-cap)
 #                          防 guest 实测吞吐超出该型号规格(超规格=变速器/计时异常 tell)。
 #                          只降不升：多 VM 并发收敛到运行中最小，绝不让任一 VM 超自身规格。
-#     CPU_ISOLATE=1        起 VM 后把 QEMU 钉进 cgroup cpuset 独占分区（默认 1，线程级）
+#     CPU_ISOLATE=1        严格模式先 -S 暂停来宾，再把 QEMU 钉进 cpuset（默认 1）
 #                          (flag: --cpu-isolate / --no-cpu-isolate)
-#                          每个 vCPU 独占 1 个逻辑线程(不是整颗物理核)：4vCPU 的 VM 只
-#                          吃 4 个逻辑线程；默认自动给宿主机预留约 12.5% 物理核心(至少 2 个)，
-#                          其余逻辑 CPU 进入自动分配池，分配顺序物理核心优先、SMT 兄弟靠后。
+#                          exact 严格为 2C2T=2T、2C4T=4T、4C4T=4T；不额外圈 sibling。
+#                          每个 vCPU 对应唯一 host logical CPU；完成后才执行 QMP cont。
+#                          Guest 的 -smp/CPUID/SMBIOS 身份不变，默认至少为宿主留 2 核。
 #                          频率封顶只管「跑多快」，这个管「vCPU 抢不抢得到核」——
 #                          宿主机满载(cargo/rust 编译塞满全核)时治 VM 卡顿/掉帧/ACE 计时
 #                          异常的真正旋钮：vCPU 独占自己的线程、永不被宿主机抢占。多 VM
-#                          自动错开到不同物理核心；主线程用尽后才落 SMT 兄弟。分区随起停伸缩、VM 停机自动还
-#                          线程。纯运行态(cgroup v2 partition，不重启)；需 host-cpu-isolate.sh
+#                          父分区保存资源并集，每台 VM 进入 exact CPU/NUMA child；并发
+#                          自动错开逻辑 CPU，停机时按实例精确归还。
+#                          纯运行态(cgroup v2 partition，不重启)；需 host-cpu-isolate.sh
 #                          的 sudo NOPASSWD(同 host-tune)。
-#     HOST_RESERVE_CORES=auto 给宿主机预留物理核心。auto 会按多开需求弹性缩小预留，
-#                          优先让 VM 横向铺到不同物理核心；显式 N 表示硬预留 N 颗。
-#                          默认自动: max(2, ceil(物理核心数/8))；设 0 可使用整机逻辑 CPU 池。
+#     HOST_RESERVE_CORES=auto 按完整 SMT2 核池给宿主机预留物理核；仅本次容量不足时缩小，
+#                          每台 VM 分配 2/4/4 条逻辑 CPU；显式 N 仍表示硬预留物理核。
+#                          不按已运行 VM 数量改变边界；设 0 时 helper 仍至少留 2 核。
 #     QEMU_SERVICE_CPUS=0  给 QEMU 辅助线程额外预留逻辑 CPU 数（默认 0，保持旧行为）。
 #                          启用后 root helper 会把 main/IO/SDL/fb-shm worker 等非 vCPU 线程
 #                          收窄到这组 CPU，避免它们和满载 vCPU 抢同一条调度队列。
@@ -202,6 +224,9 @@ _usage() {
 # 共享 $@ 与全局变量，与单文件版逐字节等价；DRY_RUN argv harness 校验）。
 # ------------------------------------------------------------------
 source "$HERE/lib/sv-cli.sh"        # CLI 解析 + 默认值 + 目录 / RANDOM 种子
+source "$HERE/lib/sv-qemu-ptracer.sh" # 每实例自动授权最终 QEMU 叶进程供 DGame 毫秒级读内存
+# 非 DRY_RUN 在任何 profile/磁盘/TPM/host tune 副作用前验证 Yama 与 wrapper。
+sv_qemu_ptracer_preflight || exit 1
 source "$HERE/lib/sv-host-helpers.sh" # 拒绝工作区 sudoers，仅信任 root-owned helper
 source "$HERE/lib/sv-portability.sh" # 迁移 host 预检：路径/QEMU 能力，不做隐身降级
 source "$HERE/lib/sv-cpupin.sh"     # 在其它宿主预检后校验 helper；稍后异步等待 vCPU

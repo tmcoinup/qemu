@@ -59,6 +59,8 @@ def main() -> None:
         "intel-lga1151-i3-9100f-asus-prime-h310m-a-r2",
         "intel-lga1151-celeron-g4900-asus-prime-h310m-a-r2",
         "intel-lga1151-pentium-g5400-asus-prime-h310m-a-r2",
+        "intel-lga1151-i3-9100f-msi-h310m-pro-m2-plus-ms-7c08",
+        "intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2",
         target_id,
     }:
         raise AssertionError("默认平台集合发生未审计增删")

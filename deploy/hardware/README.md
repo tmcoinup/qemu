@@ -6,15 +6,41 @@
 全局池随机 BIOS”的方式；这种独立抽签会生成现实中不存在的跨代组合。
 
 默认 `supported` 池包含 G4900（2C2T）、G5400（2C4T）、i3-9100F（4C4T）
-和 i5-6400T（4C4T）；每项都与对应 ASUS 主板、DDR4 速率、BIOS 和设备身份绑定。
+和 i5-6400T（4C4T）；其中 H310 原子组合覆盖 ASUS、MSI、GIGABYTE，各条目仍与
+具体主板、DDR4 速率、M.2 lane、BIOS、TPM 和设备身份成套绑定。
 
-`components.json` 是原生 NVMe、显示器和 USB HID 的可更换部件事实源。各条目必须用
-fidelity/status 字段明确区分已核验字段与未采集的实机行为。当前 NVMe SSD 有厂商
-文档但没有设备快照；
-S24F350 的型号规格已核验，但 EDID 身份字段是合成值；Microsoft 键鼠只有目录身份
-标签，仍使用 QEMU 通用 report descriptor，标为 `unverified_catalog_identity` /
-`identity_only_generic_report`。绝对坐标 tablet 标为 `generic_virtual_only`，GPU
-标为 `out_of_scope_virtual_display`。
+`board-vendors.json` 是主板 canonical manufacturer 的共享注册表，联合绑定平台 ID
+token、序号生成函数、PCI subsystem vendor、官方来源主机和序号格式证据。ASUS、
+MSI、GIGABYTE、ASRock 必须精确命中注册表，不允许靠厂商名称子串或通用 PCI ID
+猜测；序号值始终合成且不得复制实机，证据范围不足时必须在 `evidence_scope` 中如实
+保留“仅标签位置/保守形状”的边界。
+
+`components.json` 是可更换部件的入口目录；原生 NVMe 完整事实拆分到
+`storage.json`，活动显卡板卡拆分到 `gpu-boards.json`，显示器和 USB HID
+仍由入口目录直接承载。`components.json`、`storage.json` 与 `gpu-boards.json`
+当前目录修订均为 `2026-07-23.3`。存储子目录只允许精确
+`512110190592` 字节的 Samsung 970 PRO、Intel 760p、WD PC SN730 和 KIOXIA XG6，
+每项都把稳定 ID、型号、料号、固件、PCI/subsystem、OUI 和序列号样本形态原子绑定。
+这些 SSD 有厂商文档和公开身份样本，但没有本项目实机设备快照；各条目必须用
+fidelity/status 字段区分已核验字段与未采集行为。显示器池包含 Samsung S24F350、AOC 24B2XH、Xiaomi
+RMMNT238NF 和 Lenovo L24e-30，全部限定为 1920×1080、16:9。型号、可视尺寸和
+刷新范围来自厂商规格；product/date、EDID 1.3、文本/binary serial 规则及次要
+DTD 的 clock/porch/sync/blanking、同步极性和 image size 来自对应型号的公开
+raw EDID，并由目录按稳定 ID 原子绑定。序列值重新生成且
+禁止复制证据样本。Microsoft 键鼠只有目录身份标签，仍使用 QEMU
+通用 report descriptor，标为 `unverified_catalog_identity` /
+`identity_only_generic_report`。绝对坐标 tablet 标为 `generic_virtual_only`。
+`components.json` 内六款旧 generic GPU label 只作历史 profile 回查；活动
+`gpu-boards.json` 则包含 GT 1030、GTX 750 Ti、GTX 1050、GTX 1050 Ti、
+RX 550、RX 560 各 3 个品牌，共 18 块 AIB（12 NVIDIA、6 AMD）。其 carrier
+连续占用 `1AF4:A101`–`1AF4:A112`，物理主 ID 仍固定为 `1AF4:1050`。
+
+上述目录和 `component_peripheral_catalog.py`、`gpu_board_catalog.py`、
+`storage_catalog.py`、`memory_catalog.py`、`board_vendor_policy.py` 都是纯离线
+校验链：只读取仓库内 JSON，并使用 Python 标准库。`source_refs` /
+`identity_source_refs` 中的 HTTPS 地址仅是人工审计证据的静态元数据；运行时只校验
+其域名和字段形状，不发起网络请求，也不会自动安装或下载依赖。客机需要的驱动和
+厂商 API shim 均由构建机预先准备并嵌入 `respawn-stealth.exe`。
 
 `storage-compatibility.json` 独立保存无原生 NVMe boot 的老主板可用的 SATA 启动盘：
 Samsung 840 PRO、850 PRO、860 PRO 512GB。每项将稳定 ID、型号、零售料号、固件、
@@ -38,10 +64,12 @@ K10 的 Athlon II/Phenom II 条目按 Family 10h CPUID 保留 `invtsc`，不暴�
 - `status=supported` 只表示平台可在宿主运行时门禁通过后成为启动器候选，不表示目标
   H81/H110/H310/B350 machine、BDF 或寄存器行为已实现。当前启用 Intel 条目仍属于 Q35
   configuration-space identity compatibility。
-- 主板/整机/机箱序号与 asset tag 都是格式受控的合成值，不是厂商实机采集值；
+- 主板/整机/机箱序号与 asset tag 都是按注册表格式受控的合成值，不是厂商实机采集值；
   MAC 仅核验厂商 OUI 并合成后缀，PCI subsystem 也没有 `lspci -nnvv` 样机快照闭环。
 - 清单描述一块可实际组装并由厂商 BIOS 支持的消费级主板平台。
-- 显卡直通和 vGPU 不属于本分支，因此显卡仍是独立显示策略，不作为平台真实性承诺。
+- 显卡直通和 vGPU 不属于本分支，因此 18 块 AIB 仅是独立的用户态浅层身份策略，
+  不作为平台真实性承诺。目录全部声明 `serial_exposed=false`，不虚构缺少标准、
+  可核验接口的 GPU 序列号。
 - 存储是可更换部件；平台只绑定主板所能提供的 PCIe 代际、lane 数、UEFI 启动能力
   和启动盘池。运行时按 `NVME_BOOT_SUPPORTED` 自动选择 NVMe 或 SATA/AHCI，不能
   根据 CPU 型号推断。
@@ -125,9 +153,9 @@ TPM 字段：
   它不是目标主板上的物理接口、排针类型或固件内部连接方式，也不得据此宣称已模拟
   主板 TPM 电气拓扑。当前 H310 和兼容性 B350 条目选择 TPM 2.0
   `tpm-crb`/`sha256`；H110M-A/M.2 因缺少板级 PTT 证据而 fail closed 为 `none`。
-- `support_source_ref` 与 `version_source_ref` 必须是两条不同的 ASUS/Intel 官方
-  HTTPS 证据：前者核验具体主板/芯片组是否提供 fTPM/PTT，后者核验该实现对应
-  的 TPM 版本。不能只用一篇通用 TPM 文章同时替代型号支持和版本依据。
+- `support_source_ref` 与 `version_source_ref` 必须是两条不同的当前主板或 CPU
+  厂商官方 HTTPS 证据：前者核验具体主板/芯片组是否提供 fTPM/PTT 或独立模块排针，
+  后者核验对应实现的 TPM 版本。不能只用一篇通用 TPM 文章同时替代两项依据。
 
 设备字段：
 
@@ -147,7 +175,8 @@ TPM 字段：
   Linux/Windows 都只能消费清单值，不允许在启动器再硬编码一份。
 - `audio` 是具体主板的板载器件，不能跟随全局随机值或板厂随意改变。
   ALC887 必须同时绑定 `codec_id=0x10ec0887`、`codec_revision=0x00100302`
-  和 ASUS `codec_subsystem_id=0x104386c7`。当前 `identity_fidelity` 必须是
+  和以当前板厂 PCI subsystem vendor 开头的 `codec_subsystem_id`。当前
+  `identity_fidelity` 必须是
   `protocol_identity_only`：它只承诺 HDA 协议身份，不承诺真实 ALC887 的全部
   widget、插孔检测和板级布线拓扑。
 - `nvme` 是总线能力而不是某一块 SSD 的型号；SSD model、firmware、容量仍需在存储
@@ -165,7 +194,7 @@ TPM 字段：
 1. 从 CPU 和主板厂商官网核对 SKU、核数、线程、socket、内存上限和 BIOS 支持版本。
 2. 从主板规格/手册核对 PCH、PCIe、DIMM、NIC、audio 与 USB 控制器。
 3. 添加完整平台对象并更新 `catalog_revision`。
-4. 运行 `deploy/scripts/tests/test_platform_manifest.sh`，再运行硬件池目录测试。
+4. 运行 `test_board_vendor_policy.py` 与 `test_platform_manifest.sh`，再运行硬件池目录测试。
    可更换部件同时运行 `deploy/scripts/tests/test_component_manifest.sh`。
 5. Linux 与 Windows 均应保存 `PLATFORM_ID` 和 `PLATFORM_SCHEMA_VERSION`；已有 VM
    不得在普通重启时自动换平台。
@@ -173,9 +202,11 @@ TPM 字段：
 严格模式会拒绝 `legacy-unversioned`；默认也拒绝 `status!=supported`。唯一窄例外是
 显式 allow 授权的 schema 1 `compatibility` profile，此时仍会执行全部事实绑定与
 运行时门禁；已有 profile 以自身 `PLATFORM_ID` 为准，可选的 ID 参数只断言一致。
-旧 profile 迁移必须由用户显式执行
-`deploy/scripts/reroll-identity.sh <实例号>`；reroll 会改变整套硬件身份并可能触发客体
-重新激活，启动器不得自动替用户执行。
+会改变 Guest 硬件身份的旧 profile 升级必须由用户显式执行 `--reroll`；它可能触发客体
+重新激活，启动器不得自动替用户执行。精确命中已知旧 revision 的目录元数据修复是窄例外：
+只允许补入稳定 DIMM module ID、清除从未暴露的候选料号，或把内部启动盘占位值替换为
+同一 component 的真实料号。此类修复必须保持全部 Guest 可见身份不变，严格门禁通过后
+先创建只读备份再原子保存；它不要求重建实例或 reroll。
 
 ## E5 v1-v4 宿主映射说明
 

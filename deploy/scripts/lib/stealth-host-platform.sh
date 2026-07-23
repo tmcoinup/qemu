@@ -132,7 +132,7 @@ stealth_host_platform_qemu_cpu_arg() {
 
 # QEMU generic 平台序号只保证每实例唯一和跨重启稳定，不借用任何物理板厂格式。
 _serial_qemu() {
-    printf 'QEMU-%s%s\n' \
-        "$(_hex 8 | tr '[:lower:]' '[:upper:]')" \
-        "$(_rand 1000 9999)"
+    local value
+    value="$(_rand 1 999999999999)" || return 1
+    printf 'MB%012d\n' "$value"
 }

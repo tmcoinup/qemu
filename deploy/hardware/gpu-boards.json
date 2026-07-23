@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-07-23.3",
+  "scope": "shallow_user_projection_no_gpu_passthrough",
+  "boards": [
+    {
+      "id": "asus-ph-gtx1050ti-4g", "enabled": true, "selection_weight": 6, "release_year": 2016,
+      "manufacturer": "NVIDIA", "board_partner": "ASUS", "model": "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)", "part_number": "PH-GTX1050TI-4G",
+      "pci_vendor": "0x10DE", "pci_device": "0x1C82", "subsystem_vendor": "0x1043", "subsystem_device": "0x8613", "carrier_vendor": "0x1AF4", "carrier_device": "0xA101",
+      "ram_mb": 4096, "bios": "Version 86.07.42.00.96", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1291000, "boost_clock_khz": 1392000, "memory_clock_khz": 3504000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_vbios_identity", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.asus.com/us/motherboards-components/graphics-cards/phoenix/ph-gtx1050ti-4g/", "https://www.asus.com/jp/motherboards-components/graphics-cards/phoenix/ph-gtx1050ti-4g/techspec/"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/202926/asus-gtx1050ti-4096-171212", "https://forum.ubuntuusers.de/topic/proprietaerer-nvidia-treiber-nach-update-auf-2/"]
+    },
+    {
+      "id": "colorful-igame-gtx1050ti-u-4gd5", "enabled": true, "selection_weight": 5, "release_year": 2016,
+      "manufacturer": "NVIDIA", "board_partner": "Colorful", "model": "NVIDIA GeForce GTX 1050 Ti (Colorful iGame U)", "part_number": "iGame GTX1050Ti U-4GD5",
+      "pci_vendor": "0x10DE", "pci_device": "0x1C82", "subsystem_vendor": "0x7377", "subsystem_device": "0x0000", "carrier_vendor": "0x1AF4", "carrier_device": "0xA102",
+      "ram_mb": 4096, "bios": "Version 86.07.39.40.12", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1380000, "boost_clock_khz": 1493000, "memory_clock_khz": 3504000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.colorful.cn/home/product?id=417&mid=102"],
+      "identity_source_refs": ["https://modbios.io/v2/vgabios/colorful-gtx-1050-ti-4096-1737787660", "https://www.techpowerup.com/vgabios/?architecture=Uploads&memType=GDDR5&model=GTX+1050+Ti&page=2"]
+    },
+    {
+      "id": "galax-gt1030-exoc-white", "enabled": true, "selection_weight": 5, "release_year": 2017,
+      "manufacturer": "NVIDIA", "board_partner": "GALAX", "model": "NVIDIA GeForce GT 1030 (GALAX EXOC White)", "part_number": "30NPH4HVQ5EW",
+      "pci_vendor": "0x10DE", "pci_device": "0x1D01", "subsystem_vendor": "0x10DE", "subsystem_device": "0x11C7", "carrier_vendor": "0x1AF4", "carrier_device": "0xA103",
+      "ram_mb": 2048, "bios": "Version 86.08.0C.00.2B", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 64,
+      "base_clock_khz": 1253000, "boost_clock_khz": 1506000, "memory_clock_khz": 3004000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_reference_subsystem_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.galax.com/tr/graphics-card/10-series.html", "https://www.galax.com/tr/graphics-card/10-series/galax-geforcer-gt-1030-exoc-w.html"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/193533/galax-gt1030-2048-170503", "https://eshop.macsales.com/tech_center/manuals/OWCHELIOSFX_GPU_Compatibility650_R5.pdf"]
+    },
+    {
+      "id": "asus-gt1030-sl-2g-brk", "enabled": true, "selection_weight": 6, "release_year": 2017,
+      "manufacturer": "NVIDIA", "board_partner": "ASUS", "model": "NVIDIA GeForce GT 1030 (ASUS Silent)", "part_number": "GT1030-SL-2G-BRK",
+      "pci_vendor": "0x10DE", "pci_device": "0x1D01", "subsystem_vendor": "0x1043", "subsystem_device": "0x85F4", "carrier_vendor": "0x1AF4", "carrier_device": "0xA104",
+      "ram_mb": 2048, "bios": "Version 86.08.0C.00.1A", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 64,
+      "base_clock_khz": 1228000, "boost_clock_khz": 1468000, "memory_clock_khz": 3004000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_vbios_identity", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.asus.com/au/motherboards-components/graphics-cards/asus/gt1030-sl-2g-brk/techspec/"],
+      "identity_source_refs": ["https://modbios.io/v2/vgabios/asus-gtx-1030-2048-1737820765", "https://forum.archlinux.de/d/34356-nvidia-gt-1030-liefert-nur-1024x768-desktop"]
+    },
+    {
+      "id": "msi-gt1030-2g-lp-ocv1", "enabled": true, "selection_weight": 6, "release_year": 2017,
+      "manufacturer": "NVIDIA", "board_partner": "MSI", "model": "NVIDIA GeForce GT 1030 (MSI LP OCV1)", "part_number": "GeForce GT 1030 2G LP OCV1",
+      "pci_vendor": "0x10DE", "pci_device": "0x1D01", "subsystem_vendor": "0x1462", "subsystem_device": "0x8C98", "carrier_vendor": "0x1AF4", "carrier_device": "0xA105",
+      "ram_mb": 2048, "bios": "Version 86.08.0C.00.18", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 64,
+      "base_clock_khz": 1266000, "boost_clock_khz": 1519000, "memory_clock_khz": 3004000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_vbios_identity", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.msi.com/Graphics-Card/GeForce-GT-1030-2G-LP-OCV1/Specification", "https://storage-asset.msi.com/datasheet/vga/global/GeForce-GT-1030-2G-LP-OCV1.pdf"],
+      "identity_source_refs": ["https://modbios.io/v2/vgabios/msi-gt-1030-2048-1737770717", "https://gpumagick.com/scores/726927"]
+    },
+    {
+      "id": "asus-gtx750ti-oc-2gd5", "enabled": true, "selection_weight": 6, "release_year": 2014,
+      "manufacturer": "NVIDIA", "board_partner": "ASUS", "model": "NVIDIA GeForce GTX 750 Ti (ASUS OC)", "part_number": "GTX750TI-OC-2GD5",
+      "pci_vendor": "0x10DE", "pci_device": "0x1380", "subsystem_vendor": "0x1043", "subsystem_device": "0x84BB", "carrier_vendor": "0x1AF4", "carrier_device": "0xA106",
+      "ram_mb": 2048, "bios": "Version 82.07.32.00.20", "revision": "0xA2", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1072000, "boost_clock_khz": 1150000, "memory_clock_khz": 2700000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_vbios_identity", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.asus.com/es/news/mmkw1lriiufzaa7b/"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/160358/asus-gtx750ti-2048-140324", "https://gpumagick.com/scores/2213939"]
+    },
+    {
+      "id": "msi-n750ti-2gd5-oc", "enabled": true, "selection_weight": 6, "release_year": 2014,
+      "manufacturer": "NVIDIA", "board_partner": "MSI", "model": "NVIDIA GeForce GTX 750 Ti (MSI OC)", "part_number": "N750Ti-2GD5/OC",
+      "pci_vendor": "0x10DE", "pci_device": "0x1380", "subsystem_vendor": "0x1462", "subsystem_device": "0x8A9B", "carrier_vendor": "0x1AF4", "carrier_device": "0xA107",
+      "ram_mb": 2048, "bios": "Version 82.07.25.00.1F", "revision": "0xA2", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1059000, "boost_clock_khz": 1137000, "memory_clock_khz": 2700000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://us.msi.com/Graphics-Card/N750-Ti-2GD5OC/Specification"],
+      "identity_source_refs": ["https://modbios.io/v2/vgabios/msi-gtx-750-ti-2048-1737846259", "https://forum.proxmox.com/threads/gpu-passthrough-issue.109074/"]
+    },
+    {
+      "id": "gigabyte-gv-n75toc-2gi", "enabled": true, "selection_weight": 6, "release_year": 2014,
+      "manufacturer": "NVIDIA", "board_partner": "Gigabyte", "model": "NVIDIA GeForce GTX 750 Ti (Gigabyte OC)", "part_number": "GV-N75TOC-2GI",
+      "pci_vendor": "0x10DE", "pci_device": "0x1380", "subsystem_vendor": "0x1458", "subsystem_device": "0x362D", "carrier_vendor": "0x1AF4", "carrier_device": "0xA108",
+      "ram_mb": 2048, "bios": "Version 82.07.55.00.05", "revision": "0xA2", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1033000, "boost_clock_khz": 1111000, "memory_clock_khz": 2700000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.gigabyte.com/us/Graphics-Card/GV-N75TOC-2GI/sp"],
+      "identity_source_refs": ["https://modbios.io/v2/vgabios/gigabyte-gtx-750-ti-2048-1737771514", "https://forum.ubuntuusers.de/topic/opencl-amd-und-nvidia-gpu/"]
+    },
+    {
+      "id": "evga-02g-p4-6150-kr", "enabled": true, "selection_weight": 4, "release_year": 2016,
+      "manufacturer": "NVIDIA", "board_partner": "EVGA", "model": "NVIDIA GeForce GTX 1050 (EVGA Gaming)", "part_number": "02G-P4-6150-KR",
+      "pci_vendor": "0x10DE", "pci_device": "0x1C81", "subsystem_vendor": "0x3842", "subsystem_device": "0x6150", "carrier_vendor": "0x1AF4", "carrier_device": "0xA109",
+      "ram_mb": 2048, "bios": "Version 86.07.39.00.50", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1354000, "boost_clock_khz": 1455000, "memory_clock_khz": 3504000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.evga.com/Products/Specs/GPU.aspx?pn=0BBE40C2-45C4-4A88-AAB3-16365BDB1956"],
+      "identity_source_refs": ["https://modbios.io/v2/vgabios/evga-gtx-1050-2048-1737770789", "https://forums.libretro.com/t/graphics-card-issue-with-lakka/15311"]
+    },
+    {
+      "id": "msi-gtx1050-gaming-x-2g", "enabled": true, "selection_weight": 6, "release_year": 2016,
+      "manufacturer": "NVIDIA", "board_partner": "MSI", "model": "NVIDIA GeForce GTX 1050 (MSI Gaming X)", "part_number": "G1050GX2",
+      "pci_vendor": "0x10DE", "pci_device": "0x1C81", "subsystem_vendor": "0x1462", "subsystem_device": "0x3354", "carrier_vendor": "0x1AF4", "carrier_device": "0xA10A",
+      "ram_mb": 2048, "bios": "Version 86.07.39.00.70", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1418000, "boost_clock_khz": 1531000, "memory_clock_khz": 3504000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://us.msi.com/Graphics-Card/GeForce-GTX-1050-GAMING-X-2G/Specification"],
+      "identity_source_refs": ["https://modbios.io/v2/vgabios/msi-gtx-1050-2048-1737770659", "https://gpumagick.com/scores/2493726"]
+    },
+    {
+      "id": "gigabyte-gv-n1050oc-2gd", "enabled": true, "selection_weight": 6, "release_year": 2016,
+      "manufacturer": "NVIDIA", "board_partner": "Gigabyte", "model": "NVIDIA GeForce GTX 1050 (Gigabyte OC)", "part_number": "GV-N1050OC-2GD",
+      "pci_vendor": "0x10DE", "pci_device": "0x1C81", "subsystem_vendor": "0x1458", "subsystem_device": "0x372D", "carrier_vendor": "0x1AF4", "carrier_device": "0xA10B",
+      "ram_mb": 2048, "bios": "Version 86.07.39.00.72", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1380000, "boost_clock_khz": 1493000, "memory_clock_khz": 3504000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.gigabyte.com/gr/Graphics-Card/GV-N1050OC-2GD/sp"],
+      "identity_source_refs": ["https://modbios.io/v2/vgabios/gigabyte-gtx-1050-2048-1737770629", "https://gpumagick.com/scores/2718756"]
+    },
+    {
+      "id": "gigabyte-gv-n105toc-4gd", "enabled": true, "selection_weight": 6, "release_year": 2016,
+      "manufacturer": "NVIDIA", "board_partner": "Gigabyte", "model": "NVIDIA GeForce GTX 1050 Ti (Gigabyte OC)", "part_number": "GV-N105TOC-4GD",
+      "pci_vendor": "0x10DE", "pci_device": "0x1C82", "subsystem_vendor": "0x1458", "subsystem_device": "0x3763", "carrier_vendor": "0x1AF4", "carrier_device": "0xA10C",
+      "ram_mb": 4096, "bios": "Version 86.07.39.40.99", "revision": "0xA1", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1316000, "boost_clock_khz": 1430000, "memory_clock_khz": 3504000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.gigabyte.com/co/Graphics-Card/GV-N105TOC-4GD-rev-10-rev11-rev12/sp"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/194548/gigabyte-gtx1050ti-4096-170623", "https://www.reddit.com/r/VFIO/comments/l22lqx"]
+    },
+    {
+      "id": "asus-rx550-4g", "enabled": true, "selection_weight": 6, "release_year": 2017,
+      "manufacturer": "AMD", "board_partner": "ASUS", "model": "AMD Radeon RX 550 (ASUS 4G)", "part_number": "RX550-4G",
+      "pci_vendor": "0x1002", "pci_device": "0x699F", "subsystem_vendor": "0x1043", "subsystem_device": "0x0513", "carrier_vendor": "0x1AF4", "carrier_device": "0xA10D",
+      "ram_mb": 4096, "bios": "015.050.002.001.000000", "revision": "0xC7", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1100000, "boost_clock_khz": 1183000, "memory_clock_khz": 3500000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.asus.com/us/supportonly/rx550-4g/helpdesk_manual/"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/202205/202205", "https://steamcommunity.com/app/534380/discussions/1/4632610823217441197/"]
+    },
+    {
+      "id": "gigabyte-gv-rx550gaming-oc-2gd", "enabled": true, "selection_weight": 6, "release_year": 2017,
+      "manufacturer": "AMD", "board_partner": "Gigabyte", "model": "AMD Radeon RX 550 (Gigabyte Gaming OC)", "part_number": "GV-RX550GAMING OC-2GD",
+      "pci_vendor": "0x1002", "pci_device": "0x699F", "subsystem_vendor": "0x1458", "subsystem_device": "0x22F2", "carrier_vendor": "0x1AF4", "carrier_device": "0xA10E",
+      "ram_mb": 2048, "bios": "015.050.002.001.000000", "revision": "0xC7", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1100000, "boost_clock_khz": 1206000, "memory_clock_khz": 3500000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_unverified_rom", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.gigabyte.com/eu/Graphics-Card/GV-RX550GAMING-OC-2GD/sp"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/195410/195410", "https://us.forums.blizzard.com/en/wow/t/recurring-error-132/133199"]
+    },
+    {
+      "id": "msi-rx550-aero-itx-2g-oc", "enabled": true, "selection_weight": 6, "release_year": 2017,
+      "manufacturer": "AMD", "board_partner": "MSI", "model": "AMD Radeon RX 550 (MSI Aero ITX OC)", "part_number": "Radeon RX 550 AERO ITX 2G OC",
+      "pci_vendor": "0x1002", "pci_device": "0x699F", "subsystem_vendor": "0x1462", "subsystem_device": "0x8A90", "carrier_vendor": "0x1AF4", "carrier_device": "0xA10F",
+      "ram_mb": 2048, "bios": "015.050.002.001.000000", "revision": "0xC7", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1100000, "boost_clock_khz": 1203000, "memory_clock_khz": 3500000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_vbios_identity", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://it.msi.com/Graphics-card/Radeon-RX-550-AERO-ITX-2G-OC/Specification", "https://storage-asset.msi.com/datasheet/vga/it/Radeon-RX-550-AERO-ITX-2G-OC.pdf"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/193209/msi-rx550-2048-170509", "https://learn.microsoft.com/en-us/answers/questions/3748304/how-do-i-turn-on-the-directx-12-ultimate-on-windows?page=2"]
+    },
+    {
+      "id": "asus-rog-strix-rx560-4g-gaming", "enabled": true, "selection_weight": 6, "release_year": 2017,
+      "manufacturer": "AMD", "board_partner": "ASUS", "model": "AMD Radeon RX 560 (ASUS ROG Strix Gaming)", "part_number": "ROG-STRIX-RX560-4G-GAMING",
+      "pci_vendor": "0x1002", "pci_device": "0x67FF", "subsystem_vendor": "0x1043", "subsystem_device": "0x04BC", "carrier_vendor": "0x1AF4", "carrier_device": "0xA110",
+      "ram_mb": 4096, "bios": "015.050.002.001.000000", "revision": "0xCF", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1175000, "boost_clock_khz": 1275000, "memory_clock_khz": 3500000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_vbios_identity", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.asus.com/us/supportonly/strix-rx560-4g-gaming/helpdesk_download/"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/193242/asus-rx560-4096-170426", "https://forums.ea.com/discussions/plants-vs-zombies-franchise-de/origin-in-game-problem/10245191/replies/10245196"]
+    },
+    {
+      "id": "gigabyte-gv-rx560gaming-oc-4gd", "enabled": true, "selection_weight": 6, "release_year": 2017,
+      "manufacturer": "AMD", "board_partner": "Gigabyte", "model": "AMD Radeon RX 560 (Gigabyte Gaming OC)", "part_number": "GV-RX560GAMING OC-4GD",
+      "pci_vendor": "0x1002", "pci_device": "0x67FF", "subsystem_vendor": "0x1458", "subsystem_device": "0x22ED", "carrier_vendor": "0x1AF4", "carrier_device": "0xA111",
+      "ram_mb": 4096, "bios": "015.050.002.001.000000", "revision": "0xCF", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1175000, "boost_clock_khz": 1287000, "memory_clock_khz": 3500000, "sli_supported": 0,
+      "verification_status": "official_model_and_observed_vbios_identity", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.gigabyte.com/Graphics-Card/GV-RX560GAMING-OC-4GD-rev-10/sp?fref=gc"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/192707/gigabyte-rx560-4096-170421-1", "https://us.forums.blizzard.com/en/d2r/t/nvsdkngxd3d12init-failed-error-code-1160773631/9823?page=2"]
+    },
+    {
+      "id": "sapphire-pulse-rx560-4g-16cu", "enabled": true, "selection_weight": 5, "release_year": 2017,
+      "manufacturer": "AMD", "board_partner": "Sapphire", "model": "AMD Radeon RX 560 (Sapphire Pulse 16 CU)", "part_number": "11267-00/11267-25",
+      "pci_vendor": "0x1002", "pci_device": "0x67FF", "subsystem_vendor": "0x1DA2", "subsystem_device": "0xE348", "carrier_vendor": "0x1AF4", "carrier_device": "0xA112",
+      "ram_mb": 4096, "bios": "015.050.002.001.000000", "revision": "0xCF", "memory_type": "GDDR5", "memory_bus_width_bits": 128,
+      "base_clock_khz": 1175000, "boost_clock_khz": 1300000, "memory_clock_khz": 3500000, "sli_supported": 0,
+      "verification_status": "official_sku_family_and_observed_vbios_identity", "identity_fidelity": "audited_aib_bundle_shallow_user_projection_no_passthrough", "serial_exposed": false,
+      "source_refs": ["https://www.sapphiretech.com/en/consumer/pulse-rx-560-4g-g5-16-cu"],
+      "identity_source_refs": ["https://www.techpowerup.com/vgabios/192320/sapphire-rx560-4096-170419", "https://gpumagick.com/scores/2572548"]
+    }
+  ]
+}

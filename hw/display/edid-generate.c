@@ -18,7 +18,8 @@ static const struct edid_mode {
 } modes[] = {
     /*
      * Stealth: 我们的 stealth profile 模拟 24" 1080p 16:9 显示器
-     * (Samsung S24F350F / AOC 24G2E5 / BenQ GW2480 等)。EDID 只暴露一个
+     * (Samsung S24F350 / AOC 24B2XH / Xiaomi RMMNT238NF /
+     * Lenovo L24e-30)。EDID 只暴露一个
      * 真实 1080p 显示器在 Windows 分辨率下拉里该有的【正常 1080p 列表】：
      * 16:9 主档 + 4:3 兼容档，不带任何 16:10 / 5:4 这类"非 1080p 面板"特征，
      * 更不带 > native 的 1920×1200。
@@ -27,11 +28,10 @@ static const struct edid_mode {
      *   1920×1080 / 1280×720 / 1024×768 / 800×600
      *   (640×480 在 established 里但现代下拉默认不列出)
      *
-     * 注：另有一条 1600×900 第二 DTD（见 qemu_edid_generate 的 DTD2），仿真实
-     * 显示器常见的次级 detailed timing 以增强 EDID 真实性。但 Windows/viogpudo
+     * 注：目录会按具体型号加入一条来自实机 EDID 的第二 DTD。但 Windows/viogpudo
      * 的下拉只采纳【首条 DTD + CEA VIC + established】三类，不采纳第二条 DTD、
      * 也不采纳 generic standard timings（16:9 会被 Windows 误读成 16:10 冒出
-     * 1920×1200 等幻影），所以 1600×900 不会出现在下拉里。要让它出现就得改
+     * 1920×1200 等幻影），所以次要 DTD 不会直接污染分辨率下拉。要改变此行为需改
      * viogpudo 驱动 → 丢 WHQL → 关 DSE（testsigning/EfiGuard），与"全浅层 +
      * testsigning 关闭"的 ACE-安全约束冲突，故【不做】。
      *
@@ -57,9 +57,7 @@ static const struct edid_mode {
     { .xres = 1920,   .yres = 1080,   .dta =  16 },   /* VIC 16, native 16:9 (= DTD1) */
     { .xres = 1280,   .yres =  720,   .dta =   4 },   /* VIC 4,  720p  16:9 */
 
-    /* 1600×900 (16:9) 没有 CEA VIC、也不在 Est-Timings-III 位图里；作为次级
-     * detailed timing 走第二条 DTD（见 qemu_edid_generate），仅增强 EDID 真实性，
-     * Windows 下拉不会列出它（详见本表顶部注释），故不进本表。 */
+    /* 每个受管型号的次要 detailed timing 由 DTD2 单独生成，不进入通用模式表。 */
 
     /* established timings (4:3 兼容档，@ 60Hz) */
     { .xres = 1024,   .yres =  768,   .byte  = 36,   .bit = 3 },
@@ -77,6 +75,10 @@ typedef struct Timings {
     uint32_t yblank;
 
     uint64_t clock;
+    uint16_t width_mm;
+    uint16_t height_mm;
+    bool hsync_positive;
+    bool vsync_positive;
 } Timings;
 
 /*
@@ -90,13 +92,27 @@ struct std_timing {
     uint32_t xres, yres, refresh;
     uint32_t xfront, xsync, xblank;
     uint32_t yfront, ysync, yblank;
+    uint32_t clock_10khz;
+    uint16_t width_mm, height_mm;
+    bool hsync_positive, vsync_positive;
 };
 
 static const struct std_timing known_timings[] = {
     /* 1920x1080@60   CEA-861 VIC 16,  148.500 MHz */
-    { 1920, 1080, 60000,  88,  44, 280,  4,  5, 45 },
+    { 1920, 1080, 60000,  88,  44, 280,  4,  5, 45,
+      0, 0, 0, true, true },
+    /* AOC 24B2XH / Lenovo L24e-30 raw DTD, 174.500 MHz */
+    { 1920, 1080, 74973,  48,  32, 160,  3,  5, 39,
+      17450, 0, 0, true, false },
+    /* Xiaomi RMMNT238NF raw DTD, 185.630 MHz */
+    { 1920, 1080, 75002,  48,  40, 280,  5,  5, 45,
+      18563, 160, 90, true, true },
     /* 1280x720@60    CEA-861 VIC 4,    74.250 MHz */
-    { 1280,  720, 60000, 110,  40, 370,  5,  5, 30 },
+    { 1280,  720, 60000, 110,  40, 370,  5,  5, 30,
+      0, 0, 0, true, true },
+    /* Samsung S24F350 raw DTD,          74.250 MHz */
+    { 1280,  720, 50000, 440,  40, 700,  5,  5, 30,
+      7425, 0, 0, true, true },
     /* 1600x900@60    VESA CVT-RB,      97.750 MHz (DTD2) */
     { 1600,  900, 60000,  48,  32, 160,  3,  5, 26 },
     /* 1024x768@60    VESA DMT,         65.000 MHz */
@@ -121,9 +137,15 @@ static void generate_timings(Timings *timings, uint32_t refresh_rate,
             timings->yfront = k->yfront;
             timings->ysync  = k->ysync;
             timings->yblank = k->yblank;
-            timings->clock  = ((uint64_t)refresh_rate *
-                               (xres + timings->xblank) *
-                               (yres + timings->yblank)) / 10000000;
+            timings->clock = k->clock_10khz ?
+                             k->clock_10khz :
+                             ((uint64_t)refresh_rate *
+                              (xres + timings->xblank) *
+                              (yres + timings->yblank)) / 10000000;
+            timings->width_mm = k->width_mm;
+            timings->height_mm = k->height_mm;
+            timings->hsync_positive = k->hsync_positive;
+            timings->vsync_positive = k->vsync_positive;
             return;
         }
     }
@@ -140,6 +162,10 @@ static void generate_timings(Timings *timings, uint32_t refresh_rate,
     timings->clock  = ((uint64_t)refresh_rate *
                        (xres + timings->xblank) *
                        (yres + timings->yblank)) / 10000000;
+    timings->width_mm = 0;
+    timings->height_mm = 0;
+    timings->hsync_positive = false;
+    timings->vsync_positive = false;
 }
 
 static void edid_ext_dta(uint8_t *dta)
@@ -200,7 +226,7 @@ static void edid_fill_modes(uint8_t *edid, uint8_t *xtra3, uint8_t *dta,
      * Stealth: 不再发 generic standard timings。Windows/viogpudo 会把
      * standard-timing 里 16:9 (aspect bits=11) 的模式误读成 16:10，于是
      * 1920→1920×1200 / 1600→1600×1000 / 1280→1280×800 全冒成幻影档。
-     * 16:9 模式改走 DTD (native + 1600×900) 与 CEA-861 VIC，4:3 兼容档走
+     * 16:9 模式改走 DTD（native + 型号绑定次要时序）与 CEA-861 VIC，4:3 兼容档走
      * established bitmap —— 这里只处理 established / xtra3 / dta(CEA)。
      */
     for (i = 0; i < ARRAY_SIZE(modes); i++) {
@@ -279,11 +305,13 @@ static void edid_desc_text(uint8_t *desc, uint8_t type,
     memset(desc + 5, ' ', 13);
 
     len = strlen(text);
-    if (len > 12) {
-        len = 12;
+    if (len > 13) {
+        len = 13;
     }
     memcpy(desc + 5, text, len);
-    desc[5 + len] = '\n';
+    if (len < 13) {
+        desc[5 + len] = '\n';
+    }
 }
 
 static void edid_desc_ranges(uint8_t *desc, const qemu_edid_info *info)
@@ -318,6 +346,10 @@ static void edid_desc_timing(uint8_t *desc, const Timings *timings,
                              uint32_t xres, uint32_t yres,
                              uint32_t xmm, uint32_t ymm)
 {
+    if (timings->width_mm && timings->height_mm) {
+        xmm = timings->width_mm;
+        ymm = timings->height_mm;
+    }
     stw_le_p(desc, timings->clock);
 
     desc[2] = xres   & 0xff;
@@ -346,6 +378,12 @@ static void edid_desc_timing(uint8_t *desc, const Timings *timings,
                 ((ymm & 0xf00) >> 8));
 
     desc[17] = 0x18;
+    if (timings->hsync_positive) {
+        desc[17] |= 0x02;
+    }
+    if (timings->vsync_positive) {
+        desc[17] |= 0x04;
+    }
 }
 
 static uint32_t edid_to_10bit(float value)
@@ -447,6 +485,7 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     uint8_t *dta = NULL;
     uint8_t *did = NULL;
     uint32_t width_mm, height_mm;
+    uint8_t revision;
     bool samsung_s24f350;
     /* 未显式指定刷新率时使用现代桌面显示器通用的 60 Hz。 */
     uint32_t refresh_rate = info->refresh_rate ? info->refresh_rate : 60000;
@@ -458,12 +497,16 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     if (!info->vendor || strlen(info->vendor) != 3) {
         info->vendor = "RHT";
     }
+    assert(info->revision == 0 ||
+           info->revision == 3 ||
+           info->revision == 4);
+    revision = info->revision ? info->revision : 4;
     if (!info->name) {
         info->name = "QEMU Monitor";
     }
     samsung_s24f350 = !strcmp(info->vendor, "SAM") &&
                       !strcmp(info->name, "S24F350") &&
-                      info->serial && !strncmp(info->serial, "H4ZK", 4);
+                      info->serial && !strncmp(info->serial, "H4ZMC", 5);
     if (!info->prefx) {
         info->prefx = 1920;
     }
@@ -485,20 +528,20 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
 
     generate_timings(&timings, refresh_rate, info->prefx, info->prefy);
     if (!info->product_id) {
-        info->product_id = samsung_s24f350 ? 0x0f65 : 1;
+        info->product_id = samsung_s24f350 ? 0x0d20 : 1;
     }
     if (!info->manufacture_week) {
-        info->manufacture_week = samsung_s24f350 ? 32 : 42;
+        info->manufacture_week = samsung_s24f350 ? 49 : 42;
     }
     if (!info->manufacture_year) {
-        info->manufacture_year = samsung_s24f350 ? 2018 : 2014;
+        info->manufacture_year = samsung_s24f350 ? 2019 : 2014;
     }
     if (!info->video_input) {
-        info->video_input = samsung_s24f350 ? 0xa3 : 0xa5;
+        info->video_input = samsung_s24f350 ? 0x80 : 0xa5;
     }
     if (!info->min_vfreq_hz) {
         info->min_vfreq_hz = samsung_s24f350 ?
-                             56 : MIN(48U, DIV_ROUND_UP(refresh_rate, 1000));
+                             50 : MIN(48U, DIV_ROUND_UP(refresh_rate, 1000));
     }
     if (!info->max_vfreq_hz) {
         info->max_vfreq_hz = samsung_s24f350 ?
@@ -518,12 +561,12 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     }
     if (!info->max_pixel_clock_mhz) {
         info->max_pixel_clock_mhz = samsung_s24f350 ?
-                                    149 : DIV_ROUND_UP(timings.clock, 100) + 10;
+                                    170 : DIV_ROUND_UP(timings.clock, 100) + 10;
     }
     if (samsung_s24f350 && !info->secondary_x && !info->secondary_y) {
-        info->secondary_x = 1600;
-        info->secondary_y = 900;
-        info->secondary_refresh_rate = 60000;
+        info->secondary_x = 1280;
+        info->secondary_y = 720;
+        info->secondary_refresh_rate = 50000;
     }
     if (info->prefx >= 4096 || info->prefy >= 4096 || timings.clock >= 65536) {
         large_screen = 1;
@@ -567,7 +610,9 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
      * 0xff 文本描述符。
      */
     uint32_t serial_nr;
-    if (info->serial) {
+    if (info->binary_serial) {
+        serial_nr = info->binary_serial;
+    } else if (info->serial) {
         serial_nr = atoi(info->serial);
         if (serial_nr == 0) {
             /* djb2 hash for stable non-zero serial from alphanumeric input */
@@ -590,7 +635,7 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
 
     /* edid version */
     edid[18] = 1;
-    edid[19] = 4;
+    edid[19] = revision;
 
 
     /* =============== basic display parameters =============== */

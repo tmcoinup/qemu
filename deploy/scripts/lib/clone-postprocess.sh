@@ -53,6 +53,14 @@ clone_print_completion() {
     if [[ "$allow_migration" == 1 ]]; then
         start_forward_args+=("--migrate-storage-profile")
     fi
+    [[ -z "${STEALTH_MEMORY_ID:-}" ]] ||
+        start_forward_args+=("--memory-id=$STEALTH_MEMORY_ID")
+    [[ -z "${STEALTH_STORAGE_ID:-}" ]] ||
+        start_forward_args+=("--storage-id=$STEALTH_STORAGE_ID")
+    [[ -z "${STEALTH_GPU_ID:-}" ]] ||
+        start_forward_args+=("--gpu-id=$STEALTH_GPU_ID")
+    [[ -z "${STEALTH_MONITOR_ID:-}" ]] ||
+        start_forward_args+=("--monitor-id=$STEALTH_MONITOR_ID")
 
     echo ""
     if (( warning_count > 0 )); then

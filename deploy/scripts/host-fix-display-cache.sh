@@ -12,7 +12,7 @@
 #
 #   本脚本离线地：
 #     1) 按实例 profile 重新生成与设备完全一致的【正常 1080p 列表】EDID
-#        （qemu-edid + 物理尺寸补丁），写进每个 Enum\DISPLAY 实例的
+#        （qemu-edid 接收完整组件字段），写进每个 Enum\DISPLAY 实例的
 #        Device Parameters\EDID；
 #     2) 清空 GraphicsDrivers\Configuration / Connectivity 的子键（含跨厂商
 #        残留，如 DEL0F65），让 Windows 下次开机从新 EDID 重建模式表。
@@ -44,53 +44,220 @@ log() { echo "[disp-cache] $*"; }
 die() { echo "[disp-cache] ERROR: $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "需要 root（qemu-nbd / mount）。用 sudo 跑。"
-[[ -f "$DISK" ]] || die "找不到 $DISK"
-[[ -f "$PROFILE" ]] || die "找不到 profile $PROFILE"
+# root 必须锁住最终 VM 用户与 start/stop 共用的实例锁，不能落到 UID 0 的
+# /run/user/0。锁在首次读取 disk/profile 前取得，并由 FD 8 持有到 EXIT cleanup
+# 完成，避免 start/stop 与离线 RW 挂载交错。
+# shellcheck source=lib/host-display-cache-guard.sh
+source "$SCRIPT_DIR/lib/host-display-cache-guard.sh"
+host_display_cache_acquire_instance_lock \
+    "$INSTANCE" "$VMDIR" "$SCRIPT_DIR/lib/sv-instance-lock.sh" \
+    "$SCRIPT_DIR/lib/clone-lifecycle.sh" ||
+    die "无法取得最终 VM 用户的实例生命周期锁"
+log "已锁定实例 ${INSTANCE}（VM 用户: $HOST_DISPLAY_VM_USER）"
+
+[[ -f "$DISK" && ! -L "$DISK" ]] || die "找不到安全的普通磁盘文件 $DISK"
+[[ -f "$PROFILE" && ! -L "$PROFILE" ]] ||
+    die "找不到安全的普通 profile $PROFILE"
 [[ -x "$QEMU_EDID" ]] || die "找不到 $QEMU_EDID（先 ninja -C build qemu-edid）"
 
-# ---- guard：实例 VM 不能在运行 ----
+# ---- guard：取得生命周期锁后复核实例 VM 未运行 ----
 if pgrep -af "qemu-system-x86_64" 2>/dev/null | grep -q "vms/${INSTANCE}/disk.qcow2"; then
     die "实例 ${INSTANCE} 的 QEMU 正在运行——挂载它的 overlay 会损坏磁盘。先 stop-vm.sh ${INSTANCE}。"
 fi
 
 # ---- 1) 读 profile 的 EDID 参数 ----
 # 安全解析（P1#2）：不再 `eval grep`（被篡改的 profile 会执行任意 shell 代码），
-# 改用白名单单字段读取，只取这 5 个 EDID 字段。
+# 改用白名单单字段读取，并按稳定组件 ID 回查目录，避免扩池后把旧 profile
+# 默认为目录中的第一款显示器。
 source "$SCRIPT_DIR/lib/stealth-profile-io.sh"
+PROFILE_HASH_BEFORE="$(stealth_profile_sha256 "$PROFILE")" ||
+    die "无法计算 profile 初始 SHA256"
+EDID_COMPONENT_ID="$(stealth_profile_get EDID_COMPONENT_ID "$PROFILE" || true)"
 EDID_VENDOR="$(stealth_profile_get EDID_VENDOR "$PROFILE" || true)"
 EDID_NAME="$(stealth_profile_get EDID_NAME "$PROFILE" || true)"
 EDID_SERIAL="$(stealth_profile_get EDID_SERIAL "$PROFILE" || true)"
 EDID_WIDTH_MM="$(stealth_profile_get EDID_WIDTH_MM "$PROFILE" || true)"
 EDID_HEIGHT_MM="$(stealth_profile_get EDID_HEIGHT_MM "$PROFILE" || true)"
-[[ "$EDID_VENDOR" == SAM && "$EDID_NAME" == S24F350 &&
-   "$EDID_SERIAL" =~ ^H4ZK[A-Z0-9]{8}$ &&
-   "$EDID_WIDTH_MM" == 521 && "$EDID_HEIGHT_MM" == 293 ]] ||
-    die "profile 的 S24F350 EDID 身份缺失或与受控组件目录不一致"
+EDID_BINARY_SERIAL="$(stealth_profile_get EDID_BINARY_SERIAL "$PROFILE" || true)"
+EDID_REVISION="$(stealth_profile_get EDID_REVISION "$PROFILE" || true)"
+EDID_PRODUCT_ID="$(stealth_profile_get EDID_PRODUCT_ID "$PROFILE" || true)"
+EDID_MANUFACTURE_WEEK="$(
+    stealth_profile_get EDID_MANUFACTURE_WEEK "$PROFILE" || true
+)"
+EDID_MANUFACTURE_YEAR="$(
+    stealth_profile_get EDID_MANUFACTURE_YEAR "$PROFILE" || true
+)"
+EDID_VIDEO_INPUT="$(stealth_profile_get EDID_VIDEO_INPUT "$PROFILE" || true)"
+EDID_MIN_VFREQ_HZ="$(stealth_profile_get EDID_MIN_VFREQ_HZ "$PROFILE" || true)"
+EDID_MAX_VFREQ_HZ="$(stealth_profile_get EDID_MAX_VFREQ_HZ "$PROFILE" || true)"
+EDID_MIN_HFREQ_KHZ="$(stealth_profile_get EDID_MIN_HFREQ_KHZ "$PROFILE" || true)"
+EDID_MAX_HFREQ_KHZ="$(stealth_profile_get EDID_MAX_HFREQ_KHZ "$PROFILE" || true)"
+EDID_MAX_PIXEL_CLOCK_MHZ="$(
+    stealth_profile_get EDID_MAX_PIXEL_CLOCK_MHZ "$PROFILE" || true
+)"
+EDID_SECONDARY_XRES="$(
+    stealth_profile_get EDID_SECONDARY_XRES "$PROFILE" || true
+)"
+EDID_SECONDARY_YRES="$(
+    stealth_profile_get EDID_SECONDARY_YRES "$PROFILE" || true
+)"
+EDID_SECONDARY_REFRESH_RATE="$(
+    stealth_profile_get EDID_SECONDARY_REFRESH_RATE "$PROFILE" || true
+)"
+EDID_SECONDARY_PIXEL_CLOCK_KHZ="$(
+    stealth_profile_get EDID_SECONDARY_PIXEL_CLOCK_KHZ "$PROFILE" || true
+)"
+EDID_SECONDARY_HFRONT="$(
+    stealth_profile_get EDID_SECONDARY_HFRONT "$PROFILE" || true
+)"
+EDID_SECONDARY_HSYNC="$(
+    stealth_profile_get EDID_SECONDARY_HSYNC "$PROFILE" || true
+)"
+EDID_SECONDARY_HBLANK="$(
+    stealth_profile_get EDID_SECONDARY_HBLANK "$PROFILE" || true
+)"
+EDID_SECONDARY_VFRONT="$(
+    stealth_profile_get EDID_SECONDARY_VFRONT "$PROFILE" || true
+)"
+EDID_SECONDARY_VSYNC="$(
+    stealth_profile_get EDID_SECONDARY_VSYNC "$PROFILE" || true
+)"
+EDID_SECONDARY_VBLANK="$(
+    stealth_profile_get EDID_SECONDARY_VBLANK "$PROFILE" || true
+)"
+EDID_SECONDARY_HSYNC_POSITIVE="$(
+    stealth_profile_get EDID_SECONDARY_HSYNC_POSITIVE "$PROFILE" || true
+)"
+EDID_SECONDARY_VSYNC_POSITIVE="$(
+    stealth_profile_get EDID_SECONDARY_VSYNC_POSITIVE "$PROFILE" || true
+)"
+EDID_SECONDARY_WIDTH_MM="$(
+    stealth_profile_get EDID_SECONDARY_WIDTH_MM "$PROFILE" || true
+)"
+EDID_SECONDARY_HEIGHT_MM="$(
+    stealth_profile_get EDID_SECONDARY_HEIGHT_MM "$PROFILE" || true
+)"
+MONITOR_ROW="$(stealth_component_monitor_row "$EDID_COMPONENT_ID" 2>/dev/null)" ||
+    die "profile 的显示器稳定 ID 不在受控组件目录中"
+IFS='|' read -r _ EXPECTED_VENDOR EXPECTED_NAME EXPECTED_WIDTH_MM \
+    EXPECTED_HEIGHT_MM _ EXPECTED_PRODUCT_ID EXPECTED_WEEK EXPECTED_YEAR \
+    EXPECTED_VIDEO_INPUT EXPECTED_MIN_VFREQ EXPECTED_MAX_VFREQ \
+    EXPECTED_MIN_HFREQ EXPECTED_MAX_HFREQ EXPECTED_MAX_PIXEL_CLOCK \
+    EXPECTED_SECONDARY_X EXPECTED_SECONDARY_Y EXPECTED_SECONDARY_REFRESH \
+    <<<"$MONITOR_ROW"
+[[ "$EDID_VENDOR" == "$EXPECTED_VENDOR" &&
+   "$EDID_NAME" == "$EXPECTED_NAME" &&
+   "$EDID_WIDTH_MM" == "$EXPECTED_WIDTH_MM" &&
+   "$EDID_HEIGHT_MM" == "$EXPECTED_HEIGHT_MM" &&
+   "$EDID_PRODUCT_ID" == "$EXPECTED_PRODUCT_ID" &&
+   "$EDID_MANUFACTURE_WEEK" == "$EXPECTED_WEEK" &&
+   "$EDID_MANUFACTURE_YEAR" == "$EXPECTED_YEAR" &&
+   "$EDID_VIDEO_INPUT" == "$EXPECTED_VIDEO_INPUT" &&
+   "$EDID_MIN_VFREQ_HZ" == "$EXPECTED_MIN_VFREQ" &&
+   "$EDID_MAX_VFREQ_HZ" == "$EXPECTED_MAX_VFREQ" &&
+   "$EDID_MIN_HFREQ_KHZ" == "$EXPECTED_MIN_HFREQ" &&
+   "$EDID_MAX_HFREQ_KHZ" == "$EXPECTED_MAX_HFREQ" &&
+   "$EDID_MAX_PIXEL_CLOCK_MHZ" == "$EXPECTED_MAX_PIXEL_CLOCK" &&
+   "$EDID_SECONDARY_XRES" == "$EXPECTED_SECONDARY_X" &&
+   "$EDID_SECONDARY_YRES" == "$EXPECTED_SECONDARY_Y" &&
+   "$EDID_SECONDARY_REFRESH_RATE" == "$EXPECTED_SECONDARY_REFRESH" ]] &&
+    stealth_component_monitor_serial_is_valid \
+        "$EDID_COMPONENT_ID" "$EDID_SERIAL" >/dev/null 2>&1 ||
+    die "profile 的显示器 EDID 身份与受控组件目录不一致"
+EXPECTED_BINARY_SERIAL="$(
+    stealth_component_monitor_binary_serial \
+        "$EDID_COMPONENT_ID" "$EDID_SERIAL"
+)" || die "profile 的文本序列号无法映射到品牌绑定的 EDID binary serial"
+EXPECTED_REVISION="$(stealth_component_monitor_revision "$EDID_COMPONENT_ID")" ||
+    die "profile 的显示器 EDID revision 不在受控组件目录中"
+EXPECTED_SECONDARY_DETAIL="$(
+    stealth_component_monitor_secondary_detail "$EDID_COMPONENT_ID"
+)" || die "profile 的显示器次要 DTD 细节不在受控组件目录中"
+IFS='|' read -r EXPECTED_SECONDARY_CLOCK EXPECTED_SECONDARY_HFRONT \
+    EXPECTED_SECONDARY_HSYNC EXPECTED_SECONDARY_HBLANK \
+    EXPECTED_SECONDARY_VFRONT EXPECTED_SECONDARY_VSYNC \
+    EXPECTED_SECONDARY_VBLANK EXPECTED_SECONDARY_HSYNC_POSITIVE \
+    EXPECTED_SECONDARY_VSYNC_POSITIVE EXPECTED_SECONDARY_WIDTH_MM \
+    EXPECTED_SECONDARY_HEIGHT_MM <<<"$EXPECTED_SECONDARY_DETAIL"
+[[ "$EDID_BINARY_SERIAL" == "$EXPECTED_BINARY_SERIAL" &&
+   "$EDID_REVISION" == "$EXPECTED_REVISION" &&
+   "$EDID_SECONDARY_PIXEL_CLOCK_KHZ" == "$EXPECTED_SECONDARY_CLOCK" &&
+   "$EDID_SECONDARY_HFRONT" == "$EXPECTED_SECONDARY_HFRONT" &&
+   "$EDID_SECONDARY_HSYNC" == "$EXPECTED_SECONDARY_HSYNC" &&
+   "$EDID_SECONDARY_HBLANK" == "$EXPECTED_SECONDARY_HBLANK" &&
+   "$EDID_SECONDARY_VFRONT" == "$EXPECTED_SECONDARY_VFRONT" &&
+   "$EDID_SECONDARY_VSYNC" == "$EXPECTED_SECONDARY_VSYNC" &&
+   "$EDID_SECONDARY_VBLANK" == "$EXPECTED_SECONDARY_VBLANK" &&
+   "$EDID_SECONDARY_HSYNC_POSITIVE" == "$EXPECTED_SECONDARY_HSYNC_POSITIVE" &&
+   "$EDID_SECONDARY_VSYNC_POSITIVE" == "$EXPECTED_SECONDARY_VSYNC_POSITIVE" &&
+   "$EDID_SECONDARY_WIDTH_MM" == "$EXPECTED_SECONDARY_WIDTH_MM" &&
+   "$EDID_SECONDARY_HEIGHT_MM" == "$EXPECTED_SECONDARY_HEIGHT_MM" ]] ||
+    die "profile 的显示器 binary serial/revision/DTD 与受控目录不一致"
 log "实例 ${INSTANCE} 显示器: ${EDID_VENDOR} ${EDID_NAME} sn=${EDID_SERIAL} ${EDID_WIDTH_MM}x${EDID_HEIGHT_MM}mm"
 
 # ---- 2) 生成与设备一致的 16:9 EDID（qemu-edid 用当前 edid-generate.c）----
-# qemu-edid 没有 width-mm/height-mm 选项（它从 dpi 推），所以生成后把物理尺寸
-# 字节补成 profile 的真实值，再重算两块 checksum —— 这样和 start-vm.sh 传给
-# virtio-vga 的 edid-width-mm/height-mm 字节级一致。
+# 离线缓存修复必须传入与 virtio-vga 启动参数相同的完整组件事实，不能只改品牌
+# 字符串后让非 Samsung 型号继承 qemu-edid 的通用默认产品码、日期或扫描范围。
+# 先删除同实例的旧临时文件；生成或深层校验任一步失败都必须停止，绝不能把
+# 上一次运行残留的 EDID 写回 guest。
+rm -f -- "$EDID_BIN" || die "无法清理旧 EDID 临时文件: $EDID_BIN"
 "$QEMU_EDID" -o "$EDID_BIN" -v "$EDID_VENDOR" -n "$EDID_NAME" -s "$EDID_SERIAL" \
-    -x 1920 -y 1080 -X 1920 -Y 1080 >/dev/null
-python3 - "$EDID_BIN" "$EDID_WIDTH_MM" "$EDID_HEIGHT_MM" <<'PY'
+    -x 1920 -y 1080 -X 1920 -Y 1080 \
+    --width-mm "$EDID_WIDTH_MM" --height-mm "$EDID_HEIGHT_MM" \
+    --product-id "$EXPECTED_PRODUCT_ID" \
+    --binary-serial "$EXPECTED_BINARY_SERIAL" \
+    --revision "$EXPECTED_REVISION" \
+    --manufacture-week "$EXPECTED_WEEK" --manufacture-year "$EXPECTED_YEAR" \
+    --video-input "$EXPECTED_VIDEO_INPUT" \
+    --min-vfreq-hz "$EXPECTED_MIN_VFREQ" \
+    --max-vfreq-hz "$EXPECTED_MAX_VFREQ" \
+    --min-hfreq-khz "$EXPECTED_MIN_HFREQ" \
+    --max-hfreq-khz "$EXPECTED_MAX_HFREQ" \
+    --max-pixel-clock-mhz "$EXPECTED_MAX_PIXEL_CLOCK" \
+    --secondary-xres "$EXPECTED_SECONDARY_X" \
+    --secondary-yres "$EXPECTED_SECONDARY_Y" \
+    --secondary-refresh-rate "$EXPECTED_SECONDARY_REFRESH" >/dev/null ||
+    die "qemu-edid 生成显示器 EDID 失败"
+python3 - "$EDID_BIN" "$EDID_VENDOR" "$EDID_NAME" "$EDID_SERIAL" \
+    "$EDID_WIDTH_MM" "$EDID_HEIGHT_MM" "$EXPECTED_PRODUCT_ID" \
+    "$EXPECTED_WEEK" "$EXPECTED_YEAR" "$EXPECTED_VIDEO_INPUT" \
+    "$EXPECTED_MIN_VFREQ" "$EXPECTED_MAX_VFREQ" \
+    "$EXPECTED_MIN_HFREQ" "$EXPECTED_MAX_HFREQ" \
+    "$EXPECTED_MAX_PIXEL_CLOCK" "$EXPECTED_SECONDARY_X" \
+    "$EXPECTED_SECONDARY_Y" "$EXPECTED_BINARY_SERIAL" \
+    "$EXPECTED_REVISION" "$EXPECTED_SECONDARY_CLOCK" \
+    "$EXPECTED_SECONDARY_HFRONT" "$EXPECTED_SECONDARY_HSYNC" \
+    "$EXPECTED_SECONDARY_HBLANK" "$EXPECTED_SECONDARY_VFRONT" \
+    "$EXPECTED_SECONDARY_VSYNC" "$EXPECTED_SECONDARY_VBLANK" \
+    "$EXPECTED_SECONDARY_HSYNC_POSITIVE" \
+    "$EXPECTED_SECONDARY_VSYNC_POSITIVE" \
+    "$EXPECTED_SECONDARY_WIDTH_MM" "$EXPECTED_SECONDARY_HEIGHT_MM" \
+    <<'PY' || die "生成的显示器 EDID 未通过深层字段校验"
 import sys
-path, wmm, hmm = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+path, vendor, name, serial = sys.argv[1:5]
+wmm, hmm = map(int, sys.argv[5:7])
+product = int(sys.argv[7], 0)
+week, year, video = int(sys.argv[8]), int(sys.argv[9]), int(sys.argv[10], 0)
+min_v, max_v, min_h, max_h, max_clock = map(int, sys.argv[11:16])
+secondary_x, secondary_y = map(int, sys.argv[16:18])
+binary_serial = int(sys.argv[18], 0)
+revision = int(sys.argv[19])
+secondary_clock, secondary_hfront, secondary_hsync, secondary_hblank, \
+    secondary_vfront, secondary_vsync, secondary_vblank = map(
+        int, sys.argv[20:27])
+secondary_hsync_positive, secondary_vsync_positive, \
+    secondary_width_mm, secondary_height_mm = map(int, sys.argv[27:31])
 e = bytearray(open(path, 'rb').read())
-e[21] = wmm // 10
-e[22] = hmm // 10
-# 两条 DTD 的物理尺寸都补成真实值（DTD1@54, DTD2@72；同一显示器须一致）。
-# qemu-edid 没 width-mm 选项、按 dpi 推出 480×270，这里覆盖成 profile 的真实值。
-for base in (54, 72):
-    if e[base] or e[base+1]:   # 该描述符是 DTD（pixel clock 非零）才补
-        e[base+12] = wmm & 0xff
-        e[base+13] = hmm & 0xff
-        e[base+14] = ((wmm & 0xf00) >> 4) | ((hmm & 0xf00) >> 8)
-# 重算 block0 checksum (byte127)
-s = sum(e[0:127]) & 0xff
-e[127] = (0x100 - s) & 0xff if s else 0
-open(path, 'wb').write(e)
+assert len(e) >= 128 and e[:8] == b'\x00\xff\xff\xff\xff\xff\xff\x00'
+vendor_word = (e[8] << 8) | e[9]
+actual_vendor = ''.join(chr(64 + ((vendor_word >> shift) & 0x1f))
+                        for shift in (10, 5, 0))
+assert actual_vendor == vendor, (actual_vendor, vendor)
+assert (e[10] | (e[11] << 8)) == product
+assert int.from_bytes(e[12:16], 'little') == binary_serial
+assert (e[18], e[19]) == (1, revision)
+assert e[16] == week and e[17] + 1990 == year and e[20] == video
+assert e[21] == wmm // 10 and e[22] == hmm // 10
 # ---- 自检：确认是"正常 1080p 列表"结构 ----
 asp = {0:'16:10',1:'4:3',2:'5:4',3:'16:9'}
 std = []
@@ -100,18 +267,66 @@ for i in range(38, 54, 2):
     x = (b0+31)*8; a = (b1>>6)&3; y = {0:x*10//16,1:x*3//4,2:x*4//5,3:x*9//16}[a]
     std.append(f'{x}x{y}/{asp[a]}')
 dtds = []
-for base in (54, 72, 90, 108):
+dtd_details = {}
+texts = {}
+range_desc = None
+descriptor_bases = [54, 72, 90, 108]
+if len(e) >= 256 and e[128] == 0x02:
+    descriptor_bases.extend(range(128 + e[130], 128 + 127 - 17, 18))
+for base in descriptor_bases:
     if (e[base] or e[base+1]) and not (e[base]==0 and e[base+1]==0 and e[base+2]==0):
         ha = ((e[base+4]&0xf0)<<4)|e[base+2]; va = ((e[base+7]&0xf0)<<4)|e[base+5]
         dtds.append(f'{ha}x{va}')
+        hblank = ((e[base+4] & 0x0f) << 8) | e[base+3]
+        vblank = ((e[base+7] & 0x0f) << 8) | e[base+6]
+        hfront = ((e[base+11] & 0xc0) << 2) | e[base+8]
+        hsync = ((e[base+11] & 0x30) << 4) | e[base+9]
+        vfront = ((e[base+11] & 0x0c) << 2) | (e[base+10] >> 4)
+        vsync = ((e[base+11] & 0x03) << 4) | (e[base+10] & 0x0f)
+        actual_w = e[base+12] | ((e[base+14] & 0xf0) << 4)
+        actual_h = e[base+13] | ((e[base+14] & 0x0f) << 8)
+        hsync_positive = int(bool(e[base+17] & 0x02))
+        vsync_positive = int(bool(e[base+17] & 0x04))
+        dtd_details[base] = (
+            int.from_bytes(e[base:base+2], 'little') * 10,
+            ha, va, hfront, hsync, hblank, vfront, vsync, vblank,
+            hsync_positive, vsync_positive, actual_w, actual_h,
+        )
+    elif e[base:base+3] == b'\x00\x00\x00':
+        tag = e[base+3]
+        if tag in (0xfc, 0xff):
+            texts[tag] = bytes(e[base+5:base+18]).decode(
+                'ascii').rstrip(' \n\x00')
+        elif tag == 0xfd:
+            range_desc = tuple(e[base+5:base+10])
 m35 = {0:'800x600/4:3', 5:'640x480/4:3'}; m36 = {3:'1024x768/4:3'}
 est = [m35[b] for b in m35 if e[35] & (1<<b)] + [m36[b] for b in m36 if e[36] & (1<<b)]
 chk0 = sum(e[0:128]) & 0xff
 print(f'[disp-cache] 生成 EDID: DTD={dtds} 标准时序={std or "(空,符合预期)"} established(4:3)={est} blk0_chk={chk0}')
 # 关键不变式：标准时序必须为空——否则 16:9 会被 Windows 误读成 16:10 幻影档
 assert not std, f'标准时序非空 {std}：会冒出 16:10 幻影（如 1920×1200）！'
-assert '1920x1080' in dtds and '1600x900' in dtds, f'DTD 缺 1920×1080 或 1600×900: {dtds}'
+assert '1920x1080' in dtds and f'{secondary_x}x{secondary_y}' in dtds, \
+    f'DTD 缺首选或组件次要时序: {dtds}'
+expected_primary_detail = (
+    148500, 1920, 1080, 88, 44, 280, 4, 5, 45, 1, 1, wmm, hmm,
+)
+expected_secondary_detail = (
+    secondary_clock, secondary_x, secondary_y,
+    secondary_hfront, secondary_hsync, secondary_hblank,
+    secondary_vfront, secondary_vsync, secondary_vblank,
+    secondary_hsync_positive, secondary_vsync_positive,
+    secondary_width_mm, secondary_height_mm,
+)
+assert dtd_details.get(54) == expected_primary_detail, \
+    f'首选 DTD(base=54) 与固定 1080p 时序不一致: {dtd_details}'
+assert dtd_details.get(72) == expected_secondary_detail, \
+    f'次要 DTD(base=72) 与组件 raw EDID 不一致: {dtd_details}'
 assert all('4:3' in m for m in est), f'established 含非 4:3: {est}'
+assert texts.get(0xfc) == name and texts.get(0xff) == serial, texts
+assert range_desc == (min_v, max_v, min_h, max_h, (max_clock + 9) // 10), \
+    range_desc
+assert all(sum(e[base:base+128]) & 0xff == 0
+           for base in range(0, len(e), 128))
 PY
 log "EDID blob: $EDID_BIN ($(stat -c%s "$EDID_BIN") bytes)"
 
@@ -156,6 +371,11 @@ rm -f "$MOUNT_ERR"
 
 HIVE="${MOUNT}/Windows/System32/config/SYSTEM"
 [[ -f "$HIVE" ]] || die "SYSTEM hive 不存在"
+
+# profile 事实从读取到 NBD 挂载期间仍可能被不遵守实例锁的进程替换。首次改写
+# SYSTEM hive 前必须复核摘要；变化时由既有 EXIT trap 安全卸载并断开本脚本的 NBD。
+host_display_cache_require_profile_hash "$PROFILE" "$PROFILE_HASH_BEFORE" ||
+    die "profile 在离线维护期间发生变化，拒绝写入 SYSTEM hive"
 
 # ---- 4) regf 头 pre-fixup（让 hivex 能打开）----
 python3 - "$HIVE" <<'PY'

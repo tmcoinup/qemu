@@ -13,21 +13,20 @@
 #   3. 验证并幂等安装 EXE 内嵌的 Microsoft WHCP stock viogpudo；已绑定且
 #      发布 INF 完整时跳过 pnputil，缺失发布 INF 时走官方恢复，失败则停止。
 #   4. 按当前显卡 PCI SUBSYS 自动选定伪装型号，并持久化统一用户态 PCI 身份。
-#   5. 重写 Class\{4d36e968}\NNNN + Enum\PCI + Enum\DISPLAY 注册表覆盖
-#      → Win32_VideoController / 设备管理器 / 显示器名 全部对齐到伪装型号
-#   6. 把独立 x86/x64 NVAPI 身份投影事务发布到 SysWOW64/System32，使 GPU-Z 2.70
-#      可直接双击；不安装 NVIDIA 软件，也不修改内核驱动或签名链。
+#   5. 只重写 GPU 的 Class\{4d36e968}\NNNN + Enum\PCI 覆盖；
+#      显示器身份始终由 Host profile 注入的实时 QEMU EDID 决定。
+#   6. 按当前板卡厂商事务发布 x86/x64 NVAPI 或 ADL 身份读取层；不安装厂商
+#      驱动软件，也不修改内核驱动或签名链。
 #   7. 两种模式都保留名称刷新与 HardwareID 投影任务；-FirstLogon 只跳过需要
 #      交互桌面的显示模式任务，不安装第三方服务或常驻程序。
 #   8. 清掉可能残留的 RunOnce 入口（兼容旧 clone 注入；本地一键无此入口也无害）
-#   9. 完成后重启，让驱动、实时 EDID 与覆盖完整生效。
+#   9. 完成后重启，让驱动、实时 EDID 与 GPU 覆盖完整生效。
 #
 # 一键用法：发布版双击 respawn-stealth.exe（自动 UAC 提权，并内嵌本脚本）。
 # 手动用法（管理员 PowerShell）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\respawn-stealth-local.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\respawn-stealth-local.ps1 -NoReboot
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\respawn-stealth-local.ps1 -FirstLogon
-
 param(
     [switch]$NoReboot,          # 跑完不自动重启（默认跑完会重启）
     [int]   $RebootDelay = 8,   # 自动重启倒计时（秒）；期间可 Ctrl+C 取消
@@ -131,7 +130,8 @@ function Publish-GpuProjectionPayload {
         'project-gpu-hardware-id.ps1',
         'gpu-hardware-id-plan.ps1',
         'gpu-manufacturer-projection.ps1', 'gpu-manufacturer-projector.exe',
-        'display-driver-trust.ps1', 'refresh-gpu-name.ps1'
+        'display-driver-trust.ps1', 'refresh-gpu-name.ps1',
+        'gpu-board-identity-contract.ps1'
     )
     foreach ($payloadName in $payloadNames) {
         $source = Join-Path $PSScriptRoot $payloadName
@@ -423,7 +423,7 @@ if ($rc -ne 0) {
 
 # --- 11) identity+NVAPI 完整后才提交 fake-first HardwareID -----------------
 # apply 只有在双架构 installer 成功并 Complete identity 后才返回 0；因此此处开始
-# 暴露 10DE/1002 首项时，GPU-Z 的系统 reader 与 schema 已经是同一发布版本。
+# 暴露 10DE/1002 首项时，GPU-Z 2.70 的系统 reader 与 schema 已经是同一发布版本。
 try {
     Register-GpuProjectionTask -Projector $persistentProjector
 } catch {

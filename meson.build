@@ -4268,7 +4268,11 @@ endif
 traceable = []
 emulators = {}
 vmate_launch_guard_sources = get_option('vmate_launch_guard') \
-  ? files('system/vmate-launch-guard.c') : []
+  ? files(
+      'system/vmate-launch-guard.c',
+      'system/vmate-launch-guard-path.c',
+      'system/vmate-launch-guard-win32.c',
+    ) : []
 foreach target : target_dirs
   config_target = config_target_mak[target]
   target_name = config_target['TARGET_NAME']

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034,SC2317
-# SC2034/SC2317: 全局契约变量与同名函数由 setup_main 间接读取，是刻意的 mock。
+# shellcheck disable=SC2034,SC2317,SC2329
+# SC2034/SC2317/SC2329: 全局变量与同名函数由 setup_main 间接读取，是刻意的 mock。
 # ---------------------------------------------------------------------------
 # start-vm 自动触发 setup-bridge.sh 时的宿主级“一次初始化”回归测试。
 #
@@ -13,7 +13,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SETUP_BRIDGE="$REPO_ROOT/deploy/scripts/setup-bridge.sh"
-RUNTIME_LIB="$REPO_ROOT/deploy/scripts/lib/setup-bridge-runtime.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -129,6 +128,7 @@ test_runtime_repair_keeps_ready_network() {
         setup_vlan_auto_is_fully_ready() { return 1; }
         setup_install_vlan_runtime() { printf 'runtime_repaired\n' >>"$trace"; }
         setup_vlan_topology_is_ready() { printf 'topology_ready\n' >>"$trace"; return 0; }
+        setup_nm_is_active() { return 1; }
         setup_bridge_nm() { printf 'network_forbidden\n' >>"$trace"; return 92; }
         setup_bridge_iproute() { printf 'network_forbidden\n' >>"$trace"; return 93; }
         setup_main >"$out" 2>&1
@@ -138,6 +138,44 @@ test_runtime_repair_keeps_ready_network() {
     grep -F -- runtime_repaired "$trace" >/dev/null || fail "未修复缺失 runtime"
     grep -F -- topology_ready "$trace" >/dev/null || fail "runtime 修复后未复检拓扑"
     assert_not_contains "$trace" network_forbidden "拓扑已就绪仍重启 bridge"
+}
+
+test_profile_repair_keeps_ready_network() {
+    local root trace out
+
+    root="$(mktemp -d)"
+    trace="$root/profile.trace"
+    out="$root/profile.out"
+
+    : >"$trace"
+    if ! (
+        VLAN_TRUNK=1
+        VLAN_SETUP_AUTO=1
+        UPLINK=enp5s0
+        BR=br0
+        setup_validate_inputs() { :; }
+        setup_require_vlan_assets() { :; }
+        setup_require_root_and_lock() { :; }
+        setup_resolve_allowed_identity() { ALLOWED_UID_VALUE=1000; ALLOWED_GID_VALUE=1000; }
+        setup_vlan_config_path_exists() { return 0; }
+        setup_vlan_config_matches_request() { return 0; }
+        setup_install_base_dependencies() { :; }
+        setup_install_qemu_bridge_helper() { :; }
+        setup_vlan_auto_is_fully_ready() { return 1; }
+        setup_install_vlan_runtime() { printf 'runtime_checked\n' >>"$trace"; }
+        setup_vlan_topology_is_ready() { printf 'topology_ready\n' >>"$trace"; return 0; }
+        setup_nm_is_active() { return 0; }
+        setup_nm_persist_boot_contract() { printf 'profile_repaired:%s:%s\n' "$1" "$2" >>"$trace"; }
+        setup_bridge_nm() { printf 'network_forbidden\n' >>"$trace"; return 92; }
+        setup_bridge_iproute() { printf 'network_forbidden\n' >>"$trace"; return 93; }
+        setup_main >"$out" 2>&1
+    ); then
+        fail "健康拓扑上的旧 NM profile 无法原地修复"
+    fi
+    grep -F -- 'profile_repaired:br0:enp5s0' "$trace" >/dev/null \
+        || fail "未原地修复 late-carrier NM profile"
+    assert_not_contains "$trace" network_forbidden "只修 NM profile 时重启了 bridge"
+    rm -rf -- "$root"
 }
 
 test_identity_conflict_fails_before_mutation() {
@@ -196,11 +234,18 @@ test_topology_readiness_parser() {
 
 main() {
     command -v visudo >/dev/null 2>&1 || fail "缺少 visudo"
+    [[ -f "$SETUP_BRIDGE" ]] || fail "缺少 setup-bridge.sh"
+    # source 只注册函数；先执行无需 root 的 profile 原地迁移用例，使禁用 userns 的
+    # 宿主也能覆盖本次启动竞态修复。
+    # shellcheck disable=SC1090,SC1091
+    source "$SETUP_BRIDGE"
+    test_profile_repair_keeps_ready_network
+
     if (( EUID != 0 )); then
         command -v unshare >/dev/null 2>&1 || fail "缺少 unshare"
         if [[ "${SV_AUTOONCE_USERNS:-0}" != "1" ]]; then
             if ! unshare -Ur -- true >/dev/null 2>&1; then
-                echo "SKIP: 当前内核未开放非特权 user namespace"
+                echo "SKIP: NM profile 原地迁移已通过；其余用例需要非特权 user namespace"
                 return 0
             fi
             exec unshare -Ur -- env SV_AUTOONCE_USERNS=1 bash "$0"
@@ -209,14 +254,8 @@ main() {
 
     TEST_ROOT="$(mktemp -d)"
     trap 'rm -rf -- "${TEST_ROOT:-}"' EXIT
-    # shellcheck disable=SC1090
-    source "$RUNTIME_LIB"
     test_runtime_contract_exact_match
 
-    [[ -f "$SETUP_BRIDGE" ]] || fail "缺少 setup-bridge.sh"
-    # BASH_SOURCE 守卫保证 source 只注册函数，不执行任何宿主操作。
-    # shellcheck disable=SC1090,SC1091
-    source "$SETUP_BRIDGE"
     test_second_initializer_skips_network_restart
     test_runtime_repair_keeps_ready_network
     test_identity_conflict_fails_before_mutation

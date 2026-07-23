@@ -76,6 +76,21 @@ remove_boot_storage_fields() {
     chmod 0600 "$destination"
 }
 
+rewrite_legacy_samsung_nvme_v1() {
+    sed \
+        -e 's/^NVME_COMPONENT_ID=.*/NVME_COMPONENT_ID=samsung-970-pro-512gb/' \
+        -e 's/^NVME_MODEL=.*/NVME_MODEL=Samsung\\ SSD\\ 970\\ PRO\\ 512GB/' \
+        -e 's/^NVME_FIRMWARE=.*/NVME_FIRMWARE=1B2QEXP7/' \
+        -e 's/^NVME_SERIAL=.*/NVME_SERIAL=S0123456789N/' \
+        -e 's/^NVME_SIZE_BYTES=.*/NVME_SIZE_BYTES=512110190592/' \
+        -e 's/^NVME_PCI_VEN=.*/NVME_PCI_VEN=0x144D/' \
+        -e 's/^NVME_PCI_DEV=.*/NVME_PCI_DEV=0xA804/' \
+        -e 's/^NVME_SUBSYS_VEN=.*/NVME_SUBSYS_VEN=0x144D/' \
+        -e 's/^NVME_SUBSYS_DEV=.*/NVME_SUBSYS_DEV=0xA801/' \
+        -e 's|^NVME_SUBNQN_TEMPLATE=.*|NVME_SUBNQN_TEMPLATE=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:\\{serial\\}|' \
+        -e 's|^NVME_SUBNQN=.*|NVME_SUBNQN=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:S0123456789N|'
+}
+
 make_legacy_sata_v1() {
     local source="$1" destination="$2" stripped="$TMP_DIR/legacy-stripped"
     remove_boot_storage_fields "$source" "$stripped"
@@ -83,10 +98,7 @@ make_legacy_sata_v1() {
         -e 's/^PLATFORM_CATALOG_REVISION=.*/PLATFORM_CATALOG_REVISION=2026-07-19.3/' \
         -e 's/^PLATFORM_BOOT_MODEL=.*/PLATFORM_BOOT_MODEL=Samsung\\ SSD\\ 860\\ PRO\\ 512GB/' \
         -e 's/^PLATFORM_BOOT_FIRMWARE=.*/PLATFORM_BOOT_FIRMWARE=RVM02B6Q/' \
-        -e 's/^NVME_SERIAL=.*/NVME_SERIAL=S0123456789N/' \
-        -e 's|^NVME_SUBNQN_TEMPLATE=.*|NVME_SUBNQN_TEMPLATE=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:\\{serial\\}|' \
-        -e 's|^NVME_SUBNQN=.*|NVME_SUBNQN=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:S0123456789N|' \
-        "$stripped" >"$destination"
+        "$stripped" | rewrite_legacy_samsung_nvme_v1 >"$destination"
     chmod 0600 "$destination"
 }
 
@@ -137,7 +149,7 @@ test_real_legacy_sata_serial_migration() {
     assert_equal "$BOOT_STORAGE_FIRMWARE" RVM02B6Q "旧 SATA 固件"
     assert_equal "$BOOT_STORAGE_SERIAL" S0123456789N \
         "旧 ATA Identify 序号没有原样保留"
-    [[ "$NVME_SERIAL" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{9}$ &&
+    [[ "$NVME_SERIAL" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{10}$ &&
        "$NVME_SERIAL" != S0123456789N &&
        "$NVME_SUBNQN" == "nqn.2014-08.org.nvmexpress:uuid:$UUID" ]] ||
         fail "迁移后 data-only NVMe 身份没有按当前规则严格规范化"
@@ -157,15 +169,12 @@ test_real_legacy_nvme_serial_migration() {
     remove_boot_storage_fields "$current" "$stripped"
     sed \
         -e 's/^PLATFORM_CATALOG_REVISION=.*/PLATFORM_CATALOG_REVISION=2026-07-19.5/' \
-        -e 's/^NVME_SERIAL=.*/NVME_SERIAL=S0123456789N/' \
-        -e 's|^NVME_SUBNQN_TEMPLATE=.*|NVME_SUBNQN_TEMPLATE=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:\\{serial\\}|' \
-        -e 's|^NVME_SUBNQN=.*|NVME_SUBNQN=nqn.1994-11.com.samsung:nvme:970-PRO:M.2:S0123456789N|' \
-        "$stripped" >"$legacy"
+        "$stripped" | rewrite_legacy_samsung_nvme_v1 >"$legacy"
     chmod 0600 "$legacy"
 
     ALLOW_STORAGE_PROFILE_MIGRATION=1
     load_profile_success "$legacy"
-    [[ "$NVME_SERIAL" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{9}$ &&
+    [[ "$NVME_SERIAL" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{10}$ &&
        "$NVME_SUBNQN" == "nqn.2014-08.org.nvmexpress:uuid:$UUID" ]] ||
         fail "旧 NVMe v1 身份没有规范化为当前严格格式"
     assert_equal "$BOOT_STORAGE_SERIAL" "$NVME_SERIAL" \
@@ -212,10 +221,15 @@ test_current_revisions_cannot_migrate_missing_fields() {
     local missing="$TMP_DIR/static-current-missing.profile"
     local household="$TMP_DIR/household-current-cutoff.profile"
     local forged="$TMP_DIR/household-current-cutoff-forged.profile"
+    local current_revision
 
     generate_profile intel-lga1151-i5-6400t-asus-h110m-a-m2 "$static"
-    grep -Fx 'PLATFORM_CATALOG_REVISION=2026-07-19.6' "$static" >/dev/null ||
-        fail "新 manifest profile 没有使用 .6 cutoff revision"
+    current_revision="$(stealth_profile_get PLATFORM_CATALOG_REVISION "$static")" ||
+        fail "新 manifest profile 缺少目录 revision"
+    if _stealth_platform_registry_revision_predates_boot_storage \
+            manifest "$current_revision"; then
+        fail "新 manifest profile 使用了早于启动盘 cutoff 的 revision"
+    fi
     remove_boot_storage_fields "$static" "$missing"
     ALLOW_STORAGE_PROFILE_MIGRATION=1
     expect_profile_failure "$missing" \

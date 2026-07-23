@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # -------------------------------------------------------------------
 # Boot source:
 #   --iso=<path>  -> boot from that ISO (install media)
@@ -22,6 +23,8 @@ fi
 # qcow2 容器文件的宿主逻辑大小；稀疏文件的容器大小与 guest 可见容量不是一回事。
 # -------------------------------------------------------------------
 _profile_needs_save=0
+_profile_save_reason=new-identity
+_profile_loaded_existing=0
 if (( _cli_reroll )); then
     # 持久 TPM state 属于原主板实例。即使随机到同型号，重新生成 UUID/主板
     # 序列号却复用旧 EK/NVRAM 也会制造物理生命周期矛盾；随机到另一型号则会
@@ -54,7 +57,34 @@ if (( _cli_reroll )); then
     _profile_needs_save=1
 elif stealth_have_profile "$PROFILE_FILE"; then
     stealth_load_profile "$PROFILE_FILE"
+    _profile_loaded_existing=1
     echo ">> profile:     loaded from $PROFILE_FILE"
+    if [[ "${_STEALTH_MEMORY_PROFILE_MIGRATION_KIND:-none}" != none ]]; then
+        _profile_needs_save=1
+        _profile_save_reason="memory-${_STEALTH_MEMORY_PROFILE_MIGRATION_KIND}"
+        echo ">> profile:     已在内存规范化旧 DIMM 绑定（${_STEALTH_MEMORY_PROFILE_MIGRATION_KIND}）"
+    fi
+    case "${_STEALTH_STORAGE_PROFILE_MIGRATION_KIND:-none}" in
+        none)
+            ;;
+        legacy-nvme-part-number-v1|samsung-970-pro-catalog-v2)
+            # 该历史占位值从未成为 Guest 身份，可以和稳定 DIMM 绑定一起持久化。
+            _profile_needs_save=1
+            if [[ "$_profile_save_reason" == new-identity ]]; then
+                _profile_save_reason="storage-${_STEALTH_STORAGE_PROFILE_MIGRATION_KIND}"
+            else
+                _profile_save_reason+="+storage-${_STEALTH_STORAGE_PROFILE_MIGRATION_KIND}"
+            fi
+            ;;
+        *)
+            # 显式 --migrate-storage-profile 的缺字段迁移保持既有“仅本次内存”
+            # 契约。即使同时补出了 DIMM 稳定 ID，也不能借另一个安全迁移把
+            # BOOT_* 身份字段顺带落盘；下次仍须显式授权。
+            _profile_needs_save=0
+            _profile_save_reason=new-identity
+            echo ">> profile:     旧启动盘字段仅在本次进程内迁移，原文件不改写"
+            ;;
+    esac
 else
     stealth_pick_profile
     _profile_needs_save=1

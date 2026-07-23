@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Validate the launcher-side storage path without booting a guest.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -7,15 +6,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 QEMU="${QEMU:-$REPO_ROOT/build/qemu-system-x86_64}"
 QEMU_IMG="${QEMU_IMG:-$REPO_ROOT/build/qemu-img}"
+source "$REPO_ROOT/deploy/scripts/lib/stealth-components.sh"
 
-# 启动器子用例只验证 argv/CLI，统一注入可重复的平台能力；直接启动 TCG QEMU 的
-# C 设备测试不读取这些变量。严格 KVM/TSC 路径由专用测试覆盖。
 export STRICT_HARDWARE=0
 export STEALTH_KVM_AVAILABLE=1
-export STEALTH_KVM_TSC_CONTROL=1
-export STEALTH_KVM_GET_TSC_KHZ=1
-export STEALTH_KVM_TSC_KHZ=3600000
-export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+export STEALTH_KVM_TSC_CONTROL=1 STEALTH_KVM_GET_TSC_KHZ=1
+export STEALTH_KVM_TSC_KHZ=3600000 STEALTH_HOST_CPU_VENDOR=GenuineIntel
 export STEALTH_HOST_CPU_MAX_MHZ=5000
 
 fail() {
@@ -47,7 +43,6 @@ for _ in range(50):
 else:
     raise SystemExit("QMP socket did not become ready")
 
-# QMP sends a greeting first; read it before enabling capabilities.
 client.recv(4096)
 client.sendall(b'{"execute":"qmp_capabilities","id":"caps"}\n')
 client.recv(4096)
@@ -66,7 +61,7 @@ PY
 
 test_dry_run_has_safe_nvme_storage() {
     local out="$1"
-    local nvme_line
+    local nvme_line nvme_id nvme_row nvme_model nvme_firmware
 
     DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9876 \
         "$START_VM" --no-sdl --no-fb-shm --no-bridge > "$out"
@@ -76,10 +71,15 @@ test_dry_run_has_safe_nvme_storage() {
         || fail "dry-run argv must not bind emulated nvme to iothread"
     grep -Fx -- "iothread,id=io1" "$out" >/dev/null \
         && fail "dry-run argv must not create unused nvme iothread"
-    [[ "$nvme_line" == *"use-samsung-id=on"* ]] \
-        || fail "dry-run argv lost Samsung NVMe identity"
-    [[ "$nvme_line" == *"model-number=Samsung"* && "$nvme_line" == *"firmware-rev="* ]] \
-        || fail "dry-run argv lost model/firmware spoofing"
+    nvme_id="${nvme_line#*x-identity-profile=}"
+    nvme_id="${nvme_id%%,*}"
+    nvme_row="$(stealth_component_storage_row "$nvme_id")" \
+        || fail "dry-run argv selected unknown NVMe profile"
+    IFS='|' read -r _ nvme_model nvme_firmware _ <<<"$nvme_row"
+    [[ "$nvme_line" == *"x-identity-profile=$nvme_id"* &&
+       "$nvme_line" == *"model-number=$nvme_model"* &&
+       "$nvme_line" == *"firmware-rev=$nvme_firmware"* ]] \
+        || fail "dry-run argv lost selected NVMe identity bundle"
     [[ "$nvme_line" == *"serial="* ]] \
         || fail "dry-run argv lost NVMe serial"
 }
@@ -98,7 +98,7 @@ test_qemu_accepts_samsung_nvme() {
         -S \
         -drive file="$img",if=none,id=nvm0,format=qcow2,cache=none,aio=threads \
         -device pcie-root-port,id=rp1,bus=pcie.0,slot=1 \
-        -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,use-samsung-id=on,serial=SEBDN56D159B5A,model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXP7,subsys-vendor-id=0x144d,subsys-id=0xa801,subnqn=nqn.2014-08.org.nvmexpress:uuid:01234567-89ab-4cde-8f01-23456789abcd \
+        -device nvme,id=nvmectl0,bus=rp1,drive=nvm0,use-samsung-id=on,serial=SEBDN56D159B5AF,model-number="Samsung SSD 970 PRO 512GB",firmware-rev=1B2QEXP7,subsys-vendor-id=0x144d,subsys-id=0xa801,subnqn=nqn.2014-08.org.nvmexpress:uuid:01234567-89ab-4cde-8f01-23456789abcd \
         -qmp unix:"$sock",server=on,wait=off \
         2> "$err" &
     qemu_pid=$!
@@ -224,7 +224,6 @@ for index in range(16):
     client.close()
     wait_for_child_count(s1, f"active-close-{index}")
 
-# 半包 JSON 断开必须同样释放 parser/monitor，且不能影响常驻连接。
 for index in range(8):
     client, stream = connect_qmp(f"partial-{index}")
     stream.write(b'{"execute":"query-status"')
@@ -399,21 +398,29 @@ test_hotkey_capture_option_removed() {
 
 test_cpu_isolate_scripts_parse() {
     bash -n "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh"
-    bash -n "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh"
+    bash -n "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" "$REPO_ROOT/deploy/scripts/lib/sv-display-guard.sh"
     bash -n "$REPO_ROOT/deploy/scripts/host-cpu-isolate.sh"
 
-    python3 -m py_compile "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py"
-    grep -F -- '"${QEMU_SERVICE_CPUS:-0}" "${strict_args[@]}" &' \
-        "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null \
-        || fail "shell wrapper must pass service CPU count and strict policy as argv"
+    python3 -m py_compile "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" "$REPO_ROOT/deploy/scripts/vm_cpu_pinner_lifecycle.py" "$REPO_ROOT/deploy/scripts/lib/vm-strict-group-guard.py"
+    # shellcheck disable=SC2016 # grep 的是源码字面量，不应展开测试进程变量。
+    if ! grep -F -- '"$(( CPU_THREADS / CPU_CORES ))"' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null || ! grep -F -- '"$(sv_cpu_host_threads_per_core)"' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null ||
+        ! grep -F -- '--launcher-pid "$launcher_pid" --launcher-starttime "$launcher_start"' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null ||
+        ! grep -F -- '--launcher-pgid "$launcher_pgid" --status-fd 1 --abort-on-failure' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null; then
+        fail "shell wrapper must pass guest/host topology and strict supervisor identity"
+    fi
     grep -F -- 'read_held_cpus' "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" >/dev/null \
         || fail "NUMA pinner must account for CPUs held by existing VMs"
     grep -F -- '_auto_reserve' "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" >/dev/null \
         || fail "NUMA pinner must shrink automatic host reserve when capacity is tight"
     grep -F -- '--abort-on-failure' "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" >/dev/null \
         || fail "strict runtime pinning failure must request guest shutdown"
-    grep -F -- 'sv_cpu_isolate_launch' "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
-        || fail "launcher lost asynchronous CPU isolation hook"
+    grep -F -- 'CPU_START_ARGS=(-S)' "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null \
+        || fail "strict CPU isolation must pause the guest before asynchronous pinning"
+    grep -F -- 'args.qmp_socket, "cont", outcome.pid, outcome.starttime' \
+        "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" >/dev/null \
+        || fail "strict pinner must resume the guest only after helper success"
+    grep -F -- 'sv_cpu_isolate_supervise' "$REPO_ROOT/deploy/scripts/lib/sv-display-guard.sh" >/dev/null \
+        || fail "strict launcher lost ARMED/RUNNING process-group supervision"
     if grep -F -- 'sv_cpu_isolate_launch || true' \
         "$REPO_ROOT/deploy/scripts/lib/sv-assemble.sh" >/dev/null; then
         fail "strict CPU isolation failure must not be swallowed"
@@ -482,8 +489,7 @@ main() {
     test_qemu_service_cpu_flags_dry_run "$out"
     test_cpu_pm_keeps_upstream_default_dry_run "$out"
     test_phenom_cpu_masks_missing_3dnow "$out"
-    # GPU 显示策略已拆到独立文件，避免本综合回归重新超过 500 行；保留入口调用，
-    # 让既有 CI 同时覆盖默认 stable 与显式 GL/blob/hostmem opt-in 矩阵。
+    # 独立回归覆盖 stable 与显式 GL/blob/hostmem。
     "$SCRIPT_DIR/test_gpu_zerocopy_launcher.sh"
     test_hotkey_capture_option_removed "$out"
     test_cpu_isolate_scripts_parse

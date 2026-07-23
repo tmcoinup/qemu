@@ -55,6 +55,13 @@ if device_help.returncode != 0 or "(default: off)" not in fixed_native_help:
         "virtio-vga edid-fixed-native 属性缺失或没有默认关闭:\n"
         f"{device_help.stdout}{device_help.stderr}"
     )
+managed_timing_help = next(
+    (line for line in (device_help.stdout + device_help.stderr).splitlines()
+     if "edid-managed-timing-version=<uint32>" in line),
+    "",
+)
+if "(default: 0)" not in managed_timing_help:
+    raise SystemExit("EDID 受管时序版本属性缺失或默认值不是 0")
 
 
 def run_qmp(extra_args, timeout=15):
@@ -206,23 +213,23 @@ must_fail(
 )
 must_fail([
     "-device",
-    "nvme,serial=S123N123456789,use-samsung-id=on,"
+    "nvme,serial=S123N1234567890,use-samsung-id=on,"
     "model-number=Samsung SSD 970 PRO 512GB,firmware-rev=1B2QEXM7",
-], "does not match Samsung model")
+], "firmware-rev does not match NVMe identity")
 must_fail([
     "-device",
-    "nvme,serial=S123N123456789,use-samsung-id=on,"
+    "nvme,serial=S123N1234567890,use-samsung-id=on,"
     "model-number=Samsung SSD 980 500GB,firmware-rev=3B4QFXO7",
-], "unsupported Samsung model-number")
+], "model-number does not match NVMe identity")
 must_fail([
     "-device",
-    "nvme,serial=S123N123456789,use-samsung-id=on,"
+    "nvme,serial=S123N1234567890,use-samsung-id=on,"
     "model-number=Samsung SSD 970 PRO 512GB,firmware-rev=1B2QEXP7,"
     "subsys-id=0xa802",
 ], "subsys-id must be 0xa801")
 must_fail([
     "-device", "nvme,serial=S123,use-samsung-id=on",
-], "serial must match S###N#########")
+], "serial does not match vendor format")
 must_fail([
     "-device",
     "nvme,serial=S123,subnqn=nqn." + ("a" * 220),
@@ -235,6 +242,12 @@ must_fail([
 must_fail([
     "-device", "virtio-vga,edid-product-id=0x10000",
 ], "EDID profile field is out of range")
+must_fail([
+    "-device", "virtio-vga,edid-revision=2",
+], "edid-revision must be 3 or 4")
+must_fail([
+    "-device", "virtio-vga,edid-managed-timing-version=2",
+], "edid-managed-timing-version must be 0 or 1")
 must_fail([
     "-smbios", (
         "type=17,memory-type=0x1a,rank=1,voltage=1200,"
@@ -276,26 +289,29 @@ valid = run_qmp([
     "-device", json.dumps({
         "driver": "virtio-vga",
         "edid-fixed-native": True,
+        "edid-managed-timing-version": 1,
         "max_outputs": 2,
         "outputs": [
             {"name": "primary", "xres": 1920, "yres": 1080},
             {"name": "secondary", "xres": 1600, "yres": 900},
         ],
-        "edid-product-id": 0x0F65,
-        "edid-manufacture-week": 32,
-        "edid-manufacture-year": 2018,
-        "edid-video-input": 0xA3,
-        "edid-min-vfreq-hz": 56,
+        "edid-product-id": 0x0D20,
+        "edid-binary-serial": 0x5A5A5055,
+        "edid-revision": 3,
+        "edid-manufacture-week": 49,
+        "edid-manufacture-year": 2019,
+        "edid-video-input": 0x80,
+        "edid-min-vfreq-hz": 50,
         "edid-max-vfreq-hz": 75,
         "edid-min-hfreq-khz": 30,
         "edid-max-hfreq-khz": 81,
-        "edid-max-pixel-clock-mhz": 149,
-        "edid-secondary-xres": 1600,
-        "edid-secondary-yres": 900,
-        "edid-secondary-refresh-rate": 60000,
+        "edid-max-pixel-clock-mhz": 170,
+        "edid-secondary-xres": 1280,
+        "edid-secondary-yres": 720,
+        "edid-secondary-refresh-rate": 50000,
     }, separators=(",", ":")),
     "-device", (
-        "nvme,serial=S123N123456789,use-samsung-id=on,"
+        "nvme,serial=S123N1234567890,use-samsung-id=on,"
         "model-number=Samsung SSD 970 PRO 512GB,firmware-rev=1B2QEXP7,"
         "subsys-vendor-id=0x144d,subsys-id=0xa801,"
         "subnqn=nqn.2014-08.org.nvmexpress:uuid:"
@@ -323,8 +339,8 @@ valid_pci_ids = {
     )
     for bus in valid_pci_reply for dev in bus["devices"]
 }
-if (0x144D, 0xA804, 0x144D, 0xA801) not in valid_pci_ids:
-    raise SystemExit("Samsung 970 PRO 必须报告 144d:a804 / 144d:a801")
+if (0x144D, 0xA808, 0x144D, 0xA801) not in valid_pci_ids:
+    raise SystemExit("Samsung 970 PRO 必须报告 144d:a808 / 144d:a801")
 qtree = next(
     item["return"] for item in valid_responses
     if isinstance(item.get("return"), str) and "bus: main-system-bus" in item["return"]
@@ -335,6 +351,11 @@ if qtree.count('dev: ee1004-page-selector') != 2:
     raise SystemExit("DDR4 SPD 必须生成 EE1004 的 0x36/0x37 页选择器")
 if "edid-fixed-native = true" not in qtree:
     raise SystemExit("virtio-vga 没有 realize 显式 EDID native mode 策略")
+if "edid-managed-timing-version = 1" not in qtree:
+    raise SystemExit("virtio-vga 没有 realize 受管 EDID timing ABI v1")
+if "edid-binary-serial = 1515868245" not in qtree or \
+        "edid-revision = 3" not in qtree:
+    raise SystemExit("virtio-vga 没有 realize 品牌绑定 binary serial/revision")
 if "max_outputs = 2" not in qtree or "outputs = <omitted>, <omitted>" not in qtree:
     raise SystemExit("virtio-vga 两个独立 output 没有完成 QOM realize")
 

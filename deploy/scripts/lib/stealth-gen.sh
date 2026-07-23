@@ -1,17 +1,40 @@
-# NVMe Identify Controller 的 SN 字段是 20 字节 ASCII，QEMU 会按规范右侧空格补齐。
-# Samsung 970 PRO 规格给出的模式是 S###N#########；变量位使用大写十六进制，
-# 得到 48 bit 随机空间，同时保持 N 位于官方规定的第 5 个字符。
+# NVMe Identify Controller 的 SN 字段是 20 字节 ASCII，QEMU 会按规范右侧空格
+# 补齐。每个身份 profile 使用自己的厂商格式；生成值只模拟格式，不复制真实序号。
 _nvme_serial() {
-    local prefix suffix
-    while :; do
-        prefix="$(_hex 3 | tr '[:lower:]' '[:upper:]')"
-        suffix="$(_hex 9 | tr '[:lower:]' '[:upper:]')"
-        if [[ "$prefix$suffix" != "000000000000" &&
-              "$prefix$suffix" != "FFFFFFFFFFFF" ]]; then
-            printf 'S%sN%s\n' "$prefix" "$suffix"
-            return 0
-        fi
-    done
+    local component_id="${1:-samsung-970-pro-512gb}"
+    local prefix suffix serial
+
+    case "$component_id" in
+        samsung-970-pro-512gb)
+            while :; do
+                prefix="$(_hex 3 | tr '[:lower:]' '[:upper:]')"
+                suffix="$(_hex 10 | tr '[:lower:]' '[:upper:]')"
+                serial="S${prefix}N${suffix}"
+                [[ "$prefix$suffix" != "0000000000000" &&
+                   "$prefix$suffix" != "FFFFFFFFFFFFF" ]] && break
+            done
+            ;;
+        intel-760p-512gb)
+            while :; do
+                suffix="$(_hex 8 | tr '[:lower:]' '[:upper:]')"
+                serial="BTHH${suffix}512D"
+                [[ "$suffix" != "00000000" &&
+                   "$suffix" != "FFFFFFFF" ]] && break
+            done
+            ;;
+        wd-pc-sn730-512gb|kioxia-xg6-512gb)
+            while :; do
+                serial="$(_hex 12 | tr '[:lower:]' '[:upper:]')"
+                [[ "$serial" != "000000000000" &&
+                   "$serial" != "FFFFFFFFFFFF" ]] && break
+            done
+            ;;
+        *)
+            echo "ERROR: 未知 NVMe 序列号策略: $component_id" >&2
+            return 2
+            ;;
+    esac
+    printf '%s\n' "$serial"
 }
 
 # SATA ATA Identify serial 与 NVMe Identify serial 是两个不同设备身份。老实现
@@ -42,15 +65,48 @@ _mem_serial() {
     done
 }
 
-# 显示器 serial: prefix + 8 字符随机字母数字（Samsung "H4ZK500001VL" 风格）
+# 显示器 serial 只沿用实机 EDID 中已观察到的厂商格式；具体值重新生成，并由
+# 目录校验器拒绝证据样本，避免复制某台实机身份。EDID 文本描述符最多 13 字节。
 _monitor_serial() {
-    local prefix="$1"
-    local rest
+    local component_id="$1"
+    local spec kind length serial decimal letters digit alnum
+
+    spec="$(stealth_component_monitor_serial_spec "$component_id")" || return 1
+    IFS='|' read -r kind length <<<"$spec"
+    [[ "$length" =~ ^[1-9][0-9]*$ ]] || return 2
     while :; do
-        rest="$(_hex 8 | tr '[:lower:]' '[:upper:]')"
-        [[ "$rest" != "00000000" && "$rest" != "FFFFFFFF" ]] && break
+        case "$kind" in
+            samsung_h4zmc_decimal5)
+                printf -v decimal '%05d' "$(_rand 0 99999)"
+                serial="H4ZMC${decimal}"
+                ;;
+            aoc_upper_alnum7_decimal6)
+                printf -v decimal '%06d' "$(_rand 0 999999)"
+                letters="$(_hex 4 |
+                    tr '0123456789abcdef' 'GHIJKLMNOPABCDEF')"
+                digit="$(_rand 0 9)"
+                alnum="$(_hex 1 | tr '[:lower:]' '[:upper:]')"
+                serial="${letters}${digit}${alnum}A${decimal}"
+                ;;
+            xiaomi_29200_label_slash_removed_decimal)
+                printf -v decimal '%08d' "$(_rand 0 99999999)"
+                serial="29200${decimal}"
+                ;;
+            lenovo_urb_upper_alnum)
+                serial="URB$(_hex 5 | tr '[:lower:]' '[:upper:]')"
+                ;;
+            *)
+                echo "ERROR: 未知显示器序列号策略: $kind" >&2
+                return 2
+                ;;
+        esac
+        [[ ${#serial} -eq length ]] || return 2
+        if stealth_component_monitor_serial_is_valid \
+                "$component_id" "$serial" >/dev/null 2>&1; then
+            printf '%s\n' "$serial"
+            return 0
+        fi
     done
-    printf '%s\n' "${prefix}${rest}"
 }
 
 # USB HID serial 只用于 profile 内部稳定标识，当前 C descriptor 明确不向 guest

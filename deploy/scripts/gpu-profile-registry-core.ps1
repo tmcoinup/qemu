@@ -1,5 +1,13 @@
 ﻿# GPU durable transaction 的精确注册表读写与 CurrentIdentity CAS 基元。
 
+$gpuBoardIdentityContractPath = Join-Path $PSScriptRoot `
+    'gpu-board-identity-contract.ps1'
+if (-not (Test-Path -LiteralPath $gpuBoardIdentityContractPath -PathType Leaf)) {
+    throw ('缺少 GPU registry board identity contract：' +
+        $gpuBoardIdentityContractPath)
+}
+. $gpuBoardIdentityContractPath
+
 function Assert-IdentityToken {
     param([Parameter(Mandatory = $true)][string]$Value, [string]$Field = 'IdentityId')
     if ($Value -cnotmatch '^[0-9A-F]{32}$') {

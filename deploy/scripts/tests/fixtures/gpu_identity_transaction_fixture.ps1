@@ -64,11 +64,11 @@ function Set-CompleteIdentityValues {
     Set-FakeValue $Key IdentityId $IdentityId $string
     Set-FakeValue $Key SpoofName $SpoofName $string
     Set-FakeValue $Key SpoofVendor "NVIDIA" $string
-    Set-FakeValue $Key SpoofBios "Version 86.07.48.00.A0" $string
+    Set-FakeValue $Key SpoofBios "Version 86.07.42.00.96" $string
     Set-FakeValue $Key SpoofPciVendorId 0x10DE $dword
     Set-FakeValue $Key SpoofPciDeviceId 0x1C82 $dword
-    Set-FakeValue $Key SpoofSubsystemVendorId 0x10DE $dword
-    Set-FakeValue $Key SpoofSubsystemDeviceId 0x1C82 $dword
+    Set-FakeValue $Key SpoofSubsystemVendorId 0x1043 $dword
+    Set-FakeValue $Key SpoofSubsystemDeviceId 0x8613 $dword
     Set-FakeValue $Key SpoofRevisionId 0xA1 $dword
     Set-FakeValue $Key SpoofPciBusId 0 $dword
     Set-FakeValue $Key SpoofPciSlotId 6 $dword
@@ -79,11 +79,32 @@ function Set-CompleteIdentityValues {
     if ($IncludeSchema2Extensions) {
         Set-FakeValue $Key SpoofMemoryType "GDDR5" $string
         Set-FakeValue $Key SpoofMemoryBusWidthBits 128 $dword
-        Set-FakeValue $Key SpoofBaseClockKHz 1290000 $dword
+        Set-FakeValue $Key SpoofBaseClockKHz 1291000 $dword
         Set-FakeValue $Key SpoofBoostClockKHz 1392000 $dword
         Set-FakeValue $Key SpoofMemoryClockKHz 3504000 $dword
         Set-FakeValue $Key SpoofSliSupported 0 $dword
     }
+}
+
+function Set-AibIdentityValues {
+    param($Key, $Case)
+    $string = [Microsoft.Win32.RegistryValueKind]::String
+    $dword = [Microsoft.Win32.RegistryValueKind]::DWord
+    Set-FakeValue $Key SpoofName $Case.Name $string
+    Set-FakeValue $Key SpoofVendor $Case.Vendor $string
+    Set-FakeValue $Key SpoofBios $Case.Bios $string
+    Set-FakeValue $Key SpoofPciVendorId $Case.PciVendor $dword
+    Set-FakeValue $Key SpoofPciDeviceId $Case.Device $dword
+    Set-FakeValue $Key SpoofSubsystemVendorId $Case.SubVendor $dword
+    Set-FakeValue $Key SpoofSubsystemDeviceId $Case.SubDevice $dword
+    Set-FakeValue $Key SpoofRevisionId $Case.Revision $dword
+    Set-FakeValue $Key SpoofRamMb $Case.RamMb $dword
+    Set-FakeValue $Key SpoofMemoryType $Case.MemoryType $string
+    Set-FakeValue $Key SpoofMemoryBusWidthBits $Case.Width $dword
+    Set-FakeValue $Key SpoofBaseClockKHz $Case.Base $dword
+    Set-FakeValue $Key SpoofBoostClockKHz $Case.Boost $dword
+    Set-FakeValue $Key SpoofMemoryClockKHz $Case.Memory $dword
+    Set-FakeValue $Key SpoofSliSupported $Case.Sli $dword
 }
 
 function New-TransactionFixture {
@@ -94,7 +115,7 @@ function New-TransactionFixture {
     $binary = [Microsoft.Win32.RegistryValueKind]::Binary
     $qword = [Microsoft.Win32.RegistryValueKind]::QWord
     $oldId = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    $source = "PCI\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1\3&TEST&0&30"
+    $source = "PCI\VEN_1AF4&DEV_1050&SUBSYS_A1011AF4&REV_A1\3&TEST&0&30"
     $enumPath = "SYSTEM\CurrentControlSet\Enum\" + $source
     $classPath = "SYSTEM\CurrentControlSet\Control\Class\" + $classGuid + "\0001"
     $base = New-FakeRegistryKey; $config = New-FakeRegistryKey
@@ -107,7 +128,8 @@ function New-TransactionFixture {
     $config.Children["Identities\" + $IdentityId] = $identity
     if ($OldPointerPresent) {
         $config.Children["Identities\" + $oldId] = $oldIdentity
-        Set-CompleteIdentityValues $oldIdentity $oldId 2 $source "NVIDIA OLD GPU" $true
+        Set-CompleteIdentityValues $oldIdentity $oldId 2 $source `
+            "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" $true
     }
     Set-FakeValue $transaction TransactionSchemaVersion $TransactionSchema $dword
     Set-FakeValue $transaction TransactionId $IdentityId $string
@@ -119,7 +141,7 @@ function New-TransactionFixture {
     Set-FakeValue $transaction ClassSubkey "0001" $string
     if ($TransactionSchema -eq 2) { Set-FakeValue $transaction DriverInfPath "oem3.inf" $string }
     Set-CompleteIdentityValues $identity $IdentityId 2 $source `
-        "NVIDIA GeForce GTX 1050 Ti" $true
+        "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" $true
     foreach ($name in $enumJournalNames) { Set-FakeValue $enum $name ("OLD-" + $name) $string }
     foreach ($name in $classJournalNames) {
         if ($name -ceq "HardwareInformation.MemorySize") {
@@ -130,12 +152,12 @@ function New-TransactionFixture {
     }
     Write-ProjectionJournal $transaction Enum $enum $enumPath $enumJournalNames
     Write-ProjectionJournal $transaction Class $class $classPath $classJournalNames
-    $enumDesc = if ($TransactionSchema -eq 2) { "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti" }
+    $enumDesc = if ($TransactionSchema -eq 2) { "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
     $enumMfg = if ($TransactionSchema -eq 2) { "@oem3.inf,%vendor%;Red Hat, Inc." } else { "NVIDIA" }
-    $driverDesc = if ($TransactionSchema -eq 2) { "Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti" }
+    $driverDesc = if ($TransactionSchema -eq 2) { "Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
     $driverProvider = if ($TransactionSchema -eq 2) { "Red Hat, Inc." } else { "NVIDIA" }
     $matchingId = if ($TransactionSchema -eq 2) { "PCI\VEN_1AF4&DEV_1050" } else { "PCI\VEN_10DE&DEV_1C82" }
-    Set-FakeValue $enum FriendlyName "NVIDIA GeForce GTX 1050 Ti" $string
+    Set-FakeValue $enum FriendlyName "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" $string
     Set-FakeValue $enum DeviceDesc $enumDesc $string
     Set-FakeValue $enum Mfg $enumMfg $string
     foreach ($name in $classJournalNames) {
@@ -148,17 +170,17 @@ function New-TransactionFixture {
                 DriverDesc { $driverDesc; break }
                 ProviderName { $driverProvider; break }
                 MatchingDeviceId { $matchingId; break }
-                "HardwareInformation.AdapterString" { "NVIDIA GeForce GTX 1050 Ti"; break }
-                "HardwareInformation.ChipType" { "GeForce GTX 1050 Ti"; break }
+                "HardwareInformation.AdapterString" { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)"; break }
+                "HardwareInformation.ChipType" { "GeForce GTX 1050 Ti (ASUS Phoenix)"; break }
                 "HardwareInformation.DacType" { "Integrated RAMDAC"; break }
-                "HardwareInformation.BiosString" { "Version 86.07.48.00.A0"; break }
+                "HardwareInformation.BiosString" { "Version 86.07.42.00.96"; break }
             }
             Set-FakeValue $class $name $projected $string
         }
     }
     Set-FakeValue $config PendingIdentity $IdentityId $string
     Set-FakeValue $config CurrentIdentity $IdentityId $string
-    Set-FakeValue $config SpoofName "NVIDIA GeForce GTX 1050 Ti" $string
+    Set-FakeValue $config SpoofName "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" $string
     return [pscustomobject]@{
         Base=$base; Config=$config; Transaction=$transaction; Enum=$enum; Class=$class
         Identity=$identity; OldIdentity=$oldIdentity

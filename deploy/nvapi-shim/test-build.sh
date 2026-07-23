@@ -60,13 +60,18 @@ check_dll nvapi64.dll x86_64-w64-mingw32-objdump pei-x86-64
 
 # 用宿主机编译器执行与 DLL 共用的 PCI 组合实现，并锁定官方状态码。
 contract_test="$(mktemp --tmpdir nvapi-contract-test.XXXXXX)"
+aib_contract_test="$(mktemp --tmpdir nvapi-aib-contract-test.XXXXXX)"
 carrier_contract_test="$(mktemp --tmpdir nvapi-carrier-contract-test.XXXXXX)"
-trap 'rm -f "$contract_test" "$carrier_contract_test"' EXIT
-"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+trap 'rm -f "$contract_test" "$aib_contract_test" "$carrier_contract_test"' EXIT
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -I../gpu-api-common \
     -o "$contract_test" test-contract.c nvapi_pci.c nvapi_gpu_specs.c \
         nvapi_gpu_legacy_clocks_fill.c nvapi_gpu_pstates_fill.c \
-        nvapi_identity_contract.c
+        nvapi_identity_contract.c ../gpu-api-common/aib_identity_catalog.c
 "$contract_test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -I../gpu-api-common \
+    -o "$aib_contract_test" test-aib-carrier.c nvapi_gpu_specs.c \
+        nvapi_identity_contract.c ../gpu-api-common/aib_identity_catalog.c
+"$aib_contract_test"
 "${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -I../gpu-api-common \
     -o "$carrier_contract_test" ../gpu-api-common/test-carrier-validation.c \
         ../gpu-api-common/carrier_validation_contract.c
@@ -171,14 +176,15 @@ for binding in \
     grep -F "{ $binding," nvapi_shim.c >/dev/null \
         || fail "$binding 没有显式绑定到 ABI 实现"
 done
-grep -F 'source_subsystem_vendor != input->subsystem_vendor_id' \
-    nvapi_identity_contract.c >/dev/null \
-    || fail "SourceInstanceId SUBSYS 厂商号没有与 schema 字段交叉校验"
-grep -F 'source_subsystem_device != input->subsystem_device_id' \
-    nvapi_identity_contract.c >/dev/null \
-    || fail "SourceInstanceId SUBSYS 设备号没有与 schema 字段交叉校验"
-grep -F 'source_revision != input->revision_id' nvapi_identity_contract.c >/dev/null \
-    || fail "SourceInstanceId REV 没有与 schema 字段交叉校验"
+grep -F 'source_matches_logical_identity' nvapi_identity_contract.c >/dev/null \
+    || fail "SourceInstanceId 没有进入 legacy/AIB 原子映射校验"
+for carrier in 0xa101 0xa102 0xa103 0xa104 0xa105 0xa106 0xa107 0xa108 \
+        0xa109 0xa10a 0xa10b 0xa10c 0xa10d 0xa10e 0xa10f 0xa110 \
+        0xa111 0xa112; do
+    grep -F "UINT32_C($carrier)" \
+        ../gpu-api-common/aib_identity_catalog.c >/dev/null \
+        || fail "共享 AIB 目录缺少 carrier: $carrier"
+done
 if grep -R -F 'NVSHIM_FORCE_NAME' -- *.c *.h >/dev/null; then
     fail "环境变量名称覆盖会破坏注册表身份原子性"
 fi
@@ -190,11 +196,14 @@ for source in nvapi_shim.c nvapi_identity.c nvapi_pci.c nvapi_types.h \
     nvapi_gpu_legacy_clocks.c nvapi_gpu_legacy_clocks_fill.c \
     nvapi_gpu_legacy_clocks.h nvapi_gpu_pstates_fill.c \
     nvapi_gpu_pstates.h nvapi_shim_internal.h \
-    nvapi_identity_contract.c nvapi_identity_contract.h test-contract.c; do
+    nvapi_identity_contract.c nvapi_identity_contract.h test-contract.c \
+    test-aib-carrier.c; do
     lines="$(wc -l <"$source")"
     [[ "$lines" -le 500 ]] || fail "$source 共 $lines 行，超过 500 行"
 done
 for source in ../gpu-api-common/carrier_validation.h \
+    ../gpu-api-common/aib_identity_catalog.h \
+    ../gpu-api-common/aib_identity_catalog.c \
     ../gpu-api-common/carrier_validation_contract.c \
     ../gpu-api-common/carrier_validation_win.c \
     ../gpu-api-common/test-carrier-validation.c; do

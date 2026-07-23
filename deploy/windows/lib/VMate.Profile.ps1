@@ -3,6 +3,7 @@
 . (Join-Path $PSScriptRoot 'VMate.Manifest.ps1')
 . (Join-Path $PSScriptRoot 'VMate.Compatibility.ps1')
 . (Join-Path $PSScriptRoot 'VMate.Memory.ps1')
+. (Join-Path $PSScriptRoot 'VMate.BoardIdentity.ps1')
 . (Join-Path $PSScriptRoot 'VMate.ProfileStore.ps1')
 
 <#
@@ -110,18 +111,26 @@ function New-VMateHardwareProfile {
         [int]$Instance,
         [int]$MemoryMiB,
         [int]$Cpus,
+        [string]$MemoryId = '',
         [bool]$PlatformCompatibility
     )
 
-    $memoryPlan = Get-VMateMemoryModulePlan -Platform $Platform `
-        -MemoryMiB $MemoryMiB
+    $memoryPlans = @(Get-VMateMemoryModulePlans -Platform $Platform `
+            -MemoryMiB $MemoryMiB)
+    $memoryPlan = if ($MemoryId) {
+        Get-VMateMemoryModulePlan -Platform $Platform -MemoryMiB $MemoryMiB `
+            -ModuleId $MemoryId
+    } else {
+        Select-VMateMemoryModulePlan -Plans $memoryPlans
+    }
     $memorySerials = @()
     for ($index = 0; $index -lt $memoryPlan.ModuleCount; $index++) {
-        $memorySerials += New-VMateRandomHex -Bytes 4
+        $memorySerials += New-VMateMemorySerial
     }
     $memoryPart = [string]$memoryPlan.PartNumber
-    $memoryRate = Get-VMateMemoryRateFacts -Platform $Platform -PartNumber $memoryPart
-    $nvmeToken = New-VMateRandomHex -Bytes 6
+    $memoryRate = Get-VMateMemoryRateFacts -Platform $Platform `
+        -PartNumber $memoryPart -Manufacturer $memoryPlan.Manufacturer `
+        -ModuleId $memoryPlan.ModuleId
     return [ordered]@{
         schema_version = 1
         manifest_schema_version = [int]$Manifest.schema_version
@@ -157,17 +166,17 @@ function New-VMateHardwareProfile {
             uuid = [Guid]::NewGuid().ToString('D').ToLowerInvariant()
             mac = New-VMateMacAddress -Platform $Platform
             system_serial = 'SYS' + (New-VMateRandomHex -Bytes 6)
-            board_serial = 'MB' + (New-VMateRandomDigits -Length 12)
+            board_serial = New-VMateBoardSerial -Platform $Platform
             chassis_serial = 'CH' + (New-VMateRandomHex -Bytes 6)
             cpu_serial = 'CPU' + (New-VMateRandomHex -Bytes 6)
             memory_serials = $memorySerials
-            memory_manufacturer = 'Samsung'
+            memory_module_id = $memoryPlan.ModuleId
+            memory_module_digest = Get-VMateMemoryPlanDigest $memoryPlan
+            memory_manufacturer = $memoryPlan.Manufacturer
             memory_part = $memoryPart
             memory_rated_mts = $memoryRate.RatedMts
-            nvme_serial = 'S' + $nvmeToken.Substring(0, 3) + 'N' +
-                $nvmeToken.Substring(3, 9)
-            monitor_serial = [string]$Components.monitor.serial_prefix +
-                (New-VMateRandomDigits -Length 8)
+            nvme_serial = New-VMateStorageSerial $Components.storage
+            monitor_serial = New-VMateMonitorSerial $Components.monitor
         }
     }
 }
@@ -201,7 +210,8 @@ function Assert-VMateHardwareIdentity {
         [object]$Identity,
         [object]$Configuration,
         [object]$Platform,
-        [object]$Components
+        [object]$Components,
+        [bool]$AllowLegacyBoardSerial = $false
     )
 
     $uuid = [string]$Identity.uuid
@@ -222,12 +232,8 @@ function Assert-VMateHardwareIdentity {
 
     $formats = [ordered]@{
         system_serial = '^SYS[0-9A-F]{12}$'
-        board_serial = '^MB[0-9]{12}$'
         chassis_serial = '^CH[0-9A-F]{12}$'
         cpu_serial = '^CPU[0-9A-F]{12}$'
-        nvme_serial = '^S[A-Z0-9]{3}N[A-Z0-9]{9}$'
-        monitor_serial = '^' + [Regex]::Escape(
-            [string]$Components.monitor.serial_prefix) + '[0-9]{8}$'
     }
     foreach ($entry in $formats.GetEnumerator()) {
         $value = $Identity.($entry.Key)
@@ -235,14 +241,17 @@ function Assert-VMateHardwareIdentity {
             throw "硬件 profile 的 $($entry.Key) 格式无效或为空。"
         }
     }
+    Assert-VMateBoardSerial -Platform $Platform `
+        -Serial ([string]$Identity.board_serial) `
+        -AllowLegacyAsusProfile $AllowLegacyBoardSerial
+    Assert-VMateComponentSerial $Components.storage `
+        ([string]$Identity.nvme_serial) 'SSD'
+    Assert-VMateMonitorSerial $Components.monitor `
+        ([string]$Identity.monitor_serial)
     foreach ($value in @($Identity.system_serial.Substring(3),
-            $Identity.board_serial.Substring(2),
             $Identity.chassis_serial.Substring(2),
-            $Identity.cpu_serial.Substring(3),
-            $Identity.monitor_serial.Substring(
-                ([string]$Components.monitor.serial_prefix).Length))) {
-        if ($value -match '^(0+|F+)$' -or
-            $Identity.nvme_serial -match '^S(?:000N0{9}|FFFNF{9})$') {
+            $Identity.cpu_serial.Substring(3))) {
+        if ($value -match '^(0+|F+)$') {
             throw '硬件 profile 含全零或全 F 占位序列号。'
         }
     }
@@ -299,10 +308,12 @@ function Assert-VMateHardwareProfile {
         throw '硬件 profile 与当前 schema 不兼容；请显式使用 -RerollHardwareProfile。'
     }
     if ($Profile.manifest_catalog_revision -isnot [string] -or
-        [string]$Profile.manifest_catalog_revision -ne
-            [string]$Manifest.catalog_revision) {
-        throw '硬件 profile 与当前 manifest catalog_revision 不一致；请显式 reroll。'
+        [string]::IsNullOrWhiteSpace(
+            [string]$Profile.manifest_catalog_revision)) {
+        throw '硬件 profile 的 manifest_catalog_revision 缺失或无效。'
     }
+    # 目录修订仅记录生成时快照。新增其它平台不能使稳定 platform_id 指向的旧
+    # profile 失效；下方 platform_digest 仍会拒绝已选平台的任何事实变化。
     if ([int]$Profile.instance -ne $Instance -or
         [string]$Profile.platform_id -ne [string]$Platform.id) {
         throw '硬件 profile 的实例或平台 ID 与当前启动请求不一致。'
@@ -344,6 +355,7 @@ function Assert-VMateHardwareProfile {
     }
     Assert-VMateComponentProfileBinding -Binding $Profile.components `
         -Components $Components
+    Assert-VMateMemoryProfileBinding -Profile $Profile -Platform $Platform
     Assert-VMateHostCpuIdentity -HostCpu $Profile.host_cpu
     if (-not $isCompatibility -and
         -not (Test-VMateHostCpuPlatformPair $Platform $Profile.host_cpu)) {
@@ -375,7 +387,9 @@ function Assert-VMateHardwareProfile {
     }
     Assert-VMateHardwareIdentity -Identity $Profile.identity `
         -Configuration $Profile.configuration -Platform $Platform `
-        -Components $Components
+        -Components $Components -AllowLegacyBoardSerial `
+        (-not (Test-VMateComponentProperty `
+                $Profile.components 'binding_version'))
     Assert-VMateMemoryRateFacts -Profile $Profile -Platform $Platform
 }
 
@@ -390,6 +404,7 @@ function Prepare-VMateHardwareProfile {
         [int]$Instance,
         [int]$MemoryMiB,
         [int]$Cpus,
+        [string]$MemoryId = '',
         [Alias('AllowHostCpuPlatformMismatch')]
         [bool]$AllowPlatformCompatibility,
         [bool]$Reroll
@@ -406,6 +421,12 @@ function Prepare-VMateHardwareProfile {
         }
         if ($PlatformId -and [string]$existing.platform_id -ne $PlatformId) {
             throw '已有 profile 与 -PlatformId 不同；必须显式使用 -RerollHardwareProfile。'
+        }
+        if ($MemoryId -and
+            (-not (Test-VMateJsonProperty `
+                $existing.identity 'memory_module_id') -or
+             [string]$existing.identity.memory_module_id -cne $MemoryId)) {
+            throw "已有 profile 的 MemoryId 与显式请求 '$MemoryId' 不一致；不会重新抽取。"
         }
         $PlatformId = [string]$existing.platform_id
     }
@@ -424,6 +445,7 @@ function Prepare-VMateHardwareProfile {
             $profile = New-VMateHardwareProfile -Manifest $catalog -Platform $platform `
                 -Components $Components `
                 -HostCpu $HostCpu -Instance $Instance -MemoryMiB $MemoryMiB -Cpus $Cpus `
+                -MemoryId $MemoryId `
                 -PlatformCompatibility $platformSelection.IsCompatibility
             $attempt++
             $unique = Test-VMateProfileIdentityUnique -Profile $profile -Path $Path
@@ -438,7 +460,7 @@ function Prepare-VMateHardwareProfile {
     } else {
         $profile = $existing
         if (-not (Test-VMateProfileIdentityUnique -Profile $profile -Path $Path)) {
-            throw '已有 profile 的 UUID/MAC/NVMe 序列与相邻 VM 冲突。'
+            throw '已有 profile 的 UUID/MAC/NVMe/显示器序列号与相邻 VM 冲突。'
         }
         Assert-VMateHardwareProfile -Profile $profile -Manifest $catalog `
             -Platform $platform -Components $Components -HostCpu $HostCpu `

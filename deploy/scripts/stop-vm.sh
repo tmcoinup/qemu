@@ -140,11 +140,11 @@ acquire_instance_cleanup_lock() {
     #
     # 每轮先短暂打开 FD8 并非阻塞试锁；失败后立即关闭 FD8，再扫描持有者。
     # 若不先关闭，stop 自己会被扫描成非 swtpm 持有者，导致永远无法自愈。
-    # 活跃新启动器仍持锁时，扫描会看到它并拒绝杀 swtpm；五秒截止后安全退出，
+    # 活跃新启动器仍持锁时，扫描会看到它并拒绝杀 swtpm；130 秒截止后安全退出，
     # 防止本次旧 VM 收尾误删新启动器创建的 socket/TPM/TAP。
     command -v flock >/dev/null 2>&1 || return 1
     lock="$(sv_instance_lock_path "$INSTANCE")" || return 1
-    for ((attempt=0; attempt<25; attempt++)); do
+    for ((attempt=0; attempt<650; attempt++)); do
         exec 8>"$lock"
         if flock -n 8; then
             # stop 等锁期间，新启动器可能刚把同一实例切到另一个自定义 VM_DIR。

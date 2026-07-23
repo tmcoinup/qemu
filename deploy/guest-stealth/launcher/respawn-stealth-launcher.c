@@ -18,6 +18,7 @@
 #include "payload_configure_power_policy_ps1.h"
 #include "payload_apply_gpu_spoof_ps1.h"
 #include "payload_gpu_spoof_apply_support_ps1.h"
+#include "payload_gpu_board_identity_contract_ps1.h"
 #include "payload_persist_gpu_profile_ps1.h"
 #include "payload_gpu_profile_transaction_ps1.h"
 #include "payload_gpu_profile_registry_core_ps1.h"
@@ -64,6 +65,7 @@ static const EmbeddedPayload embedded_payloads[] = {
     { L"configure-power-policy.ps1", payload_configure_power_policy_ps1, (DWORD)sizeof(payload_configure_power_policy_ps1) },
     { L"apply-gpu-spoof.ps1", payload_apply_gpu_spoof_ps1, (DWORD)sizeof(payload_apply_gpu_spoof_ps1) },
     { L"gpu-spoof-apply-support.ps1", payload_gpu_spoof_apply_support_ps1, (DWORD)sizeof(payload_gpu_spoof_apply_support_ps1) },
+    { L"gpu-board-identity-contract.ps1", payload_gpu_board_identity_contract_ps1, (DWORD)sizeof(payload_gpu_board_identity_contract_ps1) },
     { L"persist-gpu-profile.ps1", payload_persist_gpu_profile_ps1, (DWORD)sizeof(payload_persist_gpu_profile_ps1) },
     { L"gpu-profile-transaction.ps1", payload_gpu_profile_transaction_ps1, (DWORD)sizeof(payload_gpu_profile_transaction_ps1) },
     { L"gpu-profile-registry-core.ps1", payload_gpu_profile_registry_core_ps1, (DWORD)sizeof(payload_gpu_profile_registry_core_ps1) },
@@ -126,12 +128,10 @@ static int append_backslashes(wchar_t *buf, size_t cap, size_t *len, size_t coun
     }
     return 1;
 }
-
 static int append_quoted_arg(wchar_t *buf, size_t cap, size_t *len, const wchar_t *arg)
 {
     int need_quote = (*arg == L'\0') || (wcspbrk(arg, L" \t\r\n\v\"") != NULL);
     size_t slashes = 0;
-
     if (*len > 0 && !append_char(buf, cap, len, L' ')) {
         return 0;
     }

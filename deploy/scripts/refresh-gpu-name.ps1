@@ -7,6 +7,14 @@
 $ErrorActionPreference = 'Stop'
 $stockDriverDescription = 'Red Hat VirtIO GPU DOD controller'
 $stockDriverProvider = 'Red Hat, Inc.'
+$gpuBoardIdentityContractPath = Join-Path $PSScriptRoot `
+    'gpu-board-identity-contract.ps1'
+if (-not (Test-Path -LiteralPath $gpuBoardIdentityContractPath -PathType Leaf)) {
+    throw ('缺少 refresh GPU board identity contract：' +
+        $gpuBoardIdentityContractPath)
+}
+. $gpuBoardIdentityContractPath
+
 function Get-ExactRegistryValue {
     # RegistryKey.GetValue 会把缺失值和空值都变成 null，也可能透明展开字符串。
     # 身份协议必须精确验证名称、类型和非空内容，因此先查 kind，再以禁止展开方式读。
@@ -34,66 +42,7 @@ function Get-ExactRegistryValue {
     # 否则 4 GiB 显存 QWord 会溢出且 Binary 无法转换成 Int32。
     return $value
 }
-function Get-LegacyVersionedIdentityHint {
-    # schema-1 的 GUID 子键只服务于一次性迁移：返回旧名称供 apply 定位原 Class，
-    # 不向调用者暴露 Vendor/PCI 等旧字段，也不允许普通 refresh 把它当当前身份。
-    # 但迁移前仍逐项验证上一代完整契约，不能让一个仅含 schema/name 的伪快照
-    # 借兼容分支成为 rollback 基线。pointer、schema、名称和自 ID 双读拒绝混合状态。
-    param($RootKey, $VersionKey, [string]$InitialPointer, [int]$SchemaBefore)
-    $stringKind = [Microsoft.Win32.RegistryValueKind]::String
-    $dwordKind = [Microsoft.Win32.RegistryValueKind]::DWord
-    if ($SchemaBefore -ne 1) { throw ('不支持的 legacy 身份 schema：' + $SchemaBefore) }
-    $legacy = [ordered]@{
-        IdentityId=Get-ExactRegistryValue $VersionKey 'IdentityId' $stringKind
-        SpoofName=Get-ExactRegistryValue $VersionKey 'SpoofName' $stringKind
-        SpoofVendor=Get-ExactRegistryValue $VersionKey 'SpoofVendor' $stringKind
-        SpoofBios=Get-ExactRegistryValue $VersionKey 'SpoofBios' $stringKind
-        SpoofPciVendorId=Get-ExactRegistryValue $VersionKey 'SpoofPciVendorId' $dwordKind
-        SpoofPciDeviceId=Get-ExactRegistryValue $VersionKey 'SpoofPciDeviceId' $dwordKind
-        SpoofSubsystemVendorId=Get-ExactRegistryValue $VersionKey 'SpoofSubsystemVendorId' $dwordKind
-        SpoofSubsystemDeviceId=Get-ExactRegistryValue $VersionKey 'SpoofSubsystemDeviceId' $dwordKind
-        SpoofRevisionId=Get-ExactRegistryValue $VersionKey 'SpoofRevisionId' $dwordKind
-        SpoofPciBusId=Get-ExactRegistryValue $VersionKey 'SpoofPciBusId' $dwordKind
-        SpoofPciSlotId=Get-ExactRegistryValue $VersionKey 'SpoofPciSlotId' $dwordKind
-        SpoofPciFunctionId=Get-ExactRegistryValue $VersionKey 'SpoofPciFunctionId' $dwordKind
-        SpoofRamMb=Get-ExactRegistryValue $VersionKey 'SpoofRamMb' $dwordKind
-        SourceInstanceId=Get-ExactRegistryValue $VersionKey 'SourceInstanceId' $stringKind
-        IdentityMode=Get-ExactRegistryValue $VersionKey 'IdentityMode' $stringKind
-    }
-    $legacyNameBefore = $legacy.SpoofName
-    $legacyNameAfter = Get-ExactRegistryValue $VersionKey 'SpoofName' $stringKind
-    $selfAfter = Get-ExactRegistryValue $VersionKey 'IdentityId' $stringKind
-    $schemaAfter = Get-ExactRegistryValue $VersionKey 'IdentitySchemaVersion' $dwordKind
-    $finalPointer = Get-ExactRegistryValue $RootKey 'CurrentIdentity' $stringKind
-    $expectedVendorId = switch -CaseSensitive ($legacy.SpoofVendor) {
-        'NVIDIA' { 0x10DE; break }; 'AMD' { 0x1002; break }; default { -1 }
-    }
-    $sourceIdentity = [regex]::Match($legacy.SourceInstanceId,
-        '^PCI\\VEN_1AF4&DEV_1050&SUBSYS_([0-9A-F]{4})([0-9A-F]{4})&REV_([0-9A-F]{2})(?:&|\\)')
-    Assert-GpuIdentityStrings $legacy.SpoofName $legacy.SpoofVendor $legacy.SpoofBios
-    if ($finalPointer -cne $InitialPointer -or $schemaAfter -ne $SchemaBefore -or
-        $legacyNameAfter -cne $legacyNameBefore -or $legacy.IdentityId -cne $InitialPointer -or
-        $selfAfter -cne $legacy.IdentityId -or $legacy.IdentityMode -cne 'shallow-user-projection' -or
-        $expectedVendorId -lt 0 -or -not $sourceIdentity.Success -or
-        $legacy.SpoofPciVendorId -ne $expectedVendorId -or
-        $legacy.SpoofPciDeviceId -lt 1 -or $legacy.SpoofPciDeviceId -gt 0xFFFF -or
-        $legacy.SpoofSubsystemVendorId -ne $legacy.SpoofPciVendorId -or
-        $legacy.SpoofSubsystemDeviceId -ne $legacy.SpoofPciDeviceId -or
-        [Convert]::ToInt32($sourceIdentity.Groups[1].Value,16) -ne $legacy.SpoofPciDeviceId -or
-        [Convert]::ToInt32($sourceIdentity.Groups[2].Value,16) -ne $legacy.SpoofPciVendorId -or
-        [Convert]::ToInt32($sourceIdentity.Groups[3].Value,16) -ne $legacy.SpoofRevisionId -or
-        $legacy.SpoofRevisionId -lt 0 -or $legacy.SpoofRevisionId -gt 0xFF -or
-        $legacy.SpoofPciBusId -lt 0 -or $legacy.SpoofPciBusId -gt 0xFF -or
-        $legacy.SpoofPciSlotId -lt 0 -or $legacy.SpoofPciSlotId -gt 0x1F -or
-        $legacy.SpoofPciFunctionId -lt 0 -or $legacy.SpoofPciFunctionId -gt 7 -or
-        $legacy.SpoofRamMb -lt 1 -or $legacy.SpoofRamMb -gt 1048576) {
-        throw '旧 versioned 身份不完整、读取变化或字段不一致'
-    }
-    return [pscustomobject]@{
-        SpoofName = $legacyNameBefore
-        IsLegacyMigrationHint = $true
-    }
-}
+
 function Get-CurrentGpuIdentity {
     # 与 NVAPI DLL 使用同一线性化读取：pointer -> 不可变 GUID 子键 -> 重读
     # pointer/schema。旧 root-only profile 只在 apply 的首次升级探测中可视为“没有
@@ -188,12 +137,7 @@ function Get-CurrentGpuIdentity {
         $schemaBefore = Get-ExactRegistryValue -Key $versionKey `
             -Name 'IdentitySchemaVersion' -Kind $dwordKind
         if ($schemaBefore -eq 1) {
-            if (-not $MissingIsAllowed -or
-                -not [string]::IsNullOrWhiteSpace($StagedId)) {
-                throw 'schema-1 versioned 身份只允许 apply 迁移探测'
-            }
-            return Get-LegacyVersionedIdentityHint $rootKey $versionKey `
-                $initialPointer $schemaBefore
+            throw 'schema-1 versioned GPU 身份已停止兼容；请用当前硬件池重建实例'
         }
         if ($schemaBefore -ne 2) { throw ('不支持的身份 schema：' + $schemaBefore) }
         $snapshot = [ordered]@{
@@ -247,14 +191,7 @@ function Get-CurrentGpuIdentity {
             -not $sourceIdentity.Success -or
             $snapshot.SpoofPciVendorId -ne $expectedVendorId -or
             $snapshot.SpoofPciDeviceId -lt 1 -or $snapshot.SpoofPciDeviceId -gt 0xFFFF -or
-            $snapshot.SpoofSubsystemVendorId -ne $snapshot.SpoofPciVendorId -or
-            $snapshot.SpoofSubsystemDeviceId -ne $snapshot.SpoofPciDeviceId -or
-            [Convert]::ToInt32($sourceIdentity.Groups[1].Value, 16) -ne
-                $snapshot.SpoofSubsystemDeviceId -or
-            [Convert]::ToInt32($sourceIdentity.Groups[2].Value, 16) -ne
-                $snapshot.SpoofSubsystemVendorId -or
-            [Convert]::ToInt32($sourceIdentity.Groups[3].Value, 16) -ne
-                $snapshot.SpoofRevisionId -or
+            -not (Test-GpuLogicalBinding $snapshot $sourceIdentity) -or
             $snapshot.SpoofRevisionId -lt 0 -or $snapshot.SpoofRevisionId -gt 0xFF -or
             $snapshot.SpoofPciBusId -lt 0 -or $snapshot.SpoofPciBusId -gt 0xFF -or
             $snapshot.SpoofPciSlotId -lt 0 -or $snapshot.SpoofPciSlotId -gt 0x1F -or
@@ -444,57 +381,6 @@ $cfg = Invoke-WithProjectionLock {
 }
 if (-not [string]::IsNullOrWhiteSpace($StagedIdentityId)) { return }
 & (Join-Path $PSScriptRoot 'gpu-manufacturer-projection.ps1') -Vendor $cfg.SpoofVendor -InstanceId $cfg.SourceInstanceId
-# active GPU Enum/Class 已在全局 Stop 策略下精确写回并验收。以下只处理可陈旧的
-# 显示器节点；单个旧节点不可写时明确 warning 后跳过，不影响已验收的 GPU 投影。
-$monitorName  = 'Samsung S24F350F'
-$monitorMfg   = 'Samsung Electronics Co., Ltd.'
-$monitorHwId  = 'MONITOR\SAM0F65'
-$monClassGuid = '{4d36e96e-e325-11ce-bfc1-08002be10318}'
-$fmtDev       = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
-$monClassRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $monClassGuid
-$displayEnum  = 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY'
-function Set-DevProp {
-    # 本函数仅用于非关键 Monitor fallback；GPU DEVPKEY 仍由 host offline
-    # projector 维护 0xFFFF0012 类型，不能用 reg.exe REG_SZ 覆盖。
-    param([string]$DevPath, [string]$Fmtid, [string]$PidHex, [string]$Value)
-    $propKey = $DevPath + '\Properties\' + $Fmtid + '\' + $PidHex
-    $r = $propKey -replace '^Microsoft\.PowerShell\.Core\\Registry::', '' `
-                  -replace '^HKEY_LOCAL_MACHINE', 'HKLM' `
-                  -replace '^HKLM:', 'HKLM'
-    & reg.exe add "$r" /v "00000000" /t REG_SZ /d $Value /f 2>$null | Out-Null
-}
-# 更新显示器 Enum\DISPLAY 和 Monitor Class 子键，保持名称、厂商和硬件 ID 一致。
-foreach ($pnp in @(Get-ChildItem $displayEnum -ErrorAction SilentlyContinue)) {
-    foreach ($inst in @(Get-ChildItem $pnp.PSPath -ErrorAction SilentlyContinue)) {
-        try {
-            Set-ItemProperty -Path $inst.PSPath -Name DeviceDesc -Type String -Value $monitorName
-            Set-ItemProperty -Path $inst.PSPath -Name FriendlyName -Type String -Value $monitorName
-            Set-ItemProperty -Path $inst.PSPath -Name Mfg -Type String -Value $monitorMfg
-            Set-ItemProperty -Path $inst.PSPath -Name HardwareID `
-                -Type MultiString -Value @($monitorHwId)
-            Set-ItemProperty -Path $inst.PSPath -Name CompatibleIDs `
-                -Type MultiString -Value @('MONITOR\Default_Monitor')
-            Set-DevProp $inst.PSPath $fmtDev '0004' $monitorName
-            Set-DevProp $inst.PSPath $fmtDev '0009' $monitorMfg
-        } catch { Write-Warning ('跳过不可写的陈旧 Monitor Enum：' + $inst.PSPath) }
-    }
-}
-foreach ($sub in @(Get-ChildItem $monClassRoot -ErrorAction SilentlyContinue)) {
-    if ($sub.PSChildName -notmatch '^\d{4}$') { continue }
-    $p = $sub.PSPath
-    $dd = ''
-    try {
-        $dd = [string](Get-ItemPropertyValue -Path $p -Name DriverDesc `
-            -ErrorAction Stop)
-    } catch {
-        continue
-    }
-    if ($dd) {
-        try {
-            Set-ItemProperty -Path $p -Name DriverDesc -Type String -Value $monitorName
-            Set-ItemProperty -Path $p -Name ProviderName -Type String -Value $monitorMfg
-            Set-DevProp $p $fmtDev '0004' $monitorName
-            Set-DevProp $p $fmtDev '0009' $monitorMfg
-        } catch { Write-Warning ('跳过不可写的陈旧 Monitor Class：' + $p) }
-    }
-}
+# 显示器身份只能来自 Host profile 注入的 QEMU EDID。这里不得再改写
+# Enum\DISPLAY、Monitor Class、HardwareID 或厂商名称，否则启动/登录任务会把
+# AOC、Xiaomi、Lenovo 等已选组件重新污染成某个固定品牌。

@@ -2,13 +2,19 @@
 
 <#
 .SYNOPSIS
-    加载并校验 Windows/Linux 共用的可更换硬件部件目录。
+    加载 Windows/Linux 共用的可更换硬件部件目录。
 
 .DESCRIPTION
-    整机平台负责 CPU、主板和芯片组；本模块只负责 SSD、显示器和 HID。
-    目录中的关联字段作为一个整体校验，避免从不同真实设备拼出不存在的组合。
-    生成后的 profile 会保存目录修订、摘要和所选 ID，普通重启不重新选择。
+    根清单引用独立 SSD/AIB 子目录；加载时校验全部原子身份，再按权重选择
+    存储、AIB GPU 和显示器。profile 绑定所选条目的 ID 与摘要，目录修订变化
+    不会改变既有 VM；条目自身变化仍会 fail closed。旧通用 GPU 仅供回读。
 #>
+
+. (Join-Path $PSScriptRoot 'VMate.ComponentPolicy.ps1')
+. (Join-Path $PSScriptRoot 'VMate.StoragePolicy.ps1')
+. (Join-Path $PSScriptRoot 'VMate.ComponentRuntime.ps1')
+. (Join-Path $PSScriptRoot 'VMate.Gpu.ps1')
+. (Join-Path $PSScriptRoot 'VMate.Json.ps1')
 
 function Test-VMateComponentProperty {
     param(
@@ -42,153 +48,10 @@ function Get-VMateComponentDigest {
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
         $digest = $sha256.ComputeHash($bytes)
-        return ([BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+        return ([BitConverter]::ToString($digest)).Replace('-', '').
+            ToLowerInvariant()
     } finally {
         $sha256.Dispose()
-    }
-}
-
-function Get-VMateSingleEnabledComponent {
-    param(
-        [object[]]$Items,
-        [string]$Kind
-    )
-
-    $enabled = @($Items | Where-Object { $_.enabled -eq $true })
-    if ($enabled.Count -ne 1) {
-        throw "部件目录 '$Kind' 必须且只能启用一个已核验模板，实际：$($enabled.Count)"
-    }
-    if ($enabled[0].enabled -isnot [bool] -or
-        -not (Test-VMateComponentProperty $enabled[0] 'id') -or
-        -not [string]$enabled[0].id) {
-        throw "部件目录 '$Kind' 的启用项缺少 ID。"
-    }
-    return $enabled[0]
-}
-
-function Assert-VMateStorageComponent {
-    param([object]$Storage)
-
-    foreach ($field in @('release_year', 'model', 'firmware', 'raw_bytes', 'pci', 'nvme',
-            'verification_status', 'identity_fidelity', 'source_refs')) {
-        if (-not (Test-VMateComponentProperty $Storage $field)) {
-            throw "SSD 部件 '$($Storage.id)' 缺少字段 '$field'。"
-        }
-    }
-    # 当前 C 行为层的 use-samsung-id 只实现这一套经过关联验证的身份。
-    if ([string]$Storage.id -ne 'samsung-970-pro-512gb' -or
-        -not (Test-VMateComponentInteger $Storage.release_year) -or
-        [int]$Storage.release_year -ne 2018 -or
-        -not (Test-VMateComponentInteger $Storage.raw_bytes) -or
-        [string]$Storage.model -ne 'Samsung SSD 970 PRO 512GB' -or
-        [string]$Storage.firmware -ne '1B2QEXP7' -or
-        [int64]$Storage.raw_bytes -ne 512110190592 -or
-        [string]$Storage.verification_status -ne 'vendor_document_reference' -or
-        [string]$Storage.identity_fidelity -ne
-            'model_register_reference_no_device_capture') {
-        throw 'SSD 目录必须匹配 970 PRO 512GB 型号、容量及受控证据边界。'
-    }
-    $pciTuple = @('vendor', 'device', 'subsystem_vendor', 'subsystem_device') |
-        ForEach-Object { ([string]$Storage.pci.$_).ToUpperInvariant() }
-    if (($pciTuple -join ':') -ne '0X144D:0XA804:0X144D:0XA801') {
-        throw 'Samsung 970 PRO PCI 身份必须为 144d:a804 / 144d:a801。'
-    }
-    if (-not (Test-VMateComponentInteger $Storage.nvme.pcie_generation) -or
-        -not (Test-VMateComponentInteger $Storage.nvme.lanes) -or
-        [int]$Storage.nvme.pcie_generation -ne 3 -or
-        [int]$Storage.nvme.lanes -ne 4 -or
-        [string]$Storage.nvme.ieee_oui -ne '00:25:38' -or
-        [string]$Storage.nvme.subnqn_template -ne
-            'nqn.2014-08.org.nvmexpress:uuid:{uuid}' -or
-        [string]$Storage.nvme.nqn_fidelity -ne
-            'standards_compliant_synthetic_uuid') {
-        throw 'Samsung 970 PRO NVMe 链路、OUI 或 subnqn 模板不完整。'
-    }
-    $sources = @($Storage.source_refs)
-    if ($sources.Count -lt 2 -or
-        @($sources | Select-Object -Unique).Count -ne $sources.Count -or
-        @($sources | Where-Object {
-                $_ -isnot [string] -or
-                [string]$_ -notmatch
-                    '^https://(?:download\.semiconductor\.samsung\.com|images\.samsung\.com)/\S+$'
-            }).Count -gt 0) {
-        throw 'Samsung 970 PRO 必须保留型号数据表和寄存器规格两份官方来源。'
-    }
-}
-
-function Assert-VMateMonitorComponent {
-    param([object]$Monitor)
-
-    foreach ($field in @('release_year', 'vendor_code', 'product_id', 'name', 'serial_prefix',
-            'width_mm', 'height_mm', 'manufacture_week', 'manufacture_year',
-            'video_input', 'range', 'secondary_timing', 'evidence',
-            'identity_fidelity', 'source_refs')) {
-        if (-not (Test-VMateComponentProperty $Monitor $field)) {
-            throw "显示器部件 '$($Monitor.id)' 缺少字段 '$field'。"
-        }
-    }
-    if ([string]$Monitor.id -ne 'samsung-s24f350' -or
-        -not (Test-VMateComponentInteger $Monitor.release_year) -or
-        [int]$Monitor.release_year -ne 2016 -or
-        [string]$Monitor.vendor_code -ne 'SAM' -or
-        [string]$Monitor.product_id -ne '0x0F65' -or
-        [string]$Monitor.name -ne 'S24F350' -or
-        [string]$Monitor.video_input -ne '0xA3' -or
-        [string]$Monitor.serial_prefix -ne 'H4ZK' -or
-        [string]$Monitor.evidence -ne 'official_model_specs_no_raw_edid' -or
-        [string]$Monitor.identity_fidelity -ne
-            'synthetic_edid_identity_fields') {
-        throw "显示器 '$($Monitor.id)' 的型号或合成 EDID 证据边界无效。"
-    }
-    foreach ($field in @('width_mm', 'height_mm', 'manufacture_week',
-            'manufacture_year')) {
-        if (-not (Test-VMateComponentInteger $Monitor.$field)) {
-            throw "显示器 '$($Monitor.id)' 的 $field 必须是 JSON 整数。"
-        }
-    }
-    if ([int]$Monitor.width_mm -ne 521 -or [int]$Monitor.height_mm -ne 293 -or
-        [int]$Monitor.manufacture_week -ne 32 -or
-        [int]$Monitor.manufacture_year -ne 2018 -or
-        ([string]$Monitor.serial_prefix).Length + 8 -gt 12) {
-        throw "显示器 '$($Monitor.id)' 的尺寸、生产日期或序列长度无效。"
-    }
-    $range = $Monitor.range
-    foreach ($field in @('min_vfreq_hz', 'max_vfreq_hz', 'min_hfreq_khz',
-            'max_hfreq_khz', 'max_pixel_clock_mhz')) {
-        if (-not (Test-VMateComponentProperty $range $field) -or
-            -not (Test-VMateComponentInteger $range.$field) -or
-            -not (Test-VMateUnsignedInteger $range.$field 1 65535)) {
-            throw "显示器 '$($Monitor.id)' 的 range.$field 无效。"
-        }
-    }
-    if ([int]$range.min_vfreq_hz -ne 56 -or
-        [int]$range.max_vfreq_hz -ne 75 -or
-        [int]$range.min_hfreq_khz -ne 30 -or
-        [int]$range.max_hfreq_khz -ne 81 -or
-        [int]$range.max_pixel_clock_mhz -ne 149) {
-        throw "显示器 '$($Monitor.id)' 的扫描范围与官方型号规格不一致。"
-    }
-    $timing = $Monitor.secondary_timing
-    foreach ($field in @('xres', 'yres', 'refresh_millihz')) {
-        if (-not (Test-VMateComponentProperty $timing $field) -or
-            -not (Test-VMateComponentInteger $timing.$field) -or
-            -not (Test-VMateUnsignedInteger $timing.$field 1 1000000)) {
-            throw "显示器 '$($Monitor.id)' 的 secondary_timing.$field 无效。"
-        }
-    }
-    if ([int]$timing.xres -ne 1600 -or [int]$timing.yres -ne 900 -or
-        [int]$timing.refresh_millihz -ne 60000) {
-        throw "显示器 '$($Monitor.id)' 的次要时序不是受控模板。"
-    }
-    $sources = @($Monitor.source_refs)
-    if ($sources.Count -lt 2 -or
-        @($sources | Select-Object -Unique).Count -ne $sources.Count -or
-        @($sources | Where-Object {
-                $_ -isnot [string] -or
-                [string]$_ -notmatch
-                    '^https://(?:www\.)?(?:samsung\.com|images\.samsung\.com)/\S+$'
-            }).Count -gt 0) {
-        throw "显示器 '$($Monitor.id)' 缺少 Samsung 官方型号来源。"
     }
 }
 
@@ -203,220 +66,335 @@ function Assert-VMateHidComponent {
         [string]$ExpectedName
     )
 
-    foreach ($field in @('vendor_id', 'product_id', 'bcd_device', 'manufacturer',
-            'product', 'serial_exposed', 'verification_status',
-            'descriptor_fidelity')) {
-        if (-not (Test-VMateComponentProperty $Hid $field)) {
-            throw "HID 部件 '$Kind/$($Hid.id)' 缺少字段 '$field'。"
+    Assert-VMatePolicyFields $Hid @('id', 'enabled', 'vendor_id',
+        'product_id', 'bcd_device', 'manufacturer', 'product',
+        'serial_exposed', 'verification_status', 'descriptor_fidelity') `
+        "HID 部件 '$Kind/$($Hid.id)'"
+    if ($Hid.enabled -isnot [bool] -or
+        [string]$Hid.id -cne $ExpectedId -or
+        [string]$Hid.vendor_id -cne $ExpectedVendor -or
+        [string]$Hid.product_id -cne $ExpectedProduct -or
+        [string]$Hid.bcd_device -cne $ExpectedBcd -or
+        [string]$Hid.manufacturer -cne 'Microsoft' -or
+        [string]$Hid.product -cne $ExpectedName -or
+        $Hid.serial_exposed -ne $false -or
+        [string]$Hid.verification_status -cne
+            'unverified_catalog_identity' -or
+        [string]$Hid.descriptor_fidelity -cne
+            'identity_only_generic_report') {
+        throw "HID 部件 '$Kind/$($Hid.id)' 与 patched descriptor 不一致。"
+    }
+}
+
+function Assert-VMateTabletComponent {
+    param([object]$Tablet)
+
+    Assert-VMatePolicyFields $Tablet @('id', 'enabled', 'vendor_id',
+        'product_id', 'bcd_device', 'manufacturer', 'product',
+        'serial_exposed', 'verification_status', 'descriptor_fidelity') `
+        "tablet '$($Tablet.id)'"
+    if ($Tablet.enabled -isnot [bool] -or
+        [string]$Tablet.id -cne 'qemu-generic-usb-tablet' -or
+        [string]$Tablet.vendor_id -cne '0x0627' -or
+        [string]$Tablet.product_id -cne '0x0001' -or
+        [string]$Tablet.bcd_device -cne '0x0000' -or
+        [string]$Tablet.manufacturer -cne 'not_exposed' -or
+        [string]$Tablet.product -cne 'QEMU USB Tablet' -or
+        $Tablet.serial_exposed -ne $false -or
+        [string]$Tablet.verification_status -cne
+            'qemu_native_virtual_device' -or
+        [string]$Tablet.descriptor_fidelity -cne 'generic_virtual_only') {
+        throw '通用 tablet 目录与 QEMU 原生设备不一致。'
+    }
+}
+
+function Get-VMateValidatedComponentItems {
+    param(
+        [object[]]$Items,
+        [string]$Kind,
+        [scriptblock]$Validator
+    )
+
+    if ($Items.Count -lt 1) {
+        throw "部件目录 '$Kind' 不能为空。"
+    }
+    $ids = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($item in $Items) {
+        if (-not (Test-VMateComponentProperty $item 'id') -or
+            $item.id -isnot [string] -or
+            [string]$item.id -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$' -or
+            -not $ids.Add([string]$item.id)) {
+            throw "部件目录 '$Kind' 含空、重复或非法 ID。"
+        }
+        & $Validator $item
+    }
+    $enabled = @($Items | Where-Object { $_.enabled -eq $true })
+    if ($enabled.Count -lt 1) {
+        throw "部件目录 '$Kind' 至少要启用一个已核验模板。"
+    }
+    return $enabled
+}
+
+function Assert-VMateMonitorCatalogSet {
+    param([object[]]$Items)
+
+    $expectedIds = @(
+        'samsung-s24f350',
+        'aoc-24b2xh',
+        'xiaomi-rmmnt238nf',
+        'lenovo-l24e-30'
+    )
+    $actualIds = @($Items | ForEach-Object { [string]$_.id } | Sort-Object)
+    if ($Items.Count -ne $expectedIds.Count -or
+        ($actualIds -join "`n") -cne
+            (@($expectedIds | Sort-Object) -join "`n") -or
+        @($Items | Where-Object {
+                $_.enabled -isnot [bool] -or $_.enabled -ne $true
+            }).Count -ne 0) {
+        throw '显示器目录必须精确包含且启用四款受控 1080p/16:9 型号。'
+    }
+}
+
+function Get-VMateWeightedComponent {
+    param(
+        [object[]]$Items,
+        [string]$Kind
+    )
+
+    if ($Items.Count -eq 1) {
+        return $Items[0]
+    }
+    [uint64]$total = 0
+    foreach ($item in $Items) {
+        if (-not (Test-VMateComponentProperty $item 'selection_weight') -or
+            -not (Test-VMateComponentInteger $item.selection_weight) -or
+            [int]$item.selection_weight -lt 1) {
+            throw "部件目录 '$Kind/$($item.id)' 缺少正整数 selection_weight。"
+        }
+        $total += [uint64]$item.selection_weight
+    }
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $bytes = New-Object byte[] 8
+        $remainder = ([uint64]::MaxValue % $total + 1) % $total
+        $limit = [uint64]::MaxValue - $remainder
+        do {
+            $rng.GetBytes($bytes)
+            $sample = [BitConverter]::ToUInt64($bytes, 0)
+        } while ($sample -gt $limit)
+    } finally {
+        $rng.Dispose()
+    }
+    [uint64]$target = $sample % $total
+    [uint64]$cursor = 0
+    foreach ($item in $Items) {
+        $cursor += [uint64]$item.selection_weight
+        if ($target -lt $cursor) {
+            return $item
         }
     }
-    if ([string]$Hid.id -ne $ExpectedId -or
-        [string]$Hid.vendor_id -ne $ExpectedVendor -or
-        [string]$Hid.product_id -ne $ExpectedProduct -or
-        [string]$Hid.bcd_device -ne $ExpectedBcd -or
-        [string]$Hid.manufacturer -ne 'Microsoft' -or
-        [string]$Hid.product -ne $ExpectedName -or
-        $Hid.serial_exposed -ne $false -or
-        [string]$Hid.verification_status -ne 'unverified_catalog_identity' -or
-        [string]$Hid.descriptor_fidelity -ne 'identity_only_generic_report') {
-        throw "HID 部件 '$Kind/$($Hid.id)' 与 patched C descriptor 不一致。"
+    throw "部件目录 '$Kind' 的加权选择状态无效。"
+}
+
+function Get-VMateComponentById {
+    param(
+        [object[]]$Items,
+        [string]$Id,
+        [string]$Kind
+    )
+
+    if (-not $Id) {
+        throw "硬件 profile 缺少 $Kind ID。"
+    }
+    $matched = @($Items | Where-Object { [string]$_.id -ceq $Id })
+    if ($matched.Count -ne 1) {
+        throw "硬件 profile 所选 $Kind '$Id' 未在启用目录中找到。"
+    }
+    return $matched[0]
+}
+
+function Read-VMateComponentJson {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "找不到$Label：$Path"
+    }
+    try {
+        $json = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+        Assert-VMateJsonNoDuplicateProperties -Json $json -Label $Label
+        return ConvertFrom-Json -InputObject $json -ErrorAction Stop
+    } catch {
+        throw "$Label 不是有效 JSON：$Path；$($_.Exception.Message)"
+    }
+}
+
+function Resolve-VMateComponentCatalogPath {
+    param(
+        [string]$RootPath,
+        [object]$Reference,
+        [string]$Label
+    )
+
+    if ($Reference -isnot [string] -or
+        [string]$Reference -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.json$' -or
+        [IO.Path]::GetFileName([string]$Reference) -cne [string]$Reference) {
+        throw "$Label 必须是与根清单同目录的 JSON 文件名。"
+    }
+    $directory = [IO.Path]::GetDirectoryName(
+        [IO.Path]::GetFullPath($RootPath))
+    return [IO.Path]::Combine($directory, [string]$Reference)
+}
+
+function Assert-VMateChildCatalogHeader {
+    param(
+        [object]$Document,
+        [string]$Revision,
+        [string]$Scope,
+        [string]$ItemsField,
+        [string]$Label
+    )
+
+    Assert-VMatePolicyFields $Document @('schema_version',
+        'catalog_revision', 'scope', $ItemsField) $Label
+    if (-not (Test-VMateComponentInteger $Document.schema_version) -or
+        [int]$Document.schema_version -ne 1 -or
+        [string]$Document.catalog_revision -cne $Revision -or
+        [string]$Document.scope -cne $Scope -or
+        $Document.$ItemsField -isnot [System.Array]) {
+        throw "$Label 的版本、修订、范围或条目数组无效。"
     }
 }
 
 function Read-VMateComponentManifest {
     param([string]$Path)
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "找不到共享部件目录：$Path"
-    }
-    try {
-        $root = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
-            ConvertFrom-Json -ErrorAction Stop
-    } catch {
-        throw "共享部件目录不是有效 JSON：$Path；$($_.Exception.Message)"
-    }
+    $root = Read-VMateComponentJson $Path '共享部件目录'
+    Assert-VMatePolicyFields $root @('schema_version', 'catalog_revision',
+        'scope', 'storage_catalog', 'gpu_board_catalog', 'gpus', 'monitors',
+        'hid') '部件目录根对象'
     if (-not (Test-VMateComponentInteger $root.schema_version) -or
         [int]$root.schema_version -ne 1 -or
         $root.catalog_revision -isnot [string] -or
-        -not [string]$root.catalog_revision) {
-        throw '部件目录只支持 schema_version=1，且必须包含 catalog_revision。'
+        [string]$root.catalog_revision -notmatch '^\d{4}-\d{2}-\d{2}\.\d+$') {
+        throw '部件目录只支持 schema_version=1 和日期格式 catalog_revision。'
     }
-    if ([string]$root.scope.gpu -ne 'out_of_scope_virtual_display') {
-        throw '部件目录必须明确 GPU 为本分支范围外的虚拟显示。'
+    Assert-VMatePolicyFields $root.scope @('gpu', 'tablet') '部件目录 scope'
+    if ([string]$root.scope.gpu -cne 'out_of_scope_virtual_display' -or
+        [string]$root.scope.tablet -cne
+            'generic_virtual_absolute_pointer') {
+        throw '部件目录 scope 与当前无 GPU 直通分支不一致。'
     }
-    if ([string]$root.scope.tablet -ne 'generic_virtual_absolute_pointer') {
-        throw '部件目录必须明确 tablet 为通用虚拟绝对指针。'
+    Assert-VMatePolicyFields $root.hid @('keyboards', 'mice', 'tablets') `
+        '部件目录 hid'
+
+    $storagePath = Resolve-VMateComponentCatalogPath $Path `
+        $root.storage_catalog 'storage_catalog'
+    $gpuBoardPath = Resolve-VMateComponentCatalogPath $Path `
+        $root.gpu_board_catalog 'gpu_board_catalog'
+    $storageDocument = Read-VMateComponentJson $storagePath 'SSD 子目录'
+    $gpuBoardDocument = Read-VMateComponentJson $gpuBoardPath 'AIB GPU 子目录'
+    Assert-VMateChildCatalogHeader $storageDocument `
+        ([string]$root.catalog_revision) 'verified_exact_512gb_nvme_only' `
+        'storage' 'SSD 子目录'
+    Assert-VMateChildCatalogHeader $gpuBoardDocument `
+        ([string]$root.catalog_revision) `
+        'shallow_user_projection_no_gpu_passthrough' 'boards' 'AIB GPU 子目录'
+
+    $storages = @(Get-VMateValidatedComponentItems `
+            @($storageDocument.storage) `
+            'storage' { param($item) Assert-VMateStorageComponent $item })
+    $legacyGpus = @(Get-VMateValidatedComponentItems @($root.gpus) `
+            'gpus' { param($item) Assert-VMateGpuComponent $item })
+    $gpus = @(Get-VMateValidatedComponentItems @($gpuBoardDocument.boards) `
+            'gpu boards' { param($item) Assert-VMateGpuBoardComponent $item })
+    Assert-VMateGpuBoardCatalogContract $gpus 18 3
+    Assert-VMateMonitorCatalogSet @($root.monitors)
+    $monitors = @(Get-VMateValidatedComponentItems @($root.monitors) `
+            'monitors' { param($item) Assert-VMateMonitorComponent $item })
+    Assert-VMateMonitorTimingSelectorSet $monitors
+    $keyboards = @(Get-VMateValidatedComponentItems @($root.hid.keyboards) `
+            'keyboards' { param($item)
+                Assert-VMateHidComponent $item 'keyboards' '0x045E' '0x0750' `
+                    '0x0163' 'microsoft-wired-keyboard-600' `
+                    'Microsoft Wired Keyboard 600'
+            })
+    $mice = @(Get-VMateValidatedComponentItems @($root.hid.mice) 'mice' {
+            param($item)
+            Assert-VMateHidComponent $item 'mice' '0x045E' '0x00CB' `
+                '0x0163' 'microsoft-usb-optical-mouse' `
+                'Microsoft USB Optical Mouse'
+        })
+    $tablets = @(Get-VMateValidatedComponentItems @($root.hid.tablets) `
+            'tablets' { param($item) Assert-VMateTabletComponent $item })
+    if ($keyboards.Count -ne 1 -or $mice.Count -ne 1 -or
+        $tablets.Count -ne 1) {
+        throw '当前 HID 行为层要求键盘、鼠标和 tablet 各启用一个模板。'
     }
-    $storage = Get-VMateSingleEnabledComponent @($root.storage) 'storage'
-    $monitor = Get-VMateSingleEnabledComponent @($root.monitors) 'monitors'
-    $keyboard = Get-VMateSingleEnabledComponent @($root.hid.keyboards) 'keyboards'
-    $mouse = Get-VMateSingleEnabledComponent @($root.hid.mice) 'mice'
-    $tablet = Get-VMateSingleEnabledComponent @($root.hid.tablets) 'tablets'
-    Assert-VMateStorageComponent $storage
-    Assert-VMateMonitorComponent $monitor
-    Assert-VMateHidComponent $keyboard 'keyboards' '0x045E' '0x0750' '0x0163' `
-        'microsoft-wired-keyboard-600' 'Microsoft Wired Keyboard 600'
-    Assert-VMateHidComponent $mouse 'mice' '0x045E' '0x00CB' '0x0163' `
-        'microsoft-usb-optical-mouse' 'Microsoft USB Optical Mouse'
-    if ([string]$tablet.id -ne 'qemu-generic-usb-tablet' -or
-        [string]$tablet.vendor_id -ne '0x0627' -or
-        [string]$tablet.product_id -ne '0x0001' -or
-        [string]$tablet.bcd_device -ne '0x0000' -or
-        [string]$tablet.manufacturer -ne 'not_exposed' -or
-        [string]$tablet.product -ne 'QEMU USB Tablet' -or
-        $tablet.serial_exposed -ne $false -or
-        [string]$tablet.verification_status -ne 'qemu_native_virtual_device' -or
-        [string]$tablet.descriptor_fidelity -ne 'generic_virtual_only') {
-        throw '通用 tablet 目录与 patched C descriptor 不一致。'
+    if ($storages.Count -ne 4 -or
+        @($storages | Where-Object {
+                [int64]$_.raw_bytes -ne 512110190592L
+            }).Count -ne 0) {
+        throw '当前产品契约要求四款精确 512GB SSD 和十八款已审计 AIB GPU。'
     }
-    return [pscustomobject]@{
+    $profileGpuIds = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($gpu in @($gpus) + @($legacyGpus)) {
+        if (-not $profileGpuIds.Add([string]$gpu.id)) {
+            throw "AIB 与旧 GPU 目录存在重复 ID：$($gpu.id)"
+        }
+    }
+    $carrierIds = @($gpus | ForEach-Object {
+            ([string]$_.carrier_vendor).ToUpperInvariant() + ':' +
+                ([string]$_.carrier_device).ToUpperInvariant()
+        })
+    if (@($carrierIds | Select-Object -Unique).Count -ne $carrierIds.Count) {
+        throw 'AIB GPU 目录包含重复的 virtio 载体编号。'
+    }
+    $catalog = [pscustomobject]@{
         schema_version = [int]$root.schema_version
         catalog_revision = [string]$root.catalog_revision
-        catalog_digest = Get-VMateComponentDigest $root
-        storage = $storage
-        monitor = $monitor
-        keyboard = $keyboard
-        mouse = $mouse
-        tablet = $tablet
+        catalog_digest = Get-VMateComponentDigest ([ordered]@{
+                root = $root
+                storage = $storageDocument
+                gpu_boards = $gpuBoardDocument
+            })
+        storage_items = $storages
+        gpu_items = $gpus
+        legacy_gpu_items = $legacyGpus
+        gpu_profile_items = @($gpus) + @($legacyGpus)
+        monitor_items = $monitors
+        keyboard_items = $keyboards
+        mouse_items = $mice
+        tablet_items = $tablets
     }
+    return New-VMateResolvedComponents $catalog `
+        (Get-VMateWeightedComponent $storages '512G storage') `
+        (Get-VMateWeightedComponent $monitors 'monitors') `
+        $keyboards[0] $mice[0] $tablets[0] `
+        (Get-VMateWeightedComponent $gpus 'gpus')
 }
 
-function New-VMateComponentProfileBinding {
-    param([object]$Components)
-
-    return [ordered]@{
-        schema_version = [int]$Components.schema_version
-        catalog_revision = [string]$Components.catalog_revision
-        catalog_digest = [string]$Components.catalog_digest
-        storage_id = [string]$Components.storage.id
-        monitor_id = [string]$Components.monitor.id
-        keyboard_id = [string]$Components.keyboard.id
-        mouse_id = [string]$Components.mouse.id
-    }
-}
-
-function Assert-VMateComponentProfileBinding {
+function Get-VMateStorageCapacityCandidates {
     param(
-        [object]$Binding,
-        [object]$Components
+        [object[]]$Items,
+        [int64]$CapacityBytes
     )
 
-    $expected = New-VMateComponentProfileBinding $Components
-    foreach ($field in @('schema_version', 'catalog_revision', 'catalog_digest',
-            'storage_id', 'monitor_id', 'keyboard_id', 'mouse_id')) {
-        if (-not (Test-VMateComponentProperty $Binding $field) -or
-            [string]$Binding.$field -ne [string]$expected.$field) {
-            throw "硬件 profile 的部件绑定 '$field' 与当前目录不一致；请审核后 reroll。"
-        }
+    if ($CapacityBytes -lt 1) {
+        throw '磁盘 virtual-size 必须是正整数。'
     }
+    $matched = @($Items | Where-Object {
+            [int64]$_.raw_bytes -eq $CapacityBytes
+        })
+    if ($matched.Count -lt 1) {
+        throw "启用的存储部件中没有 raw_bytes=$CapacityBytes 的精确匹配项。"
+    }
+    return $matched
 }
 
-function Get-VMateNvmeSubnqn {
-    param(
-        [object]$Components,
-        [string]$Uuid
-    )
 
-    if ($Uuid -notmatch
-        '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -or
-        $Uuid -in @('00000000-0000-4000-8000-000000000000',
-            'ffffffff-ffff-4fff-bfff-ffffffffffff')) {
-        throw 'NVMe subnqn 需要规范的小写 RFC 4122 v4 UUID。'
-    }
-    $value = ([string]$Components.storage.nvme.subnqn_template).Replace(
-        '{uuid}', $Uuid)
-    $byteLength = [System.Text.Encoding]::UTF8.GetByteCount($value)
-    if ($value -notmatch
-        '^nqn\.2014-08\.org\.nvmexpress:uuid:[0-9a-f-]{36}$' -or
-        $byteLength -gt 223 -or $value -match '[{},\r\n]') {
-        throw '由部件目录生成的 NVMe subnqn 无效。'
-    }
-    return $value
-}
-
-function Get-VMateMonitorEdidSuffix {
-    param(
-        [object]$Components,
-        [object]$Profile
-    )
-
-    $monitor = $Components.monitor
-    $range = $monitor.range
-    $timing = $monitor.secondary_timing
-    $fields = [ordered]@{
-        'edid-vendor' = [string]$monitor.vendor_code
-        'edid-name' = [string]$monitor.name
-        'edid-serial' = [string]$Profile.identity.monitor_serial
-        'edid-width-mm' = [int]$monitor.width_mm
-        'edid-height-mm' = [int]$monitor.height_mm
-        'edid-product-id' = ([string]$monitor.product_id).ToLowerInvariant()
-        'edid-manufacture-week' = [int]$monitor.manufacture_week
-        'edid-manufacture-year' = [int]$monitor.manufacture_year
-        'edid-video-input' = ([string]$monitor.video_input).ToLowerInvariant()
-        'edid-min-vfreq-hz' = [int]$range.min_vfreq_hz
-        'edid-max-vfreq-hz' = [int]$range.max_vfreq_hz
-        'edid-min-hfreq-khz' = [int]$range.min_hfreq_khz
-        'edid-max-hfreq-khz' = [int]$range.max_hfreq_khz
-        'edid-max-pixel-clock-mhz' = [int]$range.max_pixel_clock_mhz
-        'edid-secondary-xres' = [int]$timing.xres
-        'edid-secondary-yres' = [int]$timing.yres
-        'edid-secondary-refresh-rate' = [int]$timing.refresh_millihz
-    }
-    $pairs = @($fields.GetEnumerator() | ForEach-Object {
-        $_.Key + '=' + (ConvertTo-VMateQemuString ([string]$_.Value))
-    })
-    return ',' + ($pairs -join ',')
-}
-
-function Assert-VMateQemuImgVersion {
-    param([string]$VersionOutput)
-
-    if ($VersionOutput -notmatch '^qemu-img version 11\.0\.2(?:\s|\()') {
-        throw "qemu-img 必须与当前 QEMU 11.0.2 构建同版本；实际输出：$VersionOutput"
-    }
-}
-
-function Assert-VMateStorageInfo {
-    param(
-        [object]$Info,
-        [int64]$ExpectedBytes
-    )
-
-    if ([int64]$Info.'virtual-size' -ne $ExpectedBytes) {
-        throw "磁盘虚拟容量 $($Info.'virtual-size') bytes 与部件目录 $ExpectedBytes bytes 不一致。"
-    }
-    if ([string]$Info.format -cne 'qcow2') {
-        throw "磁盘格式 $($Info.format) 不是启动器要求的 qcow2。"
-    }
-}
-
-function Assert-VMateStorageCapacity {
-    param(
-        [string]$QemuImg,
-        [string]$Disk,
-        [int64]$ExpectedBytes,
-        [bool]$DryRun
-    )
-
-    if ($DryRun) {
-        return
-    }
-    if (-not (Test-Path -LiteralPath $QemuImg -PathType Leaf)) {
-        throw "找不到同版本 qemu-img.exe，无法核验 NVMe 容量：$QemuImg"
-    }
-    try {
-        $versionOutput = & $QemuImg '--version' 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw "qemu-img --version exit code=$LASTEXITCODE；$versionOutput"
-        }
-        Assert-VMateQemuImgVersion -VersionOutput $versionOutput
-        $output = & $QemuImg 'info' '--output=json' $Disk 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw "qemu-img exit code=$LASTEXITCODE；$output"
-        }
-        $info = $output | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-        throw "无法核验磁盘版本、格式和虚拟容量：$($_.Exception.Message)"
-    }
-    Assert-VMateStorageInfo -Info $info -ExpectedBytes $ExpectedBytes
-}
+. (Join-Path $PSScriptRoot 'VMate.ComponentSelection.ps1')

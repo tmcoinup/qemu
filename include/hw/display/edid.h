@@ -7,11 +7,13 @@ typedef struct qemu_edid_info {
     const char *vendor; /* http://www.uefi.org/pnp_id_list */
     const char *name;
     const char *serial;
+    uint32_t    binary_serial;
     uint16_t    width_mm;
     uint16_t    height_mm;
     uint16_t    product_id;
     uint16_t    manufacture_year;
     uint8_t     manufacture_week;
+    uint8_t     revision;
     uint8_t     video_input;
     uint8_t     min_vfreq_hz;
     uint8_t     max_vfreq_hz;

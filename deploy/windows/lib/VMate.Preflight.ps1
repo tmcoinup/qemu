@@ -264,9 +264,12 @@ function Get-VMateMonitorEdidCapabilityProperties {
     # 防止新增 EDID 字段时只更新正式 argv 而遗漏其中一条显示路径。
     return @(
         'edid-fixed-native',
+        'edid-managed-timing-version',
         'edid-vendor',
         'edid-name',
         'edid-serial',
+        'edid-binary-serial',
+        'edid-revision',
         'edid-width-mm',
         'edid-height-mm',
         'edid-product-id',
@@ -323,7 +326,7 @@ function Assert-VMateQemuDeviceCapabilities {
         'hda-duplex' = @('x-identity-compat', 'x-codec-id',
             'x-codec-revision', 'x-codec-subsystem-id')
         'e1000e' = @('subsys_ven', 'subsys')
-        'nvme' = @('use-samsung-id', 'model-number', 'firmware-rev',
+        'nvme' = @('x-identity-profile', 'model-number', 'firmware-rev',
             'subsys-vendor-id', 'subsys-id', 'subnqn')
         # 中文注释：Windows 启动参数默认启用 guest LED 驱动的 NumLock 策略；能力
         # 门禁必须先验证自定义 QEMU 属性，避免拼好命令后才以 unknown property 退出。

@@ -12,6 +12,8 @@ REFRESH_SCRIPT="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
 APPLY_SCRIPT="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 LOCK_PROBE_HELPER="$SCRIPT_DIR/fixtures/run_gpu_identity_lock_probe.sh"
 TRANSACTION_FIXTURE="$SCRIPT_DIR/fixtures/gpu_identity_transaction_fixture.ps1"
+GPU_CASE_HELPER="$SCRIPT_DIR/fixtures/gpu_board_catalog_cases.ps1"
+GPU_BOARDS="$REPO_ROOT/deploy/hardware/gpu-boards.json"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -21,17 +23,21 @@ fail() {
 command -v pwsh >/dev/null 2>&1 || fail "缺少 pwsh"
 [[ -f "$LOCK_PROBE_HELPER" ]] || fail "缺少 identity mutex 并发测试 helper"
 [[ -f "$TRANSACTION_FIXTURE" ]] || fail "缺少 identity transaction registry fixture"
+[[ -f "$GPU_CASE_HELPER" ]] || fail "缺少离线 GPU 板卡测试 helper"
+[[ -f "$GPU_BOARDS" ]] || fail "缺少离线 GPU 板卡目录"
 
 # 把行数上限本身放进 quick 回归，避免后续又把 fixture/并发探针塞回主文件。
 # 按项目规则只统计非空、非注释行；中文说明不占用 500 行代码预算。
-for test_source in "$0" "$LOCK_PROBE_HELPER" "$TRANSACTION_FIXTURE"; do
+for test_source in "$0" "$LOCK_PROBE_HELPER" "$TRANSACTION_FIXTURE" \
+        "$GPU_CASE_HELPER"; do
     code_lines="$(awk '!/^[[:space:]]*($|#)/ { count++ } END { print count + 0 }' \
         "$test_source")"
     (( code_lines <= 500 )) || fail "$test_source 非注释代码行=$code_lines，超过 500"
 done
 
 TRANSACTION_SCRIPT="$TRANSACTION_SCRIPT" FIXTURE_HELPER="$TRANSACTION_FIXTURE" \
-    REFRESH_SCRIPT="$REFRESH_SCRIPT" \
+    REFRESH_SCRIPT="$REFRESH_SCRIPT" GPU_CASE_HELPER="$GPU_CASE_HELPER" \
+    GPU_BOARDS="$GPU_BOARDS" \
     pwsh -NoLogo -NoProfile -NonInteractive -Command '
 $ErrorActionPreference = "Stop"
 . $env:TRANSACTION_SCRIPT
@@ -42,9 +48,51 @@ Invoke-WithIdentityWriterLock {
 }
 if (-not $script:nestedLockEntered) { throw "同线程 named mutex 不可重入" }
 . $env:FIXTURE_HELPER
+. $env:GPU_CASE_HELPER
 
-# 生产 refresh 的 staged reader 是 Commit 投影的首写门禁。schema-1 receipt 仍可
-# Recover/Rollback，但即使处于 Prepared 也必须在碰 Enum/Class/pointer 前拒绝。
+# 18 个 carrier 必须在 durable reader 中还原为各自逻辑主 ID/subsystem；
+# 特别覆盖合法的 subsystem device=0000。任一字段串板都必须拒绝。
+$aibCases = @(Get-TestGpuBoardCases $env:GPU_BOARDS)
+Assert-TestGpuBoardCoverage $aibCases
+$canonicalFields = @(
+    "SpoofName", "SpoofVendor", "SpoofBios", "SpoofRamMb", "SpoofMemoryType",
+    "SpoofMemoryBusWidthBits", "SpoofBaseClockKHz", "SpoofBoostClockKHz",
+    "SpoofMemoryClockKHz", "SpoofSliSupported", "SpoofPciVendorId",
+    "SpoofPciDeviceId", "SpoofSubsystemVendorId", "SpoofSubsystemDeviceId",
+    "SpoofRevisionId"
+)
+$caseIndex = 0
+foreach ($case in $aibCases) {
+    $caseIndex++
+    $id = ("{0:X32}" -f ([UInt64](0x1000 + $caseIndex)))
+    $key = New-FakeRegistryKey
+    $source = "PCI\VEN_1AF4&DEV_1050&SUBSYS_" + $case.Carrier +
+        ("&REV_{0:X2}\3&AIB&0&30" -f $case.Revision)
+    Set-CompleteIdentityValues $key $id 2 $source `
+        $case.Name $true
+    Set-AibIdentityValues $key $case
+    $snapshot = Read-ValidatedIdentitySnapshot $key $id @(2)
+    if ($snapshot.SpoofSubsystemVendorId -ne $case.SubVendor -or
+        $snapshot.SpoofSubsystemDeviceId -ne $case.SubDevice) {
+        throw ("AIB carrier 未保留 logical subsystem：" + $case.Carrier)
+    }
+    foreach ($field in $canonicalFields) {
+        $original = $key.Values[$field]; $kind = $key.Kinds[$field]
+        $mixed = if ($original -is [string]) { [string]$original + "-MIXED" }
+            else { [int]$original + 1 }
+        Set-FakeValue $key $field $mixed $kind
+        $rejected = $false
+        try { Read-ValidatedIdentitySnapshot $key $id @(2) | Out-Null }
+        catch { $rejected = $true }
+        if (-not $rejected) {
+            throw ("AIB canonical 字段混搭未拒绝：" + $case.Carrier + "/" + $field)
+        }
+        Set-FakeValue $key $field $original $kind
+    }
+}
+
+# 生产 refresh 的 staged reader 是 Commit 投影的首写门禁。schema-1 已不含完整
+# AIB 原子 bundle，即使处于 Prepared 也必须在碰 Enum/Class/pointer 前拒绝。
 $tokens = $null; $parseErrors = $null
 $refreshAst = [System.Management.Automation.Language.Parser]::ParseFile(
     $env:REFRESH_SCRIPT, [ref]$tokens, [ref]$parseErrors)
@@ -84,92 +132,13 @@ if ($result.Action -cne "RolledBack") { throw "kill 后 Recover 没有执行 rol
 Assert-RolledBack $script:fixture
 if ($null -ne (Invoke-RecoverOrRollback -Recover)) { throw "Recover 不是幂等操作" }
 
-# 现场 VM 可能留下 schema-1 receipt；新读者必须按旧版 spoof contract 做 CAS，
-# 而不是用 schema-2 indirect INF 字符串误判第三方修改。
-$script:fixture = New-TransactionFixture "B1B1B1B1B1B1B1B1B1B1B1B1B1B1B1B1" $true Committed 1
-$legacyReceipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
-if ($legacyReceipt.ProjectedEnum.DeviceDesc.Value -cne "NVIDIA GeForce GTX 1050 Ti" -or
-    $legacyReceipt.ProjectedClass.MatchingDeviceId.Value -cne "PCI\VEN_10DE&DEV_1C82") {
-    throw "schema-1 projected CAS contract 未兼容"
-}
-if ((Invoke-RecoverOrRollback -Recover).Action -cne "RolledBack") {
-    throw "schema-1 receipt 未完成 rollback"
-}
-Assert-RolledBack $script:fixture
-
-# 现场升级路径：旧 CurrentIdentity 指向带正确自 ID 的 schema-1。旧实现会在
-# 这里重现“PreviousIdentityId 不是完整 schema-2 快照”；修复后 receipt 必须把
-# 它视为显式 legacy rollback pointer，允许 CAS 发布字段完整的新 schema-2。
-$script:fixture = New-TransactionFixture "66666666666666666666666666666666" $true Prepared
+# 旧 schema-1 不再具备完整 AIB 原子 bundle，必须在 pointer/journal 首写前拒绝。
+$script:fixture = New-TransactionFixture "B1B1B1B1B1B1B1B1B1B1B1B1B1B1B1B1" $true Prepared
 Set-LegacyPreviousIdentity $script:fixture $true
-Set-FakeValue $script:fixture.Transaction PreviousIdentitySchemaVersion 1 `
-    ([Microsoft.Win32.RegistryValueKind]::DWord)
-Set-FakeValue $script:fixture.Config CurrentIdentity $script:fixture.OldId `
-    ([Microsoft.Win32.RegistryValueKind]::String)
-Set-FakeValue $script:fixture.Config SpoofName "NVIDIA OLD GPU" `
-    ([Microsoft.Win32.RegistryValueKind]::String)
-$receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
-if ([int]$receipt.PreviousIdentitySchemaVersion -ne 1) {
-    throw "schema-1 PreviousIdentity 未被显式标记为 legacy"
-}
-$expected = [pscustomobject]@{
-    Present=$receipt.PreviousPointerPresent; Value=$receipt.PreviousIdentityId
-}
-Set-CurrentIdentityPointer $script:fixture.Config $expected $true $receipt.NewIdentityId
-Set-FakeValue $script:fixture.Config SpoofName $receipt.NewSpoofName `
-    ([Microsoft.Win32.RegistryValueKind]::String)
-Set-TransactionState $script:fixture.Config $receipt.NewIdentityId Prepared Committed
-Set-TransactionState $script:fixture.Config $receipt.NewIdentityId Committed Completed
-Clear-PendingIdentity $script:fixture.Config $receipt.NewIdentityId
-if ([string]$script:fixture.Config.Values.CurrentIdentity -cne $script:fixture.IdentityId -or
-    [int]$script:fixture.Identity.Values.IdentitySchemaVersion -ne 2 -or
-    $script:fixture.Config.Values.ContainsKey("PendingIdentity")) {
-    throw "schema-1 CurrentIdentity 未成功迁移到完整 schema-2"
-}
+Assert-RecoveryRejectedWithoutMutation $script:fixture `
+    "完整旧 schema-1 身份未 fail-closed"
 
-# legacy pointer 已 CAS 到新 schema-2 后若进程崩溃，durable receipt 仍必须恢复
-# 原 schema-1 pointer、旧名称镜像和两个投影 journal。这里刻意不写新版的
-# PreviousIdentitySchemaVersion marker，验证现场遗留 txn-v1 仍可恢复。
-$script:fixture = New-TransactionFixture "77777777777777777777777777777777" $true Committed
-Set-LegacyPreviousIdentity $script:fixture $true
-$result = Invoke-RecoverOrRollback -Recover
-if ($result.Action -cne "RolledBack") { throw "schema-1 提交后故障没有回滚" }
-Assert-RolledBack $script:fixture
-
-# schema-1 的必填 IdentityId 正确时应兼容。此切点位于投影完成、pointer
-# CAS 之前，回滚只能保留原 legacy pointer，并恢复 journal。
-$script:fixture = New-TransactionFixture "88888888888888888888888888888888" $true Prepared
-Set-LegacyPreviousIdentity $script:fixture $true
-Set-FakeValue $script:fixture.Config CurrentIdentity $script:fixture.OldId `
-    ([Microsoft.Win32.RegistryValueKind]::String)
-Set-FakeValue $script:fixture.Config SpoofName "NVIDIA OLD GPU" `
-    ([Microsoft.Win32.RegistryValueKind]::String)
-$result = Invoke-RecoverOrRollback -Recover
-if ($result.Action -cne "RolledBack") { throw "schema-1 提交前故障没有回滚" }
-Assert-RolledBack $script:fixture
-
-# CAS 已把 pointer 改成新 schema-2、但事务状态仍停在 Prepared 的断电窗口也必须
-# 识别为本事务状态并恢复旧 schema-1；不能只支持 Committed 的现场残留。
-$script:fixture = New-TransactionFixture "89898989898989898989898989898989" $true Prepared
-Set-LegacyPreviousIdentity $script:fixture $true
-$result = Invoke-RecoverOrRollback -Recover
-if ($result.Action -cne "RolledBack") { throw "schema-1 CAS 后 Prepared 故障没有回滚" }
-Assert-RolledBack $script:fixture
-
-# Complete 先持久化 Completed、清 Pending 前被终止时，新 schema-2 已正式生效。
-# legacy previous 只用于验证 receipt，Recover 必须仅清 Pending，绝不能倒退 pointer。
-$script:fixture = New-TransactionFixture "8A8A8A8A8A8A8A8A8A8A8A8A8A8A8A8A" $true Completed
-Set-LegacyPreviousIdentity $script:fixture $true
-$result = Invoke-RecoverOrRollback -Recover
-if ($result.Action -cne "Completed" -or
-    $script:fixture.Config.Values.ContainsKey("PendingIdentity") -or
-    [string]$script:fixture.Config.Values.CurrentIdentity -cne $script:fixture.IdentityId -or
-    [string]$script:fixture.Enum.Values.FriendlyName -cne "NVIDIA GeForce GTX 1050 Ti") {
-    throw "schema-1 previous 的 Completed 恢复错误回滚了正式身份"
-}
-
-# legacy 兼容面只允许字段完整的 schema=1。半成品/未知 schema、自 ID 不一致
-# 以及 marker 与实际 schema 不一致，都必须在任何 pointer/journal 写入前拒绝。
+# 未知 schema、错误类型/自 ID 及 previous marker 不一致也必须拒绝。
 foreach ($badSchema in 0, 3) {
     $script:fixture = New-TransactionFixture "99999999999999999999999999999999" $true Prepared
     Set-LegacyPreviousIdentity $script:fixture $true
@@ -191,28 +160,12 @@ Set-LegacyPreviousIdentity $script:fixture $true
 Set-FakeValue $script:fixture.OldIdentity IdentityId 1 `
     ([Microsoft.Win32.RegistryValueKind]::DWord)
 Assert-RecoveryRejectedWithoutMutation $script:fixture "schema-1 自 ID 类型错误未安全拒绝"
-$schema1CommonFields = @(
-    "IdentitySchemaVersion", "IdentityId", "SpoofName", "SpoofVendor", "SpoofBios",
-    "SpoofPciVendorId", "SpoofPciDeviceId", "SpoofSubsystemVendorId",
-    "SpoofSubsystemDeviceId", "SpoofRevisionId", "SpoofPciBusId", "SpoofPciSlotId",
-    "SpoofPciFunctionId", "SpoofRamMb", "SourceInstanceId", "IdentityMode"
-)
-foreach ($missingField in $schema1CommonFields) {
-    $script:fixture = New-TransactionFixture "A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1" $true Prepared
-    Set-LegacyPreviousIdentity $script:fixture $true
-    [void]$script:fixture.OldIdentity.Values.Remove($missingField)
-    [void]$script:fixture.OldIdentity.Kinds.Remove($missingField)
-    Assert-RecoveryRejectedWithoutMutation $script:fixture `
-        ("schema-1 缺少 common 字段未安全拒绝：" + $missingField)
-}
 $script:fixture = New-TransactionFixture "A2A2A2A2A2A2A2A2A2A2A2A2A2A2A2A2" $true Prepared
-Set-LegacyPreviousIdentity $script:fixture $true
-Set-FakeValue $script:fixture.Transaction PreviousIdentitySchemaVersion 2 `
+Set-FakeValue $script:fixture.Transaction PreviousIdentitySchemaVersion 1 `
     ([Microsoft.Win32.RegistryValueKind]::DWord)
 Assert-RecoveryRejectedWithoutMutation $script:fixture "previous schema marker 与快照不一致未拒绝"
 $script:fixture = New-TransactionFixture "A3A3A3A3A3A3A3A3A3A3A3A3A3A3A3A3" $true Prepared
-Set-LegacyPreviousIdentity $script:fixture $true
-Set-FakeValue $script:fixture.Transaction PreviousIdentitySchemaVersion "1" `
+Set-FakeValue $script:fixture.Transaction PreviousIdentitySchemaVersion "2" `
     ([Microsoft.Win32.RegistryValueKind]::String)
 Assert-RecoveryRejectedWithoutMutation $script:fixture "previous schema marker 类型错误未拒绝"
 $script:fixture = New-TransactionFixture "A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5" $false Prepared
@@ -220,15 +173,15 @@ Set-FakeValue $script:fixture.Transaction PreviousIdentitySchemaVersion 2 `
     ([Microsoft.Win32.RegistryValueKind]::DWord)
 Assert-RecoveryRejectedWithoutMutation $script:fixture "无 previous pointer 却接受 schema marker"
 
-# schema-2 继续执行严格原路径，不能借 legacy 分支省略或放宽 IdentityId。
+# schema-2 必须执行严格原路径，不能省略或放宽 IdentityId。
 $script:fixture = New-TransactionFixture "ACACACACACACACACACACACACACACACAC" $true Prepared
 [void]$script:fixture.OldIdentity.Values.Remove("IdentityId")
 [void]$script:fixture.OldIdentity.Kinds.Remove("IdentityId")
-Assert-RecoveryRejectedWithoutMutation $script:fixture "schema-2 缺少自 ID 却回退到 legacy"
+Assert-RecoveryRejectedWithoutMutation $script:fixture "schema-2 缺少自 ID 未拒绝"
 $script:fixture = New-TransactionFixture "AFAFAFAFAFAFAFAFAFAFAFAFAFAFAFAF" $true Prepared
 Set-FakeValue $script:fixture.OldIdentity IdentityId `
     "BFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBF" ([Microsoft.Win32.RegistryValueKind]::String)
-Assert-RecoveryRejectedWithoutMutation $script:fixture "schema-2 错误自 ID 却回退到 legacy"
+Assert-RecoveryRejectedWithoutMutation $script:fixture "schema-2 错误自 ID 未拒绝"
 $schema2ExtensionFields = @(
     "SpoofMemoryType", "SpoofMemoryBusWidthBits", "SpoofBaseClockKHz",
     "SpoofBoostClockKHz", "SpoofMemoryClockKHz", "SpoofSliSupported"
@@ -273,7 +226,8 @@ $result = Invoke-RecoverOrRollback -Recover
 if ($result.Action -cne "Completed" -or
     $script:fixture.Config.Values.ContainsKey("PendingIdentity") -or
     [string]$script:fixture.Config.Values.CurrentIdentity -cne $script:fixture.IdentityId -or
-    [string]$script:fixture.Enum.Values.FriendlyName -cne "NVIDIA GeForce GTX 1050 Ti") {
+    [string]$script:fixture.Enum.Values.FriendlyName -cne `
+        "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)") {
     throw "Completed-before-clear 恢复语义错误"
 }
 
@@ -283,7 +237,8 @@ Set-FakeValue $script:fixture.Config CurrentIdentity "EEEEEEEEEEEEEEEEEEEEEEEEEE
     ([Microsoft.Win32.RegistryValueKind]::String)
 $rejected = $false
 try { Invoke-RecoverOrRollback -Recover | Out-Null } catch { $rejected = $true }
-if (-not $rejected -or [string]$script:fixture.Enum.Values.FriendlyName -cne "NVIDIA GeForce GTX 1050 Ti") {
+if (-not $rejected -or [string]$script:fixture.Enum.Values.FriendlyName -cne `
+    "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)") {
     throw "并发 pointer 没有在 journal 前 fail-closed"
 }
 
@@ -307,7 +262,7 @@ Set-FakeValue $script:fixture.Class DriverDesc "THIRD-PARTY" `
 $rejected = $false
 try { Invoke-RecoverOrRollback -Recover | Out-Null } catch { $rejected = $true }
 if (-not $rejected -or [string]$script:fixture.Enum.Values.FriendlyName -cne
-    "NVIDIA GeForce GTX 1050 Ti" -or
+    "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" -or
     [string]$script:fixture.Enum.Values.DeviceDesc -cne
         "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller") {
     throw "Class CAS 失败前 Enum 已被部分恢复"
@@ -350,8 +305,8 @@ foreach($marker in @(
 ' >/dev/null
 
 # 跨组件提交顺序必须是 GPU API coordinator Install(receipt 保留) → pointer Commit →
-# identity Complete → reader Finalize。前三步任何失败时，finally 必须先由仍兼容
-# schema-1/2 的新 reader 承接旧 pointer，再恢复可能只懂旧 schema 的历史 DLL。
+# identity Complete → reader Finalize。前三步任何失败时，finally 必须先由严格
+# schema-2 reader 承接旧 pointer，再恢复 GPU API 投影。
 gpu_api_install_line="$(rg -n -F '& $powershellExe @gpuApiInstallArgs' "$APPLY_SCRIPT" | cut -d: -f1)"
 commit_line="$(rg -n -F '& $identityHelperSource -CommitIdentity $identityTransactionId' "$APPLY_SCRIPT" | cut -d: -f1)"
 complete_line="$(rg -n -F '& $identityHelperSource -CompleteIdentity $identityTransactionId' "$APPLY_SCRIPT" | cut -d: -f1)"
@@ -373,13 +328,13 @@ recover_line="$(rg -n -F '& $identityHelperSource -RecoverPending' "$APPLY_SCRIP
 stage_line="$(rg -n -F '& $identityHelperSource -Stage -SpoofName' "$APPLY_SCRIPT" | cut -d: -f1)"
 [[ -n "$recover_line" && -n "$stage_line" && "$recover_line" -lt "$stage_line" ]] \
     || fail "生产 apply 未保证 Recover/旧任务屏障先于 Stage"
-legacy_preflight_line="$(rg -n -F '$oldIdentity = Get-PreviousIdentitySnapshot $configKey $oldPointer.Value' \
+old_preflight_line="$(rg -n -F '$oldIdentity = Get-PreviousIdentitySnapshot $configKey $oldPointer.Value' \
     "$PERSIST_SCRIPT" | cut -d: -f1)"
 pending_publish_line="$(rg -n -F "SetValue('PendingIdentity', \$versionId" \
     "$PERSIST_SCRIPT" | cut -d: -f1)"
-[[ -n "$legacy_preflight_line" && -n "$pending_publish_line" && \
-    "$legacy_preflight_line" -lt "$pending_publish_line" ]] \
-    || fail "Stage 未在发布 PendingIdentity 前预检旧 schema-1/schema-2 pointer"
+[[ -n "$old_preflight_line" && -n "$pending_publish_line" && \
+    "$old_preflight_line" -lt "$pending_publish_line" ]] \
+    || fail "Stage 未在发布 PendingIdentity 前严格预检旧 pointer"
 commit_refresh_line="$(rg -n -F '& $refreshPath -StagedIdentityId $CommitIdentity' "$PERSIST_SCRIPT" | cut -d: -f1)"
 commit_pointer_line="$(rg -n -F 'Set-CurrentIdentityPointer $configKey $expected $true' "$PERSIST_SCRIPT" | cut -d: -f1)"
 commit_preflight_line="$(rg -n -F "throw 'Commit 投影前 CurrentIdentity 已偏离事务基线'" \

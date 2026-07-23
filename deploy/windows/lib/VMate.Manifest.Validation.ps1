@@ -5,11 +5,74 @@
     校验共享整机清单中会进入 Windows profile/QEMU 参数的深层硬件事实。
 
 .DESCRIPTION
-    主清单模块负责目录状态、fidelity、TPM 和内存组合；本模块补齐严格的
-    JSON 类型、CPU/主板系列、PCI 元组、BIOS 日期及设备身份校验。拆分后每个
+    本模块集中校验 fidelity、JSON 类型、CPU/主板系列、PCI 元组、BIOS 日期
+    及设备身份；主清单模块负责目录状态、TPM 和内存组合。拆分后每个
     PowerShell 文件保持在 500 行以内，同时与 Linux 校验器采用同一 fail-closed
     边界。
 #>
+
+function Assert-VMateManifestFidelity {
+    param([object]$Manifest)
+
+    if (-not (Test-VMateJsonProperty $Manifest 'fidelity')) {
+        throw '共享硬件清单缺少 fidelity；不能判断 Q35 与目标 PCH 的真实性边界。'
+    }
+    $fidelity = $Manifest.fidelity
+    $expectedText = [ordered]@{
+        supported_semantics = 'launch_candidate_after_runtime_preflight'
+        machine_model = 'q35'
+        chipset_identity_scope = 'pci_configuration_identity_only'
+        target_pch_behavior = 'not_emulated'
+        serial_identity_scope = 'synthetic_format_only_no_device_capture'
+        asset_tag_identity_scope = 'synthetic_format_only_no_device_capture'
+        mac_identity_scope = 'vendor_oui_synthetic_suffix'
+        pci_subsystem_evidence = 'catalog_reference_no_lspci_snapshot'
+    }
+    foreach ($entry in $expectedText.GetEnumerator()) {
+        if (-not (Test-VMateJsonProperty $fidelity $entry.Key) -or
+            [string]$fidelity.($entry.Key) -ne [string]$entry.Value) {
+            throw "共享清单 fidelity.$($entry.Key) 不是受控值 '$($entry.Value)'。"
+        }
+    }
+    if (-not (Test-VMateJsonProperty $fidelity 'target_pch_bdf_equivalent') -or
+        $fidelity.target_pch_bdf_equivalent -isnot [bool] -or
+        $fidelity.target_pch_bdf_equivalent -ne $false) {
+        throw '共享清单不得宣称 Q35 BDF 与目标 PCH 等价。'
+    }
+    if (-not (Test-VMateJsonProperty $fidelity 'bdf_layout')) {
+        throw '共享清单 fidelity 缺少经当前启动器验证的 bdf_layout。'
+    }
+
+    # 布局钉住 Linux/Windows 实际 Q35 枚举；不声称目标主板使用相同地址。
+    $layout = $fidelity.bdf_layout
+    $expectedLayout = [ordered]@{
+        mch = '00:00.0'
+        lpc = '00:1f.0'
+        ahci = '00:1f.2'
+        smbus = '00:1f.3'
+        linux_root_ports = '00:01.0,00:02.0,00:03.0,00:04.0'
+        linux_hda = '00:05.0'
+        windows_root_ports = '00:01.0,00:02.0,00:03.0'
+        windows_hda = '00:04.0'
+    }
+    $actualNames = @($layout.PSObject.Properties.Name)
+    if ($actualNames.Count -ne $expectedLayout.Count) {
+        throw '共享清单 bdf_layout 字段集合不完整或包含未知字段。'
+    }
+    foreach ($entry in $expectedLayout.GetEnumerator()) {
+        if (-not (Test-VMateJsonProperty $layout $entry.Key)) {
+            throw "共享清单 bdf_layout 缺少 '$($entry.Key)'。"
+        }
+        $actual = if ($entry.Key -like '*_root_ports') {
+            @($layout.($entry.Key)) -join ','
+        } else {
+            [string]$layout.($entry.Key)
+        }
+        if ($actual -ne [string]$entry.Value) {
+            throw "共享清单 bdf_layout.$($entry.Key) 与当前 Q35 启动器不一致。"
+        }
+    }
+}
 
 function Assert-VMateNonEmptyStringFields {
     param(
@@ -233,9 +296,15 @@ function Assert-VMatePlatformFacts {
         Assert-VMateHexValue $audio.$field `
             "平台 '$PlatformId'.devices.audio.$field"
     }
-    if ((@($audio.codec, $audio.codec_id, $audio.codec_revision,
-                $audio.codec_subsystem_id) -join '|') -cne
-        'ALC887|0x10ec0887|0x00100302|0x104386c7' -or
+    $audioContracts = @{
+        '0x1043' = 'ALC887|0x10ec0887|0x00100302|0x104386c7'
+        '0x1462' = 'ALC887|0x10ec0887|0x00100302|0x1462c708'
+        '0x1458' = 'ALC887|0x10ec0887|0x00100302|0x1458a182'
+    }
+    $expectedAudio = $audioContracts[[string]$board.subsystem_vendor]
+    if ($null -eq $expectedAudio -or
+        (@($audio.codec, $audio.codec_id, $audio.codec_revision,
+                $audio.codec_subsystem_id) -join '|') -cne $expectedAudio -or
         $audio.identity_fidelity -cne 'protocol_identity_only') {
         throw "平台 '$PlatformId' 的 ALC887 协议身份不是已审计组合。"
     }
@@ -245,6 +314,51 @@ function Assert-VMatePlatformFacts {
         throw "平台 '$PlatformId' 的内存电压或 rank 不受支持。"
     }
     Assert-VMateH310CpuPolicy -Platform $Platform -PlatformId $PlatformId
+}
+
+function Get-VMateExpectedPlatformId {
+    param(
+        [object]$Cpu,
+        [object]$Board
+    )
+
+    $name = [string]$Cpu.name
+    $vendorToken = ''
+    $cpuToken = ''
+    if ([string]$Cpu.vendor_id -eq 'AuthenticAMD' -and
+        $name -match '\bRyzen\s+(\d+)\s+([0-9A-Za-z]+)\b') {
+        $vendorToken = 'amd'
+        $cpuToken = "r$($Matches[1])-$($Matches[2].ToLowerInvariant())"
+    } elseif ([string]$Cpu.vendor_id -eq 'GenuineIntel' -and
+        $name -match '\bCore\(TM\)\s+i(\d)-([0-9A-Za-z]+)\b') {
+        $vendorToken = 'intel'
+        $cpuToken = "i$($Matches[1])-$($Matches[2].ToLowerInvariant())"
+    } elseif ([string]$Cpu.vendor_id -eq 'GenuineIntel' -and
+        $name -match '\bCeleron\(R\)\s+([A-Z]\d+)\b') {
+        $vendorToken = 'intel'
+        $cpuToken = "celeron-$($Matches[1].ToLowerInvariant())"
+    } elseif ([string]$Cpu.vendor_id -eq 'GenuineIntel' -and
+        $name -match '\bPentium\(R\)\s+Gold\s+([A-Z]\d+)\b') {
+        $vendorToken = 'intel'
+        $cpuToken = "pentium-$($Matches[1].ToLowerInvariant())"
+    } else {
+        throw "无法从 CPU 名称生成平台系列 ID：$name"
+    }
+    $boardVendors = @{
+        'ASUSTeK COMPUTER INC.' = @('asus', '0x1043')
+        'Micro-Star International Co., Ltd.' = @('msi', '0x1462')
+        'Gigabyte Technology Co., Ltd.' = @('gigabyte', '0x1458')
+        'ASRock' = @('asrock', '0x1849')
+    }
+    $boardVendor = $boardVendors[[string]$Board.manufacturer]
+    if ($null -eq $boardVendor -or
+        [string]$Board.subsystem_vendor -cne $boardVendor[1]) {
+        throw "主板厂商与 subsystem vendor 未注册：$($Board.manufacturer)"
+    }
+    $product = ([string]$Board.product -replace '\.0\b', '').Replace('.', '')
+    $boardToken = ($product.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
+    return "$vendorToken-$(([string]$Cpu.socket).ToLowerInvariant())-" +
+        "$cpuToken-$($boardVendor[0])-$boardToken"
 }
 
 function Assert-VMateH310CpuPolicy {

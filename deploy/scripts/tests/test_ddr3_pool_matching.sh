@@ -17,7 +17,6 @@ is_known_active_memory_product_pair() {
     local key="$1|$2|$3|$4"
     case "$key" in
         "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400" \
-        |"Kingston|KVR24N17S6/2|KVR24N17S8/4|2400" \
         |"Crucial|CT2G4DFS624A|CT4G4DFS824A|2400" \
         |"Kingston|KVR16N11S6/2|KVR16N11S8/4|1600" \
         |"SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600" \
@@ -45,7 +44,9 @@ for row in "${BOARD_POOL[@]}"; do
     esac
 done
 
-# 活动池只允许六组有型号级依据的 DDR4/DDR3。DDR3 只绑定老家用 socket，
+# 旧双料号视图只允许五组有型号级依据的 DDR4/DDR3。Kingston DDR4 仅有
+# 官方可证的 4GB 单品，由新 module API 选择，不伪造 2GB 料号来拼旧 ABI。
+# DDR3 只绑定老家用 socket，
 # 不会被默认 LGA1151/AM4 bundle 抽到。
 active_count=0
 for row in "${MEM_POOL[@]}"; do
@@ -67,7 +68,7 @@ for row in "${MEM_POOL[@]}"; do
     fi
     active_count=$((active_count + 1))
 done
-(( active_count == 6 )) || fail "活动内存池应为三组 DDR4 + 三组 DDR3"
+(( active_count == 5 )) || fail "旧双料号池应为两组 DDR4 + 三组 DDR3"
 
 # 三组已核验 DDR3 已因家用 compatibility bundle 转为活动物料。
 (( ${#MEM_DORMANT_POOL[@]} == 0 )) || fail "DDR3 不应继续留在 dormant 目录"

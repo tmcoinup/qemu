@@ -37,6 +37,9 @@ make_profile() {
     CPU_ASSET=6999
     # shellcheck disable=SC2034
     UUID=237c3804-420b-41bf-8155-1b8808de43a8
+    # UUID 同时是当前 NVMe 标准 SubNQN 的持久身份源；测试覆盖 CPU 字段时也必须
+    # 保持这组无关的原子身份自洽，不能依赖非严格模式绕过。
+    NVME_SUBNQN="${NVME_SUBNQN_TEMPLATE//\{uuid\}/$UUID}"
     stealth_save_profile "$path"
 
     if [[ "$omit_asset" == "1" ]]; then
@@ -66,46 +69,31 @@ test_explicit_cpu_asset_is_used() {
         || fail "SMBIOS type=4 did not use profile CPU_ASSET: $type4"
 }
 
-test_missing_cpu_asset_is_stable() {
+test_missing_cpu_asset_is_rejected() {
     local profile="$TMP_DIR/missing.profile"
-    local first second
 
     make_profile "$profile" 1
 
     unset CPU_ASSET
-    stealth_load_profile "$profile"
-    first="${CPU_ASSET:-}"
-
-    unset CPU_ASSET
-    stealth_load_profile "$profile"
-    second="${CPU_ASSET:-}"
-
-    [[ "$first" =~ ^[0-9]{4}$ ]] \
-        || fail "derived CPU_ASSET is not a 4-digit tag: $first"
-    [[ "$first" == "$second" ]] \
-        || fail "derived CPU_ASSET changed between loads: $first != $second"
+    if STRICT_HARDWARE=0 stealth_load_profile "$profile" >/dev/null 2>&1; then
+        fail "schema-1 profile 缺少 CPU_ASSET 时被静默修复"
+    fi
 }
 
-test_invalid_cpu_asset_is_repaired() {
+test_invalid_cpu_asset_is_rejected() {
     local profile="$TMP_DIR/invalid.profile"
-    local type4
 
     make_profile "$profile"
     sed -i 's/^CPU_ASSET=.*/CPU_ASSET=bad-asset/' "$profile"
 
     unset CPU_ASSET
-    stealth_load_profile "$profile"
-
-    [[ "${CPU_ASSET:-}" =~ ^[0-9]{4}$ ]] \
-        || fail "invalid CPU_ASSET was not repaired: ${CPU_ASSET:-}"
-
-    type4="$(type4_line)"
-    [[ "$type4" != *bad-asset* ]] \
-        || fail "SMBIOS type=4 leaked invalid CPU_ASSET: $type4"
+    if STRICT_HARDWARE=0 stealth_load_profile "$profile" >/dev/null 2>&1; then
+        fail "schema-1 profile 的非法 CPU_ASSET 被静默修复"
+    fi
 }
 
 test_explicit_cpu_asset_is_used
-test_missing_cpu_asset_is_stable
-test_invalid_cpu_asset_is_repaired
+test_missing_cpu_asset_is_rejected
+test_invalid_cpu_asset_is_rejected
 
 echo "OK: CPU asset profile checks passed"

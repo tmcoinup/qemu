@@ -34,7 +34,7 @@ source "$HELPER"
 source "$LIFECYCLE"
 
 # 新版 NVME_POOL 的稳定 ID 位于第 1 列，容量位于第 4 列；尾部扩列不应影响解析。
-row="samsung-970-pro-512gb|Samsung SSD 970 PRO 512GB|1B2QEXP7|512110190592|0x144D|0xA804|tail"
+row="samsung-970-pro-512gb|Samsung SSD 970 PRO 512GB|1B2QEXP7|512110190592|0x144D|0xA808|tail"
 base_boot_storage_parse_nvme_pool_row "$row"
 [[ "$BASE_NVME_COMPONENT_ID" == samsung-970-pro-512gb &&
    "$BASE_NVME_MODEL" == "Samsung SSD 970 PRO 512GB" &&

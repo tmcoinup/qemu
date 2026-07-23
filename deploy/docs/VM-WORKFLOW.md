@@ -378,8 +378,9 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 | `package.sh` | host 上打一个默认只含 `respawn-stealth.exe` 的 `dist/`（已 gitignore）|
 
 行为：先核验/绑定 `VioGpuDod` → 仅新装系统清模式缓存 → 按 PCI SUBSYS 查 GPU 池
-→ 改 `Class\{4d36e968}` + `Enum\PCI` + `Enum\DISPLAY` → 重启。所有依赖释放到
-`C:\ProgramData\StealthGPU\respawn-exe\`，不依赖网络。
+→ 只改 GPU 的 `Class\{4d36e968}` + `Enum\PCI` → 重启。显示器身份始终来自
+Host profile 注入的 QEMU EDID，`respawn-stealth` 不再改写 `Enum\DISPLAY` 或
+Monitor Class。所有依赖释放到 `C:\ProgramData\StealthGPU\respawn-exe\`，不依赖网络。
 
 ### 打包进 base（必需，封 base 前做一次）
 

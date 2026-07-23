@@ -8,6 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 PREFLIGHT="$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
+DISPLAY="$REPO_ROOT/deploy/windows/lib/VMate.Display.ps1"
 LAUNCHER="$REPO_ROOT/deploy/windows/start-vm.ps1"
 
 fail() {
@@ -45,11 +46,13 @@ test_static_contract() {
     done
     require_text "'x-speed', 'x-width'" "$PREFLIGHT"
     require_text 'function Get-VMateMonitorEdidCapabilityProperties' "$PREFLIGHT"
+    require_text "'edid-managed-timing-version'" "$PREFLIGHT"
     require_text 'function Test-VMateQemuHelpProperties' "$PREFLIGHT"
     require_text "'virtio-vga' = @(\$monitorEdidProperties" "$PREFLIGHT"
-    require_text "Test-VMateQemuHelpProperties -HelpOutput \$probeText" "$LAUNCHER"
+    require_text ". (Join-Path \$libraryRoot 'VMate.Display.ps1')" "$LAUNCHER"
+    require_text "Test-VMateQemuHelpProperties -HelpOutput \$probeText" "$DISPLAY"
     require_text "-RequireBlob \$GpuZeroCopy.IsPresent" "$LAUNCHER"
-    require_text 'function Test-VMateGpuHostmem' "$LAUNCHER"
+    require_text 'function Test-VMateGpuHostmem' "$DISPLAY"
     require_text "'share\edk2-x86_64-code.fd'" "$LAUNCHER"
     require_text "'share\edk2-i386-vars.fd'" "$LAUNCHER"
 }
@@ -84,10 +87,12 @@ elif [[ "$1" == "-device" && "$2" == *,help ]]; then
     for item in x-pci-vendor-id x-pci-device-id x-pci-revision \
         x-pci-sub-vendor-id x-pci-sub-device-id x-speed x-width \
         x-identity-compat x-codec-id x-codec-revision \
-        x-codec-subsystem-id subsys_ven subsys use-samsung-id \
+        x-codec-subsystem-id subsys_ven subsys x-identity-profile \
         model-number firmware-rev subsys-vendor-id subsys-id subnqn \
         vendorid productid manufacturer product x-force-numlock-on \
-        edid-fixed-native edid-vendor edid-name edid-serial edid-width-mm \
+        edid-fixed-native edid-managed-timing-version \
+        edid-vendor edid-name edid-serial \
+        edid-binary-serial edid-revision edid-width-mm \
         edid-height-mm edid-product-id edid-manufacture-week \
         edid-manufacture-year edid-video-input edid-min-vfreq-hz \
         edid-max-vfreq-hz edid-min-hfreq-khz edid-max-hfreq-khz \
@@ -125,38 +130,13 @@ test_dynamic_capabilities() {
     write_fake_qemu "$fake"
 
     # shellcheck disable=SC2016
-    VMATE_PREFLIGHT="$PREFLIGHT" VMATE_LAUNCHER="$LAUNCHER" \
+    VMATE_PREFLIGHT="$PREFLIGHT" VMATE_DISPLAY="$DISPLAY" \
         VMATE_FAKE_QEMU="$fake" \
         VMATE_FAKE_LOG="$log" "$shell_bin" -NoLogo -NoProfile -NonInteractive \
         -Command '
             $ErrorActionPreference = "Stop"
             . $env:VMATE_PREFLIGHT
-            $tokens = $null
-            $parseErrors = $null
-            $launcherAst =
-                [System.Management.Automation.Language.Parser]::ParseFile(
-                    $env:VMATE_LAUNCHER, [ref]$tokens, [ref]$parseErrors)
-            if ($parseErrors.Count -gt 0) {
-                throw "无法解析启动器：$($parseErrors -join "; ")"
-            }
-            $glFunction = $launcherAst.Find({
-                    param($node)
-                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                        $node.Name -eq "Test-VMateVirtioGpuGl"
-                }, $true)
-            if ($null -eq $glFunction) {
-                throw "启动器缺少 Test-VMateVirtioGpuGl"
-            }
-            . ([scriptblock]::Create($glFunction.Extent.Text))
-            $hostmemFunction = $launcherAst.Find({
-                    param($node)
-                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                        $node.Name -eq "Test-VMateGpuHostmem"
-                }, $true)
-            if ($null -eq $hostmemFunction) {
-                throw "启动器缺少 Test-VMateGpuHostmem"
-            }
-            . ([scriptblock]::Create($hostmemFunction.Extent.Text))
+            . $env:VMATE_DISPLAY
 
             function Assert-ProbeFails {
                 param([scriptblock]$Action, [string]$Expected)
@@ -207,6 +187,11 @@ test_dynamic_capabilities() {
             } "pcie-root-port"
             $env:VMATE_FAKE_MISSING =
                 "device:virtio-vga:edid-max-pixel-clock-mhz"
+            Assert-ProbeFails {
+                Assert-VMateQemuDeviceCapabilities -Qemu $qemu
+            } "virtio-vga"
+            $env:VMATE_FAKE_MISSING =
+                "device:virtio-vga:edid-managed-timing-version"
             Assert-ProbeFails {
                 Assert-VMateQemuDeviceCapabilities -Qemu $qemu
             } "virtio-vga"

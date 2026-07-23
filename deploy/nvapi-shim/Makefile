@@ -5,9 +5,11 @@
 CC32 ?= i686-w64-mingw32-gcc
 CC64 ?= x86_64-w64-mingw32-gcc
 COMMON_DIR := ../gpu-api-common
-COMMON_SOURCES := $(COMMON_DIR)/carrier_validation_contract.c \
+COMMON_SOURCES := $(COMMON_DIR)/aib_identity_catalog.c \
+                  $(COMMON_DIR)/carrier_validation_contract.c \
                   $(COMMON_DIR)/carrier_validation_win.c
-COMMON_HEADERS := $(COMMON_DIR)/carrier_validation.h
+COMMON_HEADERS := $(COMMON_DIR)/aib_identity_catalog.h \
+                  $(COMMON_DIR)/carrier_validation.h
 
 SOURCES := nvapi_shim.c nvapi_identity.c nvapi_pci.c nvapi_gpu_specs.c \
            nvapi_gpu_details.c nvapi_gpu_legacy_clocks.c \

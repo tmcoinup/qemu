@@ -101,8 +101,10 @@ test_household_export_is_stable_and_truthful() {
 
     _rng_init
     serial="$(_serial_qemu)"
-    [[ "$serial" =~ ^QEMU-[0-9A-F]{8}[0-9]{4}$ ]] \
+    [[ "$serial" =~ ^MB[0-9]{12}$ ]] \
         || fail "generic Q35 序号格式错误: $serial"
+    stealth_board_serial_is_strict QEMU "$serial" \
+        || fail "generic Q35 序号没有通过共享严格策略: $serial"
 }
 
 test_vendor_and_capacity_fail_closed() {

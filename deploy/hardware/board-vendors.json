@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "catalog_revision": "2026-07-22.1",
+  "vendors": {
+    "asus": {
+      "manufacturer": "ASUSTeK COMPUTER INC.",
+      "platform_token": "asus",
+      "serial_fn": "_serial_asus",
+      "subsystem_vendor": "0x1043",
+      "official_source_hosts": [
+        "dlcdnet.asus.com",
+        "dlcdnets.asus.com",
+        "www.asus.com"
+      ],
+      "serial_policy": {
+        "regex": "^[A-Z0-9]{2}S[A-Z0-9]{9}$",
+        "example": "A1S2B3C4D5E6",
+        "generator_contract": "asus_12_char_third_s",
+        "evidence_scope": "official_documented_shape",
+        "source_ref": "https://dlcdnets.asus.com/pub/ASUS/server/RS500A-E12-RS12U/Manual/E21507_RS500A-E12-RS12U_UM_V2_WEB.pdf",
+        "value_policy": "synthetic_random_never_copied_from_device"
+      }
+    },
+    "msi": {
+      "manufacturer": "Micro-Star International Co., Ltd.",
+      "platform_token": "msi",
+      "serial_fn": "_serial_msi",
+      "subsystem_vendor": "0x1462",
+      "official_source_hosts": [
+        "account.msi.com",
+        "asset-account.msi.com",
+        "download-2.msi.com",
+        "storage-asset.msi.com",
+        "www.msi.com"
+      ],
+      "serial_policy": {
+        "regex": "^601-[A-Z0-9]{4}-[A-Z0-9]{14}$",
+        "example": "601-7979-01SB0123456789",
+        "generator_contract": "msi_601_board_code_14_suffix",
+        "evidence_scope": "official_motherboard_label_example",
+        "source_ref": "https://account.msi.com/en/page/how-to-identify-barcode",
+        "value_policy": "synthetic_random_never_copied_from_device"
+      }
+    },
+    "gigabyte": {
+      "manufacturer": "Gigabyte Technology Co., Ltd.",
+      "platform_token": "gigabyte",
+      "serial_fn": "_serial_giga",
+      "subsystem_vendor": "0x1458",
+      "official_source_hosts": [
+        "download.gigabyte.com",
+        "www.gigabyte.com"
+      ],
+      "serial_policy": {
+        "regex": "^SN[0-9]{12}$",
+        "example": "SN141200024108",
+        "generator_contract": "gigabyte_sn_yyww_8_digits",
+        "evidence_scope": "official_documented_shape_and_date_code",
+        "source_ref": "https://www.gigabyte.com/fileupload/mx/microsite/-18/Mexico/tengo_garantia.html",
+        "value_policy": "synthetic_random_never_copied_from_device"
+      }
+    },
+    "asrock": {
+      "manufacturer": "ASRock",
+      "platform_token": "asrock",
+      "serial_fn": "_serial_asr",
+      "subsystem_vendor": "0x1849",
+      "official_source_hosts": [
+        "asrock.com",
+        "download.asrock.com",
+        "www.asrock.com"
+      ],
+      "serial_policy": {
+        "regex": "^[A-Z0-9]{12}$",
+        "example": "A1M0B2C3D4E5",
+        "generator_contract": "asrock_12_char_uppercase_label",
+        "evidence_scope": "official_label_location_conservative_shape",
+        "source_ref": "https://www.asrock.com/support/index.asp?cat=FindSN",
+        "value_policy": "synthetic_random_never_copied_from_device"
+      }
+    }
+  }
+}

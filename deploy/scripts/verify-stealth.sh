@@ -219,10 +219,11 @@ verify_profile_persistence "$HERE"
 echo
 echo "=== (11) USB HID + EDID 自定义 prop（patch 0009/0010） ==="
 edid_help="$("$QEMU" -device virtio-vga,help 2>&1 || true)"
-if grep -qE "edid-vendor=|edid-name=|edid-serial=" <<<"$edid_help"; then
-    echo "  virtio-vga: edid-vendor / edid-name / edid-serial ✓ (patch 0009)"
+if grep -q "edid-managed-timing-version=" <<<"$edid_help" &&
+        grep -qE "edid-vendor=|edid-name=|edid-serial=" <<<"$edid_help"; then
+    echo "  virtio-vga: EDID identity / managed timing ABI v1 ✓ (patch 0009)"
 else
-    echo "FAIL: virtio-vga 缺 edid-vendor/edid-name/edid-serial——patch 0009 没编进 QEMU"
+    echo "FAIL: virtio-vga 缺 EDID identity/managed timing ABI——patch 0009 没编进 QEMU"
     exit 1
 fi
 usbkbd_help="$("$QEMU" -device usb-kbd,help 2>&1 || true)"
@@ -388,8 +389,8 @@ rm -f "$P15SOCK"
 echo
 echo "=== (16) PCIe 链路速率：根端口/NVMe 端点链路自洽 ==="
 # QEMU 的 pcie-root-port 默认 x-speed=Gen4(16GT/s) / x-width=x32。
-# NVMe 端点默认 Gen1 x1。两者都与 AM4/300·400 系平台 +
-# Samsung Gen3 盘矛盾。CrystalDiskInfo / 设备管理器
+# NVMe 端点默认 Gen1 x1。两者都与当前已审核平台 +
+# Gen3 x4 NVMe 画像矛盾。CrystalDiskInfo / 设备管理器
 # “PCI 链接速度” / 仿真机读 PCI_EXP_LNKCAP 会看到破绽。
 #   (a) 运行态：qom-get 验四个根端口 x-speed/x-width 已钉死
 #       (rp1=NVMe Gen3 x4；rp0/rp2/rp3 = Gen1 x1)；
@@ -467,7 +468,7 @@ fi
 if [[ -f "$CTRL" ]]; then
     grep -Eq 'pcie_cap_fill_link_ep_usp\(pci_dev, *QEMU_PCI_EXP_LNK_X4' \
         "$CTRL" || {
-            echo "FAIL: hw/nvme/ctrl.c 未把 Samsung NVMe 端点抬到 Gen3 x4"
+            echo "FAIL: hw/nvme/ctrl.c 未把 NVMe 端点抬到 Gen3 x4"
             exit 1
         }
     echo "  hw/nvme/ctrl.c: NVMe 端点 Gen3 x4 端点补丁在位"

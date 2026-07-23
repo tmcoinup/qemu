@@ -5,6 +5,11 @@
 检测工具从用户态入口读取到同一份逻辑身份，guest 安装包同时携带 NVIDIA NVAPI 和
 AMD ADL 的兼容层，但系统搜索目录只保留当前 profile 对应的一个厂商。
 
+当前 schema-2 目录覆盖 6 个芯片型号，每个型号 3 个板卡品牌，共 18 块 AIB：
+12 块 NVIDIA 使用 NVAPI，6 块 AMD 使用 ADL。`1AF4:A101`–`1AF4:A112`
+仅是内部 carrier；唯一物理显示设备始终为 `1AF4:1050`。目录没有
+`GPU_SERIAL` 或其它标准、可核验的显卡序列来源，因此兼容层不会合成序列号。
+
 这不是 GPU-Z、HWiNFO 或 AIDA64 的进程专用适配。DLL 不读取进程名，也不按调用者
 返回不同结果；所有调用者都读取
 `HKLM\SOFTWARE\StealthGPU\Identities\<CurrentIdentity>` 指向的同一个版本化快照。ADL
@@ -72,8 +77,9 @@ C:\Windows\System32\atiadlxx.dll
 6. 再次读取 pointer 与 schema；
 7. 只有前后完全一致才发布进程内快照。
 
-NVAPI 严格接受 NVIDIA `10DE` profile；ADL 严格接受 AMD `1002` profile 和当前硬件池
-中的 RX 550 / RX 560 bundle。厂商不匹配、字段缺失、Red Hat/VirtIO 名称泄漏、
+NVAPI 严格接受 12 块 NVIDIA `10DE` AIB；ADL 严格接受 6 块 AMD `1002`
+AIB（RX 550 / RX 560 各 3 个品牌），并在返回 `ABSENT` 前完整验证 NVIDIA
+板卡。厂商不匹配、字段缺失、Red Hat/VirtIO 名称泄漏、
 SUBSYS/REV/BDF 交叉校验失败、实际实例缺失、出现第二个物理 virtio Display，或
 `HardwareID` 丢失物理回退条目时均 fail closed。
 

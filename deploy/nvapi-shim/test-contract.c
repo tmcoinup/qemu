@@ -31,7 +31,7 @@ static struct nvapi_identity_contract_input valid_identity_contract(void)
         "0123456789ABCDEF0123456789ABCDEF",
         "NVIDIA GeForce GTX 1050 Ti", "NVIDIA", "Version 86.07.48.00.A0",
         "GDDR5", "PCI\\VEN_1AF4&DEV_1050&SUBSYS_1C8210DE&REV_A1\\00",
-        "shallow-user-projection", STEALTH_GPU_SCHEMA_VERSION,
+        "shallow-user-projection", STEALTH_GPU_LEGACY_SCHEMA_VERSION,
         0x10deu, 0x1c82u, 0x10deu, 0x1c82u, 0xa1u, 4096u,
         128u, 1290000u, 1392000u, 3504000u, 0u, 1u, 0u, 0u
     };
@@ -65,7 +65,7 @@ static void apply_canonical_model(
     input->boost_clock_khz = model->boost_clock_khz;
     input->memory_clock_khz = model->memory_clock_khz;
 }
-static int test_all_canonical_schema2_models(void)
+static int test_all_legacy_generic_models(void)
 {
     static const struct canonical_model_fixture models[] = {
         { "NVIDIA GeForce GTX 750 Ti", "Version 82.07.41.00.32",
@@ -92,7 +92,7 @@ static int test_all_canonical_schema2_models(void)
             identity.vram_kib != models[index].ram_mb * 1024u ||
             identity.ram_bus_width_bits != models[index].memory_bus_width_bits ||
             strcmp(identity.bios, models[index].bios + 8) != 0) {
-            fprintf(stderr, "canonical schema-2 型号未通过: %s\n",
+            fprintf(stderr, "legacy generic 型号未通过: %s\n",
                     models[index].name);
             valid = 0;
         }
@@ -193,10 +193,10 @@ int main(void)
         identity.pci_device_id != 0x1c82u || identity.ram_type != 8u ||
         identity.ram_bus_width_bits != 128u ||
         identity.vbios_revision != UINT32_C(0x86074800)) {
-        fprintf(stderr, "有效 schema-2 身份没有通过可执行契约\n");
+        fprintf(stderr, "有效 schema-1 身份没有通过可执行契约\n");
         valid = 0;
     }
-    valid &= test_all_canonical_schema2_models();
+    valid &= test_all_legacy_generic_models();
     nvapi_build_carrier_pci_identifiers(
         &identity, &carrier_device_id, &carrier_subsystem_id,
         &carrier_revision_id, &carrier_external_device_id);

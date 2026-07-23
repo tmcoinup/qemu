@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Windows/WHPX 平台、身份持久化、严格门禁和编码器选择回归。
-#
 # 仅用无副作用 DryRun/profile 函数；真实 WHPX 仍须在 Windows 物理宿主验收。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LAUNCHER="$REPO_ROOT/deploy/windows/start-vm.ps1"
+DISPLAY="$REPO_ROOT/deploy/windows/lib/VMate.Display.ps1"
 STREAMER="$REPO_ROOT/deploy/windows/stream-fb-shm.ps1"
 MANIFEST="$REPO_ROOT/deploy/hardware/platforms.json"
 COMPONENTS="$REPO_ROOT/deploy/hardware/components.json"
@@ -39,13 +39,11 @@ test_windows_powershell_files_have_bom() {
             || fail "Windows PowerShell 5.1 test BOM missing: $file"
     done
 }
-
 prepare_vm_files() {
     local root="$1"
     mkdir -p "$root/user"
     printf 'firmware-fixture' | tee "$root/disk.qcow2" "$root/code.fd" >"$root/vars.fd"
 }
-
 run_launcher_dry() {
     local shell_bin="$1"
     local root="$2"
@@ -63,7 +61,6 @@ run_launcher_dry() {
         -PlatformId "$platform_id" -FbShmPath "$root/fb.sock" \
         -GpuGlProbe Unavailable -DryRunHostCpuName "$host_cpu" -DryRun "$@"
 }
-
 test_static_policy_markers() {
     require_text "[switch]\$AllowTcgFallback" "$LAUNCHER"
     require_text "[switch]\$AllowPlatformCompatibility" "$LAUNCHER"
@@ -93,9 +90,14 @@ test_static_policy_markers() {
         "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
     require_text "'virtio-vga-gl,edid=on,edid-fixed-native=on,'" "$LAUNCHER"
     require_text "'virtio-vga,edid=on,edid-fixed-native=on,'" "$LAUNCHER"
-    require_text "Test-VMateQemuHelpProperties -HelpOutput \$probeText" "$LAUNCHER"
+    require_text ". (Join-Path \$libraryRoot 'VMate.Display.ps1')" "$LAUNCHER"
+    require_text "Test-VMateQemuHelpProperties -HelpOutput \$probeText" "$DISPLAY"
     require_text "'edid-fixed-native'" \
         "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
+    require_text "'edid-managed-timing-version'" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.Preflight.ps1"
+    require_text "'edid-managed-timing-version' = 1" \
+        "$REPO_ROOT/deploy/windows/lib/VMate.ComponentRuntime.ps1"
     require_text "'-accel', 'tcg,thread=multi'" "$LAUNCHER"
     require_text '[System.IO.File]::Replace($temporary, $Path, $backup)' \
         "$REPO_ROOT/deploy/windows/lib/VMate.ProfileStore.ps1"
@@ -103,7 +105,6 @@ test_static_policy_markers() {
         "$REPO_ROOT/deploy/windows/lib/VMate.Profile.ps1"
     require_text ". (Join-Path \$PSScriptRoot 'VMate.ProfileStore.ps1')" \
         "$REPO_ROOT/deploy/windows/lib/VMate.Profile.ps1"
-
     # 静态证明 commit 位于所有平台/SMBIOS/GPU/ROI 参数构造之后；运行时负测
     # 另行证明这些校验失败时 active profile 与备份均不变化。
     local prepare_line device_line roi_line commit_line
@@ -114,7 +115,6 @@ test_static_policy_markers() {
     (( prepare_line < device_line && device_line < roi_line && roi_line < commit_line )) \
         || fail "profile transaction order is not prepare -> full argv -> commit"
 }
-
 test_dry_run_has_explicit_identity_and_no_side_effects() {
     local shell_bin="$1"
     local tmp out uuid
@@ -122,7 +122,6 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
     prepare_vm_files "$tmp"
     out="$tmp/out.txt"
     run_launcher_dry "$shell_bin" "$tmp" >"$out"
-
     grep -Fx -- 'whpx,hyperv=off,kernel-irqchip=off' "$out" >/dev/null \
         || fail "default accelerator must disable Hyper-V surface"
     if grep -Fx -- 'tcg,thread=multi' "$out" >/dev/null; then
@@ -135,11 +134,8 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
         || fail "Intel 82574L add-in subsystem is missing"
     grep -F -- 'mac=3C:FD:FE:' "$out" >/dev/null \
         || fail "Intel NIC OUI must match e1000e"
-    grep -F -- 'nvme,id=nvmectl0' "$out" | \
-        grep -F -- 'model-number=Samsung SSD 970 PRO 512GB' | \
-        grep -F -- 'subsys-vendor-id=0x144d,subsys-id=0xa801' | \
-        grep -F -- 'subnqn=nqn.2014-08.org.nvmexpress:uuid:' >/dev/null \
-        || fail "catalog-backed Samsung NVMe identity is missing"
+    python3 "$SCRIPT_DIR/component_argv_assert.py" "$COMPONENTS" "$out" \
+        || fail "Windows dry-run 的 SSD/显示器目录投影不完整"
     grep -F -- 'intel-hda,id=hda,bus=pcie.0,addr=0x4,x-pci-vendor-id=0x8086' \
         "$out" >/dev/null || fail "manifest HDA controller BDF/identity is missing"
     grep -F -- 'hda-duplex,bus=hda.0,x-identity-compat=on' "$out" | \
@@ -196,7 +192,6 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
     run_launcher_dry "$shell_bin" "$tmp" -GuestOs Linux >"$out"
     grep -Fx -- 'base=utc,clock=host,driftfix=slew' "$out" >/dev/null \
         || fail "Linux guest RTC policy must be UTC"
-
     # 用和 manifest 完全相同的宿主 CPU 名称进入严格路径，验证 Type 4 的
     # family/socket/电压/时钟等深层字段确实接线，而非只验证功能模式。
     USERPROFILE="$tmp/user" "$shell_bin" -NoLogo -NoProfile -NonInteractive \
@@ -210,26 +205,18 @@ test_dry_run_has_explicit_identity_and_no_side_effects() {
         -DryRun >"$out"
     grep -F -- 'processor-family=0x00CE,voltage=140,external-clock=100' \
         "$out" >/dev/null || fail "strict SMBIOS Type 4 facts are missing"
-    grep -F -- 'memory-type=0x1a,type-detail=0x80,rank=1,voltage=1200,device-width=16,spd-ee1004=on' \
-        "$out" >/dev/null || fail "SMBIOS/SPD memory facts are missing"
-    grep -F -- 'speed=2400,configured-speed=2400,memory-type=0x1a' \
-        "$out" >/dev/null || fail "H310 内存额定/配置速率未分离"
-    grep -F -- 'edid-vendor=SAM,edid-name=S24F350' "$out" | \
-        grep -F -- 'edid-fixed-native=on' | \
-        grep -F -- 'edid-product-id=0x0f65' | \
-        grep -F -- 'edid-manufacture-year=2018' | \
-        grep -F -- 'edid-secondary-refresh-rate=60000' >/dev/null \
-        || fail "persistent Samsung monitor EDID facts are missing"
-
+    python3 "$SCRIPT_DIR/memory_argv_assert.py" \
+        "$REPO_ROOT/deploy/hardware/memory.json" "$MANIFEST" "$PLATFORM_ID" \
+        "$out" 8192
     # 同一根 DDR4-2400 *-CRC DIMM 在 H110/i5-6400T 上只能配置为 2133；
     # profile 和 argv 都必须保留额定 2400，不能把 SPD 一起“降级”为 2133。
     VMATE_TEST_PLATFORM_ID='intel-lga1151-i5-6400t-asus-h110m-a-m2' \
         run_launcher_dry "$shell_bin" "$tmp" >"$out"
-    grep -F -- 'speed=2400,configured-speed=2133,memory-type=0x1a' \
-        "$out" >/dev/null || fail "H110 必须报告 rated=2400/configured=2133"
+    python3 "$SCRIPT_DIR/memory_argv_assert.py" \
+        "$REPO_ROOT/deploy/hardware/memory.json" "$MANIFEST" \
+        'intel-lga1151-i5-6400t-asus-h110m-a-m2' "$out" 8192
     rm -rf "$tmp"
 }
-
 test_profile_transaction_and_integrity() {
     local shell_bin="$1"
     "$shell_bin" -NoLogo -NoProfile -NonInteractive \
@@ -296,27 +283,37 @@ test_unsupported_guest_policies_fail_before_writes() {
     require_text '不支持嵌套虚拟化' "$tmp/out"
     rm -rf "$tmp"
 }
-
 test_component_catalog_validation() {
     local shell_bin="$1"
     local tmp bad
     tmp="$(mktemp -d)"
     bad="$tmp/components-bad.json"
     sed 's/"schema_version": 1/"schema_version": 99/' "$COMPONENTS" >"$bad"
-
     REPO_ROOT="$REPO_ROOT" COMPONENT_PATH="$COMPONENTS" \
         "$shell_bin" -NoLogo -NoProfile -NonInteractive -Command '
             . "$env:REPO_ROOT/deploy/windows/lib/VMate.Common.ps1"
             . "$env:REPO_ROOT/deploy/windows/lib/VMate.Components.ps1"
             $components = Read-VMateComponentManifest $env:COMPONENT_PATH
-            if ($components.storage.id -ne "samsung-970-pro-512gb" -or
-                $components.monitor.id -ne "samsung-s24f350" -or
+            $storageIds = @($components.storage_items.id)
+            $monitorIds = @($components.monitor_items.id)
+            if ($storageIds.Count -ne 4 -or "samsung-970-pro-512gb" `
+                    -notin $storageIds -or "intel-760p-512gb" `
+                    -notin $storageIds -or "wd-pc-sn730-512gb" `
+                    -notin $storageIds -or
+                "kioxia-xg6-512gb" -notin $storageIds -or
+                $monitorIds.Count -ne 4 -or
+                "aoc-24b2xh" -notin $monitorIds -or
+                "xiaomi-rmmnt238nf" -notin $monitorIds -or
+                "lenovo-l24e-30" -notin $monitorIds -or
                 $components.keyboard.id -ne "microsoft-wired-keyboard-600" -or
                 $components.mouse.id -ne "microsoft-usb-optical-mouse") {
                 throw "component selection mismatch"
             }
             $binding = New-VMateComponentProfileBinding $components
-            $binding.catalog_revision = "tampered"
+            $binding.catalog_revision = "appended-catalog"
+            $binding.catalog_digest = "appended-catalog-digest"
+            Assert-VMateComponentProfileBinding $binding $components
+            $binding.storage_digest = "tampered"
             $rejected = $false
             try {
                 Assert-VMateComponentProfileBinding $binding $components
@@ -373,12 +370,18 @@ test_nsis_rejects_stale_version() {
     require_text 'stage_vmate_runtime(args.srcdir, install_root)' \
         "$REPO_ROOT/scripts/nsis.py"
     require_text '-DCONFIG_VMATE_RUNTIME=y' "$REPO_ROOT/scripts/nsis.py"
-    require_text '"deploy/windows/lib/VMate.Memory.ps1"' \
-        "$REPO_ROOT/scripts/nsis.py"
-    require_text '"deploy/windows/lib/VMate.Manifest.ps1"' \
-        "$REPO_ROOT/scripts/nsis.py"
-    require_text '"deploy/windows/lib/VMate.Manifest.Validation.ps1"' \
-        "$REPO_ROOT/scripts/nsis.py"
+    local runtime_file
+    for runtime_file in VMate.Memory VMate.MemoryBinding VMate.Manifest \
+            VMate.Manifest.Validation VMate.BoardIdentity VMate.ComponentPolicy \
+            VMate.StoragePolicy VMate.ComponentRuntime VMate.ComponentSelection \
+            VMate.Display VMate.Gpu; do
+        require_text "\"deploy/windows/lib/$runtime_file.ps1\"" \
+            "$REPO_ROOT/scripts/nsis.py"
+    done
+    require_text '"deploy/hardware/memory.json"' "$REPO_ROOT/scripts/nsis.py"
+    require_text '"deploy/hardware/board-vendors.json"' "$REPO_ROOT/scripts/nsis.py"
+    require_text '"deploy/hardware/storage.json"' "$REPO_ROOT/scripts/nsis.py"
+    require_text '"deploy/hardware/gpu-boards.json"' "$REPO_ROOT/scripts/nsis.py"
     require_text '"deploy/firmware/OVMF_CODE_4M_stealth.fd"' "$REPO_ROOT/scripts/nsis.py"
     require_text '"deploy/windows/lib/VMate.ProfileStore.ps1"' \
         "$REPO_ROOT/scripts/nsis.py"

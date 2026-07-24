@@ -106,6 +106,7 @@ static int test_every_shared_board(void)
             }
         } else if (board->pci_vendor_id == UINT32_C(0x1002)) {
             if (state != ADL_IDENTITY_PRESENT ||
+                strcmp(identity.name, board->name) != 0 ||
                 identity.pci_device_id != board->pci_device_id ||
                 identity.subsystem_vendor_id != board->subsystem_vendor_id ||
                 identity.subsystem_device_id != board->subsystem_device_id ||

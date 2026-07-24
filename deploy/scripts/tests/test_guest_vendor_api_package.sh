@@ -9,6 +9,7 @@ BUILD_SCRIPT="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 PACKAGE="$REPO_ROOT/deploy/guest-stealth/package.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
 NVAPI_DIR="$REPO_ROOT/deploy/nvapi-shim"
+NVAPI_PROBE_DIR="$REPO_ROOT/deploy/nvapi-runtime-probe"
 ADL_DIR="$REPO_ROOT/deploy/adl-shim"
 APPLY_SUPPORT="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 
@@ -20,8 +21,16 @@ fail() {
 for path in "$BUILD_SCRIPT" "$PACKAGE" "$LAUNCHER" \
         "$APPLY_SUPPORT" \
         "$NVAPI_DIR/nvapi.dll" "$NVAPI_DIR/nvapi64.dll" \
+        "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x86.exe" \
+        "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x64.exe" \
         "$ADL_DIR/atiadlxy.dll" "$ADL_DIR/atiadlxx.dll"; do
     [[ -f "$path" ]] || fail "缺少统一厂商 API package 文件：$path"
+done
+for probe in nvapi-runtime-probe-x86.exe nvapi-runtime-probe-x64.exe; do
+    grep -F "L\"$probe\"" "$LAUNCHER" >/dev/null \
+        || fail "launcher 未发布运行时探针：$probe"
+    grep -F "$probe" "$PACKAGE" >/dev/null \
+        || fail "legacy package 未平铺运行时探针：$probe"
 done
 
 for helper in install-nvapi-system.ps1 nvapi-system-validation.ps1 \
@@ -72,6 +81,7 @@ cp -a "$REPO_ROOT/deploy/guest-launcher-common" \
 rm -rf "$PACKAGE_REPO/deploy/guest-stealth/dist"
 ln -s "$REPO_ROOT/deploy/scripts" "$PACKAGE_REPO/deploy/scripts"
 ln -s "$NVAPI_DIR" "$PACKAGE_REPO/deploy/nvapi-shim"
+ln -s "$NVAPI_PROBE_DIR" "$PACKAGE_REPO/deploy/nvapi-runtime-probe"
 ln -s "$ADL_DIR" "$PACKAGE_REPO/deploy/adl-shim"
 ADL_SRC_DIR="$TMP_DIR/poison-adl" \
 OUT_DIR="$TMP_DIR/poison-out" BUILD_DIR="$TMP_DIR/poison-build" \
@@ -98,11 +108,16 @@ for payload in nvapi.dll nvapi64.dll atiadlxy.dll atiadlxx32.dll atiadlxx.dll; d
     strings -a -el "$EXE" | grep -F "$payload" >/dev/null \
         || fail "EXE launcher 没有实际包含目标名：$payload"
 done
+for probe in nvapi-runtime-probe-x86.exe nvapi-runtime-probe-x64.exe; do
+    strings -a -el "$EXE" | grep -F "$probe" >/dev/null \
+        || fail "EXE launcher 没有实际包含 runtime probe：$probe"
+done
 
 # 文件名只能证明释放表存在；完整原始 DLL 字节作为 PE 子串才证明 xxd/编译链没有
 # 截断、转码或从环境污染目录读取另一份二进制。
 python3 - "$EXE" "$NVAPI_DIR" "$ADL_DIR" \
-    "$REPO_ROOT/deploy/guest-stealth" "$REPO_ROOT/deploy/scripts" <<'PY'
+    "$REPO_ROOT/deploy/guest-stealth" "$REPO_ROOT/deploy/scripts" \
+    "$NVAPI_PROBE_DIR" <<'PY'
 from pathlib import Path
 import sys
 
@@ -120,6 +135,8 @@ payloads = (
     Path(sys.argv[4]) / "install-gpu-api-system.ps1",
     Path(sys.argv[4]) / "gpu-api-identity-binding.ps1",
     Path(sys.argv[5]) / "gpu-spoof-apply-support.ps1",
+    Path(sys.argv[6]) / "nvapi-runtime-probe-x86.exe",
+    Path(sys.argv[6]) / "nvapi-runtime-probe-x64.exe",
 )
 for path in payloads:
     raw = path.read_bytes()

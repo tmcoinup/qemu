@@ -278,6 +278,46 @@ function Get-GpuBoardLogicalPciIdentity {
     }
 }
 
+function Get-GpuStandardDisplayName {
+    # AIB 型号标签用于原子校验，不能直接作为 Windows PnP 或厂商 API 展示名。
+    # 设备管理器与 NVAPI/ADL 统一显示芯片标准名；板卡厂商、OC 版本继续由
+    # subsystem、VBIOS 和时钟表达。schema-5 可把该名称写入展示型
+    # DriverDesc，但 MatchingDeviceId/InfPath/InfSection/Service 仍保持 stock。
+    # 这里按已通过 bundle 门禁的逻辑主 ID 做封闭映射；未知型号必须
+    # fail-closed，不能靠删除任意括号文本猜测名称。
+    param(
+        [Parameter(Mandatory = $true)][int]$PciVendorId,
+        [Parameter(Mandatory = $true)][int]$PciDeviceId
+    )
+
+    $logicalId = '{0:X4}:{1:X4}' -f $PciVendorId, $PciDeviceId
+    switch -CaseSensitive ($logicalId) {
+        '10DE:1380' { return 'NVIDIA GeForce GTX 750 Ti' }
+        '10DE:1D01' { return 'NVIDIA GeForce GT 1030' }
+        '10DE:1C81' { return 'NVIDIA GeForce GTX 1050' }
+        '10DE:1C82' { return 'NVIDIA GeForce GTX 1050 Ti' }
+        '1002:699F' { return 'AMD Radeon RX 550' }
+        '1002:67FF' { return 'AMD Radeon RX 560' }
+        default { throw ('不支持的 GPU 标准显示主 ID：' + $logicalId) }
+    }
+}
+
+function Get-GpuLegacyMemorySizeBytes {
+    # legacy MemorySize 虽然以 4 字节 REG_BINARY 保存，但鲁大师等旧消费者会把
+    # 它重新解释成有符号 Int32。0x80000000 及以上会被当作负容量，继而回退成
+    # 1 MiB 或非独立显卡。这里使用不超过 Int32.MaxValue 的最大整 MiB：
+    # 2047 MiB = 0x7FF00000；精确容量始终由 qwMemorySize 的 UInt64 保存。
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 1048576)][int]$RamMb
+    )
+    $maxSignedLegacyRamMb = [int]::MaxValue -shr 20
+    $legacyRamMb = if ($RamMb -gt $maxSignedLegacyRamMb) {
+        $maxSignedLegacyRamMb
+    } else { $RamMb }
+    return [BitConverter]::GetBytes([UInt32]([UInt64]$legacyRamMb * 1MB))
+}
+
 function Test-GpuLogicalBinding {
     # 只接受受控 1AF4:A101..A112 carrier；schema-2 快照必须逐字段命中同一块板卡。
     param($Snapshot, [System.Text.RegularExpressions.Match]$Source)

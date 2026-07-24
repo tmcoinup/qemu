@@ -9,11 +9,12 @@
 # 常用命令：
 #   sudo deploy/scripts/setup-bridge.sh
 #   sudo UPLINK=enp3s0 deploy/scripts/setup-bridge.sh
-#   sudo VLAN_TRUNK=0 UPLINK=enp3s0 deploy/scripts/setup-bridge.sh
+#   sudo VLAN_TRUNK=0 UPLINK_AUTO=1 deploy/scripts/setup-bridge.sh
 #
 # 环境变量：
 #   BR=br0              普通模式可覆盖 bridge 名；trunk 模式固定只能为 br0。
 #   UPLINK=enp3s0       要接入 bridge 的物理上联；trunk 模式缺省时安全自动探测。
+#   UPLINK_AUTO=0|1     普通模式是否安全自动探测唯一物理上联（默认 0）。
 #   HOST_IP=...         无上联时 bridge 的宿主地址，默认 192.168.76.1/24。
 #   VLAN_TRUNK=0|1      1 = 单 br0 动态 access VLAN 模式（默认）；0 = 旧普通模式。
 #   VM_USER=<用户名>    允许启动 VLAN VM 的普通用户；sudo 调用时默认原调用者。

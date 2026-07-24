@@ -234,7 +234,8 @@ function Read-TransactionReceipt {
         $oldPresent = [int](Get-ExactRegistryValue $transactionKey 'PreviousPointerPresent' $dword)
         $mirrorPresent = [int](Get-ExactRegistryValue $transactionKey 'PreviousSpoofNamePresent' $dword)
         $classSubkey = [string](Get-ExactRegistryValue $transactionKey 'ClassSubkey' $string)
-        $driverInfPath = if ($schema -eq 2) {
+        $modernSchema = @(2,3,4,5) -ccontains $schema
+        $driverInfPath = if ($modernSchema) {
             [string](Get-ExactRegistryValue $transactionKey 'DriverInfPath' $string)
         } else { '' }
         $newIdentity = Read-ValidatedIdentitySnapshot $identityKey $IdentityId @(2)
@@ -242,12 +243,12 @@ function Read-TransactionReceipt {
         $newName = $newIdentity.SpoofName; $newVendor = $newIdentity.SpoofVendor
         $newBios = $newIdentity.SpoofBios; $newRamMb = $newIdentity.SpoofRamMb
         $newVendorId = $newIdentity.SpoofPciVendorId; $newDeviceId = $newIdentity.SpoofPciDeviceId
-        if (-not (@(1,2) -ccontains $schema) -or $txnId -cne $IdentityId -or
+        if (-not (@(1,2,3,4,5) -ccontains $schema) -or $txnId -cne $IdentityId -or
             -not (@('Prepared','Committed','Completed','RolledBack') -ccontains $state) -or
             ($oldPresent -ne 0 -and $oldPresent -ne 1) -or
             ($mirrorPresent -ne 0 -and $mirrorPresent -ne 1) -or $classSubkey -cnotmatch '^\d{4}$' -or
             [string]::IsNullOrWhiteSpace($source) -or
-            ($schema -eq 2 -and $driverInfPath -cnotmatch '^oem[0-9]+\.inf$')) {
+            ($modernSchema -and $driverInfPath -cnotmatch '^oem[0-9]+\.inf$')) {
             throw ('事务凭据字段非法：' + $IdentityId)
         }
         $oldIdState = Get-OptionalStringState $transactionKey 'PreviousIdentityId'
@@ -272,22 +273,38 @@ function Read-TransactionReceipt {
         $classPath = 'SYSTEM\CurrentControlSet\Control\Class\' + $classGuid + '\' + $classSubkey
         $enumJournal = Read-ProjectionJournal $transactionKey 'Enum' $enumPath $enumJournalNames
         $classJournal = Read-ProjectionJournal $transactionKey 'Class' $classPath $classJournalNames
-        $chipType = $newName -replace '^(NVIDIA|AMD)\s+', ''
+        # journal CAS 必须使用 refresh 实际写入的标准显示名；SpoofName 仍保留
+        # AIB 标签作为身份 mirror，不能混用为 Windows 投影值。
+        $newDisplayName = if (@(3,4,5) -ccontains $schema) {
+            Get-GpuStandardDisplayName `
+                -PciVendorId $newVendorId -PciDeviceId $newDeviceId
+        } else { $newName }
+        $chipType = $newDisplayName -replace '^(NVIDIA|AMD)\s+', ''
         $memoryBytes = [BitConverter]::GetBytes([UInt64]$newRamMb * 1MB)
-        $enumDescription = if ($schema -eq 2) {
+        $legacyMemory = if ($schema -eq 5) {
+            [byte[]](Get-GpuLegacyMemorySizeBytes -RamMb $newRamMb)
+        } elseif ($schema -eq 4) {
+            $schemaFourRamMb = if ($newRamMb -gt 4095) { 4095 } else { $newRamMb }
+            [BitConverter]::GetBytes(
+                [UInt32]([UInt64]$schemaFourRamMb * 1MB))
+        } else { [byte[]]$memoryBytes[0..3] }
+        $stockDisplaySchema = @(2,3) -ccontains $schema
+        $enumDescription = if (@(4,5) -ccontains $schema) { $newDisplayName } elseif ($stockDisplaySchema) {
             '@' + $driverInfPath + ',%viogpudod.devicedesc%;' + $stockDriverDescription
         } else { $newName }
-        $enumProvider = if ($schema -eq 2) {
+        $enumProvider = if ($stockDisplaySchema) {
             '@' + $driverInfPath + ',%vendor%;' + $stockDriverProvider
         } else { $newVendor }
         $projectedEnum = @{
-            FriendlyName=[pscustomobject]@{ Value=$newName; Kind=$string }
+            FriendlyName=[pscustomobject]@{ Value=$newDisplayName; Kind=$string }
             DeviceDesc=[pscustomobject]@{ Value=$enumDescription; Kind=$string }
             Mfg=[pscustomobject]@{ Value=$enumProvider; Kind=$string }
         }
-        $driverDescription = if ($schema -eq 2) { $stockDriverDescription } else { $newName }
-        $driverProvider = if ($schema -eq 2) { $stockDriverProvider } else { $newVendor }
-        $matchingId = if ($schema -eq 2) { $stockDriverMatchingId } else {
+        $driverDescription = if (@(4,5) -ccontains $schema) { $newDisplayName } elseif ($stockDisplaySchema) {
+            $stockDriverDescription
+        } else { $newName }
+        $driverProvider = if ($stockDisplaySchema) { $stockDriverProvider } else { $newVendor }
+        $matchingId = if ($modernSchema) { $stockDriverMatchingId } else {
             'PCI\VEN_{0:X4}&DEV_{1:X4}' -f $newVendorId,$newDeviceId
         }
         $projectedClass = @{
@@ -295,11 +312,11 @@ function Read-TransactionReceipt {
             DriverDesc=[pscustomobject]@{ Value=$driverDescription; Kind=$string }
             ProviderName=[pscustomobject]@{ Value=$driverProvider; Kind=$string }
             MatchingDeviceId=[pscustomobject]@{ Value=$matchingId; Kind=$string }
-            'HardwareInformation.AdapterString'=[pscustomobject]@{ Value=$newName; Kind=$string }
+            'HardwareInformation.AdapterString'=[pscustomobject]@{ Value=$newDisplayName; Kind=$string }
             'HardwareInformation.ChipType'=[pscustomobject]@{ Value=$chipType; Kind=$string }
             'HardwareInformation.DacType'=[pscustomobject]@{ Value='Integrated RAMDAC'; Kind=$string }
             'HardwareInformation.BiosString'=[pscustomobject]@{ Value=$newBios; Kind=$string }
-            'HardwareInformation.MemorySize'=[pscustomobject]@{ Value=[byte[]]$memoryBytes[0..3]; Kind=[Microsoft.Win32.RegistryValueKind]::Binary }
+            'HardwareInformation.MemorySize'=[pscustomobject]@{ Value=$legacyMemory; Kind=[Microsoft.Win32.RegistryValueKind]::Binary }
             'HardwareInformation.qwMemorySize'=[pscustomobject]@{ Value=([UInt64]$newRamMb * 1MB); Kind=[Microsoft.Win32.RegistryValueKind]::QWord }
         }
         return [pscustomobject]@{

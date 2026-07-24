@@ -156,14 +156,14 @@ grep -F '{ L"configure-power-policy.ps1", payload_configure_power_policy_ps1,' \
 grep -F 'cp "$POWER_POLICY_SRC"' "$PACKAGE" >/dev/null \
     || fail "legacy 调试包没有复制 power helper"
 
-# 主脚本必须无条件先配电源，再触碰 HardwareID、驱动和 spoof。缺文件与执行失败使用
+# 主脚本必须无条件先配电源，再触碰 writer、驱动和 spoof。缺文件与执行失败使用
 # 独立退出码，避免与驱动 30、显示模式 11 等既有重启协议混淆。
 power_line="$(grep -n -F '& $powershellExe @powerArgs' "$RESPAWN" | cut -d: -f1)"
-stop_line="$(grep -n -x 'Stop-GpuProjectionTask' "$RESPAWN" | head -1 | cut -d: -f1)"
+stop_line="$(grep -n -x 'Stop-GpuIdentityWriterTasks' "$RESPAWN" | head -1 | cut -d: -f1)"
 driver_line="$(grep -n -F '& $powershellExe @driverArgs' "$RESPAWN" | cut -d: -f1)"
 spoof_line="$(grep -n -F '& $powershellExe @spoofArgs' "$RESPAWN" | cut -d: -f1)"
 [[ -n "$power_line" && -n "$stop_line" && -n "$driver_line" && -n "$spoof_line" ]] \
-    || fail "无法定位电源、投影、驱动和 spoof 调用顺序"
+    || fail "无法定位电源、writer 屏障、驱动和 spoof 调用顺序"
 (( power_line < stop_line && stop_line < driver_line && driver_line < spoof_line )) \
     || fail "电源策略没有位于所有 GPU/PnP 修改之前"
 grep -F "exit 48" "$RESPAWN" >/dev/null || fail "缺 power payload 没有专用退出码"

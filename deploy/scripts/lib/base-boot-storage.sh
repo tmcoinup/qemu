@@ -197,9 +197,11 @@ base_boot_storage_require_all_pool_matches() {
 # clone 的 profile 复用/重抽事务。只有现有 profile 或新抽 profile 的实际启动盘
 # 与 base 字节容量完全一致、且可选运行时校验回调成功时才返回；所有门禁都发生在
 # 原子保存之前，失败时保留原文件，绝不落盘最后一次错配或无法 realize 的身份。
+# 第五参数可声明 staging 来自 new 或 existing；默认 auto 保持普通调用方兼容。
+# new 允许 mktemp 预占的空普通文件，但不会把它误作应严格加载的 legacy profile。
 base_boot_storage_prepare_matching_profile() {
     local profile="${1:-}" expected_size="${2:-}" max_attempts="${3:-100}"
-    local runtime_validator="${4:-}" attempt
+    local runtime_validator="${4:-}" profile_seed_state="${5:-auto}" attempt
 
     [[ -n "$profile" ]] || {
         echo "ERROR: clone 缺少 profile 路径" >&2
@@ -227,7 +229,34 @@ base_boot_storage_prepare_matching_profile() {
         return 1
     fi
 
-    if stealth_have_profile "$profile"; then
+    case "$profile_seed_state" in
+        auto)
+            if stealth_have_profile "$profile"; then
+                profile_seed_state=existing
+            else
+                profile_seed_state=new
+            fi
+            ;;
+        new)
+            if stealth_have_profile "$profile" &&
+               { [[ ! -f "$profile" || -L "$profile" || -s "$profile" ]]; }; then
+                echo "ERROR: 新 profile staging 必须不存在或是空普通文件: $profile" >&2
+                return 1
+            fi
+            ;;
+        existing)
+            if ! stealth_have_profile "$profile"; then
+                echo "ERROR: 指定复用的已有 profile staging 不存在: $profile" >&2
+                return 1
+            fi
+            ;;
+        *)
+            echo "ERROR: profile staging 来源状态非法: $profile_seed_state" >&2
+            return 1
+            ;;
+    esac
+
+    if [[ "$profile_seed_state" == existing ]]; then
         stealth_load_profile "$profile" || return 1
         if base_boot_storage_matches_size "$expected_size"; then
             if [[ -n "$runtime_validator" ]] && ! "$runtime_validator"; then

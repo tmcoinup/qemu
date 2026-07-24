@@ -296,6 +296,7 @@ BASE_PIN="$VM_DIR/.base.qcow2"
 DISK_TMP=""
 OVMF_TMP=""
 PROFILE_STAGE=""
+PROFILE_STAGE_STATE="new"
 PROFILE_BACKUP=""
 CLONE_LIFECYCLE_BASE_PIN_TMP=""
 CLONE_LIFECYCLE_BASE_PIN_PUBLISHED=0
@@ -304,7 +305,6 @@ DISK_PUBLISHED=0
 OVMF_PUBLISHED=0
 CLONE_TRANSACTION_COMMITTED=0
 VM_DIR_CREATED=0
-
 # 所有临时文件都位于 VM_DIR，与最终目标同文件系统。失败先回滚本次发布，再清理
 # staging，最后 chown；FD 8 在这些动作全部完成后才释放，避免 start/stop 看到
 # 半提交状态。成功路径也由同一 trap 保证普通用户可以读取 profile 和写 OVMF。
@@ -390,9 +390,11 @@ echo ">> base 容量: $BASE_BYTES bytes ($(numfmt --to=iec --suffix=B "$BASE_BYT
 PROFILE_STAGE="$(mktemp -- "$VM_DIR/.profile.clone.XXXXXX")"
 if [[ -f "$PROFILE" ]]; then
     cp -- "$PROFILE" "$PROFILE_STAGE"
+    PROFILE_STAGE_STATE=existing
 fi
 if ! base_boot_storage_prepare_matching_profile \
-        "$PROFILE_STAGE" "$BASE_BYTES" 100 _stealth_platform_runtime_preflight; then
+        "$PROFILE_STAGE" "$BASE_BYTES" 100 _stealth_platform_runtime_preflight \
+        "$PROFILE_STAGE_STATE"; then
     echo "ERROR: 无法为 base 生成容量一致的启动盘 profile，clone 已中止。" >&2
     echo "       未创建增量盘；最终 profile 与已有实例文件保持不变。" >&2
     echo "       请检查启动盘目录、宿主 KVM 能力或 CPU 候选后重试。" >&2

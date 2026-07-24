@@ -38,6 +38,7 @@ $cases = @(Get-TestGpuBoardCases $env:GPU_BOARDS)
 Assert-TestGpuBoardCoverage $cases
 $contracts = @(Get-GpuBoardIdentityContracts)
 if ($contracts.Count -ne $cases.Count) { throw "guest contract 数量不是 18" }
+$displayNames = New-Object Collections.Generic.List[string]
 $fields = [ordered]@{
     CarrierVendorId="CarrierVendor"; CarrierDeviceId="CarrierDevice"
     SpoofName="Name"; SpoofVendor="Vendor"; SpoofBios="Bios"
@@ -62,12 +63,103 @@ foreach ($case in $cases) {
         $profile.Vendor -cne $case.Vendor) {
         throw ("AutoDetect profile 偏移：" + $case.Carrier)
     }
+    $expectedDisplayName = $case.Name -replace " \([^()]+\)$", ""
+    $displayName = Get-GpuStandardDisplayName `
+        -PciVendorId $case.PciVendor -PciDeviceId $case.Device
+    if ($displayName -cne $expectedDisplayName -or $displayName.Contains("(")) {
+        throw ("Windows 标准显示名映射错误：" + $case.Carrier + "/" + $displayName)
+    }
+    $displayNames.Add($displayName)
+}
+$groups = @($displayNames | Group-Object)
+if ($groups.Count -ne 6 -or @($groups | Where-Object Count -ne 3).Count -ne 0) {
+    throw "18 块 AIB carrier 未精确映射为 6 个标准显示名（每组 3 块）"
+}
+foreach ($unknownLogicalId in @(
+        @(0x10DE, 0xFFFF), @(0xFFFF, 0x1C82), @(0x1002, 0x1C82))) {
+    $rejected = $false
+    try {
+        Get-GpuStandardDisplayName `
+            -PciVendorId $unknownLogicalId[0] -PciDeviceId $unknownLogicalId[1]
+    } catch { $rejected = $true }
+    if (-not $rejected) { throw "未知逻辑主 ID 未 fail-closed" }
 }
 foreach ($unknown in @(
         "A1131AF4", "138010DE", "1D0110DE", "1C8110DE",
         "1C8210DE", "699F1002", "67FF1002")) {
     if ($null -ne (Get-GpuBoardAutoDetectProfile $unknown)) {
         throw ("未知或旧式 carrier 被接受：" + $unknown)
+    }
+}
+' >/dev/null
+
+# 重复执行时 DriverDesc 已经是标准名称，Class target 只能取自严格 Stage receipt
+# 与当前 Enum Driver 的交叉绑定，RDP/其他显示节点的名称不能参与目标选择。
+APPLY_SUPPORT="$APPLY_SUPPORT" \
+    pwsh -NoLogo -NoProfile -NonInteractive -Command '
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $env:APPLY_SUPPORT, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw "apply support AST parse failed" }
+foreach ($functionName in @(
+        "Resolve-GpuSpoofActiveClassSubkey",
+        "Assert-GpuSpoofActiveClassBinding")) {
+    $functionAst = $ast.Find({ param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq $functionName
+    }, $true)
+    if ($null -eq $functionAst) {
+        throw ("缺少 active Class helper：" + $functionName)
+    }
+    . ([scriptblock]::Create($functionAst.Extent.Text))
+}
+$source = "PCI\VEN_1AF4&DEV_1050&SUBSYS_A1021AF4&REV_A1\3&AIB&0&30"
+$driver = "{4d36e968-e325-11ce-bfc1-08002be10318}\0000"
+if ((Resolve-GpuSpoofActiveClassSubkey -SourceInstanceId $source `
+        -DriverBinding $driver -StagedClassSubkey "0000") -cne "0000") {
+    throw "标准名称重复执行没有解析出唯一 active Class"
+}
+if ((Resolve-GpuSpoofActiveClassSubkey -SourceInstanceId $source `
+        -DriverBinding $driver -StagedClassSubkey "0000" `
+        -RequestedSubkey "0000") -cne "0000") {
+    throw "显式 active -Subkey 被错误拒绝"
+}
+foreach ($bad in @(
+        @{ Source=$source; Driver=$driver; Staged="0001"; Requested="" },
+        @{ Source=$source; Driver=$driver; Staged="0000"; Requested="0001" },
+        @{ Source="ROOT\RDPINDIRECTDISPLAY\0000"; Driver=$driver
+            Staged="0000"; Requested="" },
+        @{ Source=$source; Driver="{4d36e968-e325-11ce-bfc1-08002be10318}\RDP"
+            Staged="0000"; Requested="" })) {
+    $rejected = $false
+    try {
+        Resolve-GpuSpoofActiveClassSubkey -SourceInstanceId $bad.Source `
+            -DriverBinding $bad.Driver -StagedClassSubkey $bad.Staged `
+            -RequestedSubkey $bad.Requested | Out-Null
+    } catch { $rejected = $true }
+    if (-not $rejected) { throw "非法或非唯一 Class 绑定未被拒绝" }
+}
+Assert-GpuSpoofActiveClassBinding -Service "VioGpuDod" `
+    -ClassInfPath "oem3.inf" -ClassInfSection "VioGpuDod_Inst" `
+    -StagedDriverInfPath "oem3.inf"
+foreach ($badBinding in @(
+        @{ Service="BasicDisplay"; InfPath="oem3.inf"
+            Section="VioGpuDod_Inst"; Staged="oem3.inf" },
+        @{ Service="VioGpuDod"; InfPath="oem4.inf"
+            Section="VioGpuDod_Inst"; Staged="oem3.inf" },
+        @{ Service="VioGpuDod"; InfPath="oem3.inf"
+            Section="Other_Inst"; Staged="oem3.inf" },
+        @{ Service="VioGpuDod"; InfPath="oem3.inf"
+            Section="VioGpuDod_Inst"; Staged="display.inf" })) {
+    $rejected = $false
+    try {
+        Assert-GpuSpoofActiveClassBinding -Service $badBinding.Service `
+            -ClassInfPath $badBinding.InfPath `
+            -ClassInfSection $badBinding.Section `
+            -StagedDriverInfPath $badBinding.Staged
+    } catch { $rejected = $true }
+    if (-not $rejected) {
+        throw "非法或漂移的 active Service/INF 绑定未被拒绝"
     }
 }
 ' >/dev/null

@@ -395,6 +395,27 @@ test_plain_bridge_does_not_enable_vlan_filtering() {
     assert_log_not_contains "$NM_LOG" "bridge.vlan-filtering" \
         "无 VLAN_TRUNK 时不应修改历史 bridge VLAN 属性"
     [[ ! -s "$NET_LOG" ]] || fail "普通隔离 bridge 不应调用运行态 VLAN 命令"
+
+    # UPLINK_AUTO 的输入校验会把唯一物理口写入 UPLINK；普通 NM 路径随后必须
+    # 释放物理口原 DHCP profile，并让 br0 自己获取原生 LAN 的 DHCP 地址。
+    nm_reset
+    nm_seed netplan-enp30s0 ethernet enp30s0 1
+    setup_bridge_nm br0 enp30s0 192.168.76.1/24 0 >"$out"
+    [[ "${NM_TYPE[br0-slave-enp30s0]:-}" == "bridge-slave" ]] \
+        || fail "普通自动上联未创建 bridge port profile"
+    assert_log_contains "$NM_LOG" \
+        "connection modify netplan-enp30s0 connection.autoconnect no" \
+        "普通自动上联未禁止物理口原 DHCP profile"
+    assert_log_contains "$NM_LOG" "connection down netplan-enp30s0" \
+        "普通自动上联未释放物理口原 DHCP profile"
+    assert_log_contains "$NM_LOG" \
+        "connection modify br0 connection.autoconnect yes connection.autoconnect-slaves 1 ipv4.method auto ipv4.addresses ''" \
+        "普通自动上联未把 DHCP 客户端迁移到 br0"
+    assert_log_contains "$NM_LOG" "connection up br0" \
+        "普通自动上联未激活 br0 DHCP profile"
+    assert_log_not_contains "$NM_LOG" "bridge.vlan-filtering" \
+        "普通自动上联不应开启 VLAN filtering"
+    [[ ! -s "$NET_LOG" ]] || fail "普通自动上联不应调用 VLAN 运行态命令"
 }
 
 main() {

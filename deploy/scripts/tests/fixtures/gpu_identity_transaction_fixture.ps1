@@ -109,7 +109,7 @@ function Set-AibIdentityValues {
 
 function New-TransactionFixture {
     param([string]$IdentityId, [bool]$OldPointerPresent, [string]$State,
-        [int]$TransactionSchema = 2)
+        [int]$TransactionSchema = 5)
     $string = [Microsoft.Win32.RegistryValueKind]::String
     $dword = [Microsoft.Win32.RegistryValueKind]::DWord
     $binary = [Microsoft.Win32.RegistryValueKind]::Binary
@@ -139,7 +139,9 @@ function New-TransactionFixture {
     Set-FakeValue $transaction PreviousSpoofNamePresent ([int]$OldPointerPresent) $dword
     if ($OldPointerPresent) { Set-FakeValue $transaction PreviousSpoofName "NVIDIA OLD GPU" $string }
     Set-FakeValue $transaction ClassSubkey "0001" $string
-    if ($TransactionSchema -eq 2) { Set-FakeValue $transaction DriverInfPath "oem3.inf" $string }
+    if (@(2, 3, 4, 5) -contains $TransactionSchema) {
+        Set-FakeValue $transaction DriverInfPath "oem3.inf" $string
+    }
     Set-CompleteIdentityValues $identity $IdentityId 2 $source `
         "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" $true
     foreach ($name in $enumJournalNames) { Set-FakeValue $enum $name ("OLD-" + $name) $string }
@@ -152,17 +154,27 @@ function New-TransactionFixture {
     }
     Write-ProjectionJournal $transaction Enum $enum $enumPath $enumJournalNames
     Write-ProjectionJournal $transaction Class $class $classPath $classJournalNames
-    $enumDesc = if ($TransactionSchema -eq 2) { "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
-    $enumMfg = if ($TransactionSchema -eq 2) { "@oem3.inf,%vendor%;Red Hat, Inc." } else { "NVIDIA" }
-    $driverDesc = if ($TransactionSchema -eq 2) { "Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
-    $driverProvider = if ($TransactionSchema -eq 2) { "Red Hat, Inc." } else { "NVIDIA" }
-    $matchingId = if ($TransactionSchema -eq 2) { "PCI\VEN_1AF4&DEV_1050" } else { "PCI\VEN_10DE&DEV_1C82" }
-    Set-FakeValue $enum FriendlyName "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" $string
+    $modernTransaction = @(2, 3, 4, 5) -contains $TransactionSchema
+    $stockDisplayTransaction = @(2, 3) -contains $TransactionSchema
+    $displayName = if (@(3, 4, 5) -contains $TransactionSchema) {
+        "NVIDIA GeForce GTX 1050 Ti"
+    } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
+    $enumDesc = if (@(4, 5) -contains $TransactionSchema) { $displayName } elseif ($stockDisplayTransaction) { "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
+    $enumMfg = if ($stockDisplayTransaction) { "@oem3.inf,%vendor%;Red Hat, Inc." } else { "NVIDIA" }
+    $driverDesc = if (@(4, 5) -contains $TransactionSchema) { $displayName } elseif ($stockDisplayTransaction) { "Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
+    $driverProvider = if ($stockDisplayTransaction) { "Red Hat, Inc." } else { "NVIDIA" }
+    $matchingId = if ($modernTransaction) { "PCI\VEN_1AF4&DEV_1050" } else { "PCI\VEN_10DE&DEV_1C82" }
+    Set-FakeValue $enum FriendlyName $displayName $string
     Set-FakeValue $enum DeviceDesc $enumDesc $string
     Set-FakeValue $enum Mfg $enumMfg $string
     foreach ($name in $classJournalNames) {
         if ($name -ceq "HardwareInformation.MemorySize") {
-            Set-FakeValue $class $name ([byte[]](0,0,0,0)) $binary
+            $legacyMemory = if ($TransactionSchema -eq 5) {
+                [byte[]](0,0,240,127)
+            } elseif ($TransactionSchema -eq 4) {
+                [byte[]](0,0,240,255)
+            } else { [byte[]](0,0,0,0) }
+            Set-FakeValue $class $name $legacyMemory $binary
         } elseif ($name -ceq "HardwareInformation.qwMemorySize") {
             Set-FakeValue $class $name ([UInt64]4294967296) $qword
         } else {
@@ -170,8 +182,10 @@ function New-TransactionFixture {
                 DriverDesc { $driverDesc; break }
                 ProviderName { $driverProvider; break }
                 MatchingDeviceId { $matchingId; break }
-                "HardwareInformation.AdapterString" { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)"; break }
-                "HardwareInformation.ChipType" { "GeForce GTX 1050 Ti (ASUS Phoenix)"; break }
+                "HardwareInformation.AdapterString" { $displayName; break }
+                "HardwareInformation.ChipType" {
+                    $displayName -replace "^NVIDIA\s+", ""; break
+                }
                 "HardwareInformation.DacType" { "Integrated RAMDAC"; break }
                 "HardwareInformation.BiosString" { "Version 86.07.42.00.96"; break }
             }

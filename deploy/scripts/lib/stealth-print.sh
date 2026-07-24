@@ -63,13 +63,10 @@ stealth_print_profile() {
         mouse_line="usb-tablet → ${TABLET_PRODUCT} (USB ${TABLET_VID/0x/}:${TABLET_PID/0x/}, 绝对坐标)"
     fi
 
-    # GPU profile 的 VEN/DEV 是浅层用户态投影目标，不是 virtio-gpu 的物理配置头。
-    # 两者同时打印，避免把“GPU-Z 应显示 10DE:1C82”误读成 stock 驱动也能绑定该 ID。
-    local logical_gpu_id="${GPU_PCI_VEN#0x}:${GPU_PCI_DEV#0x}"
-    # PnP 的 SUBSYS 字符串固定按 device 后接 vendor 打印，和规范化 VEN:DEV 顺序
-    # 相反。把两种顺序并列输出，避免用户把 carrier 字段误当物理主 PCI ID。
+    # 启动摘要只打印客体实际枚举的一个 PCI 主 ID。GPU profile 的逻辑 VEN/DEV
+    # 只供厂商 API 选择型号能力，不再与物理 ID 并排显示成“两张卡”。
+    # PnP 的 SUBSYS 字符串固定按 device 后接 vendor 打印。
     local gpu_carrier_subsys="${GPU_CARRIER_DEV#0x}${GPU_CARRIER_VEN#0x}"
-    local logical_gpu_subsys="${GPU_SUBSYS_VEN#0x}:${GPU_SUBSYS_DEV#0x}"
     local storage_line
     if [[ "${PLATFORM_BOOT_STORAGE:-nvme}" == sata-ahci ]]; then
         storage_line="SATA/AHCI ${BOOT_STORAGE_MODEL}  fw=${BOOT_STORAGE_FIRMWARE}  SN=${BOOT_STORAGE_SERIAL}  size=$(printf '%.1f' "$(echo "$BOOT_STORAGE_SIZE_BYTES / 1024^3" | bc -l 2>/dev/null || echo 0)") GiB"
@@ -88,7 +85,7 @@ stealth_print_profile() {
   BIOS     : $BIOS_VENDOR $BIOS_VERSION ($BIOS_DATE)
   TPM      : ${TPM_IMPLEMENTATION:-none} / ${TPM_VERSION:-none} / ${TPM_FRONTEND:-none} (PCR=${TPM_PCR_BANKS:-none})
   Chassis  : $CHASSIS_TYPE  SN=$CHASSIS_SERIAL
-  GPU      : virtio display；物理=1AF4:1050；carrier=SUBSYS_${gpu_carrier_subsys}；浅层用户态=$GPU_BOARD_PARTNER $GPU_PART_NUMBER / PCI $logical_gpu_id / subsystem $logical_gpu_subsys（${GPU_IDENTITY_FIDELITY}）
+  GPU      : $GPU_NAME（$GPU_BOARD_PARTNER $GPU_PART_NUMBER，厂商 API 型号视图）；PCI=1AF4:1050 / SUBSYS_${gpu_carrier_subsys}（单一 virtio display，无直通）
   Display  : ${vga_kind}, EDID 1920×1080
   显示器   : ${EDID_VENDOR}:${EDID_PRODUCT_ID} ${EDID_NAME}  ~${diag_inch}\" (${EDID_WIDTH_MM}×${EDID_HEIGHT_MM} mm)  SN=${EDID_SERIAL}
   Storage  : ${storage_line}

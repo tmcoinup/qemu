@@ -17,6 +17,21 @@ virtio 节点之间的受控 carrier；Windows 中唯一真实显示主 ID 仍�
 本方案不做 GPU passthrough/vGPU。GPU 目录明确不暴露或合成序列号，guest 身份
 schema 也没有 `GPU_SERIAL`。
 
+版本化 identity 仍使用 schema-2。host `GPU_NAME` 与快照 `SpoofName` 保存完整的
+AIB canonical 标签，例如 `NVIDIA GeForce GTX 1050 Ti (Gigabyte OC)`，用于整行
+校验板卡的 SUBSYS、VBIOS、显存和时钟。完整 AIB bundle 通过校验后，Windows
+`FriendlyName`、`DeviceDesc`、Class `DriverDesc`、
+`HardwareInformation.AdapterString`、`HardwareInformation.ChipType` 以及
+NVAPI/ADL 的公开 adapter 名称统一按逻辑 PCI VEN/DEV 的封闭映射使用标准芯片名，例如
+`NVIDIA GeForce GTX 1050 Ti`。该名称不通过删除括号猜测，未知 PCI 主 ID 会直接失败。
+真实驱动节点的 `MatchingDeviceId`、`InfPath`、`InfSection` 与 `Service` 仍保持
+stock VioGpuDod 值。
+
+最终架构始终只有一个 VioGpuDod 显示 devnode。它的 PnP `HardwareIds` 是规范逻辑
+VEN/DEV/AIB SUBSYS/REV 首项 + 原始完整 `1AF4:1050` 尾项；真实 InstanceId、BDF、
+Service、Driver 和 PCI 配置空间仍为物理 carrier。MULTI_SZ 中的多条匹配字符串不是
+多张显卡，也不会改变渲染路径、显存分配或性能。
+
 ## 发布物与源码
 
 | 文件 | 作用 |
@@ -32,14 +47,15 @@ schema 也没有 `GPU_SERIAL`。
 | `install-nvapi-system.ps1` | 独立事务发布或移除 x86/x64 NVIDIA NVAPI 用户态 shim |
 | `nvapi-system-validation.ps1` | NVAPI 安装与恢复共用的普通文件、SHA-256 和 PE 架构校验 |
 | `install-adl-system.ps1` | 独立事务发布或移除三目标 AMD ADL/ADL2 用户态 shim |
-| `persist-gpu-profile.ps1` | 校验完整型号 bundle，并组织 schema-2 身份的 Stage/Commit/Complete/Recover |
-| `gpu-profile-transaction.ps1` | 持久化 GPU 身份 journal、指针 CAS、投影回读与崩溃恢复公共实现 |
+| `persist-gpu-profile.ps1` | 校验完整型号 bundle，并组织 identity schema-2、transaction schema-5 的 Stage/Commit/Complete/Recover |
+| `gpu-profile-transaction.ps1` | 持久化 GPU 身份 journal、指针 CAS、投影回读与崩溃恢复；transaction schema 1/2/3/4 仅用于兼容恢复 |
 | `gpu-profile-registry-core.ps1` | GPU 身份事务共用的精确注册表读取、回读与 pointer CAS 基元 |
 | `gpu-spoof-apply-support.ps1` | apply 共用的 AutoDetect、Code 22、计划任务与显示模式验收函数 |
 | `refresh-gpu-name.ps1` | 在全局写锁内严格投影唯一 VioGpuDod 实例的 Enum/Class 属性 |
 | `gpu-manufacturer-projection.ps1` | 通过 Config Manager 投影常规页制造商，并在前后直接复核 PnP/INF/SYS/WHCP |
-| `gpu-hardware-id-plan.ps1` | 无副作用地规划“逻辑首项 + 完整物理数组”，供生产脚本与测试共用 |
-| `project-gpu-hardware-id.ps1` | 唯一的 GPU Enum `HardwareID` writer；幂等投影、验证与回滚 |
+| `gpu-hardware-id-plan.ps1` | 规划规范逻辑首项 + 完整物理尾项，并严格识别可恢复的原始数组 |
+| `gpu-hardware-id-transaction.ps1` | 管理 HardwareID 耐久 journal；先写入并回读 `RollbackHardwareIds`，再进入 Applying |
+| `project-gpu-hardware-id.ps1` | HardwareID 唯一 writer；提供 Apply、Verify、RestorePhysical 与事务恢复 |
 | `respawn-stealth-local.ps1` | 串联驱动安装、`apply-gpu-spoof -AutoDetect`、收尾与重启 |
 | `respawn-restart-state.ps1` | 集中管理一次性恢复任务、显示设备就绪等待与单次重启阶段 |
 | `launcher/` | UAC manifest、payload 释放器和应用图标 |
@@ -67,22 +83,37 @@ NVIDIA profile 下，统一 EXE 把 x86 文件发布为 `SysWOW64\nvapi.dll`，�
 x64 文件发布为 `System32\nvapi64.dll`。installer 只替换当前或历史 VMate
 固定摘要，遇到真实 NVIDIA 或其它未知同名 DLL 会在写入前停止。
 
-两份 DLL 都把唯一 NVAPI 句柄关联到 OS 中实际存在的 `1AF4:1050` 显示承载设备；
-subsystem、revision 和 BDF 与真实 PCI 配置保持一致，而名称、显存及型号细节继续
-读取 NVIDIA profile。这样 SetupAPI/PCI 与 NVAPI 的双通道扫描结果会合并为一块
-NVIDIA 显卡，不会额外出现一块 `Red Hat VirtIO` 卡。
+两份 DLL 都只枚举一个 NVAPI 句柄，并在初始化时把它唯一关联到 OS 中实际存在的
+`1AF4:1050` 显示承载设备。`GetPCIIdentifiers` 的主 `deviceId` 有意返回物理
+`1AF4:1050`，用作 PnP/BDF/NVAPI 的跨接口去重键；AIB SUBSYS/REV、external device
+和标准型号仍来自 NVIDIA 逻辑 identity。这个分层返回让鲁大师等多源工具把结果归并
+到同一个 devnode，不会创建第二个 PnP 显卡。
+`GetGPUType` 明确返回 DGPU，`GetFullName` 与 Windows 投影使用同一个标准芯片名。
+真实 BDF、InstanceId、Service、Driver 和 HardwareID 物理尾项继续负责载体绑定。
+`NvAPI_SYS_GetDriverAndBranchVersion` 返回经回归锁定的 `54633 / r545_99` 兼容快照；
+GPU-Z 2.70 因而不会把明确失败误判成旧驱动并跳入未实现的 display-handle 回退入口。
+legacy `NvAPI_GPU_GetMemoryInfo` v1/v2/v3 与 frame-buffer size 接口使用 KiB，4 GiB
+返回 `4194304 KiB`；`NvAPI_GPU_GetMemoryInfoEx` v1 使用 bytes，返回
+`4294967296 bytes`。
+安装完成后还会分别运行 x86/x64 runtime probe，真实调用 Initialize、Enum、
+GetPCIIdentifiers、GetFullName 和 GetGPUType，并复核 NVIDIA vendor、external
+device、DGPU、驱动版本及最小 QueryInterface 面；任一位数失败都会停止自动
+重启并把原始状态追加到 `respawn.log`。
 
 每次 DLL 首次初始化还会以 SetupAPI/Configuration Manager 对 `SourceInstanceId`
 进行实例级复核：必须只有一个 online `1AF4:1050` Display devnode，snapshot BDF
 必须与该 devnode 的 Bus/Address 一致，Service 必须仍为 `VioGpuDod`。HardwareID
-投影的逻辑首项允许存在，但完整物理条目必须保留；任一项不符时 NVAPI/ADL 均拒绝
-发布，绝不猜测另一个载体。
+MULTI_SZ 必须精确等于当前 identity 的规范逻辑首项 + 原始完整 `1AF4:1050` 尾项；
+出现未知首项、尾项缺失或顺序变化时，NVAPI/ADL 均拒绝发布，绝不猜测另一个载体。
 
 AMD 用户态身份库来自 `deploy/adl-shim/`。AMD profile 下，PE32 实现发布到
 `SysWOW64\atiadlxy.dll` 和 `SysWOW64\atiadlxx.dll`，PE32+ 实现发布到
 `System32\atiadlxx.dll`。它实现通用 ADL/ADL2 枚举、显存、VBIOS、核心信息与
-静态时钟查询，不判断调用进程；它返回一张与同一 `1AF4:1050` 载体关联的
-adapter。NVIDIA profile 不向系统搜索目录发布 ADL，并事务移除已知 VMate 残留。
+静态时钟查询，不判断调用进程；`AdapterInfo.strAdapterName` 使用与 Windows
+投影一致的标准芯片名，并与同一 `1AF4:1050` 载体关联；逻辑 `1002` VEN/DEV、
+所选 AIB SUBSYS/REV 同时进入规范 HardwareID 首项并由 ADL 回答，单卡独显拓扑由
+ADL 用户态合同回答。NVIDIA profile
+不向系统搜索目录发布 ADL，并事务移除已知 VMate 残留。
 实时温度、功耗、风扇等没有可信数据源的接口返回官方“不支持”，
 不会伪造遥测。完整合同见
 [`GPU-VENDOR-API.md`](../docs/GPU-VENDOR-API.md)。
@@ -107,10 +138,12 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
    对应 INF/CAT 的固定摘要、NO_DRV 语义与 Microsoft WHCP 签名，再用 inbox
    `pnputil /add-driver ... /install` 清除 SMBus Code 28。若要求重启，先记录
    `ChipsetVerification` 阶段并继续完成 GPU 流程；最终一次重启后只复核该 INF，
-   不会再次运行 GPU 流程或安排第二次重启。
-4. 先停止旧投影任务并只读检查当前在线实例；已经是 physical-only 时跳过
-   sysprep/generalize 后可能退役的旧 `SourceInstanceId`，否则按上次正式身份严格恢复，
-   再次门禁。后续驱动安装和 PnP scan 因而始终只看到 stock `1AF4:1050`。
+   不会再次运行 GPU 流程或安排第二次重启。若首次启动边界来自显示/API 恢复，而
+   Full 恢复时芯片组仍待重启，则任务切换为纯 `ChipsetVerification`、返回 `30`
+   并等待人工重启，不会调用第二次自动关机。
+4. 停止 `StealthGPU-ProjectHardwareId` writer 并只读检查当前在线实例；必要时恢复
+   原始 physical-only 数组，再次门禁。后续驱动安装和 PnP scan 因而只处理唯一的
+   stock `1AF4:1050` 载体；最终投影在身份事务完成后恢复。
 5. 只枚举 `PresentOnly` 的 PCI 显示设备，先要求物理主 ID 全部为 `1AF4:1050`，
    再读取不受 FriendlyName 伪装影响的
    `DEVPKEY_Device_Service`。
@@ -122,30 +155,48 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
 9. 仅对本次新装驱动的系统清理旧 `GraphicsDrivers` 模式缓存；克隆机不清理。
 10. 在旧 SYSTEM writer 已停止的窗口先完整发布持久投影依赖，再执行
    `apply-gpu-spoof.ps1 -AutoDetect -NvapiPayloadDir <受保护目录>`：按当前 PCI
-   SUBSYS 对齐名称和版本化身份，并在 identity 尚未 `Complete` 时完整预检；随后先
-   移除非目标厂商的受管 DLL，再把目标厂商投影发布到 SysWOW64/System32。installer 失败会由同一
+   SUBSYS 对齐完整 AIB 标签和版本化 identity schema-2，并在 identity 尚未
+   `Complete` 时完整预检；新写入的 transaction schema-5 使用标准芯片名提交
+   Windows 展示字段。对于大于 2047 MiB 的 profile，legacy 32 位
+   `HardwareInformation.MemorySize` 写为 2047 MiB（`0x7FF00000`），避免旧工具
+   错按有符号 Int32 读取时得到负数；NVAPI legacy MemoryInfo 返回
+   `4194304 KiB`，MemoryInfoEx 返回 `4294967296 bytes`，`qwMemorySize` 仍精确投影
+   4 GiB。schema 1/2/3/4 只参与旧 journal 恢复，其中历史 schema-4 按原语义重建
+   4095 MiB。随后先移除非目标厂商的
+   受管 DLL，再把目标厂商投影发布到 SysWOW64/System32。installer 失败会由同一
    durable `finally` 回滚 identity；流程不写 GPU-Z 原目录、不修改 PATH，也不安装
    NVIDIA 驱动、控制面板或服务。
-11. 厂商 API 成功后，先注册 `StealthGPU-ProjectHardwareId` 内置计划任务（SYSTEM、
-    启动及登录触发），且复核其动作、权限、触发器和 `IgnoreNew` 设置。
-12. 同一份持久 `project-gpu-hardware-id.ps1` 随后同步把 HardwareID 精确写成
-   `profile 逻辑首项 + 完整物理数组`。例如首项为 `10DE:1C82`，第二项起仍是
-   `1AF4:1050`；设备实例路径、Service、Driver、CompatibleIDs 和 PCI 配置空间不变。
-13. `gpu-manufacturer-projection.ps1` 仅把设备管理器常规页制造商投影成
+   重复运行时不再用可被本工具改写的 `DriverDesc` 名称找目标，而是用 staged
+   `SourceInstanceId`、Enum `Driver`、`ClassSubkey`、`Service=VioGpuDod` 和
+   `InfPath/InfSection` 唯一绑定；RDP/远程显示 Class 只参与诊断列表。
+11. 厂商 API 成功后，在同一 devnode 上依次 Apply、probe、Verify 规范逻辑
+    HardwareID 首项 + 完整物理尾项；全部成功后注册 SYSTEM/Highest 的
+    `StealthGPU-ProjectHardwareId` 启动/登录维护任务。失败会删除任务并恢复
+    physical-only，避免留下半提交数组。Apply 在写设备前先持久化并回读
+    `RollbackHardwareIds`；即使最终 journal 收尾任一写点中断，下次 Recover
+    仍能从 before/expected 两种状态确定性恢复。
+12. `gpu-manufacturer-projection.ps1` 仅把设备管理器常规页制造商投影成
     AMD/NVIDIA；投影前后都要求活动 `Service/InfPath` 不变，并重新验证发布 INF、
     运行中 SYS 的固定摘要与 Microsoft WHCP 证书指纹。
-14. 最后通过统一 helper 校验 System32 `shutdown.exe` 并立即核对其原生退出码，
+13. 最后通过统一 helper 校验 System32 `shutdown.exe` 并立即核对其原生退出码，
     再安排默认重启；当前 profile 对应的 NVAPI 或 ADL 会从系统目录读取同一身份。
     工具若调用没有可信数据源的实时遥测或厂商驱动功能，会收到明确的“不支持”结果，
     而不是伪造数值。
+
+若 Finalize 只因某个正在运行的硬件工具仍映射旧 NVAPI/ADL backup 而返回内部状态
+`12`，新 DLL 与 identity 保持提交，固定摘要 receipt 也不会被删除。统一入口会关闭
+本轮流程并只跨一次启动边界，登录后先 `Recover` 再继续；重启后仍失败时停止自动
+重启并保留 journal，避免永久 ACL 或第三方占用造成循环。
 
 因此，“设备管理器显示 GTX 1050 Ti”不再被当成成功条件。旧 EXE 能把
 Microsoft Basic Display Adapter 改名成 GTX，但底层仍是 BasicDisplay，UEFI 下的
 分辨率会锁在启动帧缓冲（例如 1280×800）。新流程必须确认真实 Service。
 
-NVAPI、ADL 和逻辑 PCI 投影只统一用户态工具的身份查询，不增加渲染能力。
+SetupAPI 首项和 NVAPI/ADL 的逻辑身份只统一用户态查询，不增加渲染能力。
 stock `VioGpuDod` 是 Display-Only 驱动；Windows 客体不会因为显示 `10DE:1C82`
-就获得 GTX 1050 Ti 的 Direct3D、CUDA、NVENC 或真实 NVIDIA 驱动性能。
+就获得 GTX 1050 Ti 的 Direct3D、CUDA、NVENC 或真实 NVIDIA 驱动性能。读取 stock
+`VioGpuDod` DXGI adapter 描述、HardwareID 物理尾项或原始 PCI 配置的工具仍会看到
+virtio/`1AF4:1050`；真实 InstanceId、BDF、Service 和 Driver 也始终不变。
 
 ## 固定 1920×1080 原生模式
 
@@ -194,9 +245,10 @@ Start-Process -FilePath '.\respawn-stealth.exe' -ArgumentList '-NoReboot' -Wait
 或 NVIDIA 软件。GPU-Z 文件本身的下载来源与 Authenticode 签名仍由用户核验。
 
 本次 `--firstlogon` 投影链不新增 RDP、调试 HTTP、QEMU guest agent、厂商服务或
-第三方守护程序；新增持久项只有项目脚本、当前 profile 对应的一组 NVAPI 或 ADL DLL，以及 Windows 自带 Task
-Scheduler 中的名称刷新和 HardwareID 投影两条任务。电源方案只由 Windows 内置 API
-原地更新，不新增服务。VM2 现场验收使用过的 USB/HTTP 调试路径不会进入 EXE。
+第三方守护程序；新增持久项只有项目脚本、当前 profile 对应的一组 NVAPI 或 ADL DLL，
+以及 Windows 自带 Task Scheduler 中的名称刷新与
+`StealthGPU-ProjectHardwareId` 启动/登录维护任务。电源方案只由 Windows
+内置 API 原地更新，不新增服务。VM2 现场验收使用过的 USB/HTTP 调试路径不会进入 EXE。
 
 直接运行使用两个固定系统搜索目录，但两组厂商 DLL 互斥：
 
@@ -223,7 +275,8 @@ C:\Windows\System32\atiadlxx.dll  # 64 位 AMD ADL 名称
   的驱动绑定；本流程不会恢复自签驱动路径。
 - 可重复执行：payload 每次覆盖为当前 EXE 版本；驱动安装与缓存清理只在需要时发生。
 - clone 的每个 `SourceInstanceId` 使用独立 SHA-256 命名备份；旧实例不会阻止新 SUBSYS
-  实例建立自己的事务。FirstLogon 保留名称刷新与 HardwareID 投影，仅跳过交互显示任务。
+  实例建立自己的事务。FirstLogon 保留名称刷新和 HardwareID 启动/登录维护，
+  交互显示任务仍按首次登录规则跳过。
 
 `autounattend.xml` 的 clone 首次登录命令仍固定调用
 `D:\工具\respawn-stealth.exe --firstlogon`，所以封 base 前必须把最新 EXE 放到该路径。
@@ -253,12 +306,18 @@ $display = Get-PnpDevice -Class Display -PresentOnly |
 $hardwareIds = (Get-PnpDeviceProperty -InstanceId $display.InstanceId `
     -KeyName DEVPKEY_Device_HardwareIds).Data
 $hardwareIds
-if ($hardwareIds[0] -notlike 'PCI\VEN_10DE&DEV_1C82*' -or
-    $hardwareIds[1] -notlike 'PCI\VEN_1AF4&DEV_1050*') {
-    throw 'HardwareID 不是 profile-first / physical-second'
+# Colorful GTX 1050 Ti 示例；其它 AIB 应使用其 identity 中的 SUBSYS/REV。
+$expectedLogical = 'PCI\VEN_10DE&DEV_1C82&SUBSYS_00007377&REV_A1'
+if (-not $hardwareIds -or $hardwareIds.Count -lt 2 -or
+    $hardwareIds[0] -cne $expectedLogical -or
+    @($hardwareIds[1..($hardwareIds.Count - 1)] | Where-Object {
+        $_ -notlike 'PCI\VEN_1AF4&DEV_1050*'
+    }).Count -ne 0) {
+    throw 'HardwareID 不是规范逻辑首项 + 完整物理尾项'
 }
 Get-CimInstance Win32_VideoController |
-    Format-List Name,DriverVersion,CurrentHorizontalResolution,CurrentVerticalResolution
+    Format-List Name,AdapterRAM,DriverVersion,CurrentHorizontalResolution,
+        CurrentVerticalResolution
 $identityRoot = 'HKLM:\SOFTWARE\StealthGPU'
 $currentIdentity = (Get-ItemProperty -LiteralPath $identityRoot `
     -Name CurrentIdentity).CurrentIdentity
@@ -279,16 +338,27 @@ Get-FileHash "$env:WINDIR\System32\nvapi64.dll" -Algorithm SHA256
 期望 PCI 显示设备的 `DEVPKEY_Device_Service` 为 `VioGpuDod`，INF 为 `oem*.inf`，重启后
 显示设置可枚举 1920×1080；1050 Ti profile 的十进制逻辑 VEN/DEV 分别为
 `4318/7298`（十六进制 `10DE/1C82`）。ProgramData 与系统搜索目录中的两份 DLL 摘要
-必须分别一致。若通过 RDP 查看，分辨率下拉由 RDP 客户端控制，本来就会变灰；驱动与
-本地输出必须在 SDL 控制台验证。
+必须分别一致。HardwareID 首项应是当前 AIB 的规范逻辑 ID，尾项完整保留
+`1AF4:1050`；NVAPI 主 PCI 关联键也应是物理 carrier，而 external/AIB/型号保持逻辑
+NVIDIA。若通过 RDP 查看，分辨率下拉由 RDP 客户端控制，本来就会变灰；驱动与本地
+输出必须在 SDL 控制台验证。
 
 SMBus 期望 `Status=OK`、`Class=System`、ProblemCode `0`、INF 为 `oem*.inf`，
 且 `DEVPKEY_Device_Service` 为空；服务为空正是 Intel NO_DRV 包的正确结果。
 
 GTX 1050 Ti 的快照还应为 schema `2`、`GDDR5`、128 bit、base
 `1290000` kHz、boost `1392000` kHz、NVAPI memory `3504000` kHz 和
-`SpoofSliSupported=0`。GPU-Z 将该 memory clock 显示为 1752 MHz；这是查询
-投影，不是真实频率管理或显存分配。
+`SpoofSliSupported=0`。`SpoofName` 应保持所选板卡的完整 AIB canonical 标签；
+设备管理器投影与 NVAPI/ADL adapter 名称则统一为按 `10DE:1C82` 映射的
+`NVIDIA GeForce GTX 1050 Ti`，`Win32_VideoController.Name` 也使用该标准名。
+4 GiB profile 的 legacy `AdapterRAM`/`HardwareInformation.MemorySize` 为
+2047 MiB（`0x7FF00000`），确保错误按有符号 Int32 读取该字段的旧工具仍得到正数；
+NVAPI legacy `MemoryInfo` v1/v2/v3 与 frame-buffer size 接口为
+`4194304 KiB`，`MemoryInfoEx` v1 为 `4294967296 bytes`；
+`HardwareInformation.qwMemorySize` 与相应厂商接口保留精确 4 GiB。历史
+transaction schema-4 journal 恢复时仍按原语义重建 4095 MiB，新提交只使用
+schema-5。GPU-Z 将 memory clock 显示为 1752 MHz；这是查询投影，不是真实频率管理
+或显存分配。
 
 日志：
 
@@ -301,12 +371,11 @@ GTX 1050 Ti 的快照还应为 schema `2`、`GDDR5`、128 bit、base
 NVAPI installer 的逐行输出并入 `respawn.log`，因此 identity 回滚原因和双 DLL
 事务结果位于同一条正式部署日志中。
 
-仅回滚 HardwareID 浅层投影时，以管理员身份执行持久目录中的：
-
-```powershell
-& 'C:\ProgramData\StealthGPU\project-gpu-hardware-id.ps1' -Mode Rollback
-Unregister-ScheduledTask -TaskName 'StealthGPU-ProjectHardwareId' -Confirm:$false
-```
+从旧 HardwareID 布局升级时，直接运行最新统一 EXE。它会先停止旧
+`StealthGPU-ProjectHardwareId` writer，恢复并门禁原始 physical-only 数组；身份事务
+成功后再用当前 AIB 生成规范逻辑首项，逐项接回完整物理尾项，执行 Apply/Verify 并
+重新注册启动/登录维护任务。不要手工并发运行旧 projector；
+`gpu-hardware-id-projection.log` 记录恢复、投影与验证全过程。
 
 若首次运行报“payload 目录 Owner 不受信”，说明固定目录曾被普通用户预建；为避免
 管理员执行竞态，程序会故意停止。确认目录内没有用户文件后，以管理员身份删除

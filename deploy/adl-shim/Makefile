@@ -4,9 +4,11 @@ CC32 ?= i686-w64-mingw32-gcc
 CC64 ?= x86_64-w64-mingw32-gcc
 COMMON_DIR := ../gpu-api-common
 COMMON_SOURCES := $(COMMON_DIR)/aib_identity_catalog.c \
+                  $(COMMON_DIR)/gpu_model_catalog.c \
                   $(COMMON_DIR)/carrier_validation_contract.c \
                   $(COMMON_DIR)/carrier_validation_win.c
 COMMON_HEADERS := $(COMMON_DIR)/aib_identity_catalog.h \
+                  $(COMMON_DIR)/gpu_model_catalog.h \
                   $(COMMON_DIR)/carrier_validation.h
 
 SOURCES := adl_context_handle.c adl_core.c adl_core_extended.c \

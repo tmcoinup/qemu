@@ -14,6 +14,9 @@ fail() {
 
 # shellcheck source=/dev/null
 source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
+# verify-stealth 会按验收阶段重复加载总入口；新增只读常量也必须保持可重入。
+# shellcheck source=/dev/null
+source "$REPO_ROOT/deploy/scripts/stealth-lib.sh"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/fixtures/catalog-cpu-preflight-stub.sh"
 
@@ -173,5 +176,13 @@ for forwarded in \
     grep -F -- "$forwarded" <<<"$completion" >/dev/null \
         || fail "clone 完成命令未传播 $forwarded"
 done
+
+PRINT_HELPER="$REPO_ROOT/deploy/scripts/lib/stealth-print.sh"
+grep -F 'PCI=1AF4:1050 / SUBSYS_${gpu_carrier_subsys}（单一 virtio display，无直通）' \
+    "$PRINT_HELPER" >/dev/null \
+    || fail "启动摘要没有明确单一物理 GPU PCI 身份"
+if grep -F 'logical_gpu_id' "$PRINT_HELPER" >/dev/null; then
+    fail "启动摘要仍并排打印第二套逻辑 GPU PCI ID"
+fi
 
 echo "OK: Linux component selection contract passed"

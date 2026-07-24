@@ -57,7 +57,7 @@ QEMU 默认 FADT/FACP 里 Hypervisor Present Flag = 0 (除非 `+hypervisor`)，�
 | 设备 | 物理机 | QEMU 默认 | 本项目 |
 |-----|--------|-----------|--------|
 | GPU 物理主 VID/DID | NVIDIA `10DE:1C82`（1050 Ti） | virtio `1AF4:1050` | 固定保留 `1AF4:1050`，供 stock VioGpuDod 绑定；不再覆盖主 ID |
-| GPU 子系统 / 用户态逻辑 ID | 厂商 OEM ID | virtio 默认值 | PnP 原始顺序为 `SUBSYS_1C8210DE`（device `1C82`、vendor `10DE`）；注册表与系统 NVAPI 规范化投影为 `10DE:1C82` |
+| GPU 子系统 / 用户态逻辑 ID | 厂商 OEM ID | virtio 默认值 | 同一 devnode 的 PnP HardwareID 为规范逻辑 VEN/DEV/AIB SUBSYS/REV 首项 + 完整物理尾项；NVAPI 主关联键为 `1AF4:1050`，external/AIB/型号保持逻辑身份 |
 | NIC 设备 | Intel I217-LM / Realtek | e1000 / virtio-net ⚠️ | `e1000e` (仿 Intel) + 真 Intel OUI MAC |
 | AHCI / NVMe ID | Samsung / WDC / Kingston... | 0x8086:0x2922 (AHCI) | `-device nvme,serial=...,model=...`；本项目直接 NVMe + 真实 serial/model |
 | RTC/IDE/PIT 类设备存在 | 物理机也存在 | 一样 | 不改动 |

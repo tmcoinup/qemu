@@ -355,7 +355,7 @@ virtio-vga 的 `1AF4:1050`。物理节点只携带
 | profile 字段 | 含义 / 当前约束 |
 |---|---|
 | `GPU_COMPONENT_ID` | 18 个已审计 AIB 稳定 ID 之一；精确集合以 `gpu-boards.json` 为准 |
-| `GPU_VENDOR`、`GPU_NAME` | 逻辑芯片厂商与含板卡品牌的型号名称；当前为 12 块 NVIDIA 与 6 块 AMD |
+| `GPU_VENDOR`、`GPU_NAME` | 逻辑芯片厂商与完整 AIB canonical 标签；`GPU_NAME` 会原样进入 identity schema-2 的 `SpoofName`，当前为 12 块 NVIDIA 与 6 块 AMD |
 | `GPU_BOARD_PARTNER`、`GPU_PART_NUMBER` | 与稳定 ID 绑定的 ASUS、Colorful、GALAX、MSI、Gigabyte、EVGA 或 Sapphire 品牌/真实料号组合 |
 | `GPU_PCI_VEN`、`GPU_PCI_DEV` | 六个用户态逻辑主 ID：NVIDIA `10de:1d01/1380/1c81/1c82`，AMD `1002:699f/67ff` |
 | `GPU_SUBSYS_VEN`、`GPU_SUBSYS_DEV` | 与所选板卡原子绑定的真实逻辑 AIB subsystem；不能只按芯片主 ID 推断 |
@@ -368,6 +368,30 @@ virtio-vga 的 `1AF4:1050`。物理节点只携带
 派生或虚构 GPU 序列号。
 
 下列规格字段同样与所选 21 列 AIB bundle 绑定，用于 guest schema-2 用户态身份快照：
+
+`GPU_NAME`/`SpoofName` 不等于 Windows 设备展示名。完整 AIB bundle 校验通过后，
+Enum `FriendlyName`/`DeviceDesc`、Class `DriverDesc`、
+`HardwareInformation.AdapterString` 和 `HardwareInformation.ChipType` 按
+`GPU_PCI_VEN`/`GPU_PCI_DEV` 的封闭映射使用标准芯片名；Enum `Mfg` 与 Class
+`ProviderName` 使用 `GPU_VENDOR`。NVAPI/ADL 的公开 adapter 名称复用同一映射，
+完整 AIB 标签只保留在内部 identity 中用于原子校验。新的 Windows 投影使用
+transaction schema-5，transaction schema 1/2/3/4 仅用于恢复旧 journal，不改变
+identity schema-2。
+
+schema-5 的 SetupAPI HardwareID 首项包含逻辑 `VEN/DEV`、所选板卡的
+`GPU_SUBSYS_VEN`/`GPU_SUBSYS_DEV` 和 `GPU_REV`；后续物理 `1AF4:1050` 条目完整保留，
+而 `MatchingDeviceId`、`InfPath`、`InfSection`、`Service` 继续使用 stock
+`VioGpuDod` 绑定值。它们是同一 VioGpuDod devnode 的多条匹配字符串，不会生成额外
+显卡；真实 InstanceId、BDF、Driver 和 Service 仍属于 `1AF4:1050`。NVAPI
+`GetPCIIdentifiers` 的主 `deviceId` 同样使用物理 `1AF4:1050` carrier 作为跨接口
+去重键，AIB subsystem/revision、external device 和标准型号保持逻辑厂商身份。
+
+4 GiB AIB 的 NVAPI legacy `MemoryInfo` v1/v2/v3 与 frame-buffer size 接口返回
+`4194304 KiB`，`MemoryInfoEx` v1 返回 `4294967296 bytes`。旧 32 位
+`HardwareInformation.MemorySize` 则投影为
+`2047 MiB`（`0x7FF00000`），确保错误按有符号 Int32 读取它的旧工具仍得到正数；
+64 位 `HardwareInformation.qwMemorySize` 与相应厂商接口仍精确投影 4 GiB。历史
+schema-4 journal 只参与恢复，并按原语义重建 `4095 MiB`。
 
 | host profile | guest 注册表 | 单位 / 约束 |
 |---|---|---|

@@ -5,8 +5,6 @@
     [string]$StagedIdentityId
 )
 $ErrorActionPreference = 'Stop'
-$stockDriverDescription = 'Red Hat VirtIO GPU DOD controller'
-$stockDriverProvider = 'Red Hat, Inc.'
 $gpuBoardIdentityContractPath = Join-Path $PSScriptRoot `
     'gpu-board-identity-contract.ps1'
 if (-not (Test-Path -LiteralPath $gpuBoardIdentityContractPath -PathType Leaf)) {
@@ -77,10 +75,10 @@ function Get-CurrentGpuIdentity {
             if ($null -eq $transactionKey) { throw ('暂存事务不存在：' + $StagedId) }
             $transactionSchema = Get-ExactRegistryValue -Key $transactionKey `
                 -Name 'TransactionSchemaVersion' -Kind $dwordKind
-            # schema-1 只保留给 transaction helper 的 Recover/Rollback 兼容路径。
-            # Commit 严禁按旧投影契约首写 Enum/Class，否则会再次破坏签名关联。
-            if ($transactionSchema -ne 2) {
-                throw ('暂存提交只接受 transaction schema-2：' + $transactionSchema)
+            # schema-1..4 只保留给 transaction helper 的 Recover/Rollback 兼容路径。
+            # 新提交必须使用 schema-5 的标准显示名与有符号安全显存投影。
+            if ($transactionSchema -ne 5) {
+                throw ('暂存提交只接受 transaction schema-5：' + $transactionSchema)
             }
             $transactionState = Get-ExactRegistryValue -Key $transactionKey `
                 -Name 'State' -Kind $stringKind
@@ -141,6 +139,9 @@ function Get-CurrentGpuIdentity {
         }
         if ($schemaBefore -ne 2) { throw ('不支持的身份 schema：' + $schemaBefore) }
         $snapshot = [ordered]@{
+            # 共享 AIB bundle 校验会复核 schema；读取器必须把刚完成双读的版本号
+            # 带入快照，不能让缺失属性被 PowerShell 转成 0 后误拒绝合法事务。
+            IdentitySchemaVersion = [int]$schemaBefore
             IdentityId = Get-ExactRegistryValue -Key $versionKey -Name 'IdentityId' -Kind $stringKind
             SpoofName = Get-ExactRegistryValue -Key $versionKey -Name 'SpoofName' -Kind $stringKind
             SpoofVendor = Get-ExactRegistryValue -Key $versionKey -Name 'SpoofVendor' -Kind $stringKind
@@ -331,26 +332,26 @@ function Set-ActiveGpuProjection {
                 $infPath -cne $Config.StagedDriverInfPath) {
                 throw 'Prepared transaction 的 INF 与 active Class 已发生变化'
             }
-            $stockEnumDescription = '@' + $infPath +
-                ',%viogpudod.devicedesc%;' + $stockDriverDescription
-            $stockEnumProvider = '@' + $infPath +
-                ',%vendor%;' + $stockDriverProvider
-            $chipType = $Config.SpoofName -replace '^(NVIDIA|AMD)\s+', ''
-            $memoryBytes = [BitConverter]::GetBytes([UInt64]$Config.SpoofRamMb * 1MB)
-            $legacyMemory = [byte[]]$memoryBytes[0..3]
+            # SpoofName 保留 AIB 标签参与 schema-2 整行校验；Windows 展示字段只
+            # 使用厂商驱动的标准芯片名，板卡差异由 subsystem/VBIOS/时钟表达。
+            $displayName = Get-GpuStandardDisplayName `
+                -PciVendorId $Config.SpoofPciVendorId `
+                -PciDeviceId $Config.SpoofPciDeviceId
+            $chipType = $displayName -replace '^(NVIDIA|AMD)\s+', ''
+            $legacyMemory = [byte[]](Get-GpuLegacyMemorySizeBytes `
+                -RamMb $Config.SpoofRamMb)
             $driverMatchingId = Get-StockDriverMatchingDeviceId `
                 $Config.SourceInstanceId
-            Set-VerifiedRegistryValue $enumKey 'FriendlyName' $Config.SpoofName $string
-            # DeviceDesc/Mfg 与 Class DriverDesc/ProviderName 是 SetupAPI 用来
-            # 回找当前 INF driver node 的安装状态。品牌仅投影到 FriendlyName
-            # 和 HardwareInformation；否则有效的 WHQL 包会在设备管理器里误报未签名。
-            Set-VerifiedRegistryValue $enumKey 'DeviceDesc' $stockEnumDescription $string
-            Set-VerifiedRegistryValue $enumKey 'Mfg' $stockEnumProvider $string
-            Set-VerifiedRegistryValue $classKey 'DriverDesc' $stockDriverDescription $string
-            Set-VerifiedRegistryValue $classKey 'ProviderName' $stockDriverProvider $string
+            Set-VerifiedRegistryValue $enumKey 'FriendlyName' $displayName $string
+            # schema-5 的展示字段使用逻辑身份；真正的 driver node 继续由 stock
+            # MatchingDeviceId/InfPath/InfSection/Service 绑定，不改硬件与服务字段。
+            Set-VerifiedRegistryValue $enumKey 'DeviceDesc' $displayName $string
+            Set-VerifiedRegistryValue $enumKey 'Mfg' $Config.SpoofVendor $string
+            Set-VerifiedRegistryValue $classKey 'DriverDesc' $displayName $string
+            Set-VerifiedRegistryValue $classKey 'ProviderName' $Config.SpoofVendor $string
             Set-VerifiedRegistryValue $classKey 'MatchingDeviceId' `
                 $driverMatchingId $string
-            Set-VerifiedRegistryValue $classKey 'HardwareInformation.AdapterString' $Config.SpoofName $string
+            Set-VerifiedRegistryValue $classKey 'HardwareInformation.AdapterString' $displayName $string
             Set-VerifiedRegistryValue $classKey 'HardwareInformation.ChipType' $chipType $string
             Set-VerifiedRegistryValue $classKey 'HardwareInformation.DacType' 'Integrated RAMDAC' $string
             Set-VerifiedRegistryValue $classKey 'HardwareInformation.BiosString' $Config.SpoofBios $string

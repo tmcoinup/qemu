@@ -26,6 +26,7 @@
 #include "payload_gpu_manufacturer_projection_ps1.h"
 #include "payload_gpu_manufacturer_projector_exe.h"
 #include "payload_gpu_hardware_id_plan_ps1.h"
+#include "payload_gpu_hardware_id_transaction_ps1.h"
 #include "payload_project_gpu_hardware_id_ps1.h"
 #include "payload_force_displayfreq_ps1.h"
 #include "payload_install_display_driver_ps1.h"
@@ -47,6 +48,8 @@
 #include "payload_sunrisepoint_h_cat.h"
 #include "payload_nvapi_x86_dll.h"
 #include "payload_nvapi_x64_dll.h"
+#include "payload_nvapi_runtime_probe_x86_exe.h"
+#include "payload_nvapi_runtime_probe_x64_exe.h"
 #include "payload_adl_x86_dll.h"
 #include "payload_adl_x64_dll.h"
 #ifndef ARRAY_LEN
@@ -73,6 +76,7 @@ static const EmbeddedPayload embedded_payloads[] = {
     { L"gpu-manufacturer-projection.ps1", payload_gpu_manufacturer_projection_ps1, (DWORD)sizeof(payload_gpu_manufacturer_projection_ps1) },
     { L"gpu-manufacturer-projector.exe", payload_gpu_manufacturer_projector_exe, (DWORD)sizeof(payload_gpu_manufacturer_projector_exe) },
     { L"gpu-hardware-id-plan.ps1", payload_gpu_hardware_id_plan_ps1, (DWORD)sizeof(payload_gpu_hardware_id_plan_ps1) },
+    { L"gpu-hardware-id-transaction.ps1", payload_gpu_hardware_id_transaction_ps1, (DWORD)sizeof(payload_gpu_hardware_id_transaction_ps1) },
     { L"project-gpu-hardware-id.ps1", payload_project_gpu_hardware_id_ps1, (DWORD)sizeof(payload_project_gpu_hardware_id_ps1) },
     { L"force-displayfreq.ps1", payload_force_displayfreq_ps1, (DWORD)sizeof(payload_force_displayfreq_ps1) },
     { L"install-display-driver.ps1", payload_install_display_driver_ps1, (DWORD)sizeof(payload_install_display_driver_ps1) },
@@ -94,6 +98,8 @@ static const EmbeddedPayload embedded_payloads[] = {
     { L"sunrisepoint-h.cat", payload_sunrisepoint_h_cat, (DWORD)sizeof(payload_sunrisepoint_h_cat) },
     { L"nvapi.dll", payload_nvapi_x86_dll, (DWORD)sizeof(payload_nvapi_x86_dll) },
     { L"nvapi64.dll", payload_nvapi_x64_dll, (DWORD)sizeof(payload_nvapi_x64_dll) },
+    { L"nvapi-runtime-probe-x86.exe", payload_nvapi_runtime_probe_x86_exe, (DWORD)sizeof(payload_nvapi_runtime_probe_x86_exe) },
+    { L"nvapi-runtime-probe-x64.exe", payload_nvapi_runtime_probe_x64_exe, (DWORD)sizeof(payload_nvapi_runtime_probe_x64_exe) },
     { L"atiadlxy.dll", payload_adl_x86_dll, (DWORD)sizeof(payload_adl_x86_dll) },
     { L"atiadlxx32.dll", payload_adl_x86_dll, (DWORD)sizeof(payload_adl_x86_dll) },
     { L"atiadlxx.dll", payload_adl_x64_dll, (DWORD)sizeof(payload_adl_x64_dll) },
@@ -135,15 +141,12 @@ static int append_quoted_arg(wchar_t *buf, size_t cap, size_t *len, const wchar_
     if (*len > 0 && !append_char(buf, cap, len, L' ')) {
         return 0;
     }
-
     if (!need_quote) {
         return append_text(buf, cap, len, arg);
     }
-
     if (!append_char(buf, cap, len, L'"')) {
         return 0;
     }
-
     /*
      * Windows 命令行没有 argv 数组，CreateProcess 只接收一整串命令行。
      * 这里按 CommandLineToArgvW 兼容规则转义：引号前的反斜杠翻倍，
@@ -171,20 +174,17 @@ static int append_quoted_arg(wchar_t *buf, size_t cap, size_t *len, const wchar_
         slashes = 0;
         arg++;
     }
-
     if (!append_backslashes(buf, cap, len, slashes * 2) ||
         !append_char(buf, cap, len, L'"')) {
         return 0;
     }
     return 1;
 }
-
 static int is_admin(void)
 {
     BOOL ok = FALSE;
     PSID group = NULL;
     SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
-
     if (!AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID,
                                   DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
                                   &group)) {

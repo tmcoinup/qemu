@@ -1,12 +1,9 @@
 # USAGE — Linux/KVM 操作参考
 
-> **当前基线**：QEMU `11.0.2` + `V-11`，严格硬件目录 schema 1，Linux/KVM 为主路径。
-> 新 VM 启用六套 Intel 受控 bundle，主板覆盖 ASUS、MSI、GIGABYTE；底层仍是 Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
+> **当前基线**：QEMU `11.0.2` + `V-11`，严格硬件目录 schema 1，Linux/KVM 为主路径。新 VM 启用六套 Intel 受控 bundle，主板覆盖 ASUS、MSI、GIGABYTE；底层仍是 Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
 > NVMe 只含 Samsung、Intel、WD、KIOXIA 四款精确 512GB 原子模板，显示器有四款 1080p/16:9 模板；新 GPU 池覆盖 6 个芯片型号，每个型号 3 个板卡品牌，共 18 块 AIB（12 NVIDIA、6 AMD）。物理显示仍为 virtio `1AF4:1050`，不使用 GPU passthrough/vGPU，也不虚构 GPU 序列号。
 
-当前能力、E5-2696 v4/X99、其它 E5 与 Windows/WHPX 的结论先看 [硬件平台评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)；字段来源和 fidelity 见 [Profile 字段](PROFILE-FIELDS.md)。
-
-DGame 的区域推流依赖最终 QEMU 叶进程的进程级 Yama 例外。`start-vm.sh` 已逐实例自动选择包内 wrapper、内置 Python wrapper 或新版 `setpriv`，无需手工降低全局 `ptrace_scope`；根因、滚动重启和验收方式见 [DGame QEMU 内存授权记录](DGAME_QEMU_MEMORY_AUTH.md)。
+当前能力、E5-2696 v4/X99、其它 E5 与 Windows/WHPX 的结论先看 [硬件平台评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)；字段来源和 fidelity 见 [Profile 字段](PROFILE-FIELDS.md)。DGame 的区域推流依赖最终 QEMU 叶进程的进程级 Yama 例外；`start-vm.sh` 已逐实例自动选择包内 wrapper、内置 Python wrapper 或新版 `setpriv`，无需手工降低全局 `ptrace_scope`，详见 [DGame QEMU 内存授权记录](DGAME_QEMU_MEMORY_AUTH.md)。
 
 ## 1. 宿主前提
 
@@ -30,14 +27,8 @@ ip -4 route show default
 
 如果输出不是 `active`，`setup-bridge.sh` 只会使用非持久的 iproute2 fallback。Ubuntu Server 若仍由 netplan/systemd-networkd 管理，不要在 SSH 中直接切 renderer；先准备本地/带外控制台，再执行 `sudo apt install -y network-manager` 并切换 renderer。
 
-GNOME Wayland 会话由 Mutter 决定 XWayland 窗口能否抑制 `Super`、`Alt+Tab` 等宿主快捷键。
-QEMU 会在键盘抓取前发送 `_XWAYLAND_MAY_GRAB_KEYBOARD`，为当前普通 SDL 窗口申请权限。
-这条逐窗口请求不依赖 `xwayland-allow-grabs`；后者只影响 override-redirect 窗口，不应为 QEMU 全局开启。
-
-默认无需修改 GNOME 设置。只有宿主自定义了
-`xwayland-grab-access-rules` 并显式拒绝 QEMU 时，才用
-`xprop WM_CLASS` 确认 SDL 窗口类并调整对应拒绝规则；不要放宽为任意应用。
-原生 Xorg 不需要该 XWayland 授权消息。
+GNOME Wayland 会话由 Mutter 决定 XWayland 窗口能否抑制 `Super`、`Alt+Tab` 等宿主快捷键。QEMU 会在键盘抓取前发送 `_XWAYLAND_MAY_GRAB_KEYBOARD`，为当前普通 SDL 窗口申请权限；这条逐窗口请求不依赖 `xwayland-allow-grabs`，后者只影响 override-redirect 窗口，不应为 QEMU 全局开启。
+默认无需修改 GNOME 设置。只有宿主自定义了 `xwayland-grab-access-rules` 并显式拒绝 QEMU 时，才用 `xprop WM_CLASS` 确认 SDL 窗口类并调整对应拒绝规则；不要放宽为任意应用。原生 Xorg 不需要该 XWayland 授权消息。
 
 安装后还要验证 KVM 与默认 CPU 隔离前提；把用户加入 `kvm` 组后必须重新登录：
 
@@ -49,27 +40,16 @@ stat -fc %T /sys/fs/cgroup                 # 期望 cgroup2fs
 grep -w cpuset /sys/fs/cgroup/cgroup.controllers
 ```
 
-若缺少 `kvm` 组权限，执行 `sudo usermod -aG kvm "$USER"` 后注销并重新登录。
-日常启动不需要记忆或手工执行 CPU isolate preflight：
-`start-vm.sh` 在启用 `CPU_ISOLATE=1` 时会自动运行。下面的命令只用于安装后的独立诊断：
+若缺少 `kvm` 组权限，执行 `sudo usermod -aG kvm "$USER"` 后注销并重新登录。日常启动不需要记忆或手工执行 CPU isolate preflight；`start-vm.sh` 在启用 `CPU_ISOLATE=1` 时会自动运行。下面的命令只用于安装后的独立诊断：
 
 ```bash
 sudo -n /usr/local/libexec/qemu-vmate-cpu-isolate preflight
 ```
 
-其中 `sudo -n` 表示只使用已安装的 `NOPASSWD` 授权，绝不等待密码输入；授权缺失时立即失败。
-`preflight` 会验证固定 helper/runtime、QEMU 信任清单中的 canonical path、device/inode 和
-SHA-256，并检查 cgroup v2/cpuset（缺少 subtree controller 时会尝试启用），同时准备
-root-only 的 `/run/qemu-vmate-cpu-isolate` 目录。它不会创建 `vmiso` CPU 分区、迁移进程、
-修改 governor 或启动 VM；成功输出包含 `abi=5 policy=logical-1to1-v1`。
+其中 `sudo -n` 表示只使用已安装的 `NOPASSWD` 授权，绝不等待密码输入；授权缺失时立即失败。`preflight` 会验证固定 helper/runtime、QEMU 信任清单中的 canonical path、device/inode 和 SHA-256，并检查 cgroup v2/cpuset（缺少 subtree controller 时会尝试启用），同时准备 root-only 的 `/run/qemu-vmate-cpu-isolate` 目录。它不会创建 `vmiso` CPU 分区、迁移进程、修改 governor 或启动 VM；成功输出包含 `abi=5 policy=logical-1to1-v1`。
 
-本分支不做 GPU passthrough/vGPU，因此 VT-d/IOMMU 不是当前功能前提。它仍可用于宿主其它
-用途，但不能据此提高本项目 GPU 真机化评级。
-
-家用 CPU 目录分为两层：E5 v3/v4 精确宿主类拥有无需附加参数的 Haswell
-`supported` 正常池；E5 v1/v2、AMD K10/Zen 及其它候选仍属于显式
-`compatibility` 兜底。E5 v1-v4 在这里只是宿主代际分类，不是 Guest 型号；
-目录只产生家用 Guest CPU，服务器/E 系列不会作为 Guest 兜底。
+本分支不做 GPU passthrough/vGPU，因此 VT-d/IOMMU 不是当前功能前提。它仍可用于宿主其它用途，但不能据此提高本项目 GPU 真机化评级。
+家用 CPU 目录分为两层：E5 v3/v4 精确宿主类拥有无需附加参数的 Haswell `supported` 正常池；E5 v1/v2、AMD K10/Zen 及其它候选仍属于显式 `compatibility` 兜底。E5 v1-v4 在这里只是宿主代际分类，不是 Guest 型号；目录只产生家用 Guest CPU，服务器/E 系列不会作为 Guest 兜底。
 
 若当前目标只是先在 AMD 宿主安装/运行 Windows 10，并明确接受“Ryzen/B350 字段 +
 Q35/ICH9 machine 行为”不等于真实 B350，可使用窄范围兼容入口：
@@ -513,5 +493,5 @@ latency、NUMA remote access、磁盘/网络 P99、RSS、温度和功耗。
 
 ## 10. 当前 GPU 文档与历史资料
 
-`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md` 和 `ACE-SHALLOW-STEALTH.md` 描述当前浅层 GPU 流程：物理主 ID 固定为 `1AF4:1050`，subsystem 使用 `1AF4:a101`–`1AF4:a112` carrier 从 18 块 AIB bundle（12 NVIDIA、6 AMD）中选择；stock VioGpuDod 继续绑定，真实 AIB subsystem、VBIOS、显存与时钟只进入用户态逻辑身份。固定摘要的 x86 SysWOW64 + x64 System32 shim 使 GPU-Z 2.70 可直接双击；目录不生成 GPU serial。
+`STEALTH-WORKFLOW.md`、`STEALTH-APPROACHES.md` 和 `ACE-SHALLOW-STEALTH.md` 描述当前浅层 GPU 流程：全局只有一个 `1AF4:1050 + stock VioGpuDod` devnode；PnP HardwareID 为规范逻辑首项 + 完整物理尾项，真实 InstanceId/BDF/Service/Driver 不变；NVAPI 主 PCI 键用物理 carrier 跨接口去重，external/AIB/型号保持逻辑 NVIDIA。该投影不增加显卡设备、显存或性能，目录也不生成 GPU serial。
 旧审计中的自签驱动、EfiGuard、主 PCI ID 覆盖或真实 NVIDIA 转发器只代表历史快照，不能覆盖当前 manifest、启动器和上述三份文档。

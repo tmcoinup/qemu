@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # 静态验证 QEMU 11.0.2 构建工具契约，不执行 configure、编译或补丁写入。
+# shellcheck disable=SC2016 # 本文件刻意匹配生产脚本中的 shell 变量字面量。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BUILD_SCRIPT="$REPO_ROOT/deploy/tools/build.sh"
 PATCH_SCRIPT="$REPO_ROOT/deploy/tools/apply-patches.sh"
+OVMF_BUILD_SCRIPT="$REPO_ROOT/deploy/tools/build-ovmf.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -32,6 +34,7 @@ reject_text() {
 test_shell_syntax() {
     bash -n "$BUILD_SCRIPT"
     bash -n "$PATCH_SCRIPT"
+    bash -n "$OVMF_BUILD_SCRIPT"
 }
 
 test_qemu_11_baseline_and_werror() {
@@ -56,6 +59,32 @@ test_required_native_dependencies_are_preflighted() {
     require_text 'for pkg in glib-2.0 pixman-1 zlib' "$BUILD_SCRIPT"
     require_text 'build-essential bzip2 ninja-build' "$BUILD_SCRIPT"
     require_text 'zlib1g-dev' "$BUILD_SCRIPT"
+}
+
+test_runtime_version_provenance() {
+    require_text "git describe --match 'v*' --always --abbrev=10 HEAD" "$BUILD_SCRIPT"
+    require_text 'git status --porcelain --untracked-files=all --' "$BUILD_SCRIPT"
+    require_text ". ':(exclude)deploy'" "$BUILD_SCRIPT"
+    require_text 'QEMU_RUNTIME_PKGVERSION="${QEMU_RUNTIME_PKGVERSION}-dirty"' \
+        "$BUILD_SCRIPT"
+    require_text 'CFG_FLAGS+=(--with-pkgversion="$QEMU_RUNTIME_PKGVERSION")' \
+        "$BUILD_SCRIPT"
+    require_text '"$MESON" configure . "-Dpkgversion=$QEMU_RUNTIME_PKGVERSION"' \
+        "$BUILD_SCRIPT"
+}
+
+test_ovmf_basetools_preflight() {
+    require_text 'BaseTools/Source/C/bin/VfrCompile' "$OVMF_BUILD_SCRIPT"
+    require_text 'make -C "$EDK2/BaseTools"' "$OVMF_BUILD_SCRIPT"
+    require_text 'BASETOOLS_CC="${CC:-gcc} -std=gnu17"' "$OVMF_BUILD_SCRIPT"
+    reject_text 'BaseTools/BinWrappers/PosixLike/build' "$OVMF_BUILD_SCRIPT"
+}
+
+test_ovmf_nasm_version_preflight() {
+    require_text 'check_nasm_version' "$OVMF_BUILD_SCRIPT"
+    require_text '(major == 2 && minor < 15)' "$OVMF_BUILD_SCRIPT"
+    require_text '(major == 3 && minor < 2)' "$OVMF_BUILD_SCRIPT"
+    require_text '若使用 3.x 则需要 3.02+' "$OVMF_BUILD_SCRIPT"
 }
 
 test_cli_compatibility() {
@@ -228,6 +257,9 @@ test_shell_syntax
 test_qemu_11_baseline_and_werror
 test_python_preflight_contract
 test_required_native_dependencies_are_preflighted
+test_runtime_version_provenance
+test_ovmf_basetools_preflight
+test_ovmf_nasm_version_preflight
 test_cli_compatibility
 test_host_helper_orchestration_contract
 test_patch_script_validates_integrated_qemu11_features

@@ -8,12 +8,16 @@
 
 - 物理主 PCI ID 固定为 `1AF4:1050`，确保 Windows 能绑定 stock、Microsoft-WHQL
   `VioGpuDod`。
-- PCI subsystem 配置为 vendor `10DE`、device `1C82`。Windows PnP 实例字符串通常
-  写成 `SUBSYS_1C8210DE`；按 vendor:device 表示时，它对应 `10DE:1C82`。
-- 注册表身份与 x86/x64 系统搜索 NVAPI 把用户态逻辑身份投影为
-  `NVIDIA GeForce GTX 1050 Ti` / `10DE:1C82`。
-- SetupAPI HardwareID 使用“逻辑首项 + 完整物理数组”；InstanceId、PCI 配置空间和
-  `VioGpuDod` 绑定仍为 `1AF4:1050`。
+- 物理 PCI subsystem 使用 `1AF4:A101`–`1AF4:A112` carrier 选择完整 AIB profile；
+  例如 Colorful GTX 1050 Ti 是 `SUBSYS_A1021AF4`。逻辑主 ID `10DE:1C82` 与该板卡
+  自身的 `7377:0000` subsystem 分开保存，不能把 device ID 当成 subsystem。
+- identity schema-2 的 `SpoofName` 保留完整 AIB canonical 标签用于校验；Windows
+  展示字段与 x86/x64 系统搜索 NVAPI 按 `10DE:1C82` 统一映射为标准
+  `NVIDIA GeForce GTX 1050 Ti`。
+- PnP HardwareID 属于同一个 VioGpuDod devnode：MULTI_SZ 首项是规范逻辑
+  VEN/DEV/AIB SUBSYS/REV，后续逐项保留完整物理 `1AF4:1050` 数组；这不是两张卡。
+- NVAPI 主 PCI 关联键保持物理 `1AF4:1050` 以便跨接口归并；external device、AIB
+  SUBSYS/REV、标准型号和独显类型保持逻辑 NVIDIA 身份。
 - 用户态逻辑 `10DE:1C82` 不会改写 PCI config space；读取原始 PCI 配置的组件仍会
   看到主 ID `1AF4:1050`。
 - 当前路径不安装 NVIDIA 驱动，不使用 patched driver、自签证书、testsigning、
@@ -38,8 +42,9 @@
 ### 1. 物理设备与驱动绑定
 
 QEMU 向客体提供的显示设备主 ID 是 `1AF4:1050`。这是驱动绑定事实，不能用注册表
-或 NVAPI shim 改变。subsystem 携带逻辑 profile 的 vendor/device，即
-`10DE:1C82`；它只为上层身份映射提供输入，不会把设备变成原生 NVIDIA PCI 设备。
+或 NVAPI shim 改变。物理 subsystem 使用 `1AF4:A101`–`1AF4:A112` carrier 选择
+上层 profile；逻辑 `10DE:1C82` 和真实 AIB subsystem 保存在版本化快照与厂商 API
+中，不会把设备变成原生 NVIDIA PCI 设备。
 
 客体初始化首先枚举在线 PCI 显示设备，并在任何名称写入前确认：
 
@@ -55,15 +60,32 @@ QEMU 向客体提供的显示设备主 ID 是 `1AF4:1050`。这是驱动绑定�
 ### 2. 注册表用户态身份
 
 驱动验证成功后，初始化脚本才会按当前 subsystem 生成版本化身份，并写入
-`HKLM\SOFTWARE\StealthGPU`。1050 Ti profile 的关键逻辑值包括：
+`HKLM\SOFTWARE\StealthGPU`。以 Gigabyte 1050 Ti profile 为例，关键逻辑值包括：
 
-- 名称：`NVIDIA GeForce GTX 1050 Ti`
+- `SpoofName`：`NVIDIA GeForce GTX 1050 Ti (Gigabyte OC)`
+- Windows 标准显示名：`NVIDIA GeForce GTX 1050 Ti`
 - vendor：`10DE`（十进制 `4318`）
 - device：`1C82`（十进制 `7298`）
 - 模式：`shallow-user-projection`
 
-随后脚本同步 Windows 显示设备相关的名称字段。该层服务于设备管理器、WMI 和普通
-用户态诊断接口，但它不改变原始 PCI 配置，也不让 NVIDIA 内核驱动接管设备。
+identity snapshot 仍是 schema-2。新的 transaction schema-5 把按 PCI VEN/DEV
+封闭映射得到的标准芯片名写入 Enum `FriendlyName`/`DeviceDesc`、Class
+`DriverDesc`、`HardwareInformation.AdapterString` 和
+`HardwareInformation.ChipType`，并把 Enum `Mfg` 与 Class `ProviderName` 写为
+芯片厂商。`MatchingDeviceId`、`InfPath`、`InfSection`、`Service` 仍保持 stock
+`VioGpuDod` 值；transaction schema 1/2/3/4 仅用于恢复旧 journal。该层服务于设备
+管理器、SetupAPI、WMI 和普通用户态诊断接口，但不改变原始 PCI 配置，也不让厂商
+内核驱动接管设备。
+
+schema-5 把 PnP HardwareID 投影为“规范逻辑首项 + 完整物理尾项”。这些字符串都属于
+唯一的物理 `1AF4:1050` devnode；InstanceId、BDF、MatchingDeviceId、Driver、
+Service 和 PCI 配置空间不变。对于 4 GiB profile，NVAPI legacy `MemoryInfo`
+v1/v2/v3 与 frame-buffer size 接口返回 `4194304 KiB`，`MemoryInfoEx` v1 返回
+`4294967296 bytes`。旧 32 位
+`HardwareInformation.MemorySize` 饱和为 `2047 MiB`
+（`0x7FF00000`），确保错误按有符号 Int32 读取它的旧工具仍得到正数；64 位
+`HardwareInformation.qwMemorySize` 与相应厂商接口精确保存 `4 GiB`。
+历史 schema-4 journal 只参与恢复，并按原语义重建 `4095 MiB`。
 
 ### 3. 双架构系统搜索 NVAPI
 
@@ -71,21 +93,24 @@ QEMU 向客体提供的显示设备主 ID 是 `1AF4:1050`。这是驱动绑定�
 64 位工具。GPU-Z 2.70 主程序是 PE32，因此统一 EXE 将 x86 文件事务发布到 SysWOW64，
 并把 x64 文件发布到 System32 供内嵌辅助组件使用。
 
-两个架构都只枚举一个 NVAPI 物理句柄。`NvAPI_GPU_GetPCIIdentifiers` 使用同一块
-OS 显示适配器的承载主键 `1AF4:1050`，并复用 QEMU 已真实写入 PCI 配置空间的
-subsystem、revision 和 BDF；名称、显存、时钟及外部产品号仍来自 NVIDIA profile。
-因此同时使用 SetupAPI/PCI 与 NVAPI 的系统级硬件扫描器会把两条信息合并到一个设备，
-不会再把 `Red Hat VirtIO` 承载层和 NVIDIA 用户态身份误列成两块显卡。
+两个架构都只枚举一个 NVAPI 物理句柄。`NvAPI_GPU_GetPCIIdentifiers` 的主
+`deviceId` 有意返回物理 `1AF4:1050` carrier，作为 PnP/BDF/NVAPI 的跨接口关联键；
+subsystem、revision、external device 与标准型号来自同一个已验证 NVIDIA 逻辑
+profile。该句柄通过 InstanceId、BDF、Service 和规范 HardwareID 数组唯一绑定到真实
+carrier；逻辑返回值不会合成第二个 devnode。
 DLL 初始化会用 SetupAPI 与 Configuration Manager 重新绑定 `SourceInstanceId`：
-唯一在线 `1AF4:1050` devnode、`VioGpuDod`、完整物理 HardwareID 回退条目和实际
-BDF 必须全部与 snapshot 一致；否则不枚举厂商 API 设备。AMD ADL 同样把验证后的
+唯一在线 `1AF4:1050` devnode、`VioGpuDod`、规范逻辑首项 + 完整物理尾项的
+HardwareID 数组和实际 BDF 必须全部与 snapshot 一致；否则不枚举厂商 API 设备。AMD
+ADL 同样把验证后的
 真实 UDID、PNP 和 Driver path 返回给调用方，不再合成第二个 AMD PNP 实例。
 此外，启动/登录刷新会逐项回读 `FriendlyName`、`DeviceDesc`、`Mfg`、
-`DriverDesc`、`ProviderName` 和 `HardwareInformation.AdapterString`；身份名称必须
-以 canonical 厂商开头，并显式拒绝 `Red Hat`/`VirtIO`。即使第三方工具再次拆分枚举，
-通过 Windows SetupAPI/WMI 显示的承载项也仍使用 profile 中的 NVIDIA 名称。
-AMD RX 550/RX 560 使用相同的 SUBSYS、身份事务、名称刷新和 HardwareID 投影链路，
-对应字段写为 `AMD Radeon ...` / `AMD`。NVAPI 是 NVIDIA 专用接口；AMD profile
+`DriverDesc`、`ProviderName` 和 `HardwareInformation.AdapterString`；这些名称/
+厂商展示面必须来自受控 PCI 主 ID 映射，并显式拒绝 `Red Hat`/`VirtIO`。因此通过
+标准 SetupAPI、Class 注册表、WMI 或厂商 API 枚举的工具都读取同一个标准芯片名和
+厂商；真实绑定仍由保持 stock 的 `MatchingDeviceId`、INF、Service 与 physical-only
+HardwareID 尾项证明。AMD RX 550/RX 560 使用相同的 carrier、身份事务和名称刷新链路，
+逻辑 VEN/DEV、AIB SUBSYS 与独显拓扑由 ADL 回答，对应展示字段写为
+`AMD Radeon ...` / `AMD`。NVAPI 是 NVIDIA 专用接口；AMD profile
 不会伪造 NVAPI 句柄，而是明确返回“无 NVIDIA 设备”，因此不会额外枚举一张 N 卡。
 
 这个机制具有明确边界：
@@ -93,6 +118,9 @@ AMD RX 550/RX 560 使用相同的 SUBSYS、身份事务、名称刷新和 Hardwa
 - 只接受当前或历史 VMate 固定摘要，拒绝覆盖真实 NVIDIA/未知 DLL；
 - 直接忽略 Windows 显示字段、只按原始 PCI `1AF4` 厂商数据库命名的工具仍可能显示
   `Red Hat`；彻底改变该层需要非 stock 驱动，本分支为保持 WHQL `VioGpuDod` 不这样做；
+- NVAPI 主 `deviceId` 与真实 PnP carrier 同为 `1AF4:1050`，用于跨接口关联；型号与
+  AIB 信息必须读取 external device、subsystem/revision 和标准名称，不能把关联键误当
+  成逻辑 NVIDIA 主 ID；
 - 不修改工具原目录；
 - 不修改全局 `PATH`；
 - 不创建全局 NVAPI 安装标记；
@@ -110,8 +138,11 @@ AMD RX 550/RX 560 使用相同的 SUBSYS、身份事务、名称刷新和 Hardwa
 身份持久化、名称同步和双架构系统 NVAPI 发布。
 
 当前发布流程不再使用 host HTTP 提供松散脚本，也不安装 NVIDIA 驱动或常驻服务。
-系统级内容只增加两份固定摘要的用户态 DLL、项目脚本和两条 Windows 内置计划任务；
-历史脚本入口仅保留为明确报错的退役入口，不能作为兼容安装路径。
+系统级内容只增加固定摘要的用户态 DLL、项目脚本、名称刷新任务和
+`StealthGPU-ProjectHardwareId` 维护任务。重跑时先停用 writer 并临时恢复
+physical-only 数组完成驱动/PnP 门禁，事务提交后再由
+`project-gpu-hardware-id.ps1` Apply/Verify 规范逻辑首项 + 完整物理尾项，并注册
+启动/登录维护。其它历史脚本入口仅保留为明确报错的退役入口，不能作为兼容安装路径。
 
 ## 图形能力边界
 
@@ -125,7 +156,10 @@ NVIDIA WDDM 3D 驱动。因此，即使用户态显示 GTX 1050 Ti 和 `10DE:1C8
 
 host 侧使用 `virtio-vga-gl`、virgl、EGL 或 GPU handle，只说明 host 显示/传输路径可能
 使用 GPU。它不等价于 Windows 客体加载了可提供 Direct3D 的 virtio 3D 驱动，不能用
-host 日志中的 GL 成功信息推导客体具有 3D 加速。
+host 日志中的 GL 成功信息推导客体具有 3D 加速。stock `VioGpuDod` 的 DXGI adapter
+描述、真实 InstanceId/BDF/Service/Driver 和直接读取 PCI 配置空间的工具仍会看到
+物理 virtio 身份；SetupAPI 同时可见逻辑首项和物理尾项，NVAPI/ADL 的受支持查询
+返回逻辑厂商 AIB 与独显类型。以上身份投影不会增加渲染能力、可分配显存或性能。
 
 ## 历史路径的概念差异
 
@@ -151,8 +185,8 @@ VFIO 把物理 GPU 交给客体，原始 PCI ID、驱动绑定和图形能力都
 
 | 层面 | 期望事实 |
 | --- | --- |
-| 驱动层 | 在线 PCI 显示设备主 ID 为 `1AF4:1050`，服务为 `VioGpuDod` |
-| 用户态身份层 | profile 为 GTX 1050 Ti，逻辑 vendor/device 为 `10DE:1C82` |
+| 驱动层 | 只有一个在线 `1AF4:1050` PCI 显示 devnode，真实 BDF/Service/Driver 不变，服务为 `VioGpuDod` |
+| 用户态身份层 | HardwareID 为规范 `10DE:1C82` 首项 + 完整 `1AF4:1050` 尾项；NVAPI 主关联键为物理 carrier，external/AIB/型号为逻辑 NVIDIA |
 | 能力层 | Windows 客体仍按 Display-Only 路径工作，无 CUDA/NVENC/原生 NVIDIA 3D |
 
 具体打包、客体初始化与诊断方式见

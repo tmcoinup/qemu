@@ -6,17 +6,25 @@ CC32 ?= i686-w64-mingw32-gcc
 CC64 ?= x86_64-w64-mingw32-gcc
 COMMON_DIR := ../gpu-api-common
 COMMON_SOURCES := $(COMMON_DIR)/aib_identity_catalog.c \
+                  $(COMMON_DIR)/gpu_model_catalog.c \
                   $(COMMON_DIR)/carrier_validation_contract.c \
                   $(COMMON_DIR)/carrier_validation_win.c
 COMMON_HEADERS := $(COMMON_DIR)/aib_identity_catalog.h \
+                  $(COMMON_DIR)/gpu_model_catalog.h \
                   $(COMMON_DIR)/carrier_validation.h
 
-SOURCES := nvapi_shim.c nvapi_identity.c nvapi_pci.c nvapi_gpu_specs.c \
+SOURCES := nvapi_shim.c nvapi_identity.c nvapi_pci.c \
+           nvapi_driver_version.c nvapi_gpu_name.c nvapi_gpu_type.c \
+           nvapi_memory.c \
+           nvapi_gpu_specs.c \
            nvapi_gpu_details.c nvapi_gpu_legacy_clocks.c \
            nvapi_gpu_legacy_clocks_fill.c nvapi_gpu_pstates.c \
            nvapi_gpu_pstates_fill.c \
            nvapi_identity_contract.c $(COMMON_SOURCES)
-HEADERS := nvapi_types.h nvapi_identity.h nvapi_gpu_specs.h \
+HEADERS := nvapi_types.h nvapi_identity.h nvapi_driver_version.h \
+           nvapi_gpu_name.h nvapi_gpu_type.h \
+           nvapi_memory.h \
+           nvapi_gpu_specs.h \
            nvapi_gpu_details.h nvapi_gpu_legacy_clocks.h \
            nvapi_gpu_pstates.h nvapi_shim_internal.h \
            nvapi_identity_contract.h $(COMMON_HEADERS)

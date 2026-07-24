@@ -3,21 +3,16 @@
 # shellcheck disable=SC2016
 # 单引号中的 PowerShell `$` 是待匹配源码，不能由 Bash 提前展开。
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-
 fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
-
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-
 OUT_DIR="$TMP_DIR/out"
 BUILD_DIR="$TMP_DIR/build"
-
 OUT_DIR="$OUT_DIR" \
 BUILD_DIR="$BUILD_DIR" \
     "$REPO_ROOT/deploy/guest-stealth/build-exe.sh" >/dev/null
@@ -64,9 +59,10 @@ for manufacturer_payload in gpu-manufacturer-projection.ps1 \
     strings -a -el "$EXE" | grep -F "$manufacturer_payload" >/dev/null \
         || fail "EXE launcher 未包含厂商投影 payload 文件名: $manufacturer_payload"
 done
-for helper_file in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 \
+for helper_file in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 gpu-board-identity-contract.ps1 \
         gpu-profile-registry-core.ps1 gpu-spoof-apply-support.ps1 refresh-gpu-name.ps1 \
-        gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1 \
+        gpu-hardware-id-plan.ps1 gpu-hardware-id-transaction.ps1 \
+        project-gpu-hardware-id.ps1 \
         force-displayfreq.ps1 respawn-restart-state.ps1; do
     strings -a "$EXE" | grep -F "$helper_file" >/dev/null \
         || fail "EXE 未包含独立 helper 文件名: $helper_file"
@@ -97,7 +93,8 @@ for chipset_file in CannonLake-HSystem.inf cannonlake-h.cat \
     strings -a "$EXE" | grep -F "$chipset_file" >/dev/null \
         || fail "EXE 未包含芯片组 payload 文件名: $chipset_file"
 done
-for nvapi_file in nvapi.dll nvapi64.dll; do
+for nvapi_file in nvapi.dll nvapi64.dll nvapi-runtime-probe-x86.exe \
+        nvapi-runtime-probe-x64.exe; do
     strings -a "$EXE" | grep -F "$nvapi_file" >/dev/null \
         || fail "EXE 未包含 NVAPI payload 文件名: $nvapi_file"
 done
@@ -120,7 +117,7 @@ strings -a "$EXE" | grep -F -- '-SkipTask' >/dev/null \
 strings -a "$EXE" | grep -F 'StealthGPU-RefreshName' >/dev/null \
     || fail "EXE 内嵌脚本缺少持久名称刷新任务"
 strings -a "$EXE" | grep -F 'StealthGPU-ProjectHardwareId' >/dev/null \
-    || fail "EXE 未包含正式 HardwareID 投影任务"
+    || fail "EXE 未包含旧 HardwareID 任务清理标识"
 if strings -a "$EXE" | grep -F 'live-vm2-e2e' >&2; then
     fail "EXE 不得包含 VM2/HTTP/GPU-Z 专用现场调试脚本"
 fi
@@ -321,11 +318,13 @@ payloads = (
     root / "deploy/scripts/gpu-spoof-apply-support.ps1",
     root / "deploy/scripts/persist-gpu-profile.ps1",
     root / "deploy/scripts/gpu-profile-transaction.ps1",
+    root / "deploy/scripts/gpu-board-identity-contract.ps1",
     root / "deploy/scripts/gpu-profile-registry-core.ps1",
     root / "deploy/scripts/refresh-gpu-name.ps1",
     root / "deploy/scripts/gpu-manufacturer-projection.ps1",
     manufacturer_projector_path,
     root / "deploy/scripts/gpu-hardware-id-plan.ps1",
+    root / "deploy/scripts/gpu-hardware-id-transaction.ps1",
     root / "deploy/scripts/project-gpu-hardware-id.ps1",
     root / "deploy/scripts/force-displayfreq.ps1",
     root / "deploy/scripts/stock-viogpudo/viogpudo.sys",
@@ -337,6 +336,8 @@ payloads = (
     root / "deploy/scripts/stock-intel-chipset-inf/sunrisepoint-h.cat",
     root / "deploy/nvapi-shim/nvapi.dll",
     root / "deploy/nvapi-shim/nvapi64.dll",
+    root / "deploy/nvapi-runtime-probe/nvapi-runtime-probe-x86.exe",
+    root / "deploy/nvapi-runtime-probe/nvapi-runtime-probe-x64.exe",
 )
 for payload_path in payloads:
     payload = payload_path.read_bytes()
@@ -345,17 +346,19 @@ for payload_path in payloads:
 PY
 
 # legacy 调试发布仍应平铺全部 helper；默认发布继续只有一个 EXE。
-for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 \
+for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 gpu-board-identity-contract.ps1 \
         gpu-profile-registry-core.ps1 gpu-spoof-apply-support.ps1 refresh-gpu-name.ps1 \
         gpu-manufacturer-projection.ps1 gpu-manufacturer-projector.exe \
-        gpu-hardware-id-plan.ps1 project-gpu-hardware-id.ps1 \
+        gpu-hardware-id-plan.ps1 gpu-hardware-id-transaction.ps1 \
+        project-gpu-hardware-id.ps1 \
         force-displayfreq.ps1 configure-power-policy.ps1 \
         display-driver-trust.ps1 respawn-restart-state.ps1 \
         install-chipset-device.ps1 CannonLake-HSystem.inf cannonlake-h.cat \
         SunrisePoint-HSystem.inf sunrisepoint-h.cat \
         install-nvapi-system.ps1 nvapi-system-validation.ps1 \
         nvapi-system-transaction.ps1 gpu-api-identity-binding.ps1 \
-        nvapi.dll nvapi64.dll; do
+        nvapi.dll nvapi64.dll nvapi-runtime-probe-x86.exe \
+        nvapi-runtime-probe-x64.exe; do
     grep -F "$helper_name" "$REPO_ROOT/deploy/guest-stealth/package.sh" >/dev/null \
         || fail "legacy package 路径缺少 $helper_name"
 done
@@ -376,6 +379,7 @@ cp -a "$REPO_ROOT/deploy/guest-launcher-common" \
 rm -rf "$PACKAGE_REPO/deploy/guest-stealth/dist"
 ln -s "$REPO_ROOT/deploy/scripts" "$PACKAGE_REPO/deploy/scripts"
 ln -s "$REPO_ROOT/deploy/nvapi-shim" "$PACKAGE_REPO/deploy/nvapi-shim"
+ln -s "$REPO_ROOT/deploy/nvapi-runtime-probe" "$PACKAGE_REPO/deploy/nvapi-runtime-probe"
 ln -s "$REPO_ROOT/deploy/adl-shim" "$PACKAGE_REPO/deploy/adl-shim"
 poison_out="$TMP_DIR/poison-out"
 poison_build="$TMP_DIR/poison-build"
@@ -385,6 +389,7 @@ env -u INCLUDE_LEGACY_SCRIPTS \
     DRIVER_SRC_DIR="$TMP_DIR/missing-driver" \
     CHIPSET_INF_SRC_DIR="$TMP_DIR/missing-chipset" \
     NVAPI_SRC_DIR="$TMP_DIR/missing-nvapi" \
+    NVAPI_PROBE_DIR="$TMP_DIR/missing-nvapi-probe" \
     ADL_SRC_DIR="$TMP_DIR/missing-adl" \
     "$PACKAGE_REPO/deploy/guest-stealth/package.sh" >/dev/null
 
@@ -432,6 +437,9 @@ cmp -s "$REPO_ROOT/deploy/guest-stealth/gpu-api-identity-binding.ps1" \
 cmp -s "$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1" \
     "$PACKAGE_DIST/gpu-spoof-apply-support.ps1" \
     || fail "legacy 调试包的 apply support helper 与正式源不一致"
+cmp -s "$REPO_ROOT/deploy/scripts/gpu-board-identity-contract.ps1" \
+    "$PACKAGE_DIST/gpu-board-identity-contract.ps1" \
+    || fail "legacy 调试包的 GPU 板卡身份契约 helper 与正式源不一致"
 cmp -s "$MANUFACTURER_HELPER" \
     "$PACKAGE_DIST/gpu-manufacturer-projection.ps1" \
     || fail "legacy 调试包的厂商投影 helper 与正式源不一致"
@@ -484,12 +492,9 @@ if NVAPI_SRC_DIR="$BAD_NVAPI_DIR" \
     fail "构建器没有拒绝 SHA-256 不匹配的 nvapi.dll"
 fi
 
-for source_file in \
-        "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" \
-        "$PAYLOAD_SECURITY" "$MANUFACTURER_HELPER" \
-        "$MANUFACTURER_PROJECTOR_SOURCE"; do
-    [[ "$(wc -l < "$source_file")" -le 500 ]] \
-        || fail "生产源单文件超过 500 行: $source_file"
+for source_file in "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" \
+        "$PAYLOAD_SECURITY" "$MANUFACTURER_HELPER" "$MANUFACTURER_PROJECTOR_SOURCE"; do
+    [[ "$(wc -l < "$source_file")" -le 500 ]] || \
+        fail "生产源单文件超过 500 行: $source_file"
 done
-
 echo "OK: guest-stealth single EXE build checks passed"

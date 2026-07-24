@@ -222,7 +222,7 @@ schema_two_line="$(rg -n -F '$versionKey.SetValue('\''IdentitySchemaVersion'\'',
 flush_line="$(rg -n -F '$versionKey.Flush()' "$IDENTITY_SCRIPT" | cut -d: -f1)"
 driver_inf_line="$(rg -n -F '$transactionKey.SetValue('\''DriverInfPath'\'', $driverInfPath' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
-transaction_flush_line="$(rg -n -F '$transactionKey.SetValue('\''TransactionSchemaVersion'\'', 2' \
+transaction_flush_line="$(rg -n -F '$transactionKey.SetValue('\''TransactionSchemaVersion'\'', 5' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
 pending_line="$(rg -n -F '$configKey.SetValue('\''PendingIdentity'\'', $versionId' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
@@ -324,8 +324,9 @@ rg -F '$schemaBefore -ne 2' "$REFRESH_SCRIPT" >/dev/null \
     || fail "CurrentIdentity reader 没有 fail-closed 要求 schema 2"
 rg -F '$legacySchemaBefore -ne 1' "$REFRESH_SCRIPT" >/dev/null \
     || fail "旧 root-only migration hint 不应伪装为 schema 2"
-rg -F '& $refreshHelperSource -ReadIdentityOnly -AllowMissing' "$APPLY_SCRIPT" >/dev/null \
-    || fail "apply previous identity 没有走严格 CurrentIdentity snapshot"
+rg -F '& $refreshHelperSource -ReadIdentityOnly -StagedIdentityId $identityTransactionId' \
+    "$APPLY_SCRIPT" >/dev/null \
+    || fail "apply Class target 没有走严格 staged identity snapshot"
 for migration_contract in legacySchemaBefore legacySchemaAfter legacyNameBefore \
         legacyNameAfter IsLegacyMigrationHint; do
     rg -F "$migration_contract" "$REFRESH_SCRIPT" >/dev/null \
@@ -384,8 +385,8 @@ commit_cas_line="$(rg -n -F 'Set-CurrentIdentityPointer $configKey $expected $tr
 rg -F 'Invoke-LegacyGpuTaskBarrier' "$IDENTITY_SCRIPT" >/dev/null \
     || fail "直接 Stage 没有 fail-closed 旧任务屏障"
 
-# 名称刷新器只能把品牌写进 FriendlyName/HardwareInformation。其余 Enum/Class
-# 安装字段必须收敛回 stock INF，供 SetupAPI 关联微软签名的当前 driver node。
+# schema-5 把标准芯片名/厂商投影到展示字段，driver node 仍由 stock
+# MatchingDeviceId/InfPath/InfSection/Service 绑定。
 rg -F "Set-VerifiedRegistryValue \$classKey 'MatchingDeviceId'" \
     "$REFRESH_SCRIPT" >/dev/null \
     || fail "没有恢复 stock VioGpuDod MatchingDeviceId"
@@ -396,27 +397,30 @@ if rg -F "MatchingDeviceId=[pscustomobject]@{ Value=('PCI\\VEN_{0:X4}" \
     fail "durable transaction 仍从伪装 PCI 身份派生 MatchingDeviceId"
 fi
 for brand_contract in \
-        "Set-VerifiedRegistryValue \$enumKey 'FriendlyName' \$Config.SpoofName \$string" \
-        "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$stockEnumDescription \$string" \
-        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$stockEnumProvider \$string" \
-        "Set-VerifiedRegistryValue \$classKey 'DriverDesc' \$stockDriverDescription \$string" \
-        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$stockDriverProvider \$string" \
-        "Set-VerifiedRegistryValue \$classKey 'HardwareInformation.AdapterString' \$Config.SpoofName \$string"; do
+        'Get-GpuStandardDisplayName `' \
+        "Set-VerifiedRegistryValue \$enumKey 'FriendlyName' \$displayName \$string" \
+        "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$displayName \$string" \
+        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$Config.SpoofVendor \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'DriverDesc' \$displayName \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$Config.SpoofVendor \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'HardwareInformation.AdapterString' \$displayName \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'HardwareInformation.ChipType' \$chipType \$string"; do
     rg -F "$brand_contract" "$REFRESH_SCRIPT" >/dev/null \
         || fail "GPU 显示品牌兜底缺少：$brand_contract"
 done
-for schema_two_contract in 'if ($transactionSchema -ne 2)' StagedDriverInfPath \
+for schema_five_contract in 'if ($transactionSchema -ne 5)' StagedDriverInfPath \
         "'DriverInfPath' -Kind \$stringKind" "'^oem[0-9]+\\.inf$'"; do
-    rg -F "$schema_two_contract" "$REFRESH_SCRIPT" >/dev/null \
-        || fail "schema-2 staged refresh 缺少 DriverInfPath 契约：$schema_two_contract"
+    rg -F "$schema_five_contract" "$REFRESH_SCRIPT" >/dev/null \
+        || fail "schema-5 staged refresh 缺少 DriverInfPath 契约：$schema_five_contract"
 done
 for forbidden_install_spoof in \
         "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$Config.SpoofName" \
-        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$Config.SpoofVendor" \
         "Set-VerifiedRegistryValue \$classKey 'DriverDesc' \$Config.SpoofName" \
-        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$Config.SpoofVendor"; do
+        "Set-VerifiedRegistryValue \$classKey 'InfPath'" \
+        "Set-VerifiedRegistryValue \$classKey 'InfSection'" \
+        "Set-VerifiedRegistryValue \$enumKey 'Service'"; do
     if rg -F "$forbidden_install_spoof" "$REFRESH_SCRIPT" >&2; then
-        fail "refresh 仍会破坏 WHQL driver node 关联：$forbidden_install_spoof"
+        fail "refresh 写入了禁止修改的身份/driver node 字段：$forbidden_install_spoof"
     fi
 done
 for refresh_task_contract in \
@@ -433,9 +437,11 @@ if rg -F -e '$sourceEnumPath -Name HardwareID' \
 fi
 
 helper_line="$(rg -n -F '& $identityHelperSource -Stage -SpoofName' "$APPLY_SCRIPT" | cut -d: -f1)"
-old_profile_line="$(rg -n -F '$previousIdentity = & $refreshHelperSource -ReadIdentityOnly' \
+active_class_line="$(rg -n -F '$activeSubkey = Resolve-GpuSpoofActiveClassSubkey' \
     "$APPLY_SCRIPT" | cut -d: -f1)"
-reuse_old_profile_line="$(rg -n -F '$prevSpoof = $previousSpoofName' \
+active_binding_line="$(rg -n -F 'Assert-GpuSpoofActiveClassBinding -Service $activeService' \
+    "$APPLY_SCRIPT" | cut -d: -f1)"
+gpu_api_prepare_line="$(rg -n -F '& $powershellExe @gpuApiInstallArgs' \
     "$APPLY_SCRIPT" | cut -d: -f1)"
 enable_line="$(rg -n -F "Enable-GpuSpoofDisplayDevices -Reason '浅层物理门禁通过后清理 Code 22'" \
     "$APPLY_SCRIPT" | cut -d: -f1)"
@@ -445,14 +451,21 @@ scan_line="$(rg -n -F 'Invoke-GpuSpoofPnpRefresh' "$APPLY_SCRIPT" | cut -d: -f1)
 projection_line="$(rg -n -F '& $refreshHelperSource' "$APPLY_SCRIPT" | tail -1 | cut -d: -f1)"
 commit_pointer_line="$(rg -n -F '& $identityHelperSource -CommitIdentity $identityTransactionId' \
     "$APPLY_SCRIPT" | cut -d: -f1)"
-[[ -n "$helper_line" && -n "$old_profile_line" && -n "$reuse_old_profile_line" && \
+[[ -n "$helper_line" && -n "$active_class_line" && -n "$active_binding_line" && \
+    -n "$gpu_api_prepare_line" && \
     -n "$enable_line" && -n "$task_line" && -n "$scan_line" && \
     -n "$projection_line" && -n "$commit_pointer_line" && \
-    "$old_profile_line" -lt "$helper_line" && \
-    "$helper_line" -lt "$reuse_old_profile_line" && "$helper_line" -lt "$enable_line" && \
-    "$helper_line" -lt "$commit_pointer_line" && "$helper_line" -lt "$task_line" && \
+    "$helper_line" -lt "$enable_line" && "$helper_line" -lt "$active_class_line" && \
+    "$active_class_line" -lt "$active_binding_line" && \
+    "$active_binding_line" -lt "$gpu_api_prepare_line" && \
+    "$active_binding_line" -lt "$commit_pointer_line" && \
+    "$helper_line" -lt "$task_line" && \
     "$scan_line" -lt "$projection_line" ]] \
-    || fail "必须先捕获旧 profile，再于设备状态和 Class/Enum 写入前执行浅层门禁"
+    || fail "必须先执行浅层门禁，再按 Stage/Enum 唯一绑定定位 Class 并提交"
+
+if rg -F -e '$fakeNeedles' -e '$previousSpoofName' "$APPLY_SCRIPT" >&2; then
+    fail "Class target 不得再依赖可被本工具改写的 DriverDesc/旧型号名称"
+fi
 
 for source_file in "$IDENTITY_SCRIPT" "$TRANSACTION_SCRIPT" "$REGISTRY_CORE" \
         "$APPLY_SCRIPT" "$APPLY_SUPPORT" "$REFRESH_SCRIPT"; do

@@ -58,7 +58,7 @@ setup_uplink_candidate_is_physical() {
 # 所有用户输入必须在 root 检查、flock、文件安装和网络修改之前完成校验。这样旧
 # 参数或拼写错误只返回退出码 2，不会留下半套宿主配置。
 setup_validate_inputs() {
-    local uplink_auto=0
+    local uplink_detected=0
 
     if [[ -v VLAN_ID || -v VLAN_IF ]]; then
         setup_error "VLAN_ID/VLAN_IF 已废弃；setup 默认启用 trunk，请在启动 VM 时传 --vlan-id=N。"
@@ -67,6 +67,7 @@ setup_validate_inputs() {
 
     VLAN_TRUNK="${VLAN_TRUNK:-1}"
     VLAN_SETUP_AUTO="${VLAN_SETUP_AUTO:-0}"
+    UPLINK_AUTO="${UPLINK_AUTO:-0}"
     UPLINK="${UPLINK:-}"
     HOST_IP="${HOST_IP:-192.168.76.1/24}"
     BR="${BR:-br0}"
@@ -77,6 +78,10 @@ setup_validate_inputs() {
     }
     [[ "$VLAN_SETUP_AUTO" == "0" || "$VLAN_SETUP_AUTO" == "1" ]] || {
         setup_error "VLAN_SETUP_AUTO 必须为 0 或 1（实际: '$VLAN_SETUP_AUTO'）。"
+        return 2
+    }
+    [[ "$UPLINK_AUTO" == "0" || "$UPLINK_AUTO" == "1" ]] || {
+        setup_error "UPLINK_AUTO 必须为 0 或 1（实际: '$UPLINK_AUTO'）。"
         return 2
     }
     setup_validate_ifname "$BR" || {
@@ -99,16 +104,30 @@ setup_validate_inputs() {
             setup_error "VLAN_TRUNK=1 固定使用单一 br0，不能设置 BR='$BR'。"
             return 2
         }
-        if [[ -z "$UPLINK" ]]; then
-            if ! UPLINK="$(uplink_detect_from_topology \
-                setup_uplink_candidate_is_physical "$BR")"; then
-                setup_error "无法唯一识别安全的物理上联；请显式设置 UPLINK=<网卡>。"
-                return 2
-            fi
-            uplink_auto=1
-        fi
-        (( uplink_auto == 0 )) || echo ">> auto-detected uplink: $UPLINK"
     fi
+
+    # trunk 沿用缺省自动探测；普通 bridge 只有管理员显式 UPLINK_AUTO=1 才会
+    # 接管物理口。两者都要求拓扑中恰好一个安全候选，歧义或无候选一律失败闭合。
+    if [[ -z "$UPLINK" \
+        && ( "$VLAN_TRUNK" == "1" || "$UPLINK_AUTO" == "1" ) ]]; then
+        if ! UPLINK="$(uplink_detect_from_topology \
+            setup_uplink_candidate_is_physical "$BR")"; then
+            setup_error "无法唯一识别安全的物理上联；请显式设置 UPLINK=<网卡>。"
+            return 2
+        fi
+        uplink_detected=1
+    fi
+
+    # 普通 bridge 的自动修复必须由 NetworkManager 完成 DHCP/profile 迁移。旧
+    # iproute2 fallback 只迁移接口地址，不掌管 DHCP lease 与默认路由；启动时
+    # 自动进入该分支可能让宿主立即断网。管理员显式给出 UPLINK 时仍保留历史
+    # fallback，isolated bridge 与 trunk 行为也不受影响。
+    if [[ "$VLAN_TRUNK" == "0" && "$UPLINK_AUTO" == "1" \
+        && "$uplink_detected" == "1" ]] && ! setup_nm_is_active; then
+        setup_error "普通 bridge 自动上联需要正在运行的 NetworkManager；拒绝使用非持久 iproute2 fallback。"
+        return 2
+    fi
+    (( uplink_detected == 0 )) || echo ">> auto-detected uplink: $UPLINK"
 }
 
 # 自动启动器会在 sudo 前完成一次人工确认，但不同实例仍可能同时确认。下面的

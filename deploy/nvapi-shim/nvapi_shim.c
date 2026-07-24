@@ -13,6 +13,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "nvapi_driver_version.h"
+#include "nvapi_gpu_name.h"
+#include "nvapi_gpu_type.h"
+#include "nvapi_memory.h"
 #include "nvapi_identity.h"
 #include "nvapi_gpu_details.h"
 #include "nvapi_gpu_legacy_clocks.h"
@@ -144,6 +148,9 @@ NvAPI_Status nvapi_validate_gpu_handle(NvPhysicalGpuHandle handle)
     if (read_initialize_references() <= 0) {
         return NVAPI_API_NOT_INITIALIZED;
     }
+    if (handle == NULL) {
+        return NVAPI_INVALID_ARGUMENT;
+    }
     if (handle != (NvPhysicalGpuHandle)(uintptr_t)g_gpu_handle_token) {
         return NVAPI_EXPECTED_PHYSICAL_GPU_HANDLE;
     }
@@ -203,11 +210,11 @@ static NvAPI_Status __cdecl NvAPI_GPU_GetFullName(NvPhysicalGpuHandle handle,
         return status;
     }
     identity = nvapi_identity_get();
-    if (identity == NULL) {
-        return NVAPI_NVIDIA_DEVICE_NOT_FOUND;
-    }
-    copy_short_string(output, identity->name);
-    return NVAPI_OK;
+    /*
+     * identity->name 继续保存并证明完整 AIB 标签。公开 NVAPI 名称只按已经
+     * 验证的逻辑主 ID 投影标准芯片名，使它与 Windows 展示层保持一致。
+     */
+    return nvapi_copy_standard_gpu_name(identity, output);
 }
 
 static NvAPI_Status __cdecl NvAPI_GPU_GetBusId(NvPhysicalGpuHandle handle,
@@ -274,6 +281,21 @@ static NvAPI_Status __cdecl NvAPI_GPU_GetBusType(NvPhysicalGpuHandle handle,
     return NVAPI_OK;
 }
 
+static NvAPI_Status __cdecl NvAPI_GPU_GetGPUType(NvPhysicalGpuHandle handle,
+                                                  NvU32 *gpu_type)
+{
+    NvAPI_Status status;
+
+    if (gpu_type == NULL) {
+        return NVAPI_INVALID_ARGUMENT;
+    }
+    status = nvapi_validate_gpu_handle(handle);
+    if (status != NVAPI_OK) {
+        return status;
+    }
+    return nvapi_fill_gpu_type(gpu_type);
+}
+
 static NvAPI_Status __cdecl NvAPI_GPU_GetPCIIdentifiers(
     NvPhysicalGpuHandle handle, NvU32 *device_id, NvU32 *subsystem_id,
     NvU32 *revision_id, NvU32 *external_device_id)
@@ -295,8 +317,8 @@ static NvAPI_Status __cdecl NvAPI_GPU_GetPCIIdentifiers(
     }
 
     /*
-     * 返回 OS 可见承载设备的 PCI 键，让 SetupAPI/NVAPI 双通道扫描把本句柄合并
-     * 到同一块显示适配器；型号、显存和时钟仍由其余 NVAPI 接口读取 profile。
+     * 主键保持实际 carrier 关联键，避免 WMI/PnP 与 NVAPI 被工具拆成两块卡；
+     * external device、subsystem 和其它接口仍返回完整 NVIDIA 逻辑型号。
      */
     nvapi_build_carrier_pci_identifiers(identity, device_id, subsystem_id,
                                         revision_id, external_device_id);
@@ -346,13 +368,10 @@ static NvAPI_Status __cdecl NvAPI_SYS_GetDriverAndBranchVersion(
         return NVAPI_API_NOT_INITIALIZED;
     }
     /*
-     * 此 API 的成功结果是“实际显示驱动版本与 branch”。本层没有 NVIDIA
-     * display driver，也没有可信来源可报告该值；保留 QueryInterface 入口并
-     * 明确返回 NOT_SUPPORTED，避免把固定伪版本混入通用检测结果。
+     * GPU-Z 2.70 会把查询失败误判成旧驱动并调用空的 display-handle 回退入口。
+     * 生命周期验证后统一交给可宿主测试的兼容 helper，避免两个位数实现漂移。
      */
-    *version = 0u;
-    branch[0] = '\0';
-    return NVAPI_NOT_SUPPORTED;
+    return nvapi_fill_driver_and_branch_version(version, branch);
 }
 
 /*
@@ -375,6 +394,9 @@ static const struct shim_entry g_shim_table[] = {
     { NVAPI_ID_GPU_GET_BUS_TYPE, NvAPI_GPU_GetBusType },
     { NVAPI_ID_GPU_GET_BUS_ID, NvAPI_GPU_GetBusId },
     { UINT32_C(0x2A0A350F), NvAPI_GPU_GetBusSlotId },
+    { NVAPI_ID_GPU_GET_GPU_TYPE, NvAPI_GPU_GetGPUType },
+    { NVAPI_ID_GPU_GET_MEMORY_INFO, nvapi_gpu_get_memory_info },
+    { NVAPI_ID_GPU_GET_MEMORY_INFO_EX, nvapi_gpu_get_memory_info_ex },
     { UINT32_C(0x2DDFB66E), NvAPI_GPU_GetPCIIdentifiers },
     { UINT32_C(0x46FBEB03), NvAPI_GPU_GetPhysicalFrameBufferSize },
     { UINT32_C(0x5A04B644), NvAPI_GPU_GetVirtualFrameBufferSize },

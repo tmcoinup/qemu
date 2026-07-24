@@ -27,9 +27,8 @@ if (-not (Test-Path -LiteralPath $validationHelper -PathType Leaf)) {
 }
 . $validationHelper
 
-$ExpectedX86Hash = '3fe8586ccd9737b5f35f9688af394a117cff2c8e206b6168260d77d9102e7347'
-$ExpectedX64Hash = '16ae2b832a3795244c24745ae577aca3697090278b3a91a0e91875884422e6d7'
-
+$ExpectedX86Hash = '4d78efc3d5573d4fc85201612c96aa867b9da4bcd2d5d78500f0ea88105d20d0'
+$ExpectedX64Hash = '5b79d0eadd8c0eb533610c5a63f957382d1f4059a313ef581a32b43caa211e0b'
 # 这些值只用于识别仓库历史发布物，不能作为任意第三方 DLL 的放行白名单。
 # fa7412... 是早期独立 x64 浅层 shim；其余值覆盖 Git 历史发布版本。
 # 它们都可安全替换为当前不依赖真实 NVIDIA 运行时的独立实现。
@@ -39,7 +38,13 @@ $HistoricalX86Hashes = @(
     '63ecadd497f955a599e8a12ea7f45fd92915a47570be473d166ddbb3d462c13e', '0601d245ca7101b92299e4c2215480fa680554ee400d1a064782319747612ca0',
     '76dffd3513ca90d994c3800c725a6d4f6b5a95bef36f44fd122f123861fd522c', '5ad43a193ccf0c3dacc769f4267d394502708fc1a5191d9b1338ba8485ea9c94',
     '1638720952a6187773372f29837c3bb26804eaeaf00938a8c2f42996bc4dd972',
-    'f2207b5e17f1ba31af1b85ed58c5ffc920831b9f66cee8a6a013d55eec693bb9'
+    'f2207b5e17f1ba31af1b85ed58c5ffc920831b9f66cee8a6a013d55eec693bb9', '3fe8586ccd9737b5f35f9688af394a117cff2c8e206b6168260d77d9102e7347',
+    'f1f6631d0fedadee95972e655c241fedb432313b48fa572597bbaa4f39ba0d16',
+    'e2784e35ae71c804462601f8480e6d4dc471ee686464be9411be39185431eb1e',
+    '93d0ecc5c1576c5527a0be91fc783393c43853806d7582467c0e7bb486805f45',
+    'a6ad1fe56677717da6d295d19d0a53c2d80f4773c2780d0ffc175176ed475a63',
+    '1d091b178e1d9fadc9a164bef6f5995234e77bd6dce0d8f4128123709dec6a56',
+    '2b4b87941a70646983cb0bcbd03ee694f2a98b04f22feb675485bdcc487499c4', 'a9f28113bb2f89541b95342c45e85442e03bfe44bac8b7a49e01bb93463dd18f', '3f09642f7f221a081f4b2133c2ddbd639c35495916b9cb93921b5fd36388a8f4'
 )
 $HistoricalX64Hashes = @(
     'bc3fce02e8c223e335cb893c7d72db2c43dfa8a378677674854b0a52bf33de2a', 'c0e39803f8484d9dc23559576762564bc84b44fb3c90c7562829e8c96f15a83d',
@@ -49,7 +54,13 @@ $HistoricalX64Hashes = @(
     '6a46de86e767c08f215cd9526ef5527e536a244eddd78cc7a14fc45cc4f95792', '5a9181a21280eb692651cd6d6530b27124f50fcbb70e2c768427af4dbe6440ff',
     '311b95768f8bbd18fb30f0e1144c9f2c50cc4f8433b870768c4a439f57844f56',
     '1d39f3dada172f62b62f801de434ceda3060caf3b0887381d0b853771f3b97cf',
-    '529b06e18e08cf3821778bdce7f485aadeabbafd955374991c8d84cca7bc57be'
+    '529b06e18e08cf3821778bdce7f485aadeabbafd955374991c8d84cca7bc57be', '16ae2b832a3795244c24745ae577aca3697090278b3a91a0e91875884422e6d7',
+    'ca0ffd465dacbaa189521dc2dcaa94be5aa6f49180d525057399269661811397',
+    '75988e7e938c83b770f85d8e8bdacbb50c12c5d5377e4551de4e0d59328f5bfe',
+    '9ea6c62b3a6c7fe4eaa5d5b9f7facb624f4bdfa29da67ad8ce9d2369a511f994',
+    'a2a825fe180a39bd33ae4e353e3d839a63f8fdcb2aed7054408f8b9f1c16ae73',
+    'e31d2fcc74a0ff6be0d51a1a153744a728102906207d88fbf3cea61ee0d51bf0',
+    'b9463114434c1d048e7fb51c49634d4f664daab1b69b888cc637be0e241ba01f', '4972a1c0ed1cde22569817589324c696910ef71ae9fc61753409fa1becb98425', '5a3e68fd46acbbbd1347e06ef75b50c9d2dc238825870539f06d95dec873d946'
 )
 
 function Get-SystemProjectionEntryState {
@@ -405,6 +416,7 @@ try {
     $projectionLock = New-Object IO.FileStream($lockPath, [IO.FileMode]::OpenOrCreate,
         [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 } catch { throw ('另一个 NVAPI 系统投影事务正在运行：' + $_.Exception.Message) }
+$cleanupDeferredExit = $false
 try {
 $payloadRoot = if ($Action -eq 'Install' -and $DesiredState -ceq 'Present') {
     if ([string]::IsNullOrWhiteSpace($PayloadDir)) { throw 'Present Install 缺少 -PayloadDir' }
@@ -479,4 +491,10 @@ if ($Action -eq 'Rollback') {
     }
     Write-Host ('系统 NVIDIA NVAPI 目标状态：' + $DesiredState) -ForegroundColor Green
 }
+} catch {
+    if (-not (Test-NvapiCleanupDeferredError $_)) { throw }
+    Write-Warning ($_.Exception.Message +
+        '；durable receipt 已保留，重启后必须先执行 Recover。')
+    $cleanupDeferredExit = $true
 } finally { $projectionLock.Dispose() }
+if ($cleanupDeferredExit) { exit 12 }

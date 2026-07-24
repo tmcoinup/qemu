@@ -130,8 +130,10 @@ static int load_and_validate_identity(
     char source_instance[256];
     char identity_mode[32];
     struct stealth_gpu_carrier carrier;
+    struct stealth_gpu_logical_pci_identity logical_identity;
 
     ZeroMemory(&input, sizeof(input));
+    ZeroMemory(&logical_identity, sizeof(logical_identity));
     if (!read_registry_dword(key, "IdentitySchemaVersion", &schema) ||
         !read_registry_string(key, "IdentityId", identity_id,
                               (DWORD)sizeof(identity_id)) ||
@@ -209,10 +211,15 @@ static int load_and_validate_identity(
     input.bus_id = (NvU32)bus_id;
     input.slot_id = (NvU32)slot_id;
     input.function_id = (NvU32)function_id;
+    logical_identity.vendor_id = (uint32_t)pci_vendor;
+    logical_identity.device_id = (uint32_t)pci_device;
+    logical_identity.subsystem_vendor_id = (uint32_t)subsystem_vendor;
+    logical_identity.subsystem_device_id = (uint32_t)subsystem_device;
+    logical_identity.revision_id = (uint32_t)revision;
     if (!nvapi_build_validated_identity(&input, identity) ||
         !stealth_validate_virtio_gpu_carrier_windows(
             source_instance, (uint32_t)bus_id, (uint32_t)slot_id,
-            (uint32_t)function_id, &carrier)) {
+            (uint32_t)function_id, &logical_identity, &carrier)) {
         return 0;
     }
 

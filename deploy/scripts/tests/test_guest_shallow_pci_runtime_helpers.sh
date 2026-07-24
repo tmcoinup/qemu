@@ -37,6 +37,18 @@ if ($errors.Count -ne 0) {
     throw ("PowerShell 语法错误：" + ($errors | ForEach-Object Message -join "; "))
 }
 . $env:TRANSACTION_SCRIPT
+foreach ($memoryCase in @(
+    [pscustomobject]@{ RamMb=1; Bytes="00-00-10-00" },
+    [pscustomobject]@{ RamMb=2047; Bytes="00-00-F0-7F" },
+    [pscustomobject]@{ RamMb=2048; Bytes="00-00-F0-7F" },
+    [pscustomobject]@{ RamMb=4096; Bytes="00-00-F0-7F" }
+)) {
+    $actual = [BitConverter]::ToString(
+        [byte[]](Get-GpuLegacyMemorySizeBytes -RamMb $memoryCase.RamMb))
+    if ($actual -cne $memoryCase.Bytes) {
+        throw ("legacy MemorySize 编码错误：" + $memoryCase.RamMb + "/" + $actual)
+    }
+}
 Assert-IdentityToken "0123456789ABCDEF0123456789ABCDEF"
 foreach ($badToken in @(
     "0123456789abcdef0123456789abcdef",
@@ -115,7 +127,8 @@ if ($errors.Count -ne 0) {
 # 加载 strict reader/writer 的纯函数。fake RegistryKey 用于证明 Binary/QWord
 # 不会被压成 Int32，并验证错误 kind/data 会 fail-closed。
 foreach ($functionName in @(
-    "Get-ExactRegistryValue", "Get-StockDriverMatchingDeviceId",
+    "Get-ExactRegistryValue", "Get-CurrentGpuIdentity",
+    "Get-StockDriverMatchingDeviceId", "Assert-GpuIdentityStrings",
     "Set-VerifiedRegistryValue"
 )) {
     $functionAst = $ast.Find({
@@ -202,6 +215,84 @@ try {
         Out-Null
 } catch { $rejected = $true }
 if (-not $rejected) { throw "伪装设备 ID 被错误接受为驱动 MatchingDeviceId" }
+
+# 用纯内存 RegistryKey 替身执行截图中的 Stage -> strict reader 路径。此处刻意
+# 通过 Get-CurrentGpuIdentity 组装快照，防止测试手写 IdentitySchemaVersion=2
+# 掩盖生产读取器漏传 schema 字段。
+function New-ReaderRegistryKey {
+    $key = [pscustomobject]@{ Values=@{}; Kinds=@{}; Children=@{} }
+    $key | Add-Member ScriptMethod GetValueNames { return @($this.Values.Keys) }
+    $key | Add-Member ScriptMethod GetValueKind {
+        param($Name)
+        return $this.Kinds[$Name]
+    }
+    $key | Add-Member ScriptMethod GetValue {
+        param($Name, $DefaultValue, $Options)
+        if ($this.Values.ContainsKey($Name)) { return $this.Values[$Name] }
+        return $DefaultValue
+    }
+    $key | Add-Member ScriptMethod OpenSubKey {
+        param($Path, $Writable)
+        if ($this.Children.ContainsKey($Path)) { return $this.Children[$Path] }
+        return $null
+    }
+    $key | Add-Member ScriptMethod Dispose {}
+    return $key
+}
+function Set-ReaderRegistryValue($Key, [string]$Name, $Value, $Kind) {
+    $Key.Values[$Name] = $Value
+    $Key.Kinds[$Name] = $Kind
+}
+$readerBase = New-ReaderRegistryKey
+$readerRoot = New-ReaderRegistryKey
+$readerVersion = New-ReaderRegistryKey
+$readerTransaction = New-ReaderRegistryKey
+$readerBase.Children["SOFTWARE\StealthGPU"] = $readerRoot
+$identityId = "0123456789ABCDEF0123456789ABCDEF"
+$readerRoot.Children["Identities\" + $identityId] = $readerVersion
+$readerRoot.Children["Transactions\" + $identityId] = $readerTransaction
+$stringKind = [Microsoft.Win32.RegistryValueKind]::String
+$dwordKind = [Microsoft.Win32.RegistryValueKind]::DWord
+Set-ReaderRegistryValue $readerRoot PendingIdentity $identityId $stringKind
+Set-ReaderRegistryValue $readerTransaction TransactionSchemaVersion 5 $dwordKind
+Set-ReaderRegistryValue $readerTransaction State Prepared $stringKind
+Set-ReaderRegistryValue $readerTransaction ClassSubkey "0001" $stringKind
+Set-ReaderRegistryValue $readerTransaction DriverInfPath "oem3.inf" $stringKind
+$readerCase = @($aibCases | Where-Object { $_.Carrier -ceq "A10C1AF4" })[0]
+$readerValues = [ordered]@{
+    IdentitySchemaVersion=2; IdentityId=$identityId
+    SpoofName=$readerCase.Name; SpoofVendor=$readerCase.Vendor
+    SpoofBios=$readerCase.Bios; SpoofPciVendorId=$readerCase.PciVendor
+    SpoofPciDeviceId=$readerCase.Device
+    SpoofSubsystemVendorId=$readerCase.SubVendor
+    SpoofSubsystemDeviceId=$readerCase.SubDevice
+    SpoofRevisionId=$readerCase.Revision; SpoofPciBusId=0
+    SpoofPciSlotId=6; SpoofPciFunctionId=0; SpoofRamMb=$readerCase.RamMb
+    SpoofMemoryType=$readerCase.MemoryType
+    SpoofMemoryBusWidthBits=$readerCase.Width
+    SpoofBaseClockKHz=$readerCase.Base; SpoofBoostClockKHz=$readerCase.Boost
+    SpoofMemoryClockKHz=$readerCase.Memory; SpoofSliSupported=$readerCase.Sli
+    SourceInstanceId="PCI\VEN_1AF4&DEV_1050&SUBSYS_A10C1AF4&REV_A1\3&AIB&0&30"
+    IdentityMode="shallow-user-projection"
+}
+foreach ($entry in $readerValues.GetEnumerator()) {
+    $kind = if ($entry.Value -is [string]) { $stringKind } else { $dwordKind }
+    Set-ReaderRegistryValue $readerVersion $entry.Key $entry.Value $kind
+}
+$stagedSnapshot = Get-CurrentGpuIdentity -StagedId $identityId `
+    -BaseKeyOverride $readerBase
+if ($stagedSnapshot.IdentitySchemaVersion -ne 2 -or
+    $stagedSnapshot.IdentityId -cne $identityId -or
+    $stagedSnapshot.StagedClassSubkey -cne "0001" -or
+    $stagedSnapshot.StagedDriverInfPath -cne "oem3.inf") {
+    throw "Stage strict reader 没有返回完整 schema-2 快照"
+}
+Set-ReaderRegistryValue $readerRoot CurrentIdentity $identityId $stringKind
+$currentSnapshot = Get-CurrentGpuIdentity -BaseKeyOverride $readerBase
+if ($currentSnapshot.IdentitySchemaVersion -ne 2 -or
+    $currentSnapshot.IdentityId -cne $identityId) {
+    throw "CurrentIdentity strict reader 没有返回完整 schema-2 快照"
+}
 
 $fakeKey = [pscustomobject]@{
     Values=@{}; Kinds=@{}; CorruptName=$null; CorruptKindName=$null

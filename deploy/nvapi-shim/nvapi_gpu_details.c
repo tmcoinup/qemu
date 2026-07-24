@@ -213,7 +213,27 @@ NvAPI_Status __cdecl nvapi_gpu_get_connected_outputs(
     if (status != NVAPI_OK) {
         return status;
     }
-    /* 单显示器占用 output bit 0；无有效 SLI 组时 SLI 版本 API 也应返回同一 mask。 */
+    /* 单显示器占用 output bit 0；无有效 SLI 组时 SLI 版本按官方语义返回同一 mask。 */
     *outputs_mask = 1u;
+    return NVAPI_OK;
+}
+
+NvAPI_Status __cdecl nvapi_gpu_get_output_type(
+    NvPhysicalGpuHandle handle, NvU32 output_id, NvU32 *output_type)
+{
+    NvAPI_Status status;
+
+    if (output_type == NULL) {
+        return NVAPI_INVALID_ARGUMENT;
+    }
+    status = nvapi_validate_gpu_handle(handle);
+    if (status != NVAPI_OK) {
+        return status;
+    }
+    /* 当前拓扑只有 output bit 0；输出由数字 EDID 驱动，类型为 DFP。 */
+    if (output_id != 1u) {
+        return NVAPI_INVALID_ARGUMENT;
+    }
+    *output_type = NVAPI_GPU_OUTPUT_TYPE_DFP;
     return NVAPI_OK;
 }

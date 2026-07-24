@@ -27,11 +27,13 @@ REGISTRY_CORE_SRC="$SCRIPTS/gpu-profile-registry-core.ps1"
 REFRESH_HELPER_SRC="$SCRIPTS/refresh-gpu-name.ps1"
 MANUFACTURER_HELPER_SRC="$SCRIPTS/gpu-manufacturer-projection.ps1"
 HARDWARE_ID_PLAN_SRC="$SCRIPTS/gpu-hardware-id-plan.ps1"
+HARDWARE_ID_TRANSACTION_SRC="$SCRIPTS/gpu-hardware-id-transaction.ps1"
 HARDWARE_ID_PROJECTOR_SRC="$SCRIPTS/project-gpu-hardware-id.ps1"
 DISPLAY_HELPER_SRC="$SCRIPTS/force-displayfreq.ps1"
 DRIVER_SRC="$SCRIPTS/stock-viogpudo"
 CHIPSET_INF_SRC="$SCRIPTS/stock-intel-chipset-inf"
 NVAPI_SRC="$HERE/../nvapi-shim"
+NVAPI_PROBE_SRC="$HERE/../nvapi-runtime-probe"
 ADL_SRC="$HERE/../adl-shim"
 [[ -f "$POWER_POLICY_SRC" ]] || { echo "ERROR: 找不到 $POWER_POLICY_SRC" >&2; exit 1; }
 [[ -f "$RESTART_STATE_SRC" ]] || { echo "ERROR: 找不到 $RESTART_STATE_SRC" >&2; exit 1; }
@@ -44,6 +46,7 @@ ADL_SRC="$HERE/../adl-shim"
 [[ -f "$REFRESH_HELPER_SRC" ]] || { echo "ERROR: 找不到 $REFRESH_HELPER_SRC" >&2; exit 1; }
 [[ -f "$MANUFACTURER_HELPER_SRC" ]] || { echo "ERROR: 找不到 $MANUFACTURER_HELPER_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PLAN_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PLAN_SRC" >&2; exit 1; }
+[[ -f "$HARDWARE_ID_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_TRANSACTION_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PROJECTOR_SRC" >&2; exit 1; }
 [[ -f "$DISPLAY_HELPER_SRC" ]] || { echo "ERROR: 找不到 $DISPLAY_HELPER_SRC" >&2; exit 1; }
 [[ -d "$DRIVER_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_SRC" >&2; exit 1; }
@@ -76,6 +79,7 @@ BUILD_DIR="$CONTROLLED_BUILD_DIR" \
 DRIVER_SRC_DIR="$DRIVER_SRC" \
 CHIPSET_INF_SRC_DIR="$CHIPSET_INF_SRC" \
 NVAPI_SRC_DIR="$NVAPI_SRC" \
+NVAPI_PROBE_DIR="$NVAPI_PROBE_SRC" \
 ADL_SRC_DIR="$ADL_SRC" \
     "$HERE/build-exe.sh"
 
@@ -105,11 +109,13 @@ if [[ "$include_legacy_scripts" == "1" ]]; then
     cp "$MANUFACTURER_HELPER_SRC"          "$DIST/"
     cp "$CONTROLLED_BUILD_DIR/gpu-manufacturer-projector.exe" "$DIST/"
     cp "$HARDWARE_ID_PLAN_SRC"             "$DIST/"
+    cp "$HARDWARE_ID_TRANSACTION_SRC"      "$DIST/"
     cp "$HARDWARE_ID_PROJECTOR_SRC"        "$DIST/"
     cp "$DISPLAY_HELPER_SRC"               "$DIST/"
     cp "$DRIVER_SRC"/viogpudo.{sys,cat,inf} "$DIST/"
     cp "$CHIPSET_INF_SRC"/{CannonLake-HSystem.inf,cannonlake-h.cat,SunrisePoint-HSystem.inf,sunrisepoint-h.cat} "$DIST/"
     cp "$NVAPI_SRC"/nvapi{,64}.dll          "$DIST/"
+    cp "$NVAPI_PROBE_SRC"/nvapi-runtime-probe-x86.exe "$NVAPI_PROBE_SRC"/nvapi-runtime-probe-x64.exe "$DIST/"
     cp "$ADL_SRC/atiadlxy.dll"              "$DIST/"
     cp "$ADL_SRC/atiadlxy.dll"              "$DIST/atiadlxx32.dll"
     cp "$ADL_SRC/atiadlxx.dll"              "$DIST/"

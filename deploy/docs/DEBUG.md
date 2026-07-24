@@ -157,12 +157,13 @@ curl -k https://<HOST_IP>/-/leases | jq
 ## Guest 侧 (Windows)
 
 ```powershell
-# 当前浅层模式只应有一个在线 PCI 显示设备，物理 ID 保持 1AF4:1050。
+# 当前浅层模式只应有一个在线 PCI 显示设备；真实 InstanceId 保持 1AF4:1050。
 $display = Get-PnpDevice -Class Display -PresentOnly
 $display | Format-List FriendlyName,Status,Problem,InstanceId
 $display | ForEach-Object {
     Get-PnpDeviceProperty -InstanceId $_.InstanceId `
-        -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath
+        -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath,
+            DEVPKEY_Device_HardwareIds
 }
 
 Get-CimInstance Win32_VideoController |
@@ -181,6 +182,8 @@ Get-Content 'C:\ProgramData\StealthGPU\respawn.log' -Tail 100
 
 - 驱动成功标准是物理 `PCI\VEN_1AF4&DEV_1050`、`Service=VioGpuDod`、Problem=0，
   不是 `nvlddmkm`、`nvidia-smi` 或 NVIDIA 服务；当前流程不会安装这些组件。
+- `HardwareIds` 应为当前 AIB 的规范逻辑首项 + 完整 `1AF4:1050` 物理尾项；它们属于
+  上述同一个 devnode，真实 BDF、Service 和 Driver 不会因此改变。
 - 显示模式必须在 SDL 本地控制台验证。RDP 会接管会话分辨率，不能用 RDP 下灰掉的
   分辨率控件判断 VioGpuDod 是否失败。
 - 安装器返回 34 表示活动驱动未通过固定 stock 摘要/WHCP/服务路径验证。不要关闭签名

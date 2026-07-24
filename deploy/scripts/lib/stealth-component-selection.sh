@@ -5,6 +5,12 @@
 # 合法候选”中唯一命中。这里不产生新的硬件事实，所有稳定 ID 与字段仍来自
 # components.json / memory.json 的已校验投影。
 
+if [[ "${_STEALTH_COMPONENT_SELECTION_LOADED:-0}" == "1" ]]; then
+    # shellcheck disable=SC2317 # 直接执行时 return 会失败，必须退回 exit。
+    return 0 2>/dev/null || exit 0
+fi
+_STEALTH_COMPONENT_SELECTION_LOADED=1
+
 readonly _STEALTH_CURRENT_STORAGE_BYTES=512110190592
 
 stealth_component_selection_init_requests() {

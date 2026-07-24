@@ -39,6 +39,7 @@ REGISTRY_CORE_SRC="$REPO_ROOT/deploy/scripts/gpu-profile-registry-core.ps1"
 REFRESH_HELPER_SRC="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
 MANUFACTURER_HELPER_SRC="$REPO_ROOT/deploy/scripts/gpu-manufacturer-projection.ps1"
 HARDWARE_ID_PLAN_SRC="$REPO_ROOT/deploy/scripts/gpu-hardware-id-plan.ps1"
+HARDWARE_ID_TRANSACTION_SRC="$REPO_ROOT/deploy/scripts/gpu-hardware-id-transaction.ps1"
 HARDWARE_ID_PROJECTOR_SRC="$REPO_ROOT/deploy/scripts/project-gpu-hardware-id.ps1"
 DISPLAY_HELPER_SRC="$REPO_ROOT/deploy/scripts/force-displayfreq.ps1"
 DRIVER_INSTALL_SRC="$HERE/install-display-driver.ps1"
@@ -54,6 +55,7 @@ GPU_API_IDENTITY_BINDING_SRC="$HERE/gpu-api-identity-binding.ps1"
 DRIVER_SRC_DIR="${DRIVER_SRC_DIR:-$REPO_ROOT/deploy/scripts/stock-viogpudo}"
 CHIPSET_INF_SRC_DIR="${CHIPSET_INF_SRC_DIR:-$REPO_ROOT/deploy/scripts/stock-intel-chipset-inf}"
 NVAPI_SRC_DIR="${NVAPI_SRC_DIR:-$REPO_ROOT/deploy/nvapi-shim}"
+NVAPI_PROBE_DIR="${NVAPI_PROBE_DIR:-$REPO_ROOT/deploy/nvapi-runtime-probe}"
 ADL_SRC_DIR="${ADL_SRC_DIR:-$REPO_ROOT/deploy/adl-shim}"
 ADL_EXPORTS_SRC="$ADL_SRC_DIR/adl-required-exports.txt"
 SRC="$LAUNCHER/respawn-stealth-launcher.c"
@@ -63,10 +65,12 @@ LAUNCHER_ARGUMENTS_SRC="$LAUNCHER/launcher-arguments.c"
 MANUFACTURER_PROJECTOR_SRC="$LAUNCHER/gpu-manufacturer-projector.c"
 MANIFEST="$LAUNCHER/respawn-stealth.exe.manifest"
 
-NVAPI_X86_SHA256="3fe8586ccd9737b5f35f9688af394a117cff2c8e206b6168260d77d9102e7347"
-NVAPI_X64_SHA256="16ae2b832a3795244c24745ae577aca3697090278b3a91a0e91875884422e6d7"
-ADL_X86_SHA256="b45384a1a4568bf6c75f131ae1fd206a8844e810ffc70253003c4503fb0771e2"
-ADL_X64_SHA256="aff2783d5e32528c6e919d947aff097d12acadfe7e4ce5a74896dcfae11b3128"
+NVAPI_X86_SHA256="4d78efc3d5573d4fc85201612c96aa867b9da4bcd2d5d78500f0ea88105d20d0"
+NVAPI_X64_SHA256="5b79d0eadd8c0eb533610c5a63f957382d1f4059a313ef581a32b43caa211e0b"
+NVAPI_PROBE_X86_SHA256="61f45f534da33ac86a609a2c23a03eb21220058e5cf46e15405263f802ce7a8d"
+NVAPI_PROBE_X64_SHA256="cc6c89ee89068ab23cf30b2899c500b45613fc12bcd03b638b94345eabb90124"
+ADL_X86_SHA256="a191793f69ffac0f6350f8760cf21cfbfb07debfc40f7e6af41c9d7161aa3ff4"
+ADL_X64_SHA256="71628c178d1fe8d093f9eff06e1c8f5df439af69bfb2f318c7631f4f4c7a8661"
 
 need_tool() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -93,6 +97,7 @@ need_tool llvm-readobj
 [[ -f "$REFRESH_HELPER_SRC" ]] || { echo "ERROR: 找不到 $REFRESH_HELPER_SRC" >&2; exit 1; }
 [[ -f "$MANUFACTURER_HELPER_SRC" ]] || { echo "ERROR: 找不到 $MANUFACTURER_HELPER_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PLAN_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PLAN_SRC" >&2; exit 1; }
+[[ -f "$HARDWARE_ID_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_TRANSACTION_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PROJECTOR_SRC" >&2; exit 1; }
 [[ -f "$DISPLAY_HELPER_SRC" ]] || { echo "ERROR: 找不到 $DISPLAY_HELPER_SRC" >&2; exit 1; }
 [[ -f "$DRIVER_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_INSTALL_SRC" >&2; exit 1; }
@@ -110,6 +115,8 @@ need_tool llvm-readobj
 [[ -f "$PAYLOAD_ENVIRONMENT_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_ENVIRONMENT_SRC" >&2; exit 1; }
 [[ -f "$LAUNCHER_ARGUMENTS_SRC" ]] || { echo "ERROR: 找不到 $LAUNCHER_ARGUMENTS_SRC" >&2; exit 1; }
 [[ -f "$MANUFACTURER_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $MANUFACTURER_PROJECTOR_SRC" >&2; exit 1; }
+[[ -f "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x86.exe" ]] || { echo "ERROR: 缺少 NVAPI x86 runtime probe" >&2; exit 1; }
+[[ -f "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x64.exe" ]] || { echo "ERROR: 缺少 NVAPI x64 runtime probe" >&2; exit 1; }
 
 # stock 驱动的 SYS/CAT/INF 必须来自同一发布包。构建时先锁定三者摘要，既避免
 # 误把深层自签版打进浅层 EXE，也能在源文件被截断或 CAT/SYS 混版时立即失败。
@@ -187,6 +194,24 @@ verify_nvapi_file() {
 
 verify_nvapi_file nvapi.dll "$NVAPI_X86_SHA256" 'IMAGE_FILE_MACHINE_I386 (0x14C)'
 verify_nvapi_file nvapi64.dll "$NVAPI_X64_SHA256" 'IMAGE_FILE_MACHINE_AMD64 (0x8664)'
+
+# 探针随统一 EXE 发布，摘要和 Machine 必须与受测源码产物完全一致。
+verify_probe_file() {
+    local file_name="$1" expected_hash="$2" expected_machine="$3"
+    local path="$NVAPI_PROBE_DIR/$file_name" actual_hash metadata
+    actual_hash="$(sha256sum "$path" | awk '{print $1}')"
+    [[ "$actual_hash" == "$expected_hash" ]] \
+        || { echo "ERROR: $file_name SHA-256 不匹配: $actual_hash" >&2; exit 1; }
+    metadata="$(llvm-readobj --file-headers "$path")"
+    grep -F "Machine: $expected_machine" <<<"$metadata" >/dev/null \
+        || { echo "ERROR: $file_name PE Machine 不匹配" >&2; exit 1; }
+    if grep -F 'IMAGE_FILE_DLL (0x2000)' <<<"$metadata" >/dev/null; then
+        echo "ERROR: $file_name 被错误构建为 DLL" >&2
+        exit 1
+    fi
+}
+verify_probe_file nvapi-runtime-probe-x86.exe "$NVAPI_PROBE_X86_SHA256" 'IMAGE_FILE_MACHINE_I386 (0x14C)'
+verify_probe_file nvapi-runtime-probe-x64.exe "$NVAPI_PROBE_X64_SHA256" 'IMAGE_FILE_MACHINE_AMD64 (0x8664)'
 
 # ADL 同样是系统级厂商 API，而不是 GPU-Z 的旁置补丁。构建时除摘要和架构外，
 # 逐项核对公开导出清单，防止 32/64 位任一产物漏掉通用检测工具所需的入口。
@@ -305,6 +330,8 @@ xxd -i -n payload_gpu_manufacturer_projector_exe \
     > "$BUILD_DIR/payload_gpu_manufacturer_projector_exe.h"
 xxd -i -n payload_gpu_hardware_id_plan_ps1 "$HARDWARE_ID_PLAN_SRC" \
     > "$BUILD_DIR/payload_gpu_hardware_id_plan_ps1.h"
+xxd -i -n payload_gpu_hardware_id_transaction_ps1 "$HARDWARE_ID_TRANSACTION_SRC" \
+    > "$BUILD_DIR/payload_gpu_hardware_id_transaction_ps1.h"
 xxd -i -n payload_project_gpu_hardware_id_ps1 "$HARDWARE_ID_PROJECTOR_SRC" \
     > "$BUILD_DIR/payload_project_gpu_hardware_id_ps1.h"
 xxd -i -n payload_force_displayfreq_ps1 "$DISPLAY_HELPER_SRC" \
@@ -349,6 +376,12 @@ xxd -i -n payload_nvapi_x86_dll "$NVAPI_SRC_DIR/nvapi.dll" \
     > "$BUILD_DIR/payload_nvapi_x86_dll.h"
 xxd -i -n payload_nvapi_x64_dll "$NVAPI_SRC_DIR/nvapi64.dll" \
     > "$BUILD_DIR/payload_nvapi_x64_dll.h"
+xxd -i -n payload_nvapi_runtime_probe_x86_exe \
+    "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x86.exe" \
+    > "$BUILD_DIR/payload_nvapi_runtime_probe_x86_exe.h"
+xxd -i -n payload_nvapi_runtime_probe_x64_exe \
+    "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x64.exe" \
+    > "$BUILD_DIR/payload_nvapi_runtime_probe_x64_exe.h"
 xxd -i -n payload_adl_x86_dll "$ADL_SRC_DIR/atiadlxy.dll" \
     > "$BUILD_DIR/payload_adl_x86_dll.h"
 xxd -i -n payload_adl_x64_dll "$ADL_SRC_DIR/atiadlxx.dll" \

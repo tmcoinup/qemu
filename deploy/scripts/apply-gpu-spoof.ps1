@@ -5,14 +5,14 @@
     [switch]$AutoDetect,                        # 自动按 PCI subsys 查 GPU 池映射；clone 后用
     [string]$SpoofName    = 'NVIDIA GeForce GTX 1050',
     [string]$SpoofVendor  = 'NVIDIA',           # 'NVIDIA' / 'AMD'
-    [int]   $SpoofRamMb   = 2048,               # 显存 MB（注册表 HardwareInformation.MemorySize）
+    [int]   $SpoofRamMb   = 2048,               # 逻辑显存 MB；schema-5 分别发布 32/64 位字段
     [string]$SpoofBios    = 'Version 86.07.48.00.38',
     [ValidateSet('GDDR5')][string]$SpoofMemoryType = 'GDDR5', [ValidateRange(32, 1024)][ValidateScript({ ($_ -band ($_ - 1)) -eq 0 })][int]$SpoofMemoryBusWidthBits = 128,
     [ValidateRange(100000, 5000000)][int]$SpoofBaseClockKHz = 1354000, [ValidateRange(100000, 5000000)][int]$SpoofBoostClockKHz = 1455000,
     [ValidateRange(100000, 10000000)][int]$SpoofMemoryClockKHz = 3504000, [ValidateSet(0)][int]$SpoofSliSupported = 0,
     # 正式 respawn 传入同时携带 NVAPI/ADL 的受保护 payload；系统目录只发布 staged
-    # vendor 对应的一组，并与 schema-2 identity 共用 durable try/finally。参数名保留旧调用兼容，
-    # 同时接受更准确的 -GpuApiPayloadDir 别名。
+    # vendor 对应的一组，并与 schema-2 identity / transaction schema-5 共用 durable
+    # try/finally。参数名保留旧调用兼容，同时接受更准确的 -GpuApiPayloadDir 别名。
     [Alias('GpuApiPayloadDir')]
     [string]$NvapiPayloadDir = ''
 )
@@ -23,6 +23,7 @@ try { chcp 65001 | Out-Null } catch {}
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
 $powershellExe = Join-Path $PSHOME 'powershell.exe'
+$gpuApiCleanupDeferredExitCode = 12
 
 # 三个辅助脚本是可独立测试、可独立分发的源码文件。主脚本只从自己的同目录
 # 读取它们，避免重新引入难以做 AST 检查的超长内嵌 here-string。除只读 ListOnly 外，
@@ -84,8 +85,12 @@ try {
                 '-ExecutionPolicy', 'Bypass', '-File', $gpuApiCoordinatorSource,
                 '-Action', 'Recover', '-Vendor', 'Auto')
             & $powershellExe @recoverGpuApiArgs
-            if ($LASTEXITCODE -ne 0) {
-                throw ('系统 GPU API 中断事务恢复失败，退出码=' + $LASTEXITCODE)
+            $recoverGpuApiCode = [int]$LASTEXITCODE
+            if ($recoverGpuApiCode -eq $gpuApiCleanupDeferredExitCode) {
+                exit $gpuApiCleanupDeferredExitCode
+            }
+            if ($recoverGpuApiCode -ne 0) {
+                throw ('系统 GPU API 中断事务恢复失败，退出码=' + $recoverGpuApiCode)
             }
         }
     }
@@ -117,14 +122,6 @@ if ($AutoDetect) {
 }
 
 if (-not $ListOnly) {
-    # clone 的 Class\NNNN 可能仍写着 base 上一代 profile 名。必须在 helper 提交
-    # 新 SpoofName 之前先捕获旧值，后面才能把旧名加入 target needle；否则旧 GTX
-    # 切到新 GTX/AMD 时会找不到 Class 目标，而配置已经先变成新型号。
-    # refresh helper 的只读模式使用与 NVAPI 相同的 pointer/schema 双重校验；旧版
-    # root.SpoofName 只是兼容镜像，不能再参与 target 选择，否则并发更新时会混入旧名。
-    $previousIdentity = & $refreshHelperSource -ReadIdentityOnly -AllowMissing
-    $previousSpoofName = if ($null -ne $previousIdentity) { $previousIdentity.SpoofName } else { $null }
-
     # 这是所有 PnP/显卡/监视器写入前的物理门禁。helper 会确认唯一在线设备确实由
     # stock VioGpuDod 驱动且主 ID 为 1AF4:1050，再以 schema-last 方式提交逻辑
     # 10DE:1C82 等身份。深层 10DE/1002 旧机在此即失败，不会留下半套 Class/Enum 修改。
@@ -154,17 +151,19 @@ if (-not $ListOnly) {
 #
 # One-shot installer for the NVIDIA GTX 1050 spoof:
 #
-#   1) Class\{4d36e968-...}\NNNN        -> WMI VideoProcessor / AdapterRAM /
-#                                           DriverDesc / HardwareInformation.*
+#   1) Class\{4d36e968-...}\NNNN        -> 标准 DriverDesc / ProviderName /
+#                                           WMI VideoProcessor / AdapterRAM /
+#                                           HardwareInformation.*
 #
-#   2) Enum\PCI\VEN_...&DEV_...\<inst>  -> FriendlyName + DeviceDesc
-#      (this is what Device Manager and Win32_VideoController.Name read)
+#   2) Enum\PCI\VEN_...&DEV_...\<inst>  -> 标准 FriendlyName / DeviceDesc / Mfg
+#      schema-5 保持 stock MatchingDeviceId / InfPath / InfSection / Service，
+#      HardwareID 始终保持 stock 1AF4:1050；逻辑 PCI/AIB 身份由 NVAPI/ADL 返回。
 #
 #   3) C:\ProgramData\StealthGPU\refresh-gpu-name.ps1
 #      + scheduled task "StealthGPU-RefreshName" (AtStartup + AtLogOn, SYSTEM,
-#      highest privs). Windows' built-in BasicDisplay driver overwrites
-#      DeviceDesc from display.inf on every init, so we re-apply the spoof
-#      strings a couple of seconds after every boot. Pass -SkipTask to omit.
+#      highest privs). Windows PnP/driver init may restore stock display strings,
+#      so the task re-applies and verifies the global Enum/Class name projection.
+#      Pass -SkipTask only to omit the interactive display-mode task.
 #
 # OPTIONAL legacy diagnostic:
 #   Device Manager's "驱动程序提供商 / 驱动程序说明" (Driver Provider / Desc)
@@ -188,29 +187,9 @@ if (-not $ListOnly) {
 $spoofName    = $SpoofName
 $spoofVendor  = $SpoofVendor                             # Win32_VideoController.AdapterCompatibility / DxDiag 制造商
 $spoofBios    = $SpoofBios                               # HardwareInformation.BiosString (随机 NVIDIA/AMD)
-$spoofRamMb   = $SpoofRamMb                              # HardwareInformation.MemorySize (字节 = $spoofRamMb * 1MB)
+$spoofRamMb   = $SpoofRamMb                              # 4 GiB 时 legacy MemorySize=2047 MiB，qwMemorySize 精确
 $classGuid    = '{4d36e968-e325-11ce-bfc1-08002be10318}'   # Display adapters
 $classRoot    = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\' + $classGuid
-
-# Chinese localized needles built from char codes - keeps the source ASCII
-# so Windows PowerShell 5.1 parses it correctly regardless of codepage.
-$zhBasicDisplay = [string]::new([char[]](0x57fa,0x672c,0x663e,0x793a))
-$zhStandardVGA1 = [string]::new([char[]](0x6807,0x51c6,0x0020,0x0056,0x0047,0x0041))
-$zhStandardVGA2 = [string]::new([char[]](0x6807,0x51c6,0x0056,0x0047,0x0041))
-
-$fakeNeedles = @(
-    'virtio', 'Red Hat', 'Microsoft Basic', 'Standard VGA', 'QXL', 'Cirrus',
-    $zhBasicDisplay, $zhStandardVGA1, $zhStandardVGA2
-) -join '|'
-
-# Clone 场景：base 被 sysprep 前已经跑过一次 apply-gpu-spoof，所以 Class\NNNN\DriverDesc
-# 不再是 "Red Hat VirtIO GPU DOD" 而是上一代 spoof 写进去的型号名（比如 base 里抽到了
-# AMD Radeon RX 560）。把"上次 spoof 名字"读出来加进 needle 池，让 clone 后的 AutoDetect
-# 能识别"上一代 spoof 留下的 Class 项 = 我应该重写的目标"。
-$prevSpoof = $previousSpoofName
-if ($prevSpoof -and $prevSpoof.Trim()) {
-    $fakeNeedles = $fakeNeedles + '|' + [regex]::Escape($prevSpoof)
-}
 
 # ---- list ------------------------------------------------------------------
 Write-Host ("Adapters under " + $classRoot + " :") -ForegroundColor Cyan
@@ -226,44 +205,32 @@ if ($ListOnly) {
     exit 0
 }
 
-# ---- pick class subkey(s) --------------------------------------------------
-if ($Subkey) {
-    $p = Join-Path $classRoot $Subkey
-    if (-not (Test-Path $p)) {
-        Write-Host ("ERROR: subkey '" + $Subkey + "' does not exist") -ForegroundColor Red
-        exit 1
-    }
-    $dd = (Get-ItemProperty -Path $p -Name DriverDesc -ErrorAction SilentlyContinue).DriverDesc
-    $targets = @([pscustomobject]@{ Path=$p; Desc=$dd; Sub=$Subkey })
-} else {
-    $targets = Get-ChildItem $classRoot -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
-            $p  = $_.PSPath
-            $dd = (Get-ItemProperty -Path $p -Name DriverDesc -ErrorAction SilentlyContinue).DriverDesc
-            if ($dd -and ($dd -match $fakeNeedles -or $dd -eq $spoofName)) {
-                [pscustomobject]@{ Path=$p; Desc=$dd; Sub=$_.PSChildName }
-            }
-        }
-}
-
-if (-not $targets) {
-    Write-Host "No fake adapter auto-detected. Use one of the subkeys above:" -ForegroundColor Yellow
-    Write-Host "    powershell -ExecutionPolicy Bypass -File .\apply-gpu-spoof.ps1 -Subkey 0001" -ForegroundColor Yellow
-    exit 1
-}
-
 # ---- strict active Enum/Class projection, then pointer commit -------------
 $activeEnumPath = 'HKLM:\SYSTEM\CurrentControlSet\Enum\' + $stagedIdentity.SourceInstanceId
-$activeDriver = [string](Get-ItemPropertyValue -Path $activeEnumPath -Name Driver -ErrorAction Stop)
-$activeDriverMatch = [regex]::Match($activeDriver,
-    '^\{4d36e968-e325-11ce-bfc1-08002be10318\}\\([0-9]{4})$',
-    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-if (-not $activeDriverMatch.Success) { throw ('active Display Driver 绑定非法：' + $activeDriver) }
-$activeSubkey = $activeDriverMatch.Groups[1].Value
-$targets = @($targets | Where-Object { $_.Sub -ceq $activeSubkey })
-if ($targets.Count -ne 1) {
-    throw ('选中的 Class target 不是 SourceInstanceId 唯一绑定子键：' + $activeSubkey)
+$activeDriver = [string](Get-ItemPropertyValue -LiteralPath $activeEnumPath `
+    -Name Driver -ErrorAction Stop)
+$activeSubkey = Resolve-GpuSpoofActiveClassSubkey `
+    -SourceInstanceId ([string]$stagedIdentity.SourceInstanceId) `
+    -DriverBinding $activeDriver `
+    -StagedClassSubkey ([string]$stagedIdentity.StagedClassSubkey) `
+    -RequestedSubkey $Subkey
+$activeClassPath = Join-Path $classRoot $activeSubkey
+if (-not (Test-Path -LiteralPath $activeClassPath)) {
+    throw ('SourceInstanceId 唯一绑定的 Class target 不存在：' + $activeClassPath)
 }
+$activeService = [string](Get-ItemPropertyValue -LiteralPath $activeEnumPath `
+    -Name Service -ErrorAction Stop)
+$activeInfPath = [string](Get-ItemPropertyValue -LiteralPath $activeClassPath `
+    -Name InfPath -ErrorAction Stop)
+$activeInfSection = [string](Get-ItemPropertyValue -LiteralPath $activeClassPath `
+    -Name InfSection -ErrorAction Stop)
+Assert-GpuSpoofActiveClassBinding -Service $activeService `
+    -ClassInfPath $activeInfPath -ClassInfSection $activeInfSection `
+    -StagedDriverInfPath ([string]$stagedIdentity.StagedDriverInfPath)
+$activeDescription = [string](Get-ItemPropertyValue -LiteralPath $activeClassPath `
+    -Name DriverDesc -ErrorAction SilentlyContinue)
+Write-Host ("Active Class target: {0} - {1}" -f $activeSubkey,
+    $activeDescription) -ForegroundColor Cyan
 
 # reader 必须先于 CurrentIdentity pointer 发布。coordinator 以 staged identity 的
 # 厂商为唯一目标，在任何 Move 前完成目标 reader 与非目标残留的只读预检，再落
@@ -278,8 +245,12 @@ if (-not [string]::IsNullOrWhiteSpace($gpuApiCoordinatorSource)) {
         '-PayloadDir', $gpuApiPayloadRoot, '-TransactionId', $identityTransactionId,
         '-Vendor', $gpuApiVendor, '-DeferFinalize')
     & $powershellExe @gpuApiInstallArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw ('系统 GPU API 身份投影准备失败，退出码=' + $LASTEXITCODE)
+    $gpuApiInstallCode = [int]$LASTEXITCODE
+    if ($gpuApiInstallCode -eq $gpuApiCleanupDeferredExitCode) {
+        exit $gpuApiCleanupDeferredExitCode
+    }
+    if ($gpuApiInstallCode -ne 0) {
+        throw ('系统 GPU API 身份投影准备失败，退出码=' + $gpuApiInstallCode)
     }
     $gpuApiTransactionPrepared = $true
     Write-Host ('  -> ' + $gpuApiVendor +
@@ -314,7 +285,7 @@ $freqLog = [string]$taskSetup.FrequencyLog
 Invoke-GpuSpoofPnpRefresh
 
 # 最后一次 PnP scan 可能回填 Class 安装状态，因此用同一个已提交
-# CurrentIdentity 快照同步恢复 stock MatchingDeviceId 与名称镜像。
+# CurrentIdentity 快照同步恢复 stock MatchingDeviceId 与 schema-5 名称/厂商镜像。
 # 这一步不修改 Enum\PCI HardwareID/CompatibleIDs，也不改 PCI 配置空间。
 Write-Host "Reapplying profile-derived shallow Class identity after the final device scan..." -ForegroundColor Cyan
 try {
@@ -374,7 +345,7 @@ try {
         # pointer→DLL rollback；Completed 才允许清理 Pending 并保留新 reader。
         $completeInspection = & $identityHelperSource -InspectIdentity $identityTransactionId
     } catch {
-        # 无法裁决时绝不能先删 reader receipt/backup。保留兼容 schema-1/2 的新
+        # 无法裁决时绝不能先删 reader receipt/backup。保留兼容 schema-1/2/3 的新
         # readers 与 durable journals，让下次启动先恢复 identity、再按 pointer 恢复。
         $identityCompletionUnresolved = $true
         throw ('CompleteIdentity 失败且 durable 裁决失败：' + $completeError.Message +
@@ -412,8 +383,13 @@ if ($gpuApiTransactionPrepared) {
         'Bypass', '-File', $gpuApiCoordinatorSource, '-Action', 'Finalize',
         '-TransactionId', $identityTransactionId, '-Vendor', $gpuApiVendor)
     & $powershellExe @gpuApiFinalizeArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw ('系统 GPU API 身份投影 Finalize 失败，退出码=' + $LASTEXITCODE)
+    $gpuApiFinalizeCode = [int]$LASTEXITCODE
+    if ($gpuApiFinalizeCode -eq $gpuApiCleanupDeferredExitCode) {
+        exit $gpuApiCleanupDeferredExitCode
+    }
+    if ($gpuApiFinalizeCode -ne 0) {
+        throw ('系统 GPU API 身份投影 Finalize 失败，退出码=' +
+            $gpuApiFinalizeCode)
     }
     $gpuApiTransactionPrepared = $false
     Write-Host ('  -> ' + $gpuApiVendor +
@@ -439,8 +415,8 @@ Write-Host "is the specific field under investigation, inspect host-fix-gpu-devp
         $rollbackErrors = New-Object Collections.Generic.List[string]
         $identityRollbackResolution = $null
         try {
-            # 顺序不可交换：新 reader 严格兼容 schema-1/2，先把 pointer 恢复旧版；
-            # 历史 old reader 未必认识 schema-2，只能在 pointer 已旧后再恢复 DLL。
+            # 顺序不可交换：新 reader 严格兼容 transaction schema-1/2/3，先把 pointer
+            # 恢复旧版；历史 old reader 未必认识新 journal，只能在 pointer 已旧后恢复 DLL。
             $identityRollbackResolution = & $identityHelperSource `
                 -RollbackIdentity $identityTransactionId
         } catch {

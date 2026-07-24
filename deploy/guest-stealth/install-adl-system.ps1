@@ -1,5 +1,4 @@
 ﻿#Requires -Version 5.1
-
 <#
 .SYNOPSIS
   原子发布或移除 Windows 双架构系统目录中的独立 AMD ADL 身份读取层。
@@ -15,7 +14,6 @@
   目标只允许不存在、当前固定摘要或明确登记的历史项目摘要。真实 AMD 驱动和任何未知
   DLL 都会 fail-closed；脚本不修改目标 ACL、owner、驱动或签名策略。
 #>
-
 [CmdletBinding()]
 param(
     [string]$PayloadDir = '',
@@ -26,26 +24,27 @@ param(
     [string]$DesiredState = 'Present',
     [switch]$DeferFinalize
 )
-
 $ErrorActionPreference = 'Stop'
 $DesiredState = if ($DesiredState -eq 'Absent') { 'Absent' } else { 'Present' }
 # 当前构建的固定摘要；历史列表只含本项目已发布的独立 ADL 读取层，不能放行第三方 DLL。
-$ExpectedX86Hash = 'b45384a1a4568bf6c75f131ae1fd206a8844e810ffc70253003c4503fb0771e2'
-$ExpectedX64Hash = 'aff2783d5e32528c6e919d947aff097d12acadfe7e4ce5a74896dcfae11b3128'
+$ExpectedX86Hash = 'a191793f69ffac0f6350f8760cf21cfbfb07debfc40f7e6af41c9d7161aa3ff4'
+$ExpectedX64Hash = '71628c178d1fe8d093f9eff06e1c8f5df439af69bfb2f318c7631f4f4c7a8661'
 $HistoricalX86Hashes = @(
     'baacab32f579313757ef29ec00b80002ef824846f8ea80128a6ea0c2f0cdab90', '86aca99433da976135f68b4b2904c04eaee370d97104b5a1622ad59f8731b1dd', 'fff0f0bbf7c40096ef0b618b87cfc420cf67a02f194a05501c3ab38725faa3d8',
-    '154f8b6b55e8921cdd63d92d3281d686f7b8facdf3afd99f308fa01b1cf8cb07'
+    '154f8b6b55e8921cdd63d92d3281d686f7b8facdf3afd99f308fa01b1cf8cb07', 'b45384a1a4568bf6c75f131ae1fd206a8844e810ffc70253003c4503fb0771e2', '75d965f31b717030fc1093b701002e2b4951e3876a2a5e3168d4b85d61e5f8de',
+    '50f4bfa5b3db9bb4348eab6cb985f8e8b4d576b6102888708cd1611cc18570dc',
+    'dff9a3ea58a19dda2e253295a4f216586009deda923618ef72569d73500aed54', '0366737e8f2ec67dccf496b86ceeceaee931e1c700f59b83f8d10b14d471c0c4'
 )
 $HistoricalX64Hashes = @(
     'b44b814dcc4dfa411b7a4e4e5fe38248e319cbbcc9143e5bf525b84313ddfd68', '99b7e84b404bfa5140218549b4a49d68ebdfddb181ad9fdd72dcac296d799a62', '1f75802585a9fb86f38aaec3099130d29386fba9f77badf4c2e683321de68f86',
-    '6c24ff0730d775b29e2d282a1ab818e7243a723881441b28d40b8ac690c71757'
+    '6c24ff0730d775b29e2d282a1ab818e7243a723881441b28d40b8ac690c71757', 'aff2783d5e32528c6e919d947aff097d12acadfe7e4ce5a74896dcfae11b3128', 'c96ea150b104e6c93b5ac94e9479c93b91c8c969fe3bf58dda163b295a6d023b',
+    'a95ba64d916259be9294389b8b27fcd300f1bd93c44c280e9277999fbbb265de',
+    '18b3234e049ade36bcdbfd19f7152f6ac722d78407d7cb1af51ce69fd1b0b72d', '16176f762e068ea4dac02233b95953dad2c72e210a8821edcd4436b79b15d954'
 )
 function Get-LowerSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
-
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
-
 function Assert-PlainFile {
     param([Parameter(Mandatory = $true)][string]$Path)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -55,7 +54,6 @@ function Assert-PlainFile {
     }
     return $item
 }
-
 function Assert-PlainDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -64,7 +62,6 @@ function Assert-PlainDirectory {
         throw ('拒绝非普通目录或重解析点：' + $Path)
     }
 }
-
 function Initialize-PlainDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -72,7 +69,6 @@ function Initialize-PlainDirectory {
     }
     Assert-PlainDirectory -Path $Path
 }
-
 function Get-PeMetadata {
     # 仅解析固定 PE 头，不加载或执行待发布 DLL。
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -425,7 +421,7 @@ try {
 } catch {
     throw ('另一个 ADL 系统投影事务正在运行：' + $_.Exception.Message)
 }
-
+$cleanupDeferredExit = $false
 try {
     if ($Action -eq 'Recover' -or $Action -eq 'Install') {
         Resolve-PendingAdlReceipts $entries $receiptRoot (Get-CurrentGpuIdentityToken)
@@ -495,6 +491,10 @@ try {
             }
         }
     }
-} finally {
-    $projectionLock.Dispose()
-}
+} catch {
+    if (-not (Test-AdlCleanupDeferredError $_)) { throw }
+    Write-Warning ($_.Exception.Message +
+        '；durable receipt 已保留，重启后必须先执行 Recover。')
+    $cleanupDeferredExit = $true
+} finally { $projectionLock.Dispose() }
+if ($cleanupDeferredExit) { exit 12 }

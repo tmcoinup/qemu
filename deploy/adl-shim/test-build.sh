@@ -152,6 +152,19 @@ carrier_contract_test="$tmp_dir/adl-carrier-contract-test"
         ../gpu-api-common/test-carrier-validation.c \
         ../gpu-api-common/carrier_validation_contract.c
 "$carrier_contract_test"
+model_catalog_test="$tmp_dir/gpu-model-catalog-test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -Wformat=2 \
+    -I../gpu-api-common -o "$model_catalog_test" \
+        ../gpu-api-common/test-gpu-model-catalog.c \
+        ../gpu-api-common/gpu_model_catalog.c \
+        ../gpu-api-common/aib_identity_catalog.c
+"$model_catalog_test"
+adapter_info_test="$tmp_dir/adl-adapter-info-test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -Wformat=2 \
+    -ffunction-sections -Wl,--gc-sections -I../gpu-api-common \
+    -o "$adapter_info_test" test-adapter-info.c adl_core.c \
+        ../gpu-api-common/gpu_model_catalog.c
+"$adapter_info_test"
 
 # 与 AMD 官方 public headers 对应的 bootstrap/core 函数指针 ABI 断言。
 for compiler in i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc; do
@@ -235,6 +248,14 @@ for field in carrier.instance_id carrier.hardware_id \
     grep -F "$field" adl_core.c >/dev/null \
         || fail "ADL AdapterInfo 未传递已验证的真实 $field"
 done
+adapter_info_body="$(sed -n \
+    '/int adl_core_build_adapter_info(/,/^}/p' adl_core.c)"
+grep -F 'stealth_gpu_standard_model_name(' <<<"$adapter_info_body" >/dev/null \
+    || fail "ADL AdapterInfo 没有从已验证 PCI 主 ID 投影标准型号名"
+if grep -F 'copy_string(info->strAdapterName' -A 1 \
+        <<<"$adapter_info_body" | grep -F 'identity->name' >/dev/null; then
+    fail "ADL AdapterInfo 仍直接泄漏完整 AIB 标签"
+fi
 
 grep -F 'input->pci_vendor_id != AMD_PCI_VENDOR_ID' \
     adl_identity_contract.c >/dev/null \

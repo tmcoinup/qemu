@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "carrier_validation.h"
@@ -100,18 +101,34 @@ static int source_is_virtio_gpu(const char *source, size_t hardware_length)
         ascii_equals_length(source, prefix, sizeof(prefix) - 1u);
 }
 
-/* fake-first HardwareID 是预期行为；这里只要求物理原条目仍存在于 MULTI_SZ。 */
-static const char *multisz_find_hardware_id(const char *values, size_t bytes,
-                                            const char *expected,
-                                            size_t expected_length)
+static int hardware_id_is_virtio_gpu(const char *value, size_t length)
+{
+    static const char prefix[] = "PCI\\VEN_1AF4&DEV_1050";
+    const size_t prefix_length = sizeof(prefix) - 1u;
+
+    return length >= prefix_length &&
+        ascii_equals_length(value, prefix, prefix_length) &&
+        (length == prefix_length || value[prefix_length] == '&');
+}
+
+/*
+ * 合法终态只有两种：
+ *   1. 驱动/PnP 操作窗口中的全物理 1AF4:1050 数组；
+ *   2. 与当前不可变 identity 精确一致的唯一逻辑首项，后接完整物理数组。
+ * 任意逻辑-only、逻辑项不在首位、第二个逻辑项或第三方前缀都 fail-closed。
+ */
+static const char *multisz_find_physical_hardware_id(
+    const char *values, size_t bytes, const char *expected_logical)
 {
     size_t offset = 0u;
+    size_t item_index = 0u;
+    size_t logical_length;
     const char *found = NULL;
 
-    if (values == NULL || expected == NULL || expected_length == 0u ||
-        bytes < 2u) {
+    if (values == NULL || expected_logical == NULL || bytes < 2u) {
         return NULL;
     }
+    logical_length = strlen(expected_logical);
     while (offset < bytes) {
         size_t length = 0u;
 
@@ -125,13 +142,46 @@ static const char *multisz_find_hardware_id(const char *values, size_t bytes,
             /* 只有结尾的第二个 NUL 合法，提前空项或尾随垃圾都拒绝。 */
             return offset + 1u == bytes ? found : NULL;
         }
-        if (length == expected_length &&
-            ascii_equals_length(values + offset, expected, expected_length)) {
+        if (item_index == 0u && length == logical_length &&
+            ascii_equals_length(values + offset, expected_logical,
+                                logical_length)) {
+            /* 精确逻辑首项必须由后续至少一个物理匹配项承载。 */
+        } else if (!hardware_id_is_virtio_gpu(values + offset, length)) {
+            return NULL;
+        } else if (found == NULL) {
             found = values + offset;
         }
         offset += length + 1u;
+        ++item_index;
     }
     return NULL;
+}
+
+static int build_expected_logical_hardware_id(
+    const struct stealth_gpu_logical_pci_identity *identity,
+    char *output, size_t capacity)
+{
+    int written;
+
+    if (identity == NULL || output == NULL ||
+        identity->vendor_id == 0u || identity->vendor_id > UINT32_C(0xffff) ||
+        identity->device_id == 0u || identity->device_id > UINT32_C(0xffff) ||
+        identity->subsystem_vendor_id == 0u ||
+        identity->subsystem_vendor_id > UINT32_C(0xffff) ||
+        identity->subsystem_device_id > UINT32_C(0xffff) ||
+        identity->revision_id > UINT32_C(0xff) ||
+        (identity->vendor_id == VIRTIO_GPU_VENDOR_ID &&
+         identity->device_id == VIRTIO_GPU_DEVICE_ID)) {
+        return 0;
+    }
+    written = snprintf(output, capacity,
+                       "PCI\\VEN_%04X&DEV_%04X&SUBSYS_%04X%04X&REV_%02X",
+                       (unsigned int)identity->vendor_id,
+                       (unsigned int)identity->device_id,
+                       (unsigned int)identity->subsystem_device_id,
+                       (unsigned int)identity->subsystem_vendor_id,
+                       (unsigned int)identity->revision_id);
+    return written > 0 && (size_t)written < capacity;
 }
 
 /* SPDRP_DRIVER 在 Display class 中必须指向实际的 {GUID}\\NNNN 子键。 */
@@ -157,14 +207,18 @@ static int driver_key_is_display_class(const char *driver_key)
 int stealth_validate_virtio_gpu_carrier_observation(
     const char *expected_source_instance_id, uint32_t expected_bus_id,
     uint32_t expected_slot_id, uint32_t expected_function_id,
+    const struct stealth_gpu_logical_pci_identity *logical_identity,
     const struct stealth_gpu_carrier_observation *observation,
     struct stealth_gpu_carrier *carrier)
 {
     struct stealth_gpu_carrier candidate;
+    char expected_logical[64];
     size_t hardware_length;
     const char *actual_hardware_id;
 
     if (observation == NULL || carrier == NULL ||
+        !build_expected_logical_hardware_id(
+            logical_identity, expected_logical, sizeof(expected_logical)) ||
         expected_bus_id > UINT32_C(0xff) ||
         expected_slot_id > UINT32_C(0x1f) || expected_function_id > 7u ||
         observation->matching_source_count != 1u ||
@@ -173,9 +227,9 @@ int stealth_validate_virtio_gpu_carrier_observation(
         return 0;
     }
     hardware_length = source_hardware_id_length(expected_source_instance_id);
-    actual_hardware_id = multisz_find_hardware_id(
+    actual_hardware_id = multisz_find_physical_hardware_id(
         observation->hardware_ids, observation->hardware_ids_bytes,
-        expected_source_instance_id, hardware_length);
+        expected_logical);
     if (!source_is_virtio_gpu(expected_source_instance_id, hardware_length) ||
         actual_hardware_id == NULL ||
         !ascii_equals(observation->service, "VioGpuDod") ||

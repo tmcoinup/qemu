@@ -13,6 +13,7 @@ APPLY_SUPPORT="$REPO_ROOT/deploy/scripts/gpu-spoof-apply-support.ps1"
 REFRESH_SCRIPT="$REPO_ROOT/deploy/scripts/refresh-gpu-name.ps1"
 MODE_SCRIPT="$REPO_ROOT/deploy/scripts/force-displayfreq.ps1"
 RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
+RESTART_HELPER="$REPO_ROOT/deploy/guest-stealth/respawn-restart-state.ps1"
 TMP_DIR="$(mktemp -d)"
 FAKE_RUNNER="$TMP_DIR/run-with-fake-display.ps1"
 
@@ -270,6 +271,131 @@ grep -F 'Restart-RespawnForPendingWork -PendingExitCode 11' "$RESPAWN" >/dev/nul
     || fail "外层没有把显示重启码 11 接入统一二阶段流程"
 grep -F -- '-RegistrationFailureCode 33 -ShutdownFailureCode 34' "$RESPAWN" >/dev/null \
     || fail "显示二阶段注册/重启失败码契约不完整"
+
+# GPU API 目标已经提交但旧映射文件仍被占用时，必须只跨一次启动边界；恢复阶段
+# 再次返回 12 时移除任务并保留 journal，禁止永久 ACL 问题制造重启循环。
+cleanup_route_line="$(rg -n -F 'Resolve-RespawnGpuApiCleanupDeferred -ExitCode $rc' \
+    "$RESPAWN" | cut -d: -f1)"
+generic_failure_line="$(rg -n -F 'if ($rc -ne 0)' "$RESPAWN" | cut -d: -f1)"
+[[ -n "$cleanup_route_line" && -n "$generic_failure_line" && \
+    "$cleanup_route_line" -lt "$generic_failure_line" ]] \
+    || fail "GPU API cleanup deferred 没有在通用失败分支前路由"
+
+# 文件事务成功后必须真实加载两个系统位数的 NVAPI 并执行最小枚举链；探针失败
+# 要在任何自动重启之前停止，原始状态追加到同一个 respawn.log。
+for probe_name in nvapi-runtime-probe-x86.exe nvapi-runtime-probe-x64.exe; do
+    rg -F "'$probe_name'" "$RESPAWN" >/dev/null \
+        || fail "respawn 缺少 runtime probe：$probe_name"
+done
+grep -F 'Invoke-NvapiRuntimeProbes -LogPath $LogPath' "$RESTART_HELPER" \
+        >/dev/null \
+    || fail "最终投影编排没有在 fake-first 状态调用 NVAPI runtime probe"
+finalize_call_line="$(rg -n -F 'Invoke-GpuProjectionFinalization -Projector' \
+    "$RESPAWN" | cut -d: -f1)"
+[[ -n "$finalize_call_line" &&
+    "$generic_failure_line" -lt "$finalize_call_line" ]] \
+    || fail "NVAPI runtime probe 编排没有位于成功 GPU API Finalize 之后"
+grep -F 'Tee-Object -FilePath $LogPath -Append' "$RESPAWN" >/dev/null \
+    || fail "NVAPI runtime probe 原始状态没有追加到 respawn.log"
+grep -F 'exit 44' "$RESPAWN" >/dev/null \
+    || fail "NVAPI runtime probe 失败没有独立退出码"
+
+# 任意 pending helper 在 ResumeAfterReboot 阶段都必须先删除当前任务并返回，
+# Register/Shutdown 只能位于该分支之后，保证一次 EXE 最多自动重启一次。
+restart_body="$(sed -n \
+    '/function Restart-RespawnForPendingWork {/,/^}/p' "$RESTART_HELPER")"
+for once_only_contract in 'if ($ResumeAfterReboot)' \
+        'Remove-RespawnResumeTask -CurrentInstance' \
+        'exit $PendingExitCode'; do
+    grep -F "$once_only_contract" <<<"$restart_body" >/dev/null \
+        || fail "统一 pending helper 缺少单次自动重启门禁：$once_only_contract"
+done
+resume_guard_offset="$(grep -n -F 'if ($ResumeAfterReboot)' \
+    <<<"$restart_body" | cut -d: -f1)"
+register_offset="$(grep -n -F 'Register-RespawnResumeTask' \
+    <<<"$restart_body" | cut -d: -f1)"
+[[ "$resume_guard_offset" -lt "$register_offset" ]] \
+    || fail "恢复阶段可能在单次重启门禁前重新注册任务"
+
+for cleanup_contract in \
+        'function Resolve-RespawnGpuApiCleanupDeferred' \
+        'if ($ResumeAfterReboot)' \
+        'Remove-RespawnResumeTask -CurrentInstance' \
+        'Restart-RespawnForPendingWork -PendingExitCode 12' \
+        'exit 12'; do
+    rg -F "$cleanup_contract" "$RESTART_HELPER" >/dev/null \
+        || fail "GPU API cleanup deferred 缺少单次重启契约：$cleanup_contract"
+done
+[[ "$(wc -l <"$RESPAWN")" -le 500 ]] \
+    || fail "respawn-stealth-local.ps1 物理行数超过 500"
+
+# Full 恢复任务已经跨过一次启动边界。完成 helper 必须位于常规最终重启之前，
+# 并在成功或 chipset pending 分支直接退出。
+resume_success_line="$(rg -n -F 'Complete-RespawnResumeStage' "$RESPAWN" |
+    tail -n 1 | cut -d: -f1)"
+no_reboot_line="$(rg -n -F 'if ($NoReboot) {' "$RESPAWN" |
+    tail -n 1 | cut -d: -f1)"
+final_shutdown_line="$(rg -n -F \
+    'Invoke-RespawnShutdown -ShutdownPath $shutdownExe -DelaySeconds' \
+    "$RESPAWN" | tail -n 1 | cut -d: -f1)"
+[[ -n "$resume_success_line" && -n "$no_reboot_line" &&
+    -n "$final_shutdown_line" &&
+    "$resume_success_line" -lt "$no_reboot_line" &&
+    "$no_reboot_line" -lt "$final_shutdown_line" ]] \
+    || fail "无法定位 Full 恢复完成 helper 与最终重启的控制流边界"
+completion_body="$(sed -n '/^function Complete-RespawnResumeStage {/,/^}/p' \
+    "$RESTART_HELPER")"
+grep -F 'exit 0' <<<"$completion_body" >/dev/null \
+    || fail "Full 恢复成功后没有直接退出"
+grep -F 'exit 30' <<<"$completion_body" >/dev/null \
+    || fail "Full 恢复的 chipset pending 没有直接返回"
+
+RESTART_HELPER="$RESTART_HELPER" pwsh -NoLogo -NoProfile -NonInteractive -Command '
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile(
+    $env:RESTART_HELPER,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw "restart helper AST parse failed"}
+$functionAst=$ast.Find({param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -ceq "Resolve-RespawnGpuApiCleanupDeferred"
+},$true)
+if($null -eq $functionAst){throw "缺少 cleanup deferred router"}
+# 把语言级 exit 仅在测试副本中改为可捕获 sentinel，生产源码仍由上面的静态门禁
+# 确认保留真实退出码；这样可纯内存验证两个分支且不启动 Windows 重启。
+$body=$functionAst.Extent.Text.Replace(
+    "exit 12","throw `"ProbeExit12`"").Replace(
+    "exit 62","throw `"ProbeExit62`"")
+. ([scriptblock]::Create($body))
+$script:restartCalls=0; $script:removeCalls=0
+function Restart-RespawnForPendingWork {
+    param($PendingExitCode,$Reason,$ShutdownComment,$RegistrationFailureCode,
+        $ShutdownFailureCode,$MainScriptPath)
+    $script:restartCalls++
+    if($PendingExitCode -ne 12){throw "错误 pending code"}
+    throw "ProbeRestart"
+}
+function Remove-RespawnResumeTask { param([switch]$CurrentInstance)
+    if(-not $CurrentInstance){throw "未按 CurrentInstance 删除"}
+    $script:removeCalls++
+}
+$ResumeAfterReboot=$false
+Resolve-RespawnGpuApiCleanupDeferred -ExitCode 0 -MainScriptPath "main.ps1"
+if($script:restartCalls -ne 0 -or $script:removeCalls -ne 0){
+    throw "普通退出码错误进入 cleanup deferred"
+}
+$probe=""
+try {
+    Resolve-RespawnGpuApiCleanupDeferred -ExitCode 12 -MainScriptPath "main.ps1"
+} catch { $probe=$_.Exception.Message }
+if($probe -cne "ProbeRestart" -or $script:restartCalls -ne 1 -or
+    $script:removeCalls -ne 0){throw "首次 deferred 没有且仅安排一次重启"}
+$ResumeAfterReboot=$true; $probe=""
+try {
+    Resolve-RespawnGpuApiCleanupDeferred -ExitCode 12 -MainScriptPath "main.ps1"
+} catch { $probe=$_.Exception.Message }
+if($probe -cne "ProbeExit12" -or $script:restartCalls -ne 1 -or
+    $script:removeCalls -ne 1){throw "重启后 deferred 形成了再次重启循环"}
+' >/dev/null || fail "GPU API CleanupDeferred 单次重启路由运行时测试失败"
 
 # 旧 HTTP/SSH 入口已经退役。它们必须只给出迁移诊断，不能继续下载松散 helper、
 # 修改 guest 或提供一个与统一 EXE 不同的第二套执行路径。

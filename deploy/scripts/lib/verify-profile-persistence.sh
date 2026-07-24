@@ -11,6 +11,19 @@ verify_profile_persistence() (
     local legacy_serial_1 legacy_serial_2
 
     source "$script_dir/stealth-lib.sh"
+
+    load_profile_mem_serial() (
+        local load_path="$1" allow_legacy="$2" field
+
+        # 每次都模拟独立进程，避免上一次 profile 的全局变量掩盖输入缺失。
+        for field in "${_STEALTH_PROFILE_VARS[@]}"; do
+            unset "$field"
+        done
+        export ALLOW_LEGACY_PROFILE="$allow_legacy"
+        stealth_load_profile "$load_path"
+        printf '%s\n' "$MEM_SERIAL"
+    )
+
     # 本项只验证 profile 序列化，固定已审计平台并显式加载目录预检替身，
     # 不让构建机的 /dev/kvm、CPU 型号、调用方环境或随机选择影响结果。
     source "$script_dir/tests/fixtures/catalog-cpu-preflight-stub.sh"
@@ -34,8 +47,8 @@ verify_profile_persistence() (
 
     serial_in_file="$(grep '^MEM_SERIAL=' "$profile_file" | cut -d= -f2 | tr -d "'\"")"
     echo "  写入 profile 文件   = $serial_in_file"
-    serial_load_1="$(unset MEM_SERIAL; stealth_load_profile "$profile_file" && echo "$MEM_SERIAL")"
-    serial_load_2="$(unset MEM_SERIAL; stealth_load_profile "$profile_file" && echo "$MEM_SERIAL")"
+    serial_load_1="$(load_profile_mem_serial "$profile_file" 0)"
+    serial_load_2="$(load_profile_mem_serial "$profile_file" 0)"
     echo "  load 第 1 次        = $serial_load_1"
     echo "  load 第 2 次        = $serial_load_2"
     if [[ "$serial_in_file" != "$serial_load_1" ||
@@ -52,10 +65,14 @@ verify_profile_persistence() (
     fi
     echo "  ✓ DIMM_A2/B2 序列号独立: $serial_in_file / $second_slot_serial"
 
-    grep -v '^MEM_SERIAL=' "$profile_file" >"$legacy_profile_file"
+    # 当前 schema-1 profile 缺身份字段必须拒绝；这里移除整套 schema 元数据，
+    # 构造真正受 ALLOW_LEGACY_PROFILE 管控的 schema-0 历史输入来验证稳定回填。
+    sed -E \
+        '/^(MEM_SERIAL|PLATFORM_SCHEMA_VERSION|PLATFORM_CATALOG_REVISION|PLATFORM_ID|PLATFORM_STATUS|PLATFORM_RELEASE_YEAR)=/d' \
+        "$profile_file" >"$legacy_profile_file"
     chmod 600 "$legacy_profile_file"
-    legacy_serial_1="$(unset MEM_SERIAL; stealth_load_profile "$legacy_profile_file" && echo "$MEM_SERIAL")"
-    legacy_serial_2="$(unset MEM_SERIAL; stealth_load_profile "$legacy_profile_file" && echo "$MEM_SERIAL")"
+    legacy_serial_1="$(load_profile_mem_serial "$legacy_profile_file" 1)"
+    legacy_serial_2="$(load_profile_mem_serial "$legacy_profile_file" 1)"
     if [[ -z "$legacy_serial_1" || "$legacy_serial_1" != "$legacy_serial_2" ]]; then
         echo "FAIL: 老 profile fallback 不稳定 ($legacy_serial_1 vs $legacy_serial_2)"
         return 1

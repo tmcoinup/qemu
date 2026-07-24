@@ -26,5 +26,7 @@ NvAPI_Status __cdecl nvapi_get_physical_gpus_from_logical_gpu(
     NvPhysicalGpuHandle physical[NVAPI_MAX_PHYSICAL_GPUS], NvU32 *count);
 NvAPI_Status __cdecl nvapi_gpu_get_connected_outputs(
     NvPhysicalGpuHandle handle, NvU32 *outputs_mask);
+NvAPI_Status __cdecl nvapi_gpu_get_output_type(
+    NvPhysicalGpuHandle handle, NvU32 output_id, NvU32 *output_type);
 
 #endif

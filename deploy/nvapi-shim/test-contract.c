@@ -204,7 +204,7 @@ int main(void)
         carrier_subsystem_id != UINT32_C(0x1c8210de) ||
         carrier_revision_id != 0xa1u ||
         carrier_external_device_id != 0x1c82u) {
-        fprintf(stderr, "NVAPI 枚举键没有与唯一 virtio 承载设备保持一致\n");
+        fprintf(stderr, "NVAPI 枚举键没有与唯一 virtio carrier 归并\n");
         valid = 0;
     }
     contract = valid_identity_contract();

@@ -41,6 +41,12 @@ check_dll() {
         || fail "$dll 未导入 Configuration Manager 的实际 BDF 读取"
     grep -F 'DLL Name: libwinpthread-1.dll' <<<"$exports" >/dev/null \
         && fail "$dll 不应依赖额外的 MinGW pthread 运行库"
+    [[ "$(LC_ALL=C grep -aob $'\xb1\xae\x3b\xc3' "$dll" | wc -l)" -eq 1 ]] \
+        || fail "$dll 未精确包含 GetGPUType QueryInterface ID"
+    [[ "$(LC_ALL=C grep -aob $'\x68\xb3\xf9\x07' "$dll" | wc -l)" -eq 1 ]] \
+        || fail "$dll 未精确包含 GetMemoryInfo QueryInterface ID"
+    [[ "$(LC_ALL=C grep -aob $'\x98\x94\x59\xc0' "$dll" | wc -l)" -eq 1 ]] \
+        || fail "$dll 未精确包含 GetMemoryInfoEx QueryInterface ID"
 
     # 两个位数必须包含完全相同的配置契约，防止其中一个仍使用硬编码身份。
     for value_name in CurrentIdentity IdentitySchemaVersion IdentityId \
@@ -50,7 +56,7 @@ check_dll() {
         SpoofPciSlotId SpoofPciFunctionId SpoofRamMb SpoofMemoryType \
         SpoofMemoryBusWidthBits SpoofBaseClockKHz SpoofBoostClockKHz \
         SpoofMemoryClockKHz SpoofSliSupported; do
-        strings -a "$dll" | grep -Fx "$value_name" >/dev/null \
+        LC_ALL=C grep -aF "$value_name" "$dll" >/dev/null \
             || fail "$dll 缺少注册表值 $value_name"
     done
 }
@@ -62,20 +68,43 @@ check_dll nvapi64.dll x86_64-w64-mingw32-objdump pei-x86-64
 contract_test="$(mktemp --tmpdir nvapi-contract-test.XXXXXX)"
 aib_contract_test="$(mktemp --tmpdir nvapi-aib-contract-test.XXXXXX)"
 carrier_contract_test="$(mktemp --tmpdir nvapi-carrier-contract-test.XXXXXX)"
-trap 'rm -f "$contract_test" "$aib_contract_test" "$carrier_contract_test"' EXIT
+model_catalog_test="$(mktemp --tmpdir gpu-model-catalog-test.XXXXXX)"
+gpu_name_test="$(mktemp --tmpdir nvapi-gpu-name-test.XXXXXX)"
+driver_version_test="$(mktemp --tmpdir nvapi-driver-version-test.XXXXXX)"
+gpu_type_test="$(mktemp --tmpdir nvapi-gpu-type-test.XXXXXX)"
+memory_test="$(mktemp --tmpdir nvapi-memory-test.XXXXXX)"
+trap 'rm -f "$contract_test" "$aib_contract_test" "$carrier_contract_test" "$model_catalog_test" "$gpu_name_test" "$driver_version_test" "$gpu_type_test" "$memory_test"' EXIT
 "${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -I../gpu-api-common \
     -o "$contract_test" test-contract.c nvapi_pci.c nvapi_gpu_specs.c \
         nvapi_gpu_legacy_clocks_fill.c nvapi_gpu_pstates_fill.c \
         nvapi_identity_contract.c ../gpu-api-common/aib_identity_catalog.c
 "$contract_test"
 "${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -I../gpu-api-common \
-    -o "$aib_contract_test" test-aib-carrier.c nvapi_gpu_specs.c \
+    -o "$aib_contract_test" test-aib-carrier.c nvapi_pci.c nvapi_gpu_specs.c \
         nvapi_identity_contract.c ../gpu-api-common/aib_identity_catalog.c
 "$aib_contract_test"
 "${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -I../gpu-api-common \
     -o "$carrier_contract_test" ../gpu-api-common/test-carrier-validation.c \
         ../gpu-api-common/carrier_validation_contract.c
 "$carrier_contract_test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -I../gpu-api-common \
+    -o "$model_catalog_test" ../gpu-api-common/test-gpu-model-catalog.c \
+        ../gpu-api-common/gpu_model_catalog.c \
+        ../gpu-api-common/aib_identity_catalog.c
+"$model_catalog_test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -I../gpu-api-common \
+    -o "$gpu_name_test" test-gpu-name.c nvapi_gpu_name.c \
+        ../gpu-api-common/gpu_model_catalog.c
+"$gpu_name_test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+    -o "$driver_version_test" test-driver-version.c nvapi_driver_version.c
+"$driver_version_test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+    -o "$gpu_type_test" test-gpu-type.c nvapi_gpu_type.c
+"$gpu_type_test"
+"${HOST_CC:-cc}" -std=c11 -Wall -Wextra -Werror -D__cdecl= \
+    -o "$memory_test" test-memory.c nvapi_memory.c
+"$memory_test"
 
 # 锁定跨位数注册表视图、一次性初始化和原子引用计数三个并发契约。
 grep -F 'KEY_WOW64_64KEY' nvapi_identity.c >/dev/null \
@@ -112,6 +141,12 @@ for contract in SetupDiGetClassDevsA SetupDiEnumDeviceInfo \
     grep -F "$contract" ../gpu-api-common/carrier_validation_win.c >/dev/null \
         || fail "实际 carrier 验证缺少标准 Windows 契约: $contract"
 done
+grep -F 'char matched_instance_id[STEALTH_GPU_CARRIER_INSTANCE_CAPACITY];' \
+    ../gpu-api-common/carrier_validation_win.c >/dev/null \
+    || fail "Windows carrier 枚举没有为命中 InstanceId 保留独立快照"
+grep -F 'observation.instance_id = matched_instance_id;' \
+    ../gpu-api-common/carrier_validation_win.c >/dev/null \
+    || fail "Windows carrier observation 仍指向循环复用的 InstanceId 缓冲"
 grep -F 'VioGpuDod' ../gpu-api-common/carrier_validation_contract.c >/dev/null \
     || fail "实际 carrier 验证未限制 stock VioGpuDod 服务"
 
@@ -139,26 +174,60 @@ grep -F 'nvapi_get_legacy_extension_defaults' nvapi_identity.c >/dev/null \
     || fail "schema-1 没有使用受控 PCI 型号默认映射"
 grep -F 'InterlockedCompareExchange' nvapi_shim.c >/dev/null \
     || fail "NVAPI 生命周期不再使用原子引用计数"
+gpu_handle_body="$(sed -n \
+    '/NvAPI_Status nvapi_validate_gpu_handle(/,/^}/p' nvapi_shim.c)"
+grep -F 'if (handle == NULL)' <<<"$gpu_handle_body" >/dev/null &&
+    grep -F 'return NVAPI_INVALID_ARGUMENT;' <<<"$gpu_handle_body" >/dev/null \
+    || fail "NVAPI 空物理句柄没有返回 INVALID_ARGUMENT"
 driver_version_body="$(sed -n '/static NvAPI_Status __cdecl NvAPI_SYS_GetDriverAndBranchVersion(/,/^}/p' nvapi_shim.c)"
-grep -F 'return NVAPI_NOT_SUPPORTED;' <<<"$driver_version_body" >/dev/null \
-    || fail "无真实 NVIDIA driver 时版本查询必须明确返回 NOT_SUPPORTED"
-grep -F '*version = 0u;' <<<"$driver_version_body" >/dev/null \
-    || fail "不支持的 driver 版本查询没有清零版本输出"
-grep -F "branch[0] = '\\0';" <<<"$driver_version_body" >/dev/null \
-    || fail "不支持的 driver 版本查询没有清空 branch 输出"
-if grep -Fq '54633u' <<<"$driver_version_body" ||
-    grep -Fq 'r545_99' <<<"$driver_version_body"; then
-    fail "driver 版本查询仍包含固定伪造版本"
+grep -F 'return nvapi_fill_driver_and_branch_version(version, branch);' \
+    <<<"$driver_version_body" >/dev/null \
+    || fail "DriverAndBranchVersion 没有调用受测的兼容 helper"
+if grep -Fq 'return NVAPI_NOT_SUPPORTED;' <<<"$driver_version_body"; then
+    fail "DriverAndBranchVersion 仍会把 GPU-Z 2.70 导向空回退入口"
 fi
 grep -F '{ UINT32_C(0x2926AAAD), NvAPI_SYS_GetDriverAndBranchVersion }' \
     nvapi_shim.c >/dev/null \
-    || fail "DriverAndBranchVersion QueryInterface ID 没有绑定到明确失败实现"
+    || fail "DriverAndBranchVersion QueryInterface ID 没有绑定到兼容实现"
 grep -F '{ NVAPI_ID_GPU_GET_BUS_TYPE, NvAPI_GPU_GetBusType }' \
     nvapi_shim.c >/dev/null \
     || fail "GetBusType QueryInterface ID 没有绑定到 GetBusType"
 grep -F '{ NVAPI_ID_GPU_GET_BUS_ID, NvAPI_GPU_GetBusId }' \
     nvapi_shim.c >/dev/null \
     || fail "GetBusId QueryInterface ID 没有绑定到 GetBusId"
+gpu_type_body="$(sed -n \
+    '/static NvAPI_Status __cdecl NvAPI_GPU_GetGPUType(/,/^}/p' \
+    nvapi_shim.c)"
+grep -F 'return nvapi_fill_gpu_type(gpu_type);' \
+    <<<"$gpu_type_body" >/dev/null \
+    || fail "GetGPUType 没有调用受测的 DGPU helper"
+grep -F '{ NVAPI_ID_GPU_GET_GPU_TYPE, NvAPI_GPU_GetGPUType }' \
+    nvapi_shim.c >/dev/null \
+    || fail "GetGPUType QueryInterface ID 没有绑定到 DGPU 实现"
+grep -F '{ NVAPI_ID_GPU_GET_MEMORY_INFO, nvapi_gpu_get_memory_info }' \
+    nvapi_shim.c >/dev/null \
+    || fail "legacy MemoryInfo QueryInterface ID 没有绑定"
+grep -F '{ NVAPI_ID_GPU_GET_MEMORY_INFO_EX, nvapi_gpu_get_memory_info_ex }' \
+    nvapi_shim.c >/dev/null \
+    || fail "MemoryInfoEx QueryInterface ID 没有绑定"
+for forbidden_binding in \
+    'NVAPI_ID_ENUM_NVIDIA_DISPLAY_HANDLE' \
+    'NVAPI_ID_PHYSICAL_GPUS_FROM_DISPLAY' \
+    'NVAPI_ID_GET_DISPLAY_DRIVER_VERSION'; do
+    if grep -F "{ $forbidden_binding," nvapi_shim.c >/dev/null; then
+        fail "$forbidden_binding 会让 GPU-Z 进入未闭环的 display 拓扑"
+    fi
+done
+full_name_body="$(sed -n \
+    '/static NvAPI_Status __cdecl NvAPI_GPU_GetFullName(/,/^}/p' \
+    nvapi_shim.c)"
+grep -F 'nvapi_copy_standard_gpu_name(identity, output)' \
+    <<<"$full_name_body" >/dev/null \
+    || fail "GetFullName 没有调用受测的标准型号复制 helper"
+if grep -F 'copy_short_string(output, identity->name)' \
+        <<<"$full_name_body" >/dev/null; then
+    fail "GetFullName 仍直接泄漏完整 AIB 标签"
+fi
 for binding in \
     'NVAPI_ID_GPU_GET_VBIOS_VERSION_STRING' \
     'NVAPI_ID_GPU_GET_RAM_TYPE' \
@@ -192,18 +261,24 @@ fi
 # 代码文件总行数也限制在 500 内；这比“忽略注释后 500 行”的约束更严格。
 for source in nvapi_shim.c nvapi_identity.c nvapi_pci.c nvapi_types.h \
     nvapi_identity.h nvapi_gpu_specs.c nvapi_gpu_specs.h \
+    nvapi_driver_version.c nvapi_driver_version.h test-driver-version.c \
+    nvapi_gpu_name.c nvapi_gpu_name.h nvapi_gpu_type.c nvapi_gpu_type.h \
+    nvapi_memory.c nvapi_memory.h test-memory.c \
     nvapi_gpu_details.c nvapi_gpu_details.h nvapi_gpu_pstates.c \
     nvapi_gpu_legacy_clocks.c nvapi_gpu_legacy_clocks_fill.c \
     nvapi_gpu_legacy_clocks.h nvapi_gpu_pstates_fill.c \
     nvapi_gpu_pstates.h nvapi_shim_internal.h \
     nvapi_identity_contract.c nvapi_identity_contract.h test-contract.c \
-    test-aib-carrier.c; do
+    test-aib-carrier.c test-gpu-name.c test-gpu-type.c; do
     lines="$(wc -l <"$source")"
     [[ "$lines" -le 500 ]] || fail "$source 共 $lines 行，超过 500 行"
 done
 for source in ../gpu-api-common/carrier_validation.h \
     ../gpu-api-common/aib_identity_catalog.h \
     ../gpu-api-common/aib_identity_catalog.c \
+    ../gpu-api-common/gpu_model_catalog.h \
+    ../gpu-api-common/gpu_model_catalog.c \
+    ../gpu-api-common/test-gpu-model-catalog.c \
     ../gpu-api-common/carrier_validation_contract.c \
     ../gpu-api-common/carrier_validation_win.c \
     ../gpu-api-common/test-carrier-validation.c; do

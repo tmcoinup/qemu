@@ -12,6 +12,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Vendor = @{ NVIDIA='NVIDIA'; AMD='AMD'; AUTO='Auto' }[$Vendor.ToUpperInvariant()]
+$GpuApiCleanupDeferredExitCode = 12
 $powershellExe = Join-Path $PSHOME 'powershell.exe'
 $nvapiInstaller = Join-Path $PSScriptRoot 'install-nvapi-system.ps1'
 $adlInstaller = Join-Path $PSScriptRoot 'install-adl-system.ps1'
@@ -21,6 +22,20 @@ function Assert-GpuApiTransactionId {
     if ($Value -cnotmatch '\A[0-9A-F]{32}\z') {
         throw ('GPU API TransactionId 非法：' + $Value)
     }
+}
+function New-GpuApiCleanupDeferredException {
+    param([Parameter(Mandatory = $true)][string]$Message)
+    $exception = [InvalidOperationException]::new($Message)
+    $exception.Data['VmateGpuApiCleanupDeferred'] = $true
+    return $exception
+}
+function Test-GpuApiCleanupDeferredException {
+    param([Parameter(Mandatory = $true)]$Exception)
+    while ($null -ne $Exception) {
+        if ([bool]$Exception.Data['VmateGpuApiCleanupDeferred']) { return $true }
+        $Exception = $Exception.InnerException
+    }
+    return $false
 }
 function Assert-GpuApiPlainFile {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -228,6 +243,11 @@ function Invoke-GpuApiInstaller {
     if ($Deferred) { $arguments += '-DeferFinalize' }
     & $powershellExe @arguments | Out-Host
     $exitCode = [int]$LASTEXITCODE
+    if ($exitCode -eq $GpuApiCleanupDeferredExitCode -and
+        @('Finalize', 'Recover') -ccontains $ChildAction) {
+        throw (New-GpuApiCleanupDeferredException ($Label + ' ' + $ChildAction +
+            ' 的旧 DLL 清理等待重启释放'))
+    }
     if ($exitCode -ne 0) {
         throw ($Label + ' ' + $ChildAction + ' 失败，退出码=' + $exitCode)
     }
@@ -239,6 +259,7 @@ function Invoke-GpuApiSteps {
         [Parameter(Mandatory = $true)][string]$FailurePrefix
     )
     $errors = New-Object Collections.Generic.List[string]
+    $cleanupDeferred = $false
     foreach ($step in $Steps) {
         try {
             Invoke-GpuApiInstaller -Label $step.Label -Script $step.Script `
@@ -247,11 +268,19 @@ function Invoke-GpuApiSteps {
                 -WithPayload:$step.WithPayload `
                 -Deferred:$step.Deferred
         } catch {
-            $errors.Add($_.Exception.Message)
+            if (Test-GpuApiCleanupDeferredException $_.Exception) {
+                $cleanupDeferred = $true
+            } else {
+                $errors.Add($_.Exception.Message)
+            }
         }
     }
     if ($errors.Count -gt 0) {
         throw ($FailurePrefix + '：' + ($errors -join ' | '))
+    }
+    if ($cleanupDeferred) {
+        throw (New-GpuApiCleanupDeferredException ($FailurePrefix +
+            '：旧 DLL 清理等待重启释放'))
     }
 }
 function New-GpuApiVendorPlan {
@@ -448,6 +477,12 @@ try {
         Invoke-GpuApiSteps $steps 'GPU API durable recovery 失败'
         Write-Host 'GPU API 厂商互斥事务 durable recovery completed.' -ForegroundColor Green
     }
+} catch {
+    if (Test-GpuApiCleanupDeferredException $_.Exception) {
+        Write-Warning 'GPU API 目标状态已提交；旧 DLL 清理等待重启后继续。'
+        exit $GpuApiCleanupDeferredExitCode
+    }
+    throw
 } finally {
     $coordinatorLock.Dispose()
 }

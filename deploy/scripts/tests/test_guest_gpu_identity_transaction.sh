@@ -112,14 +112,16 @@ try {
         -BaseKeyOverride $script:fixture.Base | Out-Null
 } catch {
     $schema1CommitRejected = $_.Exception.Message.Contains(
-        "暂存提交只接受 transaction schema-2")
+        "暂存提交只接受 transaction schema-5")
 }
 if (-not $schema1CommitRejected -or
     (Get-FixtureMutationCount $script:fixture) -ne $mutationsBefore) {
     throw "schema-1 Prepared Commit 未在注册表首写前 fail-closed"
 }
 
-# 模拟 pointer 已提交后进程被直接 kill：下次 Recover 必须仅凭持久 receipt 恢复。
+# 新 schema-5 receipt 必须用标准芯片名/厂商做展示字段 CAS，保留 stock
+# MatchingDeviceId，并用 2047 MiB legacy 值表达精确 4 GiB。identity mirror
+# 继续保留完整 AIB 标签。模拟 pointer 已提交后被 kill，并凭持久 receipt 恢复。
 $script:fixture = New-TransactionFixture "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" $true Committed
 function Open-StealthBaseKey { return $script:fixture.Base }
 function Invoke-LegacyGpuTaskBarrier {}
@@ -127,10 +129,114 @@ $receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.Identi
 if ([int]$receipt.PreviousIdentitySchemaVersion -ne 2) {
     throw "schema-2 PreviousIdentity 未走严格原路径"
 }
+if ([string]$receipt.ProjectedEnum.FriendlyName.Value -cne `
+        "NVIDIA GeForce GTX 1050 Ti" -or
+    [string]$receipt.ProjectedEnum.DeviceDesc.Value -cne `
+        "NVIDIA GeForce GTX 1050 Ti" -or
+    [string]$receipt.ProjectedEnum.Mfg.Value -cne "NVIDIA" -or
+    [string]$receipt.ProjectedClass.DriverDesc.Value -cne `
+        "NVIDIA GeForce GTX 1050 Ti" -or
+    [string]$receipt.ProjectedClass.ProviderName.Value -cne "NVIDIA" -or
+    [string]$receipt.ProjectedClass.MatchingDeviceId.Value -cne `
+        "PCI\VEN_1AF4&DEV_1050" -or
+    [string]$receipt.ProjectedClass["HardwareInformation.AdapterString"].Value -cne `
+        "NVIDIA GeForce GTX 1050 Ti" -or
+    [string]$receipt.ProjectedClass["HardwareInformation.ChipType"].Value -cne `
+        "GeForce GTX 1050 Ti" -or
+    [string]$receipt.NewSpoofName -cne `
+        "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)") {
+    throw "schema-5 display-only hybrid 与 AIB identity mirror 没有分层"
+}
+$legacyMemory = [byte[]]$receipt.ProjectedClass[
+    "HardwareInformation.MemorySize"].Value
+if (-not (Test-RegistryDataEqual $legacyMemory ([byte[]](0,0,240,127))) -or
+    [UInt64]$receipt.ProjectedClass[
+        "HardwareInformation.qwMemorySize"].Value -ne [UInt64]4294967296) {
+    throw "schema-5 未按 2047 MiB legacy + 精确 QWord 投影 4 GiB"
+}
 $result = Invoke-RecoverOrRollback -Recover
 if ($result.Action -cne "RolledBack") { throw "kill 后 Recover 没有执行 rollback" }
 Assert-RolledBack $script:fixture
 if ($null -ne (Invoke-RecoverOrRollback -Recover)) { throw "Recover 不是幂等操作" }
+
+# schema-4 已采用完整标准展示字段，但其 legacy MemorySize 上限为
+# 4095 MiB。新版 reader 必须精确重建旧值，否则中断事务无法通过 CAS 恢复。
+$script:fixture = New-TransactionFixture "B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4B4" `
+    $true Committed 4
+$receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
+if (-not (Test-RegistryDataEqual `
+        ([byte[]]$receipt.ProjectedClass["HardwareInformation.MemorySize"].Value) `
+        ([byte[]](0,0,240,255))) -or
+    [UInt64]$receipt.ProjectedClass[
+        "HardwareInformation.qwMemorySize"].Value -ne [UInt64]4294967296) {
+    throw "schema-4 历史 4095 MiB/QWord 投影语义未保留"
+}
+$result = Invoke-RecoverOrRollback -Recover
+if ($result.Action -cne "RolledBack") { throw "schema-4 legacy transaction 未恢复" }
+Assert-RolledBack $script:fixture
+
+# schema-3 已使用标准 FriendlyName，但其安装展示字段仍是 stock，4 GiB
+# MemorySize 仍按历史 low32=0。新版恢复必须精确重建该旧投影。
+$script:fixture = New-TransactionFixture "B3B3B3B3B3B3B3B3B3B3B3B3B3B3B3B3" `
+    $true Committed 3
+$receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
+if ([string]$receipt.ProjectedEnum.FriendlyName.Value -cne `
+        "NVIDIA GeForce GTX 1050 Ti" -or
+    [string]$receipt.ProjectedEnum.DeviceDesc.Value -cne `
+        "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller" -or
+    [string]$receipt.ProjectedClass.DriverDesc.Value -cne `
+        "Red Hat VirtIO GPU DOD controller" -or
+    -not (Test-RegistryDataEqual `
+        ([byte[]]$receipt.ProjectedClass["HardwareInformation.MemorySize"].Value) `
+        ([byte[]](0,0,0,0))) -or
+    [UInt64]$receipt.ProjectedClass[
+        "HardwareInformation.qwMemorySize"].Value -ne [UInt64]4294967296) {
+    throw "schema-3 历史显示/low32 投影语义未保留"
+}
+$result = Invoke-RecoverOrRollback -Recover
+if ($result.Action -cne "RolledBack") { throw "schema-3 legacy transaction 未恢复" }
+Assert-RolledBack $script:fixture
+
+# schema-2 transaction 把完整 AIB 标签写进展示字段；恢复也必须保留其
+# 历史 4 GiB low32=0 语义，不能按 schema-5 重建。
+$script:fixture = New-TransactionFixture "B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2" `
+    $true Committed 2
+$receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
+if ([string]$receipt.ProjectedEnum.FriendlyName.Value -cne `
+        "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" -or
+    [string]$receipt.ProjectedClass["HardwareInformation.ChipType"].Value -cne `
+        "GeForce GTX 1050 Ti (ASUS Phoenix)" -or
+    -not (Test-RegistryDataEqual `
+        ([byte[]]$receipt.ProjectedClass["HardwareInformation.MemorySize"].Value) `
+        ([byte[]](0,0,0,0))) -or
+    [UInt64]$receipt.ProjectedClass[
+        "HardwareInformation.qwMemorySize"].Value -ne [UInt64]4294967296) {
+    throw "schema-2 legacy 投影语义未保留"
+}
+$result = Invoke-RecoverOrRollback -Recover
+if ($result.Action -cne "RolledBack") { throw "schema-2 legacy transaction 未恢复" }
+Assert-RolledBack $script:fixture
+
+# schema-1 receipt 同样必须按历史 low32=0 恢复，不能套用 schema-5 饱和值。
+$script:fixture = New-TransactionFixture "B1B0B1B0B1B0B1B0B1B0B1B0B1B0B1B0" `
+    $true Committed 1
+$receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
+if (-not (Test-RegistryDataEqual `
+        ([byte[]]$receipt.ProjectedClass["HardwareInformation.MemorySize"].Value) `
+        ([byte[]](0,0,0,0))) -or
+    [UInt64]$receipt.ProjectedClass[
+        "HardwareInformation.qwMemorySize"].Value -ne [UInt64]4294967296) {
+    throw "schema-1 历史 low32/QWord 投影语义未保留"
+}
+$result = Invoke-RecoverOrRollback -Recover
+if ($result.Action -cne "RolledBack") { throw "schema-1 transaction 未恢复" }
+Assert-RolledBack $script:fixture
+
+# 未知 transaction schema 必须在 pointer、journal 和投影首写前拒绝。
+$script:fixture = New-TransactionFixture "B6B6B6B6B6B6B6B6B6B6B6B6B6B6B6B6" `
+    $true Prepared 6
+Assert-RecoveryRejectedWithoutMutation $script:fixture `
+    "未知 transaction schema 未安全拒绝"
 
 # 旧 schema-1 不再具备完整 AIB 原子 bundle，必须在 pointer/journal 首写前拒绝。
 $script:fixture = New-TransactionFixture "B1B1B1B1B1B1B1B1B1B1B1B1B1B1B1B1" $true Prepared
@@ -227,7 +333,7 @@ if ($result.Action -cne "Completed" -or
     $script:fixture.Config.Values.ContainsKey("PendingIdentity") -or
     [string]$script:fixture.Config.Values.CurrentIdentity -cne $script:fixture.IdentityId -or
     [string]$script:fixture.Enum.Values.FriendlyName -cne `
-        "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)") {
+        "NVIDIA GeForce GTX 1050 Ti") {
     throw "Completed-before-clear 恢复语义错误"
 }
 
@@ -238,7 +344,7 @@ Set-FakeValue $script:fixture.Config CurrentIdentity "EEEEEEEEEEEEEEEEEEEEEEEEEE
 $rejected = $false
 try { Invoke-RecoverOrRollback -Recover | Out-Null } catch { $rejected = $true }
 if (-not $rejected -or [string]$script:fixture.Enum.Values.FriendlyName -cne `
-    "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)") {
+    "NVIDIA GeForce GTX 1050 Ti") {
     throw "并发 pointer 没有在 journal 前 fail-closed"
 }
 
@@ -249,9 +355,9 @@ Set-FakeValue $script:fixture.Enum FriendlyName "THIRD-PARTY" `
 $rejected = $false
 try { Invoke-RecoverOrRollback -Recover | Out-Null } catch { $rejected = $true }
 if (-not $rejected -or [string]$script:fixture.Enum.Values.DeviceDesc -cne
-    "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller" -or
+    "NVIDIA GeForce GTX 1050 Ti" -or
     [string]$script:fixture.Class.Values.DriverDesc -cne
-        "Red Hat VirtIO GPU DOD controller") {
+        "NVIDIA GeForce GTX 1050 Ti") {
     throw "journal 值级 CAS 没有在恢复首写前拒绝第三方修改"
 }
 
@@ -262,9 +368,9 @@ Set-FakeValue $script:fixture.Class DriverDesc "THIRD-PARTY" `
 $rejected = $false
 try { Invoke-RecoverOrRollback -Recover | Out-Null } catch { $rejected = $true }
 if (-not $rejected -or [string]$script:fixture.Enum.Values.FriendlyName -cne
-    "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" -or
+    "NVIDIA GeForce GTX 1050 Ti" -or
     [string]$script:fixture.Enum.Values.DeviceDesc -cne
-        "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller") {
+        "NVIDIA GeForce GTX 1050 Ti") {
     throw "Class CAS 失败前 Enum 已被部分恢复"
 }
 
@@ -298,7 +404,7 @@ $guard=$ast.Find({param($n)
 if($null -eq $guard){throw "缺少 durable outer finally"}
 $body=$guard.Body.Extent.Text
 foreach($marker in @(
-    "No fake adapter auto-detected", "-CommitIdentity", "exit 25",
+    "Resolve-GpuSpoofActiveClassSubkey", "-CommitIdentity", "exit 25",
     "exit `$displayModeFailureCode", "& `$powershellExe @gpuApiInstallArgs",
     "-CompleteIdentity `$identityTransactionId", "& `$powershellExe @gpuApiFinalizeArgs"
 )) { if(-not $body.Contains($marker)){throw ("outer transaction 未覆盖："+$marker)} }
@@ -323,6 +429,13 @@ identity_rollback_line="$(rg -n -F -- '-RollbackIdentity $identityTransactionId'
     || fail "apply finally 未在历史 GPU API readers 之前恢复旧 identity pointer"
 rg -F "throw ('系统 GPU API 身份投影准备失败" "$APPLY_SCRIPT" >/dev/null \
     || fail "GPU API coordinator Install 非零退出没有进入跨组件 finally"
+rg -F '$gpuApiCleanupDeferredExitCode = 12' "$APPLY_SCRIPT" >/dev/null \
+    || fail "apply 缺少 GPU API cleanup deferred 稳定退出码"
+for cleanup_code in recoverGpuApiCode gpuApiInstallCode gpuApiFinalizeCode; do
+    rg -F "if (\$$cleanup_code -eq \$gpuApiCleanupDeferredExitCode)" \
+        "$APPLY_SCRIPT" >/dev/null \
+        || fail "apply 没有原样中继 GPU API cleanup deferred：$cleanup_code"
+done
 
 recover_line="$(rg -n -F '& $identityHelperSource -RecoverPending' "$APPLY_SCRIPT" | cut -d: -f1)"
 stage_line="$(rg -n -F '& $identityHelperSource -Stage -SpoofName' "$APPLY_SCRIPT" | cut -d: -f1)"

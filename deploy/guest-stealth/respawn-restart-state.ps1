@@ -42,7 +42,7 @@ function Enable-RespawnDisplayDevices {
 }
 
 function Clear-RespawnDisplayModeTask {
-    # FirstLogon 只清理依赖交互桌面的显示模式任务；名称与 HardwareID 任务保留。
+    # FirstLogon 只清理依赖交互桌面的显示模式任务；名称刷新任务保留。
     Remove-ScheduledTaskVerified -TaskName 'StealthGPU-ForceDisplayFreq'
 }
 
@@ -99,6 +99,103 @@ function Remove-ScheduledTaskVerified {
     }
     if ($null -ne (Get-RootScheduledTaskExact -TaskName $TaskName)) {
         throw ('计划任务删除后仍可见：' + $TaskName)
+    }
+}
+
+function Register-GpuProjectionTask {
+    param(
+        [Parameter(Mandatory = $true)][string]$Projector,
+        [Parameter(Mandatory = $true)][string]$PowerShellPath,
+        [Parameter(Mandatory = $true)][string]$TaskName
+    )
+
+    if (-not (Test-Path -LiteralPath $Projector -PathType Leaf) -or
+        -not [IO.Path]::IsPathRooted($Projector)) {
+        throw ('HardwareID projector 不是有效绝对路径：' + $Projector)
+    }
+    if (-not (Test-Path -LiteralPath $PowerShellPath -PathType Leaf) -or
+        -not [IO.Path]::IsPathRooted($PowerShellPath)) {
+        throw ('Windows PowerShell 不是有效绝对路径：' + $PowerShellPath)
+    }
+    Remove-ScheduledTaskVerified -TaskName $TaskName
+    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
+        '-WindowStyle Hidden -File "' + $Projector + '" -Mode Apply'
+    $action = New-ScheduledTaskAction -Execute $PowerShellPath `
+        -Argument $arguments
+    $triggers = @(
+        (New-ScheduledTaskTrigger -AtStartup),
+        (New-ScheduledTaskTrigger -AtLogOn)
+    )
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
+        -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -MultipleInstances IgnoreNew
+    $task = New-ScheduledTask -Action $action -Trigger $triggers `
+        -Principal $principal -Settings $settings
+    Register-ScheduledTask -TaskName $TaskName -TaskPath '\' `
+        -InputObject $task -Force -ErrorAction Stop | Out-Null
+
+    $registered = Get-RootScheduledTaskExact -TaskName $TaskName
+    $systemIds = @('SYSTEM', 'NT AUTHORITY\SYSTEM', 'S-1-5-18')
+    if ($null -eq $registered -or
+        -not ($systemIds -icontains [string]$registered.Principal.UserId) -or
+        [string]$registered.Principal.RunLevel -ine 'Highest' -or
+        [string]$registered.Principal.LogonType -ine 'ServiceAccount' -or
+        @($registered.Triggers).Count -ne 2 -or
+        [string]$registered.Settings.MultipleInstances -ine 'IgnoreNew' -or
+        [string]$registered.Actions[0].Execute -ine $PowerShellPath -or
+        [string]$registered.Actions[0].Arguments -cne $arguments) {
+        throw 'HardwareID 投影计划任务注册后契约复核失败'
+    }
+}
+
+function Invoke-GpuProjectionFinalization {
+    param(
+        [Parameter(Mandatory = $true)][string]$Projector,
+        [Parameter(Mandatory = $true)][string]$PowerShellPath,
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    try {
+        foreach ($mode in 'Apply', 'Verify') {
+            Write-Host ('  HardwareID 投影 ' + $mode + '...') `
+                -ForegroundColor Cyan
+            $arguments = @('-NoProfile', '-NonInteractive',
+                '-ExecutionPolicy', 'Bypass', '-File', $Projector,
+                '-Mode', $mode)
+            & $PowerShellPath @arguments 2>&1 |
+                Tee-Object -FilePath $LogPath -Append
+            $projectorExitCode = $LASTEXITCODE
+            if ($projectorExitCode -ne 0) {
+                throw ('HardwareID ' + $mode + ' 失败，退出码=' +
+                    $projectorExitCode)
+            }
+            if ($mode -eq 'Apply') {
+                # 必须在最终 fake-first 状态测试，才能覆盖 DLL 的实时 carrier gate。
+                Invoke-NvapiRuntimeProbes -LogPath $LogPath
+            }
+        }
+        Register-GpuProjectionTask -Projector $Projector `
+            -PowerShellPath $PowerShellPath -TaskName $TaskName
+    } catch {
+        $failure = $_
+        try {
+            Remove-ScheduledTaskVerified -TaskName $TaskName
+            $rollbackArgs = @('-NoProfile', '-NonInteractive',
+                '-ExecutionPolicy', 'Bypass', '-File', $Projector,
+                '-Mode', 'RestorePhysical')
+            & $PowerShellPath @rollbackArgs 2>&1 |
+                Tee-Object -FilePath $LogPath -Append
+            if ($LASTEXITCODE -ne 0) {
+                throw ('RestorePhysical 退出码=' + $LASTEXITCODE)
+            }
+        } catch {
+            throw ('GPU-Z 投影初始化失败且物理回滚失败：初始化={0}；回滚={1}' -f `
+                $failure.Exception.Message, $_.Exception.Message)
+        }
+        throw $failure
     }
 }
 
@@ -167,6 +264,41 @@ function Register-RespawnResumeTask {
         -InputObject $task -Force -ErrorAction Stop | Out-Null
 }
 
+function Complete-RespawnResumeStage {
+    param(
+        [Parameter(Mandatory = $true)][bool]$ChipsetRestartRequired,
+        [Parameter(Mandatory = $true)][string]$MainScriptPath,
+        [switch]$KeepFirstLogon
+    )
+
+    if ($ChipsetRestartRequired) {
+        try {
+            # Full 已跨过一次启动边界：只替换验证任务，绝不再次调用 shutdown。
+            Register-RespawnResumeTask -KeepFirstLogon:$KeepFirstLogon `
+                -ResumeStage 'ChipsetVerification' `
+                -MainScriptPath $MainScriptPath
+        } catch {
+            Write-Host ('FAIL: 芯片组仍 pending，且无法保留手动重启后的验证任务：' +
+                $_.Exception.Message) -ForegroundColor Red
+            exit 56
+        }
+        Write-Host ('=== GPU 二阶段已完成；芯片组 INF 仍要求新启动边界。' +
+            '已保留只验证任务，请手动重启；不会自动二次重启。===') `
+            -ForegroundColor Yellow
+        exit 30
+    }
+    try {
+        Remove-RespawnResumeTask -CurrentInstance
+    } catch {
+        Write-Host ('FAIL: 二阶段成功但一次性恢复任务未能删除：' +
+            $_.Exception.Message) -ForegroundColor Red
+        exit 47
+    }
+    Write-Host '=== 重启后二阶段验证完成；不会再次自动重启。===' `
+        -ForegroundColor Green
+    exit 0
+}
+
 function Invoke-RespawnShutdown {
     param(
         [Parameter(Mandatory = $true)][string]$ShutdownPath,
@@ -210,6 +342,20 @@ function Restart-RespawnForPendingWork {
     )
 
     Write-Host $Reason -ForegroundColor Yellow
+    if ($ResumeAfterReboot) {
+        # 一个 EXE 调用最多自动跨越一次启动边界。恢复阶段若发现新的 pending
+        # 条件，删除当前一次性任务并返回原码，留给用户排查或手动重启。
+        try {
+            Remove-RespawnResumeTask -CurrentInstance
+        } catch {
+            Write-Host ('FAIL: 已禁止第二次自动重启，但无法删除恢复任务：' +
+                $_.Exception.Message) -ForegroundColor Red
+            exit $RegistrationFailureCode
+        }
+        Write-Host '已跨过一次启动边界；不会安排第二次自动重启。' `
+            -ForegroundColor Yellow
+        exit $PendingExitCode
+    }
     if ($NoReboot) {
         Write-Host '当前为 -NoReboot：请手动重启后再次运行本程序完成验证。' `
             -ForegroundColor Yellow
@@ -236,6 +382,38 @@ function Restart-RespawnForPendingWork {
         exit $ShutdownFailureCode
     }
     exit 0
+}
+
+function Resolve-RespawnGpuApiCleanupDeferred {
+    param(
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [Parameter(Mandatory = $true)][string]$MainScriptPath
+    )
+
+    if ($ExitCode -ne 12) { return }
+    if ($ResumeAfterReboot) {
+        # 一次启动边界后仍无法删除，通常已不是旧 image mapping，而是持久 ACL、
+        # 第三方进程或文件变化。删除当前恢复任务，禁止形成自动重启/登录重试循环；
+        # durable receipt 与 reservation 保留，供修复外部原因后手工重试。
+        try {
+            Remove-RespawnResumeTask -CurrentInstance
+        } catch {
+            Write-Host ('FAIL: GPU API 清理仍被阻止，且一次性恢复任务无法删除：' +
+                $_.Exception.Message) -ForegroundColor Red
+            exit 62
+        }
+        Write-Host 'FAIL: 重启后 GPU API 旧备份仍无法清理；已停止自动重试。' `
+            -ForegroundColor Red
+        Write-Host '      新目标与身份保持提交，durable journal 已保留供排查后重试。' `
+            -ForegroundColor Yellow
+        exit 12
+    }
+    Restart-RespawnForPendingWork -PendingExitCode 12 `
+        -Reason 'GPU API 新目标已提交；旧 DLL 仍被硬件工具占用，需要重启后安全清理。' `
+        -ShutdownComment 'GPU API 旧 DLL 等待重启释放，随后继续 durable recovery' `
+        -RegistrationFailureCode 60 -ShutdownFailureCode 61 `
+        -MainScriptPath $MainScriptPath
+    throw 'GPU API cleanup deferred 重启 helper 意外返回'
 }
 
 function Wait-ResumeDisplayDeviceReady {

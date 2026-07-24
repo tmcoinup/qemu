@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "aib_identity_catalog.h"
+#include "nvapi_identity.h"
 #include "nvapi_identity_contract.h"
 
 static int format_source(char *output, size_t capacity,
@@ -73,6 +74,30 @@ static int expect_rejected(
     return 0;
 }
 
+static int projected_pci_matches(
+    const struct stealth_aib_identity *board,
+    const struct nvapi_gpu_identity *identity)
+{
+    NvU32 device_id = 0u;
+    NvU32 subsystem_id = 0u;
+    NvU32 revision_id = 0u;
+    NvU32 external_device_id = 0u;
+
+    nvapi_build_carrier_pci_identifiers(
+        identity, &device_id, &subsystem_id, &revision_id,
+        &external_device_id);
+    if (device_id == UINT32_C(0x10501af4) &&
+        subsystem_id == nvapi_pack_pci_identifier(
+            board->subsystem_device_id, board->subsystem_vendor_id) &&
+        revision_id == board->revision_id &&
+        external_device_id == board->pci_device_id) {
+        return 1;
+    }
+    fprintf(stderr, "FAIL: NVIDIA AIB carrier/逻辑 PCI 输出错误: %s\n",
+            board->name);
+    return 0;
+}
+
 static int test_every_shared_board(void)
 {
     size_t index;
@@ -97,6 +122,7 @@ static int test_every_shared_board(void)
         memset(&identity, 0xa5, sizeof(identity));
         if (board->pci_vendor_id == UINT32_C(0x10de)) {
             if (!nvapi_build_validated_identity(&input, &identity) ||
+                strcmp(identity.name, board->name) != 0 ||
                 identity.pci_device_id != board->pci_device_id ||
                 identity.subsystem_vendor_id != board->subsystem_vendor_id ||
                 identity.subsystem_device_id != board->subsystem_device_id ||
@@ -104,6 +130,8 @@ static int test_every_shared_board(void)
                 identity.vram_kib != board->ram_mb * 1024u) {
                 fprintf(stderr, "FAIL: NVIDIA AIB 未通过: %s\n",
                         board->name);
+                valid = 0;
+            } else if (!projected_pci_matches(board, &identity)) {
                 valid = 0;
             }
         } else if (!expect_rejected("非 NVIDIA 共享板卡", &input)) {

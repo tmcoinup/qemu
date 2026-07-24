@@ -153,6 +153,70 @@ function Assert-GpuSpoofAibProfile {
     }
 }
 
+function Resolve-GpuSpoofActiveClassSubkey {
+    # Class\NNNN 的唯一授权来源是已经写入 Stage receipt 的物理 SourceInstanceId
+    # 及其当前 Enum\...\Driver 绑定。DriverDesc 会被本工具改成 Windows 标准名称，
+    # 因而只能用于展示，不能再作为重复执行或 clone 场景的目标选择条件。
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceInstanceId,
+        [Parameter(Mandatory = $true)][string]$DriverBinding,
+        [Parameter(Mandatory = $true)][string]$StagedClassSubkey,
+        [string]$RequestedSubkey = ''
+    )
+
+    if ($SourceInstanceId -cnotmatch
+            '^PCI\\VEN_1AF4&DEV_1050&SUBSYS_[0-9A-F]{8}&REV_[0-9A-F]{2}(?:&|\\)') {
+        throw ('active Class target 的 SourceInstanceId 不是 stock VioGpuDod carrier：' +
+            $SourceInstanceId)
+    }
+    $driverMatch = [regex]::Match($DriverBinding,
+        '^\{4d36e968-e325-11ce-bfc1-08002be10318\}\\([0-9]{4})$',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $driverMatch.Success) {
+        throw ('active Display Driver 绑定非法：' + $DriverBinding)
+    }
+    if ($StagedClassSubkey -cnotmatch '^[0-9]{4}$') {
+        throw ('Stage receipt 的 ClassSubkey 非法：' + $StagedClassSubkey)
+    }
+
+    $activeSubkey = $driverMatch.Groups[1].Value
+    if ($activeSubkey -cne $StagedClassSubkey) {
+        throw ('Enum Driver 与 Stage receipt 的 ClassSubkey 不一致：' +
+            $activeSubkey + '/' + $StagedClassSubkey)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RequestedSubkey)) {
+        if ($RequestedSubkey -cnotmatch '^[0-9]{4}$' -or
+            $RequestedSubkey -cne $activeSubkey) {
+            throw ('-Subkey 不是 SourceInstanceId 唯一绑定子键：' +
+                $RequestedSubkey + '/' + $activeSubkey)
+        }
+    }
+    return $activeSubkey
+}
+
+function Assert-GpuSpoofActiveClassBinding {
+    # Stage 后可能启用了 Code 22 设备；在任何系统 GPU API DLL Move 前，必须把
+    # 当前 Enum Service 与 Class INF 再和 durable Stage receipt 交叉验证一次。
+    param(
+        [Parameter(Mandatory = $true)][string]$Service,
+        [Parameter(Mandatory = $true)][string]$ClassInfPath,
+        [Parameter(Mandatory = $true)][string]$ClassInfSection,
+        [Parameter(Mandatory = $true)][string]$StagedDriverInfPath
+    )
+
+    if ($Service -ine 'VioGpuDod') {
+        throw ('active Display Service 不是 VioGpuDod：' + $Service)
+    }
+    if ($StagedDriverInfPath -cnotmatch '^oem[0-9]+\.inf$' -or
+        $ClassInfPath -cne $StagedDriverInfPath) {
+        throw ('active Class InfPath 与 Stage receipt 不一致：' +
+            $ClassInfPath + '/' + $StagedDriverInfPath)
+    }
+    if ($ClassInfSection -cne 'VioGpuDod_Inst') {
+        throw ('active Class InfSection 不是 stock VioGpuDod：' + $ClassInfSection)
+    }
+}
+
 function Install-GpuSpoofScheduledTasks {
     # 名称刷新始终安装为 SYSTEM 任务；SkipDisplayTask 只禁止交互式显示模式任务。
     param(

@@ -15,8 +15,8 @@
 #   4. 按当前显卡 PCI SUBSYS 自动选定伪装型号，并持久化统一用户态 PCI 身份。
 #   5. 只重写 GPU 的 Class\{4d36e968}\NNNN + Enum\PCI 覆盖；
 #      显示器身份始终由 Host profile 注入的实时 QEMU EDID 决定。
-#   6. 按当前板卡厂商事务发布 x86/x64 NVAPI 或 ADL 身份读取层；不安装厂商
-#      驱动软件，也不修改内核驱动或签名链。
+#   6. 按当前板卡厂商事务发布 x86/x64 NVAPI 或 ADL 身份读取层，使 GPU-Z 2.70
+#      及其它标准厂商 API 工具全局读取同一身份；不修改内核驱动或签名链。
 #   7. 两种模式都保留名称刷新与 HardwareID 投影任务；-FirstLogon 只跳过需要
 #      交互桌面的显示模式任务，不安装第三方服务或常驻程序。
 #   8. 清掉可能残留的 RunOnce 入口（兼容旧 clone 注入；本地一键无此入口也无害）
@@ -30,7 +30,7 @@
 param(
     [switch]$NoReboot,          # 跑完不自动重启（默认跑完会重启）
     [int]   $RebootDelay = 8,   # 自动重启倒计时（秒）；期间可 Ctrl+C 取消
-    [switch]$FirstLogon,        # OOBE 后执行：保留名称/HardwareID 任务，跳过显示模式任务
+    [switch]$FirstLogon,        # OOBE 后执行：保留名称/HardwareID 任务
     [switch]$Unattended,        # launcher 自动模式：失败必须返回退出码，禁止 Read-Host
     # 中文注释：仅由一次性恢复任务传入；恢复阶段区分完整续跑与芯片组只验证。
     [switch]$ResumeAfterReboot,
@@ -66,9 +66,9 @@ try {
         -ForegroundColor Red
     exit 8
 }
-function Stop-GpuProjectionTask {
-    # 重跑前先阻断两个旧 SYSTEM writer，避免驱动/PnP 操作与名称或 HardwareID
-    # 投影竞态；部署/投影失败时复用同一屏障，不能留下引用混版 helper 的任务。
+function Stop-GpuIdentityWriterTasks {
+    # 重跑前阻断名称与 HardwareID writer，避免驱动/PnP 操作和投影竞态。
+    # 部署失败时复用同一屏障，不能留下引用混版 helper 的任务。
     foreach ($taskName in $projectionTaskName, 'StealthGPU-RefreshName') {
         Remove-ScheduledTaskVerified -TaskName $taskName
     }
@@ -85,7 +85,7 @@ function Test-CurrentGpuIdentityExists {
     }
 }
 function Assert-PhysicalDisplayHardwareIds {
-    # 即使 CurrentIdentity 被删坏，也不能把残留 fake-first 带进驱动安装或 PnP scan。
+    # 即使 CurrentIdentity 被删坏，也不能把旧逻辑首项带进驱动安装或 PnP scan。
     # 这里完全依赖当前在线设备与 SetupAPI，只读证明每条 HardwareID 都是 1AF4:1050。
     $devices = @(Get-PnpDevice -Class Display -PresentOnly -ErrorAction Stop |
         Where-Object { [string]$_.InstanceId -like 'PCI\*' })
@@ -108,7 +108,7 @@ function Test-PhysicalDisplayHardwareIds {
     try { Assert-PhysicalDisplayHardwareIds; return $true }
     catch { return $false }
 }
-function Copy-ProjectionPayload {
+function Copy-IdentityPayload {
     param(
         [Parameter(Mandatory = $true)][string]$Source,
         [Parameter(Mandatory = $true)][string]$Destination
@@ -121,14 +121,13 @@ function Copy-ProjectionPayload {
         Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
     }
 }
-function Publish-GpuProjectionPayload {
-    # 两个旧 writer 均停止后，先完整发布 RefreshName/HardwareID 的依赖闭包；
-    # apply 随后才能注册新任务，因此 rc=11 重启路径也不会引用缺失或混版 helper。
+function Publish-GpuIdentityPayload {
+    # writer 停止并恢复 physical-only 后，再发布完整身份与投影依赖闭包。
     $persistentRoot = Split-Path -Parent $PSScriptRoot
     New-Item -ItemType Directory -Path $persistentRoot -Force | Out-Null
     $payloadNames = @(
-        'project-gpu-hardware-id.ps1',
-        'gpu-hardware-id-plan.ps1',
+        'project-gpu-hardware-id.ps1', 'gpu-hardware-id-plan.ps1',
+        'gpu-hardware-id-transaction.ps1',
         'gpu-manufacturer-projection.ps1', 'gpu-manufacturer-projector.exe',
         'display-driver-trust.ps1', 'refresh-gpu-name.ps1',
         'gpu-board-identity-contract.ps1'
@@ -136,45 +135,52 @@ function Publish-GpuProjectionPayload {
     foreach ($payloadName in $payloadNames) {
         $source = Join-Path $PSScriptRoot $payloadName
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-            throw ('EXE payload 缺少 HardwareID 任务依赖：' + $payloadName)
+            throw ('EXE payload 缺少 GPU 身份/投影依赖：' + $payloadName)
         }
-        Copy-ProjectionPayload -Source $source `
+        Copy-IdentityPayload -Source $source `
             -Destination (Join-Path $persistentRoot $payloadName)
     }
-    $projector = Join-Path $persistentRoot 'project-gpu-hardware-id.ps1'
-    return $projector
+    return (Join-Path $persistentRoot 'project-gpu-hardware-id.ps1')
 }
-function Register-GpuProjectionTask {
-    param([Parameter(Mandatory = $true)][string]$Projector)
-    # 计划任务只调用已经完整发布到受保护 ProgramData 的本地脚本。
-    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass ' +
-        '-WindowStyle Hidden -File "' + $Projector + '" -Mode Apply'
-    $action = New-ScheduledTaskAction -Execute $powershellExe -Argument $arguments
-    $triggers = @(
-        (New-ScheduledTaskTrigger -AtStartup),
-        (New-ScheduledTaskTrigger -AtLogOn)
-    )
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
-        -LogonType ServiceAccount -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
-    $task = New-ScheduledTask -Action $action -Trigger $triggers `
-        -Principal $principal -Settings $settings
-    Register-ScheduledTask -TaskName $projectionTaskName -InputObject $task `
-        -Force -ErrorAction Stop | Out-Null
-    # 注册后复读关键安全字段；若 Windows 拒绝了 SYSTEM/Highest 或动作路径，不能
-    # 把本次部署报告为成功。
-    $registered = Get-ScheduledTask -TaskName $projectionTaskName -ErrorAction Stop
-    $systemPrincipalIds = @('SYSTEM', 'NT AUTHORITY\SYSTEM', 'S-1-5-18')
-    if (-not ($systemPrincipalIds -icontains [string]$registered.Principal.UserId) -or
-        [string]$registered.Principal.RunLevel -ine 'Highest' -or
-        [string]$registered.Principal.LogonType -ine 'ServiceAccount' -or
-        @($registered.Triggers).Count -ne 2 -or
-        [string]$registered.Settings.MultipleInstances -ine 'IgnoreNew' -or
-        [string]$registered.Actions[0].Execute -ine $powershellExe -or
-        [string]$registered.Actions[0].Arguments -notlike ('*' + $Projector + '*')) {
-        throw 'HardwareID 投影计划任务注册后契约复核失败'
+function Invoke-NvapiRuntimeProbes {
+    param([Parameter(Mandatory = $true)][string]$LogPath)
+
+    # apply 已完成 identity + 厂商 API 原子提交。此处读取严格指针只用于选择
+    # NVIDIA 探针；真正的 schema、carrier 与 PCI 四元组仍由 DLL 自身复核。
+    $configPath = 'HKLM:\SOFTWARE\StealthGPU'
+    $identityId = [string](Get-ItemPropertyValue -LiteralPath $configPath `
+        -Name 'CurrentIdentity' -ErrorAction Stop)
+    if ($identityId -cnotmatch '^[0-9A-F]{32}$') {
+        throw 'CurrentIdentity 不是严格的 32 位身份 token'
     }
+    $identityPath = $configPath + '\Identities\' + $identityId
+    $vendor = [string](Get-ItemPropertyValue -LiteralPath $identityPath `
+        -Name 'SpoofVendor' -ErrorAction Stop)
+    if ($vendor -ceq 'AMD') {
+        Write-Host '  当前为 AMD profile；跳过 NVIDIA runtime probe。' `
+            -ForegroundColor Cyan
+        return
+    }
+    if ($vendor -cne 'NVIDIA') {
+        throw ('CurrentIdentity 包含不支持的 SpoofVendor：' + $vendor)
+    }
+
+    foreach ($probeName in 'nvapi-runtime-probe-x86.exe',
+            'nvapi-runtime-probe-x64.exe') {
+        $probePath = Join-Path $PSScriptRoot $probeName
+        if (-not (Test-Path -LiteralPath $probePath -PathType Leaf)) {
+            throw ('EXE payload 缺少 NVAPI runtime probe：' + $probeName)
+        }
+        Write-Host ("  运行 " + $probeName + ' 真实枚举自检...') `
+            -ForegroundColor Cyan
+        & $probePath 2>&1 | Tee-Object -FilePath $LogPath -Append
+        $probeRc = $LASTEXITCODE
+        if ($probeRc -ne 0) {
+            throw ($probeName + ' 枚举失败，退出码=' + $probeRc)
+        }
+    }
+    Write-Host '  NVAPI x86/x64 Initialize/Enum/PCI/FullName 自检通过。' `
+        -ForegroundColor Green
 }
 Write-Host "=== respawn-stealth (本地版): 重新对齐 GPU spoof ===" -ForegroundColor Cyan
 # --- 0) 管理员自检 ----------------------------------------------------------
@@ -304,7 +310,7 @@ foreach ($requiredProjectionFile in $projectorSource, $planSource) {
         exit 36
     }
 }
-Stop-GpuProjectionTask
+Stop-GpuIdentityWriterTasks
 if (Test-PhysicalDisplayHardwareIds) {
     # 当前实例已纯物理时，不访问 sysprep/generalize 后仍残留的退役 SourceInstanceId。
     Write-Host '  当前在线 Display 已是 stock 1AF4:1050；跳过旧身份回滚。' -ForegroundColor Cyan
@@ -326,6 +332,13 @@ try {
     Write-Host ('FAIL: 驱动/PnP 操作前 physical-only 门禁失败：' +
         $_.Exception.Message) -ForegroundColor Red
     exit 38
+}
+try {
+    $persistentProjector = Publish-GpuIdentityPayload
+} catch {
+    Write-Host ('FAIL: 无法发布安全 GPU 身份/恢复依赖：' + $_.Exception.Message) `
+        -ForegroundColor Red
+    exit 40
 }
 # --- 5) 先确保真实显示驱动已绑定（不走 HTTP）-------------------------------
 # install-display-driver.ps1 与 SYS/CAT/INF 都由同一个 EXE 释放到 PSScriptRoot。
@@ -366,17 +379,10 @@ if (-not (Test-Path -LiteralPath $spoof -PathType Leaf)) {
     exit 1
 }
 Write-Host "  使用本地 spoof 脚本: $spoof" -ForegroundColor Green
-try {
-    $persistentProjector = Publish-GpuProjectionPayload
-} catch {
-    Write-Host ('FAIL: 无法完整发布持久 GPU 投影依赖：' + $_.Exception.Message) `
-        -ForegroundColor Red
-    exit 40
-}
 # --- 7) 跑 apply，并在其 identity 事务完成前发布 NVAPI --------------------
 Write-Host "  运行 apply-gpu-spoof.ps1 -AutoDetect ...（日志 -> $log）" -ForegroundColor Cyan
 if ($FirstLogon) {
-    Write-Host '  FirstLogon: 保留名称/HardwareID 任务，仅跳过交互式显示模式任务' `
+    Write-Host '  FirstLogon: 保留名称任务，仅跳过交互式显示模式任务' `
         -ForegroundColor Cyan
     Clear-RespawnDisplayModeTask
 }
@@ -389,6 +395,7 @@ $rc = $LASTEXITCODE
 if ($FirstLogon) {
     Clear-RespawnDisplayModeTask
 }
+Resolve-RespawnGpuApiCleanupDeferred -ExitCode $rc -MainScriptPath $respawnMainScriptPath
 # 显示模式辅助程序用 11 表示 ChangeDisplaySettings 已把目标模式持久化，但驱动
 # 要求重启后才能真正应用。与驱动 3010 一样，这不是“当前已经成功”；普通模式会
 # 安排一次性二阶段验证，-NoReboot 则把明确状态返回给调用者。
@@ -409,10 +416,9 @@ $runOnce = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce'
 foreach ($name in '*StealthRespawn', 'StealthRespawn') {
     Remove-ItemProperty -Path $runOnce -Name $name -ErrorAction SilentlyContinue
 }
-
 # --- 10) 检查 apply 结果 ----------------------------------------------------
 if ($rc -ne 0) {
-    Stop-GpuProjectionTask
+    Stop-GpuIdentityWriterTasks
     Write-Host ""
     Write-Host "WARN: apply-gpu-spoof.ps1 退出码 = $rc —— 可能没找到伪装显卡节点。" -ForegroundColor Yellow
     Write-Host "      不自动重启，请翻看上面输出或 $log 排查。" -ForegroundColor Yellow
@@ -421,51 +427,27 @@ if ($rc -ne 0) {
     exit $rc
 }
 
-# --- 11) identity+NVAPI 完整后才提交 fake-first HardwareID -----------------
-# apply 只有在双架构 installer 成功并 Complete identity 后才返回 0；因此此处开始
-# 暴露 10DE/1002 首项时，GPU-Z 2.70 的系统 reader 与 schema 已经是同一发布版本。
+# GPU-Z 会先按 SetupAPI 逻辑厂商筛选候选，再进入厂商 API。恢复历史已验收的
+# canonical 逻辑首项 + 完整物理尾项，并在该最终状态运行 x86/x64 探针。
 try {
-    Register-GpuProjectionTask -Projector $persistentProjector
+    Invoke-GpuProjectionFinalization -Projector $persistentProjector `
+        -PowerShellPath $powershellExe -TaskName $projectionTaskName `
+        -LogPath $log
 } catch {
-    Stop-GpuProjectionTask
-    Write-Host ('FAIL: HardwareID 投影任务注册失败：' + $_.Exception.Message) `
-        -ForegroundColor Red
-    exit 41
+    Stop-GpuIdentityWriterTasks
+    Write-Host ('FAIL: GPU-Z HardwareID 投影/厂商 API 联合验收失败：' +
+        $_.Exception.Message) -ForegroundColor Red
+    Write-Host "      已尝试恢复 physical-only；详见 $log，不会自动重启。" `
+        -ForegroundColor Yellow
+    exit 44
 }
-
-$projectionArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-File', $persistentProjector, '-Mode', 'Apply')
-& $powershellExe @projectionArgs 2>&1 |
-    Tee-Object -FilePath $projectionLog -Append
-$projectionRc = $LASTEXITCODE
-if ($projectionRc -ne 0) {
-    Stop-GpuProjectionTask
-    $rollbackArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', $persistentProjector, '-Mode', 'RestorePhysical')
-    & $powershellExe @rollbackArgs 2>&1 |
-        Tee-Object -FilePath $projectionLog -Append
-    $rollbackRc = $LASTEXITCODE
-    if ($rollbackRc -ne 0) {
-        Write-Host ('FAIL: HardwareID 投影失败，随后 physical-only 回滚也失败；apply=' +
-            $projectionRc + '，rollback=' + $rollbackRc + '。') -ForegroundColor Red
-        exit 45
-    }
-    Write-Host ('FAIL: HardwareID 浅层投影失败，退出码 = ' + $projectionRc +
-        '；任务已移除，且已复核恢复为 1AF4:1050。') -ForegroundColor Red
-    exit 42
-}
-Write-Host ('  HardwareID 已按 profile fake-first 投影；任务 ' +
-    $projectionTaskName + ' 使用 Windows 内置 Task Scheduler 保持该值。') `
+Write-Host '  GPU-Z 候选链已恢复：同一 VioGpuDod 设备使用逻辑首项 + 物理尾项。' `
     -ForegroundColor Green
 
 if ($ResumeAfterReboot) {
-    try {
-        Remove-RespawnResumeTask -CurrentInstance
-    } catch {
-        Write-Host ('FAIL: 二阶段成功但一次性恢复任务未能删除：' +
-            $_.Exception.Message) -ForegroundColor Red
-        exit 47
-    }
+    Complete-RespawnResumeStage `
+        -ChipsetRestartRequired $chipsetRestartRequired `
+        -MainScriptPath $respawnMainScriptPath -KeepFirstLogon:$FirstLogon
 }
 
 if ($NoReboot) {

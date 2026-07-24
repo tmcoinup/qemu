@@ -437,14 +437,17 @@ if grep -F '& $powershellExe @nvapiArgs' "$RESPAWN" >/dev/null; then
 fi
 spoof_call_line="$(grep -n -F '& $powershellExe @spoofArgs' \
     "$RESPAWN" | cut -d: -f1)"
-projection_call_line="$(grep -n -F '& $powershellExe @projectionArgs' \
+physical_gate_line="$(grep -n -F '    Assert-PhysicalDisplayHardwareIds' \
+    "$RESPAWN" | cut -d: -f1)"
+projection_line="$(grep -n -F 'Invoke-GpuProjectionFinalization' \
     "$RESPAWN" | cut -d: -f1)"
 final_line="$(grep -n '^if (\$NoReboot)' "$RESPAWN" | tail -n 1 | cut -d: -f1)"
 [[ -n "$spoof_call_line" && \
-    -n "$projection_call_line" && -n "$final_line" ]] \
-    || fail "无法定位 apply、HardwareID 与最终成功顺序"
-(( spoof_call_line < projection_call_line && projection_call_line < final_line )) \
-    || fail "HardwareID 没有位于 identity+GPU API 成功之后、最终成功之前"
+    -n "$physical_gate_line" && -n "$projection_line" && -n "$final_line" ]] \
+    || fail "无法定位 physical-only 门禁、apply、最终投影与成功顺序"
+(( physical_gate_line < spoof_call_line && spoof_call_line < projection_line && \
+    projection_line < final_line )) \
+    || fail "NVAPI 最终投影没有位于 identity+GPU API 成功之后"
 
 # 跨组件升级必须由 apply 自己收口：reader Prepare 在 pointer Commit 前，
 # identity Complete 后才 Finalize；失败 finally 先恢复旧 pointer，再恢复历史 reader。

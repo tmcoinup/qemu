@@ -149,6 +149,7 @@ static int build_driver_registry_path(struct stealth_gpu_carrier *carrier)
 int stealth_validate_virtio_gpu_carrier_windows(
     const char *expected_source_instance_id, uint32_t expected_bus_id,
     uint32_t expected_slot_id, uint32_t expected_function_id,
+    const struct stealth_gpu_logical_pci_identity *logical_identity,
     struct stealth_gpu_carrier *carrier)
 {
     HDEVINFO device_set;
@@ -156,6 +157,7 @@ int stealth_validate_virtio_gpu_carrier_windows(
     struct stealth_gpu_carrier_observation observation;
     struct stealth_gpu_carrier candidate;
     char instance_id[STEALTH_GPU_CARRIER_INSTANCE_CAPACITY];
+    char matched_instance_id[STEALTH_GPU_CARRIER_INSTANCE_CAPACITY];
     char cm_instance_id[STEALTH_GPU_CARRIER_INSTANCE_CAPACITY];
     char service[64];
     char driver_key[STEALTH_GPU_CARRIER_DRIVER_KEY_CAPACITY];
@@ -172,6 +174,7 @@ int stealth_validate_virtio_gpu_carrier_windows(
     }
     ZeroMemory(&observation, sizeof(observation));
     ZeroMemory(&candidate, sizeof(candidate));
+    ZeroMemory(matched_instance_id, sizeof(matched_instance_id));
     device_set = SetupDiGetClassDevsA(&GUID_DEVCLASS_DISPLAY, NULL, NULL,
                                       DIGCF_PRESENT);
     if (device_set == INVALID_HANDLE_VALUE) {
@@ -220,9 +223,19 @@ int stealth_validate_virtio_gpu_carrier_windows(
                            &observation.slot_id)) {
             goto cleanup;
         }
+        /*
+         * instance_id 是枚举循环复用的工作缓冲。匹配后仍要继续扫描，以证明
+         * 没有第二个 virtio Display；因此必须先复制到独立快照。否则后续
+         * Remote Display Adapter 会覆写 observation 指针并让初始化依赖顺序。
+         */
+        if (lstrlenA(instance_id) >=
+            (int)STEALTH_GPU_CARRIER_INSTANCE_CAPACITY) {
+            goto cleanup;
+        }
+        lstrcpyA(matched_instance_id, instance_id);
         observation.function_id = observation.slot_id & UINT32_C(0xffff);
         observation.slot_id = (observation.slot_id >> 16) & UINT32_C(0xffff);
-        observation.instance_id = instance_id;
+        observation.instance_id = matched_instance_id;
         observation.hardware_ids = hardware_ids;
         observation.hardware_ids_bytes = hardware_ids_size;
         observation.service = service;
@@ -237,7 +250,7 @@ int stealth_validate_virtio_gpu_carrier_windows(
     observation.virtio_display_count = virtio_count;
     if (!stealth_validate_virtio_gpu_carrier_observation(
             expected_source_instance_id, expected_bus_id, expected_slot_id,
-            expected_function_id, &observation, &candidate) ||
+            expected_function_id, logical_identity, &observation, &candidate) ||
         !build_driver_registry_path(&candidate)) {
         goto cleanup;
     }

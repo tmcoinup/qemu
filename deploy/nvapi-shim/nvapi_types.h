@@ -11,6 +11,7 @@
 
 typedef int32_t NvAPI_Status;
 typedef uint32_t NvU32;
+typedef uint64_t NvU64;
 typedef void *NvPhysicalGpuHandle;
 typedef void *NvLogicalGpuHandle;
 
@@ -79,12 +80,27 @@ struct nvapi_clock_frequencies {
 /* NV_GPU_BUS_TYPE 中 3 才是 PCI Express；4 表示 FPCI。 */
 #define NVAPI_GPU_BUS_TYPE_PCI_EXPRESS 3u
 
+/* NV_GPU_TYPE 的公开枚举值；2 明确表示独立 GPU。 */
+#define NV_SYSTEM_TYPE_GPU_UNKNOWN 0u
+#define NV_SYSTEM_TYPE_IGPU        1u
+#define NV_SYSTEM_TYPE_DGPU        2u
+
 /*
  * QueryInterface ID 来自 NVIDIA 官方 nvapi_interface.h。BusType 与 BusId
  * 的编号外观非常接近，必须使用具名常量，避免再次把两个不同签名的函数绑反。
  */
 #define NVAPI_ID_GPU_GET_BUS_TYPE UINT32_C(0x1BB18724)
 #define NVAPI_ID_GPU_GET_BUS_ID   UINT32_C(0x1BE0B8E5)
+#define NVAPI_ID_GPU_GET_GPU_TYPE UINT32_C(0xC33BAEB1)
+#define NVAPI_ID_GPU_GET_MEMORY_INFO UINT32_C(0x07F9B368)
+#define NVAPI_ID_GPU_GET_MEMORY_INFO_EX UINT32_C(0xC0599498)
+#define NVAPI_ID_GPU_GET_ALL_OUTPUTS UINT32_C(0x7D554F8E)
+#define NVAPI_ID_GPU_GET_ACTIVE_OUTPUTS UINT32_C(0xE3E89B6F)
+#define NVAPI_ID_GPU_GET_CONNECTED_OUTPUTS_WITH_LID UINT32_C(0xCF8CAF39)
+#define NVAPI_ID_GPU_GET_OUTPUT_TYPE UINT32_C(0x40A505E4)
+
+/* NV_GPU_OUTPUT_TYPE 的 DFP 值；本项目唯一输出由数字显示器 EDID 驱动。 */
+#define NVAPI_GPU_OUTPUT_TYPE_DFP 2u
 
 /* 本轮型号细节所需的公开/历史 NVAPI QueryInterface 编号。 */
 #define NVAPI_ID_GPU_GET_VBIOS_REVISION       UINT32_C(0xACC3DA0A)

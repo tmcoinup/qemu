@@ -52,6 +52,27 @@ done
 log() { printf '[build-ovmf] %s\n' "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 
+check_nasm_version() {
+    local version_output major minor
+
+    version_output="$(nasm -v)" || die "无法读取 NASM 版本"
+    if [[ "$version_output" =~ NASM[[:space:]]version[[:space:]]([0-9]+)\.([0-9]+) ]]; then
+        major="$((10#${BASH_REMATCH[1]}))"
+        minor="$((10#${BASH_REMATCH[2]}))"
+    else
+        die "无法解析 NASM 版本：$version_output"
+    fi
+
+    # EDK2 需要 NASM 2.15+；NASM 3.00/3.01 的 64 位 PUSH DWORD 回归
+    # 会导致 DxeCpuExceptionHandlerLib 汇编失败，3.x 必须使用 3.02+。
+    if (( major < 2 \
+            || (major == 2 && minor < 15) \
+            || (major == 3 && minor < 2) )); then
+        die "NASM $major.$minor 不兼容：需要 2.15+，若使用 3.x 则需要 3.02+"
+    fi
+    log "NASM:        $version_output"
+}
+
 # -------- 预检 --------
 [[ -d "$EDK2" ]]                                || die "EDK2 source not found: $EDK2 (set EDK2=...)"
 [[ -f "$EDK2/edksetup.sh" ]]                    || die "$EDK2 looks invalid (no edksetup.sh)"
@@ -60,6 +81,7 @@ command -v nasm   >/dev/null 2>&1               || die "need apt: nasm"
 command -v iasl   >/dev/null 2>&1               || die "need apt: iasl (acpica-tools)"
 command -v uuidgen >/dev/null 2>&1              || die "need apt: uuid-runtime"
 command -v gcc    >/dev/null 2>&1               || die "need apt: build-essential"
+check_nasm_version
 
 log "EDK2:        $EDK2"
 log "TARGET:      $TARGET / $TOOLCHAIN  (jobs=$JOBS)"
@@ -93,10 +115,15 @@ export EDK_TOOLS_PATH="$EDK2/BaseTools"
 set +u
 source edksetup.sh BaseTools >/dev/null
 set -u
-if [[ ! -x "$EDK2/BaseTools/BinWrappers/PosixLike/build" ]]; then
+BASETOOLS_VFR="$EDK2/BaseTools/Source/C/bin/VfrCompile"
+if [[ ! -x "$BASETOOLS_VFR" ]]; then
     log "BaseTools 没编，先编（首次约 1 分钟）"
-    make -C "$EDK2/BaseTools" -j "$JOBS"
+    # GCC 15 默认进入 GNU C23；锁定版 PCCTS 仍使用 C17 的无原型函数语义。
+    # 只约束宿主 BaseTools，不能污染后续 EDK2 固件目标工具链参数。
+    BASETOOLS_CC="${CC:-gcc} -std=gnu17"
+    make -C "$EDK2/BaseTools" -j "$JOBS" CC="$BASETOOLS_CC"
 fi
+[[ -x "$BASETOOLS_VFR" ]] || die "BaseTools 编译后仍缺 VfrCompile: $BASETOOLS_VFR"
 
 # -------- 3) build OVMF with TPM2 --------
 log "build OVMF (TARGET=$TARGET, TPM2_ENABLE=TRUE)"

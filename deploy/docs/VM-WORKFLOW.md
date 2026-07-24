@@ -57,14 +57,11 @@ powercfg -h off
 Start-Process -FilePath 'D:\工具\respawn-stealth.exe' -Wait
 ```
 
-EXE 会先判断真实 `Service`。克隆机已是 `VioGpuDod` 时跳过安装；全新机则校验
-内嵌 SYS/CAT/INF 的摘要与微软签名，执行 `pnputil /install`，确认绑定成功后才做
-GPU/显示器初始化。任何一步失败都会停止，不会把 BasicDisplay 只改一个 GTX 名字。
+EXE 会先判断真实 `Service`。克隆机已是 `VioGpuDod` 时跳过安装；全新机则校验内嵌 SYS/CAT/INF 的摘要与微软签名，执行 `pnputil /install`，确认绑定成功后才做 GPU/显示器初始化。任何一步失败都会停止，不会把 BasicDisplay 只改一个 GTX 名字。
 
 ### A.4 等 EXE 自动重启
 
-默认约 8 秒后自动重启，让 VioGpuDod、实时 EDID 和名称覆盖一起生效。调试时若用了
-`-NoReboot`，检查日志后再手动执行 `shutdown /r /t 0`。
+默认约 8 秒后自动重启，让 VioGpuDod、实时 EDID 和名称覆盖一起生效。调试时若用了 `-NoReboot`，检查日志后再手动执行 `shutdown /r /t 0`。
 
 ### A.5 验证真实驱动和分辨率
 
@@ -74,32 +71,33 @@ GPU/显示器初始化。任何一步失败都会停止，不会把 BasicDisplay
 Get-PnpDevice -Class Display -PresentOnly | ForEach-Object {
     $_
     Get-PnpDeviceProperty -InstanceId $_.InstanceId `
-        -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath
+        -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath,
+            DEVPKEY_Device_HardwareIds
 }
 Get-CimInstance Win32_VideoController |
-    Format-List Name,DriverVersion,CurrentHorizontalResolution,CurrentVerticalResolution
+    Format-List Name,AdapterCompatibility,AdapterRAM,DriverVersion,
+        CurrentHorizontalResolution,CurrentVerticalResolution
 ```
 
-期望 PCI 显示设备 `Service=VioGpuDod`、INF 为 `oem*.inf`，显示设置可选
-1920×1080。设备名称显示 NVIDIA 不是驱动成功的证据；真实判断必须看 Service。
+期望唯一 PCI 显示 devnode 的 `Service=VioGpuDod`、INF 为 `oem*.inf`，显示设置可选 1920×1080；PnP HardwareID 应为规范逻辑首项 + 完整 `1AF4:1050` 物理尾项。
+`Name`/`AdapterCompatibility` 应为当前 profile 的标准芯片名/厂商。4 GiB profile 的旧 32 位 `AdapterRAM` 路径显示 `2047 MiB`（`0x7FF00000`）；NVAPI legacy MemoryInfo 返回 `4194304 KiB`，MemoryInfoEx 返回 `4294967296 bytes`，`HardwareInformation.qwMemorySize` 保持精确 `4 GiB`。
+设备名称正确仍不是驱动成功的证据；真实判断必须看 Service 与 INF。
 
-### A.6 host 端跑 host-fix-gpu-devpkey.sh（修"驱动程序提供商"显示）
+### A.6 正常流程不需要 host 端 Provider 收尾
 
-统一 EXE 跑完并重启后，guest 再关机一次（Win10 → 开始 → 关机），然后 **host 端**：
+transaction schema-5 已在 guest 内全局发布 Enum `FriendlyName`/`DeviceDesc`/`Mfg` 与 Class `DriverDesc`/`ProviderName`；标准 SetupAPI、WMI 和硬件工具会读取标准芯片名与厂商。
+它同时保留 stock `MatchingDeviceId`、`InfPath`、`InfSection`、`Service`，因此不要为了改展示名替换或补丁驱动。transaction schema 1/2/3/4 只用于恢复旧 journal；历史 schema-4 的显存字段仍按原语义重建 4095 MiB。
+
+只有在专门诊断设备管理器“驱动程序”页受 TrustedInstaller 保护的旧 DEVPKEY 时，才可把下列 host helper 当作可选外观诊断；它不属于正常部署和硬件工具适配：
 
 ```bash
-# 等 guest 真关机（看不见 QEMU 进程）
-ps -ef | grep "win10-1" | grep -v grep
-
-# 修 DEVPKEY；由 sudo 通过终端安全读取宿主密码，不要把密码写进命令或脚本
+# guest 必须先完整关机；sudo 通过终端读取宿主密码
 sudo /home/ubuntu/projects/qemu/deploy/scripts/host-fix-gpu-devpkey.sh 1
 ```
 
-这一步把"驱动程序提供商"从 `Red Hat, Inc.` 改成 `NVIDIA`（设备管理器 → GPU → 属性 → 驱动程序）。
-
 ### A.7 装 DNF / wegame / 实际游戏环境
 
-启动 VM1：
+若为了上面的可选诊断关闭了 VM1，就重新启动；否则直接继续当前 guest 会话：
 
 ```bash
 /home/ubuntu/projects/qemu/deploy/scripts/start-vm.sh 1
@@ -115,9 +113,11 @@ guest 内：
 guest 内 PowerShell：
 
 ```powershell
-# GPU 显示 NVIDIA
-(Get-CimInstance Win32_VideoController | ? { $_.Name -ne 'Microsoft Basic Display Adapter' }).Name
-# 应输出 profile 抽到的型号，如 "NVIDIA GeForce GTX 750 Ti"
+# Device Manager、SetupAPI 与 WMI 显示标准芯片型号/厂商
+Get-PnpDevice -Class Display | Where-Object InstanceId -like 'PCI\VEN_1AF4&DEV_1050*' | Select-Object FriendlyName, Status
+Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility,AdapterRAM
+# FriendlyName/Name 应为标准型号；AdapterCompatibility 应为 NVIDIA 或 AMD。
+# stock VioGpuDod 的 DXGI 描述或原始 PCI/PNP 扫描仍可能显示 virtio/1AF4:1050。
 
 # CPU
 (Get-CimInstance Win32_Processor).Name
@@ -266,14 +266,10 @@ clone 都重复等待，应在更新完成后重新执行 sysprep，并密封为
    - Order 4-5: 关 IE wizard / 关 Windows Update 自动重启
    - Order 6-9: 注册 ms-gamingoverlay no-op handler + 关 GameDVR
    - **Order 10: `D:\工具\respawn-stealth.exe --firstlogon`**
-5. `respawn-stealth.exe` 先验证物理 `1AF4:1050`/stock VioGpuDod，再按 PCI subsys
-   提交浅层逻辑 ID；事务发布 x86 SysWOW64 + x64 System32 NVAPI，使 GPU-Z 2.70
-   可直接双击；随后自动重启。`--firstlogon` 保留 SYSTEM 名称刷新与 HardwareID
-   投影任务，只跳过交互式显示模式任务；不安装第三方服务
-6. 重启后桌面就绪，Device Manager 显示 profile.GPU_NAME（可能跟 base 的 VM1 不同）
+5. `respawn-stealth.exe` 先验证物理 `1AF4:1050`/stock VioGpuDod，再按 PCI subsys 提交 schema-5 浅层逻辑 identity；事务发布 x86 SysWOW64 + x64 System32 NVAPI，使 GPU-Z 2.70 可直接双击；随后自动重启。`--firstlogon` 保留 SYSTEM 名称刷新和启动/登录 HardwareID 维护任务；交互式显示模式任务仍跳过，不安装第三方服务
+6. 重启后 Device Manager、WMI 与 NVAPI/ADL 显示同一标准型号/厂商；完整 `profile.GPU_NAME` 只供 identity schema-2 原子校验。PnP HardwareID 为规范逻辑首项 + 完整物理尾项；NVAPI 主键用 `1AF4:1050` 跨接口去重，external/AIB/型号保持逻辑 NVIDIA 身份
 
-整个过程从 `start-vm.sh` 到稳定桌面通常需要 **约 5-10 分钟**；旧 base
-触发联网 ZDP 时会更久，全程不需要鼠标键盘。
+整个过程从 `start-vm.sh` 到稳定桌面通常需要 **约 5-10 分钟**；旧 base 触发联网 ZDP 时会更久，全程不需要鼠标键盘。
 
 #### C.2.1 兜底：FirstLogonCommands Order=10 没跑成功怎么办
 
@@ -293,30 +289,23 @@ Test-Path C:\stealth\respawn.log
 Get-WinEvent -LogName 'Microsoft-Windows-Shell-Core/Operational' -MaxEvents 20 | Where-Object Message -Match 'FirstLogon'
 ```
 
-### C.3 首启后 GPU Provider 一键收尾
+### C.3 可选：旧 Driver-tab DEVPKEY 外观诊断
 
-clone 首启后 Windows 会重新枚举显示设备，并按 stock `viogpudo.inf` 把设备管理器 →
-GPU → 驱动程序 → 驱动程序提供商写回 `Red Hat, Inc.`。等 guest 第一次进桌面、
-本地 respawn 完成 GPU 名重对齐并重启/关机后，在 host 跑：
+schema-5 已由 guest 的 respawn 全局重写标准 Enum/Class 名称和厂商，正常 clone 无需 host 收尾。只有明确要检查设备管理器“驱动程序”页的受保护旧 DEVPKEY 时，才在 guest 完整关机后运行：
 
 ```bash
 deploy/scripts/finalize-clone-gpu.sh 2
 ```
 
-普通用户直接跑即可；脚本会自动 `sudo` 重执行并显式传递白名单环境，因为底层需要
-qemu-nbd + ntfs-3g 离线挂载 Windows 盘。若希望修完后自动启动：
+该脚本会自动 `sudo` 重执行并显式传递白名单环境，因为底层需要 qemu-nbd + ntfs-3g 离线挂载 Windows 盘。若希望诊断处理后自动启动：
 
 ```bash
 STABLE_DISPLAY=1 HOST_RESERVE_CORES=0 \
   deploy/scripts/finalize-clone-gpu.sh 2 --restart -- --proxy
 ```
 
-`STABLE_DISPLAY=1` 也是当前默认值；无论 base/clone 选择 AMD 还是 NVIDIA 逻辑
-身份，此处都保持普通 `virtio-vga`，不增加 blob/hostmem PCI BAR。需要对照 GL 时可给
-restart 透传 `--gpu-sdl-egl`，该路径默认仍为 gl-safe；只有再显式加
-`--gpu-zerocopy` 才把 MSI-X 从 BAR4 移到 BAR1，并以 BAR4/5 启用 host-visible window；`GPU_HOSTMEM` 必须是 256M..8G 内
-2 的幂。用户曾实测旧 GL+zero-copy 配置可稳定运行，因此该对照只能缩小变量，不能单独把
-zero-copy 定性为 DNF 自动退出的根因。
+`STABLE_DISPLAY=1` 也是当前默认值；无论 base/clone 选择 AMD 还是 NVIDIA 逻辑身份，此处都保持普通 `virtio-vga`，不增加 blob/hostmem PCI BAR。需要对照 GL 时可给 restart 透传 `--gpu-sdl-egl`，该路径默认仍为 gl-safe。
+只有再显式加 `--gpu-zerocopy` 才把 MSI-X 从 BAR4 移到 BAR1，并以 BAR4/5 启用 host-visible window；`GPU_HOSTMEM` 必须是 256M..8G 内 2 的幂。用户曾实测旧 GL+zero-copy 配置可稳定运行，因此该对照只能缩小变量，不能单独把 zero-copy 定性为 DNF 自动退出的根因。
 
 ### C.4 sysprep 与 OOBE
 
@@ -361,11 +350,8 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 
 ## 客机离线统一安装与重对齐（`deploy/guest-stealth/`）
 
-阶段 C 的 GPU 重对齐（首启 `FirstLogonCommands` Order=10 / C.2.1 兜底）只走
-`D:\工具\respawn-stealth.exe --firstlogon`。`FirstLogonCommands` 是 OOBE 后首次登录
-执行一次，不是每次开机执行；`--firstlogon` 保留 `StealthGPU-RefreshName` 与
-`StealthGPU-ProjectHardwareId`，只跳过交互式显示模式任务。迁移到其它主机时不要求对方有相同 host IP
-或 HTTP 服务。
+阶段 C 的 GPU 重对齐（首启 `FirstLogonCommands` Order=10 / C.2.1 兜底）只走 `D:\工具\respawn-stealth.exe --firstlogon`。`FirstLogonCommands` 是 OOBE 后首次登录执行一次，不是每次开机执行。
+`--firstlogon` 保留 `StealthGPU-RefreshName` 和 `StealthGPU-ProjectHardwareId`，只跳过交互式显示模式任务。驱动/PnP 操作前临时恢复 physical-only，最终再投影规范逻辑首项 + 完整物理尾项并注册启动/登录维护。迁移到其它主机时不要求对方有相同 host IP 或 HTTP 服务。
 
 ### 文件
 
@@ -377,10 +363,8 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 | `README.md` | 该目录自带的简要说明 |
 | `package.sh` | host 上打一个默认只含 `respawn-stealth.exe` 的 `dist/`（已 gitignore）|
 
-行为：先核验/绑定 `VioGpuDod` → 仅新装系统清模式缓存 → 按 PCI SUBSYS 查 GPU 池
-→ 只改 GPU 的 `Class\{4d36e968}` + `Enum\PCI` → 重启。显示器身份始终来自
-Host profile 注入的 QEMU EDID，`respawn-stealth` 不再改写 `Enum\DISPLAY` 或
-Monitor Class。所有依赖释放到 `C:\ProgramData\StealthGPU\respawn-exe\`，不依赖网络。
+行为：先核验/绑定 `VioGpuDod` → 仅新装系统清模式缓存 → 按 PCI SUBSYS 查 GPU 池 → 更新 Class/Enum，并投影 HardwareID 规范逻辑首项 + 完整物理尾项 → 重启。
+显示器身份始终来自 Host profile 注入的 QEMU EDID，`respawn-stealth` 不再改写 `Enum\DISPLAY` 或 Monitor Class。所有依赖释放到 `C:\ProgramData\StealthGPU\respawn-exe\`，不依赖网络。
 
 ### 打包进 base（必需，封 base 前做一次）
 
@@ -420,14 +404,14 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 | A.1 | host | `deploy/scripts/start-vm.sh 1 --iso=...` | 启动装机 |
 | A.3 | guest | `D:\工具\respawn-stealth.exe` | 离线安装 VioGpuDod + GPU/显示器初始化 + 重启 |
 | A.5 | guest | 查询 `DEVPKEY_Device_Service` | 验证真实 Service，而不是只看 GTX 名称 |
-| A.6 | host | `sudo .../host-fix-gpu-devpkey.sh 1` | 改 DEVPKEY 让"驱动程序提供商"显示 NVIDIA |
+| A.6（可选） | host | `sudo .../host-fix-gpu-devpkey.sh 1` | 仅诊断受保护的旧 Driver-tab DEVPKEY；正常 schema-5 流程不需要 |
 | A.7 | guest | 手动装 wegame / DNF / 实际游戏环境 | — |
 | A 末 | guest | 最新 EXE 保留在 `D:\工具\` | 必需：clone FirstLogon 固定从这里执行 |
 | B.1 | guest | `sysprep /generalize /oobe /shutdown` | 清 SID/MachineGUID 让 clone 独立 |
 | B.2 | host | `deploy/scripts/seal-base.sh 1 <name>` | 密封 base |
 | C.1 | host | `sudo .../clone-from-base.sh <name> 2` | clone qcow2 增量 + 复用/生成 profile + 注 unattend.xml |
 | C.2 | host | `.../start-vm.sh 2` | 启动新 VM；**guest 内 0 手动操作**；Order 10 优先执行 `D:\工具\respawn-stealth.exe --firstlogon` |
-| C.3 | host | `.../finalize-clone-gpu.sh 2` | 首启后修正 DriverProvider |
+| C.3（可选） | host | `.../finalize-clone-gpu.sh 2` | 仅诊断旧 Driver-tab DEVPKEY；标准工具字段已由 guest 全局投影 |
 | C 兜底 | guest | `D:\工具\respawn-stealth.exe --firstlogon` | **离线**本地重对齐 GPU（=不连 host 的 respawn-stealth）|
 | D | host + guest | 滚版本（见上） | 升级 base |
 
@@ -451,8 +435,9 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 | `irm apply-gpu-spoof.ps1 \| iex` 报"赋值表达式无效" | 该脚本有 `param()`，`iex` 不支持参数化 | 不要直接跑；重新构建并运行统一 EXE |
 | host offline 改 hive 时报 "Windows is hibernated" | Fast Startup 没关 | guest 内 `powercfg -h off` + `shutdown /s /t 0`，**别**用 GUI "关机"或 `shutdown /r` |
 | clone 完启动报 `Recovery 0xc0000001 / Your PC couldn't start properly` | sysprep 后、首次枚举前离线改了 boot-critical hive（SYSTEM/SOFTWARE/DEFAULT） | 重新 clone；首启前不要离线改这些 hive，guest 启动后要做的注册表改动写进 `autounattend.xml` 的 `<FirstLogonCommands>` |
-| 设备管理器驱动程序提供商还是 `Red Hat, Inc.` | clone 阶段不预写 Provider；Windows 首次枚举按 `viogpudo.inf` 建立原始字段 | guest 完整关机，host 端运行 `deploy/scripts/finalize-clone-gpu.sh <N>`；这是首次枚举后的受控离线收尾，脚本会自动 sudo 提权 |
-| 首启前 `ControlSet001\Enum\PCI` 不存在 | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不要在 clone 阶段运行 `host-fix-gpu-devpkey.sh`；首次登录后由 FirstLogonCommand Order=10 重对齐 GPU，再完整关机运行 finalizer |
+| WMI、设备列表或硬件工具仍显示 `Red Hat`/`VirtIO` | 没有运行当前 schema-5 EXE，或启动刷新失败 | 更新并运行统一 EXE，核对 `respawn.log`；不要用 host DEVPKEY helper 代替全局 Enum/Class 投影 |
+| 只有设备管理器“驱动程序”页的旧 Provider DEVPKEY 仍显示 `Red Hat, Inc.` | 该受保护属性与标准 Class `ProviderName` 分离 | 不影响 WMI/SetupAPI/厂商 API；仅在确需统一该外观时，完整关机后运行可选 `finalize-clone-gpu.sh <N>` |
+| 首启前 `ControlSet001\Enum\PCI` 不存在 | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不要在 clone 阶段运行 `host-fix-gpu-devpkey.sh`；首次登录后由 FirstLogonCommand Order=10 完成 schema-5 重对齐 |
 | clone VM 进桌面后 GPU 名还是 base 老型号 | 首次登录那次 FirstLogonCommand Order=10 没自动跑，或 `D:\工具\respawn-stealth.exe` 不存在 | guest 管理员 PS：`Start-Process -FilePath 'D:\工具\respawn-stealth.exe' -ArgumentList '--firstlogon' -Wait` |
 | 新 VM 显示 GTX 但分辨率锁在 1280×800、下拉灰色 | 运行的是旧 EXE，只把 Microsoft Basic Display Adapter 改了名 | 替换最新 EXE，在 SDL 控制台运行；确认 Service=`VioGpuDod` 后重启 |
 | `display-driver-install.log` 报摘要/签名错误 | SYS/CAT/INF 混版或 EXE payload 损坏 | host 重新运行 `package.sh`，不要手工替换释放目录里的驱动 |

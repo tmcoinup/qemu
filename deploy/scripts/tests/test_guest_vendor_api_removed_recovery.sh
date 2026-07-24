@@ -19,6 +19,11 @@ fail() {
     exit 1
 }
 
+rg -F '@(1, 2, 3, 4, 5) -contains $schema' "$IDENTITY_BINDING" >/dev/null \
+    || fail "GPU API durable reader 未兼容 transaction schema-1..5"
+rg -F '$identity.TransactionSchema -ne 5' "$IDENTITY_BINDING" >/dev/null \
+    || fail "GPU API Install 未锁定 transaction schema-5"
+
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -84,7 +89,7 @@ TEST_ROOT="$TEST_ROOT" pwsh -NoLogo -NoProfile -NonInteractive -Command '
     }
     $script:durableState = ""; $script:durablePointer = ""
     $script:durablePrevious = ""; $script:durablePending = ""
-    $script:durableVendor = "NVIDIA"; $script:durableSchema = 2
+    $script:durableVendor = "NVIDIA"; $script:durableSchema = 5
     $script:identityLookupId = ""; $script:settlementSteps = @()
     function Get-GpuApiIdentityDurableState {
         param([string]$TransactionId)
@@ -111,6 +116,12 @@ TEST_ROOT="$TEST_ROOT" pwsh -NoLogo -NoProfile -NonInteractive -Command '
     if ((Assert-GpuApiInstallIdentityBinding $installId "NVIDIA") -cne "NVIDIA") {
         throw "Prepared staged vendor 没有成为 Install 唯一厂商"
     }
+    $script:durableSchema = 4
+    $legacyInstallRejected = $false
+    try { $null = Assert-GpuApiInstallIdentityBinding $installId "NVIDIA" }
+    catch { $legacyInstallRejected = $true }
+    if (-not $legacyInstallRejected) { throw "schema-4 Prepared 被新 Install 接受" }
+    $script:durableSchema = 5
     foreach ($attempt in @(
         [pscustomobject]@{ State="Prepared"; Vendor="AMD"; Current=$oldId; Pending=$installId },
         [pscustomobject]@{ State="Completed"; Vendor="AMD"; Current=$installId; Pending="" }

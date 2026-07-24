@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证三个经典 ADL 系统目标的只读预检、fail-closed 发布与 durable 收据恢复。
+# 验证三个经典 ADL 系统目标的 fail-closed 发布、durable 收据与安全延期清理。
 # shellcheck disable=SC2016
 set -euo pipefail
 
@@ -177,11 +177,209 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
         }
     }
     if (Test-Path $finalizeReceipt) { throw "Finalize 遗留 durable receipt" }
+
+    function New-ManagedEntry {
+        param([string]$Name, [string]$Token)
+        $directory = Join-Path $env:TEST_ROOT $Name
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
+        $backup = Join-Path $directory (
+            ".atiadlxy.dll.vmate-backup-" + $Token)
+        [IO.File]::Copy($env:X64_DLL, $backup)
+        return [pscustomobject]@{
+            FileName="atiadlxy.dll"; Directory=$directory
+            Target=(Join-Path $directory "atiadlxy.dll"); Backup=$backup
+            ExpectedHash=$x86Hash; HistoricalHashes=@($x64Hash)
+            ObservedHash=$x64Hash
+        }
+    }
+
+    foreach ($code in @(5, 32)) {
+        $record = [pscustomobject]@{
+            Exception=(New-Object ComponentModel.Win32Exception($code))
+        }
+        if (-not (Test-AdlRetryableDeleteError $record)) {
+            throw ("Win32 删除错误未进入 ADL 回退：" + $code)
+        }
+    }
+    $ordinaryError = [pscustomobject]@{
+        Exception=(New-Object InvalidOperationException("injected"))
+    }
+    if (Test-AdlRetryableDeleteError $ordinaryError) {
+        throw "普通错误被错误降级为 ADL CleanupDeferred"
+    }
+
+    # 每次删除前都必须以 receipt 约束 canonical 路径、普通文件和允许摘要。
+    $nonCanonical = New-ManagedEntry "noncanonical" `
+        "44444444444444444444444444444444"
+    $nonCanonical.Backup = Join-Path $nonCanonical.Directory "detached.dll"
+    [IO.File]::Copy($env:X64_DLL, $nonCanonical.Backup)
+    $rejected = $false
+    try { Remove-AdlManagedBackupFile $nonCanonical } catch { $rejected = $true }
+    if (-not $rejected) { throw "非 canonical ADL backup 获得删除权限" }
+
+    $directoryEntry = New-ManagedEntry "directory" `
+        "55555555555555555555555555555555"
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath `
+        $directoryEntry.Backup -Force
+    [IO.Directory]::CreateDirectory($directoryEntry.Backup) | Out-Null
+    $rejected = $false
+    try { Remove-AdlManagedBackupFile $directoryEntry } `
+        catch { $rejected = $true }
+    if (-not $rejected) { throw "目录冒充 ADL backup 未被拒绝" }
+
+    $unknownHash = New-ManagedEntry "unknown-hash" `
+        "66666666666666666666666666666666"
+    [IO.File]::WriteAllText($unknownHash.Backup, "unknown bytes")
+    $rejected = $false
+    try { Remove-AdlManagedBackupFile $unknownHash } catch { $rejected = $true }
+    if (-not $rejected) { throw "未知 ADL backup 摘要未 fail-closed" }
+
+    $originalRemove = (Get-Item Function:\Remove-TransactionFile).ScriptBlock
+    $script:lockedBackup = ""
+    $script:mutateBackup = ""
+    $script:hardBackup = ""
+    function Remove-TransactionFile {
+        param([string]$Path)
+        if (-not [string]::IsNullOrWhiteSpace($script:hardBackup) -and
+            $Path -ceq $script:hardBackup) {
+            throw (New-Object InvalidOperationException("injected hard failure"))
+        }
+        if (-not [string]::IsNullOrWhiteSpace($script:mutateBackup) -and
+            $Path -ceq $script:mutateBackup) {
+            [IO.File]::WriteAllText($Path, "changed after first validation")
+            throw (New-Object UnauthorizedAccessException("injected mutation"))
+        }
+        if (-not [string]::IsNullOrWhiteSpace($script:lockedBackup) -and
+            $Path -ceq $script:lockedBackup) {
+            throw (New-Object UnauthorizedAccessException("injected mapped image"))
+        }
+        if ([string]::IsNullOrWhiteSpace($Path) -or
+            -not (Test-Path -LiteralPath $Path)) { return }
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Path -Force
+    }
+
+    # 删除失败后再变更字节时，第二次精确摘要复核必须把它升级为硬失败。
+    $mutated = New-ManagedEntry "mutated" `
+        "77777777777777777777777777777777"
+    $script:mutateBackup = $mutated.Backup
+    $rejected = $false
+    try { Remove-AdlManagedBackupFile $mutated } catch { $rejected = $true }
+    if (-not $rejected -or -not (Test-Path -LiteralPath $mutated.Backup)) {
+        throw "ADL 删除失败后的二次摘要复核未 fail-closed"
+    }
+    $script:mutateBackup = ""
+
+    # 第一份 backup 被映射占用时，Finalize 仍须尝试其余两份；仅延期项和
+    # receipt 被保留。释放占用后，同一 durable receipt 必须幂等收口。
+    $deferred = New-Entries "deferred" -Historical
+    $deferredId = "88888888888888888888888888888888"
+    $deferredReceipt = Join-Path $deferred.Root ($deferredId + ".json")
+    Publish-AdlProjection $deferred.Entries $deferredReceipt $deferredId
+    $script:lockedBackup = $deferred.Entries[0].Backup
+    $deferredCaught = $false
+    try {
+        Finalize-AdlProjectionReceipt $deferred.Entries `
+            $deferredReceipt $deferredId
+    } catch {
+        $deferredCaught = Test-AdlCleanupDeferredError $_
+        if (-not $deferredCaught) { throw }
+    }
+    if (-not $deferredCaught -or
+        -not (Test-Path -LiteralPath $deferredReceipt) -or
+        -not (Test-Path -LiteralPath $deferred.Entries[0].Backup) -or
+        (Test-Path -LiteralPath $deferred.Entries[1].Backup) -or
+        (Test-Path -LiteralPath $deferred.Entries[2].Backup)) {
+        throw "ADL Finalize 未尝试全部 backup 或未保留延期收据"
+    }
+    $script:lockedBackup = ""
+    Finalize-AdlProjectionReceipt $deferred.Entries `
+        $deferredReceipt $deferredId
+    if ((Test-Path -LiteralPath $deferredReceipt) -or
+        (Test-Path -LiteralPath $deferred.Entries[0].Backup)) {
+        throw "ADL 解锁后的 durable retry 未幂等收口"
+    }
+
+    # Absent/Removed 使用同一托管 backup 合约：映射占用时保留收据，重试时
+    # 只删除收据授权的旧项目字节，不能触碰后来出现的同名目标。
+    $removed = New-Entries "removed" -Historical
+    foreach ($entry in $removed.Entries) {
+        $entry | Add-Member -NotePropertyName DesiredState `
+            -NotePropertyValue "Absent"
+    }
+    $removedId = "99999999999999999999999999999999"
+    $removedReceipt = Join-Path $removed.Root ($removedId + ".json")
+    Publish-AdlProjection $removed.Entries $removedReceipt $removedId
+    $script:lockedBackup = $removed.Entries[0].Backup
+    $removedDeferred = $false
+    try {
+        Finalize-AdlProjectionReceipt $removed.Entries `
+            $removedReceipt $removedId
+    } catch {
+        $removedDeferred = Test-AdlCleanupDeferredError $_
+        if (-not $removedDeferred) { throw }
+    }
+    if (-not $removedDeferred -or
+        -not (Test-Path -LiteralPath $removedReceipt) -or
+        -not (Test-Path -LiteralPath $removed.Entries[0].Backup) -or
+        (Test-Path -LiteralPath $removed.Entries[1].Backup) -or
+        (Test-Path -LiteralPath $removed.Entries[2].Backup)) {
+        throw "ADL Removed CleanupDeferred 未保留精确 backup/receipt"
+    }
+    $script:lockedBackup = ""
+    Finalize-AdlProjectionReceipt $removed.Entries $removedReceipt $removedId
+    if ((Test-Path -LiteralPath $removedReceipt) -or
+        (Test-Path -LiteralPath $removed.Entries[0].Backup)) {
+        throw "ADL Removed durable retry 未幂等收口"
+    }
+
+    # 非 5/32 的清理错误必须保持硬失败，但仍应遍历后续两个 backup；receipt
+    # 必须留下，待故障解除后由同一收据继续完成。
+    $hard = New-Entries "hard" -Historical
+    $hardId = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    $hardReceipt = Join-Path $hard.Root ($hardId + ".json")
+    Publish-AdlProjection $hard.Entries $hardReceipt $hardId
+    $script:hardBackup = $hard.Entries[0].Backup
+    $hardCaught = $false
+    try {
+        Finalize-AdlProjectionReceipt $hard.Entries $hardReceipt $hardId
+    } catch {
+        $hardCaught = -not (Test-AdlCleanupDeferredError $_)
+    }
+    if (-not $hardCaught -or
+        -not (Test-Path -LiteralPath $hardReceipt) -or
+        -not (Test-Path -LiteralPath $hard.Entries[0].Backup) -or
+        (Test-Path -LiteralPath $hard.Entries[1].Backup) -or
+        (Test-Path -LiteralPath $hard.Entries[2].Backup)) {
+        throw "ADL 硬失败未保留 receipt 或未遍历其余 backup"
+    }
+    $script:hardBackup = ""
+    Finalize-AdlProjectionReceipt $hard.Entries $hardReceipt $hardId
+    if (Test-Path -LiteralPath $hardReceipt) {
+        throw "ADL 硬失败解除后的 durable retry 未收口"
+    }
+    Set-Item Function:\Remove-TransactionFile -Value $originalRemove
 '
+
+if rg -n 'DELAY_UNTIL_REBOOT|MoveFileEx\([^,]+,\s*\$null|MoveFileEx.*\[uint32\]4' \
+        "$TRANSACTION" >&2; then
+    fail "ADL CleanupDeferred 不得登记未经重启复核的延迟删除"
+fi
+grep -F 'Assert-AdlManagedBackupFile -Entry $Entry' "$TRANSACTION" >/dev/null \
+    || fail "ADL CleanupDeferred 前缺少 receipt backup 严格验证"
+grep -F "VmateAdlCleanupDeferred" "$TRANSACTION" >/dev/null \
+    || fail "ADL Finalize 缺少 durable CleanupDeferred marker"
+grep -F 'if ($cleanupDeferredExit) { exit 12 }' "$INSTALLER" >/dev/null \
+    || fail "ADL installer 没有在释放锁后返回 CleanupDeferred 退出码 12"
+dispose_line="$(grep -nF '} finally { $projectionLock.Dispose() }' "$INSTALLER" \
+    | cut -d: -f1)"
+exit12_line="$(grep -nF 'if ($cleanupDeferredExit) { exit 12 }' "$INSTALLER" \
+    | cut -d: -f1)"
+[[ -n "$dispose_line" && -n "$exit12_line" && "$dispose_line" -lt "$exit12_line" ]] \
+    || fail "ADL installer 必须先释放 projection lock，再返回退出码 12"
 
 for source in "$INSTALLER" "$TRANSACTION"; do
     [[ "$(wc -l < "$source")" -le 500 ]] \
         || fail "ADL 系统发布单文件超过 500 行：$source"
 done
 
-echo "OK: ADL three-target preflight, fail-closed and durable recovery passed"
+echo "OK: ADL three-target fail-closed, durable recovery and cleanup deferral passed"

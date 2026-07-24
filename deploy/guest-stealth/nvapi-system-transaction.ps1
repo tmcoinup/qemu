@@ -89,6 +89,72 @@ function Get-NvapiOptionalFileHash {
     return Get-LowerSha256 -Path $Path
 }
 
+function Test-NvapiRetryableDeleteError {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    # Windows 会把 ACL 拒绝和仍被进程映射的 image section 分别报告为
+    # AccessDenied(5) 或 SharingViolation(32)；只允许这两个原生码延期。
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        $nativeCode = if ($exception -is [ComponentModel.Win32Exception]) {
+            $exception.NativeErrorCode
+        } else { $exception.HResult -band 0xFFFF }
+        if ($nativeCode -eq 5 -or $nativeCode -eq 32) { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Assert-NvapiManagedBackupFile {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    # CleanupDeferred 资格只来自已校验 receipt：路径必须是目标同目录下的
+    # 唯一 backup 名，摘要也必须是当前/历史项目发布物。任一条件不满足即拒绝。
+    if (-not (Test-NvapiTransactionPath $Entry.Backup $Entry.Directory `
+            $Entry.FileName 'backup')) {
+        throw ('NVAPI 托管备份路径非法：' + [string]$Entry.Backup)
+    }
+    $allowedHashes = @([string]$Entry.ExpectedHash) + @($Entry.HistoricalHashes)
+    if (-not (Test-HashInAllowList ([string]$Entry.ObservedHash) $allowedHashes)) {
+        throw ('NVAPI 托管备份摘要未被发布清单授权：' + [string]$Entry.Backup)
+    }
+    if (-not (Test-Path -LiteralPath $Entry.Backup)) { return $false }
+    $null = Assert-PlainFile -Path $Entry.Backup
+    if ((Get-LowerSha256 -Path $Entry.Backup) -cne [string]$Entry.ObservedHash) {
+        throw ('NVAPI 托管备份摘要不匹配：' + [string]$Entry.Backup)
+    }
+    return $true
+}
+
+function Remove-NvapiManagedBackupFile {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    if (-not (Assert-NvapiManagedBackupFile -Entry $Entry)) { return $false }
+    try {
+        Remove-TransactionFile -Path $Entry.Backup
+        return $false
+    } catch {
+        if (-not (Test-NvapiRetryableDeleteError $_)) { throw }
+    }
+
+    # 返回 deferred 前再次核对普通文件和摘要；路径若已被并发删除则已经成功，
+    # 字节或类型发生变化则硬失败。调用方必须保留 receipt，不能按路径延迟删除。
+    if (-not (Assert-NvapiManagedBackupFile -Entry $Entry)) { return $false }
+    return $true
+}
+
+function Test-NvapiCleanupDeferredError {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception.Data.Contains('VmateNvapiCleanupDeferred') -and
+            [bool]$exception.Data['VmateNvapiCleanupDeferred']) { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
 function Undo-NvapiProjectionEntry {
     param([Parameter(Mandatory = $true)]$Entry)
 
@@ -333,6 +399,7 @@ function Finalize-NvapiProjectionReceipt {
                     $removedBackupHash -cne $entry.ObservedHash) {
                     throw ('Removed NVAPI Finalize 备份摘要不匹配：' + $entry.Backup)
                 }
+                $null = Assert-NvapiManagedBackupFile -Entry $entry
             }
             continue
         }
@@ -344,21 +411,43 @@ function Finalize-NvapiProjectionReceipt {
             (Test-Path -LiteralPath $entry.Discard)) {
             throw ('Finalize 发现未完成 rollback discard：' + $entry.Discard)
         }
+        if ($entry.CommitAction -ceq 'Replaced') {
+            $null = Assert-NvapiManagedBackupFile -Entry $entry
+        }
     }
+    $cleanupDeferred = New-Object Collections.Generic.List[string]
+    $cleanupErrors = New-Object Collections.Generic.List[string]
     foreach ($entry in $resolved) {
-        Remove-TransactionFile -Path $entry.Stage
+        try { Remove-TransactionFile -Path $entry.Stage } catch {
+            $cleanupErrors.Add($_.Exception.Message)
+        }
         if ([string]$entry.DesiredState -ceq 'Absent') {
             if ($entry.CommitAction -ceq 'Removed') {
-                Remove-TransactionFile -Path $entry.Backup
+                try {
+                    if (Remove-NvapiManagedBackupFile -Entry $entry) {
+                        $cleanupDeferred.Add([string]$entry.Backup)
+                    }
+                } catch { $cleanupErrors.Add($_.Exception.Message) }
             }
             continue
         }
         if ($entry.CommitAction -ne 'Replaced' -or
             -not (Test-Path -LiteralPath $entry.Backup)) { continue }
-        if ((Get-NvapiOptionalFileHash $entry.Backup) -cne $entry.ObservedHash) {
-            throw ('Finalize 备份摘要不匹配：' + $entry.Backup)
-        }
-        Remove-TransactionFile -Path $entry.Backup
+        try {
+            if (Remove-NvapiManagedBackupFile -Entry $entry) {
+                $cleanupDeferred.Add([string]$entry.Backup)
+            }
+        } catch { $cleanupErrors.Add($_.Exception.Message) }
+    }
+    if ($cleanupErrors.Count -gt 0) {
+        throw ('NVAPI Finalize 清理失败：' + ($cleanupErrors -join ' | '))
+    }
+    if ($cleanupDeferred.Count -gt 0) {
+        $exception = New-Object IO.IOException(
+            ('NVAPI 托管备份仍被占用，需重启后继续清理：' +
+                ($cleanupDeferred -join ', ')))
+        $exception.Data['VmateNvapiCleanupDeferred'] = $true
+        throw $exception
     }
     Remove-TransactionFile -Path $Path
 }

@@ -5,7 +5,7 @@
   为 GPU API coordinator 读取并校验 identity durable transaction。
 
 .DESCRIPTION
-  本 helper 不写注册表。Install 只接受仍由 PendingIdentity 拥有的 schema-2
+  本 helper 不写注册表。Install 只接受仍由 PendingIdentity 拥有的 schema-5
   Prepared 事务，并从不可变 identity snapshot 读取 canonical Vendor。收口只接受
   Completed/current 或 RolledBack/previous 两种终态，拒绝提前及跨事务恢复。
 #>
@@ -67,7 +67,8 @@ function Get-GpuApiIdentityDurableState {
         $state = [string](Get-GpuApiExactRegistryValue $transactionKey 'State' $string)
         $previousPresent = [int](Get-GpuApiExactRegistryValue `
             $transactionKey 'PreviousPointerPresent' $dword)
-        if ($recordedId -cne $TransactionId -or -not (@(1, 2) -contains $schema) -or
+        if ($recordedId -cne $TransactionId -or
+            -not (@(1, 2, 3, 4, 5) -contains $schema) -or
             @('Prepared', 'Committed', 'Completed', 'RolledBack') -cnotcontains $state -or
             ($previousPresent -ne 0 -and $previousPresent -ne 1)) {
             throw ('GPU identity durable transaction 字段非法：' + $TransactionId)
@@ -110,10 +111,10 @@ function Assert-GpuApiInstallIdentityBinding {
         $identity.PreviousIdentity.Present -and
         (-not $identity.CurrentIdentity.Present -or
          $identity.CurrentIdentity.Value -ceq $identity.PreviousIdentity.Value)
-    if ($identity.TransactionSchema -ne 2 -or $identity.State -cne 'Prepared' -or
+    if ($identity.TransactionSchema -ne 5 -or $identity.State -cne 'Prepared' -or
         -not $identity.PendingIdentity.Present -or
         $identity.PendingIdentity.Value -cne $TransactionId -or -not $baselineMatches) {
-        throw ('GPU API Install 只接受 pointer 未提交的 schema-2 Prepared identity：' +
+        throw ('GPU API Install 只接受 pointer 未提交的 schema-5 Prepared identity：' +
             $TransactionId)
     }
     if ($identity.Vendor -cne $RequestedVendor) {

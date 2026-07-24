@@ -16,9 +16,9 @@ NvU32 nvapi_pack_pci_identifier(NvU32 device_id, NvU32 vendor_id)
 }
 
 /*
- * NVAPI 枚举项不是第二个虚拟设备，而是 SourceInstanceId 所指向的 virtio 显卡
- * 的用户态视图。主 PCI 键因此必须使用承载设备的 1AF4:1050；subsystem 与
- * revision 则来自已经严格匹配 A101..A112 的逻辑板卡身份，不冒充物理主 ID。
+ * 主键用于把 NVAPI 结果与 Windows 唯一的 PNPDeviceID/BDF 载体归并，必须保持
+ * 1AF4:1050；型号由 external device、逻辑 subsystem/revision 以及其它标准接口
+ * 返回。这样鲁大师等多源工具不会把同一 devnode 拆成 Red Hat + NVIDIA 两块卡。
  */
 void nvapi_build_carrier_pci_identifiers(
     const struct nvapi_gpu_identity *identity, NvU32 *device_id,

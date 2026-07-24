@@ -80,6 +80,36 @@ if [[ "$source_version" != "$EXPECTED_QEMU_VERSION" ]]; then
     exit 1
 fi
 
+# ---------- 运行时代码版本证明 ----------
+# 上游 qemu-version.sh 的 `git describe --dirty` 会把 deploy 脚本或固件变化也
+# 计入 QEMU ELF 的 dirty 标记，但这些资产并不是 C/Rust 运行时编译输入，发布时
+# 会由独立 stage 清单记录。这里固定 HEAD 描述，并只把 deploy 之外的已跟踪、
+# 未跟踪变化标为 dirty；构建目录等 ignored 产物不会污染版本。
+QEMU_RUNTIME_PKGVERSION=""
+if [[ -e .git ]]; then
+    command -v git >/dev/null 2>&1 || {
+        echo "FAIL: Git checkout 中缺少 git，无法生成 QEMU 运行时代码版本证明" >&2
+        exit 1
+    }
+    if ! QEMU_RUNTIME_PKGVERSION="$(
+        git describe --match 'v*' --always --abbrev=10 HEAD
+    )"; then
+        echo "FAIL: 无法解析 QEMU HEAD 版本" >&2
+        exit 1
+    fi
+    QEMU_RUNTIME_STATE="$(
+        git status --porcelain --untracked-files=all -- \
+            . ':(exclude)deploy'
+    )" || {
+        echo "FAIL: 无法检查 QEMU 非 deploy 运行时代码状态" >&2
+        exit 1
+    }
+    if [[ -n "$QEMU_RUNTIME_STATE" ]]; then
+        QEMU_RUNTIME_PKGVERSION="${QEMU_RUNTIME_PKGVERSION}-dirty"
+    fi
+    echo ">> QEMU runtime pkgversion: $QEMU_RUNTIME_PKGVERSION"
+fi
+
 # ---------- 基础依赖预检 ----------
 missing_bin=()
 for tool in bzip2 ninja pkg-config python3; do
@@ -187,10 +217,24 @@ if [[ -n "${EXTRA_CONFIGURE:-}" ]]; then
     # shellcheck disable=SC2206
     CFG_FLAGS+=($EXTRA_CONFIGURE)
 fi
+# 版本证明属于发布安全参数，必须晚于实验性覆盖；运行时代码脏时调用方不能用
+# EXTRA_CONFIGURE 伪造 clean 版本。源码包没有 Git 元数据时保留上游空值行为。
+if [[ -n "$QEMU_RUNTIME_PKGVERSION" ]]; then
+    CFG_FLAGS+=(--with-pkgversion="$QEMU_RUNTIME_PKGVERSION")
+fi
 
 if (( RECONFIG )) || [[ ! -f build.ninja ]]; then
     echo ">> configure ${CFG_FLAGS[*]}"
     ../configure "${CFG_FLAGS[@]}"
+elif [[ -n "$QEMU_RUNTIME_PKGVERSION" ]]; then
+    # 已有 build 也必须立即同步新契约，不能要求用户猜测额外追加 --reconfig。
+    # Meson 只更新 pkgversion，保留该目录其它已配置选项；ninja 随后负责重链。
+    MESON="$REPO_ROOT/build/pyvenv/bin/meson"
+    [[ -x "$MESON" ]] || {
+        echo "FAIL: 已有 build 缺少可执行 Meson，无法同步运行时代码版本证明" >&2
+        exit 1
+    }
+    "$MESON" configure . "-Dpkgversion=$QEMU_RUNTIME_PKGVERSION"
 fi
 
 echo ">> ninja -j$JOBS"

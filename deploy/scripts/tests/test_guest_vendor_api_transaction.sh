@@ -15,6 +15,7 @@ ADL_TRANSACTION="$REPO_ROOT/deploy/guest-stealth/adl-system-transaction.ps1"
 APPLY="$REPO_ROOT/deploy/scripts/apply-gpu-spoof.ps1"
 NVAPI_DIR="$REPO_ROOT/deploy/nvapi-shim"
 ADL_DIR="$REPO_ROOT/deploy/adl-shim"
+CLEANUP_FIXTURE="$SCRIPT_DIR/fixtures/guest_vendor_api_cleanup_deferred_fixture.ps1"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -24,6 +25,7 @@ fail() {
 for path in "$COORDINATOR" "$IDENTITY_BINDING" "$NVAPI_INSTALL" \
         "$NVAPI_VALIDATION" "$NVAPI_TRANSACTION" \
         "$ADL_INSTALL" "$ADL_TRANSACTION" "$APPLY" \
+        "$CLEANUP_FIXTURE" \
         "$NVAPI_DIR/nvapi.dll" "$NVAPI_DIR/nvapi64.dll" \
         "$ADL_DIR/atiadlxy.dll" "$ADL_DIR/atiadlxx.dll"; do
     [[ -f "$path" ]] || fail "缺少厂商互斥事务文件：$path"
@@ -432,6 +434,10 @@ TEST_ROOT="$TEST_ROOT" pwsh -NoLogo -NoProfile -NonInteractive -Command '
         throw "apply 没有把 staged identity 的 canonical vendor 传给 coordinator"
     }
 ' || fail "厂商互斥计划、切换、预检或事务回滚测试失败"
+
+COORDINATOR_PATH="$COORDINATOR" TEST_ROOT="$TEST_ROOT" \
+pwsh -NoLogo -NoProfile -NonInteractive -File "$CLEANUP_FIXTURE" \
+    || fail "GPU API CleanupDeferred 聚合/优先级/reservation 契约测试失败"
 
 # 仍禁止按游戏/检测工具进程名分流或注入；修复只能由版本化 profile 厂商裁决。
 if rg -ni \

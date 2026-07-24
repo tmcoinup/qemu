@@ -190,21 +190,22 @@ base_boot_storage_load_profile_view
         runtime_checks=$((runtime_checks + 1))
     }
     base_boot_storage_prepare_matching_profile \
-        "$profile" 512110190592 3 validate_runtime >/dev/null
+        "$profile" 512110190592 3 validate_runtime existing >/dev/null
     [[ "$picks" == 0 && "$saves" == 0 && "$runtime_checks" == 1 &&
        "$original_hash" == "$(sha256sum "$profile")" ]] ||
         fail "匹配的 SATA profile 未被原样复用"
 )
 
-# 新抽身份即使容量匹配，也必须先通过创建期 CPU/KVM 回调再原子保存。这里让
-# 回调明确失败，证明瞬态 QEMU smoke 失败不会留下稍后才被 start-vm 拒绝的 profile。
+# 新抽身份即使由 mktemp 预占空 staging，也不能被当成 legacy profile；容量匹配
+# 后仍须先通过 CPU/KVM 回调再保存。回调失败时预占文件必须保持为空。
 (
     profile="$TMP_DIR/runtime-rejected.profile"
+    : >"$profile"
     picks=0
     saves=0
     runtime_checks=0
     stealth_have_profile() {
-        return 1
+        [[ -e "$1" || -L "$1" ]]
     }
     stealth_load_profile() {
         return 1
@@ -225,12 +226,12 @@ base_boot_storage_load_profile_view
         return 1
     }
     if base_boot_storage_prepare_matching_profile \
-            "$profile" 512110190592 3 reject_runtime \
+            "$profile" 512110190592 3 reject_runtime new \
             >"$TMP_DIR/runtime-rejected.log" 2>&1; then
         fail "CPU/KVM 实现预检失败后仍保存了新 profile"
     fi
     [[ "$picks" == 1 && "$runtime_checks" == 1 &&
-       "$saves" == 0 && ! -e "$profile" ]] ||
+       "$saves" == 0 && -f "$profile" && ! -s "$profile" ]] ||
         fail "运行时回调没有在保存前 fail closed: picks=$picks checks=$runtime_checks saves=$saves"
     grep -F "拒绝保存" "$TMP_DIR/runtime-rejected.log" >/dev/null ||
         fail "运行时拒绝没有说明 profile 未保存"

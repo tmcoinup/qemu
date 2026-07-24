@@ -57,34 +57,36 @@ function Assert-PhysicalHardwareIds {
 }
 
 function Get-ProjectedHardwareIds {
-    # 现场验证只替换最具体的第一项。其余原数组逐项、逐序保留，既让 GPU-Z 的
-    # 10DE 厂商门禁通过，也不给 Windows INF 匹配制造额外逻辑 ID。
+    # 只新增一个完整逻辑首项。AIB 的 SUBSYS 编码顺序是“子设备、子厂商”，不能
+    # 沿用 carrier 的 A10x:1AF4；其余原数组逐项、逐序保留给 stock INF 绑定。
     param(
         [Parameter(Mandatory = $true)][string[]]$OriginalIds,
         [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$VendorId,
-        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$DeviceId
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$DeviceId,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$SubsystemVendorId,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 65535)][int]$SubsystemDeviceId,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 255)][int]$RevisionId
     )
 
-    # 替换必须使用零宽边界；若把分隔符 `&` 一并匹配，-replace 会生成
-    # `DEV_1C82SUBSYS_...` 这种损坏的 HardwareID。
-    $stockPattern = '^PCI\\VEN_1AF4&DEV_1050(?=&|$)'
     Assert-PhysicalHardwareIds -Ids $OriginalIds
-    $logicalPrefix = 'PCI\VEN_{0:X4}&DEV_{1:X4}' -f $VendorId, $DeviceId
-    $logicalPrimary = $OriginalIds[0] -replace $stockPattern, $logicalPrefix
-    if ([string]::Equals($logicalPrimary, $OriginalIds[0],
-            [StringComparison]::OrdinalIgnoreCase)) {
+    if ($VendorId -eq 0x1AF4 -and $DeviceId -eq 0x1050) {
         throw '逻辑 PCI ID 与物理 1AF4:1050 相同，拒绝无意义投影'
     }
+    $logicalPrimary = 'PCI\VEN_{0:X4}&DEV_{1:X4}&SUBSYS_{2:X4}{3:X4}&REV_{4:X2}' -f `
+        $VendorId, $DeviceId, $SubsystemDeviceId, $SubsystemVendorId, $RevisionId
     return [string[]](@($logicalPrimary) + @($OriginalIds))
 }
 
 function Get-OriginalIdsFromExistingProjection {
-    # 只接受“当前 profile 的逻辑第一项 + 完整物理后缀”。没有正式备份时，不把任意
-    # 第三方 VEN/DEV 猜成历史 profile；VM2 的现场状态则能按这一精确规则安全接管。
+    # 优先接受 canonical 首项。兼容旧版只替换主 VEN/DEV 的 A101..A112 首项，
+    # 让现有 VM 原地迁移；候选尾部仍须是完整物理数组，任意第三方布局均拒绝。
     param(
         [Parameter(Mandatory = $true)][string[]]$CurrentIds,
         [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$VendorId,
-        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$DeviceId
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$DeviceId,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$SubsystemVendorId,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 65535)][int]$SubsystemDeviceId,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 255)][int]$RevisionId
     )
 
     Assert-HardwareIdArray -Ids $CurrentIds -Label '当前 HardwareID'
@@ -92,8 +94,19 @@ function Get-OriginalIdsFromExistingProjection {
     [string[]]$candidate = @($CurrentIds[1..($CurrentIds.Count - 1)])
     try {
         [string[]]$expected = @(Get-ProjectedHardwareIds -OriginalIds $candidate `
-            -VendorId $VendorId -DeviceId $DeviceId)
+            -VendorId $VendorId -DeviceId $DeviceId `
+            -SubsystemVendorId $SubsystemVendorId -SubsystemDeviceId $SubsystemDeviceId `
+            -RevisionId $RevisionId)
         if (Test-StringArrayEqual $CurrentIds $expected) { return $candidate }
+
+        $legacyCarrier = '^PCI\\VEN_1AF4&DEV_1050&SUBSYS_A1(?:0[1-9A-F]|1[0-2])1AF4' +
+            '&REV_[0-9A-F]{2}$'
+        if ($candidate[0] -notmatch $legacyCarrier) { return [string[]]@() }
+        $legacyPrefix = 'PCI\VEN_{0:X4}&DEV_{1:X4}' -f $VendorId, $DeviceId
+        $legacyPrimary = $candidate[0] -replace `
+            '^PCI\\VEN_1AF4&DEV_1050(?=&|$)', $legacyPrefix
+        [string[]]$legacyExpected = @($legacyPrimary) + @($candidate)
+        if (Test-StringArrayEqual $CurrentIds $legacyExpected) { return $candidate }
     } catch {
         return [string[]]@()
     }

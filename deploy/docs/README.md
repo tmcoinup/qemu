@@ -20,7 +20,7 @@ VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 
 | Windows 10 客体 | Linux/KVM 主验收对象 |
 | Windows 11 客体 | 有 TPM 2.0 路径，但 Secure Boot operational state 尚未闭环，不宣称正式支持 |
 | Linux 客体 | QEMU 设备功能兼容；启动器的命名、RTC 和安装流程仍偏向 Windows |
-| GPU | 物理设备固定为 virtio `1AF4:1050`；当前 6 个芯片型号各含 3 个品牌板卡，共 18 个 AIB 原子身份（12 NVIDIA、6 AMD），仅作客体用户态浅层投影，不使用 passthrough、SR-IOV GPU 或 vGPU |
+| GPU | 只有一个 virtio `1AF4:1050`/VioGpuDod devnode；PnP HardwareID 为规范逻辑首项 + 完整物理尾项，NVAPI 主键以物理 carrier 去重；18 个 AIB 身份仅作用户态投影，不使用 passthrough、SR-IOV GPU 或 vGPU |
 
 ## 唯一事实源
 
@@ -132,7 +132,7 @@ Linux 启动器默认按以下顺序 fail closed：
 | NVMe | Identify、容量、PCI/subsystem、SubNQN 可绑定 | SMART、热管理、功耗和错误恢复仍是通用 QEMU NVMe |
 | 音频 | HDA controller 和 ALC887 codec 身份 | `protocol_identity_only`，widget、插孔和板级布线不等价 |
 | EDID/HID | EDID 型号规格成套；HID 仅绑定 VID/PID/名称 | EDID 产品码/制造信息是明确标注的合成值；键鼠 report descriptor 仍是通用实现 |
-| 显示/GPU | 内核枚举固定为 virtio `1AF4:1050`；`1AF4:a101`–`1AF4:a112` carrier 从 18 块逻辑 AIB bundle 中选择，用户态投影对应真实品牌组合的 subsystem、VBIOS、显存与时钟 | `audited_aib_bundle_shallow_user_projection_no_passthrough`；不改变 virtio 驱动、寄存器或 3D 能力，不代表 NVIDIA/AMD 物理 GPU，也不虚构 GPU 序列号 |
+| 显示/GPU | 内核枚举固定为唯一 virtio `1AF4:1050` devnode；HardwareID 使用逻辑首项 + 物理尾项，NVAPI 以物理 carrier 跨接口关联并保留逻辑 external/AIB/型号 | `audited_aib_bundle_shallow_user_projection_no_passthrough`；不改变 virtio 驱动、寄存器、显存分配或 3D 性能，不代表 NVIDIA/AMD 物理 GPU，也不虚构 GPU 序列号 |
 
 xHCI 的 USB 链路/设备电源管理属于正常真机行为；本项目只禁止把通用虚拟控制器冒充为
 需要不同厂商 workaround 的 PCH。详细边界见 `PROFILE-FIELDS.md` 的

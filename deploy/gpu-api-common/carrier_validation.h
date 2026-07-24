@@ -38,10 +38,23 @@ struct stealth_gpu_carrier {
     uint32_t function_id;
 };
 
+/*
+ * HardwareID 投影只允许出现与不可变 identity 完全一致的逻辑首项。使用结构体
+ * 传递字段，避免 NVAPI/ADL 各自拼接字符串后产生 SUBSYS 字节序差异。
+ */
+struct stealth_gpu_logical_pci_identity {
+    uint32_t vendor_id;
+    uint32_t device_id;
+    uint32_t subsystem_vendor_id;
+    uint32_t subsystem_device_id;
+    uint32_t revision_id;
+};
+
 /* 可在 Linux 单元测试中执行的纯契约；Windows 枚举层只负责提供 observation。 */
 int stealth_validate_virtio_gpu_carrier_observation(
     const char *expected_source_instance_id, uint32_t expected_bus_id,
     uint32_t expected_slot_id, uint32_t expected_function_id,
+    const struct stealth_gpu_logical_pci_identity *logical_identity,
     const struct stealth_gpu_carrier_observation *observation,
     struct stealth_gpu_carrier *carrier);
 
@@ -52,6 +65,7 @@ int stealth_validate_virtio_gpu_carrier_observation(
 int stealth_validate_virtio_gpu_carrier_windows(
     const char *expected_source_instance_id, uint32_t expected_bus_id,
     uint32_t expected_slot_id, uint32_t expected_function_id,
+    const struct stealth_gpu_logical_pci_identity *logical_identity,
     struct stealth_gpu_carrier *carrier);
 
 #endif

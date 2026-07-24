@@ -11,6 +11,11 @@ RDP、QEMU guest agent、PowerShell 模块、NVIDIA 驱动或其它第三方软�
 
 - QEMU 设备的真实主 PCI ID 仍是 `1AF4:1050`，设备实例仍绑定 stock
   `VioGpuDod` Display-Only 驱动。
+- 系统中只有一个显示 devnode。PnP `HardwareIds` 的 MULTI_SZ 首项是当前 AIB 的
+  规范逻辑 VEN/DEV/SUBSYS/REV，其后逐项保留原始完整 `1AF4:1050` 数组；多条匹配
+  字符串不是多张显卡。
+- NVAPI 主 PCI 关联键使用物理 `1AF4:1050` carrier 跨接口去重；external device、
+  AIB SUBSYS/REV、标准型号和独显类型保持逻辑 NVIDIA 身份。
 - 当前目录在 GT 1030、GTX 750 Ti、GTX 1050、GTX 1050 Ti、RX 550、RX 560
   六个芯片型号下各提供 3 个品牌板卡，共 18 块 AIB（12 NVIDIA、6 AMD）。
   GPU-Z 等用户态程序看到所选 profile 的逻辑型号；后文 GTX 1050 Ti 只是示例。
@@ -63,7 +68,7 @@ Windows 内置 PowrProf 与 `powercfg.exe` 修改当前活动方案，不安装�
 | 字段 | 期望值 |
 | --- | --- |
 | Name | NVIDIA GeForce GTX 1050 Ti |
-| GPU / Device ID | GP107 / `10DE 1C82 - 10DE 1C82` |
+| GPU / Device ID | GP107 / 逻辑 `10DE:1C82` + 所选 AIB SUBSYS |
 | Shaders / ROPs / TMUs | 768 / 32 / 48 |
 | Memory | 4096 MB GDDR5，128 bit |
 | GPU Clock | 1290 MHz（Boost 1392 MHz） |
@@ -71,7 +76,10 @@ Windows 内置 PowrProf 与 `powercfg.exe` 修改当前活动方案，不安装�
 
 这些数值来自当前 profile 的一致性投影，不代表 guest 拥有同等显存、频率或运算能力。
 物理 PCI 配置空间、设备实例路径、`Service` 和实际显示驱动不会被伪装成 NVIDIA
-设备。
+设备。stock `VioGpuDod` 暴露的 DXGI adapter 描述和直接读取 PCI/PNP 的工具仍可能
+看到 virtio/`1AF4:1050`；这是当前非直通架构的预期边界。
+4 GiB 在 NVAPI legacy MemoryInfo 中是 `4194304 KiB`，在 MemoryInfoEx 中是
+`4294967296 bytes`；两者只是不同 ABI 单位，不是两个显存容量。
 
 不用安装 GPU-Z 也能做底层快速检查。以管理员身份打开 Windows PowerShell，执行：
 
@@ -96,8 +104,8 @@ Get-PnpDeviceProperty -InstanceId $smbus.InstanceId `
 
 - `Status` 为 `OK`，`Service` 为 `VioGpuDod`；
 - `InstanceId` 仍以物理 `PCI\VEN_1AF4&DEV_1050` 开头；
-- `HardwareIds` 第一项是所选 profile 的逻辑主 ID（上述 NVIDIA 示例为
-  `10DE:1C82`），后续项保留物理 `1AF4:1050`。
+- `HardwareIds` 首项是当前 AIB 的规范逻辑 ID，其后每一项都以物理
+  `PCI\VEN_1AF4&DEV_1050` 开头；真实 BDF、Service 和 Driver 不变；
 - SMBus 为 `Status=OK`、`Class=System`、ProblemCode `0`，INF 为 `oem*.inf`；
   `Service` 为空是 Intel NO_DRV 识别包的正常结果。
 
@@ -130,6 +138,10 @@ C:\ProgramData\StealthGPU\gpu-hardware-id-projection.log
 C:\ProgramData\StealthGPU\respawn.log
 ```
 
+`gpu-hardware-id-projection.log` 记录 physical-only 恢复、最终逻辑首项投影及验证；
+事务在写设备前先持久化并回读 `RollbackHardwareIds`，因此 journal 收尾中断也能在
+下次运行恢复。当前版本会维护 `StealthGPU-ProjectHardwareId` 启动/登录任务。
+
 常见处理方式：
 
 - 窗口再次黑屏并显示 `[Stopped]`：这是 guest 进入 ACPI S3，不是 QEMU 退出。查看
@@ -143,6 +155,8 @@ C:\ProgramData\StealthGPU\respawn.log
 - 设备管理器仍显示“SM 总线控制器”Code 28：查看
   `chipset-device-install.log`；不要安装来源不明的 SMBus `.sys`，本项目使用的是
   Microsoft WHCP 签名的 Intel NO_DRV 识别 INF。
+- `respawn.log` 返回 `30` 且提示 `ChipsetVerification`：本轮自动重启额度已经使用，
+  请人工重启一次。登录任务只复核芯片组 INF，不会重跑 GPU 流程或自动二次重启。
 - 日志提示未知 `nvapi.dll`/`nvapi64.dll`：系统可能已有真实 NVIDIA 或第三方同名库。
   installer 会故意拒绝覆盖。先确认该 guest 的用途和原驱动来源，不要强制删除。
 - 日志提示 payload 目录 Owner 不受信：确认
@@ -158,16 +172,12 @@ Start-Process -FilePath 'D:\工具\respawn-stealth.exe' `
 
 检查完毕后仍应手动重启一次。
 
-## 只撤销逻辑 HardwareID 投影
+## 从旧 HardwareID 布局升级
 
-以下操作只撤销计划任务维护的逻辑 HardwareID 首项，不是 NVIDIA/VFIO 驱动卸载器。
-先确认所有 `respawn-stealth.exe` 窗口和进程已经退出，再以管理员身份执行；不要让
-该手工回滚与统一 EXE 并发：
-
-```powershell
-& 'C:\ProgramData\StealthGPU\project-gpu-hardware-id.ps1' -Mode Rollback
-Unregister-ScheduledTask -TaskName 'StealthGPU-ProjectHardwareId' -Confirm:$false
-```
+直接运行最新 `respawn-stealth.exe`。它会停止旧 writer，先恢复并门禁原始
+physical-only 数组；身份与厂商 API 事务成功后，再按当前 AIB Apply/Verify 规范逻辑
+首项 + 完整物理尾项，并重新注册 `StealthGPU-ProjectHardwareId` 启动/登录任务。
+不要手工并发运行旧 projector。
 
 需要恢复整个 guest 时，优先使用部署前的 VM 快照。不要直接删除身份注册表 journal，
 否则会破坏下次运行时的自动恢复依据。
@@ -178,10 +188,10 @@ VM2 验收期间可以临时使用 RDP、USB/FAT 载荷、HTTP、探针或其它
 属于正式发布物，也不会被 `respawn-stealth.exe` 安装。普通双击正式 EXE 后，guest
 新增的持久内容是项目脚本、内嵌 Intel 识别 INF、stock 显示驱动包、必要的 x86/x64
 用户态身份库，以及
-`RefreshName`、`ForceDisplayFreq`、`ProjectHardwareId` 三条轻量计划任务；仅当设备尚未
-绑定兼容驱动时，程序才会安装 Windows 显示所必需的 `VioGpuDod` 内核驱动。封装镜像的
-`--firstlogon` 路径会保留 RefreshName 和 HardwareID，只抑制交互显示模式任务。两种路径都不
-新增 RDP、QGA、HTTP、网络或调试服务，默认 host 发布目录也只保留单个
-`respawn-stealth.exe`。
+`RefreshName` 名称刷新任务和 `ProjectHardwareId` 启动/登录维护任务；普通交互运行
+还可维护 `ForceDisplayFreq`。仅当设备尚未绑定兼容驱动时，程序才会
+安装 Windows 显示所必需的 `VioGpuDod` 内核驱动。封装镜像的 `--firstlogon` 路径保留
+RefreshName 并抑制交互显示模式任务。两种路径都不新增 RDP、QGA、HTTP、网络或调试
+服务，默认 host 发布目录也只保留单个 `respawn-stealth.exe`。
 
 完整实现、验证命令和源码调试方式见 [`README.md`](./README.md)。

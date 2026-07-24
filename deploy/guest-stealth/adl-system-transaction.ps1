@@ -90,6 +90,72 @@ function Get-AdlOptionalFileHash {
     return Get-LowerSha256 -Path $Path
 }
 
+function Test-AdlRetryableDeleteError {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    # Windows 分别用 AccessDenied(5) 和 SharingViolation(32) 表示 ACL 拒绝或
+    # image section 仍被映射；CleanupDeferred 只接受这两个原生错误码。
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        $nativeCode = if ($exception -is [ComponentModel.Win32Exception]) {
+            $exception.NativeErrorCode
+        } else { $exception.HResult -band 0xFFFF }
+        if ($nativeCode -eq 5 -or $nativeCode -eq 32) { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Assert-AdlManagedBackupFile {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    # 延迟清理只授权收据中目标同目录的规范 backup，且 ObservedHash 必须来自
+    # 当前或历史项目发布清单；不能把未知的真实 AMD DLL 纳入托管删除范围。
+    if (-not (Test-AdlTransactionPath $Entry.Backup $Entry.Directory `
+            $Entry.FileName 'backup')) {
+        throw ('ADL 托管备份路径非法：' + [string]$Entry.Backup)
+    }
+    $allowedHashes = @([string]$Entry.ExpectedHash) + @($Entry.HistoricalHashes)
+    if (-not (Test-HashInAllowList ([string]$Entry.ObservedHash) $allowedHashes)) {
+        throw ('ADL 托管备份摘要未被发布清单授权：' + [string]$Entry.Backup)
+    }
+    if (-not (Test-Path -LiteralPath $Entry.Backup)) { return $false }
+    $null = Assert-PlainFile -Path $Entry.Backup
+    if ((Get-LowerSha256 -Path $Entry.Backup) -cne [string]$Entry.ObservedHash) {
+        throw ('ADL 托管备份摘要不匹配：' + [string]$Entry.Backup)
+    }
+    return $true
+}
+
+function Remove-AdlManagedBackupFile {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    if (-not (Assert-AdlManagedBackupFile -Entry $Entry)) { return $false }
+    try {
+        Remove-TransactionFile -Path $Entry.Backup
+        return $false
+    } catch {
+        if (-not (Test-AdlRetryableDeleteError $_)) { throw }
+    }
+
+    # 删除失败后必须再次验证文件类型与精确摘要；若并发消失视为已完成，
+    # 若字节或类型变化则硬失败，绝不把路径交给不受收据约束的延迟删除。
+    if (-not (Assert-AdlManagedBackupFile -Entry $Entry)) { return $false }
+    return $true
+}
+
+function Test-AdlCleanupDeferredError {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception.Data.Contains('VmateAdlCleanupDeferred') -and
+            [bool]$exception.Data['VmateAdlCleanupDeferred']) { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
 function Undo-AdlProjectionEntry {
     param([Parameter(Mandatory = $true)]$Entry)
 
@@ -338,6 +404,7 @@ function Finalize-AdlProjectionReceipt {
                     $removedBackupHash -cne $entry.ObservedHash) {
                     throw ('Removed ADL Finalize 备份摘要不匹配：' + $entry.Backup)
                 }
+                $null = Assert-AdlManagedBackupFile -Entry $entry
             }
             continue
         }
@@ -346,21 +413,43 @@ function Finalize-AdlProjectionReceipt {
             (Test-Path -LiteralPath $entry.Discard)) {
             throw ('ADL Finalize 发现未完成 rollback discard：' + $entry.Discard)
         }
+        if ($entry.CommitAction -ceq 'Replaced') {
+            $null = Assert-AdlManagedBackupFile -Entry $entry
+        }
     }
+    $cleanupDeferred = New-Object Collections.Generic.List[string]
+    $cleanupErrors = New-Object Collections.Generic.List[string]
     foreach ($entry in $resolved) {
-        Remove-TransactionFile -Path $entry.Stage
+        try { Remove-TransactionFile -Path $entry.Stage } catch {
+            $cleanupErrors.Add($_.Exception.Message)
+        }
         if ([string]$entry.DesiredState -ceq 'Absent') {
             if ($entry.CommitAction -ceq 'Removed') {
-                Remove-TransactionFile -Path $entry.Backup
+                try {
+                    if (Remove-AdlManagedBackupFile -Entry $entry) {
+                        $cleanupDeferred.Add([string]$entry.Backup)
+                    }
+                } catch { $cleanupErrors.Add($_.Exception.Message) }
             }
             continue
         }
         if ($entry.CommitAction -ne 'Replaced' -or
             -not (Test-Path -LiteralPath $entry.Backup)) { continue }
-        if ((Get-AdlOptionalFileHash $entry.Backup) -cne $entry.ObservedHash) {
-            throw ('ADL Finalize 备份摘要不匹配：' + $entry.Backup)
-        }
-        Remove-TransactionFile -Path $entry.Backup
+        try {
+            if (Remove-AdlManagedBackupFile -Entry $entry) {
+                $cleanupDeferred.Add([string]$entry.Backup)
+            }
+        } catch { $cleanupErrors.Add($_.Exception.Message) }
+    }
+    if ($cleanupErrors.Count -gt 0) {
+        throw ('ADL Finalize 清理失败：' + ($cleanupErrors -join ' | '))
+    }
+    if ($cleanupDeferred.Count -gt 0) {
+        $exception = New-Object IO.IOException(
+            ('ADL 托管备份仍被占用，需重启后继续清理：' +
+                ($cleanupDeferred -join ', ')))
+        $exception.Data['VmateAdlCleanupDeferred'] = $true
+        throw $exception
     }
     Remove-TransactionFile -Path $Path
 }

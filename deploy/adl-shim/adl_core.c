@@ -7,6 +7,7 @@
 #include "adl_profile.h"
 #include "adl_public.h"
 #include "adl_runtime.h"
+#include "gpu_model_catalog.h"
 
 static int copy_string(char *output, size_t capacity, const char *source)
 {
@@ -26,7 +27,24 @@ static int copy_string(char *output, size_t capacity, const char *source)
 int adl_core_build_adapter_info(const struct adl_gpu_identity *identity,
                                 AdapterInfo *info)
 {
+    const char *standard_name;
+
+    if (info == NULL) {
+        return 0;
+    }
     memset(info, 0, sizeof(*info));
+    if (identity == NULL) {
+        return 0;
+    }
+    /*
+     * identity->name 保留完整 AIB 标签参与缓存和合同校验；AdapterInfo 对外只
+     * 返回由已验证逻辑主 ID 决定的标准芯片名。
+     */
+    standard_name = stealth_gpu_standard_model_name(
+        identity->pci_vendor_id, identity->pci_device_id);
+    if (standard_name == NULL) {
+        return 0;
+    }
     info->iSize = (int)sizeof(*info);
     info->iAdapterIndex = 0;
     /* BDF 来自已由 CM 返回并与 snapshot 逐项比对的唯一 virtio devnode。 */
@@ -52,7 +70,7 @@ int adl_core_build_adapter_info(const struct adl_gpu_identity *identity,
         copy_string(info->strDriverPathExt, sizeof(info->strDriverPathExt),
                     identity->carrier.driver_key) &&
         copy_string(info->strAdapterName, sizeof(info->strAdapterName),
-                    identity->name) &&
+                    standard_name) &&
         copy_string(info->strDisplayName, sizeof(info->strDisplayName),
                     "\\\\.\\DISPLAY1");
 }

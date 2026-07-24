@@ -160,15 +160,90 @@ test_uplink_detection_and_validation() {
         [[ "$UPLINK" == "enp3s0" ]]
     ) || fail "显式 UPLINK 未覆盖自动探测"
 
-    # 只有显式 VLAN_TRUNK=0 才保留普通 isolated bridge。
+    # 普通模式默认关闭自动接管，空 UPLINK 继续保留 isolated bridge。
     (
         VLAN_TRUNK=0
+        unset UPLINK_AUTO
         UPLINK=""
         BR=br-test
         uplink_detect_from_topology() { return 90; }
         setup_validate_inputs
-        [[ -z "$UPLINK" ]]
+        [[ "$UPLINK_AUTO" == "0" && -z "$UPLINK" ]]
     ) || fail "普通空 UPLINK 不再保持 isolated bridge"
+
+    # 修复中心显式开启普通 br0 自动上联时，必须复用相同的安全唯一探测，
+    # 而不能按接口名前缀猜测；成功结果会交给既有 NM DHCP 迁移路径。
+    (
+        VLAN_TRUNK=0
+        UPLINK_AUTO=1
+        UPLINK=""
+        BR=br0
+        uplink_detect_from_topology() {
+            [[ "${1:-}" == "setup_uplink_candidate_is_physical" \
+                && "${2:-}" == "br0" ]] || return 91
+            echo enp30s0
+        }
+        setup_nm_is_active() { return 0; }
+        setup_validate_inputs
+        [[ "$UPLINK" == "enp30s0" ]]
+    ) >"$out" || fail "普通 br0 未采用安全自动识别的 UPLINK"
+    grep -F -- ">> auto-detected uplink: enp30s0" "$out" >/dev/null \
+        || fail "普通 br0 自动识别 UPLINK 时没有明确提示"
+
+    # 即使开启自动模式，显式 UPLINK 也必须优先，不能触发拓扑探测。
+    (
+        VLAN_TRUNK=0
+        UPLINK_AUTO=1
+        UPLINK=enp31s0
+        BR=br0
+        uplink_detect_from_topology() { return 90; }
+        setup_validate_inputs
+        [[ "$UPLINK" == "enp31s0" ]]
+    ) || fail "普通模式显式 UPLINK 未覆盖自动探测"
+
+    set +e
+    (
+        VLAN_TRUNK=0
+        UPLINK_AUTO=1
+        UPLINK=""
+        BR=br0
+        uplink_detect_from_topology() { return 1; }
+        setup_validate_inputs
+    ) >"$out" 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" == "2" ]] || fail "普通 br0 无法唯一探测时退出码错误（rc=$rc）"
+    grep -F -- "请显式设置 UPLINK=<网卡>" "$out" >/dev/null \
+        || fail "普通 br0 自动上联失败时没有可操作提示"
+
+    # 普通自动上联不能落入只迁 IP、不迁 DHCP/默认路由的 iproute2 fallback；
+    # 拒绝必须发生在 root 检查、依赖安装和任何宿主网络修改之前。
+    set +e
+    (
+        VLAN_TRUNK=0
+        UPLINK_AUTO=1
+        UPLINK=""
+        BR=br0
+        uplink_detect_from_topology() { echo enp30s0; }
+        setup_nm_is_active() { return 1; }
+        setup_validate_inputs
+    ) >"$out" 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" == "2" ]] || fail "无 NetworkManager 时普通自动上联未 fail closed（rc=$rc）"
+    grep -F -- "自动上联需要正在运行的 NetworkManager" "$out" >/dev/null \
+        || fail "无 NetworkManager 的自动上联拒绝缺少可操作提示"
+
+    # 管理员显式指定 UPLINK 时继续允许历史 iproute2 路径，不能被自动模式门禁误伤。
+    (
+        VLAN_TRUNK=0
+        UPLINK_AUTO=1
+        UPLINK=enp31s0
+        BR=br0
+        setup_nm_is_active() { return 1; }
+        setup_validate_inputs
+        [[ "$UPLINK" == "enp31s0" ]]
+    ) || fail "显式 UPLINK 被无 NetworkManager 自动门禁错误拒绝"
 
     set +e
     (
@@ -211,6 +286,14 @@ test_obsolete_arguments_fail_before_root() {
     [[ "$rc" == "2" ]] || fail "trunk 非 br0 未被拒绝（rc=$rc）"
     grep -F -- "固定使用单一 br0" "$out" >/dev/null \
         || fail "trunk bridge 冲突未给出单 br0 说明"
+
+    set +e
+    VLAN_TRUNK=0 UPLINK_AUTO=guess BR=br0 bash "$SETUP_BRIDGE" >"$out" 2>&1
+    rc=$?
+    set -e
+    [[ "$rc" == "2" ]] || fail "非法 UPLINK_AUTO 未以参数错误退出（rc=$rc）"
+    grep -F -- "UPLINK_AUTO 必须为 0 或 1" "$out" >/dev/null \
+        || fail "非法 UPLINK_AUTO 没有明确错误"
 }
 
 test_installer_contract_is_static_and_root_owned() {

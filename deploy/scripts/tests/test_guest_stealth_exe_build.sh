@@ -21,6 +21,7 @@ EXE="$OUT_DIR/respawn-stealth.exe"
 PAYLOAD_SECURITY="$REPO_ROOT/deploy/guest-launcher-common/payload-security.c"
 PAYLOAD_ENVIRONMENT="$REPO_ROOT/deploy/guest-launcher-common/payload-environment.c"
 LAUNCHER_ARGUMENTS="$REPO_ROOT/deploy/guest-stealth/launcher/launcher-arguments.c"
+PAYLOADS_HEADER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-payloads.h"
 MANUFACTURER_HELPER="$REPO_ROOT/deploy/scripts/gpu-manufacturer-projection.ps1"
 MANUFACTURER_PROJECTOR_SOURCE="$REPO_ROOT/deploy/guest-stealth/launcher/gpu-manufacturer-projector.c"
 MANUFACTURER_PROJECTOR_EXE="$BUILD_DIR/gpu-manufacturer-projector.exe"
@@ -89,7 +90,10 @@ for driver_file in viogpudo.sys viogpudo.cat viogpudo.inf; do
         || fail "EXE 未包含内嵌驱动文件名: $driver_file"
 done
 for chipset_file in CannonLake-HSystem.inf cannonlake-h.cat \
-        SunrisePoint-HSystem.inf sunrisepoint-h.cat; do
+        SunrisePoint-HSystem.inf sunrisepoint-h.cat \
+        CougarPointSystem.inf cougarpoint.cat \
+        PantherPointSystem.inf pantherpoint.cat \
+        LynxPointSystem.inf lynxpoint.cat; do
     strings -a "$EXE" | grep -F "$chipset_file" >/dev/null \
         || fail "EXE 未包含芯片组 payload 文件名: $chipset_file"
 done
@@ -171,30 +175,6 @@ fi
 grep -F 'payload_publish_bundle(root_dir, work_dir' \
     "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
     || fail "launcher 没有以完整目录为单位发布 payload"
-grep -F '#include "payload_configure_power_policy_ps1.h"' \
-    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
-    || fail "launcher 没有编译电源策略 payload 数组"
-grep -F '{ L"configure-power-policy.ps1", payload_configure_power_policy_ps1,' \
-    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
-    || fail "launcher 没有把电源策略 helper 加入实际释放表"
-grep -F '#include "payload_respawn_restart_state_ps1.h"' \
-    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
-    || fail "launcher 没有编译重启状态 helper"
-grep -F '{ L"respawn-restart-state.ps1", payload_respawn_restart_state_ps1,' \
-    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
-    || fail "launcher 没有释放重启状态 helper"
-grep -F '#include "payload_gpu_manufacturer_projection_ps1.h"' \
-    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
-    || fail "launcher 没有编译厂商投影 PowerShell payload"
-grep -F '{ L"gpu-manufacturer-projection.ps1", payload_gpu_manufacturer_projection_ps1,' \
-    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
-    || fail "launcher 没有释放厂商投影 PowerShell helper"
-grep -F '#include "payload_gpu_manufacturer_projector_exe.h"' \
-    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
-    || fail "launcher 没有编译厂商投影器 payload"
-grep -F '{ L"gpu-manufacturer-projector.exe", payload_gpu_manufacturer_projector_exe,' \
-    "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" >/dev/null \
-    || fail "launcher 没有释放厂商投影器"
 grep -F 'O:BAD:P' "$PAYLOAD_SECURITY" >/dev/null \
     || fail "payload 安全描述符没有固定 Administrators Owner"
 grep -F 'OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION' \
@@ -272,6 +252,7 @@ grep -F 'COMPLUS_*' "$PAYLOAD_ENVIRONMENT" >/dev/null \
 
 for c_source in \
         "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" \
+        "$PAYLOADS_HEADER" \
         "$PAYLOAD_SECURITY" "$PAYLOAD_ENVIRONMENT" "$LAUNCHER_ARGUMENTS" \
         "$MANUFACTURER_PROJECTOR_SOURCE"; do
     [[ "$(wc -l < "$c_source")" -le 500 ]] \
@@ -295,13 +276,14 @@ fi
 
 # C 编译器应把每个数组原样放进 PE。直接查找完整二进制子串，比只看文件名更能
 # 防止 build 脚本漏掉或截断 SYS/CAT/INF；三者原始字节不变也是签名有效的前提。
-python3 - "$EXE" "$REPO_ROOT" "$MANUFACTURER_PROJECTOR_EXE" <<'PY'
+python3 - "$EXE" "$REPO_ROOT" "$MANUFACTURER_PROJECTOR_EXE" "$BUILD_DIR" <<'PY'
 from pathlib import Path
 import sys
 
 exe_path = Path(sys.argv[1])
 root = Path(sys.argv[2])
 manufacturer_projector_path = Path(sys.argv[3])
+build_dir = Path(sys.argv[4])
 exe = exe_path.read_bytes()
 payloads = (
     root / "deploy/guest-stealth/respawn-stealth-local.ps1",
@@ -327,6 +309,9 @@ payloads = (
     root / "deploy/scripts/gpu-hardware-id-transaction.ps1",
     root / "deploy/scripts/project-gpu-hardware-id.ps1",
     root / "deploy/scripts/force-displayfreq.ps1",
+    root / "deploy/guest-stealth/project-monitor-identity.ps1",
+    build_dir / "monitor-identities.json",
+    build_dir / "monitor-friendly-name-projector.exe",
     root / "deploy/scripts/stock-viogpudo/viogpudo.sys",
     root / "deploy/scripts/stock-viogpudo/viogpudo.cat",
     root / "deploy/scripts/stock-viogpudo/viogpudo.inf",
@@ -334,6 +319,12 @@ payloads = (
     root / "deploy/scripts/stock-intel-chipset-inf/cannonlake-h.cat",
     root / "deploy/scripts/stock-intel-chipset-inf/SunrisePoint-HSystem.inf",
     root / "deploy/scripts/stock-intel-chipset-inf/sunrisepoint-h.cat",
+    root / "deploy/scripts/stock-intel-chipset-inf/CougarPointSystem.inf",
+    root / "deploy/scripts/stock-intel-chipset-inf/cougarpoint.cat",
+    root / "deploy/scripts/stock-intel-chipset-inf/PantherPointSystem.inf",
+    root / "deploy/scripts/stock-intel-chipset-inf/pantherpoint.cat",
+    root / "deploy/scripts/stock-intel-chipset-inf/LynxPointSystem.inf",
+    root / "deploy/scripts/stock-intel-chipset-inf/lynxpoint.cat",
     root / "deploy/nvapi-shim/nvapi.dll",
     root / "deploy/nvapi-shim/nvapi64.dll",
     root / "deploy/nvapi-runtime-probe/nvapi-runtime-probe-x86.exe",
@@ -355,6 +346,9 @@ for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 gpu-board
         display-driver-trust.ps1 respawn-restart-state.ps1 \
         install-chipset-device.ps1 CannonLake-HSystem.inf cannonlake-h.cat \
         SunrisePoint-HSystem.inf sunrisepoint-h.cat \
+        CougarPointSystem.inf cougarpoint.cat \
+        PantherPointSystem.inf pantherpoint.cat \
+        LynxPointSystem.inf lynxpoint.cat \
         install-nvapi-system.ps1 nvapi-system-validation.ps1 \
         nvapi-system-transaction.ps1 gpu-api-identity-binding.ps1 \
         nvapi.dll nvapi64.dll nvapi-runtime-probe-x86.exe \
@@ -376,6 +370,7 @@ mkdir -p "$PACKAGE_REPO/deploy"
 cp -a "$REPO_ROOT/deploy/guest-stealth" "$PACKAGE_REPO/deploy/guest-stealth"
 cp -a "$REPO_ROOT/deploy/guest-launcher-common" \
     "$PACKAGE_REPO/deploy/guest-launcher-common"
+cp -a "$REPO_ROOT/deploy/hardware" "$PACKAGE_REPO/deploy/hardware"
 rm -rf "$PACKAGE_REPO/deploy/guest-stealth/dist"
 ln -s "$REPO_ROOT/deploy/scripts" "$PACKAGE_REPO/deploy/scripts"
 ln -s "$REPO_ROOT/deploy/nvapi-shim" "$PACKAGE_REPO/deploy/nvapi-shim"
@@ -493,7 +488,8 @@ if NVAPI_SRC_DIR="$BAD_NVAPI_DIR" \
 fi
 
 for source_file in "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c" \
-        "$PAYLOAD_SECURITY" "$MANUFACTURER_HELPER" "$MANUFACTURER_PROJECTOR_SOURCE"; do
+        "$PAYLOADS_HEADER" "$PAYLOAD_SECURITY" "$MANUFACTURER_HELPER" \
+        "$MANUFACTURER_PROJECTOR_SOURCE"; do
     [[ "$(wc -l < "$source_file")" -le 500 ]] || \
         fail "生产源单文件超过 500 行: $source_file"
 done

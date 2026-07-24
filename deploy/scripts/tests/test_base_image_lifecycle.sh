@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BASE_LIB="$REPO_ROOT/deploy/scripts/lib/base-image.sh"
 SUDO_SESSION_LIB="$REPO_ROOT/deploy/scripts/lib/sv-sudo-session.sh"
 PUBLISH_HELPER="$REPO_ROOT/deploy/scripts/lib/seal-base-publish.py"
+METRICS_HELPER="$REPO_ROOT/deploy/scripts/lib/qemu-image-metrics.py"
 SEAL="$REPO_ROOT/deploy/scripts/seal-base.sh"
 CLONE="$REPO_ROOT/deploy/scripts/clone-from-base.sh"
 TMP_DIR="$(mktemp -d)"
@@ -24,6 +25,10 @@ if [[ ! -x "$QEMU_IMG" ]]; then
 fi
 [[ -n "$QEMU_IMG" && -x "$QEMU_IMG" ]] ||
     fail "缺少 qemu-img，无法测试 base 生命周期"
+QEMU_IO="$(dirname "$QEMU_IMG")/qemu-io"
+[[ -x "$QEMU_IO" ]] || QEMU_IO="$(command -v qemu-io 2>/dev/null || true)"
+[[ -n "$QEMU_IO" && -x "$QEMU_IO" ]] ||
+    fail "缺少 qemu-io，无法测试 base 压缩布局"
 
 # shellcheck source=../lib/base-image.sh
 source "$BASE_LIB"
@@ -41,6 +46,41 @@ base_image_require_standalone_qcow2 "$QEMU_IMG" "$STANDALONE" ||
    "$BASE_IMAGE_HAS_BACKING" == 0 &&
    "$BASE_IMAGE_HAS_EXTERNAL_DATA" == 0 ]] ||
     fail "base 元数据解析错误"
+
+# 未压缩与显式 zlib 输出必须保持完全相同的 guest 数据；布局判断来自实际
+# compressed cluster 计数，而不是 qcow2 header 中默认的算法名称。
+LAYOUT_SOURCE="$TMP_DIR/layout-source.qcow2"
+LAYOUT_NONE="$TMP_DIR/layout-none.qcow2"
+LAYOUT_ZLIB="$TMP_DIR/layout-zlib.qcow2"
+"$QEMU_IMG" create -q -f qcow2 "$LAYOUT_SOURCE" 4M
+"$QEMU_IO" -f qcow2 -c 'write -P 0x5a 0 4M' "$LAYOUT_SOURCE" >/dev/null
+"$QEMU_IMG" convert -O qcow2 "$LAYOUT_SOURCE" "$LAYOUT_NONE"
+"$QEMU_IMG" convert -O qcow2 -c -o compression_type=zlib \
+    "$LAYOUT_SOURCE" "$LAYOUT_ZLIB"
+NONE_LAYOUT="$(
+    "$QEMU_IMG" check --output=json "$LAYOUT_NONE" |
+        python3 "$METRICS_HELPER" check -
+)" || fail "未压缩 qcow2 布局无法解析"
+ZLIB_LAYOUT="$(
+    "$QEMU_IMG" check --output=json "$LAYOUT_ZLIB" |
+        python3 "$METRICS_HELPER" check -
+)" || fail "zlib qcow2 布局无法解析"
+[[ "${NONE_LAYOUT%% *}" == 0 && "${ZLIB_LAYOUT%% *}" -gt 0 ]] ||
+    fail "未压缩/zlib 的 compressed cluster 策略没有落实"
+base_image_require_standalone_qcow2 "$QEMU_IMG" "$LAYOUT_ZLIB" ||
+    fail "既有 zlib 压缩 base 不再兼容 standalone/clone 校验"
+"$QEMU_IMG" compare -q "$LAYOUT_SOURCE" "$LAYOUT_NONE" ||
+    fail "未压缩 convert 改变了 guest-visible 数据"
+"$QEMU_IMG" compare -q "$LAYOUT_SOURCE" "$LAYOUT_ZLIB" ||
+    fail "zlib convert 改变了 guest-visible 数据"
+if printf '%s\n' '{"check-errors":false,"total-clusters":1}' |
+        python3 "$METRICS_HELPER" check - >/dev/null 2>&1; then
+    fail "指标解析器把 JSON bool 当成了整数"
+fi
+if printf '%s\n' '{"required":-1,"fully-allocated":1}' |
+        python3 "$METRICS_HELPER" measure - >/dev/null 2>&1; then
+    fail "指标解析器接受了负 measure"
+fi
 chmod 0444 "$STANDALONE"
 if base_image_require_trusted_backing_qcow2_fast \
         "$QEMU_IMG" "$STANDALONE" 1048576 \
@@ -199,6 +239,13 @@ if (( EUID != 0 )); then
     grep -F "源 disk 存在其它硬链接" "$TMP_DIR/hardlink-source.log" >/dev/null ||
         fail "seal 的源 disk 硬链接拒绝原因不明确"
 fi
+if "$SEAL" 9 invalid-compression --compression=unknown \
+        >"$TMP_DIR/invalid-compression.log" 2>&1; then
+    fail "seal 接受了未知压缩策略"
+fi
+grep -F "compression 只支持 none 或 zlib" \
+        "$TMP_DIR/invalid-compression.log" >/dev/null ||
+    fail "seal 的压缩策略拒绝原因不明确"
 
 # 两个入口必须接入同一契约；seal 还必须先持实例锁，再检查/转换源盘。
 grep -F 'source "$SCRIPT_DIR/lib/base-image.sh"' "$SEAL" >/dev/null ||
@@ -215,6 +262,16 @@ grep -F 'python3 "$BASE_PUBLISH_HELPER" publish \' "$SEAL" >/dev/null ||
     fail "seal 未通过非交互 sudo 和稳定 FD root helper 发布独立 base inode"
 grep -F 'sv_sudo_session_supervise \' "$SEAL" >/dev/null ||
     fail "seal 没有在主 shell 中监督长时间 qemu-img convert"
+grep -F 'COMPRESSION="${BASE_COMPRESSION:-none}"' "$SEAL" >/dev/null ||
+    fail "seal 新 base 没有默认使用未压缩性能布局"
+grep -F 'COMPRESS_ARGS=(-c -o compression_type=zlib)' "$SEAL" >/dev/null ||
+    fail "seal 没有把 zlib 压缩限制为显式策略"
+grep -F 'measure --output=json -O qcow2 "$SRC_DISK"' "$SEAL" >/dev/null ||
+    fail "seal 未在创建 staging 前执行双份发布空间门禁"
+grep -F 'seal_read_qcow2_layout "$BASE_FD_PATH"' "$SEAL" >/dev/null ||
+    fail "seal 未验证 staging 的实际 compressed cluster 布局"
+grep -F 'seal_read_qcow2_layout "$BASE_FILE"' "$SEAL" >/dev/null ||
+    fail "seal 未复核最终 root-owned base 的布局"
 grep -F "trap 'seal_signal_exit 143' TERM" "$SEAL" >/dev/null ||
     fail "seal 没有在 TERM 时先清理受监督子进程"
 grep -F 'base_image_remove_published_fingerprint' "$SEAL" >/dev/null ||

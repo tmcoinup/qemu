@@ -229,6 +229,7 @@ source "$HERE/lib/sv-qemu-ptracer.sh" # 每实例自动授权最终 QEMU 叶进�
 sv_qemu_ptracer_preflight || exit 1
 source "$HERE/lib/sv-host-helpers.sh" # 拒绝工作区 sudoers，仅信任 root-owned helper
 source "$HERE/lib/sv-portability.sh" # 迁移 host 预检：路径/QEMU 能力，不做隐身降级
+source "$HERE/lib/sv-storage-aio.sh" # active-read 选择 io_uring/native/threads，不加 IOThread
 source "$HERE/lib/sv-cpupin.sh"     # 在其它宿主预检后校验 helper；稍后异步等待 vCPU
 source "$HERE/lib/sv-host-capabilities.sh" # KVM/TSC 真能力；供 profile 做硬约束
 source "$HERE/lib/base-image.sh"   # root-owned base/backing 的运行期快速完整性门禁
@@ -238,6 +239,6 @@ source "$HERE/lib/sv-hosttune.sh"   # (可选,默认开) host 压抖动 + 按伪
                                     #   ↑ 必须在 identity 之后: 频率封顶要用 CPU_MAX_MHZ
 source "$HERE/lib/sv-tpm-mem.sh"    # TPM(swtpm) + DIMM 拓扑 / 内存 / SMBIOS / AMD DF
 source "$HERE/lib/sv-devices.sh"    # 平台 PCI ID + 显示/EDID + 启动序 + CDROM + 网络 + USB + 音频
-source "$HERE/lib/sv-dock.sh"       # GNOME dash-to-dock 集成：每实例独立可固定/可排序图标(SDL 窗口)
+source "$HERE/lib/sv-dock.sh"       # GNOME dash-to-dock：每实例编号窗口匹配；默认隐藏且不固定
 source "$HERE/lib/sv-display-guard.sh" # SDL 生命周期：inhibit + 退出时可靠恢复宿主 DPMS/屏保
 source "$HERE/lib/sv-assemble.sh"   # 组装 argv + DRY_RUN + 守护进程 + 显示生命周期启动

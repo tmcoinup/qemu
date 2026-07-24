@@ -38,7 +38,16 @@ stealth_validate_boot_storage_serial() {
 }
 
 stealth_build_boot_storage_args() {
+    local disk_aio="${QEMU_DISK_AIO_SELECTED:-threads}"
+
     BOOT_STORAGE_ARGS=()
+    case "$disk_aio" in
+        threads|native|io_uring) ;;
+        *)
+            echo "ERROR: 启动盘收到未验证的 AIO 后端: $disk_aio" >&2
+            return 1
+            ;;
+    esac
     stealth_validate_boot_storage_serial || return 1
     case "${PLATFORM_BOOT_STORAGE:-nvme}" in
         nvme)
@@ -58,7 +67,7 @@ stealth_build_boot_storage_args() {
                 return 1
             fi
             BOOT_STORAGE_ARGS=(
-                -drive "file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=threads,discard=unmap"
+                -drive "file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=${disk_aio},discard=unmap"
                 -device "nvme,id=nvmectl0,bus=rp1,drive=bootdisk0,serial=${BOOT_STORAGE_SERIAL:?缺少 BOOT_STORAGE_SERIAL},x-identity-profile=${NVME_COMPONENT_ID:?缺少 NVME_COMPONENT_ID},bootindex=3,model-number=${BOOT_STORAGE_MODEL:?缺少 BOOT_STORAGE_MODEL},firmware-rev=${BOOT_STORAGE_FIRMWARE:?缺少 BOOT_STORAGE_FIRMWARE},subsys-vendor-id=${NVME_SUBSYS_VEN:?缺少 NVME_SUBSYS_VEN},subsys-id=${NVME_SUBSYS_DEV:?缺少 NVME_SUBSYS_DEV},subnqn=${NVME_SUBNQN:?缺少 NVME_SUBNQN}"
             )
             ;;
@@ -82,7 +91,7 @@ stealth_build_boot_storage_args() {
             # 安装介质固定占 ide.0，副 ISO 占 ide.1；启动盘使用独立的第三端口，
             # 避免仅在 --iso 启动时才暴露的 unit 冲突。
             BOOT_STORAGE_ARGS=(
-                -drive "file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=threads,discard=unmap"
+                -drive "file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=${disk_aio},discard=unmap"
                 -device "ide-hd,bus=ide.2,unit=0,drive=bootdisk0,bootindex=3,model=${BOOT_STORAGE_MODEL},serial=${BOOT_STORAGE_SERIAL},ver=${BOOT_STORAGE_FIRMWARE},rotation_rate=1"
             )
             ;;

@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BUILD_SCRIPT="$REPO_ROOT/deploy/tools/build.sh"
+BUILD_DEPS_HELPER="$REPO_ROOT/deploy/tools/lib/build-dependencies.sh"
+BUILD_DEPS_DOC="$REPO_ROOT/deploy/docs/DEVELOPMENT-DEPENDENCIES.md"
 PATCH_SCRIPT="$REPO_ROOT/deploy/tools/apply-patches.sh"
 OVMF_BUILD_SCRIPT="$REPO_ROOT/deploy/tools/build-ovmf.sh"
 
@@ -33,6 +35,7 @@ reject_text() {
 
 test_shell_syntax() {
     bash -n "$BUILD_SCRIPT"
+    bash -n "$BUILD_DEPS_HELPER"
     bash -n "$PATCH_SCRIPT"
     bash -n "$OVMF_BUILD_SCRIPT"
 }
@@ -47,18 +50,41 @@ test_qemu_11_baseline_and_werror() {
 
 test_python_preflight_contract() {
     # 中文注释：只检查预检代码存在，不在静态测试中创建 pyvenv 或联网下载。
-    require_text 'find_spec("venv")' "$BUILD_SCRIPT"
-    require_text 'find_spec("ensurepip")' "$BUILD_SCRIPT"
-    require_text '"setuptools": (44, 1, 1)' "$BUILD_SCRIPT"
-    require_text '"wheel": (0, 34, 2)' "$BUILD_SCRIPT"
-    require_text 'python3-setuptools python3-wheel' "$BUILD_SCRIPT"
+    require_text 'find_spec("venv")' "$BUILD_DEPS_HELPER"
+    require_text 'find_spec("ensurepip")' "$BUILD_DEPS_HELPER"
+    require_text '"setuptools": ("python3-setuptools", (44, 1, 1))' \
+        "$BUILD_DEPS_HELPER"
+    require_text '"wheel": ("python3-wheel", (0, 34, 2))' \
+        "$BUILD_DEPS_HELPER"
 }
 
 test_required_native_dependencies_are_preflighted() {
-    require_text 'for tool in bzip2 ninja pkg-config python3' "$BUILD_SCRIPT"
-    require_text 'for pkg in glib-2.0 pixman-1 zlib' "$BUILD_SCRIPT"
-    require_text 'build-essential bzip2 ninja-build' "$BUILD_SCRIPT"
-    require_text 'zlib1g-dev' "$BUILD_SCRIPT"
+    require_text 'INSTALL_BUILD_DEPS="${INSTALL_BUILD_DEPS:-auto}"' "$BUILD_SCRIPT"
+    require_text 'source "$BUILD_DEPS_HELPER"' "$BUILD_SCRIPT"
+    require_text 'build_dependencies_ensure "$INSTALL_BUILD_DEPS"' "$BUILD_SCRIPT"
+    for package in build-essential bzip2 git meson ninja-build pkg-config \
+            python3-venv python3-pip python3-setuptools python3-wheel \
+            zlib1g-dev libglib2.0-dev libpixman-1-dev \
+            libslirp-dev libseccomp-dev libaio-dev liburing-dev \
+            libsdl2-dev libepoxy-dev libvirglrenderer-dev \
+            libspice-server-dev; do
+        require_text "$package" "$BUILD_DEPS_HELPER"
+        require_text "$package" "$BUILD_DEPS_DOC"
+    done
+    reject_text 'ovmf' "$BUILD_DEPS_HELPER"
+    require_text 'INSTALL_BUILD_DEPS=auto' "$BUILD_DEPS_DOC"
+    require_text '--no-install-build-deps' "$BUILD_DEPS_DOC"
+    require_text '/usr/bin/apt-get -o DPkg::Lock::Timeout=120 update' \
+        "$BUILD_DEPS_HELPER"
+    require_text 'build_dependencies_detect || return 1' "$BUILD_DEPS_HELPER"
+    require_text 'build_dependencies_validate_packages || return 1' \
+        "$BUILD_DEPS_HELPER"
+    require_text '--enable-linux-aio' "$BUILD_SCRIPT"
+    require_text '--enable-linux-io-uring' "$BUILD_SCRIPT"
+    require_text 'aio_build_contract_ready' "$BUILD_SCRIPT"
+    require_text 'AIO_RECONFIG=1' "$BUILD_SCRIPT"
+    require_text 'CONFIG_LINUX_AIO([[:space:]]+1)?' "$BUILD_SCRIPT"
+    require_text 'CONFIG_LINUX_IO_URING([[:space:]]+1)?' "$BUILD_SCRIPT"
 }
 
 test_runtime_version_provenance() {
@@ -92,6 +118,7 @@ test_cli_compatibility() {
 
     help_output="$("$BUILD_SCRIPT" --help)"
     for option in --clean --reconfig --debug --jobs --verify \
+            --install-build-deps --no-install-build-deps \
             --install-host-helpers --no-install-host-helpers; do
         grep -F -- "$option" <<<"$help_output" >/dev/null \
             || fail "--help 丢失既有选项 $option"

@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 PORTABILITY="$REPO_ROOT/deploy/scripts/lib/sv-portability.sh"
+SV_DEVICES="$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
 
 # 本用例只检查显示 argv，不应随 CI 宿主是 AMD/Intel 或是否开放 /dev/kvm 而变化。
 # 显式进入兼容 dry-run，并注入一个 manifest 中真实启用的 Intel 候选。
@@ -62,6 +63,13 @@ test_default_sdl_uses_stable_display() {
     grep -F -- '当前为非 GL 显示路径；使用 SHM fallback' \
         "$out" >/dev/null \
         || fail "default summary must report the stable SHM fallback"
+    grep -F -- 'export SDL_FRAMEBUFFER_ACCELERATION=0' "$SV_DEVICES" >/dev/null \
+        || fail "stable SDL must disable the accelerated window framebuffer"
+    grep -F -- 'export SDL_RENDER_DRIVER=software' "$SV_DEVICES" >/dev/null \
+        || fail "stable SDL must force the software renderer"
+    grep -F -- 'unset SDL_FRAMEBUFFER_ACCELERATION SDL_RENDER_DRIVER' \
+        "$SV_DEVICES" >/dev/null \
+        || fail "explicit SDL/GL must clear stable software renderer hints"
 }
 
 test_explicit_gl_is_safe_by_default() {

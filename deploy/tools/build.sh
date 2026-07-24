@@ -14,6 +14,9 @@ RECONFIG="${RECONFIG:-0}"
 DEBUG="${DEBUG:-0}"
 JOBS="${JOBS:-$(nproc)}"
 VERIFY="${VERIFY:-0}"
+# 中文注释：构建依赖与宿主 helper 是两条独立策略。依赖 auto 只在 Debian/Ubuntu
+# 本地前台终端补齐；CI、容器和后台绝不隐式修改宿主。
+INSTALL_BUILD_DEPS="${INSTALL_BUILD_DEPS:-auto}"
 # 中文注释：默认 auto 只在本地交互终端同步宿主 helper；CI、容器和无终端
 # 打包任务不会意外修改 /usr/local 或 /etc。需要无人值守安装时显式设为 1，
 # 并预先配置可用的非交互 sudo；只生成构建产物时显式设为 0。
@@ -29,11 +32,19 @@ usage() {
   --debug        / DEBUG=1       启用调试信息并禁止 strip
   --jobs N       / JOBS=N        设置 ninja 并行度（默认 nproc）
   --verify       / VERIFY=1      构建后运行 verify-stealth.sh
+  --install-build-deps             强制安装缺失的构建依赖
+                  INSTALL_BUILD_DEPS=1
+  --no-install-build-deps          禁止系统安装；缺依赖仍 fail closed
+                  INSTALL_BUILD_DEPS=0
   --install-host-helpers          强制构建后安装并校验宿主 helper
                   INSTALL_HOST_HELPERS=1
-  --no-install-host-helpers       只构建，不安装宿主 helper
+  --no-install-host-helpers       跳过宿主 helper（不影响构建依赖策略）
                   INSTALL_HOST_HELPERS=0
   -h, --help                    显示本帮助
+
+构建依赖默认策略:
+  INSTALL_BUILD_DEPS=auto（默认）在 Debian/Ubuntu 本地前台终端缺包时自动运行 APT；
+  CI、容器、后台或其它发行版不隐式修改系统。显式强制的无终端任务只使用 sudo -n。
 
 宿主 helper 默认策略:
   INSTALL_HOST_HELPERS=auto（默认）只在本地前台交互终端自动安装；CI、容器或后台跳过。
@@ -50,6 +61,8 @@ while (( $# )); do
         --reconfig) RECONFIG=1 ;;
         --debug)    DEBUG=1 ;;
         --verify)   VERIFY=1 ;;
+        --install-build-deps) INSTALL_BUILD_DEPS=1 ;;
+        --no-install-build-deps) INSTALL_BUILD_DEPS=0 ;;
         --install-host-helpers) INSTALL_HOST_HELPERS=1 ;;
         --no-install-host-helpers) INSTALL_HOST_HELPERS=0 ;;
         --jobs)     JOBS="$2"; shift ;;
@@ -60,6 +73,13 @@ while (( $# )); do
     shift
 done
 
+case "$INSTALL_BUILD_DEPS" in
+    auto|0|1) ;;
+    *)
+        echo "FAIL: INSTALL_BUILD_DEPS 只接受 auto、0 或 1" >&2
+        exit 2
+        ;;
+esac
 case "$INSTALL_HOST_HELPERS" in
     auto|0|1) ;;
     *)
@@ -79,6 +99,17 @@ if [[ "$source_version" != "$EXPECTED_QEMU_VERSION" ]]; then
     echo "      请切换到正确的 vmate 分支后重新执行。" >&2
     exit 1
 fi
+
+# ---------- 构建依赖 ----------
+# 依赖保障必须早于 Git 版本证明；否则全新环境缺 git 时会在自动安装前退出。
+BUILD_DEPS_HELPER="$HERE/lib/build-dependencies.sh"
+[[ -r "$BUILD_DEPS_HELPER" ]] || {
+    echo "FAIL: 缺少构建依赖 helper: $BUILD_DEPS_HELPER" >&2
+    exit 1
+}
+# shellcheck source=lib/build-dependencies.sh
+source "$BUILD_DEPS_HELPER"
+build_dependencies_ensure "$INSTALL_BUILD_DEPS" || exit $?
 
 # ---------- 运行时代码版本证明 ----------
 # 上游 qemu-version.sh 的 `git describe --dirty` 会把 deploy 脚本或固件变化也
@@ -110,76 +141,6 @@ if [[ -e .git ]]; then
     echo ">> QEMU runtime pkgversion: $QEMU_RUNTIME_PKGVERSION"
 fi
 
-# ---------- 基础依赖预检 ----------
-missing_bin=()
-for tool in bzip2 ninja pkg-config python3; do
-    command -v "$tool" >/dev/null 2>&1 || missing_bin+=("$tool")
-done
-missing_pkg=()
-for pkg in glib-2.0 pixman-1 zlib; do
-    pkg-config --exists "$pkg" 2>/dev/null || missing_pkg+=("$pkg")
-done
-if (( ${#missing_bin[@]} + ${#missing_pkg[@]} )); then
-    echo "FAIL: 缺少依赖"
-    (( ${#missing_bin[@]} )) && echo "  可执行文件: ${missing_bin[*]}"
-    (( ${#missing_pkg[@]} )) && echo "  pkg-config: ${missing_pkg[*]}"
-    echo "  修复: sudo apt install build-essential bzip2 ninja-build pkg-config \\"
-    echo "         python3-venv python3-pip libglib2.0-dev libpixman-1-dev \\"
-    echo "         libsdl2-dev libspice-server-dev libvirglrenderer-dev libepoxy-dev \\"
-    echo "         zlib1g-dev libslirp-dev libseccomp-dev ovmf"
-    exit 1
-fi
-
-# ---------- QEMU 11 Python 构建依赖预检 ----------
-# 中文注释：QEMU 11 configure 会创建 build/pyvenv，并从 pythondeps.toml
-# 安装 qemu.qmp 等工具。venv/ensurepip 缺失会让虚拟环境创建失败；而
-# setuptools 与 wheel 是 tooling 组的显式依赖，源码树没有内置这两个 wheel。
-if ! python3 - <<'PY'
-import importlib.util
-import re
-import sys
-from importlib import metadata
-
-
-def version_tuple(raw_version):
-    """把常见发行版版本字符串转换为可比较的三段整数。"""
-    parts = [int(item) for item in re.findall(r"\d+", raw_version)[:3]]
-    return tuple((parts + [0, 0, 0])[:3])
-
-
-errors = []
-if importlib.util.find_spec("venv") is None:
-    errors.append("缺少 Python venv 模块")
-if (importlib.util.find_spec("ensurepip") is None and
-        importlib.util.find_spec("pip") is None):
-    errors.append("ensurepip 与 pip 均不可用，无法初始化构建虚拟环境")
-
-requirements = {
-    "setuptools": (44, 1, 1),
-    "wheel": (0, 34, 2),
-}
-for package, minimum in requirements.items():
-    try:
-        installed = metadata.version(package)
-    except metadata.PackageNotFoundError:
-        errors.append(f"缺少 Python 包 {package}")
-        continue
-    if version_tuple(installed) < minimum:
-        expected = ".".join(str(item) for item in minimum)
-        errors.append(f"Python 包 {package}={installed}，最低要求 {expected}")
-
-if errors:
-    for error in errors:
-        print(f"  - {error}", file=sys.stderr)
-    raise SystemExit(1)
-PY
-then
-    echo "FAIL: QEMU 11 Python 构建依赖不完整" >&2
-    echo "  修复: sudo apt install python3-venv python3-pip \\" >&2
-    echo "         python3-setuptools python3-wheel" >&2
-    exit 1
-fi
-
 # ---------- vmate 定制状态提示（不强制） ----------
 if ! grep -q 'Ryzen3-1200' target/i386/cpu.c 2>/dev/null; then
     echo ">> NOTE: 当前 11.0.2 源码未检测到 vmate Ryzen3-1200 定制。"
@@ -198,6 +159,8 @@ cd build
 CFG_FLAGS=(
     --target-list=x86_64-softmmu
     --enable-kvm
+    --enable-linux-aio
+    --enable-linux-io-uring
     --enable-slirp
     --enable-virtfs
     --enable-spice
@@ -223,7 +186,24 @@ if [[ -n "$QEMU_RUNTIME_PKGVERSION" ]]; then
     CFG_FLAGS+=(--with-pkgversion="$QEMU_RUNTIME_PKGVERSION")
 fi
 
-if (( RECONFIG )) || [[ ! -f build.ninja ]]; then
+aio_build_contract_ready() {
+    [[ -r config-host.h ]] &&
+        grep -Eq '^#define[[:space:]]+CONFIG_LINUX_AIO([[:space:]]+1)?[[:space:]]*$' \
+            config-host.h &&
+        grep -Eq '^#define[[:space:]]+CONFIG_LINUX_IO_URING([[:space:]]+1)?[[:space:]]*$' \
+            config-host.h
+}
+
+# 中文注释：升级前创建的 build/ 会保留旧 Meson feature 值；只运行 ninja 不会
+# 启用新增后端。检测最终生成的 config-host.h，比猜测 Meson CLI 状态更可靠，
+# 并能让普通 build.sh 自动完成一次必要的重配置。
+AIO_RECONFIG=0
+if [[ -f build.ninja ]] && ! aio_build_contract_ready; then
+    AIO_RECONFIG=1
+    echo ">> build AIO 契约已升级，自动重新 configure"
+fi
+
+if (( RECONFIG || AIO_RECONFIG )) || [[ ! -f build.ninja ]]; then
     echo ">> configure ${CFG_FLAGS[*]}"
     ../configure "${CFG_FLAGS[@]}"
 elif [[ -n "$QEMU_RUNTIME_PKGVERSION" ]]; then
@@ -236,6 +216,12 @@ elif [[ -n "$QEMU_RUNTIME_PKGVERSION" ]]; then
     }
     "$MESON" configure . "-Dpkgversion=$QEMU_RUNTIME_PKGVERSION"
 fi
+
+aio_build_contract_ready || {
+    echo "FAIL: configure 未启用 CONFIG_LINUX_AIO/CONFIG_LINUX_IO_URING" >&2
+    echo "      请确认 libaio-dev、liburing-dev 可用且未被 EXTRA_CONFIGURE 禁用。" >&2
+    exit 1
+}
 
 echo ">> ninja -j$JOBS"
 ninja -j"$JOBS"

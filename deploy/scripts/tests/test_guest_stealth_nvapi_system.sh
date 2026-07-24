@@ -16,6 +16,7 @@ IDENTITY_HELPER="$REPO_ROOT/deploy/scripts/persist-gpu-profile.ps1"
 BUILD_SCRIPT="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 PACKAGE_SCRIPT="$REPO_ROOT/deploy/guest-stealth/package.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
+PAYLOADS_HEADER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-payloads.h"
 README="$REPO_ROOT/deploy/guest-stealth/README.md"
 NVAPI_DIR="$REPO_ROOT/deploy/nvapi-shim"
 NVAPI_CONTRACT_FIXTURE="$SCRIPT_DIR/fixtures/guest_stealth_nvapi_contract_fixture.ps1"
@@ -27,7 +28,7 @@ fail() {
 
 for path in "$INSTALLER" "$VALIDATION_HELPER" "$TRANSACTION_HELPER" \
         "$RESPAWN" "$APPLY" "$APPLY_SUPPORT" "$IDENTITY_HELPER" \
-        "$BUILD_SCRIPT" "$PACKAGE_SCRIPT" \
+        "$BUILD_SCRIPT" "$PACKAGE_SCRIPT" "$LAUNCHER" "$PAYLOADS_HEADER" \
         "$NVAPI_CONTRACT_FIXTURE" \
         "$NVAPI_DIR/nvapi.dll" "$NVAPI_DIR/nvapi64.dll"; do
     [[ -f "$path" ]] || fail "缺少系统 NVAPI 链文件: $path"
@@ -460,7 +461,7 @@ for payload_name in install-nvapi-system.ps1 nvapi-system-validation.ps1 \
         nvapi.dll nvapi64.dll; do
     grep -F "$payload_name" "$BUILD_SCRIPT" >/dev/null \
         || fail "build-exe.sh 缺少 payload: $payload_name"
-    grep -F "L\"$payload_name\"" "$LAUNCHER" >/dev/null \
+    grep -F "L\"$payload_name\"" "$PAYLOADS_HEADER" >/dev/null \
         || fail "launcher 释放表缺少 payload: $payload_name"
     grep -F "$payload_name" "$PACKAGE_SCRIPT" >/dev/null \
         || fail "legacy package 缺少 payload: $payload_name"

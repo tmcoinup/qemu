@@ -2,8 +2,8 @@
 # ---------------------------------------------------------------------------
 # sv-dock.sh — GNOME dash-to-dock 集成（start-vm.sh 在 sv-assemble.sh 前 source）
 #
-# 目的：让每台 SDL 客机窗口在 dock 里成为「独立、可固定、可拖动排序、有编号图标」
-# 的条目，而不是匿名的「运行中齿轮」。
+# 目的：让每台 SDL 客机窗口在 dock 里成为「独立、有编号图标、运行时正确分组」
+# 的条目，而不是匿名的「运行中齿轮」，同时不污染应用列表与收藏栏。
 #   根因：QEMU 自带 qemu.desktop 是 NoDisplay 且无 StartupWMClass；且三窗口默认
 #   同 WM_CLASS=qemu-system-x86_64（SDL 取二进制名）→ dock 无法区分/固定/排序。
 #
@@ -11,13 +11,13 @@
 #   1) export SDL_VIDEO_X11_WMCLASS=win10-<N>  → 每窗口唯一身份（SDL 读此环境变量）。
 #   2) 落 StartupWMClass=win10-<N> 的 per-instance .desktop + 编号 PNG 图标到
 #      ~/.local/share/{applications,icons/qemu-vm}/（幂等；图标缺失才重画）。
-#   3) 首次启动该实例时把 win10-<N>.desktop 自动加进 GNOME favorite-apps（固定）。
+#   3) 启动器默认从应用列表隐藏，也不自动固定；运行中的 SDL 窗口仍按编号分组。
 #
 # 软依赖（缺了就降级而非报错）：
 #   convert(ImageMagick) 画编号图标；缺则 .desktop 回退 stock 图标 virt-manager。
-#   gsettings+python3+flock+session bus 才自动固定；缺则只建图标（用户可手动固定）。
+#   gsettings+python3+flock+session bus 只用于显式 DOCK_PIN=1；缺失不影响窗口匹配。
 #
-# 开关：DOCK_PIN=0 关闭"首启自动固定"（图标/窗口匹配仍生效）。
+# 开关：DOCK_PIN=1 显式启用"首启自动固定"（默认 0，避免污染任务栏）。
 #
 # 稳定性铁律：任何一步失败都不得拖垮 VM 启动 —— 入口以 `sv_dock_integrate || true`
 # 调用（set -e 在函数内自动挂起），内部对每个外部命令再加 `|| true` / 2>/dev/null。
@@ -40,7 +40,7 @@ _sv_dock_make_icon() {
         "$icon" 2>/dev/null || return 1
 }
 
-# 写 ~/.local/share/applications/win10-<N>.desktop（每次刷新，保证内容最新）。
+# 写隐藏型 win10-<N>.desktop（每次刷新，保证窗口匹配内容最新）。
 _sv_dock_write_desktop() {
     local n="$1"
     local appdir="$HOME/.local/share/applications"
@@ -77,19 +77,19 @@ Categories=System;Emulator;
 Keywords=QEMU;VM;DNF;win10;虚拟机;
 StartupWMClass=win10-${n}
 StartupNotify=false
-NoDisplay=false
+NoDisplay=true
 EOF
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "$appdir" 2>/dev/null || true
     fi
 }
 
-# 首启把 win10-<N>.desktop 加进 GNOME 收藏（固定）。
+# 显式 DOCK_PIN=1 时，首启把 win10-<N>.desktop 加进 GNOME 收藏（固定）。
 #   - pin-once：标记文件存在就跳过 → 用户后来手动取消固定不会被强行加回。
 #   - 并发安全：flock 串行化 favorite-apps 的读改写（多 VM 同时起不丢项）。
 _sv_dock_pin_favorite() {
     local n="$1"
-    [[ "${DOCK_PIN:-1}" == "1" ]] || return 0
+    [[ "${DOCK_PIN:-0}" == "1" ]] || return 0
     command -v gsettings >/dev/null 2>&1 || return 0
     command -v python3   >/dev/null 2>&1 || return 0
     [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]] || return 0
@@ -129,6 +129,6 @@ sv_dock_integrate() {
     fi
     export SDL_VIDEO_X11_WMCLASS="win10-${n}"
     _sv_dock_write_desktop "$n" || true
-    echo ">> dash-to-dock:  WM_CLASS=win10-${n} + 桌面图标已就绪（可固定/拖动排序）"
+    echo ">> dash-to-dock:  WM_CLASS=win10-${n} + 隐藏窗口匹配已就绪（不进应用列表/默认不固定）"
     _sv_dock_pin_favorite "$n" || true
 }

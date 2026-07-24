@@ -42,6 +42,10 @@ HARDWARE_ID_PLAN_SRC="$REPO_ROOT/deploy/scripts/gpu-hardware-id-plan.ps1"
 HARDWARE_ID_TRANSACTION_SRC="$REPO_ROOT/deploy/scripts/gpu-hardware-id-transaction.ps1"
 HARDWARE_ID_PROJECTOR_SRC="$REPO_ROOT/deploy/scripts/project-gpu-hardware-id.ps1"
 DISPLAY_HELPER_SRC="$REPO_ROOT/deploy/scripts/force-displayfreq.ps1"
+MONITOR_PROJECT_SRC="$HERE/project-monitor-identity.ps1"
+MONITOR_PROJECTOR_SRC="$LAUNCHER/monitor-friendly-name-projector.c"
+MONITOR_EXPORTER_SRC="$REPO_ROOT/deploy/scripts/export-monitor-device-manifest.py"
+COMPONENT_CATALOG_SRC="$REPO_ROOT/deploy/hardware/components.json"
 DRIVER_INSTALL_SRC="$HERE/install-display-driver.ps1"
 DRIVER_TRUST_SRC="$HERE/display-driver-trust.ps1"
 CHIPSET_INSTALL_SRC="$HERE/install-chipset-device.ps1"
@@ -84,6 +88,7 @@ need_tool x86_64-w64-mingw32-windres
 need_tool xxd
 need_tool convert
 need_tool llvm-readobj
+need_tool python3
 
 [[ -f "$RESPAWN_SRC" ]] || { echo "ERROR: 找不到 $RESPAWN_SRC" >&2; exit 1; }
 [[ -f "$RESTART_STATE_SRC" ]] || { echo "ERROR: 找不到 $RESTART_STATE_SRC" >&2; exit 1; }
@@ -100,6 +105,10 @@ need_tool llvm-readobj
 [[ -f "$HARDWARE_ID_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_TRANSACTION_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PROJECTOR_SRC" >&2; exit 1; }
 [[ -f "$DISPLAY_HELPER_SRC" ]] || { echo "ERROR: 找不到 $DISPLAY_HELPER_SRC" >&2; exit 1; }
+[[ -f "$MONITOR_PROJECT_SRC" ]] || { echo "ERROR: 找不到 $MONITOR_PROJECT_SRC" >&2; exit 1; }
+[[ -f "$MONITOR_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $MONITOR_PROJECTOR_SRC" >&2; exit 1; }
+[[ -f "$MONITOR_EXPORTER_SRC" ]] || { echo "ERROR: 找不到 $MONITOR_EXPORTER_SRC" >&2; exit 1; }
+[[ -f "$COMPONENT_CATALOG_SRC" ]] || { echo "ERROR: 找不到 $COMPONENT_CATALOG_SRC" >&2; exit 1; }
 [[ -f "$DRIVER_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_INSTALL_SRC" >&2; exit 1; }
 [[ -f "$DRIVER_TRUST_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_TRUST_SRC" >&2; exit 1; }
 [[ -f "$CHIPSET_INSTALL_SRC" ]] || { echo "ERROR: 找不到 $CHIPSET_INSTALL_SRC" >&2; exit 1; }
@@ -138,7 +147,7 @@ verify_driver_file viogpudo.sys 04e873ad57387a518ad8ccae5116989c63170503c14b9cca
 verify_driver_file viogpudo.cat b5122b2e060ec0c2f0157afcdc64c728ec31646819055c8b79ae3f4227472078
 verify_driver_file viogpudo.inf 48abd56644386e1f0d85c54cd64db93e62a4eb33bc7acb2613f237c6e1c6a0ee
 
-# 两套 Intel 芯片组 INF 都是 Microsoft WHCP 签名的 NO_DRV 识别包。正式构建只接受
+# 五套 Intel 芯片组 INF 都是 Microsoft WHCP 签名的 NO_DRV 识别包。正式构建只接受
 # Microsoft Update Catalog 锁定版本的原始字节，不能用同名自签包或另一 OEM 版本。
 verify_chipset_file() {
     local file_name="$1"
@@ -162,6 +171,18 @@ verify_chipset_file SunrisePoint-HSystem.inf \
     4d931028bc5d6f1d28ec05f80e1b365d42a3d0ff00b0aeebe582c07dc83a1f70
 verify_chipset_file sunrisepoint-h.cat \
     d22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b
+verify_chipset_file CougarPointSystem.inf \
+    6c8325abce0d7ca7db7324bfb8571ea54e870b3052546e281a45ac95024be4d1
+verify_chipset_file cougarpoint.cat \
+    def9c32b7720dd1d8ea960d50a9ad1aa00d3e1c4f75a89c93e5738515bddebeb
+verify_chipset_file PantherPointSystem.inf \
+    11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6
+verify_chipset_file pantherpoint.cat \
+    a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500
+verify_chipset_file LynxPointSystem.inf \
+    2e754318dab5a3f906eb267a785fe040dc253c26fdcbe4878cd2aaf1316a7209
+verify_chipset_file lynxpoint.cat \
+    28ec883087c5ffe99e132631f4a7ec27c8d315430cddb83942ff1384e1643dee
 
 # NVAPI shim 没有厂商签名，固定 SHA-256 就是发布链的信任根。除摘要外还检查
 # COFF Machine、DLL flag 与唯一导出名，避免把同名错架构文件打进单 EXE。
@@ -251,6 +272,8 @@ verify_adl_file atiadlxx.dll "$ADL_X64_SHA256" 'IMAGE_FILE_MACHINE_AMD64 (0x8664
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$OUT_DIR"
+python3 "$MONITOR_EXPORTER_SRC" --catalog "$COMPONENT_CATALOG_SRC" \
+    --output "$BUILD_DIR/monitor-identities.json"
 
 # 生成一个自带盾牌的 EXE 图标。Windows 的 UAC overlay 在内置 Administrator /
 # UAC 关闭 / 图标缓存未刷新时可能不显示，所以发布物直接内嵌盾牌图标。
@@ -301,6 +324,11 @@ x86_64-w64-mingw32-gcc \
     -static -static-libgcc -Wl,--no-insert-timestamp \
     "$MANUFACTURER_PROJECTOR_SRC" -lsetupapi -lcfgmgr32 \
     -o "$BUILD_DIR/gpu-manufacturer-projector.exe"
+x86_64-w64-mingw32-gcc \
+    -std=c11 -Wall -Wextra -Werror -O2 -municode -mconsole \
+    -static -static-libgcc -Wl,--no-insert-timestamp \
+    "$MONITOR_PROJECTOR_SRC" -lsetupapi -lcfgmgr32 \
+    -o "$BUILD_DIR/monitor-friendly-name-projector.exe"
 
 # xxd 生成 C header，保留原始 UTF-8/BOM 字节；EXE 运行时原样释放脚本。
 xxd -i -n payload_respawn_ps1 "$RESPAWN_SRC" \
@@ -336,6 +364,13 @@ xxd -i -n payload_project_gpu_hardware_id_ps1 "$HARDWARE_ID_PROJECTOR_SRC" \
     > "$BUILD_DIR/payload_project_gpu_hardware_id_ps1.h"
 xxd -i -n payload_force_displayfreq_ps1 "$DISPLAY_HELPER_SRC" \
     > "$BUILD_DIR/payload_force_displayfreq_ps1.h"
+xxd -i -n payload_project_monitor_identity_ps1 "$MONITOR_PROJECT_SRC" \
+    > "$BUILD_DIR/payload_project_monitor_identity_ps1.h"
+xxd -i -n payload_monitor_identities_json "$BUILD_DIR/monitor-identities.json" \
+    > "$BUILD_DIR/payload_monitor_identities_json.h"
+xxd -i -n payload_monitor_friendly_name_projector_exe \
+    "$BUILD_DIR/monitor-friendly-name-projector.exe" \
+    > "$BUILD_DIR/payload_monitor_friendly_name_projector_exe.h"
 xxd -i -n payload_install_display_driver_ps1 "$DRIVER_INSTALL_SRC" \
     > "$BUILD_DIR/payload_install_display_driver_ps1.h"
 xxd -i -n payload_display_driver_trust_ps1 "$DRIVER_TRUST_SRC" \
@@ -372,6 +407,21 @@ xxd -i -n payload_sunrisepoint_hsystem_inf \
     > "$BUILD_DIR/payload_sunrisepoint_hsystem_inf.h"
 xxd -i -n payload_sunrisepoint_h_cat "$CHIPSET_INF_SRC_DIR/sunrisepoint-h.cat" \
     > "$BUILD_DIR/payload_sunrisepoint_h_cat.h"
+xxd -i -n payload_cougarpoint_system_inf \
+    "$CHIPSET_INF_SRC_DIR/CougarPointSystem.inf" \
+    > "$BUILD_DIR/payload_cougarpoint_system_inf.h"
+xxd -i -n payload_cougarpoint_cat "$CHIPSET_INF_SRC_DIR/cougarpoint.cat" \
+    > "$BUILD_DIR/payload_cougarpoint_cat.h"
+xxd -i -n payload_pantherpoint_system_inf \
+    "$CHIPSET_INF_SRC_DIR/PantherPointSystem.inf" \
+    > "$BUILD_DIR/payload_pantherpoint_system_inf.h"
+xxd -i -n payload_pantherpoint_cat "$CHIPSET_INF_SRC_DIR/pantherpoint.cat" \
+    > "$BUILD_DIR/payload_pantherpoint_cat.h"
+xxd -i -n payload_lynxpoint_system_inf \
+    "$CHIPSET_INF_SRC_DIR/LynxPointSystem.inf" \
+    > "$BUILD_DIR/payload_lynxpoint_system_inf.h"
+xxd -i -n payload_lynxpoint_cat "$CHIPSET_INF_SRC_DIR/lynxpoint.cat" \
+    > "$BUILD_DIR/payload_lynxpoint_cat.h"
 xxd -i -n payload_nvapi_x86_dll "$NVAPI_SRC_DIR/nvapi.dll" \
     > "$BUILD_DIR/payload_nvapi_x86_dll.h"
 xxd -i -n payload_nvapi_x64_dll "$NVAPI_SRC_DIR/nvapi64.dll" \

@@ -4,7 +4,7 @@
 # 用法：
 #   deploy/scripts/seal-base.sh <SRC_INSTANCE> <BASE_NAME>
 #       [--no-clean] [--allow-platform-compatibility]
-#       [--migrate-storage-profile]
+#       [--migrate-storage-profile] [--compression=none|zlib]
 #       [--image-root=PATH|--vms-dir=PATH|--base-dir=PATH] [--qemu-img=PATH]
 #
 # 例：
@@ -34,6 +34,7 @@ CLI_BASE_DIR=""
 CLI_QEMU_IMG=""
 ALLOW_COMPATIBILITY="${ALLOW_PLATFORM_COMPATIBILITY:-0}"
 ALLOW_STORAGE_MIGRATION="${ALLOW_STORAGE_PROFILE_MIGRATION:-0}"
+COMPRESSION="${BASE_COMPRESSION:-none}"
 POS=()
 for a in "$@"; do
     case "$a" in
@@ -44,6 +45,7 @@ for a in "$@"; do
         --qemu-img=*) CLI_QEMU_IMG="${a#*=}" ;;
         --allow-platform-compatibility) ALLOW_COMPATIBILITY=1 ;;
         --migrate-storage-profile) ALLOW_STORAGE_MIGRATION=1 ;;
+        --compression=*) COMPRESSION="${a#*=}" ;;
         --*) echo "ERROR: 未知 flag '$a'" >&2; exit 2 ;;
         *) POS+=("$a") ;;
     esac
@@ -54,6 +56,7 @@ BASE_NAME="${POS[1]:-}"
 if [[ -z "$SRC_INSTANCE" || -z "$BASE_NAME" ]]; then
     echo "usage: $0 <SRC_INSTANCE> <BASE_NAME> [--no-clean]" >&2
     echo "       [--allow-platform-compatibility] [--migrate-storage-profile]" >&2
+    echo "       [--compression=none|zlib]  # 默认 none，优先降低随机读尾延迟" >&2
     echo "       [--image-root=PATH] [--vms-dir=PATH] [--base-dir=PATH] [--qemu-img=PATH]" >&2
     exit 2
 fi
@@ -67,6 +70,10 @@ if [[ "$ALLOW_COMPATIBILITY" != 0 && "$ALLOW_COMPATIBILITY" != 1 ]]; then
 fi
 if [[ "$ALLOW_STORAGE_MIGRATION" != 0 && "$ALLOW_STORAGE_MIGRATION" != 1 ]]; then
     echo "ERROR: ALLOW_STORAGE_PROFILE_MIGRATION 必须是 0 或 1" >&2
+    exit 2
+fi
+if [[ "$COMPRESSION" != none && "$COMPRESSION" != zlib ]]; then
+    echo "ERROR: compression 只支持 none 或 zlib (实际: '$COMPRESSION')" >&2
     exit 2
 fi
 if ! [[ "$SRC_INSTANCE" =~ ^[1-9][0-9]{0,9}$ ]]; then
@@ -189,6 +196,30 @@ if [[ -z "$QEMU_IMG" || ! -f "$QEMU_IMG" || ! -x "$QEMU_IMG" ]]; then
     exit 1
 fi
 QEMU_IMG="$(readlink -e -- "$QEMU_IMG")"
+BASE_PUBLISH_HELPER="$SCRIPT_DIR/lib/seal-base-publish.py"
+IMAGE_METRICS_HELPER="$SCRIPT_DIR/lib/qemu-image-metrics.py"
+[[ -f "$IMAGE_METRICS_HELPER" ]] || {
+    echo "ERROR: 缺少 qemu-img JSON 指标解析器: $IMAGE_METRICS_HELPER" >&2
+    exit 1
+}
+
+seal_read_qcow2_layout() {
+    local image="$1" parsed extra
+
+    if ! parsed="$(
+        "$QEMU_IMG" check --output=json "$image" |
+            python3 "$IMAGE_METRICS_HELPER" check -
+    )"; then
+        echo "ERROR: qcow2 布局检查失败: $image" >&2
+        return 1
+    fi
+    read -r SEAL_COMPRESSED_CLUSTERS SEAL_ALLOCATED_CLUSTERS \
+        SEAL_FRAGMENTED_CLUSTERS SEAL_TOTAL_CLUSTERS extra <<<"$parsed"
+    [[ -z "${extra:-}" && "$SEAL_COMPRESSED_CLUSTERS" =~ ^[0-9]+$ ]] || {
+        echo "ERROR: qcow2 布局解析结果不完整: $image" >&2
+        return 1
+    }
+}
 
 # ----------------------------------------------------------------------
 # 启动盘容量护栏（封 base 时 fail-fast，而不是等克隆才 WARN）
@@ -247,7 +278,6 @@ BASE_COMMITTED=0
 BASE_PUBLISHED_FINGERPRINT=""
 BASE_FD_OPEN=0
 BASE_FD_PATH="/proc/$$/fd/9"
-BASE_PUBLISH_HELPER="$SCRIPT_DIR/lib/seal-base-publish.py"
 BASE_PUBLISH_RESULT_TMP=""
 seal_cleanup() {
     local status=$?
@@ -286,7 +316,7 @@ trap 'seal_signal_exit 129' HUP
 trap 'seal_signal_exit 130' INT
 trap 'seal_signal_exit 143' TERM
 
-# 先清/WeGame 设备身份，再 convert —— 这样 base 天生干净且仍然压缩紧凑。
+# 先清/WeGame 设备身份，再 convert；base 的压缩布局由显式策略决定。
 # 失败就 abort：宁可不出 base，也不出一个所有 clone 共享同一 qimei 的"漏指纹" base。
 seal_require_same_source_disk
 if (( CLEAN )); then
@@ -309,18 +339,59 @@ if ! sv_sudo_session_supervise "$QEMU_IMG" check -q "$SRC_DISK"; then
     exit 1
 fi
 
+if ! MEASURE_FIELDS="$(
+    "$QEMU_IMG" measure --output=json -O qcow2 "$SRC_DISK" |
+        python3 "$IMAGE_METRICS_HELPER" measure -
+)"; then
+    echo "ERROR: 无法计算 base convert 的空间上界" >&2
+    exit 1
+fi
+read -r CONVERT_REQUIRED CONVERT_FULLY_ALLOCATED MEASURE_EXTRA <<<"$MEASURE_FIELDS"
+if [[ -n "${MEASURE_EXTRA:-}" || ! "$CONVERT_REQUIRED" =~ ^[1-9][0-9]*$ ||
+      ! "$CONVERT_FULLY_ALLOCATED" =~ ^[1-9][0-9]*$ ||
+      "$CONVERT_REQUIRED" -gt 4611686018427387903 ]]; then
+    echo "ERROR: qemu-img measure 返回了不可安全计算的容量" >&2
+    exit 1
+fi
+read -r FS_TOTAL FS_AVAILABLE < <(
+    LC_ALL=C df -B1 --output=size,avail -- "$BASE_DIR" | tail -n 1
+)
+if [[ ! "$FS_TOTAL" =~ ^[1-9][0-9]*$ || ! "$FS_AVAILABLE" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: 无法读取 base 目标文件系统可用空间: $BASE_DIR" >&2
+    exit 1
+fi
+SPACE_RESERVE=$((4 * 1024 * 1024 * 1024))
+(( FS_TOTAL / 100 > SPACE_RESERVE )) && SPACE_RESERVE=$((FS_TOTAL / 100))
+(( CONVERT_REQUIRED / 10 > SPACE_RESERVE )) &&
+    SPACE_RESERVE=$((CONVERT_REQUIRED / 10))
+SPACE_NEEDED=$((CONVERT_REQUIRED * 2 + SPACE_RESERVE))
+if (( FS_AVAILABLE < SPACE_NEEDED )); then
+    echo "ERROR: base convert 空间不足；staging+原子发布峰值需要安全余量" >&2
+    echo "       可用=$FS_AVAILABLE bytes，至少需要=$SPACE_NEEDED bytes" >&2
+    exit 1
+fi
+
 echo ">> 源 disk: $SRC_DISK ($(numfmt --to=iec --suffix=B "$(stat -c%s "$SRC_DISK")"))"
 echo ">> 目标 base: $BASE_FILE"
-echo ">> qemu-img convert (compress=on，把稀疏 qcow2 重写为更紧凑的形式)..."
+echo ">> convert 布局: compression=$COMPRESSION；空间门禁 $(numfmt --to=iec "$SPACE_NEEDED") / 可用 $(numfmt --to=iec "$FS_AVAILABLE")"
+COMPRESS_ARGS=()
+if [[ "$COMPRESSION" == zlib ]]; then
+    COMPRESS_ARGS=(-c -o compression_type=zlib)
+fi
 BASE_TMP="$(mktemp -- "$BASE_DIR/.${BASE_NAME}.qcow2.seal.XXXXXX")"
 sv_sudo_session_supervise \
-    "$QEMU_IMG" convert -p -O qcow2 -c "$SRC_DISK" "$BASE_TMP"
+    "$QEMU_IMG" convert -p -O qcow2 "${COMPRESS_ARGS[@]}" "$SRC_DISK" "$BASE_TMP"
 exec 9<"$BASE_TMP"
 BASE_FD_OPEN=1
 BASE_VALIDATED_FINGERPRINT="$(
     python3 "$BASE_PUBLISH_HELPER" fingerprint "$BASE_FD_PATH"
 )"
 base_image_require_standalone_qcow2 "$QEMU_IMG" "$BASE_FD_PATH"
+seal_read_qcow2_layout "$BASE_FD_PATH"
+if [[ "$COMPRESSION" == none && "$SEAL_COMPRESSED_CLUSTERS" != 0 ]]; then
+    echo "ERROR: 未压缩策略仍产出了 $SEAL_COMPRESSED_CLUSTERS 个 compressed cluster" >&2
+    exit 1
+fi
 if [[ "$BASE_VALIDATED_FINGERPRINT" != "$(
         python3 "$BASE_PUBLISH_HELPER" fingerprint "$BASE_FD_PATH"
     )" ]]; then
@@ -360,6 +431,11 @@ rm -f -- "$BASE_PUBLISH_RESULT_TMP"
 BASE_PUBLISH_RESULT_TMP=""
 sv_sudo_session_close
 base_image_require_standalone_qcow2 "$QEMU_IMG" "$BASE_FILE"
+seal_read_qcow2_layout "$BASE_FILE"
+if [[ "$COMPRESSION" == none && "$SEAL_COMPRESSED_CLUSTERS" != 0 ]]; then
+    echo "ERROR: 最终 base 不符合未压缩布局策略" >&2
+    exit 1
+fi
 if [[ "$BASE_IMAGE_VIRTUAL_SIZE" != "$BASE_BYTES" ||
       "$(stat -c '%u:%a' -- "$BASE_FILE")" != 0:444 ||
       "$BASE_PUBLISHED_FINGERPRINT" != "$(
@@ -378,6 +454,9 @@ echo ""
 echo "=== Done ==="
 echo "  base 镜像: $BASE_FILE"
 echo "  size:     $(numfmt --to=iec --suffix=B "$(stat -c%s "$BASE_FILE")")"
+printf '  layout:   compression=%s compressed=%s allocated=%s fragmented=%s total=%s\n' \
+    "$COMPRESSION" "$SEAL_COMPRESSED_CLUSTERS" "$SEAL_ALLOCATED_CLUSTERS" \
+    "$SEAL_FRAGMENTED_CLUSTERS" "$SEAL_TOTAL_CLUSTERS"
 echo ""
 echo "下一步 — 用 clone-from-base.sh 创建新 instance:"
 NEXT_CLONE_FLAGS=("--vms-dir=$VMS_DIR" "--qemu-img=$QEMU_IMG")

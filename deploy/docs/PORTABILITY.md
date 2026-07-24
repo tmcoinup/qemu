@@ -123,12 +123,16 @@ QEMU_CAP_CHECK=0 ./deploy/scripts/start-vm.sh 1 --no-bridge
 
 不要给 emulated NVMe 加 `iothread=...`。当前 NVMe DMA helper 需要 BlockBackend 留在主 AioContext；强行迁移到 IOThread 会触发 `dma_blk_cb` 断言。
 
-当前稳定参数是：
+当前设备身份稳定参数是（文件 AIO 由启动前 active-read 自动选择）：
 
 ```bash
--drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=threads,discard=unmap
+-drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=<io_uring|native|threads>,discard=unmap
 -device nvme,...,drive=bootdisk0,x-identity-profile=...,model-number=...,firmware-rev=...
 ```
+
+`QEMU_DISK_AIO=auto` 不创建临时盘，依次用候选后端实际读取 QEMU ELF；不可用时
+回退 `threads`。显式指定后端则 fail closed。三种模式均不改变 Guest 设备，
+也不添加 IOThread；本地前台构建会自动补齐 `liburing-dev` 与 `libaio-dev`。
 
 `x-identity-profile` 把所选 Samsung、Intel、Western Digital 或 KIOXIA 型号的
 model、firmware、PCI/subsystem、OUI、链路和序列格式作为一个整体校验；旧
@@ -139,7 +143,7 @@ model、firmware、PCI/subsystem、OUI、链路和序列格式作为一个整体
 compatibility bundle 会自动切换为：
 
 ```bash
--drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=threads,discard=unmap
+-drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=<auto-selected>,discard=unmap
 -device ide-hd,bus=ide.2,unit=0,drive=bootdisk0,model=...,serial=...,ver=...,rotation_rate=1
 ```
 
@@ -174,6 +178,10 @@ VM 运行、TPM、bridge、patched QEMU 构建、固件重建、完整回归与 
 交叉打包使用不同依赖组。按用途安装并执行自检，统一见
 [开发与跨平台验证依赖](DEVELOPMENT-DEPENDENCIES.md)；不要把缺少可选打包工具误判成
 Linux VM 运行环境不可用。
+
+Debian/Ubuntu 本地前台运行 `deploy/tools/build.sh` 时会自动补齐缺失的源码构建
+包；CI、容器、后台和离线环境应预置构建组并使用 `--no-install-build-deps`。
+该机制不安装 bridge、VM 运行或固件重建依赖。
 
 持久 bridge 推荐沿用已由 netplan 使用的 NetworkManager，并在迁移前确认状态：
 
@@ -229,7 +237,8 @@ deploy/tools/build.sh --verify
 ```
 
 成功构建会在本地交互终端同步 host performance/CPU isolate helper；无人值守任务需显式
-使用 `deploy/tools/build.sh --verify --install-host-helpers`。
+使用 `deploy/tools/build.sh --verify --install-build-deps --install-host-helpers`；
+受管/离线环境则预置依赖并传 `--no-install-build-deps`。
 
 若复制的是另一台机器的预编译动态二进制，必须先检查动态库并在新 host 重新登记信任：
 

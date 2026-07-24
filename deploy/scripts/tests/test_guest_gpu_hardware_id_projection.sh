@@ -16,6 +16,7 @@ RESTART_HELPER="$REPO_ROOT/deploy/guest-stealth/respawn-restart-state.ps1"
 BUILD="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 PACKAGE="$REPO_ROOT/deploy/guest-stealth/package.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
+PAYLOADS_HEADER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-payloads.h"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -24,7 +25,7 @@ fail() {
 
 for path in "$PLAN" "$PROJECTOR" "$PROJECTION_TRANSACTION" "$TRANSACTION" \
         "$APPLY" "$RESPAWN" "$BUILD" \
-        "$RESTART_HELPER" "$PACKAGE" "$LAUNCHER"; do
+        "$RESTART_HELPER" "$PACKAGE" "$LAUNCHER" "$PAYLOADS_HEADER"; do
     [[ -f "$path" ]] || fail "缺少 HardwareID 投影链文件: $path"
 done
 for path in "$PLAN" "$PROJECTOR" "$PROJECTION_TRANSACTION" "$RESPAWN" \
@@ -474,7 +475,7 @@ completion_body="$(sed -n '/^function Complete-RespawnResumeStage {/,/^}/p' \
 for payload in gpu-hardware-id-plan.ps1 gpu-hardware-id-transaction.ps1 \
         project-gpu-hardware-id.ps1; do
     rg -F "$payload" "$BUILD" >/dev/null || fail "build 缺少 payload: $payload"
-    rg -F "L\"$payload\"" "$LAUNCHER" >/dev/null \
+    rg -F "L\"$payload\"" "$PAYLOADS_HEADER" >/dev/null \
         || fail "launcher 缺少 payload: $payload"
     rg -F "$payload" "$PACKAGE" >/dev/null \
         || fail "legacy package 缺少 payload: $payload"
@@ -489,5 +490,7 @@ for source_file in "$PLAN" "$PROJECTOR" "$PROJECTION_TRANSACTION" \
 done
 [[ "$(wc -l < "$LAUNCHER")" -le 500 ]] \
     || fail "launcher C 文件超过 500 行"
+[[ "$(wc -l < "$PAYLOADS_HEADER")" -le 500 ]] \
+    || fail "launcher payload header 超过 500 行"
 
 echo "OK: one devnode uses exact logical-first/physical-tail projection with rollback"

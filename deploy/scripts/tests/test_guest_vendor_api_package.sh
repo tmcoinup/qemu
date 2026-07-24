@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BUILD_SCRIPT="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 PACKAGE="$REPO_ROOT/deploy/guest-stealth/package.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
+PAYLOADS_HEADER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-payloads.h"
 NVAPI_DIR="$REPO_ROOT/deploy/nvapi-shim"
 NVAPI_PROBE_DIR="$REPO_ROOT/deploy/nvapi-runtime-probe"
 ADL_DIR="$REPO_ROOT/deploy/adl-shim"
@@ -18,7 +19,7 @@ fail() {
     exit 1
 }
 
-for path in "$BUILD_SCRIPT" "$PACKAGE" "$LAUNCHER" \
+for path in "$BUILD_SCRIPT" "$PACKAGE" "$LAUNCHER" "$PAYLOADS_HEADER" \
         "$APPLY_SUPPORT" \
         "$NVAPI_DIR/nvapi.dll" "$NVAPI_DIR/nvapi64.dll" \
         "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x86.exe" \
@@ -27,7 +28,7 @@ for path in "$BUILD_SCRIPT" "$PACKAGE" "$LAUNCHER" \
     [[ -f "$path" ]] || fail "缺少统一厂商 API package 文件：$path"
 done
 for probe in nvapi-runtime-probe-x86.exe nvapi-runtime-probe-x64.exe; do
-    grep -F "L\"$probe\"" "$LAUNCHER" >/dev/null \
+    grep -F "L\"$probe\"" "$PAYLOADS_HEADER" >/dev/null \
         || fail "launcher 未发布运行时探针：$probe"
     grep -F "$probe" "$PACKAGE" >/dev/null \
         || fail "legacy package 未平铺运行时探针：$probe"
@@ -40,7 +41,7 @@ for helper in install-nvapi-system.ps1 nvapi-system-validation.ps1 \
         gpu-spoof-apply-support.ps1; do
     grep -F "$helper" "$BUILD_SCRIPT" >/dev/null \
         || fail "build-exe 未嵌入 helper：$helper"
-    grep -F "$helper" "$LAUNCHER" >/dev/null \
+    grep -F "$helper" "$PAYLOADS_HEADER" >/dev/null \
         || fail "launcher 未发布 helper：$helper"
     grep -F "$helper" "$PACKAGE" >/dev/null \
         || fail "legacy package 未平铺 helper：$helper"
@@ -49,16 +50,16 @@ done
 # 五个系统目标源名称必须全部进入 launcher 表；两个 AMD x86 别名刻意复用同一
 # 已验摘要数组，不能在 package 阶段复制出未验证的第三份源。
 for payload in nvapi.dll nvapi64.dll atiadlxy.dll atiadlxx32.dll atiadlxx.dll; do
-    [[ "$(grep -Fc "L\"$payload\"" "$LAUNCHER")" -eq 1 ]] \
+    [[ "$(grep -Fc "L\"$payload\"" "$PAYLOADS_HEADER")" -eq 1 ]] \
         || fail "launcher 的系统目标 payload 不唯一：$payload"
     grep -F "$payload" "$PACKAGE" >/dev/null \
         || fail "legacy package 缺少系统目标源：$payload"
 done
-grep -F '{ L"atiadlxy.dll", payload_adl_x86_dll,' "$LAUNCHER" >/dev/null \
+grep -F '{ L"atiadlxy.dll", payload_adl_x86_dll,' "$PAYLOADS_HEADER" >/dev/null \
     || fail "atiadlxy 没有绑定受验 x86 ADL 数组"
-grep -F '{ L"atiadlxx32.dll", payload_adl_x86_dll,' "$LAUNCHER" >/dev/null \
+grep -F '{ L"atiadlxx32.dll", payload_adl_x86_dll,' "$PAYLOADS_HEADER" >/dev/null \
     || fail "atiadlxx32 没有复用受验 x86 ADL 数组"
-grep -F '{ L"atiadlxx.dll", payload_adl_x64_dll,' "$LAUNCHER" >/dev/null \
+grep -F '{ L"atiadlxx.dll", payload_adl_x64_dll,' "$PAYLOADS_HEADER" >/dev/null \
     || fail "atiadlxx 没有绑定受验 x64 ADL 数组"
 
 grep -F 'ADL_SRC_DIR="${ADL_SRC_DIR:-$REPO_ROOT/deploy/adl-shim}"' \
@@ -78,6 +79,7 @@ mkdir -p "$PACKAGE_REPO/deploy"
 cp -a "$REPO_ROOT/deploy/guest-stealth" "$PACKAGE_REPO/deploy/guest-stealth"
 cp -a "$REPO_ROOT/deploy/guest-launcher-common" \
     "$PACKAGE_REPO/deploy/guest-launcher-common"
+cp -a "$REPO_ROOT/deploy/hardware" "$PACKAGE_REPO/deploy/hardware"
 rm -rf "$PACKAGE_REPO/deploy/guest-stealth/dist"
 ln -s "$REPO_ROOT/deploy/scripts" "$PACKAGE_REPO/deploy/scripts"
 ln -s "$NVAPI_DIR" "$PACKAGE_REPO/deploy/nvapi-shim"

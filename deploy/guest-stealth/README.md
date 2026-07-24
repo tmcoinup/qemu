@@ -39,9 +39,11 @@ Service、Driver 和 PCI 配置空间仍为物理 carrier。MULTI_SZ 中的多�
 | `dist/respawn-stealth.exe` | 唯一发布物；双击后提权、释放内嵌文件、初始化并重启 |
 | `build-exe.sh` | 校验 stock 驱动摘要，用 MinGW 构建 Windows PE64 EXE |
 | `configure-power-policy.ps1` | 用 PowrProf 将屏幕/自动睡眠设为“从不”，保留桌面 S3 并关闭休眠 |
-| `install-chipset-device.ps1` | 为 A123/A323 幂等绑定 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF |
+| `install-chipset-device.ps1` | 覆盖硬件池全部 Intel SMBus：为 A323/A123/1C22/1E22/8C22 幂等绑定 WHCP NO_DRV INF，并验证 inbox 2930 |
 | `install-display-driver.ps1` | 真实驱动探测与幂等安装；必须先成功，才允许执行名称覆盖 |
 | `display-driver-trust.ps1` | 校验活动 VioGpuDod、发布 INF 与内嵌 WHCP 包；仅放行缺失发布 INF 的官方恢复 |
+| `project-monitor-identity.ps1` | 按 EDID 派生 PnP ID 只投影 Monitor 的 `DEVPKEY_Device_FriendlyName` |
+| `launcher/monitor-friendly-name-projector.c` | 用 Config Manager 写入并回读显示器 FriendlyName，不触碰驱动栈身份 |
 | `install-gpu-api-system.ps1` | 按 staged vendor 互斥发布 NVAPI/ADL，并用同一 identity TransactionId 收口 |
 | `gpu-api-identity-binding.ps1` | 校验 staged vendor、identity 终态和 previous pointer，阻止提前/跨事务收口 |
 | `install-nvapi-system.ps1` | 独立事务发布或移除 x86/x64 NVIDIA NVAPI 用户态 shim |
@@ -70,11 +72,13 @@ Service、Driver 和 PCI 配置空间仍为物理 carrier。MULTI_SZ 中的多�
 构建器与 Windows 安装器会同时锁定三份 SHA-256。SYS/CAT/INF 不是可任意混用的
 独立文件；任何一个摘要不匹配都会在安装前失败。
 
-芯片组识别输入来自 `deploy/scripts/stock-intel-chipset-inf/`。H310/A323 使用
-`CannonLake-HSystem.inf` + `cannonlake-h.cat`，H110/A123 使用
-`SunrisePoint-HSystem.inf` + `sunrisepoint-h.cat`。它们都由 Microsoft WHCP
-签名并引用 inbox `machine.inf` 的 `NO_DRV` section：作用是清除 Code 28 和正确命名，
-不包含 SMBus `.sys` 或服务。上游 Catalog 链接、版本和摘要见该目录的 `SOURCES.md`。
+芯片组识别输入来自 `deploy/scripts/stock-intel-chipset-inf/`，覆盖硬件池全部 SMBus：
+H310/A323、H110/A123、H61/1C22、B75/1E22、H81/8C22 分别使用
+`CannonLake-HSystem.inf`、`SunrisePoint-HSystem.inf`、`CougarPointSystem.inf`、
+`PantherPointSystem.inf`、`LynxPointSystem.inf` 及其 CAT。五套包均由 Microsoft
+WHCP 签名并引用 inbox `machine.inf` 的 `NO_DRV` section；Q35/ICH9 compatibility
+的 2930 则直接验证 Win10 inbox `machine.inf`，不随 EXE 分发第六套 INF。它们只清除
+Code 28 并正确命名，不包含 SMBus `.sys` 或服务。来源、版本和摘要见 `SOURCES.md`。
 
 NVIDIA 用户态身份库来自 `deploy/nvapi-shim/`：PE32 `nvapi.dll` 给 32 位程序，PE32+
 `nvapi64.dll` 给 64 位程序。两者共用版本化注册表身份并锁定 SHA-256、Machine、
@@ -134,9 +138,10 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
    睡眠，同时设置 `ALLOWSTANDBY=1`，保留正常台式机的 S1–S3 能力与“睡眠”区块；
    再执行 inbox `powercfg /hibernate off`，回读六项 AC/DC 值、活动方案及
    `HiberFilePresent`。失败就停止，不会继续改显卡。
-3. 枚举 `PresentOnly` 的 `8086:A123`/`8086:A323`；已正常绑定时跳过，否则验证
-   对应 INF/CAT 的固定摘要、NO_DRV 语义与 Microsoft WHCP 签名，再用 inbox
-   `pnputil /add-driver ... /install` 清除 SMBus Code 28。若要求重启，先记录
+3. 枚举 `PresentOnly` 的全硬件池 SMBus：`8086:A323/A123/1C22/1E22/8C22/2930`。
+   前五款已正常绑定时跳过，否则验证对应 INF/CAT 的固定摘要、NO_DRV 语义与
+   Microsoft WHCP 签名，再用 inbox `pnputil /add-driver ... /install` 清除 Code 28；
+   2930 只验证 Win10 inbox `machine.inf`。若要求重启，先记录
    `ChipsetVerification` 阶段并继续完成 GPU 流程；最终一次重启后只复核该 INF，
    不会再次运行 GPU 流程或安排第二次重启。若首次启动边界来自显示/API 恢复，而
    Full 恢复时芯片组仍待重启，则任务切换为纯 `ChipsetVerification`、返回 `30`
@@ -178,7 +183,10 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
 12. `gpu-manufacturer-projection.ps1` 仅把设备管理器常规页制造商投影成
     AMD/NVIDIA；投影前后都要求活动 `Service/InfPath` 不变，并重新验证发布 INF、
     运行中 SYS 的固定摘要与 Microsoft WHCP 证书指纹。
-13. 最后通过统一 helper 校验 System32 `shutdown.exe` 并立即核对其原生退出码，
+13. 按在线 Monitor 的 EDID 派生 PnP ID 查硬件池，只写入并回读
+    `DEVPKEY_Device_FriendlyName`，再注册 `StealthGPU-ProjectMonitorIdentity`；
+    EDID、HardwareID、INF、Monitor Class 与 `monitor.sys` 前后必须保持不变。
+14. 最后通过统一 helper 校验 System32 `shutdown.exe` 并立即核对其原生退出码，
     再安排默认重启；当前 profile 对应的 NVAPI 或 ADL 会从系统目录读取同一身份。
     工具若调用没有可信数据源的实时遥测或厂商驱动功能，会收到明确的“不支持”结果，
     而不是伪造数值。
@@ -208,9 +216,16 @@ virtio/`1AF4:1050`；真实 InstanceId、BDF、Service 和 Driver 也始终不�
 
 QEMU 设备属性本身仍默认关闭，以保持普通 QEMU 调用方的动态缩放兼容性；本项目
 通过启动器默认显式开启，因此正常使用 `start-vm.sh`/`start-vm.ps1` 无需额外传参。
-`respawn-stealth.exe` 只维护 GPU 的 Class/Enum 投影，不改写 `Enum\DISPLAY`、
-Monitor Class 或显示器 HardwareID；Samsung、AOC、Xiaomi、Lenovo 身份均以当前
-硬件 profile 生成的实时 QEMU EDID 为唯一事实源。
+四款显示器都以当前硬件 profile 生成的实时 QEMU EDID 为唯一事实源；统一 EXE 仅按
+EDID 中的厂商码和产品码，通过 `DEVPKEY_Device_FriendlyName` 投影设备管理器标签，
+不改 EDID、Monitor HardwareID、INF、Monitor Class 或 inbox `monitor.sys`：
+
+| EDID PnP code / HardwareID | 设备管理器 FriendlyName |
+| --- | --- |
+| `SAM0D20` / `MONITOR\SAM0D20` | Samsung S24F350 |
+| `AOC2402` / `MONITOR\AOC2402` | AOC 24B2XH |
+| `XMI23C3` / `MONITOR\XMI23C3` | Xiaomi Mi Monitor (RMMNT238NF) |
+| `LEN66BC` / `MONITOR\LEN66BC` | Lenovo L24e-30 |
 
 ## 全新 VM 用法
 
@@ -246,8 +261,8 @@ Start-Process -FilePath '.\respawn-stealth.exe' -ArgumentList '-NoReboot' -Wait
 
 本次 `--firstlogon` 投影链不新增 RDP、调试 HTTP、QEMU guest agent、厂商服务或
 第三方守护程序；新增持久项只有项目脚本、当前 profile 对应的一组 NVAPI 或 ADL DLL，
-以及 Windows 自带 Task Scheduler 中的名称刷新与
-`StealthGPU-ProjectHardwareId` 启动/登录维护任务。电源方案只由 Windows
+以及 Windows 自带 Task Scheduler 中的 GPU 名称、HardwareID 与
+`StealthGPU-ProjectMonitorIdentity` 启动/登录维护任务。电源方案只由 Windows
 内置 API 原地更新，不新增服务。VM2 现场验收使用过的 USB/HTTP 调试路径不会进入 EXE。
 
 直接运行使用两个固定系统搜索目录，但两组厂商 DLL 互斥：
@@ -275,7 +290,7 @@ C:\Windows\System32\atiadlxx.dll  # 64 位 AMD ADL 名称
   的驱动绑定；本流程不会恢复自签驱动路径。
 - 可重复执行：payload 每次覆盖为当前 EXE 版本；驱动安装与缓存清理只在需要时发生。
 - clone 的每个 `SourceInstanceId` 使用独立 SHA-256 命名备份；旧实例不会阻止新 SUBSYS
-  实例建立自己的事务。FirstLogon 保留名称刷新和 HardwareID 启动/登录维护，
+  实例建立自己的事务。FirstLogon 保留 GPU 名称、HardwareID 和 Monitor 标签维护，
   交互显示任务仍按首次登录规则跳过。
 
 `autounattend.xml` 的 clone 首次登录命令仍固定调用
@@ -292,7 +307,7 @@ Get-PnpDevice -Class Display -PresentOnly | ForEach-Object {
         -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath
 }
 $smbus = Get-PnpDevice -PresentOnly | Where-Object {
-    $_.InstanceId -match '^PCI\\VEN_8086&DEV_(A123|A323)&'
+    $_.InstanceId -match '^PCI\\VEN_8086&DEV_(A323|A123|1C22|1E22|8C22|2930)&'
 }
 $smbus | Format-List Status,Class,FriendlyName,InstanceId,Problem
 $smbus | ForEach-Object {
@@ -343,8 +358,9 @@ Get-FileHash "$env:WINDIR\System32\nvapi64.dll" -Algorithm SHA256
 NVIDIA。若通过 RDP 查看，分辨率下拉由 RDP 客户端控制，本来就会变灰；驱动与本地
 输出必须在 SDL 控制台验证。
 
-SMBus 期望 `Status=OK`、`Class=System`、ProblemCode `0`、INF 为 `oem*.inf`，
-且 `DEVPKEY_Device_Service` 为空；服务为空正是 Intel NO_DRV 包的正确结果。
+SMBus 期望 `Status=OK`、`Class=System`、ProblemCode `0` 且 Service 为空；前五款
+payload 型号的 INF 为 `oem*.inf`，2930 为 inbox `machine.inf`。空 Service 正是
+Intel/Windows NO_DRV 识别包的正确结果。
 
 GTX 1050 Ti 的快照还应为 schema `2`、`GDDR5`、128 bit、base
 `1290000` kHz、boost `1392000` kHz、NVAPI memory `3504000` kHz 和
@@ -366,6 +382,7 @@ schema-5。GPU-Z 将 memory clock 显示为 1752 MHz；这是查询投影，不�
 - `C:\ProgramData\StealthGPU\chipset-device-install.log`
 - `C:\ProgramData\StealthGPU\display-driver-install.log`
 - `C:\ProgramData\StealthGPU\gpu-hardware-id-projection.log`
+- `C:\ProgramData\StealthGPU\monitor-identity-projection.log`
 - `C:\ProgramData\StealthGPU\respawn.log`
 
 NVAPI installer 的逐行输出并入 `respawn.log`，因此 identity 回滚原因和双 DLL
@@ -390,7 +407,7 @@ PowerShell 脚本文件只供源码调试，默认发布目录不包含它们。
 INCLUDE_LEGACY_SCRIPTS=1 bash deploy/guest-stealth/package.sh
 ```
 
-脚本调试必须把芯片组/显示驱动 installer、两套 Intel INF/CAT、
+脚本调试必须把芯片组/显示驱动 installer、五套 Intel INF/CAT、
 `install-nvapi-system.ps1`、`nvapi-system-validation.ps1`、
 `nvapi-system-transaction.ps1`、`install-adl-system.ps1`、
 `adl-system-transaction.ps1`、`install-gpu-api-system.ps1`、
@@ -401,7 +418,9 @@ INCLUDE_LEGACY_SCRIPTS=1 bash deploy/guest-stealth/package.sh
 `persist-gpu-profile.ps1`、`gpu-profile-transaction.ps1`、
 `gpu-profile-registry-core.ps1`、
 `refresh-gpu-name.ps1`、`gpu-manufacturer-projection.ps1`、
-`gpu-manufacturer-projector.exe`、`respawn-restart-state.ps1`、
+`gpu-manufacturer-projector.exe`、`project-monitor-identity.ps1`、
+`monitor-friendly-name-projector.exe`、`monitor-identities.json`、
+`respawn-restart-state.ps1`、
 `display-driver-trust.ps1`、
 `gpu-hardware-id-plan.ps1`、`project-gpu-hardware-id.ps1` 和
 `force-displayfreq.ps1` 放在同一 payload 目录；生产环境始终使用单 EXE。

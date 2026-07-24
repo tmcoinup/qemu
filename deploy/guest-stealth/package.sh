@@ -30,6 +30,7 @@ HARDWARE_ID_PLAN_SRC="$SCRIPTS/gpu-hardware-id-plan.ps1"
 HARDWARE_ID_TRANSACTION_SRC="$SCRIPTS/gpu-hardware-id-transaction.ps1"
 HARDWARE_ID_PROJECTOR_SRC="$SCRIPTS/project-gpu-hardware-id.ps1"
 DISPLAY_HELPER_SRC="$SCRIPTS/force-displayfreq.ps1"
+MONITOR_PROJECT_SRC="$HERE/project-monitor-identity.ps1"
 DRIVER_SRC="$SCRIPTS/stock-viogpudo"
 CHIPSET_INF_SRC="$SCRIPTS/stock-intel-chipset-inf"
 NVAPI_SRC="$HERE/../nvapi-shim"
@@ -49,6 +50,7 @@ ADL_SRC="$HERE/../adl-shim"
 [[ -f "$HARDWARE_ID_TRANSACTION_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_TRANSACTION_SRC" >&2; exit 1; }
 [[ -f "$HARDWARE_ID_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $HARDWARE_ID_PROJECTOR_SRC" >&2; exit 1; }
 [[ -f "$DISPLAY_HELPER_SRC" ]] || { echo "ERROR: 找不到 $DISPLAY_HELPER_SRC" >&2; exit 1; }
+[[ -f "$MONITOR_PROJECT_SRC" ]] || { echo "ERROR: 找不到 $MONITOR_PROJECT_SRC" >&2; exit 1; }
 [[ -d "$DRIVER_SRC" ]] || { echo "ERROR: 找不到 $DRIVER_SRC" >&2; exit 1; }
 [[ -d "$CHIPSET_INF_SRC" ]] || { echo "ERROR: 找不到 $CHIPSET_INF_SRC" >&2; exit 1; }
 [[ -f "$NVAPI_SRC/nvapi.dll" ]] || { echo "ERROR: 找不到 $NVAPI_SRC/nvapi.dll" >&2; exit 1; }
@@ -112,8 +114,20 @@ if [[ "$include_legacy_scripts" == "1" ]]; then
     cp "$HARDWARE_ID_TRANSACTION_SRC"      "$DIST/"
     cp "$HARDWARE_ID_PROJECTOR_SRC"        "$DIST/"
     cp "$DISPLAY_HELPER_SRC"               "$DIST/"
+    cp "$MONITOR_PROJECT_SRC"               "$DIST/"
+    cp "$CONTROLLED_BUILD_DIR/monitor-identities.json" "$DIST/"
+    cp "$CONTROLLED_BUILD_DIR/monitor-friendly-name-projector.exe" "$DIST/"
     cp "$DRIVER_SRC"/viogpudo.{sys,cat,inf} "$DIST/"
-    cp "$CHIPSET_INF_SRC"/{CannonLake-HSystem.inf,cannonlake-h.cat,SunrisePoint-HSystem.inf,sunrisepoint-h.cat} "$DIST/"
+    chipset_files=(
+        CannonLake-HSystem.inf cannonlake-h.cat
+        SunrisePoint-HSystem.inf sunrisepoint-h.cat
+        CougarPointSystem.inf cougarpoint.cat
+        PantherPointSystem.inf pantherpoint.cat
+        LynxPointSystem.inf lynxpoint.cat
+    )
+    for chipset_file in "${chipset_files[@]}"; do
+        cp "$CHIPSET_INF_SRC/$chipset_file" "$DIST/"
+    done
     cp "$NVAPI_SRC"/nvapi{,64}.dll          "$DIST/"
     cp "$NVAPI_PROBE_SRC"/nvapi-runtime-probe-x86.exe "$NVAPI_PROBE_SRC"/nvapi-runtime-probe-x64.exe "$DIST/"
     cp "$ADL_SRC/atiadlxy.dll"              "$DIST/"

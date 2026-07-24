@@ -70,7 +70,8 @@ REPO_ROOT="$REPO_ROOT" "$POWERSHELL" -NoLogo -NoProfile -NonInteractive \
                 @("id", "AOC-24B2XH"),
                 @("enabled", $false),
                 @("selection_weight", 7),
-                @("release_year", 2021))) {
+                @("release_year", 2021),
+                @("windows_friendly_name", "Wrong Monitor"))) {
             $badMonitor = $catalog.monitor_items[1] |
                 ConvertTo-Json -Depth 32 | ConvertFrom-Json
             $badMonitor.($mutation[0]) = $mutation[1]

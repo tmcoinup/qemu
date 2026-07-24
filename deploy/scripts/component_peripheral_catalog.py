@@ -11,13 +11,15 @@ from typing import Any
 
 
 HEX16 = re.compile(r"^0x[0-9A-Fa-f]{4}$")
+WINDOWS_FRIENDLY_NAME = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
 ROOT_FIELDS = {
     "schema_version", "catalog_revision", "scope", "gpu_board_catalog",
     "storage_catalog", "gpus", "monitors", "hid",
 }
 MONITOR_FIELDS = {
     "id", "enabled", "selection_weight", "release_year", "manufacturer",
-    "model", "vendor_code", "product_id", "name", "serial_policy",
+    "model", "windows_friendly_name", "vendor_code", "product_id", "name",
+    "serial_policy",
     "binary_serial_policy", "native_resolution", "width_mm", "height_mm",
     "manufacture_week", "manufacture_year", "video_input", "edid_revision", "range",
     "secondary_timing", "evidence", "identity_fidelity", "source_refs",
@@ -97,6 +99,12 @@ MONITOR_FACTS = {
             True, False, 527, 296),
         frozenset(("URB5DT6H", "URB4N2F4", "URB644NY")),
     ),
+}
+MONITOR_WINDOWS_NAMES = {
+    "samsung-s24f350": "Samsung S24F350",
+    "aoc-24b2xh": "AOC 24B2XH",
+    "xiaomi-rmmnt238nf": "Xiaomi Mi Monitor (RMMNT238NF)",
+    "lenovo-l24e-30": "Lenovo L24e-30",
 }
 HID_FACTS = {
     "keyboards": (
@@ -187,6 +195,11 @@ def validate_monitors(root: dict[str, Any]) -> list[dict[str, Any]]:
         if stable_id in seen_ids or stable_id not in MONITOR_FACTS:
             fail("显示器稳定 ID 重复或未核验")
         expected = MONITOR_FACTS[stable_id]
+        friendly_name = item.get("windows_friendly_name")
+        if (not isinstance(friendly_name, str) or
+                WINDOWS_FRIENDLY_NAME.fullmatch(friendly_name) is None or
+                friendly_name != MONITOR_WINDOWS_NAMES[stable_id]):
+            fail(f"{stable_id} 的 Windows FriendlyName 无效")
         ranges = item.get("range")
         if not isinstance(ranges, dict) or set(ranges) != RANGE_FIELDS:
             fail(f"{stable_id}.range 字段集合无效")

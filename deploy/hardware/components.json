@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-23.3",
+  "catalog_revision": "2026-07-24.1",
   "scope": {
     "gpu": "out_of_scope_virtual_display",
     "tablet": "generic_virtual_absolute_pointer"
@@ -131,6 +131,7 @@
       "release_year": 2016,
       "manufacturer": "Samsung",
       "model": "LS24F350FHUXEN",
+      "windows_friendly_name": "Samsung S24F350",
       "vendor_code": "SAM",
       "product_id": "0x0D20",
       "name": "S24F350",
@@ -201,6 +202,7 @@
       "release_year": 2020,
       "manufacturer": "AOC",
       "model": "24B2XH",
+      "windows_friendly_name": "AOC 24B2XH",
       "vendor_code": "AOC",
       "product_id": "0x2402",
       "name": "24B2W1G5",
@@ -272,6 +274,7 @@
       "release_year": 2020,
       "manufacturer": "Xiaomi",
       "model": "RMMNT238NF",
+      "windows_friendly_name": "Xiaomi Mi Monitor (RMMNT238NF)",
       "vendor_code": "XMI",
       "product_id": "0x23C3",
       "name": "Mi Monitor",
@@ -342,6 +345,7 @@
       "release_year": 2020,
       "manufacturer": "Lenovo",
       "model": "L24e-30",
+      "windows_friendly_name": "Lenovo L24e-30",
       "vendor_code": "LEN",
       "product_id": "0x66BC",
       "name": "L24e-30",

@@ -79,6 +79,7 @@ function Get-VMateMonitorContract {
         'samsung-s24f350' = @{
             SelectionWeight = 2
             ReleaseYear = 2016
+            FriendlyName = 'Samsung S24F350'
             Facts = @('Samsung', 'LS24F350FHUXEN', 'SAM', '0x0D20',
                 'S24F350', 521, 293, 49, 2019, '0x80')
             Range = @(50, 75, 30, 81, 170)
@@ -98,6 +99,7 @@ function Get-VMateMonitorContract {
         'aoc-24b2xh' = @{
             SelectionWeight = 6
             ReleaseYear = 2020
+            FriendlyName = 'AOC 24B2XH'
             Facts = @('AOC', '24B2XH', 'AOC', '0x2402', '24B2W1G5',
                 527, 296, 39, 2022, '0x80')
             Range = @(48, 75, 30, 85, 180)
@@ -118,6 +120,7 @@ function Get-VMateMonitorContract {
         'xiaomi-rmmnt238nf' = @{
             SelectionWeight = 5
             ReleaseYear = 2020
+            FriendlyName = 'Xiaomi Mi Monitor (RMMNT238NF)'
             Facts = @('Xiaomi', 'RMMNT238NF', 'XMI', '0x23C3',
                 'Mi Monitor', 527, 293, 20, 2020, '0x80')
             Range = @(50, 75, 15, 100, 190)
@@ -138,6 +141,7 @@ function Get-VMateMonitorContract {
         'lenovo-l24e-30' = @{
             SelectionWeight = 4
             ReleaseYear = 2020
+            FriendlyName = 'Lenovo L24e-30'
             Facts = @('Lenovo', 'L24e-30', 'LEN', '0x66BC', 'L24e-30',
                 527, 296, 5, 2022, '0x80')
             Range = @(48, 75, 30, 83, 180)
@@ -163,7 +167,8 @@ function Assert-VMateMonitorComponent {
     param([object]$Monitor)
 
     $fields = @('id', 'enabled', 'selection_weight', 'release_year',
-        'manufacturer', 'model', 'vendor_code', 'product_id', 'name',
+        'manufacturer', 'model', 'windows_friendly_name', 'vendor_code',
+        'product_id', 'name',
         'serial_policy', 'binary_serial_policy', 'native_resolution', 'width_mm',
         'height_mm', 'manufacture_week', 'manufacture_year', 'video_input',
         'edid_revision', 'range', 'secondary_timing', 'evidence', 'identity_fidelity',
@@ -196,6 +201,13 @@ function Assert-VMateMonitorComponent {
         [int]$Monitor.manufacture_year, [string]$Monitor.video_input)
     if (($facts -join "`n") -cne (@($contract.Facts) -join "`n")) {
         throw "显示器 '$id' 的型号、EDID 厂商或物理规格被交叉拼接。"
+    }
+    $friendlyName = [string]$Monitor.windows_friendly_name
+    if ([string]::IsNullOrWhiteSpace($friendlyName) -or
+        $friendlyName.Length -gt 128 -or
+        $friendlyName -match '[\x00-\x1F\x7F]' -or
+        $friendlyName -cne [string]$contract.FriendlyName) {
+        throw "显示器 '$id' 的 Windows FriendlyName 无效。"
     }
     Assert-VMatePolicyFields $Monitor.native_resolution @('x', 'y',
         'aspect_ratio') "显示器 '$id' 的 native_resolution"

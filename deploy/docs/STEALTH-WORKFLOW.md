@@ -4,8 +4,8 @@
 由 `deploy/guest-stealth/package.sh` 生成的离线 `respawn-stealth.exe`。
 
 本流程坚持“客体尽量不安装软件”：不在客体下载脚本，不修改启动链，也不安装自签名、
-补丁或 NVIDIA 显示驱动。为满足 GPU-Z 2.70 直接双击，额外内容仅为两份固定摘要的
-无签名用户态 NVAPI shim、项目脚本、名称刷新任务和 HardwareID 维护任务；没有服务、
+补丁或 NVIDIA 显示驱动。统一 EXE 内嵌 stock VioGpuDod、五套 Microsoft WHCP
+Intel NO_DRV 识别包、用户态 NVAPI/ADL shim、项目脚本和受控维护任务；没有自有服务、
 控制面板、运行时安装包或第三方常驻进程。
 
 详细实现与文件职责见 [`guest-stealth/README.md`](../guest-stealth/README.md)，完整 VM
@@ -26,7 +26,14 @@ carrier 连续为 `1AF4:A101`–`1AF4:A112`，物理显示主 ID 始终是
 | 注册表逻辑身份 | GTX 1050 Ti 对应 `10DE:1C82/A1` | 不改变总线枚举出的主 PCI ID |
 | PnP HardwareID | 同一 devnode 的规范逻辑首项 + 完整 `1AF4:1050` 物理尾项 | MULTI_SZ 多条匹配字符串不是多个显卡设备 |
 | NVAPI/ADL 兼容 | 系统目录中的双架构厂商 API shim | NVAPI 主键以物理 carrier 去重，external/AIB/型号保持逻辑身份；不是厂商运行时 |
+| SMBus 识别 | A323/A123/1C22/1E22/8C22 使用 WHCP NO_DRV；2930 使用 inbox `machine.inf` | 不安装 SMBus `.sys`，也不改变 QEMU ICH9 行为 |
+| 显示器身份 | EDID 是事实源；`DEVPKEY_Device_FriendlyName` 只投影设备管理器标签 | 不改 EDID、HardwareID、INF 或 inbox `monitor.sys` |
 | 显示输出 | `VioGpuDod` 提供 Display-Only 扫描输出 | 不提供客体 Direct3D、CUDA 或 NVENC |
+
+四款显示器映射固定为：`SAM0D20 → Samsung S24F350`、
+`AOC2402 → AOC 24B2XH`、`XMI23C3 → Xiaomi Mi Monitor (RMMNT238NF)`、
+`LEN66BC → Lenovo L24e-30`。PnP code 必须来自当前 profile 的实时 EDID，不按旧
+设备名称猜测型号。
 
 必须同时满足以下约束：
 
@@ -39,6 +46,8 @@ carrier 连续为 `1AF4:A101`–`1AF4:A112`，物理显示主 ID 始终是
 - x86/x64 DLL 只写固定的 SysWOW64/System32 文件名，不写 GPU-Z 原目录或全局 `PATH`；
   目标若不是当前或历史 VMate 固定摘要，必须在任何覆盖前停止。
 - 不使用自签名证书、patched driver、EfiGuard 或任何深层 PCI 主 ID 切换模式。
+- Monitor 投影前后必须保持 EDID、`MONITOR\XXXNNNN` HardwareID、INF、Class 和
+  `monitor.sys` 不变，只允许 FriendlyName 变化。
 - 物理 PCI 门禁、真实驱动服务和 payload 校验任一失败时，流程必须停止，不能只改名称
   制造“已经安装成功”的假象。
 
@@ -57,9 +66,9 @@ sha256sum deploy/guest-stealth/dist/respawn-stealth.exe
 deploy/guest-stealth/dist/respawn-stealth.exe
 ```
 
-EXE 已内嵌 stock 驱动三件套、驱动安装器、GPU 注册表初始化脚本、双架构 NVAPI
-payload 和系统发布 helper。每次修改这些输入后都要重新执行打包脚本，并用最新 EXE
-替换客体中的旧副本。
+EXE 已内嵌 stock 驱动三件套、全池 SMBus 识别包、显示器名称清单与投影器、GPU
+注册表初始化脚本、双架构 NVAPI/ADL payload 和系统发布 helper。每次修改这些输入后
+都要重新执行打包脚本，并用最新 EXE 替换客体中的旧副本。
 
 不要为当前流程启动 HTTP 脚本服务器，也不要从网络管道执行 PowerShell。将 EXE 通过
 现有数据盘、只读 ISO、共享目录或其它受控离线方式拷进客体即可。
@@ -115,33 +124,40 @@ Start-Process -FilePath 'D:\工具\respawn-stealth.exe' `
 EXE 的关键执行顺序如下：
 
 1. 从 Windows Known Folder 定位 ProgramData，把内嵌 payload 安全发布到受保护目录。
-2. 停止旧的 `StealthGPU-ProjectHardwareId` writer，先验当前在线实例；必要时恢复
+2. 配置电源后检查当前硬件池 SMBus。A323/A123/1C22/1E22/8C22 缺驱动时安装对应
+   WHCP NO_DRV INF；2930 只验证 Win10 inbox `machine.inf`，健康实例幂等跳过。
+3. 停止旧的 `StealthGPU-ProjectHardwareId` writer，先验当前在线实例；必要时恢复
    原始 physical-only 数组，并在任何驱动/PnP 操作前再次门禁完整物理 HardwareID。
-3. 枚举所有在线 PCI 显示设备，要求物理主 ID 全部为 `1AF4:1050`。
-4. 已绑定 `VioGpuDod` 的克隆客体走无扰动快速路径；未绑定的全新客体才校验并安装
+4. 枚举所有在线 PCI 显示设备，要求物理主 ID 全部为 `1AF4:1050`。
+5. 已绑定 `VioGpuDod` 的克隆客体走无扰动快速路径；未绑定的全新客体才校验并安装
    内嵌 stock Microsoft-WHQL 驱动。
-5. 再次确认真实服务是 `VioGpuDod`；确认失败就停止，不写 GPU 伪装名称。
-6. 根据 PCI SUBSYS 持久化注册表逻辑身份。GTX 1050 Ti profile 映射为
+6. 再次确认真实服务是 `VioGpuDod`；确认失败就停止，不写 GPU 伪装名称。
+7. 根据 PCI SUBSYS 持久化注册表逻辑身份。GTX 1050 Ti profile 映射为
    `10DE:1C82/A1`，物理 `1AF4:1050` 不变；identity schema-2 的 `SpoofName`
    保留完整 AIB canonical 标签。
-7. 先预检/staging x86/x64 NVAPI，再事务发布到 SysWOW64/System32；未知同名 DLL
+8. 先预检/staging x86/x64 NVAPI，再事务发布到 SysWOW64/System32；未知同名 DLL
    fail-closed，第二架构失败会回滚第一架构。新的 transaction schema-5 把 Enum
    `FriendlyName`/`DeviceDesc` 和 Class `DriverDesc` 写为标准芯片名，把
    `Mfg`/`ProviderName` 写为芯片厂商；schema 1/2/3/4 只兼容恢复旧 journal。
    重跑时 Class 目标只按 staged 物理实例的 Driver/Service/INF 唯一绑定，不按
    DriverDesc 名称筛选。若已加载工具仅锁住旧 backup，则保留精确摘要 receipt，
    只重启一次后 Recover 清理，不修改 ACL 或登记无凭据的延迟删除。
-8. 在同一 VioGpuDod devnode 上 Apply/Verify HardwareID 的规范逻辑首项 + 完整物理
+9. 在同一 VioGpuDod devnode 上 Apply/Verify HardwareID 的规范逻辑首项 + 完整物理
    尾项，并在该最终状态运行厂商 API probe；随后注册 SYSTEM/Highest 的名称刷新任务
    以及启动/登录 `StealthGPU-ProjectHardwareId` 维护任务。
    Apply 在设备写入前持久化并回读 `RollbackHardwareIds`，使 journal 收尾的任一
    中断点都可恢复。全流程最多安排一次自动重启；若恢复后芯片组仍待重启，任务切到
    `ChipsetVerification` 并返回 `30`，由人工重启后只做 INF 复核。
    `MatchingDeviceId`、`InfPath`、`InfSection`、`Service`、真实 BDF 和 Driver
-   仍保持 stock `VioGpuDod` 绑定值，随后默认重启。
+   仍保持 stock `VioGpuDod` 绑定值。
+10. 按在线 Monitor 的 EDID PnP code 选择上面的四款映射，只写并回读
+    `DEVPKEY_Device_FriendlyName`，注册 `StealthGPU-ProjectMonitorIdentity`；
+    受保护的 EDID、HardwareID、INF、Class 与 `monitor.sys` 任一变化都会停止，
+    全部成功后才默认重启。
 
-因此，客体中唯一安装的驱动是 stock `VioGpuDod`。脚本、名称刷新任务和厂商 API payload
-由统一 EXE 管理；用户不需要另外安装 NVIDIA 驱动、控制面板、证书或第三方服务。
+因此，客体中唯一安装的内核显示驱动是 stock `VioGpuDod`。脚本、GPU/Monitor 维护任务
+和厂商 API payload 由统一 EXE 管理；用户不需要另外安装 NVIDIA 驱动、控制面板、
+证书或第三方服务。
 
 ## 5. 重启后验证
 
@@ -190,6 +206,10 @@ GTX 1050 Ti profile 的期望结果：
 
 - PnP 实例仍以 `PCI\VEN_1AF4&DEV_1050` 开头。
 - `DEVPKEY_Device_Service` 为 `VioGpuDod`，设备状态为 OK 且 Problem 为 0。
+- SMBus 为 `Status=OK`、`Class=System`、ProblemCode 0、空 Service；五款 payload
+  型号使用 `oem*.inf`，2930 使用 inbox `machine.inf`。
+- Monitor FriendlyName 命中四款 EDID 映射之一；其 HardwareID、INF 和
+  `monitor.sys` 仍为 Windows 按该 EDID 枚举的原值。
 - 注册表 `IdentityMode` 为浅层用户态投影模式。
 - 逻辑 VEN/DEV 十进制为 `4318/7298`，即十六进制 `10DE/1C82`。
 - 身份 schema 为 `2`；GTX 1050 Ti 的显存/时钟投影为 `GDDR5`、128 bit、
@@ -249,12 +269,16 @@ NVAPI/ADL，改读 stock `VioGpuDod` 的 DXGI 描述、HardwareID 物理尾项�
 | 名称像 GTX，但分辨率仍锁在启动帧缓冲 | 可能只有名称覆盖，真实驱动未绑定 | 更新统一 EXE 并重跑，确认 `Service=VioGpuDod` |
 | EXE 报物理 PCI 门禁失败 | 当前设备不是 `1AF4:1050` | 停止；恢复标准启动配置后再运行，不切换深层主 ID |
 | 设备 Code 43 | 物理 ID、驱动或旧状态不匹配 | 保持 `1AF4:1050`，用统一 EXE 核验 stock 驱动；不装 patched driver |
+| SMBus Code 28 | 当前平台的 NO_DRV INF 未绑定 | 核对全池芯片组日志；2930 则核对 inbox `machine.inf` |
+| 显示器仍为通用标签 | FriendlyName 投影未完成 | 核对 EDID PnP code 与显示器投影日志；不替换 Monitor INF |
 | payload 目录 Owner 不受信 | 固定目录可能被普通用户预建 | 核对无用户文件后，以管理员删除该目录，再重新运行 EXE |
 | GPU-Z 未显示预期逻辑字段 | 系统 DLL 未发布、加载了未知版本或查询接口仍缺失 | 核对 `nvapi-system-install.log`、双 DLL 摘要与 GPU-Z 已加载模块，再做 2.70 E2E |
 
 日志位于 `C:\ProgramData\StealthGPU\`：
 
 - `display-driver-install.log`
+- `chipset-device-install.log`
+- `monitor-identity-projection.log`
 - `nvapi-system-install.log`
 - `respawn.log`
 

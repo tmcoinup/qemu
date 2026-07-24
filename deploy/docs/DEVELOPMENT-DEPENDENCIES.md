@@ -32,14 +32,31 @@ systemd-networkd，应先准备本地或带外控制台，再决定是否安装 
 ```bash
 sudo apt install -y \
   git build-essential bzip2 ninja-build meson pkg-config \
-  python3-venv python3-pip python3-setuptools python3-wheel \
-  zlib1g-dev libfdt-dev libglib2.0-dev libpixman-1-dev \
-  libslirp-dev libseccomp-dev \
+  python3 python3-venv python3-pip python3-setuptools python3-wheel \
+  zlib1g-dev libglib2.0-dev libpixman-1-dev \
+  libslirp-dev libseccomp-dev libaio-dev liburing-dev \
   libsdl2-dev libepoxy-dev libvirglrenderer-dev libspice-server-dev
 ```
 
+`deploy/tools/build.sh` 的 `INSTALL_BUILD_DEPS=auto` 是默认值。在 Debian/Ubuntu
+本地前台终端发现缺项时，脚本会执行一次 `apt-get update`，再只安装缺失能力对应
+的包；普通用户通过 `sudo` 获取权限，可以正常输入一次密码。安装结束后会重新执行
+完整能力检查，仍有缺项就会在 configure 前失败。
+
+CI、容器、后台任务和非 Debian 系统默认不隐式修改宿主。受控无人值守环境可使用
+`--install-build-deps`（非交互时只尝试 root 或 `sudo -n`）；离线镜像或禁止系统
+修改的环境使用 `--no-install-build-deps`，但该选项不会绕过依赖门禁。依赖安装与
+构建后的 `--install-host-helpers` 是两套独立策略。
+
+自动安装只覆盖本节的 Linux QEMU 源码构建组，不会安装 VM 运行/bridge、OVMF
+重建、完整回归或 Windows 交叉打包依赖。上面的固定清单仍是 CI 镜像、离线主机和
+受管环境应预置的事实源。
+`libfdt-dev` 是可选的系统提供者；缺失时 QEMU 使用源码树的 internal dtc。
+
 `python3-wheel` 提供 Python 模块，不保证安装名为 `wheel` 的命令。应使用
 `python3 -c 'import wheel'` 验证，不要把 `command -v wheel` 当作缺包依据。
+`libaio-dev` 与 `liburing-dev` 是启动盘自动选择 `native`/`io_uring` 的构建
+契约；缺失时本地前台默认自动补齐，其它环境保持 fail closed。
 
 ## 3. 固件与 UEFI 镜像重建
 
@@ -160,7 +177,9 @@ test -x /usr/lib/qemu/qemu-bridge-helper
 python3 -c 'import wheel, setuptools, venv'
 python3 -c 'import hivex'
 pkg-config --exists \
-  zlib glib-2.0 pixman-1 sdl2 epoxy virglrenderer spice-server slirp libseccomp
+  zlib glib-2.0 pixman-1 sdl2 epoxy virglrenderer spice-server slirp libseccomp \
+  liburing
+test -r /usr/include/libaio.h || pkg-config --exists libaio
 ```
 
 宿主运行能力另行验证：

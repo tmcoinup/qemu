@@ -255,8 +255,16 @@ elif [[ "$GPU_EGL_HEADLESS" == "1" ]]; then
     DISP_ARGS+=(-display "$_egl_display")
 elif [[ "$SDL" == "1" ]]; then
     if [[ "$STABLE_DISPLAY" == "1" ]]; then
+        # SDL 2D 默认仍会优先创建 OpenGL renderer；在 GLX 不可用的 XWayland
+        # 会于 SDL 返回错误前触发致命 XError。稳定模式必须同时关闭 window
+        # framebuffer 加速并固定 software renderer，才是真正的非 GL 路径。
+        export SDL_FRAMEBUFFER_ACCELERATION=0
+        export SDL_RENDER_DRIVER=software
         DISP_ARGS+=(-display sdl,show-cursor=off)
     else
+        # 显式 GL 模式由 QEMU SDL provider 自行选择 EGL/GLX，不能继承稳定模式
+        # 或调用者遗留的软件 renderer hint。
+        unset SDL_FRAMEBUFFER_ACCELERATION SDL_RENDER_DRIVER
         DISP_ARGS+=(-display sdl,gl=on,show-cursor=off)
     fi
 else

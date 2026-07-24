@@ -6,8 +6,8 @@
 
 ## 阶段 0：host 端生成统一离线 EXE
 
-全新系统和 clone 都只运行 `respawn-stealth.exe`。显示驱动、签名 CAT/INF、安装器和
-初始化脚本已经内嵌，不需要启动 `serve-stealth-http.py`：
+全新系统和 clone 都只运行 `respawn-stealth.exe`。显示驱动、全 SMBus 池识别包、
+显示器名称清单、安装器和初始化脚本已经内嵌，不需要启动 `serve-stealth-http.py`：
 
 ```bash
 bash deploy/guest-stealth/package.sh
@@ -57,11 +57,12 @@ powercfg -h off
 Start-Process -FilePath 'D:\工具\respawn-stealth.exe' -Wait
 ```
 
-EXE 会先判断真实 `Service`。克隆机已是 `VioGpuDod` 时跳过安装；全新机则校验内嵌 SYS/CAT/INF 的摘要与微软签名，执行 `pnputil /install`，确认绑定成功后才做 GPU/显示器初始化。任何一步失败都会停止，不会把 BasicDisplay 只改一个 GTX 名字。
+EXE 先收敛 A323/A123/1C22/1E22/8C22 的 WHCP NO_DRV 与 inbox 2930，再判断显示
+`Service`；确认 `VioGpuDod` 后才做 GPU 身份与显示器 FriendlyName 投影，失败即停止。
 
 ### A.4 等 EXE 自动重启
 
-默认约 8 秒后自动重启，让 VioGpuDod、实时 EDID 和名称覆盖一起生效。调试时若用了 `-NoReboot`，检查日志后再手动执行 `shutdown /r /t 0`。
+默认约 8 秒后自动重启，让 VioGpuDod、实时 EDID 和名称投影一起生效。调试时若用了 `-NoReboot`，检查日志后再手动执行 `shutdown /r /t 0`。
 
 ### A.5 验证真实驱动和分辨率
 
@@ -183,7 +184,7 @@ deploy/scripts/seal-base.sh 1 win10-shallow-dnf-v1 \
 ```
 
 脚本会持有与 start/stop 相同的实例锁，严格校验 profile、启动盘容量和 qcow2，
-把源盘压缩转换到同目录 staging，复核镜像完整性后以 no-replace 方式发布，并自动
+默认把源盘转换为未压缩 staging（`--compression=zlib` 或 `BASE_COMPRESSION=zlib` 才压缩），复核后发布，并自动
 把最终 base 设为 `root:root/0444`。不再需要手工 `chmod -w`。每次 clone 还会
 在实例目录内建立 `.base.qcow2` hard-link pin；原 `_base` 目录项以后被移动或
 删除时，既有实例仍引用原 inode。为保持零拷贝 thin clone，base 和实例目录必须
@@ -266,8 +267,8 @@ clone 都重复等待，应在更新完成后重新执行 sysprep，并密封为
    - Order 4-5: 关 IE wizard / 关 Windows Update 自动重启
    - Order 6-9: 注册 ms-gamingoverlay no-op handler + 关 GameDVR
    - **Order 10: `D:\工具\respawn-stealth.exe --firstlogon`**
-5. `respawn-stealth.exe` 先验证物理 `1AF4:1050`/stock VioGpuDod，再按 PCI subsys 提交 schema-5 浅层逻辑 identity；事务发布 x86 SysWOW64 + x64 System32 NVAPI，使 GPU-Z 2.70 可直接双击；随后自动重启。`--firstlogon` 保留 SYSTEM 名称刷新和启动/登录 HardwareID 维护任务；交互式显示模式任务仍跳过，不安装第三方服务
-6. 重启后 Device Manager、WMI 与 NVAPI/ADL 显示同一标准型号/厂商；完整 `profile.GPU_NAME` 只供 identity schema-2 原子校验。PnP HardwareID 为规范逻辑首项 + 完整物理尾项；NVAPI 主键用 `1AF4:1050` 跨接口去重，external/AIB/型号保持逻辑 NVIDIA 身份
+5. `respawn-stealth.exe` 先收敛全 SMBus 池，再验证物理 `1AF4:1050`/stock VioGpuDod，提交 schema-5 GPU identity 与 Monitor FriendlyName；随后自动重启。`--firstlogon` 保留 GPU 名称、HardwareID 和 Monitor 标签维护任务，不安装第三方服务
+6. 重启后 Device Manager、WMI 与 NVAPI/ADL 显示同一 GPU 型号/厂商，Monitor 标签来自 EDID 映射；完整 `profile.GPU_NAME` 只供 schema-2 校验。PnP HardwareID 为逻辑首项 + 物理尾项，NVAPI 主键用 `1AF4:1050` 去重
 
 整个过程从 `start-vm.sh` 到稳定桌面通常需要 **约 5-10 分钟**；旧 base 触发联网 ZDP 时会更久，全程不需要鼠标键盘。
 
@@ -351,7 +352,7 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 ## 客机离线统一安装与重对齐（`deploy/guest-stealth/`）
 
 阶段 C 的 GPU 重对齐（首启 `FirstLogonCommands` Order=10 / C.2.1 兜底）只走 `D:\工具\respawn-stealth.exe --firstlogon`。`FirstLogonCommands` 是 OOBE 后首次登录执行一次，不是每次开机执行。
-`--firstlogon` 保留 `StealthGPU-RefreshName` 和 `StealthGPU-ProjectHardwareId`，只跳过交互式显示模式任务。驱动/PnP 操作前临时恢复 physical-only，最终再投影规范逻辑首项 + 完整物理尾项并注册启动/登录维护。迁移到其它主机时不要求对方有相同 host IP 或 HTTP 服务。
+`--firstlogon` 保留 `StealthGPU-RefreshName`、`StealthGPU-ProjectHardwareId` 和 `StealthGPU-ProjectMonitorIdentity`，只跳过交互式显示模式任务。驱动/PnP 操作前临时恢复 physical-only，最终再投影规范逻辑首项 + 完整物理尾项并注册启动/登录维护。迁移到其它主机时不要求对方有相同 host IP 或 HTTP 服务。
 
 ### 文件
 
@@ -359,12 +360,14 @@ sudo /home/ubuntu/projects/qemu/deploy/scripts/clone-from-base.sh win10-shallow-
 |---|---|
 | `dist/respawn-stealth.exe` | **唯一发布入口**：内嵌驱动三件套、安装器与初始化脚本 |
 | `install-display-driver.ps1` | 用真实 Service 做幂等判断；全新机安装，克隆机跳过 |
-| `respawn-stealth-local.ps1` | 串联驱动、`apply-gpu-spoof -AutoDetect`、清 RunOnce 与重启 |
+| `respawn-stealth-local.ps1` | 串联全池 SMBus、显示驱动、GPU/Monitor 投影、清 RunOnce 与重启 |
 | `README.md` | 该目录自带的简要说明 |
 | `package.sh` | host 上打一个默认只含 `respawn-stealth.exe` 的 `dist/`（已 gitignore）|
 
-行为：先核验/绑定 `VioGpuDod` → 仅新装系统清模式缓存 → 按 PCI SUBSYS 查 GPU 池 → 更新 Class/Enum，并投影 HardwareID 规范逻辑首项 + 完整物理尾项 → 重启。
-显示器身份始终来自 Host profile 注入的 QEMU EDID，`respawn-stealth` 不再改写 `Enum\DISPLAY` 或 Monitor Class。所有依赖释放到 `C:\ProgramData\StealthGPU\respawn-exe\`，不依赖网络。
+行为：收敛 A323/A123/1C22/1E22/8C22 + inbox 2930 → 绑定 VioGpuDod → 投影 GPU
+→ 按 EDID PnP code 投影 Monitor：`SAM0D20→Samsung S24F350`、`AOC2402→AOC 24B2XH`、
+`XMI23C3→Xiaomi Mi Monitor (RMMNT238NF)`、`LEN66BC→Lenovo L24e-30`。EDID 是
+事实源；只写 `DEVPKEY_Device_FriendlyName`，不改 EDID/HardwareID/INF/`monitor.sys`。
 
 ### 打包进 base（必需，封 base 前做一次）
 
@@ -377,7 +380,7 @@ bash deploy/guest-stealth/package.sh
 封 base 前（阶段 A 末、B.1 sysprep 之前），只把
 `deploy/guest-stealth/dist/respawn-stealth.exe` 拷进 guest，固定放到
 `D:\工具\respawn-stealth.exe`。
-EXE 自带 stock `viogpudo.sys/.cat/.inf`、安装器、respawn 和 apply 脚本，运行时
+EXE 自带 stock VioGpuDod、五套 SMBus INF/CAT、Monitor 清单/投影器及初始化脚本，运行时
 释放到 `C:\ProgramData\StealthGPU\respawn-exe\`，不依赖旁边任何文件。
 
 拷完照常 sysprep + `seal-base.sh` 封 base，之后每个 clone 首次登录都会执行这份 EXE 一次。
@@ -402,7 +405,7 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 |---|---|---|---|
 | 0 | host | `bash deploy/guest-stealth/package.sh` | 构建内嵌驱动与脚本的统一离线 EXE |
 | A.1 | host | `deploy/scripts/start-vm.sh 1 --iso=...` | 启动装机 |
-| A.3 | guest | `D:\工具\respawn-stealth.exe` | 离线安装 VioGpuDod + GPU/显示器初始化 + 重启 |
+| A.3 | guest | `D:\工具\respawn-stealth.exe` | 收敛 SMBus、VioGpuDod、GPU/Monitor 投影并重启 |
 | A.5 | guest | 查询 `DEVPKEY_Device_Service` | 验证真实 Service，而不是只看 GTX 名称 |
 | A.6（可选） | host | `sudo .../host-fix-gpu-devpkey.sh 1` | 仅诊断受保护的旧 Driver-tab DEVPKEY；正常 schema-5 流程不需要 |
 | A.7 | guest | 手动装 wegame / DNF / 实际游戏环境 | — |

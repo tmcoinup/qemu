@@ -12,6 +12,7 @@ RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
 BUILD="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 PACKAGE="$REPO_ROOT/deploy/guest-stealth/package.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
+PAYLOADS_HEADER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-payloads.h"
 README="$REPO_ROOT/deploy/guest-stealth/README.md"
 QUICKSTART="$REPO_ROOT/deploy/guest-stealth/QUICKSTART.zh-CN.md"
 RUNNER="$SCRIPT_DIR/run-vmate-tests.py"
@@ -22,7 +23,7 @@ fail() {
 }
 
 for path in "$POWER_HELPER" "$RESPAWN" "$BUILD" "$PACKAGE" "$LAUNCHER" \
-        "$README" "$QUICKSTART" "$RUNNER"; do
+        "$PAYLOADS_HEADER" "$README" "$QUICKSTART" "$RUNNER"; do
     [[ -f "$path" ]] || fail "缺少 guest 电源策略链文件: $path"
 done
 
@@ -149,10 +150,11 @@ grep -F 'POWER_POLICY_SRC="$HERE/configure-power-policy.ps1"' "$BUILD" >/dev/nul
     || fail "build-exe.sh 没有固定 power helper 源"
 grep -F 'payload_configure_power_policy_ps1 "$POWER_POLICY_SRC"' "$BUILD" >/dev/null \
     || fail "build-exe.sh 没有生成 power helper 字节数组"
-grep -F '#include "payload_configure_power_policy_ps1.h"' "$LAUNCHER" >/dev/null \
+grep -F '#include "payload_configure_power_policy_ps1.h"' \
+    "$PAYLOADS_HEADER" >/dev/null \
     || fail "launcher 没有 include power helper 数组"
 grep -F '{ L"configure-power-policy.ps1", payload_configure_power_policy_ps1,' \
-    "$LAUNCHER" >/dev/null || fail "launcher 没有释放 power helper"
+    "$PAYLOADS_HEADER" >/dev/null || fail "launcher 没有释放 power helper"
 grep -F 'cp "$POWER_POLICY_SRC"' "$PACKAGE" >/dev/null \
     || fail "legacy 调试包没有复制 power helper"
 
@@ -190,5 +192,7 @@ respawn_code_lines="$(awk '!/^[[:space:]]*($|#)/ { count++ } END { print count +
     || fail "respawn-stealth-local.ps1 非注释代码超过 500 行: $respawn_code_lines"
 [[ "$(wc -l < "$LAUNCHER")" -le 500 ]] \
     || fail "respawn-stealth-launcher.c 超过 500 行"
+[[ "$(wc -l < "$PAYLOADS_HEADER")" -le 500 ]] \
+    || fail "respawn-stealth-payloads.h 超过 500 行"
 
 echo "OK: guest-stealth 在 GPU/PnP 前将屏幕/睡眠设为从不并保留桌面 S3"

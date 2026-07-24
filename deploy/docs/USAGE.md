@@ -94,7 +94,7 @@ sudo deploy/scripts/clone-from-base.sh win10-ltsc-shallow 2 \
 
 `seal-base.sh` 会校验并把最终 base 密封为 `root:root/0444`；clone 在实例目录建立同 inode 的
 `.base.qcow2` 只读 pin，overlay 只引用这个相对路径。因此删除或移动 `_base` 原目录项都不会改变已有实例的
-backing；base 与 `VMS_DIR` 必须位于同一文件系统。完成提示包含 `sudo`、base 绝对路径、`VMS_DIR`、`qemu-img`、compatibility 与迁移授权，可直接复制；seal 优先 reflink，不支持时稀疏复制到独立 root inode，密封期间需预留约一份压缩后 base 的临时空间。
+backing；base 与 `VMS_DIR` 必须位于同一文件系统。完成提示包含 `sudo`、base 绝对路径、`VMS_DIR`、`qemu-img`、compatibility 与迁移授权，可直接复制；seal 默认生成低尾延迟的未压缩 base（`--compression=zlib` 或 `BASE_COMPRESSION=zlib` 才压缩），并按 staging 与最终独立 inode 的峰值提前检查空间。
 
 浏览器下载、`scp`、Windows 或移动介质复制会丢失 Linux owner/mode。把独立 qcow2
 复制到目标 Linux 文件系统后，仍直接执行 `sudo clone-from-base.sh`：clone 会在稳定 FD
@@ -167,11 +167,12 @@ deploy/tools/build.sh --reconfig
 deploy/tools/build.sh --debug
 deploy/tools/build.sh --jobs 8
 
-# 本地终端默认在成功构建后同步宿主 helper，并可能提示一次 sudo 密码
-# CI/后台部署需要显式强制；仅打包、不部署到当前宿主时可显式跳过
+# 本地终端缺包时默认自动安装；CI/后台强制安装须显式授权
+deploy/tools/build.sh --install-build-deps
+# 完全禁止系统安装与宿主 helper 部署（依赖门禁仍启用）
+deploy/tools/build.sh --no-install-build-deps --no-install-host-helpers
+# 构建后的宿主 helper 策略与依赖安装互相独立
 deploy/tools/build.sh --install-host-helpers
-deploy/tools/build.sh --no-install-host-helpers
-
 # 并发快速回归；完整集为避免共享 socket 冲突而串行
 python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4
 python3 deploy/scripts/tests/run-vmate-tests.py --mode full
@@ -207,7 +208,8 @@ NVMe、EDID、USB、PCI identity、fb-shm 等定制属性；不要在生产中�
 - 对照编译验证结束时的 QEMU device/inode/SHA-256，拒绝在等待 `sudo` 期间被替换的产物；
   安装后立即执行 `check`，复核目录、文件、链接数、权限、sudoers 及 QEMU 摘要。
 
-本地交互终端默认 `INSTALL_HOST_HELPERS=auto`，每次成功构建都会同步，因此重新编译 QEMU
+构建前的 `INSTALL_BUILD_DEPS` 与构建后的 `INSTALL_HOST_HELPERS` 相互独立。本地交互
+终端默认补齐缺失构建包并在成功构建后同步 helper，因此重新编译 QEMU
 或修改 helper 后只需再次运行 `deploy/tools/build.sh`，不再单独维护安装步骤。CI、容器、
 后台 job 和无前台终端任务默认不修改当前宿主；目标机无人值守部署须使用
 `--install-host-helpers`（认证不可用时 `sudo -n` 会立即失败），纯构建/打包使用
@@ -378,6 +380,7 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `CPU_FREQ_CAP` | **`0`** | 默认不全局封顶；`--freq-cap` 才按目标 CPU 上限启用 |
 | `CPU_ISOLATE` | `1` | 严格启动闸门 + NUMA-aware pinner + 每实例 cgroup cpuset |
 | `QEMU_SERVICE_CPUS` | `0` | `--svc-cpu` 分配 1 个辅助线程逻辑 CPU |
+| `QEMU_DISK_AIO` | `auto` | 实测选择 `io_uring`→`native`→`threads`，不增加 IOThread |
 | `MEM_GUARD` | `1` | 可用内存不足时告警或拒绝；`MEM_FORCE=1` 显式越过硬拒绝 |
 | `SDL` / `FB_SHM` | `1` / `1` | 默认本地稳定 SDL 窗口与 fb-shm 同时启用 |
 | `STABLE_DISPLAY` | `1` | 默认 `virtio-vga`、无 virgl/blob/hostmem；设 `0` 显式启用 GL |

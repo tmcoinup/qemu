@@ -1,9 +1,9 @@
 # Intel 芯片组识别 INF 来源
 
-本目录只保存两个已启用 Intel 平台所需的原始 INF/CAT。它们是 Microsoft
+本目录只保存五种硬件池 Intel SMBus 身份所需的原始 INF/CAT。它们是 Microsoft
 WHCP 签名的 Intel `NO_DRV`（null-driver）设备识别包：用于清除设备管理器
 Code 28 并显示正确名称，不包含 `.sys`，也不会把 QEMU ICH9 SMBus 变成真实
-Sunrise Point/Cannon Lake 控制器。
+Cougar/Panther/Lynx/Sunrise/Cannon Lake 控制器。
 
 文件必须保持上游原字节。`build-exe.sh` 与来宾安装器会分别校验 SHA-256；
 不要改换行、大小写或重新生成 CAT。
@@ -39,6 +39,50 @@ Sunrise Point/Cannon Lake 控制器。
 - `sunrisepoint-h.cat`:
   `d22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b`
 - INF 版本: `10.1.1.44`
+
+## H61 / `PCI\VEN_8086&DEV_1C22`
+
+与 H110 共用上面的 `10.1.1.44` CAB：
+
+- `CougarPointSystem.inf`:
+  `6c8325abce0d7ca7db7324bfb8571ea54e870b3052546e281a45ac95024be4d1`
+- `cougarpoint.cat`:
+  `def9c32b7720dd1d8ea960d50a9ad1aa00d3e1c4f75a89c93e5738515bddebeb`
+- INF 版本: `10.1.1.44`
+
+## B75 / `PCI\VEN_8086&DEV_1E22`
+
+与 H110 共用上面的 `10.1.1.44` CAB：
+
+- `PantherPointSystem.inf`:
+  `11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6`
+- `pantherpoint.cat`:
+  `a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500`
+- INF 版本: `10.1.1.44`
+
+## H81 / `PCI\VEN_8086&DEV_8C22`
+
+与 H110 共用上面的 `10.1.1.44` CAB：
+
+- `LynxPointSystem.inf`:
+  `2e754318dab5a3f906eb267a785fe040dc253c26fdcbe4878cd2aaf1316a7209`
+- `lynxpoint.cat`:
+  `28ec883087c5ffe99e132631f4a7ec27c8d315430cddb83942ff1384e1643dee`
+- INF 版本: `10.1.1.44`
+
+## Q35/ICH9 compatibility / `PCI\VEN_8086&DEV_2930`
+
+`2930` 不需要随 EXE 再分发 INF。项目 Win10 19041 镜像的 inbox
+`Windows\INF\machine.inf` 已包含该 Hardware ID，并将它绑定到 `System` 类的
+`NO_DRV`、空服务与名称 `SM Bus Controller`：
+
+- `machine.inf` DriverVer: `10.0.19041.1202`
+- 文件 SHA-256:
+  `d38bd6dc999fa23e523d044837f81c7e0cac38ca7f09a7ac9c775386313197f6`
+
+安装器不会替换 inbox 包，但会把 `Status=OK`、`ProblemCode=0`、`Class=System`、
+`InfPath=machine.inf`、空 `Service` 和非空本地化名称纳入同一后验门禁；任一不符
+都失败关闭，名称本身不做跨语言精确比较。
 
 Microsoft 签名只证明包的完整性与 Windows 信任状态，不自动授予第三方再分发
 权利。对外发布内嵌这些文件的 EXE 前，应由发布方确认 Intel、OEM 与 Microsoft

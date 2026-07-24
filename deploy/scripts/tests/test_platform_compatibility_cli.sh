@@ -368,12 +368,18 @@ grep -F '如确需更换整机身份，请备份后显式追加 --reroll' "$TMP_
     export PLATFORM_STATUS=compatibility
     export PLATFORM_ID
     export ALLOW_PLATFORM_COMPATIBILITY=1
+    unset DOCK_PIN
     source "$REPO_ROOT/deploy/scripts/lib/sv-dock.sh"
     _sv_dock_write_desktop 9753
+    _sv_dock_pin_favorite 9753
 )
 dock_desktop="$TMP_DIR/home/.local/share/applications/win10-9753.desktop"
 grep -F "Exec=$REPO_ROOT/deploy/scripts/sv-dock-launch.sh 9753 --proxy --allow-platform-compatibility" \
     "$dock_desktop" >/dev/null || fail "Dock Exec 丢失 compatibility allow"
+grep -Fx 'NoDisplay=true' "$dock_desktop" >/dev/null \
+    || fail "Dock 启动器不应污染 GNOME 应用列表"
+[[ ! -e "$TMP_DIR/home/.local/share/qemu-vm/.pinned-9753" ]] \
+    || fail "Dock 启动器不应默认固定到任务栏"
 
 memory_log="$TMP_DIR/set-memory.log"
 VMS_DIR="$IMAGE_ROOT/vms" \

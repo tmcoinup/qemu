@@ -341,7 +341,8 @@ sudo deploy/scripts/setup-host-helpers.sh check
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  python3-venv python3-pip python3-wheel libfdt-dev libseccomp-dev
+  python3-venv python3-pip python3-wheel libfdt-dev libseccomp-dev \
+  libaio-dev liburing-dev
 
 deploy/tools/build.sh --verify --install-host-helpers
 python3 deploy/scripts/kvm-capabilities.py --format json

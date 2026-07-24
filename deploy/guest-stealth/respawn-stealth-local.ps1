@@ -8,13 +8,13 @@
 #
 # 它做的事：
 #   1. 用 Windows 内置电源 API 把“屏幕/睡眠”设为“从不”，保留桌面 S3 并关闭休眠。
-#   2. 为 A123/A323 幂等安装 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF，
-#      清除 SMBus Code 28；它不包含 SYS，也不改变 QEMU ICH9 的真实行为。
+#   2. 按硬件池幂等安装 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF，
+#      清除 SMBus Code 28；2930 走 inbox，所有策略都不改变 ICH9 真实行为。
 #   3. 验证并幂等安装 EXE 内嵌的 Microsoft WHCP stock viogpudo；已绑定且
 #      发布 INF 完整时跳过 pnputil，缺失发布 INF 时走官方恢复，失败则停止。
 #   4. 按当前显卡 PCI SUBSYS 自动选定伪装型号，并持久化统一用户态 PCI 身份。
-#   5. 只重写 GPU 的 Class\{4d36e968}\NNNN + Enum\PCI 覆盖；
-#      显示器身份始终由 Host profile 注入的实时 QEMU EDID 决定。
+#   5. 只重写 GPU 的 Class\{4d36e968}\NNNN + Enum\PCI 覆盖；显示器深层身份
+#      仍由实时 EDID 决定，设备管理器标签按池内 PnP ID 投影 FriendlyName。
 #   6. 按当前板卡厂商事务发布 x86/x64 NVAPI 或 ADL 身份读取层，使 GPU-Z 2.70
 #      及其它标准厂商 API 工具全局读取同一身份；不修改内核驱动或签名链。
 #   7. 两种模式都保留名称刷新与 HardwareID 投影任务；-FirstLogon 只跳过需要
@@ -69,7 +69,8 @@ try {
 function Stop-GpuIdentityWriterTasks {
     # 重跑前阻断名称与 HardwareID writer，避免驱动/PnP 操作和投影竞态。
     # 部署失败时复用同一屏障，不能留下引用混版 helper 的任务。
-    foreach ($taskName in $projectionTaskName, 'StealthGPU-RefreshName') {
+    foreach ($taskName in $projectionTaskName, 'StealthGPU-RefreshName',
+            'StealthGPU-ProjectMonitorIdentity') {
         Remove-ScheduledTaskVerified -TaskName $taskName
     }
 }
@@ -130,7 +131,8 @@ function Publish-GpuIdentityPayload {
         'gpu-hardware-id-transaction.ps1',
         'gpu-manufacturer-projection.ps1', 'gpu-manufacturer-projector.exe',
         'display-driver-trust.ps1', 'refresh-gpu-name.ps1',
-        'gpu-board-identity-contract.ps1'
+        'gpu-board-identity-contract.ps1', 'project-monitor-identity.ps1',
+        'monitor-friendly-name-projector.exe', 'monitor-identities.json'
     )
     foreach ($payloadName in $payloadNames) {
         $source = Join-Path $PSScriptRoot $payloadName
@@ -237,6 +239,7 @@ $chipsetLog = Join-Path $logDir 'chipset-device-install.log'
 $driverLog = Join-Path $logDir 'display-driver-install.log'
 $powerPolicyLog = Join-Path $logDir 'power-policy.log'
 $projectionLog = Join-Path $logDir 'gpu-hardware-id-projection.log'
+$monitorLog = Join-Path $logDir 'monitor-identity-projection.log'
 $log = Join-Path $logDir 'respawn.log'
 # --- 2) 在任何 GPU/PnP 修改前配置正常台式机的“从不”电源策略 -----------------
 # 策略逻辑独立成 helper，主流程只从原子发布且受 DACL 保护的同包目录执行。失败时
@@ -256,7 +259,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 49
 }
 
-# --- 3) 在任何 GPU/PnP 修改前修复 A123/A323 SMBus Code 28 -----------------
+# --- 3) 在任何 GPU/PnP 修改前验证/修复硬件池 SMBus -------------------------
 # Intel 包是 Microsoft WHCP 签名的 NO_DRV 识别 INF：只绑定 System/null driver
 # 并设置正确名称，没有内核 SYS。已正常绑定或目标不存在时 helper 会幂等跳过。
 $chipsetInstaller = Join-Path $PSScriptRoot 'install-chipset-device.ps1'
@@ -443,6 +446,15 @@ try {
 }
 Write-Host '  GPU-Z 候选链已恢复：同一 VioGpuDod 设备使用逻辑首项 + 物理尾项。' `
     -ForegroundColor Green
+
+$monitorScript = Join-Path (Split-Path -Parent $persistentProjector) `
+    'project-monitor-identity.ps1'
+& $powershellExe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    -File $monitorScript -RegisterTask 2>&1 | Tee-Object -FilePath $monitorLog
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "FAIL: 显示器型号投影失败；请查看 $monitorLog。" -ForegroundColor Red
+    exit 45
+}
 
 if ($ResumeAfterReboot) {
     Complete-RespawnResumeStage `

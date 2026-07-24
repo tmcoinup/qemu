@@ -21,13 +21,30 @@ fake_install_root="$tmp/install-root"
 event_log="$tmp/events.log"
 sudo_log="$tmp/sudo.log"
 output_log="$tmp/output.log"
-mkdir -p "$fake_repo/deploy/tools" "$fake_repo/deploy/scripts/lib" \
+mkdir -p "$fake_repo/deploy/tools/lib" "$fake_repo/deploy/scripts/lib" \
     "$fake_repo/target/i386" "$fake_repo/build" "$fake_bin"
 cp "$SOURCE_BUILD" "$fake_repo/deploy/tools/build.sh"
+cp "$REPO_ROOT/deploy/tools/lib/build-dependencies.sh" \
+    "$fake_repo/deploy/tools/lib/"
 chmod 0755 "$fake_repo/deploy/tools/build.sh"
 printf '%s\n' '11.0.2' > "$fake_repo/VERSION"
 printf '%s\n' 'Ryzen3-1200' > "$fake_repo/target/i386/cpu.c"
 touch "$fake_repo/build/build.ninja"
+cat > "$fake_repo/build/config-host.h" <<'EOF'
+#define CONFIG_LINUX_AIO
+#define CONFIG_LINUX_IO_URING
+EOF
+
+cat > "$fake_repo/configure" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' 'configure' >> "$FAKE_EVENT_LOG"
+cat > config-host.h <<'HEADER'
+#define CONFIG_LINUX_AIO
+#define CONFIG_LINUX_IO_URING
+HEADER
+touch build.ninja
+EOF
 
 cat > "$fake_bin/pkg-config" <<'EOF'
 #!/usr/bin/env bash
@@ -130,6 +147,7 @@ fi
 EOF
 chmod 0755 "$fake_bin/pkg-config" "$fake_bin/python3" "$fake_bin/ninja" \
     "$fake_bin/systemd-detect-virt" "$fake_bin/sudo" \
+    "$fake_repo/configure" \
     "$fake_repo/deploy/scripts/setup-host-helpers.sh" \
     "$fake_repo/deploy/scripts/setup-host-helpers-real.sh" \
     "$fake_repo/deploy/scripts/host-performance.sh" \
@@ -204,6 +222,17 @@ install_event() {
     printf 'setup|install|%s|--expect-device=%s|--expect-inode=%s|--expect-sha256=%s' \
         "$qemu_arg" "$device" "$inode" "${digest%% *}"
 }
+
+# 旧 build 目录即使没有传 --reconfig，也必须自动同步新增的 AIO 构建契约。
+cat > "$fake_repo/build/config-host.h" <<'EOF'
+#undef CONFIG_LINUX_AIO
+#undef CONFIG_LINUX_IO_URING
+EOF
+reset_case
+run_build --no-install-host-helpers
+assert_events "$(printf 'configure\nninja')"
+grep -F 'build AIO 契约已升级，自动重新 configure' "$output_log" >/dev/null \
+    || fail "旧 build 没有给出自动重配置诊断"
 
 reset_case
 run_build --install-host-helpers

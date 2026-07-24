@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证 A123/A323 签名 NO_DRV 识别包、安装器幂等判定和统一 EXE 调用顺序。
+# 验证全硬件池 SMBus 的签名 NO_DRV/inbox 策略与统一 EXE 调用顺序。
 # shellcheck disable=SC2016
 set -euo pipefail
 
@@ -10,6 +10,7 @@ RESPAWN="$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
 RESTART_HELPER="$REPO_ROOT/deploy/guest-stealth/respawn-restart-state.ps1"
 BUILD_SCRIPT="$REPO_ROOT/deploy/guest-stealth/build-exe.sh"
 LAUNCHER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-launcher.c"
+PAYLOADS_HEADER="$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-payloads.h"
 PAYLOAD_DIR="$REPO_ROOT/deploy/scripts/stock-intel-chipset-inf"
 
 fail() {
@@ -17,10 +18,12 @@ fail() {
     exit 1
 }
 
-for path in "$INSTALLER" "$RESPAWN" "$RESTART_HELPER" "$BUILD_SCRIPT" "$LAUNCHER"; do
+for path in "$INSTALLER" "$RESPAWN" "$RESTART_HELPER" "$BUILD_SCRIPT" \
+        "$LAUNCHER" "$PAYLOADS_HEADER"; do
     [[ -f "$path" ]] || fail "缺少文件: $path"
 done
-for bounded_file in "$INSTALLER" "$RESPAWN" "$RESTART_HELPER" "$0"; do
+for bounded_file in "$INSTALLER" "$RESPAWN" "$RESTART_HELPER" "$BUILD_SCRIPT" \
+        "$LAUNCHER" "$PAYLOADS_HEADER" "$0"; do
     [[ "$(wc -l < "$bounded_file")" -le 500 ]] \
         || fail "芯片组/重启实现或专项测试超过 500 行: $bounded_file"
 done
@@ -55,6 +58,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
     $neededFunctions = @(
         "ConvertTo-ProblemCode",
         "Find-ChipsetPayload",
+        "Find-ChipsetPolicy",
         "Get-ChipsetStateProblems",
         "Test-AllChipsetStatesHealthy",
         "Test-SameInstanceSet",
@@ -73,36 +77,33 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
         . ([scriptblock]::Create($definition.Extent.Text))
     }
 
-    $ChipsetPayloads = @(
-        [pscustomobject]@{
-            DeviceId = "A323"
-            InfName = "CannonLake-HSystem.inf"
-            CatName = "cannonlake-h.cat"
-            CatalogFile = "CannonLake-H.cat"
-            FriendlyName = "Intel(R) SMBus - A323"
-            InfHash = "0793ffcb29ba4dd13e62ec1c406884193cbf893d95e0b49840da609d8447a123"
-            CatHash = "9e457455e44a4215610c1160c6b3cbe345a4ee8e2af621e51ef6d1079870dba2"
-            SignerThumbprint = "580E5B74E4A43390FE113F7CAD3C138E21776F1E"
-        },
-        [pscustomobject]@{
-            DeviceId = "A123"
-            InfName = "SunrisePoint-HSystem.inf"
-            CatName = "sunrisepoint-h.cat"
-            CatalogFile = "SunrisePoint-H.cat"
-            FriendlyName = "Intel(R) 100 Series/C230 Series Chipset Family SMBus - A123"
-            InfHash = "4d931028bc5d6f1d28ec05f80e1b365d42a3d0ff00b0aeebe582c07dc83a1f70"
-            CatHash = "d22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b"
-            SignerThumbprint = "A3165BF7F09B48194C3724707023CDA874710D16"
-        }
-    )
-
-    $a323 = Find-ChipsetPayload -InstanceId "PCI\VEN_8086&DEV_A323&SUBSYS_86941043"
-    $a123 = Find-ChipsetPayload -InstanceId "PCI\VEN_8086&DEV_A123&SUBSYS_86941043"
-    if ($a323.DeviceId -ne "A323" -or $a123.DeviceId -ne "A123") {
-        throw "A123/A323 payload 映射错误"
+    foreach ($variableName in "ChipsetPayloads", "InboxChipsetPolicies") {
+        $assignment = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq ("$" + $variableName)
+        }, $true)
+        if ($null -eq $assignment) { throw "缺少策略变量: $variableName" }
+        . ([scriptblock]::Create($assignment.Extent.Text))
     }
-    if ($null -ne (Find-ChipsetPayload -InstanceId "PCI\VEN_8086&DEV_2930")) {
-        throw "真实 ICH9 ID 被误判为投影目标"
+
+    $payloadById = @{}
+    foreach ($deviceId in "A323", "A123", "1C22", "1E22", "8C22") {
+        $policy = Find-ChipsetPolicy -InstanceId (
+            "PCI\VEN_8086&DEV_" + $deviceId + "&SUBSYS_86941043")
+        if ($null -eq $policy -or $policy.Provisioning -cne "Payload") {
+            throw "$deviceId payload 映射错误"
+        }
+        $payloadById[$deviceId] = $policy
+    }
+    $inbox2930 = Find-ChipsetPolicy -InstanceId "PCI\VEN_8086&DEV_2930"
+    if ($null -eq $inbox2930 -or $inbox2930.Provisioning -cne "Inbox" -or
+        $inbox2930.InfName -cne "machine.inf") {
+        throw "2930 inbox 策略映射错误"
+    }
+    if ($null -ne (Find-ChipsetPayload -InstanceId "PCI\VEN_8086&DEV_2930") -or
+        $null -ne (Find-ChipsetPolicy -InstanceId "PCI\VEN_8086&DEV_DEAD")) {
+        throw "inbox 或未知 ID 被误判为外部 payload"
     }
 
     function New-State {
@@ -130,22 +131,49 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
         }
     }
 
-    $healthyA323 = New-State -Payload $a323
-    $healthyA123 = New-State -Payload $a123 -InfPath "OEM7.INF"
-    if (-not (Test-AllChipsetStatesHealthy -States @($healthyA323, $healthyA123))) {
-        throw "两个平台的健康状态被拒绝"
+    $healthyPayloads = @()
+    foreach ($deviceId in "A323", "A123", "1C22", "1E22", "8C22") {
+        $healthyPayloads += New-State -Payload $payloadById[$deviceId]
     }
+    $healthy2930Zh = New-State -Payload $inbox2930 -InfPath "machine.inf" `
+        -FriendlyName "SM 总线控制器"
+    $healthy2930En = New-State -Payload $inbox2930 -InfPath "MACHINE.INF" `
+        -FriendlyName "SM Bus Controller"
+    if (-not (Test-AllChipsetStatesHealthy -States (
+                $healthyPayloads + @($healthy2930Zh, $healthy2930En)))) {
+        throw "硬件池 payload/inbox 健康状态被拒绝"
+    }
+    $healthyA323 = $healthyPayloads[0]
+    $healthyA123 = $healthyPayloads[1]
     $badStates = @(
-        (New-State -Payload $a323 -Status "Error"),
-        (New-State -Payload $a323 -ProblemCode 28),
-        (New-State -Payload $a323 -ClassName "Other"),
-        (New-State -Payload $a323 -InfPath ""),
-        (New-State -Payload $a323 -Service "i801"),
-        (New-State -Payload $a323 -FriendlyName "SM 总线控制器")
+        (New-State -Payload $healthyA323.Payload -Status "Error"),
+        (New-State -Payload $healthyA323.Payload -ProblemCode 28),
+        (New-State -Payload $healthyA323.Payload -ClassName "Other"),
+        (New-State -Payload $healthyA323.Payload -InfPath ""),
+        (New-State -Payload $healthyA323.Payload -Service "i801"),
+        (New-State -Payload $healthyA323.Payload -FriendlyName "SM 总线控制器")
     )
     foreach ($bad in $badStates) {
         if (Test-AllChipsetStatesHealthy -States @($healthyA123, $bad)) {
             throw "异常 SMBus 被另一个健康目标遮蔽"
+        }
+    }
+    $badInboxStates = @(
+        (New-State -Payload $inbox2930 -Status "Error" -InfPath "machine.inf" `
+            -FriendlyName "SM 总线控制器"),
+        (New-State -Payload $inbox2930 -ProblemCode 28 -InfPath "machine.inf" `
+            -FriendlyName "SM Bus Controller"),
+        (New-State -Payload $inbox2930 -ClassName "Other" -InfPath "machine.inf" `
+            -FriendlyName "SM Bus Controller"),
+        (New-State -Payload $inbox2930 -InfPath "oem42.inf" `
+            -FriendlyName "SM Bus Controller"),
+        (New-State -Payload $inbox2930 -InfPath "machine.inf" -Service "i801" `
+            -FriendlyName "SM Bus Controller"),
+        (New-State -Payload $inbox2930 -InfPath "machine.inf" -FriendlyName " ")
+    )
+    foreach ($bad in $badInboxStates) {
+        if (Test-AllChipsetStatesHealthy -States @($bad)) {
+            throw "异常或未本地化完成的 2930 inbox 状态被接受"
         }
     }
     if ((ConvertTo-ProblemCode -PropertyValue 28 -FallbackValue $null `
@@ -166,7 +194,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
         throw "目标消失未被检测"
     }
 
-    $script:SignerThumbprint = $a323.SignerThumbprint
+    $script:SignerThumbprint = $healthyA323.Payload.SignerThumbprint
     function Get-AuthenticodeSignature {
         [CmdletBinding()] param([string] $LiteralPath)
         [pscustomobject]@{
@@ -178,15 +206,19 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
             }
         }
     }
-    $resolved = Assert-ChipsetPayload -Payload $a323 -Root $env:PAYLOAD_DIR
-    if ([IO.Path]::GetFileName($resolved) -ne $a323.InfName) {
-        throw "验证后返回了错误 INF"
+    foreach ($payload in $ChipsetPayloads) {
+        $script:SignerThumbprint = $payload.SignerThumbprint
+        $resolved = Assert-ChipsetPayload -Payload $payload -Root $env:PAYLOAD_DIR
+        if ([IO.Path]::GetFileName($resolved) -ne $payload.InfName) {
+            throw "验证后返回了错误 INF: $($payload.DeviceId)"
+        }
     }
     $script:SignerThumbprint = "0000000000000000000000000000000000000000"
     $badSignerRejected = $false
     try {
-        Assert-WhcpCatalog -Path (Join-Path $env:PAYLOAD_DIR $a323.CatName) `
-            -ExpectedThumbprint $a323.SignerThumbprint
+        Assert-WhcpCatalog -Path (Join-Path $env:PAYLOAD_DIR `
+                $healthyA323.Payload.CatName) `
+            -ExpectedThumbprint $healthyA323.Payload.SignerThumbprint
     } catch {
         $badSignerRejected = $_.Exception.Message -match "WHCP"
     }
@@ -198,6 +230,12 @@ pwsh -NoLogo -NoProfile -NonInteractive -Command '
 9e457455e44a4215610c1160c6b3cbe345a4ee8e2af621e51ef6d1079870dba2  cannonlake-h.cat
 4d931028bc5d6f1d28ec05f80e1b365d42a3d0ff00b0aeebe582c07dc83a1f70  SunrisePoint-HSystem.inf
 d22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b  sunrisepoint-h.cat
+6c8325abce0d7ca7db7324bfb8571ea54e870b3052546e281a45ac95024be4d1  CougarPointSystem.inf
+def9c32b7720dd1d8ea960d50a9ad1aa00d3e1c4f75a89c93e5738515bddebeb  cougarpoint.cat
+11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6  PantherPointSystem.inf
+a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500  pantherpoint.cat
+2e754318dab5a3f906eb267a785fe040dc253c26fdcbe4878cd2aaf1316a7209  LynxPointSystem.inf
+28ec883087c5ffe99e132631f4a7ec27c8d315430cddb83942ff1384e1643dee  lynxpoint.cat
 HASHES
 ) >/dev/null || fail "Intel 芯片组 INF/CAT 摘要不匹配"
 
@@ -205,7 +243,13 @@ for hash in \
     0793ffcb29ba4dd13e62ec1c406884193cbf893d95e0b49840da609d8447a123 \
     9e457455e44a4215610c1160c6b3cbe345a4ee8e2af621e51ef6d1079870dba2 \
     4d931028bc5d6f1d28ec05f80e1b365d42a3d0ff00b0aeebe582c07dc83a1f70 \
-    d22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b; do
+    d22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b \
+    6c8325abce0d7ca7db7324bfb8571ea54e870b3052546e281a45ac95024be4d1 \
+    def9c32b7720dd1d8ea960d50a9ad1aa00d3e1c4f75a89c93e5738515bddebeb \
+    11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6 \
+    a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500 \
+    2e754318dab5a3f906eb267a785fe040dc253c26fdcbe4878cd2aaf1316a7209 \
+    28ec883087c5ffe99e132631f4a7ec27c8d315430cddb83942ff1384e1643dee; do
     grep -F "$hash" "$INSTALLER" >/dev/null \
         || fail "安装器缺少 payload 摘要 $hash"
     grep -F "$hash" "$BUILD_SCRIPT" >/dev/null \
@@ -222,6 +266,10 @@ grep -F "exit \$RestartRequiredExitCode" "$INSTALLER" >/dev/null \
     || fail "安装器没有保留 3010 重启契约"
 grep -F 'Needs_NO_DRV' "$INSTALLER" >/dev/null \
     || fail "安装器没有验证 null-driver 语义"
+grep -F "InfName       = 'machine.inf'" "$INSTALLER" >/dev/null \
+    || fail "安装器缺少 2930 Win10 inbox 策略"
+grep -F "FriendlyName=<empty>" "$INSTALLER" >/dev/null \
+    || fail "2930 inbox 策略没有验证本地化名称非空"
 if grep -Ei 'Invoke-WebRequest|Invoke-RestMethod|http://|https://|devcon|testsigning|nointegritychecks' \
         "$INSTALLER" "$RESPAWN" "$RESTART_HELPER" >&2; then
     fail "guest 运行链引入网络、devcon 或签名绕过"
@@ -300,8 +348,11 @@ final_shutdown_line="$(grep -n '^    Invoke-RespawnShutdown -ShutdownPath ' \
     || fail "芯片组验证任务没有在最终重启前注册"
 
 for payload in install-chipset-device.ps1 CannonLake-HSystem.inf cannonlake-h.cat \
-        SunrisePoint-HSystem.inf sunrisepoint-h.cat respawn-restart-state.ps1; do
-    grep -F "$payload" "$BUILD_SCRIPT" "$LAUNCHER" >/dev/null \
+        SunrisePoint-HSystem.inf sunrisepoint-h.cat \
+        CougarPointSystem.inf cougarpoint.cat \
+        PantherPointSystem.inf pantherpoint.cat \
+        LynxPointSystem.inf lynxpoint.cat respawn-restart-state.ps1; do
+    grep -F "$payload" "$BUILD_SCRIPT" "$PAYLOADS_HEADER" >/dev/null \
         || fail "单 EXE 接线缺少 $payload"
 done
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-23.3",
+  "catalog_revision": "2026-07-24.1",
   "scope": "shallow_user_projection_no_gpu_passthrough",
   "boards": [
     {

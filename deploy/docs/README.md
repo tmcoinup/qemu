@@ -20,6 +20,7 @@ VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 
 | Windows 10 客体 | Linux/KVM 主验收对象 |
 | Windows 11 客体 | 有 TPM 2.0 路径，但 Secure Boot operational state 尚未闭环，不宣称正式支持 |
 | Linux 客体 | QEMU 设备功能兼容；启动器的命名、RTC 和安装流程仍偏向 Windows |
+| Intel SMBus | 全池 A323/A123/1C22/1E22/8C22 使用五套 WHCP NO_DRV INF；2930 使用 Win10 inbox `machine.inf` |
 | GPU | 只有一个 virtio `1AF4:1050`/VioGpuDod devnode；PnP HardwareID 为规范逻辑首项 + 完整物理尾项，NVAPI 主键以物理 carrier 去重；18 个 AIB 身份仅作用户态投影，不使用 passthrough、SR-IOV GPU 或 vGPU |
 
 ## 唯一事实源
@@ -89,10 +90,13 @@ machine fidelity 不完整。
 |---|---|---|
 | GPU AIB | GT 1030、GTX 750 Ti、GTX 1050、GTX 1050 Ti、RX 550、RX 560 各 3 个品牌，共 18 块（12 NVIDIA、6 AMD） | 新 profile 按 21 列原子 bundle 绑定品牌/料号、逻辑 `10de`/`1002` 主 ID、真实 AIB subsystem 与 VBIOS；物理显示主 ID 始终为 virtio `1AF4:1050`，`1AF4:a101`–`1AF4:a112` 只作受控 carrier；不虚构 GPU serial |
 | NVMe | Samsung 970 PRO、Intel 760p、WD PC SN730、KIOXIA XG6（均为 512GB） | 四项容量都精确为 `512110190592` 字节；型号、固件、PCI/subsystem、OUI 和厂商序列形态绑定为一个 `x-identity-profile`，NQN 使用标准 UUID 格式 |
-| 显示器 | Samsung S24F350、AOC 24B2XH、Xiaomi RMMNT238NF、Lenovo L24e-30 | 全部固定 1920×1080、16:9；官方规格与对应 raw EDID 共同锁定产品码、日期、EDID 1.3、文本/binary serial 及型号专属 DTD |
+| 显示器 | Samsung S24F350、AOC 24B2XH、Xiaomi RMMNT238NF、Lenovo L24e-30 | 全部固定 1920×1080、16:9；官方规格与 raw EDID 锁定完整身份，EDID 是事实源；统一 EXE 只用 `DEVPKEY_Device_FriendlyName` 投影标签，不改 EDID/HardwareID/INF/`monitor.sys` |
 | 键盘 | Microsoft Wired Keyboard 600 | `045e:0750`、`bcdDevice=0163`；只绑定品牌身份，report descriptor 仍是通用实现；不暴露序列号 |
 | 鼠标 | Microsoft USB Optical Mouse | `045e:00cb`、`bcdDevice=0163`；只绑定品牌身份，report descriptor 仍是通用实现；不暴露序列号 |
 | 绝对指针 | QEMU USB Tablet | `0627:0001`，明确为通用虚拟设备，不冒充品牌数位板 |
+
+四款 EDID PnP 映射为 `SAM0D20→Samsung S24F350`、`AOC2402→AOC 24B2XH`、
+`XMI23C3→Xiaomi Mi Monitor (RMMNT238NF)`、`LEN66BC→Lenovo L24e-30`。
 
 组件型号只从完整条目按稳定 ID 选择，禁止跨条目拼接；旧的六款 NVIDIA/AMD generic
 GPU label 只用于已有 profile 的只读回查，不进入新 VM 抽签池。每台 VM 仍会生成并持久化 UUID、
@@ -128,10 +132,10 @@ Linux 启动器默认按以下顺序 fail closed：
 | 硬件面 | 可见身份 | 行为边界 |
 |---|---|---|
 | CPU/SMBIOS/内存 | 平台字段、拓扑、Type 0/1/2/3/4/16/17；DIMM 额定/配置速率分离；DDR4 使用 512B EE1004 与 0x36/0x37 页选择，并把硬件目录中的品牌、料号和唯一序列号投影到 SPD page 1 | cache、MSR、微码、性能和时序仍受宿主及 KVM 限制；SPD 是按目录字段生成的标准数据，不是具体 DIMM 的原始 raw dump/XMP |
-| 芯片组/PCIe/xHCI | 芯片组与 root port 身份/链路可注入；xHCI 平台字段仅留作事实 | 实现仍是 Q35/ICH9/QEMU 控制器；`qemu-xhci` 固定与行为匹配的 `1B36:000D rev01 / SUBSYS 1AF4:1100`；Linux 为 root port `00:01.0`–`00:04.0`、HDA `00:05.0`，Windows 少一个空端口、HDA 为 `00:04.0`，均不承诺 H110/H310 BDF/silicon 等价 |
+| 芯片组/PCIe/xHCI | 全 SMBus 池用 NO_DRV 正确归类和命名；芯片组与 root port 身份/链路可注入；xHCI 平台字段仅留作事实 | 五款 payload 不含 `.sys`/服务，2930 只用 inbox `machine.inf`；实现仍是 Q35/ICH9/QEMU 控制器；`qemu-xhci` 固定与行为匹配的 `1B36:000D rev01 / SUBSYS 1AF4:1100`；Linux 为 root port `00:01.0`–`00:04.0`、HDA `00:05.0`，Windows 少一个空端口、HDA 为 `00:04.0`，均不承诺目标 PCH BDF/silicon 等价 |
 | NVMe | Identify、容量、PCI/subsystem、SubNQN 可绑定 | SMART、热管理、功耗和错误恢复仍是通用 QEMU NVMe |
 | 音频 | HDA controller 和 ALC887 codec 身份 | `protocol_identity_only`，widget、插孔和板级布线不等价 |
-| EDID/HID | EDID 型号规格成套；HID 仅绑定 VID/PID/名称 | EDID 产品码/制造信息是明确标注的合成值；键鼠 report descriptor 仍是通用实现 |
+| EDID/HID | EDID 型号规格成套，并按其 PnP code 投影 Monitor FriendlyName；HID 仅绑定 VID/PID/名称 | FriendlyName 不改变 EDID、HardwareID、INF 或 `monitor.sys`；EDID 产品码/制造信息是明确标注的合成值；键鼠 report descriptor 仍是通用实现 |
 | 显示/GPU | 内核枚举固定为唯一 virtio `1AF4:1050` devnode；HardwareID 使用逻辑首项 + 物理尾项，NVAPI 以物理 carrier 跨接口关联并保留逻辑 external/AIB/型号 | `audited_aib_bundle_shallow_user_projection_no_passthrough`；不改变 virtio 驱动、寄存器、显存分配或 3D 性能，不代表 NVIDIA/AMD 物理 GPU，也不虚构 GPU 序列号 |
 
 xHCI 的 USB 链路/设备电源管理属于正常真机行为；本项目只禁止把通用虚拟控制器冒充为

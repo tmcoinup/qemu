@@ -41,8 +41,9 @@ RDP、QEMU guest agent、PowerShell 模块、NVIDIA 驱动或其它第三方软�
    推荐在 guest 中固定为 `D:\工具\respawn-stealth.exe`，方便克隆和以后重复运行。
 3. 双击 `respawn-stealth.exe`，在 Windows UAC 对话框中选择“是”。
 4. 保持窗口开启。程序会先把当前 Windows 台式机电源页面的“屏幕”和“睡眠”都设为
-   “从不”，同时关闭休眠，再自动修复 A123/A323 SMBus 的 Code 28，然后完成显示
-   驱动检查、身份事务和系统级 x86/x64 查询库发布；不要中途关机或结束进程。
+   “从不”，同时关闭休眠，再自动修复硬件池 A323/A123/1C22/1E22/8C22 SMBus
+   的 Code 28，并验证 2930 的 inbox `machine.inf`，然后完成显示驱动检查、身份
+   事务和系统级 x86/x64 查询库发布；不要中途关机或结束进程。
 5. 程序成功后会自动重启 Windows。重新登录后即可直接打开已有的 GPU-Z 或其它硬件
    查询软件；不需要 helper、旁置 DLL、环境变量或常驻调试服务。
 
@@ -74,6 +75,12 @@ Windows 内置 PowrProf 与 `powercfg.exe` 修改当前活动方案，不安装�
 | GPU Clock | 1290 MHz（Boost 1392 MHz） |
 | Memory Clock / Bandwidth | 1752 MHz / 112.1 GB/s |
 
+显示器型号仍以 host profile 注入的 EDID 为唯一事实源。统一 EXE 只通过
+`DEVPKEY_Device_FriendlyName` 投影设备管理器标签，不改 EDID、HardwareID、INF
+或 inbox `monitor.sys`；四款映射为 `SAM0D20 → Samsung S24F350`、
+`AOC2402 → AOC 24B2XH`、`XMI23C3 → Xiaomi Mi Monitor (RMMNT238NF)`、
+`LEN66BC → Lenovo L24e-30`。
+
 这些数值来自当前 profile 的一致性投影，不代表 guest 拥有同等显存、频率或运算能力。
 物理 PCI 配置空间、设备实例路径、`Service` 和实际显示驱动不会被伪装成 NVIDIA
 设备。stock `VioGpuDod` 暴露的 DXGI adapter 描述和直接读取 PCI/PNP 的工具仍可能
@@ -92,12 +99,19 @@ Get-PnpDeviceProperty -InstanceId $display.InstanceId `
     -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath,
         DEVPKEY_Device_HardwareIds
 $smbus = Get-PnpDevice -PresentOnly | Where-Object {
-    $_.InstanceId -match '^PCI\\VEN_8086&DEV_(A123|A323)&'
+    $_.InstanceId -match '^PCI\\VEN_8086&DEV_(A323|A123|1C22|1E22|8C22|2930)&'
 }
 $smbus | Format-List FriendlyName,Status,Class,Problem,InstanceId
 Get-PnpDeviceProperty -InstanceId $smbus.InstanceId `
     -KeyName DEVPKEY_Device_ProblemCode,DEVPKEY_Device_DriverInfPath,
         DEVPKEY_Device_Service
+$monitor = Get-PnpDevice -Class Monitor -PresentOnly | Where-Object {
+    $_.InstanceId -match '^DISPLAY\\(SAM0D20|AOC2402|XMI23C3|LEN66BC)\\'
+}
+$monitor | Format-List FriendlyName,Status,InstanceId
+Get-PnpDeviceProperty -InstanceId $monitor.InstanceId `
+    -KeyName DEVPKEY_Device_FriendlyName,DEVPKEY_Device_HardwareIds,
+        DEVPKEY_Device_DriverInfPath,DEVPKEY_Device_Service
 ```
 
 应同时满足：
@@ -106,8 +120,10 @@ Get-PnpDeviceProperty -InstanceId $smbus.InstanceId `
 - `InstanceId` 仍以物理 `PCI\VEN_1AF4&DEV_1050` 开头；
 - `HardwareIds` 首项是当前 AIB 的规范逻辑 ID，其后每一项都以物理
   `PCI\VEN_1AF4&DEV_1050` 开头；真实 BDF、Service 和 Driver 不变；
-- SMBus 为 `Status=OK`、`Class=System`、ProblemCode `0`，INF 为 `oem*.inf`；
-  `Service` 为空是 Intel NO_DRV 识别包的正常结果。
+- SMBus 为 `Status=OK`、`Class=System`、ProblemCode `0` 且 Service 为空；
+  A323/A123/1C22/1E22/8C22 的 INF 为 `oem*.inf`，2930 为 inbox `machine.inf`；
+- Monitor 的 FriendlyName 与上面的四款映射一致，HardwareID 仍为对应
+  `MONITOR\XXXNNNN`，INF 和 `monitor.sys` 保持 Windows inbox 值。
 
 ## 复制前后校验 EXE
 
@@ -135,12 +151,13 @@ C:\ProgramData\StealthGPU\power-policy.log
 C:\ProgramData\StealthGPU\chipset-device-install.log
 C:\ProgramData\StealthGPU\display-driver-install.log
 C:\ProgramData\StealthGPU\gpu-hardware-id-projection.log
+C:\ProgramData\StealthGPU\monitor-identity-projection.log
 C:\ProgramData\StealthGPU\respawn.log
 ```
 
 `gpu-hardware-id-projection.log` 记录 physical-only 恢复、最终逻辑首项投影及验证；
 事务在写设备前先持久化并回读 `RollbackHardwareIds`，因此 journal 收尾中断也能在
-下次运行恢复。当前版本会维护 `StealthGPU-ProjectHardwareId` 启动/登录任务。
+下次运行恢复。当前版本会维护 GPU HardwareID 与 Monitor FriendlyName 启动/登录任务。
 
 常见处理方式：
 
@@ -154,7 +171,10 @@ C:\ProgramData\StealthGPU\respawn.log
   改名，也不要安装 NVIDIA 驱动。
 - 设备管理器仍显示“SM 总线控制器”Code 28：查看
   `chipset-device-install.log`；不要安装来源不明的 SMBus `.sys`，本项目使用的是
-  Microsoft WHCP 签名的 Intel NO_DRV 识别 INF。
+  五套 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF；2930 使用 inbox
+  `machine.inf`。
+- 显示器仍显示“通用即插即用监视器”：查看 `monitor-identity-projection.log`；
+  不要安装或改写厂商 Monitor INF，标签必须由当前 EDID PnP ID 唯一选择。
 - `respawn.log` 返回 `30` 且提示 `ChipsetVerification`：本轮自动重启额度已经使用，
   请人工重启一次。登录任务只复核芯片组 INF，不会重跑 GPU 流程或自动二次重启。
 - 日志提示未知 `nvapi.dll`/`nvapi64.dll`：系统可能已有真实 NVIDIA 或第三方同名库。
@@ -176,7 +196,7 @@ Start-Process -FilePath 'D:\工具\respawn-stealth.exe' `
 
 直接运行最新 `respawn-stealth.exe`。它会停止旧 writer，先恢复并门禁原始
 physical-only 数组；身份与厂商 API 事务成功后，再按当前 AIB Apply/Verify 规范逻辑
-首项 + 完整物理尾项，并重新注册 `StealthGPU-ProjectHardwareId` 启动/登录任务。
+首项 + 完整物理尾项，并重新注册 GPU HardwareID 与 Monitor 标签维护任务。
 不要手工并发运行旧 projector。
 
 需要恢复整个 guest 时，优先使用部署前的 VM 快照。不要直接删除身份注册表 journal，
@@ -188,10 +208,10 @@ VM2 验收期间可以临时使用 RDP、USB/FAT 载荷、HTTP、探针或其它
 属于正式发布物，也不会被 `respawn-stealth.exe` 安装。普通双击正式 EXE 后，guest
 新增的持久内容是项目脚本、内嵌 Intel 识别 INF、stock 显示驱动包、必要的 x86/x64
 用户态身份库，以及
-`RefreshName` 名称刷新任务和 `ProjectHardwareId` 启动/登录维护任务；普通交互运行
+`RefreshName`、`ProjectHardwareId` 和 `ProjectMonitorIdentity` 启动/登录维护任务；普通交互运行
 还可维护 `ForceDisplayFreq`。仅当设备尚未绑定兼容驱动时，程序才会
 安装 Windows 显示所必需的 `VioGpuDod` 内核驱动。封装镜像的 `--firstlogon` 路径保留
-RefreshName 并抑制交互显示模式任务。两种路径都不新增 RDP、QGA、HTTP、网络或调试
+上述三项维护任务并抑制交互显示模式任务。两种路径都不新增 RDP、QGA、HTTP、网络或调试
 服务，默认 host 发布目录也只保留单个 `respawn-stealth.exe`。
 
 完整实现、验证命令和源码调试方式见 [`README.md`](./README.md)。

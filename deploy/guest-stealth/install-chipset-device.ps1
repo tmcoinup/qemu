@@ -1,11 +1,10 @@
-﻿# install-chipset-device.ps1 —— 幂等安装 Intel SMBus 的签名设备识别 INF。
+﻿# install-chipset-device.ps1 —— 验证或安装硬件池 Intel SMBus 设备识别 INF。
 #
 # QEMU 当前仍实现 ICH9 SMBus 寄存器行为，但已启用的平台会把 PCI 配置身份投影为：
-#   - H310: PCI\VEN_8086&DEV_A323
-#   - H110: PCI\VEN_8086&DEV_A123
-# Windows 10 19041 的 inbox machine.inf 不认识这两个投影 ID，因此设备管理器显示
-# Code 28。Intel 官方包对两者使用 Needs_NO_DRV：它只把设备归入 System 类并赋予
-# 正确名称，不包含 SYS/服务，也不会假装提供 Cannon Lake/Sunrise Point 寄存器行为。
+#   - H310/H110: A323/A123；H61/B75/H81: 1C22/1E22/8C22。
+# Intel 官方包对上述 ID 使用 Needs_NO_DRV：它只把设备归入 System 类并赋予正确
+# 名称，不包含 SYS/服务，也不会假装提供目标 PCH 的寄存器行为。显式 Q35/ICH9
+# compatibility profile 使用 2930，由 Windows 10 19041 inbox machine.inf 负责。
 
 param(
     [Parameter(Mandatory = $true)]
@@ -20,6 +19,7 @@ $RestartRequiredExitCode = 30
 # 混入；Authenticode 的 Windows 信任状态再证明 CAT 证书链在当前 guest 上有效。
 $ChipsetPayloads = @(
     [pscustomobject]@{
+        Provisioning    = 'Payload'
         DeviceId        = 'A323'
         InfName         = 'CannonLake-HSystem.inf'
         CatName         = 'cannonlake-h.cat'
@@ -30,6 +30,7 @@ $ChipsetPayloads = @(
         SignerThumbprint = '580E5B74E4A43390FE113F7CAD3C138E21776F1E'
     },
     [pscustomobject]@{
+        Provisioning    = 'Payload'
         DeviceId        = 'A123'
         InfName         = 'SunrisePoint-HSystem.inf'
         CatName         = 'sunrisepoint-h.cat'
@@ -38,6 +39,50 @@ $ChipsetPayloads = @(
         InfHash         = '4d931028bc5d6f1d28ec05f80e1b365d42a3d0ff00b0aeebe582c07dc83a1f70'
         CatHash         = 'd22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b'
         SignerThumbprint = 'A3165BF7F09B48194C3724707023CDA874710D16'
+    },
+    [pscustomobject]@{
+        Provisioning    = 'Payload'
+        DeviceId        = '1C22'
+        InfName         = 'CougarPointSystem.inf'
+        CatName         = 'cougarpoint.cat'
+        CatalogFile     = 'CougarPoint.cat'
+        FriendlyName    = 'Intel(R) 6 Series/C200 Series Chipset Family SMBus Controller - 1C22'
+        InfHash         = '6c8325abce0d7ca7db7324bfb8571ea54e870b3052546e281a45ac95024be4d1'
+        CatHash         = 'def9c32b7720dd1d8ea960d50a9ad1aa00d3e1c4f75a89c93e5738515bddebeb'
+        SignerThumbprint = 'A3165BF7F09B48194C3724707023CDA874710D16'
+    },
+    [pscustomobject]@{
+        Provisioning    = 'Payload'
+        DeviceId        = '1E22'
+        InfName         = 'PantherPointSystem.inf'
+        CatName         = 'pantherpoint.cat'
+        CatalogFile     = 'PantherPoint.cat'
+        FriendlyName    = 'Intel(R) 7 Series/C216 Chipset Family SMBus Host Controller - 1E22'
+        InfHash         = '11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6'
+        CatHash         = 'a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500'
+        SignerThumbprint = 'A3165BF7F09B48194C3724707023CDA874710D16'
+    },
+    [pscustomobject]@{
+        Provisioning    = 'Payload'
+        DeviceId        = '8C22'
+        InfName         = 'LynxPointSystem.inf'
+        CatName         = 'lynxpoint.cat'
+        CatalogFile     = 'LynxPoint.cat'
+        FriendlyName    = 'Intel(R) 8 Series/C220 Series SMBus Controller - 8C22'
+        InfHash         = '2e754318dab5a3f906eb267a785fe040dc253c26fdcbe4878cd2aaf1316a7209'
+        CatHash         = '28ec883087c5ffe99e132631f4a7ec27c8d315430cddb83942ff1384e1643dee'
+        SignerThumbprint = 'A3165BF7F09B48194C3724707023CDA874710D16'
+    }
+)
+
+# Win10 19041 machine.inf 直接包含 8086:2930 的 NO_DRV 项。它不是外部 payload，
+# 但仍必须通过相同的 present-only 后验门禁，防止 compatibility profile 把
+# Code 28、错误类或意外服务误报为“无需安装”。
+$InboxChipsetPolicies = @(
+    [pscustomobject]@{
+        Provisioning = 'Inbox'
+        DeviceId      = '2930'
+        InfName       = 'machine.inf'
     }
 )
 
@@ -100,15 +145,27 @@ function Find-ChipsetPayload {
     return $null
 }
 
+function Find-ChipsetPolicy {
+    param([Parameter(Mandatory = $true)] [string] $InstanceId)
+
+    $payload = Find-ChipsetPayload -InstanceId $InstanceId
+    if ($null -ne $payload) { return $payload }
+    foreach ($policy in $InboxChipsetPolicies) {
+        $pattern = '(?i)^PCI\\VEN_8086&DEV_' + $policy.DeviceId + '(?:&|\\|$)'
+        if ($InstanceId -match $pattern) { return $policy }
+    }
+    return $null
+}
+
 function Get-PresentChipsetStates {
     # 不按 Class 过滤：未绑定的目标位于“其他设备”，安装后才进入 System。
-    # PresentOnly 排除克隆镜像中遗留的 ghost A123/A323，避免给不存在设备装包。
+    # PresentOnly 排除克隆镜像中遗留的 ghost SMBus，避免给不存在设备装包。
     $devices = @(Get-PnpDevice -PresentOnly -ErrorAction Stop)
     $states = @()
     foreach ($device in $devices) {
         $instanceId = [string] $device.InstanceId
         if ([string]::IsNullOrWhiteSpace($instanceId)) { continue }
-        $payload = Find-ChipsetPayload -InstanceId $instanceId
+        $payload = Find-ChipsetPolicy -InstanceId $instanceId
         if ($null -eq $payload) { continue }
 
         $problemProperty = Get-DevicePropertyValue -InstanceId $instanceId `
@@ -157,13 +214,23 @@ function Get-ChipsetStateProblems {
         $problems += "ProblemCode=$($State.ProblemCode)"
     }
     if ($State.ClassName -ine 'System') { $problems += "Class=$($State.ClassName)" }
-    if ($State.InfPath -notmatch '(?i)^oem[0-9]+\.inf$') {
+    if ($State.Payload.Provisioning -eq 'Inbox') {
+        if ($State.InfPath -ine $State.Payload.InfName) {
+            $problems += "InfPath=$($State.InfPath)"
+        }
+        # machine.inf 的显示名可能被 Windows 本地化；只要求非空，不能把 zh-CN
+        # “SM 总线控制器”与英文 “SM Bus Controller”当作不同设备健康状态。
+        if ([string]::IsNullOrWhiteSpace([string] $State.FriendlyName)) {
+            $problems += 'FriendlyName=<empty>'
+        }
+    } elseif ($State.InfPath -notmatch '(?i)^oem[0-9]+\.inf$') {
         $problems += "InfPath=$($State.InfPath)"
     }
     if (-not [string]::IsNullOrWhiteSpace([string] $State.Service)) {
         $problems += "Service=$($State.Service)"
     }
-    if ($State.FriendlyName -ine $State.Payload.FriendlyName) {
+    if ($State.Payload.Provisioning -eq 'Payload' -and
+        $State.FriendlyName -ine $State.Payload.FriendlyName) {
         $problems += "FriendlyName=$($State.FriendlyName)"
     }
     return @($problems)
@@ -286,7 +353,7 @@ function Assert-ChipsetPayload {
         $infText -notmatch '(?im)^\s*Needs\s*=\s*NO_DRV\s*$' -or
         $infText.IndexOf(('CatalogFile=' + $Payload.CatalogFile),
             [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-        throw ($Payload.InfName + ' 不符合锁定的 NO_DRV/A123/A323 契约')
+        throw ($Payload.InfName + ' 不符合锁定的 NO_DRV/SMBus 契约')
     }
     Assert-WhcpCatalog -Path $catPath `
         -ExpectedThumbprint $Payload.SignerThumbprint
@@ -300,12 +367,20 @@ try {
 }
 
 if ($before.Count -eq 0) {
-    Write-Host '  未发现当前平台的 A123/A323 SMBus；无需安装芯片组识别 INF。' `
+    Write-Host '  未发现硬件池声明的 SMBus；无需安装芯片组识别 INF。' `
         -ForegroundColor Green
     exit 0
 }
 
 Write-ChipsetStates -States $before
+$badInbox = @($before | Where-Object {
+        $_.Payload.Provisioning -eq 'Inbox' -and
+        @(Get-ChipsetStateProblems -State $_).Count -ne 0
+    })
+if ($badInbox.Count -ne 0) {
+    Stop-ChipsetInstall `
+        'Win10 inbox machine.inf 未正确绑定 2930 SMBus；拒绝掩盖 compatibility profile 的设备错误。' 56
+}
 if (Test-AllChipsetStatesHealthy -States $before) {
     Write-Host '  Intel SMBus 识别 INF 已正确绑定，跳过 pnputil。' -ForegroundColor Green
     exit 0
@@ -322,7 +397,10 @@ if ([string]::IsNullOrWhiteSpace($pnputil) -or
 
 $targetIds = [string[]] @($before.InstanceId)
 $deviceIdsToInstall = @($before |
-    Where-Object { @(Get-ChipsetStateProblems -State $_).Count -ne 0 } |
+    Where-Object {
+        $_.Payload.Provisioning -eq 'Payload' -and
+        @(Get-ChipsetStateProblems -State $_).Count -ne 0
+    } |
     ForEach-Object { [string] $_.Payload.DeviceId } |
     Select-Object -Unique)
 $restartRequired = $false
@@ -371,11 +449,11 @@ do {
             -Actual ([string[]] @($after.InstanceId))) -and
         (Test-AllChipsetStatesHealthy -States $after)) {
         Write-ChipsetStates -States $after
-        Write-Host '  Intel SMBus Code 28 已清除；设备识别 INF 绑定正常。' `
+        Write-Host '  Intel SMBus 设备策略已通过；识别 INF 绑定正常。' `
             -ForegroundColor Green
         exit 0
     }
 } while ([DateTime]::UtcNow -lt $deadline)
 
 if ($after.Count -gt 0) { Write-ChipsetStates -States $after }
-Stop-ChipsetInstall 'pnputil 返回成功，但 A123/A323 在 15 秒内未通过后验校验。' 54
+Stop-ChipsetInstall 'pnputil 返回成功，但硬件池 SMBus 在 15 秒内未通过后验校验。' 54

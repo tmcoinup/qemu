@@ -67,11 +67,15 @@ jobs:
             deploy/scripts/kvm-capabilities.py \
             deploy/scripts/vm-cpu-pinner.py \
             deploy/scripts/tests/run-vmate-tests.py
-          python3 -m compileall -q deploy/scripts/lib/seal-base-publish.py
+          python3 -m compileall -q \
+            deploy/scripts/lib/qemu-aio-probe.py \
+            deploy/scripts/lib/qemu-image-metrics.py \
+            deploy/scripts/lib/seal-base-publish.py
       - name: Check newly privileged or asynchronous scripts
         run: |
           shellcheck -x -S warning \
             deploy/tools/build.sh \
+            deploy/tools/lib/build-dependencies.sh \
             deploy/scripts/host-cpu-isolate.sh \
             deploy/scripts/host-cpu-isolate-runtime.sh \
             deploy/scripts/host-performance.sh \
@@ -88,8 +92,14 @@ jobs:
             deploy/scripts/lib/sv-host-capabilities.sh \
             deploy/scripts/lib/sv-host-helpers.sh \
             deploy/scripts/lib/sv-sudo-session.sh \
-            deploy/scripts/lib/sv-cpupin.sh
+            deploy/scripts/lib/sv-cpupin.sh \
+            deploy/scripts/lib/sv-storage-aio.sh \
+            deploy/scripts/lib/stealth-storage.sh \
+            deploy/scripts/tests/test_build_dependency_auto_install.sh \
+            deploy/scripts/tests/test_storage_aio_policy.sh
       - name: Run isolated regression tests in parallel
+        env:
+          QEMU_AIO_SKIP_REAL_PROBE: '1'
         run: python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4
 
   qemu-build:
@@ -102,8 +112,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
-            build-essential libglib2.0-dev libpixman-1-dev ninja-build \
-            pkg-config python3-venv python3-setuptools python3-wheel
+            build-essential libaio-dev libglib2.0-dev libpixman-1-dev \
+            liburing-dev ninja-build pkg-config python3-venv \
+            python3-setuptools python3-wheel
       - name: Configure a minimal x86_64 system build
         run: |
           mkdir build-ci
@@ -111,6 +122,8 @@ jobs:
           ../configure \
             --target-list=x86_64-softmmu \
             --enable-werror \
+            --enable-linux-aio \
+            --enable-linux-io-uring \
             --disable-docs
       - name: Compile
         run: |
@@ -119,6 +132,12 @@ jobs:
             tests/unit/test-smbus-eeprom-spd
       - name: Run DDR4 SPD density unit test
         run: build-ci/tests/unit/test-smbus-eeprom-spd --tap
+      - name: Run active storage AIO backend probes
+        run: |
+          for aio_backend in io_uring native threads; do
+            python3 deploy/scripts/lib/qemu-aio-probe.py \
+              build-ci/qemu-system-x86_64 "$aio_backend"
+          done
       - name: Run C hardware identity checks
         env:
           QEMU: ${{ github.workspace }}/build-ci/qemu-system-x86_64

@@ -49,7 +49,16 @@ def main() -> None:
         except SystemExit:
             continue
         raise AssertionError(f"{monitor_id} 接受了非证据 reserved_values")
-    print("PASS: Python monitor reserved_values exact contract")
+    for replacement in ("Samsung S24F350\n", "Wrong Monitor"):
+        mutated = copy.deepcopy(root)
+        mutated["monitors"][0]["windows_friendly_name"] = replacement
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                policy.validate_monitors(mutated)
+        except SystemExit:
+            continue
+        raise AssertionError("接受了非法或未锁定的 Windows FriendlyName")
+    print("PASS: Python monitor evidence and FriendlyName exact contract")
 
 
 if __name__ == "__main__":

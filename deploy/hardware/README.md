@@ -18,7 +18,7 @@ MSI、GIGABYTE、ASRock 必须精确命中注册表，不允许靠厂商名称�
 `components.json` 是可更换部件的入口目录；原生 NVMe 完整事实拆分到
 `storage.json`，活动显卡板卡拆分到 `gpu-boards.json`，显示器和 USB HID
 仍由入口目录直接承载。`components.json`、`storage.json` 与 `gpu-boards.json`
-当前目录修订均为 `2026-07-23.3`。存储子目录只允许精确
+当前目录修订均为 `2026-07-24.1`。存储子目录只允许精确
 `512110190592` 字节的 Samsung 970 PRO、Intel 760p、WD PC SN730 和 KIOXIA XG6，
 每项都把稳定 ID、型号、料号、固件、PCI/subsystem、OUI 和序列号样本形态原子绑定。
 这些 SSD 有厂商文档和公开身份样本，但没有本项目实机设备快照；各条目必须用

@@ -21,7 +21,7 @@
   无原生 NVMe boot 的老主板可用的消费级 SATA 启动盘完整组合。
 
 当前目录都是 schema 1；整机为 `2026-07-22.1`，household 为
-`2026-07-19.6`，组件、GPU AIB 与 NVMe 子目录为 `2026-07-23.3`，SATA 启动盘为
+`2026-07-19.6`，组件、GPU AIB 与 NVMe 子目录为 `2026-07-24.1`，SATA 启动盘为
 `2026-07-19.1`。
 修订号用于绑定或迁移诊断，不应手工伪造。
 
@@ -325,7 +325,7 @@ binary serial 按型号固定值或 AOC 十进制后六位映射计算。binary 
 同 ID 目录修订让旧实例静默漂移。所有尺寸、扫描范围、产品码、制造时间、序列策略
 和 DTD 必须按 `EDID_COMPONENT_ID` 原子一致。
 
-当前组件目录修订为 `2026-07-23.3`。缺少上述 binary serial、revision 和完整 DTD
+当前组件目录修订为 `2026-07-24.1`。缺少上述 binary serial、revision 和完整 DTD
 字段的旧 Linux schema-1 profile 会直接拒绝加载，即使 `STRICT_HARDWARE=0` 也不会静默补齐。
 可备份后显式 `--reroll` 生成新身份，或新建实例；这项 profile ABI 更新本身不要求
 重装 Guest，但磁盘 virtual-size 仍必须精确匹配现行 512GB 目录。

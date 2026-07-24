@@ -19,9 +19,9 @@ source "$SCRIPT_DIR/fixtures/catalog-cpu-preflight-stub.sh"
 catalog_revision="$(python3 -c \
     'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["catalog_revision"])' \
     "$REPO_ROOT/deploy/hardware/components.json")"
-[[ "$catalog_revision" == 2026-07-23.3 &&
+[[ "$catalog_revision" == 2026-07-24.1 &&
    "$(stealth_component_validate)" == "$catalog_revision" ]] \
-    || fail "component/GPU/SSD catalog revision 未统一为 2026-07-23.3"
+    || fail "component/GPU/SSD catalog revision 未统一为 2026-07-24.1"
 (( ${#GPU_POOL[@]} == 18 && ${#GPU_WEIGHT_ROWS[@]} == 18 &&
    ${#LEGACY_GPU_POOL[@]} == 6 &&
    ${#NVME_POOL[@]} == 4 && ${#MONITOR_POOL[@]} == 4 )) \

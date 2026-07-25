@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 静态验证 SDL/GL scanout 的恢复重绘路径，避免窗口隐藏/恢复后只剩黑色 back buffer。
+# 静态验证 SDL renderer/GL scanout 的恢复路径。
+# 防止长期运行或窗口恢复后黑屏。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -40,6 +41,55 @@ test_display_resume_replays_scanout() {
     ' "$SDL2_C" || fail "SDL display-resume must redraw the current GL scanout"
 }
 
+test_2d_renderer_reset_recovers_all_consoles() {
+    # 两个 reset 都不携带 windowID。
+    # TARGETS_RESET 只需完整重画；
+    # DEVICE_RESET 必须重建全部 texture。
+    awk '
+        /case SDL_RENDER_TARGETS_RESET:/ {
+            saw_targets_reset = 1
+            in_targets = 1
+        }
+        in_targets && /sdl2_recover_2d_renderers\(false\)/ {
+            saw_targets_redraw = 1
+        }
+        in_targets && /break;/ { in_targets = 0 }
+        /case SDL_RENDER_DEVICE_RESET:/ {
+            saw_device_reset = 1
+            in_device = 1
+        }
+        in_device && /sdl2_recover_2d_renderers\(true\)/ {
+            saw_device_recreate = 1
+        }
+        in_device && /break;/ { in_device = 0 }
+        END {
+            exit saw_targets_reset && saw_targets_redraw &&
+                 saw_device_reset && saw_device_recreate ? 0 : 1
+        }
+    ' "$SDL2_C" || fail "SDL render reset events use the wrong recovery mode"
+    awk '
+        /static void sdl2_recover_2d_renderers\(bool recreate_textures\)/ {
+            in_func = 1
+        }
+        in_func && /for \(i = 0; i < sdl2_num_outputs; i\+\+\)/ {
+            saw_all_outputs = 1
+        }
+        in_func && /target->opengl/ { saw_2d_guard = 1 }
+        in_func && /graphic_hw_invalidate\(target->dcl.con\)/ {
+            saw_invalidate = 1
+        }
+        in_func && /sdl2_2d_switch\(&target->dcl, target->surface\)/ {
+            saw_recreate = 1
+        }
+        in_func && /sdl2_2d_redraw\(target\)/ { saw_redraw = 1 }
+        in_func && /^}/ { in_func = 0 }
+        END {
+            exit saw_all_outputs && saw_2d_guard && saw_invalidate &&
+                 saw_recreate && saw_redraw ? 0 : 1
+        }
+    ' "$SDL2_C" || fail "SDL renderer reset must recover every 2D console"
+}
+
 test_qemu11_sdl_egl_replaces_private_hook() {
     # 中文注释：QEMU 11 已在 SDL backend 内探测 X11 EGL 并设置官方 SDL hint；
     # 启动器只应传标准 display 参数，不能再维护环境变量控制的私有子窗口。
@@ -73,6 +123,7 @@ test_x11_egl_failure_falls_back_before_shader() {
 
 test_focus_gain_replays_scanout
 test_display_resume_replays_scanout
+test_2d_renderer_reset_recovers_all_consoles
 test_qemu11_sdl_egl_replaces_private_hook
 test_x11_egl_failure_falls_back_before_shader
 

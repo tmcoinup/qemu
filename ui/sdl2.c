@@ -39,6 +39,7 @@
 #include "ui/console.h"
 #include "ui/input.h"
 #include "ui/sdl2.h"
+#include "ui/sdl2-display-policy.h"
 #include "ui/sdl2-egl.h"
 #include "ui/sdl2-x11.h"
 #include "system/runstate.h"
@@ -67,9 +68,7 @@ static uint32_t sdl_button_map[INPUT_BUTTON__MAX] = {
     [INPUT_BUTTON_EXTRA]      = SDL_BUTTON(SDL_BUTTON_X2),
 };
 
-#define SDL2_REFRESH_INTERVAL_BUSY 10
-#define SDL2_MAX_IDLE_COUNT (2 * GUI_REFRESH_INTERVAL_DEFAULT \
-                             / SDL2_REFRESH_INTERVAL_BUSY + 1)
+#define SDL2_REFRESH_INTERVAL_MINIMIZED 500
 
 /* introduced in SDL 2.0.10 */
 #ifndef SDL_HINT_RENDER_BATCHING
@@ -80,13 +79,48 @@ static void sdl_update_caption(struct sdl2_console *scon);
 static void sdl_release_mouse_buttons(struct sdl2_console *scon);
 static void sdl_sync_cursor(struct sdl2_console *scon);
 static void sdl_sync_keyboard_grab(struct sdl2_console *scon);
+static void sdl_refresh_window_focus(struct sdl2_console *scon);
 static void sdl_grab_start(struct sdl2_console *scon);
 static void sdl_grab_end(struct sdl2_console *scon);
 static void sdl_deactivate_window(struct sdl2_console *scon,
                                   bool clear_mouse_focus,
                                   bool preserve_fullscreen_grab);
 
-static bool sdl2_window_create_once(struct sdl2_console *scon, int flags,
+static SDL2WindowMode
+sdl2_desired_window_mode(const struct sdl2_console *scon)
+{
+    SDL_DisplayMode mode;
+    SDL2Size guest;
+    int display_index = 0;
+
+    if (!sdl2_current_guest_size(scon, &guest)) {
+        return SDL2_WINDOW_MODE_INVALID;
+    }
+    if (scon->real_window) {
+        display_index = SDL_GetWindowDisplayIndex(scon->real_window);
+        if (display_index < 0) {
+            display_index = 0;
+        }
+    }
+    if (SDL_GetDesktopDisplayMode(display_index, &mode) != 0) {
+        return SDL2_WINDOW_MODE_INVALID;
+    }
+
+    /*
+     * Windows/X11 的 SDL display mode 对应像素，
+     * 可以直接与 guest framebuffer 比较。
+     * native Wayland 可能返回缩放后的 screen coordinates；
+     * 此时策略会保守地更早进入 desktop fullscreen，
+     * 仍优先保证 guest 不落入过小的有边框客户区。
+     * 不使用 usable bounds：
+     * 任务栏会让普通窗口装不下原生客户区。
+     * 命中边界时进入 desktop fullscreen，避免再次缩小 guest。
+     */
+    return sdl2_select_window_mode(
+        guest, (SDL2Size) { mode.w, mode.h });
+}
+
+static bool sdl2_window_create_once(struct sdl2_console *scon, Uint32 flags,
                                     char **error_message)
 {
     Uint32 wflags;
@@ -189,15 +223,36 @@ void sdl2_window_create(struct sdl2_console *scon)
 {
     g_autofree char *first_error = NULL;
     g_autofree char *fallback_error = NULL;
-    int flags = 0;
+    Uint32 flags = SDL_WINDOW_ALLOW_HIGHDPI;
 
     if (!scon->surface) {
         return;
     }
     assert(!scon->real_window);
 
+    /*
+     * 1920x1080 guest 无法放进同尺寸桌面的有边框客户区。
+     * 创建前直接选择 desktop fullscreen，
+     * 避免窗口管理器先压缩客户区，
+     * 再由 SDL 做非整数比例采样。
+     */
+    if (scon->idx == 0 &&
+        !scon->fullscreen &&
+        sdl2_desired_window_mode(scon) ==
+            SDL2_WINDOW_MODE_DESKTOP_FULLSCREEN) {
+        scon->fullscreen = true;
+        scon->auto_fullscreen = true;
+    }
+
     if (scon->fullscreen) {
         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+        if (scon->auto_fullscreen) {
+            /*
+             * 初始自动全屏退出后仍是普通可调窗口。
+             * 显式 -full-screen 保持原有窗口属性。
+             */
+            flags |= SDL_WINDOW_RESIZABLE;
+        }
     } else {
         flags |= SDL_WINDOW_RESIZABLE;
     }
@@ -265,10 +320,13 @@ void sdl2_window_create(struct sdl2_console *scon)
 
 void sdl2_window_destroy(struct sdl2_console *scon)
 {
+    bool reset_auto_fullscreen;
+
     if (!scon->real_window) {
         return;
     }
 
+    reset_auto_fullscreen = scon->auto_fullscreen;
     sdl_deactivate_window(scon, true, false);
     if (scon->winctx) {
         SDL_GL_DeleteContext(scon->winctx);
@@ -280,14 +338,68 @@ void sdl2_window_destroy(struct sdl2_console *scon)
     }
     SDL_DestroyWindow(scon->real_window);
     scon->real_window = NULL;
+
+    /*
+     * 显式 fullscreen 是用户配置，窗口重建后仍应保留。
+     * 自动 fullscreen 只属于旧 surface/desktop 的比较结果。
+     * placeholder 销毁窗口后清除自动状态，
+     * 下一次创建才能按新 surface 重新计算。
+     * saved_grab 也不能跨越已销毁的 SDL 窗口继续生效。
+     */
+    if (reset_auto_fullscreen) {
+        scon->fullscreen = false;
+        scon->auto_fullscreen = false;
+        scon->saved_grab = false;
+    }
 }
 
 void sdl2_window_resize(struct sdl2_console *scon)
 {
+    SDL2WindowMode desired;
+
     if (!scon->real_window) {
         return;
     }
 
+    desired = sdl2_desired_window_mode(scon);
+
+    /*
+     * 自动全屏只跟随 guest/desktop 的原生像素边界。
+     * 显式全屏不受分辨率切换影响。
+     * 用户通过热键退出后，
+     * 不会在同一次 resize 中被立即拉回。
+     */
+    if (scon->auto_fullscreen &&
+        desired != SDL2_WINDOW_MODE_DESKTOP_FULLSCREEN) {
+        if (SDL_SetWindowFullscreen(scon->real_window, 0) != 0) {
+            warn_report("SDL: failed to leave automatic fullscreen: %s",
+                        SDL_GetError());
+            return;
+        }
+        scon->fullscreen = false;
+        scon->auto_fullscreen = false;
+        if (!scon->saved_grab && grabbed_scon == scon) {
+            sdl_grab_end(scon);
+        }
+        scon->saved_grab = false;
+    } else if (scon->idx == 0 &&
+               !scon->fullscreen &&
+               desired == SDL2_WINDOW_MODE_DESKTOP_FULLSCREEN) {
+        if (SDL_SetWindowFullscreen(scon->real_window,
+                                    SDL_WINDOW_FULLSCREEN_DESKTOP) == 0) {
+            scon->saved_grab = grabbed_scon == scon;
+            scon->fullscreen = true;
+            scon->auto_fullscreen = true;
+            sdl_refresh_window_focus(scon);
+            return;
+        }
+        warn_report("SDL: failed to enter native-resolution fullscreen: %s",
+                    SDL_GetError());
+    }
+
+    if (scon->fullscreen) {
+        return;
+    }
     SDL_SetWindowSize(scon->real_window,
                       surface_width(scon->surface),
                       surface_height(scon->surface));
@@ -722,6 +834,7 @@ static void sdl_send_mouse_event(struct sdl2_console *scon,
 static void toggle_full_screen(struct sdl2_console *scon)
 {
     bool entering = !scon->fullscreen;
+    bool was_auto_fullscreen = scon->auto_fullscreen;
     Uint32 flags = entering ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
 
     if (SDL_SetWindowFullscreen(scon->real_window, flags) != 0) {
@@ -731,6 +844,7 @@ static void toggle_full_screen(struct sdl2_console *scon)
     }
 
     scon->fullscreen = entering;
+    scon->auto_fullscreen = false;
     if (entering) {
         scon->saved_grab = grabbed_scon == scon;
         sdl_grab_start(scon);
@@ -739,6 +853,19 @@ static void toggle_full_screen(struct sdl2_console *scon)
             sdl_grab_end(scon);
         }
         scon->saved_grab = false;
+        if (was_auto_fullscreen && scon->surface) {
+            /*
+             * 自动全屏可能从固件的较小启动窗口进入。
+             * 用户显式退出后，
+             * 把客户区恢复到当前 guest 尺寸，
+             * 不使用 SDL 保存的旧尺寸。
+             * 窗口管理器仍可按工作区约束它，
+             * 但退出意图优先。
+             */
+            SDL_SetWindowSize(scon->real_window,
+                              surface_width(scon->surface),
+                              surface_height(scon->surface));
+        }
     }
     sdl2_redraw(scon);
 }
@@ -1130,6 +1257,8 @@ static void handle_windowevent(SDL_Event *ev)
         sdl2_redraw(scon);
         break;
     case SDL_WINDOWEVENT_FOCUS_GAINED:
+        update_displaychangelistener(
+            &scon->dcl, SDL2_ACTIVE_REFRESH_INTERVAL_MS);
         sdl_refresh_window_focus(scon);
         /*
          * 中文注释：GL scanout 的窗口 back buffer 在最小化、隐藏或被窗口管理器
@@ -1174,13 +1303,15 @@ static void handle_windowevent(SDL_Event *ev)
         sdl_sync_cursor(scon);
         break;
     case SDL_WINDOWEVENT_RESTORED:
-        update_displaychangelistener(&scon->dcl, GUI_REFRESH_INTERVAL_DEFAULT);
+        update_displaychangelistener(
+            &scon->dcl, SDL2_ACTIVE_REFRESH_INTERVAL_MS);
         sdl_refresh_window_focus(scon);
         sdl2_redraw(scon);
         break;
     case SDL_WINDOWEVENT_MINIMIZED:
         sdl_deactivate_window(scon, true, true);
-        update_displaychangelistener(&scon->dcl, 500);
+        update_displaychangelistener(
+            &scon->dcl, SDL2_REFRESH_INTERVAL_MINIMIZED);
         break;
     case SDL_WINDOWEVENT_CLOSE:
         if (qemu_console_is_graphic(scon->dcl.con)) {
@@ -1202,6 +1333,8 @@ static void handle_windowevent(SDL_Event *ev)
         break;
     case SDL_WINDOWEVENT_SHOWN:
         scon->hidden = false;
+        update_displaychangelistener(
+            &scon->dcl, SDL2_ACTIVE_REFRESH_INTERVAL_MS);
         sdl_refresh_window_focus(scon);
         sdl2_redraw(scon);
         break;
@@ -1212,11 +1345,47 @@ static void handle_windowevent(SDL_Event *ev)
     }
 }
 
+static void sdl2_recover_2d_renderers(bool recreate_textures)
+{
+    int i;
+
+    /*
+     * 两类 renderer reset 都是进程级事件，不携带 windowID。
+     * DEVICE_RESET 后 SDL 明确要求重建全部 texture。
+     * TARGETS_RESET 只要求重新填充 render target；
+     * streaming texture 本身仍可复用并整帧上传。
+     *
+     * 这里遍历所有 2D console，
+     * 不只修复当前执行 dpy_refresh 的窗口。
+     * device reset 通过 sdl2_2d_switch() 销毁并重建 streaming texture；
+     * target reset 则用 sdl2_2d_redraw() 重新上传当前 DisplaySurface。
+     * 两条路径都会立即 Present，guest 桌面静止时也能恢复。
+     * OpenGL console 拥有独立 context/texture 生命周期，
+     * 不能混入 SDL_Renderer 的 reset 恢复路径。
+     */
+    for (i = 0; i < sdl2_num_outputs; i++) {
+        struct sdl2_console *target = &sdl2_console[i];
+
+        if (target->opengl || !target->real_renderer || !target->surface) {
+            continue;
+        }
+        graphic_hw_invalidate(target->dcl.con);
+        if (recreate_textures) {
+            sdl2_2d_switch(&target->dcl, target->surface);
+        } else {
+            sdl2_2d_redraw(target);
+        }
+        if (recreate_textures && !target->texture) {
+            warn_report("SDL: failed to recreate renderer texture: %s",
+                        SDL_GetError());
+        }
+    }
+}
+
 void sdl2_poll_events(struct sdl2_console *scon)
 {
     SDL_Event ev1, *ev = &ev1;
     bool allow_close = true;
-    int idle = 1;
 
     if (scon->last_vm_running != runstate_is_running()) {
         scon->last_vm_running = runstate_is_running();
@@ -1226,15 +1395,12 @@ void sdl2_poll_events(struct sdl2_console *scon)
     while (SDL_PollEvent(ev)) {
         switch (ev->type) {
         case SDL_KEYDOWN:
-            idle = 0;
             handle_keydown(ev);
             break;
         case SDL_KEYUP:
-            idle = 0;
             handle_keyup(ev);
             break;
         case SDL_TEXTINPUT:
-            idle = 0;
             handle_textinput(ev);
             break;
         case SDL_QUIT:
@@ -1250,36 +1416,40 @@ void sdl2_poll_events(struct sdl2_console *scon)
             }
             break;
         case SDL_MOUSEMOTION:
-            idle = 0;
             handle_mousemotion(ev);
             break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
-            idle = 0;
             handle_mousebutton(ev);
             break;
         case SDL_MOUSEWHEEL:
-            idle = 0;
             handle_mousewheel(ev);
             break;
         case SDL_WINDOWEVENT:
             handle_windowevent(ev);
+            break;
+        case SDL_RENDER_TARGETS_RESET:
+            sdl2_recover_2d_renderers(false);
+            break;
+        case SDL_RENDER_DEVICE_RESET:
+            sdl2_recover_2d_renderers(true);
             break;
         default:
             break;
         }
     }
 
-    if (idle) {
-        if (scon->idle_counter < SDL2_MAX_IDLE_COUNT) {
-            scon->idle_counter++;
-            if (scon->idle_counter >= SDL2_MAX_IDLE_COUNT) {
-                scon->dcl.update_interval = GUI_REFRESH_INTERVAL_DEFAULT;
-            }
-        }
+    if (!scon->real_window || scon->hidden ||
+        (SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
+        scon->dcl.update_interval = SDL2_REFRESH_INTERVAL_MINIMIZED;
     } else {
-        scon->idle_counter = 0;
-        scon->dcl.update_interval = SDL2_REFRESH_INTERVAL_BUSY;
+        /*
+         * 30 ms 的上游 idle interval 只够约 33 次/秒。
+         * 窗口可见时持续按 16 ms 轮询；
+         * 默认仍只在 guest 有 damage 时 Present，
+         * 不做无意义的 software renderer 整帧复制。
+         */
+        scon->dcl.update_interval = SDL2_ACTIVE_REFRESH_INTERVAL_MS;
     }
 }
 
@@ -1497,6 +1667,15 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
         SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
     }
 
+#ifdef SDL_HINT_WINDOWS_DPI_AWARENESS
+    /*
+     * 必须在 SDL_Init(VIDEO) 前声明 DPI awareness，
+     * 否则 Windows 可能先把整个 SDL 窗口当位图缩放。
+     * 环境变量具有更高 hint priority，调用者仍可显式覆盖。
+     * 默认使用跨显示器最稳定的 per-monitor v2。
+     */
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#endif
     if (SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Could not initialize SDL(%s) - exiting\n",
                 SDL_GetError());
@@ -1564,6 +1743,8 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
         sdl2_console[i].idx = i;
         sdl2_console[i].opts = o;
         sdl2_console[i].fullscreen = start_fullscreen;
+        sdl2_console[i].dcl.update_interval =
+            SDL2_ACTIVE_REFRESH_INTERVAL_MS;
 #ifdef CONFIG_OPENGL
         sdl2_console[i].opengl = display_opengl;
         sdl2_console[i].dcl.ops = display_opengl ? &dcl_gl_ops : &dcl_2d_ops;

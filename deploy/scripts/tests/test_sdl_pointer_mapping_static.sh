@@ -13,6 +13,9 @@ INPUT_H="$REPO_ROOT/include/ui/input.h"
 POINTER_C="$REPO_ROOT/ui/sdl2-pointer.c"
 POINTER_H="$REPO_ROOT/include/ui/sdl2-pointer.h"
 POINTER_TEST="$REPO_ROOT/tests/unit/test-sdl2-pointer.c"
+DISPLAY_POLICY_C="$REPO_ROOT/ui/sdl2-display-policy.c"
+DISPLAY_POLICY_H="$REPO_ROOT/include/ui/sdl2-display-policy.h"
+DISPLAY_POLICY_TEST="$REPO_ROOT/tests/unit/test-sdl2-display-policy.c"
 UI_MESON="$REPO_ROOT/ui/meson.build"
 UNIT_MESON="$REPO_ROOT/tests/unit/meson.build"
 
@@ -49,6 +52,75 @@ test_geometry_helper_is_small_and_built() {
         || fail "tests/unit/test-sdl2-pointer.c exceeds 500 lines"
     require_text "'sdl2-pointer.c'," "$UI_MESON"
     require_text "'test-sdl2-pointer': [" "$UNIT_MESON"
+}
+
+test_native_display_policy_is_integrated() {
+    local file
+
+    for file in "$DISPLAY_POLICY_C" "$DISPLAY_POLICY_H" \
+                "$DISPLAY_POLICY_TEST"; do
+        [[ -f "$file" ]] || fail "SDL display policy file is missing: $file"
+        (( $(wc -l < "$file") <= 500 )) \
+            || fail "$file exceeds 500 lines"
+    done
+
+    require_text "'sdl2-display-policy.c'," "$UI_MESON"
+    require_text "'test-sdl2-display-policy': [" "$UNIT_MESON"
+    require_text "sdl2_select_window_mode(" "$SDL2_C"
+    require_text "if (scon->idx == 0 &&" "$SDL2_C"
+    require_text "SDL_WINDOW_ALLOW_HIGHDPI" "$SDL2_C"
+    require_text "SDL_WINDOW_FULLSCREEN_DESKTOP" "$SDL2_C"
+    require_text "SDL_HINT_WINDOWS_DPI_AWARENESS" "$SDL2_C"
+    require_text "SDL2_ACTIVE_REFRESH_INTERVAL_MS" "$SDL2_C"
+
+    (( $(grep -cF -- "scon->idx == 0 &&" "$SDL2_C") >= 2 )) \
+        || fail "automatic fullscreen must stay on the primary console"
+    awk '
+        /flags \|= SDL_WINDOW_FULLSCREEN_DESKTOP/ { in_fullscreen_flags = 1 }
+        in_fullscreen_flags && /if \(scon->auto_fullscreen\)/ {
+            saw_auto_guard = 1
+        }
+        in_fullscreen_flags && saw_auto_guard &&
+            /flags \|= SDL_WINDOW_RESIZABLE/ {
+            found = 1
+            exit
+        }
+        END { exit found ? 0 : 1 }
+    ' "$SDL2_C" \
+        || fail "automatic fullscreen must remain resizable after exit"
+
+    awk '
+        /void sdl2_window_destroy/ { in_func = 1 }
+        in_func && /if \(reset_auto_fullscreen\)/ { saw_auto_guard = 1 }
+        in_func && saw_auto_guard && /scon->fullscreen = false/ {
+            cleared_fullscreen = 1
+        }
+        in_func && saw_auto_guard && /scon->auto_fullscreen = false/ {
+            cleared_auto = 1
+        }
+        in_func && /^}/ {
+            exit saw_auto_guard && cleared_fullscreen && cleared_auto ? 0 : 1
+        }
+        END {
+            if (!in_func || !saw_auto_guard ||
+                !cleared_fullscreen || !cleared_auto) {
+                exit 1
+            }
+        }
+    ' "$SDL2_C" \
+        || fail "destroyed automatic fullscreen windows must recompute policy"
+
+    # Windows DPI awareness 必须在 video subsystem 初始化前声明，
+    # 否则第一扇 SDL 窗口仍可能被系统做整窗 bitmap scaling。
+    awk '
+        /SDL_SetHint\(SDL_HINT_WINDOWS_DPI_AWARENESS/ {
+            saw_dpi_hint = 1
+        }
+        /SDL_Init\(SDL_INIT_VIDEO\)/ {
+            exit saw_dpi_hint ? 0 : 1
+        }
+        END { if (!saw_dpi_hint) { exit 1 } }
+    ' "$SDL2_C" || fail "SDL DPI awareness must be set before SDL_Init"
 }
 
 test_windowed_absolute_pointer_never_auto_grabs() {
@@ -159,6 +231,7 @@ test_scanout_uses_visible_subrectangle() {
 }
 
 test_geometry_helper_is_small_and_built
+test_native_display_policy_is_integrated
 test_windowed_absolute_pointer_never_auto_grabs
 test_absolute_capability_survives_guest_handler_switches
 test_relative_mode_is_explicitly_released

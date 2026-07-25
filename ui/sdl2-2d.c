@@ -28,14 +28,46 @@
 #include "ui/input.h"
 #include "ui/sdl2.h"
 
+/*
+ * 上传完成后按原生尺寸提交。
+ * 窗口更大时保留黑边，不放大 guest。
+ */
+static void sdl2_2d_present_texture(struct sdl2_console *scon)
+{
+    SDL_Rect dst;
+    SDL2Rect guest_dst;
+    SDL2Size output;
+
+    if (!scon->real_renderer || !scon->texture || !scon->surface ||
+        !sdl2_current_render_size(scon, &output)) {
+        return;
+    }
+
+    guest_dst = sdl2_guest_dst_rect(
+        output,
+        (SDL2Size) {
+            surface_width(scon->surface),
+            surface_height(scon->surface),
+        });
+    dst.x = guest_dst.x;
+    dst.y = guest_dst.y;
+    dst.w = guest_dst.width;
+    dst.h = guest_dst.height;
+
+    SDL_SetRenderDrawColor(scon->real_renderer, 0, 0, 0, 255);
+    if (SDL_RenderClear(scon->real_renderer) != 0 ||
+        SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst) != 0) {
+        return;
+    }
+    SDL_RenderPresent(scon->real_renderer);
+}
+
 void sdl2_2d_update(DisplayChangeListener *dcl,
                     int x, int y, int w, int h)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
     DisplaySurface *surf = scon->surface;
-    SDL_Rect rect, dst;
-    SDL2Rect guest_dst;
-    SDL2Size output;
+    SDL_Rect rect;
     size_t surface_data_offset;
     assert(!scon->opengl);
 
@@ -50,31 +82,12 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     rect.w = w;
     rect.h = h;
 
-    SDL_UpdateTexture(scon->texture, &rect,
-                      surface_data(surf) + surface_data_offset,
-                      surface_stride(surf));
-
-    /*
-     * Show the guest at its native resolution (1:1) centred in the window and
-     * letterbox the surplus with black borders instead of upscaling it.  The
-     * destination rectangle is placed by sdl2_guest_dst_rect() rather than via
-     * SDL_RenderSetLogicalSize(), which would scale the guest up to fill the
-     * window.
-     */
-    if (!sdl2_current_render_size(scon, &output)) {
+    if (SDL_UpdateTexture(scon->texture, &rect,
+                          surface_data(surf) + surface_data_offset,
+                          surface_stride(surf)) != 0) {
         return;
     }
-    guest_dst = sdl2_guest_dst_rect(
-        output,
-        (SDL2Size) { surface_width(surf), surface_height(surf) });
-    dst.x = guest_dst.x;
-    dst.y = guest_dst.y;
-    dst.w = guest_dst.width;
-    dst.h = guest_dst.height;
-    SDL_SetRenderDrawColor(scon->real_renderer, 0, 0, 0, 255);
-    SDL_RenderClear(scon->real_renderer);
-    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
-    SDL_RenderPresent(scon->real_renderer);
+    sdl2_2d_present_texture(scon);
 }
 
 void sdl2_2d_switch(DisplayChangeListener *dcl,

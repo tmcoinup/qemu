@@ -105,6 +105,7 @@ QUICK_TESTS = (
     "test_profile_duplicate_keys.sh",
     "test_qemu_ptracer_launch.sh",
     "test_qemu_edid_component_profiles.sh",
+    "test_sdl_gl_black_screen_static.sh",
     "test_sdl_keyboard_grab_static.sh",
     "test_sdl_pointer_mapping_static.sh",
     "test_setup_vlan_bridge.sh",

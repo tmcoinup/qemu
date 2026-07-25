@@ -116,14 +116,16 @@ test_keyboard_grab_follows_window_ownership() {
     require_case_call "case SDL_WINDOWEVENT_SHOWN:" \
         "sdl_refresh_window_focus(scon);"
     awk '
-        /static void sdl_refresh_window_focus/ { in_func = 1 }
+        /static void sdl_refresh_window_focus/ &&
+            $0 !~ /;[[:space:]]*$/ { in_func = 1 }
         in_func && /sdl_sync_keyboard_grab\(scon\)/ { found = 1 }
         in_func && /^}/ { exit found ? 0 : 1 }
         END { if (!in_func || !found) { exit 1 } }
     ' "$SDL2_C" \
         || fail "focus refresh must synchronize the keyboard grab"
     awk '
-        /static void sdl_refresh_window_focus/ { in_func = 1 }
+        /static void sdl_refresh_window_focus/ &&
+            $0 !~ /;[[:space:]]*$/ { in_func = 1 }
         in_func && /scon->fullscreen.*scon->has_input_focus/ {
             saw_fullscreen_request = 1
         }
@@ -355,7 +357,8 @@ test_host_ime_is_limited_to_text_consoles() {
     ' "$SDL2_C" \
         || fail "window creation must synchronize SDL text input"
     awk '
-        /static void sdl_refresh_window_focus/ { in_func = 1 }
+        /static void sdl_refresh_window_focus/ &&
+            $0 !~ /;[[:space:]]*$/ { in_func = 1 }
         in_func &&
             /sdl2_sync_text_input\(sdl2_console, sdl2_num_outputs\)/ {
             found = 1

@@ -41,7 +41,6 @@ struct sdl2_console {
     int hidden;
     int opengl;
     int updates;
-    int idle_counter;
     int ignore_hotkeys;
     bool gui_keysym;
     /*
@@ -53,6 +52,7 @@ struct sdl2_console {
     bool has_input_focus;
     bool has_mouse_focus;
     bool fullscreen;
+    bool auto_fullscreen;
     bool saved_grab;
     bool absolute_enabled;
     bool absolute_available;

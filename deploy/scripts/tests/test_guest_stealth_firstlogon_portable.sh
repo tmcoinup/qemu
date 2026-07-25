@@ -81,11 +81,17 @@ assert not [node for node in all_nodes
 admin_passwords = [node for node in all_nodes
                    if local_name(node) == "AdministratorPassword"]
 assert len(admin_passwords) == 1
+admin_values = children(admin_passwords[0], "Value")
+assert len(admin_values) == 1 and admin_values[0].text in (None, "")
 
 auto_logons = [node for node in all_nodes if local_name(node) == "AutoLogon"]
 assert len(auto_logons) == 1
 usernames = children(auto_logons[0], "Username")
 assert len(usernames) == 1 and usernames[0].text == "Administrator"
+auto_passwords = children(auto_logons[0], "Password")
+assert len(auto_passwords) == 1
+auto_values = children(auto_passwords[0], "Value")
+assert len(auto_values) == 1 and auto_values[0].text in (None, "")
 
 duplicate_admins = []
 for account in (node for node in all_nodes if local_name(node) == "LocalAccount"):

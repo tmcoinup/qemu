@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # host-inject-unattend.sh —— 离线把 deploy/autounattend/autounattend.xml 注入
 # 到 Win10 guest，让 sysprep'd base 首启时 OOBE 自动跑完，不弹"区域设置"
-# 这类交互界面，直接以 Administrator/123456 自动登录进 desktop。
+# 这类交互界面，直接以空密码的 Administrator 自动登录进 desktop。
 #
 # 工作机制：
 #   Windows OOBE 启动时按以下顺序搜 unattend.xml，发现就用：
@@ -18,7 +18,7 @@
 #     的模板因 0x80070422 无法预注册内置 AppX 包而反复回到 OOBE 错误页
 #   - HideEULAPage / HideOEMRegistrationScreen / HideOnlineAccountScreens
 #     / HideLocalAccountScreen / HideWirelessSetupInOOBE = true
-#   - AdministratorPassword = 123456，设置内置 Administrator 的密码
+#   - AdministratorPassword = 空字符串，内置 Administrator 使用空密码
 #   - AutoLogon: Username=Administrator, LogonCount=999, Enabled=true；
 #     指定内置 Administrator 自动登录也会启用该账号
 #   - FirstLogonCommands: 启 RDP / 关 NLA / 注册 ms-gamingoverlay 等；
@@ -137,4 +137,4 @@ if ! grep -qF "<ComputerName>${COMPUTER_NAME}</ComputerName>" "$DEST"; then
 fi
 log "wrote 3 copies (Panther, C:\\ root, Sysprep)"
 
-log "done. guest 首启走自动 OOBE → AutoLogon Administrator/123456"
+log "done. guest 首启走自动 OOBE → AutoLogon Administrator（空密码）"

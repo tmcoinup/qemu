@@ -122,13 +122,14 @@
             </OOBE>
             <UserAccounts>
                 <AdministratorPassword>
-                    <Value>123456</Value>
+                    <!-- 显式空元素表示空密码；保留 Value，避免退化为“未配置密码”。 -->
+                    <Value></Value>
                     <PlainText>true</PlainText>
                 </AdministratorPassword>
             </UserAccounts>
             <AutoLogon>
                 <Password>
-                    <Value>123456</Value>
+                    <Value></Value>
                     <PlainText>true</PlainText>
                 </Password>
                 <Username>Administrator</Username>

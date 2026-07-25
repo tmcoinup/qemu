@@ -499,7 +499,7 @@ massgrave.dev/get），与本评估的去虚拟化无关；记录在 commit log�
 | `deploy/scripts/destealth-revert.ps1` | 客机内一键回退：还原 `bootmgfw.efi.original`、删 `EfiGuardDxe.efi`、清 Trusted Root 里的伪 NVIDIA 根、卸 patched viogpudo INF/oem*.inf、删 `C:\stealth\efiguard|nv-driver|driver-signing\`、`bcdedit` 复位 |
 | `deploy/scripts/shallow-stealth.ps1` | 客机内浅层 stealth：拉 stock virtio-win 0.1.266 viogpudo（**MS-WHQL 签名**）→ `pnputil /add-driver /install` 绑到 PCI 1AF4:1050 → 跑 `apply-gpu-spoof.ps1` 注册表覆盖（DeviceDesc / FriendlyName / DriverDesc / DEVPKEY → "NVIDIA GeForce GTX 1050"）→ `nvapi64.dll` shim 进 System32 |
 | `deploy/scripts/stock-viogpudo/{viogpudo.sys,viogpudo.cat,viogpudo.inf}` | 从 virtio-win.iso 抽出的 w10/amd64 stock 版；当前构建时内嵌进 `respawn-stealth.exe`，HTTP 仅保留为历史调试入口 |
-| `deploy/autounattend/autounattend.xml` + `autounattend-vm2.iso` | OOBE 自动化 ISO：分区、Administrator/123456、AutoLogon×999、zh-CN、CST 时区、enable RDP（不装 OpenSSH，避免 Add-WindowsCapability 联网卡死） |
+| `deploy/autounattend/autounattend.xml` + `autounattend-vm2.iso` | OOBE 自动化 ISO：分区、Administrator 空密码、AutoLogon×999、zh-CN、CST 时区、enable RDP（不装 OpenSSH，避免 Add-WindowsCapability 联网卡死） |
 
 **启动器调整（`deploy/scripts/start-vm.sh`）：**
 

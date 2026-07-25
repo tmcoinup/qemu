@@ -1,9 +1,10 @@
 # guest-stealth：Win10 客机离线统一安装与初始化
 
-`respawn-stealth.exe` 是全新 VM 与克隆 VM 共用的唯一 guest 入口。它把电源策略、
-芯片组识别 INF、显示驱动、GPU 初始化脚本及 x86/x64 NVIDIA NVAPI / AMD ADL
-系统兼容库全部编译进一个 PE64 文件；
-运行时不请求 host HTTP，也不要求 EXE 旁边存在 `.ps1/.sys/.cat/.inf/.dll`。
+正式包提供两个行为相同、界面不同的独立 guest 入口：
+`respawn-stealth.exe` 保留完整控制台输出，`respawn-stealth-progress.exe` 只显示
+通用进度窗口。每个 PE64 文件都完整内嵌电源策略、芯片组识别 INF、显示驱动、
+GPU 初始化脚本及 x86/x64 NVIDIA NVAPI / AMD ADL 系统兼容库；运行时不请求
+host HTTP，也不要求 EXE 旁边存在 `.ps1/.sys/.cat/.inf/.dll`。
 
 只想完成正式部署时，请直接阅读
 [`QUICKSTART.zh-CN.md`](./QUICKSTART.zh-CN.md)；该教程只要求复制并双击一个 EXE，
@@ -36,8 +37,9 @@ Service、Driver 和 PCI 配置空间仍为物理 carrier。MULTI_SZ 中的多�
 
 | 文件 | 作用 |
 | --- | --- |
-| `dist/respawn-stealth.exe` | 唯一发布物；双击后提权、释放内嵌文件、初始化并重启 |
-| `build-exe.sh` | 校验 stock 驱动摘要，用 MinGW 构建 Windows PE64 EXE |
+| `dist/respawn-stealth.exe` | 详细模式；保留原确认框、控制台输出和错误信息 |
+| `dist/respawn-stealth-progress.exe` | 仅进度模式；隐藏详细输出，只显示通用进度与结果 |
+| `build-exe.sh` | 校验 stock 驱动摘要，用 MinGW 同时构建两个 Windows PE64 EXE |
 | `configure-power-policy.ps1` | 用 PowrProf 将屏幕/自动睡眠设为“从不”，保留桌面 S3 并关闭休眠 |
 | `install-chipset-device.ps1` | 覆盖硬件池全部 Intel SMBus：为 A323/A123/1C22/1E22/8C22 幂等绑定 WHCP NO_DRV INF，并验证 inbox 2930 |
 | `install-display-driver.ps1` | 真实驱动探测与幂等安装；必须先成功，才允许执行名称覆盖 |
@@ -60,8 +62,8 @@ Service、Driver 和 PCI 配置空间仍为物理 carrier。MULTI_SZ 中的多�
 | `project-gpu-hardware-id.ps1` | HardwareID 唯一 writer；提供 Apply、Verify、RestorePhysical 与事务恢复 |
 | `respawn-stealth-local.ps1` | 串联驱动安装、`apply-gpu-spoof -AutoDetect`、收尾与重启 |
 | `respawn-restart-state.ps1` | 集中管理一次性恢复任务、显示设备就绪等待与单次重启阶段 |
-| `launcher/` | UAC manifest、payload 释放器和应用图标 |
-| `package.sh` | 清理旧发布目录并重新生成单 EXE |
+| `launcher/` | UAC manifest、payload 释放器、仅进度 UI 和应用图标 |
+| `package.sh` | 清理旧发布目录并同时生成两个独立 EXE |
 
 驱动输入来自 `deploy/scripts/stock-viogpudo/`：
 
@@ -233,12 +235,13 @@ EDID 中的厂商码和产品码，通过 `DEVPKEY_Device_FriendlyName` 投影�
 
 ```bash
 bash deploy/guest-stealth/package.sh
-sha256sum deploy/guest-stealth/dist/respawn-stealth.exe
+sha256sum deploy/guest-stealth/dist/respawn-stealth*.exe
 ```
 
-只把 `deploy/guest-stealth/dist/respawn-stealth.exe` 拷进 Windows 任意位置。推荐固定为
-`D:\工具\respawn-stealth.exe`，然后双击运行并等待自动重启。无需启动
-`serve-stealth-http.py`，也不要再执行旧的 `irm .../shallow-stealth.ps1 | iex` 作为默认安装。
+普通使用可只把 `respawn-stealth-progress.exe` 拷进 Windows；需要观察完整诊断时
+则只复制原 `respawn-stealth.exe`。两者都是可独立运行的单文件程序，任选其一双击并
+等待自动重启。无需启动 `serve-stealth-http.py`，也不要再执行旧的
+`irm .../shallow-stealth.ps1 | iex` 作为默认安装。
 
 无人值守首次登录使用：
 
@@ -423,4 +426,5 @@ INCLUDE_LEGACY_SCRIPTS=1 bash deploy/guest-stealth/package.sh
 `respawn-restart-state.ps1`、
 `display-driver-trust.ps1`、
 `gpu-hardware-id-plan.ps1`、`project-gpu-hardware-id.ps1` 和
-`force-displayfreq.ps1` 放在同一 payload 目录；生产环境始终使用单 EXE。
+`force-displayfreq.ps1` 放在同一 payload 目录；生产环境从两个发布物中任选一个
+单独运行，不要并发启动。

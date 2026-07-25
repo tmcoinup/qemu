@@ -40,6 +40,8 @@ require_text 'if ($p.ExitCode -ne 0) { exit $p.ExitCode }' "$UNATTEND"
 require_text 'exit 44' "$UNATTEND"
 require_text 'exit 45' "$UNATTEND"
 require_text 'exit 46' "$UNATTEND"
+require_text 'sc.exe config AppXSvc start= demand' "$UNATTEND"
+require_text 'sc.exe start AppXSvc &gt;nul 2&gt;&amp;1' "$UNATTEND"
 require_text '[switch]$Unattended' "$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
 reject_text 'if (-not $NoReboot) { Read-Host' \
     "$REPO_ROOT/deploy/guest-stealth/respawn-stealth-local.ps1"
@@ -91,6 +93,21 @@ for account in (node for node in all_nodes if local_name(node) == "LocalAccount"
     if len(names) == 1 and names[0].text == "Administrator":
         duplicate_admins.append(account)
 assert not duplicate_admins
+
+specialize_commands = []
+for settings in (node for node in all_nodes if local_name(node) == "settings"):
+    if not settings.attrib.get("pass") == "specialize":
+        continue
+    for command in (node for node in settings.iter()
+                    if local_name(node) == "RunSynchronousCommand"):
+        order = children(command, "Order")
+        path = children(command, "Path")
+        assert len(order) == 1 and len(path) == 1
+        specialize_commands.append((order[0].text, path[0].text))
+assert specialize_commands == [
+    ("1", "sc.exe config AppXSvc start= demand"),
+    ("2", 'cmd.exe /c "sc.exe start AppXSvc >nul 2>&1 & exit /b 0"'),
+]
 PY
 
 TEST_TMP="$(mktemp -d)"

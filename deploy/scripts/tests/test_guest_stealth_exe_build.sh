@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证 guest-stealth 单文件 EXE 可在当前 host 上交叉编译，并带上必要 payload。
+# 验证 guest-stealth 两个单文件 EXE 可在当前 host 上交叉编译，并带上必要 payload。
 # shellcheck disable=SC2016
 # 单引号中的 PowerShell `$` 是待匹配源码，不能由 Bash 提前展开。
 set -euo pipefail
@@ -16,8 +16,8 @@ BUILD_DIR="$TMP_DIR/build"
 OUT_DIR="$OUT_DIR" \
 BUILD_DIR="$BUILD_DIR" \
     "$REPO_ROOT/deploy/guest-stealth/build-exe.sh" >/dev/null
-
 EXE="$OUT_DIR/respawn-stealth.exe"
+PROGRESS_EXE="$OUT_DIR/respawn-stealth-progress.exe"
 PAYLOAD_SECURITY="$REPO_ROOT/deploy/guest-launcher-common/payload-security.c"
 PAYLOAD_ENVIRONMENT="$REPO_ROOT/deploy/guest-launcher-common/payload-environment.c"
 LAUNCHER_ARGUMENTS="$REPO_ROOT/deploy/guest-stealth/launcher/launcher-arguments.c"
@@ -26,9 +26,9 @@ MANUFACTURER_HELPER="$REPO_ROOT/deploy/scripts/gpu-manufacturer-projection.ps1"
 MANUFACTURER_PROJECTOR_SOURCE="$REPO_ROOT/deploy/guest-stealth/launcher/gpu-manufacturer-projector.c"
 MANUFACTURER_PROJECTOR_EXE="$BUILD_DIR/gpu-manufacturer-projector.exe"
 [[ -s "$EXE" ]] || fail "未生成 respawn-stealth.exe"
+[[ -s "$PROGRESS_EXE" ]] || fail "未生成 respawn-stealth-progress.exe"
 [[ -s "$MANUFACTURER_PROJECTOR_EXE" ]] \
     || fail "未生成 gpu-manufacturer-projector.exe"
-
 file "$EXE" | grep -F 'PE32+ executable' >/dev/null \
     || fail "输出不是 Windows PE64 EXE: $(file "$EXE")"
 llvm-readobj --file-headers "$EXE" | grep -F 'TimeDateStamp: 1970-01-01 00:00:00 (0x0)' >/dev/null \
@@ -42,7 +42,6 @@ for projector_api in SetupDiGetClassDevsW CM_Set_DevNode_PropertyW; do
     strings -a "$MANUFACTURER_PROJECTOR_EXE" | grep -F "$projector_api" >/dev/null \
         || fail "厂商投影器缺少 Windows API 导入: $projector_api"
 done
-
 strings -a "$EXE" | grep -F 'requireAdministrator' >/dev/null \
     || fail "EXE 未嵌入 requireAdministrator manifest"
 x86_64-w64-mingw32-objdump -x "$EXE" | grep -F 'Entry: ID: 0x000018' >/dev/null \
@@ -336,7 +335,7 @@ for payload_path in payloads:
         raise SystemExit(f"FAIL: EXE 中找不到完整原始 payload: {payload_path.name}")
 PY
 
-# legacy 调试发布仍应平铺全部 helper；默认发布继续只有一个 EXE。
+# legacy 调试发布仍应平铺全部 helper；默认发布只允许两个指定 EXE。
 for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 gpu-board-identity-contract.ps1 \
         gpu-profile-registry-core.ps1 gpu-spoof-apply-support.ps1 refresh-gpu-name.ps1 \
         gpu-manufacturer-projection.ps1 gpu-manufacturer-projector.exe \
@@ -391,10 +390,10 @@ env -u INCLUDE_LEGACY_SCRIPTS \
 PACKAGE_DIST="$PACKAGE_REPO/deploy/guest-stealth/dist"
 PACKAGE_BUILD="$PACKAGE_REPO/build/guest-stealth-exe"
 mapfile -d '' -t package_entries < <(find "$PACKAGE_DIST" -mindepth 1 -maxdepth 1 -print0)
-[[ "${#package_entries[@]}" -eq 1 &&
-   "${package_entries[0]}" == "$PACKAGE_DIST/respawn-stealth.exe" &&
-   -s "$PACKAGE_DIST/respawn-stealth.exe" ]] \
-    || fail "污染环境下 package.sh 没有生成严格单 EXE dist"
+[[ "${#package_entries[@]}" -eq 2 &&
+   -s "$PACKAGE_DIST/respawn-stealth.exe" &&
+   -s "$PACKAGE_DIST/respawn-stealth-progress.exe" ]] \
+    || fail "污染环境下 package.sh 没有生成严格双 EXE dist"
 [[ ! -e "$poison_out" && ! -e "$poison_build" ]] \
     || fail "package.sh 仍继承了调用者的 OUT_DIR/BUILD_DIR"
 
@@ -402,6 +401,7 @@ mapfile -d '' -t package_entries < <(find "$PACKAGE_DIST" -mindepth 1 -maxdepth 
 # 但输入文件逐字节相同。复用这两次既有构建做可复现性断言，不额外再编译第三次；
 # cmp 保证整份 PE 相同，摘要同时让失败日志能直接指出两份发布物的差异。
 PACKAGE_EXE="$PACKAGE_DIST/respawn-stealth.exe"
+PACKAGE_PROGRESS_EXE="$PACKAGE_DIST/respawn-stealth-progress.exe"
 direct_hash="$(sha256sum "$EXE" | awk '{print $1}')"
 package_hash="$(sha256sum "$PACKAGE_EXE" | awk '{print $1}')"
 if ! cmp -s "$EXE" "$PACKAGE_EXE"; then
@@ -409,6 +409,8 @@ if ! cmp -s "$EXE" "$PACKAGE_EXE"; then
 fi
 [[ "$direct_hash" == "$package_hash" ]] \
     || fail "逐字节相同但 SHA-256 异常不一致: direct=$direct_hash package=$package_hash"
+cmp -s "$PROGRESS_EXE" "$PACKAGE_PROGRESS_EXE" \
+    || fail "仅进度 EXE 的连续构建结果不一致"
 cmp -s "$MANUFACTURER_PROJECTOR_EXE" \
     "$PACKAGE_BUILD/gpu-manufacturer-projector.exe" \
     || fail "相同源码连续构建的厂商投影器不一致"
@@ -450,7 +452,8 @@ if INCLUDE_LEGACY_SCRIPTS=unexpected \
         "$PACKAGE_REPO/deploy/guest-stealth/package.sh" >/dev/null 2>&1; then
     fail "package.sh 错误接受了非法 INCLUDE_LEGACY_SCRIPTS"
 fi
-[[ -s "$PACKAGE_DIST/respawn-stealth.exe" ]] \
+[[ -s "$PACKAGE_DIST/respawn-stealth.exe" &&
+   -s "$PACKAGE_DIST/respawn-stealth-progress.exe" ]] \
     || fail "非法调试开关在拒绝前破坏了既有正式 EXE"
 
 # 构建器必须在编译前拒绝被改动的驱动，避免错误 CAT/SYS 组合进入发布物。
@@ -493,4 +496,4 @@ for source_file in "$REPO_ROOT/deploy/guest-stealth/launcher/respawn-stealth-lau
     [[ "$(wc -l < "$source_file")" -le 500 ]] || \
         fail "生产源单文件超过 500 行: $source_file"
 done
-echo "OK: guest-stealth single EXE build checks passed"
+echo "OK: guest-stealth dual EXE build checks passed"

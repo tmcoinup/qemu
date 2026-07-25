@@ -6,10 +6,11 @@
 #
 # 两件事，都只动 host 侧旋钮，guest 的 CPUID / tsc-freq / 拓扑 / SMBIOS 全不变：
 #
-#  1) 抖动调优 (HOST_TUNE=1): governor=performance + 可配置 halt_poll +
-#     THP defrag=never + split-lock 限速策略。多开默认 KVM_HALT_POLL_NS=0，
-#     靠 cpuset 隔离防止宿主编译抢 vCPU；需要内核 split-lock DoS 防护的
-#     多租户宿主可显式设 SPLIT_LOCK_MITIGATE=1。
+#  1) 抖动调优 (HOST_TUNE=1): PPD 可用时选择其 performance profile；否则
+#     回退 governor=performance。另配置 halt_poll、THP defrag 与 split-lock
+#     限速策略。多开默认 KVM_HALT_POLL_NS=0，靠 cpuset 隔离防止宿主编译抢
+#     vCPU；需要内核 split-lock DoS 防护的多租户宿主可显式设
+#     SPLIT_LOCK_MITIGATE=1。
 #
 #  2) 频率封顶 (CPU_FREQ_CAP=1): 把 scaling_max_freq 压到「**运行中所有 VM**
 #     伪装 CPU 上限(CPU_MAX_MHZ=SMBIOS Type4 max-speed)的最小值」。host boost 远
@@ -42,6 +43,33 @@ sv_host_split_lock_mitigation_matches() {
     [[ "$current" == "$target" ]]
 }
 
+# PPD 管理 Intel P-State active 模式时，performance profile 的正确组合是
+# governor=powersave + EPP=performance。不能只按 governor=performance 判断，
+# 否则启动器会反复调用 helper，并重新制造 PPD 无法切换均衡模式的冲突。
+sv_host_cpu_performance_matches() {
+    local policy_root="${1:-/sys/devices/system/cpu/cpufreq}"
+    local ppd_command="${2:-powerprofilesctl}"
+    local profile="" policy driver governor expected_governor
+
+    if command -v "$ppd_command" >/dev/null 2>&1; then
+        profile="$("$ppd_command" get 2>/dev/null || true)"
+    fi
+
+    for policy in "$policy_root"/policy*; do
+        [[ -d "$policy" ]] || continue
+        driver="$policy/scaling_driver"
+        governor="$policy/scaling_governor"
+        [[ -r "$governor" ]] || continue
+        expected_governor="performance"
+        if [[ "$profile" == "performance" &&
+              -r "$driver" && -e "$policy/energy_performance_preference" &&
+              "$(<"$driver")" == "intel_pstate" ]]; then
+            expected_governor="powersave"
+        fi
+        [[ "$(<"$governor")" == "$expected_governor" ]] || return 1
+    done
+}
+
 # DRY_RUN：零副作用、零输出，原样返回（本文件被 source，return 即退出本步骤）。
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
     return 0
@@ -61,11 +89,8 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
             ;;
     esac
 
-    # --- 抖动调优是否需要：全核 governor=performance 且 halt_poll 等于目标值 ---
-    for _g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-        [[ -r "$_g" ]] || continue
-        [[ "$(cat "$_g" 2>/dev/null)" == "performance" ]] || { _ht_need=1; break; }
-    done
+    # --- 抖动调优是否需要：CPU 性能策略与 halt_poll 都等于目标值 ---
+    sv_host_cpu_performance_matches || _ht_need=1
     _hp=$(cat /sys/module/kvm/parameters/halt_poll_ns 2>/dev/null || echo 0)
     [[ "$_hp" =~ ^[0-9]+$ ]] || _hp=0
     (( _hp != _ht_halt_poll_target )) && _ht_need=1
@@ -108,7 +133,7 @@ if [[ "${HOST_TUNE:-1}" == "1" ]]; then
     fi
 
     if (( _ht_need == 0 )); then
-        _ht_ready="performance + halt_poll=${_ht_halt_poll_target}ns"
+        _ht_ready="CPU performance 策略 + halt_poll=${_ht_halt_poll_target}ns"
         if (( _ht_split_lock_supported )); then
             _ht_ready="${_ht_ready} + split_lock=${_ht_split_lock_target}"
         fi

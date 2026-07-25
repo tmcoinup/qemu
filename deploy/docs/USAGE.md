@@ -376,7 +376,7 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `CPUS` | `4` | 只允许 `2`/`4`，并须等于所选 2C2T/2C4T/4C4T SKU 的完整线程数 |
 | `MEM_TOTAL_MB` | 新 profile `8192` | 2/4/8 GiB 由 manifest 约束；新建默认 2×4 GiB |
 | `TPM` | `auto` | 跟随 profile 的主板能力、版本和前端；`1` 强制要求支持，`0` 显式关闭 |
-| `HOST_TUNE` | `1` | governor=performance、`halt_poll`、THP defrag；不停止 irqbalance |
+| `HOST_TUNE` | `1` | PPD performance（无 PPD 时回退 performance governor）、`halt_poll`、THP defrag |
 | `CPU_FREQ_CAP` | **`0`** | 默认不全局封顶；`--freq-cap` 才按目标 CPU 上限启用 |
 | `CPU_ISOLATE` | `1` | 严格启动闸门 + NUMA-aware pinner + 每实例 cgroup cpuset |
 | `QEMU_SERVICE_CPUS` | `0` | `--svc-cpu` 分配 1 个辅助线程逻辑 CPU |

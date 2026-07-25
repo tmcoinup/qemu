@@ -69,19 +69,20 @@ cat /sys/module/kvm_intel/parameters/flexpriority# 1
 **两类根因，都在 host 侧（非 guest 配置）**：
 
 ① **调度/时钟抖动**——
-- `governor=powersave`：核在 vm-exit 之间降频，每次 exit 服务延迟忽高忽低；
+- 未选择性能偏好：核在 vm-exit 之间降频，每次 exit 服务延迟忽高忽低；
 - `halt_poll_ns` 太短（默认 200000）：guest HLT 后唤醒落在 poll 窗外 → IPI 唤醒延迟尖刺；
 - THP `defrag=madvise/always`：khugepaged / 同步整理 stall 把 vCPU 冻住几毫秒 → 计时跳变。
 这些都会让 ACE 读到的帧/tick 计时方差超阈值，误判成「变速器」。
 
 ② **超规格频率（关键，易漏）**——guest 的 TSC 被钉死在伪装 CPU 的 `tsc-freq`（如
-Ryzen3-1200=3.1GHz），但**指令是按 host 真实频率执行的**。host(5800) governor=performance
+Ryzen3-1200=3.1GHz），但**指令是按 host 真实频率执行的**。host 性能策略
 能 boost 到 4.4GHz+，而伪装 CPU 自报的 SMBIOS Type4 `max-speed` 只有 3400MHz。于是 guest
 「单位 TSC tick 内干的活」远超这颗 CPU 该有的量 = 一台超频/变速的机器 → 直接踩 `13-131130-8`。
-⚠ 注意：单开 `governor=performance` 反而**加重**②（把 host 顶到满 boost），必须同时封顶频率。
+⚠ 注意：单开性能策略反而**加重**②（允许 host 满 boost），必须同时封顶频率。
 
 **修复**：`start-vm.sh` 默认 `HOST_TUNE=1`、`CPU_FREQ_CAP=0`，起 VM 前自动跑
-`host-performance.sh`：governor=performance + 可配置 halt_poll + THP defrag=never（治①），
+`host-performance.sh`：PPD performance（无 PPD 时回退 performance governor）+
+可配置 halt_poll + THP defrag=never（治①），
 但不会默认改变全机频率上限。确认单/多 VM 的全局影响后，可用 `--freq-cap` 显式把
 `scaling_max_freq` 封顶到在跑实例最小 `CPU_MAX_MHZ`（治②，**只降不升**）。手动：
 ```bash
@@ -91,7 +92,8 @@ sudo /usr/local/libexec/qemu-vmate-host-performance 3400000 0
 ```
 **验证调优是否生效**：
 ```bash
-cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort -u   # performance
+powerprofilesctl get                                                   # performance
+cat /sys/devices/system/cpu/cpufreq/policy*/scaling_governor | sort -u # PPD + Intel P-State: powersave
 cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq  | sort -u   # =CPU_MAX_MHZ*1000(如3400000)
 cat /sys/module/kvm/parameters/halt_poll_ns                          # 默认 0；启动器低延迟诊断可设 KVM_HALT_POLL_NS=500000
 cat /sys/kernel/mm/transparent_hugepage/defrag                       # [never]

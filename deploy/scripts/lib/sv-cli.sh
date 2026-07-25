@@ -263,8 +263,8 @@ esac
 # dgame / image-search / 临时 socat 同时连接。为了兼容旧工具配置，启动脚本还会
 # 建一个 ${QMP_SOCK}.proxy -> ${QMP_SOCK} 的 symlink，但不再起 Python 中转进程。
 : "${PROXY:=0}"
-# host 侧调度/时钟抖动调优: 起 VM 前自动跑 host-performance.sh(governor=performance
-# + KVM_HALT_POLL_NS(默认 0) + THP defrag=never + split-lock 限速策略)。多开时主要
+# host 侧调度/时钟抖动调优: 起 VM 前自动跑 host-performance.sh(PPD performance，
+# 无 PPD 时回退 performance governor；另含 halt_poll/THP/split-lock)。多开时主要
 # 靠 cpuset 隔离防止宿主编译抢 vCPU；如需旧低延迟 busy-poll 策略，可显式
 # KVM_HALT_POLL_NS=500000。
 # 只动 host 侧, 零反检测硬件身份影响.

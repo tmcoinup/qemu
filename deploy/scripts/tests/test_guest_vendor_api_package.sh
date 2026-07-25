@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证单 EXE/legacy 发布同时携带 NVIDIA+AMD 五个系统目标的可信源 payload。
+# 验证双 EXE/legacy 发布同时携带 NVIDIA+AMD 五个系统目标的可信源 payload。
 # shellcheck disable=SC2016
 set -euo pipefail
 
@@ -89,11 +89,12 @@ ADL_SRC_DIR="$TMP_DIR/poison-adl" \
 OUT_DIR="$TMP_DIR/poison-out" BUILD_DIR="$TMP_DIR/poison-build" \
     "$PACKAGE_REPO/deploy/guest-stealth/package.sh" >/dev/null
 EXE="$PACKAGE_REPO/deploy/guest-stealth/dist/respawn-stealth.exe"
+PROGRESS_EXE="$PACKAGE_REPO/deploy/guest-stealth/dist/respawn-stealth-progress.exe"
 mapfile -d '' -t release_entries < <(
     find "$(dirname "$EXE")" -mindepth 1 -maxdepth 1 -print0
 )
-[[ "${#release_entries[@]}" -eq 1 && "${release_entries[0]}" == "$EXE" &&
-   -s "$EXE" ]] || fail "正式 package 没有生成严格单 EXE"
+[[ "${#release_entries[@]}" -eq 2 && -s "$EXE" && -s "$PROGRESS_EXE" ]] \
+    || fail "正式 package 没有生成严格双 EXE"
 [[ ! -e "$TMP_DIR/poison-adl" && ! -e "$TMP_DIR/poison-out" &&
    ! -e "$TMP_DIR/poison-build" ]] \
     || fail "正式 package 继承了外部 ADL/输出目录"

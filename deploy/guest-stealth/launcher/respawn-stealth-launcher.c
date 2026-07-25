@@ -14,6 +14,9 @@
 #include "payload-security.h"
 #include "launcher-arguments.h"
 #include "respawn-stealth-payloads.h"
+#ifdef RESPAWN_PROGRESS_ONLY
+#include "progress-only-ui.h"
+#endif
 #ifndef ARRAY_LEN
 #define ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
 #endif
@@ -113,6 +116,7 @@ static int is_admin(void)
     return ok ? 1 : 0;
 }
 
+#ifndef RESPAWN_PROGRESS_ONLY
 static int confirm_admin_run(void)
 {
     int answer;
@@ -132,6 +136,7 @@ static int confirm_admin_run(void)
 
     return answer == IDYES;
 }
+#endif
 
 static int elevate_self(int argc, wchar_t **argv)
 {
@@ -255,11 +260,17 @@ static int run_payload(int argc, wchar_t **argv, const wchar_t *work_dir,
 {
     wchar_t powershell[PATH_BUF_LEN];
     wchar_t cmd[CMD_BUF_LEN];
+#ifndef RESPAWN_PROGRESS_ONLY
     STARTUPINFOW si;
+#endif
     PROCESS_INFORMATION pi;
     DWORD code = 1;
     size_t len = 0;
     wchar_t *environment = NULL;
+
+#ifdef RESPAWN_PROGRESS_ONLY
+    (void)autorun;
+#endif
 
     if (!find_powershell(powershell, ARRAY_LEN(powershell))) {
         return 1;
@@ -276,11 +287,18 @@ static int run_payload(int argc, wchar_t **argv, const wchar_t *work_dir,
         return 1;
     }
 
+#ifdef RESPAWN_PROGRESS_ONLY
+    if (!append_quoted_arg(cmd, ARRAY_LEN(cmd), &len, L"-Unattended")) {
+        fwprintf(stderr, L"PowerShell Unattended 参数过长。\n");
+        return 1;
+    }
+#else
     if (autorun &&
         !append_quoted_arg(cmd, ARRAY_LEN(cmd), &len, L"-Unattended")) {
         fwprintf(stderr, L"PowerShell Unattended 参数过长。\n");
         return 1;
     }
+#endif
     if (firstlogon &&
         !append_quoted_arg(cmd, ARRAY_LEN(cmd), &len, L"-FirstLogon")) {
         fwprintf(stderr, L"PowerShell FirstLogon 参数过长。\n");
@@ -297,22 +315,34 @@ static int run_payload(int argc, wchar_t **argv, const wchar_t *work_dir,
         }
     }
 
+#ifndef RESPAWN_PROGRESS_ONLY
     ZeroMemory(&si, sizeof(si));
-    ZeroMemory(&pi, sizeof(pi));
     si.cb = sizeof(si);
+#endif
+    ZeroMemory(&pi, sizeof(pi));
 
     environment = payload_build_environment(root_dir, work_dir);
     if (environment == NULL) {
         return 1;
     }
 
+#ifdef RESPAWN_PROGRESS_ONLY
     /*
-     * 不隐藏窗口：脚本会打印进度、失败原因和日志路径。等待子进程结束，
+     * 仅进度版由独立 GUI 展示运行状态；PowerShell 的标准句柄固定到 NUL，
+     * 同时禁止创建控制台。脚本自己的受保护日志仍会保留，便于事后诊断。
+     */
+    progress_only_ui_set_running();
+    if (!progress_only_create_process(
+            powershell, cmd, environment, work_dir, &pi)) {
+#else
+    /*
+     * 原版不隐藏窗口：脚本会打印进度、失败原因和日志路径。等待子进程结束，
      * 这样调用者能拿到真实退出码，bat/调试终端也不会提前返回。
      */
     if (!CreateProcessW(powershell, cmd, NULL, NULL, FALSE,
                         CREATE_UNICODE_ENVIRONMENT, environment, work_dir,
                         &si, &pi)) {
+#endif
         fwprintf(stderr, L"启动 PowerShell 失败，错误=%lu\n", GetLastError());
         payload_free_environment(environment);
         return 1;
@@ -346,23 +376,34 @@ int wmain(int argc, wchar_t **argv)
         return elevate_self(argc, argv);
     }
 
+#ifdef RESPAWN_PROGRESS_ONLY
+    if (!progress_only_ui_start()) {
+        return 1;
+    }
+#endif
+
     /*
      * 中文注释：FirstLogonCommands 需要无人值守执行，不能被确认弹窗卡住；
      * 但普通用户手动双击仍保留确认框，避免误改 HKLM / PnP / 计划任务。
      */
+#ifndef RESPAWN_PROGRESS_ONLY
     if (!autorun && !confirm_admin_run()) {
         fwprintf(stderr, L"用户取消，未执行任何修改。\n");
         return 1223; /* ERROR_CANCELLED */
     }
+#endif
 
     if (!build_work_dir(work_dir, ARRAY_LEN(work_dir)) ||
         !build_work_dir(root_dir, ARRAY_LEN(root_dir))) {
         fwprintf(stderr, L"生成工作目录路径失败。\n");
+#ifdef RESPAWN_PROGRESS_ONLY
+        progress_only_ui_finish(0);
+#endif
         return 1;
     }
 
     /*
-     * EXE 是唯一需要拷进 guest 的文件。运行时把内嵌脚本释放到 ProgramData，
+     * 用户选中的 EXE 是唯一需要拷进 guest 的文件。运行时把内嵌脚本释放到 ProgramData，
      * 并始终覆盖旧副本，确保重新打包后的硬件池映射立即生效。
      */
     {
@@ -374,16 +415,24 @@ int wmain(int argc, wchar_t **argv)
 
     if (!payload_secure_directory(root_dir)) {
         fwprintf(stderr, L"创建或保护 payload 根目录失败: %ls\n", root_dir);
+#ifdef RESPAWN_PROGRESS_ONLY
+        progress_only_ui_finish(0);
+#endif
         return 1;
     }
 
     payload_lock = payload_acquire_lock(root_dir);
     if (payload_lock == INVALID_HANDLE_VALUE) {
         DWORD lock_error = GetLastError();
+#ifndef RESPAWN_PROGRESS_ONLY
         if (!autorun) {
             MessageBoxW(NULL, lock_error == ERROR_SHARING_VIOLATION || lock_error == ERROR_LOCK_VIOLATION ? L"已有一次自动或手动初始化正在运行，请等待其完成。" : L"无法锁定初始化目录；请检查权限、重解析点与日志。",
                         L"respawn-stealth 启动失败", MB_ICONINFORMATION | MB_OK);
         }
+#endif
+#ifdef RESPAWN_PROGRESS_ONLY
+        progress_only_ui_finish(0);
+#endif
         return lock_error == ERROR_SHARING_VIOLATION || lock_error == ERROR_LOCK_VIOLATION ? ERROR_INSTALL_ALREADY_RUNNING : 1;
     }
 
@@ -406,10 +455,15 @@ int wmain(int argc, wchar_t **argv)
                        autorun, firstlogon);
 
 out:
+#ifndef RESPAWN_PROGRESS_ONLY
     if (code != 0 && !autorun) {
         swprintf(respawn_path, ARRAY_LEN(respawn_path), L"初始化未完成，退出码=%d。请查看 %ls 日志。", code, root_dir);
         MessageBoxW(NULL, respawn_path, L"respawn-stealth 执行失败", MB_ICONERROR | MB_OK);
     }
+#endif
     CloseHandle(payload_lock);
+#ifdef RESPAWN_PROGRESS_ONLY
+    progress_only_ui_finish(code == 0);
+#endif
     return code;
 }

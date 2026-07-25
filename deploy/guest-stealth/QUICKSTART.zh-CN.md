@@ -1,9 +1,10 @@
 # guest-stealth 傻瓜式使用教程（Windows 10 guest）
 
-本教程用于正式 guest。你只需要复制并运行一个文件：
-`respawn-stealth.exe`。芯片组识别 INF、显示驱动、初始化脚本和 x86/x64 身份查询库
-已经内嵌，不需要安装
-RDP、QEMU guest agent、PowerShell 模块、NVIDIA 驱动或其它第三方软件。
+本教程用于正式 guest。发布目录会生成两个可独立运行的文件：
+`respawn-stealth.exe` 显示完整细节，`respawn-stealth-progress.exe` 只显示通用
+进度。普通使用推荐复制后者；芯片组识别 INF、显示驱动、初始化脚本和 x86/x64
+身份查询库都已内嵌，不需要安装 RDP、QEMU guest agent、PowerShell 模块、
+NVIDIA 驱动或其它第三方软件。
 
 ## 先看清楚它能做什么
 
@@ -32,15 +33,16 @@ RDP、QEMU guest agent、PowerShell 模块、NVIDIA 驱动或其它第三方软�
 ## 一键安装
 
 1. 在 Linux host 确认 VM 使用本项目兼容的 `1AF4:1050` + `VioGpuDod` 配置启动。
-2. 只把下面这个文件复制到 Windows 10 guest 的任意本地目录：
+2. 从下面两个文件中任选一个复制到 Windows 10 guest 的任意本地目录：
 
    ```text
-   deploy/guest-stealth/dist/respawn-stealth.exe
+   deploy/guest-stealth/dist/respawn-stealth-progress.exe  （普通使用，仅显示进度）
+   deploy/guest-stealth/dist/respawn-stealth.exe           （诊断使用，显示完整细节）
    ```
 
-   推荐在 guest 中固定为 `D:\工具\respawn-stealth.exe`，方便克隆和以后重复运行。
-3. 双击 `respawn-stealth.exe`，在 Windows UAC 对话框中选择“是”。
-4. 保持窗口开启。程序会先把当前 Windows 台式机电源页面的“屏幕”和“睡眠”都设为
+   两个 EXE 都完整内嵌依赖，不需要放在一起；不要同时运行它们。
+3. 双击所选 EXE，在 Windows UAC 对话框中选择“是”。仅进度版不会显示控制台细节。
+4. 保持进度或控制台窗口开启。程序会先把当前 Windows 台式机电源页面的“屏幕”和“睡眠”都设为
    “从不”，同时关闭休眠，再自动修复硬件池 A323/A123/1C22/1E22/8C22 SMBus
    的 Code 28，并验证 2930 的 inbox `machine.inf`，然后完成显示驱动检查、身份
    事务和系统级 x86/x64 查询库发布；不要中途关机或结束进程。
@@ -131,13 +133,13 @@ Get-PnpDeviceProperty -InstanceId $monitor.InstanceId `
 发布物摘要：
 
 ```bash
-sha256sum deploy/guest-stealth/dist/respawn-stealth.exe
+sha256sum deploy/guest-stealth/dist/respawn-stealth*.exe
 ```
 
 复制进 guest 后，用 Windows 自带 PowerShell 重新计算：
 
 ```powershell
-Get-FileHash 'D:\工具\respawn-stealth.exe' -Algorithm SHA256
+Get-FileHash 'D:\工具\respawn-stealth-progress.exe' -Algorithm SHA256
 ```
 
 两边摘要必须完全相同。不同就重新复制，不要运行损坏或来源不明的 EXE。
@@ -212,6 +214,6 @@ VM2 验收期间可以临时使用 RDP、USB/FAT 载荷、HTTP、探针或其它
 还可维护 `ForceDisplayFreq`。仅当设备尚未绑定兼容驱动时，程序才会
 安装 Windows 显示所必需的 `VioGpuDod` 内核驱动。封装镜像的 `--firstlogon` 路径保留
 上述三项维护任务并抑制交互显示模式任务。两种路径都不新增 RDP、QGA、HTTP、网络或调试
-服务，默认 host 发布目录也只保留单个 `respawn-stealth.exe`。
+服务；默认 host 发布目录只保留详细模式与仅进度模式这两个 EXE。
 
 完整实现、验证命令和源码调试方式见 [`README.md`](./README.md)。

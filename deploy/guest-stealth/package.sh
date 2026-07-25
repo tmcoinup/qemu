@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# package.sh —— 在 host 上打一个**单 EXE**发布目录，供拷进客机后直接双击运行。
+# package.sh —— 在 host 上生成详细模式和仅进度模式两个单文件 Windows EXE。
 #
 # 产物：deploy/guest-stealth/dist/
-#   respawn-stealth.exe        <- 内嵌驱动、NVIDIA NVAPI、AMD ADL 与初始化脚本
+#   respawn-stealth.exe          <- 显示完整控制台输出
+#   respawn-stealth-progress.exe <- 仅显示通用进度窗口
 #
 # 用法：
 #   bash deploy/guest-stealth/package.sh
-#   -> 把 dist/respawn-stealth.exe 拷进客机任意位置，双击即可。
+#   -> 按需要把任一 EXE 拷进客机任意位置，双击即可。
 
 set -euo pipefail
 
@@ -135,14 +136,16 @@ if [[ "$include_legacy_scripts" == "1" ]]; then
     cp "$ADL_SRC/atiadlxx.dll"              "$DIST/"
 else
     # “构建器退出 0”不等于“正式目录正确”。最后按实际目录内容做封闭式验收：只允许
-    # 一个非空、名称精确的 EXE；任何旧脚本、调试 DLL、子目录或额外文件都让打包失败。
+    # 两个非空、名称精确的 EXE；任何旧脚本、调试 DLL、子目录或额外文件都让打包失败。
     mapfile -d '' -t release_entries < <(find "$DIST" -mindepth 1 -maxdepth 1 -print0)
-    if [[ "${#release_entries[@]}" -ne 1 ||
-          "${release_entries[0]}" != "$DIST/respawn-stealth.exe" ||
+    if [[ "${#release_entries[@]}" -ne 2 ||
           ! -f "$DIST/respawn-stealth.exe" ||
           -L "$DIST/respawn-stealth.exe" ||
-          ! -s "$DIST/respawn-stealth.exe" ]]; then
-        echo "ERROR: 正式 dist 必须且只能包含一个非空 respawn-stealth.exe" >&2
+          ! -s "$DIST/respawn-stealth.exe" ||
+          ! -f "$DIST/respawn-stealth-progress.exe" ||
+          -L "$DIST/respawn-stealth-progress.exe" ||
+          ! -s "$DIST/respawn-stealth-progress.exe" ]]; then
+        echo "ERROR: 正式 dist 必须且只能包含两个指定的非空 EXE" >&2
         find "$DIST" -mindepth 1 -maxdepth 1 -printf '  %f\n' >&2 || true
         exit 1
     fi
@@ -151,4 +154,6 @@ fi
 echo ">> 已生成自带依赖的发布目录: $DIST"
 ls -la "$DIST"
 echo ""
-echo "下一步：把 $DIST/respawn-stealth.exe 拷进客机（scp / 9p / 封 base 前放好），双击运行。"
+echo "下一步：按需要把以下任一文件拷进客机并双击运行："
+echo "  详细模式：$DIST/respawn-stealth.exe"
+echo "  仅进度模式：$DIST/respawn-stealth-progress.exe"

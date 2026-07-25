@@ -14,6 +14,8 @@
 #   所以 autounattend.xml 里 windowsPE 段（DiskConfiguration 等）会被忽略，安全。
 #
 # 关键效果（来自 deploy/autounattend/autounattend.xml）：
+#   - specialize 阶段把 AppXSvc 恢复为按需启动并尝试拉起，防止经过“系统优化”
+#     的模板因 0x80070422 无法预注册内置 AppX 包而反复回到 OOBE 错误页
 #   - HideEULAPage / HideOEMRegistrationScreen / HideOnlineAccountScreens
 #     / HideLocalAccountScreen / HideWirelessSetupInOOBE = true
 #   - AdministratorPassword = 123456，设置内置 Administrator 的密码

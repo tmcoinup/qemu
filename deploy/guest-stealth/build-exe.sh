@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# build-exe.sh —— 把 guest-stealth 本地重对齐流程打成单文件 Windows EXE。
+# build-exe.sh —— 把同一 guest-stealth 流程打成详细模式与仅进度模式两个单文件 EXE。
 #
 # 设计目标：
-#   1. 用户只需要把 respawn-stealth.exe 拷进 guest，不能再要求旁边带 .ps1/.bat。
-#   2. EXE 带 requireAdministrator manifest，双击时由 Windows 直接弹 UAC。
+#   1. 用户从两个 EXE 中任选一个拷进 guest，不能再要求旁边带 .ps1/.bat。
+#   2. 两个 EXE 都带 requireAdministrator manifest，双击时由 Windows 直接弹 UAC。
 #   3. 脚本与 stock 驱动从仓库真源即时嵌入，避免 dist 副本长期漂移或 CAT/SYS 混版。
 set -euo pipefail
 
@@ -26,6 +26,7 @@ LAUNCHER_COMMON="$REPO_ROOT/deploy/guest-launcher-common"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build/guest-stealth-exe}"
 OUT_DIR="${OUT_DIR:-$HERE/dist}"
 OUT_EXE="$OUT_DIR/respawn-stealth.exe"
+PROGRESS_OUT_EXE="$OUT_DIR/respawn-stealth-progress.exe"
 
 RESPAWN_SRC="$HERE/respawn-stealth-local.ps1"
 RESTART_STATE_SRC="$HERE/respawn-restart-state.ps1"
@@ -63,6 +64,7 @@ NVAPI_PROBE_DIR="${NVAPI_PROBE_DIR:-$REPO_ROOT/deploy/nvapi-runtime-probe}"
 ADL_SRC_DIR="${ADL_SRC_DIR:-$REPO_ROOT/deploy/adl-shim}"
 ADL_EXPORTS_SRC="$ADL_SRC_DIR/adl-required-exports.txt"
 SRC="$LAUNCHER/respawn-stealth-launcher.c"
+PROGRESS_UI_SRC="$LAUNCHER/progress-only-ui.c"
 PAYLOAD_SECURITY_SRC="$LAUNCHER_COMMON/payload-security.c"
 PAYLOAD_ENVIRONMENT_SRC="$LAUNCHER_COMMON/payload-environment.c"
 LAUNCHER_ARGUMENTS_SRC="$LAUNCHER/launcher-arguments.c"
@@ -124,6 +126,7 @@ need_tool python3
 [[ -f "$PAYLOAD_ENVIRONMENT_SRC" ]] || { echo "ERROR: 找不到 $PAYLOAD_ENVIRONMENT_SRC" >&2; exit 1; }
 [[ -f "$LAUNCHER_ARGUMENTS_SRC" ]] || { echo "ERROR: 找不到 $LAUNCHER_ARGUMENTS_SRC" >&2; exit 1; }
 [[ -f "$MANUFACTURER_PROJECTOR_SRC" ]] || { echo "ERROR: 找不到 $MANUFACTURER_PROJECTOR_SRC" >&2; exit 1; }
+[[ -f "$PROGRESS_UI_SRC" ]] || { echo "ERROR: 找不到 $PROGRESS_UI_SRC" >&2; exit 1; }
 [[ -f "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x86.exe" ]] || { echo "ERROR: 缺少 NVAPI x86 runtime probe" >&2; exit 1; }
 [[ -f "$NVAPI_PROBE_DIR/nvapi-runtime-probe-x64.exe" ]] || { echo "ERROR: 缺少 NVAPI x64 runtime probe" >&2; exit 1; }
 
@@ -318,7 +321,7 @@ done
 convert "$BUILD_DIR"/icon-*.png -strip "$BUILD_DIR/respawn-stealth.ico"
 
 # Windows 保留的 Manufacturer 属性只能通过 Config Manager API 设置。先构建一个
-# 极小的本地投影器，再把其 PE 原始字节作为 payload 嵌入唯一发布 EXE。
+# 极小的本地投影器，再把其 PE 原始字节作为 payload 嵌入每个独立发布 EXE。
 x86_64-w64-mingw32-gcc \
     -std=c11 -Wall -Wextra -Werror -O2 -municode -mconsole \
     -static -static-libgcc -Wl,--no-insert-timestamp \
@@ -473,4 +476,16 @@ x86_64-w64-mingw32-gcc \
     -lshell32 -ladvapi32 -luser32 \
     -o "$OUT_EXE"
 
-echo ">> 已生成单文件 guest 入口: $OUT_EXE"
+x86_64-w64-mingw32-gcc \
+    -std=c11 -Wall -Wextra -Werror -O2 \
+    -municode -mwindows -DRESPAWN_PROGRESS_ONLY \
+    -static -static-libgcc -Wl,--no-insert-timestamp \
+    -I "$BUILD_DIR" -I "$LAUNCHER_COMMON" \
+    "$SRC" "$PROGRESS_UI_SRC" "$PAYLOAD_SECURITY_SRC" \
+    "$PAYLOAD_ENVIRONMENT_SRC" "$LAUNCHER_ARGUMENTS_SRC" \
+    "$BUILD_DIR/respawn-stealth.res" \
+    -lshell32 -ladvapi32 -luser32 -lcomctl32 \
+    -o "$PROGRESS_OUT_EXE"
+
+echo ">> 已生成详细模式 guest 入口: $OUT_EXE"
+echo ">> 已生成仅进度 guest 入口: $PROGRESS_OUT_EXE"

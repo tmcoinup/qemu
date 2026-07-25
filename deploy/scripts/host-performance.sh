@@ -57,13 +57,39 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # power-profiles-daemon 会在首次启动时按自己的持久状态重新应用 governor/EPP。
-# 如果本 helper 先写 sysfs、daemon 稍后才由桌面会话拉起，刚设置的 performance
-# 就会被覆盖回 balanced/powersave。先启动 daemon 并通过它的公开 CLI 选择
-# performance，再执行下方原有的 sysfs 写入，保证两套控制面顺序一致。
+# Intel P-State active 模式下，PPD 刻意保持 governor=powersave，再用
+# energy_performance_preference=performance 表达性能模式。若随后强写
+# governor=performance，内核会拒绝 PPD 写入非零 EPP，导致桌面的均衡/节电模式
+# 看似选中、实际立即回滚。先恢复 PPD 所要求的 governor，再通过公开 CLI 选
+# performance；成功后不再用 sysfs 覆盖 PPD。
 #
 # 没有 PPD 的服务器、精简发行版和容器仍走原 sysfs 路径；PPD 启动或切换失败也只
 # 清晰告警并返回成功，让既有 governor/frequency fallback 继续执行，不扩大 helper
 # 在不同发行版上的硬依赖。
+_vmate_prepare_ppd_intel_pstate_governors() {
+    local policy_root="${1:-/sys/devices/system/cpu/cpufreq}"
+    local policy driver governor current
+
+    for policy in "$policy_root"/policy*; do
+        [[ -d "$policy" ]] || continue
+        driver="$policy/scaling_driver"
+        governor="$policy/scaling_governor"
+        [[ -r "$driver" && -e "$policy/energy_performance_preference" ]] || continue
+        [[ "$(<"$driver")" == "intel_pstate" ]] || continue
+        [[ -w "$governor" ]] || {
+            echo ">> power profile: ⚠ 无法写入 ${policy##*/}/scaling_governor" >&2
+            return 1
+        }
+        current="$(<"$governor")"
+        if [[ "$current" != "powersave" ]] &&
+           ! printf '%s\n' powersave > "$governor"; then
+            echo ">> power profile: ⚠ 写入 ${policy##*/}/scaling_governor 失败" >&2
+            return 1
+        fi
+    done
+}
+
+_vmate_ppd_controls_cpu=0
 _vmate_set_ppd_performance() {
     local current_profile=""
 
@@ -81,6 +107,10 @@ _vmate_set_ppd_performance() {
         echo ">> power profile: ⚠ power-profiles-daemon 启动后未处于 active（继续使用 sysfs governor）"
         return 0
     fi
+    if ! _vmate_prepare_ppd_intel_pstate_governors; then
+        echo ">> power profile: ⚠ 无法恢复 PPD 所需的 Intel P-State governor（继续使用 sysfs governor）"
+        return 0
+    fi
     if ! powerprofilesctl set performance; then
         echo ">> power profile: ⚠ 无法切换到 performance（继续使用 sysfs governor）"
         return 0
@@ -94,7 +124,8 @@ _vmate_set_ppd_performance() {
         return 0
     fi
 
-    echo ">> power profile: performance（daemon 已同步）"
+    _vmate_ppd_controls_cpu=1
+    echo ">> power profile: performance（daemon 已同步，保留其 governor/EPP 控制）"
 }
 
 # 0) x86 split-lock 限速：默认取消内核对触发任务施加的故意等待和单核串行。
@@ -120,21 +151,29 @@ fi
 # PPD 必须先完成启动与 profile 切换；否则它晚于 sysfs 写入启动时会覆盖 governor。
 _vmate_set_ppd_performance
 
-# 1) CPU governor -> performance：固定高频，消除 vm-exit 间降频导致的服务延迟
-#    忽高忽低（计时抖动的头号来源）。
-_gov_changed=0
-for p in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-    [[ -w "$p" ]] || continue
-    if [[ "$(cat "$p")" != "performance" ]]; then echo performance > "$p"; _gov_changed=1; fi
-done
-echo ">> governor   : performance$([[ $_gov_changed == 0 ]] && echo '（本就是）')"
+# 1) CPU 性能策略：PPD 成功时由其用 governor=powersave + EPP=performance 管理
+#    Intel HWP；仅在 PPD 不存在或失败时才回退到传统 performance governor。
+if (( _vmate_ppd_controls_cpu )); then
+    echo ">> governor   : 由 PPD 管理（Intel P-State: powersave + performance EPP）"
+else
+    _gov_changed=0
+    for p in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [[ -w "$p" ]] || continue
+        if [[ "$(<"$p")" != "performance" ]]; then
+            printf '%s\n' performance > "$p"
+            _gov_changed=1
+        fi
+    done
+    echo ">> governor   : performance$([[ $_gov_changed == 0 ]] && echo '（本就是）')"
+fi
 
 # 1b) (可选) 按伪装 CPU 的上限频率封顶 scaling_max_freq。
 #     host(Ryzen7 5800) boost 4.6GHz 会远超伪装的 Ryzen3-1200 3.4GHz——guest 在
 #     固定 tsc-freq(3.1GHz) 下实测吞吐就会超过它自报的 SMBIOS Type4 max-speed，
 #     等于「单位时钟干的活比这颗 CPU 该有的多」= 变速器 / 计时异常(13-131130-8)
 #     的破绽。把 scaling_max_freq 压到伪装 CPU 上限后，guest 再也跑不出超规格的
-#     速度；governor=performance 下这也就是实际钉死频率，顺带压平频率波动抖动。
+#     速度；PPD performance EPP 或传统 performance governor 都会积极升频，而该上限
+#     保证实际频率不会超过目标规格。
 #     CPU_MAX_KHZ 由 start-vm.sh 按当前实例 CPU_MAX_MHZ 传入；留空=不封顶。
 if (( CPU_MAX_KHZ > 0 )); then
     _cap="$CPU_MAX_KHZ"

@@ -162,8 +162,8 @@
 #                          ${QMP_SOCK}.proxy 兼容旧工具配置
 #     HOST_TUNE=1          起 VM 前自动跑 host-performance.sh 压计时抖动（默认 1）
 #                          (flag: --host-tune / --no-host-tune)
-#                          governor=performance + KVM_HALT_POLL_NS(默认 0) + THP
-#                          defrag=never + split-lock 限速策略。防编译抢 vCPU 主要靠
+#                          PPD performance（无 PPD 时回退 performance governor）+
+#                          halt_poll + THP defrag=never + split-lock 策略。防抢核主要靠
 #                          CPU_ISOLATE/cpuset；
 #                          需要旧低延迟 busy-poll 可显式 KVM_HALT_POLL_NS=500000。
 #     SPLIT_LOCK_MITIGATE=0

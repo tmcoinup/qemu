@@ -121,9 +121,21 @@ static int find_target(DEVINST *target, wchar_t *target_id, DWORD capacity)
     return 0;
 }
 
-static BOOL valid_vendor(const wchar_t *vendor)
+static const wchar_t *manufacturer_for_vendor(const wchar_t *vendor)
 {
-    return wcscmp(vendor, L"AMD") == 0 || wcscmp(vendor, L"NVIDIA") == 0;
+    /*
+     * Keep canonical identity tokens on the command line, but never expose
+     * AMD's internal short token as a Windows manufacturer. This native
+     * boundary mirrors Get-GpuWindowsManufacturerName in the PowerShell
+     * identity contract.
+     */
+    if (wcscmp(vendor, L"AMD") == 0) {
+        return L"Advanced Micro Devices, Inc.";
+    }
+    if (wcscmp(vendor, L"NVIDIA") == 0) {
+        return L"NVIDIA";
+    }
+    return NULL;
 }
 
 int wmain(int argc, wchar_t **argv)
@@ -131,28 +143,28 @@ int wmain(int argc, wchar_t **argv)
     DEVINST target = 0;
     wchar_t instance_id[MAX_DEVICE_ID_LEN];
     wchar_t current[256];
-    const wchar_t *vendor;
+    const wchar_t *manufacturer;
     CONFIGRET status;
     int result;
     ULONG payload_bytes;
 
-    if (argc != 2 || !valid_vendor(argv[1])) {
+    manufacturer = argc == 2 ? manufacturer_for_vendor(argv[1]) : NULL;
+    if (manufacturer == NULL) {
         fwprintf(stderr, L"usage: gpu-manufacturer-projector.exe AMD|NVIDIA\n");
         return 2;
     }
-    vendor = argv[1];
     ZeroMemory(instance_id, sizeof(instance_id));
     result = find_target(&target, instance_id, ARRAYSIZE(instance_id));
     if (result != 0) {
         return result;
     }
 
-    payload_bytes = ((ULONG)wcslen(vendor) + 1U) * sizeof(wchar_t);
+    payload_bytes = ((ULONG)wcslen(manufacturer) + 1U) * sizeof(wchar_t);
     status = CM_Set_DevNode_PropertyW(
         target,
         &k_device_manufacturer,
         DEVPROP_TYPE_STRING,
-        (const PBYTE)vendor,
+        (const PBYTE)manufacturer,
         payload_bytes,
         0
     );
@@ -167,7 +179,7 @@ int wmain(int argc, wchar_t **argv)
         fwprintf(stderr, L"manufacturer readback failed: 0x%08lx\n", status);
         return 21;
     }
-    if (wcscmp(current, vendor) != 0) {
+    if (wcscmp(current, manufacturer) != 0) {
         fwprintf(stderr, L"manufacturer readback mismatch: %ls\n", current);
         return 22;
     }

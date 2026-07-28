@@ -5,13 +5,13 @@
     [switch]$AutoDetect,                        # 自动按 PCI subsys 查 GPU 池映射；clone 后用
     [string]$SpoofName    = 'NVIDIA GeForce GTX 1050',
     [string]$SpoofVendor  = 'NVIDIA',           # 'NVIDIA' / 'AMD'
-    [int]   $SpoofRamMb   = 2048,               # 逻辑显存 MB；schema-5 分别发布 32/64 位字段
+    [int]   $SpoofRamMb   = 2048,               # 逻辑显存 MB；schema-6 分别发布 32/64 位字段
     [string]$SpoofBios    = 'Version 86.07.48.00.38',
     [ValidateSet('GDDR5')][string]$SpoofMemoryType = 'GDDR5', [ValidateRange(32, 1024)][ValidateScript({ ($_ -band ($_ - 1)) -eq 0 })][int]$SpoofMemoryBusWidthBits = 128,
     [ValidateRange(100000, 5000000)][int]$SpoofBaseClockKHz = 1354000, [ValidateRange(100000, 5000000)][int]$SpoofBoostClockKHz = 1455000,
     [ValidateRange(100000, 10000000)][int]$SpoofMemoryClockKHz = 3504000, [ValidateSet(0)][int]$SpoofSliSupported = 0,
     # 正式 respawn 传入同时携带 NVAPI/ADL 的受保护 payload；系统目录只发布 staged
-    # vendor 对应的一组，并与 schema-2 identity / transaction schema-5 共用 durable
+    # vendor 对应的一组，并与 schema-2 identity / transaction schema-6 共用 durable
     # try/finally。参数名保留旧调用兼容，同时接受更准确的 -GpuApiPayloadDir 别名。
     [Alias('GpuApiPayloadDir')]
     [string]$NvapiPayloadDir = ''
@@ -156,7 +156,7 @@ if (-not $ListOnly) {
 #                                           HardwareInformation.*
 #
 #   2) Enum\PCI\VEN_...&DEV_...\<inst>  -> 标准 FriendlyName / DeviceDesc / Mfg
-#      schema-5 保持 stock MatchingDeviceId / InfPath / InfSection / Service，
+#      schema-6 保持 stock MatchingDeviceId / InfPath / InfSection / Service，
 #      HardwareID 始终保持 stock 1AF4:1050；逻辑 PCI/AIB 身份由 NVAPI/ADL 返回。
 #
 #   3) C:\ProgramData\StealthGPU\refresh-gpu-name.ps1
@@ -285,7 +285,7 @@ $freqLog = [string]$taskSetup.FrequencyLog
 Invoke-GpuSpoofPnpRefresh
 
 # 最后一次 PnP scan 可能回填 Class 安装状态，因此用同一个已提交
-# CurrentIdentity 快照同步恢复 stock MatchingDeviceId 与 schema-5 名称/厂商镜像。
+# CurrentIdentity 快照同步恢复 stock MatchingDeviceId 与 schema-6 名称/厂商镜像。
 # 这一步不修改 Enum\PCI HardwareID/CompatibleIDs，也不改 PCI 配置空间。
 Write-Host "Reapplying profile-derived shallow Class identity after the final device scan..." -ForegroundColor Cyan
 try {

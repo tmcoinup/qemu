@@ -38,6 +38,7 @@ file "$MANUFACTURER_PROJECTOR_EXE" | grep -F 'PE32+ executable' >/dev/null \
 llvm-readobj --file-headers "$MANUFACTURER_PROJECTOR_EXE" \
     | grep -F 'TimeDateStamp: 1970-01-01 00:00:00 (0x0)' >/dev/null \
     || fail "厂商投影器的 PE/COFF 时间戳不是可复现构建要求的 0"
+strings -a -el "$MANUFACTURER_PROJECTOR_EXE" | grep -F 'Advanced Micro Devices, Inc.' >/dev/null || fail "厂商投影器未包含 AMD 正式公司名"
 for projector_api in SetupDiGetClassDevsW CM_Set_DevNode_PropertyW; do
     strings -a "$MANUFACTURER_PROJECTOR_EXE" | grep -F "$projector_api" >/dev/null \
         || fail "厂商投影器缺少 Windows API 导入: $projector_api"

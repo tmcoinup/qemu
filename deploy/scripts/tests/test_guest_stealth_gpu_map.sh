@@ -75,6 +75,19 @@ $groups = @($displayNames | Group-Object)
 if ($groups.Count -ne 6 -or @($groups | Where-Object Count -ne 3).Count -ne 0) {
     throw "18 块 AIB carrier 未精确映射为 6 个标准显示名（每组 3 块）"
 }
+if ((Get-GpuWindowsManufacturerName -Vendor AMD) -cne
+        "Advanced Micro Devices, Inc." -or
+    (Get-GpuWindowsManufacturerName -Vendor NVIDIA) -cne "NVIDIA") {
+    throw "Windows 制造商映射没有区分 AMD 正式公司名与 NVIDIA 标准短名称"
+}
+foreach ($badVendor in @("amd", "Advanced Micro Devices, Inc.", "Red Hat")) {
+    $rejected = $false
+    try { $null = Get-GpuWindowsManufacturerName -Vendor $badVendor }
+    catch { $rejected = $true }
+    if (-not $rejected) {
+        throw ("非 canonical GPU Vendor 被制造商映射接受：" + $badVendor)
+    }
+}
 foreach ($unknownLogicalId in @(
         @(0x10DE, 0xFFFF), @(0xFFFF, 0x1C82), @(0x1002, 0x1C82))) {
     $rejected = $false

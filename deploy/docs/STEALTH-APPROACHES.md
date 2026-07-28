@@ -68,16 +68,17 @@ QEMU 向客体提供的显示设备主 ID 是 `1AF4:1050`。这是驱动绑定�
 - device：`1C82`（十进制 `7298`）
 - 模式：`shallow-user-projection`
 
-identity snapshot 仍是 schema-2。新的 transaction schema-5 把按 PCI VEN/DEV
+identity snapshot 仍是 schema-2。新的 transaction schema-6 把按 PCI VEN/DEV
 封闭映射得到的标准芯片名写入 Enum `FriendlyName`/`DeviceDesc`、Class
 `DriverDesc`、`HardwareInformation.AdapterString` 和
 `HardwareInformation.ChipType`，并把 Enum `Mfg` 与 Class `ProviderName` 写为
-芯片厂商。`MatchingDeviceId`、`InfPath`、`InfSection`、`Service` 仍保持 stock
-`VioGpuDod` 值；transaction schema 1/2/3/4 仅用于恢复旧 journal。该层服务于设备
+Windows 标准厂商名（AMD 为 `Advanced Micro Devices, Inc.`，NVIDIA 为
+`NVIDIA`）。`MatchingDeviceId`、`InfPath`、`InfSection`、`Service` 仍保持 stock
+`VioGpuDod` 值；transaction schema 1–5 仅用于恢复旧 journal。该层服务于设备
 管理器、SetupAPI、WMI 和普通用户态诊断接口，但不改变原始 PCI 配置，也不让厂商
 内核驱动接管设备。
 
-schema-5 把 PnP HardwareID 投影为“规范逻辑首项 + 完整物理尾项”。这些字符串都属于
+schema-6 把 PnP HardwareID 投影为“规范逻辑首项 + 完整物理尾项”。这些字符串都属于
 唯一的物理 `1AF4:1050` devnode；InstanceId、BDF、MatchingDeviceId、Driver、
 Service 和 PCI 配置空间不变。对于 4 GiB profile，NVAPI legacy `MemoryInfo`
 v1/v2/v3 与 frame-buffer size 接口返回 `4194304 KiB`，`MemoryInfoEx` v1 返回
@@ -110,7 +111,7 @@ ADL 同样把验证后的
 厂商；真实绑定仍由保持 stock 的 `MatchingDeviceId`、INF、Service 与 physical-only
 HardwareID 尾项证明。AMD RX 550/RX 560 使用相同的 carrier、身份事务和名称刷新链路，
 逻辑 VEN/DEV、AIB SUBSYS 与独显拓扑由 ADL 回答，对应展示字段写为
-`AMD Radeon ...` / `AMD`。NVAPI 是 NVIDIA 专用接口；AMD profile
+`AMD Radeon ...` / `Advanced Micro Devices, Inc.`。NVAPI 是 NVIDIA 专用接口；AMD profile
 不会伪造 NVAPI 句柄，而是明确返回“无 NVIDIA 设备”，因此不会额外枚举一张 N 卡。
 
 这个机制具有明确边界：

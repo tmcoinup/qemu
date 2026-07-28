@@ -254,7 +254,7 @@ $readerRoot.Children["Transactions\" + $identityId] = $readerTransaction
 $stringKind = [Microsoft.Win32.RegistryValueKind]::String
 $dwordKind = [Microsoft.Win32.RegistryValueKind]::DWord
 Set-ReaderRegistryValue $readerRoot PendingIdentity $identityId $stringKind
-Set-ReaderRegistryValue $readerTransaction TransactionSchemaVersion 5 $dwordKind
+Set-ReaderRegistryValue $readerTransaction TransactionSchemaVersion 6 $dwordKind
 Set-ReaderRegistryValue $readerTransaction State Prepared $stringKind
 Set-ReaderRegistryValue $readerTransaction ClassSubkey "0001" $stringKind
 Set-ReaderRegistryValue $readerTransaction DriverInfPath "oem3.inf" $stringKind

@@ -278,10 +278,24 @@ function Get-GpuBoardLogicalPciIdentity {
     }
 }
 
+function Get-GpuWindowsManufacturerName {
+    # SpoofVendor 是内部协议使用的短标识，不能直接当作 Windows 展示字符串。
+    # AMD 官方驱动在设备管理器“制造商”和“驱动程序提供商”中使用完整公司名；
+    # NVIDIA 的标准展示值本身就是短名称。未知或大小写不规范的值必须拒绝，
+    # 避免不同写入路径各自猜测并产生不一致属性。
+    param([Parameter(Mandatory = $true)][string]$Vendor)
+
+    switch -CaseSensitive ($Vendor) {
+        'AMD' { return 'Advanced Micro Devices, Inc.' }
+        'NVIDIA' { return 'NVIDIA' }
+        default { throw ('不支持的 GPU Windows 制造商：' + $Vendor) }
+    }
+}
+
 function Get-GpuStandardDisplayName {
     # AIB 型号标签用于原子校验，不能直接作为 Windows PnP 或厂商 API 展示名。
     # 设备管理器与 NVAPI/ADL 统一显示芯片标准名；板卡厂商、OC 版本继续由
-    # subsystem、VBIOS 和时钟表达。schema-5 可把该名称写入展示型
+    # subsystem、VBIOS 和时钟表达。schema-6 可把该名称写入展示型
     # DriverDesc，但 MatchingDeviceId/InfPath/InfSection/Service 仍保持 stock。
     # 这里按已通过 bundle 门禁的逻辑主 ID 做封闭映射；未知型号必须
     # fail-closed，不能靠删除任意括号文本猜测名称。

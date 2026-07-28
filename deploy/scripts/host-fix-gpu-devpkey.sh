@@ -43,7 +43,7 @@
 #                         (auto-falls back to legacy win10-inst<N>.qcow2 layout)
 #   NBD=/dev/nbdN         default /dev/nbd0
 #   MOUNT=<path>          default /mnt/win10-inst<N>
-#   PROVIDER=<string>     default = profile.GPU_VENDOR
+#   PROVIDER=<string>     default = profile.GPU_VENDOR 的 Windows 标准厂商名
 #   DEVICE_DESC=<string>  default = profile.GPU_NAME
 #   SUBSYS_RE=<regex>     default '^VEN_1AF4&DEV_1050' (virtio-vga 主 ID)
 #
@@ -131,12 +131,17 @@ else
     log "WARN: profile 文件不存在: $PROFILE_FILE"
     log "  用默认 PROVIDER=NVIDIA / DEVICE_DESC='NVIDIA GeForce GTX 1050'"
     log "  正常情况下 start-vm.sh 首启已生成 profile；手动传 env 也行："
-    log "  PROVIDER=AMD DEVICE_DESC='AMD Radeon RX 550' sudo $0 $INSTANCE"
+    log "  PROVIDER='Advanced Micro Devices, Inc.' DEVICE_DESC='AMD Radeon RX 550' sudo $0 $INSTANCE"
 fi
 
 # env 显式覆盖 profile（向后兼容旧用法）
 : "${PROVIDER:=$DEFAULT_PROVIDER}"
 : "${DEVICE_DESC:=$DEFAULT_DEVICE_DESC}"
+# profile 和旧命令行仍以 canonical `AMD` 表示逻辑分支；Driver-tab 的 Windows
+# 展示值必须使用官方完整公司名。NVIDIA 的标准名称本身就是 `NVIDIA`。
+if [[ "$PROVIDER" == "AMD" ]]; then
+    PROVIDER="Advanced Micro Devices, Inc."
+fi
 
 log "将写入 Device Manager 字段："
 log "  驱动程序提供商 (pid 0009): $PROVIDER"

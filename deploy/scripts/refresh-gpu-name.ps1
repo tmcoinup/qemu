@@ -75,10 +75,10 @@ function Get-CurrentGpuIdentity {
             if ($null -eq $transactionKey) { throw ('暂存事务不存在：' + $StagedId) }
             $transactionSchema = Get-ExactRegistryValue -Key $transactionKey `
                 -Name 'TransactionSchemaVersion' -Kind $dwordKind
-            # schema-1..4 只保留给 transaction helper 的 Recover/Rollback 兼容路径。
-            # 新提交必须使用 schema-5 的标准显示名与有符号安全显存投影。
-            if ($transactionSchema -ne 5) {
-                throw ('暂存提交只接受 transaction schema-5：' + $transactionSchema)
+            # schema-1..5 只保留给 transaction helper 的 Recover/Rollback 兼容路径。
+            # 新提交必须使用 schema-6 的标准显示名、正式厂商名与安全显存投影。
+            if ($transactionSchema -ne 6) {
+                throw ('暂存提交只接受 transaction schema-6：' + $transactionSchema)
             }
             $transactionState = Get-ExactRegistryValue -Key $transactionKey `
                 -Name 'State' -Kind $stringKind
@@ -337,18 +337,20 @@ function Set-ActiveGpuProjection {
             $displayName = Get-GpuStandardDisplayName `
                 -PciVendorId $Config.SpoofPciVendorId `
                 -PciDeviceId $Config.SpoofPciDeviceId
+            $manufacturerName = Get-GpuWindowsManufacturerName `
+                -Vendor $Config.SpoofVendor
             $chipType = $displayName -replace '^(NVIDIA|AMD)\s+', ''
             $legacyMemory = [byte[]](Get-GpuLegacyMemorySizeBytes `
                 -RamMb $Config.SpoofRamMb)
             $driverMatchingId = Get-StockDriverMatchingDeviceId `
                 $Config.SourceInstanceId
             Set-VerifiedRegistryValue $enumKey 'FriendlyName' $displayName $string
-            # schema-5 的展示字段使用逻辑身份；真正的 driver node 继续由 stock
+            # schema-6 的展示字段使用逻辑身份；真正的 driver node 继续由 stock
             # MatchingDeviceId/InfPath/InfSection/Service 绑定，不改硬件与服务字段。
             Set-VerifiedRegistryValue $enumKey 'DeviceDesc' $displayName $string
-            Set-VerifiedRegistryValue $enumKey 'Mfg' $Config.SpoofVendor $string
+            Set-VerifiedRegistryValue $enumKey 'Mfg' $manufacturerName $string
             Set-VerifiedRegistryValue $classKey 'DriverDesc' $displayName $string
-            Set-VerifiedRegistryValue $classKey 'ProviderName' $Config.SpoofVendor $string
+            Set-VerifiedRegistryValue $classKey 'ProviderName' $manufacturerName $string
             Set-VerifiedRegistryValue $classKey 'MatchingDeviceId' `
                 $driverMatchingId $string
             Set-VerifiedRegistryValue $classKey 'HardwareInformation.AdapterString' $displayName $string

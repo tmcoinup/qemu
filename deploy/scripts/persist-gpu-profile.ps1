@@ -452,9 +452,10 @@ try {
                     $transactionKey.SetValue('DriverInfPath', $driverInfPath, $string)
                     Write-ProjectionJournal $transactionKey 'Enum' $enumKey $enumPath $enumJournalNames
                     Write-ProjectionJournal $transactionKey 'Class' $classKey $classPath $classJournalNames
-                    # schema-5 把 legacy MemorySize 收窄到有符号 32 位安全范围；
-                    # 旧 receipt 仍按其 schema-1..4 的历史显存与名称语义恢复。
-                    $transactionKey.SetValue('TransactionSchemaVersion', 5, $dword); $transactionKey.Flush()
+                    # schema-6 使用正式厂商展示名，并继续把 legacy MemorySize
+                    # 收窄到有符号 32 位安全范围；旧 receipt 仍按 schema-1..5
+                    # 的历史显存、名称和短厂商语义恢复。
+                    $transactionKey.SetValue('TransactionSchemaVersion', 6, $dword); $transactionKey.Flush()
                     $configKey.SetValue('PendingIdentity', $versionId, $string); $configKey.Flush()
                     Assert-RegistryState $configKey 'PendingIdentity' $true $versionId $string
                     return [pscustomobject]@{ NewIdentityId=$versionId; PreviousPointerPresent=$oldPointer.Present; PreviousIdentityId=$oldPointer.Value }

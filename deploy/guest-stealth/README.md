@@ -25,6 +25,9 @@ AIB canonical 标签，例如 `NVIDIA GeForce GTX 1050 Ti (Gigabyte OC)`，用�
 `HardwareInformation.AdapterString`、`HardwareInformation.ChipType` 以及
 NVAPI/ADL 的公开 adapter 名称统一按逻辑 PCI VEN/DEV 的封闭映射使用标准芯片名，例如
 `NVIDIA GeForce GTX 1050 Ti`。该名称不通过删除括号猜测，未知 PCI 主 ID 会直接失败。
+Enum `Mfg`、Class `ProviderName` 和常规页 `DEVPKEY_Device_Manufacturer` 使用独立的
+Windows 厂商映射：AMD 为 `Advanced Micro Devices, Inc.`，NVIDIA 仍为 `NVIDIA`；
+内部 `SpoofVendor` 则继续保留 `AMD`/`NVIDIA`，不混入展示字符串。
 真实驱动节点的 `MatchingDeviceId`、`InfPath`、`InfSection` 与 `Service` 仍保持
 stock VioGpuDod 值。
 
@@ -51,8 +54,8 @@ Service、Driver 和 PCI 配置空间仍为物理 carrier。MULTI_SZ 中的多�
 | `install-nvapi-system.ps1` | 独立事务发布或移除 x86/x64 NVIDIA NVAPI 用户态 shim |
 | `nvapi-system-validation.ps1` | NVAPI 安装与恢复共用的普通文件、SHA-256 和 PE 架构校验 |
 | `install-adl-system.ps1` | 独立事务发布或移除三目标 AMD ADL/ADL2 用户态 shim |
-| `persist-gpu-profile.ps1` | 校验完整型号 bundle，并组织 identity schema-2、transaction schema-5 的 Stage/Commit/Complete/Recover |
-| `gpu-profile-transaction.ps1` | 持久化 GPU 身份 journal、指针 CAS、投影回读与崩溃恢复；transaction schema 1/2/3/4 仅用于兼容恢复 |
+| `persist-gpu-profile.ps1` | 校验完整型号 bundle，并组织 identity schema-2、transaction schema-6 的 Stage/Commit/Complete/Recover |
+| `gpu-profile-transaction.ps1` | 持久化 GPU 身份 journal、指针 CAS、投影回读与崩溃恢复；transaction schema 1–5 仅用于兼容恢复 |
 | `gpu-profile-registry-core.ps1` | GPU 身份事务共用的精确注册表读取、回读与 pointer CAS 基元 |
 | `gpu-spoof-apply-support.ps1` | apply 共用的 AutoDetect、Code 22、计划任务与显示模式验收函数 |
 | `refresh-gpu-name.ps1` | 在全局写锁内严格投影唯一 VioGpuDod 实例的 Enum/Class 属性 |
@@ -163,13 +166,13 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
 10. 在旧 SYSTEM writer 已停止的窗口先完整发布持久投影依赖，再执行
    `apply-gpu-spoof.ps1 -AutoDetect -NvapiPayloadDir <受保护目录>`：按当前 PCI
    SUBSYS 对齐完整 AIB 标签和版本化 identity schema-2，并在 identity 尚未
-   `Complete` 时完整预检；新写入的 transaction schema-5 使用标准芯片名提交
-   Windows 展示字段。对于大于 2047 MiB 的 profile，legacy 32 位
+   `Complete` 时完整预检；新写入的 transaction schema-6 使用标准芯片名和正式
+   Windows 厂商名提交展示字段。对于大于 2047 MiB 的 profile，legacy 32 位
    `HardwareInformation.MemorySize` 写为 2047 MiB（`0x7FF00000`），避免旧工具
    错按有符号 Int32 读取时得到负数；NVAPI legacy MemoryInfo 返回
    `4194304 KiB`，MemoryInfoEx 返回 `4294967296 bytes`，`qwMemorySize` 仍精确投影
-   4 GiB。schema 1/2/3/4 只参与旧 journal 恢复，其中历史 schema-4 按原语义重建
-   4095 MiB。随后先移除非目标厂商的
+   4 GiB。schema 1–5 只参与旧 journal 恢复：schema-5 保留历史短厂商名，
+   schema-4 按原语义重建 4095 MiB。随后先移除非目标厂商的
    受管 DLL，再把目标厂商投影发布到 SysWOW64/System32。installer 失败会由同一
    durable `finally` 回滚 identity；流程不写 GPU-Z 原目录、不修改 PATH，也不安装
    NVIDIA 驱动、控制面板或服务。
@@ -183,8 +186,9 @@ ADL 的 `AdapterInfo` 中 UDID、PNP 字符串和 Driver path 也传递上一步
     `RollbackHardwareIds`；即使最终 journal 收尾任一写点中断，下次 Recover
     仍能从 before/expected 两种状态确定性恢复。
 12. `gpu-manufacturer-projection.ps1` 仅把设备管理器常规页制造商投影成
-    AMD/NVIDIA；投影前后都要求活动 `Service/InfPath` 不变，并重新验证发布 INF、
-    运行中 SYS 的固定摘要与 Microsoft WHCP 证书指纹。
+    `Advanced Micro Devices, Inc.`/`NVIDIA`；投影前后都要求活动
+    `Service/InfPath` 不变，并重新验证发布 INF、运行中 SYS 的固定摘要与
+    Microsoft WHCP 证书指纹。
 13. 按在线 Monitor 的 EDID 派生 PnP ID 查硬件池，只写入并回读
     `DEVPKEY_Device_FriendlyName`，再注册 `StealthGPU-ProjectMonitorIdentity`；
     EDID、HardwareID、INF、Monitor Class 与 `monitor.sys` 前后必须保持不变。
@@ -376,7 +380,7 @@ NVAPI legacy `MemoryInfo` v1/v2/v3 与 frame-buffer size 接口为
 `4194304 KiB`，`MemoryInfoEx` v1 为 `4294967296 bytes`；
 `HardwareInformation.qwMemorySize` 与相应厂商接口保留精确 4 GiB。历史
 transaction schema-4 journal 恢复时仍按原语义重建 4095 MiB，新提交只使用
-schema-5。GPU-Z 将 memory clock 显示为 1752 MHz；这是查询投影，不是真实频率管理
+schema-6。GPU-Z 将 memory clock 显示为 1752 MHz；这是查询投影，不是真实频率管理
 或显存分配。
 
 日志：

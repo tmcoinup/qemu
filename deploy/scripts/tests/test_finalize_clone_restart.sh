@@ -238,6 +238,8 @@ grep -F 'updated persistent refresh helper' "$HOST_FIX" >/dev/null ||
     fail "host finalize 没有更新客体持久化 refresh helper"
 grep -F '安装关联字段（保留微软签名链）' "$HOST_FIX" >/dev/null ||
     fail "host finalize 没有报告签名关联修复"
+grep -F 'PROVIDER="Advanced Micro Devices, Inc."' "$HOST_FIX" >/dev/null ||
+    fail "host DriverProvider 收尾没有把 canonical AMD 映射为正式公司名"
 
 python3 -m py_compile "$HIVE_PATCHER" "$PACKAGE_HELPER" ||
     fail "离线修复器 Python 语法错误"

@@ -112,14 +112,14 @@ try {
         -BaseKeyOverride $script:fixture.Base | Out-Null
 } catch {
     $schema1CommitRejected = $_.Exception.Message.Contains(
-        "暂存提交只接受 transaction schema-5")
+        "暂存提交只接受 transaction schema-6")
 }
 if (-not $schema1CommitRejected -or
     (Get-FixtureMutationCount $script:fixture) -ne $mutationsBefore) {
     throw "schema-1 Prepared Commit 未在注册表首写前 fail-closed"
 }
 
-# 新 schema-5 receipt 必须用标准芯片名/厂商做展示字段 CAS，保留 stock
+# 新 schema-6 receipt 必须用标准芯片名/正式厂商做展示字段 CAS，保留 stock
 # MatchingDeviceId，并用 2047 MiB legacy 值表达精确 4 GiB。identity mirror
 # 继续保留完整 AIB 标签。模拟 pointer 已提交后被 kill，并凭持久 receipt 恢复。
 $script:fixture = New-TransactionFixture "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" $true Committed
@@ -145,19 +145,35 @@ if ([string]$receipt.ProjectedEnum.FriendlyName.Value -cne `
         "GeForce GTX 1050 Ti" -or
     [string]$receipt.NewSpoofName -cne `
         "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)") {
-    throw "schema-5 display-only hybrid 与 AIB identity mirror 没有分层"
+    throw "schema-6 display-only hybrid 与 AIB identity mirror 没有分层"
 }
 $legacyMemory = [byte[]]$receipt.ProjectedClass[
     "HardwareInformation.MemorySize"].Value
 if (-not (Test-RegistryDataEqual $legacyMemory ([byte[]](0,0,240,127))) -or
     [UInt64]$receipt.ProjectedClass[
         "HardwareInformation.qwMemorySize"].Value -ne [UInt64]4294967296) {
-    throw "schema-5 未按 2047 MiB legacy + 精确 QWord 投影 4 GiB"
+    throw "schema-6 未按 2047 MiB legacy + 精确 QWord 投影 4 GiB"
 }
 $result = Invoke-RecoverOrRollback -Recover
 if ($result.Action -cne "RolledBack") { throw "kill 后 Recover 没有执行 rollback" }
 Assert-RolledBack $script:fixture
 if ($null -ne (Invoke-RecoverOrRollback -Recover)) { throw "Recover 不是幂等操作" }
+
+# schema-5 是仍可能留在旧客体中的历史 receipt；其短厂商值和安全显存语义
+# 必须按原样重建，不能套用 schema-6 的 AMD 正式公司名。
+$script:fixture = New-TransactionFixture "B5B5B5B5B5B5B5B5B5B5B5B5B5B5B5B5" `
+    $true Committed 5
+$receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
+if ([string]$receipt.ProjectedEnum.Mfg.Value -cne "NVIDIA" -or
+    [string]$receipt.ProjectedClass.ProviderName.Value -cne "NVIDIA" -or
+    -not (Test-RegistryDataEqual `
+        ([byte[]]$receipt.ProjectedClass["HardwareInformation.MemorySize"].Value) `
+        ([byte[]](0,0,240,127)))) {
+    throw "schema-5 历史短厂商/安全显存语义未保留"
+}
+$result = Invoke-RecoverOrRollback -Recover
+if ($result.Action -cne "RolledBack") { throw "schema-5 legacy transaction 未恢复" }
+Assert-RolledBack $script:fixture
 
 # schema-4 已采用完整标准展示字段，但其 legacy MemorySize 上限为
 # 4095 MiB。新版 reader 必须精确重建旧值，否则中断事务无法通过 CAS 恢复。
@@ -198,7 +214,7 @@ if ($result.Action -cne "RolledBack") { throw "schema-3 legacy transaction 未�
 Assert-RolledBack $script:fixture
 
 # schema-2 transaction 把完整 AIB 标签写进展示字段；恢复也必须保留其
-# 历史 4 GiB low32=0 语义，不能按 schema-5 重建。
+# 历史 4 GiB low32=0 语义，不能按 schema-5/6 重建。
 $script:fixture = New-TransactionFixture "B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2" `
     $true Committed 2
 $receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
@@ -217,7 +233,7 @@ $result = Invoke-RecoverOrRollback -Recover
 if ($result.Action -cne "RolledBack") { throw "schema-2 legacy transaction 未恢复" }
 Assert-RolledBack $script:fixture
 
-# schema-1 receipt 同样必须按历史 low32=0 恢复，不能套用 schema-5 饱和值。
+# schema-1 receipt 同样必须按历史 low32=0 恢复，不能套用 schema-5/6 饱和值。
 $script:fixture = New-TransactionFixture "B1B0B1B0B1B0B1B0B1B0B1B0B1B0B1B0" `
     $true Committed 1
 $receipt = Read-TransactionReceipt $script:fixture.Config $script:fixture.IdentityId
@@ -233,8 +249,8 @@ if ($result.Action -cne "RolledBack") { throw "schema-1 transaction 未恢复" }
 Assert-RolledBack $script:fixture
 
 # 未知 transaction schema 必须在 pointer、journal 和投影首写前拒绝。
-$script:fixture = New-TransactionFixture "B6B6B6B6B6B6B6B6B6B6B6B6B6B6B6B6" `
-    $true Prepared 6
+$script:fixture = New-TransactionFixture "B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7" `
+    $true Prepared 7
 Assert-RecoveryRejectedWithoutMutation $script:fixture `
     "未知 transaction schema 未安全拒绝"
 
@@ -462,5 +478,9 @@ rg -F '$lockedConfig = Get-CurrentGpuIdentity' "$REFRESH_SCRIPT" >/dev/null \
     || fail "refresh mutex 内缺少严格 identity 读取"
 rg -F 'Set-ActiveGpuProjection -Config $lockedConfig' "$REFRESH_SCRIPT" >/dev/null \
     || fail "refresh mutex 内缺少 active projection"
+rg -F '$manufacturerName = if ($schema -eq 6)' "$TRANSACTION_SCRIPT" >/dev/null \
+    || fail "schema-6 receipt 没有独立选择正式厂商名称"
+rg -F '} else { $newVendor }' "$TRANSACTION_SCRIPT" >/dev/null \
+    || fail "transaction reader 没有保留 schema-1..5 短厂商恢复语义"
 
 echo "OK: durable GPU identity transaction recovers crashes and injected faults"

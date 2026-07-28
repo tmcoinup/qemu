@@ -5,8 +5,8 @@
   独立投影设备管理器“常规”页制造商，同时复核真实驱动信任链未变化。
 
 .DESCRIPTION
-  stock VioGpuDod 的 Enum Mfg、Class ProviderName 与 INF/CAT 仍保持 Red Hat。
-  本脚本只调用同目录的 Config Manager 小工具设置
+  stock VioGpuDod 的 INF/CAT 与真实驱动绑定仍保持 Red Hat。本脚本只调用同目录的
+  Config Manager 小工具设置
   DEVPKEY_Device_Manufacturer，并在写入前后直接验证 PnP/INF/SYS/WHCP。
 #>
 
@@ -27,6 +27,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$identityContract = Join-Path $PSScriptRoot 'gpu-board-identity-contract.ps1'
+if (-not (Test-Path -LiteralPath $identityContract -PathType Leaf)) {
+    throw ('缺少 GPU 厂商展示合同：' + $identityContract)
+}
+. $identityContract
 
 $trustHelper = Join-Path $PSScriptRoot 'display-driver-trust.ps1'
 if (-not (Test-Path -LiteralPath $trustHelper -PathType Leaf)) {
@@ -95,6 +101,7 @@ if (($projectorItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw ('制造商投影器不能是重解析点：' + $ProjectorPath)
 }
 
+$manufacturerName = Get-GpuWindowsManufacturerName -Vendor $Vendor
 $before = Get-TrustedDisplayBinding -ExpectedInstanceId $InstanceId
 $projectorOutput = @(& $ProjectorPath $Vendor 2>&1)
 $projectorExitCode = $LASTEXITCODE
@@ -106,12 +113,12 @@ if ($projectorExitCode -ne 0) {
 $property = Get-PnpDeviceProperty -InstanceId $InstanceId `
     -KeyName 'DEVPKEY_Device_Manufacturer' -ErrorAction Stop
 if ([string]$property.Type -ine 'String' -or
-    [string]$property.Data -cne $Vendor) {
+    [string]$property.Data -cne $manufacturerName) {
     throw ('制造商属性回读不一致：' + [string]$property.Type + '/' +
         [string]$property.Data)
 }
 
 $after = Get-TrustedDisplayBinding -ExpectedInstanceId $InstanceId
 Assert-SameBinding -Before $before -After $after
-Write-Host ('设备制造商 UI 已投影为 ' + $Vendor +
+Write-Host ('设备制造商 UI 已投影为 ' + $manufacturerName +
     '；活动 INF/SYS 仍通过 Microsoft WHCP 直接信任校验。') -ForegroundColor Green

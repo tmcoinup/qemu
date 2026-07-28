@@ -99,7 +99,7 @@ $display = Get-PnpDevice -Class Display -PresentOnly |
 $display | Format-List FriendlyName,Status,InstanceId
 Get-PnpDeviceProperty -InstanceId $display.InstanceId `
     -KeyName DEVPKEY_Device_Service,DEVPKEY_Device_DriverInfPath,
-        DEVPKEY_Device_HardwareIds
+        DEVPKEY_Device_HardwareIds,DEVPKEY_Device_Manufacturer
 $smbus = Get-PnpDevice -PresentOnly | Where-Object {
     $_.InstanceId -match '^PCI\\VEN_8086&DEV_(A323|A123|1C22|1E22|8C22|2930)&'
 }
@@ -119,6 +119,8 @@ Get-PnpDeviceProperty -InstanceId $monitor.InstanceId `
 应同时满足：
 
 - `Status` 为 `OK`，`Service` 为 `VioGpuDod`；
+- AMD profile 的 Manufacturer 为 `Advanced Micro Devices, Inc.`，NVIDIA
+  profile 仍为 `NVIDIA`；
 - `InstanceId` 仍以物理 `PCI\VEN_1AF4&DEV_1050` 开头；
 - `HardwareIds` 首项是当前 AIB 的规范逻辑 ID，其后每一项都以物理
   `PCI\VEN_1AF4&DEV_1050` 开头；真实 BDF、Service 和 Driver 不变；

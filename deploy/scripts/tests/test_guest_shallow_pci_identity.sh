@@ -222,7 +222,7 @@ schema_two_line="$(rg -n -F '$versionKey.SetValue('\''IdentitySchemaVersion'\'',
 flush_line="$(rg -n -F '$versionKey.Flush()' "$IDENTITY_SCRIPT" | cut -d: -f1)"
 driver_inf_line="$(rg -n -F '$transactionKey.SetValue('\''DriverInfPath'\'', $driverInfPath' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
-transaction_flush_line="$(rg -n -F '$transactionKey.SetValue('\''TransactionSchemaVersion'\'', 5' \
+transaction_flush_line="$(rg -n -F '$transactionKey.SetValue('\''TransactionSchemaVersion'\'', 6' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
 pending_line="$(rg -n -F '$configKey.SetValue('\''PendingIdentity'\'', $versionId' \
     "$IDENTITY_SCRIPT" | cut -d: -f1)"
@@ -385,7 +385,7 @@ commit_cas_line="$(rg -n -F 'Set-CurrentIdentityPointer $configKey $expected $tr
 rg -F 'Invoke-LegacyGpuTaskBarrier' "$IDENTITY_SCRIPT" >/dev/null \
     || fail "直接 Stage 没有 fail-closed 旧任务屏障"
 
-# schema-5 把标准芯片名/厂商投影到展示字段，driver node 仍由 stock
+# schema-6 把标准芯片名/正式厂商投影到展示字段，driver node 仍由 stock
 # MatchingDeviceId/InfPath/InfSection/Service 绑定。
 rg -F "Set-VerifiedRegistryValue \$classKey 'MatchingDeviceId'" \
     "$REFRESH_SCRIPT" >/dev/null \
@@ -398,20 +398,21 @@ if rg -F "MatchingDeviceId=[pscustomobject]@{ Value=('PCI\\VEN_{0:X4}" \
 fi
 for brand_contract in \
         'Get-GpuStandardDisplayName `' \
+        'Get-GpuWindowsManufacturerName `' \
         "Set-VerifiedRegistryValue \$enumKey 'FriendlyName' \$displayName \$string" \
         "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$displayName \$string" \
-        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$Config.SpoofVendor \$string" \
+        "Set-VerifiedRegistryValue \$enumKey 'Mfg' \$manufacturerName \$string" \
         "Set-VerifiedRegistryValue \$classKey 'DriverDesc' \$displayName \$string" \
-        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$Config.SpoofVendor \$string" \
+        "Set-VerifiedRegistryValue \$classKey 'ProviderName' \$manufacturerName \$string" \
         "Set-VerifiedRegistryValue \$classKey 'HardwareInformation.AdapterString' \$displayName \$string" \
         "Set-VerifiedRegistryValue \$classKey 'HardwareInformation.ChipType' \$chipType \$string"; do
     rg -F "$brand_contract" "$REFRESH_SCRIPT" >/dev/null \
         || fail "GPU 显示品牌兜底缺少：$brand_contract"
 done
-for schema_five_contract in 'if ($transactionSchema -ne 5)' StagedDriverInfPath \
+for schema_six_contract in 'if ($transactionSchema -ne 6)' StagedDriverInfPath \
         "'DriverInfPath' -Kind \$stringKind" "'^oem[0-9]+\\.inf$'"; do
-    rg -F "$schema_five_contract" "$REFRESH_SCRIPT" >/dev/null \
-        || fail "schema-5 staged refresh 缺少 DriverInfPath 契约：$schema_five_contract"
+    rg -F "$schema_six_contract" "$REFRESH_SCRIPT" >/dev/null \
+        || fail "schema-6 staged refresh 缺少 DriverInfPath 契约：$schema_six_contract"
 done
 for forbidden_install_spoof in \
         "Set-VerifiedRegistryValue \$enumKey 'DeviceDesc' \$Config.SpoofName" \

@@ -373,12 +373,13 @@ virtio-vga 的 `1AF4:1050`。物理节点只携带
 Enum `FriendlyName`/`DeviceDesc`、Class `DriverDesc`、
 `HardwareInformation.AdapterString` 和 `HardwareInformation.ChipType` 按
 `GPU_PCI_VEN`/`GPU_PCI_DEV` 的封闭映射使用标准芯片名；Enum `Mfg` 与 Class
-`ProviderName` 使用 `GPU_VENDOR`。NVAPI/ADL 的公开 adapter 名称复用同一映射，
-完整 AIB 标签只保留在内部 identity 中用于原子校验。新的 Windows 投影使用
-transaction schema-5，transaction schema 1/2/3/4 仅用于恢复旧 journal，不改变
-identity schema-2。
+`ProviderName` 使用独立的 Windows 厂商映射：`AMD` 对应
+`Advanced Micro Devices, Inc.`，`NVIDIA` 保持不变。NVAPI/ADL 的公开 adapter
+名称复用同一型号映射，完整 AIB 标签只保留在内部 identity 中用于原子校验。
+新的 Windows 投影使用 transaction schema-6，transaction schema 1–5 仅用于恢复
+旧 journal，不改变 identity schema-2。
 
-schema-5 的 SetupAPI HardwareID 首项包含逻辑 `VEN/DEV`、所选板卡的
+schema-6 的 SetupAPI HardwareID 首项包含逻辑 `VEN/DEV`、所选板卡的
 `GPU_SUBSYS_VEN`/`GPU_SUBSYS_DEV` 和 `GPU_REV`；后续物理 `1AF4:1050` 条目完整保留，
 而 `MatchingDeviceId`、`InfPath`、`InfSection`、`Service` 继续使用 stock
 `VioGpuDod` 绑定值。它们是同一 VioGpuDod devnode 的多条匹配字符串，不会生成额外

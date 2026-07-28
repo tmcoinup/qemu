@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 HELPER="$REPO_ROOT/deploy/scripts/gpu-manufacturer-projection.ps1"
 TRUST_HELPER="$REPO_ROOT/deploy/guest-stealth/display-driver-trust.ps1"
 PROJECTOR="$REPO_ROOT/deploy/guest-stealth/launcher/gpu-manufacturer-projector.c"
+GPU_CONTRACT="$REPO_ROOT/deploy/scripts/gpu-board-identity-contract.ps1"
 DRIVER_DIR="$REPO_ROOT/deploy/scripts/stock-viogpudo"
 
 fail() {
@@ -16,7 +17,8 @@ fail() {
 
 command -v pwsh >/dev/null || fail "缺少 pwsh"
 command -v x86_64-w64-mingw32-gcc >/dev/null || fail "缺少 MinGW"
-[[ -f "$HELPER" && -f "$TRUST_HELPER" && -f "$PROJECTOR" ]] \
+[[ -f "$HELPER" && -f "$TRUST_HELPER" && -f "$PROJECTOR" &&
+   -f "$GPU_CONTRACT" ]] \
     || fail "制造商投影/信任源码不完整"
 [[ "$(wc -l < "$HELPER")" -le 500 ]] || fail "PowerShell helper 超过 500 行"
 [[ "$(wc -l < "$PROJECTOR")" -le 500 ]] || fail "C projector 超过 500 行"
@@ -27,10 +29,19 @@ FIXTURE="$TMP_DIR/manufacturer-fixture.ps1"
 RUNTIME_HELPER="$TMP_DIR/gpu-manufacturer-projection.ps1"
 cp "$HELPER" "$RUNTIME_HELPER"
 cp "$TRUST_HELPER" "$TMP_DIR/display-driver-trust.ps1"
+cp "$GPU_CONTRACT" "$TMP_DIR/gpu-board-identity-contract.ps1"
 
 cat > "$FIXTURE" <<'POWERSHELL'
 $ErrorActionPreference = 'Stop'
 $global:manufacturerCaseName = $env:MANUFACTURER_TEST_CASE
+$global:manufacturerVendor = $env:MANUFACTURER_TEST_VENDOR
+$global:expectedManufacturer = if ($global:manufacturerVendor -ceq 'AMD') {
+    'Advanced Micro Devices, Inc.'
+} elseif ($global:manufacturerVendor -ceq 'NVIDIA') {
+    'NVIDIA'
+} else {
+    throw ('测试传入未知 canonical Vendor：' + $global:manufacturerVendor)
+}
 $global:manufacturerTrustReads = 0
 $global:manufacturerDriverPath = ''
 
@@ -60,7 +71,7 @@ function Get-PnpDeviceProperty {
         $manufacturer = if ($global:manufacturerCaseName -eq 'bad-property') {
             'Red Hat, Inc.'
         } else {
-            'NVIDIA'
+            $global:expectedManufacturer
         }
         return [pscustomobject]@{ Type = 'String'; Data = $manufacturer }
     }
@@ -132,7 +143,7 @@ $projector = if ($global:manufacturerCaseName -eq 'projector-failure') {
 $failed = $false
 $failureMessage = ''
 try {
-    & $env:MANUFACTURER_HELPER -Vendor NVIDIA `
+    & $env:MANUFACTURER_HELPER -Vendor $global:manufacturerVendor `
         -InstanceId 'PCI\VEN_1AF4&DEV_1050&SUBSYS_138010DE&REV_A2\3&1&0&30' `
         -ProjectorPath $projector -SystemDirectory $systemDirectory
 } catch {
@@ -140,7 +151,7 @@ try {
     $failureMessage = $_.Exception.Message
 }
 
-if ($global:manufacturerCaseName -eq 'success') {
+if ($global:manufacturerCaseName -like 'success-*') {
     if ($failed -or $global:manufacturerTrustReads -ne 2) {
         throw ('成功路径没有在投影前后各验证一次直接信任链：failed=' +
             $failed + '; reads=' + $global:manufacturerTrustReads +
@@ -151,13 +162,17 @@ if ($global:manufacturerCaseName -eq 'success') {
 }
 POWERSHELL
 
-for case_name in success bad-binding bad-signature modified-inf \
-        projector-failure bad-property; do
+for case_spec in success-nvidia:NVIDIA success-amd:AMD \
+        bad-binding:NVIDIA bad-signature:NVIDIA modified-inf:NVIDIA \
+        projector-failure:NVIDIA bad-property:NVIDIA; do
+    case_name="${case_spec%%:*}"
+    vendor="${case_spec#*:}"
     MANUFACTURER_HELPER="$RUNTIME_HELPER" \
     MANUFACTURER_TEST_ROOT="$TMP_DIR/runtime" \
     MANUFACTURER_DRIVER_SYS="$DRIVER_DIR/viogpudo.sys" \
     MANUFACTURER_DRIVER_INF="$DRIVER_DIR/viogpudo.inf" \
     MANUFACTURER_TEST_CASE="$case_name" \
+    MANUFACTURER_TEST_VENDOR="$vendor" \
         pwsh -NoProfile -NonInteractive -File "$FIXTURE" >/dev/null
 done
 
@@ -175,6 +190,12 @@ grep -F '0xa45c254e' "$PROJECTOR" >/dev/null \
     || fail "projector 缺少 DEVPKEY_Device_Manufacturer FMTID"
 grep -F '    13' "$PROJECTOR" >/dev/null \
     || fail "projector 缺少 DEVPKEY_Device_Manufacturer PID 13"
+grep -F 'return L"Advanced Micro Devices, Inc.";' "$PROJECTOR" >/dev/null \
+    || fail "projector 没有把 canonical AMD 映射为正式公司名"
+grep -F "return 'Advanced Micro Devices, Inc.'" "$GPU_CONTRACT" >/dev/null \
+    || fail "PowerShell 厂商合同缺少 AMD 正式公司名"
+grep -F 'Get-GpuWindowsManufacturerName -Vendor $Vendor' "$HELPER" >/dev/null \
+    || fail "PowerShell 制造商回读没有使用共享厂商合同"
 if grep -E 'RegSetValue|SetupDiSetDeviceRegistryProperty' "$PROJECTOR" >&2; then
     fail "projector 不得修改 Enum Mfg 或 Class 安装字段"
 fi

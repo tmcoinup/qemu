@@ -47,6 +47,7 @@ QUICK_TESTS = (
     "test_guest_monitor_identity_projection.sh",
     "test_guest_gpu_schema1_migration.sh",
     "test_guest_numlock_launcher.sh",
+    "test_guest_sysprep_repair.sh",
     "test_iso_boot_input_safety.sh",
     "test_guest_shallow_pci_identity.sh",
     "test_guest_shallow_pci_runtime_helpers.sh",

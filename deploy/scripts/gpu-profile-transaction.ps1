@@ -1,8 +1,7 @@
 ﻿# GPU 身份 durable transaction 的公共实现。
 #
-# 本文件只定义无副作用的事务函数与 journal 字段常量；由同目录的
-# persist-gpu-profile.ps1 严格检查后 dot-source。保持独立文件可避免身份解析、
-# 快照构建和 durable rollback 全部挤在一个超长脚本内，同时不改变事务语义。
+# 本文件只定义无副作用的事务函数与 journal 字段常量；由同目录的 persist-gpu-profile.ps1
+# 严格检查后 dot-source；保持独立文件可避免身份解析、快照构建和 durable rollback 全部挤在一个超长脚本内。
 
 $registryCore = Join-Path $PSScriptRoot 'gpu-profile-registry-core.ps1'
 if (-not (Test-Path -LiteralPath $registryCore -PathType Leaf)) {
@@ -234,7 +233,7 @@ function Read-TransactionReceipt {
         $oldPresent = [int](Get-ExactRegistryValue $transactionKey 'PreviousPointerPresent' $dword)
         $mirrorPresent = [int](Get-ExactRegistryValue $transactionKey 'PreviousSpoofNamePresent' $dword)
         $classSubkey = [string](Get-ExactRegistryValue $transactionKey 'ClassSubkey' $string)
-        $modernSchema = @(2,3,4,5) -ccontains $schema
+        $modernSchema = @(2,3,4,5,6) -ccontains $schema
         $driverInfPath = if ($modernSchema) {
             [string](Get-ExactRegistryValue $transactionKey 'DriverInfPath' $string)
         } else { '' }
@@ -243,7 +242,7 @@ function Read-TransactionReceipt {
         $newName = $newIdentity.SpoofName; $newVendor = $newIdentity.SpoofVendor
         $newBios = $newIdentity.SpoofBios; $newRamMb = $newIdentity.SpoofRamMb
         $newVendorId = $newIdentity.SpoofPciVendorId; $newDeviceId = $newIdentity.SpoofPciDeviceId
-        if (-not (@(1,2,3,4,5) -ccontains $schema) -or $txnId -cne $IdentityId -or
+        if (-not (@(1,2,3,4,5,6) -ccontains $schema) -or $txnId -cne $IdentityId -or
             -not (@('Prepared','Committed','Completed','RolledBack') -ccontains $state) -or
             ($oldPresent -ne 0 -and $oldPresent -ne 1) -or
             ($mirrorPresent -ne 0 -and $mirrorPresent -ne 1) -or $classSubkey -cnotmatch '^\d{4}$' -or
@@ -275,13 +274,16 @@ function Read-TransactionReceipt {
         $classJournal = Read-ProjectionJournal $transactionKey 'Class' $classPath $classJournalNames
         # journal CAS 必须使用 refresh 实际写入的标准显示名；SpoofName 仍保留
         # AIB 标签作为身份 mirror，不能混用为 Windows 投影值。
-        $newDisplayName = if (@(3,4,5) -ccontains $schema) {
+        $newDisplayName = if (@(3,4,5,6) -ccontains $schema) {
             Get-GpuStandardDisplayName `
                 -PciVendorId $newVendorId -PciDeviceId $newDeviceId
         } else { $newName }
+        $manufacturerName = if ($schema -eq 6) {
+            Get-GpuWindowsManufacturerName -Vendor $newVendor
+        } else { $newVendor }
         $chipType = $newDisplayName -replace '^(NVIDIA|AMD)\s+', ''
         $memoryBytes = [BitConverter]::GetBytes([UInt64]$newRamMb * 1MB)
-        $legacyMemory = if ($schema -eq 5) {
+        $legacyMemory = if (@(5,6) -ccontains $schema) {
             [byte[]](Get-GpuLegacyMemorySizeBytes -RamMb $newRamMb)
         } elseif ($schema -eq 4) {
             $schemaFourRamMb = if ($newRamMb -gt 4095) { 4095 } else { $newRamMb }
@@ -289,21 +291,21 @@ function Read-TransactionReceipt {
                 [UInt32]([UInt64]$schemaFourRamMb * 1MB))
         } else { [byte[]]$memoryBytes[0..3] }
         $stockDisplaySchema = @(2,3) -ccontains $schema
-        $enumDescription = if (@(4,5) -ccontains $schema) { $newDisplayName } elseif ($stockDisplaySchema) {
+        $enumDescription = if (@(4,5,6) -ccontains $schema) { $newDisplayName } elseif ($stockDisplaySchema) {
             '@' + $driverInfPath + ',%viogpudod.devicedesc%;' + $stockDriverDescription
         } else { $newName }
         $enumProvider = if ($stockDisplaySchema) {
             '@' + $driverInfPath + ',%vendor%;' + $stockDriverProvider
-        } else { $newVendor }
+        } else { $manufacturerName }
         $projectedEnum = @{
             FriendlyName=[pscustomobject]@{ Value=$newDisplayName; Kind=$string }
             DeviceDesc=[pscustomobject]@{ Value=$enumDescription; Kind=$string }
             Mfg=[pscustomobject]@{ Value=$enumProvider; Kind=$string }
         }
-        $driverDescription = if (@(4,5) -ccontains $schema) { $newDisplayName } elseif ($stockDisplaySchema) {
+        $driverDescription = if (@(4,5,6) -ccontains $schema) { $newDisplayName } elseif ($stockDisplaySchema) {
             $stockDriverDescription
         } else { $newName }
-        $driverProvider = if ($stockDisplaySchema) { $stockDriverProvider } else { $newVendor }
+        $driverProvider = if ($stockDisplaySchema) { $stockDriverProvider } else { $manufacturerName }
         $matchingId = if ($modernSchema) { $stockDriverMatchingId } else {
             'PCI\VEN_{0:X4}&DEV_{1:X4}' -f $newVendorId,$newDeviceId
         }
@@ -414,7 +416,6 @@ function Open-StealthBaseKey {
 
 function Get-RootScheduledTaskExact {
     param([Parameter(Mandatory = $true)][string]$TaskName)
-
     # 完整枚举失败必须硬抛；不能用 SilentlyContinue 把 CIM/Task Scheduler 故障
     # 误判成“不存在”。只有一次成功枚举中确实没有根目录同名项才返回 null。
     $matches = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
@@ -432,7 +433,6 @@ function Invoke-LegacyGpuTaskBarrier {
     foreach ($taskName in 'StealthGPU-RefreshName', 'StealthGPU-ForceDisplayFreq') {
         $task = Get-RootScheduledTaskExact -TaskName $taskName
         if ($null -eq $task) { continue }
-
         Disable-ScheduledTask -TaskName $taskName -TaskPath '\' `
             -ErrorAction Stop | Out-Null
         Stop-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop

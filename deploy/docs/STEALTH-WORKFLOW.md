@@ -136,9 +136,10 @@ EXE 的关键执行顺序如下：
    `10DE:1C82/A1`，物理 `1AF4:1050` 不变；identity schema-2 的 `SpoofName`
    保留完整 AIB canonical 标签。
 8. 先预检/staging x86/x64 NVAPI，再事务发布到 SysWOW64/System32；未知同名 DLL
-   fail-closed，第二架构失败会回滚第一架构。新的 transaction schema-5 把 Enum
+   fail-closed，第二架构失败会回滚第一架构。新的 transaction schema-6 把 Enum
    `FriendlyName`/`DeviceDesc` 和 Class `DriverDesc` 写为标准芯片名，把
-   `Mfg`/`ProviderName` 写为芯片厂商；schema 1/2/3/4 只兼容恢复旧 journal。
+   `Mfg`/`ProviderName` 写为 Windows 标准厂商名；schema 1–5 只兼容恢复旧
+   journal，其中 schema-5 保留历史短厂商值。
    重跑时 Class 目标只按 staged 物理实例的 Driver/Service/INF 唯一绑定，不按
    DriverDesc 名称筛选。若已加载工具仅锁住旧 backup，则保留精确摘要 receipt，
    只重启一次后 Recover 清理，不修改 ACL 或登记无凭据的延迟删除。
@@ -228,7 +229,7 @@ GTX 1050 Ti profile 的期望结果：
   NVAPI legacy `MemoryInfo` v1/v2/v3 与 frame-buffer size 接口返回
   `4194304 KiB`，`MemoryInfoEx` v1 返回 `4294967296 bytes`；
   `HardwareInformation.qwMemorySize` 与相应厂商接口精确保留 `4 GiB`。新提交
-  使用 transaction schema-5；schema 1/2/3/4 只用于恢复，其中历史 schema-4
+  使用 transaction schema-6；schema 1–5 只用于恢复，其中历史 schema-4
   仍按原语义重建 `4095 MiB`。该兼容字段差异不会改变 profile 的逻辑显存容量。
 - `SysWOW64\nvapi.dll` 与 `System32\nvapi64.dll` 的摘要必须分别等于统一 EXE
   内嵌版本；它们是本项目用户态 shim，不应带 NVIDIA 厂商签名。

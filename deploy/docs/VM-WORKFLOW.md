@@ -86,8 +86,8 @@ Get-CimInstance Win32_VideoController |
 
 ### A.6 正常流程不需要 host 端 Provider 收尾
 
-transaction schema-5 已在 guest 内全局发布 Enum `FriendlyName`/`DeviceDesc`/`Mfg` 与 Class `DriverDesc`/`ProviderName`；标准 SetupAPI、WMI 和硬件工具会读取标准芯片名与厂商。
-它同时保留 stock `MatchingDeviceId`、`InfPath`、`InfSection`、`Service`，因此不要为了改展示名替换或补丁驱动。transaction schema 1/2/3/4 只用于恢复旧 journal；历史 schema-4 的显存字段仍按原语义重建 4095 MiB。
+transaction schema-6 已在 guest 内全局发布 Enum `FriendlyName`/`DeviceDesc`/`Mfg` 与 Class `DriverDesc`/`ProviderName`；标准 SetupAPI、WMI 和硬件工具会读取标准芯片名与 Windows 厂商名（AMD 为 `Advanced Micro Devices, Inc.`，NVIDIA 为 `NVIDIA`）。
+它同时保留 stock `MatchingDeviceId`、`InfPath`、`InfSection`、`Service`，因此不要为了改展示名替换或补丁驱动。transaction schema 1–5 只用于恢复旧 journal；历史 schema-5 保留短厂商名，schema-4 的显存字段仍按原语义重建 4095 MiB。
 
 只有在专门诊断设备管理器“驱动程序”页受 TrustedInstaller 保护的旧 DEVPKEY 时，才可把下列 host helper 当作可选外观诊断；它不属于正常部署和硬件工具适配：
 
@@ -156,6 +156,20 @@ guest 内最后一次跑（**不可逆**，跑完进 OOBE）：
 ```cmd
 C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown
 ```
+
+如果弹出“Sysprep 无法验证你的 Windows 安装”，不要改
+`GeneralizationState/CleanupState` 强行绕过。在管理员 CMD 中从工具共享目录运行：
+
+```cmd
+repair-sysprep.cmd
+```
+
+配套的 `deploy/scripts/guest/repair-sysprep.ps1` 会先把
+`setupact.log/setuperr.log` 备份到 `C:\ProgramData\VMate\SysprepRepair`，只清理
+Panther 日志明确点名、且当前仍未正确预配的 Appx 包，再以
+`/generalize /oobe /shutdown /quiet` 重试。CMD 同时把报告导出到脚本旁的
+`sysprep-report`；遇到 BitLocker、挂起更新或其它错误会保留日志并停止，不会盲改
+Sysprep 状态。若退出码为 `10`，先重启 Windows 完成组件维护，再运行同一 CMD。
 
 这会清掉：
 - MachineGUID（VM 之间隔离的关键 ID）
@@ -267,7 +281,7 @@ clone 都重复等待，应在更新完成后重新执行 sysprep，并密封为
    - Order 4-5: 关 IE wizard / 关 Windows Update 自动重启
    - Order 6-9: 注册 ms-gamingoverlay no-op handler + 关 GameDVR
    - **Order 10: `D:\工具\respawn-stealth.exe --firstlogon`**
-5. `respawn-stealth.exe` 先收敛全 SMBus 池，再验证物理 `1AF4:1050`/stock VioGpuDod，提交 schema-5 GPU identity 与 Monitor FriendlyName；随后自动重启。`--firstlogon` 保留 GPU 名称、HardwareID 和 Monitor 标签维护任务，不安装第三方服务
+5. `respawn-stealth.exe` 先收敛全 SMBus 池，再验证物理 `1AF4:1050`/stock VioGpuDod，提交 schema-6 GPU identity 与 Monitor FriendlyName；随后自动重启。`--firstlogon` 保留 GPU 名称、HardwareID 和 Monitor 标签维护任务，不安装第三方服务
 6. 重启后 Device Manager、WMI 与 NVAPI/ADL 显示同一 GPU 型号/厂商，Monitor 标签来自 EDID 映射；完整 `profile.GPU_NAME` 只供 schema-2 校验。PnP HardwareID 为逻辑首项 + 物理尾项，NVAPI 主键用 `1AF4:1050` 去重
 
 整个过程从 `start-vm.sh` 到稳定桌面通常需要 **约 5-10 分钟**；旧 base 触发联网 ZDP 时会更久，全程不需要鼠标键盘。
@@ -292,7 +306,7 @@ Get-WinEvent -LogName 'Microsoft-Windows-Shell-Core/Operational' -MaxEvents 20 |
 
 ### C.3 可选：旧 Driver-tab DEVPKEY 外观诊断
 
-schema-5 已由 guest 的 respawn 全局重写标准 Enum/Class 名称和厂商，正常 clone 无需 host 收尾。只有明确要检查设备管理器“驱动程序”页的受保护旧 DEVPKEY 时，才在 guest 完整关机后运行：
+schema-6 已由 guest 的 respawn 全局重写标准 Enum/Class 名称和厂商，正常 clone 无需 host 收尾。只有明确要检查设备管理器“驱动程序”页的受保护旧 DEVPKEY 时，才在 guest 完整关机后运行：
 
 ```bash
 deploy/scripts/finalize-clone-gpu.sh 2
@@ -407,7 +421,7 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 | A.1 | host | `deploy/scripts/start-vm.sh 1 --iso=...` | 启动装机 |
 | A.3 | guest | `D:\工具\respawn-stealth.exe` | 收敛 SMBus、VioGpuDod、GPU/Monitor 投影并重启 |
 | A.5 | guest | 查询 `DEVPKEY_Device_Service` | 验证真实 Service，而不是只看 GTX 名称 |
-| A.6（可选） | host | `sudo .../host-fix-gpu-devpkey.sh 1` | 仅诊断受保护的旧 Driver-tab DEVPKEY；正常 schema-5 流程不需要 |
+| A.6（可选） | host | `sudo .../host-fix-gpu-devpkey.sh 1` | 仅诊断受保护的旧 Driver-tab DEVPKEY；正常 schema-6 流程不需要 |
 | A.7 | guest | 手动装 wegame / DNF / 实际游戏环境 | — |
 | A 末 | guest | 最新 EXE 保留在 `D:\工具\` | 必需：clone FirstLogon 固定从这里执行 |
 | B.1 | guest | `sysprep /generalize /oobe /shutdown` | 清 SID/MachineGUID 让 clone 独立 |
@@ -438,9 +452,9 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 | `irm apply-gpu-spoof.ps1 \| iex` 报"赋值表达式无效" | 该脚本有 `param()`，`iex` 不支持参数化 | 不要直接跑；重新构建并运行统一 EXE |
 | host offline 改 hive 时报 "Windows is hibernated" | Fast Startup 没关 | guest 内 `powercfg -h off` + `shutdown /s /t 0`，**别**用 GUI "关机"或 `shutdown /r` |
 | clone 完启动报 `Recovery 0xc0000001 / Your PC couldn't start properly` | sysprep 后、首次枚举前离线改了 boot-critical hive（SYSTEM/SOFTWARE/DEFAULT） | 重新 clone；首启前不要离线改这些 hive，guest 启动后要做的注册表改动写进 `autounattend.xml` 的 `<FirstLogonCommands>` |
-| WMI、设备列表或硬件工具仍显示 `Red Hat`/`VirtIO` | 没有运行当前 schema-5 EXE，或启动刷新失败 | 更新并运行统一 EXE，核对 `respawn.log`；不要用 host DEVPKEY helper 代替全局 Enum/Class 投影 |
+| WMI、设备列表或硬件工具仍显示 `Red Hat`/`VirtIO` | 没有运行当前 schema-6 EXE，或启动刷新失败 | 更新并运行统一 EXE，核对 `respawn.log`；不要用 host DEVPKEY helper 代替全局 Enum/Class 投影 |
 | 只有设备管理器“驱动程序”页的旧 Provider DEVPKEY 仍显示 `Red Hat, Inc.` | 该受保护属性与标准 Class `ProviderName` 分离 | 不影响 WMI/SetupAPI/厂商 API；仅在确需统一该外观时，完整关机后运行可选 `finalize-clone-gpu.sh <N>` |
-| 首启前 `ControlSet001\Enum\PCI` 不存在 | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不要在 clone 阶段运行 `host-fix-gpu-devpkey.sh`；首次登录后由 FirstLogonCommand Order=10 完成 schema-5 重对齐 |
+| 首启前 `ControlSet001\Enum\PCI` 不存在 | sysprep base 的预期状态（generalize 把 PCI enum 清了） | 不要在 clone 阶段运行 `host-fix-gpu-devpkey.sh`；首次登录后由 FirstLogonCommand Order=10 完成 schema-6 重对齐 |
 | clone VM 进桌面后 GPU 名还是 base 老型号 | 首次登录那次 FirstLogonCommand Order=10 没自动跑，或 `D:\工具\respawn-stealth.exe` 不存在 | guest 管理员 PS：`Start-Process -FilePath 'D:\工具\respawn-stealth.exe' -ArgumentList '--firstlogon' -Wait` |
 | 新 VM 显示 GTX 但分辨率锁在 1280×800、下拉灰色 | 运行的是旧 EXE，只把 Microsoft Basic Display Adapter 改了名 | 替换最新 EXE，在 SDL 控制台运行；确认 Service=`VioGpuDod` 后重启 |
 | `display-driver-install.log` 报摘要/签名错误 | SYS/CAT/INF 混版或 EXE payload 损坏 | host 重新运行 `package.sh`，不要手工替换释放目录里的驱动 |
@@ -457,41 +471,3 @@ OOBE 后自动执行时用 `--firstlogon` 跳过确认框。
 - 当前阶段
 - 跑的命令
 - 完整输出（截图或文本）
-
-
-
-
-$ErrorActionPreference = 'Stop'
-  $dir = "$env:WINDIR\System32\Sysprep\Panther"
-  $logs = @("$dir\setupact.log", "$dir\setuperr.log") |
-      Where-Object { Test-Path $_ }
-
-  $bad = Select-String -LiteralPath $logs `
-      -Pattern 'SYSPRP Package\s+(.+?)\s+was installed for a user' |
-      ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } |
-      Sort-Object -Unique
-
-  $bad
-
-  if (-not $bad) {
-      Get-Content "$dir\setuperr.log" -Tail 60
-      throw '不是 AppX 包冲突，请保留上面的日志输出'
-  }
-
-  foreach ($fullName in $bad) {
-      $displayName = ($fullName -split '_', 2)[0]
-
-      Get-AppxPackage -AllUsers |
-          Where-Object PackageFullName -eq $fullName |
-          ForEach-Object {
-              Remove-AppxPackage -Package $_.PackageFullName -AllUsers
-          }
-
-      Get-AppxProvisionedPackage -Online |
-          Where-Object DisplayName -eq $displayName |
-          ForEach-Object {
-              Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName
-          }
-  }
-
-  & "$env:WINDIR\System32\Sysprep\Sysprep.exe" /generalize /oobe /shutdown

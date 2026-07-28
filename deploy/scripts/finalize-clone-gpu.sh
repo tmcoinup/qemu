@@ -127,7 +127,7 @@ echo ">> step 1/2: 离线修复 GPU Provider / Desc / 驱动签名关联"
 # 对它 chown 会同时解除全局 base 和其它实例 pin 的密封状态。
 
 if [[ "$RESTART" != 1 || "$DRY_RUN" == 1 ]]; then
-    echo ">> done: 已修复。下次启动后 Provider 应显示 profile.GPU_VENDOR，"
+    echo ">> done: 已修复。下次启动后 Provider 应显示 profile 对应的 Windows 标准厂商名，"
     echo ">>       Digital Signer 应恢复为 Microsoft Windows Hardware Compatibility Publisher。"
     echo ">> 如需自动重启：deploy/scripts/finalize-clone-gpu.sh $INSTANCE --restart -- --proxy"
     exit 0

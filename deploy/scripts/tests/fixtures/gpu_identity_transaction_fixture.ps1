@@ -109,7 +109,7 @@ function Set-AibIdentityValues {
 
 function New-TransactionFixture {
     param([string]$IdentityId, [bool]$OldPointerPresent, [string]$State,
-        [int]$TransactionSchema = 5)
+        [int]$TransactionSchema = 6)
     $string = [Microsoft.Win32.RegistryValueKind]::String
     $dword = [Microsoft.Win32.RegistryValueKind]::DWord
     $binary = [Microsoft.Win32.RegistryValueKind]::Binary
@@ -139,7 +139,7 @@ function New-TransactionFixture {
     Set-FakeValue $transaction PreviousSpoofNamePresent ([int]$OldPointerPresent) $dword
     if ($OldPointerPresent) { Set-FakeValue $transaction PreviousSpoofName "NVIDIA OLD GPU" $string }
     Set-FakeValue $transaction ClassSubkey "0001" $string
-    if (@(2, 3, 4, 5) -contains $TransactionSchema) {
+    if (@(2, 3, 4, 5, 6) -contains $TransactionSchema) {
         Set-FakeValue $transaction DriverInfPath "oem3.inf" $string
     }
     Set-CompleteIdentityValues $identity $IdentityId 2 $source `
@@ -154,22 +154,25 @@ function New-TransactionFixture {
     }
     Write-ProjectionJournal $transaction Enum $enum $enumPath $enumJournalNames
     Write-ProjectionJournal $transaction Class $class $classPath $classJournalNames
-    $modernTransaction = @(2, 3, 4, 5) -contains $TransactionSchema
+    $modernTransaction = @(2, 3, 4, 5, 6) -contains $TransactionSchema
     $stockDisplayTransaction = @(2, 3) -contains $TransactionSchema
-    $displayName = if (@(3, 4, 5) -contains $TransactionSchema) {
+    $displayName = if (@(3, 4, 5, 6) -contains $TransactionSchema) {
         "NVIDIA GeForce GTX 1050 Ti"
     } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
-    $enumDesc = if (@(4, 5) -contains $TransactionSchema) { $displayName } elseif ($stockDisplayTransaction) { "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
-    $enumMfg = if ($stockDisplayTransaction) { "@oem3.inf,%vendor%;Red Hat, Inc." } else { "NVIDIA" }
-    $driverDesc = if (@(4, 5) -contains $TransactionSchema) { $displayName } elseif ($stockDisplayTransaction) { "Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
-    $driverProvider = if ($stockDisplayTransaction) { "Red Hat, Inc." } else { "NVIDIA" }
+    $manufacturerName = if ($TransactionSchema -eq 6) {
+        Get-GpuWindowsManufacturerName -Vendor NVIDIA
+    } else { "NVIDIA" }
+    $enumDesc = if (@(4, 5, 6) -contains $TransactionSchema) { $displayName } elseif ($stockDisplayTransaction) { "@oem3.inf,%viogpudod.devicedesc%;Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
+    $enumMfg = if ($stockDisplayTransaction) { "@oem3.inf,%vendor%;Red Hat, Inc." } else { $manufacturerName }
+    $driverDesc = if (@(4, 5, 6) -contains $TransactionSchema) { $displayName } elseif ($stockDisplayTransaction) { "Red Hat VirtIO GPU DOD controller" } else { "NVIDIA GeForce GTX 1050 Ti (ASUS Phoenix)" }
+    $driverProvider = if ($stockDisplayTransaction) { "Red Hat, Inc." } else { $manufacturerName }
     $matchingId = if ($modernTransaction) { "PCI\VEN_1AF4&DEV_1050" } else { "PCI\VEN_10DE&DEV_1C82" }
     Set-FakeValue $enum FriendlyName $displayName $string
     Set-FakeValue $enum DeviceDesc $enumDesc $string
     Set-FakeValue $enum Mfg $enumMfg $string
     foreach ($name in $classJournalNames) {
         if ($name -ceq "HardwareInformation.MemorySize") {
-            $legacyMemory = if ($TransactionSchema -eq 5) {
+            $legacyMemory = if (@(5, 6) -contains $TransactionSchema) {
                 [byte[]](0,0,240,127)
             } elseif ($TransactionSchema -eq 4) {
                 [byte[]](0,0,240,255)

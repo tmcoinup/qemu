@@ -95,7 +95,8 @@ subsystem/revision 与 external device 来自同一个 NVIDIA 逻辑 profile。
 归并到唯一 devnode，同时不把真实 InstanceId、BDF、Service 或 Driver 改成 NVIDIA。
 AMD profile 同样从 ADL 的单卡、非 PowerXpress 拓扑和逻辑 AIB bundle 回答用户态
 身份。真实 virtio 主 ID 与驱动绑定只由前述载体门禁维护。
-Enum `Mfg` 与 Class `ProviderName` 使用同一芯片厂商。NVAPI legacy
+Enum `Mfg` 与 Class `ProviderName` 使用同一 Windows 标准厂商名；AMD 为
+`Advanced Micro Devices, Inc.`，NVIDIA 为 `NVIDIA`。NVAPI legacy
 `NvAPI_GPU_GetMemoryInfo` v1/v2/v3 与 legacy frame-buffer size 接口以 KiB 为单位，
 4 GiB 返回 `4194304 KiB`；`NvAPI_GPU_GetMemoryInfoEx` v1 以 bytes 为单位，返回
 `4294967296 bytes`。这两套 ABI 不能互换。4 GiB profile 的旧 32 位
@@ -139,7 +140,7 @@ TransactionId，但保留独立 durable journal。NVAPI 的既有两项 receipt 
    reservation、receipt、identity terminal State 和精确 pointer，不采用 base 的旧厂商值；
 2. 从当前唯一在线的 `1AF4:1050` 载体读取 SUBSYS，Stage 新 identity；
 3. 严格回读 staged identity；coordinator 要求 identity schema-2、transaction
-   schema-5、Prepared、`PendingIdentity=TransactionId`、current=previous，并把
+   schema-6、Prepared、`PendingIdentity=TransactionId`、current=previous，并把
    snapshot 的 `SpoofVendor` 作为本事务唯一厂商参数；
 4. 创建以 TransactionId 为 owner 的 GPU API coordinator 持久 reservation；
 5. 对目标厂商发布和非目标厂商受管残留做全量只读预检；
@@ -162,12 +163,13 @@ TransactionId）都不能进入该窗口。失败时先恢复旧 identity pointe
 `RolledBack/previous-pointer` 时 Rollback；Prepared/Committed、厂商不符或后续事务
 pointer 均保留 reservation 并 fail closed，避免提前或跨事务恢复。
 
-这里的 schema-5 只属于 identity transaction：它发布标准 Windows Enum/Class
+这里的 schema-6 只属于 identity transaction：它发布标准 Windows Enum/Class
 名称、厂商、兼容 32 位消费者的显存字段，以及同一 devnode 的规范逻辑 HardwareID
 首项；原始完整 `1AF4:1050` 数组作为尾项保留，`MatchingDeviceId`、`InfPath`、
 `InfSection`、`Service` 也保持 stock。identity snapshot 本身仍是 schema-2。
-transaction schema 1/2/3/4 不再用于新提交，只在启动时兼容恢复旧 journal；历史
-schema-4 恢复仍按原语义重建 legacy `MemorySize=4095 MiB`。
+transaction schema 1–5 不再用于新提交，只在启动时兼容恢复旧 journal；历史
+schema-5 保留 `AMD` 短厂商值，schema-4 恢复仍按原语义重建 legacy
+`MemorySize=4095 MiB`。
 
 ## 能力边界
 

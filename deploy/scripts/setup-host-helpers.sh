@@ -151,7 +151,7 @@ check_sudoers_contract() {
 
     check_regular_file "$sudoers" 440 || return 1
     expected="$(
-        printf '%s\n' '# 由 qemu vmate setup-host-helpers.sh 生成；禁止环境变量注入。'
+        printf '%s\n' '# 由 qemu vmate setup-host-helpers.sh 生成；仅授权本机 VM 操作者，禁止环境变量注入。'
         printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s *\n' \
             "$TARGET_UID" "/usr/local/libexec/qemu-vmate-host-performance"
         printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s *\n' \
@@ -410,7 +410,7 @@ install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
 chown "$OWNER_UID:$OWNER_GID" "$trust_tmp" 2>/dev/null || true
 chmod 0644 "$trust_tmp"
 {
-    echo "# 由 qemu vmate setup-host-helpers.sh 生成；禁止环境变量注入。"
+    echo "# 由 qemu vmate setup-host-helpers.sh 生成；仅授权本机 VM 操作者，禁止环境变量注入。"
     printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s *\n' "$TARGET_UID" "/usr/local/libexec/qemu-vmate-host-performance"
     printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s *\n' "$TARGET_UID" "/usr/local/libexec/qemu-vmate-cpu-isolate"
 } >"$sudoers_tmp"

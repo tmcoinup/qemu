@@ -160,6 +160,8 @@
 #                          (flag: --proxy / --no-proxy)
 #                          ${QMP_SOCK} 可多客户端并发；同时创建
 #                          ${QMP_SOCK}.proxy 兼容旧工具配置
+#     HOST_OOM_PROTECT=1   启动时临时保护本实例进程树免被全局 OOM 优先选中；
+#                          固定 oom_score_adj=-500，VM 退出即失效，不改 swap/sysctl
 #     HOST_TUNE=1          起 VM 前自动跑 host-performance.sh 压计时抖动（默认 1）
 #                          (flag: --host-tune / --no-host-tune)
 #                          PPD performance（无 PPD 时回退 performance governor）+
@@ -228,6 +230,7 @@ source "$HERE/lib/sv-qemu-ptracer.sh" # 每实例自动授权最终 QEMU 叶进�
 # 非 DRY_RUN 在任何 profile/磁盘/TPM/host tune 副作用前验证 Yama 与 wrapper。
 sv_qemu_ptracer_preflight || exit 1
 source "$HERE/lib/sv-host-helpers.sh" # 拒绝工作区 sudoers，仅信任 root-owned helper
+source "$HERE/lib/sv-host-memory.sh" # 每实例临时 OOM 保护；独立于客体配置/CPU 隔离
 source "$HERE/lib/sv-portability.sh" # 迁移 host 预检：路径/QEMU 能力，不做隐身降级
 source "$HERE/lib/sv-storage-aio.sh" # active-read 选择 io_uring/native/threads，不加 IOThread
 source "$HERE/lib/sv-cpupin.sh"     # 在其它宿主预检后校验 helper；稍后异步等待 vCPU

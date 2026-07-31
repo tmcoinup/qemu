@@ -22,38 +22,258 @@ set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-# root helper 会被 sudoers 免密放行，因此参数必须在任何写 sysfs 之前完整校验。
-# 第一个参数是频率上限（0=不封顶），第二个是 halt poll ns，第三个是
-# split-lock mitigation 目标值（0=取消故意降速，1=保留内核防护）。拒绝额外参数与环境注入。
-(( $# <= 3 )) || {
-    echo "ERROR: 用法: $0 [CPU_MAX_KHZ|0] [KVM_HALT_POLL_NS] [SPLIT_LOCK_MITIGATE|0]" >&2
-    exit 2
-}
-CPU_MAX_KHZ="${1:-0}"
-KVM_HALT_POLL_NS="${2:-0}"
-SPLIT_LOCK_MITIGATE="${3:-0}"
-if ! [[ "$CPU_MAX_KHZ" =~ ^[0-9]+$ ]] || \
-   (( CPU_MAX_KHZ != 0 && (CPU_MAX_KHZ < 100000 || CPU_MAX_KHZ > 10000000) )); then
-    echo "ERROR: CPU_MAX_KHZ 必须是 0 或 [100000,10000000] 的整数 kHz" >&2
-    exit 2
-fi
-if ! [[ "$KVM_HALT_POLL_NS" =~ ^[0-9]+$ ]] || (( KVM_HALT_POLL_NS > 10000000 )); then
-    echo "ERROR: KVM_HALT_POLL_NS 必须是 [0,10000000] 的整数 ns" >&2
-    exit 2
-fi
-case "$SPLIT_LOCK_MITIGATE" in
-    0|1) ;;
-    *)
-        echo "ERROR: SPLIT_LOCK_MITIGATE 必须是 0 或 1" >&2
+# root helper 会被 sudoers 免密放行，因此参数必须在任何写 sysfs/procfs 之前完整
+# 校验。默认命令保持原来的三参数调优 ABI；protect-launcher 是独立、固定策略的
+# 子命令，只允许保护调用 UID 自己、持有本项目实例生命周期锁的启动进程。
+COMMAND="tune"
+if [[ "${1:-}" == "protect-launcher" ]]; then
+    (( $# == 4 )) || {
+        echo "ERROR: 用法: $0 protect-launcher <INSTANCE> <PID> <STARTTIME>" >&2
         exit 2
-        ;;
-esac
+    }
+    COMMAND="$1"
+    PROTECT_INSTANCE="$2"
+    PROTECT_PID="$3"
+    PROTECT_STARTTIME="$4"
+    [[ "$PROTECT_INSTANCE" =~ ^[1-9][0-9]{0,9}$ ]] || {
+        echo "ERROR: INSTANCE 必须是 1..10 位正整数" >&2
+        exit 2
+    }
+    [[ "$PROTECT_PID" =~ ^[1-9][0-9]{0,9}$ ]] || {
+        echo "ERROR: PID 必须是 1..10 位正整数" >&2
+        exit 2
+    }
+    [[ "$PROTECT_STARTTIME" =~ ^[1-9][0-9]*$ ]] || {
+        echo "ERROR: STARTTIME 必须是正整数" >&2
+        exit 2
+    }
+else
+    (( $# <= 3 )) || {
+        echo "ERROR: 用法: $0 [CPU_MAX_KHZ|0] [KVM_HALT_POLL_NS] [SPLIT_LOCK_MITIGATE|0]" >&2
+        exit 2
+    }
+    CPU_MAX_KHZ="${1:-0}"
+    KVM_HALT_POLL_NS="${2:-0}"
+    SPLIT_LOCK_MITIGATE="${3:-0}"
+    if ! [[ "$CPU_MAX_KHZ" =~ ^[0-9]+$ ]] || \
+       (( CPU_MAX_KHZ != 0 && (CPU_MAX_KHZ < 100000 || CPU_MAX_KHZ > 10000000) )); then
+        echo "ERROR: CPU_MAX_KHZ 必须是 0 或 [100000,10000000] 的整数 kHz" >&2
+        exit 2
+    fi
+    if ! [[ "$KVM_HALT_POLL_NS" =~ ^[0-9]+$ ]] || (( KVM_HALT_POLL_NS > 10000000 )); then
+        echo "ERROR: KVM_HALT_POLL_NS 必须是 [0,10000000] 的整数 ns" >&2
+        exit 2
+    fi
+    case "$SPLIT_LOCK_MITIGATE" in
+        0|1) ;;
+        *)
+            echo "ERROR: SPLIT_LOCK_MITIGATE 必须是 0 或 1" >&2
+            exit 2
+            ;;
+    esac
+fi
 
 if [[ $EUID -ne 0 ]]; then
     echo "rerunning with sudo..."
     # 直接以脚本路径(非 'bash 脚本')重入 sudo，命令名=脚本本身，匹配
     # /etc/sudoers.d/qemu-vmate-host 的固定 helper NOPASSWD 规则；参数原样带过去。
     exec sudo -- "$0" "$@"
+fi
+
+# Linux 的 oom_score_adj 是进程属性，fork/exec 后由后代继承，进程退出即消失。
+# -500 会让普通宿主编译/桌面任务先于 VM 成为全局 OOM 候选，但不像 -1000 那样
+# 把整棵 VM 树变成不可杀进程。策略值和 proc 根均固定，不能由 NOPASSWD 调用者注入。
+# 安装器写入 sudoers 的目标 UID 是资源授权边界：脚本/锁校验用于防止误选和跨实例，
+# 不是把该 UID 当成潜在攻击者的加密凭据；此权限只应授予本机 VM 操作者。
+readonly HOST_OOM_SCORE_POLICY="-500"
+readonly HOST_OOM_POLICY_NAME="oom-score-v1"
+readonly PROC_ROOT="/proc"
+readonly RUN_USER_ROOT="/run/user"
+readonly TMP_ROOT="/tmp"
+
+_vmate_read_proc_generation() {
+    local pid="$1" stat_line rest
+    local -a fields=()
+
+    [[ -r "$PROC_ROOT/$pid/stat" ]] || return 1
+    { stat_line="$(<"$PROC_ROOT/$pid/stat")"; } 2>/dev/null || return 1
+    rest="${stat_line##*) }"
+    read -ra fields <<<"$rest"
+    (( ${#fields[@]} >= 20 )) || return 1
+    [[ "${fields[0]}" =~ ^[A-Za-z]$ && "${fields[19]}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s %s\n' "${fields[0]}" "${fields[19]}"
+}
+
+_vmate_private_dir_owned_by() {
+    local directory="$1" expected_uid="$2"
+    local owner mode
+
+    [[ -d "$directory" && ! -L "$directory" ]] || return 1
+    owner="$(stat -Lc '%u' -- "$directory" 2>/dev/null)" || return 1
+    mode="$(stat -Lc '%a' -- "$directory" 2>/dev/null)" || return 1
+    [[ "$owner" == "$expected_uid" && "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    (( (8#$mode & 8#077) == 0 ))
+}
+
+_vmate_validate_launcher_lock() {
+    local pid="$1" instance="$2" expected_uid="$3"
+    local fd_path lock_path candidate base parent owner probe_fd=""
+
+    fd_path="$PROC_ROOT/$pid/fd/8"
+    [[ -e "$fd_path" ]] || return 1
+    lock_path="$(realpath -e -- "$fd_path" 2>/dev/null)" || return 1
+
+    for base in "$RUN_USER_ROOT/$expected_uid" \
+            "$TMP_ROOT/qemu-stealth-$expected_uid"; do
+        parent="$base/qemu-stealth"
+        candidate="$parent/instance-$instance.lock"
+        [[ -e "$candidate" ]] || continue
+        [[ "$lock_path" == "$(realpath -e -- "$candidate" 2>/dev/null)" ]] || continue
+        _vmate_private_dir_owned_by "$base" "$expected_uid" || return 1
+        _vmate_private_dir_owned_by "$parent" "$expected_uid" || return 1
+        [[ -f "$lock_path" && ! -L "$lock_path" ]] || return 1
+        owner="$(stat -Lc '%u' -- "$lock_path" 2>/dev/null)" || return 1
+        [[ "$owner" == "$expected_uid" ]] || return 1
+
+        # FD8 指向正确文件还不够；必须已有另一 open-file-description 持有 flock。
+        # 若能立即取得锁，说明目标不是已通过 sv-cli 生命周期门禁的启动器。
+        exec {probe_fd}<"$lock_path" || return 1
+        if flock -n "$probe_fd"; then
+            flock -u "$probe_fd" 2>/dev/null || true
+            exec {probe_fd}<&-
+            return 1
+        fi
+        exec {probe_fd}<&-
+        return 0
+    done
+    return 1
+}
+
+_vmate_validate_launcher_script() {
+    local pid="$1" expected_uid="$2"
+    local proc_dir exe_path bash_path bash_alt script_arg target_cwd script_path
+    local script_owner script_mode fd script_open=0
+    local -a argv=()
+
+    proc_dir="$PROC_ROOT/$pid"
+    exe_path="$(realpath -e -- "$proc_dir/exe" 2>/dev/null)" || return 1
+    bash_path="$(realpath -e -- /bin/bash 2>/dev/null)" || return 1
+    bash_alt="$(realpath -e -- /usr/bin/bash 2>/dev/null || true)"
+    [[ "$exe_path" == "$bash_path" || ( -n "$bash_alt" && "$exe_path" == "$bash_alt" ) ]] \
+        || return 1
+
+    mapfile -d '' -t argv < "$proc_dir/cmdline" || return 1
+    (( ${#argv[@]} >= 2 )) || return 1
+    [[ "${argv[0]##*/}" == "bash" ]] || return 1
+    script_arg="${argv[1]}"
+    if [[ "$script_arg" != /* ]]; then
+        target_cwd="$(realpath -e -- "$proc_dir/cwd" 2>/dev/null)" || return 1
+        script_arg="$target_cwd/$script_arg"
+    fi
+    script_path="$(realpath -e -- "$script_arg" 2>/dev/null)" || return 1
+    [[ "${script_path##*/}" == "start-vm.sh" && -f "$script_path" && -x "$script_path" ]] \
+        || return 1
+    script_owner="$(stat -Lc '%u' -- "$script_path" 2>/dev/null)" || return 1
+    script_mode="$(stat -Lc '%a' -- "$script_path" 2>/dev/null)" || return 1
+    # 开发工作区通常属于调用用户；发行版/只读部署也允许 root-owned 启动器。
+    [[ "$script_mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    if [[ "$script_owner" == "0" ]]; then
+        (( (8#$script_mode & 8#022) == 0 )) || return 1
+    elif [[ "$script_owner" != "$expected_uid" ]]; then
+        return 1
+    fi
+
+    # Bash 打开的脚本通常位于 FD255，但不依赖这个实现细节；按 inode 扫描目标
+    # 自己的 FD，要求脚本在校验时仍由该进程打开。
+    for fd in "$proc_dir"/fd/*; do
+        [[ -e "$fd" ]] || continue
+        if [[ "$fd" -ef "$script_path" ]]; then
+            script_open=1
+            break
+        fi
+    done
+    (( script_open == 1 ))
+}
+
+_vmate_validate_launcher() {
+    local pid="$1" starttime="$2" instance="$3" expected_uid="$4"
+    local state actual_start real_uid
+
+    read -r state actual_start < <(_vmate_read_proc_generation "$pid") || return 1
+    [[ "$actual_start" == "$starttime" \
+       && "$state" != "Z" && "$state" != "z" \
+       && "$state" != "X" && "$state" != "x" ]] || return 1
+    real_uid="$(awk '$1 == "Uid:" { print $2; exit }' \
+        "$PROC_ROOT/$pid/status" 2>/dev/null)" || return 1
+    [[ "$real_uid" == "$expected_uid" ]] || return 1
+    _vmate_validate_launcher_script "$pid" "$expected_uid" || return 1
+    _vmate_validate_launcher_lock "$pid" "$instance" "$expected_uid"
+}
+
+_vmate_protect_launcher() {
+    local expected_uid="${SUDO_UID:-0}"
+    local score_path current_score desired_score actual_score score_fd=""
+
+    [[ "$expected_uid" =~ ^[0-9]{1,10}$ ]] || {
+        echo "ERROR: 无法确定 sudo 调用用户 UID" >&2
+        return 1
+    }
+    _vmate_validate_launcher \
+        "$PROTECT_PID" "$PROTECT_STARTTIME" "$PROTECT_INSTANCE" "$expected_uid" || {
+        echo "ERROR: OOM 保护目标不是当前用户持锁的 start-vm.sh 启动器" >&2
+        return 1
+    }
+
+    score_path="$PROC_ROOT/$PROTECT_PID/oom_score_adj"
+    [[ -f "$score_path" && ! -L "$score_path" && -r "$score_path" && -w "$score_path" ]] || {
+        echo "ERROR: 当前 Linux 内核不提供可写 oom_score_adj" >&2
+        return 1
+    }
+    current_score="$(<"$score_path")"
+    if ! [[ "$current_score" =~ ^-?[0-9]+$ ]] \
+       || (( current_score < -1000 || current_score > 1000 )); then
+        echo "ERROR: 目标 oom_score_adj 当前值无效" >&2
+        return 1
+    fi
+    desired_score="$HOST_OOM_SCORE_POLICY"
+    (( current_score < desired_score )) && desired_score="$current_score"
+
+    # 先打开旧 generation 的 proc inode，再复核 PID/starttime/脚本/实例锁；即使
+    # PID 在两次检查间退出并复用，后续写也不会落到新进程的 proc 文件上。
+    exec {score_fd}<>"$score_path" || {
+        echo "ERROR: 无法打开目标 oom_score_adj" >&2
+        return 1
+    }
+    if ! _vmate_validate_launcher \
+            "$PROTECT_PID" "$PROTECT_STARTTIME" "$PROTECT_INSTANCE" "$expected_uid"; then
+        exec {score_fd}>&-
+        echo "ERROR: OOM 保护写入前目标 generation 已变化" >&2
+        return 1
+    fi
+    if ! printf '%s\n' "$desired_score" >&"$score_fd"; then
+        exec {score_fd}>&-
+        echo "ERROR: 写入目标 oom_score_adj 失败" >&2
+        return 1
+    fi
+    exec {score_fd}>&-
+
+    _vmate_validate_launcher \
+        "$PROTECT_PID" "$PROTECT_STARTTIME" "$PROTECT_INSTANCE" "$expected_uid" || {
+        echo "ERROR: OOM 保护写入后目标 generation 已变化" >&2
+        return 1
+    }
+    actual_score="$(<"$score_path")"
+    [[ "$actual_score" == "$desired_score" ]] || {
+        echo "ERROR: oom_score_adj 写入后复核失败" >&2
+        return 1
+    }
+    printf 'host-memory-protect: policy=%s score=%s pid=%s\n' \
+        "$HOST_OOM_POLICY_NAME" "$desired_score" "$PROTECT_PID"
+}
+
+if [[ "$COMMAND" == "protect-launcher" ]]; then
+    _vmate_protect_launcher
+    exit
 fi
 
 # power-profiles-daemon 会在首次启动时按自己的持久状态重新应用 governor/EPP。

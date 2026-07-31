@@ -42,6 +42,10 @@ sudoers="$tmp/etc/sudoers.d/qemu-vmate-host"
 [[ "$(stat -c '%a' "$perf_dest")" == "755" ]] || fail "performance helper mode 错误"
 grep -F '/proc/sys/kernel/split_lock_mitigate' "$perf_dest" >/dev/null \
     || fail "performance helper 缺少 split-lock 限速管理"
+grep -F 'HOST_OOM_SCORE_POLICY="-500"' "$perf_dest" >/dev/null \
+    || fail "performance helper 缺少固定 OOM 保护策略"
+grep -F 'protect-launcher' "$perf_dest" >/dev/null \
+    || fail "performance helper 缺少启动器 OOM 保护子命令"
 [[ "$(stat -c '%a' "$iso_dest")" == "755" ]] || fail "isolate helper mode 错误"
 [[ "$(stat -c '%a' "$runtime_dest")" == "755" ]] || fail "isolate runtime mode 错误"
 [[ "$(stat -c '%a' "$cgroup_dest")" == "755" ]] || fail "isolate cgroup runtime mode 错误"
@@ -345,6 +349,9 @@ if "$PERF" 0 10000001 >/dev/null 2>&1; then
 fi
 if "$PERF" 0 0 2 >/dev/null 2>&1; then
     fail "performance helper 应拒绝非 0/1 的 split-lock 策略"
+fi
+if "$PERF" protect-launcher 1 2 3 -1000 >/dev/null 2>&1; then
+    fail "performance helper 不得接受调用方注入 OOM 分数"
 fi
 
 # root helper 的锁不得位于 /tmp，也不得允许环境变量改变 cgroup/锁路径；目标进程

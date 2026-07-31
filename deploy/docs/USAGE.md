@@ -12,7 +12,7 @@ Linux 严格启动至少需要：
 - x86_64 Linux，BIOS 已开启 Intel VT-x/EPT 或 AMD-V/NPT，当前用户可访问 `/dev/kvm`。
 - 本仓库编译的 patched `qemu-system-x86_64` 和 `qemu-img`；不能用 stock QEMU 代替。
 - OVMF、swtpm/swtpm-tools、Python 3、`socat`、`flock`（`jq` 用于诊断输出）。
-- 默认 host tune/CPU isolate 所需的 root-owned helper。
+- 默认 host tune、每实例 OOM 保护和 CPU isolate 所需的 root-owned helper。
 - 至少 2 个可用逻辑 CPU；`CPUS` 只能为 2 或 4，并须等于所选 2C2T/2C4T/4C4T SKU 的完整线程数。
 
 新 Ubuntu host 应按用途安装依赖，不要把运行时、固件重建和 Windows 交叉打包工具混成一组。完整包名、命令对应关系、Podman/rootless 边界及安装后自检见 [开发与跨平台验证依赖](DEVELOPMENT-DEPENDENCIES.md)。
@@ -199,6 +199,10 @@ NVMe、EDID、USB、PCI identity、fb-shm 等定制属性；不要在生产中�
 
 - 把 `host-performance.sh`、`host-cpu-isolate.sh` 及其 runtime 安装到
   `/usr/local/libexec/qemu-vmate-*`，固定为 `root:root/0755`。
+- `host-performance.sh` 同时提供固定策略的 `protect-launcher` 子命令；启动器只把
+  调用 UID、当前实例锁、Bash 脚本 FD 和 PID generation 全部核对通过的
+  `start-vm.sh` 交给它。该 UID 是安装器明确写入 sudoers 的本机 VM 操作者；
+  调用方不能传入自定义 OOM 分数，也不能修改其它 UID 的进程。
 - 生成最小 `NOPASSWD:NOSETENV` sudoers，绝不授权用户可写的 Git 工作区脚本。
 - 把本次构建的 QEMU canonical path、device/inode 与 SHA-256 写入 root-owned 信任清单，
   防止同名进程或替换后的二进制进入 CPU 隔离事务。
@@ -241,8 +245,8 @@ sudo deploy/scripts/setup-host-helpers.sh check
 ```
 
 不要编辑 `/usr/local/libexec` 中的安装副本，也不要手工把用户可写的仓库脚本加入
-`NOPASSWD`。默认 `HOST_TUNE=1` 和 `CPU_ISOLATE=1` 会在 VM 生命周期内调用安装副本；
-安装器本身不会立即修改 governor 或划分 cpuset。
+`NOPASSWD`。默认 `HOST_OOM_PROTECT=1`、`HOST_TUNE=1` 和 `CPU_ISOLATE=1` 会在 VM
+生命周期内调用安装副本；安装器本身不会立即修改 governor、OOM 分数或划分 cpuset。
 
 ### 3.2 检查 KVM/TSC
 
@@ -376,6 +380,7 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `CPUS` | `4` | 只允许 `2`/`4`，并须等于所选 2C2T/2C4T/4C4T SKU 的完整线程数 |
 | `MEM_TOTAL_MB` | 新 profile `8192` | 2/4/8 GiB 由 manifest 约束；新建默认 2×4 GiB |
 | `TPM` | `auto` | 跟随 profile 的主板能力、版本和前端；`1` 强制要求支持，`0` 显式关闭 |
+| `HOST_OOM_PROTECT` | `1` | 为当前实例进程树临时设置 `oom_score_adj=-500`；退出即失效 |
 | `HOST_TUNE` | `1` | PPD performance（无 PPD 时回退 performance governor）、`halt_poll`、THP defrag |
 | `CPU_FREQ_CAP` | **`0`** | 默认不全局封顶；`--freq-cap` 才按目标 CPU 上限启用 |
 | `CPU_ISOLATE` | `1` | 严格启动闸门 + NUMA-aware pinner + 每实例 cgroup cpuset |
@@ -392,7 +397,16 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 `CPU_FREQ_CAP=0` 是有意的默认值：全局 `scaling_max_freq` 会影响管理核和其它 VM，尤其不适合未经评估的高核/双路 E5。
 优先用 NUMA/cpuset 放置；只有确认宿主调度策略后才使用 `--freq-cap`。
 
-宿主内存使用单个 `memory-backend-memfd,share=on,prealloc=off` 按需占页，不预留无效 hugepage 池；`share=on` 供 VMI 读取同一份 guest RAM，不改变客体容量。
+宿主内存使用单个 `memory-backend-memfd,share=on,prealloc=off` 按需占页，不预留无效
+hugepage 池；`share=on` 供 VMI 读取同一份 guest RAM，不改变客体容量。
+`HOST_OOM_PROTECT=1` 在创建任何 QEMU/swtpm/显示守护前保护当前启动器，后代通过
+Linux fork/exec 继承固定 `oom_score_adj=-500`。它独立于 VM 的 2/4/8 GiB RAM、
+CPU 隔离开关以及 Windows/Linux 客体类型；只探测稳定的 `/proc/PID/oom_score_adj`
+接口，不按 Ubuntu 24/26 版本号硬编码。保护随进程退出自动消失，不修改 swap、
+`fstab`、sysctl 或 systemd 全局配置，也不使用会让进程完全不可杀的 `-1000`。
+该策略会让普通编译/桌面任务优先成为全局 OOM 候选，但不会凭空增加 RAM；
+`MEM_GUARD` 仍负责启动时容量检查。只有明确接受 VM 仍可能被优先杀掉时，才临时设置
+`HOST_OOM_PROTECT=0`。
 
 ## 6. 显示与 fb-shm
 

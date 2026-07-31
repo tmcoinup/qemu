@@ -41,6 +41,37 @@ socat - unix-connect:deploy/run/vm${VM_ID}.qmp
 
 ## Host KVM 侧
 
+### `/usr/bin/python3 terminated by signal KILL` / VM 被宿主杀掉
+
+先查同一时间的内核日志，不要从最后一条 USB 告警推断：
+
+```bash
+journalctl -k -b --since '-10 min' \
+  | grep -E 'oom-kill|Out of memory|Killed process|global_oom'
+```
+
+若同时出现 `global_oom` 和 `Out of memory: Killed process ... qemu-system-x86`，
+根因是 Linux 内核全局 OOM。`usb_desc_get_descriptor: ... unknown type 35` 是客体
+HID 对 USB descriptor `0x23` 的请求被 QEMU 拒绝，和 SIGKILL 没有因果关系。
+启动命令显示 `/usr/bin/python3` 是因为 ptracer wrapper 最初由 Python 执行，随后
+`exec` 成 QEMU；CPU “专属 CPU 已归还宿主”则是 QEMU 消失后的正常清理。
+
+当前启动器默认在每次真实启动时给实例进程树设置临时 `oom_score_adj=-500`，不改
+swap、sysctl 或持久系统配置。VM 运行后可这样复核：
+
+```bash
+instance=1
+qemu_pid="$(pgrep -af 'qemu-system-x86.*-name win10-'"$instance"',' \
+    | awk 'NR == 1 { print $1 }')"
+cat "/proc/$qemu_pid/oom_score_adj"        # 期望 -500，或管理员预设的更小值
+cat /proc/meminfo | grep -E 'MemAvailable|SwapFree'
+```
+
+如果 helper 版本过旧，启动器会在产生 VM 副作用前拒绝并提示执行
+`deploy/tools/build.sh --install-host-helpers`。`-500` 只改变 OOM 选择顺序，不会创造
+内存；宿主持续并发大规模链接/编译时，仍应限制并发或增加实际 RAM/swap。不要设成
+`-1000`，否则可能在极端内存耗尽时妨碍内核恢复。
+
 ### perf kvm stat — 查 vm-exit 分布
 ```bash
 sudo perf kvm --host --guest stat live

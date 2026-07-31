@@ -74,6 +74,7 @@ QUICK_TESTS = (
     "test_hardware_serials.sh",
     "test_host_compatibility_platform.sh",
     "test_host_display_cache_guard.sh",
+    "test_host_oom_protection.sh",
     "test_host_performance_ppd.sh",
     "test_household_compatibility_catalog.sh",
     "test_household_cross_generation_fallback.sh",

@@ -1,6 +1,7 @@
 #ifndef QEMU_HID_H
 #define QEMU_HID_H
 
+#include "qemu/bitmap.h"
 #include "ui/input.h"
 
 #define HID_MOUSE     1
@@ -33,6 +34,12 @@ typedef struct HIDMouseState {
 
 typedef struct HIDKeyboardState {
     uint32_t keycodes[QUEUE_LENGTH];
+    /*
+     * Host 侧入队状态只用于过滤 USB HID duplicate make，
+     * 不代表 guest report。该 advisory bitmap 不迁移；
+     * 目的端首次事件会重新建立状态。
+     */
+    DECLARE_BITMAP(host_pressed, Q_KEY_CODE__MAX);
     uint16_t modifiers;
     uint8_t leds;
     uint8_t key[16];

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""严格进程组 guard 的运行时能力探测与空闲开销回归。"""
+"""严格 session guard 的运行时能力探测与空闲开销回归。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 GUARD_PATH = ROOT / "deploy" / "scripts" / "lib" / "vm-strict-group-guard.py"
 SPEC = importlib.util.spec_from_file_location("vm_strict_group_guard", GUARD_PATH)
 if SPEC is None or SPEC.loader is None:
-    raise RuntimeError(f"无法加载进程组 guard: {GUARD_PATH}")
+    raise RuntimeError(f"无法加载 session guard: {GUARD_PATH}")
 GUARD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GUARD)
 
@@ -32,7 +32,7 @@ class RuntimePidfdProbeTest(unittest.TestCase):
     def test_pidfd_signal_permission_error_is_unsupported_and_closes_fd(self) -> None:
         with mock.patch.object(GUARD.os, "getpid", return_value=123), \
              mock.patch.object(
-                 GUARD, "process_identity", return_value=("S", "456", 123)
+                 GUARD, "process_identity", return_value=("S", "456", 123, 123)
              ), \
              mock.patch.object(GUARD, "generation_is_live", return_value=True), \
              mock.patch.object(GUARD.os, "pidfd_open", return_value=77), \
@@ -48,7 +48,7 @@ class RuntimePidfdProbeTest(unittest.TestCase):
     def test_success_probe_sends_signal_zero_and_closes_fd(self) -> None:
         with mock.patch.object(GUARD.os, "getpid", return_value=123), \
              mock.patch.object(
-                 GUARD, "process_identity", return_value=("S", "456", 123)
+                 GUARD, "process_identity", return_value=("S", "456", 123, 123)
              ), \
              mock.patch.object(GUARD, "generation_is_live", return_value=True), \
              mock.patch.object(GUARD.os, "pidfd_open", return_value=77), \
@@ -81,8 +81,8 @@ class GuardIdleCostTest(unittest.TestCase):
              mock.patch.object(instance, "_spawn_sentinel", return_value=True), \
              mock.patch.object(GUARD.subprocess, "Popen", return_value=child), \
              mock.patch.object(GUARD.time, "sleep"), \
-             mock.patch.object(instance, "_other_group_members") as scan_mock, \
-             mock.patch.object(instance, "_terminate_group", return_value=143):
+             mock.patch.object(instance, "_other_session_members") as scan_mock, \
+             mock.patch.object(instance, "_terminate_session", return_value=143):
             self.assertEqual(instance.run(), 143)
         scan_mock.assert_not_called()
 
@@ -103,7 +103,7 @@ class GuardIdleCostTest(unittest.TestCase):
              mock.patch.object(instance, "_spawn_sentinel", side_effect=adopt), \
              mock.patch.object(GUARD.subprocess, "Popen", return_value=child), \
              mock.patch.object(
-                 instance, "_other_group_members", return_value=[]
+                 instance, "_other_session_members", return_value=[]
              ) as scan_mock, \
              mock.patch.object(instance, "_disarm_sentinel", return_value=True):
             self.assertEqual(instance.run(), 0)

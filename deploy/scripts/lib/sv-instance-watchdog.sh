@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 
-sv_proc_state_starttime_pgid() {
+sv_proc_state_starttime_pgid_sid() {
     local pid="$1" stat_line rest
     local -a fields=()
     [[ -r "/proc/$pid/stat" ]] || return 1
@@ -10,8 +10,16 @@ sv_proc_state_starttime_pgid() {
     read -ra fields <<< "$rest"
     (( ${#fields[@]} >= 20 )) || return 1
     [[ "${fields[0]}" =~ ^[A-Za-z]$ && "${fields[19]}" =~ ^[0-9]+$ ]] || return 1
-    [[ "${fields[2]}" =~ ^[0-9]+$ ]] || return 1
-    printf '%s %s %s\n' "${fields[0]}" "${fields[19]}" "${fields[2]}"
+    [[ "${fields[2]}" =~ ^[0-9]+$ && "${fields[3]}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s %s %s %s\n' \
+        "${fields[0]}" "${fields[19]}" "${fields[2]}" "${fields[3]}"
+}
+
+sv_proc_state_starttime_pgid() {
+    local state start pgid _sid
+    read -r state start pgid _sid \
+        < <(sv_proc_state_starttime_pgid_sid "$1") || return 1
+    printf '%s %s %s\n' "$state" "$start" "$pgid"
 }
 
 sv_proc_state_starttime() {
@@ -24,6 +32,13 @@ sv_proc_pgid() {
     local _state _start pgid
     read -r _state _start pgid < <(sv_proc_state_starttime_pgid "$1") || return 1
     printf '%s\n' "$pgid"
+}
+
+sv_proc_sid() {
+    local _state _start _pgid sid
+    read -r _state _start _pgid sid \
+        < <(sv_proc_state_starttime_pgid_sid "$1") || return 1
+    printf '%s\n' "$sid"
 }
 
 sv_proc_generation_is_live() {

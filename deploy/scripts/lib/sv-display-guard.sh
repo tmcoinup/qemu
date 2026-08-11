@@ -58,11 +58,12 @@ sv_display_signal_bound_guard_directly() {
     (( ${#fields[@]} > 19 )) || return 1
     [[ "${fields[0]}" != [XxZz] \
        && "${fields[19]}" == "$SV_DISPLAY_CHILD_START" \
-       && "${fields[2]}" == "$SV_DISPLAY_CHILD_PID" ]] || return 1
+       && "${fields[2]}" == "$SV_DISPLAY_CHILD_PID" \
+       && "${fields[3]}" == "$SV_DISPLAY_CHILD_PID" ]] || return 1
 
     # Bash 仍把 guard 列为本函数创建且尚未 wait 的 running job；再结合
-    # starttime 与 PGID=PID 复核后，只向 leader 本身发送内建信号。leader 的
-    # 已安装 handler/sentinel 会清理组，不对可能复用的数值 PGID 直接 kill。
+    # starttime、PGID=PID、SID=PID 复核后，只向 leader 本身发送内建信号。
+    # leader 的 handler/sentinel 会清理 session，不直接 kill 可复用的数字 SID。
     mapfile -t job_pids < <(jobs -pr)
     for job_pid in "${job_pids[@]}"; do
         if [[ "$job_pid" == "$SV_DISPLAY_CHILD_PID" ]]; then
@@ -78,8 +79,8 @@ sv_display_signal_owned_child() {
 
     [[ "${SV_DISPLAY_CHILD_PID:-}" =~ ^[0-9]+$ ]] || return 1
     if [[ "${SV_DISPLAY_GROUP_GUARDED:-0}" == "1" ]]; then
-        # setsid/代际尚未绑定时只能保留 pending；此刻用数值 PGID 降级发送，
-        # 可能命中 guard 建组前所属的调用方进程组。
+        # setsid/代际尚未绑定时只能保留 pending；此刻不能用数值 SID 降级发送，
+        # 否则可能命中 guard 建立 session 前所属的调用方进程组。
         [[ "${SV_DISPLAY_CHILD_START:-}" =~ ^[0-9]+$ ]] || return 2
         if [[ ! -x "${SV_DISPLAY_GROUP_GUARD:-}" ]] \
            || ! "$SV_DISPLAY_GROUP_GUARD" signal "$SV_DISPLAY_CHILD_PID" \
@@ -107,7 +108,7 @@ sv_display_signal_owned_child() {
     kill "-$requested" -- "$SV_DISPLAY_CHILD_PID" 2>/dev/null
 }
 
-sv_display_adopt_child_group() {
+sv_display_adopt_child_session() {
     # 外部 USR1 helper 成功送达与 Bash 进入 if-body 之间仍可执行 pending trap；
     # ADOPTING 让该命令边界也能安全使用已绑定 direct-child fallback。
     SV_DISPLAY_GROUP_ADOPTING=1
@@ -127,9 +128,8 @@ sv_display_forward_signal() {
 
     SV_DISPLAY_SIGNAL_STATUS="$status"
     SV_DISPLAY_PENDING_SIGNAL="$signal"
-    # setsid 路径把 inhibit 与 QEMU 放进独立进程组；同时发送给整个组和直接
-    # 子进程，可覆盖“信号恰好早于 setsid 建组”的极短竞态。没有 setsid 时
-    # 退化为直接子进程转发，stop-vm 仍会按 QEMU PID 精确终止客机。
+    # guarded setsid 路径把 inhibit 与 QEMU 放进独立 session；非 guarded 的
+    # setsid 回退仍按进程组转发。两者都覆盖“信号恰好早于建组”的极短竞态。
     if [[ -n "${SV_DISPLAY_CHILD_PID:-}" ]]; then
         if [[ "${SV_DISPLAY_GROUP_GUARDED:-0}" != "1" \
            || "${SV_DISPLAY_CHILD_START:-}" =~ ^[0-9]+$ ]]; then
@@ -138,18 +138,19 @@ sv_display_forward_signal() {
     fi
 }
 
-sv_display_wait_for_child_group() {
-    local pid="$1" attempt state start pgid
+sv_display_wait_for_child_session() {
+    local pid="$1" attempt state start pgid sid
     for ((attempt=0; attempt<200; attempt++)); do
         if [[ "${SV_DISPLAY_GROUP_GUARDED:-0}" == "1" ]]; then
-            read -r state start pgid \
+            read -r state start pgid sid \
                 < <("$SV_DISPLAY_GROUP_GUARD" identity "$pid") || true
-        elif declare -F sv_proc_state_starttime_pgid >/dev/null; then
-            read -r state start pgid < <(sv_proc_state_starttime_pgid "$pid") || true
+        elif declare -F sv_proc_state_starttime_pgid_sid >/dev/null; then
+            read -r state start pgid sid \
+                < <(sv_proc_state_starttime_pgid_sid "$pid") || true
         fi
         if [[ "$start" =~ ^[0-9]+$ && ! "$state" =~ ^[XxZz]$ \
-           && "$pgid" == "$pid" ]]; then
-            printf '%s %s\n' "$start" "$pgid"
+           && "$pgid" == "$pid" && "$sid" == "$pid" ]]; then
+            printf '%s %s\n' "$start" "$sid"
             return 0
         fi
         sleep 0.01
@@ -158,15 +159,15 @@ sv_display_wait_for_child_group() {
 }
 
 sv_display_stop_child_generation() {
-    local pid="$1" start="$2" pgid="${3:-}" attempt _state _pgid
+    local pid="$1" start="$2" sid="${3:-}" attempt _state _pgid
     if [[ ! "$start" =~ ^[0-9]+$ ]]; then
         read -r _state start _pgid < <(sv_proc_state_starttime_pgid "$pid") || true
     fi
-    [[ "$pgid" =~ ^[0-9]+$ ]] || pgid="$pid"
-    # strict group guard 用 pidfd 接收 TERM，再由仍存活的 PGID leader 对本组完成
-    # TERM→KILL；父 shell 不对可复用的数字 PID/PGID 直接发信号。
+    [[ "$sid" =~ ^[0-9]+$ ]] || sid="$pid"
+    # strict guard 用 pidfd 接收 TERM，再由仍存活的 session leader 对本启动链
+    # 完成 TERM→KILL；父 shell 不对可复用的数字 PID/SID 直接发信号。
     sv_proc_generation_is_live "$pid" "$start" || return 0
-    [[ "$(sv_proc_pgid "$pid" 2>/dev/null || true)" == "$pgid" ]] || return 0
+    [[ "$(sv_proc_sid "$pid" 2>/dev/null || true)" == "$sid" ]] || return 0
     SV_DISPLAY_CHILD_START="$start"
     sv_display_signal_owned_child TERM \
         || { sv_proc_generation_is_live "$pid" "$start" && return 1; }
@@ -178,12 +179,12 @@ sv_display_stop_child_generation() {
 }
 
 sv_display_wait_and_restore() {
-    local child_status=0 handshake_failed=0 child_start="" child_pgid=""
+    local child_status=0 handshake_failed=0 child_start="" child_sid=""
     local _wait_state wait_start
     local parent_pid _parent_state parent_start guard guard_ready=0
 
     # EXIT 是最后一道保险；终端断开、Ctrl+C/Ctrl+\ 和 stop 的 TERM 都先转发
-    # 给 inhibit/QEMU 进程组，再由 wait 路径统一恢复 xset。wait 可能被 trap
+    # 给 inhibit/QEMU session，再由 wait 路径统一恢复 xset。wait 可能被 trap
     # 中断而子进程尚未退出，因此需要继续等待到 kill -0 确认进程消失，不能
     # 过早恢复后留下仍在运行的 VM。
     trap sv_display_cleanup_runtime EXIT
@@ -222,7 +223,7 @@ sv_display_wait_and_restore() {
         SV_DISPLAY_CHILD_PID=$!
         SV_DISPLAY_CHILD_GROUP=1
     elif sv_display_strict_cpu_supervision; then
-        echo "ERROR: 严格 CPU 隔离缺少 QEMU 进程组守护" >&2
+        echo "ERROR: 严格 CPU 隔离缺少 QEMU session 守护" >&2
         return 1
     elif command -v setsid >/dev/null 2>&1; then
         # util-linux setsid --wait 会把被包装命令的退出码原样交回，并让 TERM/INT
@@ -242,9 +243,9 @@ sv_display_wait_and_restore() {
         sv_display_signal_owned_child "${SV_DISPLAY_PENDING_SIGNAL:-TERM}" || true
     fi
     if [[ "${SV_DISPLAY_GROUP_GUARDED:-0}" == "1" ]]; then
-        if ! read -r child_start child_pgid \
-                < <(sv_display_wait_for_child_group "$SV_DISPLAY_CHILD_PID"); then
-            echo "ERROR: 无法建立 QEMU 独立进程组" >&2
+        if ! read -r child_start child_sid \
+                < <(sv_display_wait_for_child_session "$SV_DISPLAY_CHILD_PID"); then
+            echo "ERROR: 无法建立 QEMU 独立 session" >&2
             handshake_failed=1
             read -r _parent_state SV_DISPLAY_CHILD_START _ \
                 < <("$SV_DISPLAY_GROUP_GUARD" identity "$SV_DISPLAY_CHILD_PID") \
@@ -261,8 +262,8 @@ sv_display_wait_and_restore() {
         fi
         if ! sv_display_strict_cpu_supervision \
            && (( handshake_failed == 0 && SV_DISPLAY_SIGNAL_STATUS == 0 )); then
-            if ! sv_display_adopt_child_group; then
-                echo "ERROR: 无法提交 QEMU 进程组" >&2
+            if ! sv_display_adopt_child_session; then
+                echo "ERROR: 无法提交 QEMU session" >&2
                 handshake_failed=1
                 sv_display_signal_owned_child TERM || true
             fi
@@ -270,15 +271,15 @@ sv_display_wait_and_restore() {
     fi
     if sv_display_strict_cpu_supervision; then
         if [[ "${SV_DISPLAY_GROUP_GUARDED:-0}" != "1" ]]; then
-            echo "ERROR: 无法建立严格 QEMU 独立进程组" >&2
+            echo "ERROR: 无法建立严格 QEMU 独立 session" >&2
             handshake_failed=1
         fi
         if (( handshake_failed == 0 && SV_DISPLAY_SIGNAL_STATUS == 0 )); then
             if ! sv_cpu_isolate_supervise \
-                    "$SV_DISPLAY_CHILD_PID" "$child_start" "$child_pgid"; then
+                    "$SV_DISPLAY_CHILD_PID" "$child_start" "$child_sid"; then
                 handshake_failed=1
-            elif ! sv_display_adopt_child_group; then
-                echo "ERROR: 无法提交严格 QEMU 进程组" >&2
+            elif ! sv_display_adopt_child_session; then
+                echo "ERROR: 无法提交严格 QEMU session" >&2
                 handshake_failed=1
             fi
         else
@@ -286,7 +287,7 @@ sv_display_wait_and_restore() {
         fi
         if (( handshake_failed )); then
             sv_display_stop_child_generation \
-                "$SV_DISPLAY_CHILD_PID" "$child_start" "$SV_DISPLAY_CHILD_PID" \
+                "$SV_DISPLAY_CHILD_PID" "$child_start" "$child_sid" \
                 || true
         fi
     fi
@@ -341,7 +342,7 @@ sv_display_guard_launch() {
     SV_DISPLAY_GROUP_ADOPTED=0
 
     # 无本地 SDL 窗口时不触碰桌面状态；严格 CPU 隔离仍保留轻量父 shell，
-    # 让 paused QEMU 在 RUNNING 握手前始终有精确进程组监督者。
+    # 让 paused QEMU 在 RUNNING 握手前始终有精确 session 监督者。
     if [[ "${SDL:-0}" != "1" || "${HEADLESS:-0}" == "1" || -z "${DISPLAY:-}" ]]; then
         if sv_display_strict_cpu_supervision; then
             sv_display_wait_and_restore "${command[@]}"

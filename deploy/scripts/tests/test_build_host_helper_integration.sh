@@ -22,7 +22,7 @@ event_log="$tmp/events.log"
 sudo_log="$tmp/sudo.log"
 output_log="$tmp/output.log"
 mkdir -p "$fake_repo/deploy/tools/lib" "$fake_repo/deploy/scripts/lib" \
-    "$fake_repo/target/i386" "$fake_repo/build" "$fake_bin"
+    "$fake_repo/target/i386" "$fake_repo/build/pyvenv/bin" "$fake_bin"
 cp "$SOURCE_BUILD" "$fake_repo/deploy/tools/build.sh"
 cp "$REPO_ROOT/deploy/tools/lib/build-dependencies.sh" \
     "$fake_repo/deploy/tools/lib/"
@@ -77,6 +77,13 @@ EOF
 cat > "$fake_bin/systemd-detect-virt" <<'EOF'
 #!/usr/bin/env bash
 [[ "${FAKE_CONTAINER:-0}" == "1" && "$*" == *--container* ]]
+EOF
+
+cat > "$fake_repo/build/pyvenv/bin/meson" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == "configure" ]] || exit 72
+[[ "${FAKE_MESON_CONFIGURE_FAIL:-0}" == "0" ]]
 EOF
 
 cat > "$fake_bin/sudo" <<'EOF'
@@ -147,6 +154,7 @@ fi
 EOF
 chmod 0755 "$fake_bin/pkg-config" "$fake_bin/python3" "$fake_bin/ninja" \
     "$fake_bin/systemd-detect-virt" "$fake_bin/sudo" \
+    "$fake_repo/build/pyvenv/bin/meson" \
     "$fake_repo/configure" \
     "$fake_repo/deploy/scripts/setup-host-helpers.sh" \
     "$fake_repo/deploy/scripts/setup-host-helpers-real.sh" \
@@ -178,6 +186,7 @@ run_build() {
         FAKE_VERIFY_FAIL="${FAKE_VERIFY_FAIL:-0}" \
         FAKE_INSTALL_FAIL="${FAKE_INSTALL_FAIL:-0}" \
         FAKE_CHECK_FAIL="${FAKE_CHECK_FAIL:-0}" \
+        FAKE_MESON_CONFIGURE_FAIL="${FAKE_MESON_CONFIGURE_FAIL:-0}" \
         "$fake_repo/deploy/tools/build.sh" "$@" >"$output_log" 2>&1
 }
 
@@ -233,6 +242,14 @@ run_build --no-install-host-helpers
 assert_events "$(printf 'configure\nninja')"
 grep -F 'build AIO 契约已升级，自动重新 configure' "$output_log" >/dev/null \
     || fail "旧 build 没有给出自动重配置诊断"
+
+# 重装系统后可能由较旧 Meson 接管遗留 build.dat；普通构建应自动重建元数据，
+# 不能要求用户先理解 Meson 的 Python 序列化格式或手工删除整个 build/。
+reset_case
+FAKE_MESON_CONFIGURE_FAIL=1 run_build --no-install-host-helpers
+assert_events "$(printf 'configure\nninja')"
+grep -F 'build Meson 状态与当前工具链不兼容，自动重新 configure' \
+    "$output_log" >/dev/null || fail "不可读 Meson 状态没有触发自动重配置"
 
 reset_case
 run_build --install-host-helpers

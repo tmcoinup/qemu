@@ -297,7 +297,7 @@ class CpuPinnerLifecycleTest(unittest.TestCase):
         self.assertNotIn("python3 8>&-", wrapper)
         self.assertIn('python3 "$pinner"', wrapper)
         self.assertIn('python3 "$pinner" --help', wrapper)
-        self.assertIn('--launcher-pgid "$launcher_pgid" --status-fd 1', wrapper)
+        self.assertIn('--launcher-sid "$launcher_sid" --status-fd 1', wrapper)
         self.assertIn('sv_cpu_isolate_supervise()', wrapper)
 
 

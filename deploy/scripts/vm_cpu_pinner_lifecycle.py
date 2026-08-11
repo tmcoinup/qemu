@@ -142,8 +142,8 @@ def process_starttime(pid: int) -> str | None:
     return identity[1] if identity is not None else None
 
 
-def process_pgid(pid: int) -> int | None:
-    """读取 /proc stat 的进程组；和 supervisor 传入值共同绑定启动链。"""
+def process_sid(pid: int) -> int | None:
+    """读取 /proc stat 的 session；和 supervisor 传入值共同绑定启动链。"""
 
     try:
         raw = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
@@ -152,7 +152,7 @@ def process_pgid(pid: int) -> int | None:
     _prefix, separator, suffix = raw.rpartition(")")
     fields = suffix.split() if separator else []
     try:
-        return int(fields[2]) if len(fields) > 2 else None
+        return int(fields[3]) if len(fields) > 3 else None
     except ValueError:
         return None
 

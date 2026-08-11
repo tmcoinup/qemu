@@ -102,6 +102,11 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
         c->wants_gpu_frames = wants_gpu;
         c->gpu_required = gpu_required;
         c->wants_gpu_sync = wants_gpu_sync;
+        if (!gpu_required) {
+            /* 新 consumer 必须立即取得画面，不能等待 damage。 */
+            d->cpu_surface_dirty = true;
+            d->shm_last_frame_ns = 0;
+        }
 #if defined(_WIN32) && defined(CONFIG_OPENGL)
         if (wants_gpu_sync) {
             d->d3d_sync_client = c;
@@ -136,6 +141,9 @@ static void fb_shm_handle_set_roi(FbShmDisplay *d, FbShmClient *c,
     d->cfg_y = (uint32_t)(req->y < 0 ? 0 : req->y);
     d->cfg_w = req->w;
     d->cfg_h = req->h;
+    /* ROI 改变后，即使 Guest 静止也要发布新布局。 */
+    d->cpu_surface_dirty = true;
+    d->shm_last_frame_ns = 0;
 
     FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                         .status = FB_SHM_CTL_OK,
@@ -159,6 +167,9 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
         d->gpu_target_fps = r;
     } else {
         d->shm_target_fps = r;
+        /* streamer 会重建编码器，静止画面也要提供起始帧。 */
+        d->cpu_surface_dirty = true;
+        d->shm_last_frame_ns = 0;
     }
     fb_shm_update_effective_rate(d);
 

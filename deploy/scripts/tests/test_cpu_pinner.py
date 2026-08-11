@@ -391,28 +391,6 @@ class CpuPinnerTest(unittest.TestCase):
         quit_mock.assert_not_called()
         stop_mock.assert_not_called()
 
-    def test_foreign_qmp_pgid_is_never_returned_as_owned_pid(self):
-        arguments = MODULE.parse_args([
-            "1", "2", "/tmp/vmate-test.qmp", "/bin/true", "0", "1",
-            "--launcher-pid", "999", "--launcher-starttime", "111",
-            "--launcher-pgid", "999", "--status-fd", "1",
-            "--abort-on-failure",
-        ])
-        topology = [core(0, 0, 0, 2), core(0, 1, 1, 3)]
-        with mock.patch.object(MODULE, "discover_topology", return_value=topology), \
-             mock.patch.object(MODULE, "emit_supervisor_status", return_value=True), \
-             mock.patch.object(MODULE, "query_vcpus", return_value=[(0, 100), (1, 101)]), \
-             mock.patch.object(MODULE, "tgid_of", return_value=123), \
-             mock.patch.object(MODULE, "process_starttime", return_value="456"), \
-             mock.patch.object(MODULE, "process_matches", return_value=True), \
-             mock.patch.object(
-                 MODULE, "process_pgid", side_effect=lambda pid: 999 if pid == 999 else 888
-             ), mock.patch.object(MODULE.subprocess, "run") as helper_mock:
-            outcome = MODULE.run_pinner(arguments)
-
-        self.assertEqual((outcome.status, outcome.pid), (1, None))
-        helper_mock.assert_not_called()
-
     def test_strict_bound_failure_stops_then_releases_possible_partial_state(self):
         arguments = [
             "1", "4", "/tmp/vmate-test.qmp", "/bin/true", "0",

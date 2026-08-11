@@ -405,7 +405,7 @@ test_cpu_isolate_scripts_parse() {
     # shellcheck disable=SC2016 # grep 的是源码字面量，不应展开测试进程变量。
     if ! grep -F -- '"$(( CPU_THREADS / CPU_CORES ))"' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null || ! grep -F -- '"$(sv_cpu_host_threads_per_core)"' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null ||
         ! grep -F -- '--launcher-pid "$launcher_pid" --launcher-starttime "$launcher_start"' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null ||
-        ! grep -F -- '--launcher-pgid "$launcher_pgid" --status-fd 1 --abort-on-failure' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null; then
+        ! grep -F -- '--launcher-sid "$launcher_sid" --status-fd 1 --abort-on-failure' "$REPO_ROOT/deploy/scripts/lib/sv-cpupin.sh" >/dev/null; then
         fail "shell wrapper must pass guest/host topology and strict supervisor identity"
     fi
     grep -F -- 'read_held_cpus' "$REPO_ROOT/deploy/scripts/vm-cpu-pinner.py" >/dev/null \

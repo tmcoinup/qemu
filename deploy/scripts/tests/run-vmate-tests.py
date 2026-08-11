@@ -28,6 +28,7 @@ QUICK_TESTS = (
     "test_cpu_asset_profile.sh",
     "test_cpu_helper_abi_prompt.sh",
     "test_cpu_pinner.py",
+    "test_cpu_pinner_session.py",
     "test_cpu_pinner_host_contract.py",
     "test_cpu_profile_mapping_contract.sh",
     "test_cpu_pinner_handshake.sh",

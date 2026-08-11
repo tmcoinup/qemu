@@ -87,7 +87,14 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
                           surface_stride(surf)) != 0) {
         return;
     }
-    sdl2_2d_present_texture(scon);
+
+    /*
+     * 一次 graphic_hw_update() 可能广播多个脏矩形。
+     * 每个矩形都立即 RenderCopy/Present 会反复复制整张 texture，
+     * 并让后续 SDL 输入排在显示工作之后。
+     * 这里只累计成功上传，由本轮 refresh 统一提交一次。
+     */
+    scon->updates++;
 }
 
 void sdl2_2d_switch(DisplayChangeListener *dcl,
@@ -165,8 +172,20 @@ void sdl2_2d_refresh(DisplayChangeListener *dcl)
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
 
     assert(!scon->opengl);
-    graphic_hw_update(dcl->con);
+
+    /*
+     * SDL 没有供 QEMU 主循环监听的跨平台事件 fd，
+     * 输入只能在 refresh tick 内泵取。
+     * 先清空键鼠/窗口事件，再进入较重的显卡更新，
+     * 避免 renderer 或 Guest 满载额外推迟本轮输入。
+     */
     sdl2_poll_events(scon);
+    sdl2_flush_window_updates();
+    graphic_hw_update(dcl->con);
+    if (scon->updates) {
+        scon->updates = 0;
+        sdl2_2d_present_texture(scon);
+    }
 }
 
 void sdl2_2d_redraw(struct sdl2_console *scon)
@@ -176,9 +195,16 @@ void sdl2_2d_redraw(struct sdl2_console *scon)
     if (!scon->surface) {
         return;
     }
+
+    /* 完整重画覆盖局部更新，恢复路径需要立即可见。 */
+    scon->updates = 0;
     sdl2_2d_update(&scon->dcl, 0, 0,
                    surface_width(scon->surface),
                    surface_height(scon->surface));
+    if (scon->updates) {
+        scon->updates = 0;
+        sdl2_2d_present_texture(scon);
+    }
 }
 
 bool sdl2_2d_check_format(DisplayChangeListener *dcl,

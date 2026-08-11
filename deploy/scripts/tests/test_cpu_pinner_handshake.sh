@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 严格 CPU 隔离的 ARMED/RUNNING 管道与 paused QEMU 进程组监督回归。
+# 严格 CPU 隔离的 ARMED/RUNNING 管道与 paused QEMU session 监督回归。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -43,13 +43,25 @@ if mode == "delayed-fail":
 if mode == "malformed":
     print("RUNNING invalid identity", flush=True)
     raise SystemExit(1)
-if mode != "running":
+if mode not in {"running", "running-subgroup"}:
     raise SystemExit(8)
 
 launcher_pid = int(option("--launcher-pid"))
 launcher_start = option("--launcher-starttime")
-print(f"RUNNING {launcher_pid} {launcher_start}", flush=True)
-while pathlib.Path(f"/proc/{launcher_pid}").exists():
+reported_pid = launcher_pid
+reported_start = launcher_start
+if mode == "running-subgroup":
+    pidfile = pathlib.Path(os.environ["FAKE_GUEST_PIDFILE"])
+    for _attempt in range(100):
+        if pidfile.exists() and pidfile.read_text().strip():
+            break
+        time.sleep(0.01)
+    reported_pid = int(pidfile.read_text().split()[0])
+    stat = pathlib.Path(f"/proc/{reported_pid}/stat").read_text()
+    fields = stat.rpartition(")")[2].split()
+    reported_start = fields[19]
+print(f"RUNNING {reported_pid} {reported_start}", flush=True)
+while pathlib.Path(f"/proc/{reported_pid}").exists():
     time.sleep(0.02)
 PY
 
@@ -63,15 +75,29 @@ cat > "$tmp/fake-guest" <<'SH'
 #!/usr/bin/env bash
 exec python3 -c 'import os, pathlib, time; pathlib.Path(os.environ["FAKE_GUEST_PIDFILE"]).write_text(str(os.getpid())); time.sleep(30)'
 SH
+cat > "$tmp/fake-subgroup-guest" <<'PY'
+#!/usr/bin/env python3
+import os
+import pathlib
+import time
+
+os.setpgid(0, 0)
+pathlib.Path(os.environ["FAKE_GUEST_PIDFILE"]).write_text(
+    f"{os.getpid()} {os.getpgrp()} {os.getsid(0)}\n"
+)
+time.sleep(float(os.environ.get("FAKE_GUEST_DURATION", "0.4")))
+PY
 cat > "$tmp/fake-stubborn-group" <<'SH'
 #!/usr/bin/env bash
+set -m
 trap '' HUP INT QUIT TERM
 sleep 30 &
 descendant=$!
 printf '%s %s\n' "$BASHPID" "$descendant" >"$FAKE_STUBBORN_PIDFILE"
 wait "$descendant"
 SH
-chmod 0755 "$tmp/fake-bin/sudo" "$tmp/fake-guest" "$tmp/fake-stubborn-group"
+chmod 0755 "$tmp/fake-bin/sudo" "$tmp/fake-guest" \
+    "$tmp/fake-subgroup-guest" "$tmp/fake-stubborn-group"
 
 export PATH="$tmp/fake-bin:$PATH"
 export FAKE_SUDO_LOG="$tmp/sudo.log"
@@ -120,6 +146,33 @@ export FAKE_PINNER_MODE=running
 sv_display_wait_and_restore sleep 0.2 \
     || fail "合法 ARMED→RUNNING 握手没有进入正常等待/收尾"
 
+# Ubuntu 24.04 的 GNOME/systemd inhibit 会在 guard session 内新建 PGID；该合法
+# 子组仍应通过严格所有权校验，不能因 wrapper 的实现细节把 paused guest 误杀。
+reset_supervisor
+export FAKE_PINNER_MODE=running-subgroup
+export FAKE_GUEST_PIDFILE="$tmp/guest-running-subgroup.pid"
+export FAKE_GUEST_DURATION=0.4
+sv_display_wait_and_restore "$tmp/fake-subgroup-guest" \
+    || fail "同 session 的内层 PGID 未通过 RUNNING 握手"
+read -r subgroup_pid subgroup_pgid subgroup_sid <"$FAKE_GUEST_PIDFILE"
+[[ "$subgroup_pgid" == "$subgroup_pid" && "$subgroup_sid" != "$subgroup_pid" ]] \
+    || fail "nested PGID fixture 未建立独立子组"
+
+# 握手失败时必须按 session 清掉内层 PGID；旧的 killpg(guard) 会漏掉这里的 guest。
+reset_supervisor
+export FAKE_PINNER_MODE=delayed-fail
+export FAKE_GUEST_PIDFILE="$tmp/guest-failed-subgroup.pid"
+export FAKE_GUEST_DURATION=30
+if sv_display_wait_and_restore "$tmp/fake-subgroup-guest"; then
+    fail "内层 PGID 的握手失败未使严格启动失败"
+fi
+read -r failed_subgroup_pid failed_subgroup_pgid failed_subgroup_sid \
+    <"$FAKE_GUEST_PIDFILE"
+[[ "$failed_subgroup_pgid" == "$failed_subgroup_pid" \
+   && "$failed_subgroup_sid" != "$failed_subgroup_pid" ]] \
+    || fail "失败清理 fixture 未建立独立子组"
+assert_guest_gone "$failed_subgroup_pid"
+
 for mode in delayed-fail eof malformed; do
     reset_supervisor
     export FAKE_PINNER_MODE="$mode"
@@ -143,7 +196,7 @@ fi
 [[ -s "$descendant_pidfile" ]] || fail "未创建组长先退 fixture"
 assert_guest_gone "$(<"$descendant_pidfile")"
 
-# 直接 SIGKILL 真正的 PGID leader；同组 sentinel 必须清掉忽略 TERM 的全部后代。
+# 直接 SIGKILL session leader；sentinel 必须跨内层 PGID 清掉忽略 TERM 的后代。
 export FAKE_STUBBORN_PIDFILE="$tmp/stubborn-group.pids"
 outer_pid="$BASHPID"
 read -r _outer_state outer_start < <(sv_proc_state_starttime "$outer_pid") \
@@ -178,7 +231,7 @@ done
 if sv_proc_generation_is_live "$stubborn_pid" "$stubborn_start" \
     || sv_proc_generation_is_live "$stubborn_descendant" "$stubborn_descendant_start"; then
     kill -KILL -- "-$leader_pid" 2>/dev/null || true
-    fail "sentinel 未清理 leader SIGKILL 后的进程组"
+    fail "sentinel 未清理 leader SIGKILL 后的 session"
 fi
 
 # 错误的 pinner starttime 不得向复用后的数值 PID 发信号或 wait。
@@ -195,7 +248,7 @@ assert_generation_live "$unrelated_pid" "$unrelated_start"
     || fail "无法清理 stale PID fixture"
 wait "$unrelated_pid" 2>/dev/null || true
 
-# QEMU 进程组建立后、pinner 尚未启动时父 shell 遭 SIGKILL，guard 必须独立清组。
+# QEMU session 建立后、pinner 尚未启动时父 shell 遭 SIGKILL，guard 必须独立清理。
 parent_pidfile="$tmp/killed-parent.pid"
 export FAKE_GUEST_PIDFILE="$tmp/guest-parent-kill.pid"
 (
@@ -303,7 +356,7 @@ done
 flock -n 9 || fail "watchdog release 后未释放实例锁"
 exec 9>&-
 
-[[ "$(wc -l < "$FAKE_SUDO_LOG")" == "6" ]] \
+[[ "$(wc -l < "$FAKE_SUDO_LOG")" == "8" ]] \
     || fail "每条严格监督路径都必须执行一次幂等 release"
 bash -n "$CPUPIN" "$DISPLAY_GUARD" "$WATCHDOG" "$0"
-echo "PASS: strict CPU pinner ARMED/RUNNING process-group supervision"
+echo "PASS: strict CPU pinner ARMED/RUNNING session supervision"

@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # ---------------------------------------------------------------------------
 # 启动 NUMA-aware vCPU pinner。兼容模式保持异步；严格模式由显示/进程监督父 shell
-# 在 QEMU -S 进程组创建后执行 ARMED→RUNNING 管道握手。
+# 在 QEMU -S 独立 session 创建后执行 ARMED→RUNNING 管道握手。
 # ---------------------------------------------------------------------------
 
 SV_CPU_STRICT_SUPERVISION_READY=0
@@ -30,7 +30,7 @@ sv_cpu_isolate_preflight() {
     fi
     if [[ "${STRICT_HARDWARE:-1}" == "1" ]]; then
         if [[ ! -x "$group_guard" ]] || ! "$group_guard" check >/dev/null 2>&1; then
-            echo "ERROR: 严格 CPU 隔离缺少 pidfd/setsid 进程组守护能力" >&2
+            echo "ERROR: 严格 CPU 隔离缺少 pidfd/setsid session 守护能力" >&2
             return 1
         fi
     fi
@@ -89,7 +89,7 @@ sv_cpu_isolate_launch() {
     local pinner_pid
     sv_cpu_isolate_preflight || return 1
     [[ "${STRICT_HARDWARE:-1}" != "1" ]] || {
-        echo "ERROR: 严格 CPU pinner 必须由 QEMU 进程组监督器启动" >&2
+        echo "ERROR: 严格 CPU pinner 必须由 QEMU session 监督器启动" >&2
         return 1
     }
 
@@ -116,16 +116,16 @@ sv_cpu_isolate_launch() {
     return 0
 }
 
-# QEMU 已在独立 setsid 进程组内以 -S 暂停。父 shell 从只有 pinner 持写端的管道
-# 接收两阶段状态；RUNNING 前任何 EOF/FAIL/非法顺序都交给父 shell 终止整个进程组。
+# QEMU 已在独立 setsid session 内以 -S 暂停。父 shell 从只有 pinner 持写端的
+# 管道接收两阶段状态；RUNNING 前任何 EOF/FAIL/非法顺序都由父 shell 终止该 session。
 sv_cpu_isolate_supervise() {
-    local launcher_pid="$1" launcher_start="$2" launcher_pgid="$3"
+    local launcher_pid="$1" launcher_start="$2" launcher_sid="$3"
     local helper="${SV_CPU_ISO_HELPER:-/usr/local/libexec/qemu-vmate-cpu-isolate}"
     local pinner="$HERE/vm-cpu-pinner.py" status_fd kind value1 value2 extra
     local pinner_state attempt
 
     [[ "$launcher_pid" =~ ^[0-9]+$ && "$launcher_start" =~ ^[0-9]+$ \
-       && "$launcher_pgid" == "$launcher_pid" ]] || return 1
+       && "$launcher_sid" == "$launcher_pid" ]] || return 1
     SV_CPU_PINNER_ABORT=0
     exec {status_fd}< <(
         exec python3 "$pinner" \
@@ -133,7 +133,7 @@ sv_cpu_isolate_supervise() {
             "${QEMU_SERVICE_CPUS:-0}" "$(( CPU_THREADS / CPU_CORES ))" \
             "$(sv_cpu_host_threads_per_core)" \
             --launcher-pid "$launcher_pid" --launcher-starttime "$launcher_start" \
-            --launcher-pgid "$launcher_pgid" --status-fd 1 --abort-on-failure
+            --launcher-sid "$launcher_sid" --status-fd 1 --abort-on-failure
     )
     SV_CPU_PINNER_PID=$!
     SV_CPU_PINNER_START=""
@@ -165,16 +165,16 @@ sv_cpu_isolate_supervise() {
         || [[ "$kind" != "RUNNING" || ! "$value1" =~ ^[0-9]+$ \
               || ! "$value2" =~ ^[0-9]+$ || -n "$extra" ]] \
         || ! sv_proc_generation_is_live "$value1" "$value2" \
-        || [[ "$(sv_proc_pgid "$value1" 2>/dev/null || true)" != "$launcher_pgid" ]]; then
+        || [[ "$(sv_proc_sid "$value1" 2>/dev/null || true)" != "$launcher_sid" ]]; then
         echo "ERROR: CPU pinner 未完成 RUNNING 握手，正在终止暂停态 QEMU" >&2
         # ARMED 后可能已有 root helper 正在 apply/回滚，不能 SIGKILL pinner 留下
-        # 孤儿提权子进程；先停进程组，finish 等其自然收尾后再幂等 release。
+        # 孤儿提权子进程；先停 session，finish 等其自然收尾后再幂等 release。
         SV_CPU_PINNER_ABORT=0
         exec {status_fd}<&-
         return 1
     fi
     exec {status_fd}<&-
-    echo ">> CPU 隔离:   RUNNING 已确认（qemu pid=$value1, pgid=$launcher_pgid）"
+    echo ">> CPU 隔离:   RUNNING 已确认（qemu pid=$value1, sid=$launcher_sid）"
     return 0
 }
 

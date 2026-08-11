@@ -101,7 +101,8 @@ test_builtin_python_wrapper_is_zero_config_fallback() {
 
     (
         HERE="$REPO_ROOT/deploy/scripts"
-        PATH="/usr/bin:/bin"
+        # 隔离宿主已安装的 dgame_qemu_ptracer，精确覆盖内置 Python fallback。
+        PATH="$case_dir"
         unset DGAME_QEMU_PTRACER
         source "$PTRACER_MODULE"
         sv_qemu_ptracer_build_leaf_command fake-qemu -name vm-3

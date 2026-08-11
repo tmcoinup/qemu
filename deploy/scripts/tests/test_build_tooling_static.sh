@@ -83,6 +83,8 @@ test_required_native_dependencies_are_preflighted() {
     require_text '--enable-linux-io-uring' "$BUILD_SCRIPT"
     require_text 'aio_build_contract_ready' "$BUILD_SCRIPT"
     require_text 'AIO_RECONFIG=1' "$BUILD_SCRIPT"
+    require_text 'MESON_RECONFIG=1' "$BUILD_SCRIPT"
+    require_text '! "$MESON" configure . >/dev/null 2>&1' "$BUILD_SCRIPT"
     require_text 'CONFIG_LINUX_AIO([[:space:]]+1)?' "$BUILD_SCRIPT"
     require_text 'CONFIG_LINUX_IO_URING([[:space:]]+1)?' "$BUILD_SCRIPT"
 }

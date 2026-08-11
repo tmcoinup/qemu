@@ -140,7 +140,8 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
 
     assert(scon->opengl);
-
+    sdl2_poll_events(scon);
+    sdl2_flush_window_updates();
     graphic_hw_update(dcl->con);
     if (scon->updates && scon->real_window) {
         scon->updates = 0;
@@ -152,7 +153,6 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         scon->scanout_redraw_pending = false;
         sdl2_gl_redraw(scon);
     }
-    sdl2_poll_events(scon);
 }
 
 void sdl2_gl_redraw(struct sdl2_console *scon)

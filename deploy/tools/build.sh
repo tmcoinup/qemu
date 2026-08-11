@@ -194,6 +194,18 @@ aio_build_contract_ready() {
             config-host.h
 }
 
+# 中文注释：build.dat 是 Meson 的 Python 序列化内部状态，并不保证跨 Meson
+# 版本兼容。重装宿主系统后，build.ninja 可能仍在，但新系统创建的 pyvenv 无法
+# 反序列化旧状态；先做无修改的 configure 查询，失败时让 QEMU configure 重建
+# Meson 元数据。对象文件继续留在 build/ 中，Ninja 会自行判断哪些可以复用。
+MESON="$REPO_ROOT/build/pyvenv/bin/meson"
+MESON_RECONFIG=0
+if [[ -f build.ninja ]] &&
+   { [[ ! -x "$MESON" ]] || ! "$MESON" configure . >/dev/null 2>&1; }; then
+    MESON_RECONFIG=1
+    echo ">> build Meson 状态与当前工具链不兼容，自动重新 configure"
+fi
+
 # 中文注释：升级前创建的 build/ 会保留旧 Meson feature 值；只运行 ninja 不会
 # 启用新增后端。检测最终生成的 config-host.h，比猜测 Meson CLI 状态更可靠，
 # 并能让普通 build.sh 自动完成一次必要的重配置。
@@ -203,13 +215,12 @@ if [[ -f build.ninja ]] && ! aio_build_contract_ready; then
     echo ">> build AIO 契约已升级，自动重新 configure"
 fi
 
-if (( RECONFIG || AIO_RECONFIG )) || [[ ! -f build.ninja ]]; then
+if (( RECONFIG || MESON_RECONFIG || AIO_RECONFIG )) || [[ ! -f build.ninja ]]; then
     echo ">> configure ${CFG_FLAGS[*]}"
     ../configure "${CFG_FLAGS[@]}"
 elif [[ -n "$QEMU_RUNTIME_PKGVERSION" ]]; then
     # 已有 build 也必须立即同步新契约，不能要求用户猜测额外追加 --reconfig。
     # Meson 只更新 pkgversion，保留该目录其它已配置选项；ninja 随后负责重链。
-    MESON="$REPO_ROOT/build/pyvenv/bin/meson"
     [[ -x "$MESON" ]] || {
         echo "FAIL: 已有 build 缺少可执行 Meson，无法同步运行时代码版本证明" >&2
         exit 1

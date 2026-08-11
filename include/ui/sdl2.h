@@ -22,6 +22,7 @@
 #endif
 
 #include "ui/kbd-state.h"
+#include "ui/sdl2-event.h"
 #include "ui/sdl2-pointer.h"
 #ifdef CONFIG_OPENGL
 # include "ui/egl-helpers.h"
@@ -42,6 +43,8 @@ struct sdl2_console {
     int opengl;
     int updates;
     int ignore_hotkeys;
+    bool window_redraw_pending;
+    bool ui_info_pending;
     bool gui_keysym;
     /*
      * 输入门控：键鼠事件只在窗口同时拥有 X11 输入焦点(FOCUS_GAINED)
@@ -139,6 +142,7 @@ void sdl2_window_create(struct sdl2_console *scon);
 void sdl2_window_destroy(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
+void sdl2_flush_window_updates(void);
 
 bool sdl2_input_allowed(const struct sdl2_console *scon);
 void sdl2_sync_text_input(struct sdl2_console *consoles, int num_outputs);

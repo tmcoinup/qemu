@@ -36,6 +36,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "ui/console.h"
 #include "ui/input.h"
 #include "ui/sdl2.h"
@@ -59,6 +60,7 @@ static int gui_grab_code = KMOD_LALT | KMOD_LCTRL;
 static SDL_Cursor *sdl_cursor_normal;
 static SDL_Cursor *sdl_cursor_hidden;
 static Notifier mouse_mode_notifier;
+static QEMUTimer *sdl2_input_timer;
 
 static uint32_t sdl_button_map[INPUT_BUTTON__MAX] = {
     [INPUT_BUTTON_LEFT]       = SDL_BUTTON(SDL_BUTTON_LEFT),
@@ -68,7 +70,11 @@ static uint32_t sdl_button_map[INPUT_BUTTON__MAX] = {
     [INPUT_BUTTON_EXTRA]      = SDL_BUTTON(SDL_BUTTON_X2),
 };
 
-#define SDL2_REFRESH_INTERVAL_MINIMIZED 500
+/* 最小化仍需泵取 RESTORED/FOCUS，避免无 fb-shm 时卡住。 */
+#define SDL2_REFRESH_INTERVAL_MINIMIZED 100
+/* 输入泵不触发显卡更新；焦点窗口用 8ms 周期。 */
+#define SDL2_INPUT_POLL_INTERVAL_ACTIVE 8
+#define SDL2_INPUT_POLL_INTERVAL_BACKGROUND 32
 
 /* introduced in SDL 2.0.10 */
 #ifndef SDL_HINT_RENDER_BATCHING
@@ -1188,7 +1194,7 @@ static void handle_mousewheel(SDL_Event *ev)
     qemu_input_event_sync();
 }
 
-static bool sdl2_confirm_close(SDL_Window *parent)
+static bool sdl2_confirm_close(struct sdl2_console *scon)
 {
     /*
      * X 关闭一次会同时派 SDL_WINDOWEVENT_CLOSE + SDL_QUIT，多 console 的
@@ -1207,7 +1213,7 @@ static bool sdl2_confirm_close(SDL_Window *parent)
     };
     const SDL_MessageBoxData mbox = {
         SDL_MESSAGEBOX_WARNING,
-        parent,
+        scon->real_window,
         "QEMU",
         "确认关闭虚拟机吗？\n点击 Shutdown 将向 guest 发出关机请求。",
         SDL_arraysize(buttons),
@@ -1215,11 +1221,19 @@ static bool sdl2_confirm_close(SDL_Window *parent)
         NULL,
     };
     int btn = -1;
+
+    /*
+     * 原生对话框会同步阻塞主循环。
+     * 弹出前先向 Guest 释放全部键鼠，避免缺失 KEYUP。
+     */
+    sdl_deactivate_window(scon, false, true);
     if (SDL_ShowMessageBox(&mbox, &btn) < 0) {
         last_answer = true;
     } else {
         last_answer = (btn == 1);
     }
+    sdl_refresh_window_focus(scon);
+    scon->ignore_hotkeys = get_mod_state();
     last_ticks = SDL_GetTicks();
     /* 把对话框期间堆积的 QUIT/CLOSE 事件清掉，下一轮 poll 不会再问一遍 */
     SDL_FlushEvent(SDL_QUIT);
@@ -1237,24 +1251,21 @@ static void handle_windowevent(SDL_Event *ev)
 
     switch (ev->window.event) {
     case SDL_WINDOWEVENT_RESIZED:
-        {
-            QemuUIInfo info;
-            memset(&info, 0, sizeof(info));
-            info.width = ev->window.data1;
-            info.height = ev->window.data2;
-            dpy_set_ui_info(scon->dcl.con, &info, true);
-        }
-        /* fall through */
+        scon->ui_info_pending = true;
+        scon->window_redraw_pending = true;
+        break;
     case SDL_WINDOWEVENT_SIZE_CHANGED:
-        sdl2_redraw(scon);
+        /* SDL_SetWindowSize 也会产生此事件，不能回写 Guest。 */
+        scon->window_redraw_pending = true;
         break;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     case SDL_WINDOWEVENT_DISPLAY_CHANGED:
-        sdl2_redraw(scon);
+        /* DPI 只改变 drawable；Guest 仍使用 logical window 单位。 */
+        scon->window_redraw_pending = true;
         break;
 #endif
     case SDL_WINDOWEVENT_EXPOSED:
-        sdl2_redraw(scon);
+        scon->window_redraw_pending = true;
         break;
     case SDL_WINDOWEVENT_FOCUS_GAINED:
         update_displaychangelistener(
@@ -1266,7 +1277,7 @@ static void handle_windowevent(SDL_Event *ev)
          * graphic_hw_update() 不会触发 dpy_gl_update()，窗口就会一直黑到下一帧。
          * 焦点回来时主动 replay 当前 scanout，保证 idle 桌面也能恢复显示。
          */
-        sdl2_redraw(scon);
+        scon->window_redraw_pending = true;
         scon->ignore_hotkeys = get_mod_state();
         break;
     case SDL_WINDOWEVENT_ENTER:
@@ -1306,7 +1317,7 @@ static void handle_windowevent(SDL_Event *ev)
         update_displaychangelistener(
             &scon->dcl, SDL2_ACTIVE_REFRESH_INTERVAL_MS);
         sdl_refresh_window_focus(scon);
-        sdl2_redraw(scon);
+        scon->window_redraw_pending = true;
         break;
     case SDL_WINDOWEVENT_MINIMIZED:
         sdl_deactivate_window(scon, true, true);
@@ -1318,7 +1329,7 @@ static void handle_windowevent(SDL_Event *ev)
             if (scon->opts->has_window_close && !scon->opts->window_close) {
                 allow_close = false;
             }
-            if (allow_close && !sdl2_confirm_close(scon->real_window)) {
+            if (allow_close && !sdl2_confirm_close(scon)) {
                 allow_close = false;
             }
             if (allow_close) {
@@ -1336,12 +1347,63 @@ static void handle_windowevent(SDL_Event *ev)
         update_displaychangelistener(
             &scon->dcl, SDL2_ACTIVE_REFRESH_INTERVAL_MS);
         sdl_refresh_window_focus(scon);
-        sdl2_redraw(scon);
+        scon->window_redraw_pending = true;
         break;
     case SDL_WINDOWEVENT_HIDDEN:
         scon->hidden = true;
         sdl_deactivate_window(scon, true, true);
         break;
+    }
+}
+
+void sdl2_flush_window_updates(void)
+{
+    int i;
+
+    /*
+     * SDL 拖动缩放通常连续产生 RESIZED + SIZE_CHANGED。
+     * 队列排空后，每个窗口只提交最终 logical 尺寸，
+     * 并且只重画一次，
+     * 避免几十次整帧上传。
+     */
+    for (i = 0; i < sdl2_num_outputs; i++) {
+        struct sdl2_console *target = &sdl2_console[i];
+
+        if (target->ui_info_pending) {
+            int width;
+            int height;
+
+            target->ui_info_pending = false;
+            if (target->real_window) {
+                QemuUIInfo info = {
+                    .width = 0,
+                    .height = 0,
+                };
+
+                /*
+                 * display-info 使用 SDL logical window 单位。
+                 * 若改传 HiDPI drawable 像素，Guest resize 后会再次
+                 * 按 logical 单位放大，形成 2x/4x 尺寸反馈。
+                 */
+                SDL_GetWindowSize(target->real_window, &width, &height);
+                if (width > 0 && height > 0) {
+                    info.width = width;
+                    info.height = height;
+                    dpy_set_ui_info(target->dcl.con, &info, true);
+                }
+            }
+        }
+        if (target->window_redraw_pending) {
+            target->window_redraw_pending = false;
+            if (target->real_window && !target->hidden) {
+                if (target->opengl) {
+                    sdl2_redraw(target);
+                } else {
+                    /* texture 未变，只需在本轮末 Present。 */
+                    target->updates = 1;
+                }
+            }
+        }
     }
 }
 
@@ -1407,7 +1469,7 @@ void sdl2_poll_events(struct sdl2_console *scon)
             if (scon->opts->has_window_close && !scon->opts->window_close) {
                 allow_close = false;
             }
-            if (allow_close && !sdl2_confirm_close(scon->real_window)) {
+            if (allow_close && !sdl2_confirm_close(scon)) {
                 allow_close = false;
             }
             if (allow_close) {
@@ -1416,6 +1478,7 @@ void sdl2_poll_events(struct sdl2_console *scon)
             }
             break;
         case SDL_MOUSEMOTION:
+            sdl2_coalesce_mouse_motion(ev);
             handle_mousemotion(ev);
             break;
         case SDL_MOUSEBUTTONDOWN:
@@ -1450,6 +1513,43 @@ void sdl2_poll_events(struct sdl2_console *scon)
          * 不做无意义的 software renderer 整帧复制。
          */
         scon->dcl.update_interval = SDL2_ACTIVE_REFRESH_INTERVAL_MS;
+    }
+}
+
+static uint32_t sdl2_input_poll_interval(void)
+{
+    bool has_mapped_window = false;
+    int i;
+
+    for (i = 0; i < sdl2_num_outputs; i++) {
+        struct sdl2_console *scon = &sdl2_console[i];
+
+        if (!scon->real_window || scon->hidden) {
+            continue;
+        }
+        has_mapped_window = true;
+        if (!(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED) &&
+            (scon->has_input_focus || scon->has_mouse_focus ||
+             grabbed_scon == scon)) {
+            return SDL2_INPUT_POLL_INTERVAL_ACTIVE;
+        }
+    }
+    return has_mapped_window ? SDL2_INPUT_POLL_INTERVAL_BACKGROUND :
+                               SDL2_REFRESH_INTERVAL_MINIMIZED;
+}
+
+static void sdl2_input_timer_cb(void *opaque)
+{
+    (void)opaque;
+
+    if (sdl2_console && sdl2_num_outputs > 0) {
+        /* 只泵取事件，不把显卡更新拉高到 120Hz。 */
+        sdl2_poll_events(&sdl2_console[0]);
+    }
+    if (sdl2_input_timer) {
+        timer_mod(sdl2_input_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  sdl2_input_poll_interval());
     }
 }
 
@@ -1517,6 +1617,11 @@ static void sdl_mouse_define(DisplayChangeListener *dcl,
 static void sdl_cleanup(void)
 {
     int i;
+
+    if (sdl2_input_timer) {
+        timer_free(sdl2_input_timer);
+        sdl2_input_timer = NULL;
+    }
 
     /*
      * 这里仅由 atexit 调用。X11/XWayland 在退出瞬间可能已通过 RandR
@@ -1816,7 +1921,15 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
 
     atexit(sdl_cleanup);
 
-    /* SDL's event polling (in dpy_refresh) must happen on the main thread. */
+    /*
+     * SDL 事件仍在主线程执行，不再依赖全局 display refresh。
+     * 独立 timer 只处理事件；窗口重画由 dpy_refresh 合并。
+     */
+    sdl2_input_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                    sdl2_input_timer_cb, NULL);
+    timer_mod(sdl2_input_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+              SDL2_INPUT_POLL_INTERVAL_ACTIVE);
     qemu_main = NULL;
 }
 

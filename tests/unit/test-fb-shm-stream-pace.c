@@ -55,6 +55,26 @@ static void test_pacer_drops_missed_ticks(void)
     g_assert_cmpuint(p.next_frame_ns, ==, blocked_ns + p.interval_ns);
 }
 
+static void test_pacer_drops_slightly_missed_tick(void)
+{
+    StreamPacer p;
+    uint64_t start_ns = 3000000000ull;
+    uint64_t candidate_ns;
+    uint64_t blocked_ns;
+
+    fb_shm_stream_pacer_reset(&p, 60);
+    fb_shm_stream_pacer_start(&p, start_ns);
+    fb_shm_stream_pacer_finish_frame(&p, start_ns);
+
+    candidate_ns = p.next_frame_ns + p.interval_ns;
+    blocked_ns = candidate_ns + 1;
+    fb_shm_stream_pacer_finish_frame(&p, blocked_ns);
+
+    /* 只迟到 1ns 也不能把下一 deadline 留在过去并追发。 */
+    g_assert_cmpuint(p.next_frame_ns, ==, blocked_ns + p.interval_ns);
+    g_assert_cmpint(fb_shm_stream_pacer_wait_ms(&p, blocked_ns), >, 0);
+}
+
 static void test_pacer_clamps_invalid_fps(void)
 {
     StreamPacer p;
@@ -76,6 +96,8 @@ int main(int argc, char **argv)
                     test_pacer_wait_timeout_rounds_up);
     g_test_add_func("/fb-shm-stream/pace/drops-missed-ticks",
                     test_pacer_drops_missed_ticks);
+    g_test_add_func("/fb-shm-stream/pace/drops-slightly-missed-tick",
+                    test_pacer_drops_slightly_missed_tick);
     g_test_add_func("/fb-shm-stream/pace/clamps-invalid-fps",
                     test_pacer_clamps_invalid_fps);
     return g_test_run();

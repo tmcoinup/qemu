@@ -1,3 +1,10 @@
+/*
+ * 文件规模说明：该历史输入核心集中承载 handler 路由、
+ * QMP、录制回放与延迟队列，已超过 500 行。
+ * 本次暂停态 release 修复保持为局部状态机，
+ * 新增回归测试独立成文件，不继续扩展设备侧职责。
+ */
+
 #include "qemu/osdep.h"
 #include "system/system.h"
 #include "qapi/error.h"
@@ -44,6 +51,23 @@ static QEMUTimer *kbd_timer;
 static uint32_t kbd_default_delay_ms = 10;
 static uint32_t queue_count;
 static uint32_t queue_limit = 1024;
+static bool paused_release_sync_pending;
+
+static bool qemu_input_is_paused_release(const InputEvent *evt)
+{
+    if (!runstate_check(RUN_STATE_PAUSED)) {
+        return false;
+    }
+
+    switch (evt->type) {
+    case INPUT_EVENT_KIND_KEY:
+        return !evt->u.key.data->down;
+    case INPUT_EVENT_KIND_BTN:
+        return !evt->u.btn.data->down;
+    default:
+        return false;
+    }
+}
 
 QemuInputHandlerState *qemu_input_handler_register(DeviceState *dev,
                                             const QemuInputHandler *handler)
@@ -326,6 +350,8 @@ void qemu_input_event_send_impl(QemuConsole *src, InputEvent *evt)
 
 void qemu_input_event_send(QemuConsole *src, InputEvent *evt)
 {
+    bool paused_release;
+
     /* Expect all parts of QEMU to send events with QCodes exclusively.
      * Key numbers are only supported as end-user input via QMP */
     assert(!(evt->type == INPUT_EVENT_KIND_KEY &&
@@ -345,11 +371,17 @@ void qemu_input_event_send(QemuConsole *src, InputEvent *evt)
         evt->u.key.data->key->u.qcode.data = Q_KEY_CODE_PRINT;
     }
 
-    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
+    paused_release = qemu_input_is_paused_release(evt);
+    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED) &&
+        !paused_release) {
         return;
     }
 
     replay_input_event(src, evt);
+    if (paused_release) {
+        /* send 与 sync 之间状态改变也必须提交 release。 */
+        paused_release_sync_pending = true;
+    }
 }
 
 void qemu_input_event_sync_impl(void)
@@ -371,10 +403,12 @@ void qemu_input_event_sync_impl(void)
 
 void qemu_input_event_sync(void)
 {
-    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
+    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED) &&
+        !paused_release_sync_pending) {
         return;
     }
 
+    paused_release_sync_pending = false;
     replay_input_sync_event();
 }
 

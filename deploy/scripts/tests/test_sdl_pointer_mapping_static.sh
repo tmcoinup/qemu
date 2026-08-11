@@ -6,7 +6,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SDL2_C="$REPO_ROOT/ui/sdl2.c"
+SDL2_2D_C="$REPO_ROOT/ui/sdl2-2d.c"
+SDL2_GL_C="$REPO_ROOT/ui/sdl2-gl.c"
 SDL2_INPUT_C="$REPO_ROOT/ui/sdl2-input.c"
+SDL2_EVENT_C="$REPO_ROOT/ui/sdl2-event.c"
 SDL2_H="$REPO_ROOT/include/ui/sdl2.h"
 INPUT_C="$REPO_ROOT/ui/input.c"
 INPUT_H="$REPO_ROOT/include/ui/input.h"
@@ -230,6 +233,72 @@ test_scanout_uses_visible_subrectangle() {
     require_text "glBlitFramebuffer" "$REPO_ROOT/ui/sdl2-gl.c"
 }
 
+test_refresh_prioritizes_input_and_batches_2d_present() {
+    # 两条 renderer 都必须在可能阻塞的显卡更新前泵取输入。
+    for file in "$SDL2_2D_C" "$SDL2_GL_C"; do
+        awk '
+            /void sdl2_(2d|gl)_refresh/ { in_func = 1 }
+            in_func && /sdl2_poll_events\(scon\)/ { saw_poll = 1 }
+            in_func && /graphic_hw_update/ {
+                exit saw_poll ? 0 : 1
+            }
+            in_func && /^}/ { exit 1 }
+        ' "$file" || fail "SDL refresh must poll input before graphic update: $file"
+    done
+
+    # 一轮 graphic_hw_update 可产生多个 damage，software renderer 只能
+    # 上传各 dirty rect 后统一做一次整窗 RenderCopy/Present。
+    awk '
+        /void sdl2_2d_update/ { in_func = 1 }
+        in_func && /scon->updates\+\+/ { saw_batch = 1 }
+        in_func && /sdl2_2d_present_texture/ { exit 1 }
+        in_func && /^}/ { exit saw_batch ? 0 : 1 }
+    ' "$SDL2_2D_C" || fail "2D damage callback must defer Present"
+    awk '
+        /void sdl2_2d_refresh/ { in_func = 1 }
+        in_func && /sdl2_2d_present_texture/ { presents++ }
+        in_func && /^}/ { exit presents == 1 ? 0 : 1 }
+    ' "$SDL2_2D_C" || fail "2D refresh must batch damage into one Present"
+}
+
+test_input_pump_is_independent_from_display_refresh() {
+    require_text "#define SDL2_INPUT_POLL_INTERVAL_ACTIVE 8" "$SDL2_C"
+    require_text "#define SDL2_INPUT_POLL_INTERVAL_BACKGROUND 32" "$SDL2_C"
+    require_text "#define SDL2_REFRESH_INTERVAL_MINIMIZED 100" "$SDL2_C"
+    require_text "timer_new_ms(QEMU_CLOCK_REALTIME" "$SDL2_C"
+
+    awk '
+        /static void sdl2_input_timer_cb/ { in_func = 1 }
+        in_func && /sdl2_poll_events/ { saw_poll = 1 }
+        in_func && /graphic_hw_update|sdl2_flush_window_updates/ { exit 1 }
+        in_func && /^}/ { exit saw_poll ? 0 : 1 }
+    ' "$SDL2_C" || fail "independent SDL input timer must never render"
+}
+
+test_window_events_are_coalesced_and_keep_dpi_units() {
+    require_text "bool window_redraw_pending;" "$SDL2_H"
+    require_text "bool ui_info_pending;" "$SDL2_H"
+    require_text "SDL_GetWindowSize(target->real_window, &width, &height)" \
+        "$SDL2_C"
+    require_text "scon->window_redraw_pending = true;" "$SDL2_C"
+    require_text "sdl2_flush_window_updates();" "$SDL2_2D_C"
+    require_text "sdl2_flush_window_updates();" "$SDL2_GL_C"
+    require_text "sdl2_coalesce_mouse_motion(ev);" "$SDL2_C"
+    require_text "SDL_PeepEvents(&next, 1, SDL_PEEKEVENT" "$SDL2_EVENT_C"
+    require_text "'sdl2-event.c'," "$UI_MESON"
+    require_text "'test-sdl2-event': [" "$UNIT_MESON"
+    (( $(wc -l < "$SDL2_EVENT_C") <= 500 )) \
+        || fail "ui/sdl2-event.c exceeds 500 lines"
+
+    # 同步 close message box 前必须先释放 Guest held-key 状态。
+    awk '
+        /static bool sdl2_confirm_close/ { in_func = 1 }
+        in_func && /sdl_deactivate_window/ { released = 1 }
+        in_func && /SDL_ShowMessageBox/ { exit released ? 0 : 1 }
+        in_func && /^}/ { exit 1 }
+    ' "$SDL2_C" || fail "close confirmation must release guest input first"
+}
+
 test_geometry_helper_is_small_and_built
 test_native_display_policy_is_integrated
 test_windowed_absolute_pointer_never_auto_grabs
@@ -240,5 +309,8 @@ test_button_state_is_per_console_and_released
 test_console_state_is_not_global
 test_hidden_window_closes_input_state
 test_scanout_uses_visible_subrectangle
+test_refresh_prioritizes_input_and_batches_2d_present
+test_input_pump_is_independent_from_display_refresh
+test_window_events_are_coalesced_and_keep_dpi_units
 
 echo "OK: SDL pointer mapping static checks passed"

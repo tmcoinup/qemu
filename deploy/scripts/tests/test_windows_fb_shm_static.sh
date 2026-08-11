@@ -101,6 +101,51 @@ test_backend_drops_idle_listener_rate() {
         || fail "fb_shm_ensure_geometry must recompute idle listener rate after mapping"
 }
 
+test_cpu_surface_copies_only_after_damage() {
+    local display="$REPO_ROOT/ui/fb-shm-display.c"
+    local control="$REPO_ROOT/ui/fb-shm-control-request.c"
+
+    require_text "bool cpu_surface_dirty;" \
+        "$REPO_ROOT/ui/fb-shm-internal.h"
+    require_text "d->cpu_surface_dirty = true;" "$REPO_ROOT/ui/fb-shm.c"
+    require_text "if (fb_shm_commit_frame(d, surface))" "$display"
+    reject_text "cpu_surface_dirty" "$REPO_ROOT/ui/fb-shm-gl-frame.c"
+
+    # 静止期必须在 rate gate 和整帧 pixman copy 前返回；否则仍会推进时间戳
+    # 或消耗 E5 主线程内存带宽。dirty 只能在 publish 成功后清除。
+    awk '
+        /static bool fb_shm_commit_frame/ { in_func = 1 }
+        in_func && /!d->cpu_surface_dirty/ { saw_dirty_gate = 1 }
+        in_func && /fb_shm_rate_due/ {
+            if (!saw_dirty_gate) { exit 1 }
+            saw_rate = 1
+        }
+        in_func && /pixman_image_composite32/ {
+            if (!saw_rate) { exit 1 }
+            saw_copy = 1
+        }
+        in_func && /return true/ {
+            exit saw_copy ? 0 : 1
+        }
+        in_func && /^}/ { exit 1 }
+    ' "$display" || fail "CPU fb-shm dirty gate must precede rate/copy"
+
+    awk '
+        /static void fb_shm_refresh/ { in_func = 1 }
+        in_func && /if \(fb_shm_commit_frame/ { saw_success_gate = 1 }
+        in_func && /cpu_surface_dirty = false/ {
+            exit saw_success_gate ? 0 : 1
+        }
+        in_func && /^}/ { exit 1 }
+    ' "$display" || fail "CPU dirty state may clear only after publish success"
+
+    # HELLO、ROI 与 SHM rate 变更在静态桌面也必须强制一张新帧。
+    (( $(grep -cF -- "d->cpu_surface_dirty = true;" "$control") >= 3 )) \
+        || fail "fb-shm control changes must invalidate the CPU frame"
+    (( $(grep -cF -- "d->shm_last_frame_ns = 0;" "$control") >= 3 )) \
+        || fail "fb-shm control changes must bypass the stale rate deadline"
+}
+
 test_gl_readback_drains_pbo_before_rate_gate() {
     # 中文注释：普通 SHM consumer 依赖 PBO 异步读回。必须先 drain 已完成的
     # PBO，再按目标 FPS 判断是否发起下一次采样；如果先按 rate return，
@@ -420,6 +465,7 @@ test_abi_has_win32_names
 test_qapi_and_meson_enable_windows
 test_qemu_backend_has_win32_mapping
 test_backend_drops_idle_listener_rate
+test_cpu_surface_copies_only_after_damage
 test_gl_readback_drains_pbo_before_rate_gate
 test_direct_gpu_publish_is_independent_of_gl_context
 test_gpu_export_failure_is_silent

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""为严格 CPU 启动提供不可复用的进程组锚点与 pidfd 信号入口。"""
+"""为严格 CPU 启动提供不可复用的 session 锚点与 pidfd 信号入口。"""
 
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ TERMINATION_SIGNALS = {
 }
 
 
-def process_identity(pid: int) -> tuple[str, str, int] | None:
-    """返回 state/starttime/pgid；comm 中的括号不会干扰尾字段解析。"""
+def process_identity(pid: int) -> tuple[str, str, int, int] | None:
+    """返回 state/starttime/pgid/sid；comm 中的括号不会干扰尾字段解析。"""
 
     try:
         raw = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
@@ -35,7 +35,9 @@ def process_identity(pid: int) -> tuple[str, str, int] | None:
     _prefix, separator, suffix = raw.rpartition(")")
     fields = suffix.split() if separator else []
     try:
-        return (fields[0], fields[19], int(fields[2])) if len(fields) > 19 else None
+        return (
+            fields[0], fields[19], int(fields[2]), int(fields[3])
+        ) if len(fields) > 19 else None
     except (ValueError, IndexError):
         return None
 
@@ -115,8 +117,38 @@ def normalize_returncode(returncode: int | None, fallback: int = 1) -> int:
     return min(255, returncode)
 
 
-def sentinel_main(parent_pid: int, parent_start: str, pgid: int) -> int:
-    """guard 被不可捕获地终止时，仍保持 PGID 并独立清理整个命令组。"""
+def live_session_members(
+    session_id: int, excluded: set[int] | None = None
+) -> list[tuple[int, str]]:
+    """返回 session 内仍存活的 PID/starttime，供代际绑定的逐进程信号使用。"""
+
+    excluded_pids = set() if excluded is None else excluded
+    members: list[tuple[int, str]] = []
+    for stat_path in pathlib.Path("/proc").glob("[0-9]*/stat"):
+        try:
+            pid = int(stat_path.parent.name)
+        except ValueError:
+            continue
+        if pid in excluded_pids:
+            continue
+        identity = process_identity(pid)
+        if identity is not None and identity[0] not in {"X", "x", "Z", "z"} \
+                and identity[3] == session_id:
+            members.append((pid, identity[1]))
+    return members
+
+
+def signal_session_members(
+    session_id: int, signum: signal.Signals, excluded: set[int]
+) -> None:
+    """以 pidfd 向 session 当前成员发送信号，避免数字 PID 复用窗口。"""
+
+    for pid, starttime in live_session_members(session_id, excluded):
+        send_bound_signal(pid, starttime, signum)
+
+
+def sentinel_main(parent_pid: int, parent_start: str, session_id: int) -> int:
+    """guard 被不可捕获地终止时，独立清理同 session 的所有包装器与后代。"""
 
     state = {"disarmed": False, "parent_dead": False}
 
@@ -140,20 +172,20 @@ def sentinel_main(parent_pid: int, parent_start: str, pgid: int) -> int:
         time.sleep(0.02)
     if state["disarmed"]:
         return 0
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        return 0
-    time.sleep(0.5)
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        return 0
-    return 1
+    excluded = {os.getpid()}
+    signal_session_members(session_id, signal.SIGTERM, excluded)
+    deadline = time.monotonic() + 0.5
+    while live_session_members(session_id, excluded) \
+            and time.monotonic() < deadline:
+        time.sleep(0.02)
+    remaining = live_session_members(session_id, excluded)
+    if remaining:
+        signal_session_members(session_id, signal.SIGKILL, excluded)
+    return 1 if live_session_members(session_id, excluded) else 0
 
 
 class StrictGroupGuard:
-    """保持 PGID leader 存活，直到命令组清空或严格启动被撤销。"""
+    """保持 session leader 存活，直到启动链清空或严格启动被撤销。"""
 
     def __init__(self, parent_pid: int, parent_start: str,
                  command: Sequence[str]) -> None:
@@ -183,20 +215,14 @@ class StrictGroupGuard:
                        signal.SIGTERM, signal.SIGUSR1, signal.SIGUSR2):
             signal.signal(signum, self._handle_signal)
 
-    def _other_group_members(self) -> list[int]:
-        members: list[int] = []
-        for stat_path in pathlib.Path("/proc").glob("[0-9]*/stat"):
-            try:
-                pid = int(stat_path.parent.name)
-            except ValueError:
-                continue
-            if pid == self.self_pid or pid == self.sentinel_pid:
-                continue
-            identity = process_identity(pid)
-            if identity is not None and identity[0] not in {"X", "x", "Z", "z"} \
-                    and identity[2] == self.self_pid:
-                members.append(pid)
-        return members
+    def _session_exclusions(self) -> set[int]:
+        excluded = {self.self_pid}
+        if self.sentinel_pid is not None:
+            excluded.add(self.sentinel_pid)
+        return excluded
+
+    def _other_session_members(self) -> list[tuple[int, str]]:
+        return live_session_members(self.self_pid, self._session_exclusions())
 
     def _spawn_sentinel(self) -> bool:
         identity = process_identity(self.self_pid)
@@ -233,18 +259,16 @@ class StrictGroupGuard:
             time.sleep(0.01)
         return False
 
-    def _terminate_group(self, requested: signal.Signals) -> int:
-        """锚点捕获首个信号并保持 PGID，宽限后再对同一组升级 KILL。"""
+    def _terminate_session(self, requested: signal.Signals) -> int:
+        """锚点捕获首个信号，宽限后对同一 session 的存活成员升级 KILL。"""
 
-        try:
-            os.killpg(self.self_pid, requested)
-        except ProcessLookupError:
-            pass
+        exclusions = self._session_exclusions()
+        signal_session_members(self.self_pid, requested, exclusions)
         deadline = time.monotonic() + 0.5
-        while self._other_group_members() and time.monotonic() < deadline:
+        while self._other_session_members() and time.monotonic() < deadline:
             time.sleep(0.02)
-        if self._other_group_members():
-            os.killpg(self.self_pid, signal.SIGKILL)
+        if self._other_session_members():
+            signal_session_members(self.self_pid, signal.SIGKILL, exclusions)
         self._disarm_sentinel()
         return 128 + int(requested)
 
@@ -262,9 +286,9 @@ class StrictGroupGuard:
             print(f"ERROR: 无法建立严格启动 session: {exc}", file=sys.stderr)
             return 1
         if self.termination is not None:
-            return self._terminate_group(self.termination)
+            return self._terminate_session(self.termination)
         if not self._spawn_sentinel():
-            print("ERROR: 无法建立严格启动 PGID sentinel", file=sys.stderr)
+            print("ERROR: 无法建立严格启动 session sentinel", file=sys.stderr)
             return 1
         try:
             # 与原 setsid+exec 路径一致保留实例锁 FD8 和调用方明确留下的描述符。
@@ -276,7 +300,7 @@ class StrictGroupGuard:
         child_return: int | None = None
         while True:
             if self.termination is not None:
-                return self._terminate_group(self.termination)
+                return self._terminate_session(self.termination)
             if child_return is None:
                 child_return = self.child.poll()
                 if child_return is None:
@@ -289,12 +313,12 @@ class StrictGroupGuard:
                 # sentinel 仍负责父代突然死亡，期间无需扫描同组后代。
                 time.sleep(0.02)
                 continue
-            # 只有直接命令已退出时，才检查是否仍有同 PGID 后代。
+            # 只有直接命令已退出时，才检查是否仍有同 session 后代。
             # 这覆盖包装器组长早退的情况，又不影响长时间运行的 QEMU。
-            members = self._other_group_members()
+            members = self._other_session_members()
             if child_return is not None and self.adopted and not members:
                 if not self._disarm_sentinel():
-                    return self._terminate_group(signal.SIGTERM)
+                    return self._terminate_session(signal.SIGTERM)
                 return normalize_returncode(child_return)
             # 包装器组长已退出但 QEMU 后代仍长时间运行时，也把
             # 全表检查限制为每 0.5 秒一次；最终退出延迟上界可接受。
@@ -302,7 +326,7 @@ class StrictGroupGuard:
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="VMate strict process group guard")
+    parser = argparse.ArgumentParser(description="VMate strict process session guard")
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("check")
     identity_parser = subparsers.add_parser("identity")
@@ -326,7 +350,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         identity = process_identity(args.pid)
         if identity is None:
             return 1
-        print(identity[0], identity[1], identity[2])
+        print(identity[0], identity[1], identity[2], identity[3])
         return 0
     if args.action == "signal":
         return 0 if send_bound_signal(

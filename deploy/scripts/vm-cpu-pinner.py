@@ -19,7 +19,7 @@ from vm_cpu_pinner_lifecycle import (  # noqa: E402
     cleanup_applied_failure,
     emit_supervisor_status,
     ignore_lifecycle_signals, log, process_matches,
-    process_pgid, process_starttime, query_vcpus,
+    process_sid, process_starttime, query_vcpus,
     release_instance,
     request_qmp_command, request_qmp_quit,
     stop_bound_qemu,
@@ -172,7 +172,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--launcher-pid", type=int)
     parser.add_argument("--launcher-starttime")
-    parser.add_argument("--launcher-pgid", type=int)
+    parser.add_argument("--launcher-sid", type=int)
     parser.add_argument("--status-fd", type=int)
     parser.add_argument(
         "--abort-on-failure",
@@ -197,8 +197,8 @@ def run_pinner(args: argparse.Namespace) -> PinOutcome:
         or args.cpus % host_tpc != 0
         or profile not in {(2, 1, 1), (4, 2, 2), (4, 1, 1)}
         or (args.launcher_pid is None) != (args.launcher_starttime is None)
-        or (args.launcher_pgid is not None
-            and (args.launcher_pid is None or args.launcher_pgid <= 0))
+        or (args.launcher_sid is not None
+            and (args.launcher_pid is None or args.launcher_sid <= 0))
         or (args.status_fd is not None
             and (args.status_fd != 1 or not args.abort_on_failure))
         or (args.launcher_starttime is not None
@@ -229,12 +229,15 @@ def run_pinner(args: argparse.Namespace) -> PinOutcome:
     if starttime is None or any(tgid_of(tid) != pid for _index, tid in vcpus):
         log("⚠ vCPU TID 不属于同一 QEMU 代际")
         return PinOutcome(1)
-    if args.launcher_pgid is not None and (
+    # GNOME/systemd inhibit 在部分发行版会于同一 session 内建立子进程组并把
+    # wrapper 重新托管给 user systemd。session 由 guard 的 setsid() 创建，子进程
+    # 不能加入其它既有 session；用 SID 既保持严格所有权，又允许合法的内层 PGID。
+    if args.launcher_sid is not None and (
         not process_matches(args.launcher_pid, args.launcher_starttime)
-        or process_pgid(args.launcher_pid) != args.launcher_pgid
-        or process_pgid(pid) != args.launcher_pgid
+        or process_sid(args.launcher_pid) != args.launcher_sid
+        or process_sid(pid) != args.launcher_sid
     ):
-        log("⚠ QEMU 不属于严格启动器创建的进程组")
+        log("⚠ QEMU 不属于严格启动器创建的 session")
         return PinOutcome(1)
 
     # root helper 的 cgroup 名是固定安全边界，普通用户环境不得让发现算法读取另一

@@ -17,12 +17,21 @@ fail() {
 
 test_focus_gain_replays_scanout() {
     # 中文注释：窗口从 minimized/hidden 回到前台时，不一定收到 RESTORED/SHOWN。
-    # FOCUS_GAINED 是实际更稳定的恢复信号，必须主动 sdl2_redraw()。
+    # FOCUS_GAINED 是实际更稳定的恢复信号；事件洪泛时先置 per-window pending，
+    # poll 排空后仍必须由 GL flush replay 当前 scanout。
     awk '
         /case SDL_WINDOWEVENT_FOCUS_GAINED:/ { in_case = 1 }
-        in_case && /sdl2_redraw\(scon\)/ { saw_redraw = 1 }
-        in_case && /break;/ { exit saw_redraw ? 0 : 1 }
+        in_case && /scon->window_redraw_pending = true/ { saw_pending = 1 }
+        in_case && /break;/ { exit saw_pending ? 0 : 1 }
     ' "$SDL2_C" || fail "SDL focus gained must replay current GL scanout"
+    awk '
+        /void sdl2_flush_window_updates/ { in_func = 1 }
+        in_func && /if \(target->opengl\)/ { saw_gl_guard = 1 }
+        in_func && saw_gl_guard && /sdl2_redraw\(target\)/ {
+            saw_redraw = 1
+        }
+        in_func && /^}/ { exit saw_gl_guard && saw_redraw ? 0 : 1 }
+    ' "$SDL2_C" || fail "SDL pending GL redraw must replay the scanout"
 }
 
 test_display_resume_replays_scanout() {

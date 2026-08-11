@@ -283,11 +283,11 @@ test_sdl_defers_redraw_but_keeps_polling() {
         "scon->scanout_redraw_pending = true" \
         "return;"
     require_function_order "$SDL_GL" "sdl2_gl_refresh" \
+        "sdl2_poll_events(scon)" \
         "scon->scanout_redraw_pending &&" \
         "!qemu_console_is_gl_blocked(dcl->con)" \
         "scon->scanout_redraw_pending = false" \
-        "sdl2_gl_redraw(scon)" \
-        "sdl2_poll_events(scon)"
+        "sdl2_gl_redraw(scon)"
 }
 
 test_object_delete_waits_for_safe_reclaim() {

@@ -86,7 +86,7 @@ void fb_shm_stream_pacer_finish_frame(StreamPacer *p, uint64_t now_ns)
      * fwrite()/编码器/网络偶发阻塞后，不循环补发已经错过的节拍。直接从当前
      * 时间重新排下一帧，视觉上表现为丢帧或短暂停顿，而不是快进追帧。
      */
-    if (now_ns > next_ns + p->interval_ns) {
+    if (now_ns > next_ns) {
         p->next_frame_ns = now_ns + p->interval_ns;
     } else {
         p->next_frame_ns = next_ns;

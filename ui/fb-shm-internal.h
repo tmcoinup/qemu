@@ -123,6 +123,8 @@ struct FbShmDisplay {
     uint32_t active_idx;
     uint64_t frame_seq;
     bool surface_present;
+    /* CPU surface 收到真实 damage 后才重新复制 ROI。 */
+    bool cpu_surface_dirty;
     uint64_t shm_last_frame_ns;
 
 #ifndef _WIN32

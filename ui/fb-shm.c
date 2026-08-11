@@ -68,6 +68,8 @@ FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     d->shm_target_fps = d->target_fps;
     d->gpu_target_fps = d->target_fps;
     d->blend_cursor = cfg->blend_cursor;
+    /* 首次 refresh 必须创建 mapping 并发布 bootstrap 帧。 */
+    d->cpu_surface_dirty = true;
 
     if (fb_shm_open_listener(d, errp) < 0) {
         goto err;

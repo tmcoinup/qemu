@@ -140,6 +140,7 @@ if sdl.found()
   sdl_ss.add(sdl, sdl_image, pixman, glib, files(
     'sdl2-2d.c',
     'sdl2-display-policy.c',
+    'sdl2-event.c',
     'sdl2-input.c',
     'sdl2-pointer.c',
     'sdl2-x11.c',

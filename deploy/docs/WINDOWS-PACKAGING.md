@@ -75,7 +75,7 @@ Windows PowerShell 5.1 是 Windows 10/11 自带组件，不算额外运行时依
 
    ```powershell
    New-Item -ItemType Directory -Force C:\qemu\vms\1 | Out-Null
-   qemu-img.exe create -f qcow2 C:\qemu\vms\1\disk.qcow2 512110190592
+   qemu-img.exe create -f qcow2 -o preallocation=metadata,cluster_size=65536 C:\qemu\vms\1\disk.qcow2 512110190592
    ```
 
    当前已核验 NVMe 仅保留 512GB 容量：

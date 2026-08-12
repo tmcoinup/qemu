@@ -18,6 +18,31 @@ BOOT_STORAGE_MODEL="Samsung SSD 970 PRO 512GB"
 BOOT_STORAGE_SIZE_BYTES=512110190592
 BASE_IMAGE=
 DRY_RUN=0
+DISK_GUARD=0
+
+# 稀疏盘必须在启动前检查宿主真实余量；100% 阈值在已有测试文件的文件系统上
+# 必然失败，用来覆盖硬拒绝与显式 emergency override，而不依赖 CI 磁盘大小。
+DISK="$TMP_DIR"
+DISK_GUARD=1
+DISK_MIN_FREE_GIB=1
+DISK_MIN_FREE_PERCENT=100
+DISK_WARN_FREE_PERCENT=100
+if sv_disk_host_headroom_guard >"$TMP_DIR/headroom.out" 2>&1; then
+    fail "宿主文件系统余量不足时仍允许启动"
+fi
+grep -F "qcow2 所在文件系统空间不足" "$TMP_DIR/headroom.out" >/dev/null \
+    || fail "宿主磁盘余量拒绝没有给出明确原因"
+DISK_FORCE=1
+sv_disk_host_headroom_guard >"$TMP_DIR/headroom-force.out" 2>&1 \
+    || fail "DISK_FORCE=1 没有显式越过磁盘余量门禁"
+grep -F "显式越过满盘/ENOSPC 风险" "$TMP_DIR/headroom-force.out" >/dev/null \
+    || fail "磁盘余量 override 没有输出风险提示"
+DISK_GUARD=0
+DISK_FORCE=0
+unset DISK_MIN_FREE_GIB DISK_MIN_FREE_PERCENT DISK_WARN_FREE_PERCENT
+grep -F 'preallocation=metadata,cluster_size=65536' \
+        "$REPO_ROOT/deploy/scripts/lib/sv-disk.sh" >/dev/null \
+    || fail "新建独立 qcow2 没有预分配元数据"
 
 # 首次创建必须把清单中的精确十进制容量交给 qemu-img，并回读相同 virtual-size。
 DISK="$TMP_DIR/correct.qcow2"

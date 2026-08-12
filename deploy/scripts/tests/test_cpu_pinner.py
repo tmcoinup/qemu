@@ -201,9 +201,9 @@ class CpuPinnerTest(unittest.TestCase):
 
     def test_helper_receives_independent_guest_and_host_tpc(self):
         arguments = MODULE.parse_args([
-            "1", "4", "/tmp/test.qmp", "/helper", "0", "1", "1",
+            "1", "4", "/tmp/test.qmp", "/helper", "auto", "1", "1",
         ])
-        topology = [core(0, index, index, index + 8) for index in range(4)]
+        topology = [core(0, index, index, index + 8) for index in range(5)]
         completed = MODULE.subprocess.CompletedProcess([], 0, "", "")
         with mock.patch.dict(MODULE.os.environ, {"HOST_RESERVE_CORES": "0"}), \
              mock.patch.object(MODULE, "discover_topology", return_value=topology), \
@@ -219,8 +219,18 @@ class CpuPinnerTest(unittest.TestCase):
             outcome = MODULE.run_pinner(arguments)
 
         command = helper_mock.call_args.args[0]
-        self.assertEqual((outcome.status, command[7]), (0, "0,1,2,3,8,9,10,11"))
-        self.assertEqual(command[-2:], ["1", "1"])
+        self.assertEqual((outcome.status, command[7]),
+                         (0, "0,1,2,3,4,8,9,10,11,12"))
+        self.assertEqual(command[-3:], ["1", "1", "1"])
+
+    def test_auto_service_cpu_falls_back_on_four_core_host(self):
+        topology = [core(0, index, index, index + 4) for index in range(4)]
+        placement = MODULE.choose_placement(topology, set(), 4, 1, 0, 1, 1)
+        fallback = MODULE.choose_placement(topology, set(), 4, 0, 0, 1, 1)
+        self.assertFalse(placement.has_capacity)
+        self.assertTrue(placement.spans_nodes)
+        self.assertTrue(fallback.has_capacity)
+        self.assertFalse(fallback.spans_nodes)
 
     def test_guest_2c2t_vcpus_use_two_distinct_physical_cores(self):
         topology = [core(0, index, index, index + 8) for index in range(8)]

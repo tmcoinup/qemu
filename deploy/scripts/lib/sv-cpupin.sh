@@ -107,7 +107,7 @@ sv_cpu_isolate_launch() {
     }
     python3 "$pinner" \
         "$INSTANCE" "${CPUS:-4}" "$QMP_SOCK" "$helper" \
-        "${QEMU_SERVICE_CPUS:-0}" \
+        "${QEMU_SERVICE_CPUS:-auto}" \
         "$(( CPU_THREADS / CPU_CORES ))" \
         "$(sv_cpu_host_threads_per_core)" \
         --launcher-pid "$launcher_pid" --launcher-starttime "$launcher_start" &
@@ -130,7 +130,7 @@ sv_cpu_isolate_supervise() {
     exec {status_fd}< <(
         exec python3 "$pinner" \
             "$INSTANCE" "${CPUS:-4}" "$QMP_SOCK" "$helper" \
-            "${QEMU_SERVICE_CPUS:-0}" "$(( CPU_THREADS / CPU_CORES ))" \
+            "${QEMU_SERVICE_CPUS:-auto}" "$(( CPU_THREADS / CPU_CORES ))" \
             "$(sv_cpu_host_threads_per_core)" \
             --launcher-pid "$launcher_pid" --launcher-starttime "$launcher_start" \
             --launcher-sid "$launcher_sid" --status-fd 1 --abort-on-failure

@@ -10,6 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LIB="$REPO_ROOT/deploy/scripts/lib/sv-network-preflight.sh"
+VLAN_LIB="$REPO_ROOT/deploy/scripts/lib/sv-vlan-preflight.sh"
 DEVICES="$REPO_ROOT/deploy/scripts/lib/sv-devices.sh"
 REAL_STAT="$(command -v stat)"
 
@@ -161,6 +162,53 @@ test_untrusted_or_unrelated_config_is_non_applicable() {
     run_preflight || fail "配置缺失时应保持历史 isolated/bridge 语义"
 }
 
+test_native_tap_fallback_contract() {
+    (
+        INSTANCE=7
+        BRIDGE=br0
+        VLAN_ID=""
+        sv_vlan_trusted_executable() { return 0; }
+        vlan_tap_name() { [[ "$1" == "7" ]] && printf 'svtap7\n'; }
+        sv_vlan_helper_call() {
+            [[ "$*" == "check 7 1" ]] && printf 'svtap7\n'
+        }
+
+        sv_vlan_enable_native_bridge_fallback \
+            || fail "受信任 VID 1 helper 未接管 capability 丢失场景"
+        [[ "$VLAN_ID" == "1" && "$VLAN_TAP_IF" == "svtap7" \
+            && "$SV_VLAN_NATIVE_FALLBACK" == "1" ]] \
+            || fail "native TAP fallback 未提交完整运行态"
+    )
+
+    (
+        INSTANCE=7
+        BRIDGE=br9
+        VLAN_ID=""
+        sv_vlan_trusted_executable() { fail "非 br0 不应探测 VLAN helper"; }
+        ! sv_vlan_enable_native_bridge_fallback
+    ) || fail "非 br0 错误启用了 native TAP fallback"
+
+    (
+        INSTANCE=7
+        BRIDGE=br0
+        VLAN_ID=11
+        sv_vlan_trusted_executable() { fail "显式 VLAN 不应进入普通 bridge fallback"; }
+        ! sv_vlan_enable_native_bridge_fallback
+    ) || fail "显式 VLAN 被普通 bridge fallback 覆盖"
+
+    (
+        INSTANCE=7
+        BRIDGE=br0
+        VLAN_ID=""
+        sv_vlan_trusted_executable() { return 0; }
+        vlan_tap_name() { printf 'svtap7\n'; }
+        sv_vlan_helper_call() { printf 'svtap8\n'; }
+        ! sv_vlan_enable_native_bridge_fallback
+        [[ -z "$VLAN_ID" && -z "${VLAN_TAP_IF:-}" \
+            && "$SV_VLAN_NATIVE_FALLBACK" == "0" ]]
+    ) || fail "helper 返回错误 TAP 时仍污染了 fallback 状态"
+}
+
 test_launcher_integration_contract() {
     # shellcheck disable=SC2016 # 静态匹配生产脚本中的变量字面量，不在测试进程展开。
     grep -F -- 'source "$HERE/lib/sv-network-preflight.sh"' "$DEVICES" >/dev/null \
@@ -171,12 +219,17 @@ test_launcher_integration_contract() {
     # shellcheck disable=SC2016 # DRY_RUN 条件必须保持字面形式，防止意外访问宿主拓扑。
     grep -F -- '"${DRY_RUN:-0}" != "1"' "$DEVICES" >/dev/null \
         || fail "DRY_RUN 未明确跳过宿主运行态预检"
+    grep -F -- 'sv_vlan_enable_native_bridge_fallback' "$DEVICES" >/dev/null \
+        || fail "普通 bridge 未接入受信任 native TAP 恢复路径"
 }
 
 main() {
     [[ -f "$LIB" ]] || fail "缺少预检库: $LIB"
+    [[ -f "$VLAN_LIB" ]] || fail "缺少 VLAN 预检库: $VLAN_LIB"
     # shellcheck disable=SC1090
     source "$LIB"
+    # shellcheck disable=SC1090
+    source "$VLAN_LIB"
     TEST_ROOT="$(mktemp -d)"
     SYS_CLASS_NET="$TEST_ROOT/sys/class/net"
     trap 'rm -rf -- "${TEST_ROOT:-}"' EXIT
@@ -186,6 +239,7 @@ main() {
     test_uplink_topology_and_carrier_failures
     test_physical_uplink_contract
     test_untrusted_or_unrelated_config_is_non_applicable
+    test_native_tap_fallback_contract
     test_launcher_integration_contract
     echo "PASS: 普通 bridge 可信物理上联启动前健康预检"
 }

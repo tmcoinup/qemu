@@ -98,8 +98,8 @@ if python3 "$PROBE" "$TMP_DIR/fallback-qemu" native --quiet; then
     fail "active-read probe 接受了 native 静默线程池回退"
 fi
 
-grep -F 'aio=${disk_aio},discard=unmap' "$STORAGE" >/dev/null ||
-    fail "启动盘没有消费已验证的 AIO 后端"
+grep -F 'aio=${disk_aio},discard=unmap,detect-zeroes=unmap' "$STORAGE" >/dev/null ||
+    fail "启动盘没有消费已验证的 AIO 后端与零块回收策略"
 if grep -F 'iothread=' "$STORAGE" >/dev/null; then
     fail "AIO 优化错误地给 emulated storage 增加了 IOThread"
 fi

@@ -162,6 +162,11 @@
 #                          ${QMP_SOCK}.proxy 兼容旧工具配置
 #     HOST_OOM_PROTECT=1   启动时临时保护本实例进程树免被全局 OOM 优先选中；
 #                          固定 oom_score_adj=-500，VM 退出即失效，不改 swap/sysctl
+#     DISK_GUARD=1         qcow2 文件系统默认至少保留 16 GiB 且 5% 可用空间；
+#                          低于任一要求就拒绝启动，低于 10% 会告警，避免稀疏盘扩展
+#                          导致宿主 I/O 长停顿或 ENOSPC。仅紧急恢复可用
+#                          DISK_FORCE=1 显式越过；可用 DISK_MIN_FREE_GIB、
+#                          DISK_MIN_FREE_PERCENT、DISK_WARN_FREE_PERCENT 调整阈值。
 #     HOST_TUNE=1          起 VM 前自动跑 host-performance.sh 压计时抖动（默认 1）
 #                          (flag: --host-tune / --no-host-tune)
 #                          PPD performance（无 PPD 时回退 performance governor）+
@@ -195,9 +200,9 @@
 #     HOST_RESERVE_CORES=auto 按完整 SMT2 核池给宿主机预留物理核；仅本次容量不足时缩小，
 #                          每台 VM 分配 2/4/4 条逻辑 CPU；显式 N 仍表示硬预留物理核。
 #                          不按已运行 VM 数量改变边界；设 0 时 helper 仍至少留 2 核。
-#     QEMU_SERVICE_CPUS=0  给 QEMU 辅助线程额外预留逻辑 CPU 数（默认 0，保持旧行为）。
-#                          启用后 root helper 会把 main/IO/SDL/fb-shm worker 等非 vCPU 线程
-#                          收窄到这组 CPU，避免它们和满载 vCPU 抢同一条调度队列。
+#     QEMU_SERVICE_CPUS=auto 默认有容量时给 QEMU 辅助线程预留 1 个独立逻辑 CPU；
+#                          低核/多 VM 容量不足时兼容回退 0。main/IO/SDL/fb-shm worker
+#                          会收窄到该 CPU，避免和满载 vCPU 抢同一条调度队列。
 #                          短 flag: --svc-cpu(=1) / --svc-cpus=N / --no-svc-cpus；
 #                          长兼容: --qemu-service-cpu / --qemu-service-cpus=N。
 #                          短环境变量: QEMU_SVC_CPUS=1。

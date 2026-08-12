@@ -39,6 +39,7 @@ stealth_validate_boot_storage_serial() {
 
 stealth_build_boot_storage_args() {
     local disk_aio="${QEMU_DISK_AIO_SELECTED:-threads}"
+    local drive_options
 
     BOOT_STORAGE_ARGS=()
     case "$disk_aio" in
@@ -49,6 +50,9 @@ stealth_build_boot_storage_args() {
             ;;
     esac
     stealth_validate_boot_storage_serial || return 1
+    # Windows/Linux 对未使用区域的普通全零写入会转为 qcow2 unmap，避免稀疏盘
+    # 无意义扩张；非零数据语义、cache=none 与已验证 AIO 路径保持不变。
+    drive_options="file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=${disk_aio},discard=unmap,detect-zeroes=unmap"
     case "${PLATFORM_BOOT_STORAGE:-nvme}" in
         nvme)
             if [[ "${PLATFORM_STORAGE_SWITCH_REQUIRED:-0}" != 0 ||
@@ -67,7 +71,7 @@ stealth_build_boot_storage_args() {
                 return 1
             fi
             BOOT_STORAGE_ARGS=(
-                -drive "file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=${disk_aio},discard=unmap"
+                -drive "$drive_options"
                 -device "nvme,id=nvmectl0,bus=rp1,drive=bootdisk0,serial=${BOOT_STORAGE_SERIAL:?缺少 BOOT_STORAGE_SERIAL},x-identity-profile=${NVME_COMPONENT_ID:?缺少 NVME_COMPONENT_ID},bootindex=3,model-number=${BOOT_STORAGE_MODEL:?缺少 BOOT_STORAGE_MODEL},firmware-rev=${BOOT_STORAGE_FIRMWARE:?缺少 BOOT_STORAGE_FIRMWARE},subsys-vendor-id=${NVME_SUBSYS_VEN:?缺少 NVME_SUBSYS_VEN},subsys-id=${NVME_SUBSYS_DEV:?缺少 NVME_SUBSYS_DEV},subnqn=${NVME_SUBNQN:?缺少 NVME_SUBNQN}"
             )
             ;;
@@ -91,7 +95,7 @@ stealth_build_boot_storage_args() {
             # 安装介质固定占 ide.0，副 ISO 占 ide.1；启动盘使用独立的第三端口，
             # 避免仅在 --iso 启动时才暴露的 unit 冲突。
             BOOT_STORAGE_ARGS=(
-                -drive "file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=${disk_aio},discard=unmap"
+                -drive "$drive_options"
                 -device "ide-hd,bus=ide.2,unit=0,drive=bootdisk0,bootindex=3,model=${BOOT_STORAGE_MODEL},serial=${BOOT_STORAGE_SERIAL},ver=${BOOT_STORAGE_FIRMWARE},rotation_rate=1"
             )
             ;;

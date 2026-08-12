@@ -286,7 +286,7 @@ function New-VMatePlatformDeviceArguments {
         '-device', "pcie-root-port,id=rp1,slot=1,bus=pcie.0,addr=0x1,x-speed=$nvmeSpeed,x-width=$nvmeWidth,$commonPort,x-pci-device-id=$($rootDevices[0])",
         '-device', "pcie-root-port,id=rp2,slot=2,bus=pcie.0,addr=0x2,x-speed=2_5,x-width=1,$commonPort,x-pci-device-id=$($rootDevices[1])",
         '-device', "pcie-root-port,id=rp3,slot=3,bus=pcie.0,addr=0x3,x-speed=2_5,x-width=1,$commonPort,x-pci-device-id=$($rootDevices[2])",
-        '-drive', "file=$Disk,if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap",
+        '-drive', "file=$Disk,if=none,id=nvm0,format=qcow2,cache=none,aio=threads,discard=unmap,detect-zeroes=unmap",
         '-device', "nvme,id=nvmectl0,bus=rp1,drive=nvm0,x-identity-profile=$storageIdentityProfile,serial=$($Profile.identity.nvme_serial),model-number=$storageModel,firmware-rev=$storageFirmware,subsys-vendor-id=$storageSubVendor,subsys-id=$storageSubDevice,subnqn=$nvmeSubnqn",
         '-netdev', "user,id=net0,hostfwd=tcp:127.0.0.1:$SshForwardPort-:22,hostfwd=tcp:127.0.0.1:$RdpForwardPort-:3389",
         # Intel Gigabit CT Desktop Adapter 按独立扩展卡建模；板载 NIC 状态和

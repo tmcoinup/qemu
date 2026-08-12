@@ -384,9 +384,9 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `HOST_TUNE` | `1` | PPD performance（无 PPD 时回退 performance governor）、`halt_poll`、THP defrag |
 | `CPU_FREQ_CAP` | **`0`** | 默认不全局封顶；`--freq-cap` 才按目标 CPU 上限启用 |
 | `CPU_ISOLATE` | `1` | 严格启动闸门 + NUMA-aware pinner + 每实例 cgroup cpuset |
-| `QEMU_SERVICE_CPUS` | `0` | `--svc-cpu` 分配 1 个辅助线程逻辑 CPU |
-| `QEMU_DISK_AIO` | `auto` | 实测选择 `io_uring`→`native`→`threads`，不增加 IOThread |
-| `MEM_GUARD` | `1` | 可用内存不足时告警或拒绝；`MEM_FORCE=1` 显式越过硬拒绝 |
+| `QEMU_SERVICE_CPUS` | `auto` | 容量允许时分配 1 个辅助线程逻辑 CPU，否则回退 0；可显式覆盖 |
+| `QEMU_DISK_AIO` | `auto` | 实测选择 `io_uring`→`native`→`threads`；零块转 unmap，不增加 IOThread |
+| `MEM_GUARD` / `DISK_GUARD` | `1` / `1` | 内存或 qcow2 文件系统余量不足时拒绝；分别用 `MEM_FORCE=1` / `DISK_FORCE=1` 越过 |
 | `SDL` / `FB_SHM` | `1` / `1` | 默认本地稳定 SDL 窗口与 fb-shm 同时启用 |
 | `STABLE_DISPLAY` | `1` | 默认 `virtio-vga`、无 virgl/blob/hostmem；设 `0` 显式启用 GL |
 | `GPU_DISPLAY` | `sdl` | `sdl-egl`/`egl-headless` 显式 opt-in GL，但默认仍为 gl-safe |

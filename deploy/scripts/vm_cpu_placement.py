@@ -23,6 +23,7 @@ class Placement:
     preference: tuple[int, ...]
     memory_nodes: tuple[int, ...]
     spans_nodes: bool
+    has_capacity: bool
     reserve_cores: int
 
 
@@ -100,7 +101,7 @@ def choose_placement(
     reserve = max(0, min(reserve_cores, max(0, len(allocatable) - 1)))
     eligible = allocatable[reserve:]
     if not eligible:
-        return Placement((), (), bool(cores), reserve)
+        return Placement((), (), bool(cores), False, reserve)
 
     required_logical = vcpu_count + service_cpu_count
     required_physical = (
@@ -118,6 +119,10 @@ def choose_placement(
     spans_nodes = not any(
         physical >= required_physical and logical >= required_logical
         for physical, logical in total_capacity.values()
+    )
+    has_capacity = any(
+        physical >= required_physical and logical >= required_logical
+        for physical, logical in capacity.values()
     )
 
     ordered_cores: list[PhysicalCore] = []
@@ -141,7 +146,7 @@ def choose_placement(
         preference = tuple(
             thread for core in ordered_cores for thread in core.threads
         )
-    return Placement(preference, memory_nodes, spans_nodes, reserve)
+    return Placement(preference, memory_nodes, spans_nodes, has_capacity, reserve)
 
 
 def _auto_reserve(

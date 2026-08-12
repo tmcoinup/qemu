@@ -126,7 +126,7 @@ QEMU_CAP_CHECK=0 ./deploy/scripts/start-vm.sh 1 --no-bridge
 当前设备身份稳定参数是（文件 AIO 由启动前 active-read 自动选择）：
 
 ```bash
--drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=<io_uring|native|threads>,discard=unmap
+-drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=<io_uring|native|threads>,discard=unmap,detect-zeroes=unmap
 -device nvme,...,drive=bootdisk0,x-identity-profile=...,model-number=...,firmware-rev=...
 ```
 
@@ -143,7 +143,7 @@ model、firmware、PCI/subsystem、OUI、链路和序列格式作为一个整体
 compatibility bundle 会自动切换为：
 
 ```bash
--drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=<auto-selected>,discard=unmap
+-drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=<auto-selected>,discard=unmap,detect-zeroes=unmap
 -device ide-hd,bus=ide.2,unit=0,drive=bootdisk0,model=...,serial=...,ver=...,rotation_rate=1
 ```
 

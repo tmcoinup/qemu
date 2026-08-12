@@ -420,15 +420,22 @@ else
                 BRIDGE_HELPER="$h"; break
             fi
         done
-        if [[ -z "$BRIDGE_HELPER" ]]; then
+        if [[ -z "$BRIDGE_HELPER" ]] && sv_vlan_enable_native_bridge_fallback; then
+            NET_ARGS=(
+                -netdev "tap,id=net0,ifname=$VLAN_TAP_IF,script=no,downscript=$SV_VLAN_DOWNSCRIPT"
+            )
+            echo ">> network:     native LAN via $VLAN_TAP_IF on br0 (trusted VID 1 TAP helper)"
+            echo ">> WARN: qemu-bridge-helper capability unavailable; using equivalent native TAP path."
+        elif [[ -z "$BRIDGE_HELPER" ]]; then
             echo "ERROR: no qemu-bridge-helper with cap_net_admin/suid found." >&2
             echo "       Run 'sudo deploy/scripts/setup-bridge.sh' (it installs the apt package + grants caps)." >&2
             exit 1
+        else
+            NET_ARGS=(
+                -netdev "bridge,id=net0,br=$BRIDGE,helper=$BRIDGE_HELPER"
+            )
+            echo ">> network:     bridge=$BRIDGE via $BRIDGE_HELPER (guest gets LAN IP via DHCP)"
         fi
-        NET_ARGS=(
-            -netdev "bridge,id=net0,br=$BRIDGE,helper=$BRIDGE_HELPER"
-        )
-        echo ">> network:     bridge=$BRIDGE via $BRIDGE_HELPER (guest gets LAN IP via DHCP)"
     else
         NET_ARGS=(
             -netdev user,id=net0,hostfwd=tcp:127.0.0.1:$SSH_FWD_PORT-:22,hostfwd=tcp:127.0.0.1:$RDP_FWD_PORT-:3389

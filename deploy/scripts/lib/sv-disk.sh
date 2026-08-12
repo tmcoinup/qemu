@@ -6,6 +6,119 @@
 # 也要能由无 KVM、无宿主网络权限的单元测试独立验证。
 # ---------------------------------------------------------------------------
 
+sv_disk_required_free_bytes() {
+    # 同时保留固定余量与文件系统比例：小盘不能低于固定值，大盘不能只剩少量
+    # 绝对空间。先除后乘，避免对超大文件系统做百分比计算时溢出 shell 整数。
+    local total_bytes="$1"
+    local minimum_gib="$2"
+    local minimum_percent="$3"
+    local gib=$(( 1024 * 1024 * 1024 ))
+    local fixed_bytes=$(( minimum_gib * gib ))
+    local percentage_bytes
+    percentage_bytes=$((
+        (total_bytes / 100) * minimum_percent
+        + ((total_bytes % 100) * minimum_percent + 99) / 100
+    ))
+
+    if (( percentage_bytes > fixed_bytes )); then
+        printf '%s\n' "$percentage_bytes"
+    else
+        printf '%s\n' "$fixed_bytes"
+    fi
+}
+
+sv_disk_host_headroom_guard() {
+    # qcow2 是稀疏文件；guest 写盘时仍会继续向宿主文件系统分配数据和元数据。
+    # 宿主空间见底会同时放大 ext4 分配、qcow2 碎片与 SSD 垃圾回收延迟，严重时
+    # 还会因 ENOSPC 损坏客体文件系统，因此在 QEMU 启动前做硬门禁。
+    local guard="${DISK_GUARD:-1}"
+    local force="${DISK_FORCE:-0}"
+    local minimum_gib_raw="${DISK_MIN_FREE_GIB:-16}"
+    local minimum_percent_raw="${DISK_MIN_FREE_PERCENT:-5}"
+    local warning_percent_raw="${DISK_WARN_FREE_PERCENT:-10}"
+
+    case "$guard:$force" in
+        0:0|0:1|1:0|1:1) ;;
+        *)
+            echo "ERROR: DISK_GUARD 与 DISK_FORCE 必须是 0 或 1" >&2
+            return 2
+            ;;
+    esac
+    if ! [[ "$minimum_gib_raw" =~ ^[1-9][0-9]*$ \
+        && "$minimum_percent_raw" =~ ^[1-9][0-9]*$ \
+        && "$warning_percent_raw" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: 磁盘余量阈值必须是正整数" >&2
+        return 2
+    fi
+
+    local minimum_gib=$(( 10#$minimum_gib_raw ))
+    local minimum_percent=$(( 10#$minimum_percent_raw ))
+    local warning_percent=$(( 10#$warning_percent_raw ))
+    if (( minimum_gib > 1048576 || minimum_percent > 100 \
+        || warning_percent > 100 || warning_percent < minimum_percent )); then
+        echo "ERROR: 磁盘余量阈值越界，且告警百分比不得低于硬门禁百分比" >&2
+        return 2
+    fi
+    if [[ "$guard" == 0 || "${DRY_RUN:-0}" == 1 ]]; then
+        return 0
+    fi
+
+    local target="$DISK"
+    if [[ ! -e "$target" ]]; then
+        target="$(dirname -- "$target")"
+    fi
+    if [[ ! -e "$target" ]]; then
+        echo "ERROR: 无法定位实例盘所在文件系统: $DISK" >&2
+        return 1
+    fi
+
+    local stat_fields block_size total_blocks available_blocks
+    if ! stat_fields=$(stat -f -c '%S %b %a' -- "$target") \
+        || ! read -r block_size total_blocks available_blocks <<<"$stat_fields" \
+        || ! [[ "$block_size" =~ ^[1-9][0-9]*$ \
+            && "$total_blocks" =~ ^[1-9][0-9]*$ \
+            && "$available_blocks" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: 无法读取实例盘所在文件系统的可用容量: $target" >&2
+        return 1
+    fi
+
+    local total_bytes=$(( block_size * total_blocks ))
+    local available_bytes=$(( block_size * available_blocks ))
+    local required_bytes warning_bytes percent_tenths
+    required_bytes="$(
+        sv_disk_required_free_bytes \
+            "$total_bytes" "$minimum_gib" "$minimum_percent"
+    )"
+    warning_bytes=$((
+        (total_bytes / 100) * warning_percent
+        + ((total_bytes % 100) * warning_percent + 99) / 100
+    ))
+    percent_tenths=$(( available_bytes * 1000 / total_bytes ))
+
+    local gib=$(( 1024 * 1024 * 1024 ))
+    local available_gib=$(( available_bytes / gib ))
+    local required_gib=$(( (required_bytes + gib - 1) / gib ))
+    DISK_HOST_FREE_BYTES="$available_bytes"
+    DISK_HOST_REQUIRED_FREE_BYTES="$required_bytes"
+    export DISK_HOST_FREE_BYTES DISK_HOST_REQUIRED_FREE_BYTES
+
+    if (( available_bytes < required_bytes )); then
+        echo ">> 磁盘余量:    ${available_gib} GiB（$((percent_tenths / 10)).$((percent_tenths % 10))%），最低 ${required_gib} GiB" >&2
+        if [[ "$force" == 1 ]]; then
+            echo ">>   WARN: DISK_FORCE=1，显式越过满盘/ENOSPC 风险" >&2
+            return 0
+        fi
+        echo "ERROR: qcow2 所在文件系统空间不足，拒绝启动 VM" >&2
+        echo "       请释放或迁移数据；建议至少保留 ${warning_percent}% 空闲。" >&2
+        echo "       仅紧急恢复可用 DISK_FORCE=1 显式越过本次门禁。" >&2
+        return 1
+    fi
+
+    if (( available_bytes < warning_bytes )); then
+        echo ">> WARN: qcow2 文件系统仅余 ${available_gib} GiB（$((percent_tenths / 10)).$((percent_tenths % 10))%）；建议至少保留 ${warning_percent}%" >&2
+    fi
+}
+
 sv_prepare_disk() {
     # 组件清单已经把型号、固件、PCI ID 和容量绑成一个原子 bundle；这里不允许
     # 用型号字符串猜容量，更不能对历史镜像静默 resize。
@@ -13,6 +126,8 @@ sv_prepare_disk() {
     : "${QEMU_IMG:?缺少 QEMU_IMG}"
     : "${BOOT_STORAGE_SIZE_BYTES:?profile 缺 BOOT_STORAGE_SIZE_BYTES}"
     : "${BOOT_STORAGE_MODEL:?profile 缺 BOOT_STORAGE_MODEL}"
+
+    sv_disk_host_headroom_guard || return $?
 
     if [[ ! -f "$DISK" ]]; then
         if [[ "${DRY_RUN:-0}" == "1" ]]; then
@@ -31,7 +146,10 @@ sv_prepare_disk() {
             echo ">> creating fresh qcow2 at $DISK"
             echo ">>   model     : $BOOT_STORAGE_MODEL"
             echo ">>   raw bytes : $BOOT_STORAGE_SIZE_BYTES  (~${size_gib} GiB Windows-side)"
-            "$QEMU_IMG" create -f qcow2 -o preallocation=off,cluster_size=65536 \
+            # 只预分配 qcow2 元数据，数据区仍保持稀疏；可避免运行中首次扩展 L1/L2
+            # 元数据造成额外延迟。带 backing 的 overlay 需要 extended_l2 才能组合
+            # metadata preallocation，因此上面的兼容克隆路径不擅自升级镜像格式。
+            "$QEMU_IMG" create -f qcow2 -o preallocation=metadata,cluster_size=65536 \
                 "$DISK" "$BOOT_STORAGE_SIZE_BYTES"
         fi
     fi

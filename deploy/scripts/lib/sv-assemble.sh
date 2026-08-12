@@ -266,7 +266,8 @@ fi
 # 再拒绝 -daemonize 并生成叶命令。display guard 稍后把它放进 inhibit 内层。
 sv_qemu_ptracer_build_leaf_command "${CMD[@]}" || exit 1
 
-# 显式 VLAN 到这里才产生宿主网络副作用：CMD 已完整生成，且 DRY_RUN 已经退出。
+# 显式 VLAN/native fallback 到这里才产生宿主网络副作用：CMD 已完整生成，且
+# DRY_RUN 已经退出。
 # prepare 完成后立即启动异步 watchdog；若 watchdog 自身无法启动，则先回收 TAP
 # 再中止，不能留下一个没有生命周期所有者的 persistent 接口。
 if [[ -n "${VLAN_ID:-}" ]]; then

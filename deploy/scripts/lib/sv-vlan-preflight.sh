@@ -1,11 +1,11 @@
 #!/bin/bash
 # shellcheck disable=SC2153  # INSTANCE/VLAN_ID 由已先执行的 sv-cli.sh 提供。
 # ---------------------------------------------------------------------------
-# 显式 VLAN 的宿主预检、TAP 准备与异步清理
+# VLAN TAP 的宿主预检、准备与异步清理
 #
 # 安全边界必须是 setup-bridge.sh 安装的 root:root 固定副本，不能把 sudoers
-# 指向普通用户可修改的仓库脚本。无 VLAN 时本文件所有函数都立即返回，确保原有
-# qemu-bridge-helper 启动路径、输出和回退策略不受影响。
+# 指向普通用户可修改的仓库脚本。显式 VLAN 仍在启动早期 fail closed；普通 br0
+# 仅在 qemu-bridge-helper 的 capability 被包升级清除时，才复用 VID 1 native TAP。
 # ---------------------------------------------------------------------------
 
 # shellcheck disable=SC1091  # 运行时按当前库目录加载共享只读探测函数。
@@ -24,6 +24,7 @@ SV_VLAN_WATCHDOG_PID=""
 SV_VLAN_PREFLIGHT_CODE=""
 SV_VLAN_SETUP_ATTEMPTED=0
 SV_VLAN_RUNTIME_CONFLICT=""
+SV_VLAN_NATIVE_FALLBACK=0
 
 # 检查安装文件确实由 root 控制，防止管理员误把 sudoers 放行到用户可写副本。
 sv_vlan_trusted_executable() {
@@ -45,6 +46,25 @@ sv_vlan_helper_call() {
     else
         sudo -n "$SV_VLAN_HELPER" "$@"
     fi
+}
+
+# apt/dpkg 替换 qemu-bridge-helper 时会清除管理员设置的 security.capability。
+# 已完成 VLAN_TRUNK 初始化的 br0 以 VID 1 作为 native/PVID；此时受信任 helper
+# 创建的 VID 1 access TAP 与 QEMU bridge backend 的默认 port 语义一致。这里只做
+# 只读 check 并切换本次启动状态；真正创建 TAP 仍推迟到完整 argv 生成之后。
+sv_vlan_enable_native_bridge_fallback() {
+    local actual tap
+
+    [[ -z "${VLAN_ID:-}" && "${BRIDGE:-}" == "br0" ]] || return 1
+    sv_vlan_trusted_executable "$SV_VLAN_HELPER" || return 1
+    sv_vlan_trusted_executable "$SV_VLAN_DOWNSCRIPT" || return 1
+    tap="$(vlan_tap_name "$INSTANCE")" || return 1
+    actual="$(sv_vlan_helper_call check "$INSTANCE" 1 2>/dev/null)" || return 1
+    [[ "$actual" == "$tap" ]] || return 1
+
+    VLAN_ID=1
+    VLAN_TAP_IF="$tap"
+    SV_VLAN_NATIVE_FALLBACK=1
 }
 
 # 早期预检只读宿主拓扑，不创建 TAP。它在 VM 目录、profile、TPM 等副作用前
@@ -371,7 +391,11 @@ sv_vlan_prepare() {
         return 1
     fi
     SV_VLAN_PREPARED=1
-    echo ">> VLAN TAP:    $VLAN_TAP_IF (VID $VLAN_ID, guest access/untagged)"
+    if [[ "$SV_VLAN_NATIVE_FALLBACK" == "1" ]]; then
+        echo ">> native TAP:  $VLAN_TAP_IF (VID 1 PVID/untagged)"
+    else
+        echo ">> VLAN TAP:    $VLAN_TAP_IF (VID $VLAN_ID, guest access/untagged)"
+    fi
 }
 
 # stop-vm.sh 使用的公共清理入口。helper 按 root-only 状态文件验证归属，因此

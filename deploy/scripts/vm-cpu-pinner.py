@@ -160,13 +160,26 @@ def read_held_cpus(
     return held
 
 
+def parse_service_cpus(value: str) -> int | None:
+    """解析辅助线程 CPU 数；``auto`` 由宿主实时容量决定。"""
+
+    if value.strip().lower() == "auto":
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是 auto 或整数") from exc
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="QEMU vCPU NUMA-aware pinner")
     parser.add_argument("instance")
     parser.add_argument("cpus", type=int)
     parser.add_argument("qmp_socket")
     parser.add_argument("helper")
-    parser.add_argument("service_cpus", type=int, nargs="?", default=0)
+    parser.add_argument(
+        "service_cpus", type=parse_service_cpus, nargs="?", default=None
+    )
     parser.add_argument("guest_threads_per_core", type=int, nargs="?", default=1)
     parser.add_argument("host_threads_per_core", type=int, nargs="?")
     parser.add_argument("--timeout", type=float, default=90.0)
@@ -190,7 +203,7 @@ def run_pinner(args: argparse.Namespace) -> PinOutcome:
     profile = (args.cpus, args.guest_threads_per_core, host_tpc)
     if (
         args.cpus <= 0
-        or not (0 <= args.service_cpus <= 8)
+        or not (args.service_cpus is None or 0 <= args.service_cpus <= 8)
         or not (1 <= args.guest_threads_per_core <= 8)
         or not (1 <= host_tpc <= 8)
         or args.cpus % args.guest_threads_per_core != 0
@@ -244,25 +257,35 @@ def run_pinner(args: argparse.Namespace) -> PinOutcome:
     # 个分区，否则“看到的已占 CPU”与最终写入的分区不同，会产生重复分配。
     held = read_held_cpus(pid, "vmiso")
     reserve_raw = os.environ.get("HOST_RESERVE_CORES", "auto").strip().lower()
-    if reserve_raw in ("", "auto"):
-        reserve = _auto_reserve(
-            topology,
-            held,
-            len(vcpus),
-            args.service_cpus,
-            args.guest_threads_per_core,
-            host_tpc,
-        )
-    else:
+    configured_reserve: int | None = None
+    if reserve_raw not in ("", "auto"):
         try:
-            reserve = int(reserve_raw)
+            configured_reserve = int(reserve_raw)
         except ValueError:
             log(f"⚠ HOST_RESERVE_CORES 非法: {reserve_raw}")
             return PinOutcome(2, pid, starttime)
 
-    placement = choose_placement(
-        topology, held, len(vcpus), args.service_cpus, reserve,
-        args.guest_threads_per_core, host_tpc)
+    def place(service_cpus: int) -> Placement:
+        reserve = configured_reserve
+        if reserve is None:
+            reserve = _auto_reserve(
+                topology, held, len(vcpus), service_cpus,
+                args.guest_threads_per_core, host_tpc,
+            )
+        return choose_placement(
+            topology, held, len(vcpus), service_cpus, reserve,
+            args.guest_threads_per_core, host_tpc,
+        )
+
+    service_cpus = 1 if args.service_cpus is None else args.service_cpus
+    placement = place(service_cpus)
+    if args.service_cpus is None:
+        if placement.spans_nodes or not placement.has_capacity:
+            service_cpus = 0
+            placement = place(service_cpus)
+            log("ℹ 辅助线程 CPU=auto：当前容量不足，兼容回退为 0")
+        else:
+            log("ℹ 辅助线程 CPU=auto：分配 1 个独立逻辑 CPU")
     if not placement.preference or not placement.memory_nodes:
         log("⚠ 没有可用 CPU/NUMA node")
         return PinOutcome(1, pid, starttime)
@@ -279,12 +302,12 @@ def run_pinner(args: argparse.Namespace) -> PinOutcome:
         f"Guest每核 {args.guest_threads_per_core} 线程，"
         f"host每物理核映射 {host_tpc} vCPU，"
         f"预留 {placement.reserve_cores} 颗管理核，候选池 {len(placement.preference)} 个 vCPU 位置，"
-        f"锁外空闲快照 {free_hint}，需求 {len(vcpus) + args.service_cpus}"
+        f"锁外空闲快照 {free_hint}，需求 {len(vcpus) + service_cpus}"
     )
 
     command = [
         "sudo", "-n", args.helper, "apply", args.instance, memory_nodes, str(pid),
-        preference, tids, str(args.service_cpus),
+        preference, tids, str(service_cpus),
         str(args.guest_threads_per_core),
         str(host_tpc),
     ]

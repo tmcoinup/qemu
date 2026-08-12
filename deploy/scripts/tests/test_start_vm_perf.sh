@@ -287,10 +287,10 @@ test_custom_image_root_dry_run() {
 
 test_qemu_service_cpu_flags_dry_run() {
     local out="$1"
-
+    grep -Fq ': "${QEMU_SERVICE_CPUS:=${QEMU_SVC_CPUS:-auto}}"' "$REPO_ROOT/deploy/scripts/lib/sv-cli.sh" \
+        || fail "default QEMU service CPU policy must be capacity-aware"
     DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9879 \
         "$START_VM" --no-sdl --no-fb-shm --no-bridge --svc-cpu > "$out"
-
     DRY_RUN=1 TPM=0 HOST_TUNE=0 INSTANCE=9880 \
         "$START_VM" --no-sdl --no-fb-shm --no-bridge --svc-cpus=2 > "$out"
 

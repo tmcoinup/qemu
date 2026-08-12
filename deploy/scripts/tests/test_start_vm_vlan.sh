@@ -263,7 +263,8 @@ test_bridge_log_does_not_claim_host_forwarding() {
         IMAGE_ROOT="$TEST_IMAGE_ROOT" "$START_VM" 9919 --no-sdl --no-fb-shm \
         >"$out" 2>&1
     assert_contains "__DRY_RUN_ARGV__" "$out"
-    assert_contains "network:     bridge=" "$out"
+    grep -Eq 'network: +((bridge=)|native LAN)' "$out" \
+        || fail "普通 LAN 未选择 bridge 或等价 native TAP 路径"
     assert_not_contains "SSH/RDP fwd:" "$out"
     assert_not_contains "hostfwd=" "$out"
 }

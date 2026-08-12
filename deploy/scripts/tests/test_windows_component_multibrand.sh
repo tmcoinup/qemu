@@ -473,6 +473,9 @@ grep -F "Parts:    $component_revision / samsung-970-pro-512gb" \
 grep -F 'x-identity-profile=$storageIdentityProfile' \
     "$REPO_ROOT/deploy/windows/lib/VMate.Arguments.ps1" >/dev/null ||
     fail "Windows NVMe 参数没有使用所选 identity profile"
+grep -F 'discard=unmap,detect-zeroes=unmap' \
+    "$REPO_ROOT/deploy/windows/lib/VMate.Arguments.ps1" >/dev/null ||
+    fail "Windows 启动盘没有启用零块回收"
 if grep -F 'use-samsung-id=on' \
     "$REPO_ROOT/deploy/windows/lib/VMate.Arguments.ps1" >/dev/null; then
     fail "Windows NVMe 参数仍硬编码 Samsung 开关"

@@ -27,7 +27,7 @@ line_count() {
 
 test_policy_and_index() {
     local rows
-    assert_equal "$(stealth_household_compat_validate)" "2026-07-19.6" \
+    assert_equal "$(stealth_household_compat_validate)" "2026-08-12.1" \
         "catalog revision 错误"
     assert_equal "$(stealth_household_compat_status compat-haswell-i3-4130-h81)" \
         supported "E5 v3/v4 正常候选状态错误"
@@ -37,10 +37,12 @@ test_policy_and_index() {
         fail "supported 整机 ID 被误识别为 household compatibility"
     fi
 
-    assert_equal "$(stealth_household_compat_index | line_count)" 13 \
+    assert_equal "$(stealth_household_compat_status normal-ryzen7-5800-ryzen3-1200-b350)" \
+        supported "Ryzen 7 5800 正常候选状态错误"
+    assert_equal "$(stealth_household_compat_index | line_count)" 14 \
         "家用候选总数错误"
-    assert_equal "$(stealth_household_compat_index '' '' supported | line_count)" 3 \
-        "E5 v3/v4 默认正常候选数错误"
+    assert_equal "$(stealth_household_compat_index '' '' supported | line_count)" 4 \
+        "精确宿主默认正常候选数错误"
     assert_equal "$(stealth_household_compat_index '' '' compatibility | line_count)" 10 \
         "显式 compatibility 候选数错误"
     for host_class in e5-v1 e5-v2 e5-v3 e5-v4; do
@@ -57,6 +59,10 @@ test_policy_and_index() {
         "AMD K10 缺少 4C4T"
     assert_equal "$(stealth_household_compat_index amd-zen 4 | line_count)" 2 \
         "AMD Zen 缺少 2C4T/4C4T"
+    assert_equal "$(stealth_household_compat_index amd-ryzen7-5800 4 | line_count)" 1 \
+        "Ryzen 7 5800 缺少专用 4C4T 正常候选"
+    [[ -z "$(stealth_household_compat_index amd-ryzen7-5800 2)" ]] \
+        || fail "Ryzen 7 5800 正常池错误加入 2 线程 Guest"
     [[ -z "$(stealth_household_compat_index amd-zen 2)" ]] \
         || fail "AMD Zen 目录虚构了 2 线程型号"
 
@@ -78,6 +84,12 @@ test_classification_and_server_brand_gate() {
         "AMD K10 CPUID 分类错误"
     assert_equal "$(stealth_household_compat_classify AuthenticAMD 23 17)" amd-zen \
         "AMD Zen CPUID 分类错误"
+    assert_equal "$(stealth_household_compat_classify AuthenticAMD 25 33 \
+        'AMD Ryzen 7 5800 8-Core Processor')" amd-ryzen7-5800 \
+        "Ryzen 7 5800 精确宿主分类错误"
+    assert_equal "$(stealth_household_compat_classify AuthenticAMD 25 33 \
+        'AMD Ryzen 7 5800X 8-Core Processor')" amd-zen \
+        "5800X 被错误提升到 5800 正常宿主类"
     if stealth_household_compat_classify GenuineIntel 6 85 >/dev/null 2>&1; then
         fail "未知 Intel CPUID 被错误分类"
     fi
@@ -107,9 +119,9 @@ test_complete_exports() {
     while IFS='|' read -r id classes threads name; do
         stealth_household_compat_load "$id"
         assert_equal "$PLATFORM_ID" "$id" "加载后平台 ID 错误"
-        if [[ "$classes" == "e5-v3,e5-v4" ]]; then
+        if [[ "$classes" == "e5-v3,e5-v4" || "$classes" == amd-ryzen7-5800 ]]; then
             assert_equal "$PLATFORM_STATUS" supported \
-                "E5 v3/v4 正常池状态错误"
+                "精确宿主正常池状态错误"
         else
             assert_equal "$PLATFORM_STATUS" compatibility \
                 "兜底平台状态错误"
@@ -138,7 +150,7 @@ test_complete_exports() {
                 assert_equal "$NVME_MAX_PCIE_GENERATION:$NVME_LANES" "3:2" \
                     "Athlon 200GE 的 B350 M.2 必须降为 PCIe 3.0 x2"
                 ;;
-            compat-zen-ryzen3-1200-b350)
+            compat-zen-ryzen3-1200-b350|normal-ryzen7-5800-ryzen3-1200-b350)
                 assert_equal "$NVME_MAX_PCIE_GENERATION:$NVME_LANES" "3:4" \
                     "Ryzen 3 1200 的 B350 M.2 应保持 PCIe 3.0 x4"
                 ;;
@@ -244,6 +256,18 @@ rejected(
 rejected(
     "E5 v2 未验证候选被提升",
     lambda data: data["candidates"][3].update({"status": "supported"}),
+)
+rejected(
+    "Ryzen 7 5800 品牌门禁被放宽",
+    lambda data: data["host_classes"][5].update({"brand_names": []}),
+)
+rejected(
+    "5800 正常候选脱离事实别名",
+    lambda data: data["candidates"][13].pop("identity_alias_of"),
+)
+rejected(
+    "5800 正常候选与通用 Zen 宿主重叠",
+    lambda data: data["candidates"][13].update({"host_classes": ["amd-zen"]}),
 )
 rejected(
     "Xeon 客体品牌",

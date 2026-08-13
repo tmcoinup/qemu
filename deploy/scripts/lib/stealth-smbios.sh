@@ -64,8 +64,8 @@ _tsc_frequency_within_250ppm() {
     (( delta * 1000000 <= current_khz * 250 ))
 }
 
-# E5 v3/v4 正常家用池和显式 compatibility 均可保留宿主原生 invariant TSC/
-# 受限执行频率；前者还必须再次核对当前 CPUID 宿主类，不能只凭 profile 自报。
+# 精确宿主正常家用池和显式 compatibility 均可保留宿主原生 invariant TSC/
+# 受限执行频率；前者还必须再次核对当前宿主类，不能只凭 profile 自报。
 # 这只保证可启动性，不会伪称设置了宿主不支持的 TSC scaling。
 _stealth_household_runtime_variance_allowed() {
     [[ "${PLATFORM_CPU_SOURCE:-}" == named-household-compatibility &&

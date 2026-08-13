@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-19.6",
+  "catalog_revision": "2026-08-12.1",
   "identity_scope": "household_cpu_catalog_q35_identity_compatibility",
   "selection_policy": {
     "compatibility_requires_explicit_allow": true,
     "supported_requires_explicit_allow": false,
-    "host_supported_classes": ["e5-v3", "e5-v4"],
+    "host_supported_classes": ["e5-v3", "e5-v4", "amd-ryzen7-5800"],
     "priority": "host_supported_then_static_supported_then_same_generation_compatibility_then_cross_generation_compatibility",
     "selection": "uniform_random_exact_threads",
     "guest_threads_must_equal_sku_threads": true,
@@ -23,12 +23,13 @@
     "target_pch_behavior": "not_emulated"
   },
   "host_classes": [
-    {"id": "e5-v1", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [45], "guest_generations": ["sandy-bridge"]},
-    {"id": "e5-v2", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [62], "guest_generations": ["ivy-bridge"]},
-    {"id": "e5-v3", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [63], "guest_generations": ["haswell"]},
-    {"id": "e5-v4", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [79], "guest_generations": ["haswell"]},
-    {"id": "amd-k10", "vendor_id": "AuthenticAMD", "cpuid_families": [16], "cpuid_models": [2, 4, 5, 6, 8, 10], "guest_generations": ["k10"]},
-    {"id": "amd-zen", "vendor_id": "AuthenticAMD", "cpuid_families": [23, 25, 26], "cpuid_models": [], "guest_generations": ["zen"]}
+    {"id": "e5-v1", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [45], "brand_names": [], "guest_generations": ["sandy-bridge"]},
+    {"id": "e5-v2", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [62], "brand_names": [], "guest_generations": ["ivy-bridge"]},
+    {"id": "e5-v3", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [63], "brand_names": [], "guest_generations": ["haswell"]},
+    {"id": "e5-v4", "vendor_id": "GenuineIntel", "cpuid_families": [6], "cpuid_models": [79], "brand_names": [], "guest_generations": ["haswell"]},
+    {"id": "amd-k10", "vendor_id": "AuthenticAMD", "cpuid_families": [16], "cpuid_models": [2, 4, 5, 6, 8, 10], "brand_names": [], "guest_generations": ["k10"]},
+    {"id": "amd-ryzen7-5800", "vendor_id": "AuthenticAMD", "cpuid_families": [25], "cpuid_models": [33], "brand_names": ["AMD Ryzen 7 5800 8-Core Processor"], "guest_generations": ["zen"]},
+    {"id": "amd-zen", "vendor_id": "AuthenticAMD", "cpuid_families": [23, 25, 26], "cpuid_models": [], "brand_names": [], "guest_generations": ["zen"]}
   ],
   "platform_profiles": [
     {
@@ -328,6 +329,18 @@
     {
       "id": "compat-zen-ryzen3-1200-b350",
       "enabled": true, "status": "compatibility", "host_classes": ["amd-zen"], "profile_id": "asus-prime-b350-plus-ddr4",
+      "cpu": {
+        "qemu_arg": "Ryzen3-1200,family=23,model=1,stepping=1,model-id=AMD Ryzen 3 1200 Quad-Core Processor", "vendor_id": "AuthenticAMD", "name": "AMD Ryzen 3 1200 Quad-Core Processor",
+        "max_mhz": 3400, "current_mhz": 3100, "tsc_mhz": 3100, "part": "YD1200BBM4KAE", "socket": "AM4", "cores": 4, "threads": 4, "phys_bits": 43, "features": "+invtsc,+tsc-deadline,+topoext",
+        "integrated_gpu": {"present": false, "profile_state": "absent", "model": "none"},
+        "smbios": {"family": "0x006B", "upgrade": "0x31", "voltage_mv": 1200, "external_clock_mhz": 100, "characteristics": "0x00EC"}
+      },
+      "source_refs": ["https://www.amd.com/en/support/downloads/drivers.html/processors/ryzen/ryzen-1000-series/amd-ryzen-3-1200.html", "https://www.asus.com/us/supportonly/prime%20b350-plus/helpdesk_cpu/"]
+    },
+    {
+      "id": "normal-ryzen7-5800-ryzen3-1200-b350",
+      "enabled": true, "status": "supported", "host_classes": ["amd-ryzen7-5800"], "profile_id": "asus-prime-b350-plus-ddr4",
+      "identity_alias_of": "compat-zen-ryzen3-1200-b350",
       "cpu": {
         "qemu_arg": "Ryzen3-1200,family=23,model=1,stepping=1,model-id=AMD Ryzen 3 1200 Quad-Core Processor", "vendor_id": "AuthenticAMD", "name": "AMD Ryzen 3 1200 Quad-Core Processor",
         "max_mhz": 3400, "current_mhz": 3100, "tsc_mhz": 3100, "part": "YD1200BBM4KAE", "socket": "AM4", "cores": 4, "threads": 4, "phys_bits": 43, "features": "+invtsc,+tsc-deadline,+topoext",

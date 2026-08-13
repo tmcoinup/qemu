@@ -200,9 +200,9 @@
 #     HOST_RESERVE_CORES=auto 按完整 SMT2 核池给宿主机预留物理核；仅本次容量不足时缩小，
 #                          每台 VM 分配 2/4/4 条逻辑 CPU；显式 N 仍表示硬预留物理核。
 #                          不按已运行 VM 数量改变边界；设 0 时 helper 仍至少留 2 核。
-#     QEMU_SERVICE_CPUS=auto 默认有容量时给 QEMU 辅助线程预留 1 个独立逻辑 CPU；
-#                          低核/多 VM 容量不足时兼容回退 0。main/IO/SDL/fb-shm worker
-#                          会收窄到该 CPU，避免和满载 vCPU 抢同一条调度队列。
+#     QEMU_SERVICE_CPUS=0 默认不额外占用逻辑 CPU；main/IO/SDL/fb-shm worker
+#                          保留在本实例 exact cpuset 内。显式 auto 才会在容量允许时
+#                          分配 1 个独立逻辑 CPU，容量不足时回退 0。
 #                          短 flag: --svc-cpu(=1) / --svc-cpus=N / --no-svc-cpus；
 #                          长兼容: --qemu-service-cpu / --qemu-service-cpus=N。
 #                          短环境变量: QEMU_SVC_CPUS=1。

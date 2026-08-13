@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 宿主感知的整机 bundle 选择器。
 #
-# 顺序固定为：E5 v3/v4 宿主正常家用池 → 默认 supported →
+# 顺序固定为：精确宿主正常家用池 → 默认 supported →
 # 既有 compatibility → 家用 compatibility → 受限 household host。
 # 每一个候选都必须通过当前 KVM 的真实 vCPU realize；粗略的厂商/频率/TSC
 # 匹配不能再把 E5 v4 错判为可实现 Skylake。
@@ -101,12 +101,12 @@ _stealth_household_candidate_ids() {
         stealth_household_compat_current_host_class 2>/dev/null || true
     )"
     # 默认正常池必须有精确 CPUID 宿主分类；只有显式 compatibility 才允许未知
-    # 家用宿主按同厂商逐个尝试，防止普通 Intel CPU 误领 E5 v3/v4 默认池。
+    # 家用宿主按同厂商逐个尝试，防止普通 CPU 误领精确宿主默认池。
     if [[ "$wanted_status" == supported && -z "$host_class" ]]; then
         return 0
     fi
 
-    # 已知 E5 v1-v4/K10/Zen 必须锁到对应代际。未知家用宿主仍可在显式
+    # 已知 E5 v1-v4/K10/Zen/精确 5800 必须锁到对应宿主类。未知家用宿主仍可在显式
     # compatibility 下尝试同厂商的较老家用基型，但每个候选仍需真实 KVM
     # realize；这既给未来物理机留兜底，也不会把 AMD 型号放进 Intel Guest。
     while IFS='|' read -r platform_id host_classes threads _cpu_name; do
@@ -194,9 +194,8 @@ stealth_select_platform_bundle() {
         return 0
     fi
 
-    # G3220/i3-4130/i5-4570 在 E5-2696 v4 上已有实测，E5 v3 则仍由每次
-    # KVM realize 收口；它们属于宿主默认正常 CPU 池。H81/PCH 继续由独立
-    # identity scope 标记为 Q35 兼容边界。
+    # E5 v3/v4 的 Haswell 组与 Ryzen 7 5800 的 Ryzen 3 1200 均属于精确宿主
+    # 正常 CPU 池；每次仍由 KVM realize 收口，PCH 继续标记为 Q35 身份边界。
     _stealth_household_candidate_ids household_supported supported
     if _stealth_try_platform_ids household_supported; then
         return 0

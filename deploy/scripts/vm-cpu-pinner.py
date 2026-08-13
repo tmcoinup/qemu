@@ -178,7 +178,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("qmp_socket")
     parser.add_argument("helper")
     parser.add_argument(
-        "service_cpus", type=parse_service_cpus, nargs="?", default=None
+        "service_cpus", type=parse_service_cpus, nargs="?", default=0
     )
     parser.add_argument("guest_threads_per_core", type=int, nargs="?", default=1)
     parser.add_argument("host_threads_per_core", type=int, nargs="?")

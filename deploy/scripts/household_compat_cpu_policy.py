@@ -43,6 +43,7 @@ EXPECTED_FEATURE_OVERRIDES: dict[str, dict[str, str]] = {
     "compat-k10-phenom-ii-x4-955-m5a78l": {},
     "compat-zen-athlon-200ge-b350": {},
     "compat-zen-ryzen3-1200-b350": {},
+    "normal-ryzen7-5800-ryzen3-1200-b350": {},
 }
 
 # 每个摘要覆盖完整 cpu 对象，包括 SKU 名称/部件号、QEMU CPUID、核心线程、
@@ -62,6 +63,7 @@ EXPECTED_CPU_FACT_DIGESTS = {
     "compat-k10-phenom-ii-x4-955-m5a78l": "d2cc3bd0264cffcd7a6f1edd5a06058c2ad82fa9c8454707cc3469075d7b57b1",
     "compat-zen-athlon-200ge-b350": "ad175651d8c593dab604c834e134b4aacae1dfdafe797c805197aaa8bbd18365",
     "compat-zen-ryzen3-1200-b350": "a79d5480571e90a31bbcdb46912f35d5381e774c44c0db712744e771c5478af9",
+    "normal-ryzen7-5800-ryzen3-1200-b350": "a79d5480571e90a31bbcdb46912f35d5381e774c44c0db712744e771c5478af9",
 }
 
 

@@ -9,12 +9,13 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from guest_cpu_policy import forbidden_server_identity, household_brand_allowed
-from guest_cpu_policy import named_household_qemu_base_allowed
+from guest_cpu_policy import forbidden_server_identity, household_brand_allowed, named_household_qemu_base_allowed
 from household_compat_cpu_policy import validate_cpu_facts, validate_feature_overrides
 from household_compat_profile_policy import validate_profile_facts
 from household_compat_storage_policy import validate_storage_policy
+from household_host_policy import validate_host_classes
 from household_selection_policy import (
+    AUDITED_IDENTITY_ALIASES,
     EXPECTED_SELECTION_POLICY,
     HOUSEHOLD_IDENTITY_SCOPE,
     validate_candidate_status,
@@ -41,19 +42,10 @@ GENERATION_CPU = {
     "k10": ("AuthenticAMD", "phenom", 16, {4, 6}, 3, "AM3"),
     "zen": ("AuthenticAMD", "Ryzen3-1200", 23, {1, 17}, None, "AM4"),
 }
-EXPECTED_HOST_CLASSES = {
-    "e5-v1": ("GenuineIntel", [6], [45], ["sandy-bridge"]),
-    "e5-v2": ("GenuineIntel", [6], [62], ["ivy-bridge"]),
-    "e5-v3": ("GenuineIntel", [6], [63], ["haswell"]),
-    "e5-v4": ("GenuineIntel", [6], [79], ["haswell"]),
-    "amd-k10": ("AuthenticAMD", [16], [2, 4, 5, 6, 8, 10], ["k10"]),
-    "amd-zen": ("AuthenticAMD", [23, 25, 26], [], ["zen"]),
-}
 SOURCE_HOSTS = {
     "www.intel.com", "ark.intel.com", "www.amd.com", "www.asus.com",
     "dlcdnets.asus.com", "dlcdnet.asus.com",
 }
-
 
 def fail(message: str) -> None:
     """统一抛出可定位的清单错误。"""
@@ -375,11 +367,19 @@ def validate_candidate(
     classes: dict[str, dict[str, Any]],
     where: str,
 ) -> None:
-    exact(candidate, {
+    candidate_keys = {
         "id", "enabled", "status", "host_classes", "profile_id", "cpu",
         "source_refs",
-    }, where)
-    validate_id(req(candidate, "id", str, where), f"{where}.id")
+    }
+    if "identity_alias_of" in candidate:
+        candidate_keys.add("identity_alias_of")
+    exact(candidate, candidate_keys, where)
+    candidate_id = req(candidate, "id", str, where)
+    validate_id(candidate_id, f"{where}.id")
+    expected_alias = AUDITED_IDENTITY_ALIASES.get(candidate_id)
+    has_alias = "identity_alias_of" in candidate
+    if has_alias != (expected_alias is not None) or candidate.get("identity_alias_of") != expected_alias:
+        fail(f"{where}.identity_alias_of 偏离受审计身份别名关系")
     if candidate["enabled"] is not True:
         fail(f"{where} 必须是启用候选")
     profile_id = req(candidate, "profile_id", str, where)
@@ -390,7 +390,7 @@ def validate_candidate(
         fail(f"{where}.host_classes 不能为空或重复")
     profile = profiles[profile_id]
     validate_candidate_status(
-        candidate["id"],
+        candidate_id,
         req(candidate, "status", str, where),
         host_ids,
         profile_id,
@@ -407,7 +407,7 @@ def validate_candidate(
         if candidate["cpu"]["vendor_id"] != host["vendor_id"]:
             fail(f"{where} 违反同厂商 CPU 身份约束")
     validate_cpu(candidate, profile, where)
-    validate_cpu_facts(candidate["id"], candidate["cpu"], where)
+    validate_cpu_facts(candidate_id, candidate["cpu"], where)
     required = "www.intel.com" if candidate["cpu"]["vendor_id"] == "GenuineIntel" else "www.amd.com"
     validate_sources(candidate["source_refs"], f"{where}.source_refs", required)
 
@@ -426,28 +426,7 @@ def validate_manifest(root: dict[str, Any]) -> None:
         fail("manifest.selection_policy 偏离 fail-closed 兜底策略")
 
     raw_classes = req(root, "host_classes", list, "manifest")
-    classes: dict[str, dict[str, Any]] = {}
-    for index, host in enumerate(raw_classes):
-        where = f"manifest.host_classes[{index}]"
-        if not isinstance(host, dict):
-            fail(f"{where} 必须是对象")
-        exact(host, {
-            "id", "vendor_id", "cpuid_families", "cpuid_models",
-            "guest_generations",
-        }, where)
-        host_id = req(host, "id", str, where)
-        if host_id in classes or host_id not in EXPECTED_HOST_CLASSES:
-            fail(f"{where}.id 重复或未知")
-        expected = EXPECTED_HOST_CLASSES[host_id]
-        actual = (
-            host["vendor_id"], host["cpuid_families"], host["cpuid_models"],
-            host["guest_generations"],
-        )
-        if actual != expected:
-            fail(f"{where} CPUID/代际映射被篡改")
-        classes[host_id] = host
-    if set(classes) != set(EXPECTED_HOST_CLASSES):
-        fail("manifest.host_classes 没有覆盖 E5 v1-v4、AMD K10/Zen")
+    classes = validate_host_classes(raw_classes, "manifest.host_classes")
 
     raw_profiles = req(root, "platform_profiles", list, "manifest")
     profiles: dict[str, dict[str, Any]] = {}
@@ -465,9 +444,9 @@ def validate_manifest(root: dict[str, Any]) -> None:
         fail("manifest.platform_profiles 不能为空")
 
     raw_candidates = req(root, "candidates", list, "manifest")
-    candidate_ids: set[str] = set()
-    parts: set[str] = set()
-    names: set[str] = set()
+    candidates_by_id: dict[str, dict[str, Any]] = {}
+    part_owners: dict[str, str] = {}
+    name_owners: dict[str, str] = {}
     coverage: dict[str, set[tuple[int, int]]] = {key: set() for key in classes}
     used_profiles: set[str] = set()
     for index, candidate in enumerate(raw_candidates):
@@ -476,11 +455,32 @@ def validate_manifest(root: dict[str, Any]) -> None:
             fail(f"{where} 必须是对象")
         validate_candidate(candidate, profiles, classes, where)
         cpu = candidate["cpu"]
-        if candidate["id"] in candidate_ids or cpu["part"] in parts or cpu["name"] in names:
-            fail(f"{where} 的 ID、部件号或 CPU 名称重复")
-        candidate_ids.add(candidate["id"])
-        parts.add(cpu["part"])
-        names.add(cpu["name"])
+        candidate_id = candidate["id"]
+        if candidate_id in candidates_by_id:
+            fail(f"{where} 的 ID 重复")
+        alias_of = candidate.get("identity_alias_of")
+        for value, owners, label in (
+            (cpu["part"], part_owners, "部件号"),
+            (cpu["name"], name_owners, "CPU 名称"),
+        ):
+            owner_id = owners.get(value)
+            if owner_id is not None and alias_of != owner_id:
+                fail(f"{where} 的{label}重复且不是受审计身份别名")
+            owners.setdefault(value, candidate_id)
+        if alias_of is not None:
+            original = candidates_by_id.get(alias_of)
+            if original is None:
+                fail(f"{where}.identity_alias_of 必须引用前置候选")
+            if (
+                original["status"] != "compatibility"
+                or candidate["status"] != "supported"
+                or set(original["host_classes"]) & set(candidate["host_classes"])
+                or candidate["profile_id"] != original["profile_id"]
+                or candidate["cpu"] != original["cpu"]
+                or candidate["source_refs"] != original["source_refs"]
+            ):
+                fail(f"{where} 未完整复用兼容候选事实，或宿主类发生重叠")
+        candidates_by_id[candidate_id] = candidate
         used_profiles.add(candidate["profile_id"])
         for host_id in candidate["host_classes"]:
             coverage[host_id].add((cpu["cores"], cpu["threads"]))
@@ -490,6 +490,7 @@ def validate_manifest(root: dict[str, Any]) -> None:
         "e5-v3": ALLOWED_TOPOLOGIES,
         "e5-v4": ALLOWED_TOPOLOGIES,
         "amd-k10": {(2, 2), (4, 4)},
+        "amd-ryzen7-5800": {(4, 4)},
         "amd-zen": {(2, 4), (4, 4)},
     }
     for host_id, required in required_coverage.items():

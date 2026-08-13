@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 from household_compat_export import export_pairs
+from household_host_policy import classify_host_class
 from household_compat_manifest import load_manifest
 
 
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     classify.add_argument("vendor_id")
     classify.add_argument("family", type=int)
     classify.add_argument("model", type=int)
+    classify.add_argument("brand_name", nargs="?", default="")
     return parser.parse_args()
 
 
@@ -76,20 +78,15 @@ def command_index(
     return 0
 
 
-def command_classify(root: dict[str, Any], vendor: str, family: int, model: int) -> int:
-    for host in root["host_classes"]:
-        model_matches = not host["cpuid_models"] or model in host["cpuid_models"]
-        if (
-            host["vendor_id"] == vendor
-            and family in host["cpuid_families"]
-            and model_matches
-        ):
-            print(host["id"])
-            return 0
-    raise ValueError(
-        f"宿主 CPUID 没有受控家用兜底分类: vendor={vendor} "
-        f"family={family} model={model}"
-    )
+def command_classify(
+    root: dict[str, Any],
+    vendor: str,
+    family: int,
+    model: int,
+    brand_name: str,
+) -> int:
+    print(classify_host_class(root["host_classes"], vendor, family, model, brand_name))
+    return 0
 
 
 def main() -> int:
@@ -102,7 +99,9 @@ def main() -> int:
         if args.command == "index":
             return command_index(root, args.host_class, args.threads, args.status)
         if args.command == "classify":
-            return command_classify(root, args.vendor_id, args.family, args.model)
+            return command_classify(
+                root, args.vendor_id, args.family, args.model, args.brand_name
+            )
         candidate = candidate_by_id(root, args.candidate_id)
         if args.command == "status":
             print(candidate["status"])

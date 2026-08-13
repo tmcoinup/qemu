@@ -38,6 +38,10 @@ def cpu_core_keys(topology):
 
 
 class CpuPinnerTest(unittest.TestCase):
+    def test_service_cpu_default_is_off(self):
+        arguments = MODULE.parse_args(["1", "4", "/tmp/test.qmp", "/helper"])
+        self.assertEqual(arguments.service_cpus, 0)
+
     def test_diagnostics_never_pollute_strict_status_stdout(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

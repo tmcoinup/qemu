@@ -56,6 +56,19 @@ AMD 条目禁用是正确的保守处理：当前 machine type 仍是 Intel Q35/
 
 在 Ryzen 7 5800 宿主上的瞬时 KVM 实测表明，Ryzen3-1200 可按 4C/4T 和目标 TSC realize。Ryzen 3 2300X 已在 2026-07-19 复核中移出目录：ASUS PRIME B350-PLUS 官方 CPU 支持表没有该 SKU，不能继续把它称为厂商支持搭配。KVM realize 仍只证明 vCPU 可创建，不能把 AMD/Q35 compatibility 提升为真实 B350 行为等价。
 
+2026-08-12 补充：上述 5800 实测现用于精确宿主类
+`amd-ryzen7-5800` 的正常 CPU 池，唯一 Guest 候选仍是 Ryzen 3 1200 4C4T。
+分类同时核验 Family 25、Model 33 与完整 `AMD Ryzen 7 5800 8-Core Processor`
+品牌串，邻近 SKU 继续走通用 Zen compatibility。宿主 DDR4-3200 不投影给
+Guest；Guest 内存频率仍由 B350 bundle 与独立 DIMM 目录共同决定。该调整没有
+提高 AMD/Q35 的 machine fidelity 评级。
+
+2300X 并非 CPU 拓扑不合格：[AMD 官方规格](https://www.amd.com/en/support/downloads/drivers.html/processors/ryzen/ryzen-2000-series/amd-ryzen-3-2300x.html)
+明确为 4C4T，且仓库保留 `Ryzen3-2300X` named-model。限制只针对原
+PRIME B350-PLUS 配对；采用 [ASUS PRIME B450M-A II 官方支持表](https://www.asus.com/uk/supportonly/prime%20b450m-a%20ii/helpdesk_cpu/)
+明确列出 2300X 的 B450 主板时，可以重新建立独立 bundle，但正常状态仍需补齐
+5800 宿主 KVM 实测。
+
 CPU、主板、PCH、BIOS 版本/日期、机箱类型、板载音频、网卡状态、M.2 能力和内存限制作为一个原子 bundle 选择。vCPU 必须等于 SKU 完整线程数；当前六个启用平台分别按 CPU SKU 固定完整线程数，不支持随意关闭部分核心或生成多 socket 客体。
 
 ### 3.2 可更换组件

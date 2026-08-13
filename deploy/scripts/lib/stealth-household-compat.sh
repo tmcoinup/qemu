@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 家用 CPU 正常池与 compatibility 完整组合的共享加载器。
+# shellcheck disable=SC2119,SC2120 # index 的三个筛选参数均为可选参数。
 #
-# 本模块不自行决定优先级：E5 v3/v4 supported 可直接选择，其余 compatibility
-# 必须由调用方先确认 --allow-platform-compatibility，再按宿主类和 CPUS 筛选。
+# 本模块不自行决定优先级：E5 v3/v4 与精确 Ryzen 7 5800 的 supported 可直接
+# 选择，其余 compatibility 必须由调用方先确认显式授权，再按宿主类和 CPUS 筛选。
 
 if [[ "${_STEALTH_HOUSEHOLD_COMPAT_LOADED:-0}" == "1" ]]; then
     # shellcheck disable=SC2317 # source guard 兼容直接执行诊断。
@@ -79,7 +80,7 @@ stealth_household_compat_load() {
 }
 
 stealth_household_compat_classify() {
-    _stealth_household_compat_python classify "$1" "$2" "$3"
+    _stealth_household_compat_python classify "$1" "$2" "$3" "${4:-}"
 }
 
 # 只读首颗逻辑 CPU 的内核字段。独立函数便于测试替换内核视图，但生产调用
@@ -87,7 +88,7 @@ stealth_household_compat_classify() {
 _stealth_household_kernel_cpu_field() {
     local wanted="$1"
     case "$wanted" in
-        vendor_id|cpu\ family|model) ;;
+        vendor_id|cpu\ family|model|model\ name) ;;
         *) return 1 ;;
     esac
     awk -F':' -v wanted="$wanted" '
@@ -105,17 +106,19 @@ _stealth_household_kernel_cpu_field() {
 }
 
 # 返回当前物理宿主的受控分类。只有显式测试模式可通过 STEALTH_HOST_CPU_*
-# 注入；生产环境始终读取内核真实视图，无法精确分类时不猜测 E5 代际。
+# 注入；生产环境始终读取内核真实视图，无法精确分类时不猜测正常宿主型号。
 stealth_household_compat_current_host_class() {
-    local vendor family model
+    local vendor family model brand_name
     if [[ "${STEALTH_HOST_PROBE_TEST_MODE:-0}" == 1 ]]; then
         vendor="${STEALTH_HOST_CPU_VENDOR:-}"
         family="${STEALTH_HOST_CPU_FAMILY:-}"
         model="${STEALTH_HOST_CPU_MODEL:-}"
+        brand_name="${STEALTH_HOST_CPU_MODEL_NAME:-}"
     else
         vendor=
         family=
         model=
+        brand_name=
     fi
     [[ -n "$vendor" ]] ||
         vendor="$(_stealth_household_kernel_cpu_field vendor_id)"
@@ -123,8 +126,10 @@ stealth_household_compat_current_host_class() {
         family="$(_stealth_household_kernel_cpu_field "cpu family")"
     [[ -n "$model" ]] ||
         model="$(_stealth_household_kernel_cpu_field model)"
+    [[ -n "$brand_name" ]] ||
+        brand_name="$(_stealth_household_kernel_cpu_field "model name")"
     [[ "$family" =~ ^[0-9]+$ && "$model" =~ ^[0-9]+$ ]] || return 1
-    stealth_household_compat_classify "$vendor" "$family" "$model"
+    stealth_household_compat_classify "$vendor" "$family" "$model" "$brand_name"
 }
 
 # 已加载 household 条目必须与当前宿主类精确相交。该检查同时用于首次选择、
@@ -139,7 +144,7 @@ stealth_household_compat_host_class_allowed() {
 # compatibility 允许尚未收录的新家用宿主依靠真实 KVM realize 逐项尝试。
 # 已知宿主默认仍先走精确代际；只有显式 allow 的 compatibility profile 才能
 # 跨同厂商代际重载，并继续接受频率、TSC、物理位宽与真实 KVM realize 门禁。
-# supported 永远要求精确命中，未知宿主不能领取 E5 v3/v4 正常池。
+# supported 永远要求精确命中，未知宿主不能领取 E5 或 Ryzen 7 5800 正常池。
 stealth_household_compat_host_class_consistent() {
     local host_class
     if ! host_class="$(

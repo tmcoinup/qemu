@@ -310,13 +310,13 @@ esac
 # 设 0 只取消前缀预留，root helper 仍保证宿主至少剩 2 颗完整核。
 # (flag: --cpu-isolate / --no-cpu-isolate)
 : "${CPU_ISOLATE:=1}"
-# QEMU 辅助线程专用逻辑 CPU 数：默认 auto；容量允许时为 QEMU main / IO /
-# SDL / fb-shm 等非 vCPU 线程分配 1 个独立逻辑 CPU，低核或多 VM 容量不足时回退 0，
-# 避免辅助线程和满载 vCPU 抢同一条调度队列。显式数值保持严格、不自动降级。
+# QEMU 辅助线程专用逻辑 CPU 数：默认 0，不额外占用逻辑 CPU；QEMU main / IO /
+# SDL / fb-shm 等非 vCPU 线程保留在本实例的 exact cpuset 内。显式数值保持严格、
+# 不自动降级；显式 auto 才会在容量允许时分配 1 个独立逻辑 CPU。
 # 常用：--svc-cpu（等价 1）或 --svc-cpus=2；长别名
 # --qemu-service-cpu / --qemu-service-cpus=N 保留兼容。环境变量也可用短名
 # QEMU_SVC_CPUS=1，显式 QEMU_SERVICE_CPUS 优先级更高。
-: "${QEMU_SERVICE_CPUS:=${QEMU_SVC_CPUS:-auto}}"
+: "${QEMU_SERVICE_CPUS:=${QEMU_SVC_CPUS:-0}}"
 # IMAGE_ROOT/VMS_DIR 让整套 VM 数据可迁移到任意挂载点；默认保持历史路径不变。
 : "${IMAGE_ROOT:=/home/ubuntu/images}"
 IMAGE_ROOT="${IMAGE_ROOT%/}"
@@ -429,7 +429,7 @@ if [[ -n "$GPU_RENDERNODE" && ! -e "$GPU_RENDERNODE" ]]; then
 fi
 
 # QEMU_SERVICE_CPUS 是隔离层参数，不影响 QEMU argv；DRY_RUN 也需要校验，防止错误配置
-# 在真正启动时才暴露。auto 会按本次宿主剩余容量选择 1 或兼容回退 0。
+# 在真正启动时才暴露。显式 auto 会按本次宿主剩余容量选择 1 或兼容回退 0。
 if ! [[ "$QEMU_SERVICE_CPUS" =~ ^(auto|[0-8])$ ]]; then
     echo "ERROR: QEMU_SERVICE_CPUS 必须是非负整数 [0,8] 或 auto (实际: '$QEMU_SERVICE_CPUS')" >&2
     exit 2

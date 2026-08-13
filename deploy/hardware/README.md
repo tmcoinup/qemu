@@ -81,19 +81,25 @@ K10 的 Athlon II/Phenom II 条目按 Family 10h CPUID 保留 `invtsc`，不暴�
 - H81/Haswell 是窄例外：仅当宿主 CPUID 精确分类为 E5 v3/v4 时，G3220、
   i3-4130、i5-4570 三个家用型号进入默认正常 CPU 池；H81/PCH 仍只具有 Q35
   configuration identity，不宣称目标芯片组行为等价。
-- Ryzen 3 1200 的 AM4 bundle 保留了已核验的 CPU/主板事实，但标记为
-  `compatibility` 且禁用。Ryzen 3 2300X 因 ASUS 官方 CPU 支持表无该板型搭配，
-  已移出目录。
+- Ryzen 7 5800 是另一个窄例外：仅当宿主同时命中 AuthenticAMD Family 25、
+  Model 33 和完整品牌串时，`normal-ryzen7-5800-ryzen3-1200-b350` 才进入默认
+  正常 CPU 池。Guest 固定为已有实测的 Ryzen 3 1200 4C4T，不缩核、不透传
+  物理机的 8C16T，也不会把 5800X/5700X 等邻近 SKU 一并提升。
+- `platforms.json` 中 Ryzen 3 1200 的静态 AM4 bundle 仍标记为禁用的
+  `compatibility`；household 目录中的通用 Zen 候选也保持显式授权。Ryzen 3
+  2300X 本身满足 4C4T，但因 PRIME B350-PLUS 官方 CPU 支持表无该板型搭配，
+  已移出该 bundle；若后续采用官方列名支持它的 B450 主板，必须另建完整事实束，
+  并在 Ryzen 7 5800 实机完成 KVM realize 后才能加入正常池。
   当前底层仍是 Intel Q35/ICH9 行为，仅替换 PCI ID 不能成为真实 AMD B350；调用方
   显式设置 `ALLOW_PLATFORM_COMPATIBILITY=1` 后，启动器按宿主 CPU vendor、`CPUS`、
-  最大频率和 TSC 约束自动匹配。E5 v3/v4 先选择宿主专用正常池；其它宿主
+  最大频率和 TSC 约束自动匹配。精确正常宿主先选择专用正常池；其它宿主
   优先普通 `supported`，只在没有可用正常候选时回退到 `compatibility`。
   已有 profile 复用其 `PLATFORM_ID`；
   `STEALTH_PLATFORM_ID`/`--platform-id` 只用于可选的高级固定或一致性断言。
   这个独立门禁不会把 `STRICT_HARDWARE` 改成 `0`，也不会关闭 KVM/TSC、CPU realize、
   profile、磁盘，或请求 `TPM=1` 时的 TPM 检查。历史内部调用的 `STRICT_HARDWARE=0`
   直载语义仅供诊断，未授权时不会选中禁用条目。
-  实现真正的 AMD machine type 后才允许将其改回 `enabled=true/status=supported`。
+  实现真正的 AMD machine type 后，才允许把静态 AMD 整机提升为完整平台 supported。
 
 ## Schema 1 字段约束
 
@@ -227,3 +233,14 @@ TPM 字段：
   i3-4130 2C4T、i5-4570 4C4T 三个 Haswell 家用模型均能无 warning 创建 vCPU；
   该结果只证明瞬时 CPU realize；客体枚举与长稳尚未完成，E5 v3 仍由每次启动的
   真实 KVM realize 决定。
+
+## Ryzen 7 5800 宿主映射说明
+
+- 精确 Ryzen 7 5800 宿主无需 `--allow-platform-compatibility` 即可获得唯一的
+  Ryzen 3 1200、4C4T 家用 Guest；2T、6T 或更大拓扑不会由该正常池生成。
+- 物理机 DDR4-3200 是宿主内存事实，不参与 Guest DIMM 身份选择。Guest 继续遵循
+  PRIME B350-PLUS bundle 的 DDR4-2133/2400/2666 配置上限；当前已审计 DDR4 DIMM
+  料号额定均为 2400 MT/s，因此实际新 Guest 会保持受控的 DDR4-2400 身份。
+- 该正常状态只复用 2026-07-13 在 5800 宿主上完成的 Ryzen3-1200 瞬时 KVM
+  realize 证据；AMD B350 仍是 Q35 configuration identity 边界，不代表芯片组
+  寄存器、BDF、固件行为或长稳已经与物理 B350 等价。

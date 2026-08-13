@@ -40,4 +40,16 @@ typedef enum SDL2WindowMode {
  */
 SDL2WindowMode sdl2_select_window_mode(SDL2Size guest, SDL2Size desktop);
 
+/*
+ * 把 Guest 原生像素尺寸换算为 SDL logical-window 单位。
+ *
+ * window 和 render 描述当前窗口的逻辑客户区
+ * 与实际渲染输出，
+ * 它们的比值即当前显示器的 DPI 缩放。返回的 maximum 保证
+ * 窗口达到上限时，渲染输出仍不超过 Guest 原生像素，
+ * 从而避免放大窗口只产生无用黑边。
+ */
+bool sdl2_window_max_size(SDL2Size window, SDL2Size render,
+                          SDL2Size guest, SDL2Size *maximum);
+
 #endif /* QEMU_UI_SDL2_DISPLAY_POLICY_H */

@@ -40,6 +40,7 @@ static bool sdl2_gl_make_window_current(struct sdl2_console *scon)
 static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 {
     if (scon->scanout_mode == scanout) {
+        sdl2_window_update_size_limits(scon);
         return;
     }
 
@@ -52,6 +53,7 @@ static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
             surface_gl_create_texture(scon->gls, scon->surface);
         }
     }
+    sdl2_window_update_size_limits(scon);
 }
 
 static void sdl2_gl_render_surface(struct sdl2_console *scon)
@@ -300,6 +302,7 @@ void sdl2_gl_scanout_disable(DisplayChangeListener *dcl)
          */
         scon->scanout_mode = false;
         memset(&scon->guest_fb, 0, sizeof(scon->guest_fb));
+        sdl2_window_update_size_limits(scon);
         return;
     }
     sdl2_set_scanout_mode(scon, false);

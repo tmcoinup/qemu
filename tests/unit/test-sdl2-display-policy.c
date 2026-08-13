@@ -64,6 +64,52 @@ static void test_invalid_size_is_rejected(void)
         ==, SDL2_WINDOW_MODE_INVALID);
 }
 
+static void assert_size(SDL2Size actual, int width, int height)
+{
+    g_assert_cmpint(actual.width, ==, width);
+    g_assert_cmpint(actual.height, ==, height);
+}
+
+static void test_window_maximum_tracks_guest_pixels(void)
+{
+    SDL2Size maximum = { -1, -1 };
+
+    g_assert_true(sdl2_window_max_size(
+        (SDL2Size) { 2092, 1216 },
+        (SDL2Size) { 2092, 1216 },
+        (SDL2Size) { 1920, 1080 }, &maximum));
+    assert_size(maximum, 1920, 1080);
+
+    /* 2x HiDPI 下 960x540 logical 正好对应 1920x1080 像素。 */
+    g_assert_true(sdl2_window_max_size(
+        (SDL2Size) { 1280, 720 },
+        (SDL2Size) { 2560, 1440 },
+        (SDL2Size) { 1920, 1080 }, &maximum));
+    assert_size(maximum, 960, 540);
+
+    /* 小窗口仍可以放大到 Guest 原生尺寸。 */
+    g_assert_true(sdl2_window_max_size(
+        (SDL2Size) { 800, 600 },
+        (SDL2Size) { 800, 600 },
+        (SDL2Size) { 1920, 1080 }, &maximum));
+    assert_size(maximum, 1920, 1080);
+}
+
+static void test_invalid_window_maximum_is_rejected(void)
+{
+    SDL2Size maximum = { -1, -1 };
+
+    g_assert_false(sdl2_window_max_size(
+        (SDL2Size) { 0, 720 },
+        (SDL2Size) { 1280, 720 },
+        (SDL2Size) { 1920, 1080 }, &maximum));
+    assert_size(maximum, 0, 0);
+    g_assert_false(sdl2_window_max_size(
+        (SDL2Size) { 1280, 720 },
+        (SDL2Size) { 1280, 720 },
+        (SDL2Size) { 1920, 1080 }, NULL));
+}
+
 static void test_active_refresh_budget(void)
 {
     g_assert_cmpuint(SDL2_ACTIVE_REFRESH_HZ, ==, 60);
@@ -91,6 +137,10 @@ int main(int argc, char **argv)
                     test_smaller_guest_stays_windowed);
     g_test_add_func("/sdl2-display-policy/invalid-size",
                     test_invalid_size_is_rejected);
+    g_test_add_func("/sdl2-display-policy/window-maximum",
+                    test_window_maximum_tracks_guest_pixels);
+    g_test_add_func("/sdl2-display-policy/invalid-window-maximum",
+                    test_invalid_window_maximum_is_rejected);
     g_test_add_func("/sdl2-display-policy/active-refresh-budget",
                     test_active_refresh_budget);
 

@@ -44,7 +44,7 @@ struct sdl2_console {
     int updates;
     int ignore_hotkeys;
     bool window_redraw_pending;
-    bool ui_info_pending;
+    SDL2Size window_maximum;
     bool gui_keysym;
     /*
      * 输入门控：键鼠事件只在窗口同时拥有 X11 输入焦点(FOCUS_GAINED)
@@ -140,6 +140,7 @@ static inline bool sdl2_current_render_size(const struct sdl2_console *scon,
 
 void sdl2_window_create(struct sdl2_console *scon);
 void sdl2_window_destroy(struct sdl2_console *scon);
+void sdl2_window_update_size_limits(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
 void sdl2_flush_window_updates(void);

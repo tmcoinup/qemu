@@ -58,6 +58,10 @@ static void test_destination_rect(void)
                     (SDL2Size) { 1920, 1080 }),
                 0, 150, 1600, 900);
     assert_rect(sdl2_guest_dst_rect(
+                    (SDL2Size) { 1920, 1200 },
+                    (SDL2Size) { 1920, 1080 }),
+                0, 60, 1920, 1080);
+    assert_rect(sdl2_guest_dst_rect(
                     (SDL2Size) { 1001, 700 },
                     (SDL2Size) { 1920, 1080 }),
                 0, 68, 1001, 563);

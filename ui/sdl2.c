@@ -203,6 +203,7 @@ static bool sdl2_window_create_once(struct sdl2_console *scon, Uint32 flags,
         }
     }
 
+    sdl2_window_update_size_limits(scon);
     sdl_sync_keyboard_grab(scon);
     sdl2_sync_text_input(sdl2_console, sdl2_num_outputs);
     sdl_update_caption(scon);
@@ -344,6 +345,7 @@ void sdl2_window_destroy(struct sdl2_console *scon)
     }
     SDL_DestroyWindow(scon->real_window);
     scon->real_window = NULL;
+    scon->window_maximum = (SDL2Size) { 0 };
 
     /*
      * 显式 fullscreen 是用户配置，窗口重建后仍应保留。
@@ -359,6 +361,38 @@ void sdl2_window_destroy(struct sdl2_console *scon)
     }
 }
 
+void sdl2_window_update_size_limits(struct sdl2_console *scon)
+{
+    SDL2Size window;
+    SDL2Size render;
+    SDL2Size guest;
+    SDL2Size maximum;
+
+    if (!scon->real_window ||
+        !sdl2_current_render_size(scon, &render) ||
+        !sdl2_current_guest_size(scon, &guest)) {
+        return;
+    }
+
+    SDL_GetWindowSize(scon->real_window, &window.width, &window.height);
+    if (!sdl2_window_max_size(window, render, guest, &maximum) ||
+        (maximum.width == scon->window_maximum.width &&
+         maximum.height == scon->window_maximum.height)) {
+        return;
+    }
+
+    /*
+     * SDL 的 maximum size 使用 logical-window 单位。
+     * 上面已按当前 drawable/renderer 的 DPI 比例折算，
+     * 所以拖拽或双击最大化都不会越过 Guest 原生像素。
+     * 显式 fullscreen 仍由 SDL 单独管理，
+     * 不受窗口尺寸提示阻断。
+     */
+    SDL_SetWindowMaximumSize(scon->real_window,
+                             maximum.width, maximum.height);
+    scon->window_maximum = maximum;
+}
+
 void sdl2_window_resize(struct sdl2_console *scon)
 {
     SDL2WindowMode desired;
@@ -367,6 +401,7 @@ void sdl2_window_resize(struct sdl2_console *scon)
         return;
     }
 
+    sdl2_window_update_size_limits(scon);
     desired = sdl2_desired_window_mode(scon);
 
     /*
@@ -1251,16 +1286,27 @@ static void handle_windowevent(SDL_Event *ev)
 
     switch (ev->window.event) {
     case SDL_WINDOWEVENT_RESIZED:
-        scon->ui_info_pending = true;
-        scon->window_redraw_pending = true;
-        break;
     case SDL_WINDOWEVENT_SIZE_CHANGED:
-        /* SDL_SetWindowSize 也会产生此事件，不能回写 Guest。 */
+        /*
+         * 宿主窗口只改变显示画布，不改变 Guest scanout。
+         *
+         * 若把 RESIZED 的宽高通过 display-info 回写给
+         * virtio-gpu，例如 1920x1080 Guest 进入 1920x1200 窗口后，
+         * Guest 会改用 1920x1200 scanout。渲染器随后会误以为
+         * 画面已与窗口同比例，应有的上下黑边被反馈链路
+         * 抵消，导致纵向拉伸。两类 resize 事件都只合并
+         * 一次重绘；sdl2_guest_dst_rect() 负责等比缩放
+         * 和补黑边。
+         * SDL_SetWindowSize() 也会产生 SIZE_CHANGED，因此两条路径
+         * 必须保持相同的单向数据流。
+         */
+        sdl2_window_update_size_limits(scon);
         scon->window_redraw_pending = true;
         break;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     case SDL_WINDOWEVENT_DISPLAY_CHANGED:
-        /* DPI 只改变 drawable；Guest 仍使用 logical window 单位。 */
+        /* 跨显示器后用新 DPI 重算 Guest 对应的窗口上限。 */
+        sdl2_window_update_size_limits(scon);
         scon->window_redraw_pending = true;
         break;
 #endif
@@ -1362,37 +1408,13 @@ void sdl2_flush_window_updates(void)
 
     /*
      * SDL 拖动缩放通常连续产生 RESIZED + SIZE_CHANGED。
-     * 队列排空后，每个窗口只提交最终 logical 尺寸，
-     * 并且只重画一次，
+     * 队列排空后，每个窗口只按最终 logical 尺寸
+     * 重画一次，
      * 避免几十次整帧上传。
      */
     for (i = 0; i < sdl2_num_outputs; i++) {
         struct sdl2_console *target = &sdl2_console[i];
 
-        if (target->ui_info_pending) {
-            int width;
-            int height;
-
-            target->ui_info_pending = false;
-            if (target->real_window) {
-                QemuUIInfo info = {
-                    .width = 0,
-                    .height = 0,
-                };
-
-                /*
-                 * display-info 使用 SDL logical window 单位。
-                 * 若改传 HiDPI drawable 像素，Guest resize 后会再次
-                 * 按 logical 单位放大，形成 2x/4x 尺寸反馈。
-                 */
-                SDL_GetWindowSize(target->real_window, &width, &height);
-                if (width > 0 && height > 0) {
-                    info.width = width;
-                    info.height = height;
-                    dpy_set_ui_info(target->dcl.con, &info, true);
-                }
-            }
-        }
         if (target->window_redraw_pending) {
             target->window_redraw_pending = false;
             if (target->real_window && !target->hidden) {

@@ -75,6 +75,12 @@ test_native_display_policy_is_integrated() {
     require_text "SDL_WINDOW_FULLSCREEN_DESKTOP" "$SDL2_C"
     require_text "SDL_HINT_WINDOWS_DPI_AWARENESS" "$SDL2_C"
     require_text "SDL2_ACTIVE_REFRESH_INTERVAL_MS" "$SDL2_C"
+    require_text "SDL_SetWindowMaximumSize(scon->real_window," "$SDL2_C"
+    require_text "sdl2_window_max_size(window, render, guest, &maximum)" \
+        "$SDL2_C"
+    require_text "sdl2_window_update_size_limits(scon);" "$SDL2_GL_C"
+    require_text "test_window_maximum_tracks_guest_pixels" \
+        "$DISPLAY_POLICY_TEST"
 
     (( $(grep -cF -- "scon->idx == 0 &&" "$SDL2_C") >= 2 )) \
         || fail "automatic fullscreen must stay on the primary console"
@@ -275,11 +281,8 @@ test_input_pump_is_independent_from_display_refresh() {
     ' "$SDL2_C" || fail "independent SDL input timer must never render"
 }
 
-test_window_events_are_coalesced_and_keep_dpi_units() {
+test_window_events_are_coalesced_without_guest_resize() {
     require_text "bool window_redraw_pending;" "$SDL2_H"
-    require_text "bool ui_info_pending;" "$SDL2_H"
-    require_text "SDL_GetWindowSize(target->real_window, &width, &height)" \
-        "$SDL2_C"
     require_text "scon->window_redraw_pending = true;" "$SDL2_C"
     require_text "sdl2_flush_window_updates();" "$SDL2_2D_C"
     require_text "sdl2_flush_window_updates();" "$SDL2_GL_C"
@@ -289,6 +292,12 @@ test_window_events_are_coalesced_and_keep_dpi_units() {
     require_text "'test-sdl2-event': [" "$UNIT_MESON"
     (( $(wc -l < "$SDL2_EVENT_C") <= 500 )) \
         || fail "ui/sdl2-event.c exceeds 500 lines"
+
+    # 宿主窗口的任意长宽比不能反向改写 Guest scanout。
+    # 否则 16:9 Guest 进入 16:10 窗口后会变成 16:10 surface，
+    # 后续渲染将不再产生上下黑边，造成纵向拉伸。
+    reject_text "ui_info_pending" "$SDL2_H"
+    reject_text "dpy_set_ui_info" "$SDL2_C"
 
     # 同步 close message box 前必须先释放 Guest held-key 状态。
     awk '
@@ -311,6 +320,6 @@ test_hidden_window_closes_input_state
 test_scanout_uses_visible_subrectangle
 test_refresh_prioritizes_input_and_batches_2d_present
 test_input_pump_is_independent_from_display_refresh
-test_window_events_are_coalesced_and_keep_dpi_units
+test_window_events_are_coalesced_without_guest_resize
 
 echo "OK: SDL pointer mapping static checks passed"

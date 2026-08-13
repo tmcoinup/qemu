@@ -40,9 +40,13 @@ grep -F "显式越过满盘/ENOSPC 风险" "$TMP_DIR/headroom-force.out" >/dev/n
 DISK_GUARD=0
 DISK_FORCE=0
 unset DISK_MIN_FREE_GIB DISK_MIN_FREE_PERCENT DISK_WARN_FREE_PERCENT
-grep -F 'preallocation=metadata,cluster_size=65536' \
-        "$REPO_ROOT/deploy/scripts/lib/sv-disk.sh" >/dev/null \
-    || fail "新建独立 qcow2 没有预分配元数据"
+[[ "$VMATE_QCOW2_CREATE_OPTIONS" == *"cluster_size=131072"* &&
+   "$VMATE_QCOW2_CREATE_OPTIONS" == *"extended_l2=on"* &&
+   "$VMATE_QCOW2_CREATE_OPTIONS" == *"preallocation=metadata"* ]] || \
+    fail "新建 qcow2 性能布局契约不完整"
+grep -F -- "-o \"\$VMATE_QCOW2_CREATE_OPTIONS\"" \
+        "$REPO_ROOT/deploy/scripts/lib/sv-disk.sh" >/dev/null || \
+    fail "新建 qcow2 没有消费统一性能布局契约"
 
 # 首次创建必须把清单中的精确十进制容量交给 qemu-img，并回读相同 virtual-size。
 DISK="$TMP_DIR/correct.qcow2"

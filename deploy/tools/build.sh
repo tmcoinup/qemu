@@ -112,10 +112,11 @@ source "$BUILD_DEPS_HELPER"
 build_dependencies_ensure "$INSTALL_BUILD_DEPS" || exit $?
 
 # ---------- 运行时代码版本证明 ----------
-# 上游 qemu-version.sh 的 `git describe --dirty` 会把 deploy 脚本或固件变化也
-# 计入 QEMU ELF 的 dirty 标记，但这些资产并不是 C/Rust 运行时编译输入，发布时
-# 会由独立 stage 清单记录。这里固定 HEAD 描述，并只把 deploy 之外的已跟踪、
-# 未跟踪变化标为 dirty；构建目录等 ignored 产物不会污染版本。
+# 上游 qemu-version.sh 的 `git describe --dirty` 会把 deploy 资产与 GitHub CI
+# 元数据变化也计入 QEMU ELF 的 dirty 标记，但二者都不是 C/Rust
+# 运行时编译输入。deploy 由独立 stage 清单记录，.github 仅用于远程
+# 流程。这里固定 HEAD 描述，并只把其余已跟踪、未跟踪变化标为
+# dirty；构建目录等 ignored 产物不会污染版本。
 QEMU_RUNTIME_PKGVERSION=""
 if [[ -e .git ]]; then
     command -v git >/dev/null 2>&1 || {
@@ -130,9 +131,9 @@ if [[ -e .git ]]; then
     fi
     QEMU_RUNTIME_STATE="$(
         git status --porcelain --untracked-files=all -- \
-            . ':(exclude)deploy'
+            . ':(exclude)deploy' ':(exclude).github'
     )" || {
-        echo "FAIL: 无法检查 QEMU 非 deploy 运行时代码状态" >&2
+        echo "FAIL: 无法检查 QEMU 运行时编译输入状态" >&2
         exit 1
     }
     if [[ -n "$QEMU_RUNTIME_STATE" ]]; then

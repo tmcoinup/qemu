@@ -18,8 +18,9 @@ fail() {
 set +e
 output="$({
     sudo() {
-        [[ "$#" == "3" && "$1" == "-n" && "$2" == "/usr/bin/true" \
-            && "$3" == "preflight" ]] || return 97
+        [[ "$#" == "4" && "$1" == "-n" && "$2" == "/usr/bin/true" \
+            && "$3" == "preflight" && "$4" == "--qemu=/usr/bin/true" ]] \
+            || return 97
         echo "cpu-isolate preflight passed (abi=4)."
     }
 
@@ -28,6 +29,7 @@ output="$({
     DRY_RUN=0
     STRICT_HARDWARE=0
     SV_CPU_ISO_HELPER=/usr/bin/true
+    QEMU=/usr/bin/true
     source "$CPU_PIN_LIBRARY"
     CPU_ISOLATE=1
     sv_cpu_isolate_preflight

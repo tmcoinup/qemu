@@ -115,7 +115,6 @@ case "$CPUS" in
         exit 2
         ;;
 esac
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=/dev/null
@@ -124,7 +123,7 @@ source "$SCRIPT_DIR/lib/clone-lifecycle.sh"
 source "$SCRIPT_DIR/lib/base-image.sh"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib/clone-postprocess.sh"
-
+source "$SCRIPT_DIR/lib/qcow2-performance.sh"
 if [[ "$BASE_ARG" == */* || "$BASE_ARG" == *.qcow2 ]]; then
     BASE_FILE="$BASE_ARG"
     BASE_NAME="$(basename "$BASE_FILE")"
@@ -417,7 +416,8 @@ BASE_BACKING_RELATIVE="$(realpath --relative-to="$VM_DIR" -- "$BASE_PIN")"
 if ! (
     cd "$VM_DIR"
     "$QEMU_IMG" create -f qcow2 -F qcow2 \
-        -b "$BASE_BACKING_RELATIVE" "$(basename "$DISK_TMP")" >/dev/null
+        -b "$BASE_BACKING_RELATIVE" -o "$VMATE_QCOW2_CREATE_OPTIONS" \
+        "$(basename "$DISK_TMP")" >/dev/null
 ); then
     echo "ERROR: qemu-img 创建增量盘失败；最终 overlay 未发布" >&2
     exit 1

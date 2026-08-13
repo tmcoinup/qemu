@@ -196,6 +196,7 @@ deploy/scripts/stop-vm.sh 1
 - [开发与跨平台验证依赖](DEVELOPMENT-DEPENDENCIES.md)：Ubuntu 运行、构建、固件、
   完整回归和 Windows 工件的分组依赖与自检。
 - [可移植性](PORTABILITY.md)：迁移 `IMAGE_ROOT`、QEMU 路径和宿主能力。
+- [qcow2 读写性能](QCOW2-PERFORMANCE.md)：自动 AIO/元数据缓存、新盘布局与离线重排。
 - [验证](VERIFY.md)：静态与客体侧核对入口。
 - [fb-shm GPU 导出](FB-SHM-GPU-ZEROCOPY.md)：跨平台 handle、同步协议与回退边界。
 - [Windows 打包与启动](WINDOWS-PACKAGING.md)：Windows/WHPX 路线。

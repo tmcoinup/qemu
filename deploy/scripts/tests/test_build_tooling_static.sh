@@ -93,6 +93,7 @@ test_runtime_version_provenance() {
     require_text "git describe --match 'v*' --always --abbrev=10 HEAD" "$BUILD_SCRIPT"
     require_text 'git status --porcelain --untracked-files=all --' "$BUILD_SCRIPT"
     require_text ". ':(exclude)deploy'" "$BUILD_SCRIPT"
+    require_text "':(exclude).github'" "$BUILD_SCRIPT"
     require_text 'QEMU_RUNTIME_PKGVERSION="${QEMU_RUNTIME_PKGVERSION}-dirty"' \
         "$BUILD_SCRIPT"
     require_text 'CFG_FLAGS+=(--with-pkgversion="$QEMU_RUNTIME_PKGVERSION")' \

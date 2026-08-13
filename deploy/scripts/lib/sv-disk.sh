@@ -1,10 +1,14 @@
 # shellcheck shell=bash
-# ---------------------------------------------------------------------------
 # 实例磁盘创建与 profile 容量一致性校验。
 #
 # 单独拆分的原因：磁盘虚拟容量是硬件身份的一部分，既要在 Linux 启动器中复用，
 # 也要能由无 KVM、无宿主网络权限的单元测试独立验证。
 # ---------------------------------------------------------------------------
+
+_vmate_qcow2_library="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/qcow2-performance.sh"
+# shellcheck source=qcow2-performance.sh
+source "$_vmate_qcow2_library"
+unset _vmate_qcow2_library
 
 sv_disk_required_free_bytes() {
     # 同时保留固定余量与文件系统比例：小盘不能低于固定值，大盘不能只剩少量
@@ -139,17 +143,17 @@ sv_prepare_disk() {
             fi
             echo ">> 从 base 镜像克隆: $BASE_IMAGE"
             echo ">>   -> $DISK (qcow2 增量层)"
-            "$QEMU_IMG" create -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$DISK" >/dev/null
+            "$QEMU_IMG" create -f qcow2 -F qcow2 -b "$BASE_IMAGE" \
+                -o "$VMATE_QCOW2_CREATE_OPTIONS" "$DISK" >/dev/null
         else
             local size_gib
             size_gib=$(( BOOT_STORAGE_SIZE_BYTES / 1024 / 1024 / 1024 ))
             echo ">> creating fresh qcow2 at $DISK"
             echo ">>   model     : $BOOT_STORAGE_MODEL"
             echo ">>   raw bytes : $BOOT_STORAGE_SIZE_BYTES  (~${size_gib} GiB Windows-side)"
-            # 只预分配 qcow2 元数据，数据区仍保持稀疏；可避免运行中首次扩展 L1/L2
-            # 元数据造成额外延迟。带 backing 的 overlay 需要 extended_l2 才能组合
-            # metadata preallocation，因此上面的兼容克隆路径不擅自升级镜像格式。
-            "$QEMU_IMG" create -f qcow2 -o preallocation=metadata,cluster_size=65536 \
+            # Extended L2 将 128 KiB cluster 分为 4 KiB subcluster；元数据预分配
+            # 则避免运行期首次扩展 L1/L2 带来延迟和文件尾碎片。
+            "$QEMU_IMG" create -f qcow2 -o "$VMATE_QCOW2_CREATE_OPTIONS" \
                 "$DISK" "$BOOT_STORAGE_SIZE_BYTES"
         fi
     fi

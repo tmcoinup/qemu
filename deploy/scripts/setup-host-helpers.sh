@@ -15,6 +15,8 @@ PERF_DEST="$LIBEXEC_DIR/qemu-vmate-host-performance"
 ISO_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate"
 ISO_RUNTIME_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-runtime-v5.sh"
 ISO_CGROUP_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-cgroup-v5.sh"
+ISO_LOADER_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-loader-v1.sh"
+QEMU_TRUST_LIB_DEST="$LIBEXEC_DIR/qemu-vmate-qemu-trust-v1.sh"
 QEMU_TRUST_DEST="$LIBEXEC_DIR/qemu-vmate-cpu-isolate-qemu.conf"
 SUDOERS_DEST="$SUDOERS_DIR/qemu-vmate-host"
 LEGACY_PERF_SUDOERS="$SUDOERS_DIR/qemu-hostperf"
@@ -66,6 +68,8 @@ check_install_directories() {
 
 # shellcheck source=lib/setup-host-cpu-install-guard.sh
 source "$HERE/lib/setup-host-cpu-install-guard.sh"
+# shellcheck source=lib/setup-host-qemu-trust.sh
+source "$HERE/lib/setup-host-qemu-trust.sh"
 
 acquire_install_lock() {
     local lock_tmp path_meta fd_meta
@@ -119,33 +123,6 @@ acquire_install_lock() {
     fi
 }
 
-check_qemu_trust_manifest() {
-    local manifest="${1:-$QEMU_TRUST_DEST}"
-    local line key value actual_meta actual_digest
-    local trust_path="" trust_sha256="" trust_device="" trust_inode=""
-
-    check_regular_file "$manifest" 644 || return 1
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" == *=* ]] || return 1
-        key="${line%%=*}"; value="${line#*=}"
-        case "$key" in
-            path) [[ -z "$trust_path" ]] || return 1; trust_path="$value" ;;
-            sha256) [[ -z "$trust_sha256" ]] || return 1; trust_sha256="$value" ;;
-            device) [[ -z "$trust_device" ]] || return 1; trust_device="$value" ;;
-            inode) [[ -z "$trust_inode" ]] || return 1; trust_inode="$value" ;;
-            *) return 1 ;;
-        esac
-    done < "$manifest"
-    [[ "$trust_path" == /* && -f "$trust_path" && ! -L "$trust_path" &&
-       -s "$trust_path" && -x "$trust_path" &&
-       "$trust_sha256" =~ ^[0-9a-f]{64}$ && "$trust_device" =~ ^[0-9]+$ &&
-       "$trust_inode" =~ ^[0-9]+$ ]] || return 1
-    actual_meta="$(stat -Lc '%d:%i' -- "$trust_path" 2>/dev/null)" || return 1
-    [[ "$actual_meta" == "$trust_device:$trust_inode" ]] || return 1
-    actual_digest="$(sha256sum -- "$trust_path" 2>/dev/null)" || return 1
-    [[ "${actual_digest%% *}" == "$trust_sha256" ]] || return 1
-}
-
 check_sudoers_contract() {
     local sudoers="${1:-$SUDOERS_DEST}" expected actual
 
@@ -172,7 +149,9 @@ verify_installation() {
     check_regular_file "$ISO_DEST" 755 || return 1
     check_regular_file "$ISO_RUNTIME_DEST" 755 || return 1
     check_regular_file "$ISO_CGROUP_DEST" 755 || return 1
-    check_qemu_trust_manifest || {
+    check_regular_file "$ISO_LOADER_DEST" 755 || return 1
+    check_regular_file "$QEMU_TRUST_LIB_DEST" 755 || return 1
+    check_qemu_trust_manifest "$QEMU_TRUST_DEST" "${1:-}" || {
         echo "ERROR: QEMU root-owned 信任清单无效或构建产物已变化" >&2
         return 1
     }
@@ -239,12 +218,25 @@ case "$command" in
         release_stale_legacy_cpu_isolation
         ;;
     check|--check)
-        (( $# == 0 )) || { echo "用法: sudo $0 check" >&2; exit 2; }
+        CHECK_QEMU=""
+        if (( $# == 1 )) && [[ "$1" == --qemu=* && -n "${1#--qemu=}" ]]; then
+            CHECK_QEMU="${1#--qemu=}"
+        elif (( $# != 0 )); then
+            echo "用法: sudo $0 check [--qemu=/path]" >&2; exit 2
+        fi
         acquire_install_lock
-        verify_installation
+        verify_installation "$CHECK_QEMU"
         exit 0
         ;;
-    *) echo "用法: sudo $0 [install [--qemu=/path]|check]" >&2; exit 2 ;;
+    unregister|--unregister)
+        (( $# == 1 )) && [[ "$1" == --qemu=* && -n "${1#--qemu=}" ]] || {
+            echo "用法: sudo $0 unregister --qemu=/canonical/path" >&2; exit 2
+        }
+        acquire_install_lock
+        unregister_qemu_trust_path "${1#--qemu=}"
+        exit 0
+        ;;
+    *) echo "用法: sudo $0 [install|check|unregister]" >&2; exit 2 ;;
 esac
 
 # 开发版 QEMU 可以位于用户可写工作树，但 NOPASSWD helper 只信任管理员安装时记录的
@@ -262,8 +254,7 @@ QEMU_SOURCE="$(realpath -e -- "$QEMU_SOURCE" 2>/dev/null)" || {
 }
 QEMU_META="$(stat -Lc '%d %i' -- "$QEMU_SOURCE")"
 read -r QEMU_DEVICE QEMU_INODE <<<"$QEMU_META"
-QEMU_SHA256="$(sha256sum -- "$QEMU_SOURCE")"
-QEMU_SHA256="${QEMU_SHA256%% *}"
+QEMU_SHA256="$(qemu_trust_file_sha256 "$QEMU_SOURCE")"
 
 if [[ -n "$EXPECTED_QEMU_DEVICE" ]] &&
    [[ "$QEMU_DEVICE:$QEMU_INODE:$QEMU_SHA256" != \
@@ -275,8 +266,8 @@ fi
 recheck_qemu_snapshot() {
     local current_meta current_digest
     current_meta="$(stat -Lc '%d:%i' -- "$QEMU_SOURCE" 2>/dev/null)" || return 1
-    current_digest="$(sha256sum -- "$QEMU_SOURCE" 2>/dev/null)" || return 1
-    [[ "$current_meta:${current_digest%% *}" == \
+    current_digest="$(qemu_trust_file_sha256 "$QEMU_SOURCE")" || return 1
+    [[ "$current_meta:$current_digest" == \
        "$QEMU_DEVICE:$QEMU_INODE:$QEMU_SHA256" ]]
 }
 
@@ -297,6 +288,8 @@ declare -a transaction_destinations=(
     "$PERF_DEST"
     "$ISO_RUNTIME_DEST"
     "$ISO_CGROUP_DEST"
+    "$ISO_LOADER_DEST"
+    "$QEMU_TRUST_LIB_DEST"
     "$QEMU_TRUST_DEST"
     "$ISO_DEST"
 )
@@ -317,14 +310,6 @@ finish_transaction() {
         # 中文注释：sudoers 是第一个备份项，因此逆序恢复会让它最后重新生效；
         # 在 helper/runtime/trust 全部恢复之前，普通用户无法调用混合版本。
         for (( index=transaction_backup_count - 1; index >= 0; index-- )); do
-            if (( index == 2 && rollback_failed )); then
-                echo "CRITICAL: helper 依赖恢复失败，保持全部 sudoers 禁用" >&2
-                for (( permission_index=0; permission_index<=2; permission_index++ )); do
-                    rm -f -- "${transaction_destinations[$permission_index]}" \
-                        2>/dev/null || true
-                done
-                break
-            fi
             path="${transaction_destinations[$index]}"
             backup="${transaction_backups[$index]}"
             if [[ -n "$ROOT_PREFIX" &&
@@ -348,6 +333,10 @@ finish_transaction() {
             fi
         done
         if (( rollback_failed )); then
+            # 无论失败出现在依赖还是任一 sudoers 自身，最终都撤销全部授权入口。
+            for (( permission_index=0; permission_index<=2; permission_index++ )); do
+                rm -f -- "${transaction_destinations[$permission_index]}" 2>/dev/null || true
+            done
             echo "CRITICAL: helper 安装回滚不完整；保持失败状态，禁止启动 VM" >&2
             original_status=1
         fi
@@ -388,6 +377,10 @@ runtime_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-runtime-v5.XXXXXX")"
 stage_files+=("$runtime_tmp")
 cgroup_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-cgroup-v5.XXXXXX")"
 stage_files+=("$cgroup_tmp")
+loader_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-loader-v1.XXXXXX")"
+stage_files+=("$loader_tmp")
+trust_lib_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-qemu-trust-v1.XXXXXX")"
+stage_files+=("$trust_lib_tmp")
 trust_tmp="$(mktemp "$LIBEXEC_DIR/.qemu-vmate-cpu-trust.XXXXXX")"
 stage_files+=("$trust_tmp")
 sudoers_tmp="$(mktemp "$SUDOERS_DIR/.qemu-vmate-host.XXXXXX")"
@@ -401,14 +394,11 @@ install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
     "$HERE/host-cpu-isolate-runtime.sh" "$runtime_tmp"
 install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
     "$HERE/host-cpu-isolate-cgroup.sh" "$cgroup_tmp"
-{
-    printf 'path=%s\n' "$QEMU_SOURCE"
-    printf 'sha256=%s\n' "$QEMU_SHA256"
-    printf 'device=%s\n' "$QEMU_DEVICE"
-    printf 'inode=%s\n' "$QEMU_INODE"
-} > "$trust_tmp"
-chown "$OWNER_UID:$OWNER_GID" "$trust_tmp" 2>/dev/null || true
-chmod 0644 "$trust_tmp"
+install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
+    "$HERE/host-cpu-isolate-loader.sh" "$loader_tmp"
+install -o "$OWNER_UID" -g "$OWNER_GID" -m 0755 \
+    "$HERE/qemu-trust-manifest.sh" "$trust_lib_tmp"
+stage_qemu_trust_manifest "$trust_tmp"
 {
     echo "# 由 qemu vmate setup-host-helpers.sh 生成；仅授权本机 VM 操作者，禁止环境变量注入。"
     printf '#%s ALL=(root) NOPASSWD:NOSETENV: %s *\n' "$TARGET_UID" "/usr/local/libexec/qemu-vmate-host-performance"
@@ -421,6 +411,8 @@ check_regular_file "$perf_tmp" 755
 check_regular_file "$iso_tmp" 755
 check_regular_file "$runtime_tmp" 755
 check_regular_file "$cgroup_tmp" 755
+check_regular_file "$loader_tmp" 755
+check_regular_file "$trust_lib_tmp" 755
 check_qemu_trust_manifest "$trust_tmp"
 check_sudoers_contract "$sudoers_tmp"
 
@@ -472,6 +464,10 @@ mv -fT -- "$runtime_tmp" "$ISO_RUNTIME_DEST"
 maybe_test_fail after_runtime
 mv -fT -- "$cgroup_tmp" "$ISO_CGROUP_DEST"
 maybe_test_fail after_cgroup
+mv -fT -- "$loader_tmp" "$ISO_LOADER_DEST"
+maybe_test_fail after_loader
+mv -fT -- "$trust_lib_tmp" "$QEMU_TRUST_LIB_DEST"
+maybe_test_fail after_trust_library
 mv -fT -- "$trust_tmp" "$QEMU_TRUST_DEST"
 maybe_test_fail after_trust
 mv -fT -- "$perf_tmp" "$PERF_DEST"

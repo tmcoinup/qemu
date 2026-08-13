@@ -112,10 +112,25 @@ LEGACY_HELPER
 chmod 0755 "$iso_dest"
 legacy_instances=(1 2 8 9 10 12 101 999 1000)
 for legacy_instance in "${legacy_instances[@]}"; do
-    printf 'guest_threads_per_core=1\n' > \
+    printf 'instance=%s\npid=%s\nstart_time=777\nguest_threads_per_core=1\n' \
+        "$legacy_instance" "$((600000 + legacy_instance))" > \
         "$legacy_runtime/instances/$legacy_instance.state"
 done
 chmod 0600 "$legacy_runtime/instances"/*.state
+live_proc="$tmp/live-proc"
+mkdir -p "$live_proc/600012"
+printf '%s\n' \
+    '600012 (qemu worker) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777' \
+    > "$live_proc/600012/stat"
+live_status=0
+VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
+    VMATE_TEST_PROC_ROOT="$live_proc" \
+    "$SETUP" install "--qemu=$trusted_qemu" >"$tmp/legacy-live.log" 2>&1 \
+    || live_status=$?
+if [[ "$live_status" != 75 || -e "$tmp/legacy-release.log" ]]; then
+    tail -n 180 "$tmp/legacy-live.log" >&2
+    fail "运行中旧 VM 没有以未修改 helper/state 的 EX_TEMPFAIL 延后升级"
+fi
 if VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
         VMATE_TEST_LEGACY_RELEASE_FAIL=12 \
         "$SETUP" install "--qemu=$trusted_qemu" >"$tmp/legacy-fail.log" 2>&1; then
@@ -269,7 +284,7 @@ VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" \
 VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" "$SETUP" check >/dev/null
 
 # 两个不同 QEMU 的 installer 必须由 root-owned flock 完整串行化。第一个进程在
-# 取得锁后由 FIFO 暂停；第二个进程此时必须保持等待，释放后才可覆盖为第二份清单。
+# 取得锁后由 FIFO 暂停；第二个进程此时必须保持等待，释放后合并两份清单。
 lock_ready_one="$tmp/lock-ready-one"
 lock_ready_two="$tmp/lock-ready-two"
 lock_release_fifo="$tmp/lock-release.fifo"
@@ -301,8 +316,9 @@ printf '%s\n' release > "$lock_release_fifo"
 wait "$installer_one" || fail "第一个并发 installer 失败"
 wait "$installer_two" || fail "第二个并发 installer 失败"
 [[ -e "$lock_ready_two" ]] || fail "释放后第二个 installer 未取得锁"
-grep -Fx "path=$(realpath -e "$replacement_qemu")" "$trust_dest" >/dev/null \
-    || fail "并发安装最终清单不是锁后执行的第二份 QEMU"
+[[ "$(grep -Fxc "path=$(realpath -e "$trusted_qemu")" "$trust_dest")" == 1 &&
+   "$(grep -Fxc "path=$(realpath -e "$replacement_qemu")" "$trust_dest")" == 1 ]] \
+    || fail "并发安装没有原子保留两份 QEMU 信任记录"
 VMATE_INSTALL_ROOT="$tmp" VMATE_TARGET_UID="$(id -u)" "$SETUP" check >/dev/null
 rm -f "$lock_release_fifo" "$lock_ready_one" "$lock_ready_two"
 
@@ -379,7 +395,7 @@ grep -F 'host_threads_per_core' "$ISOLATE" >/dev/null \
 grep -F 'refuse_active_legacy_cpu_isolation' "$SETUP" >/dev/null \
     || fail "ABI5 installer 缺少旧状态升级保护"
 for required_guard in '_validate_qemu_target' "/proc/\$pid/exe" '^Uid:' '^Tgid:' \
-        'CPU\ [0-9]+/(KVM|TCG)' '_validate_trusted_executable' 'sha256sum'; do
+        'CPU\ [0-9]+/(KVM|TCG)' '_validate_trusted_executable' 'qemu_trust_file_sha256'; do
     grep -F "$required_guard" "$ISOLATE_RUNTIME" >/dev/null \
         || fail "CPU isolate 缺少目标边界校验: $required_guard"
 done

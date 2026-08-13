@@ -77,8 +77,10 @@ jobs:
             deploy/tools/build.sh \
             deploy/tools/lib/build-dependencies.sh \
             deploy/scripts/host-cpu-isolate.sh \
+            deploy/scripts/host-cpu-isolate-loader.sh \
             deploy/scripts/host-cpu-isolate-runtime.sh \
             deploy/scripts/host-performance.sh \
+            deploy/scripts/qemu-trust-manifest.sh \
             deploy/scripts/start-vm.sh \
             deploy/scripts/seal-base.sh \
             deploy/scripts/clone-from-base.sh \
@@ -88,6 +90,7 @@ jobs:
             deploy/scripts/lib/base-boot-storage.sh \
             deploy/scripts/lib/clone-lifecycle.sh \
             deploy/scripts/lib/clone-postprocess.sh \
+            deploy/scripts/lib/setup-host-qemu-trust.sh \
             deploy/scripts/lib/sv-disk.sh \
             deploy/scripts/lib/sv-host-capabilities.sh \
             deploy/scripts/lib/sv-host-helpers.sh \

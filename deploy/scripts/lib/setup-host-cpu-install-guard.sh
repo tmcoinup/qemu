@@ -12,6 +12,10 @@ fi
 declare -a LEGACY_STATE_PATHS=()
 declare -a LEGACY_STATE_INSTANCES=()
 
+# EX_TEMPFAIL 与 maintainer script 约定：可信旧状态仍绑定活进程时，helper 发布可以
+# 安全延后；其它状态损坏、权限错误和发布故障仍返回普通失败，不能被安装器忽略。
+readonly HOST_HELPER_UPGRADE_DEFERRED=75
+
 acquire_cpu_runtime_lock() {
     local temporary path_inode fd_inode
 
@@ -86,8 +90,48 @@ scan_legacy_cpu_states() {
     (( invalid == 0 ))
 }
 
+legacy_state_process_generation_is_live() {
+    local state="$1" expected_instance="$2"
+    local line key value instance="" pid="" start_time="" stat_line stat_fields
+    local instance_count=0 pid_count=0 start_time_count=0
+    local -a fields=()
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == *=* ]] || {
+            printf 'ERROR: 旧 ABI 实例状态行格式错误: %q\n' "$state" >&2
+            return 2
+        }
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "$key" in
+            instance) instance="$value"; instance_count=$((instance_count + 1)) ;;
+            pid) pid="$value"; pid_count=$((pid_count + 1)) ;;
+            start_time) start_time="$value"; start_time_count=$((start_time_count + 1)) ;;
+        esac
+    done < "$state"
+    if (( instance_count != 1 || pid_count != 1 || start_time_count != 1 )) \
+        || [[ "$instance" != "$expected_instance" || ! "$pid" =~ ^[0-9]+$ \
+              || ! "$start_time" =~ ^[0-9]+$ ]]; then
+        printf 'ERROR: 旧 ABI 实例状态缺少唯一有效的进程代际: %q\n' "$state" >&2
+        return 2
+    fi
+
+    # /proc/<pid>/stat 的 comm 可以包含空格甚至右括号；用最后一个 ") " 切开后，
+    # starttime 是剩余字段中的第 20 项。进程在读取期间退出只表示状态已陈旧。
+    if ! { IFS= read -r stat_line < "$CPU_PROC_ROOT/$pid/stat"; } 2>/dev/null; then
+        return 1
+    fi
+    [[ "$stat_line" == "$pid ("* && "$stat_line" == *") "* ]] || return 1
+    stat_fields="${stat_line##*) }"
+    read -r -a fields <<< "$stat_fields"
+    (( ${#fields[@]} >= 20 )) || return 1
+    [[ "${fields[0]}" != "Z" && "${fields[0]}" != "z" \
+       && "${fields[0]}" != "X" && "${fields[0]}" != "x" \
+       && "${fields[19]}" == "$start_time" ]]
+}
+
 release_stale_legacy_cpu_isolation() {
-    local index instance
+    local index instance generation_status
 
     scan_legacy_cpu_states || {
         echo "       非法运行态不会自动清理，请先人工检查" >&2
@@ -102,6 +146,17 @@ release_stale_legacy_cpu_isolation() {
         echo "ERROR: 当前 CPU helper 不可信，拒绝自动清理旧状态" >&2
         return 1
     fi
+    for index in "${!LEGACY_STATE_INSTANCES[@]}"; do
+        instance="${LEGACY_STATE_INSTANCES[$index]}"
+        if legacy_state_process_generation_is_live \
+                "${LEGACY_STATE_PATHS[$index]}" "$instance"; then
+            echo ">> 实例 $instance 的 QEMU 仍在运行，安全延后 host helper 升级" >&2
+            return "$HOST_HELPER_UPGRADE_DEFERRED"
+        else
+            generation_status=$?
+            (( generation_status == 1 )) || return 1
+        fi
+    done
     echo ">> 检测到 ${#LEGACY_STATE_INSTANCES[@]} 个旧 CPU 隔离状态，正在由旧 helper 安全回收"
     for index in "${!LEGACY_STATE_INSTANCES[@]}"; do
         instance="${LEGACY_STATE_INSTANCES[$index]}"

@@ -126,13 +126,16 @@ QEMU_CAP_CHECK=0 ./deploy/scripts/start-vm.sh 1 --no-bridge
 当前设备身份稳定参数是（文件 AIO 由启动前 active-read 自动选择）：
 
 ```bash
--drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=<io_uring|native|threads>,discard=unmap,detect-zeroes=unmap
+-drive file=...,if=none,id=bootdisk0,format=qcow2,cache=none,aio=<io_uring|native|threads>,discard=unmap,detect-zeroes=unmap,l2-cache-size=67108864,refcount-cache-size=8388608,cache-clean-interval=0,discard-no-unref=on
 -device nvme,...,drive=bootdisk0,x-identity-profile=...,model-number=...,firmware-rev=...
 ```
 
 `QEMU_DISK_AIO=auto` 不创建临时盘，依次用候选后端实际读取 QEMU ELF；不可用时
 回退 `threads`。显式指定后端则 fail closed。三种模式均不改变 Guest 设备，
 也不添加 IOThread；本地前台构建会自动补齐 `liburing-dev` 与 `libaio-dev`。
+新建镜像统一使用 128 KiB cluster、4 KiB Extended-L2 subcluster 和元数据
+预分配；旧镜像可在关机后使用 `deploy/scripts/optimize-qcow2.sh --all`
+安全重排。完整策略、空间门禁与回滚语义见 [qcow2 读写性能](QCOW2-PERFORMANCE.md)。
 
 `x-identity-profile` 把所选 Samsung、Intel、Western Digital 或 KIOXIA 型号的
 model、firmware、PCI/subsystem、OUI、链路和序列格式作为一个整体校验；旧

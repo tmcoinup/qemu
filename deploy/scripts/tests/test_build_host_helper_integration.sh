@@ -108,10 +108,13 @@ cp "$REPO_ROOT/deploy/scripts/setup-host-helpers.sh" \
     "$fake_repo/deploy/scripts/setup-host-helpers-real.sh"
 cp "$REPO_ROOT/deploy/scripts/host-performance.sh" \
     "$REPO_ROOT/deploy/scripts/host-cpu-isolate.sh" \
+    "$REPO_ROOT/deploy/scripts/host-cpu-isolate-loader.sh" \
     "$REPO_ROOT/deploy/scripts/host-cpu-isolate-runtime.sh" \
     "$REPO_ROOT/deploy/scripts/host-cpu-isolate-cgroup.sh" \
+    "$REPO_ROOT/deploy/scripts/qemu-trust-manifest.sh" \
     "$fake_repo/deploy/scripts/"
 cp "$REPO_ROOT/deploy/scripts/lib/setup-host-cpu-install-guard.sh" \
+    "$REPO_ROOT/deploy/scripts/lib/setup-host-qemu-trust.sh" \
     "$fake_repo/deploy/scripts/lib/"
 cat > "$fake_repo/deploy/scripts/setup-host-helpers.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -160,8 +163,10 @@ chmod 0755 "$fake_bin/pkg-config" "$fake_bin/python3" "$fake_bin/ninja" \
     "$fake_repo/deploy/scripts/setup-host-helpers-real.sh" \
     "$fake_repo/deploy/scripts/host-performance.sh" \
     "$fake_repo/deploy/scripts/host-cpu-isolate.sh" \
+    "$fake_repo/deploy/scripts/host-cpu-isolate-loader.sh" \
     "$fake_repo/deploy/scripts/host-cpu-isolate-runtime.sh" \
     "$fake_repo/deploy/scripts/host-cpu-isolate-cgroup.sh" \
+    "$fake_repo/deploy/scripts/qemu-trust-manifest.sh" \
     "$fake_repo/deploy/scripts/verify-stealth.sh" "$tmp/pty-runner.sh"
 
 reset_case() {

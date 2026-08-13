@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034
 # ---------------------------------------------------------------------------
 # host-cpu-isolate.sh —— 把一台隐身 VM 的 QEMU 进程钉进一个 cgroup v2 cpuset
 # 「独占分区」, 让每个 vCPU 拥有唯一宿主逻辑 CPU，不与其它 VM/宿主线程超分同一
@@ -59,8 +60,10 @@ readonly CPU_ISOLATE_RUNTIME_ABI="5" CPU_ISOLATE_PACKING_POLICY="logical-1to1-v1
 readonly CPU_ISOLATE_CGROUP_ABI="5"
 readonly RUNTIME_LIB="/usr/local/libexec/qemu-vmate-cpu-isolate-runtime-v5.sh"
 readonly CGROUP_LIB="/usr/local/libexec/qemu-vmate-cpu-isolate-cgroup-v5.sh"
+readonly TRUST_LIB="/usr/local/libexec/qemu-vmate-qemu-trust-v1.sh"
+readonly LOADER_LIB="/usr/local/libexec/qemu-vmate-cpu-isolate-loader-v1.sh"
+readonly QEMU_TRUST_ABI="1"
 # 该变量由固定运行库消费；shellcheck 单文件分析看不到跨文件引用。
-# shellcheck disable=SC2034
 readonly TRUST_MANIFEST="/usr/local/libexec/qemu-vmate-cpu-isolate-qemu.conf"
 _die() { echo "host-cpu-isolate: $*" >&2; exit 1; }
 _warn() { echo "host-cpu-isolate: $*" >&2; }
@@ -239,7 +242,12 @@ _validate_cli() {
     local command="${1:-}"; local -a cli_tids=()
     case "$command" in
         preflight)
-            (( $# == 1 )) || _die "preflight 不接受额外参数"
+            (( $# <= 2 )) || _die "用法: preflight [--qemu=/canonical/path]"
+            if (( $# == 2 )); then
+                [[ "$2" == --qemu=/* && -n "${2#--qemu=}" && ${#2} -le 4103 &&
+                   "$2" != *$'\r'* && "$2" != *$'\n'* ]] \
+                    || _die "preflight --qemu 路径非法"
+            fi
             ;;
         apply)
             (( $# == 9 )) \
@@ -267,51 +275,6 @@ _validate_cli() {
 }
 
 _validate_cli "$@"
-
-# 提权后只加载 installer 放置的 root-owned 固定运行库。校验 regular/no-symlink、
-# owner、精确 mode 和 link count，避免 NOPASSWD main 通过用户可写 source 获得 root。
-_load_trusted_library() {
-    local library="$1" metadata uid gid mode links
-    [[ -f "$library" && ! -L "$library" ]] \
-        || _die "CPU isolate library 不是普通文件: $library"
-    metadata="$(stat -Lc '%u %g %a %h' -- "$library" 2>/dev/null)" \
-        || _die "无法读取 CPU isolate library 元数据"
-    read -r uid gid mode links <<<"$metadata"
-    [[ "$uid:$gid:$mode:$links" == "0:0:755:1" ]] \
-        || _die "CPU isolate library 必须为 root:root 0755 且只有一个硬链接"
-    # shellcheck disable=SC1090
-    source "$library"
-}
-
-_load_runtime_libraries() {
-    local metadata uid gid mode parent
-    parent="${RUNTIME_LIB%/*}"
-    [[ -d "$parent" && ! -L "$parent" ]] \
-        || _die "CPU isolate libexec 不是普通目录: $parent"
-    metadata="$(stat -Lc '%u %g %a' -- "$parent" 2>/dev/null)" \
-        || _die "无法读取 CPU isolate libexec 元数据"
-    read -r uid gid mode <<<"$metadata"
-    [[ "$uid" == "0" && "$gid" == "0" && "$mode" =~ ^[0-7]{3,4}$ ]] \
-        || _die "CPU isolate libexec owner/mode 非法"
-    (( (8#$mode & 8#022) == 0 )) \
-        || _die "CPU isolate libexec 不得由 group/other 写入"
-    [[ "${CGROUP_LIB%/*}" == "$parent" ]] || _die "CPU isolate library 目录不一致"
-    _load_trusted_library "$RUNTIME_LIB"
-    _load_trusted_library "$CGROUP_LIB"
-    [[ "${VMATE_CPU_ISOLATE_RUNTIME_ABI:-}" == "$CPU_ISOLATE_RUNTIME_ABI" ]] \
-        || _die "CPU isolate main/runtime ABI 不匹配"
-    [[ "${VMATE_CPU_ISOLATE_CGROUP_ABI:-}" == "$CPU_ISOLATE_CGROUP_ABI" ]] \
-        || _die "CPU isolate main/cgroup ABI 不匹配"
-    declare -F _validate_qemu_target _apply_transaction_begin \
-        _apply_transaction_exit \
-        _verify_vmiso_cpu_grant _strict_cpu_list_intersection_csv \
-        _caller_uid _proc_start_time _proc_generation_is_live \
-        _scan_vmiso_children _collect_instance_allocations \
-        _select_instance_cpus _validate_recorded_topology _activate_instance_cpuset \
-        _localize_instance_memory _release_instance_cpuset \
-        _status_instance_cpusets _validate_memory_locality_tool >/dev/null \
-        || _die "CPU isolate runtime 接口不完整"
-}
 
 # cgroup v2 + cpuset controller 预检。返回非零表示环境不支持, 调用方应优雅跳过。
 _precheck() {
@@ -356,6 +319,21 @@ if [[ $EUID -ne 0 ]]; then
     exec sudo -n -- "$0" "$@" 2>/dev/null || { _warn "需要 root 但无免密 sudo"; exit 1; }
 fi
 
+# 在 source 之前先锁定父目录信任边界；loader 内会再次核验并装载其余 ABI 库。
+_loader_parent="${LOADER_LIB%/*}"
+[[ -d "$_loader_parent" && ! -L "$_loader_parent" ]] \
+    || _die "CPU isolate loader 目录不可信"
+_loader_meta="$(stat -Lc '%u:%g:%a' -- "$_loader_parent" 2>/dev/null)" \
+    || _die "无法读取 CPU isolate loader 目录元数据"
+IFS=: read -r _loader_uid _loader_gid _loader_mode <<<"$_loader_meta"
+[[ "$_loader_uid:$_loader_gid" == "0:0" && "$_loader_mode" =~ ^[0-7]{3,4}$ ]] \
+    && (( (8#$_loader_mode & 8#022) == 0 )) \
+    || _die "CPU isolate loader 目录 owner/mode 不可信"
+[[ -f "$LOADER_LIB" && ! -L "$LOADER_LIB" &&
+   "$(stat -Lc '%u:%g:%a:%h' -- "$LOADER_LIB" 2>/dev/null)" == "0:0:755:1" ]] \
+    || _die "CPU isolate loader 文件不可信"
+# shellcheck disable=SC1090
+source "$LOADER_LIB"
 _load_runtime_libraries
 
 CMD="${1:-}"; shift || true
@@ -365,11 +343,12 @@ CMD="${1:-}"; shift || true
 case "$CMD" in
 # --------------------------------------------------------------- preflight
 preflight)
-    _validate_trust_manifest
+    _preflight_qemu="${1:-}"
     _prepare_runtime
     _precheck || exit 1
     _validate_memory_locality_tool
     _open_global_lock
+    _validate_trust_manifest "${_preflight_qemu#--qemu=}"
     [[ ! -d "$VMISO" ]] || _collect_instance_allocations
     echo "cpu-isolate preflight passed (abi=5 policy=$CPU_ISOLATE_PACKING_POLICY)."
     ;;
@@ -383,13 +362,12 @@ apply)
         || _die "用法: apply <instance> <mems> <pid> <pref> <tids> <service> <guest_tpc> <host_tpc>"
     # 参数已在提权前后由 _validate_cli 严格验证，这里不再静默改写非法输入。
 
-    _validate_trust_manifest
     _precheck || exit 1
+    _open_global_lock
+    _validate_trust_manifest
     _validate_qemu_target "$PID" "$TIDS"
 
-    # 串行化后的 helper 才是最终 NUMA/CPU 分配者。PREF 包含未扩展的 SMT2 线程候选，
-    # 实例数不预配置；锁内逐台排除已占 logical CPU，并保持每台 Guest 的 core/thread 形状。
-    _open_global_lock
+    # 串行化后的 helper 才是最终 NUMA/CPU 分配者。锁内逐台排除已占 logical CPU。
     _validate_target_unchanged "$PID"
     _state_path="$(_instance_state_path "$INST")"
     if [[ -e "$_state_path" || -L "$_state_path" ]]; then

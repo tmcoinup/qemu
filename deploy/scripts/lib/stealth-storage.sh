@@ -5,6 +5,11 @@
 # 经 component catalog 绑定的审核画像。调用方必须先加载 profile 与 DISK 路径。
 # shellcheck disable=SC2034 # BOOT_STORAGE_ARGS 由启动命令组装器读取。
 
+_vmate_qcow2_library="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/qcow2-performance.sh"
+# shellcheck source=qcow2-performance.sh
+source "$_vmate_qcow2_library"
+unset _vmate_qcow2_library
+
 stealth_validate_boot_storage_serial() {
     local serial="${BOOT_STORAGE_SERIAL:-}"
     local LC_ALL=C
@@ -52,7 +57,7 @@ stealth_build_boot_storage_args() {
     stealth_validate_boot_storage_serial || return 1
     # Windows/Linux 对未使用区域的普通全零写入会转为 qcow2 unmap，避免稀疏盘
     # 无意义扩张；非零数据语义、cache=none 与已验证 AIO 路径保持不变。
-    drive_options="file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=${disk_aio},discard=unmap,detect-zeroes=unmap"
+    drive_options="file=${DISK:?缺少 DISK},if=none,id=bootdisk0,format=qcow2,cache=none,aio=${disk_aio},discard=unmap,detect-zeroes=unmap,${VMATE_QCOW2_RUNTIME_OPTIONS}"
     case "${PLATFORM_BOOT_STORAGE:-nvme}" in
         nvme)
             if [[ "${PLATFORM_STORAGE_SWITCH_REQUIRED:-0}" != 0 ||

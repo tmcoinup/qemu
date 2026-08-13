@@ -56,73 +56,44 @@ _caller_gid() {
 }
 
 _validate_trust_manifest() {
-    local metadata uid gid mode links line key value device inode digest
+    local expected="${1:-}" canonical
 
-    [[ -f "$TRUST_MANIFEST" && ! -L "$TRUST_MANIFEST" ]] \
-        || _die "QEMU 信任清单不是普通文件: $TRUST_MANIFEST"
-    metadata="$(stat -Lc '%u %g %a %h' -- "$TRUST_MANIFEST" 2>/dev/null)" \
-        || _die "无法读取 QEMU 信任清单元数据"
-    read -r uid gid mode links <<<"$metadata"
-    [[ "$uid:$gid:$mode:$links" == "0:0:644:1" ]] \
-        || _die "QEMU 信任清单必须为 root:root 0644 且只有一个硬链接"
-
-    TRUSTED_QEMU_PATH=""; TRUSTED_QEMU_SHA256=""
-    TRUSTED_QEMU_DEVICE=""; TRUSTED_QEMU_INODE=""
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" == *=* ]] || _die "QEMU 信任清单格式错误"
-        key="${line%%=*}"; value="${line#*=}"
-        case "$key" in
-            path) [[ -z "$TRUSTED_QEMU_PATH" ]] || _die "QEMU 信任清单 path 重复"
-                  TRUSTED_QEMU_PATH="$value" ;;
-            sha256) [[ -z "$TRUSTED_QEMU_SHA256" ]] || _die "QEMU 信任清单 sha256 重复"
-                    TRUSTED_QEMU_SHA256="$value" ;;
-            device) [[ -z "$TRUSTED_QEMU_DEVICE" ]] || _die "QEMU 信任清单 device 重复"
-                    TRUSTED_QEMU_DEVICE="$value" ;;
-            inode) [[ -z "$TRUSTED_QEMU_INODE" ]] || _die "QEMU 信任清单 inode 重复"
-                   TRUSTED_QEMU_INODE="$value" ;;
-            *) _die "QEMU 信任清单含未知字段: $key" ;;
-        esac
-    done < "$TRUST_MANIFEST"
-    [[ "$TRUSTED_QEMU_PATH" == /* && "$TRUSTED_QEMU_PATH" != *$'\r'* &&
-       "$TRUSTED_QEMU_SHA256" =~ ^[0-9a-f]{64}$ &&
-       "$TRUSTED_QEMU_DEVICE" =~ ^[0-9]+$ && "$TRUSTED_QEMU_INODE" =~ ^[0-9]+$ ]] \
-        || _die "QEMU 信任清单字段非法，请重新安装 host helpers"
-
-    # preflight 必须在 QEMU 启动前发现“重编译后忘记重装清单”，不能只检查配置格式
-    # 而把失败推迟到异步 pinner。canonical path 的文件也拒绝被 symlink 替换。
-    [[ -f "$TRUSTED_QEMU_PATH" && ! -L "$TRUSTED_QEMU_PATH" &&
-       -s "$TRUSTED_QEMU_PATH" && -x "$TRUSTED_QEMU_PATH" ]] \
-        || _die "信任清单中的 QEMU 不再是非空可执行普通文件"
-    metadata="$(stat -Lc '%d %i' -- "$TRUSTED_QEMU_PATH" 2>/dev/null)" \
-        || _die "无法读取信任清单中的 QEMU inode"
-    read -r device inode <<<"$metadata"
-    [[ "$device:$inode" == "$TRUSTED_QEMU_DEVICE:$TRUSTED_QEMU_INODE" ]] \
-        || _die "QEMU 构建 inode 已变化，请重新安装 host helpers"
-    digest="$(sha256sum -- "$TRUSTED_QEMU_PATH" 2>/dev/null)" \
-        || _die "无法校验信任清单中的 QEMU 摘要"
-    digest="${digest%% *}"
-    [[ "$digest" == "$TRUSTED_QEMU_SHA256" ]] \
-        || _die "QEMU 构建摘要已变化，请重新安装 host helpers"
+    qemu_trust_manifest_load_checked "$TRUST_MANIFEST" 0 0 644 \
+        || _die "QEMU 信任清单无效: $QEMU_TRUST_ERROR"
+    qemu_trust_manifest_has_live_record \
+        || _die "QEMU 信任清单没有仍有效的 executable"
+    [[ -n "$expected" ]] || return 0
+    canonical="$(realpath -e -- "$expected" 2>/dev/null)" \
+        || _die "无法规范化待启动 QEMU: $expected"
+    [[ "$canonical" == "$expected" ]] \
+        || _die "待启动 QEMU 必须使用 canonical path: $expected"
+    qemu_trust_manifest_find_path "$canonical" &&
+        qemu_trust_manifest_record_is_live "$QEMU_TRUST_MATCH_INDEX" \
+        || _die "待启动 QEMU 未以当前 device/inode/SHA-256 登记: $canonical"
 }
 
 _validate_trusted_executable() {
-    local pid="$1" exe metadata device inode digest
+    local pid="$1" exe metadata device inode digest index start_before start_after
 
+    start_before="$(_proc_start_time "$pid")" || _die "无法读取 pid=$pid 代际"
     exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" \
         || _die "无法读取 pid=$pid 可执行文件"
     [[ "$exe" != *" (deleted)" ]] || _die "QEMU executable 已被替换或删除"
-    [[ "$exe" == "$TRUSTED_QEMU_PATH" ]] \
+    qemu_trust_manifest_find_path "$exe" \
         || _die "QEMU executable 未在 root-owned 信任清单中: $exe"
+    index="$QEMU_TRUST_MATCH_INDEX"
     metadata="$(stat -Lc '%d %i' -- "/proc/$pid/exe" 2>/dev/null)" \
         || _die "无法读取 QEMU executable inode"
     read -r device inode <<<"$metadata"
-    [[ "$device:$inode" == "$TRUSTED_QEMU_DEVICE:$TRUSTED_QEMU_INODE" ]] \
+    [[ "$device:$inode" == \
+       "${QEMU_TRUST_DEVICES[$index]}:${QEMU_TRUST_INODES[$index]}" ]] \
         || _die "QEMU executable inode 已变化，请重新安装 host helpers"
-    digest="$(sha256sum "/proc/$pid/exe" 2>/dev/null)" \
+    digest="$(qemu_trust_file_sha256 "/proc/$pid/exe")" \
         || _die "无法校验 QEMU executable 摘要"
-    digest="${digest%% *}"
-    [[ "$digest" == "$TRUSTED_QEMU_SHA256" ]] \
+    [[ "$digest" == "${QEMU_TRUST_SHA256S[$index]}" ]] \
         || _die "QEMU executable 摘要不匹配，请重新安装 host helpers"
+    start_after="$(_proc_start_time "$pid")" || _die "QEMU 在摘要校验期间退出"
+    [[ "$start_after" == "$start_before" ]] || _die "QEMU pid 在摘要校验期间被复用"
 }
 
 _validate_instance_name() {

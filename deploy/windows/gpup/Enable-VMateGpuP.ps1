@@ -69,6 +69,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Host.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.DriverStore.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Identity.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.HardwareIdentity.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Guest.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Partition.ps1')
 
@@ -171,10 +172,18 @@ if ($null -eq $identity -and -not $DryRun) {
         -Vendor $plan.Vendor -PartitionIdentitySeed $seed -StateRoot $StateRoot
 }
 
+$hardwareIdentity = $null
 if (-not $DryRun) {
     $preflightUniqueness = Test-VMateGpuPIdentityUniqueness -StateRoot $StateRoot
     if (-not $preflightUniqueness.IsUnique) {
-        throw 'GPU-P VM 身份预检发现碰撞；尚未同步驱动或修改 adapter。'
+        throw 'GPU-P VM 身份预检发现碰撞；尚未修改硬件身份、同步驱动或修改 adapter。'
+    }
+    $hardwareIdentity = Ensure-VMateGpuPHardwareIdentity -VM $vm `
+        -StateRoot $StateRoot
+    $hardwareUniqueness = Test-VMateGpuPHardwareIdentityUniqueness `
+        -StateRoot $StateRoot
+    if (-not $hardwareUniqueness.IsUnique) {
+        throw 'Hyper-V 硬件身份预检发现碰撞；尚未修改 GPU-P adapter。'
     }
 }
 
@@ -333,6 +342,7 @@ if ($DryRun) {
             [uint64]$plan.CapabilitySnapshot.Resources.VRAM.Total)
         HostPartitionCapacity = $partitionCapacity
         DriverSync = $driverResult
+        HardwareIdentityPolicy = 'random-once-persisted-on-create'
         WillStartVM = $StartVM.IsPresent
         WillValidateGuest = $ValidateGuest.IsPresent
     }
@@ -381,5 +391,6 @@ if (-not $uniqueness.IsUnique) {
         [uint64]$configurationResult.CapabilitySnapshot.Resources.VRAM.Total)
     HostPartitionCapacity = $partitionCapacity
     DriverSync = $driverResult
+    HardwareIdentity = $hardwareIdentity
     GuestValidation = $guestResult
 }

@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Host.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.DriverStore.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Identity.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.HardwareIdentity.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Display.ps1')
 
 Assert-VMateGpuPHostEnvironment
@@ -83,11 +84,15 @@ if (-not [String]::IsNullOrWhiteSpace($VMName)) {
         Generation = [int]$vm.Generation
         GpuPartitionAdapters = $adapters
         Identity = $identity
+        HardwareIdentity = Get-VMateGpuPHardwareIdentityStatus `
+            -VM $vm -StateRoot $StateRoot
     }
 }
 
 $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
 $identityAudit = Test-VMateGpuPIdentityUniqueness -StateRoot $StateRoot
+$hardwareIdentityAudit = Test-VMateGpuPHardwareIdentityUniqueness `
+    -StateRoot $StateRoot
 [pscustomobject][ordered]@{
     Backend = 'Hyper-V GPU-P'
     ComputerName = $env:COMPUTERNAME
@@ -97,6 +102,7 @@ $identityAudit = Test-VMateGpuPIdentityUniqueness -StateRoot $StateRoot
     HostIndirectDisplayAdapters = @(Get-VMateGpuPHostIndirectDisplayAdapter)
     VM = $vmStatus
     IdentityAudit = $identityAudit
+    HardwareIdentityAudit = $hardwareIdentityAudit
     ProductionSupportInferred = $false
     ProductionSupportNote = '是否受厂商生产支持必须按宿主 OS、服务器型号、GPU 和驱动授权矩阵核对。'
 }

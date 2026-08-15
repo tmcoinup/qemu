@@ -33,6 +33,9 @@ test_files_and_encoding() {
     local file line_count bom
     local files=(
         VMate.GpuP.Identity.ps1
+        VMate.HyperV.FirmwareIdentity.ps1
+        VMate.HyperV.NetworkIdentity.ps1
+        VMate.GpuP.HardwareIdentity.ps1
         VMate.GpuP.Lifecycle.ps1
         VMate.GpuP.Guest.ps1
         New-VMateGpuPVM.ps1
@@ -59,6 +62,7 @@ test_dynamic_gpu_contract() {
     local disable="$GPUP/Disable-VMateGpuP.ps1"
     local status="$GPUP/Get-VMateGpuPStatus.ps1"
     local sync_line configure_line preflight_line create_line
+    local identity_preflight_line hardware_apply_line
 
     require_text "[ValidateSet('Auto', 'NVIDIA', 'AMD')]" "$new_vm"
     require_text 'Get-VMHostPartitionableGpu -ErrorAction Stop' "$new_vm"
@@ -77,6 +81,9 @@ test_dynamic_gpu_contract() {
     require_text '[int]$GuestCapacity = 2' "$new_vm"
     require_text 'Get-VMateGpuPCmdletCompatibility' "$new_vm"
     require_text 'HostLockTimeoutSeconds = $HostLockTimeoutSeconds' "$new_vm"
+    require_text "HardwareIdentityPolicy = 'random-once-persisted-on-create'" \
+        "$new_vm"
+    require_text 'HardwareIdentity = $created.HardwareIdentity' "$new_vm"
     preflight_line="$(rg -n 'Get-VMateGpuPCmdletCompatibility' "$new_vm" | \
         head -n1 | cut -d: -f1)"
     create_line="$(rg -n '^\$created = New-VMateGpuPVirtualMachine' "$new_vm" | \
@@ -115,6 +122,15 @@ test_dynamic_gpu_contract() {
     require_text 'Set-VMateGpuPHostPartitionCount' "$enable"
     require_text 'Enter-VMateGpuPConfigurationLock' "$enable"
     require_text 'HostPartitionCapacity = $partitionCapacity' "$enable"
+    require_text 'Ensure-VMateGpuPHardwareIdentity -VM $vm' "$enable"
+    require_text 'Test-VMateGpuPHardwareIdentityUniqueness' "$enable"
+    require_text 'HardwareIdentity = $hardwareIdentity' "$enable"
+    identity_preflight_line="$(rg -n 'Test-VMateGpuPIdentityUniqueness' \
+        "$enable" | head -n1 | cut -d: -f1)"
+    hardware_apply_line="$(rg -n 'Ensure-VMateGpuPHardwareIdentity -VM' \
+        "$enable" | head -n1 | cut -d: -f1)"
+    [[ "$identity_preflight_line" -lt "$hardware_apply_line" ]] \
+        || fail 'core identity collision must fail before hardware identity mutation'
     sync_line="$(rg -n 'Sync-VMateGpuPDriverStore' "$enable" | head -n1 | cut -d: -f1)"
     configure_line="$(rg -n 'Invoke-VMateGpuPConfiguration' "$enable" | head -n1 | cut -d: -f1)"
     [[ "$sync_line" -lt "$configure_line" ]] \
@@ -129,6 +145,8 @@ test_dynamic_gpu_contract() {
     require_text 'Exit-VMateGpuPConfigurationLock' "$disable"
     require_text 'Get-VMHostPartitionableGpu' "$status"
     require_text 'HostIndirectDisplayAdapters' "$status"
+    require_text 'Get-VMateGpuPHardwareIdentityStatus' "$status"
+    require_text 'HardwareIdentityAudit' "$status"
     reject_regex '(DEV_[0-9A-Fa-f]{4}|GeForce[[:space:]]+(GTX|RTX)|Radeon[[:space:]]+PRO|4060|1060)' \
         "$new_vm" "$enable" "$update" "$status"
     reject_regex '(respawn-stealth|VioGpuDod|nvapi-shim|adl-shim)' \
@@ -188,7 +206,13 @@ test_identity_contract() {
     require_text 'if ($createdVhd -and' "$lifecycle"
     require_text '$remaining = Get-VM -Id $createdVm.Id' "$lifecycle"
     require_text '已保留身份清单与 VHD' "$lifecycle"
+    require_text 'Ensure-VMateGpuPHardwareIdentity -VM $createdVm' "$lifecycle"
+    require_text 'HardwareIdentity = $hardwareIdentity' "$lifecycle"
     reject_regex '(qemu-system|whpx|vfio|Dismount-VMHostAssignableDevice)' "$lifecycle"
+    reject_regex '(?i)(qemu|whpx|vfio|Dismount-VMHostAssignableDevice)' \
+        "$GPUP/VMate.HyperV.FirmwareIdentity.ps1" \
+        "$GPUP/VMate.HyperV.NetworkIdentity.ps1" \
+        "$GPUP/VMate.GpuP.HardwareIdentity.ps1"
 }
 
 test_identity_pure_functions() {
@@ -255,6 +279,9 @@ test_packaging_and_documentation_contract() {
         VMate.GpuP.WindowsImage.ps1
         VMate.GpuP.Display.ps1
         VMate.GpuP.Identity.ps1
+        VMate.HyperV.FirmwareIdentity.ps1
+        VMate.HyperV.NetworkIdentity.ps1
+        VMate.GpuP.HardwareIdentity.ps1
         VMate.GpuP.Lifecycle.ps1
         VMate.GpuP.Guest.ps1
         VMate.GpuP.GuestValidation.ps1
@@ -276,7 +303,17 @@ test_packaging_and_documentation_contract() {
     require_text 'Hyper-V GPU-P modules' "$NSIS_SCRIPT"
     require_text 'New-VMateGpuPVM.ps1' "$GPU_P_DOC"
     require_text 'Enable-VMateGpuP.ps1' "$GPU_P_DOC"
+    require_text '首次随机、随后固定' "$GPU_P_DOC"
+    require_text 'HostObserved.Match=True' "$GPU_P_DOC"
+    require_text 'GuestObserved' "$GPU_P_DOC"
+    require_text 'stream-fb-shm.ps1' "$GPU_P_DOC"
     require_text 'test_windows_gpup_workflow.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_hyperv_firmware_identity.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_hyperv_network_identity.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_gpup_hardware_identity.sh' \
         "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
 }
 

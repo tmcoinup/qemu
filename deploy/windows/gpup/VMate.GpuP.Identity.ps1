@@ -132,6 +132,39 @@ function Assert-VMateGpuPIdentityRecord {
     return $Identity
 }
 
+function Read-VMateGpuPIdentityManifest {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw "GPU-P 身份清单不存在：$fullPath"
+    }
+    if (-not [IO.Path]::GetFileName($fullPath).Equals(
+            'identity.json', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "GPU-P 身份清单文件名无效：$fullPath"
+    }
+    try {
+        $record = Get-Content -LiteralPath $fullPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "无法读取 GPU-P 身份清单 $fullPath：$($_.Exception.Message)"
+    }
+    $vmId = [Guid]::Empty
+    if (-not [Guid]::TryParse([string]$record.VMId, [ref]$vmId) -or
+        $vmId -eq [Guid]::Empty) {
+        throw "GPU-P 身份清单的 VMId 无效：$fullPath"
+    }
+    $parentName = [IO.DirectoryInfo]::new(
+        [IO.Path]::GetDirectoryName($fullPath)).Name
+    if (-not $parentName.Equals($vmId.ToString('D'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "GPU-P 身份清单目录与 VMId 不匹配：$fullPath"
+    }
+    Assert-VMateGpuPIdentityRecord -Identity $record -VMId $vmId | Out-Null
+    return $record
+}
+
 function Get-VMateGpuPIdentity {
     [CmdletBinding()]
     param(
@@ -145,7 +178,7 @@ function Get-VMateGpuPIdentity {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         return $null
     }
-    $record = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $record = Read-VMateGpuPIdentityManifest -Path $path
     Assert-VMateGpuPIdentityRecord -Identity $record -VMId $VMId | Out-Null
     return $record
 }
@@ -378,12 +411,7 @@ function Test-VMateGpuPIdentityUniqueness {
 
     $records = @()
     foreach ($file in @(Get-ChildItem -LiteralPath $StateRoot -Filter identity.json -File -Recurse)) {
-        try {
-            $records += (Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json)
-        }
-        catch {
-            throw "无法读取 GPU-P 身份清单 $($file.FullName)：$($_.Exception.Message)"
-        }
+        $records += Read-VMateGpuPIdentityManifest -Path $file.FullName
     }
 
     $collisions = @()

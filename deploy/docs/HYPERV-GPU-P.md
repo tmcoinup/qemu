@@ -16,7 +16,7 @@ P-11 是独立的 Windows Hyper-V GPU-P 产品线。它不使用 QEMU/WHPX 显�
 | Guest 驱动 | 从 Windows Hyper-V 宿主最终选中的 PnP 实例动态解析官方 WDDM 签名包，离线同步到 `HostDriverStore` |
 | Guest 显示 | 只接受所选宿主真实型号；拒绝 virtio、VioGpuDod、IDD 和身份 shim |
 | Host IDD | 只在宿主盘点；可校验并静默运行用户显式提供的外部签名安装器 |
-| 身份 | Hyper-V VMId + VMate 256-bit 随机 seed；PartitionId/VfLuid 只记录平台分配值，物理序列只读、不伪造 |
+| 身份 | VMId + 256-bit seed；每 VM 首次生成并固定受支持的固件序列与静态 MAC；GPU 物理序列只读 |
 
 微软的 GPU-P 架构由 guest `dxgkrnl` 经 VMBus 把硬件调用交给宿主 KMD，guest
 保留厂商 UMD；所以 guest 显示宿主 GPU 型号、官方驱动和 `nvidia-smi` 并不表示
@@ -209,23 +209,51 @@ VM 的百分比是两个独立维度；overcommit 也不会增加物理资源。
 [Msvm_GpuPartitionSettingData](https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-gpupartitionsettingdata) 和
 [Partition and assign GPUs](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/partition-assign-vm-gpu)。
 
-## 随机身份与品牌
+## 每 VM 随机身份与品牌
 
-创建 VM 时生成并持久化：
+P-11 采用“首次随机、随后固定”的身份生命周期。创建 VM 时使用系统 CSPRNG 生成身份，
+原子保存到 `%ProgramData%\VMate\GpuP\<VMId>\identity.json` 的
+`HardwareIdentity`，再在 VM 完全关闭时应用。重启、重新启用 GPU-P、更新驱动或重复执行
+创建恢复流程都复用原值，不会重新抽取；只有新的 Hyper-V VMId 才生成一套新身份。
 
-- Hyper-V VMId；
-- 256-bit `PartitionIdentitySeed`；
-- 首次选中的真实 GPU `InstancePath`；
-- Hyper-V 分配并由 P-11 观测到的 `PartitionId`/`PartitionVfLuid`；
-- 厂商工具返回的 GPU UUID 观察值（物理/虚拟 scope 未知）。
+当前由宿主官方 Hyper-V 接口管理且可逐 VM 固定的字段为：
 
-同一 VM 重启不会重抽内部 seed；新 VM 得到新 seed。多卡宿主用 seed 在稳定排序后的
-真实候选池中选择，所以可以随机落到真实 AMD/NVIDIA/不同板卡，但一张物理 NVIDIA 卡
-不会被显示成 AMD 或其它 AIB 品牌。seed 只参与选择和审计，绝不写入厂商驱动、固件或
-guest 可见标识。P-11 不生成、修改或保证 guest 可见的 serial/UUID；serial 常为 `N/A`，
-UUID 仅在厂商工具实际返回时记录。普通 `nvidia-smi --query-gpu=uuid` 可能报告共享物理
-GPU 的 UUID，多台合法 guest 出现相同值不构成碰撞。NVIDIA GRID/vGPU 文档中的随机 UUID
-语义只适用于该产品，不能据此推断普通消费级 Windows GPU-P。参考
+- `BIOSGUID`、`BIOSSerialNumber`、`BaseBoardSerialNumber`；
+- `ChassisSerialNumber`、`ChassisAssetTag`；
+- 创建时已经存在的每张 Hyper-V 虚拟网卡的 locally-administered unicast 静态 MAC；
+- Hyper-V VMId、256-bit `PartitionIdentitySeed` 和首次选中的真实 GPU `InstancePath`。
+
+固件字段通过 `Msvm_VirtualSystemSettingData`/`ModifySystemSettings` 事务写入；静态 MAC 在
+宿主全部 Hyper-V 网卡和 P-11 已保存身份中做碰撞检查。应用失败会恢复原有固件值或网卡
+MAC 策略，身份文件不会因重试而悄悄换号。没有虚拟网卡时明确记录 `NotPresent`，不会为
+了生成 MAC 而擅自增加设备。
+
+宿主 `State=Applied` 且 `HostObserved.Match=True`（即 HostApplied）只表示 Hyper-V
+WMI/cmdlet 接受了设置且宿主回读一致，**不等于** Windows guest 已经显示同一个值。
+不同 Hyper-V/Windows 版本可能继续向 guest 返回空值、平台默认值或经过规范化的值；最终
+交付必须冷启动 guest 后，再分别读取 `Win32_BIOS`、
+`Win32_BaseBoard`、`Win32_SystemEnclosure` 与网卡配置，保存为独立的
+`GuestObserved` 证据。不把 guest 未观测到的字段报告成已经成功伪造。当前自动流程只
+预留 `GuestObserved` 槽位，尚未自动采集 guest SMBIOS；其值为 `null` 表示“未验证”，
+不是“已确认与宿主请求一致”。
+
+以下字段没有受支持的逐 VM 随机接口，P-11 不用注册表、驱动 shim 或字符串投影绕过：
+
+- CPU 厂商、型号、序列和 CPUID；
+- DIMM SPD、内存条序列及内存控制器身份；
+- Hyper-V 合成 SCSI/VMBus 控制器厂商、PCI ID、固件和序列，以及 guest 磁盘 serial；
+- NVIDIA/AMD 物理 GPU serial、UUID、厂商、型号和显存规格。
+
+P-11 也不会为了制造 guest 磁盘 serial 而改写 VHDX `VirtualDiskId`：该字段不保证映射为
+guest 所见序列，而且会永久修改调用者提供的磁盘文件。Windows 安装在 guest 内自行创建
+的 GPT/分区/卷标识不属于 Hyper-V 硬件身份，也不由本层重抽。
+
+多卡宿主用 seed 在稳定排序后的真实候选池中选择，所以可以随机落到宿主实际存在的
+AMD/NVIDIA/不同板卡，但一张物理 NVIDIA 卡不会显示成 AMD 或其它 AIB 品牌。
+`PartitionId`/`PartitionVfLuid` 和厂商工具返回的 GPU UUID 只是平台观察值。普通
+`nvidia-smi --query-gpu=uuid` 可能在共享同一物理 GPU 的多台 guest 中返回相同值，这不
+构成 VM 身份碰撞。NVIDIA GRID/vGPU 的随机 UUID 语义只适用于对应产品，不能推断到普通
+消费级 Windows GPU-P。参考
 [NVIDIA vGPU identification properties](https://docs.nvidia.com/vgpu/7.0/grid-management-sdk-user-guide/index.html#abstract-vgpu-identification-properties-that-do-not-apply-to-a-vgpu)。
 
 旧 Win10 的 `Add-VMGpuPartitionAdapter` 可能没有 `-InstancePath`。P-11 只在宿主返回的
@@ -240,6 +268,27 @@ guest。`Get-VMateGpuPStatus.ps1` 会只读列出宿主 IDD。
 
 P-11 当前不实现 IDD 到某台 VM 的帧采集、传输或输入控制链。GPU-P 可提供 3D，但要
 达到 GameViewer 的完整远程显示效果，仍需保留 GameViewer 或接入独立的 RDP/采集方案。
+
+## 操作 VM 与区域推流
+
+P-11 不运行 QEMU，因此旧的 QEMU `fb-shm` object、`qemu-fb-shm-stream.exe` 和
+`stream-fb-shm.ps1` 不能读取 Hyper-V VM 的画面。GPU-P 只提供渲染/计算加速，不提供
+帧传输或键鼠通道。当前可用的官方交互路径是：
+
+- 安装系统和应急控制使用 VMConnect basic mode；
+- 日常桌面使用 VMConnect enhanced mode 或 RDP；enhanced mode 本身使用 terminal
+  session remoting；
+- 自动化命令、文件复制和 guest 验收使用带显式 guest 凭据的 PowerShell Direct。
+
+参见微软的 [GPU-P 桌面远程方式](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/gpu-paravirtualization#remoting-of-the-vmcontainer-desktop)、
+[VMConnect](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/virtual-machine-connection) 和
+[PowerShell Direct](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/powershell-direct)。
+
+“只推指定显示器、窗口或矩形区域”目前未实现。它必须作为与 GPU-P 分离的媒体后端：
+在 guest 内经用户明确选择后用 Windows Graphics Capture/Desktop Duplication 取得帧，
+按裁剪区域编码，再通过经过认证的 VMate 通道传输；输入侧还要处理分辨率/DPI 坐标映射、
+焦点和按键去重。宿主 GameViewer IDD 不能直接变成 guest 的采集源。Windows Graphics
+Capture 的能力边界见 [Screen capture](https://learn.microsoft.com/en-us/windows/apps/develop/media-authoring-processing/screen-capture)。
 
 ## 干净 guest 与可检测边界
 

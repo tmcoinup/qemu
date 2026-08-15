@@ -205,6 +205,7 @@ if ($DryRun) {
         FullHostVramQuota = $fullHostVramQuotaPreview
         HostPartitionCapacityPlan = $partitionCapacityPlan
         PhysicalGpuSerialPolicy = 'vendor-managed-read-only'
+        HardwareIdentityPolicy = 'random-once-persisted-on-create'
         WillDeferGpuProvisioning = $CreateVhd.IsPresent
         WillStartVM = $StartVM.IsPresent
         WillValidateGuest = $ValidateGuest.IsPresent
@@ -237,6 +238,7 @@ try {
             QuotaMode = [string]$quotaRequest.QuotaMode
             EffectiveAllowOvercommit = $effectiveAllowOvercommit
             FullHostVramQuota = $fullHostVramQuotaPreview
+            HardwareIdentity = $created.HardwareIdentity
             ResumeArguments = [pscustomobject][ordered]@{
                 VMName = $VMName
                 Vendor = [string]$selected.VendorInfo.Vendor
@@ -310,6 +312,7 @@ try {
         EffectiveAllowOvercommit = [bool]$gpuResult.EffectiveAllowOvercommit
         FullHostVramQuota = [bool]$gpuResult.FullHostVramQuota
         HostPartitionCapacity = $gpuResult.HostPartitionCapacity
+        HardwareIdentity = $gpuResult.HardwareIdentity
         GuestValidation = $gpuResult.GuestValidation
     }
 }

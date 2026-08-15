@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 
 $identityModule = Join-Path $PSScriptRoot 'VMate.GpuP.Identity.ps1'
 . $identityModule
+. (Join-Path $PSScriptRoot 'VMate.GpuP.HardwareIdentity.ps1')
 
 function Assert-VMateHyperVAdministrator {
     [CmdletBinding()]
@@ -128,6 +129,7 @@ function Get-VMateGpuPVirtualMachinePlan {
         PartitionIdentitySeed = $PartitionIdentitySeed
         AutomaticCheckpoints = $false
         SecureBootTemplate = 'MicrosoftWindows'
+        HardwareIdentityPolicy = 'random-once-persisted-on-create'
         PhysicalGpuSerialPolicy = 'vendor-managed-read-only'
     }
 }
@@ -230,11 +232,14 @@ function New-VMateGpuPVirtualMachine {
             -Vendor $plan.Vendor `
             -PartitionIdentitySeed $plan.PartitionIdentitySeed `
             -StateRoot $StateRoot
+        $hardwareIdentity = Ensure-VMateGpuPHardwareIdentity -VM $createdVm `
+            -StateRoot $StateRoot
         return [pscustomobject][ordered]@{
             VM = $createdVm
             Plan = $plan
             Identity = $identity
             IdentityPath = $identityPath
+            HardwareIdentity = $hardwareIdentity
         }
     }
     catch {

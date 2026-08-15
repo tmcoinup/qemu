@@ -261,7 +261,7 @@ SectionEnd
 !include "${BINDIR}\system-mui-text.nsh"
     !insertmacro MUI_DESCRIPTION_TEXT ${SectionTools} "Tools."
 !ifdef CONFIG_VMATE_RUNTIME
-    !insertmacro MUI_DESCRIPTION_TEXT ${SectionVMateRuntime} "VMate WHPX launcher, hardware catalogs, snapshot and streaming tools."
+    !insertmacro MUI_DESCRIPTION_TEXT ${SectionVMateRuntime} "VMate Windows launchers, Hyper-V GPU-P modules, hardware catalogs and tools."
 !endif
 !ifdef DLLDIR
     !insertmacro MUI_DESCRIPTION_TEXT ${SectionDll}   "Runtime Libraries (DLL)."

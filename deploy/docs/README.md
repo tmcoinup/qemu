@@ -1,11 +1,16 @@
 # VMate 部署文档
 
-> 当前维护基线：QEMU `11.0.2`，分支 `V-11`，硬件目录修订日期
-> `2026-07-23`。`V-11` 与 `G-11` 是独立分支；QEMU 可执行文件、QMP/QGA 协议和
-> 设备模型名称继续沿用上游名称。
+> 当前维护基线：QEMU `11.0.2`，分支 `P-11`。P-11 的主新增能力是独立的
+> Windows Hyper-V GPU-P 后端；它不复用 V-11 guest 镜像、VioGpuDod 或身份投影。
+> QEMU 可执行文件、QMP/QGA 协议和设备模型名称继续沿用上游名称。
 
-VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 GPU 硬件身份高度一致，
-但底层仍是 Q35/ICH9/QEMU 设备行为的条件可用方案**。它通过有限、可审计的整机和组件目录
+P-11 新建 VM、NVIDIA/AMD 动态选择、官方 Windows WDDM 驱动同步及严格验收先看
+[P-11 Hyper-V GPU-P 后端](HYPERV-GPU-P.md)。本文其余 QEMU/KVM/WHPX 内容作为
+仓库的非 GPU-P 参考，不定义 P-11 guest 镜像。
+
+仓库继承的 QEMU 路径仍应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 GPU
+硬件身份高度一致，但底层仍是 Q35/ICH9/QEMU 设备行为的条件可用方案**。这段定位不适用于
+P-11 的 Hyper-V GPU-P VM；P-11 的保证和限制只以专门文档为准。旧路径通过有限、可审计的整机和组件目录
 避免随机出不存在或互相矛盾的组合，不承诺把虚拟机变成不可识别的物理机。
 
 完整完成度、E5-2696 v4/X99、其它 E5、Windows/Linux 兼容性及优化结论见
@@ -15,13 +20,13 @@ VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 
 
 | 范围 | 当前状态 |
 |---|---|
-| Linux 宿主 | KVM 主路径；默认 `STRICT_HARDWARE=1`，能力或身份不匹配即停止 |
-| Windows 宿主 | WHPX 受限路径；详情见 [Windows 打包与启动](WINDOWS-PACKAGING.md) |
+| Linux 宿主 | QEMU/KVM 参考路径；不提供 Hyper-V GPU-P，也不复制 Linux 驱动到 Windows guest |
+| Windows 宿主 | P-11 使用 Hyper-V GPU-P；QEMU/WHPX 路径仅作独立参考 |
 | Windows 10 客体 | Linux/KVM 主验收对象 |
 | Windows 11 客体 | 有 TPM 2.0 路径，但 Secure Boot operational state 尚未闭环，不宣称正式支持 |
 | Linux 客体 | QEMU 设备功能兼容；启动器的命名、RTC 和安装流程仍偏向 Windows |
 | Intel SMBus | 全池 A323/A123/1C22/1E22/8C22 使用五套 WHCP NO_DRV INF；2930 使用 Win10 inbox `machine.inf` |
-| GPU | 只有一个 virtio `1AF4:1050`/VioGpuDod devnode；PnP HardwareID 为规范逻辑首项 + 完整物理尾项，NVAPI 主键以物理 carrier 去重；18 个 AIB 身份仅作用户态投影，不使用 passthrough、SR-IOV GPU 或 vGPU |
+| GPU | P-11 动态枚举真实 NVIDIA/AMD partitionable GPU、同步匹配的 Windows WDDM 驱动并配置 GPU-P；不做 PCIe 整卡直通，不使用旧 virtio/身份投影 guest |
 
 ## 唯一事实源
 
@@ -190,6 +195,7 @@ deploy/scripts/stop-vm.sh 1
 
 ## 文档入口
 
+- [P-11 Hyper-V GPU-P 后端](HYPERV-GPU-P.md)：Windows Hyper-V 创建、双厂商动态选择、驱动同步、身份与 guest 验收。
 - [硬件平台、E5/X99 与兼容性评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)：当前结论和验收矩阵。
 - [Profile 字段](PROFILE-FIELDS.md)：schema、目录绑定、字段和 fidelity。
 - [操作参考](USAGE.md)：Linux 构建、启动、网络、调优和验收命令。

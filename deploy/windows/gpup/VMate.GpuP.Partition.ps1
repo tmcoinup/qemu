@@ -9,9 +9,9 @@
     不包含型号或厂商常量。数量足够时保持宿主现状；不足时选择能够容纳目标
     guest 数的最小有效值，并在没有任何已分配 GPU-P adapter 时事务更新。
 
-    Invoke-VMateGpuPWithHostLock 使用由 InstancePath 派生的 Global mutex。
-    调用方应把重新读取能力、配额预检、驱动同步和 adapter 配置全部放进同一个
-    script block，避免多个 Enable 进程同时基于旧快照通过预检。
+    公共更新入口固定先取得 Common 模块的全宿主配置锁，再取得由 InstancePath
+    派生的 Global mutex。这样直接调用也会与 Host 模块的 adapter 配置串行，
+    无需依赖调用方记住锁约定。
 #>
 
 $gpuPCommon = Join-Path $PSScriptRoot 'VMate.GpuP.Common.ps1'
@@ -47,6 +47,7 @@ function Get-VMateGpuPValidPartitionCounts {
 function Get-VMateGpuPPartitionCountPlan {
     param(
         [Parameter(Mandatory = $true)][object]$HostGpu,
+        [Parameter(Mandatory = $true)]
         [ValidateRange(1, 65535)][int]$GuestCapacity
     )
 
@@ -116,7 +117,13 @@ function Resolve-VMateGpuPPartitionableGpu {
 }
 
 function Get-VMateGpuPAssignedAdapterSnapshot {
-    $required = @('Get-VM', 'Get-VMGpuPartitionAdapter')
+    param([Parameter(Mandatory = $true)][string]$InstancePath)
+
+    if ([string]::IsNullOrWhiteSpace($InstancePath)) {
+        throw '检查 adapter 归属时 InstancePath 不能为空。'
+    }
+    $required = @(
+        'Get-VM', 'Get-VMGpuPartitionAdapter', 'Get-VMHostPartitionableGpu')
     foreach ($command in $required) {
         if (-not (Get-Command -Name $command -ErrorAction SilentlyContinue)) {
             throw "缺少 Hyper-V PowerShell cmdlet：$command"
@@ -127,6 +134,11 @@ function Get-VMateGpuPAssignedAdapterSnapshot {
     } catch {
         throw "无法枚举 Hyper-V VM 以检查 GPU-P adapter：$($_.Exception.Message)"
     }
+    try {
+        $hostGpus = @(Get-VMHostPartitionableGpu -ErrorAction Stop)
+    } catch {
+        throw "无法枚举 partitionable GPU 以核对 adapter 归属：$($_.Exception.Message)"
+    }
 
     $assigned = [System.Collections.Generic.List[object]]::new()
     foreach ($vm in $vms) {
@@ -136,8 +148,38 @@ function Get-VMateGpuPAssignedAdapterSnapshot {
             throw "无法读取 VM [$($vm.Name)] 的 GPU-P adapter：$($_.Exception.Message)"
         }
         foreach ($adapter in $adapters) {
+            $pathProperty = $adapter.PSObject.Properties['InstancePath']
+            $adapterPath = if ($null -eq $pathProperty) {
+                ''
+            } else {
+                [string]$pathProperty.Value
+            }
+            $ownership = 'Unknown'
+            if (-not [string]::IsNullOrWhiteSpace($adapterPath)) {
+                if ([string]::Equals($adapterPath, $InstancePath,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $ownership = 'SelectedGpu'
+                } else {
+                    # 非空 mismatch 也可能是陈旧/损坏路径。只有它唯一命中当前
+                    # partitionable inventory 中另一张有效 Name 时才能安全忽略。
+                    $otherMatches = @($hostGpus | Where-Object {
+                            $name = $_.PSObject.Properties['Name']
+                            $null -ne $name -and
+                            -not [string]::IsNullOrWhiteSpace(
+                                [string]$name.Value) -and
+                            [string]::Equals(
+                                [string]$name.Value, $adapterPath,
+                                [System.StringComparison]::OrdinalIgnoreCase)
+                        })
+                    if ($otherMatches.Count -eq 1) {
+                        continue
+                    }
+                }
+            }
             [void]$assigned.Add([pscustomobject][ordered]@{
                     VMName = [string]$vm.Name
+                    InstancePath = $adapterPath
+                    Ownership = $ownership
                     Adapter = $adapter
                 })
         }
@@ -145,10 +187,10 @@ function Get-VMateGpuPAssignedAdapterSnapshot {
     return @($assigned)
 }
 
-function Set-VMateGpuPHostPartitionCount {
-    [CmdletBinding()]
+function Invoke-VMateGpuPHostPartitionCountCore {
     param(
         [Parameter(Mandatory = $true)][string]$InstancePath,
+        [Parameter(Mandatory = $true)]
         [ValidateRange(1, 65535)][int]$GuestCapacity,
         [switch]$DryRun
     )
@@ -165,6 +207,7 @@ function Set-VMateGpuPHostPartitionCount {
             PartitionCount = $plan.DesiredPartitionCount
             ValidPartitionCounts = $plan.ValidPartitionCounts
             ChangeRequired = $false
+            ChangeApplied = $false
         }
     }
 
@@ -175,12 +218,14 @@ function Set-VMateGpuPHostPartitionCount {
         throw ('当前 Hyper-V 模块缺少 Set-VMHostPartitionableGpu；' +
             '现有 PartitionCount 不足，无法满足目标 guest 数量。')
     }
-    $assigned = @(Get-VMateGpuPAssignedAdapterSnapshot)
+    $assigned = @(Get-VMateGpuPAssignedAdapterSnapshot `
+        -InstancePath $InstancePath)
     if ($assigned.Count -ne 0) {
         $owners = @($assigned | ForEach-Object { $_.VMName } |
             Sort-Object -Unique)
-        throw ("宿主已有 $($assigned.Count) 个 GPU-P adapter 分配给 VM " +
-            "[$($owners -join ', ')]；为避免破坏现有分配，拒绝更改 PartitionCount。")
+        throw ("所选 GPU 已有或存在归属不明的 $($assigned.Count) 个 GPU-P " +
+            "adapter，涉及 VM [$($owners -join ', ')]；为避免破坏现有分配，" +
+            '拒绝更改 PartitionCount。')
     }
 
     if ($DryRun.IsPresent) {
@@ -192,6 +237,7 @@ function Set-VMateGpuPHostPartitionCount {
             PartitionCount = $plan.DesiredPartitionCount
             ValidPartitionCounts = $plan.ValidPartitionCounts
             ChangeRequired = $true
+            ChangeApplied = $false
         }
     }
 
@@ -241,6 +287,88 @@ function Set-VMateGpuPHostPartitionCount {
         PartitionCount = $plan.DesiredPartitionCount
         ValidPartitionCounts = $plan.ValidPartitionCounts
         ChangeRequired = $true
+        ChangeApplied = $true
+    }
+}
+
+function Set-VMateGpuPHostPartitionCount {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$InstancePath,
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 65535)][int]$GuestCapacity,
+        [switch]$DryRun,
+        [ValidateRange(1, 300)][int]$LockTimeoutSeconds = 120
+    )
+
+    # 固定顺序是全宿主锁 -> per-GPU 锁。Common/Host 的 adapter 事务使用同一个
+    # 全宿主锁，因此直接调用本入口时，PartitionCount 与 Add/Set adapter 不会
+    # 并发。两层 mutex 都支持同线程递归，便于上层持有全宿主锁覆盖更长事务。
+    $configurationLock = Enter-VMateGpuPConfigurationLock `
+        -TimeoutSeconds $LockTimeoutSeconds
+    try {
+        return Invoke-VMateGpuPWithHostLock -InstancePath $InstancePath `
+            -TimeoutSeconds $LockTimeoutSeconds -ScriptBlock {
+                Invoke-VMateGpuPHostPartitionCountCore `
+                    -InstancePath $InstancePath `
+                    -GuestCapacity $GuestCapacity -DryRun:$DryRun
+            }
+    } finally {
+        Exit-VMateGpuPConfigurationLock -Mutex $configurationLock
+    }
+}
+
+function Restore-VMateGpuPHostPartitionCount {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$InstancePath,
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 65535)][int]$ExpectedPartitionCount,
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 65535)][int]$PreviousPartitionCount,
+        [ValidateRange(1, 300)][int]$LockTimeoutSeconds = 120
+    )
+
+    $configurationLock = Enter-VMateGpuPConfigurationLock `
+        -TimeoutSeconds $LockTimeoutSeconds
+    try {
+        return Invoke-VMateGpuPWithHostLock -InstancePath $InstancePath `
+            -TimeoutSeconds $LockTimeoutSeconds -ScriptBlock {
+                Assert-VMateGpuPPartitionReadEnvironment
+                if (-not (Get-Command Set-VMHostPartitionableGpu `
+                        -ErrorAction SilentlyContinue)) {
+                    throw '回滚 PartitionCount 时缺少 Set-VMHostPartitionableGpu。'
+                }
+                $gpu = Resolve-VMateGpuPPartitionableGpu $InstancePath
+                $actual = Get-VMateGpuPObjectUInt64 $gpu `
+                    'PartitionCount' '回滚前的宿主 GPU'
+                if ($actual -ne [uint64]$ExpectedPartitionCount) {
+                    throw ("回滚前 PartitionCount 已变化：" +
+                        "$actual != $ExpectedPartitionCount")
+                }
+                $assigned = @(Get-VMateGpuPAssignedAdapterSnapshot `
+                        -InstancePath $InstancePath)
+                if ($assigned.Count -ne 0) {
+                    throw '回滚 PartitionCount 时所选 GPU 已存在或存在归属不明的 adapter。'
+                }
+                Set-VMHostPartitionableGpu -Name $InstancePath `
+                    -PartitionCount ([uint16]$PreviousPartitionCount) `
+                    -ErrorAction Stop
+                $restoredGpu = Resolve-VMateGpuPPartitionableGpu $InstancePath
+                $restored = Get-VMateGpuPObjectUInt64 $restoredGpu `
+                    'PartitionCount' '回滚后的宿主 GPU'
+                if ($restored -ne [uint64]$PreviousPartitionCount) {
+                    throw "PartitionCount 回滚回读不一致：$restored"
+                }
+                return [pscustomobject]@{
+                    Status = 'Restored'
+                    InstancePath = $InstancePath
+                    PartitionCount = $restored
+                }
+            }
+    }
+    finally {
+        Exit-VMateGpuPConfigurationLock -Mutex $configurationLock
     }
 }
 

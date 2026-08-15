@@ -1,6 +1,10 @@
-# USAGE — Linux/KVM 操作参考
+# USAGE — Linux/KVM 操作参考（非 P-11 GPU-P）
 
-> **当前基线**：QEMU `11.0.2` + `V-11`，严格硬件目录 schema 1，Linux/KVM 为主路径。新 VM 启用六套 Intel 受控 bundle，主板覆盖 ASUS、MSI、GIGABYTE；底层仍是 Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
+> 本文保留 QEMU/KVM 操作参考。P-11 的 GPU-P 只运行在 Windows Hyper-V 宿主，
+> 不会把 Ubuntu 的 NVIDIA/AMD 驱动复制给 Windows guest；新建 P-11 VM 请看
+> [Hyper-V GPU-P 后端](HYPERV-GPU-P.md)。以下严格硬件目录内容不定义 P-11 镜像。
+>
+> QEMU `11.0.2` 严格硬件目录 schema 1 的 Linux/KVM 参考路径启用六套 Intel 受控 bundle，主板覆盖 ASUS、MSI、GIGABYTE；底层仍是 Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
 > NVMe 只含 Samsung、Intel、WD、KIOXIA 四款精确 512GB 原子模板，显示器有四款 1080p/16:9 模板；新 GPU 池覆盖 6 个芯片型号，每个型号 3 个板卡品牌，共 18 块 AIB（12 NVIDIA、6 AMD）。物理显示仍为 virtio `1AF4:1050`，不使用 GPU passthrough/vGPU，也不虚构 GPU 序列号。
 
 当前能力、E5-2696 v4/X99、其它 E5 与 Windows/WHPX 的结论先看 [硬件平台评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)；字段来源和 fidelity 见 [Profile 字段](PROFILE-FIELDS.md)。DGame 的区域推流依赖最终 QEMU 叶进程的进程级 Yama 例外；`start-vm.sh` 已逐实例自动选择包内 wrapper、内置 Python wrapper 或新版 `setpriv`，无需手工降低全局 `ptrace_scope`，详见 [DGame QEMU 内存授权记录](DGAME_QEMU_MEMORY_AUTH.md)。

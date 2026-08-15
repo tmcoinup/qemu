@@ -1,11 +1,12 @@
 # Windows 打包与启动方案
 
-> **版本基线**：当前维护目标为 QEMU `11.0.2` + `V-11` 分支；`V-11` 与
-> `G-11` 是相互独立的两条维护线。安装包继续保留
+> **文档范围**：本文只描述继承的 QEMU `11.0.2` + WHPX 打包路径，不是 P-11
+> GPU-P VM 的创建入口。P-11 请使用 [Hyper-V GPU-P 后端](HYPERV-GPU-P.md)。
+> 安装包继续保留
 > `qemu-system-x86_64.exe`、`qemu-img.exe` 等上游兼容文件名，避免破坏脚本、
 > QMP 管理工具和既有自动化；VMate 用于标识本仓库的下游构建来源。
 
-本文档覆盖 Windows 10 / Windows 11 宿主运行 patched QEMU 的方案。Windows 10
+本文档覆盖 Windows 10 / Windows 11 宿主运行 patched QEMU 的参考方案。Windows 10
 和 Linux 客体属于当前可启动范围；Windows 11 客体需要 TPM 2.0 与可验证的 Secure
 Boot，而 Windows 原生构建尚未提供这两项的完整链路，因此启动器会提前拒绝。
 

@@ -413,10 +413,15 @@ for relative in runtime:
     if not relative.endswith(".ps1"):
         continue
     with open(os.path.join(root, relative), encoding="utf-8-sig") as source:
-        for name in re.findall(
-                r"Join-Path\s+\$(?:libraryRoot|PSScriptRoot)\s+'(VMate\.[^']+\.ps1)'",
-                source.read()):
-            required.add("deploy/windows/lib/" + name)
+        for base_name, name in re.findall(
+                r"Join-Path\s+\$(libraryRoot|PSScriptRoot)\s+"
+                r"'(VMate\.[^']+\.ps1)'", source.read()):
+            base = ("deploy/windows/lib" if base_name == "libraryRoot"
+                    else os.path.dirname(relative))
+            dependency = os.path.normpath(os.path.join(
+                base, name
+            )).replace(os.sep, "/")
+            required.add(dependency)
 missing_dependencies = sorted(required - runtime)
 if missing_dependencies:
     raise SystemExit("NSIS runtime misses dot-source closure: " +

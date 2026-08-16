@@ -38,6 +38,7 @@
 #include "system/memory.h"
 #include "qom/object.h"
 #include "qemu/memfd.h"
+#include "qemu/timer.h"
 
 #include "console-priv.h"
 
@@ -53,9 +54,13 @@ typedef struct QemuGraphicConsole {
     int cursor_x, cursor_y;
     bool cursor_on;
     bool cursor_position_valid;
+    /* Host monotonic ms when the hardware cursor position was recorded. */
+    int64_t cursor_position_ms;
     int input_cursor_x, input_cursor_y;
     bool input_cursor_x_valid, input_cursor_y_valid;
     bool input_cursor_position_valid;
+    /* Host monotonic ms when the injected absolute position was recorded. */
+    int64_t input_cursor_position_ms;
 } QemuGraphicConsole;
 
 typedef QemuConsoleClass QemuGraphicConsoleClass;
@@ -1074,6 +1079,7 @@ void dpy_mouse_set(QemuConsole *c, int x, int y, bool on)
     con->cursor_y = y;
     con->cursor_on = on;
     con->cursor_position_valid = true;
+    con->cursor_position_ms = qemu_clock_get_ms(QEMU_CLOCK_HOST);
     if (!qemu_console_is_visible(c)) {
         return;
     }
@@ -1272,6 +1278,7 @@ void dpy_gl_cursor_position(QemuConsole *con,
     graphic->cursor_x = qemu_console_cursor_u32_to_int(pos_x);
     graphic->cursor_y = qemu_console_cursor_u32_to_int(pos_y);
     graphic->cursor_position_valid = true;
+    graphic->cursor_position_ms = qemu_clock_get_ms(QEMU_CLOCK_HOST);
 
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1560,6 +1567,7 @@ void qemu_console_record_absolute_input(QemuConsole *con,
     }
     graphic->input_cursor_position_valid =
         graphic->input_cursor_x_valid && graphic->input_cursor_y_valid;
+    graphic->input_cursor_position_ms = qemu_clock_get_ms(QEMU_CLOCK_HOST);
 }
 
 GuestMousePosition *qmp_query_guest_mouse_position(const char *device,
@@ -1570,6 +1578,7 @@ GuestMousePosition *qmp_query_guest_mouse_position(const char *device,
     QemuConsole *con;
     QemuGraphicConsole *graphic;
     GuestMousePosition *position;
+    int64_t now_ms;
 
     if (device) {
         if (!has_head) {
@@ -1606,24 +1615,38 @@ GuestMousePosition *qmp_query_guest_mouse_position(const char *device,
      * Win10/DNF 这类软件光标路径可能永远不会触发 cursor_position_valid，
      * 因此再回退到 QMP input-send-event 注入的最近一次绝对鼠标位置。
      * 这些状态只保存在 QEMU 进程内，不新增 guest 可见设备、寄存器或 agent 命令。
+     *
+     * 两条来源的证据强度完全不同，必须让调用方能分辨：
+     * - hardware-cursor 由 guest 自己上报，是独立证据；
+     * - injected-input 是调用方自己刚注入的坐标被回显，拿它确认"指针到位了"
+     *   是自指的，永远只会同意。
+     * 硬件光标一旦上报过就不会再失效（guest 停止移动光标也不会通知我们），
+     * 所以再补一个 age，让调用方能把陈旧读数当作"未确认"而不是"确认"。
      */
     graphic = QEMU_GRAPHIC_CONSOLE(con);
     position = g_new0(GuestMousePosition, 1);
+    now_ms = qemu_clock_get_ms(QEMU_CLOCK_HOST);
     if (graphic->cursor_position_valid) {
         position->x = graphic->cursor_x;
         position->y = graphic->cursor_y;
         position->visible = graphic->cursor_on;
         position->valid = true;
+        position->source = GUEST_MOUSE_POSITION_SOURCE_HARDWARE_CURSOR;
+        position->age_ms = MAX(now_ms - graphic->cursor_position_ms, 0);
     } else if (graphic->input_cursor_position_valid) {
         position->x = graphic->input_cursor_x;
         position->y = graphic->input_cursor_y;
         position->visible = true;
         position->valid = true;
+        position->source = GUEST_MOUSE_POSITION_SOURCE_INJECTED_INPUT;
+        position->age_ms = MAX(now_ms - graphic->input_cursor_position_ms, 0);
     } else {
         position->x = 0;
         position->y = 0;
         position->visible = false;
         position->valid = false;
+        position->source = GUEST_MOUSE_POSITION_SOURCE_NONE;
+        position->age_ms = 0;
     }
 
     return position;

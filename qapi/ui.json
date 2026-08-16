@@ -849,6 +849,27 @@
 { 'command': 'query-mice', 'returns': ['MouseInfo'] }
 
 ##
+# @GuestMousePositionSource:
+#
+# Where a reported cursor position comes from.
+#
+# @hardware-cursor: the guest reported the position through the
+#     display device hardware cursor channel.  This is independent
+#     evidence: it is produced by the guest, not by the caller.
+#
+# @injected-input: the position is the most recent absolute pointer
+#     position injected by the host through input-send-event.  It is
+#     an echo of what the caller itself sent, so it must not be used
+#     to confirm that the guest cursor really arrived somewhere.
+#
+# @none: no position has ever been recorded for this console.
+#
+# Since: 9.2
+##
+{ 'enum': 'GuestMousePositionSource',
+  'data': [ 'hardware-cursor', 'injected-input', 'none' ] }
+
+##
 # @GuestMousePosition:
 #
 # Host-side cursor position for a graphic console.
@@ -868,11 +889,22 @@
 #     input-send-event.
 #     When false, @x and @y are only placeholders.
 #
+# @source: which channel produced @x and @y.  Callers that use this
+#     command to confirm a pointer landed on a target must treat
+#     @injected-input as "unconfirmed": that value is their own
+#     injection echoed back, so it always agrees with the request.
+#
+# @age-ms: milliseconds elapsed since @x and @y were recorded.  The
+#     hardware cursor channel is only updated when the guest moves
+#     its own cursor; a large age means the value is stale, not that
+#     the cursor is standing still.  Zero when @valid is false.
+#
 # Since: 9.2
 ##
 { 'struct': 'GuestMousePosition',
   'data': { 'x': 'int', 'y': 'int',
-            'visible': 'bool', 'valid': 'bool' } }
+            'visible': 'bool', 'valid': 'bool',
+            'source': 'GuestMousePositionSource', 'age-ms': 'int' } }
 
 ##
 # @query-guest-mouse-position:
@@ -898,7 +930,8 @@
 #
 #     -> { "execute": "query-guest-mouse-position" }
 #     <- { "return": { "x": 640, "y": 360,
-#                      "visible": true, "valid": true } }
+#                      "visible": true, "valid": true,
+#                      "source": "hardware-cursor", "age-ms": 12 } }
 ##
 { 'command': 'query-guest-mouse-position',
   'data': { '*device': 'str', '*head': 'int' },

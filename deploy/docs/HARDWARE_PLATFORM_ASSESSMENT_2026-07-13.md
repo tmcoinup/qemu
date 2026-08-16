@@ -446,12 +446,25 @@ sudo deploy/scripts/guest/collect-hardware-snapshot.sh /tmp/vmate-hardware-linux
 ```
 
 Windows 客体（管理员 PowerShell 可取得更完整证据）：
+所有快照均含 UUID、序列号、MAC 或设备路径，应作为敏感诊断数据保管。
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\deploy\windows\collect-hardware-snapshot.ps1 `
   -OutputDirectory C:\Temp\vmate-hardware-windows `
   -Parallelism 4 -TimeoutSeconds 90
+```
+
+排查指定 guest 进程及其驱动安装影响时，可额外采集进程树、磁盘映像摘要、签名和
+操作系统加载器可枚举的模块；它不采集进程内存内容或内存转储，也不修改目标进程。
+输出含命令行和用户路径，应按敏感诊断数据保管，不要直接上传到公共服务：
+这是点时快照：目标及其子进程必须已在运行；比较安装前后时应分别写入两个新目录，
+两次快照之间已经退出的短生命周期进程不能由本工具追溯。
+
+```powershell
+.\deploy\windows\collect-hardware-snapshot.ps1 `
+  -OutputDirectory C:\Temp\vmate-hardware-windows `
+  -ProcessName @('97385.exe', 'TranslucentTB.exe')
 ```
 
 至少人工核对 CPU/核心线程、SMBIOS 0/1/2/3/4/16/17、PCI 主/子系统 ID、PCIe link、NVMe Identify/容量/firmware/SubNQN、NIC OUI、USB descriptor、EDID、TPM、Secure Boot、设备驱动和本次启动 warning。

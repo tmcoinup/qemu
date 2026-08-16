@@ -17,6 +17,8 @@ VMATE_RUNTIME_FILES = (
     "deploy/windows/stop-vm.ps1",
     "deploy/windows/stream-fb-shm.ps1",
     "deploy/windows/collect-hardware-snapshot.ps1",
+    "deploy/windows/lib/VMate.ProcessEvidence.ps1",
+    "deploy/windows/lib/VMate.FileEvidence.ps1",
     "deploy/windows/lib/VMate.Common.ps1",
     "deploy/windows/lib/VMate.Json.ps1",
     "deploy/windows/lib/VMate.ComponentPolicy.ps1",

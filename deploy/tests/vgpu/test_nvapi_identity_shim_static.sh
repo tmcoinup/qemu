@@ -8,11 +8,13 @@ SHIM_DIR="$REPO_ROOT/deploy/guest/nvapi-shim"
 PATCH_SCRIPT="$REPO_ROOT/deploy/guest/patch-grid-strings.ps1"
 APPLY_SCRIPT="$REPO_ROOT/deploy/guest/apply-vm-profile.ps1"
 INSTALL_SCRIPT="$REPO_ROOT/deploy/guest/install-nvapi-shim.ps1"
-START_SCRIPT="$REPO_ROOT/deploy/start-vm.sh"
+START_SCRIPT="$REPO_ROOT/deploy/scripts/start-vm.sh"
 SETUP_SCRIPT="$REPO_ROOT/deploy/setup-guest.sh"
 SYNC_SCRIPT="$REPO_ROOT/deploy/sync-vgpu-profile.sh"
 MDEV_LIB="$REPO_ROOT/deploy/lib/vgpu-mdev.sh"
 MDEV_HELPER="$REPO_ROOT/deploy/host/update-vgpu-mdev-identity.py"
+CATALOG_HEADER="$SHIM_DIR/vgpu_profile_catalog.h"
+IDENTITY_QUERY="$SHIM_DIR/VgpuIdentityQuery.exe"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
@@ -46,6 +48,14 @@ check_image() {
     for marker in \
         IdentityContractVersion \
         IdentityProfileKey \
+        IdentityCatalogSha256 \
+        IdentityBoardBrand \
+        IdentityBoardModel \
+        IdentityMemoryTypeName \
+        IdentityMemoryMakerName \
+        IdentityMemoryMakerNvapiName \
+        IdentityProjectionScope \
+        IdentityPciProjectionMode \
         IdentityVramMB \
         IdentityCoreClockKHz \
         IdentityBoostClockKHz \
@@ -93,6 +103,26 @@ for tool in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc \
             x86_64-w64-mingw32-objdump i686-w64-mingw32-objdump \
             cc strings; do
     command -v "$tool" >/dev/null || fail "missing build tool: $tool"
+done
+
+"$SHIM_DIR/generate-profile-catalog.sh" --check ||
+    fail 'compiled profile catalog header is stale'
+"$REPO_ROOT/deploy/guest/generate-vgpu-profile-catalog.sh" --check ||
+    fail 'guest JSON profile catalog is stale'
+
+i686-w64-mingw32-gcc \
+    -O2 -std=c99 -Wall -Wextra -Werror \
+    -o "$TMP_DIR/VgpuIdentityQuery.exe" \
+    "$SHIM_DIR/vgpu_identity_query.c" \
+    -Wl,--no-insert-timestamp -Wl,--image-base,0x00400000 \
+    -static -lsetupapi -ladvapi32 -Wl,--subsystem,console
+cmp -s "$TMP_DIR/VgpuIdentityQuery.exe" "$IDENTITY_QUERY" ||
+    fail 'VgpuIdentityQuery.exe is stale; run nvapi-shim/build.sh'
+for marker in \
+        'Native display PnP' 'Native transport' 'Projected profile' \
+        'Board identity' 'VRAM identity' 'Projection scope' 'VERIFY %s'; do
+    strings -a "$IDENTITY_QUERY" | grep -F "$marker" >/dev/null ||
+        fail "VgpuIdentityQuery.exe lacks '$marker'"
 done
 
 cc -O2 -std=c99 -Wall -Wextra -Werror \
@@ -158,6 +188,9 @@ done
 require_text '0xCEEE8E9F' "$SHIM_DIR/nvapi_shim.c"
 require_text '0x2DDFB66E' "$SHIM_DIR/nvapi_shim.c"
 require_text 'hook_GetPCIIdentifiers' "$SHIM_DIR/nvapi_shim.c"
+require_text 'transport-device-profile-subsystem' "$SHIM_DIR/nvapi_shim.c"
+require_text 'g_identity_preserve_transport_device' "$SHIM_DIR/nvapi_shim.c"
+require_text '*pExtDeviceId != real_device_id' "$SHIM_DIR/nvapi_shim.c"
 require_text 'IdentityGpuName' "$SHIM_DIR/nvapi_shim.c"
 require_text '0x1EA54A3B' "$SHIM_DIR/nvapi_shim.c"
 require_text '0x6FF81213' "$SHIM_DIR/nvapi_shim.c"
@@ -177,9 +210,14 @@ require_text 'nvapi_memory_bandwidth_from_raw_clock_mbps' \
 require_text 'status_allows_profile_override' "$SHIM_DIR/nvapi_shim.c"
 require_text 'g_identity_contract_valid' "$SHIM_DIR/nvapi_shim.c"
 require_text 'return g_identity_contract_valid;' "$SHIM_DIR/nvapi_shim.c"
-require_text 'profile_key_matches_pci_contract' "$SHIM_DIR/nvapi_shim.c"
-for profile_key in gtx750ti_2gb gt1030_2gb gtx1050_2gb; do
-    require_text "\"$profile_key\"" "$SHIM_DIR/nvapi_shim.c"
+require_text 'profile_contract_matches_registry' "$SHIM_DIR/nvapi_shim.c"
+require_text '#include "vgpu_profile_catalog.h"' "$SHIM_DIR/nvapi_shim.c"
+for profile_key in \
+        gtx750ti_2gb gt1030_2gb gtx1050_2gb \
+        gtx750ti_asus_2gb gtx750ti_msi_2gb gtx750ti_gigabyte_2gb \
+        gt1030_galax_2gb gt1030_asus_2gb gt1030_msi_2gb \
+        gtx1050_colorful_2gb gtx1050_msi_2gb gtx1050_gigabyte_2gb; do
+    require_text "\"$profile_key\"" "$CATALOG_HEADER"
 done
 if grep -Eq 'FALLBACK_|nvapi_choose_memory_raw_clock_khz' \
         "$SHIM_DIR/nvapi_shim.c"; then
@@ -198,9 +236,8 @@ require_text '1-31 printable ASCII characters' "$PATCH_SCRIPT"
 require_text 'IdentityProfileKey' "$PATCH_SCRIPT"
 require_text 'IdentityContractVersion' "$PATCH_SCRIPT"
 require_text 'NVAPI identity registry contract committed' "$PATCH_SCRIPT"
-require_text "ProfileKey = 'gtx750ti_2gb'" "$PATCH_SCRIPT"
-require_text "ProfileKey = 'gt1030_2gb'" "$PATCH_SCRIPT"
-require_text "ProfileKey = 'gtx1050_2gb'" "$PATCH_SCRIPT"
+require_text 'vgpu-profile-catalog.json' "$PATCH_SCRIPT"
+require_text 'CatalogSha256' "$PATCH_SCRIPT"
 require_text 'IdentityGpuName' "$APPLY_SCRIPT"
 require_text "'gpu.name' 31" "$APPLY_SCRIPT"
 require_text 'IdentityTmuCount' "$PATCH_SCRIPT"
@@ -229,10 +266,11 @@ require_text 'mdev_identity_name=$GPU_NAME' "$START_SCRIPT"
 require_text 'guest_gpu_name' "$MDEV_LIB"
 require_text '1-31 printable ASCII bytes' "$MDEV_HELPER"
 
-if grep -aF 'NVIDIA GeForce GTX 750 Ti' \
-        "$SHIM_DIR/nvapi64.dll" "$SHIM_DIR/nvapi.dll" >/dev/null; then
-    fail 'checked-in shim hard-codes VM2 instead of reading its registry identity'
-fi
+for image in "$SHIM_DIR/nvapi64.dll" "$SHIM_DIR/nvapi.dll"; do
+    strings -a "$image" | grep -Fx \
+        DF5077AE641CADFA30E2372E4846A59372B46ADBF222A12E5EE3F6AF1D8C613D \
+        >/dev/null || fail "$(basename "$image") lacks the compiled catalog digest"
+done
 
 if grep -Eq '0x(7A5E9C9F|1DCECC0E)' "$SHIM_DIR/nvapi_shim.c"; then
     fail 'shim reintroduced an unverified historical RAM query ID'
@@ -265,6 +303,14 @@ loader_text = loader.group(0)
 required_values = {
     "IdentityContractVersion",
     "IdentityProfileKey",
+    "IdentityCatalogSha256",
+    "IdentityBoardBrand",
+    "IdentityBoardModel",
+    "IdentityMemoryTypeName",
+    "IdentityMemoryMakerName",
+    "IdentityMemoryMakerNvapiName",
+    "IdentityProjectionScope",
+    "IdentityPciProjectionMode",
     "IdentityGpuName",
     "IdentityVbiosVersion",
     "IdentityVramMB",
@@ -306,14 +352,14 @@ strings = writer.index("$expectedStrings = [ordered]@{", invalidate)
 numbers = writer.index("$spec = @{", strings)
 verified = writer.index("if ($registryProblems.Count -gt 0)", numbers)
 commit = writer.index(
-    "New-ItemProperty -Path $specKey -Name IdentityContractVersion -Value 1",
+    "New-ItemProperty -Path $specKey -Name IdentityContractVersion -Value 2",
     verified,
 )
 readback = writer.index("$committedVersion =", commit)
 rewrite = writer.index("function RewriteKey", readback)
 assert invalidate < strings < numbers < verified < commit < readback < rewrite
 assert writer.count(
-    "New-ItemProperty -Path $specKey -Name IdentityContractVersion -Value 1"
+    "New-ItemProperty -Path $specKey -Name IdentityContractVersion -Value 2"
 ) == 1
 PY
 

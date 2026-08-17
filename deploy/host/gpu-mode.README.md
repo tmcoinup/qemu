@@ -103,7 +103,7 @@ sudo ./gpu-mode.sh doctor         # 排错信息一把梭
 切换前 **必须** 把所有 VM 停干净，否则 `assert_no_gpu_users` 会拒绝：
 
 ```bash
-~/projects/qemu/deploy/stop-vm.sh 1     # 或逐一停止所有 VM
+~/projects/qemu/deploy/scripts/stop-vm.sh 1     # 或逐一停止所有 VM
 ls /sys/bus/mdev/devices/               # 应当为空
 ```
 

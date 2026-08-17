@@ -1,11 +1,19 @@
 #ifndef QEMU_HID_H
 #define QEMU_HID_H
 
+#include "qemu/bitmap.h"
 #include "ui/input.h"
 
 #define HID_MOUSE     1
 #define HID_TABLET    2
 #define HID_KEYBOARD  3
+
+/* Standard LED bits in a USB HID keyboard Output Report. */
+#define HID_KBD_LED_NUM_LOCK     0x01
+#define HID_KBD_LED_CAPS_LOCK    0x02
+#define HID_KBD_LED_SCROLL_LOCK  0x04
+#define HID_KBD_LED_COMPOSE      0x08
+#define HID_KBD_LED_KANA         0x10
 
 typedef struct HIDPointerEvent {
     int32_t xdx, ydy; /* relative iff it's a mouse, otherwise absolute */
@@ -26,6 +34,9 @@ typedef struct HIDMouseState {
 
 typedef struct HIDKeyboardState {
     uint32_t keycodes[QUEUE_LENGTH];
+    /* Host-side enqueue state used only to suppress duplicate HID makes.
+     * It is advisory and deliberately excluded from the migration ABI. */
+    DECLARE_BITMAP(host_pressed, Q_KEY_CODE__MAX);
     uint16_t modifiers;
     uint8_t leds;
     uint8_t key[16];
@@ -58,6 +69,9 @@ void hid_pointer_activate(HIDState *hs);
 int hid_pointer_poll(HIDState *hs, uint8_t *buf, int len);
 int hid_keyboard_poll(HIDState *hs, uint8_t *buf, int len);
 int hid_keyboard_write(HIDState *hs, uint8_t *buf, int len);
+
+/* Atomically enqueue one press/release click on this exact HID keyboard. */
+bool hid_keyboard_send_key_click(HIDState *hs, QKeyCode qcode);
 
 extern const VMStateDescription vmstate_hid_keyboard_device;
 

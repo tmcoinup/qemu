@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 HELPER="$REPO_ROOT/deploy/host/sync-monitor-cache.sh"
-START_VM="$REPO_ROOT/deploy/start-vm.sh"
+START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -102,13 +102,19 @@ encoded = ((ord(vendor[0]) - 64) << 10 |
 e[8:10] = encoded.to_bytes(2, 'big')
 e[10:12] = (0xD0D8).to_bytes(2, 'little')
 e[21], e[22] = 53, 30
+e[35], e[36], e[37] = 0x21, 0x08, 0x00
 e[38:54] = b'\x01\x01' * 8
 # One 1920x1080 DTD; only the fields checked by the helper are material here.
 e[54:56] = b'\x01\x01'
 e[56], e[58] = 0x80, 0x70
 e[59], e[61] = 0x38, 0x40
+# Match the generator's xtra3/range/name base layout and CTA serial descriptor.
+e[72:90] = (bytes.fromhex('000000f7000a004a80') + b'\x00' * 9)
+e[93], e[111], e[138] = 0xFD, 0xFC, 0xFF
 e[126] = 1
 e[127] = (-sum(e[:127])) & 0xff
+# CTA video block: VIC 16 (1080p60) and VIC 4 (720p60).
+e[128:135] = bytes.fromhex('02030700421004')
 e[255] = (-sum(e[128:255])) & 0xff
 open(path, 'wb').write(e)
 PY
@@ -231,7 +237,9 @@ reject_text 'remove_hiberfile' "$TRACE"
 DISPATCH="$TMP_DIR/monitor-dispatch.sh"
 {
     printf '%s\n' '#!/usr/bin/env bash' 'set -u' 'VM_ID=2' \
-        'monitor_sync_rc=$1'
+        'monitor_sync_rc=$1' 'PROXY=${2:-0}' \
+        'VMS_DIR_CLI=${3:-}' 'VM_DIR_CLI=${4:-}' \
+        'INSTANCES_DIR_CLI=${5:-}'
     awk '
         /case "\$monitor_sync_rc" in/ { copy = 1 }
         copy { print }
@@ -251,11 +259,35 @@ set -e
 [[ $hibernated_rc -eq 11 ]] || \
     fail "hibernated sync rc 11 became $hibernated_rc"
 reject_text 'QEMU_PROCEEDS' "$TMP_DIR/dispatch-11.out"
-require_text './deploy/finish-vgpu-install.sh 2' "$TMP_DIR/dispatch-11.err"
-reject_text 'finish-vgpu-install.sh 2 --token-file' "$TMP_DIR/dispatch-11.err"
-require_text '本地 SDL 救援窗口' "$TMP_DIR/dispatch-11.err"
+require_text './deploy/scripts/recover-hibernated-vm.sh 2' "$TMP_DIR/dispatch-11.err"
+reject_text 'finish-vgpu-install.sh' "$TMP_DIR/dispatch-11.err"
+require_text '本地标准 VGA 窗口' "$TMP_DIR/dispatch-11.err"
 reject_text 'powercfg /h off' "$TMP_DIR/dispatch-11.err"
 reject_text 'RealTimeIsUniversal' "$TMP_DIR/dispatch-11.err"
+
+set +e
+"$DISPATCH" 11 1 >"$TMP_DIR/dispatch-11-proxy.out" \
+    2>"$TMP_DIR/dispatch-11-proxy.err"
+hibernated_proxy_rc=$?
+set -e
+[[ $hibernated_proxy_rc -eq 11 ]] || \
+    fail "proxied hibernated sync rc 11 became $hibernated_proxy_rc"
+reject_text 'QEMU_PROCEEDS' "$TMP_DIR/dispatch-11-proxy.out"
+require_text './deploy/scripts/recover-hibernated-vm.sh 2 --proxy' \
+    "$TMP_DIR/dispatch-11-proxy.err"
+reject_text 'finish-vgpu-install.sh' "$TMP_DIR/dispatch-11-proxy.err"
+
+set +e
+"$DISPATCH" 11 1 "$TMP_DIR/custom vms" >"$TMP_DIR/dispatch-11-root.out" \
+    2>"$TMP_DIR/dispatch-11-root.err"
+hibernated_root_rc=$?
+set -e
+[[ $hibernated_root_rc -eq 11 ]] || \
+    fail "custom-root hibernated sync rc 11 became $hibernated_root_rc"
+reject_text 'QEMU_PROCEEDS' "$TMP_DIR/dispatch-11-root.out"
+require_text "./deploy/scripts/recover-hibernated-vm.sh 2 --vms-dir $TMP_DIR/custom\\ vms --proxy" \
+    "$TMP_DIR/dispatch-11-root.err"
+reject_text 'finish-vgpu-install.sh' "$TMP_DIR/dispatch-11-root.err"
 
 set +e
 "$DISPATCH" 15 >"$TMP_DIR/dispatch-15.out" \

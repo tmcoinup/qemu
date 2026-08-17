@@ -90,6 +90,8 @@ for dependency in jq sha256sum stat realpath mktemp install awk od tr \
         || die "missing dependency: $dependency"
 done
 vm_storage_init
+vm_storage_require_namespace_ready "$VM_ID" \
+    || die "VM storage still uses an old/conflicting layout"
 if [[ -z "$GPUZ_SOURCE" ]]; then
     GPUZ_SOURCE=$(gpuz_asset_default_source) \
         || die "could not derive the canonical GPU-Z source"
@@ -397,8 +399,8 @@ trap cleanup EXIT
 # Build the existing, independently hash-manifested B/native GPU-Z profile
 # against an isolated config copy.  The live vm.conf and disk are never edited.
 fake_image="$work/image"
-fake_vm_root="$fake_image/vms/G-11"
-fake_instance="$fake_vm_root/vm${VM_ID}"
+fake_vm_root="$fake_image/vms"
+fake_instance="$fake_vm_root/${VM_ID}"
 mkdir -p "$fake_instance"
 awk '
     !/^[[:space:]]*(export[[:space:]]+)?(SPOOF|SPOOF_MODE|VGPU_IDENTITY_TARGET|VGPU_MDEV_INTERNAL_PCI_IDENTITY|VGPU_MDEV_FRL_ENABLED|VGPU_PATCHED_DRIVER_INF|VGPU_PATCHED_DRIVER_VERSION|VGPU_PATCHED_DRIVER_REQUIRED_VERSION|GPUZ_PACKAGE_ENABLED)=/
@@ -407,7 +409,7 @@ printf '\nSPOOF_MODE=B\nVGPU_IDENTITY_TARGET=name-only\nGPUZ_PACKAGE_ENABLED=1\n
     >>"$fake_instance/vm.conf"
 install -m 0600 /dev/null "$fake_instance/disk.qcow2"
 fake_gpuz_root="$work/gpuz"
-env -u VM_INSTANCE_DIR -u VM_INSTANCE_ID \
+env -u VMS_DIR -u VM_INSTANCE_DIR -u VM_INSTANCE_ID \
     -u VM_DISK_ARCHIVE_DIR -u VM_BASE_ARCHIVE_DIR \
     -u VM_NVRAM_BACKUP_DIR -u ISO_DIR \
 IMAGE_ROOT="$fake_image" \

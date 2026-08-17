@@ -231,26 +231,134 @@ static void spd_encode_timing(uint32_t timing_ps, uint16_t *mtb,
     *ftb = remainder / SPD_FTB_PS;
 }
 
-/*
- * Generate a DDR3-1600 desktop UDIMM. The supported shape is deliberately
- * narrow: 4 Gbit x8 SDRAM devices, one rank and a 64-bit data bus produce a
- * 4 GiB module. Rejecting all other inputs prevents the advertised capacity
- * or speed from drifting away from the bytes encoded below.
- */
-uint8_t *spd_data_generate_ddr3(uint32_t size_mb, uint32_t speed_mts,
-                                Error **errp)
+static bool spd_ddr3_geometry(const SmbusEepromDdr3Config *config,
+                              uint8_t *density_code, uint8_t *addressing,
+                              uint8_t *organization, uint16_t *trfc_mtb,
+                              Error **errp)
 {
+    /*
+     * Keep this table deliberately narrow.  Every entry describes a common
+     * non-ECC 64-bit desktop UDIMM geometry and has a self-consistent DRAM
+     * density, row/column layout and refresh time.
+     */
+    if (config->size_mb == 2048 && config->ranks == 1 &&
+        config->device_width_bits == 16) {
+        *density_code = 0x04; /* 4 Gbit */
+        *addressing = 0x19;   /* 15 row bits, 10 column bits */
+        *organization = 0x02; /* One rank, x16 */
+        *trfc_mtb = 0x0820;   /* 260 ns */
+        return true;
+    }
+    if (config->size_mb == 2048 && config->ranks == 1 &&
+        config->device_width_bits == 8) {
+        *density_code = 0x03; /* 2 Gbit */
+        *addressing = 0x19;   /* 15 row bits, 10 column bits */
+        *organization = 0x01; /* One rank, x8 */
+        *trfc_mtb = 0x0500;   /* 160 ns */
+        return true;
+    }
+    if (config->size_mb == 4096 && config->ranks == 1 &&
+        config->device_width_bits == 8) {
+        *density_code = 0x04; /* 4 Gbit */
+        *addressing = 0x21;   /* 16 row bits, 10 column bits */
+        *organization = 0x01; /* One rank, x8 */
+        *trfc_mtb = 0x0820;   /* 260 ns */
+        return true;
+    }
+    if (config->size_mb == 4096 && config->ranks == 2 &&
+        config->device_width_bits == 8) {
+        *density_code = 0x03; /* 2 Gbit */
+        *addressing = 0x19;   /* 15 row bits, 10 column bits */
+        *organization = 0x09; /* Two ranks, x8 */
+        *trfc_mtb = 0x0500;   /* 160 ns */
+        return true;
+    }
+
+    error_setg(errp, "unsupported DDR3 SPD geometry: %u MB, %u rank(s), "
+               "x%u devices", config->size_mb, config->ranks,
+               config->device_width_bits);
+    return false;
+}
+
+static bool spd_ddr3_identity_is_valid(
+    const SmbusEepromDdr3Config *config, Error **errp)
+{
+    static const uint8_t serial_zero[4];
+    static const uint8_t serial_one[4] = { 0, 0, 0, 1 };
+    static const uint8_t serial_ff[4] = { 0xff, 0xff, 0xff, 0xff };
+    size_t length;
+    size_t i;
+
+    if (!config->identity_configured) {
+        return true;
+    }
+    if (config->module_mfr_jep106[0] == 0 &&
+        config->module_mfr_jep106[1] == 0) {
+        error_setg(errp, "DDR3 SPD module manufacturer JEP106 cannot be "
+                   "0000");
+        return false;
+    }
+    if (!memcmp(config->serial, serial_zero, sizeof(serial_zero)) ||
+        !memcmp(config->serial, serial_one, sizeof(serial_one)) ||
+        !memcmp(config->serial, serial_ff, sizeof(serial_ff))) {
+        error_setg(errp, "DDR3 SPD serial cannot be reserved value %02X%02X"
+                   "%02X%02X", config->serial[0], config->serial[1],
+                   config->serial[2], config->serial[3]);
+        return false;
+    }
+
+    length = strnlen(config->part_number, sizeof(config->part_number));
+    if (!length || length > SMBUS_EEPROM_DDR3_PART_NUMBER_LEN) {
+        error_setg(errp, "DDR3 SPD part number must contain 1 to %u "
+                   "printable ASCII characters",
+                   SMBUS_EEPROM_DDR3_PART_NUMBER_LEN);
+        return false;
+    }
+    for (i = 0; i < length; i++) {
+        uint8_t ch = config->part_number[i];
+
+        if (ch < 0x20 || ch > 0x7e) {
+            error_setg(errp, "DDR3 SPD part number contains a non-printable "
+                       "ASCII character at offset %zu", i);
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Generate a DDR3 desktop UDIMM using explicit per-slot geometry.  The
+ * identity area follows DDR3 SPD bytes 117 onward and is optional so legacy
+ * callers retain their byte-for-byte anonymous SPD data.
+ */
+uint8_t *spd_data_generate_ddr3_config(
+    const SmbusEepromDdr3Config *config, Error **errp)
+{
+    uint8_t density_code;
+    uint8_t addressing;
+    uint8_t organization;
+    uint16_t trfc_mtb;
     uint8_t *spd;
     uint16_t crc;
+    size_t part_length;
 
-    if (size_mb != 4096) {
-        error_setg(errp, "DDR3 SPD supports only 4096 MB modules "
-                   "(requested %u MB)", size_mb);
+    if (!config) {
+        error_setg(errp, "DDR3 SPD configuration cannot be NULL");
         return NULL;
     }
-    if (speed_mts != 1600) {
-        error_setg(errp, "DDR3 SPD supports only 1600 MT/s "
-                   "(requested %u MT/s)", speed_mts);
+    if (config->size_mb != 2048 && config->size_mb != 4096) {
+        error_setg(errp, "DDR3 SPD module size must be 2048 or 4096 MB "
+                   "(requested %u MB)", config->size_mb);
+        return NULL;
+    }
+    if (config->speed_mts != 1333 && config->speed_mts != 1600) {
+        error_setg(errp, "DDR3 SPD speed must be 1333 or 1600 MT/s "
+                   "(requested %u MT/s)", config->speed_mts);
+        return NULL;
+    }
+    if (!spd_ddr3_geometry(config, &density_code, &addressing,
+                           &organization, &trfc_mtb, errp) ||
+        !spd_ddr3_identity_is_valid(config, errp)) {
         return NULL;
     }
 
@@ -260,43 +368,88 @@ uint8_t *spd_data_generate_ddr3(uint32_t size_mb, uint32_t speed_mts,
     spd[1] = 0x11;    /* SPD revision 1.1 */
     spd[2] = 0x0B;    /* DDR3 SDRAM */
     spd[3] = 0x02;    /* UDIMM */
-    spd[4] = 0x04;    /* 4 Gbit SDRAM, 8 banks */
-    spd[5] = 0x19;    /* 15 row address bits, 10 column bits */
+    spd[4] = density_code;
+    spd[5] = addressing;
     spd[6] = 0x00;    /* 1.5 V operable */
-    spd[7] = 0x01;    /* One rank, x8 SDRAM devices */
+    spd[7] = organization;
     spd[8] = 0x03;    /* 64-bit primary bus, no ECC extension */
     spd[9] = 0x11;    /* FTB dividend/divisor: 1 ps */
     spd[10] = 0x01;   /* MTB dividend */
     spd[11] = 0x08;   /* MTB divisor: 125 ps */
-    spd[12] = 0x0A;   /* tCKmin: 1.25 ns = DDR3-1600 */
-    spd[14] = 0xFC;   /* Supported CAS latencies: CL6 through CL11 */
-    spd[16] = 0x6E;   /* tAAmin: 13.75 ns (CL11 at DDR3-1600) */
+
+    if (config->speed_mts == 1333) {
+        spd[12] = 0x0C; /* tCKmin: 1.5 ns = DDR3-1333 */
+        spd[14] = 0x3C; /* Supported CAS latencies: CL6 through CL9 */
+        spd[16] = 0x6C; /* tAAmin: 13.5 ns (CL9 at DDR3-1333) */
+        spd[18] = 0x6C; /* tRCDmin: 13.5 ns */
+        spd[20] = 0x6C; /* tRPmin: 13.5 ns */
+        spd[21] = 0x11; /* Upper nibbles for tRASmin and tRCmin */
+        spd[22] = 0x20; /* tRASmin: 36 ns */
+        spd[23] = 0x89; /* tRCmin: 49.125 ns */
+    } else {
+        spd[12] = 0x0A; /* tCKmin: 1.25 ns = DDR3-1600 */
+        spd[14] = 0xFC; /* Supported CAS latencies: CL6 through CL11 */
+        spd[16] = 0x6E; /* tAAmin: 13.75 ns (CL11 at DDR3-1600) */
+        spd[18] = 0x6E; /* tRCDmin: 13.75 ns */
+        spd[20] = 0x6E; /* tRPmin: 13.75 ns */
+        spd[21] = 0x11; /* Upper nibbles for tRASmin and tRCmin */
+        spd[22] = 0x18; /* tRASmin: 35 ns */
+        spd[23] = 0x81; /* tRCmin: 48.125 ns */
+    }
+
     spd[17] = 0x78;   /* tWRmin: 15 ns */
-    spd[18] = 0x6E;   /* tRCDmin: 13.75 ns */
-    spd[19] = 0x30;   /* tRRDmin: 6 ns */
-    spd[20] = 0x6E;   /* tRPmin: 13.75 ns */
-    spd[21] = 0x11;   /* Upper nibbles for tRASmin and tRCmin */
-    spd[22] = 0x18;   /* tRASmin: 35 ns */
-    spd[23] = 0x86;   /* tRCmin: 48.75 ns */
-    spd[24] = 0x20;   /* tRFCmin: 260 ns, little endian */
-    spd[25] = 0x08;
+    spd[24] = trfc_mtb & 0xff;
+    spd[25] = trfc_mtb >> 8;
     spd[26] = 0x3C;   /* tWTRmin: 7.5 ns */
     spd[27] = 0x3C;   /* tRTPmin: 7.5 ns */
-    spd[28] = 0x00;   /* tFAWmin upper nibble */
-    spd[29] = 0xF0;   /* tFAWmin: 30 ns */
+    if (config->device_width_bits == 16) {
+        /* x16 devices have a 2 KiB page and use the wider timing window. */
+        spd[19] = 0x3C; /* tRRDmin: 7.5 ns */
+        spd[28] = 0x01; /* tFAWmin upper nibble */
+        spd[29] = config->speed_mts == 1333 ? 0x68 : 0x40;
+    } else {
+        /* x8 devices have a 1 KiB page. */
+        spd[19] = 0x30; /* tRRDmin: 6 ns */
+        spd[28] = 0x00; /* tFAWmin upper nibble */
+        spd[29] = 0xF0; /* tFAWmin: 30 ns */
+    }
     spd[33] = 0x00;   /* Standard monolithic SDRAM devices */
 
     /* Unbuffered desktop DIMM mechanical information. */
     spd[60] = 0x0F;   /* 30 mm nominal height */
     spd[61] = 0x11;   /* 2 mm maximum thickness, front and back */
     spd[62] = 0x00;   /* Reference raw card A, revision 0 */
-    spd[63] = 0x00;   /* Standard rank-1 address mapping */
+    spd[63] = 0x00;   /* Standard rank address mapping */
 
     crc = spd_crc16(spd, 117);
     spd[126] = crc & 0xFF;
     spd[127] = crc >> 8;
 
+    if (config->identity_configured) {
+        memcpy(&spd[117], config->module_mfr_jep106,
+               sizeof(config->module_mfr_jep106));
+        memcpy(&spd[122], config->serial, sizeof(config->serial));
+        memset(&spd[128], ' ', SMBUS_EEPROM_DDR3_PART_NUMBER_LEN);
+        part_length = strlen(config->part_number);
+        memcpy(&spd[128], config->part_number, part_length);
+        memcpy(&spd[148], config->dram_mfr_jep106,
+               sizeof(config->dram_mfr_jep106));
+    }
+
     return spd;
+}
+
+uint8_t *spd_data_generate_ddr3(uint32_t size_mb, uint32_t speed_mts,
+                                Error **errp)
+{
+    SmbusEepromDdr3Config config = {
+        .size_mb = size_mb,
+        .speed_mts = speed_mts,
+        .ranks = 1,
+        .device_width_bits = size_mb == 2048 ? 16 : 8,
+    };
+
+    return spd_data_generate_ddr3_config(&config, errp);
 }
 
 /*

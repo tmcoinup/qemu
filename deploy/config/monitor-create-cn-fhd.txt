@@ -2,22 +2,30 @@
 #
 # One monitor-profiles.tsv key per line.  create-vm.sh accepts only this pool;
 # legacy VMs may still load any entry from the full catalog.  Every entry here
-# is a real 23.8/24-inch 1920x1080 FHD monitor (commonly called "1K" in China).
+# is a real 21.5/23.8/24/27-inch 1920x1080 FHD monitor (commonly called "1K"
+# in China).  The preferred EDID timing remains the sample-backed 60 Hz mode;
+# a 75/76 Hz range limit is not treated as an advertised high-refresh mode.
 
 # Samsung
 samsung-s24f350
 samsung-c24f390
 samsung-s24d300
 samsung-s24r35x
+samsung-s22f350
+samsung-s27f350
 
 # Dell
 dell-p2419h
 dell-p2417h
 dell-se2419hr
 dell-se2416h
+dell-p2219h
+dell-p2719h
 
 # BenQ
 benq-gw2480
+benq-gw2280
+benq-gw2780
 
 # AOC
 aoc-24b1w
@@ -25,13 +33,19 @@ aoc-2470w
 
 # Philips
 philips-243v7
+philips-223v7
+philips-273v7
 
 # Lenovo
 lenovo-t24i-10
 lenovo-d24-20
+lenovo-d22-20
+lenovo-d27-30
 
 # ASUS
 asus-va24e
+asus-va229
+asus-va27ehe
 
 # Redmi / Xiaomi
 redmi-rmmnt238nf

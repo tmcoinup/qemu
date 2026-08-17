@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Atomically place the VM-unbound offline EXE on the Windows public desktop of
-# the standalone clone base.  The live base is never mounted or edited.
+# Atomically place the VM-unbound offline identity EXE on the Windows public
+# desktop of the standalone clone base.  GPU-Z is omitted by default and may
+# be included only through an explicit option.  The live base is never mounted
+# or edited.
 set -euo pipefail
 umask 077
 
@@ -12,6 +14,8 @@ ORIGINAL_ARGS=("$@")
 source "$here/lib/vm-storage.sh"
 # shellcheck source=lib/vgpu-profiles.sh
 source "$here/lib/vgpu-profiles.sh"
+# shellcheck source=lib/gpuz-assets.sh
+source "$here/lib/gpuz-assets.sh"
 vm_storage_init
 
 usage() {
@@ -23,12 +27,17 @@ Options:
                      (default: $VM_BASE_DIR/win10-base.qcow2)
   --exe FILE.exe     Portable guest EXE
                      (default: $STAGE_DIR/VgpuPortable/VgpuPortable.exe)
+  --with-gpuz        Also place the audited GPU-Z.exe beside the EXE (optional)
+  --gpuz-source FILE Audited external TechPowerUp GPU-Z 2.70 executable
+                     (implies --with-gpuz; default source when selected:
+                     $IMAGE_ROOT/candidates/gpuz-2.70-audit/GPU-Z.2.70.0.exe)
   --yes, -y          Skip the final replacement confirmation
   -h, --help         Show this help
 
 The script clones the base to a private temporary qcow2, mounts only that
-copy, writes C:\Users\Public\Desktop\VgpuPortable.exe, validates it, then
-atomically archives/replaces the base.  Hibernated/dirty NTFS is refused.
+copy, writes VgpuPortable.exe to the Public Desktop, validates it, then
+atomically archives/replaces the base.  GPU-Z is not required or copied unless
+--with-gpuz/--gpuz-source is explicit.  Hibernated/dirty NTFS is refused.
 EOF
 }
 
@@ -47,6 +56,8 @@ sha256_upper() {
 
 BASE=""
 PORTABLE_EXE=""
+GPUZ_SOURCE=""
+WITH_GPUZ=0
 ASSUME_YES=0
 while (($#)); do
     case "$1" in
@@ -59,6 +70,16 @@ while (($#)); do
             (($# >= 2)) || die "--exe requires a Windows executable"
             PORTABLE_EXE=$2
             shift 2
+            ;;
+        --gpuz-source)
+            (($# >= 2)) || die "--gpuz-source requires a host file"
+            GPUZ_SOURCE=$2
+            WITH_GPUZ=1
+            shift 2
+            ;;
+        --with-gpuz)
+            WITH_GPUZ=1
+            shift
             ;;
         -y|--yes)
             ASSUME_YES=1
@@ -85,6 +106,10 @@ fi
 [[ -n "$BASE" ]] || BASE=$(vm_storage_base_path)
 [[ -n "$PORTABLE_EXE" ]] ||
     PORTABLE_EXE="$STAGE_DIR/VgpuPortable/VgpuPortable.exe"
+if ((WITH_GPUZ)) && [[ -z "$GPUZ_SOURCE" ]]; then
+    GPUZ_SOURCE=$(gpuz_asset_default_source) ||
+        die "could not derive the canonical GPU-Z source"
+fi
 [[ "$BASE" == /* && "$BASE" != / ]] ||
     die "--base must be a non-root absolute path"
 [[ "$PORTABLE_EXE" == /* && "${PORTABLE_EXE,,}" == *.exe ]] ||
@@ -92,6 +117,10 @@ fi
 BASE=$(realpath -e -- "$BASE") || die "base image does not exist"
 PORTABLE_EXE=$(realpath -e -- "$PORTABLE_EXE") ||
     die "portable EXE does not exist; run ./deploy/package-vgpu-one-click.sh first"
+if ((WITH_GPUZ)); then
+    GPUZ_SOURCE=$(gpuz_asset_resolve_source "$GPUZ_SOURCE") ||
+        die "invalid --gpuz-source"
+fi
 [[ -f "$BASE" && ! -L "$BASE" ]] ||
     die "base must be a regular non-symlink image"
 [[ -f "$PORTABLE_EXE" && ! -L "$PORTABLE_EXE" ]] ||
@@ -113,6 +142,15 @@ EXPECTED_CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
 
 PORTABLE_SHA256=$(sha256_upper "$PORTABLE_EXE")
 PORTABLE_BYTES=$(stat -c %s -- "$PORTABLE_EXE")
+GPUZ_SHA256=""
+GPUZ_BYTES=0
+if ((WITH_GPUZ)); then
+    GPUZ_SHA256=$(sha256_upper "$GPUZ_SOURCE")
+    GPUZ_BYTES=$(stat -c %s -- "$GPUZ_SOURCE")
+    [[ "$GPUZ_BYTES" == "$GPUZ_ASSET_BYTES" &&
+       "$GPUZ_SHA256" == "$GPUZ_ASSET_SHA256" ]] ||
+        die "GPU-Z source is not the locked ${GPUZ_ASSET_PRODUCT_VERSION} image (${GPUZ_ASSET_BYTES} bytes / ${GPUZ_ASSET_SHA256})"
+fi
 PORTABLE_PARENT=$(dirname -- "$PORTABLE_EXE")
 PORTABLE_RECEIPT="$PORTABLE_PARENT/.$(basename -- "$PORTABLE_EXE").receipts/${PORTABLE_SHA256}.json"
 [[ -f "$PORTABLE_RECEIPT" && ! -L "$PORTABLE_RECEIPT" ]] ||
@@ -121,10 +159,17 @@ CATALOG_SHA256=$(jq -er \
     --arg exeSha256 "$PORTABLE_SHA256" \
     --argjson exeBytes "$PORTABLE_BYTES" '
     select(
-        .schemaVersion == 1 and .bindingMode == "portable-auto" and
-        .launcherFormat == "QEMU_GPUZ_PORTABLE_EXE_V1" and
+        (keys | sort) == [
+            "bindingMode", "bundleManifestSha256", "catalogSha256",
+            "exeBytes", "exeSha256", "gpuZDelivery", "launcherFormat",
+            "schemaVersion"
+        ] and
+        .schemaVersion == 4 and .bindingMode == "portable-auto" and
+        .gpuZDelivery == "optional-explicit-sibling" and
+        .launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4" and
         .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
-        (.catalogSha256 | test("^[0-9A-F]{64}$"))
+        (.catalogSha256 | test("^[0-9A-F]{64}$")) and
+        (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
     ) | .catalogSha256
 ' "$PORTABLE_RECEIPT") ||
     die "portable EXE host receipt is invalid"
@@ -275,28 +320,73 @@ refresh_restored_attestation_ctime() {
             --arg baseDeviceId "$restored_device" \
             --arg baseInode "$restored_inode" \
             --arg baseMtimeNs "$restored_mtime" \
-            --arg baseCtimeNs "$restored_ctime" '
+            --arg baseCtimeNs "$restored_ctime" \
+            --arg gpuZSha256 "$GPUZ_ASSET_SHA256" \
+            --argjson gpuZBytes "$GPUZ_ASSET_BYTES" '
         if (
-            (keys | sort) == [
-                "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
-                "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
-                "exeBytes", "exeSha256", "guestPath", "installedUtc",
-                "schemaVersion"
-            ] and
-            .schemaVersion == 2 and .bindingMode == "portable-auto" and
             .basePath == $basePath and .baseFileBytes == $baseFileBytes and
             .baseDeviceId == $baseDeviceId and .baseInode == $baseInode and
             .baseMtimeNs == $baseMtimeNs and
             (.baseCtimeNs | type) == "string" and
-            .guestPath == "C:\\Users\\Public\\Desktop\\VgpuPortable.exe" and
-            (.exeSha256 | test("^[0-9A-F]{64}$")) and
-            (.exeBytes | type) == "number" and .exeBytes > 0 and
+            .bindingMode == "portable-auto" and
             (.catalogSha256 | test("^[0-9A-F]{64}$")) and
-            (.installedUtc | type) == "string"
+            (.installedUtc | type) == "string" and
+            (
+                ((keys | sort) == [
+                    "baseCtimeNs", "baseDeviceId", "baseFileBytes",
+                    "baseInode", "baseMtimeNs", "basePath", "bindingMode",
+                    "catalogSha256", "exeBytes", "exeSha256", "guestPath",
+                    "installedUtc", "schemaVersion"
+                ] and
+                 .schemaVersion == 2 and
+                 .guestPath == "C:\\Users\\Public\\Desktop\\VgpuPortable.exe" and
+                 (.exeSha256 | test("^[0-9A-F]{64}$")) and
+                 (.exeBytes | type) == "number" and .exeBytes > 0)
+                or
+                ((keys | sort) == [
+                    "baseCtimeNs", "baseDeviceId", "baseFileBytes",
+                    "baseInode", "baseMtimeNs", "basePath", "bindingMode",
+                    "catalogSha256", "gpuZBytes", "gpuZDelivery",
+                    "gpuZGuestPath", "gpuZSha256", "installedUtc",
+                    "portableBytes", "portableGuestPath", "portableSha256",
+                    "schemaVersion"
+                ] and
+                 .schemaVersion == 3 and
+                 .gpuZDelivery == "external-sibling" and
+                 .portableGuestPath == "C:\\Users\\Public\\Desktop\\VgpuPortable.exe" and
+                 (.portableSha256 | test("^[0-9A-F]{64}$")) and
+                 (.portableBytes | type) == "number" and
+                 .portableBytes > 0 and
+                 .gpuZGuestPath == "C:\\Users\\Public\\Desktop\\GPU-Z.exe" and
+                 .gpuZSha256 == $gpuZSha256 and .gpuZBytes == $gpuZBytes)
+                or
+                ((keys | sort) == [
+                    "baseCtimeNs", "baseDeviceId", "baseFileBytes",
+                    "baseInode", "baseMtimeNs", "basePath", "bindingMode",
+                    "catalogSha256", "gpuZBytes", "gpuZDelivery",
+                    "gpuZGuestPath", "gpuZIncluded", "gpuZSha256",
+                    "installedUtc", "portableBytes", "portableGuestPath",
+                    "portableSha256", "schemaVersion"
+                ] and
+                 .schemaVersion == 4 and
+                 .gpuZDelivery == "optional-explicit-sibling" and
+                 .portableGuestPath == "C:\\Users\\Public\\Desktop\\VgpuPortable.exe" and
+                 (.portableSha256 | test("^[0-9A-F]{64}$")) and
+                 (.portableBytes | type) == "number" and
+                 .portableBytes > 0 and
+                 (.gpuZIncluded | type) == "boolean" and
+                 (if .gpuZIncluded then
+                    .gpuZGuestPath == "C:\\Users\\Public\\Desktop\\GPU-Z.exe" and
+                    .gpuZSha256 == $gpuZSha256 and .gpuZBytes == $gpuZBytes
+                  else
+                    .gpuZGuestPath == null and .gpuZSha256 == null and
+                    .gpuZBytes == null
+                  end))
+            )
         ) then
             .baseCtimeNs = $baseCtimeNs
         else
-            error("restored attestation is not a valid schema-2 generation")
+            error("restored attestation is not a valid schema-2/schema-3/schema-4 generation")
         end
     ' "$ATTESTATION" >"$refresh_tmp"; then
         rm -f -- "$refresh_tmp"
@@ -442,17 +532,34 @@ mount -t ntfs-3g -o big_writes,windows_names \
 MOUNTED=1
 DEST_DIR="$MOUNT_DIR/Users/Public/Desktop"
 mkdir -p -- "$DEST_DIR"
-DEST_TMP="$DEST_DIR/.VgpuPortable.exe.new.$$"
-cp --reflink=never -- "$PORTABLE_EXE" "$DEST_TMP"
-sync -- "$DEST_TMP"
-[[ "$(sha256_upper "$DEST_TMP")" == "$PORTABLE_SHA256" &&
-   "$(stat -c %s -- "$DEST_TMP")" == "$PORTABLE_BYTES" ]] ||
+PORTABLE_DEST_TMP="$DEST_DIR/.VgpuPortable.exe.new.$$"
+cp --reflink=never -- "$PORTABLE_EXE" "$PORTABLE_DEST_TMP"
+sync -- "$PORTABLE_DEST_TMP"
+[[ "$(sha256_upper "$PORTABLE_DEST_TMP")" == "$PORTABLE_SHA256" &&
+   "$(stat -c %s -- "$PORTABLE_DEST_TMP")" == "$PORTABLE_BYTES" ]] ||
     die "portable EXE verification failed inside the base image"
-mv -fT -- "$DEST_TMP" "$DEST_DIR/VgpuPortable.exe"
+mv -fT -- "$PORTABLE_DEST_TMP" "$DEST_DIR/VgpuPortable.exe"
+if ((WITH_GPUZ)); then
+    GPUZ_DEST_TMP="$DEST_DIR/.GPU-Z.exe.new.$$"
+    cp --reflink=never -- "$GPUZ_SOURCE" "$GPUZ_DEST_TMP"
+    sync -- "$GPUZ_DEST_TMP"
+    [[ "$(sha256_upper "$GPUZ_DEST_TMP")" == "$GPUZ_SHA256" &&
+       "$(stat -c %s -- "$GPUZ_DEST_TMP")" == "$GPUZ_BYTES" ]] ||
+        die "optional GPU-Z verification failed inside the base image"
+    mv -fT -- "$GPUZ_DEST_TMP" "$DEST_DIR/GPU-Z.exe"
+fi
 sync
-[[ "$(sha256_upper "$DEST_DIR/VgpuPortable.exe")" == "$PORTABLE_SHA256" ]] ||
-    die "published base-image EXE hash is incorrect"
-log "installed C:\\Users\\Public\\Desktop\\VgpuPortable.exe"
+[[ "$(sha256_upper "$DEST_DIR/VgpuPortable.exe")" == "$PORTABLE_SHA256" &&
+   "$(stat -c %s -- "$DEST_DIR/VgpuPortable.exe")" == "$PORTABLE_BYTES" ]] ||
+    die "published base-image portable EXE is incorrect"
+if ((WITH_GPUZ)); then
+    [[ "$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256" &&
+       "$(stat -c %s -- "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_BYTES" ]] ||
+        die "published base-image optional GPU-Z is incorrect"
+    log "installed identity EXE plus explicitly selected GPU-Z on C:\\Users\\Public\\Desktop"
+else
+    log "installed identity EXE only; GPU-Z was not selected or copied"
+fi
 
 umount -- "$MOUNT_DIR"
 MOUNTED=0
@@ -500,17 +607,26 @@ BASE_INODE=$(stat -c %i -- "$BASE")
 BASE_MTIME_NS=$(stat -c %y -- "$BASE")
 BASE_CTIME_NS=$(stat -c %z -- "$BASE")
 ATTESTATION_TMP="${ATTESTATION}.new.$$.$RANDOM"
+GPUZ_INCLUDED_JSON=false
+if ((WITH_GPUZ)); then
+    GPUZ_INCLUDED_JSON=true
+fi
 jq -n \
-    --argjson schemaVersion 2 \
+    --argjson schemaVersion 4 \
     --arg basePath "$BASE" \
     --argjson baseFileBytes "$BASE_FILE_BYTES" \
     --arg baseDeviceId "$BASE_DEVICE_ID" \
     --arg baseInode "$BASE_INODE" \
     --arg baseMtimeNs "$BASE_MTIME_NS" \
     --arg baseCtimeNs "$BASE_CTIME_NS" \
-    --arg guestPath 'C:\Users\Public\Desktop\VgpuPortable.exe' \
-    --arg exeSha256 "$PORTABLE_SHA256" \
-    --argjson exeBytes "$PORTABLE_BYTES" \
+    --arg portableGuestPath 'C:\Users\Public\Desktop\VgpuPortable.exe' \
+    --arg portableSha256 "$PORTABLE_SHA256" \
+    --argjson portableBytes "$PORTABLE_BYTES" \
+    --arg gpuZDelivery optional-explicit-sibling \
+    --argjson gpuZIncluded "$GPUZ_INCLUDED_JSON" \
+    --arg gpuZGuestPath 'C:\Users\Public\Desktop\GPU-Z.exe' \
+    --arg gpuZSha256 "$GPUZ_SHA256" \
+    --argjson gpuZBytes "$GPUZ_BYTES" \
     --arg catalogSha256 "$CATALOG_SHA256" \
     --arg installedUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     {
@@ -522,9 +638,14 @@ jq -n \
         baseInode: $baseInode,
         baseMtimeNs: $baseMtimeNs,
         baseCtimeNs: $baseCtimeNs,
-        guestPath: $guestPath,
-        exeSha256: $exeSha256,
-        exeBytes: $exeBytes,
+        portableGuestPath: $portableGuestPath,
+        portableSha256: $portableSha256,
+        portableBytes: $portableBytes,
+        gpuZDelivery: $gpuZDelivery,
+        gpuZIncluded: $gpuZIncluded,
+        gpuZGuestPath: (if $gpuZIncluded then $gpuZGuestPath else null end),
+        gpuZSha256: (if $gpuZIncluded then $gpuZSha256 else null end),
+        gpuZBytes: (if $gpuZIncluded then $gpuZBytes else null end),
         catalogSha256: $catalogSha256,
         installedUtc: $installedUtc
     }' >"$ATTESTATION_TMP"
@@ -539,12 +660,37 @@ jq -e \
     --arg baseInode "$BASE_INODE" \
     --arg baseMtimeNs "$BASE_MTIME_NS" \
     --arg baseCtimeNs "$BASE_CTIME_NS" \
-    --arg catalogSha256 "$CATALOG_SHA256" '
-    .schemaVersion == 2 and .bindingMode == "portable-auto" and
+    --arg catalogSha256 "$CATALOG_SHA256" \
+    --arg portableSha256 "$PORTABLE_SHA256" \
+    --argjson portableBytes "$PORTABLE_BYTES" \
+    --argjson gpuZIncluded "$GPUZ_INCLUDED_JSON" \
+    --arg gpuZSha256 "$GPUZ_SHA256" \
+    --argjson gpuZBytes "$GPUZ_BYTES" '
+    (keys | sort) == [
+        "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
+        "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
+        "gpuZBytes", "gpuZDelivery", "gpuZGuestPath", "gpuZIncluded",
+        "gpuZSha256",
+        "installedUtc", "portableBytes", "portableGuestPath",
+        "portableSha256", "schemaVersion"
+    ] and
+    .schemaVersion == 4 and .bindingMode == "portable-auto" and
     .basePath == $basePath and .baseFileBytes == $baseFileBytes and
     .baseDeviceId == $baseDeviceId and .baseInode == $baseInode and
     .baseMtimeNs == $baseMtimeNs and .baseCtimeNs == $baseCtimeNs and
-    .catalogSha256 == $catalogSha256
+    .portableGuestPath == "C:\\Users\\Public\\Desktop\\VgpuPortable.exe" and
+    .portableSha256 == $portableSha256 and
+    .portableBytes == $portableBytes and
+    .gpuZDelivery == "optional-explicit-sibling" and
+    .gpuZIncluded == $gpuZIncluded and
+    (if $gpuZIncluded then
+        .gpuZGuestPath == "C:\\Users\\Public\\Desktop\\GPU-Z.exe" and
+        .gpuZSha256 == $gpuZSha256 and .gpuZBytes == $gpuZBytes
+     else
+        .gpuZGuestPath == null and .gpuZSha256 == null and .gpuZBytes == null
+     end) and
+    .catalogSha256 == $catalogSha256 and
+    (.installedUtc | type) == "string"
 ' "$ATTESTATION" >/dev/null ||
     die "published base attestation failed verification"
 PUBLICATION_COMPLETE=1
@@ -552,14 +698,19 @@ BASE_TMP=""
 
 trap - EXIT
 rm -rf -- "$WORK_ROOT"
+GPUZ_RESULT='not included (default; install later from the official audited file)'
+if ((WITH_GPUZ)); then
+    GPUZ_RESULT="C:\\Users\\Public\\Desktop\\GPU-Z.exe / sha256=$GPUZ_SHA256 / bytes=$GPUZ_BYTES"
+fi
 cat <<EOF
 [vgpu-base] PASS
   base:       $BASE
   archive:    $BASE_BACKUP
-  guest file: C:\\Users\\Public\\Desktop\\VgpuPortable.exe
-  EXE sha256: $PORTABLE_SHA256
+  portable:   C:\\Users\\Public\\Desktop\\VgpuPortable.exe
+              sha256=$PORTABLE_SHA256
+  GPU-Z:      $GPUZ_RESULT
   catalog:    $CATALOG_SHA256
 
 后续 clone 不需要再打包，也不需要 HTTP：
-  ./deploy/clone-vgpu-base.sh NEW_VM_ID --gpu-profile gtx1050_2gb
+  ./deploy/scripts/clone-vgpu-base.sh NEW_VM_ID --gpu-profile gtx1050_2gb
 EOF

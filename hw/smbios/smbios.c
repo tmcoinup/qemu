@@ -20,6 +20,8 @@
 #include "qemu/bswap.h"
 #include "qapi/error.h"
 #include "qemu/config-file.h"
+#include "qemu/cutils.h"
+#include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "system/system.h"
@@ -147,6 +149,7 @@ static struct {
 
 static struct {
     const char *loc_pfx, *bank, *manufacturer, *serial, *asset, *part;
+    const char *rank_list;
     uint16_t speed;
     /*
      * 0 keeps the legacy defaults (memory_type=0x07 "RAM",
@@ -627,6 +630,10 @@ static const QemuOptDesc qemu_smbios_type17_opts[] = {
         .name = "rank",
         .type = QEMU_OPT_NUMBER,
         .help = "rank count (0=unknown)",
+    },{
+        .name = "rank-list",
+        .type = QEMU_OPT_STRING,
+        .help = "pipe-delimited per-DIMM rank counts (1..8)",
     },{
         .name = "voltage",
         .type = QEMU_OPT_NUMBER,
@@ -1272,8 +1279,34 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
         SMBIOS_TABLE_SET_STR(17, serial_number_str, serial_str);
     }
     SMBIOS_TABLE_SET_STR(17, asset_tag_number_str, type17.asset);
-    SMBIOS_TABLE_SET_STR(17, part_number_str, type17.part);
-    t->attributes = type17.rank;
+    {
+        char part_str[128];
+
+        if (smbios_type17_list_item(part_str, sizeof(part_str), type17.part,
+                                    instance)) {
+            SMBIOS_TABLE_SET_STR(17, part_number_str, part_str);
+        } else {
+            SMBIOS_TABLE_SET_STR(17, part_number_str, type17.part);
+        }
+    }
+    if (type17.rank_list) {
+        char rank_str[16];
+        unsigned int rank;
+
+        if (!smbios_type17_list_item(rank_str, sizeof(rank_str),
+                                     type17.rank_list, instance)) {
+            pstrcpy(rank_str, sizeof(rank_str), type17.rank_list);
+        }
+        if (qemu_strtoui(rank_str, NULL, 10, &rank) < 0 ||
+            rank < 1 || rank > 8) {
+            error_report("invalid SMBIOS type 17 rank-list item '%s'",
+                         rank_str);
+            exit(EXIT_FAILURE);
+        }
+        t->attributes = rank;
+    } else {
+        t->attributes = type17.rank;
+    }
     t->configured_clock_speed = t->speed;
     t->minimum_voltage = cpu_to_le16(type17.voltage_mv);
     t->maximum_voltage = cpu_to_le16(type17.voltage_mv);
@@ -1555,12 +1588,36 @@ static bool smbios_get_tables_ep(MachineState *ms,
     smbios_build_type_9_table(errp);
     smbios_build_type_11_table();
 
-#define GET_DIMM_SZ ((i < dimm_cnt - 1) ? mc->smbios_memory_device_size \
-    : ((current_machine->ram_size - 1) % mc->smbios_memory_device_size) + 1)
+#define GET_DIMM_SZ (mc->smbios_memory_device_sizes_count ? \
+    mc->smbios_memory_device_sizes[i] : \
+    ((i < dimm_cnt - 1) ? mc->smbios_memory_device_size : \
+     ((current_machine->ram_size - 1) % mc->smbios_memory_device_size) + 1))
 
-    dimm_cnt = QEMU_ALIGN_UP(current_machine->ram_size,
-                             mc->smbios_memory_device_size) /
-               mc->smbios_memory_device_size;
+    if (mc->smbios_memory_device_sizes_count) {
+        uint64_t configured_size = 0;
+
+        dimm_cnt = mc->smbios_memory_device_sizes_count;
+        for (i = 0; i < dimm_cnt; i++) {
+            uint64_t size = mc->smbios_memory_device_sizes[i];
+
+            if (!size || configured_size > UINT64_MAX - size) {
+                error_setg(errp, "invalid SMBIOS per-device memory size");
+                goto err_exit;
+            }
+            configured_size += size;
+        }
+        if (configured_size != current_machine->ram_size) {
+            error_setg(errp, "SMBIOS per-device memory size total (%" PRIu64
+                       " bytes) does not match guest RAM (%" PRIu64 " bytes)",
+                       configured_size,
+                       (uint64_t)current_machine->ram_size);
+            goto err_exit;
+        }
+    } else {
+        dimm_cnt = QEMU_ALIGN_UP(current_machine->ram_size,
+                                 mc->smbios_memory_device_size) /
+                   mc->smbios_memory_device_size;
+    }
 
     /* stealth: include unpopulated slots in the handle-space reservation
      * so T17_BASE + total_slots never collides with T19_BASE. */
@@ -2028,6 +2085,7 @@ void smbios_entry_add(QemuOpts *opts, Error **errp)
             save_opt(&type17.serial, opts, "serial");
             save_opt(&type17.asset, opts, "asset");
             save_opt(&type17.part, opts, "part");
+            save_opt(&type17.rank_list, opts, "rank-list");
             type17.speed = qemu_opt_get_number(opts, "speed", 0);
             type17.memtype = qemu_opt_get_number(opts, "memtype", 0);
             type17.type_detail = qemu_opt_get_number(opts, "typedetail", 0);

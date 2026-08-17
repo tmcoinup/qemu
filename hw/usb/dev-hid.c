@@ -29,10 +29,12 @@
 #include "migration/vmstate.h"
 #include "desc.h"
 #include "qapi/error.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/input/hid.h"
 #include "hw/usb/hid.h"
+#include "hw/usb/hid-numlock.h"
 #include "hw/core/qdev-properties.h"
 #include "qom/object.h"
 
@@ -51,11 +53,22 @@ struct USBHIDState {
      * 0 / NULL 表示不覆盖，保持 desc_* 静态默认 (Microsoft / HUION)。 */
     uint16_t vendorid;
     uint16_t productid;
+    /* UINT32_MAX means "keep the descriptor default".  uint32_t is used so
+     * 0x0000 remains a representable, intentional bcdDevice value. */
+    uint32_t bcd_device;
     char *manufacturer;
     char *product;
-    /* 内部：若 vendorid/productid 任一非 0，分配一份 USBDesc 副本写回 .id；
+    /* 内部：若 vendorid/productid/bcd-device 任一覆盖，分配一份
+     * USBDesc 副本写回 .id；
      * unrealize 时 g_free。dev->usb_desc 指向这份副本而不是 const 静态。 */
     USBDesc *patched_desc;
+
+    /* Opt-in, guest-LED-driven NumLock convergence state. */
+    USBHIDNumLockState numlock;
+    QEMUBH *numlock_bh;
+
+    /* Distinguishes a migration stream carrying the optional subsection. */
+    bool numlock_migration_loaded;
 };
 
 #define TYPE_USB_HID "usb-hid"
@@ -86,7 +99,7 @@ static const USBDescStrings desc_strings = {
      */
     [STR_MANUFACTURER]         = "Microsoft",
     [STR_PRODUCT_MOUSE]        = "Microsoft USB Optical Mouse",
-    [STR_PRODUCT_TABLET]       = "HUION PenTablet",
+    [STR_PRODUCT_TABLET]       = "QEMU USB Tablet",
     [STR_PRODUCT_KEYBOARD]     = "Microsoft Wired Keyboard 600",
     [STR_SERIAL_COMPAT]        = "42",
     [STR_CONFIG_MOUSE]         = "HID Mouse",
@@ -95,7 +108,7 @@ static const USBDescStrings desc_strings = {
     [STR_SERIAL_MOUSE]         = "89126",
     [STR_SERIAL_TABLET]        = "28754",
     [STR_SERIAL_KEYBOARD]      = "68284",
-    [STR_MANUFACTURER_TABLET]  = "HUION",
+    [STR_MANUFACTURER_TABLET]  = "QEMU",
 };
 
 static const USBDescIface desc_iface_mouse = {
@@ -396,9 +409,10 @@ static const USBDescMSOS desc_msos_suspend = {
  * Microsoft VID 0x045E with retail PIDs that match the iProduct strings:
  *   - Mouse:    045E:00CB (Microsoft USB Optical Mouse)
  *   - Keyboard: 045E:0750 (Microsoft Wired Keyboard 600)
- * Tablet 用 HUION (绘王) 256C:006D — 国内深圳厂, 淘宝入门款 H420 数位板,
- * 比 Wacom 草根, 不会引来"为什么家用机插 Wacom 专业板"这类二级怀疑.
- * 绝对坐标 USB pointer 报为 graphics tablet 而非 virtual mouse.
+ * usb-tablet 只实现 QEMU 的单接口通用绝对坐标 report；它没有
+ * HUION/VEIKK/XP-Pen 真机的复合接口、压力或倾角协议。默认 descriptor
+ * 因此保持诚实的 QEMU 0627:0001 身份；旧 vm.conf 的品牌覆盖只由
+ * 启动器的明确 compatibility 路径保留，不再进入新建池。
  */
 /*
  * bcdDevice: 真硬件设备版本号在 USB ID 数据库里都不为 0。bcdDevice=0 是
@@ -406,7 +420,7 @@ static const USBDescMSOS desc_msos_suspend = {
  * 必然虚拟"）。改为公开报告的真实硬件 firmware revision：
  *   - Microsoft USB Optical Mouse 045E:00CB → bcdDevice 0x0163
  *   - Microsoft Wired Keyboard 600 045E:0750 → bcdDevice 0x0163
- *   - HUION H420 256C:006D → bcdDevice 0x0100
+ *   - QEMU generic absolute pointer 0627:0001 → bcdDevice 0x0000
  *
  * iSerialNumber: 真实 OEM mouse/keyboard 都不暴露 serial 字符串（iSerialNumber=0）。
  * 之前给的 "68284" / "89126" / "28754" 这类 4-5 位 random 数 string 在 lsusb -v
@@ -445,9 +459,9 @@ static const USBDesc desc_mouse2 = {
 
 static const USBDesc desc_tablet = {
     .id = {
-        .idVendor          = 0x256C,
-        .idProduct         = 0x006D,
-        .bcdDevice         = 0x0100,
+        .idVendor          = 0x0627,
+        .idProduct         = 0x0001,
+        .bcdDevice         = 0x0000,
         .iManufacturer     = STR_MANUFACTURER_TABLET,
         .iProduct          = STR_PRODUCT_TABLET,
         .iSerialNumber     = 0,
@@ -459,9 +473,9 @@ static const USBDesc desc_tablet = {
 
 static const USBDesc desc_tablet2 = {
     .id = {
-        .idVendor          = 0x256C,
-        .idProduct         = 0x006D,
-        .bcdDevice         = 0x0100,
+        .idVendor          = 0x0627,
+        .idProduct         = 0x0001,
+        .bcdDevice         = 0x0000,
         .iManufacturer     = STR_MANUFACTURER_TABLET,
         .iProduct          = STR_PRODUCT_TABLET,
         .iSerialNumber     = 0,
@@ -613,10 +627,59 @@ static void usb_hid_changed(HIDState *hs)
     usb_wakeup(us->intr, 0);
 }
 
+static void usb_keyboard_force_numlock_bh(void *opaque)
+{
+    USBHIDState *us = opaque;
+
+    /* The LED may have changed before the deferred callback ran. */
+    if (!usb_hid_numlock_should_inject(&us->numlock)) {
+        return;
+    }
+
+    if (hid_keyboard_send_key_click(&us->hid, Q_KEY_CODE_NUM_LOCK)) {
+        /* Keep pending until the guest confirms ON. */
+        us->numlock.injection_attempted = true;
+    } else {
+        /* Do not spin on a full queue; a later explicit OFF can retry. */
+        us->numlock.force_pending = false;
+        us->numlock.injection_attempted = false;
+    }
+}
+
+static void usb_keyboard_numlock_report(USBHIDState *us, bool led_on)
+{
+    USBHIDNumLockAction action =
+        usb_hid_numlock_report(&us->numlock, led_on);
+
+    if (!us->numlock_bh) {
+        return;
+    }
+
+    switch (action) {
+    case USB_HID_NUMLOCK_ACTION_SCHEDULE:
+        qemu_bh_schedule(us->numlock_bh);
+        break;
+    case USB_HID_NUMLOCK_ACTION_CANCEL:
+        qemu_bh_cancel(us->numlock_bh);
+        break;
+    case USB_HID_NUMLOCK_ACTION_NONE:
+        break;
+    }
+}
+
+static void usb_keyboard_numlock_reset(USBHIDState *us)
+{
+    if (us->numlock_bh) {
+        qemu_bh_cancel(us->numlock_bh);
+    }
+    usb_hid_numlock_reset(&us->numlock);
+}
+
 static void usb_hid_handle_reset(USBDevice *dev)
 {
     USBHIDState *us = USB_HID(dev);
 
+    usb_keyboard_numlock_reset(us);
     hid_reset(&us->hid);
 }
 
@@ -665,6 +728,11 @@ static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
     case HID_SET_REPORT:
         if (hs->kind == HID_KEYBOARD) {
             p->actual_length = hid_keyboard_write(hs, data, length);
+            if (p->actual_length > 0) {
+                /* Trust the guest's actual Output Report; never guess OFF. */
+                usb_keyboard_numlock_report(
+                    us, (data[0] & HID_KBD_LED_NUM_LOCK) != 0);
+            }
         } else {
             goto fail;
         }
@@ -740,6 +808,11 @@ static void usb_hid_unrealize(USBDevice *dev)
 {
     USBHIDState *us = USB_HID(dev);
 
+    usb_keyboard_numlock_reset(us);
+    if (us->numlock_bh) {
+        qemu_bh_delete(us->numlock_bh);
+        us->numlock_bh = NULL;
+    }
     hid_free(&us->hid);
     /* stealth (patch 0010): 释放 VID/PID 覆盖时分配的 USBDesc 副本 */
     if (us->patched_desc) {
@@ -774,13 +847,20 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
      * 任一非零就 g_memdup() 出一份可写副本，patch .id 后挂到 dev->usb_desc。
      * 字符串覆盖在 usb_desc_init() 之后用 usb_desc_set_string() 写入设备的
      * per-instance strings list（不动 const desc_strings 静态表）。 */
-    if (us->vendorid || us->productid) {
+    if (us->bcd_device != UINT32_MAX && us->bcd_device > UINT16_MAX) {
+        error_setg(errp, "bcd-device must be a 16-bit BCD value");
+        return;
+    }
+    if (us->vendorid || us->productid || us->bcd_device != UINT32_MAX) {
         us->patched_desc = g_memdup2(selected, sizeof(*selected));
         if (us->vendorid) {
             us->patched_desc->id.idVendor = us->vendorid;
         }
         if (us->productid) {
             us->patched_desc->id.idProduct = us->productid;
+        }
+        if (us->bcd_device != UINT32_MAX) {
+            us->patched_desc->id.bcdDevice = us->bcd_device;
         }
         dev->usb_desc = us->patched_desc;
     } else {
@@ -828,7 +908,15 @@ static void usb_mouse_realize(USBDevice *dev, Error **errp)
 
 static void usb_keyboard_realize(USBDevice *dev, Error **errp)
 {
+    USBHIDState *us = USB_HID(dev);
+
     usb_hid_initfn(dev, HID_KEYBOARD, &desc_keyboard, &desc_keyboard2, errp);
+    if (us->numlock.force_on && us->hid.s) {
+        /* Defer injection out of the USB control-transfer call stack. */
+        us->numlock_bh = qemu_bh_new_guarded(
+            usb_keyboard_force_numlock_bh, us,
+            &DEVICE(dev)->mem_reentrancy_guard);
+    }
 }
 
 static int usb_ptr_post_load(void *opaque, int version_id)
@@ -839,6 +927,109 @@ static int usb_ptr_post_load(void *opaque, int version_id)
         hid_pointer_activate(&s->hid);
     }
     return 0;
+}
+
+static int usb_keyboard_pre_load(void *opaque)
+{
+    USBHIDState *us = opaque;
+
+    /* loadvm may reuse an existing object; discard its old runtime state. */
+    usb_keyboard_numlock_reset(us);
+    us->numlock_migration_loaded = false;
+    return 0;
+}
+
+static bool usb_keyboard_numlock_migration_needed(void *opaque)
+{
+    USBHIDState *us = opaque;
+
+    /* Keep the historical usb-kbd v1 stream unchanged when opt-in is off. */
+    return us->numlock.force_on;
+}
+
+static int usb_keyboard_numlock_subsection_post_load(void *opaque,
+                                                      int version_id)
+{
+    USBHIDState *us = opaque;
+
+    us->numlock_migration_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_usb_kbd_numlock = {
+    .name = "usb-kbd/numlock-startup",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = usb_keyboard_numlock_subsection_post_load,
+    .needed = usb_keyboard_numlock_migration_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(numlock.led_known, USBHIDState),
+        VMSTATE_BOOL(numlock.led_on, USBHIDState),
+        VMSTATE_BOOL(numlock.force_pending, USBHIDState),
+        VMSTATE_BOOL(numlock.injection_attempted, USBHIDState),
+        VMSTATE_BOOL(numlock.startup_completed, USBHIDState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool usb_keyboard_post_load(void *opaque, int version_id, Error **errp)
+{
+    USBHIDState *us = opaque;
+    bool hid_led_on = (us->hid.kbd.leds & HID_KBD_LED_NUM_LOCK) != 0;
+    bool subsection_loaded = us->numlock_migration_loaded;
+
+    us->numlock_migration_loaded = false;
+
+    if (!subsection_loaded) {
+        if (us->numlock.force_on) {
+            /* Old streams have no convergence epoch; preserve their LED. */
+            us->numlock.led_known = true;
+            us->numlock.led_on = hid_led_on;
+            us->numlock.startup_completed = true;
+        }
+        return true;
+    }
+
+    if (!us->numlock.force_on) {
+        error_setg(errp, "usb-kbd NumLock migration state requires "
+                   "x-force-numlock-on=on on the destination");
+        return false;
+    }
+
+    if ((!us->numlock.led_known &&
+         (us->numlock.led_on || us->numlock.force_pending ||
+          us->numlock.injection_attempted ||
+          us->numlock.startup_completed)) ||
+        (us->numlock.led_known && us->numlock.led_on != hid_led_on)) {
+        error_setg(errp, "usb-kbd NumLock migration state disagrees with "
+                   "the migrated HID LED report");
+        return false;
+    }
+
+    /* Normalize an older v1 subsection's completed+OFF representation. */
+    if (us->numlock.led_known && !us->numlock.led_on &&
+        !us->numlock.force_pending &&
+        !us->numlock.injection_attempted) {
+        us->numlock.startup_completed = false;
+        us->numlock.force_pending = true;
+        us->numlock.injection_attempted = false;
+    }
+
+    if ((us->numlock.injection_attempted &&
+         !us->numlock.force_pending) ||
+        (us->numlock.force_pending &&
+         (us->numlock.led_on || us->numlock.startup_completed)) ||
+        (us->numlock.led_on && !us->numlock.startup_completed)) {
+        error_setg(errp, "usb-kbd NumLock migration state has an invalid "
+                   "pending/completed combination");
+        return false;
+    }
+
+    /* A queued click migrates with HID state; only restore an unrun BH. */
+    if (usb_hid_numlock_should_inject(&us->numlock) && us->numlock_bh) {
+        qemu_bh_schedule(us->numlock_bh);
+    }
+    return true;
 }
 
 static const VMStateDescription vmstate_usb_ptr = {
@@ -857,10 +1048,16 @@ static const VMStateDescription vmstate_usb_kbd = {
     .name = "usb-kbd",
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_load = usb_keyboard_pre_load,
+    .post_load_errp = usb_keyboard_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_USB_DEVICE(dev, USBHIDState),
         VMSTATE_HID_KEYBOARD_DEVICE(hid, USBHIDState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_usb_kbd_numlock,
+        NULL
     }
 };
 
@@ -890,6 +1087,7 @@ static const Property usb_tablet_properties[] = {
         /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */
         DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
         DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
+        DEFINE_PROP_UINT32("bcd-device", USBHIDState, bcd_device, UINT32_MAX),
         DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
         DEFINE_PROP_STRING("product", USBHIDState, product),
 };
@@ -900,7 +1098,7 @@ static void usb_tablet_class_initfn(ObjectClass *klass, const void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize        = usb_tablet_realize;
-    uc->product_desc   = "HUION PenTablet";
+    uc->product_desc   = "QEMU USB Tablet";
     dc->vmsd = &vmstate_usb_ptr;
     device_class_set_props(dc, usb_tablet_properties);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
@@ -917,6 +1115,7 @@ static const Property usb_mouse_properties[] = {
         /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */
         DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
         DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
+        DEFINE_PROP_UINT32("bcd-device", USBHIDState, bcd_device, UINT32_MAX),
         DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
         DEFINE_PROP_STRING("product", USBHIDState, product),
 };
@@ -942,12 +1141,43 @@ static const TypeInfo usb_mouse_info = {
 static const Property usb_keyboard_properties[] = {
         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
         DEFINE_PROP_STRING("display", USBHIDState, display),
+        DEFINE_PROP_BOOL("x-force-numlock-on", USBHIDState,
+                         numlock.force_on, false),
         /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */
         DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
         DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
+        DEFINE_PROP_UINT32("bcd-device", USBHIDState, bcd_device, UINT32_MAX),
         DEFINE_PROP_STRING("manufacturer", USBHIDState, manufacturer),
         DEFINE_PROP_STRING("product", USBHIDState, product),
 };
+
+static bool usb_keyboard_get_numlock_led_known(Object *obj, Error **errp)
+{
+    USBHIDState *us = USB_HID(obj);
+
+    return us->numlock.led_known;
+}
+
+static bool usb_keyboard_get_numlock_led_on(Object *obj, Error **errp)
+{
+    USBHIDState *us = USB_HID(obj);
+
+    return us->numlock.led_on;
+}
+
+static bool usb_keyboard_get_numlock_force_pending(Object *obj, Error **errp)
+{
+    USBHIDState *us = USB_HID(obj);
+
+    return us->numlock.force_pending;
+}
+
+static bool usb_keyboard_get_numlock_on_confirmed(Object *obj, Error **errp)
+{
+    USBHIDState *us = USB_HID(obj);
+
+    return us->numlock.startup_completed;
+}
 
 static void usb_keyboard_class_initfn(ObjectClass *klass, const void *data)
 {
@@ -958,6 +1188,20 @@ static void usb_keyboard_class_initfn(ObjectClass *klass, const void *data)
     uc->product_desc   = "Microsoft Wired Keyboard 600";
     dc->vmsd = &vmstate_usb_kbd;
     device_class_set_props(dc, usb_keyboard_properties);
+    object_class_property_add_bool(klass, "x-numlock-led-known",
+                                   usb_keyboard_get_numlock_led_known, NULL);
+    object_class_property_add_bool(klass, "x-numlock-led-on",
+                                   usb_keyboard_get_numlock_led_on, NULL);
+    object_class_property_add_bool(klass, "x-numlock-force-pending",
+                                   usb_keyboard_get_numlock_force_pending,
+                                   NULL);
+    object_class_property_add_bool(klass, "x-numlock-on-confirmed",
+                                   usb_keyboard_get_numlock_on_confirmed,
+                                   NULL);
+    /* Compatibility alias retained for V-11-era diagnostics. */
+    object_class_property_add_bool(klass, "x-numlock-startup-completed",
+                                   usb_keyboard_get_numlock_on_confirmed,
+                                   NULL);
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
 }
 

@@ -1,4 +1,4 @@
-# Tesla V100 host resource example for deploy/start-vm.sh.
+# Tesla V100 host resource example for deploy/scripts/start-vm.sh.
 #
 # Copy this file to deploy/host/vgpu-host.conf, or point
 # VGPU_HOST_CONFIG at another readable file.  The example is intentionally

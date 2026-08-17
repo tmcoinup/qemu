@@ -15,14 +15,22 @@
 #   mdev_find_type <profile>        # 根据 profile 匹配 /sys 下的 type name
 #   mdev_allocate <profile> <uuid> [framebuffer_mb] [guest_gpu_name]
 #                 [vgpu_pci_id vgpu_pci_device_id] [frl_enabled]
+#                 [rm_fb_bus_width rm_fb_ram_type rm_fb_memory_vendor]
 #                                   # 用 <uuid> 在 type 下创建 mdev。
 #                                   # 第 4 参数写入/移除 per-VM 名称；可选
 #                                   # 的成对第 5/6 参数写入 vgpu_unlock
 #                                   # 内部 vdev_id/pdev_id。可选第 7 参数
 #                                   # 写 per-mdev frl_enabled；无 PCI ID 时
-#                                   # 第 5/6 参数传空。旧 1-6 参数兼容。
+#                                   # 第 5/6 参数传空。完整 RM 显存描述使用
+#                                   # 固定第 8-10 参数，第 5-7 参数可留空；
+#                                   # 旧 1-7 参数兼容。
 #   mdev_configure_console_interval <uuid> <microseconds>
 #                                   # R535 console REGION copy 周期。
+#   mdev_set_identity_override <uuid> <guest_gpu_name>
+#                 [vgpu_pci_id vgpu_pci_device_id frl_enabled
+#                  rm_fb_bus_width rm_fb_ram_type rm_fb_memory_vendor]
+#                                   # VM 未运行时把 per-mdev contract 原子
+#                                   # 恢复为 B；probe rollback 用。
 #   mdev_release <uuid>             # VM 退出时拆除 mdev（通过 remove sysfs）
 #   mdev_count_active [type_dir]    # 统计同一物理 GPU 下已分配的 mdev
 
@@ -42,6 +50,8 @@
 : "${VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG_PATH:=${VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG:-/etc/vgpu_unlock/profile_override.toml}}"
 : "${VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG:=$VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG_PATH}"
 : "${VGPU_MDEV_IDENTITY_MODE:=auto}" # auto | required | off
+: "${VGPU_MDEV_ADMIN_HELPER:=/usr/local/libexec/qemu-vgpu-mdev-admin}"
+: "${VGPU_MDEV_ADMIN_INSTALLER:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../host/install-vgpu-mdev-admin.sh}"
 _MDEV_MANAGED_IDENTITY_CONFIG=/etc/vgpu_unlock/profile_override.toml
 _MDEV_TRUSTED_IDENTITY_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../host/update-vgpu-mdev-identity.py"
 if [[ -z "${VGPU_MDEV_IDENTITY_HELPER:-}" ]]; then
@@ -49,6 +59,36 @@ if [[ -z "${VGPU_MDEV_IDENTITY_HELPER:-}" ]]; then
 fi
 
 mdev_err() { printf 'mdev: %s\n' "$*" >&2; }
+
+_mdev_admin_available() {
+    [[ -f "$VGPU_MDEV_ADMIN_HELPER" &&
+       ! -L "$VGPU_MDEV_ADMIN_HELPER" &&
+       -x "$VGPU_MDEV_ADMIN_HELPER" ]]
+}
+
+# Invoke only the installed, root-owned helper's validated verbs.  -n is
+# deliberate: a missing/stale sudoers contract must fail in the terminal and
+# must never open a graphical password dialog during VM startup or cleanup.
+_mdev_admin_run() {
+    _mdev_admin_available || {
+        mdev_err "受限 mdev admin helper 未安装: $VGPU_MDEV_ADMIN_HELPER"
+        mdev_err "一次性安装: sudo $VGPU_MDEV_ADMIN_INSTALLER"
+        return 1
+    }
+    if (( EUID == 0 )); then
+        "$VGPU_MDEV_ADMIN_HELPER" "$@"
+    elif ! sudo -n -- "$VGPU_MDEV_ADMIN_HELPER" "$@"; then
+        mdev_err "mdev admin helper/sudoers 未就绪（已禁止密码弹窗）"
+        mdev_err "一次性修复: sudo $VGPU_MDEV_ADMIN_INSTALLER"
+        return 1
+    fi
+}
+
+_mdev_is_production_sysfs() {
+    [[ "$MDEV_DEVICES_DIR" == /sys/bus/mdev/devices &&
+       "$MDEV_BUS_CLASS_DIR" == /sys/class/mdev_bus &&
+       "$NVIDIA_MODULE_VERSION_FILE" == /sys/module/nvidia/version ]]
+}
 
 mdev_uuid_in_use() {
     local uuid=$1 cmdline pid
@@ -133,9 +173,13 @@ _mdev_sudo_run() {
 _mdev_sync_identity_override_locked() {
     local uuid=$1 identity_name=$2 config=$VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG
     local helper=$VGPU_MDEV_IDENTITY_HELPER directory temporary root_temporary
-    local canonical_config canonical_helper trusted_helper
+    local canonical_config canonical_helper trusted_helper used_admin=0
+    local admin_pci_id admin_pci_device_id admin_frl admin_fb_bus
+    local admin_ram_type admin_memory_vendor
     local -a helper_identity_args=()
     local identity_pci_id="" identity_pci_device_id="" identity_frl_enabled=""
+    local identity_rm_fb_bus_width="" identity_rm_fb_ram_type=""
+    local identity_rm_fb_memory_vendor=""
 
     case $# in
         2) ;;
@@ -149,13 +193,21 @@ _mdev_sync_identity_override_locked() {
             identity_pci_device_id=$4
             identity_frl_enabled=$5
             ;;
+        8)
+            identity_pci_id=$3
+            identity_pci_device_id=$4
+            identity_frl_enabled=$5
+            identity_rm_fb_bus_width=$6
+            identity_rm_fb_ram_type=$7
+            identity_rm_fb_memory_vendor=$8
+            ;;
         *)
-            mdev_err "per-mdev identity 参数必须是 name、name+FRL、name+PCI pair 或 name+PCI pair+FRL"
+            mdev_err "per-mdev identity 参数必须是旧 name/PCI/FRL 合同或完整 RM FB 合同"
             return 1
             ;;
     esac
     if [[ -z "$identity_name" && $# -gt 2 ]]; then
-        mdev_err "移除 per-mdev identity 时不能同时写 PCI/FRL override"
+        mdev_err "移除 per-mdev identity 时不能同时写 PCI/FRL/RM override"
         return 1
     fi
     if [[ -n "$identity_frl_enabled" &&
@@ -163,7 +215,13 @@ _mdev_sync_identity_override_locked() {
         mdev_err "per-mdev frl_enabled 必须是 0 或 1: $identity_frl_enabled"
         return 1
     fi
-
+    if (( $# == 8 )) &&
+            [[ -z "$identity_rm_fb_bus_width" ||
+               -z "$identity_rm_fb_ram_type" ||
+               -z "$identity_rm_fb_memory_vendor" ]]; then
+        mdev_err "per-mdev RM FB 位宽、显存类型、显存厂商必须完整提供"
+        return 1
+    fi
     [[ "$config" == "$VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG_PATH" ]] || {
         mdev_err "identity config 路径与 hook 路径不一致: $config != $VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG_PATH"
         return 1
@@ -177,6 +235,31 @@ _mdev_sync_identity_override_locked() {
         mdev_err "per-mdev identity helper 缺失: $helper"
         return 1
     }
+
+    canonical_config=$(readlink -f -- "$config") || return 1
+    canonical_helper=$(readlink -f -- "$helper") || return 1
+    trusted_helper=$(readlink -f -- "$_MDEV_TRUSTED_IDENTITY_HELPER") || return 1
+    if [[ "$canonical_config" == "$_MDEV_MANAGED_IDENTITY_CONFIG" &&
+          "$canonical_helper" == "$trusted_helper" ]] &&
+            _mdev_admin_available; then
+        if [[ -n "$identity_name" ]]; then
+            admin_pci_id=${identity_pci_id:--}
+            admin_pci_device_id=${identity_pci_device_id:--}
+            admin_frl=${identity_frl_enabled:--}
+            admin_fb_bus=${identity_rm_fb_bus_width:--}
+            admin_ram_type=${identity_rm_fb_ram_type:--}
+            admin_memory_vendor=${identity_rm_fb_memory_vendor:--}
+            _mdev_admin_run identity-set "$uuid" "$identity_name" \
+                "$admin_pci_id" "$admin_pci_device_id" "$admin_frl" \
+                "$admin_fb_bus" "$admin_ram_type" "$admin_memory_vendor" ||
+                return 1
+        else
+            _mdev_admin_run identity-remove "$uuid" || return 1
+        fi
+        used_admin=1
+    fi
+
+    if ((used_admin == 0)); then
     directory=$(dirname "$config")
     if [[ -w "$directory" ]]; then
         temporary=$(mktemp "$directory/.profile_override.XXXXXXXX") || return 1
@@ -194,6 +277,13 @@ _mdev_sync_identity_override_locked() {
         fi
         if [[ -n "$identity_frl_enabled" ]]; then
             helper_identity_args+=(--frl-enabled "$identity_frl_enabled")
+        fi
+        if [[ -n "$identity_rm_fb_bus_width" ]]; then
+            helper_identity_args+=(
+                --rm-fb-bus-width "$identity_rm_fb_bus_width"
+                --rm-fb-ram-type "$identity_rm_fb_ram_type"
+                --rm-fb-memory-vendor "$identity_rm_fb_memory_vendor"
+            )
         fi
         python3 "$helper" --config "$config" --output "$temporary" \
             --uuid "$uuid" "${helper_identity_args[@]}" || {
@@ -214,18 +304,6 @@ _mdev_sync_identity_override_locked() {
             return 1
         }
     else
-        canonical_config=$(readlink -f -- "$config") || {
-            rm -f "$temporary"
-            return 1
-        }
-        canonical_helper=$(readlink -f -- "$helper") || {
-            rm -f "$temporary"
-            return 1
-        }
-        trusted_helper=$(readlink -f -- "$_MDEV_TRUSTED_IDENTITY_HELPER") || {
-            rm -f "$temporary"
-            return 1
-        }
         [[ "$canonical_config" == "$_MDEV_MANAGED_IDENTITY_CONFIG" ]] || {
             mdev_err "拒绝 sudo 覆盖非受管 identity config: $canonical_config"
             rm -f "$temporary"
@@ -245,6 +323,7 @@ _mdev_sync_identity_override_locked() {
         }
         rm -f "$temporary"
     fi
+    fi
     if [[ -n "$identity_name" && -n "$identity_frl_enabled" &&
           -n "$identity_pci_id" ]]; then
         mdev_err "host per-mdev GPU identity 设置为 '$identity_name', vdev_id=$identity_pci_id, pdev_id=$identity_pci_device_id, frl_enabled=$identity_frl_enabled: $uuid"
@@ -257,6 +336,58 @@ _mdev_sync_identity_override_locked() {
     else
         mdev_err "host per-mdev GPU identity 已移除: $uuid"
     fi
+    if [[ -n "$identity_name" ]]; then
+        mdev_err "host per-mdev 显示合同：1 head / 1920x1080 / max_pixels=2073600: $uuid"
+    fi
+    if [[ -n "$identity_rm_fb_bus_width" ]]; then
+        mdev_err "host per-mdev RM 显存合同：${identity_rm_fb_bus_width}-bit / RAM type ${identity_rm_fb_ram_type} / vendor ${identity_rm_fb_memory_vendor}: $uuid"
+    fi
+}
+
+# Public, lock-safe B-contract reset used by the isolated signed-consumer probe.
+# Refuse while QEMU owns the UUID.  If an unused mdev survived a prior failure,
+# remove it before rewriting TOML: vgpu_unlock reads per-mdev identity while a
+# fresh UUID is created, so reusing the old object would silently keep the old
+# identity even though the configuration file looks correct.
+mdev_set_identity_override() {
+    local uuid=$1 identity_name=$2 owner_pid rc=0
+    local -a identity_field_args=("${@:3}")
+
+    case $# in
+        2|3|4|5|8|10) ;;
+        *)
+            mdev_err "mdev_set_identity_override 参数合同非法"
+            return 1
+            ;;
+    esac
+
+    [[ "$uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
+        mdev_err "非法 mdev UUID: $uuid"
+        return 1
+    }
+    [[ -n "$identity_name" ]] || {
+        mdev_err "B identity 名称不能为空"
+        return 1
+    }
+
+    _mdev_host_lock_acquire || return 1
+    if owner_pid=$(mdev_uuid_in_use "$uuid"); then
+        mdev_err "UUID $uuid 正被 PID $owner_pid 使用，拒绝在线修改 identity"
+        rc=1
+    elif [[ -L "$MDEV_DEVICES_DIR/$uuid" ]] &&
+            ! _mdev_release_locked "$uuid"; then
+        mdev_err "无法释放 probe 遗留的未占用 mdev: $uuid"
+        rc=1
+    elif [[ -L "$MDEV_DEVICES_DIR/$uuid" ]]; then
+        mdev_err "mdev remove 返回后 UUID 仍存在，拒绝写入可误导的 identity: $uuid"
+        rc=1
+    elif ! _mdev_sync_identity_override_locked \
+            "$uuid" "$identity_name" "${identity_field_args[@]}"; then
+        rc=$?
+        ((rc != 0)) || rc=1
+    fi
+    _mdev_host_lock_release || { ((rc != 0)) || rc=1; }
+    return "$rc"
 }
 
 # profile 名 → NVIDIA vGPU type name 的关键子串。
@@ -517,12 +648,17 @@ mdev_configure_console_interval() {
     # NVIDIA R535 的默认 console-copy / VGA-copy 周期都是 100000us，
     # 所以 QEMU 即使以 60Hz QUERY_GFX_PLANE，也只能看到约 10 个新帧/秒。
     # 这两个内部键必须在 QEMU 打开 mdev 之前一起设置。
-    _mdev_sudo_write \
-        "intervaltime=${interval_us},vgaintervaltime=${interval_us}" \
-        "$params_path" || {
+    if _mdev_is_production_sysfs && _mdev_admin_available; then
+        _mdev_admin_run console-interval "$uuid" "$interval_us" || {
+            mdev_err "设置 R535 console REGION 周期失败"
+            return 1
+        }
+    elif ! _mdev_sudo_write \
+            "intervaltime=${interval_us},vgaintervaltime=${interval_us}" \
+            "$params_path"; then
         mdev_err "设置 R535 console REGION 周期失败"
         return 1
-    }
+    fi
     mdev_err "R535 console REGION 周期=${interval_us}us（实验性内部参数）"
 }
 
@@ -530,10 +666,11 @@ _mdev_allocate_locked() {
     local profile=$1 uuid=$2 requested_fb_mb=${3:-$VGPU_PER_VM_FB_MB}
     local identity_argument_present=0 identity_name=""
     local type_dir mdev_dir actual_fb_mb available fb_used existing_type
+    local parent bdf type_id create_via_admin=0
     local -a identity_field_args=()
 
-    if (( $# == 5 || $# > 7 )); then
-        mdev_err "mdev_allocate identity 参数必须是成对 PCI ID，可再带第 7 参数 FRL"
+    if (( $# == 5 || $# == 8 || $# == 9 || $# > 10 )); then
+        mdev_err "mdev_allocate identity 参数必须是旧 PCI/FRL 或完整 RM FB 合同"
         return 1
     fi
 
@@ -541,9 +678,9 @@ _mdev_allocate_locked() {
         identity_argument_present=1
         identity_name=$4
     fi
-    if (( $# == 6 || $# == 7 )); then
+    if (( $# == 6 || $# == 7 || $# == 10 )); then
         [[ -n "$identity_name" ]] || {
-            mdev_err "mdev_allocate 写 PCI/FRL identity 时 guest_gpu_name 不能为空"
+            mdev_err "mdev_allocate 写 PCI/FRL/RM identity 时 guest_gpu_name 不能为空"
             return 1
         }
         if [[ -n "$5" || -n "$6" ]]; then
@@ -564,7 +701,19 @@ _mdev_allocate_locked() {
         }
         identity_field_args+=("$7")
     fi
-
+    if (( $# == 10 )); then
+        if [[ -n "$7" && "$7" != 0 && "$7" != 1 ]]; then
+            mdev_err "mdev_allocate frl_enabled 必须留空或为 0/1: $7"
+            return 1
+        fi
+        if [[ -z "$8" || -z "$9" || -z "${10}" ]]; then
+            mdev_err "mdev_allocate RM FB 位宽、显存类型、显存厂商必须完整提供"
+            return 1
+        fi
+        # The full contract is positional so empty PCI/FRL placeholders are
+        # preserved all the way into the atomic TOML generator.
+        identity_field_args=("$5" "$6" "$7" "$8" "$9" "${10}")
+    fi
     [[ "$uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
         mdev_err "非法 mdev UUID: $uuid"
         return 1
@@ -643,16 +792,24 @@ _mdev_allocate_locked() {
             "$uuid" "$identity_name" "${identity_field_args[@]}" || return 1
     fi
 
-    if ! _mdev_sudo_write "$uuid" "$type_dir/create"; then
-        mdev_err "写入 $type_dir/create 失败"
-        return 1
+    if _mdev_is_production_sysfs && _mdev_admin_available; then
+        parent=$(_mdev_parent_for_type "$type_dir") || return 1
+        bdf=$(basename -- "$parent")
+        type_id=$(basename -- "$type_dir")
+        _mdev_admin_run mdev-create "$bdf" "$type_id" "$uuid" || return 1
+        create_via_admin=1
+    else
+        if ! _mdev_sudo_write "$uuid" "$type_dir/create"; then
+            mdev_err "写入 $type_dir/create 失败"
+            return 1
+        fi
     fi
 
     # mdev 创建后内核自动生成 /dev/vfio/<iommu_group>，默认仅 root:root 0600，
     # 当前用户 (ubuntu) 打不开；直接 chown 给调用者，免改 udev 规则。
     local group
     group=$(basename "$(readlink -f "$mdev_dir/iommu_group" 2>/dev/null)") || true
-    if [[ -n "$group" && -c "/dev/vfio/$group" ]]; then
+    if ((create_via_admin == 0)) && [[ -n "$group" && -c "/dev/vfio/$group" ]]; then
         if sudo -n true 2>/dev/null; then
             sudo chown "$(id -u):$(id -g)" "/dev/vfio/$group" 2>/dev/null
         elif [[ -n "${SUDO_PASSWORD:-}" ]]; then
@@ -679,7 +836,11 @@ _mdev_release_locked() {
         return 1
     }
     [[ -L "$mdev_dir" ]] || return 0
-    _mdev_sudo_write 1 "$mdev_dir/remove"
+    if _mdev_is_production_sysfs && _mdev_admin_available; then
+        _mdev_admin_run mdev-remove "$uuid"
+    else
+        _mdev_sudo_write 1 "$mdev_dir/remove"
+    fi
 }
 
 mdev_release() {

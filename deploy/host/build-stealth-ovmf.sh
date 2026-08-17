@@ -155,8 +155,8 @@ ls -la "$DST"
 sha256sum "$DST"
 
 cat <<EOF
-Done.  Now run from deploy/:
-    ./start-vm.sh 1
+Done.  Now run from the repository root:
+    ./deploy/scripts/start-vm.sh 1
 Verify in guest:
     Get-ItemProperty 'HKLM:\\HARDWARE\\DESCRIPTION\\System' SystemBiosVersion
 should show "American Megatrends Inc. - 10000" in the list (not "Ubuntu ...").

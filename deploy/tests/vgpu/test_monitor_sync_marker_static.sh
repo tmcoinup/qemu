@@ -5,8 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-SYNC="$REPO_ROOT/deploy/sync-monitor-profile.sh"
-START_VM="$REPO_ROOT/deploy/start-vm.sh"
+SYNC="$REPO_ROOT/deploy/scripts/sync-monitor-profile.sh"
+START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -38,14 +38,41 @@ require_marker_input '${GPU_SUB_VID:-}'
 require_marker_input '${GPU_SUB_DID:-}'
 require_marker_input '${VGPU_PATCHED_DRIVER_INF:-}'
 require_marker_input '${VGPU_PATCHED_DRIVER_VERSION:-}'
-require_marker_input 'host-edid-sync-v4'
+require_marker_input '${VGPU_PATCHED_DRIVER_REQUIRED_VERSION:-}'
+require_marker_input '${VGPU_PRODUCTION_MIGRATION_ID:-}'
+require_marker_input '$MONITOR_DRIVER_VERSION'
+require_marker_input '$MONITOR_DRIVER_INF_SHA256'
+require_marker_input '$MONITOR_DRIVER_CATALOG_SHA256'
+require_marker_input 'nvidia_modes.py'
+require_marker_input 'windows_hive.py'
+require_marker_input 'profile_override.toml'
+require_marker_input 'update-vgpu-mdev-identity.py'
+require_marker_input 'vgpu_display_contract=1:1920:1080:2073600'
+require_marker_input 'host-edid-sync-v8-edid-override'
 
-if grep -F 'host-edid-sync-v3' "$SYNC" >/dev/null; then
-    fail "legacy v3 marker generation remains"
+if grep -E 'host-edid-sync-v(3|4|5|6|7)([^0-9]|$)' "$SYNC" >/dev/null; then
+    fail "legacy v3..v7 marker generation remains"
 fi
 grep -F -- '--marker-value "$spec_hash"' "$SYNC" >/dev/null ||
     fail "computed identity-bound hash is not passed to the cache helper"
+grep -F -- '--driver-version "$MONITOR_DRIVER_VERSION"' "$SYNC" >/dev/null ||
+    fail "locked production driver version is not passed explicitly"
+grep -F -- '--driver-inf-sha256 "$MONITOR_DRIVER_INF_SHA256"' "$SYNC" >/dev/null ||
+    fail "locked production INF hash is not passed explicitly"
 grep -F -- 'MONITOR_SYNC_SPOOF_MODE="$SPOOF_MODE"' "$START_VM" >/dev/null ||
     fail "start-vm does not hash the effective post-CLI spoof mode"
+grep -F -- '缺少 MONITOR_PROFILE；拒绝静默套用固定 Dell 身份' "$SYNC" >/dev/null ||
+    fail "monitor sync still has a silent fixed-profile fallback"
+if grep -F -- 'old_profile=${MONITOR_PROFILE:-dell-p2419h}' "$SYNC" >/dev/null; then
+    fail "monitor sync still defaults arbitrary VMs to Dell P2419H"
+fi
+grep -F -- 'elif [[ -t 0 ]]; then' "$SYNC" >/dev/null ||
+    fail "interactive start cannot obtain a temporary sudo ticket automatically"
+grep -F -- 'sudo -v' "$SYNC" >/dev/null ||
+    fail "interactive monitor sync omits secure sudo ticket acquisition"
+grep -F -- '凭据不会写入仓库或参数' "$SYNC" >/dev/null ||
+    fail "interactive privilege prompt does not document credential handling"
+grep -F -- '非交互运行缺少 sudo 票据' "$SYNC" >/dev/null ||
+    fail "non-interactive privilege failure is not explicit"
 
-echo "OK: monitor sync v4 marker includes GPU parent and patched-driver identity"
+echo "OK: monitor sync v8 marker, automatic privilege prompt, GPU, driver, EDID override, mode, and hive policies"

@@ -25,11 +25,13 @@
 #     ./setup-guest.sh 1 --skip-ivshmem
 #     ./setup-guest.sh 1 --with-guest-identity # 可选旧 guest 注册表修复
 #     ./setup-guest.sh 1 --with-nvapi-shim # 显式兼容回退；同时启用 guest identity
-#     ./setup-guest.sh 1 --online-monitor-rescue  # 仅在 host 离线同步不可用时
+#     ./setup-guest.sh 1 --online-monitor-rescue --skip-vgpu --skip-license \
+#       --skip-ivshmem --skip-service --skip-input  # 仅旧 WinRM guest 显示器救援
 #
 # Customize:
 #     ./setup-guest.sh 1 --gpu-name "GeForce GTX 1050"
-#     ./setup-guest.sh 1 --online-monitor-rescue --monitor samsung-s24f350
+#     ./setup-guest.sh 1 --online-monitor-rescue --monitor samsung-s24f350 \
+#       --skip-vgpu --skip-license --skip-ivshmem --skip-service --skip-input
 #     # --monitor 只选择救援型号；没有 --online-monitor-rescue 时不会进 guest 执行
 #
 set -euo pipefail
@@ -208,7 +210,9 @@ fi
 
 if [[ $SKIP_STEALTH -eq 0 ]]; then
     step "[5/7] GPU identity: '${GPU_NAME}' + registry specs + RefreshGridNames task"
+    guest/generate-vgpu-profile-catalog.sh --check
     cp -f guest/patch-grid-strings.ps1 "$STAGE_DIR/"
+    cp -f guest/vgpu-profile-catalog.json "$STAGE_DIR/"
     cp -f guest/install-nvapi-shim.ps1 "$STAGE_DIR/"
     cp -f guest/nvapi-shim/nvapi64.dll guest/nvapi-shim/nvapi.dll \
         "$STAGE_DIR/"
@@ -230,8 +234,10 @@ if [[ $SKIP_STEALTH -eq 0 ]]; then
     SHIM64_SHA256=$(sha256sum guest/nvapi-shim/nvapi64.dll | awk '{print toupper($1)}')
     SHIM32_SHA256=$(sha256sum guest/nvapi-shim/nvapi.dll | awk '{print toupper($1)}')
     PATCH_SHA256=$(sha256sum guest/patch-grid-strings.ps1 | awk '{print toupper($1)}')
+    CATALOG_ASSET_SHA256=$(sha256sum guest/vgpu-profile-catalog.json | awk '{print toupper($1)}')
+    CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
     INSTALLER_SHA256=$(sha256sum guest/install-nvapi-shim.ps1 | awk '{print toupper($1)}')
-    python3 - "$IP" "$HOST_IP" "$GPU_NAME" \
+    python3 - "$IP" "$HOST_IP" "$GPU_PROFILE" "$GPU_NAME" \
         "$((GPU_PCI_VID))" "$((GPU_PCI_DID))" \
         "$((GPU_SUB_VID))" "$((GPU_SUB_DID))" "$((GPU_REV))" \
         "$GPU_CORE_MHZ" "$GPU_BOOST_MHZ" "$GPU_MEMORY_MHZ" \
@@ -242,17 +248,19 @@ if [[ $SKIP_STEALTH -eq 0 ]]; then
         "$GPU_ARCHITECTURE" \
         "$GPU_IMPLEMENTATION" "$GPU_CHIP_REVISION" "$GPU_PCIE_WIDTH" \
         "$GPU_VBIOS_VERSION" "$SHIM64_SHA256" "$SHIM32_SHA256" \
-        "$PATCH_SHA256" "$INSTALLER_SHA256" \
+        "$PATCH_SHA256" "$CATALOG_ASSET_SHA256" "$CATALOG_SHA256" \
+        "$INSTALLER_SHA256" \
         "$((1 - SKIP_NVAPI_SHIM))" <<'PYEOF'
 import sys
 from pypsrp.client import Client
 (
-    ip, host, gpu, pci_vendor, pci_device, pci_subvendor, pci_subdevice,
+    ip, host, gpu_profile, gpu, pci_vendor, pci_device, pci_subvendor, pci_subdevice,
     pci_revision, core, boost, memory, bus, bandwidth, vram,
     memory_type, memory_maker, cuda_cores, shader_subpipes, rop_count, tmu_count,
     architecture, implementation, chip_revision, pcie_width, vbios_version,
-    shim64_sha, shim32_sha, patch_sha, installer_sha, install_shim,
-) = sys.argv[1:31]
+    shim64_sha, shim32_sha, patch_sha, catalog_asset_sha, catalog_sha,
+    installer_sha, install_shim,
+) = sys.argv[1:34]
 c = Client(ip, username='Administrator', password='123456', ssl=False, auth='ntlm')
 ps = fr'''
 $ProgressPreference = 'SilentlyContinue'
@@ -261,7 +269,14 @@ Invoke-WebRequest 'http://{host}:8080/patch-grid-strings.ps1' `
 if ((Get-FileHash -LiteralPath C:\nv\patch-grid-strings.ps1 -Algorithm SHA256).Hash -cne '{patch_sha}') {{
     throw 'patch-grid-strings.ps1 SHA256 mismatch'
 }}
+Invoke-WebRequest 'http://{host}:8080/vgpu-profile-catalog.json' `
+    -OutFile C:\nv\vgpu-profile-catalog.json -UseBasicParsing
+if ((Get-FileHash -LiteralPath C:\nv\vgpu-profile-catalog.json -Algorithm SHA256).Hash -cne '{catalog_asset_sha}') {{
+    throw 'vgpu-profile-catalog.json SHA256 mismatch'
+}}
 & powershell.exe -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 `
+    -CatalogPath C:\nv\vgpu-profile-catalog.json `
+    -CatalogSha256 '{catalog_sha}' -ProfileKey '{gpu_profile}' `
     -TargetName '{gpu}' `
     -NvapiPciVendorId {pci_vendor} -NvapiPciDeviceId {pci_device} `
     -NvapiPciSubVendorId {pci_subvendor} `
@@ -303,7 +318,7 @@ if ({install_shim} -eq 1) {{
 $tn = 'RefreshGridNames'
 Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA 0
 $a = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 -TargetName "{gpu}" -NvapiPciVendorId {pci_vendor} -NvapiPciDeviceId {pci_device} -NvapiPciSubVendorId {pci_subvendor} -NvapiPciSubDeviceId {pci_subdevice} -NvapiPciRevisionId {pci_revision} -CoreClockMHz {core} -BoostClockMHz {boost} -MemoryClockMHz {memory} -MemoryBusBits {bus} -MemoryBandwidthMBps {bandwidth} -VramMB {vram} -MemoryType {memory_type} -MemoryMaker {memory_maker} -CudaCores {cuda_cores} -ShaderSubPipes {shader_subpipes} -RopCount {rop_count} -TmuCount {tmu_count} -Architecture {architecture} -Implementation {implementation} -ChipRevision {chip_revision} -PcieWidth {pcie_width} -VbiosVersion "{vbios_version}"'
+    -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\nv\patch-grid-strings.ps1 -CatalogPath C:\nv\vgpu-profile-catalog.json -CatalogSha256 "{catalog_sha}" -ProfileKey "{gpu_profile}" -TargetName "{gpu}" -NvapiPciVendorId {pci_vendor} -NvapiPciDeviceId {pci_device} -NvapiPciSubVendorId {pci_subvendor} -NvapiPciSubDeviceId {pci_subdevice} -NvapiPciRevisionId {pci_revision} -CoreClockMHz {core} -BoostClockMHz {boost} -MemoryClockMHz {memory} -MemoryBusBits {bus} -MemoryBandwidthMBps {bandwidth} -VramMB {vram} -MemoryType {memory_type} -MemoryMaker {memory_maker} -CudaCores {cuda_cores} -ShaderSubPipes {shader_subpipes} -RopCount {rop_count} -TmuCount {tmu_count} -Architecture {architecture} -Implementation {implementation} -ChipRevision {chip_revision} -PcieWidth {pcie_width} -VbiosVersion "{vbios_version}"'
 # AtStartup only — running again at logon causes Device Manager to
 # flicker (registry edits trigger a PnP rescan, which redraws the
 # whole 设备管理器 UI). One pass at boot is enough; cold-start PnP

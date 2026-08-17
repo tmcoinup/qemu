@@ -39,21 +39,81 @@ $lockPath = Join-Path $tokenDirectory '.qemu-vgpu-license-install.lock'
 $timeZonePath = 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation'
 $expectedTimeZone = 'China Standard Time'
 $maximumClockSkewSeconds = 300
+$serviceControlTimeoutSeconds = 30
+
+function Wait-LicenseServiceStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.ServiceProcess.ServiceControllerStatus]$DesiredStatus,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSeconds
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $service = Get-Service -Name $serviceName -ErrorAction Stop
+        if ($service.Status -eq $DesiredStatus) {
+            return $service
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $service = Get-Service -Name $serviceName -ErrorAction Stop
+    throw ("Service '{0}' did not reach {1} within {2} seconds " +
+        "(current status: {3})" -f $serviceName, $DesiredStatus,
+        $TimeoutSeconds, $service.Status)
+}
+
+function Invoke-LicenseServiceControl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('start', 'stop')]
+        [string]$Action,
+
+        [Parameter(Mandatory = $true)]
+        [System.ServiceProcess.ServiceControllerStatus]$DesiredStatus
+    )
+
+    $serviceController = Join-Path $env:SystemRoot 'System32\sc.exe'
+    if (-not (Test-Path -LiteralPath $serviceController -PathType Leaf)) {
+        throw "Windows service controller was not found: $serviceController"
+    }
+
+    $controlOutput = @(& $serviceController $Action $serviceName 2>&1)
+    $controlExitCode = $LASTEXITCODE
+    $service = Get-Service -Name $serviceName -ErrorAction Stop
+    if ($controlExitCode -ne 0 -and $service.Status -ne $DesiredStatus) {
+        $detail = ($controlOutput | Out-String).Trim()
+        throw ("Service control '{0}' failed for '{1}' (exit {2}, " +
+            "status {3}): {4}" -f $Action, $serviceName,
+            $controlExitCode, $service.Status, $detail)
+    }
+
+    return Wait-LicenseServiceStatus -DesiredStatus $DesiredStatus `
+        -TimeoutSeconds $serviceControlTimeoutSeconds
+}
 
 function Restart-LicenseService {
     $service = Get-Service -Name $serviceName -ErrorAction Stop
-    if ($service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
-        Start-Service -Name $serviceName -ErrorAction Stop
+    if ($service.Status -eq
+        [System.ServiceProcess.ServiceControllerStatus]::StopPending) {
+        $service = Wait-LicenseServiceStatus `
+            -DesiredStatus ([System.ServiceProcess.ServiceControllerStatus]::Stopped) `
+            -TimeoutSeconds $serviceControlTimeoutSeconds
     }
-    else {
-        Restart-Service -Name $serviceName -Force -ErrorAction Stop
+    elseif ($service.Status -ne
+        [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+        $service = Invoke-LicenseServiceControl -Action stop `
+            -DesiredStatus ([System.ServiceProcess.ServiceControllerStatus]::Stopped)
     }
 
-    $service = Get-Service -Name $serviceName -ErrorAction Stop
-    $service.WaitForStatus(
-        [System.ServiceProcess.ServiceControllerStatus]::Running,
-        [timespan]::FromSeconds(20)
-    )
+    $service = Invoke-LicenseServiceControl -Action start `
+        -DesiredStatus ([System.ServiceProcess.ServiceControllerStatus]::Running)
+    Write-Host ("[license] service restart: {0}={1} " +
+        "(bounded {2}s stop/start)" -f $serviceName, $service.Status,
+        $serviceControlTimeoutSeconds)
 }
 
 function Find-NvidiaSmi {

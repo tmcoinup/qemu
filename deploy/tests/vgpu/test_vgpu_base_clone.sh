@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-CLONE_SOURCE="$REPO_ROOT/deploy/clone-vgpu-base.sh"
+CLONE_SOURCE="$REPO_ROOT/deploy/scripts/clone-vgpu-base.sh"
 REAL_JQ=$(command -v jq || true)
 
 fail() {
@@ -31,12 +31,14 @@ cleanup() {
 trap cleanup EXIT
 
 HARNESS="$TMP_DIR/harness"
-mkdir -p "$HARNESS/deploy/lib" "$HARNESS/bin"
-cp -- "$CLONE_SOURCE" "$HARNESS/deploy/clone-vgpu-base.sh"
+mkdir -p "$HARNESS/deploy/lib" "$HARNESS/deploy/scripts" "$HARNESS/bin"
+cp -- "$CLONE_SOURCE" "$HARNESS/deploy/scripts/clone-vgpu-base.sh"
 cp -- "$REPO_ROOT/deploy/lib/vm-storage.sh" "$HARNESS/deploy/lib/vm-storage.sh"
 cp -- "$REPO_ROOT/deploy/lib/vgpu-profiles.sh" \
     "$HARNESS/deploy/lib/vgpu-profiles.sh"
-chmod +x "$HARNESS/deploy/clone-vgpu-base.sh"
+cp -- "$REPO_ROOT/deploy/lib/gpuz-assets.sh" \
+    "$HARNESS/deploy/lib/gpuz-assets.sh"
+chmod +x "$HARNESS/deploy/scripts/clone-vgpu-base.sh"
 
 # jq wrapper gives the lock test an observable marker after sidecar parsing.
 cat >"$HARNESS/bin/jq" <<EOF
@@ -49,7 +51,7 @@ exit "\$rc"
 EOF
 chmod +x "$HARNESS/bin/jq"
 
-cat >"$HARNESS/deploy/create-vm.sh" <<'EOF'
+cat >"$HARNESS/deploy/scripts/create-vm.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 {
@@ -76,8 +78,8 @@ while (($#)); do
             ;;
     esac
 done
-[[ -n "$profile" ]]
-instance="$VM_INSTANCES_DIR/vm$id"
+[[ -n "$profile" ]] || profile=gtx1050_colorful_2gb
+instance="$VM_INSTANCES_DIR/$id"
 mkdir -p "$instance"
 spoof_mode=B
 [[ "${STUB_BAD_CONF:-0}" != 1 ]] || spoof_mode=A
@@ -87,9 +89,9 @@ GPU_PROFILE='$profile'
 VM_UUID='00112233-4455-4677-8899-AABBCCDDEEFF'
 CONF
 EOF
-chmod +x "$HARNESS/deploy/create-vm.sh"
+chmod +x "$HARNESS/deploy/scripts/create-vm.sh"
 
-cat >"$HARNESS/deploy/create-disk.sh" <<'EOF'
+cat >"$HARNESS/deploy/scripts/create-disk.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 {
@@ -100,19 +102,31 @@ set -euo pipefail
 [[ $# -eq 2 && "$2" == --from-base ]]
 [[ "${STUB_DISK_FAIL:-0}" != 1 ]] || exit 91
 [[ "${STUB_DISK_NO_PUBLISH:-0}" != 1 ]] || exit 0
-mkdir -p "$VM_INSTANCES_DIR/vm$1"
-printf 'standalone clone fixture\n' >"$VM_INSTANCES_DIR/vm$1/disk.qcow2"
+mkdir -p "$VM_INSTANCES_DIR/$1"
+printf 'standalone clone fixture\n' >"$VM_INSTANCES_DIR/$1/disk.qcow2"
 [[ "${STUB_DISK_PUBLISH_FAIL:-0}" != 1 ]] || exit 92
 EOF
-chmod +x "$HARNESS/deploy/create-disk.sh"
+chmod +x "$HARNESS/deploy/scripts/create-disk.sh"
 
-cat >"$HARNESS/deploy/start-vm.sh" <<'EOF'
+cat >"$HARNESS/deploy/scripts/sync-monitor-profile.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+{
+    printf 'monitor-sync'
+    printf '|%s' "$@"
+    printf '|start-lock=%s\n' "${VM_START_LOCK_HELD:-<unset>}"
+} >>"$TRACE"
+exit "${STUB_MONITOR_SYNC_RC:-0}"
+EOF
+chmod +x "$HARNESS/deploy/scripts/sync-monitor-profile.sh"
+
+cat >"$HARNESS/deploy/scripts/start-vm.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 id=$1
 exec {STORAGE_TEST_FD}>"$VM_RUN_DIR/.storage.lock"
 flock -n -s "$STORAGE_TEST_FD"
-exec {START_TEST_FD}>"$VM_RUN_DIR/vm${id}.start.lock"
+exec {START_TEST_FD}>"$VM_INSTANCES_DIR/${id}/run/start.lock"
 flock -n -x "$START_TEST_FD"
 {
     printf 'start-vm'
@@ -120,7 +134,7 @@ flock -n -x "$START_TEST_FD"
     printf '\n'
 } >>"$TRACE"
 EOF
-chmod +x "$HARNESS/deploy/start-vm.sh"
+chmod +x "$HARNESS/deploy/scripts/start-vm.sh"
 
 IMAGE_ROOT="$TMP_DIR/images"
 VM_ROOT="$IMAGE_ROOT/vms"
@@ -138,6 +152,8 @@ chmod 0444 "$BASE"
 
 # shellcheck source=../../../lib/vgpu-profiles.sh
 source "$HARNESS/deploy/lib/vgpu-profiles.sh"
+# shellcheck source=../../../lib/gpuz-assets.sh
+source "$HARNESS/deploy/lib/gpuz-assets.sh"
 CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
 
 write_attestation() {
@@ -160,6 +176,48 @@ write_attestation() {
         --arg catalogSha256 "$catalog" \
         --argjson extra "$extra_json" '
         {
+            schemaVersion: 4,
+            bindingMode: "portable-auto",
+            basePath: $basePath,
+            baseFileBytes: $baseFileBytes,
+            baseDeviceId: $baseDeviceId,
+            baseInode: $baseInode,
+            baseMtimeNs: $baseMtimeNs,
+            baseCtimeNs: $baseCtimeNs,
+            portableGuestPath:
+                "C:\\Users\\Public\\Desktop\\VgpuPortable.exe",
+            portableSha256:
+                "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+            portableBytes: 1048576,
+            gpuZDelivery: "optional-explicit-sibling",
+            gpuZIncluded: false,
+            gpuZGuestPath: null,
+            gpuZSha256: null,
+            gpuZBytes: null,
+            catalogSha256: $catalogSha256,
+            installedUtc: "2026-07-20T10:00:00Z"
+        } + $extra
+    ' >"$ATTESTATION"
+    chmod 0444 "$ATTESTATION"
+}
+
+write_legacy_attestation() {
+    local bytes device inode mtime ctime
+    bytes=$(stat -c %s -- "$BASE")
+    device=$(stat -c %D -- "$BASE")
+    inode=$(stat -c %i -- "$BASE")
+    mtime=$(stat -c %y -- "$BASE")
+    ctime=$(stat -c %z -- "$BASE")
+    rm -f -- "$ATTESTATION"
+    "$REAL_JQ" -n \
+        --arg basePath "$BASE" \
+        --argjson baseFileBytes "$bytes" \
+        --arg baseDeviceId "$device" \
+        --arg baseInode "$inode" \
+        --arg baseMtimeNs "$mtime" \
+        --arg baseCtimeNs "$ctime" \
+        --arg catalogSha256 "$CATALOG_SHA256" '
+        {
             schemaVersion: 2,
             bindingMode: "portable-auto",
             basePath: $basePath,
@@ -174,15 +232,19 @@ write_attestation() {
             exeBytes: 12270080,
             catalogSha256: $catalogSha256,
             installedUtc: "2026-07-20T10:00:00Z"
-        } + $extra
+        }
     ' >"$ATTESTATION"
     chmod 0444 "$ATTESTATION"
 }
 write_attestation
 
 run_clone() {
-    "$HARNESS/deploy/clone-vgpu-base.sh" "$@"
+    "$HARNESS/deploy/scripts/clone-vgpu-base.sh" "$@"
 }
+
+run_clone --list-gpu-profiles >"$TMP_DIR/profiles.out"
+[[ "$(tail -n +2 "$TMP_DIR/profiles.out" | wc -l)" -eq 12 ]] ||
+    fail "clone did not expose all 12 atomic model/AIB/VRAM-maker rows"
 
 # VM IDs are not tied to VM1/2/3.  All audited profiles and forwarded hardware
 # selectors must reach the canonical create-vm/create-disk entry points.
@@ -193,6 +255,10 @@ grep -Fxq 'create-vm-start-lock|1' "$TRACE" ||
     fail "clone did not tell create-vm that it owns the VM start lock"
 grep -Fxq 'create-disk|456|--from-base' "$TRACE" ||
     fail "VM456 did not require the prepared base"
+grep -Fxq 'monitor-sync|456|start-lock=1' "$TRACE" ||
+    fail "VM456 did not automatically apply its generated monitor profile"
+grep -Fq 'automatic sync=complete' "$TMP_DIR/456.out" ||
+    fail "clone handoff did not report completed automatic monitor sync"
 
 run_clone 987654 --gpu-profile gt1030_2gb \
     --platform office-intel \
@@ -203,6 +269,34 @@ grep -Fxq \
     "$TRACE" || fail "forwarded create-vm selectors are incorrect"
 grep -Fxq 'create-disk|987654|--from-base' "$TRACE" ||
     fail "VM987654 did not clone from base"
+grep -Fxq 'monitor-sync|987654|start-lock=1' "$TRACE" ||
+    fail "explicit monitor profile was not automatically synchronized"
+
+# Every catalog row, including non-reference AIB and VRAM-maker variants, is
+# accepted by the same VM-unbound clone path without repackaging.
+profile_vm=800
+while IFS= read -r profile; do
+    run_clone "$profile_vm" --gpu-profile "$profile" --no-monitor-sync \
+        >"$TMP_DIR/profile-${profile}.out"
+    grep -Fxq "create-vm|${profile_vm}|--gpu-profile|${profile}" "$TRACE" ||
+        fail "clone did not forward atomic profile $profile"
+    profile_vm=$((profile_vm + 1))
+done < <(vgpu_profile_keys)
+
+# A base may include GPU-Z only by explicit opt-in; the true state must bind
+# all exact fields and remains a valid clone source.
+write_attestation "$CATALOG_SHA256" \
+    '{"gpuZIncluded":true,"gpuZGuestPath":"C:\\Users\\Public\\Desktop\\GPU-Z.exe","gpuZSha256":"6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29","gpuZBytes":11642144}'
+run_clone 820 --no-monitor-sync >"$TMP_DIR/gpuz-included.out"
+grep -Fxq 'create-vm|820' "$TRACE" ||
+    fail "default clone pinned a fixed GPU instead of delegating random selection"
+grep -Fq 'GPU profile: gtx1050_colorful_2gb' \
+    "$TMP_DIR/gpuz-included.out" ||
+    fail "default clone did not report the GPU selected by create-vm"
+grep -Fq 'GPU-Z:       included by explicit base opt-in' \
+    "$TMP_DIR/gpuz-included.out" ||
+    fail "clone did not report the attested explicit GPU-Z opt-in"
+write_attestation
 
 run_clone 2147483647 --gpu-profile gtx1050_2gb --start \
     >"$TMP_DIR/max-id.out"
@@ -214,6 +308,54 @@ grep -Fxq 'start-vm|2147483647' "$TRACE" ||
     fail "--start did not release its locks and invoke start-vm"
 grep -Fq 'C:\Users\Public\Desktop\VgpuPortable.exe' "$TMP_DIR/max-id.out" ||
     fail "clone handoff omitted the offline guest EXE path"
+grep -Fq 'GPU-Z:       not included (default)' "$TMP_DIR/max-id.out" ||
+    fail "clone handoff did not report the default no-GPU-Z state"
+
+# Monitor handling is automatic even without --start.  A pristine base may
+# need one guest enumeration; that is a successful deferred state, while the
+# next normal start remains responsible for retrying it.
+export STUB_MONITOR_SYNC_RC=10
+run_clone 457 >"$TMP_DIR/monitor-deferred.out"
+unset STUB_MONITOR_SYNC_RC
+grep -Fxq 'monitor-sync|457|start-lock=1' "$TRACE" ||
+    fail "first-enumeration clone did not invoke automatic monitor sync"
+grep -Fq 'automatic sync=first-enumeration-deferred' \
+    "$TMP_DIR/monitor-deferred.out" ||
+    fail "first-enumeration deferral was not explained in the clone handoff"
+
+# Rescue/debug opt-out must be explicit and is forwarded to an immediate
+# start so clone and start do not silently disagree about operator intent.
+before_monitor=$(grep -c '^monitor-sync|' "$TRACE" || true)
+run_clone 458 --no-monitor-sync >"$TMP_DIR/monitor-disabled.out"
+after_monitor=$(grep -c '^monitor-sync|' "$TRACE" || true)
+[[ "$after_monitor" -eq "$before_monitor" ]] ||
+    fail "--no-monitor-sync still invoked the monitor helper"
+grep -Fq 'automatic sync=disabled' "$TMP_DIR/monitor-disabled.out" ||
+    fail "monitor opt-out was not visible in the clone handoff"
+
+run_clone 459 --no-monitor-sync --start >"$TMP_DIR/monitor-disabled-start.out"
+grep -Fxq 'start-vm|459|--no-monitor-sync' "$TRACE" ||
+    fail "monitor opt-out was not forwarded to --start"
+
+# Once a disk is published, an unexpected sync error keeps the clone for
+# recovery but fails closed and never launches it.
+export STUB_MONITOR_SYNC_RC=12
+if run_clone 460 --start >"$TMP_DIR/monitor-fail.out" \
+        2>"$TMP_DIR/monitor-fail.err"; then
+    fail "clone accepted an unexpected automatic monitor-sync failure"
+else
+    monitor_fail_rc=$?
+fi
+unset STUB_MONITOR_SYNC_RC
+[[ "$monitor_fail_rc" -eq 12 ]] ||
+    fail "automatic monitor-sync failure status was not preserved"
+[[ -f "$VM_INSTANCES_DIR/460/vm.conf" &&
+   -f "$VM_INSTANCES_DIR/460/disk.qcow2" ]] ||
+    fail "published clone was lost after monitor-sync recovery failure"
+! grep -Fq 'start-vm|460' "$TRACE" ||
+    fail "clone started after an unexpected monitor-sync failure"
+grep -Fq '克隆已保留' "$TMP_DIR/monitor-fail.err" ||
+    fail "monitor-sync failure did not explain clone recovery state"
 
 # Invalid IDs/profiles and duplicate IDs fail before any helper is invoked.
 for args in \
@@ -234,8 +376,8 @@ for args in \
 done
 
 # Existing identity or disk state is never overwritten.
-mkdir -p "$VM_INSTANCES_DIR/vm600"
-printf 'SPOOF_MODE=B\n' >"$VM_INSTANCES_DIR/vm600/vm.conf"
+mkdir -p "$VM_INSTANCES_DIR/600"
+printf 'SPOOF_MODE=B\n' >"$VM_INSTANCES_DIR/600/vm.conf"
 before=$(wc -l <"$TRACE")
 if run_clone 600 >"$TMP_DIR/existing-conf.out" 2>"$TMP_DIR/existing-conf.err"; then
     fail "clone accepted an existing VM configuration"
@@ -243,8 +385,8 @@ fi
 [[ "$(wc -l <"$TRACE")" -eq "$before" ]] ||
     fail "existing VM configuration invoked a helper"
 
-mkdir -p "$VM_INSTANCES_DIR/vm601"
-printf 'existing disk\n' >"$VM_INSTANCES_DIR/vm601/disk.qcow2"
+mkdir -p "$VM_INSTANCES_DIR/601"
+printf 'existing disk\n' >"$VM_INSTANCES_DIR/601/disk.qcow2"
 if run_clone 601 >"$TMP_DIR/existing-disk.out" 2>"$TMP_DIR/existing-disk.err"; then
     fail "clone accepted an existing VM disk"
 fi
@@ -260,6 +402,47 @@ write_attestation \
     'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 if run_clone 611 >"$TMP_DIR/catalog.out" 2>"$TMP_DIR/catalog.err"; then
     fail "clone accepted a base built from a different GPU catalog"
+fi
+write_attestation "$CATALOG_SHA256" '{"gpuZDelivery":"embedded"}'
+if run_clone 615 >"$TMP_DIR/delivery.out" 2>"$TMP_DIR/delivery.err"; then
+    fail "clone accepted a non-optional GPU-Z delivery attestation"
+fi
+write_attestation "$CATALOG_SHA256" \
+    '{"gpuZSha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}'
+if run_clone 616 >"$TMP_DIR/gpuz-hash.out" 2>"$TMP_DIR/gpuz-hash.err"; then
+    fail "clone accepted a different external GPU-Z hash"
+fi
+write_attestation "$CATALOG_SHA256" \
+    '{"gpuZGuestPath":"C:\\Users\\Public\\Desktop\\Other.exe"}'
+if run_clone 617 >"$TMP_DIR/gpuz-path.out" 2>"$TMP_DIR/gpuz-path.err"; then
+    fail "clone accepted a different external GPU-Z guest path"
+fi
+write_attestation "$CATALOG_SHA256" '{"gpuZBytes":11642143}'
+if run_clone 680 >"$TMP_DIR/gpuz-bytes.out" 2>"$TMP_DIR/gpuz-bytes.err"; then
+    fail "clone accepted a different external GPU-Z byte length"
+fi
+write_attestation "$CATALOG_SHA256" \
+    '{"portableGuestPath":"C:\\Users\\Public\\Desktop\\OtherPortable.exe"}'
+if run_clone 681 >"$TMP_DIR/portable-path.out" \
+        2>"$TMP_DIR/portable-path.err"; then
+    fail "clone accepted a different portable guest path"
+fi
+write_attestation "$CATALOG_SHA256" '{"portableSha256":"not-a-sha"}'
+if run_clone 682 >"$TMP_DIR/portable-hash.out" \
+        2>"$TMP_DIR/portable-hash.err"; then
+    fail "clone accepted a malformed portable hash"
+fi
+write_attestation "$CATALOG_SHA256" '{"portableBytes":0}'
+if run_clone 683 >"$TMP_DIR/portable-bytes.out" \
+        2>"$TMP_DIR/portable-bytes.err"; then
+    fail "clone accepted a non-positive portable byte length"
+fi
+
+# Legacy schema 2 proves only one guest file and must not authorize a new
+# external-sibling clone.
+write_legacy_attestation
+if run_clone 618 >"$TMP_DIR/legacy.out" 2>"$TMP_DIR/legacy.err"; then
+    fail "clone accepted a legacy single-file base attestation"
 fi
 
 write_attestation
@@ -298,9 +481,9 @@ if run_clone 620 >"$TMP_DIR/bad-conf.out" 2>"$TMP_DIR/bad-conf.err"; then
     fail "clone accepted a non-B configuration from create-vm"
 fi
 unset STUB_BAD_CONF
-[[ ! -e "$VM_INSTANCES_DIR/vm620/vm.conf" ]] ||
+[[ ! -e "$VM_INSTANCES_DIR/620/vm.conf" ]] ||
     fail "invalid newly-created configuration was not rolled back"
-[[ ! -e "$VM_INSTANCES_DIR/vm620/disk.qcow2" ]] ||
+[[ ! -e "$VM_INSTANCES_DIR/620/disk.qcow2" ]] ||
     fail "invalid configuration still reached disk creation"
 
 export STUB_DISK_FAIL=1
@@ -308,9 +491,9 @@ if run_clone 621 >"$TMP_DIR/disk-fail.out" 2>"$TMP_DIR/disk-fail.err"; then
     fail "clone accepted a create-disk failure"
 fi
 unset STUB_DISK_FAIL
-[[ ! -e "$VM_INSTANCES_DIR/vm621/vm.conf" ]] ||
+[[ ! -e "$VM_INSTANCES_DIR/621/vm.conf" ]] ||
     fail "configuration was not rolled back after pre-publication disk failure"
-[[ ! -e "$VM_INSTANCES_DIR/vm621/disk.qcow2" ]] ||
+[[ ! -e "$VM_INSTANCES_DIR/621/disk.qcow2" ]] ||
     fail "pre-publication failure unexpectedly left a disk"
 
 export STUB_DISK_NO_PUBLISH=1
@@ -318,7 +501,7 @@ if run_clone 622 >"$TMP_DIR/no-disk.out" 2>"$TMP_DIR/no-disk.err"; then
     fail "clone accepted create-disk success without a published disk"
 fi
 unset STUB_DISK_NO_PUBLISH
-[[ ! -e "$VM_INSTANCES_DIR/vm622/vm.conf" ]] ||
+[[ ! -e "$VM_INSTANCES_DIR/622/vm.conf" ]] ||
     fail "configuration was not rolled back when create-disk published nothing"
 
 export STUB_DISK_PUBLISH_FAIL=1
@@ -327,8 +510,8 @@ if run_clone 623 >"$TMP_DIR/published-fail.out" \
     fail "clone accepted create-disk failure after disk publication"
 fi
 unset STUB_DISK_PUBLISH_FAIL
-[[ -f "$VM_INSTANCES_DIR/vm623/vm.conf" &&
-   -f "$VM_INSTANCES_DIR/vm623/disk.qcow2" ]] ||
+[[ -f "$VM_INSTANCES_DIR/623/vm.conf" &&
+   -f "$VM_INSTANCES_DIR/623/disk.qcow2" ]] ||
     fail "published disk did not retain its matching recovery configuration"
 
 # Hold the same exclusive lock used by the base installer.  Clone must acquire
@@ -352,7 +535,7 @@ done
 flock -u "$LOCK_FD"
 wait "$locked_pid" || fail "clone failed after the storage lock was released"
 children=()
-grep -Fxq 'create-vm|700|--gpu-profile|gtx1050_2gb' "$TRACE" ||
+grep -Fxq 'create-vm|700' "$TRACE" ||
     fail "lock-delayed clone did not create its VM"
 grep -Fxq 'create-disk|700|--from-base' "$TRACE" ||
     fail "lock-delayed clone did not create its disk"
@@ -362,7 +545,8 @@ grep -Fxq 'create-disk|700|--from-base' "$TRACE" ||
 # disk publication.
 before=$(wc -l <"$TRACE")
 rm -f -- "$JQ_MARKER"
-exec {VM_LOCK_FD}>"$VM_RUN_DIR/vm701.start.lock"
+mkdir -p "$VM_INSTANCES_DIR/701/run"
+exec {VM_LOCK_FD}>"$VM_INSTANCES_DIR/701/run/start.lock"
 flock -x "$VM_LOCK_FD"
 if run_clone 701 >"$TMP_DIR/vm-lock.out" 2>"$TMP_DIR/vm-lock.err"; then
     fail "clone ignored a busy per-VM start lock"

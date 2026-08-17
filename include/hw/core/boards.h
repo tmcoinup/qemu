@@ -253,6 +253,10 @@ typedef struct {
  * @smbios_memory_device_size:
  *    Default size of memory device,
  *    SMBIOS 3.1.0 "7.18 Memory Device (Type 17)"
+ * @smbios_memory_device_sizes:
+ *    Optional per-device sizes for non-uniform memory configurations.  When
+ *    present, @smbios_memory_device_sizes_count entries must describe all
+ *    installed memory and their sum must match MachineState::ram_size.
  * @get_valid_cpu_types:
  *    Returns a list of valid CPU types for this board. May be NULL
  *    if not needed.
@@ -324,6 +328,8 @@ struct MachineClass {
     const CPUArchIdList *(*possible_cpu_arch_ids)(MachineState *machine);
     int64_t (*get_default_cpu_node_id)(const MachineState *ms, int idx);
     uint64_t smbios_memory_device_size;
+    uint64_t *smbios_memory_device_sizes;
+    unsigned int smbios_memory_device_sizes_count;
     bool (*create_default_memdev)(MachineState *ms, const char *path,
                                   Error **errp);
 };

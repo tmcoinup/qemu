@@ -448,7 +448,7 @@ gpu-mode — RTX 2080 在 vGPU host driver 与消费版 driver 间切换
   sudo gpu-mode.sh doctor                    一站式状态打印，排错用
 
 切换前必须：
-  - 所有 qemu-system VM 已停（stop-vm.sh）
+  - 所有 qemu-system VM 已通过 deploy/scripts/stop-vm.sh 停止
   - 没有 mdev 设备占用
 EOF
 }

@@ -1,0 +1,642 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index f10333a..5fdd9d5 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -19,6 +19,7 @@ use std::os::unix::io::RawFd;
+ use std::path::PathBuf;
+ use std::process;
+ use std::str;
++use std::sync::atomic::{AtomicBool, Ordering};
+ 
+ use ctor::ctor;
+ use libc::RTLD_NEXT;
+@@ -71,6 +72,95 @@ use crate::utils::uuid_to_vmid;
+ use crate::uuid::Uuid;
+ 
+ static LAST_MDEV_UUID: Mutex<Option<Uuid>> = parking_lot::const_mutex(None);
++static RM_CONTROL_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
++static RM_CONTROL_TRACE: Mutex<RmControlTraceState> =
++    parking_lot::const_mutex(RmControlTraceState::new());
++static RM_IDENTITY_OVERRIDE_ENABLED: AtomicBool = AtomicBool::new(false);
++static RM_IDENTITY_OVERRIDE: Mutex<RmIdentityOverrideState> =
++    parking_lot::const_mutex(RmIdentityOverrideState::new());
++
++const DEFAULT_RM_CONTROL_TRACE_LIMIT: u32 = 4096;
++const MAX_RM_CONTROL_TRACE_LIMIT: u32 = 100_000;
++const NVIDIA_MODULE_VERSION_PATH: &str = "/sys/module/nvidia/version";
++const NV2080_CTRL_CMD_FB_GET_INFO_V2: u32 = 0x2080_1303;
++const NV2080_CTRL_FB_INFO_MAX_LIST_SIZE: usize = 0x36;
++const NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH: u32 = 0x0b;
++const NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE: u32 = 0x0d;
++const NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID: u32 = 0x1c;
++
++#[repr(C)]
++struct RmInfoEntry {
++    index: u32,
++    data: u32,
++}
++
++#[repr(C)]
++struct Nv2080CtrlFbGetInfoV2Params {
++    fb_info_list_size: u32,
++    fb_info_list: [RmInfoEntry; NV2080_CTRL_FB_INFO_MAX_LIST_SIZE],
++}
++
++#[derive(Clone, Copy, Default)]
++struct RmIdentityOverrideConfig {
++    fb_bus_width: Option<u32>,
++    fb_ram_type: Option<u32>,
++    fb_memory_vendor: Option<u32>,
++}
++
++impl RmIdentityOverrideConfig {
++    fn enabled(&self) -> bool {
++        self.fb_bus_width.is_some() || self.fb_ram_type.is_some() || self.fb_memory_vendor.is_some()
++    }
++}
++
++struct RmIdentityOverrideState {
++    mdev_uuid: Option<String>,
++    config: RmIdentityOverrideConfig,
++}
++
++impl RmIdentityOverrideState {
++    const fn new() -> Self {
++        Self {
++            mdev_uuid: None,
++            config: RmIdentityOverrideConfig {
++                fb_bus_width: None,
++                fb_ram_type: None,
++                fb_memory_vendor: None,
++            },
++        }
++    }
++}
++
++fn rm_identity_driver_supported(version: &str) -> bool {
++    version.trim().starts_with("535.")
++}
++
++struct RmControlTraceState {
++    mdev_uuid: Option<String>,
++    commands: Vec<u32>,
++    limit: u32,
++    count: u32,
++    limit_reported: bool,
++}
++
++impl RmControlTraceState {
++    const fn new() -> Self {
++        Self {
++            mdev_uuid: None,
++            commands: Vec::new(),
++            limit: DEFAULT_RM_CONTROL_TRACE_LIMIT,
++            count: 0,
++            limit_reported: false,
++        }
++    }
++}
++
++#[derive(Default)]
++struct RmControlTraceConfig {
++    enabled: bool,
++    commands: Vec<u32>,
++    limit: Option<u32>,
++}
+ 
+ #[ctor]
+ static CONFIG: Config = {
+@@ -350,6 +440,353 @@ struct VgpuProfileOverride {
+     adapter_name: Option<String>,
+     short_gpu_name: Option<String>,
+     license_type: Option<String>,
++    rm_control_trace: Option<bool>,
++    rm_control_trace_commands: Option<Vec<U32>>,
++    rm_control_trace_limit: Option<u32>,
++    rm_fb_bus_width: Option<u32>,
++    rm_fb_ram_type: Option<u32>,
++    rm_fb_memory_vendor: Option<u32>,
++}
++
++fn merge_rm_control_trace_config(
++    trace: &mut RmControlTraceConfig,
++    config_override: &VgpuProfileOverride,
++) {
++    if let Some(enabled) = config_override.rm_control_trace {
++        trace.enabled = enabled;
++    }
++    if let Some(commands) = config_override.rm_control_trace_commands.as_ref() {
++        trace.commands = commands.iter().map(|command| command.0).collect();
++    }
++    if let Some(limit) = config_override.rm_control_trace_limit {
++        trace.limit = Some(limit);
++    }
++}
++
++fn configure_rm_control_trace(
++    vgpu_type: &str,
++    mdev_uuid: Option<String>,
++    config_overrides: &ProfileOverridesConfig,
++    source: &str,
++) {
++    let mut trace = RmControlTraceConfig::default();
++    if let Some(config_override) = config_overrides.profile.get(vgpu_type) {
++        merge_rm_control_trace_config(&mut trace, config_override);
++    }
++    if let Some(mdev_uuid) = mdev_uuid.as_ref() {
++        if let Some(config_override) = config_overrides.mdev.get(mdev_uuid) {
++            merge_rm_control_trace_config(&mut trace, config_override);
++        }
++    }
++
++    trace.commands.sort_unstable();
++    trace.commands.dedup();
++    let limit = trace
++        .limit
++        .unwrap_or(DEFAULT_RM_CONTROL_TRACE_LIMIT)
++        .min(MAX_RM_CONTROL_TRACE_LIMIT);
++    let enabled = trace.enabled && limit > 0;
++
++    {
++        let mut state = RM_CONTROL_TRACE.lock();
++        let same_mdev = state.mdev_uuid == mdev_uuid;
++        state.mdev_uuid = mdev_uuid.clone();
++        state.commands = trace.commands;
++        state.limit = limit;
++        if !same_mdev {
++            state.count = 0;
++            state.limit_reported = false;
++        } else if state.count < state.limit {
++            // A later profile-level merge may raise the limit.  Keep the
++            // already captured start-up events without leaving the tracer in
++            // its old "limit reached" state.
++            state.limit_reported = false;
++        }
++    }
++    RM_CONTROL_TRACE_ENABLED.store(enabled, Ordering::Release);
++
++    if enabled {
++        info!(
++            "G11_RM_TRACE configured mdev={} source={} limit={} command_filter={}",
++            mdev_uuid.as_deref().unwrap_or("unknown"),
++            source,
++            limit,
++            if RM_CONTROL_TRACE.lock().commands.is_empty() {
++                "all"
++            } else {
++                "selected"
++            }
++        );
++    }
++}
++
++fn configure_rm_control_trace_for_mdev(mdev_uuid: Uuid) {
++    let config_overrides = match load_overrides() {
++        Ok(overrides) => overrides,
++        Err(_) => {
++            RM_CONTROL_TRACE_ENABLED.store(false, Ordering::Release);
++            return;
++        }
++    };
++    let config_overrides: ProfileOverridesConfig = match toml::from_str(&config_overrides) {
++        Ok(config) => config,
++        Err(e) => {
++            error!("Failed to decode config for early RM trace: {}", e);
++            RM_CONTROL_TRACE_ENABLED.store(false, Ordering::Release);
++            return;
++        }
++    };
++
++    // The start-data command supplies the mdev UUID before vGPU manager asks
++    // for the profile.  Enabling the per-mdev trace here captures the static
++    // FB/GR/MC queries that occur before the profile override callback.
++    configure_rm_control_trace(
++        "",
++        Some(mdev_uuid.to_string()),
++        &config_overrides,
++        "mdev-start",
++    );
++    configure_rm_identity_override_for_mdev(mdev_uuid, &config_overrides);
++}
++
++fn configure_rm_identity_override_for_mdev(
++    mdev_uuid: Uuid,
++    config_overrides: &ProfileOverridesConfig,
++) {
++    let mdev_uuid = mdev_uuid.to_string();
++    let driver_version = fs::read_to_string(NVIDIA_MODULE_VERSION_PATH);
++    if !driver_version
++        .as_deref()
++        .is_ok_and(rm_identity_driver_supported)
++    {
++        let reported_version = driver_version
++            .as_deref()
++            .map(str::trim)
++            .unwrap_or("unavailable");
++        {
++            let mut state = RM_IDENTITY_OVERRIDE.lock();
++            state.mdev_uuid = Some(mdev_uuid.clone());
++            state.config = RmIdentityOverrideConfig::default();
++        }
++        RM_IDENTITY_OVERRIDE_ENABLED.store(false, Ordering::Release);
++        error!(
++            "G11_RM_IDENTITY disabled mdev={} unsupported_driver={} expected=535.x",
++            mdev_uuid, reported_version
++        );
++        return;
++    }
++    let mut config = config_overrides
++        .mdev
++        .get(mdev_uuid.as_str())
++        .map(|profile| RmIdentityOverrideConfig {
++            fb_bus_width: profile.rm_fb_bus_width,
++            fb_ram_type: profile.rm_fb_ram_type,
++            fb_memory_vendor: profile.rm_fb_memory_vendor,
++        })
++        .unwrap_or_default();
++
++    if let Some(value) = config.fb_bus_width {
++        const VALID_BUS_WIDTHS: &[u32] = &[32, 64, 96, 128, 160, 192, 256, 320, 352, 384, 448, 512];
++        if !VALID_BUS_WIDTHS.contains(&value) {
++            error!(
++                "G11_RM_IDENTITY ignoring invalid fb_bus_width={} mdev={}",
++                value, mdev_uuid
++            );
++            config.fb_bus_width = None;
++        }
++    }
++    if let Some(value) = config.fb_ram_type {
++        const VALID_RAM_TYPES: &[u32] = &[
++            0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,
++            0x12, 0x13, 0x14,
++        ];
++        if !VALID_RAM_TYPES.contains(&value) {
++            error!(
++                "G11_RM_IDENTITY ignoring invalid fb_ram_type={:#x} mdev={}",
++                value, mdev_uuid
++            );
++            config.fb_ram_type = None;
++        }
++    }
++    if let Some(value) = config.fb_memory_vendor {
++        const VALID_MEMORY_VENDORS: &[u32] =
++            &[0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0x0f, u32::MAX];
++        if !VALID_MEMORY_VENDORS.contains(&value) {
++            error!(
++                "G11_RM_IDENTITY ignoring invalid fb_memory_vendor={:#x} mdev={}",
++                value, mdev_uuid
++            );
++            config.fb_memory_vendor = None;
++        }
++    }
++
++    let enabled = config.enabled();
++    {
++        let mut state = RM_IDENTITY_OVERRIDE.lock();
++        state.mdev_uuid = Some(mdev_uuid.clone());
++        state.config = config;
++    }
++    RM_IDENTITY_OVERRIDE_ENABLED.store(enabled, Ordering::Release);
++
++    if enabled {
++        info!(
++            "G11_RM_IDENTITY configured mdev={} fb_bus_width={:?} fb_ram_type={:?} fb_memory_vendor={:?}",
++            mdev_uuid,
++            config.fb_bus_width,
++            config.fb_ram_type,
++            config.fb_memory_vendor
++        );
++    }
++}
++
++fn patch_rm_info_entry(
++    entries: &mut [RmInfoEntry],
++    list_size: u32,
++    index: u32,
++    value: u32,
++) -> Option<u32> {
++    let list_size = cmp::min(list_size as usize, entries.len());
++    entries
++        .iter_mut()
++        .take(list_size)
++        .find(|entry| entry.index == index)
++        .map(|entry| {
++            let old = entry.data;
++            entry.data = value;
++            old
++        })
++}
++
++unsafe fn apply_rm_identity_override(io_data: &mut Nvos54Parameters) {
++    if !RM_IDENTITY_OVERRIDE_ENABLED.load(Ordering::Acquire)
++        || io_data.cmd != NV2080_CTRL_CMD_FB_GET_INFO_V2
++    {
++        return;
++    }
++
++    if io_data.params.is_null()
++        || io_data.params_size as usize != mem::size_of::<Nv2080CtrlFbGetInfoV2Params>()
++    {
++        error!(
++            "G11_RM_IDENTITY refusing FB_GET_INFO_V2 size={} expected={}",
++            io_data.params_size,
++            mem::size_of::<Nv2080CtrlFbGetInfoV2Params>()
++        );
++        return;
++    }
++
++    let params: &mut Nv2080CtrlFbGetInfoV2Params = &mut *io_data.params.cast();
++    if params.fb_info_list_size as usize > params.fb_info_list.len() {
++        error!(
++            "G11_RM_IDENTITY refusing FB_GET_INFO_V2 list_size={} max={}",
++            params.fb_info_list_size,
++            params.fb_info_list.len()
++        );
++        return;
++    }
++
++    let state = RM_IDENTITY_OVERRIDE.lock();
++    let mdev_uuid = state.mdev_uuid.as_deref().unwrap_or("unknown");
++    for (field, index, value) in [
++        (
++            "fb_bus_width",
++            NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH,
++            state.config.fb_bus_width,
++        ),
++        (
++            "fb_ram_type",
++            NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE,
++            state.config.fb_ram_type,
++        ),
++    ] {
++        let value = match value {
++            Some(value) => value,
++            None => continue,
++        };
++        match patch_rm_info_entry(
++            &mut params.fb_info_list,
++            params.fb_info_list_size,
++            index,
++            value,
++        ) {
++            Some(old) => info!(
++                "G11_RM_IDENTITY mdev={} cmd={:#010x} field={} index={:#04x} old={} new={} requested=true",
++                mdev_uuid, io_data.cmd, field, index, old, value
++            ),
++            None => info!(
++                "G11_RM_IDENTITY mdev={} cmd={:#010x} field={} index={:#04x} requested=false",
++                mdev_uuid, io_data.cmd, field, index
++            ),
++        }
++    }
++
++    if let Some(value) = state.config.fb_memory_vendor {
++        match patch_rm_info_entry(
++            &mut params.fb_info_list,
++            params.fb_info_list_size,
++            NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID,
++            value,
++        ) {
++            Some(old) => info!(
++                "G11_RM_IDENTITY mdev={} cmd={:#010x} field=fb_memory_vendor index={:#04x} old={} new={} requested=true",
++                mdev_uuid,
++                io_data.cmd,
++                NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID,
++                old,
++                value
++            ),
++            None => info!(
++                "G11_RM_IDENTITY mdev={} cmd={:#010x} field=fb_memory_vendor index={:#04x} requested=false manager_did_not_query=true",
++                mdev_uuid,
++                io_data.cmd,
++                NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID
++            ),
++        }
++    }
++}
++
++fn trace_rm_control(io_data: &Nvos54Parameters) {
++    if !RM_CONTROL_TRACE_ENABLED.load(Ordering::Acquire) {
++        return;
++    }
++
++    let event = {
++        let mut state = RM_CONTROL_TRACE.lock();
++        if !state.commands.is_empty() && state.commands.binary_search(&io_data.cmd).is_err() {
++            None
++        } else if state.count < state.limit {
++            state.count += 1;
++            Some((state.mdev_uuid.clone(), state.count, false, state.limit))
++        } else if !state.limit_reported {
++            state.limit_reported = true;
++            Some((state.mdev_uuid.clone(), state.count, true, state.limit))
++        } else {
++            None
++        }
++    };
++
++    if let Some((mdev_uuid, sequence, limit_reached, limit)) = event {
++        if limit_reached {
++            info!(
++                "G11_RM_TRACE limit reached mdev={} limit={}",
++                mdev_uuid.as_deref().unwrap_or("unknown"),
++                limit
++            );
++        } else {
++            info!(
++                "G11_RM_TRACE mdev={} seq={} pid={} cmd={:#010x} size={} status={:#010x} hclient={:#010x} hobject={:#010x} flags={:#010x}",
++                mdev_uuid.as_deref().unwrap_or("unknown"),
++                sequence,
++                process::id(),
++                io_data.cmd,
++                io_data.params_size,
++                io_data.status,
++                io_data.h_client,
++                io_data.h_object,
++                io_data.flags
++            );
++        }
++    }
+ }
+ 
+ fn check_size_log(name: &str, actual_size: usize, expected_size: usize) {
+@@ -430,6 +867,18 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+         return ret;
+     }
+ 
++    // G-11 diagnostic mode records only RM control metadata. Parameter payloads
++    // are intentionally excluded because some commands carry license material.
++    trace_rm_control(io_data);
++
++    // The response has already been produced by the signed host kernel driver.
++    // Only fixed-layout, descriptive FB fields explicitly configured for this
++    // mdev UUID are adjusted before vGPU manager caches them. PCI identity,
++    // architecture and operational topology remain native.
++    if io_data.status == NV_OK {
++        apply_rm_identity_override(io_data);
++    }
++
+     //info!("{:#x?}", io_data);
+ 
+     macro_rules! check_size {
+@@ -586,6 +1035,7 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+                 info!("{:#?}", config);
+ 
+                 *LAST_MDEV_UUID.lock() = Some(config.mdev_uuid);
++                configure_rm_control_trace_for_mdev(config.mdev_uuid);
+             }
+             NV0000_CTRL_CMD_VGPU_CREATE_DEVICE
+                 // 18.0 driver sends larger struct with size 40 bytes. Only extra members added at the end,
+@@ -601,6 +1051,7 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+                 info!("{:#?}", params);
+ 
+                 *LAST_MDEV_UUID.lock() = Some(params.vgpu_name);
++                configure_rm_control_trace_for_mdev(params.vgpu_name);
+             }
+             NVA081_CTRL_CMD_VGPU_CONFIG_GET_VGPU_TYPE_INFO => {
+                 if
+@@ -738,6 +1189,14 @@ fn handle_profile_override<C: VgpuConfigLike>(config: &mut C) -> bool {
+ 
+     let vgpu_type = format!("nvidia-{}", config.vgpu_type());
+     let mdev_uuid = LAST_MDEV_UUID.lock().clone();
++    let mdev_uuid_string = mdev_uuid.map(|uuid| uuid.to_string());
++
++    configure_rm_control_trace(
++        &vgpu_type,
++        mdev_uuid_string.clone(),
++        &config_overrides,
++        "profile",
++    );
+ 
+     if let Some(config_override) = config_overrides.profile.get(vgpu_type.as_str()) {
+         info!("Applying profile {} overrides", vgpu_type);
+@@ -746,7 +1205,7 @@ fn handle_profile_override<C: VgpuConfigLike>(config: &mut C) -> bool {
+             return false;
+         }
+     }
+-    if let Some(mdev_uuid) = mdev_uuid.map(|uuid| uuid.to_string()) {
++    if let Some(mdev_uuid) = mdev_uuid_string {
+         if let Some(config_override) = config_overrides.mdev.get(mdev_uuid.as_str()) {
+             info!("Applying mdev UUID {} profile overrides", mdev_uuid);
+ 
+@@ -989,3 +1448,120 @@ fn apply_profile_override<C: VgpuConfigLike>(
+ 
+     true
+ }
++
++#[cfg(test)]
++mod g11_tests {
++    use std::mem;
++
++    use super::{
++        merge_rm_control_trace_config, patch_rm_info_entry, rm_identity_driver_supported,
++        Nv2080CtrlFbGetInfoV2Params, ProfileOverridesConfig, RmControlTraceConfig, RmInfoEntry,
++        NV2080_CTRL_FB_INFO_MAX_LIST_SIZE,
++    };
++
++    #[test]
++    fn mdev_rm_trace_settings_replace_profile_defaults() {
++        let overrides: ProfileOverridesConfig = toml::from_str(
++            r#"
++                [profile.nvidia-257]
++                rm_control_trace = true
++                rm_control_trace_commands = ["0x20801301", "0x20801201"]
++                rm_control_trace_limit = 100
++
++                [mdev."bcbed946-976f-467a-bd7d-01e181b1bee8"]
++                rm_control_trace_commands = ["0x20801701"]
++                rm_control_trace_limit = 250
++            "#,
++        )
++        .expect("trace configuration must parse");
++
++        let mut trace = RmControlTraceConfig::default();
++        merge_rm_control_trace_config(&mut trace, overrides.profile.get("nvidia-257").unwrap());
++        merge_rm_control_trace_config(
++            &mut trace,
++            overrides
++                .mdev
++                .get("bcbed946-976f-467a-bd7d-01e181b1bee8")
++                .unwrap(),
++        );
++
++        assert!(trace.enabled);
++        assert_eq!(trace.commands, vec![0x20801701]);
++        assert_eq!(trace.limit, Some(250));
++    }
++
++    #[test]
++    fn fb_get_info_v2_layout_matches_r535() {
++        assert_eq!(NV2080_CTRL_FB_INFO_MAX_LIST_SIZE, 0x36);
++        assert_eq!(mem::size_of::<RmInfoEntry>(), 8);
++        assert_eq!(mem::size_of::<Nv2080CtrlFbGetInfoV2Params>(), 436);
++    }
++
++    #[test]
++    fn rm_identity_is_gated_to_r535() {
++        assert!(rm_identity_driver_supported("535.161.05\n"));
++        assert!(!rm_identity_driver_supported("550.163.02\n"));
++        assert!(!rm_identity_driver_supported("unavailable"));
++    }
++
++    #[test]
++    fn rm_info_patch_honors_caller_list_size() {
++        let mut entries = [
++            RmInfoEntry {
++                index: 0x0b,
++                data: 256,
++            },
++            RmInfoEntry {
++                index: 0x0d,
++                data: 0x11,
++            },
++            RmInfoEntry {
++                index: 0x1c,
++                data: u32::MAX,
++            },
++        ];
++
++        assert_eq!(patch_rm_info_entry(&mut entries, 2, 0x0b, 128), Some(256));
++        assert_eq!(entries[0].data, 128);
++        assert_eq!(patch_rm_info_entry(&mut entries, 2, 0x1c, 1), None);
++        assert_eq!(entries[2].data, u32::MAX);
++        assert_eq!(
++            patch_rm_info_entry(&mut entries, 3, 0x1c, 1),
++            Some(u32::MAX)
++        );
++        assert_eq!(entries[2].data, 1);
++    }
++
++    #[test]
++    fn per_mdev_rm_fb_identity_settings_parse() {
++        let overrides: ProfileOverridesConfig = toml::from_str(
++            r#"
++                [mdev."bcbed946-976f-467a-bd7d-01e181b1bee8"]
++                rm_fb_bus_width = 128
++                rm_fb_ram_type = 8
++                rm_fb_memory_vendor = 1
++
++                [mdev."12345678-1234-1234-1234-123456789abc"]
++                rm_fb_bus_width = 64
++                rm_fb_ram_type = 8
++                rm_fb_memory_vendor = 15
++            "#,
++        )
++        .expect("RM FB identity configuration must parse");
++        let profile = overrides
++            .mdev
++            .get("bcbed946-976f-467a-bd7d-01e181b1bee8")
++            .unwrap();
++
++        assert_eq!(profile.rm_fb_bus_width, Some(128));
++        assert_eq!(profile.rm_fb_ram_type, Some(8));
++        assert_eq!(profile.rm_fb_memory_vendor, Some(1));
++        let other = overrides
++            .mdev
++            .get("12345678-1234-1234-1234-123456789abc")
++            .unwrap();
++        assert_eq!(other.rm_fb_bus_width, Some(64));
++        assert_eq!(other.rm_fb_ram_type, Some(8));
++        assert_eq!(other.rm_fb_memory_vendor, Some(15));
++    }
++}

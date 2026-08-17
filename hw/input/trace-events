@@ -45,6 +45,8 @@ ps2_mouse_reset(void *opaque) "%p"
 # hid.c
 hid_kbd_queue_full(void) "queue full"
 hid_kbd_queue_empty(void) "queue empty"
+hid_kbd_repeat_ignored(int qcode) "ignore duplicate make qcode=%d"
+hid_kbd_release_all(void) "queue full on release, reset to all-up report"
 
 # virtio-input.c
 virtio_input_queue_full(void) "queue full"

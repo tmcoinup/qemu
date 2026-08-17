@@ -40,6 +40,7 @@
 
 #include "nvapi_profile_clocks.h"
 #include "nvapi_profile_math.h"
+#include "vgpu_profile_catalog.h"
 
 typedef int32_t NvAPI_Status;          /* NVAPI_OK = 0 */
 typedef uint32_t NvU32;
@@ -58,7 +59,7 @@ static DirectGetMethod_t  g_real_direct = NULL;
 static INIT_ONCE          g_real_init_once = INIT_ONCE_STATIC_INIT;
 
 #define NVAPI_GPU_BUS_TYPE_PCI_EXPRESS 3u
-#define IDENTITY_CONTRACT_VERSION      1u
+#define IDENTITY_CONTRACT_VERSION      2u
 
 /*
  * Per-VM values written beneath NVIDIA's 64-bit NvAPI registry key.  These
@@ -85,6 +86,7 @@ static NvU32 g_pci_device_id;
 static NvU32 g_pci_subvendor_id;
 static NvU32 g_pci_subdevice_id;
 static NvU32 g_pci_revision_id;
+static NvU32 g_vram_mb;
 static BOOL  g_identity_pci_valid;
 static BOOL  g_identity_contract_valid;
 static NvU32 g_ray_tracing_cores;
@@ -97,6 +99,15 @@ static BOOL  g_identity_gpu_name_valid;
 static char  g_identity_vbios_version[NVAPI_SHORT_STRING_MAX];
 static BOOL  g_identity_vbios_version_valid;
 static char  g_identity_profile_key[NVAPI_SHORT_STRING_MAX];
+static char  g_identity_catalog_sha256[65];
+static char  g_identity_board_brand[NVAPI_SHORT_STRING_MAX];
+static char  g_identity_board_model[NVAPI_SHORT_STRING_MAX];
+static char  g_identity_memory_type_name[NVAPI_SHORT_STRING_MAX];
+static char  g_identity_memory_maker_name[NVAPI_SHORT_STRING_MAX];
+static char  g_identity_memory_maker_nvapi_name[NVAPI_SHORT_STRING_MAX];
+static char  g_identity_scope[NVAPI_SHORT_STRING_MAX];
+static char  g_identity_pci_projection_mode[NVAPI_SHORT_STRING_MAX];
+static BOOL  g_identity_preserve_transport_device;
 static INIT_ONCE g_identity_init_once = INIT_ONCE_STATIC_INIT;
 
 static BOOL read_identity_dword(HKEY key, const char *name, NvU32 *value,
@@ -113,15 +124,17 @@ static BOOL read_identity_dword(HKEY key, const char *name, NvU32 *value,
     return FALSE;
 }
 
-static BOOL read_identity_ascii(HKEY key, const char *name, char *destination)
+static BOOL read_identity_ascii(HKEY key, const char *name, char *destination,
+                                DWORD destination_size)
 {
-    char candidate[NVAPI_SHORT_STRING_MAX] = { 0 };
+    char candidate[128] = { 0 };
     DWORD type = 0, size = sizeof(candidate);
     size_t i;
 
     if (RegQueryValueExA(key, name, NULL, &type,
             (BYTE *)candidate, &size) != ERROR_SUCCESS || type != REG_SZ ||
-            size < 2 || size > sizeof(candidate) || candidate[size - 1] != '\0') {
+            size < 2 || size > sizeof(candidate) || size > destination_size ||
+            candidate[size - 1] != '\0') {
         return FALSE;
     }
     /* Reject embedded NULs and non-printable/non-ASCII bytes.  This makes an
@@ -163,38 +176,74 @@ static BOOL is_valid_vbios_version(const char *value)
     return TRUE;
 }
 
+static BOOL is_valid_catalog_sha256(const char *value)
+{
+    size_t index;
+
+    if (!value || strlen(value) != 64u) {
+        return FALSE;
+    }
+    for (index = 0; index < 64u; ++index) {
+        if (!((value[index] >= '0' && value[index] <= '9') ||
+              (value[index] >= 'A' && value[index] <= 'F'))) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static BOOL is_valid_pcie_width(NvU32 width)
 {
     return width == 1u || width == 2u || width == 4u || width == 8u ||
            width == 16u || width == 32u;
 }
 
-static BOOL profile_key_matches_pci_contract(const char *profile_key)
+static BOOL profile_contract_matches_registry(const char *profile_key)
 {
-    struct ProfilePciContract {
-        const char *key;
-        NvU32 device;
-        NvU32 subvendor;
-        NvU32 subdevice;
-        NvU32 revision;
-    };
-    static const struct ProfilePciContract contracts[] = {
-        { "gtx750ti_2gb", 0x1380u, 0x10deu, 0x1380u, 0xa2u },
-        { "gt1030_2gb",   0x1d01u, 0x1043u, 0x85f9u, 0xa1u },
-        { "gtx1050_2gb",  0x1c81u, 0x1028u, 0x11c0u, 0xa1u }
-    };
     size_t index;
 
-    if (!profile_key || g_pci_vendor_id != 0x10deu) {
+    if (!profile_key ||
+        strcmp(g_identity_catalog_sha256,
+               QEMU_VGPU_PROFILE_CATALOG_SHA256) != 0) {
         return FALSE;
     }
-    for (index = 0; index < sizeof(contracts) / sizeof(contracts[0]);
-         ++index) {
-        if (strcmp(profile_key, contracts[index].key) == 0 &&
-            g_pci_device_id == contracts[index].device &&
-            g_pci_subvendor_id == contracts[index].subvendor &&
-            g_pci_subdevice_id == contracts[index].subdevice &&
-            g_pci_revision_id == contracts[index].revision) {
+    for (index = 0; index < QEMU_VGPU_PROFILE_CONTRACT_COUNT; ++index) {
+        const QemuVgpuProfileContract *contract =
+            &qemu_vgpu_profile_contracts[index];
+
+        if (strcmp(profile_key, contract->key) == 0 &&
+            strcmp(g_identity_gpu_name, contract->name) == 0 &&
+            strcmp(g_identity_board_brand, contract->board_brand) == 0 &&
+            strcmp(g_identity_board_model, contract->board_model) == 0 &&
+            strcmp(g_identity_memory_type_name,
+                   contract->memory_type_name) == 0 &&
+            strcmp(g_identity_memory_maker_name,
+                   contract->memory_maker_name) == 0 &&
+            strcmp(g_identity_memory_maker_nvapi_name,
+                   contract->memory_maker_nvapi_name) == 0 &&
+            strcmp(g_identity_scope, contract->identity_scope) == 0 &&
+            strcmp(g_identity_vbios_version, contract->vbios_version) == 0 &&
+            g_pci_vendor_id == contract->pci_vendor_id &&
+            g_pci_device_id == contract->pci_device_id &&
+            g_pci_subvendor_id == contract->pci_subvendor_id &&
+            g_pci_subdevice_id == contract->pci_subdevice_id &&
+            g_pci_revision_id == contract->pci_revision_id &&
+            g_vram_mb == contract->vram_mb &&
+            g_core_clock_kHz == contract->core_clock_khz &&
+            g_boost_clock_kHz == contract->boost_clock_khz &&
+            g_mem_raw_clock_kHz == contract->memory_raw_clock_khz &&
+            g_mem_bus_width_bits == contract->memory_bus_bits &&
+            g_mem_bandwidth_mbps == contract->memory_bandwidth_mbps &&
+            g_memory_type == contract->memory_type &&
+            g_memory_maker == contract->memory_maker &&
+            g_cuda_cores == contract->cuda_cores &&
+            g_shader_subpipes == contract->shader_subpipes &&
+            g_rop_count == contract->rop_count &&
+            g_tmu_count == contract->tmu_count &&
+            g_architecture == contract->architecture &&
+            g_implementation == contract->implementation &&
+            g_chip_revision == contract->chip_revision &&
+            g_pcie_width == contract->pcie_width) {
             return TRUE;
         }
     }
@@ -207,11 +256,10 @@ static BOOL identity_values_are_coherent(NvU32 legacy_mem_raw_clock_kHz,
     NvU32 derived_bandwidth;
     uint64_t difference;
 
-    if (vram_mb != 2048u ||
+    if (vram_mb != 2048u || g_vram_mb != vram_mb ||
         g_boost_clock_kHz < g_core_clock_kHz ||
         legacy_mem_raw_clock_kHz != g_mem_raw_clock_kHz ||
         g_memory_type != NVAPI_RAM_TYPE_GDDR5 ||
-        g_memory_maker != 1u ||
         g_tmu_count != g_shader_subpipes * 8u ||
         !is_valid_pcie_width(g_pcie_width) ||
         g_ray_tracing_cores != 0u || g_tensor_cores != 0u ||
@@ -241,6 +289,7 @@ static BOOL CALLBACK load_identity_once(PINIT_ONCE once, PVOID parameter,
     NvU32 legacy_mem_raw_clock_kHz = 0;
     NvU32 vram_mb = 0;
     char final_profile_key[NVAPI_SHORT_STRING_MAX] = { 0 };
+    char final_catalog_sha256[65] = { 0 };
     BOOL complete = TRUE;
 
     (void)once;
@@ -257,24 +306,42 @@ static BOOL CALLBACK load_identity_once(PINIT_ONCE once, PVOID parameter,
         if (!read_identity_dword(key, name, destination, minimum, maximum)) \
             complete = FALSE;                                              \
     } while (0)
-#define REQUIRE_ASCII(name, destination, valid_flag)                  \
-    do {                                                               \
-        valid_flag = read_identity_ascii(key, name, destination);      \
-        if (!valid_flag)                                                \
-            complete = FALSE;                                           \
+#define REQUIRE_ASCII(name, destination, valid_flag)                       \
+    do {                                                                  \
+        valid_flag = read_identity_ascii(                                 \
+            key, name, destination, (DWORD)sizeof(destination));           \
+        if (!valid_flag)                                                   \
+            complete = FALSE;                                              \
+    } while (0)
+#define REQUIRE_ASCII_VALUE(name, destination)                             \
+    do {                                                                  \
+        if (!read_identity_ascii(                                         \
+                key, name, destination, (DWORD)sizeof(destination)))       \
+            complete = FALSE;                                              \
     } while (0)
 
     REQUIRE_DWORD("IdentityContractVersion", &contract_version,
                   IDENTITY_CONTRACT_VERSION, IDENTITY_CONTRACT_VERSION);
-    if (!read_identity_ascii(
-            key, "IdentityProfileKey", g_identity_profile_key)) {
+    if (!read_identity_ascii(key, "IdentityProfileKey",
+            g_identity_profile_key, sizeof(g_identity_profile_key))) {
         complete = FALSE;
     }
+    REQUIRE_ASCII_VALUE("IdentityCatalogSha256", g_identity_catalog_sha256);
+    REQUIRE_ASCII_VALUE("IdentityBoardBrand", g_identity_board_brand);
+    REQUIRE_ASCII_VALUE("IdentityBoardModel", g_identity_board_model);
+    REQUIRE_ASCII_VALUE("IdentityMemoryTypeName", g_identity_memory_type_name);
+    REQUIRE_ASCII_VALUE("IdentityMemoryMakerName", g_identity_memory_maker_name);
+    REQUIRE_ASCII_VALUE("IdentityMemoryMakerNvapiName",
+                        g_identity_memory_maker_nvapi_name);
+    REQUIRE_ASCII_VALUE("IdentityProjectionScope", g_identity_scope);
+    REQUIRE_ASCII_VALUE("IdentityPciProjectionMode",
+                        g_identity_pci_projection_mode);
     REQUIRE_ASCII("IdentityGpuName", g_identity_gpu_name,
                   g_identity_gpu_name_valid);
     REQUIRE_ASCII("IdentityVbiosVersion", g_identity_vbios_version,
                   g_identity_vbios_version_valid);
-    REQUIRE_DWORD("IdentityVramMB", &vram_mb, 2048u, 2048u);
+    REQUIRE_DWORD("IdentityVramMB", &g_vram_mb, 2048u, 2048u);
+    vram_mb = g_vram_mb;
     REQUIRE_DWORD("IdentityPciVendorId", &g_pci_vendor_id, 1u, 0xffffu);
     REQUIRE_DWORD("IdentityPciDeviceId", &g_pci_device_id, 1u, 0xffffu);
     REQUIRE_DWORD("IdentityPciSubVendorId", &g_pci_subvendor_id,
@@ -296,7 +363,7 @@ static BOOL CALLBACK load_identity_once(PINIT_ONCE once, PVOID parameter,
                   1u, 10000000u);
     REQUIRE_DWORD("IdentityMemoryType", &g_memory_type,
                   NVAPI_RAM_TYPE_GDDR5, NVAPI_RAM_TYPE_GDDR5);
-    REQUIRE_DWORD("IdentityMemoryMaker", &g_memory_maker, 1u, 1u);
+    REQUIRE_DWORD("IdentityMemoryMaker", &g_memory_maker, 1u, 10u);
     REQUIRE_DWORD("IdentityCudaCores", &g_cuda_cores, 1u, 1000000u);
     REQUIRE_DWORD("IdentityShaderSubPipes", &g_shader_subpipes,
                   1u, 100000u);
@@ -315,23 +382,38 @@ static BOOL CALLBACK load_identity_once(PINIT_ONCE once, PVOID parameter,
      * concurrent incomplete writer cannot enable a partial contract. */
     REQUIRE_DWORD("IdentityContractVersion", &final_contract_version,
                   IDENTITY_CONTRACT_VERSION, IDENTITY_CONTRACT_VERSION);
-    if (!read_identity_ascii(
-            key, "IdentityProfileKey", final_profile_key)) {
+    if (!read_identity_ascii(key, "IdentityProfileKey", final_profile_key,
+            sizeof(final_profile_key))) {
+        complete = FALSE;
+    }
+    if (!read_identity_ascii(key, "IdentityCatalogSha256",
+            final_catalog_sha256, sizeof(final_catalog_sha256))) {
         complete = FALSE;
     }
     (void)read_identity_dword(
         key, "IdentityTraceQueryInterface", &g_trace_query_interface, 0u, 1u);
 
 #undef REQUIRE_ASCII
+#undef REQUIRE_ASCII_VALUE
 #undef REQUIRE_DWORD
 
     RegCloseKey(key);
     g_identity_pci_valid =
-        profile_key_matches_pci_contract(g_identity_profile_key);
+        profile_contract_matches_registry(g_identity_profile_key);
+    if (strcmp(g_identity_pci_projection_mode, "profile-tuple") == 0) {
+        g_identity_preserve_transport_device = FALSE;
+    } else if (strcmp(g_identity_pci_projection_mode,
+                      "transport-device-profile-subsystem") == 0) {
+        g_identity_preserve_transport_device = TRUE;
+    } else {
+        complete = FALSE;
+    }
     if (complete &&
         contract_version == IDENTITY_CONTRACT_VERSION &&
         final_contract_version == IDENTITY_CONTRACT_VERSION &&
         strcmp(g_identity_profile_key, final_profile_key) == 0 &&
+        strcmp(g_identity_catalog_sha256, final_catalog_sha256) == 0 &&
+        is_valid_catalog_sha256(g_identity_catalog_sha256) &&
         g_identity_pci_valid &&
         identity_values_are_coherent(legacy_mem_raw_clock_kHz, vram_mb)) {
         g_identity_contract_valid = TRUE;
@@ -572,12 +654,17 @@ hook_GetFullName(void *hPhysicalGpu, char *name)
 }
 
 /*
- * Public NvAPI_GPU_GetPCIIdentifiers (0x2DDFB66E).  This is deliberately an
- * app-local presentation override only: the Windows PCI enumerator, PnP
- * hardware ID and production-signed kernel driver continue to see/bind the
- * native vGPU endpoint.  NVIDIA returns the internal DeviceId as
+ * Public NvAPI_GPU_GetPCIIdentifiers (0x2DDFB66E).  NVIDIA returns the
+ * internal DeviceId as
  * (device << 16) | vendor, the SubSystemId as
  * (subdevice << 16) | subvendor, and ExtDeviceId as the bare device ID.
+ *
+ * System projection uses transport-device-profile-subsystem: the real
+ * vendor/device/external-device values remain exactly aligned with the one
+ * Windows PnP adapter and its production-signed driver, while the atomic
+ * board subsystem and target revision come from the profile.  Hardware tools
+ * can therefore merge PnP and NVAPI as one logical adapter without losing the
+ * AIB brand.  Legacy app-local packages explicitly select profile-tuple.
  */
 static NvAPI_Status __cdecl
 hook_GetPCIIdentifiers(void *hPhysicalGpu, NvU32 *pDeviceId,
@@ -598,10 +685,27 @@ hook_GetPCIIdentifiers(void *hPhysicalGpu, NvU32 *pDeviceId,
     if (!g_identity_pci_valid) {
         return rc;
     }
-    *pDeviceId = (g_pci_device_id << 16) | g_pci_vendor_id;
+    if (g_identity_preserve_transport_device) {
+        NvU32 real_vendor_id;
+        NvU32 real_device_id;
+
+        /* This mode cannot synthesize a transport identity after
+         * NVAPI_NOT_SUPPORTED: a successful real query is its provenance. */
+        if (rc != NVAPI_OK) {
+            return rc;
+        }
+        real_vendor_id = *pDeviceId & 0xffffu;
+        real_device_id = *pDeviceId >> 16;
+        if (!real_vendor_id || !real_device_id ||
+            *pExtDeviceId != real_device_id) {
+            return rc;
+        }
+    } else {
+        *pDeviceId = (g_pci_device_id << 16) | g_pci_vendor_id;
+        *pExtDeviceId = g_pci_device_id;
+    }
     *pSubSystemId = (g_pci_subdevice_id << 16) | g_pci_subvendor_id;
     *pRevisionId = g_pci_revision_id;
-    *pExtDeviceId = g_pci_device_id;
     return NVAPI_OK;
 }
 

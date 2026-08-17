@@ -54,6 +54,10 @@ STAGE_DIR="$TMP_DIR/images/staging" \
     "$INSTALLER" --help >"$TMP_DIR/help.out"
 grep -Fq -- '--base IMAGE' "$TMP_DIR/help.out" ||
     fail "--help did not describe the base selector"
+grep -Fq -- '--gpuz-source FILE' "$TMP_DIR/help.out" ||
+    fail "--help did not describe the external GPU-Z source"
+grep -Fq -- '--with-gpuz' "$TMP_DIR/help.out" ||
+    fail "--help did not describe explicit GPU-Z opt-in"
 [[ ! -e "$TMP_DIR/images" ]] ||
     fail "--help unexpectedly created storage"
 
@@ -74,12 +78,32 @@ require_text '[[ -f "$BASE" && ! -L "$BASE" ]]' \
     "regular non-symlink base gate"
 require_text '[[ -f "$PORTABLE_EXE" && ! -L "$PORTABLE_EXE" ]]' \
     "regular non-symlink EXE gate"
+require_text 'GPUZ_SOURCE=$(gpuz_asset_resolve_source "$GPUZ_SOURCE")' \
+    "regular non-symlink external GPU-Z gate"
+require_text '"$GPUZ_BYTES" == "$GPUZ_ASSET_BYTES"' \
+    "locked external GPU-Z byte-length gate"
+require_text '"$GPUZ_SHA256" == "$GPUZ_ASSET_SHA256"' \
+    "locked external GPU-Z hash gate"
 require_text 'die "portable EXE has no host content receipt"' \
     "authenticated package-receipt gate"
 require_text '.bindingMode == "portable-auto"' \
     "portable-auto receipt binding"
-require_text '.launcherFormat == "QEMU_GPUZ_PORTABLE_EXE_V1"' \
-    "portable launcher format binding"
+require_text '.schemaVersion == 4 and .bindingMode == "portable-auto"' \
+    "identity-only portable receipt schema"
+require_text '.gpuZDelivery == "optional-explicit-sibling"' \
+    "optional GPU-Z delivery receipt binding"
+require_text '.launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4"' \
+    "identity-only launcher format binding"
+reject_regex 'QEMU_GPUZ_PORTABLE_EXE_V1' \
+    "legacy embedded portable launcher acceptance"
+assert_before \
+    '"$GPUZ_SHA256" == "$GPUZ_ASSET_SHA256"' \
+    'cp --reflink=auto -- "$BASE" "$BASE_TMP"' \
+    "external GPU-Z validation before private base copy"
+assert_before \
+    '.launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4"' \
+    'cp --reflink=auto -- "$BASE" "$BASE_TMP"' \
+    "portable receipt validation before private base copy"
 
 # An exclusive global storage lock must be held before inspection/copy.  Every
 # normal start/create path holds this inode shared, so a running VM is refused.
@@ -142,14 +166,22 @@ require_text '-d "$MOUNT_DIR/Users/Public"' \
 require_text 'mount -t ntfs-3g -o big_writes,windows_names' \
     "safe Windows NTFS write mount"
 
-# The copied EXE is verified before and after its app-local atomic rename.
-require_text 'sync -- "$DEST_TMP"' "guest EXE data sync"
-require_text '"$(sha256_upper "$DEST_TMP")" == "$PORTABLE_SHA256"' \
+# The identity EXE is always verified before/after publication.  GPU-Z uses
+# the same gates only inside the explicit WITH_GPUZ branch.
+require_text 'sync -- "$PORTABLE_DEST_TMP"' "guest EXE data sync"
+require_text 'sync -- "$GPUZ_DEST_TMP"' "external GPU-Z data sync"
+require_text '"$(sha256_upper "$PORTABLE_DEST_TMP")" == "$PORTABLE_SHA256"' \
     "pre-publication guest EXE hash check"
-require_text 'mv -fT -- "$DEST_TMP" "$DEST_DIR/VgpuPortable.exe"' \
+require_text '"$(sha256_upper "$GPUZ_DEST_TMP")" == "$GPUZ_SHA256"' \
+    "pre-publication external GPU-Z hash check"
+require_text 'mv -fT -- "$PORTABLE_DEST_TMP" "$DEST_DIR/VgpuPortable.exe"' \
     "atomic guest EXE publication"
+require_text 'mv -fT -- "$GPUZ_DEST_TMP" "$DEST_DIR/GPU-Z.exe"' \
+    "atomic external GPU-Z publication"
 require_text '"$(sha256_upper "$DEST_DIR/VgpuPortable.exe")" == "$PORTABLE_SHA256"' \
     "post-publication guest EXE hash check"
+require_text '"$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256"' \
+    "post-publication external GPU-Z hash check"
 
 # Cleanup has to unmount/disconnect and restore the archived original if the
 # base pathname is absent.  Final publication uses same-filesystem renames.
@@ -186,16 +218,18 @@ require_text 'mv -T -- "$BASE" "$BASE_BACKUP"' "original-base archival rename"
 require_text 'mv -T -- "$BASE_TMP" "$BASE"' "new-base atomic rename"
 require_text 'atomic base publication failed' "base publication rollback error"
 
-# Clone-side attestation must at least bind package/catalog/path and a concrete
-# base generation.  The dynamic fixture test covers strict verification.
+# Clone-side attestation binds the identity EXE, the optional inclusion state,
+# the catalog, and a concrete base generation.  The fixture test covers both
+# false/null and explicit true/exact GPU-Z states.
 for key in schemaVersion bindingMode basePath baseFileBytes baseDeviceId \
-        baseInode baseMtimeNs baseCtimeNs guestPath exeSha256 exeBytes \
+        baseInode baseMtimeNs baseCtimeNs portableGuestPath portableSha256 \
+        portableBytes gpuZDelivery gpuZIncluded gpuZGuestPath gpuZSha256 gpuZBytes \
         catalogSha256 installedUtc; do
     require_text "$key" "sidecar field $key"
 done
 require_text '[[ "$CATALOG_SHA256" == "$EXPECTED_CATALOG_SHA256" ]]' \
     "current-catalog package gate"
-require_text '.schemaVersion == 2' "generation-bound sidecar schema"
+require_text '.schemaVersion == 4' "generation-bound optional-file sidecar schema"
 require_text 'mv -fT -- "$ATTESTATION_TMP" "$ATTESTATION"' \
     "atomic sidecar publication"
 require_text 'die "published base attestation failed verification"' \
@@ -233,7 +267,9 @@ done
 require_text 'refresh_restored_attestation_ctime()' \
     "rollback ctime refresh helper"
 require_text '.baseCtimeNs = $baseCtimeNs' \
-    "schema2 rollback ctime rewrite"
+    "rollback ctime rewrite"
+require_text 'valid schema-2/schema-3/schema-4 generation' \
+    "legacy/new rollback attestation compatibility"
 require_text 'mv -fT -- "$refresh_tmp" "$ATTESTATION"' \
     "atomic refreshed-sidecar publication"
 require_text 'if ((ATTESTATION_MOVED && restored_original))' \

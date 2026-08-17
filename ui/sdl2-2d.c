@@ -28,30 +28,16 @@
 #include "ui/input.h"
 #include "ui/sdl2.h"
 
-void sdl2_2d_update(DisplayChangeListener *dcl,
-                    int x, int y, int w, int h)
+static void sdl2_2d_present_texture(struct sdl2_console *scon)
 {
-    struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
     DisplaySurface *surf = scon->surface;
-    SDL_Rect rect, dst;
-    size_t surface_data_offset;
+    SDL_Rect dst;
     int ow, oh, dx, dy, dw, dh;
-    assert(!scon->opengl);
 
-    if (!scon->texture) {
+    if (!surf || !scon->texture || !scon->real_renderer ||
+        !scon->real_window || scon->hidden) {
         return;
     }
-
-    surface_data_offset = surface_bytes_per_pixel(surf) * x +
-                          surface_stride(surf) * y;
-    rect.x = x;
-    rect.y = y;
-    rect.w = w;
-    rect.h = h;
-
-    SDL_UpdateTexture(scon->texture, &rect,
-                      surface_data(surf) + surface_data_offset,
-                      surface_stride(surf));
 
     /*
      * Show the guest at its native resolution (1:1) centred in the window and
@@ -72,6 +58,34 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
     SDL_RenderPresent(scon->real_renderer);
     sdl2_note_present(scon);
+}
+
+void sdl2_2d_update(DisplayChangeListener *dcl,
+                    int x, int y, int w, int h)
+{
+    struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    DisplaySurface *surf = scon->surface;
+    SDL_Rect rect;
+    size_t surface_data_offset;
+
+    assert(!scon->opengl);
+    if (!scon->texture) {
+        return;
+    }
+
+    surface_data_offset = surface_bytes_per_pixel(surf) * x +
+                          surface_stride(surf) * y;
+    rect.x = x;
+    rect.y = y;
+    rect.w = w;
+    rect.h = h;
+    if (SDL_UpdateTexture(scon->texture, &rect,
+                          surface_data(surf) + surface_data_offset,
+                          surface_stride(surf)) == 0) {
+        /* One graphic update may contain many dirty rectangles.  Upload each
+         * rectangle now, then present the complete texture once per refresh. */
+        scon->updates++;
+    }
 }
 
 void sdl2_2d_switch(DisplayChangeListener *dcl,
@@ -149,14 +163,19 @@ void sdl2_2d_refresh(DisplayChangeListener *dcl)
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
 
     assert(!scon->opengl);
+    sdl2_poll_events(scon);
+    sdl2_flush_window_updates();
     scon->presented_since_refresh = false;
     graphic_hw_update(dcl->con);
+    if (scon->updates) {
+        scon->updates = 0;
+        sdl2_2d_present_texture(scon);
+    }
     if (scon->fixed_present && !scon->presented_since_refresh &&
         !scon->hidden && scon->real_window &&
         !(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
-        sdl2_2d_redraw(scon);
+        sdl2_2d_present_texture(scon);
     }
-    sdl2_poll_events(scon);
 }
 
 void sdl2_2d_redraw(struct sdl2_console *scon)
@@ -166,9 +185,14 @@ void sdl2_2d_redraw(struct sdl2_console *scon)
     if (!scon->surface) {
         return;
     }
+    scon->updates = 0;
     sdl2_2d_update(&scon->dcl, 0, 0,
                    surface_width(scon->surface),
                    surface_height(scon->surface));
+    if (scon->updates) {
+        scon->updates = 0;
+        sdl2_2d_present_texture(scon);
+    }
 }
 
 bool sdl2_2d_check_format(DisplayChangeListener *dcl,

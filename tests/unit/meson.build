@@ -50,7 +50,18 @@ tests = {
   'test-fifo': [],
   'test-envlist': [],
   'test-edid': [meson.project_source_root() / 'hw/display/edid-generate.c'],
+  'test-sdl2-pointer': [meson.project_source_root() / 'ui/sdl2-pointer.c'],
+  'test-usb-hid-numlock': [meson.project_source_root() / 'hw/usb/hid-numlock.c'],
 }
+
+if sdl.found()
+  tests += {
+    'test-sdl2-event': [
+      meson.project_source_root() / 'ui/sdl2-event.c',
+      sdl,
+    ],
+  }
+endif
 
 if have_system or have_tools
   tests += {
@@ -126,6 +137,10 @@ endif
 
 if have_system
   tests += {
+    'test-input-paused-release': [
+      meson.project_source_root() / 'ui/input.c',
+      pixman,
+    ],
     'ptimer-test': ['ptimer-test-stubs.c', meson.project_source_root() / 'hw/core/ptimer.c'],
     'test-iov': [],
     'test-opts-visitor': [testqapi],

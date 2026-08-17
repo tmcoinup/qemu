@@ -87,7 +87,7 @@ static void test_metadata(void)
     qemu_edid_info info = {
         .vendor = "AOC",
         .name = "24G2E5",
-        .serial = "CNV123456789",
+        .serial = "2920012345678",
         .product_id = 0x2401,
         .week = 18,
         .year = 2022,
@@ -142,12 +142,12 @@ static void test_metadata(void)
     g_assert_cmpmem(name + 5, 6, "24G2E5", 6);
     serial = find_descriptor(edid, 0xff);
     g_assert_nonnull(serial);
-    g_assert_cmpmem(serial + 5, 12, "CNV123456789", 12);
+    g_assert_cmpmem(serial + 5, 13, "2920012345678", 13);
 
     assert_checksums(edid);
 }
 
-static void test_legacy_windows_modes(void)
+static void test_vgpu_fhd_modes(void)
 {
     uint8_t edid[1024] = { 0 };
     qemu_edid_info info = {
@@ -170,7 +170,7 @@ static void test_legacy_windows_modes(void)
 
     qemu_edid_generate(edid, sizeof(edid), &info);
 
-    /* The buggy driver must never see EDID 1.3 standard aspect codes. */
+    /* The generic generator leaves NVIDIA-specific standard slots to deploy. */
     for (i = 38; i < 54; i += 2) {
         g_assert_cmphex(edid[i], ==, 0x01);
         g_assert_cmphex(edid[i + 1], ==, 0x01);
@@ -180,15 +180,15 @@ static void test_legacy_windows_modes(void)
     g_assert_cmphex(edid[36], ==, 0x08); /* 1024x768 */
     g_assert_cmphex(edid[37], ==, 0x00);
 
+    /* Keep ordinary compatibility modes, with both 16:10 bits clear. */
     xtra3 = find_descriptor(edid, 0xf7);
     g_assert_nonnull(xtra3);
     g_assert_cmphex(xtra3[5], ==, 0x0a);
-    g_assert_cmphex(xtra3[6], ==, 0x00); /* no 75 Hz mode outside some ranges */
-    g_assert_cmphex(xtra3[7], ==, 0x4a); /* three 1280-wide modes */
-    g_assert_cmphex(xtra3[8], ==, 0xa0); /* 1360x768, 1440x900 */
-    g_assert_cmphex(xtra3[9], ==, 0x20); /* 1680x1050 */
+    g_assert_cmphex(xtra3[6], ==, 0x00);
+    g_assert_cmphex(xtra3[7], ==, 0x4a); /* 1280x1024/960/768 */
+    g_assert_cmphex(xtra3[8], ==, 0x80); /* 1360x768; no 1440x900 */
+    g_assert_cmphex(xtra3[9], ==, 0x00); /* no 1680x1050 */
     g_assert_cmphex(xtra3[10], ==, 0x00); /* no 1920x1200 */
-    g_assert_cmphex(xtra3[11], ==, 0x00); /* no modes above 1080p */
 
     /* CTA video data block: 1080p60 and 720p60 only. */
     g_assert_cmphex(edid[128], ==, 0x02);
@@ -255,7 +255,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     g_test_add_func("/edid/metadata", test_metadata);
-    g_test_add_func("/edid/legacy-windows-modes", test_legacy_windows_modes);
+    g_test_add_func("/edid/vgpu-fhd-modes", test_vgpu_fhd_modes);
     g_test_add_func("/edid/generic-defaults", test_generic_defaults);
 
     return g_test_run();

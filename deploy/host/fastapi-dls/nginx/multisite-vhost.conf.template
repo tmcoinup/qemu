@@ -1,0 +1,65 @@
+# 宿主 Nginx 多站点入口：Cloudflare -> Nginx :443 -> fastapi-dls 回环端口。
+# 由 install-multisite-proxy.sh 渲染；不要直接把占位符版本安装到 Nginx。
+
+# HTTP 只负责 Cloudflare 到源站的规范跳转。Full (strict) 正常请求会直接走 443。
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DLS_DOMAIN__;
+
+    # 依赖宿主机已有的 00-cloudflare-realip.conf，拒绝绕过 Cloudflare 的源站直连。
+    if ($origin_from_cloudflare = 0) {
+        return 444;
+    }
+
+    return 308 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name __DLS_DOMAIN__;
+
+    # 该证书由 Cloudflare Origin CA 或 DNS-01 签发的公开 CA 提供，必须覆盖此域名。
+    ssl_certificate __FRONTEND_CERT__;
+    ssl_certificate_key __FRONTEND_KEY__;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # 依赖宿主机已有的 00-cloudflare-realip.conf，拒绝绕过 Cloudflare 的源站直连。
+    if ($origin_from_cloudflare = 0) {
+        return 444;
+    }
+
+    client_max_body_size 1m;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    # 在公网边界覆盖而不是追加，绝不把访客传入的 XFF 带入可信链。
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header CF-Connecting-IP "";
+    proxy_set_header Forwarded "";
+    proxy_connect_timeout 3s;
+    proxy_send_timeout 15s;
+    proxy_read_timeout 60s;
+
+    # DLS 上游是 dlsctl.sh 签发的自签 Web 证书。Nginx 显式信任并校验它，
+    # 不要为了反代而关闭 proxy_ssl_verify。
+    proxy_ssl_server_name on;
+    proxy_ssl_name __DLS_DOMAIN__;
+    proxy_ssl_trusted_certificate __UPSTREAM_CERT__;
+    proxy_ssl_verify on;
+    proxy_ssl_verify_depth 2;
+
+    # token、租约和管理接口均不得由 Nginx 或 Cloudflare 缓存。
+    proxy_cache off;
+    proxy_no_cache 1;
+    proxy_cache_bypass 1;
+    add_header Cache-Control "no-store, private, max-age=0" always;
+
+    location / {
+        proxy_pass https://127.0.0.1:__UPSTREAM_PORT__;
+    }
+}

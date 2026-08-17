@@ -1,29 +1,38 @@
 #!/usr/bin/env bash
-# Canonical storage layout for the G-11 deploy/*.sh vGPU workflow.
+# Canonical storage layout for the G-11 deploy/scripts vGPU workflow.
 #
-# G-11 owns its own namespace below IMAGE_ROOT/vms/G-11.  The V-11 branch uses
-# a different layout and must never be mixed into this resolver.
+# As on V-11, the default instance parent is IMAGE_ROOT/vms and one VM uses a
+# numeric directory below it.  G-11 and V-11 remain independent branches: a
+# V-11-marked numeric directory is rejected instead of being silently merged
+# into a G-11 VM.  Use --vms-dir/VM_ROOT when both layouts must coexist.
 
 vm_storage_init() {
     local disk_dir_was_set=0
 
     [[ -n "${VM_DISK_DIR:-}" ]] && disk_dir_was_set=1
-    if [[ -z "${VM_ROOT:-}" ]]; then
-        : "${IMAGE_ROOT:=/home/ubuntu/images}"
-        VM_ROOT=$IMAGE_ROOT/vms/G-11
-    else
-        : "${IMAGE_ROOT:=/home/ubuntu/images}"
+    : "${IMAGE_ROOT:=/home/ubuntu/images}"
+    if [[ -n "${VM_ROOT:-}" && -n "${VMS_DIR:-}" &&
+          "${VM_ROOT%/}" != "${VMS_DIR%/}" ]]; then
+        echo "[vm-storage] VM_ROOT and VMS_DIR select different roots" >&2
+        return 2
     fi
+    if [[ -z "${VM_ROOT:-}" ]]; then
+        VM_ROOT=${VMS_DIR:-$IMAGE_ROOT/vms}
+    fi
+    if [[ "$VM_ROOT" != / && "$VM_ROOT" == */ ]]; then
+        VM_ROOT=${VM_ROOT%/}
+    fi
+    : "${VMS_DIR:=$VM_ROOT}"
     : "${ISO_DIR:=$IMAGE_ROOT/iso}"
     : "${STAGE_DIR:=$IMAGE_ROOT/staging}"
     if [[ -z "${VM_INSTANCES_DIR:-}" ]]; then
         if ((disk_dir_was_set)); then
             # Compatibility for callers that historically selected a separate
-            # disk mount with VM_DISK_DIR.  New data still gets one vmN/
+            # disk mount with VM_DISK_DIR.  New data still gets one numeric
             # directory per instance on that mount.
             VM_INSTANCES_DIR=$VM_DISK_DIR
         else
-            # One G-11 VM is one complete vmN/ bundle directly below VM_ROOT.
+            # One G-11 VM is one complete numeric bundle below VM_ROOT.
             VM_INSTANCES_DIR=$VM_ROOT
         fi
     fi
@@ -59,7 +68,7 @@ vm_storage_init() {
     : "${VM_NVRAM_BACKUP_DIR:=$VM_NVRAM_DIR/backups}"
     : "${VM_STORAGE_COMPAT_FALLBACK:=0}"
 
-    export IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VM_INSTANCES_DIR
+    export IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VMS_DIR VM_INSTANCES_DIR
     export VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK
     export VM_SHARED_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR
     export VM_NVRAM_DIR VM_CONTROL_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR
@@ -68,6 +77,7 @@ vm_storage_init() {
 
 vm_storage_prepare() {
     vm_storage_init
+    vm_storage_validate_root_path "$VM_ROOT" "VM root" || return
     if [[ -z "${VM_INSTANCE_DIR:-}" &&
           ( -L "$VM_INSTANCES_DIR" ||
             ( -e "$VM_INSTANCES_DIR" && ! -d "$VM_INSTANCES_DIR" ) ) ]]; then
@@ -109,6 +119,70 @@ vm_storage_validate_path_text() {
     esac
 }
 
+# Validate an absolute directory path without creating it.  The final path may
+# be absent, but every existing ancestor must be a real (non-symlink)
+# directory.  This is used by --vms-dir before vm_storage_prepare creates it.
+vm_storage_validate_root_path() {
+    local path=${1:-} label=${2:-directory}
+    local probe next canonical lexical
+
+    vm_storage_validate_path_text "$path" "$label" || return
+    path=${path%/}
+    probe=$path
+    while [[ ! -e "$probe" && ! -L "$probe" ]]; do
+        next=${probe%/*}
+        [[ -n "$next" && "$next" != "$probe" ]] || next=/
+        probe=$next
+    done
+    [[ -d "$probe" && ! -L "$probe" ]] || {
+        echo "[vm-storage] $label has an unsafe existing component: $probe" >&2
+        return 2
+    }
+    canonical=$(realpath -e -- "$probe") || return
+    lexical=$(realpath -ms -- "$probe") || return
+    [[ "$canonical" == "$lexical" ]] || {
+        echo "[vm-storage] $label may not traverse a symbolic-link component: $path" >&2
+        return 2
+    }
+    if [[ -e "$path" || -L "$path" ]]; then
+        [[ -d "$path" && ! -L "$path" ]] || {
+            echo "[vm-storage] $label must be a real directory: $path" >&2
+            return 2
+        }
+    fi
+}
+
+vm_storage_root_is_historical() {
+    local root=${1:-} image_root=${IMAGE_ROOT:-/home/ubuntu/images}
+
+    root=${root%/}
+    image_root=${image_root%/}
+    [[ "$root" == "$image_root/vms/G-11" ||
+       "$root" == "$image_root/vms/instances" ]]
+}
+
+# Select the complete managed root.  Unlike --instances-dir this moves shared
+# bases, assets and global coordination into the same caller-selected tree.
+vm_storage_select_root() {
+    local requested=${1:-} canonical
+
+    vm_storage_validate_root_path "$requested" "VMS directory" || return
+    canonical=$(realpath -ms -- "${requested%/}") || return
+    if vm_storage_root_is_historical "$canonical"; then
+        echo "[vm-storage] an old G-11 source cannot be selected as the new VMS root: $canonical" >&2
+        echo "  migrate it to ${IMAGE_ROOT:-/home/ubuntu/images}/vms or choose a separate new root" >&2
+        return 2
+    fi
+    VM_ROOT=$canonical
+    VMS_DIR=$canonical
+    unset VM_INSTANCE_DIR VM_INSTANCE_ID VM_INSTANCES_DIR
+    unset VM_SHARED_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR VM_NVRAM_DIR
+    unset VM_CONTROL_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR
+    unset VM_DISK_ARCHIVE_DIR VM_BASE_ARCHIVE_DIR VM_NVRAM_BACKUP_DIR
+    VM_STORAGE_COMPAT_FALLBACK=0
+    export VM_ROOT VMS_DIR VM_STORAGE_COMPAT_FALLBACK
+}
+
 # Bind this process to one exact VM bundle.  The parent must already exist so
 # a mistyped or unmounted path cannot silently create a large VM on /.
 vm_storage_select_instance_dir() {
@@ -120,8 +194,8 @@ vm_storage_select_instance_dir() {
     requested=${requested%/}
     basename=${requested%/}
     basename=${basename##*/}
-    [[ "$basename" == "vm$id" ]] || {
-        echo "[vm-storage] VM directory basename must be vm$id: $requested" >&2
+    [[ "$basename" == "$id" ]] || {
+        echo "[vm-storage] VM directory basename must be $id: $requested" >&2
         return 2
     }
     parent=${requested%/}
@@ -147,13 +221,48 @@ vm_storage_select_instance_dir() {
         }
     fi
 
-    VM_INSTANCE_DIR=$canonical_parent/vm$id
+    VM_INSTANCE_DIR=$canonical_parent/$id
     VM_INSTANCE_ID=$id
     VM_STORAGE_COMPAT_FALLBACK=0
     export VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK
 }
 
-# Select an instance pool; vm<ID> is appended by the resolver.
+# Bind stop/migration recovery to one of the two historical vm<ID> paths.
+# Normal CLI callers must use vm_storage_select_instance_dir and a numeric
+# basename, so this compatibility function cannot create new legacy bundles.
+vm_storage_select_legacy_instance_dir() {
+    local id=${1:-} requested=${2:-} parent canonical_parent lexical_parent
+    local namespaced pre_namespace
+
+    vm_storage_validate_id "$id" || return
+    vm_storage_validate_path_text "$requested" "legacy VM directory" || return
+    requested=${requested%/}
+    namespaced=$(vm_storage_g11_namespace_instance_dir "$id") || return
+    pre_namespace=$(vm_storage_pre_namespace_instance_dir "$id") || return
+    [[ "$requested" == "$namespaced" || "$requested" == "$pre_namespace" ]] || {
+        echo "[vm-storage] unsupported legacy VM directory: $requested" >&2
+        return 2
+    }
+    [[ -d "$requested" && ! -L "$requested" ]] || {
+        echo "[vm-storage] legacy VM directory must be a real directory: $requested" >&2
+        return 2
+    }
+    parent=${requested%/*}
+    canonical_parent=$(realpath -e -- "$parent") || return
+    lexical_parent=$(realpath -ms -- "$parent") || return
+    [[ "$canonical_parent" == "$lexical_parent" ]] || {
+        echo "[vm-storage] legacy VM directory traverses a symbolic link: $requested" >&2
+        return 2
+    }
+    VM_INSTANCE_DIR=$canonical_parent/${requested##*/}
+    VM_INSTANCE_ID=$id
+    VM_STORAGE_COMPAT_FALLBACK=0
+    export VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK
+}
+
+# Select an instance pool; numeric <ID> is appended by the resolver.  This is
+# retained for compatibility; --vms-dir is preferred when the complete root
+# (including shared/control) should move together.
 vm_storage_select_instances_dir() {
     local requested=${1:-} canonical lexical
 
@@ -186,12 +295,16 @@ vm_storage_instance_dir() {
         printf '%s\n' "$VM_INSTANCE_DIR"
         return 0
     fi
-    printf '%s/vm%s\n' "$VM_INSTANCES_DIR" "$1"
+    printf '%s/%s\n' "$VM_INSTANCES_DIR" "$1"
 }
 
-# Pre-namespace G-11 location used only by the dedicated migration guard/tool.
-# Numeric IMAGE_ROOT/vms/<N> directories belong to V-11 and are intentionally
-# absent from this function.
+# G-11 layouts used before numeric VM directories became canonical.  They are
+# read only by the migration guard/tool and are never normal write targets.
+vm_storage_g11_namespace_instance_dir() {
+    vm_storage_validate_id "$1" || return
+    printf '%s/vms/G-11/vm%s\n' "$IMAGE_ROOT" "$1"
+}
+
 vm_storage_pre_namespace_instance_dir() {
     vm_storage_validate_id "$1" || return
     printf '%s/vms/instances/vm%s\n' "$IMAGE_ROOT" "$1"
@@ -201,20 +314,53 @@ vm_storage_namespace_migration_required() {
     local id=$1 selected legacy
 
     selected=$(vm_storage_instance_dir "$id") || return
-    legacy=$(vm_storage_pre_namespace_instance_dir "$id") || return
-    [[ "$selected" != "$legacy" ]] || return 1
-    [[ -e "$legacy/vm.conf" || -L "$legacy/vm.conf" ||
-       -e "$legacy/disk.qcow2" || -L "$legacy/disk.qcow2" ||
-       -e "$legacy/nvram.fd" || -L "$legacy/nvram.fd" ||
-       -e "$legacy/tpm" || -L "$legacy/tpm" ]]
+    # An explicit/custom instance parent is independent of the default old
+    # trees and must not be blocked by an unrelated VM with the same ID.
+    [[ "$selected" == "${IMAGE_ROOT%/}/vms/$id" ]] || return 1
+    for legacy in \
+        "$(vm_storage_g11_namespace_instance_dir "$id")" \
+        "$(vm_storage_pre_namespace_instance_dir "$id")"; do
+        [[ "$selected" != "$legacy" ]] || continue
+        if [[ -e "$legacy/vm.conf" || -L "$legacy/vm.conf" ||
+              -e "$legacy/disk.qcow2" || -L "$legacy/disk.qcow2" ||
+              -e "$legacy/nvram.fd" || -L "$legacy/nvram.fd" ||
+              -e "$legacy/tpm" || -L "$legacy/tpm" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+vm_storage_v11_collision() {
+    local id=$1 selected
+
+    selected=$(vm_storage_instance_dir "$id") || return
+    [[ -d "$selected" && ! -L "$selected" ]] || return 1
+    [[ -e "$selected/profile" || -L "$selected/profile" ||
+       -e "$selected/ovmf-vars.fd" || -L "$selected/ovmf-vars.fd" ||
+       -e "$selected/tpm-state" || -L "$selected/tpm-state" ||
+       -e "$selected/tpm12-state" || -L "$selected/tpm12-state" ]]
 }
 
 # Every mutating lifecycle entry point uses this guard.  Otherwise a direct
 # create-vm/create-disk call could bypass start-vm's check and create a second
 # G-11 VM with the same ID while the complete old bundle still exists.
 vm_storage_require_namespace_ready() {
-    local id=$1 selected legacy rc
+    local id=$1 selected legacy rc found_legacy=0
 
+    selected=$(vm_storage_instance_dir "$id") || return
+    if vm_storage_root_is_historical "$VM_ROOT"; then
+        echo "[vm-storage] refusing to create numeric data inside an old G-11 source root" >&2
+        echo "  selected: $VM_ROOT" >&2
+        echo "  run: ./deploy/scripts/migrate-g11-layout.sh --check" >&2
+        return 1
+    fi
+    if vm_storage_v11_collision "$id"; then
+        echo "[vm-storage] numeric directory contains V-11 state; refusing to mix branches" >&2
+        echo "  directory: $selected" >&2
+        echo "  choose an unused ID or a separate root with --vms-dir" >&2
+        return 1
+    fi
     if vm_storage_namespace_migration_required "$id"; then
         :
     else
@@ -222,12 +368,19 @@ vm_storage_require_namespace_ready() {
         ((rc == 1)) && return 0
         return "$rc"
     fi
-    selected=$(vm_storage_instance_dir "$id") || return
-    legacy=$(vm_storage_pre_namespace_instance_dir "$id") || return
     echo "[vm-storage] old G-11 bundle still needs namespace migration; refusing a duplicate vm$id" >&2
-    echo "  old: $legacy" >&2
+    for legacy in \
+        "$(vm_storage_g11_namespace_instance_dir "$id")" \
+        "$(vm_storage_pre_namespace_instance_dir "$id")"; do
+        if [[ -e "$legacy/vm.conf" || -e "$legacy/disk.qcow2" ||
+              -e "$legacy/nvram.fd" || -e "$legacy/tpm" || -L "$legacy" ]]; then
+            echo "  old: $legacy" >&2
+            found_legacy=1
+        fi
+    done
+    ((found_legacy)) || echo "  old: <unresolved legacy bundle>" >&2
     echo "  new: $selected" >&2
-    echo "  run: ./deploy/migrate-g11-layout.sh --check" >&2
+    echo "  run: ./deploy/scripts/migrate-g11-layout.sh --check" >&2
     return 1
 }
 
@@ -382,7 +535,7 @@ vm_storage_config_path() {
 }
 
 # Existing categorized and flat files remain usable until the storage migrator
-# is run.  A new file always resolves into the selected vmN bundle.
+# is run.  A new file always resolves into the selected numeric bundle.
 vm_storage_disk_path() {
     local preferred categorized legacy
     vm_storage_validate_instance_tree "$1" || return
@@ -441,13 +594,9 @@ vm_storage_run_preferred_path() {
         mon) filename=monitor.sock ;;
         mdev) filename=mdev.uuid ;;
         monitor-edid) filename=monitor-edid.sha256 ;;
-        # Cooperative locks deliberately stay outside the instance tree.  A
-        # delete/rename of a vmN bundle must never unlink a held lock inode
-        # and let another process recreate the same pathname.
-        start.lock|disk.lock)
-            printf '%s/vm%s.%s\n' "$VM_RUN_DIR" "$id" "$kind"
-            return 0
-            ;;
+        start.lock) filename=start.lock ;;
+        disk.lock) filename=disk.lock ;;
+        tpm.lock) filename=tpm.lock ;;
         *) echo "invalid VM runtime file kind: $kind" >&2; return 2 ;;
     esac
     run_dir=$(vm_storage_instance_run_dir "$id") || return
@@ -458,7 +607,7 @@ vm_storage_run_legacy_path() {
     local id=$1 kind=$2
     vm_storage_validate_id "$id" || return
     case "$kind" in
-        pid|qmp|mon|mdev|monitor-edid|start.lock|disk.lock) ;;
+        pid|qmp|mon|mdev|monitor-edid|start.lock|disk.lock|tpm.lock) ;;
         *) echo "invalid VM runtime file kind: $kind" >&2; return 2 ;;
     esac
     printf '%s/vm%s.%s\n' "$VM_RUN_DIR" "$id" "$kind"

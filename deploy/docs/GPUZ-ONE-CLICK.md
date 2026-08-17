@@ -1,215 +1,305 @@
-# G-11 离线显卡身份包：基础镜像与任意 VM 克隆
+# G-11 通用显卡身份包与 GPU-Z 选装
 
-当前推荐产物是一个真正不绑定 VM 的离线文件：
+## 最终行为
+
+`VgpuPortable.exe` 是所有 B/native G-11 虚拟机共用的入口。它有两个明确分离的
+构建变体：
+
+- 默认双击只安装显卡型号、板卡品牌、显存类型/厂商等身份组件和
+  `vGPU Identity Query`；
+- 默认不内嵌、不下载、不要求、不安装 `GPU-Z.exe`；
+- GPU-Z 只有在用户显式执行 `VgpuPortable.exe /with-gpuz` 时才会选装；
+- 包不绑定 VM ID/UUID。VM 新建、基础盘克隆和任意正常启动都使用同一份
+  schema-2 原子目录与目录摘要；
+- 显式私有授权版额外内嵌 DLS token，并在同一次运行中安装身份、原子安装 token、
+  等待 NVIDIA 报告 `Licensed`，最后关闭休眠/Fast Startup；GTX 750 Ti、GT 1030、
+  GTX 1050 都走同一流程；
+- 不改 BCD，不开启 `testsigning`/`nointegritychecks`，不安装测试签名或
+  自签名内核驱动，不替换 System32/SysWOW64 的 NVAPI。
+
+默认路径与选装路径是两条明确分开的路径：
+
+```text
+start-vm.sh 只读 vm.conf
+        │
+        ├─ SMBIOS Type 11：profile + VM UUID + catalog SHA-256
+        │
+VgpuPortable.exe（所有 VM 共用）
+        │
+        ├─ 默认：身份 profile + 受保护 app-local NVAPI + 权威查询工具
+        ├─ 私有授权版：上述内容 + token + Licensed 验收 + 关闭休眠/Fast Startup
+        │
+        └─ /with-gpuz：额外导入并验证官方 GPU-Z 2.70
+```
+
+## 一、宿主机打包
+
+在仓库根目录执行：
+
+```bash
+./deploy/package-vgpu-one-click.sh
+```
+
+默认输出：
 
 ```text
 /home/ubuntu/images/staging/VgpuPortable/VgpuPortable.exe
+/home/ubuntu/images/staging/VgpuPortable/.host-bundle/
 ```
 
-它同时内嵌已经审计的 GTX 750 Ti、GT 1030、GTX 1050 三套 profile，不包含
-VM ID、VM UUID，也不依赖 HTTP、网络共享、WinRM 或 guest 下载。可把同一个
-`VgpuPortable.exe` 放入 Windows 基础镜像，之后克隆 VM4、VM5、VM6、VM456 或
-其他支持范围内的任意编号，不再为每台 VM 重新生成 EXE。
-
-这仍不是让用户任意选择显卡型号的改名器。每次 B/native 启动时，
-`start-vm.sh` 会根据该 VM 的只读配置自动发布一条 SMBIOS Type 11 声明，包含
-profile、该次 VM UUID、catalog 哈希、原生 PnP tuple 和驱动版本。EXE 在 guest
-内只接受恰好一条完整声明，核对当前 SMBIOS UUID、`DEV_1E30`、538.33、Code 0、
-生产签名链、BCD 和单 Display 拓扑后才选择对应 profile。缺少、重复、篡改或互相
-不一致都会 fail-closed。A/off 启动不发布该声明。
-
-## 最短三条宿主命令
+需要把某台实际 VM 一次收尾为可授权成品时，使用统一私有版：
 
 ```bash
-cd /home/ubuntu/projects/qemu
-./deploy/package-vgpu-one-click.sh
-sudo ./deploy/install-vgpu-portable-to-base.sh
-./deploy/clone-vgpu-base.sh 456 --gpu-profile gtx1050_2gb --start
+chmod 600 /home/ubuntu/images/staging/client_configuration_token.tok
+./deploy/package-vgpu-one-click.sh --with-license-token
 ```
 
-第一条生成无 VM 绑定的离线 EXE；第二条只需在制作基础镜像时执行一次；第三条
-创建 B/native 配置、从已准备的基础镜像克隆独立系统盘，并可立即启动。进入
-Windows 后双击公共桌面的 `VgpuPortable.exe`，等待：
+私有输出仍叫同一个文件名，但放在独立目录：
 
 ```text
-[GPU-Z profile] INSTALL PASS
+/home/ubuntu/images/staging/VgpuPortableLicensed/VgpuPortable.exe
+/home/ubuntu/images/staging/VgpuPortableLicensed/.host-bundle/
 ```
 
-对于这个正常的 B/native 基础镜像/克隆流程，guest 成功安装后**不需要关机，也
-不需要再运行任何人工 host commit**。宿主每次正常运行 `start-vm.sh` 时自动注入
-只读声明；它不是额外的现场步骤。
-
-## 一次性准备基础镜像
-
-基础镜像必须已经满足：
-
-- standalone qcow2，无 backing file 或外部 data file；
-- Windows 已完整关机，NTFS 干净，未休眠、未启用会留下休眠状态的 Fast Startup；
-- 原始 NVIDIA GRID 538.33 已正常绑定到 B/native `DEV_1E30`，设备 Code 0；
-- DriverStore catalog 与当前加载的 `nvlddmkm.sys` 使用正常
-  NVIDIA/Microsoft 生产签名链；
-- 没有测试签名/自签名内核驱动，整个 BCD 中 `testsigning` 和
-  `nointegritychecks` 均为 No 或未设置。
-
-注入前必须停止所有 VM。`install-vgpu-portable-to-base.sh` 获取独占存储锁，并
-拒绝被进程打开、被其他 qcow2 依赖或无法验证的 base。它不会直接挂载、修改正在
-使用的 base，而是：
-
-1. 把 base 复制/克隆到同目录私有临时 qcow2；
-2. 先只读检查 Windows 分区，再以安全的 NTFS 读写方式挂载临时副本；
-3. 写入并复验
-   `C:\Users\Public\Desktop\VgpuPortable.exe`；
-4. 卸载、断开 NBD、执行 `qemu-img check`；
-5. 归档旧 base 后原子替换，并写入 portable attestation sidecar。
-
-检测到 dirty/hibernated NTFS、活动持有者、存储依赖或哈希不一致时会在发布前
-退出。不要用 `remove_hiberfile`、强制挂载或手工 NBD 写盘绕过门禁。
-
-使用非默认路径时：
+也可从仓库外的安全路径显式选择 token：
 
 ```bash
-./deploy/package-vgpu-one-click.sh --portable \
-  --output-exe /srv/private/VgpuPortable.exe
+./deploy/package-vgpu-one-click.sh \
+  --token-file /安全路径/client_configuration_token.tok
+```
 
+token 必须是普通文件、`1024..1048576` 字节、非 HTML、权限不宽于 `0600`，而且
+必须位于仓库外。私有 EXE 本身就是凭据，宿主权限固定为 `0600`；不要提交仓库、
+公开分发或写进通用基础盘。默认不带参数的版本仍然不含 token，适合基础盘。
+
+查看包内所有可选显卡身份：
+
+```bash
+./deploy/package-vgpu-portable.sh --list-gpu-profiles
+```
+
+当前目录包含 12 个完整原子行，覆盖 GTX 750 Ti、GT 1030、GTX 1050，
+NVIDIA/ASUS/Dell/Colorful（七彩虹）/GALAX/Gigabyte/MSI 七个板卡品牌，以及 Samsung、
+SK hynix、Micron 三个显存厂商。选择的是完整行；脚本不会把不同卡的板号、
+VBIOS、频率、显存厂商或子系统 ID 随意拼接。
+
+## 二、准备通用 Windows 基础盘
+
+推荐默认方式（不放 GPU-Z）：
+
+```bash
+sudo ./deploy/install-vgpu-portable-to-base.sh --yes
+```
+
+安装器只编辑基础盘的私有临时副本，检查 qcow2、NBD、NTFS 和休眠状态后，
+才归档旧基础盘并原子替换。默认只把下面一个文件写到公共桌面：
+
+```text
+C:\Users\Public\Desktop\VgpuPortable.exe
+```
+
+基础盘证明为 schema 4，其中 `gpuZIncluded=false`，GPU-Z 的路径、哈希和
+字节数字段为 `null`。
+
+只有确实希望所有克隆都预置 GPU-Z sidecar 时，才显式执行：
+
+```bash
+sudo ./deploy/install-vgpu-portable-to-base.sh --with-gpuz --yes
+```
+
+或指定已审计来源：
+
+```bash
 sudo ./deploy/install-vgpu-portable-to-base.sh \
-  --base /srv/images/win10-base.qcow2 \
-  --exe /srv/private/VgpuPortable.exe
+  --gpuz-source /安全路径/GPU-Z.2.70.0.exe --yes
 ```
 
-`--yes` 只跳过最后一次替换确认，不会跳过停机、NTFS、qcow2、哈希或回执检查。
+`--gpuz-source` 自动表示选装。普通部署不要加这两个参数。
 
-## 从基础镜像克隆
+## 三、新建与克隆任意 VM
+
+列出可选行：
 
 ```bash
-./deploy/clone-vgpu-base.sh 456 \
-  --gpu-profile gtx1050_2gb \
-  --start
+./deploy/scripts/clone-vgpu-base.sh --list-gpu-profiles
 ```
 
-支持的 profile：
-
-| profile | Windows / GPU-Z 目标名称 | 当前合同 |
-|---|---|---|
-| `gtx750ti_2gb` | NVIDIA GeForce GTX 750 Ti | 2 GB / GDDR5 / Samsung |
-| `gt1030_2gb` | NVIDIA GeForce GT 1030 | 2 GB / GDDR5 / Samsung |
-| `gtx1050_2gb` | NVIDIA GeForce GTX 1050 | 2 GB / GDDR5 / Samsung |
-
-`clone-vgpu-base.sh` 会拒绝已存在的 VM ID，验证 base 自 portable 注入后未发生
-变化，调用 `create-vm.sh` 生成新的 UUID/B 配置，再以 `--from-base` 创建独立
-qcow2。可同时传递 `--platform`、`--ssd-profile`、`--monitor-profile`。不带
-`--start` 时只创建，之后正常运行：
+克隆任意受支持 VM ID，例如：
 
 ```bash
-./deploy/start-vm.sh 456
+# 不指定 GPU：从 12 条审核行随机一次并固化
+./deploy/scripts/clone-vgpu-base.sh 10 --start
+
+# 指定 GPU：固定为所选原子行
+./deploy/scripts/clone-vgpu-base.sh 11 --gpu-profile gtx1050_msi_2gb --start
+./deploy/scripts/clone-vgpu-base.sh 12 --gpu-profile gtx1050_gigabyte_2gb --start
+./deploy/scripts/clone-vgpu-base.sh 456 --gpu-profile gt1030_asus_2gb
 ```
 
-新增显卡型号不能靠改显示名称或复制现有 profile。应先在统一
-`deploy/lib/vgpu-profiles.sh` catalog 中锁定并审计 PCI、显存、时钟和 NVAPI
-字段，重新构建 portable EXE和基础镜像，再用锁定的 538.33 + GPU-Z 2.70 组合
-实机验证；不为 VM 编号增加专用文件或代码分支。
+这不是为每个 VM 重新打包。克隆器会：
 
-## Guest 内做了什么
+1. 校验基础盘路径、inode/mtime/ctime、目录摘要和 schema-4 证明；
+2. 调用统一的 `create-vm.sh`；显式 profile 原样传递，未指定则随机一条；
+3. 把完整原子行写入该实例的 `vm.conf`；
+4. 从独立基础盘创建实例盘；
+5. 正常启动时由 `start-vm.sh` 发布只读 firmware claim；
+6. guest 中同一个 `VgpuPortable.exe` 根据 claim 自动选中正确行。
 
-portable 包只做用户态 GPU-Z/application-local 身份层安装和验收：
+直接新建配置也使用同一目录：
 
-- 内嵌并锁定 TechPowerUp GPU-Z 2.70；
-- 在受保护的
-  `C:\ProgramData\QemuGpuZProfile\applications\<版本-哈希>\`
-  发布 GPU-Z、app-local NVAPI shim 和原始 NVIDIA NVAPI；
-- 创建 `GPU-Z (vGPU profile)` 公共桌面快捷方式和受保护的启动刷新任务；
-- 通过 DriverStore 的实际 `oemN.inf` 反查 catalog，不固定任何 `oemN.inf`
-  编号；
-- 安装前后复核单 Display、PCI 父节点、Code 0、驱动版本、生产签名链和 BCD；
-- 不写 BCD，不安装、替换、重签或清理显示驱动，不替换 System32/SysWOW64
-  NVAPI DLL，不安装测试签名/自签名内核驱动。
+```bash
+./deploy/scripts/create-vm.sh --list-gpu-profiles
+./deploy/scripts/create-vm.sh 19
+./deploy/scripts/create-vm.sh 20 --gpu-profile gtx750ti_gigabyte_2gb
+```
 
-GPU-Z 2.70 只在自身进程内看到 catalog 对应的 consumer PCI tuple 和规格；系统
-PnP 仍是原生 vGPU `10DE:1E30 / SUBSYS_132610DE`，这样才能继续使用未经修改的
-NVIDIA/Microsoft 生产签名驱动。设备树中的 PCI bridge 是父设备，不是第二张
-显卡；验收只允许一个 present Display adapter。
+第一条创建命令随机并固化 GPU，第二条显式固定 GPU。两种方式都只写入一次；已有
+实例使用 `create-vm.sh --force` 时，未显式给出 `--gpu-profile` 会保留旧显卡策略。
 
-锁定的 GPU-Z 文件 SHA-256 为：
+显式换卡会重新校验完整行和持久化状态，避免静默换身份。
+
+## 四、Windows 默认安装（不装 GPU-Z）
+
+1. 正常启动 B/native VM；
+2. 双击公共桌面的 `VgpuPortable.exe`；
+3. 接受管理员提升；
+4. 等待窗口显示 `[vGPU identity] INSTALL PASS`；
+5. 双击新建的 `vGPU Identity Query` 快捷方式查看结果。
+
+命令行静默运行：
+
+```bat
+VgpuPortable.exe /no-launch
+```
+
+只复验、不修改：
+
+```bat
+VgpuPortable.exe /verify-only /no-launch
+```
+
+成功回执位于：
 
 ```text
-6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29
+C:\ProgramData\QemuGpuZProfile\last-result.json
 ```
 
-TMU/Texture Fillrate 等私有查询只对当前锁定的 GRID 538.33 + GPU-Z 2.70 调用
-布局通过测试。更换 GPU-Z 或驱动版本必须重新审计。
+默认成功回执必须包含：
 
-## 签名边界
-
-需要“真实 NVIDIA/Microsoft 签名”的对象是实际显示驱动：DriverStore catalog、
-加载中的 `nvlddmkm.sys` 及其链。软件会拒绝私有 Root、self-issued catalog、
-`IsSigned=false`、测试模式和完整性旁路；不会只修改设备属性中的“签名者”文字。
-
-外层 `VgpuPortable.exe` 和 app-local shim 当前是仓库构建的未签名**用户态**
-产物，不是内核驱动。UAC 因此可能显示“未知发布者”，这不改变设备属性中驱动应为
-Microsoft WHCP signer 的要求。若目标 WDAC/AppLocker/UMCI 禁止未签名用户态
-EXE、脚本或 DLL，应建立正常受信的用户态代码签名/允许规则；不能用
-`testsigning`、`nointegritychecks` 或自签内核证书绕过。
-
-## HWiNFO 当前边界
-
-portable 主流程当前只对内嵌的 **GPU-Z 2.70 x86** 做了端到端锁定和验收。
-HWiNFO 64 会从 x64 NVAPI、内核 PCI/vGPU 拓扑及其他接口交叉读取，所以可能继续
-显示 `[FAKE] NVIDIA GRID Quadro RTX6000-2Q`、`TU104` 或底层 Quadro 信息。这个
-结果不表示系统出现了第二张显卡，也不能用简单改字符串解决。
-
-本包不会扫描或修改任意 HWiNFO 安装目录，不会全局替换 `nvapi64.dll`，也不把
-HWiNFO 当作 portable 的已支持验收工具。仓库另有
-[HWiNFO64 app-local 实验适配](HWINFO-APP-LOCAL-EXPERIMENT.md)，只允许用户明确
-指定正常签名、版本可审计的 `HWiNFO64.exe`，并离线放置 x64 app-local shim；
-它不随 portable 自动安装，且不能承诺 `[FAKE]`、TU104 或所有字段消失。正式主线
-仍以设备管理器、实际驱动签名链和包内 GPU-Z 2.70 为当前验收范围。
-
-## 旧 A → B 迁移兼容流程
-
-历史 `SPOOF_MODE=A` 实例不是 portable 主流程。A 使用过修改 INF/自签 catalog，
-必须按 VM/UUID 绑定，避免把一次迁移回执应用到另一块磁盘或配置：
-
-```bash
-./deploy/package-vgpu-one-click.sh 3
-# Windows 只运行生成的 VgpuProductionMigration.exe，等待完整关机
-sudo ./deploy/commit-vgpu-production-migration.sh 3
-./deploy/start-vm.sh 3
+```json
+{
+  "receiptType": "vgpu-identity-portable-final",
+  "schemaVersion": 3,
+  "gpuZDelivery": "optional-explicit-sibling",
+  "gpuZRequested": false,
+  "gpuZInstalled": false,
+  "gpuZExe": null,
+  "testsigning": false,
+  "nointegritychecks": false,
+  "systemNvapiChanged": false
+}
 ```
 
-这个带 `VM_ID` 的调用仅为 legacy 兼容：A 生成按 VM 绑定的完整生产驱动迁移
-EXE；B 会生成旧的按 VM 绑定 GPU-Z 包。新建 B/native VM、基础镜像和克隆一律
-使用不带参数的 portable 入口。不要把 legacy 的关机/host commit 套到正常
-portable clone 上。
+`VgpuIdentityQuery.exe` 同时报告真实 native transport（DEV_1E30）和目录投影的
+型号、AIB 板卡、显存厂商、VBIOS、频率、位宽、带宽及核心字段，并以
+`VERIFY PASS` 结束。它是本方案的权威查询入口，不依赖 GPU-Z。
 
-## 验收与排错
+### 实际 VM 的统一授权收尾
 
-管理员 PowerShell：
+先确认 VM 使用 B/native，官方 GRID 538.33 已安装，设备为 Code 0。把
+`VgpuPortableLicensed/VgpuPortable.exe` 安全复制到这台 Windows，再直接双击并
+接受 UAC。不要按显卡型号选择脚本，也不要再为新 VM 运行
+`finish-vgpu-install.sh`。
 
-```powershell
-Get-CimInstance Win32_VideoController |
-  Format-List Name,PNPDeviceID,DriverVersion,ConfigManagerErrorCode,
-    CurrentHorizontalResolution,CurrentVerticalResolution
+私有版只有在以下条件全部通过时才显示安装成功：
 
-Get-CimInstance Win32_PnPSignedDriver |
-  Where-Object DeviceClass -eq DISPLAY |
-  Format-List DeviceName,InfName,DriverVersion,Signer,IsSigned
+1. firmware claim、VM UUID、12 行 catalog、原生 `DEV_1E30`、538.33、Code 0 和
+   生产签名链全部匹配；
+2. token 原子安装到 NVIDIA `ClientConfigToken` 目录；失败时回滚旧 token；
+3. `NVDisplay.ContainerLocalSystem` 正常运行，且 `nvidia-smi -q` 明确报告
+   `License Status : Licensed`；
+4. `powercfg /hibernate off` 成功，`HiberbootEnabled=0`，`hiberfil.sys` 不再存在；
+5. BCD 仍为 `testsigning=False`、`nointegritychecks=False`，系统 NVAPI 未改动。
 
-bcdedit /enum all | Select-String 'testsigning|nointegritychecks'
+成功窗口会额外显示：
+
+```text
+License:   Licensed
+Power:     hibernation/Fast Startup disabled
+Next:      fully shut down Windows, then cold-start normally
 ```
 
-预期只有一张目标 NVIDIA Display，Code 0，驱动 `31.0.15.3833`，签名者为
-`Microsoft Windows Hardware Compatibility Publisher`；BCD 查询应无启用项。
-GPU-Z 2.70 应显示配置型号、2 GB、对应显存/位宽/时钟和 WHQL，下拉框只有一项。
+随后执行 Windows“关机”，等 QEMU 窗口自然退出，再用普通启动命令冷启动。私有版
+回执为 schema 4，并在
+`C:\ProgramData\QemuGpuZProfile\last-result.json` 记录 token 哈希、授权状态和电源
+状态；回执不会记录 token 内容。
 
-| 现象 | 正确处理 |
+## 五、以后从官网选装 GPU-Z
+
+当前经过二进制和调用路径审计的唯一文件是 TechPowerUp GPU-Z 2.70 x86：
+
+```text
+文件名：GPU-Z.exe
+字节数：11642144
+SHA-256：6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29
+ProductVersion：2.70.0
+签名：有效、非自签、TechPowerUp
+```
+
+操作步骤：
+
+1. 用户自行从 TechPowerUp 官方渠道取得 GPU-Z；
+2. 核对它确实是上面的 2.70 x86 审计文件；
+3. 重命名为 `GPU-Z.exe`；
+4. 放到 `VgpuPortable.exe` 同目录；
+5. 在该目录打开命令提示符，执行：
+
+```bat
+VgpuPortable.exe /with-gpuz
+```
+
+静默安装但不自动打开 GPU-Z：
+
+```bat
+VgpuPortable.exe /with-gpuz /no-launch
+```
+
+选装成功后，受保护副本和快捷方式位于：
+
+```text
+C:\ProgramData\QemuGpuZProfile\applications\identity-...\GPU-Z.exe
+C:\Users\Public\Desktop\GPU-Z (vGPU profile).lnk
+```
+
+必须从 `GPU-Z (vGPU profile)` 快捷方式启动，才能使用同目录受保护的
+app-local NVAPI。不要把 shim 放进 Windows 或 GPU-Z 的其他安装目录。
+
+官网以后发布的更新版本不会自动放行。即使签名有效，只要字节数、哈希、
+版本或已审计 ABI 不一致，`/with-gpuz` 就会在任何 profile 写入前失败。
+先更新资产目录、重新审计调用路径、提升契约并重建包，才能支持新版本。
+
+## 六、通用性和底层边界
+
+- VM ID：支持 `1..2147483647`，包内没有 VM ID/UUID；
+- 型号/品牌/显存：host 目录、guest JSON、编译的 NVAPI 目录、固件 claim 和
+  回执共享同一 SHA-256；
+- 新建/克隆：均调用 `create-vm.sh` 和同一 `vgpu-profiles.sh`，不另做品牌分支；
+- 底层 transport：仍是生产签名 GRID 538.33、native DEV_1E30、Code 0；
+- 身份投影：只在受保护的 32 位 app-local 用户态目录生效；
+- 系统边界：不改 Driver Store、内核驱动、BCD、System32/SysWOW64 NVAPI；
+- GPU-Z：不参与默认安装、基础盘默认证明或权威查询，仅为显式选装消费者。
+
+## 七、常见错误
+
+| 现象 | 处理 |
 |---|---|
-| portable 报 claim missing/duplicate/mismatch | 确认以持久 B 配置正常运行 `start-vm.sh`；A/off、旧启动进程或手工启动 QEMU 不会有合格声明 |
-| Code 43 且分辨率变小 | 先修复 host/guest vGPU branch 与原始 538.33 驱动绑定；身份包不能掩盖驱动故障 |
-| 检出两个 Display | 退出会创建 Remote Display Adapter 的 RDP 会话，从本地 QEMU/fb-shm 画面冷启动复核 |
-| base 注入拒绝 storage lock | 停止全部 VM 和其他存储操作，不要强制绕过 |
-| base 注入拒绝 dirty/hibernated NTFS | 正常启动 Windows、关闭 Fast Startup、执行完整关机后重试 |
-| clone 报 base changed/no attestation | 重新运行安全注入脚本；不要手改 sidecar |
-| GPU-Z 出现 Unknown | 使用包内锁定的 2.70，核对 B claim、Code 0、538.33 和 catalog 是否已有该型号 |
+| 默认双击提示缺少 GPU-Z | 使用的仍是旧 V3/1.3.0 包；重新构建并确认 V4/1.4.0 |
+| `/with-gpuz` 提示缺少同目录文件 | 把官方审计文件精确命名为 `GPU-Z.exe` 并放到 EXE 同目录 |
+| `/with-gpuz` 提示大小/哈希/签名错误 | 不是审计的 2.70 x86；不要绕过，先完成新版本审计 |
+| Query 显示 claim/catalog 不一致 | 该 VM 的 `vm.conf`、当前启动 claim 与 EXE 目录不同步；重建包或正常重启 |
+| Query 不以 `VERIFY PASS` 结束 | 按输出字段排查；不要用第三方界面截图代替权威查询结果 |
+| Code 43、驱动签名错误或多块 Display | 先修复生产签名 GRID 驱动和拓扑；身份脚本会拒绝继续 |
+| base/clone 拒绝 schema | 用新版安装器重新准备 base；默认应为 schema 4、`gpuZIncluded=false` |
 
-失败时保留第一条 `FAIL:` 和
-`C:\ProgramData\QemuGpuZProfile\backups` 下的只读记录。不要反复复制 DLL、手改
-claim/JSON/marker、导入私有证书或执行任何 `bcdedit /set`。
+任何失败都不要通过开启测试签名、关闭完整性检查、修改 BCD 或安装自签名内核
+驱动来绕过。

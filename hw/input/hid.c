@@ -230,19 +230,49 @@ static void hid_keyboard_event(DeviceState *dev, QemuConsole *src,
 {
     HIDState *hs = (HIDState *)dev;
     int scancodes[3], i, count;
+    int qcode;
     int slot;
     InputKeyEvent *key = evt->u.key.data;
+    bool trackable;
+
+    qcode = qemu_input_key_value_to_qcode(key->key);
+    trackable = qcode > Q_KEY_CODE_UNMAPPED && qcode < Q_KEY_CODE__MAX;
+    if (key->down && trackable && test_bit(qcode, hs->kbd.host_pressed)) {
+        trace_hid_kbd_repeat_ignored(qcode);
+        return;
+    }
 
     count = qemu_input_key_value_to_scancode(key->key,
                                              key->down,
                                              scancodes);
     if (hs->n + count > QUEUE_LENGTH) {
         trace_hid_kbd_queue_full();
+        if (!key->down) {
+            /* A lost release can leave the guest permanently pressed.  Drop
+             * the unconsumed queue and enqueue a no-op scancode, which makes
+             * the next report all-up while preserving migration compatibility. */
+            memset(hs->kbd.key, 0, sizeof(hs->kbd.key));
+            hs->kbd.keys = 0;
+            hs->kbd.modifiers = 0;
+            bitmap_zero(hs->kbd.host_pressed, Q_KEY_CODE__MAX);
+            hs->head = 0;
+            hs->n = 1;
+            hs->kbd.keycodes[0] = 0;
+            trace_hid_kbd_release_all();
+            hs->event(hs);
+        }
         return;
     }
     for (i = 0; i < count; i++) {
         slot = (hs->head + hs->n) & QUEUE_MASK; hs->n++;
         hs->kbd.keycodes[slot] = scancodes[i];
+    }
+    if (trackable) {
+        if (key->down) {
+            set_bit(qcode, hs->kbd.host_pressed);
+        } else {
+            clear_bit(qcode, hs->kbd.host_pressed);
+        }
     }
     hs->event(hs);
 }
@@ -489,6 +519,7 @@ void hid_reset(HIDState *hs)
     case HID_KEYBOARD:
         memset(hs->kbd.keycodes, 0, sizeof(hs->kbd.keycodes));
         memset(hs->kbd.key, 0, sizeof(hs->kbd.key));
+        bitmap_zero(hs->kbd.host_pressed, Q_KEY_CODE__MAX);
         hs->kbd.keys = 0;
         hs->kbd.modifiers = 0;
         break;
@@ -554,6 +585,9 @@ static int hid_post_load(void *opaque, int version_id)
     HIDState *s = opaque;
 
     hid_set_next_idle(s);
+    if (s->kind == HID_KEYBOARD) {
+        bitmap_zero(s->kbd.host_pressed, Q_KEY_CODE__MAX);
+    }
 
     if (s->n == QUEUE_LENGTH && (s->kind == HID_TABLET ||
                                  s->kind == HID_MOUSE)) {

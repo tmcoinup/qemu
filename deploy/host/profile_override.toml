@@ -18,10 +18,10 @@
 # 安装阶段保留 driver 原生 GRID 名称。start-vm.sh 会按稳定 mdev UUID
 # 原子维护 [mdev."UUID"] 的 card_name/adapter_name；这里不能写全局名称，
 # 否则所有使用 nvidia-257 的 VM 都会被污染成同一型号。
-num_displays = 4
+num_displays = 1
 display_width = 1920
-display_height = 1200
-max_pixels = 9216000
+display_height = 1080
+max_pixels = 2073600
 # nvidia-257 原生 2Q 分配是 1856 MiB framebuffer + 192 MiB reservation。
 # 两者之和才是 guest 应报告的 2048 MiB；写成 2048+256 会让
 # GPU-Z 误报 2304 MB。

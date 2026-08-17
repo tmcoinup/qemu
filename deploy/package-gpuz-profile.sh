@@ -174,9 +174,9 @@ fi
 if ((PACKAGE_ALL)); then
     declare -a configured_vm_ids=()
     shopt -s nullglob
-    for configured_conf in "$VM_INSTANCES_DIR"/vm*/vm.conf; do
+    for configured_conf in "$VM_INSTANCES_DIR"/*/vm.conf; do
         configured_leaf=$(basename -- "$(dirname -- "$configured_conf")")
-        [[ "$configured_leaf" =~ ^vm([1-9][0-9]*)$ ]] || continue
+        [[ "$configured_leaf" =~ ^([1-9][0-9]*)$ ]] || continue
         configured_vm_id_match=${BASH_REMATCH[1]}
         vm_id_is_supported "$configured_vm_id_match" \
             || die "configured VM ID exceeds the supported range: $configured_vm_id_match"
@@ -274,7 +274,10 @@ fi
 resolve_gpuz_source_once
 REQUESTED_VM_ID=$VM_ID
 readonly REQUESTED_VM_ID
-vm_storage_prepare_instance "$VM_ID"
+vm_storage_require_namespace_ready "$VM_ID" \
+    || die "VM storage still uses an old/conflicting layout"
+vm_storage_validate_instance_tree "$VM_ID" \
+    || die "VM instance tree is unsafe"
 
 INSTANCE_DIR=$(vm_storage_instance_dir "$VM_ID")
 CONF=$(vm_storage_config_path "$VM_ID")
@@ -422,11 +425,12 @@ esac
 
 [[ "$GPU_VRAM_MB" == 2048 ]] \
     || die "only the audited 2048 MB identity catalog is supported"
-[[ "$GPU_MEMORY_TYPE" == GDDR5 &&
-   "$GPU_MEMORY_MAKER" == Samsung &&
-   "$GPU_MEMORY_TYPE_NVAPI" == 8 &&
-   "$GPU_MEMORY_MAKER_NVAPI" == 1 ]] \
-    || die "the current package accepts only audited GDDR5(8)/Samsung(1) profiles"
+[[ "$GPU_MEMORY_TYPE" == GDDR5 && "$GPU_MEMORY_TYPE_NVAPI" == 8 ]] \
+    || die "the current package accepts only audited GDDR5(8) profiles"
+case "$GPU_MEMORY_MAKER|${GPU_MEMORY_MAKER_NVAPI_NAME:-}|$GPU_MEMORY_MAKER_NVAPI" in
+    'Samsung|Samsung|1'|'SK hynix|Hynix|6'|'Micron|Micron|10') ;;
+    *) die "the VRAM maker display/NVAPI/enum tuple is not cataloged" ;;
+esac
 ((GPU_BOOST_MHZ >= GPU_CORE_MHZ)) \
     || die "GPU boost clock must not be lower than the core clock"
 ((GPU_TMU_COUNT == GPU_SHADER_SUBPIPES * 8)) \
@@ -491,7 +495,8 @@ fi
 for asset in \
         "$here/guest/apply-gpuz-profile.ps1" \
         "$here/guest/nvapi-shim/nvapi.dll" \
-        "$here/guest/nvapi-shim/nvapi_profile_probe32.exe"; do
+        "$here/guest/nvapi-shim/nvapi_profile_probe32.exe" \
+        "$here/guest/vgpu-profile-catalog.json"; do
     [[ -s "$asset" && ! -L "$asset" ]] \
         || die "required app-local asset is missing or unsafe: $asset"
 done
@@ -746,8 +751,8 @@ trap cleanup_work EXIT
 # enables monitor rescue.  A validated transport-only fallback is therefore
 # added only to this temporary copy.  The live vm.conf is never edited.
 FAKE_IMAGE_ROOT="$WORK_ROOT/image-root"
-FAKE_VM_ROOT="$FAKE_IMAGE_ROOT/vms/G-11"
-FAKE_CONF_DIR="$FAKE_VM_ROOT/vm${VM_ID}"
+FAKE_VM_ROOT="$FAKE_IMAGE_ROOT/vms"
+FAKE_CONF_DIR="$FAKE_VM_ROOT/${VM_ID}"
 FAKE_STAGE="$FAKE_IMAGE_ROOT/staging"
 STAGE_TRANSFER="$WORK_ROOT/stage-transfer"
 mkdir -p "$FAKE_CONF_DIR" "$FAKE_STAGE" "$STAGE_TRANSFER"
@@ -759,7 +764,7 @@ printf '\nSPOOF_MODE=B\nMONITOR_PROFILE=%q\nMONITOR_SERIAL=%q\n' \
     >>"$FAKE_CONF_DIR/vm.conf"
 chmod 0400 "$FAKE_CONF_DIR/vm.conf"
 
-env -u VM_INSTANCE_DIR -u VM_INSTANCE_ID \
+env -u VMS_DIR -u VM_INSTANCE_DIR -u VM_INSTANCE_ID \
     -u VM_DISK_ARCHIVE_DIR -u VM_BASE_ARCHIVE_DIR \
     -u VM_NVRAM_BACKUP_DIR -u ISO_DIR \
 IMAGE_ROOT="$FAKE_IMAGE_ROOT" \
@@ -785,7 +790,9 @@ STAGED_BUNDLE="$STAGE_TRANSFER/vm${VM_ID}"
 
 BUNDLE="$WORK_ROOT/bundle"
 mkdir -p "$BUNDLE"
-for staged_asset in apply-vm-profile.ps1 patch-grid-strings.ps1; do
+for staged_asset in \
+        apply-vm-profile.ps1 patch-grid-strings.ps1 \
+        vgpu-profile-catalog.json; do
     install -m 0600 -- "$STAGED_BUNDLE/$staged_asset" "$BUNDLE/$staged_asset"
 done
 install -m 0600 -- "$STAGED_BUNDLE/vm${VM_ID}-profile.json" \
@@ -863,6 +870,7 @@ files_json='[]'
 for name in \
         gpu-profile.json \
         apply-vm-profile.ps1 patch-grid-strings.ps1 \
+        vgpu-profile-catalog.json \
         apply-gpuz-profile.ps1 \
         nvapi.dll nvapi_profile_probe32.exe \
         "$GPUZ_ASSET_BUNDLE_NAME" \

@@ -121,6 +121,17 @@
 static const guint16 *keycode_map;
 static size_t keycode_maplen;
 
+/*
+ * Optional project-local GNOME/Wayland shortcut guard.  Native Wayland does
+ * not expose a general-purpose keyboard-inhibit protocol to GTK 3, so the
+ * launcher supplies a helper which temporarily releases host shortcuts while
+ * the GTK console owns keyboard focus and the pointer is inside it.
+ */
+static const char *gtk_gnome_guard_script;
+static char *gtk_gnome_guard_state;
+static bool gtk_gnome_guard_active;
+static bool gtk_gnome_guard_cleanup_registered;
+
 struct VCChardev {
     Chardev parent;
     VirtualConsole *console;
@@ -189,6 +200,77 @@ static bool gd_is_grab_active(GtkDisplayState *s)
 static bool gd_grab_on_hover(GtkDisplayState *s)
 {
     return gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(s->grab_on_hover_item));
+}
+
+static bool gd_env_enabled(const char *name)
+{
+    const char *value = g_getenv(name);
+
+    return value &&
+           (g_ascii_strcasecmp(value, "1") == 0 ||
+            g_ascii_strcasecmp(value, "yes") == 0 ||
+            g_ascii_strcasecmp(value, "true") == 0 ||
+            g_ascii_strcasecmp(value, "on") == 0);
+}
+
+static bool gd_gnome_guard_run(const char *action)
+{
+    gchar *argv[] = {
+        (gchar *)gtk_gnome_guard_script,
+        (gchar *)action,
+        gtk_gnome_guard_state,
+        NULL,
+    };
+    GError *err = NULL;
+    gint status = 0;
+    bool ok;
+
+    if (!gtk_gnome_guard_script || !gtk_gnome_guard_state) {
+        return false;
+    }
+    ok = g_spawn_sync(NULL, argv, NULL,
+                      G_SPAWN_STDOUT_TO_DEV_NULL |
+                      G_SPAWN_STDERR_TO_DEV_NULL,
+                      NULL, NULL, NULL, NULL, &status, &err);
+    if (ok) {
+        ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    if (!ok) {
+        warn_report("gtk: GNOME shortcut guard %s failed: %s",
+                    action, err ? err->message : "unknown error");
+    }
+    g_clear_error(&err);
+    return ok;
+}
+
+static void gd_gnome_guard_restore(void)
+{
+    if (gtk_gnome_guard_active && gd_gnome_guard_run("restore")) {
+        gtk_gnome_guard_active = false;
+    }
+}
+
+static void gd_gnome_guard_set(bool want)
+{
+    if (want && !gtk_gnome_guard_active) {
+        if (gd_gnome_guard_run("tame")) {
+            gtk_gnome_guard_active = true;
+        }
+    } else if (!want) {
+        gd_gnome_guard_restore();
+    }
+}
+
+static void gd_gnome_guard_update(VirtualConsole *vc)
+{
+    gd_gnome_guard_set(vc && vc->has_input_focus && vc->has_mouse_focus &&
+                       vc->s->kbd_owner == vc);
+}
+
+static void gd_gnome_guard_cleanup(void)
+{
+    gd_gnome_guard_restore();
+    g_clear_pointer(&gtk_gnome_guard_state, g_free);
 }
 
 static void gd_update_cursor(VirtualConsole *vc)
@@ -719,6 +801,7 @@ static gboolean gd_window_close(GtkWidget *widget, GdkEvent *event,
     }
 
     if (allow_close) {
+        gd_gnome_guard_restore();
         qmp_quit(NULL);
     }
 
@@ -1082,6 +1165,10 @@ static gboolean gd_button_event(GtkWidget *widget, GdkEventButton *button,
     VirtualConsole *vc = opaque;
     GtkDisplayState *s = vc->s;
     InputButton btn;
+
+    if (button->type == GDK_BUTTON_PRESS) {
+        gtk_widget_grab_focus(widget);
+    }
 
     /* implicitly grab the input at the first click in the relative mode */
     if (button->button == 1 && button->type == GDK_BUTTON_PRESS &&
@@ -1667,6 +1754,51 @@ static void gd_menu_zoom_fit(GtkMenuItem *item, void *opaque)
     gd_update_full_redraw(vc);
 }
 
+#ifdef GDK_WINDOWING_X11
+static void gd_x11_request_keyboard_grab_permission(GdkDisplay *display,
+                                                     GdkWindow *window)
+{
+    XClientMessageEvent message = { 0 };
+    Display *xdisplay;
+    Atom permission_atom;
+
+    if (!display || !window || !GDK_IS_X11_DISPLAY(display)) {
+        return;
+    }
+
+    xdisplay = GDK_DISPLAY_XDISPLAY(display);
+    permission_atom = XInternAtom(xdisplay,
+                                  "_XWAYLAND_MAY_GRAB_KEYBOARD", False);
+    if (permission_atom == None) {
+        return;
+    }
+
+    /*
+     * Ported from V-11's SDL/XWayland path.  Mutter requires a VM/RDP client
+     * to request permission before XGrabKeyboard may inhibit compositor
+     * shortcuts.  A native Xorg server safely ignores the client message.
+     */
+    message.type = ClientMessage;
+    message.window = GDK_WINDOW_XID(window);
+    message.message_type = permission_atom;
+    message.format = 32;
+    message.data.l[0] = 1;
+    message.data.l[1] = CurrentTime;
+
+    (void)XSendEvent(xdisplay, DefaultRootWindow(xdisplay), False,
+                     SubstructureNotifyMask | SubstructureRedirectMask,
+                     (XEvent *)&message);
+    XFlush(xdisplay);
+}
+#else
+static void gd_x11_request_keyboard_grab_permission(GdkDisplay *display,
+                                                     GdkWindow *window)
+{
+    (void)display;
+    (void)window;
+}
+#endif
+
 static void gd_grab_update(VirtualConsole *vc, bool kbd, bool ptr)
 {
     GdkDisplay *display = gtk_widget_get_display(vc->gfx.drawing_area);
@@ -1684,6 +1816,9 @@ static void gd_grab_update(VirtualConsole *vc, bool kbd, bool ptr)
     }
 
     if (caps) {
+        if (kbd) {
+            gd_x11_request_keyboard_grab_permission(display, window);
+        }
         gdk_seat_grab(seat, window, caps, false, cursor,
                       NULL, NULL, NULL);
     } else {
@@ -1704,6 +1839,7 @@ static void gd_grab_keyboard(VirtualConsole *vc, const char *reason)
     win32_kbd_set_grab(true);
     gd_grab_update(vc, true, vc->s->ptr_owner == vc);
     vc->s->kbd_owner = vc;
+    gd_gnome_guard_update(vc);
     gd_update_caption(vc->s);
     trace_gd_grab(vc->label, "kbd", reason);
 }
@@ -1719,6 +1855,7 @@ static void gd_ungrab_keyboard(GtkDisplayState *s)
 
     win32_kbd_set_grab(false);
     gd_grab_update(vc, false, vc->s->ptr_owner == vc);
+    gd_gnome_guard_update(vc);
     gd_update_caption(s);
     trace_gd_ungrab(vc->label, "kbd");
 }
@@ -1776,6 +1913,28 @@ static void gd_menu_grab_input(GtkMenuItem *item, void *opaque)
     }
 
     gd_update_cursor(vc);
+    gd_gnome_guard_update(vc);
+}
+
+static void gd_menu_grab_on_hover(GtkMenuItem *item, void *opaque)
+{
+    GtkDisplayState *s = opaque;
+    VirtualConsole *vc = gd_vc_find_current(s);
+
+    if (!vc || vc->type != GD_VC_GFX ||
+        !qemu_console_is_graphic(vc->gfx.dcl.con)) {
+        gd_gnome_guard_set(false);
+        return;
+    }
+
+    if (gd_grab_on_hover(s)) {
+        if (vc->has_input_focus && vc->has_mouse_focus) {
+            gd_grab_keyboard(vc, "grab-on-hover-enabled");
+        }
+    } else if (!gd_is_grab_active(s) && s->kbd_owner == vc) {
+        gd_ungrab_keyboard(s);
+    }
+    gd_gnome_guard_update(vc);
 }
 
 static void gd_change_page(GtkNotebook *nb, gpointer arg1, guint arg2,
@@ -1819,9 +1978,11 @@ static gboolean gd_enter_event(GtkWidget *widget, GdkEventCrossing *crossing,
     VirtualConsole *vc = opaque;
     GtkDisplayState *s = vc->s;
 
-    if (gd_grab_on_hover(s)) {
+    vc->has_mouse_focus = true;
+    if (gd_grab_on_hover(s) && vc->has_input_focus) {
         gd_grab_keyboard(vc, "grab-on-hover");
     }
+    gd_gnome_guard_update(vc);
     return TRUE;
 }
 
@@ -1831,9 +1992,12 @@ static gboolean gd_leave_event(GtkWidget *widget, GdkEventCrossing *crossing,
     VirtualConsole *vc = opaque;
     GtkDisplayState *s = vc->s;
 
+    vc->has_mouse_focus = false;
+    qkbd_state_lift_all_keys(vc->gfx.kbd);
     if (gd_grab_on_hover(s)) {
         gd_ungrab_keyboard(s);
     }
+    gd_gnome_guard_update(vc);
     return TRUE;
 }
 
@@ -1841,8 +2005,14 @@ static gboolean gd_focus_in_event(GtkWidget *widget,
                                   GdkEventFocus *event, gpointer opaque)
 {
     VirtualConsole *vc = opaque;
+    GtkDisplayState *s = vc->s;
 
+    vc->has_input_focus = true;
     win32_kbd_set_window(gd_win32_get_hwnd(vc));
+    if (gd_grab_on_hover(s) && vc->has_mouse_focus) {
+        gd_grab_keyboard(vc, "grab-on-hover-focus");
+    }
+    gd_gnome_guard_update(vc);
     return TRUE;
 }
 
@@ -1852,8 +2022,13 @@ static gboolean gd_focus_out_event(GtkWidget *widget,
     VirtualConsole *vc = opaque;
     GtkDisplayState *s = vc->s;
 
+    vc->has_input_focus = false;
     win32_kbd_set_window(NULL);
     gtk_release_modifiers(s);
+    if (s->kbd_owner == vc) {
+        gd_ungrab_keyboard(s);
+    }
+    gd_gnome_guard_update(vc);
     return TRUE;
 }
 
@@ -2200,6 +2375,8 @@ static void gd_connect_signals(GtkDisplayState *s)
                      G_CALLBACK(gd_menu_zoom_fit), s);
     g_signal_connect(s->grab_item, "activate",
                      G_CALLBACK(gd_menu_grab_input), s);
+    g_signal_connect(s->grab_on_hover_item, "toggled",
+                     G_CALLBACK(gd_menu_grab_on_hover), s);
     g_signal_connect(s->notebook, "switch-page",
                      G_CALLBACK(gd_change_page), s);
 }
@@ -2518,6 +2695,33 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
         exit(1);
     }
     assert(opts->type == DISPLAY_TYPE_GTK);
+
+    if (gd_env_enabled("QEMU_GTK_TAME_GNOME")) {
+        unsigned uid;
+
+#ifdef G_OS_WIN32
+        uid = 0;
+#else
+        uid = (unsigned)getuid();
+#endif
+        gtk_gnome_guard_script = g_getenv("GNOME_SUPER_GUARD");
+        if (gtk_gnome_guard_script &&
+            g_file_test(gtk_gnome_guard_script,
+                        G_FILE_TEST_IS_EXECUTABLE)) {
+            gtk_gnome_guard_state = g_strdup_printf(
+                "%s/qemu-gtk-%u-%ld.gnome-super", g_get_tmp_dir(),
+                uid, (long)getpid());
+            if (!gtk_gnome_guard_cleanup_registered) {
+                atexit(gd_gnome_guard_cleanup);
+                gtk_gnome_guard_cleanup_registered = true;
+            }
+        } else {
+            warn_report("gtk: QEMU_GTK_TAME_GNOME requested but "
+                        "GNOME_SUPER_GUARD is not executable");
+            gtk_gnome_guard_script = NULL;
+        }
+    }
+
     s = g_malloc0(sizeof(*s));
     s->opts = opts;
 
@@ -2591,6 +2795,9 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
 
     vc = gd_vc_find_current(s);
     gtk_widget_set_sensitive(s->view_menu, vc != NULL);
+    if (vc && vc->type == GD_VC_GFX) {
+        gtk_widget_grab_focus(vc->focus);
+    }
 #ifdef CONFIG_VTE
     gtk_widget_set_sensitive(s->copy_item,
                              vc && vc->type == GD_VC_VTE);

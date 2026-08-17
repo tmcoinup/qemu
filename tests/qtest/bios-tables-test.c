@@ -103,6 +103,13 @@ typedef struct {
     uint8_t smbios_thread_count;
     uint16_t smbios_thread_count2;
     int type17_count;
+    uint32_t type17_size_mb;
+    const uint32_t *type17_sizes_mb;
+    int type17_sizes_len;
+    const char * const *type17_part_numbers;
+    int type17_part_numbers_len;
+    const uint8_t *type17_ranks;
+    int type17_ranks_len;
     uint8_t *required_struct_types;
     int required_struct_types_len;
     int type4_count;
@@ -747,6 +754,30 @@ static void smbios_type4_count_test(test_data *data, int type4_count)
     }
 }
 
+static char *smbios_table_string(test_data *data, uint64_t addr,
+                                 uint8_t formatted_len, uint8_t string_number)
+{
+    GString *value = g_string_new(NULL);
+    uint64_t cursor = addr + formatted_len;
+    uint8_t current = 1;
+    uint8_t ch;
+
+    if (!string_number) {
+        return g_string_free(value, false);
+    }
+    while (current < string_number) {
+        do {
+            ch = qtest_readb(data->qts, cursor++);
+        } while (ch);
+        current++;
+    }
+    while ((ch = qtest_readb(data->qts, cursor++))) {
+        g_string_append_c(value, ch);
+    }
+
+    return g_string_free(value, false);
+}
+
 static void test_smbios_structs(test_data *data, SmbiosEntryPointType ep_type)
 {
     DECLARE_BITMAP(struct_bitmap, SMBIOS_MAX_TYPE+1) = { 0 };
@@ -781,6 +812,36 @@ static void test_smbios_structs(test_data *data, SmbiosEntryPointType ep_type)
             type4_count++;
         }
         if (type == 17) {
+            uint16_t size = qtest_readw(data->qts, addr +
+                offsetof(struct smbios_type_17, size));
+
+            if (data->type17_size_mb) {
+                g_assert_cmpuint(size, ==, data->type17_size_mb);
+            }
+            if (data->type17_sizes_mb) {
+                g_assert_cmpint(type17_count, <, data->type17_sizes_len);
+                g_assert_cmpuint(size, ==,
+                                 data->type17_sizes_mb[type17_count]);
+            }
+            if (data->type17_part_numbers) {
+                uint8_t part_string = qtest_readb(data->qts, addr +
+                    offsetof(struct smbios_type_17, part_number_str));
+                g_autofree char *part =
+                    smbios_table_string(data, addr, len, part_string);
+
+                g_assert_cmpint(type17_count, <,
+                                data->type17_part_numbers_len);
+                g_assert_cmpstr(part, ==,
+                                data->type17_part_numbers[type17_count]);
+            }
+            if (data->type17_ranks) {
+                uint8_t rank = qtest_readb(data->qts, addr +
+                    offsetof(struct smbios_type_17, attributes));
+
+                g_assert_cmpint(type17_count, <, data->type17_ranks_len);
+                g_assert_cmpuint(rank, ==,
+                                 data->type17_ranks[type17_count]);
+            }
             type17_count++;
         }
 
@@ -829,6 +890,15 @@ static void test_smbios_structs(test_data *data, SmbiosEntryPointType ep_type)
     smbios_type4_count_test(data, type4_count);
     if (data->type17_count) {
         g_assert_cmpint(type17_count, ==, data->type17_count);
+    }
+    if (data->type17_sizes_mb) {
+        g_assert_cmpint(type17_count, ==, data->type17_sizes_len);
+    }
+    if (data->type17_part_numbers) {
+        g_assert_cmpint(type17_count, ==, data->type17_part_numbers_len);
+    }
+    if (data->type17_ranks) {
+        g_assert_cmpint(type17_count, ==, data->type17_ranks_len);
     }
 }
 
@@ -1106,6 +1176,103 @@ static void test_acpi_q35_9_2_smbios_memory_device_size(void)
     };
 
     test_smbios("-m 8G", &data);
+}
+
+static char *bios_tables_test_setenv(const char *name, const char *value)
+{
+    char *saved = g_strdup(g_getenv(name));
+
+    g_assert_true(g_setenv(name, value, true));
+    return saved;
+}
+
+static void bios_tables_test_restore_env(const char *name, const char *saved)
+{
+    if (saved) {
+        g_assert_true(g_setenv(name, saved, true));
+    } else {
+        g_unsetenv(name);
+    }
+}
+
+static char *bios_tables_test_unsetenv(const char *name)
+{
+    char *saved = g_strdup(g_getenv(name));
+
+    g_unsetenv(name);
+    return saved;
+}
+
+static void test_acpi_q35_smbios_spd_module_size(void)
+{
+    g_autofree char *saved_type =
+        bios_tables_test_setenv("QEMU_SPD_TYPE", "DDR3");
+    g_autofree char *saved_module =
+        bios_tables_test_setenv("QEMU_SPD_MODULE_MB", "2048");
+    g_autofree char *saved_module_list =
+        bios_tables_test_unsetenv("QEMU_SPD_MODULE_MB_LIST");
+    g_autofree char *saved_speed =
+        bios_tables_test_setenv("QEMU_SPD_SPEED_MT", "1333");
+    g_autofree char *saved_slots =
+        bios_tables_test_setenv("QEMU_SPD_SLOTS", "2");
+    test_data data = {
+        .machine = MACHINE_Q35,
+        .arch = "x86",
+        .required_struct_types = base_required_struct_types,
+        .required_struct_types_len = ARRAY_SIZE(base_required_struct_types),
+        .type17_count = 2,
+        .type17_size_mb = 2048,
+    };
+
+    test_smbios("-m 4G", &data);
+
+    bios_tables_test_restore_env("QEMU_SPD_SLOTS", saved_slots);
+    bios_tables_test_restore_env("QEMU_SPD_SPEED_MT", saved_speed);
+    bios_tables_test_restore_env("QEMU_SPD_MODULE_MB_LIST", saved_module_list);
+    bios_tables_test_restore_env("QEMU_SPD_MODULE_MB", saved_module);
+    bios_tables_test_restore_env("QEMU_SPD_TYPE", saved_type);
+}
+
+static void test_acpi_q35_smbios_spd_mixed_modules(void)
+{
+    static const uint32_t sizes_mb[] = { 4096, 2048 };
+    static const uint8_t ranks[] = { 2, 1 };
+    static const char * const part_numbers[] = {
+        "KVR16N11S8/4",
+        "KVR16N11S6/2",
+    };
+    g_autofree char *saved_type =
+        bios_tables_test_setenv("QEMU_SPD_TYPE", "DDR3");
+    g_autofree char *saved_module =
+        bios_tables_test_unsetenv("QEMU_SPD_MODULE_MB");
+    g_autofree char *saved_module_list =
+        bios_tables_test_setenv("QEMU_SPD_MODULE_MB_LIST", "4096,2048");
+    g_autofree char *saved_speed =
+        bios_tables_test_setenv("QEMU_SPD_SPEED_MT", "1600");
+    g_autofree char *saved_slots =
+        bios_tables_test_setenv("QEMU_SPD_SLOTS", "2");
+    test_data data = {
+        .machine = MACHINE_Q35,
+        .arch = "x86",
+        .required_struct_types = base_required_struct_types,
+        .required_struct_types_len = ARRAY_SIZE(base_required_struct_types),
+        .type17_count = 2,
+        .type17_sizes_mb = sizes_mb,
+        .type17_sizes_len = ARRAY_SIZE(sizes_mb),
+        .type17_part_numbers = part_numbers,
+        .type17_part_numbers_len = ARRAY_SIZE(part_numbers),
+        .type17_ranks = ranks,
+        .type17_ranks_len = ARRAY_SIZE(ranks),
+    };
+
+    test_smbios("-m 6G -smbios 'type=17,"
+                "part=KVR16N11S8/4|KVR16N11S6/2,rank-list=2|1'", &data);
+
+    bios_tables_test_restore_env("QEMU_SPD_SLOTS", saved_slots);
+    bios_tables_test_restore_env("QEMU_SPD_SPEED_MT", saved_speed);
+    bios_tables_test_restore_env("QEMU_SPD_MODULE_MB_LIST", saved_module_list);
+    bios_tables_test_restore_env("QEMU_SPD_MODULE_MB", saved_module);
+    bios_tables_test_restore_env("QEMU_SPD_TYPE", saved_type);
 }
 
 static void test_acpi_q35_kvm_type4_count(void)
@@ -2834,6 +3001,10 @@ int main(int argc, char *argv[])
                            test_acpi_q35_smbios_type4_options);
             qtest_add_func("acpi/q35/smbios-9.2-memory-device-size",
                            test_acpi_q35_9_2_smbios_memory_device_size);
+            qtest_add_func("acpi/q35/smbios-spd-module-size",
+                           test_acpi_q35_smbios_spd_module_size);
+            qtest_add_func("acpi/q35/smbios-spd-mixed-modules",
+                           test_acpi_q35_smbios_spd_mixed_modules);
             qtest_add_func("acpi/q35/oem-fields", test_acpi_q35_oem_fields);
             if (tpm_model_is_available("-machine q35", "tpm-tis")) {
                 qtest_add_func("acpi/q35/tpm2-tis", test_acpi_q35_tcg_tpm2_tis);

@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-PROMOTE="$REPO_ROOT/deploy/promote-base.sh"
+PROMOTE="$REPO_ROOT/deploy/scripts/promote-base.sh"
 REAL_QEMU_IMG="$REPO_ROOT/build/qemu-img"
 [[ -x "$REAL_QEMU_IMG" ]] || REAL_QEMU_IMG=$(command -v qemu-img || true)
 
@@ -20,9 +20,10 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 VM_ROOT="$TMP_DIR/vms"
 IMAGE_ROOT="$TMP_DIR"
 QEMU_IMG="$TMP_DIR/qemu-img"
+TEST_VM_ID=910008
 export IMAGE_ROOT VM_ROOT QEMU_IMG
-mkdir -p "$VM_ROOT/vm8" "$VM_ROOT/shared/bases" "$VM_ROOT/control"
-printf 'new-base-content\n' >"$VM_ROOT/vm8/disk.qcow2"
+mkdir -p "$VM_ROOT/$TEST_VM_ID" "$VM_ROOT/shared/bases" "$VM_ROOT/control"
+printf 'new-base-content\n' >"$VM_ROOT/$TEST_VM_ID/disk.qcow2"
 printf 'old-base-content\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
 
 cat >"$QEMU_IMG" <<'EOF'
@@ -71,7 +72,7 @@ chmod +x "$QEMU_IMG"
 
 exec {STORAGE_HOLDER_FD}>"$VM_ROOT/control/.storage.lock"
 flock -s "$STORAGE_HOLDER_FD"
-if "$PROMOTE" 8 -y >"$TMP_DIR/locked.out" 2>"$TMP_DIR/locked.err"; then
+if "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/locked.out" 2>"$TMP_DIR/locked.err"; then
     fail "promote-base ignored a running/shared storage holder"
 fi
 exec {STORAGE_HOLDER_FD}>&-
@@ -79,7 +80,7 @@ grep -Fq '其它 VM 正在运行' "$TMP_DIR/locked.err" \
     || fail "exclusive-storage refusal was not clear"
 
 printf 'BACKING=parent.qcow2\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
-if "$PROMOTE" 8 -y >"$TMP_DIR/nonstandalone.out" \
+if "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/nonstandalone.out" \
     2>"$TMP_DIR/nonstandalone.err"; then
     fail "promote-base archived a non-standalone existing base"
 fi
@@ -87,7 +88,7 @@ grep -Fq '现有 base 不是 standalone' "$TMP_DIR/nonstandalone.err" \
     || fail "non-standalone existing-base refusal was not clear"
 printf 'old-base-content\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
 
-"$PROMOTE" 8 -y >"$TMP_DIR/success.out"
+"$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/success.out"
 grep -Fq 'new-base-content' "$VM_ROOT/shared/bases/win10-base.qcow2" \
     || fail "new base was not published"
 archive=$(find "$VM_ROOT/shared/bases/archive" -type f -name 'win10-base-*.qcow2' -print -quit)
@@ -95,58 +96,58 @@ archive=$(find "$VM_ROOT/shared/bases/archive" -type f -name 'win10-base-*.qcow2
 grep -Fq 'old-base-content' "$archive" || fail "archive content changed"
 
 # Replacing a base that any existing overlay depends on must be refused.
-mkdir -p "$VM_ROOT/vm9"
+mkdir -p "$VM_ROOT/9"
 printf 'stable-dependent-base\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
 printf 'BACKING=%s\n' "$VM_ROOT/shared/bases/win10-base.qcow2" \
-    >"$VM_ROOT/vm9/disk.qcow2"
-if "$PROMOTE" 8 -y >"$TMP_DIR/dependent.out" 2>"$TMP_DIR/dependent.err"; then
+    >"$VM_ROOT/9/disk.qcow2"
+if "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/dependent.out" 2>"$TMP_DIR/dependent.err"; then
     fail "promote-base replaced a base with an existing dependent overlay"
 fi
 grep -Fq 'overlay 依赖目标 base 路径' "$TMP_DIR/dependent.err" \
     || fail "dependent-overlay refusal was not clear"
 grep -Fq 'stable-dependent-base' "$VM_ROOT/shared/bases/win10-base.qcow2" \
     || fail "dependent-overlay refusal changed the base"
-rm -f "$VM_ROOT/vm9/disk.qcow2"
+rm -f "$VM_ROOT/9/disk.qcow2"
 
 SYMLINK_OUTSIDE="$TMP_DIR/symlink-outside"
 mkdir -p "$SYMLINK_OUTSIDE"
 printf 'BACKING=%s\n' "$VM_ROOT/shared/bases/win10-base.qcow2" \
     >"$SYMLINK_OUTSIDE/dependent.qcow2"
 ln -s "$SYMLINK_OUTSIDE/dependent.qcow2" \
-    "$VM_ROOT/vm9/dependent-link.qcow2"
-if "$PROMOTE" 8 -y >"$TMP_DIR/symlink.out" 2>"$TMP_DIR/symlink.err"; then
+    "$VM_ROOT/9/dependent-link.qcow2"
+if "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/symlink.out" 2>"$TMP_DIR/symlink.err"; then
     fail "promote-base ignored a dependent qcow2 file symlink"
 fi
 grep -Fq 'overlay 依赖目标 base 路径' "$TMP_DIR/symlink.err" \
     || fail "symlink dependent refusal was not clear"
-rm -f "$VM_ROOT/vm9/dependent-link.qcow2" "$SYMLINK_OUTSIDE/dependent.qcow2"
+rm -f "$VM_ROOT/9/dependent-link.qcow2" "$SYMLINK_OUTSIDE/dependent.qcow2"
 
 DIR_LINK_OUTSIDE="$TMP_DIR/dir-link-outside/vm10"
 mkdir -p "$DIR_LINK_OUTSIDE"
 printf 'BACKING=%s\n' "$VM_ROOT/shared/bases/win10-base.qcow2" \
     >"$DIR_LINK_OUTSIDE/disk.qcow2"
-ln -s "$DIR_LINK_OUTSIDE" "$VM_ROOT/vm10"
-if "$PROMOTE" 8 -y >"$TMP_DIR/dir-link.out" 2>"$TMP_DIR/dir-link.err"; then
+ln -s "$DIR_LINK_OUTSIDE" "$VM_ROOT/10"
+if "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/dir-link.out" 2>"$TMP_DIR/dir-link.err"; then
     fail "promote-base ignored a dependent below a directory symlink"
 fi
 grep -Fq 'overlay 依赖目标 base 路径' "$TMP_DIR/dir-link.err" \
     || fail "directory-symlink dependent refusal was not clear"
-rm -f "$VM_ROOT/vm10" "$DIR_LINK_OUTSIDE/disk.qcow2"
+rm -f "$VM_ROOT/10" "$DIR_LINK_OUTSIDE/disk.qcow2"
 
 # Even when the target base pathname is currently missing, publishing a new
 # unrelated file there must not silently reconnect a broken overlay.
 mv "$VM_ROOT/shared/bases/win10-base.qcow2" \
     "$VM_ROOT/shared/bases/win10-base.qcow2.saved"
 printf 'BACKING=%s\n' "$VM_ROOT/shared/bases/win10-base.qcow2" \
-    >"$VM_ROOT/vm9/disk.qcow2"
-if "$PROMOTE" 8 -y >"$TMP_DIR/missing.out" 2>"$TMP_DIR/missing.err"; then
+    >"$VM_ROOT/9/disk.qcow2"
+if "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/missing.out" 2>"$TMP_DIR/missing.err"; then
     fail "promote-base published into a missing path recorded by an overlay"
 fi
 grep -Fq 'overlay 依赖目标 base 路径' "$TMP_DIR/missing.err" \
     || fail "missing-base dependency refusal was not clear"
 [[ ! -e "$VM_ROOT/shared/bases/win10-base.qcow2" ]] \
     || fail "missing-base dependency check published a new base"
-rm -f "$VM_ROOT/vm9/disk.qcow2"
+rm -f "$VM_ROOT/9/disk.qcow2"
 mv "$VM_ROOT/shared/bases/win10-base.qcow2.saved" \
     "$VM_ROOT/shared/bases/win10-base.qcow2"
 
@@ -157,7 +158,7 @@ printf 'BACKING=%s\n' "$VM_ROOT/shared/bases/win10-base.qcow2" \
     >"$EXTERNAL_DISKS/dependent.qcow2"
 if VM_INSTANCES_DIR="$VM_ROOT" VM_DISK_DIR="$EXTERNAL_DISKS" \
     VM_BASE_DIR="$VM_ROOT/shared/bases" \
-    "$PROMOTE" 8 -y >"$TMP_DIR/external.out" 2>"$TMP_DIR/external.err"; then
+    "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/external.out" 2>"$TMP_DIR/external.err"; then
     fail "promote-base ignored a dependent in an external managed disk dir"
 fi
 grep -Fq 'overlay 依赖目标 base 路径' "$TMP_DIR/external.err" \
@@ -167,32 +168,32 @@ rm -rf "$EXTERNAL_DISKS"
 # Even if convert/check return success, a published base must not retain a
 # qcow2 external data-file dependency.
 printf 'stable-before-data-output\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
-printf 'DATA_FILE=shared.raw\n' >"$VM_ROOT/vm8/disk.qcow2"
-if "$PROMOTE" 8 -y >"$TMP_DIR/data-output.out" 2>"$TMP_DIR/data-output.err"; then
+printf 'DATA_FILE=shared.raw\n' >"$VM_ROOT/$TEST_VM_ID/disk.qcow2"
+if "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/data-output.out" 2>"$TMP_DIR/data-output.err"; then
     fail "promote-base published a qcow2 with an external data-file"
 fi
 grep -Fq 'convert 结果不是有效 standalone qcow2' "$TMP_DIR/data-output.err" \
     || fail "external-data-file output refusal was not clear"
 grep -Fq 'stable-before-data-output' "$VM_ROOT/shared/bases/win10-base.qcow2" \
     || fail "external-data-file output refusal changed the base"
-printf 'new-base-content\n' >"$VM_ROOT/vm8/disk.qcow2"
+printf 'new-base-content\n' >"$VM_ROOT/$TEST_VM_ID/disk.qcow2"
 
 # Real qcow2 protocol backing (file:/...) is deliberately fail-closed; it must
 # not be misparsed as a relative host pathname and silently missed.
 PROTOCOL_VM_ROOT="$TMP_DIR/protocol/vms"
-mkdir -p "$PROTOCOL_VM_ROOT/vm8" "$PROTOCOL_VM_ROOT/shared/bases" \
-    "$PROTOCOL_VM_ROOT/vm9" "$PROTOCOL_VM_ROOT/control"
+mkdir -p "$PROTOCOL_VM_ROOT/$TEST_VM_ID" "$PROTOCOL_VM_ROOT/shared/bases" \
+    "$PROTOCOL_VM_ROOT/9" "$PROTOCOL_VM_ROOT/control"
 "$REAL_QEMU_IMG" create -q -f qcow2 \
-    "$PROTOCOL_VM_ROOT/vm8/disk.qcow2" 1M
+    "$PROTOCOL_VM_ROOT/$TEST_VM_ID/disk.qcow2" 1M
 "$REAL_QEMU_IMG" create -q -f qcow2 \
     "$PROTOCOL_VM_ROOT/shared/bases/win10-base.qcow2" 1M
 "$REAL_QEMU_IMG" create -q -f qcow2 -F qcow2 \
     -b "file:$PROTOCOL_VM_ROOT/shared/bases/win10-base.qcow2" \
-    "$PROTOCOL_VM_ROOT/vm9/disk.qcow2"
+    "$PROTOCOL_VM_ROOT/9/disk.qcow2"
 protocol_base_inode=$(stat -c %i "$PROTOCOL_VM_ROOT/shared/bases/win10-base.qcow2")
 if IMAGE_ROOT="$TMP_DIR/protocol" VM_ROOT="$PROTOCOL_VM_ROOT" \
     QEMU_IMG="$REAL_QEMU_IMG" \
-    "$PROMOTE" 8 -y >"$TMP_DIR/protocol.out" 2>"$TMP_DIR/protocol.err"; then
+    "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/protocol.out" 2>"$TMP_DIR/protocol.err"; then
     fail "promote-base accepted an unsupported protocol backing reference"
 fi
 grep -Fq 'unsupported backing reference' "$TMP_DIR/protocol.err" \
@@ -203,21 +204,21 @@ grep -Fq 'unsupported backing reference' "$TMP_DIR/protocol.err" \
 # Complete-chain inspection must catch managed top -> external middle -> base.
 CHAIN_VM_ROOT="$TMP_DIR/recursive/vms"
 CHAIN_OUTSIDE="$TMP_DIR/recursive-outside"
-mkdir -p "$CHAIN_VM_ROOT/vm8" "$CHAIN_VM_ROOT/shared/bases" \
-    "$CHAIN_VM_ROOT/vm9" "$CHAIN_VM_ROOT/control" "$CHAIN_OUTSIDE"
+mkdir -p "$CHAIN_VM_ROOT/$TEST_VM_ID" "$CHAIN_VM_ROOT/shared/bases" \
+    "$CHAIN_VM_ROOT/9" "$CHAIN_VM_ROOT/control" "$CHAIN_OUTSIDE"
 "$REAL_QEMU_IMG" create -q -f qcow2 \
-    "$CHAIN_VM_ROOT/vm8/disk.qcow2" 1M
+    "$CHAIN_VM_ROOT/$TEST_VM_ID/disk.qcow2" 1M
 "$REAL_QEMU_IMG" create -q -f qcow2 \
     "$CHAIN_VM_ROOT/shared/bases/win10-base.qcow2" 1M
 "$REAL_QEMU_IMG" create -q -f qcow2 -F qcow2 \
     -b "$CHAIN_VM_ROOT/shared/bases/win10-base.qcow2" \
     "$CHAIN_OUTSIDE/middle.qcow2"
 "$REAL_QEMU_IMG" create -q -f qcow2 -F qcow2 \
-    -b "$CHAIN_OUTSIDE/middle.qcow2" "$CHAIN_VM_ROOT/vm9/disk.qcow2"
+    -b "$CHAIN_OUTSIDE/middle.qcow2" "$CHAIN_VM_ROOT/9/disk.qcow2"
 chain_base_inode=$(stat -c %i "$CHAIN_VM_ROOT/shared/bases/win10-base.qcow2")
 if IMAGE_ROOT="$TMP_DIR/recursive" VM_ROOT="$CHAIN_VM_ROOT" \
     QEMU_IMG="$REAL_QEMU_IMG" \
-    "$PROMOTE" 8 -y >"$TMP_DIR/recursive.out" 2>"$TMP_DIR/recursive.err"; then
+    "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/recursive.out" 2>"$TMP_DIR/recursive.err"; then
     fail "promote-base missed a base behind an external middle layer"
 fi
 grep -Fq 'overlay 依赖目标 base 路径' "$TMP_DIR/recursive.err" \
@@ -252,7 +253,7 @@ case "$1" in
 esac
 EOF
 chmod +x "$QEMU_IMG"
-if "$PROMOTE" 8 -y >"$TMP_DIR/fail.out" 2>"$TMP_DIR/fail.err"; then
+if "$PROMOTE" "$TEST_VM_ID" -y >"$TMP_DIR/fail.out" 2>"$TMP_DIR/fail.err"; then
     fail "promote-base accepted a failed conversion"
 fi
 grep -Fq 'stable-base' "$VM_ROOT/shared/bases/win10-base.qcow2" \

@@ -22,6 +22,8 @@
 #endif
 
 #include "ui/kbd-state.h"
+#include "ui/sdl2-event.h"
+#include "ui/sdl2-pointer.h"
 #ifdef CONFIG_OPENGL
 # include "ui/egl-helpers.h"
 #endif
@@ -42,6 +44,8 @@ struct sdl2_console {
     int updates;
     int idle_counter;
     int ignore_hotkeys;
+    bool window_redraw_pending;
+    bool ui_info_pending;
     int64_t fps_window_start_us;
     uint32_t fps_frame_count;
     double present_fps;
@@ -54,6 +58,18 @@ struct sdl2_console {
      * keyboard focus and mouse-enter events arrive together. */
     bool has_input_focus;
     bool has_mouse_focus;
+    bool absolute_enabled;
+    bool absolute_available;
+    uint32_t mouse_button_state;
+    bool guest_cursor;
+    int guest_x;
+    int guest_y;
+    SDL_Surface *guest_sprite_surface;
+    SDL_Cursor *guest_sprite;
+    SDL2AxisScale window_to_render_x;
+    SDL2AxisScale window_to_render_y;
+    SDL2AxisScale render_to_guest_x;
+    SDL2AxisScale render_to_guest_y;
     SDL_GLContext winctx;
     QKbdState *kbd;
     bool has_dmabuf;
@@ -76,6 +92,77 @@ struct sdl2_console {
 #endif
 };
 
+/* Dimensions of the image that the current SDL path actually renders. */
+static inline bool sdl2_current_guest_size(const struct sdl2_console *scon,
+                                           SDL2Size *guest)
+{
+    SDL2Size surface = { 0 };
+    SDL2Size scanout = { 0 };
+    bool scanout_mode = false;
+
+    if (!scon || !guest) {
+        return false;
+    }
+    if (scon->surface) {
+        surface.width = surface_width(scon->surface);
+        surface.height = surface_height(scon->surface);
+    }
+#ifdef CONFIG_OPENGL
+    if (scon->opengl && scon->scanout_mode) {
+        scanout_mode = true;
+        /* G-11 currently renders the complete scanout backing framebuffer. */
+        scanout.width = scon->guest_fb.width;
+        scanout.height = scon->guest_fb.height;
+    }
+#endif
+    return sdl2_select_guest_size(scanout_mode, surface, scanout, guest);
+}
+
+/*
+ * SDL mouse events use logical window pixels.  Rendering may use a larger
+ * SDL drawable/renderer output on high-DPI displays, or a native EGL child.
+ */
+static inline bool sdl2_current_render_size(const struct sdl2_console *scon,
+                                            SDL2Size *render)
+{
+    if (!scon || !scon->real_window || !render) {
+        return false;
+    }
+
+    *render = (SDL2Size) { 0 };
+    if (scon->opengl) {
+#ifdef CONFIG_OPENGL
+        if (scon->native_egl && scon->esurface != EGL_NO_SURFACE &&
+            qemu_egl_display) {
+            EGLint width = 0;
+            EGLint height = 0;
+
+            if (eglQuerySurface(qemu_egl_display, scon->esurface,
+                                EGL_WIDTH, &width) &&
+                eglQuerySurface(qemu_egl_display, scon->esurface,
+                                EGL_HEIGHT, &height)) {
+                render->width = width;
+                render->height = height;
+            }
+        } else {
+            SDL_GL_GetDrawableSize(scon->real_window,
+                                   &render->width, &render->height);
+        }
+#endif
+    } else if (scon->real_renderer &&
+               SDL_GetRendererOutputSize(scon->real_renderer,
+                                         &render->width,
+                                         &render->height) != 0) {
+        *render = (SDL2Size) { 0 };
+    }
+
+    if (render->width <= 0 || render->height <= 0) {
+        SDL_GetWindowSize(scon->real_window,
+                          &render->width, &render->height);
+    }
+    return render->width > 0 && render->height > 0;
+}
+
 /*
  * Centred destination rectangle for a gw*gh guest surface inside a ww*wh
  * window.  The guest is shown at its native resolution and is never magnified
@@ -88,33 +175,20 @@ struct sdl2_console {
 static inline void sdl2_gfx_dst_rect(int ww, int wh, int gw, int gh,
                                      int *px, int *py, int *pw, int *ph)
 {
-    double scale;
-    int dw, dh;
+    SDL2Rect dst = sdl2_guest_dst_rect(
+        (SDL2Size) { ww, wh }, (SDL2Size) { gw, gh });
 
-    if (gw < 1 || gh < 1) {
-        *px = 0;
-        *py = 0;
-        *pw = ww;
-        *ph = wh;
-        return;
-    }
-
-    scale = MIN((double)ww / gw, (double)wh / gh);
-    if (scale > 1.0) {
-        scale = 1.0;            /* never magnify past the native resolution */
-    }
-    dw = (int)(gw * scale + 0.5);
-    dh = (int)(gh * scale + 0.5);
-    *pw = dw;
-    *ph = dh;
-    *px = (ww - dw) / 2;
-    *py = (wh - dh) / 2;
+    *px = dst.x;
+    *py = dst.y;
+    *pw = dst.width;
+    *ph = dst.height;
 }
 
 void sdl2_window_create(struct sdl2_console *scon);
 void sdl2_window_destroy(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
+void sdl2_flush_window_updates(void);
 void sdl2_note_present(struct sdl2_console *scon);
 
 void sdl2_process_key(struct sdl2_console *scon,

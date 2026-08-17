@@ -1,7 +1,8 @@
 # 虚拟化检测面 (DNF TP / 常见反作弊) 全量清单
 
-最后更新 2026-07-15。按检测层从低到高排列。GPU 身份必须区分新配置的安全 B、
-V3 收尾后的已审计 GTX 1050 A，以及始终不变的 host backing hardware。
+最后更新 2026-08-03。按检测层从低到高排列。本文只描述 G-11/vGPU；V-11 是
+独立分支，不能把它的 GPU、显示驱动或检测结论直接套用。GPU 身份必须区分新配置
+的安全 B、历史 A 实验，以及始终不变的 host backing hardware。
 
 ## Layer 0 — CPU / CPUID
 
@@ -10,8 +11,8 @@ V3 收尾后的已审计 GTX 1050 A，以及始终不变的 host backing hardwar
 | `CPUID.1.ECX[31]` HYPERVISOR bit | 0 | **1** ⚠️ | `-cpu ...,x-hv-stealth=on` (见 `target/i386/cpu.c:8317`) |
 | `CPUID.40000000-400000FF` KVM/HV leaves | 无 (InvalidLeaf) | KVM signature ⚠️ | `-cpu ...,kvm=off` |
 | `CPUID.1.ECX[5]` VMX / `CPUID.80000001.ECX[2]` SVM | 可能 1 | 0 | 我们显式 `,vmx=off` 固化 |
-| Brand string (80000002-4) | 真实型号 | QEMU 默认带 "Virtual CPU" | 本项目三个模型 model_id 写了真实 brand |
-| Family / Model / Stepping | 真实 | qemu64 族：15/6/1 | 新增 Core-i5-4590 / Core-i5-6500 / Core-i3-8100 模型 |
+| Brand string (80000002-4) | 真实型号 | QEMU 默认带 "Virtual CPU" | 8 个目录模型各自写入对应 brand；active 6、legacy 2 |
+| Family / Model / Stepping | 真实 | qemu64 族：15/6/1 | G3220、i3-4130、i5-4460/4570/4590、i7-4790 及 legacy i5-6500/i3-8100 显式模型 |
 | TSC invariant (`80000007.EDX[8]`) | 1 | 0 (qemu64) | `,+invtsc` 固定打开 |
 | RDTSC 一致性 (rdtsc 在不同核差异 < 几千周期) | 一致 | KVM-clock 校准差 → 可能漂移 | `kvm=off` 关 KVMclock；`-rtc clock=host,driftfix=slew` 矫正 |
 
@@ -25,14 +26,23 @@ V3 收尾后的已审计 GTX 1050 A，以及始终不变的 host backing hardwar
 | 字段 | 物理机 | QEMU 默认 | 本项目 |
 |-----|--------|-----------|--------|
 | Type 0 vendor | AMI / Phoenix / Insyde | "SeaBIOS" ⚠️ | `-smbios type=0,vendor="American Megatrends Inc."` |
-| Type 1 manufacturer/product | ASUS / MSI / Gigabyte 等 | "QEMU"/"Standard PC" ⚠️ | `create-vm.sh` 随机池，写入 `G-11/vmN/vm.conf` 后每次启动一致 |
+| Type 1 manufacturer/product | ASUS / MSI / Gigabyte 等 | "QEMU"/"Standard PC" ⚠️ | `create-vm.sh` 随机池，写入 `vms/N/vm.conf` 后每次启动一致 |
 | Type 1 UUID | 厂固化 | 启动新 uuid | 配置里固化 `VM_UUID` |
-| Type 2 serial | 主板 SN | 空 | 从 `G-11/vmN/vm.conf` 的 `MB_SN` 填 |
-| Type 17 memory_type | 0x18 / 0x1A / 0x22 (DDR3/4/5) | **0x07 (RAM)** ⚠️ | `memtype=0x1A` (CLI) + 新 QEMU opts (本仓库 patch) |
+| Type 2 serial | 主板 SN | 空 | 从 `vms/N/vm.conf` 的 `MB_SN` 填 |
+| Type 17 memory_type | 0x18 / 0x1A / 0x22 (DDR3/4/5) | **0x07 (RAM)** ⚠️ | profile 按 DDR3=`0x18`、DDR4=`0x1A` 传入 |
 | Type 17 type_detail | 0x80 (Synchronous) | **0x02 (Other)** ⚠️ | `typedetail=0x80` (本仓库 patch) |
 | Type 17 data_width/total_width | 64 / 64 (no ECC) | **0xFFFF / 0xFFFF** ⚠️ | `width=64,totalwidth=64` (本仓库 patch) |
-| Type 17 manufacturer/part/serial | Kingston / KVR... | 空 | `G-11/vmN/vm.conf` 随机池 |
+| Type 17 manufacturer/part/serial | DIMM 实际品牌/逐槽料号/不同序列 | 空 | 17 套目录；active 为 Kingston、Samsung、Micron、SK hynix 四品牌；v3 持久化完整 `MEM_SERIAL_LIST` 并逐槽跨 VM 查重 |
+| DDR3 SPD 几何/身份 | 容量、Rank、颗粒宽度、JEP106、serial、part 自洽 | 通常无本项目身份 | 四种审核几何；bytes 117/122/128/148 起分别写 module JEP106/serial/18-byte part/DRAM JEP106 |
+| legacy DDR4 SPD | EE1004 page 1 常含身份 | 仅 page 0 | 本项目明确保持 256-byte page 0-only；身份由 SMBIOS Type 17 提供，不伪造 page 1 |
 | Type 3 chassis | 机箱 SN | 空 | `CHASSIS_SN` |
+
+硬件合同 v3 的 `SYS_SN`、`MB_SN`、`CHASSIS_SN` 遵守 ASUS/MSI/Gigabyte 各自
+格式且互不重复；DIMM 基准序列是非保留 8 位十六进制，第二槽稳定派生另一值，
+完整 `MEM_SERIAL_LIST` 与 `MEM_SN + slot` 必须一致，且每个成员进入同一
+`MEMORY_SERIAL` 跨 VM 命名空间。SMBIOS 与 DDR3 SPD 使用同一对序列。Micron E1 目录 SKU 超过 JEDEC 18-byte part
+字段，所以两种 Micron profile 均使用可核验的 `...-1G6` 基础 part，而不是半截
+`...-1G6E`。这些值创建后固定，启动不会重新随机。
 
 验证命令 (guest):
 
@@ -77,7 +87,7 @@ VGPU_IDENTITY_TARGET=name-only
 
 这时 marketing name 可以来自 per-mdev 配置，但 PCI 仍是 `DEV_1E30`。这就是当前
 安全停留点。历史 finish 会修改 INF/自签 catalog，已在产生包和 marker 前拒绝；
-不要运行旧 ZIP或手工写 A/internal/FRL。三款 profile 的受支持策略始终保持 B；
+不要运行旧 ZIP或手工写 A/internal/FRL。当前 12 条 GPU 原子 profile 的受支持策略始终保持 B；
 真实 VM3 的 legacy A 通过 production migration 回到原始 GRID 538.33/native
 身份，设备管理器与 GPU-Z 的型号由 name/profile overlay 提供。
 
@@ -91,7 +101,7 @@ host `nvidia-smi vgpu` 的 `vGPU Name` 也可能继续显示 GT 1030/type 标签
 
 授权页同样不是身份或 license 的单一判据。legacy 严格 GTX1050 的历史记录是控制
 面板授权页消失、host `Unlicensed`、per-mdev `FRL N/A`；它不等于激活，也不是当前
-生产合同。当前三款 profile 都按 B/off 原生 vGPU 合同验收 DLS/token 和
+生产合同。当前 12 条 GPU 原子 profile 都按 B/off 原生 vGPU 合同验收 DLS/token 和
 `Licensed`。
 
 Guest 验证：
@@ -146,13 +156,18 @@ Get-CimInstance Win32_Processor | Select-Object Name, Family, Model, Stepping
 Get-CimInstance Win32_ComputerSystem | Select-Object HypervisorPresent, Manufacturer, Model
 
 # AIDA64 / CPU-Z 里肉眼确认:
-#   - Brand string 显示 i5-6500
-#   - CPUID: family 6 model 94 step 3
-#   - Mainboard: Gigabyte B85M-...（或随机到的那一套）
-#   - SPD: Kingston KVR16N11S8/8 1600 MT/s
+#   - Brand string/核心数/缓存与 vm.conf 的 CPU_PROFILE 一致
+#   - Mainboard 是白名单中的 H81（legacy VM 才可能是 H97/B150/B360）
+#   - SMBIOS Type 17 与 SPD 的逐槽容量、Rank、料号、品牌和序列一致
+#   - active 内存可能是 Kingston、Samsung、Micron 或 SK hynix，不应强求 KVR
 
 # 对 DNF TP 的最终测试方式:
 #   - 先装游戏
 #   - 启动 dnf.exe, 观察是否正常进登录界面
 #   - 登录后能进角色选择 = TP 过检
 ```
+
+安全底线不因“检测优化”而放宽：不修改 BCD，不开启 `testsigning` 或
+`nointegritychecks`，不安装测试签名/自签名内核驱动，也不把 V-11 的驱动方案复制
+到 G-11。目录与 SPD/SMBIOS 一致性只能减少矛盾，不能把 QEMU q35、mdev backing
+或 timing 行为宣称成完整物理机等价物。

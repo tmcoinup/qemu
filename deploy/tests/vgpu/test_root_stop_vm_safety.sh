@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-STOP_VM="$REPO_ROOT/deploy/stop-vm.sh"
+STOP_VM="$REPO_ROOT/deploy/scripts/stop-vm.sh"
 TMP_DIR="$(mktemp -d)"
 VM_ID=$((980000000 + $$ % 10000000))
 
@@ -59,16 +59,16 @@ grep -Fq "no qemu-system for vm${VM_ID}" "$TMP_DIR/cleanup.out" \
 
 # New instance bundles use generic runtime names inside the VM directory.
 CANONICAL_ID=$((VM_ID + 1))
-mkdir -p "$TMP_DIR/vm${CANONICAL_ID}/run" \
-    "$TMP_DIR/vm${CANONICAL_ID}/tpm/state"
+mkdir -p "$TMP_DIR/${CANONICAL_ID}/run" \
+    "$TMP_DIR/${CANONICAL_ID}/tpm/state"
 printf '%s\n' '00000000-0000-0000-0000-999999999998' \
-    >"$TMP_DIR/vm${CANONICAL_ID}/run/mdev.uuid"
-touch "$TMP_DIR/vm${CANONICAL_ID}/run/qemu.pid" \
-    "$TMP_DIR/vm${CANONICAL_ID}/run/qmp.sock" \
-    "$TMP_DIR/vm${CANONICAL_ID}/run/monitor.sock"
-printf '%s\n' 999999999 >"$TMP_DIR/vm${CANONICAL_ID}/run/swtpm.pid"
-touch "$TMP_DIR/vm${CANONICAL_ID}/tpm/state/tpm2-00.permall"
-python3 - "$TMP_DIR/vm${CANONICAL_ID}/run/swtpm.sock" <<'PY'
+    >"$TMP_DIR/${CANONICAL_ID}/run/mdev.uuid"
+touch "$TMP_DIR/${CANONICAL_ID}/run/qemu.pid" \
+    "$TMP_DIR/${CANONICAL_ID}/run/qmp.sock" \
+    "$TMP_DIR/${CANONICAL_ID}/run/monitor.sock"
+printf '%s\n' 999999999 >"$TMP_DIR/${CANONICAL_ID}/run/swtpm.pid"
+touch "$TMP_DIR/${CANONICAL_ID}/tpm/state/tpm2-00.permall"
+python3 - "$TMP_DIR/${CANONICAL_ID}/run/swtpm.sock" <<'PY'
 import socket
 import sys
 
@@ -77,9 +77,12 @@ sock.bind(sys.argv[1])
 sock.close()
 PY
 VM_ROOT="$TMP_DIR" "$STOP_VM" "$CANONICAL_ID" >"$TMP_DIR/canonical-cleanup.out"
-[[ -z "$(find "$TMP_DIR/vm${CANONICAL_ID}/run" -mindepth 1 -print -quit)" ]] \
-    || fail "canonical per-VM runtime files were not removed"
-[[ -e "$TMP_DIR/vm${CANONICAL_ID}/tpm/state/tpm2-00.permall" ]] \
+[[ -z "$(find "$TMP_DIR/${CANONICAL_ID}/run" -mindepth 1 \
+    ! -name '*.lock' -print -quit)" ]] \
+    || fail "canonical per-VM runtime state was not removed"
+[[ -e "$TMP_DIR/${CANONICAL_ID}/run/tpm.lock" ]] \
+    || fail "per-VM TPM lock was not kept with the VM bundle"
+[[ -e "$TMP_DIR/${CANONICAL_ID}/tpm/state/tpm2-00.permall" ]] \
     || fail "persistent TPM state was removed during stale runtime cleanup"
 
 # Guard the central invariant statically: cleanup must never enumerate every

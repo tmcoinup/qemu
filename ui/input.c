@@ -44,6 +44,23 @@ static QEMUTimer *kbd_timer;
 static uint32_t kbd_default_delay_ms = 10;
 static uint32_t queue_count;
 static uint32_t queue_limit = 1024;
+static bool paused_release_sync_pending;
+
+static bool qemu_input_is_paused_release(const InputEvent *evt)
+{
+    if (!runstate_check(RUN_STATE_PAUSED)) {
+        return false;
+    }
+
+    switch (evt->type) {
+    case INPUT_EVENT_KIND_KEY:
+        return !evt->u.key.data->down;
+    case INPUT_EVENT_KIND_BTN:
+        return !evt->u.btn.data->down;
+    default:
+        return false;
+    }
+}
 
 QemuInputHandlerState *qemu_input_handler_register(DeviceState *dev,
                                             const QemuInputHandler *handler)
@@ -326,6 +343,8 @@ void qemu_input_event_send_impl(QemuConsole *src, InputEvent *evt)
 
 void qemu_input_event_send(QemuConsole *src, InputEvent *evt)
 {
+    bool paused_release;
+
     /* Expect all parts of QEMU to send events with QCodes exclusively.
      * Key numbers are only supported as end-user input via QMP */
     assert(!(evt->type == INPUT_EVENT_KIND_KEY &&
@@ -345,11 +364,16 @@ void qemu_input_event_send(QemuConsole *src, InputEvent *evt)
         evt->u.key.data->key->u.qcode.data = Q_KEY_CODE_PRINT;
     }
 
-    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
+    paused_release = qemu_input_is_paused_release(evt);
+    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED) &&
+        !paused_release) {
         return;
     }
 
     replay_input_event(src, evt);
+    if (paused_release) {
+        paused_release_sync_pending = true;
+    }
 }
 
 void qemu_input_event_sync_impl(void)
@@ -371,10 +395,12 @@ void qemu_input_event_sync_impl(void)
 
 void qemu_input_event_sync(void)
 {
-    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED)) {
+    if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED) &&
+        !paused_release_sync_pending) {
         return;
     }
 
+    paused_release_sync_pending = false;
     replay_input_sync_event();
 }
 
@@ -471,6 +497,28 @@ bool qemu_input_is_absolute(QemuConsole *con)
     s = qemu_input_find_handler(INPUT_EVENT_MASK_REL | INPUT_EVENT_MASK_ABS,
                                 con);
     return (s != NULL) && (s->handler->mask & INPUT_EVENT_MASK_ABS);
+}
+
+/*
+ * qemu_input_is_absolute() reports the handler currently selected for input.
+ * Firmware can leave PS/2 selected until the USB tablet is first polled, even
+ * though the tablet is already registered.  Display frontends need the
+ * separate capability query below so that ordering does not capture the host
+ * pointer or switch SDL into relative mode during boot.
+ */
+bool qemu_input_has_absolute(QemuConsole *con)
+{
+    QemuInputHandlerState *s;
+
+    QTAILQ_FOREACH(s, &handlers, node) {
+        if (!(s->handler->mask & INPUT_EVENT_MASK_ABS)) {
+            continue;
+        }
+        if (s->con == NULL || s->con == con) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int qemu_input_scale_axis(int value,

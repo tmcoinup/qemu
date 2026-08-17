@@ -53,7 +53,7 @@ done
 
 [[ -n "$SHMEM_PATH" ]] || SHMEM_PATH="/dev/shm/nv-shmem-vm${VM_ID}"
 [[ -e "$SHMEM_PATH" ]] || {
-    echo "[connect] $SHMEM_PATH missing — start the VM (./start-vm.sh $VM_ID) first"
+    echo "[connect] $SHMEM_PATH missing — start the VM (./deploy/scripts/start-vm.sh $VM_ID) first"
     exit 1
 }
 

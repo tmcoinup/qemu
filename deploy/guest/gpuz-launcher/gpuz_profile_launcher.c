@@ -9,10 +9,10 @@
 #include <stdio.h>
 #include <wchar.h>
 
-#define LAUNCHER_MARKER "QEMU_GPUZ_SINGLE_EXE_V1"
 #define RUN_DIRECTORY_ATTEMPTS 32u
 #define SHA256_BYTES 32u
 #define CHILD_ENVIRONMENT_CHARS 16384u
+#define FINAL_PATH_MAX_CHARS 32768u
 
 typedef struct PayloadEntry {
     WORD resource_id;
@@ -101,6 +101,100 @@ static BOOL get_fixed_local_path(const wchar_t *path)
     CloseHandle(handle);
     return ok;
 }
+
+#if EXTERNAL_GPUZ_ENABLED
+/*
+ * Resolve the name and volume from an already-open handle.  This closes the
+ * path-check/open race for the external sibling: a writable parent directory
+ * can be renamed or replaced after a pathname check, but it cannot change
+ * which object this handle names.  The caller owns the returned HeapAlloc
+ * buffer.
+ */
+static BOOL get_final_fixed_path(HANDLE handle, wchar_t **result)
+{
+    wchar_t *path = NULL;
+    wchar_t *volume = NULL;
+    DWORD required;
+    DWORD capacity;
+    DWORD length;
+    BOOL ok = FALSE;
+
+    *result = NULL;
+    required = GetFinalPathNameByHandleW(
+        handle, NULL, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (required == 0 || required > FINAL_PATH_MAX_CHARS) {
+        goto done;
+    }
+    capacity = required + 1u;
+    path = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
+                                capacity * sizeof(wchar_t));
+    volume = (wchar_t *)HeapAlloc(GetProcessHeap(), 0,
+                                  capacity * sizeof(wchar_t));
+    if (!path || !volume) {
+        goto done;
+    }
+    length = GetFinalPathNameByHandleW(
+        handle, path, capacity,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (length == 0 || length >= capacity ||
+        !GetVolumePathNameW(path, volume, capacity) ||
+        GetDriveTypeW(volume) != DRIVE_FIXED) {
+        goto done;
+    }
+    *result = path;
+    path = NULL;
+    ok = TRUE;
+
+done:
+    if (volume) {
+        SecureZeroMemory(volume, capacity * sizeof(wchar_t));
+        HeapFree(GetProcessHeap(), 0, volume);
+    }
+    if (path) {
+        SecureZeroMemory(path, capacity * sizeof(wchar_t));
+        HeapFree(GetProcessHeap(), 0, path);
+    }
+    return ok;
+}
+
+static BOOL handles_share_final_directory(HANDLE module, HANDLE sibling,
+                                          const wchar_t *sibling_name)
+{
+    wchar_t *module_path = NULL;
+    wchar_t *sibling_path = NULL;
+    wchar_t *module_separator;
+    wchar_t *sibling_separator;
+    BOOL ok = FALSE;
+
+    if (!get_final_fixed_path(module, &module_path) ||
+        !get_final_fixed_path(sibling, &sibling_path)) {
+        goto done;
+    }
+    module_separator = wcsrchr(module_path, L'\\');
+    sibling_separator = wcsrchr(sibling_path, L'\\');
+    if (!module_separator || module_separator == module_path ||
+        !sibling_separator || sibling_separator == sibling_path ||
+        _wcsicmp(sibling_separator + 1, sibling_name) != 0) {
+        goto done;
+    }
+    *module_separator = L'\0';
+    *sibling_separator = L'\0';
+    ok = _wcsicmp(module_path, sibling_path) == 0;
+
+done:
+    if (module_path) {
+        SecureZeroMemory(module_path,
+                         (wcslen(module_path) + 1u) * sizeof(wchar_t));
+        HeapFree(GetProcessHeap(), 0, module_path);
+    }
+    if (sibling_path) {
+        SecureZeroMemory(sibling_path,
+                         (wcslen(sibling_path) + 1u) * sizeof(wchar_t));
+        HeapFree(GetProcessHeap(), 0, sibling_path);
+    }
+    return ok;
+}
+#endif
 
 static BOOL make_security_attributes(SECURITY_ATTRIBUTES *attributes,
                                      PSECURITY_DESCRIPTOR *descriptor)
@@ -577,6 +671,162 @@ static BOOL extract_payload(const wchar_t *bundle_root, HANDLE *locks)
     return TRUE;
 }
 
+#if EXTERNAL_GPUZ_ENABLED
+/*
+ * Import the exact same-directory GPU-Z image through one pinned source
+ * handle.  FILE_SHARE_WRITE/DELETE are deliberately omitted, so no writer can
+ * replace or modify the source between validation and copying.  PowerShell
+ * never receives or loads the user-writable source path; it only sees this
+ * protected, re-hashed snapshot.
+ */
+static BOOL import_external_gpuz(const wchar_t *bundle_root,
+                                 HANDLE *result_lock,
+                                 BOOL *source_missing)
+{
+    wchar_t module_path[MAX_PATH];
+    wchar_t source_path[MAX_PATH];
+    wchar_t destination_path[MAX_PATH];
+    wchar_t *separator;
+    SECURITY_ATTRIBUTES attributes;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    HANDLE module = INVALID_HANDLE_VALUE;
+    HANDLE source = INVALID_HANDLE_VALUE;
+    HANDLE output = INVALID_HANDLE_VALUE;
+    HANDLE locked = INVALID_HANDLE_VALUE;
+    BY_HANDLE_FILE_INFORMATION information;
+    BYTE expected_digest[SHA256_BYTES];
+    BYTE actual_digest[SHA256_BYTES];
+    BYTE buffer[65536];
+    DWORD module_chars;
+    DWORD source_attributes;
+    DWORD read_bytes;
+    DWORD copied = 0;
+    BOOL ok = FALSE;
+
+    *result_lock = INVALID_HANDLE_VALUE;
+    *source_missing = FALSE;
+    memcpy(expected_digest, EXTERNAL_GPUZ_SHA256, sizeof(expected_digest));
+    module_chars = GetModuleFileNameW(NULL, module_path, MAX_PATH);
+    if (module_chars == 0 || module_chars >= MAX_PATH ||
+        !get_fixed_local_path(module_path)) {
+        goto done;
+    }
+    module = CreateFileW(module_path, FILE_READ_ATTRIBUTES,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE |
+                         FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                         FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (module == INVALID_HANDLE_VALUE) {
+        goto done;
+    }
+    separator = wcsrchr(module_path, L'\\');
+    if (!separator || separator == module_path) {
+        goto done;
+    }
+    *separator = L'\0';
+    if (!join_path(source_path, MAX_PATH, module_path, EXTERNAL_GPUZ_NAME) ||
+        !join_path(destination_path, MAX_PATH, bundle_root,
+                   EXTERNAL_GPUZ_NAME)) {
+        goto done;
+    }
+    source_attributes = GetFileAttributesW(source_path);
+    if (source_attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD source_error = GetLastError();
+        if (source_error == ERROR_FILE_NOT_FOUND ||
+            source_error == ERROR_PATH_NOT_FOUND) {
+            *source_missing = TRUE;
+        }
+        goto done;
+    }
+    if (!get_fixed_local_path(source_path)) {
+        goto done;
+    }
+    source = CreateFileW(source_path, GENERIC_READ | READ_CONTROL,
+                         FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_READONLY |
+                         FILE_FLAG_OPEN_REPARSE_POINT |
+                         FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (source == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(source, &information) ||
+        (information.dwFileAttributes &
+            (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        information.nFileSizeHigh != 0 ||
+        information.nFileSizeLow != EXTERNAL_GPUZ_BYTES ||
+        !handles_share_final_directory(module, source,
+                                       EXTERNAL_GPUZ_NAME) ||
+        !sha256_handle(source, actual_digest) ||
+        !digest_equal(actual_digest, expected_digest) ||
+        !make_security_attributes(&attributes, &descriptor)) {
+        goto done;
+    }
+    output = CreateFileW(destination_path, GENERIC_WRITE, 0, &attributes,
+                         CREATE_NEW,
+                         FILE_ATTRIBUTE_READONLY | FILE_FLAG_WRITE_THROUGH,
+                         NULL);
+    if (output == INVALID_HANDLE_VALUE) {
+        goto done;
+    }
+    for (;;) {
+        if (!ReadFile(source, buffer, sizeof(buffer), &read_bytes, NULL)) {
+            goto done;
+        }
+        if (read_bytes == 0) {
+            break;
+        }
+        if (copied > EXTERNAL_GPUZ_BYTES - read_bytes ||
+            !write_all(output, buffer, read_bytes)) {
+            goto done;
+        }
+        copied += read_bytes;
+    }
+    if (copied != EXTERNAL_GPUZ_BYTES || !FlushFileBuffers(output)) {
+        goto done;
+    }
+    CloseHandle(output);
+    output = INVALID_HANDLE_VALUE;
+
+    locked = CreateFileW(destination_path, GENERIC_READ | READ_CONTROL,
+                         FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_READONLY |
+                         FILE_FLAG_OPEN_REPARSE_POINT |
+                         FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    if (locked == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(locked, &information) ||
+        (information.dwFileAttributes &
+            (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        information.nFileSizeHigh != 0 ||
+        information.nFileSizeLow != EXTERNAL_GPUZ_BYTES ||
+        !verify_protected_handle(locked) ||
+        !sha256_handle(locked, actual_digest) ||
+        !digest_equal(actual_digest, expected_digest)) {
+        goto done;
+    }
+    *result_lock = locked;
+    locked = INVALID_HANDLE_VALUE;
+    ok = TRUE;
+
+done:
+    SecureZeroMemory(buffer, sizeof(buffer));
+    SecureZeroMemory(actual_digest, sizeof(actual_digest));
+    SecureZeroMemory(expected_digest, sizeof(expected_digest));
+    if (descriptor) {
+        LocalFree(descriptor);
+    }
+    if (locked != INVALID_HANDLE_VALUE) {
+        CloseHandle(locked);
+    }
+    if (output != INVALID_HANDLE_VALUE) {
+        CloseHandle(output);
+    }
+    if (source != INVALID_HANDLE_VALUE) {
+        CloseHandle(source);
+    }
+    if (module != INVALID_HANDLE_VALUE) {
+        CloseHandle(module);
+    }
+    return ok;
+}
+#endif
+
 static void close_payload_locks(HANDLE *locks)
 {
     size_t index;
@@ -806,7 +1056,7 @@ static void close_child_standard_handles(HANDLE handles[3])
 static BOOL run_profile(const wchar_t *program_data,
                         const wchar_t *bundle_root,
                         const wchar_t *runtime_temp,
-                        BOOL verify_only, BOOL no_launch,
+                        BOOL verify_only, BOOL no_launch, BOOL install_gpuz,
                         DWORD *exit_code, BOOL *process_created,
                         BOOL *process_completed)
 {
@@ -849,10 +1099,11 @@ static BOOL run_profile(const wchar_t *program_data,
     result = _snwprintf(
         command_line, sizeof(command_line) / sizeof(command_line[0]),
         L"\"%ls\" -NoLogo -NoProfile -NonInteractive "
-        L"-ExecutionPolicy Bypass -File \"%ls\"%ls%ls",
+        L"-ExecutionPolicy Bypass -File \"%ls\"%ls%ls%ls",
         powershell, script,
         verify_only ? L" -VerifyOnly" : L"",
-        no_launch ? L" -NoLaunch" : L"");
+        no_launch ? L" -NoLaunch" : L"",
+        install_gpuz ? L" -InstallGpuZ" : L"");
     if (result < 0 ||
         (size_t)result >= sizeof(command_line) / sizeof(command_line[0])) {
         SecureZeroMemory(environment, sizeof(environment));
@@ -946,13 +1197,15 @@ static BOOL run_profile(const wchar_t *program_data,
 }
 
 static int parse_arguments(int argc, wchar_t **argv,
-                           BOOL *verify_only, BOOL *no_launch)
+                           BOOL *verify_only, BOOL *no_launch,
+                           BOOL *with_gpuz)
 {
     int index;
     int valid = 1;
 
     *verify_only = FALSE;
     *no_launch = FALSE;
+    *with_gpuz = FALSE;
     for (index = 1; index < argc; ++index) {
         if (_wcsicmp(argv[index], L"/verify-only") == 0 ||
             _wcsicmp(argv[index], L"--verify-only") == 0) {
@@ -960,6 +1213,9 @@ static int parse_arguments(int argc, wchar_t **argv,
         } else if (_wcsicmp(argv[index], L"/no-launch") == 0 ||
                    _wcsicmp(argv[index], L"--no-launch") == 0) {
             *no_launch = TRUE;
+        } else if (_wcsicmp(argv[index], L"/with-gpuz") == 0 ||
+                   _wcsicmp(argv[index], L"--with-gpuz") == 0) {
+            *with_gpuz = TRUE;
         } else {
             valid = 0;
         }
@@ -980,9 +1236,15 @@ int wmain(int argc, wchar_t **argv)
     HANDLE run_handle = INVALID_HANDLE_VALUE;
     HANDLE bundle_handle = INVALID_HANDLE_VALUE;
     HANDLE runtime_handle = INVALID_HANDLE_VALUE;
+#if EXTERNAL_GPUZ_ENABLED
+    HANDLE external_gpuz_lock = INVALID_HANDLE_VALUE;
+    BOOL external_gpuz_missing = FALSE;
+#endif
     DWORD child_exit = ERROR_GEN_FAILURE;
     BOOL verify_only;
     BOOL no_launch;
+    BOOL with_gpuz;
+    BOOL install_gpuz = FALSE;
     BOOL process_created = FALSE;
     BOOL process_completed = FALSE;
     BOOL profile_observed = FALSE;
@@ -992,15 +1254,29 @@ int wmain(int argc, wchar_t **argv)
     size_t index;
 
     (void)LAUNCHER_MARKER;
-    SetConsoleTitleW(L"QEMU GPU-Z profile installer");
+    SetConsoleTitleW(L"QEMU vGPU identity installer");
     for (index = 0; index < PAYLOAD_COUNT; ++index) {
         locks[index] = INVALID_HANDLE_VALUE;
     }
-    if (!parse_arguments(argc, argv, &verify_only, &no_launch)) {
-        show_message(no_launch, MB_ICONERROR, L"GPU-Z profile",
-                     L"Only /verify-only and /no-launch are accepted.");
+    if (!parse_arguments(argc, argv, &verify_only, &no_launch,
+                         &with_gpuz) || (verify_only && with_gpuz)) {
+        show_message(no_launch, MB_ICONERROR, L"vGPU identity",
+                     L"Accepted options: /verify-only, /no-launch, and /with-gpuz. /verify-only cannot be combined with /with-gpuz.");
         return 2;
     }
+#if EXTERNAL_GPUZ_ENABLED
+    install_gpuz = with_gpuz;
+    if (!EXTERNAL_GPUZ_OPTIONAL && !verify_only) {
+        /* Preserve the historical schema-3 launcher behavior. */
+        install_gpuz = TRUE;
+    }
+#else
+    if (with_gpuz) {
+        show_message(no_launch, MB_ICONERROR, L"vGPU identity",
+                     L"This legacy embedded bundle does not accept /with-gpuz.");
+        return 2;
+    }
+#endif
     if (!is_administrator()) {
         show_message(no_launch, MB_ICONERROR, L"GPU-Z profile",
                      L"Administrator elevation is required.");
@@ -1049,9 +1325,30 @@ int wmain(int argc, wchar_t **argv)
                      L"An embedded asset failed its size or SHA-256 check.");
         goto done;
     }
+#if EXTERNAL_GPUZ_ENABLED
+    if (install_gpuz) {
+        wprintf(L"[GPU-Z profile] Importing the hash-pinned same-directory GPU-Z.exe...\n");
+        if (!import_external_gpuz(bundle_root, &external_gpuz_lock,
+                                  &external_gpuz_missing)) {
+            if (external_gpuz_missing) {
+                if (EXTERNAL_GPUZ_OPTIONAL) {
+                    show_message(no_launch, MB_ICONERROR, L"vGPU identity",
+                                 L"/with-gpuz requires the audited official GPU-Z.exe in the same directory as VgpuPortable.exe.");
+                    goto done;
+                }
+                wprintf(L"[GPU-Z profile] No sibling GPU-Z.exe; only an already installed protected exact image can be reused.\n");
+            } else {
+                show_message(no_launch, MB_ICONERROR, L"GPU-Z profile",
+                             L"The same-directory GPU-Z.exe is busy for writing, reparse-backed, non-local, or does not match the audited TechPowerUp 2.70 image.");
+                goto done;
+            }
+        }
+    }
+#endif
     wprintf(L"[GPU-Z profile] Running the signed-driver, BCD and topology gates...\n");
     profile_observed = run_profile(
         program_data, bundle_root, runtime_temp, verify_only, no_launch,
+        install_gpuz,
         &child_exit, &process_created, &process_completed);
     if (!profile_observed) {
         if (!process_created) {
@@ -1069,6 +1366,12 @@ int wmain(int argc, wchar_t **argv)
     return_code = (int)child_exit;
 
 done:
+#if EXTERNAL_GPUZ_ENABLED
+    if (external_gpuz_lock != INVALID_HANDLE_VALUE) {
+        CloseHandle(external_gpuz_lock);
+        external_gpuz_lock = INVALID_HANDLE_VALUE;
+    }
+#endif
     close_payload_locks(locks);
     if (bundle_handle != INVALID_HANDLE_VALUE) {
         CloseHandle(bundle_handle);

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Default to the reusable, VM-unbound offline guest EXE.  A positional VM_ID
-# remains available only for the legacy per-VM migration/compatibility flows.
+# Default to the reusable, VM-unbound profile installer.  GPU-Z itself remains
+# an external, hash-pinned sibling.  A positional VM_ID remains available only
+# for the legacy per-VM migration/compatibility flows.
 set -euo pipefail
 umask 077
 export LC_ALL=C
@@ -13,14 +14,22 @@ source "$here/lib/vm-storage.sh"
 usage() {
     cat >&2 <<'EOF'
 usage: ./deploy/package-vgpu-one-click.sh
+       ./deploy/package-vgpu-one-click.sh --with-license-token
+       ./deploy/package-vgpu-one-click.sh --token-file FILE.tok
+       ./deploy/package-vgpu-one-click.sh --with-license-token --replace-licensed
        ./deploy/package-vgpu-one-click.sh --portable [portable options]
        ./deploy/package-vgpu-one-click.sh VM_ID   # legacy only
 
 No argument (recommended):
-  Build one offline VgpuPortable.exe with every audited B/native profile.
-  It contains no VM ID/UUID and can be placed in a Windows base image before
-  cloning.  --portable forwards its remaining options to
-  package-vgpu-portable.sh.
+  Build one VgpuPortable.exe with every audited B/native profile and no
+  VM ID/UUID.  It does not embed or require GPU-Z or a DLS token.
+  --with-license-token builds a separate private VgpuPortable.exe using
+  $STAGE_DIR/client_configuration_token.tok.  --token-file selects another
+  repository-external token.  The private EXE works for every B/native GPU
+  profile and replaces the legacy model-specific finish step for new VMs.
+  When the DLS token changes, add --replace-licensed.  The old authenticated
+  private EXE/bundle is retained under a mode-0700 repository-external backup.
+  --portable forwards its remaining options to package-vgpu-portable.sh.
 
 VM_ID (legacy compatibility):
 The VM config must contain exactly one simple literal:
@@ -42,12 +51,16 @@ if (($# == 1)) && [[ "$1" == -h || "$1" == --help ]]; then
     exit 0
 fi
 if (($# == 0)); then
-    echo "[vgpu-one-click] building the offline VM-unbound portable guest EXE"
+    echo "[vgpu-one-click] building the VM-unbound portable profile installer (GPU-Z is an external sibling)"
     exec "$here/package-vgpu-portable.sh"
 fi
 if [[ "$1" == --portable ]]; then
     shift
-    echo "[vgpu-one-click] building the offline VM-unbound portable guest EXE"
+    echo "[vgpu-one-click] building the VM-unbound portable profile installer (GPU-Z is an external sibling)"
+    exec "$here/package-vgpu-portable.sh" "$@"
+fi
+if [[ "$1" == --with-license-token || "$1" == --token-file ]]; then
+    echo "[vgpu-one-click] building the private all-profile identity/license finalizer"
     exec "$here/package-vgpu-portable.sh" "$@"
 fi
 (($# == 1)) || {
@@ -64,6 +77,8 @@ for dependency in awk sha256sum python3; do
 done
 
 vm_storage_init
+vm_storage_require_namespace_ready "$VM_ID" \
+    || die "VM storage still uses an old/conflicting layout"
 CONF=$(vm_storage_config_path "$VM_ID") \
     || die "could not select a unique vm${VM_ID} configuration"
 [[ -f "$CONF" && ! -L "$CONF" && -r "$CONF" ]] \

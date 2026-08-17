@@ -68,6 +68,15 @@ grep -Fq 'ConfigManagerErrorCode' "$GUEST_SCRIPT" \
     || fail "guest script does not verify Device Manager health"
 grep -Fq 'NVDisplay.ContainerLocalSystem' "$GUEST_SCRIPT" \
     || fail "guest script does not manage the NVIDIA licensing service"
+grep -Fq 'Wait-LicenseServiceStatus' "$GUEST_SCRIPT" \
+    || fail "guest script does not bound NVIDIA service state transitions"
+grep -Fq "[ValidateSet('start', 'stop')]" "$GUEST_SCRIPT" \
+    || fail "guest script does not use explicit bounded service controls"
+grep -Fq "System32\\sc.exe" "$GUEST_SCRIPT" \
+    || fail "guest script does not use the Windows service controller"
+if grep -Fq 'Restart-Service -Name $serviceName' "$GUEST_SCRIPT"; then
+    fail "guest script still uses the potentially unbounded Restart-Service path"
+fi
 grep -Fq 'Assert-LocalRtcContract' "$GUEST_SCRIPT" \
     || fail "guest script does not enforce the host-owned local RTC contract"
 grep -Fq 'RealTimeIsUniversal must be absent or DWORD 0' "$GUEST_SCRIPT" \

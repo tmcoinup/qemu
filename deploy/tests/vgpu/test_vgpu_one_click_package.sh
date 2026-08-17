@@ -33,7 +33,7 @@ rg -Fq 'VGPU_PACKAGE_DISPATCH_CONFIG_SHA256' "$gpuz_packager" ||
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 fixture="$tmp/fixture"
-mkdir -p "$fixture/deploy/lib" "$fixture/image/vms/G-11/vm456"
+mkdir -p "$fixture/deploy/lib" "$fixture/image/vms/456"
 install -m 0700 "$dispatcher" "$fixture/deploy/package-vgpu-one-click.sh"
 install -m 0600 "$storage_lib" "$fixture/deploy/lib/vm-storage.sh"
 
@@ -50,10 +50,10 @@ make_stub() {
 make_stub "$fixture/deploy/package-vgpu-production-migration.sh" production
 make_stub "$fixture/deploy/package-gpuz-profile.sh" gpuz
 
-conf="$fixture/image/vms/G-11/vm456/vm.conf"
+conf="$fixture/image/vms/456/vm.conf"
 result="$tmp/result"
 run_dispatcher() {
-    env -u VM_ROOT -u VM_INSTANCES_DIR -u VM_INSTANCE_DIR -u VM_INSTANCE_ID \
+    env -u VM_ROOT -u VMS_DIR -u VM_INSTANCES_DIR -u VM_INSTANCE_DIR -u VM_INSTANCE_ID \
         -u VM_SHARED_DIR -u VM_CONFIG_DIR -u VM_DISK_DIR -u VM_BASE_DIR \
         -u VM_NVRAM_DIR -u VM_CONTROL_DIR -u VM_RUN_DIR -u VM_LOG_DIR \
         -u VM_ASSET_DIR -u VM_STORAGE_COMPAT_FALLBACK \
@@ -75,7 +75,7 @@ expected_sha=$(sha256sum "$conf" | awk '{print toupper($1)}')
 [[ "$(<"$result")" == "gpuz|456|B|$expected_sha" ]] \
     || fail "B mode dispatch or immutable-config constraint is wrong"
 
-max_conf="$fixture/image/vms/G-11/vm2147483647/vm.conf"
+max_conf="$fixture/image/vms/2147483647/vm.conf"
 mkdir -p "$(dirname "$max_conf")"
 printf 'VM_ID=2147483647\nSPOOF_MODE=B\n' >"$max_conf"
 run_dispatcher 2147483647 >/dev/null

@@ -21,7 +21,8 @@ gnome_super_shortcuts_is_gnome() {
 
 _gnome_super_value_contains_protected_shortcut() {
     case "$1" in
-        *"<Super>"*|*"Super_L"*|*"Super_R"*|*"<Mod4>"*|*"<Meta>"*|*"<Alt>Tab"*|*"<Alt>Above_Tab"*) return 0 ;;
+        *"<Super>"*|*"Super_L"*|*"Super_R"*|*"<Mod4>"*|*"<Meta>"*|\
+        *"<Alt>Tab"*|*"<Alt>Above_Tab"*|*"<Control><Alt>Delete"*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -134,6 +135,7 @@ org.gnome.desktop.wm.keybindings move-to-monitor-up
 org.freedesktop.ibus.general.hotkey triggers
 org.freedesktop.ibus.panel.emoji hotkey
 org.gnome.settings-daemon.plugins.media-keys help
+org.gnome.settings-daemon.plugins.media-keys logout
 org.gnome.settings-daemon.plugins.media-keys magnifier
 org.gnome.settings-daemon.plugins.media-keys magnifier-zoom-in
 org.gnome.settings-daemon.plugins.media-keys magnifier-zoom-out
@@ -204,7 +206,8 @@ gnome_super_shortcuts_restore_stale() {
     local state_file
     for state_file in \
         /tmp/qemu-stream-client-"$(id -u)"-*.gnome-super \
-        /tmp/qemu-sdl-"$(id -u)"-*.gnome-super
+        /tmp/qemu-sdl-"$(id -u)"-*.gnome-super \
+        /tmp/qemu-gtk-"$(id -u)"-*.gnome-super
     do
         [[ -e "$state_file" ]] || continue
         gnome_super_shortcuts_restore_state "$state_file"

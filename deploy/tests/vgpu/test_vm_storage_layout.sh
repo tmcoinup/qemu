@@ -19,7 +19,7 @@ assert_eq() {
 }
 
 reset_storage_env() {
-    unset IMAGE_ROOT ISO_DIR VM_ROOT VM_INSTANCES_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR
+    unset IMAGE_ROOT ISO_DIR VM_ROOT VMS_DIR VM_INSTANCES_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR
     unset VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK
     unset VM_SHARED_DIR VM_CONTROL_DIR
     unset VM_NVRAM_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR
@@ -35,7 +35,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
     # shellcheck source=../../../lib/vm-storage.sh
     source "$STORAGE_LIB"
     vm_storage_init
-    assert_eq "$IMAGE_ROOT/vms/G-11" "$VM_ROOT" "IMAGE_ROOT-derived VM_ROOT"
+    assert_eq "$IMAGE_ROOT/vms" "$VM_ROOT" "IMAGE_ROOT-derived VM_ROOT"
     assert_eq "$VM_ROOT" "$VM_INSTANCES_DIR" "instances directory"
     assert_eq "$VM_ROOT/legacy/configs" "$VM_CONFIG_DIR" "config directory"
     assert_eq "$VM_ROOT/legacy/disks" "$VM_DISK_DIR" "disk directory"
@@ -43,20 +43,22 @@ trap 'rm -rf "$TMP_DIR"' EXIT
     assert_eq "$VM_ROOT/legacy/nvram" "$VM_NVRAM_DIR" "NVRAM directory"
     assert_eq "$VM_ROOT/control" "$VM_RUN_DIR" "control directory"
     assert_eq "$IMAGE_ROOT/iso" "$ISO_DIR" "ISO directory"
-    assert_eq "$VM_INSTANCES_DIR/vm7/vm.conf" \
+    assert_eq "$VM_INSTANCES_DIR/7/vm.conf" \
         "$(vm_storage_config_path 7)" "fresh config path"
-    assert_eq "$VM_INSTANCES_DIR/vm7/disk.qcow2" \
+    assert_eq "$VM_INSTANCES_DIR/7/disk.qcow2" \
         "$(vm_storage_disk_path 7)" "fresh disk path"
-    assert_eq "$VM_INSTANCES_DIR/vm7/nvram.fd" \
+    assert_eq "$VM_INSTANCES_DIR/7/nvram.fd" \
         "$(vm_storage_nvram_path 7)" "fresh NVRAM path"
-    assert_eq "$VM_INSTANCES_DIR/vm7/log/qemu.log" \
+    assert_eq "$VM_INSTANCES_DIR/7/log/qemu.log" \
         "$(vm_storage_log_path 7)" "fresh log path"
-    assert_eq "$VM_INSTANCES_DIR/vm7/run/qemu.pid" \
+    assert_eq "$VM_INSTANCES_DIR/7/run/qemu.pid" \
         "$(vm_storage_run_path 7 pid)" "fresh runtime path"
-    assert_eq "$VM_RUN_DIR/vm7.start.lock" \
-        "$(vm_storage_run_path 7 start.lock)" "global start lock"
-    assert_eq "$VM_RUN_DIR/vm7.disk.lock" \
-        "$(vm_storage_run_path 7 disk.lock)" "global disk lock"
+    assert_eq "$VM_INSTANCES_DIR/7/run/start.lock" \
+        "$(vm_storage_run_path 7 start.lock)" "in-bundle start lock"
+    assert_eq "$VM_INSTANCES_DIR/7/run/disk.lock" \
+        "$(vm_storage_run_path 7 disk.lock)" "in-bundle disk lock"
+    assert_eq "$VM_INSTANCES_DIR/7/run/tpm.lock" \
+        "$(vm_storage_run_path 7 tpm.lock)" "in-bundle TPM lock"
     assert_eq "$VM_BASE_DIR/win10-base.qcow2" \
         "$(vm_storage_base_path)" "fresh base path"
 )
@@ -92,8 +94,8 @@ trap 'rm -rf "$TMP_DIR"' EXIT
     assert_eq "$VM_DISK_DIR/win10-vm1.qcow2" \
         "$(vm_storage_disk_path 1)" "same-file compatibility symlink"
 
-    mkdir -p "$VM_INSTANCES_DIR/vm1"
-    touch "$VM_INSTANCES_DIR/vm1/disk.qcow2"
+    mkdir -p "$VM_INSTANCES_DIR/1"
+    touch "$VM_INSTANCES_DIR/1/disk.qcow2"
     if vm_storage_disk_path 1 >/dev/null 2>"$TMP_DIR/three-way.err"; then
         fail "instance/categorized disk conflict was not rejected"
     fi
@@ -135,7 +137,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
     reset_storage_env
     VM_ROOT="$TMP_DIR/unsafe/vms"
     mkdir -p "$VM_ROOT" "$TMP_DIR/unsafe/outside"
-    ln -s "$TMP_DIR/unsafe/outside" "$VM_ROOT/vm9"
+    ln -s "$TMP_DIR/unsafe/outside" "$VM_ROOT/9"
     source "$STORAGE_LIB"
     vm_storage_init
     if vm_storage_prepare_instance 9 >/dev/null 2>"$TMP_DIR/unsafe.err"; then
@@ -162,13 +164,47 @@ trap 'rm -rf "$TMP_DIR"' EXIT
     fi
     grep -Fq 'refusing a duplicate vm3' "$TMP_DIR/namespace-guard.err" \
         || fail "namespace guard refusal was not clear"
-    [[ ! -e "$IMAGE_ROOT/vms/G-11" ]] \
-        || fail "namespace guard created the new G-11 root"
+    [[ ! -e "$IMAGE_ROOT/vms/3" ]] \
+        || fail "namespace guard created the numeric destination"
 
-    vm_storage_select_instance_dir 3 \
+    vm_storage_select_legacy_instance_dir 3 \
         "$IMAGE_ROOT/vms/instances/vm3"
     vm_storage_require_namespace_ready 3 \
         || fail "explicitly selected old bundle was incorrectly rejected"
+)
+
+(
+    reset_storage_env
+    IMAGE_ROOT="$TMP_DIR/v11-collision"
+    mkdir -p "$IMAGE_ROOT/vms/4"
+    touch "$IMAGE_ROOT/vms/4/profile"
+    source "$STORAGE_LIB"
+    vm_storage_init
+
+    if vm_storage_require_namespace_ready 4 \
+            >"$TMP_DIR/v11-collision.out" \
+            2>"$TMP_DIR/v11-collision.err"; then
+        fail "V-11-marked numeric directory was accepted as G-11"
+    fi
+    grep -Fq 'contains V-11 state' "$TMP_DIR/v11-collision.err" \
+        || fail "V-11 collision refusal was not clear"
+)
+
+(
+    reset_storage_env
+    IMAGE_ROOT="$TMP_DIR/historical-root"
+    mkdir -p "$IMAGE_ROOT/vms/G-11"
+    source "$STORAGE_LIB"
+    vm_storage_init
+
+    if vm_storage_select_root "$IMAGE_ROOT/vms/G-11" \
+            >"$TMP_DIR/historical-root.out" \
+            2>"$TMP_DIR/historical-root.err"; then
+        fail "--vms-dir accepted the obsolete G-11 namespace as a new root"
+    fi
+    grep -Fq 'old G-11 source cannot be selected' \
+        "$TMP_DIR/historical-root.err" \
+        || fail "historical root refusal was not clear"
 )
 
 echo "PASS: per-instance VM storage paths, three-generation fallback, and conflicts"

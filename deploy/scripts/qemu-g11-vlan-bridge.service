@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore G-11 VLAN-aware br0 topology
+Wants=network-online.target
+After=NetworkManager-wait-online.service network-online.target
+ConditionPathExists=/etc/qemu/g11-vlan.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/qemu-g11-vlan-bridge ensure
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

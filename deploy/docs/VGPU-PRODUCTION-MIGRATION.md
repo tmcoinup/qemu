@@ -185,7 +185,7 @@ commit 脚本写入；旧 vm.conf 和 staged receipt 均保存到 instance backu
 ### 4. 正常启动
 
 ```bash
-./deploy/start-vm.sh 3
+./deploy/scripts/start-vm.sh 3
 ```
 
 旧自签 INF 也可能包含 `DEV_1E30`，所以本流程不依赖 Windows driver rank。续跑任务

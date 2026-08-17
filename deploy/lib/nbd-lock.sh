@@ -69,7 +69,7 @@ nbd_guard_disk() {
     fi
     if [[ -n "$holders" ]]; then
         echo "ERROR: 磁盘 $disk 正被进程持有: $holders" >&2
-        echo "       拒绝挂载（双挂 qcow2 会损坏）。请先 stop-vm.sh 停掉对应 VM 再试。" >&2
+        echo "       拒绝挂载（双挂 qcow2 会损坏）。请先用 ./deploy/scripts/stop-vm.sh 停掉对应 VM 再试。" >&2
         exit 1
     fi
 }

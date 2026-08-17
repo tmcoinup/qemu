@@ -3,8 +3,8 @@
 本分支只有一条 NVIDIA mdev/vGPU VM 链路：
 
 ```bash
-./deploy/start-vm.sh <vm_id> [options]
-./deploy/stop-vm.sh  <vm_id> [--force]
+./deploy/scripts/start-vm.sh <vm_id> [options]
+./deploy/scripts/stop-vm.sh  <vm_id> [--force]
 ```
 
 `off`、`B` 和 `A` 只改变 guest 身份策略，不会更换 host mdev resource、物理 GPU、
@@ -44,7 +44,7 @@ strict-A 不再是交付目标。启动器拒绝新的 CLI/持久化 A；legacy 
 ## off：原生安装与恢复身份
 
 ```bash
-./deploy/start-vm.sh 2 --no-spoof --no-monitor-sync
+./deploy/scripts/start-vm.sh 2 --no-spoof --no-monitor-sync
 ```
 
 off 使用原生 GRID PCI 身份：
@@ -60,7 +60,7 @@ off 使用原生 GRID PCI 身份：
 ## B：通用 name-only 身份
 
 ```bash
-./deploy/start-vm.sh 2 --spoof-name-only
+./deploy/scripts/start-vm.sh 2 --spoof-name-only
 ```
 
 B 保留原生 `10DE:1E30 / SUBSYS_132610DE` 和原版 GRID driver，host 在创建 mdev
@@ -116,9 +116,46 @@ GTX1050 历史推进路径会修改 INF、重建 catalog 并使用 VM 本地自�
 生产迁移回执提交为 B/native，并完成 Code 0、WHCP signer 和 GPU-Z 验收；尚未
 迁移的其他旧 A 实例仍由启动和封装门禁隔离。
 
-未来只有取得与 `DEV_1C81&SUBSYS_11C01028`、目标版本匹配且未经修改的
-NVIDIA/Microsoft 正式生产签名驱动后，才能设计只做验证、不改 INF/不重签的
-strict-A transition。
+未来只有同时取得以下证据，才能设计只做验证、不改 INF/不重签的 strict-A
+transition：驱动精确匹配 `DEV_1C81&SUBSYS_11C01028`、INF/CAT/SYS 保持原字节并
+通过 NVIDIA/Microsoft 生产信任链，以及该安装 Section 已在当前 R535 mdev 上实测
+Code 0、冷重启、显示输出与 vGPU 协议/授权均正常。只有“INF 中存在目标 ID”不够。
+
+### 原版 desktop 537.58 候选（仅隔离实验，不得用于正式 VM）
+
+host 缓存中审计到的原版 NVIDIA desktop 537.58 WHQL 包确实包含 Dell GTX 1050 的
+精确 PnP 项：
+
+```text
+nvddig.inf: PCI\VEN_10DE&DEV_1C81&SUBSYS_11C01028 -> Section029
+DriverVersion: 31.0.15.3758
+Catalog: nv_disp.cat / Microsoft Windows Hardware Compatibility Publisher
+```
+
+但这个 `Section029` 是消费卡安装 Section，不是已验证 GRID 538.33 的 vGPU Section。
+它没有 GRID Section 使用的 `nv_vgpu_sw_licensing_addreg`、`AdapterType=1`、
+`GridLicensedFeatures=7` 和 `GridSupportQuadro=1` 契约。desktop SYS 中出现 VGX/vGPU
+字符串、INF 复制部分 vGPU 文件，也不能证明 NVIDIA RM 会在当前 mdev 上 Code 0。
+NVIDIA 的兼容矩阵保证的是正式 vGPU guest driver release 与 vGPU Manager 的组合，
+不是同一 R535 分支中的任意 desktop driver。
+
+因此 537.58 当前只属于“生产签名和 PnP 匹配通过、mdev 运行兼容性未证明”的实验
+候选。不得直接安装到 VM3/VM9，不得据此解除启动器 strict-A gate。若继续研究，必须
+使用独立磁盘的可丢弃克隆，依次证明原生 `1E30` 基线、外部/内部身份一致切换、Code 0、
+1920x1080、guest/host 状态、生产签名和多次冷启动；任一步失败都只丢弃克隆。
+
+### 为什么 V-11 不能补上这个缺口
+
+V-11 当前物理显示设备是 `1AF4:1050` virtio-gpu，绑定 stock Microsoft-WHQL
+`VioGpuDod`；NVIDIA/AMD 型号和 HardwareID 首项属于用户态投影，PCI config、BDF、
+Service 与 MatchingDeviceId 仍是 virtio。V-11 历史上把主 PCI 改成 NVIDIA 的路径
+同样需要修改/自签 VioGpu 驱动，现已 fail-closed。
+
+G-11 的 VFIO `x-pci-vendor-id/device-id/sub-*` 和 per-mdev internal identity 已经是
+底层实现，缺的不是 QEMU 属性。缺口是一个同时满足目标消费卡 PnP、当前 NVIDIA mdev
+初始化和生产签名的 guest 驱动契约。V-11 的 virtio EDID 通过
+`VIRTIO_GPU_CMD_GET_EDID` 返回；NVIDIA R535 mdev 不提供 VFIO EDID region，所以这条
+live EDID 通道也不能移植给 G-11 的 NVIDIA devnode。
 
 ## License 与 FRL 是两个状态
 
@@ -171,7 +208,7 @@ Remote Display Adapter，其设备数量、动态分辨率与编码 FPS 不能�
 执行：
 
 ```bash
-./deploy/start-vm.sh <vm_id> --no-spoof --no-monitor-sync
+./deploy/scripts/start-vm.sh <vm_id> --no-spoof --no-monitor-sync
 ```
 
 不要自动卸载设备或删除现有 `oemN.inf`，避免让 VM 失去显示。先在原生

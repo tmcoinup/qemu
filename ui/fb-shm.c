@@ -152,6 +152,8 @@ struct FbShmDisplay {
     int32_t cur_roi_x, cur_roi_y;
     uint64_t frame_seq;
     bool surface_present;
+    /* CPU surface 收到真实 damage 后才重新复制完整 ROI。 */
+    bool cpu_surface_dirty;
 
 #ifndef _WIN32
     int memfd;
@@ -1274,6 +1276,11 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
         (req->flags & FB_SHM_HELLO_F_GPU_FRAMES) != 0;
     c->gpu_required =
         (req->flags & FB_SHM_HELLO_F_GPU_REQUIRED) != 0;
+    if (!c->gpu_required) {
+        /* 新 SHM consumer 必须立即取得 bootstrap 画面，不等下一次 damage。 */
+        d->cpu_surface_dirty = true;
+        d->shm_last_frame_ns = 0;
+    }
     gpu_only = c->wants_gpu_frames && c->gpu_required;
     fb_shm_update_effective_rate(d);
 
@@ -1373,6 +1380,9 @@ static void fb_shm_handle_set_roi(FbShmDisplay *d, FbShmClient *c,
     d->cfg_y = (uint32_t)(req->y < 0 ? 0 : req->y);
     d->cfg_w = req->w;
     d->cfg_h = req->h;
+    /* ROI 改变后，静止 Guest 也必须发布新布局。 */
+    d->cpu_surface_dirty = true;
+    d->shm_last_frame_ns = 0;
 
     FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                         .status = FB_SHM_CTL_OK,
@@ -1396,6 +1406,9 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
         d->gpu_target_fps = r;
     } else {
         d->shm_target_fps = r;
+        /* streamer 可能因新帧率重建编码器，立即补一帧静止画面。 */
+        d->cpu_surface_dirty = true;
+        d->shm_last_frame_ns = 0;
     }
     fb_shm_update_effective_rate(d);
 
@@ -1549,6 +1562,10 @@ static void fb_shm_gfx_switch(DisplayChangeListener *dcl,
         return;
     }
     d->surface_present = !surface_is_placeholder(new_surface);
+    if (d->surface_present) {
+        /* 同尺寸 surface 也可能换了 backing，必须重新发布。 */
+        d->cpu_surface_dirty = true;
+    }
     /* Defer real allocation until next refresh tick where we have the
      * source dimensions stable.  We just remember them here. */
     uint32_t sw = surface_width(new_surface);
@@ -1573,13 +1590,17 @@ static void fb_shm_gfx_switch(DisplayChangeListener *dcl,
 static void fb_shm_gfx_update(DisplayChangeListener *dcl,
                               int x, int y, int w, int h)
 {
-    /* No-op: we are refresh-driven and re-grab the whole ROI on tick.
-     * Tracking dirty rects would only matter for partial-frame encoders,
-     * and the consumer reads the damage_* fields directly. */
-    (void)dcl; (void)x; (void)y; (void)w; (void)h;
+    FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+
+    /* consumer 仍读取完整 ROI；多个 dirty rect 折叠成下一 refresh 的一次复制。 */
+    if (w > 0 && h > 0) {
+        d->cpu_surface_dirty = true;
+    }
+    (void)x;
+    (void)y;
 }
 
-static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
+static bool fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
 {
     uint32_t sw = surface_width(surface);
     uint32_t sh = surface_height(surface);
@@ -1590,10 +1611,13 @@ static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
     fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
 
     if (d->shm && !fb_shm_has_shm_consumers(d)) {
-        return;
+        return false;
+    }
+    if (d->shm && !d->cpu_surface_dirty) {
+        return false;
     }
     if (!fb_shm_rate_due(d->shm_target_fps, &d->shm_last_frame_ns, now_ns)) {
-        return;
+        return false;
     }
 
     if (!d->shm || rw != d->cur_w || rh != d->cur_h ||
@@ -1602,7 +1626,7 @@ static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
         Error *err = NULL;
         if (fb_shm_ensure_geometry(d, rw, rh, sw, sh, rx, ry, &err) < 0) {
             warn_report_err(err);
-            return;
+            return false;
         }
     }
 
@@ -1623,6 +1647,7 @@ static void fb_shm_commit_frame(FbShmDisplay *d, DisplaySurface *surface)
                              (int)rw, (int)rh);
 
     fb_shm_publish_frame(d, next_idx, rw, rh);
+    return true;
 }
 
 static void fb_shm_publish_frame(FbShmDisplay *d, uint32_t next_idx,
@@ -2281,7 +2306,10 @@ static void fb_shm_refresh(DisplayChangeListener *dcl)
     if (!surface || surface_is_placeholder(surface)) {
         return;
     }
-    fb_shm_commit_frame(d, surface);
+    if (fb_shm_commit_frame(d, surface)) {
+        /* 只有成功发布才清 dirty；无 consumer/限速/分配失败都保留。 */
+        d->cpu_surface_dirty = false;
+    }
 }
 
 static const DisplayChangeListenerOps fb_shm_ops = {
@@ -2358,6 +2386,8 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     d->shm_target_fps = d->target_fps;
     d->gpu_target_fps = d->target_fps;
     d->blend_cursor = cfg->blend_cursor;
+    /* 首次 refresh 必须创建 mapping 并发布 bootstrap 帧。 */
+    d->cpu_surface_dirty = true;
 
 #ifndef _WIN32
     d->wake_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);

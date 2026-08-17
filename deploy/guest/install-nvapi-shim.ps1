@@ -22,7 +22,7 @@
        a complete, validated pair from an earlier app-local installation.
 
   Rollback:
-    .\install-nvapi-shim.ps1 -ApplicationExe C:\Tools\GPU-Z.exe -Uninstall
+    .\install-nvapi-shim.ps1 -ApplicationExe C:\Tools\App.exe -Uninstall
     .\install-nvapi-shim.ps1 -Uninstall
 #>
 [CmdletBinding()]
@@ -32,6 +32,8 @@ param(
     [string]$X86Path = '',
     [string]$ExpectedX64Sha256 = '',
     [string]$ExpectedX86Sha256 = '',
+    [string[]]$TrustedPriorX64Sha256 = @(),
+    [string[]]$TrustedPriorX86Sha256 = @(),
     [string]$ApplicationExe = '',
     [switch]$Uninstall
 )
@@ -43,13 +45,12 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 $ErrorActionPreference = 'Stop'
 
-# Install both 64-bit (System32\nvapi64.dll for 64-bit apps) AND 32-bit
-# (SysWOW64\nvapi.dll for 32-bit apps like 鲁大师 on x64 Windows). 鲁大师
-# loads SysWOW64\nvapi.dll (confirmed in-guest), so a 64-bit-only install
-# leaves 鲁大师 seeing real RTX 2080 specs.
+# Install both 64-bit (System32\nvapi64.dll for 64-bit callers) and 32-bit
+# (SysWOW64\nvapi.dll for 32-bit callers on x64 Windows).  Both search paths
+# are part of the system contract; no process name is used to select identity.
 $arches = @(
-    @{ label='x64'; machine=0x8664; sys='C:\Windows\System32'; name='nvapi64.dll'; backup='nvapi64_orig.dll'; scratch='C:\nv\nvapi64.shim.dll'; source=$X64Path; expected=$ExpectedX64Sha256 },
-    @{ label='x86'; machine=0x014c; sys='C:\Windows\SysWOW64'; name='nvapi.dll';   backup='nvapi_orig.dll';   scratch='C:\nv\nvapi.shim.dll'; source=$X86Path; expected=$ExpectedX86Sha256 }
+    @{ label='x64'; machine=0x8664; sys='C:\Windows\System32'; name='nvapi64.dll'; backup='nvapi64_orig.dll'; scratch='C:\nv\nvapi64.shim.dll'; source=$X64Path; expected=$ExpectedX64Sha256; trustedPrior=@($TrustedPriorX64Sha256) },
+    @{ label='x86'; machine=0x014c; sys='C:\Windows\SysWOW64'; name='nvapi.dll';   backup='nvapi_orig.dll';   scratch='C:\nv\nvapi.shim.dll'; source=$X86Path; expected=$ExpectedX86Sha256; trustedPrior=@($TrustedPriorX86Sha256) }
 )
 
 function Take-Own($f) {
@@ -151,6 +152,64 @@ function Get-SystemNvapiPath($Arch) {
         $systemDirectory = Join-Path $env:windir 'System32'
     }
     return Join-Path $systemDirectory $Arch.name
+}
+
+function Get-SystemPairState($Arch) {
+    $target = Join-Path $Arch.sys $Arch.name
+    $backup = Join-Path $Arch.sys $Arch.backup
+    $targetExists = Test-Path -LiteralPath $target -PathType Leaf
+    $backupExists = Test-Path -LiteralPath $backup -PathType Leaf
+    if (-not $targetExists) {
+        throw "System NVAPI target is missing: $target"
+    }
+
+    $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+    $expectedHash = ([string]$Arch.expected).ToUpperInvariant()
+    if ($targetHash -ceq $expectedHash) {
+        if (-not $backupExists) {
+            throw "Managed system NVAPI shim has no original backup: $target"
+        }
+        Assert-ShimImage $target $Arch.machine
+        Assert-OriginalNvidiaImage $backup $Arch.machine
+        return 'installed'
+    }
+
+    if (@($Arch.trustedPrior) -ccontains $targetHash) {
+        if (-not $backupExists) {
+            throw "Trusted prior system NVAPI shim has no original backup: $target"
+        }
+        Assert-ShimImage $target $Arch.machine
+        Assert-OriginalNvidiaImage $backup $Arch.machine
+        return 'trusted-prior'
+    }
+
+    # A target that is neither this exact manifest-pinned shim nor an exact
+    # coordinator-authorized prior hash must still be the validly signed
+    # NVIDIA/WHCP original.  This rejects an unknown shim, a partially copied
+    # file and any third-party DLL before either architecture is mutated.
+    Assert-OriginalNvidiaImage $target $Arch.machine
+    if ($backupExists) {
+        Assert-OriginalNvidiaImage $backup $Arch.machine
+    }
+    return 'original'
+}
+
+function Get-PendingFileRenameOperations {
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    return @((Get-ItemProperty $key -Name PendingFileRenameOperations `
+        -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+}
+
+function Set-PendingFileRenameOperations([string[]]$AdditionalPairs) {
+    if ($AdditionalPairs.Count -eq 0) { return }
+    if (($AdditionalPairs.Count % 2) -ne 0) {
+        throw 'Pending file-rename operations must contain source/destination pairs.'
+    }
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    $existing = @(Get-PendingFileRenameOperations)
+    $combined = @($existing | Where-Object { $null -ne $_ }) + $AdditionalPairs
+    Set-ItemProperty $key -Name PendingFileRenameOperations -Value $combined `
+        -Type MultiString -Force
 }
 
 function Assert-ApplicationStopped($ApplicationPath) {
@@ -478,39 +537,91 @@ if (-not [string]::IsNullOrWhiteSpace($ApplicationExe)) {
     return
 }
 
-if ($Uninstall) {
-    Write-Host '[uninstall] restoring original nvapi DLLs' -Fore Cyan
-    foreach ($a in $arches) {
-        $target = Join-Path $a.sys $a.name
-        $backup = Join-Path $a.sys $a.backup
-        if (Test-Path $backup) {
-            Take-Own $target
-            Remove-Item $target -Force -EA 0
-            Move-Item $backup $target -Force
-            Write-Host "  [$($a.label)] reverted $target"
-        }
-    }
-    Write-Host 'Reboot to drop cached handles.'
-    return
-}
-
 foreach ($a in $arches) {
     if ([string]$a.expected -notmatch '\A[0-9A-Fa-f]{64}\z') {
         throw "Expected$($a.label)Sha256 must be supplied as 64 hexadecimal characters."
     }
     $a.expected = ([string]$a.expected).ToUpperInvariant()
+    $trusted = @{}
+    foreach ($hash in @($a.trustedPrior)) {
+        if ([string]$hash -cnotmatch '\A[0-9A-Fa-f]{64}\z') {
+            throw "TrustedPrior$($a.label)Sha256 contains an invalid SHA256 value."
+        }
+        $normalized = ([string]$hash).ToUpperInvariant()
+        if ($normalized -cne $a.expected) {
+            $trusted[$normalized] = $true
+        }
+    }
+    $a.trustedPrior = @($trusted.Keys | Sort-Object)
+}
+
+# Classify both architecture pairs before changing either one.  The system
+# flow accepts only the exact requested shim, a coordinator-authorized prior
+# hash with a signed original backup, or an Authenticode-valid NVIDIA original;
+# an unknown/partial pair stops the whole operation fail-closed.
+$systemStates = @{}
+foreach ($a in $arches) {
+    $systemStates[$a.label] = Get-SystemPairState $a
+}
+
+if ($Uninstall) {
+    Write-Host '[uninstall] restoring original nvapi DLLs' -Fore Cyan
+    $pendingRestore = @()
+    foreach ($a in $arches) {
+        $target = Join-Path $a.sys $a.name
+        $backup = Join-Path $a.sys $a.backup
+        if ($systemStates[$a.label] -eq 'original') {
+            if (Test-Path -LiteralPath $backup -PathType Leaf) {
+                $targetHash = (Get-FileHash -LiteralPath $target `
+                    -Algorithm SHA256).Hash
+                $backupHash = (Get-FileHash -LiteralPath $backup `
+                    -Algorithm SHA256).Hash
+                if ($targetHash -cne $backupHash) {
+                    throw "[$($a.label)] original target and redundant backup differ; refusing to delete either file"
+                }
+                Take-Own $backup
+                Remove-Item -LiteralPath $backup -Force -ErrorAction Stop
+                Write-Host "  [$($a.label)] removed byte-identical redundant backup"
+            }
+            Write-Host "  [$($a.label)] original already active"
+            continue
+        }
+        Take-Own $target
+        try {
+            Copy-Item -LiteralPath $backup -Destination $target -Force `
+                -ErrorAction Stop
+            Assert-OriginalNvidiaImage $target $a.machine
+            Remove-Item -LiteralPath $backup -Force -ErrorAction Stop
+            Write-Host "  [$($a.label)] reverted $target"
+        } catch [System.IO.IOException] {
+            # Session Manager performs these ordered pairs before user-mode
+            # NVAPI clients start.  The signed backup remains beside the live
+            # shim until the move succeeds, so rollback never depends on the
+            # removable installation media.
+            Write-Host "  [$($a.label)] target is in use — scheduling signed-original restore" -Fore Yellow
+            $pendingRestore += @("\??\$target", '')
+            $pendingRestore += @("\??\$backup", "\??\$target")
+        }
+    }
+    Set-PendingFileRenameOperations $pendingRestore
+    Write-Host 'Reboot to drop cached handles and complete any scheduled restore.'
+    return
 }
 
 New-Item -Type Directory -Force 'C:\nv' | Out-Null
 $ProgressPreference = 'SilentlyContinue'
 $pending = @()
-$pendKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
 
 foreach ($a in $arches) {
     $target = Join-Path $a.sys $a.name
     $backup = Join-Path $a.sys $a.backup
     $url    = "$BaseUrl/$($a.name)"
     Write-Host "[$($a.label)] install $target (<- $url)" -Fore Cyan
+
+    if ($systemStates[$a.label] -eq 'installed') {
+        Write-Host '  exact manifest-pinned shim/original pair is already installed'
+        continue
+    }
 
     # Pull the compatibility-path asset or copy the already manifest-verified
     # immutable asset supplied by apply-vm-profile.ps1.
@@ -528,13 +639,13 @@ foreach ($a in $arches) {
 
     # backup original once
     if (-not (Test-Path $backup)) {
-        Assert-OriginalNvidiaImage $target
+        Assert-OriginalNvidiaImage $target $a.machine
         Take-Own $target
-        Copy-Item $target $backup -Force
-        Assert-OriginalNvidiaImage $backup
+        Copy-Item -LiteralPath $target -Destination $backup -Force
+        Assert-OriginalNvidiaImage $backup $a.machine
         "  backup -> $backup"
     } else {
-        Assert-OriginalNvidiaImage $backup
+        Assert-OriginalNvidiaImage $backup $a.machine
         "  backup $backup already exists"
     }
 
@@ -542,7 +653,9 @@ foreach ($a in $arches) {
     # when NVIDIA services hold the DLL open.
     Take-Own $target
     try {
-        Copy-Item $a.scratch $target -Force -ErrorAction Stop
+        Copy-Item -LiteralPath $a.scratch -Destination $target -Force `
+            -ErrorAction Stop
+        Assert-ShimImage $target $a.machine
         $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
         if ($targetHash -cne $scratchHash) {
             throw "Installed shim hash mismatch: $target"
@@ -557,9 +670,7 @@ foreach ($a in $arches) {
 }
 
 if ($pending.Count) {
-    $existing = (Get-ItemProperty $pendKey -Name PendingFileRenameOperations -EA 0).PendingFileRenameOperations
-    if ($existing) { $pending = $existing + $pending }
-    Set-ItemProperty $pendKey -Name PendingFileRenameOperations -Value $pending -Type MultiString -Force
+    Set-PendingFileRenameOperations $pending
     Write-Host ''
     Write-Host 'Some files are in use. Reboot to apply:' -Fore Green
     Write-Host '  shutdown /r /t 5' -Fore Green

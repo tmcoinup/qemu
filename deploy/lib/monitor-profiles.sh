@@ -8,6 +8,9 @@
 _monitor_profile_lib_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 MONITOR_PROFILE_CATALOG=${MONITOR_PROFILE_CATALOG:-"${_monitor_profile_lib_dir}/../config/monitor-profiles.tsv"}
 MONITOR_CREATE_PROFILE_POOL=${MONITOR_CREATE_PROFILE_POOL:-"${_monitor_profile_lib_dir}/../config/monitor-create-cn-fhd.txt"}
+MONITOR_REQUIRED_PREFERRED_X=1920
+MONITOR_REQUIRED_PREFERRED_Y=1080
+MONITOR_REQUIRED_PREFERRED_REFRESH_HZ=60
 
 _monitor_profile_error() {
     printf 'monitor-profiles: %s\n' "$*" >&2
@@ -15,6 +18,35 @@ _monitor_profile_error() {
 
 _monitor_profile_is_uint() {
     [[ $1 =~ ^(0|[1-9][0-9]*)$ ]]
+}
+
+# Serial formats are keyed by the real monitor identity rather than inferred
+# from a coincidentally similar prefix.  Keep the catalog schema stable for
+# the shell and PowerShell consumers; every loaded profile still exposes its
+# explicit policy through MONITOR_SERIAL_POLICY.
+monitor_profile_serial_policy_for_key() {
+    case ${1:-} in
+        samsung-s24f350) printf '%s\n' samsung-h4zmc-decimal5 ;;
+        redmi-rmmnt238nf) printf '%s\n' redmi-29200-decimal8 ;;
+        *) printf '%s\n' generic-prefix-hash ;;
+    esac
+}
+
+# Source EDID captures document the serial format, but their exact observed
+# values must never be copied into a synthetic VM identity.
+monitor_profile_serial_is_reserved() {
+    local serial=${1-}
+    local policy=${2:-${MONITOR_SERIAL_POLICY:-generic-prefix-hash}}
+
+    case $policy in
+        samsung-h4zmc-decimal5)
+            [[ $serial == H4ZMC01676 || $serial == H4ZMC01889 ]]
+            ;;
+        redmi-29200-decimal8)
+            [[ $serial == 2920000167575 || $serial == 2920000116680 ]]
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 monitor_profiles_validate() {
@@ -29,7 +61,7 @@ monitor_profiles_validate() {
     local width_mm height_mm native_x native_y refresh_hz
     local min_v max_v min_h max_h max_clock_mhz video_input
     local year week serial_prefix mode_set
-    local numeric value pair diagonal_sq
+    local numeric value pair diagonal_sq serial_policy
     local key_re='^[a-z0-9][a-z0-9-]{0,47}$'
     local product_re='^0x[0-9A-F]{4}$'
     local video_input_re='^0x[0-9A-F]{2}$'
@@ -120,17 +152,23 @@ monitor_profiles_validate() {
             }
         done
 
-        ((width_mm >= 450 && width_mm <= 560 && height_mm >= 250 && height_mm <= 330)) || {
+        # Reviewed creation profiles cover the common 21.5, 23.8/24 and
+        # 27-inch FHD desktop classes.  Keep TVs, portable panels and larger
+        # FHD panels out, while retaining exact DTD millimetres from the
+        # source EDID instead of rounding every model to a nominal size.
+        ((width_mm >= 450 && width_mm <= 610 && height_mm >= 250 && height_mm <= 345)) || {
             _monitor_profile_error "$catalog:$line_no: physical dimensions are outside the supported desktop-monitor range"
             return 1
         }
         diagonal_sq=$((width_mm * width_mm + height_mm * height_mm))
-        ((diagonal_sq >= 540 * 540 && diagonal_sq <= 620 * 620)) || {
-            _monitor_profile_error "$catalog:$line_no: physical diagonal is outside 21.3-24.4 inches"
+        ((diagonal_sq >= 540 * 540 && diagonal_sq <= 690 * 690)) || {
+            _monitor_profile_error "$catalog:$line_no: physical diagonal is outside 21.3-27.2 inches"
             return 1
         }
-        ((native_x == 1920 && native_y == 1080)) || {
-            _monitor_profile_error "$catalog:$line_no: fhd-standard profiles must be 1920x1080"
+        ((native_x == MONITOR_REQUIRED_PREFERRED_X &&
+          native_y == MONITOR_REQUIRED_PREFERRED_Y &&
+          refresh_hz == MONITOR_REQUIRED_PREFERRED_REFRESH_HZ)) || {
+            _monitor_profile_error "$catalog:$line_no: every full-catalog preferred timing must be 1920x1080@60"
             return 1
         }
         ((refresh_hz >= 50 && refresh_hz <= 240 && min_v <= refresh_hz && refresh_hz <= max_v && max_v <= 240)) || {
@@ -158,6 +196,31 @@ monitor_profiles_validate() {
             _monitor_profile_error "$catalog:$line_no: serial prefix must be 1-8 uppercase alphanumeric characters"
             return 1
         }
+        serial_policy=$(monitor_profile_serial_policy_for_key "$key") || return
+        case $serial_policy in
+            samsung-h4zmc-decimal5)
+                [[ $serial_prefix == H4ZMC ]] || {
+                    _monitor_profile_error "$catalog:$line_no: samsung-s24f350 serial prefix must be H4ZMC"
+                    return 1
+                }
+                ;;
+            redmi-29200-decimal8)
+                [[ $serial_prefix == 29200 ]] || {
+                    _monitor_profile_error "$catalog:$line_no: redmi-rmmnt238nf serial prefix must be 29200"
+                    return 1
+                }
+                ;;
+            generic-prefix-hash)
+                [[ $serial_prefix != H4ZMC && $serial_prefix != 29200 ]] || {
+                    _monitor_profile_error "$catalog:$line_no: special serial prefix '$serial_prefix' is reserved for its matching profile"
+                    return 1
+                }
+                ;;
+            *)
+                _monitor_profile_error "$catalog:$line_no: unsupported serial policy '$serial_policy'"
+                return 1
+                ;;
+        esac
         [[ $mode_set == fhd-standard ]] || {
             _monitor_profile_error "$catalog:$line_no: unsupported mode set '$mode_set'"
             return 1
@@ -198,8 +261,7 @@ monitor_create_pool_validate() {
     local p_min_v p_max_v p_min_h p_max_h p_max_clock_mhz p_video_input
     local p_year p_week p_serial_prefix p_mode_set
     local key_re='^[a-z0-9][a-z0-9-]{0,47}$'
-    local -A catalog_native=()
-    local -A catalog_mode_set=()
+    local -A catalog_preferred=()
     local -A seen=()
 
     monitor_profiles_validate "$catalog" || return
@@ -213,8 +275,7 @@ monitor_create_pool_validate() {
         p_min_v p_max_v p_min_h p_max_h p_max_clock_mhz p_video_input p_year \
         p_week p_serial_prefix p_mode_set; do
         [[ -z $p_key || $p_key == \#* ]] && continue
-        catalog_native[$p_key]="${p_native_x}x${p_native_y}"
-        catalog_mode_set[$p_key]=$p_mode_set
+        catalog_preferred[$p_key]="${p_native_x}x${p_native_y}@${p_refresh_hz}|${p_mode_set}"
     done < "$catalog"
 
     while IFS= read -r line || [[ -n $line ]]; do
@@ -233,13 +294,13 @@ monitor_create_pool_validate() {
             return 1
         }
         seen[$line]=1
-        [[ -n ${catalog_native[$line]+x} ]] || {
+        [[ -n ${catalog_preferred[$line]+x} ]] || {
             _monitor_profile_error "$pool:$line_no: unknown catalog profile '$line'"
             return 1
         }
-        [[ ${catalog_native[$line]} == 1920x1080 &&
-           ${catalog_mode_set[$line]} == fhd-standard ]] || {
-            _monitor_profile_error "$pool:$line_no: creation profiles must be FHD 1920x1080"
+        [[ ${catalog_preferred[$line]} == \
+           "${MONITOR_REQUIRED_PREFERRED_X}x${MONITOR_REQUIRED_PREFERRED_Y}@${MONITOR_REQUIRED_PREFERRED_REFRESH_HZ}|fhd-standard" ]] || {
+            _monitor_profile_error "$pool:$line_no: creation profiles must have preferred timing 1920x1080@60"
             return 1
         }
         ((row_count += 1))
@@ -356,6 +417,7 @@ monitor_profile_load() {
         MONITOR_YEAR=$p_year
         MONITOR_WEEK=$p_week
         MONITOR_SERIAL_PREFIX=$p_serial_prefix
+        MONITOR_SERIAL_POLICY=$(monitor_profile_serial_policy_for_key "$p_key") || return
         MONITOR_MODE_SET=$p_mode_set
 
         export MONITOR_PROFILE MONITOR_VENDOR MONITOR_PRODUCT_ID MONITOR_EDID_NAME
@@ -363,7 +425,8 @@ monitor_profile_load() {
         export MONITOR_WIDTH_MM MONITOR_HEIGHT_MM
         export MONITOR_NATIVE_X MONITOR_NATIVE_Y MONITOR_REFRESH_HZ MONITOR_MIN_V MONITOR_MAX_V
         export MONITOR_MIN_H MONITOR_MAX_H MONITOR_MAX_CLOCK_MHZ MONITOR_VIDEO_INPUT
-        export MONITOR_YEAR MONITOR_WEEK MONITOR_SERIAL_PREFIX MONITOR_MODE_SET
+        export MONITOR_YEAR MONITOR_WEEK MONITOR_SERIAL_PREFIX MONITOR_SERIAL_POLICY
+        export MONITOR_MODE_SET
         return 0
     done < "$catalog"
 
@@ -451,12 +514,45 @@ monitor_profile_random() {
 monitor_profile_generate_serial() {
     local prefix=${1:-${MONITOR_SERIAL_PREFIX:-MON}}
     local seed=${2-}
-    local material remaining
+    local policy=${3:-}
+    local material remaining numeric_material candidate
 
-    [[ $prefix =~ ^[A-Z0-9]{1,8}$ ]] || {
-        _monitor_profile_error 'serial prefix must be 1-8 uppercase alphanumeric characters'
-        return 2
-    }
+    if [[ -z $policy ]]; then
+        if [[ -n ${MONITOR_SERIAL_POLICY:-} &&
+              ${MONITOR_SERIAL_PREFIX:-} == "$prefix" ]]; then
+            policy=$MONITOR_SERIAL_POLICY
+        else
+            case $prefix in
+                H4ZMC) policy=samsung-h4zmc-decimal5 ;;
+                29200) policy=redmi-29200-decimal8 ;;
+                *) policy=generic-prefix-hash ;;
+            esac
+        fi
+    fi
+    case $policy in
+        samsung-h4zmc-decimal5)
+            [[ $prefix == H4ZMC ]] || {
+                _monitor_profile_error 'Samsung S24F350 serial prefix must be H4ZMC'
+                return 2
+            }
+            ;;
+        redmi-29200-decimal8)
+            [[ $prefix == 29200 ]] || {
+                _monitor_profile_error 'Redmi RMMNT238NF serial prefix must be 29200'
+                return 2
+            }
+            ;;
+        generic-prefix-hash)
+            [[ $prefix =~ ^[A-Z0-9]{1,8}$ ]] || {
+                _monitor_profile_error 'serial prefix must be 1-8 uppercase alphanumeric characters'
+                return 2
+            }
+            ;;
+        *)
+            _monitor_profile_error "unsupported serial policy '$policy'"
+            return 2
+            ;;
+    esac
     command -v sha256sum >/dev/null 2>&1 || {
         _monitor_profile_error 'sha256sum is required to generate monitor serials'
         return 1
@@ -473,8 +569,66 @@ monitor_profile_generate_serial() {
     material=${material%% *}
     material=${material^^}
     material=${material//[^A-Z0-9]/}
-    remaining=$((12 - ${#prefix}))
-    printf '%s%s\n' "$prefix" "${material:0:remaining}"
+    case $policy in
+        samsung-h4zmc-decimal5)
+            numeric_material=$((16#${material:0:15}))
+            numeric_material=$((numeric_material % 100000))
+            while :; do
+                printf -v candidate 'H4ZMC%05d' "$numeric_material"
+                if ! monitor_profile_serial_is_reserved "$candidate" "$policy"; then
+                    printf '%s\n' "$candidate"
+                    break
+                fi
+                numeric_material=$(((numeric_material + 1) % 100000))
+            done
+            ;;
+        redmi-29200-decimal8)
+            numeric_material=$((16#${material:0:15}))
+            numeric_material=$((numeric_material % 100000000))
+            while :; do
+                printf -v candidate '29200%08d' "$numeric_material"
+                if ! monitor_profile_serial_is_reserved "$candidate" "$policy"; then
+                    printf '%s\n' "$candidate"
+                    break
+                fi
+                numeric_material=$(((numeric_material + 1) % 100000000))
+            done
+            ;;
+        generic-prefix-hash)
+            remaining=$((12 - ${#prefix}))
+            printf '%s%s\n' "$prefix" "${material:0:remaining}"
+            ;;
+    esac
+}
+
+# Validate the persisted/displayed serial against the currently loaded
+# profile.  Optional prefix/policy arguments keep this useful to callers that
+# do not use monitor_profile_load, while the one-argument form is the normal
+# profile-aware API.
+monitor_profile_serial_validate() {
+    local LC_ALL=C
+    local serial=${1-}
+    local prefix=${2:-${MONITOR_SERIAL_PREFIX:-}}
+    local policy=${3:-${MONITOR_SERIAL_POLICY:-generic-prefix-hash}}
+    local suffix
+
+    case $policy in
+        samsung-h4zmc-decimal5)
+            [[ $prefix == H4ZMC && $serial =~ ^H4ZMC[0-9]{5}$ ]] || return 1
+            ! monitor_profile_serial_is_reserved "$serial" "$policy"
+            ;;
+        redmi-29200-decimal8)
+            [[ $prefix == 29200 && $serial =~ ^29200[0-9]{8}$ ]] || return 1
+            ! monitor_profile_serial_is_reserved "$serial" "$policy"
+            ;;
+        generic-prefix-hash)
+            [[ $prefix =~ ^[A-Z0-9]{1,8}$ && ${#serial} -eq 12 ]] || return 1
+            [[ ${serial:0:${#prefix}} == "$prefix" ]] || return 1
+            suffix=${serial:${#prefix}}
+            [[ $suffix =~ ^[0-9A-F]+$ ]]
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 monitor_profile_legacy_rows() {

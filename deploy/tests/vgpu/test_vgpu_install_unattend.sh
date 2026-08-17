@@ -113,22 +113,23 @@ for forbidden in (
 ):
     assert forbidden not in lower, forbidden
 
-# The only one-shot commands set NumLock for the sign-in desktop and the
-# built-in Administrator profile. RTC is owned entirely by the host launcher;
-# no script, registry override, or task is installed in Windows.
+# Fast Startup is disabled before the first VM shutdown.  NumLock is owned by
+# usb-kbd's guest-LED state machine, not by per-user registry guesses.  RTC
+# remains owned by the host launcher; no persistent guest task is installed.
 commands = [
     node.text or ""
     for node in root.findall(".//u:Path", ns) + root.findall(".//u:CommandLine", ns)
 ]
-assert len(commands) == 2, commands
-numlock_commands = [
+assert len(commands) == 1, commands
+assert all("InitialKeyboardIndicators" not in command for command in commands)
+
+fast_startup_commands = [
     command for command in commands
-    if "InitialKeyboardIndicators" in command
+    if "HiberbootEnabled" in command
 ]
-assert len(numlock_commands) == 2, numlock_commands
-assert any("HKU\\.DEFAULT" in command for command in numlock_commands)
-assert any("HKCU\\Control Panel\\Keyboard" in command for command in numlock_commands)
-assert all(" /d 2 /f" in command for command in numlock_commands)
+assert len(fast_startup_commands) == 1, fast_startup_commands
+assert "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power" in fast_startup_commands[0]
+assert " /t REG_DWORD /d 0 /f" in fast_startup_commands[0]
 
 assert all("RealTimeIsUniversal" not in command for command in commands)
 PY
@@ -152,4 +153,4 @@ if grep -Fq '__COMPUTER_NAME__' "$EXTRACTED"; then
     fail "rendered answer file retained its placeholder"
 fi
 
-echo "PASS: minimal vGPU install OOBE/timezone/NumLock answer ISO"
+echo "PASS: minimal vGPU install OOBE/timezone/Fast-Startup answer ISO"

@@ -19,6 +19,13 @@ usage() {
     cat >&2 <<'EOF'
 usage: ./deploy/finish-vgpu-install.sh VM_ID [--token-file FILE.tok] [options]
 
+LEGACY ONLY:
+  Current GTX 750 Ti / GT 1030 / GTX 1050 B/native VMs do not use this
+  command. Build the unified private finalizer instead:
+    ./deploy/package-vgpu-one-click.sh --with-license-token
+  This script remains only for pre-unification GTX750Ti/GT1030 token receipts
+  and explicit old UTC-to-localtime migration.
+
 Token selection:
   --token-file FILE      Use this local NVIDIA DLS client token
                          If omitted, auto-use $STAGE_DIR/client_configuration_token.tok
@@ -32,9 +39,9 @@ Options:
   --no-final-start       Prepare/migrate, but do not start the final vGPU boot
   -h, --help             Show this help
 
-Normal use is one command on the host. Keep this terminal open. B-mode
-name-only profiles copy the small shared EXE. GTX 1050 strict-A refuses before
-building anything until a matching production-signed driver is available.
+For an eligible legacy VM, keep this terminal open. B-mode name-only profiles
+copy the old small shared EXE. GTX 1050 strict-A refuses before building
+anything until a matching production-signed driver is available.
 EOF
 }
 
@@ -98,6 +105,8 @@ while (( $# > 0 )); do
 done
 
 [[ -n "$VM_ID" ]] || { usage; exit 2; }
+vm_storage_require_namespace_ready "$VM_ID" \
+    || die "VM storage still uses an old/conflicting layout"
 
 INSTANCE_DIR=$(vm_storage_instance_dir "$VM_ID")
 CONF=$(vm_storage_config_path "$VM_ID")
@@ -462,7 +471,7 @@ esac
 verify_vm_config_unchanged "before the rescue boot"
 set +e
 VGPU_GUEST_FINISH_TARGET="$GPU_NAME" \
-    "$here/start-vm.sh" "${rescue_args[@]}"
+    "$here/scripts/start-vm.sh" "${rescue_args[@]}"
 rescue_rc=$?
 set -e
 (( rescue_rc == 0 )) || die "rescue QEMU exited with status $rescue_rc; package was kept at $TRANSFER_PACKAGE"
@@ -612,17 +621,17 @@ log "kept reusable private guest package: $TRANSFER_PACKAGE (mode 0600); delete 
 release_package_lock
 
 if (( ! FINAL_START )); then
-    log "preparation complete; later run: ./deploy/start-vm.sh $VM_ID"
+    log "preparation complete; later run: ./deploy/scripts/start-vm.sh $VM_ID"
     exit 0
 fi
 
 cat <<EOF
 
 [vgpu-finish] 宿主迁移完成。现在自动执行正常 vGPU 冷启动：
-  ./deploy/start-vm.sh $VM_ID
+  ./deploy/scripts/start-vm.sh $VM_ID
 
 EDID 会在启动前自动同步。GTX 1050 严格身份的验收是 Code 0、538.33、
 DEV_1C81/SUBSYS_11C01028 和 Frame Rate Limit N/A；控制面板无授权页且 host
 仍显示 Unlicensed 不等于“已激活”。B/off 模式才继续验收 DLS/Licensed。
 EOF
-"$here/start-vm.sh" "$VM_ID"
+"$here/scripts/start-vm.sh" "$VM_ID"

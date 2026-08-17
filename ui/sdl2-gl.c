@@ -157,24 +157,30 @@ static bool sdl2_gl_ensure_window_context(struct sdl2_console *scon)
 
 static void sdl2_gl_render_surface(struct sdl2_console *scon)
 {
-    int ww, wh, dx, dy, dw, dh;
+    SDL2Size output;
+    SDL2Size guest;
+    SDL2Rect dst;
+    SDL2Rect viewport;
 
     if (sdl2_gl_make_window_current(scon) != 0) {
         return;
     }
     sdl2_set_scanout_mode(scon, false);
 
-    SDL_GetWindowSize(scon->real_window, &ww, &wh);
+    if (!sdl2_current_render_size(scon, &output)) {
+        return;
+    }
+    guest = (SDL2Size) {
+        surface_width(scon->surface), surface_height(scon->surface),
+    };
     /*
      * Show the guest at its native resolution (1:1) centred in the window and
-     * letterbox the surplus instead of upscaling it (sdl2_gfx_dst_rect()).
+     * letterbox the surplus instead of upscaling it (sdl2_guest_dst_rect()).
      * surface_gl_render_texture() clears the whole framebuffer first, so the
      * area outside the viewport is left as the (black) border.
      */
-    sdl2_gfx_dst_rect(ww, wh,
-                      surface_width(scon->surface),
-                      surface_height(scon->surface),
-                      &dx, &dy, &dw, &dh);
+    dst = sdl2_guest_dst_rect(output, guest);
+    viewport = sdl2_gl_viewport(output, dst);
     if (scon->native_egl) {
         /*
          * 中文注释：native EGL 子窗口使用带 alpha 的 X11 visual。普通
@@ -188,7 +194,7 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
         glDrawBuffer(GL_BACK);
         glReadBuffer(GL_BACK);
     }
-    glViewport(dx, dy, dw, dh);
+    glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
     surface_gl_render_texture(scon->gls, scon->surface);
     if (scon->native_egl) {
@@ -257,9 +263,10 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
 
     assert(scon->opengl);
+    sdl2_poll_events(scon);
+    sdl2_flush_window_updates();
 
     if (!sdl2_gl_ensure_window_context(scon)) {
-        sdl2_poll_events(scon);
         return;
     }
     scon->presented_since_refresh = false;
@@ -273,7 +280,6 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         !(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
         sdl2_gl_redraw(scon);
     }
-    sdl2_poll_events(scon);
 }
 
 void sdl2_gl_redraw(struct sdl2_console *scon)
@@ -490,6 +496,10 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    SDL2Size output;
+    SDL2Size guest;
+    SDL2Rect dst;
+    SDL2Rect viewport;
     int ww, wh, dx, dy, dw, dh;
     GLint sy1, sy2;
 
@@ -509,19 +519,27 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
         return;
     }
 
-    SDL_GetWindowSize(scon->real_window, &ww, &wh);
+    if (!sdl2_current_render_size(scon, &output)) {
+        return;
+    }
+    ww = output.width;
+    wh = output.height;
     /*
      * virtio-gpu-gl (virgl) routes the scanout through this GL-texture path
      * even for a plain 2D guest, so this — not sdl2_gl_render_surface() — is
      * what draws the picture here.  Keep them consistent: show the guest at
      * its native resolution (1:1) centred in the window, letterboxed with
      * black borders instead of stretched to fill, shrinking only when the
-     * window is too small (sdl2_gfx_dst_rect()).  Blit straight to the default
-     * framebuffer after clearing it to black for the borders.
+     * window is too small (sdl2_guest_dst_rect()).  Blit straight to the
+     * default framebuffer after clearing it to black for the borders.
      */
-    sdl2_gfx_dst_rect(ww, wh,
-                      scon->guest_fb.width, scon->guest_fb.height,
-                      &dx, &dy, &dw, &dh);
+    guest = (SDL2Size) { scon->guest_fb.width, scon->guest_fb.height };
+    dst = sdl2_guest_dst_rect(output, guest);
+    viewport = sdl2_gl_viewport(output, dst);
+    dx = viewport.x;
+    dy = viewport.y;
+    dw = viewport.width;
+    dh = viewport.height;
     if (!scon->logged_scanout_flush) {
         GLenum status;
 

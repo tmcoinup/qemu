@@ -18,6 +18,30 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# Exact source value from the production-signed GRID 538.33 nvgridsw.inf and
+# the reviewed G-11 policy written to the active NVIDIA display-adapter
+# software key.  The legacy value is accepted only to migrate VMs that already
+# received the previous 15-mode policy.  The destination exactly matches the
+# ten source modes in the reviewed FHD EDID (notably including 1600x900).
+$NvidiaGrid53833NvModes = [string[]]@(
+    '{*}SHV 1280x720x8,16,32,64 1680x1050x8,16,32,64 1920x1080x8,16,32,64 2048x1536x8,16,32,64=1; 1920x1440x8,16,32,64=1F; 640x480x8,16,32,64 800x600x8,16,32,64 1024x768x8,16,32,64=1FFF; 1920x1200x8,16,32,64=3F; 1600x900x8,16,32,64=3FF; 2560x1440x8,16,32,64 2560x1600x8,16,32,64=7B; 1600x1024x8,16,32,64 1600x1200x8,16,32,64=7F; 1280x768x8,16,32,64 1280x800x8,16,32,64 1280x960x8,16,32,64 1280x1024x8,16,32,64 1360x768x8,16,32,64 1366x768x8,16,32,64=7FF;',
+    ' 1152x864x8,16,32,64 1440x1080x8,16,32,64=FFF;S 720x480x8,16,32,64=1; 720x576x8,16,32,64=8032;'
+)
+$NvidiaLegacyFhdNvModesPolicy = [string[]]@(
+    '{*}SHV 1280x720x8,16,32,64 1920x1080x8,16,32,64=1; 640x480x8,16,32,64 800x600x8,16,32,64 1024x768x8,16,32,64=1FFF; 1600x900x8,16,32,64=3FF; 1600x1024x8,16,32,64 1600x1200x8,16,32,64=7F; 1280x768x8,16,32,64 1280x960x8,16,32,64 1280x1024x8,16,32,64 1360x768x8,16,32,64 1366x768x8,16,32,64=7FF;',
+    ' 1152x864x8,16,32,64 1440x1080x8,16,32,64=FFF;'
+)
+$NvidiaFhdNvModesPolicy = [string[]]@(
+    '{*}SHV 1280x720x8,16,32,64 1920x1080x8,16,32,64=1; 640x480x8,16,32,64 800x600x8,16,32,64 1024x768x8,16,32,64=1FFF; 1600x900x8,16,32,64=3FF; 1280x768x8,16,32,64 1280x960x8,16,32,64 1280x1024x8,16,32,64 1360x768x8,16,32,64=7FF;'
+)
+$NvidiaFhdModeNames = [string[]]@(
+    '1920x1080', '1600x900', '1360x768', '1280x1024', '1280x960',
+    '1280x768', '1280x720', '1024x768', '800x600', '640x480'
+)
+$NvidiaGrid53833ProviderNames = [string[]]@('NVIDIA', 'NVIDIA Corporation')
+$NvidiaGrid53833DriverVersion = '31.0.15.3833'
+$NvidiaGrid53833InfSha256 = '67a240e1d464cf97dabfec1a7cecf000eaa9ddfd702f32ba2c8771f17905dc2b'
+
 $CatalogColumns = @(
     'key', 'vendor', 'product_id', 'edid_name', 'display_name',
     'manufacturer', 'width_mm', 'height_mm', 'native_x', 'native_y',
@@ -104,6 +128,30 @@ function Test-PrintableAscii {
     return $Value -match '^[\x20-\x7e]+$'
 }
 
+function Get-MonitorSerialPolicy {
+    param([Parameter(Mandatory = $true)][string]$Key)
+
+    switch -CaseSensitive ($Key) {
+        'samsung-s24f350' { return 'samsung-h4zmc-decimal5' }
+        'redmi-rmmnt238nf' { return 'redmi-29200-decimal8' }
+        default { return 'generic-prefix-hash' }
+    }
+}
+
+function Get-MonitorReservedSerials {
+    param([Parameter(Mandatory = $true)][string]$Key)
+
+    switch -CaseSensitive ($Key) {
+        'samsung-s24f350' {
+            return [string[]]@('H4ZMC01676', 'H4ZMC01889')
+        }
+        'redmi-rmmnt238nf' {
+            return [string[]]@('2920000167575', '2920000116680')
+        }
+        default { return [string[]]@() }
+    }
+}
+
 function ConvertTo-MonitorConfig {
     param([Parameter(Mandatory = $true)][object]$Row)
 
@@ -113,6 +161,8 @@ function ConvertTo-MonitorConfig {
     $displayName = ([string]$Row.display_name).Trim()
     $manufacturer = ([string]$Row.manufacturer).Trim()
     $serialPrefix = ([string]$Row.serial_prefix).Trim()
+    $serialPolicy = Get-MonitorSerialPolicy -Key $key
+    $reservedSerials = [string[]]@(Get-MonitorReservedSerials -Key $key)
     $modeSet = ([string]$Row.mode_set).Trim().ToLowerInvariant()
 
     if ($key -notmatch '^[a-z0-9][a-z0-9-]*$') {
@@ -128,9 +178,26 @@ function ConvertTo-MonitorConfig {
     if ($displayName.Length -eq 0 -or $manufacturer.Length -eq 0) {
         throw "Profile '$key' must provide display_name and manufacturer"
     }
-    if ($serialPrefix.Length -gt 8 -or
-        ($serialPrefix.Length -gt 0 -and -not (Test-PrintableAscii -Value $serialPrefix))) {
-        throw "Profile '$key' serial_prefix must be at most 8 printable ASCII characters"
+    if ($serialPrefix -cnotmatch '^[A-Z0-9]{1,8}$') {
+        throw "Profile '$key' serial_prefix must be 1..8 uppercase alphanumeric characters"
+    }
+    switch ($serialPolicy) {
+        'samsung-h4zmc-decimal5' {
+            if ($serialPrefix -cne 'H4ZMC') {
+                throw "Profile '$key' serial_prefix must be H4ZMC"
+            }
+        }
+        'redmi-29200-decimal8' {
+            if ($serialPrefix -cne '29200') {
+                throw "Profile '$key' serial_prefix must be 29200"
+            }
+        }
+        'generic-prefix-hash' {
+            if ($serialPrefix -ceq 'H4ZMC' -or $serialPrefix -ceq '29200') {
+                throw "Profile '$key' uses a serial prefix reserved by a special policy"
+            }
+        }
+        default { throw "Profile '$key' uses unsupported serial policy '$serialPolicy'" }
     }
     if ($modeSet -ne 'fhd-standard') {
         throw "Profile '$key' uses unsupported mode_set '$modeSet'"
@@ -157,6 +224,8 @@ function ConvertTo-MonitorConfig {
         Year          = [int](ConvertTo-CatalogUInt $Row.year 'year' 2245)
         Week          = [int](ConvertTo-CatalogUInt $Row.week 'week' 54)
         SerialPrefix  = $serialPrefix
+        SerialPolicy  = $serialPolicy
+        ReservedSerials = $reservedSerials
         ModeSet       = $modeSet
     }
 
@@ -201,18 +270,66 @@ function Get-StableUInt32 {
     return [uint32]$number
 }
 
+function Test-MonitorSerial {
+    param(
+        [Parameter(Mandatory = $true)][object]$Config,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value
+    )
+
+    if ($Value -cin @($Config.ReservedSerials)) { return $false }
+    switch ($Config.SerialPolicy) {
+        'samsung-h4zmc-decimal5' {
+            return $Value -cmatch '^H4ZMC[0-9]{5}$'
+        }
+        'redmi-29200-decimal8' {
+            return $Value -cmatch '^29200[0-9]{8}$'
+        }
+        'generic-prefix-hash' {
+            if ($Value.Length -ne 12 -or
+                -not $Value.StartsWith($Config.SerialPrefix,
+                    [StringComparison]::Ordinal)) {
+                return $false
+            }
+            $suffix = $Value.Substring($Config.SerialPrefix.Length)
+            return $suffix -cmatch '^[0-9A-F]+$'
+        }
+        default { return $false }
+    }
+}
+
 function New-DefaultSerial {
     param([Parameter(Mandatory = $true)][object]$Config)
 
     $prefix = $Config.SerialPrefix
-    if ($prefix.Length -eq 0) { $prefix = $Config.Vendor }
-    $suffix = '{0:X8}' -f (Get-StableUInt32 -Value ("profile:" + $Config.Key))
-    $room = 12 - $prefix.Length
-    if ($room -lt 4) {
-        throw "Profile '$($Config.Key)' serial_prefix leaves too little room for a serial suffix"
+    $stable = [uint64](Get-StableUInt32 -Value ("profile:" + $Config.Key))
+    switch ($Config.SerialPolicy) {
+        'samsung-h4zmc-decimal5' {
+            do {
+                $candidate = 'H4ZMC' + ('{0:D5}' -f ($stable % 100000))
+                $stable = ($stable + 1) % 100000
+            } while ($candidate -cin @($Config.ReservedSerials))
+            return $candidate
+        }
+        'redmi-29200-decimal8' {
+            do {
+                $candidate = '29200' + ('{0:D8}' -f ($stable % 100000000))
+                $stable = ($stable + 1) % 100000000
+            } while ($candidate -cin @($Config.ReservedSerials))
+            return $candidate
+        }
+        'generic-prefix-hash' {
+            $suffix = '{0:X8}' -f $stable
+            $room = 12 - $prefix.Length
+            if ($room -lt 4) {
+                throw "Profile '$($Config.Key)' serial_prefix leaves too little room for a serial suffix"
+            }
+            if ($room -lt $suffix.Length) { $suffix = $suffix.Substring(0, $room) }
+            return $prefix + $suffix
+        }
+        default {
+            throw "Profile '$($Config.Key)' uses unsupported serial policy '$($Config.SerialPolicy)'"
+        }
     }
-    if ($room -lt $suffix.Length) { $suffix = $suffix.Substring(0, $room) }
-    return $prefix + $suffix
 }
 
 function Set-ByteBlock {
@@ -247,7 +364,7 @@ function Build-FhdEdid {
         [Parameter(Mandatory = $true)][uint32]$BinarySerial
     )
 
-    $edid = New-Object byte[] 128
+    $edid = New-Object byte[] 256
     Set-ByteBlock $edid 0 ([byte[]]@(0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00))
 
     $a = [int][char]$Config.Vendor[0] - 64
@@ -286,24 +403,23 @@ function Build-FhdEdid {
     $edid[36] = 0x08
     $edid[37] = 0x00
 
-    # EDID 1.4 standard timings.  Keeping the native timing here as well as in
-    # the preferred DTD makes Windows' fallback mode enumeration predictable.
+    # G-11 uses NVIDIA vGPU, whose EDID parser handles standard timings
+    # correctly.  Publish the complete ordinary FHD compatibility list while
+    # omitting every 16:10 aspect entry.
     for ($slot = 0; $slot -lt 8; $slot++) {
         $edid[38 + 2 * $slot] = 0x01
         $edid[39 + 2 * $slot] = 0x01
     }
     $standardModes = @(
-        [pscustomobject]@{ X = 1920; Y = 1080; Aspect = 3 },
-        [pscustomobject]@{ X = 1680; Y = 1050; Aspect = 0 },
-        [pscustomobject]@{ X = 1600; Y = 900;  Aspect = 3 },
-        [pscustomobject]@{ X = 1280; Y = 1024; Aspect = 2 },
-        [pscustomobject]@{ X = 1280; Y = 800;  Aspect = 0 },
-        [pscustomobject]@{ X = 1280; Y = 720;  Aspect = 3 }
+        [pscustomobject]@{ X = 1920; Aspect = 3 }, # 1920x1080
+        [pscustomobject]@{ X = 1600; Aspect = 3 }, # 1600x900
+        [pscustomobject]@{ X = 1280; Aspect = 2 }, # 1280x1024
+        [pscustomobject]@{ X = 1280; Aspect = 3 }  # 1280x720
     )
     for ($slot = 0; $slot -lt $standardModes.Count; $slot++) {
         $mode = $standardModes[$slot]
         $edid[38 + 2 * $slot] = [byte](([int]$mode.X / 8) - 31)
-        $edid[39 + 2 * $slot] = [byte](([int]$mode.Aspect -shl 6) -bor 0)
+        $edid[39 + 2 * $slot] = [byte]([int]$mode.Aspect -shl 6)
     }
 
     # Preferred 1920x1080p60 DTD (148.50 MHz, CEA-861 positive sync).
@@ -317,6 +433,15 @@ function Build-FhdEdid {
         (($Config.HeightMm -shr 8) -band 0x0F))
     Set-ByteBlock $edid 54 $dtd
 
+    # Established Timings III: 1360x768, 1280x1024/960/768.  The bits for
+    # 1680x1050 and 1440x900 (both 16:10) remain clear.
+    $xtra3 = New-Object byte[] 18
+    $xtra3[3] = 0xF7
+    $xtra3[5] = 10
+    $xtra3[7] = 0x4A
+    $xtra3[8] = 0x80
+    Set-ByteBlock $edid 72 $xtra3
+
     $range = New-Object byte[] 18
     $range[3] = 0xFD
     $range[5] = [byte]$Config.MinV
@@ -327,14 +452,23 @@ function Build-FhdEdid {
     $range[10] = 0x01 # limits only; no secondary timing formula
     $range[11] = 0x0A
     for ($i = 12; $i -lt 18; $i++) { $range[$i] = 0x20 }
-    Set-ByteBlock $edid 72 $range
-    Set-ByteBlock $edid 90 (New-TextDescriptor 0xFC $Config.EdidName)
-    Set-ByteBlock $edid 108 (New-TextDescriptor 0xFF $TextSerial)
+    Set-ByteBlock $edid 90 $range
+    Set-ByteBlock $edid 108 (New-TextDescriptor 0xFC $Config.EdidName)
 
-    $edid[126] = 0 # no extension blocks: this file is exactly 128 bytes
+    # One CTA-861 extension.  Its sole data block advertises VIC 16
+    # (1920x1080p60) and VIC 4 (1280x720p60); there are no CTA DTDs.
+    $edid[126] = 1
     [uint32]$sum = 0
     for ($i = 0; $i -lt 127; $i++) { $sum += $edid[$i] }
     $edid[127] = [byte]((256 - ($sum % 256)) % 256)
+
+    Set-ByteBlock $edid 128 ([byte[]]@(
+        0x02, 0x03, 0x07, 0x00, 0x42, 0x10, 0x04
+    ))
+    Set-ByteBlock $edid 135 (New-TextDescriptor 0xFF $TextSerial)
+    $sum = 0
+    for ($i = 128; $i -lt 255; $i++) { $sum += $edid[$i] }
+    $edid[255] = [byte]((256 - ($sum % 256)) % 256)
     return $edid
 }
 
@@ -345,7 +479,7 @@ function Assert-FhdEdid {
         [Parameter(Mandatory = $true)][uint32]$BinarySerial
     )
 
-    if ($Edid.Length -ne 128) { throw "Internal EDID error: length is not 128 bytes" }
+    if ($Edid.Length -ne 256) { throw "Internal EDID error: length is not 256 bytes" }
     $header = [byte[]]@(0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00)
     for ($i = 0; $i -lt 8; $i++) {
         if ($Edid[$i] -ne $header[$i]) { throw "Internal EDID error: invalid header" }
@@ -353,12 +487,18 @@ function Assert-FhdEdid {
     if ($Edid[18] -ne 1 -or $Edid[19] -ne 4) {
         throw "Internal EDID error: expected EDID 1.4"
     }
-    if ($Edid[126] -ne 0) {
-        throw "Internal EDID error: a 128-byte EDID must have extension count zero"
+    if ($Edid[126] -ne 1) {
+        throw "Internal EDID error: expected exactly one CTA extension"
     }
-    [uint32]$sum = 0
-    foreach ($value in $Edid) { $sum += $value }
-    if (($sum % 256) -ne 0) { throw "Internal EDID error: invalid checksum" }
+    for ($block = 0; $block -lt 2; $block++) {
+        [uint32]$sum = 0
+        for ($i = $block * 128; $i -lt ($block + 1) * 128; $i++) {
+            $sum += $Edid[$i]
+        }
+        if (($sum % 256) -ne 0) {
+            throw "Internal EDID error: invalid checksum in block $block"
+        }
+    }
 
     [uint64]$encodedSerial = [uint64]$Edid[12] +
         ([uint64]$Edid[13] * 256) +
@@ -383,43 +523,44 @@ function Assert-FhdEdid {
         throw "Internal EDID error: preferred DTD sync encoding is invalid"
     }
 
-    $expectedModes = @(
-        [pscustomobject]@{ X = 1920; Y = 1080 },
-        [pscustomobject]@{ X = 1680; Y = 1050 },
-        [pscustomobject]@{ X = 1600; Y = 900 },
-        [pscustomobject]@{ X = 1280; Y = 1024 },
-        [pscustomobject]@{ X = 1280; Y = 800 },
-        [pscustomobject]@{ X = 1280; Y = 720 }
+    $expectedStandard = [byte[]]@(
+        0xD1, 0xC0, # 1920x1080
+        0xA9, 0xC0, # 1600x900
+        0x81, 0x80, # 1280x1024
+        0x81, 0xC0, # 1280x720
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01
     )
-    for ($slot = 0; $slot -lt $expectedModes.Count; $slot++) {
-        $xByte = [int]$Edid[38 + 2 * $slot]
-        $shape = ([int]$Edid[39 + 2 * $slot] -shr 6) -band 0x03
-        $refresh = ([int]$Edid[39 + 2 * $slot] -band 0x3F) + 60
-        $x = ($xByte + 31) * 8
-        $y = switch ($shape) {
-            0 { $x * 10 / 16 }
-            1 { $x * 3 / 4 }
-            2 { $x * 4 / 5 }
-            3 { $x * 9 / 16 }
+    for ($i = 0; $i -lt $expectedStandard.Length; $i++) {
+        if ($Edid[38 + $i] -ne $expectedStandard[$i]) {
+            throw "Internal EDID error: unexpected standard timing list"
         }
-        if ($x -ne $expectedModes[$slot].X -or
-            $y -ne $expectedModes[$slot].Y -or $refresh -ne 60) {
-            throw "Internal EDID error: unexpected standard timing in slot $slot"
-        }
-        if ($x -gt $Config.NativeX -or $y -gt $Config.NativeY -or
-            ($x -eq 1920 -and $y -eq 1200)) {
-            throw "Internal EDID error: mode exceeds native resolution"
-        }
-    }
-    if ($Edid[50] -ne 0x01 -or $Edid[51] -ne 0x01 -or
-        $Edid[52] -ne 0x01 -or $Edid[53] -ne 0x01) {
-        throw "Internal EDID error: unused standard timing slots are not empty"
     }
     if ($Edid[35] -ne 0x21 -or $Edid[36] -ne 0x08 -or $Edid[37] -ne 0) {
         throw "Internal EDID error: unexpected established timings"
     }
-    if ($Edid[75] -ne 0xFD -or $Edid[93] -ne 0xFC -or $Edid[111] -ne 0xFF) {
+    if ($Edid[75] -ne 0xF7 -or $Edid[93] -ne 0xFD -or
+        $Edid[111] -ne 0xFC -or $Edid[138] -ne 0xFF) {
         throw "Internal EDID error: descriptor layout is invalid"
+    }
+    $expectedXtra3 = [byte[]]@(
+        0x00, 0x00, 0x00, 0xF7, 0x00, 0x0A, 0x00, 0x4A, 0x80,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    )
+    for ($i = 0; $i -lt $expectedXtra3.Length; $i++) {
+        if ($Edid[72 + $i] -ne $expectedXtra3[$i]) {
+            throw "Internal EDID error: unexpected Established Timings III list"
+        }
+    }
+    $expectedCta = [byte[]]@(0x02, 0x03, 0x07, 0x00, 0x42, 0x10, 0x04)
+    for ($i = 0; $i -lt $expectedCta.Length; $i++) {
+        if ($Edid[128 + $i] -ne $expectedCta[$i]) {
+            throw "Internal EDID error: CTA must advertise only VIC 16 and VIC 4"
+        }
+    }
+    for ($i = 153; $i -lt 255; $i++) {
+        if ($Edid[$i] -ne 0) {
+            throw "Internal EDID error: unexpected CTA timing or data block"
+        }
     }
 }
 
@@ -452,6 +593,243 @@ function Set-RegistryValue {
     New-ItemProperty -Path $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
 }
 
+function ConvertTo-NvModeCanonical {
+    param([Parameter(Mandatory = $true)][string[]]$Values)
+
+    return [string[]]@(
+        foreach ($value in $Values) {
+            ([regex]::Replace($value.Trim(), '\s+', ' '))
+        }
+    )
+}
+
+function Test-StringArrayEqual {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Left,
+        [Parameter(Mandatory = $true)][string[]]$Right
+    )
+
+    if ($Left.Count -ne $Right.Count) { return $false }
+    for ($i = 0; $i -lt $Left.Count; $i++) {
+        if (-not [string]::Equals($Left[$i], $Right[$i],
+            [StringComparison]::Ordinal)) { return $false }
+    }
+    return $true
+}
+
+function Get-NvModeNames {
+    param([Parameter(Mandatory = $true)][string[]]$Values)
+
+    $seen = @{}
+    foreach ($value in $Values) {
+        foreach ($match in [regex]::Matches(
+            $value, '(?i)(?<!\d)(\d{3,4})x(\d{3,4})x\d+(?:,\d+)*(?![\d,])')) {
+            $name = $match.Groups[1].Value + 'x' + $match.Groups[2].Value
+            $seen[$name] = $true
+        }
+    }
+    return [string[]]@($seen.Keys | Sort-Object)
+}
+
+function Assert-NvidiaFhdModePolicy {
+    param([Parameter(Mandatory = $true)][string[]]$Values)
+
+    $actualText = ConvertTo-NvModeCanonical $Values
+    $policyText = ConvertTo-NvModeCanonical $NvidiaFhdNvModesPolicy
+    if (-not (Test-StringArrayEqual -Left $actualText -Right $policyText)) {
+        throw 'NV_Modes is not the exact G-11 FHD policy'
+    }
+    $actualModes = Get-NvModeNames $Values
+    $expectedModes = [string[]]@($NvidiaFhdModeNames | Sort-Object)
+    if (-not (Test-StringArrayEqual -Left $actualModes -Right $expectedModes)) {
+        throw "G-11 NV_Modes mode set differs: $($actualModes -join ', ')"
+    }
+    foreach ($name in $actualModes) {
+        $parts = $name.Split('x')
+        if (([int]$parts[0] * 10) -eq ([int]$parts[1] * 16)) {
+            throw "G-11 NV_Modes contains forbidden 16:10 mode: $name"
+        }
+    }
+}
+
+function Set-NvidiaFhdModePolicy {
+    $instanceIds = @()
+    if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
+        $instanceIds = @(
+            Get-PnpDevice -Class Display -PresentOnly -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty InstanceId
+        )
+    }
+    if ($instanceIds.Count -eq 0 -and
+        (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)) {
+        $instanceIds = @(
+            Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+                Where-Object { $_.PNPClass -eq 'Display' -and $_.Present } |
+                Select-Object -ExpandProperty PNPDeviceID
+        )
+    }
+    if ($instanceIds.Count -eq 0) {
+        throw 'Get-PnpDevice or Get-CimInstance is required to locate the active display adapter'
+    }
+
+    $classGuid = '{4d36e968-e325-11ce-bfc1-08002be10318}'
+    $classRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class'
+    $targets = @{}
+    foreach ($instanceId in $instanceIds) {
+        if ($instanceId -notmatch '^PCI\\VEN_10DE&') { continue }
+        $enumPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$instanceId"
+        $device = Get-ItemProperty -LiteralPath $enumPath -ErrorAction Stop
+        if (([string]$device.Service) -ine 'nvlddmkm') { continue }
+        if ($null -ne $device.ClassGUID -and
+            ([string]$device.ClassGUID) -ine $classGuid) {
+            throw "Active NVIDIA display has unexpected ClassGUID: $($device.ClassGUID)"
+        }
+        $driver = [string]$device.Driver
+        if ($driver -notmatch '^\{4d36e968-e325-11ce-bfc1-08002be10318\}\\\d{4}$') {
+            throw "Active nvlddmkm device has an unexpected Driver relation: '$driver'"
+        }
+        $target = Join-Path $classRoot $driver
+        if (-not (Test-Path -LiteralPath $target)) {
+            throw "Active NVIDIA display software key was not found: $target"
+        }
+        $targets[$target.ToLowerInvariant()] = $target
+    }
+    if ($targets.Count -eq 0) {
+        throw 'No present PCI VEN_10DE display device bound to nvlddmkm was found'
+    }
+
+    [string[]]$sourceText = @(ConvertTo-NvModeCanonical $NvidiaGrid53833NvModes)
+    [string[]]$legacyPolicyText = @(ConvertTo-NvModeCanonical $NvidiaLegacyFhdNvModesPolicy)
+    [string[]]$policyText = @(ConvertTo-NvModeCanonical $NvidiaFhdNvModesPolicy)
+    Assert-NvidiaFhdModePolicy $NvidiaFhdNvModesPolicy
+    $plans = @()
+
+    # Validate every target and value before the first write.  An unknown
+    # secondary adapter or driver package must not leave the first adapter
+    # half-migrated.  The INF identity is locked independently of NV_Modes:
+    # another NVIDIA release may publish the same value with different
+    # semantics and is not an approved migration source.
+    foreach ($target in $targets.Values) {
+        $registryKey = Get-Item -LiteralPath $target -ErrorAction Stop
+        foreach ($identityName in @('ProviderName', 'DriverVersion', 'InfPath')) {
+            $identityKind = $registryKey.GetValueKind($identityName)
+            if ($identityKind -ne [Microsoft.Win32.RegistryValueKind]::String) {
+                throw "$identityName at $target is $identityKind, expected REG_SZ"
+            }
+        }
+        $providerName = [string]$registryKey.GetValue(
+            'ProviderName', $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $providerAccepted = $false
+        foreach ($expectedProvider in $NvidiaGrid53833ProviderNames) {
+            if ([string]::Equals($providerName, $expectedProvider,
+                [StringComparison]::OrdinalIgnoreCase)) {
+                $providerAccepted = $true
+                break
+            }
+        }
+        if (-not $providerAccepted) {
+            throw "ProviderName at $target is not an approved NVIDIA provider: '$providerName'"
+        }
+
+        $driverVersion = [string]$registryKey.GetValue(
+            'DriverVersion', $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if (-not [string]::Equals($driverVersion, $NvidiaGrid53833DriverVersion,
+            [StringComparison]::Ordinal)) {
+            throw "DriverVersion at $target is '$driverVersion', expected $NvidiaGrid53833DriverVersion"
+        }
+
+        $infPath = [string]$registryKey.GetValue(
+            'InfPath', $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($infPath -cnotmatch '^oem(?:0|[1-9][0-9]*)\.inf$') {
+            throw "InfPath at $target is not canonical oemN.inf: '$infPath'"
+        }
+        if ([string]::IsNullOrEmpty($env:SystemRoot)) {
+            throw 'SystemRoot is empty; cannot authenticate the published NVIDIA INF'
+        }
+        $publishedInf = Join-Path (Join-Path $env:SystemRoot 'INF') $infPath
+        if (-not (Test-Path -LiteralPath $publishedInf -PathType Leaf)) {
+            throw "Published NVIDIA INF was not found: $publishedInf"
+        }
+        $publishedInfHash = (Get-FileHash -LiteralPath $publishedInf -Algorithm SHA256 `
+            -ErrorAction Stop).Hash
+        if (-not [string]::Equals($publishedInfHash, $NvidiaGrid53833InfSha256,
+            [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Published NVIDIA INF hash mismatch at $publishedInf"
+        }
+
+        $kind = $registryKey.GetValueKind('NV_Modes')
+        if ($kind -ne [Microsoft.Win32.RegistryValueKind]::MultiString) {
+            throw "NV_Modes at $target is $kind, expected REG_MULTI_SZ"
+        }
+        # Windows PowerShell 5.1 can stringify a REG_MULTI_SZ returned by
+        # Get-ItemPropertyValue into one concatenated string.  Read it through
+        # the raw RegistryKey API so the original element boundaries survive;
+        # those boundaries are part of the reviewed NVIDIA migration source.
+        $existing = [string[]]@($registryKey.GetValue(
+            'NV_Modes', $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames))
+        [string[]]$existingText = @(ConvertTo-NvModeCanonical $existing)
+        if (Test-StringArrayEqual -Left $existingText -Right $policyText) {
+            Assert-NvidiaFhdModePolicy $existing
+            $needsWrite = $false
+        } elseif ((Test-StringArrayEqual -Left $existingText -Right $sourceText) -or
+                  (Test-StringArrayEqual -Left $existingText -Right $legacyPolicyText)) {
+            $needsWrite = $true
+        } else {
+            $existingLengths = (@($existingText | ForEach-Object { $_.Length }) -join ',')
+            $sourceLengths = (@($sourceText | ForEach-Object { $_.Length }) -join ',')
+            throw (("Refusing to overwrite unknown NV_Modes at {0} " +
+                "(actual count/lengths={1}/{2}; approved source={3}/{4})") -f
+                $target, $existingText.Count, $existingLengths,
+                $sourceText.Count, $sourceLengths)
+        }
+        $plans += [pscustomobject]@{
+            Path       = $target
+            NeedsWrite = $needsWrite
+            Original   = $existing
+        }
+    }
+
+    $writes = 0
+    $committed = @()
+    try {
+        foreach ($plan in $plans) {
+            if (-not $plan.NeedsWrite) {
+                Write-Host "  $($plan.Path) NV_Modes already matches the $($NvidiaFhdModeNames.Count)-mode FHD policy"
+                continue
+            }
+            Set-RegistryValue $plan.Path 'NV_Modes' MultiString $NvidiaFhdNvModesPolicy
+            $committed += $plan
+            $writtenKey = Get-Item -LiteralPath $plan.Path -ErrorAction Stop
+            $writtenKind = $writtenKey.GetValueKind('NV_Modes')
+            if ($writtenKind -ne [Microsoft.Win32.RegistryValueKind]::MultiString) {
+                throw "NV_Modes write at $($plan.Path) produced $writtenKind"
+            }
+            $written = [string[]]@($writtenKey.GetValue(
+                'NV_Modes', $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames))
+            Assert-NvidiaFhdModePolicy $written
+            $writes++
+            Write-Host "  $($plan.Path) NV_Modes -> $($NvidiaFhdModeNames.Count) reviewed FHD/1K PC modes"
+        }
+    } catch {
+        $failure = $_
+        foreach ($plan in $committed) {
+            try {
+                Set-RegistryValue $plan.Path 'NV_Modes' MultiString $plan.Original
+                Write-Warning "Rolled back NV_Modes at $($plan.Path) after a failed multi-adapter write"
+            } catch {
+                Write-Warning "Could not roll back NV_Modes at $($plan.Path): $($_.Exception.Message)"
+            }
+        }
+        throw $failure
+    }
+    return $targets.Count
+}
+
 function Convert-ToRegExePath {
     param([Parameter(Mandatory = $true)][string]$Path)
     $result = $Path -replace '^Microsoft\.PowerShell\.Core\\Registry::', ''
@@ -460,30 +838,145 @@ function Convert-ToRegExePath {
     return $result
 }
 
-function Set-DeviceStringProperty {
+function Set-MonitorRegistryValue {
     param(
-        [Parameter(Mandatory = $true)][string]$DevicePath,
-        [Parameter(Mandatory = $true)][string]$PropertyId,
-        [Parameter(Mandatory = $true)][string]$Value
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Binary', 'String', 'MultiString')][string]$Type,
+        [Parameter(Mandatory = $true)][object]$Value
     )
-    if (-not (Get-Command reg.exe -ErrorAction SilentlyContinue)) { return }
-    $formatId = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
-    $propertyPath = Join-Path $DevicePath ("Properties\$formatId\$PropertyId")
-    $regPath = Convert-ToRegExePath $propertyPath
-    # Enum\DISPLAY\...\Properties is commonly owned by TrustedInstaller. The
-    # normal DeviceDesc/FriendlyName/Mfg values above are sufficient for the
-    # online rescue; a protected DEVPROP slot is only an optional enhancement
-    # and must not abort cache clearing/device re-enumeration under PS 5.1's
-    # ErrorActionPreference=Stop.
+    if (-not (Get-Command reg.exe -ErrorAction SilentlyContinue)) {
+        throw 'reg.exe is required to update the protected monitor instance tree'
+    }
+    $regPath = Convert-ToRegExePath $Path
+    $regType = switch ($Type) {
+        'Binary' { 'REG_BINARY' }
+        'String' { 'REG_SZ' }
+        'MultiString' { 'REG_MULTI_SZ' }
+    }
+    $regData = switch ($Type) {
+        'Binary' {
+            -join @([byte[]]$Value | ForEach-Object { $_.ToString('X2') })
+        }
+        'String' { [string]$Value }
+        'MultiString' { ([string[]]$Value) -join '\0' }
+    }
+    & reg.exe add $regPath /v $Name /t $regType /d $regData /f 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not write $regPath\$Name as $regType"
+    }
+
+    $writtenKey = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $expectedKind = switch ($Type) {
+        'Binary' { [Microsoft.Win32.RegistryValueKind]::Binary }
+        'String' { [Microsoft.Win32.RegistryValueKind]::String }
+        'MultiString' { [Microsoft.Win32.RegistryValueKind]::MultiString }
+    }
+    if ($writtenKey.GetValueKind($Name) -ne $expectedKind) {
+        throw "$regPath\$Name failed registry-type verification"
+    }
+    $actual = $writtenKey.GetValue(
+        $Name, $null,
+        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    switch ($Type) {
+        'Binary' {
+            [byte[]]$expectedBytes = $Value
+            [byte[]]$actualBytes = $actual
+            if ($actualBytes.Length -ne $expectedBytes.Length) {
+                throw "$regPath\$Name failed binary-length verification"
+            }
+            for ($index = 0; $index -lt $expectedBytes.Length; $index++) {
+                if ($actualBytes[$index] -ne $expectedBytes[$index]) {
+                    throw "$regPath\$Name failed binary read-back verification"
+                }
+            }
+        }
+        'String' {
+            if (-not [string]::Equals([string]$actual, [string]$Value,
+                [StringComparison]::Ordinal)) {
+                throw "$regPath\$Name failed string read-back verification"
+            }
+        }
+        'MultiString' {
+            [string[]]$actualStrings = @($actual)
+            [string[]]$expectedStrings = $Value
+            if (-not (Test-StringArrayEqual -Left $actualStrings `
+                -Right $expectedStrings)) {
+                throw "$regPath\$Name failed multi-string read-back verification"
+            }
+        }
+    }
+}
+
+function Set-EdidOverride {
+    param(
+        [Parameter(Mandatory = $true)][string]$ParametersPath,
+        [Parameter(Mandatory = $true)][byte[]]$Edid
+    )
+    if ($Edid.Length -eq 0 -or ($Edid.Length % 128) -ne 0) {
+        throw "EDID override requires non-empty 128-byte blocks; got $($Edid.Length) bytes"
+    }
+    $blockCount = [int]($Edid.Length / 128)
+    if ($blockCount -ne ([int]$Edid[126] + 1)) {
+        throw "EDID extension count does not match its $blockCount blocks"
+    }
+    if (-not (Get-Command reg.exe -ErrorAction SilentlyContinue)) {
+        throw 'reg.exe is required to publish EDID_OVERRIDE reliably'
+    }
+
+    $overridePath = Join-Path $ParametersPath 'EDID_OVERRIDE'
+    $regPath = Convert-ToRegExePath $overridePath
+    # Recreate this one target-scoped key so a shorter replacement EDID cannot
+    # inherit stale block 2/3 values. reg.exe is used deliberately: it is the
+    # supported path that stayed responsive on the locked Enum\DISPLAY tree on
+    # Windows PowerShell 5.1 in the GRID guest.
     $savedPreference = $ErrorActionPreference
     try {
+        # Missing is the normal first-run state. PowerShell 5.1 otherwise
+        # promotes reg.exe's expected stderr to a terminating NativeCommandError
+        # before the following exact-key create can run.
         $ErrorActionPreference = 'SilentlyContinue'
-        & reg.exe add $regPath /v 00000000 /t REG_SZ /d $Value /f 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Verbose "Protected device property was not writable: $regPath"
-        }
+        & reg.exe delete $regPath /f 2>$null | Out-Null
     } finally {
         $ErrorActionPreference = $savedPreference
+    }
+    # Do not issue a key-only `reg add`: on Windows 10 that materializes an
+    # empty default REG_SZ. Writing block 0 directly creates the key with only
+    # the Microsoft-defined numeric REG_BINARY values.
+    for ($blockNumber = 0; $blockNumber -lt $blockCount; $blockNumber++) {
+        $offset = $blockNumber * 128
+        [byte[]]$block = $Edid[$offset..($offset + 127)]
+        $hex = -join @($block | ForEach-Object { $_.ToString('X2') })
+        & reg.exe add $regPath /v ([string]$blockNumber) /t REG_BINARY `
+            /d $hex /f 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not write $regPath\$blockNumber"
+        }
+    }
+
+    $writtenKey = Get-Item -LiteralPath $overridePath -ErrorAction Stop
+    [string[]]$writtenNames = @($writtenKey.GetValueNames() | Sort-Object)
+    [string[]]$expectedNames = @(0..($blockCount - 1) |
+        ForEach-Object { [string]$_ })
+    if (-not (Test-StringArrayEqual -Left $writtenNames `
+        -Right $expectedNames)) {
+        throw "EDID_OVERRIDE value names are not exactly 0..$($blockCount - 1)"
+    }
+    for ($blockNumber = 0; $blockNumber -lt $blockCount; $blockNumber++) {
+        if ($writtenKey.GetValueKind([string]$blockNumber) -ne
+            [Microsoft.Win32.RegistryValueKind]::Binary) {
+            throw "EDID_OVERRIDE\$blockNumber is not REG_BINARY"
+        }
+        [byte[]]$actual = $writtenKey.GetValue([string]$blockNumber)
+        if ($actual.Length -ne 128) {
+            throw "EDID_OVERRIDE\$blockNumber has the wrong length"
+        }
+        for ($index = 0; $index -lt 128; $index++) {
+            if ($actual[$index] -ne $Edid[$blockNumber * 128 + $index]) {
+                throw "EDID_OVERRIDE\$blockNumber failed read-back verification"
+            }
+        }
     }
 }
 
@@ -504,38 +997,37 @@ function Set-MonitorRegistry {
 
     foreach ($device in @(Get-ChildItem -LiteralPath $base -ErrorAction SilentlyContinue)) {
         foreach ($instance in @(Get-ChildItem -LiteralPath $device.PSPath -ErrorAction SilentlyContinue)) {
-            $parameters = Join-Path $instance.PSPath 'Device Parameters'
-            Set-RegistryValue $parameters 'EDID' Binary $Edid
-            Set-RegistryValue $instance.PSPath 'HardwareID' MultiString ([string[]]@($hardwareId))
-            Set-RegistryValue $instance.PSPath 'CompatibleIDs' MultiString $compatibleIds
-            Set-RegistryValue $instance.PSPath 'DeviceDesc' String $Config.DisplayName
-            Set-RegistryValue $instance.PSPath 'FriendlyName' String $Config.DisplayName
-            Set-RegistryValue $instance.PSPath 'Mfg' String $Config.Manufacturer
-            Set-DeviceStringProperty $instance.PSPath '0004' $Config.DisplayName
-            Set-DeviceStringProperty $instance.PSPath '0009' $Config.Manufacturer
+            $deviceParametersPath = Join-Path $instance.PSPath 'Device Parameters'
+            if (-not (Test-Path -LiteralPath $deviceParametersPath)) { continue }
+            $parameterKey = Get-Item -LiteralPath $deviceParametersPath -ErrorAction Stop
+            if (@($parameterKey.GetValueNames()) -notcontains 'EDID') { continue }
+            # Invoke the exact-key override before any child function can alter
+            # a dynamically scoped local under Windows PowerShell 5.1, and
+            # recompute the provider path for each protected-tree write.
+            Set-EdidOverride -ParametersPath `
+                ([string](Join-Path $instance.PSPath 'Device Parameters')) `
+                -Edid $Edid
+            Set-MonitorRegistryValue `
+                -Path ([string](Join-Path $instance.PSPath 'Device Parameters')) `
+                -Name 'EDID' -Type Binary -Value $Edid
+            Set-MonitorRegistryValue $instance.PSPath 'HardwareID' MultiString `
+                ([string[]]@($hardwareId))
+            Set-MonitorRegistryValue $instance.PSPath 'CompatibleIDs' MultiString `
+                $compatibleIds
+            Set-MonitorRegistryValue $instance.PSPath 'DeviceDesc' String `
+                $Config.DisplayName
+            Set-MonitorRegistryValue $instance.PSPath 'FriendlyName' String `
+                $Config.DisplayName
+            Set-MonitorRegistryValue $instance.PSPath 'Mfg' String `
+                $Config.Manufacturer
             $count++
-            Write-Host ("  DISPLAY\{0}\{1} -> {2}" -f
-                $device.PSChildName, $instance.PSChildName, $Config.DisplayName)
+            Write-Host ("  DISPLAY\{0}\{1} -> {2}; EDID_OVERRIDE={3} block(s)" -f
+                $device.PSChildName, $instance.PSChildName,
+                $Config.DisplayName, ($Edid.Length / 128))
         }
     }
     if ($count -eq 0) { throw 'No monitor instances were found under Enum\DISPLAY' }
     return $count
-}
-
-function Set-MonitorClassNames {
-    param([Parameter(Mandatory = $true)][object]$Config)
-
-    $root = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}'
-    if (-not (Test-Path -LiteralPath $root)) { return }
-    foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSChildName -match '^\d{4}$' })) {
-        if (Get-ItemProperty -LiteralPath $key.PSPath -Name DriverDesc -ErrorAction SilentlyContinue) {
-            Set-RegistryValue $key.PSPath 'DriverDesc' String $Config.DisplayName
-            Set-RegistryValue $key.PSPath 'ProviderName' String $Config.Manufacturer
-            Set-DeviceStringProperty $key.PSPath '0004' $Config.DisplayName
-            Set-DeviceStringProperty $key.PSPath '0009' $Config.Manufacturer
-        }
-    }
 }
 
 function Clear-GraphicsModeCache {
@@ -631,49 +1123,101 @@ function Install-MonitorRefreshTask {
     $monitorId = $Config.Vendor + ('{0:X4}' -f $Config.ProductId)
     $template = @'
 # Generated by spoof-monitor.ps1.  This task is installed only by -InstallTask.
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
 Start-Sleep -Seconds 3
 $edid = [Convert]::FromBase64String('__EDID__')
 $displayName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__NAME__'))
 $manufacturer = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__MFG__'))
 $hardwareId = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__HWID__'))
 $base = 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY'
-$classRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}'
-$formatId = '{a8b865dd-2e3d-4094-ad97-e593a70c75d6}'
-function Set-Value($path, $name, $type, $value) {
-    if (-not (Test-Path -LiteralPath $path)) {
-        New-Item -Path $path -ItemType RegistryKey -Force | Out-Null
-    }
-    New-ItemProperty -Path $path -Name $name -PropertyType $type -Value $value -Force | Out-Null
-}
 function To-RegPath($path) {
     $result = $path -replace '^Microsoft\.PowerShell\.Core\\Registry::', ''
     $result = $result -replace '^HKEY_LOCAL_MACHINE', 'HKLM'
     return ($result -replace '^HKLM:', 'HKLM')
 }
-function Set-DevProp($path, $id, $value) {
-    $propertyPath = Join-Path $path ("Properties\$formatId\$id")
-    & reg.exe add (To-RegPath $propertyPath) /v 00000000 /t REG_SZ /d $value /f 2>$null | Out-Null
+function Set-Value($path, $name, $type, $value) {
+    $regPath = To-RegPath $path
+    $regType = switch ($type) {
+        Binary { 'REG_BINARY' }
+        String { 'REG_SZ' }
+        MultiString { 'REG_MULTI_SZ' }
+        default { throw "Unsupported registry type $type" }
+    }
+    $data = switch ($type) {
+        Binary { -join @([byte[]]$value | ForEach-Object { $_.ToString('X2') }) }
+        String { [string]$value }
+        MultiString { ([string[]]$value) -join '\0' }
+    }
+    & reg.exe add $regPath /v $name /t $regType /d $data /f 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not write $regPath\$name as $regType"
+    }
+    $key = Get-Item -LiteralPath $path -ErrorAction Stop
+    $expectedKind = switch ($type) {
+        Binary { [Microsoft.Win32.RegistryValueKind]::Binary }
+        String { [Microsoft.Win32.RegistryValueKind]::String }
+        MultiString { [Microsoft.Win32.RegistryValueKind]::MultiString }
+    }
+    if ($key.GetValueKind($name) -ne $expectedKind) {
+        throw "$regPath\$name failed registry-type verification"
+    }
+}
+function Set-Override($deviceParametersPath, [byte[]]$bytes) {
+    if ($bytes.Length -eq 0 -or ($bytes.Length % 128) -ne 0) {
+        throw 'Invalid EDID block length'
+    }
+    $count = [int]($bytes.Length / 128)
+    if ($count -ne ([int]$bytes[126] + 1)) {
+        throw 'EDID extension count mismatch'
+    }
+    $path = Join-Path $deviceParametersPath 'EDID_OVERRIDE'
+    $regPath = To-RegPath $path
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        & reg.exe delete $regPath /f 2>$null | Out-Null
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    for ($blockNumber = 0; $blockNumber -lt $count; $blockNumber++) {
+        $offset = $blockNumber * 128
+        [byte[]]$block = $bytes[$offset..($offset + 127)]
+        $hex = -join @($block | ForEach-Object { $_.ToString('X2') })
+        & reg.exe add $regPath /v ([string]$blockNumber) /t REG_BINARY `
+            /d $hex /f 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not write $regPath\$blockNumber"
+        }
+    }
+    $key = Get-Item -LiteralPath $path -ErrorAction Stop
+    if (@($key.GetValueNames()).Count -ne $count) {
+        throw 'EDID_OVERRIDE retained a stale block'
+    }
+    for ($blockNumber = 0; $blockNumber -lt $count; $blockNumber++) {
+        [byte[]]$actual = $key.GetValue([string]$blockNumber)
+        if ($actual.Length -ne 128) {
+            throw "EDID_OVERRIDE\$blockNumber has the wrong length"
+        }
+        for ($index = 0; $index -lt 128; $index++) {
+            if ($actual[$index] -ne $bytes[$blockNumber * 128 + $index]) {
+                throw "EDID_OVERRIDE\$blockNumber failed verification"
+            }
+        }
+    }
 }
 foreach ($device in @(Get-ChildItem -LiteralPath $base)) {
     foreach ($instance in @(Get-ChildItem -LiteralPath $device.PSPath)) {
-        Set-Value (Join-Path $instance.PSPath 'Device Parameters') EDID Binary $edid
+        $deviceParametersPath = Join-Path $instance.PSPath 'Device Parameters'
+        if (-not (Test-Path -LiteralPath $deviceParametersPath)) { continue }
+        $parameterKey = Get-Item -LiteralPath $deviceParametersPath
+        if (@($parameterKey.GetValueNames()) -notcontains 'EDID') { continue }
+        Set-Value $deviceParametersPath EDID Binary $edid
+        Set-Override $deviceParametersPath $edid
         Set-Value $instance.PSPath HardwareID MultiString ([string[]]@($hardwareId))
         Set-Value $instance.PSPath CompatibleIDs MultiString ([string[]]@('*PNP09FF'))
         Set-Value $instance.PSPath DeviceDesc String $displayName
         Set-Value $instance.PSPath FriendlyName String $displayName
         Set-Value $instance.PSPath Mfg String $manufacturer
-        Set-DevProp $instance.PSPath 0004 $displayName
-        Set-DevProp $instance.PSPath 0009 $manufacturer
-    }
-}
-foreach ($key in @(Get-ChildItem -LiteralPath $classRoot |
-    Where-Object { $_.PSChildName -match '^\d{4}$' })) {
-    if (Get-ItemProperty -LiteralPath $key.PSPath -Name DriverDesc) {
-        Set-Value $key.PSPath DriverDesc String $displayName
-        Set-Value $key.PSPath ProviderName String $manufacturer
-        Set-DevProp $key.PSPath 0004 $displayName
-        Set-DevProp $key.PSPath 0009 $manufacturer
     }
 }
 '@
@@ -727,10 +1271,9 @@ if ([string]::IsNullOrWhiteSpace($Serial)) {
     $effectiveSerial = New-DefaultSerial $config
 } else {
     $effectiveSerial = $Serial.Trim()
-    if ($effectiveSerial.Length -gt 12 -or
-        -not (Test-PrintableAscii -Value $effectiveSerial)) {
-        throw '-Serial must contain 1..12 printable ASCII characters'
-    }
+}
+if (-not (Test-MonitorSerial -Config $config -Value $effectiveSerial)) {
+    throw "-Serial does not match profile '$($config.Key)' policy '$($config.SerialPolicy)'"
 }
 $binarySerial = Get-StableUInt32 -Value $effectiveSerial
 [byte[]]$edid = Build-FhdEdid $config $effectiveSerial $binarySerial
@@ -743,8 +1286,8 @@ if ($BuildOnly) {
         New-Item -Path $outputDirectory -ItemType Directory -Force | Out-Null
     }
     [IO.File]::WriteAllBytes($outputPath, $edid)
-    Write-Host ("Built 128-byte EDID 1.4: {0} ({1}, serial {2}, checksum 0x{3:X2})" -f
-        $outputPath, $config.DisplayName, $effectiveSerial, $edid[127])
+    Write-Host ("Built 256-byte EDID 1.4 + CTA: {0} ({1}, serial {2}, checksums 0x{3:X2}/0x{4:X2})" -f
+        $outputPath, $config.DisplayName, $effectiveSerial, $edid[127], $edid[255])
     return
 }
 
@@ -752,12 +1295,14 @@ Assert-Administrator
 Write-Host ("[spoof-monitor] profile={0} monitor='{1}' PNP={2}{3:X4} serial={4}" -f
     $config.Key, $config.DisplayName, $config.Vendor, $config.ProductId, $effectiveSerial) -ForegroundColor Cyan
 
+Write-Host '[spoof-monitor] validating and applying the locked NVIDIA FHD/1K source-mode policy' -ForegroundColor Cyan
+$nvidiaModeTargets = Set-NvidiaFhdModePolicy
+
 Write-Host '[spoof-monitor] removing old persistent monitor-refresh tasks' -ForegroundColor Cyan
 Remove-LegacyMonitorTasks
 
 Write-Host '[spoof-monitor] writing EDID, IDs, and friendly names to every DISPLAY instance' -ForegroundColor Cyan
 $firstPass = Set-MonitorRegistry $edid $config
-Set-MonitorClassNames $config
 
 Write-Host '[spoof-monitor] clearing cached graphics mode and monitor data stores' -ForegroundColor Cyan
 Clear-GraphicsModeCache
@@ -769,12 +1314,11 @@ Invoke-MonitorDeviceCycle
 # Reapply all fields once after enumeration so the final registry state agrees.
 Write-Host '[spoof-monitor] synchronizing post-cycle DISPLAY instances' -ForegroundColor Cyan
 $secondPass = Set-MonitorRegistry $edid $config
-Set-MonitorClassNames $config
 
 if ($InstallTask) {
     Write-Host '[spoof-monitor] installing opt-in persistent refresh task' -ForegroundColor Cyan
     Install-MonitorRefreshTask $edid $config
 }
 
-Write-Host ("[spoof-monitor] complete: {0} instance(s) before cycle, {1} after cycle; restart Windows if Settings is still open." -f
-    $firstPass, $secondPass) -ForegroundColor Green
+Write-Host ("[spoof-monitor] complete: {0} instance(s) before cycle, {1} after cycle; NVIDIA mode targets={2}; fully restart Windows before validating the mode list." -f
+    $firstPass, $secondPass, $nvidiaModeTargets) -ForegroundColor Green

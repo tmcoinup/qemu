@@ -92,6 +92,7 @@ $VersionsRoot = Join-Path $InstallRoot 'versions'
 $InstalledApply = Join-Path $InstallRoot 'apply-vm-profile.ps1'
 $InstalledConfig = Join-Path $InstallRoot 'profile.json'
 $InstalledPatch = Join-Path $InstallRoot 'patch-grid-strings.ps1'
+$InstalledIdentityCatalog = Join-Path $InstallRoot 'vgpu-profile-catalog.json'
 $InstalledMonitor = Join-Path $InstallRoot 'spoof-monitor.ps1'
 $InstalledMonitorCatalog = Join-Path $InstallRoot 'monitor-profiles.tsv'
 $GpuTaskName = 'RefreshGridNames'
@@ -206,13 +207,42 @@ function ConvertTo-ValidatedMonitor {
     Assert-AllowedProperties $Raw @(
         'profile', 'serial', 'displayName', 'nativeX', 'nativeY', 'refreshHz'
     ) 'monitor'
+    $profile = ConvertTo-RequiredString `
+        (Get-PropertyValue $Raw 'profile' 'monitor') `
+        'monitor.profile' 64 '^[a-z0-9][a-z0-9-]*$'
+    $serial = ConvertTo-RequiredString `
+        (Get-PropertyValue $Raw 'serial' 'monitor') `
+        'monitor.serial' 13 '^[A-Z0-9]+$'
+    switch -CaseSensitive ($profile) {
+        'samsung-s24f350' {
+            if ($serial -cnotmatch '^H4ZMC[0-9]{5}$') {
+                throw "Invalid Samsung S24F350 monitor serial '$serial'."
+            }
+            if ($serial -cin @('H4ZMC01676', 'H4ZMC01889')) {
+                throw "Samsung S24F350 monitor serial copies a reserved evidence sample."
+            }
+        }
+        'redmi-rmmnt238nf' {
+            if ($serial -cnotmatch '^29200[0-9]{8}$') {
+                throw "Invalid Redmi RMMNT238NF monitor serial '$serial'."
+            }
+            if ($serial -cin @('2920000167575', '2920000116680')) {
+                throw "Redmi RMMNT238NF monitor serial copies a reserved evidence sample."
+            }
+        }
+        default {
+            # The host staging path validates the catalog-specific prefix and
+            # hexadecimal suffix.  The offline guest schema has only the key,
+            # so it can independently enforce the generic policy's canonical
+            # 12-byte uppercase-alphanumeric envelope.
+            if ($serial.Length -ne 12) {
+                throw "Invalid generic monitor serial '$serial'."
+            }
+        }
+    }
     return [pscustomobject]@{
-        Profile = ConvertTo-RequiredString `
-            (Get-PropertyValue $Raw 'profile' 'monitor') `
-            'monitor.profile' 64 '^[a-z0-9][a-z0-9-]*$'
-        Serial = ConvertTo-RequiredString `
-            (Get-PropertyValue $Raw 'serial' 'monitor') `
-            'monitor.serial' 12 '^[\x21-\x7e]+$'
+        Profile = $profile
+        Serial = $serial
         DisplayName = ConvertTo-RequiredString `
             (Get-PropertyValue $Raw 'displayName' 'monitor') `
             'monitor.displayName' 128
@@ -232,11 +262,15 @@ function ConvertTo-ValidatedConfig {
     param([Parameter(Mandatory = $true)][object]$Raw)
 
     Assert-AllowedProperties $Raw @(
-        'schemaVersion', 'vmId', 'vmUuid', 'spoofMode', 'gpu', 'monitor'
+        'schemaVersion', 'catalogSha256', 'vmId', 'vmUuid', 'spoofMode',
+        'gpu', 'monitor'
     ) 'top-level'
     $schema = ConvertTo-RequiredInt `
         (Get-PropertyValue $Raw 'schemaVersion' 'top-level') `
-        'schemaVersion' 1 1
+        'schemaVersion' 2 2
+    $catalogSha256 = ConvertTo-RequiredString `
+        (Get-PropertyValue $Raw 'catalogSha256' 'top-level') `
+        'catalogSha256' 64 '^[0-9A-F]{64}$'
     $vmId = ConvertTo-RequiredInt `
         (Get-PropertyValue $Raw 'vmId' 'top-level') `
         'vmId' 1 2147483647
@@ -259,7 +293,9 @@ function ConvertTo-ValidatedConfig {
         'nvapiPciSubDeviceId', 'nvapiPciRevisionId',
         'memoryType', 'memoryMaker', 'cudaCores', 'shaderSubPipes',
         'ropCount', 'tmuCount', 'architecture', 'implementation', 'chipRevision',
-        'pcieWidth', 'vbiosVersion'
+        'pcieWidth', 'vbiosVersion', 'boardBrand', 'boardModel',
+        'boardIdentity', 'serialPolicy', 'identityScope', 'memoryTypeName',
+        'memoryMakerName', 'memoryMakerNvapiName'
     ) 'gpu'
     $expectedPnpId = ConvertTo-RequiredString `
         (Get-PropertyValue $gpuRaw 'expectedPnpId' 'gpu') `
@@ -273,6 +309,32 @@ function ConvertTo-ValidatedConfig {
             'gpu.profile' 64 '^[a-z0-9][a-z0-9_-]*$'
         Name = ConvertTo-RequiredString `
             (Get-PropertyValue $gpuRaw 'name' 'gpu') 'gpu.name' 31
+        BoardBrand = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'boardBrand' 'gpu') `
+            'gpu.boardBrand' 31 '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$'
+        BoardModel = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'boardModel' 'gpu') `
+            'gpu.boardModel' 31 '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$'
+        BoardIdentity = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'boardIdentity' 'gpu') `
+            'gpu.boardIdentity' 64 `
+            '^subsystem=0x[0-9A-F]{4}:0x[0-9A-F]{4}$'
+        SerialPolicy = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'serialPolicy' 'gpu') `
+            'gpu.serialPolicy' 32 '^not-exposed$'
+        IdentityScope = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'identityScope' 'gpu') `
+            'gpu.identityScope' 96 `
+            '^B:system-pci=host-mdev,catalog=protected-user-mode$'
+        MemoryTypeName = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'memoryTypeName' 'gpu') `
+            'gpu.memoryTypeName' 16 '^GDDR5$'
+        MemoryMakerName = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'memoryMakerName' 'gpu') `
+            'gpu.memoryMakerName' 31 '^(Samsung|SK hynix|Micron)$'
+        MemoryMakerNvapiName = ConvertTo-RequiredString `
+            (Get-PropertyValue $gpuRaw 'memoryMakerNvapiName' 'gpu') `
+            'gpu.memoryMakerNvapiName' 31 '^(Samsung|Hynix|Micron)$'
         NvapiPciVendorId = ConvertTo-RequiredInt `
             (Get-PropertyValue $gpuRaw 'nvapiPciVendorId' 'gpu') `
             'gpu.nvapiPciVendorId' 1 65535
@@ -344,8 +406,17 @@ function ConvertTo-ValidatedConfig {
     if ($gpu.BoostClockMHz -lt $gpu.CoreClockMHz) {
         throw 'gpu.boostClockMHz must not be lower than gpu.coreClockMHz.'
     }
-    if ($gpu.MemoryType -ne 8) {
-        throw "Invalid 'gpu.memoryType' value '$($gpu.MemoryType)' (only the audited GDDR5 enum 8 is supported)."
+    $memoryMakerContract = switch ([int]$gpu.MemoryMaker) {
+        1 { @('Samsung', 'Samsung') }
+        6 { @('SK hynix', 'Hynix') }
+        10 { @('Micron', 'Micron') }
+        default { $null }
+    }
+    if ($gpu.MemoryType -ne 8 -or $null -eq $memoryMakerContract -or
+        $gpu.MemoryTypeName -cne 'GDDR5' -or
+        $gpu.MemoryMakerName -cne $memoryMakerContract[0] -or
+        $gpu.MemoryMakerNvapiName -cne $memoryMakerContract[1]) {
+        throw 'GPU VRAM type, maker enum, and maker names are not one supported atomic mapping.'
     }
     if (@(1, 2, 4, 8, 16, 32) -notcontains $gpu.PcieWidth) {
         throw "Invalid 'gpu.pcieWidth' value '$($gpu.PcieWidth)' (expected a physical lane count)."
@@ -375,6 +446,7 @@ function ConvertTo-ValidatedConfig {
 
     return [pscustomobject]@{
         SchemaVersion = $schema
+        CatalogSha256 = $catalogSha256
         VmId = $vmId
         VmUuid = $vmUuid
         SpoofMode = $spoofMode
@@ -451,12 +523,12 @@ function ConvertTo-ManifestAsset {
 function ConvertTo-ValidatedManifest {
     param([Parameter(Mandatory = $true)][object]$Raw)
     Assert-AllowedProperties $Raw @(
-        'schemaVersion', 'vmId', 'profile', 'patch',
+        'schemaVersion', 'vmId', 'profile', 'patch', 'catalog',
         'monitorScript', 'monitorCatalog'
     ) 'manifest'
     $schema = ConvertTo-RequiredInt `
         (Get-PropertyValue $Raw 'schemaVersion' 'manifest') `
-        'manifest.schemaVersion' 1 1
+        'manifest.schemaVersion' 2 2
     $vmId = ConvertTo-RequiredInt `
         (Get-PropertyValue $Raw 'vmId' 'manifest') `
         'manifest.vmId' 1 2147483647
@@ -464,6 +536,8 @@ function ConvertTo-ValidatedManifest {
         (Get-NullablePropertyValue $Raw 'profile' 'manifest') 'profile' -Required
     $patch = ConvertTo-ManifestAsset `
         (Get-NullablePropertyValue $Raw 'patch' 'manifest') 'patch' -Required
+    $catalog = ConvertTo-ManifestAsset `
+        (Get-NullablePropertyValue $Raw 'catalog' 'manifest') 'catalog' -Required
     $monitorScript = ConvertTo-ManifestAsset `
         (Get-NullablePropertyValue $Raw 'monitorScript' 'manifest') 'monitorScript'
     $monitorCatalog = ConvertTo-ManifestAsset `
@@ -477,6 +551,7 @@ function ConvertTo-ValidatedManifest {
         VmId = $vmId
         Profile = $profile
         Patch = $patch
+        Catalog = $catalog
         MonitorScript = $monitorScript
         MonitorCatalog = $monitorCatalog
     }
@@ -534,6 +609,125 @@ function Download-Bytes {
     return ,$bytes
 }
 
+function Read-And-ValidateIdentityCatalog {
+    param(
+        [Parameter(Mandatory = $true)][object]$Config,
+        [AllowNull()][object]$Manifest,
+        [AllowNull()][string]$SourceDirectory,
+        [AllowNull()][string]$ResolvedBaseUrl
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ResolvedBaseUrl)) {
+        if ($null -eq $Manifest -or $null -eq $Manifest.Catalog) {
+            throw 'Remote schema-2 profile has no hash-authorized identity catalog.'
+        }
+        $catalogUrl = $ResolvedBaseUrl.TrimEnd('/') + '/' +
+            $Manifest.Catalog.Name
+        [byte[]]$catalogBytes = Download-Bytes $catalogUrl `
+            'vGPU identity catalog' 1048576
+        Assert-Sha256 $catalogBytes $Manifest.Catalog.Sha256 `
+            'vGPU identity catalog'
+    } else {
+        $catalogPath = $null
+        foreach ($directory in @($SourceDirectory, $PSScriptRoot, $InstallRoot)) {
+            if ([string]::IsNullOrWhiteSpace($directory)) { continue }
+            $candidate = Join-Path $directory 'vgpu-profile-catalog.json'
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $catalogPath = $candidate
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($catalogPath)) {
+            throw 'Schema-2 vGPU identity catalog is unavailable beside the profile/script.'
+        }
+        [byte[]]$catalogBytes = [IO.File]::ReadAllBytes($catalogPath)
+        if ($catalogBytes.Length -lt 1 -or $catalogBytes.Length -gt 1048576) {
+            throw "vGPU identity catalog size $($catalogBytes.Length) is invalid."
+        }
+    }
+    $catalogText = ConvertFrom-Utf8Bytes $catalogBytes
+    try {
+        $catalog = $catalogText | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "vGPU identity catalog is invalid JSON: $($_.Exception.Message)"
+    }
+    Assert-AllowedProperties $catalog @(
+        'schemaVersion', 'catalogSha256', 'identityMode', 'transportPnpId',
+        'profiles'
+    ) 'identity catalog'
+    if ([int](Get-PropertyValue $catalog 'schemaVersion' 'identity catalog') -ne 2 -or
+        [string](Get-PropertyValue $catalog 'catalogSha256' 'identity catalog') -cne
+            [string]$Config.CatalogSha256 -or
+        [string](Get-PropertyValue $catalog 'identityMode' 'identity catalog') -cne
+            'protected-user-mode' -or
+        [string](Get-PropertyValue $catalog 'transportPnpId' 'identity catalog') -cne
+            'PCI\VEN_10DE&DEV_1E30') {
+        throw 'Identity catalog header conflicts with the schema-2 VM profile.'
+    }
+    $profiles = @(Get-PropertyValue $catalog 'profiles' 'identity catalog')
+    if ($profiles.Count -lt 1 -or $profiles.Count -gt 64) {
+        throw "Identity catalog profile count $($profiles.Count) is outside 1..64."
+    }
+    $selectedRows = @($profiles | Where-Object {
+        [string]$_.profile -ceq [string]$Config.Gpu.Profile
+    })
+    if ($selectedRows.Count -ne 1) {
+        throw "Identity catalog does not uniquely select '$($Config.Gpu.Profile)'."
+    }
+    $selected = $selectedRows[0]
+    Assert-AllowedProperties $selected @(
+        'profile', 'name', 'expectedPnpId', 'boardBrand', 'boardModel',
+        'boardIdentity', 'serialPolicy', 'identityScope', 'memoryTypeName',
+        'memoryMakerName', 'memoryMakerNvapiName', 'nvapiPciVendorId',
+        'nvapiPciDeviceId', 'nvapiPciSubVendorId', 'nvapiPciSubDeviceId',
+        'nvapiPciRevisionId', 'coreClockMHz', 'boostClockMHz',
+        'memoryClockMHz', 'memoryBusBits', 'memoryBandwidthMBps', 'vramMB',
+        'memoryType', 'memoryMaker', 'cudaCores', 'shaderSubPipes',
+        'ropCount', 'tmuCount', 'architecture', 'implementation',
+        'chipRevision', 'pcieWidth', 'vbiosVersion'
+    ) 'identity catalog selected profile'
+    foreach ($pair in @(
+        @('Profile', 'profile'), @('Name', 'name'),
+        @('ExpectedPnpId', 'expectedPnpId'),
+        @('BoardBrand', 'boardBrand'), @('BoardModel', 'boardModel'),
+        @('BoardIdentity', 'boardIdentity'), @('SerialPolicy', 'serialPolicy'),
+        @('IdentityScope', 'identityScope'),
+        @('MemoryTypeName', 'memoryTypeName'),
+        @('MemoryMakerName', 'memoryMakerName'),
+        @('MemoryMakerNvapiName', 'memoryMakerNvapiName'),
+        @('VbiosVersion', 'vbiosVersion')
+    )) {
+        if ([string]$Config.Gpu.($pair[0]) -cne
+            [string]$selected.($pair[1])) {
+            throw "GPU field '$($pair[1])' is split from the selected catalog row."
+        }
+    }
+    foreach ($pair in @(
+        @('NvapiPciVendorId', 'nvapiPciVendorId'),
+        @('NvapiPciDeviceId', 'nvapiPciDeviceId'),
+        @('NvapiPciSubVendorId', 'nvapiPciSubVendorId'),
+        @('NvapiPciSubDeviceId', 'nvapiPciSubDeviceId'),
+        @('NvapiPciRevisionId', 'nvapiPciRevisionId'),
+        @('CoreClockMHz', 'coreClockMHz'),
+        @('BoostClockMHz', 'boostClockMHz'),
+        @('MemoryClockMHz', 'memoryClockMHz'),
+        @('MemoryBusBits', 'memoryBusBits'),
+        @('MemoryBandwidthMBps', 'memoryBandwidthMBps'),
+        @('VramMB', 'vramMB'), @('MemoryType', 'memoryType'),
+        @('MemoryMaker', 'memoryMaker'), @('CudaCores', 'cudaCores'),
+        @('ShaderSubPipes', 'shaderSubPipes'), @('RopCount', 'ropCount'),
+        @('TmuCount', 'tmuCount'), @('Architecture', 'architecture'),
+        @('Implementation', 'implementation'),
+        @('ChipRevision', 'chipRevision'), @('PcieWidth', 'pcieWidth')
+    )) {
+        if ([int64]$Config.Gpu.($pair[0]) -ne
+            [int64]$selected.($pair[1])) {
+            throw "GPU field '$($pair[1])' is split from the selected catalog row."
+        }
+    }
+    Write-Pass "profile '$($Config.Gpu.Profile)' matches one complete schema-2 identity row."
+    return $catalogText
+}
+
 function Read-Configuration {
     $sourceDirectory = $null
     $resolvedBaseUrl = $null
@@ -577,12 +771,15 @@ function Read-Configuration {
     if ($null -ne $manifest -and $manifest.VmId -ne $config.VmId) {
         throw "Manifest vmId $($manifest.VmId) does not match profile vmId $($config.VmId)."
     }
+    $catalogText = Read-And-ValidateIdentityCatalog $config $manifest `
+        $sourceDirectory $resolvedBaseUrl
     return [pscustomobject]@{
         Text = $jsonText
         Config = $config
         SourceDirectory = $sourceDirectory
         BaseUrl = $resolvedBaseUrl
         Manifest = $manifest
+        CatalogText = $catalogText
     }
 }
 
@@ -765,9 +962,14 @@ function Disable-HibernationExplicitly {
 function Invoke-GpuPatch {
     param(
         [Parameter(Mandatory = $true)][object]$Gpu,
-        [Parameter(Mandatory = $true)][string]$PatchPath
+        [Parameter(Mandatory = $true)][string]$PatchPath,
+        [Parameter(Mandatory = $true)][string]$CatalogPath,
+        [Parameter(Mandatory = $true)][string]$CatalogSha256
     )
     $arguments = @{
+        CatalogPath = $CatalogPath
+        CatalogSha256 = $CatalogSha256
+        ProfileKey = $Gpu.Profile
         TargetName = $Gpu.Name
         NvapiPciVendorId = $Gpu.NvapiPciVendorId
         NvapiPciDeviceId = $Gpu.NvapiPciDeviceId
@@ -883,13 +1085,16 @@ function New-ProfileVersion {
     $candidateApply = Join-Path $candidateRoot 'apply-vm-profile.ps1'
     $candidateConfig = Join-Path $candidateRoot 'profile.json'
     $candidatePatch = Join-Path $candidateRoot 'patch-grid-strings.ps1'
+    $candidateIdentityCatalog = Join-Path $candidateRoot `
+        'vgpu-profile-catalog.json'
     $candidateMonitor = Join-Path $candidateRoot 'spoof-monitor.ps1'
-    $candidateCatalog = Join-Path $candidateRoot 'monitor-profiles.tsv'
+    $candidateMonitorCatalog = Join-Path $candidateRoot 'monitor-profiles.tsv'
     $candidateCreated = Join-Path $candidateRoot 'version-created-utc.txt'
     try {
         New-Item -Path $candidateRoot -ItemType Directory -ErrorAction Stop | Out-Null
         Copy-FileAtomically $PSCommandPath $candidateApply
         Write-Utf8NoBom $candidateConfig $Source.Text
+        Write-Utf8NoBom $candidateIdentityCatalog $Source.CatalogText
 
         $patchAsset = if ($null -ne $Source.Manifest) {
             $Source.Manifest.Patch
@@ -912,15 +1117,18 @@ function New-ProfileVersion {
             }
             Install-Dependency 'spoof-monitor.ps1' $candidateMonitor `
                 $Source.SourceDirectory $Source.BaseUrl $monitorAsset
-            Install-Dependency 'monitor-profiles.tsv' $candidateCatalog `
+            Install-Dependency 'monitor-profiles.tsv' $candidateMonitorCatalog `
                 $Source.SourceDirectory $Source.BaseUrl $catalogAsset
         }
 
         Assert-PowerShellScriptParses $candidateApply 'candidate apply script'
         Assert-PowerShellScriptParses $candidatePatch 'candidate GPU patch script'
+        if ((Get-Item -LiteralPath $candidateIdentityCatalog).Length -eq 0) {
+            throw 'candidate vGPU identity catalog is empty.'
+        }
         if ($OnlineMonitorRescue -and -not $GpuOnly) {
             Assert-PowerShellScriptParses $candidateMonitor 'candidate monitor script'
-            if ((Get-Item -LiteralPath $candidateCatalog).Length -eq 0) {
+            if ((Get-Item -LiteralPath $candidateMonitorCatalog).Length -eq 0) {
                 throw 'candidate monitor catalog is empty.'
             }
         }
@@ -933,6 +1141,7 @@ function New-ProfileVersion {
             Apply = Join-Path $finalRoot 'apply-vm-profile.ps1'
             Config = Join-Path $finalRoot 'profile.json'
             Patch = Join-Path $finalRoot 'patch-grid-strings.ps1'
+            IdentityCatalog = Join-Path $finalRoot 'vgpu-profile-catalog.json'
             Monitor = Join-Path $finalRoot 'spoof-monitor.ps1'
             MonitorCatalog = Join-Path $finalRoot 'monitor-profiles.tsv'
             Created = Join-Path $finalRoot 'version-created-utc.txt'
@@ -953,6 +1162,7 @@ function Publish-CompatibilityCopies {
         Copy-FileAtomically $Version.Apply $InstalledApply
         Copy-FileAtomically $Version.Config $InstalledConfig
         Copy-FileAtomically $Version.Patch $InstalledPatch
+        Copy-FileAtomically $Version.IdentityCatalog $InstalledIdentityCatalog
         if (Test-Path -LiteralPath $Version.Monitor -PathType Leaf) {
             Copy-FileAtomically $Version.Monitor $InstalledMonitor
         }
@@ -1168,6 +1378,8 @@ function Test-GpuTask {
             $applyDirectory = [IO.Path]::GetDirectoryName($taskApplyPath)
             $configDirectory = [IO.Path]::GetDirectoryName($taskConfigPath)
             $taskPatchPath = Join-Path $applyDirectory 'patch-grid-strings.ps1'
+            $taskCatalogPath = Join-Path $applyDirectory `
+                'vgpu-profile-catalog.json'
             $createdPath = Join-Path $applyDirectory 'version-created-utc.txt'
             $versionsPrefix = [IO.Path]::GetFullPath($VersionsRoot).TrimEnd('\') + '\'
             if ($applyDirectory -ine $configDirectory -or
@@ -1178,6 +1390,7 @@ function Test-GpuTask {
                 -not (Test-Path -LiteralPath $taskApplyPath -PathType Leaf) -or
                 -not (Test-Path -LiteralPath $taskConfigPath -PathType Leaf) -or
                 -not (Test-Path -LiteralPath $taskPatchPath -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $taskCatalogPath -PathType Leaf) -or
                 -not (Test-Path -LiteralPath $createdPath -PathType Leaf)) {
                 $problems += 'task action does not reference one complete immutable version directory'
             } else {
@@ -1316,11 +1529,16 @@ function Invoke-Main {
             throw '-GpuOnly must run from one immutable QemuVmProfile version directory.'
         }
         $taskPatch = Join-Path $taskRoot 'patch-grid-strings.ps1'
+        $taskCatalog = Join-Path $taskRoot 'vgpu-profile-catalog.json'
         if (-not (Test-Path -LiteralPath $taskPatch -PathType Leaf)) {
             throw "Offline GPU patch is missing: $taskPatch"
         }
+        if (-not (Test-Path -LiteralPath $taskCatalog -PathType Leaf)) {
+            throw "Offline vGPU identity catalog is missing: $taskCatalog"
+        }
         Assert-PowerShellScriptParses $taskPatch 'offline GPU patch script'
-        Invoke-GpuPatch $config.Gpu $taskPatch
+        Invoke-GpuPatch $config.Gpu $taskPatch $taskCatalog `
+            $config.CatalogSha256
         Write-Host ''
         Write-Host '[vm-profile] offline refresh verification' -ForegroundColor Cyan
         Test-ProfileState $config
@@ -1335,7 +1553,8 @@ function Invoke-Main {
         $version = New-ProfileVersion $source
 
         if ($DisableHibernation) { Disable-HibernationExplicitly }
-        Invoke-GpuPatch $config.Gpu $version.Patch
+        Invoke-GpuPatch $config.Gpu $version.Patch $version.IdentityCatalog `
+            $config.CatalogSha256
         if ($OnlineMonitorRescue) {
             Invoke-OnlineMonitorRepair $config.Monitor $version.Monitor
         }

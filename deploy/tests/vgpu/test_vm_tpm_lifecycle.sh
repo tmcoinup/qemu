@@ -297,7 +297,7 @@ vm_tpm_start 41 "$TMP_DIR/missing/qemu" 1 >/dev/null
 [[ ${#VM_TPM_QEMU_ARGS[@]} -eq 6 ]] || fail 'dry-run TPM argv length'
 [[ "${VM_TPM_QEMU_ARGS[0]}" == -chardev ]] || fail 'dry-run chardev option'
 [[ "${VM_TPM_QEMU_ARGS[1]}" == \
-    "socket,id=chrtpm,path=$VM_ROOT/vm41/run/swtpm.sock" ]] \
+    "socket,id=chrtpm,path=$VM_ROOT/41/run/swtpm.sock" ]] \
     || fail 'dry-run socket argument'
 [[ "${VM_TPM_QEMU_ARGS[3]}" == emulator,id=tpm0,chardev=chrtpm ]] \
     || fail 'dry-run tpmdev argument'
@@ -309,7 +309,7 @@ VM_TPM_VERSION=1.2
 vm_tpm_start 40 "$TMP_DIR/missing/qemu" 1 >/dev/null
 [[ ${#VM_TPM_QEMU_ARGS[@]} -eq 6 ]] || fail 'TPM 1.2 dry-run argv length'
 [[ "${VM_TPM_QEMU_ARGS[1]}" == \
-    "socket,id=chrtpm,path=$VM_ROOT/vm40/run/swtpm.sock" ]] \
+    "socket,id=chrtpm,path=$VM_ROOT/40/run/swtpm.sock" ]] \
     || fail 'TPM 1.2 dry-run socket argument'
 [[ "${VM_TPM_QEMU_ARGS[5]}" == tpm-tis,tpmdev=tpm0 ]] \
     || fail 'TPM 1.2 dry-run TIS argument'
@@ -322,7 +322,7 @@ printf -v UTF8_SEGMENT '测%.0s' {1..30}
 if (
     VM_ROOT="$TMP_DIR/$UTF8_SEGMENT/vms"
     unset IMAGE_ROOT ISO_DIR STAGE_DIR VM_INSTANCES_DIR VM_CONFIG_DIR
-    unset VM_DISK_DIR VM_BASE_DIR VM_NVRAM_DIR VM_RUN_DIR VM_LOG_DIR
+    unset VMS_DIR VM_DISK_DIR VM_BASE_DIR VM_NVRAM_DIR VM_RUN_DIR VM_LOG_DIR
     unset VM_ASSET_DIR VM_SHARED_DIR VM_CONTROL_DIR VM_INSTANCE_DIR
     unset VM_INSTANCE_ID VM_DISK_ARCHIVE_DIR VM_BASE_ARCHIVE_DIR
     unset VM_NVRAM_BACKUP_DIR VM_STORAGE_COMPAT_FALLBACK
@@ -347,14 +347,14 @@ VM_TPM_SWTPM_BIN=$FAKE_BIN/bad-swtpm
 if vm_tpm_start 42 "$QEMU_BIN" 0 >"$TMP_DIR/bad.out" 2>"$TMP_DIR/bad.err"; then
     fail 'swtpm without --terminate was accepted'
 fi
-assert_not_exists "$VM_ROOT/vm42" 'failed capability instance'
+assert_not_exists "$VM_ROOT/42" 'failed capability instance'
 VM_TPM_SWTPM_BIN=$FAKE_SWTPM
 
 VM_TPM_LOCALCA_BIN=$TMP_DIR/missing/swtpm_localca
 if vm_tpm_start 43 "$QEMU_BIN" 0 >"$TMP_DIR/localca.out" 2>"$TMP_DIR/localca.err"; then
     fail 'real start accepted a missing swtpm_localca dependency'
 fi
-assert_not_exists "$VM_ROOT/vm43" 'missing localca instance'
+assert_not_exists "$VM_ROOT/43" 'missing localca instance'
 assert_file_contains "$TMP_DIR/localca.err" 'swtpm_localca is missing' \
     'missing localca diagnostic'
 VM_TPM_LOCALCA_BIN=$FAKE_LOCALCA

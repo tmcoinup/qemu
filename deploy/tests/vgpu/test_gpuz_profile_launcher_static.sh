@@ -3,6 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 builder="$root/deploy/guest/gpuz-launcher/build.sh"
+portable_packager="$root/deploy/package-vgpu-portable.sh"
 source_file="$root/deploy/guest/gpuz-launcher/gpuz_profile_launcher.c"
 uac_manifest="$root/deploy/guest/gpuz-launcher/gpuz_profile_launcher.manifest"
 gpuz_source="${IMAGE_ROOT:-/home/ubuntu/images}/candidates/gpuz-2.70-audit/GPU-Z.2.70.0.exe"
@@ -85,19 +86,22 @@ make_fixture() {
 bash -n "$builder"
 rg -Fq 'level="requireAdministrator" uiAccess="false"' "$uac_manifest" ||
     fail "launcher does not request UAC before extraction"
-rg -Fq 'FILEVERSION 1,1,0,0' "$builder" ||
+rg -Fq "LAUNCHER_VERSION_COMMA='1,1,0,0'" "$builder" ||
     fail "launcher numeric file version is not 1.1.0.0"
-rg -Fq 'PRODUCTVERSION 1,1,0,0' "$builder" ||
+rg -Fq 'FILEVERSION $LAUNCHER_VERSION_COMMA' "$builder" ||
     fail "launcher numeric product version is not 1.1.0.0"
-rg -Fq 'VALUE "FileVersion", "1.1.0.0\0"' "$builder" ||
+rg -Fq "LAUNCHER_VERSION_TEXT='1.1.0.0'" "$builder" ||
     fail "launcher display file version is not 1.1.0.0"
-rg -Fq 'VALUE "ProductVersion", "1.1.0.0\0"' "$builder" ||
+rg -Fq 'VALUE "ProductVersion", "$LAUNCHER_VERSION_TEXT\0"' "$builder" ||
     fail "launcher display product version is not 1.1.0.0"
 rg -Fq 'version="1.1.0.0"' "$uac_manifest" ||
     fail "launcher assembly version is not 1.1.0.0"
 for required in \
         'BCryptGenRandom' \
         'BCRYPT_SHA256_ALGORITHM' \
+        'GetFinalPathNameByHandleW' \
+        'GetVolumePathNameW' \
+        'handles_share_final_directory' \
         'FILE_FLAG_OPEN_REPARSE_POINT' \
         'CREATE_NEW' \
         'O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)' \
@@ -115,7 +119,10 @@ for required in \
         'inherited COR_*, COMPLUS_* or DOTNET_*' \
         'QemuGpuZProfile-RuntimeTemp' \
         'WaitForSingleObject(process.hProcess, INFINITE)' \
-        'delete_tree_without_following_reparse'; do
+        'delete_tree_without_following_reparse' \
+        'L"/with-gpuz"' \
+        'install_gpuz ? L" -InstallGpuZ"' \
+        'EXTERNAL_GPUZ_OPTIONAL'; do
     rg -Fq "$required" "$source_file" ||
         fail "launcher is missing security primitive: $required"
 done
@@ -238,6 +245,87 @@ for expected_id, name, entry in zip(range(201, 212), names, entries):
     assert embedded == source
     assert hashlib.sha256(embedded).digest() == hashlib.sha256(source).digest()
 PY
+
+# Portable schema 4 is intentionally a different launcher generation: GPU-Z
+# is declared as an explicit optional sibling and must never become RCDATA.
+mkdir -m 0700 -- "$tmp/portable"
+IMAGE_ROOT="$tmp/portable-empty-image-root" "$portable_packager" \
+    --output-dir "$tmp/portable/bundle" \
+    --output-exe "$tmp/portable/from-packager.exe" >/dev/null
+portable_bundle="$tmp/portable/bundle"
+portable_a="$tmp/portable-a.exe"
+portable_b="$tmp/portable-b.exe"
+bash "$builder" --bundle-dir "$portable_bundle" \
+    --output "$portable_a" >/dev/null
+bash "$builder" --bundle-dir "$portable_bundle" \
+    --output "$portable_b" >/dev/null
+cmp -s "$portable_a" "$portable_b" ||
+    fail "optional-GPU-Z bundle did not produce a deterministic EXE"
+strings -el "$portable_a" | grep -Fq 'QEMU_VGPU_PORTABLE_IDENTITY_V4' ||
+    fail "multi-brand EXE omits its V4 ownership/version marker"
+strings -el "$portable_a" | grep -Fq '1.4.0.0' ||
+    fail "multi-brand EXE omits its 1.4.0.0 file/product version"
+python3 - "$portable_a" "$portable_bundle/bundle-manifest.json" \
+        "$gpuz_source" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+import pefile
+
+exe = pathlib.Path(sys.argv[1])
+manifest = json.loads(pathlib.Path(sys.argv[2]).read_text())
+gpuz = pathlib.Path(sys.argv[3]).read_bytes()
+expected_hash = hashlib.sha256(gpuz).hexdigest().upper()
+assert manifest["schemaVersion"] == 4
+assert manifest["optionalExternalFiles"] == [{
+    "name": "GPU-Z.exe",
+    "sha256": expected_hash,
+    "bytes": len(gpuz),
+}]
+assert "GPU-Z.exe" not in {row["name"] for row in manifest["files"]}
+
+pe = pefile.PE(str(exe), fast_load=False)
+resources = []
+for type_entry in pe.DIRECTORY_ENTRY_RESOURCE.entries:
+    type_id = type_entry.id
+    if type_id != pefile.RESOURCE_TYPE["RT_RCDATA"]:
+        continue
+    for id_entry in type_entry.directory.entries:
+        for language_entry in id_entry.directory.entries:
+            data = language_entry.data.struct
+            payload = pe.get_data(data.OffsetToData, data.Size)
+            resources.append(payload)
+assert len(resources) == len(manifest["files"]) + 2
+assert all(len(payload) != len(gpuz) for payload in resources)
+assert all(hashlib.sha256(payload).hexdigest().upper() != expected_hash
+           for payload in resources)
+PY
+
+external_tampered="$tmp/external-manifest-tampered"
+cp -a -- "$portable_bundle" "$external_tampered"
+jq '.optionalExternalFiles[0].sha256 =
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"' \
+    "$external_tampered/bundle-manifest.json" \
+    >"$tmp/external-tampered-manifest.json"
+mv -f -- "$tmp/external-tampered-manifest.json" \
+    "$external_tampered/bundle-manifest.json"
+printf 'schema_version=1\nmanifest_sha256=%s\n' \
+    "$(hash_upper "$external_tampered/bundle-manifest.json")" \
+    >"$external_tampered/READY"
+if bash "$builder" --bundle-dir "$external_tampered" \
+        --output "$tmp/external-manifest-tampered.exe" >/dev/null 2>&1; then
+    fail "builder accepted tampered optionalExternalFiles metadata"
+fi
+
+external_injected="$tmp/external-file-injected"
+cp -a -- "$portable_bundle" "$external_injected"
+install -m 0600 -- "$gpuz_source" "$external_injected/GPU-Z.exe"
+if bash "$builder" --bundle-dir "$external_injected" \
+        --output "$tmp/external-file-injected.exe" >/dev/null 2>&1; then
+    fail "builder accepted an unexpected bundled GPU-Z image"
+fi
 
 # Reusing an identical target is permitted; silently replacing a different
 # existing file is not.

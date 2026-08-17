@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bundle vGPU data per VM without touching unrelated numeric-instance dirs.
+# Bundle legacy flat vGPU data into the current numeric per-VM directories.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +34,7 @@ BLOCKED=0
 # current launcher/create/delete/promote operation can change the plan between
 # validation and publication.  Check mode remains completely non-mutating.
 if ((APPLY)); then
+    vm_storage_validate_root_path "$VM_ROOT" "VM root"
     mkdir -p "$VM_RUN_DIR"
     exec {STORAGE_LOCK_FD}>"$VM_RUN_DIR/.storage.lock"
     if ! flock -n -x "$STORAGE_LOCK_FD"; then
@@ -158,21 +159,22 @@ for src in "$IMAGE_ROOT"/*.iso; do
     add_move "$src" "$ISO_DIR/${src##*/}"
 done
 
-# A base-only or ISO-only migration must still lock every known production VM
-# against older launchers that use only vmN.start.lock.
+# Inventory every known production VM so apply creates its standard bundle
+# subdirectories after moving legacy files.
 for path in \
     "$VM_CONFIG_DIR"/vm*.conf \
     "$VM_DISK_DIR"/win10-vm*.qcow2 \
     "$VM_NVRAM_DIR"/vm*_VARS.fd \
     "$VM_RUN_DIR"/vm*.start.lock \
     "$VM_RUN_DIR"/vm*.disk.lock \
-    "$VM_INSTANCES_DIR"/vm*; do
+    "$VM_RUN_DIR"/vm*.tpm.lock \
+    "$VM_INSTANCES_DIR"/[1-9]*; do
     name=${path##*/}
     if [[ "$name" =~ ^vm([1-9][0-9]*)\.(conf|start\.lock)$ ||
-          "$name" =~ ^vm([1-9][0-9]*)\.disk\.lock$ ||
+          "$name" =~ ^vm([1-9][0-9]*)\.(disk|tpm)\.lock$ ||
           "$name" =~ ^vm([1-9][0-9]*)_VARS\.fd$ ||
           "$name" =~ ^win10-vm([1-9][0-9]*)\.qcow2$ ||
-          "$name" =~ ^vm([1-9][0-9]*)$ ]]; then
+          "$name" =~ ^([1-9][0-9]*)$ ]]; then
         VM_IDS[${BASH_REMATCH[1]}]=1
     fi
 done
@@ -180,7 +182,7 @@ shopt -u nullglob
 
 echo "[storage-migrate] target layout"
 printf '  ISO       %s\n' "$ISO_DIR"
-printf '  instances %s/vmN\n' "$VM_INSTANCES_DIR"
+printf '  instances %s/N\n' "$VM_INSTANCES_DIR"
 printf '  bases     %s\n' "$VM_BASE_DIR"
 printf '  control   %s\n' "$VM_RUN_DIR"
 printf '  assets    %s\n' "$VM_ASSET_DIR"
@@ -419,24 +421,29 @@ if ((!APPLY)); then
     exit 0
 fi
 
-# Older launchers and lifecycle tools coordinate through stable global per-VM
-# locks.  Take both before creating any destination directory.
-declare -a INSTANCE_LOCK_FDS=()
+# Apply already holds .storage.lock exclusively.  Every current lifecycle
+# entry point takes that lock before creating/opening its in-bundle locks, so
+# no per-VM destination directory has to be created ahead of the move plan.
+# If a historical flat lock already exists, also prove that no older tool is
+# holding it; successful migration removes these obsolete zero-byte files.
+declare -a LEGACY_INSTANCE_LOCK_FDS=() LEGACY_INSTANCE_LOCK_PATHS=()
 for id in $(printf '%s\n' "${!VM_IDS[@]}" | sort -n); do
-    start_lock=$(vm_storage_run_preferred_path "$id" start.lock)
-    disk_lock=$(vm_storage_run_preferred_path "$id" disk.lock)
-    exec {fd}>"$start_lock"
-    if ! flock -n "$fd"; then
-        echo "[storage-migrate] vm${id} start lock is busy; no files moved" >&2
-        exit 1
-    fi
-    INSTANCE_LOCK_FDS+=("$fd")
-    exec {fd}>"$disk_lock"
-    if ! flock -n -x "$fd"; then
-        echo "[storage-migrate] vm${id} disk lock is busy; no files moved" >&2
-        exit 1
-    fi
-    INSTANCE_LOCK_FDS+=("$fd")
+    for lock_kind in start.lock disk.lock tpm.lock; do
+        lock_path=$(vm_storage_run_legacy_path "$id" "$lock_kind")
+        [[ -e "$lock_path" || -L "$lock_path" ]] || continue
+        if [[ ! -f "$lock_path" || -L "$lock_path" ||
+              "$(stat -c %s -- "$lock_path")" != 0 ]]; then
+            echo "[storage-migrate] unsafe legacy lock: $lock_path" >&2
+            exit 1
+        fi
+        exec {fd}<>"$lock_path"
+        if ! flock -n -x "$fd"; then
+            echo "[storage-migrate] vm${id} ${lock_kind%.*} lock is busy; no files moved" >&2
+            exit 1
+        fi
+        LEGACY_INSTANCE_LOCK_FDS+=("$fd")
+        LEGACY_INSTANCE_LOCK_PATHS+=("$lock_path")
+    done
 done
 
 declare -a CREATED_DIRS=()
@@ -533,6 +540,10 @@ trap - EXIT
 for id in "${!VM_IDS[@]}"; do
     vm_storage_prepare_instance "$id"
 done
+for lock_path in "${LEGACY_INSTANCE_LOCK_PATHS[@]}"; do
+    rm -f -- "$lock_path" || \
+        echo "[storage-migrate] WARN: stale lock cleanup failed: $lock_path" >&2
+done
 
 # Remove only empty directories from the two deprecated layouts.  Unknown or
 # user-created files keep their parent directory intact.
@@ -543,4 +554,4 @@ for legacy_dir in \
 done
 
 echo "[storage-migrate] complete; manifest: $MANIFEST"
-echo "[storage-migrate] unmanaged numeric instance dirs and $VM_ROOT/_base were not touched"
+echo "[storage-migrate] unrelated numeric instance dirs and $VM_ROOT/_base were not touched"

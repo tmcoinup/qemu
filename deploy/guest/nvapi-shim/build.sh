@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Build both x64 and x86 app-local shim DLLs.  The installer selects the image
-# matching the target executable and leaves System32/SysWOW64 unchanged.
+# Build both x64 and x86 forwarding shim DLLs.  The same validated images can
+# be installed app-locally or, through the explicit system projection package,
+# into the two Windows NVAPI search paths with signed originals beside them.
 #
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
@@ -9,10 +10,15 @@ cd "$(dirname "$(readlink -f "$0")")"
 SRC=nvapi_shim.c
 DEF=nvapi_shim.def
 PROBE_SRC=nvapi_profile_probe.c
+QUERY_SRC=vgpu_identity_query.c
+SYSTEM_PROBE_SRC=system_nvapi_probe.c
 deploy=${NV_DEPLOY_DIR:-/home/ubuntu/images/staging}
 mkdir -p "$deploy"
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
+
+./generate-profile-catalog.sh --check
+../generate-vgpu-profile-catalog.sh --check
 
 targets=(
     x86_64-w64-mingw32:nvapi64.dll:libnvapi64.a:0x180000000
@@ -21,6 +27,10 @@ targets=(
 probes=(
     x86_64-w64-mingw32:nvapi_profile_probe64.exe:0x140000000
     i686-w64-mingw32:nvapi_profile_probe32.exe:0x00400000
+)
+system_probes=(
+    x86_64-w64-mingw32:SystemNvapiProbe64.exe:0x140000000
+    i686-w64-mingw32:SystemNvapiProbe32.exe:0x00400000
 )
 
 # Build and validate both architectures before replacing either checked-in or
@@ -43,6 +53,19 @@ for target in "${targets[@]}"; do
     file "$tmp/$out"
 done
 
+for probe in "${system_probes[@]}"; do
+    IFS=: read -r triplet out image_base <<< "$probe"
+    echo "[build] $out ($triplet, system-search runtime verification)"
+    "${triplet}-gcc" \
+        -O2 -std=c99 -Wall -Wextra -Werror \
+        -o "$tmp/$out" "$SYSTEM_PROBE_SRC" \
+        -Wl,--no-insert-timestamp \
+        -Wl,--image-base,"$image_base" \
+        -static \
+        -Wl,--subsystem,console
+    file "$tmp/$out"
+done
+
 for probe in "${probes[@]}"; do
     IFS=: read -r triplet out image_base <<< "$probe"
     echo "[build] $out ($triplet, test-only)"
@@ -55,6 +78,21 @@ for probe in "${probes[@]}"; do
         -Wl,--subsystem,console
     file "$tmp/$out"
 done
+for probe in "${system_probes[@]}"; do
+    IFS=: read -r _ out _ <<< "$probe"
+    install -m 0755 "$tmp/$out" "$out"
+    install -m 0644 "$tmp/$out" "$deploy/$out"
+done
+
+echo "[build] VgpuIdentityQuery.exe (i686-w64-mingw32, installed query)"
+i686-w64-mingw32-gcc \
+    -O2 -std=c99 -Wall -Wextra -Werror \
+    -o "$tmp/VgpuIdentityQuery.exe" "$QUERY_SRC" \
+    -Wl,--no-insert-timestamp \
+    -Wl,--image-base,0x00400000 \
+    -static -lsetupapi -ladvapi32 \
+    -Wl,--subsystem,console
+file "$tmp/VgpuIdentityQuery.exe"
 
 for target in "${targets[@]}"; do
     IFS=: read -r _ out implib _ <<< "$target"
@@ -67,6 +105,10 @@ for probe in "${probes[@]}"; do
     install -m 0755 "$tmp/$out" "$out"
     install -m 0644 "$tmp/$out" "$deploy/$out"
 done
+install -m 0755 "$tmp/VgpuIdentityQuery.exe" VgpuIdentityQuery.exe
+install -m 0644 "$tmp/VgpuIdentityQuery.exe" \
+    "$deploy/VgpuIdentityQuery.exe"
 
 echo "Staged in $deploy :"
-ls -la "$deploy"/nvapi*.dll "$deploy"/nvapi_profile_probe*.exe
+ls -la "$deploy"/nvapi*.dll "$deploy"/nvapi_profile_probe*.exe \
+    "$deploy"/SystemNvapiProbe*.exe "$deploy"/VgpuIdentityQuery.exe

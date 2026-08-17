@@ -14,7 +14,7 @@ GTX 1050 vGPU 一键收尾包
 
 若任何校验失败，EXE 不写完成回执，也不会自动关机。保留完整错误信息；不要卸载
 显示设备。恢复启动可在宿主使用：
-  ./deploy/start-vm.sh VM_ID --no-spoof --no-monitor-sync
+  ./deploy/scripts/start-vm.sh VM_ID --no-spoof --no-monitor-sync
 
 本 ZIP 内含 DLS token 的 EXE，权限按私有文件处理，不要公开上传或通过 staging
 HTTP server 下载。published INF 是每套 Windows 动态分配的 oemN.inf，不应照抄

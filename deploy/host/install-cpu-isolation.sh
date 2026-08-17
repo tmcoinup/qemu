@@ -34,7 +34,7 @@ id "$invoking_user" >/dev/null 2>&1 || {
     exit 1
 }
 
-sudoers_line="${invoking_user} ALL=(root) NOPASSWD: ${installed_helper} apply *, ${installed_helper} release *"
+sudoers_line="${invoking_user} ALL=(root) NOPASSWD: ${installed_helper} apply *, ${installed_helper} release *, ${installed_helper} oom-protect *"
 if ((print_only)); then
     echo "helper=$installed_helper"
     echo "sudoers=$sudoers_file"

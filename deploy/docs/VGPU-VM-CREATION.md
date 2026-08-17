@@ -3,11 +3,11 @@
 本文只适用于下面这条生产路径：
 
 ```text
-deploy/create-vm.sh + deploy/create-disk.sh + deploy/start-vm.sh
+deploy/scripts/create-vm.sh + deploy/scripts/create-disk.sh + deploy/scripts/start-vm.sh
 ```
 
 这是本分支唯一的 VM 生命周期；日常启动和停止只使用
-`deploy/start-vm.sh` 与 `deploy/stop-vm.sh`。
+`deploy/scripts/start-vm.sh` 与 `deploy/scripts/stop-vm.sh`。
 
 > **当前生产签名策略：** 历史 GTX1050 strict-A ZIP 会修改 INF 并自签 catalog，
 > 已在 `finish-vgpu-install.sh` 中硬禁用。下文涉及
@@ -20,15 +20,15 @@ deploy/create-vm.sh + deploy/create-disk.sh + deploy/start-vm.sh
 [`VGPU-RECOVERY-RUNBOOK.md`](VGPU-RECOVERY-RUNBOOK.md) 逐步操作。
 NVIDIA 控制面板产品名则应先排查 host per-mdev 配置和冷启动日志。
 
-## 推荐入口：日常只记住 `start-vm.sh`
+## 推荐入口：日常只记住 `deploy/scripts/start-vm.sh`
 
 生命周期入口现在会按最终启动模式补齐缺失资源，不需要先手工运行
 `create-vm.sh` / `create-disk.sh`：
 
 | 命令 | 实例不存在时的行为 | 适用场景 |
 |---|---|---|
-| `./deploy/start-vm.sh 2` | 自动生成 `vm.conf`，严格从公共 base 复制系统盘，然后启动 | 已有合格 base，日常新建实例 |
-| `./deploy/start-vm.sh 2 --install [ISO]` | 自动生成 `vm.conf`，严格创建空盘，挂 Windows ISO 和最小应答 ISO 后启动 | 第一次制作 base，或确实要从 ISO 重装 |
+| `./deploy/scripts/start-vm.sh 2` | 自动生成 `vm.conf`，严格从公共 base 复制系统盘，然后启动 | 已有合格 base，日常新建实例 |
+| `./deploy/scripts/start-vm.sh 2 --install [ISO]` | 自动生成 `vm.conf`，严格创建空盘；安装期 helper 自动引导 xHCI USB Windows 光盘，并挂最小应答 ISO | 第一次制作 base，或确实要从 ISO 重装 |
 
 `--install` 省略 ISO 时使用 `/home/ubuntu/images/iso/win10.iso`。这两个动作都只
 补缺失文件：已有 `vm.conf` 保持原身份，已有 `disk.qcow2` 永不覆盖；因此给已有
@@ -39,15 +39,22 @@ NVIDIA 控制面板产品名则应先排查 host per-mdev 配置和冷启动日�
 登录，区域/输入法为中国大陆简体中文，时区为 `China Standard Time`（北京/上海
 同属 UTC+8）。RTC 由宿主通过 `TZ=Asia/Shanghai` 和
 `-rtc base=localtime,clock=host,driftfix=slew` 提供；新装不写
-`RealTimeIsUniversal`。登录界面和该账号的 NumLock 默认开启。
+`RealTimeIsUniversal`。NumLock 由宿主 QEMU 根据 guest USB LED 回报默认保持开启，
+不依赖登录界面或用户注册表；specialize 阶段只一次性写 `HiberbootEnabled=0`，
+避免首次“关机”变成 Fast Startup 休眠。
 应答文件不含磁盘分区、
 镜像版本选择或产品密钥；在安装界面中手动选 Windows 10 专业版、目标磁盘并完成
 分区。它也不含 WinRM/RDP、网络下载或常驻任务，不会因为挂了应答介质就静默擦盘。
 需要连 OOBE 也完整手动完成时使用：
 
 ```bash
-./deploy/start-vm.sh 2 --install /path/to/windows.iso --manual-oobe
+./deploy/scripts/start-vm.sh 2 --install /path/to/windows.iso --manual-oobe
 ```
+
+helper、Windows ISO 和应答 ISO 都是安装期设备；正式启动三者全部不挂载。
+`--manual-oobe` 只移除应答 ISO。默认 USB 路径异常时可显式加
+`--install-media ide`，该慢速回退不持久化。完整傻瓜教程见
+[`G11-INSTALL-MEDIA.md`](G11-INSTALL-MEDIA.md)。
 
 宿主一次性前置依赖：
 
@@ -71,10 +78,10 @@ VM 不会启动。
 cd /home/ubuntu/projects/qemu
 
 # 路径 A：公共 base 已验收，自动 clone 并启动
-./deploy/start-vm.sh 2
+./deploy/scripts/start-vm.sh 2
 
 # 路径 B：从 ISO 安装；即使公共 base 存在，缺盘时也只建空盘
-./deploy/start-vm.sh 2 --install /home/ubuntu/images/iso/win10-ltsc.iso
+./deploy/scripts/start-vm.sh 2 --install /home/ubuntu/images/iso/win10-ltsc.iso
 ```
 
 普通启动找不到公共 base 时会拒绝静默创建一个不可启动的空盘，并提示改用
@@ -86,10 +93,10 @@ VM ID 只使用正整数，例如 `2`；目录名会自动成为 `vm2`。`win10-
 需要固定首次生成的 GPU/显示器时，可先显式创建配置；这是高级入口，不是日常必需：
 
 ```bash
-./deploy/create-vm.sh 2 \
+./deploy/scripts/create-vm.sh 2 \
   --gpu-profile gt1030_2gb \
   --monitor-profile benq-gw2480
-./deploy/start-vm.sh 2
+./deploy/scripts/start-vm.sh 2
 ```
 
 ### 自动创建的确定性规则
@@ -98,7 +105,7 @@ VM ID 只使用正整数，例如 `2`；目录名会自动成为 `vm2`。`win10-
 |---|---|---|---|
 | 缺失 | 任意 | 非 dry-run | 随机身份只生成一次并设为只读 |
 | 任意 | 缺失 | `--install` | `create-disk --blank`，不读取/复制 base |
-| 任意 | 任意 | `--install` | 默认挂最小 OOBE 应答 ISO；`--manual-oobe` 可关闭 |
+| 任意 | 任意 | `--install` | 默认挂临时 helper + USB Windows ISO + 最小 OOBE 应答 ISO；`--manual-oobe` 只关闭应答盘 |
 | 任意 | 缺失 | 普通模式 | `create-disk --from-base`；base 缺失则失败 |
 | 任意 | 已存在 | 任意 | 原盘保持不变 |
 | 缺失 | 任意 | `--dry-run` | 拒绝猜测身份，不创建任何资源 |
@@ -111,10 +118,10 @@ vGPU 本身仍必须在 guest 中保留匹配版本的 GRID 驱动和 license to
 转发组件，不能删除。
 
 离线同步前，Windows 必须是完整关机而不是休眠/Fast Startup。GTX1050 的历史
-strict-A ZIP 已禁用，当前保持 B，不运行 driver stager。GTX750Ti/GT1030 的 legacy
-B 收尾仍可使用小 `VgpuGuestFinish.exe` 处理 token/休眠/RTC；宿主核验当前 VM 的
-UUID/GPU/token 后再离线同步。这里不使用 RDP、VNC、WinRM 或 guest HTTP，也不要让
-host 强删 `hiberfil.sys`。
+strict-A ZIP 已禁用，当前保持 B，不运行 driver stager。当前 GTX750Ti、GT1030、
+GTX1050 都使用同一个私有 `VgpuPortable.exe` 处理身份、token、Licensed 和电源
+收尾；`finish-vgpu-install.sh` 只保留给统一前旧回执/UTC 迁移。这里不使用 RDP、
+VNC、WinRM 或 guest HTTP，也不要让 host 强删 `hiberfil.sys`。
 
 GPU 产品名默认也遵守 guest 最小化边界：使用默认/`--spoof-name-only` 时，host
 按 mdev UUID 注入每 VM 名称，不需要仓库 PowerShell、启动任务或 NVAPI shim。
@@ -124,10 +131,12 @@ base 的注册表残留时才需要 `sync-vgpu-profile.sh`；它不是新 clone 
 GRID driver 安装包由用户通过自己的文件传输方式放进 Windows 并本地运行。主新装
 流程不启用远程管理服务，不下载脚本，也不创建固定实验凭据或 AutoLogon。
 
-OOBE 应答介质只执行两条 `reg.exe` one-shot，把登录界面和 `Administrator` 的
-`InitialKeyboardIndicators` 设为 `2`；不会复制 PowerShell、创建服务或计划任务。
-不做 host/guest NumLock 动态同步：QEMU 输入链路没有可靠的 LED 双向状态查询，
-启动时盲目发送 NumLock 只能“切换”而不能幂等地“设为开”。
+OOBE 应答介质只执行一条 `reg.exe` one-shot，把 `HiberbootEnabled` 设为 `0`；不会
+写 `InitialKeyboardIndicators`、复制 PowerShell、创建服务或计划任务。G-11 的
+`usb-kbd` 会读取 Windows HID `SET_REPORT` 的 NumLock LED 位：仅在明确 OFF 时原子
+发送一次按下/释放并等待 ON，同一轮不会重复翻转。默认开启；本次确需关闭可给
+`start-vm.sh` 加 `--no-numlock`。完整说明见
+[`G11-NUMLOCK-FIRST-BOOT.md`](G11-NUMLOCK-FIRST-BOOT.md)。
 
 空密码只适用于 QEMU 本地控制台。Windows 默认安全策略会拒绝空密码账号进行网络
 登录；不要关闭这个限制。
@@ -192,41 +201,56 @@ unzip -p /home/ubuntu/images/staging/553.24-display-driver.zip \
 
 ## 路线一：真正从空盘安装并制作 base
 
-下面以 VM 4、最终身份 GTX 1050 2GB 为例。首次启动把环境中的 profile 传给
-自动调用的 `create-vm.sh`，一条命令完成配置、空盘和安装启动：
+下面以 VM 4 为例。最短命令不指定显卡，首次启动会让 `create-vm.sh` 从 12 条
+审核 profile 中等概率随机一条并固化；一条命令完成配置、空盘和安装启动：
 
 ```bash
 cd /home/ubuntu/projects/qemu
 VM_ID=4
-PROFILE=gtx1050_2gb
-ISO=/home/ubuntu/images/iso/win10-ltsc.iso
+ISO=/home/ubuntu/images/iso/win10.iso
 
-./deploy/create-vm.sh --list-gpu-profiles
-./deploy/create-vm.sh --list-monitor-profiles
+./deploy/scripts/create-vm.sh --list-gpu-profiles
+./deploy/scripts/create-vm.sh --list-monitor-profiles
+./deploy/scripts/create-vm.sh --list-input-profiles
+./deploy/scripts/check-hardware-pool.sh --machine-readable
 
-GPU_PROFILE="$PROFILE" ./deploy/start-vm.sh "$VM_ID" --install "$ISO"
+./deploy/scripts/start-vm.sh "$VM_ID" --install "$ISO"
 ```
+
+如果必须固定显卡，再额外设置 `PROFILE=gtx1050_2gb` 并使用
+`GPU_PROFILE="$PROFILE" ./deploy/scripts/start-vm.sh "$VM_ID" --install "$ISO"`。
 
 未显式指定显示器时，会先等概率随机一个中国大陆常见品牌，再随机该品牌的
-23.8/24 英寸 FHD/1K（1920×1080）具体型号；结果和序列号只生成一次。
+21.5、23.8/24 或 27 英寸 FHD/1K（1920×1080@60）具体型号；profile 和显示器
+序列只生成一次。完整目录 35 款与严格池 28 款都要求 preferred timing 为
+1920×1080@60；1366×768、2560×1440 等不能混入为 profile 原生分辨率。型号来源、
+尺寸档位和“不伪造 75 Hz 模式”的边界见
+[`G11-MONITOR-POOL.md`](G11-MONITOR-POOL.md)。
 
-可选值为：
+品牌审计口径是主板 3、内存 4、SSD 5、GPU app-local 板卡 metadata 7、active
+键盘 3、可选相对鼠标 3；显示器是明确例外（新建 8 品牌/完整 11 品牌）。默认绝对
+指针只有 QEMU 通用 profile。GPU 板卡 metadata 的序列策略为 `not-exposed`，USB
+输入为 `none`/`iSerialNumber=0`；不会拿 mdev UUID 或虚构 `serial=` 充数。显示器
+只有 Samsung S24F350 与 Redmi RMMNT238NF 使用已审核的型号专属序列格式，其余
+33 款明确为 `generic-prefix-hash`。全部品牌、固定设备例外与相对鼠标创建命令见
+[`G11-HARDWARE-POOL.md`](G11-HARDWARE-POOL.md)。
 
-```text
-gtx750ti_2gb
-gt1030_2gb
-gtx1050_2gb
-```
+底层 `q35`/ICH9/ICH9-AHCI、`qemu-xhci` 和 QEMU `nvme` controller 是实现边界；
+安装/救援 `std-vga` 与 `--legacy-shmem` 的 `ivshmem` 是临时/旧兼容边界。它们不
+参加品牌池，也不能因 profile 名称或 PCI metadata 被解释成完整物理设备仿真。
+
+完整 12 条可选值以 `./deploy/scripts/create-vm.sh --list-gpu-profiles` 的实时输出
+为准，其中包括 `gtx1050_colorful_2gb` 七彩虹配置。
 
 可在另一终端确认配置已经固定到该 VM：
 
 ```bash
 rg '^(GPU_PROFILE|GPU_NAME|GPU_PCI_DID|GPU_SUB_DID|VGPU_MDEV_PROFILE|VGPU_FB_MB|MONITOR_PROFILE|MONITOR_BRAND_NAME|MONITOR_MODEL_NAME|MONITOR_NATIVE_[XY])=' \
-  "/home/ubuntu/images/vms/G-11/vm${VM_ID}/vm.conf"
+  "/home/ubuntu/images/vms/${VM_ID}/vm.conf"
 ```
 
-默认布局下配置位于 `vms/G-11/vm${VM_ID}/vm.conf`，系统盘位于
-`vms/G-11/vm${VM_ID}/disk.qcow2`。自定义路径请先用
+默认布局下配置位于 `vms/${VM_ID}/vm.conf`，系统盘位于
+`vms/${VM_ID}/disk.qcow2`。自定义路径请先用
 `start-vm.sh "$VM_ID" --print-paths` 核对。完整目录说明见
 [`STORAGE-LAYOUT.md`](STORAGE-LAYOUT.md)。
 
@@ -236,13 +260,16 @@ rg '^(GPU_PROFILE|GPU_NAME|GPU_PCI_DID|GPU_SUB_DID|VGPU_MDEV_PROFILE|VGPU_FB_MB|
 公共 base 是否存在不影响安装盘语义。等价的低级分步命令只用于调试或需要逐步检查时：
 
 ```bash
-./deploy/create-vm.sh "$VM_ID" --gpu-profile "$PROFILE"
-./deploy/create-disk.sh "$VM_ID" --blank
-./deploy/start-vm.sh "$VM_ID" --install "$ISO"
+./deploy/scripts/create-vm.sh "$VM_ID" --gpu-profile "$PROFILE"
+./deploy/scripts/create-disk.sh "$VM_ID" --blank
+./deploy/scripts/start-vm.sh "$VM_ID" --install "$ISO"
 ```
 
-安装模式使用 std-vga，**不挂 vGPU**。因此这一阶段看不到 RTX6000-2Q 是正常的；
-第一次挂 RTX6000-2Q 是 Windows 安装完成后的下一阶段。
+安装模式使用 std-vga，**不挂 vGPU**。Windows ISO 默认经 xHCI USB BOT 读取，
+helper 只负责 fresh NVRAM 自动引导；两者及应答盘在普通启动全部消失。安装显示只是
+安装/救援临时设备，不计入三款 2 GB
+GPU 品牌池。因此这一阶段看不到 RTX6000-2Q 是正常的；第一次挂 RTX6000-2Q 是
+Windows 安装完成后的下一阶段。
 
 Windows 文件复制和重启完成后，默认会跳过区域/账号页面并首次自动进入
 `Administrator` 桌面；密码为空、时区为北京/上海 UTC+8、NumLock 默认开启。新装
@@ -260,9 +287,9 @@ tzutil.exe /g
 期望 `China Standard Time`，本地时间为正确北京时间，UTC 行与真实 UTC 时刻一致。
 不用检查或创建 `RealTimeIsUniversal`。
 
-旧 `base=utc` VM/base 也不要运行 guest RTC 脚本。让 Windows 完整关机后执行
-`finish-vgpu-install.sh`；脚本会兼容启动旧契约，等 guest EXE 再次完整关机后，由
-宿主备份 SYSTEM hive、离线删除旧 DWORD，并写入 `RTC_CONTRACT=localtime`。
+旧 `base=utc` VM/base 也不要运行 guest RTC 脚本。只有统一前、明确
+`RTC_CONTRACT=utc` 的兼容资产，才在 Windows 完整关机后按其旧流程执行
+`finish-vgpu-install.sh`；当前新 VM 已是 localtime，不需要这一步。
 
 ### 3. 宿主预检 RTX6000-2Q profile
 
@@ -302,7 +329,7 @@ adapter_name = "<GPU_NAME>"
 
 ```bash
 # 终端 A；保持前台运行
-./deploy/start-vm.sh "$VM_ID" --no-spoof --no-monitor-sync
+./deploy/scripts/start-vm.sh "$VM_ID" --no-spoof --no-monitor-sync
 ```
 
 此时 QEMU 不添加任何 `x-pci-*` 消费卡覆盖。驱动安装前，Windows 可能只显示
@@ -326,12 +353,20 @@ GRID 538.33 安装包放进 Windows，在当前本地 QEMU 窗口中运行 NVIDI
 
 驱动安装完成后，让 Windows 完整关机。不要制作 base，也不要先切消费身份。
 
-### 6. 验收原生正式签名安装状态
+### 6. 统一完成身份、授权和电源收尾
 
-GTX1050 不运行 legacy finish；该入口会在生成包前拒绝，VM 保持 B。GTX750Ti/
-GT1030 如需 legacy token/RTC 收尾，可在完整关机后运行
-`./deploy/finish-vgpu-install.sh "$VM_ID"` 并使用打印的小 EXE。不得复制 VM3 的
-driver、证书、`oemN.inf` 或完成 marker。详细说明见
+三款当前 B/native 型号没有分支。完整关机后，从普通 B 模式重新启动，再在宿主
+构建私有通用文件：
+
+```bash
+chmod 600 /home/ubuntu/images/staging/client_configuration_token.tok
+./deploy/package-vgpu-one-click.sh --with-license-token
+```
+
+把 `VgpuPortableLicensed/VgpuPortable.exe` 安全复制进目标 Windows，双击后必须
+看到身份 INSTALL PASS、Code 0、`License: Licensed` 和休眠/Fast Startup 已关闭，
+然后完整关机并普通冷启动。不得复制 VM3 的 driver、证书、`oemN.inf` 或旧 marker，
+也不运行型号专用 finish。详细说明见
 [`VGPU-LICENSING.md`](VGPU-LICENSING.md)。
 
 guest 管理员 PowerShell：
@@ -360,8 +395,8 @@ nvidia-smi -q | Select-String 'Product Name|Driver Version|License Status'
 当前三款 profile 都保持 B，不要手工加 `--spoof`。日常启动：
 
 ```bash
-./deploy/start-vm.sh "$VM_ID"
-./deploy/report-vm-boot-timing.sh "$VM_ID"
+./deploy/scripts/start-vm.sh "$VM_ID"
+./deploy/scripts/report-vm-boot-timing.sh "$VM_ID"
 ```
 
 预期 marketing name 等于 `vm.conf` 的型号，PCI 保持原生
@@ -396,7 +431,7 @@ nvidia-smi -q | Select-String 'License Status'
 
 预期结果：
 
-- `Name` 等于 `G-11/vmN/vm.conf` 中的 `GPU_NAME`；
+- `Name` 等于 `vms/N/vm.conf` 中的 `GPU_NAME`；
 - 三款当前 profile 都保持 B，为原生 `DEV_1E30&SUBSYS_132610DE`、Code 0、
   Licensed；marketing name 等于配置；
 - 显存均约 2 GB。
@@ -420,26 +455,33 @@ shutdown /s /t 0
 ```
 
 ```bash
-./deploy/promote-base.sh "$VM_ID"
+./deploy/scripts/promote-base.sh "$VM_ID"
 ```
 
 已完成 G-11 存储迁移时，新 base 写入
-`vms/G-11/shared/bases/win10-base.qcow2`，旧 base 归档到
-`vms/G-11/shared/bases/archive/`。旧平铺 `vms/win10-base.qcow2` 不属于新 G-11
+`vms/shared/bases/win10-base.qcow2`，旧 base 归档到
+`vms/shared/bases/archive/`。旧平铺 `vms/win10-base.qcow2` 不属于新 G-11
 默认布局，也不会被普通启动偷偷采用；应先按
 [`STORAGE-LAYOUT.md`](STORAGE-LAYOUT.md) 停机、备份并完成受控迁移，再制作或
 替换新布局下的 base。
 
-base 中必须只保留未经修改且具有 NVIDIA/Microsoft 生产签名的 GRID driver 和
-token；不得包含 patched driver、自签 catalog、私有根或测试签名配置。制作前必须
+base 中必须只保留未经修改且具有 NVIDIA/Microsoft 生产签名的 GRID driver；若
+组织策略允许，也可保留已经正常安装到 NVIDIA 标准目录的 token，但不得留下包含
+凭据的私有 portable。不得包含 patched driver、自签 catalog、私有根或测试签名配置。制作前必须
 确认 `vm.conf` 使用 `RTC_CONTRACT=localtime`；新 base 不应包含
 `RealTimeIsUniversal`，否则每个 clone 都可能继承 RTC 回拨和 B/off 授权失败。
-不要把消费身份同步脚本、`RefreshGridNames` 任务或 NVAPI shim 做进新 base；B 模式
-的每 VM 产品名由 host 在每次创建 mdev 时提供。可以放入的是尚未执行、无 VM
-绑定的离线 `VgpuPortable.exe`；它在每个 clone 内首次双击时才按本次启动的只读
-firmware claim 安装受保护的 GPU-Z application-local 身份层。
+不要把消费身份同步脚本、`RefreshGridNames` 任务或已执行的 NVAPI 身份层做进新
+base；B 模式的每 VM 产品名由 host 在每次创建 mdev 时提供。默认只放尚未执行、
+无 VM 绑定的 `VgpuPortable.exe`。portable 不内嵌、不下载、不要求 GPU-Z；它在
+每个 clone 内首次双击时按本次启动的只读 firmware claim 安装受保护的
+application-local 身份层和权威查询器。
 
-所有 VM 保持停止后，为这个 base 一次性构建并安全注入 portable EXE：
+这里注入的必须是默认 `VgpuPortable/VgpuPortable.exe`。不要把
+`VgpuPortableLicensed/VgpuPortable.exe` 写入通用 base；后者含 DLS 凭据，只在需要
+为单台实际 VM 补授权时安全传入并运行。
+
+所有 VM 保持停止后，为这个 base 一次性构建 portable EXE，并按默认单文件方式
+安全注入：
 
 ```bash
 cd /home/ubuntu/projects/qemu
@@ -447,15 +489,20 @@ cd /home/ubuntu/projects/qemu
 sudo ./deploy/install-vgpu-portable-to-base.sh
 ```
 
-注入器不会直接挂载 live base，而是修改私有临时副本；它拒绝 dirty/hibernated
-NTFS、活动持有者、backing/data-file 和被其他 qcow2 依赖的 base。完整验证、
+注入器不会直接挂载 live base，而是修改私有临时副本；它会复验 portable 回执，
+并在 schema-4 base 证明中记录 `gpuZIncluded=false`，同时拒绝
+dirty/hibernated NTFS、活动持有者、backing/data-file 和被其他 qcow2 依赖的 base。完整验证、
 卸载和 `qemu-img check` 后才归档旧 base 并原子替换。不要用强制 NTFS 挂载或
 `remove_hiberfile` 绕过。
+
+只有明确希望所有克隆都预置经过审计的 GPU-Z 2.70 时，才给 base 注入命令增加
+`--with-gpuz`；普通基础盘不加。以后也可在单台 guest 中从官网取得审计文件，
+精确命名为 `GPU-Z.exe`，再运行 `VgpuPortable.exe /with-gpuz`。
 
 ## 路线二：从合格 base 新建普通实例
 
 已有按上面流程验收过的
-`vms/G-11/shared/bases/win10-base.qcow2` 后，不要为每台 VM 重装 Windows 和
+`vms/shared/bases/win10-base.qcow2` 后，不要为每台 VM 重装 Windows 和
 NVIDIA 驱动：
 
 该 base 必须是 standalone qcow2；`create-disk.sh` 会验证无 backing、执行
@@ -463,19 +510,28 @@ NVIDIA 驱动：
 
 ```bash
 cd /home/ubuntu/projects/qemu
-./deploy/clone-vgpu-base.sh 5 --gpu-profile gt1030_2gb --start
+./deploy/scripts/vmctl.sh clone 5 --gpu-profile gt1030_2gb --start
 ```
 
-脚本验证 base 自 portable 注入后没有改变，创建新的 VM UUID/B 配置，再严格调用
-`create-disk.sh --from-base`；即使 base 在检查与复制之间消失也不会退回创建空盘。
-克隆的公共桌面已有 `VgpuPortable.exe`。Windows 启动后双击一次，它会读取
+`vmctl clone` 封装 `clone-vgpu-base.sh`。脚本验证 base 自 portable 注入后没有改变，
+创建新的 VM UUID/B 配置，再严格调用 `create-disk.sh --from-base`；即使 base 在
+检查与复制之间消失也不会退回创建空盘。不传 `--monitor-profile` 时自动从审核池
+生成并固定显示器，克隆完成后立即同步；`--start` 仅决定是否立刻开机，普通启动
+还会自动复核，因此无需单独执行 `vmctl monitor`。
+默认克隆的公共桌面只有 `VgpuPortable.exe`。Windows 启动后双击一次，它会读取
 `start-vm.sh` 自动注入的只读 profile/UUID/catalog claim 并选择 GT 1030；不需要
 HTTP、WinRM、另一终端或 guest 完成后的 host commit。
 
-然后按路线一第 7 步的 PowerShell 命令验收名称、PCI ID、Code 0、2 GB 和 license。
-本例 GT1030 保持 B，所以要求 `Licensed`。若 clone 的配置目标是 GTX1050，也始终
-安全停留在 B，并按原生 PnP、Code 0 和 `Licensed` 验收；不要运行已禁用的 strict
-收尾。未来取得匹配目标 tuple 的正式生产签名驱动后，再另行审计 transition。
+安装完成后用 `vGPU Identity Query` 权威验收型号、板卡品牌和显存厂家，最后必须
+显示 `VERIFY PASS`。默认流程完全不读取同目录 GPU-Z。以后显式选装后，才会创建
+`GPU-Z (vGPU profile)` 快捷方式；原来的 TechPowerUp GPU-Z 进程不会继承
+app-local shim，可显示原生 TU102，且 profile 快捷方式中未覆盖的底层字段也可能
+仍显示 TU102/12 nm/754 mm²。
+
+然后按路线一的 PowerShell 命令验收名称、PCI ID、Code 0、2 GB 和 license。若
+base 没有已安装 token，就为该实际 VM 运行私有统一 portable。本例 GT1030 和目标
+为 GTX1050 的 clone 都保持 B，并按原生 PnP、Code 0 和 `Licensed` 验收；不要运行
+旧 strict/型号专用 finish。
 
 ## 关于完整 PCI 消费身份 A
 

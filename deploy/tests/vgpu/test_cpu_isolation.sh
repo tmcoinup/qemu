@@ -7,8 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 HELPER="$REPO_ROOT/deploy/host/cpu-isolate.sh"
 INSTALLER="$REPO_ROOT/deploy/host/install-cpu-isolation.sh"
-START_VM="$REPO_ROOT/deploy/start-vm.sh"
-STOP_VM="$REPO_ROOT/deploy/stop-vm.sh"
+START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
+STOP_VM="$REPO_ROOT/deploy/scripts/stop-vm.sh"
 TMP_DIR="$(mktemp -d)"
 CG_ROOT="$TMP_DIR/cgroup"
 PROC_ROOT="$TMP_DIR/proc"
@@ -142,6 +142,8 @@ grep -Fq 'NOPASSWD: /usr/local/libexec/qemu-cpu-isolate apply *' \
     "$TMP_DIR/install.out" || fail "installer sudoers rule does not scope apply"
 grep -Fq '/usr/local/libexec/qemu-cpu-isolate release *' \
     "$TMP_DIR/install.out" || fail "installer sudoers rule does not scope release"
+grep -Fq '/usr/local/libexec/qemu-cpu-isolate oom-protect *' \
+    "$TMP_DIR/install.out" || fail "installer sudoers rule does not scope OOM protection"
 
 # Exercise the launcher-side QMP handshake.  required mode must query the
 # vCPU native TID, call the helper, and only then issue QMP cont.
@@ -245,7 +247,12 @@ case "$mode" in
     -n)
         [[ "${1:-}" == -- ]] && shift
         [[ "${1:-}" == "$AUTO_SYSTEM_HELPER" ]] || exit 1
-        exec "$@"
+        # This mock cannot change EUID like real sudo.  Executing the helper
+        # would make its non-root trampoline invoke this mock recursively.
+        # Validate the exact non-mutating NOPASSWD readiness probe instead.
+        [[ "${2:-}" == release &&
+           "${3:-}" == 999999999999999999 && $# == 3 ]] || exit 1
+        exit 0
         ;;
     -S)
         [[ "${1:-}" == -p ]] || exit 2
@@ -286,11 +293,16 @@ CPU_ISOLATION_INSTALLER=$ORIGINAL_INSTALLER
 CPU_ISOLATION=required
 CPU_ISOLATION_HELPER="$TMP_DIR/fake-helper"
 CPU_ISOLATION_QMP_TIMEOUT=3
-QEMU_SERVICE_CPUS=0
+unset QEMU_SERVICE_CPUS
 HOST_RESERVE_CORES=auto
 DRY_RUN=0
 FAKE_HELPER_LOG="$TMP_DIR/fake-helper.log"
 export CPU_ISOLATION_HELPER FAKE_HELPER_LOG
+PLAN_OUTPUT=$(cpu_isolation_print_plan)
+grep -Fq 'service CPUs=auto' <<<"$PLAN_OUTPUT" \
+    || fail "CPU isolation library default service CPU count is not auto"
+# Keep this handshake deterministic; auto placement is host-capacity dependent.
+QEMU_SERVICE_CPUS=0
 cpu_isolation_launch 42 1 "$TMP_DIR/qmp.sock" "$TMP_DIR/qemu.pid" \
     "$TMP_DIR/cpu.state"
 wait "$CPU_ISOLATION_PINNER_PID" || fail "QMP pinner failed"
@@ -306,12 +318,56 @@ cpu_isolation_cleanup 42 "$TMP_DIR/cpu.state"
 grep -Fxq 'release 42' "$TMP_DIR/fake-helper.log" \
     || fail "launcher cleanup did not release the VM cgroup"
 
+# auto must count CPUs already held by other VM cgroups.  With two eligible
+# CPUs, one vCPU and one held CPU, the optional service CPU must fall back to
+# zero instead of asking the root helper for impossible capacity.
+AUTO_TOPOLOGY="$TMP_DIR/auto-topology"
+AUTO_CGROUP="$TMP_DIR/auto-cgroup"
+mkdir -p "$AUTO_TOPOLOGY" "$AUTO_CGROUP/qemu-vm-isolation/vm99"
+printf '9000\n' >"$AUTO_CGROUP/qemu-vm-isolation/vm99/cgroup.procs"
+printf '2\n' >"$AUTO_CGROUP/qemu-vm-isolation/vm99/cpuset.cpus"
+printf '0-3\n' >"$AUTO_TOPOLOGY/online"
+for cpu in 0 1 2 3; do
+    mkdir -p "$AUTO_TOPOLOGY/cpu${cpu}/topology"
+    printf '%s\n' "$cpu" \
+        >"$AUTO_TOPOLOGY/cpu${cpu}/topology/thread_siblings_list"
+done
+: >"$TMP_DIR/fake-helper.log"
+"$TMP_DIR/fake-qmp.py" -name vm43 "$TMP_DIR/qmp-auto.sock" \
+    "$TMP_DIR/qmp-auto.record" &
+FAKE_QMP_PID=$!
+for _ in $(seq 1 100); do
+    [[ -S "$TMP_DIR/qmp-auto.sock" ]] && break
+    kill -0 "$FAKE_QMP_PID" 2>/dev/null || fail "auto fake QMP exited early"
+    sleep 0.01
+done
+QEMU_SERVICE_CPUS=auto
+CPU_ISOLATION_SYS_CPU_ROOT=$AUTO_TOPOLOGY
+CPU_ISOLATION_CGROUP_ROOT=$AUTO_CGROUP
+cpu_isolation_launch 43 1 "$TMP_DIR/qmp-auto.sock" "$TMP_DIR/qemu-auto.pid" \
+    "$TMP_DIR/cpu-auto.state"
+wait "$CPU_ISOLATION_PINNER_PID" || fail "auto QMP pinner failed"
+CPU_ISOLATION_PINNER_PID=""
+wait "$FAKE_QMP_PID" || fail "auto fake QMP failed"
+grep -Eq '^apply 43 [0-9]+ 2,3 [0-9]+ 0$' "$TMP_DIR/fake-helper.log" \
+    || fail "auto service CPU did not account for an existing VM allocation"
+cpu_isolation_cleanup 43 "$TMP_DIR/cpu-auto.state"
+unset CPU_ISOLATION_SYS_CPU_ROOT CPU_ISOLATION_CGROUP_ROOT
+
 grep -Fq 'source "$here/lib/cpu-isolation.sh"' "$START_VM" \
     || fail "start-vm does not load CPU isolation"
+grep -Fq 'QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-auto}"' "$START_VM" \
+    || fail "start-vm default service CPU count is not auto"
 grep -Fq '[[ "$CPU_ISOLATION" == required ]] && QEMU_CMD+=( -S )' "$START_VM" \
     || fail "required mode does not pause guest until isolation succeeds"
-grep -Fq 'cpu_isolation_launch "$VM_ID" 4' "$START_VM" \
-    || fail "start-vm does not launch the QMP pinner"
+grep -Fq 'cpu_isolation_launch "$VM_ID" "$CPU_VCPUS"' "$START_VM" \
+    || fail "start-vm does not launch the QMP pinner with profile vCPU count"
+grep -Fq 'export -n SUDO_PASSWORD' "$START_VM" \
+    || fail "start-vm leaves a caller-exported host credential exported"
+grep -Fq 'QEMU_LAUNCH=( env -u SUDO_PASSWORD )' "$START_VM" \
+    || fail "start-vm does not strip the host credential from QEMU's environment"
+[[ "$(grep -Fc '"${QEMU_LAUNCH[@]}" "${QEMU_CMD[@]}"' "$START_VM")" -eq 3 ]] \
+    || fail "not every QEMU launch mode uses the credential-scrubbed wrapper"
 grep -Fq 'cpu_isolation_release_vm "$VM_ID"' "$STOP_VM" \
     || fail "stop-vm does not release the per-VM partition"
 

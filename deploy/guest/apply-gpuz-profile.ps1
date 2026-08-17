@@ -1,15 +1,16 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Apply and verify one HTTP-free, app-local GPU-Z identity bundle.
+  Apply and verify one HTTP-free vGPU identity bundle, with optional GPU-Z.
 
 .DESCRIPTION
-  This entry point accepts only the three audited 2 GB catalog identities.
+  This entry point accepts every audited B/native catalog identity.
   It verifies every bundle asset before mutation, checks the VM UUID, active
   display count, driver health/signature and BCD integrity policy, applies the
-  per-VM registry profile, atomically publishes the manifest-bound GPU-Z
-  2.70.0 image under protected ProgramData, and installs the x86 shim only
-  beside that persistent executable.  BCD, the Driver Store, display-driver
+  per-VM registry profile, publishes the identity query and x86 app-local shim
+  under protected ProgramData, and optionally imports the contract-bound
+  GPU-Z 2.70.0 image only when -InstallGpuZ is explicitly supplied.  BCD, the
+  Driver Store, display-driver
   binaries and System32/SysWOW64 NVAPI images are never modified.  Windows
   Task Scheduler still persists the protected offline registry-refresh task
   in its normal system-managed task store.
@@ -21,7 +22,8 @@
 [CmdletBinding()]
 param(
     [switch]$VerifyOnly,
-    [switch]$NoLaunch
+    [switch]$NoLaunch,
+    [switch]$InstallGpuZ
 )
 
 Set-StrictMode -Version 2.0
@@ -41,7 +43,12 @@ $SystemPowerShell = Join-Path $env:SystemRoot `
     'System32\WindowsPowerShell\v1.0\powershell.exe'
 $SystemBcdEdit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
 $SystemReg = Join-Path $env:SystemRoot 'System32\reg.exe'
+$SystemPowerCfg = Join-Path $env:SystemRoot 'System32\powercfg.exe'
 $PublicSignerCache = @{}
+
+if ($VerifyOnly -and $InstallGpuZ) {
+    throw '-VerifyOnly and -InstallGpuZ cannot be combined.'
+}
 
 if (-not ([System.Management.Automation.PSTypeName]'QemuGpuZNativeSecurity').Type) {
     Add-Type -TypeDefinition @'
@@ -532,6 +539,7 @@ function Assert-Administrator {
     $null = Assert-RegularLocalPath $SystemPowerShell 'system Windows PowerShell'
     $null = Assert-RegularLocalPath $SystemBcdEdit 'system BCD reader'
     $null = Assert-RegularLocalPath $SystemReg 'system registry tool'
+    $null = Assert-RegularLocalPath $SystemPowerCfg 'system power configuration tool'
 }
 
 function Assert-AllowedProperties {
@@ -1103,7 +1111,7 @@ function Read-And-VerifyBundle {
     }
     $manifestSchema = ConvertTo-StrictInt `
         (Get-RequiredProperty $manifest 'schemaVersion' 'manifest') `
-        'manifest.schemaVersion' 1 2
+        'manifest.schemaVersion' 1 4
     if ($manifestSchema -eq 1) {
         Assert-AllowedProperties $manifest @(
             'schemaVersion', 'vmId', 'files'
@@ -1120,6 +1128,27 @@ function Read-And-VerifyBundle {
             'manifest.bindingMode' 13 '^portable-auto$'
         if ($bindingMode -cne 'portable-auto') {
             throw 'Portable manifest binding mode is not canonical.'
+        }
+    } elseif ($manifestSchema -eq 3) {
+        Assert-AllowedProperties $manifest @(
+            'schemaVersion', 'bindingMode', 'files', 'externalFiles'
+        ) 'manifest'
+        $bindingMode = ConvertTo-StrictString `
+            (Get-RequiredProperty $manifest 'bindingMode' 'manifest') `
+            'manifest.bindingMode' 13 '^portable-auto$'
+        if ($bindingMode -cne 'portable-auto') {
+            throw 'External-sibling manifest binding mode is not canonical.'
+        }
+    } elseif ($manifestSchema -eq 4) {
+        Assert-AllowedProperties $manifest @(
+            'schemaVersion', 'bindingMode', 'files',
+            'optionalExternalFiles'
+        ) 'manifest'
+        $bindingMode = ConvertTo-StrictString `
+            (Get-RequiredProperty $manifest 'bindingMode' 'manifest') `
+            'manifest.bindingMode' 13 '^portable-auto$'
+        if ($bindingMode -cne 'portable-auto') {
+            throw 'Optional-GPU-Z manifest binding mode is not canonical.'
         }
     } else {
         throw 'Unsupported manifest schema.'
@@ -1154,6 +1183,56 @@ function Read-And-VerifyBundle {
             throw "Bundle asset SHA256 mismatch for $name."
         }
     }
+    $externalFiles = @()
+    if ($manifestSchema -eq 3 -or $manifestSchema -eq 4) {
+        $externalProperty = if ($manifestSchema -eq 4) {
+            'optionalExternalFiles'
+        } else {
+            'externalFiles'
+        }
+        $externalContext = "manifest.$externalProperty[]"
+        $externalFiles = @(
+            Get-RequiredProperty $manifest $externalProperty 'manifest'
+        )
+        if ($externalFiles.Count -ne 1) {
+            throw 'Portable manifest must declare exactly one GPU-Z sibling.'
+        }
+        foreach ($file in $externalFiles) {
+            Assert-AllowedProperties $file @('name', 'sha256', 'bytes') `
+                $externalContext
+            $name = ConvertTo-StrictString `
+                (Get-RequiredProperty $file 'name' `
+                    $externalContext) `
+                "$externalContext.name" 128 `
+                '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+            if ($name.Contains('..') -or $seen.ContainsKey($name)) {
+                throw "Unsafe or duplicate external file name: $name"
+            }
+            $seen[$name] = $true
+            $expectedHash = ConvertTo-StrictString `
+                (Get-RequiredProperty $file 'sha256' `
+                    $externalContext) `
+                "$externalContext.sha256" 64 '^[0-9A-F]{64}$'
+            $expectedBytes = ConvertTo-StrictInt `
+                (Get-RequiredProperty $file 'bytes' `
+                    $externalContext) `
+                "$externalContext.bytes" 1 268435456
+            if ($name -cne 'GPU-Z.exe' -or $expectedBytes -ne 11642144 -or
+                $expectedHash -cne
+                    '6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29') {
+                throw 'The declared optional sibling is not the audited GPU-Z 2.70 image.'
+            }
+            $path = Join-Path $BundleRoot $name
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $item = Assert-RegularLocalPath $path `
+                    "protected external snapshot '$name'"
+                if ([int64]$item.Length -ne $expectedBytes -or
+                    (Get-Sha256 $path) -cne $expectedHash) {
+                    throw "External snapshot size/SHA256 mismatch for $name."
+                }
+            }
+        }
+    }
     foreach ($requiredName in @(
         'apply-vm-profile.ps1', 'patch-grid-strings.ps1',
         'apply-gpuz-profile.ps1',
@@ -1164,7 +1243,15 @@ function Read-And-VerifyBundle {
             throw "Required asset is not covered by the manifest: $requiredName"
         }
     }
-    $allowedRootNames = @('READY', 'bundle-manifest.json') + @($seen.Keys)
+    $allowedRootNames = @('READY', 'bundle-manifest.json') +
+        @($files | ForEach-Object { [string]$_.name })
+    foreach ($externalFile in $externalFiles) {
+        $externalName = [string]$externalFile.name
+        if (Test-Path -LiteralPath (Join-Path $BundleRoot $externalName) `
+                -PathType Leaf) {
+            $allowedRootNames += $externalName
+        }
+    }
     $rootItems = @(Get-ChildItem -LiteralPath $BundleRoot -Force -ErrorAction Stop)
     if ($rootItems.Count -ne $allowedRootNames.Count) {
         throw 'Bundle root contains an unmanifested file or directory.'
@@ -1175,7 +1262,8 @@ function Read-And-VerifyBundle {
             throw "Bundle root contains a forbidden entry: $($rootItem.Name)"
         }
     }
-    Write-Pass "all $($files.Count) HTTP-free bundle assets match the manifest."
+    Write-Pass (("all {0} embedded assets and {1} declared GPU-Z " +
+        "asset(s) match the manifest.") -f $files.Count, $externalFiles.Count)
     return $manifest
 }
 
@@ -1184,10 +1272,18 @@ function Read-And-ValidatePortableContract {
         [Parameter(Mandatory = $true)][object]$Manifest,
         [Parameter(Mandatory = $true)][object]$RawContract
     )
-    Assert-AllowedProperties $Manifest @(
-        'schemaVersion', 'bindingMode', 'files'
-    ) 'portable manifest'
-    if ([int](Get-RequiredProperty $Manifest 'schemaVersion' 'manifest') -ne 2 -or
+    $rawContractSchema = ConvertTo-StrictInt `
+        (Get-RequiredProperty $RawContract 'schemaVersion' 'contract') `
+        'contract.schemaVersion' 3 4
+    $expectedManifestSchema = if ($rawContractSchema -eq 4) { 3 } else { 2 }
+    $allowedManifestProperties = @('schemaVersion', 'bindingMode', 'files')
+    if ($expectedManifestSchema -eq 3) {
+        $allowedManifestProperties += 'externalFiles'
+    }
+    Assert-AllowedProperties $Manifest $allowedManifestProperties `
+        'portable manifest'
+    if ([int](Get-RequiredProperty $Manifest 'schemaVersion' 'manifest') -ne
+            $expectedManifestSchema -or
         [string](Get-RequiredProperty $Manifest 'bindingMode' 'manifest') -cne
             'portable-auto') {
         throw 'Portable contract requires the portable-auto manifest schema.'
@@ -1198,9 +1294,7 @@ function Read-And-ValidatePortableContract {
         'expectedPnpId', 'expectedDriverVersion', 'profiles', 'gpuz',
         'appLocal'
     ) 'contract'
-    if ((ConvertTo-StrictInt `
-            (Get-RequiredProperty $RawContract 'schemaVersion' 'contract') `
-            'contract.schemaVersion' 3 3) -ne 3) {
+    if ($rawContractSchema -ne 3 -and $rawContractSchema -ne 4) {
         throw 'Unsupported portable contract schema.'
     }
     $bindingMode = ConvertTo-StrictString `
@@ -1306,9 +1400,11 @@ function Read-And-ValidatePortableContract {
     }
 
     $gpuz = Get-RequiredProperty $RawContract 'gpuz' 'contract'
-    Assert-AllowedProperties $gpuz @(
-        'name', 'bytes', 'productVersion', 'sha256'
-    ) 'contract.gpuz'
+    $allowedGpuZProperties = @('name', 'bytes', 'productVersion', 'sha256')
+    if ($rawContractSchema -eq 4) {
+        $allowedGpuZProperties += 'delivery'
+    }
+    Assert-AllowedProperties $gpuz $allowedGpuZProperties 'contract.gpuz'
     $gpuzName = ConvertTo-StrictString `
         (Get-RequiredProperty $gpuz 'name' 'contract.gpuz') `
         'contract.gpuz.name' 128 '^[A-Za-z0-9][A-Za-z0-9._-]*$'
@@ -1327,7 +1423,26 @@ function Read-And-ValidatePortableContract {
             '6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29') {
         throw 'Portable contract does not select the audited GPU-Z 2.70 image.'
     }
-    $manifestGpuZ = @($manifestFiles | Where-Object {
+    $gpuzDelivery = 'embedded'
+    $gpuZManifestSource = $manifestFiles
+    if ($rawContractSchema -eq 4) {
+        $gpuzDelivery = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuz 'delivery' 'contract.gpuz') `
+            'contract.gpuz.delivery' 32 '^external-sibling$'
+        if ($gpuzDelivery -cne 'external-sibling') {
+            throw 'Portable GPU-Z delivery mode is not external-sibling.'
+        }
+        $gpuZManifestSource = @(
+            Get-RequiredProperty $Manifest 'externalFiles' 'manifest'
+        )
+        if (@($manifestFiles | Where-Object {
+                [string](Get-RequiredProperty $_ 'name' `
+                    'manifest.files[]') -ceq $gpuzName
+            }).Count -ne 0) {
+            throw 'External GPU-Z must not also be embedded in manifest.files.'
+        }
+    }
+    $manifestGpuZ = @($gpuZManifestSource | Where-Object {
         [string](Get-RequiredProperty $_ 'name' 'manifest.files[]') -ceq
             $gpuzName
     })
@@ -1375,6 +1490,7 @@ function Read-And-ValidatePortableContract {
         GpuZBytes = [int64]$gpuzBytes
         GpuZProductVersion = $gpuzVersion
         GpuZSha256 = $gpuzSha256
+        GpuZDelivery = $gpuzDelivery
         GpuZSourcePath = Join-Path $BundleRoot $gpuzName
         GpuZApplicationDirectory = Join-Path $ApplicationsRoot (
             '{0}-{1}' -f $gpuzVersion, $gpuzSha256.Substring(0, 16)
@@ -1383,6 +1499,393 @@ function Read-And-ValidatePortableContract {
         ShimSha256 = [string]$appLocal.shimSha256
         ProbePath = Join-Path $BundleRoot ([string]$appLocal.probeName)
         ProbeSha256 = [string]$appLocal.probeSha256
+    }
+}
+
+function Read-And-ValidatePortableIdentityContract {
+    param(
+        [Parameter(Mandatory = $true)][object]$Manifest,
+        [Parameter(Mandatory = $true)][object]$RawContract
+    )
+    $identitySchema = ConvertTo-StrictInt `
+        (Get-RequiredProperty $RawContract 'schemaVersion' 'contract') `
+        'contract.schemaVersion' 5 7
+    $expectedManifestSchema = if ($identitySchema -ge 6) { 4 } else { 3 }
+    $externalProperty = if ($identitySchema -ge 6) {
+        'optionalExternalFiles'
+    } else {
+        'externalFiles'
+    }
+    Assert-AllowedProperties $Manifest @(
+        'schemaVersion', 'bindingMode', 'files', $externalProperty
+    ) 'portable identity manifest'
+    if ([int](Get-RequiredProperty $Manifest 'schemaVersion' 'manifest') -ne
+            $expectedManifestSchema -or
+        [string](Get-RequiredProperty $Manifest 'bindingMode' 'manifest') -cne
+            'portable-auto') {
+        throw "Schema-$identitySchema identity contract requires portable manifest schema $expectedManifestSchema."
+    }
+    $allowedContractProperties = @(
+        'schemaVersion', 'bindingMode', 'spoofMode', 'catalogSha256',
+        'expectedPnpId', 'expectedDriverVersion', 'catalog', 'profiles',
+        'gpuz', 'appLocal'
+    )
+    if ($identitySchema -eq 7) {
+        $allowedContractProperties += 'licenseToken'
+    }
+    Assert-AllowedProperties $RawContract $allowedContractProperties `
+        'identity contract'
+    if ([string](Get-RequiredProperty $RawContract 'bindingMode' 'contract') -cne
+            'portable-auto' -or
+        [string](Get-RequiredProperty $RawContract 'spoofMode' 'contract') -cne 'B') {
+        throw "Unsupported schema-$identitySchema portable identity contract header."
+    }
+    $catalogSha256 = ConvertTo-StrictString `
+        (Get-RequiredProperty $RawContract 'catalogSha256' 'contract') `
+        'contract.catalogSha256' 64 '^[0-9A-F]{64}$'
+    $expectedPnp = ConvertTo-StrictString `
+        (Get-RequiredProperty $RawContract 'expectedPnpId' 'contract') `
+        'contract.expectedPnpId' 64 '^PCI\\VEN_10DE&DEV_1E30$'
+    $driverVersion = ConvertTo-StrictString `
+        (Get-RequiredProperty $RawContract 'expectedDriverVersion' 'contract') `
+        'contract.expectedDriverVersion' 32 '^[0-9]+(\.[0-9]+){3}$'
+    if ($expectedPnp -cne 'PCI\VEN_10DE&DEV_1E30' -or
+        $driverVersion -cne '31.0.15.3833') {
+        throw 'Portable identity mode accepts only native DEV_1E30 / GRID 538.33.'
+    }
+
+    $manifestFiles = @(Get-RequiredProperty $Manifest 'files' 'manifest')
+    $catalogAsset = Get-RequiredProperty $RawContract 'catalog' 'contract'
+    Assert-AllowedProperties $catalogAsset @('name', 'sha256', 'bytes') `
+        'contract.catalog'
+    $catalogName = ConvertTo-StrictString `
+        (Get-RequiredProperty $catalogAsset 'name' 'contract.catalog') `
+        'contract.catalog.name' 128 '^vgpu-profile-catalog\.json$'
+    $catalogAssetSha256 = ConvertTo-StrictString `
+        (Get-RequiredProperty $catalogAsset 'sha256' 'contract.catalog') `
+        'contract.catalog.sha256' 64 '^[0-9A-F]{64}$'
+    $catalogBytes = ConvertTo-StrictInt `
+        (Get-RequiredProperty $catalogAsset 'bytes' 'contract.catalog') `
+        'contract.catalog.bytes' 1 1048576
+    $catalogPath = Join-Path $BundleRoot $catalogName
+    $catalogItem = Assert-RegularLocalPath $catalogPath 'schema-2 identity catalog'
+    if ([int64]$catalogItem.Length -ne $catalogBytes -or
+        (Get-Sha256 $catalogPath) -cne $catalogAssetSha256) {
+        throw 'Schema-2 identity catalog size/hash mismatch.'
+    }
+    $catalogManifestRows = @($manifestFiles | Where-Object {
+        [string](Get-RequiredProperty $_ 'name' 'manifest.files[]') -ceq
+            $catalogName
+    })
+    if ($catalogManifestRows.Count -ne 1 -or
+        [string](Get-RequiredProperty $catalogManifestRows[0] 'sha256' `
+            'manifest.files[]') -cne $catalogAssetSha256 -or
+        [int64](Get-RequiredProperty $catalogManifestRows[0] 'bytes' `
+            'manifest.files[]') -ne $catalogBytes) {
+        throw 'Manifest does not uniquely bind the schema-2 identity catalog.'
+    }
+    try {
+        $catalog = Get-Content -LiteralPath $catalogPath -Raw |
+            ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw "Schema-2 identity catalog is invalid JSON: $($_.Exception.Message)"
+    }
+    Assert-AllowedProperties $catalog @(
+        'schemaVersion', 'catalogSha256', 'identityMode', 'transportPnpId',
+        'profiles'
+    ) 'identity catalog'
+    if ([int]$catalog.schemaVersion -ne 2 -or
+        [string]$catalog.catalogSha256 -cne $catalogSha256 -or
+        [string]$catalog.identityMode -cne 'protected-user-mode' -or
+        [string]$catalog.transportPnpId -cne $expectedPnp) {
+        throw 'Identity catalog header conflicts with the portable/firmware contract.'
+    }
+
+    $catalogProfiles = @($catalog.profiles)
+    $rawProfiles = @(Get-RequiredProperty $RawContract 'profiles' 'contract')
+    if ($catalogProfiles.Count -lt 1 -or $catalogProfiles.Count -gt 64 -or
+        $rawProfiles.Count -ne $catalogProfiles.Count) {
+        throw 'Portable identity contract and schema-2 catalog profile counts differ.'
+    }
+    $profiles = @()
+    $seenKeys = @{}
+    $seenAssets = @{}
+    foreach ($rawProfile in $rawProfiles) {
+        Assert-AllowedProperties $rawProfile @(
+            'key', 'canonicalDisplayName', 'boardBrand', 'boardModel',
+            'memoryMakerName', 'asset'
+        ) 'contract.profiles[]'
+        $key = ConvertTo-StrictString `
+            (Get-RequiredProperty $rawProfile 'key' 'contract.profiles[]') `
+            'contract.profiles[].key' 64 '^[a-z0-9][a-z0-9_]*$'
+        $canonicalName = ConvertTo-StrictString `
+            (Get-RequiredProperty $rawProfile 'canonicalDisplayName' `
+                'contract.profiles[]') `
+            'contract.profiles[].canonicalDisplayName' 31 `
+            '^NVIDIA [A-Za-z0-9][\x20-\x7E]{0,22}$'
+        $boardBrand = ConvertTo-StrictString `
+            (Get-RequiredProperty $rawProfile 'boardBrand' `
+                'contract.profiles[]') `
+            'contract.profiles[].boardBrand' 31 `
+            '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$'
+        $boardModel = ConvertTo-StrictString `
+            (Get-RequiredProperty $rawProfile 'boardModel' `
+                'contract.profiles[]') `
+            'contract.profiles[].boardModel' 31 `
+            '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$'
+        $memoryMakerName = ConvertTo-StrictString `
+            (Get-RequiredProperty $rawProfile 'memoryMakerName' `
+                'contract.profiles[]') `
+            'contract.profiles[].memoryMakerName' 31 `
+            '^(Samsung|SK hynix|Micron)$'
+        $matches = @($catalogProfiles | Where-Object {
+            [string]$_.profile -ceq $key
+        })
+        if ($matches.Count -ne 1 -or
+            [string]$matches[0].name -cne $canonicalName -or
+            [string]$matches[0].boardBrand -cne $boardBrand -or
+            [string]$matches[0].boardModel -cne $boardModel -or
+            [string]$matches[0].memoryMakerName -cne $memoryMakerName -or
+            $seenKeys.ContainsKey($key)) {
+            throw "Portable identity '$key' is missing, duplicated, or split across rows."
+        }
+        $seenKeys[$key] = $true
+
+        $asset = Get-RequiredProperty $rawProfile 'asset' 'contract.profiles[]'
+        Assert-AllowedProperties $asset @('name', 'sha256') `
+            'contract.profiles[].asset'
+        $assetName = ConvertTo-StrictString `
+            (Get-RequiredProperty $asset 'name' 'contract.profiles[].asset') `
+            'contract.profiles[].asset.name' 128 `
+            '^profile-[a-z0-9_]+\.json$'
+        $assetHash = ConvertTo-StrictString `
+            (Get-RequiredProperty $asset 'sha256' 'contract.profiles[].asset') `
+            'contract.profiles[].asset.sha256' 64 '^[0-9A-F]{64}$'
+        if ($assetName -cne "profile-$key.json" -or
+            $seenAssets.ContainsKey($assetName)) {
+            throw "Portable profile asset name is ambiguous: $assetName"
+        }
+        $seenAssets[$assetName] = $true
+        $profilePath = Join-Path $BundleRoot $assetName
+        if ((Get-Sha256 $profilePath) -cne $assetHash) {
+            throw "Portable profile hash mismatch: $assetName"
+        }
+        $manifestRows = @($manifestFiles | Where-Object {
+            [string](Get-RequiredProperty $_ 'name' 'manifest.files[]') -ceq
+                $assetName
+        })
+        if ($manifestRows.Count -ne 1 -or
+            [string](Get-RequiredProperty $manifestRows[0] 'sha256' `
+                'manifest.files[]') -cne $assetHash) {
+            throw "Manifest does not uniquely bind portable profile $assetName."
+        }
+        $profiles += [pscustomobject]@{
+            Key = $key
+            CanonicalDisplayName = $canonicalName
+            BoardBrand = $boardBrand
+            BoardModel = $boardModel
+            MemoryMakerName = $memoryMakerName
+            CatalogGpu = $matches[0]
+            Path = $profilePath
+            Sha256 = $assetHash
+        }
+    }
+    foreach ($catalogGpu in $catalogProfiles) {
+        if (-not $seenKeys.ContainsKey([string]$catalogGpu.profile)) {
+            throw "Portable contract omits catalog profile '$($catalogGpu.profile)'."
+        }
+    }
+
+    $gpuz = Get-RequiredProperty $RawContract 'gpuz' 'contract'
+    Assert-AllowedProperties $gpuz @(
+        'name', 'bytes', 'productVersion', 'sha256', 'delivery'
+    ) 'contract.gpuz'
+    $gpuzName = ConvertTo-StrictString `
+        (Get-RequiredProperty $gpuz 'name' 'contract.gpuz') `
+        'contract.gpuz.name' 128 '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    $gpuzBytes = ConvertTo-StrictInt `
+        (Get-RequiredProperty $gpuz 'bytes' 'contract.gpuz') `
+        'contract.gpuz.bytes' 1 268435456
+    $gpuzVersion = ConvertTo-StrictString `
+        (Get-RequiredProperty $gpuz 'productVersion' 'contract.gpuz') `
+        'contract.gpuz.productVersion' 32 '^[0-9]+(\.[0-9]+){2}$'
+    $gpuzSha256 = ConvertTo-StrictString `
+        (Get-RequiredProperty $gpuz 'sha256' 'contract.gpuz') `
+        'contract.gpuz.sha256' 64 '^[0-9A-F]{64}$'
+    $expectedGpuZDelivery = if ($identitySchema -ge 6) {
+        'optional-explicit-sibling'
+    } else {
+        'external-sibling'
+    }
+    if ($gpuzName -cne 'GPU-Z.exe' -or $gpuzBytes -ne 11642144 -or
+        $gpuzVersion -cne '2.70.0' -or
+        $gpuzSha256 -cne
+            '6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29' -or
+        [string](Get-RequiredProperty $gpuz 'delivery' 'contract.gpuz') -cne
+            $expectedGpuZDelivery) {
+        throw "Schema-$identitySchema contract does not declare the audited optional GPU-Z 2.70 image."
+    }
+    $externalContext = "manifest.$externalProperty[]"
+    $externalFiles = @(
+        Get-RequiredProperty $Manifest $externalProperty 'manifest'
+    )
+    $manifestGpuZ = @($externalFiles | Where-Object {
+        [string](Get-RequiredProperty $_ 'name' $externalContext) -ceq
+            $gpuzName
+    })
+    if ($manifestGpuZ.Count -ne 1 -or
+        [string](Get-RequiredProperty $manifestGpuZ[0] 'sha256' `
+            $externalContext) -cne $gpuzSha256 -or
+        [int64](Get-RequiredProperty $manifestGpuZ[0] 'bytes' `
+            $externalContext) -ne $gpuzBytes) {
+        throw "Manifest GPU-Z metadata does not match the schema-$identitySchema contract."
+    }
+
+    $licenseTokenPath = $null
+    $licenseTokenSha256 = $null
+    $licenseTokenBytes = 0L
+    $licenseTokenDelivery = $null
+    $licenseInstallerPath = $null
+    if ($identitySchema -eq 7) {
+        $licenseToken = Get-RequiredProperty $RawContract 'licenseToken' `
+            'contract'
+        Assert-AllowedProperties $licenseToken @(
+            'name', 'sha256', 'bytes', 'delivery'
+        ) 'contract.licenseToken'
+        $licenseTokenName = ConvertTo-StrictString `
+            (Get-RequiredProperty $licenseToken 'name' `
+                'contract.licenseToken') `
+            'contract.licenseToken.name' 64 `
+            '^client_configuration_token\.tok$'
+        $licenseTokenSha256 = ConvertTo-StrictString `
+            (Get-RequiredProperty $licenseToken 'sha256' `
+                'contract.licenseToken') `
+            'contract.licenseToken.sha256' 64 '^[0-9A-F]{64}$'
+        $licenseTokenBytes = ConvertTo-StrictInt `
+            (Get-RequiredProperty $licenseToken 'bytes' `
+                'contract.licenseToken') `
+            'contract.licenseToken.bytes' 1024 1048576
+        $licenseTokenDelivery = ConvertTo-StrictString `
+            (Get-RequiredProperty $licenseToken 'delivery' `
+                'contract.licenseToken') `
+            'contract.licenseToken.delivery' 32 '^embedded-private$'
+        $licenseTokenPath = Join-Path $BundleRoot $licenseTokenName
+        $licenseTokenItem = Assert-RegularLocalPath $licenseTokenPath `
+            'embedded private vGPU license token'
+        if ([int64]$licenseTokenItem.Length -ne $licenseTokenBytes -or
+            (Get-Sha256 $licenseTokenItem.FullName) -cne
+                $licenseTokenSha256) {
+            throw 'Embedded private vGPU license token size/hash mismatch.'
+        }
+        $tokenPrefixBytes = @(Get-Content -LiteralPath `
+            $licenseTokenItem.FullName -Encoding Byte -TotalCount 256)
+        $tokenPrefix = [Text.Encoding]::ASCII.GetString(
+            [byte[]]$tokenPrefixBytes
+        )
+        if ($tokenPrefix -match '(?i)<\s*(?:!doctype\s+html|html)') {
+            throw 'Embedded private vGPU license token is an HTML error page.'
+        }
+        $tokenRows = @($manifestFiles | Where-Object {
+            [string](Get-RequiredProperty $_ 'name' 'manifest.files[]') -ceq
+                $licenseTokenName
+        })
+        if ($tokenRows.Count -ne 1 -or
+            [string](Get-RequiredProperty $tokenRows[0] 'sha256' `
+                'manifest.files[]') -cne $licenseTokenSha256 -or
+            [int64](Get-RequiredProperty $tokenRows[0] 'bytes' `
+                'manifest.files[]') -ne $licenseTokenBytes) {
+            throw 'Manifest does not uniquely bind the private vGPU license token.'
+        }
+
+        $licenseInstallerName = 'install-vgpu-license.ps1'
+        $licenseInstallerPath = Join-Path $BundleRoot $licenseInstallerName
+        $null = Assert-RegularLocalPath $licenseInstallerPath `
+            'embedded private vGPU license installer'
+        $installerRows = @($manifestFiles | Where-Object {
+            [string](Get-RequiredProperty $_ 'name' 'manifest.files[]') -ceq
+                $licenseInstallerName
+        })
+        if ($installerRows.Count -ne 1) {
+            throw 'Manifest does not uniquely bind the private vGPU license installer.'
+        }
+    }
+
+    $appLocal = Get-RequiredProperty $RawContract 'appLocal' 'contract'
+    Assert-AllowedProperties $appLocal @(
+        'shimName', 'shimSha256', 'probeName', 'probeSha256',
+        'queryName', 'querySha256'
+    ) 'contract.appLocal'
+    foreach ($nameProperty in @('shimName', 'probeName', 'queryName')) {
+        $value = ConvertTo-StrictString `
+            (Get-RequiredProperty $appLocal $nameProperty 'contract.appLocal') `
+            "contract.appLocal.$nameProperty" 128 `
+            '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+        if ($value.Contains('..')) {
+            throw "Unsafe app-local asset name: $value"
+        }
+    }
+    if ([string]$appLocal.queryName -cne 'VgpuIdentityQuery.exe') {
+        throw 'The identity contract does not select the authoritative query image.'
+    }
+    foreach ($hashProperty in @(
+        'shimSha256', 'probeSha256', 'querySha256'
+    )) {
+        $null = ConvertTo-StrictString `
+            (Get-RequiredProperty $appLocal $hashProperty 'contract.appLocal') `
+            "contract.appLocal.$hashProperty" 64 '^[0-9A-F]{64}$'
+    }
+    # Schemas 6/7 install the identity runtime without requiring GPU-Z. Keep a
+    # deterministic protected generation that also includes the optional
+    # audited GPU-Z hash, so a future reviewed version cannot collide with it.
+    $applicationGeneration = if ($identitySchema -ge 6) {
+        'identity-{0}-{1}-{2}-{3}' -f `
+            $catalogSha256.Substring(0, 16), `
+            ([string]$appLocal.shimSha256).Substring(0, 16), `
+            ([string]$appLocal.querySha256).Substring(0, 16), `
+            $gpuzSha256.Substring(0, 16)
+    } else {
+        '{0}-{1}-{2}-{3}' -f `
+            $gpuzVersion, $gpuzSha256.Substring(0, 16), `
+            ([string]$appLocal.shimSha256).Substring(0, 16), `
+            ([string]$appLocal.querySha256).Substring(0, 16)
+    }
+    $applicationDirectory = Join-Path $ApplicationsRoot $applicationGeneration
+
+    return [pscustomobject]@{
+        ContractSchemaVersion = $identitySchema
+        BindingMode = 'portable-auto'
+        VmId = $null
+        VmUuid = $null
+        SpoofMode = 'B'
+        GpuProfile = $null
+        CatalogSha256 = $catalogSha256
+        CatalogPath = $catalogPath
+        CatalogAssetSha256 = $catalogAssetSha256
+        Profiles = $profiles
+        ProfilePath = $null
+        ExpectedPnpId = $expectedPnp
+        ExpectedDriverVersion = $driverVersion
+        FirmwareClaim = $null
+        FirmwareClaimSha256 = $null
+        GpuZName = $gpuzName
+        GpuZBytes = [int64]$gpuzBytes
+        GpuZProductVersion = $gpuzVersion
+        GpuZSha256 = $gpuzSha256
+        GpuZDelivery = $expectedGpuZDelivery
+        GpuZSourcePath = Join-Path $BundleRoot $gpuzName
+        IdentityApplicationDirectory = $applicationDirectory
+        GpuZApplicationDirectory = $applicationDirectory
+        ShimPath = Join-Path $BundleRoot ([string]$appLocal.shimName)
+        ShimSha256 = [string]$appLocal.shimSha256
+        ProbePath = Join-Path $BundleRoot ([string]$appLocal.probeName)
+        ProbeSha256 = [string]$appLocal.probeSha256
+        QueryPath = Join-Path $BundleRoot ([string]$appLocal.queryName)
+        QuerySha256 = [string]$appLocal.querySha256
+        LicenseTokenPath = $licenseTokenPath
+        LicenseTokenSha256 = $licenseTokenSha256
+        LicenseTokenBytes = [int64]$licenseTokenBytes
+        LicenseTokenDelivery = $licenseTokenDelivery
+        LicenseInstallerPath = $licenseInstallerPath
     }
 }
 
@@ -1396,8 +1899,11 @@ function Read-And-ValidateContract {
     }
     $contractSchema = ConvertTo-StrictInt `
         (Get-RequiredProperty $contract 'schemaVersion' 'contract') `
-        'contract.schemaVersion' 2 3
-    if ($contractSchema -eq 3) {
+        'contract.schemaVersion' 2 7
+    if ($contractSchema -in @(5, 6, 7)) {
+        return Read-And-ValidatePortableIdentityContract $Manifest $contract
+    }
+    if ($contractSchema -eq 3 -or $contractSchema -eq 4) {
         return Read-And-ValidatePortableContract $Manifest $contract
     }
     Assert-AllowedProperties $contract @(
@@ -1670,6 +2176,12 @@ function Select-PortableProfile {
 
 function Read-And-ValidateProfile {
     param([Parameter(Mandatory = $true)][object]$Contract)
+    $hasIdentitySchema = $Contract.PSObject.Properties.Name -contains `
+        'ContractSchemaVersion'
+    $portableSchema5 = [string]$Contract.BindingMode -ceq 'portable-auto' -and
+        $hasIdentitySchema -and
+        [int]$Contract.ContractSchemaVersion -in @(5, 6, 7)
+    $atomicSchema2 = $portableSchema5
     if ([string]$Contract.BindingMode -ceq 'portable-auto') {
         Select-PortableProfile $Contract
     }
@@ -1680,18 +2192,42 @@ function Read-And-ValidateProfile {
         throw "VM profile is not valid JSON: $($_.Exception.Message)"
     }
     if ([string]$Contract.BindingMode -ceq 'portable-auto') {
-        Assert-AllowedProperties $raw @(
-            'schemaVersion', 'bindingMode', 'gpu'
-        ) 'profile'
-        if ([int]$raw.schemaVersion -ne 1 -or
-            [string]$raw.bindingMode -cne 'portable-auto') {
-            throw 'Selected profile is not a portable-auto catalog asset.'
+        if ($portableSchema5) {
+            Assert-AllowedProperties $raw @(
+                'schemaVersion', 'bindingMode', 'catalogSha256', 'gpu'
+            ) 'profile'
+            if ([int]$raw.schemaVersion -ne 2 -or
+                [string]$raw.bindingMode -cne 'portable-auto' -or
+                [string]$raw.catalogSha256 -cne
+                    [string]$Contract.CatalogSha256) {
+                throw 'Selected profile is not a schema-2 catalog-bound portable asset.'
+            }
+        } else {
+            Assert-AllowedProperties $raw @(
+                'schemaVersion', 'bindingMode', 'gpu'
+            ) 'profile'
+            if ([int]$raw.schemaVersion -ne 1 -or
+                [string]$raw.bindingMode -cne 'portable-auto') {
+                throw 'Selected profile is not a portable-auto catalog asset.'
+            }
         }
     } else {
-        Assert-AllowedProperties $raw @(
-            'schemaVersion', 'vmId', 'vmUuid', 'spoofMode', 'gpu', 'monitor'
-        ) 'profile'
-        if ([int]$raw.schemaVersion -ne 1 -or
+        if ([int]$raw.schemaVersion -eq 2) {
+            Assert-AllowedProperties $raw @(
+                'schemaVersion', 'catalogSha256', 'vmId', 'vmUuid',
+                'spoofMode', 'gpu', 'monitor'
+            ) 'profile'
+            $atomicSchema2 = $true
+            $profileCatalogSha256 = ConvertTo-StrictString `
+                (Get-RequiredProperty $raw 'catalogSha256' 'profile') `
+                'profile.catalogSha256' 64 '^[0-9A-F]{64}$'
+        } else {
+            Assert-AllowedProperties $raw @(
+                'schemaVersion', 'vmId', 'vmUuid', 'spoofMode', 'gpu',
+                'monitor'
+            ) 'profile'
+        }
+        if ([int]$raw.schemaVersion -notin @(1, 2) -or
             [int]$raw.vmId -ne $Contract.VmId -or
             [string]$raw.vmUuid -ine $Contract.VmUuid -or
             [string]$raw.spoofMode -cne 'B') {
@@ -1706,7 +2242,10 @@ function Read-And-ValidateProfile {
         'nvapiPciVendorId', 'nvapiPciDeviceId', 'nvapiPciSubVendorId',
         'nvapiPciSubDeviceId', 'nvapiPciRevisionId',
         'cudaCores', 'shaderSubPipes', 'ropCount', 'tmuCount', 'architecture',
-        'implementation', 'chipRevision', 'pcieWidth', 'vbiosVersion'
+        'implementation', 'chipRevision', 'pcieWidth', 'vbiosVersion',
+        'boardBrand', 'boardModel', 'boardIdentity', 'serialPolicy',
+        'identityScope', 'memoryTypeName', 'memoryMakerName',
+        'memoryMakerNvapiName'
     ) 'profile.gpu'
 
     $profileKey = ConvertTo-StrictString `
@@ -1728,6 +2267,38 @@ function Read-And-ValidateProfile {
             'profile.gpu.vbiosVersion' 64 `
             '^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){4}$'
     }
+    if ($atomicSchema2) {
+        $validated['boardBrand'] = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuRaw 'boardBrand' 'profile.gpu') `
+            'profile.gpu.boardBrand' 31 `
+            '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$'
+        $validated['boardModel'] = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuRaw 'boardModel' 'profile.gpu') `
+            'profile.gpu.boardModel' 31 `
+            '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$'
+        $validated['boardIdentity'] = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuRaw 'boardIdentity' 'profile.gpu') `
+            'profile.gpu.boardIdentity' 64 `
+            '^subsystem=0x[0-9A-F]{4}:0x[0-9A-F]{4}$'
+        $validated['serialPolicy'] = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuRaw 'serialPolicy' 'profile.gpu') `
+            'profile.gpu.serialPolicy' 32 '^not-exposed$'
+        $validated['identityScope'] = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuRaw 'identityScope' 'profile.gpu') `
+            'profile.gpu.identityScope' 96 `
+            '^B:system-pci=host-mdev,catalog=protected-user-mode$'
+        $validated['memoryTypeName'] = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuRaw 'memoryTypeName' 'profile.gpu') `
+            'profile.gpu.memoryTypeName' 16 '^GDDR5$'
+        $validated['memoryMakerName'] = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuRaw 'memoryMakerName' 'profile.gpu') `
+            'profile.gpu.memoryMakerName' 31 `
+            '^(Samsung|SK hynix|Micron)$'
+        $validated['memoryMakerNvapiName'] = ConvertTo-StrictString `
+            (Get-RequiredProperty $gpuRaw 'memoryMakerNvapiName' 'profile.gpu') `
+            'profile.gpu.memoryMakerNvapiName' 31 `
+            '^(Samsung|Hynix|Micron)$'
+    }
     $integerRanges = [ordered]@{
         nvapiPciVendorId = @(1, 65535)
         nvapiPciDeviceId = @(1, 65535)
@@ -1741,7 +2312,7 @@ function Read-And-ValidateProfile {
         memoryBandwidthMBps = @(1, 1000000)
         vramMB = @(2048, 2048)
         memoryType = @(8, 8)
-        memoryMaker = @(1, 1)
+        memoryMaker = @(1, 10)
         cudaCores = @(1, 1000000)
         shaderSubPipes = @(1, 65535)
         ropCount = @(1, 65535)
@@ -1761,8 +2332,21 @@ function Read-And-ValidateProfile {
     if ([int64]$gpu.boostClockMHz -lt [int64]$gpu.coreClockMHz) {
         throw 'profile.gpu.boostClockMHz must not be lower than coreClockMHz.'
     }
-    if ([int64]$gpu.memoryType -ne 8 -or [int64]$gpu.memoryMaker -ne 1) {
-        throw 'Only the audited GDDR5(8)/Samsung(1) profile contract is accepted.'
+    $memoryMakerContract = switch ([int]$gpu.memoryMaker) {
+        1 { @('Samsung', 'Samsung') }
+        6 { @('SK hynix', 'Hynix') }
+        10 { @('Micron', 'Micron') }
+        default { $null }
+    }
+    if ([int64]$gpu.memoryType -ne 8 -or
+        $null -eq $memoryMakerContract) {
+        throw 'Only cataloged GDDR5 with Samsung(1), Hynix(6), or Micron(10) is accepted.'
+    }
+    if ($atomicSchema2 -and
+        ([string]$gpu.memoryTypeName -cne 'GDDR5' -or
+         [string]$gpu.memoryMakerName -cne $memoryMakerContract[0] -or
+         [string]$gpu.memoryMakerNvapiName -cne $memoryMakerContract[1])) {
+        throw 'The VRAM maker enum and human-readable names are not one atomic mapping.'
     }
     if (@(1, 2, 4, 8, 16, 32) -notcontains [int]$gpu.pcieWidth) {
         throw 'profile.gpu.pcieWidth must be one of 1/2/4/8/16/32.'
@@ -1816,13 +2400,67 @@ function Read-And-ValidateProfile {
     } elseif ($Contract.ExpectedPnpId -cne 'PCI\VEN_10DE&DEV_1E30') {
         throw 'B mode must retain the native DEV_1E30 PnP identity.'
     }
-    if ([string]$Contract.BindingMode -ceq 'portable-auto') {
+    if ($atomicSchema2) {
+        if ($portableSchema5) {
+            $selected = @($Contract.Profiles | Where-Object {
+                [string]$_.Key -ceq [string]$Contract.GpuProfile
+            })
+            if ($selected.Count -ne 1) {
+                throw 'Portable profile does not select exactly one catalog entry.'
+            }
+            $catalogGpu = $selected[0].CatalogGpu
+        } else {
+            $catalogPath = Join-Path $BundleRoot 'vgpu-profile-catalog.json'
+            try {
+                $catalog = Get-Content -LiteralPath $catalogPath -Raw |
+                    ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                throw "VM-bound schema-2 identity catalog is unavailable or invalid: $($_.Exception.Message)"
+            }
+            if ([int]$catalog.schemaVersion -ne 2 -or
+                [string]$catalog.catalogSha256 -cne
+                    [string]$profileCatalogSha256 -or
+                [string]$catalog.identityMode -cne 'protected-user-mode' -or
+                [string]$catalog.transportPnpId -cne
+                    'PCI\VEN_10DE&DEV_1E30') {
+                throw 'VM-bound schema-2 identity catalog header is inconsistent.'
+            }
+            $catalogRows = @($catalog.profiles | Where-Object {
+                [string]$_.profile -ceq [string]$Contract.GpuProfile
+            })
+            if ($catalogRows.Count -ne 1) {
+                throw 'VM-bound profile does not select one schema-2 catalog row.'
+            }
+            $catalogGpu = $catalogRows[0]
+        }
+        foreach ($property in @(
+            'profile', 'name', 'expectedPnpId', 'boardBrand', 'boardModel',
+            'boardIdentity', 'serialPolicy', 'identityScope', 'memoryTypeName',
+            'memoryMakerName', 'memoryMakerNvapiName', 'vbiosVersion'
+        )) {
+            if ([string]$gpu.$property -cne [string]$catalogGpu.$property) {
+                throw "Portable profile field '$property' is split from its catalog row."
+            }
+        }
+        foreach ($property in @(
+            'coreClockMHz', 'boostClockMHz', 'memoryClockMHz',
+            'memoryBusBits', 'memoryBandwidthMBps', 'vramMB', 'memoryType',
+            'memoryMaker', 'nvapiPciVendorId', 'nvapiPciDeviceId',
+            'nvapiPciSubVendorId', 'nvapiPciSubDeviceId',
+            'nvapiPciRevisionId', 'cudaCores', 'shaderSubPipes', 'ropCount',
+            'tmuCount', 'architecture', 'implementation', 'chipRevision',
+            'pcieWidth'
+        )) {
+            if ([int64]$gpu.$property -ne [int64]$catalogGpu.$property) {
+                throw "Portable profile field '$property' is split from its catalog row."
+            }
+        }
+    } elseif ([string]$Contract.BindingMode -ceq 'portable-auto') {
         $selected = @($Contract.Profiles | Where-Object {
             [string]$_.Key -ceq [string]$Contract.GpuProfile
         })
-        if ($selected.Count -ne 1 -or
-            [string]$gpu.name -cne
-                [string]$selected[0].CanonicalDisplayName) {
+        if ($selected.Count -ne 1 -or [string]$gpu.name -cne
+            [string]$selected[0].CanonicalDisplayName) {
             throw 'Portable profile name does not match its canonical catalog entry.'
         }
     }
@@ -2134,6 +2772,26 @@ function Get-HealthyDisplayState {
     }
 }
 
+function Get-HealthyDisplayStateWithRetry {
+    param([Parameter(Mandatory = $true)][object]$Contract)
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            return Get-HealthyDisplayState $Contract
+        } catch {
+            # PnP/driver signature providers can briefly surface the Win32
+            # sharing-violation HRESULT while Windows refreshes device state.
+            # Retry only that precise transient; all policy/topology failures
+            # remain fail-closed on their first occurrence.
+            $win32Code = ([int64]$_.Exception.HResult) -band 0xFFFF
+            if ($win32Code -ne 32 -or $attempt -eq 5) {
+                throw
+            }
+            Start-Sleep -Seconds 2
+        }
+    }
+    throw 'The display state retry loop ended unexpectedly.'
+}
+
 function Get-PeMachine {
     param([Parameter(Mandatory = $true)][string]$Path)
     [byte[]]$bytes = [IO.File]::ReadAllBytes($Path)
@@ -2182,7 +2840,8 @@ function Get-GpuZRawEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Contract,
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Context
+        [Parameter(Mandatory = $true)][string]$Context,
+        [switch]$AdminOnlySourceSnapshot
     )
     $item = Assert-RegularLocalPath $Path $Context
     # A SUBST/DOS-device alias can hide a low-privilege writable real parent.
@@ -2208,7 +2867,9 @@ function Get-GpuZRawEvidence {
     Assert-OutsideWindowsTree $item.Directory.FullName `
         "$Context application directory"
     Assert-TrustedGpuZWriteBoundary $item $Context
-    Assert-UsersReadExecuteAccess $item.FullName $Context
+    if (-not $AdminOnlySourceSnapshot) {
+        Assert-UsersReadExecuteAccess $item.FullName $Context
+    }
     if ($item.Extension -ine '.exe' -or (Get-PeMachine $item.FullName) -ne 0x014c) {
         throw 'The accepted GPU-Z 2.70.0 build must be a 32-bit PE executable.'
     }
@@ -2306,21 +2967,98 @@ function Get-ValidatedGpuZ {
     return $evidence
 }
 
-function Install-ProtectedGpuZ {
+function Initialize-ProtectedIdentityApplication {
     param([Parameter(Mandatory = $true)][object]$Contract)
-    $source = Assert-RegularLocalPath $Contract.GpuZSourcePath `
-        'manifest-bound GPU-Z bundle asset'
-    if ($source.Name -cne $Contract.GpuZName -or
-        [int64]$source.Length -ne [int64]$Contract.GpuZBytes -or
-        (Get-Sha256 $source.FullName) -cne $Contract.GpuZSha256) {
-        throw 'The manifest-bound GPU-Z source changed before publication.'
+    if ([int]$Contract.ContractSchemaVersion -notin @(6, 7)) {
+        throw 'Identity application initialization requires contract schema 6 or 7.'
+    }
+    $directory = Initialize-AdminSystemDirectory `
+        $Contract.IdentityApplicationDirectory -AllowUsersReadExecute
+    $null = Assert-ProtectedAdminSystemDirectory $directory `
+        'vGPU identity application directory' -AllowUsersReadExecute
+    Assert-OutsideWindowsTree $directory 'vGPU identity application directory'
+    return $directory
+}
+
+function Get-OptionalValidatedGpuZ {
+    param([Parameter(Mandatory = $true)][object]$Contract)
+    $path = Join-Path $Contract.GpuZApplicationDirectory $Contract.GpuZName
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "The optional protected GPU-Z path is not a regular file: $path"
+    }
+    return Get-ValidatedGpuZ $Contract
+}
+
+function Install-OptionalProtectedGpuZ {
+    param([Parameter(Mandatory = $true)][object]$Contract)
+    if ([int]$Contract.ContractSchemaVersion -notin @(6, 7)) {
+        throw 'Optional GPU-Z installation requires contract schema 6 or 7.'
+    }
+    $existing = Get-OptionalValidatedGpuZ $Contract
+    if ($null -ne $existing) {
+        Write-Pass 'the exact optional protected GPU-Z image already exists; reusing it.'
+        return $existing
     }
 
+    $null = Assert-ProtectedAdminSystemDirectory `
+        $Contract.IdentityApplicationDirectory `
+        'vGPU identity application directory' -AllowUsersReadExecute
+    $source = Assert-RegularLocalPath $Contract.GpuZSourcePath `
+        'explicit optional GPU-Z source snapshot'
+    $null = Get-GpuZRawEvidence $Contract $source.FullName `
+        'explicit optional GPU-Z source snapshot' -AdminOnlySourceSnapshot
+
+    $stagingDirectory = Join-Path $ApplicationsRoot (
+        '.optional-gpuz.{0}.tmp' -f [Guid]::NewGuid().ToString('N')
+    )
+    $stagedPath = Join-Path $stagingDirectory $Contract.GpuZName
+    $targetPath = Join-Path $Contract.GpuZApplicationDirectory `
+        $Contract.GpuZName
+    try {
+        $null = Initialize-AdminSystemDirectory $stagingDirectory `
+            -AllowUsersReadExecute
+        Copy-Item -LiteralPath $source.FullName -Destination $stagedPath `
+            -ErrorAction Stop
+        $null = Set-AdminSystemUsersReadExecuteFile $stagedPath `
+            'staged optional GPU-Z executable'
+        $null = Get-GpuZRawEvidence $Contract $stagedPath `
+            'staged optional GPU-Z executable'
+        try {
+            Move-Item -LiteralPath $stagedPath -Destination $targetPath `
+                -ErrorAction Stop
+        } catch [IO.IOException] {
+            # Another elevated instance may have won the no-replace publish.
+            $null = Get-ValidatedGpuZ $Contract
+        }
+    } finally {
+        if (Test-Path -LiteralPath $stagingDirectory) {
+            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+    $evidence = Get-ValidatedGpuZ $Contract
+    Write-Pass 'optional GPU-Z was explicitly installed and reverified in protected ProgramData.'
+    return $evidence
+}
+
+function Install-ProtectedGpuZ {
+    param([Parameter(Mandatory = $true)][object]$Contract)
     $targetDirectory = $Contract.GpuZApplicationDirectory
     if (Test-Path -LiteralPath $targetDirectory) {
         $evidence = Get-ValidatedGpuZ $Contract
         Write-Pass 'the exact protected GPU-Z application already exists; reusing it.'
         return $evidence
+    }
+
+    $source = Assert-RegularLocalPath $Contract.GpuZSourcePath `
+        'contract-bound protected GPU-Z source snapshot'
+    if ($source.Name -cne $Contract.GpuZName -or
+        [int64]$source.Length -ne [int64]$Contract.GpuZBytes -or
+        (Get-Sha256 $source.FullName) -cne $Contract.GpuZSha256) {
+        throw 'The protected GPU-Z source snapshot changed before publication.'
     }
 
     $versionName = Split-Path -Leaf $targetDirectory
@@ -2494,6 +3232,125 @@ function Install-PublicGpuZShortcut {
     return $evidence
 }
 
+function Get-ValidatedIdentityQueryShortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$ShortcutPath,
+        [Parameter(Mandatory = $true)][string]$QueryPath
+    )
+    $item = Assert-RegularLocalPath $ShortcutPath `
+        'public vGPU identity query shortcut'
+    Assert-TrustedGpuZWriteBoundary $item `
+        'public vGPU identity query shortcut'
+    $shell = $null
+    $shortcut = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($item.FullName)
+        $targetPath = [IO.Path]::GetFullPath([string]$shortcut.TargetPath)
+        $workingDirectory = [IO.Path]::GetFullPath(
+            [string]$shortcut.WorkingDirectory
+        )
+        if (-not $targetPath.Equals(
+                [IO.Path]::GetFullPath($QueryPath),
+                [StringComparison]::OrdinalIgnoreCase) -or
+            -not $workingDirectory.Equals(
+                [IO.Path]::GetFullPath((Split-Path -Parent $QueryPath)),
+                [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$shortcut.Arguments -cne '--pause') {
+            throw 'The public vGPU identity query shortcut is not canonical.'
+        }
+        return [pscustomobject][ordered]@{
+            path = $item.FullName
+            targetPath = $targetPath
+            workingDirectory = $workingDirectory
+            arguments = [string]$shortcut.Arguments
+        }
+    } finally {
+        if ($null -ne $shortcut -and
+            [Runtime.InteropServices.Marshal]::IsComObject($shortcut)) {
+            $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject(
+                $shortcut
+            )
+        }
+        if ($null -ne $shell -and
+            [Runtime.InteropServices.Marshal]::IsComObject($shell)) {
+            $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject(
+                $shell
+            )
+        }
+    }
+}
+
+function Install-PublicIdentityQueryShortcut {
+    param([Parameter(Mandatory = $true)][string]$QueryPath)
+    $desktop = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::CommonDesktopDirectory
+    )
+    if ([string]::IsNullOrWhiteSpace($desktop)) {
+        throw 'Windows did not provide the Public Desktop directory.'
+    }
+    $desktopItem = Get-Item -LiteralPath $desktop -Force -ErrorAction Stop
+    if (-not $desktopItem.PSIsContainer -or
+        ($desktopItem.Attributes -band
+            [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Public Desktop is not a regular directory: $desktop"
+    }
+    $shortcutPath = Join-Path $desktopItem.FullName `
+        'vGPU Identity Query.lnk'
+    if (Test-Path -LiteralPath $shortcutPath) {
+        $existing = Get-Item -LiteralPath $shortcutPath -Force `
+            -ErrorAction Stop
+        if ($existing.PSIsContainer -or
+            ($existing.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The owned Public Desktop query shortcut is unsafe: $shortcutPath"
+        }
+    }
+    $temporaryPath = Join-Path $desktopItem.FullName (
+        '.vGPU-Identity-Query-{0}.tmp.lnk' -f
+            [Guid]::NewGuid().ToString('N')
+    )
+    $shell = $null
+    $shortcut = $null
+    try {
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $shortcut = $shell.CreateShortcut($temporaryPath)
+            $shortcut.TargetPath = $QueryPath
+            $shortcut.Arguments = '--pause'
+            $shortcut.WorkingDirectory = Split-Path -Parent $QueryPath
+            $shortcut.Description = `
+                'Verify native transport and projected vGPU board/VRAM identity'
+            $shortcut.IconLocation = $QueryPath + ',0'
+            $shortcut.Save()
+        } finally {
+            if ($null -ne $shortcut -and
+                [Runtime.InteropServices.Marshal]::IsComObject($shortcut)) {
+                $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject(
+                    $shortcut
+                )
+            }
+            if ($null -ne $shell -and
+                [Runtime.InteropServices.Marshal]::IsComObject($shell)) {
+                $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject(
+                    $shell
+                )
+            }
+        }
+        $null = Set-AdminSystemUsersReadExecuteFile $temporaryPath `
+            'public vGPU identity query shortcut'
+        $null = Get-ValidatedIdentityQueryShortcut $temporaryPath $QueryPath
+        Move-Item -LiteralPath $temporaryPath -Destination $shortcutPath `
+            -Force -ErrorAction Stop
+    } finally {
+        Remove-Item -LiteralPath $temporaryPath -Force `
+            -ErrorAction SilentlyContinue
+    }
+    $evidence = Get-ValidatedIdentityQueryShortcut $shortcutPath $QueryPath
+    Write-Pass "Public Desktop identity-query shortcut installed at $shortcutPath."
+    return $evidence
+}
+
 function Write-AtomicProtectedJson {
     param(
         [Parameter(Mandatory = $true)][object]$Value,
@@ -2567,6 +3424,32 @@ function Assert-SystemNvapiUnchanged {
     Write-Pass 'System32 and SysWOW64 NVAPI hashes are unchanged.'
 }
 
+function Test-HklmRegistrySubKeyExists {
+    param([Parameter(Mandatory = $true)][string]$SubKey)
+
+    # Do not probe optional keys with reg.exe.  On Windows PowerShell 5.1 a
+    # missing key writes a NativeCommandError record; with this installer's
+    # fail-closed ErrorActionPreference that expected absence becomes a
+    # terminating error before $LASTEXITCODE can be inspected.
+    $baseKey = $null
+    $key = $null
+    try {
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64
+        )
+        $key = $baseKey.OpenSubKey($SubKey, $false)
+        return $null -ne $key
+    } finally {
+        if ($null -ne $key) {
+            $key.Dispose()
+        }
+        if ($null -ne $baseKey) {
+            $baseKey.Dispose()
+        }
+    }
+}
+
 function New-GuestBackup {
     param(
         [Parameter(Mandatory = $true)][object]$Contract,
@@ -2604,10 +3487,9 @@ function New-GuestBackup {
     $inventory | ConvertTo-Json -Depth 8 |
         Set-Content -LiteralPath (Join-Path $root 'inventory.json') -Encoding UTF8
 
-    $nvapiKey = 'HKLM\SOFTWARE\NVIDIA Corporation\Global\NvAPI'
-    & $SystemReg query $nvapiKey *> $null
-    if ($LASTEXITCODE -eq 0) {
-        & $SystemReg export $nvapiKey `
+    $nvapiSubKey = 'SOFTWARE\NVIDIA Corporation\Global\NvAPI'
+    if (Test-HklmRegistrySubKeyExists $nvapiSubKey) {
+        & $SystemReg export ("HKLM\{0}" -f $nvapiSubKey) `
             (Join-Path $root 'nvapi-before.reg') /y *> $null
         if ($LASTEXITCODE -ne 0) {
             throw 'Could not export the existing NVAPI identity registry key.'
@@ -2631,6 +3513,8 @@ function Invoke-ProfilePatch {
     param(
         [Parameter(Mandatory = $true)][object]$Gpu,
         [Parameter(Mandatory = $true)][string]$PatchPath,
+        [string]$CatalogPath = '',
+        [string]$CatalogSha256 = '',
         [switch]$NativeBOnly
     )
     $arguments = @{
@@ -2658,6 +3542,12 @@ function Invoke-ProfilePatch {
         ChipRevision = [int]$Gpu.chipRevision
         PcieWidth = [int]$Gpu.pcieWidth
         VbiosVersion = [string]$Gpu.vbiosVersion
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CatalogPath)) {
+        $arguments.CatalogPath = $CatalogPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CatalogSha256)) {
+        $arguments.CatalogSha256 = $CatalogSha256
     }
     if ($NativeBOnly) {
         $arguments.DeviceIdMatch = @('VEN_10DE&DEV_1E30')
@@ -2779,12 +3669,15 @@ function Install-PortableBProfile {
     New-Item -Path $version -ItemType Directory -ErrorAction Stop | Out-Null
     $versionPatch = Join-Path $version 'patch-grid-strings.ps1'
     $versionProfile = Join-Path $version 'profile.json'
+    $versionCatalog = Join-Path $version 'vgpu-profile-catalog.json'
     Copy-Item -LiteralPath (Join-Path $BundleRoot 'patch-grid-strings.ps1') `
         -Destination $versionPatch
     Copy-Item -LiteralPath $Contract.ProfilePath -Destination $versionProfile
+    Copy-Item -LiteralPath $Contract.CatalogPath -Destination $versionCatalog
     if ((Get-Sha256 $versionPatch) -cne
             (Get-Sha256 (Join-Path $BundleRoot 'patch-grid-strings.ps1')) -or
-        (Get-Sha256 $versionProfile) -cne (Get-Sha256 $Contract.ProfilePath)) {
+        (Get-Sha256 $versionProfile) -cne (Get-Sha256 $Contract.ProfilePath) -or
+        (Get-Sha256 $versionCatalog) -cne $Contract.CatalogAssetSha256) {
         throw 'Protected portable task assets failed post-copy hash verification.'
     }
 
@@ -2796,9 +3689,13 @@ function Install-PortableBProfile {
         $null
     }
     try {
-        Invoke-ProfilePatch $Gpu $versionPatch -NativeBOnly
+        Invoke-ProfilePatch $Gpu $versionPatch `
+            -CatalogPath $versionCatalog `
+            -CatalogSha256 $Contract.CatalogSha256 -NativeBOnly
         $argumentText = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden ' +
             '-File "' + $versionPatch + '" ' +
+            '-CatalogPath "' + $versionCatalog + '" ' +
+            '-CatalogSha256 "' + [string]$Contract.CatalogSha256 + '" ' +
             '-ProfileKey "' + [string]$Gpu.profile + '" ' +
             '-TargetName "' + [string]$Gpu.name + '" ' +
             '-NvapiPciVendorId ' + [int]$Gpu.nvapiPciVendorId + ' ' +
@@ -2907,7 +3804,7 @@ function Assert-AppLocalShimImage {
 function Install-AppLocalShim {
     param(
         [Parameter(Mandatory = $true)][object]$Contract,
-        [Parameter(Mandatory = $true)][string]$ApplicationExe
+        [Parameter(Mandatory = $true)][string]$ApplicationDirectory
     )
     if ((Get-Sha256 $Contract.ShimPath) -cne $Contract.ShimSha256 -or
         (Get-Sha256 $Contract.ProbePath) -cne $Contract.ProbeSha256) {
@@ -2915,11 +3812,10 @@ function Install-AppLocalShim {
     }
     $null = Assert-AppLocalShimImage $Contract.ShimPath $Contract.ShimSha256
 
-    $applicationDirectory = Split-Path -Parent $ApplicationExe
-    Assert-OutsideWindowsTree $applicationDirectory `
-        'GPU-Z app-local installation directory'
-    $target = Join-Path $applicationDirectory 'nvapi.dll'
-    $original = Join-Path $applicationDirectory 'nvapi_orig.dll'
+    Assert-OutsideWindowsTree $ApplicationDirectory `
+        'vGPU identity app-local installation directory'
+    $target = Join-Path $ApplicationDirectory 'nvapi.dll'
+    $original = Join-Path $ApplicationDirectory 'nvapi_orig.dll'
     $targetExists = Test-Path -LiteralPath $target -PathType Leaf
     $originalExists = Test-Path -LiteralPath $original -PathType Leaf
     if ($targetExists -xor $originalExists) {
@@ -2943,9 +3839,9 @@ function Install-AppLocalShim {
     $null = Assert-NvidiaProductionImage $systemOriginal 0x014c `
         'system x86 NVAPI source'
     $nonce = [Guid]::NewGuid().ToString('N')
-    $temporaryOriginal = Join-Path $applicationDirectory `
+    $temporaryOriginal = Join-Path $ApplicationDirectory `
         ('.qemu-nvapi-original-' + $nonce + '.tmp')
-    $temporaryShim = Join-Path $applicationDirectory `
+    $temporaryShim = Join-Path $ApplicationDirectory `
         ('.qemu-nvapi-shim-' + $nonce + '.tmp')
     $createdOriginal = $false
     $createdTarget = $false
@@ -2987,7 +3883,86 @@ function Install-AppLocalShim {
         Remove-Item -LiteralPath $temporaryShim -Force `
             -ErrorAction SilentlyContinue
     }
-    Write-Pass 'hash-pinned x86 NVAPI shim installed only beside GPU-Z.'
+    Write-Pass 'hash-pinned x86 NVAPI shim installed only in the protected identity application directory.'
+}
+
+function Get-ValidatedIdentityQuery {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+    $item = Assert-RegularLocalPath $Path 'authoritative vGPU identity query'
+    if ((Get-PeMachine $item.FullName) -ne 0x014c -or
+        (Get-Sha256 $item.FullName) -cne $ExpectedSha256) {
+        throw 'The vGPU identity query does not match its x86 manifest image.'
+    }
+    Assert-TrustedGpuZWriteBoundary $item 'authoritative vGPU identity query'
+    Assert-UsersReadExecuteAccess $item.FullName `
+        'authoritative vGPU identity query'
+    return $item
+}
+
+function Install-IdentityQuery {
+    param(
+        [Parameter(Mandatory = $true)][object]$Contract,
+        [Parameter(Mandatory = $true)][string]$ApplicationDirectory
+    )
+    if ([int]$Contract.ContractSchemaVersion -notin @(5, 6, 7)) {
+        return $null
+    }
+    if ((Get-Sha256 $Contract.QueryPath) -cne $Contract.QuerySha256 -or
+        (Get-PeMachine $Contract.QueryPath) -ne 0x014c) {
+        throw 'The bundled authoritative query asset failed hash/PE validation.'
+    }
+    Assert-OutsideWindowsTree $ApplicationDirectory `
+        'vGPU identity query installation directory'
+    $target = Join-Path $ApplicationDirectory 'VgpuIdentityQuery.exe'
+    if (Test-Path -LiteralPath $target -PathType Leaf) {
+        try {
+            return (Get-ValidatedIdentityQuery $target $Contract.QuerySha256)
+        } catch {
+            # A prior owned query generation may be replaced atomically below.
+        }
+    } elseif (Test-Path -LiteralPath $target) {
+        throw "The owned vGPU identity query path is not a regular file: $target"
+    }
+    $temporary = Join-Path $ApplicationDirectory (
+        '.VgpuIdentityQuery.{0}.new' -f [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        Copy-Item -LiteralPath $Contract.QueryPath -Destination $temporary `
+            -ErrorAction Stop
+        $null = Set-AdminSystemUsersReadExecuteFile $temporary `
+            'staged authoritative vGPU identity query'
+        $temporaryItem = Assert-RegularLocalPath $temporary `
+            'staged authoritative vGPU identity query'
+        if ((Get-PeMachine $temporaryItem.FullName) -ne 0x014c -or
+            (Get-Sha256 $temporaryItem.FullName) -cne $Contract.QuerySha256) {
+            throw 'Staged authoritative query changed before publication.'
+        }
+        Move-Item -LiteralPath $temporary -Destination $target -Force `
+            -ErrorAction Stop
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force `
+            -ErrorAction SilentlyContinue
+    }
+    $item = Get-ValidatedIdentityQuery $target $Contract.QuerySha256
+    Write-Pass 'authoritative native/projected vGPU identity query installed.'
+    return $item
+}
+
+function Invoke-IdentityQuery {
+    param(
+        [Parameter(Mandatory = $true)][object]$Contract,
+        [Parameter(Mandatory = $true)][string]$QueryPath
+    )
+    $null = Get-ValidatedIdentityQuery $QueryPath $Contract.QuerySha256
+    $output = (& $QueryPath 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $output -notmatch '(?m)^VERIFY PASS\s*$') {
+        throw "Authoritative vGPU identity query failed.`n$output"
+    }
+    Write-Pass 'authoritative query separates native DEV_1E30 transport from the exact projected board/VRAM row.'
+    return $output
 }
 
 function Assert-OutputMatch {
@@ -3005,13 +3980,12 @@ function Invoke-AppLocalProbe {
     param(
         [Parameter(Mandatory = $true)][object]$Contract,
         [Parameter(Mandatory = $true)][object]$Gpu,
-        [Parameter(Mandatory = $true)][string]$ApplicationExe
+        [Parameter(Mandatory = $true)][string]$ApplicationDirectory
     )
-    $applicationDirectory = Split-Path -Parent $ApplicationExe
-    Assert-OutsideWindowsTree $applicationDirectory `
-        'GPU-Z app-local probe directory'
-    $target = Join-Path $applicationDirectory 'nvapi.dll'
-    $original = Join-Path $applicationDirectory 'nvapi_orig.dll'
+    Assert-OutsideWindowsTree $ApplicationDirectory `
+        'vGPU identity app-local probe directory'
+    $target = Join-Path $ApplicationDirectory 'nvapi.dll'
+    $original = Join-Path $ApplicationDirectory 'nvapi_orig.dll'
     if ((Get-Sha256 $target) -cne $Contract.ShimSha256) {
         throw 'Installed app-local nvapi.dll hash is incorrect.'
     }
@@ -3025,7 +3999,7 @@ function Invoke-AppLocalProbe {
     Assert-UsersReadExecuteAccess $targetItem.FullName `
         'app-local nvapi.dll'
 
-    $probeTarget = Join-Path $applicationDirectory 'nvapi_profile_probe32.exe'
+    $probeTarget = Join-Path $ApplicationDirectory 'nvapi_profile_probe32.exe'
     if (Test-Path -LiteralPath $probeTarget) {
         throw "Close/remove the conflicting test probe before verification: $probeTarget"
     }
@@ -3112,6 +4086,349 @@ function Invoke-AppLocalProbe {
     return $probeOutput
 }
 
+function Get-NvidiaSmiPath {
+    $candidates = @(
+        (Join-Path $env:SystemRoot 'System32\nvidia-smi.exe'),
+        (Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Assert-RegularLocalPath $candidate 'NVIDIA SMI query').FullName
+        }
+    }
+    $command = Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
+    if ($null -ne $command -and
+        -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+        return (Assert-RegularLocalPath ([string]$command.Source) `
+            'NVIDIA SMI query').FullName
+    }
+    throw 'nvidia-smi.exe was not found; install GRID 538.33 first.'
+}
+
+function Get-PrivateLicenseEvidence {
+    param([Parameter(Mandatory = $true)][object]$Contract)
+    if ([int]$Contract.ContractSchemaVersion -ne 7) {
+        throw 'Private license verification requires contract schema 7.'
+    }
+    $tokenDirectory = Join-Path $env:ProgramFiles `
+        'NVIDIA Corporation\vGPU Licensing\ClientConfigToken'
+    $tokenPath = Join-Path $tokenDirectory `
+        'client_configuration_token.tok'
+    $tokenItem = Assert-RegularLocalPath $tokenPath `
+        'installed private vGPU license token'
+    if ([int64]$tokenItem.Length -ne [int64]$Contract.LicenseTokenBytes -or
+        (Get-Sha256 $tokenItem.FullName) -cne
+            [string]$Contract.LicenseTokenSha256) {
+        throw 'Installed vGPU license token does not match the private package.'
+    }
+    $service = Get-Service -Name 'NVDisplay.ContainerLocalSystem' `
+        -ErrorAction Stop
+    if ($service.Status -ne
+        [System.ServiceProcess.ServiceControllerStatus]::Running) {
+        throw 'NVDisplay.ContainerLocalSystem is not running.'
+    }
+    $nvidiaSmi = Get-NvidiaSmiPath
+    $queryLines = @(& $nvidiaSmi '-q' 2>&1)
+    $queryExitCode = $LASTEXITCODE
+    $query = $queryLines -join [Environment]::NewLine
+    if ($queryExitCode -ne 0) {
+        throw "nvidia-smi -q failed with exit code $queryExitCode."
+    }
+    if ($query -notmatch
+        '(?im)^\s*License Status\s*:\s*Licensed(?:\s+\([^\r\n]*\))?\s*$') {
+        throw 'NVIDIA license status is not Licensed.'
+    }
+    Write-Pass 'the exact token is installed and NVIDIA reports Licensed.'
+    return [pscustomobject]@{
+        tokenPath = $tokenItem.FullName
+        tokenSha256 = [string]$Contract.LicenseTokenSha256
+        tokenBytes = [int64]$tokenItem.Length
+        service = [string]$service.Status
+        licenseStatus = 'Licensed'
+    }
+}
+
+function Install-PrivateLicenseToken {
+    param([Parameter(Mandatory = $true)][object]$Contract)
+    if ([int]$Contract.ContractSchemaVersion -ne 7) {
+        throw 'Private license installation requires contract schema 7.'
+    }
+    $null = Assert-RegularLocalPath $Contract.LicenseInstallerPath `
+        'embedded private vGPU license installer'
+    $source = Assert-RegularLocalPath $Contract.LicenseTokenPath `
+        'embedded private vGPU license token'
+    if ([int64]$source.Length -ne [int64]$Contract.LicenseTokenBytes -or
+        (Get-Sha256 $source.FullName) -cne
+            [string]$Contract.LicenseTokenSha256) {
+        throw 'Private token changed after contract validation.'
+    }
+
+    $arguments = @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', [string]$Contract.LicenseInstallerPath,
+        '-TokenFile', $source.FullName,
+        '-ExpectedTokenSha256', [string]$Contract.LicenseTokenSha256
+    )
+    $licenseOutput = @(& $SystemPowerShell @arguments 2>&1)
+    $licenseExitCode = $LASTEXITCODE
+    foreach ($line in $licenseOutput) {
+        Write-Host ([string]$line)
+    }
+    if ($licenseExitCode -ne 0) {
+        $detail = ($licenseOutput | Out-String).Trim()
+        throw "Private vGPU license installation failed (exit $licenseExitCode): $detail"
+    }
+    return Get-PrivateLicenseEvidence $Contract
+}
+
+function Assert-HibernationAndFastStartupDisabled {
+    $powerKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power'
+    $settings = Get-ItemProperty -LiteralPath $powerKey `
+        -Name HiberbootEnabled -ErrorAction Stop
+    $hiberboot = [int]$settings.HiberbootEnabled
+    $hiberfile = Join-Path $env:SystemDrive 'hiberfil.sys'
+    $hiberfilePresent = Test-Path -LiteralPath $hiberfile
+    if ($hiberboot -ne 0 -or $hiberfilePresent) {
+        throw ('Hibernation/Fast Startup is still enabled ' +
+            "(HiberbootEnabled=$hiberboot, hiberfil.sys=$hiberfilePresent).")
+    }
+    Write-Pass 'hibernation and Fast Startup are disabled.'
+    return [pscustomobject]@{
+        hibernationDisabled = $true
+        fastStartupDisabled = $true
+        hiberbootEnabled = $hiberboot
+        hiberfilePresent = $hiberfilePresent
+    }
+}
+
+function Disable-HibernationAndFastStartup {
+    # This intentionally changes only the supported powercfg/registry state;
+    # it never changes BCD integrity policy.
+    $powerOutput = @(& $SystemPowerCfg '/hibernate' 'off' 2>&1)
+    $powerExitCode = $LASTEXITCODE
+    if ($powerExitCode -ne 0) {
+        $detail = ($powerOutput | Out-String).Trim()
+        throw "powercfg /hibernate off failed (exit $powerExitCode): $detail"
+    }
+    $powerKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power'
+    New-ItemProperty -Path $powerKey -Name HiberbootEnabled `
+        -PropertyType DWord -Value 0 -Force | Out-Null
+    return Assert-HibernationAndFastStartupDisabled
+}
+
+function Invoke-PortableIdentityMain {
+    param(
+        [Parameter(Mandatory = $true)][object]$Contract,
+        [Parameter(Mandatory = $true)][object]$Gpu,
+        [Parameter(Mandatory = $true)][object]$DisplayState,
+        [Parameter(Mandatory = $true)][object]$SystemNvapi
+    )
+    $applicationDirectory = $Contract.IdentityApplicationDirectory
+    $queryPath = Join-Path $applicationDirectory 'VgpuIdentityQuery.exe'
+
+    if ($VerifyOnly) {
+        $null = Assert-ProtectedAdminSystemDirectory $ApplicationsRoot `
+            'vGPU identity applications root' -AllowUsersReadExecute
+        $null = Assert-ProtectedAdminSystemDirectory $applicationDirectory `
+            'vGPU identity application directory' -AllowUsersReadExecute
+        $null = Invoke-AppLocalProbe $Contract $Gpu $applicationDirectory
+        $null = Invoke-IdentityQuery $Contract $queryPath
+        $gpuZEvidence = Get-OptionalValidatedGpuZ $Contract
+        $licenseEvidence = $null
+        $powerEvidence = $null
+        if ([int]$Contract.ContractSchemaVersion -eq 7) {
+            $licenseEvidence = Get-PrivateLicenseEvidence $Contract
+            $powerEvidence = Assert-HibernationAndFastStartupDisabled
+        }
+        Assert-SystemNvapiUnchanged $SystemNvapi
+        Write-Host ''
+        Write-Host '[vGPU identity] VERIFY PASS; no changes were made.' `
+            -ForegroundColor Green
+        Write-Host ('  GPU-Z:     ' + $(if ($null -eq $gpuZEvidence) {
+            'not installed (optional)'
+        } else {
+            'installed and verified'
+        }))
+        if ([int]$Contract.ContractSchemaVersion -eq 7) {
+            Write-Host "  License:   $($licenseEvidence.licenseStatus)"
+            Write-Host '  Power:     hibernation/Fast Startup disabled'
+        }
+        return
+    }
+
+    # Optional GPU-Z is intentionally outside the default dependency graph.
+    # Only the explicit switch makes its source a pre-mutation requirement.
+    $existingGpuZ = Get-OptionalValidatedGpuZ $Contract
+    if ($InstallGpuZ) {
+        if (-not (Test-Path -LiteralPath $Contract.GpuZSourcePath `
+                -PathType Leaf)) {
+            throw ('-InstallGpuZ requires the audited official GPU-Z.exe ' +
+                'to be imported beside VgpuPortable.exe.')
+        }
+        $null = Get-GpuZRawEvidence $Contract $Contract.GpuZSourcePath `
+            'explicit optional GPU-Z source snapshot' `
+            -AdminOnlySourceSnapshot
+    } else {
+        Write-Pass 'GPU-Z was not selected; identity installation/query continues without it.'
+    }
+
+    Initialize-ProtectedState
+    $backup = New-GuestBackup $Contract $DisplayState $SystemNvapi
+    Install-Profile $Contract $Gpu
+    $applicationDirectory = Initialize-ProtectedIdentityApplication $Contract
+    Install-AppLocalShim $Contract $applicationDirectory
+    $queryItem = Install-IdentityQuery $Contract $applicationDirectory
+    if ($null -eq $queryItem) {
+        throw 'Schema-6/7 identity installation did not publish its query executable.'
+    }
+    $queryOutput = Invoke-IdentityQuery $Contract $queryItem.FullName
+    $probeOutput = Invoke-AppLocalProbe $Contract $Gpu $applicationDirectory
+    $gpuZEvidence = if ($InstallGpuZ) {
+        Install-OptionalProtectedGpuZ $Contract
+    } else {
+        $existingGpuZ
+    }
+    $licenseEvidence = $null
+    $powerEvidence = $null
+    if ([int]$Contract.ContractSchemaVersion -eq 7) {
+        $licenseEvidence = Install-PrivateLicenseToken $Contract
+        $powerEvidence = Disable-HibernationAndFastStartup
+    }
+
+    Assert-SystemNvapiUnchanged $SystemNvapi
+    Assert-NormalCodeIntegrityBoot
+    # The complete PnP topology, loaded kernel image, INF/catalog signature and
+    # parent checks already ran before any mutation.  Repeating that full scan
+    # here can block forever inside the Windows PnP/signature providers.  The
+    # installer changes only owned profile/identity state, so finish with one
+    # bounded live controller query plus the independent BCD/system-NVAPI and
+    # native app-local probes above.
+    $finalDisplayState = $DisplayState
+    $postDisplays = @($DisplayState.Display)
+    $postController = @(Get-CimInstance Win32_VideoController `
+        -OperationTimeoutSec 15 -ErrorAction Stop |
+        Where-Object {
+            (Test-PnpPrefix ([string]$_.PNPDeviceID) `
+                $Contract.ExpectedPnpId) -and
+            [int]$_.ConfigManagerErrorCode -eq 0
+        })
+    if ($postController.Count -ne 1 -or
+        [string]$postController[0].Name -cne [string]$Gpu.name -or
+        [int]$postController[0].ConfigManagerErrorCode -ne 0) {
+        throw 'Final WMI GPU name/PnP/Code 0 acceptance failed.'
+    }
+    Write-Pass 'bounded final WMI query still reports the accepted GPU name/PnP/Code 0.'
+
+    $null = Get-ValidatedIdentityQuery $queryItem.FullName $Contract.QuerySha256
+    if ($null -ne $gpuZEvidence) {
+        $gpuZEvidence = Get-ValidatedGpuZ $Contract
+    }
+    $queryShortcutEvidence = Install-PublicIdentityQueryShortcut `
+        $queryItem.FullName
+    $gpuZShortcutEvidence = if ($null -ne $gpuZEvidence) {
+        Install-PublicGpuZShortcut ([string]$gpuZEvidence.path)
+    } else {
+        $null
+    }
+
+    $result = [ordered]@{
+        receiptType = 'vgpu-identity-portable-final'
+        schemaVersion = if ([int]$Contract.ContractSchemaVersion -eq 7) {
+            4
+        } else {
+            3
+        }
+        completedUtc = [DateTime]::UtcNow.ToString('o')
+        bindingMode = [string]$Contract.BindingMode
+        observedVmUuid = $Contract.VmUuid
+        gpuProfile = $Contract.GpuProfile
+        gpuName = [string]$Gpu.name
+        gpuBoardBrand = [string]$Gpu.boardBrand
+        gpuBoardModel = [string]$Gpu.boardModel
+        memoryTypeName = [string]$Gpu.memoryTypeName
+        memoryMaker = [int]$Gpu.memoryMaker
+        memoryMakerName = [string]$Gpu.memoryMakerName
+        memoryMakerNvapiName = [string]$Gpu.memoryMakerNvapiName
+        identityScope = [string]$Gpu.identityScope
+        identityApplicationDirectory = $applicationDirectory
+        pnpDeviceId = [string]$postController[0].PNPDeviceID
+        driverVersion = [string]$postController[0].DriverVersion
+        displayCount = $postDisplays.Count
+        parentId = $finalDisplayState.ParentId
+        parentClass = $finalDisplayState.ParentClass
+        kernelDriverPath = $finalDisplayState.KernelDriverPath
+        driverInfPath = $finalDisplayState.DriverInfPath
+        driverCatalogPath = $finalDisplayState.DriverCatalogPath
+        gpuZDelivery = [string]$Contract.GpuZDelivery
+        gpuZRequested = [bool]$InstallGpuZ
+        gpuZInstalled = [bool]($null -ne $gpuZEvidence)
+        gpuZExe = if ($null -ne $gpuZEvidence) {
+            [string]$gpuZEvidence.path
+        } else {
+            $null
+        }
+        gpuZ = $gpuZEvidence
+        gpuZShortcut = $gpuZShortcutEvidence
+        privateLicensedFinalizer = [bool]([int]$Contract.ContractSchemaVersion -eq 7)
+        licenseTokenDelivery = $Contract.LicenseTokenDelivery
+        licenseTokenSha256 = $Contract.LicenseTokenSha256
+        licenseTokenBytes = [int64]$Contract.LicenseTokenBytes
+        license = $licenseEvidence
+        power = $powerEvidence
+        identityQueryExe = $queryItem.FullName
+        identityQuerySha256 = $Contract.QuerySha256
+        identityQueryShortcut = $queryShortcutEvidence
+        identityQuery = $queryOutput
+        shimSha256 = $Contract.ShimSha256
+        systemNvapiSha256 = $SystemNvapi
+        backup = $backup
+        probe = $probeOutput
+        catalogSha256 = $Contract.CatalogSha256
+        profileClaimSource = 'SMBIOS-Type11-read-only'
+        profileClaimSha256 = $Contract.FirmwareClaimSha256
+        testsigning = $false
+        nointegritychecks = $false
+        systemNvapiChanged = $false
+        hostCommitEligible = $false
+    }
+    Write-AtomicProtectedJson $result `
+        (Join-Path $InstallRoot 'last-result.json')
+
+    Write-Host ''
+    Write-Host '[vGPU identity] INSTALL PASS' -ForegroundColor Green
+    Write-Host "  GPU:       $($Gpu.name)"
+    Write-Host "  Board:     $($Gpu.boardBrand) $($Gpu.boardModel)"
+    Write-Host "  VRAM:      $($Gpu.memoryTypeName) / $($Gpu.memoryMakerName) (NVAPI $($Gpu.memoryMakerNvapiName)=$($Gpu.memoryMaker))"
+    Write-Host "  PnP:       $($postController[0].PNPDeviceID)"
+    Write-Host "  Driver:    $($postController[0].DriverVersion) / Code 0"
+    Write-Host "  Query:     $($queryItem.FullName)"
+    Write-Host ('  GPU-Z:     ' + $(if ($null -eq $gpuZEvidence) {
+        'not installed (optional)'
+    } else {
+        'installed and verified'
+    }))
+    Write-Host "  Backup:    $backup"
+    Write-Host '  BCD:       testsigning=False, nointegritychecks=False'
+    Write-Host '  NVAPI:     app-local only; system DLL hashes unchanged'
+    if ([int]$Contract.ContractSchemaVersion -eq 7) {
+        Write-Host "  License:   $($licenseEvidence.licenseStatus)"
+        Write-Host '  Power:     hibernation/Fast Startup disabled'
+        Write-Host '  Next:      fully shut down Windows, then cold-start normally'
+    }
+
+    if (-not $NoLaunch) {
+        if ($InstallGpuZ) {
+            $null = Get-ValidatedGpuZ $Contract
+            Start-Process -FilePath ([string]$gpuZEvidence.path) `
+                -WorkingDirectory $applicationDirectory | Out-Null
+        } else {
+            Start-Process -FilePath $queryItem.FullName `
+                -ArgumentList '--pause' `
+                -WorkingDirectory $applicationDirectory | Out-Null
+        }
+    }
+}
+
 function Invoke-Main {
     Assert-Administrator
     $manifest = Read-And-VerifyBundle
@@ -3119,15 +4436,33 @@ function Invoke-Main {
     $gpu = Read-And-ValidateProfile $contract
     Assert-GuestUuid $contract
     Assert-NormalCodeIntegrityBoot
-    $displayState = Get-HealthyDisplayState $contract
+    $displayState = Get-HealthyDisplayStateWithRetry $contract
     $systemNvapi = Get-SystemNvapiReceipt
+
+    $hasIdentitySchema = $contract.PSObject.Properties.Name -contains `
+        'ContractSchemaVersion'
+    if ($hasIdentitySchema -and
+        [int]$contract.ContractSchemaVersion -in @(6, 7)) {
+        Invoke-PortableIdentityMain $contract $gpu $displayState $systemNvapi
+        return
+    }
+    if ($InstallGpuZ) {
+        throw '-InstallGpuZ is accepted only by the schema-6/7 optional GPU-Z package.'
+    }
 
     if ($VerifyOnly) {
         # Verification is bound only to the deterministic protected installed
         # target.  It never publishes/replaces GPU-Z from the bundle.
         $gpuZEvidence = Get-ValidatedGpuZ $contract
         $applicationExe = [string]$gpuZEvidence.path
-        $null = Invoke-AppLocalProbe $contract $gpu $applicationExe
+        $applicationDirectory = Split-Path -Parent $applicationExe
+        $null = Invoke-AppLocalProbe $contract $gpu $applicationDirectory
+        if ($hasIdentitySchema -and
+            [int]$contract.ContractSchemaVersion -eq 5) {
+            $queryPath = Join-Path (Split-Path -Parent $applicationExe) `
+                'VgpuIdentityQuery.exe'
+            $null = Invoke-IdentityQuery $contract $queryPath
+        }
         $verifiedGpuZ = Get-ValidatedGpuZ $contract
         if ([string]$verifiedGpuZ.path -ine [string]$gpuZEvidence.path -or
             [string]$verifiedGpuZ.sha256 -cne [string]$gpuZEvidence.sha256 -or
@@ -3141,16 +4476,44 @@ function Invoke-Main {
         return
     }
 
+    # The external image must pass all content, PE, version and public
+    # TechPowerUp signature gates before any profile/registry mutation.  A
+    # rerun may omit the sibling only when the deterministic protected target
+    # already passes the same complete validation.
+    if (Test-Path -LiteralPath $contract.GpuZSourcePath -PathType Leaf) {
+        $null = Get-GpuZRawEvidence $contract $contract.GpuZSourcePath `
+            'protected external GPU-Z source snapshot' `
+            -AdminOnlySourceSnapshot
+    } else {
+        try {
+            $null = Get-ValidatedGpuZ $contract
+        } catch {
+            if ([string]$contract.GpuZDelivery -ceq 'external-sibling') {
+                throw ('The same-directory GPU-Z.exe is missing and no ' +
+                    'complete protected GPU-Z 2.70 installation can be reused.')
+            }
+            throw
+        }
+        Write-Pass 'no external sibling was supplied; the existing protected exact GPU-Z image will be reused.'
+    }
+
     Initialize-ProtectedState
     $backup = New-GuestBackup $contract $displayState $systemNvapi
     Install-Profile $contract $gpu
     $gpuZEvidence = Install-ProtectedGpuZ $contract
     $applicationExe = [string]$gpuZEvidence.path
-    Install-AppLocalShim $contract $applicationExe
-    $probeOutput = Invoke-AppLocalProbe $contract $gpu $applicationExe
+    $applicationDirectory = Split-Path -Parent $applicationExe
+    Install-AppLocalShim $contract $applicationDirectory
+    $queryItem = Install-IdentityQuery $contract $applicationDirectory
+    $queryOutput = if ($null -ne $queryItem) {
+        Invoke-IdentityQuery $contract $queryItem.FullName
+    } else {
+        $null
+    }
+    $probeOutput = Invoke-AppLocalProbe $contract $gpu $applicationDirectory
     Assert-SystemNvapiUnchanged $systemNvapi
     Assert-NormalCodeIntegrityBoot
-    $finalDisplayState = Get-HealthyDisplayState $contract
+    $finalDisplayState = Get-HealthyDisplayStateWithRetry $contract
     if ([string]$finalDisplayState.Display.InstanceId -ine
             [string]$displayState.Display.InstanceId -or
         [string]$finalDisplayState.ParentId -ine [string]$displayState.ParentId) {
@@ -3175,6 +4538,11 @@ function Invoke-Main {
     $gpuZEvidence = Get-ValidatedGpuZ $contract
     $applicationExe = [string]$gpuZEvidence.path
     $shortcutEvidence = Install-PublicGpuZShortcut $applicationExe
+    $queryShortcutEvidence = if ($null -ne $queryItem) {
+        Install-PublicIdentityQueryShortcut $queryItem.FullName
+    } else {
+        $null
+    }
 
     $result = [ordered]@{
         receiptType = if ([string]$contract.BindingMode -ceq 'portable-auto') {
@@ -3182,12 +4550,19 @@ function Invoke-Main {
         } else {
             'gpuz-vm-bound-final'
         }
-        schemaVersion = 1
+        schemaVersion = 2
         completedUtc = [DateTime]::UtcNow.ToString('o')
         bindingMode = [string]$contract.BindingMode
         observedVmUuid = $contract.VmUuid
         gpuProfile = $contract.GpuProfile
         gpuName = [string]$gpu.name
+        gpuBoardBrand = [string]$gpu.boardBrand
+        gpuBoardModel = [string]$gpu.boardModel
+        memoryTypeName = [string]$gpu.memoryTypeName
+        memoryMaker = [int]$gpu.memoryMaker
+        memoryMakerName = [string]$gpu.memoryMakerName
+        memoryMakerNvapiName = [string]$gpu.memoryMakerNvapiName
+        identityScope = [string]$gpu.identityScope
         pnpDeviceId = [string]$postController[0].PNPDeviceID
         driverVersion = [string]$postController[0].DriverVersion
         displayCount = $postDisplays.Count
@@ -3199,6 +4574,18 @@ function Invoke-Main {
         gpuZExe = $applicationExe
         gpuZ = $gpuZEvidence
         gpuZShortcut = $shortcutEvidence
+        identityQueryExe = if ($null -ne $queryItem) {
+            $queryItem.FullName
+        } else {
+            $null
+        }
+        identityQuerySha256 = if ($null -ne $queryItem) {
+            $contract.QuerySha256
+        } else {
+            $null
+        }
+        identityQueryShortcut = $queryShortcutEvidence
+        identityQuery = $queryOutput
         shimSha256 = $contract.ShimSha256
         systemNvapiSha256 = $systemNvapi
         backup = $backup
@@ -3222,6 +4609,11 @@ function Invoke-Main {
     Write-Host ''
     Write-Host '[GPU-Z profile] INSTALL PASS' -ForegroundColor Green
     Write-Host "  GPU:       $($gpu.name)"
+    if (-not [string]::IsNullOrWhiteSpace([string]$gpu.boardBrand)) {
+        Write-Host "  Board:     $($gpu.boardBrand) $($gpu.boardModel)"
+        Write-Host "  VRAM:      $($gpu.memoryTypeName) / $($gpu.memoryMakerName) (NVAPI $($gpu.memoryMakerNvapiName)=$($gpu.memoryMaker))"
+        Write-Host "  Scope:     $($gpu.identityScope)"
+    }
     Write-Host "  PnP:       $($postController[0].PNPDeviceID)"
     Write-Host "  Driver:    $($postController[0].DriverVersion) / Code 0"
     Write-Host "  Displays:  1 (parent class '$($finalDisplayState.ParentClass)' is not Display)"

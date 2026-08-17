@@ -15,7 +15,7 @@
 # Usage:
 #   ./install-vgpu-driver.sh              # vm1 default
 #   ./install-vgpu-driver.sh <vm_id>
-#   ./install-vgpu-driver.sh --ip 192.168.30.191
+#   ./install-vgpu-driver.sh <vm_id> --ip 192.168.30.191  # IP/MAC 必须与该 VM 匹配
 #   ./install-vgpu-driver.sh --no-reboot  # don't reboot after install
 #
 set -euo pipefail
@@ -43,22 +43,44 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# A same-version NVIDIA repair can restore the INF-provided NV_Modes value
+# without changing the monitor profile hash.  Invalidate the offline monitor
+# completion marker immediately before the first guest write so the next full
+# shutdown must re-apply the reviewed G-11 display-mode policy.
+invalidate_monitor_sync_marker() {
+    local instance_dir monitor_marker
+
+    instance_dir=$(vm_storage_instance_dir "$VM_ID") || return
+    vm_storage_validate_root_path "$instance_dir" "vm${VM_ID} instance directory" || return
+    vm_storage_validate_instance_tree "$VM_ID" || return
+    monitor_marker=$(vm_storage_run_preferred_path "$VM_ID" monitor-edid) || return
+    [[ "$monitor_marker" == "$instance_dir/run/monitor-edid.sha256" ]] || {
+        echo "[install-vgpu] refusing unexpected monitor marker path: $monitor_marker" >&2
+        return 1
+    }
+    if [[ -L "$monitor_marker" ||
+          ( -e "$monitor_marker" && ! -f "$monitor_marker" ) ]]; then
+        echo "[install-vgpu] refusing unsafe monitor marker: $monitor_marker" >&2
+        return 1
+    fi
+    if [[ -f "$monitor_marker" ]]; then
+        rm -f -- "$monitor_marker" || {
+            echo "[install-vgpu] failed to invalidate monitor marker: $monitor_marker" >&2
+            return 1
+        }
+        [[ ! -e "$monitor_marker" && ! -L "$monitor_marker" ]] || {
+            echo "[install-vgpu] monitor marker still exists after removal: $monitor_marker" >&2
+            return 1
+        }
+    fi
+    echo "[install-vgpu] monitor mode cache marked for resync after the next full shutdown"
+}
+
 # Fail before wiping the guest if either historically misnamed asset is not the
 # exact 538.33 baseline verified with this host driver.
 vgpu_verify_driver_assets all
 
-if [[ -z "$IP_OVERRIDE" ]]; then
-    conf=$(vm_storage_config_path "$VM_ID")
-    [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }
-    # shellcheck source=/dev/null
-    source "$conf"
-    mac_lc=${VM_MAC,,}
-    IP=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" \
-        '$3=="br0" && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}')
-    [[ -n "$IP" ]] || { echo "no IP for $VM_MAC" >&2; exit 1; }
-else
-    IP="$IP_OVERRIDE"
-fi
+IP=$(vgpu_resolve_bound_guest_ip "$VM_ID" "$IP_OVERRIDE") || exit
 
 HOST_IP=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
 [[ -n "$HOST_IP" ]] || HOST_IP="192.168.30.127"
@@ -85,6 +107,8 @@ echo "[install-vgpu] guest=$IP  reboot=$([[ $NO_REBOOT -eq 1 ]] && echo no || ec
 
 REBOOT_CMD=""
 [[ $NO_REBOOT -eq 0 ]] && REBOOT_CMD='Write-Host "rebooting in 10s..." -Fore Yellow; Start-Sleep 10; shutdown /r /t 0'
+
+invalidate_monitor_sync_marker
 
 exec python3 - "$IP" "$GUEST_USER" "$GUEST_PASS" "$BASE_URL" "$REBOOT_CMD" <<'PYEOF'
 import sys

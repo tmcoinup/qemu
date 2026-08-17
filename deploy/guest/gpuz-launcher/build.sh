@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Validate one GPU-Z directory bundle and compile it into one native Win64 EXE.
+# Validate one GPU-Z profile bundle and compile it into one native Win64 EXE.
+# Portable schema 4 declares GPU-Z as an optional exact sibling.  The launcher
+# imports it through a pinned handle only for the explicit /with-gpuz path.
 set -euo pipefail
 export LC_ALL=C
 umask 077
@@ -12,9 +14,11 @@ usage() {
     cat >&2 <<'EOF'
 usage: build.sh --bundle-dir DIR --output FILE.exe
 
-The builder embeds every READY/manifest-owned file as an individually
-size/SHA-256-pinned PE RCDATA resource.  It accepts both the historical
-VM-bound schema and the portable-auto catalog schema.
+The builder embeds every manifest.files entry as an individually
+size/SHA-256-pinned PE RCDATA resource.  It accepts the historical VM-bound
+and embedded-portable schemas, portable schema 3 (required external sibling),
+and portable schema 4, whose manifest.optionalExternalFiles entry declares the
+only GPU-Z image accepted by the explicit /with-gpuz path.
 EOF
 }
 
@@ -134,6 +138,8 @@ MANIFEST_SCHEMA=$(jq -er '.schemaVersion' "$MANIFEST") ||
     die "manifest schemaVersion is missing"
 BINDING_MODE=""
 VM_LABEL=""
+EXTERNAL_GPUZ=0
+OPTIONAL_GPUZ=0
 case "$MANIFEST_SCHEMA" in
     1)
         jq -e '
@@ -175,6 +181,70 @@ case "$MANIFEST_SCHEMA" in
         BINDING_MODE=portable-auto
         VM_LABEL=portable-auto
         ;;
+    3)
+        jq -e \
+            --arg gpuzName "$GPUZ_ASSET_BUNDLE_NAME" \
+            --arg gpuzHash "$GPUZ_ASSET_SHA256" \
+            --argjson gpuzBytes "$GPUZ_ASSET_BYTES" '
+            (keys | sort) == [
+                "bindingMode", "externalFiles", "files", "schemaVersion"
+            ] and
+            .schemaVersion == 3 and .bindingMode == "portable-auto" and
+            (.files | type) == "array" and
+            (.files | length) >= 10 and (.files | length) <= 31 and
+            all(.files[];
+                type == "object" and
+                (keys | sort) == ["bytes", "name", "sha256"] and
+                (.name | type) == "string" and
+                (.sha256 | type) == "string" and
+                (.bytes | type) == "number" and
+                (.bytes | floor) == .bytes
+            ) and
+            .externalFiles == [{
+                name: $gpuzName,
+                sha256: $gpuzHash,
+                bytes: $gpuzBytes
+            }] and
+            ([.files[].name] | index($gpuzName)) == null
+        ' "$MANIFEST" >/dev/null ||
+            die "unsupported external-sibling portable manifest schema"
+        BINDING_MODE=portable-auto
+        VM_LABEL=portable-auto-external
+        EXTERNAL_GPUZ=1
+        ;;
+    4)
+        jq -e \
+            --arg gpuzName "$GPUZ_ASSET_BUNDLE_NAME" \
+            --arg gpuzHash "$GPUZ_ASSET_SHA256" \
+            --argjson gpuzBytes "$GPUZ_ASSET_BYTES" '
+            (keys | sort) == [
+                "bindingMode", "files", "optionalExternalFiles",
+                "schemaVersion"
+            ] and
+            .schemaVersion == 4 and .bindingMode == "portable-auto" and
+            (.files | type) == "array" and
+            (.files | length) >= 10 and (.files | length) <= 31 and
+            all(.files[];
+                type == "object" and
+                (keys | sort) == ["bytes", "name", "sha256"] and
+                (.name | type) == "string" and
+                (.sha256 | type) == "string" and
+                (.bytes | type) == "number" and
+                (.bytes | floor) == .bytes
+            ) and
+            .optionalExternalFiles == [{
+                name: $gpuzName,
+                sha256: $gpuzHash,
+                bytes: $gpuzBytes
+            }] and
+            ([.files[].name] | index($gpuzName)) == null
+        ' "$MANIFEST" >/dev/null ||
+            die "unsupported optional-GPU-Z portable manifest schema"
+        BINDING_MODE=portable-auto
+        VM_LABEL=portable-auto-identity
+        EXTERNAL_GPUZ=1
+        OPTIONAL_GPUZ=1
+        ;;
     *)
         die "unsupported bundle manifest schema"
         ;;
@@ -183,7 +253,145 @@ esac
 declare -a CONTRACT_PROFILE_NAMES=()
 declare -a CONTRACT_PROFILE_SHAS=()
 if [[ "$BINDING_MODE" == portable-auto ]]; then
-    jq -e \
+    if ((EXTERNAL_GPUZ)); then
+        identity_contract_schema=$(jq -er '.schemaVersion' "$CONTRACT")
+        if [[ "$identity_contract_schema" == 5 ||
+              "$identity_contract_schema" == 6 ||
+              "$identity_contract_schema" == 7 ]]; then
+            expected_identity_schema=5
+            expected_gpuz_delivery=external-sibling
+            if ((OPTIONAL_GPUZ)); then
+                if [[ "$identity_contract_schema" == 7 ]]; then
+                    expected_identity_schema=7
+                else
+                    expected_identity_schema=6
+                fi
+                expected_gpuz_delivery=optional-explicit-sibling
+            fi
+            jq -e \
+            --arg gpuzName "$GPUZ_ASSET_BUNDLE_NAME" \
+            --argjson gpuzBytes "$GPUZ_ASSET_BYTES" \
+            --arg gpuzVersion "$GPUZ_ASSET_PRODUCT_VERSION" \
+            --arg gpuzHash "$GPUZ_ASSET_SHA256" \
+            --argjson expectedSchema "$expected_identity_schema" \
+            --arg expectedDelivery "$expected_gpuz_delivery" '
+            (keys | sort) ==
+                (if $expectedSchema == 7 then [
+                    "appLocal", "bindingMode", "catalog", "catalogSha256",
+                    "expectedDriverVersion", "expectedPnpId", "gpuz",
+                    "licenseToken", "profiles", "schemaVersion", "spoofMode"
+                ] else [
+                    "appLocal", "bindingMode", "catalog", "catalogSha256",
+                    "expectedDriverVersion", "expectedPnpId", "gpuz", "profiles",
+                    "schemaVersion", "spoofMode"
+                ] end) and
+            .schemaVersion == $expectedSchema and
+            .bindingMode == "portable-auto" and
+            .spoofMode == "B" and
+            (.catalogSha256 | test("^[0-9A-F]{64}$")) and
+            .expectedPnpId == "PCI\\VEN_10DE&DEV_1E30" and
+            .expectedDriverVersion == "31.0.15.3833" and
+            (.catalog | keys | sort) == ["bytes", "name", "sha256"] and
+            .catalog.name == "vgpu-profile-catalog.json" and
+            (.catalog.sha256 | test("^[0-9A-F]{64}$")) and
+            (.catalog.bytes | type) == "number" and .catalog.bytes > 0 and
+            (.profiles | type) == "array" and
+            (.profiles | length) >= 1 and (.profiles | length) <= 64 and
+            ([.profiles[] | .key] | unique | length) == (.profiles | length) and
+            ([.profiles[] | .asset.name | ascii_downcase] | unique | length) ==
+                (.profiles | length) and
+            all(.profiles[];
+                (keys | sort) == [
+                    "asset", "boardBrand", "boardModel",
+                    "canonicalDisplayName", "key", "memoryMakerName"
+                ] and
+                (.key | test("^[a-z0-9][a-z0-9_]*$")) and
+                (.canonicalDisplayName | test("^NVIDIA [ -~]{1,23}$")) and
+                (.boardBrand | test("^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$")) and
+                (.boardModel | test("^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$")) and
+                (.memoryMakerName == "Samsung" or
+                 .memoryMakerName == "SK hynix" or
+                 .memoryMakerName == "Micron") and
+                (.asset | keys | sort) == ["name", "sha256"] and
+                (.asset.name | test("^profile-[a-z0-9_]+[.]json$")) and
+                (.asset.sha256 | test("^[0-9A-F]{64}$"))
+            ) and
+            (.gpuz | keys | sort) ==
+                ["bytes", "delivery", "name", "productVersion", "sha256"] and
+            .gpuz.name == $gpuzName and .gpuz.bytes == $gpuzBytes and
+            .gpuz.productVersion == $gpuzVersion and .gpuz.sha256 == $gpuzHash and
+            .gpuz.delivery == $expectedDelivery and
+            (.appLocal | keys | sort) ==
+                ["probeName", "probeSha256", "queryName", "querySha256",
+                 "shimName", "shimSha256"] and
+            (.appLocal.shimName | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+            (.appLocal.probeName | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+            .appLocal.queryName == "VgpuIdentityQuery.exe" and
+            (.appLocal.shimSha256 | test("^[0-9A-F]{64}$")) and
+            (.appLocal.probeSha256 | test("^[0-9A-F]{64}$")) and
+            (.appLocal.querySha256 | test("^[0-9A-F]{64}$")) and
+            (if $expectedSchema == 7 then
+                (.licenseToken | keys | sort) ==
+                    ["bytes", "delivery", "name", "sha256"] and
+                .licenseToken.name == "client_configuration_token.tok" and
+                (.licenseToken.sha256 | test("^[0-9A-F]{64}$")) and
+                (.licenseToken.bytes | type) == "number" and
+                (.licenseToken.bytes | floor) == .licenseToken.bytes and
+                .licenseToken.bytes >= 1024 and
+                .licenseToken.bytes <= 1048576 and
+                .licenseToken.delivery == "embedded-private"
+             else true end)
+            ' "$CONTRACT" >/dev/null ||
+                die "portable identity contract is not the expected atomic multi-brand catalog"
+        else
+            jq -e \
+        --arg gpuzName "$GPUZ_ASSET_BUNDLE_NAME" \
+        --argjson gpuzBytes "$GPUZ_ASSET_BYTES" \
+        --arg gpuzVersion "$GPUZ_ASSET_PRODUCT_VERSION" \
+        --arg gpuzHash "$GPUZ_ASSET_SHA256" '
+        (keys | sort) == [
+            "appLocal", "bindingMode", "catalogSha256",
+            "expectedDriverVersion", "expectedPnpId", "gpuz", "profiles",
+            "schemaVersion", "spoofMode"
+        ] and
+        .schemaVersion == 4 and .bindingMode == "portable-auto" and
+        .spoofMode == "B" and
+        (.catalogSha256 | test("^[0-9A-F]{64}$")) and
+        .expectedPnpId == "PCI\\VEN_10DE&DEV_1E30" and
+        .expectedDriverVersion == "31.0.15.3833" and
+        (.profiles | type) == "array" and (.profiles | length) == 3 and
+        [.profiles[] | .key] ==
+            ["gtx750ti_2gb", "gt1030_2gb", "gtx1050_2gb"] and
+        [.profiles[] | .canonicalDisplayName] == [
+            "NVIDIA GeForce GTX 750 Ti",
+            "NVIDIA GeForce GT 1030",
+            "NVIDIA GeForce GTX 1050"
+        ] and
+        ([.profiles[] | .key] | unique | length) == 3 and
+        ([.profiles[] | .canonicalDisplayName] | unique | length) == 3 and
+        ([.profiles[] | .asset.name | ascii_downcase] | unique | length) == 3 and
+        all(.profiles[];
+            (keys | sort) == ["asset", "canonicalDisplayName", "key"] and
+            (.asset | keys | sort) == ["name", "sha256"] and
+            (.asset.name | test("^profile-[a-z0-9_]+[.]json$")) and
+            (.asset.sha256 | test("^[0-9A-F]{64}$"))
+        ) and
+        (.gpuz | keys | sort) ==
+            ["bytes", "delivery", "name", "productVersion", "sha256"] and
+        .gpuz.name == $gpuzName and .gpuz.bytes == $gpuzBytes and
+        .gpuz.productVersion == $gpuzVersion and .gpuz.sha256 == $gpuzHash and
+        .gpuz.delivery == "external-sibling" and
+        (.appLocal | keys | sort) ==
+            ["probeName", "probeSha256", "shimName", "shimSha256"] and
+        (.appLocal.shimName | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+        (.appLocal.probeName | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+        (.appLocal.shimSha256 | test("^[0-9A-F]{64}$")) and
+        (.appLocal.probeSha256 | test("^[0-9A-F]{64}$"))
+            ' "$CONTRACT" >/dev/null ||
+                die "external-sibling portable contract does not match the audited catalog schema"
+        fi
+    else
+        jq -e \
         --arg gpuzName "$GPUZ_ASSET_BUNDLE_NAME" \
         --argjson gpuzBytes "$GPUZ_ASSET_BYTES" \
         --arg gpuzVersion "$GPUZ_ASSET_PRODUCT_VERSION" \
@@ -226,6 +434,7 @@ if [[ "$BINDING_MODE" == portable-auto ]]; then
         (.appLocal.probeSha256 | test("^[0-9A-F]{64}$"))
     ' "$CONTRACT" >/dev/null ||
         die "portable contract does not match the audited catalog schema"
+    fi
     mapfile -t CONTRACT_PROFILE_NAMES < <(
         jq -er '.profiles[].asset.name' "$CONTRACT"
     )
@@ -278,6 +487,28 @@ CONTRACT_PROBE_SHA=$(jq -er '.appLocal.probeSha256' "$CONTRACT")
 CONTRACT_GPUZ_NAME=$(jq -er '.gpuz.name' "$CONTRACT")
 CONTRACT_GPUZ_BYTES=$(jq -er '.gpuz.bytes' "$CONTRACT")
 CONTRACT_GPUZ_SHA=$(jq -er '.gpuz.sha256' "$CONTRACT")
+CONTRACT_SCHEMA=$(jq -er '.schemaVersion' "$CONTRACT")
+declare -a CONTRACT_CATALOG_NAMES=()
+declare -a CONTRACT_QUERY_NAMES=()
+declare -a CONTRACT_TOKEN_NAMES=()
+declare -a CONTRACT_LICENSE_INSTALLER_NAMES=()
+if [[ "$CONTRACT_SCHEMA" == 5 || "$CONTRACT_SCHEMA" == 6 ||
+      "$CONTRACT_SCHEMA" == 7 ]]; then
+    CONTRACT_CATALOG_NAME=$(jq -er '.catalog.name' "$CONTRACT")
+    CONTRACT_CATALOG_SHA=$(jq -er '.catalog.sha256' "$CONTRACT")
+    CONTRACT_CATALOG_BYTES=$(jq -er '.catalog.bytes' "$CONTRACT")
+    CONTRACT_CATALOG_NAMES+=("$CONTRACT_CATALOG_NAME")
+    CONTRACT_QUERY_NAME=$(jq -er '.appLocal.queryName' "$CONTRACT")
+    CONTRACT_QUERY_SHA=$(jq -er '.appLocal.querySha256' "$CONTRACT")
+    CONTRACT_QUERY_NAMES+=("$CONTRACT_QUERY_NAME")
+fi
+if [[ "$CONTRACT_SCHEMA" == 7 ]]; then
+    CONTRACT_TOKEN_NAME=$(jq -er '.licenseToken.name' "$CONTRACT")
+    CONTRACT_TOKEN_SHA=$(jq -er '.licenseToken.sha256' "$CONTRACT")
+    CONTRACT_TOKEN_BYTES=$(jq -er '.licenseToken.bytes' "$CONTRACT")
+    CONTRACT_TOKEN_NAMES+=("$CONTRACT_TOKEN_NAME")
+    CONTRACT_LICENSE_INSTALLER_NAMES+=("install-vgpu-license.ps1")
+fi
 
 declare -a payload_names=(READY bundle-manifest.json)
 declare -A seen_casefold=(
@@ -320,34 +551,83 @@ for required_name in \
         apply-gpuz-profile.ps1 gpuz-contract.json \
         nvapi.dll nvapi_profile_probe32.exe RUN-GPUZ-PROFILE.cmd \
         "${CONTRACT_PROFILE_NAMES[@]}" \
-        "$CONTRACT_SHIM_NAME" "$CONTRACT_PROBE_NAME" \
-        "$CONTRACT_GPUZ_NAME"; do
+        "${CONTRACT_CATALOG_NAMES[@]}" \
+        "${CONTRACT_QUERY_NAMES[@]}" \
+        "${CONTRACT_TOKEN_NAMES[@]}" \
+        "${CONTRACT_LICENSE_INSTALLER_NAMES[@]}" \
+        "$CONTRACT_SHIM_NAME" "$CONTRACT_PROBE_NAME"; do
     [[ -n "${seen_casefold[${required_name,,}]+x}" ]] \
         || die "manifest omits required GPU-Z asset: $required_name"
 done
+if ((!EXTERNAL_GPUZ)); then
+    [[ -n "${seen_casefold[${CONTRACT_GPUZ_NAME,,}]+x}" ]] \
+        || die "manifest omits required GPU-Z asset: $CONTRACT_GPUZ_NAME"
+fi
 for profile_index in "${!CONTRACT_PROFILE_NAMES[@]}"; do
     [[ "$(sha256_upper \
             "$BUNDLE_DIR/${CONTRACT_PROFILE_NAMES[$profile_index]}")" == \
        "${CONTRACT_PROFILE_SHAS[$profile_index]}" ]] ||
         die "contract profile hash does not match the private snapshot"
 done
+if [[ "$CONTRACT_SCHEMA" == 5 || "$CONTRACT_SCHEMA" == 6 ||
+      "$CONTRACT_SCHEMA" == 7 ]]; then
+    [[ "$(stat -c %s -- "$BUNDLE_DIR/$CONTRACT_CATALOG_NAME")" == \
+           "$CONTRACT_CATALOG_BYTES" &&
+       "$(sha256_upper "$BUNDLE_DIR/$CONTRACT_CATALOG_NAME")" == \
+           "$CONTRACT_CATALOG_SHA" ]] ||
+        die "contract catalog hash does not match the private snapshot"
+    [[ "$(sha256_upper "$BUNDLE_DIR/$CONTRACT_QUERY_NAME")" == \
+           "$CONTRACT_QUERY_SHA" ]] ||
+        die "contract query hash does not match the private snapshot"
+fi
+if [[ "$CONTRACT_SCHEMA" == 7 ]]; then
+    [[ "$(stat -c %s -- "$BUNDLE_DIR/$CONTRACT_TOKEN_NAME")" == \
+           "$CONTRACT_TOKEN_BYTES" &&
+       "$(sha256_upper "$BUNDLE_DIR/$CONTRACT_TOKEN_NAME")" == \
+           "$CONTRACT_TOKEN_SHA" ]] ||
+        die "contract license token hash does not match the private snapshot"
+    jq -e \
+        --arg name "$CONTRACT_TOKEN_NAME" \
+        --arg sha256 "$CONTRACT_TOKEN_SHA" \
+        --argjson bytes "$CONTRACT_TOKEN_BYTES" '
+        [.files[] | select(.name == $name)] ==
+            [{name: $name, sha256: $sha256, bytes: $bytes}]
+    ' "$MANIFEST" >/dev/null ||
+        die "manifest does not exactly own the private license token"
+fi
 [[ "$(sha256_upper "$BUNDLE_DIR/$CONTRACT_SHIM_NAME")" == \
        "$CONTRACT_SHIM_SHA" &&
    "$(sha256_upper "$BUNDLE_DIR/$CONTRACT_PROBE_NAME")" == \
-       "$CONTRACT_PROBE_SHA" &&
-   "$(stat -c %s -- "$BUNDLE_DIR/$CONTRACT_GPUZ_NAME")" == \
-       "$CONTRACT_GPUZ_BYTES" &&
-   "$(sha256_upper "$BUNDLE_DIR/$CONTRACT_GPUZ_NAME")" == \
-       "$CONTRACT_GPUZ_SHA" ]] \
+       "$CONTRACT_PROBE_SHA" ]] \
     || die "contract asset hashes do not match the private snapshot"
-jq -e \
-    --arg name "$CONTRACT_GPUZ_NAME" \
-    --arg sha256 "$CONTRACT_GPUZ_SHA" \
-    --argjson bytes "$CONTRACT_GPUZ_BYTES" '
-    [.files[] | select(.name == $name)] ==
-        [{name: $name, sha256: $sha256, bytes: $bytes}]
-' "$MANIFEST" >/dev/null \
-    || die "manifest does not exactly own the contract GPU-Z name/hash/bytes"
+if ((EXTERNAL_GPUZ)); then
+    jq -e \
+        --arg name "$CONTRACT_GPUZ_NAME" \
+        --arg sha256 "$CONTRACT_GPUZ_SHA" \
+        --argjson bytes "$CONTRACT_GPUZ_BYTES" '
+        [.files[] | select(.name == $name)] == [] and
+        (if .schemaVersion == 4 then
+            .optionalExternalFiles == [{name: $name, sha256: $sha256, bytes: $bytes}]
+         else
+            .externalFiles == [{name: $name, sha256: $sha256, bytes: $bytes}]
+         end)
+    ' "$MANIFEST" >/dev/null \
+        || die "manifest does not exactly bind the external sibling GPU-Z"
+else
+    [[ "$(stat -c %s -- "$BUNDLE_DIR/$CONTRACT_GPUZ_NAME")" == \
+           "$CONTRACT_GPUZ_BYTES" &&
+       "$(sha256_upper "$BUNDLE_DIR/$CONTRACT_GPUZ_NAME")" == \
+           "$CONTRACT_GPUZ_SHA" ]] \
+        || die "contract GPU-Z hash does not match the private snapshot"
+    jq -e \
+        --arg name "$CONTRACT_GPUZ_NAME" \
+        --arg sha256 "$CONTRACT_GPUZ_SHA" \
+        --argjson bytes "$CONTRACT_GPUZ_BYTES" '
+        [.files[] | select(.name == $name)] ==
+            [{name: $name, sha256: $sha256, bytes: $bytes}]
+    ' "$MANIFEST" >/dev/null \
+        || die "manifest does not exactly own the contract GPU-Z name/hash/bytes"
+fi
 expected_root_count=${#payload_names[@]}
 actual_root_count=$(find "$BUNDLE_DIR" -mindepth 1 -maxdepth 1 -printf x | wc -c)
 [[ "$actual_root_count" -eq "$expected_root_count" ]] \
@@ -364,9 +644,49 @@ install -m 0600 -- "$here/gpuz_profile_launcher.manifest" \
 
 metadata="$tmp/payload_metadata.h"
 resource_file="$tmp/gpuz_profile_launcher.rc"
+if ((EXTERNAL_GPUZ)); then
+    if [[ "$CONTRACT_SCHEMA" == 7 ]]; then
+        LAUNCHER_MARKER='QEMU_VGPU_PORTABLE_LICENSED_V5'
+        LAUNCHER_VERSION_COMMA='1,5,0,0'
+        LAUNCHER_VERSION_TEXT='1.5.0.0'
+        LAUNCHER_DESCRIPTION='Private vGPU identity and license finalizer'
+    elif [[ "$CONTRACT_SCHEMA" == 6 ]]; then
+        LAUNCHER_MARKER='QEMU_VGPU_PORTABLE_IDENTITY_V4'
+        LAUNCHER_VERSION_COMMA='1,4,0,0'
+        LAUNCHER_VERSION_TEXT='1.4.0.0'
+        LAUNCHER_DESCRIPTION='vGPU identity installer with optional GPU-Z'
+    elif [[ "$CONTRACT_SCHEMA" == 5 ]]; then
+        LAUNCHER_MARKER='QEMU_VGPU_PORTABLE_IDENTITY_V3'
+        LAUNCHER_VERSION_COMMA='1,3,0,0'
+        LAUNCHER_VERSION_TEXT='1.3.0.0'
+        LAUNCHER_DESCRIPTION='vGPU multi-brand identity installer'
+    else
+        LAUNCHER_MARKER='QEMU_GPUZ_PORTABLE_EXTERNAL_V2'
+        LAUNCHER_VERSION_COMMA='1,2,0,0'
+        LAUNCHER_VERSION_TEXT='1.2.0.0'
+        LAUNCHER_DESCRIPTION='GPU-Z external-sibling profile installer'
+    fi
+else
+    LAUNCHER_MARKER='QEMU_GPUZ_SINGLE_EXE_V1'
+    LAUNCHER_VERSION_COMMA='1,1,0,0'
+    LAUNCHER_VERSION_TEXT='1.1.0.0'
+    LAUNCHER_DESCRIPTION='Single-file GPU-Z profile installer'
+fi
 {
     printf '#ifndef QEMU_GPUZ_PAYLOAD_METADATA_H\n'
     printf '#define QEMU_GPUZ_PAYLOAD_METADATA_H\n'
+    printf '#define LAUNCHER_MARKER "%s"\n' "$LAUNCHER_MARKER"
+    printf '#define EXTERNAL_GPUZ_ENABLED %du\n' "$EXTERNAL_GPUZ"
+    printf '#define EXTERNAL_GPUZ_OPTIONAL %du\n' "$OPTIONAL_GPUZ"
+    if ((EXTERNAL_GPUZ)); then
+        external_hash_initializer=$(sed -E 's/(..)/0x\1,/g' \
+            <<<"$CONTRACT_GPUZ_SHA")
+        printf '#define EXTERNAL_GPUZ_BYTES %uu\n' "$CONTRACT_GPUZ_BYTES"
+        printf 'static const wchar_t EXTERNAL_GPUZ_NAME[] = L"%s";\n' \
+            "$CONTRACT_GPUZ_NAME"
+        printf 'static const BYTE EXTERNAL_GPUZ_SHA256[SHA256_BYTES] = {%s};\n' \
+            "$external_hash_initializer"
+    fi
     printf '#define PAYLOAD_COUNT %uu\n' "${#payload_names[@]}"
     printf 'static const PayloadEntry PAYLOAD_ENTRIES[PAYLOAD_COUNT] = {\n'
 } >"$metadata"
@@ -396,10 +716,10 @@ done
     printf '};\n'
     printf '#endif\n'
 } >>"$metadata"
-cat >>"$resource_file" <<'EOF'
+cat >>"$resource_file" <<EOF
 1 VERSIONINFO
- FILEVERSION 1,1,0,0
- PRODUCTVERSION 1,1,0,0
+ FILEVERSION $LAUNCHER_VERSION_COMMA
+ PRODUCTVERSION $LAUNCHER_VERSION_COMMA
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -411,13 +731,13 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "Local QEMU vGPU tools\0"
-            VALUE "FileDescription", "Single-file GPU-Z profile installer\0"
-            VALUE "FileVersion", "1.1.0.0\0"
+            VALUE "FileDescription", "$LAUNCHER_DESCRIPTION\0"
+            VALUE "FileVersion", "$LAUNCHER_VERSION_TEXT\0"
             VALUE "InternalName", "GpuZProfileInstaller\0"
             VALUE "OriginalFilename", "GpuZProfileInstaller.exe\0"
             VALUE "ProductName", "QEMU GPU-Z profile installer\0"
-            VALUE "ProductVersion", "1.1.0.0\0"
-            VALUE "SpecialBuild", "QEMU_GPUZ_SINGLE_EXE_V1\0"
+            VALUE "ProductVersion", "$LAUNCHER_VERSION_TEXT\0"
+            VALUE "SpecialBuild", "$LAUNCHER_MARKER\0"
         END
     END
     BLOCK "VarFileInfo"

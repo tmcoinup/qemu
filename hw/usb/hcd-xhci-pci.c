@@ -131,19 +131,6 @@ static void usb_xhci_pci_realize(struct PCIDevice *dev, Error **errp)
     dev->config[PCI_CACHE_LINE_SIZE] = 0x10;
     dev->config[0x60] = 0x30; /* release number */
 
-    /* stealth: 平台一致性 PCI ID 覆盖。class_init 写好的 vendor/device 已在
-     * pci_qdev_realize 阶段落入 config，这里按需改写。class code (0x0C0330)
-     * 不动，Windows 仍按 class match 绑定通用 usbxhci.sys。 */
-    if (s->stealth_vendor_id != 0xFFFFFFFF) {
-        pci_config_set_vendor_id(dev->config, s->stealth_vendor_id & 0xFFFF);
-    }
-    if (s->stealth_device_id != 0xFFFFFFFF) {
-        pci_config_set_device_id(dev->config, s->stealth_device_id & 0xFFFF);
-    }
-    if (s->stealth_revision != 0xFFFFFFFF) {
-        pci_config_set_revision(dev->config, s->stealth_revision & 0xFF);
-    }
-
     object_property_set_link(OBJECT(&s->xhci), "host", OBJECT(s), NULL);
     s->xhci.intr_update = xhci_pci_intr_update;
     s->xhci.intr_raise = xhci_pci_intr_raise;
@@ -240,14 +227,6 @@ static const Property xhci_pci_properties[] = {
     DEFINE_PROP_ON_OFF_AUTO("msix", XHCIPciState, msix, ON_OFF_AUTO_AUTO),
     DEFINE_PROP_BOOL("conditional-intr-mapping", XHCIPciState,
                      conditional_intr_mapping, false),
-    /* Optional platform-matched PCI identity; unset keeps the vGPU-safe
-     * qemu-xhci defaults below. */
-    DEFINE_PROP_UINT32("x-pci-vendor-id", XHCIPciState, stealth_vendor_id,
-                       0xFFFFFFFF),
-    DEFINE_PROP_UINT32("x-pci-device-id", XHCIPciState, stealth_device_id,
-                       0xFFFFFFFF),
-    DEFINE_PROP_UINT32("x-pci-revision", XHCIPciState, stealth_revision,
-                       0xFFFFFFFF),
 };
 
 static void xhci_class_init(ObjectClass *klass, const void *data)
@@ -287,18 +266,21 @@ static void qemu_xhci_class_init(ObjectClass *klass, const void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
     /*
-     * Default xHCI identity. Upstream uses Red Hat / Qumranet 0x1B36 which
-     * is a QEMU tell in Windows PnP. Tried Intel 100-series 0x8086/0xA12F
-     * once to hide that — guest then came up but then on next cold boot
-     * with stealth chain enabled (no IDD, -vga none, vGPU in early boot)
-     * Windows never reached network, so xHCI PnP re-enumeration seems to
-     * interact with the rest of the boot chain. Reverting. Revisit only
-     * with a plan to re-arm input drivers (usb-tablet binds to the xHCI
-     * HCD on every boot).
+     * A PCI device ID is a driver behavior contract, not a cosmetic string.
+     * Windows USBXHCI.SYS selects vendor/device-specific workarounds from it;
+     * advertising an Intel PCH ID cannot give qemu-xhci the matching reset,
+     * link-power or power-transition behavior.
+     *
+     * This tree can override the default PCI subsystem identity globally to
+     * describe a selected mainboard.  Pin the complete upstream qemu-xhci
+     * identity here as well, so the controller cannot inherit an unrelated
+     * OEM subsystem tuple.
      */
-    k->vendor_id    = PCI_VENDOR_ID_REDHAT;
-    k->device_id    = PCI_DEVICE_ID_REDHAT_XHCI;
-    k->revision     = 0x01;
+    k->vendor_id           = PCI_VENDOR_ID_REDHAT;
+    k->device_id           = PCI_DEVICE_ID_REDHAT_XHCI;
+    k->revision            = 0x01;
+    k->subsystem_vendor_id = PCI_SUBVENDOR_ID_REDHAT_QUMRANET;
+    k->subsystem_id        = PCI_SUBDEVICE_ID_QEMU;
 }
 
 static void qemu_xhci_instance_init(Object *obj)

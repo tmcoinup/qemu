@@ -23,6 +23,7 @@ GTAGS
 *.patch
 !deploy/host/ovmf-mdev-fastboot.patch
 !deploy/host/ovmf-security-modules.patch
+!deploy/host/patches/vgpu-unlock-rs-g11.patch
 *.gcov
 /.claude/settings.local.json
 .claude/scheduled_tasks.lock

@@ -5,10 +5,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-STOP_VM="$REPO_ROOT/deploy/stop-vm.sh"
+STOP_VM="$REPO_ROOT/deploy/scripts/stop-vm.sh"
 TMP_DIR="$(mktemp -d)"
 VM_ID=$((970000000 + $$ % 10000000))
-INSTANCE="$TMP_DIR/vm${VM_ID}"
+INSTANCE="$TMP_DIR/${VM_ID}"
 QMP_SOCK="$INSTANCE/run/qmp.sock"
 QMP_RECORD="$TMP_DIR/qmp.record"
 FAKE_QEMU="$TMP_DIR/qemu-system-x86_64"

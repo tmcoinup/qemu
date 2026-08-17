@@ -5,6 +5,51 @@
 > 不得复现这些证书/Driver Store 步骤。VM3 的 legacy A 已使用生产迁移流程切回
 > 未修改 GRID 538.33 + B/native；受支持的最终状态是 B。
 
+## 2026-08-17：VM9 通用系统身份 FINAL PASS
+
+VM9 只作为验收样机；实现和包均从 VM 的 canonical GPU/monitor profile 读取，
+没有 VM9、鲁大师、ASUS 或 AOC 特例。
+
+| 项 | 实机验收结果 |
+|---|---|
+| Present Display | 恰好 1 个 `NVIDIA GeForce GTX 750 Ti`，Code 0 |
+| 原生 transport | `PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE` |
+| Guest driver | GRID 538.33 / `31.0.15.3833` / NVIDIA+WHCP 正式签名 |
+| 系统 NVAPI merge | transport device 保持 `10DE:1E30`，Subsystem 为 ASUS `1043:84BB` |
+| 板卡/显存 | ASUS / Samsung / GDDR5 / 2 GB / 128 bit / 86.4 GB/s |
+| 显示器 | `AOC 2470W`，present/OK，1920×1080@60 |
+| 32/64 位 | `SystemNvapiProbe32.exe` 与 `SystemNvapiProbe64.exe` 均 PASS，GPU count=1 |
+| 3D | `dxdiag` 只有一个 Display Devices；DDI 12、WDDM 2.7、Feature Levels 12_1～9_1 |
+| 稳定性 | 本次原生 538.33 启动后无新增 host Xid/TDR，SDL 保持可见 |
+
+鲁大师先在总览点“重新扫描”后，显卡页显示 ASUS、SAMSUNG、GDDR5、128 bit、
+86.4 GB/s 和正确时钟，并且不再出现“本机共有 2 块显卡”。这只是清理该软件旧
+缓存的验收步骤；系统实现对进程名无判断，普通 32/64 位 NVAPI 调用者使用同一
+系统合同。
+
+VM9 安装的已验证合同：
+
+```text
+contract = D4B7F7A9123D25C7B29ECFD490DA0918E7C206BE0722B710CA8C41C342440A28
+installed v9 ISO SHA256 = D0010A0B87A8E4179A543897C4D7F4ABF25FB3C371CF88BB41635F4AA90E2083
+validated receipt = C:\ProgramData\G11\SystemNvapiProjection\receipts\<contract>-validated.json
+```
+
+文档与门禁收口后又从当前源码重新生成最终交付 ISO，合同 ID 不变（payload 与
+VM 事实相同），输出为
+`SystemNvapiProjection-final/vm9-...-D4B7F7A9123D25C7.iso`，SHA-256 为
+`78F10D0F4156412C8B7B147C172C24D76B10E06A1443B753AF26490EBFD4CC02`。
+
+对照中 desktop 537.58 / `31.0.15.3758` 曾产生 host `Xid 43` 和 guest TDR/驱动
+卸载，解释了此前偶发黑屏。两条 537.58 审计行已改为
+`quarantined-runtime-instability`：隔离克隆仍可复现实验，但生产 stage/commit、
+正常启动、monitor sync 和系统身份打包全部拒绝。
+
+通用包回归另生成三台独立 fixture，覆盖 GTX 750 Ti/GT 1030/GTX 1050、
+ASUS/MSI/Gigabyte、Samsung/Micron/SK hynix 及 AOC/Dell/Samsung 显示器；三组
+合同、EDID、x86/x64 payload 和 ISO 均通过。因此本次结果不是单独为 VM9 或某个
+检测程序适配。
+
 ## 2026-07-20：VM3 生产签名 B/native FINAL PASS
 
 | 项 | 当前 VM3 已验证值 |
@@ -211,35 +256,43 @@ catalog 并用 `pnputil` 安装。即使 BCD 测试选项关闭，这仍是私�
 
 结论：vGPU-Unlock-patcher 路线 **稳定度质变**。
 
-## 光驱伪装 (2026-04-23 补)
+## 光驱生命周期与高速安装边界（2026-08-04 收口）
 
 Q35 machine 自带板载 ICH9-AHCI (`VEN_8086&DEV_2922`)，QEMU 默认会在其空闲 AHCI 端口（当前拓扑为 `ide.2`）自动挂一个空 ATAPI CDROM。Windows Device Manager 里显示 `QEMU QEMU DVD-ROM`，是最明显的虚拟化指纹之一。
 
-`-device ide-cd,model=...` 属性已有，但 **ATA/ATAPI INQUIRY 响应走硬编码** (`hw/ide/atapi.c:801-802`)，不读 `s->drive_model_str`。
+源码仍支持显式 `-device ide-cd,model=...` 的 ATAPI INQUIRY 投影，供单独的
+设备实验使用；G-11 生产启动器不再使用这一能力。没有逐型号审核和真实序列证据时，
+把 TSST/HL-DT-ST 字符串覆盖到临时安装介质反而会制造不可信身份。
 
-源码补丁：把 cmd_inquiry 里的 `padstr8(buf+8, 8, "QEMU")` / `padstr8(buf+16, 16, "QEMU DVD-ROM")` 改成读 `s->drive_model_str` 并按首个空格拆分成 vendor(8 byte) + product(16 byte)。
-
-启动脚本（2026-07-13 调整）：普通启动不再挂空光驱，并通过
+启动脚本：普通启动不再挂空光驱，并通过
 `-global ide-cd.bootindex=-1` 抑制 QEMU 自动创建默认 CD-ROM；只有
-`--install` 会向 guest 暴露光驱。
+`--install` 会向 guest 暴露安装介质。默认 Windows ISO 不再走每 2 KiB 一次请求的
+ICH9-AHCI ATAPI PIO，而是由安装期 FAT helper 自动 chainload 到 xHCI USB BOT 光盘。
 
 ```bash
 # start-vm.sh - 普通模式：抑制 QEMU 默认空光驱，不创建 ide-cd 设备
 -global ide-cd.bootindex=-1
 
-# start-vm.sh --install：挂安装介质到板载 ide.0 bus
--drive if=none,id=odd0,media=cdrom,readonly=on,file=$ISO
--device ide-cd,drive=odd0,bus=ide.0,model=TSSTcorp CDDVDW SH-224DB,serial=R8PG6VCD${VM_ID}23456
+# start-vm.sh --install 默认路径：helper=1、系统盘=2、USB ISO=3
+-drive file=$HELPER,if=none,id=installboot,format=raw,readonly=on
+-drive file=$ISO,if=none,id=odd0,media=cdrom,readonly=on,format=raw
+-device usb-storage,id=installboot-usb,drive=installboot,bus=xhci.0,port=4,bootindex=1,removable=on
+-device usb-storage,id=odd0-usb,drive=odd0,bus=xhci.0,port=3,bootindex=3,removable=on
+
+# 自动 OOBE 应答介质同样使用通用临时身份
+-drive if=none,id=answer0,media=cdrom,readonly=on,format=raw,file=$UNATTEND_ISO
+-device ide-cd,drive=answer0,bus=ide.2
 ```
 
-安装模式的光驱身份：
-- `SCSI\CDROM&VEN_TSSTCORP&PROD_CDDVDW_SH-224DB` （InstanceId）
-- Win32_CDROMDrive Caption = `TSSTcorp CDDVDW SH-224DB`
+安装期光驱明确属于 `generic transient ODD`：只承载介质，不进入持久硬件品牌池，
+不生成或查重虚构序列。启动器在载入 `vm.conf` 前后清除旧
+`ODD_MODEL`/`ODD_SERIAL`，调用环境和历史配置都不能重新注入型号或序列。
 
-注意事项：
-- 第一次启动后 guest 里 `QEMU QEMU DVD-ROM` phantom 记录会残留，需 `pnputil /remove-device <InstanceId> /force`
-- model 字符串首个空格前最多 8 字符（SCSI INQUIRY vendor field 大小）。常见模式 "TSSTcorp"(8) "Samsung"(7) "PIONEER"(7) "LG"(2) 都合适
-- 空格后部分被截到 16 字符（product field）
+helper 同样是无品牌的安装期实现设备，由 G-11 独立源码确定性构建并在启动前核验
+SHA-256。它、Windows ISO 和应答 ISO 在不带 `--install` 的正式启动中全部不存在。
+显式 `--install-media ide` 只作慢速兼容回退且不挂 helper。VM10 A/B 中，约 760 MB
+读取由旧 ATAPI 的 367,914 次/124.84 秒降至 USB 的约 12,000 次/约 0.7–1.1 秒。
+完整操作见 [`G11-INSTALL-MEDIA.md`](G11-INSTALL-MEDIA.md)。
 
 ## 可用资产
 
@@ -247,4 +300,4 @@ Q35 machine 自带板载 ICH9-AHCI (`VEN_8086&DEV_2922`)，QEMU 默认会在其�
 - `/tmp/nv-transfer/` — guest 共享目录（Display.Driver.zip + ps1 脚本等）
 - `/usr/src/nvidia-535.161.05/` — patched driver 源码（重装 / 内核升级时要重走一遍）
 - `/usr/share/nvidia/vgpu/vgpuConfig.xml.bak` — 原始 xml 备份，vcfgclone 改动可回滚
-- `deploy/start-vm.sh` (--rdp 模式): `-vga none` + vfio-pci spoof=ON 的完整参数
+- `deploy/scripts/start-vm.sh`（`--rdp` 模式）：`-vga none` + vfio-pci spoof=ON 的完整参数

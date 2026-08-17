@@ -17,21 +17,25 @@ static const struct edid_mode {
     uint32_t dta;
 } modes[] = {
     /*
-     * Keep the base standard-timing slots unused.  The signed viogpudo
-     * shipped with this tree interprets the EDID 1.3 16:9 aspect code as
-     * 16:10, turning a 1920-wide standard timing into a bogus 1920x1200
-     * mode.  CTA and Established Timings III do not take that parser path.
+     * G-11 is the NVIDIA vGPU branch.  Its managed FHD/"1K" policy keeps the
+     * normal 16:9, 5:4 and 4:3 compatibility list while removing only 16:10.
+     * The generic generator leaves base standard timings empty; the host
+     * cache synchronizer fills its NVIDIA-safe standard list, including
+     * 1600x900, after generating the profile EDID.
      */
     { .xres = 1920,   .yres = 1080,   .dta = 16 },
     { .xres = 1280,   .yres =  720,   .dta =  4 },
 
-    /* Established Timings III modes accepted by the legacy driver. */
-    { .xres = 1680,   .yres = 1050,   .xtra3 = 9, .bit = 5 },
-    { .xres = 1440,   .yres =  900,   .xtra3 = 8, .bit = 5 },
+    /*
+     * Established Timings III modes used by the NVIDIA vGPU path.  Keep the
+     * ordinary 5:4/4:3 and sub-FHD compatibility modes, but deliberately omit
+     * every 16:10 entry (1680x1050 and 1440x900).
+     */
     { .xres = 1360,   .yres =  768,   .xtra3 = 8, .bit = 7 },
     { .xres = 1280,   .yres = 1024,   .xtra3 = 7, .bit = 1 },
     { .xres = 1280,   .yres =  960,   .xtra3 = 7, .bit = 3 },
     { .xres = 1280,   .yres =  768,   .xtra3 = 7, .bit = 6 },
+
     /* Base established timings (all at 60 Hz). */
     { .xres = 1024,   .yres =  768,   .byte  = 36,   .bit = 3 },
     { .xres =  800,   .yres =  600,   .byte  = 35,   .bit = 0 },
@@ -207,11 +211,13 @@ static void edid_desc_text(uint8_t *desc, uint8_t type,
     memset(desc + 5, ' ', 13);
 
     len = strlen(text);
-    if (len > 12) {
-        len = 12;
+    if (len > 13) {
+        len = 13;
     }
     memcpy(desc + 5, text, len);
-    desc[5 + len] = '\n';
+    if (len < 13) {
+        desc[5 + len] = '\n';
+    }
 }
 
 static void edid_desc_ranges(uint8_t *desc, uint8_t min_v, uint8_t max_v,
@@ -539,8 +545,9 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     }
 
     /*
-     * The legacy Windows driver consumes this bitmap but ignores secondary
-     * DTDs, so do not invent a 1600x900 DTD that cannot enter its mode list.
+     * Keep the NVIDIA vGPU compatibility list in Established Timings III,
+     * with all 16:10 bits left clear.  The host cache synchronizer adds
+     * 1600x900 and the remaining common modes through standard timings.
      */
     xtra3 = desc;
     edid_desc_xtra3_std(xtra3);

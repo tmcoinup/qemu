@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update one vgpu_unlock-rs per-mdev identity override without touching guests."""
+"""Update one G-11 vgpu_unlock-rs per-mdev contract without touching guests."""
 
 from __future__ import annotations
 
@@ -18,7 +18,27 @@ ANY_SECTION_RE = re.compile(r"^\s*\[")
 GENERATED_MARKERS = {
     "# Per-VM marketing name; generated atomically by start-vm.sh.",
     "# Per-VM GPU identity; generated atomically by start-vm.sh.",
+    "# Per-VM GPU identity and FHD display contract; generated atomically by start-vm.sh.",
 }
+
+# G-11 exposes one local NVIDIA console.  Keep the live vGPU resource ceiling
+# aligned with the FHD EDID/NV_Modes policy instead of inheriting GRID's
+# multi-head 16:10-capable defaults.  mdev overrides are applied after the
+# shared profile table, so this also migrates hosts whose preserved global
+# profile still contains the legacy 4-head/1920x1200 values.
+DISPLAY_CONTRACT = {
+    "num_displays": 1,
+    "display_width": 1920,
+    "display_height": 1080,
+    "max_pixels": 2073600,
+}
+
+# These values come from NVIDIA's R535 control ABI, not from a benchmark's
+# private rendering enums.  Keep the accepted set identical to the hook so an
+# invalid value can never be persisted and then silently ignored at runtime.
+RM_FB_BUS_WIDTHS = {32, 64, 96, 128, 160, 192, 256, 320, 352, 384, 448, 512}
+RM_FB_RAM_TYPES = {*range(0x0, 0xA), *range(0xC, 0x15)}
+RM_FB_MEMORY_VENDORS = {*range(0x1, 0xA), 0xF, 0xFFFFFFFF}
 
 
 def validate_name(value: str) -> str:
@@ -41,6 +61,18 @@ def parse_u64(value: str) -> int:
     parsed = int(value, 0)
     if not 0 <= parsed <= 0xFFFFFFFFFFFFFFFF:
         raise argparse.ArgumentTypeError("PCI identity does not fit in an unsigned 64-bit field")
+    return parsed
+
+
+def parse_u32(value: str) -> int:
+    """Parse an unsigned TOML-compatible 32-bit RM descriptor value."""
+    if not re.fullmatch(r"(?:0[xX][0-9A-Fa-f]+|[0-9]+)", value):
+        raise argparse.ArgumentTypeError(
+            "RM descriptor must be an unsigned decimal or 0x-prefixed integer"
+        )
+    parsed = int(value, 0)
+    if not 0 <= parsed <= 0xFFFFFFFF:
+        raise argparse.ArgumentTypeError("RM descriptor does not fit in an unsigned 32-bit field")
     return parsed
 
 
@@ -69,6 +101,25 @@ def validate_pci_identity(pci_id: int | None, pci_device_id: int | None) -> None
         raise ValueError(
             "pci_id must be packed as (pci_device_id << 16) | subsystem_device_id"
         )
+
+
+def validate_rm_fb_identity(
+    bus_width: int | None,
+    ram_type: int | None,
+    memory_vendor: int | None,
+) -> None:
+    """Require one complete, NVIDIA-ABI-valid framebuffer descriptor tuple."""
+    supplied = (bus_width is not None, ram_type is not None, memory_vendor is not None)
+    if any(supplied) and not all(supplied):
+        raise ValueError(
+            "rm_fb_bus_width, rm_fb_ram_type and rm_fb_memory_vendor must be supplied together"
+        )
+    if bus_width is not None and bus_width not in RM_FB_BUS_WIDTHS:
+        raise ValueError("rm_fb_bus_width is not an NVIDIA-supported bus width")
+    if ram_type is not None and ram_type not in RM_FB_RAM_TYPES:
+        raise ValueError("rm_fb_ram_type is not an NVIDIA R535 RAM type")
+    if memory_vendor is not None and memory_vendor not in RM_FB_MEMORY_VENDORS:
+        raise ValueError("rm_fb_memory_vendor is not an NVIDIA R535 memory vendor")
 
 
 def canonical_uuid(value: str) -> str | None:
@@ -123,11 +174,23 @@ def rewrite(
     pci_id: int | None = None,
     pci_device_id: int | None = None,
     frl_enabled: int | None = None,
+    rm_fb_bus_width: int | None = None,
+    rm_fb_ram_type: int | None = None,
+    rm_fb_memory_vendor: int | None = None,
 ) -> str:
     validate_pci_identity(pci_id, pci_device_id)
+    validate_rm_fb_identity(
+        rm_fb_bus_width,
+        rm_fb_ram_type,
+        rm_fb_memory_vendor,
+    )
     if frl_enabled not in {None, 0, 1}:
         raise ValueError("frl_enabled must be 0, 1, or absent")
-    if name is None and (pci_id is not None or frl_enabled is not None):
+    if name is None and (
+        pci_id is not None
+        or frl_enabled is not None
+        or rm_fb_bus_width is not None
+    ):
         raise ValueError("identity fields cannot be written while removing an mdev override")
 
     parsed_keys = parsed_target_keys(text, mdev_uuid)
@@ -159,10 +222,11 @@ def rewrite(
         quoted_name = json.dumps(name, ensure_ascii=True)
         output.extend([
             "",
-            "# Per-VM GPU identity; generated atomically by start-vm.sh.",
+            "# Per-VM GPU identity and FHD display contract; generated atomically by start-vm.sh.",
             f'[mdev."{mdev_uuid}"]',
             f"card_name = {quoted_name}",
             f"adapter_name = {quoted_name}",
+            *(f"{key} = {value}" for key, value in DISPLAY_CONTRACT.items()),
         ])
         if pci_id is not None:
             output.extend([
@@ -171,6 +235,12 @@ def rewrite(
             ])
         if frl_enabled is not None:
             output.append(f"frl_enabled = {frl_enabled}")
+        if rm_fb_bus_width is not None:
+            output.extend([
+                f"rm_fb_bus_width = {rm_fb_bus_width}",
+                f"rm_fb_ram_type = {rm_fb_ram_type}",
+                f"rm_fb_memory_vendor = {rm_fb_memory_vendor}",
+            ])
     rewritten = "\n".join(output) + "\n"
     result = tomllib.loads(rewritten)
     result_mdev = result.get("mdev", {})
@@ -189,7 +259,12 @@ def rewrite(
                 entry.get("adapter_name") != name or \
                 entry.get("pci_id") != pci_id or \
                 entry.get("pci_device_id") != pci_device_id or \
-                entry.get("frl_enabled") != frl_enabled:
+                entry.get("frl_enabled") != frl_enabled or \
+                entry.get("rm_fb_bus_width") != rm_fb_bus_width or \
+                entry.get("rm_fb_ram_type") != rm_fb_ram_type or \
+                entry.get("rm_fb_memory_vendor") != rm_fb_memory_vendor or \
+                any(entry.get(key) != value
+                    for key, value in DISPLAY_CONTRACT.items()):
             raise ValueError("written mdev identity failed semantic validation")
     return rewritten
 
@@ -205,13 +280,25 @@ def main() -> int:
     parser.add_argument("--pci-id", type=parse_u64)
     parser.add_argument("--pci-device-id", type=parse_u64)
     parser.add_argument("--frl-enabled", type=parse_binary)
+    parser.add_argument("--rm-fb-bus-width", type=parse_u32)
+    parser.add_argument("--rm-fb-ram-type", type=parse_u32)
+    parser.add_argument("--rm-fb-memory-vendor", type=parse_u32)
     args = parser.parse_args()
 
     canonical_uuid = str(uuid_module.UUID(args.uuid))
     name = None if args.remove else validate_name(args.name)
     try:
         validate_pci_identity(args.pci_id, args.pci_device_id)
-        if args.remove and (args.pci_id is not None or args.frl_enabled is not None):
+        validate_rm_fb_identity(
+            args.rm_fb_bus_width,
+            args.rm_fb_ram_type,
+            args.rm_fb_memory_vendor,
+        )
+        if args.remove and (
+            args.pci_id is not None
+            or args.frl_enabled is not None
+            or args.rm_fb_bus_width is not None
+        ):
             raise ValueError("identity fields cannot be supplied with --remove")
     except ValueError as exc:
         parser.error(str(exc))
@@ -224,6 +311,9 @@ def main() -> int:
             args.pci_id,
             args.pci_device_id,
             args.frl_enabled,
+            args.rm_fb_bus_width,
+            args.rm_fb_ram_type,
+            args.rm_fb_memory_vendor,
         ),
         encoding="utf-8",
     )

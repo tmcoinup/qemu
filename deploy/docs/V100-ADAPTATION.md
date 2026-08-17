@@ -32,7 +32,7 @@
 mdev 的分配和回收入口见
 [`deploy/lib/vgpu-mdev.sh`](../lib/vgpu-mdev.sh)，QEMU 的
 `display=on,ramfb=on,enable-migration=off` 启动路径见
-[`deploy/start-vm.sh`](../start-vm.sh)。
+[`deploy/scripts/start-vm.sh`](../scripts/start-vm.sh)。
 
 ## V100 型号与 2Q resource profile
 
@@ -95,7 +95,7 @@ VGPU_MDEV_IDENTITY_MODE=off
 
 ```bash
 VGPU_HOST_CONFIG=/etc/qemu-vgpu/v100-pcie-16gb.conf \
-  ./deploy/start-vm.sh 1
+  ./deploy/scripts/start-vm.sh 1
 ```
 
 32GB PCIe 型号只需按表改为 `V100D-2Q` 和 `32768`；其他变体同理。配置加载后

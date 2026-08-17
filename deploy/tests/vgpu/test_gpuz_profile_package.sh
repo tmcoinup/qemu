@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Do not let a caller's storage selection escape the per-test temporary roots.
-unset IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VM_INSTANCES_DIR
+unset IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VMS_DIR VM_INSTANCES_DIR
 unset VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK
 unset VM_SHARED_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR VM_NVRAM_DIR
 unset VM_CONTROL_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR
@@ -42,9 +42,9 @@ install -m 0600 -- "$locked_gpuz_source" \
 create_vm() {
     local vm_id=$1 profile=$2
     VM_ROOT="$vm_root" IMAGE_ROOT="$image_root" STAGE_DIR="$stage_dir" \
-        bash "$root/deploy/create-vm.sh" "$vm_id" \
+        bash "$root/deploy/scripts/create-vm.sh" "$vm_id" \
         --gpu-profile "$profile" >/dev/null
-    touch "$vm_root/vm${vm_id}/disk.qcow2"
+    touch "$vm_root/${vm_id}/disk.qcow2"
 }
 
 package_vm() {
@@ -65,7 +65,7 @@ vm_config_value() {
             }
             print value
         }
-    ' "$root_dir/vm${vm_id}/vm.conf"
+    ' "$root_dir/${vm_id}/vm.conf"
 }
 
 generic_namespace() {
@@ -90,8 +90,8 @@ assert_manifest() {
     jq -e --argjson vmId "$vm_id" '
         (keys | sort) == ["files", "schemaVersion", "vmId"] and
         .schemaVersion == 1 and .vmId == $vmId and
-        (.files | length) == 9 and
-        ([.files[].name] | unique | length) == 9
+        (.files | length) == 10 and
+        ([.files[].name] | unique | length) == 10
     ' "$manifest" >/dev/null ||
         fail "vm$vm_id manifest schema mismatch"
 
@@ -115,6 +115,7 @@ assert_manifest() {
     for expected in \
             gpu-profile.json \
             apply-vm-profile.ps1 patch-grid-strings.ps1 \
+            vgpu-profile-catalog.json \
             apply-gpuz-profile.ps1 \
             nvapi.dll nvapi_profile_probe32.exe \
             GPU-Z.exe \
@@ -130,7 +131,7 @@ assert_manifest() {
             ! -type f -print -quit | grep -q .; then
         fail "vm$vm_id bundle has a non-file entry"
     fi
-    [[ "$(find "$bundle" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 11 ]] ||
+    [[ "$(find "$bundle" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 12 ]] ||
         fail "vm$vm_id bundle has an unmanifested file"
 }
 
@@ -221,9 +222,19 @@ assert_profile_bundle() {
            6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29 ]] ||
         fail "vm$vm_id bundle does not contain the locked raw GPU-Z executable"
     jq -e --arg profile "$profile" --arg name "$name" '
-        .gpu as $gpu |
-        .spoofMode == "B" and $gpu.profile == $profile and
+        . as $root |
+        $root.gpu as $gpu |
+        $root.schemaVersion == 2 and
+        ($root.catalogSha256 | test("^[0-9A-F]{64}$")) and
+        $root.spoofMode == "B" and $gpu.profile == $profile and
         $gpu.name == $name and $gpu.memoryType == 8 and
+        ($gpu.boardBrand | type == "string") and
+        ($gpu.boardModel | type == "string") and
+        $gpu.memoryTypeName == "GDDR5" and
+        $gpu.memoryMakerName == "Samsung" and
+        $gpu.memoryMakerNvapiName == "Samsung" and
+        $gpu.identityScope ==
+          "B:system-pci=host-mdev,catalog=protected-user-mode" and
         $gpu.nvapiPciVendorId == 4318 and
         (
             ($profile == "gtx750ti_2gb" and
@@ -270,8 +281,8 @@ if rg -n -i 'Take-Own|PendingFileRenameOperations|System32\\nvapi64\\.dll.*Copy|
         "$guest_entry" >/dev/null; then
     fail "guest entry contains a system-wide NVAPI installation path"
 fi
-rg -Fq "Join-Path \$applicationDirectory 'nvapi.dll'" "$guest_entry" ||
-    fail "guest entry lacks the dedicated app-local target"
+rg -Fq "Join-Path \$ApplicationDirectory 'nvapi.dll'" "$guest_entry" ||
+    fail "guest entry lacks the parameterized protected app-local identity target"
 rg -Fq 'Get-PnpDevice -Class Display -PresentOnly' "$guest_entry" ||
     fail "guest entry lacks the present Display acceptance gate"
 rg -Fq "Class -ine 'System'" "$guest_entry" ||
@@ -312,7 +323,7 @@ rg -Fq 'locally trusted/private root' "$guest_entry" ||
     fail "guest entry does not explicitly reject a private local trust root"
 rg -Fq 'GetFinalPathNameByHandleW' "$guest_entry" ||
     fail "guest entry cannot resolve SUBST/DOS-device aliases by handle"
-rg -Fq "Assert-OutsideWindowsTree \$applicationDirectory" "$guest_entry" ||
+rg -Fq "Assert-OutsideWindowsTree \$ApplicationDirectory" "$guest_entry" ||
     fail "guest entry does not recheck the final app-local directory identity"
 rg -Fq '$item = Resolve-FinalRegularLocalPath $item.FullName $Context' \
     "$guest_entry" ||
@@ -347,7 +358,7 @@ rg -Fq "'zero hardware RT/Tensor cores'" "$guest_entry" ||
     fail "guest entry does not verify zero RT/Tensor cores for pre-RTX profiles"
 rg -Fq "'app-local PCI identifiers'" "$guest_entry" ||
     fail "guest entry does not verify the catalog PCI tuple through the app-local shim"
-[[ "$(rg -c '^\s*Assert-NormalCodeIntegrityBoot\s*$' "$guest_entry")" -eq 2 ]] ||
+[[ "$(rg -c '^\s*Assert-NormalCodeIntegrityBoot\s*$' "$guest_entry")" -ge 2 ]] ||
     fail "guest entry does not recheck BCD after installation"
 [[ "$(rg -c '^\s*\$finalDisplayState = Get-HealthyDisplayState' \
         "$guest_entry")" -eq 1 ]] ||
@@ -487,7 +498,8 @@ shortcut_validator = re.search(
 )
 assert shortcut_validator
 assert "Assert-UsersReadExecuteAccess" not in shortcut_validator.group("body")
-verify_start = source.index("    if ($VerifyOnly) {")
+main_start = source.index("function Invoke-Main")
+verify_start = source.index("    if ($VerifyOnly) {", main_start)
 verify_end = source.index("    Initialize-ProtectedState", verify_start)
 body = source[verify_start:verify_end]
 assert "Get-ValidatedGpuZ $contract" in body
@@ -616,10 +628,10 @@ disabled_vm_root="$tmp/disabled-vms"
 disabled_stage="$tmp/disabled-staging"
 VM_ROOT="$disabled_vm_root" IMAGE_ROOT="$disabled_image" \
 STAGE_DIR="$disabled_stage" \
-    bash "$root/deploy/create-vm.sh" 73 \
+    bash "$root/deploy/scripts/create-vm.sh" 73 \
     --gpu-profile gtx1050_2gb >/dev/null
-touch "$disabled_vm_root/vm73/disk.qcow2"
-disabled_conf="$disabled_vm_root/vm73/vm.conf"
+touch "$disabled_vm_root/73/disk.qcow2"
+disabled_conf="$disabled_vm_root/73/vm.conf"
 chmod 0600 "$disabled_conf"
 sed -i '/^GPUZ_PACKAGE_ENABLED=/d' "$disabled_conf"
 printf '\nGPUZ_PACKAGE_ENABLED=0\n' >>"$disabled_conf"
@@ -649,11 +661,11 @@ fi
 symlink_image="$tmp/symlink-images"
 symlink_vm_root="$tmp/symlink-vms"
 symlink_stage="$tmp/symlink-staging"
-mkdir -p "$symlink_vm_root" "$tmp/symlink-target/vm75"
+mkdir -p "$symlink_vm_root" "$tmp/symlink-target/75"
 printf 'VM_ID=75\nGPUZ_PACKAGE_ENABLED=0\n' \
-    >"$tmp/symlink-target/vm75/vm.conf"
-ln -s "$tmp/symlink-target/vm75" \
-    "$symlink_vm_root/vm75"
+    >"$tmp/symlink-target/75/vm.conf"
+ln -s "$tmp/symlink-target/75" \
+    "$symlink_vm_root/75"
 if VM_ROOT="$symlink_vm_root" IMAGE_ROOT="$symlink_image" \
         STAGE_DIR="$symlink_stage" \
         bash "$packager" --all --output-root "$tmp/symlink-output" \
@@ -667,7 +679,7 @@ fi
 # directory/CLI identity remains authoritative and must exactly match the
 # persisted instance identity before any output path is prepared.
 create_vm 74 gtx1050_2gb
-mismatched_id_conf="$vm_root/vm74/vm.conf"
+mismatched_id_conf="$vm_root/74/vm.conf"
 chmod 0600 "$mismatched_id_conf"
 sed -i 's/^VM_ID=.*/VM_ID=456/' "$mismatched_id_conf"
 chmod 0444 "$mismatched_id_conf"
@@ -677,6 +689,12 @@ fi
 [[ ! -e "$tmp/mismatched-vm-id" &&
    ! -e "$tmp/mismatched-vm-id.exe" ]] ||
     fail "VM_ID mismatch published an output"
+# The fleet identity gate intentionally rejects every later create while a
+# malformed numeric instance remains in VM_ROOT.  Restore this negative
+# fixture before the shared root is reused by the remaining package cases.
+chmod 0600 "$mismatched_id_conf"
+sed -i 's/^VM_ID=.*/VM_ID=74/' "$mismatched_id_conf"
+chmod 0444 "$mismatched_id_conf"
 
 # Batch mode continues after an early invalid VM, publishes later valid VMs,
 # and still returns nonzero overall.
@@ -690,11 +708,11 @@ for partial_id_profile in '71 gtx1050_2gb' '72 gt1030_2gb'; do
     read -r partial_id partial_profile <<<"$partial_id_profile"
     VM_ROOT="$partial_vm_root" IMAGE_ROOT="$partial_image" \
     STAGE_DIR="$partial_stage" \
-        bash "$root/deploy/create-vm.sh" "$partial_id" \
+        bash "$root/deploy/scripts/create-vm.sh" "$partial_id" \
         --gpu-profile "$partial_profile" >/dev/null
-    touch "$partial_vm_root/vm${partial_id}/disk.qcow2"
+    touch "$partial_vm_root/${partial_id}/disk.qcow2"
 done
-partial_bad_conf="$partial_vm_root/vm71/vm.conf"
+partial_bad_conf="$partial_vm_root/71/vm.conf"
 chmod 0600 "$partial_bad_conf"
 sed -i \
     -e 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
@@ -722,7 +740,7 @@ assert_single_exe "$partial_good_namespace/.host-bundle" 72 \
 # it unless both the installed PnP package and loaded kernel image are
 # production-signed and normal code-integrity boot is active.
 create_vm 64 gtx1050_2gb
-a_conf="$vm_root/vm64/vm.conf"
+a_conf="$vm_root/64/vm.conf"
 chmod 0600 "$a_conf"
 sed -i \
     -e 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
@@ -739,7 +757,7 @@ assert_profile_bundle "$a_bundle" 64 gtx1050_2gb \
 
 # A non-GTX1050 profile must remain B-only.
 create_vm 65 gt1030_2gb
-bad_a_conf="$vm_root/vm65/vm.conf"
+bad_a_conf="$vm_root/65/vm.conf"
 chmod 0600 "$bad_a_conf"
 sed -i \
     -e 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
@@ -755,7 +773,7 @@ fi
 # A GTX 1050 must still refuse the current VM3-like incomplete state when the
 # explicit full-consumer completion marker is absent.
 create_vm 67 gtx1050_2gb
-incomplete_a_conf="$vm_root/vm67/vm.conf"
+incomplete_a_conf="$vm_root/67/vm.conf"
 chmod 0600 "$incomplete_a_conf"
 sed -i \
     -e 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' \
@@ -771,7 +789,7 @@ fi
 # Legacy sparse B configs inherit catalog overlays and ignore stale consumer
 # PCI tuples because B retains the native DEV_1E30 endpoint.
 create_vm 66 gt1030_2gb
-sparse_conf="$vm_root/vm66/vm.conf"
+sparse_conf="$vm_root/66/vm.conf"
 chmod 0600 "$sparse_conf"
 sed -i -E \
     -e '/^(GPU_NAME|GPU_VRAM_MB|GPU_VBIOS|GPU_CORE_MHZ|GPU_BOOST_MHZ|GPU_MEMORY_MHZ|GPU_MEMORY_BUS_BITS|GPU_MEMORY_BANDWIDTH_MBPS|GPU_MEMORY_TYPE|GPU_MEMORY_MAKER|GPU_MEMORY_TYPE_NVAPI|GPU_MEMORY_MAKER_NVAPI|GPU_CUDA_CORES|GPU_SHADER_SUBPIPES|GPU_ROP_COUNT|GPU_TMU_COUNT|GPU_ARCHITECTURE|GPU_IMPLEMENTATION|GPU_CHIP_REVISION|GPU_PCIE_WIDTH|MONITOR_PROFILE|MONITOR_SERIAL)=/d' \
@@ -803,7 +821,7 @@ if package_vm 4 "$arbitrary" 2>/dev/null; then
 fi
 grep -Fxq user-data "$arbitrary/sentinel" ||
     fail "arbitrary output sentinel changed"
-if package_vm 4 "$vm_root/vm4/output" 2>/dev/null; then
+if package_vm 4 "$vm_root/4/output" 2>/dev/null; then
     fail "packager accepted output inside the VM instance"
 fi
 if package_vm 4 "$root/deploy/.forbidden-gpuz-output" 2>/dev/null; then
@@ -866,7 +884,7 @@ assert_single_exe "$closed_output_bundle" 4
 # same VM without leaving another guest-facing candidate, but cannot be
 # silently repurposed for another VM.
 unchanged_content_hash=$(file_sha256 "$tmp/bundle-vm4.exe")
-vm4_conf="$vm_root/vm4/vm.conf"
+vm4_conf="$vm_root/4/vm.conf"
 chmod 0600 "$vm4_conf"
 printf '\n# Host-only lifecycle note; not part of the guest payload.\n' >>"$vm4_conf"
 chmod 0444 "$vm4_conf"

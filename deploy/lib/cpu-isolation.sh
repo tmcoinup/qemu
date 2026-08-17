@@ -81,10 +81,9 @@ cpu_isolation_run_installer() {
         sudo -S -p '' -- "$CPU_ISOLATION_INSTALLER"
 }
 
-cpu_isolation_ensure_ready() {
+host_runtime_helper_ensure_ready() {
     local auto_install=${CPU_ISOLATION_AUTO_INSTALL,,}
 
-    [[ "${CPU_ISOLATION:-required}" != off ]] || return 0
     [[ "${DRY_RUN:-0}" != 1 ]] || return 0
 
     # An explicit helper is an advanced/test override; never replace it.
@@ -93,27 +92,37 @@ cpu_isolation_ensure_ready() {
                 cpu_isolation_dependencies_ready; then
             return 0
         fi
-        echo "[cpu-isolate] 显式 CPU_ISOLATION_HELPER 不可用" >&2
+        echo "[host-helper] 显式 CPU_ISOLATION_HELPER 不可用" >&2
     elif cpu_isolation_system_helper_ready; then
         return 0
     else
         case "$auto_install" in
             1|on|yes|true)
-                echo "[cpu-isolate] 缺少或需要更新宿主 helper/依赖，开始自动安装"
+                echo "[host-helper] 缺少或需要更新宿主 helper/依赖，开始自动安装"
                 if cpu_isolation_run_installer &&
                         cpu_isolation_system_helper_ready; then
-                    echo "[cpu-isolate] 宿主 helper/依赖安装完成"
+                    echo "[host-helper] 宿主 helper/依赖安装完成"
                     return 0
                 fi
-                echo "[cpu-isolate] 自动安装后 CPU 隔离仍不可用" >&2
+                echo "[host-helper] 自动安装后 helper 仍不可用" >&2
                 ;;
             0|off|no|false)
-                echo "[cpu-isolate] helper/依赖不可用，且自动安装已关闭" >&2
+                echo "[host-helper] helper/依赖不可用，且自动安装已关闭" >&2
                 ;;
             *)
-                echo "[cpu-isolate] CPU_ISOLATION_AUTO_INSTALL 必须是 0 或 1" >&2
+                echo "[host-helper] CPU_ISOLATION_AUTO_INSTALL 必须是 0 或 1" >&2
                 ;;
         esac
+    fi
+
+    return 1
+}
+
+cpu_isolation_ensure_ready() {
+    [[ "${CPU_ISOLATION:-required}" != off ]] || return 0
+
+    if host_runtime_helper_ensure_ready; then
+        return 0
     fi
 
     if [[ "${CPU_ISOLATION:-required}" == auto ]]; then
@@ -123,6 +132,76 @@ cpu_isolation_ensure_ready() {
         return 0
     fi
     return 1
+}
+
+host_oom_process_generation() {
+    local pid=$1
+
+    python3 - "$pid" <<'PY'
+import sys
+
+pid = int(sys.argv[1])
+with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+    value = stream.read().strip()
+close = value.rfind(") ")
+if close < 0:
+    raise SystemExit(1)
+fields = value[close + 2:].split()
+if len(fields) < 20 or fields[0] in {"X", "Z"}:
+    raise SystemExit(1)
+starttime = fields[19]
+if not starttime.isdigit() or int(starttime) <= 0:
+    raise SystemExit(1)
+print(fields[0], starttime)
+PY
+}
+
+host_oom_protect_launcher() {
+    local vm_id=$1 helper pid state start output score
+    local policy=${HOST_OOM_PROTECT:-1}
+
+    case "$policy" in
+        0)
+            echo "[host-oom] HOST_OOM_PROTECT=0，已显式关闭"
+            return 0
+            ;;
+        1) ;;
+        *)
+            echo "[host-oom] HOST_OOM_PROTECT 必须是 0 或 1" >&2
+            return 2
+            ;;
+    esac
+    [[ "${DRY_RUN:-0}" != 1 ]] || return 0
+    host_runtime_helper_ensure_ready || {
+        echo "[host-oom] 宿主 helper 不可用，拒绝未保护启动" >&2
+        return 1
+    }
+
+    helper=$(cpu_isolation_helper_path)
+    pid=$BASHPID
+    if ! read -r state start < <(host_oom_process_generation "$pid"); then
+        echo "[host-oom] 无法读取启动器进程代际" >&2
+        return 1
+    fi
+    if ! output=$("$helper" oom-protect "$vm_id" "$pid" "$start" 2>&1); then
+        echo "[host-oom] 无法保护 vm${vm_id} 启动器进程树: $output" >&2
+        return 1
+    fi
+    if [[ "$output" =~ ^host-oom-protect:\ policy=oom-score-v1\ score=(-[0-9]+)\ pid=([0-9]+)$ ]]; then
+        score=${BASH_REMATCH[1]}
+    else
+        echo "[host-oom] helper 返回了未知协议: $output" >&2
+        return 1
+    fi
+    [[ "${BASH_REMATCH[2]}" == "$pid" ]] || {
+        echo "[host-oom] helper 返回了错误的进程身份" >&2
+        return 1
+    }
+    ((score >= -1000 && score <= -500)) || {
+        echo "[host-oom] helper 返回了越界 OOM 分数: $score" >&2
+        return 1
+    }
+    echo "[host-oom] vm${vm_id} 进程树 oom_score_adj=$score（随 VM 退出失效）"
 }
 
 cpu_isolation_normalize_mode() {
@@ -151,16 +230,18 @@ cpu_isolation_print_plan() {
             echo "  CPU 隔离: off"
             ;;
         *)
-            echo "  CPU 隔离: ${CPU_ISOLATION}（vCPU 1:1，service CPUs=${QEMU_SERVICE_CPUS:-1}，host reserve=${HOST_RESERVE_CORES:-auto}）"
+            echo "  CPU 隔离: ${CPU_ISOLATION}（vCPU 1:1，service CPUs=${QEMU_SERVICE_CPUS:-auto}，host reserve=${HOST_RESERVE_CORES:-auto}）"
             ;;
     esac
 }
 
 cpu_isolation_launch() {
     local vm_id=$1 vcpu_count=$2 qmp_sock=$3 pid_file=$4 state_file=$5
-    local helper
+    local helper topology_root cgroup_root
     local timeout=${CPU_ISOLATION_QMP_TIMEOUT:-90}
     helper=$(cpu_isolation_helper_path)
+    topology_root=${CPU_ISOLATION_SYS_CPU_ROOT:-/sys/devices/system/cpu}
+    cgroup_root=${CPU_ISOLATION_CGROUP_ROOT:-/sys/fs/cgroup}
 
     [[ "${CPU_ISOLATION:-required}" != off ]] || return 0
     [[ "${DRY_RUN:-0}" != 1 ]] || return 0
@@ -175,8 +256,9 @@ cpu_isolation_launch() {
     echo "[cpu-isolate] mode=${CPU_ISOLATION}：等待 QMP vCPU TID"
 
     python3 - "$CPU_ISOLATION" "$vm_id" "$vcpu_count" "$qmp_sock" \
-        "$pid_file" "$helper" "${QEMU_SERVICE_CPUS:-1}" \
-        "${HOST_RESERVE_CORES:-auto}" "$timeout" "$state_file" <<'PY' &
+        "$pid_file" "$helper" "${QEMU_SERVICE_CPUS:-auto}" \
+        "${HOST_RESERVE_CORES:-auto}" "$timeout" "$state_file" \
+        "$topology_root" "$cgroup_root" <<'PY' &
 import glob
 import json
 import os
@@ -187,9 +269,16 @@ import sys
 import time
 
 (mode, vm_id, expected_text, qmp_path, pid_file, helper, service_text,
- reserve_text, timeout_text, state_file) = sys.argv[1:]
+ reserve_text, timeout_text, state_file, topology_root,
+ cgroup_root) = sys.argv[1:]
 expected = int(expected_text)
-service_count = int(service_text)
+service_auto = service_text.lower() == "auto"
+try:
+    service_count = 1 if service_auto else int(service_text)
+except ValueError:
+    raise SystemExit(f"invalid service CPU count: {service_text}")
+if not 0 <= service_count <= 64:
+    raise SystemExit(f"service CPU count out of range: {service_count}")
 timeout = int(timeout_text)
 
 def log(message):
@@ -218,7 +307,7 @@ def expand_cpu_list(value):
 
 def online_cpus():
     try:
-        with open("/sys/devices/system/cpu/online", encoding="ascii") as stream:
+        with open(os.path.join(topology_root, "online"), encoding="ascii") as stream:
             return expand_cpu_list(stream.read())
     except OSError:
         return set()
@@ -226,7 +315,10 @@ def online_cpus():
 def topology():
     online = online_cpus()
     cores = {}
-    for path in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list"):
+    pattern = os.path.join(
+        topology_root, "cpu[0-9]*", "topology", "thread_siblings_list"
+    )
+    for path in glob.glob(pattern):
         try:
             with open(path, encoding="ascii") as stream:
                 siblings = tuple(sorted(expand_cpu_list(stream.read()) & online))
@@ -235,6 +327,23 @@ def topology():
         if siblings:
             cores[siblings] = siblings
     return sorted(cores.values(), key=lambda siblings: siblings[0])
+
+def held_partition_cpus():
+    held = set()
+    pattern = os.path.join(
+        cgroup_root, "qemu-vm-isolation", "vm[1-9]*", "cpuset.cpus"
+    )
+    for path in glob.glob(pattern):
+        try:
+            with open(os.path.join(os.path.dirname(path), "cgroup.procs"),
+                      encoding="ascii") as stream:
+                if not stream.read().strip():
+                    continue
+            with open(path, encoding="ascii") as stream:
+                held.update(expand_cpu_list(stream.read()))
+        except (OSError, ValueError):
+            continue
+    return held
 
 def qmp_command(stream, command, ident):
     request = {"execute": command, "id": ident}
@@ -358,27 +467,44 @@ if any(tgid_for_tid(tid) != pid for _, tid in rows):
     raise SystemExit(1)
 
 default_reserve = min(max(2, (len(cores) + 7) // 8), len(cores) - 1)
-if reserve_text.lower() == "auto":
-    reserve = default_reserve
-    demand = len(rows) + service_count
-    while reserve > 1 and sum(len(core) for core in cores[reserve:]) < demand:
-        reserve -= 1
-else:
+configured_reserve = None
+if reserve_text.lower() != "auto":
     try:
-        reserve = int(reserve_text)
+        configured_reserve = int(reserve_text)
     except ValueError:
         fail_required(f"HOST_RESERVE_CORES 非法：{reserve_text}", pid)
         raise SystemExit(1)
-    if reserve < 0 or reserve >= len(cores):
-        fail_required(f"HOST_RESERVE_CORES 超界：{reserve}", pid)
+    if configured_reserve < 0 or configured_reserve >= len(cores):
+        fail_required(f"HOST_RESERVE_CORES 超界：{configured_reserve}", pid)
         raise SystemExit(1)
 
-eligible = cores[reserve:]
-preference = [core[0] for core in eligible]
-preference.extend(cpu for core in eligible for cpu in core[1:])
-if len(preference) < len(rows) + service_count:
+def placement(service_cpus):
+    reserve = default_reserve if configured_reserve is None else configured_reserve
+    if configured_reserve is None:
+        demand = len(rows) + service_cpus
+        while reserve > 1 and sum(len(core) for core in cores[reserve:]) < demand:
+            reserve -= 1
+    eligible = cores[reserve:]
+    preference = [core[0] for core in eligible]
+    preference.extend(cpu for core in eligible for cpu in core[1:])
+    return reserve, preference
+
+held_cpus = held_partition_cpus()
+
+def available_count(preference):
+    return sum(cpu not in held_cpus for cpu in preference)
+
+reserve, preference = placement(service_count)
+if service_auto:
+    if available_count(preference) < len(rows) + service_count:
+        service_count = 0
+        reserve, preference = placement(service_count)
+        log("辅助线程 CPU=auto：当前容量不足，兼容回退为 0")
+    else:
+        log("辅助线程 CPU=auto：分配 1 个独立逻辑 CPU")
+if available_count(preference) < len(rows) + service_count:
     fail_required(
-        f"预留 {reserve} 个物理核后 CPU 不足：需要 {len(rows) + service_count}，可用 {len(preference)}",
+        f"预留 {reserve} 个物理核后 CPU 不足：需要 {len(rows) + service_count}，可用 {available_count(preference)}",
         pid,
     )
     raise SystemExit(1)

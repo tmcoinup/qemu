@@ -11,7 +11,7 @@
 # 用法:
 #   ./install-vgpu-driver-gui.sh              # vm1 default
 #   ./install-vgpu-driver-gui.sh <vm_id>
-#   ./install-vgpu-driver-gui.sh --ip <ip>
+#   ./install-vgpu-driver-gui.sh <vm_id> --ip <ip>  # IP/MAC 必须与该 VM 匹配
 #
 # 前置:
 #   - guest WinRM 通 (Administrator/123456)
@@ -53,22 +53,44 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# A same-version NVIDIA repair can restore the INF-provided NV_Modes value
+# without changing the monitor profile hash.  Invalidate the offline monitor
+# completion marker immediately before the first guest write so the next full
+# shutdown must re-apply the reviewed G-11 display-mode policy.
+invalidate_monitor_sync_marker() {
+    local instance_dir monitor_marker
+
+    instance_dir=$(vm_storage_instance_dir "$VM_ID") || return
+    vm_storage_validate_root_path "$instance_dir" "vm${VM_ID} instance directory" || return
+    vm_storage_validate_instance_tree "$VM_ID" || return
+    monitor_marker=$(vm_storage_run_preferred_path "$VM_ID" monitor-edid) || return
+    [[ "$monitor_marker" == "$instance_dir/run/monitor-edid.sha256" ]] || {
+        echo "[gui-install] refusing unexpected monitor marker path: $monitor_marker" >&2
+        return 1
+    }
+    if [[ -L "$monitor_marker" ||
+          ( -e "$monitor_marker" && ! -f "$monitor_marker" ) ]]; then
+        echo "[gui-install] refusing unsafe monitor marker: $monitor_marker" >&2
+        return 1
+    fi
+    if [[ -f "$monitor_marker" ]]; then
+        rm -f -- "$monitor_marker" || {
+            echo "[gui-install] failed to invalidate monitor marker: $monitor_marker" >&2
+            return 1
+        }
+        [[ ! -e "$monitor_marker" && ! -L "$monitor_marker" ]] || {
+            echo "[gui-install] monitor marker still exists after removal: $monitor_marker" >&2
+            return 1
+        }
+    fi
+    echo "[gui-install] monitor mode cache marked for resync after the next full shutdown"
+}
+
 # Fail before touching the guest if the historically misnamed asset was replaced
 # by a real 553.24 (R550) installer or any other unverified package.
 vgpu_verify_driver_assets exe
 
-if [[ -z "$IP_OVERRIDE" ]]; then
-    conf=$(vm_storage_config_path "$VM_ID")
-    [[ -f "$conf" ]] || { echo "missing $conf" >&2; exit 1; }
-    # shellcheck source=/dev/null
-    source "$conf"
-    mac_lc=${VM_MAC,,}
-    IP=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" \
-        '$3=="br0" && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}')
-    [[ -n "$IP" ]] || { echo "no IP for $VM_MAC" >&2; exit 1; }
-else
-    IP="$IP_OVERRIDE"
-fi
+IP=$(vgpu_resolve_bound_guest_ip "$VM_ID" "$IP_OVERRIDE") || exit
 
 HOST_IP=$(ip -4 -o addr show br0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
 [[ -n "$HOST_IP" ]] || HOST_IP="192.168.30.127"
@@ -83,6 +105,8 @@ done
 
 echo "[gui-install] guest=$IP  timeout=${TIMEOUT_INSTALL}s"
 echo
+
+invalidate_monitor_sync_marker
 
 # ── Step 1: arm AutoLogon + RunOnce + trigger reboot ───────────────────
 echo "[1/3] arm RunOnce + AutoLogon, then reboot guest"

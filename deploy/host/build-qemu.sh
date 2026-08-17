@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build-qemu.sh — (重)编 QEMU x86_64 二进制。
+# build-qemu.sh — (重)编 QEMU x86_64 二进制与离线 EDID 工具。
 #
 # 用法:
 #   ./deploy/host/build-qemu.sh                 # 增量编（保留 build/ 已有 .o）
@@ -86,16 +86,17 @@ case "$ACTION" in
         ;;
 esac
 
-NINJA_ARGS=(qemu-system-x86_64)
+NINJA_ARGS=(qemu-system-x86_64 qemu-edid)
 [[ -n "$JOBS" ]] && NINJA_ARGS=(-j "$JOBS" "${NINJA_ARGS[@]}")
 
 echo "[build-qemu] ninja ${NINJA_ARGS[*]}"
 ninja "${NINJA_ARGS[@]}"
 
 bin="$here/build/qemu-system-x86_64"
+edid_bin="$here/build/qemu-edid"
 echo
 echo "[build-qemu] OK"
-ls -la "$bin"
+ls -la "$bin" "$edid_bin"
 echo
 echo "  display backends:"
 "$bin" -display help 2>&1 | sed 's/^/    /'

@@ -63,6 +63,7 @@ for dependency in jq sha256sum stat realpath awk install flock pgrep grep; do
 done
 
 vm_storage_init
+vm_storage_require_namespace_ready "$VM_ID"
 CONF=$(vm_storage_config_path "$VM_ID")
 DISK=$(vm_storage_disk_path "$VM_ID")
 INSTANCE_DIR=$(vm_storage_instance_dir "$VM_ID")
@@ -78,9 +79,12 @@ INSTANCE_DIR=$(vm_storage_instance_dir "$VM_ID")
 [[ ! -L "$VM_RUN_DIR" &&
    ( ! -e "$VM_RUN_DIR" || -d "$VM_RUN_DIR" ) ]] \
     || die "VM runtime root is unsafe"
+vm_storage_validate_root_path "$VM_ROOT" "VM root" \
+    || die "VM root is unsafe"
 mkdir -p -- "$VM_RUN_DIR"
 exec {STORAGE_LOCK_FD}>"$VM_RUN_DIR/.storage.lock"
 flock -s "$STORAGE_LOCK_FD"
+vm_storage_prepare_instance "$VM_ID"
 START_LOCK=$(vm_storage_run_path "$VM_ID" start.lock)
 DISK_LOCK=$(vm_storage_run_path "$VM_ID" disk.lock)
 exec {START_LOCK_FD}>"$START_LOCK"

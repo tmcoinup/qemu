@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034  # Public path/argv variables are consumed by callers.
-# TPM 1.2/2.0 lifecycle helpers for the root deploy/*.sh vGPU workflow.
+# TPM 1.2/2.0 lifecycle helpers for the deploy/scripts vGPU workflow.
 #
 # Callers normally do:
 #
@@ -137,7 +137,7 @@ vm_tpm_paths() {
     VM_TPM_SOCKET=$run_dir/swtpm.sock
     VM_TPM_PID_FILE=$run_dir/swtpm.pid
     VM_TPM_LOG=$log_dir/swtpm.log
-    VM_TPM_LOCK_FILE=$VM_RUN_DIR/vm${id}.tpm.lock
+    VM_TPM_LOCK_FILE=$(vm_storage_run_preferred_path "$id" tpm.lock) || return
 
     _vm_tpm_validate_path_text "$VM_TPM_STATE_DIR" "TPM state path" || return
     _vm_tpm_validate_path_text "$VM_TPM_CONFIG_DIR" "TPM config path" || return
@@ -336,11 +336,14 @@ _vm_tpm_validate_existing_paths() {
 }
 
 _vm_tpm_ensure_lock_root() {
-    if [[ -L "$VM_RUN_DIR" || ( -e "$VM_RUN_DIR" && ! -d "$VM_RUN_DIR" ) ]]; then
-        _vm_tpm_error "VM runtime root must be a real directory: $VM_RUN_DIR"
+    local lock_root=${VM_TPM_LOCK_FILE%/*}
+
+    vm_storage_validate_instance_tree "$VM_TPM_INSTANCE_ID" || return
+    if [[ -L "$lock_root" || ( -e "$lock_root" && ! -d "$lock_root" ) ]]; then
+        _vm_tpm_error "VM runtime directory must be real: $lock_root"
         return 1
     fi
-    mkdir -p -- "$VM_RUN_DIR"
+    vm_storage_prepare_instance "$VM_TPM_INSTANCE_ID" || return
 }
 
 _vm_tpm_prepare_filesystem() {

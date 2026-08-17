@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Build one offline, VM-unbound Windows EXE for every audited B/native profile.
+# Build one VM-unbound Windows identity installer for every audited B/native
+# profile.  GPU-Z is neither embedded nor required by the default path.  An
+# exact audited official image may be imported later through the explicit
+# /with-gpuz option.  A separate, explicitly requested private build may embed
+# a DLS client token so the same VgpuPortable.exe can finalize every current
+# B/native GPU profile without the legacy model-specific finish flow.
 set -euo pipefail
 umask 077
 
@@ -17,21 +22,37 @@ usage() {
     cat <<'EOF'
 usage: ./deploy/package-vgpu-portable.sh [options]
 
-Build one completely offline guest EXE.  It contains every audited profile,
-does not contain a VM ID/UUID, and selects the current VM profile from the
-read-only per-boot firmware claim published automatically by start-vm.sh.
+Build one VM-unbound guest EXE.  It contains every audited identity profile,
+does not embed or require GPU-Z, does not contain a VM ID/UUID, and selects
+the current VM profile from the read-only per-boot firmware claim published
+automatically by start-vm.sh.
 
 Options:
   --output-dir DIR       Expanded host audit bundle
-                         (default: $STAGE_DIR/VgpuPortable/.host-bundle)
+                         (default: identity-only or private licensed root)
   --output-exe FILE.exe  Guest file
-                         (default: $STAGE_DIR/VgpuPortable/VgpuPortable.exe)
-  --gpuz-source FILE     Audited TechPowerUp GPU-Z 2.70 source
+                         (default: VgpuPortable.exe below the selected root)
+  --with-license-token   Build a private all-profile finalizer using
+                         $STAGE_DIR/client_configuration_token.tok
+  --token-file FILE.tok  Same private finalizer with an explicit token path
+  --replace-licensed     Replace an authenticated private output whose receipt
+                         binds a different token/catalog.  Licensed builds only;
+                         the old EXE/bundle is retained in a mode-0700 backup.
   --list-gpu-profiles    Print the embedded profile catalog
   -h, --help             Show this help
 
-No VM_ID is accepted.  Copy VgpuPortable.exe into any B/native Windows VM,
-or place it in the Windows base image before cloning.
+No VM_ID is accepted.  Double-click VgpuPortable.exe in any B/native Windows
+VM to install/query the identity only.  GPU-Z is optional.  To install it
+later, put the exact audited official GPU-Z 2.70 file named GPU-Z.exe beside
+VgpuPortable.exe and run "VgpuPortable.exe /with-gpuz".  Future unreviewed
+GPU-Z versions fail closed; GPU-Z bytes are never embedded in this EXE.
+
+The default output is identity-only and safe to place in a prepared base.
+--with-license-token/--token-file instead writes to VgpuPortableLicensed by
+default.  That EXE contains a DLS credential, remains mode 0600 on the host,
+    must not be published, and installs the token, requires NVIDIA Licensed,
+    then disables hibernation/Fast Startup for every supported B/native profile
+    (GTX 750 Ti, GT 1030, GTX 1050).
 EOF
 }
 
@@ -50,7 +71,9 @@ sha256_upper() {
 
 OUTPUT_DIR=""
 OUTPUT_EXE=""
-GPUZ_SOURCE=""
+WITH_LICENSE_TOKEN=0
+TOKEN_FILE=""
+REPLACE_LICENSED=0
 while (($#)); do
     case "$1" in
         --output-dir)
@@ -63,10 +86,19 @@ while (($#)); do
             OUTPUT_EXE=$2
             shift 2
             ;;
-        --gpuz-source)
-            (($# >= 2)) || die "--gpuz-source requires a host file"
-            GPUZ_SOURCE=$2
+        --with-license-token)
+            WITH_LICENSE_TOKEN=1
+            shift
+            ;;
+        --token-file)
+            (($# >= 2)) || die "--token-file requires a path"
+            WITH_LICENSE_TOKEN=1
+            TOKEN_FILE=$2
             shift 2
+            ;;
+        --replace-licensed)
+            REPLACE_LICENSED=1
+            shift
             ;;
         --list-gpu-profiles)
             vgpu_profile_print_catalog
@@ -82,6 +114,9 @@ while (($#)); do
     esac
 done
 
+((REPLACE_LICENSED == 0 || WITH_LICENSE_TOKEN == 1)) ||
+    die "--replace-licensed requires --with-license-token or --token-file"
+
 for dependency in jq sha256sum awk stat find realpath mktemp install flock \
         x86_64-w64-mingw32-gcc x86_64-w64-mingw32-windres; do
     command -v "$dependency" >/dev/null 2>&1 \
@@ -89,16 +124,39 @@ for dependency in jq sha256sum awk stat find realpath mktemp install flock \
 done
 vgpu_profile_validate_catalog ||
     die "GPU identity catalog validation failed"
+"$here/guest/generate-vgpu-profile-catalog.sh" --check ||
+    die "guest-readable GPU identity catalog is stale"
+"$here/guest/nvapi-shim/generate-profile-catalog.sh" --check ||
+    die "compiled NVAPI GPU identity catalog is stale"
 vm_storage_init
 
-if [[ -z "$GPUZ_SOURCE" ]]; then
-    GPUZ_SOURCE=$(gpuz_asset_default_source) ||
-        die "could not derive the canonical GPU-Z source"
+TOKEN_SHA256=""
+TOKEN_BYTES=0
+if ((WITH_LICENSE_TOKEN)); then
+    [[ -n "$TOKEN_FILE" ]] || \
+        TOKEN_FILE="$STAGE_DIR/client_configuration_token.tok"
+    [[ ! -L "$TOKEN_FILE" ]] || die "license token must not be a symlink"
+    TOKEN_FILE=$(realpath -e -- "$TOKEN_FILE" 2>/dev/null) ||
+        die "license token does not exist: $TOKEN_FILE"
+    [[ -f "$TOKEN_FILE" && -r "$TOKEN_FILE" && ! -L "$TOKEN_FILE" ]] ||
+        die "license token is not a readable regular file: $TOKEN_FILE"
+    [[ "$TOKEN_FILE" != "$here" && "$TOKEN_FILE" != "$here/"* ]] ||
+        die "license token must remain outside the repository: $TOKEN_FILE"
+    TOKEN_BYTES=$(stat -c %s -- "$TOKEN_FILE")
+    ((TOKEN_BYTES >= 1024 && TOKEN_BYTES <= 1048576)) ||
+        die "license token size must be 1024..1048576 bytes"
+    if LC_ALL=C head -c 256 -- "$TOKEN_FILE" |
+            grep -Eiq '<[[:space:]]*(!doctype[[:space:]]+html|html)'; then
+        die "license token looks like an HTML error page"
+    fi
+    token_mode=$(stat -c %a -- "$TOKEN_FILE")
+    (( (8#$token_mode & 077) == 0 )) ||
+        die "license token must not be group/other-accessible (run chmod 600): $TOKEN_FILE"
+    TOKEN_SHA256=$(sha256_upper "$TOKEN_FILE")
+    PORTABLE_ROOT="$STAGE_DIR/VgpuPortableLicensed"
+else
+    PORTABLE_ROOT="$STAGE_DIR/VgpuPortable"
 fi
-GPUZ_SOURCE=$(gpuz_asset_resolve_source "$GPUZ_SOURCE") ||
-    die "invalid --gpuz-source"
-
-PORTABLE_ROOT="$STAGE_DIR/VgpuPortable"
 [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$PORTABLE_ROOT/.host-bundle"
 [[ -n "$OUTPUT_EXE" ]] || OUTPUT_EXE="$PORTABLE_ROOT/VgpuPortable.exe"
 [[ "$OUTPUT_DIR" == /* && "$OUTPUT_DIR" != / ]] ||
@@ -165,36 +223,196 @@ validate_existing_exe() {
        "$(stat -c %u -- "$receipt")" == "$EUID" &&
        "$(stat -c %a -- "$receipt")" == 600 ]] ||
         die "existing portable EXE has no trusted content receipt"
-    jq -e \
-        --arg catalogSha256 "$CATALOG_SHA256" \
-        --arg exeSha256 "$hash" \
-        --argjson exeBytes "$bytes" '
-        (keys | sort) == [
-            "bindingMode", "bundleManifestSha256", "catalogSha256",
-            "exeBytes", "exeSha256", "launcherFormat", "schemaVersion"
-        ] and
-        .schemaVersion == 1 and .bindingMode == "portable-auto" and
+    if ((WITH_LICENSE_TOKEN)); then
+        jq -e \
+            --arg catalogSha256 "$CATALOG_SHA256" \
+            --arg exeSha256 "$hash" \
+            --argjson exeBytes "$bytes" \
+            --arg tokenSha256 "$TOKEN_SHA256" \
+            --argjson tokenBytes "$TOKEN_BYTES" '
+            (keys | sort) == [
+                "bindingMode", "bundleManifestSha256", "catalogSha256",
+                "exeBytes", "exeSha256", "gpuZDelivery",
+                "launcherFormat", "licenseTokenBytes",
+                "licenseTokenDelivery", "licenseTokenSha256",
+                "schemaVersion"
+            ] and
+            .schemaVersion == 5 and
+            .bindingMode == "portable-auto" and
+            .catalogSha256 == $catalogSha256 and
+            .gpuZDelivery == "optional-explicit-sibling" and
+            .licenseTokenDelivery == "embedded-private" and
+            .licenseTokenSha256 == $tokenSha256 and
+            .licenseTokenBytes == $tokenBytes and
+            .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_V5" and
+            .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
+            (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
+        ' "$receipt" >/dev/null || {
+            ((REPLACE_LICENSED)) && return 1
+            die "existing licensed portable EXE receipt does not match this token/catalog (rerun with --replace-licensed to retain it in a private backup and rebuild)"
+        }
+    else
+        jq -e \
+            --arg catalogSha256 "$CATALOG_SHA256" \
+            --arg exeSha256 "$hash" \
+            --argjson exeBytes "$bytes" '
+        .bindingMode == "portable-auto" and
         .catalogSha256 == $catalogSha256 and
-        .launcherFormat == "QEMU_GPUZ_PORTABLE_EXE_V1" and
         .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
-        (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
-    ' "$receipt" >/dev/null ||
-        die "existing portable EXE receipt does not match this catalog"
+        (.bundleManifestSha256 | test("^[0-9A-F]{64}$")) and
+        (
+            ((keys | sort) == [
+                "bindingMode", "bundleManifestSha256", "catalogSha256",
+                "exeBytes", "exeSha256", "launcherFormat", "schemaVersion"
+            ] and
+             .schemaVersion == 1 and
+             .launcherFormat == "QEMU_GPUZ_PORTABLE_EXE_V1")
+            or
+            ((keys | sort) == [
+                "bindingMode", "bundleManifestSha256", "catalogSha256",
+                "exeBytes", "exeSha256", "gpuZDelivery",
+                "launcherFormat", "schemaVersion"
+            ] and
+             .schemaVersion == 2 and
+             .gpuZDelivery == "external-sibling" and
+             .launcherFormat == "QEMU_GPUZ_PORTABLE_EXTERNAL_V2")
+            or
+            ((keys | sort) == [
+                "bindingMode", "bundleManifestSha256", "catalogSha256",
+                "exeBytes", "exeSha256", "gpuZDelivery",
+                "launcherFormat", "schemaVersion"
+            ] and
+             .schemaVersion == 3 and
+             .gpuZDelivery == "external-sibling" and
+             .launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V3")
+            or
+            ((keys | sort) == [
+                "bindingMode", "bundleManifestSha256", "catalogSha256",
+                "exeBytes", "exeSha256", "gpuZDelivery",
+                "launcherFormat", "schemaVersion"
+            ] and
+             .schemaVersion == 4 and
+             .gpuZDelivery == "optional-explicit-sibling" and
+             .launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4")
+        )
+        ' "$receipt" >/dev/null ||
+            die "existing portable EXE receipt does not match this catalog"
+    fi
+}
+
+validate_existing_licensed_bundle_authenticity() {
+    local manifest ready manifest_hash file_name file_hash file_bytes
+    manifest="$OUTPUT_DIR/bundle-manifest.json"
+    ready="$OUTPUT_DIR/READY"
+    for required in "$manifest" "$ready" "$OUTPUT_DIR/gpuz-contract.json"; do
+        [[ -f "$required" && ! -L "$required" ]] ||
+            die "existing licensed bundle has a missing/unsafe authenticated file: $required"
+    done
+    mapfile -t ready_lines <"$ready"
+    [[ ${#ready_lines[@]} -eq 2 &&
+       "${ready_lines[0]}" == schema_version=1 &&
+       "${ready_lines[1]}" =~ ^manifest_sha256=([0-9A-F]{64})$ ]] ||
+        die "existing licensed bundle READY is malformed"
+    manifest_hash=$(sha256_upper "$manifest")
+    [[ "$manifest_hash" == "${BASH_REMATCH[1]}" ]] ||
+        die "existing licensed bundle manifest is not authenticated by READY"
+    jq -e '
+        .schemaVersion == 4 and .bindingMode == "portable-auto" and
+        (.files | type) == "array" and (.files | length) >= 10 and
+        all(.files[];
+            (keys | sort) == ["bytes", "name", "sha256"] and
+            (.name | type) == "string" and
+            (.sha256 | test("^[0-9A-F]{64}$")) and
+            (.bytes | type) == "number" and (.bytes | floor) == .bytes and
+            .bytes >= 0
+        ) and
+        ([.files[].name] | unique | length) == (.files | length)
+    ' "$manifest" >/dev/null ||
+        die "existing licensed bundle manifest is malformed"
+    while IFS=$'\t' read -r file_name file_hash file_bytes; do
+        [[ "$file_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$ &&
+           "$file_name" != *..* ]] ||
+            die "existing licensed bundle contains an unsafe payload name"
+        payload="$OUTPUT_DIR/$file_name"
+        [[ -f "$payload" && ! -L "$payload" ]] ||
+            die "existing licensed bundle payload is missing/unsafe: $file_name"
+        [[ "$(stat -c %s -- "$payload")" == "$file_bytes" &&
+           "$(sha256_upper "$payload")" == "$file_hash" ]] ||
+            die "existing licensed bundle payload failed its manifest: $file_name"
+    done < <(jq -er '.files[] | [.name, .sha256, .bytes] | @tsv' "$manifest")
 }
 
 EXISTING_EXE=0
+REPLACE_EXISTING_LICENSED=0
 if [[ -e "$OUTPUT_EXE" || -L "$OUTPUT_EXE" ]]; then
-    validate_existing_exe
+    if ! validate_existing_exe; then
+        ((WITH_LICENSE_TOKEN && REPLACE_LICENSED)) ||
+            die "existing portable EXE validation failed"
+        REPLACE_EXISTING_LICENSED=1
+    fi
     EXISTING_EXE=1
 fi
 if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
     [[ -d "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] ||
         die "existing expanded bundle is unsafe"
-    jq -e --arg catalogSha256 "$CATALOG_SHA256" '
-        .schemaVersion == 3 and .bindingMode == "portable-auto" and
-        .catalogSha256 == $catalogSha256
-    ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1 ||
-        die "existing expanded bundle is not an owned portable catalog"
+    if ((WITH_LICENSE_TOKEN)); then
+        validate_existing_licensed_bundle_authenticity
+        jq -e --arg catalogSha256 "$CATALOG_SHA256" \
+            --arg tokenSha256 "$TOKEN_SHA256" \
+            --argjson tokenBytes "$TOKEN_BYTES" '
+            .schemaVersion == 7 and .bindingMode == "portable-auto" and
+            .catalogSha256 == $catalogSha256 and
+            .licenseToken.name == "client_configuration_token.tok" and
+            .licenseToken.sha256 == $tokenSha256 and
+            .licenseToken.bytes == $tokenBytes and
+            .licenseToken.delivery == "embedded-private"
+        ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1 || {
+            ((REPLACE_LICENSED)) ||
+                die "existing licensed bundle does not match this token/catalog (rerun with --replace-licensed to retain it in a private backup and rebuild)"
+            REPLACE_EXISTING_LICENSED=1
+        }
+    else
+        jq -e --arg catalogSha256 "$CATALOG_SHA256" '
+            (.schemaVersion == 3 or .schemaVersion == 4 or
+             .schemaVersion == 5 or .schemaVersion == 6) and
+            .bindingMode == "portable-auto" and
+            .catalogSha256 == $catalogSha256
+        ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1 ||
+            die "existing expanded bundle is not an owned portable catalog"
+    fi
+fi
+
+REPLACED_LICENSED_BACKUP=""
+if ((REPLACE_EXISTING_LICENSED)); then
+    backup_root="$(dirname -- "$OUTPUT_PARENT")/package-backups"
+    if [[ -e "$backup_root" || -L "$backup_root" ]]; then
+        [[ -d "$backup_root" && ! -L "$backup_root" &&
+           "$(stat -c %u -- "$backup_root")" == "$EUID" &&
+           "$(stat -c %a -- "$backup_root")" == 700 ]] ||
+            die "licensed package backup root is unsafe: $backup_root"
+    else
+        mkdir -m 0700 -- "$backup_root"
+    fi
+    REPLACED_LICENSED_BACKUP=$(mktemp -d \
+        "$backup_root/VgpuPortableLicensed.old.XXXXXXXX")
+    backup_exe="$REPLACED_LICENSED_BACKUP/$(basename -- "$OUTPUT_EXE")"
+    backup_bundle="$REPLACED_LICENSED_BACKUP/$(basename -- "$OUTPUT_DIR")"
+    if ((EXISTING_EXE)); then
+        ln -T -- "$OUTPUT_EXE" "$backup_exe" ||
+            die "could not retain the authenticated private EXE backup"
+        chmod 0600 "$backup_exe"
+    fi
+    if [[ -e "$OUTPUT_DIR" ]]; then
+        cp -a -- "$OUTPUT_DIR" "$backup_bundle" ||
+            die "could not retain the authenticated private bundle backup"
+    fi
+    cat >"$REPLACED_LICENSED_BACKUP/README.txt" <<EOF
+Private licensed portable backup retained before an authenticated replacement.
+Source EXE: $OUTPUT_EXE
+Source bundle: $OUTPUT_DIR
+Do not publish this directory; it may contain a DLS client token.
+EOF
+    chmod 0600 "$REPLACED_LICENSED_BACKUP/README.txt"
 fi
 
 WORK_ROOT=$(mktemp -d "$OUTPUT_PARENT/.vgpu-portable.XXXXXXXX")
@@ -210,11 +428,18 @@ for asset in \
         "$here/guest/apply-gpuz-profile.ps1" \
         "$here/guest/apply-vm-profile.ps1" \
         "$here/guest/patch-grid-strings.ps1" \
+        "$here/guest/vgpu-profile-catalog.json" \
         "$here/guest/nvapi-shim/nvapi.dll" \
-        "$here/guest/nvapi-shim/nvapi_profile_probe32.exe"; do
+        "$here/guest/nvapi-shim/nvapi_profile_probe32.exe" \
+        "$here/guest/nvapi-shim/VgpuIdentityQuery.exe"; do
     [[ -s "$asset" && ! -L "$asset" ]] ||
         die "required guest asset is missing or unsafe: $asset"
 done
+if ((WITH_LICENSE_TOKEN)); then
+    [[ -s "$here/guest/install-vgpu-license.ps1" &&
+       ! -L "$here/guest/install-vgpu-license.ps1" ]] ||
+        die "required private license installer is missing or unsafe"
+fi
 
 install -m 0600 -- "$here/guest/apply-gpuz-profile.ps1" \
     "$BUNDLE/apply-gpuz-profile.ps1"
@@ -222,129 +447,128 @@ install -m 0600 -- "$here/guest/apply-vm-profile.ps1" \
     "$BUNDLE/apply-vm-profile.ps1"
 install -m 0600 -- "$here/guest/patch-grid-strings.ps1" \
     "$BUNDLE/patch-grid-strings.ps1"
+install -m 0600 -- "$here/guest/vgpu-profile-catalog.json" \
+    "$BUNDLE/vgpu-profile-catalog.json"
 install -m 0600 -- "$here/guest/nvapi-shim/nvapi.dll" \
     "$BUNDLE/nvapi.dll"
 install -m 0600 -- "$here/guest/nvapi-shim/nvapi_profile_probe32.exe" \
     "$BUNDLE/nvapi_profile_probe32.exe"
-gpuz_asset_snapshot "$GPUZ_SOURCE" "$BUNDLE/$GPUZ_ASSET_BUNDLE_NAME" ||
-    die "refusing a non-locked GPU-Z source"
-
+install -m 0600 -- "$here/guest/nvapi-shim/VgpuIdentityQuery.exe" \
+    "$BUNDLE/VgpuIdentityQuery.exe"
+CONTRACT_SCHEMA=6
+LICENSE_TOKEN_JSON=null
+if ((WITH_LICENSE_TOKEN)); then
+    install -m 0600 -- "$here/guest/install-vgpu-license.ps1" \
+        "$BUNDLE/install-vgpu-license.ps1"
+    install -m 0600 -- "$TOKEN_FILE" \
+        "$BUNDLE/client_configuration_token.tok"
+    [[ "$(stat -c %s -- "$BUNDLE/client_configuration_token.tok")" == \
+           "$TOKEN_BYTES" &&
+       "$(sha256_upper "$BUNDLE/client_configuration_token.tok")" == \
+           "$TOKEN_SHA256" ]] ||
+        die "private license token snapshot changed during packaging"
+    CONTRACT_SCHEMA=7
+    LICENSE_TOKEN_JSON=$(jq -cn \
+        --arg name client_configuration_token.tok \
+        --arg sha256 "$TOKEN_SHA256" \
+        --argjson bytes "$TOKEN_BYTES" \
+        '{name:$name,sha256:$sha256,bytes:$bytes,delivery:"embedded-private"}')
+fi
 profiles_json='[]'
 for profile_key in $(vgpu_profile_keys); do
     vgpu_profile_load "$profile_key" ||
         die "could not load catalog profile $profile_key"
     profile_name="profile-${profile_key}.json"
     profile_path="$BUNDLE/$profile_name"
-    jq -n \
-        --argjson schemaVersion 1 \
-        --arg bindingMode portable-auto \
+    jq -e \
         --arg profile "$GPU_PROFILE" \
-        --arg name "$GPU_NAME" \
-        --arg expectedPnpId 'PCI\VEN_10DE&DEV_1E30' \
-        --argjson nvapiPciVendorId "$((GPU_PCI_VID))" \
-        --argjson nvapiPciDeviceId "$((GPU_PCI_DID))" \
-        --argjson nvapiPciSubVendorId "$((GPU_SUB_VID))" \
-        --argjson nvapiPciSubDeviceId "$((GPU_SUB_DID))" \
-        --argjson nvapiPciRevisionId "$((GPU_REV))" \
-        --argjson coreClockMHz "$GPU_CORE_MHZ" \
-        --argjson boostClockMHz "$GPU_BOOST_MHZ" \
-        --argjson memoryClockMHz "$GPU_MEMORY_MHZ" \
-        --argjson memoryBusBits "$GPU_MEMORY_BUS_BITS" \
-        --argjson memoryBandwidthMBps "$GPU_MEMORY_BANDWIDTH_MBPS" \
-        --argjson vramMB "$GPU_VRAM_MB" \
-        --argjson memoryType "$GPU_MEMORY_TYPE_NVAPI" \
-        --argjson memoryMaker "$GPU_MEMORY_MAKER_NVAPI" \
-        --argjson cudaCores "$GPU_CUDA_CORES" \
-        --argjson shaderSubPipes "$GPU_SHADER_SUBPIPES" \
-        --argjson ropCount "$GPU_ROP_COUNT" \
-        --argjson tmuCount "$GPU_TMU_COUNT" \
-        --argjson architecture "$((GPU_ARCHITECTURE))" \
-        --argjson implementation "$GPU_IMPLEMENTATION" \
-        --argjson chipRevision "$((GPU_CHIP_REVISION))" \
-        --argjson pcieWidth "$GPU_PCIE_WIDTH" \
-        --arg vbiosVersion "${GPU_VBIOS#Version }" '
+        --arg catalogSha256 "$CATALOG_SHA256" '
+        [.profiles[] | select(.profile == $profile)] as $matches |
+        if ($matches | length) != 1 then error("ambiguous profile") else
         {
-            schemaVersion: $schemaVersion,
-            bindingMode: $bindingMode,
-            gpu: {
-                profile: $profile,
-                name: $name,
-                expectedPnpId: $expectedPnpId,
-                nvapiPciVendorId: $nvapiPciVendorId,
-                nvapiPciDeviceId: $nvapiPciDeviceId,
-                nvapiPciSubVendorId: $nvapiPciSubVendorId,
-                nvapiPciSubDeviceId: $nvapiPciSubDeviceId,
-                nvapiPciRevisionId: $nvapiPciRevisionId,
-                coreClockMHz: $coreClockMHz,
-                boostClockMHz: $boostClockMHz,
-                memoryClockMHz: $memoryClockMHz,
-                memoryBusBits: $memoryBusBits,
-                memoryBandwidthMBps: $memoryBandwidthMBps,
-                vramMB: $vramMB,
-                memoryType: $memoryType,
-                memoryMaker: $memoryMaker,
-                cudaCores: $cudaCores,
-                shaderSubPipes: $shaderSubPipes,
-                ropCount: $ropCount,
-                tmuCount: $tmuCount,
-                architecture: $architecture,
-                implementation: $implementation,
-                chipRevision: $chipRevision,
-                pcieWidth: $pcieWidth,
-                vbiosVersion: $vbiosVersion
-            }
-        }' >"$profile_path"
+            schemaVersion: 2,
+            bindingMode: "portable-auto",
+            catalogSha256: $catalogSha256,
+            gpu: $matches[0]
+        }
+        end
+    ' "$BUNDLE/vgpu-profile-catalog.json" >"$profile_path" ||
+        die "guest catalog does not contain exactly one $GPU_PROFILE row"
     chmod 0600 "$profile_path"
     profile_sha=$(sha256_upper "$profile_path")
     profiles_json=$(jq -c \
         --arg key "$GPU_PROFILE" \
         --arg canonicalDisplayName "$GPU_NAME" \
+        --arg boardBrand "$GPU_BOARD_BRAND" \
+        --arg boardModel "$GPU_BOARD_MODEL" \
+        --arg memoryMakerName "$GPU_MEMORY_MAKER" \
         --arg name "$profile_name" \
         --arg sha256 "$profile_sha" '
         . + [{
             key: $key,
             canonicalDisplayName: $canonicalDisplayName,
+            boardBrand: $boardBrand,
+            boardModel: $boardModel,
+            memoryMakerName: $memoryMakerName,
             asset: {name: $name, sha256: $sha256}
         }]' <<<"$profiles_json")
 done
 
 SHIM_SHA256=$(sha256_upper "$BUNDLE/nvapi.dll")
 PROBE_SHA256=$(sha256_upper "$BUNDLE/nvapi_profile_probe32.exe")
+QUERY_SHA256=$(sha256_upper "$BUNDLE/VgpuIdentityQuery.exe")
+CATALOG_ASSET_SHA256=$(sha256_upper "$BUNDLE/vgpu-profile-catalog.json")
+CATALOG_ASSET_BYTES=$(stat -c %s -- "$BUNDLE/vgpu-profile-catalog.json")
 jq -n \
-    --argjson schemaVersion 3 \
+    --argjson schemaVersion "$CONTRACT_SCHEMA" \
     --arg bindingMode portable-auto \
     --arg spoofMode B \
     --arg catalogSha256 "$CATALOG_SHA256" \
     --arg expectedPnpId 'PCI\VEN_10DE&DEV_1E30' \
     --arg expectedDriverVersion 31.0.15.3833 \
     --argjson profiles "$profiles_json" \
+    --arg catalogName vgpu-profile-catalog.json \
+    --arg catalogAssetSha256 "$CATALOG_ASSET_SHA256" \
+    --argjson catalogAssetBytes "$CATALOG_ASSET_BYTES" \
     --arg gpuzName "$GPUZ_ASSET_BUNDLE_NAME" \
     --argjson gpuzBytes "$GPUZ_ASSET_BYTES" \
     --arg gpuzVersion "$GPUZ_ASSET_PRODUCT_VERSION" \
     --arg gpuzSha256 "$GPUZ_ASSET_SHA256" \
     --arg shimSha256 "$SHIM_SHA256" \
-    --arg probeSha256 "$PROBE_SHA256" '
-    {
+    --arg probeSha256 "$PROBE_SHA256" \
+    --arg querySha256 "$QUERY_SHA256" \
+    --argjson licenseToken "$LICENSE_TOKEN_JSON" '
+    ({
         schemaVersion: $schemaVersion,
         bindingMode: $bindingMode,
         spoofMode: $spoofMode,
         catalogSha256: $catalogSha256,
         expectedPnpId: $expectedPnpId,
         expectedDriverVersion: $expectedDriverVersion,
+        catalog: {
+            name: $catalogName,
+            sha256: $catalogAssetSha256,
+            bytes: $catalogAssetBytes
+        },
         profiles: $profiles,
         gpuz: {
             name: $gpuzName,
             bytes: $gpuzBytes,
             productVersion: $gpuzVersion,
-            sha256: $gpuzSha256
+            sha256: $gpuzSha256,
+            delivery: "optional-explicit-sibling"
         },
         appLocal: {
             shimName: "nvapi.dll",
             shimSha256: $shimSha256,
             probeName: "nvapi_profile_probe32.exe",
-            probeSha256: $probeSha256
+            probeSha256: $probeSha256,
+            queryName: "VgpuIdentityQuery.exe",
+            querySha256: $querySha256
         }
-    }' >"$BUNDLE/gpuz-contract.json"
+    } + if $licenseToken == null then {} else {
+        licenseToken: $licenseToken
+    } end)' >"$BUNDLE/gpuz-contract.json"
 chmod 0600 "$BUNDLE/gpuz-contract.json"
 
 cat >"$BUNDLE/RUN-GPUZ-PROFILE.cmd" <<'EOF'
@@ -374,13 +598,21 @@ done < <(find "$BUNDLE" -mindepth 1 -maxdepth 1 -type f \
     ! -name READY ! -name bundle-manifest.json -printf '%f\n' | sort)
 
 jq -n \
-    --argjson schemaVersion 2 \
+    --argjson schemaVersion 4 \
     --arg bindingMode portable-auto \
-    --argjson files "$files_json" '
+    --argjson files "$files_json" \
+    --arg gpuzName "$GPUZ_ASSET_BUNDLE_NAME" \
+    --arg gpuzSha256 "$GPUZ_ASSET_SHA256" \
+    --argjson gpuzBytes "$GPUZ_ASSET_BYTES" '
     {
         schemaVersion: $schemaVersion,
         bindingMode: $bindingMode,
-        files: $files
+        files: $files,
+        optionalExternalFiles: [{
+            name: $gpuzName,
+            sha256: $gpuzSha256,
+            bytes: $gpuzBytes
+        }]
     }' >"$BUNDLE/bundle-manifest.json"
 chmod 0600 "$BUNDLE/bundle-manifest.json"
 MANIFEST_SHA256=$(sha256_upper "$BUNDLE/bundle-manifest.json")
@@ -394,23 +626,38 @@ bash "$here/guest/gpuz-launcher/build.sh" \
 EXE_SHA256=$(sha256_upper "$SINGLE_EXE")
 EXE_BYTES=$(stat -c %s -- "$SINGLE_EXE")
 RECEIPT_TEMP="$WORK_ROOT/$EXE_SHA256.json"
+RECEIPT_SCHEMA=4
+LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_IDENTITY_V4
+if ((WITH_LICENSE_TOKEN)); then
+    RECEIPT_SCHEMA=5
+    LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_LICENSED_V5
+fi
 jq -n \
-    --argjson schemaVersion 1 \
+    --argjson schemaVersion "$RECEIPT_SCHEMA" \
     --arg bindingMode portable-auto \
     --arg catalogSha256 "$CATALOG_SHA256" \
-    --arg launcherFormat QEMU_GPUZ_PORTABLE_EXE_V1 \
+    --arg gpuZDelivery optional-explicit-sibling \
+    --arg launcherFormat "$LAUNCHER_FORMAT" \
     --arg exeSha256 "$EXE_SHA256" \
     --argjson exeBytes "$EXE_BYTES" \
-    --arg bundleManifestSha256 "$MANIFEST_SHA256" '
-    {
+    --arg bundleManifestSha256 "$MANIFEST_SHA256" \
+    --argjson withLicenseToken "$WITH_LICENSE_TOKEN" \
+    --arg tokenSha256 "$TOKEN_SHA256" \
+    --argjson tokenBytes "$TOKEN_BYTES" '
+    ({
         schemaVersion: $schemaVersion,
         bindingMode: $bindingMode,
         catalogSha256: $catalogSha256,
+        gpuZDelivery: $gpuZDelivery,
         launcherFormat: $launcherFormat,
         exeSha256: $exeSha256,
         exeBytes: $exeBytes,
         bundleManifestSha256: $bundleManifestSha256
-    }' >"$RECEIPT_TEMP"
+    } + if $withLicenseToken == 1 then {
+        licenseTokenDelivery: "embedded-private",
+        licenseTokenSha256: $tokenSha256,
+        licenseTokenBytes: $tokenBytes
+    } else {} end)' >"$RECEIPT_TEMP"
 chmod 0600 "$RECEIPT_TEMP"
 RECEIPT_FINAL="$RECEIPT_DIR/$EXE_SHA256.json"
 if [[ -e "$RECEIPT_FINAL" || -L "$RECEIPT_FINAL" ]]; then
@@ -423,7 +670,7 @@ else
         die "could not publish the content receipt"
 fi
 
-if ((EXISTING_EXE)); then
+if ((EXISTING_EXE && !REPLACE_EXISTING_LICENSED)); then
     validate_existing_exe
 fi
 EXE_STAGE="$OUTPUT_PARENT/.$(basename -- "$OUTPUT_EXE").new.$$.$RANDOM"
@@ -462,12 +709,29 @@ cat <<EOF
   binding:     portable-auto (no VM ID, no VM UUID)
   profiles:    $(vgpu_profile_keys | paste -sd, -)
   catalog:     ${CATALOG_SHA256}
-  launcher:    1.1.0.0
+  launcher:    $(if ((WITH_LICENSE_TOKEN)); then printf '%s' '1.5.0.0 / private identity + DLS token finalizer'; else printf '%s' '1.4.0.0 / multi-brand identity-only by default'; fi)
   bundle:      ${OUTPUT_DIR}
   single EXE:  ${OUTPUT_EXE}
   EXE bytes:   ${EXE_BYTES}
   EXE sha256:  ${EXE_SHA256}
+$(if [[ -n "$REPLACED_LICENSED_BACKUP" ]]; then printf '  old private backup: %s\n' "$REPLACED_LICENSED_BACKUP"; fi)
 
-这是离线通用 guest 文件。可放进 Windows 基础镜像，克隆后的任意
-B/native VM 直接双击；不需要为 VM3/VM4/VM456 分别重新打包。
+$(if ((WITH_LICENSE_TOKEN)); then
+    cat <<PRIVATE
+这是显式构建的私有授权版通用 guest 文件。它包含 DLS token；不要公开分发。
+在任意受支持 B/native VM 中直接双击 VgpuPortable.exe，会统一安装身份、token，
+等待 NVIDIA 明确报告 Licensed，并关闭休眠/Fast Startup。完成后让 Windows 完整
+关机，再正常冷启动复验。
+PRIVATE
+else
+    cat <<PUBLIC
+这是默认不安装、也不要求 GPU-Z 的通用 guest 文件。直接双击
+VgpuPortable.exe 即可安装并查询显卡/板卡/显存身份。
+PUBLIC
+fi)
+
+以后确实需要 GPU-Z 时，把官网取得且严格匹配 TechPowerUp GPU-Z 2.70 的
+GPU-Z.exe 放在同目录，再执行：VgpuPortable.exe /with-gpuz
+选装路径会校验 11642144 bytes / ${GPUZ_ASSET_SHA256}；不匹配就在任何
+profile 写入前失败。无需为任意 VM ID 或不同品牌分别重新打包。
 EOF

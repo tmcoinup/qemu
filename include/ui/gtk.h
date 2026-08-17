@@ -84,6 +84,9 @@ typedef struct VirtualConsole {
     GtkWidget *menu_item;
     GtkWidget *tab_item;
     GtkWidget *focus;
+    /* Keep keyboard ownership tied to the visible, focused console. */
+    bool has_input_focus;
+    bool has_mouse_focus;
     VirtualConsoleType type;
     union {
         VirtualGfxConsole gfx;

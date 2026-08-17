@@ -5,8 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-CREATE_VM="$REPO_ROOT/deploy/create-vm.sh"
-START_VM="$REPO_ROOT/deploy/start-vm.sh"
+CREATE_VM="$REPO_ROOT/deploy/scripts/create-vm.sh"
+START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -93,12 +93,12 @@ env -i \
     VM_ROOT="$VM_ROOT" \
     STAGE_DIR="$STAGE_DIR" \
     "$CREATE_VM" "$VM_ID" \
-        --platform i3-8100 \
-        --ssd-profile samsung-970-pro-512gb \
+        --platform i5-4590-h81m-s1-8g \
+        --ssd-profile samsung-850-pro-512gb \
         --gpu-profile gtx1050_2gb \
         --monitor-profile dell-se2416h >"$TMP_DIR/create.out"
 
-CONF="$VM_ROOT/vm${VM_ID}/vm.conf"
+CONF="$VM_ROOT/${VM_ID}/vm.conf"
 chmod u+w "$CONF"
 sed -i 's/^SPOOF_MODE=.*/SPOOF_MODE=A/' "$CONF"
 chmod 0444 "$CONF"

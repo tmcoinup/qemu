@@ -28,6 +28,19 @@
 #include "qapi/error.h"
 
 #define SMBUS_EEPROM_MAX_SLOTS 8
+#define SMBUS_EEPROM_DDR3_PART_NUMBER_LEN 18
+
+typedef struct SmbusEepromDdr3Config {
+    uint32_t size_mb;
+    uint32_t speed_mts;
+    uint8_t ranks;
+    uint8_t device_width_bits;
+    bool identity_configured;
+    uint8_t module_mfr_jep106[2];
+    uint8_t dram_mfr_jep106[2];
+    uint8_t serial[4];
+    char part_number[SMBUS_EEPROM_DDR3_PART_NUMBER_LEN + 1];
+} SmbusEepromDdr3Config;
 
 void smbus_eeprom_init_one(I2CBus *bus, uint8_t address, uint8_t *eeprom_buf);
 void smbus_eeprom_init(I2CBus *bus, int nb_eeprom,
@@ -37,6 +50,8 @@ enum sdram_type { SDR = 0x4, DDR = 0x7, DDR2 = 0x8 };
 uint8_t *spd_data_generate(enum sdram_type type, ram_addr_t size);
 uint8_t *spd_data_generate_ddr3(uint32_t size_mb, uint32_t speed_mts,
                                 Error **errp);
+uint8_t *spd_data_generate_ddr3_config(
+    const SmbusEepromDdr3Config *config, Error **errp);
 uint8_t *spd_data_generate_ddr4(uint32_t size_mb, uint32_t speed_mts,
                                 Error **errp);
 

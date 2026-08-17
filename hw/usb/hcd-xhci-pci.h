@@ -41,14 +41,6 @@ typedef struct XHCIPciState {
     OnOffAuto msi;
     OnOffAuto msix;
     bool conditional_intr_mapping;
-    /*
-     * Optional platform PCI identity. 0xFFFFFFFF keeps the class default
-     * (Red Hat 1B36:000D for qemu-xhci). Launch scripts inject an AMD or
-     * Intel identity to match the selected CPU and mainboard profile.
-     */
-    uint32_t stealth_vendor_id;
-    uint32_t stealth_device_id;
-    uint32_t stealth_revision;
 } XHCIPciState;
 
 #endif

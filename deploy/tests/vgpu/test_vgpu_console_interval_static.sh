@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 MDEV_LIB="$REPO_ROOT/deploy/lib/vgpu-mdev.sh"
-START_VM="$REPO_ROOT/deploy/start-vm.sh"
+START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 
 fail() {
     echo "FAIL: $*" >&2

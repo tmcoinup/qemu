@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-START_VM="$REPO_ROOT/deploy/start-vm.sh"
+START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 STORAGE_LIB="$REPO_ROOT/deploy/lib/vm-storage.sh"
 
 fail() {
@@ -36,7 +36,7 @@ reject_text() {
 }
 
 reset_storage_env() {
-    unset IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VM_INSTANCES_DIR
+    unset IMAGE_ROOT ISO_DIR STAGE_DIR VM_ROOT VMS_DIR VM_INSTANCES_DIR
     unset VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK
     unset VM_SHARED_DIR VM_CONTROL_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR
     unset VM_NVRAM_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR
@@ -49,12 +49,14 @@ trap 'rm -rf -- "$TMP_DIR"' EXIT
 VM_ID=73
 DEFAULT_ROOT="$TMP_DIR/default root"
 EXACT_PARENT="$TMP_DIR/exact bundles"
-EXACT_BUNDLE="$EXACT_PARENT/vm${VM_ID}"
+EXACT_BUNDLE="$EXACT_PARENT/${VM_ID}"
 INSTANCES_PARENT="$TMP_DIR/instance pool with spaces"
-INSTANCES_BUNDLE="$INSTANCES_PARENT/vm${VM_ID}"
+INSTANCES_BUNDLE="$INSTANCES_PARENT/${VM_ID}"
+VMS_ROOT="$TMP_DIR/complete vms root"
+VMS_BUNDLE="$VMS_ROOT/${VM_ID}"
 
 mkdir -p "$DEFAULT_ROOT/legacy/disks" "$EXACT_BUNDLE" \
-    "$INSTANCES_BUNDLE"
+    "$INSTANCES_BUNDLE" "$VMS_BUNDLE"
 
 # Deliberately create two different old-layout disks.  An explicit selector
 # must neither choose one nor report their ambiguity.
@@ -94,7 +96,7 @@ printf 'categorized legacy disk must stay unused\n' \
     vm_storage_select_instances_dir "$INSTANCES_PARENT"
 
     assert_eq "$INSTANCES_BUNDLE" "$(vm_storage_instance_dir "$VM_ID")" \
-        "--instances-dir appends vm<ID>"
+        "--instances-dir appends numeric ID"
     assert_eq "$INSTANCES_BUNDLE/vm.conf" \
         "$(vm_storage_config_path "$VM_ID")" "--instances-dir config"
     assert_eq "$INSTANCES_BUNDLE/disk.qcow2" \
@@ -143,6 +145,7 @@ EOF
 
 write_vm_conf "$EXACT_BUNDLE"
 write_vm_conf "$INSTANCES_BUNDLE"
+write_vm_conf "$VMS_BUNDLE"
 touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd" \
     "$TMP_DIR/vgpu-host.conf"
 
@@ -214,6 +217,15 @@ run_start "$TMP_DIR/instances.out" "$TMP_DIR/instances.err" \
 assert_selected_bundle "$INSTANCES_BUNDLE" \
     "$TMP_DIR/instances.out" "$TMP_DIR/instances.err" "--instances-dir"
 
+run_start "$TMP_DIR/vms.out" "$TMP_DIR/vms.err" \
+    --vms-dir "$VMS_ROOT" --dry-run --no-gpu --no-tpm \
+    --no-monitor-sync --no-cpu-isolate
+assert_selected_bundle "$VMS_BUNDLE" \
+    "$TMP_DIR/vms.out" "$TMP_DIR/vms.err" "--vms-dir"
+require_text "VM_ROOT=$VMS_ROOT" <(
+    "$START_VM" "$VM_ID" --vms-dir "$VMS_ROOT" --print-paths
+) "--vms-dir print root"
+
 expect_cli_reject() {
     local label=$1 option=$2
     shift 2
@@ -233,7 +245,7 @@ expect_cli_reject() {
 expect_cli_reject vm-dir-missing --vm-dir --vm-dir
 expect_cli_reject instances-dir-missing --instances-dir --instances-dir
 expect_cli_reject vm-dir-relative --vm-dir \
-    --vm-dir "relative/vm${VM_ID}" --dry-run
+    --vm-dir "relative/${VM_ID}" --dry-run
 expect_cli_reject instances-dir-relative --instances-dir \
     --instances-dir "relative instances" --dry-run
 expect_cli_reject vm-dir-duplicate --vm-dir \
@@ -243,5 +255,9 @@ expect_cli_reject instances-dir-duplicate --instances-dir \
     --instances-dir "$INSTANCES_PARENT" --dry-run
 expect_cli_reject selector-conflict --vm-dir \
     --vm-dir "$EXACT_BUNDLE" --instances-dir "$EXACT_PARENT" --dry-run
+expect_cli_reject vms-dir-duplicate --vms-dir \
+    --vms-dir "$VMS_ROOT" --vms-dir "$VMS_ROOT" --dry-run
+expect_cli_reject vms-selector-conflict --vms-dir \
+    --vms-dir "$VMS_ROOT" --vm-dir "$EXACT_BUNDLE" --dry-run
 
 echo "PASS: start-vm explicit bundle/instances paths and fail-closed CLI selection"

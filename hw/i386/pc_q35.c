@@ -169,13 +169,281 @@ static uint32_t pc_q35_spd_uint_from_env(const char *name,
     return parsed;
 }
 
-static void pc_q35_init_spd(I2CBus *smbus)
+static uint32_t pc_q35_spd_module_mb_from_env(void)
 {
-    PCQ35SpdType type = pc_q35_spd_type_from_env();
     uint32_t module_mb = pc_q35_spd_uint_from_env("QEMU_SPD_MODULE_MB",
                                                    4096);
-    uint32_t speed_mts = pc_q35_spd_uint_from_env(
-        "QEMU_SPD_SPEED_MT", type == PC_Q35_SPD_DDR3 ? 1600 : 2666);
+
+    if (module_mb != 2048 && module_mb != 4096) {
+        error_report("QEMU_SPD_MODULE_MB must be exactly 2048 or 4096 "
+                     "(got %u)", module_mb);
+        exit(EXIT_FAILURE);
+    }
+
+    return module_mb;
+}
+
+typedef struct PCQ35SpdModules {
+    uint32_t size_mb[SMBUS_EEPROM_MAX_SLOTS];
+    uint8_t ranks[SMBUS_EEPROM_MAX_SLOTS];
+    uint8_t device_width_bits[SMBUS_EEPROM_MAX_SLOTS];
+    uint8_t module_mfr_jep106[SMBUS_EEPROM_MAX_SLOTS][2];
+    uint8_t dram_mfr_jep106[SMBUS_EEPROM_MAX_SLOTS][2];
+    uint8_t serial[SMBUS_EEPROM_MAX_SLOTS][4];
+    char part_number[SMBUS_EEPROM_MAX_SLOTS]
+                    [SMBUS_EEPROM_DDR3_PART_NUMBER_LEN + 1];
+    uint32_t count;
+    bool from_list;
+    bool capacity_configured;
+    bool ddr3_details_configured;
+} PCQ35SpdModules;
+
+static char **pc_q35_spd_split_list(const char *name, const char *value,
+                                    uint32_t slots)
+{
+    char **values;
+    size_t count;
+
+    if (!value || !*value) {
+        error_report("%s must be a non-empty comma-separated list", name);
+        exit(EXIT_FAILURE);
+    }
+    values = g_strsplit(value, ",", -1);
+    count = g_strv_length(values);
+    if (count != slots) {
+        error_report("%s must contain exactly %u entries to match "
+                     "QEMU_SPD_SLOTS (got %zu)", name, slots, count);
+        g_strfreev(values);
+        exit(EXIT_FAILURE);
+    }
+    return values;
+}
+
+static bool pc_q35_spd_parse_hex(const char *value, uint8_t *result,
+                                 size_t result_size)
+{
+    size_t i;
+
+    if (strlen(value) != result_size * 2) {
+        return false;
+    }
+    for (i = 0; i < result_size; i++) {
+        int high = g_ascii_xdigit_value(value[i * 2]);
+        int low = g_ascii_xdigit_value(value[i * 2 + 1]);
+
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        result[i] = high << 4 | low;
+    }
+    return true;
+}
+
+static void pc_q35_spd_parse_decimal_list(const char *name,
+                                          const char *value,
+                                          uint32_t slots, uint8_t *result,
+                                          bool device_width)
+{
+    g_auto(GStrv) values = pc_q35_spd_split_list(name, value, slots);
+    uint32_t i;
+
+    for (i = 0; i < slots; i++) {
+        unsigned int parsed;
+
+        if (!*values[i] ||
+            strspn(values[i], "0123456789") != strlen(values[i]) ||
+            qemu_strtoui(values[i], NULL, 10, &parsed) < 0 ||
+            (device_width ? parsed != 8 && parsed != 16 :
+                            parsed != 1 && parsed != 2)) {
+            error_report("%s entry %u must be %s (got '%s')", name, i,
+                         device_width ? "exactly 8 or 16" :
+                                        "exactly 1 or 2",
+                         values[i]);
+            exit(EXIT_FAILURE);
+        }
+        result[i] = parsed;
+    }
+}
+
+static void pc_q35_spd_parse_jep106_list(const char *name,
+                                         const char *value, uint32_t slots,
+                                         uint8_t result[][2], bool allow_zero)
+{
+    g_auto(GStrv) values = pc_q35_spd_split_list(name, value, slots);
+    uint32_t i;
+
+    for (i = 0; i < slots; i++) {
+        if (!pc_q35_spd_parse_hex(values[i], result[i], 2)) {
+            error_report("%s entry %u must be exactly four hexadecimal "
+                         "characters (got '%s')", name, i, values[i]);
+            exit(EXIT_FAILURE);
+        }
+        if (!allow_zero && result[i][0] == 0 && result[i][1] == 0) {
+            error_report("%s entry %u cannot be 0000", name, i);
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+static bool pc_q35_spd_serial_is_reserved(const uint8_t serial[4])
+{
+    static const uint8_t serial_zero[4];
+    static const uint8_t serial_one[4] = { 0, 0, 0, 1 };
+    static const uint8_t serial_ff[4] = { 0xff, 0xff, 0xff, 0xff };
+
+    return !memcmp(serial, serial_zero, sizeof(serial_zero)) ||
+           !memcmp(serial, serial_one, sizeof(serial_one)) ||
+           !memcmp(serial, serial_ff, sizeof(serial_ff));
+}
+
+static void pc_q35_spd_parse_serial_list(const char *value, uint32_t slots,
+                                         uint8_t result[][4])
+{
+    const char *name = "QEMU_SPD_SERIAL_LIST";
+    g_auto(GStrv) values = pc_q35_spd_split_list(name, value, slots);
+    uint32_t i;
+    uint32_t previous;
+
+    for (i = 0; i < slots; i++) {
+        if (!pc_q35_spd_parse_hex(values[i], result[i], 4)) {
+            error_report("%s entry %u must be exactly eight hexadecimal "
+                         "characters (got '%s')", name, i, values[i]);
+            exit(EXIT_FAILURE);
+        }
+        if (pc_q35_spd_serial_is_reserved(result[i])) {
+            error_report("%s entry %u uses reserved serial '%s'", name, i,
+                         values[i]);
+            exit(EXIT_FAILURE);
+        }
+        for (previous = 0; previous < i; previous++) {
+            if (!memcmp(result[i], result[previous], sizeof(result[i]))) {
+                error_report("%s entries %u and %u must be unique", name,
+                             previous, i);
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+}
+
+static void pc_q35_spd_parse_part_list(
+    const char *value, uint32_t slots,
+    char result[][SMBUS_EEPROM_DDR3_PART_NUMBER_LEN + 1])
+{
+    const char *name = "QEMU_SPD_PART_LIST";
+    g_auto(GStrv) values = pc_q35_spd_split_list(name, value, slots);
+    uint32_t i;
+
+    for (i = 0; i < slots; i++) {
+        size_t length = strlen(values[i]);
+        size_t offset;
+
+        if (!length || length > SMBUS_EEPROM_DDR3_PART_NUMBER_LEN) {
+            error_report("%s entry %u must contain 1 to %u characters "
+                         "(got %zu)", name, i,
+                         SMBUS_EEPROM_DDR3_PART_NUMBER_LEN, length);
+            exit(EXIT_FAILURE);
+        }
+        for (offset = 0; offset < length; offset++) {
+            uint8_t ch = values[i][offset];
+
+            if (ch < 0x20 || ch > 0x7e) {
+                error_report("%s entry %u must contain only printable "
+                             "ASCII characters", name, i);
+                exit(EXIT_FAILURE);
+            }
+        }
+        memcpy(result[i], values[i], length + 1);
+    }
+}
+
+static bool pc_q35_spd_ddr3_geometry_supported(uint32_t size_mb,
+                                                uint8_t ranks,
+                                                uint8_t device_width_bits)
+{
+    return (size_mb == 2048 && ranks == 1 &&
+            (device_width_bits == 8 || device_width_bits == 16)) ||
+           (size_mb == 4096 && device_width_bits == 8 &&
+            (ranks == 1 || ranks == 2));
+}
+
+static void pc_q35_spd_ddr3_details_from_env(PCQ35SpdModules *modules)
+{
+    static const char * const required_names[] = {
+        "QEMU_SPD_RANK_LIST",
+        "QEMU_SPD_DEVICE_WIDTH_LIST",
+        "QEMU_SPD_MODULE_MFR_JEP106_LIST",
+        "QEMU_SPD_SERIAL_LIST",
+        "QEMU_SPD_PART_LIST",
+    };
+    const char *required_values[G_N_ELEMENTS(required_names)];
+    const char *dram_mfr = getenv("QEMU_SPD_DRAM_MFR_JEP106_LIST");
+    size_t present = 0;
+    uint32_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(required_names); i++) {
+        required_values[i] = getenv(required_names[i]);
+        present += required_values[i] != NULL;
+    }
+
+    for (i = 0; i < modules->count; i++) {
+        modules->ranks[i] = 1;
+        modules->device_width_bits[i] =
+            modules->size_mb[i] == 2048 ? 16 : 8;
+    }
+
+    if (!present && !dram_mfr) {
+        return;
+    }
+    if (present != G_N_ELEMENTS(required_names)) {
+        error_report("QEMU DDR3 SPD details are atomic: set all of "
+                     "QEMU_SPD_RANK_LIST, QEMU_SPD_DEVICE_WIDTH_LIST, "
+                     "QEMU_SPD_MODULE_MFR_JEP106_LIST, "
+                     "QEMU_SPD_SERIAL_LIST and QEMU_SPD_PART_LIST");
+        exit(EXIT_FAILURE);
+    }
+    if (pc_q35_spd_type_from_env() != PC_Q35_SPD_DDR3) {
+        error_report("QEMU DDR3 SPD detail lists require "
+                     "QEMU_SPD_TYPE=DDR3");
+        exit(EXIT_FAILURE);
+    }
+
+    pc_q35_spd_parse_decimal_list(required_names[0], required_values[0],
+                                  modules->count, modules->ranks, false);
+    pc_q35_spd_parse_decimal_list(required_names[1], required_values[1],
+                                  modules->count,
+                                  modules->device_width_bits, true);
+    pc_q35_spd_parse_jep106_list(required_names[2], required_values[2],
+                                 modules->count,
+                                 modules->module_mfr_jep106, false);
+    pc_q35_spd_parse_serial_list(required_values[3], modules->count,
+                                 modules->serial);
+    pc_q35_spd_parse_part_list(required_values[4], modules->count,
+                               modules->part_number);
+    if (dram_mfr) {
+        pc_q35_spd_parse_jep106_list("QEMU_SPD_DRAM_MFR_JEP106_LIST",
+                                     dram_mfr, modules->count,
+                                     modules->dram_mfr_jep106, true);
+    }
+
+    for (i = 0; i < modules->count; i++) {
+        if (!pc_q35_spd_ddr3_geometry_supported(
+                modules->size_mb[i], modules->ranks[i],
+                modules->device_width_bits[i])) {
+            error_report("unsupported DDR3 SPD geometry at slot %u: %u MB, "
+                         "%u rank(s), x%u devices", i, modules->size_mb[i],
+                         modules->ranks[i], modules->device_width_bits[i]);
+            exit(EXIT_FAILURE);
+        }
+    }
+    modules->ddr3_details_configured = true;
+    modules->capacity_configured = true;
+}
+
+static PCQ35SpdModules pc_q35_spd_modules_from_env(void)
+{
+    PCQ35SpdModules modules = { 0 };
+    const char *list = getenv("QEMU_SPD_MODULE_MB_LIST");
+    const char *legacy = getenv("QEMU_SPD_MODULE_MB");
     uint32_t slots = pc_q35_spd_uint_from_env("QEMU_SPD_SLOTS", 2);
     uint32_t i;
 
@@ -184,15 +452,103 @@ static void pc_q35_init_spd(I2CBus *smbus)
                      "(got %u)", SMBUS_EEPROM_MAX_SLOTS, slots);
         exit(EXIT_FAILURE);
     }
+    if (list && legacy) {
+        error_report("QEMU_SPD_MODULE_MB_LIST and QEMU_SPD_MODULE_MB "
+                     "cannot be used together");
+        exit(EXIT_FAILURE);
+    }
 
-    for (i = 0; i < slots; i++) {
+    modules.count = slots;
+    modules.from_list = list != NULL;
+    modules.capacity_configured = list || legacy || getenv("QEMU_SPD_SLOTS");
+
+    if (list) {
+        g_auto(GStrv) values = NULL;
+        size_t count;
+
+        if (!*list) {
+            error_report("QEMU_SPD_MODULE_MB_LIST must be a comma-separated "
+                         "list of 2048 or 4096 MB module sizes");
+            exit(EXIT_FAILURE);
+        }
+        values = g_strsplit(list, ",", -1);
+        count = g_strv_length(values);
+        if (count != slots) {
+            error_report("QEMU_SPD_MODULE_MB_LIST must contain exactly %u "
+                         "entries to match QEMU_SPD_SLOTS (got %zu)",
+                         slots, count);
+            exit(EXIT_FAILURE);
+        }
+
+        for (i = 0; i < slots; i++) {
+            unsigned int parsed;
+            const char *value = values[i];
+
+            if (!*value || strspn(value, "0123456789") != strlen(value) ||
+                qemu_strtoui(value, NULL, 10, &parsed) < 0 ||
+                (parsed != 2048 && parsed != 4096)) {
+                error_report("QEMU_SPD_MODULE_MB_LIST entry %u must be "
+                             "exactly 2048 or 4096 (got '%s')", i, value);
+                exit(EXIT_FAILURE);
+            }
+            modules.size_mb[i] = parsed;
+        }
+    } else {
+        uint32_t module_mb = pc_q35_spd_module_mb_from_env();
+
+        for (i = 0; i < slots; i++) {
+            modules.size_mb[i] = module_mb;
+        }
+    }
+
+    pc_q35_spd_ddr3_details_from_env(&modules);
+
+    return modules;
+}
+
+static void pc_q35_init_spd(MachineState *machine, I2CBus *smbus)
+{
+    PCQ35SpdType type = pc_q35_spd_type_from_env();
+    PCQ35SpdModules modules = pc_q35_spd_modules_from_env();
+    uint32_t speed_mts = pc_q35_spd_uint_from_env(
+        "QEMU_SPD_SPEED_MT", type == PC_Q35_SPD_DDR3 ? 1600 : 2666);
+    uint64_t capacity_mb = 0;
+    uint32_t i;
+
+    for (i = 0; i < modules.count; i++) {
+        capacity_mb += modules.size_mb[i];
+    }
+    if (modules.capacity_configured &&
+        capacity_mb * MiB != machine->ram_size) {
+        error_report("configured SPD module total (%" PRIu64
+                     " MB) must match guest RAM (%" PRIu64 " MB)",
+                     capacity_mb, (uint64_t)(machine->ram_size / MiB));
+        exit(EXIT_FAILURE);
+    }
+
+    for (i = 0; i < modules.count; i++) {
         uint8_t *spd;
 
         if (type == PC_Q35_SPD_DDR3) {
-            spd = spd_data_generate_ddr3(module_mb, speed_mts,
-                                         &error_fatal);
+            SmbusEepromDdr3Config config = {
+                .size_mb = modules.size_mb[i],
+                .speed_mts = speed_mts,
+                .ranks = modules.ranks[i],
+                .device_width_bits = modules.device_width_bits[i],
+                .identity_configured = modules.ddr3_details_configured,
+            };
+
+            memcpy(config.module_mfr_jep106,
+                   modules.module_mfr_jep106[i],
+                   sizeof(config.module_mfr_jep106));
+            memcpy(config.dram_mfr_jep106, modules.dram_mfr_jep106[i],
+                   sizeof(config.dram_mfr_jep106));
+            memcpy(config.serial, modules.serial[i], sizeof(config.serial));
+            memcpy(config.part_number, modules.part_number[i],
+                   sizeof(config.part_number));
+            spd = spd_data_generate_ddr3_config(&config, &error_fatal);
         } else {
-            spd = spd_data_generate_ddr4(module_mb, speed_mts,
+            spd = spd_data_generate_ddr4(modules.size_mb[i], speed_mts,
                                          &error_fatal);
         }
         smbus_eeprom_init_one(smbus, 0x50 + i, spd);
@@ -392,7 +748,7 @@ static void pc_q35_init(MachineState *machine)
          * Default to two 4 GiB DDR4-2666 modules. Strict environment
          * overrides let the launcher keep SPD aligned with its profile.
          */
-        pc_q35_init_spd(pcms->smbus);
+        pc_q35_init_spd(machine, pcms->smbus);
     }
 
     /* the rest devices to which pci devfn is automatically assigned */
@@ -442,15 +798,27 @@ static void pc_q35_machine_options(MachineClass *m)
 
 static void pc_q35_machine_11_0_options(MachineClass *m)
 {
+    PCQ35SpdModules modules;
+    uint32_t i;
+
     pc_q35_machine_options(m);
+    modules = pc_q35_spd_modules_from_env();
     /*
-     * Split the guest RAM into 4 GiB DIMMs so an 8 GB VM looks like a
-     * dual-channel desktop build (two populated slots, same kit). CPU-Z
-     * / AIDA / 鲁大师 use SMBIOS type 17 topology to label "Dual Channel";
-     * leaving the upstream 2 TiB default collapses everything into one
-     * giant DIMM, which is a virtualization tell.
+     * Split guest RAM using the same validated module capacity as the SPD.
+     * CPU-Z / AIDA / 鲁大师 consume both SMBIOS Type 17 and SPD, so these
+     * two views must never disagree.  The default remains 4 GiB per DIMM.
      */
-    m->smbios_memory_device_size = 4 * GiB;
+    if (modules.from_list) {
+        m->smbios_memory_device_sizes_count = modules.count;
+        m->smbios_memory_device_sizes = g_new(uint64_t, modules.count);
+        for (i = 0; i < modules.count; i++) {
+            m->smbios_memory_device_sizes[i] =
+                (uint64_t)modules.size_mb[i] * MiB;
+        }
+    } else {
+        m->smbios_memory_device_size =
+            (uint64_t)modules.size_mb[0] * MiB;
+    }
 }
 
 DEFINE_Q35_MACHINE_AS_LATEST(11, 0);
@@ -467,6 +835,8 @@ DEFINE_Q35_MACHINE(10, 2);
 static void pc_q35_machine_10_1_options(MachineClass *m)
 {
     pc_q35_machine_10_2_options(m);
+    g_clear_pointer(&m->smbios_memory_device_sizes, g_free);
+    m->smbios_memory_device_sizes_count = 0;
     m->smbios_memory_device_size = 2047 * TiB;
     compat_props_add(m->compat_props, hw_compat_10_1, hw_compat_10_1_len);
     compat_props_add(m->compat_props, pc_compat_10_1, pc_compat_10_1_len);

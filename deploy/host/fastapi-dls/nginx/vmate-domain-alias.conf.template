@@ -1,0 +1,76 @@
+# VMate 域名别名：Cloudflare -> 宿主 Nginx -> VMate 网关 127.0.0.1:__UPSTREAM_PORT__。
+# 由 install-vmate-domain-alias.sh 渲染；不要直接把占位符版本安装到 Nginx。
+
+# 变量名从域名生成，避免与现有 vmate.dgamef.com 站点的 map 冲突。
+map $http_upgrade $__VHOST_ID___connection_upgrade {
+    default upgrade;
+    '' '';
+}
+
+map $host $__VHOST_ID___host_allowed {
+    default 0;
+    __VMATE_DOMAIN__ 1;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __VMATE_DOMAIN__;
+
+    if ($origin_from_cloudflare = 0) {
+        return 444;
+    }
+
+    return 308 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name __VMATE_DOMAIN__;
+
+    ssl_certificate __FRONTEND_CERT__;
+    ssl_certificate_key __FRONTEND_KEY__;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    if ($origin_from_cloudflare = 0) {
+        return 444;
+    }
+    if ($__VHOST_ID___host_allowed = 0) {
+        return 444;
+    }
+
+    client_max_body_size 16m;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header CF-Connecting-IP "";
+    proxy_set_header Forwarded "";
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $__VHOST_ID___connection_upgrade;
+    proxy_connect_timeout 3s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 300s;
+
+    # 不能绕过 Cloudflare 的 VMate 就绪检查端点。
+    location = /readyz {
+        return 404;
+    }
+
+    # 管理/API 响应绝不缓存。
+    location ~ ^/(?:admin(?:/|$)|api(?:/|$)) {
+        proxy_cache off;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
+        add_header Cache-Control "no-store, private, max-age=0" always;
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:__UPSTREAM_PORT__;
+    }
+}

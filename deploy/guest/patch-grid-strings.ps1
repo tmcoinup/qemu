@@ -1,8 +1,11 @@
 ﻿# patch-grid-strings.ps1 — 把 guest 注册表里的 "GRID RTX6000-*" 替换为审计目录中的消费级型号名
 # 用法:
 #   .\patch-grid-strings.ps1 -TargetName "NVIDIA GeForce GTX 1050"
-# ProfileKey 可省略；兼容调用会从已审计的 PCI tuple 精确推导。
+# ProfileKey 可省略；兼容调用会从 schema-2 catalog 的完整 PCI subsystem
+# tuple 精确推导。板卡品牌、显存厂商和所有数值字段必须来自同一原子行。
 param(
+    [string]$CatalogPath = '',
+    [string]$CatalogSha256 = '',
     [string]$TargetName = 'NVIDIA GeForce GTX 1050',
     [string]$Vendor = '',
     [string]$ProfileKey = '',
@@ -11,6 +14,8 @@ param(
     [ValidateRange(1,65535)][int]$NvapiPciSubVendorId = 0x1028,
     [ValidateRange(1,65535)][int]$NvapiPciSubDeviceId = 0x11C0,
     [ValidateRange(0,255)][int]$NvapiPciRevisionId = 0xA1,
+    [ValidateSet('profile-tuple','transport-device-profile-subsystem')]
+    [string]$PciProjectionMode = 'profile-tuple',
     [ValidateRange(1,10000)][int]$CoreClockMHz = 1354,
     [ValidateRange(1,10000)][int]$BoostClockMHz = 1455,
     [ValidateRange(1,10000)][int]$MemoryClockMHz = 1752,
@@ -42,6 +47,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$CatalogPath = if ([string]::IsNullOrWhiteSpace($CatalogPath)) {
+    Join-Path $PSScriptRoot 'vgpu-profile-catalog.json'
+} else {
+    [IO.Path]::GetFullPath($CatalogPath)
+}
 $out = "C:\Windows\Temp\patch-grid-strings.out"
 "" | Out-File $out
 function W($s){ $s | Out-File -Append $out; Write-Host $s }
@@ -56,45 +66,91 @@ $to = $to.Trim()
 if ($to -notmatch '\A[\x20-\x7E]{1,31}\z') {
     throw 'Final GPU name must contain 1-31 printable ASCII characters.'
 }
-$catalogIdentity = @{
-    '1380' = [pscustomobject]@{
-        ProfileKey = 'gtx750ti_2gb'
-        Name = 'NVIDIA GeForce GTX 750 Ti'
-        SubVendor = 0x10DE
-        SubDevice = 0x1380
-        Revision = 0xA2
-    }
-    '1D01' = [pscustomobject]@{
-        ProfileKey = 'gt1030_2gb'
-        Name = 'NVIDIA GeForce GT 1030'
-        SubVendor = 0x1043
-        SubDevice = 0x85F9
-        Revision = 0xA1
-    }
-    '1C81' = [pscustomobject]@{
-        ProfileKey = 'gtx1050_2gb'
-        Name = 'NVIDIA GeForce GTX 1050'
-        SubVendor = 0x1028
-        SubDevice = 0x11C0
-        Revision = 0xA1
-    }
+if (-not (Test-Path -LiteralPath $CatalogPath -PathType Leaf)) {
+    throw "The schema-2 vGPU identity catalog is missing: $CatalogPath"
 }
-$pciKey = '{0:X4}' -f $NvapiPciDeviceId
-$selectedCatalogIdentity = $catalogIdentity[$pciKey]
-if ($null -eq $selectedCatalogIdentity -or
-    $NvapiPciVendorId -ne 0x10DE -or
-    $NvapiPciSubVendorId -ne $selectedCatalogIdentity.SubVendor -or
-    $NvapiPciSubDeviceId -ne $selectedCatalogIdentity.SubDevice -or
-    $NvapiPciRevisionId -ne $selectedCatalogIdentity.Revision) {
-    throw 'The NVAPI PCI tuple does not match one audited identity profile.'
+try {
+    $catalog = Get-Content -LiteralPath $CatalogPath -Raw |
+        ConvertFrom-Json -ErrorAction Stop
+} catch {
+    throw "The schema-2 vGPU identity catalog is invalid JSON: $($_.Exception.Message)"
 }
+if ([int]$catalog.schemaVersion -ne 2 -or
+    [string]$catalog.identityMode -cne 'protected-user-mode' -or
+    [string]$catalog.transportPnpId -cne 'PCI\VEN_10DE&DEV_1E30' -or
+    [string]$catalog.catalogSha256 -cnotmatch '^[0-9A-F]{64}$') {
+    throw 'The vGPU identity catalog header is not the supported schema-2 contract.'
+}
+if ([string]::IsNullOrWhiteSpace($CatalogSha256)) {
+    $CatalogSha256 = [string]$catalog.catalogSha256
+} elseif ($CatalogSha256 -cne [string]$catalog.catalogSha256) {
+    throw 'The requested catalog hash does not match the protected catalog asset.'
+}
+$candidates = @($catalog.profiles | Where-Object {
+    [int64]$_.nvapiPciVendorId -eq $NvapiPciVendorId -and
+    [int64]$_.nvapiPciDeviceId -eq $NvapiPciDeviceId -and
+    [int64]$_.nvapiPciSubVendorId -eq $NvapiPciSubVendorId -and
+    [int64]$_.nvapiPciSubDeviceId -eq $NvapiPciSubDeviceId -and
+    [int64]$_.nvapiPciRevisionId -eq $NvapiPciRevisionId -and
+    ([string]::IsNullOrWhiteSpace($ProfileKey) -or
+        [string]$_.profile -ceq $ProfileKey)
+})
+if ($candidates.Count -ne 1) {
+    throw 'The full NVAPI PCI subsystem tuple does not select exactly one schema-2 profile.'
+}
+$selectedCatalogIdentity = $candidates[0]
 if ([string]::IsNullOrWhiteSpace($ProfileKey)) {
-    $ProfileKey = [string]$selectedCatalogIdentity.ProfileKey
+    $ProfileKey = [string]$selectedCatalogIdentity.profile
 }
-if ($ProfileKey -cne [string]$selectedCatalogIdentity.ProfileKey -or
-    $to -cne [string]$selectedCatalogIdentity.Name) {
-    throw "ProfileKey/TargetName does not match the audited PCI tuple '$pciKey'."
+$expectedFields = [ordered]@{
+    profile = $ProfileKey
+    name = $to
+    nvapiPciVendorId = $NvapiPciVendorId
+    nvapiPciDeviceId = $NvapiPciDeviceId
+    nvapiPciSubVendorId = $NvapiPciSubVendorId
+    nvapiPciSubDeviceId = $NvapiPciSubDeviceId
+    nvapiPciRevisionId = $NvapiPciRevisionId
+    coreClockMHz = $CoreClockMHz
+    boostClockMHz = $BoostClockMHz
+    memoryClockMHz = $MemoryClockMHz
+    memoryBusBits = $MemoryBusBits
+    memoryBandwidthMBps = $MemoryBandwidthMBps
+    vramMB = $VramMB
+    memoryType = $MemoryType
+    memoryMaker = $MemoryMaker
+    cudaCores = $CudaCores
+    shaderSubPipes = $ShaderSubPipes
+    ropCount = $RopCount
+    tmuCount = $TmuCount
+    architecture = $Architecture
+    implementation = $Implementation
+    chipRevision = $ChipRevision
+    pcieWidth = $PcieWidth
 }
+foreach ($item in $expectedFields.GetEnumerator()) {
+    $actual = $selectedCatalogIdentity.($item.Key)
+    if ($item.Value -is [string]) {
+        if ([string]$actual -cne [string]$item.Value) {
+            throw "Profile field '$($item.Key)' does not match schema-2 catalog."
+        }
+    } elseif ([int64]$actual -ne [int64]$item.Value) {
+        throw "Profile field '$($item.Key)' does not match schema-2 catalog."
+    }
+}
+$catalogVbios = [string]$selectedCatalogIdentity.vbiosVersion
+$requestedVbios = $VbiosVersion.Trim()
+if ($requestedVbios.StartsWith('Version ', [StringComparison]::OrdinalIgnoreCase)) {
+    $requestedVbios = $requestedVbios.Substring(8).Trim()
+}
+if ($requestedVbios -cne $catalogVbios) {
+    throw 'VBIOS version does not match the schema-2 catalog row.'
+}
+$BoardBrand = [string]$selectedCatalogIdentity.boardBrand
+$BoardModel = [string]$selectedCatalogIdentity.boardModel
+$MemoryTypeName = [string]$selectedCatalogIdentity.memoryTypeName
+$MemoryMakerName = [string]$selectedCatalogIdentity.memoryMakerName
+$MemoryMakerNvapiName = [string]$selectedCatalogIdentity.memoryMakerNvapiName
+$IdentityScope = [string]$selectedCatalogIdentity.identityScope
 # 要替换掉的 GRID 原始名（覆盖 1Q/2Q/3Q/4Q/8Q 几个常见 profile）。
 # 优先长串 ("NVIDIA GRID RTX6000-2Q") 先于短串 ("GRID RTX6000") 匹配，
 # 否则命中短的会在 to 前留一个多余的 "NVIDIA " (→ "NVIDIA NVIDIA GeForce...")。
@@ -103,14 +159,19 @@ $from = 'NVIDIA GRID RTX6000-1Q','NVIDIA GRID RTX6000-2Q','NVIDIA GRID RTX6000-3
 
 W "==== Config ===="
 W ("  ProfileKey = $ProfileKey")
+W ("  Catalog    = schema 2 / $CatalogSha256")
 W ("  TargetName = $TargetName")
 W ("  Vendor     = $Vendor")
 W ("  Final 'to' = $to")
 W ("  DeviceIds  = $($DeviceIdMatch -join ', ')")
 W ("  NVAPI PCI   = $($NvapiPciVendorId.ToString('X4')):$($NvapiPciDeviceId.ToString('X4')) / $($NvapiPciSubVendorId.ToString('X4')):$($NvapiPciSubDeviceId.ToString('X4')) rev $($NvapiPciRevisionId.ToString('X2'))")
+W ("  PCI policy  = $PciProjectionMode")
 W ("  VRAM       = $VramMB MB")
 W ("  Clocks     = core $CoreClockMHz / boost $BoostClockMHz / memory $MemoryClockMHz MHz")
 W ("  Memory     = type $MemoryType / maker $MemoryMaker / bus ${MemoryBusBits}-bit")
+W ("  Board      = $BoardBrand $BoardModel")
+W ("  VRAM maker = $MemoryMakerName (NVAPI $MemoryMakerNvapiName=$MemoryMaker)")
+W ("  Scope      = $IdentityScope")
 W ("  Cores      = CUDA $CudaCores / subpipes $ShaderSubPipes / ROPs $RopCount / TMUs $TmuCount")
 W ("  GPU IDs    = arch 0x$($Architecture.ToString('X')) / impl $Implementation / chip rev 0x$($ChipRevision.ToString('X')) / PCIe x$PcieWidth")
 
@@ -151,8 +212,16 @@ Remove-ItemProperty -Path $specKey -Name IdentityContractVersion -Force `
     -ErrorAction SilentlyContinue
 $expectedStrings = [ordered]@{
     IdentityProfileKey = $ProfileKey
+    IdentityCatalogSha256 = $CatalogSha256
     IdentityGpuName = $to
     IdentityVbiosVersion = $VbiosVersion
+    IdentityBoardBrand = $BoardBrand
+    IdentityBoardModel = $BoardModel
+    IdentityMemoryTypeName = $MemoryTypeName
+    IdentityMemoryMakerName = $MemoryMakerName
+    IdentityMemoryMakerNvapiName = $MemoryMakerNvapiName
+    IdentityProjectionScope = $IdentityScope
+    IdentityPciProjectionMode = $PciProjectionMode
 }
 foreach ($item in $expectedStrings.GetEnumerator()) {
     New-ItemProperty -Path $specKey -Name $item.Key -Value $item.Value `
@@ -160,9 +229,12 @@ foreach ($item in $expectedStrings.GetEnumerator()) {
 }
 $spec = @{
     IdentityVramMB = $VramMB
-    # These values are consumed only by the app-local forwarding DLL's public
-    # NvAPI_GPU_GetPCIIdentifiers hook.  They do not alter the PCI enumerator,
-    # PnP hardware ID, driver binding, or kernel signature state.
+    # These values are consumed only by the forwarding DLL's public
+    # NvAPI_GPU_GetPCIIdentifiers hook.  profile-tuple publishes the complete
+    # catalog tuple for legacy app-local packages.  The system package selects
+    # transport-device-profile-subsystem so vendor/device stay mergeable with
+    # the one PnP adapter while the atomic AIB subsystem remains visible.
+    # Neither policy alters PCI config space, PnP, driver binding or signature.
     IdentityPciVendorId = $NvapiPciVendorId
     IdentityPciDeviceId = $NvapiPciDeviceId
     IdentityPciSubVendorId = $NvapiPciSubVendorId
@@ -243,7 +315,7 @@ if ($registryProblems.Count -gt 0) {
 # Commit the complete contract with one final registry-value write.  If even
 # the marker readback is wrong, remove it again so a new shim process forwards
 # the real NVIDIA results instead of consuming partial data.
-New-ItemProperty -Path $specKey -Name IdentityContractVersion -Value 1 `
+New-ItemProperty -Path $specKey -Name IdentityContractVersion -Value 2 `
     -PropertyType DWord -Force | Out-Null
 $committed = Get-ItemProperty -Path $specKey -ErrorAction Stop
 $committedVersion = @($committed.PSObject.Properties |
@@ -257,13 +329,13 @@ try {
     )
 } catch {}
 if ($committedVersion.Count -ne 1 -or
-    [int64]$committedVersion[0].Value -ne 1 -or
+    [int64]$committedVersion[0].Value -ne 2 -or
     $committedKind -cne 'DWord') {
     Remove-ItemProperty -Path $specKey -Name IdentityContractVersion -Force `
         -ErrorAction SilentlyContinue
     throw 'NVAPI identity contract completion marker verification failed.'
 }
-W '  NVAPI identity registry contract committed (version 1, REG_SZ/REG_DWORD).'
+W '  NVAPI identity registry contract committed (version 2, atomic AIB/VRAM identity).'
 
 function RewriteKey($path) {
     if (-not (Test-Path $path)) { return }

@@ -153,6 +153,8 @@ source "$HERE/lib/vm-storage.sh"
 vm_storage_init
 
 if [[ "$ACTION" == start ]]; then
+    vm_storage_require_namespace_ready "$VM_ID" \
+        || die "VM 存储仍是旧布局或与 V-11 冲突"
     vm_storage_prepare_instance "$VM_ID"
 else
     vm_storage_validate_instance_tree "$VM_ID"

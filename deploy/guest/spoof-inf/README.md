@@ -15,7 +15,7 @@
 1. **资源层**始终创建 `nvidia-257 / RTX6000-2Q`，实际 framebuffer 是
    2048MB。宿主的 mdev type 没有为每个消费卡型号各建一份。
 
-2. **身份层**由 QEMU 按 `instances/vmN/vm.conf`，在同一时刻只向 guest 暴露一个消费卡
+2. **身份层**由 QEMU 按 `vms/N/vm.conf`，在同一时刻只向 guest 暴露一个消费卡
    PCI Device ID：`1380` (GTX 750 Ti)、`1D01` (GT 1030) 或
    `1C81` (GTX 1050)。
 
@@ -91,7 +91,7 @@ Get-ChildItem 'C:\NVIDIA\DisplayDriver\553.74' -Recurse -Filter 'nvdm*.inf' |
 7. Windows 正常关机，在宿主执行：
 
 ```bash
-./deploy/promote-base.sh 1
+./deploy/scripts/promote-base.sh 1
 ```
 
 之后 `create-disk.sh` 从 `vms/bases/win10-base.qcow2` 克隆，不需要每台新 VM 重做

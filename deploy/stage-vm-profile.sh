@@ -160,6 +160,10 @@ sha256_file() {
 }
 
 vm_storage_init
+vm_storage_require_namespace_ready "$VM_ID" || {
+    echo "[stage-vm-profile] VM 存储仍是旧布局或与 V-11 冲突" >&2
+    exit 1
+}
 CONF=$(vm_storage_config_path "$VM_ID")
 [[ -r "$CONF" ]] || {
     echo "[stage-vm-profile] 配置不存在: $CONF" >&2
@@ -199,27 +203,36 @@ configured_vm_uuid=${VM_UUID:-}
 vgpu_profile_validate_catalog
 monitor_profiles_validate
 vgpu_profile_load "$configured_gpu_profile"
-# vm.conf is the per-instance source of truth.  The catalog validates the key
-# and supplies backward-compatible defaults for older configs, but explicit
-# persisted name/spec fields must not be silently replaced by catalog values.
-GPU_NAME=${configured_gpu_name:-$GPU_NAME}
-GPU_CORE_MHZ=${configured_gpu_core_mhz:-$GPU_CORE_MHZ}
-GPU_BOOST_MHZ=${configured_gpu_boost_mhz:-$GPU_BOOST_MHZ}
-GPU_MEMORY_MHZ=${configured_gpu_memory_mhz:-$GPU_MEMORY_MHZ}
-GPU_MEMORY_BUS_BITS=${configured_gpu_memory_bus_bits:-$GPU_MEMORY_BUS_BITS}
-GPU_MEMORY_BANDWIDTH_MBPS=${configured_gpu_memory_bandwidth_mbps:-$GPU_MEMORY_BANDWIDTH_MBPS}
-GPU_VRAM_MB=${configured_gpu_vram_mb:-$GPU_VRAM_MB}
-GPU_VBIOS=${configured_gpu_vbios:-$GPU_VBIOS}
-GPU_MEMORY_TYPE_NVAPI=${configured_gpu_memory_type_nvapi:-$GPU_MEMORY_TYPE_NVAPI}
-GPU_MEMORY_MAKER_NVAPI=${configured_gpu_memory_maker_nvapi:-$GPU_MEMORY_MAKER_NVAPI}
-GPU_CUDA_CORES=${configured_gpu_cuda_cores:-$GPU_CUDA_CORES}
-GPU_SHADER_SUBPIPES=${configured_gpu_shader_subpipes:-$GPU_SHADER_SUBPIPES}
-GPU_ROP_COUNT=${configured_gpu_rop_count:-$GPU_ROP_COUNT}
-GPU_TMU_COUNT=${configured_gpu_tmu_count:-$GPU_TMU_COUNT}
-GPU_ARCHITECTURE=${configured_gpu_architecture:-$GPU_ARCHITECTURE}
-GPU_IMPLEMENTATION=${configured_gpu_implementation:-$GPU_IMPLEMENTATION}
-GPU_CHIP_REVISION=${configured_gpu_chip_revision:-$GPU_CHIP_REVISION}
-GPU_PCIE_WIDTH=${configured_gpu_pcie_width:-$GPU_PCIE_WIDTH}
+"$here/guest/generate-vgpu-profile-catalog.sh" --check ||
+    fail_config 'guest schema-2 vGPU 目录未同步；先运行 deploy/guest/generate-vgpu-profile-catalog.sh'
+CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
+# A profile key selects one complete schema-2 row.  Older vm.conf files may
+# persist redundant fields; accept them only when they equal that row.  Never
+# assemble a board identity, VRAM maker, clocks, or PCI tuple from independent
+# overrides.
+require_catalog_value() {
+    local configured=$1 expected=$2 field=$3
+    [[ -z "$configured" || "$configured" == "$expected" ]] ||
+        fail_config "$field 与 GPU_PROFILE=$GPU_PROFILE 的原子目录行不一致（配置: $configured；目录: $expected）"
+}
+require_catalog_value "$configured_gpu_name" "$GPU_NAME" GPU_NAME
+require_catalog_value "$configured_gpu_core_mhz" "$GPU_CORE_MHZ" GPU_CORE_MHZ
+require_catalog_value "$configured_gpu_boost_mhz" "$GPU_BOOST_MHZ" GPU_BOOST_MHZ
+require_catalog_value "$configured_gpu_memory_mhz" "$GPU_MEMORY_MHZ" GPU_MEMORY_MHZ
+require_catalog_value "$configured_gpu_memory_bus_bits" "$GPU_MEMORY_BUS_BITS" GPU_MEMORY_BUS_BITS
+require_catalog_value "$configured_gpu_memory_bandwidth_mbps" "$GPU_MEMORY_BANDWIDTH_MBPS" GPU_MEMORY_BANDWIDTH_MBPS
+require_catalog_value "$configured_gpu_vram_mb" "$GPU_VRAM_MB" GPU_VRAM_MB
+require_catalog_value "$configured_gpu_vbios" "$GPU_VBIOS" GPU_VBIOS
+require_catalog_value "$configured_gpu_memory_type_nvapi" "$GPU_MEMORY_TYPE_NVAPI" GPU_MEMORY_TYPE_NVAPI
+require_catalog_value "$configured_gpu_memory_maker_nvapi" "$GPU_MEMORY_MAKER_NVAPI" GPU_MEMORY_MAKER_NVAPI
+require_catalog_value "$configured_gpu_cuda_cores" "$GPU_CUDA_CORES" GPU_CUDA_CORES
+require_catalog_value "$configured_gpu_shader_subpipes" "$GPU_SHADER_SUBPIPES" GPU_SHADER_SUBPIPES
+require_catalog_value "$configured_gpu_rop_count" "$GPU_ROP_COUNT" GPU_ROP_COUNT
+require_catalog_value "$configured_gpu_tmu_count" "$GPU_TMU_COUNT" GPU_TMU_COUNT
+require_catalog_value "$configured_gpu_architecture" "$GPU_ARCHITECTURE" GPU_ARCHITECTURE
+require_catalog_value "$configured_gpu_implementation" "$GPU_IMPLEMENTATION" GPU_IMPLEMENTATION
+require_catalog_value "$configured_gpu_chip_revision" "$GPU_CHIP_REVISION" GPU_CHIP_REVISION
+require_catalog_value "$configured_gpu_pcie_width" "$GPU_PCIE_WIDTH" GPU_PCIE_WIDTH
 if [[ -n "$configured_mdev_profile" && "$configured_mdev_profile" != nvidia-257 ]]; then
     fail_config "VGPU_MDEV_PROFILE 在 B 模式下必须为 nvidia-257: $configured_mdev_profile"
 fi
@@ -234,8 +247,8 @@ MONITOR_SERIAL=$configured_monitor_serial
 GPU_NAME=$(normalize_ascii_string "$GPU_NAME" 31 GPU_NAME)
 MONITOR_DISPLAY_NAME=$(normalize_ascii_string \
     "$MONITOR_DISPLAY_NAME" 128 MONITOR_DISPLAY_NAME)
-[[ "$MONITOR_SERIAL" =~ ^[A-Z0-9]{1,12}$ ]] || {
-    echo "[stage-vm-profile] MONITOR_SERIAL 非法: $MONITOR_SERIAL" >&2
+monitor_profile_serial_validate "$MONITOR_SERIAL" || {
+    echo "[stage-vm-profile] MONITOR_SERIAL 不符合 ${MONITOR_PROFILE} 的 ${MONITOR_SERIAL_POLICY} 策略: $MONITOR_SERIAL" >&2
     exit 1
 }
 [[ "$configured_vm_uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
@@ -319,7 +332,11 @@ IMAGE_ROOT=${IMAGE_ROOT:-/home/ubuntu/images}
 STAGE_DIR=${STAGE_DIR:-$IMAGE_ROOT/staging}
 mkdir -p "$STAGE_DIR"
 
-assets=(apply-vm-profile.ps1 patch-grid-strings.ps1)
+assets=(
+    apply-vm-profile.ps1
+    patch-grid-strings.ps1
+    vgpu-profile-catalog.json
+)
 if (( ONLINE_MONITOR_RESCUE )); then
     assets+=(spoof-monitor.ps1)
 fi
@@ -360,12 +377,21 @@ MANIFEST_NAME="vm${VM_ID}-manifest.json"
 PROFILE_TMP="$PUBLISH_DIR/$PROFILE_NAME"
 MANIFEST_TMP="$PUBLISH_DIR/$MANIFEST_NAME"
 jq -n \
-    --argjson schemaVersion 1 \
+    --argjson schemaVersion 2 \
+    --arg catalogSha256 "$CATALOG_SHA256" \
     --argjson vmId "$VM_ID" \
     --arg vmUuid "$configured_vm_uuid" \
     --arg spoofMode "$configured_spoof_mode" \
     --arg gpuProfile "$GPU_PROFILE" \
     --arg gpuName "$GPU_NAME" \
+    --arg boardBrand "$GPU_BOARD_BRAND" \
+    --arg boardModel "$GPU_BOARD_MODEL" \
+    --arg boardIdentity "$GPU_BOARD_IDENTITY" \
+    --arg serialPolicy "$GPU_SERIAL_POLICY" \
+    --arg identityScope "$GPU_IDENTITY_SCOPE" \
+    --arg memoryTypeName "$GPU_MEMORY_TYPE" \
+    --arg memoryMakerName "$GPU_MEMORY_MAKER" \
+    --arg memoryMakerNvapiName "$GPU_MEMORY_MAKER_NVAPI_NAME" \
     --arg expectedPnpId "$EXPECTED_PNP_ID" \
     --argjson nvapiPciVendorId "$GPU_PCI_VID_DECIMAL" \
     --argjson nvapiPciDeviceId "$GPU_PCI_DID_DECIMAL" \
@@ -397,12 +423,21 @@ jq -n \
     --argjson refreshHz "$MONITOR_REFRESH_HZ" \
     '{
         schemaVersion: $schemaVersion,
+        catalogSha256: $catalogSha256,
         vmId: $vmId,
         vmUuid: $vmUuid,
         spoofMode: $spoofMode,
         gpu: {
             profile: $gpuProfile,
             name: $gpuName,
+            boardBrand: $boardBrand,
+            boardModel: $boardModel,
+            boardIdentity: $boardIdentity,
+            serialPolicy: $serialPolicy,
+            identityScope: $identityScope,
+            memoryTypeName: $memoryTypeName,
+            memoryMakerName: $memoryMakerName,
+            memoryMakerNvapiName: $memoryMakerNvapiName,
             expectedPnpId: $expectedPnpId,
             nvapiPciVendorId: $nvapiPciVendorId,
             nvapiPciDeviceId: $nvapiPciDeviceId,
@@ -442,6 +477,7 @@ jq -e . "$PROFILE_TMP" >/dev/null
 PROFILE_SHA256=$(sha256_file "$PROFILE_TMP")
 PATCH_SHA256=$(sha256_file "$PUBLISH_DIR/patch-grid-strings.ps1")
 APPLY_SHA256=$(sha256_file "$PUBLISH_DIR/apply-vm-profile.ps1")
+CATALOG_ASSET_SHA256=$(sha256_file "$PUBLISH_DIR/vgpu-profile-catalog.json")
 if (( ONLINE_MONITOR_RESCUE )); then
     MONITOR_SCRIPT_SHA256=$(sha256_file "$PUBLISH_DIR/spoof-monitor.ps1")
     MONITOR_CATALOG_SHA256=$(sha256_file "$PUBLISH_DIR/monitor-profiles.tsv")
@@ -453,12 +489,14 @@ else
 fi
 
 jq -n \
-    --argjson schemaVersion 1 \
+    --argjson schemaVersion 2 \
     --argjson vmId "$VM_ID" \
     --arg profileName "$PROFILE_NAME" \
     --arg profileSha256 "$PROFILE_SHA256" \
     --arg patchName patch-grid-strings.ps1 \
     --arg patchSha256 "$PATCH_SHA256" \
+    --arg catalogName vgpu-profile-catalog.json \
+    --arg catalogSha256 "$CATALOG_ASSET_SHA256" \
     --argjson online "$ONLINE_JSON" \
     --arg monitorScriptName spoof-monitor.ps1 \
     --arg monitorScriptSha256 "$MONITOR_SCRIPT_SHA256" \
@@ -469,6 +507,7 @@ jq -n \
         vmId: $vmId,
         profile: {name: $profileName, sha256: $profileSha256},
         patch: {name: $patchName, sha256: $patchSha256},
+        catalog: {name: $catalogName, sha256: $catalogSha256},
         monitorScript: (if $online then
             {name: $monitorScriptName, sha256: $monitorScriptSha256}
         else null end),
@@ -483,7 +522,11 @@ MANIFEST_SHA256=$(sha256_file "$MANIFEST_TMP")
 # Each rename publishes a complete file.  The manifest is the commit point and
 # is deliberately last: if publication is interrupted, a consumer either sees
 # the previous valid set or rejects the mixed set by hash.
-publish_order=(apply-vm-profile.ps1 patch-grid-strings.ps1)
+publish_order=(
+    apply-vm-profile.ps1
+    patch-grid-strings.ps1
+    vgpu-profile-catalog.json
+)
 if (( ONLINE_MONITOR_RESCUE )); then
     publish_order+=(spoof-monitor.ps1 monitor-profiles.tsv)
 fi
@@ -515,6 +558,7 @@ if [[ -n "$TRANSFER_DIR" ]]; then
     bundle_assets=(
         apply-vm-profile.ps1
         patch-grid-strings.ps1
+        vgpu-profile-catalog.json
         "$PROFILE_NAME"
     )
     if (( ONLINE_MONITOR_RESCUE )); then
@@ -529,6 +573,8 @@ if [[ -n "$TRANSFER_DIR" ]]; then
         printf 'profile_sha256=%s\n' "$PROFILE_SHA256"
         printf 'apply_sha256=%s\n' "$APPLY_SHA256"
         printf 'patch_sha256=%s\n' "$PATCH_SHA256"
+        printf 'catalog_sha256=%s\n' "$CATALOG_ASSET_SHA256"
+        printf 'catalog_contract_sha256=%s\n' "$CATALOG_SHA256"
     } >"$BUNDLE_TMP/READY"
     chmod 0644 "$BUNDLE_TMP/READY"
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Host-only, per-mdev GPU marketing-name contract. No guest assets are used.
+# Host-only, per-mdev GPU identity/RM descriptor contract. No guest assets are used.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
 HELPER="$REPO_ROOT/deploy/host/update-vgpu-mdev-identity.py"
 MDEV_LIB="$REPO_ROOT/deploy/lib/vgpu-mdev.sh"
-START_VM="$REPO_ROOT/deploy/start-vm.sh"
+START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 HOST_PROFILE="$REPO_ROOT/deploy/host/profile_override.toml"
 UNLOCK_SETUP="$REPO_ROOT/deploy/host/setup-vgpu-unlock.sh"
 TMP_DIR=$(mktemp -d)
@@ -37,8 +37,12 @@ mv "$OUTPUT" "$CONFIG"
 grep -Fxq "[mdev.\"$UUID\"]" "$CONFIG"
 grep -Fxq 'card_name = "NVIDIA GeForce GTX 750 Ti"' "$CONFIG"
 grep -Fxq 'adapter_name = "NVIDIA GeForce GTX 750 Ti"' "$CONFIG"
+grep -Fxq 'num_displays = 1' "$CONFIG"
+grep -Fxq 'display_width = 1920' "$CONFIG"
+grep -Fxq 'display_height = 1080' "$CONFIG"
+grep -Fxq 'max_pixels = 2073600' "$CONFIG"
 grep -Fxq "[mdev.\"$OTHER\"]" "$CONFIG"
-if grep -Eq '^(pci_id|pci_device_id|frl_enabled)[[:space:]]*=' "$CONFIG"; then
+if grep -Eq '^(pci_id|pci_device_id|frl_enabled|rm_)[^=]*=' "$CONFIG"; then
     fail 'name-only update unexpectedly wrote an internal identity override'
 fi
 
@@ -57,12 +61,16 @@ adapter_name = "Legacy spelling"
 EOF
 python3 "$HELPER" --config "$CONFIG" --output "$OUTPUT" --uuid "$UUID" \
     --name 'NVIDIA GeForce GTX 1050' \
-    --pci-id 0x1C8111C0 --pci-device-id 0x1C81 --frl-enabled 0
+    --pci-id 0x1C8111C0 --pci-device-id 0x1C81 --frl-enabled 0 \
+    --rm-fb-bus-width 128 --rm-fb-ram-type 8 --rm-fb-memory-vendor 1
 mv "$OUTPUT" "$CONFIG"
 [[ $(grep -Fxc "[mdev.\"$UUID\"]" "$CONFIG") == 1 ]]
 grep -Fxq 'pci_id = 0x1C8111C0' "$CONFIG"
 grep -Fxq 'pci_device_id = 0x1C81' "$CONFIG"
 grep -Fxq 'frl_enabled = 0' "$CONFIG"
+grep -Fxq 'rm_fb_bus_width = 128' "$CONFIG"
+grep -Fxq 'rm_fb_ram_type = 8' "$CONFIG"
+grep -Fxq 'rm_fb_memory_vendor = 1' "$CONFIG"
 python3 -c 'import pathlib,tomllib,sys; tomllib.loads(pathlib.Path(sys.argv[1]).read_text())' \
     "$CONFIG"
 
@@ -82,10 +90,11 @@ fi
 # Updating is idempotent and does not duplicate the UUID section.
 python3 "$HELPER" --config "$CONFIG" --output "$OUTPUT" --uuid "$UUID" \
     --name 'NVIDIA GeForce GTX 1050' \
-    --pci-id 0x1C8111C0 --pci-device-id 0x1C81 --frl-enabled 0
+    --pci-id 0x1C8111C0 --pci-device-id 0x1C81 --frl-enabled 0 \
+    --rm-fb-bus-width 128 --rm-fb-ram-type 8 --rm-fb-memory-vendor 1
 mv "$OUTPUT" "$CONFIG"
 [[ $(grep -Fxc "[mdev.\"$UUID\"]" "$CONFIG") == 1 ]]
-[[ $(grep -Fxc '# Per-VM GPU identity; generated atomically by start-vm.sh.' \
+[[ $(grep -Fxc '# Per-VM GPU identity and FHD display contract; generated atomically by start-vm.sh.' \
     "$CONFIG") == 1 ]] || fail 'generated marker was not text-idempotent'
 if grep -Fq '# Per-VM marketing name; generated atomically by start-vm.sh.' \
         "$CONFIG"; then
@@ -94,16 +103,19 @@ fi
 grep -Fxq 'card_name = "NVIDIA GeForce GTX 1050"' "$CONFIG"
 grep -Fxq 'pci_id = 0x1C8111C0' "$CONFIG"
 grep -Fxq 'frl_enabled = 0' "$CONFIG"
+grep -Fxq 'rm_fb_bus_width = 128' "$CONFIG"
+grep -Fxq 'rm_fb_ram_type = 8' "$CONFIG"
+grep -Fxq 'rm_fb_memory_vendor = 1' "$CONFIG"
 if grep -Fq 'GTX 750 Ti' "$CONFIG"; then
     fail 'old per-mdev name survived replacement'
 fi
 
-# Switching back to B/name-only mode removes stale internal PCI IDs.
+# A legacy name-only rewrite removes every stale optional field atomically.
 python3 "$HELPER" --config "$CONFIG" --output "$OUTPUT" --uuid "$UUID" \
     --name 'NVIDIA GeForce GTX 1050'
 mv "$OUTPUT" "$CONFIG"
 grep -Fxq 'card_name = "NVIDIA GeForce GTX 1050"' "$CONFIG"
-if grep -Eq '^(pci_id|pci_device_id|frl_enabled)[[:space:]]*=' "$CONFIG"; then
+if grep -Eq '^(pci_id|pci_device_id|frl_enabled|rm_)[^=]*=' "$CONFIG"; then
     fail 'name-only mode retained stale internal identity fields'
 fi
 
@@ -113,7 +125,7 @@ mv "$OUTPUT" "$CONFIG"
 if grep -Fq "$UUID" "$CONFIG"; then
     fail 'per-mdev section survived removal'
 fi
-if grep -Fq '# Per-VM GPU identity; generated atomically by start-vm.sh.' \
+if grep -Fq '# Per-VM GPU identity and FHD display contract; generated atomically by start-vm.sh.' \
         "$CONFIG"; then
     fail 'generated marker survived per-mdev removal'
 fi
@@ -161,6 +173,27 @@ if python3 "$HELPER" --config "$CONFIG" --output "$OUTPUT" --uuid "$UUID" \
     fail 'frl_enabled was accepted while removing an identity'
 fi
 
+# RM FB fields form one complete tuple and use NVIDIA's bounded ABI enums.
+if python3 "$HELPER" --config "$CONFIG" --output "$OUTPUT" --uuid "$UUID" \
+        --name 'NVIDIA GeForce GTX 750 Ti' \
+        --rm-fb-bus-width 128 --rm-fb-ram-type 8 >/dev/null 2>&1; then
+    fail 'partial RM FB identity was accepted'
+fi
+for invalid_tuple in '127 8 1' '128 10 1' '128 8 10'; do
+    read -r invalid_bus invalid_type invalid_vendor <<<"$invalid_tuple"
+    if python3 "$HELPER" --config "$CONFIG" --output "$OUTPUT" --uuid "$UUID" \
+            --name 'NVIDIA GeForce GTX 750 Ti' \
+            --rm-fb-bus-width "$invalid_bus" \
+            --rm-fb-ram-type "$invalid_type" \
+            --rm-fb-memory-vendor "$invalid_vendor" >/dev/null 2>&1; then
+        fail "invalid RM FB tuple was accepted: $invalid_tuple"
+    fi
+done
+if python3 "$HELPER" --config "$CONFIG" --output "$OUTPUT" --uuid "$UUID" \
+        --remove --rm-fb-bus-width 128 --rm-fb-ram-type 8 \
+        --rm-fb-memory-vendor 1 >/dev/null 2>&1; then
+    fail 'RM FB identity was accepted while removing an identity'
+fi
 # Exercise the locked library helper without sudo against a writable config.
 VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG="$CONFIG"
 VGPU_MDEV_IDENTITY_HELPER="$HELPER"
@@ -170,13 +203,16 @@ _mdev_sync_identity_override_locked "$UUID" 'NVIDIA GeForce GTX 750 Ti' \
     >/dev/null 2>&1
 grep -Fxq 'card_name = "NVIDIA GeForce GTX 750 Ti"' "$CONFIG"
 _mdev_sync_identity_override_locked "$UUID" 'NVIDIA GeForce GTX 1050' \
-    0x1C8111C0 0x1C81 0 >/dev/null 2>&1
+    0x1C8111C0 0x1C81 0 128 8 1 >/dev/null 2>&1
 grep -Fxq 'pci_id = 0x1C8111C0' "$CONFIG"
 grep -Fxq 'pci_device_id = 0x1C81' "$CONFIG"
 grep -Fxq 'frl_enabled = 0' "$CONFIG"
+grep -Fxq 'rm_fb_bus_width = 128' "$CONFIG"
+grep -Fxq 'rm_fb_ram_type = 8' "$CONFIG"
+grep -Fxq 'rm_fb_memory_vendor = 1' "$CONFIG"
 _mdev_sync_identity_override_locked "$UUID" 'NVIDIA GeForce GTX 750 Ti' \
     >/dev/null 2>&1
-if grep -Eq '^(pci_id|pci_device_id|frl_enabled)[[:space:]]*=' "$CONFIG"; then
+if grep -Eq '^(pci_id|pci_device_id|frl_enabled|rm_)[^=]*=' "$CONFIG"; then
     fail 'library name-only update retained stale identity fields'
 fi
 if _mdev_sync_identity_override_locked "$UUID" 'NVIDIA GeForce GTX 1050' \
@@ -211,8 +247,10 @@ grep -Fq '"$VGPU_MDEV_INTERNAL_PCI_IDENTITY" == 1 && "$SPOOF_MODE" == A' \
     "$START_VM" || fail 'start-vm internal PCI identity is not gated by opt-in plus A mode'
 grep -Fq '"$(( (internal_did_value << 16) | internal_subdid_value ))"' \
     "$START_VM" || fail 'start-vm does not pack vdev_id as DID<<16|SUB_DID'
-grep -Fq 'mdev_internal_pci_args=(' "$START_VM" || \
-    fail 'start-vm does not pass an explicitly enabled internal PCI pair'
+grep -Fq 'mdev_identity_contract_args=(' "$START_VM" || \
+    fail 'start-vm does not build one complete per-mdev identity contract'
+grep -Fq '"$GPU_MEMORY_VENDOR_RM"' "$START_VM" || \
+    fail 'start-vm does not pass the canonical RM memory-vendor enum'
 grep -Fq 'VGPU_MDEV_FRL_ENABLED' "$START_VM" || \
     fail 'start-vm does not expose an explicit per-mdev FRL override'
 grep -Fq 'VGPU_MDEV_IDENTITY_MODE=off' \
@@ -222,12 +260,13 @@ grep -Fq 'preserving existing profile_override.toml' "$UNLOCK_SETUP" || \
     fail 'vgpu_unlock maintenance would erase generated per-mdev identities'
 
 # The global type must stay neutral; names belong only under generated mdev sections.
-# The host type is shared by multiple VMs.  Names and PCI IDs must stay under
+# The host type is shared by multiple VMs.  Names, PCI IDs and RM descriptor
+# fields must stay under
 # generated per-mdev sections, never in the global nvidia-257 profile.
 if awk '
     /^\[profile\.nvidia-257\]$/ { in_profile=1; next }
     /^\[/ { in_profile=0 }
-    in_profile && /^(card_name|adapter_name|pci_id|pci_device_id|frl_enabled)[[:space:]]*=/ { found=1 }
+    in_profile && /^(card_name|adapter_name|pci_id|pci_device_id|frl_enabled|rm_)[^=]*=/ { found=1 }
     END { exit(found ? 0 : 1) }
 ' "$HOST_PROFILE"; then
     fail 'global nvidia-257 profile still hard-codes a per-VM identity'
@@ -246,6 +285,10 @@ reservation = profile.get("framebuffer_reservation")
 assert framebuffer == 0x74000000
 assert reservation == 0x0C000000
 assert framebuffer + reservation == 2048 * 1024 * 1024
+assert profile["num_displays"] == 1
+assert profile["display_width"] == 1920
+assert profile["display_height"] == 1080
+assert profile["max_pixels"] == 1920 * 1080
 PY
 
-echo 'PASS: per-mdev GPU name/PCI identity is packed, scoped, removable, and 2 GiB-correct'
+echo 'PASS: per-mdev GPU identity/RM FB tuple is scoped, validated, removable and reboot-regenerable'

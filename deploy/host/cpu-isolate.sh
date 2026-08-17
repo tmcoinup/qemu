@@ -142,6 +142,79 @@ verify_qemu_process() {
     (( found_name )) || die "pid=$pid 的 -name 与 vm${vm_id} 不匹配"
 }
 
+process_starttime() {
+    local pid=$1 stat_line tail
+    local -a fields=()
+
+    [[ -r "$PROC_ROOT/$pid/stat" ]] || return 1
+    IFS= read -r stat_line <"$PROC_ROOT/$pid/stat" || return 1
+    [[ "$stat_line" == *") "* ]] || return 1
+    # Everything after the final ") " starts at proc stat field 3.  The comm
+    # field itself may contain spaces or parentheses, so a plain awk field
+    # split is not generation-safe.
+    tail=${stat_line##*) }
+    read -r -a fields <<<"$tail"
+    ((${#fields[@]} >= 20)) || return 1
+    [[ "${fields[0]}" != Z && "${fields[0]}" != X &&
+       "${fields[19]}" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s\n' "${fields[19]}"
+}
+
+verify_launcher_process() {
+    local vm_id=$1 pid=$2 expected_start=$3 actual_start uid_line real_uid
+    local arg previous="" found=0
+
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$expected_start" =~ ^[1-9][0-9]*$ ]] ||
+        die "OOM 保护的 pid/starttime 非法"
+    actual_start=$(process_starttime "$pid") ||
+        die "无法核验启动器 pid=$pid 的进程代际"
+    [[ "$actual_start" == "$expected_start" ]] ||
+        die "启动器 pid=$pid 已换代，拒绝修改 OOM 分数"
+
+    if [[ "$TEST_MODE" != 1 ]]; then
+        uid_line=$(awk '/^Uid:/{print $2; exit}' "$PROC_ROOT/$pid/status" 2>/dev/null)
+        [[ "$uid_line" =~ ^[0-9]+$ ]] || die "无法确认启动器 UID"
+        if [[ -n "${SUDO_UID:-}" ]]; then
+            real_uid=$SUDO_UID
+        else
+            real_uid=$EUID
+        fi
+        [[ "$real_uid" =~ ^[0-9]+$ && "$uid_line" == "$real_uid" ]] ||
+            die "只能保护当前调用用户的启动器"
+    fi
+
+    while IFS= read -r arg; do
+        if [[ "${previous##*/}" == start-vm.sh && "$arg" == "$vm_id" ]]; then
+            found=1
+            break
+        fi
+        previous=$arg
+    done < <(tr '\0' '\n' <"$PROC_ROOT/$pid/cmdline")
+    ((found)) || die "pid=$pid 不是 vm${vm_id} 的 start-vm.sh 启动器"
+}
+
+protect_launcher_oom() {
+    local vm_id=$1 pid=$2 expected_start=$3 score_path current target=-500
+
+    valid_vm_id "$vm_id" || die "VM id 非法"
+    verify_launcher_process "$vm_id" "$pid" "$expected_start"
+    score_path="$PROC_ROOT/$pid/oom_score_adj"
+    [[ -f "$score_path" && ! -L "$score_path" ]] ||
+        die "启动器 oom_score_adj 不可用"
+    IFS= read -r current <"$score_path" || die "无法读取 oom_score_adj"
+    [[ "$current" =~ ^-?[0-9]+$ && "$current" -ge -1000 &&
+       "$current" -le 1000 ]] || die "oom_score_adj 当前值非法"
+    # Never weaken a stronger policy inherited from a trusted parent.
+    if ((current < target)); then
+        target=$current
+    fi
+    printf '%s\n' "$target" >"$score_path" || die "无法写入 oom_score_adj"
+    [[ "$(cat "$score_path" 2>/dev/null)" == "$target" ]] ||
+        die "oom_score_adj 写入后复核失败"
+    printf 'host-oom-protect: policy=oom-score-v1 score=%s pid=%s\n' \
+        "$target" "$pid"
+}
+
 verify_vcpu_tids() {
     local pid=$1 tids_csv=$2 tid tgid
     local -A seen=()
@@ -446,10 +519,6 @@ status_isolation() {
 cmd=${1:-}
 shift || true
 
-if [[ "$cmd" == release && $# == 1 ]] && valid_vm_id "$1"; then
-    [[ -d "$PARTITION/vm${1}" ]] || exit 0
-fi
-
 if [[ "$cmd" != status && "$EUID" -ne 0 && "$TEST_MODE" != 1 ]]; then
     if command -v sudo >/dev/null 2>&1; then
         sudo -n -- "$0" "$cmd" "$@"
@@ -470,11 +539,15 @@ case "$cmd" in
         (($# == 1)) || die "用法: release <vm_id>"
         release_isolation "$1"
         ;;
+    oom-protect)
+        (($# == 3)) || die "用法: oom-protect <vm_id> <launcher_pid> <starttime>"
+        protect_launcher_oom "$@"
+        ;;
     status)
         (($# <= 1)) || die "用法: status [vm_id]"
         status_isolation "${1:-}"
         ;;
     *)
-        die "用法: $0 apply|release|status ..."
+        die "用法: $0 apply|release|oom-protect|status ..."
         ;;
 esac

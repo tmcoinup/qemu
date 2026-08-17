@@ -9,10 +9,17 @@ run_unit=1
 build_targets=1
 filter=""
 unit_names=(
+    test-input-paused-release
+    test-sdl2-event
+    test-sdl2-pointer
+    test-usb-hid-numlock
     test-fb-shm-stream-pace
     test-fb-shm-stream-gpu
     test-fb-shm-stream-control
     test-fb-shm-stream-ffmpeg
+)
+qtest_names=(
+    usb-hid-keyboard-queue-test
 )
 
 usage() {
@@ -21,7 +28,7 @@ usage: deploy/tests/run-g11.sh [options]
 
   --filter TEXT   run deployment tests whose path contains TEXT
   --no-build      do not rebuild the QEMU/streamer test targets
-  --no-unit       skip compiled fb-shm unit tests
+  --no-unit       skip compiled G-11 unit tests
   -h, --help      show this help
 
 BUILD_DIR may point at a configured QEMU build directory.
@@ -69,8 +76,12 @@ if ((build_targets)); then
     for unit_name in "${unit_names[@]}"; do
         unit_targets+=("tests/unit/$unit_name")
     done
+    qtest_targets=()
+    for qtest_name in "${qtest_names[@]}"; do
+        qtest_targets+=("tests/qtest/$qtest_name")
+    done
     if ! ninja -C "$build_dir" qemu-system-x86_64 qemu-fb-shm-stream \
-            "${unit_targets[@]}"; then
+            "${unit_targets[@]}" "${qtest_targets[@]}"; then
         echo "run-g11: build failed" >&2
         exit 1
     fi
@@ -113,6 +124,18 @@ if ((run_unit)); then
         else
             failed=$((failed + 1))
             failed_tests+=("${unit_bin#$repo_root/}")
+        fi
+    done
+    for qtest_name in "${qtest_names[@]}"; do
+        qtest_bin="$build_dir/tests/qtest/$qtest_name"
+        printf '\n==> %s\n' "${qtest_bin#$repo_root/}"
+        if [[ -x "$qtest_bin" ]] && \
+                QTEST_QEMU_BINARY="$build_dir/qemu-system-x86_64" \
+                "$qtest_bin" --tap; then
+            passed=$((passed + 1))
+        else
+            failed=$((failed + 1))
+            failed_tests+=("${qtest_bin#$repo_root/}")
         fi
     done
 fi

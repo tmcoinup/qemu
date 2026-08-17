@@ -21,7 +21,7 @@ VM_ROOT="$IMAGE_ROOT/vms"
 export IMAGE_ROOT VM_ROOT
 mkdir -p "$VM_ROOT/legacy/configs" "$VM_ROOT/legacy/disks" \
     "$VM_ROOT/legacy/nvram" "$VM_ROOT/legacy/log" \
-    "$VM_ROOT/control" "$VM_ROOT/1" "$VM_ROOT/_base"
+    "$VM_ROOT/control" "$VM_ROOT/_base"
 
 "$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/win10-vm1.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/win10-base.qcow2" 1M
@@ -35,11 +35,9 @@ printf 'vm2-vars\n' >"$VM_ROOT/legacy/nvram/vm2_VARS.fd"
 printf 'vm2-config\n' >"$VM_ROOT/legacy/configs/vm2.conf"
 printf 'vm2-log\n' >"$VM_ROOT/legacy/log/vm2.log"
 printf 'iso\n' >"$IMAGE_ROOT/win10-ltsc.iso"
-"$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/1/disk.qcow2" 1M
 "$QEMU_IMG" create -q -f qcow2 "$VM_ROOT/_base/compat.qcow2" 1M
 disk_inode=$(stat -c %i "$VM_ROOT/win10-vm1.qcow2")
 categorized_inode=$(stat -c %i "$VM_ROOT/legacy/disks/win10-vm2.qcow2")
-compat_disk_inode=$(stat -c %i "$VM_ROOT/1/disk.qcow2")
 compat_base_inode=$(stat -c %i "$VM_ROOT/_base/compat.qcow2")
 
 "$MIGRATE" --check >"$TMP_DIR/check.out"
@@ -49,32 +47,30 @@ grep -Fq 'CHECK ONLY: no files moved' "$TMP_DIR/check.out" \
 
 "$MIGRATE" --apply >"$TMP_DIR/apply.out"
 [[ ! -e "$VM_ROOT/win10-vm1.qcow2" ]] || fail "legacy disk remains after apply"
-[[ -f "$VM_ROOT/vm1/disk.qcow2" ]] || fail "instance disk missing"
-[[ "$(stat -c %i "$VM_ROOT/vm1/disk.qcow2")" == "$disk_inode" ]] \
+[[ -f "$VM_ROOT/1/disk.qcow2" ]] || fail "instance disk missing"
+[[ "$(stat -c %i "$VM_ROOT/1/disk.qcow2")" == "$disk_inode" ]] \
     || fail "same-filesystem migration did not preserve the disk inode"
-[[ "$(stat -c %i "$VM_ROOT/vm2/disk.qcow2")" == "$categorized_inode" ]] \
+[[ "$(stat -c %i "$VM_ROOT/2/disk.qcow2")" == "$categorized_inode" ]] \
     || fail "categorized disk was not migrated into vm2"
 [[ -f "$VM_ROOT/shared/bases/win10-base.qcow2" ]] || fail "categorized base missing"
 [[ -f "$VM_ROOT/shared/bases/archive/win10-base.qcow2.old" ]] \
     || fail "old base was not archived"
-[[ -f "$VM_ROOT/vm1/vm.conf" ]] || fail "instance config missing"
-[[ -f "$VM_ROOT/vm1/nvram.fd" ]] || fail "instance NVRAM missing"
-[[ -f "$VM_ROOT/vm1/log/qemu.log" ]] || fail "instance log missing"
-[[ -f "$VM_ROOT/vm1/backups/nvram/vm1_VARS.fd.bak-display-test" ]] \
+[[ -f "$VM_ROOT/1/vm.conf" ]] || fail "instance config missing"
+[[ -f "$VM_ROOT/1/nvram.fd" ]] || fail "instance NVRAM missing"
+[[ -f "$VM_ROOT/1/log/qemu.log" ]] || fail "instance log missing"
+[[ -f "$VM_ROOT/1/backups/nvram/vm1_VARS.fd.bak-display-test" ]] \
     || fail "NVRAM backup was not moved into the instance"
-[[ -f "$VM_ROOT/vm2/vm.conf" &&
-   -f "$VM_ROOT/vm2/nvram.fd" &&
-   -f "$VM_ROOT/vm2/log/qemu.log" ]] \
+[[ -f "$VM_ROOT/2/vm.conf" &&
+   -f "$VM_ROOT/2/nvram.fd" &&
+   -f "$VM_ROOT/2/log/qemu.log" ]] \
     || fail "categorized-only vm2 payload was not bundled"
-[[ -d "$VM_ROOT/vm1/run" &&
-   -d "$VM_ROOT/vm1/backups/disks" ]] \
+[[ -d "$VM_ROOT/1/run" &&
+   -d "$VM_ROOT/1/backups/disks" ]] \
     || fail "migration did not complete the instance directory skeleton"
 [[ ! -e "$VM_ROOT/legacy/configs" && ! -e "$VM_ROOT/legacy/disks" &&
    ! -e "$VM_ROOT/legacy/nvram" && ! -e "$VM_ROOT/legacy/log" ]] \
     || fail "migration left empty deprecated classification directories"
 [[ -f "$IMAGE_ROOT/iso/win10-ltsc.iso" ]] || fail "ISO was not classified"
-[[ "$(stat -c %i "$VM_ROOT/1/disk.qcow2")" == "$compat_disk_inode" ]] \
-    || fail "numeric compatibility workflow was modified"
 [[ "$(stat -c %i "$VM_ROOT/_base/compat.qcow2")" == "$compat_base_inode" ]] \
     || fail "compatibility _base was modified"
 find "$VM_ROOT/control" -name 'storage-migration-*.tsv' -type f | grep -q . \
@@ -86,9 +82,9 @@ grep -Fq 'instance layout is current' "$TMP_DIR/idempotent.out" \
 
 # A destination collision must fail before moving the legacy source.
 COLLISION_ROOT="$TMP_DIR/collision/vms"
-mkdir -p "$COLLISION_ROOT/vm2"
+mkdir -p "$COLLISION_ROOT/2"
 "$QEMU_IMG" create -q -f qcow2 "$COLLISION_ROOT/win10-vm2.qcow2" 1M
-"$QEMU_IMG" create -q -f qcow2 "$COLLISION_ROOT/vm2/disk.qcow2" 2M
+"$QEMU_IMG" create -q -f qcow2 "$COLLISION_ROOT/2/disk.qcow2" 2M
 if IMAGE_ROOT="$TMP_DIR/collision" VM_ROOT="$COLLISION_ROOT" \
     "$MIGRATE" --apply >"$TMP_DIR/collision.out" 2>"$TMP_DIR/collision.err"; then
     fail "migration accepted conflicting disk paths"
@@ -231,7 +227,7 @@ fi
 grep -Fq 'planned qcow2 has an external data-file' "$TMP_DIR/data-file.err" \
     || fail "external-data-file refusal was not clear"
 [[ -f "$DATA_VM_ROOT/win10-vm7.qcow2" &&
-   ! -e "$DATA_VM_ROOT/vm7/disk.qcow2" ]] \
+   ! -e "$DATA_VM_ROOT/7/disk.qcow2" ]] \
     || fail "external-data-file refusal moved the qcow2"
 
 # Relative ISO/NVRAM symlinks also change meaning after a directory move, so
@@ -329,7 +325,7 @@ grep -Fq 'runtime state must be cleaned' "$TMP_DIR/runtime-state.err" \
 UNSAFE_ROOT="$TMP_DIR/unsafe-instance/vms"
 mkdir -p "$UNSAFE_ROOT" "$TMP_DIR/unsafe-instance-outside"
 "$QEMU_IMG" create -q -f qcow2 "$UNSAFE_ROOT/win10-vm5.qcow2" 1M
-ln -s "$TMP_DIR/unsafe-instance-outside" "$UNSAFE_ROOT/vm5"
+ln -s "$TMP_DIR/unsafe-instance-outside" "$UNSAFE_ROOT/5"
 if IMAGE_ROOT="$TMP_DIR/unsafe-instance" VM_ROOT="$UNSAFE_ROOT" \
     "$MIGRATE" --check >"$TMP_DIR/unsafe-instance.out" \
     2>"$TMP_DIR/unsafe-instance.err"; then

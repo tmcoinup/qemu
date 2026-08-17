@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-START_VM="$REPO_ROOT/deploy/start-vm.sh"
+START_VM="$REPO_ROOT/deploy/scripts/start-vm.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -98,13 +98,13 @@ trap cleanup EXIT
 [[ ! -e "/sys/bus/mdev/devices/$DRY_MDEV_UUID" ]] \
     || fail "test VM id collides with an existing mdev"
 
-mkdir -p "$VM_ROOT/vm${VM_ID}/log" \
-    "$VM_ROOT/vm${VM_ID}/run" "$VM_ROOT/control"
-touch "$VM_ROOT/vm${VM_ID}/disk.qcow2"
-touch "$VM_ROOT/vm${VM_ID}/nvram.fd"
+mkdir -p "$VM_ROOT/${VM_ID}/log" \
+    "$VM_ROOT/${VM_ID}/run" "$VM_ROOT/control"
+touch "$VM_ROOT/${VM_ID}/disk.qcow2"
+touch "$VM_ROOT/${VM_ID}/nvram.fd"
 touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd"
 
-cat >"$VM_ROOT/vm${VM_ID}/vm.conf" <<EOF
+cat >"$VM_ROOT/${VM_ID}/vm.conf" <<EOF
 VM_ID=$VM_ID
 VM_UUID=3b5a3617-dd9b-42a1-9010-487ffdc145bf
 RTC_CONTRACT=localtime
@@ -201,12 +201,15 @@ V100_OUT="$TMP_DIR/v100.out"
 NO_TPM_OUT="$TMP_DIR/no-tpm.out"
 STREAM_OUT="$TMP_DIR/stream.out"
 GT1030_OUT="$TMP_DIR/gt1030.out"
+VLAN_OUT="$TMP_DIR/vlan.out"
 
 run_start_vm "$SDL_OUT"
 require_text "模式=vgpu-sdl" "$SDL_OUT"
 require_text 'ide-cd.bootindex=-1' "$SDL_OUT"
 reject_text 'id=odd0' "$SDL_OUT"
 reject_text 'media=cdrom' "$SDL_OUT"
+reject_text 'id=installboot' "$SDL_OUT"
+reject_text 'g11-usb-install-boot.img' "$SDL_OUT"
 reject_text 'ide-cd\,drive=' "$SDL_OUT"
 reject_text 'scsi-cd' "$SDL_OUT"
 require_text 'vGPU resource: nvidia-257/2048MB' "$SDL_OUT"
@@ -217,20 +220,24 @@ require_text 'x-pci-revision=0x06' "$SDL_OUT"
 require_tpm2 "$SDL_OUT"
 require_text 'sdl\,gl=on' "$SDL_OUT"
 require_text 'processor-upgrade=0x2D' "$SDL_OUT"
-require_text 'rank=1\,voltage=1200' "$SDL_OUT"
+require_text 'rank=1\,rank-list=1\|1\,voltage=1500' "$SDL_OUT"
 require_text 'firmware-rev=1.0' "$SDL_OUT"
-require_text 'qemu-xhci\,id=xhci\,bus=pcie.0\,addr=0x6\,x-pci-vendor-id=0x8086\,x-pci-device-id=0x8CB1\,x-pci-revision=0x01' "$SDL_OUT"
+require_text 'qemu-xhci\,id=xhci\,bus=pcie.0\,addr=0x6' "$SDL_OUT"
+if grep -F -- 'qemu-xhci\,' "$SDL_OUT" |
+        grep -Eq 'x-pci-(vendor-id|device-id|revision)'; then
+    fail 'native start projected physical PCI facts onto qemu-xhci'
+fi
 require_text 'i8042=off' "$SDL_OUT"
 require_text '旧 vm.conf 缺少 SSD PCIe 链路元数据' "${SDL_OUT%.out}.err"
-require_text '旧 vm.conf 缺少 xHCI PCI identity；保留历史按 CPU_MODEL 推导行为，不改写 guest tuple' \
+require_text '旧 vm.conf 缺少 xHCI 平台事实；按 CPU_MODEL 补齐校验数据，运行时仍固定上游 qemu-xhci 身份' \
     "${SDL_OUT%.out}.err"
-require_text '键盘: Microsoft Wired Keyboard 600 / usb-kbd / USB 045E:0750' \
+require_text '键盘: Microsoft Wired Keyboard 600 legacy tuple / usb-kbd / USB 045E:0750 / SN=none / compat_legacy_identity_only' \
     "$SDL_OUT"
-require_text '鼠标: HUION PenTablet / usb-tablet 绝对坐标 / USB 256C:006D' \
+require_text '绝对指针: PenTablet historical branded tuple / usb-tablet / USB 256C:006D / SN=none / quarantined_protocol_mismatch' \
     "$SDL_OUT"
-require_text 'usb-kbd\,bus=xhci.0\,vendorid=0x045E\,productid=0x0750\,manufacturer=Microsoft\,product=Microsoft\ Wired\ Keyboard\ 600' \
+require_text 'usb-kbd\,id=kbd0\,bus=xhci.0\,usb_version=2\,vendorid=0x045E\,productid=0x0750\,bcd-device=0x0163\,manufacturer=Microsoft\,product=Microsoft\ Wired\ Keyboard\ 600\,x-force-numlock-on=on' \
     "$SDL_OUT"
-require_text 'usb-tablet\,bus=xhci.0\,vendorid=0x256C\,productid=0x006D\,manufacturer=HUION\,product=HUION\ PenTablet' \
+require_text 'usb-tablet\,bus=xhci.0\,usb_version=2\,vendorid=0x256C\,productid=0x006D\,bcd-device=0x0100\,manufacturer=HUION\,product=HUION\ PenTablet' \
     "$SDL_OUT"
 reject_text 'multi=on' "$SDL_OUT"
 if grep -F -- 'usb-kbd\,' "$SDL_OUT" | grep -Fq -- 'serial=' ||
@@ -240,6 +247,35 @@ fi
 reject_text 'show-cursor=on' "$SDL_OUT"
 reject_text 'gtk\,gl=on' "$SDL_OUT"
 require_no_legacy_transport "$SDL_OUT"
+require_text 'bridge\,id=net0\,br=br0\,helper=/usr/local/libexec/qemu-g11-bridge-helper' \
+    "$SDL_OUT"
+reject_text 'g11t' "$SDL_OUT"
+
+run_start_vm "$VLAN_OUT" --vlan-id 11
+require_text "网络: access VLAN 11 / g11t${VM_ID} -> br0（guest untagged）" \
+    "$VLAN_OUT"
+require_text "tap\,id=net0\,ifname=g11t${VM_ID}\,script=no\,downscript=/usr/local/libexec/qemu-g11-vlan-down" \
+    "$VLAN_OUT"
+reject_text 'bridge\,id=net0\,br=br0' "$VLAN_OUT"
+[[ -z "$(find "$VM_ROOT/${VM_ID}/run" -mindepth 1 -print -quit)" ]] \
+    || fail "VLAN dry-run created TAP marker/runtime state"
+
+# VLAN is a launch-time network domain, never persistent guest hardware.
+cp -- "$VM_ROOT/${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.no-vlan"
+printf 'VLAN_ID=99\n' >>"$VM_ROOT/${VM_ID}/vm.conf"
+run_start_vm "$TMP_DIR/config-vlan.out"
+require_text '网络: br0 默认/native LAN' "$TMP_DIR/config-vlan.out"
+reject_text "g11t${VM_ID}" "$TMP_DIR/config-vlan.out"
+mv -- "$TMP_DIR/vm.conf.no-vlan" "$VM_ROOT/${VM_ID}/vm.conf"
+
+if run_start_vm "$TMP_DIR/vlan-duplicate.out" --vlan-id 11 --vlan-id=12; then
+    fail 'duplicate --vlan-id was accepted'
+fi
+require_text '--vlan-id 只能指定一次' "$TMP_DIR/vlan-duplicate.err"
+if run_start_vm "$TMP_DIR/vlan-invalid.out" --vlan-id 4095; then
+    fail 'reserved VLAN 4095 was accepted'
+fi
+require_text '必须是 1..4094' "$TMP_DIR/vlan-invalid.err"
 
 run_start_vm "$GTK_OUT" --gtk --proxy
 require_text "模式=vgpu-gtk" "$GTK_OUT"
@@ -247,27 +283,27 @@ require_native_vfio "$GTK_OUT"
 require_vgpu_root_port "$GTK_OUT"
 require_tpm2 "$GTK_OUT"
 require_text 'gtk\,gl=on\,show-cursor=on\,grab-on-hover=on' "$GTK_OUT"
-require_text "unix:${VM_ROOT}/vm${VM_ID}/run/qmp.sock\\,server\\,nowait\\,multi=on" \
+require_text "unix:${VM_ROOT}/${VM_ID}/run/qmp.sock\\,server\\,nowait\\,multi=on" \
     "$GTK_OUT"
-require_text "QMP multi: native multi-client on ${VM_ROOT}/vm${VM_ID}/run/qmp.sock" \
+require_text "QMP multi: native multi-client on ${VM_ROOT}/${VM_ID}/run/qmp.sock" \
     "$GTK_OUT"
-require_text "QMP alias: ${VM_ROOT}/vm${VM_ID}/run/qmp.sock.proxy" \
+require_text "QMP alias: ${VM_ROOT}/${VM_ID}/run/qmp.sock.proxy" \
     "$GTK_OUT"
-[[ ! -e "$VM_ROOT/vm${VM_ID}/run/qmp.sock.proxy" &&
-   ! -L "$VM_ROOT/vm${VM_ID}/run/qmp.sock.proxy" ]] \
+[[ ! -e "$VM_ROOT/${VM_ID}/run/qmp.sock.proxy" &&
+   ! -L "$VM_ROOT/${VM_ID}/run/qmp.sock.proxy" ]] \
     || fail "--proxy dry-run created a QMP compatibility alias"
 require_no_legacy_transport "$GTK_OUT"
 
 # GT 1030 is a PCIe 3.0 x4 card even though the physical desktop slot is x16.
 # Exercise the profile-specific root-port width without allocating an mdev.
-cp -- "$VM_ROOT/vm${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.gtx1050"
+cp -- "$VM_ROOT/${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.gtx1050"
 sed -i 's/^GPU_PROFILE=.*/GPU_PROFILE=gt1030_2gb/' \
-    "$VM_ROOT/vm${VM_ID}/vm.conf"
+    "$VM_ROOT/${VM_ID}/vm.conf"
 run_start_vm "$GT1030_OUT"
 require_native_vfio "$GT1030_OUT"
 require_vgpu_root_port "$GT1030_OUT" 4
 reject_text 'x-width=16' "$GT1030_OUT"
-mv -- "$TMP_DIR/vm.conf.gtx1050" "$VM_ROOT/vm${VM_ID}/vm.conf"
+mv -- "$TMP_DIR/vm.conf.gtx1050" "$VM_ROOT/${VM_ID}/vm.conf"
 
 run_start_vm "$STREAM_OUT" \
     --stream 'rtmp://ingest.example/live/supersecret' \
@@ -313,17 +349,19 @@ reject_text 'vfio-pci' "$RESCUE_OUT"
 reject_text 'vnc=' "$RESCUE_OUT"
 reject_text 'id=odd0' "$RESCUE_OUT"
 reject_text 'media=cdrom' "$RESCUE_OUT"
+reject_text 'id=installboot' "$RESCUE_OUT"
+reject_text 'g11-usb-install-boot.img' "$RESCUE_OUT"
 
 # Configs created before RTC_CONTRACT was persisted must retain the production
 # local-RTC behavior.  In particular, absence of the field is not evidence that
 # the guest opted into the short-lived UTC compatibility contract.
-cp -- "$VM_ROOT/vm${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.with-rtc"
-sed -i '/^RTC_CONTRACT=/d' "$VM_ROOT/vm${VM_ID}/vm.conf"
+cp -- "$VM_ROOT/${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.with-rtc"
+sed -i '/^RTC_CONTRACT=/d' "$VM_ROOT/${VM_ID}/vm.conf"
 run_start_vm "$MISSING_RTC_OUT" --rescue-sdl
 require_text 'base=localtime\,clock=host\,driftfix=slew' "$MISSING_RTC_OUT"
 require_text 'kvm-pit.lost_tick_policy=delay' "$MISSING_RTC_OUT"
 reject_text 'base=utc\,clock=host' "$MISSING_RTC_OUT"
-mv -- "$TMP_DIR/vm.conf.with-rtc" "$VM_ROOT/vm${VM_ID}/vm.conf"
+mv -- "$TMP_DIR/vm.conf.with-rtc" "$VM_ROOT/${VM_ID}/vm.conf"
 
 run_start_vm "$RDP_OUT" --rdp
 require_text "模式=rdp" "$RDP_OUT"
@@ -378,15 +416,15 @@ unset TEST_VGPU_HOST_CONFIG
 
 # Every vGPU run probes the root-port link/identity properties.  Native runs
 # also probe their display backend and ramfb support; streamed SDL adds the
-# fb-shm object probe.  Invalid stream configurations fail before any probe.
-[[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 18 ]] \
+    # fb-shm object probe.  Invalid stream/VLAN configurations fail before any probe.
+[[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 24 ]] \
     || fail "fake QEMU saw an unexpected invocation"
 
 [[ -z "$(find "$VM_ROOT/control" -mindepth 1 -print -quit)" ]] \
     || fail "dry-run created runtime state"
-[[ -z "$(find "$VM_ROOT/vm${VM_ID}/run" -mindepth 1 -print -quit)" ]] \
+[[ -z "$(find "$VM_ROOT/${VM_ID}/run" -mindepth 1 -print -quit)" ]] \
     || fail "dry-run created per-instance TPM/runtime state"
-[[ ! -e "$VM_ROOT/vm${VM_ID}/tpm" ]] \
+[[ ! -e "$VM_ROOT/${VM_ID}/tpm" ]] \
     || fail "dry-run created persistent TPM state"
 [[ ! -e "$SHMEM_PATH" ]] || fail "dry-run created legacy shared memory"
 [[ ! -e "/sys/bus/mdev/devices/$DRY_MDEV_UUID" ]] || fail "dry-run created an mdev"

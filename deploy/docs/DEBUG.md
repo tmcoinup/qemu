@@ -1,7 +1,7 @@
 # 调试与日志
 
 下列绝对路径是默认 G-11 布局。使用自定义 bundle 时，先运行
-`./deploy/start-vm.sh "$VM_ID" --vm-dir /abs/path/vmN --print-paths`，再使用输出的
+`./deploy/scripts/start-vm.sh "$VM_ID" --vm-dir /abs/path/N --print-paths`，再使用输出的
 `VM_RUN`、`VM_LOG` 和 `VM_CONFIG`，不要猜路径。
 
 ## QEMU 侧
@@ -22,7 +22,7 @@
 
 ### GDB attach 到 QEMU 进程
 ```bash
-sudo gdb -p "$(cat /home/ubuntu/images/vms/G-11/vm${VM_ID}/run/qemu.pid)"
+sudo gdb -p "$(cat /home/ubuntu/images/vms/${VM_ID}/run/qemu.pid)"
 (gdb) info threads
 (gdb) thread N
 (gdb) bt
@@ -43,10 +43,10 @@ sudo gdb -p "$(cat /home/ubuntu/images/vms/G-11/vm${VM_ID}/run/qemu.pid)"
 
 ```bash
 # 终端 1
-./deploy/start-vm.sh "$VM_ID" --proxy
+./deploy/scripts/start-vm.sh "$VM_ID" --proxy
 
 # 终端 2（也可使用同目录下的 qmp.sock.proxy 兼容别名）
-socat - unix-connect:/home/ubuntu/images/vms/G-11/vm${VM_ID}/run/qmp.sock
+socat - unix-connect:/home/ubuntu/images/vms/${VM_ID}/run/qmp.sock
 {"execute":"qmp_capabilities"}
 {"execute":"query-cpu-model-expansion","arguments":{"type":"full","model":{"name":"Core-i5-6500"}}}
 ```
@@ -74,7 +74,7 @@ cat /sys/module/kvm_intel/parameters/flexpriority# 1
 qemu-system-x86_64: tpm-emulator: TPM result for CMD_INIT: 0x9 operation failed
 ```
 **根因**：被强杀(SIGKILL / OOM-kill)的 qemu 留下的 swtpm `--daemon`（PPID 已脱离
-qemu）仍持 `vms/G-11/vmN/tpm/state` 的 NVRAM flock。新 swtpm 能应答控制通道（start-vm 打印
+qemu）仍持 `vms/N/tpm/state` 的 NVRAM flock。新 swtpm 能应答控制通道（start-vm 打印
 "TPM 2.0 ready"），但 QEMU 发 CMD_INIT 时抢不到锁。`tpm.log` 实锤：
 ```
 SWTPM_NVRAM_Lock_Dir: Could not lock access to lockfile: Resource temporarily unavailable
@@ -82,14 +82,14 @@ SWTPM_NVRAM_Lock_Dir: Could not lock access to lockfile: Resource temporarily un
 失败重试还会再叠加孤儿（曾累计到 3 个）。
 
 **自愈**：`start-vm.sh` 起 daemon 前有 preflight reaper（无活 qemu 占用本实例 tpm-sock
-时按 `dir=.../vms/G-11/vmN/tpm/state` 精确清理，跨实例零误杀），所以正常重跑
+时按 `dir=.../vms/N/tpm/state` 精确清理，跨实例零误杀），所以正常重跑
 `start-vm.sh <N>` 即恢复；`stop-vm.sh <N>` 停机时也会一并收 swtpm。
 
 **手动兜底**：
 ```bash
 vm=3
-pkill -f "swtpm socket --tpmstate dir=.*/vms/G-11/vm${vm}/tpm/state,"
-# ⚠ 绝不删 vms/G-11/vmN/tpm/state/tpm2-00.permall —— 那是真 TPM 持久态(EK/Platform cert)，
+pkill -f "swtpm socket --tpmstate dir=.*/vms/${vm}/tpm/state,"
+# ⚠ 绝不删 vms/N/tpm/state/tpm2-00.permall —— 那是真 TPM 持久态(EK/Platform cert)，
 #   删了 guest BitLocker / 证明链会崩
 ```
 
@@ -102,6 +102,30 @@ sudo journalctl -fu nvidia-vgpu-mgr
 # unlock 的 profile 是否生效
 sudo grep -i 'profile override\|vdev_id' /var/log/syslog
 ```
+
+### `Failed to allocate device: 0x59` / VFIO `Connection timed out`
+
+`nvidia-vgpu-mgr` 通常先报 `Failed to allocate device: 0x59`，约 25 秒后 QEMU 才
+显示 `error getting device from group ...: Connection timed out`。这属于 host vGPU
+资源/RM 状态，不是 Windows SYSTEM hive 或 guest 驱动错误。不要反复启动 VM；也
+不要用 `setpci` bus reset、强制 `rmmod` 或删除 TPM/NVRAM。
+
+先用对应 VM 的标准停止封装回收它记录的孤立 mdev；若另一个已停止 VM 留有
+`run/mdev.uuid`，也只对那个实例运行同一命令。确认没有任何 QEMU/mdev 后，照抄：
+
+```bash
+./deploy/scripts/stop-vm.sh N
+sudo ./deploy/host/recover-vgpu-gpu.sh --check --resume
+sudo ./deploy/host/recover-vgpu-gpu.sh --resume
+./deploy/scripts/start-vm.sh N --proxy
+```
+
+第一条 recovery 命令严格只读。第二条持有与 `gpu-mode`/mdev 生命周期相同的全局
+锁，并再次检查无 mdev、无 NVIDIA/VFIO fd 使用者、目标 PCI 函数与 headless 模块
+集合；它依次尝试 NVIDIA 默认 reset、干净模块重载、最后一次仅限 `flr` 的函数级
+reset，并用 one-shot `nvidia-vgpud` 恢复 profile。脚本不会选择 bus reset、不会
+强卸模块，也不会自动重启。若一次封装仍失败，保持所有 VM 关闭并停止操作；取得宿主
+重启授权后再受控重启，不能把失败循环升级成 slot/bus reset。
 
 ### VM3 legacy 严格 GTX 1050 快照诊断（只读）
 
@@ -137,7 +161,7 @@ per-mdev 结果：
 
 ```bash
 vm=3
-conf="/home/ubuntu/images/vms/G-11/vm${vm}/vm.conf"
+conf="/home/ubuntu/images/vms/${vm}/vm.conf"
 uuid=$(sed -n 's/^VM_UUID=//p' "$conf")
 
 sed -n '/^GPU_PROFILE=/p;/^SPOOF_MODE=/p;/^VGPU_MDEV_INTERNAL_PCI_IDENTITY=/p;
@@ -163,11 +187,11 @@ sudo journalctl -b -u nvidia-vgpu-mgr.service --no-pager |
 驱动绑定，不要先强行添加自定义分辨率。
 
 1. 让 Windows 完整关机，不要休眠或只在 guest 中点“重启”。无法操作桌面时，
-   host 可先用 `./deploy/stop-vm.sh 3` 优雅关机。
+   host 可先用 `./deploy/scripts/stop-vm.sh 3` 优雅关机。
 2. 用一次性 off 模式启动：
 
    ```bash
-   ./deploy/start-vm.sh 3 --no-spoof --no-monitor-sync
+   ./deploy/scripts/start-vm.sh 3 --no-spoof --no-monitor-sync
    ```
 
    `--no-spoof` 只影响这次启动，不会改写只读 `vm.conf`；它会让外层 PCI 和

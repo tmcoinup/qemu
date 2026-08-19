@@ -1,7 +1,8 @@
 # Tesla V100 宿主适配说明
 
-> 当前状态：**无 V100 预适配（hardware-unverified）**。配置、假 sysfs
-> 和 dry-run 已可在无卡环境验证；下文“到机后”清单完成前不代表生产可用。
+> 当前状态：**1GB/2GB 软件预适配已完成，V100 实机未验收
+> （hardware-unverified）**。配置、假 sysfs 和 dry-run 已在无卡环境验证；
+> 下文“到机后”清单完成前不代表生产可用。
 
 本文说明如何把当前 NVIDIA vGPU 启动链路从 RTX 2080 宿主迁移到 Tesla V100。
 重点是宿主资源选择、驱动边界和验证方法；它不把 V100 加成一个 QEMU 模拟设备。
@@ -29,29 +30,39 @@
 - QEMU 命令行中的 `x-pci-*` 只改变客户机看到的 PCI 身份，不会改变物理
   V100 型号、实际 framebuffer 或调度份额。
 
+仓库提供的官方 V100 模板默认同时设置 `SPOOF_MODE=off` 和
+`VGPU_MDEV_IDENTITY_MODE=off`：初次验收时 Windows 的系统 PCI/PnP 身份应保持
+V100 vGPU 原生值。所选 1GB/2GB 消费卡目录行只绑定同容量资源和便携用户态元数据，
+不能当成物理 V100 身份已被改变的证明。
+
 mdev 的分配和回收入口见
 [`deploy/lib/vgpu-mdev.sh`](../lib/vgpu-mdev.sh)，QEMU 的
 `display=on,ramfb=on,enable-migration=off` 启动路径见
 [`deploy/scripts/start-vm.sh`](../scripts/start-vm.sh)。
 
-## V100 型号与 2Q resource profile
+## V100 型号与 1Q/2Q resource profile
 
 V100 的 `nvidia-NNN` mdev type 编号由安装的 host driver 和机器实际导出的
 sysfs 内容决定，不能在代码或配置里猜测。适配时按 sysfs `name` 匹配下表中的
 profile 名，再记录实际的 `nvidia-NNN` 目录。
 
-| 物理 V100 变体 | `VGPU_RESOURCE_PROFILE` | `VGPU_RESOURCE_FB_MB` | `VGPU_TOTAL_FB_MB` |
+| 物理 V100 变体 | 1GB 身份映射 | 2GB 身份映射 | `VGPU_TOTAL_FB_MB` |
 |---|---:|---:|---:|
-| Tesla V100 PCIe 16GB | `V100-2Q` | `2048` | `16384` |
-| Tesla V100 PCIe 32GB | `V100D-2Q` | `2048` | `32768` |
-| Tesla V100 SXM2 16GB | `V100X-2Q` | `2048` | `16384` |
-| Tesla V100 SXM2 32GB | `V100DX-2Q` | `2048` | `32768` |
-| Tesla V100S | `V100S-2Q` | `2048` | `32768` |
-| Tesla V100 FHHL | `V100L-2Q` | `2048` | `16384` |
+| Tesla V100 PCIe 16GB | `V100-1Q` | `V100-2Q` | `16384` |
+| Tesla V100 PCIe 32GB | `V100D-1Q` | `V100D-2Q` | `32768` |
+| Tesla V100 SXM2 16GB | `V100X-1Q` | `V100X-2Q` | `16384` |
+| Tesla V100 SXM2 32GB | `V100DX-1Q` | `V100DX-2Q` | `32768` |
+| Tesla V100S PCIe 32GB | `V100S-1Q` | `V100S-2Q` | `32768` |
+| Tesla V100 FHHL | `V100L-1Q` | `V100L-2Q` | `16384` |
+
+名称、framebuffer 和每卡最大实例数以
+[NVIDIA vGPU 16 Virtual GPU Types Reference](https://docs.nvidia.com/vgpu/16.0/grid-vgpu-user-guide/index.html#virtual-gpu-types-reference)
+为基线；最终仍以目标宿主实际导出的 sysfs `name` 和 `available_instances` 为准。
 
 表中的总显存是型号的标称 framebuffer 容量，用于启动前的资源上限检查；
 最终可创建实例数还必须服从 host driver 暴露的 profile 能力、保留开销和
-`available_instances`。不要仅凭 `总显存 / 2048` 承诺可并发 VM 数量。
+`available_instances`。不要仅凭 `总显存 / 单实例显存` 承诺可并发
+VM 数量；1GB 与 2GB 混合时同样必须以 driver 实时结果为准。
 
 SXM2 设备在系统中仍会有可供 sysfs 使用的 PCI BDF，`VGPU_MGPU` 应填写该设备
 实际枚举出的地址，不能照抄另一台机器的值。
@@ -64,8 +75,9 @@ guest-visible GPU 身份混在一起：
 | 变量 | 含义 |
 |---|---|
 | `VGPU_HOST_CONFIG` | 可选的宿主配置文件路径。启动器默认读取 `deploy/host/vgpu-host.conf`；只有要改用其他文件时才设置此变量。 |
-| `VGPU_RESOURCE_PROFILE` | 要匹配的官方 vGPU resource profile 名，例如 `V100-2Q`；不能写死成某台机器上的 `nvidia-NNN`。 |
-| `VGPU_RESOURCE_FB_MB` | 单个 mdev 的 framebuffer，本文列出的 2Q profile 均为 `2048`。 |
+| `VGPU_RESOURCE_PROFILE_1024` | 1GB guest 身份要匹配的官方 vGPU resource profile 名，例如 `V100-1Q`。 |
+| `VGPU_RESOURCE_PROFILE_2048` | 2GB guest 身份要匹配的官方 vGPU resource profile 名，例如 `V100-2Q`。 |
+| `VGPU_RESOURCE_PROFILE` / `VGPU_RESOURCE_FB_MB` | 只保留给单一容量的 legacy 静态配置；不能与上述同容量映射冲突，新 V100 部署不使用它们。 |
 | `VGPU_MGPU` | 物理 V100 的完整 PCI BDF，例如 `0000:65:00.0`；也可用 `auto`，但 profile 在全宿主必须唯一匹配。 |
 | `VGPU_TOTAL_FB_MB` | 该物理 GPU 的 framebuffer 上限，16GB 型号为 `16384`，32GB 型号为 `32768`。 |
 | `VGPU_CONSOLE_INTERVAL_US` | R535 console REGION copy 周期；当前实验值为 `16667`，`0` 表示不写 NVIDIA 私有参数。 |
@@ -83,8 +95,8 @@ cp deploy/host/vgpu-host-v100.conf.example deploy/host/vgpu-host.conf
 尖括号内容必须在到卡后替换，不能作为出厂默认值：
 
 ```bash
-VGPU_RESOURCE_PROFILE=V100-2Q
-VGPU_RESOURCE_FB_MB=2048
+VGPU_RESOURCE_PROFILE_1024=V100-1Q
+VGPU_RESOURCE_PROFILE_2048=V100-2Q
 VGPU_MGPU=<目标宿主上的完整PCI-BDF>
 VGPU_TOTAL_FB_MB=16384
 VGPU_CONSOLE_INTERVAL_US=0
@@ -98,7 +110,8 @@ VGPU_HOST_CONFIG=/etc/qemu-vgpu/v100-pcie-16gb.conf \
   ./deploy/scripts/start-vm.sh 1
 ```
 
-32GB PCIe 型号只需按表改为 `V100D-2Q` 和 `32768`；其他变体同理。配置加载后
+32GB PCIe 型号只需按表同时改为 `V100D-1Q`/`V100D-2Q` 和
+`32768`；其他变体同理。配置加载后
 应校验数值格式、BDF 格式、profile 唯一匹配和 framebuffer 上限，遇到未知值
 必须拒绝启动，不能静默退回 RTX 6000/`nvidia-257`。
 
@@ -115,7 +128,7 @@ override 套到 V100 profile 上。
 V100 到机时不要直接运行它；如果还需要在“vGPU 宿主”与“宿主 CUDA”
 间切换，应先为 V100 的官方驱动单独建立并验证快照。
 
-R535 / NVIDIA vGPU 16 支持上述 V100 2Q profile，但 host 与 guest driver 必须
+R535 / NVIDIA vGPU 16 支持上述 V100 1Q/2Q profile，但 host 与 guest driver 必须
 来自兼容的 vGPU release 组合。不能只看两边都含“535”，也不能直接复用仓库中
 为现有 RTX 2080 环境写死的 guest 版本判断。部署前应以同一 vGPU 16 driver
 bundle 的兼容组合为准，并同时核对 vGPU manager、guest display driver 和
@@ -133,8 +146,8 @@ console 参数，不属于稳定 ABI。换 minor version、V100 变体或 profil
 
 1. 将宿主资源配置与 guest-visible GPU identity 解耦，只通过本文列出的
    `VGPU_*` 宿主变量选择物理资源。
-2. 建立上表六种 V100 变体的配置 fixture，断言 profile、单实例 2048MB 和
-   16/32GB 总量映射正确。
+2. 建立 V100-1Q/2Q 配置 fixture，断言 1024/2048MB 身份自动选中
+   同容量资源，且 16GB 上 7个 2GB + 2个 1GB 的混合容量边界正确。
 3. 用临时目录构造假的 `mdev_supported_types`：覆盖唯一名称匹配、没有匹配、
    重复匹配、profile 目录编号变化和 `available_instances=0`。
 4. 测试 `VGPU_MGPU` 的 BDF 校验，以及所指 sysfs 设备的 vendor、parent GPU 和
@@ -192,19 +205,21 @@ profile、VFIO display REGION 可用或 Windows driver 能正常启动。
 
 - 枚举 `${VGPU_MGPU}/mdev_supported_types` 下每个目录的 `name`、`description`、
   `available_instances` 和 `device_api`。
-- 先运行只读预检：
+- 先分别运行两档只读预检：
 
   ```bash
-  deploy/host/probe-vgpu-host.sh --config deploy/host/vgpu-host.conf
+  deploy/host/probe-vgpu-host.sh --config deploy/host/vgpu-host.conf --fb-mb 1024
+  deploy/host/probe-vgpu-host.sh --config deploy/host/vgpu-host.conf --fb-mb 2048
   ```
 
-- 确认表中对应的 2Q 名称恰好匹配一个 type，并记录实际 `nvidia-NNN`；若名称
+- 确认表中对应的 1Q 和 2Q 名称各恰好匹配一个 type，并记录实际
+  `nvidia-NNN`；若任一名称
   不存在或有歧义，应停止适配并保存完整 sysfs 输出，不能回退到
   `RTX6000-2Q`。
 - 创建一个 mdev，确认其 parent 是目标 V100、`/dev/vfio` 权限正确，然后完整
   删除；重复创建/删除并检查没有残留 UUID。
-- 逐步增加实例，验证 `available_instances`、`VGPU_TOTAL_FB_MB` 上限、driver
-  保留开销和失败后的回收行为。
+- 分别验证 1GB、2GB 和两者混合实例的 `available_instances`、
+  `VGPU_TOTAL_FB_MB` 上限、driver 保留开销和失败后的回收行为。
 
 ### 3. QEMU 与显示路径
 
@@ -220,8 +235,9 @@ profile、VFIO display REGION 可用或 Windows driver 能正常启动。
 
 ### 4. Windows guest 与稳定性
 
-- 安装与 host/profile 兼容的 NVIDIA vGPU guest driver，确认 Device Manager 无
-  Code 43，guest `nvidia-smi` 能识别 profile 且 license 为有效状态。
+- 用 1GB 和 2GB guest 各启动至少一台；安装与 host/profile 兼容的
+  NVIDIA vGPU guest driver，确认 Device Manager 无 Code 43，guest
+  `nvidia-smi` 能识别对应 profile 且 license 为有效状态。
 - 验证重启 guest、重启 vGPU manager、宿主重启、异常中止 QEMU 后 mdev 都能
   正确恢复和回收。
 - 至少执行单 VM 长稳和计划并发数的多 VM 压力测试；持续检查 `dmesg`、

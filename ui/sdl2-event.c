@@ -7,6 +7,17 @@
 #include "qemu/osdep.h"
 #include "ui/sdl2-event.h"
 
+void sdl2_disable_host_text_input(void)
+{
+    SDL_StopTextInput();
+}
+
+bool sdl2_window_updates_allowed(Uint32 flags, bool hidden)
+{
+    return !hidden &&
+           !(flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED));
+}
+
 void sdl2_coalesce_mouse_motion(SDL_Event *event)
 {
     SDL_Event next;

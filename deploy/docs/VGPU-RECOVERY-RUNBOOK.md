@@ -69,6 +69,11 @@ sudo -v
 ./deploy/scripts/vmctl.sh start <vm_id>
 ```
 
+封装会自动按 VM 的资源档选择原生生产驱动端点：1GB/`nvidia-256` 使用
+`SUBSYS_132510DE`，2GB/`nvidia-257` 使用 `SUBSYS_132610DE`，不需要手工填写 PnP
+编号。同步成功必须出现 `EDID_OVERRIDE 写入`、`NVIDIA NV_Modes 命中 1` 和
+`hivex commit 完成`；出现 `WAIT` 时不要当作成功。
+
 密码只在 `sudo` 提示中输入，不写入仓库、配置文件或命令参数。
 
 ### 4. 只验收这三项

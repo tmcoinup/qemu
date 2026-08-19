@@ -21,11 +21,15 @@ assert_eq 512110190592 "$SSD_REQUIRED_SIZE_BYTES" 'fixed SSD byte contract'
 
 mapfile -t profile_keys < <(ssd_profile_keys)
 mapfile -t default_keys < <(ssd_default_profile_keys)
-assert_eq 9 "${#profile_keys[@]}" 'active SSD profile count'
+mapfile -t explicit_keys < <(ssd_explicit_profile_keys)
+assert_eq 10 "${#profile_keys[@]}" 'selectable SSD profile count'
 assert_eq 9 "${#default_keys[@]}" 'default SSD key count'
+assert_eq 1 "${#explicit_keys[@]}" 'explicit SSD key count'
 assert_eq "$(printf '%s\n' "${profile_keys[@]}" | LC_ALL=C sort)" \
-    "$(printf '%s\n' "${default_keys[@]}" | LC_ALL=C sort)" \
-    'active/default SSD key sets'
+    "$(printf '%s\n' "${default_keys[@]}" "${explicit_keys[@]}" | LC_ALL=C sort)" \
+    'selectable/default+explicit SSD key sets'
+assert_eq samsung-960-pro-512gb "${explicit_keys[0]}" \
+    'append-only explicit SSD profile'
 
 declare -A seen=()
 sata_count=0
@@ -43,15 +47,25 @@ for key in "${profile_keys[@]}"; do
     esac
 done
 assert_eq 7 "$sata_count" 'SATA SSD count'
-assert_eq 2 "$nvme_count" 'NVMe SSD count'
+assert_eq 3 "$nvme_count" 'NVMe SSD count'
 
 listed=0
-while IFS=$'\t' read -r key _brand _interface size _rest; do
+listed_default=0
+listed_explicit=0
+while IFS=$'\t' read -r key _brand _interface size _firmware _controller \
+        _form _gen _lanes _model _logical _physical auto_random; do
     [[ -n "$key" ]] || continue
     assert_eq "$SSD_REQUIRED_SIZE_BYTES" "$size" "$key listed capacity"
+    case "$auto_random" in
+        1) listed_default=$((listed_default + 1)) ;;
+        0) listed_explicit=$((listed_explicit + 1)) ;;
+        *) fail "$key has invalid AUTO_RANDOM=$auto_random" ;;
+    esac
     listed=$((listed + 1))
 done < <(ssd_profile_print_catalog)
-assert_eq 9 "$listed" 'printed SSD catalog count'
+assert_eq 10 "$listed" 'printed SSD catalog count'
+assert_eq 9 "$listed_default" 'printed default SSD count'
+assert_eq 1 "$listed_explicit" 'printed explicit SSD count'
 
 # Fail closed if a future edit introduces a 500 GB/other-capacity row, even
 # when it is also added to the default list.  Direct loads must reject it too.
@@ -70,9 +84,9 @@ if (
     fail 'direct SSD load accepted a non-512110190592 profile'
 fi
 
-# Every active profile must be represented exactly once in the reviewed
-# default-key set; omissions and duplicate defaults are both configuration
-# errors rather than silent selection changes.
+# Every selectable profile must be represented exactly once in the reviewed
+# default or explicit set; omissions, duplicates and cross-tier overlap are
+# configuration errors rather than silent selection changes.
 if (
     SSD_DEFAULT_PROFILE_KEYS=("${SSD_DEFAULT_PROFILE_KEYS[@]:0:8}")
     hardware_profile_validate_catalog >/dev/null 2>&1
@@ -85,5 +99,11 @@ if (
 ); then
     fail 'catalog accepted a duplicate default SSD key'
 fi
+if (
+    SSD_EXPLICIT_PROFILE_KEYS+=("${SSD_DEFAULT_PROFILE_KEYS[0]}")
+    hardware_profile_validate_catalog >/dev/null 2>&1
+); then
+    fail 'catalog accepted a default/explicit SSD overlap'
+fi
 
-echo 'PASS: all 9 active/default SSD profiles are exactly 512110190592 bytes (7 SATA, 2 NVMe)'
+echo 'PASS: 10 selectable SSD profiles are exact 512110190592-byte devices; the original 9-row default pool is stable'

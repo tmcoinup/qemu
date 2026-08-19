@@ -26,13 +26,15 @@ reject_text() {
     fi
 }
 
-assert_optical_identity_is_generic() {
+assert_no_persistent_optical_contract() {
     local file=$1 label=$2 optical_line
 
     while IFS= read -r optical_line; do
+        [[ "$optical_line" != *'id=g11-odd'* ]] ||
+            fail "$label attached a default g11-odd optical drive: $optical_line"
         [[ "$optical_line" != *'model='* &&
            "$optical_line" != *'serial='* ]] ||
-            fail "$label exposed an unaudited optical model/serial: $optical_line"
+            fail "$label transient media exposed an unaudited identity: $optical_line"
     done < <(
         sed 's/ -/\n-/g' "$file" |
             grep -E -- '((ide|scsi)-cd|usb-storage)\\,' || true
@@ -151,6 +153,10 @@ if [[ "$#" -eq 2 && "$1" == -device && "$2" == usb-kbd,help ]]; then
         '  x-numlock-on-confirmed=<bool>'
     exit 0
 fi
+if [[ "$#" -eq 2 && "$1" == -device && "$2" == ICH9-LPC,help ]]; then
+    printf '%s\n' '  x-g11-chipset=<str>'
+    exit 0
+fi
 printf '%q ' "$@" >>"$FAKE_QEMU_TRACE"
 printf '\n' >>"$FAKE_QEMU_TRACE"
 if [[ " $* " == *' -qmp stdio '* ]]; then
@@ -258,7 +264,7 @@ reject_text 'ide-cd\,drive=odd0' "$TMP_DIR/qemu.trace"
 require_text 'bootindex=2' "$TMP_DIR/qemu.trace"
 require_text 'id=answer0' "$TMP_DIR/qemu.trace"
 require_text 'bus=ide.2' "$TMP_DIR/qemu.trace"
-assert_optical_identity_is_generic "$TMP_DIR/qemu.trace" \
+assert_no_persistent_optical_contract "$TMP_DIR/qemu.trace" \
     'install bootstrap'
 require_text 'autounattend.iso' "$TMP_DIR/qemu.trace"
 require_text 'Autounattend.xml' "$TMP_DIR/xorriso.trace"
@@ -269,6 +275,8 @@ require_text '手动安装: 产品密钥 / Windows 版本 / 目标磁盘与分�
 require_text '安装模式自动创建空盘' "$TMP_DIR/install.out"
 require_text '安装介质: UEFI helper -> xHCI USB BOT CD-ROM' "$TMP_DIR/install.out"
 require_text '普通启动全部不挂载' "$TMP_DIR/install.out"
+require_text '光驱: 安装模式临时 xHCI USB BOT CD-ROM' \
+    "$TMP_DIR/install.out"
 require_text '  键盘:' "$TMP_DIR/install.out"
 require_text '  绝对指针:' "$TMP_DIR/install.out"
 require_text 'KBD_PRODUCT=' \
@@ -315,7 +323,9 @@ if ! run_start "$INSTALL_IDE_ROOT" "$INSTALL_IDE_ID" \
     sed 's/^/start-vm: /' "$TMP_DIR/install-ide.err" >&2 || true
     fail "explicit IDE install-media fallback failed"
 fi
-require_text 'ide-cd\,drive=odd0\,bus=ide.0\,bootindex=1' \
+require_text 'id=install-odd-media\,media=cdrom\,readonly=on\,format=raw' \
+    "$TMP_DIR/qemu.trace"
+require_text 'ide-cd\,id=install-odd-ide\,drive=install-odd-media\,bus=ide.0\,unit=0\,model=HL-DT-ST\ DVDRAM\ GH24NS50\,ver=XP02\,serial=\,bootindex=1' \
     "$TMP_DIR/qemu.trace"
 reject_text 'usb-storage\,drive=odd0' "$TMP_DIR/qemu.trace"
 reject_text 'id=installboot' "$TMP_DIR/qemu.trace"
@@ -442,15 +452,15 @@ if grep -Fq 'id=answer0' "$TMP_DIR/qemu.trace"; then
     fail "normal base startup attached the install answer ISO"
 fi
 require_text 'ide-cd.bootindex=-1' "$TMP_DIR/qemu.trace"
-reject_text 'id=odd0' "$TMP_DIR/qemu.trace"
-reject_text 'media=cdrom' "$TMP_DIR/qemu.trace"
-reject_text 'ide-cd\,drive=' "$TMP_DIR/qemu.trace"
+reject_text 'id=g11-odd-media' "$TMP_DIR/qemu.trace"
+reject_text 'id=g11-odd' "$TMP_DIR/qemu.trace"
+reject_text 'id=odd0\,' "$TMP_DIR/qemu.trace"
 reject_text 'scsi-cd' "$TMP_DIR/qemu.trace"
 reject_text 'usb-storage\,drive=odd0' "$TMP_DIR/qemu.trace"
 reject_text 'id=installboot' "$TMP_DIR/qemu.trace"
 reject_text 'installboot-usb' "$TMP_DIR/qemu.trace"
 reject_text 'g11-usb-install-boot.img' "$TMP_DIR/qemu.trace"
-assert_optical_identity_is_generic "$TMP_DIR/qemu.trace" \
+assert_no_persistent_optical_contract "$TMP_DIR/qemu.trace" \
     'normal bootstrap'
 
 # The fully parsed final mode decides disk intent. Option values that happen to

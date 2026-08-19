@@ -14,7 +14,11 @@
 #
 # MODEL is required for MSI so the MS-XXXX board code can be bound into the
 # serial.  RELEASE_YEAR is required for Gigabyte so its YY/week fields are not
-# invented independently from the board.  ASUS ignores those two arguments.
+# invented independently from the board.  ASUS, ASRock and ECS ignore those
+# two arguments.  ASRock and ECS formats follow their official serial-label
+# examples/guides:
+#   https://www.asrock.com/support/index.asp?cat=FindSN
+#   https://campaign.ecs.com.tw/support/productinfo/MB.htm
 #
 #   g11_hardware_serial_memory_generate
 #   g11_hardware_serial_memory_validate SERIAL
@@ -86,6 +90,10 @@ _g11_hardware_serial_random_digits() {
     _g11_hardware_serial_random_chars 0123456789 "$1"
 }
 
+_g11_hardware_serial_random_letters() {
+    _g11_hardware_serial_random_chars ABCDEFGHIJKLMNOPQRSTUVWXYZ "$1"
+}
+
 _g11_hardware_serial_random_bounded() {
     local upper=${1:-} value
 
@@ -106,6 +114,12 @@ _g11_hardware_serial_board_vendor_token() {
             ;;
         Gigabyte|GIGABYTE|'Gigabyte Technology Co., Ltd.')
             printf 'gigabyte\n'
+            ;;
+        ASRock|'ASRock Inc.')
+            printf 'asrock\n'
+            ;;
+        ECS|'Elitegroup Computer Systems Co., Ltd.')
+            printf 'ecs\n'
             ;;
         *)
             return 2
@@ -132,7 +146,7 @@ _g11_hardware_serial_release_year_yy() {
 
 g11_hardware_serial_board_generate() {
     local vendor=${1:-} model=${2:-} release_year=${3:-}
-    local token code yy week suffix prefix
+    local token code yy week suffix prefix letter
 
     token=$(_g11_hardware_serial_board_vendor_token "$vendor") || {
         _g11_hardware_serial_error "unsupported board vendor: ${vendor:-<empty>}"
@@ -164,6 +178,19 @@ g11_hardware_serial_board_generate() {
             suffix=$(_g11_hardware_serial_random_digits 8) || return
             printf 'SN%s%02d%s\n' "$yy" "$week" "$suffix"
             ;;
+        asrock)
+            prefix=$(_g11_hardware_serial_random_alnum 2) || return
+            letter=$(_g11_hardware_serial_random_letters 1) || return
+            suffix=$(_g11_hardware_serial_random_digits 6) || return
+            printf '%sM0X%s%s\n' "$prefix" "$letter" "$suffix"
+            ;;
+        ecs)
+            prefix=$(_g11_hardware_serial_random_letters 1) || return
+            code=$(_g11_hardware_serial_random_digits 5) || return
+            letter=$(_g11_hardware_serial_random_letters 1) || return
+            suffix=$(_g11_hardware_serial_random_digits 8) || return
+            printf '%s%s%s%s\n' "$prefix" "$code" "$letter" "$suffix"
+            ;;
     esac
 }
 
@@ -187,6 +214,12 @@ g11_hardware_serial_board_validate() {
             [[ "${serial:2:2}" == "$yy" ]] || return 1
             week=${serial:4:2}
             (( 10#$week >= 1 && 10#$week <= 53 ))
+            ;;
+        asrock)
+            [[ "$serial" =~ ^[0-9A-Z]{2}M0X[A-Z][0-9]{6}$ ]]
+            ;;
+        ecs)
+            [[ "$serial" =~ ^[A-Z][0-9]{5}[A-Z][0-9]{8}$ ]]
             ;;
     esac
 }
@@ -295,7 +328,8 @@ g11_hardware_serial_ssd_profile_keys() {
         intel-545s-512gb \
         wd-pc-sa530-512gb \
         wd-black-pcie-512gb \
-        samsung-970-pro-512gb
+        samsung-970-pro-512gb \
+        samsung-960-pro-512gb
 }
 
 g11_hardware_serial_ssd_profile_supported() {
@@ -304,7 +338,7 @@ g11_hardware_serial_ssd_profile_supported() {
         samsung-860-pro-512gb|crucial-mx100-512gb|\
         kingston-kc400-512gb|intel-545s-512gb|\
         wd-pc-sa530-512gb|wd-black-pcie-512gb|\
-        samsung-970-pro-512gb)
+        samsung-970-pro-512gb|samsung-960-pro-512gb)
             return 0
             ;;
         *)
@@ -334,7 +368,7 @@ g11_hardware_serial_ssd_generate() {
                 payload=$(_g11_hardware_serial_random_hex 14) || return
                 serial="S${payload}"
                 ;;
-            samsung-970-pro-512gb)
+            samsung-970-pro-512gb|samsung-960-pro-512gb)
                 prefix=$(_g11_hardware_serial_random_hex 3) || return
                 payload=$(_g11_hardware_serial_random_hex 10) || return
                 serial="S${prefix}N${payload}"
@@ -397,7 +431,7 @@ g11_hardware_serial_ssd_validate() {
                 return 1
             fi
             ;;
-        samsung-970-pro-512gb)
+        samsung-970-pro-512gb|samsung-960-pro-512gb)
             if [[ "$serial" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{10}$ ]]; then
                 payload="${serial:1:3}${serial:5:10}"
             elif [[ "$mode" == compatible &&

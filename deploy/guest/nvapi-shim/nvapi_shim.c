@@ -1,7 +1,7 @@
 /*
- * nvapi_shim.c — DLL shim sitting between apps (鲁大师 / GPU-Z / HWiNFO /
- * game engine NVAPI user) and the real NVIDIA nvapi64.dll. Intercepts a
- * small whitelist of ABI-verified NVAPI function IDs whose real return values
+ * nvapi_shim.c — process-agnostic NVAPI forwarding layer between any NVAPI
+ * caller and the real NVIDIA nvapi64.dll. Intercepts a small whitelist of
+ * ABI-verified NVAPI function IDs whose real return values
  * leak the physical RTX 2080 hardware and rewrites successful results to match
  * the per-VM identity stored under NVIDIA's registry tree.  Overrides remain
  * disabled unless that tree contains one complete, committed and internally
@@ -23,10 +23,10 @@
  *       -Wl,--subsystem,windows
  *
  * Install in guest:
- *   Use install-nvapi-shim.ps1 -ApplicationExe <path>.  App-local mode copies
- *   the original, validly signed NVIDIA DLL next to that executable under its
- *   *_orig.dll name and places the matching x86/x64 shim beside it.  It never
- *   replaces System32 or SysWOW64 NVAPI files and needs no BCD signature mode.
+ *   The G-11 system projection coordinator installs both architectures from
+ *   one VM-bound, hash-verified package and retains the original NVIDIA DLLs
+ *   as forwarding targets.  Selection is based only on the atomic profile
+ *   contract, never on a caller executable name.
  *
  * See README.md beside this source for the registry contract, ABI evidence,
  * query-interface tracing, and the remaining GPU-Z limitations.
@@ -198,6 +198,11 @@ static BOOL is_valid_pcie_width(NvU32 width)
            width == 16u || width == 32u;
 }
 
+static BOOL is_valid_vram_mb(NvU32 vram_mb)
+{
+    return vram_mb == 1024u || vram_mb == 2048u;
+}
+
 static BOOL profile_contract_matches_registry(const char *profile_key)
 {
     size_t index;
@@ -243,7 +248,9 @@ static BOOL profile_contract_matches_registry(const char *profile_key)
             g_architecture == contract->architecture &&
             g_implementation == contract->implementation &&
             g_chip_revision == contract->chip_revision &&
-            g_pcie_width == contract->pcie_width) {
+            g_pcie_width == contract->pcie_width &&
+            g_ray_tracing_cores == contract->ray_tracing_cores &&
+            g_tensor_cores == contract->tensor_cores) {
             return TRUE;
         }
     }
@@ -256,7 +263,7 @@ static BOOL identity_values_are_coherent(NvU32 legacy_mem_raw_clock_kHz,
     NvU32 derived_bandwidth;
     uint64_t difference;
 
-    if (vram_mb != 2048u || g_vram_mb != vram_mb ||
+    if (!is_valid_vram_mb(vram_mb) || g_vram_mb != vram_mb ||
         g_boost_clock_kHz < g_core_clock_kHz ||
         legacy_mem_raw_clock_kHz != g_mem_raw_clock_kHz ||
         g_memory_type != NVAPI_RAM_TYPE_GDDR5 ||
@@ -340,7 +347,10 @@ static BOOL CALLBACK load_identity_once(PINIT_ONCE once, PVOID parameter,
                   g_identity_gpu_name_valid);
     REQUIRE_ASCII("IdentityVbiosVersion", g_identity_vbios_version,
                   g_identity_vbios_version_valid);
-    REQUIRE_DWORD("IdentityVramMB", &g_vram_mb, 2048u, 2048u);
+    REQUIRE_DWORD("IdentityVramMB", &g_vram_mb, 1024u, 2048u);
+    if (!is_valid_vram_mb(g_vram_mb)) {
+        complete = FALSE;
+    }
     vram_mb = g_vram_mb;
     REQUIRE_DWORD("IdentityPciVendorId", &g_pci_vendor_id, 1u, 0xffffu);
     REQUIRE_DWORD("IdentityPciDeviceId", &g_pci_device_id, 1u, 0xffffu);
@@ -711,8 +721,8 @@ hook_GetPCIIdentifiers(void *hPhysicalGpu, NvU32 *pDeviceId,
 
 /*
  * NvAPI_GPU_GetFBWidthAndLocation (0x11104158) — returns FB bit width
- * and physical location (video memory location enum). 鲁大师 reads bus
- * width via this, not via GetRamBusWidth.
+ * and physical location (video memory location enum). Some inventory clients
+ * use this private query instead of the public GetRamBusWidth entry point.
  * Signature: NvAPI_Status (__cdecl *)(void* gpu, uint32_t *width, uint32_t *loc)
  */
 static NvAPI_Status __cdecl

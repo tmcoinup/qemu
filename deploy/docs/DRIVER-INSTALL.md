@@ -11,8 +11,8 @@
 | host vGPU driver | `535.161.05` |
 | guest GRID package | `538.33` |
 | Windows DriverVersion | `31.0.15.3833` |
-| present Display PnP | `PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE...` |
-| host resource | profile 决定；当前 2 GB 档通常为 `nvidia-257 / 2048 MB` |
+| present Display PnP | 1GB/`nvidia-256` 为 `...DEV_1E30&SUBSYS_132510DE...`；2GB/`nvidia-257` 为 `...DEV_1E30&SUBSYS_132610DE...` |
+| host resource | profile 决定：1GB 为 `nvidia-256 / 1024 MB`，2GB 为 `nvidia-257 / 2048 MB` |
 | guest 模式 | `SPOOF_MODE=B` / `VGPU_IDENTITY_TARGET=name-only` |
 | 身份扩展 | VM-bound system NVAPI one-adapter merge |
 

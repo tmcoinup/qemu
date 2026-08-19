@@ -24,6 +24,8 @@ SUDO_PW=${SUDO_PASSWORD:-}
 source "$here/lib/vm-storage.sh"
 # shellcheck source=lib/vlan-runtime.sh
 source "$here/lib/vlan-runtime.sh"
+# shellcheck source=lib/dgame-endpoints.sh
+source "$here/lib/dgame-endpoints.sh"
 STORAGE_SELECTION_EXPLICIT=0
 if [[ -v VM_INSTANCE_DIR || -v VM_INSTANCES_DIR || -v VM_ROOT || -v VMS_DIR ]]; then
     STORAGE_SELECTION_EXPLICIT=1
@@ -164,6 +166,11 @@ CPU_ISOLATION_STATE_FILE="$(dirname "$QMP_FILE")/cpu-isolation.state"
 STREAM_HELPER="$here/fb-shm-stream.sh"
 STREAM_PID_FILE="$(dirname "$QMP_FILE")/fb-shm-stream.pid"
 STREAM_STATE_PREFIX="$(dirname "$QMP_FILE")/fb-shm-stream"
+DGAME_PREVIEW_SOCKET=$(dgame_preview_socket_path "$(dirname "$QMP_FILE")")
+DGAME_QMP_COMPAT=$(dgame_endpoint_path "$VM_ID" qmp)
+DGAME_QMP_PROXY_COMPAT=$(dgame_endpoint_path "$VM_ID" qmp.proxy)
+DGAME_FB_COMPAT=$(dgame_endpoint_path "$VM_ID" fb)
+DGAME_MON_COMPAT=$(dgame_endpoint_path "$VM_ID" mon)
 G11_VLAN_RUNTIME_MARKER="$(g11_vlan_marker_path "$VM_ID")"
 MDEV_UUID=""
 VM_PATTERN="qemu-system-x86_64.*-name[[:space:]]+vm${VM_ID}([,[:space:]]|$)"
@@ -351,7 +358,13 @@ cleanup_run() {
             rc=1
         fi
     fi
+    dgame_endpoint_alias_remove "$DGAME_QMP_COMPAT" "$QMP_FILE" || true
+    dgame_endpoint_alias_remove "$DGAME_MON_COMPAT" "$MON_FILE" || true
+    dgame_endpoint_alias_remove \
+        "$DGAME_FB_COMPAT" "$DGAME_PREVIEW_SOCKET" || true
+    dgame_endpoint_alias_remove "$DGAME_QMP_PROXY_COMPAT" "$QMP_FILE" || true
     rm -f "$PID_FILE" "$QMP_FILE" "$QMP_PROXY_FILE" "$MON_FILE" \
+        "$DGAME_PREVIEW_SOCKET" \
         2>/dev/null || true
     if ! cleanup_vlan_runtime; then
         echo "[down] vm${VM_ID} VLAN TAP 清理失败" >&2

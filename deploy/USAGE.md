@@ -4,7 +4,7 @@
 [`docs/G11-QUICKSTART.md`](docs/G11-QUICKSTART.md)：它以无 VM 绑定、不内嵌 GPU-Z 的
 `VgpuPortable.exe`、默认单文件 base 注入和任意 B/native VM 克隆为主流程；
 GPU-Z 只在以后显式选择时从官网取得并受审计导入；实际 VM 的 token/授权/电源
-收尾使用显式私有版，同一 EXE 覆盖三款型号；旧 A
+收尾使用显式私有版，同一 EXE 覆盖六个芯片型号/25 条原子 profile；旧 A
 迁移的按 VM 关机提交单独保留。
 
 新建 VM 请直接按
@@ -13,9 +13,7 @@ GPU-Z 只在以后显式选择时从官网取得并受审计导入；实际 VM �
 其中历史 GTX1050 自签 ZIP 收尾已禁用；新 VM 保持 B，等待正式生产签名驱动。
 已有原版 WHQL + Code 0 qualification 时，任意匹配 VM ID 的 outer-only 流程与
 完整关机步骤见 [`docs/SIGNED-CONSUMER-PRODUCTION.md`](docs/SIGNED-CONSUMER-PRODUCTION.md)。
-如果是从 V-11 切换操作习惯，先看
-[`docs/G11-V11-OPERATION-PARITY.md`](docs/G11-V11-OPERATION-PARITY.md)：它列出已对齐项、
-vGPU 有意保留的差异和可直接照抄的运行中显示切换命令。
+当前操作员流程只维护 G-11；DGame 不再探测已退役分支的窗口标题或运行时端点。
 
 ## 入口脚本
 
@@ -23,7 +21,7 @@ vGPU 有意保留的差异和可直接照抄的运行中显示切换命令。
 `deploy/scripts/create-vm.sh`、`deploy/scripts/start-vm.sh` 与
 `deploy/scripts/stop-vm.sh`；这里也是唯一实现位置，不保留 `deploy/` 下的同名旧入口。native、
 stream/relay 和 `--rdp` 只是同一 vGPU VM 的显示模式。
-G-11 与 V-11 是独立分支；脚本位置统一不等于 GPU、显示驱动或验收策略可以混用。
+历史分支资料不得作为本分支 GPU、显示驱动或验收策略的运行时回退。
 
 ```
 ./deploy/scripts/start-vm.sh <vm_id> --install [iso]          # 缺盘自动空盘；默认跳 OOBE
@@ -60,17 +58,18 @@ G-11 与 V-11 是独立分支；脚本位置统一不等于 GPU、显示驱动�
 ./deploy/scripts/create-vm.sh --list-cpu-profiles
 ./deploy/scripts/create-vm.sh --list-board-profiles
 ./deploy/scripts/create-vm.sh --list-memory-profiles
-./deploy/scripts/create-vm.sh --list-platforms # 查看 28 套审核整机及 new/explicit/legacy 策略
+./deploy/scripts/create-vm.sh --list-platforms # 查看 264 套审核整机及 new/explicit/legacy 策略
 ./deploy/scripts/create-vm.sh --list-ssd-profiles
 ./deploy/scripts/create-vm.sh --list-gpu-profiles
 ./deploy/scripts/create-vm.sh --list-monitor-profiles
 ./deploy/scripts/create-vm.sh --list-input-profiles
 ./deploy/scripts/create-vm.sh --list-input-compat # 只查旧 VM 的兼容/隔离记录
 ./deploy/package-vgpu-one-click.sh             # 推荐：生成无 VM 绑定、不内嵌 GPU-Z 的 VgpuPortable.exe
-./deploy/package-vgpu-one-click.sh --with-license-token # 私有：三款统一身份+token+Licensed+关闭休眠
-./deploy/package-vgpu-portable.sh --list-gpu-profiles # 查看 12 条原子板卡/显存合同
-sudo ./deploy/install-vgpu-portable-to-base.sh # 默认只将 portable EXE 一次性安全注入 base
-./deploy/scripts/vmctl.sh clone <vm_id> [--gpu-profile PROFILE] [--start] # GPU 可省略随机；自动生成/同步显示器
+./deploy/package-vgpu-one-click.sh --with-license-token # 私有：六个芯片型号/25条身份+token+Licensed+关闭休眠
+./deploy/package-vgpu-portable.sh --list-gpu-profiles # 查看 25 条原子板卡/显存合同
+./deploy/scripts/vmctl.sh seal <source_id> <base_name> # 默认清理 WeGame/Tencent 身份并封装具名 base
+sudo ./deploy/install-vgpu-portable-to-base.sh --base-name <base_name> # 给所选 base 注入 portable 并生成独立证明
+./deploy/scripts/vmctl.sh clone <base_name> <new_id> [--gpu-profile PROFILE] [--start] # 精确选择 base；GPU 可随机
 ./deploy/package-vgpu-one-click.sh <vm_id>     # legacy：A 迁移或旧 B 的 VM 绑定包
 ./deploy/package-gpuz-profile.sh <vm_id> [...] # legacy B 的 VM/UUID 绑定 GPU-Z 包
 ./deploy/package-vgpu-production-migration.sh <vm_id>         # legacy A → 原始签名 538.33 + B 的 guest 单 EXE
@@ -101,25 +100,25 @@ G-11 已开放完整的 `--vlan-id VID` 生命周期：root-owned helper 逐 VM 
 均会幂等回收。未携带 VLAN 参数时使用默认原生 LAN，不会继承 `vm.conf` 中的 VID，
 VLAN 失败也不会静默回退。
 
-active 池包含 6 款 CPU、4 块双槽 H81 主板和 15 套双条 DDR3 内存，内存覆盖
-Kingston、Samsung、Micron、SK hynix 四品牌。创建器只从审核整机白名单筛选，
+active 池包含 6 款 CPU、10 块双槽 H81 主板和 25 套双条 DDR3 内存，内存覆盖
+Kingston、Samsung、Micron、SK hynix、Crucial 五品牌。创建器只从审核整机白名单筛选，
 不能任意笛卡尔组合。默认低端池为 24 套 4/6/8 GiB 组合；
 i7-4790 的 8 GiB 组合不参加正常随机，通常只能显式创建；5 款默认 CPU 均未
 得到 `enforce=on supported`、且 i7 自身明确 supported 时，无参数创建会先把
 i7 作为 active 能力兜底。
 完整目录另保留 i5-4590/H97、i5-6500/B150、i3-8100/B360 三套 legacy，正常随机
 不使用；只有连 i7 在内的 6 款 active CPU 都明确不可用时才自动 legacy 兜底。
-另有 9 款精确 `512110190592` 字节 SSD（Samsung、Crucial、Kingston、Intel、WD）、
-3 个 2 GB GPU 目标型号、12 条系统用户态原子 profile（板卡 metadata 覆盖
-NVIDIA、ASUS、Dell、MSI、Gigabyte、GALAX、Colorful（七彩虹）；显存厂家覆盖 Samsung、
-SK hynix、Micron），以及 35 款全部为
+另有 10 款精确 `512110190592` 字节 SSD（原 9 款默认，960 PRO 手动扩展）、
+3 个 1GB + 3 个 2GB GPU 芯片型号、25 条系统用户态原子 profile（原 24 条默认；板卡 metadata
+覆盖 NVIDIA、ASUS、Dell、MSI、Gigabyte、GALAX、Colorful（七彩虹）、ZOTAC、EVGA；
+显存厂家覆盖 Samsung、SK hynix、Micron、Elpida），以及 35 款全部为
 1920×1080@60 的显示器（新建 8 品牌/28 款，完整 11 品牌）。active 键盘和可选
 相对鼠标各为 Microsoft、Logitech、Dell 三品牌；默认绝对指针是唯一的 QEMU 通用
 profile。`q35`/ICH9/ICH9-AHCI、`qemu-xhci`、QEMU `nvme` controller、安装/救援
 `std-vga` 和 legacy `ivshmem` 是实现/兼容边界，不进入品牌扩展。4 GiB=2×2 GiB、
 8 GiB=2×4 GiB，均为真双通道；6 GiB=4+2 GiB
 Intel Flex，只是匹配的 4 GiB 区双通道，额外 2 GiB 区单通道。创建和每次启动
-都会联合检查 CPU/主板、逐槽内存、SSD 链路、2 GB mdev、GPU PCIe 宽度及 TPM，
+都会联合检查 CPU/主板、逐槽内存、SSD 链路、1GB/2GB mdev、GPU PCIe 宽度及 TPM，
 详见 [`docs/G11-HARDWARE-POOL.md`](docs/G11-HARDWARE-POOL.md)。
 
 新建 VM 的硬件合同 v3 延续了 system/baseboard/chassis 三个标签共用所选主板品牌
@@ -129,8 +128,8 @@ chassis 是整机集成商或资产所有者语义。SSD 使用型号专属严�
 `MEM_SERIAL_LIST` 持久化；所有最终槽值在统一 `MEMORY_SERIAL` 命名空间跨 VM
 查重。DDR3 启动时
 逐槽容量、Rank、device width、module/DRAM JEP106、serial、part 必须原子一致，
-同时进入 SMBIOS 和 SPD。Micron E1 目录 SKU 在 18-byte SPD part 字段使用
-`MT4JTF25664AZ-1G6` / `MT8JTF51264AZ-1G6` 基础 part。两套 legacy DDR4 仍为
+同时进入 SMBIOS 和 SPD。Micron 目录 SKU 在 18-byte SPD part 字段使用
+对应的 `-1G6`（1600）或 `-1G4`（1333）基础 part。两套 legacy DDR4 仍为
 256-byte page 0-only，身份留在 SMBIOS Type 17。GPU 与 USB 输入的序列策略分别为
 `not-exposed` 和 `none`，不会拿 mdev UUID 或虚构 USB `serial=` 充数。显示器只有
 Samsung S24F350/Redmi RMMNT238NF 是已审核的型号专属格式，其余 33 款明确使用
@@ -140,11 +139,13 @@ Samsung S24F350/Redmi RMMNT238NF 是已审核的型号专属格式，其余 33 �
 若 guest 禁止测试签名和自签名，按
 [`docs/GPUZ-ONE-CLICK.md`](docs/GPUZ-ONE-CLICK.md) 使用
 portable 主流程。默认产物为
-`$STAGE_DIR/VgpuPortable/VgpuPortable.exe`，内嵌 GTX 750 Ti、GT 1030、
-GTX 1050 的 12 条锁定原子 profile，但不内嵌 GPU-Z 程序，也没有 VM ID/UUID。
+`$STAGE_DIR/VgpuPortable/VgpuPortable.exe`，内嵌 GT 730、GT 740、GTX 750、
+GTX 750 Ti、GT 1030、GTX 1050 的 25 条锁定原子 profile，但不内嵌 GPU-Z
+程序，也没有 VM ID/UUID。
 板卡、subsystem、VBIOS、时钟、显存厂家和 NVAPI enum 必须整行匹配，不能单独
 覆盖。首次及普通安装默认不读取、不要求也不安装 GPU-Z；它会安装受保护的身份
-组件和 `vGPU Identity Query`。以后需要 GPU-Z 时，把官方审计的 2.70 x86 精确
+组件和 `vGPU Identity Query`，并在同一次双击中应用推荐的 guest 登录启动/
+native-display 性能优化。以后需要 GPU-Z 时，把官方审计的 2.70 x86 精确
 命名为 `GPU-Z.exe` 放在同目录，再显式运行 `VgpuPortable.exe /with-gpuz`；锁定的
 SHA-256 为
 `6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29`。错误或被篡改的
@@ -166,6 +167,22 @@ NVAPI 程序都显示同一板卡/显存身份并持久恢复 monitor 时，再�
 ./deploy/package-system-nvapi-projection.sh 456
 ```
 
+默认产物进入 `/home/ubuntu/images/vms/456/packages/SystemNvapiProjection/`，随
+`vmctl delete 456` 删除完整 VM bundle 时一并清理；`--output-root` 仅用于调用者
+自行管理生命周期的外部导出。
+打包器会直接打印只读挂载命令；日常手工入口为：
+
+```bash
+./deploy/scripts/vmctl.sh cdrom 456 mount /absolute/package.iso
+./deploy/scripts/vmctl.sh cdrom 456 status
+./deploy/scripts/vmctl.sh cdrom 456 eject
+```
+
+普通启动默认没有光驱。`mount` 会热插一台设备层
+`HL-DT-ST DVDRAM GH24NS50 / XP02` 只读光驱，`eject` 会删除整台设备。
+已由旧启动参数运行的 VM 需要停机/启动一次，详见
+[`docs/G11-OPTICAL-DRIVE.md`](docs/G11-OPTICAL-DRIVE.md)。
+
 它只替换系统用户态 NVAPI 转发 DLL，保存并验证相邻的 NVIDIA 正式签名原件，
 不触碰 INF/CAT/SYS 或 BCD。系统模式保留 real `10DE:1E30` vendor/device，只合并
 profile Subsystem 与静态字段，所以 PnP、DXGI/D3D 和 NVAPI 仍是一块逻辑显卡。
@@ -174,7 +191,7 @@ profile Subsystem 与静态字段，所以 PnP、DXGI/D3D 和 NVAPI 仍是一块
 实际 VM 还需要 DLS 授权时，token 权限设为 `0600` 后运行
 `./deploy/package-vgpu-one-click.sh --with-license-token`。独立输出
 `$STAGE_DIR/VgpuPortableLicensed/VgpuPortable.exe` 含 token，双击后必须看到
-`Licensed`，并会关闭休眠/Fast Startup。它不得写入通用 base、提交仓库或公开分发；
+`Licensed`，并会关闭休眠/Fast Startup、应用相同性能优化。它不得写入通用 base、提交仓库或公开分发；
 默认 `VgpuPortable/` 产物仍不含 token。
 
 portable 阶段可使用安装器创建的 `vGPU Identity Query` 快捷方式初验板卡和显存厂家；必须
@@ -182,15 +199,16 @@ portable 阶段可使用安装器创建的 `vGPU Identity Query` 快捷方式初
 GPU-Z 后，才使用 `GPU-Z (vGPU profile)` 快捷方式查看兼容显示。桌面原有的
 TechPowerUp GPU-Z 从另一目录启动，不会继承 app-local shim，所以可继续显示原生
 TU102 或核心字段。profile 快捷方式本身也可能在 `GPU`/Technology/Die Size 等未覆盖
-字段中显示 TU102/12 nm/754 mm²。完成系统包后，应以包内 x86/x64 probe、单
-Display 和 validated 收据作为最终验收；不要手工替换 DLL。
+字段中显示 TU102/12 nm/754 mm²。完成系统包后，应以包内 x86/x64 NVAPI 与
+原生 D3D12 四个 probe、单 Display 和 validated 收据作为最终验收；不要手工
+替换 DLL。
 
 最短流程：
 
 ```bash
 ./deploy/package-vgpu-one-click.sh
-sudo ./deploy/install-vgpu-portable-to-base.sh
-./deploy/scripts/vmctl.sh clone 456 --start
+sudo ./deploy/install-vgpu-portable-to-base.sh --base-name win10-ltsc-v1
+./deploy/scripts/vmctl.sh clone win10-ltsc-v1 456 --start
 ```
 
 第二条必须在所有 VM 完整停止、base 无 backing/data-file、Windows NTFS 干净且
@@ -232,12 +250,19 @@ QEMU 参数，不创建或删除任何 socket/软链接。
 
 ## CPU 隔离
 
-CPU 隔离默认是 `required`：启动器从 QMP `query-cpus-fast` 取得真实 vCPU TID，
-为每个 vCPU 分配一个逻辑 CPU。`service CPU` 默认是 `auto`：可用容量足够时为
-QEMU 主循环、显示和 IO 线程留 1 个专用逻辑 CPU；不足时自动回退为 0，
-但每个 vCPU 的 1:1 绑核不变。只有显式传 `--svc-cpus N` 时才严格要求该数量、
-容量不足也不自动降级。普通启动会给 QEMU 加 `-S`，隔离完成后才放行
-guest；失败则终止本次 VM。
+CPU 隔离默认是 `required`：启动器从 QMP `query-cpus-fast` 取得真实 vCPU TID 以及
+socket/core/thread 拓扑，把 guest 的一个 core 映射到一个完整 host core；guest 的
+两个 SMT thread 对应同一 host core 的两个 sibling。因而 `2C4T` guest 精确占用
+host `2C4T`，而不是四个不同物理核。`service CPU` 默认是 `0`，不会为 QEMU 主循环、
+显示和 IO 线程另留逻辑 CPU。只有显式传 `--svc-cpus auto` 时，容量足够才分配
+1 个、不足则回退为 0；显式传 `--svc-cpus N` 时严格要求该数量，容量不足也不
+自动降级。无论 service CPU 如何设置，guest core/SMT 的对应关系都不变。普通启动
+会给 QEMU 加 `-S`，隔离完成后才放行 guest；失败则终止本次 VM。
+
+当前 22C44T host 的自动保留区是 3 个物理核。连续启动 8 台相同 `2C4T` VM 时，
+VM 合计使用 16C32T；被保留的前 3 核加上尚未分配的后 3 核，host 仍有 6C12T
+供桌面和其他应用使用。选择时按完整物理核排除：只要某个 sibling 已属于另一台
+VM，该物理核就不会再分给新 VM。
 
 首次普通启动若发现 root helper、sudoers 或
 `python3`/`taskset`/`flock`/`cmp` 缺失，会自动调用安装器；`sudo` 本身必须
@@ -251,13 +276,13 @@ sudo ./deploy/host/install-cpu-isolation.sh
 ./deploy/scripts/start-vm.sh 1 --cpu-isolate       # 同默认行为，保留为显式兼容参数
 ./deploy/scripts/start-vm.sh 1 --cpu-isolate-auto  # 显式允许不可用时降级继续
 ./deploy/scripts/start-vm.sh 1 --no-cpu-isolate    # 明确关闭
+./deploy/scripts/start-vm.sh 1 --svc-cpus auto     # 可选：容量足够时另留一个逻辑 CPU
 ./deploy/scripts/start-vm.sh 1 --svc-cpus 1        # 可选：为非 vCPU 线程另留一个逻辑 CPU
 ```
 
-启动摘要默认应显示 `service CPUs=auto`；隔离完成行会按当时容量显示
-`1 service CPU` 或 `0 service CPU`。用
-`env -u QEMU_SERVICE_CPUS ./deploy/scripts/start-vm.sh N` 可排除环境覆盖；要固定策略则
-显式传 `--svc-cpus 0` 或 `--svc-cpus 1`。
+启动摘要默认应显示 `service CPUs=0`，隔离完成行应显示 `service CPU=0`。
+用 `env -u QEMU_SERVICE_CPUS ./deploy/scripts/start-vm.sh N` 可排除环境覆盖；确需
+辅助线程专用 CPU 时，显式传 `--svc-cpus auto` 或 `--svc-cpus 1`。
 
 默认 `HOST_OOM_PROTECT=1` 会在启动 QEMU/swtpm/sidecar 前，通过同一个
 root-owned helper 将当前 VM 进程树临时设为 `oom_score_adj=-500`。调用会
@@ -295,12 +320,82 @@ helper 只操作 cgroup v2 的
 如需禁止自动安装，显式设置 `CPU_ISOLATION_AUTO_INSTALL=0`；在默认 required
 模式下，这会让缺依赖的启动直接失败，而不是静默关闭隔离。
 
+## G-11 DGame 本地预览
+
+G-11 native SDL/GTK 默认创建独立的 `dgame-preview-vmN`，并发布 DGame 既有发现
+路径：
+
+```text
+/tmp/qemu-stealth-N.fb          -> vms/N/run/dgame-fb-shm.sock
+/tmp/qemu-stealth-N.qmp         -> vms/N/run/qmp.sock
+/tmp/qemu-stealth-N.mon         -> vms/N/run/monitor.sock
+SDL title                       = win10-N
+QMP query-name                  = vmN
+```
+
+窗口名和 QMP 名故意分开：前者是 DGame 稳定窗口名，后者保留 G-11
+`start/ctl/stop` 的进程身份。运行中的旧 VM 不重启即可补 preview：
+
+```bash
+./deploy/scripts/vmctl.sh display 8 preview-on
+./deploy/scripts/vmctl.sh display 8 status
+# 不再需要时只删 DGame preview，不碰网络推流
+./deploy/scripts/vmctl.sh display 8 preview-off
+```
+
+默认 `DGAME_PREVIEW_GPU=auto`。QEMU 复用 SDL/GTK 已上传到活动亮机卡的纹理，先在
+GPU 内裁业务 ROI，再把 ROI texture 导出为 dma-buf；当前宿主唯一 render node 是
+RX570 的 `/dev/dri/renderD128`。换成 RX550 后不改脚本，只要活动桌面仍由
+`amdgpu + Mesa/EGL` 提供，provider 会自动跟随。导出或 DGame 导入失败时，每台 VM
+自动重连同一对象的 SHM 帧，不会留下黑色预览。只做兼容诊断时可用
+`--no-dgame-preview-gpu`；完全关闭默认预览用 `--no-dgame-preview`。
+
+预览帧率/长时间静置修复的傻瓜更新流程（以 VM 8 为例）：
+
+```bash
+# 1. 先增量构建；封装脚本会同时校验 QEMU 与 qemu-edid
+cd /home/ubuntu/projects/qemu
+./deploy/host/build-qemu.sh
+
+# 2. 运行中的 QEMU 仍是旧映像；保存业务后用统一入口正常重启
+./deploy/scripts/vmctl.sh stop 8
+./deploy/scripts/vmctl.sh start 8
+./deploy/scripts/vmctl.sh display 8 status
+
+# 3. 更新并重启 DGame；不需要改 ROI 或重建 preview 对象
+cd /home/ubuntu/projects/dgame/client
+cargo build --release
+./target/release/dgame
+```
+
+`LIVE` 数值是最近 1 秒实收帧数，应稳定跟随设置值。无论画面
+是否变化，QEMU 都会按该节拍重发最后一帧；damage 只负责刷新缓存内容。
+固定帧流静默 2 秒后 DGame 先重发当前 `SET_RATE`，再等 1 秒仍无帧
+才重连，不再需要手动点“显示/隐藏”。
+
+16 窗口、`800x600` / `1067x600` 的只读容量核算：
+
+```bash
+./deploy/scripts/vmctl.sh preview-capacity --instances 16 --rate 60
+```
+
+按默认 `1920x1080` guest DisplaySurface，60 Hz 整屏上传上界为 7594 MiB/s；
+两个 ROI 自身为 1758 / 2345 MiB/s，合计上界为 9352 / 9939 MiB/s，保守纹理
+常驻量为 186 / 205 MiB。30 Hz 的流量部分减半；dirty-region 会降低实际上传，
+但最终上线仍须用 16 台动态画面实压。这里没有按 VM 编号、RX570 PCI 地址或
+具体 AMD 型号写业务分支；guest 源分辨率不同时用 `--source-size WxH` 重算。
+
+DGame 的 QEMU 内存读取由 G-11 启动器给最终 QEMU 叶进程设置逐进程
+`PR_SET_PTRACER_ANY`，不修改宿主 `kernel.yama.ptrace_scope`。建议保持全局 scope=1；
+scope=2/3 会在分配 mdev 前明确拒绝启动。旧的已运行 QEMU 必须在维护窗口正常重启
+一次，职业名等内存字段才会取得这项授权。
+
 ## 固定区域网络推流
 
 native SDL/GTK 可以保留本地窗口，同时通过 `fb-shm` sidecar 推一个固定 ROI：
 
 ```bash
-# 默认 libx264、30 Hz、6M、SHM 完整帧
+# 默认 libx264、30 Hz、6M、auto；当前外部 consumer 自动选中 SHM
 ./deploy/scripts/start-vm.sh 1 \
   --stream 'rtmps://ingest.example/live/vm1' \
   --stream-roi 100,50,1280,720 \
@@ -338,11 +433,16 @@ listener 模式会在 QEMU 启动前被拒绝，已有本地文件也不会被�
 `stop-vm.sh`、关闭本地窗口和启动失败都会精确回收 consumer 与 ffmpeg
 进程组。当前只传视频，不包含音频、远程输入、ABR/CDN 调度或多区域边缘编排。
 
-R535 vGPU 生产端只有 system-memory VFIO display REGION，没有 DMA-BUF。
-因此 G-11 启动器会拒绝 `--stream-mode gpu`；`auto/shm` 都走 SHM/rawvideo。
+R535 vGPU 生产端只有 system-memory VFIO display REGION，没有原生 DMA-BUF。
+因此外部 `qemu-fb-shm-stream` 会拒绝 `--stream-mode gpu`；默认 `auto` 和显式
+`shm` 都走 SHM/rawvideo。
 `qemu-fb-shm-stream --print-capabilities` 会如实报告
 `gpu.zero-copy=no`/`GPU_E_BACKEND_NOT_BUILT`，严格 `--mode gpu` 在连接前以
 状态码 3 退出，不会静默回退并冒充零拷贝。
+
+这与上面的 DGame 本地 GPU 预览不冲突：DGame 消费 SDL/GTK 在亮机卡上生成的
+ROI texture；外部编码 sidecar 尚无 dma-buf import/encode backend。二者使用两个
+fb-shm 对象，互不改变帧率、ROI、socket 或生命周期。
 
 ## 镜像和配置放在哪里
 
@@ -362,7 +462,7 @@ R535 vGPU 生产端只有 system-memory VFIO display REGION，没有 DMA-BUF。
     │   ├── run/         # pid/socket/mdev + start/disk/tpm locks
     │   └── backups/{disks,nvram}/
     ├── shared/
-    │   ├── bases/       # win10-base.qcow2 + archive/
+    │   ├── bases/       # <BASE_NAME>.qcow2 + 每镜像证明 + archive/
     │   └── assets/      # host UI 共享资源
     └── control/         # 仅全局 .storage.lock 和迁移历史
 ```
@@ -377,7 +477,7 @@ R535 vGPU 生产端只有 system-memory VFIO display REGION，没有 DMA-BUF。
 迁移只接受可验证的 standalone qcow2；若任一待移动镜像带 backing、被其它
 overlay 依赖或 metadata 无法解析，`--check` 会 fail-closed，必须先人工处理链。
 依赖扫描也覆盖显式放在 `IMAGE_ROOT` 外的托管 disk/base 目录；`delete-vm.sh` 与
-`promote-base.sh` 采用相同的 fail-closed 规则。
+`seal-base.sh` 采用相同的 fail-closed 规则。
 
 详细的停机保护、备份范围及旧 G-11 命名空间迁移规则见
 [`docs/STORAGE-LAYOUT.md`](docs/STORAGE-LAYOUT.md)。
@@ -437,7 +537,7 @@ QEMU 打开 mdev 前将两者设为 `16667 us`。这是 R535 内部、非正式�
 QEMU/SDL Present，不能把 manager 的 copy 周期动态降回 10 Hz。请勿设置
 `disable_vnc=1`，它会一并关闭 SDL 依赖的 console REGION。
 
-## 新建 VM：固定 2GB 的 NVIDIA 显卡池
+## 新建 VM：1GB/2GB NVIDIA 多品牌显卡池
 
 日常入口会自动生成持久配置和磁盘；完整规则见
 [`docs/VGPU-VM-CREATION.md`](docs/VGPU-VM-CREATION.md)：
@@ -470,9 +570,11 @@ QEMU/SDL Present，不能把 manager 的 copy 周期动态降回 10 Hz。请勿�
   --gpu-profile gtx1050_2gb
 ```
 
-完整目录可查询 8 款 CPU、7 块主板和 17 套内存；其中 active 是 6 款 CPU、4 块
-双槽 H81 和 15 套四品牌双条 DDR3。它们只能筛选 28 套审核整机白名单，不会做
-任意笛卡尔组合。默认随机池为 24 套 4/6/8 GiB 低端组合；i7-4790 通常必须显式
+完整目录可查询 8 款 CPU、13 块主板和 27 套内存；其中 active 是 6 款 CPU、10 块
+双槽 H81 和 25 套五品牌双条 DDR3。它们只能筛选 264 套审核整机白名单，不会做
+任意笛卡尔组合。i3-4130 在每块 active H81 上都有 Kingston、Samsung、Micron、
+SK hynix 的 1333/1600 及 4G/6G/8G 闭合矩阵。默认随机池仍为 24 套
+4/6/8 GiB 低端组合；i7-4790 通常必须显式
 指定，只在 5 款默认 CPU 均未 supported、且自身明确 supported 时作为 active
 能力兜底。另 3 套整机为 legacy，且只有 6 款 active 都得到明确非 supported
 结果才会自动选用。旧 i5-4590/H97 也属于
@@ -484,8 +586,9 @@ legacy，不要与新的
 存储选择还会比较主板与 SSD 的接口、PCIe 代际和通道。新 Haswell 白名单从
 Samsung 840/850/860 PRO、Crucial MX100、Kingston KC400、Intel 545s、
 Western Digital PC SA530 七款 SATA 盘中选择；Samsung 970 PRO 与 WD Black
-两款 Gen3 x4 NVMe 保留给链路匹配的兼容平台。active catalog 与 default key
-集合只有这九款，且每款均精确为 `512110190592` 字节；其他容量不能进入新建
+两款 Gen3 x4 NVMe 保留给链路匹配的兼容平台。Samsung 960 PRO 是第三款 NVMe
+且只在显式选择时使用。完整目录十款、默认 key 仍为原九款，且每款均精确为
+`512110190592` 字节；其他容量不能进入新建
 目录。新配置也会持久化并传递逻辑/物理扇区：MX100 为
 `512/4096`，当前其余型号为 `512/512`。显式 `--ssd-profile` 仍可在兼容层内
 选择 SATA。qcow2
@@ -521,25 +624,25 @@ Redmi）。完整目录与新建池都强校验 preferred timing；1366×768、2
 只有 Samsung S24F350 与 Redmi RMMNT238NF 有已审核的型号专属序列格式；其他
 33 款使用目录前缀加稳定哈希，不把通用值冒充成厂商标签格式。
 
-池中只有 NVIDIA GTX 750 Ti、GT 1030、GTX 1050 三个目标型号，但包含 12 条
-不可拆分的板卡/显存 profile，且每条都是 2048MB；普通
-GTX 750 参考版标准显存是 1GB，因此严格 2GB 池使用 GTX 750 Ti。AMD 不能加入
+池中有 GT 730、GT 740、GTX 750 三个 1GB 型号和 GTX 750 Ti、GT 1030、
+GTX 1050 三个 2GB 型号，共 25 条不可拆分的板卡/显存 profile。GTX 750 的正式
+名称不是 RTX 750，并与 2GB GTX 750 Ti 保持不同 device ID。AMD 不能加入
 这条池，因为底层是 NVIDIA GRID driver、NVIDIA mdev 和 NVAPI。
-系统用户态板卡 metadata 覆盖 NVIDIA、ASUS、Dell、MSI、Gigabyte、GALAX、Colorful（七彩虹），
-显存厂家为 Samsung、SK hynix、Micron，序列策略均为 `not-exposed`；B 模式系统
+系统用户态板卡 metadata 覆盖 NVIDIA、ASUS、Dell、MSI、Gigabyte、ZOTAC、GALAX、Colorful（七彩虹）、EVGA，
+显存厂家为 Samsung、Elpida、SK hynix、Micron，序列策略均为 `not-exposed`；B 模式系统
 PCI device 仍是宿主 mdev；正式 merge 只投影 profile 的原子 Subsystem/静态字段。
 
 `vms/N/vm.conf` 中的 `GPU_*` 是每 VM 的客户机身份，`VGPU_MDEV_PROFILE`
-是 RTX 宿主的 `nvidia-257` fallback。实际资源可由宿主配置的
-`VGPU_RESOURCE_PROFILE` 覆盖（例如 V100-2Q），但必须与当前 guest 身份同为
-2048MB。
+按容量是 RTX 宿主的 `nvidia-256`/`nvidia-257` fallback。实际资源可由宿主配置的
+`VGPU_RESOURCE_PROFILE_1024`/`VGPU_RESOURCE_PROFILE_2048` 覆盖（例如
+V100-1Q/V100-2Q），并且必须与当前 guest 身份同为 1024MB/2048MB。
 
 启动器默认在宿主机完成产品名同步：它复用持久化的 `VM_UUID` 作为 mdev UUID，
 并在创建 mdev 前原子维护 `/etc/vgpu_unlock/profile_override.toml` 中对应的
 `[mdev."UUID"]`，写入 `card_name`、`adapter_name` 和单头
 `1920×1080/max_pixels=2073600` 显示合同。后者优先于旧宿主可能保留的全局
 `4 heads/1920×1200` 值。因此不同 VM 即使共用
-`nvidia-257`，NVIDIA 控制面板“系统信息”仍可得到各自的 `GPU_NAME`；guest 里
+同一容量 type，NVIDIA 控制面板“系统信息”仍可得到各自的 `GPU_NAME`；guest 里
 无需安装名称代理 DLL、服务或常驻程序。`SPOOF_MODE=off` 会移除该 VM 的名称项。
 
 这个 host-only 覆写改变产品名称和 vGPU 显示能力上限，不会改物理 GPU、调度份额
@@ -644,8 +747,10 @@ NVIDIA R535 mdev 没有 `VFIO_GFX_EDID_REGION`，`start-vm.sh` 会在 QEMU
 启动前按需离线刷新 Windows
 SYSTEM hive 中已有的 raw EDID、模式缓存和 Microsoft 标准
 `Device Parameters\EDID_OVERRIDE\0..N`（每个值一个 128-byte block）；这一步不向 guest 复制脚本、不安装服务、
-不创建计划任务。同步器还会从 `Select\Current/Default/LastKnownGood` 沿固定
-B/native `DEV_1E30&SUBSYS_132610DE` 的 `Driver` 关系精确约束 `NV_Modes`，不会
+不创建计划任务。同步器还会从 `Select\Current/Default/LastKnownGood` 沿 profile
+对应的固定 B/native `Driver` 关系精确约束 `NV_Modes`：1GB/`nvidia-256` 使用
+`DEV_1E30&SUBSYS_132510DE`，2GB/`nvidia-257` 使用
+`DEV_1E30&SUBSYS_132610DE`。它不会
 全扫孤立 ControlSet/Class key 或修改驱动文件。迁移后遗留的 A/consumer
 `DEV_1C81&SUBSYS_11C01028` Enum 历史会跳过；它不能代替当前 native 设备通过门禁。
 `Current` 必须同时命中 EDID 和经 Provider/版本/已发布 INF 哈希认证的 GRID
@@ -670,8 +775,8 @@ B/native `DEV_1E30&SUBSYS_132610DE` 的 `Driver` 关系精确约束 `NV_Modes`�
 都必须与 profile 一致。NVIDIA 的原始父 key 仍可以叫 `DISPLAY\\NVD0000`，但它不再是
 有效 EDID 的验收结果。如果鲁大师仍显示 `NVIDIA VGX / 641×400 / 16:10`，
 就应重跑 `vmctl monitor ... --force`，不再将它当作无法修复的 R535 局限。
-`VgpuPortable.exe` 只处理 GPU 身份（GPU-Z 为显式选装消费者），不代替这条
-显示器同步链。
+`VgpuPortable.exe` 处理 GPU 身份和 guest 性能（GPU-Z 为显式选装消费者），但不
+选择或写入显示器，因此不代替这条显示器同步链。
 
 日志中的 SYSTEM hive `logical_end` 按 REGF header `Length` 计算；其后直到
 `physical` EOF 的旧 hbin/零填充是 Windows 允许的 slack，封装原样保留。只有
@@ -722,7 +827,7 @@ NVIDIA vGPU 路径让 EDID 与受控 `NV_Modes` 使用同一份 10 项：1920×1
 640×480；Windows“设置”通常隐藏 640×480，所以一般显示 9 项。它精确清除
 1920×1200、1680×1050、1280×800、2560×1600 等 16:10，也删除上一版额外的
 1600×1200、1600×1024、1440×1080、1366×768、1152×864，不会误删
-1600×900；不能把 V-11 的 virtio 显示驱动规则原样套到 G-11。正常
+1600×900；不能把已退役的 virtio 显示驱动规则套到 G-11。正常
 `start-vm.sh N` 会自动按 marker 约束 NVIDIA source modes；只有要无条件清除旧
 EDID/GraphicsDrivers 缓存时才执行 `./deploy/scripts/vmctl.sh monitor N --force`。受支持的 GRID 安装封装会在同版本重装前主动使
 monitor marker 失效；手工 Device Manager 重装后则必须再显式使用 `--force`。
@@ -747,12 +852,12 @@ monitor marker 失效；手工 Device Manager 重装后则必须再显式使用 
 # 先用真实 PCI 身份安装匹配的 GRID driver
 ./deploy/scripts/start-vm.sh 1 --no-spoof --no-monitor-sync
 
-# 正常 B 重启后，三款型号统一运行私有 VgpuPortable.exe：
+# 正常 B 重启后，全部 25 条 profile 统一运行私有 VgpuPortable.exe：
 ./deploy/package-vgpu-one-click.sh --with-license-token
 ```
 
 GTX1050 strict-A 会因旧路径修改 INF/自签 catalog 而提前拒绝，不再生成 ZIP；当前
-三款都保持 B。私有 portable 含 token，不能由 staging HTTP server 下载、写入通用
+全部 profile 都保持 B。私有 portable 含 token，不能由 staging HTTP server 下载、写入通用
 base 或公开分发。
 详见 [`docs/VGPU-LICENSING.md`](docs/VGPU-LICENSING.md)。
 
@@ -783,6 +888,7 @@ A/internal/FRL。完整生产签名边界见
 | 安装蓝屏 `USBXHCI.SYS` / `PAGE_FAULT_IN_NONPAGED_AREA` | 不删盘；按 [`docs/USBXHCI-INSTALL-RECOVERY.md`](docs/USBXHCI-INSTALL-RECOVERY.md) 增量重编并续装，确认启动摘要为固定上游 xHCI 行为身份 |
 | 动态拖动稳定只有约 10 FPS | 检查启动日志是否有 `R535 console REGION 周期=16667us`；确认未将 `VGPU_CONSOLE_INTERVAL_US` 设为 0 |
 | GTK 标题没有 FPS | 正常；`SDL Present` 只在 SDL 后端实现。用 host license/FRL 和实际 frame-time 判断 |
+| DGame 设 60 但 `LIVE` 长期只有 28–32，或静置后定格 | 按“G-11 DGame 本地预览”的傻瓜更新流程同时重编 QEMU/DGame，并在维护窗口正常重启 VM；只热插 `preview-on` 不会替换运行中的 QEMU 代码 |
 | 动态画面卡在 3/15 FPS | 当前 B/off 检查 DLS、Licensed、Code 0 和实际 vGPU profile；不要用历史 strict-A 的 `Unlicensed / FRL N/A` 作为当前验收 |
 | 重启后先报无法获取 license，且一直不恢复 | 查 guest NVIDIA 日志是否反复出现 `Clock windback has been detected`；先用 `recover-hibernated-vm.sh` 排除休眠。只有统一前明确 UTC 的 GTX750Ti/GT1030 legacy B 才运行兼容 finish 迁移 RTC；当前新 VM 核对 localtime/时区/DLS |
 | SDL 动态帧率低于约 55 FPS | 确认窗口未最小化；看 host `nvidia-smi vgpu -q` 的 license/FRL 和 CPU/GPU 负载 |
@@ -839,7 +945,7 @@ host:                                     │ (KVM 直接 page mapping，纯 RAM
 | `./deploy/scripts/create-vm.sh <vm_id>` | 生成 `$VM_ROOT/N/vm.conf`（一次性） |
 | `./deploy/scripts/create-disk.sh <vm_id> --from-base` | 严格克隆公共 base；不存在则失败，不退回空盘 |
 | `./deploy/scripts/recover-hibernated-vm.sh <vm_id> [--rescue-gtk] [--proxy]` | host-only 本地标准 VGA 恢复休眠；完整关机后自动强刷 EDID/NV_Modes，失败闭锁 |
-| `./deploy/finish-vgpu-install.sh <vm_id>` | 仅统一前 GTX750Ti/GT1030 的旧 token 回执/UTC 迁移；当前三款新 VM 不使用，GTX1050 strict-A 仍拒绝 |
+| `./deploy/finish-vgpu-install.sh <vm_id>` | 仅统一前 GTX750Ti/GT1030 的旧 token 回执/UTC 迁移；当前 25 条新 VM 不使用，GTX1050 strict-A 仍拒绝 |
 | `./deploy/scripts/vmctl.sh monitor 1 [--monitor-profile PROFILE] [--force]` | 关机状态从 host 离线同步 EDID_OVERRIDE/raw EDID/NVIDIA 10 项模式策略；guest 无常驻组件 |
 | `./deploy/scripts/host-nvme-apst.sh check` | 只读检查 Linux 宿主 NVMe APST；`persist/apply/rollback` 只在管理员显式执行时写入，见 [`docs/NVME-APST.md`](docs/NVME-APST.md) |
 | `./deploy/sync-vgpu-profile.sh 1` | 可选：清理/同步旧 guest 的注册表身份；默认不安装 NVAPI shim |

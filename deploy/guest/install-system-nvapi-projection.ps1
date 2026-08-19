@@ -51,6 +51,8 @@ $ExpectedPayloadNames = @(
     'nvapi64.dll',
     'SystemNvapiProbe32.exe',
     'SystemNvapiProbe64.exe',
+    'D3D12CapabilityProbe32.exe',
+    'D3D12CapabilityProbe64.exe',
     'monitor-edid.bin',
     $ContractName
 )
@@ -292,7 +294,8 @@ function Read-Payload([string]$Root) {
     Assert-ExactPropertyNames $contract.payload @(
         'coordinatorSha256', 'lowLevelInstallerSha256',
         'profileWriterSha256', 'identityCatalogJsonSha256',
-        'shimX86Sha256', 'shimX64Sha256', 'probeX86Sha256', 'probeX64Sha256'
+        'shimX86Sha256', 'shimX64Sha256', 'probeX86Sha256', 'probeX64Sha256',
+        'd3dProbeX86Sha256', 'd3dProbeX64Sha256'
     ) 'contract.payload'
     Assert-ExactPropertyNames $contract.monitor @(
         'key', 'pnpVendor', 'productId', 'pnpId', 'edidName', 'displayName',
@@ -306,9 +309,10 @@ function Read-Payload([string]$Root) {
         'memoryBusBits', 'memoryBandwidthMBps', 'vramMB', 'memoryType',
         'memoryMaker', 'cudaCores', 'shaderSubPipes', 'ropCount', 'tmuCount',
         'architecture', 'implementation', 'chipRevision', 'pcieWidth',
+        'd3d12RaytracingTier', 'rayTracingCores', 'tensorCores',
         'vbiosVersion'
     ) 'contract.profile'
-    if ([int]$contract.schemaVersion -ne 2 -or
+    if ([int]$contract.schemaVersion -ne 4 -or
         [string]$contract.purpose -cne 'g11-system-nvapi-projection' -or
         [string]$contract.contractId -cne [string]$manifest.contractId -or
         [string]$contract.contractId -cnotmatch '^[0-9A-F]{64}$' -or
@@ -329,9 +333,12 @@ function Read-Payload([string]$Root) {
             'transport-device-profile-subsystem' -or
         [string]$contract.profile.key -cnotmatch '^[a-z0-9_]+$' -or
         [string]$contract.profile.name -cne [string]$contract.transport.gpuName -or
-        [int]$contract.profile.vramMB -ne 2048 -or
+        [int]$contract.profile.vramMB -notin @(1024, 2048) -or
         [int]$contract.profile.memoryType -ne 8 -or
         [int]$contract.profile.memoryMaker -notin @(1, 6, 10) -or
+        [int]$contract.profile.d3d12RaytracingTier -ne 0 -or
+        [int]$contract.profile.rayTracingCores -ne 0 -or
+        [int]$contract.profile.tensorCores -ne 0 -or
         [string]$contract.monitor.key -cnotmatch
             '^[a-z0-9][a-z0-9-]{0,47}$' -or
         [string]$contract.monitor.pnpVendor -cnotmatch '^[A-Z]{3}$' -or
@@ -374,6 +381,10 @@ function Read-Payload([string]$Root) {
             $fileHashes['SystemNvapiProbe32.exe'] -or
         [string]$contract.payload.probeX64Sha256 -cne
             $fileHashes['SystemNvapiProbe64.exe'] -or
+        [string]$contract.payload.d3dProbeX86Sha256 -cne
+            $fileHashes['D3D12CapabilityProbe32.exe'] -or
+        [string]$contract.payload.d3dProbeX64Sha256 -cne
+            $fileHashes['D3D12CapabilityProbe64.exe'] -or
         [string]$contract.monitor.edidSha256 -cne
             $fileHashes['monitor-edid.bin']) {
         throw 'contract payload 摘要与 manifest 不一致。'
@@ -911,8 +922,8 @@ function Assert-RegistryContract($Contract) {
             IdentityShaderSubPipes = [int]$profile.shaderSubPipes
             IdentityRopCount = [int]$profile.ropCount
             IdentityTmuCount = [int]$profile.tmuCount
-            IdentityRayTracingCores = 0
-            IdentityTensorCores = 0
+            IdentityRayTracingCores = [int]$profile.rayTracingCores
+            IdentityTensorCores = [int]$profile.tensorCores
             IdentityArchitecture = [int]$profile.architecture
             IdentityImplementation = [int]$profile.implementation
             IdentityChipRevision = [int]$profile.chipRevision
@@ -964,11 +975,34 @@ function Invoke-SystemProbes($Payload) {
         $probe = Join-Path $Payload.Root $name
         $output = (& $probe ([int]$profile.memoryMaker) `
             ([int]$profile.memoryType) ([int]$profile.memoryBusBits) `
-            $expectedDevice.ToString() $expectedSubsystem.ToString() 2>&1 |
+            $expectedDevice.ToString() $expectedSubsystem.ToString() `
+            ([int]$profile.rayTracingCores) `
+            ([int]$profile.tensorCores) 2>&1 |
             Out-String)
         if ($LASTEXITCODE -ne 0 -or
             $output -notmatch 'SYSTEM_NVAPI_VERIFY PASS') {
             throw "$name 系统搜索路径运行时验证失败：$output"
+        }
+        Write-Host ($output.Trim()) -ForegroundColor Green
+    }
+}
+
+function Invoke-NativeD3D12Probes($Payload) {
+    $profile = $Payload.Contract.profile
+    if ([int]$profile.d3d12RaytracingTier -ne 0) {
+        throw 'native D3D12 probe currently accepts only the reviewed tier-zero catalog.'
+    }
+    foreach ($name in @(
+            'D3D12CapabilityProbe32.exe',
+            'D3D12CapabilityProbe64.exe'
+        )) {
+        $probe = Join-Path $Payload.Root $name
+        $output = (& $probe '--require-tier-zero' 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0 -or
+            $output -notmatch 'D3D12_NATIVE_VERIFY PASS') {
+            throw ("$name 原生 D3D12 OPTIONS5 与零光追合同不一致。" +
+                "这是签名显卡驱动的实际返回，不是检测工具缓存；" +
+                "已拒绝继续安装/验收：`r`n$output")
         }
         Write-Host ($output.Trim()) -ForegroundColor Green
     }
@@ -1188,6 +1222,8 @@ $transport = if ($Action -in @(
 switch ($Action) {
     'Install' {
         Write-Step "安装32/64位程序共用的单显卡系统投影：$($payload.Contract.profile.key)"
+        Write-Step '写入前验证签名显卡驱动的原生 x86/x64 D3D12 OPTIONS5'
+        Invoke-NativeD3D12Probes $payload
         $durableRoot = Copy-PayloadDurably $payload
         $payload = Read-Payload $durableRoot
         Remove-StaleProjectionTasks $payload.Contract
@@ -1211,13 +1247,14 @@ switch ($Action) {
         Assert-SystemProjection $payload
         Wait-RegistryContract $payload.Contract 120
         Invoke-SystemProbes $payload
+        Invoke-NativeD3D12Probes $payload
         $monitorInstance = Sync-MonitorIdentity $payload 300
         Assert-MonitorIdentityTask $payload
         $exitBcd = Get-NormalBcdSnapshot
         if ($exitBcd -cne $entryBcd) { throw '验证期间 BCD 发生变化。' }
         Write-Receipt $payload 'validated' $transport $exitBcd $monitorInstance
         Unregister-VerificationTask $payload.Contract
-        Write-Host ("PASS：x86/x64 系统 NVAPI 均返回 {0} / {1}；monitor={2}。" -f
+        Write-Host ("PASS：x86/x64 系统 NVAPI 与原生 D3D12 均符同一能力合同；{0} / {1}；monitor={2}。" -f
             $payload.Contract.profile.memoryTypeName,
             $payload.Contract.profile.memoryMakerName,
             $payload.Contract.monitor.displayName) -ForegroundColor Green

@@ -26,6 +26,19 @@ struct QEMU_PACKED usb_msd_csw {
 
 struct MSDState {
     USBDevice dev;
+    /* Per-instance usb-bot descriptor used for the optional USB identity
+     * projection and for the USB-standard no-serial form
+     * (iSerialNumber=0). */
+    USBDesc *patched_desc;
+    bool no_serial;
+    uint16_t vendorid;
+    uint16_t productid;
+    uint32_t bcd_device;
+    char *manufacturer;
+    char *product;
+    char *scsi_vendor;
+    char *scsi_product;
+    char *scsi_version;
     enum USBMSDMode mode;
     uint32_t scsi_off;
     uint32_t scsi_len;

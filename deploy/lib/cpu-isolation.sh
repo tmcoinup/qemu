@@ -230,13 +230,14 @@ cpu_isolation_print_plan() {
             echo "  CPU 隔离: off"
             ;;
         *)
-            echo "  CPU 隔离: ${CPU_ISOLATION}（vCPU 1:1，service CPUs=${QEMU_SERVICE_CPUS:-auto}，host reserve=${HOST_RESERVE_CORES:-auto}）"
+            echo "  CPU 隔离: ${CPU_ISOLATION}（guest core/thread -> host core/SMT，service CPUs=${QEMU_SERVICE_CPUS:-0}，host reserve=${HOST_RESERVE_CORES:-auto}）"
             ;;
     esac
 }
 
 cpu_isolation_launch() {
-    local vm_id=$1 vcpu_count=$2 qmp_sock=$3 pid_file=$4 state_file=$5
+    local vm_id=$1 vcpu_count=$2 guest_core_count=$3 guest_threads_per_core=$4
+    local qmp_sock=$5 pid_file=$6 state_file=$7
     local helper topology_root cgroup_root
     local timeout=${CPU_ISOLATION_QMP_TIMEOUT:-90}
     helper=$(cpu_isolation_helper_path)
@@ -255,8 +256,9 @@ cpu_isolation_launch() {
     printf 'pending\n' >"$state_file" 2>/dev/null || true
     echo "[cpu-isolate] mode=${CPU_ISOLATION}：等待 QMP vCPU TID"
 
-    python3 - "$CPU_ISOLATION" "$vm_id" "$vcpu_count" "$qmp_sock" \
-        "$pid_file" "$helper" "${QEMU_SERVICE_CPUS:-auto}" \
+    python3 - "$CPU_ISOLATION" "$vm_id" "$vcpu_count" \
+        "$guest_core_count" "$guest_threads_per_core" "$qmp_sock" \
+        "$pid_file" "$helper" "${QEMU_SERVICE_CPUS:-0}" \
         "${HOST_RESERVE_CORES:-auto}" "$timeout" "$state_file" \
         "$topology_root" "$cgroup_root" <<'PY' &
 import glob
@@ -268,10 +270,19 @@ import subprocess
 import sys
 import time
 
-(mode, vm_id, expected_text, qmp_path, pid_file, helper, service_text,
- reserve_text, timeout_text, state_file, topology_root,
+(mode, vm_id, expected_text, guest_cores_text, guest_threads_text,
+ qmp_path, pid_file, helper, service_text, reserve_text, timeout_text,
+ state_file, topology_root,
  cgroup_root) = sys.argv[1:]
 expected = int(expected_text)
+guest_cores = int(guest_cores_text)
+guest_threads = int(guest_threads_text)
+if guest_cores < 1 or guest_threads < 1:
+    raise SystemExit("guest CPU topology must be positive")
+if guest_cores * guest_threads != expected:
+    raise SystemExit(
+        f"guest CPU topology mismatch: {guest_cores}C x {guest_threads}T != {expected} vCPUs"
+    )
 service_auto = service_text.lower() == "auto"
 try:
     service_count = 1 if service_auto else int(service_text)
@@ -389,12 +400,42 @@ def query_vcpus():
             qmp_command(stream, "qmp_capabilities", "cpu-isolate-cap")
             result = qmp_command(stream, "query-cpus-fast", "cpu-isolate-query")
             sock.close()
-            rows = sorted(
-                (int(row["cpu-index"]), int(row["thread-id"]))
-                for row in result
-                if "cpu-index" in row and "thread-id" in row
-            )
-            if len(rows) == expected:
+            rows = []
+            for row in result:
+                props = row.get("props") or {}
+                required = (
+                    "cpu-index", "thread-id",
+                )
+                topology_required = ("socket-id", "core-id", "thread-id")
+                if any(name not in row for name in required) or any(
+                    name not in props for name in topology_required
+                ):
+                    continue
+                rows.append({
+                    "index": int(row["cpu-index"]),
+                    "tid": int(row["thread-id"]),
+                    "socket": int(props["socket-id"]),
+                    "core": int(props["core-id"]),
+                    "thread": int(props["thread-id"]),
+                })
+            rows.sort(key=lambda item: item["index"])
+            expected_topology = {
+                (0, core_id, thread_id)
+                for core_id in range(guest_cores)
+                for thread_id in range(guest_threads)
+            }
+            actual_topology = {
+                (row["socket"], row["core"], row["thread"])
+                for row in rows
+            }
+            indices = [row["index"] for row in rows]
+            tids = [row["tid"] for row in rows]
+            if (
+                len(rows) == expected
+                and indices == list(range(expected))
+                and len(set(tids)) == expected
+                and actual_topology == expected_topology
+            ):
                 return rows
             last_error = f"expected {expected} vCPUs, QMP returned {len(rows)}"
         except Exception as exc:
@@ -458,11 +499,11 @@ except Exception as exc:
     fail_required(f"QMP query-cpus-fast 超时：{exc}")
     raise SystemExit(1)
 
-pid = tgid_for_tid(rows[0][1])
+pid = tgid_for_tid(rows[0]["tid"])
 if not pid or not valid_vm_process(pid):
     fail_required("QMP TID 无法解析到目标 QEMU")
     raise SystemExit(1)
-if any(tgid_for_tid(tid) != pid for _, tid in rows):
+if any(tgid_for_tid(row["tid"]) != pid for row in rows):
     fail_required("QMP 返回了跨进程 vCPU TID", pid)
     raise SystemExit(1)
 
@@ -478,41 +519,82 @@ if reserve_text.lower() != "auto":
         fail_required(f"HOST_RESERVE_CORES 超界：{configured_reserve}", pid)
         raise SystemExit(1)
 
+guest_host_core_count = expected // guest_threads
+
+def raw_placement_fits(reserve, service_cpus):
+    eligible = cores[reserve:]
+    guest_candidates = [
+        core for core in eligible if len(core) >= guest_threads
+    ]
+    if len(guest_candidates) < guest_host_core_count:
+        return False
+    used = set(guest_candidates[:guest_host_core_count])
+    service_capacity = sum(
+        len(core) for core in eligible if core not in used
+    )
+    return service_capacity >= service_cpus
+
 def placement(service_cpus):
     reserve = default_reserve if configured_reserve is None else configured_reserve
     if configured_reserve is None:
-        demand = len(rows) + service_cpus
-        while reserve > 1 and sum(len(core) for core in cores[reserve:]) < demand:
+        while reserve > 1 and not raw_placement_fits(reserve, service_cpus):
             reserve -= 1
-    eligible = cores[reserve:]
-    preference = [core[0] for core in eligible]
-    preference.extend(cpu for core in eligible for cpu in core[1:])
-    return reserve, preference
+    return reserve, cores[reserve:]
 
 held_cpus = held_partition_cpus()
 
-def available_count(preference):
-    return sum(cpu not in held_cpus for cpu in preference)
-
-reserve, preference = placement(service_count)
-if service_auto:
-    if available_count(preference) < len(rows) + service_count:
-        service_count = 0
-        reserve, preference = placement(service_count)
-        log("辅助线程 CPU=auto：当前容量不足，兼容回退为 0")
-    else:
-        log("辅助线程 CPU=auto：分配 1 个独立逻辑 CPU")
-if available_count(preference) < len(rows) + service_count:
+reserve, eligible = placement(service_count)
+free_cores = [core for core in eligible if not (set(core) & held_cpus)]
+guest_host_cores = [
+    core for core in free_cores if len(core) >= guest_threads
+][:guest_host_core_count]
+if len(guest_host_cores) != guest_host_core_count:
     fail_required(
-        f"预留 {reserve} 个物理核后 CPU 不足：需要 {len(rows) + service_count}，可用 {available_count(preference)}",
+        f"预留 {reserve} 个物理核后完整 host core 不足：guest 需要 {guest_host_core_count} 个，得到 {len(guest_host_cores)} 个",
         pid,
     )
     raise SystemExit(1)
 
+host_core_by_guest_id = {
+    core_id: guest_host_cores[core_id]
+    for core_id in range(guest_host_core_count)
+}
+vcpu_cpus = []
+for row in rows:
+    host_core = host_core_by_guest_id[row["core"]]
+    if row["thread"] >= len(host_core):
+        fail_required(
+            f"host core {host_core} 无法承载 guest thread-id={row['thread']}",
+            pid,
+        )
+        raise SystemExit(1)
+    vcpu_cpus.append(host_core[row["thread"]])
+
+used_host_cores = set(guest_host_cores)
+service_cores = [core for core in free_cores if core not in used_host_cores]
+service_preference = [core[0] for core in service_cores]
+service_preference.extend(
+    cpu for core in service_cores for cpu in core[1:]
+)
+if service_auto:
+    if len(service_preference) < 1:
+        service_count = 0
+        log("辅助线程 CPU=auto：当前容量不足，兼容回退为 0")
+    else:
+        log("辅助线程 CPU=auto：分配 1 个独立逻辑 CPU")
+if len(service_preference) < service_count:
+    fail_required(
+        f"预留 {reserve} 个物理核并满足 guest 拓扑后 service CPU 不足：需要 {service_count}，可用 {len(service_preference)}",
+        pid,
+    )
+    raise SystemExit(1)
+service_cpus = service_preference[:service_count]
+preference = vcpu_cpus + service_cpus
+
 command = [
     helper, "apply", vm_id, str(pid),
     ",".join(map(str, preference)),
-    ",".join(str(tid) for _, tid in rows),
+    ",".join(str(row["tid"]) for row in rows),
     str(service_count),
 ]
 try:
@@ -537,7 +619,11 @@ if mode == "required":
         raise SystemExit(1)
 
 write_state(f"applied pid={pid}")
-log(f"vm{vm_id} 隔离完成：{len(rows)} vCPU + {service_count} service CPU，host reserve={reserve} cores")
+log(
+    f"vm{vm_id} 隔离完成：guest={guest_cores}C/{expected}T -> "
+    f"host={guest_host_core_count}C/{len(vcpu_cpus)}T，"
+    f"service CPU={service_count}，host reserve={reserve} cores"
+)
 PY
     CPU_ISOLATION_PINNER_PID=$!
     return 0

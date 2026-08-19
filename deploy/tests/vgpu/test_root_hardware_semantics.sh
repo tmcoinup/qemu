@@ -47,13 +47,15 @@ reject_text() {
     fi
 }
 
-assert_optical_identity_is_generic() {
+assert_no_persistent_optical_contract() {
     local file=$1 label=$2 optical_line
 
     while IFS= read -r optical_line; do
+        [[ "$optical_line" != *'id=g11-odd'* ]] ||
+            fail "$label attached a default g11-odd optical drive: $optical_line"
         [[ "$optical_line" != *'model='* &&
            "$optical_line" != *'serial='* ]] ||
-            fail "$label exposed an unaudited optical model/serial: $optical_line"
+            fail "$label transient media exposed an unaudited identity: $optical_line"
     done < <(
         sed 's/ -/\n-/g' "$file" |
             grep -E -- '((ide|scsi)-cd|usb-storage)\\,' || true
@@ -206,6 +208,17 @@ assert_ssd_profile() {
             expected_gen=3
             expected_lanes=4
             ;;
+        samsung-960-pro-512gb)
+            expected_brand=Samsung
+            expected_model='Samsung SSD 960 PRO 512GB'
+            expected_bus=nvme
+            expected_bytes=512110190592
+            expected_fw=2B6QCXP7
+            expected_controller=samsung
+            expected_form=m.2-2280
+            expected_gen=3
+            expected_lanes=4
+            ;;
         *) fail "$label selected an unreviewed SSD profile: $SSD_PROFILE" ;;
     esac
 
@@ -309,6 +322,36 @@ assert_platform() {
             expected_memory_profile=samsung-m378b5-flex-4plus2
             expected_lifecycle=new
             ;;
+        i3-4130-h81m-s1-kingston-1333-6g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=gigabyte-h81m-s1
+            expected_memory_profile=kvr13n9-flex-4plus2
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-s1-micron-1600-6g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=gigabyte-h81m-s1
+            expected_memory_profile=micron-mtjtf-flex-4plus2
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-s1-samsung-1333-4g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=gigabyte-h81m-s1
+            expected_memory_profile=samsung-m378b5773dh0-1333-2x2
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-s1-micron-1333-6g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=gigabyte-h81m-s1
+            expected_memory_profile=micron-mtjtf-1333-flex-4plus2
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-s1-hynix-1333-8g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=gigabyte-h81m-s1
+            expected_memory_profile=hynix-hmt351u6cfr8c-1333-2x4
+            expected_lifecycle=explicit-new
+            ;;
         i5-4460-h81m-c-micron-4g)
             expected_cpu_profile=i5-4460
             expected_board_profile=asus-h81m-c
@@ -325,6 +368,48 @@ assert_platform() {
             expected_cpu_profile=i7-4790
             expected_board_profile=msi-h81m-p33
             expected_memory_profile=kvr16n11s8-2x4
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-plus-crucial-8g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=asus-h81m-plus
+            expected_memory_profile=crucial-ct51264bd160b-2x4
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-a-4g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=asus-h81m-a
+            expected_memory_profile=kvr16n11s6-2x2
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-ds2-6g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=gigabyte-h81m-ds2
+            expected_memory_profile=kvr16n11-flex-4plus2
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-e33-8g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=msi-h81m-e33
+            expected_memory_profile=kvr16n11s8-2x4
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81m-hds-4g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=asrock-h81m-hds
+            expected_memory_profile=kvr16n11s6-2x2
+            expected_lifecycle=explicit-new
+            ;;
+        i3-4130-h81h3-m4-samsung-6g)
+            expected_cpu_profile=i3-4130
+            expected_board_profile=ecs-h81h3-m4
+            expected_memory_profile=samsung-m378b5-flex-4plus2
+            expected_lifecycle=explicit-new
+            ;;
+        i5-4590-h81m-plus-6g)
+            expected_cpu_profile=i5-4590
+            expected_board_profile=asus-h81m-plus
+            expected_memory_profile=kvr16n11-flex-4plus2
             expected_lifecycle=explicit-new
             ;;
         i5-4590)
@@ -444,21 +529,86 @@ assert_platform() {
             expected_bios_date=07/24/2021
             expected_board_release_year=2018 expected_board_serial_policy=asus
             ;;
+        asus-h81m-plus)
+            expected_board_brand='ASUSTeK COMPUTER INC.'
+            expected_board_model=H81M-PLUS expected_board_revision='Rev X.0x'
+            expected_chipset=H81 expected_bios=2205 expected_bios_date=06/18/2015
+            expected_board_release_year=2013 expected_board_serial_policy=asus
+            ;;
+        asus-h81m-a)
+            expected_board_brand='ASUSTeK COMPUTER INC.'
+            expected_board_model=H81M-A expected_board_revision='Rev X.0x'
+            expected_chipset=H81 expected_bios=2203 expected_bios_date=06/18/2015
+            expected_board_release_year=2013 expected_board_serial_policy=asus
+            ;;
+        gigabyte-h81m-ds2)
+            expected_board_brand=Gigabyte expected_board_model=GA-H81M-DS2
+            expected_board_revision=3.0 expected_chipset=H81 expected_bios=F3
+            expected_bios_date=08/21/2020
+            expected_board_release_year=2014 expected_board_serial_policy=gigabyte
+            ;;
+        msi-h81m-e33)
+            expected_board_brand=MSI
+            expected_board_model='H81M-E33 (MS-7817)'
+            expected_board_revision=1.0 expected_chipset=H81 expected_bios=6.7
+            expected_bios_date=11/27/2015
+            expected_board_release_year=2013 expected_board_serial_policy=msi
+            ;;
+        asrock-h81m-hds)
+            expected_board_brand=ASRock expected_board_model=H81M-HDS
+            expected_board_revision=1.0 expected_chipset=H81 expected_bios=2.20
+            expected_bios_date=03/09/2016
+            expected_board_release_year=2013 expected_board_serial_policy=asrock
+            ;;
+        ecs-h81h3-m4)
+            expected_board_brand=ECS expected_board_model=H81H3-M4
+            expected_board_revision=1.0A expected_chipset=H81 expected_bios=5.04.10
+            expected_bios_date=04/10/2015
+            expected_board_release_year=2013 expected_board_serial_policy=ecs
+            ;;
         *) fail "test bug: unknown board profile $expected_board_profile" ;;
     esac
     case "$expected_board_profile" in
-        asus-h81m-k|asus-h81m-c|gigabyte-h81m-s1)
+        asus-h81m-k|asus-h81m-c|gigabyte-h81m-s1|asus-h81m-a)
             expected_tpm=none expected_board_slots=2 expected_max_memory=16
             expected_nvme_gen=0 expected_nvme_lanes=0
             expected_xhci_device=0x8C31 expected_xhci_revision=0x05
             expected_main_slot=PCIEX16 expected_aux_slot=PCIEX1_1
             expected_aux_type=171 expected_aux_width=8 expected_aux_length=3
             ;;
-        msi-h81m-p33)
+        msi-h81m-p33|msi-h81m-e33)
             expected_tpm=none expected_board_slots=2 expected_max_memory=16
             expected_nvme_gen=0 expected_nvme_lanes=0
             expected_xhci_device=0x8C31 expected_xhci_revision=0x05
             expected_main_slot=PCI_E2 expected_aux_slot=PCI_E1
+            expected_aux_type=171 expected_aux_width=8 expected_aux_length=3
+            ;;
+        asus-h81m-plus)
+            expected_tpm=none expected_board_slots=2 expected_max_memory=16
+            expected_nvme_gen=0 expected_nvme_lanes=0
+            expected_xhci_device=0x8C31 expected_xhci_revision=0x05
+            expected_main_slot=PCIEX16_1 expected_aux_slot=PCIEX1_1
+            expected_aux_type=171 expected_aux_width=8 expected_aux_length=3
+            ;;
+        gigabyte-h81m-ds2)
+            expected_tpm=none expected_board_slots=2 expected_max_memory=16
+            expected_nvme_gen=0 expected_nvme_lanes=0
+            expected_xhci_device=0x8C31 expected_xhci_revision=0x05
+            expected_main_slot=PCIEX16 expected_aux_slot=PCIEX1
+            expected_aux_type=171 expected_aux_width=8 expected_aux_length=3
+            ;;
+        asrock-h81m-hds)
+            expected_tpm=none expected_board_slots=2 expected_max_memory=16
+            expected_nvme_gen=0 expected_nvme_lanes=0
+            expected_xhci_device=0x8C31 expected_xhci_revision=0x05
+            expected_main_slot=PCIE1 expected_aux_slot=PCIE2
+            expected_aux_type=171 expected_aux_width=8 expected_aux_length=3
+            ;;
+        ecs-h81h3-m4)
+            expected_tpm=none expected_board_slots=2 expected_max_memory=16
+            expected_nvme_gen=0 expected_nvme_lanes=0
+            expected_xhci_device=0x8C31 expected_xhci_revision=0x05
+            expected_main_slot=PCIEX16 expected_aux_slot=PCIEX1
             expected_aux_type=171 expected_aux_width=8 expected_aux_length=3
             ;;
         gigabyte-h97-d3h)
@@ -534,6 +684,13 @@ assert_platform() {
             expected_mem_total=6144 expected_mem_voltage=1500
             expected_channel_mode=flex
             ;;
+        samsung-m378b5773dh0-1333-2x2)
+            expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1333
+            expected_mem_model_list='M378B5773DH0-CH9,M378B5773DH0-CH9'
+            expected_mem_module_list=2048,2048 expected_mem_device_width_list=8,8
+            expected_mem_total=4096 expected_mem_voltage=1500
+            expected_channel_mode=dual-channel
+            ;;
         micron-mt4jtf25664az-2x2)
             expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1600
             expected_mem_model_list='MT4JTF25664AZ-1G6,MT4JTF25664AZ-1G6'
@@ -541,9 +698,30 @@ assert_platform() {
             expected_mem_total=4096 expected_mem_voltage=1500
             expected_channel_mode=dual-channel
             ;;
+        micron-mtjtf-flex-4plus2)
+            expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1600
+            expected_mem_model_list='MT8JTF51264AZ-1G6,MT4JTF25664AZ-1G6'
+            expected_mem_module_list=4096,2048 expected_mem_device_width_list=8,16
+            expected_mem_total=6144 expected_mem_voltage=1500
+            expected_channel_mode=flex
+            ;;
+        micron-mtjtf-1333-flex-4plus2)
+            expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1333
+            expected_mem_model_list='MT8JTF51264AZ-1G4,MT8JTF25664AZ-1G4'
+            expected_mem_module_list=4096,2048 expected_mem_device_width_list=8,8
+            expected_mem_total=6144 expected_mem_voltage=1500
+            expected_channel_mode=flex
+            ;;
         hynix-hmt351u6cfr8c-2x4)
             expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1600
             expected_mem_model_list='HMT351U6CFR8C-PB,HMT351U6CFR8C-PB'
+            expected_mem_module_list=4096,4096 expected_mem_device_width_list=8,8
+            expected_mem_total=8192 expected_mem_voltage=1500
+            expected_channel_mode=dual-channel
+            ;;
+        hynix-hmt351u6cfr8c-1333-2x4)
+            expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1333
+            expected_mem_model_list='HMT351U6CFR8C-H9,HMT351U6CFR8C-H9'
             expected_mem_module_list=4096,4096 expected_mem_device_width_list=8,8
             expected_mem_total=8192 expected_mem_voltage=1500
             expected_channel_mode=dual-channel
@@ -562,6 +740,13 @@ assert_platform() {
             expected_mem_total=8192 expected_mem_voltage=1200
             expected_channel_mode=dual-channel
             ;;
+        crucial-ct51264bd160b-2x4)
+            expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1600
+            expected_mem_model_list='CT51264BD160B,CT51264BD160B'
+            expected_mem_module_list=4096,4096 expected_mem_device_width_list=8,8
+            expected_mem_total=8192 expected_mem_voltage=1500
+            expected_channel_mode=dual-channel
+            ;;
         *) fail "test bug: unknown memory profile $expected_memory_profile" ;;
     esac
 
@@ -576,15 +761,25 @@ assert_platform() {
             expected_module_jep106_list=80CE,80CE
             expected_dram_jep106_list=80CE,80CE
             ;;
-        micron-mt4jtf25664az-2x2)
+        samsung-m378b5773dh0-1333-2x2)
+            expected_mem_rank_list=1,1
+            expected_module_jep106_list=80CE,80CE
+            expected_dram_jep106_list=80CE,80CE
+            ;;
+        micron-mt4jtf25664az-2x2|micron-mtjtf-flex-4plus2|micron-mtjtf-1333-flex-4plus2)
             expected_mem_rank_list=1,1
             expected_module_jep106_list=802C,802C
             expected_dram_jep106_list=802C,802C
             ;;
-        hynix-hmt351u6cfr8c-2x4)
+        hynix-hmt351u6cfr8c-2x4|hynix-hmt351u6cfr8c-1333-2x4)
             expected_mem_rank_list=2,2
             expected_module_jep106_list=80AD,80AD
             expected_dram_jep106_list=80AD,80AD
+            ;;
+        crucial-ct51264bd160b-2x4)
+            expected_mem_rank_list=1,1
+            expected_module_jep106_list=802C,802C
+            expected_dram_jep106_list=802C,802C
             ;;
         *) fail "test bug: missing v3 SPD contract for $expected_memory_profile" ;;
     esac
@@ -702,6 +897,10 @@ if [ "$#" -eq 2 ] && [ "$1" = -device ] \
         '  x-pci-vendor-id=<uint32>' \
         '  x-pci-device-id=<uint32>' \
         '  x-pci-revision=<uint32>'
+    exit 0
+fi
+if [ "$#" -eq 2 ] && [ "$1" = -object ] && [ "$2" = fb-shm,help ]; then
+    printf 'fb-shm options:\n  path=<string>\n  rate=<uint32>\n'
     exit 0
 fi
 echo "unexpected fake QEMU invocation: $*" >&2
@@ -917,6 +1116,7 @@ expected_ssds=(
     samsung-840-pro-512gb
     samsung-850-pro-512gb
     samsung-860-pro-512gb
+    samsung-960-pro-512gb
     samsung-970-pro-512gb
     wd-black-pcie-512gb
     wd-pc-sa530-512gb
@@ -929,11 +1129,13 @@ HARDWARE_PROFILES="$REPO_ROOT/deploy/lib/hardware-profiles.sh"
 # shellcheck source=/dev/null
 source "$HARDWARE_PROFILES"
 assert_eq 8 "${#CPU_PROFILES[@]}" 'CPU component catalog count'
-assert_eq 7 "${#BOARD_PROFILES[@]}" 'board component catalog count'
-assert_eq 17 "${#MEMORY_PROFILES[@]}" 'memory component catalog count'
-assert_eq 28 "${#HARDWARE_COMBINATIONS[@]}" 'reviewed combination count'
+assert_eq 13 "${#BOARD_PROFILES[@]}" 'board component catalog count'
+assert_eq 4 "${#CHIPSET_PRESENTATION_PROFILES[@]}" \
+    'chipset presentation catalog count'
+assert_eq 27 "${#MEMORY_PROFILES[@]}" 'memory component catalog count'
+assert_eq 264 "${#HARDWARE_COMBINATIONS[@]}" 'reviewed combination count'
 assert_eq 24 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new combination count'
-assert_eq 1 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" \
+assert_eq 237 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" \
     'explicit-new combination count'
 assert_eq 3 "${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}" \
     'legacy combination count'
@@ -943,16 +1145,28 @@ assert_eq \
     "$(cpu_profile_keys | tr '\n' ' ' | sed 's/ $//')" \
     'exact CPU component keys'
 assert_eq \
-    'asus-h81m-k asus-h81m-c gigabyte-h81m-s1 msi-h81m-p33 gigabyte-h97-d3h gigabyte-b150m-d3h asus-prime-b360m-a' \
+    'asus-h81m-k asus-h81m-c gigabyte-h81m-s1 msi-h81m-p33 gigabyte-h97-d3h gigabyte-b150m-d3h asus-prime-b360m-a asus-h81m-plus asus-h81m-a gigabyte-h81m-ds2 msi-h81m-e33 asrock-h81m-hds ecs-h81h3-m4' \
     "$(board_profile_keys | tr '\n' ' ' | sed 's/ $//')" \
     'exact board component keys'
+assert_eq 'H81|H81|0x8086|0x8C5C|0x04' \
+    "$(hardware_chipset_identity_for_platform i3-4130-h81m-s1-6g)" \
+    'GA-H81M-S1 presents H81 LPC instead of ICH9'
+assert_eq 'H97|H97|0x8086|0x8CC6|0x00' \
+    "$(hardware_chipset_identity_for_platform i5-4590)" \
+    'H97 legacy platform LPC identity'
+assert_eq 'B150|B150|0x8086|0xA148|0x31' \
+    "$(hardware_chipset_identity_for_platform i5-6500)" \
+    'B150 legacy platform LPC identity'
+assert_eq 'B360|B360|0x8086|0xA308|0x10' \
+    "$(hardware_chipset_identity_for_platform i3-8100)" \
+    'B360 legacy platform LPC identity'
 assert_eq \
-    'kvr13n9s6-2x2 kvr13n9-flex-4plus2 kvr13n9s8-2x4 kvr16n11s6-2x2 kvr16n11-flex-4plus2 kvr16n11s8-2x4 samsung-m378b5773dh0-2x2 samsung-m378b5-flex-4plus2 samsung-m378b5273dh0-2x4 micron-mt4jtf25664az-2x2 micron-mtjtf-flex-4plus2 micron-mt8jtf51264az-2x4 hynix-hmt325u6cfr8c-2x2 hynix-hmt3x5-flex-4plus2 hynix-hmt351u6cfr8c-2x4 kvr21n15s8-2x4 kvr24n17s8-2x4' \
+    'kvr13n9s6-2x2 kvr13n9-flex-4plus2 kvr13n9s8-2x4 kvr16n11s6-2x2 kvr16n11-flex-4plus2 kvr16n11s8-2x4 samsung-m378b5773dh0-2x2 samsung-m378b5-flex-4plus2 samsung-m378b5273dh0-2x4 micron-mt4jtf25664az-2x2 micron-mtjtf-flex-4plus2 micron-mt8jtf51264az-2x4 hynix-hmt325u6cfr8c-2x2 hynix-hmt3x5-flex-4plus2 hynix-hmt351u6cfr8c-2x4 samsung-m378b5773dh0-1333-2x2 samsung-m378b5-1333-flex-4plus2 samsung-m378b5273dh0-1333-2x4 micron-mt8jtf25664az-1333-2x2 micron-mtjtf-1333-flex-4plus2 micron-mt8jtf51264az-1333-2x4 hynix-hmt325u6cfr8c-1333-2x2 hynix-hmt3x5-1333-flex-4plus2 hynix-hmt351u6cfr8c-1333-2x4 kvr21n15s8-2x4 kvr24n17s8-2x4 crucial-ct51264bd160b-2x4' \
     "$(memory_profile_keys | tr '\n' ' ' | sed 's/ $//')" \
     'exact memory component keys'
 
 # Every memory row is a two-slot desktop layout with an explicit v3 physical
-# rank/device/JEP106 tuple.  This audits all 17 rows, including profiles not
+# rank/device/JEP106 tuple.  This audits all 27 rows, including profiles not
 # selected by the smaller end-to-end representative set below.
 for memory_key in $(memory_profile_keys); do
     memory_profile_load "$memory_key"
@@ -1005,8 +1219,8 @@ mapfile -t active_board_keys < <(
         printf '%s\n' "$combination_board"
     done | awk '!seen[$0]++'
 )
-assert_eq 'asus-h81m-k asus-h81m-c gigabyte-h81m-s1 msi-h81m-p33' \
-    "${active_board_keys[*]}" 'four active two-slot board profiles'
+assert_eq 'asus-h81m-k asus-h81m-c gigabyte-h81m-s1 msi-h81m-p33 asus-h81m-plus asus-h81m-a gigabyte-h81m-ds2 msi-h81m-e33 asrock-h81m-hds ecs-h81h3-m4' \
+    "${active_board_keys[*]}" 'ten active two-slot board profiles'
 for board_key in "${active_board_keys[@]}"; do
     board_profile_load "$board_key"
     assert_eq 2 "$MEM_BOARD_SLOTS" "$board_key active DIMM slots"
@@ -1084,8 +1298,20 @@ done
 
 platform_catalog="$TMP_DIR/platform-catalog.out"
 "$CREATE_VM" --list-platforms >"$platform_catalog"
+fallback_platform_catalog="$TMP_DIR/platform-catalog-fallback.out"
+"$CREATE_VM" --include-fallback --list-platforms >"$fallback_platform_catalog"
 cpu_catalog="$TMP_DIR/cpu-catalog.out"
 "$CREATE_VM" --list-cpu-profiles >"$cpu_catalog"
+fallback_cpu_catalog="$TMP_DIR/cpu-catalog-fallback.out"
+"$CREATE_VM" --include-fallback --list-cpu-profiles >"$fallback_cpu_catalog"
+assert_eq 261 "$(( $(wc -l <"$platform_catalog") - 1 ))" \
+    'default visible platform count'
+assert_eq 264 "$(( $(wc -l <"$fallback_platform_catalog") - 1 ))" \
+    'fallback-visible platform count'
+assert_eq 6 "$(( $(wc -l <"$cpu_catalog") - 1 ))" \
+    'default visible CPU count'
+assert_eq 8 "$(( $(wc -l <"$fallback_cpu_catalog") - 1 ))" \
+    'fallback-visible CPU count'
 require_text $'i7-4790\tCore-i7-4790\t4C/8T\t3600/4000\t8192' \
     "$cpu_catalog" 'i7-4790 4C/8T and 8 MiB LLC catalog row'
 require_text $'i5-4570-h81m-k-6g\tCore-i5-4570 4C/4T' \
@@ -1094,13 +1320,39 @@ require_text $'g3220-h81m-k-4g\tIntel-Pentium-G3220 2C/2T' \
     "$platform_catalog" 'G3220/4 GiB platform catalog row'
 require_text $'i3-4130-h81m-p33-8g\tCore-i3-4130 2C/4T' \
     "$platform_catalog" 'H81/i3 platform catalog row'
+require_text $'i3-4130-h81m-a-4g\tCore-i3-4130 2C/4T\tASUSTeK COMPUTER INC. H81M-A' \
+    "$platform_catalog" 'H81M-A/i3 expanded platform catalog row'
+require_text $'i3-4130-h81m-ds2-6g\tCore-i3-4130 2C/4T\tGigabyte GA-H81M-DS2' \
+    "$platform_catalog" 'H81M-DS2/i3 expanded platform catalog row'
+require_text $'i3-4130-h81m-e33-8g\tCore-i3-4130 2C/4T\tMSI H81M-E33' \
+    "$platform_catalog" 'H81M-E33/i3 expanded platform catalog row'
+require_text $'i3-4130-h81m-hds-4g\tCore-i3-4130 2C/4T\tASRock H81M-HDS' \
+    "$platform_catalog" 'H81M-HDS/i3 expanded platform catalog row'
+require_text $'i3-4130-h81h3-m4-samsung-6g\tCore-i3-4130 2C/4T\tECS H81H3-M4' \
+    "$platform_catalog" 'H81H3-M4/i3 expanded platform catalog row'
+require_text $'i3-4130-h81m-s1-kingston-1333-6g\tCore-i3-4130 2C/4T\tGigabyte GA-H81M-S1\tH81\tKVR13N9S8/4 + KVR13N9S6/2 DDR3@1333' \
+    "$platform_catalog" 'H81M-S1/i3 DDR3-1333 platform catalog row'
+require_text $'i3-4130-h81m-s1-micron-1600-6g\tCore-i3-4130 2C/4T\tGigabyte GA-H81M-S1\tH81\tMT8JTF51264AZ-1G6 + MT4JTF25664AZ-1G6 DDR3@1600' \
+    "$platform_catalog" 'H81M-S1/i3 Micron platform catalog row'
+require_text $'i3-4130-h81m-s1-hynix-1600-6g\tCore-i3-4130 2C/4T\tGigabyte GA-H81M-S1\tH81\tHMT351U6CFR8C-PB + HMT325U6CFR8C-PB DDR3@1600' \
+    "$platform_catalog" 'H81M-S1/i3 SK hynix platform catalog row'
+require_text $'i3-4130-h81m-s1-samsung-1333-4g\tCore-i3-4130 2C/4T\tGigabyte GA-H81M-S1\tH81\tM378B5773DH0-CH9 + M378B5773DH0-CH9 DDR3@1333' \
+    "$platform_catalog" 'H81M-S1/i3 Samsung DDR3-1333 platform catalog row'
+require_text $'i3-4130-h81m-s1-micron-1333-6g\tCore-i3-4130 2C/4T\tGigabyte GA-H81M-S1\tH81\tMT8JTF51264AZ-1G4 + MT8JTF25664AZ-1G4 DDR3@1333' \
+    "$platform_catalog" 'H81M-S1/i3 Micron DDR3-1333 platform catalog row'
+require_text $'i3-4130-h81m-s1-hynix-1333-8g\tCore-i3-4130 2C/4T\tGigabyte GA-H81M-S1\tH81\tHMT351U6CFR8C-H9 + HMT351U6CFR8C-H9 DDR3@1333' \
+    "$platform_catalog" 'H81M-S1/i3 SK hynix DDR3-1333 platform catalog row'
 require_text $'i7-4790-h81m-p33-8g\tCore-i7-4790 4C/8T' \
     "$platform_catalog" 'i7 4C/8T explicit platform catalog row'
-require_text $'i5-6500\tCore-i5-6500' "$platform_catalog" \
+reject_text $'i5-6500\tCore-i5-6500' "$platform_catalog" \
+    'default platform catalog legacy B150 row'
+reject_text 'legacy-compatibility' "$platform_catalog" \
+    'default platform catalog compatibility policy'
+require_text $'i5-6500\tCore-i5-6500' "$fallback_platform_catalog" \
     'legacy B150 platform catalog row'
 require_text 'explicit-new' "$platform_catalog" \
     'platform catalog explicit-only policy'
-require_text 'legacy-compatibility' "$platform_catalog" \
+require_text 'legacy-compatibility' "$fallback_platform_catalog" \
     'platform catalog compatibility policy'
 
 fresh_compat_id=779998
@@ -1113,6 +1365,23 @@ if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
 fi
 require_text '仅保留给已有 VM' "$TMP_DIR/fresh-compat.err" \
     'fresh compatibility platform refusal'
+
+fresh_authorized_compat_id=779997
+env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+    IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+    "$CREATE_VM" "$fresh_authorized_compat_id" --platform i5-6500 \
+    --allow-fallback-platform --ssd-profile samsung-970-pro-512gb \
+    --gpu-profile gtx1050_2gb --monitor-profile lenovo-d24-20 \
+    >"$TMP_DIR/fresh-authorized-compat.out" \
+    2>"$TMP_DIR/fresh-authorized-compat.err"
+# shellcheck source=/dev/null
+source "$VM_ROOT/${fresh_authorized_compat_id}/vm.conf"
+assert_eq i5-6500 "$PLATFORM" 'authorized compatibility platform'
+assert_eq legacy-compatibility "$CPU_REALIZATION_POLICY" \
+    'authorized compatibility CPU policy'
+require_text '用户显式授权新建旧平台兜底配置' \
+    "$TMP_DIR/fresh-authorized-compat.err" \
+    'authorized compatibility warning'
 
 default_new_id=779999
 env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
@@ -1180,13 +1449,39 @@ require_text '没有通过审核的 CPU/主板/内存组合' \
 [[ ! -e "$VM_ROOT/${illegal_component_id}/vm.conf" ]] || \
     fail 'illegal component selection persisted a VM hardware contract'
 
+# Capacity selectors keep the operator-facing choice small while source still
+# persists one complete audited platform/GPU row.
+capacity_selector_id=780098
+env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+    IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+    "$CREATE_VM" "$capacity_selector_id" \
+    --memory-size 6G --ssd-profile samsung-850-pro-512gb \
+    --gpu-vram 1024 --monitor-profile lenovo-d24-20 \
+    >"$TMP_DIR/capacity-selector.out"
+# shellcheck source=/dev/null
+source "$VM_ROOT/${capacity_selector_id}/vm.conf"
+assert_eq 6144 "$MEM_TOTAL_MB" 'memory capacity selector'
+assert_eq 1024 "$GPU_VRAM_MB" 'GPU VRAM capacity selector'
+assert_eq nvidia-256 "$VGPU_MDEV_PROFILE" '1GB GPU resource mapping'
+[[ "$(hardware_profile_lifecycle_class "$PLATFORM")" != legacy-compatibility ]] || \
+    fail 'capacity selectors pulled a hidden compatibility platform'
+
 declare -A PLATFORM_IDS=()
 next_id=780001
 for platform in \
         g3220-h81m-k-4g g3220-h81m-c-6g i3-4130-h81m-p33-8g \
         i5-4460-h81m-s1-4g i5-4570-h81m-k-6g \
         i5-4590-h81m-s1-8g i7-4790-h81m-p33-8g \
-        i3-4130-h81m-s1-samsung-6g i5-4460-h81m-c-micron-4g \
+        i3-4130-h81m-plus-crucial-8g i5-4590-h81m-plus-6g \
+        i3-4130-h81m-a-4g i3-4130-h81m-ds2-6g \
+        i3-4130-h81m-e33-8g i3-4130-h81m-hds-4g \
+        i3-4130-h81h3-m4-samsung-6g \
+        i3-4130-h81m-s1-samsung-6g \
+        i3-4130-h81m-s1-kingston-1333-6g \
+        i3-4130-h81m-s1-samsung-1333-4g \
+        i3-4130-h81m-s1-micron-1333-6g \
+        i3-4130-h81m-s1-hynix-1333-8g \
+        i3-4130-h81m-s1-micron-1600-6g i5-4460-h81m-c-micron-4g \
         i5-4570-h81m-s1-hynix-8g \
         i5-4590 i5-6500 i3-8100; do
     id=$next_id
@@ -1226,7 +1521,10 @@ for platform in \
 
     runtime_out="$TMP_DIR/runtime-$id.out"
     runtime_err="$TMP_DIR/runtime-$id.err"
-    run_start "$id" "$runtime_out" "$runtime_err" --no-gpu --no-tpm
+    if ! run_start "$id" "$runtime_out" "$runtime_err" --no-gpu --no-tpm; then
+        sed "s/^/${platform}: /" "$runtime_err" >&2 || true
+        fail "$platform start-vm dry-run failed"
+    fi
     if [[ "$platform" != i5-4590 && "$platform" != i5-6500 &&
           "$platform" != i3-8100 ]]; then
         require_text 'CPU realization: policy=enforced class=not-probed-dry-run enforce=on' \
@@ -1255,7 +1553,7 @@ for platform in \
     if grep -F -- 'type=17\,' "$runtime_out" | grep -Fq -- 'asset='; then
         fail "$platform SMBIOS Type 17 invented a DIMM asset tag"
     fi
-    assert_optical_identity_is_generic "$runtime_out" \
+    assert_no_persistent_optical_contract "$runtime_out" \
         "$platform normal dry-run"
     require_text "type=16\,max-capacity=${expected_max_memory}G\,num-devices=${expected_board_slots}" \
         "$runtime_out" "$platform SMBIOS physical memory array"
@@ -1374,9 +1672,9 @@ for platform in \
         || fail "$platform runtime memory is not ${MEM_TOTAL_MB} MiB"
 done
 
-# Install media are transient generic QEMU optical drives.  Historical
-# ODD_MODEL/ODD_SERIAL values from either the caller or vm.conf must not reach
-# either the Windows ISO or unattended-answer device.
+# Normal modes have no optical drive.  USB/helper/answer install transports
+# stay generic, and historical ODD_MODEL/ODD_SERIAL values from either the
+# caller or vm.conf must not create a default drive or reach a transient one.
 install_odd_id=${PLATFORM_IDS[g3220-h81m-k-4g]}
 install_odd_conf="$VM_ROOT/${install_odd_id}/vm.conf"
 install_odd_iso="$TMP_DIR/install-odd.iso"
@@ -1407,15 +1705,17 @@ reject_text 'ide-cd\,drive=odd0' "$TMP_DIR/install-odd.out" \
     'vm.conf must not inject the slow ATAPI compatibility backend'
 require_text 'ide-cd\,drive=answer0\,bus=ide.2' \
     "$TMP_DIR/install-odd.out" 'answer ISO generic optical device'
-assert_optical_identity_is_generic "$TMP_DIR/install-odd.out" \
+assert_no_persistent_optical_contract "$TMP_DIR/install-odd.out" \
     'install dry-run'
+reject_text 'id=g11-odd' "$TMP_DIR/install-odd.out" \
+    'USB install must not add the manual optical device'
 for injected_odd_identity in CONFIG-MODEL-INJECT CONFIG-SERIAL-INJECT \
         ENV-MODEL-INJECT ENV-SERIAL-INJECT; do
     reject_text "$injected_odd_identity" "$TMP_DIR/install-odd.out" \
         'ODD environment/config injection'
 done
 mv -- "$TMP_DIR/install-odd.vm.conf" "$install_odd_conf"
-require_text 'unset ODD_MODEL ODD_SERIAL' "$START_VM" \
+require_text 'unset ODD_PROFILE ODD_BRAND ODD_MODEL ODD_FIRMWARE_REV ODD_INTERFACE' "$START_VM" \
     'ODD environment/config scrub'
 
 # Hardware-v3 predates the persisted final per-slot list.  A missing list is

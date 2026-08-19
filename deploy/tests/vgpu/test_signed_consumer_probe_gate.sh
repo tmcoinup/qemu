@@ -74,6 +74,10 @@ if [ "$#" -eq 2 ] && [ "$1" = -device ] &&
         '  x-pci-revision=<uint32>'
     exit 0
 fi
+if [ "$#" -eq 2 ] && [ "$1" = -object ] && [ "$2" = fb-shm,help ]; then
+    printf 'fb-shm options:\n  path=<string>\n  rate=<uint32>\n'
+    exit 0
+fi
 echo "unexpected fake QEMU invocation: $*" >&2
 exit 99
 EOF

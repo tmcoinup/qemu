@@ -1078,6 +1078,11 @@ static QemuOptsList runtime_opts = {
             .help = "Use a volume label other than QEMU VVFAT",
         },
         {
+            .name = "label-charset",
+            .type = QEMU_OPT_STRING,
+            .help = "Encode the UTF-8 volume label in this FAT charset",
+        },
+        {
             .name = "rw",
             .type = QEMU_OPT_BOOL,
             .help = "Make the image writable",
@@ -1139,7 +1144,8 @@ static int vvfat_open(BlockDriverState *bs, QDict *options, int flags,
     BDRVVVFATState *s = bs->opaque;
     int cyls, heads, secs;
     bool floppy;
-    const char *dirname, *label;
+    const char *dirname, *label, *label_charset;
+    g_autofree char *encoded_label = NULL;
     QemuOpts *opts;
     int ret;
 
@@ -1167,10 +1173,38 @@ static int vvfat_open(BlockDriverState *bs, QDict *options, int flags,
 
     memset(s->volume_label, ' ', sizeof(s->volume_label));
     label = qemu_opt_get(opts, "label");
+    label_charset = qemu_opt_get(opts, "label-charset");
+    if (label_charset && !label) {
+        error_setg(errp,
+                   "vvfat label-charset requires an explicit label");
+        ret = -EINVAL;
+        goto fail;
+    }
     if (label) {
-        size_t label_length = strlen(label);
+        size_t label_length;
+
+        if (label_charset) {
+            GError *gerror = NULL;
+            gsize bytes_written = 0;
+
+            encoded_label = g_convert(label, -1, label_charset, "UTF-8",
+                                      NULL, &bytes_written, &gerror);
+            if (!encoded_label) {
+                error_setg(errp,
+                           "vvfat label cannot be encoded as %s: %s",
+                           label_charset, gerror->message);
+                g_error_free(gerror);
+                ret = -EINVAL;
+                goto fail;
+            }
+            label = encoded_label;
+            label_length = bytes_written;
+        } else {
+            label_length = strlen(label);
+        }
         if (label_length > 11) {
-            error_setg(errp, "vvfat label cannot be longer than 11 bytes");
+            error_setg(errp,
+                       "vvfat label cannot be longer than 11 encoded bytes");
             ret = -EINVAL;
             goto fail;
         }
@@ -3245,6 +3279,7 @@ static const char *const vvfat_strong_runtime_opts[] = {
     "fat-type",
     "floppy",
     "label",
+    "label-charset",
     "rw",
 
     NULL

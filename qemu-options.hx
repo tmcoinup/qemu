@@ -2205,7 +2205,9 @@ DEF("display", HAS_ARG, QEMU_OPTION_display,
     "-display spice-app[,gl=on|off]\n"
 #endif
 #if defined(CONFIG_SDL)
-    "-display sdl[,gl=on|core|es|off][,grab-mod=<mod>][,show-cursor=on|off]\n"
+    "-display sdl[,gl=on|core|es|off][,grab-mod=<mod>][,title=<name>]\n"
+    "            [,single-console=on|off]\n"
+    "            [,show-cursor=on|off]\n"
     "            [,window-close=on|off]\n"
 #endif
 #if defined(CONFIG_GTK)
@@ -2300,6 +2302,13 @@ SRST
         ``grab-mod=<mods>`` : Used to select the modifier keys for toggling
         the mouse grabbing in conjunction with the "g" key. ``<mods>`` can be
         either ``lshift-lctrl-lalt`` or ``rctrl``.
+
+        ``title=<name>`` : Use ``name`` as the complete primary SDL window
+        title. Additional SDL consoles append their display index. This does
+        not change the guest/process identity supplied by ``-name``.
+
+        ``single-console=on|off`` : Create only the primary SDL operator
+        window. Other QEMU consoles remain available to non-SDL listeners.
 
         ``gl=on|off|core|es`` : Use OpenGL for displaying
 

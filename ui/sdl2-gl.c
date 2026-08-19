@@ -63,24 +63,58 @@ static bool sdl2_gl_window_ready(struct sdl2_console *scon)
 
 static int sdl2_gl_make_window_current(struct sdl2_console *scon)
 {
+    int current_tid;
+
     if (!sdl2_gl_window_ready(scon)) {
         return -1;
     }
     if (scon->native_egl) {
+        current_tid = qemu_get_thread_id();
         if (!eglMakeCurrent(qemu_egl_display, scon->esurface,
                             scon->esurface, scon->ectx)) {
-            error_report("sdl2-egl: eglMakeCurrent failed: %s",
-                         qemu_egl_get_error_string());
+            if (!scon->warned_native_egl_make_current) {
+                error_report("sdl2-egl: eglMakeCurrent failed for console %d "
+                             "(thread=%d last-owner=%d): %s; suppressing "
+                             "repeated reports",
+                             scon->idx, current_tid,
+                             scon->native_egl_owner_tid,
+                             qemu_egl_get_error_string());
+                scon->warned_native_egl_make_current = true;
+            }
             return -1;
         }
+        scon->native_egl_owner_tid = current_tid;
         return 0;
     }
     return SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 }
 
+static void sdl2_gl_release_window_current(struct sdl2_console *scon)
+{
+    if (!scon->native_egl || eglGetCurrentContext() != scon->ectx) {
+        return;
+    }
+    if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                        EGL_NO_SURFACE, EGL_NO_CONTEXT)) {
+        if (!scon->warned_native_egl_release) {
+            warn_report("sdl2-egl: cannot release window context for console "
+                        "%d (thread=%d): %s",
+                        scon->idx, qemu_get_thread_id(),
+                        qemu_egl_get_error_string());
+            scon->warned_native_egl_release = true;
+        }
+        return;
+    }
+    scon->native_egl_owner_tid = 0;
+}
+
 static void sdl2_gl_swap_window(struct sdl2_console *scon)
 {
     bool presented = true;
+
+    if (!sdl2_window_is_renderable(scon)) {
+        return;
+    }
 
     if (scon->native_egl) {
         if (!eglSwapBuffers(qemu_egl_display, scon->esurface)) {
@@ -111,6 +145,9 @@ static int sdl2_gl_make_guest_context_current(struct sdl2_console *scon,
             error_report("sdl2-egl: guest eglMakeCurrent failed: %s",
                          qemu_egl_get_error_string());
             return -1;
+        }
+        if (scon->native_egl_owner_tid == qemu_get_thread_id()) {
+            scon->native_egl_owner_tid = 0;
         }
         return 0;
     }
@@ -152,7 +189,11 @@ static bool sdl2_gl_ensure_window_context(struct sdl2_console *scon)
             surface_gl_create_texture(scon->gls, scon->surface);
         }
     }
-    return scon->gls != NULL;
+    if (!scon->gls) {
+        sdl2_gl_release_window_current(scon);
+        return false;
+    }
+    return true;
 }
 
 static void sdl2_gl_render_surface(struct sdl2_console *scon)
@@ -162,12 +203,14 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
     SDL2Rect dst;
     SDL2Rect viewport;
 
-    if (sdl2_gl_make_window_current(scon) != 0) {
+    if (!sdl2_window_is_renderable(scon) ||
+        sdl2_gl_make_window_current(scon) != 0) {
         return;
     }
     sdl2_set_scanout_mode(scon, false);
 
     if (!sdl2_current_render_size(scon, &output)) {
+        sdl2_gl_release_window_current(scon);
         return;
     }
     guest = (SDL2Size) {
@@ -204,6 +247,7 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     }
     sdl2_gl_swap_window(scon);
+    sdl2_gl_release_window_current(scon);
 }
 
 void sdl2_gl_update(DisplayChangeListener *dcl,
@@ -218,7 +262,9 @@ void sdl2_gl_update(DisplayChangeListener *dcl,
     }
 
     surface_gl_update_texture(scon->gls, scon->surface, x, y, w, h);
-    scon->updates++;
+    /* Pending latch: do not accumulate indefinitely while minimized. */
+    scon->updates = 1;
+    sdl2_gl_release_window_current(scon);
 }
 
 void sdl2_gl_switch(DisplayChangeListener *dcl,
@@ -256,6 +302,7 @@ void sdl2_gl_switch(DisplayChangeListener *dcl,
     }
 
     surface_gl_create_texture(scon->gls, scon->surface);
+    sdl2_gl_release_window_current(scon);
 }
 
 void sdl2_gl_refresh(DisplayChangeListener *dcl)
@@ -271,20 +318,24 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
     }
     scon->presented_since_refresh = false;
     graphic_hw_update(dcl->con);
-    if (scon->updates && scon->real_window) {
+    if (scon->updates && sdl2_window_is_renderable(scon)) {
         scon->updates = 0;
         sdl2_gl_render_surface(scon);
     }
     if (scon->fixed_present && !scon->presented_since_refresh &&
-        !scon->hidden && scon->real_window &&
-        !(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
+        sdl2_window_is_renderable(scon)) {
         sdl2_gl_redraw(scon);
     }
+    sdl2_gl_release_window_current(scon);
 }
 
 void sdl2_gl_redraw(struct sdl2_console *scon)
 {
     assert(scon->opengl);
+
+    if (!sdl2_window_is_renderable(scon)) {
+        return;
+    }
 
     if (scon->scanout_mode) {
         /* sdl2_gl_scanout_flush actually only care about
@@ -309,7 +360,11 @@ QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
     }
 
     if (scon->native_egl) {
-        return qemu_egl_create_context(dgc, params, scon->ectx);
+        QEMUGLContext egl_ctx = qemu_egl_create_context(dgc, params,
+                                                        scon->ectx);
+
+        sdl2_gl_release_window_current(scon);
+        return egl_ctx;
     }
 
     current_ctx = SDL_GL_GetCurrentContext();
@@ -370,6 +425,7 @@ int sdl2_gl_make_context_current(DisplayGLCtx *dgc,
 void sdl2_gl_scanout_disable(DisplayChangeListener *dcl)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    bool was_scanout = scon->scanout_mode;
 
     assert(scon->opengl);
     if (scon->scanout_mode && sdl2_gl_make_window_current(scon) != 0) {
@@ -378,6 +434,10 @@ void sdl2_gl_scanout_disable(DisplayChangeListener *dcl)
     scon->w = 0;
     scon->h = 0;
     sdl2_set_scanout_mode(scon, false);
+    sdl2_gl_release_window_current(scon);
+    if (was_scanout) {
+        sdl2_window_resize(scon);
+    }
 }
 
 void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
@@ -390,6 +450,7 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
                              void *d3d_tex2d)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    bool guest_size_changed;
 
     assert(scon->opengl);
     if (!sdl2_gl_ensure_window_context(scon)) {
@@ -402,9 +463,13 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
     scon->y0_top = backing_y_0_top;
 
     if (sdl2_gl_make_window_current(scon) != 0) {
+        sdl2_gl_release_window_current(scon);
         return;
     }
 
+    guest_size_changed = !scon->scanout_mode ||
+                         scon->guest_fb.width != backing_width ||
+                         scon->guest_fb.height != backing_height;
     sdl2_set_scanout_mode(scon, true);
     egl_fb_setup_for_tex(&scon->guest_fb, backing_width, backing_height,
                          backing_id, false);
@@ -415,6 +480,10 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
                     backing_id, backing_width, backing_height, w, h, x, y,
                     backing_y_0_top, scon->native_egl);
         scon->logged_scanout_texture = true;
+    }
+    sdl2_gl_release_window_current(scon);
+    if (guest_size_changed) {
+        sdl2_window_resize(scon);
     }
 }
 
@@ -445,6 +514,7 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
         return;
     }
     if (sdl2_gl_make_window_current(scon) != 0) {
+        sdl2_gl_release_window_current(scon);
         return;
     }
 
@@ -456,6 +526,7 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
     egl_dmabuf_import_texture(dmabuf);
     texture = qemu_dmabuf_get_texture(dmabuf);
     if (!texture) {
+        sdl2_gl_release_window_current(scon);
         return;
     }
 
@@ -472,6 +543,7 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
     if (qemu_dmabuf_get_allow_fences(dmabuf)) {
         scon->guest_fb.dmabuf = dmabuf;
     }
+    sdl2_gl_release_window_current(scon);
 }
 
 void sdl2_gl_release_dmabuf(DisplayChangeListener *dcl,
@@ -489,6 +561,7 @@ void sdl2_gl_release_dmabuf(DisplayChangeListener *dcl,
         return;
     }
     egl_dmabuf_release_texture(dmabuf);
+    sdl2_gl_release_window_current(scon);
 }
 #endif
 
@@ -504,6 +577,9 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     GLint sy1, sy2;
 
     assert(scon->opengl);
+    if (!sdl2_window_is_renderable(scon)) {
+        return;
+    }
     if (!scon->scanout_mode) {
         return;
     }
@@ -520,6 +596,7 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     }
 
     if (!sdl2_current_render_size(scon, &output)) {
+        sdl2_gl_release_window_current(scon);
         return;
     }
     ww = output.width;
@@ -599,6 +676,7 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     }
 
     sdl2_gl_swap_window(scon);
+    sdl2_gl_release_window_current(scon);
 }
 
 void sdl2_gl_console_init(struct sdl2_console *scon)

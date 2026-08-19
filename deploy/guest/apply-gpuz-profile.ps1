@@ -1154,7 +1154,7 @@ function Read-And-VerifyBundle {
         throw 'Unsupported manifest schema.'
     }
     $files = @(Get-RequiredProperty $manifest 'files' 'manifest')
-    if ($files.Count -lt 8 -or $files.Count -gt 32) {
+    if ($files.Count -lt 8 -or $files.Count -gt 64) {
         throw "Unexpected manifest file count: $($files.Count)"
     }
     $seen = @{}
@@ -1637,7 +1637,7 @@ function Read-And-ValidatePortableIdentityContract {
             (Get-RequiredProperty $rawProfile 'memoryMakerName' `
                 'contract.profiles[]') `
             'contract.profiles[].memoryMakerName' 31 `
-            '^(Samsung|SK hynix|Micron)$'
+            '^(Samsung|Elpida|SK hynix|Micron)$'
         $matches = @($catalogProfiles | Where-Object {
             [string]$_.profile -ceq $key
         })
@@ -2293,11 +2293,11 @@ function Read-And-ValidateProfile {
         $validated['memoryMakerName'] = ConvertTo-StrictString `
             (Get-RequiredProperty $gpuRaw 'memoryMakerName' 'profile.gpu') `
             'profile.gpu.memoryMakerName' 31 `
-            '^(Samsung|SK hynix|Micron)$'
+            '^(Samsung|Elpida|SK hynix|Micron)$'
         $validated['memoryMakerNvapiName'] = ConvertTo-StrictString `
             (Get-RequiredProperty $gpuRaw 'memoryMakerNvapiName' 'profile.gpu') `
             'profile.gpu.memoryMakerNvapiName' 31 `
-            '^(Samsung|Hynix|Micron)$'
+            '^(Samsung|Elpida|Hynix|Micron)$'
     }
     $integerRanges = [ordered]@{
         nvapiPciVendorId = @(1, 65535)
@@ -2310,7 +2310,7 @@ function Read-And-ValidateProfile {
         memoryClockMHz = @(1, 10000)
         memoryBusBits = @(1, 1024)
         memoryBandwidthMBps = @(1, 1000000)
-        vramMB = @(2048, 2048)
+        vramMB = @(1024, 2048)
         memoryType = @(8, 8)
         memoryMaker = @(1, 10)
         cudaCores = @(1, 1000000)
@@ -2331,6 +2331,9 @@ function Read-And-ValidateProfile {
     $gpu = [pscustomobject]$validated
     if ([int64]$gpu.boostClockMHz -lt [int64]$gpu.coreClockMHz) {
         throw 'profile.gpu.boostClockMHz must not be lower than coreClockMHz.'
+    }
+    if (@(1024, 2048) -notcontains [int]$gpu.vramMB) {
+        throw 'profile.gpu.vramMB must be one audited catalog size (1024 or 2048).'
     }
     $memoryMakerContract = switch ([int]$gpu.memoryMaker) {
         1 { @('Samsung', 'Samsung') }
@@ -4216,6 +4219,49 @@ function Disable-HibernationAndFastStartup {
     return Assert-HibernationAndFastStartupDisabled
 }
 
+function Invoke-RecommendGuestPerformance {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Apply', 'Verify')]
+        [string]$Mode
+    )
+
+    $optimizerPath = Join-Path $BundleRoot 'Optimize-Guest.ps1'
+    $optimizer = Assert-RegularLocalPath $optimizerPath `
+        'embedded G-11 guest performance optimizer'
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $optimizer.FullName,
+        '-Mode', $Mode,
+        '-StartupDelayMs', '0'
+    )
+    Write-Host "[vGPU portable] Guest performance $Mode..." `
+        -ForegroundColor Cyan
+    $performanceOutput = @(& $SystemPowerShell @arguments 2>&1)
+    $performanceExitCode = $LASTEXITCODE
+    foreach ($line in $performanceOutput) {
+        Write-Host ([string]$line)
+    }
+    $marker = if ($Mode -eq 'Apply') {
+        'APPLY PASS: recommended native-display tuning is installed.'
+    } else {
+        'VERIFY PASS: tuning is active and no owned legacy display helper is running.'
+    }
+    $outputText = ($performanceOutput | Out-String)
+    if ($performanceExitCode -ne 0 -or $outputText -notmatch `
+            ('(?m)^' + [regex]::Escape($marker) + '\s*$')) {
+        $detail = $outputText.Trim()
+        throw "Embedded guest performance $Mode failed (exit $performanceExitCode): $detail"
+    }
+    return [pscustomobject]@{
+        mode = $Mode
+        status = 'PASS'
+        profile = 'recommended-native-v1'
+        stateRoot = (Join-Path $env:ProgramData 'G11GuestPerformance')
+    }
+}
+
 function Invoke-PortableIdentityMain {
     param(
         [Parameter(Mandatory = $true)][object]$Contract,
@@ -4240,6 +4286,7 @@ function Invoke-PortableIdentityMain {
             $licenseEvidence = Get-PrivateLicenseEvidence $Contract
             $powerEvidence = Assert-HibernationAndFastStartupDisabled
         }
+        $performanceEvidence = Invoke-RecommendGuestPerformance -Mode Verify
         Assert-SystemNvapiUnchanged $SystemNvapi
         Write-Host ''
         Write-Host '[vGPU identity] VERIFY PASS; no changes were made.' `
@@ -4253,6 +4300,7 @@ function Invoke-PortableIdentityMain {
             Write-Host "  License:   $($licenseEvidence.licenseStatus)"
             Write-Host '  Power:     hibernation/Fast Startup disabled'
         }
+        Write-Host "  Guest:     $($performanceEvidence.profile) verified"
         return
     }
 
@@ -4330,6 +4378,7 @@ function Invoke-PortableIdentityMain {
     } else {
         $null
     }
+    $performanceEvidence = Invoke-RecommendGuestPerformance -Mode Apply
 
     $result = [ordered]@{
         receiptType = 'vgpu-identity-portable-final'
@@ -4375,6 +4424,7 @@ function Invoke-PortableIdentityMain {
         licenseTokenBytes = [int64]$Contract.LicenseTokenBytes
         license = $licenseEvidence
         power = $powerEvidence
+        guestPerformance = $performanceEvidence
         identityQueryExe = $queryItem.FullName
         identityQuerySha256 = $Contract.QuerySha256
         identityQueryShortcut = $queryShortcutEvidence
@@ -4410,6 +4460,7 @@ function Invoke-PortableIdentityMain {
     Write-Host "  Backup:    $backup"
     Write-Host '  BCD:       testsigning=False, nointegritychecks=False'
     Write-Host '  NVAPI:     app-local only; system DLL hashes unchanged'
+    Write-Host "  Guest:     $($performanceEvidence.profile) applied"
     if ([int]$Contract.ContractSchemaVersion -eq 7) {
         Write-Host "  License:   $($licenseEvidence.licenseStatus)"
         Write-Host '  Power:     hibernation/Fast Startup disabled'

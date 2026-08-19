@@ -13,6 +13,7 @@ PATCH_GRID="$REPO_ROOT/deploy/guest/patch-grid-strings.ps1"
 APPLY_PROFILE="$REPO_ROOT/deploy/guest/apply-vm-profile.ps1"
 SETUP_GUEST="$REPO_ROOT/deploy/setup-guest.sh"
 INF_PATCH="$REPO_ROOT/deploy/guest/spoof-inf/inf-patch.ps1"
+EVIDENCE_TSV="$REPO_ROOT/deploy/docs/G11-1GB-GPU-EVIDENCE.tsv"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -30,6 +31,33 @@ assert_eq() {
 
 # shellcheck source=../../../lib/vgpu-profiles.sh
 source "$PROFILE_LIB"
+
+assert_eq 'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE' \
+    "$(vgpu_profile_native_grid_pnp_id nvidia-256)" \
+    'nvidia-256 native GRID PnP mapping'
+assert_eq 'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE' \
+    "$(vgpu_profile_native_grid_pnp_id nvidia-257)" \
+    'nvidia-257 native GRID PnP mapping'
+if vgpu_profile_native_grid_pnp_id nvidia-999 >/dev/null 2>&1; then
+    fail 'unknown mdev profile received a native GRID PnP mapping'
+fi
+
+assert_eq 1024 "$(vgpu_profile_normalize_vram_mb '1024 MB')" \
+    '1024 MB capacity normalization'
+assert_eq 2048 "$(vgpu_profile_normalize_vram_mb '2048 MB')" \
+    '2048 MB capacity normalization'
+mapfile -t default_1gb_profiles < <(vgpu_profile_default_keys_for_vram 1024)
+mapfile -t default_2gb_profiles < <(vgpu_profile_default_keys_for_vram 2048)
+assert_eq 12 "${#default_1gb_profiles[@]}" 'default 1024 MB GPU pool size'
+assert_eq 12 "${#default_2gb_profiles[@]}" 'default 2048 MB GPU pool size'
+if vgpu_profile_normalize_vram_mb 4096 >/dev/null 2>&1; then
+    fail 'unsupported GPU VRAM capacity was normalized'
+fi
+for requested_vram in 1024 2048; do
+    vgpu_profile_pick_random_vram "$requested_vram"
+    assert_eq "$requested_vram" "$GPU_VRAM_MB" \
+        "$requested_vram MB constrained GPU random"
+done
 
 # Catalog validation must be side-effect free. Otherwise validating all rows
 # immediately before launch can leak the last row's RAM maker into another VM.
@@ -56,10 +84,14 @@ test_catalog() {
     local expected_board_identity print_catalog rm_memory_vendor
 
     ((${#VGPU_PROFILE_CATALOG[@]} > 0)) || fail "vGPU profile catalog is empty"
-    assert_eq DF5077AE641CADFA30E2372E4846A59372B46ADBF222A12E5EE3F6AF1D8C613D \
+    assert_eq FEEA5430609C81C495617607A3500F7A7BEA6CB6AFB4A5156F1918A1ACDCED7B \
         "$(vgpu_profile_catalog_sha256)" "canonical vGPU profile catalog SHA"
-    assert_eq 12 "${#VGPU_PROFILE_CATALOG[@]}" \
+    assert_eq 25 "${#VGPU_PROFILE_CATALOG[@]}" \
         "multi-brand catalog profile count"
+    assert_eq 24 "${#VGPU_DEFAULT_PROFILE_KEYS[@]}" \
+        "backward-stable default GPU count"
+    assert_eq 1 "${#VGPU_EXPLICIT_PROFILE_KEYS[@]}" \
+        "manual expansion GPU count"
     assert_eq "${#VGPU_PROFILE_CATALOG[@]}" \
         "${#VGPU_PROFILE_BOARD_METADATA[@]}" \
         "board metadata catalog coverage"
@@ -87,12 +119,14 @@ test_catalog() {
             || fail "duplicate vGPU PCI identity: $pci_id"
         SEEN_PCI_IDS[$pci_id]="$key"
 
-        assert_eq 2048 "$vram_mb" "$key catalog VRAM"
-        assert_eq nvidia-257 "$mdev_profile" "$key catalog mdev profile"
+        case "$vram_mb:$mdev_profile" in
+            1024:nvidia-256|2048:nvidia-257) ;;
+            *) fail "$key has an invalid VRAM/mdev resource pair" ;;
+        esac
         assert_eq GDDR5 "$ram_type" "$key catalog memory type"
         assert_eq 8 "$memory_type_nvapi" "$key NVAPI memory type"
         case "$ram_maker|$memory_maker_nvapi" in
-            'Samsung|1'|'SK hynix|6'|'Micron|10') ;;
+            'Samsung|1'|'Elpida|3'|'SK hynix|6'|'Micron|10') ;;
             *) fail "$key has a split/unknown memory-maker mapping" ;;
         esac
         rm_memory_vendor=$(vgpu_profile_rm_memory_vendor_value \
@@ -102,7 +136,7 @@ test_catalog() {
             "$bus_bits" "$memory_type_nvapi" "$rm_memory_vendor" || \
             fail "$key cannot form a safe RM FB descriptor tuple"
         case "$ram_maker|$rm_memory_vendor" in
-            'Samsung|1'|'SK hynix|6'|'Micron|15') ;;
+            'Samsung|1'|'Elpida|3'|'SK hynix|6'|'Micron|15') ;;
             *) fail "$key maps to the wrong NVIDIA RM memory-vendor enum" ;;
         esac
         local raw_memory_khz=$((memory_mhz * 2000))
@@ -125,7 +159,9 @@ test_catalog() {
             0x1028) expected_board_brand=Dell ;;
             0x1462) expected_board_brand=MSI ;;
             0x1458) expected_board_brand=Gigabyte ;;
+            0x19DA) expected_board_brand=ZOTAC ;;
             0x7377) expected_board_brand=Colorful ;;
+            0x3842) expected_board_brand=EVGA ;;
             *) fail "$key has an unmapped board subvendor $subvid" ;;
         esac
         case "$key" in
@@ -177,6 +213,26 @@ test_catalog() {
                 assert_eq 16 "$pcie_width" "$key PCIe width"
                 ;;
         esac
+        case "$did" in
+            0x0FC8)
+                assert_eq 1024 "$vram_mb" "$key GT 740 VRAM"
+                assert_eq 128 "$bus_bits" "$key GT 740 memory bus"
+                assert_eq 384 "$cuda_cores" "$key GT 740 CUDA cores"
+                assert_eq 16 "$rop_count" "$key GT 740 ROP count"
+                ;;
+            0x1287)
+                assert_eq 1024 "$vram_mb" "$key GT 730 VRAM"
+                assert_eq 64 "$bus_bits" "$key GT 730 memory bus"
+                assert_eq 384 "$cuda_cores" "$key GT 730 CUDA cores"
+                assert_eq 8 "$rop_count" "$key GT 730 ROP count"
+                ;;
+            0x1381)
+                assert_eq 1024 "$vram_mb" "$key GTX 750 VRAM"
+                assert_eq 128 "$bus_bits" "$key GTX 750 memory bus"
+                assert_eq 512 "$cuda_cores" "$key GTX 750 CUDA cores"
+                assert_eq 0x12 "$chip_revision" "$key GTX 750 chip revision"
+                ;;
+        esac
 
         did_hex="${did#0x}"
         grep -Fq "VEN_10DE&DEV_${did_hex^^}" "$PATCH_GRID" \
@@ -206,11 +262,50 @@ test_catalog() {
     print_catalog="$(vgpu_profile_print_catalog)"
     grep -Eq '^PROFILE[[:space:]]+NAME[[:space:]]+VRAM[[:space:]]+CLOCKS[[:space:]]+BOARD[[:space:]]+VRAM-MAKER[[:space:]]+SERIAL[[:space:]]+MDEV$' \
         <<<"$print_catalog" || fail "printed catalog omits BOARD/VRAM-MAKER/SERIAL columns"
-    for expected_board_brand in NVIDIA ASUS Dell MSI Gigabyte GALAX Colorful; do
-        grep -Eq "[[:space:]]${expected_board_brand}[[:space:]]+.*not-exposed[[:space:]]+nvidia-257$" \
+    for expected_board_brand in NVIDIA ASUS Dell MSI Gigabyte ZOTAC GALAX Colorful EVGA; do
+        grep -Eq "[[:space:]]${expected_board_brand}[[:space:]]+.*not-exposed[[:space:]]+nvidia-25[67]$" \
             <<<"$print_catalog" || \
             fail "printed catalog omits $expected_board_brand/not-exposed"
     done
+
+    local tsv_catalog tsv_rows
+    tsv_catalog=$(vgpu_profile_print_tsv_catalog) || \
+        fail "machine-readable GPU catalog could not be generated"
+    assert_eq $'PROFILE\tMODEL\tBOARD_BRAND\tBOARD_MODEL\tVRAM_MIB\tVRAM_MAKER\tMDEV\tAUTO_RANDOM' \
+        "$(head -n1 <<<"$tsv_catalog")" \
+        "machine-readable GPU catalog header"
+    if ! awk -F '\t' 'NR > 1 && NF != 8 { exit 1 }' <<<"$tsv_catalog"; then
+        fail "machine-readable GPU catalog has a non-eight-column row"
+    fi
+    tsv_rows=$(tail -n +2 <<<"$tsv_catalog" | wc -l)
+    assert_eq "${#VGPU_PROFILE_CATALOG[@]}" "$tsv_rows" \
+        "machine-readable GPU catalog row count"
+    grep -Fqx $'gt1030_asus_2gb\tNVIDIA GeForce GT 1030\tASUS\tSilent\t2048\tSK hynix\tnvidia-257\t1' \
+        <<<"$tsv_catalog" || fail "machine-readable GPU catalog lost model/brand fields"
+    grep -Fqx $'gtx750ti_evga_sc_2gb\tNVIDIA GeForce GTX 750 Ti\tEVGA\t02G-P4-3753-KR\t2048\tSamsung\tnvidia-257\t0' \
+        <<<"$tsv_catalog" || fail "manual EVGA expansion lost AUTO_RANDOM=0"
+
+    [[ -r "$EVIDENCE_TSV" ]] || fail "1GB manufacturer evidence TSV is missing"
+    assert_eq 13 "$(wc -l <"$EVIDENCE_TSV")" \
+        "1GB evidence header plus twelve rows"
+    awk -F '\t' '
+        NR == 1 {
+            if (NF != 12 || $1 != "profile" ||
+                    $8 != "g11_subsystem_projection" ||
+                    $9 != "g11_vbios_projection" ||
+                    $12 != "physical_unit_serial_policy") exit 1
+            next
+        }
+        NF != 12 || $6 !~ /^https:\/\// || $10 != 1024 ||
+                $12 !~ /^not-exposed/ { exit 1 }
+    ' "$EVIDENCE_TSV" || fail "1GB manufacturer evidence TSV is malformed"
+    while IFS='|' read -r evidence_key evidence_vram; do
+        [[ "$evidence_vram" == 1024 ]] || continue
+        assert_eq 1 "$(awk -F '\t' -v key="$evidence_key" \
+            'NR > 1 && $1 == key { count++ } END { print count + 0 }' \
+            "$EVIDENCE_TSV")" "$evidence_key evidence row coverage"
+    done < <(printf '%s\n' "${VGPU_PROFILE_CATALOG[@]}" |
+        awk -F '|' '{print $1 "|" $9}')
 
     # Catalog validation itself must fail closed on a plausible-looking row
     # whose displayed clock and bandwidth cannot describe the same GDDR5 bus.
@@ -256,7 +351,7 @@ test_catalog() {
         fail "catalog validator accepted an exposed/synthetic GPU serial policy"
     fi
     [[ "$(vgpu_profile_catalog_sha256)" != \
-       DF5077AE641CADFA30E2372E4846A59372B46ADBF222A12E5EE3F6AF1D8C613D ]] \
+       FEEA5430609C81C495617607A3500F7A7BEA6CB6AFB4A5156F1918A1ACDCED7B ]] \
         || fail "companion metadata change did not alter the catalog SHA"
     VGPU_PROFILE_BOARD_METADATA=(
         "${original_board_metadata[0]/|NVIDIA|/|ASUS|}"
@@ -332,12 +427,12 @@ test_random_picker() {
     local actual_index forced_index expected_key
 
     actual_index=$(_vgpu_profile_random_index \
-        "${#VGPU_PROFILE_CATALOG[@]}") ||
+        "${#VGPU_DEFAULT_PROFILE_KEYS[@]}") ||
         fail "real random GPU index selection failed"
     [[ "$actual_index" =~ ^[0-9]+$ ]] ||
         fail "random GPU selector returned a non-numeric index"
-    ((actual_index < ${#VGPU_PROFILE_CATALOG[@]})) ||
-        fail "random GPU selector escaped the audited catalog"
+    ((actual_index < ${#VGPU_DEFAULT_PROFILE_KEYS[@]})) ||
+        fail "random GPU selector escaped the default catalog"
 
     # Override only inside this subshell so every possible index is exercised
     # deterministically without making the regression probabilistic.
@@ -347,15 +442,17 @@ test_random_picker() {
             printf '%s\n' "$FORCED_VGPU_INDEX"
         }
         for ((forced_index = 0;
-             forced_index < ${#VGPU_PROFILE_CATALOG[@]};
+             forced_index < ${#VGPU_DEFAULT_PROFILE_KEYS[@]};
              forced_index += 1)); do
             FORCED_VGPU_INDEX=$forced_index
-            expected_key=${VGPU_PROFILE_CATALOG[$forced_index]%%|*}
+            expected_key=${VGPU_DEFAULT_PROFILE_KEYS[$forced_index]}
             vgpu_profile_pick_random ||
                 fail "random GPU picker could not load index $forced_index"
             assert_eq "$expected_key" "$GPU_PROFILE" \
                 "random GPU index $forced_index"
         done
+        [[ "$GPU_PROFILE" != gtx750ti_evga_sc_2gb ]] ||
+            fail 'manual EVGA profile entered default random selection'
     )
 }
 
@@ -368,6 +465,7 @@ export IMAGE_ROOT VM_ROOT
 test_create_profile() {
     local key="$1" vm_id="$2" order="$3" conf
     local expected_name expected_vid expected_did expected_subvid expected_subdid
+    local expected_mdev expected_vram
     local expected_core expected_boost expected_memory
     local expected_vbios expected_memory_maker expected_memory_type_nvapi
     local expected_memory_maker_nvapi
@@ -380,6 +478,8 @@ test_create_profile() {
     expected_did="$GPU_PCI_DID"
     expected_subvid="$GPU_SUB_VID"
     expected_subdid="$GPU_SUB_DID"
+    expected_mdev="$VGPU_MDEV_PROFILE"
+    expected_vram="$GPU_VRAM_MB"
     expected_core="$GPU_CORE_MHZ"
     expected_boost="$GPU_BOOST_MHZ"
     expected_memory="$GPU_MEMORY_MHZ"
@@ -436,9 +536,9 @@ test_create_profile() {
             fail "$key new config invented an installed patched-driver version"
         [[ ! -v VGPU_PATCHED_DRIVER_INF ]] || \
             fail "$key new config hard-coded an installed OEM INF"
-        assert_eq nvidia-257 "${VGPU_MDEV_PROFILE-}" "$key conf mdev profile"
-        assert_eq 2048 "${VGPU_FB_MB-}" "$key conf allocated framebuffer"
-        assert_eq 2048 "${GPU_VRAM_MB-}" "$key conf advertised VRAM"
+        assert_eq "$expected_mdev" "${VGPU_MDEV_PROFILE-}" "$key conf mdev profile"
+        assert_eq "$expected_vram" "${VGPU_FB_MB-}" "$key conf allocated framebuffer"
+        assert_eq "$expected_vram" "${GPU_VRAM_MB-}" "$key conf advertised VRAM"
         assert_eq "$expected_name" "${GPU_NAME-}" "$key conf GPU name"
         assert_eq "$expected_vid" "${GPU_PCI_VID-}" "$key conf PCI vendor"
         assert_eq "$expected_did" "${GPU_PCI_DID-}" "$key conf PCI device"
@@ -658,6 +758,10 @@ test_create_profile gtx1050_2gb 102 option-first
 # Exercise shell-safe vm.conf serialization for the only catalog label that
 # contains whitespace; fixed Samsung defaults used to hide this failure.
 test_create_profile gtx750ti_msi_2gb 105 vm-first
+test_create_profile gt740_zotac_1gb 106 option-first
+test_create_profile gt730_gigabyte_1gb 107 vm-first
+# Exercises the fourth audited VRAM maker and the GTX 750 (not RTX 750) row.
+test_create_profile gtx750_gigabyte_1gb 108 option-first
 test_create_random_profile
 test_unknown_profile_fails
 test_force_gpu_policy

@@ -98,6 +98,9 @@
 #define FB_SHM_HELLO_F_WIN32_NAMES   (1u << 1)
 #define FB_SHM_HELLO_F_GPU_FRAMES    (1u << 2)
 #define FB_SHM_HELLO_F_GPU_REQUIRED  (1u << 3)
+#define FB_SHM_HELLO_F_GPU_SYNC      (1u << 4)
+/* Client accepts FbShmGpuFrame v2 with full guest source dimensions. */
+#define FB_SHM_HELLO_F_GPU_SOURCE_SIZE (1u << 5)
 
 #define FB_SHM_WIN32_NAME_MAX 260u
 #define FB_SHM_GPU_NAME_MAX   260u
@@ -110,6 +113,9 @@
 /* FbShmGpuFrame.flags bit masks. */
 #define FB_SHM_GPU_FRAME_F_Y0_TOP       (1u << 0)
 #define FB_SHM_GPU_FRAME_F_KEYED_MUTEX  (1u << 1)
+
+#define FB_SHM_GPU_FRAME_VERSION_V1 1u
+#define FB_SHM_GPU_FRAME_VERSION    2u
 
 typedef struct FbShmCtlReq {
     uint32_t magic;
@@ -157,6 +163,26 @@ typedef struct FbShmWin32Names {
  * use this payload when their encoder can import dma-buf / D3D11 directly;
  * otherwise they can ignore it and keep reading FbShmHeader slots.
  */
+/* Legacy payload retained for clients that did not negotiate v2. */
+typedef struct FbShmGpuFrameV1 {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t size;
+    uint32_t handle_type;
+    uint32_t flags;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t fourcc;
+    uint32_t x;
+    uint32_t y;
+    uint32_t backing_width;
+    uint32_t backing_height;
+    uint64_t modifier;
+    uint64_t frame_seq;
+    char handle_name[FB_SHM_GPU_NAME_MAX];
+} FbShmGpuFrameV1;
+
 typedef struct FbShmGpuFrame {
     uint32_t magic;
     uint32_t version;
@@ -174,6 +200,9 @@ typedef struct FbShmGpuFrame {
     uint64_t modifier;
     uint64_t frame_seq;
     char handle_name[FB_SHM_GPU_NAME_MAX];
+    /* Full guest coordinate space; width/height may be a private ROI texture. */
+    uint32_t source_width;
+    uint32_t source_height;
 } FbShmGpuFrame;
 
 /*

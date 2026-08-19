@@ -178,10 +178,14 @@ assert_single_exe() {
         fail "vm$vm_id single EXE is not private on the host"
     file "$expected_exe" | grep -Fq 'PE32+ executable (console) x86-64' ||
         fail "vm$vm_id single EXE is not native Win64"
+    # grep -q can exit before strings finishes; under pipefail that turns a
+    # real match into SIGPIPE status 141.  Consume the complete stream.
     strings -a "$expected_exe" |
-        grep -Fq 'requestedExecutionLevel level="requireAdministrator" uiAccess="false"' ||
+        grep -F 'requestedExecutionLevel level="requireAdministrator" uiAccess="false"' \
+            >/dev/null ||
         fail "vm$vm_id single EXE omits its UAC manifest"
-    strings -el "$expected_exe" | grep -Fq 'QEMU_GPUZ_SINGLE_EXE_V1' ||
+    strings -el "$expected_exe" | grep -F 'QEMU_GPUZ_SINGLE_EXE_V1' \
+        >/dev/null ||
         fail "vm$vm_id single EXE omits its launcher marker"
 }
 

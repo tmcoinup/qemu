@@ -35,7 +35,7 @@ static void sdl2_2d_present_texture(struct sdl2_console *scon)
     int ow, oh, dx, dy, dw, dh;
 
     if (!surf || !scon->texture || !scon->real_renderer ||
-        !scon->real_window || scon->hidden) {
+        !sdl2_window_is_renderable(scon)) {
         return;
     }
 
@@ -82,9 +82,12 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     if (SDL_UpdateTexture(scon->texture, &rect,
                           surface_data(surf) + surface_data_offset,
                           surface_stride(surf)) == 0) {
-        /* One graphic update may contain many dirty rectangles.  Upload each
-         * rectangle now, then present the complete texture once per refresh. */
-        scon->updates++;
+        /*
+         * One graphic update may contain many dirty rectangles.  This is a
+         * pending latch, not a frame counter: keep it saturated while the
+         * window is minimized, then present the latest complete texture once.
+         */
+        scon->updates = 1;
     }
 }
 
@@ -167,13 +170,12 @@ void sdl2_2d_refresh(DisplayChangeListener *dcl)
     sdl2_flush_window_updates();
     scon->presented_since_refresh = false;
     graphic_hw_update(dcl->con);
-    if (scon->updates) {
+    if (scon->updates && sdl2_window_is_renderable(scon)) {
         scon->updates = 0;
         sdl2_2d_present_texture(scon);
     }
     if (scon->fixed_present && !scon->presented_since_refresh &&
-        !scon->hidden && scon->real_window &&
-        !(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
+        sdl2_window_is_renderable(scon)) {
         sdl2_2d_present_texture(scon);
     }
 }
@@ -189,7 +191,7 @@ void sdl2_2d_redraw(struct sdl2_console *scon)
     sdl2_2d_update(&scon->dcl, 0, 0,
                    surface_width(scon->surface),
                    surface_height(scon->surface));
-    if (scon->updates) {
+    if (scon->updates && sdl2_window_is_renderable(scon)) {
         scon->updates = 0;
         sdl2_2d_present_texture(scon);
     }

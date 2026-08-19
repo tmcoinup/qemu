@@ -14,6 +14,7 @@
   ├─ 系统 NVAPI（32 位和 64 位调用者）
   │    保留 transport vendor/device = 10DE:1E30
   │    合并 profile 的板卡 Subsystem、VBIOS、时钟、GDDR5、位宽、显存厂家
+  │    RT cores = 0，Tensor cores = 0（六个旧卡 device ID 的闭合能力目录）
   └─ Monitor PnP
        按同一 VM 的 MONITOR_PROFILE 发布 FriendlyName + EDID_OVERRIDE
 ```
@@ -29,17 +30,24 @@ D3D 驱动，也不改变物理 GPU、mdev scheduler 或执行资源。
 
 ## 当前通用范围
 
-唯一目录有 12 条原子 profile，覆盖当前三款 2 GB GDDR5 显卡：
+唯一目录有 25 条原子 profile，覆盖三款 1GB 和三款 2GB GDDR5 显卡；默认随机层
+仍保留原 24 条，新增项只在用户手动选择时使用：
 
 | 型号 | 已收录板卡/显存组合 |
 |---|---|
-| GTX 750 Ti | NVIDIA/Samsung、ASUS/Samsung、MSI/SK hynix、Gigabyte/Micron |
+| GT 730 1GB | ASUS/Samsung、MSI/SK hynix、Gigabyte/Samsung、ZOTAC/SK hynix |
+| GT 740 1GB | MSI/Samsung、ASUS/SK hynix、Gigabyte/Samsung、ZOTAC/Micron |
+| GTX 750 1GB | ASUS/Samsung、MSI/SK hynix、Gigabyte/Elpida、ZOTAC/Samsung |
+| GTX 750 Ti | NVIDIA/Samsung、ASUS/Samsung、MSI/SK hynix、Gigabyte/Micron、EVGA/Samsung |
 | GT 1030 | ASUS/Samsung、GALAX/Samsung、ASUS/SK hynix、MSI/Micron |
 | GTX 1050 | Dell/Samsung、Colorful/Samsung、MSI/Micron、Gigabyte/SK hynix |
 
 每一行把型号、PCI Subsystem、板卡品牌、VBIOS、时钟、位宽、带宽、显存类型、
 显存厂家 enum 和核心字段一起锁定。安装器不允许从不同 profile 拼字段，也没有
 VM 编号、进程名或某个品牌的 fallback。查看机器当前可选值：
+
+1GB 厂商正式型号、P/N、公开商品码和实体 S/N 边界见
+[`G11-1GB-GPU-EXPANSION.md`](G11-1GB-GPU-EXPANSION.md)。
 
 ```bash
 cd /home/ubuntu/projects/qemu
@@ -74,14 +82,23 @@ VM_ID=9
 命令成功后会打印一个目录、一个只读 ISO 和 ISO SHA-256。默认位置是：
 
 ```text
-/home/ubuntu/images/staging/SystemNvapiProjection/
+/home/ubuntu/images/vms/<VM_ID>/packages/SystemNvapiProjection/
 ```
+
+包与该 VM 的磁盘、NVRAM 放在同一个数字 VM bundle 内；执行
+`./deploy/scripts/vmctl.sh delete <VM_ID>` 时会一起删除，不会在全局 staging 留下
+孤儿目录。只有显式传入 `--output-root` 才会导出到外部目录，外部导出不属于
+`delete-vm` 的清理范围。
 
 接下来只做三件事：
 
 1. 将刚生成的 ISO 只读挂到它绑定的 VM，或把同名输出目录完整复制进该 VM；
 2. 在 Windows 双击 `Run-As-Administrator.cmd`，确认一次 UAC；
-3. 等 Windows 自动重启，再等待约 1～2 分钟让 SYSTEM 完成验证。
+3. 原生 x86/x64 D3D12 门禁都通过后，等 Windows 自动重启，再等待约
+   1～2 分钟让 SYSTEM 完成验证。
+
+若任一 D3D12 探针报非零 ray-tracing tier，第 2 步会在任何系统投影写入前
+失败并且不重启。这是所选旧卡与签名驱动 transport 不一致，不是光盘故障。
 
 安装器会保存 NVIDIA 原件、安装 32/64 位系统转发 DLL、写入完整原子合同、发布
 显示器 EDID，并注册启动/登录后的持久收敛任务。旧基础盘若残留
@@ -95,8 +112,10 @@ VM_ID=9
 
 ## 验收
 
-先双击 `Verify-As-Administrator.cmd`。窗口必须同时看到两次
-`SYSTEM_NVAPI_VERIFY PASS`，最后显示目标显存类型、显存厂家和显示器的 `PASS`。
+成功安装并重启后，双击 `Verify-As-Administrator.cmd`。窗口必须同时看到
+两次 `SYSTEM_NVAPI_VERIFY PASS`（每行均含 `RT=0 Tensor=0`）与两次
+`D3D12_NATIVE_VERIFY PASS`（每行均含 `native_raytracing_nonzero=no`）；
+最后显示目标显存类型、显存厂家和显示器的 `PASS`。
 受保护收据位于：
 
 ```text

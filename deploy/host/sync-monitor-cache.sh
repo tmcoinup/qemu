@@ -114,10 +114,13 @@ case "$DRIVER_POLICY" in
            "$EXPECTED_DRIVER_INF_SHA256" == \
                67a240e1d464cf97dabfec1a7cecf000eaa9ddfd702f32ba2c8771f17905dc2b &&
            "$EXPECTED_DRIVER_CATALOG_SHA256" == \
-               56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f &&
-           "${EXPECTED_NVIDIA_PNP_ID^^}" == \
-               'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE' ]] || \
+               56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f ]] || \
             die "GRID 538.33 monitor policy tuple 不在审核目录"
+        case "${EXPECTED_NVIDIA_PNP_ID^^}" in
+            'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE'|\
+            'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE') ;;
+            *) die "GRID 538.33 B/native PnP 不在 1Q/2Q 审核目录" ;;
+        esac
         NVIDIA_MODE_POLICY_KIND=locked-grid
         ;;
     nvidia-53758-dch-whql-gtx1050-dell)
@@ -491,27 +494,32 @@ expected_nvidia_pnp_id = os.environ['EXPECTED_NVIDIA_PNP_ID']
 driver_policy = os.environ['DRIVER_POLICY']
 mode_policy_kind = os.environ['NVIDIA_MODE_POLICY_KIND']
 allowed_driver_policies = {
-    'grid-53833-native': (
-        GRID_53833_DRIVER_VERSION, GRID_53833_INF_SHA256,
-        '56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f',
-        r'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE', 'locked-grid'),
-    'nvidia-53758-dch-whql-gtx1050-dell': (
+    'grid-53833-native': {
+        (GRID_53833_DRIVER_VERSION, GRID_53833_INF_SHA256,
+         '56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f',
+         r'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE', 'locked-grid'),
+        (GRID_53833_DRIVER_VERSION, GRID_53833_INF_SHA256,
+         '56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f',
+         r'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE', 'locked-grid'),
+    },
+    'nvidia-53758-dch-whql-gtx1050-dell': {(
         '31.0.15.3758',
         'c2860e03d30f7ba610f9726765354e75cabb624791aecea61478066d9ead50f1',
         '08ad09f3b13e78d40b674914178b51090eabf99df3fd1571c7dcbb367d8b430b',
-        r'PCI\VEN_10DE&DEV_1C81&SUBSYS_11C01028', 'edid-only-consumer'),
-    'nvidia-53758-dch-whql-gtx750ti-asus': (
+        r'PCI\VEN_10DE&DEV_1C81&SUBSYS_11C01028', 'edid-only-consumer')},
+    'nvidia-53758-dch-whql-gtx750ti-asus': {(
         '31.0.15.3758',
         '1b7b9f3a5a13a4fec0074bcea8a1dd64336cef228041b1124b8e31d41cded957',
         '08ad09f3b13e78d40b674914178b51090eabf99df3fd1571c7dcbb367d8b430b',
-        r'PCI\VEN_10DE&DEV_1380&SUBSYS_84BB1043', 'edid-only-consumer'),
+        r'PCI\VEN_10DE&DEV_1380&SUBSYS_84BB1043', 'edid-only-consumer')},
 }
-expected_policy_tuple = allowed_driver_policies.get(driver_policy)
+expected_policy_tuples = allowed_driver_policies.get(driver_policy)
 actual_policy_tuple = (
     expected_driver_version, expected_driver_inf_sha256,
     expected_driver_catalog_sha256, expected_nvidia_pnp_id.upper(),
     mode_policy_kind)
-if expected_policy_tuple is None or actual_policy_tuple != expected_policy_tuple:
+if (expected_policy_tuples is None or
+        actual_policy_tuple not in expected_policy_tuples):
     raise SystemExit('helper NVIDIA monitor driver policy tuple 不在审核目录')
 expected_enum_prefix = expected_nvidia_pnp_id[4:].lower()
 edid = open(os.environ['EDID_BIN'], 'rb').read()
@@ -654,7 +662,7 @@ def nvidia_driver_targets(cs):
                 continue
             if not expected_device:
                 print(f'  {cs}\\Enum\\PCI\\{device_name}: '
-                      '跳过 legacy/非当前 NVIDIA PnP 残留')
+                      '跳过 legacy/非当前 B-native NVIDIA PnP 残留')
                 continue
             driver = reg_string(instance, 'Driver')
             class_guid = reg_string(instance, 'ClassGUID')

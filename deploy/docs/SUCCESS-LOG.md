@@ -258,13 +258,18 @@ catalog 并用 `pnputil` 安装。即使 BCD 测试选项关闭，这仍是私�
 
 ## 光驱生命周期与高速安装边界（2026-08-04 收口）
 
+> 2026-08-18 更新：现行合同继续保持“普通启动零光驱”。
+> `--install` 才在启动期创建临时光驱；日常 ISO 由 `vmctl cdrom mount`
+> 热插 USB-BOT/SCSI 光驱，`eject` 删除整台设备。当前操作以
+> [`G11-OPTICAL-DRIVE.md`](G11-OPTICAL-DRIVE.md) 为准。
+
 Q35 machine 自带板载 ICH9-AHCI (`VEN_8086&DEV_2922`)，QEMU 默认会在其空闲 AHCI 端口（当前拓扑为 `ide.2`）自动挂一个空 ATAPI CDROM。Windows Device Manager 里显示 `QEMU QEMU DVD-ROM`，是最明显的虚拟化指纹之一。
 
-源码仍支持显式 `-device ide-cd,model=...` 的 ATAPI INQUIRY 投影，供单独的
-设备实验使用；G-11 生产启动器不再使用这一能力。没有逐型号审核和真实序列证据时，
+源码仍支持显式 `-device ide-cd,model=...` 的 ATAPI INQUIRY 投影。在 2026-08-04
+收口时，G-11 生产启动器暂未使用这一能力。没有逐型号审核和真实序列证据时，
 把 TSST/HL-DT-ST 字符串覆盖到临时安装介质反而会制造不可信身份。
 
-启动脚本：普通启动不再挂空光驱，并通过
+现行启动脚本：普通启动不挂空光驱，并通过
 `-global ide-cd.bootindex=-1` 抑制 QEMU 自动创建默认 CD-ROM；只有
 `--install` 会向 guest 暴露安装介质。默认 Windows ISO 不再走每 2 KiB 一次请求的
 ICH9-AHCI ATAPI PIO，而是由安装期 FAT helper 自动 chainload 到 xHCI USB BOT 光盘。
@@ -284,7 +289,7 @@ ICH9-AHCI ATAPI PIO，而是由安装期 FAT helper 自动 chainload 到 xHCI US
 -device ide-cd,drive=answer0,bus=ide.2
 ```
 
-安装期光驱明确属于 `generic transient ODD`：只承载介质，不进入持久硬件品牌池，
+默认 USB 安装期光驱明确属于 `generic transient ODD`：只承载介质，不进入硬件品牌池，
 不生成或查重虚构序列。启动器在载入 `vm.conf` 前后清除旧
 `ODD_MODEL`/`ODD_SERIAL`，调用环境和历史配置都不能重新注入型号或序列。
 

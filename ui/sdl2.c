@@ -57,6 +57,7 @@ static SDL_Cursor *sdl_cursor_normal;
 static SDL_Cursor *sdl_cursor_hidden;
 static SDL_Cursor *sdl_cursor_windows;
 static bool sdl2_framebuffer_cursor;
+static bool sdl2_screen_saver_inhibited;
 static Notifier mouse_mode_notifier;
 static QEMUTimer *sdl2_input_timer;
 static uint32_t sdl_button_map[INPUT_BUTTON__MAX] = {
@@ -96,6 +97,24 @@ static bool sdl2_env_enabled(const char *name)
             g_ascii_strcasecmp(value, "yes") == 0 ||
             g_ascii_strcasecmp(value, "true") == 0 ||
             g_ascii_strcasecmp(value, "on") == 0);
+}
+
+static void sdl2_apply_host_display_sleep_policy(void)
+{
+    /*
+     * SDL video initialization inhibits the host screen saver by default,
+     * while upstream QEMU explicitly re-enables it.  A G-11 SDL console is a
+     * locally watched display, so keep the monitor awake unless the operator
+     * explicitly opts back into the upstream laptop-friendly behaviour.
+     * This affects only host screen blanking/DPMS, never guest power policy.
+     */
+    if (sdl2_env_enabled("QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP")) {
+        SDL_EnableScreenSaver();
+        sdl2_screen_saver_inhibited = false;
+    } else {
+        SDL_DisableScreenSaver();
+        sdl2_screen_saver_inhibited = true;
+    }
 }
 
 static bool sdl2_gnome_guard_run(const char *action)
@@ -161,6 +180,8 @@ static void sdl2_gnome_guard_update(struct sdl2_console *scon)
 #define SDL2_REFRESH_INTERVAL_MINIMIZED_MS 100
 #define SDL2_INPUT_POLL_INTERVAL_ACTIVE_MS 8
 #define SDL2_INPUT_POLL_INTERVAL_BACKGROUND_MS 32
+#define SDL2_FPS_STABLE_MIN_FRAMES 30
+#define SDL2_FPS_LOW_WARMUP_WINDOWS 2
 
 /* introduced in SDL 2.0.10 */
 #ifndef SDL_HINT_RENDER_BATCHING
@@ -187,6 +208,17 @@ static bool sdl2_should_use_native_egl(void)
 static void sdl2_window_destroy_native_egl(struct sdl2_console *scon)
 {
 #ifdef CONFIG_X11
+    if (qemu_egl_display != EGL_NO_DISPLAY &&
+        scon->ectx != EGL_NO_CONTEXT &&
+        eglGetCurrentContext() == scon->ectx) {
+        if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                            EGL_NO_SURFACE, EGL_NO_CONTEXT)) {
+            warn_report("sdl2-egl: cannot release current context before "
+                        "window teardown: %s", qemu_egl_get_error_string());
+        } else {
+            scon->native_egl_owner_tid = 0;
+        }
+    }
     if (scon->esurface) {
         eglDestroySurface(qemu_egl_display, scon->esurface);
         scon->esurface = EGL_NO_SURFACE;
@@ -304,6 +336,22 @@ static bool sdl2_window_init_native_egl(struct sdl2_console *scon)
     }
 
     /*
+     * qemu_egl_init_surface_x11() leaves the new window context current.
+     * SDL setup can run before the GUI refresh timer starts (and GL display
+     * callbacks are allowed to use another thread), so never carry that
+     * ownership across the initialization boundary.  Every rendering entry
+     * point acquires the context for its own bounded operation.
+     */
+    if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                        EGL_NO_SURFACE, EGL_NO_CONTEXT)) {
+        error_report("sdl2-egl: cannot release context after window init: %s",
+                     qemu_egl_get_error_string());
+        sdl2_window_destroy_native_egl(scon);
+        return false;
+    }
+    scon->native_egl_owner_tid = 0;
+
+    /*
      * Linux/X11 下 SDL 只负责窗口和输入；GL context/surface 由 QEMU EGL
      * helpers 创建。这样本地 SDL 窗口保留，同时 fb-shm 的 texture→dma-buf
      * 导出和 direct dma-buf import 都使用同一个可控 EGL provider。
@@ -328,7 +376,8 @@ static void sdl2_window_sync_native_egl_child(struct sdl2_console *scon)
     int ww;
     int wh;
 
-    if (!scon->native_egl || !scon->native_egl_window || !scon->real_window) {
+    if (!scon->native_egl || !scon->native_egl_window ||
+        !sdl2_window_is_renderable(scon)) {
         return;
     }
 
@@ -653,6 +702,7 @@ void sdl2_window_create(struct sdl2_console *scon)
         scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, 0);
     }
 
+    sdl2_window_update_size_limits(scon);
     sdl_update_caption(scon);
 }
 
@@ -675,17 +725,79 @@ void sdl2_window_destroy(struct sdl2_console *scon)
     }
     SDL_DestroyWindow(scon->real_window);
     scon->real_window = NULL;
+    scon->window_resize_pending = false;
+    scon->window_maximum = (SDL2Size) { 0 };
+}
+
+void sdl2_window_update_size_limits(struct sdl2_console *scon)
+{
+    SDL2Size window;
+    SDL2Size render;
+    SDL2Size guest;
+    SDL2Size maximum;
+    bool embedded_render_child = false;
+
+    if (!scon->real_window ||
+        !sdl2_current_render_size(scon, &render) ||
+        !sdl2_current_guest_size(scon, &guest)) {
+        return;
+    }
+
+    SDL_GetWindowSize(scon->real_window, &window.width, &window.height);
+#ifdef CONFIG_OPENGL
+    embedded_render_child = scon->native_egl;
+#endif
+    /*
+     * A native EGL child is synchronized after SDL drains resize events.
+     * During that short interval eglQuerySurface() still reports its old
+     * size.  Treating that mismatch as a DPI ratio would shrink the maximum
+     * to an externally requested ROI and prevent the SHOWN handler from
+     * restoring the full guest mode.
+     */
+    if (!sdl2_window_max_size(window, render, guest,
+                              embedded_render_child, &maximum) ||
+        (maximum.width == scon->window_maximum.width &&
+         maximum.height == scon->window_maximum.height)) {
+        return;
+    }
+
+    /*
+     * SDL size hints use logical window units.  The policy helper accounts
+     * for the current monitor's drawable/window DPI ratio, so maximizing or
+     * dragging cannot enlarge the client area beyond the guest's native mode.
+     */
+    SDL_SetWindowMaximumSize(scon->real_window,
+                             maximum.width, maximum.height);
+    scon->window_maximum = maximum;
 }
 
 void sdl2_window_resize(struct sdl2_console *scon)
 {
+    SDL2Size guest;
+
     if (!scon->real_window) {
         return;
     }
 
-    SDL_SetWindowSize(scon->real_window,
-                      surface_width(scon->surface),
-                      surface_height(scon->surface));
+    /*
+     * Guest 在宿主窗口最小化/隐藏期间仍可以切换显示模式。
+     * 此时不调 SDL 父窗口和 native-EGL 子窗口；窗口恢复后
+     * 再按最新 surface 尺寸一次性应用，
+     * 避免最小化动画变成真实 resize。
+     */
+    if (!sdl2_window_is_renderable(scon)) {
+        scon->window_resize_pending = true;
+        return;
+    }
+    if (!sdl2_current_guest_size(scon, &guest)) {
+        return;
+    }
+    scon->window_resize_pending = false;
+
+    sdl2_window_update_size_limits(scon);
+    if (!gui_fullscreen) {
+        SDL_SetWindowSize(scon->real_window, guest.width, guest.height);
+    }
 #ifdef CONFIG_OPENGL
 #ifdef CONFIG_X11
     sdl2_window_sync_native_egl_child(scon);
@@ -709,8 +821,15 @@ static void sdl_update_caption(struct sdl2_console *scon)
     char win_title[1024];
     char icon_title[1024];
     const char *status = "";
+    const char *title_name = qemu_name;
+    bool title_is_explicit = false;
     const char *cursor_status = sdl2_framebuffer_cursor ?
                                 " | Cursor: framebuffer (host hidden)" : "";
+
+    if (scon->opts->u.sdl.title && scon->opts->u.sdl.title[0]) {
+        title_name = scon->opts->u.sdl.title;
+        title_is_explicit = true;
+    }
 
     if (!runstate_is_running()) {
         status = " [Stopped]";
@@ -732,16 +851,47 @@ static void sdl_update_caption(struct sdl2_console *scon)
         }
     }
 
-    if (qemu_name) {
+    if (title_is_explicit && scon->idx == 0) {
+        /*
+         * The launcher supplies a stable per-instance title such as
+         * "win10-8".  Treat it as the complete base title: appending the SDL
+         * console index turned the first display into an invented "-0" VM.
+         */
         if (scon->present_fps_valid) {
             snprintf(win_title, sizeof(win_title),
-                     "QEMU (%s-%d) | SDL Present %.1f FPS%s%s", qemu_name,
+                     "%s | SDL Present %.1f FPS%s%s", title_name,
+                     scon->present_fps, cursor_status, status);
+        } else {
+            snprintf(win_title, sizeof(win_title), "%s%s%s",
+                     title_name, cursor_status, status);
+        }
+        snprintf(icon_title, sizeof(icon_title), "%s", title_name);
+    } else if (title_is_explicit) {
+        /*
+         * QEMU can expose hidden firmware/text consoles in the same SDL
+         * process.  Keep their names outside the primary instance contract,
+         * otherwise an exact `win10-N` lookup would map every console.
+         */
+        if (scon->present_fps_valid) {
+            snprintf(win_title, sizeof(win_title),
+                     "%s-console-%d | SDL Present %.1f FPS%s%s", title_name,
+                     scon->idx, scon->present_fps, cursor_status, status);
+        } else {
+            snprintf(win_title, sizeof(win_title), "%s-console-%d%s%s",
+                     title_name, scon->idx, cursor_status, status);
+        }
+        snprintf(icon_title, sizeof(icon_title), "%s-console-%d",
+                 title_name, scon->idx);
+    } else if (title_name) {
+        if (scon->present_fps_valid) {
+            snprintf(win_title, sizeof(win_title),
+                     "QEMU (%s-%d) | SDL Present %.1f FPS%s%s", title_name,
                      scon->idx, scon->present_fps, cursor_status, status);
         } else {
             snprintf(win_title, sizeof(win_title), "QEMU (%s-%d)%s%s",
-                     qemu_name, scon->idx, cursor_status, status);
+                     title_name, scon->idx, cursor_status, status);
         }
-        snprintf(icon_title, sizeof(icon_title), "QEMU (%s)", qemu_name);
+        snprintf(icon_title, sizeof(icon_title), "QEMU (%s)", title_name);
     } else {
         if (scon->present_fps_valid) {
             snprintf(win_title, sizeof(win_title),
@@ -770,6 +920,20 @@ static void sdl2_present_rate_tick(struct sdl2_console *scon)
     }
     elapsed_us = now_us - scon->fps_window_start_us;
     if (elapsed_us >= G_USEC_PER_SEC) {
+        if (!scon->present_fps_valid && scon->fps_low_warmup_windows &&
+            scon->fps_frame_count < SDL2_FPS_STABLE_MIN_FRAMES) {
+            /*
+             * SHOWN can still drain one or two minimized-cadence timer
+             * windows.  Do not advertise their 0.8/1.8 FPS as the active
+             * rate.  The budget is bounded, so a genuinely slow renderer is
+             * still reported after warm-up instead of being hidden forever.
+             */
+            scon->fps_low_warmup_windows--;
+            scon->fps_frame_count = 0;
+            scon->fps_window_start_us = now_us;
+            return;
+        }
+        scon->fps_low_warmup_windows = 0;
         scon->present_fps = (double)scon->fps_frame_count * G_USEC_PER_SEC /
                             elapsed_us;
         scon->fps_frame_count = 0;
@@ -777,6 +941,16 @@ static void sdl2_present_rate_tick(struct sdl2_console *scon)
         scon->present_fps_valid = true;
         sdl_update_caption(scon);
     }
+}
+
+static void sdl2_present_rate_reset(struct sdl2_console *scon)
+{
+    scon->fps_window_start_us = 0;
+    scon->fps_frame_count = 0;
+    scon->present_fps = 0.0;
+    scon->present_fps_valid = false;
+    scon->fps_low_warmup_windows = SDL2_FPS_LOW_WARMUP_WINDOWS;
+    sdl_update_caption(scon);
 }
 
 void sdl2_note_present(struct sdl2_console *scon)
@@ -1491,20 +1665,25 @@ static void handle_windowevent(SDL_Event *ev)
 
     switch (ev->window.event) {
     case SDL_WINDOWEVENT_RESIZED:
-        scon->ui_info_pending = true;
+    case SDL_WINDOWEVENT_SIZE_CHANGED:
+        /*
+         * 宿主窗口只是 Guest scanout 的显示画布。不再把
+         * RESIZED 通过 display-info 回写 Guest：否则最小化途中的
+         * 中间尺寸会被当成新分辨率，
+         * 形成“先缩成一点再消失”
+         * 的反馈环。SDL_SetWindowSize() 也会产生 SIZE_CHANGED，
+         * 所以两类事件统一只重绘。
+         */
+        sdl2_window_update_size_limits(scon);
         scon->window_redraw_pending = true;
         sdl_reset_relative_motion(scon);
-        break;
-    case SDL_WINDOWEVENT_SIZE_CHANGED:
-        /* Programmatic SDL_SetWindowSize also emits this event; redraw but
-         * do not feed that size back into the guest. */
-        scon->window_redraw_pending = true;
         break;
     case SDL_WINDOWEVENT_EXPOSED:
         scon->window_redraw_pending = true;
         break;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     case SDL_WINDOWEVENT_DISPLAY_CHANGED:
+        sdl2_window_update_size_limits(scon);
         scon->window_redraw_pending = true;
         break;
 #endif
@@ -1587,8 +1766,13 @@ static void handle_windowevent(SDL_Event *ev)
         }
         sdl2_gnome_guard_update(scon);
         break;
+    case SDL_WINDOWEVENT_MAXIMIZED:
     case SDL_WINDOWEVENT_RESTORED:
+        /* Both maximize and unminimize replace the compositor buffer. */
         sdl_sync_keyboard_grab(scon);
+        if (scon->window_resize_pending) {
+            sdl2_window_resize(scon);
+        }
         scon->window_redraw_pending = true;
         update_displaychangelistener_ns(
             &scon->dcl, SDL2_REFRESH_INTERVAL_ACTIVE_NS);
@@ -1599,6 +1783,13 @@ static void handle_windowevent(SDL_Event *ev)
         }
         break;
     case SDL_WINDOWEVENT_MINIMIZED:
+        /*
+         * 丢弃最小化前排队的 resize/redraw；
+         * RESTORED 会补一次整帧。
+         */
+        scon->window_redraw_pending = false;
+        scon->window_resize_pending = true;
+        sdl2_present_rate_reset(scon);
         sdl_release_mouse_buttons(scon);
         sdl_reset_relative_motion(scon);
         if (!grabbed_scon || sdl_console_is_grabbed(scon)) {
@@ -1637,6 +1828,8 @@ static void handle_windowevent(SDL_Event *ev)
         sdl_sync_keyboard_grab(scon);
         update_displaychangelistener_ns(
             &scon->dcl, SDL2_REFRESH_INTERVAL_ACTIVE_NS);
+        sdl2_window_resize(scon);
+        graphic_hw_invalidate(scon->dcl.con);
         scon->window_redraw_pending = true;
         if (sdl_cursor_is_active(scon) &&
             (sdl_console_is_grabbed(scon) ||
@@ -1646,6 +1839,10 @@ static void handle_windowevent(SDL_Event *ev)
         break;
     case SDL_WINDOWEVENT_HIDDEN:
         scon->hidden = true;
+        /* SHOWN 会重新同步窗口并补一次整帧。 */
+        scon->window_redraw_pending = false;
+        scon->window_resize_pending = true;
+        sdl2_present_rate_reset(scon);
         sdl_release_mouse_buttons(scon);
         sdl_reset_relative_motion(scon);
         if (!grabbed_scon || sdl_console_is_grabbed(scon)) {
@@ -1666,33 +1863,23 @@ void sdl2_flush_window_updates(void)
 {
     int i;
 
-    /* A resize drag can queue dozens of RESIZED/SIZE_CHANGED/EXPOSED events.
-     * Once the SDL queue is drained, publish only the final logical size and
-     * redraw each affected window once. */
+    /*
+     * A resize drag can queue dozens of RESIZED/SIZE_CHANGED/EXPOSED events.
+     * Once the SDL queue is drained, redraw each visible window once and drop
+     * animation updates belonging to a minimized or hidden window.
+     */
     for (i = 0; i < sdl2_num_outputs; i++) {
         struct sdl2_console *target = &sdl2_console[i];
 
-        if (target->ui_info_pending) {
-            int width;
-            int height;
-
-            target->ui_info_pending = false;
-            if (target->real_window) {
-                QemuUIInfo info = { 0 };
-
-                SDL_GetWindowSize(target->real_window, &width, &height);
-                if (width > 0 && height > 0) {
-                    info.width = width;
-                    info.height = height;
-                    dpy_set_ui_info(target->dcl.con, &info, true);
-                }
-            }
+        if (!sdl2_window_is_renderable(target)) {
+            target->window_redraw_pending = false;
+            continue;
+        }
+        if (target->window_resize_pending) {
+            sdl2_window_resize(target);
         }
         if (target->window_redraw_pending) {
             target->window_redraw_pending = false;
-            if (!target->real_window || target->hidden) {
-                continue;
-            }
 #ifdef CONFIG_OPENGL
             sdl2_window_sync_native_egl_child(target);
 #endif
@@ -1935,6 +2122,11 @@ static void sdl_cleanup(void)
     }
     sdl2_gnome_guard_restore();
     g_clear_pointer(&sdl2_gnome_guard_state, g_free);
+    if (sdl2_screen_saver_inhibited) {
+        /* Do not leave a process-global inhibitor behind during SDL teardown. */
+        SDL_EnableScreenSaver();
+        sdl2_screen_saver_inhibited = false;
+    }
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
@@ -1952,6 +2144,8 @@ static void sdl2_set_paused(DisplayChangeListener *dcl, bool paused)
     }
     if (paused) {
         scon->hidden = true;
+        scon->window_resize_pending = true;
+        sdl2_present_rate_reset(scon);
         sdl_release_mouse_buttons(scon);
         sdl_reset_relative_motion(scon);
         if (!grabbed_scon || sdl_console_is_grabbed(scon)) {
@@ -1964,7 +2158,10 @@ static void sdl2_set_paused(DisplayChangeListener *dcl, bool paused)
         SDL_HideWindow(scon->real_window);
     } else {
         scon->hidden = false;
+        update_displaychangelistener_ns(
+            &scon->dcl, SDL2_REFRESH_INTERVAL_ACTIVE_NS);
         SDL_ShowWindow(scon->real_window);
+        sdl2_window_resize(scon);
         graphic_hw_invalidate(dcl->con);
         /*
          * 中文注释：display-resume 可能发生在 guest 桌面完全静止时。对
@@ -1973,6 +2170,7 @@ static void sdl2_set_paused(DisplayChangeListener *dcl, bool paused)
          * 这里直接重绘一次已缓存的 scanout，避免 SDL 窗口恢复后停在黑色
          * back buffer。
          */
+        scon->window_redraw_pending = true;
         sdl2_redraw(scon);
     }
 }
@@ -2122,11 +2320,33 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
      * higher priority, so an administrator can still override this policy. */
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
 #endif
+#ifdef CONFIG_X11
+    /*
+     * SDL otherwise derives WM_CLASS from argv[0] (qemu-system-x86_64),
+     * which does not match the distro's qemu.desktop application id.  A
+     * stable class lets GNOME/Dock group the window and calculate the proper
+     * minimize target instead of using its top-left fallback.  Preserve an
+     * explicit administrator override.
+     */
+    if (!g_getenv("SDL_VIDEO_X11_WMCLASS")) {
+        g_setenv("SDL_VIDEO_X11_WMCLASS", "qemu", false);
+    }
+#endif
     if (SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Could not initialize SDL(%s) - exiting\n",
                 SDL_GetError());
         exit(1);
     }
+    /*
+     * SDL2 enables desktop text input during video initialization.  That is
+     * correct for a native text field, but wrong for a graphic VM console:
+     * IBus/Fcitx/host IMEs may consume key down/up events before QEMU can
+     * forward their physical scancodes to the guest.  QEMU's SDL graphic and
+     * built-in text consoles both have scancode/qcode paths, so keep SDL text
+     * composition disabled for the lifetime of this backend.  Guest language
+     * input remains entirely inside the guest OS.
+     */
+    sdl2_disable_host_text_input();
 #ifdef SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR /* only available since SDL 2.0.8 */
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
 #endif
@@ -2136,7 +2356,6 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
 #endif
     SDL_SetHint(SDL_HINT_WINDOWS_NO_CLOSE_ON_ALT_F4, "1");
     sdl2_set_hint_x11_force_egl();
-    SDL_EnableScreenSaver();
     memset(&info, 0, sizeof(info));
     SDL_VERSION(&info.version);
 
@@ -2156,10 +2375,16 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
             break;
         }
     }
+    if (o->u.sdl.has_single_console && o->u.sdl.single_console && i > 1) {
+        info_report("sdl2: single-console mode keeps console 0 and skips "
+                    "%d auxiliary consoles", i - 1);
+        i = 1;
+    }
     sdl2_num_outputs = i;
     if (sdl2_num_outputs == 0) {
         return;
     }
+    sdl2_apply_host_display_sleep_policy();
     sdl2_console = g_new0(struct sdl2_console, sdl2_num_outputs);
 
     /* Listener registration may immediately replay a guest cursor. */

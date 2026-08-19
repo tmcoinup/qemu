@@ -81,6 +81,10 @@ if [ "$#" -eq 2 ] && [ "$1" = -device ] \
         '  x-pci-revision=<uint32>'
     exit 0
 fi
+if [ "$#" -eq 2 ] && [ "$1" = -object ] && [ "$2" = fb-shm,help ]; then
+    printf 'fb-shm options:\n  path=<string>\n  rate=<uint32>\n'
+    exit 0
+fi
 echo "unexpected fake QEMU invocation: $*" >&2
 exit 99
 EOF
@@ -241,7 +245,10 @@ STATE_BEFORE=$(sha256sum "$STATE")
 CONTRACT_BEFORE=$(sha256sum "$CONTRACT")
 run_start --production-migration-source \
     >"$TMP_DIR/authorized.out" 2>"$TMP_DIR/authorized.err" \
-    || fail "exact production migration source was rejected"
+    || {
+        cat "$TMP_DIR/authorized.err" >&2
+        fail "exact production migration source was rejected"
+    }
 require_text \
     "production-migration-source authorized for this invocation only" \
     "$TMP_DIR/authorized.out" "process-local authorization"

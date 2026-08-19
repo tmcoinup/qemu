@@ -68,6 +68,12 @@ struct ICH9LPCState {
     Notifier machine_ready;
 
     qemu_irq gsi[IOAPIC_NUM_PINS];
+
+    /*
+     * G-11 presents one reviewed Intel PCH LPC identity to guest inventory
+     * tools.  The emulated LPC/ACPI/IRQ behavior remains ICH9.
+     */
+    char *g11_chipset;
 };
 
 #define ICH9_MASK(bit, ms_bit, ls_bit) \

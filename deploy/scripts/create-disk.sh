@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # create-disk.sh — 创建 VM 主盘 qcow2。
 #
-# 默认行为：
-#   $VM_BASE_DIR/win10-base.qcow2 存在 → 复制 base（秒级，无需重新装 driver）
+# 默认行为保留历史兼容：
+#   $VM_BASE_DIR/win10-base.qcow2 存在 → 复制该默认 base
 #   不存在                              → 建空 qcow2（用于从 ISO 装 Windows）
+# 多基础镜像必须用 --base-name NAME 精确选择。
 #
 # 强制空盘: ./deploy/scripts/create-disk.sh <vm_id> --blank
-# 强制从 base: ./deploy/scripts/create-disk.sh <vm_id> --from-base  # base 缺失即失败
+# 强制从指定 base: ./deploy/scripts/create-disk.sh <vm_id> --from-base --base-name NAME
 #
 # 空盘容量优先取 SIZE_BYTES，其次取显式 CLI GB，再其次读取
 # vm.conf 的 SSD_SIZE_BYTES；旧配置没有容量字段时仍回退 512 GB。
@@ -14,7 +15,7 @@
 # 用法:
 #   ./deploy/scripts/create-disk.sh <vm_id>            # 默认从 base 复制
 #   ./deploy/scripts/create-disk.sh <vm_id> --blank    # 强制空盘
-#   ./deploy/scripts/create-disk.sh <vm_id> --from-base # 强制克隆公共 base
+#   ./deploy/scripts/create-disk.sh <vm_id> --from-base --base-name win10-ltsc-v1
 #   ./deploy/scripts/create-disk.sh <vm_id> 1024       # 空盘 1TB
 #   SIZE_BYTES=123456 ./deploy/scripts/create-disk.sh 1 # 精确字节数
 #
@@ -34,16 +35,43 @@ source "$here/lib/vm-storage.sh"
 source "$here/lib/disk-headroom.sh"
 vm_storage_init
 
+usage() {
+    cat <<'EOF'
+usage: ./deploy/scripts/create-disk.sh VM_ID [SIZE_GB] [options]
+
+Options:
+  --from-base          Clone a standalone base; fail if it is missing
+  --base-name NAME     Select the managed base name (default: win10-base)
+  --blank              Create an empty disk; cannot use --base-name
+  -h, --help           Show this help
+EOF
+}
+
 VM_ID=""
 SIZE_GB=512
 SIZE_GB_SET=0
 FORCE_BLANK=0
 REQUIRE_BASE=0
+BASE_NAME=win10-base
+BASE_NAME_SET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --blank) FORCE_BLANK=1; shift ;;
         --from-base|--require-base) REQUIRE_BASE=1; shift ;;
-        -h|--help) sed -n '3,21p' "$0"; exit 0 ;;
+        --base-name)
+            (($# >= 2)) || { echo "--base-name 需要名称" >&2; exit 2; }
+            ((BASE_NAME_SET == 0)) || { echo "--base-name 只能指定一次" >&2; exit 2; }
+            BASE_NAME=$2
+            BASE_NAME_SET=1
+            shift 2
+            ;;
+        --base-name=*)
+            ((BASE_NAME_SET == 0)) || { echo "--base-name 只能指定一次" >&2; exit 2; }
+            BASE_NAME=${1#*=}
+            BASE_NAME_SET=1
+            shift
+            ;;
+        -h|--help) usage; exit 0 ;;
         *)
             if [[ "$1" =~ ^[0-9]+$ ]]; then
                 if [[ -z "$VM_ID" ]]; then
@@ -64,12 +92,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 if [[ -z "$VM_ID" || ! "$VM_ID" =~ ^[1-9][0-9]*$ ]]; then
-    echo "usage: $0 <vm_id> [size_gb=512] [--blank|--from-base]" >&2
+    usage >&2
     exit 2
 fi
 vm_storage_require_namespace_ready "$VM_ID"
+vm_storage_validate_base_name "$BASE_NAME"
 if ((FORCE_BLANK && REQUIRE_BASE)); then
     echo "--blank 与 --from-base 不能同时使用" >&2
+    exit 2
+fi
+if ((FORCE_BLANK && BASE_NAME_SET)); then
+    echo "--blank 与 --base-name 不能同时使用" >&2
     exit 2
 fi
 if [[ ! "$SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
@@ -139,7 +172,7 @@ if ! flock -n -x "$DISK_LOCK_FD"; then
     exit 1
 fi
 TARGET=$(vm_storage_disk_path "$VM_ID")
-BASE=$(vm_storage_base_path)
+BASE=$(vm_storage_base_path "$BASE_NAME")
 
 if [[ -e "$TARGET" || -L "$TARGET" ]]; then
     echo "⚠️  $TARGET 已存在。删除请 ./deploy/scripts/delete-vm.sh ${VM_ID} -y" >&2
@@ -195,7 +228,7 @@ if [[ -f "$BASE" && $FORCE_BLANK -eq 0 ]]; then
         exit 1
     fi
     "$QEMU_IMG" check -q "$BASE"
-    echo "[create-disk] 从 baseline 复制：$BASE → $TARGET"
+    echo "[create-disk] 从 baseline '$BASE_NAME' 复制：$BASE → $TARGET"
     cp --reflink=auto -- "$BASE" "$TARGET_TMP"
     # A shared baseline is commonly made 0444 to prevent accidental edits.
     # The private copy must still be writable for qemu-img resize and the VM.

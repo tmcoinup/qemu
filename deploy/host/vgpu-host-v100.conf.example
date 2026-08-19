@@ -10,17 +10,18 @@
 # explicit domain:bus:slot.function, for example 0000:65:00.0.
 VGPU_MGPU=auto
 
-# Common 16 GiB PCIe V100, 2 GiB Q-series graphics vGPU.
-VGPU_RESOURCE_PROFILE='V100-2Q'
-VGPU_RESOURCE_FB_MB=2048
+# Common 16 GiB PCIe V100.  start-vm.sh selects the matching Q-series
+# resource from the selected VM's audited 1 GiB/2 GiB identity row.
+VGPU_RESOURCE_PROFILE_1024='V100-1Q'
+VGPU_RESOURCE_PROFILE_2048='V100-2Q'
 VGPU_TOTAL_FB_MB=16384
 
-# Other 2 GiB Q-series names (select exactly one for the installed SKU):
-#   PCIe 32 GiB : V100D-2Q       (VGPU_TOTAL_FB_MB=32768)
-#   SXM2 16 GiB : V100X-2Q       (VGPU_TOTAL_FB_MB=16384)
-#   SXM2 32 GiB : V100DX-2Q      (VGPU_TOTAL_FB_MB=32768)
-#   V100S       : V100S-2Q       (set total from nvidia-smi)
-#   FHHL        : V100L-2Q       (VGPU_TOTAL_FB_MB=16384)
+# Other Q-series pairs (replace both names for the installed SKU):
+#   PCIe 32 GiB : V100D-1Q / V100D-2Q   (VGPU_TOTAL_FB_MB=32768)
+#   SXM2 16 GiB : V100X-1Q / V100X-2Q   (VGPU_TOTAL_FB_MB=16384)
+#   SXM2 32 GiB : V100DX-1Q / V100DX-2Q (VGPU_TOTAL_FB_MB=32768)
+#   V100S 32 GiB: V100S-1Q / V100S-2Q   (VGPU_TOTAL_FB_MB=32768)
+#   FHHL        : V100L-1Q / V100L-2Q   (VGPU_TOTAL_FB_MB=16384)
 
 # Check both NVIDIA's available_instances and the per-parent framebuffer sum.
 VGPU_CAPACITY_CHECK=both

@@ -50,6 +50,7 @@ tests = {
   'test-fifo': [],
   'test-envlist': [],
   'test-edid': [meson.project_source_root() / 'hw/display/edid-generate.c'],
+  'test-sdl2-display-policy': [meson.project_source_root() / 'ui/sdl2-display-policy.c'],
   'test-sdl2-pointer': [meson.project_source_root() / 'ui/sdl2-pointer.c'],
   'test-usb-hid-numlock': [meson.project_source_root() / 'hw/usb/hid-numlock.c'],
 }

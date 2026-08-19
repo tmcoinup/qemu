@@ -42,7 +42,7 @@ Options:
   --gpuz-source FILE     Host GPU-Z 2.70.0 executable to embed
                          (default: $IMAGE_ROOT/candidates/gpuz-2.70-audit/
                          GPU-Z.2.70.0.exe)
-  --list-gpu-profiles    Print the current 2 GB GPU identity catalog
+  --list-gpu-profiles    Print the current 1/2 GB GPU identity catalog
   -h, --help             Show this help
 
 Normal use:
@@ -423,12 +423,15 @@ case "$configured_mode" in
         ;;
 esac
 
-[[ "$GPU_VRAM_MB" == 2048 ]] \
-    || die "only the audited 2048 MB identity catalog is supported"
+case "$GPU_VRAM_MB" in
+    1024|2048) ;;
+    *) die "only the audited 1024/2048 MB identity catalog is supported" ;;
+esac
 [[ "$GPU_MEMORY_TYPE" == GDDR5 && "$GPU_MEMORY_TYPE_NVAPI" == 8 ]] \
     || die "the current package accepts only audited GDDR5(8) profiles"
 case "$GPU_MEMORY_MAKER|${GPU_MEMORY_MAKER_NVAPI_NAME:-}|$GPU_MEMORY_MAKER_NVAPI" in
-    'Samsung|Samsung|1'|'SK hynix|Hynix|6'|'Micron|Micron|10') ;;
+    'Samsung|Samsung|1'|'Elpida|Elpida|3'|\
+    'SK hynix|Hynix|6'|'Micron|Micron|10') ;;
     *) die "the VRAM maker display/NVAPI/enum tuple is not cataloged" ;;
 esac
 ((GPU_BOOST_MHZ >= GPU_CORE_MHZ)) \

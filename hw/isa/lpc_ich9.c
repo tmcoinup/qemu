@@ -704,12 +704,60 @@ static void ich9_lpc_initfn(Object *obj)
     ich9_pm_add_properties(obj, &lpc->pm);
 }
 
+typedef struct G11LPCIdentity {
+    const char *chipset;
+    uint16_t device_id;
+    uint8_t revision;
+} G11LPCIdentity;
+
+/*
+ * This closed list intentionally changes only D31:F0's guest-visible PCI
+ * identity.  AHCI and xHCI retain their native QEMU identities because a
+ * mismatched storage/USB ID can select Windows silicon-specific quirks that
+ * the virtual controllers do not implement.
+ */
+static const G11LPCIdentity g11_lpc_identities[] = {
+    { "H81",  0x8c5c, 0x04 },
+    { "H97",  0x8cc6, 0x00 },
+    { "B150", 0xa148, 0x31 },
+    { "B360", 0xa308, 0x10 },
+};
+
+static bool ich9_lpc_apply_g11_identity(ICH9LPCState *lpc, Error **errp)
+{
+    PCIDevice *d = PCI_DEVICE(lpc);
+    size_t index;
+
+    if (!lpc->g11_chipset) {
+        return true;
+    }
+    for (index = 0; index < ARRAY_SIZE(g11_lpc_identities); index++) {
+        const G11LPCIdentity *identity = &g11_lpc_identities[index];
+
+        if (strcmp(lpc->g11_chipset, identity->chipset) != 0) {
+            continue;
+        }
+        pci_config_set_vendor_id(d->config, PCI_VENDOR_ID_INTEL);
+        pci_config_set_device_id(d->config, identity->device_id);
+        pci_config_set_revision(d->config, identity->revision);
+        return true;
+    }
+
+    error_setg(errp,
+               "ICH9-LPC x-g11-chipset must be one of H81, H97, B150, B360");
+    return false;
+}
+
 static void ich9_lpc_realize(PCIDevice *d, Error **errp)
 {
     ICH9LPCState *lpc = ICH9_LPC_DEVICE(d);
     PCIBus *pci_bus = pci_get_bus(d);
     ISABus *isa_bus;
     uint32_t irq;
+
+    if (!ich9_lpc_apply_g11_identity(lpc, errp)) {
+        return;
+    }
 
     if ((lpc->smi_host_features & BIT_ULL(ICH9_LPC_SMI_F_CPU_HOT_UNPLUG_BIT)) &&
         !(lpc->smi_host_features & BIT_ULL(ICH9_LPC_SMI_F_CPU_HOTPLUG_BIT))) {
@@ -844,6 +892,7 @@ static const Property ich9_lpc_properties[] = {
                      pm.swsmi_timer_enabled, true),
     DEFINE_PROP_BOOL("x-smi-periodic-timer", ICH9LPCState,
                      pm.periodic_timer_enabled, true),
+    DEFINE_PROP_STRING("x-g11-chipset", ICH9LPCState, g11_chipset),
 };
 
 static void ich9_send_gpe(AcpiDeviceIf *adev, AcpiEventStatusBits ev)

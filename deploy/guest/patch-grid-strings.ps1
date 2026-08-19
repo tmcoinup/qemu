@@ -21,7 +21,7 @@ param(
     [ValidateRange(1,10000)][int]$MemoryClockMHz = 1752,
     [ValidateRange(1,1024)][int]$MemoryBusBits = 128,
     [ValidateRange(1,1000000)][int]$MemoryBandwidthMBps = 112000,
-    [ValidateSet(2048)][int]$VramMB = 2048,
+    [ValidateSet(1024,2048)][int]$VramMB = 2048,
     [ValidateSet(8)][int]$MemoryType = 8,
     [ValidateRange(1,255)][int]$MemoryMaker = 1,
     [ValidateRange(1,1000000)][int]$CudaCores = 640,
@@ -38,8 +38,12 @@ param(
     #   SPOOF_MODE=A + gtx750ti_2gb → DEV_1380
     #   SPOOF_MODE=A + gtx1050_2gb → DEV_1C81
     #   SPOOF_MODE=A + gt1030_2gb  → DEV_1D01
+    # GT 730/740/GTX 750 现在只支持 B/native；额外 ID 仅供旧诊断调用匹配。
     [string[]]$DeviceIdMatch = @(
         'VEN_10DE&DEV_1E30',
+        'VEN_10DE&DEV_0FC8',
+        'VEN_10DE&DEV_1287',
+        'VEN_10DE&DEV_1381',
         'VEN_10DE&DEV_1380',
         'VEN_10DE&DEV_1C81',
         'VEN_10DE&DEV_1D01'

@@ -11,6 +11,7 @@
 #                      (NO_VFIO 旁路 vfio-pci；iso 默认 $IMAGE_ROOT/iso/win10.iso)
 #                      默认仅跳过 OOBE；密钥/版本/磁盘分区仍手动选择
 #                      OOBE 使用内置 Administrator，密码为空
+#                      普通启动不创建光驱；手动 ISO 用 vmctl cdrom mount
 #   --install-media usb|ide
 #                      安装 ISO 传输：USB xHCI 高速光驱（默认）或 IDE 兼容回退
 #   --manual-oobe      安装时不附加应答 ISO，恢复完整手动 OOBE
@@ -35,12 +36,18 @@
 #   --signed-consumer-probe outer-only|outer+internal
 #                      仅供 probe-signed-consumer-vgpu.sh 使用的一次性、
 #                      已消费 host attestation FD；普通入口不能建立授权
-#   --proxy           启用 QEMU 原生 QMP 多客户端；并创建 .proxy 兼容别名
-#   --no-proxy        关闭 QMP 多客户端（默认）
+#   --proxy           创建 .proxy 兼容别名；DGame preview 默认已启用原生 multi QMP
+#   --no-proxy        不创建 .proxy 别名（默认；不关闭 preview 所需的 multi QMP）
 #   --cpu-isolate      CPU 隔离 required 模式（默认；保留为显式兼容参数）
 #   --cpu-isolate-auto CPU 隔离 auto 模式（不可用时显式降级继续）
 #   --no-cpu-isolate   关闭 CPU 隔离
-#   --svc-cpus <N>     QEMU 主循环/显示/IO 专用逻辑 CPU 数（默认 auto=1/0）
+#   --svc-cpus <0..64|auto>
+#                      QEMU 主循环/显示/IO 专用逻辑 CPU 数（默认 0，不单独分配）
+#   --dgame-preview    为 DGame 创建独立本地 fb-shm 帧源（native 默认）
+#   --no-dgame-preview 关闭 DGame 本地预览兼容端点
+#   --dgame-preview-rate <Hz>  本地预览帧率 1..240（默认 60）
+#   --dgame-preview-gpu 优先 SDL/GTK texture -> dma-buf（默认）
+#   --no-dgame-preview-gpu 只保留 SHM 兼容帧
 #   --stream <URL>      启用 fb-shm 区域推流；必须给显式目标 URL/绝对文件
 #   --stream-roi X,Y,W,H  固定推流区域（默认完整主显示）
 #   --stream-rate <Hz>  捕获/编码帧率 1..240（默认 30）
@@ -49,7 +56,7 @@
 #   --stream-preset <name>   编码器 preset（默认 veryfast）
 #   --stream-gop <frames>    GOP 帧数（默认 60）
 #   --stream-container <name> 显式 ffmpeg muxer
-#   --stream-mode auto|shm|gpu  G-11 默认 shm；R535 拒绝严格 gpu 模式
+#   --stream-mode auto|shm|gpu  G-11 默认 auto；GPU 不可用时回退 SHM
 #   --no-stream         关闭环境变量配置的推流
 #   --vlan-id <1..4094> 本次 VM 接入指定 access VLAN；guest 内收发无标签帧
 #   --dry-run          只打印最终 QEMU argv，不分配 mdev/不启动
@@ -85,11 +92,18 @@
 #   GUEST_MEM_MB     分配内存 (默认 8192)
 #   GFX_BACKEND      vGPU native 窗口后端 (sdl|gtk，默认 sdl)
 #   INSTALL_GFX_BACKEND  install 窗口后端 (gtk|sdl，默认 gtk)
-#   QEMU_SDL_DISABLE_IBUS auto|0|1；默认 auto，在宿主 IBus 会话中隔离
-#                     SDL 的宿主输入法（guest 仍接收原始键盘事件）
+#   QEMU_SDL_DISABLE_IBUS auto|0|1；默认 1，仅为当前 SDL QEMU 子进程隔离
+#                     IBus/Fcitx/XIM；0 恢复旧行为，auto 仅检测到 IME 时隔离
 #   QEMU_SDL_PRESENT_MODE fixed|dynamic；默认 fixed，SDL 固定 60Hz Present；
 #                     dynamic 保留旧的按画面变化 Present 行为
+#   QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP 0|1；默认 0，SDL 窗口运行期间阻止
+#                     宿主屏保/显示器休眠；1 恢复上游 QEMU 的自动息屏行为
+#   QEMU_SDL_GNOME_ANIMATIONS off|on；默认 off。GNOME 下由可逆守护器
+#                     去掉 SDL 窗口最小化/恢复/最大化的 clone 双影；
+#                     最后一个 G-11 SDL 退出后恢复宿主原值
 #   GUEST_NUMLOCK     1=默认按 guest LED 状态保持 NumLock 开启；0=关闭
+#   G11_CHIPSET_PRESENTATION catalog|off；默认 catalog，把主板目录中的
+#                     H81/H97/B150/B360 映射到 00:1f.0；off 为兼容回退
 #                     不修改 Windows 注册表，也不盲目发送切换键
 #   DISPLAY_WIDTH/HEIGHT  旧 external viewer 窗口大小 (默认 1920x1080)
 #   VGPU_ROMBAR      vGPU ROM BAR 策略 (auto|0|1；native 默认 0)
@@ -97,6 +111,8 @@
 #   VGPU_HOST_CONFIG 宿主 vGPU 资源配置（默认 host/vgpu-host.conf）
 #   VGPU_RESOURCE_PROFILE  真实 mdev type id/name/glob（与 guest identity 分离）
 #   VGPU_RESOURCE_FB_MB    真实 mdev framebuffer MB
+#   VGPU_RESOURCE_PROFILE_1024/_2048  按来宾显存自动选真实 mdev type；
+#                     适用于同一 V100 宿主同时运行 1GB/2GB VM
 #   VGPU_MDEV_IDENTITY_MODE host per-mdev 名称：auto|required|off（默认 auto）
 #   VGPU_MDEV_INTERNAL_PCI_IDENTITY 实验性内部 vdev/pdev ID：0|1（默认 0）
 #                     仅 SPOOF_MODE=A 时生效；其他情况仍为 name-only
@@ -105,10 +121,16 @@
 #                     新配置按 BOARD_TPM_VERSION 自动选择；旧配置仍默认 TPM 2.0
 #   MEM_GUARD/MEM_FORCE  prealloc 内存护栏及显式风险旁路
 #   HOST_OOM_PROTECT 1=将当前 VM 进程树临时设为 oom_score_adj=-500
-#   PROXY            QMP 原生多客户端开关（0/1，默认 0）
+#   PROXY            QMP `.proxy` 兼容别名开关（0/1，默认 0）
 #   CPU_ISOLATION    auto|required|off（默认 required）
 #   CPU_ISOLATION_AUTO_INSTALL  缺 helper/依赖时自动安装（0/1，默认 1）
-#   QEMU_SERVICE_CPUS  非 vCPU 服务线程专用逻辑 CPU 数（默认 auto；有容量为 1，否则 0）
+#   QEMU_SERVICE_CPUS  非 vCPU 服务线程专用逻辑 CPU 数（默认 0；需显式指定）
+#   DGAME_PREVIEW     auto|on|off；native 默认 on，使用独立 fb-shm 对象
+#   DGAME_PREVIEW_RATE  DGame 本地预览帧率 1..240（默认 60）
+#   DGAME_PREVIEW_GPU auto|on|off；默认 auto，优先亮机卡 EGL/dma-buf，
+#                     失败时 DGame 自动改读同一对象的 SHM 帧
+#   DGAME_QEMU_PTRACER 可选的进程级 ptracer wrapper；
+#                     默认使用仓库内置版本，不修改 kernel.yama.ptrace_scope
 #   HOST_RESERVE_CORES auto 或宿主保留物理核数（默认 auto）
 #   DISK_GUARD       1=启动/建盘前检查 qcow2 文件系统余量（默认 1）
 #   DISK_FORCE       1=仅紧急恢复时显式越过磁盘余量门禁
@@ -117,7 +139,7 @@
 #   QEMU_DISK_AIO    auto|io_uring|native|threads（默认 auto；实读后选择）
 #   STREAM_OUTPUT    显式网络 URL 或绝对输出文件；非空时启用区域推流
 #   STREAM_ROI       X,Y,W,H；STREAM_RATE/ENCODER/BITRATE/PRESET/GOP/CONTAINER
-#   STREAM_MODE      shm|auto|gpu（默认 shm；当前 R535 产品路径拒绝 gpu）
+#   STREAM_MODE      shm|auto|gpu（默认 auto；当前 R535 产品路径拒绝严格 gpu）
 #   QEMU_FB_SHM_STREAM_BIN  qemu-fb-shm-stream 路径
 #   VGPU_GUEST_FINISH_TARGET  finish-vgpu-install.sh 的一次性 rescue 提示；
 #                     仅 rescue-sdl/gtk 接受，正常启动绝不注入 guest
@@ -170,10 +192,14 @@ source "$here/lib/storage-aio.sh"
 source "$here/lib/bridge-network.sh"
 # shellcheck source=lib/vlan-runtime.sh
 source "$here/lib/vlan-runtime.sh"
+# shellcheck source=lib/dgame-endpoints.sh
+source "$here/lib/dgame-endpoints.sh"
+# shellcheck source=lib/dgame-qemu-ptracer.sh
+source "$here/lib/dgame-qemu-ptracer.sh"
 
 VM_ID="${1:-}"
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso] [--install-media usb|ide]|--native|--gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
+    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso] [--install-media usb|ide]|--native|--gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -264,7 +290,7 @@ while (( $# > 0 )); do
             fi
             ;;
         --vnc|--spoof-mode|--signed-consumer-probe|--shmem|--svc-cpus|--stream|--stream-output|\
-        --stream-roi|--stream-rate|--stream-encoder|--stream-bitrate|\
+        --dgame-preview-rate|--stream-roi|--stream-rate|--stream-encoder|--stream-bitrate|\
         --stream-preset|--stream-gop|--stream-container|--stream-mode|\
         --stream-start-timeout|--width|--height|--vlan-id|--install-media|--extra)
             storage_option=$1
@@ -378,8 +404,8 @@ source "$here/lib/cpu-isolation.sh"
 source "$here/lib/windows-unattend.sh"
 
 # 宿主资源配置与 vmN/vm.conf 的 guest-visible identity 分开。正版
-# Tesla V100 可在这里选 V100-2Q/V100D-2Q；vm.conf 仍可保持
-# GTX 750 Ti/GT 1030/GTX 1050 等身份。显式指定的配置丢失时应
+# Tesla V100 可在这里把 1024/2048 MB 分别映射到 V100-1Q/V100-2Q；
+# vm.conf 仍可保持 GT 730/740、GTX 750/750 Ti、GT 1030/GTX 1050 等身份。显式指定的配置丢失时应
 # 立即报错，默认本地文件不存在则保持旧行为。
 VGPU_HOST_CONFIG_WAS_SET=0
 [[ -v VGPU_HOST_CONFIG ]] && VGPU_HOST_CONFIG_WAS_SET=1
@@ -467,7 +493,7 @@ for ((early_i = 0; early_i < ${#EARLY_ARGS[@]}; early_i += 1)); do
             ;;
         # These options consume their next token even when it starts with `--`.
         --vnc|--shmem|--width|--height|--svc-cpus|--extra|\
-        --stream|--stream-output|--stream-roi|--stream-rate|\
+        --dgame-preview-rate|--stream|--stream-output|--stream-roi|--stream-rate|\
         --stream-encoder|--stream-bitrate|--stream-preset|--stream-gop|\
         --stream-container|--stream-mode|--stream-start-timeout|--vlan-id|\
         --install-media)
@@ -1218,10 +1244,12 @@ fi
 # vm.conf, never from a caller environment accidentally inherited by the
 # launcher.  Vendor/device/revision are validation facts only; qemu-xhci keeps
 # its upstream behavior identity in every mode.
-# Installation optical drives are deliberately generic transient devices.
-# Clear both historical override names before and after vm.conf is sourced so
-# neither the caller environment nor a persisted config can inject identity.
-unset ODD_MODEL ODD_SERIAL INSTALL_MEDIA_BACKEND \
+# Optical identity comes only from the reviewed hardware catalog.  Clear every
+# historical/configurable name before and after vm.conf is sourced so neither
+# the caller environment nor a persisted config can inject an arbitrary model,
+# firmware or serial.  Installation helper/answer transports remain generic.
+unset ODD_PROFILE ODD_BRAND ODD_MODEL ODD_FIRMWARE_REV ODD_INTERFACE \
+    ODD_FORM_FACTOR ODD_SERIAL_POLICY ODD_SERIAL INSTALL_MEDIA_BACKEND \
     XHCI_PCI_VENDOR_ID XHCI_PCI_DEVICE_ID XHCI_PCI_REVISION \
     XHCI_PCI_BUS XHCI_PCI_ADDR G11_HARDWARE_CONTRACT_VERSION \
     HARDWARE_COMPONENT_CONTRACT_VERSION CPU_REALIZATION_POLICY \
@@ -1266,7 +1294,8 @@ readonly VM_ID
 # persist or inject it, so restore only the caller's pre-source environment.
 VLAN_ID=$VLAN_ID_ENV_VALUE
 INSTALL_MEDIA_BACKEND=${INSTALL_MEDIA_BACKEND_ENV_VALUE:-usb}
-unset ODD_MODEL ODD_SERIAL
+unset ODD_PROFILE ODD_BRAND ODD_MODEL ODD_FIRMWARE_REV ODD_INTERFACE \
+    ODD_FORM_FACTOR ODD_SERIAL_POLICY ODD_SERIAL
 unset EARLY_CONF EARLY_CONF_PRESENT EARLY_CONF_SNAPSHOT
 unset CONFIG_VM_ID_AFTER_SOURCE
 
@@ -1456,7 +1485,7 @@ fi
 
 # 老配置只有 GPU_PROFILE 时先补齐 guest identity。真实宿主
 # mdev 资源由 VGPU_RESOURCE_* 覆盖，不再被 identity catalog 里的
-# nvidia-257 绑死。
+# nvidia-256/nvidia-257 绑死。
 if [[ -z "${GPU_NAME:-}" || -z "${GPU_CORE_MHZ:-}" ||
       -z "${GPU_BOOST_MHZ:-}" || -z "${GPU_MEMORY_MHZ:-}" ||
       -z "${GPU_MEMORY_BUS_BITS:-}" || -z "${GPU_MEMORY_TYPE_NVAPI:-}" ||
@@ -1472,8 +1501,35 @@ if ! vgpu_profile_validate_rm_fb_identity_values \
     echo "[start-vm] GPU 显存字段不能映射为安全的 NVIDIA RM FB 合同" >&2
     exit 2
 fi
-: "${VGPU_MDEV_PROFILE:=nvidia-257}"
-: "${VGPU_FB_MB:=2048}"
+if [[ -z "${VGPU_MDEV_PROFILE:-}" ]]; then
+    case "${GPU_VRAM_MB:-2048}" in
+        1024) VGPU_MDEV_PROFILE=nvidia-256 ;;
+        2048) VGPU_MDEV_PROFILE=nvidia-257 ;;
+        *)
+            echo "[start-vm] 无法为 ${GPU_VRAM_MB:-<missing>}MB 推导 legacy mdev profile" >&2
+            exit 2
+            ;;
+    esac
+fi
+: "${VGPU_FB_MB:=${GPU_VRAM_MB:-2048}}"
+# A dual-size host policy selects the real V100 (or other host GPU) resource
+# only after the atomic guest profile has supplied its framebuffer size.  A
+# legacy single-profile override remains supported, but conflicting static and
+# size-keyed declarations fail instead of silently choosing one.
+VGPU_RESOURCE_PROFILE_BY_FB=""
+case "$VGPU_FB_MB" in
+    1024) VGPU_RESOURCE_PROFILE_BY_FB=${VGPU_RESOURCE_PROFILE_1024:-} ;;
+    2048) VGPU_RESOURCE_PROFILE_BY_FB=${VGPU_RESOURCE_PROFILE_2048:-} ;;
+esac
+if [[ -n "$VGPU_RESOURCE_PROFILE_BY_FB" ]]; then
+    if [[ -n "${VGPU_RESOURCE_PROFILE:-}" &&
+          "$VGPU_RESOURCE_PROFILE" != "$VGPU_RESOURCE_PROFILE_BY_FB" ]]; then
+        echo "[start-vm] 静态 VGPU_RESOURCE_PROFILE=${VGPU_RESOURCE_PROFILE} 与 ${VGPU_FB_MB}MB 映射 ${VGPU_RESOURCE_PROFILE_BY_FB} 冲突" >&2
+        exit 2
+    fi
+    VGPU_RESOURCE_PROFILE=$VGPU_RESOURCE_PROFILE_BY_FB
+    : "${VGPU_RESOURCE_FB_MB:=$VGPU_FB_MB}"
+fi
 : "${VGPU_RESOURCE_PROFILE:=$VGPU_MDEV_PROFILE}"
 : "${VGPU_RESOURCE_FB_MB:=$VGPU_FB_MB}"
 if [[ ! "$VGPU_FB_MB" =~ ^[1-9][0-9]*$ ||
@@ -1483,6 +1539,10 @@ if [[ ! "$VGPU_FB_MB" =~ ^[1-9][0-9]*$ ||
 fi
 if (( VGPU_RESOURCE_FB_MB != VGPU_FB_MB )); then
     echo "[start-vm] guest 显存 ${VGPU_FB_MB}MB 与宿主 mdev ${VGPU_RESOURCE_FB_MB}MB 不一致" >&2
+    exit 2
+fi
+if [[ -n "${GPU_VRAM_MB:-}" && "$VGPU_FB_MB" != "$GPU_VRAM_MB" ]]; then
+    echo "[start-vm] catalog 显存 ${GPU_VRAM_MB}MB 与 VM mdev 合同 ${VGPU_FB_MB}MB 不一致" >&2
     exit 2
 fi
 
@@ -1941,9 +2001,12 @@ INSTALL_UNATTEND_TEMPLATE="${INSTALL_UNATTEND_TEMPLATE:-$here/autounattend/autou
 UNATTEND_ISO=""
 TAME_GNOME="${TAME_GNOME:-auto}"
 QEMU_SDL_WINDOWS_CURSOR="${QEMU_SDL_WINDOWS_CURSOR:-$VM_ASSET_DIR/aero_arrow.cur}"
-QEMU_SDL_DISABLE_IBUS="${QEMU_SDL_DISABLE_IBUS:-auto}"
+QEMU_SDL_DISABLE_IBUS="${QEMU_SDL_DISABLE_IBUS:-1}"
 QEMU_SDL_PRESENT_MODE="${QEMU_SDL_PRESENT_MODE:-fixed}"
+QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP="${QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP:-0}"
+QEMU_SDL_GNOME_ANIMATIONS="${QEMU_SDL_GNOME_ANIMATIONS:-off}"
 GUEST_NUMLOCK="${GUEST_NUMLOCK:-1}"
+G11_CHIPSET_PRESENTATION="${G11_CHIPSET_PRESENTATION:-catalog}"
 
 should_tame_gnome_super() {
     local mode=${TAME_GNOME,,}
@@ -1964,10 +2027,13 @@ DRY_RUN="${DRY_RUN:-0}"
 PROXY="${PROXY:-0}"
 CPU_ISOLATION="${CPU_ISOLATION:-}"
 HOST_OOM_PROTECT="${HOST_OOM_PROTECT:-1}"
-QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-auto}"
+QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-0}"
 HOST_RESERVE_CORES="${HOST_RESERVE_CORES:-auto}"
 CPU_ISOLATION_QMP_TIMEOUT="${CPU_ISOLATION_QMP_TIMEOUT:-90}"
 STREAM_OUTPUT="${STREAM_OUTPUT:-}"
+DGAME_PREVIEW="${DGAME_PREVIEW:-auto}"
+DGAME_PREVIEW_RATE="${DGAME_PREVIEW_RATE:-60}"
+DGAME_PREVIEW_GPU="${DGAME_PREVIEW_GPU:-auto}"
 STREAM_ROI="${STREAM_ROI:-}"
 STREAM_RATE="${STREAM_RATE:-30}"
 STREAM_ENCODER="${STREAM_ENCODER:-libx264}"
@@ -1975,7 +2041,7 @@ STREAM_BITRATE="${STREAM_BITRATE:-6M}"
 STREAM_PRESET="${STREAM_PRESET:-veryfast}"
 STREAM_GOP="${STREAM_GOP:-60}"
 STREAM_CONTAINER="${STREAM_CONTAINER:-}"
-STREAM_MODE="${STREAM_MODE:-shm}"
+STREAM_MODE="${STREAM_MODE:-auto}"
 STREAM_START_TIMEOUT="${STREAM_START_TIMEOUT:-15}"
 VLAN_ID_CLI_SEEN=0
 STREAM_ENABLED=0
@@ -2090,6 +2156,13 @@ while (( $# > 0 )); do
         --svc-cpus)
             require_cli_value "$1" "$#"
             QEMU_SERVICE_CPUS="$2"; shift 2 ;;
+        --dgame-preview) DGAME_PREVIEW=on; shift ;;
+        --no-dgame-preview) DGAME_PREVIEW=off; shift ;;
+        --dgame-preview-rate)
+            require_cli_value "$1" "$#"
+            DGAME_PREVIEW_RATE="$2"; shift 2 ;;
+        --dgame-preview-gpu) DGAME_PREVIEW_GPU=on; shift ;;
+        --no-dgame-preview-gpu) DGAME_PREVIEW_GPU=off; shift ;;
         --stream|--stream-output)
             require_cli_value "$1" "$#"
             STREAM_OUTPUT="$2"; STREAM_ENABLED=1; shift 2 ;;
@@ -2340,6 +2413,42 @@ case "$MODE" in
         ;;
 esac
 
+case "${DGAME_PREVIEW,,}" in
+    auto)
+        case "$MODE" in
+            vgpu-sdl|vgpu-gtk) DGAME_PREVIEW_ENABLED=1 ;;
+            *)                 DGAME_PREVIEW_ENABLED=0 ;;
+        esac
+        ;;
+    1|yes|true|on) DGAME_PREVIEW_ENABLED=1 ;;
+    0|no|false|off) DGAME_PREVIEW_ENABLED=0 ;;
+    *)
+        echo "DGAME_PREVIEW 必须是 auto、on 或 off: $DGAME_PREVIEW" >&2
+        exit 2
+        ;;
+esac
+if ((DGAME_PREVIEW_ENABLED)); then
+    case "$MODE" in
+        vgpu-sdl|vgpu-gtk) ;;
+        *)
+            echo "--dgame-preview 仅支持 G-11 native vGPU SDL/GTK 模式" >&2
+            exit 2
+            ;;
+    esac
+fi
+case "${DGAME_PREVIEW_GPU,,}" in
+    auto|1|yes|true|on) DGAME_PREVIEW_GPU_ENABLED=1 ;;
+    0|no|false|off)     DGAME_PREVIEW_GPU_ENABLED=0 ;;
+    *)
+        echo "DGAME_PREVIEW_GPU 必须是 auto、on 或 off:" \
+             "$DGAME_PREVIEW_GPU" >&2
+        exit 2
+        ;;
+esac
+if ((!DGAME_PREVIEW_ENABLED)); then
+    DGAME_PREVIEW_GPU_ENABLED=0
+fi
+
 stream_config_error() {
     echo "[start-vm] 推流参数错误: $*" >&2
     exit 2
@@ -2408,6 +2517,8 @@ stream_validate_output() {
             ;;
     esac
 }
+
+stream_validate_uint "DGame preview rate" "$DGAME_PREVIEW_RATE" 1 240
 
 STREAM_ROI_X=""
 STREAM_ROI_Y=""
@@ -2805,6 +2916,25 @@ fi
 # that made any tampering fail above.
 hardware_profile_load "$PLATFORM" || exit $?
 
+# Every board in the current catalog has one closed, reviewed LPC identity.
+# `off` is an explicit recovery escape hatch for an existing Windows image;
+# arbitrary PCI IDs are never accepted from vm.conf or the environment.
+CHIPSET_PRESENTATION_ARGS=()
+case "${G11_CHIPSET_PRESENTATION,,}" in
+    catalog)
+        CHIPSET_PRESENTATION_ARGS=(
+            -global "ICH9-LPC.x-g11-chipset=${CHIPSET_QEMU_PRESENTATION_KEY}"
+        )
+        ;;
+    off)
+        echo "[start-vm] WARN: 芯片组 PCI identity 投影已关闭；来宾会重新看到默认 ICH9" >&2
+        ;;
+    *)
+        echo "[start-vm] G11_CHIPSET_PRESENTATION 必须是 catalog 或 off" >&2
+        exit 2
+        ;;
+esac
+
 : "${QEMU_BIN:=$here/../build/qemu-system-x86_64}"
 : "${QEMU_IMG:=$here/../build/qemu-img}"
 
@@ -3180,12 +3310,26 @@ host_oom_protect_launcher "$VM_ID" || {
 [[ -x "$QEMU_BIN" ]] || { echo "QEMU 不存在或没执行权: $QEMU_BIN" >&2; exit 1; }
 [[ -r "$OVMF_CODE" ]] || { echo "OVMF_CODE 不存在或不可读: $OVMF_CODE" >&2; exit 1; }
 [[ -r "$OVMF_VARS" ]] || { echo "OVMF_VARS 不存在或不可读: $OVMF_VARS" >&2; exit 1; }
+dgame_qemu_ptracer_preflight || {
+    echo "[start-vm] DGame/QEMU 内存读取兼容预检失败；VM 未启动" >&2
+    exit 1
+}
 
 # Fail closed when the launcher has been updated but the local QEMU binary is
 # still an older G-11 build that allows qemu-xhci to impersonate a physical
 # PCH.  This catches the exact mixed source/binary state that can make Windows
 # USBXHCI.SYS enable hardware-specific workarounds against the virtual model.
 if [[ "$DRY_RUN" != 1 ]]; then
+    if [[ "${G11_CHIPSET_PRESENTATION,,}" == catalog ]]; then
+        if ! QEMU_LPC_HELP=$("$QEMU_BIN" -device ICH9-LPC,help 2>&1) ||
+                ! grep -Eq '^  x-g11-chipset=<(str|string)>' \
+                    <<<"$QEMU_LPC_HELP"; then
+            echo "[start-vm] 当前 QEMU 缺少 G-11 芯片组 identity 白名单" >&2
+            echo "[start-vm] 先运行 ./deploy/host/build-qemu.sh 增量重编，再重试" >&2
+            exit 1
+        fi
+        unset QEMU_LPC_HELP
+    fi
     if ! QEMU_XHCI_HELP=$("$QEMU_BIN" -device qemu-xhci,help 2>&1); then
         echo "[start-vm] QEMU 缺 qemu-xhci 支持" >&2
         exit 1
@@ -3219,17 +3363,22 @@ fi
 
 STREAM_HELPER="$here/fb-shm-stream.sh"
 STREAM_BIN="${QEMU_FB_SHM_STREAM_BIN:-$here/../build/qemu-fb-shm-stream}"
-STREAM_SOCKET="$(vm_storage_instance_run_dir "$VM_ID")/fb-shm.sock"
+INSTANCE_RUN_DIR=$(vm_storage_instance_run_dir "$VM_ID")
+DGAME_PREVIEW_SOCKET=$(dgame_preview_socket_path "$INSTANCE_RUN_DIR")
+STREAM_SOCKET="$INSTANCE_RUN_DIR/fb-shm.sock"
+if ((DGAME_PREVIEW_ENABLED)); then
+    [[ "$DGAME_PREVIEW_SOCKET" == /* && ${#DGAME_PREVIEW_SOCKET} -lt 104 &&
+       "$DGAME_PREVIEW_SOCKET" != *,* &&
+       "$DGAME_PREVIEW_SOCKET" != *$'\n'* &&
+       "$DGAME_PREVIEW_SOCKET" != *$'\r'* ]] ||
+        stream_config_error \
+            "DGame preview socket 路径必须是无逗号的短绝对路径"
+fi
 if ((STREAM_ENABLED)); then
     [[ "$STREAM_SOCKET" == /* && ${#STREAM_SOCKET} -lt 104 &&
        "$STREAM_SOCKET" != *,* && "$STREAM_SOCKET" != *$'\n'* &&
        "$STREAM_SOCKET" != *$'\r'* ]] ||
         stream_config_error "fb-shm socket 路径必须是无逗号的短绝对路径"
-    if ! "$QEMU_BIN" -object fb-shm,help 2>&1 |
-            grep -q '^  path=<string>'; then
-        echo "[start-vm] QEMU 未编译可并行 SDL/GTK 的 fb-shm object" >&2
-        exit 1
-    fi
     if [[ "$DRY_RUN" != 1 ]]; then
         [[ -x "$STREAM_HELPER" ]] || {
             echo "[start-vm] 推流生命周期 helper 不可执行: $STREAM_HELPER" >&2
@@ -3269,6 +3418,19 @@ if ((STREAM_ENABLED)); then
         }
     fi
 fi
+if ((DGAME_PREVIEW_ENABLED || STREAM_ENABLED)); then
+    if ! "$QEMU_BIN" -object fb-shm,help 2>&1 |
+            grep -q '^  path=<string>'; then
+        echo "[start-vm] QEMU 未编译可并行 SDL/GTK 的 fb-shm object" >&2
+        exit 1
+    fi
+fi
+if ((DGAME_PREVIEW_ENABLED)) && [[ "$DRY_RUN" != 1 ]] &&
+        [[ -L "$DGAME_PREVIEW_SOCKET" ]]; then
+    echo "[start-vm] 拒绝符号链接 DGame preview socket:" \
+         "$DGAME_PREVIEW_SOCKET" >&2
+    exit 1
+fi
 
 VM_PATTERN="qemu-system-x86_64.*-name[[:space:]]+vm${VM_ID}([,[:space:]]|$)"
 vm_is_running() {
@@ -3300,7 +3462,42 @@ if [[ "$DRY_RUN" != 1 && ${#TPM_ARGS[@]} -gt 0 ]]; then
 fi
 STREAM_SIDECAR_OWNED=0
 QMP_PROXY_ALIAS_OWNED=0
+DGAME_COMPAT_ENDPOINTS_INSTALLED=0
+
+cleanup_dgame_compat_endpoints() {
+    [[ "${DGAME_COMPAT_ENDPOINTS_INSTALLED:-0}" == 1 ]] || return 0
+    DGAME_COMPAT_ENDPOINTS_INSTALLED=0
+    dgame_endpoint_alias_remove "${DGAME_QMP_COMPAT:-}" "${QMP_SOCK:-}" || true
+    dgame_endpoint_alias_remove "${DGAME_MON_COMPAT:-}" "${MON_SOCK:-}" || true
+    dgame_endpoint_alias_remove \
+        "${DGAME_FB_COMPAT:-}" "${DGAME_PREVIEW_SOCKET:-}" || true
+    dgame_endpoint_alias_remove \
+        "${DGAME_QMP_PROXY_COMPAT:-}" "${QMP_SOCK:-}" || true
+}
+
+install_dgame_compat_endpoints() {
+    DGAME_COMPAT_ENDPOINTS_INSTALLED=1
+    if ! dgame_endpoint_alias_install "$DGAME_QMP_COMPAT" "$QMP_SOCK" ||
+       ! dgame_endpoint_alias_install "$DGAME_MON_COMPAT" "$MON_SOCK"; then
+        cleanup_dgame_compat_endpoints
+        return 1
+    fi
+    if ((DGAME_PREVIEW_ENABLED)) &&
+            ! dgame_endpoint_alias_install \
+                "$DGAME_FB_COMPAT" "$DGAME_PREVIEW_SOCKET"; then
+        cleanup_dgame_compat_endpoints
+        return 1
+    fi
+    if [[ "$PROXY" == 1 ]] &&
+            ! dgame_endpoint_alias_install \
+                "$DGAME_QMP_PROXY_COMPAT" "$QMP_SOCK"; then
+        echo "[start-vm] DGame QMP broker 已占用或保留 proxy endpoint:" \
+             "$DGAME_QMP_PROXY_COMPAT" >&2
+    fi
+}
+
 cleanup_started_tpm() {
+    cleanup_dgame_compat_endpoints
     if [[ "${QMP_PROXY_ALIAS_OWNED:-0}" == 1 ]]; then
         QMP_PROXY_ALIAS_OWNED=0
         if [[ -L "${QMP_PROXY_SOCK:-}" &&
@@ -3352,6 +3549,80 @@ case "$MODE" in
     rescue-sdl|vgpu-sdl) LOCAL_INPUT_BACKEND=sdl ;;
     *)          LOCAL_INPUT_BACKEND="" ;;
 esac
+
+# A graphic guest needs physical SDL scancodes, never host-side composition.
+# Keep this in the launcher as a second layer for SDL 2.30 Wayland/XWayland
+# implementations that can hand a key to IBus/Fcitx before QEMU sees the SDL
+# event.  The environment changes are inherited only by this start-vm process
+# tree; they do not change the desktop's global input-source setting.
+if [[ "$LOCAL_INPUT_BACKEND" == sdl ]]; then
+    # DGame 的 G-11 窗口发现合同使用 win10-N；QEMU 进程名继续保留 vmN，
+    # 避免改变 ctl/stop 生命周期。X11 WM_CLASS 与主窗口标题使用同一实例名。
+    export SDL_VIDEO_X11_WMCLASS="win10-${VM_ID}"
+    case "${QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP,,}" in
+        0|no|false|off)
+            QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP=0
+            ;;
+        1|yes|true|on)
+            QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP=1
+            ;;
+        *)
+            echo "QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP 必须是 0 或 1: $QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP" >&2
+            exit 2
+            ;;
+    esac
+    export QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP
+    if [[ "$DRY_RUN" != 1 ]]; then
+        if [[ "$QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP" == 0 ]]; then
+            echo "[start-vm] SDL 宿主防息屏已启用：窗口空闲不会触发宿主屏保/显示器休眠"
+        else
+            echo "[start-vm] SDL 允许宿主自动息屏（显式兼容模式）"
+        fi
+    fi
+    if ((DGAME_PREVIEW_GPU_ENABLED)); then
+        # 当前宿主的 DISPLAY/DRM provider 是 RX570；以后换 RX550 时仍由
+        # 活跃 provider 自动选择，不按 PCI 地址或 GPU 型号写分支。
+        # native EGL 失败时 QEMU 退回 SDL GL，DGame 随后退回 SHM。
+        export QEMU_SDL_NATIVE_EGL=1
+        if [[ -n "${DISPLAY:-}" && -z "${SDL_VIDEODRIVER:-}" ]]; then
+            export SDL_VIDEODRIVER=x11
+        fi
+    fi
+    case "${QEMU_SDL_GNOME_ANIMATIONS,,}" in
+        off|on)
+            QEMU_SDL_GNOME_ANIMATIONS="${QEMU_SDL_GNOME_ANIMATIONS,,}"
+            export QEMU_SDL_GNOME_ANIMATIONS
+            ;;
+        *)
+            echo "QEMU_SDL_GNOME_ANIMATIONS 必须是 off 或 on: $QEMU_SDL_GNOME_ANIMATIONS" >&2
+            exit 2
+            ;;
+    esac
+    case "${QEMU_SDL_DISABLE_IBUS,,}" in
+        auto)
+            QEMU_SDL_IME_ENV="${XMODIFIERS:-} ${SDL_IM_MODULE:-} ${GTK_IM_MODULE:-}"
+            case "${QEMU_SDL_IME_ENV,,}" in
+                *ibus*|*fcitx*) QEMU_SDL_DISABLE_IBUS_ACTIVE=1 ;;
+                *)              QEMU_SDL_DISABLE_IBUS_ACTIVE=0 ;;
+            esac
+            unset QEMU_SDL_IME_ENV
+            ;;
+        1|yes|true|on) QEMU_SDL_DISABLE_IBUS_ACTIVE=1 ;;
+        0|no|false|off) QEMU_SDL_DISABLE_IBUS_ACTIVE=0 ;;
+        *)
+            echo "QEMU_SDL_DISABLE_IBUS 必须是 auto 或 0/1: $QEMU_SDL_DISABLE_IBUS" >&2
+            exit 2
+            ;;
+    esac
+    if (( QEMU_SDL_DISABLE_IBUS_ACTIVE )); then
+        export XMODIFIERS=@im=none
+        export SDL_IM_MODULE=none
+        export IBUS_ADDRESS=/nonexistent
+        if [[ "$DRY_RUN" != 1 ]]; then
+            echo "[start-vm] SDL 宿主输入法已隔离：host 拼音/Fcitx 状态不会吞 guest 按键"
+        fi
+    fi
+fi
 
 if [[ "$LOCAL_INPUT_BACKEND" == sdl || "$LOCAL_INPUT_BACKEND" == gtk ]] &&
         should_tame_gnome_super; then
@@ -3412,28 +3683,6 @@ if [[ "$MODE" == vgpu-sdl ]]; then
             exit 2
             ;;
     esac
-    case "${QEMU_SDL_DISABLE_IBUS,,}" in
-        auto)
-            [[ "${XMODIFIERS:-}" == *@im=ibus* ]] && \
-                QEMU_SDL_DISABLE_IBUS_ACTIVE=1 || QEMU_SDL_DISABLE_IBUS_ACTIVE=0
-            ;;
-        1|yes|true|on) QEMU_SDL_DISABLE_IBUS_ACTIVE=1 ;;
-        0|no|false|off) QEMU_SDL_DISABLE_IBUS_ACTIVE=0 ;;
-        *)
-            echo "QEMU_SDL_DISABLE_IBUS 必须是 auto 或 0/1: $QEMU_SDL_DISABLE_IBUS" >&2
-            exit 2
-            ;;
-    esac
-    if (( QEMU_SDL_DISABLE_IBUS_ACTIVE )); then
-        # Ubuntu SDL 2.30's IBus cursor-location callback can dereference a
-        # vanished XWayland window when a USB keyboard/mouse KVM disconnects.
-        # QEMU forwards hardware key events to Windows, so host-side IME
-        # composition is neither required nor desirable for this console.
-        export IBUS_ADDRESS=/nonexistent
-        if [[ "$DRY_RUN" != 1 ]]; then
-            echo "[start-vm] SDL host IBus 已隔离（避免键鼠热拔插触发 SDL2 崩溃）"
-        fi
-    fi
     if [[ "$DRY_RUN" != 1 ]]; then
         if [[ "$QEMU_SDL_PRESENT_MODE" == fixed ]]; then
             echo "[start-vm] SDL Present 模式：固定 60Hz（默认）"
@@ -3809,32 +4058,30 @@ case "$SSD_INTERFACE" in
         ;;
 esac
 
-# ─── 安装光驱：只在 --install 模式挂载  ───────────────────────
-# Q35 板载 ICH9-AHCI (VEN_8086&DEV_2922) 默认会自动创建一个空
-# ide-cd；只删掉显式 -device 仍会让 Windows 看到光驱。QEMU 会在
-# -global 引用某默认驱动时抑制该驱动的自动设备；普通模式因此
-# 只传递一个无害的 ide-cd 全局属性，不创建任何光驱前端。
-# --install 默认把 Windows ISO 作为 xHCI USB BOT 光驱挂载。OVMF/WinPE 会把
+# ─── 安装光驱：普通启动默认零光驱  ─────────────────────
+# Q35 的默认 ide-cd 也必须被抑制；否则即使没有 ISO，Windows 仍会看到
+# 一台空光驱。所有模式先传递一个无害的全局属性来阻止默认设备，只有
+# --install 才会在启动 argv 里创建光驱。日常 ISO 由 optical-media.sh
+# 在已运行 VM 上热插 usb-bot + scsi-cd；eject 会删除整台手动光驱。
+# --install 默认把 Windows ISO 作为临时 xHCI USB BOT 介质挂载。OVMF/WinPE 会把
 # READ(10) 合并到约 64 KiB，避免 ICH9-AHCI ATAPI PIO 每 2048B 一次的线程池
 # 往返；VM10 实测 boot.wim 请求从 367914 次降到 12090 次。`ide` 仅保留为
 # 显式兼容回退。USB 默认路径由 helper=bootindex 1 引导，系统盘固定为 2，
-# Windows USB 光盘使用 3 让 OVMF 主动连接其文件系统；IDE 回退仍由光盘=1
-# 引导。首次重启不按键会从 Windows 光盘 loader 自然回落到系统盘。
-# helper、Windows ISO 和
-# 应答 ISO 都只存在于 install 模式。临时设备没有经审核的实体型号/序列
-# 依据，因而不传 model= 或 serial=，也不接受历史覆盖。
+# Windows USB 光盘使用 3 让 OVMF 主动连接其文件系统；IDE 回退光驱=1
+# 引导。helper、Windows ISO 和应答 ISO 只存在于 install 模式。默认 USB
+# 传输与 helper/应答盘保持 generic；显式 IDE 回退才使用审核的 ODD 目录身份。
 INSTALL_MEDIA_DEVICE_ARGS=()
+DRIVE_ARGS+=( -global ide-cd.bootindex=-1 )
 if [[ "$MODE" == "install" ]]; then
     [[ -f "$ISO" ]] || { echo "ISO 不存在: $ISO" >&2; exit 1; }
-    DRIVE_ARGS+=( -drive "file=${ISO},if=none,id=odd0,media=cdrom,readonly=on,format=raw" )
     case "$INSTALL_MEDIA_BACKEND" in
         usb)
+            DRIVE_ARGS+=( -drive "file=${ISO},if=none,id=odd0,media=cdrom,readonly=on,format=raw" )
             # qemu-xhci is created later in INPUT_ARGS, so only the backend
             # belongs in DRIVE_ARGS.  A small source-built FAT helper is the
             # firmware boot target; it then chainloads the Windows USB CD-ROM
             # after confirming sources/boot.wim.  Frontends are appended after
             # xHCI exists, on stable ports 3 and 4.
-            DRIVE_ARGS+=( -global ide-cd.bootindex=-1 )
             DRIVE_ARGS+=( -drive "file=${INSTALL_BOOT_HELPER},if=none,id=installboot,format=raw,readonly=on" )
             # Keep the ISO frontend before the helper frontend.  Combined
             # with ISO bootindex=3 this makes OVMF connect its SimpleFS before
@@ -3846,7 +4093,8 @@ if [[ "$MODE" == "install" ]]; then
             )
             ;;
         ide)
-            DRIVE_ARGS+=( -device "ide-cd,drive=odd0,bus=ide.0,bootindex=1" )
+            DRIVE_ARGS+=( -drive "file=${ISO},if=none,id=install-odd-media,media=cdrom,readonly=on,format=raw" )
+            DRIVE_ARGS+=( -device "ide-cd,id=install-odd-ide,drive=install-odd-media,bus=ide.0,unit=0,model=${ODD_MODEL},ver=${ODD_FIRMWARE_REV},serial=,bootindex=1" )
             ;;
     esac
     if [[ -n "$UNATTEND_ISO" ]]; then
@@ -3854,8 +4102,6 @@ if [[ "$MODE" == "install" ]]; then
         # ide.1 may contain a SATA system disk; use a separate AHCI port.
         DRIVE_ARGS+=( -device "ide-cd,drive=answer0,bus=ide.2" )
     fi
-else
-    DRIVE_ARGS+=( -global ide-cd.bootindex=-1 )
 fi
 
 # ─── 图形 / vGPU ──────────────────────────────────────────────────────────
@@ -4071,7 +4317,7 @@ case "$MODE" in
         GFX_ARGS+=( -device "vfio-pci-nohotplug,${vfio_opts}" -vga none )
         case "$MODE" in
             vgpu-sdl)
-                GFX_ARGS+=( -display "sdl,gl=on" ) ;;
+                GFX_ARGS+=( -display "sdl,gl=on,title=win10-${VM_ID},single-console=on" ) ;;
             vgpu-gtk)
                 GFX_ARGS+=( -display "gtk,gl=on,show-cursor=on,grab-on-hover=on,show-tabs=off,show-menubar=off" ) ;;
         esac
@@ -4084,10 +4330,17 @@ PIDFILE=$(vm_storage_run_preferred_path "$VM_ID" pid)
 MON_SOCK=$(vm_storage_run_preferred_path "$VM_ID" mon)
 QMP_SOCK=$(vm_storage_run_preferred_path "$VM_ID" qmp)
 QMP_PROXY_SOCK="${QMP_SOCK}.proxy"
+DGAME_QMP_COMPAT=$(dgame_endpoint_path "$VM_ID" qmp)
+DGAME_QMP_PROXY_COMPAT=$(dgame_endpoint_path "$VM_ID" qmp.proxy)
+DGAME_FB_COMPAT=$(dgame_endpoint_path "$VM_ID" fb)
+DGAME_MON_COMPAT=$(dgame_endpoint_path "$VM_ID" mon)
 QMP_ARGS=( -qmp "unix:${QMP_SOCK},server,nowait" )
-if [[ "$PROXY" == 1 ]]; then
+QMP_MULTI_CLIENT=0
+if [[ "$PROXY" == 1 || "$DGAME_PREVIEW_ENABLED" == 1 ]]; then
+    QMP_MULTI_CLIENT=1
     # 本分支 QEMU 原生为每个连接创建独立 QMP monitor；不再启动 Python
-    # 中转进程。保留 -qmp shorthand，供依赖 QEMU argv 的工具识别。
+    # 中转进程。DGame broker、CPU 隔离器和运行期控制可能同时连接，
+    # native preview 因此也必须启用 multi。保留 shorthand 供工具识别。
     QMP_ARGS=( -qmp "unix:${QMP_SOCK},server,nowait,multi=on" )
 fi
 MDEV_FILE=$(vm_storage_run_preferred_path "$VM_ID" mdev)
@@ -4142,6 +4395,18 @@ if [[ "${IVSHMEM_SIZE_MB:-0}" -gt 0 ]]; then
         -device "ivshmem-plain,memdev=ivshm,bus=pcie.0,addr=0x12,x-pci-sub-vendor-id=0x10DE,x-pci-sub-device-id=0x1551,x-pci-class-id=0x058000,x-pci-revision=0xa1"
     )
     echo "  ivshmem: ${IVSHMEM_PATH} (${IVSHMEM_SIZE_MB} MB) → guest PCI 00:12.0 (stealth subsys=0x10DE:0x1551)"
+fi
+
+DGAME_PREVIEW_QEMU_ARGS=()
+if ((DGAME_PREVIEW_ENABLED)); then
+    DGAME_PREVIEW_RATE=$((10#$DGAME_PREVIEW_RATE))
+    DGAME_PREVIEW_OBJECT_ARG="fb-shm,id=dgame-preview-vm${VM_ID}"
+    DGAME_PREVIEW_OBJECT_ARG+=",path=${DGAME_PREVIEW_SOCKET}"
+    DGAME_PREVIEW_OBJECT_ARG+=",rate=${DGAME_PREVIEW_RATE}"
+    DGAME_PREVIEW_QEMU_ARGS=(
+        -object "$DGAME_PREVIEW_OBJECT_ARG"
+    )
+    unset DGAME_PREVIEW_OBJECT_ARG
 fi
 
 STREAM_QEMU_ARGS=()
@@ -4200,15 +4465,32 @@ echo "启动 VM ${VM_ID} 模式=${MODE}"
 echo "  VM 目录: $(vm_storage_instance_dir "$VM_ID")"
 echo "  配置: ${CONF}"
 echo "  磁盘: ${DISK}"
-if [[ "$PROXY" == 1 ]]; then
+if [[ "$QMP_MULTI_CLIENT" == 1 ]]; then
     echo "  QMP multi: native multi-client on ${QMP_SOCK}"
+fi
+if [[ "$PROXY" == 1 ]]; then
     echo "  QMP alias: ${QMP_PROXY_SOCK}"
+fi
+if ((DGAME_PREVIEW_ENABLED)); then
+    echo "  DGame preview: ${DGAME_PREVIEW_RATE}Hz ${DGAME_PREVIEW_SOCKET}"
+    if ((DGAME_PREVIEW_GPU_ENABLED)); then
+        echo "  DGame transport: GPU first (active display EGL/dma-buf)"
+        echo "  DGame fallback: per-client SHM"
+    else
+        echo "  DGame transport: SHM only (DGAME_PREVIEW_GPU=off)"
+    fi
+    echo "  DGame compatibility: $(dgame_endpoint_path "$VM_ID" fb)"
 fi
 echo "  CPU: ${CPU_MODEL}@${TSC_FREQ}Hz (${CPU_CORES}C/${CPU_VCPUS}T)"
 echo "  CPU realization: policy=${CPU_REALIZATION_POLICY} class=${G11_CPU_CAPABILITY_CLASS} enforce=${CPU_ENFORCE_MODE}"
 echo "  硬件合法性: ${HARDWARE_LEGALITY_POLICY}/${G11_HW_LEGALITY_CODE}"
 cpu_isolation_print_plan
 echo "  主板: ${BOARD_BRAND} ${BOARD_MODEL} / ${VM_UUID}"
+if [[ "${G11_CHIPSET_PRESENTATION,,}" == catalog ]]; then
+    echo "  芯片组: ${CHIPSET_PRESENTATION_NAME} / LPC ${BOARD_LPC_PCI_VENDOR_ID}:${BOARD_LPC_PCI_DEVICE_ID} rev ${BOARD_LPC_PCI_REVISION}（q35/ICH9 行为实现）"
+else
+    echo "  芯片组: ICH9（G11_CHIPSET_PRESENTATION=off 兼容回退）"
+fi
 echo "  内存: ${MEM_MODULE_MB_LIST//,/+} MiB ${MEM_MODEL_LIST//,/ + } (${MEM_FAMILY:-unknown}@${MEM_SPEED}, ${MEM_CHANNEL_MODE})"
 if [[ "$SSD_INTERFACE" == nvme ]]; then
     echo "  SSD: ${SSD_MODEL} / ${SSD_INTERFACE}:${SSD_CONTROLLER_PROFILE} / PCIe ${SSD_PCIE_GEN}.0 x${SSD_PCIE_LANES} ${SSD_FORM_FACTOR} / fw=${SSD_FIRMWARE_REV} / sector=${SSD_LOGICAL_BLOCK_SIZE}/${SSD_PHYSICAL_BLOCK_SIZE}B / ${SSD_SIZE_BYTES} bytes"
@@ -4218,11 +4500,15 @@ fi
 echo "  xHCI: qemu-xhci 1B36:000D rev01 / SUBSYS 1AF4:1100（行为身份固定；目标平台 ${XHCI_PCI_VENDOR_ID}:${XHCI_PCI_DEVICE_ID} 仅作事实校验）"
 if [[ "$MODE" == install ]]; then
     if [[ "$INSTALL_MEDIA_BACKEND" == usb ]]; then
+        echo "  光驱: 安装模式临时 xHCI USB BOT CD-ROM"
         echo "  安装介质: UEFI helper -> xHCI USB BOT CD-ROM（64 KiB 合并读取高速路径）"
         echo "  安装期附加设备: helper + Windows ISO${UNATTEND_ISO:+ + OOBE answer ISO}（普通启动全部不挂载）"
     else
+        echo "  光驱: 安装模式临时 ${ODD_MODEL} / fw=${ODD_FIRMWARE_REV} / SN=${ODD_SERIAL_POLICY}"
         echo "  安装介质: ICH9-AHCI IDE CD-ROM（兼容回退，可能较慢）"
     fi
+else
+    echo "  光驱: 未挂载（默认；仅 --install 或 vmctl.sh cdrom mount 时创建）"
 fi
 echo "  键盘: ${KBD_BRAND} ${KBD_MODEL} / usb-kbd / USB ${KBD_VID#0x}:${KBD_PID#0x} / SN=${KBD_SERIAL_POLICY} / ${KBD_FIDELITY}"
 if [[ "$GUEST_NUMLOCK" == 1 ]]; then
@@ -4350,6 +4636,7 @@ QEMU_CMD=(
     "${RTC_ARGS[@]}"
     -global "kvm-pit.lost_tick_policy=${PIT_LOST_TICK_POLICY}"
     -global ICH9-LPC.disable_s3=1
+    "${CHIPSET_PRESENTATION_ARGS[@]}"
     "${TPM_ARGS[@]}"
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
     -drive "if=pflash,format=raw,file=$VARS_PRIV"
@@ -4358,6 +4645,7 @@ QEMU_CMD=(
     "${NET_ARGS[@]}"
     "${DRIVE_ARGS[@]}"
     "${GFX_ARGS[@]}"
+    "${DGAME_PREVIEW_QEMU_ARGS[@]}"
     "${STREAM_QEMU_ARGS[@]}"
     "${INPUT_ARGS[@]}"
     "${INSTALL_MEDIA_DEVICE_ARGS[@]}"
@@ -4373,6 +4661,25 @@ QEMU_CMD=(
 # entering this script.  QEMU never needs it, and env -u also covers every
 # launch mode below without changing the reviewed QEMU argv.
 QEMU_LAUNCH=( env -u SUDO_PASSWORD )
+if [[ "$LOCAL_INPUT_BACKEND" == sdl &&
+      "$QEMU_SDL_GNOME_ANIMATIONS" == off ]] &&
+        gnome_super_shortcuts_is_gnome &&
+        gnome_super_shortcuts_available; then
+    GNOME_ANIMATION_GUARD="$here/host/gnome-animation-guard.py"
+    if [[ ! -x "$GNOME_ANIMATION_GUARD" ]]; then
+        echo "[start-vm] GNOME 动画守护器不可执行: $GNOME_ANIMATION_GUARD" >&2
+        exit 1
+    fi
+    # The wrapper owns the reversible setting journal and forwards signals to
+    # QEMU.  Multiple G-11 SDL VMs share a refcount; the final exit restores
+    # the exact pre-launch value, including an originally disabled setting.
+    QEMU_LAUNCH+=( python3 "$GNOME_ANIMATION_GUARD" run -- )
+    if [[ "$DRY_RUN" != 1 ]]; then
+        echo "[start-vm] GNOME 窗口动画保护：已去掉 SDL 最小化/恢复/最大化双影；QEMU 退出自动恢复"
+    fi
+elif [[ "$LOCAL_INPUT_BACKEND" == sdl && "$DRY_RUN" != 1 ]]; then
+    echo "[start-vm] SDL 使用桌面原生窗口动画（GNOME 下可能显示旧窗口 clone）"
+fi
 
 [[ "$NATIVE_FULLSCREEN" == 1 ]] && QEMU_CMD+=( -full-screen )
 # required 模式从暂停状态启动；root helper 完成 cgroup + TID 绑核后
@@ -4399,6 +4706,14 @@ if [[ "$DRY_RUN" == 1 ]]; then
     exit 0
 fi
 
+dgame_qemu_ptracer_build_leaf "${QEMU_CMD[@]}" || {
+    echo "[start-vm] 无法构造带 DGame 内存授权的 QEMU 叶命令" >&2
+    exit 1
+}
+QEMU_EXEC_CMD=("${DGAME_QEMU_LEAF_CMD[@]}")
+echo "[start-vm] DGame memory: process-local Yama exception "\
+     "(${DGAME_QEMU_PTRACER_DESCRIPTION})"
+
 G11_VLAN_PREPARED=0
 if [[ -n "$VLAN_ID" ]]; then
     g11_vlan_prepare "$VM_ID" "$VLAN_ID" "$VLAN_TAP_IF" || exit $?
@@ -4409,6 +4724,16 @@ if [[ -n "$VLAN_ID" ]]; then
         exit 1
     }
     start_vm_timing_mark vlan-ready
+fi
+
+if ! install_dgame_compat_endpoints; then
+    echo "[start-vm] 无法安全创建 DGame 发现端点；VM 未启动" >&2
+    exit 1
+fi
+if ((DGAME_PREVIEW_ENABLED)); then
+    echo "[start-vm] DGame endpoints: $DGAME_QMP_COMPAT, $DGAME_FB_COMPAT"
+else
+    echo "[start-vm] DGame endpoint: $DGAME_QMP_COMPAT"
 fi
 
 # 兼容旧工具写死的 `.proxy` 路径。真正的并发由主 QMP listener 的
@@ -4437,7 +4762,8 @@ fi
 start_vm_timing_mark qemu-launch
 printf '%s\n' "${START_VM_TIMING_LINES[@]}" >>"$QEMU_LOG"
 
-if ! cpu_isolation_launch "$VM_ID" "$CPU_VCPUS" "$QMP_SOCK" "$PIDFILE" \
+if ! cpu_isolation_launch "$VM_ID" "$CPU_VCPUS" "$CPU_CORES" \
+        "$CPU_THREADS_PER_CORE" "$QMP_SOCK" "$PIDFILE" \
         "$CPU_ISOLATION_STATE_FILE"; then
     echo "[start-vm] required CPU 隔离无法启动" >&2
     exit 1
@@ -4484,7 +4810,7 @@ if [[ "$MODE" != "rdp" ]]; then
 
         # sidecar 要等 fb-shm socket，因此 QEMU 必须先后台启动；本脚本仍
         # wait QEMU，保持原来“关闭窗口即退出并回收资源”的前台生命周期。
-        "${QEMU_LAUNCH[@]}" "${QEMU_CMD[@]}" 2> >(tee -a "$QEMU_LOG" >&2) &
+        "${QEMU_LAUNCH[@]}" "${QEMU_EXEC_CMD[@]}" 2> >(tee -a "$QEMU_LOG" >&2) &
         STREAM_QEMU_PID=$!
         trap 'stream_signal_exit 130 INT' INT
         trap 'stream_signal_exit 143 TERM' TERM
@@ -4529,7 +4855,7 @@ if [[ "$MODE" != "rdp" ]]; then
 
     # 不能 exec：EXIT trap 负责回收 mdev 与独立 swtpm daemon。
     set +e
-    "${QEMU_LAUNCH[@]}" "${QEMU_CMD[@]}" 2> >(tee -a "$QEMU_LOG" >&2)
+    "${QEMU_LAUNCH[@]}" "${QEMU_EXEC_CMD[@]}" 2> >(tee -a "$QEMU_LOG" >&2)
     qemu_rc=$?
     set -e
     exit "$qemu_rc"
@@ -4583,7 +4909,7 @@ trap cleanup_all INT TERM EXIT
 # 1) QEMU 后台启 + 重定向 stderr 到 log（tmux 会破坏数组里的引号 — 之前
 # 试过 `tmux new-session "${QEMU_CMD[*]}"`，QEMU 一启动就 crash 因为
 # `-machine "q35,accel=kvm,..."` 这种逗号串被 shell 重新分词搞乱）。
-"${QEMU_LAUNCH[@]}" "${QEMU_CMD[@]}" >>"$QEMU_LOG" 2>&1 &
+"${QEMU_LAUNCH[@]}" "${QEMU_EXEC_CMD[@]}" >>"$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
 echo "[start-vm] QEMU pid=${QEMU_PID}  (stderr: tail -f ${QEMU_LOG})"
 

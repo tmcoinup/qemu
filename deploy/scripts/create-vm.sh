@@ -3,8 +3,10 @@
 #
 #   用法:  ./deploy/scripts/create-vm.sh <vm_id> [--platform PLATFORM]
 #          ./deploy/scripts/create-vm.sh <vm_id> [--cpu-profile CPU] [--board-profile BOARD]
-#                                  [--memory-profile MEMORY]
-#                                  [--ssd-profile PROFILE] [--gpu-profile PROFILE]
+#                                  [--memory-profile MEMORY|--memory-size 4G|6G|8G]
+#                                  [--ssd-profile PROFILE]
+#                                  [--gpu-profile PROFILE|--gpu-vram 1024|2048]
+#                                  [--allow-fallback-platform]
 #                                  [--monitor-profile PROFILE]
 #                                  [--keyboard-profile PROFILE]
 #                                  [--relative-mouse [--mouse-profile PROFILE]]
@@ -14,12 +16,14 @@
 #                         --list-memory-profiles
 #          ./deploy/scripts/create-vm.sh --list-ssd-profiles
 #          ./deploy/scripts/create-vm.sh --list-gpu-profiles
+#          ./deploy/scripts/create-vm.sh --list-gpu-profiles-tsv
 #          ./deploy/scripts/create-vm.sh --list-monitor-profiles
 #          ./deploy/scripts/create-vm.sh --list-keyboard-profiles|--list-mouse-profiles
 #                         --list-pointer-profiles|--list-input-compat
 #
-# 挑选一套「平台 + 主板 + 内存 + SSD + NVIDIA 2GB 显卡 + 真实显示器」；
-# 未显式指定显卡时，从完整审核目录等概率随机一条原子 profile。生成 UUID /
+# 挑选一套「平台 + 主板 + 内存 + SSD + NVIDIA 1GB/2GB 显卡 + 真实显示器」；
+# 未显式指定显卡时，从向后兼容的默认审核层等概率随机一条原子 profile；追加
+# 的显式层只在用户选中时使用。生成 UUID /
 # 各种序列号 / MAC，写入实例自己的 vm.conf 后仅作只读。
 # start-vm.sh 只读这个文件，确保同一个 VM 每次开机表现一致。
 
@@ -57,13 +61,19 @@ PLATFORM_REQUEST=""
 CPU_PROFILE_REQUEST=""
 BOARD_PROFILE_REQUEST=""
 MEMORY_PROFILE_REQUEST=""
+MEMORY_SIZE_MB_REQUEST=""
 SSD_PROFILE_REQUEST="${SSD_PROFILE:-}"
 GPU_PROFILE_REQUEST="${GPU_PROFILE:-}"
 GPU_PROFILE_EXPLICIT=0
+GPU_VRAM_MB_REQUEST=""
+GPU_VRAM_EXPLICIT=0
 MONITOR_PROFILE_REQUEST="${MONITOR_PROFILE:-}"
 KBD_PROFILE_REQUEST=""
 MOUSE_PROFILE_REQUEST=""
 POINTER_MODE_REQUEST=absolute
+INCLUDE_FALLBACK=0
+ALLOW_FALLBACK_PLATFORM=0
+LIST_ACTION=""
 while (( $# > 0 )); do
     case "$1" in
         --force) FORCE=1; shift ;;
@@ -71,6 +81,12 @@ while (( $# > 0 )); do
             [[ $# -ge 2 ]] || { echo "--gpu-profile 缺少参数" >&2; exit 2; }
             GPU_PROFILE_REQUEST=$2
             GPU_PROFILE_EXPLICIT=1
+            shift 2
+            ;;
+        --gpu-vram)
+            [[ $# -ge 2 ]] || { echo "--gpu-vram 缺少参数" >&2; exit 2; }
+            GPU_VRAM_MB_REQUEST=$(vgpu_profile_normalize_vram_mb "$2") || exit $?
+            GPU_VRAM_EXPLICIT=1
             shift 2
             ;;
         --platform)
@@ -93,34 +109,51 @@ while (( $# > 0 )); do
             MEMORY_PROFILE_REQUEST=$2
             shift 2
             ;;
+        --memory-size)
+            [[ $# -ge 2 ]] || { echo "--memory-size 缺少参数" >&2; exit 2; }
+            MEMORY_SIZE_MB_REQUEST=$(hardware_memory_size_mb_normalize "$2") || exit $?
+            shift 2
+            ;;
+        --include-fallback)
+            INCLUDE_FALLBACK=1
+            shift
+            ;;
+        --allow-fallback-platform)
+            ALLOW_FALLBACK_PLATFORM=1
+            shift
+            ;;
         --ssd-profile)
             [[ $# -ge 2 ]] || { echo "--ssd-profile 缺少参数" >&2; exit 2; }
             SSD_PROFILE_REQUEST=$2
             shift 2
             ;;
         --list-ssd-profiles)
-            ssd_profile_print_catalog
-            exit 0
+            LIST_ACTION=ssd
+            shift
             ;;
         --list-platforms)
-            hardware_profile_print_catalog
-            exit 0
+            LIST_ACTION=platform
+            shift
             ;;
         --list-cpu-profiles)
-            cpu_profile_print_catalog
-            exit 0
+            LIST_ACTION=cpu
+            shift
             ;;
         --list-board-profiles)
-            board_profile_print_catalog
-            exit 0
+            LIST_ACTION=board
+            shift
             ;;
         --list-memory-profiles)
-            memory_profile_print_catalog
-            exit 0
+            LIST_ACTION=memory
+            shift
             ;;
         --list-gpu-profiles)
-            vgpu_profile_print_catalog
-            exit 0
+            LIST_ACTION=gpu
+            shift
+            ;;
+        --list-gpu-profiles-tsv)
+            LIST_ACTION=gpu-tsv
+            shift
             ;;
         --keyboard-profile)
             [[ $# -ge 2 ]] || { echo "--keyboard-profile 缺少参数" >&2; exit 2; }
@@ -138,24 +171,24 @@ while (( $# > 0 )); do
             shift
             ;;
         --list-input-profiles)
-            input_profile_print_catalog active all
-            exit 0
+            LIST_ACTION=input
+            shift
             ;;
         --list-keyboard-profiles)
-            input_keyboard_profile_print_catalog active
-            exit 0
+            LIST_ACTION=keyboard
+            shift
             ;;
         --list-mouse-profiles)
-            input_mouse_profile_print_catalog active
-            exit 0
+            LIST_ACTION=mouse
+            shift
             ;;
         --list-pointer-profiles)
-            input_pointer_profile_print_catalog active
-            exit 0
+            LIST_ACTION=pointer
+            shift
             ;;
         --list-input-compat)
-            input_profile_print_catalog compat all
-            exit 0
+            LIST_ACTION=input-compat
+            shift
             ;;
         --monitor-profile)
             [[ $# -ge 2 ]] || { echo "--monitor-profile 缺少参数" >&2; exit 2; }
@@ -163,8 +196,8 @@ while (( $# > 0 )); do
             shift 2
             ;;
         --list-monitor-profiles)
-            monitor_create_pool_print_catalog
-            exit 0
+            LIST_ACTION=monitor
+            shift
             ;;
         -h|--help)
             sed -n '2,18p' "$0"
@@ -179,18 +212,56 @@ while (( $# > 0 )); do
     esac
 done
 
+if [[ -n "$LIST_ACTION" ]]; then
+    [[ -z "$VM_ID" ]] || {
+        echo "目录查询不能同时指定 vm_id" >&2
+        exit 2
+    }
+    case "$LIST_ACTION" in
+        platform) hardware_profile_print_catalog "$INCLUDE_FALLBACK" ;;
+        cpu) cpu_profile_print_catalog "$INCLUDE_FALLBACK" ;;
+        board) board_profile_print_catalog "$INCLUDE_FALLBACK" ;;
+        memory) memory_profile_print_catalog "$INCLUDE_FALLBACK" ;;
+        ssd) ssd_profile_print_catalog ;;
+        gpu) vgpu_profile_print_catalog ;;
+        gpu-tsv) vgpu_profile_print_tsv_catalog ;;
+        monitor) monitor_create_pool_print_catalog ;;
+        input) input_profile_print_catalog active all ;;
+        keyboard) input_keyboard_profile_print_catalog active ;;
+        mouse) input_mouse_profile_print_catalog active ;;
+        pointer) input_pointer_profile_print_catalog active ;;
+        input-compat) input_profile_print_catalog compat all ;;
+    esac
+    exit 0
+fi
+
+if (( GPU_PROFILE_EXPLICIT && GPU_VRAM_EXPLICIT )); then
+    echo "--gpu-profile 与 --gpu-vram 不能同时使用" >&2
+    exit 2
+fi
+if (( GPU_VRAM_EXPLICIT )); then
+    # An explicit command-line capacity choice takes precedence over an
+    # inherited GPU_PROFILE environment value.
+    GPU_PROFILE_REQUEST=""
+fi
+if [[ -n "$MEMORY_PROFILE_REQUEST" && -n "$MEMORY_SIZE_MB_REQUEST" ]]; then
+    echo "--memory-profile 与 --memory-size 不能同时使用" >&2
+    exit 2
+fi
+
 COMPONENT_SELECTOR_COUNT=0
 [[ -z "$CPU_PROFILE_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
 [[ -z "$BOARD_PROFILE_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
 [[ -z "$MEMORY_PROFILE_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
+[[ -z "$MEMORY_SIZE_MB_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
 if [[ -n "$PLATFORM_REQUEST" && "$COMPONENT_SELECTOR_COUNT" != 0 ]]; then
-    echo "--platform 与 --cpu-profile/--board-profile/--memory-profile 不能混用" >&2
+    echo "--platform 与 --cpu-profile/--board-profile/--memory-profile/--memory-size 不能混用" >&2
     echo "整机组合只从审核白名单选择；请任选一种选择方式" >&2
     exit 2
 fi
 
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--force] [--platform PLATFORM|--cpu-profile CPU --board-profile BOARD --memory-profile MEMORY] [--ssd-profile PROFILE] [--gpu-profile PROFILE] [--monitor-profile PROFILE] [--keyboard-profile PROFILE] [--relative-mouse [--mouse-profile PROFILE]]" >&2
+    echo "usage: $0 <vm_id> [--force] [--platform PLATFORM|--cpu-profile CPU --board-profile BOARD (--memory-profile MEMORY|--memory-size 4G|6G|8G)] [--allow-fallback-platform] [--ssd-profile PROFILE] [--gpu-profile PROFILE|--gpu-vram 1024|2048] [--monitor-profile PROFILE] [--keyboard-profile PROFILE] [--relative-mouse [--mouse-profile PROFILE]]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -343,7 +414,7 @@ if (( FORCE )) && [[ -f "$CONF" ]]; then
         esac
     fi
 
-    if (( ! GPU_PROFILE_EXPLICIT )); then
+    if (( ! GPU_PROFILE_EXPLICIT && ! GPU_VRAM_EXPLICIT )); then
         [[ -n "$OLD_GPU_PROFILE" ]] || {
             echo "旧 vm.conf 缺少 GPU_PROFILE，拒绝 --force 自动换卡；请显式传 --gpu-profile" >&2
             exit 1
@@ -514,14 +585,26 @@ select_default_platform_for_host() {
 if [[ -n "$PLATFORM_REQUEST" ]]; then
     PLATFORM=$PLATFORM_REQUEST
 elif (( COMPONENT_SELECTOR_COUNT )); then
-    mapfile -t PLATFORMS < <(hardware_profile_component_candidates \
+    mapfile -t PLATFORM_COMPONENT_CANDIDATES < <(hardware_profile_component_candidates \
         "$CPU_PROFILE_REQUEST" "$BOARD_PROFILE_REQUEST" \
-        "$MEMORY_PROFILE_REQUEST")
+        "$MEMORY_PROFILE_REQUEST" "$MEMORY_SIZE_MB_REQUEST")
+    PLATFORMS=()
+    for candidate in "${PLATFORM_COMPONENT_CANDIDATES[@]}"; do
+        candidate_lifecycle=$(hardware_profile_lifecycle_class "$candidate") || exit $?
+        if [[ "$candidate_lifecycle" == legacy-compatibility ]] && \
+                (( ! ALLOW_FALLBACK_PLATFORM )); then
+            continue
+        fi
+        PLATFORMS+=("$candidate")
+    done
     if (( ${#PLATFORMS[@]} == 0 )); then
         echo "没有通过审核的 CPU/主板/内存组合:" >&2
         echo "  CPU=${CPU_PROFILE_REQUEST:-任意}" >&2
         echo "  主板=${BOARD_PROFILE_REQUEST:-任意}" >&2
         echo "  内存=${MEMORY_PROFILE_REQUEST:-任意}" >&2
+        if [[ -n "$MEMORY_SIZE_MB_REQUEST" ]]; then
+            echo "  内存容量=${MEMORY_SIZE_MB_REQUEST}MiB" >&2
+        fi
         echo "用 --list-platforms 查看合法整机组合；组件不会做笛卡尔积乱配" >&2
         exit 2
     fi
@@ -541,7 +624,7 @@ PLATFORM_LIFECYCLE_CLASS=$(hardware_profile_lifecycle_class "$PLATFORM") || {
 }
 PLATFORM_COMPAT_NEW_REJECT=0
 if [[ "$PLATFORM_LIFECYCLE_CLASS" == legacy-compatibility ]]; then
-    if (( AUTO_LEGACY_FALLBACK )); then
+    if (( AUTO_LEGACY_FALLBACK || ALLOW_FALLBACK_PLATFORM )); then
         PLATFORM_COMPAT_NEW_REJECT=0
     elif (( ! FORCE || ! CONFIG_WAS_PRESENT )) || [[ "$OLD_PLATFORM" != "$PLATFORM" ]]; then
         PLATFORM_COMPAT_NEW_REJECT=1
@@ -552,6 +635,9 @@ else
 fi
 if (( AUTO_LEGACY_FALLBACK )); then
     echo "[create-vm] WARN: 6 款新建 CPU 均未通过本机 enforce=on；仅本次自动选择旧平台兜底: $PLATFORM" >&2
+elif [[ "$PLATFORM_LIFECYCLE_CLASS" == legacy-compatibility ]] && \
+        (( ALLOW_FALLBACK_PLATFORM )); then
+    echo "[create-vm] WARN: 用户显式授权新建旧平台兜底配置: $PLATFORM" >&2
 elif [[ "$HOST_PLATFORM_SELECTION_REASON" == no-supported-default-explicit-new-fallback ]]; then
     echo "[create-vm] WARN: 5 款低端默认 CPU 均未通过本机 enforce=on；仅本次使用两槽 i7 新平台兜底: $PLATFORM" >&2
 fi
@@ -681,12 +767,16 @@ fi
 
 if (( PLATFORM_COMPAT_NEW_REJECT )); then
     echo "平台 $PLATFORM 仅保留给已有 VM 的宿主兼容启动，不能新建实例" >&2
-    echo "请运行 $0 --list-platforms；新 VM 请选择 NEW_VM_POLICY=new 的平台" >&2
+    echo "请改选正常平台；确需兜底时必须显式传 --allow-fallback-platform" >&2
     exit 2
 fi
 
 if [[ -z "$GPU_PROFILE_REQUEST" ]]; then
-    vgpu_profile_pick_random
+    if [[ -n "$GPU_VRAM_MB_REQUEST" ]]; then
+        vgpu_profile_pick_random_vram "$GPU_VRAM_MB_REQUEST"
+    else
+        vgpu_profile_pick_random
+    fi
     GPU_PROFILE_REQUEST=$GPU_PROFILE
 else
     vgpu_profile_load "$GPU_PROFILE_REQUEST"
@@ -694,7 +784,7 @@ fi
 
 # Validate the complete combination before generating identity values or
 # publishing vm.conf.  This catches cross-generation boards, DDR drift,
-# impossible storage links, non-2GB mdev resources, GPU lane mismatches and
+# impossible storage links, mismatched mdev resources, GPU lane mismatches and
 # TPM frontend/version contradictions as one atomic profile contract.
 VGPU_FB_MB=$GPU_VRAM_MB
 TPM=1
@@ -1159,7 +1249,7 @@ printf '          板卡身份=%s %s；板卡序列号=%s\n' \
 printf '          B 模式 PCI identity 保持宿主 mdev；仅 A 模式使用 catalog %s:%s sub %s:%s\n' \
     "$GPU_PCI_VID" "$GPU_PCI_DID" "$GPU_SUB_VID" "$GPU_SUB_DID"
 printf '          mdev 资源 fallback=%s/%d MB（宿主配置可覆盖）\n' \
-    "$VGPU_MDEV_PROFILE" 2048
+    "$VGPU_MDEV_PROFILE" "$VGPU_FB_MB"
 printf '  显示器: %s %s / %s（%s%s，%dx%d@%dHz，%dx%d mm，SN=%s）\n' \
     "$MONITOR_BRAND_NAME" "$MONITOR_MODEL_NAME" "$MONITOR_PROFILE" "$MONITOR_VENDOR" \
     "${MONITOR_PRODUCT_ID#0x}" "$MONITOR_NATIVE_X" "$MONITOR_NATIVE_Y" \

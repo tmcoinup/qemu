@@ -3477,13 +3477,19 @@
 #     ignored by most operating systems.  Defaults to "QEMU VVFAT".
 #     (since 2.4)
 #
+# @label-charset: encode the UTF-8 @label in this character set before
+#     writing the FAT volume-label fields.  The encoded label remains
+#     limited to 11 bytes.  If omitted, @label bytes are written
+#     unchanged.
+#     Requires an explicit @label.  (since 11.0)
+#
 # @rw: whether to allow write operations (default: false)
 #
 # Since: 2.9
 ##
 { 'struct': 'BlockdevOptionsVVFAT',
   'data': { 'dir': 'str', '*fat-type': 'int', '*floppy': 'bool',
-            '*label': 'str', '*rw': 'bool' } }
+            '*label': 'str', '*label-charset': 'str', '*rw': 'bool' } }
 
 ##
 # @BlockdevOptionsGenericFormat:

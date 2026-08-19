@@ -54,12 +54,26 @@ STAGE_DIR="$TMP_DIR/images/staging" \
     "$INSTALLER" --help >"$TMP_DIR/help.out"
 grep -Fq -- '--base IMAGE' "$TMP_DIR/help.out" ||
     fail "--help did not describe the base selector"
+grep -Fq -- '--base-name NAME' "$TMP_DIR/help.out" ||
+    fail "--help did not describe the managed named-base selector"
 grep -Fq -- '--gpuz-source FILE' "$TMP_DIR/help.out" ||
     fail "--help did not describe the external GPU-Z source"
 grep -Fq -- '--with-gpuz' "$TMP_DIR/help.out" ||
     fail "--help did not describe explicit GPU-Z opt-in"
 [[ ! -e "$TMP_DIR/images" ]] ||
     fail "--help unexpectedly created storage"
+if "$INSTALLER" --base-name '../escape' \
+        >"$TMP_DIR/unsafe-name.out" 2>"$TMP_DIR/unsafe-name.err"; then
+    fail "installer accepted an unsafe managed base name"
+fi
+grep -Fq 'invalid base name' "$TMP_DIR/unsafe-name.err" ||
+    fail "unsafe managed base-name refusal was not clear"
+if "$INSTALLER" --base-name win10-ltsc-v1 --base /tmp/custom.qcow2 \
+        >"$TMP_DIR/conflicting-base.out" 2>"$TMP_DIR/conflicting-base.err"; then
+    fail "installer accepted both --base-name and --base"
+fi
+grep -Fq 'cannot be combined' "$TMP_DIR/conflicting-base.err" ||
+    fail "conflicting base selectors were not explained"
 
 # The installer is offline and must not alter Windows code-integrity policy.
 reject_regex \
@@ -88,12 +102,14 @@ require_text 'die "portable EXE has no host content receipt"' \
     "authenticated package-receipt gate"
 require_text '.bindingMode == "portable-auto"' \
     "portable-auto receipt binding"
-require_text '.schemaVersion == 4 and .bindingMode == "portable-auto"' \
-    "identity-only portable receipt schema"
+require_text '.schemaVersion == 6 and .bindingMode == "portable-auto"' \
+    "unified portable receipt schema"
 require_text '.gpuZDelivery == "optional-explicit-sibling"' \
     "optional GPU-Z delivery receipt binding"
-require_text '.launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4"' \
-    "identity-only launcher format binding"
+require_text '.guestPerformance == "embedded-recommended-native-v1"' \
+    "embedded guest performance receipt binding"
+require_text '.launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6"' \
+    "unified launcher format binding"
 reject_regex 'QEMU_GPUZ_PORTABLE_EXE_V1' \
     "legacy embedded portable launcher acceptance"
 assert_before \
@@ -101,7 +117,7 @@ assert_before \
     'cp --reflink=auto -- "$BASE" "$BASE_TMP"' \
     "external GPU-Z validation before private base copy"
 assert_before \
-    '.launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4"' \
+    '.launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6"' \
     'cp --reflink=auto -- "$BASE" "$BASE_TMP"' \
     "portable receipt validation before private base copy"
 
@@ -224,12 +240,13 @@ require_text 'atomic base publication failed' "base publication rollback error"
 for key in schemaVersion bindingMode basePath baseFileBytes baseDeviceId \
         baseInode baseMtimeNs baseCtimeNs portableGuestPath portableSha256 \
         portableBytes gpuZDelivery gpuZIncluded gpuZGuestPath gpuZSha256 gpuZBytes \
+        guestPerformance \
         catalogSha256 installedUtc; do
     require_text "$key" "sidecar field $key"
 done
 require_text '[[ "$CATALOG_SHA256" == "$EXPECTED_CATALOG_SHA256" ]]' \
     "current-catalog package gate"
-require_text '.schemaVersion == 4' "generation-bound optional-file sidecar schema"
+require_text '.schemaVersion == 5' "generation-bound unified sidecar schema"
 require_text 'mv -fT -- "$ATTESTATION_TMP" "$ATTESTATION"' \
     "atomic sidecar publication"
 require_text 'die "published base attestation failed verification"' \
@@ -268,7 +285,7 @@ require_text 'refresh_restored_attestation_ctime()' \
     "rollback ctime refresh helper"
 require_text '.baseCtimeNs = $baseCtimeNs' \
     "rollback ctime rewrite"
-require_text 'valid schema-2/schema-3/schema-4 generation' \
+require_text 'valid schema-2/schema-3/schema-4/schema-5 generation' \
     "legacy/new rollback attestation compatibility"
 require_text 'mv -fT -- "$refresh_tmp" "$ATTESTATION"' \
     "atomic refreshed-sidecar publication"

@@ -40,13 +40,13 @@ jq -e '
     .spoofMode == "B" and
     .expectedPnpId == "PCI\\VEN_10DE&DEV_1E30" and
     .expectedDriverVersion == "31.0.15.3833" and
-    (.profiles | length) == 12 and
-    ([.profiles[].key] | unique | length) == 12 and
-    ([.profiles[].asset.name] | unique | length) == 12 and
+    (.profiles | length) == 25 and
+    ([.profiles[].key] | unique | length) == 25 and
+    ([.profiles[].asset.name] | unique | length) == 25 and
     ([.profiles[].boardBrand] | unique | sort) ==
-        ["ASUS", "Colorful", "Dell", "GALAX", "Gigabyte", "MSI", "NVIDIA"] and
+        ["ASUS", "Colorful", "Dell", "EVGA", "GALAX", "Gigabyte", "MSI", "NVIDIA", "ZOTAC"] and
     ([.profiles[].memoryMakerName] | unique | sort) ==
-        ["Micron", "SK hynix", "Samsung"] and
+        ["Elpida", "Micron", "SK hynix", "Samsung"] and
     .catalog.name == "vgpu-profile-catalog.json" and
     (.catalog.sha256 | test("^[0-9A-F]{64}$")) and
     .appLocal.queryName == "VgpuIdentityQuery.exe" and
@@ -65,9 +65,17 @@ jq -e '
         "bindingMode", "files", "optionalExternalFiles", "schemaVersion"
     ] and
     .schemaVersion == 4 and .bindingMode == "portable-auto" and
-    ([.files[].name | select(startswith("profile-"))] | length) == 12 and
+    ([.files[].name | select(startswith("profile-"))] | length) == 25 and
     ([.files[].name] | index("vgpu-profile-catalog.json")) != null and
+    ([.files[].name] | index("G11-1GB-GPU-EXPANSION.md")) != null and
+    ([.files[].name] | index("G11-1GB-GPU-EVIDENCE.tsv")) != null and
     ([.files[].name] | index("VgpuIdentityQuery.exe")) != null and
+    ([.files[].name] | index("Optimize-Guest.ps1")) != null and
+    ([.files[].name] | index("01-Audit.cmd")) != null and
+    ([.files[].name] | index("02-Apply-Recommended.cmd")) != null and
+    ([.files[].name] | index("03-Verify.cmd")) != null and
+    ([.files[].name] | index("04-Rollback.cmd")) != null and
+    ([.files[].name] | index("README.txt")) != null and
     ([.files[].name] | index("client_configuration_token.tok")) == null and
     ([.files[].name] | index("install-vgpu-license.ps1")) == null and
     ([.files[].name] | index("GPU-Z.exe")) == null and
@@ -97,9 +105,10 @@ receipt_dir="$tmp/out/.VgpuPortable.exe.receipts"
 exe_hash=$(sha256sum "$tmp/out/VgpuPortable.exe" |
     awk '{print toupper($1)}')
 jq -e --arg hash "$exe_hash" '
-    .schemaVersion == 4 and .bindingMode == "portable-auto" and
+    .schemaVersion == 6 and .bindingMode == "portable-auto" and
     .gpuZDelivery == "optional-explicit-sibling" and
-    .launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4" and
+    .guestPerformance == "embedded-recommended-native-v1" and
+    .launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6" and
     .exeSha256 == $hash
 ' "$receipt_dir/$exe_hash.json" >/dev/null ||
     fail "portable host receipt is missing or malformed"
@@ -130,7 +139,7 @@ jq -e --arg tokenHash "$token_hash" --argjson tokenBytes "$token_bytes" '
         "profiles", "schemaVersion", "spoofMode"
     ] and
     .schemaVersion == 7 and .bindingMode == "portable-auto" and
-    (.profiles | length) == 12 and
+    (.profiles | length) == 25 and
     .licenseToken == {
         name: "client_configuration_token.tok",
         sha256: $tokenHash,
@@ -147,7 +156,8 @@ jq -e --arg tokenHash "$token_hash" --argjson tokenBytes "$token_bytes" '
         bytes: $tokenBytes
     }] and
     ([.files[].name] | index("install-vgpu-license.ps1")) != null and
-    ([.files[].name | select(startswith("profile-"))] | length) == 12
+    ([.files[].name] | index("Optimize-Guest.ps1")) != null and
+    ([.files[].name | select(startswith("profile-"))] | length) == 25
 ' "$licensed_manifest" >/dev/null ||
     fail "private portable manifest is missing its finalizer assets"
 cmp -s -- "$licensed_token" \
@@ -159,8 +169,9 @@ licensed_exe_hash=$(sha256sum "$tmp/licensed/VgpuPortable.exe" |
     awk '{print toupper($1)}')
 jq -e --arg hash "$licensed_exe_hash" --arg tokenHash "$token_hash" \
     --argjson tokenBytes "$token_bytes" '
-    .schemaVersion == 5 and
-    .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_V5" and
+    .schemaVersion == 7 and
+    .guestPerformance == "embedded-recommended-native-v1" and
+    .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7" and
     .licenseTokenDelivery == "embedded-private" and
     .licenseTokenSha256 == $tokenHash and
     .licenseTokenBytes == $tokenBytes and
@@ -259,6 +270,9 @@ fi
 if "$packager" --gpuz-source /does/not/exist >/dev/null 2>&1; then
     fail "portable packager retained the obsolete embedded GPU-Z option"
 fi
+if "$packager" --replace-public --with-license-token >/dev/null 2>&1; then
+    fail "portable packager combined public replacement with a private token"
+fi
 
 external_tampered="$tmp/external-tampered"
 cp -a -- "$tmp/out/.host-bundle" "$external_tampered"
@@ -309,6 +323,8 @@ rg -Fq 'exec "$here/package-vgpu-portable.sh"' "$dispatcher" ||
 rg -Fq -- 'if [[ "$1" == --with-license-token || "$1" == --token-file ]]' \
     "$dispatcher" ||
     fail "one-click dispatcher does not expose the private portable finalizer"
+rg -Fq -- 'if [[ "$1" == --replace-public ]]' "$dispatcher" ||
+    fail "one-click dispatcher does not expose authenticated public replacement"
 
 for required in \
         'G11_VGPU_PROFILE_V1|' \
@@ -321,6 +337,10 @@ for required in \
         'Get-PrivateLicenseEvidence' \
         'Disable-HibernationAndFastStartup' \
         'Assert-HibernationAndFastStartupDisabled' \
+        'Invoke-RecommendGuestPerformance' \
+        "'Optimize-Guest.ps1'" \
+        "'-Mode', \$Mode" \
+        'guestPerformance = $performanceEvidence' \
         'client_configuration_token.tok' \
         "'NVDisplay.ContainerLocalSystem'" \
         "'Licensed'" \
@@ -367,4 +387,4 @@ assert "if ($InstallGpuZ)" in source
 assert "Start-Process -FilePath $queryItem.FullName" in source
 PY
 
-echo "PASS: portable EXE defaults to 12-row identity/query only and keeps GPU-Z explicit/optional"
+echo "PASS: one portable EXE carries identity, guest performance and optional GPU-Z gates"

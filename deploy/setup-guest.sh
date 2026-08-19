@@ -135,10 +135,13 @@ GPU_CHIP_REVISION=${configured_gpu_chip_revision:-$GPU_CHIP_REVISION}
 GPU_PCIE_WIDTH=${configured_gpu_pcie_width:-$GPU_PCIE_WIDTH}
 [[ -n "$GPU_NAME_OVERRIDE" ]] && GPU_NAME=$GPU_NAME_OVERRIDE
 : "${GPU_VRAM_MB:=2048}"
-if [[ "$GPU_VRAM_MB" != 2048 ]]; then
-    echo "[setup-guest] vGPU identity 只允许 2048MB，当前 ${GPU_VRAM_MB}MB" >&2
-    exit 2
-fi
+case "$GPU_VRAM_MB" in
+    1024|2048) ;;
+    *)
+        echo "[setup-guest] vGPU identity 只允许目录中的 1024/2048MB，当前 ${GPU_VRAM_MB}MB" >&2
+        exit 2
+        ;;
+esac
 if [[ "$GPU_VBIOS" != 'Version '* ]]; then
     echo "[setup-guest] GPU_VBIOS 必须以 'Version ' 开头: $GPU_VBIOS" >&2
     exit 2
@@ -187,7 +190,7 @@ if [[ $SKIP_VGPU -eq 0 ]]; then
         echo "[setup-guest] !! vGPU driver silent install 失败"
         echo "  这是已知 NVIDIA GRID 538.33 quirk：silent + vGPU mdev 不 work，必须 GUI 装。"
         echo "  → RDP 进 guest，双击 C:\\nv\\553.24.exe 选 Express install。"
-        echo "  → 装好 reboot 后 shutdown，再运行 ./promote-base.sh $VM_ID 生成 bases/win10-base.qcow2，"
+        echo "  → 装好 reboot 后 shutdown，再运行 ./deploy/scripts/seal-base.sh $VM_ID BASE_NAME 生成具名 base，"
         echo "    之后所有 fresh VM 跳过这步。"
     }
 fi

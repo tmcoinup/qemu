@@ -210,9 +210,10 @@ cmp -s "$output_a" "$output_b" ||
 file "$output_a" | grep -Fq 'PE32+ executable (console) x86-64' ||
     fail "launcher is not a native Win64 console PE"
 strings -a "$output_a" |
-    grep -Fq 'requestedExecutionLevel level="requireAdministrator" uiAccess="false"' ||
+    grep -F 'requestedExecutionLevel level="requireAdministrator" uiAccess="false"' \
+        >/dev/null ||
     fail "compiled EXE omits its UAC manifest"
-strings -el "$output_a" | grep -Fq 'QEMU_GPUZ_SINGLE_EXE_V1' ||
+strings -el "$output_a" | grep -F 'QEMU_GPUZ_SINGLE_EXE_V1' >/dev/null ||
     fail "compiled EXE omits its ownership/version marker"
 python3 - "$output_a" "$fixture" <<'PY'
 import hashlib
@@ -261,10 +262,11 @@ bash "$builder" --bundle-dir "$portable_bundle" \
     --output "$portable_b" >/dev/null
 cmp -s "$portable_a" "$portable_b" ||
     fail "optional-GPU-Z bundle did not produce a deterministic EXE"
-strings -el "$portable_a" | grep -Fq 'QEMU_VGPU_PORTABLE_IDENTITY_V4' ||
-    fail "multi-brand EXE omits its V4 ownership/version marker"
-strings -el "$portable_a" | grep -Fq '1.4.0.0' ||
-    fail "multi-brand EXE omits its 1.4.0.0 file/product version"
+strings -el "$portable_a" | grep -F 'QEMU_VGPU_PORTABLE_UNIFIED_V6' \
+    >/dev/null ||
+    fail "unified EXE omits its V6 ownership/version marker"
+strings -el "$portable_a" | grep -F '1.6.0.0' >/dev/null ||
+    fail "unified EXE omits its 1.6.0.0 file/product version"
 python3 - "$portable_a" "$portable_bundle/bundle-manifest.json" \
         "$gpuz_source" <<'PY'
 import hashlib

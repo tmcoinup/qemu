@@ -42,10 +42,22 @@ CPU_PROFILES=(
 #   https://www.asus.com/supportonly/h81m-k/helpdesk_bios/
 #   https://www.asus.com/uk/supportonly/h81m-c/helpdesk_bios/
 #   https://dlcdnet.asus.com/pub/ASUS/mb/LGA1150/H81M-C/E8447_H81M-C.pdf
+#   https://dlcdnets.asus.com/pub/ASUS/mb/LGA1150/H81M-PLUS/E8448_H81M-PLUS.pdf
+#   https://www.asus.com/supportonly/h81m-plus/helpdesk_bios/
+#   https://dlcdnet.asus.com/pub/ASUS/mb/LGA1150/H81M-A/E8445_H81M-Series.pdf
+#   https://www.asus.com/supportonly/h81m-a/helpdesk_bios/
 #   https://www.gigabyte.com/Motherboard/GA-H81M-S1-rev-21/sp
 #   https://www.gigabyte.com/Motherboard/GA-H81M-S1-rev-21/support
+#   https://www.gigabyte.com/Motherboard/GA-H81M-DS2-rev-30/sp
+#   https://www.gigabyte.com/Motherboard/GA-H81M-DS2-rev-30/support
 #   https://storage-asset.msi.com/datasheet/original/mb/global/H81M-P33.pdf
 #   https://nl.msi.com/Motherboard/H81M-P33/support
+#   https://www.msi.com/Motherboard/H81M-E33/Specification
+#   https://www.msi.com/faq/1502
+#   https://www.asrock.com/mb/Intel/H81M-HDS/
+#   https://download.asrock.com/Manual/H81M-HDS.pdf
+#   https://campaign.ecs.com.tw/ECSWebSite/Product/Product_SPEC/EN/Motherboard/H81H3-M4%20-LL-V1-DO-0A-RR-/Socket%201150
+#   https://campaign.ecs.com.tw/support/8series_haswell/haswell_ready.html
 #   https://www.gigabyte.com/Motherboard/GA-H97-D3H-rev-10/support
 #   https://www.gigabyte.com/Motherboard/GA-B150M-D3H-rev-10/support
 #   https://www.asus.com/supportonly/prime%20b360m-a/helpdesk_bios/
@@ -57,6 +69,30 @@ BOARD_PROFILES=(
     "gigabyte-h97-d3h|Gigabyte|GA-H97-D3H|1.0|H97|F7|09/19/2015|1.2|4|32|2|2|0x8CB1|0x01|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2014|gigabyte"
     "gigabyte-b150m-d3h|Gigabyte|GA-B150M-D3H|1.0|B150|F21|12/12/2016|2.0|4|64|3|4|0xA12F|0x01|PCIEX16|PCIEX4|177|10|4|LGA1151|DDR4|2133|2015|gigabyte"
     "asus-prime-b360m-a|ASUS|PRIME B360M-A|1.xx|B360|3202|07/24/2021|2.0|4|64|3|4|0xA36D|0x01|PCIEX16|PCIEX1_1|177|8|3|LGA1151-300|DDR4|2666|2018|asus"
+    # Append-only manual tier: existing keys and the four-board default pool
+    # above retain their order and random weight.
+    "asus-h81m-plus|ASUSTeK COMPUTER INC.|H81M-PLUS|Rev X.0x|H81|2205|06/18/2015|none|2|16|0|0|0x8C31|0x05|PCIEX16_1|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
+    "asus-h81m-a|ASUSTeK COMPUTER INC.|H81M-A|Rev X.0x|H81|2203|06/18/2015|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
+    "gigabyte-h81m-ds2|Gigabyte|GA-H81M-DS2|3.0|H81|F3|08/21/2020|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1|171|8|3|LGA1150|DDR3|1600|2014|gigabyte"
+    "msi-h81m-e33|MSI|H81M-E33 (MS-7817)|1.0|H81|6.7|11/27/2015|none|2|16|0|0|0x8C31|0x05|PCI_E2|PCI_E1|171|8|3|LGA1150|DDR3|1600|2013|msi"
+    "asrock-h81m-hds|ASRock|H81M-HDS|1.0|H81|2.20|03/09/2016|none|2|16|0|0|0x8C31|0x05|PCIE1|PCIE2|171|8|3|LGA1150|DDR3|1600|2013|asrock"
+    "ecs-h81h3-m4|ECS|H81H3-M4|1.0A|H81|5.04.10|04/10/2015|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1|171|8|3|LGA1150|DDR3|1600|2013|ecs"
+)
+
+# Guest-visible LPC identity for every chipset used by BOARD_PROFILES.
+#
+# The q35 machine still implements ICH9 LPC/ACPI/interrupt-routing behavior;
+# only the PCI identity at 00:1f.0 is selected from this closed catalog.  This
+# is deliberately narrower than generic PCI-ID override properties: changing
+# ICH9 AHCI or qemu-xhci identities can make Windows load hardware-specific
+# storage/USB quirks that the virtual controller does not implement.
+#
+# chipset|QEMU-presentation-key|PCI-vendor|PCI-device|PCI-revision
+CHIPSET_PRESENTATION_PROFILES=(
+    "H81|H81|0x8086|0x8C5C|0x04"
+    "H97|H97|0x8086|0x8CC6|0x00"
+    "B150|B150|0x8086|0xA148|0x31"
+    "B360|B360|0x8086|0xA308|0x10"
 )
 
 # Memory fields:
@@ -72,6 +108,7 @@ BOARD_PROFILES=(
 #   https://download.semiconductor.samsung.com/resources/data-sheet/237561ds_ddr3_2gb_d-die_based_udimm_rev14.pdf
 #   https://www.micron.com/products/obsolete/obsolete-udimm/part-catalog
 #   https://product.skhynix.com/products/dram/module/module_info.jsp
+#   https://www.crucial.com/memory/ddr3/ct51264bd160b
 # JEP106 byte pairs follow the audited V-11 memory catalog.  0000 means that
 # the module assembler does not promise one fixed DRAM die vendor.
 MEMORY_PROFILES=(
@@ -90,15 +127,29 @@ MEMORY_PROFILES=(
     "hynix-hmt325u6cfr8c-2x2|SK hynix|HMT325U6CFR8C-PB,HMT325U6CFR8C-PB|1600|DDR3|0x18|64|2048,2048|2|DIMM|1,1|8,8|1500|dual-channel|80AD,80AD|80AD,80AD"
     "hynix-hmt3x5-flex-4plus2|SK hynix|HMT351U6CFR8C-PB,HMT325U6CFR8C-PB|1600|DDR3|0x18|64|4096,2048|2|DIMM|2,1|8,8|1500|flex|80AD,80AD|80AD,80AD"
     "hynix-hmt351u6cfr8c-2x4|SK hynix|HMT351U6CFR8C-PB,HMT351U6CFR8C-PB|1600|DDR3|0x18|64|4096,4096|2|DIMM|2,2|8,8|1500|dual-channel|80AD,80AD|80AD,80AD"
+    # Native DDR3-1333 bins for the other three active brands.  These are
+    # distinct CH9/-1G4/-H9 parts, not 1600 profiles with a relabeled speed.
+    "samsung-m378b5773dh0-1333-2x2|Samsung|M378B5773DH0-CH9,M378B5773DH0-CH9|1333|DDR3|0x18|64|2048,2048|2|DIMM|1,1|8,8|1500|dual-channel|80CE,80CE|80CE,80CE"
+    "samsung-m378b5-1333-flex-4plus2|Samsung|M378B5273DH0-CH9,M378B5773DH0-CH9|1333|DDR3|0x18|64|4096,2048|2|DIMM|2,1|8,8|1500|flex|80CE,80CE|80CE,80CE"
+    "samsung-m378b5273dh0-1333-2x4|Samsung|M378B5273DH0-CH9,M378B5273DH0-CH9|1333|DDR3|0x18|64|4096,4096|2|DIMM|2,2|8,8|1500|dual-channel|80CE,80CE|80CE,80CE"
+    "micron-mt8jtf25664az-1333-2x2|Micron|MT8JTF25664AZ-1G4,MT8JTF25664AZ-1G4|1333|DDR3|0x18|64|2048,2048|2|DIMM|1,1|8,8|1500|dual-channel|802C,802C|802C,802C"
+    "micron-mtjtf-1333-flex-4plus2|Micron|MT8JTF51264AZ-1G4,MT8JTF25664AZ-1G4|1333|DDR3|0x18|64|4096,2048|2|DIMM|1,1|8,8|1500|flex|802C,802C|802C,802C"
+    "micron-mt8jtf51264az-1333-2x4|Micron|MT8JTF51264AZ-1G4,MT8JTF51264AZ-1G4|1333|DDR3|0x18|64|4096,4096|2|DIMM|1,1|8,8|1500|dual-channel|802C,802C|802C,802C"
+    "hynix-hmt325u6cfr8c-1333-2x2|SK hynix|HMT325U6CFR8C-H9,HMT325U6CFR8C-H9|1333|DDR3|0x18|64|2048,2048|2|DIMM|1,1|8,8|1500|dual-channel|80AD,80AD|80AD,80AD"
+    "hynix-hmt3x5-1333-flex-4plus2|SK hynix|HMT351U6CFR8C-H9,HMT325U6CFR8C-H9|1333|DDR3|0x18|64|4096,2048|2|DIMM|2,1|8,8|1500|flex|80AD,80AD|80AD,80AD"
+    "hynix-hmt351u6cfr8c-1333-2x4|SK hynix|HMT351U6CFR8C-H9,HMT351U6CFR8C-H9|1333|DDR3|0x18|64|4096,4096|2|DIMM|2,2|8,8|1500|dual-channel|80AD,80AD|80AD,80AD"
     "kvr21n15s8-2x4|Kingston|KVR21N15S8/4,KVR21N15S8/4|2133|DDR4|0x1A|64|4096,4096|2|DIMM|1,1|8,8|1200|dual-channel|0198,0198|0000,0000"
     "kvr24n17s8-2x4|Kingston|KVR24N17S8/4,KVR24N17S8/4|2400|DDR4|0x1A|64|4096,4096|2|DIMM|1,1|8,8|1200|dual-channel|0198,0198|0000,0000"
+    # Crucial is Micron's module brand; 802C is retained for both the module
+    # assembler and DRAM maker.  H81 runs this dual-voltage DDR3L kit at 1.5 V.
+    "crucial-ct51264bd160b-2x4|Crucial|CT51264BD160B,CT51264BD160B|1600|DDR3|0x18|64|4096,4096|2|DIMM|1,1|8,8|1500|dual-channel|802C,802C|802C,802C"
 )
 
 # platform|CPU-key|board-key|memory-key|lifecycle
 # lifecycle=new participates in the normal low-end random pool; explicit-new
-# is the reviewed two-slot i7 tier (normally selected by an operator, or only
-# after all five low-end CPUs are conclusively unavailable); legacy-
-# compatibility is existing-VM/last-resort fallback only.
+# is a reviewed manual tier that expands boards or combinations without
+# changing default random weights; legacy-compatibility is existing-VM/
+# last-resort fallback only.
 HARDWARE_COMBINATIONS=(
     "g3220-h81m-k-4g|g3220|asus-h81m-k|kvr13n9s6-2x2|new"
     "g3220-h81m-c-6g|g3220|asus-h81m-c|kvr13n9-flex-4plus2|new"
@@ -128,7 +179,119 @@ HARDWARE_COMBINATIONS=(
     "i5-4590|i5-4590|gigabyte-h97-d3h|kvr16n11s8-2x4|legacy-compatibility"
     "i5-6500|i5-6500|gigabyte-b150m-d3h|kvr21n15s8-2x4|legacy-compatibility"
     "i3-8100|i3-8100|asus-prime-b360m-a|kvr24n17s8-2x4|legacy-compatibility"
+    # Append-only reviewed combinations.  explicit-new exposes more real
+    # choices without changing the 24-row no-argument random pool.
+    "i3-4130-h81m-plus-crucial-8g|i3-4130|asus-h81m-plus|crucial-ct51264bd160b-2x4|explicit-new"
+    "i5-4590-h81m-plus-6g|i5-4590|asus-h81m-plus|kvr16n11-flex-4plus2|explicit-new"
+    "i3-4130-h81m-a-4g|i3-4130|asus-h81m-a|kvr16n11s6-2x2|explicit-new"
+    "i3-4130-h81m-ds2-6g|i3-4130|gigabyte-h81m-ds2|kvr16n11-flex-4plus2|explicit-new"
+    "i3-4130-h81m-e33-8g|i3-4130|msi-h81m-e33|kvr16n11s8-2x4|explicit-new"
+    # Complete 4G/6G/8G choices on every i3-4130 board while retaining the
+    # selected board.  Symmetric 4G/8G rows are dual-channel; 6G is reviewed
+    # 4+2 GiB Flex.  Existing brands are completed where profiles already
+    # exist, so a capacity change normally preserves both brand and speed.
+    "i3-4130-h81m-c-6g|i3-4130|asus-h81m-c|kvr16n11-flex-4plus2|explicit-new"
+    "i3-4130-h81m-c-8g|i3-4130|asus-h81m-c|kvr16n11s8-2x4|explicit-new"
+    "i3-4130-h81m-s1-4g|i3-4130|gigabyte-h81m-s1|kvr16n11s6-2x2|explicit-new"
+    "i3-4130-h81m-s1-8g|i3-4130|gigabyte-h81m-s1|kvr16n11s8-2x4|explicit-new"
+    "i3-4130-h81m-s1-samsung-4g|i3-4130|gigabyte-h81m-s1|samsung-m378b5773dh0-2x2|explicit-new"
+    "i3-4130-h81m-s1-samsung-8g|i3-4130|gigabyte-h81m-s1|samsung-m378b5273dh0-2x4|explicit-new"
+    "i3-4130-h81m-p33-4g|i3-4130|msi-h81m-p33|kvr16n11s6-2x2|explicit-new"
+    "i3-4130-h81m-p33-6g|i3-4130|msi-h81m-p33|kvr16n11-flex-4plus2|explicit-new"
+    "i3-4130-h81m-p33-samsung-4g|i3-4130|msi-h81m-p33|samsung-m378b5773dh0-2x2|explicit-new"
+    "i3-4130-h81m-p33-samsung-6g|i3-4130|msi-h81m-p33|samsung-m378b5-flex-4plus2|explicit-new"
+    "i3-4130-h81m-k-samsung-6g|i3-4130|asus-h81m-k|samsung-m378b5-flex-4plus2|explicit-new"
+    "i3-4130-h81m-k-samsung-8g|i3-4130|asus-h81m-k|samsung-m378b5273dh0-2x4|explicit-new"
+    "i3-4130-h81m-plus-4g|i3-4130|asus-h81m-plus|kvr16n11s6-2x2|explicit-new"
+    "i3-4130-h81m-plus-6g|i3-4130|asus-h81m-plus|kvr16n11-flex-4plus2|explicit-new"
+    "i3-4130-h81m-plus-8g|i3-4130|asus-h81m-plus|kvr16n11s8-2x4|explicit-new"
+    "i3-4130-h81m-a-6g|i3-4130|asus-h81m-a|kvr16n11-flex-4plus2|explicit-new"
+    "i3-4130-h81m-a-8g|i3-4130|asus-h81m-a|kvr16n11s8-2x4|explicit-new"
+    "i3-4130-h81m-ds2-4g|i3-4130|gigabyte-h81m-ds2|kvr16n11s6-2x2|explicit-new"
+    "i3-4130-h81m-ds2-8g|i3-4130|gigabyte-h81m-ds2|kvr16n11s8-2x4|explicit-new"
+    "i3-4130-h81m-e33-4g|i3-4130|msi-h81m-e33|kvr16n11s6-2x2|explicit-new"
+    "i3-4130-h81m-e33-6g|i3-4130|msi-h81m-e33|kvr16n11-flex-4plus2|explicit-new"
+    "i3-4130-h81m-hds-4g|i3-4130|asrock-h81m-hds|kvr16n11s6-2x2|explicit-new"
+    "i3-4130-h81m-hds-6g|i3-4130|asrock-h81m-hds|kvr16n11-flex-4plus2|explicit-new"
+    "i3-4130-h81m-hds-8g|i3-4130|asrock-h81m-hds|kvr16n11s8-2x4|explicit-new"
+    "i3-4130-h81h3-m4-samsung-4g|i3-4130|ecs-h81h3-m4|samsung-m378b5773dh0-2x2|explicit-new"
+    "i3-4130-h81h3-m4-samsung-6g|i3-4130|ecs-h81h3-m4|samsung-m378b5-flex-4plus2|explicit-new"
+    "i3-4130-h81h3-m4-samsung-8g|i3-4130|ecs-h81h3-m4|samsung-m378b5273dh0-2x4|explicit-new"
 )
+
+# i3-4130 exposes the same reviewed two-DIMM memory matrix on every active H81
+# board.  Existing rows retain their stable IDs/lifecycle; only missing
+# CPU/board/memory triples are appended as explicit-new.  This keeps the
+# no-argument random pool backward-stable while making the three UI attributes
+# genuinely independent across unlocked boards.
+I3_4130_REVIEWED_BOARD_MATRIX=(
+    "asus-h81m-k|h81m-k"
+    "asus-h81m-c|h81m-c"
+    "gigabyte-h81m-s1|h81m-s1"
+    "msi-h81m-p33|h81m-p33"
+    "asus-h81m-plus|h81m-plus"
+    "asus-h81m-a|h81m-a"
+    "gigabyte-h81m-ds2|h81m-ds2"
+    "msi-h81m-e33|h81m-e33"
+    "asrock-h81m-hds|h81m-hds"
+    "ecs-h81h3-m4|h81h3-m4"
+)
+I3_4130_REVIEWED_MEMORY_MATRIX=(
+    "kvr13n9s6-2x2|kingston-1333-4g"
+    "kvr13n9-flex-4plus2|kingston-1333-6g"
+    "kvr13n9s8-2x4|kingston-1333-8g"
+    "kvr16n11s6-2x2|kingston-1600-4g"
+    "kvr16n11-flex-4plus2|kingston-1600-6g"
+    "kvr16n11s8-2x4|kingston-1600-8g"
+    "samsung-m378b5773dh0-2x2|samsung-1600-4g"
+    "samsung-m378b5-flex-4plus2|samsung-1600-6g"
+    "samsung-m378b5273dh0-2x4|samsung-1600-8g"
+    "micron-mt4jtf25664az-2x2|micron-1600-4g"
+    "micron-mtjtf-flex-4plus2|micron-1600-6g"
+    "micron-mt8jtf51264az-2x4|micron-1600-8g"
+    "hynix-hmt325u6cfr8c-2x2|hynix-1600-4g"
+    "hynix-hmt3x5-flex-4plus2|hynix-1600-6g"
+    "hynix-hmt351u6cfr8c-2x4|hynix-1600-8g"
+    "samsung-m378b5773dh0-1333-2x2|samsung-1333-4g"
+    "samsung-m378b5-1333-flex-4plus2|samsung-1333-6g"
+    "samsung-m378b5273dh0-1333-2x4|samsung-1333-8g"
+    "micron-mt8jtf25664az-1333-2x2|micron-1333-4g"
+    "micron-mtjtf-1333-flex-4plus2|micron-1333-6g"
+    "micron-mt8jtf51264az-1333-2x4|micron-1333-8g"
+    "hynix-hmt325u6cfr8c-1333-2x2|hynix-1333-4g"
+    "hynix-hmt3x5-1333-flex-4plus2|hynix-1333-6g"
+    "hynix-hmt351u6cfr8c-1333-2x4|hynix-1333-8g"
+)
+
+_hardware_profile_append_i3_4130_memory_matrix() {
+    local row platform cpu board memory lifecycle board_row board_alias
+    local memory_row memory_alias key triple
+    local -A seen_triples=() seen_keys=()
+
+    for row in "${HARDWARE_COMBINATIONS[@]}"; do
+        IFS='|' read -r platform cpu board memory lifecycle <<<"$row"
+        seen_keys["$platform"]=1
+        seen_triples["$cpu|$board|$memory"]=1
+    done
+    for board_row in "${I3_4130_REVIEWED_BOARD_MATRIX[@]}"; do
+        IFS='|' read -r board board_alias <<<"$board_row"
+        for memory_row in "${I3_4130_REVIEWED_MEMORY_MATRIX[@]}"; do
+            IFS='|' read -r memory memory_alias <<<"$memory_row"
+            triple="i3-4130|$board|$memory"
+            [[ ! -v "seen_triples[$triple]" ]] || continue
+            key="i3-4130-$board_alias-$memory_alias"
+            [[ ! -v "seen_keys[$key]" ]] || {
+                echo "i3-4130 审核矩阵生成了重复平台 ID: $key" >&2
+                return 1
+            }
+            HARDWARE_COMBINATIONS+=("$key|$triple|explicit-new")
+            seen_keys["$key"]=1
+            seen_triples["$triple"]=1
+        done
+    done
+}
+
+_hardware_profile_append_i3_4130_memory_matrix
 
 # Compatibility view consumed by the existing legality/start/test code.  It is
 # generated from the normalized catalogs below; no hardware fact is duplicated.
@@ -137,11 +300,34 @@ HARDWARE_NEW_PROFILE_KEYS=()
 HARDWARE_EXPLICIT_NEW_PROFILE_KEYS=()
 HARDWARE_LEGACY_COMPAT_PROFILE_KEYS=()
 
+# Optional optical-drive identity fields:
+# key|brand|ATA/SCSI model|firmware|interface|form-factor|serial-policy
+#
+# LG's product page and specification sheet identify GH24NS50 as an internal
+# SATA DVD writer.  LG's support page publishes XP02 for this exact model.
+# The Windows-facing string is the conventional HL-DT-ST INQUIRY identity:
+# vendor "HL-DT-ST" (8 bytes), product "DVDRAM GH24NS50" (15 bytes).
+#
+#   https://www.lg.com/bd/support/product/lg-GH24NS50.AUAU10B
+#   https://www.lg.com/us/products/documents/GH24NS50%20spec%20sheet.pdf
+#
+# One period-correct model is available to every current platform, but it is
+# never attached by a normal start.  It appears only for the explicit IDE
+# installer fallback or through the manual USB-BOT/SCSI hotplug wrapper.  No
+# serial is invented: QEMU receives an explicit empty serial so its QM0000x
+# fallback cannot leak into VPD page 0x80.
+OPTICAL_DRIVE_PROFILES=(
+    "lg-gh24ns50|LG Electronics|HL-DT-ST DVDRAM GH24NS50|XP02|sata-atapi|5.25-inch|none"
+)
+OPTICAL_DRIVE_DEFAULT_PROFILE=lg-gh24ns50
+
 # key|brand|ATA Identify model|interface|visible bytes|firmware|controller|
 # form-factor|PCIe-generation|PCIe-lanes|logical-sector-bytes|physical-sector-bytes
 #
 # Samsung firmware source:
 #   https://semiconductor.samsung.com/consumer-storage/support/tools/
+# Samsung 960 PRO 512GB/M.2/PCIe Gen3 x4 specifications:
+#   https://download.semiconductor.samsung.com/resources/data-sheet/Samsung_SSD_960_PRO_Data_Sheet_Rev_1_2.pdf
 # Samsung 840/850 PRO specifications:
 #   https://www.samsung.com/us/business/support/owners/product/840-pro-series-512gb/
 #   https://download.semiconductor.samsung.com/resources/data-sheet/Samsung_SSD_850_PRO_Data_Sheet_Rev_3.pdf
@@ -177,6 +363,9 @@ SSD_PROFILES=(
     "wd-pc-sa530-512gb|Western Digital|WDC PC SA530 SDASB8Y512G|sata|512110190592|40101000|ahci|2.5-inch|0|0|512|512"
     "wd-black-pcie-512gb|Western Digital|WDC WDS512G1X0C-00ENX0|nvme|512110190592|B35900WD|wd|m.2-2280|3|4|512|512"
     "samsung-970-pro-512gb|Samsung|Samsung SSD 970 PRO 512GB|nvme|512110190592|1B2QEXP7|samsung|m.2-2280|3|4|512|512"
+    # Manual append-only expansion.  It is selectable but deliberately not
+    # inserted into SSD_DEFAULT_PROFILE_KEYS, preserving existing auto picks.
+    "samsung-960-pro-512gb|Samsung|Samsung SSD 960 PRO 512GB|nvme|512110190592|2B6QCXP7|samsung|m.2-2280|3|4|512|512"
 )
 
 # Every root-workflow profile is the same exact 512 GB visible capacity, so a
@@ -194,6 +383,12 @@ SSD_DEFAULT_PROFILE_KEYS=(
     samsung-970-pro-512gb
 )
 
+# Profiles available only through an explicit selector/UI choice.  Keeping a
+# separate reviewed set makes append-only catalog growth backward-stable.
+SSD_EXPLICIT_PROFILE_KEYS=(
+    samsung-960-pro-512gb
+)
+
 # IEEE registrations belonging to Intel Corporate.  e1000e must not borrow an
 # OEM system vendor's OUI merely to look varied.
 INTEL_OUIS=(
@@ -204,6 +399,54 @@ INTEL_OUIS=(
     "00:23:14"
     "00:24:D7"
 )
+
+# O(1) row indexes keep catalog loading proportional to the number of reviewed
+# combinations.  The i3 memory matrix is intentionally broad, so repeatedly
+# rescanning the full Bash arrays for every flattened row would otherwise make
+# list/start commands quadratic.
+declare -A _HARDWARE_CPU_ROW_BY_KEY=()
+declare -A _HARDWARE_BOARD_ROW_BY_KEY=()
+declare -A _HARDWARE_MEMORY_ROW_BY_KEY=()
+declare -A _HARDWARE_COMBINATION_ROW_BY_KEY=()
+declare -A _HARDWARE_CHIPSET_ROW_BY_KEY=()
+declare -A _HARDWARE_OPTICAL_ROW_BY_KEY=()
+
+_hardware_profile_build_indexes() {
+    local row key
+
+    _HARDWARE_CPU_ROW_BY_KEY=()
+    _HARDWARE_BOARD_ROW_BY_KEY=()
+    _HARDWARE_MEMORY_ROW_BY_KEY=()
+    _HARDWARE_COMBINATION_ROW_BY_KEY=()
+    _HARDWARE_CHIPSET_ROW_BY_KEY=()
+    _HARDWARE_OPTICAL_ROW_BY_KEY=()
+    for row in "${CPU_PROFILES[@]}"; do
+        key=${row%%|*}
+        _HARDWARE_CPU_ROW_BY_KEY["$key"]=$row
+    done
+    for row in "${BOARD_PROFILES[@]}"; do
+        key=${row%%|*}
+        _HARDWARE_BOARD_ROW_BY_KEY["$key"]=$row
+    done
+    for row in "${MEMORY_PROFILES[@]}"; do
+        key=${row%%|*}
+        _HARDWARE_MEMORY_ROW_BY_KEY["$key"]=$row
+    done
+    for row in "${HARDWARE_COMBINATIONS[@]}"; do
+        key=${row%%|*}
+        _HARDWARE_COMBINATION_ROW_BY_KEY["$key"]=$row
+    done
+    for row in "${CHIPSET_PRESENTATION_PROFILES[@]}"; do
+        key=${row%%|*}
+        _HARDWARE_CHIPSET_ROW_BY_KEY["$key"]=$row
+    done
+    for row in "${OPTICAL_DRIVE_PROFILES[@]}"; do
+        key=${row%%|*}
+        _HARDWARE_OPTICAL_ROW_BY_KEY["$key"]=$row
+    done
+}
+
+_hardware_profile_build_indexes
 
 hardware_profile_keys() {
     local row key
@@ -226,15 +469,14 @@ hardware_profile_legacy_compat_keys() {
 }
 
 hardware_profile_lifecycle_class() {
-    local requested=${1:-} row key _cpu _board _memory lifecycle
+    local requested=${1:-} matched= _key _cpu _board _memory lifecycle
 
-    for row in "${HARDWARE_COMBINATIONS[@]}"; do
-        IFS='|' read -r key _cpu _board _memory lifecycle <<<"$row"
-        [[ "$key" == "$requested" ]] || continue
-        printf '%s\n' "$lifecycle"
-        return 0
-    done
-    return 1
+    if [[ -n "$requested" ]]; then
+        matched=${_HARDWARE_COMBINATION_ROW_BY_KEY["$requested"]-}
+    fi
+    [[ -n "$matched" ]] || return 1
+    IFS='|' read -r _key _cpu _board _memory lifecycle <<<"$matched"
+    printf '%s\n' "$lifecycle"
 }
 
 cpu_profile_keys() {
@@ -262,13 +504,10 @@ memory_profile_keys() {
 }
 
 cpu_profile_load() {
-    local requested=${1:-} row key matched=
-    for row in "${CPU_PROFILES[@]}"; do
-        IFS='|' read -r key _ <<<"$row"
-        [[ "$key" == "$requested" ]] || continue
-        matched=$row
-        break
-    done
+    local requested=${1:-} matched=
+    if [[ -n "$requested" ]]; then
+        matched=${_HARDWARE_CPU_ROW_BY_KEY["$requested"]-}
+    fi
     [[ -n "$matched" ]] || {
         echo "未知 CPU profile: ${requested:-<empty>}" >&2
         return 2
@@ -283,14 +522,39 @@ cpu_profile_load() {
     CPU_VCPUS=$((CPU_CORES * CPU_THREADS_PER_CORE))
 }
 
+chipset_presentation_load() {
+    local requested=${1:-} matched=
+
+    if [[ -n "$requested" ]]; then
+        matched=${_HARDWARE_CHIPSET_ROW_BY_KEY["$requested"]-}
+    fi
+    [[ -n "$matched" ]] || {
+        echo "芯片组没有已审核的 LPC identity: ${requested:-<empty>}" >&2
+        return 2
+    }
+    IFS='|' read -r CHIPSET_PRESENTATION_NAME \
+        CHIPSET_QEMU_PRESENTATION_KEY BOARD_LPC_PCI_VENDOR_ID \
+        BOARD_LPC_PCI_DEVICE_ID BOARD_LPC_PCI_REVISION <<<"$matched"
+}
+
+hardware_chipset_identity_for_platform() {
+    local requested=${1:-}
+
+    (
+        hardware_profile_load "$requested" || exit
+        printf '%s|%s|%s|%s|%s\n' \
+            "$CHIPSET_PRESENTATION_NAME" \
+            "$CHIPSET_QEMU_PRESENTATION_KEY" \
+            "$BOARD_LPC_PCI_VENDOR_ID" "$BOARD_LPC_PCI_DEVICE_ID" \
+            "$BOARD_LPC_PCI_REVISION"
+    )
+}
+
 board_profile_load() {
-    local requested=${1:-} row key matched=
-    for row in "${BOARD_PROFILES[@]}"; do
-        IFS='|' read -r key _ <<<"$row"
-        [[ "$key" == "$requested" ]] || continue
-        matched=$row
-        break
-    done
+    local requested=${1:-} matched=
+    if [[ -n "$requested" ]]; then
+        matched=${_HARDWARE_BOARD_ROW_BY_KEY["$requested"]-}
+    fi
     [[ -n "$matched" ]] || {
         echo "未知主板 profile: ${requested:-<empty>}" >&2
         return 2
@@ -303,17 +567,15 @@ board_profile_load() {
         BOARD_CPU_SOCKET BOARD_MEMORY_FAMILY BOARD_MAX_MEMORY_SPEED \
         BOARD_RELEASE_YEAR BOARD_SERIAL_POLICY \
         <<<"$matched"
+    chipset_presentation_load "$BOARD_CHIPSET"
 }
 
 memory_profile_load() {
-    local requested=${1:-} row key matched= module
+    local requested=${1:-} matched= module
     local -a modules
-    for row in "${MEMORY_PROFILES[@]}"; do
-        IFS='|' read -r key _ <<<"$row"
-        [[ "$key" == "$requested" ]] || continue
-        matched=$row
-        break
-    done
+    if [[ -n "$requested" ]]; then
+        matched=${_HARDWARE_MEMORY_ROW_BY_KEY["$requested"]-}
+    fi
     [[ -n "$matched" ]] || {
         echo "未知内存 profile: ${requested:-<empty>}" >&2
         return 2
@@ -340,14 +602,68 @@ memory_profile_load() {
     done
 }
 
-hardware_combination_load() {
-    local requested=${1:-} row key matched=
-    for row in "${HARDWARE_COMBINATIONS[@]}"; do
+# V-11-style capacity selector used by the G-11 create/clone entry points.
+# Physical DIMM details still come from an audited MEMORY_PROFILES row; this
+# helper only normalizes the requested total and never manufactures a layout.
+hardware_memory_size_mb_normalize() {
+    local requested=${1:-}
+
+    requested=${requested,,}
+    requested=${requested//[[:space:]]/}
+    case "$requested" in
+        4|4g|4gb|4gib|4096|4096m|4096mb|4096mib)
+            printf '%s\n' 4096
+            ;;
+        6|6g|6gb|6gib|6144|6144m|6144mb|6144mib)
+            printf '%s\n' 6144
+            ;;
+        8|8g|8gb|8gib|8192|8192m|8192mb|8192mib)
+            printf '%s\n' 8192
+            ;;
+        *)
+            printf '内存档位只支持 4G、6G 或 8G，当前: %s\n' \
+                "${1:-<empty>}" >&2
+            return 2
+            ;;
+    esac
+}
+
+memory_profile_total_mb() {
+    local requested=${1:-}
+
+    (
+        memory_profile_load "$requested" || exit
+        printf '%s\n' "$MEM_TOTAL_MB"
+    )
+}
+
+optical_drive_profile_keys() {
+    local row key
+    for row in "${OPTICAL_DRIVE_PROFILES[@]}"; do
         IFS='|' read -r key _ <<<"$row"
-        [[ "$key" == "$requested" ]] || continue
-        matched=$row
-        break
+        printf '%s\n' "$key"
     done
+}
+
+optical_drive_profile_load() {
+    local requested=${1:-} matched=
+
+    if [[ -n "$requested" ]]; then
+        matched=${_HARDWARE_OPTICAL_ROW_BY_KEY["$requested"]-}
+    fi
+    [[ -n "$matched" ]] || {
+        echo "未知光驱 profile: ${requested:-<empty>}" >&2
+        return 2
+    }
+    IFS='|' read -r ODD_PROFILE ODD_BRAND ODD_MODEL ODD_FIRMWARE_REV \
+        ODD_INTERFACE ODD_FORM_FACTOR ODD_SERIAL_POLICY <<<"$matched"
+}
+
+hardware_combination_load() {
+    local requested=${1:-} matched=
+    if [[ -n "$requested" ]]; then
+        matched=${_HARDWARE_COMBINATION_ROW_BY_KEY["$requested"]-}
+    fi
     [[ -n "$matched" ]] || {
         echo "未知平台: ${requested:-<empty>}" >&2
         return 2
@@ -363,6 +679,7 @@ hardware_profile_load() {
     cpu_profile_load "$CPU_PROFILE" || return
     board_profile_load "$BOARD_PROFILE" || return
     memory_profile_load "$MEMORY_PROFILE" || return
+    optical_drive_profile_load "$OPTICAL_DRIVE_DEFAULT_PROFILE" || return
     PLATFORM_GENERATION=$CPU_GENERATION
     BOARD_VERSION=$BOARD_REVISION
 }
@@ -410,29 +727,41 @@ _hardware_profile_materialize_catalog() {
 
 hardware_profile_matches_components() {
     local requested=${1:-} cpu_request=${2:-} board_request=${3:-}
-    local memory_request=${4:-} row key cpu board memory lifecycle
+    local memory_request=${4:-} memory_total_request=${5:-}
+    local row= key cpu board memory lifecycle memory_total
 
-    for row in "${HARDWARE_COMBINATIONS[@]}"; do
-        IFS='|' read -r key cpu board memory lifecycle <<<"$row"
-        [[ "$key" == "$requested" ]] || continue
-        [[ "$lifecycle" == new || "$lifecycle" == explicit-new ]] || return 1
-        [[ -z "$cpu_request" || "$cpu" == "$cpu_request" ]] || return 1
-        [[ -z "$board_request" || "$board" == "$board_request" ]] || return 1
-        [[ -z "$memory_request" || "$memory" == "$memory_request" ]] || return 1
-        return 0
-    done
-    return 1
+    if [[ -n "$requested" ]]; then
+        row=${_HARDWARE_COMBINATION_ROW_BY_KEY["$requested"]-}
+    fi
+    [[ -n "$row" ]] || return 1
+    IFS='|' read -r key cpu board memory lifecycle <<<"$row"
+    [[ "$lifecycle" == new || "$lifecycle" == explicit-new ]] || return 1
+    [[ -z "$cpu_request" || "$cpu" == "$cpu_request" ]] || return 1
+    [[ -z "$board_request" || "$board" == "$board_request" ]] || return 1
+    [[ -z "$memory_request" || "$memory" == "$memory_request" ]] || return 1
+    if [[ -n "$memory_total_request" ]]; then
+        memory_total=$(memory_profile_total_mb "$memory") || return 1
+        [[ "$memory_total" == "$memory_total_request" ]] || return 1
+    fi
+    return 0
 }
 
 hardware_profile_component_candidates() {
     local cpu_request=${1:-} board_request=${2:-} memory_request=${3:-}
+    local memory_total_request=${4:-}
+    local include_fallback=${5:-1}
     local row key _cpu _board _memory _lifecycle
 
     for row in "${HARDWARE_COMBINATIONS[@]}"; do
         IFS='|' read -r key _cpu _board _memory _lifecycle <<<"$row"
+        if [[ "$_lifecycle" == legacy-compatibility && "$include_fallback" != 1 ]]; then
+            continue
+        fi
         hardware_profile_matches_components "$key" "$cpu_request" \
-            "$board_request" "$memory_request" && printf '%s\n' "$key"
+            "$board_request" "$memory_request" "$memory_total_request" && \
+            printf '%s\n' "$key"
     done
+    return 0
 }
 
 hardware_profile_component_contract() {
@@ -543,13 +872,16 @@ hardware_profile_component_contract_validate() {
 }
 
 hardware_profile_print_catalog() {
-    local row key lifecycle layout parts
+    local include_fallback=${1:-0} row key lifecycle layout parts
 
     printf 'PROFILE\tCPU/TOPOLOGY\tBOARD\tCHIPSET\tMEMORY\tTPM\tNEW_VM_POLICY\tCOMPONENT_KEYS\n'
     for row in "${HARDWARE_COMBINATIONS[@]}"; do
         IFS='|' read -r key _ <<<"$row"
-        hardware_profile_load "$key" || return
         lifecycle=$(hardware_profile_lifecycle_class "$key") || lifecycle=invalid
+        if [[ "$lifecycle" == legacy-compatibility && "$include_fallback" != 1 ]]; then
+            continue
+        fi
+        hardware_profile_load "$key" || return
         layout=${MEM_MODULE_MB_LIST//,/+}
         parts=${MEM_MODEL_LIST//,/ + }
         printf '%s\t%s %sC/%sT\t%s %s\t%s\t%s %s@%s %sMiB/%s [%s]\t%s\t%s\t%s/%s/%s\n' \
@@ -562,6 +894,7 @@ hardware_profile_print_catalog() {
 }
 
 cpu_profile_print_catalog() {
+    local include_fallback=${1:-0}
     local row key model _brand tsc _part base max _family _upgrade _chars
     local cores threads _l1 _l2 l3 _l2assoc _l3assoc generation socket
     local memory max_speed _root _revision lifecycle new_count legacy_count platform
@@ -575,12 +908,15 @@ cpu_profile_print_catalog() {
         legacy_count=0
         while IFS= read -r platform; do
             [[ -n "$platform" ]] && new_count=$((new_count + 1))
-        done < <(hardware_profile_component_candidates "$key" '' '')
+        done < <(hardware_profile_component_candidates "$key" '' '' '' 0)
         for platform in "${HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}"; do
             hardware_combination_load "$platform" >/dev/null 2>&1 || continue
             [[ "$CPU_PROFILE" == "$key" ]] && legacy_count=$((legacy_count + 1))
         done
         lifecycle="new:${new_count}/legacy:${legacy_count}"
+        if (( new_count == 0 )) && [[ "$include_fallback" != 1 ]]; then
+            continue
+        fi
         printf '%s\t%s\t%sC/%sT\t%s/%s\t%s\t%s\t%s\t%s@%s\t%s\n' \
             "$key" "$model" "$cores" "$((cores * threads))" "$base" \
             "$max" "$l3" "$generation" "$socket" "$memory" "$max_speed" \
@@ -589,14 +925,20 @@ cpu_profile_print_catalog() {
 }
 
 board_profile_print_catalog() {
+    local include_fallback=${1:-0}
     local row key brand model revision chipset bios date tpm slots max_gb
     local nvme_gen nvme_lanes _xhci _xhci_rev _main _aux _type _width _length
-    local socket memory max_speed
+    local socket memory max_speed candidate_count
     printf 'BOARD_PROFILE\tBOARD\tCHIPSET/BIOS\tSOCKET/MEMORY\tDIMM\tTPM\tNATIVE_M2\n'
     for row in "${BOARD_PROFILES[@]}"; do
         IFS='|' read -r key brand model revision chipset bios date tpm slots \
             max_gb nvme_gen nvme_lanes _xhci _xhci_rev _main _aux _type \
             _width _length socket memory max_speed <<<"$row"
+        if [[ "$include_fallback" != 1 ]]; then
+            candidate_count=$(hardware_profile_component_candidates '' "$key" '' '' 0 | \
+                awk 'NF { count++ } END { print count + 0 }')
+            (( candidate_count > 0 )) || continue
+        fi
         printf '%s\t%s %s rev %s\t%s %s %s\t%s %s@%s\t%s/%sGiB\t%s\tGen%sx%s\n' \
             "$key" "$brand" "$model" "$revision" "$chipset" "$bios" \
             "$date" "$socket" "$memory" "$max_speed" "$slots" "$max_gb" \
@@ -605,20 +947,39 @@ board_profile_print_catalog() {
 }
 
 memory_profile_print_catalog() {
+    local include_fallback=${1:-0}
     local row key brand model_list speed family _type width module_list slots
     local _form rank_list device_width_list voltage channel_mode module_jep dram_jep
-    local layout parts
+    local layout parts candidate_count
     printf 'MEMORY_PROFILE\tPARTS\tFAMILY/SPEED\tLAYOUT\tCHANNEL\tRANK/DEVICE\tJEP106(MODULE/DRAM)\tVOLTAGE_MV\n'
     for row in "${MEMORY_PROFILES[@]}"; do
         IFS='|' read -r key brand model_list speed family _type width \
             module_list slots _form rank_list device_width_list voltage \
             channel_mode module_jep dram_jep <<<"$row"
+        if [[ "$include_fallback" != 1 ]]; then
+            candidate_count=$(hardware_profile_component_candidates '' '' "$key" '' 0 | \
+                awk 'NF { count++ } END { print count + 0 }')
+            (( candidate_count > 0 )) || continue
+        fi
         layout=${module_list//,/+}
         parts=${model_list//,/ + }
         printf '%s\t%s %s\t%s@%s\t%sMiB/%s-bit\t%s\t%sR x%s\t%s/%s\t%s\n' \
             "$key" "$brand" "$parts" "$family" "$speed" "$layout" \
             "$width" "$channel_mode" "$rank_list" "$device_width_list" \
             "$module_jep" "$dram_jep" "$voltage"
+    done
+}
+
+optical_drive_profile_print_catalog() {
+    local row key brand model firmware interface form_factor serial_policy
+
+    printf 'OPTICAL_PROFILE\tBRAND/MODEL\tFIRMWARE\tINTERFACE/FORM\tSERIAL\n'
+    for row in "${OPTICAL_DRIVE_PROFILES[@]}"; do
+        IFS='|' read -r key brand model firmware interface form_factor \
+            serial_policy <<<"$row"
+        printf '%s\t%s %s\t%s\t%s/%s\t%s\n' \
+            "$key" "$brand" "$model" "$firmware" "$interface" \
+            "$form_factor" "$serial_policy"
     done
 }
 
@@ -651,6 +1012,19 @@ ssd_default_profile_keys() {
     printf '%s\n' "${SSD_DEFAULT_PROFILE_KEYS[@]}"
 }
 
+ssd_explicit_profile_keys() {
+    printf '%s\n' "${SSD_EXPLICIT_PROFILE_KEYS[@]}"
+}
+
+ssd_profile_is_default() {
+    local requested=${1:-} key
+
+    for key in "${SSD_DEFAULT_PROFILE_KEYS[@]}"; do
+        [[ "$key" == "$requested" ]] && return 0
+    done
+    return 1
+}
+
 # Board-bound storage compatibility.  Compare a drive's advertised endpoint
 # link with the board's native M.2 capability instead of treating DDR3/DDR4 or
 # the generic "nvme" interface name as a topology.  Missing link metadata is
@@ -658,7 +1032,7 @@ ssd_default_profile_keys() {
 hardware_storage_combination_allowed() {
     local platform=${1:-} interface=${2:-}
     local drive_gen=${3:-} drive_lanes=${4:-} form_factor=${5:-}
-    local row key board_gen board_lanes
+    local combination= board_key board_row= board_gen board_lanes
 
     hardware_profile_is_catalog_key "$platform" || return 1
     [[ "$interface" == sata ]] && return 0
@@ -671,14 +1045,14 @@ hardware_storage_combination_allowed() {
        "$drive_lanes" =~ ^[1-9][0-9]*$ &&
        "$form_factor" == m.2-2280 ]] || return 1
 
-    for row in "${HARDWARE_PROFILES[@]}"; do
-        IFS='|' read -r key _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \
-            board_gen board_lanes <<<"$row"
-        [[ "$key" == "$platform" ]] || continue
-        (( board_gen >= drive_gen && board_lanes >= drive_lanes ))
-        return
-    done
-    return 1
+    combination=${_HARDWARE_COMBINATION_ROW_BY_KEY["$platform"]-}
+    [[ -n "$combination" ]] || return 1
+    IFS='|' read -r _ _ board_key _ _ <<<"$combination"
+    board_row=${_HARDWARE_BOARD_ROW_BY_KEY["$board_key"]-}
+    [[ -n "$board_row" ]] || return 1
+    IFS='|' read -r _ _ _ _ _ _ _ _ _ _ board_gen board_lanes _ \
+        <<<"$board_row"
+    (( board_gen >= drive_gen && board_lanes >= drive_lanes ))
 }
 
 # Lower number wins.  Explicit --ssd-profile bypasses this preference but is
@@ -698,13 +1072,9 @@ hardware_storage_preference_tier() {
 }
 
 hardware_profile_is_catalog_key() {
-    local requested=${1:-} row key
+    local requested=${1:-}
 
-    for row in "${HARDWARE_PROFILES[@]}"; do
-        IFS='|' read -r key _ <<<"$row"
-        [[ "$key" == "$requested" ]] && return 0
-    done
-    return 1
+    [[ -n "$requested" && -v "_HARDWARE_COMBINATION_ROW_BY_KEY[$requested]" ]]
 }
 
 ssd_profile_load() {
@@ -734,19 +1104,28 @@ ssd_profile_load() {
 ssd_profile_print_catalog() {
     local row key brand model interface size_bytes firmware controller
     local form_factor pcie_gen pcie_lanes logical_block_size physical_block_size
+    local auto_random
     for row in "${SSD_PROFILES[@]}"; do
         IFS='|' read -r key brand model interface size_bytes firmware controller \
             form_factor pcie_gen pcie_lanes logical_block_size \
             physical_block_size <<<"$row"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        if ssd_profile_is_default "$key"; then
+            auto_random=1
+        else
+            auto_random=0
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$key" "$brand" "$interface" "$size_bytes" "$firmware" \
             "$controller" "$form_factor" "$pcie_gen" "$pcie_lanes" \
-            "$model" "$logical_block_size" "$physical_block_size"
+            "$model" "$logical_block_size" "$physical_block_size" \
+            "$auto_random"
     done
 }
 
 hardware_profile_validate_catalog() {
-    local row key brand seen='|' default_seen='|' default_key found
+    local row key brand seen='|' selection_seen='|' selection_key found
+    local selection_class
+    local -a selection_keys=()
 
     # Validate normalized component catalogs and the explicit combination
     # matrix in a subshell so audit calls never overwrite the caller's loaded
@@ -761,12 +1140,16 @@ hardware_profile_validate_catalog() {
         local mem_model_list mem_type mem_width module_list slots form rank_list
         local device_width_list voltage channel_mode module_jep_list dram_jep_list
         local cpu_key board_key memory_key module device_width rank mem_total
-        local part index
+        local part index matrix_board_row matrix_memory_row
+        local matrix_board_alias matrix_memory_alias
         local used_cpu='|' used_board='|' used_memory='|' flat flat_count=0
-        local seen_model='|'
+        local seen_model='|' seen_chipset='|' used_chipset='|'
+        local presentation_key lpc_vendor lpc_device lpc_revision
         local -a parts modules ranks device_widths module_jeps dram_jeps
         local -A active_cpu_seen=() active_board_seen=() default_cpu_seen=()
         local -A active_memory_brand_seen=()
+        local -A i3_board_seen=() i3_board_capacity_seen=()
+        local -A i3_board_memory_seen=()
 
         seen='|'
         for row in "${CPU_PROFILES[@]}"; do
@@ -810,6 +1193,28 @@ hardware_profile_validate_catalog() {
             }
         done
 
+        for row in "${CHIPSET_PRESENTATION_PROFILES[@]}"; do
+            IFS='|' read -r chipset presentation_key lpc_vendor lpc_device \
+                lpc_revision <<<"$row"
+            [[ -n "$lpc_revision" && "$seen_chipset" != *"|$chipset|"* ]] || {
+                echo "重复或字段不完整的芯片组 identity: $chipset" >&2
+                exit 1
+            }
+            seen_chipset+="$chipset|"
+            [[ "$chipset" =~ ^(H81|H97|B150|B360)$ &&
+               "$presentation_key" == "$chipset" &&
+               "$lpc_vendor" == 0x8086 &&
+               "$lpc_device" =~ ^0x[0-9A-F]{4}$ &&
+               "$lpc_revision" =~ ^0x[0-9A-F]{2}$ ]] || {
+                echo "芯片组 LPC identity 未经审核: $row" >&2
+                exit 1
+            }
+        done
+        (( ${#CHIPSET_PRESENTATION_PROFILES[@]} == 4 )) || {
+            echo "芯片组 identity 目录必须精确覆盖 H81/H97/B150/B360" >&2
+            exit 1
+        }
+
         seen='|'
         for row in "${BOARD_PROFILES[@]}"; do
             IFS='|' read -r key brand board revision chipset bios bios_date tpm \
@@ -837,7 +1242,8 @@ hardware_profile_validate_catalog() {
                "$max_speed" =~ ^[1-9][0-9]*$ &&
                "$release_year" =~ ^20[0-9]{2}$ &&
                ( "$serial_policy" == asus || "$serial_policy" == msi ||
-                 "$serial_policy" == gigabyte ) ]] || {
+                 "$serial_policy" == gigabyte || "$serial_policy" == asrock ||
+                 "$serial_policy" == ecs ) ]] || {
                 echo "主板 profile 字段非法: $key" >&2
                 exit 1
             }
@@ -848,12 +1254,21 @@ hardware_profile_validate_catalog() {
                 }
             fi
             case "$brand:$serial_policy" in
-                'ASUSTeK COMPUTER INC.:asus'|'ASUS:asus'|Gigabyte:gigabyte|MSI:msi) ;;
+                'ASUSTeK COMPUTER INC.:asus'|'ASUS:asus'|Gigabyte:gigabyte|MSI:msi|ASRock:asrock|ECS:ecs) ;;
                 *)
                     echo "主板厂商与序列策略不匹配: $key/$brand/$serial_policy" >&2
                     exit 1
                     ;;
             esac
+            chipset_presentation_load "$chipset" || exit
+            used_chipset+="$chipset|"
+        done
+        for row in "${CHIPSET_PRESENTATION_PROFILES[@]}"; do
+            IFS='|' read -r chipset _ <<<"$row"
+            [[ "$used_chipset" == *"|$chipset|"* ]] || {
+                echo "孤立芯片组 identity: $chipset" >&2
+                exit 1
+            }
         done
 
         seen='|'
@@ -977,6 +1392,18 @@ hardware_profile_validate_catalog() {
                 active_board_seen["$board_key"]=1
                 active_memory_brand_seen["$MEM_BRAND"]=1
                 [[ "$lifecycle" != new ]] || default_cpu_seen["$cpu_key"]=1
+                if [[ "$cpu_key" == i3-4130 ]]; then
+                    i3_board_seen["$board_key"]=1
+                    i3_board_capacity_seen["$board_key:$MEM_TOTAL_MB"]=1
+                    i3_board_memory_seen["$board_key:$memory_key"]=1
+                    case "$MEM_TOTAL_MB:$MEM_CHANNEL_MODE" in
+                        4096:dual-channel|6144:flex|8192:dual-channel) ;;
+                        *)
+                            echo "i3-4130 容量与双通道/Flex 拓扑不匹配: $key" >&2
+                            exit 1
+                            ;;
+                    esac
+                fi
             fi
             used_cpu+="$cpu_key|"
             used_board+="$board_key|"
@@ -992,21 +1419,45 @@ hardware_profile_validate_catalog() {
             echo "兼容平台视图数量错误" >&2
             exit 1
         }
-        (( ${#active_cpu_seen[@]} == 6 && ${#active_board_seen[@]} == 4 &&
+        (( ${#active_cpu_seen[@]} == 6 && ${#active_board_seen[@]} == 10 &&
            ${#default_cpu_seen[@]} == 5 )) || {
-            echo "新建池必须是 6 CPU（5 默认+1 显式）/4 块两槽主板" >&2
+            echo "新建池必须是 6 CPU（5 默认+1 显式）/10 块两槽主板" >&2
             exit 1
         }
+        (( ${#i3_board_seen[@]} == 10 )) || {
+            echo "i3-4130 必须覆盖 10 块审核双槽主板" >&2
+            exit 1
+        }
+        for board_key in "${!i3_board_seen[@]}"; do
+            [[ -v "i3_board_capacity_seen[$board_key:4096]" &&
+               -v "i3_board_capacity_seen[$board_key:6144]" &&
+               -v "i3_board_capacity_seen[$board_key:8192]" ]] || {
+                echo "i3-4130 主板缺少 4G/6G/8G 完整容量: $board_key" >&2
+                exit 1
+            }
+        done
+        for matrix_board_row in "${I3_4130_REVIEWED_BOARD_MATRIX[@]}"; do
+            IFS='|' read -r board_key matrix_board_alias <<<"$matrix_board_row"
+            for matrix_memory_row in "${I3_4130_REVIEWED_MEMORY_MATRIX[@]}"; do
+                IFS='|' read -r memory_key matrix_memory_alias \
+                    <<<"$matrix_memory_row"
+                [[ -v "i3_board_memory_seen[$board_key:$memory_key]" ]] || {
+                    echo "i3-4130 主板缺少审核内存矩阵项: $board_key/$memory_key" >&2
+                    exit 1
+                }
+            done
+        done
         [[ -v active_cpu_seen[i7-4790] && ! -v default_cpu_seen[i7-4790] ]] || {
             echo "i7-4790 只能是显式高配，不能进入低端默认随机池" >&2
             exit 1
         }
-        (( ${#active_memory_brand_seen[@]} == 4 )) &&
+        (( ${#active_memory_brand_seen[@]} == 5 )) &&
             [[ -v 'active_memory_brand_seen[Kingston]' &&
                -v 'active_memory_brand_seen[Samsung]' &&
                -v 'active_memory_brand_seen[Micron]' &&
-               -v 'active_memory_brand_seen[SK hynix]' ]] || {
-            echo "新建内存池必须覆盖 Kingston/Samsung/Micron/SK hynix 四厂" >&2
+               -v 'active_memory_brand_seen[SK hynix]' &&
+               -v 'active_memory_brand_seen[Crucial]' ]] || {
+            echo "新建内存池必须覆盖 Kingston/Samsung/Micron/SK hynix/Crucial 五厂" >&2
             exit 1
         }
 
@@ -1075,31 +1526,81 @@ hardware_profile_validate_catalog() {
             *) echo "SSD 形态/PCIe 链路不匹配: $key" >&2; return 1 ;;
         esac
     done
-    for default_key in "${SSD_DEFAULT_PROFILE_KEYS[@]}"; do
-        [[ "$default_seen" != *"|$default_key|"* ]] || {
-            echo "重复默认 SSD profile: $default_key" >&2
-            return 1
-        }
-        default_seen+="$default_key|"
-        found=0
-        for row in "${SSD_PROFILES[@]}"; do
-            IFS='|' read -r key _ <<<"$row"
-            if [[ "$key" == "$default_key" ]]; then
-                found=1
-                IFS='|' read -r _ _ _ _ size _ _ _ _ _ <<<"$row"
-                [[ "$size" == "$SSD_REQUIRED_SIZE_BYTES" ]] || return 1
-                break
-            fi
+    for selection_class in default explicit; do
+        if [[ "$selection_class" == default ]]; then
+            selection_keys=("${SSD_DEFAULT_PROFILE_KEYS[@]}")
+        else
+            selection_keys=("${SSD_EXPLICIT_PROFILE_KEYS[@]}")
+        fi
+        for selection_key in "${selection_keys[@]}"; do
+            [[ "$selection_seen" != *"|$selection_key|"* ]] || {
+                echo "重复或跨层 SSD profile: $selection_key" >&2
+                return 1
+            }
+            selection_seen+="$selection_key|"
+            found=0
+            for row in "${SSD_PROFILES[@]}"; do
+                IFS='|' read -r key _ <<<"$row"
+                if [[ "$key" == "$selection_key" ]]; then
+                    found=1
+                    IFS='|' read -r _ _ _ _ size _ _ _ _ _ <<<"$row"
+                    [[ "$size" == "$SSD_REQUIRED_SIZE_BYTES" ]] || return 1
+                    break
+                fi
+            done
+            (( found )) || {
+                echo "$selection_class SSD profile 不存在: $selection_key" >&2
+                return 1
+            }
         done
-        (( found )) || { echo "默认 SSD profile 不存在: $default_key" >&2; return 1; }
     done
     for row in "${SSD_PROFILES[@]}"; do
         IFS='|' read -r key _ <<<"$row"
-        [[ "$default_seen" == *"|$key|"* ]] || {
-            echo "SSD profile 未进入默认审核 key 集: $key" >&2
+        [[ "$selection_seen" == *"|$key|"* ]] || {
+            echo "SSD profile 未进入默认或显式审核 key 集: $key" >&2
             return 1
         }
     done
+
+    local odd_model odd_firmware odd_interface odd_form_factor odd_serial
+    seen='|'
+    found=0
+    for row in "${OPTICAL_DRIVE_PROFILES[@]}"; do
+        IFS='|' read -r key brand odd_model odd_firmware odd_interface \
+            odd_form_factor odd_serial <<<"$row"
+        [[ "$seen" != *"|$key|"* ]] || {
+            echo "重复光驱 profile: $key" >&2
+            return 1
+        }
+        seen+="$key|"
+        [[ "$key" =~ ^[a-z0-9][a-z0-9-]*$ &&
+           "$brand" == 'LG Electronics' &&
+           "$odd_model" == 'HL-DT-ST DVDRAM GH24NS50' &&
+           "$odd_firmware" == XP02 &&
+           "$odd_interface" == sata-atapi &&
+           "$odd_form_factor" == 5.25-inch &&
+           "$odd_serial" == none &&
+           ${#odd_model} -le 40 && ${#odd_firmware} -le 8 ]] || {
+            echo "光驱 profile 未经审核或字段非法: $key" >&2
+            return 1
+        }
+        [[ "$key" != "$OPTICAL_DRIVE_DEFAULT_PROFILE" ]] || found=1
+    done
+    (( ${#OPTICAL_DRIVE_PROFILES[@]} == 1 && found == 1 )) || {
+        echo "可选光驱目录必须唯一且包含默认 profile" >&2
+        return 1
+    }
+    if ! (
+        for key in $(hardware_profile_keys); do
+            hardware_profile_load "$key" || exit
+            [[ "$ODD_PROFILE" == "$OPTICAL_DRIVE_DEFAULT_PROFILE" ]] || {
+                echo "平台没有绑定默认可选光驱 profile: $key" >&2
+                exit 1
+            }
+        done
+    ); then
+        return 1
+    fi
 
     local platform interface compatible_count
     for platform in $(hardware_profile_keys); do

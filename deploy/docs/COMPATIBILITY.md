@@ -39,12 +39,14 @@ Status meanings:
 | Capability | G-11 product status | Notes |
 |---|---|---|
 | Native local display | **Supported** | NVIDIA REGION to QEMU SDL/GTK. |
+| DGame local GPU preview | **Experimental; implemented** | SDL/GTK's existing DisplaySurface texture is ROI-blitted on the active display GPU and exported as DMA-BUF. RX570 is the current provider; RX550 follows the same generic amdgpu/EGL selection. Every VM independently falls back to SHM. |
+| DGame discovery | **Implemented** | Native starts expose `/tmp/qemu-stealth-N.{fb,qmp,mon}`, SDL title `win10-N`, and keep G-11 QMP identity `vmN`; old running VMs can hot-add preview. |
 | Host CPU isolation | **Experimental; implemented; required by default** | Launcher/QMP and mock-cgroup rollback tests pass. Missing Ubuntu packages/helper/sudoers are installed automatically before launch; target-host cgroup v2 partition behavior still requires acceptance. `--cpu-isolate-auto` is an explicit opt-down. |
 | Fixed ROI capture | **Experimental; implemented** | The TCG-to-SHM-to-libx264 end-to-end test passes, including a runtime ROI change.  A real R535 vGPU dynamic-frame soak remains outstanding. |
 | Network video output | **Experimental; implemented** | Explicit destinations, lifecycle and validation are tested; a production ingest/TLS/authentication soak is not yet recorded.  The launcher never creates a listener. |
 | Dirty-region local display updates | **Supported** | REGION row comparison reduces local GL uploads and presents. |
 | Dirty-region video encoding | **Unsupported** | The shared-memory path publishes a complete ROI frame. |
-| Generic QEMU GPU handle export | **Experimental; outside the R535 G-11 path** | The producer protocol can publish DMA-BUF when its Linux display path supplies one.  Windows named-D3D11 transport is cross-compile checked only and currently lacks the keyed-mutex/fence synchronization required for safe asynchronous consumption. |
+| Generic QEMU GPU handle export | **Experimental** | The producer can publish a native scanout DMA-BUF or export an SDL/GTK DisplaySurface texture after its unavoidable CPU-to-display-GPU upload. Windows named-D3D11 transport is cross-compile checked only and currently lacks the keyed-mutex/fence synchronization required for safe asynchronous consumption. |
 | Native GPU-handle encoding | **Unsupported** | No native DMA-BUF/D3D11 import-and-encode backend is implemented.  The current consumer reports `gpu.zero-copy=no` and `GPU_E_BACKEND_NOT_BUILT`, regardless of which optional library headers Meson discovers. |
 | R535 vGPU end-to-end zero-copy | **Unsupported** | The accepted NVIDIA mdev console exposes a system-memory REGION, not DMA-BUF. |
 | SHM/rawvideo to libx264 | **Exercised** | Automated TCG → dynamic ROI → SHM → ffmpeg → H.264 file test passes. |
@@ -66,13 +68,13 @@ G-11 uses three separate checks:
    encoder without a system-memory capture or GPU upload anywhere in the
    path.
 
-Passing level 1 does not imply level 2 or 3.  The generic producer protocol can
-represent level 1 on a suitable DMA-BUF display path, but the current consumer
-does not implement level 2.  The G-11 R535 path does not start at level 1:
-it captures a system-memory VFIO display REGION, publishes complete BGR0
-frames through SHM, copies them into ffmpeg's `rawvideo` stdin, and may then
-upload them for NVENC/QSV.  Selecting a hardware encoder therefore does not
-make the G-11 stream zero-copy.
+Passing level 1 does not imply level 2 or 3.  DGame implements level-1 import
+for the local SDL/GTK texture export, but that texture exists only after the
+system-memory R535 REGION has been uploaded to the bright/display GPU.  The
+network encoder consumer still does not implement level 2: it publishes BGR0
+through SHM, copies it into ffmpeg's `rawvideo` stdin, and may then upload it
+for NVENC/QSV. Selecting a hardware encoder therefore does not make the G-11
+network stream or original vGPU boundary zero-copy.
 
 ## Current streamer capability contract
 

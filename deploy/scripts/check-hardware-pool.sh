@@ -128,13 +128,16 @@ monitor_catalog_brand_count=${#monitor_catalog_brands[@]}
 monitor_create_brand_count=${#monitor_create_brands[@]}
 
 for audited_count in "$board_brand_count" "$memory_brand_count" \
-        "$ssd_brand_count" "$gpu_board_brand_count" \
-        "$keyboard_brand_count" "$mouse_brand_count"; do
+        "$ssd_brand_count" "$keyboard_brand_count" "$mouse_brand_count"; do
     ((audited_count >= 3 && audited_count <= 5)) || {
         echo "可替换硬件品牌覆盖必须在 3..5，实际为 $audited_count" >&2
         exit 1
     }
 done
+((gpu_board_brand_count >= 4 && gpu_board_brand_count <= 12)) || {
+    echo "GPU 板卡品牌覆盖必须在 4..12，实际为 $gpu_board_brand_count" >&2
+    exit 1
+}
 ((monitor_create_brand_count >= 5)) || {
     echo "35 款显示器目录的新建池品牌数不足" >&2
     exit 1
@@ -151,35 +154,59 @@ for cpu_row in "${CPU_PROFILES[@]}"; do
 done
 legacy_only_cpu_profile_count=$((${#CPU_PROFILES[@]} - new_cpu_profile_count))
 
+gpu_1gb_count=0
+gpu_2gb_count=0
+for gpu_row in "${VGPU_PROFILE_CATALOG[@]}"; do
+    IFS='|' read -r _ _ _ _ _ _ _ _ gpu_vram_mb _ <<<"$gpu_row"
+    case "$gpu_vram_mb" in
+        1024) gpu_1gb_count=$((gpu_1gb_count + 1)) ;;
+        2048) gpu_2gb_count=$((gpu_2gb_count + 1)) ;;
+        *)
+            echo "GPU 目录含非 1GB/2GB 显存: ${gpu_vram_mb}MB" >&2
+            exit 1
+            ;;
+    esac
+done
+
 if (( machine_readable )); then
-    printf 'summary cpu=%s board=%s memory=%s combination=%s new_default=%s explicit_new=%s legacy=%s ssd_512gb=%s gpu_2gb=%s monitor_catalog=%s monitor_new=%s\n' \
+    printf 'summary cpu=%s board=%s chipset_presentation=%s memory=%s combination=%s new_default=%s explicit_new=%s legacy=%s ssd_512gb=%s optical=%s gpu_catalog=%s gpu_1gb=%s gpu_2gb=%s monitor_catalog=%s monitor_new=%s\n' \
         "${#CPU_PROFILES[@]}" "${#BOARD_PROFILES[@]}" \
+        "${#CHIPSET_PRESENTATION_PROFILES[@]}" \
         "${#MEMORY_PROFILES[@]}" "${#HARDWARE_COMBINATIONS[@]}" \
         "${#HARDWARE_NEW_PROFILE_KEYS[@]}" \
         "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" \
         "${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}" \
-        "${#SSD_PROFILES[@]}" "${#VGPU_PROFILE_CATALOG[@]}" \
+        "${#SSD_PROFILES[@]}" "${#OPTICAL_DRIVE_PROFILES[@]}" \
+        "${#VGPU_PROFILE_CATALOG[@]}" \
+        "$gpu_1gb_count" "$gpu_2gb_count" \
         "${#monitor_catalog_keys[@]}" "${#monitor_create_keys[@]}"
     printf 'brands board=%s memory=%s ssd=%s gpu_board=%s keyboard=%s relative_mouse=%s monitor_catalog=%s monitor_new=%s\n' \
         "$board_brand_count" "$memory_brand_count" "$ssd_brand_count" \
         "$gpu_board_brand_count" "$keyboard_brand_count" \
         "$mouse_brand_count" "$monitor_catalog_brand_count" \
         "$monitor_create_brand_count"
-    printf 'serial_policy board=vendor-format memory=jedec-4byte ssd=model-strict monitor=profile-aware gpu=not-exposed keyboard=none relative_mouse=none absolute_pointer=none nic=mac install_odd=none\n'
-    printf 'fixed_exceptions cpu=Intel-H81-platform nic=Intel-e1000e audio=Intel-HDA absolute_pointer=QEMU-generic tpm=swtpm install_odd=generic-transient monitor=35-model-catalog\n'
-    printf 'architecture_boundaries platform=q35-ICH9-AHCI xhci=qemu-xhci nvme=QEMU-nvme rescue_display=std-vga legacy_transport=ivshmem\n'
+    printf 'serial_policy board=vendor-format memory=jedec-4byte ssd=model-strict optical=none monitor=profile-aware gpu=not-exposed keyboard=none relative_mouse=none absolute_pointer=none nic=mac install_media=none\n'
+    printf 'fixed_exceptions cpu=Intel-H81-platform nic=Intel-e1000e audio=Intel-HDA absolute_pointer=QEMU-generic tpm=swtpm install_media=generic-transient monitor=35-model-catalog\n'
+    printf 'optical_drive profile=lg-gh24ns50 brand=LG_Electronics model=HL-DT-ST_DVDRAM_GH24NS50 firmware=XP02 interface=sata-atapi serial=none lifecycle=install-or-manual-hotplug default=absent coverage=all-%s-platforms\n' \
+        "${#HARDWARE_COMBINATIONS[@]}"
+    printf 'chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 coverage=all-%s-platforms\n' \
+        "${#HARDWARE_COMBINATIONS[@]}"
+    printf 'architecture_boundaries machine=q35-ICH9-behavior sata=ICH9-AHCI xhci=qemu-xhci nvme=QEMU-nvme rescue_display=std-vga legacy_transport=ivshmem\n'
 else
     printf 'G-11 硬件池（QEMU=%s）\n' "$qemu_bin"
     printf '  CPU: %s（新建可用 %s 款；旧代兼容 %s 款）\n' \
         "${#CPU_PROFILES[@]}" "$new_cpu_profile_count" \
         "$legacy_only_cpu_profile_count"
-    printf '  主板: %s；内存套装: %s；合法整机组合: %s（默认 %s / 显式新建 %s / 旧兼容 %s）\n' \
-        "${#BOARD_PROFILES[@]}" "${#MEMORY_PROFILES[@]}" \
+    printf '  主板: %s；芯片组 identity: %s；内存套装: %s；合法整机组合: %s（默认 %s / 显式新建 %s / 旧兼容 %s）\n' \
+        "${#BOARD_PROFILES[@]}" "${#CHIPSET_PRESENTATION_PROFILES[@]}" \
+        "${#MEMORY_PROFILES[@]}" \
         "${#HARDWARE_COMBINATIONS[@]}" "${#HARDWARE_NEW_PROFILE_KEYS[@]}" \
         "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" \
         "${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}"
-    printf '  SSD: %s 款精确 512GB；GPU: %s 款 2GB；显示器: %s catalog / %s 新建池\n\n' \
-        "${#SSD_PROFILES[@]}" "${#VGPU_PROFILE_CATALOG[@]}" \
+    printf '  SSD: %s 款精确 512GB；可选光驱 profile: %s 款；GPU: %s 条（1GB %s / 2GB %s）；显示器: %s catalog / %s 新建池\n\n' \
+        "${#SSD_PROFILES[@]}" "${#OPTICAL_DRIVE_PROFILES[@]}" \
+        "${#VGPU_PROFILE_CATALOG[@]}" \
+        "$gpu_1gb_count" "$gpu_2gb_count" \
         "${#monitor_catalog_keys[@]}" "${#monitor_create_keys[@]}"
     printf '  品牌（可替换件）: 主板 %s [%s]；内存 %s [%s]；SSD %s [%s]\n' \
         "$board_brand_count" "$(brand_list board_brand_seen)" \
@@ -191,9 +218,12 @@ else
         "$mouse_brand_count" "$(brand_list mouse_brand_seen)"
     printf '  显示器例外: 新建 %s 品牌 / 完整 %s 品牌，保留用户要求的 35 款 FHD 目录。\n' \
         "$monitor_create_brand_count" "$monitor_catalog_brand_count"
-    printf '  架构绑定例外: Intel CPU/H81、Intel e1000e、Intel HDA、swtpm、QEMU 通用绝对指针、QEMU 通用临时安装光驱。\n'
-    printf '  实现/兼容边界: q35/ICH9/ICH9-AHCI、qemu-xhci、QEMU nvme controller、救援 std-vga、legacy ivshmem。\n'
-    printf '  序列策略: 主板/内存/SSD/显示器按各自合同；GPU/HID/临时光驱不暴露；NIC 用唯一 MAC。\n\n'
+    printf '  可选光驱: LG Electronics HL-DT-ST DVDRAM GH24NS50 / XP02 / SN=none；普通启动不挂载，仅安装或手动热插。\n'
+    printf '  架构绑定例外: Intel CPU/H81、Intel e1000e、Intel HDA、swtpm、QEMU 通用绝对指针、安装期临时传输介质。\n'
+    printf '  芯片组呈现: H81=8086:8C5C/04，H97=8086:8CC6/00，B150=8086:A148/31，B360=8086:A308/10；覆盖全部 %s 套平台。\n' \
+        "${#HARDWARE_COMBINATIONS[@]}"
+    printf '  实现/兼容边界: machine/LPC 行为仍是 q35/ICH9，SATA 仍是 ICH9-AHCI；qemu-xhci、QEMU nvme controller、救援 std-vga、legacy ivshmem 保持原生身份。\n'
+    printf '  序列策略: 主板/内存/SSD/显示器按各自合同；GPU/HID/光驱不伪造序列；NIC 用唯一 MAC。\n\n'
     printf '%-14s %-24s %-10s %-13s %-13s %s\n' \
         CPU_PROFILE QEMU_MODEL TOPOLOGY HOST_CLASS CREATE_SCOPE RESULT
 fi

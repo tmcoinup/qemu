@@ -87,6 +87,42 @@ static void test_motion_delta_saturates(void)
     g_assert_cmpint(event.motion.yrel, ==, INT32_MIN);
 }
 
+static void test_host_text_input_disabled(void)
+{
+    /*
+     * SDL2 desktop video init starts text input by default.  Reproduce that
+     * state explicitly because this unit test only initializes SDL events.
+     */
+    SDL_StartTextInput();
+    g_assert_true(SDL_IsTextInputActive());
+
+    sdl2_disable_host_text_input();
+
+    g_assert_false(SDL_IsTextInputActive());
+    g_assert_cmpint(SDL_EventState(SDL_TEXTINPUT, SDL_QUERY), ==, SDL_DISABLE);
+    g_assert_cmpint(SDL_EventState(SDL_TEXTEDITING, SDL_QUERY), ==,
+                    SDL_DISABLE);
+}
+
+static void test_window_update_visibility(void)
+{
+    g_assert_true(sdl2_window_updates_allowed(SDL_WINDOW_SHOWN, false));
+    g_assert_true(sdl2_window_updates_allowed(
+        SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS, false));
+
+    /* SDL may retain SHOWN together with MINIMIZED; minimized must win. */
+    g_assert_false(sdl2_window_updates_allowed(
+        SDL_WINDOW_SHOWN | SDL_WINDOW_MINIMIZED, false));
+    g_assert_false(sdl2_window_updates_allowed(SDL_WINDOW_HIDDEN, false));
+
+    /* QMP/window-hide state is authoritative even before SDL flags settle. */
+    g_assert_false(sdl2_window_updates_allowed(SDL_WINDOW_SHOWN, true));
+
+    /* Restored/maximized windows are renderable again. */
+    g_assert_true(sdl2_window_updates_allowed(
+        SDL_WINDOW_SHOWN | SDL_WINDOW_MAXIMIZED, false));
+}
+
 int main(int argc, char **argv)
 {
     int result;
@@ -101,6 +137,10 @@ int main(int argc, char **argv)
                     test_motion_keeps_sources_separate);
     g_test_add_func("/sdl2-event/motion-saturation",
                     test_motion_delta_saturates);
+    g_test_add_func("/sdl2-event/host-text-input-disabled",
+                    test_host_text_input_disabled);
+    g_test_add_func("/sdl2-event/window-update-visibility",
+                    test_window_update_visibility);
     result = g_test_run();
 
     SDL_Quit();

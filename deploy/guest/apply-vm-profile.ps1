@@ -331,10 +331,10 @@ function ConvertTo-ValidatedConfig {
             'gpu.memoryTypeName' 16 '^GDDR5$'
         MemoryMakerName = ConvertTo-RequiredString `
             (Get-PropertyValue $gpuRaw 'memoryMakerName' 'gpu') `
-            'gpu.memoryMakerName' 31 '^(Samsung|SK hynix|Micron)$'
+            'gpu.memoryMakerName' 31 '^(Samsung|Elpida|SK hynix|Micron)$'
         MemoryMakerNvapiName = ConvertTo-RequiredString `
             (Get-PropertyValue $gpuRaw 'memoryMakerNvapiName' 'gpu') `
-            'gpu.memoryMakerNvapiName' 31 '^(Samsung|Hynix|Micron)$'
+            'gpu.memoryMakerNvapiName' 31 '^(Samsung|Elpida|Hynix|Micron)$'
         NvapiPciVendorId = ConvertTo-RequiredInt `
             (Get-PropertyValue $gpuRaw 'nvapiPciVendorId' 'gpu') `
             'gpu.nvapiPciVendorId' 1 65535
@@ -367,7 +367,7 @@ function ConvertTo-ValidatedConfig {
             'gpu.memoryBandwidthMBps' 1 1000000
         VramMB = ConvertTo-RequiredInt `
             (Get-PropertyValue $gpuRaw 'vramMB' 'gpu') `
-            'gpu.vramMB' 2048 2048
+            'gpu.vramMB' 1024 2048
         MemoryType = ConvertTo-RequiredInt `
             (Get-PropertyValue $gpuRaw 'memoryType' 'gpu') `
             'gpu.memoryType' 1 255
@@ -405,6 +405,9 @@ function ConvertTo-ValidatedConfig {
     }
     if ($gpu.BoostClockMHz -lt $gpu.CoreClockMHz) {
         throw 'gpu.boostClockMHz must not be lower than gpu.coreClockMHz.'
+    }
+    if (@(1024, 2048) -notcontains $gpu.VramMB) {
+        throw 'gpu.vramMB must be one audited catalog size (1024 or 2048).'
     }
     $memoryMakerContract = switch ([int]$gpu.MemoryMaker) {
         1 { @('Samsung', 'Samsung') }

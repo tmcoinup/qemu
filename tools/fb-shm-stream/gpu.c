@@ -45,7 +45,7 @@ fb_shm_stream_gpu_validate_frame(const FbShmGpuFrame *frame,
     (void)has_native_handle;
 #endif
     if (!frame || frame->magic != FB_SHM_MAGIC ||
-        frame->version != FB_SHM_VERSION ||
+        frame->version != FB_SHM_GPU_FRAME_VERSION ||
         frame->size != sizeof(*frame) || frame->frame_seq == 0) {
         return FB_SHM_STREAM_GPU_E_WIRE;
     }
@@ -54,6 +54,7 @@ fb_shm_stream_gpu_validate_frame(const FbShmGpuFrame *frame,
     }
     if (!frame->width || !frame->height ||
         !frame->backing_width || !frame->backing_height ||
+        !frame->source_width || !frame->source_height ||
         frame->x >= frame->backing_width ||
         frame->y >= frame->backing_height ||
         frame->width > frame->backing_width - frame->x ||

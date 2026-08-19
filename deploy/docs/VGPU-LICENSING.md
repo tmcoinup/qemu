@@ -22,7 +22,7 @@
 | 通用 off/B | 原生 `DEV_1E30` | 原版 GRID 538.33 | 通常存在 | token/DLS 正常时应为 `Licensed` | 按 vGPU profile/license 合同 |
 | legacy GTX1050 严格 A（禁用） | `DEV_1C81 / SUBSYS_11C01028` | 修改 INF/自签 538.33，不合规 | 历史记录 | 历史为 `Unlicensed` | 历史为 `N/A` |
 
-三款 profile 当前都使用 B，并继续按原生 DLS `Licensed` 合同验收。不要把 VM3
+全部 25 条 profile 当前都使用 B，并继续按原生 DLS `Licensed` 合同验收。不要把 VM3
 历史 strict-A 的结果扩展成当前或未来生产结论。
 
 ## 当前统一一键收尾
@@ -38,7 +38,7 @@ token、身份合同和校验值一起嵌入私有 `VgpuPortable.exe`；双击 E
 因此控制面板显示“管理许可证”时，当前动作仍是从普通 B/native 启动重新运行同一个
 私有 `VgpuPortable.exe`，不是填写旧式主/次服务器字段，也不是运行型号专用 finish。
 
-GTX 750 Ti、GT 1030、GTX 1050 当前都保持 B/native，并使用同一个私有
+GT 730、GT 740、GTX 750、GTX 750 Ti、GT 1030、GTX 1050 当前都保持 B/native，并使用同一个私有
 `VgpuPortable.exe`。先在宿主构建：
 
 ```bash
@@ -67,7 +67,7 @@ portable 收尾。
 
 把私有 EXE 安全复制进目标 Windows，双击并接受 UAC。它按如下顺序 fail-closed：
 
-1. 核对 VM UUID、12 行 catalog、目标 profile、原生 `DEV_1E30`、538.33、Code 0、
+1. 核对 VM UUID、25 行 catalog、目标 profile、原生 `DEV_1E30`、538.33、Code 0、
    生产签名链、BCD 正常完整性策略和单 Display；
 2. 安装型号/板卡/显存身份与权威查询器；
 3. 使用已有的事务安装器原子安装 token；失败时恢复旧 token；
@@ -75,21 +75,23 @@ portable 收尾。
    `License Status : Licensed`；
 5. 执行 `powercfg /hibernate off` 并写 `HiberbootEnabled=0`，复核
    `hiberfil.sys` 已不存在；
-6. 写 schema-4 回执，不记录 token 内容。
+6. 应用推荐的 guest 登录启动/native-display 性能优化，并保存可回滚原状态；
+7. 写 schema-4 回执，不记录 token 内容。
 
-窗口必须同时显示身份 `INSTALL PASS`、`License: Licensed` 与
-`Power: hibernation/Fast Startup disabled`。随后让 Windows 完整关机，等 QEMU
-窗口自然退出，再普通冷启动验收。三款型号没有不同命令，也没有每 VM 打包。
+窗口必须同时显示性能优化 `APPLY PASS`、身份 `INSTALL PASS`、
+`License: Licensed` 与 `Power: hibernation/Fast Startup disabled`。随后让 Windows 完整关机，等 QEMU
+窗口自然退出，再普通冷启动验收。六个芯片型号没有不同命令，也没有每 VM 打包。
 
 ## 私有 EXE 的信任边界
 
-默认无参数构建的 `VgpuPortable/VgpuPortable.exe` 不含 token，只负责身份/查询，
-可放进通用 base。`VgpuPortableLicensed/VgpuPortable.exe` 包含 DLS 凭据，只用于
+默认无参数构建的 `VgpuPortable/VgpuPortable.exe` 不含 token，负责身份/查询和
+推荐 guest 性能优化，可放进通用 base。`VgpuPortableLicensed/VgpuPortable.exe`
+包含 DLS 凭据，只用于
 受信任实际 VM：宿主固定权限 `0600`，token 必须位于仓库外、不是链接、大小为
 `1024..1048576` 字节且不是 HTML。不要把私有 EXE 写入通用 base、提交仓库或公开
 分发。
 
-私有包把 token、授权安装器和 12 个 profile 全部写入同一 manifest，并在 PE 构建
+私有包把 token、授权安装器和 25 个 profile 全部写入同一 manifest，并在 PE 构建
 前复核大小/哈希。token 文件存在或仍在有效期内，都不能替代正式生产签名驱动。
 不得关闭 Secure Boot/HVCI、导入私有 Root/TrustedPublisher、修改 BCD 或重签
 catalog。
@@ -101,7 +103,7 @@ NVIDIA token 位于其标准 `ClientConfigToken` 目录。
 ## `finish-vgpu-install.sh` 为什么仍存在
 
 它现在只是统一前兼容入口：处理旧 GTX750Ti/GT1030 B VM 的历史 token 回执，以及
-明确 `RTC_CONTRACT=utc` 实例在完整关机后的宿主离线 RTC 迁移。当前新建的三款
+明确 `RTC_CONTRACT=utc` 实例在完整关机后的宿主离线 RTC 迁移。当前新建的全部
 B/native VM 都不运行它。它对历史 GTX1050 strict-A 修改 INF/自签 catalog 的路径
 继续在生成 guest 包、启动或写 marker 之前硬拒绝。
 

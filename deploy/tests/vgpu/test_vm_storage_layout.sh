@@ -59,8 +59,25 @@ trap 'rm -rf "$TMP_DIR"' EXIT
         "$(vm_storage_run_path 7 disk.lock)" "in-bundle disk lock"
     assert_eq "$VM_INSTANCES_DIR/7/run/tpm.lock" \
         "$(vm_storage_run_path 7 tpm.lock)" "in-bundle TPM lock"
+    assert_eq "$VM_INSTANCES_DIR/7/run/optical.lock" \
+        "$(vm_storage_run_path 7 optical.lock)" "in-bundle optical lock"
+    assert_eq "$VM_INSTANCES_DIR/7/run/usb-directory.lock" \
+        "$(vm_storage_run_path 7 usb-directory.lock)" "in-bundle USB lock"
     assert_eq "$VM_BASE_DIR/win10-base.qcow2" \
         "$(vm_storage_base_path)" "fresh base path"
+    assert_eq "$VM_BASE_DIR/win10-ltsc-v2.qcow2" \
+        "$(vm_storage_base_path win10-ltsc-v2)" "named base path"
+    if vm_storage_base_path '../escape' >"$TMP_DIR/base-name.out" \
+            2>"$TMP_DIR/base-name.err"; then
+        fail "unsafe base name was accepted"
+    fi
+    grep -Fq 'invalid base name' "$TMP_DIR/base-name.err" \
+        || fail "unsafe base-name refusal was not clear"
+    mkdir -p "$VM_BASE_DIR"
+    touch "$VM_BASE_DIR/win10-ltsc-v2.qcow2" \
+        "$VM_BASE_DIR/win11-vgpu-v1.qcow2"
+    assert_eq $'win10-ltsc-v2\nwin11-vgpu-v1' \
+        "$(vm_storage_list_base_names)" "managed base listing"
 )
 
 (

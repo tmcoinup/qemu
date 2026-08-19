@@ -84,8 +84,9 @@ Microsoft 对显示驱动 INF 的说明确认 `DDInstall` 中的 `HKR` 落在设
 [Microsoft display software settings](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/adding-software-registry-settings)、
 [NVIDIA Compressed Modes User's Guide](https://download.nvidia.com/Windows/43.45/NV_Compress_Modes_Users_Guide_2.1.pdf)。
 同步器只处理 SYSTEM `Select` 明确指向的 `Current` / `Default` /
-`LastKnownGood`，并只从固定 B/native
-`Enum\PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE...` 验证
+`LastKnownGood`，并只从 profile 对应的固定 B/native 路径验证：1GB/`nvidia-256`
+使用 `Enum\PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE...`，2GB/`nvidia-257`
+使用 `Enum\PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE...`。随后验证
 `Service=nvlddmkm`，再沿 `Driver={4d36e968-...}\NNNN` 关系定位当前 software
 key。A → B 迁移后残留的 consumer-ID `DEV_1C81&SUBSYS_11C01028` Enum/Class
 历史不会被当成当前设备，也不会被改写；当前 native PnP 若缺失或认证失败则仍然
@@ -121,8 +122,8 @@ GraphicsDrivers 缓存。启动后 Windows 可能仍保留 NVIDIA 发布的原�
 - 鲁大师应显示 profile 对应的 PNP/品牌型号、尺寸、16:9 和 1920×1080。若仍是
   `NVIDIA VGX / 641×400 mm / 16:10`，就是旧 marker 或未写入
   `EDID_OVERRIDE`，不是“正常的 live EDID 局限”；
-- `VgpuPortable.exe` 只处理 GPU 身份（GPU-Z 为显式选装消费者），不会选择或写入显示器。即使已运行它，
-  显示器仍必须由本页的 host 同步链处理。
+- `VgpuPortable.exe` 处理 GPU 身份和推荐 guest 性能（GPU-Z 为显式选装消费者），
+  但不会选择或写入显示器。即使已运行它，显示器仍必须由本页的 host 同步链处理。
 
 ## 已有 VM：最短入口
 
@@ -325,20 +326,20 @@ profile 并固定到新 VM 的 `vm.conf`，克隆器随后立即自动同步。`
 
 ```bash
 cd /home/ubuntu/projects/qemu
-./deploy/scripts/vmctl.sh clone N --gpu-profile gtx1050_2gb --start
+./deploy/scripts/vmctl.sh clone win10-ltsc-v1 N --gpu-profile gtx1050_2gb --start
 ```
 
-需要固定型号时才显式传入。`VgpuPortable.exe` 仍只负责 GPU 身份，GPU-Z 仍为
+需要固定型号时才显式传入。`VgpuPortable.exe` 仍不负责显示器身份，GPU-Z 仍为
 显式选装项：
 
 ```bash
-./deploy/scripts/vmctl.sh clone N \
+./deploy/scripts/vmctl.sh clone win10-ltsc-v1 N \
   --gpu-profile gtx1050_2gb \
   --monitor-profile benq-gw2280 \
   --start
 ```
 
-`vmctl clone` 是 `clone-vgpu-base.sh` 的傻瓜封装，两种入口行为相同。若 portable
+`vmctl clone` 是 `clone-from-base.sh` 的傻瓜封装，两种入口行为相同。若 portable
 base 已经枚举过显示器，克隆完成时就会按新 profile 重刷现有缓存。若 base 从未
 枚举过显示器，克隆会明确报告 `first-enumeration-deferred`；第一次启动只让
 Windows 建立 `Enum\DISPLAY` 实例，完整关机后下一次普通启动自动完成，不需要手工

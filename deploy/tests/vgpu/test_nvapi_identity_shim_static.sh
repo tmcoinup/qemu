@@ -15,6 +15,7 @@ MDEV_LIB="$REPO_ROOT/deploy/lib/vgpu-mdev.sh"
 MDEV_HELPER="$REPO_ROOT/deploy/host/update-vgpu-mdev-identity.py"
 CATALOG_HEADER="$SHIM_DIR/vgpu_profile_catalog.h"
 IDENTITY_QUERY="$SHIM_DIR/VgpuIdentityQuery.exe"
+SYSTEM_PROBE_SOURCE="$SHIM_DIR/system_nvapi_probe.c"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 
@@ -125,6 +126,43 @@ for marker in \
         fail "VgpuIdentityQuery.exe lacks '$marker'"
 done
 
+# The package verifier must exercise the same process-agnostic, system-search
+# NVAPI path in both Windows architectures.  Rebuild the probes here so a
+# checked-in executable cannot silently lag behind its capability contract.
+for spec in \
+    'x86_64-w64-mingw32:SystemNvapiProbe64.exe:0x140000000:pei-x86-64' \
+    'i686-w64-mingw32:SystemNvapiProbe32.exe:0x00400000:pei-i386'; do
+    IFS=: read -r triplet name image_base image_format <<<"$spec"
+    "$triplet-gcc" \
+        -O2 -std=c99 -Wall -Wextra -Werror \
+        -o "$TMP_DIR/$name" \
+        "$SYSTEM_PROBE_SOURCE" \
+        -Wl,--no-insert-timestamp \
+        -Wl,--image-base,"$image_base" \
+        -static \
+        -Wl,--subsystem,console
+    cmp -s "$TMP_DIR/$name" "$SHIM_DIR/$name" || \
+        fail "$name is stale; run deploy/guest/nvapi-shim/build.sh"
+    "$triplet-objdump" -f "$SHIM_DIR/$name" |
+        grep -F "file format $image_format" >/dev/null || \
+        fail "$name has the wrong PE architecture"
+    strings -a "$SHIM_DIR/$name" |
+        grep -F 'SYSTEM_NVAPI_VERIFY PASS architecture=' >/dev/null || \
+        fail "$name lacks the system verification marker"
+    strings -a "$SHIM_DIR/$name" |
+        grep -F 'RT=%u Tensor=%u name=%s' >/dev/null || \
+        fail "$name lacks the RT/Tensor verification marker"
+done
+require_text 'if (argc != 8' "$SYSTEM_PROBE_SOURCE"
+require_text 'query_interface(0xAFD1B02Cu)' "$SYSTEM_PROBE_SOURCE"
+require_text 'gpu_info.ray_tracing_cores != expected_rt_cores' \
+    "$SYSTEM_PROBE_SOURCE"
+require_text 'gpu_info.tensor_cores != expected_tensor_cores' \
+    "$SYSTEM_PROBE_SOURCE"
+if grep -Eiq 'ludashi|鲁大师|gpu-z|gpuz' "$SYSTEM_PROBE_SOURCE"; then
+    fail 'system NVAPI probe contains an application-specific branch'
+fi
+
 cc -O2 -std=c99 -Wall -Wextra -Werror \
     "$SHIM_DIR/test_profile_math.c" -o "$TMP_DIR/test-profile-math"
 "$TMP_DIR/test-profile-math"
@@ -211,9 +249,17 @@ require_text 'status_allows_profile_override' "$SHIM_DIR/nvapi_shim.c"
 require_text 'g_identity_contract_valid' "$SHIM_DIR/nvapi_shim.c"
 require_text 'return g_identity_contract_valid;' "$SHIM_DIR/nvapi_shim.c"
 require_text 'profile_contract_matches_registry' "$SHIM_DIR/nvapi_shim.c"
+require_text 'g_ray_tracing_cores == contract->ray_tracing_cores' \
+    "$SHIM_DIR/nvapi_shim.c"
+require_text 'g_tensor_cores == contract->tensor_cores' \
+    "$SHIM_DIR/nvapi_shim.c"
 require_text '#include "vgpu_profile_catalog.h"' "$SHIM_DIR/nvapi_shim.c"
 for profile_key in \
         gtx750ti_2gb gt1030_2gb gtx1050_2gb \
+        gt740_1gb gt740_asus_1gb gt740_gigabyte_1gb gt740_zotac_1gb \
+        gt730_1gb gt730_msi_1gb gt730_gigabyte_1gb gt730_zotac_1gb \
+        gtx750_asus_1gb gtx750_msi_1gb \
+        gtx750_gigabyte_1gb gtx750_zotac_1gb \
         gtx750ti_asus_2gb gtx750ti_msi_2gb gtx750ti_gigabyte_2gb \
         gt1030_galax_2gb gt1030_asus_2gb gt1030_msi_2gb \
         gtx1050_colorful_2gb gtx1050_msi_2gb gtx1050_gigabyte_2gb; do
@@ -268,7 +314,7 @@ require_text '1-31 printable ASCII bytes' "$MDEV_HELPER"
 
 for image in "$SHIM_DIR/nvapi64.dll" "$SHIM_DIR/nvapi.dll"; do
     strings -a "$image" | grep -Fx \
-        DF5077AE641CADFA30E2372E4846A59372B46ADBF222A12E5EE3F6AF1D8C613D \
+        FEEA5430609C81C495617607A3500F7A7BEA6CB6AFB4A5156F1918A1ACDCED7B \
         >/dev/null || fail "$(basename "$image") lacks the compiled catalog digest"
 done
 

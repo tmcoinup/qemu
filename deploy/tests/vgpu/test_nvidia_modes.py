@@ -149,6 +149,7 @@ for required in (
     "GRID_53833_INF_SHA256",
     "verify_driver_package",
     "EXPECTED_NVIDIA_PNP_ID",
+    r"PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE",
     r"PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE",
     "expected_enum_prefix",
     "legacy/非当前 B-native NVIDIA PnP 残留",
@@ -202,6 +203,10 @@ require("stream.write(d[:HBIN])" not in host_text,
         "host helper rewrites the base block during hive validation")
 
 sync_text = SYNC_WRAPPER.read_text(encoding="utf-8")
+require(
+    "vgpu_profile_native_grid_pnp_id" in sync_text,
+    "sync wrapper does not derive the native PnP ID from the mdev profile",
+)
 
 
 def extract_shell_assignment(text: str, name: str) -> str:

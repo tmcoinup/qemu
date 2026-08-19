@@ -29,11 +29,17 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 第一次操作 G-11：portable EXE、base 注入、任意 VM 克隆与验收 | [G11-QUICKSTART.md](G11-QUICKSTART.md) |
 | 普通 32/64 位程序统一板卡/显存身份、单 3D adapter、显示器持久化与一键回滚 | [G11-BOTTOM-GPU-IDENTITY.md](G11-BOTTOM-GPU-IDENTITY.md) |
 | vGPU 硬件池、整机搭配合法性与宿主 CPU realization | [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) |
+| H81/H97/B150/B360 芯片组、旧卡 DXR 能力门禁与全配置现实一致性 | [G11-HARDWARE-COHERENCE.md](G11-HARDWARE-COHERENCE.md) |
+| 新增 GT 730/GT 740/GTX 750 1GB、多品牌实型号/SKU/S/N 边界、封装和 V100 双规格 | [G11-1GB-GPU-EXPANSION.md](G11-1GB-GPU-EXPANSION.md) |
 | 35 款显示器目录、正常 FHD/1K 分辨率白名单及已有 VM 一键刷新 | [G11-MONITOR-POOL.md](G11-MONITOR-POOL.md) |
 | 无 VM 绑定显卡身份、GPU-Z 选装、新建/克隆通用性和 HWiNFO 边界 | [GPUZ-ONE-CLICK.md](GPUZ-ONE-CLICK.md) |
 | HWiNFO64 x64 app-local 实验和不能承诺的字段 | [HWINFO-APP-LOCAL-EXPERIMENT.md](HWINFO-APP-LOCAL-EXPERIMENT.md) |
 | 新装 Windows、制作 base、从 base 创建实例 | [VGPU-VM-CREATION.md](VGPU-VM-CREATION.md) |
-| Windows ISO 高速 USB 安装、安装期 helper、IDE 回退与正式启动零光驱 | [G11-INSTALL-MEDIA.md](G11-INSTALL-MEDIA.md) |
+| Windows ISO 高速 USB 安装、安装期 helper 与 IDE 回退 | [G11-INSTALL-MEDIA.md](G11-INSTALL-MEDIA.md) |
+| 普通启动零光驱、只读 ISO 一键热插/换盘/整机热拔 | [G11-OPTICAL-DRIVE.md](G11-OPTICAL-DRIVE.md) |
+| 公共工具目录或任意 host 目录免驱挂成 Windows 只读 U 盘 | [G11-USB-DIRECTORY.md](G11-USB-DIRECTORY.md) |
+| Windows 10 一键关闭 Defender/更新/商店并精简、审计和回滚 | [G11-GUEST-LITE.md](G11-GUEST-LITE.md) |
+| Windows 登录后卡顿、启动软件很晚出现：guest 审计、优化、验收与一键回滚 | [G11-GUEST-PERFORMANCE.md](G11-GUEST-PERFORMANCE.md) |
 | Windows 安装出现 `USBXHCI.SYS` / `PAGE_FAULT_IN_NONPAGED_AREA` | [USBXHCI-INSTALL-RECOVERY.md](USBXHCI-INSTALL-RECOVERY.md) |
 | Windows 网卡有链路但没有 IPv4、宿主一键建桥、默认 LAN 与 VLAN 生命周期 | [G11-NETWORK-BRIDGE-VLAN.md](G11-NETWORK-BRIDGE-VLAN.md) |
 | GRID 538.33 正式基线、三款显卡身份边界与 driver 回退 | [DRIVER-INSTALL.md](DRIVER-INSTALL.md) |
@@ -42,6 +48,8 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 授权 + 显示器最短照抄流程 | [VGPU-RECOVERY-RUNBOOK.md](VGPU-RECOVERY-RUNBOOK.md) |
 | 私有通用收尾、token/DLS、Unlicensed、FRL 与控制面板授权页 | [VGPU-LICENSING.md](VGPU-LICENSING.md) |
 | 开机 NumLock、`--no-numlock` 与首次桌面右键卡顿排查 | [G11-NUMLOCK-FIRST-BOOT.md](G11-NUMLOCK-FIRST-BOOT.md) |
+| SDL 窗口在宿主拼音/Fcitx 状态下仍向 Guest 发送完整物理按键 | [G11-SDL-HOST-IME.md](G11-SDL-HOST-IME.md) |
+| SDL 窗口空闲后宿主屏保/显示器休眠导致黑屏 | [G11-SDL-NO-SLEEP.md](G11-SDL-NO-SLEEP.md) |
 | 理解 off/B/A 身份模式 | [STEALTH-APPROACHES.md](STEALTH-APPROACHES.md) |
 | 备份、迁移和恢复每 VM bundle | [STORAGE-LAYOUT.md](STORAGE-LAYOUT.md) |
 | 可选的 Linux 宿主 NVMe APST 检查、持久化与回滚 | [NVME-APST.md](NVME-APST.md) |
@@ -57,8 +65,8 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 
 ```bash
 ./deploy/package-vgpu-one-click.sh
-sudo ./deploy/install-vgpu-portable-to-base.sh
-./deploy/scripts/vmctl.sh clone 456 --start
+sudo ./deploy/install-vgpu-portable-to-base.sh --base-name win10-ltsc-v1
+./deploy/scripts/vmctl.sh clone win10-ltsc-v1 456 --start
 # 进入 Windows 完成基础安装/授权后，为成品 VM 生成系统身份包：
 ./deploy/package-system-nvapi-projection.sh 456
 ```
@@ -72,7 +80,8 @@ sudo ./deploy/install-vgpu-portable-to-base.sh
 启动继续自动复核；无需单独执行 `vmctl monitor`。
 
 portable 阶段使用 `vGPU Identity Query` 初验；成品系统包重启后以 x86/x64
-`SYSTEM_NVAPI_VERIFY PASS`、唯一 present Display、DXGI/D3D 和 validated 收据
+`SYSTEM_NVAPI_VERIFY PASS`（含 `RT=0 Tensor=0`）、x86/x64
+`D3D12_NATIVE_VERIFY PASS`（tier 0）、唯一 present Display 和 validated 收据
 作为最终验收。系统包让普通程序共享同一板卡/显存合同，同时保留唯一原生
 `DEV_1E30` 3D transport。base 注入要求
 所有 VM 停止、standalone qcow2 以及干净、
@@ -82,7 +91,7 @@ portable 阶段使用 `vGPU Identity Query` 初验；成品系统包重启后以
 历史 `SPOOF_MODE=A` 仍运行
 `package-vgpu-one-click.sh <vm_id>`，Windows 只双击绑定的
 `VgpuProductionMigration.exe`；自动关机后宿主核验回执并提交 B/native。不要把
-这个 legacy commit 步骤套到正常 portable clone。当前三款 B/native 实际 VM 都用
+这个 legacy commit 步骤套到正常 portable clone。当前 25 条 B/native profile 都用
 `package-vgpu-one-click.sh --with-license-token` 构建的私有 portable 收尾；
 `finish-vgpu-install.sh` 只保留给统一前 GTX750Ti/GT1030 的旧回执/UTC 迁移，
 GTX1050 strict-A 自签路径已经禁用。
@@ -99,7 +108,7 @@ Windows 分配的 published driver 是 `oemN.inf`，编号按每个 Driver Store
 
 | 模式 | Guest PCI 身份 | Driver | host 内部 identity | 当前用途 |
 |---|---|---|---|---|
-| `off` / `--no-spoof` | 原生 `DEV_1E30 / SUBSYS_132610DE` | 原版 GRID | 清理该 UUID 的覆盖 | 安装、恢复、诊断 |
+| `off` / `--no-spoof` | 原生 `DEV_1E30`；1GB/1Q 为 `SUBSYS_132510DE`，2GB/2Q 为 `SUBSYS_132610DE` | 原版 GRID | 清理该 UUID 的覆盖 | 安装、恢复、诊断 |
 | `B` / `--spoof-name-only` | 保持 `DEV_1E30` | 原版 GRID | 每 VM marketing name | 所有 profile 的通用安全路径 |
 | `B` + `signed-consumer-v2` qualification | 已证明 profile 的 consumer tuple；当前为 `DEV_1C81 / SUBSYS_11C01028` | 对应 catalog 中未修改的原版 WHQL driver | native；禁止 internal override | 任意匹配 VM ID 的持久 outer-only 生产路径 |
 | GTX1050 legacy `A`（禁用） | `DEV_1C81 / SUBSYS_11C01028` | 修改 INF/自签 538.33，不合规 | `pci_id=0x1C8111C0`、`pci_device_id=0x1C81` | 仅历史记录，不是当前入口 |
@@ -131,7 +140,7 @@ Windows 装好并完整关机后，以原生 PCI 身份启动并安装基础 GRI
 ./deploy/scripts/start-vm.sh 2 --no-spoof --no-monitor-sync
 ```
 
-基础 driver Code 0 后再次完整关机，从普通 B 启动进入 Windows。三款型号统一构建
+基础 driver Code 0 后再次完整关机，从普通 B 启动进入 Windows。全部 profile 统一构建
 私有 `VgpuPortable.exe`，在 guest 双击后要求 `Licensed` 并关闭休眠/Fast Startup：
 
 ```bash
@@ -148,7 +157,8 @@ chmod 600 /home/ubuntu/images/staging/client_configuration_token.tok
 ./deploy/scripts/start-vm.sh 2
 ```
 
-实例无论配置 GTX 750 Ti、GT 1030 还是 GTX 1050，正式驱动都保持 B/GRID
+实例无论配置 1GB 的 GT 730/GT 740/GTX 750，还是 2GB 的 GTX 750 Ti/GT 1030/
+GTX 1050，正式驱动都保持 B/GRID
 538.33。原版 537.58 outer-only 路径因 Xid 43/TDR 已生产隔离，详见
 [`SIGNED-CONSUMER-PRODUCTION.md`](SIGNED-CONSUMER-PRODUCTION.md)。板卡、显存厂家
 和 monitor 的普通程序一致性由
@@ -158,7 +168,7 @@ chmod 600 /home/ubuntu/images/staging/client_configuration_token.tok
 
 ## License 与 FRL 必须分开显示
 
-当前支持的三款 profile 都按 B/off 合同验收：token/DLS 正常时，host 应显示
+当前支持的 25 条 profile 都按 B/off 合同验收：token/DLS 正常时，host 应显示
 `License Status: Licensed`。历史 GTX1050 严格 A 曾出现控制面板授权页消失、
 `Unlicensed / FRL N/A`；那是已禁用的自签实验记录，不是当前验收合同，也不等于
 “已激活”。
@@ -186,8 +196,8 @@ Host：
 nvidia-smi vgpu -q
 ```
 
-默认三款 profile 都要求 B/off 原生 PnP、driver `31.0.15.3833`、Code 0、约 2 GB
-和 Licensed；marketing name 由每 VM host profile 提供。12 条原子 profile 的
+默认全部 profile 都要求 B/off 原生 PnP、driver `31.0.15.3833`、Code 0，并按目录为 1GB/2GB
+和 Licensed；marketing name 由每 VM host profile 提供。25 条原子 profile 的
 板卡/显存静态字段可由同一系统用户态投影发布，但 PnP、DXGI/D3D 和调度仍是唯一
 原生 vGPU。537.58 即使有历史 Code-0 qualification 也不会被生产使用。
 

@@ -21,8 +21,9 @@ usage() {
 usage: ./deploy/package-system-nvapi-projection.sh VM_ID [options]
 
 Options:
-  --output-root DIR   Private output root
-                      (default: $STAGE_DIR/SystemNvapiProjection)
+  --output-root DIR   Explicit private export root; an external override is
+                      not managed by delete-vm
+                      (default: VM_DIR/packages/SystemNvapiProjection)
   --list-profiles     Show every supported atomic GPU/VRAM-maker profile
   -h, --help          Show this help
 
@@ -85,6 +86,8 @@ monitor_profiles_validate || die 'monitor profile catalog validation failed'
 vm_storage_init
 vm_storage_require_namespace_ready "$VM_ID" \
     || die 'VM storage still uses an old/conflicting layout'
+vm_storage_validate_instance_tree "$VM_ID" \
+    || die 'VM instance tree is unsafe'
 CONF=$(vm_storage_config_path "$VM_ID")
 [[ -f "$CONF" && ! -L "$CONF" && -r "$CONF" ]] \
     || die "VM config is not a safe readable file: $CONF"
@@ -142,6 +145,8 @@ done
 requested_profile=${configured[GPU_PROFILE]}
 vgpu_profile_load "$requested_profile" \
     || die 'vm.conf selects an unknown atomic GPU profile'
+vgpu_profile_capability_load "$requested_profile" \
+    || die 'vm.conf GPU profile has no reviewed D3D12 capability contract'
 
 assert_profile_field() {
     local field=$1 canonical=$2 actual
@@ -239,7 +244,9 @@ else
     MONITOR_DRIVER_POLICY=grid-53833-native
     MONITOR_DRIVER_INF_SHA256=67a240e1d464cf97dabfec1a7cecf000eaa9ddfd702f32ba2c8771f17905dc2b
     MONITOR_DRIVER_CATALOG_SHA256=56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f
-    MONITOR_DRIVER_PNP_ID='PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE'
+    MONITOR_DRIVER_PNP_ID=$(vgpu_profile_native_grid_pnp_id \
+        "$VGPU_MDEV_PROFILE") \
+        || die 'GPU resource has no reviewed B/native PnP mapping'
 fi
 
 # The system shim must identify the same logical adapter as Windows PnP.  The
@@ -259,7 +266,14 @@ PCI_PROJECTION_MODE=transport-device-profile-subsystem
 unset transport_tail TRANSPORT_PCI_VENDOR_HEX TRANSPORT_PCI_DEVICE_HEX
 
 if [[ -z "$OUTPUT_ROOT" ]]; then
-    OUTPUT_ROOT="$STAGE_DIR/SystemNvapiProjection"
+    VM_PACKAGE_ROOT=$(vm_storage_instance_package_dir "$VM_ID") \
+        || die 'could not resolve the VM package directory'
+    OUTPUT_ROOT="$VM_PACKAGE_ROOT/SystemNvapiProjection"
+    for directory in "$VM_PACKAGE_ROOT" "$OUTPUT_ROOT"; do
+        [[ ! -L "$directory" && ( ! -e "$directory" || -d "$directory" ) ]] \
+            || die "VM package path is not a real directory: $directory"
+    done
+    install -d -m 0700 -- "$VM_PACKAGE_ROOT" "$OUTPUT_ROOT"
 fi
 [[ "$OUTPUT_ROOT" == /* && "$OUTPUT_ROOT" != / ]] \
     || die '--output-root must be a non-root absolute path'
@@ -282,6 +296,8 @@ assets=(
     guest/nvapi-shim/nvapi64.dll
     guest/nvapi-shim/SystemNvapiProbe32.exe
     guest/nvapi-shim/SystemNvapiProbe64.exe
+    guest/d3d12-capability-probe/D3D12CapabilityProbe32.exe
+    guest/d3d12-capability-probe/D3D12CapabilityProbe64.exe
 )
 for relative in "${assets[@]}"; do
     source_path="$here/$relative"
@@ -313,6 +329,8 @@ SHIM_X86_SHA=$(sha256_upper "$PUBLISHED/nvapi.dll")
 SHIM_X64_SHA=$(sha256_upper "$PUBLISHED/nvapi64.dll")
 PROBE_X86_SHA=$(sha256_upper "$PUBLISHED/SystemNvapiProbe32.exe")
 PROBE_X64_SHA=$(sha256_upper "$PUBLISHED/SystemNvapiProbe64.exe")
+D3D_PROBE_X86_SHA=$(sha256_upper "$PUBLISHED/D3D12CapabilityProbe32.exe")
+D3D_PROBE_X64_SHA=$(sha256_upper "$PUBLISHED/D3D12CapabilityProbe64.exe")
 MONITOR_EDID_SHA=$(sha256_upper "$PUBLISHED/monitor-edid.bin")
 COORDINATOR_SHA=$(sha256_upper \
     "$PUBLISHED/install-system-nvapi-projection.ps1")
@@ -357,6 +375,8 @@ jq -n \
     --arg identityCatalogJsonSha256 "$IDENTITY_CATALOG_JSON_SHA" \
     --arg shimX86Sha256 "$SHIM_X86_SHA" --arg shimX64Sha256 "$SHIM_X64_SHA" \
     --arg probeX86Sha256 "$PROBE_X86_SHA" --arg probeX64Sha256 "$PROBE_X64_SHA" \
+    --arg d3dProbeX86Sha256 "$D3D_PROBE_X86_SHA" \
+    --arg d3dProbeX64Sha256 "$D3D_PROBE_X64_SHA" \
     --argjson pciVendorId "$((GPU_PCI_VID))" \
     --argjson pciDeviceId "$((GPU_PCI_DID))" \
     --argjson pciSubVendorId "$((GPU_SUB_VID))" \
@@ -377,11 +397,14 @@ jq -n \
     --argjson implementation "$GPU_IMPLEMENTATION" \
     --argjson chipRevision "$((GPU_CHIP_REVISION))" \
     --argjson pcieWidth "$GPU_PCIE_WIDTH" \
+    --argjson d3d12RaytracingTier "$GPU_D3D12_RAYTRACING_TIER" \
+    --argjson rayTracingCores "$GPU_RAY_TRACING_CORES" \
+    --argjson tensorCores "$GPU_TENSOR_CORES" \
     --argjson transportPciVendorId "$TRANSPORT_PCI_VENDOR_ID" \
     --argjson transportPciDeviceId "$TRANSPORT_PCI_DEVICE_ID" \
     --argjson monitorProductId "$((MONITOR_PRODUCT_ID))" '
     {
-      schemaVersion: 2,
+      schemaVersion: 4,
       purpose: $purpose,
       contractId: "",
       vmId: ($vmId | tonumber),
@@ -414,6 +437,8 @@ jq -n \
         ropCount: $ropCount, tmuCount: $tmuCount,
         architecture: $architecture, implementation: $implementation,
         chipRevision: $chipRevision, pcieWidth: $pcieWidth,
+        d3d12RaytracingTier: $d3d12RaytracingTier,
+        rayTracingCores: $rayTracingCores, tensorCores: $tensorCores,
         vbiosVersion: $vbiosVersion
       },
       monitor: {
@@ -435,7 +460,9 @@ jq -n \
         shimX86Sha256: $shimX86Sha256,
         shimX64Sha256: $shimX64Sha256,
         probeX86Sha256: $probeX86Sha256,
-        probeX64Sha256: $probeX64Sha256
+        probeX64Sha256: $probeX64Sha256,
+        d3dProbeX86Sha256: $d3dProbeX86Sha256,
+        d3dProbeX64Sha256: $d3dProbeX64Sha256
       }
     }' >"$CONTRACT_BASE"
 CONTRACT_ID=$(jq -cS 'del(.contractId)' "$CONTRACT_BASE" | sha256sum | \
@@ -453,6 +480,8 @@ manifest_files=(
     nvapi64.dll
     SystemNvapiProbe32.exe
     SystemNvapiProbe64.exe
+    D3D12CapabilityProbe32.exe
+    D3D12CapabilityProbe64.exe
     monitor-edid.bin
     system-nvapi-contract.json
 )
@@ -540,11 +569,14 @@ cat >"$PUBLISHED/README-运行说明.txt" <<EOF
 G-11 通用系统硬件身份投影（vm${VM_ID}）
 
 目标：${GPU_NAME} / ${GPU_BOARD_BRAND} / ${GPU_MEMORY_TYPE} ${GPU_MEMORY_MAKER}
+NVAPI 能力：RT cores=${GPU_RAY_TRACING_CORES} / Tensor cores=${GPU_TENSOR_CORES}
+D3D12 预期：raytracing tier=${GPU_D3D12_RAYTRACING_TIER}（安装前与验收都直接探测原生 x86/x64 路径）
 显示器：${MONITOR_DISPLAY_NAME} / ${MONITOR_VENDOR}${MONITOR_PRODUCT_ID#0x}
 绑定：${VM_UUID}
 Display：${TARGET_PNP} / ${DRIVER_VERSION}
 
-安装：双击 Run-As-Administrator.cmd，确认 UAC；Windows 会自动重启并验收。
+安装：双击 Run-As-Administrator.cmd，确认 UAC；原生 x86/x64 D3D12 门禁
+      都通过后 Windows 才会安装、自动重启并验收。
 复核：重启后可右键 Verify-As-Administrator.cmd -> 以管理员身份运行。
 回滚：双击 Rollback-As-Administrator.cmd；Windows 会重启并恢复签名原件。
 
@@ -552,6 +584,11 @@ Display：${TARGET_PNP} / ${DRIVER_VERSION}
 不导入证书，不安装任何内核驱动。x86/x64 未识别 NVAPI 调用转发给原始 NVIDIA DLL。
 显示器发布器只按合同 EDID 处理匹配的 DISPLAY 实例，用于驱动换代后新实例的
 FriendlyName/EDID_OVERRIDE 收敛；它不检测、修改或注入任何具体应用。
+所有硬件检测工具仅用于重新扫描和交叉验收。本包会在任何系统投影写入前，
+直接用 ID3D12Device::CheckFeatureSupport(D3D12_OPTIONS5) 验证 x86/x64。任一路径
+与合同不符就拒绝安装/验收；不要放置应用专用 d3d12.dll，也不要替换
+Windows 系统 d3d12.dll。
+本包不安装应用专用 DLL，不按进程名匹配，也不修改任何检测工具。
 EOF
 # cmd.exe consumes a byte after bare LF in batch files on affected Windows
 # builds.  Publish launchers with canonical CRLF so every line keeps its first
@@ -570,7 +607,7 @@ OUTPUT_BASENAME="vm${VM_ID}-${VM_UUID}-${CONTRACT_ID:0:16}"
 OUTPUT_DIR="$OUTPUT_ROOT/$OUTPUT_BASENAME"
 OUTPUT_ISO="$OUTPUT_ROOT/${OUTPUT_BASENAME}.iso"
 [[ ! -e "$OUTPUT_DIR" && ! -e "$OUTPUT_ISO" ]] \
-    || die "output already exists (content-addressed): $OUTPUT_BASENAME"
+    || die "output already exists (content-addressed): $OUTPUT_BASENAME (root: $OUTPUT_ROOT)"
 ISO_WORK="$work/SystemNvapiProjection.iso"
 xorriso -as mkisofs -quiet -iso-level 3 -J -joliet-long -r \
     -V "G11_NVAPI_VM${VM_ID}" -o "$ISO_WORK" "$PUBLISHED"
@@ -580,7 +617,10 @@ mv -T -- "$PUBLISHED" "$OUTPUT_DIR"
 mv -- "$ISO_WORK" "$OUTPUT_ISO"
 chmod 0700 "$OUTPUT_DIR"
 chmod 0600 "$OUTPUT_DIR"/* "$OUTPUT_ISO"
+rm -rf -- "$work"
 work=""
+printf -v MOUNT_COMMAND '%q ' ./deploy/scripts/vmctl.sh cdrom "$VM_ID" mount "$OUTPUT_ISO"
+MOUNT_COMMAND=${MOUNT_COMMAND% }
 
 cat <<EOF
 [system-nvapi-package] PASS
@@ -588,6 +628,8 @@ cat <<EOF
   profile:         ${GPU_PROFILE}
   board:           ${GPU_BOARD_BRAND} ${GPU_BOARD_MODEL}
   VRAM identity:   ${GPU_MEMORY_TYPE} / ${GPU_MEMORY_MAKER} (NVAPI ${GPU_MEMORY_MAKER_NVAPI_NAME}=${GPU_MEMORY_MAKER_NVAPI})
+  NVAPI capability: RT cores=${GPU_RAY_TRACING_CORES} / Tensor cores=${GPU_TENSOR_CORES}
+  D3D12 expected:  raytracing tier=${GPU_D3D12_RAYTRACING_TIER} (native x86/x64 install gate)
   monitor:         ${MONITOR_DISPLAY_NAME} / ${MONITOR_VENDOR}${MONITOR_PRODUCT_ID#0x}
   transport:       ${TRANSPORT_KIND} / ${TARGET_PNP} / ${DRIVER_VERSION}
   contract:        ${CONTRACT_ID}
@@ -595,13 +637,18 @@ cat <<EOF
   read-only ISO:   ${OUTPUT_ISO}
   ISO SHA256:      ${ISO_SHA256}
 
+VM 生命周期：默认产物位于 vm${VM_ID}/packages，delete-vm 删除该 VM 时会一并清理。
+
 傻瓜步骤：
-  1. 把 ISO 只读挂到绑定的 vm${VM_ID}。
+  1. 宿主在仓库根目录执行（命令强制只读挂载）：
+     ${MOUNT_COMMAND}
   2. 双击 Run-As-Administrator.cmd，确认一次 UAC。
-  3. Windows 自动重启；SYSTEM 同时验证 x86/x64 系统路径。
+  3. 写入前先验证原生 x86/x64 D3D12；只有通过才安装并自动重启。
   4. 打开设备管理器；监视器应为 ${MONITOR_DISPLAY_NAME}。
-  5. 打开硬件工具重新扫描；显卡厂商/显存厂家应为 ${GPU_BOARD_BRAND} / ${GPU_MEMORY_MAKER}。
+  5. 打开多个硬件工具重新扫描；显卡厂商/显存厂家应为 ${GPU_BOARD_BRAND} / ${GPU_MEMORY_MAKER}，NVAPI RT/Tensor 应为 ${GPU_RAY_TRACING_CORES}/${GPU_TENSOR_CORES}。
+     若原生 D3D12 仍显示光追，脚本会直接 FAIL，不会伪造成功收据或安装应用专用 DLL。
   6. 需要恢复时双击 Rollback-As-Administrator.cmd。
+  7. 用完后宿主执行：./deploy/scripts/vmctl.sh cdrom ${VM_ID} eject
 
 不写 BCD，不开启 testsigning/nointegritychecks，不改 INF/CAT/SYS，不安装内核驱动。
 EOF

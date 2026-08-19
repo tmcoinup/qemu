@@ -40,8 +40,8 @@ $ErrorActionPreference = 'Stop'
 # These hashes bind this small wrapper to the two source-tree artifacts whose
 # app-local behavior was statically audited.  A rebuild or installer change
 # must update both this file and its repository test before publication.
-$ExpectedInstallerSha256 = '3864BBB37A14640369A4A483A3231796F768111721DE77F191A18FF76F50C158'
-$ExpectedX64ShimSha256 = '045904D4710BF1CA6D3D8846575C3FE5C47C8B2607537671B654F50B2501F7AB'
+$ExpectedInstallerSha256 = '718909E9A0172A40A108E90BF07528BC05C3061558284F707EE025D31BA1153B'
+$ExpectedX64ShimSha256 = '534F3E5965F73FB5EF75690A37C5C3FA0361FE9A3CBBD1BAD35CF0AB9465A324'
 
 function Resolve-RegularFile {
     param(

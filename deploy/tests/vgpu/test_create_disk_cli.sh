@@ -100,6 +100,24 @@ clone_mode=$(stat -c %a "$VM_ROOT/10/disk.qcow2")
     || fail "base clone unexpectedly created a blank image"
 chmod 0644 "$VM_ROOT/shared/bases/win10-base.qcow2"
 
+# An explicit name must select that exact managed base, leaving the historical
+# default and every sibling base untouched.
+printf 'named-base-fixture\n' \
+    >"$VM_ROOT/shared/bases/win11-vgpu-v2.qcow2"
+chmod 0444 "$VM_ROOT/shared/bases/win11-vgpu-v2.qcow2"
+"$CREATE_DISK" 23 --from-base --base-name win11-vgpu-v2 \
+    >"$TMP_DIR/vm23.out"
+cmp "$VM_ROOT/shared/bases/win11-vgpu-v2.qcow2" \
+    "$VM_ROOT/23/disk.qcow2" || fail "named base clone content differs"
+grep -Fq "baseline 'win11-vgpu-v2'" "$TMP_DIR/vm23.out" \
+    || fail "named base selection was not visible"
+if "$CREATE_DISK" 24 --from-base --base-name '../escape' \
+        >"$TMP_DIR/unsafe-name.out" 2>"$TMP_DIR/unsafe-name.err"; then
+    fail "create-disk accepted an unsafe base name"
+fi
+[[ ! -e "$VM_ROOT/24/disk.qcow2" ]] \
+    || fail "unsafe base name published a disk"
+
 # A profile larger than the baseline is safe: clone first, then grow only the
 # private copy.  The shared baseline must stay at its original virtual size.
 printf 'VIRTUAL_SIZE=500107862016\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"

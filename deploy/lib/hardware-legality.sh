@@ -631,11 +631,14 @@ g11_hardware_combination_validate() {
             "GPU_PROFILE=$gpu_profile is not in the reviewed G-11 catalog"
         return 1
     fi
-    if [[ "$exp_gpu_vram" != 2048 || "$exp_gpu_mdev" != nvidia-257 ]]; then
-        _g11_hw_legality_fail GPU_CATALOG_NOT_2GB_MDEV \
-            "GPU_PROFILE=$gpu_profile is not an audited nvidia-257/2048MB identity"
-        return 1
-    fi
+    case "$exp_gpu_vram:$exp_gpu_mdev" in
+        1024:nvidia-256|2048:nvidia-257) ;;
+        *)
+            _g11_hw_legality_fail GPU_CATALOG_RESOURCE_MISMATCH \
+                "GPU_PROFILE=$gpu_profile has an unsupported mdev/framebuffer pair: ${exp_gpu_mdev}/${exp_gpu_vram}MB"
+            return 1
+            ;;
+    esac
     _g11_hw_legality_exact_or_legacy "$policy" VGPU_MDEV_PROFILE "$gpu_mdev" \
         "$exp_gpu_mdev" GPU_METADATA_REQUIRED GPU_MDEV_MISMATCH || return 1
     _g11_hw_legality_exact_or_legacy "$policy" GPU_VRAM_MB "$gpu_vram" \

@@ -233,12 +233,15 @@ require_catalog_value "$configured_gpu_architecture" "$GPU_ARCHITECTURE" GPU_ARC
 require_catalog_value "$configured_gpu_implementation" "$GPU_IMPLEMENTATION" GPU_IMPLEMENTATION
 require_catalog_value "$configured_gpu_chip_revision" "$GPU_CHIP_REVISION" GPU_CHIP_REVISION
 require_catalog_value "$configured_gpu_pcie_width" "$GPU_PCIE_WIDTH" GPU_PCIE_WIDTH
-if [[ -n "$configured_mdev_profile" && "$configured_mdev_profile" != nvidia-257 ]]; then
-    fail_config "VGPU_MDEV_PROFILE 在 B 模式下必须为 nvidia-257: $configured_mdev_profile"
+if [[ -n "$configured_mdev_profile" &&
+      "$configured_mdev_profile" != "$VGPU_MDEV_PROFILE" ]]; then
+    fail_config "VGPU_MDEV_PROFILE 与 GPU_PROFILE=$GPU_PROFILE 不匹配（配置: $configured_mdev_profile；目录: $VGPU_MDEV_PROFILE）"
 fi
 VGPU_MDEV_PROFILE=${configured_mdev_profile:-$VGPU_MDEV_PROFILE}
-[[ "$VGPU_MDEV_PROFILE" == nvidia-257 ]] || \
-    fail_config "catalog 的 B 模式 mdev profile 必须为 nvidia-257: $VGPU_MDEV_PROFILE"
+case "$GPU_VRAM_MB:$VGPU_MDEV_PROFILE" in
+    1024:nvidia-256|2048:nvidia-257) ;;
+    *) fail_config "catalog 的 B 模式 mdev/显存组合不受支持: $VGPU_MDEV_PROFILE/${GPU_VRAM_MB}MB" ;;
+esac
 monitor_profile_load "$configured_monitor_profile"
 MONITOR_SERIAL=$configured_monitor_serial
 
@@ -261,7 +264,11 @@ validate_positive_int GPU_MEMORY_MHZ "$GPU_MEMORY_MHZ" 1 10000
 validate_positive_int GPU_MEMORY_BUS_BITS "$GPU_MEMORY_BUS_BITS" 1 1024
 validate_positive_int GPU_MEMORY_BANDWIDTH_MBPS \
     "$GPU_MEMORY_BANDWIDTH_MBPS" 1 1000000
-validate_positive_int GPU_VRAM_MB "$GPU_VRAM_MB" 2048 2048
+validate_positive_int GPU_VRAM_MB "$GPU_VRAM_MB" 1024 2048
+case "$GPU_VRAM_MB" in
+    1024|2048) ;;
+    *) fail_config "GPU_VRAM_MB 必须是目录支持的 1024 或 2048" ;;
+esac
 validate_positive_int GPU_MEMORY_TYPE_NVAPI "$GPU_MEMORY_TYPE_NVAPI" 8 8
 validate_positive_int GPU_MEMORY_MAKER_NVAPI "$GPU_MEMORY_MAKER_NVAPI" 1 255
 validate_positive_int GPU_CUDA_CORES "$GPU_CUDA_CORES" 1 1000000

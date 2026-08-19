@@ -32,7 +32,7 @@
 | Type 17 memory_type | 0x18 / 0x1A / 0x22 (DDR3/4/5) | **0x07 (RAM)** ⚠️ | profile 按 DDR3=`0x18`、DDR4=`0x1A` 传入 |
 | Type 17 type_detail | 0x80 (Synchronous) | **0x02 (Other)** ⚠️ | `typedetail=0x80` (本仓库 patch) |
 | Type 17 data_width/total_width | 64 / 64 (no ECC) | **0xFFFF / 0xFFFF** ⚠️ | `width=64,totalwidth=64` (本仓库 patch) |
-| Type 17 manufacturer/part/serial | DIMM 实际品牌/逐槽料号/不同序列 | 空 | 17 套目录；active 为 Kingston、Samsung、Micron、SK hynix 四品牌；v3 持久化完整 `MEM_SERIAL_LIST` 并逐槽跨 VM 查重 |
+| Type 17 manufacturer/part/serial | DIMM 实际品牌/逐槽料号/不同序列 | 空 | 18 套目录；active 为 Kingston、Samsung、Micron、SK hynix、Crucial 五品牌；v3 持久化完整 `MEM_SERIAL_LIST` 并逐槽跨 VM 查重 |
 | DDR3 SPD 几何/身份 | 容量、Rank、颗粒宽度、JEP106、serial、part 自洽 | 通常无本项目身份 | 四种审核几何；bytes 117/122/128/148 起分别写 module JEP106/serial/18-byte part/DRAM JEP106 |
 | legacy DDR4 SPD | EE1004 page 1 常含身份 | 仅 page 0 | 本项目明确保持 256-byte page 0-only；身份由 SMBIOS Type 17 提供，不伪造 page 1 |
 | Type 3 chassis | 机箱 SN | 空 | `CHASSIS_SN` |
@@ -87,7 +87,7 @@ VGPU_IDENTITY_TARGET=name-only
 
 这时 marketing name 可以来自 per-mdev 配置，但 PCI 仍是 `DEV_1E30`。这就是当前
 安全停留点。历史 finish 会修改 INF/自签 catalog，已在产生包和 marker 前拒绝；
-不要运行旧 ZIP或手工写 A/internal/FRL。当前 12 条 GPU 原子 profile 的受支持策略始终保持 B；
+不要运行旧 ZIP或手工写 A/internal/FRL。当前 25 条 GPU 原子 profile 的受支持策略始终保持 B；
 真实 VM3 的 legacy A 通过 production migration 回到原始 GRID 538.33/native
 身份，设备管理器与 GPU-Z 的型号由 name/profile overlay 提供。
 
@@ -101,7 +101,7 @@ host `nvidia-smi vgpu` 的 `vGPU Name` 也可能继续显示 GT 1030/type 标签
 
 授权页同样不是身份或 license 的单一判据。legacy 严格 GTX1050 的历史记录是控制
 面板授权页消失、host `Unlicensed`、per-mdev `FRL N/A`；它不等于激活，也不是当前
-生产合同。当前 12 条 GPU 原子 profile 都按 B/off 原生 vGPU 合同验收 DLS/token 和
+生产合同。当前 25 条 GPU 原子 profile 都按 B/off 原生 vGPU 合同验收 DLS/token 和
 `Licensed`。
 
 Guest 验证：

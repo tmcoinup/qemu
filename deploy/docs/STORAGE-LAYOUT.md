@@ -34,22 +34,31 @@ G-11 现在参考 V-11 的实例分类方式：默认直接使用
     │   │   ├── swtpm.sock
     │   │   ├── start.lock
     │   │   ├── disk.lock
-    │   │   └── tpm.lock
+    │   │   ├── tpm.lock
+    │   │   ├── optical.lock
+    │   │   └── usb-directory.lock
     │   └── backups/
     │       ├── disks/
     │       └── nvram/
     ├── shared/                         # 多台 G-11 VM 共用的模板/资源
     │   ├── bases/
-    │   │   ├── win10-base.qcow2
+    │   │   ├── win10-ltsc-v1.qcow2
+    │   │   ├── win10-ltsc-v1.qcow2.vgpu-portable.json
+    │   │   ├── win11-vgpu-v2.qcow2
+    │   │   ├── win11-vgpu-v2.qcow2.vgpu-portable.json
     │   │   └── archive/
-    │   └── assets/
+    │   ├── assets/
+    │   └── usb/                        # 多台 VM 共用的只读工具 U 盘根目录
+    │       ├── G11GuestLite/
+    │       ├── G11GuestPerformance/
+    │       └── 其他工具各自的目录/
     └── control/                        # 只允许全局协调数据
         ├── .storage.lock
         └── history/                    # 旧布局迁移记录（存在迁移时）
 ```
 
 `control/.storage.lock` 是整套存储的全局协调锁，不属于某台 VM，也不是删除 VM 后的
-残留。每台 VM 的三个零字节锁文件则位于该 VM 的 `run/`；停止后保留是正常现象，
+残留。每台 VM 的零字节锁文件则位于该 VM 的 `run/`；停止后保留是正常现象，
 删除整个数字目录时会一起删除。
 
 共享 OVMF code 在仓库的 `deploy/host/OVMF_CODE_4M_stealth.fd`，OVMF VARS 模板
@@ -69,14 +78,17 @@ G-11 现在参考 V-11 的实例分类方式：默认直接使用
 | `<ID>/backups/` | 视内容 | 否 | 该 VM 自己的历史磁盘/NVRAM |
 | `shared/bases/` | 建议 | 否 | 新实例来源，不随单台 VM 删除 |
 | `shared/assets/` | 建议 | 可重建 | host UI 资源 |
+| `shared/usb/` | 按需 | 可以 | 公共只读工具 U 盘；每个工具只管理自己的子目录 |
 | `control/` | 不必 | 不要手删 | 全局协调锁和迁移记录 |
 
 备份和恢复时，最稳妥的办法是让 VM 完整关机后复制整个 `<ID>/`。至少要把
 `vm.conf`、`disk.qcow2`、`nvram.fd` 和 `tpm/` 作为同一组处理。
 
-`shared/bases/win10-base.qcow2` 必须是没有 backing file、也没有 external
-data-file 的 standalone qcow2。创建磁盘、替换 base、迁移和删除脚本都会检查
-qcow2 依赖；无法证明安全时会拒绝操作，不会猜测 rebase 策略。
+`shared/bases/<BASE_NAME>.qcow2` 必须是没有 backing file、也没有 external
+data-file 的 standalone qcow2。每个镜像的 portable 证明紧邻它并使用
+`<BASE_NAME>.qcow2.vgpu-portable.json`；clone 必须点名，绝不猜测“最新”镜像。
+创建磁盘、替换 base、迁移和删除脚本都会检查 qcow2 依赖；无法证明安全时会拒绝
+操作，不会猜测 rebase 策略。
 
 ## V-11 与 G-11 的边界
 

@@ -11,7 +11,7 @@ static FbShmGpuFrame valid_dma_buf_frame(void)
 {
     return (FbShmGpuFrame) {
         .magic = FB_SHM_MAGIC,
-        .version = FB_SHM_VERSION,
+        .version = FB_SHM_GPU_FRAME_VERSION,
         .size = sizeof(FbShmGpuFrame),
         .handle_type = FB_SHM_GPU_HANDLE_DMA_BUF,
         .flags = FB_SHM_GPU_FRAME_F_Y0_TOP,
@@ -23,6 +23,8 @@ static FbShmGpuFrame valid_dma_buf_frame(void)
         .y = 24,
         .backing_width = 1920,
         .backing_height = 1080,
+        .source_width = 1920,
+        .source_height = 1080,
         .modifier = 0,
         .frame_seq = 7,
     };

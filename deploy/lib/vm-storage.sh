@@ -396,6 +396,15 @@ vm_storage_instance_run_dir() {
     printf '%s/run\n' "$instance"
 }
 
+# VM-bound delivery artifacts belong to the same numeric bundle as the disk,
+# NVRAM, logs and runtime state.  Keeping them here means delete-vm's atomic
+# bundle removal cannot leave a second, global package tree behind.
+vm_storage_instance_package_dir() {
+    local instance
+    instance=$(vm_storage_instance_dir "$1") || return
+    printf '%s/packages\n' "$instance"
+}
+
 vm_storage_instance_disk_backup_dir() {
     local instance
     instance=$(vm_storage_instance_dir "$1") || return
@@ -415,7 +424,7 @@ vm_storage_validate_instance_tree() {
     for candidate in \
         "$instance" "$instance/log" "$instance/run" \
         "$instance/backups" "$instance/backups/disks" \
-        "$instance/backups/nvram"; do
+        "$instance/backups/nvram" "$instance/packages"; do
         if [[ -L "$candidate" || ( -e "$candidate" && ! -d "$candidate" ) ]]; then
             echo "[vm-storage] instance directory is unsafe: $candidate" >&2
             return 1
@@ -483,12 +492,26 @@ vm_storage_nvram_legacy_path() {
     printf '%s/vm%s_VARS.fd\n' "$VM_ROOT" "$1"
 }
 
+vm_storage_validate_base_name() {
+    local name=${1:-}
+
+    [[ -n "$name" && ${#name} -le 128 &&
+       "$name" =~ ^[A-Za-z0-9_-]+$ ]] || {
+        echo "invalid base name (1..128 letters/digits/_/-; omit .qcow2): ${name:-<empty>}" >&2
+        return 2
+    }
+}
+
 vm_storage_base_preferred_path() {
-    printf '%s/win10-base.qcow2\n' "$VM_BASE_DIR"
+    local name=${1:-win10-base}
+    vm_storage_validate_base_name "$name" || return
+    printf '%s/%s.qcow2\n' "$VM_BASE_DIR" "$name"
 }
 
 vm_storage_base_legacy_path() {
-    printf '%s/win10-base.qcow2\n' "$VM_ROOT"
+    local name=${1:-win10-base}
+    vm_storage_validate_base_name "$name" || return
+    printf '%s/%s.qcow2\n' "$VM_ROOT" "$name"
 }
 
 _vm_storage_resolve_many() {
@@ -597,6 +620,8 @@ vm_storage_run_preferred_path() {
         start.lock) filename=start.lock ;;
         disk.lock) filename=disk.lock ;;
         tpm.lock) filename=tpm.lock ;;
+        optical.lock) filename=optical.lock ;;
+        usb-directory.lock) filename=usb-directory.lock ;;
         *) echo "invalid VM runtime file kind: $kind" >&2; return 2 ;;
     esac
     run_dir=$(vm_storage_instance_run_dir "$id") || return
@@ -607,7 +632,7 @@ vm_storage_run_legacy_path() {
     local id=$1 kind=$2
     vm_storage_validate_id "$id" || return
     case "$kind" in
-        pid|qmp|mon|mdev|monitor-edid|start.lock|disk.lock|tpm.lock) ;;
+        pid|qmp|mon|mdev|monitor-edid|start.lock|disk.lock|tpm.lock|optical.lock|usb-directory.lock) ;;
         *) echo "invalid VM runtime file kind: $kind" >&2; return 2 ;;
     esac
     printf '%s/vm%s.%s\n' "$VM_RUN_DIR" "$id" "$kind"
@@ -626,10 +651,38 @@ vm_storage_run_path() {
 }
 
 vm_storage_base_path() {
-    local preferred legacy
-    preferred=$(vm_storage_base_preferred_path)
-    legacy=$(vm_storage_base_legacy_path)
-    _vm_storage_resolve "$preferred" "$legacy" "base image"
+    local name=${1:-win10-base} preferred legacy
+    vm_storage_validate_base_name "$name" || return
+    preferred=$(vm_storage_base_preferred_path "$name") || return
+
+    # Only the historical fixed basename ever existed at VM_ROOT.  New named
+    # bases always live below VM_BASE_DIR, so a caller cannot accidentally
+    # select an unrelated flat file by inventing another legacy basename.
+    if [[ "$name" != win10-base ]]; then
+        printf '%s\n' "$preferred"
+        return 0
+    fi
+    legacy=$(vm_storage_base_legacy_path "$name") || return
+    _vm_storage_resolve "$preferred" "$legacy" "base image $name"
+}
+
+# Print only managed, safely named standalone-base candidates.  Metadata and
+# portable-attestation validation remain the responsibility of the consumer.
+vm_storage_list_base_names() {
+    local file leaf name
+    local -a files=()
+
+    [[ -d "$VM_BASE_DIR" && ! -L "$VM_BASE_DIR" ]] || return 0
+    shopt -s nullglob
+    files=("$VM_BASE_DIR"/*.qcow2)
+    shopt -u nullglob
+    for file in "${files[@]}"; do
+        [[ -f "$file" && ! -L "$file" ]] || continue
+        leaf=${file##*/}
+        name=${leaf%.qcow2}
+        vm_storage_validate_base_name "$name" >/dev/null 2>&1 || continue
+        printf '%s\n' "$name"
+    done
 }
 
 vm_storage_iso_path() {

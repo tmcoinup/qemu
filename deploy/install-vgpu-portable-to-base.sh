@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Atomically place the VM-unbound offline identity EXE on the Windows public
-# desktop of the standalone clone base.  GPU-Z is omitted by default and may
+# Atomically place the VM-unbound offline identity/performance EXE on the
+# Windows public desktop of the standalone clone base.  GPU-Z is omitted by default and may
 # be included only through an explicit option.  The live base is never mounted
 # or edited.
 set -euo pipefail
@@ -23,8 +23,10 @@ usage() {
 usage: ./deploy/install-vgpu-portable-to-base.sh [options]
 
 Options:
-  --base IMAGE       Windows standalone qcow2 base
-                     (default: $VM_BASE_DIR/win10-base.qcow2)
+  --base-name NAME   Managed base created by seal-base.sh (recommended)
+                     Example: win10-ltsc-v1; omit .qcow2
+  --base IMAGE       Explicit Windows standalone qcow2 path (advanced)
+                     Cannot be combined with --base-name
   --exe FILE.exe     Portable guest EXE
                      (default: $STAGE_DIR/VgpuPortable/VgpuPortable.exe)
   --with-gpuz        Also place the audited GPU-Z.exe beside the EXE (optional)
@@ -35,7 +37,7 @@ Options:
   -h, --help         Show this help
 
 The script clones the base to a private temporary qcow2, mounts only that
-copy, writes VgpuPortable.exe to the Public Desktop, validates it, then
+copy, writes the unified VgpuPortable.exe to the Public Desktop, validates it, then
 atomically archives/replaces the base.  GPU-Z is not required or copied unless
 --with-gpuz/--gpuz-source is explicit.  Hibernated/dirty NTFS is refused.
 EOF
@@ -55,6 +57,8 @@ sha256_upper() {
 }
 
 BASE=""
+BASE_NAME=""
+BASE_PATH_SET=0
 PORTABLE_EXE=""
 GPUZ_SOURCE=""
 WITH_GPUZ=0
@@ -63,7 +67,15 @@ while (($#)); do
     case "$1" in
         --base)
             (($# >= 2)) || die "--base requires an image"
+            ((BASE_PATH_SET == 0)) || die "--base may be specified once"
             BASE=$2
+            BASE_PATH_SET=1
+            shift 2
+            ;;
+        --base-name)
+            (($# >= 2)) || die "--base-name requires a name"
+            [[ -z "$BASE_NAME" ]] || die "--base-name may be specified once"
+            BASE_NAME=$2
             shift 2
             ;;
         --exe)
@@ -95,6 +107,12 @@ while (($#)); do
     esac
 done
 
+[[ -z "$BASE_NAME" || $BASE_PATH_SET -eq 0 ]] ||
+    die "--base-name and --base cannot be combined"
+if [[ -n "$BASE_NAME" ]]; then
+    vm_storage_validate_base_name "$BASE_NAME" || exit 2
+fi
+
 # Offline qcow2/NBD mounting needs root.  Parse help/options first, then
 # re-exec once and let sudo use its normal password prompt; no credential is
 # stored in this script.
@@ -103,7 +121,14 @@ if ((EUID != 0)); then
         -- "$0" "${ORIGINAL_ARGS[@]}"
 fi
 
-[[ -n "$BASE" ]] || BASE=$(vm_storage_base_path)
+if [[ -n "$BASE_NAME" ]]; then
+    BASE=$(vm_storage_base_path "$BASE_NAME")
+elif ((BASE_PATH_SET == 0)); then
+    # Retain the historical default only for compatibility.  New tutorials
+    # always name the base explicitly so multiple generations cannot mix.
+    BASE_NAME=win10-base
+    BASE=$(vm_storage_base_path "$BASE_NAME")
+fi
 [[ -n "$PORTABLE_EXE" ]] ||
     PORTABLE_EXE="$STAGE_DIR/VgpuPortable/VgpuPortable.exe"
 if ((WITH_GPUZ)) && [[ -z "$GPUZ_SOURCE" ]]; then
@@ -161,12 +186,13 @@ CATALOG_SHA256=$(jq -er \
     select(
         (keys | sort) == [
             "bindingMode", "bundleManifestSha256", "catalogSha256",
-            "exeBytes", "exeSha256", "gpuZDelivery", "launcherFormat",
-            "schemaVersion"
+            "exeBytes", "exeSha256", "gpuZDelivery", "guestPerformance",
+            "launcherFormat", "schemaVersion"
         ] and
-        .schemaVersion == 4 and .bindingMode == "portable-auto" and
+        .schemaVersion == 6 and .bindingMode == "portable-auto" and
         .gpuZDelivery == "optional-explicit-sibling" and
-        .launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4" and
+        .guestPerformance == "embedded-recommended-native-v1" and
+        .launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6" and
         .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
         (.catalogSha256 | test("^[0-9A-F]{64}$")) and
         (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
@@ -378,6 +404,30 @@ refresh_restored_attestation_ctime() {
                  (if .gpuZIncluded then
                     .gpuZGuestPath == "C:\\Users\\Public\\Desktop\\GPU-Z.exe" and
                     .gpuZSha256 == $gpuZSha256 and .gpuZBytes == $gpuZBytes
+                 else
+                    .gpuZGuestPath == null and .gpuZSha256 == null and
+                    .gpuZBytes == null
+                  end))
+                or
+                ((keys | sort) == [
+                    "baseCtimeNs", "baseDeviceId", "baseFileBytes",
+                    "baseInode", "baseMtimeNs", "basePath", "bindingMode",
+                    "catalogSha256", "gpuZBytes", "gpuZDelivery",
+                    "gpuZGuestPath", "gpuZIncluded", "gpuZSha256",
+                    "guestPerformance", "installedUtc", "portableBytes",
+                    "portableGuestPath", "portableSha256", "schemaVersion"
+                ] and
+                 .schemaVersion == 5 and
+                 .gpuZDelivery == "optional-explicit-sibling" and
+                 .guestPerformance == "embedded-recommended-native-v1" and
+                 .portableGuestPath == "C:\\Users\\Public\\Desktop\\VgpuPortable.exe" and
+                 (.portableSha256 | test("^[0-9A-F]{64}$")) and
+                 (.portableBytes | type) == "number" and
+                 .portableBytes > 0 and
+                 (.gpuZIncluded | type) == "boolean" and
+                 (if .gpuZIncluded then
+                    .gpuZGuestPath == "C:\\Users\\Public\\Desktop\\GPU-Z.exe" and
+                    .gpuZSha256 == $gpuZSha256 and .gpuZBytes == $gpuZBytes
                   else
                     .gpuZGuestPath == null and .gpuZSha256 == null and
                     .gpuZBytes == null
@@ -386,7 +436,7 @@ refresh_restored_attestation_ctime() {
         ) then
             .baseCtimeNs = $baseCtimeNs
         else
-            error("restored attestation is not a valid schema-2/schema-3/schema-4 generation")
+            error("restored attestation is not a valid schema-2/schema-3/schema-4/schema-5 generation")
         end
     ' "$ATTESTATION" >"$refresh_tmp"; then
         rm -f -- "$refresh_tmp"
@@ -556,9 +606,9 @@ if ((WITH_GPUZ)); then
     [[ "$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256" &&
        "$(stat -c %s -- "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_BYTES" ]] ||
         die "published base-image optional GPU-Z is incorrect"
-    log "installed identity EXE plus explicitly selected GPU-Z on C:\\Users\\Public\\Desktop"
+    log "installed unified identity/performance EXE plus explicitly selected GPU-Z on C:\\Users\\Public\\Desktop"
 else
-    log "installed identity EXE only; GPU-Z was not selected or copied"
+    log "installed unified identity/performance EXE only; GPU-Z was not selected or copied"
 fi
 
 umount -- "$MOUNT_DIR"
@@ -612,7 +662,7 @@ if ((WITH_GPUZ)); then
     GPUZ_INCLUDED_JSON=true
 fi
 jq -n \
-    --argjson schemaVersion 4 \
+    --argjson schemaVersion 5 \
     --arg basePath "$BASE" \
     --argjson baseFileBytes "$BASE_FILE_BYTES" \
     --arg baseDeviceId "$BASE_DEVICE_ID" \
@@ -627,6 +677,7 @@ jq -n \
     --arg gpuZGuestPath 'C:\Users\Public\Desktop\GPU-Z.exe' \
     --arg gpuZSha256 "$GPUZ_SHA256" \
     --argjson gpuZBytes "$GPUZ_BYTES" \
+    --arg guestPerformance embedded-recommended-native-v1 \
     --arg catalogSha256 "$CATALOG_SHA256" \
     --arg installedUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     {
@@ -646,6 +697,7 @@ jq -n \
         gpuZGuestPath: (if $gpuZIncluded then $gpuZGuestPath else null end),
         gpuZSha256: (if $gpuZIncluded then $gpuZSha256 else null end),
         gpuZBytes: (if $gpuZIncluded then $gpuZBytes else null end),
+        guestPerformance: $guestPerformance,
         catalogSha256: $catalogSha256,
         installedUtc: $installedUtc
     }' >"$ATTESTATION_TMP"
@@ -670,11 +722,11 @@ jq -e \
         "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
         "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
         "gpuZBytes", "gpuZDelivery", "gpuZGuestPath", "gpuZIncluded",
-        "gpuZSha256",
+        "gpuZSha256", "guestPerformance",
         "installedUtc", "portableBytes", "portableGuestPath",
         "portableSha256", "schemaVersion"
     ] and
-    .schemaVersion == 4 and .bindingMode == "portable-auto" and
+    .schemaVersion == 5 and .bindingMode == "portable-auto" and
     .basePath == $basePath and .baseFileBytes == $baseFileBytes and
     .baseDeviceId == $baseDeviceId and .baseInode == $baseInode and
     .baseMtimeNs == $baseMtimeNs and .baseCtimeNs == $baseCtimeNs and
@@ -682,6 +734,7 @@ jq -e \
     .portableSha256 == $portableSha256 and
     .portableBytes == $portableBytes and
     .gpuZDelivery == "optional-explicit-sibling" and
+    .guestPerformance == "embedded-recommended-native-v1" and
     .gpuZIncluded == $gpuZIncluded and
     (if $gpuZIncluded then
         .gpuZGuestPath == "C:\\Users\\Public\\Desktop\\GPU-Z.exe" and
@@ -702,15 +755,21 @@ GPUZ_RESULT='not included (default; install later from the official audited file
 if ((WITH_GPUZ)); then
     GPUZ_RESULT="C:\\Users\\Public\\Desktop\\GPU-Z.exe / sha256=$GPUZ_SHA256 / bytes=$GPUZ_BYTES"
 fi
+if [[ -n "$BASE_NAME" ]]; then
+    CLONE_HINT="  ./deploy/scripts/clone-from-base.sh $BASE_NAME NEW_VM_ID --gpu-profile gtx1050_2gb"
+else
+    CLONE_HINT="  自定义 --base 路径不是托管名称；请先放入 VM_BASE_DIR 并按名称调用 clone-from-base.sh。"
+fi
 cat <<EOF
 [vgpu-base] PASS
   base:       $BASE
   archive:    $BASE_BACKUP
   portable:   C:\\Users\\Public\\Desktop\\VgpuPortable.exe
               sha256=$PORTABLE_SHA256
+  performance: embedded recommended-native-v1
   GPU-Z:      $GPUZ_RESULT
   catalog:    $CATALOG_SHA256
 
 后续 clone 不需要再打包，也不需要 HTTP：
-  ./deploy/scripts/clone-vgpu-base.sh NEW_VM_ID --gpu-profile gtx1050_2gb
+$CLONE_HINT
 EOF

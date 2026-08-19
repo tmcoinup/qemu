@@ -26,17 +26,25 @@ DEVICES_DIR="$TMP_DIR/sys/bus/mdev/devices"
 V100_PARENT="$TMP_DIR/sys/devices/pci0000:00/0000:65:00.0"
 RTX_PARENT="$TMP_DIR/sys/devices/pci0000:00/0000:66:00.0"
 V100D_PARENT="$TMP_DIR/sys/devices/pci0000:00/0000:68:00.0"
+V100_1Q_TYPE="$V100_PARENT/mdev_supported_types/nvidia-105"
 V100_TYPE="$V100_PARENT/mdev_supported_types/nvidia-106"
 V100D_TYPE="$V100D_PARENT/mdev_supported_types/nvidia-291"
 RTX_TYPE="$RTX_PARENT/mdev_supported_types/nvidia-257"
 mkdir -p "$CLASS_DIR" "$DEVICES_DIR" \
-    "$V100_TYPE" "$V100D_TYPE" "$RTX_TYPE"
+    "$V100_1Q_TYPE" "$V100_TYPE" "$V100D_TYPE" "$RTX_TYPE"
 ln -s "$V100_PARENT" "$CLASS_DIR/0000:65:00.0"
 ln -s "$RTX_PARENT" "$CLASS_DIR/0000:66:00.0"
 ln -s "$V100D_PARENT" "$CLASS_DIR/0000:68:00.0"
 printf '%s\n' 0x10de >"$V100_PARENT/vendor"
 printf '%s\n' 0x10de >"$RTX_PARENT/vendor"
 printf '%s\n' 0x10de >"$V100D_PARENT/vendor"
+
+printf '%s\n' 'GRID V100-1Q' >"$V100_1Q_TYPE/name"
+printf '%s\n' 'num_heads=4, framebuffer=1024M, max_instance=16' \
+    >"$V100_1Q_TYPE/description"
+printf '%s\n' 16 >"$V100_1Q_TYPE/available_instances"
+printf '%s\n' vfio-pci >"$V100_1Q_TYPE/device_api"
+touch "$V100_1Q_TYPE/create"
 
 printf '%s\n' 'GRID V100-2Q' >"$V100_TYPE/name"
 printf '%s\n' 'num_heads=4, framebuffer=2048M, max_instance=8' \
@@ -93,6 +101,14 @@ VGPU_HOST_LOCK_FILE="$TMP_DIR/gpu-mode.lock"
 # shellcheck source=../../../lib/vgpu-mdev.sh
 source "$MDEV_LIB"
 
+for identity_key in gt740_1gb gt740_zotac_1gb gt730_gigabyte_1gb \
+        gtx750_asus_1gb gtx750_zotac_1gb; do
+    assert_eq RTX6000-1Q "$(_profile_to_keyword "$identity_key")" \
+        "$identity_key legacy 1Q keyword"
+    assert_eq nvidia-256 "$(_mdev_legacy_type_id "$identity_key")" \
+        "$identity_key legacy 1Q type"
+done
+
 # Host recovery/mode switching must exclude mdev create/remove through the same
 # advisory lock.  A held lock must fail closed instead of racing sysfs writes.
 exec 8<"$VGPU_HOST_LOCK_FILE"
@@ -115,6 +131,11 @@ VGPU_MGPU=auto
 found=$(mdev_find_type V100-2Q)
 assert_eq "$(readlink -f "$V100_TYPE")" "$(readlink -f "$found")" \
     'V100 type-name discovery'
+found_1q=$(mdev_find_type V100-1Q)
+assert_eq "$(readlink -f "$V100_1Q_TYPE")" "$(readlink -f "$found_1q")" \
+    'V100 1Q type-name discovery'
+assert_eq 1024 "$(mdev_type_framebuffer_mb "$V100_1Q_TYPE")" \
+    'V100 1Q framebuffer parsing'
 found_v100d=$(mdev_find_type V100D-2Q)
 assert_eq "$(readlink -f "$V100D_TYPE")" "$(readlink -f "$found_v100d")" \
     'V100D type-name discovery'
@@ -172,26 +193,44 @@ assert_eq "$(readlink -f "$V100_TYPE")/create" \
     "$(readlink -f "$(dirname "$WRITE_PATH")")/$(basename "$WRITE_PATH")" \
     'mdev create path'
 
+ALLOC_1Q_UUID=20000000-0000-0000-0000-000000000007
+mdev_allocate V100-1Q "$ALLOC_1Q_UUID" 1024 >/dev/null
+assert_eq "$ALLOC_1Q_UUID" "$WRITE_CONTENT" '1Q mdev create UUID'
+assert_eq "$(readlink -f "$V100_1Q_TYPE")/create" \
+    "$(readlink -f "$(dirname "$WRITE_PATH")")/$(basename "$WRITE_PATH")" \
+    '1Q mdev create path'
+if mdev_allocate V100-1Q 20000000-0000-0000-0000-000000000008 \
+        2048 >/dev/null 2>&1; then
+    fail '1Q framebuffer mismatch was accepted'
+fi
+
 if mdev_allocate V100-2Q 20000000-0000-0000-0000-000000000002 \
         4096 >/dev/null 2>&1; then
     fail 'framebuffer mismatch was accepted'
 fi
 
-# The eighth active 2 GiB vGPU fills a 16 GiB card; another allocation must be
-# rejected even if a patched driver over-reports available_instances.
-make_active "$V100_PARENT" "$V100_TYPE" 8
+# Two 1 GiB vGPUs mixed with seven 2 GiB vGPUs fill a 16 GiB card.  Capacity
+# accounting must inspect each active type instead of multiplying one size.
+make_active "$V100_PARENT" "$V100_1Q_TYPE" 8
+assert_eq 15360 "$(mdev_active_framebuffer_mb "$V100_1Q_TYPE" 1024)" \
+    'mixed 1Q/2Q framebuffer sum'
 WRITE_CONTENT=""
-if mdev_allocate V100-2Q 20000000-0000-0000-0000-000000000003 \
-        2048 >/dev/null 2>&1; then
+mdev_allocate V100-1Q 20000000-0000-0000-0000-000000000009 \
+    1024 >/dev/null
+[[ -n "$WRITE_CONTENT" ]] || fail 'final 1 GiB slot was rejected'
+make_active "$V100_PARENT" "$V100_1Q_TYPE" 9
+WRITE_CONTENT=""
+if mdev_allocate V100-1Q 20000000-0000-0000-0000-000000000003 \
+        1024 >/dev/null 2>&1; then
     fail '16 GiB hard capacity limit was not enforced'
 fi
 [[ -z "$WRITE_CONTENT" ]] || fail 'capacity failure attempted a sysfs write'
 
 # sysfs capacity is independently enforced when the framebuffer cap has room.
-rm -f "$DEVICES_DIR/10000000-0000-0000-0000-000000000008"
-printf '%s\n' 0 >"$V100_TYPE/available_instances"
-if mdev_allocate V100-2Q 20000000-0000-0000-0000-000000000004 \
-        2048 >/dev/null 2>&1; then
+rm -f "$DEVICES_DIR/10000000-0000-0000-0000-000000000009"
+printf '%s\n' 0 >"$V100_1Q_TYPE/available_instances"
+if mdev_allocate V100-1Q 20000000-0000-0000-0000-000000000004 \
+        1024 >/dev/null 2>&1; then
     fail 'available_instances=0 was ignored'
 fi
 

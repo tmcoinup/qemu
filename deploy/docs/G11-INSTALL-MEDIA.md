@@ -17,16 +17,16 @@
 ```
 
 正式启动不会挂载 Windows ISO、OOBE 应答 ISO 或 UEFI helper，Windows 中也不会
-残留这些光驱/USB 安装设备。
+残留这些 USB/应答安装设备。普通启动不创建任何空光驱。
 
 ## 默认路径与兼容回退
 
-| 模式 | 临时附加设备 | 启动顺序 | 正式启动是否存在 |
+| 模式 | 临时附加设备 | 启动顺序 | 正式启动是否保留 |
 |---|---|---|---|
 | 默认 `--install` | 只读 UEFI helper、xHCI USB Windows 光盘、可选应答光盘 | helper=1，系统盘=2，USB 光盘=3；helper 转入已连接的 USB 光盘 | 否 |
 | `--install --manual-oobe` | helper、USB Windows 光盘；无应答光盘 | 同上 | 否 |
 | `--install-media ide` | IDE Windows 光盘、可选应答光盘；无 helper | IDE 光盘=1，系统盘=2 | 否 |
-| 普通/救援启动 | 无安装介质 | 系统盘 | 不存在 |
+| 普通/救援启动 | 无安装介质、无光驱 | 系统盘 | 否 |
 
 只有默认路径在 fresh NVRAM 中需要 helper。OVMF 能高速读取 USB BOT 光盘，却不会为
 这类 Windows El Torito 布局自动建立可用启动项；helper 只负责查找同时含有
@@ -82,8 +82,9 @@ bash deploy/tests/vgpu/test_usb_install_boot_helper.sh
   命令，在提示出现时按一次空格；不需要手敲 UEFI 路径。
 - helper 缺失或哈希不符：启动器会在生成应答盘、创建空系统盘、启动 TPM/完整 VM 之前
   fail-closed，并打印重建或 IDE 回退命令。
-- Windows 已装完：完整关机后改用不带 `--install` 的正式启动命令，三种安装期设备
-  会全部消失。
+- Windows 已装完：完整关机后改用不带 `--install` 的正式启动命令，helper、
+  USB Windows ISO、应答 ISO 和光驱都会消失。日常手动热插见
+  [`G11-OPTICAL-DRIVE.md`](G11-OPTICAL-DRIVE.md)。
 - `--manual-oobe`：只关闭应答 ISO，不会关闭 Windows ISO 或 helper。
 - 将来启用 Secure Boot：当前 helper 没有第三方签名，不得通过关闭完整性检查或改
   BCD 绕过；保持现有 G-11 固件合同，或显式用 IDE 回退并另行审核正式签名方案。

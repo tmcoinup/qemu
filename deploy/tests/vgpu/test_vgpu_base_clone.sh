@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Fixture regression for clone-vgpu-base.sh.  The harness substitutes tiny
+# Fixture regression for the canonical clone-from-base.sh.  The harness substitutes tiny
 # create/start scripts and a text "base"; no real VM, qcow2 image, or NBD is
 # opened.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-CLONE_SOURCE="$REPO_ROOT/deploy/scripts/clone-vgpu-base.sh"
+CLONE_SOURCE="$REPO_ROOT/deploy/scripts/clone-from-base.sh"
 REAL_JQ=$(command -v jq || true)
 
 fail() {
@@ -32,13 +32,13 @@ trap cleanup EXIT
 
 HARNESS="$TMP_DIR/harness"
 mkdir -p "$HARNESS/deploy/lib" "$HARNESS/deploy/scripts" "$HARNESS/bin"
-cp -- "$CLONE_SOURCE" "$HARNESS/deploy/scripts/clone-vgpu-base.sh"
+cp -- "$CLONE_SOURCE" "$HARNESS/deploy/scripts/clone-from-base.sh"
 cp -- "$REPO_ROOT/deploy/lib/vm-storage.sh" "$HARNESS/deploy/lib/vm-storage.sh"
 cp -- "$REPO_ROOT/deploy/lib/vgpu-profiles.sh" \
     "$HARNESS/deploy/lib/vgpu-profiles.sh"
 cp -- "$REPO_ROOT/deploy/lib/gpuz-assets.sh" \
     "$HARNESS/deploy/lib/gpuz-assets.sh"
-chmod +x "$HARNESS/deploy/scripts/clone-vgpu-base.sh"
+chmod +x "$HARNESS/deploy/scripts/clone-from-base.sh"
 
 # jq wrapper gives the lock test an observable marker after sidecar parsing.
 cat >"$HARNESS/bin/jq" <<EOF
@@ -63,14 +63,22 @@ set -euo pipefail
 id=$1
 shift
 profile=""
+vram=""
 while (($#)); do
     case "$1" in
         --gpu-profile)
             profile=$2
             shift 2
             ;;
-        --platform|--ssd-profile|--monitor-profile)
+        --gpu-vram)
+            vram=$2
             shift 2
+            ;;
+        --platform|--cpu-profile|--board-profile|--memory-profile|--memory-size|--ssd-profile|--monitor-profile)
+            shift 2
+            ;;
+        --allow-fallback-platform)
+            shift
             ;;
         *)
             echo "unexpected create-vm fixture argument: $1" >&2
@@ -78,6 +86,11 @@ while (($#)); do
             ;;
     esac
 done
+if [[ "$vram" == 1024 ]]; then
+    profile=gt740_1gb
+elif [[ "$vram" == 2048 ]]; then
+    profile=gtx1050_colorful_2gb
+fi
 [[ -n "$profile" ]] || profile=gtx1050_colorful_2gb
 instance="$VM_INSTANCES_DIR/$id"
 mkdir -p "$instance"
@@ -99,7 +112,8 @@ set -euo pipefail
     printf '|%s' "$@"
     printf '\n'
 } >>"$TRACE"
-[[ $# -eq 2 && "$2" == --from-base ]]
+[[ $# -eq 4 && "$2" == --from-base && "$3" == --base-name ]]
+[[ "$4" =~ ^[A-Za-z0-9_-]+$ ]]
 [[ "${STUB_DISK_FAIL:-0}" != 1 ]] || exit 91
 [[ "${STUB_DISK_NO_PUBLISH:-0}" != 1 ]] || exit 0
 mkdir -p "$VM_INSTANCES_DIR/$1"
@@ -142,7 +156,8 @@ VM_INSTANCES_DIR="$VM_ROOT/instances"
 VM_BASE_DIR="$VM_ROOT/bases"
 VM_RUN_DIR="$VM_ROOT/run"
 TRACE="$TMP_DIR/trace"
-BASE="$VM_BASE_DIR/win10-base.qcow2"
+BASE_NAME=win10-base
+BASE="$VM_BASE_DIR/${BASE_NAME}.qcow2"
 ATTESTATION="${BASE}.vgpu-portable.json"
 export IMAGE_ROOT VM_ROOT VM_INSTANCES_DIR VM_BASE_DIR VM_RUN_DIR TRACE
 export PATH="$HARNESS/bin:$PATH"
@@ -176,7 +191,7 @@ write_attestation() {
         --arg catalogSha256 "$catalog" \
         --argjson extra "$extra_json" '
         {
-            schemaVersion: 4,
+            schemaVersion: 5,
             bindingMode: "portable-auto",
             basePath: $basePath,
             baseFileBytes: $baseFileBytes,
@@ -194,6 +209,7 @@ write_attestation() {
             gpuZGuestPath: null,
             gpuZSha256: null,
             gpuZBytes: null,
+            guestPerformance: "embedded-recommended-native-v1",
             catalogSha256: $catalogSha256,
             installedUtc: "2026-07-20T10:00:00Z"
         } + $extra
@@ -239,12 +255,52 @@ write_legacy_attestation() {
 write_attestation
 
 run_clone() {
-    "$HARNESS/deploy/scripts/clone-vgpu-base.sh" "$@"
+    "$HARNESS/deploy/scripts/clone-from-base.sh" "$BASE_NAME" "$@"
 }
 
+if "$HARNESS/deploy/scripts/clone-from-base.sh" 453 \
+        >"$TMP_DIR/missing-base-name.out" 2>"$TMP_DIR/missing-base-name.err"; then
+    fail "canonical clone guessed a base name"
+fi
+grep -Fq 'BASE_NAME NEW_VM_ID' "$TMP_DIR/missing-base-name.err" ||
+    fail "missing clone BASE_NAME usage error was not clear"
+
+# Every managed name selects its own qcow2 and its own attestation.  A second
+# generation must be cloneable without renaming or replacing win10-base.
+FIRST_BASE_NAME=$BASE_NAME
+FIRST_BASE=$BASE
+FIRST_ATTESTATION=$ATTESTATION
+BASE_NAME=win11-vgpu-v2
+BASE="$VM_BASE_DIR/${BASE_NAME}.qcow2"
+ATTESTATION="${BASE}.vgpu-portable.json"
+printf 'second portable-enabled standalone base fixture\n' >"$BASE"
+chmod 0444 "$BASE"
+write_attestation
+run_clone 455 --no-monitor-sync >"$TMP_DIR/named-base.out"
+grep -Fxq 'create-disk|455|--from-base|--base-name|win11-vgpu-v2' "$TRACE" ||
+    fail "second named base was not forwarded to create-disk"
+grep -Fq 'base name:   win11-vgpu-v2' "$TMP_DIR/named-base.out" ||
+    fail "clone handoff omitted the selected named base"
+
+BASE_NAME=$FIRST_BASE_NAME
+BASE=$FIRST_BASE
+ATTESTATION=$FIRST_ATTESTATION
+mapfile -t listed_bases < <(run_clone --list-bases)
+[[ "${listed_bases[*]}" == 'win10-base win11-vgpu-v2' ]] ||
+    fail "--list-bases did not expose both managed generations"
+if "$HARNESS/deploy/scripts/clone-from-base.sh" '../escape' 454 \
+        >"$TMP_DIR/unsafe-base.out" 2>"$TMP_DIR/unsafe-base.err"; then
+    fail "clone accepted an unsafe base name"
+fi
+grep -Fq 'invalid base name' "$TMP_DIR/unsafe-base.err" ||
+    fail "unsafe clone base-name refusal was not clear"
+
 run_clone --list-gpu-profiles >"$TMP_DIR/profiles.out"
-[[ "$(tail -n +2 "$TMP_DIR/profiles.out" | wc -l)" -eq 12 ]] ||
-    fail "clone did not expose all 12 atomic model/AIB/VRAM-maker rows"
+[[ "$(tail -n +2 "$TMP_DIR/profiles.out" | wc -l)" -eq 25 ]] ||
+    fail "clone did not expose all 25 atomic model/AIB/VRAM-maker rows"
+[[ "${#VGPU_DEFAULT_PROFILE_KEYS[@]}" -eq 24 &&
+   "${#VGPU_EXPLICIT_PROFILE_KEYS[@]}" -eq 1 ]] ||
+    fail "clone catalog changed the stable 24-row default / 1-row explicit policy"
 
 # VM IDs are not tied to VM1/2/3.  All audited profiles and forwarded hardware
 # selectors must reach the canonical create-vm/create-disk entry points.
@@ -253,7 +309,7 @@ grep -Fxq 'create-vm|456|--gpu-profile|gtx750ti_2gb' "$TRACE" ||
     fail "VM456 create-vm arguments are incorrect"
 grep -Fxq 'create-vm-start-lock|1' "$TRACE" ||
     fail "clone did not tell create-vm that it owns the VM start lock"
-grep -Fxq 'create-disk|456|--from-base' "$TRACE" ||
+grep -Fxq 'create-disk|456|--from-base|--base-name|win10-base' "$TRACE" ||
     fail "VM456 did not require the prepared base"
 grep -Fxq 'monitor-sync|456|start-lock=1' "$TRACE" ||
     fail "VM456 did not automatically apply its generated monitor profile"
@@ -267,10 +323,16 @@ run_clone 987654 --gpu-profile gt1030_2gb \
 grep -Fxq \
     'create-vm|987654|--gpu-profile|gt1030_2gb|--platform|office-intel|--ssd-profile|samsung-970-pro-512gb|--monitor-profile|lenovo-d24-20' \
     "$TRACE" || fail "forwarded create-vm selectors are incorrect"
-grep -Fxq 'create-disk|987654|--from-base' "$TRACE" ||
+grep -Fxq 'create-disk|987654|--from-base|--base-name|win10-base' "$TRACE" ||
     fail "VM987654 did not clone from base"
 grep -Fxq 'monitor-sync|987654|start-lock=1' "$TRACE" ||
     fail "explicit monitor profile was not automatically synchronized"
+
+run_clone 987655 --gpu-vram 1024 --memory-size 6G \
+    --allow-fallback-platform --no-monitor-sync >"$TMP_DIR/987655.out"
+grep -Fxq \
+    'create-vm|987655|--gpu-vram|1024|--memory-size|6G|--allow-fallback-platform' \
+    "$TRACE" || fail "capacity/fallback selectors were not forwarded"
 
 # Every catalog row, including non-reference AIB and VRAM-maker variants, is
 # accepted by the same VM-unbound clone path without repackaging.
@@ -287,8 +349,8 @@ done < <(vgpu_profile_keys)
 # all exact fields and remains a valid clone source.
 write_attestation "$CATALOG_SHA256" \
     '{"gpuZIncluded":true,"gpuZGuestPath":"C:\\Users\\Public\\Desktop\\GPU-Z.exe","gpuZSha256":"6CB0EF29682452DE81A9576808881685161411A1FAD00938BA04131159979C29","gpuZBytes":11642144}'
-run_clone 820 --no-monitor-sync >"$TMP_DIR/gpuz-included.out"
-grep -Fxq 'create-vm|820' "$TRACE" ||
+run_clone 830 --no-monitor-sync >"$TMP_DIR/gpuz-included.out"
+grep -Fxq 'create-vm|830' "$TRACE" ||
     fail "default clone pinned a fixed GPU instead of delegating random selection"
 grep -Fq 'GPU profile: gtx1050_colorful_2gb' \
     "$TMP_DIR/gpuz-included.out" ||
@@ -302,7 +364,7 @@ run_clone 2147483647 --gpu-profile gtx1050_2gb --start \
     >"$TMP_DIR/max-id.out"
 grep -Fxq 'create-vm|2147483647|--gpu-profile|gtx1050_2gb' "$TRACE" ||
     fail "maximum supported VM ID was not forwarded"
-grep -Fxq 'create-disk|2147483647|--from-base' "$TRACE" ||
+grep -Fxq 'create-disk|2147483647|--from-base|--base-name|win10-base' "$TRACE" ||
     fail "maximum supported VM ID disk was not cloned"
 grep -Fxq 'start-vm|2147483647' "$TRACE" ||
     fail "--start did not release its locks and invoke start-vm"
@@ -310,6 +372,8 @@ grep -Fq 'C:\Users\Public\Desktop\VgpuPortable.exe' "$TMP_DIR/max-id.out" ||
     fail "clone handoff omitted the offline guest EXE path"
 grep -Fq 'GPU-Z:       not included (default)' "$TMP_DIR/max-id.out" ||
     fail "clone handoff did not report the default no-GPU-Z state"
+grep -Fq 'performance: embedded recommended-native-v1' "$TMP_DIR/max-id.out" ||
+    fail "clone handoff omitted the attested guest performance profile"
 
 # Monitor handling is automatic even without --start.  A pristine base may
 # need one guest enumeration; that is a successful deferred state, while the
@@ -406,6 +470,12 @@ fi
 write_attestation "$CATALOG_SHA256" '{"gpuZDelivery":"embedded"}'
 if run_clone 615 >"$TMP_DIR/delivery.out" 2>"$TMP_DIR/delivery.err"; then
     fail "clone accepted a non-optional GPU-Z delivery attestation"
+fi
+write_attestation "$CATALOG_SHA256" \
+    '{"guestPerformance":"not-embedded"}'
+if run_clone 614 >"$TMP_DIR/performance.out" \
+        2>"$TMP_DIR/performance.err"; then
+    fail "clone accepted a base without the unified guest performance profile"
 fi
 write_attestation "$CATALOG_SHA256" \
     '{"gpuZSha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}'
@@ -537,7 +607,7 @@ wait "$locked_pid" || fail "clone failed after the storage lock was released"
 children=()
 grep -Fxq 'create-vm|700' "$TRACE" ||
     fail "lock-delayed clone did not create its VM"
-grep -Fxq 'create-disk|700|--from-base' "$TRACE" ||
+grep -Fxq 'create-disk|700|--from-base|--base-name|win10-base' "$TRACE" ||
     fail "lock-delayed clone did not create its disk"
 
 # A busy per-VM lifecycle lock must fail before sidecar parsing or helper

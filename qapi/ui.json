@@ -1529,10 +1529,25 @@
 # @grab-mod: Modifier keys that should be pressed together with the
 #     "G" key to release the mouse grab.
 #
+# @title: Complete title for primary SDL window.  Secondary console
+#     indices are appended only for other SDL windows.  When omitted,
+#     the guest name supplied by ``-name`` is used.  This lets
+#     launchers
+#     expose a stable desktop-window identity without changing the
+#     QMP/process identity.  (Since 9.2)
+#
+# @single-console: Create an SDL window only for console index 0.
+#     Other QEMU consoles remain available to non-SDL display
+#     listeners.  This is
+#     useful for a launcher that exposes one operator window per VM.
+#     (default: false, since 9.2)
+#
 # Since: 7.1
 ##
 { 'struct'  : 'DisplaySDL',
-  'data'    : { '*grab-mod'   : 'HotKeyMod' } }
+  'data'    : { '*grab-mod'   : 'HotKeyMod',
+                '*title'      : 'str',
+                '*single-console' : 'bool' } }
 
 ##
 # @DisplayFbShm:

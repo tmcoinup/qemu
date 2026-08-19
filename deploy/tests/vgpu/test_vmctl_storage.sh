@@ -91,8 +91,8 @@ for invocation in \
         fail "vmctl $action bypassed the canonical deploy/scripts entry"
 done
 
-for name in create-vm.sh create-disk.sh clone-vgpu-base.sh promote-base.sh \
-        sync-monitor-profile.sh; do
+for name in create-vm.sh create-disk.sh clone-from-base.sh seal-base.sh \
+        promote-base.sh sync-monitor-profile.sh; do
     cat >"$FIXTURE/deploy/scripts/$name" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -102,13 +102,25 @@ EOF
 done
 
 WRAPPED_ROOT="$TMP_DIR/wrapped vms"
-for action in create disk clone promote monitor; do
+for action in create disk clone seal promote monitor; do
     result="$TMP_DIR/$action.result"
+    action_args=(23)
+    expected_args='23 --example-option value'
+    case "$action" in
+        clone)
+            action_args=(win10-ltsc-v2 23)
+            expected_args='win10-ltsc-v2 23 --example-option value'
+            ;;
+        seal)
+            action_args=(23 win10-ltsc-v2)
+            expected_args='23 win10-ltsc-v2 --example-option value'
+            ;;
+    esac
     VMCTL_RESULT="$result" "${unset_storage_env[@]}" \
-        "$FIXTURE/deploy/scripts/vmctl.sh" "$action" 23 \
+        "$FIXTURE/deploy/scripts/vmctl.sh" "$action" "${action_args[@]}" \
         --vms-dir "$WRAPPED_ROOT" --example-option value
     [[ "$(<"$result")" == \
-       "$WRAPPED_ROOT|$WRAPPED_ROOT|23 --example-option value" ]] \
+       "$WRAPPED_ROOT|$WRAPPED_ROOT|$expected_args" ]] \
         || fail "vmctl $action did not export/forward the selected root correctly"
 done
 monitor_result="$TMP_DIR/monitor-profile.result"

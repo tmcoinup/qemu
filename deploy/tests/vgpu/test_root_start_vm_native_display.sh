@@ -141,6 +141,11 @@ EOF
 cat >"$TMP_DIR/qemu-system-x86_64" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$FAKE_QEMU_TRACE"
+printf 'XMODIFIERS=%s SDL_IM_MODULE=%s IBUS_ADDRESS=%s NATIVE_EGL=%s SDL_DRIVER=%s WMCLASS=%s args=%s\n' \
+    "${XMODIFIERS-}" "${SDL_IM_MODULE-}" "${IBUS_ADDRESS-}" \
+    "${QEMU_SDL_NATIVE_EGL-}" "${SDL_VIDEODRIVER-}" \
+    "${SDL_VIDEO_X11_WMCLASS-}" "$*" \
+    >>"$FAKE_QEMU_ENV_TRACE"
 if [ "$#" -eq 2 ] && [ "$1" = -display ] && [ "$2" = help ]; then
     printf '%s\n' gtk sdl
     exit 0
@@ -169,6 +174,7 @@ exit 99
 EOF
 chmod +x "$TMP_DIR/qemu-system-x86_64"
 : >"$TMP_DIR/qemu.trace"
+: >"$TMP_DIR/qemu-env.trace"
 
 run_start_vm() {
     local output=$1
@@ -188,6 +194,7 @@ run_start_vm() {
         OVMF_VARS="$TMP_DIR/OVMF_VARS.fd" \
         REPAIR_DISPLAY_VARS=off \
         FAKE_QEMU_TRACE="$TMP_DIR/qemu.trace" \
+        FAKE_QEMU_ENV_TRACE="$TMP_DIR/qemu-env.trace" \
         "${optional_env[@]}" \
         "$START_VM" "$VM_ID" --dry-run "$@" >"$output" 2>"${output%.out}.err"
 }
@@ -199,18 +206,20 @@ RESCUE_OUT="$TMP_DIR/rescue.out"
 MISSING_RTC_OUT="$TMP_DIR/missing-rtc.out"
 V100_OUT="$TMP_DIR/v100.out"
 NO_TPM_OUT="$TMP_DIR/no-tpm.out"
+NO_PREVIEW_OUT="$TMP_DIR/no-preview.out"
 STREAM_OUT="$TMP_DIR/stream.out"
 GT1030_OUT="$TMP_DIR/gt1030.out"
 VLAN_OUT="$TMP_DIR/vlan.out"
 
 run_start_vm "$SDL_OUT"
 require_text "模式=vgpu-sdl" "$SDL_OUT"
+require_text "XMODIFIERS=@im=none SDL_IM_MODULE=none IBUS_ADDRESS=/nonexistent NATIVE_EGL=1 SDL_DRIVER=x11 WMCLASS=win10-${VM_ID} args=-display help" \
+    "$TMP_DIR/qemu-env.trace"
 require_text 'ide-cd.bootindex=-1' "$SDL_OUT"
 reject_text 'id=odd0' "$SDL_OUT"
-reject_text 'media=cdrom' "$SDL_OUT"
+reject_text 'id=g11-odd' "$SDL_OUT"
 reject_text 'id=installboot' "$SDL_OUT"
 reject_text 'g11-usb-install-boot.img' "$SDL_OUT"
-reject_text 'ide-cd\,drive=' "$SDL_OUT"
 reject_text 'scsi-cd' "$SDL_OUT"
 require_text 'vGPU resource: nvidia-257/2048MB' "$SDL_OUT"
 require_native_vfio "$SDL_OUT"
@@ -218,7 +227,11 @@ require_vgpu_root_port "$SDL_OUT"
 require_text 'x-pci-device-id=0x0C01' "$SDL_OUT"
 require_text 'x-pci-revision=0x06' "$SDL_OUT"
 require_tpm2 "$SDL_OUT"
-require_text 'sdl\,gl=on' "$SDL_OUT"
+require_text "sdl\\,gl=on\\,title=win10-${VM_ID}\\,single-console=on" "$SDL_OUT"
+require_text "fb-shm\\,id=dgame-preview-vm${VM_ID}\\,path=${VM_ROOT}/${VM_ID}/run/dgame-fb-shm.sock\\,rate=60" \
+    "$SDL_OUT"
+require_text 'DGame transport: GPU first (active display EGL/dma-buf)' "$SDL_OUT"
+require_text 'DGame fallback: per-client SHM' "$SDL_OUT"
 require_text 'processor-upgrade=0x2D' "$SDL_OUT"
 require_text 'rank=1\,rank-list=1\|1\,voltage=1500' "$SDL_OUT"
 require_text 'firmware-rev=1.0' "$SDL_OUT"
@@ -239,7 +252,8 @@ require_text 'usb-kbd\,id=kbd0\,bus=xhci.0\,usb_version=2\,vendorid=0x045E\,prod
     "$SDL_OUT"
 require_text 'usb-tablet\,bus=xhci.0\,usb_version=2\,vendorid=0x256C\,productid=0x006D\,bcd-device=0x0100\,manufacturer=HUION\,product=HUION\ PenTablet' \
     "$SDL_OUT"
-reject_text 'multi=on' "$SDL_OUT"
+require_text "unix:${VM_ROOT}/${VM_ID}/run/qmp.sock\\,server\\,nowait\\,multi=on" \
+    "$SDL_OUT"
 if grep -F -- 'usb-kbd\,' "$SDL_OUT" | grep -Fq -- 'serial=' ||
         grep -F -- 'usb-tablet\,' "$SDL_OUT" | grep -Fq -- 'serial='; then
     fail 'legacy USB HID fallback invented a descriptor serial number'
@@ -250,6 +264,11 @@ require_no_legacy_transport "$SDL_OUT"
 require_text 'bridge\,id=net0\,br=br0\,helper=/usr/local/libexec/qemu-g11-bridge-helper' \
     "$SDL_OUT"
 reject_text 'g11t' "$SDL_OUT"
+
+run_start_vm "$NO_PREVIEW_OUT" --no-dgame-preview
+reject_text 'id=dgame-preview-vm' "$NO_PREVIEW_OUT"
+reject_text 'DGame transport:' "$NO_PREVIEW_OUT"
+reject_text 'multi=on' "$NO_PREVIEW_OUT"
 
 run_start_vm "$VLAN_OUT" --vlan-id 11
 require_text "网络: access VLAN 11 / g11t${VM_ID} -> br0（guest untagged）" \
@@ -283,6 +302,8 @@ require_native_vfio "$GTK_OUT"
 require_vgpu_root_port "$GTK_OUT"
 require_tpm2 "$GTK_OUT"
 require_text 'gtk\,gl=on\,show-cursor=on\,grab-on-hover=on' "$GTK_OUT"
+require_text "fb-shm\\,id=dgame-preview-vm${VM_ID}\\,path=${VM_ROOT}/${VM_ID}/run/dgame-fb-shm.sock\\,rate=60" \
+    "$GTK_OUT"
 require_text "unix:${VM_ROOT}/${VM_ID}/run/qmp.sock\\,server\\,nowait\\,multi=on" \
     "$GTK_OUT"
 require_text "QMP multi: native multi-client on ${VM_ROOT}/${VM_ID}/run/qmp.sock" \
@@ -310,6 +331,7 @@ run_start_vm "$STREAM_OUT" \
     --stream-roi 100,50,1280,720 --stream-rate 60 \
     --stream-encoder h264_nvenc --stream-bitrate 8M --stream-mode shm
 require_text 'fb-shm\,id=stream-vm' "$STREAM_OUT"
+require_text 'fb-shm\,id=dgame-preview-vm' "$STREAM_OUT"
 require_text 'rate=60\,x=100\,y=50\,width=1280\,height=720' "$STREAM_OUT"
 require_text '推流: fb-shm 60Hz mode=shm encoder=h264_nvenc target=rtmp://...' \
     "$STREAM_OUT"
@@ -348,7 +370,7 @@ require_text 'kvm-pit.lost_tick_policy=delay' "$RESCUE_OUT"
 reject_text 'vfio-pci' "$RESCUE_OUT"
 reject_text 'vnc=' "$RESCUE_OUT"
 reject_text 'id=odd0' "$RESCUE_OUT"
-reject_text 'media=cdrom' "$RESCUE_OUT"
+reject_text 'id=g11-odd' "$RESCUE_OUT"
 reject_text 'id=installboot' "$RESCUE_OUT"
 reject_text 'g11-usb-install-boot.img' "$RESCUE_OUT"
 
@@ -386,8 +408,8 @@ reject_text 'tpm-crb\,tpmdev=tpm0' "$NO_TPM_OUT"
 # does not require the physical V100 to be present.
 cat >"$TMP_DIR/vgpu-host-v100.conf" <<'EOF'
 VGPU_MGPU=auto
-VGPU_RESOURCE_PROFILE=V100-2Q
-VGPU_RESOURCE_FB_MB=2048
+VGPU_RESOURCE_PROFILE_1024=V100-1Q
+VGPU_RESOURCE_PROFILE_2048=V100-2Q
 VGPU_TOTAL_FB_MB=16384
 VGPU_CONSOLE_INTERVAL_US=0
 EOF
@@ -399,6 +421,20 @@ require_native_vfio "$V100_OUT"
 require_vgpu_root_port "$V100_OUT"
 require_tpm2 "$V100_OUT"
 require_no_legacy_transport "$V100_OUT"
+
+# The same host file must choose V100-1Q for a 1 GiB catalog identity without
+# changing any guest-visible fields or persisting a host resource into vm.conf.
+cp -- "$VM_ROOT/${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.2gb"
+sed -i 's/^GPU_PROFILE=.*/GPU_PROFILE=gtx750_asus_1gb/' \
+    "$VM_ROOT/${VM_ID}/vm.conf"
+run_start_vm "$TMP_DIR/v100-1q.out"
+require_text 'vGPU resource: V100-1Q/1024MB' "$TMP_DIR/v100-1q.out"
+require_text 'GPU identity: gtx750_asus_1gb / NVIDIA GeForce GTX 750' \
+    "$TMP_DIR/v100-1q.out"
+require_native_vfio "$TMP_DIR/v100-1q.out"
+require_vgpu_root_port "$TMP_DIR/v100-1q.out"
+require_no_legacy_transport "$TMP_DIR/v100-1q.out"
+mv -- "$TMP_DIR/vm.conf.2gb" "$VM_ROOT/${VM_ID}/vm.conf"
 unset TEST_VGPU_HOST_CONFIG
 
 cat >"$TMP_DIR/vgpu-host-bad-fb.conf" <<'EOF'
@@ -415,9 +451,10 @@ require_text 'guest 显存 2048MB 与宿主 mdev 4096MB 不一致' \
 unset TEST_VGPU_HOST_CONFIG
 
 # Every vGPU run probes the root-port link/identity properties.  Native runs
-# also probe their display backend and ramfb support; streamed SDL adds the
-    # fb-shm object probe.  Invalid stream/VLAN configurations fail before any probe.
-[[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 24 ]] \
+# also probe their display backend and ramfb support; DGame preview and external
+# streaming share one fb-shm capability probe.  Invalid configurations fail
+# before any probe.  The explicit --no-dgame-preview run omits that one probe.
+[[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 37 ]] \
     || fail "fake QEMU saw an unexpected invocation"
 
 [[ -z "$(find "$VM_ROOT/control" -mindepth 1 -print -quit)" ]] \

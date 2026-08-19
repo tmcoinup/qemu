@@ -50,6 +50,11 @@ require_marker_input 'update-vgpu-mdev-identity.py'
 require_marker_input 'vgpu_display_contract=1:1920:1080:2073600'
 require_marker_input 'host-edid-sync-v8-edid-override'
 
+grep -F -- 'vgpu_profile_native_grid_pnp_id' "$SYNC" >/dev/null ||
+    fail "monitor sync does not map nvidia-256/257 to the native 1Q/2Q PnP ID"
+grep -F -- "\${VGPU_MDEV_PROFILE:-}" "$SYNC" >/dev/null ||
+    fail "monitor sync native PnP mapping is not selected from the VM profile"
+
 if grep -E 'host-edid-sync-v(3|4|5|6|7)([^0-9]|$)' "$SYNC" >/dev/null; then
     fail "legacy v3..v7 marker generation remains"
 fi

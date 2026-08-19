@@ -191,7 +191,7 @@ case "$MANIFEST_SCHEMA" in
             ] and
             .schemaVersion == 3 and .bindingMode == "portable-auto" and
             (.files | type) == "array" and
-            (.files | length) >= 10 and (.files | length) <= 31 and
+            (.files | length) >= 10 and (.files | length) <= 64 and
             all(.files[];
                 type == "object" and
                 (keys | sort) == ["bytes", "name", "sha256"] and
@@ -223,7 +223,7 @@ case "$MANIFEST_SCHEMA" in
             ] and
             .schemaVersion == 4 and .bindingMode == "portable-auto" and
             (.files | type) == "array" and
-            (.files | length) >= 10 and (.files | length) <= 31 and
+            (.files | length) >= 10 and (.files | length) <= 64 and
             all(.files[];
                 type == "object" and
                 (keys | sort) == ["bytes", "name", "sha256"] and
@@ -310,6 +310,7 @@ if [[ "$BINDING_MODE" == portable-auto ]]; then
                 (.boardBrand | test("^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$")) and
                 (.boardModel | test("^[A-Za-z0-9][A-Za-z0-9 ._-]{0,30}$")) and
                 (.memoryMakerName == "Samsung" or
+                 .memoryMakerName == "Elpida" or
                  .memoryMakerName == "SK hynix" or
                  .memoryMakerName == "Micron") and
                 (.asset | keys | sort) == ["name", "sha256"] and
@@ -559,6 +560,29 @@ for required_name in \
     [[ -n "${seen_casefold[${required_name,,}]+x}" ]] \
         || die "manifest omits required GPU-Z asset: $required_name"
 done
+UNIFIED_PERFORMANCE=0
+performance_names=(
+    Optimize-Guest.ps1
+    01-Audit.cmd
+    02-Apply-Recommended.cmd
+    03-Verify.cmd
+    04-Rollback.cmd
+    README.txt
+)
+for performance_name in "${performance_names[@]}"; do
+    if [[ -n "${seen_casefold[${performance_name,,}]+x}" ]]; then
+        UNIFIED_PERFORMANCE=1
+        break
+    fi
+done
+if ((UNIFIED_PERFORMANCE)); then
+    [[ "$CONTRACT_SCHEMA" == 6 || "$CONTRACT_SCHEMA" == 7 ]] ||
+        die "guest performance payload requires portable identity schema 6 or 7"
+    for performance_name in "${performance_names[@]}"; do
+        [[ -n "${seen_casefold[${performance_name,,}]+x}" ]] ||
+            die "unified portable manifest omits guest performance asset: $performance_name"
+    done
+fi
 if ((!EXTERNAL_GPUZ)); then
     [[ -n "${seen_casefold[${CONTRACT_GPUZ_NAME,,}]+x}" ]] \
         || die "manifest omits required GPU-Z asset: $CONTRACT_GPUZ_NAME"
@@ -645,7 +669,17 @@ install -m 0600 -- "$here/gpuz_profile_launcher.manifest" \
 metadata="$tmp/payload_metadata.h"
 resource_file="$tmp/gpuz_profile_launcher.rc"
 if ((EXTERNAL_GPUZ)); then
-    if [[ "$CONTRACT_SCHEMA" == 7 ]]; then
+    if ((UNIFIED_PERFORMANCE)) && [[ "$CONTRACT_SCHEMA" == 7 ]]; then
+        LAUNCHER_MARKER='QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7'
+        LAUNCHER_VERSION_COMMA='1,7,0,0'
+        LAUNCHER_VERSION_TEXT='1.7.0.0'
+        LAUNCHER_DESCRIPTION='Private vGPU identity, license and performance setup'
+    elif ((UNIFIED_PERFORMANCE)) && [[ "$CONTRACT_SCHEMA" == 6 ]]; then
+        LAUNCHER_MARKER='QEMU_VGPU_PORTABLE_UNIFIED_V6'
+        LAUNCHER_VERSION_COMMA='1,6,0,0'
+        LAUNCHER_VERSION_TEXT='1.6.0.0'
+        LAUNCHER_DESCRIPTION='vGPU identity and guest performance setup'
+    elif [[ "$CONTRACT_SCHEMA" == 7 ]]; then
         LAUNCHER_MARKER='QEMU_VGPU_PORTABLE_LICENSED_V5'
         LAUNCHER_VERSION_COMMA='1,5,0,0'
         LAUNCHER_VERSION_TEXT='1.5.0.0'

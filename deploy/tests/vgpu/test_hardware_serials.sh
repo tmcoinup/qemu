@@ -33,7 +33,8 @@ assert_eq '' "$source_output" 'source-time output'
 source "$SERIAL_LIB"
 
 # Board serials are vendor-bound.  MSI additionally binds its MS-XXXX board
-# code, and Gigabyte binds release YY plus a real 01..53 week field.
+# code, Gigabyte binds release YY plus a real 01..53 week field, and ASRock/
+# ECS follow their published label formats.
 for _iteration in $(seq 1 32); do
     asus_serial=$(g11_hardware_serial_board_generate \
         'ASUSTeK COMPUTER INC.' H81M-K 2013)
@@ -58,6 +59,19 @@ for _iteration in $(seq 1 32); do
         fail "generated Gigabyte serial is invalid: $gigabyte_serial"
     [[ "$gigabyte_serial" =~ ^SN14(0[1-9]|[1-4][0-9]|5[0-3])[0-9]{8}$ ]] ||
         fail "Gigabyte year/week shape drifted: $gigabyte_serial"
+
+    asrock_serial=$(g11_hardware_serial_board_generate ASRock H81M-HDS 2013)
+    g11_hardware_serial_board_validate \
+        ASRock "$asrock_serial" H81M-HDS 2013 ||
+        fail "generated ASRock serial is invalid: $asrock_serial"
+    [[ "$asrock_serial" =~ ^[0-9A-Z]{2}M0X[A-Z][0-9]{6}$ ]] ||
+        fail "ASRock serial shape drifted: $asrock_serial"
+
+    ecs_serial=$(g11_hardware_serial_board_generate ECS H81H3-M4 2013)
+    g11_hardware_serial_board_validate ECS "$ecs_serial" H81H3-M4 2013 ||
+        fail "generated ECS serial is invalid: $ecs_serial"
+    [[ "$ecs_serial" =~ ^[A-Z][0-9]{5}[A-Z][0-9]{8}$ ]] ||
+        fail "ECS serial shape drifted: $ecs_serial"
 done
 
 # Accepted aliases match current G-11 and the canonical V-11 spellings.
@@ -70,6 +84,12 @@ g11_hardware_serial_board_validate \
 g11_hardware_serial_board_validate \
     'Gigabyte Technology Co., Ltd.' SN141200024108 GA-H81M-S1 2014 ||
     fail 'canonical Gigabyte alias rejected a valid serial'
+g11_hardware_serial_board_validate \
+    'ASRock Inc.' 71M0XE001276 H81M-HDS 2013 ||
+    fail 'canonical ASRock alias rejected an official-shape serial'
+g11_hardware_serial_board_validate \
+    'Elitegroup Computer Systems Co., Ltd.' A12345B12345678 H81H3-M4 2013 ||
+    fail 'canonical ECS alias rejected an official-shape serial'
 
 assert_rejected 'ASUS missing fixed third S' \
     g11_hardware_serial_board_validate ASUS A12B3C4D5E6F '' ''
@@ -84,6 +104,10 @@ assert_rejected 'Gigabyte week zero' \
     g11_hardware_serial_board_validate Gigabyte SN140000024108 GA-H81M-S1 2014
 assert_rejected 'Gigabyte week 54' \
     g11_hardware_serial_board_validate Gigabyte SN145400024108 GA-H81M-S1 2014
+assert_rejected 'ASRock serial without fixed M0X token' \
+    g11_hardware_serial_board_validate ASRock 71M1XE001276 H81M-HDS 2013
+assert_rejected 'ECS serial without the second letter' \
+    g11_hardware_serial_board_validate ECS A12345612345678 H81H3-M4 2013
 assert_rejected 'unknown board vendor' \
     g11_hardware_serial_board_generate Example Example-H81 2014
 

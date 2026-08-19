@@ -153,9 +153,30 @@ import json
 import os
 import socket
 import sys
+import threading
 
 path = sys.argv[-2]
 record = sys.argv[-1]
+vcpu_count = int(os.environ.get("FAKE_QMP_VCPUS", "1"))
+threads_per_core = int(os.environ.get("FAKE_QMP_THREADS_PER_CORE", "1"))
+if vcpu_count < 1 or threads_per_core < 1 or vcpu_count % threads_per_core:
+    raise SystemExit("invalid fake QMP topology")
+stop_workers = threading.Event()
+worker_ids = []
+worker_ready = threading.Condition()
+
+def worker():
+    with worker_ready:
+        worker_ids.append(threading.get_native_id())
+        worker_ready.notify_all()
+    stop_workers.wait()
+
+workers = [threading.Thread(target=worker, daemon=True) for _ in range(vcpu_count)]
+for thread in workers:
+    thread.start()
+with worker_ready:
+    while len(worker_ids) != vcpu_count:
+        worker_ready.wait(timeout=1)
 try:
     os.unlink(path)
 except FileNotFoundError:
@@ -175,7 +196,19 @@ for connection_index in range(2):
         command = request["execute"]
         ident = request["id"]
         if command == "query-cpus-fast":
-            result = [{"cpu-index": 0, "thread-id": os.getpid()}]
+            result = [
+                {
+                    "cpu-index": index,
+                    "thread-id": worker_ids[index],
+                    "props": {
+                        "socket-id": 0,
+                        "core-id": index // threads_per_core,
+                        "thread-id": index % threads_per_core,
+                        "node-id": 0,
+                    },
+                }
+                for index in range(vcpu_count)
+            ]
         else:
             result = {}
         stream.write((json.dumps({"return": result, "id": ident}) + "\r\n").encode())
@@ -185,6 +218,9 @@ for connection_index in range(2):
             break
     conn.close()
 server.close()
+stop_workers.set()
+for thread in workers:
+    thread.join(timeout=1)
 PY
 cat >"$TMP_DIR/fake-helper" <<'EOF'
 #!/usr/bin/env bash
@@ -299,11 +335,9 @@ DRY_RUN=0
 FAKE_HELPER_LOG="$TMP_DIR/fake-helper.log"
 export CPU_ISOLATION_HELPER FAKE_HELPER_LOG
 PLAN_OUTPUT=$(cpu_isolation_print_plan)
-grep -Fq 'service CPUs=auto' <<<"$PLAN_OUTPUT" \
-    || fail "CPU isolation library default service CPU count is not auto"
-# Keep this handshake deterministic; auto placement is host-capacity dependent.
-QEMU_SERVICE_CPUS=0
-cpu_isolation_launch 42 1 "$TMP_DIR/qmp.sock" "$TMP_DIR/qemu.pid" \
+grep -Fq 'service CPUs=0' <<<"$PLAN_OUTPUT" \
+    || fail "CPU isolation library default service CPU count is not zero"
+cpu_isolation_launch 42 1 1 1 "$TMP_DIR/qmp.sock" "$TMP_DIR/qemu.pid" \
     "$TMP_DIR/cpu.state"
 wait "$CPU_ISOLATION_PINNER_PID" || fail "QMP pinner failed"
 CPU_ISOLATION_PINNER_PID=""
@@ -344,29 +378,80 @@ done
 QEMU_SERVICE_CPUS=auto
 CPU_ISOLATION_SYS_CPU_ROOT=$AUTO_TOPOLOGY
 CPU_ISOLATION_CGROUP_ROOT=$AUTO_CGROUP
-cpu_isolation_launch 43 1 "$TMP_DIR/qmp-auto.sock" "$TMP_DIR/qemu-auto.pid" \
+cpu_isolation_launch 43 1 1 1 "$TMP_DIR/qmp-auto.sock" "$TMP_DIR/qemu-auto.pid" \
     "$TMP_DIR/cpu-auto.state"
 wait "$CPU_ISOLATION_PINNER_PID" || fail "auto QMP pinner failed"
 CPU_ISOLATION_PINNER_PID=""
 wait "$FAKE_QMP_PID" || fail "auto fake QMP failed"
-grep -Eq '^apply 43 [0-9]+ 2,3 [0-9]+ 0$' "$TMP_DIR/fake-helper.log" \
+grep -Eq '^apply 43 [0-9]+ 3 [0-9]+ 0$' "$TMP_DIR/fake-helper.log" \
     || fail "auto service CPU did not account for an existing VM allocation"
 cpu_isolation_cleanup 43 "$TMP_DIR/cpu-auto.state"
 unset CPU_ISOLATION_SYS_CPU_ROOT CPU_ISOLATION_CGROUP_ROOT
 
+# A 2C/4T guest must consume two complete host SMT cores.  Seven existing
+# 2C/4T VMs occupy host cores 3..16; vm8 must receive cores 17 and 18, leaving
+# host cores 0..2 and 19..21 (6C/12T) outside the eight-VM allocation.
+SMT_TOPOLOGY="$TMP_DIR/smt-topology"
+SMT_CGROUP="$TMP_DIR/smt-cgroup"
+mkdir -p "$SMT_TOPOLOGY" "$SMT_CGROUP/qemu-vm-isolation"
+printf '0-43\n' >"$SMT_TOPOLOGY/online"
+for cpu in $(seq 0 43); do
+    if ((cpu < 22)); then sibling=$((cpu + 22)); else sibling=$((cpu - 22)); fi
+    first=$cpu
+    second=$sibling
+    if ((first > second)); then first=$sibling; second=$cpu; fi
+    mkdir -p "$SMT_TOPOLOGY/cpu${cpu}/topology"
+    printf '%s,%s\n' "$first" "$second" \
+        >"$SMT_TOPOLOGY/cpu${cpu}/topology/thread_siblings_list"
+done
+for vm in $(seq 1 7); do
+    first_core=$((3 + (vm - 1) * 2))
+    second_core=$((first_core + 1))
+    mkdir -p "$SMT_CGROUP/qemu-vm-isolation/vm${vm}"
+    printf '%s\n' "$((9000 + vm))" \
+        >"$SMT_CGROUP/qemu-vm-isolation/vm${vm}/cgroup.procs"
+    printf '%s,%s,%s,%s\n' \
+        "$first_core" "$((first_core + 22))" \
+        "$second_core" "$((second_core + 22))" \
+        >"$SMT_CGROUP/qemu-vm-isolation/vm${vm}/cpuset.cpus"
+done
+: >"$TMP_DIR/fake-helper.log"
+FAKE_QMP_VCPUS=4 FAKE_QMP_THREADS_PER_CORE=2 \
+    "$TMP_DIR/fake-qmp.py" -name vm8 "$TMP_DIR/qmp-smt.sock" \
+    "$TMP_DIR/qmp-smt.record" &
+FAKE_QMP_PID=$!
+for _ in $(seq 1 100); do
+    [[ -S "$TMP_DIR/qmp-smt.sock" ]] && break
+    kill -0 "$FAKE_QMP_PID" 2>/dev/null || fail "SMT fake QMP exited early"
+    sleep 0.01
+done
+QEMU_SERVICE_CPUS=0
+CPU_ISOLATION_SYS_CPU_ROOT=$SMT_TOPOLOGY
+CPU_ISOLATION_CGROUP_ROOT=$SMT_CGROUP
+cpu_isolation_launch 8 4 2 2 "$TMP_DIR/qmp-smt.sock" \
+    "$TMP_DIR/qemu-smt.pid" "$TMP_DIR/cpu-smt.state"
+wait "$CPU_ISOLATION_PINNER_PID" || fail "2C/4T topology pinner failed"
+CPU_ISOLATION_PINNER_PID=""
+wait "$FAKE_QMP_PID" || fail "SMT fake QMP failed"
+grep -Eq '^apply 8 [0-9]+ 17,39,18,40 [0-9]+,[0-9]+,[0-9]+,[0-9]+ 0$' \
+    "$TMP_DIR/fake-helper.log" \
+    || fail "vm8 was not mapped to two complete host SMT cores"
+cpu_isolation_cleanup 8 "$TMP_DIR/cpu-smt.state"
+unset CPU_ISOLATION_SYS_CPU_ROOT CPU_ISOLATION_CGROUP_ROOT QEMU_SERVICE_CPUS
+
 grep -Fq 'source "$here/lib/cpu-isolation.sh"' "$START_VM" \
     || fail "start-vm does not load CPU isolation"
-grep -Fq 'QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-auto}"' "$START_VM" \
-    || fail "start-vm default service CPU count is not auto"
+grep -Fq 'QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-0}"' "$START_VM" \
+    || fail "start-vm default service CPU count is not zero"
 grep -Fq '[[ "$CPU_ISOLATION" == required ]] && QEMU_CMD+=( -S )' "$START_VM" \
     || fail "required mode does not pause guest until isolation succeeds"
-grep -Fq 'cpu_isolation_launch "$VM_ID" "$CPU_VCPUS"' "$START_VM" \
-    || fail "start-vm does not launch the QMP pinner with profile vCPU count"
+grep -Fq 'cpu_isolation_launch "$VM_ID" "$CPU_VCPUS" "$CPU_CORES"' "$START_VM" \
+    || fail "start-vm does not launch the QMP pinner with profile CPU topology"
 grep -Fq 'export -n SUDO_PASSWORD' "$START_VM" \
     || fail "start-vm leaves a caller-exported host credential exported"
 grep -Fq 'QEMU_LAUNCH=( env -u SUDO_PASSWORD )' "$START_VM" \
     || fail "start-vm does not strip the host credential from QEMU's environment"
-[[ "$(grep -Fc '"${QEMU_LAUNCH[@]}" "${QEMU_CMD[@]}"' "$START_VM")" -eq 3 ]] \
+[[ "$(grep -Fc '"${QEMU_LAUNCH[@]}" "${QEMU_EXEC_CMD[@]}"' "$START_VM")" -eq 3 ]] \
     || fail "not every QEMU launch mode uses the credential-scrubbed wrapper"
 grep -Fq 'cpu_isolation_release_vm "$VM_ID"' "$STOP_VM" \
     || fail "stop-vm does not release the per-VM partition"

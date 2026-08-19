@@ -72,6 +72,8 @@ typedef struct {
     uint32_t implementation;
     uint32_t chip_revision;
     uint32_t pcie_width;
+    uint32_t ray_tracing_cores;
+    uint32_t tensor_cores;
 } QemuVgpuProfileContract;
 
 EOF
@@ -82,6 +84,7 @@ EOF
     printf 'static const QemuVgpuProfileContract qemu_vgpu_profile_contracts[] = {\n'
     while IFS= read -r profile_key; do
         vgpu_profile_load "$profile_key"
+        vgpu_profile_capability_load "$profile_key"
         printf '    { %s, %s, %s, %s, %s, %s, %s, %s, %s,\n' \
             "$(c_string "$GPU_PROFILE")" \
             "$(c_string "$GPU_NAME")" \
@@ -100,11 +103,12 @@ EOF
             "$((GPU_BOOST_MHZ * 1000))" "$((GPU_MEMORY_MHZ * 2000))" \
             "$GPU_MEMORY_BUS_BITS" "$GPU_MEMORY_BANDWIDTH_MBPS" \
             "$GPU_MEMORY_TYPE_NVAPI" "$GPU_MEMORY_MAKER_NVAPI"
-        printf '      %uu, %uu, %uu, %uu, 0x%Xu, %uu, 0x%Xu, %uu },\n' \
+        printf '      %uu, %uu, %uu, %uu, 0x%Xu, %uu, 0x%Xu, %uu, %uu, %uu },\n' \
             "$GPU_CUDA_CORES" "$GPU_SHADER_SUBPIPES" \
             "$GPU_ROP_COUNT" "$GPU_TMU_COUNT" "$((GPU_ARCHITECTURE))" \
             "$GPU_IMPLEMENTATION" "$((GPU_CHIP_REVISION))" \
-            "$GPU_PCIE_WIDTH"
+            "$GPU_PCIE_WIDTH" "$GPU_RAY_TRACING_CORES" \
+            "$GPU_TENSOR_CORES"
     done < <(vgpu_profile_keys)
     cat <<'EOF'
 };

@@ -13,7 +13,7 @@
 #   /dev/shm/nv-shmem-vmN             # ivshmem 后端
 #
 # 不动:
-#   $VM_BASE_DIR/win10-base.qcow2     # 公共 baseline
+#   $VM_BASE_DIR/*.qcow2              # 所有具名公共 baseline 及其证明
 #
 # 安全保护：检测到 QEMU 还在跑会拒绝删，先用规范 stop 入口停机。
 #

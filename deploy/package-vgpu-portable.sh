@@ -29,7 +29,7 @@ automatically by start-vm.sh.
 
 Options:
   --output-dir DIR       Expanded host audit bundle
-                         (default: identity-only or private licensed root)
+                         (default: public unified or private licensed root)
   --output-exe FILE.exe  Guest file
                          (default: VgpuPortable.exe below the selected root)
   --with-license-token   Build a private all-profile finalizer using
@@ -38,21 +38,26 @@ Options:
   --replace-licensed     Replace an authenticated private output whose receipt
                          binds a different token/catalog.  Licensed builds only;
                          the old EXE/bundle is retained in a mode-0700 backup.
+  --replace-public       Replace an authenticated public output from an older
+                         catalog/format; retain the old EXE/bundle in a
+                         mode-0700 repository-external backup.
   --list-gpu-profiles    Print the embedded profile catalog
   -h, --help             Show this help
 
 No VM_ID is accepted.  Double-click VgpuPortable.exe in any B/native Windows
-VM to install/query the identity only.  GPU-Z is optional.  To install it
-later, put the exact audited official GPU-Z 2.70 file named GPU-Z.exe beside
-VgpuPortable.exe and run "VgpuPortable.exe /with-gpuz".  Future unreviewed
-GPU-Z versions fail closed; GPU-Z bytes are never embedded in this EXE.
+VM to install/query the identity and apply the recommended G-11 native-display
+startup/runtime tuning in the same elevated run.  GPU-Z is optional.  To
+install it later, put the exact audited official GPU-Z 2.70 file named
+GPU-Z.exe beside VgpuPortable.exe and run "VgpuPortable.exe /with-gpuz".
+Future unreviewed GPU-Z versions fail closed; GPU-Z bytes are never embedded
+in this EXE.
 
-The default output is identity-only and safe to place in a prepared base.
+The default output has no DLS token and is safe to place in a prepared base.
 --with-license-token/--token-file instead writes to VgpuPortableLicensed by
 default.  That EXE contains a DLS credential, remains mode 0600 on the host,
     must not be published, and installs the token, requires NVIDIA Licensed,
     then disables hibernation/Fast Startup for every supported B/native profile
-    (GTX 750 Ti, GT 1030, GTX 1050).
+    (GT 730, GT 740, GTX 750, GTX 750 Ti, GT 1030, GTX 1050).
 EOF
 }
 
@@ -74,6 +79,7 @@ OUTPUT_EXE=""
 WITH_LICENSE_TOKEN=0
 TOKEN_FILE=""
 REPLACE_LICENSED=0
+REPLACE_PUBLIC=0
 while (($#)); do
     case "$1" in
         --output-dir)
@@ -100,6 +106,10 @@ while (($#)); do
             REPLACE_LICENSED=1
             shift
             ;;
+        --replace-public)
+            REPLACE_PUBLIC=1
+            shift
+            ;;
         --list-gpu-profiles)
             vgpu_profile_print_catalog
             exit 0
@@ -116,6 +126,10 @@ done
 
 ((REPLACE_LICENSED == 0 || WITH_LICENSE_TOKEN == 1)) ||
     die "--replace-licensed requires --with-license-token or --token-file"
+((REPLACE_PUBLIC == 0 || WITH_LICENSE_TOKEN == 0)) ||
+    die "--replace-public cannot be combined with a license token"
+((REPLACE_PUBLIC == 0 || REPLACE_LICENSED == 0)) ||
+    die "choose only one replacement mode"
 
 for dependency in jq sha256sum awk stat find realpath mktemp install flock \
         x86_64-w64-mingw32-gcc x86_64-w64-mingw32-windres; do
@@ -230,23 +244,37 @@ validate_existing_exe() {
             --argjson exeBytes "$bytes" \
             --arg tokenSha256 "$TOKEN_SHA256" \
             --argjson tokenBytes "$TOKEN_BYTES" '
-            (keys | sort) == [
-                "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "exeBytes", "exeSha256", "gpuZDelivery",
-                "launcherFormat", "licenseTokenBytes",
-                "licenseTokenDelivery", "licenseTokenSha256",
-                "schemaVersion"
-            ] and
-            .schemaVersion == 5 and
             .bindingMode == "portable-auto" and
             .catalogSha256 == $catalogSha256 and
             .gpuZDelivery == "optional-explicit-sibling" and
             .licenseTokenDelivery == "embedded-private" and
             .licenseTokenSha256 == $tokenSha256 and
             .licenseTokenBytes == $tokenBytes and
-            .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_V5" and
             .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
-            (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
+            (.bundleManifestSha256 | test("^[0-9A-F]{64}$")) and
+            (
+                ((keys | sort) == [
+                    "bindingMode", "bundleManifestSha256", "catalogSha256",
+                    "exeBytes", "exeSha256", "gpuZDelivery",
+                    "launcherFormat", "licenseTokenBytes",
+                    "licenseTokenDelivery", "licenseTokenSha256",
+                    "schemaVersion"
+                ] and
+                 .schemaVersion == 5 and
+                 .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_V5")
+                or
+                ((keys | sort) == [
+                    "bindingMode", "bundleManifestSha256", "catalogSha256",
+                    "exeBytes", "exeSha256", "gpuZDelivery",
+                    "guestPerformance", "launcherFormat",
+                    "licenseTokenBytes", "licenseTokenDelivery",
+                    "licenseTokenSha256", "schemaVersion"
+                ] and
+                 .schemaVersion == 7 and
+                 .guestPerformance == "embedded-recommended-native-v1" and
+                 .launcherFormat ==
+                    "QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7")
+            )
         ' "$receipt" >/dev/null || {
             ((REPLACE_LICENSED)) && return 1
             die "existing licensed portable EXE receipt does not match this token/catalog (rerun with --replace-licensed to retain it in a private backup and rebuild)"
@@ -294,28 +322,40 @@ validate_existing_exe() {
              .schemaVersion == 4 and
              .gpuZDelivery == "optional-explicit-sibling" and
              .launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4")
+            or
+            ((keys | sort) == [
+                "bindingMode", "bundleManifestSha256", "catalogSha256",
+                "exeBytes", "exeSha256", "gpuZDelivery",
+                "guestPerformance", "launcherFormat", "schemaVersion"
+            ] and
+             .schemaVersion == 6 and
+             .gpuZDelivery == "optional-explicit-sibling" and
+             .guestPerformance == "embedded-recommended-native-v1" and
+             .launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6")
         )
-        ' "$receipt" >/dev/null ||
-            die "existing portable EXE receipt does not match this catalog"
+        ' "$receipt" >/dev/null || {
+            ((REPLACE_PUBLIC)) && return 1
+            die "existing portable EXE receipt does not match this catalog (rerun with --replace-public to retain it in a backup and rebuild)"
+        }
     fi
 }
 
-validate_existing_licensed_bundle_authenticity() {
+validate_existing_bundle_authenticity() {
     local manifest ready manifest_hash file_name file_hash file_bytes
     manifest="$OUTPUT_DIR/bundle-manifest.json"
     ready="$OUTPUT_DIR/READY"
     for required in "$manifest" "$ready" "$OUTPUT_DIR/gpuz-contract.json"; do
         [[ -f "$required" && ! -L "$required" ]] ||
-            die "existing licensed bundle has a missing/unsafe authenticated file: $required"
+            die "existing bundle has a missing/unsafe authenticated file: $required"
     done
     mapfile -t ready_lines <"$ready"
     [[ ${#ready_lines[@]} -eq 2 &&
        "${ready_lines[0]}" == schema_version=1 &&
        "${ready_lines[1]}" =~ ^manifest_sha256=([0-9A-F]{64})$ ]] ||
-        die "existing licensed bundle READY is malformed"
+        die "existing bundle READY is malformed"
     manifest_hash=$(sha256_upper "$manifest")
     [[ "$manifest_hash" == "${BASH_REMATCH[1]}" ]] ||
-        die "existing licensed bundle manifest is not authenticated by READY"
+        die "existing bundle manifest is not authenticated by READY"
     jq -e '
         .schemaVersion == 4 and .bindingMode == "portable-auto" and
         (.files | type) == "array" and (.files | length) >= 10 and
@@ -328,27 +368,33 @@ validate_existing_licensed_bundle_authenticity() {
         ) and
         ([.files[].name] | unique | length) == (.files | length)
     ' "$manifest" >/dev/null ||
-        die "existing licensed bundle manifest is malformed"
+        die "existing bundle manifest is malformed"
     while IFS=$'\t' read -r file_name file_hash file_bytes; do
         [[ "$file_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$ &&
            "$file_name" != *..* ]] ||
-            die "existing licensed bundle contains an unsafe payload name"
+            die "existing bundle contains an unsafe payload name"
         payload="$OUTPUT_DIR/$file_name"
         [[ -f "$payload" && ! -L "$payload" ]] ||
-            die "existing licensed bundle payload is missing/unsafe: $file_name"
+            die "existing bundle payload is missing/unsafe: $file_name"
         [[ "$(stat -c %s -- "$payload")" == "$file_bytes" &&
            "$(sha256_upper "$payload")" == "$file_hash" ]] ||
-            die "existing licensed bundle payload failed its manifest: $file_name"
+            die "existing bundle payload failed its manifest: $file_name"
     done < <(jq -er '.files[] | [.name, .sha256, .bytes] | @tsv' "$manifest")
 }
 
 EXISTING_EXE=0
-REPLACE_EXISTING_LICENSED=0
+REPLACE_EXISTING=0
+REPLACEMENT_KIND=""
 if [[ -e "$OUTPUT_EXE" || -L "$OUTPUT_EXE" ]]; then
     if ! validate_existing_exe; then
-        ((WITH_LICENSE_TOKEN && REPLACE_LICENSED)) ||
+        if ((WITH_LICENSE_TOKEN && REPLACE_LICENSED)); then
+            REPLACEMENT_KIND=licensed
+        elif ((!WITH_LICENSE_TOKEN && REPLACE_PUBLIC)); then
+            REPLACEMENT_KIND=public
+        else
             die "existing portable EXE validation failed"
-        REPLACE_EXISTING_LICENSED=1
+        fi
+        REPLACE_EXISTING=1
     fi
     EXISTING_EXE=1
 fi
@@ -356,7 +402,7 @@ if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
     [[ -d "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] ||
         die "existing expanded bundle is unsafe"
     if ((WITH_LICENSE_TOKEN)); then
-        validate_existing_licensed_bundle_authenticity
+        validate_existing_bundle_authenticity
         jq -e --arg catalogSha256 "$CATALOG_SHA256" \
             --arg tokenSha256 "$TOKEN_SHA256" \
             --argjson tokenBytes "$TOKEN_BYTES" '
@@ -369,50 +415,59 @@ if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
         ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1 || {
             ((REPLACE_LICENSED)) ||
                 die "existing licensed bundle does not match this token/catalog (rerun with --replace-licensed to retain it in a private backup and rebuild)"
-            REPLACE_EXISTING_LICENSED=1
+            REPLACE_EXISTING=1
+            REPLACEMENT_KIND=licensed
         }
     else
-        jq -e --arg catalogSha256 "$CATALOG_SHA256" '
+        if ! jq -e --arg catalogSha256 "$CATALOG_SHA256" '
             (.schemaVersion == 3 or .schemaVersion == 4 or
              .schemaVersion == 5 or .schemaVersion == 6) and
             .bindingMode == "portable-auto" and
             .catalogSha256 == $catalogSha256
-        ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1 ||
-            die "existing expanded bundle is not an owned portable catalog"
+        ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1; then
+            ((REPLACE_PUBLIC)) ||
+                die "existing expanded bundle is not the current owned portable catalog (rerun with --replace-public)"
+            validate_existing_bundle_authenticity
+            REPLACE_EXISTING=1
+            REPLACEMENT_KIND=public
+        fi
     fi
 fi
 
-REPLACED_LICENSED_BACKUP=""
-if ((REPLACE_EXISTING_LICENSED)); then
+REPLACED_BACKUP=""
+if ((REPLACE_EXISTING)); then
+    [[ "$REPLACEMENT_KIND" == public || "$REPLACEMENT_KIND" == licensed ]] ||
+        die "internal replacement kind is missing"
     backup_root="$(dirname -- "$OUTPUT_PARENT")/package-backups"
     if [[ -e "$backup_root" || -L "$backup_root" ]]; then
         [[ -d "$backup_root" && ! -L "$backup_root" &&
            "$(stat -c %u -- "$backup_root")" == "$EUID" &&
            "$(stat -c %a -- "$backup_root")" == 700 ]] ||
-            die "licensed package backup root is unsafe: $backup_root"
+            die "package backup root is unsafe: $backup_root"
     else
         mkdir -m 0700 -- "$backup_root"
     fi
-    REPLACED_LICENSED_BACKUP=$(mktemp -d \
-        "$backup_root/VgpuPortableLicensed.old.XXXXXXXX")
-    backup_exe="$REPLACED_LICENSED_BACKUP/$(basename -- "$OUTPUT_EXE")"
-    backup_bundle="$REPLACED_LICENSED_BACKUP/$(basename -- "$OUTPUT_DIR")"
+    backup_prefix=VgpuPortable.old
+    [[ "$REPLACEMENT_KIND" == public ]] || backup_prefix=VgpuPortableLicensed.old
+    REPLACED_BACKUP=$(mktemp -d "$backup_root/${backup_prefix}.XXXXXXXX")
+    backup_exe="$REPLACED_BACKUP/$(basename -- "$OUTPUT_EXE")"
+    backup_bundle="$REPLACED_BACKUP/$(basename -- "$OUTPUT_DIR")"
     if ((EXISTING_EXE)); then
         ln -T -- "$OUTPUT_EXE" "$backup_exe" ||
-            die "could not retain the authenticated private EXE backup"
+            die "could not retain the authenticated old EXE backup"
         chmod 0600 "$backup_exe"
     fi
     if [[ -e "$OUTPUT_DIR" ]]; then
         cp -a -- "$OUTPUT_DIR" "$backup_bundle" ||
-            die "could not retain the authenticated private bundle backup"
+            die "could not retain the authenticated old bundle backup"
     fi
-    cat >"$REPLACED_LICENSED_BACKUP/README.txt" <<EOF
-Private licensed portable backup retained before an authenticated replacement.
+    cat >"$REPLACED_BACKUP/README.txt" <<EOF
+Portable backup retained before an authenticated ${REPLACEMENT_KIND} replacement.
 Source EXE: $OUTPUT_EXE
 Source bundle: $OUTPUT_DIR
-Do not publish this directory; it may contain a DLS client token.
+Do not publish this directory; licensed generations may contain a DLS client token.
 EOF
-    chmod 0600 "$REPLACED_LICENSED_BACKUP/README.txt"
+    chmod 0600 "$REPLACED_BACKUP/README.txt"
 fi
 
 WORK_ROOT=$(mktemp -d "$OUTPUT_PARENT/.vgpu-portable.XXXXXXXX")
@@ -429,6 +484,14 @@ for asset in \
         "$here/guest/apply-vm-profile.ps1" \
         "$here/guest/patch-grid-strings.ps1" \
         "$here/guest/vgpu-profile-catalog.json" \
+        "$here/docs/G11-1GB-GPU-EXPANSION.md" \
+        "$here/docs/G11-1GB-GPU-EVIDENCE.tsv" \
+        "$here/guest/guest-performance/Optimize-Guest.ps1" \
+        "$here/guest/guest-performance/01-Audit.cmd" \
+        "$here/guest/guest-performance/02-Apply-Recommended.cmd" \
+        "$here/guest/guest-performance/03-Verify.cmd" \
+        "$here/guest/guest-performance/04-Rollback.cmd" \
+        "$here/guest/guest-performance/README.txt" \
         "$here/guest/nvapi-shim/nvapi.dll" \
         "$here/guest/nvapi-shim/nvapi_profile_probe32.exe" \
         "$here/guest/nvapi-shim/VgpuIdentityQuery.exe"; do
@@ -449,6 +512,22 @@ install -m 0600 -- "$here/guest/patch-grid-strings.ps1" \
     "$BUNDLE/patch-grid-strings.ps1"
 install -m 0600 -- "$here/guest/vgpu-profile-catalog.json" \
     "$BUNDLE/vgpu-profile-catalog.json"
+install -m 0600 -- "$here/docs/G11-1GB-GPU-EXPANSION.md" \
+    "$BUNDLE/G11-1GB-GPU-EXPANSION.md"
+install -m 0600 -- "$here/docs/G11-1GB-GPU-EVIDENCE.tsv" \
+    "$BUNDLE/G11-1GB-GPU-EVIDENCE.tsv"
+install -m 0600 -- "$here/guest/guest-performance/Optimize-Guest.ps1" \
+    "$BUNDLE/Optimize-Guest.ps1"
+install -m 0600 -- "$here/guest/guest-performance/01-Audit.cmd" \
+    "$BUNDLE/01-Audit.cmd"
+install -m 0600 -- "$here/guest/guest-performance/02-Apply-Recommended.cmd" \
+    "$BUNDLE/02-Apply-Recommended.cmd"
+install -m 0600 -- "$here/guest/guest-performance/03-Verify.cmd" \
+    "$BUNDLE/03-Verify.cmd"
+install -m 0600 -- "$here/guest/guest-performance/04-Rollback.cmd" \
+    "$BUNDLE/04-Rollback.cmd"
+install -m 0600 -- "$here/guest/guest-performance/README.txt" \
+    "$BUNDLE/README.txt"
 install -m 0600 -- "$here/guest/nvapi-shim/nvapi.dll" \
     "$BUNDLE/nvapi.dll"
 install -m 0600 -- "$here/guest/nvapi-shim/nvapi_profile_probe32.exe" \
@@ -626,17 +705,18 @@ bash "$here/guest/gpuz-launcher/build.sh" \
 EXE_SHA256=$(sha256_upper "$SINGLE_EXE")
 EXE_BYTES=$(stat -c %s -- "$SINGLE_EXE")
 RECEIPT_TEMP="$WORK_ROOT/$EXE_SHA256.json"
-RECEIPT_SCHEMA=4
-LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_IDENTITY_V4
+RECEIPT_SCHEMA=6
+LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_UNIFIED_V6
 if ((WITH_LICENSE_TOKEN)); then
-    RECEIPT_SCHEMA=5
-    LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_LICENSED_V5
+    RECEIPT_SCHEMA=7
+    LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7
 fi
 jq -n \
     --argjson schemaVersion "$RECEIPT_SCHEMA" \
     --arg bindingMode portable-auto \
     --arg catalogSha256 "$CATALOG_SHA256" \
     --arg gpuZDelivery optional-explicit-sibling \
+    --arg guestPerformance embedded-recommended-native-v1 \
     --arg launcherFormat "$LAUNCHER_FORMAT" \
     --arg exeSha256 "$EXE_SHA256" \
     --argjson exeBytes "$EXE_BYTES" \
@@ -649,6 +729,7 @@ jq -n \
         bindingMode: $bindingMode,
         catalogSha256: $catalogSha256,
         gpuZDelivery: $gpuZDelivery,
+        guestPerformance: $guestPerformance,
         launcherFormat: $launcherFormat,
         exeSha256: $exeSha256,
         exeBytes: $exeBytes,
@@ -670,7 +751,7 @@ else
         die "could not publish the content receipt"
 fi
 
-if ((EXISTING_EXE && !REPLACE_EXISTING_LICENSED)); then
+if ((EXISTING_EXE && !REPLACE_EXISTING)); then
     validate_existing_exe
 fi
 EXE_STAGE="$OUTPUT_PARENT/.$(basename -- "$OUTPUT_EXE").new.$$.$RANDOM"
@@ -709,24 +790,25 @@ cat <<EOF
   binding:     portable-auto (no VM ID, no VM UUID)
   profiles:    $(vgpu_profile_keys | paste -sd, -)
   catalog:     ${CATALOG_SHA256}
-  launcher:    $(if ((WITH_LICENSE_TOKEN)); then printf '%s' '1.5.0.0 / private identity + DLS token finalizer'; else printf '%s' '1.4.0.0 / multi-brand identity-only by default'; fi)
+  launcher:    $(if ((WITH_LICENSE_TOKEN)); then printf '%s' '1.7.0.0 / private identity + DLS + guest performance'; else printf '%s' '1.6.0.0 / identity + guest performance'; fi)
   bundle:      ${OUTPUT_DIR}
   single EXE:  ${OUTPUT_EXE}
   EXE bytes:   ${EXE_BYTES}
   EXE sha256:  ${EXE_SHA256}
-$(if [[ -n "$REPLACED_LICENSED_BACKUP" ]]; then printf '  old private backup: %s\n' "$REPLACED_LICENSED_BACKUP"; fi)
+$(if [[ -n "$REPLACED_BACKUP" ]]; then printf '  old %s backup: %s\n' "$REPLACEMENT_KIND" "$REPLACED_BACKUP"; fi)
 
 $(if ((WITH_LICENSE_TOKEN)); then
     cat <<PRIVATE
 这是显式构建的私有授权版通用 guest 文件。它包含 DLS token；不要公开分发。
 在任意受支持 B/native VM 中直接双击 VgpuPortable.exe，会统一安装身份、token，
-等待 NVIDIA 明确报告 Licensed，并关闭休眠/Fast Startup。完成后让 Windows 完整
-关机，再正常冷启动复验。
+等待 NVIDIA 明确报告 Licensed，关闭休眠/Fast Startup，并应用推荐的登录启动和
+native-display 性能优化。完成后让 Windows 完整关机，再正常冷启动复验。
 PRIVATE
 else
     cat <<PUBLIC
 这是默认不安装、也不要求 GPU-Z 的通用 guest 文件。直接双击
-VgpuPortable.exe 即可安装并查询显卡/板卡/显存身份。
+VgpuPortable.exe 即可安装并查询显卡/板卡/显存身份，同时应用推荐的登录启动和
+native-display 性能优化。
 PUBLIC
 fi)
 

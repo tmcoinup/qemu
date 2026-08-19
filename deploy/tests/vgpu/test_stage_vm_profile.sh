@@ -119,7 +119,7 @@ manifest="$stage_dir/vm2-manifest.json"
 jq -e '
     (keys | sort) == ["catalogSha256", "gpu", "monitor", "schemaVersion", "spoofMode", "vmId", "vmUuid"] and
     .schemaVersion == 2 and
-    .catalogSha256 == "DF5077AE641CADFA30E2372E4846A59372B46ADBF222A12E5EE3F6AF1D8C613D" and
+    .catalogSha256 == "FEEA5430609C81C495617607A3500F7A7BEA6CB6AFB4A5156F1918A1ACDCED7B" and
     .vmId == 2 and
     .vmUuid == "a94177e0-3318-4e5c-abd3-ce68b502822e" and
     .spoofMode == "B" and

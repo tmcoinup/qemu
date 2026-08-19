@@ -1,0 +1,37 @@
+#include <windows.h>
+
+1 RT_MANIFEST "guest_lite_launcher.manifest"
+
+101 RCDATA "G11-Guest-Lite.ps1"
+102 RCDATA "01-OneClick-Apply.cmd"
+103 RCDATA "02-Audit.cmd"
+104 RCDATA "03-Rollback.cmd"
+105 RCDATA "README.txt"
+
+1 VERSIONINFO
+ FILEVERSION 1,5,0,0
+ PRODUCTVERSION 1,5,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "Local QEMU guest tools\0"
+            VALUE "FileDescription", "G-11 Windows 10 Guest Lite\0"
+            VALUE "FileVersion", "1.5.0.0\0"
+            VALUE "InternalName", "G11GuestLite\0"
+            VALUE "OriginalFilename", "G11GuestLite.exe\0"
+            VALUE "ProductName", "G-11 Windows 10 Guest Lite\0"
+            VALUE "ProductVersion", "1.5.0.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

@@ -1,9 +1,12 @@
 # G-11 vGPU 傻瓜教程：基础镜像一次封装，任意 VM 克隆
 
-本页只适用于 **G-11/vGPU 分支**。V-11 是独立分支，不要混用脚本或验收结论。
+本页和当前 DGame 部署只适用于 **G-11/vGPU 分支**；已退役分支不参与运行时发现、
+窗口标题或故障回退。
 
-宿主底层 GPU 名称、显存类型/位宽的通用安装、鲁大师重新扫描验收、安全边界和
+宿主底层 GPU 名称、显存类型/位宽的通用安装、多工具重新扫描验收、安全边界和
 回滚见 [`G11-BOTTOM-GPU-IDENTITY.md`](G11-BOTTOM-GPU-IDENTITY.md)。
+所有主板误显 ICH9、旧显卡误显“光线追踪”的统一修复见
+[`G11-HARDWARE-COHERENCE.md`](G11-HARDWARE-COHERENCE.md)。
 
 ## 先记住
 
@@ -11,8 +14,8 @@
 2. 不安装测试签名/自签名内核驱动。显示驱动必须是未修改的 NVIDIA GRID
    538.33，并由正常 NVIDIA/Microsoft 生产链验证；使用这种驱动不需要自行买驱动
    签名证书。
-3. 无 VM 绑定的 `VgpuPortable.exe` 继续负责基础盘/授权和 app-local 兼容；它不
-   内嵌 GPU-Z。要让普通 32/64 位硬件程序都看到同一板卡、显存厂家，并持久恢复
+3. 无 VM 绑定的 `VgpuPortable.exe` 继续负责基础盘/授权、app-local 兼容和推荐
+   guest 性能优化；它不内嵌 GPU-Z。要让普通 32/64 位硬件程序都看到同一板卡、显存厂家，并持久恢复
    显示器名称，成品 VM 再运行一次 VM/UUID 绑定的
    `package-system-nvapi-projection.sh` 系统包。
 4. 新 VM 始终保持 B/native。PnP、DXGI/D3D 和生产签名 GRID 538.33 使用唯一的
@@ -22,27 +25,51 @@
    已证实不稳定的 desktop 537.58 consumer 路径已经生产隔离。
 6. `start-vm.sh` 默认根据 Windows USB 键盘 LED 回报幂等保持 NumLock 开启；不再
    依赖登录用户注册表。确需关闭本次策略时加 `--no-numlock`。
-7. 与最新 V-11 的日常操作对齐情况、已补功能和不可混用的 vGPU/VirtIO
-   边界统一见 [`G11-V11-OPERATION-PARITY.md`](G11-V11-OPERATION-PARITY.md)。
+7. DGame 只按 G-11 的端点、窗口标题和 vGPU 显示合同运行，不再枚举旧分支标题。
 
 > UAC 可能把本地构建的 portable 外层 EXE 显示为“未知发布者”。它是用户态
 > 封装器，不是显示驱动或自签名内核文件。设备属性中实际驱动的数字签名者应为
 > `Microsoft Windows Hardware Compatibility Publisher`。
 
-## 运行中隐藏/恢复默认 SDL 窗口
+## DGame 黑画面、GPU 预览与 SDL 窗口
 
 启动 VM 后另开一个宿主终端（以 VM9 为例）：
 
 ```bash
 ./deploy/scripts/vmctl.sh display 9 status
+./deploy/scripts/vmctl.sh display 9 preview-on   # 旧的运行中 VM 可无重启补帧源
 ./deploy/scripts/vmctl.sh display 9 window-hide
 ./deploy/scripts/vmctl.sh display 9 window-show
 ```
 
-要切成仅推流，必须启动时就提供明确的 `--stream URL`，再执行
-`vmctl.sh display 9 stream-only`；恢复本地窗口用 `window-only`。封装会先核对
-QMP 中的 VM 名称，并在推流不可用时保持唯一窗口可见。该热切换针对默认
-SDL；`--gtk` 仍没有对等的运行中 hide/show hook。
+native 新启动默认已有独立 DGame preview；它会创建
+`/tmp/qemu-stealth-9.fb`，唯一 SDL 操作窗口标题固定为 `win10-9`。启动器使用
+`single-console=on`，不会再创建 `win10-9-console-I` 辅助窗口；QMP/进程名仍为
+`vm9`。窗口显回时按 guest 当前完整分辨率恢复，SDL 客户区最大值也限制为该
+分辨率。默认优先把 SDL/GTK
+在亮机卡上的 ROI texture 导成 dma-buf，失败自动回退 SHM；当前是 RX570，以后换
+RX550 不需要改 PCI 地址或脚本。16 窗口上线前运行：
+
+```bash
+./deploy/scripts/vmctl.sh preview-capacity --instances 16 --rate 60
+```
+
+它默认同时核算 `800x600`、`1067x600`。若 60 Hz 实压抖动，先降到 30 Hz。
+默认 guest 源按 `1920x1080`；其它源分辨率追加 `--source-size WxH`。
+当前旧 VM 热加 preview 后可立即显示 SHM 帧；GPU 路径、稳定标题和职业名等 QEMU
+内存读取授权，需要下次用新 binary 正常启动后生效。
+
+正常冷启动在没有 consumer 时会显示 `rate=1Hz`，连接 DGame 后才切到请求帧率；这
+不是配置丢失。`BAR 0: dma-buf unavailable, using mmap fallback` 只描述 NVIDIA
+mdev REGION 边界，也不等于 RX570/RX550 的 DGame GPU 导出失败。若出现连续
+`EGL_BAD_ACCESS`，说明仍在运行旧 QEMU：先完整停止 VM、重新构建，再正常启动。
+新版会在每次 SDL 绘制后归还 native EGL context，异常最多报告一次。维护期间需
+临时绕开 GPU 预览时使用 `--no-dgame-preview-gpu`，DGame 会走每客户端 SHM。
+
+要输出网络视频，仍必须启动时提供明确的 `--stream URL`；它使用第二个 fb-shm
+对象，不会被 DGame 的 ROI/帧率修改。之后可执行 `stream-only`，恢复本地窗口用
+`window-only`。封装会先核对 QMP 中的 VM 名称，并在 fb-shm 不可用时保持唯一窗口
+可见。该窗口热切换针对默认 SDL；`--gtk` 仍没有对等的 hide/show hook。
 
 ## 刚装好 Windows 的单台 VM：统一收尾
 
@@ -102,21 +129,36 @@ driver、license 与 FRL。
 ./deploy/scripts/start-vm.sh 9
 ```
 
-私有 EXE 对 12 个 profile 自动读取固件 claim，不包含 VM ID/UUID；同一个文件可逐台
+私有 EXE 对 25 个 profile 自动读取固件 claim，不包含 VM ID/UUID；同一个文件可逐台
 用于受信任 VM。它包含 DLS 凭据，宿主权限为 `0600`，不要放进公共基础盘、仓库或
 公开下载位置。默认不带参数构建的 `VgpuPortable/VgpuPortable.exe` 仍是无 token 的
 基础盘安全版。
 
-## 新主流程：只需三条宿主命令
+## 新主流程：已有 base 时只需三条宿主命令
 
-先让所有 VM 完整关机，然后在宿主执行：
+先让所有 VM 完整关机。如果目前只有已经装好并验收通过的模板 VM（例如 VM1），
+先执行一次：
+
+```bash
+BASE_NAME=win10-ltsc-v1
+./deploy/scripts/vmctl.sh seal 1 "$BASE_NAME"
+```
+
+它采用 G-11 统一入口 `seal-base.sh`，默认先清理模板盘中的
+WeGame/Tencent QIMEI、登录态、SSO/SDK/设备缓存、D3DSCache 与注册表键，再发布
+standalone base；清理失败不会产出 base。然后执行：
 
 ```bash
 cd /home/ubuntu/projects/qemu
+BASE_NAME=win10-ltsc-v1
 ./deploy/package-vgpu-one-click.sh
-sudo ./deploy/install-vgpu-portable-to-base.sh
-./deploy/scripts/vmctl.sh clone 456 --start
+sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
+./deploy/scripts/vmctl.sh clone "$BASE_NAME" 456 --start
 ```
+
+若第一条提示现有 public catalog/format 较旧，改为执行一次
+`./deploy/package-vgpu-one-click.sh --replace-public`；旧产物会进入仓库外
+`package-backups`，不会直接删除。
 
 三条命令分别完成：
 
@@ -124,9 +166,34 @@ sudo ./deploy/install-vgpu-portable-to-base.sh
    `/home/ubuntu/images/staging/VgpuPortable/VgpuPortable.exe`。EXE 内有全部已审计
    profile，但没有 VM ID/UUID，也没有 GPU-Z 程序字节。
 2. 默认只将 `C:\Users\Public\Desktop\VgpuPortable.exe` 写入 Windows base；
-   base 回执明确记录 `gpuZIncluded=false`。这一步只需为每个 base 做一次。
+   base schema-5 回执明确记录 `gpuZIncluded=false` 和
+   `guestPerformance=embedded-recommended-native-v1`。这一步只需为每个 base 做一次。
 3. 创建 VM456 的独立 B/native 配置和 UUID，从 base 克隆系统盘；未指定显卡和
    显示器时分别从审核池随机一次并写入 `vm.conf`，克隆后自动同步，然后启动。
+
+`BASE_NAME` 是基础镜像的永久选择键，不是装饰性备注。它只能包含字母、数字、
+`_`、`-`，不写 `.qcow2`。推荐格式是 `<系统>-<版本或用途>-v<代号>`，例如
+`win10-ltsc2021-game-v1`；内容换代就改为 `v2`，不要命名为 `latest`。上述命令
+产生并绑定：
+
+```text
+shared/bases/win10-ltsc-v1.qcow2
+shared/bases/win10-ltsc-v1.qcow2.vgpu-portable.json
+```
+
+以后做第二个基础镜像时换名即可，第一代不会被覆盖：
+
+```bash
+BASE_NAME=win11-vgpu-v2
+./deploy/scripts/vmctl.sh seal 2 "$BASE_NAME"
+./deploy/package-vgpu-one-click.sh
+sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
+./deploy/scripts/vmctl.sh clone "$BASE_NAME" 457 --start
+./deploy/scripts/clone-from-base.sh --list-bases
+```
+
+每个 base 都要单独执行一次 portable 注入。clone 会校验所选 base 自己的证明，
+不能拿 A 的证明配 B，也不会因为目录中有多个镜像而猜“最新”的一个。
 
 `--start` 只控制是否立即开机，不控制显示器配置。克隆但不启动也会自动同步；以后
 每次 `start-vm.sh` 都会按 marker 复核，不需要另跑 `vmctl monitor`。只有切换型号或
@@ -135,10 +202,14 @@ sudo ./deploy/install-vgpu-portable-to-base.sh
 进入 Windows 后只双击公共桌面的 `VgpuPortable.exe`，UAC 点“是”，等待：
 
 ```text
+APPLY PASS: recommended native-display tuning is installed.
 [vGPU identity] INSTALL PASS
 ```
 
-安装结束再双击公共桌面的 `vGPU Identity Query`。必须看到配置选中的
+这一次运行已经同时完成显卡身份/授权和登录启动性能优化；不再运行
+`guest-performance.sh`、`01-Audit.cmd` 或 `02-Apply-Recommended.cmd`。从开始菜单
+完整关机并正常冷启动。需要核对身份时再双击公共桌面的 `vGPU Identity Query`，
+必须看到配置选中的
 `Projected profile`、`Board identity`、`VRAM identity`，并以 `VERIFY PASS`
 结束。这个查询器会同时显示原生 `DEV_1E30` 传输层，避免把系统 PCI 真身与
 受保护的身份/NVAPI 投影层混为一谈。
@@ -165,26 +236,31 @@ fail-closed，不会污染默认身份安装。
 ./deploy/scripts/check-hardware-pool.sh --machine-readable
 ```
 
-当前 active 池是 6 款 CPU、4 块双槽 H81 主板和 15 套双条 DDR3 内存；内存覆盖
-Kingston、Samsung、Micron、SK hynix 四品牌。完整目录另保留 2 款 legacy-only
-CPU、3 块 legacy 四槽板和 2 套 legacy DDR4，因此内存目录共 17 套。整机白名单
-共 28 套：默认低端池 24 套、通常必须显式指定的 i7 新组合 1 套、legacy 3 套。
+当前 active 池是 6 款 CPU、10 块双槽 H81 主板和 25 套双条 DDR3 内存；内存覆盖
+Kingston、Samsung、Micron、SK hynix、Crucial 五品牌。完整目录另保留 2 款 legacy-only
+CPU、3 块 legacy 四槽板和 2 套 legacy DDR4，因此内存目录共 27 套。i3-4130
+在每块 active H81 上均提供 Kingston、Samsung、Micron、SK hynix 的
+DDR3-1333/1600；每个频率/品牌组合都有 4G、6G、8G 三档。整机白名单
+共 264 套：默认低端池 24 套、必须显式指定的扩展组合 237 套、legacy 3 套。
 5 款默认 CPU 均未得到 supported 时，无参数创建仍会探测 i7；i7 明确 supported
 才使用它，连 i7 在内的 6 款 active 都明确非 supported 才会自动 legacy 兜底，
 探测不确定则 fail-closed。另有
-9 款精确 `512110190592` 字节 SSD、3 个 2 GB GPU 目标型号（12 条板卡/显存
-原子 profile），以及 35 款全部为
+9 款默认、1 款手动扩展的精确 `512110190592` 字节 SSD，3 个 1GB + 3 个 2GB GPU 芯片型号
+（25 条板卡/显存原子 profile；默认随机仍为原 24 条），以及 35 款全部为
 1920×1080@60 的显示器（其中 28 款可新建）。4 GiB 是 2×2 GiB 真双通道，8 GiB
 是 2×4 GiB 真双通道；6 GiB 是 4+2 GiB Intel Flex，只能把匹配的 4 GiB 区称为
 双通道，额外 2 GiB 区为单通道。审计器会标出哪些组合可用于新 VM、哪些只保留
 旧平台身份。完整明细和报错处理见
 [G-11 vGPU 硬件池教程](G11-HARDWARE-POOL.md)。
 
-可替换硬件的品牌覆盖为：主板 3、内存 4、SSD 5、GPU 系统用户态板卡 metadata 7、
+可替换硬件的品牌覆盖为：主板 5、内存 5、SSD 5、GPU 系统用户态板卡 metadata 9、
 active 键盘 3、可选相对鼠标 3。显示器因保留 35 款 FHD 目录而明确例外为新建
-8 品牌/完整 11 品牌；默认绝对指针只有诚实的 QEMU 通用 profile。CPU/芯片组、
-Intel e1000e、Intel HDA、swtpm 和安装期临时光驱也都是固定合同，不为凑品牌数
-只改字符串。`q35`/ICH9/ICH9-AHCI、`qemu-xhci`、QEMU `nvme` controller、
+8 品牌/完整 11 品牌；默认绝对指针只有诚实的 QEMU 通用 profile。CPU/芯片组实现、
+Intel e1000e、Intel HDA、swtpm 和安装期临时介质也都是固定合同，不为凑品牌数
+只改字符串。普通启动不创建光驱；安装或手动热插时可使用
+`HL-DT-ST DVDRAM GH24NS50 / XP02` 审核身份，但不伪造序列。
+主板目录现在只把 00:1f.0 的 LPC inventory identity 映射为
+H81/H97/B150/B360；`q35`/ICH9 行为、ICH9-AHCI、`qemu-xhci`、QEMU `nvme` controller、
 安装/救援 `std-vga` 和 legacy `ivshmem` 是实现/兼容边界，也不进入品牌随机。
 
 新 VM 使用硬件合同 v3：system/baseboard/chassis 三个标签延续 ASUS、MSI、
@@ -192,8 +268,8 @@ Gigabyte 主板语法且互不重复；只有 baseboard serial 天然归主板�
 是现有合同中的整机/资产标签。`MEM_SN` 是非保留 JEDEC 4-byte 序列，第二槽
 稳定派生出不同值；新配置还持久化完整 `MEM_SERIAL_LIST`，两个最终槽值在统一
 `MEMORY_SERIAL` 命名空间跨 VM 查重。DDR3 的逐槽容量、Rank、颗粒宽度、模组/DRAM JEP106、序列和
-料号会同时进入 SMBIOS 与 SPD。Micron E1 目录 SKU 在 18-byte SPD part 字段使用
-`MT4JTF25664AZ-1G6` / `MT8JTF51264AZ-1G6` 基础 part。两套 legacy DDR4 仍是
+料号会同时进入 SMBIOS 与 SPD。Micron 目录 SKU 在 18-byte SPD part 字段使用
+对应的 `-1G6`（1600）或 `-1G4`（1333）基础 part。两套 legacy DDR4 仍是
 256-byte page 0-only，厂商/料号/序列由 SMBIOS Type 17 提供，不伪造 EE1004
 page 1。SSD 按九款型号使用严格序列格式；显示器只有 Samsung S24F350 与 Redmi
 RMMNT238NF 是型号专属格式，其余 33 款为 `generic-prefix-hash`。GPU 板卡序列为
@@ -234,11 +310,13 @@ ISO=/home/ubuntu/images/iso/win10.iso
 ./deploy/scripts/create-vm.sh --list-gpu-profiles
 ./deploy/scripts/create-vm.sh --list-monitor-profiles
 ./deploy/scripts/create-vm.sh --list-input-profiles
+# 日常列表只显示正常型号；只有明确需要旧平台时才看：
+./deploy/scripts/create-vm.sh --include-fallback --list-platforms
 
 ./deploy/scripts/create-vm.sh "$VM_ID" \
-  --platform i3-4130-h81m-p33-8g \
+  --memory-size 8G \
   --ssd-profile samsung-850-pro-512gb \
-  --gpu-profile gtx1050_2gb \
+  --gpu-vram 2048 \
   --monitor-profile philips-243v7
 
 # 二选一：不带 VLAN 参数就是默认 LAN
@@ -318,13 +396,13 @@ EXE 可跨 VM 使用，但不能在 guest 内任意选择/伪造另一个型号�
 写进该 VM 的 `vm.conf`：
 
 ```bash
-./deploy/scripts/vmctl.sh clone 457 --start
+./deploy/scripts/vmctl.sh clone win10-ltsc-v1 457 --start
 ```
 
 需要固定型号时再选择 profile，例如：
 
 ```bash
-./deploy/scripts/vmctl.sh clone 457 --gpu-profile gt1030_msi_2gb
+./deploy/scripts/vmctl.sh clone win10-ltsc-v1 457 --gpu-profile gt1030_msi_2gb
 ./deploy/scripts/start-vm.sh 457
 ```
 
@@ -342,6 +420,17 @@ Windows 中应已经有：
 - NVIDIA/Microsoft 生产签名 catalog 与加载中的内核驱动；
 - `testsigning=No`、`nointegritychecks=No` 或未设置；
 - 不含 patched driver、自签 catalog、私有测试根证书。
+
+从模板 VM 封装基础镜像的傻瓜入口是：
+
+```bash
+./deploy/scripts/vmctl.sh seal 1 win10-ltsc-v1
+```
+
+默认 WeGame/Tencent 清理会写入模板 VM 的源盘，使后续 clone 不共享 QIMEI、登录态
+和设备缓存；它不删除 ACE 程序。若确实要把这些状态原样固化，才显式使用
+`./deploy/scripts/vmctl.sh seal 1 win10-ltsc-v1 --no-clean`。清理同样拒绝 dirty/hibernated NTFS，
+不执行 `ntfsfix`、`remove_hiberfile`，也不修改 BCD 或驱动。
 
 运行 base 注入脚本前必须停止**所有** VM，而不只是模板 VM。脚本获取独占存储
 锁，拒绝正在使用、带 backing/data-file、被其他 qcow2 依赖或校验失败的 base。
@@ -372,14 +461,14 @@ Windows 中应已经有：
 不要把这个私有产物交给 `install-vgpu-portable-to-base.sh`；通用 base 只使用上面的
 默认无 token 版本。
 
-自定义 portable 输出或 base：
+自定义 portable 输出，并注入指定的具名 base：
 
 ```bash
 ./deploy/package-vgpu-one-click.sh --portable \
   --output-exe /srv/private/VgpuPortable.exe
 
 sudo ./deploy/install-vgpu-portable-to-base.sh \
-  --base /srv/images/win10-base.qcow2 \
+  --base-name win10-ltsc-v1 \
   --exe /srv/private/VgpuPortable.exe
 ```
 
@@ -390,7 +479,7 @@ sudo ./deploy/install-vgpu-portable-to-base.sh \
 克隆但暂不启动：
 
 ```bash
-./deploy/scripts/vmctl.sh clone 458 --gpu-profile gtx750ti_2gb
+./deploy/scripts/vmctl.sh clone win10-ltsc-v1 458 --gpu-profile gtx750ti_2gb
 ```
 
 之后正常启动即可：
@@ -399,7 +488,7 @@ sudo ./deploy/install-vgpu-portable-to-base.sh \
 ./deploy/scripts/start-vm.sh 458
 ```
 
-`vmctl clone` 封装 `clone-vgpu-base.sh`，还可传递 `--platform`、
+`vmctl clone` 封装 `clone-from-base.sh`，还可传递 `--platform`、
 `--ssd-profile` 和 `--monitor-profile`。不传显示器参数时自动生成并固定一个；目标
 VM 配置或磁盘已经存在时会拒绝，不会覆盖。
 
@@ -413,10 +502,26 @@ VM_ID=456
 ./deploy/package-system-nvapi-projection.sh "$VM_ID"
 ```
 
-把命令打印的 ISO 只读挂入该 VM，在 Windows 双击
-`Run-As-Administrator.cmd`，确认 UAC，等待自动重启和约 1～2 分钟的 SYSTEM
-验证。然后双击 `Verify-As-Administrator.cmd`；必须看到 x86、x64 两个
-`SYSTEM_NVAPI_VERIFY PASS` 和最终 PASS。
+默认目录是
+`/home/ubuntu/images/vms/$VM_ID/packages/SystemNvapiProjection/`，因此删除该 VM
+时包和 ISO 会随完整 VM bundle 一起清理。不要为了日常安装传 `--output-root`；该
+选项只用于明确需要保留在 VM 外部的导出副本。
+
+打包器结尾会打印带完整 ISO 路径的一键命令，直接照抄：
+
+```bash
+./deploy/scripts/vmctl.sh cdrom "$VM_ID" mount /absolute/path/from-packager.iso
+```
+
+在 Windows 双击 `Run-As-Administrator.cmd` 并确认 UAC。它会在任何写入之前
+直接检查签名显卡驱动的 x86/x64 D3D12 OPTIONS5；两者都符合目录的
+tier 0 合同时才安装并自动重启。任一路径非零时会拒绝安装、不重启；
+这是能力不一致，不是 ISO 挂载失败。日志在
+`C:\Windows\Temp\G11-System-NVAPI-Install.log`。
+
+只有 `Run` 成功并重启后才双击 `Verify-As-Administrator.cmd`；必须同时看到
+x86/x64 两个 `SYSTEM_NVAPI_VERIFY PASS`、x86/x64 两个
+`D3D12_NATIVE_VERIFY PASS` 和最终 PASS。
 
 此包从当前 `vm.conf` 原子读取所选 GPU/板卡/显存 profile 与显示器 profile，
 并绑定 VM UUID、唯一 Display PnP、驱动版本、payload 哈希和 EDID。它不包含
@@ -428,6 +533,20 @@ GTX 1050，ASUS/MSI/Gigabyte，Samsung/Micron/SK hynix 和三款不同显示器�
 profile 的板卡 Subsystem 和静态规格合入，因此硬件程序不会再拆成“两块显卡”。
 完整原理、收据位置、黑屏判断和一键回滚见
 [`G11-BOTTOM-GPU-IDENTITY.md`](G11-BOTTOM-GPU-IDENTITY.md)。
+默认零光驱、手动热插/换盘/整机热拔和盘符不刷新的处理见
+[`G11-OPTICAL-DRIVE.md`](G11-OPTICAL-DRIVE.md)。
+
+SystemNvapiProjection schema 4 把当前六个旧显卡 device ID 的能力合同绑定进
+包内；x86/x64 系统探针必须同时显示 `RT=0 Tensor=0`，x86/x64 原生
+D3D12 探针也必须同时显示 tier 0。这一处理对所有调用者一致，不接收
+应用路径，也没有鲁大师进程或 VM 编号特例。
+
+鲁大师、GPU-Z、HWiNFO 等只用于重新扫描和交叉验收。当前 RTX 2080 宿主上的
+`DEV_1E30` 生产 transport 和隔离 M60-1Q 候选都已实测为 x64 tier 11，
+因此当前应如实判为 D3D12 现实一致性失败。不要放置 app-local
+`d3d12.dll`，也不要替换系统 `d3d12.dll`。完整实机记录、公共层流程和签名
+transport 边界见
+[配置现实一致性教程](G11-HARDWARE-COHERENCE.md)。
 
 ## 最终验收
 
@@ -453,7 +572,8 @@ PCI bridge 是显卡父设备，不是第二张显卡。底层系统 PnP 仍是 
 
 系统包安装后，先运行包内 `Verify-As-Administrator.cmd`：
 
-- x86 与 x64 probe 都输出 `SYSTEM_NVAPI_VERIFY PASS`；
+- x86 与 x64 NVAPI probe 都输出 `SYSTEM_NVAPI_VERIFY PASS`；
+- x86 与 x64 D3D12 probe 都输出 `D3D12_NATIVE_VERIFY PASS`；
 - 两个 probe 都断言 NVAPI physical GPU 数量为 1；
 - device 保持原生 transport，Subsystem、显存类型/厂家和位宽匹配同一 profile；
 - 最终 validated 收据记录 VM UUID、Display instance、驱动和 payload 哈希。
@@ -537,6 +657,7 @@ VM3 已完成这条历史 A → B/native 迁移，可作为 Code 0、生产签�
 | Code 43，分辨率变小 | host/guest vGPU branch 或原始驱动绑定有问题；先修 538.33/Code 0，GPU-Z 包不能掩盖 |
 | 检出两张 Display | 退出 RDP并从本地画面复核；PCI bridge 不算显卡，Remote Display Adapter 才算 Display |
 | base 注入报存储锁 | 停止所有 VM 和存储操作后重试 |
+| seal 报 WeGame/Tencent 清理失败 | 先让模板 Windows 完整关机并关闭 Fast Startup，按第一条错误修复后重跑；不要用 `--no-clean` 掩盖异常 |
 | base 注入报 dirty/hibernated | 正常启动 Windows、关闭 Fast Startup、执行完整关机后重试 |
 | 正常启动直接报 Windows hibernated/Fast Startup | 运行 `./deploy/scripts/recover-hibernated-vm.sh N`，在本地标准 VGA 中执行页面给出的两条内置命令并等待自然关机 |
 | 私有版拒绝 token 权限 | token 必须在仓库外且权限不宽于 `0600`；不要为了省事放宽权限 |

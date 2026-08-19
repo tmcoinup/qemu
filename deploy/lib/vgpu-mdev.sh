@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # deploy/lib/vgpu-mdev.sh — vGPU mdev 分配/回收 helper
 #
-# 默认仍兼容本机 RTX 2080 魔改 16 GB / 2 GB-per-VM 环境，但
+# 默认兼容本机 RTX 2080 魔改 16 GB / 1 GB 或 2 GB-per-VM 环境，但
 # 物理 GPU、mdev type 和 guest 显卡身份不再绑定。Tesla V100 等卡应
 # 通过 VGPU_RESOURCE_PROFILE 按 sysfs name 选择 type，不要猜 nvidia-NNN。
 #
@@ -398,9 +398,9 @@ mdev_set_identity_override() {
 #   nvidia-259 = GRID RTX6000-4Q  (4 GB)
 _profile_to_keyword() {
     case "$1" in
-        gtx750ti_2gb|gtx1050_2gb|gt1030_2gb|nvidia-257|2Q|RTX6000-2Q) echo "RTX6000-2Q" ;;
+        *_2gb|nvidia-257|2Q|RTX6000-2Q) echo "RTX6000-2Q" ;;
+        gt740*_1gb|gt730*_1gb|gtx750*_1gb|nvidia-256|1Q|RTX6000-1Q) echo "RTX6000-1Q" ;;
         gt1030_4gb|nvidia-259|4Q|RTX6000-4Q)             echo "RTX6000-4Q" ;;
-        1Q|RTX6000-1Q|nvidia-256)                        echo "RTX6000-1Q" ;;
         3Q|RTX6000-3Q|nvidia-258)                        echo "RTX6000-3Q" ;;
         *)                                                echo "$1" ;;
     esac
@@ -449,9 +449,9 @@ mdev_type_roots() {
 
 _mdev_legacy_type_id() {
     case "$1" in
-        gtx750ti_2gb|gtx1050_2gb|gt1030_2gb|nvidia-257|2Q|RTX6000-2Q) echo nvidia-257 ;;
+        *_2gb|nvidia-257|2Q|RTX6000-2Q) echo nvidia-257 ;;
+        gt740*_1gb|gt730*_1gb|gtx750*_1gb|nvidia-256|1Q|RTX6000-1Q) echo nvidia-256 ;;
         gt1030_4gb|nvidia-259|4Q|RTX6000-4Q)                         echo nvidia-259 ;;
-        1Q|RTX6000-1Q|nvidia-256)                                    echo nvidia-256 ;;
         3Q|RTX6000-3Q|nvidia-258)                                    echo nvidia-258 ;;
         nvidia-[0-9]*)                                                echo "$1" ;;
         *)                                                            return 1 ;;

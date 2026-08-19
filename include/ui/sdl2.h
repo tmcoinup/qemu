@@ -22,6 +22,7 @@
 #endif
 
 #include "ui/kbd-state.h"
+#include "ui/sdl2-display-policy.h"
 #include "ui/sdl2-event.h"
 #include "ui/sdl2-pointer.h"
 #ifdef CONFIG_OPENGL
@@ -45,11 +46,13 @@ struct sdl2_console {
     int idle_counter;
     int ignore_hotkeys;
     bool window_redraw_pending;
-    bool ui_info_pending;
+    bool window_resize_pending;
+    SDL2Size window_maximum;
     int64_t fps_window_start_us;
     uint32_t fps_frame_count;
     double present_fps;
     bool present_fps_valid;
+    uint8_t fps_low_warmup_windows;
     bool fixed_present;
     bool presented_since_refresh;
     bool gui_keysym;
@@ -84,13 +87,29 @@ struct sdl2_console {
     uintptr_t native_egl_colormap;
     EGLContext ectx;
     EGLSurface esurface;
+    int native_egl_owner_tid;
     bool logged_native_egl_visual;
     bool logged_scanout_texture;
     bool logged_scanout_flush;
     bool warned_missing_scanout_fb;
     bool warned_native_egl_blit;
+    bool warned_native_egl_make_current;
+    bool warned_native_egl_release;
 #endif
 };
+
+/*
+ * 统一 2D、GL 和 native-EGL 的可见性判定。
+ * 最小化或显式隐藏时保留最后一帧和待处理更新，
+ * 但不再 resize/map/swap 宿主窗口。
+ */
+static inline bool
+sdl2_window_is_renderable(const struct sdl2_console *scon)
+{
+    return scon && scon->real_window &&
+           sdl2_window_updates_allowed(
+               SDL_GetWindowFlags(scon->real_window), scon->hidden);
+}
 
 /* Dimensions of the image that the current SDL path actually renders. */
 static inline bool sdl2_current_guest_size(const struct sdl2_console *scon,
@@ -186,6 +205,7 @@ static inline void sdl2_gfx_dst_rect(int ww, int wh, int gw, int gh,
 
 void sdl2_window_create(struct sdl2_console *scon);
 void sdl2_window_destroy(struct sdl2_console *scon);
+void sdl2_window_update_size_limits(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
 void sdl2_flush_window_updates(void);

@@ -36,6 +36,7 @@ mkdir -p \
     "$INSTANCE/backups/disks" \
     "$INSTANCE/backups/nvram" \
     "$INSTANCE/log" "$INSTANCE/run" "$INSTANCE/tpm/state" \
+    "$INSTANCE/packages/SystemNvapiProjection/vm${VM_ID}-fixture" \
     "$OTHER_INSTANCE"
 touch \
     "$INSTANCE/vm.conf" \
@@ -45,6 +46,8 @@ touch \
     "$INSTANCE/run/monitor-edid.sha256" \
     "$INSTANCE/tpm/state/tpm2-00.permall" \
     "$INSTANCE/custom-per-vm-note" \
+    "$INSTANCE/packages/SystemNvapiProjection/vm${VM_ID}-fixture.iso" \
+    "$INSTANCE/packages/SystemNvapiProjection/vm${VM_ID}-fixture/Run-As-Administrator.cmd" \
     "$VM_ROOT/legacy/configs/vm${VM_ID}.conf" \
     "$VM_ROOT/legacy/nvram/vm${VM_ID}_VARS.fd" \
     "$VM_ROOT/legacy/nvram/backups/vm${VM_ID}_VARS.fd.bak-test" \

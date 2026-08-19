@@ -8,11 +8,14 @@ stop_vm="$here/scripts/stop-vm.sh"
 ctl_vm="$here/scripts/ctl-vm.sh"
 create_vm="$here/scripts/create-vm.sh"
 create_disk="$here/scripts/create-disk.sh"
-clone_vm="$here/scripts/clone-vgpu-base.sh"
+clone_vm="$here/scripts/clone-from-base.sh"
 monitor_vm="$here/scripts/sync-monitor-profile.sh"
-promote_vm="$here/scripts/promote-base.sh"
+optical_vm="$here/scripts/optical-media.sh"
+seal_base="$here/scripts/seal-base.sh"
+promote_base="$here/scripts/promote-base.sh"
 delete_vm="$here/scripts/delete-vm.sh"
 migrate_layout="$here/scripts/migrate-g11-layout.sh"
+preview_capacity="$here/host/check-dgame-preview-capacity.sh"
 
 usage() {
     cat <<'EOF'
@@ -21,26 +24,34 @@ usage:
   ./deploy/scripts/vmctl.sh start  ID [--vms-dir ABS|--vm-dir ABS] [options]
   ./deploy/scripts/vmctl.sh stop   ID [--vms-dir ABS|--vm-dir ABS] [--force]
   ./deploy/scripts/vmctl.sh create ID [--vms-dir ABS] [create options]
-  ./deploy/scripts/vmctl.sh disk   ID [--vms-dir ABS] [--blank|--from-base]
-  ./deploy/scripts/vmctl.sh clone  ID [--vms-dir ABS] [clone options]
+  ./deploy/scripts/vmctl.sh disk   ID [--vms-dir ABS] [--blank|--from-base] [--base-name NAME]
+  ./deploy/scripts/vmctl.sh clone  BASE_NAME ID [--vms-dir ABS] [clone options]
   ./deploy/scripts/vmctl.sh monitor ID [--vms-dir ABS] [--monitor-profile PROFILE] [--force]
-  ./deploy/scripts/vmctl.sh promote ID [--vms-dir ABS] [promote options]
+  ./deploy/scripts/vmctl.sh seal   SOURCE_ID BASE_NAME [--vms-dir ABS] [seal options]
   ./deploy/scripts/vmctl.sh delete ID [--vms-dir ABS] [-y]
   ./deploy/scripts/vmctl.sh path   ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh status ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh display ID ACTION [--vms-dir ABS|--vm-dir ABS]
+  ./deploy/scripts/vmctl.sh preview-capacity [--instances N] [--source-size WxH]
+      [--size WxH] [--rate HZ]
+  ./deploy/scripts/vmctl.sh cdrom  ID status|eject [storage selector]
+  ./deploy/scripts/vmctl.sh cdrom  ID mount /absolute/file.iso [--replace] [storage selector]
   ./deploy/scripts/vmctl.sh migrate [--check|--apply] [--vms-dir ABS]
 
 Examples:
   ./deploy/scripts/vmctl.sh path 2
   ./deploy/scripts/vmctl.sh start 2
-  ./deploy/scripts/vmctl.sh clone 456 --start                  # GPU/monitor 随机一次并固化
-  ./deploy/scripts/vmctl.sh clone 456 --gpu-profile gtx1050_2gb --start
+  ./deploy/scripts/vmctl.sh seal 1 win10-ltsc-v1
+  ./deploy/scripts/vmctl.sh clone win10-ltsc-v1 456 --start    # GPU/monitor 随机一次并固化
+  ./deploy/scripts/vmctl.sh clone win10-ltsc-v1 457 --gpu-profile gtx1050_2gb --start
   ./deploy/scripts/vmctl.sh start 2 --vms-dir /mnt/fast-vms
   ./deploy/scripts/vmctl.sh stop 2 --vm-dir /mnt/fast-vms/2
   ./deploy/scripts/vmctl.sh monitor 2 --monitor-profile benq-gw2280 --force
   ./deploy/scripts/vmctl.sh display 2 stream-only
   ./deploy/scripts/vmctl.sh display 2 window-show
+  ./deploy/scripts/vmctl.sh preview-capacity --instances 16 --rate 60
+  ./deploy/scripts/vmctl.sh cdrom 2 mount /path/to/package.iso
+  ./deploy/scripts/vmctl.sh cdrom 2 eject
 
 When a new configuration omits --gpu-profile, create and clone choose one
 audited GPU row at random and persist it in vm.conf.  Normal start and clone
@@ -125,9 +136,13 @@ case "$ACTION" in
         shift
         exec "$delete_vm" "$@"
         ;;
+    seal)
+        shift
+        exec_with_vms_root "$seal_base" "$@"
+        ;;
     promote)
         shift
-        exec_with_vms_root "$promote_vm" "$@"
+        exec_with_vms_root "$promote_base" "$@"
         ;;
     path)
         shift
@@ -151,6 +166,14 @@ case "$ACTION" in
     display|control)
         shift
         exec "$ctl_vm" "$@"
+        ;;
+    preview-capacity)
+        shift
+        exec "$preview_capacity" "$@"
+        ;;
+    cdrom|optical)
+        shift
+        exec "$optical_vm" "$@"
         ;;
     migrate)
         shift

@@ -2,6 +2,10 @@
 
 这次修复只落在 G-11，不合并 V-11 整个提交，也不改变 Windows BCD、
 `testsigning`、`nointegritychecks` 或 guest 内核驱动。
+窗口最小化/恢复的独立构建与验收步骤见
+[`G11-SDL-MINIMIZE.md`](G11-SDL-MINIMIZE.md)。
+宿主处于拼音/Fcitx 时 Guest 键盘无输入，见
+[`G11-SDL-HOST-IME.md`](G11-SDL-HOST-IME.md)。
 
 ## 一键构建与验证
 

@@ -90,6 +90,22 @@ require_text 'transport-device-profile-subsystem' "$packager"
 require_text 'PciProjectionMode = [string]$contract.transport.pciProjectionMode' \
     "$coordinator"
 require_text 'expectedSubsystem' "$coordinator"
+require_text '([int]$profile.rayTracingCores)' "$coordinator"
+require_text '([int]$profile.tensorCores)' "$coordinator"
+require_text 'function Invoke-NativeD3D12Probes' "$coordinator"
+require_text "'D3D12CapabilityProbe32.exe'" "$coordinator"
+require_text "'D3D12CapabilityProbe64.exe'" "$coordinator"
+require_text "Invoke-NativeD3D12Probes \$payload" "$coordinator"
+require_text 'D3D12_NATIVE_VERIFY PASS' "$coordinator"
+require_text 'NVAPI capability: RT cores=${GPU_RAY_TRACING_CORES}' "$packager"
+require_text './deploy/scripts/vmctl.sh cdrom' "$packager"
+require_text 'D3D12 expected:  raytracing tier=${GPU_D3D12_RAYTRACING_TIER}' \
+    "$packager"
+require_text '不安装应用专用 DLL' "$packager"
+require_text '0xAFD1B02Cu' \
+    "$root/deploy/guest/nvapi-shim/system_nvapi_probe.c"
+require_text 'gpu_info.ray_tracing_cores != expected_rt_cores' \
+    "$root/deploy/guest/nvapi-shim/system_nvapi_probe.c"
 require_text 'function Get-TrustedPriorShimHashes' "$coordinator"
 require_text "'^[0-9A-F]{64}-validated\.json\$'" "$coordinator"
 require_text 'Test-PnpPrefix ([string]$receipt.displayInstanceId)' "$coordinator"
@@ -166,13 +182,17 @@ assert_bundle() {
         -name "vm${vm_id}-*.iso" -print)
     [[ ${#dirs[@]} -eq 1 && ${#isos[@]} -eq 1 ]] ||
         fail "vm$vm_id did not produce one directory and one ISO"
+    if find "$output" -mindepth 1 -maxdepth 1 -type d \
+            -name '.build-vm*' -print -quit | grep -q .; then
+        fail "vm$vm_id left a temporary build directory"
+    fi
     local bundle=${dirs[0]} iso=${isos[0]}
     [[ $(stat -c %a -- "$bundle") == 700 && $(stat -c %a -- "$iso") == 600 ]] ||
         fail "vm$vm_id output permissions are not private"
     if find "$bundle" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
         fail "vm$vm_id bundle contains a non-regular top-level entry"
     fi
-    [[ $(find "$bundle" -mindepth 1 -maxdepth 1 -type f | wc -l) -eq 15 ]] ||
+    [[ $(find "$bundle" -mindepth 1 -maxdepth 1 -type f | wc -l) -eq 17 ]] ||
         fail "vm$vm_id bundle has an unexpected file count"
     while IFS= read -r file; do
         [[ $(stat -c %a -- "$file") == 600 ]] ||
@@ -210,7 +230,7 @@ PY
           "profile", "purpose", "schemaVersion", "sourceConfigSha256",
           "transport", "vmId", "vmUuid"
         ] and
-        .schemaVersion == 2 and .purpose == "g11-system-nvapi-projection" and
+        .schemaVersion == 4 and .purpose == "g11-system-nvapi-projection" and
         .vmId == $vmId and (.vmUuid | test("^[0-9a-f-]{36}$")) and
         (.sourceConfigSha256 | test("^[0-9A-F]{64}$")) and
         .transport.targetPnpId == "PCI\\VEN_10DE&DEV_1E30" and
@@ -224,13 +244,16 @@ PY
         .profile.memoryMakerName == $memoryMaker and
         .profile.memoryMakerNvapiName == $memoryMakerNvapi and
         .profile.memoryMaker == $memoryMakerId and .profile.memoryType == 8 and
+        .profile.d3d12RaytracingTier == 0 and
+        .profile.rayTracingCores == 0 and .profile.tensorCores == 0 and
         .monitor.key == $monitorKey and .monitor.displayName == $monitorName and
         .monitor.manufacturer == $monitorMfg and
         .monitor.pnpVendor == $monitorVendor and
         .monitor.productId == $monitorProduct and .monitor.pnpId == $monitorPnp and
         (.monitor.edidSha256 | test("^[0-9A-F]{64}$")) and
         (.payload | keys | sort) == [
-          "coordinatorSha256", "identityCatalogJsonSha256",
+          "coordinatorSha256", "d3dProbeX64Sha256", "d3dProbeX86Sha256",
+          "identityCatalogJsonSha256",
           "lowLevelInstallerSha256", "probeX64Sha256", "probeX86Sha256",
           "profileWriterSha256", "shimX64Sha256", "shimX86Sha256"
         ] and all(.payload[]; test("^[0-9A-F]{64}$"))
@@ -249,8 +272,8 @@ PY
     jq -e --arg contractId "$actual_contract_id" '
         (keys | sort) == ["contractId", "files", "purpose", "schemaVersion"] and
         .schemaVersion == 1 and .purpose == "g11-system-nvapi-projection" and
-        .contractId == $contractId and (.files | length) == 10 and
-        ([.files[].path] | unique | length) == 10
+        .contractId == $contractId and (.files | length) == 12 and
+        ([.files[].path] | unique | length) == 12
     ' "$manifest" >/dev/null || fail "vm$vm_id manifest is malformed"
     local path bytes digest
     while IFS=$'\t' read -r path bytes digest; do
@@ -272,7 +295,9 @@ PY
         --arg shim86 "$(sha256_upper "$bundle/nvapi.dll")" \
         --arg shim64 "$(sha256_upper "$bundle/nvapi64.dll")" \
         --arg probe86 "$(sha256_upper "$bundle/SystemNvapiProbe32.exe")" \
-        --arg probe64 "$(sha256_upper "$bundle/SystemNvapiProbe64.exe")" '
+        --arg probe64 "$(sha256_upper "$bundle/SystemNvapiProbe64.exe")" \
+        --arg d3dProbe86 "$(sha256_upper "$bundle/D3D12CapabilityProbe32.exe")" \
+        --arg d3dProbe64 "$(sha256_upper "$bundle/D3D12CapabilityProbe64.exe")" '
         .payload.coordinatorSha256 == $coordinator and
         .payload.lowLevelInstallerSha256 == $installerSha and
         .payload.profileWriterSha256 == $writer and
@@ -280,7 +305,9 @@ PY
         .payload.shimX86Sha256 == $shim86 and
         .payload.shimX64Sha256 == $shim64 and
         .payload.probeX86Sha256 == $probe86 and
-        .payload.probeX64Sha256 == $probe64
+        .payload.probeX64Sha256 == $probe64 and
+        .payload.d3dProbeX86Sha256 == $d3dProbe86 and
+        .payload.d3dProbeX64Sha256 == $d3dProbe64
     ' "$contract" >/dev/null || fail "vm$vm_id executable payload is not contract-bound"
     [[ $(sha256_upper "$bundle/monitor-edid.bin") == \
         "$(jq -er '.monitor.edidSha256' "$contract")" ]] ||
@@ -315,5 +342,40 @@ package_fixture 903 "$tmp/output-samsung"
 assert_bundle "$tmp/output-samsung" 903 gtx1050_gigabyte_2gb Gigabyte \
     samsung-s24f350 'Samsung S24F350' SAM 0x0D20 SAM0D20 S24F350 \
     Samsung 'SK hynix' 6 Hynix
+
+# A 1 GiB/nvidia-256 fixture exercises the native RTX6000-1Q 1325 transport;
+# the older 2 GiB fixtures above exercise the RTX6000-2Q 1326 transport.
+create_fixture 904 gtx750_asus_1gb dell-p2419h
+package_fixture 904 "$tmp/output-grid-1q"
+assert_bundle "$tmp/output-grid-1q" 904 gtx750_asus_1gb ASUS dell-p2419h \
+    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Samsung 1 Samsung
+
+# Without --output-root the delivery artifacts must stay inside the numeric
+# VM bundle.  This is the path delete-vm removes atomically with that VM.
+default_output="$vm_root/904/packages/SystemNvapiProjection"
+IMAGE_ROOT="$image_root" VM_ROOT="$vm_root" STAGE_DIR="$stage_dir" \
+    bash "$packager" 904 >"$tmp/default-output.log"
+assert_bundle "$default_output" 904 gtx750_asus_1gb ASUS dell-p2419h \
+    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Samsung 1 Samsung
+require_text "$default_output" "$tmp/default-output.log"
+require_text './deploy/scripts/vmctl.sh cdrom 904 mount' "$tmp/default-output.log"
+require_text './deploy/scripts/vmctl.sh cdrom 904 eject' "$tmp/default-output.log"
+[[ ! -e "$stage_dir/SystemNvapiProjection" ]] ||
+    fail 'default package escaped into the global staging directory'
+
+# A packages symlink would break delete-vm ownership by redirecting artifacts
+# outside the numeric VM bundle.  Default packaging must reject it before
+# publishing any file through the link.
+create_fixture 905 gtx750_asus_1gb dell-p2419h
+mkdir -p "$tmp/outside-packages"
+ln -s "$tmp/outside-packages" "$vm_root/905/packages"
+if IMAGE_ROOT="$image_root" VM_ROOT="$vm_root" STAGE_DIR="$stage_dir" \
+        bash "$packager" 905 >"$tmp/symlink-output.log" 2>&1; then
+    fail 'default package followed a packages directory symlink'
+fi
+require_text 'VM instance tree is unsafe' "$tmp/symlink-output.log"
+if find "$tmp/outside-packages" -mindepth 1 -print -quit | grep -q .; then
+    fail 'rejected package path wrote through its symlink'
+fi
 
 echo 'PASS: system NVAPI/monitor package is process-agnostic, content-bound and generic'

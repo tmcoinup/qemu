@@ -50,7 +50,8 @@ strict-A 不再是交付目标。启动器拒绝新的 CLI/持久化 A；legacy 
 off 使用原生 GRID PCI 身份：
 
 ```text
-10DE:1E30 / SUBSYS_132610DE
+1GB/1Q: 10DE:1E30 / SUBSYS_132510DE
+2GB/2Q: 10DE:1E30 / SUBSYS_132610DE
 ```
 
 它适合安装原版 GRID 538.33、排查 Code 28/43，以及从严格身份安全恢复。off 启动会
@@ -63,7 +64,8 @@ off 使用原生 GRID PCI 身份：
 ./deploy/scripts/start-vm.sh 2 --spoof-name-only
 ```
 
-B 保留原生 `10DE:1E30 / SUBSYS_132610DE` 和原版 GRID driver，host 在创建 mdev
+B 保留原生 `10DE:1E30` 和原版 GRID driver；1GB/1Q 使用
+`SUBSYS_132510DE`，2GB/2Q 使用 `SUBSYS_132610DE`。host 在创建 mdev
 时按稳定 VM UUID 提供 `vm.conf` 的 `GPU_NAME`。它是所有 profile 的 driver-safe
 路径，也是 GTX 750 Ti、GT 1030 的最终模式。
 
@@ -112,7 +114,7 @@ VGPU_PATCHED_DRIVER_VERSION=31.0.15.3833
 
 GTX1050 历史推进路径会修改 INF、重建 catalog 并使用 VM 本地自签证书，现已在
 生成 guest 包、启动 VM 或写 marker 前硬拒绝。不要恢复旧 ZIP、导入私有根或手工
-持久化 A/internal/FRL。三款 profile 的受支持策略均为 B。VM3 的 legacy A 已通过
+持久化 A/internal/FRL。当前 25 条 profile 的受支持策略均为 B。VM3 的 legacy A 已通过
 生产迁移回执提交为 B/native，并完成 Code 0、WHCP signer 和 GPU-Z 验收；尚未
 迁移的其他旧 A 实例仍由启动和封装门禁隔离。
 

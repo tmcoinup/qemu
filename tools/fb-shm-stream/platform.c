@@ -343,7 +343,15 @@ fb_shm_stream_control_payload_size(const FbShmCtlAck *ack)
         return 0;
 #endif
     case FB_SHM_CTL_NOTIFY_GPU_FRAME:
-        return ack->status == FB_SHM_CTL_OK ? sizeof(FbShmGpuFrame) : 0;
+        if (ack->status != FB_SHM_CTL_OK) {
+            return 0;
+        }
+        if (ack->shm_size != sizeof(FbShmGpuFrameV1) &&
+            ack->shm_size != sizeof(FbShmGpuFrame)) {
+            fb_shm_stream_die("unsupported fb-shm GPU payload size %u",
+                              ack->shm_size);
+        }
+        return ack->shm_size;
     case FB_SHM_CTL_SET_ROI:
     case FB_SHM_CTL_SET_RATE:
     case FB_SHM_CTL_BYE:
@@ -529,12 +537,28 @@ static void fb_shm_stream_apply_gpu_frame(Session *s,
 {
     ControlRx *rx = &s->control_rx;
     FbShmGpuFrame *gpu = &rx->payload.gpu;
+    FbShmGpuFrame normalized = { 0 };
     FbShmStreamGpuStatus status;
     bool has_handle = false;
 
-    if (ack->shm_size != sizeof(*gpu) ||
-        rx->payload_size != sizeof(*gpu) ||
-        rx->payload_bytes != sizeof(*gpu)) {
+    if (rx->payload_size != ack->shm_size ||
+        rx->payload_bytes != ack->shm_size) {
+        s->gpu_error = FB_SHM_STREAM_GPU_E_WIRE;
+        s->gpu_error_logged = false;
+        return;
+    }
+    if (ack->shm_size == sizeof(FbShmGpuFrameV1)) {
+        FbShmGpuFrameV1 *legacy = (FbShmGpuFrameV1 *)gpu;
+
+        memcpy(&normalized, legacy,
+               offsetof(FbShmGpuFrame, source_width));
+        normalized.version = FB_SHM_GPU_FRAME_VERSION;
+        normalized.size = sizeof(normalized);
+        normalized.source_width = legacy->backing_width;
+        normalized.source_height = legacy->backing_height;
+    } else if (ack->shm_size == sizeof(FbShmGpuFrame)) {
+        normalized = *gpu;
+    } else {
         s->gpu_error = FB_SHM_STREAM_GPU_E_WIRE;
         s->gpu_error_logged = false;
         return;
@@ -542,7 +566,7 @@ static void fb_shm_stream_apply_gpu_frame(Session *s,
 #ifndef _WIN32
     has_handle = rx->nfds == 1;
 #endif
-    status = fb_shm_stream_gpu_validate_frame(gpu, has_handle);
+    status = fb_shm_stream_gpu_validate_frame(&normalized, has_handle);
     if (status != FB_SHM_STREAM_GPU_OK) {
         s->gpu_error = status;
         s->gpu_error_logged = false;
@@ -550,7 +574,7 @@ static void fb_shm_stream_apply_gpu_frame(Session *s,
     }
 
     fb_shm_stream_close_gpu_frame(s);
-    s->gpu_frame = *gpu;
+    s->gpu_frame = normalized;
 #ifndef _WIN32
     s->gpu_fd = rx->fds[0];
     rx->fds[0] = -1;
@@ -628,7 +652,8 @@ static uint32_t fb_shm_stream_hello_flags(StreamMode mode)
     if (mode == STREAM_MODE_GPU ||
         (mode == STREAM_MODE_AUTO &&
          fb_shm_stream_gpu_backend_available())) {
-        flags |= FB_SHM_HELLO_F_GPU_FRAMES;
+        flags |= FB_SHM_HELLO_F_GPU_FRAMES |
+                 FB_SHM_HELLO_F_GPU_SOURCE_SIZE;
     }
     if (mode == STREAM_MODE_GPU) {
         flags |= FB_SHM_HELLO_F_GPU_REQUIRED;

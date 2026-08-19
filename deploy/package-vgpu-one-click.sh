@@ -14,6 +14,7 @@ source "$here/lib/vm-storage.sh"
 usage() {
     cat >&2 <<'EOF'
 usage: ./deploy/package-vgpu-one-click.sh
+       ./deploy/package-vgpu-one-click.sh --replace-public
        ./deploy/package-vgpu-one-click.sh --with-license-token
        ./deploy/package-vgpu-one-click.sh --token-file FILE.tok
        ./deploy/package-vgpu-one-click.sh --with-license-token --replace-licensed
@@ -21,14 +22,17 @@ usage: ./deploy/package-vgpu-one-click.sh
        ./deploy/package-vgpu-one-click.sh VM_ID   # legacy only
 
 No argument (recommended):
-  Build one VgpuPortable.exe with every audited B/native profile and no
-  VM ID/UUID.  It does not embed or require GPU-Z or a DLS token.
+  Build one VgpuPortable.exe with every audited B/native profile, the
+  recommended guest performance optimizer, and no VM ID/UUID.  It does not
+  embed or require GPU-Z or a DLS token.
   --with-license-token builds a separate private VgpuPortable.exe using
   $STAGE_DIR/client_configuration_token.tok.  --token-file selects another
   repository-external token.  The private EXE works for every B/native GPU
   profile and replaces the legacy model-specific finish step for new VMs.
   When the DLS token changes, add --replace-licensed.  The old authenticated
   private EXE/bundle is retained under a mode-0700 repository-external backup.
+  When the public catalog/format changes, add --replace-public; its old
+  authenticated EXE/bundle is retained the same way.
   --portable forwards its remaining options to package-vgpu-portable.sh.
 
 VM_ID (legacy compatibility):
@@ -51,16 +55,20 @@ if (($# == 1)) && [[ "$1" == -h || "$1" == --help ]]; then
     exit 0
 fi
 if (($# == 0)); then
-    echo "[vgpu-one-click] building the VM-unbound portable profile installer (GPU-Z is an external sibling)"
+    echo "[vgpu-one-click] building the VM-unbound identity/performance installer (GPU-Z is an external sibling)"
     exec "$here/package-vgpu-portable.sh"
 fi
 if [[ "$1" == --portable ]]; then
     shift
-    echo "[vgpu-one-click] building the VM-unbound portable profile installer (GPU-Z is an external sibling)"
+    echo "[vgpu-one-click] building the VM-unbound identity/performance installer (GPU-Z is an external sibling)"
+    exec "$here/package-vgpu-portable.sh" "$@"
+fi
+if [[ "$1" == --replace-public ]]; then
+    echo "[vgpu-one-click] replacing an older public identity/performance generation with backup"
     exec "$here/package-vgpu-portable.sh" "$@"
 fi
 if [[ "$1" == --with-license-token || "$1" == --token-file ]]; then
-    echo "[vgpu-one-click] building the private all-profile identity/license finalizer"
+    echo "[vgpu-one-click] building the private all-profile identity/license/performance finalizer"
     exec "$here/package-vgpu-portable.sh" "$@"
 fi
 (($# == 1)) || {

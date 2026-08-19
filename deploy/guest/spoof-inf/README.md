@@ -91,10 +91,10 @@ Get-ChildItem 'C:\NVIDIA\DisplayDriver\553.74' -Recurse -Filter 'nvdm*.inf' |
 7. Windows 正常关机，在宿主执行：
 
 ```bash
-./deploy/scripts/promote-base.sh 1
+./deploy/scripts/seal-base.sh 1 win10-ltsc-v1
 ```
 
-之后 `create-disk.sh` 从 `vms/bases/win10-base.qcow2` 克隆，不需要每台新 VM 重做
+之后 `create-disk.sh --base-name win10-ltsc-v1` 从具名 base 克隆，不需要每台新 VM 重做
 `all_2gb`。新 VM 第一次进入 Windows 后只需运行
 `./deploy/sync-vgpu-profile.sh <vm_id>`，把该 VM 实际抽到的单个型号名称和
 NVAPI 规格写入 guest。

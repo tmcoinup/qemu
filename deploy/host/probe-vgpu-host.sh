@@ -9,13 +9,15 @@ config_was_set=0
 [[ -v VGPU_HOST_CONFIG ]] && config_was_set=1
 VGPU_HOST_CONFIG="${VGPU_HOST_CONFIG:-$here/vgpu-host.conf}"
 profile_arg=""
+fb_arg=""
 
 usage() {
     cat <<'EOF'
-usage: probe-vgpu-host.sh [--config FILE] [--profile NAME]
+usage: probe-vgpu-host.sh [--config FILE] [--profile NAME] [--fb-mb 1024|2048]
 
 Lists every mdev type exposed by the selected/auto-detected GPU parent and
-validates the configured VGPU_RESOURCE_PROFILE without writing host state.
+validates the configured static or 1GB/2GB mapped VGPU_RESOURCE_PROFILE values
+without writing host state. --fb-mb selects one configured mapping.
 EOF
 }
 
@@ -30,6 +32,14 @@ while (($#)); do
         --profile)
             [[ $# -ge 2 ]] || { echo '--profile requires a name' >&2; exit 2; }
             profile_arg=$2
+            shift 2
+            ;;
+        --fb-mb)
+            [[ $# -ge 2 ]] || { echo '--fb-mb requires 1024 or 2048' >&2; exit 2; }
+            case "$2" in
+                1024|2048) fb_arg=$2 ;;
+                *) echo '--fb-mb requires 1024 or 2048' >&2; exit 2 ;;
+            esac
             shift 2
             ;;
         -h|--help)
@@ -92,19 +102,40 @@ for root in "${roots[@]}"; do
     done
 done
 
-profile=${profile_arg:-${VGPU_RESOURCE_PROFILE:-}}
-if [[ -n "$profile" ]]; then
+declare -a configured_profiles=()
+if [[ -n "$profile_arg" ]]; then
+    configured_profiles+=("$profile_arg|${fb_arg:-${VGPU_RESOURCE_FB_MB:-}}")
+elif [[ -n "$fb_arg" ]]; then
+    case "$fb_arg" in
+        1024) profile=${VGPU_RESOURCE_PROFILE_1024:-} ;;
+        2048) profile=${VGPU_RESOURCE_PROFILE_2048:-} ;;
+    esac
+    [[ -n "$profile" ]] || {
+        echo "no configured VGPU_RESOURCE_PROFILE_${fb_arg} mapping" >&2
+        exit 1
+    }
+    configured_profiles+=("$profile|$fb_arg")
+elif [[ -n "${VGPU_RESOURCE_PROFILE:-}" ]]; then
+    configured_profiles+=("$VGPU_RESOURCE_PROFILE|${VGPU_RESOURCE_FB_MB:-}")
+else
+    [[ -z "${VGPU_RESOURCE_PROFILE_1024:-}" ]] ||
+        configured_profiles+=("$VGPU_RESOURCE_PROFILE_1024|1024")
+    [[ -z "${VGPU_RESOURCE_PROFILE_2048:-}" ]] ||
+        configured_profiles+=("$VGPU_RESOURCE_PROFILE_2048|2048")
+fi
+
+for configured in "${configured_profiles[@]}"; do
+    IFS='|' read -r profile expected_fb <<<"$configured"
     selected=$(mdev_find_type "$profile")
     mdev_validate_type_parent "$selected"
     selected_fb=$(mdev_type_framebuffer_mb "$selected")
     selected_available=$(cat "$selected/available_instances")
 
-    if [[ -n "${VGPU_RESOURCE_FB_MB:-}" &&
-          "$selected_fb" != "$VGPU_RESOURCE_FB_MB" ]]; then
-        echo "selected profile framebuffer mismatch: sysfs=${selected_fb}MB config=${VGPU_RESOURCE_FB_MB}MB" >&2
+    if [[ -n "$expected_fb" && "$selected_fb" != "$expected_fb" ]]; then
+        echo "selected profile framebuffer mismatch: profile=${profile} sysfs=${selected_fb}MB config=${expected_fb}MB" >&2
         exit 1
     fi
     printf '\nselected      : %s (%s, %s MB, available=%s)\n' \
         "$selected" "$(cat "$selected/name")" "$selected_fb" \
         "$selected_available"
-fi
+done

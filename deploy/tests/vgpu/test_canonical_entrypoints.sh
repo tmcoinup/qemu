@@ -18,8 +18,9 @@ CANONICAL_ENTRIES=(
     stop-vm.sh
     create-vm.sh
     create-disk.sh
-    clone-vgpu-base.sh
-    promote-base.sh
+    clone-from-base.sh
+    seal-base.sh
+    host-clean-tencent.sh
     delete-vm.sh
     sync-monitor-profile.sh
     migrate-g11-layout.sh
@@ -31,6 +32,11 @@ CANONICAL_ENTRIES=(
     host-nvme-apst.sh
 )
 
+COMPATIBILITY_ALIASES=(
+    clone-vgpu-base.sh
+    promote-base.sh
+)
+
 REMOVED_ROOT_ENTRIES=(
     start-vm.sh
     stop-vm.sh
@@ -38,6 +44,8 @@ REMOVED_ROOT_ENTRIES=(
     create-disk.sh
     clone-vgpu-base.sh
     promote-base.sh
+    clone-from-base.sh
+    seal-base.sh
     delete-vm.sh
     sync-monitor-profile.sh
     migrate-g11-layout.sh
@@ -49,6 +57,12 @@ REMOVED_ROOT_ENTRIES=(
 for entry in "${CANONICAL_ENTRIES[@]}"; do
     path="$DEPLOY/scripts/$entry"
     [[ -x "$path" ]] || fail "canonical entry is not executable: $path"
+    bash -n "$path"
+done
+
+for entry in "${COMPATIBILITY_ALIASES[@]}"; do
+    path="$DEPLOY/scripts/$entry"
+    [[ -x "$path" ]] || fail "compatibility alias is not executable: $path"
     bash -n "$path"
 done
 
@@ -81,6 +95,10 @@ grep -Fq 'start_vm="$here/scripts/start-vm.sh"' "$DEPLOY/scripts/vmctl.sh" ||
     fail "vmctl does not use canonical start-vm"
 grep -Fq 'create_disk="$here/scripts/create-disk.sh"' "$DEPLOY/scripts/vmctl.sh" ||
     fail "vmctl does not use canonical disk entry"
+grep -Fq 'clone_vm="$here/scripts/clone-from-base.sh"' "$DEPLOY/scripts/vmctl.sh" ||
+    fail "vmctl does not use canonical clone-from-base entry"
+grep -Fq 'seal_base="$here/scripts/seal-base.sh"' "$DEPLOY/scripts/vmctl.sh" ||
+    fail "vmctl does not use canonical seal-base entry"
 grep -Fq 'migrate_layout="$here/scripts/migrate-g11-layout.sh"' \
     "$DEPLOY/scripts/vmctl.sh" || fail "vmctl does not use canonical migration entry"
 

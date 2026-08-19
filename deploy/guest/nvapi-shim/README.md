@@ -83,10 +83,11 @@ clock, RAM type, and bus width. Relative to that raw GDDR5 clock, the transfer
 factor is two: `3504000 * 2 * 128 / 8000 = 112128 MB/s`. The configured
 bandwidth supplies a missing clock and repairs a value that differs by more
 than one percent; catalog rounding such as 112000 versus 112128 MB/s retains
-the advertised 1752 MHz rendered clock. The current catalog contains 12
-atomic GDDR5 rows across GTX 750 Ti, GT 1030 and GTX 1050, seven board brands
-(NVIDIA, ASUS, Dell, MSI, Gigabyte, GALAX and Colorful), and three VRAM makers
-(Samsung, SK hynix and Micron). Profile staging and the registry writer reject
+the advertised 1752 MHz rendered clock. The current catalog contains 24
+atomic GDDR5 rows across GT 730, GT 740, GTX 750, GTX 750 Ti, GT 1030 and
+GTX 1050, eight board brands (NVIDIA, ASUS, Dell, MSI, Gigabyte, ZOTAC, GALAX
+and Colorful), and four VRAM makers (Samsung, Elpida, SK hynix and Micron).
+Profile staging and the registry writer reject
 unknown maker/type enums or any tuple not present in that catalog; the math
 helper returns zero for an unsupported RAM-type enum.
 
@@ -158,20 +159,27 @@ The build and setup flow does not install either probe.
 
 For process-agnostic deployment, build a VM-bound package with
 `deploy/package-system-nvapi-projection.sh VM_ID`. Its coordinator validates
-the unique Code-0 Display and signed driver, saves the signed NVIDIA originals,
-installs both system search-path images, and runs `SystemNvapiProbe32.exe` and
-`SystemNvapiProbe64.exe` after reboot. Each probe requires exactly one NVAPI
+the unique Code-0 Display and signed driver. Before it saves or writes any
+system projection, it runs `D3D12CapabilityProbe32.exe` and
+`D3D12CapabilityProbe64.exe` against the native NVIDIA adapter. Both must match
+the catalog's tier-zero contract. Only then does it save the signed NVIDIA
+originals, install both system search-path images, and run
+`SystemNvapiProbe32.exe` and `SystemNvapiProbe64.exe` after reboot. Each probe
+requires exactly one NVAPI
 physical GPU, the native transport device, the profile subsystem, and the
-expected RAM maker/type/bus width. A protected `validated` receipt is written
-only after both pass. A persistent SYSTEM task republishes the complete GPU
+expected RAM maker/type/bus width plus the catalog-bound RT/Tensor core counts.
+A protected `validated` receipt is written only after both architectures pass
+both the NVAPI and native D3D12 gates.
+A persistent SYSTEM task republishes the complete GPU
 and monitor contract after startup/logon so legacy refresh tasks cannot leave
 a partial registry state.
 
 The portable/app-local flow still installs `VgpuIdentityQuery.exe` beside its
 protected x86 shim and may explicitly add the audited GPU-Z copy with
 `/with-gpuz`. That compatibility path is independent from the system package;
-new system-wide acceptance should use the two system probes, one present PnP
-Display, and the validated receipt.
+mounting or replacing the system-package ISO does not require rebuilding or
+rerunning `VgpuPortable.exe`. New system-wide acceptance should use all four
+probes, one present PnP Display, and the validated receipt.
 
 ## Known limits
 
@@ -190,6 +198,10 @@ Display, and the validated receipt.
 - The locked GPU-Z 2.70 NVAPI TMU/Texture Fillrate path is covered. Its
   Ray Tracing/DirectML capability boxes may instead use DXGI/D3D12 feature
   checks; those runtime paths remain native and are outside this DLL's ABI.
+  The system package therefore probes both native x86/x64 D3D12 paths and
+  fails before writing when either reports a nonzero ray-tracing tier. On the
+  qualified RTX 2080-backed GRID 538.33 path, x64 reports tier 11, so the
+  old-card reality contract is intentionally rejected rather than masked.
 - A changed registry profile is visible only in processes started after the
   shim is reloaded because identity values are intentionally read once.
 - Replacing system NVAPI affects every new 32/64-bit NVAPI caller. Use only the

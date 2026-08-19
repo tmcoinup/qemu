@@ -39,7 +39,7 @@ set_e5_host() {
 test_manifest_and_index() {
     local revision rows
     revision="$(stealth_host_platform_validate)"
-    assert_equal "$revision" "2026-07-19.3" "共享清单 revision 错误"
+    assert_equal "$revision" "2026-08-19.1" "共享清单 revision 错误"
     rows="$(stealth_host_platform_index)"
     grep -Fx 'compat-host-intel-q35|GenuineIntel' <<<"$rows" >/dev/null \
         || fail "缺少 Intel host template"
@@ -122,14 +122,35 @@ test_vendor_and_capacity_fail_closed() {
     export STEALTH_HOST_CPU_MODEL=158
     export STEALTH_HOST_CPU_STEPPING=10
     export STEALTH_HOST_CPU_CORES=4
-    export STEALTH_HOST_CPU_ONLINE_THREADS=4
+    export STEALTH_HOST_CPU_ONLINE_THREADS=1
     if stealth_host_platform_load compat-host-intel-q35 2 >/dev/null 2>&1; then
-        fail "Guest 与宿主拓扑不一致仍被放行"
+        fail "Guest 超过宿主在线容量仍被放行"
     fi
     if STEALTH_KVM_TSC_KHZ=0 \
         stealth_host_platform_load compat-host-intel-q35 4 >/dev/null 2>&1; then
         fail "未知 KVM TSC 被虚构值放行"
     fi
+}
+
+test_larger_household_host_uses_bounded_guest_subset() {
+    export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+    export STEALTH_HOST_CPU_MODEL_NAME='Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz'
+    export STEALTH_HOST_CPU_FAMILY=6
+    export STEALTH_HOST_CPU_MODEL=158
+    export STEALTH_HOST_CPU_STEPPING=10
+    export STEALTH_HOST_CPU_CORES=6
+    export STEALTH_HOST_CPU_ONLINE_THREADS=12
+    export STEALTH_HOST_CPU_MAX_MHZ=4500
+    export STEALTH_HOST_CPU_PHYS_BITS=39
+    export STEALTH_KVM_TSC_KHZ=2592000
+
+    stealth_host_platform_load compat-host-intel-q35 4
+
+    assert_equal "$CPU_CORES" 2 "9750H 的 4 vCPU 没有形成 2C4T 子拓扑"
+    assert_equal "$CPU_THREADS" 4 "9750H 的 Guest 线程数错误"
+    assert_equal "$CPU_HOST_CORES" 6 "9750H 宿主核心事实未绑定"
+    assert_equal "$CPU_HOST_ONLINE_THREADS" 12 "9750H 宿主线程事实未绑定"
+    assert_equal "$CPU_TSC_MHZ" 2592 "9750H TSC 没有使用宿主真值"
 }
 
 test_amd_export() {
@@ -159,5 +180,6 @@ test_amd_export() {
 test_manifest_and_index
 test_household_export_is_stable_and_truthful
 test_vendor_and_capacity_fail_closed
+test_larger_household_host_uses_bounded_guest_subset
 test_amd_export
 echo "OK: host compatibility platform checks passed"

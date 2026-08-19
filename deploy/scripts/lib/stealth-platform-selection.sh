@@ -170,7 +170,7 @@ _stealth_exact_host_candidate_ids() {
 stealth_select_platform_bundle() {
     local requested="${STEALTH_PLATFORM_ID:-}"
     local allow="${ALLOW_PLATFORM_COMPATIBILITY:-0}"
-    local status
+    local status requested_rejection_file
     local -a supported=() household_supported=() static_compatibility=()
     local -a household_compatibility=() cross_generation_compatibility=()
     local -a exact_host=()
@@ -186,12 +186,36 @@ stealth_select_platform_bundle() {
             echo "ERROR: 指定平台需要 --allow-platform-compatibility: $requested" >&2
             return 1
         fi
-        if ! stealth_platform_registry_load "$requested" "${CPUS:-4}" ||
-           ! _stealth_platform_runtime_preflight; then
-            echo "ERROR: 指定平台无法由当前宿主完整实现: $requested" >&2
+        requested_rejection_file="$(
+            mktemp "${TMPDIR:-/tmp}/vmate-platform-requested.XXXXXX"
+        )" || return 1
+        if {
+            stealth_platform_registry_load "$requested" "${CPUS:-4}" &&
+                _stealth_platform_runtime_preflight
+        } 2>"$requested_rejection_file"; then
+            sed -n '1,40p' "$requested_rejection_file" >&2
+            rm -f -- "$requested_rejection_file"
+            return 0
+        fi
+        _STEALTH_PLATFORM_FIRST_REJECTION="$(
+            sed -n '1,40p' "$requested_rejection_file"
+        )"
+        rm -f -- "$requested_rejection_file"
+        # 显式跨厂商请求不是“同一硬件偏好的实现失败”，不能借兜底链静默换成
+        # 另一厂商。registry 已成功加载时 CPU_VENDOR 是清单真值；保持原拒绝
+        # 结果也能让调用方看到准确的 platform/host 厂商差异。
+        if [[ -n "${CPU_VENDOR:-}" &&
+              "$CPU_VENDOR" != "$(_host_cpu_vendor)" ]]; then
+            printf '%s\n' "$_STEALTH_PLATFORM_FIRST_REJECTION" >&2
+            echo "ERROR: 指定平台 CPU 厂商与宿主不一致，禁止跨厂商兜底: $requested" >&2
             return 1
         fi
-        return 0
+        echo ">> WARN: 首选平台 $requested 无法由当前宿主完整实现，正在尝试受控兜底候选" >&2
+        # 首选平台改变后，DIMM 的代际、socket 与训练频率也可能改变。继续沿用
+        # 首选平台的显式内存 ID 会让一个已经通过 KVM 的兜底平台在部件阶段再次
+        # 失败，因此只释放平台相关的 DIMM 选择；硬盘、GPU、显示器仍保持用户选择。
+        STEALTH_MEMORY_ID=
+        export STEALTH_MEMORY_ID
     fi
 
     # E5 v3/v4 的 Haswell 组与 Ryzen 7 5800 的 Ryzen 3 1200 均属于精确宿主

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 验证宿主感知的家用 CPU 兜底优先级、E5 代际约束和启动盘切换。
-# shellcheck disable=SC1091,SC2030,SC2031,SC2054,SC2329
+# shellcheck disable=SC1091,SC2030,SC2031,SC2054,SC2317,SC2329
 set -euo pipefail
 export STEALTH_HOST_PROBE_TEST_MODE=1
 

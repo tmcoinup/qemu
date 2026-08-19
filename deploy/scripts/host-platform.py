@@ -86,7 +86,7 @@ def export_pairs(
         "CPU_PROC_FAMILY": "0x0002",
         "CPU_SOCKET": "",
         "CPU_MODEL": "host",
-        "CPU_CORES": facts["cores"],
+        "CPU_CORES": facts["guest_cores"],
         "CPU_THREADS": guest_cpus,
         "CPU_PHYS_BITS": facts["guest_phys_bits"],
         "CPU_FEATURES": "",

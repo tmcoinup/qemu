@@ -226,7 +226,7 @@ def validate_manifest(root: dict[str, Any]) -> None:
         "cpu_model_source": "host_passthrough",
         "guest_cpu_class": "household_only",
         "server_brand_policy": "reject",
-        "host_topology_policy": "exact_up_to_4_threads",
+        "host_topology_policy": "bounded_guest_subset_2c2t_2c4t_4c4t",
         "profile_binding": (
             "vendor_brand_family_model_stepping_phys_bits_tsc_topology"
         ),

@@ -80,6 +80,7 @@ QUICK_TESTS = (
     "test_household_compatibility_catalog.sh",
     "test_household_cross_generation_fallback.sh",
     "test_household_platform_selection.sh",
+    "test_v11_cpu_fallback.sh",
     "test_ryzen5800_supported_pool.sh",
     "test_storage_compatibility_catalog.sh",
     "test_storage_aio_policy.sh",

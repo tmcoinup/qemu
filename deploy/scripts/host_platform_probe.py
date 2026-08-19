@@ -132,6 +132,36 @@ def detect_host_cores(cpuinfo: dict[str, str]) -> int:
     return parse_positive_int(value, "STEALTH_HOST_CPU_CORES", 4096)
 
 
+def guest_core_count(host_cores: int, online_threads: int, guest_cpus: int) -> int:
+    """在宿主容量内选择产品允许的 2C2T、2C4T 或 4C4T 子拓扑。"""
+    if host_cores > online_threads or online_threads % host_cores != 0:
+        fail(
+            "宿主核心/线程拓扑不可能: "
+            f"cores={host_cores} threads={online_threads}"
+        )
+    threads_per_core = online_threads // host_cores
+    if threads_per_core not in {1, 2}:
+        fail(f"宿主每核心线程数不受支持: {threads_per_core}")
+    if guest_cpus not in {2, 4}:
+        fail("host-passthrough Guest 只允许 2 或 4 个 vCPU")
+    if online_threads < guest_cpus:
+        fail(
+            f"host-passthrough Guest CPUS={guest_cpus} 超过宿主在线容量 "
+            f"{online_threads}"
+        )
+    # Guest 固定使用至少两个物理核心。支持 SMT 的大宿主优先形成 2C4T，
+    # 不支持 SMT 的宿主形成 4C4T；2 vCPU 始终形成可审计的 2C2T。
+    if guest_cpus == 2:
+        if host_cores < 2:
+            fail("host-passthrough 2C2T 至少需要两个宿主物理核心")
+        return 2
+    if threads_per_core == 2 and host_cores >= 2:
+        return 2
+    if host_cores >= 4:
+        return 4
+    fail("宿主容量无法形成 2C4T 或 4C4T Guest 子拓扑")
+
+
 def detect_host_facts(guest_cpus: int) -> dict[str, int | str]:
     """形成可持久化的 host-passthrough 最小事实集合。"""
     cpuinfo = read_cpuinfo()
@@ -171,17 +201,7 @@ def detect_host_facts(guest_cpus: int) -> dict[str, int | str]:
     )
     online_threads = detect_online_threads()
     cores = detect_host_cores(cpuinfo)
-    if online_threads > 4 or cores > 4:
-        fail("host-passthrough 只允许不超过 4 核/4 线程的家用宿主")
-    if guest_cpus != online_threads:
-        fail(
-            f"host-passthrough 要求 Guest CPUS={guest_cpus} 与宿主线程数 "
-            f"{online_threads} 完全一致"
-        )
-    if cores > online_threads or online_threads % cores != 0:
-        fail(f"宿主核心/线程拓扑不可能: cores={cores} threads={online_threads}")
-    if (cores, online_threads) not in {(2, 2), (2, 4), (4, 4)}:
-        fail("host-passthrough 只允许 2C2T、2C4T 或 4C4T 家用拓扑")
+    guest_cores = guest_core_count(cores, online_threads, guest_cpus)
     tsc_khz = parse_positive_int(
         os.environ.get("STEALTH_KVM_TSC_KHZ", ""),
         "STEALTH_KVM_TSC_KHZ",
@@ -195,7 +215,7 @@ def detect_host_facts(guest_cpus: int) -> dict[str, int | str]:
         str(value)
         for value in (
             vendor, brand, family, model, stepping, cores, online_threads,
-            max_mhz, phys_bits, tsc_khz, guest_cpus,
+            max_mhz, phys_bits, tsc_khz, guest_cores, guest_cpus,
         )
     )
     fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
@@ -207,6 +227,7 @@ def detect_host_facts(guest_cpus: int) -> dict[str, int | str]:
         "stepping": stepping,
         "cores": cores,
         "online_threads": online_threads,
+        "guest_cores": guest_cores,
         "max_mhz": max_mhz,
         "current_mhz": current_mhz,
         "phys_bits": phys_bits,

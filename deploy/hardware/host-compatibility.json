@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-19.3",
+  "catalog_revision": "2026-08-19.1",
   "identity_scope": "generic_q35_host_passthrough_compatibility",
   "machine_model": "q35",
   "defaults": {
@@ -14,7 +14,7 @@
     "cpu_model_source": "host_passthrough",
     "guest_cpu_class": "household_only",
     "server_brand_policy": "reject",
-    "host_topology_policy": "exact_up_to_4_threads",
+    "host_topology_policy": "bounded_guest_subset_2c2t_2c4t_4c4t",
     "profile_binding": "vendor_brand_family_model_stepping_phys_bits_tsc_topology",
     "tsc_policy": "host_default_no_tsc_freq",
     "kvm_realize_required": true

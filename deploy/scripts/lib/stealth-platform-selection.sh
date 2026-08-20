@@ -35,7 +35,7 @@ _stealth_platform_runtime_preflight() {
 _stealth_try_platform_ids() {
     local array_name="$1"
     local -n candidate_ids="$array_name"
-    local platform_id rejection_file
+    local platform_id rejection_file rejection
 
     (( ${#candidate_ids[@]} > 0 )) || return 1
     _stealth_shuffle_platform_ids "$array_name" || return 1
@@ -52,9 +52,14 @@ _stealth_try_platform_ids() {
             rm -f -- "$rejection_file"
             return 0
         fi
+        rejection="$(sed -n '1,40p' "$rejection_file")"
         if [[ -z "${_STEALTH_PLATFORM_FIRST_REJECTION:-}" ]]; then
-            _STEALTH_PLATFORM_FIRST_REJECTION="$(sed -n '1,40p' "$rejection_file")"
+            _STEALTH_PLATFORM_FIRST_REJECTION="$rejection"
         fi
+        # 第一条错误解释首选/首个候选为何失败；最后一条则解释真正的兜底
+        # 为什么也没能接住。两者都保留，避免多实例容量问题被早期 TSC 错误遮蔽。
+        _STEALTH_PLATFORM_FINAL_REJECTION="$rejection"
+        _STEALTH_PLATFORM_FINAL_REJECTION_ID="$platform_id"
         rm -f -- "$rejection_file"
     done
     return 1
@@ -170,11 +175,13 @@ _stealth_exact_host_candidate_ids() {
 stealth_select_platform_bundle() {
     local requested="${STEALTH_PLATFORM_ID:-}"
     local allow="${ALLOW_PLATFORM_COMPATIBILITY:-0}"
-    local status requested_rejection_file
+    local status requested_rejection_file requested_rejection
     local -a supported=() household_supported=() static_compatibility=()
     local -a household_compatibility=() cross_generation_compatibility=()
     local -a exact_host=()
     _STEALTH_PLATFORM_FIRST_REJECTION=
+    _STEALTH_PLATFORM_FINAL_REJECTION=
+    _STEALTH_PLATFORM_FINAL_REJECTION_ID=
 
     if [[ -n "$requested" ]]; then
         stealth_platform_registry_is_id "$requested" || {
@@ -197,9 +204,12 @@ stealth_select_platform_bundle() {
             rm -f -- "$requested_rejection_file"
             return 0
         fi
-        _STEALTH_PLATFORM_FIRST_REJECTION="$(
+        requested_rejection="$(
             sed -n '1,40p' "$requested_rejection_file"
         )"
+        _STEALTH_PLATFORM_FIRST_REJECTION="$requested_rejection"
+        _STEALTH_PLATFORM_FINAL_REJECTION="$requested_rejection"
+        _STEALTH_PLATFORM_FINAL_REJECTION_ID="$requested"
         rm -f -- "$requested_rejection_file"
         # 显式跨厂商请求不是“同一硬件偏好的实现失败”，不能借兜底链静默换成
         # 另一厂商。registry 已成功加载时 CPU_VENDOR 是清单真值；保持原拒绝
@@ -256,6 +266,11 @@ stealth_select_platform_bundle() {
     # 无论是否启用 compatibility，都先呈现第一条真实拒绝原因。
     [[ -z "$_STEALTH_PLATFORM_FIRST_REJECTION" ]] ||
         printf '%s\n' "$_STEALTH_PLATFORM_FIRST_REJECTION" >&2
+    if [[ -n "$_STEALTH_PLATFORM_FINAL_REJECTION" &&
+          "$_STEALTH_PLATFORM_FINAL_REJECTION" != "$_STEALTH_PLATFORM_FIRST_REJECTION" ]]; then
+        echo "ERROR: 最终兜底候选 ${_STEALTH_PLATFORM_FINAL_REJECTION_ID:-unknown} 的拒绝原因：" >&2
+        printf '%s\n' "$_STEALTH_PLATFORM_FINAL_REJECTION" >&2
+    fi
     if [[ "$allow" == 1 ]] &&
        (( ${#supported[@]} + ${#household_supported[@]} +
           ${#static_compatibility[@]} + ${#household_compatibility[@]} +

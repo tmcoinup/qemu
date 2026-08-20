@@ -33,6 +33,30 @@ def topology_with_smt_width(width: int):
 
 
 class CpuPinnerHostContractTest(unittest.TestCase):
+    def test_i7_9750h_can_place_second_2c4t_guest_after_vm1(self):
+        topology = [core(0, index, index, index + 6) for index in range(6)]
+        reserve = MODULE._auto_reserve(
+            topology, set(), 4, 0,
+            guest_threads_per_core=2, host_threads_per_core=2,
+        )
+        first = MODULE.choose_placement(
+            topology, set(), 4, 0, reserve,
+            guest_threads_per_core=2, host_threads_per_core=2,
+        )
+        # VM1 使用两个完整 SMT2 核；VM2 必须避开其 exact cpuset，并使用另外
+        # 两个完整 SMT2 核。前两核继续作为宿主管理保留，不参与任何 VM。
+        held = set(first.preference[:4])
+        second = MODULE.choose_placement(
+            topology, held, 4, 0, reserve,
+            guest_threads_per_core=2, host_threads_per_core=2,
+        )
+
+        self.assertEqual(reserve, 2)
+        self.assertEqual(held, {2, 3, 8, 9})
+        self.assertTrue(second.has_capacity)
+        self.assertEqual(second.preference[:4], (4, 10, 5, 11))
+        self.assertTrue(set(second.preference[:4]).isdisjoint(held))
+
     def test_hybrid_host_reserves_from_allocatable_smt2_pool(self):
         # 14700F：前 8 颗 P-core 为 SMT2，后 12 颗 E-core 为 SMT1。
         topology = [

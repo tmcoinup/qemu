@@ -12,6 +12,9 @@ from guest_cpu_policy import forbidden_server_identity, household_brand_allowed
 from host_platform_manifest import SUPPORTED_VENDORS, fail
 
 
+ONLINE_CPU_PATH = Path("/sys/devices/system/cpu/online")
+
+
 def test_overrides_enabled() -> bool:
     """只有独立测试可注入宿主事实；生产启动必须读取内核真实视图。"""
     return os.environ.get("STEALTH_HOST_PROBE_TEST_MODE") == "1"
@@ -110,15 +113,47 @@ def detect_phys_bits(cpuinfo: dict[str, str]) -> int:
     return parse_positive_int(value, "STEALTH_HOST_CPU_PHYS_BITS", 64)
 
 
-def detect_online_threads() -> int:
-    """逻辑 CPU 数只用于容量门禁和指纹，不冒充物理核心数。"""
+def parse_linux_cpu_list_count(value: str, where: str) -> int:
+    """严格解析 Linux ``cpulist``，返回不重复的逻辑 CPU 数量。"""
+    text = value.strip()
+    if not text:
+        fail(f"{where} 为空")
+    cpus: set[int] = set()
+    for token in text.split(","):
+        match = re.fullmatch(r"([0-9]+)(?:-([0-9]+))?", token)
+        if match is None:
+            fail(f"{where} 包含非法 CPU 范围: {token}")
+        first = int(match.group(1))
+        last = int(match.group(2) or match.group(1))
+        if first > last or last >= 8192:
+            fail(f"{where} 的 CPU 范围超出允许值: {token}")
+        selected = set(range(first, last + 1))
+        if cpus.intersection(selected):
+            fail(f"{where} 包含重复 CPU: {token}")
+        cpus.update(selected)
+    return len(cpus)
+
+
+def detect_online_threads(online_path: Path = ONLINE_CPU_PATH) -> int:
+    """读取整机在线线程数；不能受当前调用进程 affinity 影响。
+
+    V-11 启动首台 VM 后，cpuset partition 会按设计把已分配核心从客户端、shell
+    与后续 sudo clone 进程的 affinity 中摘除。``sched_getaffinity(0)`` 因而只是
+    当前进程可调度集合，不是稳定宿主身份；继续使用它会让第二台 VM 把 6C12T
+    误读成 6C8T 并拒绝 host-passthrough。内核 ``cpu/online`` 才是整机真值，
+    实际剩余容量仍由多实例 pinner 根据每个 vm-N exact cpuset 独立门禁。
+    """
     value = test_override("STEALTH_HOST_CPU_ONLINE_THREADS")
     if value is not None:
         return parse_positive_int(value, "STEALTH_HOST_CPU_ONLINE_THREADS", 8192)
     try:
-        detected = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
+        text = online_path.read_text(encoding="ascii")
+    except OSError:
+        # 极简 Linux 环境可能没有挂载 sysfs；os.cpu_count 仍比进程 affinity
+        # 更接近整机事实。返回值随后还会与物理核心/SMT 拓扑共同校验。
         detected = os.cpu_count() or 0
+    else:
+        detected = parse_linux_cpu_list_count(text, str(online_path))
     if detected <= 0:
         fail("无法探测宿主在线逻辑 CPU 数")
     return detected

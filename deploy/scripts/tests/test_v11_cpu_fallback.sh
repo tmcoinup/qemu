@@ -73,4 +73,24 @@ rm -f -- "$output_log"
     fail "兜底后未生成容量一致的完整部件 profile"
 assert_contains "$output" "正在尝试受控兜底候选" "首选平台失败没有给出兜底进度"
 
+test_final_fallback_diagnostic_is_not_hidden_by_preference_error() (
+    export STEALTH_HOST_CPU_ONLINE_THREADS=8
+    export STEALTH_PLATFORM_ID=intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2
+    local diagnostic_log diagnostics
+    diagnostic_log="$(mktemp)"
+    if stealth_select_platform_bundle 2>"$diagnostic_log"; then
+        rm -f -- "$diagnostic_log"
+        fail "残缺 6C8T 测试拓扑不应通过最终兜底"
+    fi
+    diagnostics="$(sed -n '1,120p' "$diagnostic_log")"
+    rm -f -- "$diagnostic_log"
+    assert_contains "$diagnostics" \
+        "最终兜底候选 compat-host-intel-q35 的拒绝原因" \
+        "最终 host-passthrough 失败原因被首选 TSC 错误遮蔽"
+    assert_contains "$diagnostics" "cores=6 threads=8" \
+        "最终兜底诊断没有保留错误宿主拓扑"
+)
+
+test_final_fallback_diagnostic_is_not_hidden_by_preference_error
+
 echo "OK: V-11 selected CPU controlled fallback checks passed"

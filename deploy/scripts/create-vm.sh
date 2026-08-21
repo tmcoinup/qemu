@@ -22,8 +22,8 @@
 #                         --list-pointer-profiles|--list-input-compat
 #
 # 挑选一套「平台 + 主板 + 内存 + SSD + NVIDIA 1GB/2GB 显卡 + 真实显示器」；
-# 未显式指定显卡时，从向后兼容的默认审核层等概率随机一条原子 profile；追加
-# 的显式层只在用户选中时使用。生成 UUID /
+# 未显式指定显卡时，先按宿主 framebuffer 档位收窄，再从该档的生产审核层
+# 等概率随机一条原子 profile；追加的显式层只在用户选中时使用。生成 UUID /
 # 各种序列号 / MAC，写入实例自己的 vm.conf 后仅作只读。
 # start-vm.sh 只读这个文件，确保同一个 VM 每次开机表现一致。
 
@@ -33,6 +33,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
 # shellcheck source=lib/vgpu-profiles.sh
 source "$here/lib/vgpu-profiles.sh"
+# shellcheck source=lib/vgpu-host-config.sh
+source "$here/lib/vgpu-host-config.sh"
 # shellcheck source=lib/monitor-profiles.sh
 source "$here/lib/monitor-profiles.sh"
 # shellcheck source=lib/hardware-profiles.sh
@@ -212,6 +214,85 @@ while (( $# > 0 )); do
     esac
 done
 
+infer_existing_vgpu_host_tier() {
+    local conf value seen="" count
+    local -a values=()
+
+    for conf in "$VM_ROOT"/*/vm.conf; do
+        [[ -f "$conf" && ! -L "$conf" ]] || continue
+        values=()
+        mapfile -t values < <(sed -n -E \
+            's/^[[:space:]]*GPU_VRAM_MB=(1024|2048)[[:space:]]*$/\1/p' \
+            "$conf")
+        count=${#values[@]}
+        (( count == 1 )) || {
+            echo "已有配置无法唯一读取 GPU_VRAM_MB: $conf" >&2
+            return 2
+        }
+        value=${values[0]}
+        if [[ -n "$seen" && "$seen" != "$value" ]]; then
+            echo "已有 VM 同时包含 ${seen}MB 与 ${value}MB vGPU 档位" >&2
+            return 3
+        fi
+        seen=$value
+    done
+    [[ -n "$seen" ]] || return 1
+    printf '%s\n' "$seen"
+}
+
+# Resolve the one physical-GPU tier for both VM creation and the management
+# TSV.  Publishing the active tier through the existing AUTO_RANDOM column
+# keeps VMate's eight-column protocol backward compatible: a 2 GiB host marks
+# only the 12 production rows, while a 1 GiB host marks only four Maxwell rows.
+resolve_vgpu_host_tier() {
+    local quiet=${1:-0} config_was_set=0 config tier inferred_tier infer_rc
+    local config_rc=0
+
+    if [[ -v VGPU_HOST_CONFIG ]]; then
+        config_was_set=1
+        config=$VGPU_HOST_CONFIG
+    else
+        config=$here/host/vgpu-host.conf
+    fi
+    if vgpu_host_config_load "$config" '[create-vm]' \
+            VGPU_HOST_FB_TIER_MB VGPU_HOST_VRAM_MB; then
+        config_rc=0
+    else
+        config_rc=$?
+        if ((config_rc != 3)); then
+            return "$config_rc"
+        fi
+        if ((config_was_set)); then
+            echo "VGPU_HOST_CONFIG 不存在: $config" >&2
+            return 1
+        fi
+    fi
+    if [[ -n "${VGPU_HOST_FB_TIER_MB:-}" &&
+          -n "${VGPU_HOST_VRAM_MB:-}" &&
+          "$VGPU_HOST_FB_TIER_MB" != "$VGPU_HOST_VRAM_MB" ]]; then
+        echo "VGPU_HOST_FB_TIER_MB 与兼容变量 VGPU_HOST_VRAM_MB 冲突" >&2
+        return 2
+    fi
+    tier=${VGPU_HOST_FB_TIER_MB:-${VGPU_HOST_VRAM_MB:-}}
+    if [[ -z "$tier" ]]; then
+        if inferred_tier=$(infer_existing_vgpu_host_tier); then
+            tier=$inferred_tier
+            (( quiet )) || \
+                echo "[create-vm] WARN: 未配置宿主 vGPU 档位；沿用现有 VM 的 ${tier}MB" >&2
+        else
+            infer_rc=$?
+            if (( infer_rc > 1 )); then
+                echo "请先运行 ./deploy/configure-g11-vgpu-host.sh 固定单一宿主档位" >&2
+                return 2
+            fi
+            tier=2048
+            (( quiet )) || \
+                echo "[create-vm] WARN: 空池未配置宿主 vGPU 档位；使用生产默认 2048MB" >&2
+        fi
+    fi
+    vgpu_profile_normalize_vram_mb "$tier"
+}
+
 if [[ -n "$LIST_ACTION" ]]; then
     [[ -z "$VM_ID" ]] || {
         echo "目录查询不能同时指定 vm_id" >&2
@@ -224,7 +305,10 @@ if [[ -n "$LIST_ACTION" ]]; then
         memory) memory_profile_print_catalog "$INCLUDE_FALLBACK" ;;
         ssd) ssd_profile_print_catalog ;;
         gpu) vgpu_profile_print_catalog ;;
-        gpu-tsv) vgpu_profile_print_tsv_catalog ;;
+        gpu-tsv)
+            VGPU_CATALOG_HOST_TIER=$(resolve_vgpu_host_tier 1) || exit $?
+            vgpu_profile_print_tsv_catalog "$VGPU_CATALOG_HOST_TIER"
+            ;;
         monitor) monitor_create_pool_print_catalog ;;
         input) input_profile_print_catalog active all ;;
         keyboard) input_keyboard_profile_print_catalog active ;;
@@ -234,6 +318,13 @@ if [[ -n "$LIST_ACTION" ]]; then
     esac
     exit 0
 fi
+
+# The framebuffer tier is a host/physical-GPU policy, not a per-account
+# random choice.  Prefer an explicit gitignored host config.  For a pre-policy
+# installation, infer one unambiguous tier from existing immutable vm.conf
+# files; an empty pool starts on the production 2 GiB default.  A mixed legacy
+# pool cannot be guessed safely and must be reconciled by the operator.
+VGPU_HOST_FB_TIER_MB=$(resolve_vgpu_host_tier) || exit $?
 
 if (( GPU_PROFILE_EXPLICIT && GPU_VRAM_EXPLICIT )); then
     echo "--gpu-profile 与 --gpu-vram 不能同时使用" >&2
@@ -773,13 +864,28 @@ fi
 
 if [[ -z "$GPU_PROFILE_REQUEST" ]]; then
     if [[ -n "$GPU_VRAM_MB_REQUEST" ]]; then
-        vgpu_profile_pick_random_vram "$GPU_VRAM_MB_REQUEST"
+        [[ "$GPU_VRAM_MB_REQUEST" == "$VGPU_HOST_FB_TIER_MB" ]] || {
+            echo "请求 ${GPU_VRAM_MB_REQUEST}MB 与宿主固定档 ${VGPU_HOST_FB_TIER_MB}MB 冲突" >&2
+            exit 2
+        }
+        vgpu_profile_pick_random_vram "$VGPU_HOST_FB_TIER_MB"
     else
-        vgpu_profile_pick_random
+        vgpu_profile_pick_random_vram "$VGPU_HOST_FB_TIER_MB"
     fi
     GPU_PROFILE_REQUEST=$GPU_PROFILE
 else
     vgpu_profile_load "$GPU_PROFILE_REQUEST"
+fi
+if vgpu_profile_is_legacy "$GPU_PROFILE"; then
+    if (( ! PRESERVE_OLD_GPU_POLICY )); then
+        echo "GPU profile $GPU_PROFILE 是仅供旧 VM 读取的 Kepler/R470 身份，不能与当前 GRID 538.33/R535 基线新建组合" >&2
+        exit 2
+    fi
+fi
+if [[ "$GPU_VRAM_MB" != "$VGPU_HOST_FB_TIER_MB" ]]; then
+    echo "GPU profile $GPU_PROFILE/${GPU_VRAM_MB}MB 与宿主固定档 ${VGPU_HOST_FB_TIER_MB}MB 冲突" >&2
+    echo "先关停该物理 GPU 上全部 VM，再用 configure-g11-vgpu-host.sh 统一切档" >&2
+    exit 2
 fi
 
 # Validate the complete combination before generating identity values or

@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  G-11 Sysprep clone answer file.
+
+  Run Sysprep with /generalize /oobe /shutdown.  Each clone receives a new
+  Windows identity; the oobeSystem settings only remove interactive pages and
+  start the one-shot VMate finalizer.  PersistAllDeviceInstalls intentionally
+  remains false so the image can move to another compatible G-11 host.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+    <settings pass="generalize">
+        <component name="Microsoft-Windows-PnpSysprep" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <PersistAllDeviceInstalls>false</PersistAllDeviceInstalls>
+        </component>
+    </settings>
+
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <!-- Deliberately omit ComputerName.  Windows 10 then uses its
+                 normal DESKTOP-XXXXXXX-style random name.  ComputerName=*
+                 instead derives a prefix from owner/organization metadata
+                 (for example ADMINS-*), which is not the V-11 behavior. -->
+            <RegisteredOrganization>VMate</RegisteredOrganization>
+            <RegisteredOwner>Administrator</RegisteredOwner>
+            <TimeZone>China Standard Time</TimeZone>
+        </component>
+        <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <InputLocale>0804:00000804</InputLocale>
+            <SystemLocale>zh-CN</SystemLocale>
+            <UILanguage>zh-CN</UILanguage>
+            <UILanguageFallback>en-US</UILanguageFallback>
+            <UserLocale>zh-CN</UserLocale>
+        </component>
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Description>Disable hibernation and Fast Startup</Description>
+                    <Path>cmd.exe /c powercfg.exe /hibernate off</Path>
+                </RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <Description>Restrict the one-shot blank bootstrap account to the local console</Description>
+                    <Path>cmd.exe /c reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v LimitBlankPasswordUse /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
+    </settings>
+
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <TimeZone>China Standard Time</TimeZone>
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideLocalAccountScreen>true</HideLocalAccountScreen>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                <ProtectYourPC>3</ProtectYourPC>
+            </OOBE>
+            <UserAccounts>
+                <!-- One local-console-only bootstrap logon. The finalizer
+                     clears AutoLogon. It disables this built-in account only
+                     when another enabled local administrator exists, so a
+                     malformed template cannot leave the clone inaccessible. -->
+                <AdministratorPassword>
+                    <Value></Value>
+                    <PlainText>true</PlainText>
+                </AdministratorPassword>
+            </UserAccounts>
+            <AutoLogon>
+                <Password>
+                    <Value></Value>
+                    <PlainText>true</PlainText>
+                </Password>
+                <Username>Administrator</Username>
+                <LogonCount>1</LogonCount>
+                <Enabled>true</Enabled>
+            </AutoLogon>
+            <FirstLogonCommands>
+                <SynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Description>Initialize this G-11 clone, keep errors visible, and shut it down</Description>
+                    <RequiresUserInput>true</RequiresUserInput>
+                    <CommandLine>cmd.exe /d /c C:\ProgramData\VMate\G11\Retry-Clone-Initialization.cmd</CommandLine>
+                </SynchronousCommand>
+            </FirstLogonCommands>
+        </component>
+        <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <InputLocale>0804:00000804</InputLocale>
+            <SystemLocale>zh-CN</SystemLocale>
+            <UILanguage>zh-CN</UILanguage>
+            <UILanguageFallback>en-US</UILanguageFallback>
+            <UserLocale>zh-CN</UserLocale>
+        </component>
+    </settings>
+</unattend>

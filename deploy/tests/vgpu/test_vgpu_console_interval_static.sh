@@ -29,6 +29,29 @@ grep -Fq 'MDEV_RECOVERY_FILE=$(vm_storage_run_preferred_path "$VM_ID" mdev)' "$S
     || fail "newly allocated mdev has no pre-configuration recovery record"
 grep -Fq 'trap cleanup_allocated_mdev EXIT' "$START_VM" \
     || fail "newly allocated mdev is not protected during parameter setup"
+grep -Fq 'MDEV_ALLOCATION_STATE=pending-new' "$START_VM" \
+    || fail "new UUID allocation has no pending-new cleanup state"
+grep -Fq 'MDEV_ALLOCATION_STATE=pending-existing' "$START_VM" \
+    || fail "pre-existing UUID allocation has no non-owning pending state"
+grep -Fq 'MDEV_ALLOCATION_STATE=active' "$START_VM" \
+    || fail "successful allocation is not promoted to active cleanup state"
+grep -Fq 'mdev_cleanup_allocation_state "$MDEV_ALLOCATION_STATE"' "$START_VM" \
+    || fail "start-vm does not delegate cleanup to the tested ownership state machine"
+grep -Fq '_mdev_release_locked "$uuid"' "$MDEV_LIB" \
+    || fail "signal cleanup cannot reuse an allocator-held host lock"
+trap_line=$(grep -nF 'trap cleanup_allocated_mdev EXIT' "$START_VM" |
+    head -1 | cut -d: -f1)
+allocate_line=$(grep -nF 'mdev_allocate "${VGPU_RESOURCE_PROFILE}"' "$START_VM" |
+    head -1 | cut -d: -f1)
+record_line=$(grep -nF 'MDEV_RECOVERY_FILE=$(vm_storage_run_preferred_path "$VM_ID" mdev)' \
+    "$START_VM" | head -1 | cut -d: -f1)
+active_line=$(grep -nF 'MDEV_ALLOCATION_STATE=active' "$START_VM" |
+    head -1 | cut -d: -f1)
+[[ "$trap_line" =~ ^[0-9]+$ && "$allocate_line" =~ ^[0-9]+$ &&
+   "$record_line" =~ ^[0-9]+$ && "$active_line" =~ ^[0-9]+$ &&
+   "$trap_line" -lt "$record_line" && "$record_line" -lt "$allocate_line" &&
+   "$allocate_line" -lt "$active_line" ]] \
+    || fail "new mdev recovery must be recorded before allocation, then promoted"
 if grep -Fq 'disable_vnc=1' "$MDEV_LIB" "$START_VM"; then
     fail "disable_vnc would remove the console REGION required by native SDL"
 fi

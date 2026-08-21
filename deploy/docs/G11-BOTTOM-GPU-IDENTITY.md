@@ -30,8 +30,10 @@ D3D 驱动，也不改变物理 GPU、mdev scheduler 或执行资源。
 
 ## 当前通用范围
 
-唯一目录有 25 条原子 profile，覆盖三款 1GB 和三款 2GB GDDR5 显卡；默认随机层
-仍保留原 24 条，新增项只在用户手动选择时使用：
+唯一目录有 25 条原子 profile，覆盖三款 1GB 和三款 2GB GDDR5 显卡。新建生命周期
+分为 12 条 2GB 默认行、4 条 1GB Maxwell 行和 1 条显式行；另 8 条 Kepler 行只供
+已有配置继续使用。未指定显卡时按 `VGPU_HOST_FB_TIER_MB` 只从对应容量档选择，
+不会跨档，也不会从显式或 legacy 行随机：
 
 | 型号 | 已收录板卡/显存组合 |
 |---|---|
@@ -94,11 +96,13 @@ VM_ID=9
 
 1. 将刚生成的 ISO 只读挂到它绑定的 VM，或把同名输出目录完整复制进该 VM；
 2. 在 Windows 双击 `Run-As-Administrator.cmd`，确认一次 UAC；
-3. 原生 x86/x64 D3D12 门禁都通过后，等 Windows 自动重启，再等待约
+3. 原生 x86/x64 D3D12 查询审计完成后，等 Windows 自动重启，再等待约
    1～2 分钟让 SYSTEM 完成验证。
 
-若任一 D3D12 探针报非零 ray-tracing tier，第 2 步会在任何系统投影写入前
-失败并且不重启。这是所选旧卡与签名驱动 transport 不一致，不是光盘故障。
+若任一 D3D12 探针无法枚举/查询 NVIDIA adapter，第 2 步会在任何系统投影写入前
+失败并且不重启。若它能正常查询、但报告非零 ray-tracing tier，窗口会明确警告
+所选旧卡与签名驱动 transport 的原生能力不一致，然后继续安装；系统不会替换
+`d3d12.dll`，也不会把该原生结果伪造成 tier 0。
 
 安装器会保存 NVIDIA 原件、安装 32/64 位系统转发 DLL、写入完整原子合同、发布
 显示器 EDID，并注册启动/登录后的持久收敛任务。旧基础盘若残留
@@ -114,7 +118,8 @@ VM_ID=9
 
 成功安装并重启后，双击 `Verify-As-Administrator.cmd`。窗口必须同时看到
 两次 `SYSTEM_NVAPI_VERIFY PASS`（每行均含 `RT=0 Tensor=0`）与两次
-`D3D12_NATIVE_VERIFY PASS`（每行均含 `native_raytracing_nonzero=no`）；
+`D3D12_NATIVE_VERIFY PASS`（表示 x86/x64 原生路径都可查询；
+`native_raytracing_nonzero=yes` 会伴随明确警告）；
 最后显示目标显存类型、显存厂家和显示器的 `PASS`。
 受保护收据位于：
 

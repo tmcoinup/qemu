@@ -168,6 +168,23 @@ shopt -u nullglob
 declare -a DELETE_QCOW2=()
 declare -A DELETE_QCOW2_KEYS=()
 declare -A DELETE_QCOW2_SEEN=()
+is_managed_qcow2_path() {
+    case "${1##*/}" in
+        # These are repository-owned metadata files beside a qcow2. Their
+        # names intentionally contain ".qcow2.", but they are not images and
+        # must never be handed to qemu-img. Keep every other *.qcow2.* path
+        # fail-closed because legacy disk backups use that form.
+        *.qcow2.vgpu-portable.json|*.qcow2.vmate.json)
+            return 1
+            ;;
+        *.qcow2|*.qcow2.*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 add_delete_qcow2() {
     local image=$1 real_target
 
@@ -179,17 +196,15 @@ add_delete_qcow2() {
     [[ -n "$real_target" ]] && DELETE_QCOW2_KEYS["$real_target"]=1
 }
 for f in "${TARGETS[@]}"; do
-    case "${f##*/}" in
-        *.qcow2|*.qcow2.*)
-            add_delete_qcow2 "$f"
-            ;;
-    esac
+    is_managed_qcow2_path "$f" && add_delete_qcow2 "$f"
 done
 while IFS= read -r -d '' f; do
     add_delete_qcow2 "$f"
 done < <(
     find -P "$INSTANCE_DIR" -type f \
-        \( -name '*.qcow2' -o -name '*.qcow2.*' \) -print0
+        \( -name '*.qcow2' -o -name '*.qcow2.*' \) \
+        ! -name '*.qcow2.vgpu-portable.json' \
+        ! -name '*.qcow2.vmate.json' -print0
 )
 
 if ((${#DELETE_QCOW2[@]})); then
@@ -215,7 +230,9 @@ if ((${#DELETE_QCOW2[@]})); then
     exec {QCOW2_FIND_FD}< <(
         while IFS= read -r -d '' scan_root; do
             find -L "$scan_root" \( -type f -o -type l \) \
-                \( -name '*.qcow2' -o -name '*.qcow2.*' \) -print0 || exit 1
+                \( -name '*.qcow2' -o -name '*.qcow2.*' \) \
+                ! -name '*.qcow2.vgpu-portable.json' \
+                ! -name '*.qcow2.vmate.json' -print0 || exit 1
         done < <(vm_storage_qcow2_scan_roots)
     )
     QCOW2_FIND_PID=$!

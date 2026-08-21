@@ -5,7 +5,8 @@ title G-11 Windows 10 Guest Lite - One Click Apply
 cd /d "%~dp0"
 echo G-11 Windows 10 Guest Lite
 echo.
-echo This will request UAC, show one security warning, then apply the full profile.
+echo This turns off Defender, firewall, updates, cloud/consumer background items,
+echo then applies the VM performance profile. It will request UAC and one warning.
 echo Do not close the window while it is working.
 echo.
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0G11-Guest-Lite.ps1" -Mode Apply

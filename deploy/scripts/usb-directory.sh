@@ -11,7 +11,7 @@ usage() {
     cat <<'EOF'
 usage:
   ./deploy/scripts/usb-directory.sh ID status [storage selector]
-  ./deploy/scripts/usb-directory.sh ID mount /absolute/host/directory [--replace] [--label LABEL] [storage selector]
+  ./deploy/scripts/usb-directory.sh ID mount /absolute/host/directory [--replace] [--label LABEL] [--size SIZE] [storage selector]
   ./deploy/scripts/usb-directory.sh ID eject [storage selector]
 
 storage selector (choose at most one):
@@ -22,6 +22,8 @@ QEMU VVFAT.  No guest driver is required.  Host-side changes become visible
 only after ejecting and mounting again; mount --replace forces that refresh.
 LABEL accepts 1..11 ASCII letters, numbers, spaces, '_' or '-'.  The managed
 public-tools wrapper additionally uses the exact Windows Chinese label 'U盘'.
+SIZE accepts an integer with an optional K, M, G or T binary suffix.  A sized
+disk is read-only FAT32 and uses no host disk-image file.
 EOF
 }
 
@@ -62,6 +64,8 @@ fi
 REPLACE=0
 LABEL=G11_USB
 LABEL_SEEN=0
+SIZE_REQUEST=""
+SIZE_SEEN=0
 VMS_DIR_CLI=""
 VM_DIR_CLI=""
 INSTANCES_DIR_CLI=""
@@ -86,6 +90,22 @@ while (($#)); do
             ((LABEL_SEEN == 0)) || die '--label may be specified once'
             LABEL=${1#*=}
             LABEL_SEEN=1
+            shift
+            ;;
+        --size)
+            [[ "$ACTION" == mount ]] || die '--size is valid only with mount'
+            (($# >= 2)) || die '--size requires a value'
+            ((SIZE_SEEN == 0)) || die '--size may be specified once'
+            SIZE_REQUEST=$2
+            SIZE_SEEN=1
+            shift 2
+            ;;
+        --size=*)
+            [[ "$ACTION" == mount ]] || die '--size is valid only with mount'
+            ((SIZE_SEEN == 0)) || die '--size may be specified once'
+            SIZE_REQUEST=${1#*=}
+            [[ -n "$SIZE_REQUEST" ]] || die '--size requires a value'
+            SIZE_SEEN=1
             shift
             ;;
         --vms-dir|--vm-dir|--instances-dir)
@@ -205,7 +225,7 @@ exec {USB_LOCK_FD}>"$USB_LOCK"
 flock -w 10 "$USB_LOCK_FD" || die "timed out waiting for vm${VM_ID} USB operation lock"
 
 python3 - "$QMP_SOCK" "vm${VM_ID}" "$ACTION" "$HOST_PATH" "$REPLACE" \
-    "$LABEL" "$LABEL_CHARSET" <<'PY'
+    "$LABEL" "$LABEL_CHARSET" "$SIZE_REQUEST" <<'PY'
 import json
 import os
 import socket
@@ -220,8 +240,30 @@ import time
     replace_text,
     requested_label,
     requested_label_charset,
+    requested_size_text,
 ) = sys.argv[1:]
 replace = replace_text == "1"
+
+
+def parse_size(value):
+    if not value:
+        return None
+    import re
+
+    match = re.fullmatch(r"([1-9][0-9]*)([KMGTkmgt]?)(?:[iI]?[bB])?", value)
+    if not match:
+        raise ValueError(
+            "size must be a positive integer with optional K, M, G or T suffix"
+        )
+    suffix = match.group(2).upper()
+    multiplier = 1 << (10 * ("KMGT".index(suffix) + 1)) if suffix else 1
+    size = int(match.group(1)) * multiplier
+    if size % 512:
+        raise ValueError("size must resolve to a multiple of 512 bytes")
+    return size
+
+
+requested_size = None
 device_id = "g11-usb-dir"
 backend_id = "g11-usb-dir-media"
 profile_name = "sandisk-ultra-usb3"
@@ -243,6 +285,7 @@ class QMPError(RuntimeError):
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(8)
 try:
+    requested_size = parse_size(requested_size_text)
     sock.connect(qmp_path)
     stream = sock.makefile("rwb", buffering=0)
     while True:
@@ -340,10 +383,13 @@ try:
             {"path": f"/machine/peripheral/{device_id}", "property": "attached"},
         ))
 
+    size_not_checked = object()
+
     def validate_managed_device(
         expected_dir=None,
         expected_label=None,
         expected_label_charset="",
+        expected_size=size_not_checked,
         allow_detached=False,
     ):
         devices = peripheral_types()
@@ -405,10 +451,25 @@ try:
         actual_dir = options.get("dir")
         actual_label = options.get("label", "QEMU VVFAT")
         actual_label_charset = options.get("label-charset", "")
+        actual_fat_type = options.get("fat-type", 16)
+        configured_size = options.get("size")
+        virtual_size = image.get("virtual-size")
         if not isinstance(actual_dir, str) or bool(options.get("rw", False)):
             raise QMPError("managed VVFAT source options are invalid or writable")
         if not isinstance(actual_label_charset, str):
             raise QMPError("managed VVFAT label charset is invalid")
+        if not isinstance(actual_fat_type, int) or actual_fat_type not in (12, 16, 32):
+            raise QMPError("managed VVFAT FAT type is invalid")
+        if configured_size is not None and (
+            not isinstance(configured_size, int) or configured_size <= 0
+        ):
+            raise QMPError("managed VVFAT configured size is invalid")
+        if not isinstance(virtual_size, int) or virtual_size <= 0:
+            raise QMPError("managed VVFAT virtual capacity is unavailable")
+        if configured_size is not None and (
+            actual_fat_type != 32 or virtual_size != configured_size
+        ):
+            raise QMPError("managed sized VVFAT backend is not matching FAT32")
         actual_dir = os.path.realpath(actual_dir)
         if expected_dir is not None and actual_dir != os.path.realpath(expected_dir):
             raise QMPError(
@@ -427,7 +488,20 @@ try:
                 f"expected {expected_label_charset!r}, "
                 f"got {actual_label_charset!r}"
             )
-        return entry, actual_dir, actual_label, actual_label_charset
+        if expected_size is not size_not_checked and configured_size != expected_size:
+            raise QMPError(
+                "managed USB size mismatch: "
+                f"expected {expected_size!r}, got {configured_size!r}"
+            )
+        return (
+            entry,
+            actual_dir,
+            actual_label,
+            actual_label_charset,
+            configured_size,
+            virtual_size,
+            actual_fat_type,
+        )
 
     def wait_device_absent(target=device_id):
         deadline = time.monotonic() + 8
@@ -465,7 +539,7 @@ try:
         except (OSError, ValueError, QMPError):
             pass
 
-    def add_managed_stack(host_dir, label, label_charset):
+    def add_managed_stack(host_dir, label, label_charset, size):
         devices = peripheral_types()
         if device_id in devices or backend_present():
             raise QMPError("managed USB IDs are already occupied")
@@ -475,13 +549,15 @@ try:
                 "node-name": backend_id,
                 "read-only": True,
                 "dir": host_dir,
-                "fat-type": 16,
+                "fat-type": 32 if size is not None else 16,
                 "floppy": False,
                 "label": label,
                 "rw": False,
             }
             if label_charset:
                 vvfat_arguments["label-charset"] = label_charset
+            if size is not None:
+                vvfat_arguments["size"] = size
             command("blockdev-add", vvfat_arguments)
             usb_arguments = {
                 "driver": "usb-storage",
@@ -509,7 +585,9 @@ try:
         except (OSError, ValueError, QMPError):
             cleanup_failed_add()
             raise
-        return validate_managed_device(host_dir, label, label_charset)
+        return validate_managed_device(
+            host_dir, label, label_charset, expected_size=size
+        )
 
     devices = peripheral_types()
     current = None
@@ -523,19 +601,25 @@ try:
     if action == "mount":
         if current is None:
             add_managed_stack(
-                requested_dir, requested_label, requested_label_charset
+                requested_dir, requested_label, requested_label_charset,
+                requested_size,
             )
         else:
-            _, current_dir, current_label, current_label_charset = current
+            (
+                _, current_dir, current_label, current_label_charset,
+                current_size, _, _,
+            ) = current
             same = (
                 current_dir == os.path.realpath(requested_dir)
                 and current_label == requested_label
                 and current_label_charset == requested_label_charset
+                and current_size == requested_size
             )
             if replace:
                 remove_managed_stack()
                 add_managed_stack(
-                    requested_dir, requested_label, requested_label_charset
+                    requested_dir, requested_label, requested_label_charset,
+                    requested_size,
                 )
             elif not same:
                 raise QMPError(
@@ -544,7 +628,8 @@ try:
             elif not device_attached():
                 remove_managed_stack()
                 add_managed_stack(
-                    requested_dir, requested_label, requested_label_charset
+                    requested_dir, requested_label, requested_label_charset,
+                    requested_size,
                 )
     elif action == "eject":
         remove_managed_stack()
@@ -559,7 +644,8 @@ try:
         if final is None:
             raise QMPError("QMP returned success but the USB disk is absent")
         validate_managed_device(
-            requested_dir, requested_label, requested_label_charset
+            requested_dir, requested_label, requested_label_charset,
+            expected_size=requested_size,
         )
     elif action == "eject" and final is not None:
         raise QMPError("QMP returned success but the USB disk remains present")
@@ -567,9 +653,14 @@ try:
     final_dir = ""
     final_label = ""
     final_label_charset = ""
+    final_capacity = 0
+    final_fat_type = 0
     attached = False
     if final is not None:
-        _, final_dir, final_label, final_label_charset = final
+        (
+            _, final_dir, final_label, final_label_charset, _,
+            final_capacity, final_fat_type,
+        ) = final
         attached = device_attached()
     print(f"VM_NAME={actual_name}")
     print(f"USB_DIRECTORY_DEVICE={device_id}")
@@ -578,6 +669,9 @@ try:
     print(f"USB_DIRECTORY_ATTACHED={'yes' if attached else 'no'}")
     print("USB_DIRECTORY_TRANSPORT=usb-storage/scsi-hd/vvfat")
     print("USB_DIRECTORY_MODE=read-only")
+    print("USB_DIRECTORY_BACKING=host-directory-no-image")
+    print(f"USB_DIRECTORY_CAPACITY_BYTES={final_capacity}")
+    print(f"USB_DIRECTORY_FAT_TYPE={final_fat_type or 'none'}")
     print(f"USB_DIRECTORY_PATH={final_dir}")
     print(f"USB_DIRECTORY_LABEL={final_label}")
     print(

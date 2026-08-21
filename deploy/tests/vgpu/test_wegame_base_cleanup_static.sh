@@ -36,7 +36,7 @@ require_text '清理失败则拒绝产出 base' "$SEAL" \
 
 clean_line=$(grep -nF '"$CLEANER" "$VM_ID" --disk "$VM_DISK"' "$SEAL" |
     head -n1 | cut -d: -f1)
-convert_line=$(grep -nF '"$QEMU_IMG" convert' "$SEAL" |
+convert_line=$(grep -nF '"$QEMU_IMG" "${CONVERT_ARGS[@]}"' "$SEAL" |
     head -n1 | cut -d: -f1)
 [[ -n "$clean_line" && -n "$convert_line" && "$clean_line" -lt "$convert_line" ]] ||
     fail "source cleanup is not ordered before base conversion"

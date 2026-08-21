@@ -74,7 +74,7 @@
 #   VM_ROOT/VMS_DIR  VM 根目录 (默认 $IMAGE_ROOT/vms)
 #   VM_INSTANCE_DIR  当前 VM 的完整 bundle 路径（等价于 --vm-dir）
 #   VM_INSTANCES_DIR 每 VM bundle 父目录 (默认 $VM_ROOT)
-#   VM_BASE_DIR      公共 base 目录 (默认 $VM_ROOT/shared/bases)
+#   VM_BASE_DIR      公共 base 目录 (默认 $VM_ROOT/_base，与 V-11 相同)
 #   ISO_DIR          Windows ISO 目录 (默认 $IMAGE_ROOT/iso)
 #   INSTALL_UNATTENDED  安装时自动附加 OOBE 应答 ISO (0/1，默认 1)
 #   INSTALL_UNATTEND_TEMPLATE  最小应答 XML 模板
@@ -109,10 +109,11 @@
 #   VGPU_ROMBAR      vGPU ROM BAR 策略 (auto|0|1；native 默认 0)
 #   VGPU_ROMFILE     可选的缓存 vGPU option ROM 文件 (诊断用)
 #   VGPU_HOST_CONFIG 宿主 vGPU 资源配置（默认 host/vgpu-host.conf）
+#   VGPU_HOST_FB_TIER_MB  同一物理 GPU 的唯一 framebuffer 档：1024|2048
 #   VGPU_RESOURCE_PROFILE  真实 mdev type id/name/glob（与 guest identity 分离）
 #   VGPU_RESOURCE_FB_MB    真实 mdev framebuffer MB
-#   VGPU_RESOURCE_PROFILE_1024/_2048  按来宾显存自动选真实 mdev type；
-#                     适用于同一 V100 宿主同时运行 1GB/2GB VM
+#   VGPU_RESOURCE_PROFILE_1024/_2048  仅为旧配置读取兼容；配置了宿主固定档
+#                     后只能命中其中一档，不能授权同一物理 GPU 混档
 #   VGPU_MDEV_IDENTITY_MODE host per-mdev 名称：auto|required|off（默认 auto）
 #   VGPU_MDEV_INTERNAL_PCI_IDENTITY 实验性内部 vdev/pdev ID：0|1（默认 0）
 #                     仅 SPOOF_MODE=A 时生效；其他情况仍为 name-only
@@ -402,21 +403,30 @@ source "$here/lib/vm-tpm.sh"
 source "$here/lib/cpu-isolation.sh"
 # shellcheck source=lib/windows-unattend.sh
 source "$here/lib/windows-unattend.sh"
+# shellcheck source=lib/vgpu-host-config.sh
+source "$here/lib/vgpu-host-config.sh"
 
 # 宿主资源配置与 vmN/vm.conf 的 guest-visible identity 分开。正版
-# Tesla V100 可在这里把 1024/2048 MB 分别映射到 V100-1Q/V100-2Q；
-# vm.conf 仍可保持 GT 730/740、GTX 750/750 Ti、GT 1030/GTX 1050 等身份。显式指定的配置丢失时应
-# 立即报错，默认本地文件不存在则保持旧行为。
+# Tesla V100 在这里固定为 V100-1Q 或 V100-2Q 单一 framebuffer 档；同一
+# 物理 GPU 不能同时发布两档。显式指定的配置丢失时应立即报错，默认本地
+# 文件不存在则保持旧行为。
 VGPU_HOST_CONFIG_WAS_SET=0
 [[ -v VGPU_HOST_CONFIG ]] && VGPU_HOST_CONFIG_WAS_SET=1
 VGPU_HOST_CONFIG="${VGPU_HOST_CONFIG:-$here/host/vgpu-host.conf}"
-if [[ -r "$VGPU_HOST_CONFIG" ]]; then
-    # shellcheck source=/dev/null
-    source "$VGPU_HOST_CONFIG"
-elif [[ "$VGPU_HOST_CONFIG_WAS_SET" == 1 ]]; then
-    echo "[start-vm] VGPU_HOST_CONFIG 不存在或不可读: $VGPU_HOST_CONFIG" >&2
-    exit 1
+VGPU_HOST_CONFIG_RC=0
+if vgpu_host_config_load "$VGPU_HOST_CONFIG" '[start-vm]'; then
+    VGPU_HOST_CONFIG_RC=0
+else
+    VGPU_HOST_CONFIG_RC=$?
+    if [[ "$VGPU_HOST_CONFIG_RC" != 3 ]]; then
+        exit "$VGPU_HOST_CONFIG_RC"
+    fi
+    if [[ "$VGPU_HOST_CONFIG_WAS_SET" == 1 ]]; then
+        echo "[start-vm] VGPU_HOST_CONFIG 不存在: $VGPU_HOST_CONFIG" >&2
+        exit 1
+    fi
 fi
+unset VGPU_HOST_CONFIG_RC
 # Host policy is sourced before vm.conf and therefore participates in the real
 # shell precedence.  Capture spoof inputs only now so the pre-storage guard
 # sees exactly what the later parser would inherit.
@@ -1512,10 +1522,25 @@ if [[ -z "${VGPU_MDEV_PROFILE:-}" ]]; then
     esac
 fi
 : "${VGPU_FB_MB:=${GPU_VRAM_MB:-2048}}"
-# A dual-size host policy selects the real V100 (or other host GPU) resource
-# only after the atomic guest profile has supplied its framebuffer size.  A
-# legacy single-profile override remains supported, but conflicting static and
-# size-keyed declarations fail instead of silently choosing one.
+# NVIDIA vGPU 16 time-sliced instances on one physical GPU must use one
+# framebuffer size.  The host policy is checked before choosing the real V100
+# (or other host GPU) resource; a legacy size-keyed mapping remains readable,
+# but it cannot authorize a VM outside the fixed host tier.
+if [[ -n "${VGPU_HOST_FB_TIER_MB:-}" && -n "${VGPU_HOST_VRAM_MB:-}" &&
+      "$VGPU_HOST_FB_TIER_MB" != "$VGPU_HOST_VRAM_MB" ]]; then
+    echo "[start-vm] VGPU_HOST_FB_TIER_MB 与兼容变量 VGPU_HOST_VRAM_MB 冲突" >&2
+    exit 2
+fi
+VGPU_HOST_FB_TIER_MB=${VGPU_HOST_FB_TIER_MB:-${VGPU_HOST_VRAM_MB:-}}
+if [[ -n "$VGPU_HOST_FB_TIER_MB" ]]; then
+    VGPU_HOST_FB_TIER_MB=$(vgpu_profile_normalize_vram_mb \
+        "$VGPU_HOST_FB_TIER_MB") || exit $?
+    if [[ "$VGPU_FB_MB" != "$VGPU_HOST_FB_TIER_MB" ]]; then
+        echo "[start-vm] VM 要求 ${VGPU_FB_MB}MB，但宿主固定档是 ${VGPU_HOST_FB_TIER_MB}MB" >&2
+        echo "[start-vm] 先关闭该物理 GPU 上全部 VM，再统一迁移 vm.conf/宿主档位" >&2
+        exit 2
+    fi
+fi
 VGPU_RESOURCE_PROFILE_BY_FB=""
 case "$VGPU_FB_MB" in
     1024) VGPU_RESOURCE_PROFILE_BY_FB=${VGPU_RESOURCE_PROFILE_1024:-} ;;
@@ -2709,6 +2734,78 @@ cpu_isolation_ensure_ready || {
 [[ "$MONITOR_SYNC" == 0 || "$MONITOR_SYNC" == 1 ]] || {
     echo "MONITOR_SYNC 必须是 0 或 1" >&2; exit 2;
 }
+G11_INIT_REQUIRED="$SELECTED_VM_DIR/.g11-init-required"
+G11_INIT_ISO=""
+G11_INIT_CONTRACT_ID=""
+if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
+    [[ -f "$G11_INIT_REQUIRED" && ! -L "$G11_INIT_REQUIRED" ]] || {
+        echo "[start-vm] G-11 初始化标记类型不安全，拒绝启动: $G11_INIT_REQUIRED" >&2
+        exit 1
+    }
+    CONF_UID=$(stat -c %u -- "$CONF")
+    [[ "$(stat -c '%a:%u:%h' -- "$G11_INIT_REQUIRED")" == "600:${CONF_UID}:1" ]] || {
+        echo "[start-vm] G-11 初始化标记权限、owner 或链接数不安全" >&2
+        exit 1
+    }
+    jq -e \
+        --arg vmUuid "${VM_UUID,,}" \
+        --arg gpuProfile "$GPU_PROFILE" \
+        --arg monitorProfile "$MONITOR_PROFILE" \
+        --arg sourceConfigSha256 "$(start_vm_sha256_upper "$CONF")" '
+        (keys | sort) == [
+            "baseName", "catalogSha256", "createdUtc", "gpuProfile",
+            "monitorProfile", "schemaVersion", "sourceConfigSha256", "state",
+            "systemNvapiContractId", "systemNvapiIsoFile",
+            "systemNvapiIsoSha256", "vmUuid"
+        ] and
+        .schemaVersion == 2 and .state == "guest-firstboot-required" and
+        (.baseName | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")) and
+        (.catalogSha256 | test("^[0-9A-F]{64}$")) and
+        .vmUuid == $vmUuid and .gpuProfile == $gpuProfile and
+        .monitorProfile == $monitorProfile and
+        .sourceConfigSha256 == $sourceConfigSha256 and
+        (.systemNvapiContractId | test("^[0-9A-F]{64}$")) and
+        (.systemNvapiIsoFile | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,191}\\.iso$")) and
+        (.systemNvapiIsoSha256 | test("^[0-9A-F]{64}$")) and
+        (.createdUtc | type) == "string"
+    ' "$G11_INIT_REQUIRED" >/dev/null || {
+        echo "[start-vm] G-11 初始化标记已过期或不匹配 vm.conf；请用当前版本重新克隆" >&2
+        exit 1
+    }
+    G11_INIT_CONTRACT_ID=$(jq -er '.systemNvapiContractId' "$G11_INIT_REQUIRED")
+    G11_INIT_ISO_FILE=$(jq -er '.systemNvapiIsoFile' "$G11_INIT_REQUIRED")
+    G11_INIT_ISO_SHA256=$(jq -er '.systemNvapiIsoSha256' "$G11_INIT_REQUIRED")
+    G11_INIT_PACKAGE_ROOT="$SELECTED_VM_DIR/packages/SystemNvapiProjection"
+    [[ -d "$G11_INIT_PACKAGE_ROOT" && ! -L "$G11_INIT_PACKAGE_ROOT" &&
+       "$(stat -c '%a:%u' -- "$G11_INIT_PACKAGE_ROOT")" == "700:${CONF_UID}" ]] || {
+        echo "[start-vm] 每 VM 系统 NVAPI 包目录缺失或权限不安全" >&2
+        exit 1
+    }
+    G11_INIT_ISO="$G11_INIT_PACKAGE_ROOT/$G11_INIT_ISO_FILE"
+    G11_INIT_ISO_REAL=$(realpath -e -- "$G11_INIT_ISO" 2>/dev/null || true)
+    [[ "$G11_INIT_ISO_REAL" == "$G11_INIT_ISO" &&
+       -f "$G11_INIT_ISO" && ! -L "$G11_INIT_ISO" && -s "$G11_INIT_ISO" &&
+       "$(stat -c '%a:%u:%h' -- "$G11_INIT_ISO")" == "600:${CONF_UID}:1" ]] || {
+        echo "[start-vm] 每 VM 系统 NVAPI 初始化 ISO 缺失、越界或权限不安全" >&2
+        exit 1
+    }
+    [[ "$(start_vm_sha256_upper "$G11_INIT_ISO")" == "$G11_INIT_ISO_SHA256" ]] || {
+        echo "[start-vm] 每 VM 系统 NVAPI 初始化 ISO 摘要不匹配，拒绝自动执行" >&2
+        exit 1
+    }
+    [[ "$G11_INIT_ISO_FILE" == "vm${VM_ID}-${VM_UUID,,}-${G11_INIT_CONTRACT_ID:0:16}.iso" ]] || {
+        echo "[start-vm] 每 VM 系统 NVAPI ISO 名称与 UUID/合同不一致" >&2
+        exit 1
+    }
+    [[ "$MODE" != install ]] || {
+        echo "[start-vm] 私有克隆初始化期间禁止切换到 Windows 安装模式" >&2
+        exit 1
+    }
+    if [[ "$MONITOR_SYNC" == 1 ]]; then
+        echo "[start-vm] G-11 首次启动尚未完成；将自动安装系统 NVAPI、重启验收并关机"
+    fi
+    MONITOR_SYNC=0
+fi
 case "$REPAIR_DISPLAY_VARS" in
     auto|force|off) ;;
     *) echo "REPAIR_DISPLAY_VARS 必须是 auto、force 或 off" >&2; exit 2 ;;
@@ -3053,7 +3150,7 @@ if [[ ! -f "$DISK_PATH" ]]; then
             exit 1
         fi
         echo "[start-vm] $DISK_PATH 不存在，自动从公共 base 创建实例盘"
-        "$here/scripts/create-disk.sh" "$VM_ID" --from-base
+        "$here/scripts/create-disk.sh" "$VM_ID" --from-base --linked
         DISK_PATH=$(vm_storage_disk_path "$VM_ID")
     fi
 fi
@@ -3074,12 +3171,45 @@ if [[ "$DRY_RUN" != 1 ]]; then
         echo "[start-vm] 无法安全校验 VM 磁盘: $DISK_PATH" >&2
         exit 1
     fi
-    if [[ "$VM_STORAGE_QCOW2_VIRTUAL_SIZE" != "$SSD_SIZE_BYTES" ]]; then
+    INSTANCE_DISK_VIRTUAL_SIZE=$VM_STORAGE_QCOW2_VIRTUAL_SIZE
+    INSTANCE_DISK_MODE=standalone
+    if [[ -n "$VM_STORAGE_QCOW2_DATA_FILE" ]]; then
+        echo "[start-vm] 实例盘不能使用 external data file: $DISK_PATH" >&2
+        exit 1
+    fi
+    if [[ -n "$VM_STORAGE_QCOW2_BACKING" ]]; then
+        INSTANCE_BASE_PIN=$(vm_storage_instance_base_pin_path "$VM_ID") || exit 1
+        if [[ "$VM_STORAGE_QCOW2_BACKING" != "$(basename "$INSTANCE_BASE_PIN")" ]]; then
+            echo "[start-vm] 增量盘必须使用实例内固定相对母盘 pin: $INSTANCE_BASE_PIN" >&2
+            exit 1
+        fi
+        RESOLVED_INSTANCE_BASE_PIN=$(vm_storage_resolved_backing_path "$DISK_PATH") || {
+            echo "[start-vm] 无法安全解析增量盘 backing" >&2
+            exit 1
+        }
+        if [[ "$RESOLVED_INSTANCE_BASE_PIN" != "$INSTANCE_BASE_PIN" ||
+              ! -f "$INSTANCE_BASE_PIN" || -L "$INSTANCE_BASE_PIN" ||
+              "$DISK_PATH" -ef "$INSTANCE_BASE_PIN" ]]; then
+            echo "[start-vm] 增量盘 backing 不是安全的实例内 .base.qcow2" >&2
+            exit 1
+        fi
+        if ! vm_storage_read_qcow2_metadata "$QEMU_IMG" "$INSTANCE_BASE_PIN" ||
+                [[ -n "$VM_STORAGE_QCOW2_BACKING" ||
+                   -n "$VM_STORAGE_QCOW2_DATA_FILE" ]]; then
+            echo "[start-vm] 实例内母盘 pin 必须是 standalone qcow2" >&2
+            exit 1
+        fi
+        INSTANCE_DISK_MODE=linked
+    fi
+    if [[ "$INSTANCE_DISK_VIRTUAL_SIZE" != "$SSD_SIZE_BYTES" ]]; then
         echo "[start-vm] 磁盘容量与硬件 profile 不一致，拒绝启动" >&2
-        echo "  qcow2:  $VM_STORAGE_QCOW2_VIRTUAL_SIZE 字节" >&2
+        echo "  qcow2:  $INSTANCE_DISK_VIRTUAL_SIZE 字节" >&2
         echo "  profile: $SSD_SIZE_BYTES 字节 ($SSD_MODEL)" >&2
         echo "[start-vm] 请备份后迁移/扩容 qcow2，或恢复与磁盘匹配的 SSD profile" >&2
         exit 1
+    fi
+    if [[ "$INSTANCE_DISK_MODE" == linked ]]; then
+        echo "[start-vm] 实例盘: V-11 式增量盘 / backing=.base.qcow2"
     fi
 fi
 disk_headroom_guard "$DISK_PATH"
@@ -3359,6 +3489,23 @@ if [[ "$DRY_RUN" != 1 ]]; then
         echo "[start-vm] 请重编 QEMU，或临时追加 --install-media ide" >&2
         exit 1
     fi
+    if [[ -n "$G11_INIT_ISO" ]]; then
+        if ! QEMU_USB_BOT_HELP=$("$QEMU_BIN" -device usb-bot,help 2>&1) ||
+                ! grep -q '^  x-no-serial=<bool>' <<<"$QEMU_USB_BOT_HELP"; then
+            echo "[start-vm] 当前 QEMU 缺少无虚构序列号的 usb-bot 初始化传输" >&2
+            echo "[start-vm] 先运行 ./deploy/host/build-qemu.sh 增量重编，再重试" >&2
+            exit 1
+        fi
+        unset QEMU_USB_BOT_HELP
+        if ! QEMU_SCSI_CD_HELP=$("$QEMU_BIN" -device scsi-cd,help 2>&1) ||
+                ! grep -q '^  vendor=<str>' <<<"$QEMU_SCSI_CD_HELP" ||
+                ! grep -q '^  product=<str>' <<<"$QEMU_SCSI_CD_HELP" ||
+                ! grep -q '^  ver=<str>' <<<"$QEMU_SCSI_CD_HELP"; then
+            echo "[start-vm] 当前 QEMU 缺少可审核身份的 scsi-cd 初始化光驱" >&2
+            exit 1
+        fi
+        unset QEMU_SCSI_CD_HELP
+    fi
 fi
 
 STREAM_HELPER="$here/fb-shm-stream.sh"
@@ -3463,6 +3610,7 @@ fi
 STREAM_SIDECAR_OWNED=0
 QMP_PROXY_ALIAS_OWNED=0
 DGAME_COMPAT_ENDPOINTS_INSTALLED=0
+G11_INIT_MEDIA_WATCH_PID=""
 
 cleanup_dgame_compat_endpoints() {
     [[ "${DGAME_COMPAT_ENDPOINTS_INSTALLED:-0}" == 1 ]] || return 0
@@ -3497,6 +3645,13 @@ install_dgame_compat_endpoints() {
 }
 
 cleanup_started_tpm() {
+    if [[ "${G11_INIT_MEDIA_WATCH_PID:-}" =~ ^[1-9][0-9]*$ ]]; then
+        if kill -0 "$G11_INIT_MEDIA_WATCH_PID" 2>/dev/null; then
+            kill -TERM "$G11_INIT_MEDIA_WATCH_PID" 2>/dev/null || true
+        fi
+        wait "$G11_INIT_MEDIA_WATCH_PID" 2>/dev/null || true
+        G11_INIT_MEDIA_WATCH_PID=""
+    fi
     cleanup_dgame_compat_endpoints
     if [[ "${QMP_PROXY_ALIAS_OWNED:-0}" == 1 ]]; then
         QMP_PROXY_ALIAS_OWNED=0
@@ -4102,6 +4257,24 @@ if [[ "$MODE" == "install" ]]; then
         # ide.1 may contain a SATA system disk; use a separate AHCI port.
         DRIVE_ARGS+=( -device "ide-cd,drive=answer0,bus=ide.2" )
     fi
+elif [[ -n "$G11_INIT_ISO" ]]; then
+    # Private Sysprep clones receive their exact UUID/profile-bound payload on
+    # a reviewed USB-BOT/SCSI optical stack.  It is not a normal-mode device:
+    # after the coordinator copies and ejects the manifest-pinned payload, a
+    # host QMP watcher hot-removes both the SCSI device and its USB transport
+    # before the internal verification reboot.
+    G11_INIT_ODD_VENDOR=${ODD_MODEL%% *}
+    G11_INIT_ODD_PRODUCT=${ODD_MODEL#* }
+    [[ "$G11_INIT_ODD_VENDOR" != "$ODD_MODEL" &&
+       ${#G11_INIT_ODD_VENDOR} -le 8 && ${#G11_INIT_ODD_PRODUCT} -le 16 ]] || {
+        echo "[start-vm] 光驱目录型号无法映射到 SCSI INQUIRY: $ODD_MODEL" >&2
+        exit 1
+    }
+    DRIVE_ARGS+=( -drive "file=${G11_INIT_ISO},if=none,id=g11-init-odd-media,media=cdrom,readonly=on,format=raw" )
+    INSTALL_MEDIA_DEVICE_ARGS+=(
+        -device "usb-bot,id=g11-init-odd-usb,bus=xhci.0,port=3,x-no-serial=on"
+        -device "scsi-cd,id=g11-init-odd,drive=g11-init-odd-media,bus=g11-init-odd-usb.0,vendor=${G11_INIT_ODD_VENDOR},product=${G11_INIT_ODD_PRODUCT},ver=${ODD_FIRMWARE_REV},serial=,bootindex=-1"
+    )
 fi
 
 # ─── 图形 / vGPU ──────────────────────────────────────────────────────────
@@ -4206,23 +4379,50 @@ allocate_vgpu() {
             return 1
             ;;
     esac
-    mdev_allocate "${VGPU_RESOURCE_PROFILE}" "$MDEV_UUID" \
-        "$VGPU_RESOURCE_FB_MB" "${mdev_identity_args[@]}" >/dev/null || {
-        echo "mdev 分配失败 — 排查 sudo / VGPU_MGPU=${VGPU_MGPU:-?} / host driver/profile" >&2
-        return 1
-    }
-    MDEV_RECOVERY_FILE=$(vm_storage_run_preferred_path "$VM_ID" mdev)
-    printf '%s\n' "$MDEV_UUID" >"$MDEV_RECOVERY_FILE"
+    # Install the EXIT guard before allocation.  pending-new protects the
+    # create-to-return window inside mdev_allocate; pending-existing prevents
+    # an API failure or signal from deleting a stale UUID that predated this
+    # launch.  Only a successful allocation promotes either state to active.
+    MDEV_RECOVERY_FILE=""
+    if [[ -L "$MDEV_DEVICES_DIR/$MDEV_UUID" ]]; then
+        MDEV_ALLOCATION_STATE=pending-existing
+    else
+        MDEV_ALLOCATION_STATE=pending-new
+    fi
     cleanup_allocated_mdev() {
-        if mdev_release "$MDEV_UUID" &&
-                [[ ! -L "$MDEV_DEVICES_DIR/$MDEV_UUID" ]]; then
-            rm -f "$MDEV_RECOVERY_FILE"
-        else
-            echo "[start-vm] mdev 回收失败，保留 $MDEV_RECOVERY_FILE ($MDEV_UUID)" >&2
-        fi
+        mdev_cleanup_allocation_state "$MDEV_ALLOCATION_STATE" \
+            "$MDEV_UUID" "$MDEV_RECOVERY_FILE" || true
         cleanup_started_tpm
     }
     trap cleanup_allocated_mdev EXIT
+    # Prewrite the marker only for a new UUID.  A hard interruption after the
+    # kernel create then always leaves enough information for host recovery.
+    if [[ "$MDEV_ALLOCATION_STATE" == pending-new ]]; then
+        if ! MDEV_RECOVERY_FILE=$(vm_storage_run_preferred_path "$VM_ID" mdev); then
+            echo "mdev recovery 路径解析失败" >&2
+            return 1
+        fi
+        if ! printf '%s\n' "$MDEV_UUID" >"$MDEV_RECOVERY_FILE"; then
+            echo "mdev recovery 记录写入失败: $MDEV_RECOVERY_FILE" >&2
+            return 1
+        fi
+    fi
+    if ! mdev_allocate "${VGPU_RESOURCE_PROFILE}" "$MDEV_UUID" \
+            "$VGPU_RESOURCE_FB_MB" "${mdev_identity_args[@]}" >/dev/null; then
+        echo "mdev 分配失败 — 排查 sudo / VGPU_MGPU=${VGPU_MGPU:-?} / host driver/profile" >&2
+        return 1
+    fi
+    MDEV_ALLOCATION_STATE=active
+    if [[ -z "$MDEV_RECOVERY_FILE" ]]; then
+        if ! MDEV_RECOVERY_FILE=$(vm_storage_run_preferred_path "$VM_ID" mdev); then
+            echo "mdev recovery 路径解析失败" >&2
+            return 1
+        fi
+        if ! printf '%s\n' "$MDEV_UUID" >"$MDEV_RECOVERY_FILE"; then
+            echo "mdev recovery 记录写入失败: $MDEV_RECOVERY_FILE" >&2
+            return 1
+        fi
+    fi
     if [[ "$MODE" == vgpu-sdl || "$MODE" == vgpu-gtk ]]; then
         mdev_configure_console_interval \
             "$MDEV_UUID" "$VGPU_CONSOLE_INTERVAL_US" || {
@@ -4336,7 +4536,8 @@ DGAME_FB_COMPAT=$(dgame_endpoint_path "$VM_ID" fb)
 DGAME_MON_COMPAT=$(dgame_endpoint_path "$VM_ID" mon)
 QMP_ARGS=( -qmp "unix:${QMP_SOCK},server,nowait" )
 QMP_MULTI_CLIENT=0
-if [[ "$PROXY" == 1 || "$DGAME_PREVIEW_ENABLED" == 1 ]]; then
+if [[ "$PROXY" == 1 || "$DGAME_PREVIEW_ENABLED" == 1 ||
+      -n "$G11_INIT_ISO" ]]; then
     QMP_MULTI_CLIENT=1
     # 本分支 QEMU 原生为每个连接创建独立 QMP monitor；不再启动 Python
     # 中转进程。DGame broker、CPU 隔离器和运行期控制可能同时连接，
@@ -4507,6 +4708,9 @@ if [[ "$MODE" == install ]]; then
         echo "  光驱: 安装模式临时 ${ODD_MODEL} / fw=${ODD_FIRMWARE_REV} / SN=${ODD_SERIAL_POLICY}"
         echo "  安装介质: ICH9-AHCI IDE CD-ROM（兼容回退，可能较慢）"
     fi
+elif [[ -n "$G11_INIT_ISO" ]]; then
+    echo "  光驱: 首次初始化临时 ${ODD_MODEL} / ${ODD_FIRMWARE_REV}（载荷复制后自动热拔）"
+    echo "  系统 NVAPI: VM-bound contract ${G11_INIT_CONTRACT_ID}"
 else
     echo "  光驱: 未挂载（默认；仅 --install 或 vmctl.sh cdrom mount 时创建）"
 fi
@@ -4767,6 +4971,20 @@ if ! cpu_isolation_launch "$VM_ID" "$CPU_VCPUS" "$CPU_CORES" \
         "$CPU_ISOLATION_STATE_FILE"; then
     echo "[start-vm] required CPU 隔离无法启动" >&2
     exit 1
+fi
+
+if [[ -n "$G11_INIT_ISO" ]]; then
+    G11_INIT_MEDIA_WATCHER="$here/host/watch-g11-init-media.py"
+    [[ -f "$G11_INIT_MEDIA_WATCHER" && ! -L "$G11_INIT_MEDIA_WATCHER" ]] || {
+        echo "[start-vm] 初始化光驱自动热拔器缺失或类型不安全: $G11_INIT_MEDIA_WATCHER" >&2
+        exit 1
+    }
+    python3 "$G11_INIT_MEDIA_WATCHER" \
+        "$QMP_SOCK" "vm${VM_ID}" "$G11_INIT_ISO" \
+        "$G11_INIT_ODD_VENDOR" "$G11_INIT_ODD_PRODUCT" \
+        "$ODD_FIRMWARE_REV" >>"$QEMU_LOG" 2>&1 &
+    G11_INIT_MEDIA_WATCH_PID=$!
+    echo "[start-vm] 初始化光驱将在载荷复制完成后自动热拔"
 fi
 
 # 非 rdp 模式都是"QEMU 直接挂前台显示"——install/vgpu-gtk/vgpu-sdl 都让 QEMU 自己

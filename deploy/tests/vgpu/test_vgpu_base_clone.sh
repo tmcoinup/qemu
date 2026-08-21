@@ -87,7 +87,7 @@ while (($#)); do
     esac
 done
 if [[ "$vram" == 1024 ]]; then
-    profile=gt740_1gb
+    profile=gtx750_asus_1gb
 elif [[ "$vram" == 2048 ]]; then
     profile=gtx1050_colorful_2gb
 fi
@@ -97,12 +97,75 @@ mkdir -p "$instance"
 spoof_mode=B
 [[ "${STUB_BAD_CONF:-0}" != 1 ]] || spoof_mode=A
 cat >"$instance/vm.conf" <<CONF
+VM_ID='$id'
 SPOOF_MODE='$spoof_mode'
 GPU_PROFILE='$profile'
+MONITOR_PROFILE='dell-p2419h'
 VM_UUID='00112233-4455-4677-8899-AABBCCDDEEFF'
 CONF
 EOF
 chmod +x "$HARNESS/deploy/scripts/create-vm.sh"
+
+cat >"$HARNESS/deploy/package-system-nvapi-projection.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+requested_id=$1
+conf="$VM_INSTANCES_DIR/$requested_id/vm.conf"
+config_sha=$(sha256sum -- "$conf" | awk '{print toupper($1)}')
+unset VM_ID VM_UUID GPU_PROFILE MONITOR_PROFILE
+# shellcheck source=/dev/null
+source "$conf"
+[[ "$VM_ID" == "$requested_id" ]]
+uuid=${VM_UUID,,}
+root="$VM_INSTANCES_DIR/$requested_id/packages/SystemNvapiProjection"
+temporary="$root/.contract.json"
+jq -n \
+    --argjson vmId "$requested_id" \
+    --arg vmUuid "$uuid" \
+    --arg profile "$GPU_PROFILE" \
+    --arg monitor "$MONITOR_PROFILE" \
+    --arg configSha "$config_sha" '
+    {
+        schemaVersion: 4,
+        purpose: "g11-system-nvapi-projection",
+        contractId: "",
+        vmId: $vmId,
+        vmUuid: $vmUuid,
+        identityCatalogSha256: ("E" * 64),
+        sourceConfigSha256: $configSha,
+        profile: {key: $profile},
+        monitor: {key: $monitor},
+        transport: {
+            targetPnpId: "PCI\\VEN_10DE&DEV_1E30",
+            driverVersion: "31.0.15.3833"
+        },
+        payload: {
+            shimX86Sha256: ("A" * 64),
+            shimX64Sha256: ("B" * 64)
+        }
+    }' >"$temporary"
+contract_id=$(jq -cS 'del(.contractId)' "$temporary" |
+    sha256sum | awk '{print toupper($1)}')
+stem="vm${requested_id}-${uuid}-${contract_id:0:16}"
+payload="$root/$stem"
+mkdir -m 0700 -- "$payload"
+jq --arg contractId "$contract_id" '.contractId = $contractId' \
+    "$temporary" >"$payload/system-nvapi-contract.json"
+rm -f -- "$temporary"
+jq -n --arg contractId "$contract_id" '
+    {
+        schemaVersion: 1,
+        purpose: "g11-system-nvapi-projection",
+        contractId: $contractId,
+        files: [range(0; 12) | {
+            path: ("fixture" + (tostring)), bytes: 1, sha256: ("F" * 64)
+        }]
+    }' >"$payload/system-nvapi-manifest.json"
+printf 'read-only per-VM ISO fixture\n' >"$root/$stem.iso"
+chmod 0600 "$root/$stem.iso"
+printf 'system-nvapi-package|%s|%s\n' "$requested_id" "$contract_id" >>"$TRACE"
+EOF
+chmod +x "$HARNESS/deploy/package-system-nvapi-projection.sh"
 
 cat >"$HARNESS/deploy/scripts/create-disk.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -112,12 +175,27 @@ set -euo pipefail
     printf '|%s' "$@"
     printf '\n'
 } >>"$TRACE"
-[[ $# -eq 4 && "$2" == --from-base && "$3" == --base-name ]]
-[[ "$4" =~ ^[A-Za-z0-9_-]+$ ]]
+[[ $# -eq 5 && "$2" == --from-base ]]
+case "$3" in
+    --base-name) [[ "$4" =~ ^[A-Za-z0-9_-]+$ ]] ;;
+    --base) [[ "$4" == /* && "$4" == *.qcow2 && -f "$4" ]] ;;
+    *) exit 89 ;;
+esac
+[[ "$5" == --linked || "$5" == --full-copy ]]
 [[ "${STUB_DISK_FAIL:-0}" != 1 ]] || exit 91
 [[ "${STUB_DISK_NO_PUBLISH:-0}" != 1 ]] || exit 0
 mkdir -p "$VM_INSTANCES_DIR/$1"
-printf 'standalone clone fixture\n' >"$VM_INSTANCES_DIR/$1/disk.qcow2"
+if [[ "$5" == --linked ]]; then
+    if [[ "$3" == --base-name ]]; then
+        selected_base="$VM_BASE_DIR/$4.qcow2"
+    else
+        selected_base=$4
+    fi
+    ln -- "$selected_base" "$VM_INSTANCES_DIR/$1/.base.qcow2"
+    printf 'linked clone fixture\n' >"$VM_INSTANCES_DIR/$1/disk.qcow2"
+else
+    printf 'standalone clone fixture\n' >"$VM_INSTANCES_DIR/$1/disk.qcow2"
+fi
 [[ "${STUB_DISK_PUBLISH_FAIL:-0}" != 1 ]] || exit 92
 EOF
 chmod +x "$HARNESS/deploy/scripts/create-disk.sh"
@@ -217,6 +295,57 @@ write_attestation() {
     chmod 0444 "$ATTESTATION"
 }
 
+write_private_attestation() {
+    local bytes device inode mtime ctime
+    bytes=$(stat -c %s -- "$BASE")
+    device=$(stat -c %D -- "$BASE")
+    inode=$(stat -c %i -- "$BASE")
+    mtime=$(stat -c %y -- "$BASE")
+    ctime=$(stat -c %z -- "$BASE")
+    rm -f -- "$ATTESTATION"
+    "$REAL_JQ" -n \
+        --arg basePath "$BASE" \
+        --argjson baseFileBytes "$bytes" \
+        --arg baseDeviceId "$device" \
+        --arg baseInode "$inode" \
+        --arg baseMtimeNs "$mtime" \
+        --arg baseCtimeNs "$ctime" \
+        --arg catalogSha256 "$CATALOG_SHA256" '
+        {
+            schemaVersion: 7,
+            bindingMode: "portable-auto",
+            deploymentMode: "site-private-licensed-firstboot-v2",
+            basePath: $basePath,
+            baseFileBytes: $baseFileBytes,
+            baseDeviceId: $baseDeviceId,
+            baseInode: $baseInode,
+            baseMtimeNs: $baseMtimeNs,
+            baseCtimeNs: $baseCtimeNs,
+            portableGuestPath: "C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe",
+            portableSha256: ("A" * 64),
+            portableBytes: 1048576,
+            firstBootScriptGuestPath: "C:\\ProgramData\\VMate\\G11\\Finalize-Clone.ps1",
+            firstBootScriptSha256: ("B" * 64),
+            retryGuestPath: "C:\\ProgramData\\VMate\\G11\\Retry-Clone-Initialization.cmd",
+            retrySha256: ("C" * 64),
+            sysprepAnswerGuestPath: "C:\\Windows\\Panther\\unattend.xml",
+            sysprepAnswerSha256: ("D" * 64),
+            windowsGeneralized: true,
+            oobeMode: "unattended-auto-finalize",
+            licenseDelivery: "embedded-private-shared-token",
+            firstBootWorkflow: "licensed-portable-system-nvapi-two-boot-v1",
+            systemNvapiDelivery: "per-vm-read-only-iso",
+            systemNvapiRequired: true,
+            dlsHost: "dls.gvmates.com",
+            dlsPort: 443,
+            guestPerformance: "embedded-recommended-native-v1",
+            catalogSha256: $catalogSha256,
+            installedUtc: "2026-08-19T00:00:00Z"
+        }
+    ' >"$ATTESTATION"
+    chmod 0400 "$ATTESTATION"
+}
+
 write_legacy_attestation() {
     local bytes device inode mtime ctime
     bytes=$(stat -c %s -- "$BASE")
@@ -262,8 +391,8 @@ if "$HARNESS/deploy/scripts/clone-from-base.sh" 453 \
         >"$TMP_DIR/missing-base-name.out" 2>"$TMP_DIR/missing-base-name.err"; then
     fail "canonical clone guessed a base name"
 fi
-grep -Fq 'BASE_NAME NEW_VM_ID' "$TMP_DIR/missing-base-name.err" ||
-    fail "missing clone BASE_NAME usage error was not clear"
+grep -Fq 'BASE_NAME_OR_QCOW2 NEW_VM_ID' "$TMP_DIR/missing-base-name.err" ||
+    fail "missing clone base selector usage error was not clear"
 
 # Every managed name selects its own qcow2 and its own attestation.  A second
 # generation must be cloneable without renaming or replacing win10-base.
@@ -277,7 +406,7 @@ printf 'second portable-enabled standalone base fixture\n' >"$BASE"
 chmod 0444 "$BASE"
 write_attestation
 run_clone 455 --no-monitor-sync >"$TMP_DIR/named-base.out"
-grep -Fxq 'create-disk|455|--from-base|--base-name|win11-vgpu-v2' "$TRACE" ||
+grep -Fxq 'create-disk|455|--from-base|--base-name|win11-vgpu-v2|--linked' "$TRACE" ||
     fail "second named base was not forwarded to create-disk"
 grep -Fq 'base name:   win11-vgpu-v2' "$TMP_DIR/named-base.out" ||
     fail "clone handoff omitted the selected named base"
@@ -288,7 +417,13 @@ ATTESTATION=$FIRST_ATTESTATION
 mapfile -t listed_bases < <(run_clone --list-bases)
 [[ "${listed_bases[*]}" == 'win10-base win11-vgpu-v2' ]] ||
     fail "--list-bases did not expose both managed generations"
-if "$HARNESS/deploy/scripts/clone-from-base.sh" '../escape' 454 \
+mapfile -t cli_dir_bases < <(
+    "$HARNESS/deploy/scripts/clone-from-base.sh" \
+        --base-dir="$VM_BASE_DIR" --list-bases
+)
+[[ "${cli_dir_bases[*]}" == 'win10-base win11-vgpu-v2' ]] ||
+    fail "V-11-style --base-dir did not select the requested base directory"
+if "$HARNESS/deploy/scripts/clone-from-base.sh" 'bad.name' 454 \
         >"$TMP_DIR/unsafe-base.out" 2>"$TMP_DIR/unsafe-base.err"; then
     fail "clone accepted an unsafe base name"
 fi
@@ -298,9 +433,29 @@ grep -Fq 'invalid base name' "$TMP_DIR/unsafe-base.err" ||
 run_clone --list-gpu-profiles >"$TMP_DIR/profiles.out"
 [[ "$(tail -n +2 "$TMP_DIR/profiles.out" | wc -l)" -eq 25 ]] ||
     fail "clone did not expose all 25 atomic model/AIB/VRAM-maker rows"
-[[ "${#VGPU_DEFAULT_PROFILE_KEYS[@]}" -eq 24 &&
-   "${#VGPU_EXPLICIT_PROFILE_KEYS[@]}" -eq 1 ]] ||
-    fail "clone catalog changed the stable 24-row default / 1-row explicit policy"
+[[ "${#VGPU_DEFAULT_PROFILE_KEYS[@]}" -eq 12 &&
+   "${#VGPU_TIER_1024_PROFILE_KEYS[@]}" -eq 4 &&
+   "${#VGPU_EXPLICIT_PROFILE_KEYS[@]}" -eq 1 &&
+   "${#VGPU_LEGACY_PROFILE_KEYS[@]}" -eq 8 ]] ||
+    fail "clone catalog lost the 12 default / 4 tier / 1 explicit / 8 legacy policy"
+
+# Like V-11, the same local/delivery qcow2 can be selected by exact path.
+"$HARNESS/deploy/scripts/clone-from-base.sh" "$BASE" 452 --no-monitor-sync \
+    >"$TMP_DIR/path-base.out"
+grep -Fxq "create-disk|452|--from-base|--base|$BASE|--linked" "$TRACE" ||
+    fail "exact qcow2 path was not forwarded without making another base copy"
+grep -Fq "base image:  $BASE" "$TMP_DIR/path-base.out" ||
+    fail "exact-path clone handoff omitted the selected image"
+grep -Fq 'disk mode:   linked (incremental / V-11-style)' \
+    "$TMP_DIR/path-base.out" ||
+    fail "default clone did not report V-11-style incremental disk mode"
+
+# A full standalone copy remains an explicit escape hatch, never the default.
+run_clone 451 --full-copy --no-monitor-sync >"$TMP_DIR/full-copy.out"
+grep -Fxq 'create-disk|451|--from-base|--base-name|win10-base|--full-copy' \
+    "$TRACE" || fail "explicit full-copy mode was not forwarded"
+grep -Fq 'disk mode:   copy (standalone full copy)' \
+    "$TMP_DIR/full-copy.out" || fail "full-copy mode was not visible"
 
 # VM IDs are not tied to VM1/2/3.  All audited profiles and forwarded hardware
 # selectors must reach the canonical create-vm/create-disk entry points.
@@ -309,7 +464,7 @@ grep -Fxq 'create-vm|456|--gpu-profile|gtx750ti_2gb' "$TRACE" ||
     fail "VM456 create-vm arguments are incorrect"
 grep -Fxq 'create-vm-start-lock|1' "$TRACE" ||
     fail "clone did not tell create-vm that it owns the VM start lock"
-grep -Fxq 'create-disk|456|--from-base|--base-name|win10-base' "$TRACE" ||
+grep -Fxq 'create-disk|456|--from-base|--base-name|win10-base|--linked' "$TRACE" ||
     fail "VM456 did not require the prepared base"
 grep -Fxq 'monitor-sync|456|start-lock=1' "$TRACE" ||
     fail "VM456 did not automatically apply its generated monitor profile"
@@ -323,7 +478,7 @@ run_clone 987654 --gpu-profile gt1030_2gb \
 grep -Fxq \
     'create-vm|987654|--gpu-profile|gt1030_2gb|--platform|office-intel|--ssd-profile|samsung-970-pro-512gb|--monitor-profile|lenovo-d24-20' \
     "$TRACE" || fail "forwarded create-vm selectors are incorrect"
-grep -Fxq 'create-disk|987654|--from-base|--base-name|win10-base' "$TRACE" ||
+grep -Fxq 'create-disk|987654|--from-base|--base-name|win10-base|--linked' "$TRACE" ||
     fail "VM987654 did not clone from base"
 grep -Fxq 'monitor-sync|987654|start-lock=1' "$TRACE" ||
     fail "explicit monitor profile was not automatically synchronized"
@@ -364,7 +519,7 @@ run_clone 2147483647 --gpu-profile gtx1050_2gb --start \
     >"$TMP_DIR/max-id.out"
 grep -Fxq 'create-vm|2147483647|--gpu-profile|gtx1050_2gb' "$TRACE" ||
     fail "maximum supported VM ID was not forwarded"
-grep -Fxq 'create-disk|2147483647|--from-base|--base-name|win10-base' "$TRACE" ||
+grep -Fxq 'create-disk|2147483647|--from-base|--base-name|win10-base|--linked' "$TRACE" ||
     fail "maximum supported VM ID disk was not cloned"
 grep -Fxq 'start-vm|2147483647' "$TRACE" ||
     fail "--start did not release its locks and invoke start-vm"
@@ -400,6 +555,82 @@ grep -Fq 'automatic sync=disabled' "$TMP_DIR/monitor-disabled.out" ||
 run_clone 459 --no-monitor-sync --start >"$TMP_DIR/monitor-disabled-start.out"
 grep -Fxq 'start-vm|459|--no-monitor-sync' "$TRACE" ||
     fail "monitor opt-out was not forwarded to --start"
+
+# A private generalized base publishes its host gate before the disk commit,
+# defers monitor mutation until one-click initialization, and may start only
+# the intended guest first-boot pass. Pre-publication failures roll the gate
+# back; a disk already published retains it and therefore remains fail-closed.
+write_private_attestation
+"$REAL_JQ" '
+    .schemaVersion = 6 |
+    .deploymentMode = "site-private-licensed-firstboot-v1" |
+    del(.firstBootWorkflow, .systemNvapiDelivery, .systemNvapiRequired)
+' "$ATTESTATION" >"$ATTESTATION.old"
+mv -f -- "$ATTESTATION.old" "$ATTESTATION"
+chmod 0400 "$ATTESTATION"
+if run_clone 833 >"$TMP_DIR/private-old.out" 2>"$TMP_DIR/private-old.err"; then
+    fail "private clone accepted obsolete schema-6 first-boot semantics"
+fi
+grep -Fq 'schema-6 base lacks automatic system NVAPI projection' \
+    "$TMP_DIR/private-old.err" ||
+    fail "obsolete private base refusal did not explain the required rebuild"
+write_private_attestation
+before_monitor=$(grep -c '^monitor-sync|' "$TRACE" || true)
+run_clone 834 --gpu-profile gtx750_asus_1gb --start >"$TMP_DIR/private.out"
+after_monitor=$(grep -c '^monitor-sync|' "$TRACE" || true)
+[[ "$after_monitor" -eq "$before_monitor" ]] ||
+    fail "private clone modified the monitor cache before guest validation"
+[[ -f "$VM_INSTANCES_DIR/834/.g11-init-required" ]] ||
+    fail "private clone did not publish its initialization gate"
+"$REAL_JQ" -e \
+    '.schemaVersion == 2 and .state == "guest-firstboot-required" and
+     .baseName == "win10-base" and
+     .vmUuid == "00112233-4455-4677-8899-aabbccddeeff" and
+     .gpuProfile == "gtx750_asus_1gb" and .monitorProfile == "dell-p2419h" and
+     (.catalogSha256 | test("^[0-9A-F]{64}$")) and
+     (.sourceConfigSha256 | test("^[0-9A-F]{64}$")) and
+     (.systemNvapiContractId | test("^[0-9A-F]{64}$")) and
+     (.systemNvapiIsoSha256 | test("^[0-9A-F]{64}$")) and
+     .systemNvapiIsoFile ==
+       ("vm834-00112233-4455-4677-8899-aabbccddeeff-" +
+        (.systemNvapiContractId[0:16]) + ".iso")' \
+    "$VM_INSTANCES_DIR/834/.g11-init-required" >/dev/null ||
+    fail "private clone initialization gate is invalid"
+[[ -f "$VM_INSTANCES_DIR/834/packages/SystemNvapiProjection/$(
+        "$REAL_JQ" -r '.systemNvapiIsoFile' \
+            "$VM_INSTANCES_DIR/834/.g11-init-required")" ]] ||
+    fail "private clone did not retain its read-only per-VM system NVAPI ISO"
+grep -Fq 'system-nvapi-package|834|' "$TRACE" ||
+    fail "private clone did not invoke the per-VM system NVAPI packager"
+grep -Fxq 'start-vm|834' "$TRACE" ||
+    fail "private --start did not launch the intended first-boot pass"
+grep -Fq 'deferred-to-one-click-initialization' "$TMP_DIR/private.out" ||
+    fail "private clone did not explain deferred monitor initialization"
+
+export STUB_DISK_FAIL=1
+if run_clone 835 >"$TMP_DIR/private-disk-fail.out" \
+        2>"$TMP_DIR/private-disk-fail.err"; then
+    fail "private clone accepted a pre-publication disk failure"
+fi
+unset STUB_DISK_FAIL
+[[ ! -e "$VM_INSTANCES_DIR/835/.g11-init-required" &&
+   ! -e "$VM_INSTANCES_DIR/835/packages/SystemNvapiProjection" &&
+   ! -e "$VM_INSTANCES_DIR/835/vm.conf" &&
+   ! -e "$VM_INSTANCES_DIR/835/disk.qcow2" ]] ||
+    fail "private pre-publication failure was not rolled back"
+
+export STUB_DISK_PUBLISH_FAIL=1
+if run_clone 836 >"$TMP_DIR/private-published-fail.out" \
+        2>"$TMP_DIR/private-published-fail.err"; then
+    fail "private clone accepted a post-publication disk failure"
+fi
+unset STUB_DISK_PUBLISH_FAIL
+[[ -f "$VM_INSTANCES_DIR/836/.g11-init-required" &&
+   -d "$VM_INSTANCES_DIR/836/packages/SystemNvapiProjection" &&
+   -f "$VM_INSTANCES_DIR/836/vm.conf" &&
+   -f "$VM_INSTANCES_DIR/836/disk.qcow2" ]] ||
+    fail "private published disk did not retain its fail-closed gate"
+write_attestation
 
 # Once a disk is published, an unexpected sync error keeps the clone for
 # recovery but fails closed and never launches it.
@@ -607,7 +838,7 @@ wait "$locked_pid" || fail "clone failed after the storage lock was released"
 children=()
 grep -Fxq 'create-vm|700' "$TRACE" ||
     fail "lock-delayed clone did not create its VM"
-grep -Fxq 'create-disk|700|--from-base|--base-name|win10-base' "$TRACE" ||
+grep -Fxq 'create-disk|700|--from-base|--base-name|win10-base|--linked' "$TRACE" ||
     fail "lock-delayed clone did not create its disk"
 
 # A busy per-VM lifecycle lock must fail before sidecar parsing or helper

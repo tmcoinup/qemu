@@ -3472,6 +3472,11 @@
 # @floppy: whether to export a floppy image (true) or partitioned hard
 #     disk (false; default)
 #
+# @size: virtual disk size in bytes.  When specified, the image uses
+#     FAT32 and must be read-only.  The size is virtual: directory
+#     data is read in place and no disk-image file is allocated.
+#     (since 11.1)
+#
 # @label: set the volume label, limited to 11 bytes.  FAT16 and FAT32
 #     traditionally have some restrictions on labels, which are
 #     ignored by most operating systems.  Defaults to "QEMU VVFAT".
@@ -3489,7 +3494,8 @@
 ##
 { 'struct': 'BlockdevOptionsVVFAT',
   'data': { 'dir': 'str', '*fat-type': 'int', '*floppy': 'bool',
-            '*label': 'str', '*label-charset': 'str', '*rw': 'bool' } }
+            '*size': 'int', '*label': 'str', '*label-charset': 'str',
+            '*rw': 'bool' } }
 
 ##
 # @BlockdevOptionsGenericFormat:

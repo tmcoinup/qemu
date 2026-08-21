@@ -52,8 +52,8 @@ grep -Fq 'CHECK ONLY: no files moved' "$TMP_DIR/check.out" \
     || fail "same-filesystem migration did not preserve the disk inode"
 [[ "$(stat -c %i "$VM_ROOT/2/disk.qcow2")" == "$categorized_inode" ]] \
     || fail "categorized disk was not migrated into vm2"
-[[ -f "$VM_ROOT/shared/bases/win10-base.qcow2" ]] || fail "categorized base missing"
-[[ -f "$VM_ROOT/shared/bases/archive/win10-base.qcow2.old" ]] \
+[[ -f "$VM_ROOT/_base/win10-base.qcow2" ]] || fail "categorized base missing"
+[[ -f "$VM_ROOT/_base/archive/win10-base.qcow2.old" ]] \
     || fail "old base was not archived"
 [[ -f "$VM_ROOT/1/vm.conf" ]] || fail "instance config missing"
 [[ -f "$VM_ROOT/1/nvram.fd" ]] || fail "instance NVRAM missing"
@@ -125,12 +125,12 @@ grep -Fq 'cannot prove qcow2 backing safety' "$TMP_DIR/bad.err" \
 # A relative backing filename would resolve from a different directory after
 # moving the overlay, so migration must refuse it instead of breaking the chain.
 REL_ROOT="$TMP_DIR/relative/vms"
-mkdir -p "$REL_ROOT/shared/bases" "$REL_ROOT/control"
-"$QEMU_IMG" create -q -f qcow2 "$REL_ROOT/shared/bases/win10-base.qcow2" 1M
+mkdir -p "$REL_ROOT/_base" "$REL_ROOT/control"
+"$QEMU_IMG" create -q -f qcow2 "$REL_ROOT/_base/win10-base.qcow2" 1M
 (
     cd "$REL_ROOT"
     "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
-        -b shared/bases/win10-base.qcow2 win10-vm4.qcow2
+        -b _base/win10-base.qcow2 win10-vm4.qcow2
 )
 if IMAGE_ROOT="$TMP_DIR/relative" VM_ROOT="$REL_ROOT" \
     "$MIGRATE" --check >"$TMP_DIR/relative.out" 2>"$TMP_DIR/relative.err"; then
@@ -168,7 +168,7 @@ mkdir -p "$EXTERNAL_VM_ROOT/control" "$EXTERNAL_DISKS"
     -b "$EXTERNAL_VM_ROOT/win10-base.qcow2" \
     "$EXTERNAL_DISKS/dependent.qcow2"
 if IMAGE_ROOT="$EXTERNAL_IMAGE_ROOT" VM_ROOT="$EXTERNAL_VM_ROOT" \
-    VM_DISK_DIR="$EXTERNAL_DISKS" VM_BASE_DIR="$EXTERNAL_VM_ROOT/shared/bases" \
+    VM_DISK_DIR="$EXTERNAL_DISKS" VM_BASE_DIR="$EXTERNAL_VM_ROOT/_base" \
     "$MIGRATE" --check >"$TMP_DIR/external.out" 2>"$TMP_DIR/external.err"; then
     fail "migration ignored a dependent in an external managed disk dir"
 fi

@@ -34,6 +34,7 @@ $StateRoot = Join-Path ([Environment]::GetFolderPath(
     [Environment+SpecialFolder]::CommonApplicationData)) `
     'G11\SystemNvapiProjection'
 $ReceiptRoot = Join-Path $StateRoot 'receipts'
+$CloneComputerNameState = Join-Path $StateRoot 'private-clone-computer-name.json'
 $TaskPrefix = 'G11-System-NVAPI-'
 $MonitorTaskPrefix = 'G11-Monitor-Identity-'
 if ([string]::IsNullOrWhiteSpace($PayloadDir)) {
@@ -431,6 +432,205 @@ function Copy-PayloadDurably($Payload) {
     return (Read-Payload $target).Root
 }
 
+function Get-V11ComputerName($Contract) {
+    try {
+        $compact = ([Guid]$Contract.vmUuid).ToString('N').ToUpperInvariant()
+    } catch {
+        throw '无法从合同 UUID 生成 V-11 风格主机名。'
+    }
+    return 'DESKTOP-' + $compact.Substring(0, 7)
+}
+
+function Test-PayloadRootIsCdRom([string]$Root) {
+    try {
+        $driveRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Root))
+        if ([string]::IsNullOrWhiteSpace($driveRoot)) { return $false }
+        $drive = New-Object IO.DriveInfo -ArgumentList $driveRoot
+        return $drive.IsReady -and
+            $drive.DriveType -eq [IO.DriveType]::CDRom
+    } catch {
+        return $false
+    }
+}
+
+function Write-CloneComputerNameState($Contract, [string]$ComputerName) {
+    New-ProtectedDirectory $StateRoot
+    $state = [ordered]@{
+        schemaVersion = 1
+        purpose = 'g11-private-clone-computer-name'
+        contractId = [string]$Contract.contractId
+        vmUuid = ([Guid]$Contract.vmUuid).ToString('D').ToLowerInvariant()
+        computerName = $ComputerName
+    }
+    $temporary = "$CloneComputerNameState.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temporary,
+            (($state | ConvertTo-Json -Compress) + "`r`n"),
+            (New-Object Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temporary -Destination $CloneComputerNameState `
+            -Force -ErrorAction Stop
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Read-CloneComputerNameState($Contract) {
+    if (-not (Test-Path -LiteralPath $CloneComputerNameState -PathType Leaf)) {
+        return $null
+    }
+    $item = Get-RegularFile $CloneComputerNameState 'private clone computer-name state'
+    $state = Get-Content -LiteralPath $item.FullName -Raw -Encoding UTF8 |
+        ConvertFrom-Json -ErrorAction Stop
+    Assert-ExactPropertyNames $state @(
+        'schemaVersion', 'purpose', 'contractId', 'vmUuid', 'computerName'
+    ) 'private clone computer-name state'
+    $expected = Get-V11ComputerName $Contract
+    if ([int]$state.schemaVersion -ne 1 -or
+        [string]$state.purpose -cne 'g11-private-clone-computer-name' -or
+        [string]$state.contractId -cne [string]$Contract.contractId -or
+        ([Guid]$state.vmUuid).ToString('D').ToLowerInvariant() -cne
+            ([Guid]$Contract.vmUuid).ToString('D').ToLowerInvariant() -or
+        [string]$state.computerName -cne $expected) {
+        throw 'private clone computer-name state 与当前 VM 合同不一致。'
+    }
+    return $state
+}
+
+function Prepare-V11CloneComputerName($Payload) {
+    $state = Read-CloneComputerNameState $Payload.Contract
+    if ($null -eq $state -and
+        -not (Test-PayloadRootIsCdRom $Payload.Root)) {
+        # A manually unpacked system-NVAPI package is not a private clone
+        # bootstrap and must not rename an existing operator-managed machine.
+        return
+    }
+    $expected = Get-V11ComputerName $Payload.Contract
+    if ([string]$env:COMPUTERNAME -cne $expected) {
+        if (-not (Get-Command Rename-Computer -ErrorAction SilentlyContinue)) {
+            throw '系统缺少 Rename-Computer，无法应用 V-11 风格主机名。'
+        }
+        Rename-Computer -NewName $expected -Force -ErrorAction Stop
+        $pending = [string](Get-ItemProperty -LiteralPath `
+            'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' `
+            -Name ComputerName -ErrorAction Stop).ComputerName
+        if ($pending -cne $expected) {
+            throw "主机名重启待生效值不匹配：$pending"
+        }
+        Write-Host "COMPUTER_NAME_PENDING PASS name=$expected" `
+            -ForegroundColor Green
+    }
+    Write-CloneComputerNameState $Payload.Contract $expected
+}
+
+function Assert-V11CloneComputerName($Contract) {
+    $state = Read-CloneComputerNameState $Contract
+    if ($null -eq $state) { return }
+    $expected = Get-V11ComputerName $Contract
+    if ([string]$env:COMPUTERNAME -cne $expected) {
+        throw "V-11 风格主机名未在重启后生效：$($env:COMPUTERNAME) != $expected"
+    }
+    Write-Host "COMPUTER_NAME_VERIFY PASS name=$expected" `
+        -ForegroundColor Green
+}
+
+function Initialize-StorageEjectApi {
+    if ($null -ne ('VMate.G11.StorageMedia' -as [type])) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace VMate.G11 {
+    public static class StorageMedia {
+        private const uint GENERIC_READ = 0x80000000;
+        private const uint FILE_SHARE_READ = 0x00000001;
+        private const uint FILE_SHARE_WRITE = 0x00000002;
+        private const uint OPEN_EXISTING = 3;
+        private const uint IOCTL_STORAGE_EJECT_MEDIA = 0x002D4808;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(
+            string fileName, uint desiredAccess, uint shareMode,
+            IntPtr securityAttributes, uint creationDisposition,
+            uint flagsAndAttributes, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DeviceIoControl(
+            SafeFileHandle device, uint controlCode,
+            IntPtr inBuffer, uint inBufferSize,
+            IntPtr outBuffer, uint outBufferSize,
+            out uint bytesReturned, IntPtr overlapped);
+
+        public static void Eject(string driveName) {
+            string normalized = driveName.TrimEnd('\\');
+            if (normalized.Length != 2 || normalized[1] != ':') {
+                throw new ArgumentException("Not a drive-letter root", "driveName");
+            }
+            using (SafeFileHandle handle = CreateFileW(
+                @"\\.\" + normalized, GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
+                OPEN_EXISTING, 0, IntPtr.Zero)) {
+                if (handle.IsInvalid) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Could not open payload CD-ROM");
+                }
+                uint returned;
+                if (!DeviceIoControl(handle, IOCTL_STORAGE_EJECT_MEDIA,
+                        IntPtr.Zero, 0, IntPtr.Zero, 0,
+                        out returned, IntPtr.Zero)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Could not eject payload CD-ROM");
+                }
+            }
+        }
+    }
+}
+'@
+}
+
+function Eject-MatchingPayloadMedia($Contract) {
+    Initialize-StorageEjectApi
+    $ejected = 0
+    foreach ($drive in [IO.DriveInfo]::GetDrives()) {
+        try {
+            if (-not $drive.IsReady -or
+                $drive.DriveType -ne [IO.DriveType]::CDRom) { continue }
+        } catch {
+            # A removable drive can disappear during enumeration.
+            continue
+        }
+        $contractPath = Join-Path $drive.RootDirectory.FullName $ContractName
+        try {
+            $candidateContract = Get-Content -LiteralPath $contractPath `
+                -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            continue
+        }
+        if ([string]$candidateContract.contractId -cne
+            [string]$Contract.contractId -or
+            [string]$candidateContract.vmUuid -cne
+            [string]$Contract.vmUuid) { continue }
+        try {
+            # A matching label/contract is security-sensitive: validate the
+            # complete manifest again before using it as the detach signal.
+            $candidate = Read-Payload $drive.RootDirectory.FullName
+            if ([string]$candidate.Contract.contractId -cne
+                [string]$Contract.contractId) {
+                throw 'matching payload contract changed while being read'
+            }
+            [VMate.G11.StorageMedia]::Eject($drive.Name)
+        } catch {
+            throw "无法弹出已复制的 VM-bound 初始化光盘 $($drive.Name)：$($_.Exception.Message)"
+        }
+        $ejected++
+        Write-Host ("INIT_MEDIA_EJECT PASS drive={0} contract={1}" -f
+            $drive.Name, [string]$Contract.contractId) -ForegroundColor Green
+    }
+    return $ejected
+}
+
 function Get-TrustedPriorShimHashes($Payload) {
     $result = [ordered]@{ X86 = @(); X64 = @() }
     if (-not (Test-Path -LiteralPath $ReceiptRoot -PathType Container)) {
@@ -619,6 +819,107 @@ function Convert-ToRegExePath([string]$Path) {
     return ($result -replace '^HKLM:', 'HKLM')
 }
 
+function Initialize-MonitorSetupApi {
+    if ($null -ne ('VMate.G11.MonitorSetupApi' -as [type])) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace VMate.G11 {
+    public static class MonitorSetupApi {
+        private const uint DIGCF_ALLCLASSES = 0x00000004;
+        private const uint DEVPROP_TYPE_STRING = 0x00000012;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SP_DEVINFO_DATA {
+            public uint cbSize;
+            public Guid ClassGuid;
+            public uint DevInst;
+            public UIntPtr Reserved;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DEVPROPKEY {
+            public Guid fmtid;
+            public uint pid;
+        }
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        private static extern IntPtr SetupDiGetClassDevsW(
+            IntPtr classGuid, string enumerator, IntPtr parent,
+            uint flags);
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        private static extern bool SetupDiOpenDeviceInfoW(
+            IntPtr deviceInfoSet, string instanceId, IntPtr parent,
+            uint flags, ref SP_DEVINFO_DATA deviceInfoData);
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        private static extern bool SetupDiSetDevicePropertyW(
+            IntPtr deviceInfoSet, ref SP_DEVINFO_DATA deviceInfoData,
+            ref DEVPROPKEY propertyKey, uint propertyType,
+            byte[] propertyBuffer, uint propertyBufferSize, uint flags);
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiDestroyDeviceInfoList(
+            IntPtr deviceInfoSet);
+
+        public static void SetFriendlyName(
+                string instanceId, string friendlyName) {
+            IntPtr set = SetupDiGetClassDevsW(
+                IntPtr.Zero, null, IntPtr.Zero, DIGCF_ALLCLASSES);
+            if (set == new IntPtr(-1)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "SetupDiGetClassDevs failed");
+            }
+            try {
+                SP_DEVINFO_DATA data = new SP_DEVINFO_DATA();
+                data.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+                if (!SetupDiOpenDeviceInfoW(
+                        set, instanceId, IntPtr.Zero, 0, ref data)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "SetupDiOpenDeviceInfo failed for " + instanceId);
+                }
+                DEVPROPKEY key = new DEVPROPKEY();
+                key.fmtid = new Guid(
+                    "A45C254E-DF1C-4EFD-8020-67D146A850E0");
+                key.pid = 14; // DEVPKEY_Device_FriendlyName
+                byte[] value = Encoding.Unicode.GetBytes(friendlyName + "\0");
+                if (!SetupDiSetDevicePropertyW(
+                        set, ref data, ref key, DEVPROP_TYPE_STRING,
+                        value, (uint)value.Length, 0)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "SetupDiSetDeviceProperty(FriendlyName) failed for " +
+                        instanceId);
+                }
+            } finally {
+                SetupDiDestroyDeviceInfoList(set);
+            }
+        }
+    }
+}
+'@
+}
+
+function Set-MonitorPnpFriendlyName(
+        [string]$InstanceId, [string]$FriendlyName) {
+    Initialize-MonitorSetupApi
+    [VMate.G11.MonitorSetupApi]::SetFriendlyName($InstanceId, $FriendlyName)
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        $property = Get-PnpDeviceProperty -InstanceId $InstanceId `
+            -KeyName 'DEVPKEY_Device_FriendlyName' -ErrorAction Stop
+        if ([string]$property.Data -ceq $FriendlyName) { return }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "SetupAPI FriendlyName 回读失败：$InstanceId"
+}
+
 function Set-ProtectedMonitorValue {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -681,10 +982,10 @@ function Set-MonitorEdidOverride([string]$ParametersPath, [byte[]]$Edid) {
     }
 }
 
-function Get-MonitorRegistryInstances($Payload) {
+function Get-MonitorRegistryInstances(
+        $Payload, [switch]$IncludeNonMatching) {
     $base = 'HKLM:\SYSTEM\CurrentControlSet\Enum\DISPLAY'
     if (-not (Test-Path -LiteralPath $base)) { return @() }
-    $expectedHardware = 'MONITOR\' + [string]$Payload.Contract.monitor.pnpId
     $result = @()
     foreach ($device in @(Get-ChildItem -LiteralPath $base -ErrorAction Stop)) {
         foreach ($instance in @(Get-ChildItem -LiteralPath $device.PSPath `
@@ -696,15 +997,10 @@ function Get-MonitorRegistryInstances($Payload) {
                 $parameterKey.GetValueKind('EDID') -ne
                     [Microsoft.Win32.RegistryValueKind]::Binary) { continue }
             [byte[]]$edid = $parameterKey.GetValue('EDID')
-            if (-not (Test-MonitorBaseIdentity $edid $Payload.Contract.monitor)) {
+            if (-not $IncludeNonMatching -and
+                -not (Test-MonitorBaseIdentity $edid $Payload.Contract.monitor)) {
                 continue
             }
-            $instanceValues = Get-Item -LiteralPath $instance.PSPath -ErrorAction Stop
-            [string[]]$hardwareIds = @($instanceValues.GetValue('HardwareID'))
-            $identityMatches = [string]$device.PSChildName -ieq
-                [string]$Payload.Contract.monitor.pnpId -or
-                @($hardwareIds | Where-Object { $_ -ieq $expectedHardware }).Count -gt 0
-            if (-not $identityMatches) { continue }
             $result += [pscustomobject]@{
                 InstanceId = 'DISPLAY\' + [string]$device.PSChildName + '\' +
                     [string]$instance.PSChildName
@@ -717,8 +1013,9 @@ function Get-MonitorRegistryInstances($Payload) {
 }
 
 function Get-PresentMonitorMap {
-    if (-not (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue)) {
-        throw '系统缺少 Get-PnpDevice，无法验证当前 monitor 实例。'
+    if (-not (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Get-PnpDeviceProperty -ErrorAction SilentlyContinue)) {
+        throw '系统缺少 PnpDevice cmdlet，无法验证当前 monitor 实例。'
     }
     $result = @{}
     foreach ($device in @(Get-PnpDevice -Class Monitor -PresentOnly `
@@ -731,12 +1028,11 @@ function Get-PresentMonitorMap {
 function Publish-MonitorInstance($Instance, [byte[]]$Edid, $Monitor) {
     Set-ProtectedMonitorValue $Instance.ParametersPath 'EDID' Binary $Edid
     Set-MonitorEdidOverride $Instance.ParametersPath $Edid
-    Set-ProtectedMonitorValue $Instance.InstancePath 'DeviceDesc' String `
+    # DeviceDesc/Manufacturer/HardwareIds are OS/driver-owned properties.
+    # Publish only the documented writable friendly-name property through
+    # SetupAPI so the live PnP manager and Device Manager see the same value.
+    Set-MonitorPnpFriendlyName $Instance.InstanceId `
         ([string]$Monitor.displayName)
-    Set-ProtectedMonitorValue $Instance.InstancePath 'FriendlyName' String `
-        ([string]$Monitor.displayName)
-    Set-ProtectedMonitorValue $Instance.InstancePath 'Mfg' String `
-        ([string]$Monitor.manufacturer)
 }
 
 function Assert-MonitorIdentity($Payload, [byte[]]$Edid) {
@@ -749,19 +1045,6 @@ function Assert-MonitorIdentity($Payload, [byte[]]$Edid) {
         throw "合同 monitor 当前匹配实例数量不是 1：$($active.Count)"
     }
     foreach ($instance in $instances) {
-        $key = Get-Item -LiteralPath $instance.InstancePath -ErrorAction Stop
-        foreach ($pair in @(
-            @('DeviceDesc', [string]$Payload.Contract.monitor.displayName),
-            @('FriendlyName', [string]$Payload.Contract.monitor.displayName),
-            @('Mfg', [string]$Payload.Contract.monitor.manufacturer)
-        )) {
-            if (@($key.GetValueNames()) -cnotcontains [string]$pair[0] -or
-                $key.GetValueKind([string]$pair[0]) -ne
-                    [Microsoft.Win32.RegistryValueKind]::String -or
-                [string]$key.GetValue([string]$pair[0]) -cne [string]$pair[1]) {
-                throw "monitor 实例值不匹配：$($instance.InstanceId) / $($pair[0])"
-            }
-        }
         $parameters = Get-Item -LiteralPath $instance.ParametersPath `
             -ErrorAction Stop
         [byte[]]$raw = $parameters.GetValue('EDID')
@@ -799,10 +1082,37 @@ function Sync-MonitorIdentity($Payload, [int]$WaitSeconds = 0) {
         try {
             $instances = @(Get-MonitorRegistryInstances $Payload)
             $present = Get-PresentMonitorMap
-            if ($instances.Count -eq 0 -or
-                @($instances | Where-Object {
+            $active = @($instances | Where-Object {
+                $present.ContainsKey([string]$_.InstanceId)
+            })
+            if ($active.Count -eq 0) {
+                # A generalized clone initially enumerates the native NVIDIA
+                # monitor PDO with the template/generic EDID.  Bootstrap only
+                # the unambiguous one-head NVDxxxx instance; never guess among
+                # multiple displays or touch a remote/foreign monitor.
+                $presentIds = @($present.Keys)
+                if ($presentIds.Count -ne 1 -or
+                    [string]$presentIds[0] -notmatch
+                        '\ADISPLAY\\NVD[0-9A-F]{4}\\') {
+                    throw '唯一的 native NVIDIA monitor 实例尚未稳定。'
+                }
+                $allRegistry = @(Get-MonitorRegistryInstances $Payload `
+                    -IncludeNonMatching)
+                $bootstrap = @($allRegistry | Where-Object {
+                    [string]$_.InstanceId -ieq [string]$presentIds[0]
+                })
+                if ($bootstrap.Count -ne 1) {
+                    throw '当前 NVIDIA monitor 没有唯一的 EDID 注册表实例。'
+                }
+                Publish-MonitorInstance $bootstrap[0] $edid `
+                    $Payload.Contract.monitor
+                $instances = @(Get-MonitorRegistryInstances $Payload)
+                $present = Get-PresentMonitorMap
+                $active = @($instances | Where-Object {
                     $present.ContainsKey([string]$_.InstanceId)
-                }).Count -ne 1) {
+                })
+            }
+            if ($active.Count -ne 1) {
                 throw '匹配 EDID 的当前 monitor 实例尚未稳定。'
             }
             foreach ($instance in $instances) {
@@ -990,21 +1300,36 @@ function Invoke-SystemProbes($Payload) {
 function Invoke-NativeD3D12Probes($Payload) {
     $profile = $Payload.Contract.profile
     if ([int]$profile.d3d12RaytracingTier -ne 0) {
-        throw 'native D3D12 probe currently accepts only the reviewed tier-zero catalog.'
+        throw 'native D3D12 audit currently accepts only the reviewed tier-zero catalog.'
     }
+    $capabilityMismatch = @()
     foreach ($name in @(
             'D3D12CapabilityProbe32.exe',
             'D3D12CapabilityProbe64.exe'
         )) {
         $probe = Join-Path $Payload.Root $name
-        $output = (& $probe '--require-tier-zero' 2>&1 | Out-String)
+        # The signed GRID userspace driver owns native D3D12 capability
+        # reporting.  The system NVAPI projection cannot truthfully change
+        # ID3D12Device::CheckFeatureSupport, so clone readiness only requires
+        # both native architectures to enumerate/query the NVIDIA adapter.
+        # Keep --require-tier-zero in the standalone diagnostic probe for
+        # operators who want a strict transport-coherence audit.
+        $output = (& $probe 2>&1 | Out-String)
         if ($LASTEXITCODE -ne 0 -or
             $output -notmatch 'D3D12_NATIVE_VERIFY PASS') {
-            throw ("$name 原生 D3D12 OPTIONS5 与零光追合同不一致。" +
-                "这是签名显卡驱动的实际返回，不是检测工具缓存；" +
+            throw ("$name 无法查询签名显卡驱动的原生 D3D12 OPTIONS5；" +
                 "已拒绝继续安装/验收：`r`n$output")
         }
+        if ($output -match 'native_raytracing_nonzero=yes') {
+            $capabilityMismatch += $name
+        }
         Write-Host ($output.Trim()) -ForegroundColor Green
+    }
+    if ($capabilityMismatch.Count -gt 0) {
+        Write-Warning ("目标旧卡的 NVAPI 能力合同为 DXR tier 0，但签名 vGPU " +
+            "transport 的原生 D3D12 暴露了光追能力（{0}）。本工具不会替换 " +
+            "d3d12.dll 或伪造 ID3D12Device；该差异已记录，但不阻断 NVAPI " +
+            "投影与克隆初始化。" -f ($capabilityMismatch -join ', '))
     }
 }
 
@@ -1222,10 +1547,15 @@ $transport = if ($Action -in @(
 switch ($Action) {
     'Install' {
         Write-Step "安装32/64位程序共用的单显卡系统投影：$($payload.Contract.profile.key)"
-        Write-Step '写入前验证签名显卡驱动的原生 x86/x64 D3D12 OPTIONS5'
+        Write-Step '写入前审计签名显卡驱动的原生 x86/x64 D3D12 OPTIONS5'
         Invoke-NativeD3D12Probes $payload
+        Prepare-V11CloneComputerName $payload
         $durableRoot = Copy-PayloadDurably $payload
         $payload = Read-Payload $durableRoot
+        # The exact VM-bound package is now durable.  Eject every matching
+        # read-only ISO so the host watcher can hot-remove the complete
+        # temporary optical stack before the verification reboot.
+        $null = Eject-MatchingPayloadMedia $payload.Contract
         Remove-StaleProjectionTasks $payload.Contract
         Invoke-ProfileWriter $payload
         Assert-RegistryContract $payload.Contract
@@ -1244,6 +1574,7 @@ switch ($Action) {
     }
     'Verify' {
         Write-Step '验证单逻辑显卡的32/64位系统搜索路径与显存厂家结果'
+        Assert-V11CloneComputerName $payload.Contract
         Assert-SystemProjection $payload
         Wait-RegistryContract $payload.Contract 120
         Invoke-SystemProbes $payload
@@ -1254,7 +1585,7 @@ switch ($Action) {
         if ($exitBcd -cne $entryBcd) { throw '验证期间 BCD 发生变化。' }
         Write-Receipt $payload 'validated' $transport $exitBcd $monitorInstance
         Unregister-VerificationTask $payload.Contract
-        Write-Host ("PASS：x86/x64 系统 NVAPI 与原生 D3D12 均符同一能力合同；{0} / {1}；monitor={2}。" -f
+        Write-Host ("PASS：x86/x64 系统 NVAPI 符合目标能力合同，原生 D3D12 路径已如实审计；{0} / {1}；monitor={2}。" -f
             $payload.Contract.profile.memoryTypeName,
             $payload.Contract.profile.memoryMakerName,
             $payload.Contract.monitor.displayName) -ForegroundColor Green

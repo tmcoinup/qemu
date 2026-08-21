@@ -140,7 +140,7 @@ sudo ./deploy/install-vgpu-portable-to-base.sh \
 克隆任意受支持 VM ID，例如：
 
 ```bash
-# 不指定 GPU：从原 24 条默认审核行随机一次并固化
+# 不指定 GPU：按 VGPU_HOST_FB_TIER_MB 从对应单档新建层随机一次并固化
 ./deploy/scripts/clone-from-base.sh win10-ltsc-v1 10 --start
 
 # 指定 GPU：固定为所选原子行
@@ -152,7 +152,7 @@ sudo ./deploy/install-vgpu-portable-to-base.sh \
 这不是为每个 VM 重新打包。克隆器会：
 
 1. 校验基础盘路径、inode/mtime/ctime、目录摘要和 schema-5 统一证明；
-2. 调用统一的 `create-vm.sh`；显式 profile 原样传递，未指定则随机一条；
+2. 调用统一的 `create-vm.sh`；显式 profile 原样传递，未指定则按宿主显存档选择；
 3. 把完整原子行写入该实例的 `vm.conf`；
 4. 从独立基础盘创建实例盘；
 5. 正常启动时由 `start-vm.sh` 发布只读 firmware claim；
@@ -166,7 +166,9 @@ sudo ./deploy/install-vgpu-portable-to-base.sh \
 ./deploy/scripts/create-vm.sh 20 --gpu-profile gtx750ti_gigabyte_2gb
 ```
 
-第一条创建命令随机并固化 GPU，第二条显式固定 GPU。两种方式都只写入一次；已有
+未指定时，2048MB 宿主档只从 12 条 2GB 默认行选择，1024MB 宿主档只从 4 条
+Maxwell 1GB 新建行选择；显式 1 条和 Kepler legacy 8 条不参加无参数随机。
+第一条创建命令按该规则固化 GPU，第二条显式固定 GPU。两种方式都只写入一次；已有
 实例使用 `create-vm.sh --force` 时，未显式给出 `--gpu-profile` 会保留旧显卡策略。
 
 显式换卡会重新校验完整行和持久化状态，避免静默换身份。

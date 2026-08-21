@@ -168,8 +168,10 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
 2. 默认只将 `C:\Users\Public\Desktop\VgpuPortable.exe` 写入 Windows base；
    base schema-5 回执明确记录 `gpuZIncluded=false` 和
    `guestPerformance=embedded-recommended-native-v1`。这一步只需为每个 base 做一次。
-3. 创建 VM456 的独立 B/native 配置和 UUID，从 base 克隆系统盘；未指定显卡和
-   显示器时分别从审核池随机一次并写入 `vm.conf`，克隆后自动同步，然后启动。
+3. 创建 VM456 的独立 B/native 配置和 UUID，从 base 建立 V-11 式增量盘；
+   `disk.qcow2` 刚创建通常只有几百 KB，隐藏的 `.base.qcow2` hard-link 固定母盘
+   inode。未指定显卡时按 `VGPU_HOST_FB_TIER_MB` 从对应单档新建层随机，显示器从
+   审核新建池随机，结果分别写入 `vm.conf`，克隆后自动同步，然后启动。
 
 `BASE_NAME` 是基础镜像的永久选择键，不是装饰性备注。它只能包含字母、数字、
 `_`、`-`，不写 `.qcow2`。推荐格式是 `<系统>-<版本或用途>-v<代号>`，例如
@@ -177,8 +179,8 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
 产生并绑定：
 
 ```text
-shared/bases/win10-ltsc-v1.qcow2
-shared/bases/win10-ltsc-v1.qcow2.vgpu-portable.json
+_base/win10-ltsc-v1.qcow2
+_base/win10-ltsc-v1.qcow2.vgpu-portable.json
 ```
 
 以后做第二个基础镜像时换名即可，第一代不会被覆盖：
@@ -198,6 +200,17 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
 `--start` 只控制是否立即开机，不控制显示器配置。克隆但不启动也会自动同步；以后
 每次 `start-vm.sh` 都会按 marker 复核，不需要另跑 `vmctl monitor`。只有切换型号或
 强制清旧缓存时才使用关机态的 `vmctl monitor ... --force`。
+
+默认克隆不会再复制一份几十 GB 的母盘。查看真正新增空间：
+
+```bash
+du -h /home/ubuntu/images/vms/456/disk.qcow2
+qemu-img info /home/ubuntu/images/vms/456/disk.qcow2
+```
+
+第二条应显示 `backing file: .base.qcow2`。只有明确需要可脱离母盘单独搬走的 VM
+时才给 clone 增加 `--full-copy`。母盘换代必须原子发布新 inode；已有 VM 使用自己
+的 pin 保持旧版本，新克隆才使用新版，禁止原地改写母盘让旧增量盘“跟着更新”。
 
 进入 Windows 后只双击公共桌面的 `VgpuPortable.exe`，UAC 点“是”，等待：
 
@@ -245,8 +258,9 @@ DDR3-1333/1600；每个频率/品牌组合都有 4G、6G、8G 三档。整机白
 5 款默认 CPU 均未得到 supported 时，无参数创建仍会探测 i7；i7 明确 supported
 才使用它，连 i7 在内的 6 款 active 都明确非 supported 才会自动 legacy 兜底，
 探测不确定则 fail-closed。另有
-9 款默认、1 款手动扩展的精确 `512110190592` 字节 SSD，3 个 1GB + 3 个 2GB GPU 芯片型号
-（25 条板卡/显存原子 profile；默认随机仍为原 24 条），以及 35 款全部为
+7 款默认 SATA、3 款显式 NVMe 的精确 `512110190592` 字节 SSD，3 个 1GB + 3 个
+2GB GPU 芯片型号（25 条板卡/显存原子 profile：2GB 默认 12 条、1GB Maxwell
+新建 4 条、显式 1 条、Kepler legacy 8 条），以及 35 款全部为
 1920×1080@60 的显示器（其中 28 款可新建）。4 GiB 是 2×2 GiB 真双通道，8 GiB
 是 2×4 GiB 真双通道；6 GiB 是 4+2 GiB Intel Flex，只能把匹配的 4 GiB 区称为
 双通道，额外 2 GiB 区为单通道。审计器会标出哪些组合可用于新 VM、哪些只保留
@@ -271,7 +285,7 @@ Gigabyte 主板语法且互不重复；只有 baseboard serial 天然归主板�
 料号会同时进入 SMBIOS 与 SPD。Micron 目录 SKU 在 18-byte SPD part 字段使用
 对应的 `-1G6`（1600）或 `-1G4`（1333）基础 part。两套 legacy DDR4 仍是
 256-byte page 0-only，厂商/料号/序列由 SMBIOS Type 17 提供，不伪造 EE1004
-page 1。SSD 按九款型号使用严格序列格式；显示器只有 Samsung S24F350 与 Redmi
+page 1。SSD 按十款型号使用严格序列格式；显示器只有 Samsung S24F350 与 Redmi
 RMMNT238NF 是型号专属格式，其余 33 款为 `generic-prefix-hash`。GPU 板卡序列为
 `not-exposed`，USB 输入为 `none`/`iSerialNumber=0`。创建器在 fleet 锁下查重并对
 撞号重抽，启动器再次复核；缺少列表的 v1/v2/v3 旧配置只在内存中稳定派生，
@@ -392,8 +406,10 @@ EXE 可跨 VM 使用，但不能在 guest 内任意选择/伪造另一个型号�
 每行都固定 2 GB GDDR5，并把型号、subsystem、VBIOS、时钟、板卡和显存厂家一起
 锁定；不能只改 `GPU_BOARD_BRAND` 或 `GPU_MEMORY_MAKER` 拼出目录外组合。
 
-最省事的克隆命令无需指定显卡；它会从上面 12 行等概率随机一行，并把结果永久
-写进该 VM 的 `vm.conf`：
+最省事的克隆命令无需指定显卡；宿主固定为
+`VGPU_HOST_FB_TIER_MB=2048` 时，它会从上面 12 行等概率随机一行，并把结果永久
+写进该 VM 的 `vm.conf`。宿主固定为 1024MB 时则只从 4 条 Maxwell 1GB 新建行
+选择；两个档位不会互混，显式行和 Kepler legacy 行也不进入无参数随机：
 
 ```bash
 ./deploy/scripts/vmctl.sh clone win10-ltsc-v1 457 --start
@@ -514,9 +530,9 @@ VM_ID=456
 ```
 
 在 Windows 双击 `Run-As-Administrator.cmd` 并确认 UAC。它会在任何写入之前
-直接检查签名显卡驱动的 x86/x64 D3D12 OPTIONS5；两者都符合目录的
-tier 0 合同时才安装并自动重启。任一路径非零时会拒绝安装、不重启；
-这是能力不一致，不是 ISO 挂载失败。日志在
+直接审计签名显卡驱动的 x86/x64 D3D12 OPTIONS5；两条路径都能枚举/查询 NVIDIA
+adapter 后便安装并自动重启。查询失败时会拒绝安装、不重启；原生 DXR tier 高于
+目标旧卡时会明确警告并继续，因为该值属于签名 vGPU transport。日志在
 `C:\Windows\Temp\G11-System-NVAPI-Install.log`。
 
 只有 `Run` 成功并重启后才双击 `Verify-As-Administrator.cmd`；必须同时看到
@@ -536,14 +552,15 @@ profile 的板卡 Subsystem 和静态规格合入，因此硬件程序不会再�
 默认零光驱、手动热插/换盘/整机热拔和盘符不刷新的处理见
 [`G11-OPTICAL-DRIVE.md`](G11-OPTICAL-DRIVE.md)。
 
-SystemNvapiProjection schema 4 把当前六个旧显卡 device ID 的能力合同绑定进
-包内；x86/x64 系统探针必须同时显示 `RT=0 Tensor=0`，x86/x64 原生
-D3D12 探针也必须同时显示 tier 0。这一处理对所有调用者一致，不接收
+SystemNvapiProjection schema 4 把当前六个旧显卡 device ID 的 NVAPI 能力合同绑定进
+包内；x86/x64 系统探针必须同时显示 `RT=0 Tensor=0`。x86/x64 原生 D3D12 探针
+必须都能完成 OPTIONS5 查询，但其 tier 由签名 transport 如实返回。这一处理对所有调用者一致，不接收
 应用路径，也没有鲁大师进程或 VM 编号特例。
 
 鲁大师、GPU-Z、HWiNFO 等只用于重新扫描和交叉验收。当前 RTX 2080 宿主上的
 `DEV_1E30` 生产 transport 和隔离 M60-1Q 候选都已实测为 x64 tier 11，
-因此当前应如实判为 D3D12 现实一致性失败。不要放置 app-local
+因此严格 D3D12 现实一致性审计仍会失败，但这不再阻断授权和 NVAPI 系统投影。
+不要放置 app-local
 `d3d12.dll`，也不要替换系统 `d3d12.dll`。完整实机记录、公共层流程和签名
 transport 边界见
 [配置现实一致性教程](G11-HARDWARE-COHERENCE.md)。

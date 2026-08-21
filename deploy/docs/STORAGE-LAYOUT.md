@@ -17,7 +17,8 @@ G-11 现在参考 V-11 的实例分类方式：默认直接使用
     ├── 1/                              # VM 1 的完整 bundle
     ├── 2/                              # VM 2 的完整 bundle
     │   ├── vm.conf                     # 持久硬件身份和启动配置
-    │   ├── disk.qcow2                  # 该 VM 唯一的可写系统盘
+    │   ├── .base.qcow2                 # 隐藏母盘 hard-link pin（增量克隆时）
+    │   ├── disk.qcow2                  # 可写增量盘，或显式 full-copy 独立盘
     │   ├── nvram.fd                    # 该 VM 独立的 UEFI 变量
     │   ├── tpm/
     │   │   ├── state/                  # TPM 持久状态
@@ -40,13 +41,11 @@ G-11 现在参考 V-11 的实例分类方式：默认直接使用
     │   └── backups/
     │       ├── disks/
     │       └── nvram/
-    ├── shared/                         # 多台 G-11 VM 共用的模板/资源
-    │   ├── bases/
-    │   │   ├── win10-ltsc-v1.qcow2
-    │   │   ├── win10-ltsc-v1.qcow2.vgpu-portable.json
-    │   │   ├── win11-vgpu-v2.qcow2
-    │   │   ├── win11-vgpu-v2.qcow2.vgpu-portable.json
-    │   │   └── archive/
+    ├── _base/                          # 与 V-11 同名的 base 默认目录
+    │   ├── win10-ltsc-v1.qcow2
+    │   ├── win10-ltsc-v1.g11base       # 私有交付清单（如有）
+    │   └── win10-ltsc-v1.qcow2.vgpu-portable.json
+    ├── shared/                         # 多台 G-11 VM 共用的非 base 资源
     │   ├── assets/
     │   └── usb/                        # 多台 VM 共用的只读工具 U 盘根目录
     │       ├── G11GuestLite/
@@ -70,25 +69,31 @@ G-11 现在参考 V-11 的实例分类方式：默认直接使用
 | 路径 | 是否备份 | 停机后能否单独清理 | 说明 |
 |---|---:|---:|---|
 | `<ID>/vm.conf` | 必须 | 否 | UUID、MAC、硬件身份、GPU profile |
-| `<ID>/disk.qcow2` | 必须 | 否 | Windows 和用户数据 |
+| `<ID>/.base.qcow2` | 增量 VM 必须 | 否 | 固定该 VM 使用的母盘 inode；不是额外复制的数据 |
+| `<ID>/disk.qcow2` | 必须 | 否 | Windows 和用户写入；默认是小型 qcow2 overlay |
 | `<ID>/nvram.fd` | 必须 | 否 | UEFI boot 状态，应与磁盘成组恢复 |
 | `<ID>/tpm/` | 必须 | 否 | 删除等同于更换 TPM，可能触发密钥/BitLocker 恢复 |
 | `<ID>/run/` | 不必 | 可重建 | PID、socket、mdev recovery 和每 VM 锁 |
 | `<ID>/log/` | 按需 | 可以 | 该 VM 的排障日志 |
 | `<ID>/backups/` | 视内容 | 否 | 该 VM 自己的历史磁盘/NVRAM |
-| `shared/bases/` | 建议 | 否 | 新实例来源，不随单台 VM 删除 |
+| `_base/` | 建议 | 否 | 新实例来源，不随单台 VM 删除 |
 | `shared/assets/` | 建议 | 可重建 | host UI 资源 |
 | `shared/usb/` | 按需 | 可以 | 公共只读工具 U 盘；每个工具只管理自己的子目录 |
 | `control/` | 不必 | 不要手删 | 全局协调锁和迁移记录 |
 
-备份和恢复时，最稳妥的办法是让 VM 完整关机后复制整个 `<ID>/`。至少要把
-`vm.conf`、`disk.qcow2`、`nvram.fd` 和 `tpm/` 作为同一组处理。
+备份和恢复时，最稳妥的办法是让 VM 完整关机后复制整个 `<ID>/`。增量 VM 必须把
+`.base.qcow2`、`disk.qcow2`、`vm.conf`、`nvram.fd` 和 `tpm/` 作为同一组；只复制
+`disk.qcow2` 不能独立恢复。需要单文件搬运时先显式压平为 standalone qcow2。
 
-`shared/bases/<BASE_NAME>.qcow2` 必须是没有 backing file、也没有 external
+`_base/<BASE_NAME>.qcow2` 必须是没有 backing file、也没有 external
 data-file 的 standalone qcow2。每个镜像的 portable 证明紧邻它并使用
 `<BASE_NAME>.qcow2.vgpu-portable.json`；clone 必须点名，绝不猜测“最新”镜像。
 创建磁盘、替换 base、迁移和删除脚本都会检查 qcow2 依赖；无法证明安全时会拒绝
 操作，不会猜测 rebase 策略。
+
+`clone-from-base.sh` 默认与 V-11 一样：先把所选 standalone base hard-link 为
+`<ID>/.base.qcow2`，再让 `<ID>/disk.qcow2` 只记录增量。原子发布新母盘只影响以后
+创建的 VM；已有 VM 继续使用自己的 pin。`--full-copy` 才会恢复历史的整盘复制。
 
 ## V-11 与 G-11 的边界
 
@@ -109,13 +114,14 @@ VMS_DIR=$IMAGE_ROOT/vms
 VM_ROOT=$VMS_DIR
 VM_INSTANCES_DIR=$VM_ROOT
 VM_SHARED_DIR=$VM_ROOT/shared
-VM_BASE_DIR=$VM_SHARED_DIR/bases
+VM_BASE_DIR=$VMS_DIR/_base
 VM_ASSET_DIR=$VM_SHARED_DIR/assets
 VM_CONTROL_DIR=$VM_ROOT/control
 VM_RUN_DIR=$VM_CONTROL_DIR          # 兼容变量名；不是实例 run/
 ```
 
-推荐用 `--vms-dir ABS` 一次移动整套根目录，包括数字 VM、`shared/` 和 `control/`：
+推荐用 `--vms-dir ABS` 一次选择整套根目录，包括数字 VM、`_base/`、`shared/` 和
+`control/`：
 
 ```bash
 ./deploy/scripts/vmctl.sh path 2 --vms-dir /mnt/fast/vms

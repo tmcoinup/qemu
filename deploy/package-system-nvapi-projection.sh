@@ -306,9 +306,18 @@ for relative in "${assets[@]}"; do
     install -m 0600 "$source_path" "$PUBLISHED/$(basename -- "$relative")"
 done
 
-QEMU_EDID="$here/../build/qemu-edid"
-[[ -x "$QEMU_EDID" && ! -L "$QEMU_EDID" ]] \
-    || die 'missing/unsafe build/qemu-edid; run deploy/host/build-qemu.sh first'
+if [[ -z "${QEMU_EDID:-}" ]]; then
+    for candidate in \
+            /opt/vmate/qemu-edid.g11 \
+            "$here/../build/qemu-edid"; do
+        if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+            QEMU_EDID=$candidate
+            break
+        fi
+    done
+fi
+[[ -n "${QEMU_EDID:-}" && -x "$QEMU_EDID" && ! -L "$QEMU_EDID" ]] \
+    || die 'missing/unsafe qemu-edid.g11; reinstall VMate or set QEMU_EDID'
 "$here/host/sync-monitor-cache.sh" \
     --generate-only "$PUBLISHED/monitor-edid.bin" \
     --qemu-edid "$QEMU_EDID" \
@@ -570,13 +579,13 @@ G-11 通用系统硬件身份投影（vm${VM_ID}）
 
 目标：${GPU_NAME} / ${GPU_BOARD_BRAND} / ${GPU_MEMORY_TYPE} ${GPU_MEMORY_MAKER}
 NVAPI 能力：RT cores=${GPU_RAY_TRACING_CORES} / Tensor cores=${GPU_TENSOR_CORES}
-D3D12 预期：raytracing tier=${GPU_D3D12_RAYTRACING_TIER}（安装前与验收都直接探测原生 x86/x64 路径）
+D3D12 目标：raytracing tier=${GPU_D3D12_RAYTRACING_TIER}；安装前与验收均审计原生 x86/x64 路径，签名 transport 的实际能力可能更高
 显示器：${MONITOR_DISPLAY_NAME} / ${MONITOR_VENDOR}${MONITOR_PRODUCT_ID#0x}
 绑定：${VM_UUID}
 Display：${TARGET_PNP} / ${DRIVER_VERSION}
 
-安装：双击 Run-As-Administrator.cmd，确认 UAC；原生 x86/x64 D3D12 门禁
-      都通过后 Windows 才会安装、自动重启并验收。
+安装：双击 Run-As-Administrator.cmd，确认 UAC；原生 x86/x64 D3D12 都能正常
+      查询后，Windows 会安装、自动重启并验收。
 复核：重启后可右键 Verify-As-Administrator.cmd -> 以管理员身份运行。
 回滚：双击 Rollback-As-Administrator.cmd；Windows 会重启并恢复签名原件。
 
@@ -585,9 +594,10 @@ Display：${TARGET_PNP} / ${DRIVER_VERSION}
 显示器发布器只按合同 EDID 处理匹配的 DISPLAY 实例，用于驱动换代后新实例的
 FriendlyName/EDID_OVERRIDE 收敛；它不检测、修改或注入任何具体应用。
 所有硬件检测工具仅用于重新扫描和交叉验收。本包会在任何系统投影写入前，
-直接用 ID3D12Device::CheckFeatureSupport(D3D12_OPTIONS5) 验证 x86/x64。任一路径
-与合同不符就拒绝安装/验收；不要放置应用专用 d3d12.dll，也不要替换
-Windows 系统 d3d12.dll。
+直接用 ID3D12Device::CheckFeatureSupport(D3D12_OPTIONS5) 审计 x86/x64。任一路径
+无法枚举/查询 NVIDIA adapter 才拒绝安装；若签名 vGPU transport 暴露的原生 DXR
+能力高于目标旧卡，则明确警告但不谎称已改写 D3D12，也不阻断 NVAPI 投影。
+不要放置应用专用 d3d12.dll，也不要替换 Windows 系统 d3d12.dll。
 本包不安装应用专用 DLL，不按进程名匹配，也不修改任何检测工具。
 EOF
 # cmd.exe consumes a byte after bare LF in batch files on affected Windows
@@ -629,7 +639,7 @@ cat <<EOF
   board:           ${GPU_BOARD_BRAND} ${GPU_BOARD_MODEL}
   VRAM identity:   ${GPU_MEMORY_TYPE} / ${GPU_MEMORY_MAKER} (NVAPI ${GPU_MEMORY_MAKER_NVAPI_NAME}=${GPU_MEMORY_MAKER_NVAPI})
   NVAPI capability: RT cores=${GPU_RAY_TRACING_CORES} / Tensor cores=${GPU_TENSOR_CORES}
-  D3D12 expected:  raytracing tier=${GPU_D3D12_RAYTRACING_TIER} (native x86/x64 install gate)
+  D3D12 target:    raytracing tier=${GPU_D3D12_RAYTRACING_TIER} (native x86/x64 audit; transport may expose more)
   monitor:         ${MONITOR_DISPLAY_NAME} / ${MONITOR_VENDOR}${MONITOR_PRODUCT_ID#0x}
   transport:       ${TRANSPORT_KIND} / ${TARGET_PNP} / ${DRIVER_VERSION}
   contract:        ${CONTRACT_ID}
@@ -643,10 +653,10 @@ VM 生命周期：默认产物位于 vm${VM_ID}/packages，delete-vm 删除该 V
   1. 宿主在仓库根目录执行（命令强制只读挂载）：
      ${MOUNT_COMMAND}
   2. 双击 Run-As-Administrator.cmd，确认一次 UAC。
-  3. 写入前先验证原生 x86/x64 D3D12；只有通过才安装并自动重启。
+  3. 写入前先审计原生 x86/x64 D3D12；无法查询时才停止，能力高于目标时会显示警告并继续。
   4. 打开设备管理器；监视器应为 ${MONITOR_DISPLAY_NAME}。
   5. 打开多个硬件工具重新扫描；显卡厂商/显存厂家应为 ${GPU_BOARD_BRAND} / ${GPU_MEMORY_MAKER}，NVAPI RT/Tensor 应为 ${GPU_RAY_TRACING_CORES}/${GPU_TENSOR_CORES}。
-     若原生 D3D12 仍显示光追，脚本会直接 FAIL，不会伪造成功收据或安装应用专用 DLL。
+     原生 D3D12 是否显示光追由签名 vGPU transport 决定；脚本会如实警告，不会伪造该结果或安装应用专用 DLL。
   6. 需要恢复时双击 Rollback-As-Administrator.cmd。
   7. 用完后宿主执行：./deploy/scripts/vmctl.sh cdrom ${VM_ID} eject
 

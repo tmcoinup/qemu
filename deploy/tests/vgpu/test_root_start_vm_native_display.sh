@@ -403,13 +403,14 @@ require_text 'TPM: disabled (explicit)' "$NO_TPM_OUT"
 reject_text 'socket\,id=chrtpm\,path=' "$NO_TPM_OUT"
 reject_text 'tpm-crb\,tpmdev=tpm0' "$NO_TPM_OUT"
 
-# A host resource preset can select a V100 mdev by sysfs name while the VM's
+# A fixed 2 GiB host tier can select a V100 mdev by sysfs name while the VM's
 # guest-visible identity remains the catalog's GTX 1050.  Dry-run deliberately
 # does not require the physical V100 to be present.
 cat >"$TMP_DIR/vgpu-host-v100.conf" <<'EOF'
 VGPU_MGPU=auto
-VGPU_RESOURCE_PROFILE_1024=V100-1Q
-VGPU_RESOURCE_PROFILE_2048=V100-2Q
+VGPU_HOST_FB_TIER_MB=2048
+VGPU_RESOURCE_PROFILE=V100-2Q
+VGPU_RESOURCE_FB_MB=2048
 VGPU_TOTAL_FB_MB=16384
 VGPU_CONSOLE_INTERVAL_US=0
 EOF
@@ -422,19 +423,61 @@ require_vgpu_root_port "$V100_OUT"
 require_tpm2 "$V100_OUT"
 require_no_legacy_transport "$V100_OUT"
 
-# The same host file must choose V100-1Q for a 1 GiB catalog identity without
-# changing any guest-visible fields or persisting a host resource into vm.conf.
+# The same fixed 2 GiB host tier must reject a 1 GiB catalog identity before
+# probing QEMU or touching runtime state.
 cp -- "$VM_ROOT/${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.2gb"
 sed -i 's/^GPU_PROFILE=.*/GPU_PROFILE=gtx750_asus_1gb/' \
     "$VM_ROOT/${VM_ID}/vm.conf"
-run_start_vm "$TMP_DIR/v100-1q.out"
-require_text 'vGPU resource: V100-1Q/1024MB' "$TMP_DIR/v100-1q.out"
-require_text 'GPU identity: gtx750_asus_1gb / NVIDIA GeForce GTX 750' \
-    "$TMP_DIR/v100-1q.out"
-require_native_vfio "$TMP_DIR/v100-1q.out"
-require_vgpu_root_port "$TMP_DIR/v100-1q.out"
-require_no_legacy_transport "$TMP_DIR/v100-1q.out"
+if run_start_vm "$TMP_DIR/v100-1q.out"; then
+    fail 'fixed 2 GiB V100 tier accepted a 1 GiB guest identity'
+fi
+require_text 'VM 要求 1024MB，但宿主固定档是 2048MB' \
+    "$TMP_DIR/v100-1q.err"
 mv -- "$TMP_DIR/vm.conf.2gb" "$VM_ROOT/${VM_ID}/vm.conf"
+unset TEST_VGPU_HOST_CONFIG
+
+# start-vm must enforce the same fail-closed host-policy loader as create-vm;
+# otherwise a bad policy can silently fall back to the VM's legacy mdev type.
+ln -s "$TMP_DIR/vgpu-host-v100.conf" "$TMP_DIR/vgpu-host-link.conf"
+TEST_VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-link.conf"
+if run_start_vm "$TMP_DIR/host-link.out"; then
+    fail 'start-vm followed a symlinked host vGPU config'
+fi
+require_text '可读普通非符号链接文件' "$TMP_DIR/host-link.err"
+
+mkdir "$TMP_DIR/vgpu-host-directory.conf"
+TEST_VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-directory.conf"
+if run_start_vm "$TMP_DIR/host-directory.out"; then
+    fail 'start-vm sourced a directory as host vGPU config'
+fi
+require_text '可读普通非符号链接文件' "$TMP_DIR/host-directory.err"
+
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=(' >"$TMP_DIR/vgpu-host-syntax.conf"
+TEST_VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-syntax.conf"
+if run_start_vm "$TMP_DIR/host-syntax.out"; then
+    fail 'start-vm swallowed a host vGPU config syntax error'
+fi
+if ! grep -Fq 'VGPU_HOST_CONFIG 加载失败' "$TMP_DIR/host-syntax.err" &&
+        ! grep -Eq 'syntax error|unexpected EOF' "$TMP_DIR/host-syntax.err"; then
+    fail 'start-vm host config syntax refusal was not clear'
+fi
+
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=2048' \
+    >"$TMP_DIR/vgpu-host-unreadable.conf"
+chmod 000 "$TMP_DIR/vgpu-host-unreadable.conf"
+TEST_VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-unreadable.conf"
+if run_start_vm "$TMP_DIR/host-unreadable.out"; then
+    chmod 600 "$TMP_DIR/vgpu-host-unreadable.conf"
+    fail 'start-vm accepted an unreadable host vGPU config'
+fi
+chmod 600 "$TMP_DIR/vgpu-host-unreadable.conf"
+require_text '可读普通非符号链接文件' "$TMP_DIR/host-unreadable.err"
+
+TEST_VGPU_HOST_CONFIG="$TMP_DIR/missing-vgpu-host.conf"
+if run_start_vm "$TMP_DIR/host-missing.out"; then
+    fail 'start-vm accepted a missing explicit host vGPU config'
+fi
+require_text 'VGPU_HOST_CONFIG 不存在' "$TMP_DIR/host-missing.err"
 unset TEST_VGPU_HOST_CONFIG
 
 cat >"$TMP_DIR/vgpu-host-bad-fb.conf" <<'EOF'
@@ -454,8 +497,9 @@ unset TEST_VGPU_HOST_CONFIG
 # also probe their display backend and ramfb support; DGame preview and external
 # streaming share one fb-shm capability probe.  Invalid configurations fail
 # before any probe.  The explicit --no-dgame-preview run omits that one probe.
-[[ "$(wc -l <"$TMP_DIR/qemu.trace")" -eq 37 ]] \
-    || fail "fake QEMU saw an unexpected invocation"
+QEMU_PROBE_COUNT=$(wc -l <"$TMP_DIR/qemu.trace")
+[[ "$QEMU_PROBE_COUNT" -eq 33 ]] \
+    || fail "fake QEMU saw an unexpected invocation count: $QEMU_PROBE_COUNT"
 
 [[ -z "$(find "$VM_ROOT/control" -mindepth 1 -print -quit)" ]] \
     || fail "dry-run created runtime state"

@@ -6,12 +6,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 packager="$root/deploy/package-guest-lite.sh"
 wrapper="$root/deploy/scripts/guest-lite.sh"
 guest="$root/deploy/guest/guest-lite/G11-Guest-Lite.ps1"
+clone_manifest="$root/deploy/guest/guest-lite/clone-manifest.json"
 exe_builder="$root/deploy/guest/guest-lite/exe/build.sh"
 exe_source="$root/deploy/guest/guest-lite/exe/guest_lite_launcher.c"
 exe_manifest="$root/deploy/guest/guest-lite/exe/guest_lite_launcher.manifest"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-for dependency in xorriso mktemp rg strings cmp \
+for dependency in xorriso mktemp rg strings cmp jq sha256sum stat \
         x86_64-w64-mingw32-gcc x86_64-w64-mingw32-windres \
         x86_64-w64-mingw32-objdump; do
     command -v "$dependency" >/dev/null 2>&1 \
@@ -22,6 +23,8 @@ bash -n "$packager"
 bash -n "$wrapper"
 bash -n "$exe_builder"
 [[ -x "$exe_builder" ]] || fail 'EXE builder is not executable'
+[[ -s "$clone_manifest" && ! -L "$clone_manifest" ]] \
+    || fail 'clone manifest is missing or unsafe'
 
 tmp=$(mktemp -d)
 cleanup() { rm -rf -- "$tmp"; }
@@ -78,6 +81,28 @@ for launcher in "$extracted"/*.cmd; do
         || fail "launcher is not CRLF: $launcher"
 done
 
+jq -e '
+    (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
+    .schemaVersion == 1 and .profileVersion == "2.3.0" and
+    (.files | length) == 5 and
+    ([.files[].name] | sort) == [
+        "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
+        "G11-Guest-Lite.ps1", "README.txt"
+    ] and
+    ([.files[].name] | unique | length) == 5 and
+    all(.files[];
+        (.sha256 | test("^[0-9A-F]{64}$")) and
+        (.bytes | type) == "number" and .bytes > 0 and
+        (.bytes | floor) == .bytes)
+' "$clone_manifest" >/dev/null || fail 'clone manifest schema is invalid'
+while IFS=$'\t' read -r name expected_sha expected_bytes; do
+    actual_sha=$(sha256sum "$extracted/$name" | awk '{print toupper($1)}')
+    [[ "$actual_sha" == "$expected_sha" &&
+       "$(stat -c %s -- "$extracted/$name")" == "$expected_bytes" ]] \
+        || fail "clone manifest does not pin packaged asset: $name"
+done < <(jq -r '.files[] | [.name, .sha256, (.bytes | tostring)] | @tsv' \
+    "$clone_manifest")
+
 pe_header=$(x86_64-w64-mingw32-objdump -f "$exe")
 rg -q 'file format pei-x86-64' <<<"$pe_header" \
     || fail 'standalone launcher is not a 64-bit Windows PE'
@@ -86,6 +111,12 @@ for dll in ADVAPI32.dll bcrypt.dll KERNEL32.dll SHELL32.dll USER32.dll; do
     rg -Fq "DLL Name: $dll" <<<"$pe_imports" \
         || fail "standalone launcher omitted expected system import: $dll"
 done
+while IFS= read -r dll; do
+    case "${dll,,}" in
+        advapi32.dll|bcrypt.dll|kernel32.dll|msvcrt.dll|shell32.dll|user32.dll) ;;
+        *) fail "standalone launcher has a non-inbox/unreviewed DLL import: $dll" ;;
+    esac
+done < <(sed -n 's/^[[:space:]]*DLL Name: //p' <<<"$pe_imports")
 exe_ascii=$(strings -a "$exe")
 for token in requireAdministrator G11-Guest-Lite.ps1 \
         DisableAntiSpyware Invoke-Rollback; do
@@ -96,7 +127,7 @@ exe_wide=$(strings -a -el "$exe")
 for token in 'G11GuestLite.exe /apply' 'G11GuestLite.exe /audit' \
         'G11GuestLite.exe /rollback' \
         'WindowsPowerShell\v1.0\powershell.exe' \
-        'G-11 Windows 10 Guest Lite 1.5'; do
+        'G-11 Windows 10 Guest Lite 2.3.0'; do
     rg -Fq "$token" <<<"$exe_wide" \
         || fail "standalone launcher omitted fixed entry point: $token"
 done
@@ -108,6 +139,8 @@ rg -Fq 'Some Windows' "$exe_source" \
     || fail 'standalone launcher omitted the FAT package-media compatibility path'
 rg -Fq 'level="requireAdministrator"' "$exe_manifest" \
     || fail 'standalone launcher omitted its UAC manifest'
+rg -Fq 'assemblyIdentity version="2.3.0.0"' "$exe_manifest" \
+    || fail 'standalone launcher manifest version is stale'
 if rg -n 'bundle_id|G11GuestLite-\$|G11GuestLite-\*|sha256sum|SHA256SUMS|ISO-SHA256' \
         "$packager"; then
     fail 'guest-lite packager still contains content-addressed output logic'
@@ -120,6 +153,8 @@ done
 for required in \
         'IsTamperProtected' \
         'Get-OptionalRegistryValue' \
+        'Ensure-RegistryKey' \
+        'if (-not (Test-Path -LiteralPath $Path))' \
         'OnboardingState' \
         'Set-MpPreference' \
         'DisableRealtimeMonitoring' \
@@ -130,16 +165,71 @@ for required in \
         'AMServiceEnabled' \
         'DefenderPreferences' \
         'Restore-DefenderPreferenceSnapshots' \
+        'Set-NetFirewallProfile' \
+        'FirewallProfiles' \
+        "FirewallServiceName = 'MpsSvc'" \
+        'Disable-FirewallService' \
+        'Start-ScheduledTask' \
+        'BFE and other core networking services' \
+        'DisableFileSyncNGSC' \
+        'ShellFeedsTaskbarViewMode' \
+        'LetAppsRunInBackground' \
+        'MicrosoftEdgeUpdate' \
+        'Office Automatic Updates 2.0' \
+        'GoogleUpdater' \
+        'ComponentUpdatesEnabled' \
+        'DisableAppUpdate' \
+        'bUpdater' \
+        'OneDrive (?:Standalone Update' \
+        'SysMain' \
+        'WSearch' \
+        'PowerThrottlingOff' \
+        'RetiredRegistryPlan' \
+        'preserved appearance restored' \
+        'SCHEME_MIN' \
+        'Registry.pol' \
+        'MS-GPREG 2.2.1' \
+        '($key + [char]0)' \
+        '(([string]$entry.Name) + [char]0)' \
+        'Write-ManagedPolicyFiles' \
+        'gpt.ini' \
+        'Write-ManagedPolicyMetadata' \
+        'gPCMachineExtensionNames/gPCUserExtensionNames are Active Directory GPO' \
+        'PolicyMetadataPath' \
+        'Restore-PolicyFileSnapshots' \
+        'Refresh-LocalPolicy' \
+        'G11GuestLite-EnforceProfile' \
+        'Register-EnforcementTask' \
+        "'Enforce' { Invoke-Enforce }" \
+        "-UserId 'SYSTEM'" \
+        'S-1-5-18' \
+        'Ensure-CurrentBaseline' \
+        'SchemaVersion = 4' \
+        "'CloneApply' { Invoke-Apply -UnattendedClone }" \
+        'Save-AuditReportLines' \
+        'cpuSampleSkipped=True' \
         'NoAutoUpdate' \
         'DoNotConnectToWindowsUpdateInternetLocations' \
+        'DODownloadMode' \
         'RemoveWindowsStore' \
         'Microsoft.BingNews' \
+        'Microsoft.BingWeather' \
+        'Microsoft.OneDriveSync' \
+        'Microsoft.OutlookForWindows' \
         'Microsoft.WindowsStore' \
         'Remove-AppxPackage' \
         'G11GuestLite' \
         'Invoke-Rollback'; do
     rg -Fq "$required" "$guest" || fail "guest script omitted: $required"
 done
+
+if rg -n -F 'New-Item -Path $Entry.Path -Force' "$guest"; then
+    fail 'guest-lite can recreate an existing registry leaf and erase sibling values'
+fi
+
+if rg -n -F '$RegistryPolicyExtensionPair' "$guest"; then
+    fail 'guest-lite still writes Active Directory extension metadata into local gpt.ini'
+fi
 
 if rg -n \
         '^[[:space:]]*(\$[[:alnum:]_]+[[:space:]]*=[[:space:]]*)?Get-ItemPropertyValue([[:space:]`]|$)' \
@@ -157,8 +247,14 @@ for safe_list in failures issues result rows; do
         || fail "guest-lite omitted the safe generic-list conversion: \$$safe_list"
 done
 
+if rg -n '\.InvocationInfo\.MyCommand\.Name|\$invocation\.MyCommand\.Name' \
+        "$guest"; then
+    fail 'guest-lite directly reads the optional PowerShell 5.1 command Name property'
+fi
+rg -Fq "PSObject.Properties['Name']" "$guest" \
+    || fail 'guest-lite omitted strict-safe exception command-name inspection'
+
 for protected in \
-        'Windows Firewall' \
         'BITS' \
         'CryptSvc' \
         'NVIDIA/vGPU'; do
@@ -170,15 +266,25 @@ if rg -n -i \
         "$guest"; then
     fail 'guest-lite contains a prohibited destructive/signing operation'
 fi
+for firewall_profile in Domain Private Public; do
+    rg -Fq "$firewall_profile" "$guest" \
+        || fail "guest-lite omitted firewall profile: $firewall_profile"
+done
+rg -Fq '编译器支持已静态链接' \
+    "$root/deploy/guest/guest-lite/README.txt" \
+    || fail 'guest-lite does not document its no-third-party-runtime contract'
 if rg -n -i \
         'ShellExecute|WinExec|system[[:space:]]*\(|CreateService|DeviceIoControl|bcdedit|testsigning|nointegritychecks' \
         "$exe_source" "$exe_manifest"; then
     fail 'standalone launcher contains an unreviewed process/driver/BCD path'
 fi
 if rg -n -i \
-        'Set-Service.+WinDefend|Stop-Service.+WinDefend|Set-Service.+MpsSvc|Stop-Service.+MpsSvc|Set-Service.+BITS|Stop-Service.+BITS|Set-Service.+NVDisplay|Stop-Service.+NVDisplay' \
+        'Set-Service.+WinDefend|Stop-Service.+WinDefend|Set-Service.+BITS|Stop-Service.+BITS|Set-Service.+NVDisplay|Stop-Service.+NVDisplay' \
         "$guest"; then
     fail 'guest-lite attempts to modify a protected service'
+fi
+if rg -n -F "Name = 'BFE'" "$guest"; then
+    fail 'guest-lite attempts to disable the Base Filtering Engine'
 fi
 if rg -n -i \
         'password|passwd|credential|private[_ -]?key|BEGIN (RSA |OPENSSH )?PRIVATE KEY' \

@@ -111,8 +111,10 @@ INF 的 SHA-256 精确匹配生产 `nvgridsw.inf` 收据。即使其他 NVIDIA �
 `4 heads/1920×1200` 资源合同；这解决的是实时 vGPU 的显示头数和最大分辨率上限。
 
 关机态同步会验证并写入 BenQ/Dell 等目标 raw EDID、标准
-`EDID_OVERRIDE`、10 项 `NV_Modes`、实例 `FriendlyName` 和 Windows
-GraphicsDrivers 缓存。启动后 Windows 可能仍保留 NVIDIA 发布的原始父 key
+`EDID_OVERRIDE`、10 项 `NV_Modes`、缓存 `FriendlyName` 和 Windows
+GraphicsDrivers 缓存。它不能在 Windows 关机时修改 live PnP 对象；私有 Sysprep
+克隆的系统身份包会在启动/登录后用 SetupAPI 再发布实时 FriendlyName，并回读验证。
+启动后 Windows 可能仍保留 NVIDIA 发布的原始父 key
 `DISPLAY\NVD0000`；这个内部路径不是 Windows 有效 EDID 的验收结果，也不要为了
 改 key 名而换驱动。验收看的是有效 WMI EDID、设备管理器友好名和第三方工具结果：
 
@@ -151,7 +153,7 @@ sudo -v
 | 现象 | 负责边界 | 标准入口 |
 |---|---|---|
 | NVIDIA 控制面板“管理许可证” / host `Unlicensed` | Guest token 与 DLS | 私有 `VgpuPortableLicensed/VgpuPortable.exe` |
-| “通用即插即用监视器” / 旧 16:10 缓存 | Host 关机态 EDID/`NV_Modes` 同步 | `vmctl.sh monitor N --force` |
+| “通用即插即用监视器” / 旧 16:10 缓存 | Host 关机态 EDID/`NV_Modes` + guest live FriendlyName | `vmctl.sh monitor N --force` 后正常启动，等待 SYSTEM 身份任务 |
 
 授权 EXE 成功不会把显示器名改成 AOC/BenQ/Dell；显示器同步成功也
 不会为 NVIDIA 申请 license。两者都需要时，固定顺序是：Guest 运行私有
@@ -176,7 +178,9 @@ sudo 密码提示，凭据不会写入仓库或命令参数。非交互启动必
 
 若 base 从未枚举过显示器，第一次启动会看到“本次先启动枚举”的提示；在 Windows
 内完整关机后，再执行同一条 `start-vm.sh N`，启动器会自动补齐，无需插入一条人工
-monitor 命令。
+monitor 命令。私有 Sysprep 克隆则由首启系统身份任务完成 live 名称；如果首启窗口
+红字退出，应先看 `C:\ProgramData\VMate\G11\clone-initialization-error.txt` 并以
+管理员运行同目录的 `Retry-Clone-Initialization.cmd`，不要反复点击设备管理器更新。
 
 `vmctl monitor` 是关机态强制修复/切换型号入口：它离线更新 `Select` 选中
 ControlSet 中已有的 `Enum\DISPLAY`

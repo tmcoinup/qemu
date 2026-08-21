@@ -39,7 +39,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
     assert_eq "$VM_ROOT" "$VM_INSTANCES_DIR" "instances directory"
     assert_eq "$VM_ROOT/legacy/configs" "$VM_CONFIG_DIR" "config directory"
     assert_eq "$VM_ROOT/legacy/disks" "$VM_DISK_DIR" "disk directory"
-    assert_eq "$VM_ROOT/shared/bases" "$VM_BASE_DIR" "base directory"
+    assert_eq "$VM_ROOT/_base" "$VM_BASE_DIR" "V-11-style base directory"
     assert_eq "$VM_ROOT/legacy/nvram" "$VM_NVRAM_DIR" "NVRAM directory"
     assert_eq "$VM_ROOT/control" "$VM_RUN_DIR" "control directory"
     assert_eq "$IMAGE_ROOT/iso" "$ISO_DIR" "ISO directory"
@@ -47,6 +47,9 @@ trap 'rm -rf "$TMP_DIR"' EXIT
         "$(vm_storage_config_path 7)" "fresh config path"
     assert_eq "$VM_INSTANCES_DIR/7/disk.qcow2" \
         "$(vm_storage_disk_path 7)" "fresh disk path"
+    assert_eq "$VM_INSTANCES_DIR/7/.base.qcow2" \
+        "$(vm_storage_instance_base_pin_path 7)" \
+        "V-11-style instance base pin path"
     assert_eq "$VM_INSTANCES_DIR/7/nvram.fd" \
         "$(vm_storage_nvram_path 7)" "fresh NVRAM path"
     assert_eq "$VM_INSTANCES_DIR/7/log/qemu.log" \
@@ -74,6 +77,10 @@ trap 'rm -rf "$TMP_DIR"' EXIT
     grep -Fq 'invalid base name' "$TMP_DIR/base-name.err" \
         || fail "unsafe base-name refusal was not clear"
     mkdir -p "$VM_BASE_DIR"
+    touch "$VM_ROOT/win10-base.qcow2"
+    assert_eq "$VM_BASE_DIR/win10-base.qcow2" \
+        "$(vm_storage_base_path win10-base)" \
+        "normal base lookup has no flat-path compatibility fallback"
     touch "$VM_BASE_DIR/win10-ltsc-v2.qcow2" \
         "$VM_BASE_DIR/win11-vgpu-v1.qcow2"
     assert_eq $'win10-ltsc-v2\nwin11-vgpu-v1' \

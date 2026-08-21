@@ -34,7 +34,8 @@ VM_TPM_LOCK=/home/ubuntu/images/vms/2/run/tpm.lock
 /home/ubuntu/images/vms/
 ├── 1/                         # VM 1，全部私有文件都在这里
 │   ├── vm.conf
-│   ├── disk.qcow2
+│   ├── .base.qcow2             # 默认增量克隆的隐藏母盘 hard-link pin
+│   ├── disk.qcow2              # 只保存 VM 写入；刚创建通常几百 KB
 │   ├── nvram.fd
 │   ├── tpm/
 │   ├── log/
@@ -44,8 +45,8 @@ VM_TPM_LOCK=/home/ubuntu/images/vms/2/run/tpm.lock
 │   │   └── tpm.lock
 │   └── backups/
 ├── 2/                         # VM 2，同样是一个完整 bundle
+├── _base/                     # 与 V-11 相同的 standalone 母盘目录
 ├── shared/
-│   ├── bases/
 │   └── assets/
 └── control/
     ├── .storage.lock          # 整套存储的全局锁，不是 VM 残留
@@ -150,7 +151,7 @@ cd /home/ubuntu/projects/qemu
 ```
 
 它删除整个 `/home/ubuntu/images/vms/2/`，包括 TPM、日志、备份、未知的 per-VM
-附加文件和 `run/*.lock`；不会删除 `shared/bases/` 或其它数字 VM。
+附加文件和 `run/*.lock`；不会删除 `_base/` 或其它数字 VM。
 
 ### 我就是想用 rm
 

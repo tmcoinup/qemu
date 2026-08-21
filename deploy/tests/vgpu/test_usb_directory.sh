@@ -96,6 +96,9 @@ require_text 'USB_DIRECTORY_STATE=present' "$TMP_DIR/mount.out"
 require_text 'USB_DIRECTORY_ATTACHED=yes' "$TMP_DIR/mount.out"
 require_text 'USB_DIRECTORY_TRANSPORT=usb-storage/scsi-hd/vvfat' "$TMP_DIR/mount.out"
 require_text 'USB_DIRECTORY_MODE=read-only' "$TMP_DIR/mount.out"
+require_text 'USB_DIRECTORY_BACKING=host-directory-no-image' "$TMP_DIR/mount.out"
+require_text 'USB_DIRECTORY_CAPACITY_BYTES=528482304' "$TMP_DIR/mount.out"
+require_text 'USB_DIRECTORY_FAT_TYPE=16' "$TMP_DIR/mount.out"
 require_text "USB_DIRECTORY_PATH=$TMP_DIR/first" "$TMP_DIR/mount.out"
 require_text 'USB_DIRECTORY_LABEL=G11_TEST' "$TMP_DIR/mount.out"
 require_text 'USB_DIRECTORY_LABEL_CHARSET=none' "$TMP_DIR/mount.out"
@@ -249,8 +252,66 @@ require_text "USB_DIRECTORY_PATH=$TMP_DIR/shared/usb" \
     "$TMP_DIR/shared-mount.out"
 require_text 'USB_DIRECTORY_LABEL=U盘' "$TMP_DIR/shared-mount.out"
 require_text 'USB_DIRECTORY_LABEL_CHARSET=CP936' "$TMP_DIR/shared-mount.out"
+require_text 'USB_DIRECTORY_BACKING=host-directory-no-image' \
+    "$TMP_DIR/shared-mount.out"
+require_text 'USB_DIRECTORY_CAPACITY_BYTES=137438953472' \
+    "$TMP_DIR/shared-mount.out"
+require_text 'USB_DIRECTORY_FAT_TYPE=32' "$TMP_DIR/shared-mount.out"
 [[ ! -e "$TMP_DIR/shared/usb/autorun.inf" ]] ||
     fail 'shared wrapper still created an autorun.inf display-name override'
+
+# A smaller sized image exercises the same FAT32 layout without scanning the
+# full 128 GiB public capacity during this regression.
+fat32_vvfat_json=$(python3 - "$TMP_DIR/shared/usb" <<'PY'
+import json
+import sys
+
+print("json:" + json.dumps({
+    "driver": "vvfat",
+    "dir": sys.argv[1],
+    "fat-type": 32,
+    "size": 512 * 1024 * 1024,
+    "floppy": False,
+    "label": "U盘",
+    "label-charset": "CP936",
+    "rw": False,
+}, ensure_ascii=False, separators=(",", ":")))
+PY
+)
+"$QEMU_IMG" convert -S 4k -f vvfat -O raw \
+    "$fat32_vvfat_json" "$TMP_DIR/fat32.raw"
+[[ "$(stat -c %s "$TMP_DIR/fat32.raw")" == 536870912 ]] ||
+    fail 'sized FAT32 VVFAT did not expose the requested virtual capacity'
+python3 - "$TMP_DIR/fat32.raw" <<'PY'
+import struct
+import sys
+
+expected = b"U\xc5\xcc" + b" " * 8
+with open(sys.argv[1], "rb") as image:
+    image.seek(454)
+    partition_lba = struct.unpack("<I", image.read(4))[0]
+    boot_offset = partition_lba * 512
+    image.seek(boot_offset)
+    boot = image.read(512)
+    if boot[71:82] != expected or boot[82:90] != b"FAT32   ":
+        raise SystemExit("sized FAT32 boot label or type is invalid")
+    sectors_per_cluster = boot[13]
+    reserved = struct.unpack_from("<H", boot, 14)[0]
+    fat_count = boot[16]
+    sectors_per_fat = struct.unpack_from("<I", boot, 36)[0]
+    root_cluster = struct.unpack_from("<I", boot, 44)[0]
+    root_lba = (
+        partition_lba + reserved + fat_count * sectors_per_fat
+        + (root_cluster - 2) * sectors_per_cluster
+    )
+    image.seek(root_lba * 512)
+    if image.read(11) != expected:
+        raise SystemExit("sized FAT32 root label is invalid")
+PY
+mdir -i "$TMP_DIR/fat32.raw@@32256" ::ToolA >"$TMP_DIR/fat32-mdir.out"
+require_text 'TXT' "$TMP_DIR/fat32-mdir.out"
+[[ "$(mtype -i "$TMP_DIR/fat32.raw@@32256" ::ToolA/a.txt)" == 'tool-a' ]] ||
+    fail 'sized FAT32 VVFAT file content did not round-trip'
 
 # The public label must be the real FAT label, encoded for a Simplified
 # Chinese Windows guest.  It must not depend on AutoRun shell decoration.

@@ -28,10 +28,12 @@ DXR 1.1。当前 G-11 目录中六个旧卡 device ID 都要求 tier 0。
 
 日常不需要单独执行探针；新版 SystemNvapiProjection ISO 的
 `Run-As-Administrator.cmd` 会在任何写入前自动运行 x86/x64 两个版本，
-`Verify-As-Administrator.cmd` 会在最终验收时再运行一次。
+`Verify-As-Administrator.cmd` 会在最终验收时再运行一次。自动克隆流程要求两条
+原生路径都能枚举 NVIDIA adapter 并查询 OPTIONS5；签名 vGPU transport 若暴露
+高于目标旧卡的 DXR 能力，会显示警告但不会阻断 NVAPI 投影。
 
-只做诊断时，把本目录三个 Windows 文件放在同一目录，双击
-`Run-Native-D3D12-Probe.cmd`。它会在桌面生成
+只做严格 transport 一致性诊断时，把本目录三个 Windows 文件放在同一目录，双击
+`Run-Native-D3D12-Probe.cmd`。它会带 `--require-tier-zero` 运行，并在桌面生成
 `G11-D3D12-Native-Probe.txt`，不需要管理员权限。两段都必须包含：
 
 ```text
@@ -40,5 +42,6 @@ EXIT_CODE=0
 ```
 
 若任一段返回 `FAIL`、`raytracing_tier=10/11` 或非零 exit code，该 transport
-不符合所选旧卡。不要用 app-local/system `d3d12.dll` 替换、进程注入或
-测试签名驱动把结果伪装成通过。
+不符合所选旧卡的原生 D3D12 能力；这不等于 x86/x64 NVAPI 投影或授权失败。
+不要用 app-local/system `d3d12.dll` 替换、进程注入或测试签名驱动把结果伪装成
+通过。

@@ -46,7 +46,9 @@ vm_storage_init() {
         if ((disk_dir_was_set)); then
             VM_BASE_DIR=$VM_DISK_DIR
         else
-            VM_BASE_DIR=$VM_SHARED_DIR/bases
+            # Match V-11: named bases are direct children of VMS_DIR/_base.
+            # shared/ remains for reusable non-base assets only.
+            VM_BASE_DIR=$VM_ROOT/_base
         fi
     fi
     if [[ -z "${VM_NVRAM_DIR:-}" ]]; then
@@ -84,8 +86,11 @@ vm_storage_prepare() {
         echo "[vm-storage] instances root must be a real directory: $VM_INSTANCES_DIR" >&2
         return 1
     fi
-    mkdir -p "$ISO_DIR" "$VM_BASE_DIR" "$VM_RUN_DIR" \
-        "$VM_ASSET_DIR" "$VM_BASE_ARCHIVE_DIR"
+    # Base archives are legacy/opt-in replacement state.  Normal create,
+    # import, clone and single-image sealing do not create an empty archive/
+    # directory; the few compatibility paths that retain backups create it
+    # immediately before use.
+    mkdir -p "$ISO_DIR" "$VM_BASE_DIR" "$VM_RUN_DIR" "$VM_ASSET_DIR"
     if [[ -z "${VM_INSTANCE_DIR:-}" ]]; then
         mkdir -p "$VM_INSTANCES_DIR"
     fi
@@ -466,6 +471,16 @@ vm_storage_disk_preferred_path() {
     printf '%s/disk.qcow2\n' "$instance"
 }
 
+# V-11-style linked clones pin the exact base inode inside the numeric VM
+# bundle, then reference this fixed relative filename from disk.qcow2.  An
+# atomic replacement of _base/NAME.qcow2 therefore affects only future clones;
+# existing VMs keep their original backing bytes without a global archive.
+vm_storage_instance_base_pin_path() {
+    local instance
+    instance=$(vm_storage_instance_dir "$1") || return
+    printf '%s/.base.qcow2\n' "$instance"
+}
+
 vm_storage_disk_categorized_path() {
     vm_storage_validate_id "$1" || return
     printf '%s/win10-vm%s.qcow2\n' "$VM_DISK_DIR" "$1"
@@ -655,10 +670,11 @@ vm_storage_base_path() {
     vm_storage_validate_base_name "$name" || return
     preferred=$(vm_storage_base_preferred_path "$name") || return
 
-    # Only the historical fixed basename ever existed at VM_ROOT.  New named
-    # bases always live below VM_BASE_DIR, so a caller cannot accidentally
-    # select an unrelated flat file by inventing another legacy basename.
-    if [[ "$name" != win10-base ]]; then
+    # Normal lifecycle commands never fall back to an old flat base.  Only a
+    # caller that explicitly enables the historical migration resolver may
+    # read the one fixed basename that existed before named bases.
+    if [[ "${VM_STORAGE_COMPAT_FALLBACK:-0}" == 0 ||
+          "$name" != win10-base ]]; then
         printf '%s\n' "$preferred"
         return 0
     fi

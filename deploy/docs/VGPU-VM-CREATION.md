@@ -27,7 +27,7 @@ NVIDIA 控制面板产品名则应先排查 host per-mdev 配置和冷启动日�
 
 | 命令 | 实例不存在时的行为 | 适用场景 |
 |---|---|---|
-| `./deploy/scripts/start-vm.sh 2` | 自动生成 `vm.conf`，严格从公共 base 复制系统盘，然后启动 | 已有合格 base，日常新建实例 |
+| `./deploy/scripts/start-vm.sh 2` | 自动生成 `vm.conf`，严格从公共 base 创建 V-11 式增量盘，然后启动 | 已有合格 base，日常新建实例 |
 | `./deploy/scripts/start-vm.sh 2 --install [ISO]` | 自动生成 `vm.conf`，严格创建空盘；安装期 helper 自动引导 xHCI USB Windows 光盘，并挂最小应答 ISO | 第一次制作 base，或确实要从 ISO 重装 |
 
 `--install` 省略 ISO 时使用 `/home/ubuntu/images/iso/win10.iso`。这两个动作都只
@@ -108,7 +108,7 @@ VM ID 只使用正整数，例如 `2`；目录名会自动成为 `vm2`。`win10-
 | 缺失 | 任意 | 非 dry-run | 随机身份只生成一次并设为只读 |
 | 任意 | 缺失 | `--install` | `create-disk --blank`，不读取/复制 base |
 | 任意 | 任意 | `--install` | 默认挂临时 helper + USB Windows ISO + 最小 OOBE 应答 ISO；`--manual-oobe` 只关闭应答盘 |
-| 任意 | 缺失 | 普通模式 | `create-disk --from-base`；base 缺失则失败 |
+| 任意 | 缺失 | 普通模式 | `create-disk --from-base --linked`；base 缺失则失败 |
 | 任意 | 已存在 | 任意 | 原盘保持不变 |
 | 缺失 | 任意 | `--dry-run` | 拒绝猜测身份，不创建任何资源 |
 
@@ -164,11 +164,11 @@ B 是所有 profile 当前的安全 name-only 路径。新 GTX1050 配置与其�
 “切成消费卡”不会改变底层 mdev、显存大小、物理频率或调度份额。六个芯片
 身份按目录固定为 1024MB 或 2048MB，启动器必须分配同容量 mdev。
 
-当前 RTX 2080 宿主无本机覆盖时，1GB 行回退到 `nvidia-256`，2GB 行回退到
-`nvidia-257`。更换 V100 后，`deploy/host/vgpu-host.conf` 用
-`VGPU_RESOURCE_PROFILE_1024`/`VGPU_RESOURCE_PROFILE_2048` 把两档分别映射到
-`V100-1Q`/`V100-2Q`；完整流程见 [`V100-ADAPTATION.md`](V100-ADAPTATION.md)。
-无论使用哪种宿主卡，启动器都会拒绝 guest 显存与实际 resource 不一致。
+当前 RTX 2080 宿主必须用 `deploy/configure-g11-vgpu-host.sh` 固定整池为
+`nvidia-256/1024MB` 或 `nvidia-257/2048MB`。更换 V100 后也只能固定为
+`V100-1Q` 或 `V100-2Q` 其中一档；同一物理 GPU 不能同时发布两档映射。
+完整流程见 [`V100-ADAPTATION.md`](V100-ADAPTATION.md)。无论使用哪种宿主卡，
+创建器、启动器和 mdev 分配锁内检查都会拒绝 guest 与宿主档位不一致。
 
 `deploy/host/gpu-mode.sh consumer` 是把**宿主机**切到消费版 NVIDIA 驱动，会让
 mdev/vGPU 不可用；它与 guest 消费卡身份切换完全不是一回事。
@@ -203,8 +203,10 @@ unzip -p /home/ubuntu/images/staging/553.24-display-driver.zip \
 
 ## 路线一：真正从空盘安装并制作 base
 
-下面以 VM 4 为例。最短命令不指定显卡，首次启动会让 `create-vm.sh` 从 24 条
-审核 profile 中等概率随机一条并固化；一条命令完成配置、空盘和安装启动：
+下面以 VM 4 为例。最短命令不指定显卡，首次启动会让 `create-vm.sh` 按
+`VGPU_HOST_FB_TIER_MB` 从对应单档新建层随机一条并固化：2048MB 档使用 12 条
+2GB 默认行，1024MB 档使用 4 条 Maxwell 1GB 新建行。一条命令完成配置、空盘和
+安装启动：
 
 ```bash
 cd /home/ubuntu/projects/qemu
@@ -244,7 +246,9 @@ ISO=/home/ubuntu/images/iso/win10.iso
 参加品牌池，也不能因 profile 名称或 PCI metadata 被解释成完整物理设备仿真。
 
 完整 25 条可选值以 `./deploy/scripts/create-vm.sh --list-gpu-profiles` 的实时输出
-为准，包括 12 条 1GB 和 13 条 2GB 配置；未显式指定时仍只从原 24 条默认层随机。
+为准，包括 12 条 1GB 和 13 条 2GB 配置。新建生命周期为 12 条 2GB 默认、4 条
+1GB Maxwell、1 条显式和 8 条 Kepler legacy；未显式指定时只从宿主容量档对应的
+12 条或 4 条新建层随机，不会跨档。
 
 可在另一终端确认配置已经固定到该 VM：
 
@@ -474,9 +478,10 @@ WeGame/Tencent QIMEI、登录态、SSO/SDK/设备缓存、D3DSCache 和相应注
 清理失败或 hive 校验失败都会停止且不发布 base。只有明确需要保留这些状态时才用
 `./deploy/scripts/vmctl.sh seal "$VM_ID" "$BASE_NAME" --no-clean`。
 
-已完成 G-11 存储迁移时，新 base 写入
-`vms/shared/bases/<BASE_NAME>.qcow2`，旧的同名 base 归档到
-`vms/shared/bases/archive/`。旧平铺 `vms/win10-base.qcow2` 不属于新 G-11
+已完成 G-11 存储迁移时，新 base 与 V-11 一样写入
+`vms/_base/<BASE_NAME>.qcow2`。私有 Sysprep 一键流程只保留当前 qcow2，不创建
+`archive/`；普通显式替换流程仍可按其提示保留回滚代次。旧平铺
+`vms/win10-base.qcow2` 不属于新 G-11
 默认布局，也不会被普通启动偷偷采用；应先按
 [`STORAGE-LAYOUT.md`](STORAGE-LAYOUT.md) 停机、备份并完成受控迁移，再制作或
 替换新布局下的 base。
@@ -520,11 +525,12 @@ dirty/hibernated NTFS、活动持有者、backing/data-file 和被其他 qcow2 �
 ## 路线二：从合格 base 新建普通实例
 
 已有按上面流程验收过的
-`vms/shared/bases/<BASE_NAME>.qcow2` 及其同名 portable 证明后，不要为每台 VM 重装 Windows 和
+`vms/_base/<BASE_NAME>.qcow2` 及其同名 portable 证明后，不要为每台 VM 重装 Windows 和
 NVIDIA 驱动：
 
 该 base 必须是 standalone qcow2；`create-disk.sh` 会验证无 backing、执行
-`qemu-img check`，并通过临时文件原子发布克隆盘。校验失败不会留下最终盘名。
+`qemu-img check`，把母盘 inode hard-link 固定为实例内 `.base.qcow2`，再通过临时
+文件原子发布只保存写入的 `disk.qcow2` overlay。校验失败不会留下最终盘名或 pin。
 
 ```bash
 cd /home/ubuntu/projects/qemu
@@ -534,7 +540,9 @@ BASE_NAME=win10-ltsc-v1
 
 `vmctl clone` 封装 `clone-from-base.sh`。脚本验证 base 自 portable 注入后没有改变，
 创建新的 VM UUID/B 配置，再严格调用 `create-disk.sh --from-base`；即使 base 在
-检查与复制之间消失也不会退回创建空盘。不传 `--monitor-profile` 时自动从审核池
+检查与建链之间消失也不会退回创建空盘。默认增量盘刚创建通常只有几百 KB；只有
+显式传 `--full-copy` 才复制成可脱离母盘的 standalone 实例。不传
+`--monitor-profile` 时自动从审核池
 生成并固定显示器，克隆完成后立即同步；`--start` 仅决定是否立刻开机，普通启动
 还会自动复核，因此无需单独执行 `vmctl monitor`。
 默认克隆的公共桌面只有 `VgpuPortable.exe`。Windows 启动后双击一次，它会读取

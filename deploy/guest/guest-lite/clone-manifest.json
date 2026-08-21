@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "profileVersion": "2.3.0",
+  "files": [
+    {
+      "name": "01-OneClick-Apply.cmd",
+      "sha256": "482E1B9DD0F36ABBF4EE6E774218947EAC8AEE63243172D96FD0580F5282CDAD",
+      "bytes": 838
+    },
+    {
+      "name": "02-Audit.cmd",
+      "sha256": "B51616E1C499F9082F1F34BF6A6EB115E7D55B5CC3554CFB76380BD45B981411",
+      "bytes": 362
+    },
+    {
+      "name": "03-Rollback.cmd",
+      "sha256": "C02CDAAA8F9281567FD0678223CB0672F45964ED681CA5B4CDC61854FE09095B",
+      "bytes": 627
+    },
+    {
+      "name": "G11-Guest-Lite.ps1",
+      "sha256": "A9521FEFD91C51C87371F14D159DFD4341B0D4468B133B59FF397E307AAA4D99",
+      "bytes": 135911
+    },
+    {
+      "name": "README.txt",
+      "sha256": "6F2F81DC733AF4614BB6F61A9A2EBB5E9586DBBD949868FD12DB57FB64DA4F7A",
+      "bytes": 8559
+    }
+  ]
+}

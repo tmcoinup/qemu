@@ -31,7 +31,7 @@ OTHER_INSTANCE="$VM_ROOT/$OTHER_ID"
 
 mkdir -p \
     "$VM_ROOT/legacy/configs" "$VM_ROOT/legacy/disks/archive" \
-    "$VM_ROOT/shared/bases" "$VM_ROOT/legacy/nvram/backups" \
+    "$VM_ROOT/_base" "$VM_ROOT/legacy/nvram/backups" \
     "$VM_ROOT/control" "$VM_ROOT/legacy/log" \
     "$INSTANCE/backups/disks" \
     "$INSTANCE/backups/nvram" \
@@ -61,10 +61,16 @@ for image in \
     "$VM_ROOT/legacy/disks/archive/win10-vm${VM_ID}.qcow2.bak-test" \
     "$VM_ROOT/win10-vm${VM_ID}.qcow2" \
     "$VM_ROOT/legacy/disks/win10-vm${OTHER_ID}.qcow2" \
-    "$VM_ROOT/shared/bases/win10-base.qcow2" \
+    "$VM_ROOT/_base/win10-base.qcow2" \
     "$OTHER_INSTANCE/disk.qcow2"; do
     "$QEMU_IMG" create -q -f qcow2 "$image" 1M
 done
+printf '{"schemaVersion":7}\n' \
+    >"$VM_ROOT/_base/win10-base.qcow2.vgpu-portable.json"
+printf '{"schema_version":1}\n' \
+    >"$VM_ROOT/_base/.win10-base.qcow2.vmate.json"
+printf '{"note":"per-VM metadata, not an image"}\n' \
+    >"$INSTANCE/disk.qcow2.vgpu-portable.json"
 printf '00000000-0000-0000-0000-%012d\n' "$VM_ID" \
     >"$VM_ROOT/control/vm${VM_ID}.mdev"
 
@@ -192,7 +198,11 @@ for path in \
 done
 [[ -f "$VM_ROOT/legacy/disks/win10-vm${OTHER_ID}.qcow2" ]] \
     || fail "delete touched another VM"
-[[ -f "$VM_ROOT/shared/bases/win10-base.qcow2" ]] || fail "delete touched the base"
+[[ -f "$VM_ROOT/_base/win10-base.qcow2" ]] || fail "delete touched the base"
+[[ -f "$VM_ROOT/_base/win10-base.qcow2.vgpu-portable.json" ]] \
+    || fail "delete touched the base portable attestation"
+[[ -f "$VM_ROOT/_base/.win10-base.qcow2.vmate.json" ]] \
+    || fail "delete touched the base type manifest"
 [[ -f "$OTHER_INSTANCE/disk.qcow2" ]] \
     || fail "delete touched another numeric VM bundle"
 

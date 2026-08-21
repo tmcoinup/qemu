@@ -15,6 +15,7 @@ seal_base="$here/scripts/seal-base.sh"
 promote_base="$here/scripts/promote-base.sh"
 delete_vm="$here/scripts/delete-vm.sh"
 migrate_layout="$here/scripts/migrate-g11-layout.sh"
+repair_init="$here/scripts/repair-clone-init.sh"
 preview_capacity="$here/host/check-dgame-preview-capacity.sh"
 
 usage() {
@@ -24,11 +25,12 @@ usage:
   ./deploy/scripts/vmctl.sh start  ID [--vms-dir ABS|--vm-dir ABS] [options]
   ./deploy/scripts/vmctl.sh stop   ID [--vms-dir ABS|--vm-dir ABS] [--force]
   ./deploy/scripts/vmctl.sh create ID [--vms-dir ABS] [create options]
-  ./deploy/scripts/vmctl.sh disk   ID [--vms-dir ABS] [--blank|--from-base] [--base-name NAME]
-  ./deploy/scripts/vmctl.sh clone  BASE_NAME ID [--vms-dir ABS] [clone options]
+  ./deploy/scripts/vmctl.sh disk   ID [--vms-dir ABS] [--blank|--from-base] [--base-name NAME] [--linked|--full-copy]
+  ./deploy/scripts/vmctl.sh clone  BASE_NAME ID [--vms-dir ABS] [clone options]  # linked default
   ./deploy/scripts/vmctl.sh monitor ID [--vms-dir ABS] [--monitor-profile PROFILE] [--force]
   ./deploy/scripts/vmctl.sh seal   SOURCE_ID BASE_NAME [--vms-dir ABS] [seal options]
   ./deploy/scripts/vmctl.sh delete ID [--vms-dir ABS] [-y]
+  ./deploy/scripts/vmctl.sh repair-init ID [--vms-dir ABS]
   ./deploy/scripts/vmctl.sh path   ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh status ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh display ID ACTION [--vms-dir ABS|--vm-dir ABS]
@@ -52,6 +54,7 @@ Examples:
   ./deploy/scripts/vmctl.sh preview-capacity --instances 16 --rate 60
   ./deploy/scripts/vmctl.sh cdrom 2 mount /path/to/package.iso
   ./deploy/scripts/vmctl.sh cdrom 2 eject
+  ./deploy/scripts/vmctl.sh repair-init 2
 
 When a new configuration omits --gpu-profile, create and clone choose one
 audited GPU row at random and persist it in vm.conf.  Normal start and clone
@@ -139,6 +142,10 @@ case "$ACTION" in
     seal)
         shift
         exec_with_vms_root "$seal_base" "$@"
+        ;;
+    repair-init)
+        shift
+        exec_with_vms_root "$repair_init" "$@"
         ;;
     promote)
         shift

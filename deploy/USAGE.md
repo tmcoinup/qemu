@@ -69,7 +69,7 @@ stream/relay 和 `--rdp` 只是同一 vGPU VM 的显示模式。
 ./deploy/package-vgpu-portable.sh --list-gpu-profiles # 查看 25 条原子板卡/显存合同
 ./deploy/scripts/vmctl.sh seal <source_id> <base_name> # 默认清理 WeGame/Tencent 身份并封装具名 base
 sudo ./deploy/install-vgpu-portable-to-base.sh --base-name <base_name> # 给所选 base 注入 portable 并生成独立证明
-./deploy/scripts/vmctl.sh clone <base_name> <new_id> [--gpu-profile PROFILE] [--start] # 精确选择 base；GPU 可随机
+./deploy/scripts/vmctl.sh clone <base_name> <new_id> [--gpu-profile PROFILE] [--start] # 精确选择 base；GPU 按宿主 framebuffer 单档随机
 ./deploy/package-vgpu-one-click.sh <vm_id>     # legacy：A 迁移或旧 B 的 VM 绑定包
 ./deploy/package-gpuz-profile.sh <vm_id> [...] # legacy B 的 VM/UUID 绑定 GPU-Z 包
 ./deploy/package-vgpu-production-migration.sh <vm_id>         # legacy A → 原始签名 538.33 + B 的 guest 单 EXE
@@ -108,8 +108,9 @@ i7-4790 的 8 GiB 组合不参加正常随机，通常只能显式创建；5 款
 i7 作为 active 能力兜底。
 完整目录另保留 i5-4590/H97、i5-6500/B150、i3-8100/B360 三套 legacy，正常随机
 不使用；只有连 i7 在内的 6 款 active CPU 都明确不可用时才自动 legacy 兜底。
-另有 10 款精确 `512110190592` 字节 SSD（原 9 款默认，960 PRO 手动扩展）、
-3 个 1GB + 3 个 2GB GPU 芯片型号、25 条系统用户态原子 profile（原 24 条默认；板卡 metadata
+另有 10 款精确 `512110190592` 字节 SSD（7 款 SATA 默认、3 款 NVMe 显式选择）、
+3 个 1GB + 3 个 2GB GPU 芯片型号、25 条系统用户态原子 profile（2GB 默认层 12 条、
+1GB Maxwell 新建层 4 条、显式层 1 条、Kepler legacy 层 8 条；板卡 metadata
 覆盖 NVIDIA、ASUS、Dell、MSI、Gigabyte、GALAX、Colorful（七彩虹）、ZOTAC、EVGA；
 显存厂家覆盖 Samsung、SK hynix、Micron、Elpida），以及 35 款全部为
 1920×1080@60 的显示器（新建 8 品牌/28 款，完整 11 品牌）。active 键盘和可选
@@ -214,8 +215,9 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name win10-ltsc-v1
 第二条必须在所有 VM 完整停止、base 无 backing/data-file、Windows NTFS 干净且
 未休眠时执行。脚本只写私有临时副本，验证、卸载和 `qemu-img check` 完成后才
 归档旧 base 并原子替换；不要强制挂载 dirty/hibernated NTFS。第三条不指定
-`--gpu-profile` 和 `--monitor-profile`，会分别从审核池随机一次并写入 `vm.conf`，
-随后同步显示器；`--start` 只决定是否马上开机。以后每次正常启动仍会自动校验，
+`--gpu-profile` 和 `--monitor-profile`：GPU 按 `VGPU_HOST_FB_TIER_MB` 从对应单档
+新建层随机，显示器从审核新建池随机，然后分别写入 `vm.conf` 并同步显示器；
+`--start` 只决定是否马上开机。以后每次正常启动仍会自动校验，
 不需要另跑 `vmctl monitor`。
 
 VM3 已按
@@ -455,14 +457,15 @@ fb-shm 对象，互不改变帧率、ROI、socket 或生命周期。
 └── vms/
     ├── N/               # 一台 G-11 VM 的完整数字 bundle
     │   ├── vm.conf
-    │   ├── disk.qcow2
+    │   ├── .base.qcow2  # 默认增量克隆的隐藏母盘 hard-link pin
+    │   ├── disk.qcow2   # 默认只保存该 VM 的增量写入
     │   ├── nvram.fd
     │   ├── tpm/state/   # 持久 TPM 1.2/2.0 NVRAM/EK 状态
     │   ├── log/{qemu,swtpm}.log
     │   ├── run/         # pid/socket/mdev + start/disk/tpm locks
     │   └── backups/{disks,nvram}/
+    ├── _base/           # <BASE_NAME>.qcow2 + 每镜像证明/交付清单
     ├── shared/
-    │   ├── bases/       # <BASE_NAME>.qcow2 + 每镜像证明 + archive/
     │   └── assets/      # host UI 共享资源
     └── control/         # 仅全局 .storage.lock 和迁移历史
 ```
@@ -585,9 +588,9 @@ legacy，不要与新的
 
 存储选择还会比较主板与 SSD 的接口、PCIe 代际和通道。新 Haswell 白名单从
 Samsung 840/850/860 PRO、Crucial MX100、Kingston KC400、Intel 545s、
-Western Digital PC SA530 七款 SATA 盘中选择；Samsung 970 PRO 与 WD Black
-两款 Gen3 x4 NVMe 保留给链路匹配的兼容平台。Samsung 960 PRO 是第三款 NVMe
-且只在显式选择时使用。完整目录十款、默认 key 仍为原九款，且每款均精确为
+Western Digital PC SA530 七款 SATA 盘中选择；Samsung 970 PRO、WD Black 与
+Samsung 960 PRO 三款 NVMe 保留给链路匹配的兼容平台，且都只在显式选择时使用。
+完整目录十款、默认池只含七款 SATA，且每款均精确为
 `512110190592` 字节；其他容量不能进入新建
 目录。新配置也会持久化并传递逻辑/物理扇区：MX100 为
 `512/4096`，当前其余型号为 `512/512`。显式 `--ssd-profile` 仍可在兼容层内
@@ -628,14 +631,17 @@ Redmi）。完整目录与新建池都强校验 preferred timing；1366×768、2
 GTX 1050 三个 2GB 型号，共 25 条不可拆分的板卡/显存 profile。GTX 750 的正式
 名称不是 RTX 750，并与 2GB GTX 750 Ti 保持不同 device ID。AMD 不能加入
 这条池，因为底层是 NVIDIA GRID driver、NVIDIA mdev 和 NVAPI。
+未指定显卡时按 `VGPU_HOST_FB_TIER_MB` 只在一个容量档内选择：2048MB 档使用
+12 条 2GB 默认行，1024MB 档使用 4 条 Maxwell 新建行；显式 1 条和 8 条 Kepler
+legacy 行都不进入无参数随机。
 系统用户态板卡 metadata 覆盖 NVIDIA、ASUS、Dell、MSI、Gigabyte、ZOTAC、GALAX、Colorful（七彩虹）、EVGA，
 显存厂家为 Samsung、Elpida、SK hynix、Micron，序列策略均为 `not-exposed`；B 模式系统
 PCI device 仍是宿主 mdev；正式 merge 只投影 profile 的原子 Subsystem/静态字段。
 
 `vms/N/vm.conf` 中的 `GPU_*` 是每 VM 的客户机身份，`VGPU_MDEV_PROFILE`
-按容量是 RTX 宿主的 `nvidia-256`/`nvidia-257` fallback。实际资源可由宿主配置的
-`VGPU_RESOURCE_PROFILE_1024`/`VGPU_RESOURCE_PROFILE_2048` 覆盖（例如
-V100-1Q/V100-2Q），并且必须与当前 guest 身份同为 1024MB/2048MB。
+按容量是 RTX 宿主的 `nvidia-256`/`nvidia-257` fallback。实际资源由宿主配置的
+`VGPU_HOST_FB_TIER_MB`、`VGPU_RESOURCE_PROFILE` 和 `VGPU_RESOURCE_FB_MB`
+共同固定为唯一档位（例如 V100-2Q/2048MB），并且必须与当前 guest 身份一致。
 
 启动器默认在宿主机完成产品名同步：它复用持久化的 `VM_UUID` 作为 mdev UUID，
 并在创建 mdev 前原子维护 `/etc/vgpu_unlock/profile_override.toml` 中对应的
@@ -943,7 +949,7 @@ host:                                     │ (KVM 直接 page mapping，纯 RAM
 | `./deploy/install-ivshmem-driver.sh 1` | 旧 relay 路径：单独装 ivshmem driver |
 | `./deploy/install-nv-service.sh 1` | 旧 relay 路径：单独刷 service binary |
 | `./deploy/scripts/create-vm.sh <vm_id>` | 生成 `$VM_ROOT/N/vm.conf`（一次性） |
-| `./deploy/scripts/create-disk.sh <vm_id> --from-base` | 严格克隆公共 base；不存在则失败，不退回空盘 |
+| `./deploy/scripts/create-disk.sh <vm_id> --from-base --linked` | 从 standalone base 创建 V-11 式实例内 pin + 小型增量盘；不存在则失败，不退回空盘；`--full-copy` 才复制独立整盘 |
 | `./deploy/scripts/recover-hibernated-vm.sh <vm_id> [--rescue-gtk] [--proxy]` | host-only 本地标准 VGA 恢复休眠；完整关机后自动强刷 EDID/NV_Modes，失败闭锁 |
 | `./deploy/finish-vgpu-install.sh <vm_id>` | 仅统一前 GTX750Ti/GT1030 的旧 token 回执/UTC 迁移；当前 25 条新 VM 不使用，GTX1050 strict-A 仍拒绝 |
 | `./deploy/scripts/vmctl.sh monitor 1 [--monitor-profile PROFILE] [--force]` | 关机状态从 host 离线同步 EDID_OVERRIDE/raw EDID/NVIDIA 10 项模式策略；guest 无常驻组件 |
@@ -961,5 +967,5 @@ host:                                     │ (KVM 直接 page mapping，纯 RAM
   `RealTimeIsUniversal` 或运行旧 RTC guest 脚本。详见
   [`docs/VGPU-LICENSING.md`](docs/VGPU-LICENSING.md)。
 - **vGPU mdev 分配失败** (`mdev_allocate failed`)：先运行 `sudo -v`；无人值守时只通过批准的安全渠道提供 `SUDO_PASSWORD`，不要写入仓库或命令历史。
-- **磁盘满** (`/dev/nvme0n1p3 100%`)：guest qcow2 写阻塞 → boot 卡。检查 `vms/N/backups/` 和 `vms/shared/bases/archive/`；旧 G-11 尚未迁移时再只读检查 `vms/G-11/` 与 `vms/instances/`。
+- **磁盘满** (`/dev/nvme0n1p3 100%`)：guest qcow2 写阻塞 → boot 卡。检查 `vms/N/backups/`；只有使用普通替换回滚流程时再检查 `vms/_base/archive/`。旧 G-11 尚未迁移时只读检查 `vms/G-11/` 与 `vms/instances/`。
 - **ivshmem 已被占** (relay 反复 `REQUEST_MMAP failed: 548`)：旧 relay 孤儿没退。NvDisplayContainer 启动会自动 kill 同名孤儿；手动可 `./deploy/service.sh 1 restart`。

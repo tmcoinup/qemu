@@ -82,7 +82,7 @@ grep -Fq 'APPLY OK' "$TMP_DIR/apply.out" \
     || fail "namespaced VM rename did not preserve the disk inode"
 [[ "$(stat -c %i "$TARGET_ROOT/3/disk.qcow2")" == "$legacy_inode" ]] \
     || fail "pre-namespace VM rename did not preserve the disk inode"
-[[ "$(stat -c %i "$TARGET_ROOT/shared/bases/win10-base.qcow2")" == \
+[[ "$(stat -c %i "$TARGET_ROOT/_base/win10-base.qcow2")" == \
    "$base_inode" ]] || fail "base rename did not preserve the image inode"
 [[ -f "$TARGET_ROOT/shared/assets/README" ]] \
     || fail "shared assets were not moved"
@@ -133,7 +133,7 @@ grep -Fq 'verified empty shared skeletons' \
 run_migrate "$EMPTY_IMAGE_ROOT" "$EMPTY_TARGET" --apply \
     >"$TMP_DIR/empty-shared-apply.out" 2>"$TMP_DIR/empty-shared-apply.err" \
     || fail "populated pre-namespace shared data did not migrate"
-[[ "$(stat -c %i "$EMPTY_TARGET/shared/bases/win10-base.qcow2")" == \
+[[ "$(stat -c %i "$EMPTY_TARGET/_base/win10-base.qcow2")" == \
    "$empty_base_inode" &&
    -f "$EMPTY_TARGET/shared/assets/aero_arrow.cur" &&
    ! -e "$EMPTY_NAMESPACE" && ! -e "$EMPTY_TARGET/bases" &&
@@ -160,7 +160,7 @@ grep -Fq 'outside qcow2 chain depends on a planned file' \
     || fail "dependent outside overlay refusal was not clear"
 [[ -f "$DEPEND_NAMESPACE/shared/bases/win10-base.qcow2" &&
    -f "$DEPEND_TARGET/2/disk.qcow2" &&
-   ! -e "$DEPEND_TARGET/shared/bases" ]] \
+   ! -e "$DEPEND_TARGET/_base" ]] \
     || fail "blocked dependency check changed data"
 
 # A pre-existing numeric destination (for example V-11) is a hard conflict.

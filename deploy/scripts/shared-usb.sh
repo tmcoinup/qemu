@@ -22,6 +22,9 @@ The default public USB root is:
 
 Each tool owns one child directory below that root. mount always ejects and
 reopens the VVFAT view so host-side package updates are visible in Windows.
+Windows sees a 128 GiB read-only FAT32 USB disk.  The capacity is virtual: no
+128 GiB host image is created, and only files below the public USB root occupy
+host storage.
 EOF
 }
 
@@ -106,7 +109,7 @@ if [[ "$ACTION" == mount ]]; then
     SHARED_USB_ROOT=$(realpath -e -- "$SHARED_USB_ROOT")
     echo "[shared-usb] refreshing read-only public USB: $SHARED_USB_ROOT"
     exec "$USB_DIRECTORY" "$VM_ID" mount "$SHARED_USB_ROOT" \
-        --replace --label 'U盘' "${selector_args[@]}"
+        --replace --label 'U盘' --size 128G "${selector_args[@]}"
 fi
 
 exec "$USB_DIRECTORY" "$VM_ID" "$ACTION" "${selector_args[@]}"

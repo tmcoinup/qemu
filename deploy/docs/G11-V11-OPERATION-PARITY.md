@@ -13,7 +13,7 @@ QMP、磁盘和宿主稳定性能力，不能互拷显示驱动、PCI 身份、g
 | 操作/能力 | 当前结论 | 说明 |
 |---|---|---|
 | 创建、启动、状态、停止 | 基本一致 | G-11 的规范入口同样位于 `deploy/scripts/`，傻瓜入口是 `deploy/scripts/vmctl.sh` |
-| 基础镜像封装、克隆 | 名称与方法已一致 | 两边统一为 `seal-base.sh SOURCE_ID BASE_NAME`、`clone-from-base.sh BASE_NAME NEW_ID`；G-11 每个具名 standalone base 独立绑定 portable attestation，且 seal 默认清理 WeGame/Tencent 跨克隆身份 |
+| 基础镜像封装、克隆 | 名称、方法和增量语义已一致 | 两边统一为 `seal-base.sh SOURCE_ID BASE_NAME`、`clone-from-base.sh BASE_NAME_OR_QCOW2 NEW_ID`，并接受 `--vms-dir` / `--base-dir`；G-11 私有一键构建只保留一个本机与交付共用的 standalone 母盘，实例默认使用 hard-link pin + qcow2 增量盘 |
 | Windows 内键盘、鼠标、关机 | 一致 | G-11 已补入暂停态释放、USB HID 队列满时 all-up 和 duplicate-make 过滤 |
 | SDL 交互延迟/恢复 | 一致 | 独立 8 ms 输入泵、鼠标移动合并、输入先于重显示更新；2D renderer reset 会重建/重传当前画面；G-11 仍保持自己的固定 60 Hz Present |
 | 运行中隐藏/恢复窗口 | 默认 SDL 一致 | `vmctl display ID window-hide/window-show`；先核验 QMP 的 `query-name`，不会连错 VM |
@@ -57,8 +57,10 @@ QMP、磁盘和宿主稳定性能力，不能互拷显示驱动、PCI 身份、g
 11. 每 VM 进程树的临时 OOM 保护：固定策略、调用 UID 与 PID generation 校验。
 12. V-11 最新的通用 NVMe APST 单文件工具及无宿主副作用回归测试。
 13. 基础镜像公开文件名和参数顺序统一为 `seal-base.sh SOURCE_ID BASE_NAME` /
-    `clone-from-base.sh BASE_NAME NEW_ID`；G-11 保留默认 WeGame/Tencent 清理和
-    每个具名 base 独立的 portable attestation 门禁。
+    `clone-from-base.sh BASE_NAME_OR_QCOW2 NEW_ID`，并统一支持 `--vms-dir` /
+    `--base-dir`；G-11 保留默认 WeGame/Tencent 清理和每个 base 独立的 portable
+    attestation 门禁。私有 Sysprep 包的同一个 qcow2 可本机直接克隆，也可交付；
+    克隆默认使用实例内 hard-link pin + qcow2 增量盘，`--full-copy` 才复制整盘。
 14. native 默认增加独立 `dgame-preview-vmN` 对象、V-11 兼容 socket/QMP/窗口名，
     并允许 `preview-on`/`preview-off` 无重启热插拔。
 15. DGame 预览优先把亮机卡 EGL texture 的业务 ROI 导出为 dma-buf；GPU 导入失败时
@@ -84,9 +86,10 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
 第一条默认清理模板源盘中的 WeGame/Tencent QIMEI、登录态、SSO/SDK/设备缓存、
 D3DSCache 和注册表键；失败时不发布 base。它不删 ACE 程序，不强修 dirty/休眠
 NTFS，不改 BCD 或驱动。只有明确要把这些身份带入所有克隆时才给 `vmctl seal`
-增加 `--no-clean`。G-11 与 V-11 一样要求显式 `BASE_NAME`，但只从 G-11 自己的
-`shared/bases/` 选择，并校验该名称自己的 standalone 镜像和 portable 证明；两个
-分支的基础镜像不能互换。
+增加 `--no-clean`。G-11 与 V-11 一样要求显式 `BASE_NAME`，并默认从所选 G-11
+`VMS_DIR/_base/` 选择，校验该名称自己的 standalone 镜像和 portable 证明；两个
+分支的基础镜像不能互换。实例的 `disk.qcow2` 默认只记录增量，`.base.qcow2`
+固定创建时的母盘 inode；母盘换代只影响新克隆，不会重定向已有 VM。
 
 ## 傻瓜操作：普通本地窗口
 

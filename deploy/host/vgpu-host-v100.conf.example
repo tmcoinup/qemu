@@ -10,18 +10,21 @@
 # explicit domain:bus:slot.function, for example 0000:65:00.0.
 VGPU_MGPU=auto
 
-# Common 16 GiB PCIe V100.  start-vm.sh selects the matching Q-series
-# resource from the selected VM's audited 1 GiB/2 GiB identity row.
-VGPU_RESOURCE_PROFILE_1024='V100-1Q'
-VGPU_RESOURCE_PROFILE_2048='V100-2Q'
+# Common 16 GiB PCIe V100, fixed to one 2 GiB framebuffer tier.  NVIDIA vGPU
+# 16 does not permit 1Q and 2Q sizes to coexist on one physical V100.  To run a
+# 1 GiB pool, change all three tier/profile/framebuffer values together while
+# every VM on this GPU is stopped; do not configure both mappings at once.
+VGPU_HOST_FB_TIER_MB=2048
+VGPU_RESOURCE_PROFILE='V100-2Q'
+VGPU_RESOURCE_FB_MB=2048
 VGPU_TOTAL_FB_MB=16384
 
-# Other Q-series pairs (replace both names for the installed SKU):
-#   PCIe 32 GiB : V100D-1Q / V100D-2Q   (VGPU_TOTAL_FB_MB=32768)
-#   SXM2 16 GiB : V100X-1Q / V100X-2Q   (VGPU_TOTAL_FB_MB=16384)
-#   SXM2 32 GiB : V100DX-1Q / V100DX-2Q (VGPU_TOTAL_FB_MB=32768)
-#   V100S 32 GiB: V100S-1Q / V100S-2Q   (VGPU_TOTAL_FB_MB=32768)
-#   FHHL        : V100L-1Q / V100L-2Q   (VGPU_TOTAL_FB_MB=16384)
+# Other Q-series names (choose exactly one size for the installed SKU):
+#   PCIe 32 GiB : V100D-1Q or V100D-2Q   (VGPU_TOTAL_FB_MB=32768)
+#   SXM2 16 GiB : V100X-1Q or V100X-2Q   (VGPU_TOTAL_FB_MB=16384)
+#   SXM2 32 GiB : V100DX-1Q or V100DX-2Q (VGPU_TOTAL_FB_MB=32768)
+#   V100S 32 GiB: V100S-1Q or V100S-2Q   (VGPU_TOTAL_FB_MB=32768)
+#   FHHL        : V100L-1Q or V100L-2Q   (VGPU_TOTAL_FB_MB=16384)
 
 # Check both NVIDIA's available_instances and the per-parent framebuffer sum.
 VGPU_CAPACITY_CHECK=both
@@ -36,7 +39,6 @@ VGPU_CONSOLE_INTERVAL_US=0
 VGPU_MDEV_IDENTITY_MODE=off
 
 # A genuine V100 does not need vgpu_unlock or the RTX6000 profile override.
-# Keep the real vGPU PCI identity for initial driver validation.  Per-VM config
-# or CLI --spoof-mode may override this later if consumer-card spoofing is
-# deliberately required.
+# Keep the real vGPU PCI identity; do not install a patched/test-signed driver
+# or change Windows BCD to imitate the RTX path.
 SPOOF_MODE=off

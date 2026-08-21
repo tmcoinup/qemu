@@ -16,6 +16,8 @@
 #   ./deploy/scripts/seal-base.sh <源_vm_id> <base_name>
 #   ./deploy/scripts/seal-base.sh 1 win10-ltsc-v1 -y
 #   ./deploy/scripts/seal-base.sh 1 win10-ltsc-v1 --no-clean
+#   ./deploy/scripts/seal-base.sh 1 win10-ltsc-v1 --compression-type zstd \
+#       --compression-parallel 16 --progress
 #
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,7 +29,16 @@ vm_storage_init
 
 usage() {
     cat <<'EOF'
-usage: ./deploy/scripts/seal-base.sh SOURCE_VM_ID BASE_NAME [-y|--yes] [--no-clean]
+usage: ./deploy/scripts/seal-base.sh SOURCE_VM_ID BASE_NAME [options]
+
+Options:
+  -y, --yes                  不再询问封装确认
+  --no-clean                 保留 WeGame/Tencent 跨克隆身份（默认清理）
+  --compression-type TYPE    qcow2 压缩：zlib 或 zstd（默认 zlib）
+  --compression-parallel N   qemu-img 并行度：1..16（默认由 qemu-img 决定）
+  --progress                 显示 qemu-img 转换百分比
+  --single-image             V-11 式单镜像发布：目标已存在就拒绝，
+                             不创建或保留 base archive
 
 BASE_NAME 只能包含字母、数字、下划线和短横线，不要写 .qcow2。
 例如 BASE_NAME=win10-ltsc-v1 会产出 win10-ltsc-v1.qcow2。
@@ -42,11 +53,33 @@ VM_ID=""
 BASE_NAME=""
 ASSUME_YES=0
 CLEAN_WEGAME=1
+COMPRESSION_TYPE=zlib
+COMPRESSION_PARALLEL=""
+SHOW_PROGRESS=0
+SINGLE_IMAGE=0
 declare -a POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y|--yes) ASSUME_YES=1; shift ;;
         --no-clean) CLEAN_WEGAME=0; shift ;;
+        --compression-type)
+            (($# >= 2)) || {
+                echo "--compression-type requires zlib or zstd" >&2
+                exit 2
+            }
+            COMPRESSION_TYPE=$2
+            shift 2
+            ;;
+        --compression-parallel)
+            (($# >= 2)) || {
+                echo "--compression-parallel requires an integer in 1..16" >&2
+                exit 2
+            }
+            COMPRESSION_PARALLEL=$2
+            shift 2
+            ;;
+        --progress) SHOW_PROGRESS=1; shift ;;
+        --single-image) SINGLE_IMAGE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --*) echo "unknown arg: $1" >&2; exit 2 ;;
         *) POSITIONAL+=("$1"); shift ;;
@@ -59,6 +92,17 @@ if ((${#POSITIONAL[@]} != 2)); then
 fi
 VM_ID=${POSITIONAL[0]}
 BASE_NAME=${POSITIONAL[1]}
+[[ "$COMPRESSION_TYPE" == zlib || "$COMPRESSION_TYPE" == zstd ]] || {
+    echo "--compression-type must be zlib or zstd" >&2
+    exit 2
+}
+if [[ -n "$COMPRESSION_PARALLEL" ]]; then
+    [[ "$COMPRESSION_PARALLEL" =~ ^[1-9][0-9]*$ ]] &&
+        ((10#$COMPRESSION_PARALLEL <= 16)) || {
+        echo "--compression-parallel must be an integer in 1..16" >&2
+        exit 2
+    }
+fi
 vm_storage_validate_id "$VM_ID"
 vm_storage_validate_base_name "$BASE_NAME"
 vm_storage_require_namespace_ready "$VM_ID"
@@ -72,7 +116,8 @@ if ! flock -n -x "$STORAGE_LOCK_FD"; then
     exit 1
 fi
 vm_storage_prepare_instance "$VM_ID"
-mkdir -p "$VM_BASE_DIR" "$VM_BASE_ARCHIVE_DIR"
+mkdir -p "$VM_BASE_DIR"
+((SINGLE_IMAGE)) || mkdir -p "$VM_BASE_ARCHIVE_DIR"
 START_LOCK=$(vm_storage_run_path "$VM_ID" start.lock)
 exec {START_LOCK_FD}>"$START_LOCK"
 if ! flock -n "$START_LOCK_FD"; then
@@ -103,6 +148,11 @@ if [[ -e "$ATTESTATION" || -L "$ATTESTATION" ]]; then
         exit 1
     }
 fi
+if ((SINGLE_IMAGE)) && [[ -e "$BASE" || -L "$BASE" ]]; then
+    echo "[seal-base] $BASE 已存在；单镜像模式与 V-11 一样拒绝覆盖" >&2
+    echo "  验收后直接淘汰旧文件，再重新执行；不会自动建立 archive。" >&2
+    exit 1
+fi
 CLEANER="$here/scripts/host-clean-tencent.sh"
 if (( CLEAN_WEGAME )); then
     [[ -x "$CLEANER" ]] || {
@@ -114,6 +164,33 @@ fi
 : "${QEMU_IMG:=$here/../build/qemu-img}"
 [[ -x "$QEMU_IMG" ]] || QEMU_IMG=$(command -v qemu-img || true)
 [[ -x "$QEMU_IMG" ]] || { echo "找不到 qemu-img" >&2; exit 1; }
+
+# zstd is optional in qcow2 builds. Prove support before the Tencent cleaner
+# changes the source disk, so an incompatible host fails without mutation.
+if [[ "$COMPRESSION_TYPE" == zstd ]]; then
+    COMPRESSION_PROBE_DIR=$(mktemp -d "$VM_RUN_DIR/.zstd-probe.XXXXXXXX")
+    COMPRESSION_PROBE="$COMPRESSION_PROBE_DIR/probe.qcow2"
+    cleanup_compression_probe() {
+        rm -f -- "$COMPRESSION_PROBE"
+        rmdir -- "$COMPRESSION_PROBE_DIR" 2>/dev/null || true
+    }
+    trap cleanup_compression_probe EXIT
+    COMPRESSION_PROBE_OK=0
+    if "$QEMU_IMG" create -q -f qcow2 -o compression_type=zstd \
+            "$COMPRESSION_PROBE" 1M; then
+        probe_type=$(
+            "$QEMU_IMG" info --output=json -- "$COMPRESSION_PROBE" |
+                jq -er '."format-specific".data."compression-type"'
+        ) || probe_type=""
+        [[ "$probe_type" == zstd ]] && COMPRESSION_PROBE_OK=1
+    fi
+    cleanup_compression_probe
+    trap - EXIT
+    ((COMPRESSION_PROBE_OK)) || {
+        echo "[seal-base] qemu-img 不支持 qcow2 zstd 压缩；可改用 --compression-type zlib" >&2
+        exit 1
+    }
+fi
 
 if ! vm_storage_read_qcow2_metadata "$QEMU_IMG" "$VM_DISK"; then
     echo "[seal-base] 源磁盘不是可验证的 qcow2: $VM_DISK" >&2
@@ -203,11 +280,13 @@ if ! wait "$QCOW2_FIND_PID"; then
     exit 1
 fi
 
-base_dev=$(stat -c %d -- "$(dirname "$BASE")")
-archive_dev=$(stat -c %d -- "$VM_BASE_ARCHIVE_DIR")
-if [[ "$base_dev" != "$archive_dev" ]]; then
-    echo "[seal-base] base 与 archive 不在同一文件系统，拒绝非原子替换" >&2
-    exit 1
+if (( ! SINGLE_IMAGE )); then
+    base_dev=$(stat -c %d -- "$(dirname "$BASE")")
+    archive_dev=$(stat -c %d -- "$VM_BASE_ARCHIVE_DIR")
+    if [[ "$base_dev" != "$archive_dev" ]]; then
+        echo "[seal-base] base 与 archive 不在同一文件系统，拒绝非原子替换" >&2
+        exit 1
+    fi
 fi
 
 vm_size=$(stat -c%s "$VM_DISK")
@@ -266,8 +345,18 @@ cleanup_seal() {
 }
 trap cleanup_seal EXIT
 
-echo "[seal-base] qemu-img convert (compact + standalone)..."
-"$QEMU_IMG" convert -O qcow2 -c "$VM_DISK" "$BASE_TMP"
+parallel_label=${COMPRESSION_PARALLEL:-qemu-img-default}
+echo "[seal-base] qemu-img convert (compact + standalone, compression=${COMPRESSION_TYPE}, parallel=${parallel_label})..."
+CONVERT_ARGS=(convert -O qcow2 -c)
+if [[ "$COMPRESSION_TYPE" != zlib ]]; then
+    CONVERT_ARGS+=(-o "compression_type=$COMPRESSION_TYPE")
+fi
+if [[ -n "$COMPRESSION_PARALLEL" ]]; then
+    CONVERT_ARGS+=(-m "$COMPRESSION_PARALLEL")
+fi
+((SHOW_PROGRESS == 0)) || CONVERT_ARGS+=(-p)
+CONVERT_ARGS+=("$VM_DISK" "$BASE_TMP")
+"$QEMU_IMG" "${CONVERT_ARGS[@]}"
 "$QEMU_IMG" check -q "$BASE_TMP"
 if ! vm_storage_read_qcow2_metadata "$QEMU_IMG" "$BASE_TMP" ||
         [[ -n "$VM_STORAGE_QCOW2_BACKING" ||

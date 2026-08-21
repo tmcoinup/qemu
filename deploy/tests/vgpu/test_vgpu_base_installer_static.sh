@@ -60,6 +60,8 @@ grep -Fq -- '--gpuz-source FILE' "$TMP_DIR/help.out" ||
     fail "--help did not describe the external GPU-Z source"
 grep -Fq -- '--with-gpuz' "$TMP_DIR/help.out" ||
     fail "--help did not describe explicit GPU-Z opt-in"
+grep -Fq -- '--single-image' "$TMP_DIR/help.out" ||
+    fail "--help did not describe V-11-style single-image publication"
 [[ ! -e "$TMP_DIR/images" ]] ||
     fail "--help unexpectedly created storage"
 if "$INSTALLER" --base-name '../escape' \
@@ -110,6 +112,12 @@ require_text '.guestPerformance == "embedded-recommended-native-v1"' \
     "embedded guest performance receipt binding"
 require_text '.launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6"' \
     "unified launcher format binding"
+require_text 'GUEST_LITE_MANIFEST_SOURCE="$GUEST_LITE_SOURCE_ROOT/clone-manifest.json"' \
+    "Guest Lite clone-manifest source"
+require_text 'die '\''Guest Lite manifest is not pinned by the clone finalizer'\''' \
+    "Guest Lite finalizer hash pin"
+require_text 'verify_guest_lite_dir()' \
+    "Guest Lite payload verifier"
 reject_regex 'QEMU_GPUZ_PORTABLE_EXE_V1' \
     "legacy embedded portable launcher acceptance"
 assert_before \
@@ -120,6 +128,10 @@ assert_before \
     '.launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6"' \
     'cp --reflink=auto -- "$BASE" "$BASE_TMP"' \
     "portable receipt validation before private base copy"
+assert_before \
+    'Guest Lite manifest is not pinned by the clone finalizer' \
+    'cp --reflink=auto -- "$BASE" "$BASE_TMP"' \
+    "Guest Lite authentication before private base copy"
 
 # An exclusive global storage lock must be held before inspection/copy.  Every
 # normal start/create path holds this inode shared, so a running VM is refused.
@@ -133,8 +145,10 @@ require_text 'global storage lock owner does not match the base-image owner' \
     "storage-owner fail-closed gate"
 require_text 'chown "$storage_uid:$storage_gid" "/proc/self/fd/$STORAGE_LOCK_FD"' \
     "root-created lock ownership repair"
-require_text 'for storage_dir in "$VM_RUN_DIR" "$VM_BASE_ARCHIVE_DIR"; do' \
-    "root-created storage-directory ownership repair"
+require_text 'storage_dirs=("$VM_RUN_DIR")' \
+    "single-image-aware storage-directory ownership repair"
+require_text '((SINGLE_IMAGE)) || storage_dirs+=("$VM_BASE_ARCHIVE_DIR")' \
+    "archive directory is lazy in single-image mode"
 require_text 'lsof -t -- "$BASE"' "open-holder check"
 assert_before \
     'flock -n -x "$STORAGE_LOCK_FD"' \
@@ -194,6 +208,14 @@ require_text 'mv -fT -- "$PORTABLE_DEST_TMP" "$DEST_DIR/VgpuPortable.exe"' \
     "atomic guest EXE publication"
 require_text 'mv -fT -- "$GPUZ_DEST_TMP" "$DEST_DIR/GPU-Z.exe"' \
     "atomic external GPU-Z publication"
+require_text "sed -i 's/\$/\\r/' \"\$guest_lite_launcher\"" \
+    "Windows-safe Guest Lite launcher conversion"
+require_text 'rm -rf -- "$MOUNT_DIR/ProgramData/G11GuestLite"' \
+    "stale clone-bound Guest Lite state removal"
+require_text 'cp --reflink=never -- "$GUEST_LITE_STAGE"/* "$GUEST_LITE_DEST/"' \
+    "Guest Lite payload publication"
+require_text 'verify_guest_lite_dir "$GUEST_LITE_DEST"' \
+    "published Guest Lite payload verification"
 require_text '"$(sha256_upper "$DEST_DIR/VgpuPortable.exe")" == "$PORTABLE_SHA256"' \
     "post-publication guest EXE hash check"
 require_text '"$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256"' \
@@ -253,6 +275,14 @@ require_text 'die "published base attestation failed verification"' \
     "published-sidecar verification"
 require_text 'PUBLICATION_COMPLETE=1' \
     "base-and-sidecar transaction commit marker"
+require_text 'temporary rollback deleted after full verification' \
+    "single-image successful rollback disposal"
+require_text 'temporary rollback generation changed; refusing to discard it' \
+    "single-image rollback generation proof"
+assert_before \
+    'PUBLICATION_COMPLETE=1' \
+    'rm -- "$BASE_BACKUP"' \
+    "valid new generation commit before old rollback unlink"
 
 # A successful prior installation leaves sidecars whose names also match the
 # broad *.qcow2.* backup pattern.  Prove the intentionally narrow exclusion
@@ -285,8 +315,12 @@ require_text 'refresh_restored_attestation_ctime()' \
     "rollback ctime refresh helper"
 require_text '.baseCtimeNs = $baseCtimeNs' \
     "rollback ctime rewrite"
-require_text 'valid schema-2/schema-3/schema-4/schema-5 generation' \
+require_text 'valid schema-2..5 public or schema-6/7 private generation' \
     "legacy/new rollback attestation compatibility"
+require_text '.schemaVersion == 7 and' \
+    "current private Sysprep attestation schema"
+require_text '.systemNvapiRequired == true' \
+    "current private base requires per-VM system NVAPI"
 require_text 'mv -fT -- "$refresh_tmp" "$ATTESTATION"' \
     "atomic refreshed-sidecar publication"
 require_text 'if ((ATTESTATION_MOVED && restored_original))' \

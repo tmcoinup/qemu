@@ -48,7 +48,7 @@ assert_eq 2048 "$(vgpu_profile_normalize_vram_mb '2048 MB')" \
     '2048 MB capacity normalization'
 mapfile -t default_1gb_profiles < <(vgpu_profile_default_keys_for_vram 1024)
 mapfile -t default_2gb_profiles < <(vgpu_profile_default_keys_for_vram 2048)
-assert_eq 12 "${#default_1gb_profiles[@]}" 'default 1024 MB GPU pool size'
+assert_eq 4 "${#default_1gb_profiles[@]}" 'R535-safe 1024 MB GPU pool size'
 assert_eq 12 "${#default_2gb_profiles[@]}" 'default 2048 MB GPU pool size'
 if vgpu_profile_normalize_vram_mb 4096 >/dev/null 2>&1; then
     fail 'unsupported GPU VRAM capacity was normalized'
@@ -88,10 +88,14 @@ test_catalog() {
         "$(vgpu_profile_catalog_sha256)" "canonical vGPU profile catalog SHA"
     assert_eq 25 "${#VGPU_PROFILE_CATALOG[@]}" \
         "multi-brand catalog profile count"
-    assert_eq 24 "${#VGPU_DEFAULT_PROFILE_KEYS[@]}" \
-        "backward-stable default GPU count"
+    assert_eq 12 "${#VGPU_DEFAULT_PROFILE_KEYS[@]}" \
+        "single-tier default GPU count"
+    assert_eq 4 "${#VGPU_TIER_1024_PROFILE_KEYS[@]}" \
+        "R535-safe 1 GiB tier count"
     assert_eq 1 "${#VGPU_EXPLICIT_PROFILE_KEYS[@]}" \
         "manual expansion GPU count"
+    assert_eq 8 "${#VGPU_LEGACY_PROFILE_KEYS[@]}" \
+        "Kepler legacy-only GPU count"
     assert_eq "${#VGPU_PROFILE_CATALOG[@]}" \
         "${#VGPU_PROFILE_BOARD_METADATA[@]}" \
         "board metadata catalog coverage"
@@ -268,7 +272,7 @@ test_catalog() {
             fail "printed catalog omits $expected_board_brand/not-exposed"
     done
 
-    local tsv_catalog tsv_rows
+    local tsv_catalog tsv_1gb_catalog tsv_rows
     tsv_catalog=$(vgpu_profile_print_tsv_catalog) || \
         fail "machine-readable GPU catalog could not be generated"
     assert_eq $'PROFILE\tMODEL\tBOARD_BRAND\tBOARD_MODEL\tVRAM_MIB\tVRAM_MAKER\tMDEV\tAUTO_RANDOM' \
@@ -284,6 +288,29 @@ test_catalog() {
         <<<"$tsv_catalog" || fail "machine-readable GPU catalog lost model/brand fields"
     grep -Fqx $'gtx750ti_evga_sc_2gb\tNVIDIA GeForce GTX 750 Ti\tEVGA\t02G-P4-3753-KR\t2048\tSamsung\tnvidia-257\t0' \
         <<<"$tsv_catalog" || fail "manual EVGA expansion lost AUTO_RANDOM=0"
+    assert_eq 12 \
+        "$(awk -F '\t' 'NR > 1 && $8 == 1 { count++ } END { print count + 0 }' \
+            <<<"$tsv_catalog")" \
+        '2 GiB host catalog AUTO_RANDOM count'
+
+    tsv_1gb_catalog=$(vgpu_profile_print_tsv_catalog 1024) || \
+        fail "1 GiB machine-readable GPU catalog could not be generated"
+    assert_eq 4 \
+        "$(awk -F '\t' 'NR > 1 && $8 == 1 { count++ } END { print count + 0 }' \
+            <<<"$tsv_1gb_catalog")" \
+        '1 GiB host catalog AUTO_RANDOM count'
+    grep -Fqx $'gtx750_asus_1gb\tNVIDIA GeForce GTX 750\tASUS\tGTX750-PHOC-1GD5\t1024\tSamsung\tnvidia-256\t1' \
+        <<<"$tsv_1gb_catalog" || \
+        fail '1 GiB host catalog did not publish Maxwell AUTO_RANDOM=1'
+    if awk -F '\t' '
+            NR > 1 && $8 == 1 && ($5 != 1024 || $1 ~ /^gt(730|740)/) {
+                bad = 1
+            }
+            END { exit bad ? 0 : 1 }
+        ' \
+            <<<"$tsv_1gb_catalog"; then
+        fail '1 GiB host catalog randomized another tier or Kepler identity'
+    fi
 
     [[ -r "$EVIDENCE_TSV" ]] || fail "1GB manufacturer evidence TSV is missing"
     assert_eq 13 "$(wc -l <"$EVIDENCE_TSV")" \
@@ -461,6 +488,71 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 IMAGE_ROOT="$TMP_DIR"
 VM_ROOT="$TMP_DIR/vms"
 export IMAGE_ROOT VM_ROOT
+HOST_1GB_CONFIG="$TMP_DIR/vgpu-host-1gb.conf"
+HOST_2GB_CONFIG="$TMP_DIR/vgpu-host-2gb.conf"
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=1024' >"$HOST_1GB_CONFIG"
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=2048' >"$HOST_2GB_CONFIG"
+export VGPU_HOST_CONFIG="$HOST_2GB_CONFIG"
+
+VGPU_HOST_CONFIG="$HOST_1GB_CONFIG" "$CREATE_VM" \
+    --list-gpu-profiles-tsv >"$TMP_DIR/gpu-catalog-1gb.tsv" \
+    2>"$TMP_DIR/gpu-catalog-1gb.err"
+assert_eq 4 \
+    "$(awk -F '\t' 'NR > 1 && $8 == 1 { count++ } END { print count + 0 }' \
+        "$TMP_DIR/gpu-catalog-1gb.tsv")" \
+    'create-vm management TSV follows the configured 1 GiB host tier'
+
+# Host tier input is a scheduler boundary.  Existing unsafe files and source
+# errors must never be swallowed into inferred/default 2 GiB behavior.
+ln -s "$HOST_1GB_CONFIG" "$TMP_DIR/vgpu-host-link.conf"
+if VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-link.conf" "$CREATE_VM" \
+        --list-gpu-profiles-tsv >"$TMP_DIR/host-link.out" \
+        2>"$TMP_DIR/host-link.err"; then
+    fail 'create-vm followed a symlinked host vGPU config'
+fi
+grep -Fq '可读普通非符号链接文件' "$TMP_DIR/host-link.err" || \
+    fail 'create-vm host config symlink refusal was not clear'
+
+mkdir "$TMP_DIR/vgpu-host-directory.conf"
+if VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-directory.conf" "$CREATE_VM" \
+        --list-gpu-profiles-tsv >"$TMP_DIR/host-directory.out" \
+        2>"$TMP_DIR/host-directory.err"; then
+    fail 'create-vm sourced a directory as host vGPU config'
+fi
+grep -Fq '可读普通非符号链接文件' "$TMP_DIR/host-directory.err" || \
+    fail 'create-vm host config directory refusal was not clear'
+
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=(' >"$TMP_DIR/vgpu-host-bad-syntax.conf"
+if VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-bad-syntax.conf" "$CREATE_VM" \
+        --list-gpu-profiles-tsv >"$TMP_DIR/host-syntax.out" \
+        2>"$TMP_DIR/host-syntax.err"; then
+    fail 'create-vm swallowed a host vGPU config syntax error'
+fi
+if ! grep -Fq 'VGPU_HOST_CONFIG 加载失败' "$TMP_DIR/host-syntax.err" &&
+        ! grep -Eq 'syntax error|unexpected EOF' "$TMP_DIR/host-syntax.err"; then
+    fail 'create-vm host config syntax refusal was not clear'
+fi
+
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=1024' \
+    >"$TMP_DIR/vgpu-host-unreadable.conf"
+chmod 000 "$TMP_DIR/vgpu-host-unreadable.conf"
+if VGPU_HOST_CONFIG="$TMP_DIR/vgpu-host-unreadable.conf" "$CREATE_VM" \
+        --list-gpu-profiles-tsv >"$TMP_DIR/host-unreadable.out" \
+        2>"$TMP_DIR/host-unreadable.err"; then
+    chmod 600 "$TMP_DIR/vgpu-host-unreadable.conf"
+    fail 'create-vm accepted an unreadable host vGPU config'
+fi
+chmod 600 "$TMP_DIR/vgpu-host-unreadable.conf"
+grep -Fq '可读普通非符号链接文件' "$TMP_DIR/host-unreadable.err" || \
+    fail 'create-vm unreadable host config refusal was not clear'
+
+if VGPU_HOST_CONFIG="$TMP_DIR/missing-vgpu-host.conf" "$CREATE_VM" \
+        --list-gpu-profiles-tsv >"$TMP_DIR/host-missing.out" \
+        2>"$TMP_DIR/host-missing.err"; then
+    fail 'create-vm accepted a missing explicit host vGPU config'
+fi
+grep -Fq 'VGPU_HOST_CONFIG 不存在' "$TMP_DIR/host-missing.err" || \
+    fail 'create-vm missing explicit host config refusal was not clear'
 
 test_create_profile() {
     local key="$1" vm_id="$2" order="$3" conf
@@ -495,11 +587,15 @@ test_create_profile() {
     expected_implementation="$GPU_IMPLEMENTATION"
     expected_chip_revision="$GPU_CHIP_REVISION"
     expected_pcie_width="$GPU_PCIE_WIDTH"
+    local -a create_env=()
+    if [[ "$expected_vram" == 1024 ]]; then
+        create_env=(env "VGPU_HOST_CONFIG=$HOST_1GB_CONFIG")
+    fi
     if [[ "$order" == "option-first" ]]; then
-        "$CREATE_VM" --gpu-profile "$key" "$vm_id" \
+        "${create_env[@]}" "$CREATE_VM" --gpu-profile "$key" "$vm_id" \
             >"$TMP_DIR/create-$vm_id.out" 2>"$TMP_DIR/create-$vm_id.err"
     else
-        "$CREATE_VM" "$vm_id" --gpu-profile "$key" \
+        "${create_env[@]}" "$CREATE_VM" "$vm_id" --gpu-profile "$key" \
             >"$TMP_DIR/create-$vm_id.out" 2>"$TMP_DIR/create-$vm_id.err"
     fi
 
@@ -758,10 +854,15 @@ test_create_profile gtx1050_2gb 102 option-first
 # Exercise shell-safe vm.conf serialization for the only catalog label that
 # contains whitespace; fixed Samsung defaults used to hide this failure.
 test_create_profile gtx750ti_msi_2gb 105 vm-first
-test_create_profile gt740_zotac_1gb 106 option-first
-test_create_profile gt730_gigabyte_1gb 107 vm-first
 # Exercises the fourth audited VRAM maker and the GTX 750 (not RTX 750) row.
 test_create_profile gtx750_gigabyte_1gb 108 option-first
+if VGPU_HOST_CONFIG="$HOST_1GB_CONFIG" "$CREATE_VM" 106 \
+        --gpu-profile gt740_zotac_1gb \
+        >"$TMP_DIR/create-legacy.out" 2>"$TMP_DIR/create-legacy.err"; then
+    fail 'new VM accepted a Kepler legacy-only identity'
+fi
+grep -Fq 'Kepler/R470' "$TMP_DIR/create-legacy.err" || \
+    fail 'Kepler new-VM refusal was not clear'
 test_create_random_profile
 test_unknown_profile_fails
 test_force_gpu_policy

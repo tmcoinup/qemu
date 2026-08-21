@@ -54,6 +54,10 @@
 : "${VGPU_MDEV_ADMIN_INSTALLER:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../host/install-vgpu-mdev-admin.sh}"
 _MDEV_MANAGED_IDENTITY_CONFIG=/etc/vgpu_unlock/profile_override.toml
 _MDEV_TRUSTED_IDENTITY_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../host/update-vgpu-mdev-identity.py"
+# Internal state lets an EXIT cleanup reuse a lock already held by an
+# interrupted allocator instead of waiting on a second flock owned by itself.
+# Callers must treat values other than "held" as not safe for a locked helper.
+_MDEV_HOST_LOCK_STATE=none
 if [[ -z "${VGPU_MDEV_IDENTITY_HELPER:-}" ]]; then
     VGPU_MDEV_IDENTITY_HELPER=$_MDEV_TRUSTED_IDENTITY_HELPER
 fi
@@ -108,6 +112,10 @@ mdev_uuid_in_use() {
 # it read-only lets an unprivileged VM launcher coordinate without truncating
 # or replacing it; unlike /run, this inode also survives a host reboot.
 _mdev_host_lock_acquire() {
+    [[ "$_MDEV_HOST_LOCK_STATE" == none ]] || {
+        mdev_err "vGPU host 全局锁状态不可重入: $_MDEV_HOST_LOCK_STATE"
+        return 1
+    }
     [[ "$VGPU_HOST_LOCK_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
         mdev_err "VGPU_HOST_LOCK_WAIT_SECONDS 必须是正整数: $VGPU_HOST_LOCK_WAIT_SECONDS"
         return 1
@@ -122,7 +130,9 @@ _mdev_host_lock_acquire() {
         return 1
     }
 
+    _MDEV_HOST_LOCK_STATE=acquiring
     exec {MDEV_HOST_LOCK_FD}<"$VGPU_HOST_LOCK_FILE" || {
+        _MDEV_HOST_LOCK_STATE=none
         mdev_err "无法打开 vGPU host 全局锁: $VGPU_HOST_LOCK_FILE"
         return 1
     }
@@ -130,16 +140,23 @@ _mdev_host_lock_acquire() {
         mdev_err "等待 vGPU host 全局锁超时: $VGPU_HOST_LOCK_FILE"
         exec {MDEV_HOST_LOCK_FD}<&-
         unset MDEV_HOST_LOCK_FD
+        _MDEV_HOST_LOCK_STATE=none
         return 1
     }
+    _MDEV_HOST_LOCK_STATE=held
 }
 
 _mdev_host_lock_release() {
     local rc=0
-    [[ -n "${MDEV_HOST_LOCK_FD:-}" ]] || return 0
+    if [[ -z "${MDEV_HOST_LOCK_FD:-}" ]]; then
+        _MDEV_HOST_LOCK_STATE=none
+        return 0
+    fi
+    _MDEV_HOST_LOCK_STATE=releasing
     flock -u "$MDEV_HOST_LOCK_FD" || rc=1
     exec {MDEV_HOST_LOCK_FD}<&- || rc=1
     unset MDEV_HOST_LOCK_FD
+    _MDEV_HOST_LOCK_STATE=none
     return "$rc"
 }
 
@@ -614,6 +631,69 @@ mdev_active_framebuffer_mb() {
     echo "$total"
 }
 
+# Equal-size is a scheduler/RM contract, not merely a capacity calculation.
+# NVIDIA vGPU 16 permits different A/B/Q series on one physical GPU only when
+# their framebuffer amount is the same.  Read every active mdev's real type
+# while the host allocation lock is held; an unreadable or different size is
+# fail-closed so a stale VM cannot race a new allocation into another tier.
+mdev_validate_active_framebuffer_tier() {
+    local type_dir=$1 requested_fb_mb=$2 parent d fb active_type active_name
+    local resolved active_parent uuid
+
+    [[ "$requested_fb_mb" =~ ^[1-9][0-9]*$ ]] || {
+        mdev_err "请求 framebuffer 档位必须是正整数: $requested_fb_mb"
+        return 1
+    }
+    parent=$(_mdev_parent_for_type "$type_dir") || return 1
+    if [[ ! -d "$MDEV_DEVICES_DIR" || -L "$MDEV_DEVICES_DIR" ||
+          ! -r "$MDEV_DEVICES_DIR" || ! -x "$MDEV_DEVICES_DIR" ]]; then
+        mdev_err "mdev devices 目录缺失、不可遍历或不安全: $MDEV_DEVICES_DIR"
+        return 1
+    fi
+
+    for d in "$MDEV_DEVICES_DIR"/*; do
+        # An unmatched glob is the only valid non-entry.  Real mdev bus entries
+        # are UUID symlinks; anything else means the active set is not safely
+        # enumerable and must not be interpreted as an empty GPU.
+        [[ -e "$d" || -L "$d" ]] || continue
+        if [[ ! -L "$d" ]]; then
+            mdev_err "mdev devices 目录含非符号链接条目，无法安全归属: $d"
+            return 1
+        fi
+        uuid=$(basename -- "$d")
+        if [[ ! "$uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+            mdev_err "mdev devices 目录含非法 UUID 条目: $uuid"
+            return 1
+        fi
+        resolved=$(readlink -f "$d" 2>/dev/null || true)
+        active_type=$(readlink -f "$d/mdev_type" 2>/dev/null || true)
+        if [[ -z "$resolved" || ! -d "$resolved" ||
+              "${resolved##*/}" != "$uuid" ||
+              -z "$active_type" || ! -d "$active_type" ]]; then
+            mdev_err "无法确认活动 mdev $uuid 的 parent/type 归属"
+            return 1
+        fi
+        active_parent=$(_mdev_parent_for_type "$active_type" 2>/dev/null || true)
+        if [[ -z "$active_parent" || "$active_parent" != "${resolved%/*}" ]]; then
+            mdev_err "活动 mdev $uuid 的设备 parent 与 mdev_type 不一致"
+            return 1
+        fi
+        # A fully resolved instance on another physical GPU is irrelevant to
+        # this allocation.  Only that positive attribution may be skipped.
+        [[ "$active_parent" == "$parent" ]] || continue
+        fb=$(mdev_type_framebuffer_mb "$d/mdev_type" 2>/dev/null || true)
+        if [[ ! "$fb" =~ ^[1-9][0-9]*$ ]]; then
+            mdev_err "无法确认活动 mdev $(basename "$d") 的 framebuffer 档位: ${active_type:-unknown}"
+            return 1
+        fi
+        if (( fb != requested_fb_mb )); then
+            active_name=$(cat "$d/mdev_type/name" 2>/dev/null || true)
+            mdev_err "同一物理 GPU 禁止混合 framebuffer 档位: 活动 $(basename "$d")=${active_name:-$(basename "$active_type")}/${fb}MB，请求 ${requested_fb_mb}MB"
+            return 1
+        fi
+    done
+}
+
 mdev_configure_console_interval() {
     local uuid=$1 interval_us=$2
     local mdev_dir=$MDEV_DEVICES_DIR/$uuid
@@ -742,6 +822,7 @@ _mdev_allocate_locked() {
         mdev_err "profile 显存不匹配: $profile 实际 ${actual_fb_mb}MB，请求 ${requested_fb_mb}MB"
         return 1
     fi
+    mdev_validate_active_framebuffer_tier "$type_dir" "$requested_fb_mb" || return 1
 
     mdev_dir=$MDEV_DEVICES_DIR/$uuid
     if [[ -L "$mdev_dir" ]]; then
@@ -821,10 +902,51 @@ _mdev_allocate_locked() {
 }
 
 mdev_allocate() {
-    local rc
+    local rc release_rc=0 uuid=${2:-} existed_before=0
     _mdev_host_lock_acquire || return 1
+    # Take the ownership snapshot under the same host lock as create/remove.
+    # Otherwise a concurrent creator of the same UUID could be mistaken for
+    # an object owned by this call and be removed by the failure rollback.
+    [[ -z "$uuid" || ! -L "$MDEV_DEVICES_DIR/$uuid" ]] || existed_before=1
     if _mdev_allocate_locked "$@"; then rc=0; else rc=$?; fi
-    _mdev_host_lock_release || { ((rc != 0)) || rc=1; }
+    # A privileged create can succeed just before a later validation/helper
+    # reports failure.  While the original host lock is still held, roll back
+    # only a UUID that did not exist when this API call began.
+    if ((rc != 0 && existed_before == 0)) &&
+            [[ -n "$uuid" && -L "$MDEV_DEVICES_DIR/$uuid" ]]; then
+        mdev_err "分配失败后检测到本次新建 mdev，执行锁内回滚: $uuid"
+        if ! _mdev_release_locked "$uuid" ||
+                [[ -L "$MDEV_DEVICES_DIR/$uuid" ]]; then
+            mdev_err "分配失败后的 mdev 回滚未完成，保留上层 recovery 记录: $uuid"
+        fi
+    fi
+    if _mdev_host_lock_release; then
+        release_rc=0
+    else
+        release_rc=$?
+        ((release_rc != 0)) || release_rc=1
+    fi
+    # A successful create followed by a lock-release error is still an API
+    # failure.  Reacquire before best-effort rollback; start-vm's pending-new
+    # recovery guard covers the exceptional case where reacquire also fails.
+    if ((rc == 0 && release_rc != 0)); then
+        rc=$release_rc
+        if ((existed_before == 0)) && [[ -n "$uuid" ]]; then
+            mdev_err "分配完成但 host 锁释放失败，尝试重新加锁回滚: $uuid"
+            if _mdev_host_lock_acquire; then
+                if [[ -L "$MDEV_DEVICES_DIR/$uuid" ]] &&
+                        ! _mdev_release_locked "$uuid"; then
+                    mdev_err "host 锁异常后的 mdev 回滚失败: $uuid"
+                elif [[ -L "$MDEV_DEVICES_DIR/$uuid" ]]; then
+                    mdev_err "host 锁异常后的 mdev remove 返回成功但 UUID 仍存在: $uuid"
+                fi
+                _mdev_host_lock_release ||
+                    mdev_err "mdev 回滚后 host 锁仍无法释放: $uuid"
+            else
+                mdev_err "无法重新取得 host 锁；由上层 recovery 守卫处理: $uuid"
+            fi
+        fi
+    fi
     return "$rc"
 }
 
@@ -849,4 +971,70 @@ mdev_release() {
     if _mdev_release_locked "$@"; then rc=0; else rc=$?; fi
     _mdev_host_lock_release || { ((rc != 0)) || rc=1; }
     return "$rc"
+}
+
+# Resolve the start-vm allocation handoff without guessing ownership.  The
+# caller records pending-new/pending-existing before mdev_allocate and changes
+# it to active only after the API succeeds.  During an EXIT trap the allocator
+# may still own the host lock, so use the locked primitive only in that exact
+# state; acquiring/releasing are deliberately left for recovery instead of
+# risking an unsafe mutation or a self-deadlock.
+mdev_cleanup_allocation_state() {
+    local state=$1 uuid=$2 recovery_file=${3:-}
+    local release_required=0 release_ok=0
+
+    [[ "$uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
+        mdev_err "cleanup 收到非法 mdev UUID: $uuid"
+        return 1
+    }
+    case "$state" in
+        active)
+            release_required=1
+            ;;
+        pending-new)
+            [[ ! -L "$MDEV_DEVICES_DIR/$uuid" ]] || release_required=1
+            ;;
+        pending-existing)
+            # The failed launch never owned this pre-existing object.
+            return 0
+            ;;
+        *)
+            mdev_err "未知 mdev cleanup 状态: $state"
+            return 1
+            ;;
+    esac
+
+    if ((release_required)); then
+        case "${_MDEV_HOST_LOCK_STATE:-none}" in
+            held)
+                if _mdev_release_locked "$uuid"; then release_ok=1; fi
+                ;;
+            none)
+                if mdev_release "$uuid"; then release_ok=1; fi
+                ;;
+            *)
+                mdev_err "host 锁处于 ${_MDEV_HOST_LOCK_STATE:-unknown}，保留 recovery 记录: $uuid"
+                ;;
+        esac
+        if ((release_ok)) && [[ ! -L "$MDEV_DEVICES_DIR/$uuid" ]]; then
+            if [[ -n "$recovery_file" ]] && ! rm -f -- "$recovery_file"; then
+                mdev_err "mdev 已回收但 recovery 记录无法删除: $recovery_file"
+                return 1
+            fi
+            return 0
+        fi
+        if [[ -n "$recovery_file" ]]; then
+            mdev_err "mdev 回收失败，保留 $recovery_file ($uuid)"
+        else
+            mdev_err "mdev 回收失败，UUID=$uuid（恢复记录尚未建立）"
+        fi
+        return 1
+    fi
+
+    # pending-new can fail before the kernel object appears.  Its prewritten
+    # marker is then stale and safe to remove.
+    if [[ -n "$recovery_file" ]] && ! rm -f -- "$recovery_file"; then
+        mdev_err "未创建 mdev，但 recovery 记录无法删除: $recovery_file"
+        return 1
+    fi
 }

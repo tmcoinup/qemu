@@ -81,11 +81,18 @@ install_line=$(grep -nF 'Invoke-NativeD3D12Probes $payload' "$COORDINATOR" |
 write_line=$(grep -nF 'Copy-PayloadDurably $payload' "$COORDINATOR" |
     head -n 1 | cut -d: -f1)
 [[ -n "$install_line" && -n "$write_line" && "$install_line" -lt "$write_line" ]] || \
-    fail 'native D3D12 gate is not before the first durable payload write'
+    fail 'native D3D12 audit is not before the first durable payload write'
 [[ $(grep -Fc 'Invoke-NativeD3D12Probes $payload' "$COORDINATOR") -eq 2 ]] || \
-    fail 'native D3D12 gate must run during both Install and Verify'
+    fail 'native D3D12 audit must run during both Install and Verify'
+grep -Fq '$output = (& $probe 2>&1 | Out-String)' "$COORDINATOR" || \
+    fail 'automatic clone flow must query native D3D12 without enforcing target tier'
+if grep -Fq "& \$probe '--require-tier-zero'" "$COORDINATOR"; then
+    fail 'automatic clone flow still rejects a healthy signed transport by DXR tier'
+fi
+grep -Fq 'native_raytracing_nonzero=yes' "$COORDINATOR" || \
+    fail 'automatic clone flow does not surface the native transport mismatch'
 for name in D3D12CapabilityProbe32.exe D3D12CapabilityProbe64.exe; do
     grep -Fq "$name" "$PACKAGER" || fail "system package omits $name"
 done
 
-echo 'PASS: native x86/x64 D3D12 OPTIONS5 probes are generic, reproducible and fail-closed'
+echo 'PASS: native x86/x64 D3D12 probes are reproducible, query-fail-closed and mismatch-visible'

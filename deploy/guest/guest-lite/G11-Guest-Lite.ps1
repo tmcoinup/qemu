@@ -4,20 +4,24 @@
   Audit, apply, or roll back the G-11 Windows 10 guest lite profile.
 
 .DESCRIPTION
-  The full profile disables Microsoft Defender Antivirus, Windows Update, and
-  Microsoft Store access; unregisters a reviewed list of consumer Appx apps
-  for the interactive user; and disables a reviewed list of optional services
-  and scheduled tasks.
+  The full profile disables Microsoft Defender Antivirus, Windows and common
+  software auto-updaters, Microsoft Store, OneDrive/cloud sync, news/weather
+  feeds, consumer Appx apps, background activity, and reviewed optional
+  services/tasks. It also selects the built-in High performance power plan and
+  reduces desktop animation/startup delay for the interactive user.
 
   The tool does not bypass Tamper Protection, remove provisioned Appx payloads,
-  modify BCD or driver-signing policy, change kernel drivers, disable Windows
-  Firewall, or delete Windows component-store files. Original registry,
-  service, and task state is saved under C:\ProgramData\G11GuestLite.
+  modify BCD or driver-signing policy, change kernel drivers, delete firewall
+  rules/service files, or delete Windows component-store files. Original
+  registry, firewall, power, service, task, and app state is saved under
+  C:\ProgramData\G11GuestLite.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit', 'Apply', 'Rollback')]
-    [string]$Mode = 'Audit'
+    [ValidateSet('Audit', 'Apply', 'CloneApply', 'Rollback', 'Enforce')]
+    [string]$Mode = 'Audit',
+    [ValidatePattern('^$|^S-1-5-[0-9-]+$')]
+    [string]$UserSid = ''
 )
 
 Set-StrictMode -Version 2.0
@@ -28,15 +32,27 @@ $StateRoot = Join-Path $env:ProgramData 'G11GuestLite'
 $StatePath = Join-Path $StateRoot 'state.json'
 $ReportRoot = Join-Path $StateRoot 'reports'
 $ToolRoot = Join-Path $StateRoot 'tools'
-$SchemaVersion = 1
+$SchemaVersion = 4
+$MinimumSchemaVersion = 1
+$EnforcementTaskPath = '\'
+$EnforcementTaskName = 'G11GuestLite-EnforceProfile'
+$EnforcementLogPath = Join-Path $StateRoot 'enforce-last.txt'
+$FirewallServiceName = 'MpsSvc'
+$LocalPolicyRoot = Join-Path $env:SystemRoot 'System32\GroupPolicy'
+$MachinePolicyPath = Join-Path $LocalPolicyRoot 'Machine\Registry.pol'
+$UserPolicyPath = Join-Path $LocalPolicyRoot 'User\Registry.pol'
+$PolicyMetadataPath = Join-Path $LocalPolicyRoot 'gpt.ini'
 
 # Policy values only. The tool never changes Defender service ACLs or deletes
 # Defender files. Windows 10 1903+ requires Tamper Protection to be turned off
 # manually before these policies can take effect.
 $RegistryPlan = @(
-    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'; Name = 'DisableAntiSpyware'; Type = 'DWord'; Value = 1; Group = 'Defender' },
-    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'; Name = 'DisableAntiVirus'; Type = 'DWord'; Value = 1; Group = 'Defender' },
-    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'; Name = 'ServiceKeepAlive'; Type = 'DWord'; Value = 0; Group = 'Defender' },
+    # DisableAntiSpyware is a legacy value that current Defender platforms can
+    # protect or ignore even with Tamper Protection off. Keep requesting it,
+    # but judge success from the supported runtime protection fields below.
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'; Name = 'DisableAntiSpyware'; Type = 'DWord'; Value = 1; Group = 'Defender'; Required = $false },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'; Name = 'DisableAntiVirus'; Type = 'DWord'; Value = 1; Group = 'Defender'; Required = $false },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'; Name = 'ServiceKeepAlive'; Type = 'DWord'; Value = 0; Group = 'Defender'; Required = $false },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection'; Name = 'DisableRealtimeMonitoring'; Type = 'DWord'; Value = 1; Group = 'Defender' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection'; Name = 'DisableBehaviorMonitoring'; Type = 'DWord'; Value = 1; Group = 'Defender' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection'; Name = 'DisableOnAccessProtection'; Type = 'DWord'; Value = 1; Group = 'Defender' },
@@ -56,16 +72,50 @@ $RegistryPlan = @(
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name = 'SetDisableUXWUAccess'; Type = 'DWord'; Value = 1; Group = 'WindowsUpdate' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate'; Type = 'DWord'; Value = 1; Group = 'WindowsUpdate' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'AUOptions'; Type = 'DWord'; Value = 2; Group = 'WindowsUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'; Name = 'DODownloadMode'; Type = 'DWord'; Value = 0; Group = 'WindowsUpdate' },
+
+    # Keep installed desktop software usable while stopping the reviewed
+    # vendor updaters. These are documented vendor policies; services/tasks
+    # below are also disabled because consumer Windows may ignore domain-only
+    # policy applicability.
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate'; Name = 'UpdateDefault'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate'; Name = 'AutoUpdateCheckPeriodMinutes'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate'; Name = 'EnableAutomaticUpdates'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Google\Update'; Name = 'UpdateDefault'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Google\Update'; Name = 'AutoUpdateCheckPeriodMinutes'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Google\Chrome'; Name = 'ComponentUpdatesEnabled'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Mozilla\Firefox'; Name = 'DisableAppUpdate'; Type = 'DWord'; Value = 1; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Mozilla\Firefox'; Name = 'BackgroundAppUpdate'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Adobe\Acrobat Reader\DC\FeatureLockDown'; Name = 'bUpdater'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Adobe\Adobe Acrobat\DC\FeatureLockDown'; Name = 'bUpdater'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\WOW6432Node\Policies\Adobe\Acrobat Reader\DC\FeatureLockDown'; Name = 'bUpdater'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\WOW6432Node\Policies\Adobe\Adobe Acrobat\DC\FeatureLockDown'; Name = 'bUpdater'; Type = 'DWord'; Value = 0; Group = 'SoftwareUpdate' },
 
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore'; Name = 'RemoveWindowsStore'; Type = 'DWord'; Value = 1; Group = 'Store' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\WindowsStore'; Name = 'RemoveWindowsStore'; Type = 'DWord'; Value = 1; Group = 'Store' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore'; Name = 'AutoDownload'; Type = 'DWord'; Value = 2; Group = 'Store' },
 
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive'; Name = 'DisableFileSyncNGSC'; Type = 'DWord'; Value = 1; Group = 'Cloud' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\SettingSync'; Name = 'DisableSettingSync'; Type = 'DWord'; Value = 2; Group = 'Cloud' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\SettingSync'; Name = 'DisableSettingSyncUserOverride'; Type = 'DWord'; Value = 1; Group = 'Cloud' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'EnableActivityFeed'; Type = 'DWord'; Value = 0; Group = 'Cloud' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'PublishUserActivities'; Type = 'DWord'; Value = 0; Group = 'Cloud' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'UploadUserActivities'; Type = 'DWord'; Value = 0; Group = 'Cloud' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'AllowCrossDeviceClipboard'; Type = 'DWord'; Value = 0; Group = 'Cloud' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds'; Name = 'EnableFeeds'; Type = 'DWord'; Value = 0; Group = 'NewsWeather' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Feeds'; Name = 'ShellFeedsTaskbarViewMode'; Type = 'DWord'; Value = 2; Group = 'NewsWeather' },
+
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'; Name = 'AllowTelemetry'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; Name = 'DisableWindowsConsumerFeatures'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; Name = 'DisableTailoredExperiencesWithDiagnosticData'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; Name = 'DisableWindowsSpotlightFeatures'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; Name = 'DisableThirdPartySuggestions'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; Name = 'DisableSoftLanding'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; Name = 'DisableCloudOptimizedContent'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search'; Name = 'AllowCortana'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search'; Name = 'DisableWebSearch'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search'; Name = 'AllowCloudSearch'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; Name = 'LetAppsRunInBackground'; Type = 'DWord'; Value = 2; Group = 'Background' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer'; Name = 'DisableSearchBoxSuggestions'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AdvertisingInfo'; Name = 'Enabled'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'; Name = 'ContentDeliveryAllowed'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
@@ -79,10 +129,32 @@ $RegistryPlan = @(
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'; Name = 'SubscribedContent-338389Enabled'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'; Name = 'SubscribedContent-353694Enabled'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'; Name = 'SubscribedContent-353696Enabled'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications'; Name = 'GlobalUserDisabled'; Type = 'DWord'; Value = 1; Group = 'Background' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search'; Name = 'BackgroundAppGlobalToggle'; Type = 'DWord'; Value = 0; Group = 'Background' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting'; Name = 'Disabled'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; Name = 'AllowGameDVR'; Type = 'DWord'; Value = 0; Group = 'Gaming' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR'; Name = 'AppCaptureEnabled'; Type = 'DWord'; Value = 0; Group = 'Gaming' },
-    [pscustomobject]@{ Path = 'HKCU:\System\GameConfigStore'; Name = 'GameDVR_Enabled'; Type = 'DWord'; Value = 0; Group = 'Gaming' }
+    [pscustomobject]@{ Path = 'HKCU:\System\GameConfigStore'; Name = 'GameDVR_Enabled'; Type = 'DWord'; Value = 0; Group = 'Gaming' },
+
+    [pscustomobject]@{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling'; Name = 'PowerThrottlingOff'; Type = 'DWord'; Value = 1; Group = 'Performance' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Serialize'; Name = 'StartupDelayInMSec'; Type = 'DWord'; Value = 0; Group = 'Performance' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Name = 'TaskbarAnimations'; Type = 'DWord'; Value = 0; Group = 'Performance' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'; Name = 'EnableTransparency'; Type = 'DWord'; Value = 0; Group = 'Performance' },
+    [pscustomobject]@{ Path = 'HKCU:\Control Panel\Desktop'; Name = 'MenuShowDelay'; Type = 'String'; Value = '0'; Group = 'Performance' }
+)
+
+# Values in this list are removed, not blanked, and use the same exact
+# snapshot/rollback machinery as set-valued policy entries.
+$RegistryRemovePlan = @(
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; Name = 'OneDrive'; Group = 'Cloud' }
+)
+
+# Earlier releases selected the global "best performance" visual-effects
+# preset. That preset can hide the desktop background and disable font
+# smoothing, so 2.2 retires it and restores the original per-user value from
+# the first rollback baseline. Keep it allowlisted only for safe restoration.
+$RetiredRegistryPlan = @(
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'; Name = 'VisualFXSetting'; Group = 'PreservedAppearance' }
 )
 
 # Apply the same Defender intent through its supported live configuration
@@ -105,15 +177,35 @@ $DefenderPreferencePlan = @(
     [pscustomobject]@{ Name = 'ThrottleForScheduledScanOnly'; Value = $false; Required = $false }
 )
 
-# Exact service names only. Core networking, audio, printing, search, BITS,
-# cryptography, firewall, AppX infrastructure, and NVIDIA services are absent
-# intentionally. Missing services are harmless and are reported as such.
+# Exact service names only. BFE and the rest of core networking, audio,
+# printing, BITS, cryptography, AppX infrastructure, and NVIDIA services remain
+# untouched. MpsSvc is the one explicit firewall exception requested for the
+# controlled VM: profiles are disabled first, then its startup is disabled.
+# Missing services are harmless and are reported as such.
 $ServicePlan = @(
+    [pscustomobject]@{ Name = 'MpsSvc'; Group = 'Firewall'; Purpose = 'Windows Defender Firewall startup and runtime' },
     [pscustomobject]@{ Name = 'wuauserv'; Group = 'WindowsUpdate'; Purpose = 'Windows Update' },
     [pscustomobject]@{ Name = 'UsoSvc'; Group = 'WindowsUpdate'; Purpose = 'Update Orchestrator' },
-    [pscustomobject]@{ Name = 'DoSvc'; Group = 'WindowsUpdate'; Purpose = 'Delivery Optimization' },
+    # DoSvc is protected on current Windows builds. Windows Update is blocked
+    # by policy and wuauserv/UsoSvc, while Delivery Optimization peer traffic
+    # is disabled by DODownloadMode. A resident DoSvc is therefore inert and
+    # is reported without turning a supported-access denial into Apply failure.
+    [pscustomobject]@{ Name = 'DoSvc'; Group = 'WindowsUpdate'; Purpose = 'Delivery Optimization (protected/inert)'; Required = $false },
+    [pscustomobject]@{ Name = 'uhssvc'; Group = 'WindowsUpdate'; Purpose = 'Microsoft Update Health Service' },
     [pscustomobject]@{ Name = 'InstallService'; Group = 'Store'; Purpose = 'Microsoft Store Install Service' },
     [pscustomobject]@{ Name = 'PushToInstall'; Group = 'Store'; Purpose = 'Windows PushToInstall' },
+    [pscustomobject]@{ Name = 'edgeupdate'; Group = 'SoftwareUpdate'; Purpose = 'Microsoft Edge Update' },
+    [pscustomobject]@{ Name = 'edgeupdatem'; Group = 'SoftwareUpdate'; Purpose = 'Microsoft Edge Update on demand' },
+    [pscustomobject]@{ Name = 'MicrosoftEdgeElevationService'; Group = 'SoftwareUpdate'; Purpose = 'Microsoft Edge elevation/update helper' },
+    [pscustomobject]@{ Name = 'gupdate'; Group = 'SoftwareUpdate'; Purpose = 'Google Update' },
+    [pscustomobject]@{ Name = 'gupdatem'; Group = 'SoftwareUpdate'; Purpose = 'Google Update on demand' },
+    [pscustomobject]@{ Name = 'AdobeARMservice'; Group = 'SoftwareUpdate'; Purpose = 'Adobe Acrobat Update' },
+    [pscustomobject]@{ Name = 'MozillaMaintenance'; Group = 'SoftwareUpdate'; Purpose = 'Mozilla Maintenance/Update' },
+    [pscustomobject]@{ Name = 'SysMain'; Group = 'Performance'; Purpose = 'SysMain prefetch background I/O' },
+    [pscustomobject]@{ Name = 'WSearch'; Group = 'Performance'; Purpose = 'Windows Search indexing' },
+    [pscustomobject]@{ Name = 'CDPSvc'; Group = 'Optional'; Purpose = 'Connected Devices Platform' },
+    [pscustomobject]@{ Name = 'DusmSvc'; Group = 'Optional'; Purpose = 'Data Usage collection' },
+    [pscustomobject]@{ Name = 'WpnService'; Group = 'Optional'; Purpose = 'Windows push notifications' },
     [pscustomobject]@{ Name = 'DiagTrack'; Group = 'Optional'; Purpose = 'Connected User Experiences and Telemetry' },
     [pscustomobject]@{ Name = 'dmwappushservice'; Group = 'Optional'; Purpose = 'WAP push telemetry routing' },
     [pscustomobject]@{ Name = 'MapsBroker'; Group = 'Optional'; Purpose = 'Downloaded Maps Manager' },
@@ -128,7 +220,21 @@ $ServicePlan = @(
     [pscustomobject]@{ Name = 'XblGameSave'; Group = 'Optional'; Purpose = 'Xbox Live game save' },
     [pscustomobject]@{ Name = 'XboxNetApiSvc'; Group = 'Optional'; Purpose = 'Xbox Live networking' },
     [pscustomobject]@{ Name = 'WerSvc'; Group = 'Optional'; Purpose = 'Windows Error Reporting' },
-    [pscustomobject]@{ Name = 'RemoteRegistry'; Group = 'Optional'; Purpose = 'Remote Registry' }
+    [pscustomobject]@{ Name = 'RemoteRegistry'; Group = 'Optional'; Purpose = 'Remote Registry' },
+    [pscustomobject]@{ Name = 'diagnosticshub.standardcollector.service'; Group = 'Optional'; Purpose = 'Diagnostics Hub collector' },
+    [pscustomobject]@{ Name = 'TrkWks'; Group = 'Optional'; Purpose = 'Distributed Link Tracking' },
+    [pscustomobject]@{ Name = 'WbioSrvc'; Group = 'Optional'; Purpose = 'Windows biometric service' },
+    [pscustomobject]@{ Name = 'icssvc'; Group = 'Optional'; Purpose = 'Mobile hotspot service' },
+    [pscustomobject]@{ Name = 'AJRouter'; Group = 'Optional'; Purpose = 'AllJoyn router' },
+    [pscustomobject]@{ Name = 'SharedRealitySvc'; Group = 'Optional'; Purpose = 'Spatial data service' }
+)
+
+# Newer vendor updater services have versioned names. Discovery is constrained
+# to these anchored allowlist patterns; arbitrary "update" services are never
+# touched.
+$ServicePatternPlan = @(
+    [pscustomobject]@{ Pattern = '^GoogleUpdater(?:Internal)?Service[0-9._-]+$'; Group = 'SoftwareUpdate'; Purpose = 'Google Updater versioned service' },
+    [pscustomobject]@{ Pattern = '^OneDriveUpdaterService[0-9A-Za-z._-]*$'; Group = 'Cloud'; Purpose = 'OneDrive updater service' }
 )
 
 $TaskPlan = @(
@@ -136,14 +242,14 @@ $TaskPlan = @(
     [pscustomobject]@{ Path = '\Microsoft\Windows\Windows Defender\'; Name = 'Windows Defender Cleanup'; Group = 'Defender' },
     [pscustomobject]@{ Path = '\Microsoft\Windows\Windows Defender\'; Name = 'Windows Defender Scheduled Scan'; Group = 'Defender' },
     [pscustomobject]@{ Path = '\Microsoft\Windows\Windows Defender\'; Name = 'Windows Defender Verification'; Group = 'Defender' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'Schedule Scan'; Group = 'WindowsUpdate' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'Schedule Scan Static Task'; Group = 'WindowsUpdate' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'USO_UxBroker'; Group = 'WindowsUpdate' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'UpdateModelTask'; Group = 'WindowsUpdate' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'Maintenance Install'; Group = 'WindowsUpdate' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\WindowsUpdate\'; Name = 'Scheduled Start'; Group = 'WindowsUpdate' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\WindowsUpdate\'; Name = 'sih'; Group = 'WindowsUpdate' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\WindowsUpdate\'; Name = 'sihboot'; Group = 'WindowsUpdate' },
+    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'Schedule Scan'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'Schedule Scan Static Task'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'USO_UxBroker'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'UpdateModelTask'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ Path = '\Microsoft\Windows\UpdateOrchestrator\'; Name = 'Maintenance Install'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ Path = '\Microsoft\Windows\WindowsUpdate\'; Name = 'Scheduled Start'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ Path = '\Microsoft\Windows\WindowsUpdate\'; Name = 'sih'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ Path = '\Microsoft\Windows\WindowsUpdate\'; Name = 'sihboot'; Group = 'WindowsUpdate'; Required = $false },
     [pscustomobject]@{ Path = '\Microsoft\Windows\Application Experience\'; Name = 'Microsoft Compatibility Appraiser'; Group = 'Optional' },
     [pscustomobject]@{ Path = '\Microsoft\Windows\Application Experience\'; Name = 'ProgramDataUpdater'; Group = 'Optional' },
     [pscustomobject]@{ Path = '\Microsoft\Windows\Application Experience\'; Name = 'StartupAppTask'; Group = 'Optional' },
@@ -157,7 +263,28 @@ $TaskPlan = @(
     [pscustomobject]@{ Path = '\Microsoft\Windows\Maps\'; Name = 'MapsUpdateTask'; Group = 'Optional' },
     [pscustomobject]@{ Path = '\Microsoft\Windows\PushToInstall\'; Name = 'LoginCheck'; Group = 'Store' },
     [pscustomobject]@{ Path = '\Microsoft\Windows\PushToInstall\'; Name = 'Registration'; Group = 'Store' },
-    [pscustomobject]@{ Path = '\Microsoft\Windows\Windows Error Reporting\'; Name = 'QueueReporting'; Group = 'Optional' }
+    [pscustomobject]@{ Path = '\Microsoft\Windows\Windows Error Reporting\'; Name = 'QueueReporting'; Group = 'Optional' },
+    [pscustomobject]@{ Path = '\Microsoft\Office\'; Name = 'Office Automatic Updates 2.0'; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = '\Microsoft\Office\'; Name = 'Office Feature Updates'; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = '\Microsoft\Office\'; Name = 'Office Feature Updates Logon'; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ Path = '\'; Name = 'Adobe Acrobat Update Task'; Group = 'SoftwareUpdate' }
+)
+
+# Folder/name discovery covers version-dependent task names while remaining a
+# strict allowlist. Every discovered task is persisted before it is changed.
+$TaskPatternPlan = @(
+    [pscustomobject]@{ PathPattern = '^\\Microsoft\\Windows\\Windows Defender\\$'; NamePattern = '^.+$'; Group = 'Defender' },
+    [pscustomobject]@{ PathPattern = '^\\Microsoft\\Windows\\UpdateOrchestrator\\$'; NamePattern = '^.+$'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ PathPattern = '^\\Microsoft\\Windows\\WindowsUpdate\\$'; NamePattern = '^.+$'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ PathPattern = '^\\Microsoft\\Windows\\WaaSMedic\\$'; NamePattern = '^.+$'; Group = 'WindowsUpdate'; Required = $false },
+    [pscustomobject]@{ PathPattern = '^\\Microsoft\\Windows\\InstallService\\$'; NamePattern = '^.+$'; Group = 'Store' },
+    [pscustomobject]@{ PathPattern = '^\\Microsoft\\Windows\\PushToInstall\\$'; NamePattern = '^.+$'; Group = 'Store' },
+    [pscustomobject]@{ PathPattern = '^\\Microsoft\\EdgeUpdate\\$'; NamePattern = '^MicrosoftEdgeUpdateTask.+$'; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ PathPattern = '^\\Microsoft\\Office\\$'; NamePattern = '^Office (?:Automatic Updates|Feature Updates).*$'; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ PathPattern = '^\\GoogleSystem\\GoogleUpdater\\$'; NamePattern = '^GoogleUpdaterTask.+$'; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ PathPattern = '^\\$'; NamePattern = '^GoogleUpdateTaskMachine.+$'; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ PathPattern = '^\\$'; NamePattern = '^Adobe Acrobat Update Task$'; Group = 'SoftwareUpdate' },
+    [pscustomobject]@{ PathPattern = '^\\$'; NamePattern = '^OneDrive (?:Standalone Update|Reporting) Task.*$'; Group = 'Cloud' }
 )
 
 # These are package identity names, never wildcard patterns. Provisioned
@@ -165,8 +292,11 @@ $TaskPlan = @(
 $AppPlan = @(
     'Microsoft.BingNews',
     'Microsoft.BingWeather',
+    'Microsoft.BingSearch',
+    'Microsoft.Copilot',
     'Microsoft.GetHelp',
     'Microsoft.Getstarted',
+    'Microsoft.GamingApp',
     'Microsoft.Messaging',
     'Microsoft.Microsoft3DViewer',
     'Microsoft.MicrosoftOfficeHub',
@@ -174,10 +304,16 @@ $AppPlan = @(
     'Microsoft.MixedReality.Portal',
     'Microsoft.Office.OneNote',
     'Microsoft.OneConnect',
+    'Microsoft.OneDriveSync',
     'Microsoft.People',
     'Microsoft.Print3D',
     'Microsoft.SkypeApp',
+    'Microsoft.Todos',
     'Microsoft.Wallet',
+    'Microsoft.WindowsAlarms',
+    'Microsoft.WindowsCamera',
+    'microsoft.windowscommunicationsapps',
+    'Microsoft.Windows.DevHome',
     'Microsoft.WindowsFeedbackHub',
     'Microsoft.WindowsMaps',
     'Microsoft.WindowsSoundRecorder',
@@ -194,6 +330,10 @@ $AppPlan = @(
     'Clipchamp.Clipchamp',
     'MicrosoftTeams',
     'MSTeams',
+    'Microsoft.OutlookForWindows',
+    'Microsoft.PowerAutomateDesktop',
+    'MicrosoftCorporationII.MicrosoftFamily',
+    'MicrosoftCorporationII.QuickAssist',
     'SpotifyAB.SpotifyMusic',
     'king.com.CandyCrushSaga',
     'king.com.CandyCrushSodaSaga',
@@ -205,6 +345,26 @@ $AppPlan = @(
     'Microsoft.StorePurchaseApp',
     'Microsoft.WindowsStore'
 )
+
+# Process names are exact executable base names. They are stopped only after
+# the corresponding policy/service/task/app controls have been applied.
+$ProcessPlan = @(
+    [pscustomobject]@{ Name = 'OneDrive'; Group = 'Cloud'; Purpose = 'OneDrive sync client' },
+    [pscustomobject]@{ Name = 'MicrosoftEdgeUpdate'; Group = 'SoftwareUpdate'; Purpose = 'Microsoft Edge updater' },
+    [pscustomobject]@{ Name = 'GoogleUpdate'; Group = 'SoftwareUpdate'; Purpose = 'Google updater' },
+    [pscustomobject]@{ Name = 'GoogleUpdater'; Group = 'SoftwareUpdate'; Purpose = 'Google updater' },
+    [pscustomobject]@{ Name = 'AdobeARM'; Group = 'SoftwareUpdate'; Purpose = 'Adobe updater' },
+    [pscustomobject]@{ Name = 'SearchIndexer'; Group = 'Performance'; Purpose = 'Windows Search indexer' },
+    [pscustomobject]@{ Name = 'GameBar'; Group = 'Gaming'; Purpose = 'Xbox Game Bar' },
+    [pscustomobject]@{ Name = 'GameBarFTServer'; Group = 'Gaming'; Purpose = 'Xbox Game Bar server' },
+    [pscustomobject]@{ Name = 'XboxGameBarWidgets'; Group = 'Gaming'; Purpose = 'Xbox Game Bar widgets' },
+    [pscustomobject]@{ Name = 'YourPhone'; Group = 'Cloud'; Purpose = 'Phone Link' },
+    [pscustomobject]@{ Name = 'PhoneExperienceHost'; Group = 'Cloud'; Purpose = 'Phone Link host' },
+    [pscustomobject]@{ Name = 'HxTsr'; Group = 'Cloud'; Purpose = 'Mail and Calendar background host' },
+    [pscustomobject]@{ Name = 'Video.UI'; Group = 'ConsumerApp'; Purpose = 'Movies and TV background host' }
+)
+
+$HighPerformanceScheme = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -291,6 +451,46 @@ function Get-OptionalRegistryValue {
     )
 }
 
+function Get-AllRegistryPlans {
+    return @($RegistryPlan) + @($RegistryRemovePlan) + @($RetiredRegistryPlan)
+}
+
+function Test-PlanRequired {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    $property = $Plan.PSObject.Properties['Required']
+    return $null -eq $property -or [bool]$property.Value
+}
+
+function Test-RegistryTargetAllowed {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    foreach ($entry in @(Get-AllRegistryPlans)) {
+        if ([string]$entry.Path -ieq $Path -and
+            [string]$entry.Name -ieq $Name) { return $true }
+    }
+    return $false
+}
+
+function Test-RegistryValueMatches {
+    param(
+        [AllowNull()][object]$Actual,
+        [AllowNull()][object]$Desired,
+        [Parameter(Mandatory = $true)][string]$Type
+    )
+
+    switch ($Type) {
+        'DWord' { return [int64]$Actual -eq [int64]$Desired }
+        'QWord' { return [uint64]$Actual -eq [uint64]$Desired }
+        'String' { return [string]$Actual -ceq [string]$Desired }
+        'ExpandString' { return [string]$Actual -ceq [string]$Desired }
+        default { return $Actual -eq $Desired }
+    }
+}
+
 function Get-RegistrySnapshot {
     param([Parameter(Mandatory = $true)][object]$Entry)
 
@@ -319,25 +519,46 @@ function Get-RegistrySnapshot {
     }
 }
 
+function Ensure-RegistryKey {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Windows PowerShell 5.1's Registry provider can recreate an existing leaf
+    # key when New-Item -Force is called, deleting sibling values already set
+    # during this same profile pass. VM1 exposed the exact symptom: only the
+    # last planned value under each key survived. Create only absent keys.
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
+    }
+}
+
 function Set-PlannedRegistryValue {
     param([Parameter(Mandatory = $true)][object]$Entry)
 
-    New-Item -Path $Entry.Path -Force | Out-Null
+    Ensure-RegistryKey -Path ([string]$Entry.Path)
     New-ItemProperty -Path $Entry.Path -Name $Entry.Name `
         -PropertyType $Entry.Type -Value $Entry.Value -Force | Out-Null
     Write-Host "  policy: $($Entry.Path)\$($Entry.Name)=$($Entry.Value)" `
         -ForegroundColor DarkGray
 }
 
+function Remove-PlannedRegistryValue {
+    param([Parameter(Mandatory = $true)][object]$Entry)
+
+    Remove-ItemProperty -LiteralPath $Entry.Path -Name $Entry.Name `
+        -ErrorAction SilentlyContinue
+    Write-Host "  startup disabled: $($Entry.Path)\$($Entry.Name)" `
+        -ForegroundColor DarkGray
+}
+
 function Restore-RegistrySnapshot {
     param([Parameter(Mandatory = $true)][object]$Snapshot)
 
-    $allowed = @($RegistryPlan | ForEach-Object { "$($_.Path)|$($_.Name)" })
-    if ($allowed -notcontains "$($Snapshot.Path)|$($Snapshot.Name)") {
+    if (-not (Test-RegistryTargetAllowed -Path ([string]$Snapshot.Path) `
+        -Name ([string]$Snapshot.Name))) {
         throw "State contains an unexpected registry target: $($Snapshot.Path)\$($Snapshot.Name)"
     }
     if ([bool]$Snapshot.ValueExisted) {
-        New-Item -Path ([string]$Snapshot.Path) -Force | Out-Null
+        Ensure-RegistryKey -Path ([string]$Snapshot.Path)
         New-ItemProperty -Path ([string]$Snapshot.Path) `
             -Name ([string]$Snapshot.Name) -PropertyType ([string]$Snapshot.Kind) `
             -Value $Snapshot.Value -Force | Out-Null
@@ -353,6 +574,511 @@ function Restore-RegistrySnapshot {
             }
         }
     }
+}
+
+function Restore-RetiredRegistryValues {
+    param([Parameter(Mandatory = $true)][object]$State)
+
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($plan in $RetiredRegistryPlan) {
+        $snapshot = @($State.Registry | Where-Object {
+            [string]$_.Path -ieq [string]$plan.Path -and
+            [string]$_.Name -ieq [string]$plan.Name
+        }) | Select-Object -First 1
+        if ($null -eq $snapshot) {
+            $failures.Add("preserved appearance baseline is missing: $($plan.Path)\$($plan.Name)")
+            continue
+        }
+        try {
+            Restore-RegistrySnapshot $snapshot
+            Write-Host "  preserved appearance restored: $($plan.Name)" `
+                -ForegroundColor DarkGray
+        } catch {
+            $failures.Add("preserved appearance $($plan.Name): $($_.Exception.Message)")
+        }
+    }
+    return $failures.ToArray()
+}
+
+function Get-PolicyFileSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Scope,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $exists = Test-Path -LiteralPath $Path -PathType Leaf
+    $bytes = [byte[]]@()
+    if ($exists) {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Local policy file is a reparse point: $Path"
+        }
+        $bytes = [IO.File]::ReadAllBytes($Path)
+    }
+    return [pscustomobject]@{
+        Scope = $Scope
+        Path = $Path
+        Existed = [bool]$exists
+        Base64 = if ($exists) { [Convert]::ToBase64String($bytes) } else { '' }
+    }
+}
+
+function Test-RegistryPolHeader {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+
+    return $Bytes.Length -ge 8 -and
+        $Bytes[0] -eq 0x50 -and $Bytes[1] -eq 0x52 -and
+        $Bytes[2] -eq 0x65 -and $Bytes[3] -eq 0x67 -and
+        [BitConverter]::ToUInt32($Bytes, 4) -eq 1
+}
+
+function Get-RegistryPolTypeCode {
+    param([Parameter(Mandatory = $true)][string]$Type)
+
+    switch ($Type) {
+        'String' { return [uint32]1 }
+        'ExpandString' { return [uint32]2 }
+        'Binary' { return [uint32]3 }
+        'DWord' { return [uint32]4 }
+        'MultiString' { return [uint32]7 }
+        'QWord' { return [uint32]11 }
+        default { throw "Unsupported Registry.pol value type: $Type" }
+    }
+}
+
+function Get-RegistryPolData {
+    param([Parameter(Mandatory = $true)][object]$Entry)
+
+    switch ([string]$Entry.Type) {
+        'DWord' {
+            return [BitConverter]::GetBytes([uint32][int64]$Entry.Value)
+        }
+        'QWord' {
+            return [BitConverter]::GetBytes([uint64]$Entry.Value)
+        }
+        'String' {
+            return [Text.Encoding]::Unicode.GetBytes(
+                ([string]$Entry.Value) + [char]0
+            )
+        }
+        'ExpandString' {
+            return [Text.Encoding]::Unicode.GetBytes(
+                ([string]$Entry.Value) + [char]0
+            )
+        }
+        'Binary' { return [byte[]]$Entry.Value }
+        'MultiString' {
+            $text = ((@($Entry.Value) | ForEach-Object { [string]$_ }) -join `
+                ([char]0)) + [char]0 + [char]0
+            return [Text.Encoding]::Unicode.GetBytes($text)
+        }
+        default { throw "Unsupported Registry.pol value type: $($Entry.Type)" }
+    }
+}
+
+function Write-BytesToStream {
+    param(
+        [Parameter(Mandatory = $true)][IO.MemoryStream]$Stream,
+        [Parameter(Mandatory = $true)][byte[]]$Bytes
+    )
+
+    $Stream.Write($Bytes, 0, $Bytes.Length)
+}
+
+function Write-RegistryPolText {
+    param(
+        [Parameter(Mandatory = $true)][IO.MemoryStream]$Stream,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+
+    Write-BytesToStream -Stream $Stream `
+        -Bytes ([Text.Encoding]::Unicode.GetBytes($Text))
+}
+
+function New-ManagedRegistryPolBytes {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][object[]]$Entries,
+        [Parameter(Mandatory = $true)][string]$HivePrefix
+    )
+
+    [byte[]]$base = if ([bool]$Snapshot.Existed) {
+        [Convert]::FromBase64String([string]$Snapshot.Base64)
+    } else {
+        [byte[]](0x50, 0x52, 0x65, 0x67, 1, 0, 0, 0)
+    }
+    if (-not (Test-RegistryPolHeader $base)) {
+        throw "Original local policy file has an unsupported header: $($Snapshot.Path)"
+    }
+
+    $stream = New-Object IO.MemoryStream
+    try {
+        Write-BytesToStream -Stream $stream -Bytes $base
+        foreach ($entry in $Entries) {
+            $path = [string]$entry.Path
+            if (-not $path.StartsWith($HivePrefix,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Registry.pol entry is outside ${HivePrefix}: $path"
+            }
+            $key = $path.Substring($HivePrefix.Length)
+            [byte[]]$data = @(Get-RegistryPolData $entry)
+            Write-RegistryPolText $stream '['
+            # MS-GPREG 2.2.1 requires both the key and value-name fields to be
+            # null-terminated UTF-16LE strings. The semicolon delimiters follow
+            # those terminators; omitting either NUL makes LocalGPO reject the
+            # complete registry policy file during gpupdate.
+            Write-RegistryPolText $stream ($key + [char]0)
+            Write-RegistryPolText $stream ';'
+            Write-RegistryPolText $stream (([string]$entry.Name) + [char]0)
+            Write-RegistryPolText $stream ';'
+            Write-BytesToStream $stream `
+                ([BitConverter]::GetBytes((Get-RegistryPolTypeCode `
+                    ([string]$entry.Type))))
+            Write-RegistryPolText $stream ';'
+            Write-BytesToStream $stream `
+                ([BitConverter]::GetBytes([uint32]$data.Length))
+            Write-RegistryPolText $stream ';'
+            Write-BytesToStream $stream $data
+            Write-RegistryPolText $stream ']'
+        }
+        return $stream.ToArray()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Write-PolicyFileAtomically {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][byte[]]$Bytes
+    )
+
+    $parent = Split-Path -Parent $Path
+    New-Item -Path $parent -ItemType Directory -Force | Out-Null
+    $parentItem = Get-Item -LiteralPath $parent -Force -ErrorAction Stop
+    if (($parentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Local policy directory is a reparse point: $parent"
+    }
+    $temporary = Join-Path $parent `
+        ('.Registry.pol.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllBytes($temporary, $Bytes)
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Write-ManagedPolicyFiles {
+    param([Parameter(Mandatory = $true)][object]$Snapshots)
+
+    foreach ($configuration in @(
+        [pscustomobject]@{
+            Scope = 'Machine'; Path = $MachinePolicyPath; Prefix = 'HKLM:\'
+        },
+        [pscustomobject]@{
+            Scope = 'User'; Path = $UserPolicyPath; Prefix = 'HKCU:\'
+        }
+    )) {
+        $property = $Snapshots.PSObject.Properties[[string]$configuration.Scope]
+        if ($null -eq $property) {
+            throw "Rollback state lacks the $($configuration.Scope) policy snapshot."
+        }
+        $snapshot = $property.Value
+        if ([string]$snapshot.Path -ine [string]$configuration.Path) {
+            throw "Unexpected local policy path in state: $($snapshot.Path)"
+        }
+        $entries = @($RegistryPlan | Where-Object {
+            ([string]$_.Path).StartsWith(
+                [string]$configuration.Prefix,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        })
+        [byte[]]$bytes = @(New-ManagedRegistryPolBytes `
+            -Snapshot $snapshot -Entries $entries `
+            -HivePrefix ([string]$configuration.Prefix))
+        Write-PolicyFileAtomically -Path ([string]$configuration.Path) `
+            -Bytes $bytes
+        Write-Host "  local policy persisted: $($configuration.Scope) Registry.pol" `
+            -ForegroundColor DarkGray
+    }
+}
+
+function Get-NextLocalPolicyVersion {
+    param([uint32]$CurrentVersion = 0)
+
+    [uint32]$machineVersion = $CurrentVersion -band 0xffff
+    [uint32]$userVersion = ($CurrentVersion -shr 16) -band 0xffff
+    $machineVersion = ($machineVersion + 1) -band 0xffff
+    $userVersion = ($userVersion + 1) -band 0xffff
+    if ($machineVersion -eq 0) { $machineVersion = 1 }
+    if ($userVersion -eq 0) { $userVersion = 1 }
+    return [uint32](($userVersion -shl 16) -bor $machineVersion)
+}
+
+function New-ManagedPolicyMetadataBytes {
+    param([Parameter(Mandatory = $true)][object]$Snapshot)
+
+    if ([string]$Snapshot.Path -ine $PolicyMetadataPath) {
+        throw "Unexpected local policy metadata path in state: $($Snapshot.Path)"
+    }
+    $text = ''
+    if ([bool]$Snapshot.Existed) {
+        [byte[]]$base = [Convert]::FromBase64String([string]$Snapshot.Base64)
+        if ($base.Count -gt 0 -and
+            [Array]::IndexOf($base, [byte]0) -ge 0) {
+            throw "Local policy metadata is not an ANSI gpt.ini file: $PolicyMetadataPath"
+        }
+        if ($base.Count -gt 0) {
+            $text = [Text.Encoding]::Default.GetString($base)
+        }
+    }
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    if (-not [string]::IsNullOrEmpty($text)) {
+        foreach ($line in @($text -split '\r\n|\n|\r')) { $lines.Add($line) }
+        while ($lines.Count -gt 0 -and
+            [string]::IsNullOrEmpty($lines[$lines.Count - 1])) {
+            $lines.RemoveAt($lines.Count - 1)
+        }
+    }
+
+    $generalStart = -1
+    $generalEnd = $lines.Count
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match '^\s*\[General\]\s*$') {
+            $generalStart = $index
+            for ($next = $index + 1; $next -lt $lines.Count; $next++) {
+                if ($lines[$next] -match '^\s*\[[^]]+\]\s*$') {
+                    $generalEnd = $next
+                    break
+                }
+            }
+            break
+        }
+    }
+    if ($generalStart -lt 0) {
+        if ($lines.Count -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace($lines[$lines.Count - 1])) {
+            $lines.Add('')
+        }
+        $generalStart = $lines.Count
+        $lines.Add('[General]')
+        $generalEnd = $lines.Count
+    }
+
+    [uint32]$currentVersion = 0
+    for ($index = $generalStart + 1; $index -lt $generalEnd; $index++) {
+        if ($lines[$index] -notmatch '^\s*([^=]+?)\s*=(.*)$') { continue }
+        $key = [string]$matches[1]
+        $value = [string]$matches[2]
+        switch -Regex ($key) {
+            '^(?i:Version)$' {
+                [uint32]$parsed = 0
+                if ([uint32]::TryParse($value.Trim(), [ref]$parsed)) {
+                    $currentVersion = $parsed
+                }
+            }
+        }
+    }
+
+    $desired = @{
+        Version = [string](Get-NextLocalPolicyVersion $currentVersion)
+    }
+    $desiredOrder = @('Version')
+    # gPCMachineExtensionNames/gPCUserExtensionNames are Active Directory GPO
+    # object attributes, not valid gpt.ini keys. Guest Lite 2.2 briefly wrote
+    # them here; Windows then ignored the local GPO after reboot even though
+    # gpupdate returned success. Remove only those retired managed-copy keys;
+    # rollback still restores the original gpt.ini byte-for-byte.
+    $retiredKeys = @(
+        'gPCMachineExtensionNames', 'gPCUserExtensionNames'
+    )
+    $written = @{}
+    $output = New-Object 'System.Collections.Generic.List[string]'
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($index -eq $generalEnd) {
+            foreach ($key in $desiredOrder) {
+                if (-not $written.ContainsKey($key)) {
+                    $output.Add("$key=$($desired[$key])")
+                    $written[$key] = $true
+                }
+            }
+        }
+        $line = $lines[$index]
+        if ($index -gt $generalStart -and $index -lt $generalEnd -and
+            $line -match '^\s*([^=]+?)\s*=') {
+            $key = [string]$matches[1]
+            if ($retiredKeys -icontains $key) { continue }
+            if ($desired.ContainsKey($key)) {
+                if (-not $written.ContainsKey($key)) {
+                    $output.Add("$key=$($desired[$key])")
+                    $written[$key] = $true
+                }
+                continue
+            }
+        }
+        $output.Add($line)
+    }
+    foreach ($key in $desiredOrder) {
+        if (-not $written.ContainsKey($key)) {
+            $output.Add("$key=$($desired[$key])")
+        }
+    }
+    $managedText = ($output.ToArray() -join "`r`n") + "`r`n"
+    return [Text.Encoding]::Default.GetBytes($managedText)
+}
+
+function Write-ManagedPolicyMetadata {
+    param([Parameter(Mandatory = $true)][object]$Snapshot)
+
+    [byte[]]$bytes = @(New-ManagedPolicyMetadataBytes -Snapshot $Snapshot)
+    Write-PolicyFileAtomically -Path $PolicyMetadataPath -Bytes $bytes
+    Write-Host '  local policy metadata persisted: gpt.ini' `
+        -ForegroundColor DarkGray
+}
+
+function Refresh-LocalPolicy {
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        & gpupdate.exe /force /wait:60 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            $failures.Add("local policy refresh: gpupdate returned $LASTEXITCODE")
+        } else {
+            Write-Host '  local policy refresh completed' -ForegroundColor DarkGray
+        }
+    } catch {
+        $failures.Add("local policy refresh: $($_.Exception.Message)")
+    }
+    return $failures.ToArray()
+}
+
+function Restore-PolicyFileSnapshots {
+    param([AllowNull()][object]$Snapshots)
+
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    if ($null -eq $Snapshots) {
+        return $failures.ToArray()
+    }
+    foreach ($configuration in @(
+        [pscustomobject]@{ Scope = 'Machine'; Path = $MachinePolicyPath },
+        [pscustomobject]@{ Scope = 'User'; Path = $UserPolicyPath },
+        [pscustomobject]@{ Scope = 'Metadata'; Path = $PolicyMetadataPath }
+    )) {
+        try {
+            $property = $Snapshots.PSObject.Properties[[string]$configuration.Scope]
+            if ($null -eq $property) {
+                throw "missing $($configuration.Scope) snapshot"
+            }
+            $snapshot = $property.Value
+            if ([string]$snapshot.Path -ine [string]$configuration.Path) {
+                throw "unexpected path '$($snapshot.Path)'"
+            }
+            if ([bool]$snapshot.Existed) {
+                [byte[]]$bytes = [Convert]::FromBase64String(
+                    [string]$snapshot.Base64
+                )
+                Write-PolicyFileAtomically -Path ([string]$configuration.Path) `
+                    -Bytes $bytes
+            } else {
+                Remove-Item -LiteralPath ([string]$configuration.Path) `
+                    -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            $failures.Add("local policy rollback $($configuration.Scope): $($_.Exception.Message)")
+        }
+    }
+    return $failures.ToArray()
+}
+
+function Get-EnforcementTaskSnapshot {
+    $task = Get-ScheduledTask -TaskPath $EnforcementTaskPath `
+        -TaskName $EnforcementTaskName -ErrorAction SilentlyContinue | `
+        Select-Object -First 1
+    return [pscustomobject]@{
+        Path = $EnforcementTaskPath
+        Name = $EnforcementTaskName
+        Existed = [bool]($null -ne $task)
+        Enabled = [bool]($null -ne $task -and $task.Settings.Enabled)
+    }
+}
+
+function Register-EnforcementTask {
+    param([Parameter(Mandatory = $true)][object]$State)
+
+    $baselineProperty = $State.PSObject.Properties['EnforcementTask']
+    if ($null -eq $baselineProperty) {
+        throw 'Rollback state lacks the enforcement-task baseline.'
+    }
+    if ([bool]$baselineProperty.Value.Existed) {
+        throw "A pre-existing scheduled task conflicts with $EnforcementTaskPath$EnforcementTaskName."
+    }
+    $script = Join-Path $ToolRoot 'G11-Guest-Lite.ps1'
+    if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
+        throw "Installed enforcement script is missing: $script"
+    }
+    $powerShell = Join-Path $env:SystemRoot `
+        'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode Enforce -UserSid "{1}"' -f `
+        $script.Replace('"', '""'), [string]$State.UserSid
+    $action = New-ScheduledTaskAction -Execute $powerShell `
+        -Argument $arguments -WorkingDirectory $ToolRoot
+    $startup = New-ScheduledTaskTrigger -AtStartup
+    $startup.Delay = 'PT45S'
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User ([string]$State.UserName)
+    $logon.Delay = 'PT45S'
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
+        -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    Register-ScheduledTask -TaskPath $EnforcementTaskPath `
+        -TaskName $EnforcementTaskName -Action $action `
+        -Trigger @($startup, $logon) -Principal $principal `
+        -Settings $settings -Force | Out-Null
+    Write-Host "  startup/logon enforcement task installed: $EnforcementTaskPath$EnforcementTaskName" `
+        -ForegroundColor DarkGray
+}
+
+function Remove-EnforcementTask {
+    param([AllowNull()][object]$Baseline)
+
+    if ($null -eq $Baseline) { return }
+    if ([string]$Baseline.Path -ine $EnforcementTaskPath -or
+        [string]$Baseline.Name -ine $EnforcementTaskName) {
+        throw 'Rollback state contains an unexpected enforcement task.'
+    }
+    if ([bool]$Baseline.Existed) {
+        throw 'The enforcement task existed before Apply and was not owned by Guest Lite.'
+    }
+    Unregister-ScheduledTask -TaskPath $EnforcementTaskPath `
+        -TaskName $EnforcementTaskName -Confirm:$false `
+        -ErrorAction SilentlyContinue
+}
+
+function Read-EnforcementState {
+    param([Parameter(Mandatory = $true)][string]$ExpectedUserSid)
+
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if ($currentSid -ne 'S-1-5-18') {
+        throw 'Enforce mode may run only as Local System from the installed task.'
+    }
+    if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) {
+        throw "No applied-state file exists: $StatePath"
+    }
+    $state = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | `
+        ConvertFrom-Json
+    if ([int]$state.SchemaVersion -lt $MinimumSchemaVersion -or
+        [int]$state.SchemaVersion -gt $SchemaVersion) {
+        throw "Unsupported state schema '$($state.SchemaVersion)'."
+    }
+    if ([string]$state.ComputerName -ine $env:COMPUTERNAME) {
+        throw "State belongs to computer '$($state.ComputerName)', not '$env:COMPUTERNAME'."
+    }
+    if ([string]$state.UserSid -ne $ExpectedUserSid) {
+        throw "Enforcement SID '$ExpectedUserSid' does not match saved SID '$($state.UserSid)'."
+    }
+    return $state
 }
 
 function Get-DefenderPreferenceSnapshots {
@@ -443,6 +1169,17 @@ function Stop-CurrentDefenderScan {
 
 function Set-DefenderRuntimePreferences {
     $failures = New-Object 'System.Collections.Generic.List[string]'
+    $defenderService = Get-Service -Name WinDefend -ErrorAction SilentlyContinue
+    $defenderEngineRunning = @(
+        Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
+    ).Count -gt 0
+    if ($null -ne $defenderService -and
+        [string]$defenderService.Status -ne 'Running' -and
+        -not $defenderEngineRunning) {
+        Write-Host '  Defender engine is inactive; runtime preference calls are unnecessary' `
+            -ForegroundColor DarkGray
+        return $failures.ToArray()
+    }
     $setter = Get-Command Set-MpPreference -ErrorAction SilentlyContinue
     if ($null -eq $setter) {
         $failures.Add('Defender runtime: Set-MpPreference is unavailable')
@@ -537,6 +1274,133 @@ function Restore-DefenderPreferenceSnapshots {
     return $failures.ToArray()
 }
 
+function Get-FirewallSnapshots {
+    $result = New-Object 'System.Collections.Generic.List[object]'
+    if ($null -eq (Get-Command Get-NetFirewallProfile `
+        -ErrorAction SilentlyContinue)) {
+        return $result.ToArray()
+    }
+    try {
+        foreach ($profile in @(Get-NetFirewallProfile -ErrorAction Stop)) {
+            if (@('Domain', 'Private', 'Public') -notcontains `
+                [string]$profile.Name) { continue }
+            $result.Add([pscustomobject]@{
+                Name = [string]$profile.Name
+                Enabled = [string]$profile.Enabled
+            })
+        }
+    } catch {
+        # NetSecurity can become unavailable after MpsSvc has been stopped.
+        # The service startup/state is audited independently below.
+        return $result.ToArray()
+    }
+    return $result.ToArray()
+}
+
+function Disable-FirewallProfiles {
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    $firewallService = Get-CimInstance Win32_Service `
+        -Filter "Name='$FirewallServiceName'" -ErrorAction SilentlyContinue
+    if ($null -ne $firewallService -and
+        [string]$firewallService.StartMode -eq 'Disabled') {
+        Write-Host '  Windows Firewall profiles inactive: MpsSvc startup is disabled' `
+            -ForegroundColor DarkGray
+        return $failures.ToArray()
+    }
+    $setter = Get-Command Set-NetFirewallProfile -ErrorAction SilentlyContinue
+    if ($null -eq $setter) {
+        $failures.Add('Windows Firewall: Set-NetFirewallProfile is unavailable')
+        return $failures.ToArray()
+    }
+    try {
+        Set-NetFirewallProfile -Profile Domain, Private, Public `
+            -Enabled False -ErrorAction Stop
+        Write-Host '  Windows Firewall profiles disabled: Domain, Private, Public' `
+            -ForegroundColor DarkGray
+    } catch {
+        $failures.Add("Windows Firewall profiles: $($_.Exception.Message)")
+    }
+    foreach ($profile in @(Get-FirewallSnapshots)) {
+        if ([string]$profile.Enabled -ine 'False') {
+            $failures.Add("Windows Firewall profile still enabled: $($profile.Name)")
+        }
+    }
+    return $failures.ToArray()
+}
+
+function Restore-FirewallSnapshots {
+    param([AllowNull()][object[]]$Snapshots)
+
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    if ($null -eq $Snapshots -or $Snapshots.Count -eq 0) {
+        return $failures.ToArray()
+    }
+    if ($null -eq (Get-Command Set-NetFirewallProfile `
+        -ErrorAction SilentlyContinue)) {
+        $failures.Add('Windows Firewall rollback: Set-NetFirewallProfile is unavailable')
+        return $failures.ToArray()
+    }
+    foreach ($snapshot in $Snapshots) {
+        $name = [string]$snapshot.Name
+        if (@('Domain', 'Private', 'Public') -notcontains $name) {
+            $failures.Add("Windows Firewall state contains an unexpected profile: $name")
+            continue
+        }
+        $enabled = [string]$snapshot.Enabled
+        if (@('True', 'False', 'NotConfigured') -notcontains $enabled) {
+            $failures.Add("Windows Firewall state has invalid Enabled value for ${name}: $enabled")
+            continue
+        }
+        try {
+            Set-NetFirewallProfile -Profile $name `
+                -Enabled $enabled -ErrorAction Stop
+        } catch {
+            $failures.Add("Windows Firewall rollback ${name}: $($_.Exception.Message)")
+        }
+    }
+    return $failures.ToArray()
+}
+
+function Test-ServiceNameAllowed {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    if ($ServicePlan.Name -icontains $Name) { return $true }
+    foreach ($pattern in $ServicePatternPlan) {
+        if ($Name -imatch ([string]$pattern.Pattern)) { return $true }
+    }
+    return $false
+}
+
+function Get-CurrentServicePlans {
+    $result = New-Object 'System.Collections.Generic.List[object]'
+    $seen = @{}
+    foreach ($plan in $ServicePlan) {
+        $key = ([string]$plan.Name).ToLowerInvariant()
+        if (-not $seen.ContainsKey($key)) {
+            $result.Add($plan)
+            $seen[$key] = $true
+        }
+    }
+    foreach ($service in @(Get-CimInstance Win32_Service -ErrorAction Stop)) {
+        $name = [string]$service.Name
+        $key = $name.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        foreach ($pattern in $ServicePatternPlan) {
+            if ($name -imatch ([string]$pattern.Pattern)) {
+                $result.Add([pscustomobject]@{
+                    Name = $name
+                    Group = [string]$pattern.Group
+                    Purpose = [string]$pattern.Purpose
+                    Required = (Test-PlanRequired $pattern)
+                })
+                $seen[$key] = $true
+                break
+            }
+        }
+    }
+    return $result.ToArray()
+}
+
 function Get-ServiceSnapshot {
     param([Parameter(Mandatory = $true)][object]$Plan)
 
@@ -563,7 +1427,8 @@ function Get-ServiceSnapshot {
 
 function Disable-PlannedServices {
     $failures = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($plan in $ServicePlan) {
+    foreach ($plan in @(Get-CurrentServicePlans)) {
+        if ([string]$plan.Name -ieq $FirewallServiceName) { continue }
         $saved = Get-ServiceSnapshot $plan
         if (-not [bool]$saved.Exists) {
             Write-Host "  service absent: $($plan.Name)" -ForegroundColor DarkGray
@@ -576,8 +1441,13 @@ function Disable-PlannedServices {
                 -ForegroundColor DarkGray
         } catch {
             $message = "service $($plan.Name): $($_.Exception.Message)"
-            $failures.Add($message)
-            Write-Warning $message
+            if (Test-PlanRequired $plan) {
+                $failures.Add($message)
+                Write-Warning $message
+            } else {
+                Write-Host "  protected service retained but made inert: $($plan.Name)" `
+                    -ForegroundColor DarkYellow
+            }
         }
     }
     # Windows PowerShell 5.1 can throw "Argument types do not match" when an
@@ -585,10 +1455,76 @@ function Disable-PlannedServices {
     return $failures.ToArray()
 }
 
+function Disable-FirewallService {
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    $plan = @($ServicePlan | Where-Object {
+        [string]$_.Name -ieq $FirewallServiceName
+    }) | Select-Object -First 1
+    if ($null -eq $plan) {
+        $failures.Add("Windows Firewall service plan is missing: $FirewallServiceName")
+        return $failures.ToArray()
+    }
+    $saved = Get-ServiceSnapshot $plan
+    if (-not [bool]$saved.Exists) {
+        $failures.Add("Windows Firewall service is missing: $FirewallServiceName")
+        return $failures.ToArray()
+    }
+    try {
+        Stop-Service -Name $FirewallServiceName -Force `
+            -ErrorAction SilentlyContinue
+        Set-Service -Name $FirewallServiceName -StartupType Disabled `
+            -ErrorAction Stop
+        $current = Get-ServiceSnapshot $plan
+        if ([string]$current.StartMode -ne 'Disabled') {
+            throw "startup mode remained '$($current.StartMode)'"
+        }
+        $stateNote = if ([string]$current.State -eq 'Running') {
+            ' (running instance will be absent after restart)'
+        } else { '' }
+        Write-Host "  firewall service startup disabled: $FirewallServiceName$stateNote" `
+            -ForegroundColor DarkGray
+    } catch {
+        $directError = $_.Exception.Message
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if ($currentSid -ne 'S-1-5-18') {
+            # MpsSvc intentionally denies SERVICE_CHANGE_CONFIG to a normal
+            # elevated administrator on supported Windows 10 builds.  The
+            # profile's already-installed, rollback-owned task runs as Local
+            # System and can apply the same documented startup-mode change
+            # without deleting the service, changing its ACL, or touching a
+            # driver.  Start it immediately so the first requested reboot is
+            # already a true no-MpsSvc boot.
+            try {
+                Start-ScheduledTask -TaskPath $EnforcementTaskPath `
+                    -TaskName $EnforcementTaskName -ErrorAction Stop
+                $deadline = [DateTime]::UtcNow.AddMinutes(3)
+                do {
+                    Start-Sleep -Seconds 2
+                    $current = Get-ServiceSnapshot $plan
+                    if ([string]$current.StartMode -eq 'Disabled') {
+                        $stateNote = if ([string]$current.State -eq 'Running') {
+                            ' (running instance will be absent after restart)'
+                        } else { '' }
+                        Write-Host "  firewall startup disabled by the Local System enforcement task: $FirewallServiceName$stateNote" `
+                            -ForegroundColor DarkGray
+                        return $failures.ToArray()
+                    }
+                } while ([DateTime]::UtcNow -lt $deadline)
+                throw 'Local System enforcement did not set Disabled within three minutes.'
+            } catch {
+                $failures.Add("Windows Firewall service ${FirewallServiceName}: direct=$directError; Local System=$($_.Exception.Message)")
+                return $failures.ToArray()
+            }
+        }
+        $failures.Add("Windows Firewall service ${FirewallServiceName}: $directError")
+    }
+    return $failures.ToArray()
+}
+
 function Restore-ServiceSnapshot {
     param([Parameter(Mandatory = $true)][object]$Snapshot)
 
-    if ($ServicePlan.Name -notcontains [string]$Snapshot.Name) {
+    if (-not (Test-ServiceNameAllowed -Name ([string]$Snapshot.Name))) {
         throw "State contains an unexpected service: $($Snapshot.Name)"
     }
     if (-not [bool]$Snapshot.Exists) { return }
@@ -624,6 +1560,55 @@ function Restore-ServiceSnapshot {
     }
 }
 
+function Test-TaskTargetAllowed {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    foreach ($plan in $TaskPlan) {
+        if ([string]$plan.Path -ieq $Path -and
+            [string]$plan.Name -ieq $Name) { return $true }
+    }
+    foreach ($pattern in $TaskPatternPlan) {
+        if ($Path -imatch ([string]$pattern.PathPattern) -and
+            $Name -imatch ([string]$pattern.NamePattern)) { return $true }
+    }
+    return $false
+}
+
+function Get-CurrentTaskPlans {
+    $result = New-Object 'System.Collections.Generic.List[object]'
+    $seen = @{}
+    foreach ($plan in $TaskPlan) {
+        $key = ("$($plan.Path)|$($plan.Name)").ToLowerInvariant()
+        if (-not $seen.ContainsKey($key)) {
+            $result.Add($plan)
+            $seen[$key] = $true
+        }
+    }
+    foreach ($task in @(Get-ScheduledTask -ErrorAction Stop)) {
+        $path = [string]$task.TaskPath
+        $name = [string]$task.TaskName
+        $key = ("${path}|${name}").ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        foreach ($pattern in $TaskPatternPlan) {
+            if ($path -imatch ([string]$pattern.PathPattern) -and
+                $name -imatch ([string]$pattern.NamePattern)) {
+                $result.Add([pscustomobject]@{
+                    Path = $path
+                    Name = $name
+                    Group = [string]$pattern.Group
+                    Required = (Test-PlanRequired $pattern)
+                })
+                $seen[$key] = $true
+                break
+            }
+        }
+    }
+    return $result.ToArray()
+}
+
 function Get-TaskSnapshot {
     param([Parameter(Mandatory = $true)][object]$Plan)
 
@@ -645,7 +1630,7 @@ function Get-TaskSnapshot {
 
 function Disable-PlannedTasks {
     $failures = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($plan in $TaskPlan) {
+    foreach ($plan in @(Get-CurrentTaskPlans)) {
         $saved = Get-TaskSnapshot $plan
         if (-not [bool]$saved.Exists -or -not [bool]$saved.Enabled) { continue }
         try {
@@ -657,8 +1642,13 @@ function Disable-PlannedTasks {
                 -ForegroundColor DarkGray
         } catch {
             $message = "task $($plan.Path)$($plan.Name): $($_.Exception.Message)"
-            $failures.Add($message)
-            Write-Warning $message
+            if (Test-PlanRequired $plan) {
+                $failures.Add($message)
+                Write-Warning $message
+            } else {
+                Write-Host "  protected task retained but made inert: $($plan.Path)$($plan.Name)" `
+                    -ForegroundColor DarkYellow
+            }
         }
     }
     return $failures.ToArray()
@@ -667,8 +1657,8 @@ function Disable-PlannedTasks {
 function Restore-TaskSnapshot {
     param([Parameter(Mandatory = $true)][object]$Snapshot)
 
-    $allowed = @($TaskPlan | ForEach-Object { "$($_.Path)|$($_.Name)" })
-    if ($allowed -notcontains "$($Snapshot.Path)|$($Snapshot.Name)") {
+    if (-not (Test-TaskTargetAllowed -Path ([string]$Snapshot.Path) `
+        -Name ([string]$Snapshot.Name))) {
         throw "State contains an unexpected task: $($Snapshot.Path)$($Snapshot.Name)"
     }
     if (-not [bool]$Snapshot.Exists -or -not [bool]$Snapshot.Enabled) { return }
@@ -684,33 +1674,38 @@ function Restore-TaskSnapshot {
 
 function Get-AppSnapshots {
     $rows = New-Object 'System.Collections.Generic.List[object]'
+    $allowed = @{}
     foreach ($name in $AppPlan) {
-        foreach ($package in @(Get-AppxPackage -Name $name `
-            -ErrorAction SilentlyContinue)) {
-            $rows.Add([pscustomobject]@{
-                Name = [string]$package.Name
-                PackageFullName = [string]$package.PackageFullName
-                PackageFamilyName = [string]$package.PackageFamilyName
-                InstallLocation = [string]$package.InstallLocation
-            })
-        }
+        $allowed[([string]$name).ToLowerInvariant()] = $true
+    }
+    # One current-user inventory is substantially faster than issuing one
+    # deployment query for every package name (VM1 measured minutes for the
+    # repeated form). Exact-name filtering preserves the reviewed allowlist.
+    foreach ($package in @(Get-AppxPackage -ErrorAction SilentlyContinue)) {
+        $name = [string]$package.Name
+        if (-not $allowed.ContainsKey($name.ToLowerInvariant())) { continue }
+        $rows.Add([pscustomobject]@{
+            Name = $name
+            PackageFullName = [string]$package.PackageFullName
+            PackageFamilyName = [string]$package.PackageFamilyName
+            InstallLocation = [string]$package.InstallLocation
+        })
     }
     return $rows.ToArray()
 }
 
 function Remove-PlannedApps {
-    param([Parameter(Mandatory = $true)][object[]]$Snapshots)
-
     $failures = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($package in $Snapshots) {
+    # Remove what is installed now, not just what existed in the original
+    # baseline. Rollback still restores only packages that the tool found
+    # before its first Apply.
+    foreach ($package in @(Get-AppSnapshots)) {
         if ($AppPlan -notcontains [string]$package.Name) {
             $message = "unexpected app identity in state: $($package.Name)"
             $failures.Add($message)
             Write-Warning $message
             continue
         }
-        if ($null -eq (Get-AppxPackage -Name ([string]$package.Name) `
-            -ErrorAction SilentlyContinue)) { continue }
         try {
             Remove-AppxPackage -Package ([string]$package.PackageFullName) `
                 -ErrorAction Stop
@@ -804,6 +1799,94 @@ function Restore-PlannedApps {
     return $failures.ToArray()
 }
 
+function Stop-PlannedProcesses {
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($plan in $ProcessPlan) {
+        foreach ($process in @(Get-Process -Name ([string]$plan.Name) `
+            -ErrorAction SilentlyContinue)) {
+            try {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                Write-Host "  process stopped: $($process.ProcessName) ($($plan.Purpose))" `
+                    -ForegroundColor DarkGray
+            } catch {
+                $message = "process $($plan.Name): $($_.Exception.Message)"
+                $failures.Add($message)
+                Write-Warning $message
+            }
+        }
+    }
+    foreach ($plan in $ProcessPlan) {
+        if (@(Get-Process -Name ([string]$plan.Name) `
+            -ErrorAction SilentlyContinue).Count -gt 0) {
+            $failures.Add("process still running: $($plan.Name)")
+        }
+    }
+    return $failures.ToArray()
+}
+
+function Get-PowerSnapshot {
+    $result = [ordered]@{
+        Available = $false
+        ActiveScheme = ''
+        Error = ''
+    }
+    try {
+        $text = (& powercfg.exe /GetActiveScheme 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            $result.Error = "powercfg /GetActiveScheme returned $LASTEXITCODE"
+            return [pscustomobject]$result
+        }
+        $match = [regex]::Match($text, `
+            '(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+        if (-not $match.Success) {
+            $result.Error = 'active power scheme GUID was not found'
+            return [pscustomobject]$result
+        }
+        $result.Available = $true
+        $result.ActiveScheme = $match.Value.ToLowerInvariant()
+    } catch {
+        $result.Error = $_.Exception.Message
+    }
+    return [pscustomobject]$result
+}
+
+function Set-PerformancePowerPlan {
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        & powercfg.exe /SetActive SCHEME_MIN *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "powercfg /SetActive SCHEME_MIN returned $LASTEXITCODE"
+        }
+        $current = Get-PowerSnapshot
+        if (-not [bool]$current.Available -or
+            [string]$current.ActiveScheme -ine $HighPerformanceScheme) {
+            throw "High performance scheme was not activated: $($current.Error)"
+        }
+        Write-Host "  power scheme: High performance ($HighPerformanceScheme)" `
+            -ForegroundColor DarkGray
+    } catch {
+        $message = "power scheme: $($_.Exception.Message)"
+        $failures.Add($message)
+        Write-Warning $message
+    }
+    return $failures.ToArray()
+}
+
+function Restore-PowerSnapshot {
+    param([AllowNull()][object]$Snapshot)
+
+    if ($null -eq $Snapshot -or -not [bool]$Snapshot.Available) { return }
+    $scheme = [string]$Snapshot.ActiveScheme
+    if ($scheme -notmatch `
+        '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+        throw "State contains an invalid power scheme GUID: $scheme"
+    }
+    & powercfg.exe /SetActive $scheme *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "powercfg could not restore scheme $scheme (exit $LASTEXITCODE)"
+    }
+}
+
 function Save-StateAtomically {
     param([Parameter(Mandatory = $true)][object]$State)
 
@@ -824,7 +1907,8 @@ function Read-State {
     }
     $state = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | `
         ConvertFrom-Json
-    if ([int]$state.SchemaVersion -ne $SchemaVersion) {
+    if ([int]$state.SchemaVersion -lt $MinimumSchemaVersion -or
+        [int]$state.SchemaVersion -gt $SchemaVersion) {
         throw "Unsupported state schema '$($state.SchemaVersion)'."
     }
     if ([string]$state.ComputerName -ine $env:COMPUTERNAME) {
@@ -914,11 +1998,14 @@ function Confirm-FullProfile {
 This full Windows 10 guest profile will:
 
 - turn off Microsoft Defender Antivirus protection
-- turn off Windows Update and Microsoft Store
+- turn off all Windows Firewall profiles and disable MpsSvc startup
+- turn off Windows, Store, and reviewed software auto-updaters
+- turn off OneDrive/cloud sync, news/weather, and background apps
 - remove reviewed consumer apps for this user
-- disable reviewed optional services and tasks
+- disable reviewed optional services/tasks and select High performance power
 
-The guest will have no built-in antivirus and will not receive security updates.
+The guest will have no built-in antivirus/firewall and will not receive security updates.
+Disabling MpsSvc startup can affect network discovery, IPsec, or Windows components.
 Continue?
 '@
     try {
@@ -962,52 +2049,126 @@ function Get-VerificationIssues {
         try {
             $current = Get-RegistrySnapshot $entry
             if (-not [bool]$current.ValueExisted -or
-                [int64]$current.Value -ne [int64]$entry.Value) {
-                $shown = if ($current.ValueExisted) {
-                    [string]$current.Value
-                } else { '<missing>' }
-                $issues.Add("policy not applied: $($entry.Path)\$($entry.Name) current=$shown desired=$($entry.Value)")
+                -not (Test-RegistryValueMatches -Actual $current.Value `
+                    -Desired $entry.Value -Type ([string]$entry.Type))) {
+                if (Test-PlanRequired $entry) {
+                    $shown = if ($current.ValueExisted) {
+                        [string]$current.Value
+                    } else { '<missing>' }
+                    $issues.Add("policy not applied: $($entry.Path)\$($entry.Name) current=$shown desired=$($entry.Value)")
+                }
             }
         } catch {
             $issues.Add("policy unreadable: $($entry.Path)\$($entry.Name): $($_.Exception.Message)")
         }
     }
-    foreach ($plan in $ServicePlan) {
+    foreach ($entry in $RegistryRemovePlan) {
+        try {
+            $current = Get-RegistrySnapshot $entry
+            if ([bool]$current.ValueExisted) {
+                $issues.Add("startup value still present: $($entry.Path)\$($entry.Name)")
+            }
+        } catch {
+            $issues.Add("startup value unreadable: $($entry.Path)\$($entry.Name): $($_.Exception.Message)")
+        }
+    }
+    foreach ($plan in @(Get-CurrentServicePlans)) {
+        if ([string]$plan.Name -ieq $FirewallServiceName) { continue }
         try {
             $current = Get-ServiceSnapshot $plan
             if ([bool]$current.Exists -and
-                [string]$current.StartMode -ne 'Disabled') {
+                [string]$current.StartMode -ne 'Disabled' -and
+                (Test-PlanRequired $plan)) {
                 $issues.Add("service still enabled: $($plan.Name) start=$($current.StartMode) state=$($current.State)")
             }
         } catch {
             $issues.Add("service unreadable: $($plan.Name): $($_.Exception.Message)")
         }
     }
-    foreach ($plan in $TaskPlan) {
+    foreach ($plan in @(Get-CurrentTaskPlans)) {
         try {
             $current = Get-TaskSnapshot $plan
-            if ([bool]$current.Exists -and [bool]$current.Enabled) {
+            if ([bool]$current.Exists -and [bool]$current.Enabled -and
+                (Test-PlanRequired $plan)) {
                 $issues.Add("task still enabled: $($plan.Path)$($plan.Name)")
             }
         } catch {
             $issues.Add("task unreadable: $($plan.Path)$($plan.Name): $($_.Exception.Message)")
         }
     }
+    $installedAppNames = @{}
+    foreach ($package in @(Get-AppSnapshots)) {
+        $installedAppNames[([string]$package.Name).ToLowerInvariant()] = $true
+    }
     foreach ($name in $AppPlan) {
-        if ($null -ne (Get-AppxPackage -Name $name `
-            -ErrorAction SilentlyContinue)) {
+        if ($installedAppNames.ContainsKey(
+            ([string]$name).ToLowerInvariant())) {
             $issues.Add("app still registered for current user: $name")
         }
     }
 
+    $firewallPlan = @($ServicePlan | Where-Object {
+        [string]$_.Name -ieq $FirewallServiceName
+    }) | Select-Object -First 1
+    $firewallService = if ($null -ne $firewallPlan) {
+        Get-ServiceSnapshot $firewallPlan
+    } else { $null }
+    $firewallServiceDisabled = [bool](
+        $null -ne $firewallService -and
+        [bool]$firewallService.Exists -and
+        [string]$firewallService.StartMode -eq 'Disabled'
+    )
+    if ($null -eq $firewallService -or -not [bool]$firewallService.Exists) {
+        $issues.Add("Windows Firewall service is missing: $FirewallServiceName")
+    } elseif (-not $firewallServiceDisabled) {
+        $issues.Add("Windows Firewall service startup is not disabled: $FirewallServiceName start=$($firewallService.StartMode)")
+    } elseif ([string]$firewallService.State -eq 'Running') {
+        $issues.Add("Windows Firewall service is still running after restart: $FirewallServiceName")
+    }
+
+    $firewallProfiles = @(Get-FirewallSnapshots)
+    if ($firewallProfiles.Count -ne 3 -and -not $firewallServiceDisabled) {
+        $issues.Add("Windows Firewall profile state is incomplete: found=$($firewallProfiles.Count) expected=3")
+    }
+    foreach ($profile in $firewallProfiles) {
+        if ([string]$profile.Enabled -ine 'False') {
+            $issues.Add("Windows Firewall profile still enabled: $($profile.Name)")
+        }
+    }
+
+    $enforcement = Get-EnforcementTaskSnapshot
+    if (-not [bool]$enforcement.Existed -or -not [bool]$enforcement.Enabled) {
+        $issues.Add("startup/logon enforcement task is missing or disabled: $EnforcementTaskPath$EnforcementTaskName")
+    }
+    if (-not (Test-Path -LiteralPath $PolicyMetadataPath -PathType Leaf)) {
+        $issues.Add("local policy metadata is missing: $PolicyMetadataPath")
+    }
+
+    $power = Get-PowerSnapshot
+    if (-not [bool]$power.Available) {
+        $issues.Add("active power scheme cannot be read: $($power.Error)")
+    } elseif ([string]$power.ActiveScheme -ine $HighPerformanceScheme) {
+        $issues.Add("High performance power scheme is not active: $($power.ActiveScheme)")
+    }
+    foreach ($plan in $ProcessPlan) {
+        if (@(Get-Process -Name ([string]$plan.Name) `
+            -ErrorAction SilentlyContinue).Count -gt 0) {
+            $issues.Add("background process still running: $($plan.Name)")
+        }
+    }
+
     $defender = Get-DefenderStatusSummary
+    $defenderEngineInactive = [bool](
+        [string]$defender.WinDefendState -notin @('Running', 'StartPending') -and
+        -not [bool]$defender.MsMpEngProcessRunning
+    )
     if (-not [bool]$defender.Available -and
+        -not $defenderEngineInactive -and
         -not [string]::IsNullOrWhiteSpace([string]$defender.Error)) {
         $issues.Add("Defender effective state cannot be read: $($defender.Error)")
     }
-    if ([bool]$defender.Available) {
+    if ([bool]$defender.Available -and -not $defenderEngineInactive) {
         foreach ($name in @(
-            'AMServiceEnabled', 'AntivirusEnabled', 'AntispywareEnabled',
             'RealTimeProtectionEnabled', 'BehaviorMonitorEnabled',
             'IoavProtectionEnabled', 'OnAccessProtectionEnabled', 'NISEnabled'
         )) {
@@ -1016,13 +2177,24 @@ function Get-VerificationIssues {
             }
         }
     }
-    if ([bool]$defender.MsMpEngProcessRunning) {
-        $issues.Add('Defender process still running: MsMpEng.exe (Antimalware Service Executable)')
-    }
-    if ([string]$defender.WinDefendState -eq 'Running') {
-        $issues.Add('Defender protected service still running: WinDefend')
-    }
+    # Modern Windows protects the WinDefend service and its engine process.
+    # Their residency is informational; the effective protection fields above
+    # determine whether antivirus scanning is actually active.
     return $issues.ToArray()
+}
+
+function Save-AuditReportLines {
+    param(
+        [Parameter(Mandatory = $true)]$Lines,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $safeLabel = $Label -replace '[^A-Za-z0-9_.-]', '_'
+    $path = Join-Path $ReportRoot ('{0}-{1}.txt' -f `
+        (Get-Date -Format 'yyyyMMdd-HHmmss'), $safeLabel)
+    $Lines | Set-Content -LiteralPath $path -Encoding UTF8
+    Write-Host "Audit report: $path" -ForegroundColor Cyan
+    return $path
 }
 
 function New-AuditReport {
@@ -1039,8 +2211,38 @@ function New-AuditReport {
     $lines.Add("domainJoined=$($computer.PartOfDomain) tamperProtection=$(Get-TamperProtectionState)")
     $defender = Get-DefenderStatusSummary
     $lines.Add("defenderAvailable=$($defender.Available) amServiceEnabled=$($defender.AMServiceEnabled) antivirusEnabled=$($defender.AntivirusEnabled) antispywareEnabled=$($defender.AntispywareEnabled) realtimeEnabled=$($defender.RealTimeProtectionEnabled) behaviorEnabled=$($defender.BehaviorMonitorEnabled) ioavEnabled=$($defender.IoavProtectionEnabled) onAccessEnabled=$($defender.OnAccessProtectionEnabled) nisEnabled=$($defender.NISEnabled) winDefendState=$($defender.WinDefendState) msMpEngRunning=$($defender.MsMpEngProcessRunning) error=$($defender.Error)")
+    $enforcement = Get-EnforcementTaskSnapshot
+    $lines.Add("enforcementTask=$EnforcementTaskPath$EnforcementTaskName exists=$($enforcement.Existed) enabled=$($enforcement.Enabled) log=$EnforcementLogPath")
+    $lines.Add("machinePolicyFile=$MachinePolicyPath exists=$(Test-Path -LiteralPath $MachinePolicyPath -PathType Leaf)")
+    $lines.Add("userPolicyFile=$UserPolicyPath exists=$(Test-Path -LiteralPath $UserPolicyPath -PathType Leaf)")
+    $lines.Add("policyMetadataFile=$PolicyMetadataPath exists=$(Test-Path -LiteralPath $PolicyMetadataPath -PathType Leaf)")
+    if ($Label -in @('before-apply', 'after-apply')) {
+        # Apply already builds its rollback inventory separately. Repeating
+        # every scheduled-task/Appx/CIM query here used several minutes on
+        # VM1 and provided no additional safety. Keep a fast security/runtime
+        # checkpoint; 02-Audit.cmd remains the full measured inventory.
+        $lines.Add('inventoryMode=lightweight (full inventory is manual-audit)')
+        foreach ($serviceName in @('MpsSvc', 'BFE')) {
+            try {
+                $service = Get-CimInstance Win32_Service `
+                    -Filter "Name='$serviceName'" -ErrorAction Stop
+                $lines.Add("service=$serviceName start=$($service.StartMode) state=$($service.State) pid=$($service.ProcessId)")
+            } catch {
+                $lines.Add("service=$serviceName error=$($_.Exception.Message)")
+            }
+        }
+        $power = Get-PowerSnapshot
+        $lines.Add("powerAvailable=$($power.Available) activeScheme=$($power.ActiveScheme) desiredScheme=$HighPerformanceScheme error=$($power.Error)")
+        $lines.Add('cpuSampleSkipped=True (run 02-Audit.cmd after restart for the measured sample)')
+        return (Save-AuditReportLines -Lines $lines -Label $Label)
+    }
     foreach ($product in @(Get-AntivirusProducts)) {
         $lines.Add("antivirus=$($product.Name) state=$($product.State) path=$($product.Path)")
+    }
+    foreach ($entry in $RegistryRemovePlan) {
+        $saved = Get-RegistrySnapshot $entry
+        $current = if ($saved.ValueExisted) { [string]$saved.Value } else { '<missing>' }
+        $lines.Add("group=$($entry.Group) path=$($entry.Path) name=$($entry.Name) current=$current desired=<missing>")
     }
     $lines.Add('')
 
@@ -1048,7 +2250,7 @@ function New-AuditReport {
     foreach ($entry in $RegistryPlan) {
         $saved = Get-RegistrySnapshot $entry
         $current = if ($saved.ValueExisted) { [string]$saved.Value } else { '<missing>' }
-        $lines.Add("group=$($entry.Group) path=$($entry.Path) name=$($entry.Name) current=$current desired=$($entry.Value)")
+        $lines.Add("group=$($entry.Group) path=$($entry.Path) name=$($entry.Name) current=$current desired=$($entry.Value) required=$(Test-PlanRequired $entry)")
     }
     $lines.Add('')
 
@@ -1069,17 +2271,73 @@ function New-AuditReport {
     }
     $lines.Add('')
 
+    $lines.Add('[Windows Firewall profiles]')
+    $firewallProfiles = @(Get-FirewallSnapshots)
+    if ($firewallProfiles.Count -eq 0) {
+        $lines.Add('state=<unavailable> desiredEnabled=False')
+    } else {
+        foreach ($profile in $firewallProfiles) {
+            $lines.Add("name=$($profile.Name) enabled=$($profile.Enabled) desiredEnabled=False")
+        }
+    }
+    $lines.Add('')
+
     $lines.Add('[services]')
-    foreach ($plan in $ServicePlan) {
+    foreach ($plan in @(Get-CurrentServicePlans)) {
         $saved = Get-ServiceSnapshot $plan
-        $lines.Add("group=$($plan.Group) name=$($plan.Name) exists=$($saved.Exists) start=$($saved.StartMode) state=$($saved.State) purpose=$($plan.Purpose)")
+        $lines.Add("group=$($plan.Group) name=$($plan.Name) exists=$($saved.Exists) start=$($saved.StartMode) state=$($saved.State) required=$(Test-PlanRequired $plan) purpose=$($plan.Purpose)")
     }
     $lines.Add('')
 
     $lines.Add('[scheduled tasks]')
-    foreach ($plan in $TaskPlan) {
+    foreach ($plan in @(Get-CurrentTaskPlans)) {
         $saved = Get-TaskSnapshot $plan
-        $lines.Add("group=$($plan.Group) task=$($plan.Path)$($plan.Name) exists=$($saved.Exists) enabled=$($saved.Enabled)")
+        $lines.Add("group=$($plan.Group) task=$($plan.Path)$($plan.Name) exists=$($saved.Exists) enabled=$($saved.Enabled) required=$(Test-PlanRequired $plan)")
+    }
+    $lines.Add('')
+
+    $lines.Add('[runtime and performance]')
+    $power = Get-PowerSnapshot
+    $lines.Add("powerAvailable=$($power.Available) activeScheme=$($power.ActiveScheme) desiredScheme=$HighPerformanceScheme error=$($power.Error)")
+    foreach ($plan in $ProcessPlan) {
+        $running = @(Get-Process -Name ([string]$plan.Name) `
+            -ErrorAction SilentlyContinue).Count -gt 0
+        $lines.Add("group=$($plan.Group) process=$($plan.Name) running=$running purpose=$($plan.Purpose)")
+    }
+    $lines.Add('')
+
+    $lines.Add('[instant process CPU sample]')
+    if ($Label -eq 'manual-audit') {
+        try {
+            $performance = @(Get-CimInstance `
+                Win32_PerfFormattedData_PerfProc_Process -ErrorAction Stop)
+            $mps = Get-CimInstance Win32_Service -Filter "Name='MpsSvc'" `
+                -ErrorAction Stop
+            $mpsCpu = if ([uint32]$mps.ProcessId -eq 0 -or
+                [string]$mps.State -ne 'Running') {
+                @()
+            } else {
+                @($performance | Where-Object {
+                    [uint32]$_.IDProcess -eq [uint32]$mps.ProcessId
+                } | Select-Object -First 1)
+            }
+            $shownMpsCpu = if ([string]$mps.State -ne 'Running') {
+                0
+            } elseif ($mpsCpu.Count -gt 0) {
+                [uint64]$mpsCpu[0].PercentProcessorTime
+            } else { '<unavailable>' }
+            $lines.Add("firewallService=MpsSvc state=$($mps.State) pid=$($mps.ProcessId) hostProcessCpuPercent=$shownMpsCpu profilesDesired=False")
+            foreach ($row in @($performance | Where-Object {
+                $_.Name -notin @('_Total', 'Idle')
+            } | Sort-Object PercentProcessorTime -Descending | `
+                Select-Object -First 10)) {
+                $lines.Add("process=$($row.Name) pid=$($row.IDProcess) cpuPercent=$($row.PercentProcessorTime)")
+            }
+        } catch {
+            $lines.Add("cpuSampleError=$($_.Exception.Message)")
+        }
+    } else {
+        $lines.Add("cpuSampleSkipped=True label=$Label (run 02-Audit.cmd after restart for the measured sample)")
     }
     $lines.Add('')
 
@@ -1091,18 +2349,15 @@ function New-AuditReport {
     }
     $lines.Add('')
     $lines.Add('[protected by design]')
-    $lines.Add('BCD and boot integrity; kernel and NVIDIA/vGPU drivers; Windows Firewall; audio; networking; printing; Windows Search; BITS; CryptSvc; AppXSvc; ClipSVC; Microsoft Edge/WebView2; Calculator; Photos; Paint; Notepad; DesktopAppInstaller; VCLibs/.NET/UI.Xaml dependencies.')
+    $lines.Add('BCD and boot integrity; kernel and NVIDIA/vGPU drivers; Defender/firewall service files and ACLs; BFE and other core networking services; protected-but-inert DoSvc/UpdateOrchestrator objects; firewall saved rules; audio; printing; BITS; CryptSvc; AppXSvc; ClipSVC; Microsoft Edge/WebView2 application binaries; Calculator; Photos; Paint; Notepad; DesktopAppInstaller; VCLibs/.NET/UI.Xaml dependencies; provisioned Appx payloads.')
 
-    $safeLabel = $Label -replace '[^A-Za-z0-9_.-]', '_'
-    $path = Join-Path $ReportRoot ('{0}-{1}.txt' -f `
-        (Get-Date -Format 'yyyyMMdd-HHmmss'), $safeLabel)
-    $lines | Set-Content -LiteralPath $path -Encoding UTF8
-    Write-Host "Audit report: $path" -ForegroundColor Cyan
-    return $path
+    return (Save-AuditReportLines -Lines $lines -Label $Label)
 }
 
 function New-OriginalState {
     $os = Get-CimInstance Win32_OperatingSystem
+    $servicePlans = @(Get-CurrentServicePlans)
+    $taskPlans = @(Get-CurrentTaskPlans)
     $state = [ordered]@{
         SchemaVersion = $SchemaVersion
         CreatedUtc = [DateTime]::UtcNow.ToString('o')
@@ -1112,35 +2367,201 @@ function New-OriginalState {
         OsCaption = [string]$os.Caption
         OsBuild = [string]$os.BuildNumber
         DefenderPreferences = @(Get-DefenderPreferenceSnapshots)
-        Registry = @($RegistryPlan | ForEach-Object { Get-RegistrySnapshot $_ })
-        Services = @($ServicePlan | ForEach-Object { Get-ServiceSnapshot $_ })
-        Tasks = @($TaskPlan | ForEach-Object { Get-TaskSnapshot $_ })
+        FirewallProfiles = @(Get-FirewallSnapshots)
+        Registry = @(Get-AllRegistryPlans | ForEach-Object { Get-RegistrySnapshot $_ })
+        Services = @($servicePlans | ForEach-Object { Get-ServiceSnapshot $_ })
+        Tasks = @($taskPlans | ForEach-Object { Get-TaskSnapshot $_ })
         Apps = @(Get-AppSnapshots)
+        AppBaselineNames = @($AppPlan)
+        Power = (Get-PowerSnapshot)
+        PolicyFiles = [pscustomobject]@{
+            Machine = Get-PolicyFileSnapshot -Scope 'Machine' `
+                -Path $MachinePolicyPath
+            User = Get-PolicyFileSnapshot -Scope 'User' `
+                -Path $UserPolicyPath
+            Metadata = Get-PolicyFileSnapshot -Scope 'Metadata' `
+                -Path $PolicyMetadataPath
+        }
+        EnforcementTask = Get-EnforcementTaskSnapshot
     }
     Save-StateAtomically $state
     return (Read-State)
 }
 
-function Ensure-DefenderPreferenceBaseline {
+function Set-StateProperty {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][object]$Value
+    )
+
+    $property = $State.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        Add-Member -InputObject $State -MemberType NoteProperty `
+            -Name $Name -Value $Value
+    } else {
+        $property.Value = $Value
+    }
+}
+
+function Ensure-CurrentBaseline {
     param([Parameter(Mandatory = $true)][object]$State)
 
-    if ($null -ne $State.PSObject.Properties['DefenderPreferences']) {
-        return $State
+    $changed = [int]$State.SchemaVersion -ne $SchemaVersion
+    if ($null -eq $State.PSObject.Properties['DefenderPreferences']) {
+        Set-StateProperty -State $State -Name DefenderPreferences `
+            -Value @(Get-DefenderPreferenceSnapshots)
+        $changed = $true
     }
-    $baseline = @(Get-DefenderPreferenceSnapshots)
-    Add-Member -InputObject $State -MemberType NoteProperty `
-        -Name DefenderPreferences -Value $baseline
-    Save-StateAtomically $State
-    Write-Host 'Added a rollback baseline for the new Defender runtime controls.' `
-        -ForegroundColor Yellow
+    if ($null -eq $State.PSObject.Properties['FirewallProfiles']) {
+        Set-StateProperty -State $State -Name FirewallProfiles `
+            -Value @(Get-FirewallSnapshots)
+        $changed = $true
+    }
+
+    $registry = New-Object 'System.Collections.Generic.List[object]'
+    $registrySeen = @{}
+    foreach ($snapshot in @($State.Registry)) {
+        $key = ("$($snapshot.Path)|$($snapshot.Name)").ToLowerInvariant()
+        if (-not $registrySeen.ContainsKey($key)) {
+            $registry.Add($snapshot)
+            $registrySeen[$key] = $true
+        }
+    }
+    foreach ($plan in @(Get-AllRegistryPlans)) {
+        $key = ("$($plan.Path)|$($plan.Name)").ToLowerInvariant()
+        if (-not $registrySeen.ContainsKey($key)) {
+            $registry.Add((Get-RegistrySnapshot $plan))
+            $registrySeen[$key] = $true
+            $changed = $true
+        }
+    }
+    Set-StateProperty -State $State -Name Registry -Value $registry.ToArray()
+
+    $services = New-Object 'System.Collections.Generic.List[object]'
+    $serviceSeen = @{}
+    foreach ($snapshot in @($State.Services)) {
+        $key = ([string]$snapshot.Name).ToLowerInvariant()
+        if (-not $serviceSeen.ContainsKey($key)) {
+            $services.Add($snapshot)
+            $serviceSeen[$key] = $true
+        }
+    }
+    foreach ($plan in @(Get-CurrentServicePlans)) {
+        $key = ([string]$plan.Name).ToLowerInvariant()
+        if (-not $serviceSeen.ContainsKey($key)) {
+            $services.Add((Get-ServiceSnapshot $plan))
+            $serviceSeen[$key] = $true
+            $changed = $true
+        }
+    }
+    Set-StateProperty -State $State -Name Services -Value $services.ToArray()
+
+    $tasks = New-Object 'System.Collections.Generic.List[object]'
+    $taskSeen = @{}
+    foreach ($snapshot in @($State.Tasks)) {
+        $key = ("$($snapshot.Path)|$($snapshot.Name)").ToLowerInvariant()
+        if (-not $taskSeen.ContainsKey($key)) {
+            $tasks.Add($snapshot)
+            $taskSeen[$key] = $true
+        }
+    }
+    foreach ($plan in @(Get-CurrentTaskPlans)) {
+        $key = ("$($plan.Path)|$($plan.Name)").ToLowerInvariant()
+        if (-not $taskSeen.ContainsKey($key)) {
+            $tasks.Add((Get-TaskSnapshot $plan))
+            $taskSeen[$key] = $true
+            $changed = $true
+        }
+    }
+    Set-StateProperty -State $State -Name Tasks -Value $tasks.ToArray()
+
+    $apps = New-Object 'System.Collections.Generic.List[object]'
+    $appSeen = @{}
+    foreach ($snapshot in @($State.Apps)) {
+        $key = ([string]$snapshot.PackageFullName).ToLowerInvariant()
+        if (-not $appSeen.ContainsKey($key)) {
+            $apps.Add($snapshot)
+            $appSeen[$key] = $true
+        }
+    }
+    $baselineNames = @()
+    if ($null -ne $State.PSObject.Properties['AppBaselineNames']) {
+        $baselineNames = @($State.AppBaselineNames)
+    }
+    $baselineNameSet = @{}
+    foreach ($name in $baselineNames) {
+        $baselineNameSet[([string]$name).ToLowerInvariant()] = $true
+    }
+    $currentApps = @(Get-AppSnapshots)
+    foreach ($name in $AppPlan) {
+        $nameKey = ([string]$name).ToLowerInvariant()
+        if ($baselineNameSet.ContainsKey($nameKey)) { continue }
+        foreach ($snapshot in @($currentApps | Where-Object {
+            [string]$_.Name -ieq [string]$name
+        })) {
+            $key = ([string]$snapshot.PackageFullName).ToLowerInvariant()
+            if (-not $appSeen.ContainsKey($key)) {
+                $apps.Add($snapshot)
+                $appSeen[$key] = $true
+            }
+        }
+        $baselineNameSet[$nameKey] = $true
+        $changed = $true
+    }
+    Set-StateProperty -State $State -Name Apps -Value $apps.ToArray()
+    Set-StateProperty -State $State -Name AppBaselineNames `
+        -Value @($AppPlan)
+
+    if ($null -eq $State.PSObject.Properties['Power']) {
+        Set-StateProperty -State $State -Name Power -Value (Get-PowerSnapshot)
+        $changed = $true
+    }
+    if ($null -eq $State.PSObject.Properties['PolicyFiles']) {
+        Set-StateProperty -State $State -Name PolicyFiles -Value `
+            ([pscustomobject]@{
+                Machine = Get-PolicyFileSnapshot -Scope 'Machine' `
+                    -Path $MachinePolicyPath
+                User = Get-PolicyFileSnapshot -Scope 'User' `
+                    -Path $UserPolicyPath
+                Metadata = Get-PolicyFileSnapshot -Scope 'Metadata' `
+                    -Path $PolicyMetadataPath
+            })
+        $changed = $true
+    } elseif ($null -eq $State.PolicyFiles.PSObject.Properties['Metadata']) {
+        Add-Member -InputObject $State.PolicyFiles -MemberType NoteProperty `
+            -Name Metadata -Value (Get-PolicyFileSnapshot -Scope 'Metadata' `
+                -Path $PolicyMetadataPath)
+        $changed = $true
+    }
+    if ($null -eq $State.PSObject.Properties['EnforcementTask']) {
+        Set-StateProperty -State $State -Name EnforcementTask `
+            -Value (Get-EnforcementTaskSnapshot)
+        $changed = $true
+    }
+    Set-StateProperty -State $State -Name SchemaVersion -Value $SchemaVersion
+
+    if ($changed) {
+        Save-StateAtomically $State
+        Write-Host 'Upgraded the original rollback baseline for Guest Lite 2.3.' `
+            -ForegroundColor Yellow
+        return (Read-State)
+    }
     return $State
 }
 
 function Invoke-Apply {
+    param([switch]$UnattendedClone)
+
     Assert-Windows10 | Out-Null
     Assert-InteractiveAdministrator
     Assert-DefenderCanBeConfigured
-    Confirm-FullProfile
+    if ($UnattendedClone) {
+        Write-Host 'Trusted G-11 clone initialization requested the full profile; interactive confirmation is suppressed.' `
+            -ForegroundColor Yellow
+    } else {
+        Confirm-FullProfile
+    }
     Initialize-StateRoot
     Install-LocalTools
 
@@ -1154,33 +2575,79 @@ function Invoke-Apply {
         Write-Host "Saved original rollback baseline: $StatePath" `
             -ForegroundColor Green
     }
-    $state = Ensure-DefenderPreferenceBaseline $state
-
+    $state = Ensure-CurrentBaseline $state
     $failures = New-Object 'System.Collections.Generic.List[string]'
-    Write-Host '[1/5] Applying reviewed policy values' -ForegroundColor Cyan
+
+    Write-Host '[persistence] Writing native local policy and installing the SYSTEM enforcement task' `
+        -ForegroundColor Cyan
+    Write-ManagedPolicyFiles -Snapshots $state.PolicyFiles
+    Write-ManagedPolicyMetadata -Snapshot $state.PolicyFiles.Metadata
+    Register-EnforcementTask -State $state
+    foreach ($failure in @(Refresh-LocalPolicy)) {
+        $failures.Add($failure)
+    }
+
+    Write-Host '[1/8] Applying policy values and disabling startup entries' `
+        -ForegroundColor Cyan
+    foreach ($failure in @(Restore-RetiredRegistryValues $state)) {
+        $failures.Add($failure)
+    }
     foreach ($entry in $RegistryPlan) {
         try { Set-PlannedRegistryValue $entry } catch {
             $message = "policy $($entry.Path)\$($entry.Name): $($_.Exception.Message)"
+            if (Test-PlanRequired $entry) {
+                $failures.Add($message)
+                Write-Warning $message
+            } else {
+                Write-Host "  protected legacy policy retained: $($entry.Name)" `
+                    -ForegroundColor DarkYellow
+            }
+        }
+    }
+    foreach ($entry in $RegistryRemovePlan) {
+        try { Remove-PlannedRegistryValue $entry } catch {
+            $message = "startup $($entry.Path)\$($entry.Name): $($_.Exception.Message)"
             $failures.Add($message)
             Write-Warning $message
         }
     }
 
-    Write-Host '[2/5] Disabling live Defender scanning and cancelling current scan' `
+    Write-Host '[2/8] Disabling live Defender scanning and cancelling current scan' `
         -ForegroundColor Cyan
     foreach ($failure in @(Set-DefenderRuntimePreferences)) {
         $failures.Add($failure)
     }
 
-    Write-Host '[3/5] Disabling reviewed services' -ForegroundColor Cyan
+    Write-Host '[3/8] Disabling Windows Firewall profiles and MpsSvc startup' `
+        -ForegroundColor Cyan
+    foreach ($failure in @(Disable-FirewallProfiles)) {
+        $failures.Add($failure)
+    }
+    foreach ($failure in @(Disable-FirewallService)) {
+        $failures.Add($failure)
+    }
+
+    Write-Host '[4/8] Disabling reviewed services' -ForegroundColor Cyan
     foreach ($failure in @(Disable-PlannedServices)) { $failures.Add($failure) }
 
-    Write-Host '[4/5] Disabling reviewed scheduled tasks' -ForegroundColor Cyan
+    Write-Host '[5/8] Disabling reviewed scheduled tasks' -ForegroundColor Cyan
     foreach ($failure in @(Disable-PlannedTasks)) { $failures.Add($failure) }
 
-    Write-Host '[5/5] Removing reviewed apps for the current user' `
+    Write-Host '[6/8] Removing reviewed apps for the current user' `
         -ForegroundColor Cyan
-    foreach ($failure in @(Remove-PlannedApps @($state.Apps))) {
+    foreach ($failure in @(Remove-PlannedApps)) {
+        $failures.Add($failure)
+    }
+
+    Write-Host '[7/8] Stopping reviewed background processes' `
+        -ForegroundColor Cyan
+    foreach ($failure in @(Stop-PlannedProcesses)) {
+        $failures.Add($failure)
+    }
+
+    Write-Host '[8/8] Selecting the built-in High performance power plan' `
+        -ForegroundColor Cyan
+    foreach ($failure in @(Set-PerformancePowerPlan)) {
         $failures.Add($failure)
     }
 
@@ -1190,11 +2657,120 @@ function Invoke-Apply {
         Write-Host "APPLY PARTIAL: $($failures.Count) item(s) were protected or failed." `
             -ForegroundColor Yellow
         foreach ($failure in $failures) { Write-Host "  - $failure" }
-        Write-Host 'The rollback baseline is intact. Reboot, then run 02-Audit.cmd; it now verifies MsMpEng.exe and WinDefend explicitly.'
+        Write-Host 'The rollback baseline is intact. Reboot, then run 02-Audit.cmd for the complete Defender/firewall/update/cloud/performance verification.'
         return 3
     }
     Write-Host 'APPLY PASS: full guest-lite profile is staged.' -ForegroundColor Green
-    Write-Host 'Restart Windows now. After restart, run 02-Audit.cmd to verify Defender/Update/Store, MsMpEng.exe, and WinDefend state.'
+    Write-Host 'Restart Windows now. After restart, run 02-Audit.cmd to verify every profile item.'
+    return 0
+}
+
+function Get-EnforcementRegistryEntry {
+    param(
+        [Parameter(Mandatory = $true)][object]$Entry,
+        [Parameter(Mandatory = $true)][string]$TargetUserSid
+    )
+
+    $path = [string]$Entry.Path
+    if ($path.StartsWith('HKCU:\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = 'Registry::HKEY_USERS\{0}\{1}' -f `
+            $TargetUserSid, $path.Substring(6)
+    }
+    return [pscustomobject]@{
+        Path = $path
+        Name = [string]$Entry.Name
+        Type = if ($null -ne $Entry.PSObject.Properties['Type']) {
+            [string]$Entry.Type
+        } else { '' }
+        Value = if ($null -ne $Entry.PSObject.Properties['Value']) {
+            $Entry.Value
+        } else { $null }
+        Group = [string]$Entry.Group
+        Required = (Test-PlanRequired $Entry)
+    }
+}
+
+function Invoke-Enforce {
+    Assert-Windows10 | Out-Null
+    if ([string]::IsNullOrWhiteSpace($UserSid)) {
+        throw 'Enforce mode requires the saved interactive-user SID.'
+    }
+    $state = Read-EnforcementState -ExpectedUserSid $UserSid
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    $log = New-Object 'System.Collections.Generic.List[string]'
+    $log.Add("generated=$([DateTime]::Now.ToString('o')) mode=Enforce")
+
+    try {
+        Write-ManagedPolicyFiles -Snapshots $state.PolicyFiles
+        Write-ManagedPolicyMetadata -Snapshot $state.PolicyFiles.Metadata
+        $log.Add('localPolicy=written registryPol=True gptIni=True')
+    } catch {
+        $message = "local policy persistence: $($_.Exception.Message)"
+        $failures.Add($message)
+        $log.Add("failure=$message")
+    }
+    foreach ($failure in @(Refresh-LocalPolicy)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+
+    $userHive = "Registry::HKEY_USERS\$UserSid"
+    $userHiveLoaded = Test-Path -LiteralPath $userHive -PathType Container
+    $log.Add("userHiveLoaded=$userHiveLoaded sid=$UserSid")
+    foreach ($entry in $RegistryPlan) {
+        if (([string]$entry.Path).StartsWith(
+                'HKCU:\', [StringComparison]::OrdinalIgnoreCase) -and
+            -not $userHiveLoaded) {
+            continue
+        }
+        $target = Get-EnforcementRegistryEntry $entry $UserSid
+        try {
+            Set-PlannedRegistryValue $target
+        } catch {
+            $message = "policy $($entry.Path)\$($entry.Name): $($_.Exception.Message)"
+            if (Test-PlanRequired $entry) {
+                $failures.Add($message)
+                $log.Add("failure=$message")
+            } else {
+                $log.Add("optional=$message")
+            }
+        }
+    }
+    foreach ($entry in $RegistryRemovePlan) {
+        if (([string]$entry.Path).StartsWith(
+                'HKCU:\', [StringComparison]::OrdinalIgnoreCase) -and
+            -not $userHiveLoaded) {
+            continue
+        }
+        $target = Get-EnforcementRegistryEntry $entry $UserSid
+        try {
+            Remove-PlannedRegistryValue $target
+        } catch {
+            $message = "startup $($entry.Path)\$($entry.Name): $($_.Exception.Message)"
+            $failures.Add($message)
+            $log.Add("failure=$message")
+        }
+    }
+
+    foreach ($failure in @(Set-DefenderRuntimePreferences)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    foreach ($failure in @(Disable-FirewallProfiles)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    foreach ($failure in @(Disable-FirewallService)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    foreach ($failure in @(Stop-PlannedProcesses)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    $log.Add("result=$(if ($failures.Count -eq 0) { 'pass' } else { 'partial' }) failures=$($failures.Count)")
+    $log | Set-Content -LiteralPath $EnforcementLogPath -Encoding UTF8
+    if ($failures.Count -gt 0) { return 3 }
     return 0
 }
 
@@ -1205,7 +2781,22 @@ function Invoke-Rollback {
     $state = Read-State
     $failures = New-Object 'System.Collections.Generic.List[string]'
 
-    Write-Host '[1/5] Restoring registry policy values' -ForegroundColor Cyan
+    Write-Host '[1/9] Removing the Guest Lite enforcement task' -ForegroundColor Cyan
+    try {
+        Remove-EnforcementTask $state.EnforcementTask
+    } catch {
+        $message = "enforcement task: $($_.Exception.Message)"
+        $failures.Add($message)
+        Write-Warning $message
+    }
+
+    Write-Host '[2/9] Restoring native local-policy files' -ForegroundColor Cyan
+    foreach ($failure in @(Restore-PolicyFileSnapshots $state.PolicyFiles)) {
+        $failures.Add($failure)
+        Write-Warning $failure
+    }
+
+    Write-Host '[3/9] Restoring registry policy/startup values' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Registry)) {
         try { Restore-RegistrySnapshot $snapshot } catch {
             $message = "policy $($snapshot.Path)\$($snapshot.Name): $($_.Exception.Message)"
@@ -1214,7 +2805,7 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[2/5] Restoring Defender runtime preferences' -ForegroundColor Cyan
+    Write-Host '[4/9] Restoring Defender runtime preferences' -ForegroundColor Cyan
     $defenderSnapshots = @()
     if ($null -ne $state.PSObject.Properties['DefenderPreferences']) {
         $defenderSnapshots = @($state.DefenderPreferences)
@@ -1225,7 +2816,7 @@ function Invoke-Rollback {
         $failures.Add($failure)
     }
 
-    Write-Host '[3/5] Restoring service startup/running state' -ForegroundColor Cyan
+    Write-Host '[5/9] Restoring service startup/running state' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Services)) {
         try { Restore-ServiceSnapshot $snapshot } catch {
             $message = "service $($snapshot.Name): $($_.Exception.Message)"
@@ -1234,7 +2825,18 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[4/5] Restoring scheduled task enabled state' -ForegroundColor Cyan
+    Write-Host '[6/9] Restoring Windows Firewall profiles' -ForegroundColor Cyan
+    $firewallSnapshots = @()
+    if ($null -ne $state.PSObject.Properties['FirewallProfiles']) {
+        $firewallSnapshots = @($state.FirewallProfiles)
+    }
+    foreach ($failure in @(
+        Restore-FirewallSnapshots $firewallSnapshots
+    )) {
+        $failures.Add($failure)
+    }
+
+    Write-Host '[7/9] Restoring scheduled task enabled state' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Tasks)) {
         try { Restore-TaskSnapshot $snapshot } catch {
             $message = "task $($snapshot.Path)$($snapshot.Name): $($_.Exception.Message)"
@@ -1243,10 +2845,19 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[5/5] Re-registering removed current-user apps' `
+    Write-Host '[8/9] Re-registering removed current-user apps' `
         -ForegroundColor Cyan
     foreach ($failure in @(Restore-PlannedApps @($state.Apps))) {
         $failures.Add($failure)
+    }
+
+    Write-Host '[9/9] Restoring the original power scheme' -ForegroundColor Cyan
+    if ($null -ne $state.PSObject.Properties['Power']) {
+        try { Restore-PowerSnapshot $state.Power } catch {
+            $message = "power scheme: $($_.Exception.Message)"
+            $failures.Add($message)
+            Write-Warning $message
+        }
     }
 
     $null = New-AuditReport 'after-rollback'
@@ -1293,24 +2904,36 @@ try {
             }
         }
         'Apply' { Invoke-Apply }
+        'CloneApply' { Invoke-Apply -UnattendedClone }
         'Rollback' { Invoke-Rollback }
+        'Enforce' { Invoke-Enforce }
     }
     exit [int]$exitCode
 } catch {
+    $caught = $_
     Write-Host ''
-    Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
-    if ($null -ne $_.InvocationInfo -and
-        [int]$_.InvocationInfo.ScriptLineNumber -gt 0) {
-        $failedCommand = [string]$_.InvocationInfo.MyCommand.Name
-        if ([string]::IsNullOrWhiteSpace($failedCommand)) {
-            $failedCommand = '<script>'
+    Write-Host "FAILED: $($caught.Exception.Message)" -ForegroundColor Red
+    $invocation = $caught.InvocationInfo
+    if ($null -ne $invocation -and
+        [int]$invocation.ScriptLineNumber -gt 0) {
+        $failedCommand = '<script>'
+        $myCommand = $invocation.MyCommand
+        if ($null -ne $myCommand) {
+            # A bare `throw` can report a ScriptBlock-like command object that
+            # has no Name property on Windows PowerShell 5.1. StrictMode turns
+            # direct MyCommand.Name access into a second, misleading failure.
+            $nameProperty = $myCommand.PSObject.Properties['Name']
+            if ($null -ne $nameProperty -and
+                -not [string]::IsNullOrWhiteSpace([string]$nameProperty.Value)) {
+                $failedCommand = [string]$nameProperty.Value
+            }
         }
         Write-Host ("FAILED AT: line {0}, command {1}" -f `
-            [int]$_.InvocationInfo.ScriptLineNumber, $failedCommand) `
+            [int]$invocation.ScriptLineNumber, $failedCommand) `
             -ForegroundColor Red
     }
-    if (-not [string]::IsNullOrWhiteSpace([string]$_.ScriptStackTrace)) {
-        Write-Host "STACK: $($_.ScriptStackTrace)" -ForegroundColor DarkRed
+    if (-not [string]::IsNullOrWhiteSpace([string]$caught.ScriptStackTrace)) {
+        Write-Host "STACK: $($caught.ScriptStackTrace)" -ForegroundColor DarkRed
     }
     Write-Host "No BCD, driver-signing, or kernel-driver change was attempted."
     exit 1

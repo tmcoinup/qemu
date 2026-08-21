@@ -313,9 +313,10 @@ HARDWARE_LEGACY_COMPAT_PROFILE_KEYS=()
 #
 # One period-correct model is available to every current platform, but it is
 # never attached by a normal start.  It appears only for the explicit IDE
-# installer fallback or through the manual USB-BOT/SCSI hotplug wrapper.  No
-# serial is invented: QEMU receives an explicit empty serial so its QM0000x
-# fallback cannot leak into VPD page 0x80.
+# installer fallback, the private-clone one-shot USB-BOT/SCSI payload, or the
+# manual USB-BOT/SCSI hotplug wrapper.  No serial is invented: QEMU receives
+# an explicit empty serial so its QM0000x fallback cannot leak into VPD page
+# 0x80.
 OPTICAL_DRIVE_PROFILES=(
     "lg-gh24ns50|LG Electronics|HL-DT-ST DVDRAM GH24NS50|XP02|sata-atapi|5.25-inch|none"
 )
@@ -379,13 +380,15 @@ SSD_DEFAULT_PROFILE_KEYS=(
     kingston-kc400-512gb
     intel-545s-512gb
     wd-pc-sa530-512gb
-    wd-black-pcie-512gb
-    samsung-970-pro-512gb
 )
 
-# Profiles available only through an explicit selector/UI choice.  Keeping a
-# separate reviewed set makes append-only catalog growth backward-stable.
+# NVMe identities require a board with a reviewed native M.2 link.  Keeping
+# every NVMe row explicit prevents a management client from choosing one
+# independently of the default H81 platform and handing create-vm an invalid
+# H81+NVMe tuple.
 SSD_EXPLICIT_PROFILE_KEYS=(
+    wd-black-pcie-512gb
+    samsung-970-pro-512gb
     samsung-960-pro-512gb
 )
 

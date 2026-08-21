@@ -20,9 +20,10 @@ Options:
   --print-dir-path   Print only the directory that can be mounted as a USB disk
   -h, --help         Show this help
 
-The output contains a standalone 64-bit G11GuestLite.exe plus its reviewable
-Windows 10 audit/apply/rollback sources. It has no credential or VM identity
-and makes no Windows change until the user explicitly runs it in the guest.
+The output contains standalone 64-bit Guest Lite 2.3.0 plus reviewable Windows 10
+audit/apply/rollback sources. Runtime imports are Windows inbox components only.
+It has no credential or VM identity and makes no Windows change until the user
+explicitly runs it in the guest.
 EOF
 }
 

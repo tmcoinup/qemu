@@ -1,204 +1,249 @@
-# G-11 Windows 10 一键关闭杀毒、更新、商店与系统精简
+# G-11 Guest Lite 2.3.0：Windows 10 全面精简/提速傻瓜教程
 
-这是放进 Windows guest、由登录用户主动运行的独立维护工具。它只加入当前
-`G-11` 分支；没有把改动复制到独立的 `V-11` 分支。
+本工具只属于 **G-11/vGPU**。V-11 是独立分支；不要互拷 VM bundle、驱动或配置。
+2.3.0 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
+资讯、天气、商店、OneDrive/同步、消费 App、后台服务/任务和常见 VM 高 I/O 项。
 
-## 傻瓜步骤
+它是激进配置：完成后系统没有内置杀毒、防火墙和自动安全更新。先只在用户指定的
+实验机 **VM1** 验收，不要直接批量投放。
 
-首选：在当前终端输入实际 VM 编号，再更新公共工具目录并把它直接挂成只读 U 盘：
+`2.3.0` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
+清掉”补齐完整原生本地策略状态：原始 `Registry.pol` 和 `gpt.ini` 均逐字节存入回滚
+基线，受管副本只写本地 GPO 支持的 `Version` 并同时递增机器/用户版本。Local System 补强
+任务在开机/登录延迟 45 秒后强制刷新策略、再写入运行态，然后立即退出；没有常驻进程
+或第三方服务。2.0.1 的 PowerShell 5.1 异常显示修复也继续保留。
 
-```bash
-read -r -p '请输入 VM 编号: ' VM_ID
-./deploy/scripts/guest-lite.sh "$VM_ID" usb-mount
-```
+VM1 的第二轮重启审计还定位出 Windows PowerShell 5.1 Registry provider 的陷阱：对
+已经存在的叶键反复执行 `New-Item -Force` 会重建该键并删除刚写入的兄弟值，表现为同一
+键下只有最后一个策略留下。2.3.0 改为仅在键不存在时创建；设置和回滚都不再重建现有
+叶键。Appx 审计也从逐包查询改为一次枚举后按精确白名单过滤，明显缩短应用/验证时间。
 
-后续示例继续使用同一个 `VM_ID`；如果换了终端，先重新执行上面的输入命令。
-脚本不依赖某个固定 VM，删除验收机不会影响公共包或其他 VM。
+## 一、VM1 最短流程
 
-公共 U 盘根目录固定为 `/home/ubuntu/images/vms/shared/usb/`；每个工具只管理自己的
-子目录，Guest Lite 固定在：
-
-```text
-/home/ubuntu/images/vms/shared/usb/G11GuestLite/
-```
-
-不使用内容哈希，不创建历史目录。Windows 中打开卷标 `U盘` 的可移动磁盘，
-再进入 `G11GuestLite` 子目录。它是本机构建、未签名的普通 64 位 Windows 用户态
-程序，内嵌同目录可审查的 PowerShell/CMD 源码；没有驱动，也不改 BCD 或驱动签名
-策略。
-
-若只生成公共目录而暂时不挂 U 盘：
+宿主仓库根目录执行一条命令：
 
 ```bash
-./deploy/scripts/guest-lite.sh "$VM_ID" prepare
+./deploy/scripts/guest-lite.sh 1 usb-mount
 ```
 
-只读光驱仍作为兼容入口：
+这会重建固定目录
+`/home/ubuntu/images/vms/shared/usb/G11GuestLite/`，再热插整个公共目录为只读 U 盘；
+不会自动运行 guest 程序，也不会修改其他 VM。
 
-```bash
-./deploy/scripts/guest-lite.sh "$VM_ID" mount
-```
+然后在 VM1 的 Windows 10 内：
 
-`mount` 是运行中热插入 `usb-bot + scsi-cd` 光驱，不会自动运行 Windows 工具。
-如果该 VM 已插入另一张手动 ISO，命令会拒绝换盘；只有明确加 `--replace` 才换盘。
+1. 打开“Windows 安全中心 → 病毒和威胁防护 → 管理设置”，手工关闭“篡改防护”。
+   工具不会绕过它。没有这个开关时先运行 `G11GuestLite.exe /audit`。
+2. 打开卷标为 `U盘` 的磁盘，进入 `G11GuestLite`，双击
+   `G11GuestLite.exe`；UAC 点“是”，风险确认点 `Yes`。
+3. 等待 `APPLY PASS` 或 `APPLY PARTIAL`，不要中途关机，然后从 Windows 开始菜单
+   正常“重启”。进入桌面后等待至少 3 分钟，让一次性补强任务及策略刷新执行完。
+4. 重启后双击：
 
-然后在 Windows 10 内：
+   ```text
+   C:\ProgramData\G11GuestLite\tools\02-Audit.cmd
+   ```
 
-1. 打开“Windows 安全中心 → 病毒和威胁防护 → 管理设置”，手工关闭
-   “篡改防护”。工具不会也不能绕过这个保护。
-2. 打开 `U盘\G11GuestLite`，双击 `G11GuestLite.exe`（光盘和独立
-   EXE 的入口相同）。
-3. UAC 选择“是”，安全警告选择 `Yes`，等待窗口显示 `APPLY PASS`。
-   因为仓库没有代码签名私钥，SmartScreen 可能显示“Windows 已保护你的电脑”；确认
-   文件来自受管公共 U 盘后，选择“更多信息 → 仍要运行”。若不信任 EXE，可直接审查
-   同目录源码并运行 `01-OneClick-Apply.cmd`，功能相同。封装按要求不生成内容哈希。
-4. 从 Windows 开始菜单选择“重启”。
-5. 重启后，运行公共目录中的
-   `C:\ProgramData\G11GuestLite\tools\02-Audit.cmd`；检查报告路径：
+5. 只有窗口显示 `VERIFY PASS` 才是完整通过。详细报告在：
 
    ```text
    C:\ProgramData\G11GuestLite\reports
    ```
 
-窗口还会直接显示 `VERIFY PASS` 或逐项列出 `VERIFY PARTIAL`，不要求用户自己猜十六
-进制安全中心状态。尚未执行 Apply 时，`AUDIT PASS` 只表示只读报告生成成功。
-
-EXE 参数为：
-
-```text
-G11GuestLite.exe /apply       # 应用；双击时的默认动作
-G11GuestLite.exe /audit       # 只审计，或重启后验证
-G11GuestLite.exe /rollback    # 恢复首次 Apply 前保存的状态
-```
-
-Apply 成功或部分成功后，EXE 和透明脚本入口会保存在
-`C:\ProgramData\G11GuestLite\tools`，以后不需要再次挂 U 盘或光驱。
-
-若窗口顶部显示 `Guest Lite 1.1`，并报
-`Property OnboardingState does not exist`，或顶部显示 `1.2` 并报
-`Argument types do not match`，运行的都是旧包。两个错误都发生在 Apply 的
-首次审计阶段，服务、任务、Defender 和 App 尚未开始修改；重新执行 `usb-mount`，
-再从 `U盘\G11GuestLite` 运行顶部显示 `1.5` 的 `G11GuestLite.exe` 即可。
-不要继续运行复制到桌面的旧包。
-
-`1.3` 从 U 盘执行 Apply 后可能提示 `the EXE could not be copied`；`1.4` 已允许
-可移动盘来源，但部分 FAT 可移动盘不提供它使用的句柄属性查询，仍会出现同一提示。
-Apply、脚本回滚和报告都有效，但重启后没有本地 EXE。`1.5` 对受管 FAT/ISO 介质
-使用文件属性校验，把当前 EXE 保存到受保护的本地工具目录，同时仍拒绝网络路径和
-重解析点来源。
-
-若显示 `APPLY PARTIAL`，不是整包失败：Windows 拒绝了屏幕上列出的某个受保护
-服务或任务。原始状态已经保存，可以先重启并审计，也可以直接回滚。工具不会为了
-追求全绿而夺取系统服务/任务所有权。
-
-完成后宿主可弹出公共 U 盘：
+验收后宿主可弹出只读 U 盘：
 
 ```bash
-./deploy/scripts/guest-lite.sh "$VM_ID" usb-eject
+./deploy/scripts/guest-lite.sh 1 usb-eject
 ```
 
-如果使用的是兼容光驱，则执行：
+若只能使用光驱兼容路径：
 
 ```bash
-./deploy/scripts/guest-lite.sh "$VM_ID" eject
+./deploy/scripts/guest-lite.sh 1 mount
+./deploy/scripts/guest-lite.sh 1 eject
 ```
 
-公共 U 盘、任意 host 目录挂载和刷新限制见
-[G11-USB-DIRECTORY.md](G11-USB-DIRECTORY.md)。
+## 二、VM1 防火墙/CPU 专项验收
 
-## 一键预设会做什么
+按 VM1 的实验要求，工具先用 Windows 自带 `Set-NetFirewallProfile` 关闭 Domain、
+Private、Public 三种配置文件，再把 `MpsSvc` 启动类型设为 `Disabled` 并尝试停止当前
+实例。它不删除服务、规则或文件，不修改服务 ACL，也不停止 `BFE` 和其他网络基础服务。
+Windows 10 会让 `MpsSvc` 拒绝普通管理员的 `SERVICE_CHANGE_CONFIG`；工具遇到该受支持的
+`Access denied` 时，立即启动自己受回滚基线管理的 Local System 补强任务并等待
+`StartMode=Disabled`，不接管 ACL、不删服务。这样第一次正常重启就是无 MpsSvc 进程的
+验证启动。
 
-- 通过 Windows Defender ADMX 对应策略停用 Defender Antivirus 的实时、行为、
-  下载文件和云端样本保护，并停用其四个内置计划任务；同时调用
-  `Set-MpPreference` 立即关闭实时/行为/IOAV/脚本扫描，取消当前按需扫描；若平台
-  仍保留引擎，则把扫描平均 CPU 负载目标设为 5%；不删除 Defender 文件；
-- 用 Windows Update 策略停用自动更新及其 UI/公网连接，停用 `wuauserv`、
-  `UsoSvc`、`DoSvc` 和已知更新任务；保留 BITS 与加密服务；
-- 停用 Store 策略、`InstallService`、`PushToInstall`，并移除当前用户的
-  `Microsoft.WindowsStore`/`StorePurchaseApp` 注册；
-- 移除当前用户的资讯、天气、反馈中心、Phone Link、Xbox、3D、纸牌、音乐、视频、
-  地图、Cortana、Teams/Spotify/常见广告预装 App；
-- 停用遥测、地图、零售演示、Fax、定位、电话、Insider、钱包、Xbox、错误报告、
-  Remote Registry 等明确列出的可选服务和遥测任务；
-- 关闭消费内容静默安装、建议、广告 ID、Web 搜索建议、Cortana 和 Game DVR。
+微软明确建议“关闭 profile，不要停止 `MpsSvc`”，因为禁用服务可能影响网络发现、
+IPsec 或部分 Windows 组件。本版本是用户明确指定的受控 VM1 实验配置；不要投放到只能
+远程管理的机器。若网络或应用异常，在 VM1 本地双击
+`C:\ProgramData\G11GuestLite\tools\03-Rollback.cmd`，看到 `ROLLBACK PASS` 后重启。
 
-App 只对执行工具的当前用户卸载。工具有意不调用
-`Remove-AppxProvisionedPackage`，因此预配包仍留在系统中，回滚可以从安全的
-`C:\Program Files\WindowsApps` 清单重新注册。这样不如离线删镜像节省磁盘多，
-但不容易把 Store 和 UWP 依赖永久做坏。
+管理员 PowerShell 可只读复核：
 
-## 保留项
+```powershell
+Get-NetFirewallProfile | Format-Table Name, Enabled
+Get-CimInstance Win32_Service -Filter "Name='MpsSvc'" |
+  Format-List Name, StartMode, State, ProcessId
+Get-Process | Sort-Object CPU -Descending |
+  Select-Object -First 15 ProcessName, CPU, Id
+```
 
-下列内容不会被精简：
+重启后的目标是 `MpsSvc StartMode=Disabled`、`State=Stopped`、`ProcessId=0`。服务停止
+后 `Get-NetFirewallProfile` 可能不可用；停止前能读取时三个 `Enabled` 都应为 `False`。
+注意 `CPU` 列是进程启动后的累计 CPU 时间，不是瞬时百分比；任务管理器“详细信息”页
+更适合观察重启后 3–5 分钟的实时占用。若仍然出现 50%，把最新 audit 报告和任务管理器
+中具体进程名保留下来，再定位是否实际为 `MsMpEng`、`svchost` 内另一服务或第三方
+网络过滤器。
 
-- BCD、启动完整性、`testsigning`、`nointegritychecks`；
-- 任何内核、NVIDIA、GRID/vGPU 驱动以及驱动签名设置；
-- Windows 防火墙、网络、音频、打印、Windows Search、BITS、CryptSvc；
-- AppXSvc/ClipSVC、Edge/WebView2、桌面应用安装器、计算器、照片、画图、记事本；
-- VCLibs、.NET Native、UI.Xaml 等 Appx 框架依赖；
-- 宿主机配置与凭据。
+## 三、2.3 实际修改矩阵
 
-EXE 只是带 `requireAdministrator` UAC 清单的启动器：它把内嵌、固定名称的资源解压
-到仅 `Administrators`/`SYSTEM` 可访问的本地临时目录，使用固定的
-`System32\WindowsPowerShell\v1.0\powershell.exe` 路径执行，结束后删除临时目录。
-它不是安装器，不包含服务、内核组件、测试签名或自签名驱动。
+| 类别 | 处理 | 保留/边界 |
+|---|---|---|
+| Defender | 本地策略与 `Set-MpPreference` 双通道关闭扫描，取消当前扫描，停可管理任务；开机/登录后补强并检查实际扫描字段 | 不夺服务 ACL，不删 Defender 文件；新版 Windows 可保留空闲的 `MsMpEng`/`WinDefend` 外壳及“引擎已加载”信息字段，是否通过以实时、行为、下载、访问、网络保护字段为准 |
+| 防火墙 | 三种 profile 全关；`MpsSvc` 启动类型设为禁用并停止，保存 profile 及服务原值 | 不删服务/规则/文件，不改 ACL；保留 `BFE`；微软不推荐停服务，限 VM1 实验，异常走本地回滚 |
+| Windows 更新 | 关 WU/公网/Delivery Optimization 对等下载策略，停 `wuauserv`/`UsoSvc`/Update Health 和可管理任务 | 受 Windows 保护的 `DoSvc`/UpdateOrchestrator 对象可保留但被上游策略和服务链路架空；保留 BITS/CryptSvc |
+| 软件更新 | 关 Edge/Office/Google 策略及 Edge/Google/Adobe/Mozilla 常见更新服务、任务、进程 | 浏览器、Office、Adobe 本体不卸载 |
+| 商店 | 禁用 Store 策略/服务，移除当前用户 Store 与购买 App 注册 | 保留 AppXSvc/ClipSVC 和预配载荷供回滚 |
+| 云盘/同步 | 禁 OneDrive、设置/活动/剪贴板同步，删 OneDrive 启动值，停更新任务/进程 | OneDrive 程序载荷不硬删，回滚后可恢复 |
+| 资讯/天气 | 隐藏 Win10 资讯和兴趣，移除 Bing News/Weather | 无通配卸载 |
+| 消费 App | 当前用户移除 Xbox、Phone Link、Teams、Outlook、Mail/Calendar、3D、纸牌等白名单包 | 保留计算器、照片、画图、记事本、DesktopAppInstaller 和框架依赖 |
+| 后台/隐私 | 关后台 App、内容投放、遥测、推送、地图、定位、Game DVR 等白名单服务/任务 | 不碰网络、音频、打印、NVIDIA/vGPU |
+| 性能 | 关 SysMain/搜索索引、电源节流、透明/任务栏动画和启动延时；切换内置“高性能”方案 | 保留桌面背景和字体平滑；2.2 自动恢复旧版 `VisualFXSetting` 基线；不改分页文件、时钟、HPET 或 BCD |
+| 重启持久化 | 保存并扩展机器/用户 `Registry.pol`，生成/合并合法的 `gpt.ini Version`，开机和目标用户登录后由 SYSTEM 延迟刷新、补强一次 | `gPCMachineExtensionNames`/`gPCUserExtensionNames` 是 AD GPO 对象属性，绝不写进本地 gpt.ini；无常驻服务、无密码、无第三方库；回滚逐字节还原原 policy/metadata 文件 |
 
-工具只处理 Windows 自带的 Microsoft Defender。若 guest 另外安装了第三方杀毒，
-审计报告会列出它，但不会按模糊名称静默卸载第三方软件。
+脚本不会按“名称里含 update/service”粗暴匹配。固定对象用精确名称；版本化 Google/
+OneDrive 服务和计划任务只允许通过锚定的路径/正则白名单发现。发现到的每一个对象都
+先写进 `state.json`，再修改。
 
-任务管理器中的 `Antimalware Service Executable` 就是 `MsMpEng.exe`，由受保护的
-`WinDefend` 服务承载。Apply 后必须重启；`02-Audit.cmd` 会明确检查：
+## 四、回滚基线与重复运行
+
+首次 Apply 在任何修改前保存：
 
 ```text
-msMpEngRunning=False
-winDefendState=<非 Running>
-amServiceEnabled=False
-realtimeEnabled=False
+C:\ProgramData\G11GuestLite\state.json
 ```
 
-只要其中任一仍启用，就返回 `VERIFY PARTIAL`。Windows 将反恶意软件服务作为受保护
-进程运行，普通管理员也不能可靠地停止或改变其启动类型；本工具不会夺取服务 ACL、
-冒用 TrustedInstaller、改内核驱动或通过 BCD 绕过保护。这样可能无法让所有新版
-Defender 平台上的进程彻底消失，但不会把“设置了注册表”误报成“已经停用”。
+其中包含计算机名、用户 SID、注册表值/类型、防火墙三 profile、活动电源方案、服务
+启动/运行状态、任务启用状态、当前用户 App 清单，以及机器/用户原始
+`Registry.pol`、`gpt.ini` 字节和补强任务是否原先存在。目录 ACL 只允许 Administrators 和
+SYSTEM。重复 Apply 复用首次基线，不把“已经禁用”的状态覆盖成原始值。
 
-`G11GuestPerformance` 与本工具都包含 Game DVR 设置。若两个工具都用，建议先运行
-性能优化，再运行本精简工具；需要恢复时按相反顺序，先回滚本工具，再回滚性能工具。
+若 VM1 已经运行过 1.5/2.0/2.1/2.2，2.3 会先把新增项目（包括 `MpsSvc`）的当前状态
+补进旧基线、原子保存为 schema 4，再开始新增修改。VM1 从 2.1 升级时，原基线已保存
+最初的 Registry.pol；2.1 没有创建过 gpt.ini，因此新版可安全补记“原文件不存在”并
+保证回滚精确删除它。
 
-## 回滚
-
-在 Windows 内双击：
+回滚只需双击：
 
 ```text
 C:\ProgramData\G11GuestLite\tools\03-Rollback.cmd
 ```
 
-回滚会恢复首次 Apply 前的精确注册表值、服务启动/运行状态、任务启用状态，并尝试
-重新注册被本工具移除的当前用户 App。显示 `ROLLBACK PASS` 后重启。
+看到 `ROLLBACK PASS` 后重启。回滚会先删除 Guest Lite 补强任务、恢复原始
+`Registry.pol`/`gpt.ini`，再恢复注册表/防火墙/服务/任务/App/电源。失败时显示
+`ROLLBACK PARTIAL`，原 state 不删除，可修复后重试。App 只恢复首次 Apply 前存在的
+包；若其他工具后来删除 WindowsApps 预配文件，本工具不会从互联网下载来源不明的 Appx。
 
-若 App 的预配文件后来被其他维护工具或系统升级删除，会显示 `ROLLBACK PARTIAL`，
-状态文件会保留以便重试；本工具不会从互联网下载来源不明的 Appx 包。
+若 VM1 以前已应用 `G11GuestPerformance`/新版 `VgpuPortable.exe` 的性能项，Guest
+Lite 会把当时状态作为自己的基线。多个可回滚工具必须按应用的反顺序恢复：先回滚
+Guest Lite，再回滚 Guest Performance；不要交叉覆盖各自的 `state.json`。
 
-## 使用边界
+## 五、独立封装与无第三方运行库证明
 
-- 只支持 Windows 10 客户端，不在 Windows 11/Windows Server 上执行；
-- 若 Defender for Endpoint 已接管设备，工具拒绝与企业管理策略对抗；
-- Windows 10 Home/Pro 不完整支持“关闭 Store”策略，所以当前用户 Store 还会被移除；
-- 关闭 Defender 和更新后，guest 没有内置恶意软件防护，也不会自动收到安全修复。
-  仅应用于受控网络、可从快照/基础镜像恢复的 VM；
-- Windows 10 已结束普通支持，策略和平台版本不同可能令某些 Defender 设置被忽略。
-  `02-Audit.cmd` 的结果比“脚本运行过”更重要。
+只构建，不挂载：
 
-微软说明：Windows 10 1903 以后篡改防护会阻止本地 Defender 变更；平台
-4.18.2108.4 及以后会在相应客户端上忽略旧 `DisableAntiSpyware`/`DisableAntivirus`
-总开关。工具因此同时使用细粒度策略和 `Set-MpPreference`、检查篡改防护/MDE
-状态，并要求重启后审计，而不宣称能绕过受保护服务。
+```bash
+./deploy/package-guest-lite.sh
+```
+
+默认输出固定在：
+
+```text
+/home/ubuntu/images/staging/guest-lite/G11GuestLite/G11GuestLite.exe
+/home/ubuntu/images/staging/guest-lite/G11GuestLite/G11GuestLite.iso
+```
+
+也可指定无凭据的绝对目录：
+
+```bash
+./deploy/package-guest-lite.sh --output-root /absolute/output/directory
+```
+
+EXE 是普通 x86-64 Windows 用户态 PE，内嵌可审查的 PS1/CMD/README；MinGW 编译器
+支持静态链接，导入表测试只允许 Windows inbox 的
+`ADVAPI32/bcrypt/KERNEL32/msvcrt/SHELL32/USER32`。Windows 运行时只需要系统自带
+DLL、Windows PowerShell 5.1、CIM/NetSecurity/Defender/Appx/TaskScheduler cmdlet
+和 `powercfg/sc/icacls`，不安装 VC++/.NET/Python/Java 等第三方运行库。
+
+运行完整封装回归：
+
+```bash
+./deploy/tests/vgpu/test_guest_lite_package.sh
+```
+
+测试会验证确定性构建、PE 架构/UAC 清单、严格 DLL 导入白名单、内嵌资源、ISO/USB
+目录、CRLF 启动器、schema 4 policy/metadata/task 回滚、合法 gpt.ini、克隆 manifest、
+禁止 BCD/签名/驱动/系统包删除操作及 2.3 必需控制项。
+
+## 六、克隆后自动运行与 VM2 验收
+
+这条自动链只接到 **G-11 私有 Sysprep 母盘**，不改 V-11，也不把宿主凭据写入镜像。
+制作母盘时先在 Windows 安全中心手工关闭“篡改防护”，然后按现有私有母盘流程执行
+Sysprep `/generalize /oobe /shutdown`。这是 Defender 的人工安全边界，脚本不会绕过。
+
+重新注入当前首启载荷后，克隆命令仍是一条：
+
+```bash
+./deploy/scripts/clone-from-base.sh win10-base 2 --start
+```
+
+首启顺序如下：
+
+1. 自动 OOBE/独立 MachineGuid、机器 SID 和 `DESKTOP-XXXXXXX` 名称；
+2. VgpuPortable 做 DLS Licensed、GRID 538.33、DEV_1E30/Code 0 校验；
+3. finalizer 校验 `clone-manifest.json` 固定摘要及 Guest Lite 每个载荷摘要，自动运行
+   `CloneApply`，保存该克隆 RID-500 用户的原始外观/策略/App/服务回滚基线；
+4. 复用系统 NVAPI 的内部重启，SYSTEM 验证 NVAPI/显示器，同时要求
+   `MpsSvc=Disabled/Stopped/PID 0`、`BFE=Auto/Running`、本地 policy 文件及 Guest Lite
+   补强任务完整；
+5. 只有全部通过才写 schema-3 完成标记并完整关机；宿主“初始”只读复核后再启动。
+
+若母盘篡改防护仍开启，自动链会明确失败并保留
+`C:\ProgramData\VMate\G11\clone-initialization-error.txt`，不会静默跳过 Defender。修复
+母盘后重建；不要通过 BCD、测试签名、驱动或 ACL 绕过。
+
+## 七、明确禁止和保留项
+
+- 不运行 `bcdedit`，不设置 `testsigning`/`nointegritychecks`；
+- 不安装、替换、测试签名或自签名任何内核驱动；
+- 不修改正式 NVIDIA GRID/vGPU、网卡、音频、打印和存储驱动；
+- 不使用 TrustedInstaller/接管 ACL/删除系统服务的手段；
+- 不调用 `Remove-AppxProvisionedPackage`，不删 WinSxS/System32/WindowsApps；
+- 不停 BITS、CryptSvc、AppXSvc、ClipSVC；
+- 不关闭桌面背景或字体平滑，不再设置全局“最佳性能”视觉预设；
+- 不写入或索取宿主/guest 凭据，包内不含 VM ID、UUID、token 或账号信息；
+- 只支持 Windows 10 client，不在 Windows 11/Server 执行。
+
+## 八、为什么可能出现 PARTIAL
+
+Windows 10 1903+ 的篡改防护会阻止 Defender 本地改动；新版 Defender 平台可能忽略
+旧式 `DisableAntiSpyware`、`DisableAntiVirus`、`ServiceKeepAlive` 总开关。2.2 把这
+三个值视为可选兼容项，严格检查受支持的实时、行为、下载、访问和网络保护有效状态。
+Update Orchestrator/DoSvc 的受保护对象
+不接管 ACL，而是验证其上游 WU 策略及 `wuauserv`/`UsoSvc` 已关闭。其他必需策略、
+服务、任务、App、进程或三种防火墙 profile 不符时仍返回 PARTIAL。
 
 参考：
 
-- [Microsoft Defender Antivirus 策略和篡改防护](https://learn.microsoft.com/windows/client-management/mdm/policy-csp-admx-microsoftdefenderantivirus)
-- [DisableAntiSpyware 的版本限制](https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/security-malware-windows-defender-disableantispyware)
-- [反恶意软件受保护服务限制](https://learn.microsoft.com/windows/win32/services/protecting-anti-malware-services-)
-- [Set-MpPreference 参数](https://learn.microsoft.com/powershell/module/defender/set-mppreference)
+- [Microsoft Defender DisableAntiSpyware 与篡改防护限制](https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/security-malware-windows-defender-disableantispyware)
 - [Windows Update 策略](https://learn.microsoft.com/windows/deployment/update/waas-wu-settings)
-- [关闭 Microsoft Store 的受支持策略](https://learn.microsoft.com/windows/configuration/store/)
-- [Appx 当前用户卸载与预配包区别](https://learn.microsoft.com/windows-hardware/manufacture/desktop/sideload-apps-with-dism-s14)
+- [OneDrive DisableFileSyncNGSC 策略](https://learn.microsoft.com/windows/client-management/mdm/policy-csp-system#disableonedrivefilesync)
+- [Microsoft Edge Update 策略](https://learn.microsoft.com/deployedge/microsoft-edge-update-policies)
+- [Google Update/Chrome 自动更新策略](https://support.google.com/chrome/a/answer/6350036)
+- [Mozilla Firefox DisableAppUpdate 策略](https://mozilla.github.io/policy-templates/#disableappupdate)
+- [Adobe Acrobat/Reader bUpdater 策略](https://www.adobe.com/devnet-docs/acrobatetk/tools/PrefRef/Windows/Updater-Win.html)
+- [Windows Firewall 概览与微软“不停止 MpsSvc”的风险说明](https://learn.microsoft.com/windows/security/operating-system-security/network-security/windows-firewall/)
+- [Set-NetFirewallProfile](https://learn.microsoft.com/powershell/module/netsecurity/set-netfirewallprofile)
+- [Get-NetFirewallProfile](https://learn.microsoft.com/powershell/module/netsecurity/get-netfirewallprofile)
+- [Microsoft Group Policy gpt.ini 版本格式](https://learn.microsoft.com/openspecs/windows_protocols/ms-gpol/59bb540a-64f4-4c52-9c55-5ca2fd2c0270)
+- [Microsoft Registry.pol 消息格式（键名和值名必须为 NUL 结尾 UTF-16LE）](https://learn.microsoft.com/openspecs/windows_protocols/ms-gpreg/5c092c22-bf6b-4e7f-b180-b20743d368f5)

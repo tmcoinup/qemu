@@ -25,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$RUN_DIR" "$VMS_DIR/42/log" "$VMS_DIR/42/backups/disks" \
-    "$VMS_DIR/42/backups/nvram" "$VMS_DIR/shared/bases" "$VMS_DIR/control"
+    "$VMS_DIR/42/backups/nvram" "$VMS_DIR/_base" "$VMS_DIR/control"
 
 fail() {
     echo "FAIL: $*" >&2

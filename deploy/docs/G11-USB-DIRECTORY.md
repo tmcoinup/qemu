@@ -1,8 +1,12 @@
 # G-11：把 host 目录挂成 Windows U 盘
 
-这个功能使用 QEMU 自带的 VVFAT，把一个 host 目录临时呈现为 FAT16 块设备，再通过
+这个功能使用 QEMU 自带的 VVFAT，把一个 host 目录临时呈现为 FAT 块设备，再通过
 标准 `usb-storage` 热插到正在运行的 Windows。Windows 使用自带 USB 大容量存储驱动，
 不需要安装 virtio、测试签名或自签名驱动，也不修改 BCD。
+
+公共 `shared-usb.sh` 封装固定呈现为 **128 GiB FAT32 只读 U 盘**。128 GiB 是逻辑
+容量，脚本不创建 128 GiB 的 raw/qcow2 镜像，也不预分配宿主机空间；QEMU 直接读取
+公共目录中的原文件，所以宿主机只为这些原文件本身付出空间。
 
 ## Guest Lite 一键用法
 
@@ -71,6 +75,40 @@ read -r -p '请输入 VM 编号: ' VM_ID
 ./deploy/scripts/shared-usb.sh "$VM_ID" eject
 ```
 
+第一次使用包含本功能的新 QEMU 时，需要让 VM 用新编译的 QEMU 完整重启一次；旧的
+运行中 QEMU 进程不认识 VVFAT 大容量参数，单纯热拔插无法给旧进程换代码。重启后按
+下面的傻瓜步骤操作。先保存 Windows 中的工作；`--graceful-only` 只允许正常关机，
+guest 不响应时会报错退出，不会强杀 VM：
+
+```bash
+cd /home/ubuntu/projects/qemu
+read -r -p '请输入 VM 编号: ' VM_ID
+./deploy/scripts/stop-vm.sh "$VM_ID" --graceful-only
+./deploy/scripts/start-vm.sh "$VM_ID"
+./deploy/scripts/shared-usb.sh "$VM_ID" mount
+./deploy/scripts/shared-usb.sh "$VM_ID" status
+```
+
+状态中看到以下三行即表示 128 GiB 按需占用模式已经生效：
+
+```text
+USB_DIRECTORY_CAPACITY_BYTES=137438953472
+USB_DIRECTORY_FAT_TYPE=32
+USB_DIRECTORY_BACKING=host-directory-no-image
+```
+
+查看宿主机真正占用量（这才是实际磁盘消耗，不是 Windows 看到的 128 GiB）：
+
+```bash
+du -sh /home/ubuntu/images/vms/shared/usb
+```
+
+用完执行：
+
+```bash
+./deploy/scripts/shared-usb.sh "$VM_ID" eject
+```
+
 ## 任意 host 目录
 
 通用封装允许明确指定其他目录：
@@ -85,6 +123,14 @@ read -r -p '请输入 VM 编号: ' VM_ID
 
 ```bash
 ./deploy/scripts/usb-directory.sh "$VM_ID" mount /绝对路径/目录 --label MY_USB
+```
+
+通用封装也可明确指定逻辑容量；指定容量时自动使用只读 FAT32，容量单位按 1024
+换算：
+
+```bash
+./deploy/scripts/usb-directory.sh "$VM_ID" mount /绝对路径/目录 \
+  --label MY_USB --size 128G
 ```
 
 通用入口的自定义卷标只能使用 1 至 11 个 ASCII 字母、数字、空格、`_` 或 `-`；
@@ -111,8 +157,12 @@ VM_DIR="/数据盘/vms/$VM_ID"
 
 - 默认且唯一支持只读；Windows 无法删除、感染或覆盖 host 文件；
 - 它不是实时共享目录。挂载期间不要修改 host 源目录；修改后执行 `--replace`；
-- VVFAT 默认是约 504 MiB 的 FAT16 虚拟盘，适合安装器、脚本和小型工具包；更大的
-  目录应使用只读 ISO 或另行制作磁盘镜像；
+- `shared-usb.sh` 固定使用逻辑 128 GiB FAT32；通用 `usb-directory.sh` 不传
+  `--size` 时仍保持约 504 MiB FAT16 的兼容行为；
+- 128 GiB 是只读目录映射的容量上限，不是可供 Windows 写入的云盘；Windows 无法
+  往其中保存文件，新增内容必须先放入宿主机公共目录，再执行 `mount` 刷新；
+- 当前 VVFAT 单个文件必须小于 2 GiB；128 GiB 解决的是整个工具目录的总容量，
+  不是 FAT32 的单文件限制，超大单文件应改用只读 ISO 或拆分；
 - 源目录不能是 `/`，不能包含符号链接、socket、设备节点或 FIFO；
 - 完整停止并重新启动 QEMU 后 U 盘默认不存在，需要时重新执行 `mount`；
 - 不导出宿主凭据、私钥、token 或包含这些内容的目录；
@@ -127,6 +177,9 @@ USB_DIRECTORY_STATE=present
 USB_DIRECTORY_ATTACHED=yes
 USB_DIRECTORY_TRANSPORT=usb-storage/scsi-hd/vvfat
 USB_DIRECTORY_MODE=read-only
+USB_DIRECTORY_BACKING=host-directory-no-image
+USB_DIRECTORY_CAPACITY_BYTES=137438953472
+USB_DIRECTORY_FAT_TYPE=32
 USB_DIRECTORY_PATH=/home/ubuntu/images/vms/shared/usb
 USB_DIRECTORY_LABEL=U盘
 USB_DIRECTORY_LABEL_CHARSET=CP936

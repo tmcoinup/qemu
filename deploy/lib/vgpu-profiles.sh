@@ -68,25 +68,15 @@ VGPU_PROFILE_CATALOG=(
     "gtx750ti_evga_sc_2gb|nvidia-257|NVIDIA GeForce GTX 750 Ti|0x10DE|0x1380|0x3842|0x3753|0xA2|2048|Version 82.07.25.00.50|1176|1255|1350|128|86400|GDDR5|Samsung|8|1|640|5|16|40|0x110|7|0x12|16"
 )
 
-# Append-only selection policy.  The original 24 rows retain the exact same
-# default random population and order; newly audited board brands are manual
-# until a separate migration deliberately changes fleet-wide distribution.
+# New G-11 VMs use one host-wide framebuffer tier.  The production default is
+# 2 GiB; a host that deliberately selects the 1 GiB tier randomizes only among
+# the four Maxwell GTX 750 rows.  Kepler identities remain readable for old
+# immutable vm.conf files, but cannot enter a new production-driver selection:
+# the locked GRID 538.33/R535 branch post-dates Kepler's R470 support ceiling.
 VGPU_DEFAULT_PROFILE_KEYS=(
     gtx750ti_2gb
     gt1030_2gb
     gtx1050_2gb
-    gt740_1gb
-    gt740_asus_1gb
-    gt740_gigabyte_1gb
-    gt740_zotac_1gb
-    gt730_1gb
-    gt730_msi_1gb
-    gt730_gigabyte_1gb
-    gt730_zotac_1gb
-    gtx750_asus_1gb
-    gtx750_msi_1gb
-    gtx750_gigabyte_1gb
-    gtx750_zotac_1gb
     gtx750ti_asus_2gb
     gtx750ti_msi_2gb
     gtx750ti_gigabyte_2gb
@@ -97,8 +87,24 @@ VGPU_DEFAULT_PROFILE_KEYS=(
     gtx1050_msi_2gb
     gtx1050_gigabyte_2gb
 )
+VGPU_TIER_1024_PROFILE_KEYS=(
+    gtx750_asus_1gb
+    gtx750_msi_1gb
+    gtx750_gigabyte_1gb
+    gtx750_zotac_1gb
+)
 VGPU_EXPLICIT_PROFILE_KEYS=(
     gtx750ti_evga_sc_2gb
+)
+VGPU_LEGACY_PROFILE_KEYS=(
+    gt740_1gb
+    gt740_asus_1gb
+    gt740_gigabyte_1gb
+    gt740_zotac_1gb
+    gt730_1gb
+    gt730_msi_1gb
+    gt730_gigabyte_1gb
+    gt730_zotac_1gb
 )
 
 # Direct3D/NVAPI capability contract keyed by the consumer PCI device ID.
@@ -583,22 +589,21 @@ vgpu_profile_normalize_vram_mb() {
 }
 
 vgpu_profile_default_keys_for_vram() {
-    local requested=${1:-} normalized row key profile_key profile_vram
+    local requested=${1:-} normalized
 
     normalized=$(vgpu_profile_normalize_vram_mb "$requested") || return
-    for key in "${VGPU_DEFAULT_PROFILE_KEYS[@]}"; do
-        for row in "${VGPU_PROFILE_CATALOG[@]}"; do
-            IFS='|' read -r profile_key _ _ _ _ _ _ _ profile_vram _ \
-                <<<"$row"
-            [[ "$profile_key" == "$key" ]] || continue
-            [[ "$profile_vram" == "$normalized" ]] && printf '%s\n' "$key"
-            break
-        done
-    done
+    case "$normalized" in
+        1024) printf '%s\n' "${VGPU_TIER_1024_PROFILE_KEYS[@]}" ;;
+        2048) printf '%s\n' "${VGPU_DEFAULT_PROFILE_KEYS[@]}" ;;
+    esac
 }
 
 vgpu_profile_explicit_keys() {
     printf '%s\n' "${VGPU_EXPLICIT_PROFILE_KEYS[@]}"
+}
+
+vgpu_profile_legacy_keys() {
+    printf '%s\n' "${VGPU_LEGACY_PROFILE_KEYS[@]}"
 }
 
 vgpu_profile_is_default() {
@@ -610,17 +615,37 @@ vgpu_profile_is_default() {
     return 1
 }
 
+vgpu_profile_is_default_for_vram() {
+    local requested=${1:-} tier=${2:-} key
+
+    while IFS= read -r key; do
+        [[ -n "$key" ]] || continue
+        [[ "$key" == "$requested" ]] && return 0
+    done < <(vgpu_profile_default_keys_for_vram "$tier")
+    return 1
+}
+
+vgpu_profile_is_legacy() {
+    local requested=${1:-} key
+
+    for key in "${VGPU_LEGACY_PROFILE_KEYS[@]}"; do
+        [[ "$key" == "$requested" ]] && return 0
+    done
+    return 1
+}
+
 vgpu_profile_validate_selection_policy_catalog() {
     local key row profile_key found policy
     local seen='|'
     local -a keys=()
 
-    for policy in default explicit; do
-        if [[ "$policy" == default ]]; then
-            keys=("${VGPU_DEFAULT_PROFILE_KEYS[@]}")
-        else
-            keys=("${VGPU_EXPLICIT_PROFILE_KEYS[@]}")
-        fi
+    for policy in default tier-1024 explicit legacy; do
+        case "$policy" in
+            default) keys=("${VGPU_DEFAULT_PROFILE_KEYS[@]}") ;;
+            tier-1024) keys=("${VGPU_TIER_1024_PROFILE_KEYS[@]}") ;;
+            explicit) keys=("${VGPU_EXPLICIT_PROFILE_KEYS[@]}") ;;
+            legacy) keys=("${VGPU_LEGACY_PROFILE_KEYS[@]}") ;;
+        esac
         for key in "${keys[@]}"; do
             [[ "$seen" != *"|$key|"* ]] || {
                 printf '重复或跨层 vGPU profile: %s\n' "$key" >&2
@@ -798,7 +823,9 @@ vgpu_profile_print_catalog() {
 # model/board brand are separate fields, so callers never have to infer an AIB
 # vendor from spacing or from the profile key.
 vgpu_profile_print_tsv_catalog() {
-    local row auto_random
+    local active_tier=${1:-2048} row auto_random
+
+    active_tier=$(vgpu_profile_normalize_vram_mb "$active_tier") || return
 
     printf 'PROFILE\tMODEL\tBOARD_BRAND\tBOARD_MODEL\tVRAM_MIB\tVRAM_MAKER\tMDEV\tAUTO_RANDOM\n'
     for row in "${VGPU_PROFILE_CATALOG[@]}"; do
@@ -807,7 +834,7 @@ vgpu_profile_print_tsv_catalog() {
             GPU_VRAM_MB _ _ _ _ _ _ _ GPU_MEMORY_MAKER \
             _ _ _ _ _ _ _ _ _ _ <<<"$row"
         vgpu_profile_load_board_metadata "$GPU_PROFILE" || return 1
-        if vgpu_profile_is_default "$GPU_PROFILE"; then
+        if vgpu_profile_is_default_for_vram "$GPU_PROFILE" "$active_tier"; then
             auto_random=1
         else
             auto_random=0

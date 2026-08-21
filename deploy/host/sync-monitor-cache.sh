@@ -35,12 +35,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-QEMU_EDID="${QEMU_EDID:-${REPO_ROOT}/build/qemu-edid}"
+DEPLOY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SOURCE_ROOT="$(cd "$DEPLOY_ROOT/.." && pwd)"
+QEMU_EDID="${QEMU_EDID:-${SOURCE_ROOT}/build/qemu-edid}"
 # Security-sensitive registry constants are always loaded from this checkout;
 # unlike qemu-edid/catalog test inputs, the policy is not environment-overridable.
-NVIDIA_MODE_POLICY="${REPO_ROOT}/deploy/lib/nvidia_modes.py"
-WINDOWS_HIVE_VALIDATOR="${REPO_ROOT}/deploy/lib/windows_hive.py"
+NVIDIA_MODE_POLICY="${DEPLOY_ROOT}/lib/nvidia_modes.py"
+WINDOWS_HIVE_VALIDATOR="${DEPLOY_ROOT}/lib/windows_hive.py"
 EXPECTED_DRIVER_VERSION="31.0.15.3833"
 EXPECTED_DRIVER_INF_SHA256="67a240e1d464cf97dabfec1a7cecf000eaa9ddfd702f32ba2c8771f17905dc2b"
 EXPECTED_DRIVER_CATALOG_SHA256="56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f"
@@ -79,7 +80,7 @@ while (( $# > 0 )); do
 done
 
 # shellcheck source=../../lib/monitor-profiles.sh
-source "$REPO_ROOT/deploy/lib/monitor-profiles.sh"
+source "$DEPLOY_ROOT/lib/monitor-profiles.sh"
 monitor_profiles_validate
 
 if [[ -n "$GENERATE_ONLY" ]]; then
@@ -356,7 +357,7 @@ fi
 # ---- 3) 通过 NBD 连接实例盘（RW）并挂载 ----
 # 并发安全 (P2)：取全局 NBD 锁，串行化所有 host-*.sh 离线工具，防并发抢同一 nbd 设备。
 # shellcheck source=../lib/nbd-lock.sh
-source "$REPO_ROOT/deploy/lib/nbd-lock.sh"
+source "$DEPLOY_ROOT/lib/nbd-lock.sh"
 modprobe nbd max_part=16 2>/dev/null || true
 _DISPLAY_MOUNTED=0
 MOUNT_ERR=""
@@ -524,8 +525,6 @@ if (expected_policy_tuples is None or
 expected_enum_prefix = expected_nvidia_pnp_id[4:].lower()
 edid = open(os.environ['EDID_BIN'], 'rb').read()
 monitor_name = os.environ['MONITOR_NAME']
-monitor_mfg = os.environ['MONITOR_MFG']
-monitor_hwid = 'MONITOR\\' + os.environ['MONITOR_PNP']
 if len(edid) == 0 or len(edid) % 128:
     raise SystemExit(f'EDID 长度必须是非零 128 字节倍数: {len(edid)}')
 edid_blocks = [edid[offset:offset + 128]
@@ -538,9 +537,6 @@ root = h.root()
 
 def reg_sz(value):
     return value.encode('utf-16le') + b'\x00\x00'
-
-def reg_multi(values):
-    return ('\x00'.join(values) + '\x00\x00').encode('utf-16le')
 
 def child(n, name):
     for c in h.node_children(n):
@@ -781,14 +777,15 @@ for cs in csets:
                             raise SystemExit(
                                 f'{cs}\\...\\{h.node_name(pnp)}\\{h.node_name(inst)}: '
                                 f'EDID_OVERRIDE\\{block_number} 写后校验失败')
-                    h.node_set_value(inst, {'key': 'DeviceDesc', 't': 1,
-                                           'value': reg_sz(monitor_name)})
+                    # DeviceDesc/Manufacturer/HardwareID are owned by PnP and
+                    # the signed monitor driver.  Rewriting them offline is
+                    # overwritten at enumeration and can make the Enum tree
+                    # internally inconsistent.  FriendlyName is the one
+                    # documented writable identity property; the guest
+                    # coordinator republishes it through SetupAPI once the
+                    # devnode is live.
                     h.node_set_value(inst, {'key': 'FriendlyName', 't': 1,
                                            'value': reg_sz(monitor_name)})
-                    h.node_set_value(inst, {'key': 'Mfg', 't': 1,
-                                           'value': reg_sz(monitor_mfg)})
-                    h.node_set_value(inst, {'key': 'HardwareID', 't': 7,
-                                           'value': reg_multi([monitor_hwid])})
                     edid_writes += 1
                     override_writes += 1
                     control_set_stats[cs.lower()]['edid'] += 1
@@ -897,4 +894,4 @@ if [[ -n "$MARKER" ]]; then
     chmod 0644 "$marker_tmp"
     mv -f -- "$marker_tmp" "$MARKER"
 fi
-log "完成 Windows 离线 EDID/EDID_OVERRIDE/模式缓存：${MONITOR_DISPLAY_NAME}；guest 内未安装软件。"
+log "完成 Windows 离线 EDID/EDID_OVERRIDE/模式缓存：${MONITOR_DISPLAY_NAME}；此 host 命令不直接修改 live PnP 名称。"

@@ -42,7 +42,11 @@ assert_no_persistent_optical_contract() {
 }
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf -- "$TMP_DIR"' EXIT
+if [[ "${KEEP_TEST_TMP:-0}" == 1 ]]; then
+    trap 'printf "retained test fixture: %s\n" "$TMP_DIR" >&2' EXIT
+else
+    trap 'rm -rf -- "$TMP_DIR"' EXIT
+fi
 
 touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd"
 
@@ -96,21 +100,38 @@ cat >"$TMP_DIR/qemu-img" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$*" >>"$FAKE_QEMU_IMG_TRACE"
 record_size() {
-    local image=$1 size=$2 base=${1##*/}
+    local image=$1 size=$2 base=${1##*/} image_dir
+    image_dir=$(dirname -- "$image")
     printf '%s\n' "$size" >"$image.size"
     # create-disk atomically renames only the real qcow2.  Mirror its final
     # metadata path in this fake; real qemu-img stores virtual-size in-image.
     if [[ "$base" == .disk.qcow2.partial.* ]]; then
-        printf '%s\n' "$size" >"${image%/*}/disk.qcow2.size"
+        printf '%s\n' "$size" >"$image_dir/disk.qcow2.size"
     fi
 }
 case "$1" in
     create)
-        target=${@: -2:1}
-        size=${@: -1}
+        backing=""
+        for ((index = 1; index <= $#; index++)); do
+            if [[ "${!index}" == -b ]]; then
+                next=$((index + 1))
+                backing=${!next}
+                break
+            fi
+        done
+        if [[ -n "$backing" ]]; then
+            target=${@: -1}
+            size=500000000000
+        else
+            target=${@: -2:1}
+            size=${@: -1}
+        fi
         mkdir -p "$(dirname "$target")"
         : >"$target"
         record_size "$target" "$size"
+        if [[ -n "$backing" ]]; then
+            printf '%s\n' "$backing" >"$(dirname -- "$target")/.linked-backing"
+        fi
         ;;
     resize)
         image=$2
@@ -126,10 +147,25 @@ case "$1" in
         [[ -f "$image" ]]
         size=500000000000
         [[ ! -f "$image.size" ]] || size=$(<"$image.size")
+        backing=""
+        full_backing=""
+        image_leaf=${image##*/}
+        if [[ "$image_leaf" == disk.qcow2 ||
+              "$image_leaf" == .disk.qcow2.partial.* ]] &&
+                [[ -f "${image%/*}/.linked-backing" ]]; then
+            backing=$(<"${image%/*}/.linked-backing")
+            full_backing=$(readlink -m -- "${image%/*}/$backing")
+        fi
         if [[ " $* " == *' --output=json '* ]]; then
-            printf '{"format":"qcow2","virtual-size":%s,"backing-filename":null,"full-backing-filename":null,"format-specific":{"data":{}}}\n' "$size"
+            if [[ -n "$backing" ]]; then
+                printf '{"format":"qcow2","virtual-size":%s,"backing-filename":"%s","full-backing-filename":"%s","format-specific":{"data":{}}}\n' \
+                    "$size" "$backing" "$full_backing"
+            else
+                printf '{"format":"qcow2","virtual-size":%s,"backing-filename":null,"full-backing-filename":null,"format-specific":{"data":{}}}\n' "$size"
+            fi
         else
             printf 'image: %s\nfile format: qcow2\nvirtual size: %s\n' "$image" "$size"
+            [[ -z "$backing" ]] || printf 'backing file: %s\n' "$backing"
         fi
         ;;
     *)
@@ -155,6 +191,14 @@ if [[ "$#" -eq 2 && "$1" == -device && "$2" == usb-kbd,help ]]; then
 fi
 if [[ "$#" -eq 2 && "$1" == -device && "$2" == ICH9-LPC,help ]]; then
     printf '%s\n' '  x-g11-chipset=<str>'
+    exit 0
+fi
+if [[ "$#" -eq 2 && "$1" == -device && "$2" == usb-bot,help ]]; then
+    printf '%s\n' '  x-no-serial=<bool>'
+    exit 0
+fi
+if [[ "$#" -eq 2 && "$1" == -device && "$2" == scsi-cd,help ]]; then
+    printf '%s\n' '  vendor=<str>' '  product=<str>' '  ver=<str>'
     exit 0
 fi
 printf '%q ' "$@" >>"$FAKE_QEMU_TRACE"
@@ -230,8 +274,8 @@ run_start() {
 # --install must create a blank image even when a qualified public base exists.
 INSTALL_ROOT="$TMP_DIR/install-vms"
 INSTALL_ID=910001
-mkdir -p "$INSTALL_ROOT/shared/bases"
-printf 'base-must-not-be-copied\n' >"$INSTALL_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$INSTALL_ROOT/_base"
+printf 'base-must-not-be-copied\n' >"$INSTALL_ROOT/_base/win10-base.qcow2"
 printf 'windows-iso\n' >"$TMP_DIR/windows.iso"
 if ! run_start "$INSTALL_ROOT" "$INSTALL_ID" \
         "$TMP_DIR/install.out" "$TMP_DIR/install.err" \
@@ -393,8 +437,8 @@ require_text 'id=odd0-usb' "$TMP_DIR/qemu.trace"
 # interactive and must not build or attach the answer medium.
 MANUAL_ROOT="$TMP_DIR/manual-vms"
 MANUAL_ID=910010
-mkdir -p "$MANUAL_ROOT/shared/bases"
-printf 'base-must-not-be-copied\n' >"$MANUAL_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$MANUAL_ROOT/_base"
+printf 'base-must-not-be-copied\n' >"$MANUAL_ROOT/_base/win10-base.qcow2"
 run_start "$MANUAL_ROOT" "$MANUAL_ID" \
     "$TMP_DIR/manual.out" "$TMP_DIR/manual.err" \
     --install "$TMP_DIR/windows.iso" --manual-oobe
@@ -411,8 +455,8 @@ require_text 'id=odd0-usb' "$TMP_DIR/qemu.trace"
 # same blank-disk guarantee.
 DEFAULT_ROOT="$TMP_DIR/default-vms"
 DEFAULT_ID=910004
-mkdir -p "$DEFAULT_ROOT/shared/bases" "$TMP_DIR/iso"
-printf 'base-must-not-be-copied\n' >"$DEFAULT_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$DEFAULT_ROOT/_base" "$TMP_DIR/iso"
+printf 'base-must-not-be-copied\n' >"$DEFAULT_ROOT/_base/win10-base.qcow2"
 printf 'default-windows-iso\n' >"$TMP_DIR/iso/win10.iso"
 run_start "$DEFAULT_ROOT" "$DEFAULT_ID" \
     "$TMP_DIR/default.out" "$TMP_DIR/default.err" --install
@@ -433,21 +477,33 @@ require_text 'ISO 不存在' "$TMP_DIR/bad-iso.err"
 [[ ! -e "$BAD_ISO_ROOT/${BAD_ISO_ID}/disk.qcow2" ]] || \
     fail "missing ISO still published a blank disk"
 
-# A normal first start must clone the public base and must not invoke
-# qemu-img create. --no-gpu keeps this lifecycle test away from real mdev sysfs.
+# A normal first start must create the same V-11-style incremental disk used by
+# clone-from-base. --no-gpu keeps this lifecycle test away from real mdev sysfs.
 CLONE_ROOT="$TMP_DIR/clone-vms"
 CLONE_ID=910002
-mkdir -p "$CLONE_ROOT/shared/bases"
-printf 'qualified-base\n' >"$CLONE_ROOT/shared/bases/win10-base.qcow2"
-run_start "$CLONE_ROOT" "$CLONE_ID" \
-    "$TMP_DIR/clone.out" "$TMP_DIR/clone.err" --no-gpu
+mkdir -p "$CLONE_ROOT/_base"
+printf 'qualified-base\n' >"$CLONE_ROOT/_base/win10-base.qcow2"
+if ! run_start "$CLONE_ROOT" "$CLONE_ID" \
+        "$TMP_DIR/clone.out" "$TMP_DIR/clone.err" --no-gpu; then
+    sed 's/^/clone: /' "$TMP_DIR/clone.err" >&2 || true
+    fail 'normal linked bootstrap failed before storage assertions'
+fi
 CLONE_DISK="$CLONE_ROOT/${CLONE_ID}/disk.qcow2"
-cmp "$CLONE_ROOT/shared/bases/win10-base.qcow2" "$CLONE_DISK" || \
-    fail "normal bootstrap did not clone the public base"
-if grep -Fq 'create -f qcow2' "$TMP_DIR/qemu-img.trace"; then
-    fail "normal bootstrap created a blank disk instead of cloning the base"
+CLONE_PIN="$CLONE_ROOT/${CLONE_ID}/.base.qcow2"
+[[ -f "$CLONE_DISK" && -f "$CLONE_PIN" && ! -L "$CLONE_PIN" ]] ||
+    fail 'normal bootstrap did not publish the overlay and base pin'
+[[ "$CLONE_PIN" -ef "$CLONE_ROOT/_base/win10-base.qcow2" ]] ||
+    fail 'normal bootstrap base pin does not share the selected base inode'
+[[ ! "$CLONE_DISK" -ef "$CLONE_PIN" ]] ||
+    fail 'normal bootstrap published the base itself as the writable disk'
+require_text 'create -q -f qcow2 -F qcow2 -b .base.qcow2' \
+    "$TMP_DIR/qemu-img.trace"
+if grep -Fq 'preallocation=metadata' "$TMP_DIR/qemu-img.trace"; then
+    fail 'normal bootstrap created a blank standalone disk'
 fi
 require_text '自动从公共 base 创建实例盘' "$TMP_DIR/clone.out"
+require_text '实例盘: V-11 式增量盘 / backing=.base.qcow2' \
+    "$TMP_DIR/clone.out"
 if grep -Fq 'id=answer0' "$TMP_DIR/qemu.trace"; then
     fail "normal base startup attached the install answer ISO"
 fi
@@ -463,44 +519,127 @@ reject_text 'g11-usb-install-boot.img' "$TMP_DIR/qemu.trace"
 assert_no_persistent_optical_contract "$TMP_DIR/qemu.trace" \
     'normal bootstrap'
 
+# A private Sysprep clone gate attaches exactly its per-VM package as a
+# read-only, non-boot, reviewed true-model USB CD-ROM. It must not reintroduce
+# the install helper or any ordinary persistent optical identity; the guest
+# eject/host watcher pair removes it after the payload is durable.
+CLONE_CONF="$CLONE_ROOT/${CLONE_ID}/vm.conf"
+CLONE_UUID=$(
+    unset VM_UUID
+    # shellcheck source=/dev/null
+    source "$CLONE_CONF"
+    printf '%s' "${VM_UUID,,}"
+)
+CLONE_GPU_PROFILE=$(
+    unset GPU_PROFILE
+    # shellcheck source=/dev/null
+    source "$CLONE_CONF"
+    printf '%s' "$GPU_PROFILE"
+)
+CLONE_MONITOR_PROFILE=$(
+    unset MONITOR_PROFILE
+    # shellcheck source=/dev/null
+    source "$CLONE_CONF"
+    printf '%s' "$MONITOR_PROFILE"
+)
+CLONE_CONFIG_SHA256=$(sha256sum -- "$CLONE_CONF" | awk '{print toupper($1)}')
+INIT_CONTRACT_ID=$(printf '%064d' 0 | tr 0 A)
+INIT_ISO_FILE="vm${CLONE_ID}-${CLONE_UUID}-${INIT_CONTRACT_ID:0:16}.iso"
+INIT_PACKAGE_ROOT="$CLONE_ROOT/${CLONE_ID}/packages/SystemNvapiProjection"
+mkdir -m 0700 -p -- "$INIT_PACKAGE_ROOT"
+printf 'private VM-bound initialization ISO\n' >"$INIT_PACKAGE_ROOT/$INIT_ISO_FILE"
+chmod 0600 "$INIT_PACKAGE_ROOT/$INIT_ISO_FILE"
+INIT_ISO_SHA256=$(sha256sum -- "$INIT_PACKAGE_ROOT/$INIT_ISO_FILE" |
+    awk '{print toupper($1)}')
+jq -n \
+    --arg baseName private-base \
+    --arg vmUuid "$CLONE_UUID" \
+    --arg gpuProfile "$CLONE_GPU_PROFILE" \
+    --arg monitorProfile "$CLONE_MONITOR_PROFILE" \
+    --arg sourceConfigSha256 "$CLONE_CONFIG_SHA256" \
+    --arg systemNvapiContractId "$INIT_CONTRACT_ID" \
+    --arg systemNvapiIsoFile "$INIT_ISO_FILE" \
+    --arg systemNvapiIsoSha256 "$INIT_ISO_SHA256" '
+    {
+        schemaVersion: 2,
+        state: "guest-firstboot-required",
+        baseName: $baseName,
+        catalogSha256: ("B" * 64),
+        createdUtc: "2026-08-19T00:00:00Z",
+        vmUuid: $vmUuid,
+        gpuProfile: $gpuProfile,
+        monitorProfile: $monitorProfile,
+        sourceConfigSha256: $sourceConfigSha256,
+        systemNvapiContractId: $systemNvapiContractId,
+        systemNvapiIsoFile: $systemNvapiIsoFile,
+        systemNvapiIsoSha256: $systemNvapiIsoSha256
+    }' >"$CLONE_ROOT/${CLONE_ID}/.g11-init-required"
+chmod 0600 "$CLONE_ROOT/${CLONE_ID}/.g11-init-required"
+if ! run_start "$CLONE_ROOT" "$CLONE_ID" \
+        "$TMP_DIR/private-init.out" "$TMP_DIR/private-init.err" --no-gpu; then
+    sed 's/^/private-init: /' "$TMP_DIR/private-init.err" >&2 || true
+    fail 'private initialization startup failed before argv assertions'
+fi
+require_text "file=${INIT_PACKAGE_ROOT}/${INIT_ISO_FILE}\,if=none\,id=g11-init-odd-media\,media=cdrom\,readonly=on\,format=raw" \
+    "$TMP_DIR/qemu.trace"
+require_text 'usb-bot\,id=g11-init-odd-usb\,bus=xhci.0\,port=3\,x-no-serial=on' \
+    "$TMP_DIR/qemu.trace"
+require_text 'scsi-cd\,id=g11-init-odd\,drive=g11-init-odd-media\,bus=g11-init-odd-usb.0\,vendor=HL-DT-ST\,product=DVDRAM\ GH24NS50\,ver=XP02\,serial=\,bootindex=-1' \
+    "$TMP_DIR/qemu.trace"
+reject_text 'g11-init-odd-usb\,bus=xhci.0\,port=3\,attached=on' \
+    "$TMP_DIR/qemu.trace"
+if tr ' ' '\n' <"$TMP_DIR/qemu.trace" |
+        grep -F 'g11-init-odd-usb' | grep -Fq 'bootindex='; then
+    fail "private initialization ISO unexpectedly became bootable"
+fi
+reject_text 'id=installboot' "$TMP_DIR/qemu.trace"
+require_text "系统 NVAPI: VM-bound contract ${INIT_CONTRACT_ID}" \
+    "$TMP_DIR/private-init.out"
+require_text 'QMP multi: native multi-client' "$TMP_DIR/private-init.out"
+require_text '载荷复制后自动热拔' "$TMP_DIR/private-init.out"
+[[ -f "$CLONE_ROOT/${CLONE_ID}/.g11-init-required" ]] ||
+    fail "start-vm cleared the private initialization gate before host verification"
+
 # The fully parsed final mode decides disk intent. Option values that happen to
 # equal --install/--dry-run must not affect bootstrap or lock behavior.
 LAST_MODE_ROOT="$TMP_DIR/last-mode-vms"
 LAST_MODE_ID=910005
-mkdir -p "$LAST_MODE_ROOT/shared/bases"
-printf 'last-mode-base\n' >"$LAST_MODE_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$LAST_MODE_ROOT/_base"
+printf 'last-mode-base\n' >"$LAST_MODE_ROOT/_base/win10-base.qcow2"
 run_start "$LAST_MODE_ROOT" "$LAST_MODE_ID" \
     "$TMP_DIR/last-mode.out" "$TMP_DIR/last-mode.err" \
     --install "$TMP_DIR/windows.iso" --no-gpu
-cmp "$LAST_MODE_ROOT/shared/bases/win10-base.qcow2" \
-    "$LAST_MODE_ROOT/${LAST_MODE_ID}/disk.qcow2" || \
-    fail "final --no-gpu mode did not override earlier --install disk intent"
+[[ -f "$LAST_MODE_ROOT/${LAST_MODE_ID}/disk.qcow2" &&
+   "$LAST_MODE_ROOT/${LAST_MODE_ID}/.base.qcow2" -ef "$LAST_MODE_ROOT/_base/win10-base.qcow2" ]] ||
+    fail "final --no-gpu mode did not create a linked base disk"
 
 EXTRA_ROOT="$TMP_DIR/extra-vms"
 EXTRA_ID=910006
-mkdir -p "$EXTRA_ROOT/shared/bases"
-printf 'extra-base\n' >"$EXTRA_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$EXTRA_ROOT/_base"
+printf 'extra-base\n' >"$EXTRA_ROOT/_base/win10-base.qcow2"
 run_start "$EXTRA_ROOT" "$EXTRA_ID" \
     "$TMP_DIR/extra.out" "$TMP_DIR/extra.err" \
     --extra --install --no-gpu
-cmp "$EXTRA_ROOT/shared/bases/win10-base.qcow2" \
-    "$EXTRA_ROOT/${EXTRA_ID}/disk.qcow2" || \
+[[ -f "$EXTRA_ROOT/${EXTRA_ID}/disk.qcow2" &&
+   "$EXTRA_ROOT/${EXTRA_ID}/.base.qcow2" -ef "$EXTRA_ROOT/_base/win10-base.qcow2" ]] ||
     fail "--extra value was mistaken for install mode"
 
 EXTRA_DRY_ROOT="$TMP_DIR/extra-dry-vms"
 EXTRA_DRY_ID=910007
-mkdir -p "$EXTRA_DRY_ROOT/shared/bases"
-printf 'extra-dry-base\n' >"$EXTRA_DRY_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$EXTRA_DRY_ROOT/_base"
+printf 'extra-dry-base\n' >"$EXTRA_DRY_ROOT/_base/win10-base.qcow2"
 run_start "$EXTRA_DRY_ROOT" "$EXTRA_DRY_ID" \
     "$TMP_DIR/extra-dry.out" "$TMP_DIR/extra-dry.err" \
     --extra --dry-run --no-gpu
 [[ -f "$EXTRA_DRY_ROOT/${EXTRA_DRY_ID}/disk.qcow2" ]] || \
     fail "--extra value was mistaken for dry-run mode"
+[[ "$EXTRA_DRY_ROOT/${EXTRA_DRY_ID}/.base.qcow2" -ef "$EXTRA_DRY_ROOT/_base/win10-base.qcow2" ]] ||
+    fail "--extra value did not preserve linked-clone storage intent"
 
 FINAL_INSTALL_ROOT="$TMP_DIR/final-install-vms"
 FINAL_INSTALL_ID=910008
-mkdir -p "$FINAL_INSTALL_ROOT/shared/bases"
-printf 'final-install-base\n' >"$FINAL_INSTALL_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$FINAL_INSTALL_ROOT/_base"
+printf 'final-install-base\n' >"$FINAL_INSTALL_ROOT/_base/win10-base.qcow2"
 run_start "$FINAL_INSTALL_ROOT" "$FINAL_INSTALL_ID" \
     "$TMP_DIR/final-install.out" "$TMP_DIR/final-install.err" \
     --no-gpu --install "$TMP_DIR/windows.iso"

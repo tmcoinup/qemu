@@ -13,7 +13,8 @@ usage: ./build.sh --output /absolute/path/G11GuestLite.exe
 
 Builds an ordinary 64-bit Windows user-mode EXE. The EXE embeds the reviewed
 PowerShell/CMD/README payloads and requests UAC through a standard manifest.
-It does not sign or install a driver.
+Compiler support is statically linked; runtime imports are Windows inbox DLLs
+only. It does not sign or install a driver.
 EOF
 }
 

@@ -12,8 +12,8 @@
 | 主板 | 10 / 13 | 5 品牌：ASUS、Gigabyte、MSI、ASRock、ECS；active 全是 H81、双内存槽 |
 | 内存 | 25 / 27 | 5 品牌：Kingston、Samsung、Micron、SK hynix、Crucial；active 全为双条 DDR3 |
 | 审核整机组合 | 261 / 264 | 默认 24 套、显式 237 套、legacy 3 套 |
-| SSD | 9 默认 / 10 可选 | 5 品牌；每款精确 `512110190592` 字节，新增 960 PRO 只手动选择 |
-| GPU | 24 默认 / 25 可选 | 6 个 NVIDIA 芯片型号；新增 EVGA 只手动选择，板卡 metadata 共 9 品牌 |
+| SSD | 7 默认 / 10 可选 | 5 品牌；每款精确 `512110190592` 字节，7 款 SATA 默认、3 款 NVMe 显式选择 |
+| GPU | 25 总目录 | 6 个 NVIDIA 芯片型号；2GB 默认 12、1GB Maxwell 新建 4、显式 1、Kepler legacy 8 |
 | 显示器 | 28 / 35 | 新建 8 品牌/完整 11 品牌；35 款全部为 1920×1080@60，是超过 5 品牌的明确例外 |
 | 键盘 | 3 / 8 | active 为 Microsoft、Logitech、Dell；旧 A4Tech/Rapoo 等 5 行只在 compatibility/quarantine |
 | 相对鼠标 | 3 / 8 | Microsoft、Logitech、Dell；只在创建时显式 `--relative-mouse` 才挂载 |
@@ -26,10 +26,11 @@
 能启动的 legacy 平台中兜底。如果仍有 active 探测结果不确定且 i7 也未明确通过，
 创建器不会偷换旧平台，而是保留 active 选择，让启动门禁 fail-closed。
 
-扩容采用追加层：原 24 套平台、9 款 SSD、24 条 GPU 的默认 key、顺序和随机权重
-均不改变。H81M-PLUS/Crucial、五款 i3-4130 扩展主板、i3 双频率/四品牌内存矩阵、
-960 PRO 和 EVGA 只在用户
-明确选择或锁定相应项时进入候选；已有 `vm.conf` 的稳定 ID 也不重写。
+平台扩容仍采用追加层：原 24 套平台的默认 key、顺序和随机权重不改变。
+H81M-PLUS/Crucial、五款 i3-4130 扩展主板和 i3 双频率/四品牌内存矩阵只在用户
+明确选择或锁定相应项时进入候选。SSD 采用 7 款 SATA 默认、3 款 NVMe 显式的
+生命周期；GPU 采用 12 条 2GB 默认、4 条 1GB Maxwell 新建、1 条显式和 8 条
+Kepler legacy 的生命周期。已有 `vm.conf` 的稳定 ID 不重写。
 
 ### 七彩虹 profile 审核依据
 
@@ -109,7 +110,8 @@
   接口、压力/倾角协议；因此新建池诚实使用 QEMU `0627:0001`。
 - 全部 264 套平台可用同一个已审核光驱身份：
   `HL-DT-ST DVDRAM GH24NS50`、固件 `XP02`。普通启动不挂载它；仅显式
-  IDE 安装回退或手动 USB-BOT/SCSI 热插时创建。启动器/手动脚本显式传空
+  IDE 安装回退、私有克隆的一次性初始化载荷或手动 USB-BOT/SCSI 热插时创建。
+  首启载荷复制后会自动弹出并热拔整个光驱栈。启动器/手动脚本显式传空
   `serial=`，不伪造实机序列也不让 QEMU 回落到 `QM0000x`。
 - 默认安装期 UEFI helper、USB Windows ISO 和应答 ISO 仍是 QEMU 通用临时
   传输设备，正常启动时不挂载。它们没有可验实体身份，不传
@@ -126,7 +128,7 @@
 | GPU 板卡 | `not-exposed`；V-11 目录也明确不暴露，不用 mdev UUID 冒充板卡序列 |
 | USB 键鼠/指针 | `none`，descriptor `iSerialNumber=0`；启动参数永不加 `serial=` |
 | NIC | 使用 Intel 全局单播 MAC，拒绝本地管理/多播位、非 Intel OUI、`000000`/`FFFFFF` 后缀 |
-| 可选光驱 | `HL-DT-ST DVDRAM GH24NS50 / XP02`；`serial=none`；普通启动 absent，仅安装/手动热插 |
+| 可选光驱 | `HL-DT-ST DVDRAM GH24NS50 / XP02`；`serial=none`；普通启动 absent，仅安装/一次性私有克隆载荷/手动热插 |
 | 安装/应答临时介质 | `none`；QEMU generic transient transport，不传 `model=` 或 `serial=` |
 
 创建器持有 fleet identity 全局锁，在发布 `vm.conf` 前不执行地解析其他数字 VM
@@ -382,10 +384,11 @@ VLAN 白名单见 [G-11 宿主桥接/VLAN 教程](G11-NETWORK-BRIDGE-VLAN.md)。
 
 ### 方案 A：使用默认低端池
 
-配置不存在时，启动器会从本机能实现的 24 套默认组合、9 款默认兼容 SSD、24 条默认
-1GB/2GB GPU 和 28 款新建显示器中选择并持久化。GPU 按 24 条原子 profile
-等概率抽取；只在
-第一次生成配置时随机，之后启动不会换卡：
+配置不存在时，启动器会从本机能实现的 24 套默认组合、7 款默认 SATA SSD 和
+28 款新建显示器中选择并持久化。GPU 按 `VGPU_HOST_FB_TIER_MB` 只在单一容量档
+抽取：2048MB 档从 12 条 2GB 默认行等概率选择，1024MB 档从 4 条 Maxwell 1GB
+新建行等概率选择；显式 1 条和 Kepler legacy 8 条不参加无参数随机。选择只发生在
+第一次生成配置时，之后启动不会换卡：
 
 ```bash
 ./deploy/scripts/start-vm.sh 8 --install /home/ubuntu/images/iso/win10.iso
@@ -493,13 +496,14 @@ CPU+主板下解析另一条白名单，不会反向换板。源头 CLI 的容�
 ## SSD、GPU 和显示器边界
 
 - SSD 完整目录为 10 款，全部精确为 `512110190592` 字节：7 款 SATA、3 款
-  NVMe。原 9 款仍是默认层；Samsung 960 PRO 512GB 是手动扩展。active H81 没有
-  原生 M.2，所以自动选择会经过拓扑门禁并使用兼容 SATA；NVMe 只用于链路合法平台。
+  NVMe。默认层只含 7 款 SATA；3 款 NVMe 都必须显式选择。active H81 没有
+  原生 M.2，所以自动选择只使用兼容 SATA；NVMe 还必须通过链路合法性门禁。
 - GPU 有 GT 730、GT 740、GTX 750 三个 1GB 型号，以及 GTX 750 Ti、
   GT 1030、GTX 1050 三个 2GB 型号。guest 身份与宿主 mdev framebuffer
   合同必须同为 1024 或 2048MB。25 条 app-local 原子行覆盖 9 个板卡品牌和
   Samsung/SK hynix/Micron/Elpida 4 个显存厂家，序列策略都为
-  `not-exposed`；B 模式
+  `not-exposed`；其中 12 条为 2GB 默认层、4 条为 1GB Maxwell 新建层、1 条仅
+  显式选择、8 条 Kepler 仅供旧配置。B 模式
   系统 PCI 始终保持宿主 mdev，不能把这些 metadata 解释成可替换的系统 PCI 板卡。
 - 显示器完整目录 35 款，每一款 preferred/native timing 都是
   1920×1080@60；新建白名单为其中 28 款。其他分辨率不能作为 profile 的原生模式。

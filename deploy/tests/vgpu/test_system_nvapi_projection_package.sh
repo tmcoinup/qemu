@@ -56,10 +56,20 @@ if rg -n -i 'ludashi|\u9c81\u5927\u5e08|gpu-z|gpuz|vm9|AOC 2470W|AOC2470' \
 fi
 require_text '& $bcdedit /enum all' "$coordinator"
 require_text "@('testsigning', 'nointegritychecks')" "$coordinator"
+require_text "'*S-1-5-32-544:(F)'" "$installer"
+require_text 'icacls failed for' "$installer"
+if grep -Fq "'Administrators:(F)'" "$installer"; then
+    fail 'system installer uses a localized Administrators group name'
+fi
 require_text "'RefreshMonitor'" "$coordinator"
 require_text "'RefreshIdentity'" "$coordinator"
 require_text 'function Test-MonitorBaseIdentity' "$coordinator"
 require_text 'function Get-MonitorRegistryInstances' "$coordinator"
+require_text '[switch]$IncludeNonMatching' "$coordinator"
+require_text 'Get-MonitorRegistryInstances $Payload `' "$coordinator"
+require_text '-IncludeNonMatching' "$coordinator"
+require_text '\ADISPLAY\\NVD[0-9A-F]{4}\\' "$coordinator"
+require_text '唯一的 native NVIDIA monitor 实例尚未稳定。' "$coordinator"
 require_text 'function Set-MonitorEdidOverride' "$coordinator"
 require_text 'function Register-MonitorIdentityTask' "$coordinator"
 require_text 'function Wait-RegistryContract' "$coordinator"
@@ -67,10 +77,24 @@ require_text "\$trigger.Delay = 'PT45S'" "$coordinator"
 require_text '-Action RefreshIdentity -PayloadDir' "$coordinator"
 require_text 'Invoke-ProfileWriter $payload' "$coordinator"
 require_text "Get-PnpDevice -Class Monitor -PresentOnly" "$coordinator"
-require_text "@('DeviceDesc', [string]\$Payload.Contract.monitor.displayName)" \
-    "$coordinator"
-require_text "@('FriendlyName', [string]\$Payload.Contract.monitor.displayName)" \
-    "$coordinator"
+require_text 'SetupDiSetDevicePropertyW' "$coordinator"
+require_text 'DEVPKEY_Device_FriendlyName' "$coordinator"
+require_text 'function Set-MonitorPnpFriendlyName' "$coordinator"
+require_text 'Set-MonitorPnpFriendlyName $Instance.InstanceId' "$coordinator"
+if rg -n 'Set-ProtectedMonitorValue[[:space:]]+\$Instance\.InstancePath[[:space:]]+.(DeviceDesc|Mfg|HardwareID).' \
+        "$coordinator" >/dev/null; then
+    fail 'system coordinator directly rewrites an OS/driver-owned monitor property'
+fi
+require_text 'function Initialize-StorageEjectApi' "$coordinator"
+require_text 'IOCTL_STORAGE_EJECT_MEDIA = 0x002D4808' "$coordinator"
+require_text 'GENERIC_READ = 0x80000000' "$coordinator"
+require_text '@"\\.\" + normalized, GENERIC_READ' "$coordinator"
+require_text 'Eject-MatchingPayloadMedia $payload.Contract' "$coordinator"
+require_text 'function Get-V11ComputerName' "$coordinator"
+require_text "return 'DESKTOP-' + \$compact.Substring(0, 7)" "$coordinator"
+require_text 'Prepare-V11CloneComputerName $payload' "$coordinator"
+require_text 'Assert-V11CloneComputerName $payload.Contract' "$coordinator"
+require_text 'Rename-Computer -NewName $expected -Force' "$coordinator"
 require_text "\$names.Count -ne 2 -or \$names[0] -cne '0' -or \$names[1] -cne '1'" \
     "$coordinator"
 require_text 'Remove-StaleProjectionTasks $payload.Contract' "$coordinator"
@@ -97,9 +121,11 @@ require_text "'D3D12CapabilityProbe32.exe'" "$coordinator"
 require_text "'D3D12CapabilityProbe64.exe'" "$coordinator"
 require_text "Invoke-NativeD3D12Probes \$payload" "$coordinator"
 require_text 'D3D12_NATIVE_VERIFY PASS' "$coordinator"
+require_text '$output = (& $probe 2>&1 | Out-String)' "$coordinator"
+require_text 'native_raytracing_nonzero=yes' "$coordinator"
 require_text 'NVAPI capability: RT cores=${GPU_RAY_TRACING_CORES}' "$packager"
 require_text './deploy/scripts/vmctl.sh cdrom' "$packager"
-require_text 'D3D12 expected:  raytracing tier=${GPU_D3D12_RAYTRACING_TIER}' \
+require_text 'D3D12 target:    raytracing tier=${GPU_D3D12_RAYTRACING_TIER}' \
     "$packager"
 require_text '不安装应用专用 DLL' "$packager"
 require_text '0xAFD1B02Cu' \
@@ -122,20 +148,29 @@ require_text 'removed byte-identical redundant backup' "$installer"
 
 image_root="$tmp/images"
 vm_root="$tmp/vms"
+vm_root_1g="$tmp/vms-1g"
 stage_dir="$tmp/staging"
-mkdir -p "$image_root" "$vm_root" "$stage_dir"
+host_config="$tmp/vgpu-host-2gb.conf"
+host_config_1g="$tmp/vgpu-host-1gb.conf"
+mkdir -p "$image_root" "$vm_root" "$vm_root_1g" "$stage_dir"
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=2048' >"$host_config"
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=1024' >"$host_config_1g"
 
 create_fixture() {
     local vm_id=$1 gpu_profile=$2 monitor_profile=$3
-    IMAGE_ROOT="$image_root" VM_ROOT="$vm_root" STAGE_DIR="$stage_dir" \
+    local fixture_root=${4:-$vm_root}
+    local fixture_host_config=${5:-$host_config}
+    IMAGE_ROOT="$image_root" VM_ROOT="$fixture_root" STAGE_DIR="$stage_dir" \
+        VGPU_HOST_CONFIG="$fixture_host_config" \
         bash "$create_vm" "$vm_id" --gpu-profile "$gpu_profile" \
             --monitor-profile "$monitor_profile" >/dev/null
-    touch "$vm_root/$vm_id/disk.qcow2"
+    touch "$fixture_root/$vm_id/disk.qcow2"
 }
 
 package_fixture() {
     local vm_id=$1 output=$2
-    IMAGE_ROOT="$image_root" VM_ROOT="$vm_root" STAGE_DIR="$stage_dir" \
+    local fixture_root=${3:-$vm_root}
+    IMAGE_ROOT="$image_root" VM_ROOT="$fixture_root" STAGE_DIR="$stage_dir" \
         bash "$packager" "$vm_id" --output-root "$output" >/dev/null
 }
 
@@ -174,6 +209,7 @@ assert_bundle() {
     local memory_maker_name=${12}
     local memory_maker_id=${13}
     local memory_maker_nvapi_name=${14}
+    local fixture_root=${15:-$vm_root}
     local monitor_product_dec=$((monitor_product))
     local -a dirs=() isos=()
     mapfile -t dirs < <(find "$output" -mindepth 1 -maxdepth 1 -type d \
@@ -265,7 +301,7 @@ PY
     actual_contract_id=$(jq -er '.contractId' "$contract")
     [[ $actual_contract_id == "$expected_contract_id" ]] ||
         fail "vm$vm_id contract ID is not content-addressed"
-    [[ $(sha256_upper "$vm_root/$vm_id/vm.conf") == \
+    [[ $(sha256_upper "$fixture_root/$vm_id/vm.conf") == \
         "$(jq -er '.sourceConfigSha256' "$contract")" ]] ||
         fail "vm$vm_id source config hash is not bound"
 
@@ -345,18 +381,21 @@ assert_bundle "$tmp/output-samsung" 903 gtx1050_gigabyte_2gb Gigabyte \
 
 # A 1 GiB/nvidia-256 fixture exercises the native RTX6000-1Q 1325 transport;
 # the older 2 GiB fixtures above exercise the RTX6000-2Q 1326 transport.
-create_fixture 904 gtx750_asus_1gb dell-p2419h
-package_fixture 904 "$tmp/output-grid-1q"
+create_fixture 904 gtx750_asus_1gb dell-p2419h \
+    "$vm_root_1g" "$host_config_1g"
+package_fixture 904 "$tmp/output-grid-1q" "$vm_root_1g"
 assert_bundle "$tmp/output-grid-1q" 904 gtx750_asus_1gb ASUS dell-p2419h \
-    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Samsung 1 Samsung
+    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Samsung 1 Samsung \
+    "$vm_root_1g"
 
 # Without --output-root the delivery artifacts must stay inside the numeric
 # VM bundle.  This is the path delete-vm removes atomically with that VM.
-default_output="$vm_root/904/packages/SystemNvapiProjection"
-IMAGE_ROOT="$image_root" VM_ROOT="$vm_root" STAGE_DIR="$stage_dir" \
+default_output="$vm_root_1g/904/packages/SystemNvapiProjection"
+IMAGE_ROOT="$image_root" VM_ROOT="$vm_root_1g" STAGE_DIR="$stage_dir" \
     bash "$packager" 904 >"$tmp/default-output.log"
 assert_bundle "$default_output" 904 gtx750_asus_1gb ASUS dell-p2419h \
-    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Samsung 1 Samsung
+    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Samsung 1 Samsung \
+    "$vm_root_1g"
 require_text "$default_output" "$tmp/default-output.log"
 require_text './deploy/scripts/vmctl.sh cdrom 904 mount' "$tmp/default-output.log"
 require_text './deploy/scripts/vmctl.sh cdrom 904 eject' "$tmp/default-output.log"
@@ -366,10 +405,11 @@ require_text './deploy/scripts/vmctl.sh cdrom 904 eject' "$tmp/default-output.lo
 # A packages symlink would break delete-vm ownership by redirecting artifacts
 # outside the numeric VM bundle.  Default packaging must reject it before
 # publishing any file through the link.
-create_fixture 905 gtx750_asus_1gb dell-p2419h
+create_fixture 905 gtx750_asus_1gb dell-p2419h \
+    "$vm_root_1g" "$host_config_1g"
 mkdir -p "$tmp/outside-packages"
-ln -s "$tmp/outside-packages" "$vm_root/905/packages"
-if IMAGE_ROOT="$image_root" VM_ROOT="$vm_root" STAGE_DIR="$stage_dir" \
+ln -s "$tmp/outside-packages" "$vm_root_1g/905/packages"
+if IMAGE_ROOT="$image_root" VM_ROOT="$vm_root_1g" STAGE_DIR="$stage_dir" \
         bash "$packager" 905 >"$tmp/symlink-output.log" 2>&1; then
     fail 'default package followed a packages directory symlink'
 fi

@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 CREATE_DISK="$REPO_ROOT/deploy/scripts/create-disk.sh"
 REAL_QEMU_IMG="$REPO_ROOT/build/qemu-img"
 [[ -x "$REAL_QEMU_IMG" ]] || REAL_QEMU_IMG=$(command -v qemu-img || true)
+REAL_JQ=$(command -v jq || true)
 
 fail() {
     echo "FAIL: $*" >&2
@@ -17,6 +18,7 @@ fail() {
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 [[ -n "$REAL_QEMU_IMG" && -x "$REAL_QEMU_IMG" ]] || fail "qemu-img is required"
+[[ -n "$REAL_JQ" && -x "$REAL_JQ" ]] || fail "jq is required"
 VM_ROOT="$TMP_DIR/vms"
 IMAGE_ROOT="$TMP_DIR"
 TRACE="$TMP_DIR/qemu-img.trace"
@@ -87,27 +89,27 @@ grep -Eq "^create\\|$VM_ROOT/4/\\.disk\\.qcow2\\.partial\\.[^|]+\\|12345$" "$TRA
 
 # With a qualified base and no --blank, creation must clone instead of calling
 # qemu-img create.
-mkdir -p "$VM_ROOT/shared/bases"
-printf 'qualified-base-fixture\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
-chmod 0444 "$VM_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$VM_ROOT/_base"
+printf 'qualified-base-fixture\n' >"$VM_ROOT/_base/win10-base.qcow2"
+chmod 0444 "$VM_ROOT/_base/win10-base.qcow2"
 "$CREATE_DISK" 10 >"$TMP_DIR/vm10.out"
-cmp "$VM_ROOT/shared/bases/win10-base.qcow2" "$VM_ROOT/10/disk.qcow2" \
+cmp "$VM_ROOT/_base/win10-base.qcow2" "$VM_ROOT/10/disk.qcow2" \
     || fail "base clone content differs"
 clone_mode=$(stat -c %a "$VM_ROOT/10/disk.qcow2")
 (( (8#$clone_mode & 0200) != 0 )) \
     || fail "clone inherited a read-only baseline mode"
 [[ "$(grep -c '^create|' "$TRACE")" -eq 1 ]] \
     || fail "base clone unexpectedly created a blank image"
-chmod 0644 "$VM_ROOT/shared/bases/win10-base.qcow2"
+chmod 0644 "$VM_ROOT/_base/win10-base.qcow2"
 
 # An explicit name must select that exact managed base, leaving the historical
 # default and every sibling base untouched.
 printf 'named-base-fixture\n' \
-    >"$VM_ROOT/shared/bases/win11-vgpu-v2.qcow2"
-chmod 0444 "$VM_ROOT/shared/bases/win11-vgpu-v2.qcow2"
+    >"$VM_ROOT/_base/win11-vgpu-v2.qcow2"
+chmod 0444 "$VM_ROOT/_base/win11-vgpu-v2.qcow2"
 "$CREATE_DISK" 23 --from-base --base-name win11-vgpu-v2 \
     >"$TMP_DIR/vm23.out"
-cmp "$VM_ROOT/shared/bases/win11-vgpu-v2.qcow2" \
+cmp "$VM_ROOT/_base/win11-vgpu-v2.qcow2" \
     "$VM_ROOT/23/disk.qcow2" || fail "named base clone content differs"
 grep -Fq "baseline 'win11-vgpu-v2'" "$TMP_DIR/vm23.out" \
     || fail "named base selection was not visible"
@@ -118,9 +120,70 @@ fi
 [[ ! -e "$VM_ROOT/24/disk.qcow2" ]] \
     || fail "unsafe base name published a disk"
 
+# The V-11-compatible exact path selects the same delivery/local image without
+# copying it into VM_BASE_DIR first.
+mkdir -p "$TMP_DIR/delivery"
+EXACT_BASE="$TMP_DIR/delivery/win10-base.qcow2"
+printf 'VIRTUAL_SIZE=512000000000\nexact-path-base\n' >"$EXACT_BASE"
+chmod 0444 "$EXACT_BASE"
+"$CREATE_DISK" 25 --from-base --base "$EXACT_BASE" \
+    >"$TMP_DIR/vm25.out"
+cmp "$EXACT_BASE" "$VM_ROOT/25/disk.qcow2" ||
+    fail "exact-path base clone content differs"
+grep -Fq "baseline 'win10-base'" "$TMP_DIR/vm25.out" ||
+    fail "exact-path base selection was not visible"
+if "$CREATE_DISK" 26 --from-base --base "$EXACT_BASE" \
+        --base-name win10-base >/dev/null 2>&1; then
+    fail "create-disk accepted both --base and --base-name"
+fi
+
+# V-11-style linked mode pins the exact base inode inside the instance and
+# publishes a tiny overlay with a fixed relative backing name. Replacing the
+# managed base path later must not retarget an existing VM.
+LINKED_VM_ROOT="$TMP_DIR/linked-vms"
+mkdir -p "$LINKED_VM_ROOT/_base" "$LINKED_VM_ROOT/27"
+LINKED_BASE="$LINKED_VM_ROOT/_base/win10-base.qcow2"
+"$REAL_QEMU_IMG" create -q -f qcow2 "$LINKED_BASE" 64M
+printf '%s\n' 'SSD_SIZE_BYTES=67108864' >"$LINKED_VM_ROOT/27/vm.conf"
+VM_ROOT="$LINKED_VM_ROOT" QEMU_IMG="$REAL_QEMU_IMG" DISK_GUARD=0 \
+    "$CREATE_DISK" 27 --from-base --linked >"$TMP_DIR/linked.out"
+LINKED_DISK="$LINKED_VM_ROOT/27/disk.qcow2"
+LINKED_PIN="$LINKED_VM_ROOT/27/.base.qcow2"
+[[ -f "$LINKED_DISK" && -f "$LINKED_PIN" && ! -L "$LINKED_PIN" &&
+   "$LINKED_BASE" -ef "$LINKED_PIN" ]] ||
+    fail "linked clone did not publish an instance-local hard-link pin"
+"$REAL_JQ" -e \
+    --arg fullBacking "$LINKED_PIN" '
+    .format == "qcow2" and ."virtual-size" == 67108864 and
+    ."backing-filename" == ".base.qcow2" and
+    ."full-backing-filename" == $fullBacking and
+    ."actual-size" < 4194304
+' < <("$REAL_QEMU_IMG" info --output=json -- "$LINKED_DISK") >/dev/null ||
+    fail "linked clone metadata is not a small relative overlay"
+linked_pin_inode=$(stat -c %i -- "$LINKED_PIN")
+LINKED_REPLACEMENT="$LINKED_VM_ROOT/_base/.win10-base.new.qcow2"
+"$REAL_QEMU_IMG" create -q -f qcow2 "$LINKED_REPLACEMENT" 64M
+mv -T -- "$LINKED_REPLACEMENT" "$LINKED_BASE"
+[[ "$(stat -c %i -- "$LINKED_PIN")" == "$linked_pin_inode" &&
+   ! "$LINKED_BASE" -ef "$LINKED_PIN" ]] ||
+    fail "base replacement retargeted an existing linked clone"
+"$REAL_QEMU_IMG" check -q "$LINKED_DISK" ||
+    fail "linked clone broke after atomic managed-base replacement"
+grep -Fq 'V-11 式增量盘' "$TMP_DIR/linked.out" ||
+    fail "linked creation did not explain its disk mode"
+
+if VM_ROOT="$LINKED_VM_ROOT" "$CREATE_DISK" 28 --from-base \
+        --linked --full-copy >/dev/null 2>&1; then
+    fail "create-disk accepted both linked and full-copy modes"
+fi
+if VM_ROOT="$LINKED_VM_ROOT" SIZE_BYTES=67108864 "$CREATE_DISK" 29 \
+        --blank --linked >/dev/null 2>&1; then
+    fail "create-disk accepted linked mode for a blank disk"
+fi
+
 # A profile larger than the baseline is safe: clone first, then grow only the
 # private copy.  The shared baseline must stay at its original virtual size.
-printf 'VIRTUAL_SIZE=500107862016\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
+printf 'VIRTUAL_SIZE=500107862016\n' >"$VM_ROOT/_base/win10-base.qcow2"
 mkdir -p "$VM_ROOT/20"
 printf 'SSD_SIZE_BYTES=512110190592\n' \
     >"$VM_ROOT/20/vm.conf"
@@ -133,12 +196,12 @@ grep -Fxq 'VIRTUAL_SIZE=512110190592' \
     "$VM_ROOT/20/disk.qcow2" \
     || fail "grown clone does not report the profile capacity"
 grep -Fxq 'VIRTUAL_SIZE=500107862016' \
-    "$VM_ROOT/shared/bases/win10-base.qcow2" \
+    "$VM_ROOT/_base/win10-base.qcow2" \
     || fail "growing a clone mutated the shared baseline"
 
 # Shrinking a baseline is deliberately unsupported.  A 500 GB profile cannot
 # clone a 512 GB baseline and must fail before publishing or calling resize.
-printf 'VIRTUAL_SIZE=512110190592\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
+printf 'VIRTUAL_SIZE=512110190592\n' >"$VM_ROOT/_base/win10-base.qcow2"
 mkdir -p "$VM_ROOT/21"
 printf 'SSD_SIZE_BYTES=500107862016\n' \
     >"$VM_ROOT/21/vm.conf"
@@ -174,7 +237,7 @@ grep -Fq '要求从公共 base 创建，但文件不存在' "$TMP_DIR/required.e
     fail "--from-base missing-base refusal published a disk"
 
 # A base with any backing file is not portable to disks/ and must be rejected.
-printf 'BACKING=parent.qcow2\n' >"$VM_ROOT/shared/bases/win10-base.qcow2"
+printf 'BACKING=parent.qcow2\n' >"$VM_ROOT/_base/win10-base.qcow2"
 if "$CREATE_DISK" 11 >"$TMP_DIR/backing.out" 2>"$TMP_DIR/backing.err"; then
     fail "base clone accepted a non-standalone base"
 fi
@@ -186,8 +249,8 @@ grep -Fq 'base 必须是 standalone qcow2' "$TMP_DIR/backing.err" \
 # An explicitly requested blank install disk must not depend on the health of
 # an unrelated public-base symlink. Normal clone mode still rejects it.
 DANGLING_VM_ROOT="$TMP_DIR/dangling-vms"
-mkdir -p "$DANGLING_VM_ROOT/shared/bases"
-ln -s missing-base.qcow2 "$DANGLING_VM_ROOT/shared/bases/win10-base.qcow2"
+mkdir -p "$DANGLING_VM_ROOT/_base"
+ln -s missing-base.qcow2 "$DANGLING_VM_ROOT/_base/win10-base.qcow2"
 VM_ROOT="$DANGLING_VM_ROOT" SIZE_BYTES=23456 "$CREATE_DISK" 16 --blank \
     >"$TMP_DIR/dangling-blank.out"
 [[ -f "$DANGLING_VM_ROOT/16/disk.qcow2" ]] || \
@@ -202,9 +265,9 @@ grep -Fq 'base 是失效符号链接' "$TMP_DIR/dangling-clone.err" || \
 # A qcow2 external data_file is not standalone even when backing-filename is
 # empty; cloning it would make multiple VM images share one writable payload.
 DATA_VM_ROOT="$TMP_DIR/data-vms"
-mkdir -p "$DATA_VM_ROOT/shared/bases"
+mkdir -p "$DATA_VM_ROOT/_base"
 (
-    cd "$DATA_VM_ROOT/shared/bases"
+    cd "$DATA_VM_ROOT/_base"
     "$REAL_QEMU_IMG" create -q -f qcow2 -o data_file=base.data \
         win10-base.qcow2 1M
 )

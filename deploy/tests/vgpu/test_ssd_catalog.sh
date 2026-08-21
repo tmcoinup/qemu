@@ -23,13 +23,17 @@ mapfile -t profile_keys < <(ssd_profile_keys)
 mapfile -t default_keys < <(ssd_default_profile_keys)
 mapfile -t explicit_keys < <(ssd_explicit_profile_keys)
 assert_eq 10 "${#profile_keys[@]}" 'selectable SSD profile count'
-assert_eq 9 "${#default_keys[@]}" 'default SSD key count'
-assert_eq 1 "${#explicit_keys[@]}" 'explicit SSD key count'
+assert_eq 7 "${#default_keys[@]}" 'H81-compatible default SSD key count'
+assert_eq 3 "${#explicit_keys[@]}" 'explicit NVMe SSD key count'
 assert_eq "$(printf '%s\n' "${profile_keys[@]}" | LC_ALL=C sort)" \
     "$(printf '%s\n' "${default_keys[@]}" "${explicit_keys[@]}" | LC_ALL=C sort)" \
     'selectable/default+explicit SSD key sets'
-assert_eq samsung-960-pro-512gb "${explicit_keys[0]}" \
-    'append-only explicit SSD profile'
+assert_eq wd-black-pcie-512gb "${explicit_keys[0]}" \
+    'WD Black moved to explicit NVMe SSD profile'
+assert_eq samsung-970-pro-512gb "${explicit_keys[1]}" \
+    'Samsung 970 Pro moved to explicit NVMe SSD profile'
+assert_eq samsung-960-pro-512gb "${explicit_keys[2]}" \
+    'Samsung 960 Pro explicit NVMe SSD profile'
 
 declare -A seen=()
 sata_count=0
@@ -64,8 +68,8 @@ while IFS=$'\t' read -r key _brand _interface size _firmware _controller \
     listed=$((listed + 1))
 done < <(ssd_profile_print_catalog)
 assert_eq 10 "$listed" 'printed SSD catalog count'
-assert_eq 9 "$listed_default" 'printed default SSD count'
-assert_eq 1 "$listed_explicit" 'printed explicit SSD count'
+assert_eq 7 "$listed_default" 'printed default SSD count'
+assert_eq 3 "$listed_explicit" 'printed explicit SSD count'
 
 # Fail closed if a future edit introduces a 500 GB/other-capacity row, even
 # when it is also added to the default list.  Direct loads must reject it too.
@@ -88,7 +92,7 @@ fi
 # default or explicit set; omissions, duplicates and cross-tier overlap are
 # configuration errors rather than silent selection changes.
 if (
-    SSD_DEFAULT_PROFILE_KEYS=("${SSD_DEFAULT_PROFILE_KEYS[@]:0:8}")
+    SSD_DEFAULT_PROFILE_KEYS=("${SSD_DEFAULT_PROFILE_KEYS[@]:0:6}")
     hardware_profile_validate_catalog >/dev/null 2>&1
 ); then
     fail 'catalog accepted an active SSD omitted from default keys'
@@ -106,4 +110,4 @@ if (
     fail 'catalog accepted a default/explicit SSD overlap'
 fi
 
-echo 'PASS: 10 selectable SSD profiles are exact 512110190592-byte devices; the original 9-row default pool is stable'
+echo 'PASS: 10 exact-size SSD profiles; 7 H81-safe defaults and 3 explicit NVMe rows'

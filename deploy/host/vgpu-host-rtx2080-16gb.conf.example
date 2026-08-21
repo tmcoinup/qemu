@@ -1,0 +1,26 @@
+# RTX 2080 16 GiB vgpu_unlock host policy for G-11.
+#
+# Copy through deploy/configure-g11-vgpu-host.sh instead of editing this
+# tracked example in place.  The generated deploy/host/vgpu-host.conf is
+# gitignored host state and contains no credentials.
+
+# Use an explicit BDF on a multi-NVIDIA host.  auto is safe only when the
+# selected profile matches exactly one NVIDIA mdev parent.
+VGPU_MGPU=auto
+
+# One physical time-sliced GPU must use one framebuffer amount.  This default
+# gives every VM 2 GiB.  A 1 GiB pool must change these three values together
+# to 1024 / nvidia-256 / 1024 while all mdevs on this card are stopped.
+VGPU_HOST_FB_TIER_MB=2048
+VGPU_RESOURCE_PROFILE=nvidia-257
+VGPU_RESOURCE_FB_MB=2048
+
+# The AMD adapter drives the host desktop, so the complete NVIDIA framebuffer
+# is available to the vGPU pool.  Keep both sysfs and per-parent sum checks.
+VGPU_TOTAL_FB_MB=16384
+VGPU_CAPACITY_CHECK=both
+
+# These R535-only console values are already validated on the current host.
+VGPU_CONSOLE_INTERVAL_US=16667
+VGPU_MDEV_IDENTITY_MODE=auto
+SPOOF_MODE=B

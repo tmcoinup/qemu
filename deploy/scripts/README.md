@@ -29,6 +29,7 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 ./deploy/scripts/delete-vm.sh ID
 ./deploy/scripts/sync-monitor-profile.sh ID --force
 ./deploy/scripts/recover-hibernated-vm.sh ID
+./deploy/scripts/repair-clone-init.sh ID
 ./deploy/scripts/report-vm-boot-timing.sh ID
 ./deploy/scripts/migrate-g11-layout.sh --check
 ./deploy/scripts/vmctl.sh start ID
@@ -50,9 +51,13 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 普通启动默认不创建光驱；上面的 `mount` 会热插只读光驱，`eject`
 会删除整台设备。只有 `start-vm.sh ID --install [ISO]` 会在启动时挂光驱。
 公共工具 U 盘固定映射 `shared/usb/`，每个工具只管理自己的子目录；Windows 中的
-真实 FAT 卷标固定为 `U盘`（CP936），不使用 `autorun.inf` 覆盖名称。它和任意
-host 目录 U 盘均为只读 VVFAT/USB Mass Storage，不需要 Windows 额外驱动。详见
+真实 FAT 卷标固定为 `U盘`（CP936），逻辑容量固定为 128 GiB FAT32，不使用
+`autorun.inf` 覆盖名称，也不创建或预分配宿主机镜像。它和任意 host 目录 U 盘均为
+只读 VVFAT/USB Mass Storage，不需要 Windows 额外驱动。详见
 [`../docs/G11-USB-DIRECTORY.md`](../docs/G11-USB-DIRECTORY.md)。
+`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.3.0；Defender、防火墙服务启动、
+系统/软件更新、OneDrive、资讯天气、消费 App 和性能项的 VM1 傻瓜验收与回滚见
+[`../docs/G11-GUEST-LITE.md`](../docs/G11-GUEST-LITE.md)。
 新版 `VgpuPortable.exe` 已在同一次双击中应用可回滚的登录启动优化。只有仍使用
 旧版 EXE 或支持人员需要独立诊断时，才运行 `guest-performance.sh ID mount`，详见
 [`../docs/G11-GUEST-PERFORMANCE.md`](../docs/G11-GUEST-PERFORMANCE.md)。
@@ -66,19 +71,23 @@ native 启动默认创建与网络编码分离的 DGame preview，发布
 
 - 公开文件名使用 `seal-base.sh` 和 `clone-from-base.sh`。
 - 参数顺序固定为 `seal-base.sh SOURCE_ID BASE_NAME` 和
-  `clone-from-base.sh BASE_NAME NEW_ID`。`BASE_NAME` 只写字母、数字、`_`、`-`，
+  `clone-from-base.sh BASE_NAME_OR_QCOW2 NEW_ID`。和 V-11 一样支持
+  `--vms-dir`、`--base-dir` 以及明确 qcow2 路径；`BASE_NAME` 只写字母、数字、`_`、`-`，
   不写 `.qcow2`。
 - 推荐名称为 `<系统>-<版本或用途>-v<代号>`，例如
   `win10-ltsc2021-game-v1`。镜像内容换代就使用 `v2`，不要使用含义会漂移的
   `latest`；同名受控替换虽然会归档旧代，但不应代替版本命名。
-- G-11 每个名称独立发布为 `shared/bases/<BASE_NAME>.qcow2`，证明文件为
-  `shared/bases/<BASE_NAME>.qcow2.vgpu-portable.json`。例如 `win10-ltsc-v1`
+- G-11 与 V-11 一样，默认把每个名称独立发布为
+  `_base/<BASE_NAME>.qcow2`，证明文件为
+  `_base/<BASE_NAME>.qcow2.vgpu-portable.json`。例如 `win10-ltsc-v1`
   与 `win11-vgpu-v2` 可以同时存在，clone 必须点名选择。
 - G-11 的 `seal-base.sh` 默认先离线
   清理源盘里的 WeGame/Tencent QIMEI、登录态、SDK/设备缓存与注册表键。清理失败
   不发布 base；只有明确要原样保留这些身份时才传 `--no-clean`。
-- G-11 的 `clone-from-base.sh` 只接受托管的具名 standalone base，并强制校验该
-  名称自己的 portable attestation。
+- G-11 的 `clone-from-base.sh` 接受托管名称或明确 standalone qcow2 路径，并强制
+  校验镜像旁边属于该具体 inode/内容代次的 portable attestation。默认与 V-11
+  一样建立实例内 `.base.qcow2` hard-link pin 和小型 `disk.qcow2` 增量盘；母盘
+  换代只影响新克隆。只有明确需要独立整盘时才加 `--full-copy`。
 - 旧的 `promote-base.sh`、`clone-vgpu-base.sh` 只保留为转发兼容入口；教程、
   `vmctl.sh` 和新自动化不再使用旧名称。兼容入口固定映射历史名称
   `win10-base`，新 base 必须使用 canonical 命令显式命名。
@@ -96,6 +105,7 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
 ./deploy/scripts/vmctl.sh start 11
 ./deploy/scripts/vmctl.sh display 11 status
 ./deploy/scripts/vmctl.sh stop 11
+./deploy/scripts/vmctl.sh repair-init 11  # 仅失败克隆：刷新初始化包，不改母盘/系统盘
 ```
 
 前四条分别完成“清理并封装 base → 构建无凭据 portable → 安全注入并生成证明 →

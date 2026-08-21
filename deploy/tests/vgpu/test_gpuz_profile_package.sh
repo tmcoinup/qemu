@@ -551,9 +551,9 @@ done <<'EOF'
 5|gt1030_2gb|NVIDIA GeForce GT 1030|PCI\VEN_10DE&DEV_1E30
 6|gtx1050_2gb|NVIDIA GeForce GTX 1050|PCI\VEN_10DE&DEV_1E30
 EOF
-[[ -d "$vm_root/shared/bases" && -d "$vm_root/control" &&
+[[ -d "$vm_root/_base" && -d "$vm_root/control" &&
    ! -e "$vm_root/instances" ]] ||
-    fail "temporary VM storage did not use vmN/shared/bases/control layout"
+    fail "temporary VM storage did not use vmN/_base/control layout"
 
 # An explicit stable EXE name is supported when it shares the trusted output
 # parent with the expanded host bundle.

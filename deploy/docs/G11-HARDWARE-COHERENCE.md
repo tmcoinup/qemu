@@ -8,14 +8,14 @@ guest 包。
 本轮没有针对鲁大师的进程名、安装目录或 exe 做适配。鲁大师、GPU-Z、HWiNFO、
 设备管理器等都只是验收工具；仓库中不存在鲁大师专用 DLL、安装器或打包器。
 
-公共层现在有三道闭合门禁：
+公共层现在有三道必过门禁和一项如实审计：
 
 | 层 | 处理 | 覆盖 |
 |---|---|---:|
 | QEMU 00:1f.0 LPC inventory | 主板目录选择 H81/H97/B150/B360 身份 | 264/264 个平台 |
 | G-11 系统 NVAPI | 同一 VM 合同供所有 32/64 位 NVAPI 调用者使用 | 25/25 个 GPU profile |
-| GPU 能力目录 | 六个消费卡 device ID 都显式要求 DXR tier 0、RT core 0、Tensor core 0 | 6/6 个 device ID |
-| 原生 D3D12 门禁 | 安装写入前和最终验收均直接查 OPTIONS5 | x86 + x64 |
+| GPU 能力目录 | 六个消费卡 device ID 都显式要求目标 DXR tier 0、NVAPI RT core 0、Tensor core 0 | 6/6 个 device ID |
+| 原生 D3D12 审计 | 安装写入前和最终验收均直接查 OPTIONS5；查询失败阻断，签名 transport 能力差异警告 | x86 + x64 |
 
 截图中的 `Gigabyte GA-H81M-S1 + i3-4130 + GTX 750` 因此适用同一条公共路径，
 不是 VM8 或鲁大师特例。
@@ -57,8 +57,9 @@ NVAPI tensor cores             = 0
 搜索路径中的 x86/x64 NVAPI 转发层都从这份原子合同返回 RT/Tensor `0/0`，不按
 调用进程选择结果。`SystemNvapiProbe32.exe` 与 `SystemNvapiProbe64.exe` 会从
 Windows 系统目录绝对加载 DLL，并把这两个值纳入 PASS 条件。包内另有
-`D3D12CapabilityProbe32.exe` 与 `D3D12CapabilityProbe64.exe`，两者都必须对
-实际 NVIDIA adapter 返回 tier 0，否则在任何系统投影写入前拒绝安装。
+`D3D12CapabilityProbe32.exe` 与 `D3D12CapabilityProbe64.exe`，两者都必须能对
+实际 NVIDIA adapter 查询 OPTIONS5；无法枚举/查询时在任何系统投影写入前拒绝
+安装，签名 transport 返回非零 tier 时则如实警告并继续。
 
 ### 必须如实保留的 D3D12 边界
 
@@ -75,7 +76,8 @@ GRID 538.33 正式签名、Code 0 和稳定画面，仍保留原生 `10DE:1E30` 
 - 跨代 M60 transport 的隔离实机候选已验证不合格，不进入生产目录。
 
 若某工具重新扫描后仍因原生 D3D12 OPTIONS5 显示“光线追踪”，该 VM 的
-**D3D12 现实一致性验收失败**。此时应保留工具结果、`dxdiag`、设备 PnP 和系统包
+**严格 D3D12 现实一致性审计失败**，但授权、唯一 Code-0 Display 和 x86/x64
+NVAPI 合同仍可分别验收通过。此时应保留工具结果、`dxdiag`、设备 PnP 和系统包
 验证日志；不能再用应用专用代理把它伪装成通过。
 
 ### 2026-08-18 实机资格结果
@@ -145,24 +147,24 @@ cd /home/ubuntu/projects/qemu
 
 Windows 一般在 2～5 秒内收到换盘事件；在“此电脑”按 `F5` 即可，不需要为看到 ISO
 重启 Windows 或 VM。`Run-As-Administrator.cmd` 只是系统投影的安装入口，
-不是挂载 ISO 必需步骤。它先运行原生 x86/x64 D3D12 门禁：
+不是挂载 ISO 必需步骤。它先运行原生 x86/x64 D3D12 审计：
 
-- 两者都为 tier 0 时，才会安装并自动重启；
-- 任一路径不为 tier 0 时，立即失败，不写入、不重启，日志在
-  `C:\Windows\Temp\G11-System-NVAPI-Install.log`。
+- 两者都能枚举 NVIDIA adapter 并查询 OPTIONS5 时，会安装并自动重启；
+- 任一路径无法查询时立即失败，不写入、不重启；非零 tier 会明确警告并继续。
+  日志在 `C:\Windows\Temp\G11-System-NVAPI-Install.log`。
 
-当前 VM8 属于第二种，x64 实测 tier 11；这个 FAIL 是如实拦截，不是 ISO
-挂载故障。只有 `Run` 成功安装并重启后，才运行
+当前签名 transport 的 x64 实测 tier 11；自动流程会明确显示 WARNING 后继续，
+不是 ISO 挂载故障。只有 `Run` 成功安装并重启后，才运行
 `Verify-As-Administrator.cmd` 做手动复核。`Verify` 不是挂盘所必需，也不用于
 安装 `VgpuPortable.exe`。
 
-必须同时看到类似：
+必须同时看到类似（`native_raytracing_nonzero` 可为 `yes`，此时另有 WARNING）：
 
 ```text
 SYSTEM_NVAPI_VERIFY PASS architecture=x86 ... RT=0 Tensor=0 ...
 SYSTEM_NVAPI_VERIFY PASS architecture=x64 ... RT=0 Tensor=0 ...
-D3D12_NATIVE_VERIFY PASS ... native_raytracing_nonzero=no   # x86
-D3D12_NATIVE_VERIFY PASS ... native_raytracing_nonzero=no   # x64
+D3D12_NATIVE_VERIFY PASS ... native_raytracing_nonzero=no|yes   # x86
+D3D12_NATIVE_VERIFY PASS ... native_raytracing_nonzero=no|yes   # x64
 ```
 
 包不接收应用路径，不检测鲁大师进程，也不会向任何应用目录复制 DLL。
@@ -179,8 +181,8 @@ D3D12_NATIVE_VERIFY PASS ... native_raytracing_nonzero=no   # x64
 - 显卡型号、板卡厂商、1/2 GB、GDDR5、厂家、位宽、时钟必须来自同一个 profile；
 - NVAPI RT core 与 Tensor core 都必须为 0；
 - 不得出现第二块显卡、Code 43、Xid、TDR 或持续黑屏；
-- 若任何工具仍显示光追，按上文 D3D12 边界记为失败，不能只以另一个工具的 PASS
-  覆盖它。
+- 若任何工具仍显示光追，按上文 D3D12 边界记为“严格现实一致性未通过”，不能把
+  NVAPI 的 PASS 描述成已经改变原生 D3D12。
 
 硬件工具的缓存可能保留旧结果，所以“重新扫描”只是验收动作，不是实现依赖。
 

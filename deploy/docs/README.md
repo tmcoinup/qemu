@@ -27,10 +27,11 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 对比最新 V-11 的 VM 操作、已补齐功能和不可混用边界 | [G11-V11-OPERATION-PARITY.md](G11-V11-OPERATION-PARITY.md) |
 | 默认/指定 VM 路径、独立 bundle 和旧 G-11 目录迁移 | [STORAGE-PATHS-QUICKSTART.md](STORAGE-PATHS-QUICKSTART.md) |
 | 第一次操作 G-11：portable EXE、base 注入、任意 VM 克隆与验收 | [G11-QUICKSTART.md](G11-QUICKSTART.md) |
+| VMate 私有交付：Sysprep 独立 Windows 身份、跳过 OOBE、授权 EXE 首启一次和跨机导入 | [G11-SYSPREP-PRIVATE-BASE.md](G11-SYSPREP-PRIVATE-BASE.md) |
 | 普通 32/64 位程序统一板卡/显存身份、单 3D adapter、显示器持久化与一键回滚 | [G11-BOTTOM-GPU-IDENTITY.md](G11-BOTTOM-GPU-IDENTITY.md) |
 | vGPU 硬件池、整机搭配合法性与宿主 CPU realization | [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) |
-| H81/H97/B150/B360 芯片组、旧卡 DXR 能力门禁与全配置现实一致性 | [G11-HARDWARE-COHERENCE.md](G11-HARDWARE-COHERENCE.md) |
-| 新增 GT 730/GT 740/GTX 750 1GB、多品牌实型号/SKU/S/N 边界、封装和 V100 双规格 | [G11-1GB-GPU-EXPANSION.md](G11-1GB-GPU-EXPANSION.md) |
+| H81/H97/B150/B360 芯片组、旧卡 DXR 能力审计与全配置现实一致性边界 | [G11-HARDWARE-COHERENCE.md](G11-HARDWARE-COHERENCE.md) |
+| 1GB Maxwell 新建层、Kepler 旧配置边界及整池单档切换 | [G11-1GB-GPU-EXPANSION.md](G11-1GB-GPU-EXPANSION.md) |
 | 35 款显示器目录、正常 FHD/1K 分辨率白名单及已有 VM 一键刷新 | [G11-MONITOR-POOL.md](G11-MONITOR-POOL.md) |
 | 无 VM 绑定显卡身份、GPU-Z 选装、新建/克隆通用性和 HWiNFO 边界 | [GPUZ-ONE-CLICK.md](GPUZ-ONE-CLICK.md) |
 | HWiNFO64 x64 app-local 实验和不能承诺的字段 | [HWINFO-APP-LOCAL-EXPERIMENT.md](HWINFO-APP-LOCAL-EXPERIMENT.md) |
@@ -38,7 +39,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | Windows ISO 高速 USB 安装、安装期 helper 与 IDE 回退 | [G11-INSTALL-MEDIA.md](G11-INSTALL-MEDIA.md) |
 | 普通启动零光驱、只读 ISO 一键热插/换盘/整机热拔 | [G11-OPTICAL-DRIVE.md](G11-OPTICAL-DRIVE.md) |
 | 公共工具目录或任意 host 目录免驱挂成 Windows 只读 U 盘 | [G11-USB-DIRECTORY.md](G11-USB-DIRECTORY.md) |
-| Windows 10 一键关闭 Defender/更新/商店并精简、审计和回滚 | [G11-GUEST-LITE.md](G11-GUEST-LITE.md) |
+| Windows 10 一键关闭 Defender/防火墙/系统与软件更新/云盘/资讯天气并全面提速、审计和回滚 | [G11-GUEST-LITE.md](G11-GUEST-LITE.md) |
 | Windows 登录后卡顿、启动软件很晚出现：guest 审计、优化、验收与一键回滚 | [G11-GUEST-PERFORMANCE.md](G11-GUEST-PERFORMANCE.md) |
 | Windows 安装出现 `USBXHCI.SYS` / `PAGE_FAULT_IN_NONPAGED_AREA` | [USBXHCI-INSTALL-RECOVERY.md](USBXHCI-INSTALL-RECOVERY.md) |
 | Windows 网卡有链路但没有 IPv4、宿主一键建桥、默认 LAN 与 VLAN 生命周期 | [G11-NETWORK-BRIDGE-VLAN.md](G11-NETWORK-BRIDGE-VLAN.md) |
@@ -53,7 +54,9 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 理解 off/B/A 身份模式 | [STEALTH-APPROACHES.md](STEALTH-APPROACHES.md) |
 | 备份、迁移和恢复每 VM bundle | [STORAGE-LAYOUT.md](STORAGE-LAYOUT.md) |
 | 可选的 Linux 宿主 NVMe APST 检查、持久化与回滚 | [NVME-APST.md](NVME-APST.md) |
-| 适配 Tesla V100 宿主资源 | [V100-ADAPTATION.md](V100-ADAPTATION.md) |
+| G-11 硬件池事实复核、已采纳整改与未验证容量边界 | [G11-HARDWARE-POOL-ASSESSMENT.md](G11-HARDWARE-POOL-ASSESSMENT.md) |
+| RTX 2080/V100 单档宿主策略傻瓜配置与满槽验收 | [G11-VGPU-HOST-QUICKSTART.md](G11-VGPU-HOST-QUICKSTART.md) |
+| Tesla V100 原生 vGPU 适配边界与到卡验收 | [V100-ADAPTATION.md](V100-ADAPTATION.md) |
 | 排查 QEMU、mdev、TPM 和 guest | [DEBUG.md](DEBUG.md) |
 
 仓库级概览和完整命令表见 [`../README.md`](../README.md) 与
@@ -61,7 +64,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 
 ## 傻瓜入口
 
-新建与克隆使用同一个不绑定 VM 的显卡身份安装器；默认不需要 GPU-Z：
+公共/高级流程使用不绑定 VM 的显卡身份安装器；默认不需要 GPU-Z：
 
 ```bash
 ./deploy/package-vgpu-one-click.sh
@@ -70,6 +73,10 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name win10-ltsc-v1
 # 进入 Windows 完成基础安装/授权后，为成品 VM 生成系统身份包：
 ./deploy/package-system-nvapi-projection.sh 456
 ```
+
+VMate 私有 Sysprep 流程无需手工执行最后一行：`clone-from-base.sh` 会按新 VM 的
+UUID/profile/显示器/config 自动生成只读 ISO，Windows 首启内部重启验收，最终用户
+只点一次“初始”。旧 schema-6 私有包必须用当前工具重做或重新导入。
 
 `VgpuPortable.exe` 内嵌全部已审计 profile，不含 VM ID/UUID，也不内嵌、下载或
 默认安装 GPU-Z。base 注入器默认只预置这一个文件；以后只有显式执行
@@ -81,8 +88,8 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name win10-ltsc-v1
 
 portable 阶段使用 `vGPU Identity Query` 初验；成品系统包重启后以 x86/x64
 `SYSTEM_NVAPI_VERIFY PASS`（含 `RT=0 Tensor=0`）、x86/x64
-`D3D12_NATIVE_VERIFY PASS`（tier 0）、唯一 present Display 和 validated 收据
-作为最终验收。系统包让普通程序共享同一板卡/显存合同，同时保留唯一原生
+`D3D12_NATIVE_VERIFY PASS`（表示原生路径可查询，tier 可能由 transport 暴露）、
+唯一 present Display 和 validated 收据作为最终验收。系统包让普通程序共享同一板卡/显存合同，同时保留唯一原生
 `DEV_1E30` 3D transport。base 注入要求
 所有 VM 停止、standalone qcow2 以及干净、
 未休眠的 NTFS，并只修改临时副本后原子发布。旧内嵌版 portable 必须重建并

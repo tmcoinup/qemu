@@ -72,7 +72,8 @@ sudo -v
 封装会自动按 VM 的资源档选择原生生产驱动端点：1GB/`nvidia-256` 使用
 `SUBSYS_132510DE`，2GB/`nvidia-257` 使用 `SUBSYS_132610DE`，不需要手工填写 PnP
 编号。同步成功必须出现 `EDID_OVERRIDE 写入`、`NVIDIA NV_Modes 命中 1` 和
-`hivex commit 完成`；出现 `WAIT` 时不要当作成功。
+`hivex commit 完成`；出现 `WAIT` 时不要当作成功。这个 host 命令只修改关机磁盘
+缓存；Windows 启动后由私有系统身份任务通过 SetupAPI 发布设备管理器实时名称。
 
 密码只在 `sudo` 提示中输入，不写入仓库、配置文件或命令参数。
 
@@ -127,7 +128,7 @@ shutdown.exe /s /f /t 0
 | 现象 | 处理 |
 |---|---|
 | 新 DLS 443 可通但仍 `Unlicensed` | 使用新 token 重建私有 EXE，再在 guest 运行；旧 EXE 仍带旧 token |
-| 显示器仍是“通用即插即用监视器” | 完整关机后重跑 `vmctl.sh monitor N --force` |
+| 显示器仍是“通用即插即用监视器” | 先确认首启初始化已成功；若有 `clone-initialization-error.txt`，管理员运行 `Retry-Clone-Initialization.cmd`。再完整关机执行 `vmctl.sh monitor N --force` 并正常启动，等待 SYSTEM 身份任务 |
 | Windows 正在配置更新 | 等它完成；不要关闭 QEMU 或强停 VM |
 | NVIDIA 是 Basic Display Adapter / Code 28/43 | 这是驱动绑定问题，不是授权或 EDID；转到 `DRIVER-INSTALL.md` |
 

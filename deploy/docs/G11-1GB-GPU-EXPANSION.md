@@ -1,8 +1,9 @@
 # G-11 1GB 显卡扩容傻瓜教程
 
-本轮已把 G-11 的显卡身份池从原来的 12 个 2GB 原子配置扩为 24 个：原有
-12 个 2GB 保留，新增 GT 730、GT 740、GTX 750 三种 1GB 芯片型号，每种各有
-ASUS、MSI、Gigabyte、ZOTAC 四个真实厂商型号。
+G-11 曾把显卡身份池从 12 个 2GB 原子配置扩为 24 个；当前再加入 1 条显式 EVGA
+后，总目录为 25 条。当前生命周期是 12 条 2GB 默认、4 条 GTX 750 1GB Maxwell
+新建、1 条显式和 8 条 GT 730/GT 740 Kepler legacy。12 个 1GB 厂商型号仍全部
+保留在目录中，但不会全部进入新 VM 的无参数随机。
 
 先纠正名称：NVIDIA 有 **GeForce GTX 750 1GB**，设备 ID 是 `10DE:1381`；没有
 这代正式零售型号“RTX 750”。它也不是已有的 GTX 750 Ti 2GB（`10DE:1380`）。
@@ -56,7 +57,7 @@ Windows 实卡可另存 GPU-Z 的 Lookup/BIOS 信息。照片、发票、机器�
 
 ## 直接使用
 
-先从仓库根目录列出全部 24 个配置：
+先从仓库根目录列出全部 25 个配置：
 
 ```bash
 ./deploy/package-vgpu-portable.sh --list-gpu-profiles
@@ -70,8 +71,10 @@ Windows 实卡可另存 GPU-Z 的 Lookup/BIOS 信息。照片、发票、机器�
 ./deploy/scripts/start-vm.sh 101
 ```
 
-不指定 `--gpu-profile` 时仍从整个审核池随机一次并写进该 VM 的 `vm.conf`；以后启动
-不会重新随机。所有新增 1GB 行只走 B/native、原版签名驱动路径，不开启
+不指定 `--gpu-profile` 时按 `VGPU_HOST_FB_TIER_MB` 从对应单档新建层随机一次并
+写进该 VM 的 `vm.conf`：1024MB 档只使用 4 条 GTX 750 Maxwell 行，2048MB 档
+只使用 12 条 2GB 默认行；显式行和 8 条 Kepler legacy 行不参加无参数随机。
+以后启动不会重新随机。所有 1GB 行只走 B/native、原版签名驱动路径，不开启
 `testsigning`/`nointegritychecks`，不改 BCD，也不安装测试签名或自签名内核驱动。
 
 ## 一键封装
@@ -87,11 +90,11 @@ Windows 实卡可另存 GPU-Z 的 Lookup/BIOS 信息。照片、发票、机器�
 
 ```bash
 ./deploy/package-vgpu-one-click.sh --portable \
-  --output-dir /home/ubuntu/images/staging/VgpuPortable-24/.host-bundle \
-  --output-exe /home/ubuntu/images/staging/VgpuPortable-24/VgpuPortable.exe
+  --output-dir /home/ubuntu/images/staging/VgpuPortable-25/.host-bundle \
+  --output-exe /home/ubuntu/images/staging/VgpuPortable-25/VgpuPortable.exe
 ```
 
-生成的 `VgpuPortable.exe` 内含全部 24 个原子 profile；展开的 host audit bundle
+生成的 `VgpuPortable.exe` 内含全部 25 个原子 profile；展开的 host audit bundle
 还包含本教程和 TSV 来源表。需要正式 NVIDIA 授权时，token 必须从仓库外的
 mode-0600 文件显式传入，不能写进仓库：
 
@@ -101,40 +104,36 @@ chmod 600 /安全路径/client_configuration_token.tok
   --token-file /安全路径/client_configuration_token.tok
 ```
 
-## 更换 Tesla V100 后的 1GB/2GB 自动适配
+## 更换 Tesla V100 后选择一个 framebuffer 档
 
-复制模板到仓库外：
-
-```bash
-sudo install -D -m 0644 deploy/host/vgpu-host-v100.conf.example \
-  /etc/qemu/g11-vgpu-host.conf
-sudoedit /etc/qemu/g11-vgpu-host.conf
-```
-
-16GB PCIe V100 保留这两个映射：
+先确认该 NVIDIA GPU 上没有运行中的 VM/mdev，再用统一封装生成宿主本地策略。
+例如 16GB PCIe V100 的 1GB 档：
 
 ```bash
-VGPU_RESOURCE_PROFILE_1024=V100-1Q
-VGPU_RESOURCE_PROFILE_2048=V100-2Q
-VGPU_TOTAL_FB_MB=16384
+bash deploy/configure-g11-vgpu-host.sh \
+  --preset v100-pcie-16gb \
+  --tier 1024 \
+  --gpu 0000:04:00.0
 ```
 
-把 `VGPU_MGPU=auto` 改成该卡的完整 BDF（多卡宿主必须改），然后只读核验两档：
+把示例 BDF 换成实卡的完整地址；32GB 卡把 preset 换成
+`v100-pcie-32gb`。脚本按 16384/32768MB 完整显存计算，不扣固定预留，并为真 V100
+固定 `VGPU_MDEV_IDENTITY_MODE=off`、`SPOOF_MODE=off`。然后只读核验该档：
 
 ```bash
-VGPU_HOST_CONFIG=/etc/qemu/g11-vgpu-host.conf \
-  ./deploy/host/probe-vgpu-host.sh --fb-mb 1024
-VGPU_HOST_CONFIG=/etc/qemu/g11-vgpu-host.conf \
-  ./deploy/host/probe-vgpu-host.sh --fb-mb 2048
+./deploy/host/probe-vgpu-host.sh \
+  --config deploy/host/vgpu-host.conf \
+  --profile V100-1Q
 ```
 
-启动时仍按所需容量选择目录 profile：1GB 行自动拿 `V100-1Q/1024MB`，2GB 行自动
-拿 `V100-2Q/2048MB`。官方 V100 模板默认 `SPOOF_MODE=off` 且
+启动时 1GB 行拿 `V100-1Q/1024MB`；2GB VM 会被明确拒绝。要整池切到 2GB，先
+关闭该 NVIDIA GPU 上所有 VM/mdev，再用配置封装统一生成 `V100-2Q/2048MB`。
+官方 V100 模板默认 `SPOOF_MODE=off` 且
 `VGPU_MDEV_IDENTITY_MODE=off`，所以 Windows 系统 PCI/PnP 身份保持 V100 vGPU 原生
 值；消费卡目录只负责容量合同和可选的便携用户态元数据，不能宣称改变了物理卡或
 系统 PCI 身份。启动器会拒绝容量不一致、同名 profile 多卡歧义和超额分配。
 
 完整的 V100 驱动、license、变体名称和到机验收见
-[`V100-ADAPTATION.md`](V100-ADAPTATION.md)。在真 V100 上完成两档各至少一台 VM 的
-驱动 Code 0、图形输出、授权、压力与并发验证前，状态仍是
+[`V100-ADAPTATION.md`](V100-ADAPTATION.md)。在真 V100 上完成所选档位的
+驱动 Code 0、图形输出、授权、压力与满槽并发验证前，状态仍是
 `hardware-unverified`，不能宣称生产验收完成。

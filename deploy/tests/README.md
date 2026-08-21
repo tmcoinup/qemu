@@ -80,7 +80,8 @@ bash deploy/tests/vgpu/test_signed_consumer_production.sh
 ```
 
 原生 D3D12 测试会可重复构建 x86/x64 OPTIONS5 探针，检查它们不含
-应用特例、不跨越 BCD/驱动边界，且安装门禁位于首次持久写入之前。
+应用特例、不跨越 BCD/驱动边界，且原生查询审计位于首次持久写入之前；自动克隆
+只在 adapter/OPTIONS5 无法查询时失败，签名 transport 的 DXR 差异会明确警告。
 系统包测试会实际生成 1GB/2GB、GTX 750/750 Ti、GT 1030、GTX 1050 隔离
 fixture，覆盖 ASUS/MSI/Gigabyte、Samsung/Micron/SK hynix 和三款 monitor，并
 验证 schema-4 合同、EDID、x86/x64 NVAPI/D3D12 payload 与 ISO。它还要求默认产物只进入数字 VM 的

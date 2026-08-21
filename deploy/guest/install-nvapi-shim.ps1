@@ -54,8 +54,27 @@ $arches = @(
 )
 
 function Take-Own($f) {
-    & cmd /c takeown /f "`"$f`"" /a 2>&1 | Out-Null
-    & cmd /c icacls "`"$f`"" /grant 'Administrators:(F)' 2>&1 | Out-Null
+    $takeown = Join-Path $env:SystemRoot 'System32\takeown.exe'
+    $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+    foreach ($tool in @($takeown, $icacls)) {
+        if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+            throw "Required Windows ACL tool is missing: $tool"
+        }
+    }
+
+    $takeownOutput = (& $takeown /f $f /a 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "takeown failed for '$f': $($takeownOutput.Trim())"
+    }
+
+    # Built-in group names are localized (for example 管理员 on zh-CN).
+    # icacls accepts a leading-* SID, so use the invariant Administrators SID
+    # and fail immediately if the ACL was not actually granted.
+    $icaclsOutput = (& $icacls $f /grant '*S-1-5-32-544:(F)' 2>&1 |
+        Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "icacls failed for '$f': $($icaclsOutput.Trim())"
+    }
 }
 
 function Get-PeMachine($Path) {
@@ -196,8 +215,17 @@ function Get-SystemPairState($Arch) {
 
 function Get-PendingFileRenameOperations {
     $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
-    return @((Get-ItemProperty $key -Name PendingFileRenameOperations `
-        -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+    # A clean Windows installation commonly has no value yet.  Under
+    # Set-StrictMode, dereferencing the missing property throws even when
+    # Get-ItemProperty used SilentlyContinue.  Inspect PSObject.Properties so
+    # absence is the normal empty-list case, while a real registry read error
+    # still fails closed.
+    $values = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
+    $property = $values.PSObject.Properties['PendingFileRenameOperations']
+    if ($null -eq $property -or $null -eq $property.Value) {
+        return @()
+    }
+    return @($property.Value)
 }
 
 function Set-PendingFileRenameOperations([string[]]$AdditionalPairs) {

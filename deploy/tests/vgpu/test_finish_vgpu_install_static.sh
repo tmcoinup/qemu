@@ -532,7 +532,7 @@ require_text 'GTX 1050 strict-A finish is disabled' "$STRICT_ROOT/finish.err"
    ! -e "$STRICT_ROOT/35/log" &&
    ! -e "$STRICT_ROOT/35/run" &&
    ! -e "$STRICT_ROOT/35/backups" &&
-   ! -e "$STRICT_ROOT/shared/bases" &&
+   ! -e "$STRICT_ROOT/_base" &&
    ! -e "$STRICT_ROOT/control" &&
    ! -e "$STRICT_ROOT/shared/assets" ]] \
     || fail 'strict GTX 1050 rejection changed config or published/launched an artifact'
@@ -576,7 +576,7 @@ require_text 'GTX 1050 strict-A finish is disabled' \
    ! -e "$LEGACY_STRICT_ROOT/36/log" &&
    ! -e "$LEGACY_STRICT_ROOT/36/run" &&
    ! -e "$LEGACY_STRICT_ROOT/36/backups" &&
-   ! -e "$LEGACY_STRICT_ROOT/shared/bases" &&
+   ! -e "$LEGACY_STRICT_ROOT/_base" &&
    ! -e "$LEGACY_STRICT_ROOT/control" &&
    ! -e "$LEGACY_STRICT_ROOT/shared/assets" ]] \
     || fail 'legacy strict rejection changed config or published/launched an artifact'

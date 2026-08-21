@@ -50,6 +50,8 @@ require("[string]$ApplicationExe = ''")
 require("Invoke-AppLocalMode $ApplicationExe -Remove:$Uninstall")
 require("# App-local mode returns before all system-wide mutation code below.")
 require("PendingFileRenameOperations")
+require("$values.PSObject.Properties['PendingFileRenameOperations']")
+require("if ($null -eq $property -or $null -eq $property.Value)")
 
 dispatch = text.index("Invoke-AppLocalMode $ApplicationExe -Remove:$Uninstall")
 system_uninstall = text.index("if ($Uninstall)", dispatch)

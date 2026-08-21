@@ -868,6 +868,8 @@ TMP_DIR="$(mktemp -d)"
 export IMAGE_ROOT="$TMP_DIR"
 VM_ROOT="$TMP_DIR/vms"
 EMPTY_VGPU_CONFIG="$TMP_DIR/vgpu-host.conf"
+HOST_1GB_CONFIG="$TMP_DIR/vgpu-host-1gb.conf"
+HOST_2GB_CONFIG="$TMP_DIR/vgpu-host-2gb.conf"
 
 cleanup() {
     rm -rf -- "$TMP_DIR"
@@ -878,6 +880,8 @@ trap cleanup EXIT
 [[ -x "$START_VM" ]] || fail "start-vm.sh is missing or not executable"
 
 touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd" "$EMPTY_VGPU_CONFIG"
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=1024' >"$HOST_1GB_CONFIG"
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=2048' >"$HOST_2GB_CONFIG"
 cat >"$TMP_DIR/qemu-system-x86_64" <<'EOF'
 #!/bin/sh
 if [ "$#" -eq 2 ] && [ "$1" = -display ] && [ "$2" = help ]; then
@@ -952,6 +956,7 @@ create_vm() {
         PATH=/usr/bin:/bin \
         IMAGE_ROOT="$IMAGE_ROOT" \
         VM_ROOT="$VM_ROOT" \
+        VGPU_HOST_CONFIG="$HOST_2GB_CONFIG" \
         "$CREATE_VM" "$id" \
         "${compatibility_args[@]}" \
         --platform "$platform" \
@@ -977,6 +982,7 @@ create_vm_default_ssd() {
         PATH=/usr/bin:/bin \
         IMAGE_ROOT="$IMAGE_ROOT" \
         VM_ROOT="$VM_ROOT" \
+        VGPU_HOST_CONFIG="$HOST_2GB_CONFIG" \
         "$CREATE_VM" "$id" \
         "${compatibility_args[@]}" \
         --platform "$platform" \
@@ -1245,7 +1251,7 @@ for combination in "${HARDWARE_COMBINATIONS[@]}"; do
         fail "$combination_key default profile populated more than two DIMMs"
 done
 mapfile -t default_ssds < <(ssd_default_profile_keys)
-assert_eq 'samsung-840-pro-512gb samsung-850-pro-512gb samsung-860-pro-512gb crucial-mx100-512gb kingston-kc400-512gb intel-545s-512gb wd-pc-sa530-512gb wd-black-pcie-512gb samsung-970-pro-512gb' \
+assert_eq 'samsung-840-pro-512gb samsung-850-pro-512gb samsung-860-pro-512gb crucial-mx100-512gb kingston-kc400-512gb intel-545s-512gb wd-pc-sa530-512gb' \
     "${default_ssds[*]}" "default exact-512 GB SSD pool"
 
 best_default_ssds_for_platform() {
@@ -1276,12 +1282,14 @@ assert_eq \
     'crucial-mx100-512gb intel-545s-512gb kingston-kc400-512gb samsung-840-pro-512gb samsung-850-pro-512gb samsung-860-pro-512gb wd-pc-sa530-512gb' \
     "$(best_default_ssds_for_platform i5-4590 | tr '\n' ' ' | sed 's/ $//')" \
     "H97 exact best-tier SATA candidate set"
-assert_eq 'samsung-970-pro-512gb wd-black-pcie-512gb' \
+assert_eq \
+    'crucial-mx100-512gb intel-545s-512gb kingston-kc400-512gb samsung-840-pro-512gb samsung-850-pro-512gb samsung-860-pro-512gb wd-pc-sa530-512gb' \
     "$(best_default_ssds_for_platform i5-6500 | tr '\n' ' ' | sed 's/ $//')" \
-    "B150 exact best-tier NVMe candidate set"
-assert_eq 'samsung-970-pro-512gb wd-black-pcie-512gb' \
+    "B150 default SATA candidate set; NVMe remains explicit"
+assert_eq \
+    'crucial-mx100-512gb intel-545s-512gb kingston-kc400-512gb samsung-840-pro-512gb samsung-850-pro-512gb samsung-860-pro-512gb wd-pc-sa530-512gb' \
     "$(best_default_ssds_for_platform i3-8100 | tr '\n' ' ' | sed 's/ $//')" \
-    "B360 exact best-tier NVMe candidate set"
+    "B360 default SATA candidate set; NVMe remains explicit"
 for catalog_oui in "${INTEL_OUIS[@]}"; do
     case "$catalog_oui" in
         00:1B:21|00:1E:67|00:21:6A|00:22:FA|00:23:14|00:24:D7 \
@@ -1452,14 +1460,16 @@ require_text '没有通过审核的 CPU/主板/内存组合' \
 # Capacity selectors keep the operator-facing choice small while source still
 # persists one complete audited platform/GPU row.
 capacity_selector_id=780098
+capacity_vm_root="$TMP_DIR/capacity-vms"
 env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
-    IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+    IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$capacity_vm_root" \
+    VGPU_HOST_CONFIG="$HOST_1GB_CONFIG" \
     "$CREATE_VM" "$capacity_selector_id" \
     --memory-size 6G --ssd-profile samsung-850-pro-512gb \
     --gpu-vram 1024 --monitor-profile lenovo-d24-20 \
     >"$TMP_DIR/capacity-selector.out"
 # shellcheck source=/dev/null
-source "$VM_ROOT/${capacity_selector_id}/vm.conf"
+source "$capacity_vm_root/${capacity_selector_id}/vm.conf"
 assert_eq 6144 "$MEM_TOTAL_MB" 'memory capacity selector'
 assert_eq 1024 "$GPU_VRAM_MB" 'GPU VRAM capacity selector'
 assert_eq nvidia-256 "$VGPU_MDEV_PROFILE" '1GB GPU resource mapping'
@@ -2016,9 +2026,9 @@ require_text '绑定的 TPM 持久状态' "$TMP_DIR/force-tpm.err" \
 assert_eq "$guard_hash" "$(sha256sum "$guard_conf")" \
     "failed TPM rewrite preserved vm.conf"
 
-# The implicit path first chooses the best compatible topology tier; every
-# selectable model now has the same exact 512 GB capacity as the shared base.
-# H97/DDR3 falls back to SATA; both Gen3 x4 boards must prefer NVMe.
+# The implicit path stays in the production-default SATA pool; every selectable
+# model has the same exact 512 GB capacity as the shared base.  NVMe identities
+# remain available only through an explicit profile selection.
 for default_platform in i5-4570-h81m-c-8g i5-4590 i5-6500 i3-8100; do
     default_ssd_id=$next_id
     next_id=$((next_id + 1))
@@ -2031,9 +2041,9 @@ for default_platform in i5-4570-h81m-c-8g i5-4590 i5-6500 i3-8100; do
     case "$default_platform|$SSD_INTERFACE|$SSD_PCIE_GEN|$SSD_PCIE_LANES" in
         'i5-4570-h81m-c-8g|sata|0|0'|\
         'i5-4590|sata|0|0'|\
-        'i5-6500|nvme|3|4'|\
-        'i3-8100|nvme|3|4') ;;
-        *) fail "$default_platform did not select its highest compatible storage tier: $SSD_PROFILE" ;;
+        'i5-6500|sata|0|0'|\
+        'i3-8100|sata|0|0') ;;
+        *) fail "$default_platform implicit SSD escaped the default SATA pool: $SSD_PROFILE" ;;
     esac
     assert_serials "$default_platform default SSD"
     assert_intel_mac "$default_platform default SSD"
@@ -2303,7 +2313,7 @@ require_text 'strict-A startup is disabled' \
 for forbidden in \
         "$strict_guard_root/control" \
         "$strict_guard_root/shared/assets" \
-        "$strict_guard_root/shared/bases" \
+        "$strict_guard_root/_base" \
         "$strict_guard_root/${strict_guard_id}/run" \
         "$strict_guard_root/${strict_guard_id}/log" \
         "$strict_guard_root/${strict_guard_id}/backups"; do
@@ -2446,7 +2456,7 @@ require_text 'strict-A startup is disabled' \
 for forbidden in \
         "$legacy_marker_root/control" \
         "$legacy_marker_root/shared/assets" \
-        "$legacy_marker_root/shared/bases" \
+        "$legacy_marker_root/_base" \
         "$legacy_marker_root/${legacy_marker_id}/run" \
         "$legacy_marker_root/${legacy_marker_id}/log" \
         "$legacy_marker_root/${legacy_marker_id}/backups"; do

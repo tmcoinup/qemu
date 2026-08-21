@@ -8,6 +8,8 @@
 #
 # 强制空盘: ./deploy/scripts/create-disk.sh <vm_id> --blank
 # 强制从指定 base: ./deploy/scripts/create-disk.sh <vm_id> --from-base --base-name NAME
+# V-11 式增量盘: ./deploy/scripts/create-disk.sh <vm_id> --from-base --base-name NAME --linked
+# 或使用和 V-11 一致的明确路径：--base /path/NAME.qcow2
 #
 # 空盘容量优先取 SIZE_BYTES，其次取显式 CLI GB，再其次读取
 # vm.conf 的 SSD_SIZE_BYTES；旧配置没有容量字段时仍回退 512 GB。
@@ -22,7 +24,7 @@
 # 环境变量:
 #   VM_ROOT/VMS_DIR  /home/ubuntu/images/vms
 #   VM_INSTANCES_DIR $VM_ROOT
-#   VM_BASE_DIR      $VM_ROOT/shared/bases
+#   VM_BASE_DIR      $VM_ROOT/_base
 #   SIZE_BYTES       精确字节数（覆盖 CLI 的 GB 参数）
 
 set -euo pipefail
@@ -42,7 +44,12 @@ usage: ./deploy/scripts/create-disk.sh VM_ID [SIZE_GB] [options]
 Options:
   --from-base          Clone a standalone base; fail if it is missing
   --base-name NAME     Select the managed base name (default: win10-base)
-  --blank              Create an empty disk; cannot use --base-name
+  --base IMAGE         Select an exact standalone qcow2 path
+  --linked             Create a small V-11-style qcow2 overlay (base inode is
+                       pinned inside the VM directory)
+  --full-copy          Create an independent standalone copy (historical default
+                       for direct create-disk callers)
+  --blank              Create an empty disk; cannot use --base/--base-name
   -h, --help           Show this help
 EOF
 }
@@ -54,6 +61,10 @@ FORCE_BLANK=0
 REQUIRE_BASE=0
 BASE_NAME=win10-base
 BASE_NAME_SET=0
+BASE_PATH=""
+BASE_PATH_SET=0
+CLONE_MODE=copy
+CLONE_MODE_SET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --blank) FORCE_BLANK=1; shift ;;
@@ -69,6 +80,37 @@ while [[ $# -gt 0 ]]; do
             ((BASE_NAME_SET == 0)) || { echo "--base-name 只能指定一次" >&2; exit 2; }
             BASE_NAME=${1#*=}
             BASE_NAME_SET=1
+            shift
+            ;;
+        --base)
+            (($# >= 2)) || { echo "--base 需要 qcow2 路径" >&2; exit 2; }
+            ((BASE_PATH_SET == 0)) || { echo "--base 只能指定一次" >&2; exit 2; }
+            BASE_PATH=$2
+            BASE_PATH_SET=1
+            shift 2
+            ;;
+        --base=*)
+            ((BASE_PATH_SET == 0)) || { echo "--base 只能指定一次" >&2; exit 2; }
+            BASE_PATH=${1#*=}
+            BASE_PATH_SET=1
+            shift
+            ;;
+        --linked)
+            ((CLONE_MODE_SET == 0)) || {
+                echo "--linked/--full-copy 只能指定一次" >&2
+                exit 2
+            }
+            CLONE_MODE=linked
+            CLONE_MODE_SET=1
+            shift
+            ;;
+        --full-copy)
+            ((CLONE_MODE_SET == 0)) || {
+                echo "--linked/--full-copy 只能指定一次" >&2
+                exit 2
+            }
+            CLONE_MODE=copy
+            CLONE_MODE_SET=1
             shift
             ;;
         -h|--help) usage; exit 0 ;;
@@ -97,12 +139,20 @@ if [[ -z "$VM_ID" || ! "$VM_ID" =~ ^[1-9][0-9]*$ ]]; then
 fi
 vm_storage_require_namespace_ready "$VM_ID"
 vm_storage_validate_base_name "$BASE_NAME"
+((BASE_NAME_SET == 0 || BASE_PATH_SET == 0)) || {
+    echo "--base 与 --base-name 不能同时使用" >&2
+    exit 2
+}
 if ((FORCE_BLANK && REQUIRE_BASE)); then
     echo "--blank 与 --from-base 不能同时使用" >&2
     exit 2
 fi
-if ((FORCE_BLANK && BASE_NAME_SET)); then
-    echo "--blank 与 --base-name 不能同时使用" >&2
+if ((FORCE_BLANK && (BASE_NAME_SET || BASE_PATH_SET))); then
+    echo "--blank 与 --base/--base-name 不能同时使用" >&2
+    exit 2
+fi
+if ((FORCE_BLANK && CLONE_MODE_SET)); then
+    echo "--blank 与 --linked/--full-copy 不能同时使用" >&2
     exit 2
 fi
 if [[ ! "$SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
@@ -172,7 +222,23 @@ if ! flock -n -x "$DISK_LOCK_FD"; then
     exit 1
 fi
 TARGET=$(vm_storage_disk_path "$VM_ID")
-BASE=$(vm_storage_base_path "$BASE_NAME")
+if ((BASE_PATH_SET)); then
+    [[ "$BASE_PATH" == /* && "$BASE_PATH" != / &&
+       "${BASE_PATH,,}" == *.qcow2 ]] || {
+        echo "[create-disk] --base 必须是绝对 .qcow2 路径" >&2
+        exit 2
+    }
+    [[ -f "$BASE_PATH" && ! -L "$BASE_PATH" ]] || {
+        echo "[create-disk] --base 必须是普通非符号链接文件: $BASE_PATH" >&2
+        exit 1
+    }
+    BASE=$(realpath -e -- "$BASE_PATH") || exit 1
+    BASE_NAME=$(basename -- "$BASE")
+    BASE_NAME=${BASE_NAME%.qcow2}
+    vm_storage_validate_base_name "$BASE_NAME" || exit 2
+else
+    BASE=$(vm_storage_base_path "$BASE_NAME")
+fi
 
 if [[ -e "$TARGET" || -L "$TARGET" ]]; then
     echo "⚠️  $TARGET 已存在。删除请 ./deploy/scripts/delete-vm.sh ${VM_ID} -y" >&2
@@ -190,8 +256,18 @@ fi
 mkdir -p "$(dirname "$TARGET")"
 disk_headroom_guard "$TARGET"
 TARGET_TMP="$(dirname "$TARGET")/.$(basename "$TARGET").partial.$$.$RANDOM"
+BASE_PIN=""
+BASE_PIN_TMP=""
+BASE_PIN_CREATED=0
+BASE_PIN_CREATED_ID=""
 cleanup_create_disk() {
     rm -f -- "$TARGET_TMP"
+    [[ -z "$BASE_PIN_TMP" ]] || rm -f -- "$BASE_PIN_TMP"
+    if ((BASE_PIN_CREATED)) && [[ -n "$BASE_PIN" && -f "$BASE_PIN" &&
+            ! -L "$BASE_PIN" && ! -e "$TARGET" && ! -L "$TARGET" &&
+            "$(stat -Lc '%d:%i' -- "$BASE_PIN")" == "$BASE_PIN_CREATED_ID" ]]; then
+        rm -f -- "$BASE_PIN"
+    fi
 }
 trap cleanup_create_disk EXIT
 
@@ -204,7 +280,7 @@ publish_target() {
     trap - EXIT
 }
 
-# Path A：base 存在且没显式 --blank → 复制 base (秒级，含 driver baseline)
+# Path A：base 存在且没显式 --blank → V-11 式增量盘或独立完整复制。
 if [[ -f "$BASE" && $FORCE_BLANK -eq 0 ]]; then
     if ! vm_storage_read_qcow2_metadata "$QEMU_IMG" "$BASE"; then
         echo "[create-disk] base 元数据无效，未创建 VM 磁盘: $BASE" >&2
@@ -228,6 +304,80 @@ if [[ -f "$BASE" && $FORCE_BLANK -eq 0 ]]; then
         exit 1
     fi
     "$QEMU_IMG" check -q "$BASE"
+
+    if [[ "$CLONE_MODE" == linked ]]; then
+        BASE_PIN=$(vm_storage_instance_base_pin_path "$VM_ID") || exit 1
+        [[ ! -e "$BASE_PIN" && ! -L "$BASE_PIN" ]] || {
+            echo "[create-disk] 实例内母盘 pin 已存在，拒绝覆盖: $BASE_PIN" >&2
+            exit 1
+        }
+        BASE_PIN_TMP="$(dirname "$BASE_PIN")/.$(basename "$BASE_PIN").partial.$$.$RANDOM"
+        if ! ln -- "$BASE" "$BASE_PIN_TMP"; then
+            echo "[create-disk] 无法建立 V-11 式母盘 hard-link pin" >&2
+            echo "  base: $BASE" >&2
+            echo "  VM:   $(dirname "$BASE_PIN")" >&2
+            echo "  基础镜像与 VM 必须位于支持 hard link 的同一文件系统；" >&2
+            echo "  需要完整独立盘时显式使用 --full-copy。" >&2
+            exit 1
+        fi
+        [[ -f "$BASE_PIN_TMP" && ! -L "$BASE_PIN_TMP" &&
+           "$BASE_PIN_TMP" -ef "$BASE" ]] || {
+            echo "[create-disk] 母盘 pin 未固定到所选 base inode" >&2
+            exit 1
+        }
+        mv -T -- "$BASE_PIN_TMP" "$BASE_PIN"
+        BASE_PIN_TMP=""
+        BASE_PIN_CREATED_ID=$(stat -Lc '%d:%i' -- "$BASE_PIN")
+        BASE_PIN_CREATED=1
+
+        echo "[create-disk] 从 baseline '$BASE_NAME' 创建 V-11 式增量盘"
+        echo "  base: $BASE"
+        echo "  pin:  $BASE_PIN"
+        echo "  disk: $TARGET"
+        (
+            cd -- "$(dirname "$TARGET_TMP")"
+            "$QEMU_IMG" create -q -f qcow2 -F qcow2 \
+                -b "$(basename "$BASE_PIN")" "$(basename "$TARGET_TMP")"
+        )
+        if (( SIZE > BASE_SIZE )); then
+            echo "[create-disk] 扩展增量盘虚拟容量：${BASE_SIZE} → ${SIZE} 字节"
+            "$QEMU_IMG" resize "$TARGET_TMP" "$SIZE"
+        fi
+        "$QEMU_IMG" check -q "$TARGET_TMP"
+        if ! vm_storage_read_qcow2_metadata "$QEMU_IMG" "$TARGET_TMP" ||
+                [[ "$VM_STORAGE_QCOW2_BACKING" != "$(basename "$BASE_PIN")" ||
+                   -n "$VM_STORAGE_QCOW2_DATA_FILE" ]]; then
+            echo "[create-disk] 增量盘 backing 元数据不符合实例内相对 pin 合同" >&2
+            exit 1
+        fi
+        RESOLVED_BACKING=$(vm_storage_resolved_backing_path "$TARGET_TMP") || exit 1
+        [[ "$RESOLVED_BACKING" == "$BASE_PIN" &&
+           -f "$BASE_PIN" && ! -L "$BASE_PIN" && "$BASE_PIN" -ef "$BASE" ]] || {
+            echo "[create-disk] 增量盘没有绑定到所选母盘 pin" >&2
+            echo "  expected: $BASE_PIN" >&2
+            echo "  actual:   ${RESOLVED_BACKING:-<missing>}" >&2
+            exit 1
+        }
+        TARGET_SIZE=$(qcow2_virtual_size "$TARGET_TMP") || {
+            echo "[create-disk] 无法校验增量盘虚拟容量" >&2
+            exit 1
+        }
+        if (( TARGET_SIZE != SIZE )); then
+            echo "[create-disk] 增量盘容量校验失败: ${TARGET_SIZE} != ${SIZE}" >&2
+            exit 1
+        fi
+        publish_target
+        BASE_PIN_CREATED=0
+        if ! "$QEMU_IMG" info "$TARGET" | sed -n '1,10p'; then
+            echo "[create-disk] 警告：增量盘已发布，但最终 info 展示失败: $TARGET" >&2
+        fi
+        echo
+        echo "✅ 已创建增量盘；disk.qcow2 只保存 VM 写入，.base.qcow2 固定旧母盘 inode。"
+        echo "   更新母盘后，已有 VM 不变；只有新克隆使用新母盘。"
+        echo "   下一步: ./deploy/scripts/start-vm.sh $VM_ID"
+        exit 0
+    fi
+
     echo "[create-disk] 从 baseline '$BASE_NAME' 复制：$BASE → $TARGET"
     cp --reflink=auto -- "$BASE" "$TARGET_TMP"
     # A shared baseline is commonly made 0444 to prevent accidental edits.

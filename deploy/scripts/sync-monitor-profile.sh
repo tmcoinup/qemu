@@ -187,6 +187,9 @@ if [[ "$current_block" != "$expected_block" ]]; then
         monitor_config_block
     } >>"$tmp"
     chmod --reference="$CONF" "$tmp"
+    if (( EUID == 0 )); then
+        chown --reference="$CONF" "$tmp"
+    fi
     mv -T -- "$tmp" "$CONF"
     trap - EXIT
     echo "[monitor-sync] vm.conf → ${MONITOR_PROFILE} / ${MONITOR_SERIAL}"
@@ -273,4 +276,4 @@ else
     exit 1
 fi
 
-echo "[monitor-sync] 完成：Windows 标准 EDID_OVERRIDE 已按 128B block 写入；guest 内未安装脚本、服务或计划任务"
+echo "[monitor-sync] 完成：Windows 标准 EDID_OVERRIDE 已按 128B block 写入；设备管理器 live 名称由私有克隆的 SYSTEM 身份任务在下次启动通过 SetupAPI 发布"

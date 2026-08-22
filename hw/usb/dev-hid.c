@@ -38,6 +38,18 @@
 #include "hw/core/qdev-properties.h"
 #include "qom/object.h"
 
+typedef struct USBHIDIntervalSpeedDesc {
+    USBDescDevice device;
+    USBDescConfig config;
+    USBDescIface iface;
+    USBDescEndpoint endpoint;
+} USBHIDIntervalSpeedDesc;
+
+typedef struct USBHIDIntervalDesc {
+    USBHIDIntervalSpeedDesc full;
+    USBHIDIntervalSpeedDesc high;
+} USBHIDIntervalDesc;
+
 struct USBHIDState {
     USBDevice dev;
     USBEndpoint *intr;
@@ -69,6 +81,16 @@ struct USBHIDState {
 
     /* Distinguishes a migration stream carrying the optional subsection. */
     bool numlock_migration_loaded;
+
+    /*
+     * Explicit latency/fingerprint trade-off.  The default keeps every byte
+     * of the historical endpoint descriptors unchanged.  Opt-in advertises a
+     * 1 ms interrupt interval and therefore deliberately changes the guest's
+     * USB descriptor fingerprint without changing its HID report protocol.
+     */
+    bool low_latency;
+    USBHIDIntervalDesc low_latency_desc;
+    bool low_latency_migration_loaded;
 };
 
 #define TYPE_USB_HID "usb-hid"
@@ -821,6 +843,67 @@ static void usb_hid_unrealize(USBDevice *dev)
     }
 }
 
+static bool usb_hid_patch_interval_speed(
+    const USBDescDevice *source, USBHIDIntervalSpeedDesc *patched,
+    uint8_t interval, const USBDescDevice **result, Error **errp)
+{
+    const USBDescConfig *config;
+    const USBDescIface *iface;
+
+    if (!source) {
+        *result = NULL;
+        return true;
+    }
+
+    /*
+     * usb-kbd/usb-mouse currently expose one configuration containing one
+     * interface and one interrupt endpoint.  Fail closed if that topology is
+     * extended later instead of silently patching only part of a descriptor.
+     */
+    if (source->bNumConfigurations != 1 || !source->confs) {
+        error_setg(errp, "USB HID low latency requires exactly one "
+                   "configuration");
+        return false;
+    }
+    config = &source->confs[0];
+    if (config->nif_groups != 0 || config->nif != 1 || !config->ifs) {
+        error_setg(errp, "USB HID low latency requires exactly one "
+                   "non-grouped interface");
+        return false;
+    }
+    iface = &config->ifs[0];
+    if (iface->bNumEndpoints != 1 || !iface->eps ||
+        iface->eps[0].bmAttributes != USB_ENDPOINT_XFER_INT) {
+        error_setg(errp, "USB HID low latency requires exactly one "
+                   "interrupt endpoint");
+        return false;
+    }
+
+    patched->device = *source;
+    patched->config = *config;
+    patched->iface = *iface;
+    patched->endpoint = iface->eps[0];
+    patched->endpoint.bInterval = interval;
+    patched->iface.eps = &patched->endpoint;
+    patched->config.ifs = &patched->iface;
+    patched->device.confs = &patched->config;
+    *result = &patched->device;
+    return true;
+}
+
+static bool usb_hid_patch_low_latency(USBHIDState *us,
+                                      const USBDesc *source,
+                                      USBDesc *patched, Error **errp)
+{
+    /* Full speed counts 1 ms frames; high speed uses 2^(n-1) microframes. */
+    return usb_hid_patch_interval_speed(
+               source->full, &us->low_latency_desc.full, 1,
+               &patched->full, errp) &&
+           usb_hid_patch_interval_speed(
+               source->high, &us->low_latency_desc.high, 4,
+               &patched->high, errp);
+}
+
 static void usb_hid_initfn(USBDevice *dev, int kind,
                            const USBDesc *usb1, const USBDesc *usb2,
                            Error **errp)
@@ -851,7 +934,8 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
         error_setg(errp, "bcd-device must be a 16-bit BCD value");
         return;
     }
-    if (us->vendorid || us->productid || us->bcd_device != UINT32_MAX) {
+    if (us->vendorid || us->productid || us->bcd_device != UINT32_MAX ||
+        us->low_latency) {
         us->patched_desc = g_memdup2(selected, sizeof(*selected));
         if (us->vendorid) {
             us->patched_desc->id.idVendor = us->vendorid;
@@ -861,6 +945,11 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
         }
         if (us->bcd_device != UINT32_MAX) {
             us->patched_desc->id.bcdDevice = us->bcd_device;
+        }
+        if (us->low_latency &&
+            !usb_hid_patch_low_latency(us, selected, us->patched_desc, errp)) {
+            g_clear_pointer(&us->patched_desc, g_free);
+            return;
         }
         dev->usb_desc = us->patched_desc;
     } else {
@@ -919,14 +1008,35 @@ static void usb_keyboard_realize(USBDevice *dev, Error **errp)
     }
 }
 
-static int usb_ptr_post_load(void *opaque, int version_id)
+static int usb_ptr_pre_load(void *opaque)
+{
+    USBHIDState *us = opaque;
+
+    us->low_latency_migration_loaded = false;
+    return 0;
+}
+
+static bool usb_hid_low_latency_post_load(USBHIDState *us, Error **errp)
+{
+    if (us->low_latency_migration_loaded != us->low_latency) {
+        error_setg(errp, "USB HID migration requires matching "
+                   "x-low-latency settings on source and destination");
+        return false;
+    }
+    return true;
+}
+
+static bool usb_ptr_post_load(void *opaque, int version_id, Error **errp)
 {
     USBHIDState *s = opaque;
 
+    if (!usb_hid_low_latency_post_load(s, errp)) {
+        return false;
+    }
     if (s->dev.remote_wakeup) {
         hid_pointer_activate(&s->hid);
     }
-    return 0;
+    return true;
 }
 
 static int usb_keyboard_pre_load(void *opaque)
@@ -936,8 +1046,47 @@ static int usb_keyboard_pre_load(void *opaque)
     /* loadvm may reuse an existing object; discard its old runtime state. */
     usb_keyboard_numlock_reset(us);
     us->numlock_migration_loaded = false;
+    us->low_latency_migration_loaded = false;
     return 0;
 }
+
+static bool usb_hid_low_latency_migration_needed(void *opaque)
+{
+    USBHIDState *us = opaque;
+
+    return us->low_latency;
+}
+
+static int usb_hid_low_latency_subsection_post_load(void *opaque,
+                                                    int version_id)
+{
+    USBHIDState *us = opaque;
+
+    us->low_latency_migration_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_usb_ptr_low_latency = {
+    .name = "usb-ptr/low-latency",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = usb_hid_low_latency_subsection_post_load,
+    .needed = usb_hid_low_latency_migration_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_usb_kbd_low_latency = {
+    .name = "usb-kbd/low-latency",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = usb_hid_low_latency_subsection_post_load,
+    .needed = usb_hid_low_latency_migration_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static bool usb_keyboard_numlock_migration_needed(void *opaque)
 {
@@ -979,6 +1128,10 @@ static bool usb_keyboard_post_load(void *opaque, int version_id, Error **errp)
     bool subsection_loaded = us->numlock_migration_loaded;
 
     us->numlock_migration_loaded = false;
+
+    if (!usb_hid_low_latency_post_load(us, errp)) {
+        return false;
+    }
 
     if (!subsection_loaded) {
         if (us->numlock.force_on) {
@@ -1036,11 +1189,16 @@ static const VMStateDescription vmstate_usb_ptr = {
     .name = "usb-ptr",
     .version_id = 1,
     .minimum_version_id = 1,
-    .post_load = usb_ptr_post_load,
+    .pre_load = usb_ptr_pre_load,
+    .post_load_errp = usb_ptr_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_USB_DEVICE(dev, USBHIDState),
         VMSTATE_HID_POINTER_DEVICE(hid, USBHIDState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_usb_ptr_low_latency,
+        NULL
     }
 };
 
@@ -1057,6 +1215,7 @@ static const VMStateDescription vmstate_usb_kbd = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_usb_kbd_numlock,
+        &vmstate_usb_kbd_low_latency,
         NULL
     }
 };
@@ -1112,6 +1271,7 @@ static const TypeInfo usb_tablet_info = {
 
 static const Property usb_mouse_properties[] = {
         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
+        DEFINE_PROP_BOOL("x-low-latency", USBHIDState, low_latency, false),
         /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */
         DEFINE_PROP_UINT16("vendorid", USBHIDState, vendorid, 0),
         DEFINE_PROP_UINT16("productid", USBHIDState, productid, 0),
@@ -1141,6 +1301,7 @@ static const TypeInfo usb_mouse_info = {
 static const Property usb_keyboard_properties[] = {
         DEFINE_PROP_UINT32("usb_version", USBHIDState, usb_version, 2),
         DEFINE_PROP_STRING("display", USBHIDState, display),
+        DEFINE_PROP_BOOL("x-low-latency", USBHIDState, low_latency, false),
         DEFINE_PROP_BOOL("x-force-numlock-on", USBHIDState,
                          numlock.force_on, false),
         /* stealth (patch 0010): VID/PID/manufacturer/product 覆盖 */

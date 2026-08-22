@@ -22,8 +22,13 @@ $ContinuationTaskName = 'VMate-G11-Clone-Continuation'
 $GuestLiteRoot = Join-Path $Root 'GuestLite'
 $GuestLiteManifestPath = Join-Path $GuestLiteRoot 'clone-manifest.json'
 $GuestLiteStatePath = Join-Path $env:ProgramData 'G11GuestLite\state.json'
-$GuestLiteProfileVersion = '2.3.0'
-$ExpectedGuestLiteManifestSha256 = '07837EDE18039F2513B0B339B4F37DD4787C1B8BAE751C08995007231D161841'
+$GuestLiteEnforcementLogPath = Join-Path $env:ProgramData `
+    'G11GuestLite\enforce-last.txt'
+$GuestLiteProfileVersion = '2.5.2'
+$ExpectedGuestLiteManifestSha256 = 'FC098C96AFE5068690E89FEC24B96E318CA0E2C3EE6D9D10AE5D0C7679797850'
+$GuestLiteEnglishInputTip = '0409:00000409'
+$GuestLitePinyinLanguageTags = @('zh-CN', 'zh-Hans-CN')
+$GuestLitePinyinInputTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
 
 function Write-AtomicUtf8Json {
     param(
@@ -240,6 +245,73 @@ function Read-And-ValidateGuestLitePayload {
     return (Join-Path $GuestLiteRoot 'G11-Guest-Lite.ps1')
 }
 
+function Open-GuestLiteUserHive {
+    param([Parameter(Mandatory = $true)][string]$UserSid)
+
+    $loadedRoot = "Registry::HKEY_USERS\$UserSid"
+    if (Test-Path -LiteralPath $loadedRoot -PathType Container) {
+        return [pscustomobject]@{
+            RootPath = $loadedRoot
+            MountName = ''
+            LoadedByThisProcess = $false
+        }
+    }
+
+    $profiles = @(Get-CimInstance Win32_UserProfile -OperationTimeoutSec 15 `
+        -ErrorAction Stop | Where-Object {
+            [string]$_.SID -ceq $UserSid -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.LocalPath)
+        })
+    if ($profiles.Count -ne 1) {
+        throw "Expected one Windows profile for Guest Lite SID $UserSid; observed $($profiles.Count)."
+    }
+    $hiveItem = Get-PlainFile (Join-Path ([string]$profiles[0].LocalPath) `
+        'NTUSER.DAT') 'Guest Lite user registry hive'
+    $mountName = "G11GuestLiteVerify_$PID"
+    $mountRoot = "Registry::HKEY_USERS\$mountName"
+    if (Test-Path -LiteralPath $mountRoot) {
+        throw "Temporary Guest Lite registry mount already exists: $mountName"
+    }
+    $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+    $loadOutput = @(& $regExe load "HKU\$mountName" `
+        $hiveItem.FullName 2>&1)
+    if ($LASTEXITCODE -ne 0 -or
+        -not (Test-Path -LiteralPath $mountRoot -PathType Container)) {
+        throw "Could not load the Guest Lite user registry hive: $($loadOutput -join ' ')"
+    }
+    return [pscustomobject]@{
+        RootPath = $mountRoot
+        MountName = $mountName
+        LoadedByThisProcess = $true
+    }
+}
+
+function Close-GuestLiteUserHive {
+    param([Parameter(Mandatory = $true)][object]$Hive)
+
+    if (-not [bool]$Hive.LoadedByThisProcess) { return }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+    $unloadOutput = @(& $regExe unload "HKU\$($Hive.MountName)" 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not unload the temporary Guest Lite user registry hive: $($unloadOutput -join ' ')"
+    }
+}
+
+function Resolve-GuestLiteRegistryPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$UserHive
+    )
+
+    if ($Path.StartsWith('HKCU:\', [StringComparison]::OrdinalIgnoreCase)) {
+        return ('{0}\{1}' -f [string]$UserHive.RootPath,
+            $Path.Substring(6))
+    }
+    return $Path
+}
+
 function Read-And-ValidateGuestLiteState {
     param([switch]$RequireStopped)
 
@@ -247,15 +319,29 @@ function Read-And-ValidateGuestLiteState {
         'Guest Lite rollback state'
     $state = Get-Content -LiteralPath $stateItem.FullName -Raw -Encoding UTF8 |
         ConvertFrom-Json -ErrorAction Stop
+    $osIdentity = Get-WindowsOsIdentity
+    try {
+        $stateMachineGuid = ([Guid]([string]$state.MachineGuid)).ToString('D').ToLowerInvariant()
+    } catch {
+        throw "Guest Lite rollback state contains an invalid MachineGuid: $($state.MachineGuid)"
+    }
     $bootstrapAccounts = @(Get-CimInstance Win32_UserAccount `
         -OperationTimeoutSec 15 -ErrorAction Stop | Where-Object {
             [bool]$_.LocalAccount -and [string]$_.SID -match '-500$'
         })
     if ($bootstrapAccounts.Count -ne 1 -or
-        [int]$state.SchemaVersion -ne 4 -or
-        [string]$state.ComputerName -ine $env:COMPUTERNAME -or
+        [int]$state.SchemaVersion -ne 5 -or
+        $stateMachineGuid -cne [string]$osIdentity.MachineGuid -or
         [string]$state.UserSid -cne [string]$bootstrapAccounts[0].SID) {
         throw 'Guest Lite rollback state is not bound to this clone/bootstrap user.'
+    }
+    $audioBaseline = $state.PSObject.Properties['AudioEndpoint']
+    $languageBaseline = $state.PSObject.Properties['UserLanguageList']
+    if ($null -eq $audioBaseline -or
+        -not [bool]$audioBaseline.Value.Available -or
+        $null -eq $languageBaseline -or
+        -not [bool]$languageBaseline.Value.Available) {
+        throw 'Guest Lite rollback state lacks the audio/language baseline.'
     }
 
     $task = Get-ScheduledTask -TaskPath '\' `
@@ -273,6 +359,79 @@ function Read-And-ValidateGuestLiteState {
         if (-not (Test-Path -LiteralPath $policyPath -PathType Leaf)) {
             throw "Guest Lite local-policy persistence is missing: $policyPath"
         }
+    }
+
+    $userHive = Open-GuestLiteUserHive -UserSid ([string]$state.UserSid)
+    try {
+        foreach ($expected in @(
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'ToastEnabled'; Value = 0; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'NoToastApplicationNotification'; Value = 1; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'NoToastApplicationNotificationOnLockScreen'; Value = 1; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer'; Name = 'DisableNotificationCenter'; Value = 1; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search'; Name = 'SearchboxTaskbarMode'; Value = 0; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications'; Name = 'DisableNotifications'; Value = 1; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\Control Panel\International\User Profile'; Name = 'InputMethodOverride'; Value = '0409:00000409'; Type = 'String' }
+        )) {
+            $resolvedPath = Resolve-GuestLiteRegistryPath `
+                -Path ([string]$expected.Path) -UserHive $userHive
+            $key = Get-Item -LiteralPath $resolvedPath -ErrorAction Stop
+            try {
+                if (@($key.GetValueNames()) -notcontains [string]$expected.Name) {
+                    throw "Guest Lite setting is missing: $($expected.Path)\$($expected.Name)"
+                }
+                $actual = $key.GetValue(
+                    [string]$expected.Name, $null,
+                    [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+                )
+                $matches = if ([string]$expected.Type -ceq 'DWord') {
+                    [int64]$actual -eq [int64]$expected.Value
+                } else {
+                    [string]$actual -ceq [string]$expected.Value
+                }
+                if (-not $matches) {
+                    throw "Guest Lite setting differs: $($expected.Path)\$($expected.Name) current=$actual desired=$($expected.Value)"
+                }
+            } finally {
+                $key.Close()
+            }
+        }
+
+        # The continuation task runs as Local System after the internal reboot.
+        # Get-WinUserLanguageList would therefore inspect SYSTEM's HKCU. Read the
+        # saved clone user's hive directly so notification and input assertions
+        # are bound to state.UserSid in both interactive and SYSTEM phases.
+        $languageRoot = '{0}\Control Panel\International\User Profile' -f `
+            [string]$userHive.RootPath
+        $languageKey = Get-Item -LiteralPath $languageRoot -ErrorAction Stop
+        try {
+            $languageList = @($languageKey.GetValue(
+                'Languages', [string[]]@(),
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            ))
+        } finally {
+            $languageKey.Close()
+        }
+        if ($languageList.Count -lt 2 -or
+            [string]$languageList[0] -ine 'en-US' -or
+            [string]$languageList[1] -notin $GuestLitePinyinLanguageTags) {
+            throw 'Guest Lite input order is not en-US/US first and zh-CN/Microsoft Pinyin second.'
+        }
+        foreach ($input in @(
+            [pscustomobject]@{ Language = [string]$languageList[0]; Tip = $GuestLiteEnglishInputTip },
+            [pscustomobject]@{ Language = [string]$languageList[1]; Tip = $GuestLitePinyinInputTip }
+        )) {
+            $inputKey = Get-Item -LiteralPath (Join-Path $languageRoot `
+                ([string]$input.Language)) -ErrorAction Stop
+            try {
+                if (@($inputKey.GetValueNames()) -inotcontains [string]$input.Tip) {
+                    throw "Guest Lite input method is missing: $($input.Language)/$($input.Tip)"
+                }
+            } finally {
+                $inputKey.Close()
+            }
+        }
+    } finally {
+        Close-GuestLiteUserHive -Hive $userHive
     }
 
     $firewall = Get-CimInstance Win32_Service -Filter "Name='MpsSvc'" `
@@ -295,6 +454,65 @@ function Read-And-ValidateGuestLiteState {
         FirewallStartMode = [string]$firewall.StartMode
         FirewallState = [string]$firewall.State
         FirewallProcessId = [uint32]$firewall.ProcessId
+        Notifications = 'disabled'
+        TaskbarSearch = 'hidden'
+        DefaultInputMethod = '0409:00000409'
+        InputOrder = 'en-US/US,zh-CN/Microsoft-Pinyin'
+        Audio = 'muted'
+    }
+}
+
+function Invoke-And-WaitGuestLiteEnforcement {
+    $taskPath = '\'
+    $taskName = 'G11GuestLite-EnforceProfile'
+    $deadline = [DateTime]::Now.AddMinutes(10)
+
+    # Do not race the 45-second startup trigger. If it is already running,
+    # wait for that instance and then request a fresh, measurable run.
+    do {
+        $task = Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
+            -ErrorAction Stop
+        if ([string]$task.State -notin @('Running', 'Queued')) { break }
+        Start-Sleep -Seconds 2
+    } while ([DateTime]::Now -lt $deadline)
+    if ([string]$task.State -in @('Running', 'Queued')) {
+        throw 'Guest Lite enforcement task did not become idle within ten minutes.'
+    }
+
+    $previousInfo = Get-ScheduledTaskInfo -TaskPath $taskPath `
+        -TaskName $taskName -ErrorAction Stop
+    $previousRunTime = $previousInfo.LastRunTime
+    Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
+        -ErrorAction Stop
+    $completed = $false
+    do {
+        Start-Sleep -Seconds 2
+        $task = Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
+            -ErrorAction Stop
+        $info = Get-ScheduledTaskInfo -TaskPath $taskPath `
+            -TaskName $taskName -ErrorAction Stop
+        if ([string]$task.State -notin @('Running', 'Queued') -and
+            $info.LastRunTime -gt $previousRunTime) {
+            $completed = $true
+            break
+        }
+    } while ([DateTime]::Now -lt $deadline)
+    if (-not $completed) {
+        throw 'Guest Lite enforcement task did not finish within ten minutes.'
+    }
+    if ([int64]$info.LastTaskResult -ne 0) {
+        throw "Guest Lite enforcement task failed: result=$($info.LastTaskResult), lastRun=$($info.LastRunTime.ToString('o'))."
+    }
+    $logItem = Get-PlainFile $GuestLiteEnforcementLogPath `
+        'Guest Lite enforcement log'
+    $log = Get-Content -LiteralPath $logItem.FullName -Raw -Encoding UTF8
+    if ($log -notmatch '(?m)^audio=default-render-muted\r?$' -or
+        $log -notmatch '(?m)^result=pass failures=0\r?$') {
+        throw 'Guest Lite enforcement log does not contain a clean pass receipt.'
+    }
+    return [pscustomobject]@{
+        LastRunTime = $info.LastRunTime.ToString('o')
+        LastTaskResult = [int64]$info.LastTaskResult
     }
 }
 
@@ -304,10 +522,38 @@ function Invoke-GuestLiteCloneProfile {
         'System32\WindowsPowerShell\v1.0\powershell.exe'
     $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode CloneApply' `
         -f $script.Replace('"', '""')
+    $logRoot = Join-Path $Root 'logs'
+    if (-not (Test-Path -LiteralPath $logRoot -PathType Container)) {
+        New-Item -Path $logRoot -ItemType Directory -Force -ErrorAction Stop |
+            Out-Null
+    }
+    $logRootItem = Get-Item -LiteralPath $logRoot -Force -ErrorAction Stop
+    if ($logRootItem -isnot [IO.DirectoryInfo] -or
+        ($logRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Clone log root must be a regular, non-reparse directory: $logRoot"
+    }
+    $standardOutput = Join-Path $logRoot 'guest-lite-clone-apply-output.txt'
+    $standardError = Join-Path $logRoot 'guest-lite-clone-apply-error.txt'
+    Remove-Item -LiteralPath $standardOutput, $standardError -Force `
+        -ErrorAction SilentlyContinue
     $process = Start-Process -FilePath $powerShell -ArgumentList $arguments `
-        -WorkingDirectory $GuestLiteRoot -Wait -PassThru
+        -WorkingDirectory $GuestLiteRoot -WindowStyle Hidden `
+        -RedirectStandardOutput $standardOutput `
+        -RedirectStandardError $standardError -Wait -PassThru
     if ($process.ExitCode -ne 0) {
-        throw "Guest Lite clone profile failed with exit code $($process.ExitCode). Check that Tamper Protection was manually turned off before sealing the base."
+        $detail = ''
+        foreach ($candidate in @($standardError, $standardOutput)) {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                continue
+            }
+            $candidateDetail = (@(Get-Content -LiteralPath $candidate -Tail 12 `
+                -ErrorAction SilentlyContinue) -join ' | ').Trim()
+            if (-not [string]::IsNullOrWhiteSpace($candidateDetail)) {
+                $detail = $candidateDetail
+                break
+            }
+        }
+        throw "Guest Lite clone profile failed with exit code $($process.ExitCode). Check that Tamper Protection was manually turned off before sealing the base. Logs: $standardOutput / $standardError. $detail"
     }
     return (Read-And-ValidateGuestLiteState)
 }
@@ -552,22 +798,25 @@ try {
         $receipt = Read-And-ValidateResult -GuestUuid $guestUuid
     }
 
+    $projection = Find-SystemProjectionPayload -GuestUuid $guestUuid `
+        -PortableReceipt $receipt
+    $projectionReceipt = Read-And-ValidateProjectionReceipt `
+        -Projection $projection -GuestUuid $guestUuid -PortableReceipt $receipt
+    $resumeVerifiedProjection = $null -ne $projectionReceipt
+
     # Run after licensed vGPU/DLS validation but before the existing internal
-    # projection reboot.  The trusted clone-only mode keeps the interactive
+    # projection reboot. The trusted clone-only mode keeps the interactive
     # user's exact rollback baseline and starts its Local System enforcement
     # task immediately, so that same reboot is also the no-MpsSvc verification
-    # boot.  Complete mode never reapplies; it accepts only the secured state.
+    # boot. Complete mode only verifies. An interactive Auto retry safely
+    # reapplies the currently attested profile while retaining the original
+    # state.json baseline; this upgrades older clones and newly added settings.
     $guestLiteState = if ($Phase -ceq 'Complete') {
         $null = Read-And-ValidateGuestLitePayload
         Read-And-ValidateGuestLiteState -RequireStopped
     } else {
         Invoke-GuestLiteCloneProfile
     }
-
-    $projection = Find-SystemProjectionPayload -GuestUuid $guestUuid `
-        -PortableReceipt $receipt
-    $projectionReceipt = Read-And-ValidateProjectionReceipt `
-        -Projection $projection -GuestUuid $guestUuid -PortableReceipt $receipt
     if ($null -ne $projectionReceipt -and $Phase -cne 'Complete' -and
         [string]$guestLiteState.FirewallState -cne 'Stopped') {
         Register-CloneContinuationTask
@@ -604,6 +853,13 @@ try {
         }
     }
 
+    # A host-ready receipt is issued only after one explicit post-profile
+    # SYSTEM run has re-disabled reviewed services/tasks/processes and returned
+    # a clean result. This also catches clone-time rename/SID binding errors
+    # instead of leaving them hidden behind an old enforcement log.
+    $guestLiteEnforcement = Invoke-And-WaitGuestLiteEnforcement
+    $guestLiteState = Read-And-ValidateGuestLiteState -RequireStopped
+
     $safeMarker = [ordered]@{
         schemaVersion = 3
         state = 'ready-for-host-initialization'
@@ -624,12 +880,19 @@ try {
             userSid = [string]$guestLiteState.UserSid
             rollbackBaseline = 'C:\ProgramData\G11GuestLite\state.json'
             enforcementTask = '\G11GuestLite-EnforceProfile'
+            enforcementLastRun = [string]$guestLiteEnforcement.LastRunTime
+            enforcementLastResult = [int64]$guestLiteEnforcement.LastTaskResult
             firewallService = 'MpsSvc'
             firewallStartMode = [string]$guestLiteState.FirewallStartMode
             firewallState = [string]$guestLiteState.FirewallState
             firewallProcessId = [uint32]$guestLiteState.FirewallProcessId
             baseFilteringEngine = 'preserved-running'
             appearance = 'background-and-font-preserved'
+            notifications = [string]$guestLiteState.Notifications
+            taskbarSearch = [string]$guestLiteState.TaskbarSearch
+            defaultInputMethod = [string]$guestLiteState.DefaultInputMethod
+            inputOrder = [string]$guestLiteState.InputOrder
+            audio = [string]$guestLiteState.Audio
         }
         systemNvapiProjection = [ordered]@{
             state = 'validated'

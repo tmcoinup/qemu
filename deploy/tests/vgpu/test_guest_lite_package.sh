@@ -7,6 +7,7 @@ packager="$root/deploy/package-guest-lite.sh"
 wrapper="$root/deploy/scripts/guest-lite.sh"
 guest="$root/deploy/guest/guest-lite/G11-Guest-Lite.ps1"
 clone_manifest="$root/deploy/guest/guest-lite/clone-manifest.json"
+finalizer="$root/deploy/guest/finalize-g11-clone.ps1"
 exe_builder="$root/deploy/guest/guest-lite/exe/build.sh"
 exe_source="$root/deploy/guest/guest-lite/exe/guest_lite_launcher.c"
 exe_manifest="$root/deploy/guest/guest-lite/exe/guest_lite_launcher.manifest"
@@ -83,7 +84,7 @@ done
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.3.0" and
+    .schemaVersion == 1 and .profileVersion == "2.5.2" and
     (.files | length) == 5 and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -127,7 +128,7 @@ exe_wide=$(strings -a -el "$exe")
 for token in 'G11GuestLite.exe /apply' 'G11GuestLite.exe /audit' \
         'G11GuestLite.exe /rollback' \
         'WindowsPowerShell\v1.0\powershell.exe' \
-        'G-11 Windows 10 Guest Lite 2.3.0'; do
+        'G-11 Windows 10 Guest Lite 2.5.2'; do
     rg -Fq "$token" <<<"$exe_wide" \
         || fail "standalone launcher omitted fixed entry point: $token"
 done
@@ -139,7 +140,7 @@ rg -Fq 'Some Windows' "$exe_source" \
     || fail 'standalone launcher omitted the FAT package-media compatibility path'
 rg -Fq 'level="requireAdministrator"' "$exe_manifest" \
     || fail 'standalone launcher omitted its UAC manifest'
-rg -Fq 'assemblyIdentity version="2.3.0.0"' "$exe_manifest" \
+rg -Fq 'assemblyIdentity version="2.5.2.0"' "$exe_manifest" \
     || fail 'standalone launcher manifest version is stale'
 if rg -n 'bundle_id|G11GuestLite-\$|G11GuestLite-\*|sha256sum|SHA256SUMS|ISO-SHA256' \
         "$packager"; then
@@ -152,6 +153,10 @@ done
 
 for required in \
         'IsTamperProtected' \
+        'Tamper Protection state cannot be verified while the Defender engine is active' \
+        'Defender engine is already inactive; continuing without a bypass' \
+        "[string]\$defender.WinDefendState -notin @('Running', 'StartPending')" \
+        '-not [bool]$defender.MsMpEngProcessRunning' \
         'Get-OptionalRegistryValue' \
         'Ensure-RegistryKey' \
         'if (-not (Test-Path -LiteralPath $Path))' \
@@ -174,6 +179,31 @@ for required in \
         'DisableFileSyncNGSC' \
         'ShellFeedsTaskbarViewMode' \
         'LetAppsRunInBackground' \
+        "Name = 'SearchboxTaskbarMode'; Type = 'DWord'; Value = 0; Group = 'Taskbar'" \
+        "Name = 'ToastEnabled'; Type = 'DWord'; Value = 0; Group = 'Notifications'" \
+        "Name = 'NoToastApplicationNotification'; Type = 'DWord'; Value = 1; Group = 'Notifications'" \
+        "Name = 'NoToastApplicationNotificationOnLockScreen'; Type = 'DWord'; Value = 1; Group = 'Notifications'" \
+        "Name = 'DisableNotificationCenter'; Type = 'DWord'; Value = 1; Group = 'Notifications'" \
+        "Name = 'DisableNotifications'; Type = 'DWord'; Value = 1; Group = 'Notifications'" \
+        "Name = 'InputMethodOverride'; Type = 'String'; Value = '0409:00000409'; Group = 'Input'" \
+        "EnglishLanguageTag = 'en-US'" \
+        "EnglishInputTip = '0409:00000409'" \
+        "PinyinLanguageTag = 'zh-CN'" \
+        "PinyinCanonicalLanguageTag = 'zh-Hans-CN'" \
+        '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}' \
+        'Get-UserLanguageListSnapshot' \
+        'Set-PreferredUserLanguageList' \
+        'Restore-UserLanguageListSnapshot' \
+        '$liveLanguages = Get-WinUserLanguageList -ErrorAction Stop' \
+        '$languageIndex -lt $liveLanguages.Count' \
+        '$desired.Add($PinyinLanguageTag)' \
+        'Initialize-AudioEndpointInterop' \
+        'IAudioEndpointVolume' \
+        'Get-AudioEndpointSnapshot' \
+        'Set-DefaultAudioMuted' \
+        'Restore-AudioEndpointSnapshot' \
+        'AudioEndpoint' \
+        'UserLanguageList' \
         'MicrosoftEdgeUpdate' \
         'Office Automatic Updates 2.0' \
         'GoogleUpdater' \
@@ -200,12 +230,19 @@ for required in \
         'Refresh-LocalPolicy' \
         'G11GuestLite-EnforceProfile' \
         'Register-EnforcementTask' \
+        'Get-CurrentMachineGuid' \
+        'MachineGuid' \
+        'LastTaskResult' \
+        'New-ScheduledTaskTrigger -AtLogOn -User ([string]$State.UserSid)' \
+        'services=reviewed-disabled' \
+        'tasks=reviewed-disabled' \
         "'Enforce' { Invoke-Enforce }" \
         "-UserId 'SYSTEM'" \
         'S-1-5-18' \
         'Ensure-CurrentBaseline' \
-        'SchemaVersion = 4' \
+        'SchemaVersion = 5' \
         "'CloneApply' { Invoke-Apply -UnattendedClone }" \
+        'Avoid two duplicate' \
         'Save-AuditReportLines' \
         'cpuSampleSkipped=True' \
         'NoAutoUpdate' \
@@ -220,8 +257,36 @@ for required in \
         'Remove-AppxPackage' \
         'G11GuestLite' \
         'Invoke-Rollback'; do
-    rg -Fq "$required" "$guest" || fail "guest script omitted: $required"
+    rg -Fq -- "$required" "$guest" || fail "guest script omitted: $required"
 done
+
+if grep -Fq '@(Get-WinUserLanguageList' "$guest"; then
+    fail 'guest-lite must explicitly index the Windows PowerShell 5.1 LanguageList collection'
+fi
+if grep -Fq '@(Get-WinUserLanguageList' "$finalizer"; then
+    fail 'clone finalizer must explicitly index the Windows PowerShell 5.1 LanguageList collection'
+fi
+
+if rg -Fq '$desired.Add($pinyin[0])' "$guest" ||
+        rg -Fq '$restored.Add($single[0])' "$guest"; then
+    fail 'language list appends a WinUserLanguage object instead of a tag on PowerShell 5.1'
+fi
+
+enforce_body=$(sed -n '/^function Invoke-Enforce {/,/^function Invoke-Rollback {/p' \
+    "$guest")
+for required_call in Disable-PlannedServices Disable-PlannedTasks \
+        Stop-PlannedProcesses Set-DefaultAudioMuted Set-PerformancePowerPlan; do
+    rg -Fq "$required_call" <<<"$enforce_body" \
+        || fail "SYSTEM enforcement omitted self-healing call: $required_call"
+done
+enforcement_reader=$(sed -n \
+    '/^function Read-EnforcementState {/,/^function Get-DefenderPreferenceSnapshots {/p' \
+    "$guest")
+if rg -Fq '$state.ComputerName' <<<"$enforcement_reader"; then
+    fail 'SYSTEM enforcement is still coupled to the mutable computer name'
+fi
+rg -Fq 'Test-StateMachineGuid $state' <<<"$enforcement_reader" \
+    || fail 'SYSTEM enforcement does not bind rollback state to MachineGuid'
 
 if rg -n -F 'New-Item -Path $Entry.Path -Force' "$guest"; then
     fail 'guest-lite can recreate an existing registry leaf and erase sibling values'
@@ -285,6 +350,9 @@ if rg -n -i \
 fi
 if rg -n -F "Name = 'BFE'" "$guest"; then
     fail 'guest-lite attempts to disable the Base Filtering Engine'
+fi
+if rg -n -F "Name = 'Audiosrv'" "$guest"; then
+    fail 'guest-lite attempts to disable the Windows Audio service'
 fi
 if rg -n -i \
         'password|passwd|credential|private[_ -]?key|BEGIN (RSA |OPENSSH )?PRIVATE KEY' \

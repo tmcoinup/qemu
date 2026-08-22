@@ -59,10 +59,13 @@ A/B 时才显式传 `--svc-cpus N`；本优化流程不添加该参数。
   进程；
 - 将 `StartupDelayInMSec` 设为 0，让 Explorer 立即放行普通启动项；
 - 选择 Windows 内置“高性能”电源计划（存在时），关闭 VM 内前台任务节流；
+- 将该计划的显示器空闲超时和系统自动睡眠（AC/DC）设为“从不”，避免 guest
+  无操作后自己黑屏；用户主动睡眠/关机仍然可用；
 - 关闭透明效果、任务栏动画和重复的 guest Game DVR；G-11 的 host DGame/QEMU
   画面不受影响。
 
-脚本会先保存注册表原值、电源计划、服务状态和每个任务的启用状态。状态与报告在：
+脚本会先保存注册表原值、电源计划、该计划的 AC/DC 超时原值、服务状态和每个任务的
+启用状态。状态与报告在：
 
 ```text
 C:\ProgramData\G11GuestPerformance\state.json

@@ -141,10 +141,11 @@ EOF
 cat >"$TMP_DIR/qemu-system-x86_64" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$FAKE_QEMU_TRACE"
-printf 'XMODIFIERS=%s SDL_IM_MODULE=%s IBUS_ADDRESS=%s NATIVE_EGL=%s SDL_DRIVER=%s WMCLASS=%s args=%s\n' \
+printf 'XMODIFIERS=%s SDL_IM_MODULE=%s IBUS_ADDRESS=%s NATIVE_EGL=%s SDL_DRIVER=%s X11_WMCLASS=%s WAYLAND_WMCLASS=%s WINDOW_MODE=%s CURSOR_MODE=%s args=%s\n' \
     "${XMODIFIERS-}" "${SDL_IM_MODULE-}" "${IBUS_ADDRESS-}" \
     "${QEMU_SDL_NATIVE_EGL-}" "${SDL_VIDEODRIVER-}" \
-    "${SDL_VIDEO_X11_WMCLASS-}" "$*" \
+    "${SDL_VIDEO_X11_WMCLASS-}" "${SDL_VIDEO_WAYLAND_WMCLASS-}" \
+    "${G11_SDL_WINDOW_MODE-}" "${QEMU_SDL_CURSOR_MODE-}" "$*" \
     >>"$FAKE_QEMU_ENV_TRACE"
 if [ "$#" -eq 2 ] && [ "$1" = -display ] && [ "$2" = help ]; then
     printf '%s\n' gtk sdl
@@ -184,6 +185,16 @@ run_start_vm() {
     if [[ -n "${TEST_VGPU_HOST_CONFIG:-}" ]]; then
         optional_env+=("VGPU_HOST_CONFIG=$TEST_VGPU_HOST_CONFIG")
     fi
+    if [[ "${TEST_NATIVE_WAYLAND:-0}" == 1 ]]; then
+        optional_env+=(
+            "XDG_SESSION_TYPE=wayland"
+            "XDG_RUNTIME_DIR=/run/user/1000"
+            "WAYLAND_DISPLAY=wayland-0"
+            "SDL_VIDEODRIVER=wayland"
+            "QEMU_SDL_NATIVE_EGL=0"
+            "G11_SDL_WINDOW_MODE=native-wayland-v1"
+        )
+    fi
     env -i \
         HOME="${HOME:-/tmp}" \
         PATH=/usr/bin:/bin \
@@ -207,13 +218,15 @@ MISSING_RTC_OUT="$TMP_DIR/missing-rtc.out"
 V100_OUT="$TMP_DIR/v100.out"
 NO_TPM_OUT="$TMP_DIR/no-tpm.out"
 NO_PREVIEW_OUT="$TMP_DIR/no-preview.out"
+GUEST_CURSOR_OUT="$TMP_DIR/guest-cursor.out"
+WAYLAND_OUT="$TMP_DIR/native-wayland.out"
 STREAM_OUT="$TMP_DIR/stream.out"
 GT1030_OUT="$TMP_DIR/gt1030.out"
 VLAN_OUT="$TMP_DIR/vlan.out"
 
 run_start_vm "$SDL_OUT"
 require_text "模式=vgpu-sdl" "$SDL_OUT"
-require_text "XMODIFIERS=@im=none SDL_IM_MODULE=none IBUS_ADDRESS=/nonexistent NATIVE_EGL=1 SDL_DRIVER=x11 WMCLASS=win10-${VM_ID} args=-display help" \
+require_text "XMODIFIERS=@im=none SDL_IM_MODULE=none IBUS_ADDRESS=/nonexistent NATIVE_EGL=1 SDL_DRIVER=x11 X11_WMCLASS=win10-${VM_ID} WAYLAND_WMCLASS=win10-${VM_ID} WINDOW_MODE= CURSOR_MODE=host args=-display help" \
     "$TMP_DIR/qemu-env.trace"
 require_text 'ide-cd.bootindex=-1' "$SDL_OUT"
 reject_text 'id=odd0' "$SDL_OUT"
@@ -264,6 +277,25 @@ require_no_legacy_transport "$SDL_OUT"
 require_text 'bridge\,id=net0\,br=br0\,helper=/usr/local/libexec/qemu-g11-bridge-helper' \
     "$SDL_OUT"
 reject_text 'g11t' "$SDL_OUT"
+
+TEST_NATIVE_WAYLAND=1 run_start_vm "$WAYLAND_OUT" --no-dgame-preview-gpu
+require_text "模式=vgpu-sdl" "$WAYLAND_OUT"
+require_text "NATIVE_EGL=0 SDL_DRIVER=wayland X11_WMCLASS=win10-${VM_ID} WAYLAND_WMCLASS=win10-${VM_ID} WINDOW_MODE=native-wayland-v1 CURSOR_MODE=host args=-display help" \
+    "$TMP_DIR/qemu-env.trace"
+require_text "sdl\,gl=on\,title=win10-${VM_ID}\,single-console=on" \
+    "$WAYLAND_OUT"
+require_text "fb-shm\,id=dgame-preview-vm${VM_ID}\,path=${VM_ROOT}/${VM_ID}/run/dgame-fb-shm.sock\,rate=60" \
+    "$WAYLAND_OUT"
+require_text 'DGame transport: GPU-first disabled; SHM fallback retained' \
+    "$WAYLAND_OUT"
+reject_text 'DGame transport: GPU first' "$WAYLAND_OUT"
+
+run_start_vm "$GUEST_CURSOR_OUT" --guest-cursor
+require_text "模式=vgpu-sdl" "$GUEST_CURSOR_OUT"
+require_text "CURSOR_MODE=guest args=-display help" "$TMP_DIR/qemu-env.trace"
+require_text "sdl\,gl=on\,title=win10-${VM_ID}\,single-console=on" \
+    "$GUEST_CURSOR_OUT"
+reject_text 'show-cursor=on' "$GUEST_CURSOR_OUT"
 
 run_start_vm "$NO_PREVIEW_OUT" --no-dgame-preview
 reject_text 'id=dgame-preview-vm' "$NO_PREVIEW_OUT"
@@ -365,7 +397,7 @@ require_text '模式=rescue-sdl' "$RESCUE_OUT"
 require_text 'VGA\,id=rescue-vga\,bus=pcie.0\,addr=0x2' "$RESCUE_OUT"
 require_text 'sdl\,gl=off' "$RESCUE_OUT"
 require_text '标准显卡 -> SDL 本地救援（无 vGPU/VNC/RDP）' "$RESCUE_OUT"
-require_text 'base=localtime\,clock=host\,driftfix=slew' "$RESCUE_OUT"
+require_text 'base=localtime\,clock=vm\,driftfix=slew' "$RESCUE_OUT"
 require_text 'kvm-pit.lost_tick_policy=delay' "$RESCUE_OUT"
 reject_text 'vfio-pci' "$RESCUE_OUT"
 reject_text 'vnc=' "$RESCUE_OUT"
@@ -380,9 +412,9 @@ reject_text 'g11-usb-install-boot.img' "$RESCUE_OUT"
 cp -- "$VM_ROOT/${VM_ID}/vm.conf" "$TMP_DIR/vm.conf.with-rtc"
 sed -i '/^RTC_CONTRACT=/d' "$VM_ROOT/${VM_ID}/vm.conf"
 run_start_vm "$MISSING_RTC_OUT" --rescue-sdl
-require_text 'base=localtime\,clock=host\,driftfix=slew' "$MISSING_RTC_OUT"
+require_text 'base=localtime\,clock=vm\,driftfix=slew' "$MISSING_RTC_OUT"
 require_text 'kvm-pit.lost_tick_policy=delay' "$MISSING_RTC_OUT"
-reject_text 'base=utc\,clock=host' "$MISSING_RTC_OUT"
+reject_text 'base=utc\,clock=vm' "$MISSING_RTC_OUT"
 mv -- "$TMP_DIR/vm.conf.with-rtc" "$VM_ROOT/${VM_ID}/vm.conf"
 
 run_start_vm "$RDP_OUT" --rdp
@@ -496,9 +528,11 @@ unset TEST_VGPU_HOST_CONFIG
 # Every vGPU run probes the root-port link/identity properties.  Native runs
 # also probe their display backend and ramfb support; DGame preview and external
 # streaming share one fb-shm capability probe.  Invalid configurations fail
-# before any probe.  The explicit --no-dgame-preview run omits that one probe.
+# before any probe.  The explicit --no-dgame-preview run omits that one probe;
+# the explicit guest-cursor and native-Wayland SDL runs each exercise the same
+# four normal probes; Wayland disables GPU-first but retains the fb-shm object.
 QEMU_PROBE_COUNT=$(wc -l <"$TMP_DIR/qemu.trace")
-[[ "$QEMU_PROBE_COUNT" -eq 33 ]] \
+[[ "$QEMU_PROBE_COUNT" -eq 41 ]] \
     || fail "fake QEMU saw an unexpected invocation count: $QEMU_PROBE_COUNT"
 
 [[ -z "$(find "$VM_ROOT/control" -mindepth 1 -print -quit)" ]] \

@@ -170,8 +170,9 @@ live EDID 通道也不能移植给 G-11 的 NVIDIA devnode。
 `frl_enabled=0` 只关闭该 UUID 的 frame-rate limiter，不会把 `Unlicensed` 改成
 `Licensed`，也不会授予 license。状态页必须分别显示 license 与 FRL。
 
-VM3 动态画面已经证明不再固定于 3 FPS，但这不等于保证 60 FPS。静止 REGION 桌面
-显示 `SDL Present 0.0 FPS` 是像素去重，不是限帧；RDP 编码帧率也不能用于 FRL 验收。
+VM3 动态画面已经证明不再固定于 3 FPS，但这不等于保证 60 FPS。默认 fixed 模式下
+静止 REGION 桌面常见 `Content 0/s | Present 60/s (fixed)`；RDP 编码帧率也不能
+用于 FRL 验收。
 
 ## 验收
 

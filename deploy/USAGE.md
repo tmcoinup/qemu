@@ -58,7 +58,8 @@ stream/relay 和 `--rdp` 只是同一 vGPU VM 的显示模式。
 ./deploy/scripts/create-vm.sh --list-cpu-profiles
 ./deploy/scripts/create-vm.sh --list-board-profiles
 ./deploy/scripts/create-vm.sh --list-memory-profiles
-./deploy/scripts/create-vm.sh --list-platforms # 查看 264 套审核整机及 new/explicit/legacy 策略
+./deploy/scripts/create-vm.sh --list-platforms # 查看 48 套正常 X79 新建整机
+./deploy/scripts/create-vm.sh --include-fallback --list-platforms # 查看 312 套及 archived/legacy 策略
 ./deploy/scripts/create-vm.sh --list-ssd-profiles
 ./deploy/scripts/create-vm.sh --list-gpu-profiles
 ./deploy/scripts/create-vm.sh --list-monitor-profiles
@@ -100,15 +101,15 @@ G-11 已开放完整的 `--vlan-id VID` 生命周期：root-owned helper 逐 VM 
 均会幂等回收。未携带 VLAN 参数时使用默认原生 LAN，不会继承 `vm.conf` 中的 VID，
 VLAN 失败也不会静默回退。
 
-active 池包含 6 款 CPU、10 块双槽 H81 主板和 25 套双条 DDR3 内存，内存覆盖
-Kingston、Samsung、Micron、SK hynix、Crucial 五品牌。创建器只从审核整机白名单筛选，
-不能任意笛卡尔组合。默认低端池为 24 套 4/6/8 GiB 组合；
-i7-4790 的 8 GiB 组合不参加正常随机，通常只能显式创建；5 款默认 CPU 均未
-得到 `enforce=on supported`、且 i7 自身明确 supported 时，无参数创建会先把
-i7 作为 active 能力兜底。
-完整目录另保留 i5-4590/H97、i5-6500/B150、i3-8100/B360 三套 legacy，正常随机
-不使用；只有连 i7 在内的 6 款 active CPU 都明确不可用时才自动 legacy 兜底。
-另有 10 款精确 `512110190592` 字节 SSD（7 款 SATA 默认、3 款 NVMe 显式选择）、
+正常新建池包含 Core i7-4820K/Core i7-3820 两款家用无核显 4C/8T CPU、ASUS
+P9X79/Gigabyte GA-X79-UP4/ASRock X79 Extreme4 三块三品牌 X79 主板，以及 48 条
+审核整机。内存覆盖 Kingston、Samsung、Elpida、Micron 的 DDR3-1600/1866；只在
+CPU、主板和模组共同上限内组合。4/8 GiB 为两根双通道，12 GiB 为 3×4 GiB
+三通道，16 GiB 为 4×4 GiB 四通道。无参数创建优先 i7-4820K + DDR3-1866。
+完整目录共 10 CPU、16 主板、37 内存、312 整机；旧 H81/6G 等 261 条 archived
+只供已有 VM，另 3 条 legacy compatibility 必须显式授权。
+另有 10 款精确 `512110190592` 字节 SSD（3 款 Gen3 x4 NVMe 自动优先、7 款 SATA
+按平台回退）、
 3 个 1GB + 3 个 2GB GPU 芯片型号、25 条系统用户态原子 profile（2GB 默认层 12 条、
 1GB Maxwell 新建层 4 条、显式层 1 条、Kepler legacy 层 8 条；板卡 metadata
 覆盖 NVIDIA、ASUS、Dell、MSI、Gigabyte、GALAX、Colorful（七彩虹）、ZOTAC、EVGA；
@@ -116,9 +117,7 @@ i7 作为 active 能力兜底。
 1920×1080@60 的显示器（新建 8 品牌/28 款，完整 11 品牌）。active 键盘和可选
 相对鼠标各为 Microsoft、Logitech、Dell 三品牌；默认绝对指针是唯一的 QEMU 通用
 profile。`q35`/ICH9/ICH9-AHCI、`qemu-xhci`、QEMU `nvme` controller、安装/救援
-`std-vga` 和 legacy `ivshmem` 是实现/兼容边界，不进入品牌扩展。4 GiB=2×2 GiB、
-8 GiB=2×4 GiB，均为真双通道；6 GiB=4+2 GiB
-Intel Flex，只是匹配的 4 GiB 区双通道，额外 2 GiB 区单通道。创建和每次启动
+`std-vga` 和 legacy `ivshmem` 是实现/兼容边界，不进入品牌扩展。创建和每次启动
 都会联合检查 CPU/主板、逐槽内存、SSD 链路、1GB/2GB mdev、GPU PCIe 宽度及 TPM，
 详见 [`docs/G11-HARDWARE-POOL.md`](docs/G11-HARDWARE-POOL.md)。
 
@@ -130,7 +129,7 @@ chassis 是整机集成商或资产所有者语义。SSD 使用型号专属严�
 查重。DDR3 启动时
 逐槽容量、Rank、device width、module/DRAM JEP106、serial、part 必须原子一致，
 同时进入 SMBIOS 和 SPD。Micron 目录 SKU 在 18-byte SPD part 字段使用
-对应的 `-1G6`（1600）或 `-1G4`（1333）基础 part。两套 legacy DDR4 仍为
+对应的 `-1G6`（1600）、`-1G4`（1333）或新 X79 `-1G9`（1866）基础 part。两套 legacy DDR4 仍为
 256-byte page 0-only，身份留在 SMBIOS Type 17。GPU 与 USB 输入的序列策略分别为
 `not-exposed` 和 `none`，不会拿 mdev UUID 或虚构 USB `serial=` 充数。显示器只有
 Samsung S24F350/Redmi RMMNT238NF 是已审核的型号专属格式，其余 33 款明确使用
@@ -501,11 +500,13 @@ overlay 依赖或 metadata 无法解析，`--check` 会 fail-closed，必须先�
 4. 默认不挂 ivshmem，不启动 guest 抓屏 relay，不使用 RDP。
 5. 键鼠直接走 QEMU 原生输入；`Ctrl+C`、关窗口或另一终端
    `./deploy/scripts/stop-vm.sh 1` 都会关闭 QEMU 并释放该 VM 的 mdev。
-6. 可见窗口以 `16,666,667 ns` 绝对 deadline 提交（目标 60 FPS），
-   标题实时显示 `SDL Present xx.x FPS`；隐藏或
-   最小化时自动降频。这里显示的是 host Present 频率，不是 guest 独立帧数。
-   静止 REGION 帧会被精确去重，因此桌面不变时显示 `0.0 FPS`；
-   像素变化后自动恢复提交。
+6. 可见窗口以 `16,666,667 ns` 绝对 deadline 提交（目标 60Hz），
+   X11 标题实时显示 `Content xx.x/s | Present xx.x/s (fixed)`；Wayland 在
+   Cairo libdecor 可用时同样实时显示，否则自动保持静态标题，避免 GTK monitor
+   告警刷屏。隐藏或最小化时自动降频。Content 是内容更新率，Present 是 host
+   窗口提交率，都不是 guest 独立帧数。静止 REGION 帧会跳过 full upload，但 fixed
+   模式仍约 60/s 提交缓存纹理；像素变化后在下一次 poll 上传。完整修复与验收见
+   [`docs/G11-SDL-WAYLAND-TITLE.md`](docs/G11-SDL-WAYLAND-TITLE.md)。
 
 所有会挂载 vGPU 的模式都先在 `pcie.0` 的 `00:10.0` 创建专用 PCIe root
 port，再把 VFIO endpoint 放到其下游（通常由固件枚举为 `01:00.0`）。端点不再
@@ -523,10 +524,14 @@ Wayland 下它由 GDK/合成器调度；是否更流畅应结合授权前后的 
 `AudioSvcHost`。guest 仍必须安装与 host/profile 匹配的 NVIDIA GRID vGPU
 驱动并完成授权；它们是 vGPU 工作所必需，并非抓屏/远程桌面组件。
 
-宿主 NVIDIA 535 REGION 不提供 guest 硬件光标的 shape/visible 元数据，
-所以桌面默认显示 Windows 箭头 fallback。若游戏自己把光标画入
-framebuffer，用 `Ctrl-Alt-C` 切换到 `Cursor: framebuffer (host hidden)` 模式，
-宿主固定箭头会被隐藏；再按一次恢复。该模式不会修改 guest。
+宿主 NVIDIA 535 REGION 不提供 Guest 硬件光标的 shape/visible 元数据，所以 SDL
+平时显示 Windows 箭头 fallback。G-11 启动器默认 `host`，保留宿主即时光标并以
+跟手为优先；标题栏拖动时允许看到 framebuffer 延迟箭头形成的重影。显式
+`--auto-cursor` 才会在左键按住、最近 Guest 坐标附近严格匹配到配置的 32×32
+Windows 箭头已进入 primary framebuffer 时临时隐藏 Host fallback；失配、松键、
+失焦或 surface 切换立即恢复。`--guest-cursor` 只接受权威 Guest sprite。
+实现完全位于 Host，不向 Guest 安装进程、hook、启动项、设备或驱动。完整原理与
+傻瓜验收见 [`docs/G11-SDL-MOUSE.md`](docs/G11-SDL-MOUSE.md)。
 
 当前 host NVIDIA 535 驱动只提供 VFIO display REGION，不提供 DMA-BUF，
 因此这里不是零拷贝显示：QEMU 读取 REGION 后交给 SDL/GTK。它省掉的是 guest
@@ -573,24 +578,20 @@ QEMU/SDL Present，不能把 manager 的 copy 周期动态降回 10 Hz。请勿�
   --gpu-profile gtx1050_2gb
 ```
 
-完整目录可查询 8 款 CPU、13 块主板和 27 套内存；其中 active 是 6 款 CPU、10 块
-双槽 H81 和 25 套五品牌双条 DDR3。它们只能筛选 264 套审核整机白名单，不会做
-任意笛卡尔组合。i3-4130 在每块 active H81 上都有 Kingston、Samsung、Micron、
-SK hynix 的 1333/1600 及 4G/6G/8G 闭合矩阵。默认随机池仍为 24 套
-4/6/8 GiB 低端组合；i7-4790 通常必须显式
-指定，只在 5 款默认 CPU 均未 supported、且自身明确 supported 时作为 active
-能力兜底。另 3 套整机为 legacy，且只有 6 款 active 都得到明确非 supported
-结果才会自动选用。旧 i5-4590/H97 也属于
-legacy，不要与新的
-`i5-4590-h81m-*` 混淆。组件 key、合法组合及
+完整目录可查询 10 款 CPU、16 块主板和 37 套内存，组合总数 312；正常新建层只
+投影两款 4C/8T Core i7、三块 X79 和 48 条审核组合，不会做任意笛卡尔组合。
+默认按性能级别优先 DDR3-1866 的 i7-4820K。旧 H81、4+2 GiB Flex 与 6G 组合均为
+archived-existing-only；3 条 legacy compatibility 也不会自动混入正常新建。
+组件 key、合法组合及
 `--cpu-profile`/`--board-profile`/`--memory-profile` 完整示例见
 [`docs/G11-HARDWARE-POOL.md`](docs/G11-HARDWARE-POOL.md)。
 
-存储选择还会比较主板与 SSD 的接口、PCIe 代际和通道。新 Haswell 白名单从
+存储选择还会比较主板、CPU 与 SSD 的接口、PCIe 代际和通道。X79 新建池从
 Samsung 840/850/860 PRO、Crucial MX100、Kingston KC400、Intel 545s、
-Western Digital PC SA530 七款 SATA 盘中选择；Samsung 970 PRO、WD Black 与
-Samsung 960 PRO 三款 NVMe 保留给链路匹配的兼容平台，且都只在显式选择时使用。
-完整目录十款、默认池只含七款 SATA，且每款均精确为
+Western Digital PC SA530 七款 SATA 盘，以及 Samsung 970 PRO、WD Black、
+Samsung 960 PRO 三款 Gen3 x4 NVMe 中选择。自动顺序先尝试 NVMe；仅
+i7-4820K + 审核被动转接路径满足 Gen3 合同，i7-3820 自动回退 SATA。
+完整目录十款，且每款均精确为
 `512110190592` 字节；其他容量不能进入新建
 目录。新配置也会持久化并传递逻辑/物理扇区：MX100 为
 `512/4096`，当前其余型号为 `512/512`。显式 `--ssd-profile` 仍可在兼容层内
@@ -613,7 +614,7 @@ virtual-size 必须与 `SSD_SIZE_BYTES` 完全一致；
 其压力、倾角或复合接口协议。
 
 > 边界：上述主板是 SMBIOS/SPD/设备身份 profile；当前 QEMU machine/板载 SATA
-> 仍是 `q35`/ICH9/ICH9-AHCI，并非完整仿真 H81/H97/B150/B360 PCH。USB 控制器
+> 仍是 `q35`/ICH9/ICH9-AHCI，并非完整仿真 X79/H81/H97/B150/B360 PCH。USB 控制器
 > 仍是 `qemu-xhci`；NVMe 即使带审核过的型号、序列和 PCI metadata，控制器行为仍由
 > QEMU `nvme` 实现。安装/救援 `std-vga` 是临时显示，legacy `ivshmem` 只是旧 relay
 > 传输通道。以上均不能按可替换消费品牌理解。
@@ -868,7 +869,7 @@ base 或公开分发。
 详见 [`docs/VGPU-LICENSING.md`](docs/VGPU-LICENSING.md)。
 
 RTC 由宿主统一提供：QEMU 进程使用 `TZ=Asia/Shanghai` 和
-`-rtc base=localtime,clock=host,driftfix=slew`。新装不写
+`-rtc base=localtime,clock=vm,driftfix=slew`。新装不写
 `RealTimeIsUniversal`。只有统一前 GTX750Ti/GT1030 的旧 UTC legacy B VM/base 在
 完整关机后才运行兼容 finish，由宿主备份 SYSTEM、离线删除旧 DWORD 并写入
 `RTC_CONTRACT=localtime`。当前新 VM 不运行；休眠时先走

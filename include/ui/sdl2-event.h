@@ -1,10 +1,17 @@
 #ifndef UI_SDL2_EVENT_H
 #define UI_SDL2_EVENT_H
 
+#include <stdint.h>
 #include <SDL.h>
 
-/* 合并队首连续且同来源的鼠标移动，不跨越其他事件。 */
-void sdl2_coalesce_mouse_motion(SDL_Event *event);
+/*
+ * 合并队首连续且同来源的鼠标移动，不跨越其他事件。
+ * max_events/deadline_us 把内部 SDL_PollEvent 也纳入主循环预算；
+ * 返回额外消费的事件数（不含调用者已经取出的 event）。
+ */
+unsigned int sdl2_coalesce_mouse_motion(SDL_Event *event,
+                                        unsigned int max_events,
+                                        int64_t deadline_us);
 
 /*
  * SDL2 桌面端默认打开 TEXTINPUT；宿主 IME 因而可以吃掉

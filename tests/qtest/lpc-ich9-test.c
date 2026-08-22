@@ -22,6 +22,7 @@ static const G11LPCIdentityTest g11_lpc_identity_tests[] = {
     { "H97",  0x8cc6, 0x00 },
     { "B150", 0xa148, 0x31 },
     { "B360", 0xa308, 0x10 },
+    { "X79",  0x1d41, 0x06 },
 };
 
 static void test_g11_lpc_identity(gconstpointer opaque)

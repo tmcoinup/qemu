@@ -19,6 +19,7 @@ unit_names=(
     test-fb-shm-stream-ffmpeg
 )
 qtest_names=(
+    usb-hid-numlock-test
     usb-hid-keyboard-queue-test
 )
 

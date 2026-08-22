@@ -11,7 +11,8 @@
 # key|qemu-model|brand-string|tsc-hz|part|base-MHz|max-MHz|SMBIOS-family|
 # socket-upgrade|processor-characteristics|cores|threads-per-core|L1-total-KiB|
 # L2-total-KiB|L3-KiB|L2-assoc-enum|L3-assoc-enum|generation|socket|
-# memory-family|max-memory-MT/s|GPU-root-port-device|GPU-root-port-revision
+# memory-family|max-memory-MT/s|GPU-root-port-device|GPU-root-port-revision|
+# CPU-PCIe-generation
 #
 # Intel specifications (official):
 #   https://www.intel.com/content/www/us/en/products/sku/77773/intel-pentium-processor-g3220-3m-cache-3-00-ghz/specifications.html
@@ -20,20 +21,29 @@
 #   https://www.intel.com/content/www/us/en/products/sku/75043/intel-core-i54570-processor-6m-cache-up-to-3-60-ghz/specifications.html
 #   https://www.intel.com/content/www/us/en/products/sku/80815/intel-core-i54590-processor-6m-cache-up-to-3-70-ghz/specifications.html
 #   https://www.intel.com/content/www/us/en/products/sku/80806/intel-core-i74790-processor-8m-cache-up-to-4-00-ghz/specifications.html
+#   https://www.intel.com/content/www/us/en/products/sku/63698/intel-core-i73820-processor-10m-cache-up-to-3-80-ghz/specifications.html
+#   https://www.intel.com/content/www/us/en/products/sku/77781/intel-core-i74820k-processor-10m-cache-up-to-3-90-ghz/specifications.html
+#
+# The strict consumer-desktop intersection requested for this expansion is
+# 4C/8T + no integrated graphics + LGA2011 quad-channel memory.  It contains
+# exactly i7-3820 and i7-4820K; a third row would require admitting a Xeon,
+# a 6C/12T part, an iGPU part, or a dual-channel platform.
 CPU_PROFILES=(
-    "g3220|Intel-Pentium-G3220|Intel(R) Pentium(R) CPU G3220 @ 3.00GHz|3000000000|BX80646G3220|3000|3000|11|0x2D|0xEC|2|1|128|512|3072|7|9|4|LGA1150|DDR3|1333|0x0C01|0x06"
-    "i3-4130|Core-i3-4130|Intel(R) Core(TM) i3-4130 CPU @ 3.40GHz|3400000000|BX80646I34130|3400|3400|206|0x2D|0xFC|2|2|128|512|3072|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06"
-    "i5-4460|Core-i5-4460|Intel(R) Core(TM) i5-4460 CPU @ 3.20GHz|3200000000|BX80646I54460|3200|3400|205|0x2D|0xEC|4|1|256|1024|6144|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06"
-    "i5-4570|Core-i5-4570|Intel(R) Core(TM) i5-4570 CPU @ 3.20GHz|3200000000|SR14E|3200|3600|205|0x2D|0xEC|4|1|256|1024|6144|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06"
-    "i5-4590|Core-i5-4590|Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz|3300000000|SR1QJ|3300|3700|205|0x2D|0xEC|4|1|256|1024|6144|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06"
-    "i7-4790|Core-i7-4790|Intel(R) Core(TM) i7-4790 CPU @ 3.60GHz|3600000000|BX80646I74790|3600|4000|198|0x2D|0xFC|4|2|256|1024|8192|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06"
-    "i5-6500|Core-i5-6500|Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz|3200000000|SR2L6|3200|3600|205|0x32|0xEC|4|1|256|1024|6144|5|9|6|LGA1151|DDR4|2133|0x1901|0x07"
-    "i3-8100|Core-i3-8100|Intel(R) Core(TM) i3-8100 CPU @ 3.60GHz|3600000000|SR3N5|3600|3600|206|0x32|0xEC|4|1|256|1024|6144|5|9|8|LGA1151-300|DDR4|2400|0x1901|0x07"
+    "g3220|Intel-Pentium-G3220|Intel(R) Pentium(R) CPU G3220 @ 3.00GHz|3000000000|BX80646G3220|3000|3000|11|0x2D|0xEC|2|1|128|512|3072|7|9|4|LGA1150|DDR3|1333|0x0C01|0x06|3"
+    "i3-4130|Core-i3-4130|Intel(R) Core(TM) i3-4130 CPU @ 3.40GHz|3400000000|BX80646I34130|3400|3400|206|0x2D|0xFC|2|2|128|512|3072|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06|3"
+    "i5-4460|Core-i5-4460|Intel(R) Core(TM) i5-4460 CPU @ 3.20GHz|3200000000|BX80646I54460|3200|3400|205|0x2D|0xEC|4|1|256|1024|6144|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06|3"
+    "i5-4570|Core-i5-4570|Intel(R) Core(TM) i5-4570 CPU @ 3.20GHz|3200000000|SR14E|3200|3600|205|0x2D|0xEC|4|1|256|1024|6144|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06|3"
+    "i5-4590|Core-i5-4590|Intel(R) Core(TM) i5-4590 CPU @ 3.30GHz|3300000000|SR1QJ|3300|3700|205|0x2D|0xEC|4|1|256|1024|6144|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06|3"
+    "i7-4790|Core-i7-4790|Intel(R) Core(TM) i7-4790 CPU @ 3.60GHz|3600000000|BX80646I74790|3600|4000|198|0x2D|0xFC|4|2|256|1024|8192|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06|3"
+    "i5-6500|Core-i5-6500|Intel(R) Core(TM) i5-6500 CPU @ 3.20GHz|3200000000|SR2L6|3200|3600|205|0x32|0xEC|4|1|256|1024|6144|5|9|6|LGA1151|DDR4|2133|0x1901|0x07|3"
+    "i3-8100|Core-i3-8100|Intel(R) Core(TM) i3-8100 CPU @ 3.60GHz|3600000000|SR3N5|3600|3600|206|0x32|0xEC|4|1|256|1024|6144|5|9|8|LGA1151-300|DDR4|2400|0x1901|0x07|3"
+    "i7-3820|Core-i7-3820|Intel(R) Core(TM) i7-3820 CPU @ 3.60GHz|3600000000|BX80619I73820|3600|3800|198|0x26|0xFC|4|2|256|1024|10240|7|14|2|LGA2011|DDR3|1600|0x3C02|0x07|2"
+    "i7-4820k|Core-i7-4820K|Intel(R) Core(TM) i7-4820K CPU @ 3.70GHz|3700000000|BX80633I74820K|3700|3900|198|0x26|0xFC|4|2|256|1024|10240|7|14|3|LGA2011|DDR3|1866|0x0E02|0x04|3"
 )
 
 # Board fields:
 # key|brand|model|revision|chipset|BIOS|BIOS-date|TPM|DIMM-slots|max-GiB|
-# native-M.2-gen|native-M.2-lanes|xHCI-device|xHCI-revision|main-slot|
+# native-M.2-gen|native-M.2-lanes|xHCI-vendor|xHCI-device|xHCI-revision|main-slot|
 # auxiliary-slot|aux-type|aux-width|aux-length|socket|memory-family|max-MT/s|
 # release-year|serial-policy
 #
@@ -61,22 +71,33 @@ CPU_PROFILES=(
 #   https://www.gigabyte.com/Motherboard/GA-H97-D3H-rev-10/support
 #   https://www.gigabyte.com/Motherboard/GA-B150M-D3H-rev-10/support
 #   https://www.asus.com/supportonly/prime%20b360m-a/helpdesk_bios/
+#   https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf
+#   https://www.asus.com/us/supportonly/p9x79/helpdesk_bios/
+#   https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp
+#   https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support
+#   https://www.asrock.com/mb/Intel/X79%20Extreme4/
+#   https://download.asrock.com/Manual/X79%20Extreme4.pdf
 BOARD_PROFILES=(
-    "asus-h81m-k|ASUSTeK COMPUTER INC.|H81M-K|Rev X.0x|H81|3802|01/23/2024|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
-    "asus-h81m-c|ASUSTeK COMPUTER INC.|H81M-C|Rev X.0x|H81|3602|04/14/2018|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
-    "gigabyte-h81m-s1|Gigabyte|GA-H81M-S1|2.1|H81|FH|08/13/2015|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2015|gigabyte"
-    "msi-h81m-p33|MSI|H81M-P33 (MS-7817)|1.0|H81|1.A|07/17/2018|none|2|16|0|0|0x8C31|0x05|PCI_E2|PCI_E1|171|8|3|LGA1150|DDR3|1600|2013|msi"
-    "gigabyte-h97-d3h|Gigabyte|GA-H97-D3H|1.0|H97|F7|09/19/2015|1.2|4|32|2|2|0x8CB1|0x01|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2014|gigabyte"
-    "gigabyte-b150m-d3h|Gigabyte|GA-B150M-D3H|1.0|B150|F21|12/12/2016|2.0|4|64|3|4|0xA12F|0x01|PCIEX16|PCIEX4|177|10|4|LGA1151|DDR4|2133|2015|gigabyte"
-    "asus-prime-b360m-a|ASUS|PRIME B360M-A|1.xx|B360|3202|07/24/2021|2.0|4|64|3|4|0xA36D|0x01|PCIEX16|PCIEX1_1|177|8|3|LGA1151-300|DDR4|2666|2018|asus"
-    # Append-only manual tier: existing keys and the four-board default pool
-    # above retain their order and random weight.
-    "asus-h81m-plus|ASUSTeK COMPUTER INC.|H81M-PLUS|Rev X.0x|H81|2205|06/18/2015|none|2|16|0|0|0x8C31|0x05|PCIEX16_1|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
-    "asus-h81m-a|ASUSTeK COMPUTER INC.|H81M-A|Rev X.0x|H81|2203|06/18/2015|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
-    "gigabyte-h81m-ds2|Gigabyte|GA-H81M-DS2|3.0|H81|F3|08/21/2020|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1|171|8|3|LGA1150|DDR3|1600|2014|gigabyte"
-    "msi-h81m-e33|MSI|H81M-E33 (MS-7817)|1.0|H81|6.7|11/27/2015|none|2|16|0|0|0x8C31|0x05|PCI_E2|PCI_E1|171|8|3|LGA1150|DDR3|1600|2013|msi"
-    "asrock-h81m-hds|ASRock|H81M-HDS|1.0|H81|2.20|03/09/2016|none|2|16|0|0|0x8C31|0x05|PCIE1|PCIE2|171|8|3|LGA1150|DDR3|1600|2013|asrock"
-    "ecs-h81h3-m4|ECS|H81H3-M4|1.0A|H81|5.04.10|04/10/2015|none|2|16|0|0|0x8C31|0x05|PCIEX16|PCIEX1|171|8|3|LGA1150|DDR3|1600|2013|ecs"
+    "asus-h81m-k|ASUSTeK COMPUTER INC.|H81M-K|Rev X.0x|H81|3802|01/23/2024|none|2|16|0|0|0x8086|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
+    "asus-h81m-c|ASUSTeK COMPUTER INC.|H81M-C|Rev X.0x|H81|3602|04/14/2018|none|2|16|0|0|0x8086|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
+    "gigabyte-h81m-s1|Gigabyte|GA-H81M-S1|2.1|H81|FH|08/13/2015|none|2|16|0|0|0x8086|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2015|gigabyte"
+    "msi-h81m-p33|MSI|H81M-P33 (MS-7817)|1.0|H81|1.A|07/17/2018|none|2|16|0|0|0x8086|0x8C31|0x05|PCI_E2|PCI_E1|171|8|3|LGA1150|DDR3|1600|2013|msi"
+    "gigabyte-h97-d3h|Gigabyte|GA-H97-D3H|1.0|H97|F7|09/19/2015|1.2|4|32|2|2|0x8086|0x8CB1|0x01|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2014|gigabyte"
+    "gigabyte-b150m-d3h|Gigabyte|GA-B150M-D3H|1.0|B150|F21|12/12/2016|2.0|4|64|3|4|0x8086|0xA12F|0x01|PCIEX16|PCIEX4|177|10|4|LGA1151|DDR4|2133|2015|gigabyte"
+    "asus-prime-b360m-a|ASUS|PRIME B360M-A|1.xx|B360|3202|07/24/2021|2.0|4|64|3|4|0x8086|0xA36D|0x01|PCIEX16|PCIEX1_1|177|8|3|LGA1151-300|DDR4|2666|2018|asus"
+    # Append-only historical tier: existing keys retain their stable order;
+    # the normalization pass below archives every non-X79 creation row.
+    "asus-h81m-plus|ASUSTeK COMPUTER INC.|H81M-PLUS|Rev X.0x|H81|2205|06/18/2015|none|2|16|0|0|0x8086|0x8C31|0x05|PCIEX16_1|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
+    "asus-h81m-a|ASUSTeK COMPUTER INC.|H81M-A|Rev X.0x|H81|2203|06/18/2015|none|2|16|0|0|0x8086|0x8C31|0x05|PCIEX16|PCIEX1_1|171|8|3|LGA1150|DDR3|1600|2013|asus"
+    "gigabyte-h81m-ds2|Gigabyte|GA-H81M-DS2|3.0|H81|F3|08/21/2020|none|2|16|0|0|0x8086|0x8C31|0x05|PCIEX16|PCIEX1|171|8|3|LGA1150|DDR3|1600|2014|gigabyte"
+    "msi-h81m-e33|MSI|H81M-E33 (MS-7817)|1.0|H81|6.7|11/27/2015|none|2|16|0|0|0x8086|0x8C31|0x05|PCI_E2|PCI_E1|171|8|3|LGA1150|DDR3|1600|2013|msi"
+    "asrock-h81m-hds|ASRock|H81M-HDS|1.0|H81|2.20|03/09/2016|none|2|16|0|0|0x8086|0x8C31|0x05|PCIE1|PCIE2|171|8|3|LGA1150|DDR3|1600|2013|asrock"
+    "ecs-h81h3-m4|ECS|H81H3-M4|1.0A|H81|5.04.10|04/10/2015|none|2|16|0|0|0x8086|0x8C31|0x05|PCIEX16|PCIEX1|171|8|3|LGA1150|DDR3|1600|2013|ecs"
+    # Consumer X79 boards.  None has native M.2; Gen3 NVMe is supplied only by
+    # the separately audited passive-adapter path below and only with i7-4820K.
+    "asus-p9x79|ASUSTeK COMPUTER INC.|P9X79|Rev 1.xx|X79|4701|06/23/2014|1.2|8|64|0|0|0x1B21|0x1042|0x00|PCIEX16_1|PCIEX1_1|171|8|3|LGA2011|DDR3|1866|2011|asus"
+    "gigabyte-x79-up4|Gigabyte|GA-X79-UP4|1.0|X79|F7|03/20/2014|1.2|8|64|0|0|0x1B73|0x1009|0x02|PCIEX16_1|PCIEX1_1|171|8|3|LGA2011|DDR3|1866|2012|gigabyte"
+    "asrock-x79-extreme4|ASRock|X79 Extreme4|1.0|X79|P3.20|07/22/2013|none|4|32|0|0|0x1B21|0x1042|0x00|PCIE1|PCIE2|171|8|3|LGA2011|DDR3|1600|2011|asrock"
 )
 
 # Guest-visible LPC identity for every chipset used by BOARD_PROFILES.
@@ -93,6 +114,7 @@ CHIPSET_PRESENTATION_PROFILES=(
     "H97|H97|0x8086|0x8CC6|0x00"
     "B150|B150|0x8086|0xA148|0x31"
     "B360|B360|0x8086|0xA308|0x10"
+    "X79|X79|0x8086|0x1D41|0x06"
 )
 
 # Memory fields:
@@ -109,6 +131,8 @@ CHIPSET_PRESENTATION_PROFILES=(
 #   https://www.micron.com/products/obsolete/obsolete-udimm/part-catalog
 #   https://product.skhynix.com/products/dram/module/module_info.jsp
 #   https://www.crucial.com/memory/ddr3/ct51264bd160b
+#   https://www.intel.com/content/dam/doc/platform-memory/ddr3-1600-udimm-n-ecc-sandy-bridge.pdf
+#   https://www.intel.com/content/dam/www/public/us/en/documents/platform-memory/ddr3-1866-udimm-n-ecc-ivybridge-e-validation-results.pdf
 # JEP106 byte pairs follow the audited V-11 memory catalog.  0000 means that
 # the module assembler does not promise one fixed DRAM die vendor.
 MEMORY_PROFILES=(
@@ -138,6 +162,20 @@ MEMORY_PROFILES=(
     "hynix-hmt325u6cfr8c-1333-2x2|SK hynix|HMT325U6CFR8C-H9,HMT325U6CFR8C-H9|1333|DDR3|0x18|64|2048,2048|2|DIMM|1,1|8,8|1500|dual-channel|80AD,80AD|80AD,80AD"
     "hynix-hmt3x5-1333-flex-4plus2|SK hynix|HMT351U6CFR8C-H9,HMT325U6CFR8C-H9|1333|DDR3|0x18|64|4096,2048|2|DIMM|2,1|8,8|1500|flex|80AD,80AD|80AD,80AD"
     "hynix-hmt351u6cfr8c-1333-2x4|SK hynix|HMT351U6CFR8C-H9,HMT351U6CFR8C-H9|1333|DDR3|0x18|64|4096,4096|2|DIMM|2,2|8,8|1500|dual-channel|80AD,80AD|80AD,80AD"
+    # Four consumer/non-ECC UDIMM models for the LGA2011 expansion.  Three
+    # populated 4 GiB modules are honestly exposed as triple-channel/12 GiB;
+    # four matching modules are quad-channel/16 GiB.  The 1866 parts are from
+    # Intel's Ivy Bridge-E non-ECC validation list, not relabeled 1600 bins.
+    "kvr16n11s8-3x4|Kingston|KVR16N11S8/4,KVR16N11S8/4,KVR16N11S8/4|1600|DDR3|0x18|64|4096,4096,4096|3|DIMM|1,1,1|8,8,8|1500|triple-channel|0198,0198,0198|0000,0000,0000"
+    "kvr16n11s8-4x4|Kingston|KVR16N11S8/4,KVR16N11S8/4,KVR16N11S8/4,KVR16N11S8/4|1600|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|1,1,1,1|8,8,8,8|1500|quad-channel|0198,0198,0198,0198|0000,0000,0000,0000"
+    "samsung-m378b5273dh0-3x4|Samsung|M378B5273DH0-CK0,M378B5273DH0-CK0,M378B5273DH0-CK0|1600|DDR3|0x18|64|4096,4096,4096|3|DIMM|2,2,2|8,8,8|1500|triple-channel|80CE,80CE,80CE|80CE,80CE,80CE"
+    "samsung-m378b5273dh0-4x4|Samsung|M378B5273DH0-CK0,M378B5273DH0-CK0,M378B5273DH0-CK0,M378B5273DH0-CK0|1600|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|2,2,2,2|8,8,8,8|1500|quad-channel|80CE,80CE,80CE,80CE|80CE,80CE,80CE,80CE"
+    "elpida-ebj40ug8bfw0-2x4|Elpida|EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F|1866|DDR3|0x18|64|4096,4096|2|DIMM|1,1|8,8|1500|dual-channel|02FE,02FE|02FE,02FE"
+    "elpida-ebj40ug8bfw0-3x4|Elpida|EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F|1866|DDR3|0x18|64|4096,4096,4096|3|DIMM|1,1,1|8,8,8|1500|triple-channel|02FE,02FE,02FE|02FE,02FE,02FE"
+    "elpida-ebj40ug8bfw0-4x4|Elpida|EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F|1866|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|1,1,1,1|8,8,8,8|1500|quad-channel|02FE,02FE,02FE,02FE|02FE,02FE,02FE,02FE"
+    "micron-mt8ktf51264az-2x4|Micron|MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9|1866|DDR3|0x18|64|4096,4096|2|DIMM|1,1|8,8|1500|dual-channel|802C,802C|802C,802C"
+    "micron-mt8ktf51264az-3x4|Micron|MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9|1866|DDR3|0x18|64|4096,4096,4096|3|DIMM|1,1,1|8,8,8|1500|triple-channel|802C,802C,802C|802C,802C,802C"
+    "micron-mt8ktf51264az-4x4|Micron|MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9|1866|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|1,1,1,1|8,8,8,8|1500|quad-channel|802C,802C,802C,802C|802C,802C,802C,802C"
     "kvr21n15s8-2x4|Kingston|KVR21N15S8/4,KVR21N15S8/4|2133|DDR4|0x1A|64|4096,4096|2|DIMM|1,1|8,8|1200|dual-channel|0198,0198|0000,0000"
     "kvr24n17s8-2x4|Kingston|KVR24N17S8/4,KVR24N17S8/4|2400|DDR4|0x1A|64|4096,4096|2|DIMM|1,1|8,8|1200|dual-channel|0198,0198|0000,0000"
     # Crucial is Micron's module brand; 802C is retained for both the module
@@ -146,10 +184,10 @@ MEMORY_PROFILES=(
 )
 
 # platform|CPU-key|board-key|memory-key|lifecycle
-# lifecycle=new participates in the normal low-end random pool; explicit-new
-# is a reviewed manual tier that expands boards or combinations without
-# changing default random weights; legacy-compatibility is existing-VM/
-# last-resort fallback only.
+# lifecycle=new participates in the normal performance-first pool; explicit-new
+# is a reviewed manual tier; archived is existing-VM-only; legacy-compatibility
+# is existing-VM/last-resort fallback only.  Historical literal lifecycle values
+# below are normalized by _hardware_profile_archive_retired_combinations.
 HARDWARE_COMBINATIONS=(
     "g3220-h81m-k-4g|g3220|asus-h81m-k|kvr13n9s6-2x2|new"
     "g3220-h81m-c-6g|g3220|asus-h81m-c|kvr13n9-flex-4plus2|new"
@@ -179,8 +217,8 @@ HARDWARE_COMBINATIONS=(
     "i5-4590|i5-4590|gigabyte-h97-d3h|kvr16n11s8-2x4|legacy-compatibility"
     "i5-6500|i5-6500|gigabyte-b150m-d3h|kvr21n15s8-2x4|legacy-compatibility"
     "i3-8100|i3-8100|asus-prime-b360m-a|kvr24n17s8-2x4|legacy-compatibility"
-    # Append-only reviewed combinations.  explicit-new exposes more real
-    # choices without changing the 24-row no-argument random pool.
+    # Append-only historical combinations.  Their stable IDs remain loadable,
+    # but the normalization pass below removes them from all new-VM choices.
     "i3-4130-h81m-plus-crucial-8g|i3-4130|asus-h81m-plus|crucial-ct51264bd160b-2x4|explicit-new"
     "i5-4590-h81m-plus-6g|i5-4590|asus-h81m-plus|kvr16n11-flex-4plus2|explicit-new"
     "i3-4130-h81m-a-4g|i3-4130|asus-h81m-a|kvr16n11s6-2x2|explicit-new"
@@ -217,6 +255,62 @@ HARDWARE_COMBINATIONS=(
     "i3-4130-h81h3-m4-samsung-4g|i3-4130|ecs-h81h3-m4|samsung-m378b5773dh0-2x2|explicit-new"
     "i3-4130-h81h3-m4-samsung-6g|i3-4130|ecs-h81h3-m4|samsung-m378b5-flex-4plus2|explicit-new"
     "i3-4130-h81h3-m4-samsung-8g|i3-4130|ecs-h81h3-m4|samsung-m378b5273dh0-2x4|explicit-new"
+    # LGA2011 consumer expansion.  Higher-frequency i7-4820K + DDR3-1866
+    # combinations come first so no-argument creation can prefer them after
+    # the host realization probe.  X79 Extreme4 is limited to its official
+    # DDR3-1600 ceiling; i7-3820 is likewise limited to DDR3-1600.
+    "i7-4820k-p9x79-elpida-12g|i7-4820k|asus-p9x79|elpida-ebj40ug8bfw0-3x4|new"
+    "i7-4820k-p9x79-elpida-16g|i7-4820k|asus-p9x79|elpida-ebj40ug8bfw0-4x4|new"
+    "i7-4820k-p9x79-micron-12g|i7-4820k|asus-p9x79|micron-mt8ktf51264az-3x4|new"
+    "i7-4820k-p9x79-micron-16g|i7-4820k|asus-p9x79|micron-mt8ktf51264az-4x4|new"
+    "i7-4820k-x79-up4-elpida-12g|i7-4820k|gigabyte-x79-up4|elpida-ebj40ug8bfw0-3x4|new"
+    "i7-4820k-x79-up4-elpida-16g|i7-4820k|gigabyte-x79-up4|elpida-ebj40ug8bfw0-4x4|new"
+    "i7-4820k-x79-up4-micron-12g|i7-4820k|gigabyte-x79-up4|micron-mt8ktf51264az-3x4|new"
+    "i7-4820k-x79-up4-micron-16g|i7-4820k|gigabyte-x79-up4|micron-mt8ktf51264az-4x4|new"
+    "i7-4820k-x79-extreme4-kingston-12g|i7-4820k|asrock-x79-extreme4|kvr16n11s8-3x4|new"
+    "i7-4820k-x79-extreme4-kingston-16g|i7-4820k|asrock-x79-extreme4|kvr16n11s8-4x4|new"
+    "i7-4820k-x79-extreme4-samsung-12g|i7-4820k|asrock-x79-extreme4|samsung-m378b5273dh0-3x4|new"
+    "i7-4820k-x79-extreme4-samsung-16g|i7-4820k|asrock-x79-extreme4|samsung-m378b5273dh0-4x4|new"
+    "i7-3820-p9x79-kingston-12g|i7-3820|asus-p9x79|kvr16n11s8-3x4|new"
+    "i7-3820-p9x79-kingston-16g|i7-3820|asus-p9x79|kvr16n11s8-4x4|new"
+    "i7-3820-p9x79-samsung-12g|i7-3820|asus-p9x79|samsung-m378b5273dh0-3x4|new"
+    "i7-3820-p9x79-samsung-16g|i7-3820|asus-p9x79|samsung-m378b5273dh0-4x4|new"
+    "i7-3820-x79-up4-kingston-12g|i7-3820|gigabyte-x79-up4|kvr16n11s8-3x4|new"
+    "i7-3820-x79-up4-kingston-16g|i7-3820|gigabyte-x79-up4|kvr16n11s8-4x4|new"
+    "i7-3820-x79-up4-samsung-12g|i7-3820|gigabyte-x79-up4|samsung-m378b5273dh0-3x4|new"
+    "i7-3820-x79-up4-samsung-16g|i7-3820|gigabyte-x79-up4|samsung-m378b5273dh0-4x4|new"
+    "i7-3820-x79-extreme4-kingston-12g|i7-3820|asrock-x79-extreme4|kvr16n11s8-3x4|new"
+    "i7-3820-x79-extreme4-kingston-16g|i7-3820|asrock-x79-extreme4|kvr16n11s8-4x4|new"
+    "i7-3820-x79-extreme4-samsung-12g|i7-3820|asrock-x79-extreme4|samsung-m378b5273dh0-3x4|new"
+    "i7-3820-x79-extreme4-samsung-16g|i7-3820|asrock-x79-extreme4|samsung-m378b5273dh0-4x4|new"
+    # The same three quad-capable boards cover the low capacities honestly:
+    # two installed DIMMs use two channels; no empty channel is reported as
+    # active.  i7-4820K receives validated DDR3-1866 8G pairs, while 4G uses
+    # real 2G DDR3-1600 parts because the reviewed 1866 models are 4G modules.
+    "i7-4820k-p9x79-kingston-4g|i7-4820k|asus-p9x79|kvr16n11s6-2x2|new"
+    "i7-4820k-p9x79-samsung-4g|i7-4820k|asus-p9x79|samsung-m378b5773dh0-2x2|new"
+    "i7-4820k-p9x79-elpida-8g|i7-4820k|asus-p9x79|elpida-ebj40ug8bfw0-2x4|new"
+    "i7-4820k-p9x79-micron-8g|i7-4820k|asus-p9x79|micron-mt8ktf51264az-2x4|new"
+    "i7-4820k-x79-up4-kingston-4g|i7-4820k|gigabyte-x79-up4|kvr16n11s6-2x2|new"
+    "i7-4820k-x79-up4-samsung-4g|i7-4820k|gigabyte-x79-up4|samsung-m378b5773dh0-2x2|new"
+    "i7-4820k-x79-up4-elpida-8g|i7-4820k|gigabyte-x79-up4|elpida-ebj40ug8bfw0-2x4|new"
+    "i7-4820k-x79-up4-micron-8g|i7-4820k|gigabyte-x79-up4|micron-mt8ktf51264az-2x4|new"
+    "i7-4820k-x79-extreme4-kingston-4g|i7-4820k|asrock-x79-extreme4|kvr16n11s6-2x2|new"
+    "i7-4820k-x79-extreme4-samsung-4g|i7-4820k|asrock-x79-extreme4|samsung-m378b5773dh0-2x2|new"
+    "i7-4820k-x79-extreme4-kingston-8g|i7-4820k|asrock-x79-extreme4|kvr16n11s8-2x4|new"
+    "i7-4820k-x79-extreme4-samsung-8g|i7-4820k|asrock-x79-extreme4|samsung-m378b5273dh0-2x4|new"
+    "i7-3820-p9x79-kingston-4g|i7-3820|asus-p9x79|kvr16n11s6-2x2|new"
+    "i7-3820-p9x79-kingston-8g|i7-3820|asus-p9x79|kvr16n11s8-2x4|new"
+    "i7-3820-p9x79-samsung-4g|i7-3820|asus-p9x79|samsung-m378b5773dh0-2x2|new"
+    "i7-3820-p9x79-samsung-8g|i7-3820|asus-p9x79|samsung-m378b5273dh0-2x4|new"
+    "i7-3820-x79-up4-kingston-4g|i7-3820|gigabyte-x79-up4|kvr16n11s6-2x2|new"
+    "i7-3820-x79-up4-kingston-8g|i7-3820|gigabyte-x79-up4|kvr16n11s8-2x4|new"
+    "i7-3820-x79-up4-samsung-4g|i7-3820|gigabyte-x79-up4|samsung-m378b5773dh0-2x2|new"
+    "i7-3820-x79-up4-samsung-8g|i7-3820|gigabyte-x79-up4|samsung-m378b5273dh0-2x4|new"
+    "i7-3820-x79-extreme4-kingston-4g|i7-3820|asrock-x79-extreme4|kvr16n11s6-2x2|new"
+    "i7-3820-x79-extreme4-kingston-8g|i7-3820|asrock-x79-extreme4|kvr16n11s8-2x4|new"
+    "i7-3820-x79-extreme4-samsung-4g|i7-3820|asrock-x79-extreme4|samsung-m378b5773dh0-2x2|new"
+    "i7-3820-x79-extreme4-samsung-8g|i7-3820|asrock-x79-extreme4|samsung-m378b5273dh0-2x4|new"
 )
 
 # i3-4130 exposes the same reviewed two-DIMM memory matrix on every active H81
@@ -293,11 +387,47 @@ _hardware_profile_append_i3_4130_memory_matrix() {
 
 _hardware_profile_append_i3_4130_memory_matrix
 
+# Keep every pre-X79 and historical 6 GiB key loadable for immutable existing
+# vm.conf files, but remove it from every creation/component candidate path.
+# This is an archive operation, not a deletion, so existing installations keep
+# booting while every newly created 4/8/12/16G machine uses a quad-capable X79.
+_hardware_profile_archive_retired_combinations() {
+    local index row platform cpu board memory lifecycle memory_row module_list
+    local module total
+    local -a modules=()
+
+    for ((index = 0; index < ${#HARDWARE_COMBINATIONS[@]}; index += 1)); do
+        row=${HARDWARE_COMBINATIONS[index]}
+        IFS='|' read -r platform cpu board memory lifecycle <<<"$row"
+        memory_row=
+        for memory_row in "${MEMORY_PROFILES[@]}"; do
+            [[ "${memory_row%%|*}" == "$memory" ]] && break
+        done
+        [[ -n "$memory_row" && "${memory_row%%|*}" == "$memory" ]] || continue
+        IFS='|' read -r _ _ _ _ _ _ _ module_list _ <<<"$memory_row"
+        IFS=',' read -r -a modules <<<"$module_list"
+        total=0
+        for module in "${modules[@]}"; do
+            total=$((total + module))
+        done
+        [[ "$lifecycle" != legacy-compatibility ]] || continue
+        case "$board" in
+            asus-p9x79|gigabyte-x79-up4|asrock-x79-extreme4)
+                (( total != 6144 )) && continue
+                ;;
+        esac
+        HARDWARE_COMBINATIONS[index]="$platform|$cpu|$board|$memory|archived"
+    done
+}
+
+_hardware_profile_archive_retired_combinations
+
 # Compatibility view consumed by the existing legality/start/test code.  It is
 # generated from the normalized catalogs below; no hardware fact is duplicated.
 HARDWARE_PROFILES=()
 HARDWARE_NEW_PROFILE_KEYS=()
 HARDWARE_EXPLICIT_NEW_PROFILE_KEYS=()
+HARDWARE_ARCHIVED_PROFILE_KEYS=()
 HARDWARE_LEGACY_COMPAT_PROFILE_KEYS=()
 
 # Optional optical-drive identity fields:
@@ -382,14 +512,40 @@ SSD_DEFAULT_PROFILE_KEYS=(
     wd-pc-sa530-512gb
 )
 
-# NVMe identities require a board with a reviewed native M.2 link.  Keeping
-# every NVMe row explicit prevents a management client from choosing one
-# independently of the default H81 platform and handing create-vm an invalid
-# H81+NVMe tuple.
+# This is the historical default/explicit audit partition, not the automatic
+# order.  Automatic X79 selection may use these NVMe identities only through a
+# reviewed passive adapter and compatible Gen3 CPU; older platforms are denied.
 SSD_EXPLICIT_PROFILE_KEYS=(
     wd-black-pcie-512gb
     samsung-970-pro-512gb
     samsung-960-pro-512gb
+)
+
+# Automatic storage candidates are ordered independently from the historical
+# default/explicit audit partition.  Gen3 x4 NVMe is considered first and is
+# selected only when hardware_storage_combination_allowed proves the exact CPU
+# and board path; SATA remains the compatible fallback for all older boards.
+SSD_AUTO_PROFILE_KEYS=(
+    wd-black-pcie-512gb
+    samsung-970-pro-512gb
+    samsung-960-pro-512gb
+    samsung-840-pro-512gb
+    samsung-850-pro-512gb
+    samsung-860-pro-512gb
+    crucial-mx100-512gb
+    kingston-kc400-512gb
+    intel-545s-512gb
+    wd-pc-sa530-512gb
+)
+
+# Passive consumer M.2 NVMe adapters have no active protocol bridge and expose
+# the drive directly on one reviewed X79 CPU lane group.  They do not make a
+# Sandy Bridge-E CPU Gen3-capable: the CPU-side generation remains a hard cap.
+# board-key|slot|PCIe-generation|lanes|form-factor|adapter-kind
+PCIE_NVME_ADAPTER_PROFILES=(
+    "asus-p9x79|PCIEX16_3|3|4|m.2-2280|passive"
+    "gigabyte-x79-up4|PCIEX8_1|3|4|m.2-2280|passive"
+    "asrock-x79-extreme4|PCIE4|3|4|m.2-2280|passive"
 )
 
 # IEEE registrations belonging to Intel Corporate.  e1000e must not borrow an
@@ -460,15 +616,27 @@ hardware_profile_keys() {
 }
 
 hardware_profile_new_keys() {
-    printf '%s\n' "${HARDWARE_NEW_PROFILE_KEYS[@]}"
+    if (( ${#HARDWARE_NEW_PROFILE_KEYS[@]} > 0 )); then
+        printf '%s\n' "${HARDWARE_NEW_PROFILE_KEYS[@]}"
+    fi
 }
 
 hardware_profile_explicit_new_keys() {
-    printf '%s\n' "${HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}"
+    if (( ${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]} > 0 )); then
+        printf '%s\n' "${HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}"
+    fi
 }
 
 hardware_profile_legacy_compat_keys() {
-    printf '%s\n' "${HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}"
+    if (( ${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]} > 0 )); then
+        printf '%s\n' "${HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}"
+    fi
+}
+
+hardware_profile_archived_keys() {
+    if (( ${#HARDWARE_ARCHIVED_PROFILE_KEYS[@]} > 0 )); then
+        printf '%s\n' "${HARDWARE_ARCHIVED_PROFILE_KEYS[@]}"
+    fi
 }
 
 hardware_profile_lifecycle_class() {
@@ -521,7 +689,8 @@ cpu_profile_load() {
         CPU_THREADS_PER_CORE CPU_L1_CACHE_KB CPU_L2_CACHE_KB \
         CPU_L3_CACHE_KB CPU_L2_ASSOC CPU_L3_ASSOC CPU_GENERATION \
         CPU_SOCKET CPU_MEMORY_FAMILY CPU_MAX_MEMORY_SPEED \
-        GPU_ROOT_PORT_DEVICE_ID GPU_ROOT_PORT_REVISION <<<"$matched"
+        GPU_ROOT_PORT_DEVICE_ID GPU_ROOT_PORT_REVISION \
+        CPU_PCIE_GENERATION <<<"$matched"
     CPU_VCPUS=$((CPU_CORES * CPU_THREADS_PER_CORE))
 }
 
@@ -565,7 +734,8 @@ board_profile_load() {
     IFS='|' read -r BOARD_PROFILE BOARD_BRAND BOARD_MODEL BOARD_REVISION \
         BOARD_CHIPSET BIOS_VER BIOS_DATE BOARD_TPM_VERSION MEM_BOARD_SLOTS \
         MEM_MAX_CAPACITY_GB BOARD_NVME_PCIE_GEN BOARD_NVME_PCIE_LANES \
-        BOARD_XHCI_DEVICE_ID BOARD_XHCI_REVISION PCIE_MAIN_SLOT \
+        BOARD_XHCI_VENDOR_ID BOARD_XHCI_DEVICE_ID BOARD_XHCI_REVISION \
+        PCIE_MAIN_SLOT \
         PCIE_AUX_SLOT PCIE_AUX_TYPE PCIE_AUX_WIDTH PCIE_AUX_LENGTH \
         BOARD_CPU_SOCKET BOARD_MEMORY_FAMILY BOARD_MAX_MEMORY_SPEED \
         BOARD_RELEASE_YEAR BOARD_SERIAL_POLICY \
@@ -617,14 +787,17 @@ hardware_memory_size_mb_normalize() {
         4|4g|4gb|4gib|4096|4096m|4096mb|4096mib)
             printf '%s\n' 4096
             ;;
-        6|6g|6gb|6gib|6144|6144m|6144mb|6144mib)
-            printf '%s\n' 6144
-            ;;
         8|8g|8gb|8gib|8192|8192m|8192mb|8192mib)
             printf '%s\n' 8192
             ;;
+        12|12g|12gb|12gib|12288|12288m|12288mb|12288mib)
+            printf '%s\n' 12288
+            ;;
+        16|16g|16gb|16gib|16384|16384m|16384mb|16384mib)
+            printf '%s\n' 16384
+            ;;
         *)
-            printf '内存档位只支持 4G、6G 或 8G，当前: %s\n' \
+            printf '内存档位只支持 4G、8G、12G 或 16G（6G 已归档），当前: %s\n' \
                 "${1:-<empty>}" >&2
             return 2
             ;;
@@ -709,6 +882,7 @@ _hardware_profile_materialize_catalog() {
     HARDWARE_PROFILES=()
     HARDWARE_NEW_PROFILE_KEYS=()
     HARDWARE_EXPLICIT_NEW_PROFILE_KEYS=()
+    HARDWARE_ARCHIVED_PROFILE_KEYS=()
     HARDWARE_LEGACY_COMPAT_PROFILE_KEYS=()
     for row in "${HARDWARE_COMBINATIONS[@]}"; do
         IFS='|' read -r platform _cpu _board _memory lifecycle <<<"$row"
@@ -717,6 +891,7 @@ _hardware_profile_materialize_catalog() {
         case "$lifecycle" in
             new) HARDWARE_NEW_PROFILE_KEYS+=("$platform") ;;
             explicit-new) HARDWARE_EXPLICIT_NEW_PROFILE_KEYS+=("$platform") ;;
+            archived) HARDWARE_ARCHIVED_PROFILE_KEYS+=("$platform") ;;
             legacy-compatibility)
                 HARDWARE_LEGACY_COMPAT_PROFILE_KEYS+=("$platform")
                 ;;
@@ -747,6 +922,30 @@ hardware_profile_matches_components() {
         [[ "$memory_total" == "$memory_total_request" ]] || return 1
     fi
     return 0
+}
+
+# Lower number wins.  The new consumer X79 pool intentionally prefers the
+# no-iGPU 4C/8T i7-4820K, then its DDR3-1866 combinations, before older
+# dual-channel choices.  This is a selection policy only; every returned row
+# still has to pass the KVM enforce=on realization gate.
+hardware_profile_performance_priority() {
+    local requested=${1:-}
+
+    (
+        hardware_profile_load "$requested" || exit
+        case "$CPU_PROFILE:$MEM_SPEED" in
+            i7-4820k:1866) printf '0\n' ;;
+            i7-4820k:*) printf '10\n' ;;
+            i7-3820:*) printf '20\n' ;;
+            i5-4590:*) printf '100\n' ;;
+            i5-4570:*) printf '110\n' ;;
+            i5-4460:*) printf '120\n' ;;
+            i3-4130:*) printf '130\n' ;;
+            g3220:*) printf '140\n' ;;
+            i7-4790:*) printf '150\n' ;;
+            *) printf '900\n' ;;
+        esac
+    )
 }
 
 hardware_profile_component_candidates() {
@@ -875,15 +1074,24 @@ hardware_profile_component_contract_validate() {
 }
 
 hardware_profile_print_catalog() {
-    local include_fallback=${1:-0} row key lifecycle layout parts
+    local include_fallback=${1:-0} filter=${2:-active}
+    local row key lifecycle layout parts
 
     printf 'PROFILE\tCPU/TOPOLOGY\tBOARD\tCHIPSET\tMEMORY\tTPM\tNEW_VM_POLICY\tCOMPONENT_KEYS\n'
     for row in "${HARDWARE_COMBINATIONS[@]}"; do
         IFS='|' read -r key _ <<<"$row"
         lifecycle=$(hardware_profile_lifecycle_class "$key") || lifecycle=invalid
-        if [[ "$lifecycle" == legacy-compatibility && "$include_fallback" != 1 ]]; then
-            continue
-        fi
+        case "$filter" in
+            archived) [[ "$lifecycle" == archived ]] || continue ;;
+            active)
+                if [[ ( "$lifecycle" == legacy-compatibility ||
+                        "$lifecycle" == archived ) &&
+                      "$include_fallback" != 1 ]]; then
+                    continue
+                fi
+                ;;
+            *) echo "未知平台目录过滤器: $filter" >&2; return 2 ;;
+        esac
         hardware_profile_load "$key" || return
         layout=${MEM_MODULE_MB_LIST//,/+}
         parts=${MEM_MODEL_LIST//,/ + }
@@ -900,13 +1108,13 @@ cpu_profile_print_catalog() {
     local include_fallback=${1:-0}
     local row key model _brand tsc _part base max _family _upgrade _chars
     local cores threads _l1 _l2 l3 _l2assoc _l3assoc generation socket
-    local memory max_speed _root _revision lifecycle new_count legacy_count platform
+    local memory max_speed _root _revision _pcie lifecycle new_count legacy_count platform
 
     printf 'CPU_PROFILE\tQEMU_MODEL\tTOPOLOGY\tBASE/MAX_MHZ\tL3_KIB\tGEN\tSOCKET\tMEMORY\tPOLICY\n'
     for row in "${CPU_PROFILES[@]}"; do
         IFS='|' read -r key model _brand tsc _part base max _family _upgrade \
             _chars cores threads _l1 _l2 l3 _l2assoc _l3assoc generation \
-            socket memory max_speed _root _revision <<<"$row"
+            socket memory max_speed _root _revision _pcie <<<"$row"
         new_count=0
         legacy_count=0
         while IFS= read -r platform; do
@@ -930,13 +1138,14 @@ cpu_profile_print_catalog() {
 board_profile_print_catalog() {
     local include_fallback=${1:-0}
     local row key brand model revision chipset bios date tpm slots max_gb
-    local nvme_gen nvme_lanes _xhci _xhci_rev _main _aux _type _width _length
+    local nvme_gen nvme_lanes _xhci_vendor _xhci _xhci_rev
+    local _main _aux _type _width _length
     local socket memory max_speed candidate_count
     printf 'BOARD_PROFILE\tBOARD\tCHIPSET/BIOS\tSOCKET/MEMORY\tDIMM\tTPM\tNATIVE_M2\n'
     for row in "${BOARD_PROFILES[@]}"; do
         IFS='|' read -r key brand model revision chipset bios date tpm slots \
-            max_gb nvme_gen nvme_lanes _xhci _xhci_rev _main _aux _type \
-            _width _length socket memory max_speed <<<"$row"
+            max_gb nvme_gen nvme_lanes _xhci_vendor _xhci _xhci_rev _main \
+            _aux _type _width _length socket memory max_speed <<<"$row"
         if [[ "$include_fallback" != 1 ]]; then
             candidate_count=$(hardware_profile_component_candidates '' "$key" '' '' 0 | \
                 awk 'NF { count++ } END { print count + 0 }')
@@ -997,8 +1206,9 @@ hardware_xhci_identity_for_platform() {
 
     identity=$(
         hardware_profile_load "$requested" || exit
-        printf '0x8086|%s|%s|pcie.0|0x6\n' \
-            "$BOARD_XHCI_DEVICE_ID" "$BOARD_XHCI_REVISION"
+        printf '%s|%s|%s|pcie.0|0x6\n' \
+            "$BOARD_XHCI_VENDOR_ID" "$BOARD_XHCI_DEVICE_ID" \
+            "$BOARD_XHCI_REVISION"
     ) || return
     printf '%s\n' "$identity"
 }
@@ -1019,6 +1229,10 @@ ssd_explicit_profile_keys() {
     printf '%s\n' "${SSD_EXPLICIT_PROFILE_KEYS[@]}"
 }
 
+ssd_auto_profile_keys() {
+    printf '%s\n' "${SSD_AUTO_PROFILE_KEYS[@]}"
+}
+
 ssd_profile_is_default() {
     local requested=${1:-} key
 
@@ -1028,14 +1242,25 @@ ssd_profile_is_default() {
     return 1
 }
 
-# Board-bound storage compatibility.  Compare a drive's advertised endpoint
-# link with the board's native M.2 capability instead of treating DDR3/DDR4 or
-# the generic "nvme" interface name as a topology.  Missing link metadata is
-# interpreted as the historical Samsung path (Gen3 x4), preserving old callers.
+ssd_profile_is_auto() {
+    local requested=${1:-} key
+
+    for key in "${SSD_AUTO_PROFILE_KEYS[@]}"; do
+        [[ "$key" == "$requested" ]] && return 0
+    done
+    return 1
+}
+
+# CPU-and-board-bound storage compatibility.  A native M.2 link or one audited
+# passive X79 adapter may provide the board-side path, while CPU PCIe generation
+# remains the upper bound.  Missing drive metadata retains the historical Gen3
+# x4 interpretation for old callers.
 hardware_storage_combination_allowed() {
     local platform=${1:-} interface=${2:-}
     local drive_gen=${3:-} drive_lanes=${4:-} form_factor=${5:-}
-    local combination= board_key board_row= board_gen board_lanes
+    local combination= cpu_key board_key cpu_row= board_row=
+    local cpu_pcie_gen board_gen board_lanes adapter_row adapter_board
+    local adapter_slot adapter_gen adapter_lanes adapter_form adapter_kind
 
     hardware_profile_is_catalog_key "$platform" || return 1
     [[ "$interface" == sata ]] && return 0
@@ -1050,12 +1275,30 @@ hardware_storage_combination_allowed() {
 
     combination=${_HARDWARE_COMBINATION_ROW_BY_KEY["$platform"]-}
     [[ -n "$combination" ]] || return 1
-    IFS='|' read -r _ _ board_key _ _ <<<"$combination"
+    IFS='|' read -r _ cpu_key board_key _ _ <<<"$combination"
+    cpu_row=${_HARDWARE_CPU_ROW_BY_KEY["$cpu_key"]-}
     board_row=${_HARDWARE_BOARD_ROW_BY_KEY["$board_key"]-}
-    [[ -n "$board_row" ]] || return 1
+    [[ -n "$cpu_row" && -n "$board_row" ]] || return 1
+    cpu_pcie_gen=${cpu_row##*|}
     IFS='|' read -r _ _ _ _ _ _ _ _ _ _ board_gen board_lanes _ \
         <<<"$board_row"
-    (( board_gen >= drive_gen && board_lanes >= drive_lanes ))
+    if (( board_gen < drive_gen || board_lanes < drive_lanes )); then
+        board_gen=0
+        board_lanes=0
+        for adapter_row in "${PCIE_NVME_ADAPTER_PROFILES[@]}"; do
+            IFS='|' read -r adapter_board adapter_slot adapter_gen \
+                adapter_lanes adapter_form adapter_kind <<<"$adapter_row"
+            [[ "$adapter_board" == "$board_key" &&
+               "$adapter_form" == "$form_factor" &&
+               "$adapter_kind" == passive ]] || continue
+            if (( adapter_gen > board_gen )); then
+                board_gen=$adapter_gen
+                board_lanes=$adapter_lanes
+            fi
+        done
+    fi
+    (( cpu_pcie_gen >= drive_gen && board_gen >= drive_gen &&
+       board_lanes >= drive_lanes ))
 }
 
 # Lower number wins.  Explicit --ssd-profile bypasses this preference but is
@@ -1112,7 +1355,7 @@ ssd_profile_print_catalog() {
         IFS='|' read -r key brand model interface size_bytes firmware controller \
             form_factor pcie_gen pcie_lanes logical_block_size \
             physical_block_size <<<"$row"
-        if ssd_profile_is_default "$key"; then
+        if ssd_profile_is_auto "$key"; then
             auto_random=1
         else
             auto_random=0
@@ -1136,31 +1379,31 @@ hardware_profile_validate_catalog() {
     if ! (
         local model brand_string tsc part base max family upgrade chars cores
         local threads l1 l2 l3 l2assoc l3assoc generation socket mem_family
-        local max_speed root_device root_revision
+        local max_speed root_device root_revision cpu_pcie_generation
         local board revision chipset bios bios_date tpm board_slots max_gb
-        local nvme_gen nvme_lanes xhci_device xhci_revision main_slot aux_slot
+        local nvme_gen nvme_lanes xhci_vendor xhci_device xhci_revision
+        local main_slot aux_slot
         local aux_type aux_width aux_length release_year serial_policy
         local mem_model_list mem_type mem_width module_list slots form rank_list
         local device_width_list voltage channel_mode module_jep_list dram_jep_list
         local cpu_key board_key memory_key module device_width rank mem_total
-        local part index matrix_board_row matrix_memory_row
-        local matrix_board_alias matrix_memory_alias
+        local part index
         local used_cpu='|' used_board='|' used_memory='|' flat flat_count=0
         local seen_model='|' seen_chipset='|' used_chipset='|'
         local presentation_key lpc_vendor lpc_device lpc_revision
         local -a parts modules ranks device_widths module_jeps dram_jeps
         local -A active_cpu_seen=() active_board_seen=() default_cpu_seen=()
         local -A active_memory_brand_seen=()
-        local -A i3_board_seen=() i3_board_capacity_seen=()
-        local -A i3_board_memory_seen=()
+        local -A active_board_capacity_seen=() active_cpu_capacity_seen=()
+        local new_count=0 explicit_count=0 archived_count=0 legacy_count=0
 
         seen='|'
         for row in "${CPU_PROFILES[@]}"; do
             IFS='|' read -r key model brand_string tsc part base max family \
                 upgrade chars cores threads l1 l2 l3 l2assoc l3assoc \
                 generation socket mem_family max_speed root_device \
-                root_revision <<<"$row"
-            [[ -n "$root_revision" && "$seen" != *"|$key|"* ]] || {
+                root_revision cpu_pcie_generation <<<"$row"
+            [[ -n "$cpu_pcie_generation" && "$seen" != *"|$key|"* ]] || {
                 echo "重复或字段不完整的 CPU profile: $key" >&2
                 exit 1
             }
@@ -1181,12 +1424,16 @@ hardware_profile_validate_catalog() {
                "$l1" =~ ^[1-9][0-9]*$ && "$l2" =~ ^[1-9][0-9]*$ &&
                "$l3" =~ ^[1-9][0-9]*$ &&
                ( "$l2assoc" == 5 || "$l2assoc" == 7 ) &&
-               "$l3assoc" == 9 &&
-               ( "$generation" == 4 || "$generation" == 6 || "$generation" == 8 ) &&
+               ( "$l3assoc" == 9 || "$l3assoc" == 14 ) &&
+               ( "$generation" == 2 || "$generation" == 3 ||
+                 "$generation" == 4 || "$generation" == 6 ||
+                 "$generation" == 8 ) &&
                ( "$mem_family" == DDR3 || "$mem_family" == DDR4 ) &&
                "$max_speed" =~ ^[1-9][0-9]*$ &&
                "$root_device" =~ ^0x[0-9A-Fa-f]{4}$ &&
-               "$root_revision" =~ ^0x[0-9A-Fa-f]{2}$ ]] || {
+               "$root_revision" =~ ^0x[0-9A-Fa-f]{2}$ &&
+               ( "$cpu_pcie_generation" == 2 ||
+                 "$cpu_pcie_generation" == 3 ) ]] || {
                 echo "CPU profile 字段非法: $key" >&2
                 exit 1
             }
@@ -1204,7 +1451,7 @@ hardware_profile_validate_catalog() {
                 exit 1
             }
             seen_chipset+="$chipset|"
-            [[ "$chipset" =~ ^(H81|H97|B150|B360)$ &&
+            [[ "$chipset" =~ ^(H81|H97|B150|B360|X79)$ &&
                "$presentation_key" == "$chipset" &&
                "$lpc_vendor" == 0x8086 &&
                "$lpc_device" =~ ^0x[0-9A-F]{4}$ &&
@@ -1213,17 +1460,18 @@ hardware_profile_validate_catalog() {
                 exit 1
             }
         done
-        (( ${#CHIPSET_PRESENTATION_PROFILES[@]} == 4 )) || {
-            echo "芯片组 identity 目录必须精确覆盖 H81/H97/B150/B360" >&2
+        (( ${#CHIPSET_PRESENTATION_PROFILES[@]} == 5 )) || {
+            echo "芯片组 identity 目录必须精确覆盖 H81/H97/B150/B360/X79" >&2
             exit 1
         }
 
         seen='|'
         for row in "${BOARD_PROFILES[@]}"; do
             IFS='|' read -r key brand board revision chipset bios bios_date tpm \
-                board_slots max_gb nvme_gen nvme_lanes xhci_device \
-                xhci_revision main_slot aux_slot aux_type aux_width aux_length \
-                socket mem_family max_speed release_year serial_policy <<<"$row"
+                board_slots max_gb nvme_gen nvme_lanes xhci_vendor \
+                xhci_device xhci_revision main_slot aux_slot aux_type \
+                aux_width aux_length socket mem_family max_speed release_year \
+                serial_policy <<<"$row"
             [[ -n "$serial_policy" && "$seen" != *"|$key|"* ]] || {
                 echo "重复或字段不完整的主板 profile: $key" >&2
                 exit 1
@@ -1233,9 +1481,11 @@ hardware_profile_validate_catalog() {
                -n "$board" && -n "$revision" && -n "$chipset" &&
                -n "$bios" && "$bios_date" =~ ^[0-9]{2}/[0-9]{2}/[0-9]{4}$ &&
                ( "$tpm" == none || "$tpm" == 1.2 || "$tpm" == 2.0 ) &&
-               ( "$board_slots" == 2 || "$board_slots" == 4 ) &&
+               ( "$board_slots" == 2 || "$board_slots" == 4 ||
+                 "$board_slots" == 8 ) &&
                "$max_gb" =~ ^[1-9][0-9]*$ &&
                "$nvme_gen" =~ ^[0-9]+$ && "$nvme_lanes" =~ ^[0-9]+$ &&
+               "$xhci_vendor" =~ ^0x[0-9A-Fa-f]{4}$ &&
                "$xhci_device" =~ ^0x[0-9A-Fa-f]{4}$ &&
                "$xhci_revision" =~ ^0x[0-9A-Fa-f]{2}$ &&
                -n "$main_slot" && -n "$aux_slot" &&
@@ -1290,9 +1540,13 @@ hardware_profile_validate_catalog() {
                -n "$mem_model_list" && "$max_speed" =~ ^[1-9][0-9]*$ &&
                ( "$mem_family" == DDR3 || "$mem_family" == DDR4 ) &&
                ( "$mem_type" == 0x18 || "$mem_type" == 0x1A ) &&
-               "$mem_width" == 64 && "$slots" == 2 && "$form" == DIMM &&
+               "$mem_width" == 64 &&
+               ( "$slots" == 2 || "$slots" == 3 || "$slots" == 4 ) &&
+               "$form" == DIMM &&
                ( "$voltage" == 1200 || "$voltage" == 1500 ) &&
-               ( "$channel_mode" == dual-channel || "$channel_mode" == flex ) ]] || {
+               ( "$channel_mode" == dual-channel || "$channel_mode" == flex ||
+                 "$channel_mode" == triple-channel ||
+                 "$channel_mode" == quad-channel ) ]] || {
                 echo "内存 profile 字段非法: $key" >&2
                 exit 1
             }
@@ -1335,14 +1589,27 @@ hardware_profile_validate_catalog() {
                 mem_total=$((mem_total + module))
             done
             case "$channel_mode" in
-                dual-channel)
-                    [[ "${modules[0]}" == "${modules[1]}" &&
-                       "${parts[0]}" == "${parts[1]}" &&
-                       "${ranks[0]}" == "${ranks[1]}" &&
-                       "${device_widths[0]}" == "${device_widths[1]}" &&
-                       "${module_jeps[0]}" == "${module_jeps[1]}" &&
-                       "${dram_jeps[0]}" == "${dram_jeps[1]}" ]] || {
-                        echo "双通道 profile 必须是同容量同料号两条: $key" >&2
+                dual-channel|triple-channel|quad-channel)
+                    case "$channel_mode:$slots" in
+                        dual-channel:2|triple-channel:3|quad-channel:4) ;;
+                        *)
+                            echo "内存通道数必须等于已安装条数: $key/$channel_mode/$slots" >&2
+                            exit 1
+                            ;;
+                    esac
+                    for ((index = 1; index < slots; index += 1)); do
+                        [[ "${modules[0]}" == "${modules[index]}" &&
+                           "${parts[0]}" == "${parts[index]}" &&
+                           "${ranks[0]}" == "${ranks[index]}" &&
+                           "${device_widths[0]}" == "${device_widths[index]}" &&
+                           "${module_jeps[0]}" == "${module_jeps[index]}" &&
+                           "${dram_jeps[0]}" == "${dram_jeps[index]}" ]] || {
+                            echo "多通道 profile 必须逐条同容量/料号/几何: $key" >&2
+                            exit 1
+                        }
+                    done
+                    (( mem_total == slots * modules[0] )) || {
+                        echo "多通道 profile 容量合计异常: $key" >&2
                         exit 1
                     }
                     ;;
@@ -1365,7 +1632,10 @@ hardware_profile_validate_catalog() {
             }
             seen+="$key|"
             case "$lifecycle" in
-                new|explicit-new|legacy-compatibility) ;;
+                new) new_count=$((new_count + 1)) ;;
+                explicit-new) explicit_count=$((explicit_count + 1)) ;;
+                archived) archived_count=$((archived_count + 1)) ;;
+                legacy-compatibility) legacy_count=$((legacy_count + 1)) ;;
                 *) echo "平台生命周期无效: $key/$lifecycle" >&2; exit 1 ;;
             esac
             hardware_profile_load "$key" || exit
@@ -1382,31 +1652,53 @@ hardware_profile_validate_catalog() {
                 echo "内存频率/插槽/容量与平台不兼容: $key" >&2
                 exit 1
             }
-            [[ "$lifecycle" == legacy-compatibility || "$CPU_GENERATION" == 4 ]] || {
-                echo "非 Haswell 平台不能进入 G-11 新建池: $key" >&2
+            if [[ "$lifecycle" == archived ]]; then
+                [[ "$MEM_TOTAL_MB" == 6144 || "$BOARD_CHIPSET" != X79 ]] || {
+                    echo "归档平台必须是已取消的 6G 档或旧非 X79 新建池: $key" >&2
+                    exit 1
+                }
+            fi
+            [[ "$lifecycle" == archived || "$lifecycle" == legacy-compatibility ||
+               "$CPU_GENERATION" == 2 || "$CPU_GENERATION" == 3 ||
+               "$CPU_GENERATION" == 4 ]] || {
+                echo "未经审核的 CPU 代际不能进入 G-11 新建池: $key" >&2
                 exit 1
             }
-            if [[ "$lifecycle" != legacy-compatibility ]]; then
-                (( MEM_BOARD_SLOTS == 2 && MEM_SLOTS == 2 )) || {
-                    echo "新建池只允许两槽主板/两条内存: $key" >&2
+            if [[ "$lifecycle" != legacy-compatibility && "$lifecycle" != archived ]]; then
+                case "$MEM_TOTAL_MB:$MEM_CHANNEL_MODE" in
+                    4096:dual-channel|8192:dual-channel)
+                        (( MEM_BOARD_SLOTS >= 4 && MEM_SLOTS == 2 )) || {
+                            echo "4G/8G 新建档必须在四通道主板安装双通道两条: $key" >&2
+                            exit 1
+                        }
+                        ;;
+                    12288:triple-channel)
+                        (( MEM_BOARD_SLOTS >= 4 && MEM_SLOTS == 3 )) || {
+                            echo "12G 新建档必须在四通道主板安装三条 4G: $key" >&2
+                            exit 1
+                        }
+                        ;;
+                    16384:quad-channel)
+                        (( MEM_BOARD_SLOTS >= 4 && MEM_SLOTS == 4 )) || {
+                            echo "16G 新建档必须在四通道主板安装四条 4G: $key" >&2
+                            exit 1
+                        }
+                        ;;
+                    *)
+                        echo "新建内存档位/通道不符合 4/8/12/16 合同: $key" >&2
+                        exit 1
+                        ;;
+                esac
+                [[ "$BOARD_CHIPSET" == X79 ]] || {
+                    echo "新建池主板必须统一为消费级四通道 X79: $key" >&2
                     exit 1
                 }
                 active_cpu_seen["$cpu_key"]=1
                 active_board_seen["$board_key"]=1
+                active_board_capacity_seen["$board_key:$MEM_TOTAL_MB"]=1
+                active_cpu_capacity_seen["$cpu_key:$MEM_TOTAL_MB"]=1
                 active_memory_brand_seen["$MEM_BRAND"]=1
                 [[ "$lifecycle" != new ]] || default_cpu_seen["$cpu_key"]=1
-                if [[ "$cpu_key" == i3-4130 ]]; then
-                    i3_board_seen["$board_key"]=1
-                    i3_board_capacity_seen["$board_key:$MEM_TOTAL_MB"]=1
-                    i3_board_memory_seen["$board_key:$memory_key"]=1
-                    case "$MEM_TOTAL_MB:$MEM_CHANNEL_MODE" in
-                        4096:dual-channel|6144:flex|8192:dual-channel) ;;
-                        *)
-                            echo "i3-4130 容量与双通道/Flex 拓扑不匹配: $key" >&2
-                            exit 1
-                            ;;
-                    esac
-                fi
             fi
             used_cpu+="$cpu_key|"
             used_board+="$board_key|"
@@ -1422,45 +1714,40 @@ hardware_profile_validate_catalog() {
             echo "兼容平台视图数量错误" >&2
             exit 1
         }
-        (( ${#active_cpu_seen[@]} == 6 && ${#active_board_seen[@]} == 10 &&
-           ${#default_cpu_seen[@]} == 5 )) || {
-            echo "新建池必须是 6 CPU（5 默认+1 显式）/10 块两槽主板" >&2
+        (( new_count == 48 && explicit_count == 0 && archived_count == 261 &&
+           legacy_count == 3 )) || {
+            echo "平台生命周期数量必须是 new=48/explicit=0/archived=261/legacy=3" >&2
             exit 1
         }
-        (( ${#i3_board_seen[@]} == 10 )) || {
-            echo "i3-4130 必须覆盖 10 块审核双槽主板" >&2
+        (( ${#active_cpu_seen[@]} == 2 && ${#active_board_seen[@]} == 3 &&
+           ${#default_cpu_seen[@]} == 2 )) || {
+            echo "新建池必须是 2 款无核显 4C/8T 家用 CPU/3 块四通道家用主板" >&2
             exit 1
         }
-        for board_key in "${!i3_board_seen[@]}"; do
-            [[ -v "i3_board_capacity_seen[$board_key:4096]" &&
-               -v "i3_board_capacity_seen[$board_key:6144]" &&
-               -v "i3_board_capacity_seen[$board_key:8192]" ]] || {
-                echo "i3-4130 主板缺少 4G/6G/8G 完整容量: $board_key" >&2
+        for board_key in "${!active_board_seen[@]}"; do
+            [[ -v "active_board_capacity_seen[$board_key:4096]" &&
+               -v "active_board_capacity_seen[$board_key:8192]" &&
+               -v "active_board_capacity_seen[$board_key:12288]" &&
+               -v "active_board_capacity_seen[$board_key:16384]" ]] || {
+                echo "四通道主板缺少 4G/8G/12G/16G 完整档位: $board_key" >&2
                 exit 1
             }
         done
-        for matrix_board_row in "${I3_4130_REVIEWED_BOARD_MATRIX[@]}"; do
-            IFS='|' read -r board_key matrix_board_alias <<<"$matrix_board_row"
-            for matrix_memory_row in "${I3_4130_REVIEWED_MEMORY_MATRIX[@]}"; do
-                IFS='|' read -r memory_key matrix_memory_alias \
-                    <<<"$matrix_memory_row"
-                [[ -v "i3_board_memory_seen[$board_key:$memory_key]" ]] || {
-                    echo "i3-4130 主板缺少审核内存矩阵项: $board_key/$memory_key" >&2
-                    exit 1
-                }
-            done
+        for cpu_key in "${!active_cpu_seen[@]}"; do
+            [[ -v "active_cpu_capacity_seen[$cpu_key:4096]" &&
+               -v "active_cpu_capacity_seen[$cpu_key:8192]" &&
+               -v "active_cpu_capacity_seen[$cpu_key:12288]" &&
+               -v "active_cpu_capacity_seen[$cpu_key:16384]" ]] || {
+                echo "新建 CPU 缺少 4G/8G/12G/16G 完整档位: $cpu_key" >&2
+                exit 1
+            }
         done
-        [[ -v active_cpu_seen[i7-4790] && ! -v default_cpu_seen[i7-4790] ]] || {
-            echo "i7-4790 只能是显式高配，不能进入低端默认随机池" >&2
-            exit 1
-        }
-        (( ${#active_memory_brand_seen[@]} == 5 )) &&
+        (( ${#active_memory_brand_seen[@]} == 4 )) &&
             [[ -v 'active_memory_brand_seen[Kingston]' &&
                -v 'active_memory_brand_seen[Samsung]' &&
                -v 'active_memory_brand_seen[Micron]' &&
-               -v 'active_memory_brand_seen[SK hynix]' &&
-               -v 'active_memory_brand_seen[Crucial]' ]] || {
-            echo "新建内存池必须覆盖 Kingston/Samsung/Micron/SK hynix/Crucial 五厂" >&2
+               -v 'active_memory_brand_seen[Elpida]' ]] || {
+            echo "新建内存池必须覆盖 Kingston/Samsung/Micron/Elpida 四个消费级品牌" >&2
             exit 1
         }
 
@@ -1565,6 +1852,68 @@ hardware_profile_validate_catalog() {
         }
     done
 
+    local auto_seen='|' auto_key auto_found auto_count=0
+    for auto_key in "${SSD_AUTO_PROFILE_KEYS[@]}"; do
+        [[ "$auto_seen" != *"|$auto_key|"* ]] || {
+            echo "自动 SSD 候选重复: $auto_key" >&2
+            return 1
+        }
+        auto_seen+="$auto_key|"
+        auto_found=0
+        for row in "${SSD_PROFILES[@]}"; do
+            IFS='|' read -r key _ <<<"$row"
+            [[ "$key" == "$auto_key" ]] || continue
+            auto_found=1
+            break
+        done
+        (( auto_found )) || {
+            echo "自动 SSD profile 不存在: $auto_key" >&2
+            return 1
+        }
+        auto_count=$((auto_count + 1))
+    done
+    (( auto_count == ${#SSD_PROFILES[@]} )) || {
+        echo "自动 SSD 池必须覆盖完整审核目录" >&2
+        return 1
+    }
+    for row in "${SSD_PROFILES[@]}"; do
+        IFS='|' read -r key _ <<<"$row"
+        [[ "$auto_seen" == *"|$key|"* ]] || {
+            echo "SSD profile 未进入自动兼容筛选池: $key" >&2
+            return 1
+        }
+    done
+
+    local adapter_seen='|' adapter_board adapter_slot adapter_gen
+    local adapter_lanes adapter_form adapter_kind adapter_board_row
+    local adapter_board_nvme_gen adapter_board_nvme_lanes
+    for row in "${PCIE_NVME_ADAPTER_PROFILES[@]}"; do
+        IFS='|' read -r adapter_board adapter_slot adapter_gen adapter_lanes \
+            adapter_form adapter_kind <<<"$row"
+        [[ "$adapter_seen" != *"|$adapter_board|"* ]] || {
+            echo "同一主板重复定义 NVMe 转接路径: $adapter_board" >&2
+            return 1
+        }
+        adapter_seen+="$adapter_board|"
+        adapter_board_row=${_HARDWARE_BOARD_ROW_BY_KEY["$adapter_board"]-}
+        [[ -n "$adapter_board_row" && -n "$adapter_slot" &&
+           "$adapter_gen" == 3 && "$adapter_lanes" == 4 &&
+           "$adapter_form" == m.2-2280 && "$adapter_kind" == passive ]] || {
+            echo "NVMe 转接路径未经审核: $row" >&2
+            return 1
+        }
+        IFS='|' read -r _ _ _ _ _ _ _ _ _ _ adapter_board_nvme_gen \
+            adapter_board_nvme_lanes _ <<<"$adapter_board_row"
+        (( adapter_board_nvme_gen == 0 && adapter_board_nvme_lanes == 0 )) || {
+            echo "原生 M.2 主板不应重复添加被动转接路径: $adapter_board" >&2
+            return 1
+        }
+    done
+    (( ${#PCIE_NVME_ADAPTER_PROFILES[@]} == 3 )) || {
+        echo "X79 NVMe 转接路径必须精确覆盖三块新增主板" >&2
+        return 1
+    }
+
     local odd_model odd_firmware odd_interface odd_form_factor odd_serial
     seen='|'
     found=0
@@ -1608,7 +1957,7 @@ hardware_profile_validate_catalog() {
     local platform interface compatible_count
     for platform in $(hardware_profile_keys); do
         compatible_count=0
-        for default_key in "${SSD_DEFAULT_PROFILE_KEYS[@]}"; do
+        for default_key in "${SSD_AUTO_PROFILE_KEYS[@]}"; do
             for row in "${SSD_PROFILES[@]}"; do
                 IFS='|' read -r key _ _ interface _ _ _ form_factor \
                     pcie_gen pcie_lanes _ _ <<<"$row"

@@ -54,8 +54,16 @@ flock -s "$STORAGE_LOCK_FD"
 BASE_FILE_BYTES=$(stat -c %s -- "$BASE")
 BASE_DEVICE_ID=$(stat -c %D -- "$BASE")
 BASE_INODE=$(stat -c %i -- "$BASE")
-BASE_MTIME_NS=$(stat -c %y -- "$BASE")
-BASE_CTIME_NS=$(stat -c %z -- "$BASE")
+OBSERVED_BASE_MTIME_NS=$(TZ=UTC stat -c %y -- "$BASE")
+BASE_CTIME_NS=$(TZ=UTC stat -c %z -- "$BASE")
+BASE_MTIME_NS=$(jq -er '.baseMtimeNs | strings' "$ATTESTATION") ||
+    die "private base attestation has no string mtime"
+OBSERVED_BASE_MTIME_INSTANT=$(date -u -d "$OBSERVED_BASE_MTIME_NS" '+%s.%N') ||
+    die "could not normalize the base image mtime"
+ATTESTED_BASE_MTIME_INSTANT=$(date -u -d "$BASE_MTIME_NS" '+%s.%N') ||
+    die "private base attestation has an invalid mtime"
+[[ "$OBSERVED_BASE_MTIME_INSTANT" == "$ATTESTED_BASE_MTIME_INSTANT" ]] ||
+    die "base image mtime changed after portable-package installation"
 # Instance-local hard-link pins change only inode ctime. Keep ctime as an audit
 # field, while content eligibility remains bound to inode/size/mtime and the
 # exported transfer manifest receives a fresh full-image SHA-256 below.

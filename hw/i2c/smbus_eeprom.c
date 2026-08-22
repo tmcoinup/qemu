@@ -351,9 +351,17 @@ uint8_t *spd_data_generate_ddr3_config(
                    "(requested %u MB)", config->size_mb);
         return NULL;
     }
-    if (config->speed_mts != 1333 && config->speed_mts != 1600) {
-        error_setg(errp, "DDR3 SPD speed must be 1333 or 1600 MT/s "
+    if (config->speed_mts != 1333 && config->speed_mts != 1600 &&
+        config->speed_mts != 1866) {
+        error_setg(errp, "DDR3 SPD speed must be 1333, 1600 or 1866 MT/s "
                    "(requested %u MT/s)", config->speed_mts);
+        return NULL;
+    }
+    if (config->speed_mts == 1866 &&
+        (config->size_mb != 4096 || config->ranks != 1 ||
+         config->device_width_bits != 8)) {
+        error_setg(errp, "DDR3-1866 SPD is reviewed only for a 4096 MB, "
+                   "single-rank x8 UDIMM");
         return NULL;
     }
     if (!spd_ddr3_geometry(config, &density_code, &addressing,
@@ -386,7 +394,7 @@ uint8_t *spd_data_generate_ddr3_config(
         spd[21] = 0x11; /* Upper nibbles for tRASmin and tRCmin */
         spd[22] = 0x20; /* tRASmin: 36 ns */
         spd[23] = 0x89; /* tRCmin: 49.125 ns */
-    } else {
+    } else if (config->speed_mts == 1600) {
         spd[12] = 0x0A; /* tCKmin: 1.25 ns = DDR3-1600 */
         spd[14] = 0xFC; /* Supported CAS latencies: CL6 through CL11 */
         spd[16] = 0x6E; /* tAAmin: 13.75 ns (CL11 at DDR3-1600) */
@@ -395,6 +403,22 @@ uint8_t *spd_data_generate_ddr3_config(
         spd[21] = 0x11; /* Upper nibbles for tRASmin and tRCmin */
         spd[22] = 0x18; /* tRASmin: 35 ns */
         spd[23] = 0x81; /* tRCmin: 48.125 ns */
+    } else {
+        /*
+         * JEDEC DDR3-1866M down-bin used by MT8KTF51264AZ-1G9:
+         * 1.071 ns tCK (9 MTB - 54 FTB), CL13, 13.125 ns
+         * tAA/tRCD/tRP, 34 ns tRAS and 47.125 ns tRC.
+         */
+        spd[12] = 0x09; /* tCKmin MTB: 1.125 ns */
+        spd[14] = 0xFE; /* Supported CL5 through CL11 */
+        spd[15] = 0x02; /* Supported CL13 */
+        spd[16] = 0x69; /* tAAmin: 13.125 ns */
+        spd[18] = 0x69; /* tRCDmin: 13.125 ns */
+        spd[20] = 0x69; /* tRPmin: 13.125 ns */
+        spd[21] = 0x11; /* Upper nibbles for tRASmin and tRCmin */
+        spd[22] = 0x10; /* tRASmin: 34 ns */
+        spd[23] = 0x79; /* tRCmin: 47.125 ns */
+        spd[34] = 0xCA; /* tCKmin fine offset: -54 ps => 1.071 ns */
     }
 
     spd[17] = 0x78;   /* tWRmin: 15 ns */

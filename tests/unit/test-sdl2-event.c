@@ -42,7 +42,8 @@ static void test_motion_stops_before_keyup(void)
     push(&tail);
 
     g_assert_cmpint(SDL_PollEvent(&event), ==, 1);
-    sdl2_coalesce_mouse_motion(&event);
+    g_assert_cmpuint(sdl2_coalesce_mouse_motion(
+                         &event, UINT_MAX, INT64_MAX), ==, 2);
     g_assert_cmpuint(event.type, ==, SDL_MOUSEMOTION);
     g_assert_cmpint(event.motion.xrel, ==, 6);
     g_assert_cmpint(event.motion.yrel, ==, 6);
@@ -66,7 +67,8 @@ static void test_motion_keeps_sources_separate(void)
     push(&first);
     push(&other_device);
     g_assert_cmpint(SDL_PollEvent(&event), ==, 1);
-    sdl2_coalesce_mouse_motion(&event);
+    g_assert_cmpuint(sdl2_coalesce_mouse_motion(
+                         &event, UINT_MAX, INT64_MAX), ==, 0);
     g_assert_cmpint(event.motion.xrel, ==, 1);
     g_assert_cmpint(SDL_PollEvent(&event), ==, 1);
     g_assert_cmpuint(event.motion.which, ==, 3);
@@ -82,9 +84,49 @@ static void test_motion_delta_saturates(void)
     push(&first);
     push(&next);
     g_assert_cmpint(SDL_PollEvent(&event), ==, 1);
-    sdl2_coalesce_mouse_motion(&event);
+    g_assert_cmpuint(sdl2_coalesce_mouse_motion(
+                         &event, UINT_MAX, INT64_MAX), ==, 1);
     g_assert_cmpint(event.motion.xrel, ==, INT32_MAX);
     g_assert_cmpint(event.motion.yrel, ==, INT32_MIN);
+}
+
+static void test_motion_respects_count_budget(void)
+{
+    SDL_Event event;
+    int i;
+
+    SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+    for (i = 0; i < 11; i++) {
+        SDL_Event item = motion(1, 2, 0, i, i, 1, 1);
+
+        push(&item);
+    }
+
+    g_assert_cmpint(SDL_PollEvent(&event), ==, 1);
+    g_assert_cmpuint(sdl2_coalesce_mouse_motion(
+                         &event, 3, INT64_MAX), ==, 3);
+    g_assert_cmpint(event.motion.xrel, ==, 4);
+    for (i = 0; i < 7; i++) {
+        g_assert_cmpint(SDL_PollEvent(&event), ==, 1);
+    }
+    g_assert_cmpint(SDL_PollEvent(&event), ==, 0);
+}
+
+static void test_motion_respects_expired_deadline(void)
+{
+    SDL_Event first = motion(1, 2, 0, 0, 0, 1, 1);
+    SDL_Event next = motion(1, 2, 0, 1, 1, 2, 2);
+    SDL_Event event;
+
+    SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+    push(&first);
+    push(&next);
+    g_assert_cmpint(SDL_PollEvent(&event), ==, 1);
+    g_assert_cmpuint(sdl2_coalesce_mouse_motion(
+                         &event, UINT_MAX, 0), ==, 0);
+    g_assert_cmpint(event.motion.xrel, ==, 1);
+    g_assert_cmpint(SDL_PollEvent(&event), ==, 1);
+    g_assert_cmpint(event.motion.xrel, ==, 2);
 }
 
 static void test_host_text_input_disabled(void)
@@ -137,6 +179,10 @@ int main(int argc, char **argv)
                     test_motion_keeps_sources_separate);
     g_test_add_func("/sdl2-event/motion-saturation",
                     test_motion_delta_saturates);
+    g_test_add_func("/sdl2-event/motion-count-budget",
+                    test_motion_respects_count_budget);
+    g_test_add_func("/sdl2-event/motion-deadline",
+                    test_motion_respects_expired_deadline);
     g_test_add_func("/sdl2-event/host-text-input-disabled",
                     test_host_text_input_disabled);
     g_test_add_func("/sdl2-event/window-update-visibility",

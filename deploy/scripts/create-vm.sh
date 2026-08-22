@@ -3,7 +3,7 @@
 #
 #   用法:  ./deploy/scripts/create-vm.sh <vm_id> [--platform PLATFORM]
 #          ./deploy/scripts/create-vm.sh <vm_id> [--cpu-profile CPU] [--board-profile BOARD]
-#                                  [--memory-profile MEMORY|--memory-size 4G|6G|8G]
+#                                  [--memory-profile MEMORY|--memory-size 4G|8G|12G|16G]
 #                                  [--ssd-profile PROFILE]
 #                                  [--gpu-profile PROFILE|--gpu-vram 1024|2048]
 #                                  [--allow-fallback-platform]
@@ -12,6 +12,7 @@
 #                                  [--relative-mouse [--mouse-profile PROFILE]]
 #          ./deploy/scripts/create-vm.sh <vm_id> --force  # 覆盖已存在配置
 #          ./deploy/scripts/create-vm.sh --list-platforms
+#          ./deploy/scripts/create-vm.sh --list-archived-platforms
 #          ./deploy/scripts/create-vm.sh --list-cpu-profiles|--list-board-profiles
 #                         --list-memory-profiles
 #          ./deploy/scripts/create-vm.sh --list-ssd-profiles
@@ -135,6 +136,10 @@ while (( $# > 0 )); do
             ;;
         --list-platforms)
             LIST_ACTION=platform
+            shift
+            ;;
+        --list-archived-platforms)
+            LIST_ACTION=platform-archived
             shift
             ;;
         --list-cpu-profiles)
@@ -299,7 +304,8 @@ if [[ -n "$LIST_ACTION" ]]; then
         exit 2
     }
     case "$LIST_ACTION" in
-        platform) hardware_profile_print_catalog "$INCLUDE_FALLBACK" ;;
+        platform) hardware_profile_print_catalog "$INCLUDE_FALLBACK" active ;;
+        platform-archived) hardware_profile_print_catalog 1 archived ;;
         cpu) cpu_profile_print_catalog "$INCLUDE_FALLBACK" ;;
         board) board_profile_print_catalog "$INCLUDE_FALLBACK" ;;
         memory) memory_profile_print_catalog "$INCLUDE_FALLBACK" ;;
@@ -352,7 +358,7 @@ if [[ -n "$PLATFORM_REQUEST" && "$COMPONENT_SELECTOR_COUNT" != 0 ]]; then
 fi
 
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--force] [--platform PLATFORM|--cpu-profile CPU --board-profile BOARD (--memory-profile MEMORY|--memory-size 4G|6G|8G)] [--allow-fallback-platform] [--ssd-profile PROFILE] [--gpu-profile PROFILE|--gpu-vram 1024|2048] [--monitor-profile PROFILE] [--keyboard-profile PROFILE] [--relative-mouse [--mouse-profile PROFILE]]" >&2
+    echo "usage: $0 <vm_id> [--force] [--platform PLATFORM|--cpu-profile CPU --board-profile BOARD (--memory-profile MEMORY|--memory-size 4G|8G|12G|16G)] [--allow-fallback-platform] [--ssd-profile PROFILE] [--gpu-profile PROFILE|--gpu-vram 1024|2048] [--monitor-profile PROFILE] [--keyboard-profile PROFILE] [--relative-mouse [--mouse-profile PROFILE]]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -566,55 +572,68 @@ if (( FORCE )) && [[ -f "$CONF" ]]; then
     fi
 fi
 
-# For an unqualified default creation, try reviewed low-end/new combinations
-# against this host before materializing identity.  Legacy rows are considered
-# only after every new CPU has conclusively failed enforce=on.  If probing is
-# unavailable (missing KVM/QEMU/timeout), keep the normal new pool and let the
-# launcher fail closed; uncertainty must never silently select an old platform.
+# For an unqualified default creation, try reviewed new combinations in their
+# performance-first order (no-iGPU 4C/8T, then CPU/RAM frequency)
+# against this host before materializing identity.  If both active CPUs fail,
+# creation fails instead of silently selecting an older, slower platform.  If
+# probing is unavailable (missing KVM/QEMU/timeout), keep a new X79 profile and
+# let the launcher fail closed.
 AUTO_LEGACY_FALLBACK=0
 HOST_PLATFORM_SELECTION_REASON=explicit
 select_default_platform_for_host() {
     local qemu_bin=${QEMU_BIN:-"$here/../build/qemu-system-x86_64"}
-    local start_index index platform cpu_key cpu_model capability
+    local start_index index platform cpu_key cpu_model capability priority
     local new_probe_fallback_platform unavailable_platform=
     local saw_unavailable=0
-    local -a candidates fallback_candidates
+    local -a candidates priorities tier_candidates
     local -A probed_class=()
 
     mapfile -t candidates < <(hardware_profile_new_keys)
     (( ${#candidates[@]} > 0 )) || return 1
-    start_index=$((RANDOM % ${#candidates[@]}))
-    new_probe_fallback_platform=${candidates[$start_index]}
-    for ((index = 0; index < ${#candidates[@]}; index += 1)); do
-        platform=${candidates[$(((start_index + index) % ${#candidates[@]}))]}
-        hardware_combination_load "$platform" || return 1
-        cpu_key=$CPU_PROFILE
-        if [[ ! -v 'probed_class[$cpu_key]' ]]; then
-            cpu_profile_load "$cpu_key" || return 1
-            cpu_model=$CPU_MODEL
-            if g11_cpu_capability_probe "$qemu_bin" "$cpu_model"; then
-                probed_class[$cpu_key]=$G11_CPU_CAPABILITY_CLASS
-            else
-                probed_class[$cpu_key]=$G11_CPU_CAPABILITY_CLASS
+    mapfile -t priorities < <(
+        for platform in "${candidates[@]}"; do
+            hardware_profile_performance_priority "$platform"
+        done | LC_ALL=C sort -n -u
+    )
+    for priority in "${priorities[@]}"; do
+        tier_candidates=()
+        for platform in "${candidates[@]}"; do
+            [[ "$(hardware_profile_performance_priority "$platform")" == \
+                "$priority" ]] || continue
+            tier_candidates+=("$platform")
+        done
+        (( ${#tier_candidates[@]} > 0 )) || continue
+        start_index=$((RANDOM % ${#tier_candidates[@]}))
+        : "${new_probe_fallback_platform:=${tier_candidates[$start_index]}}"
+        for ((index = 0; index < ${#tier_candidates[@]}; index += 1)); do
+            platform=${tier_candidates[$(((start_index + index) % ${#tier_candidates[@]}))]}
+            hardware_combination_load "$platform" || return 1
+            cpu_key=$CPU_PROFILE
+            if [[ ! -v 'probed_class[$cpu_key]' ]]; then
+                cpu_profile_load "$cpu_key" || return 1
+                cpu_model=$CPU_MODEL
+                if g11_cpu_capability_probe "$qemu_bin" "$cpu_model"; then
+                    probed_class[$cpu_key]=$G11_CPU_CAPABILITY_CLASS
+                else
+                    probed_class[$cpu_key]=$G11_CPU_CAPABILITY_CLASS
+                fi
             fi
-        fi
-        capability=${probed_class[$cpu_key]}
-        if [[ "$capability" == supported ]]; then
-            PLATFORM=$platform
-            HOST_PLATFORM_SELECTION_REASON=host-supported-new
-            return 0
-        fi
-        if [[ "$capability" == unavailable ]]; then
-            saw_unavailable=1
-            : "${unavailable_platform:=$platform}"
-        fi
+            capability=${probed_class[$cpu_key]}
+            if [[ "$capability" == supported ]]; then
+                PLATFORM=$platform
+                HOST_PLATFORM_SELECTION_REASON=host-supported-performance-first
+                return 0
+            fi
+            if [[ "$capability" == unavailable ]]; then
+                saw_unavailable=1
+                : "${unavailable_platform:=$platform}"
+            fi
+        done
     done
 
-    # i7-4790 is intentionally excluded from ordinary low-end random
-    # selection, but it is still a reviewed new platform and therefore must
-    # be tried before any four-slot/old-generation compatibility row.  Probe
-    # it even when one of the five default models was unavailable: a positive
-    # i7 result is still conclusive, while uncertainty only blocks legacy.
+    # Keep the explicit-new tier generic even though the current X79 policy
+    # leaves it empty.  Future reviewed performance tiers still pass through
+    # the same strict KVM realization gate.
     mapfile -t candidates < <(hardware_profile_explicit_new_keys)
     for platform in "${candidates[@]}"; do
         hardware_combination_load "$platform" || return 1
@@ -645,30 +664,6 @@ select_default_platform_for_host() {
         return 0
     fi
 
-    mapfile -t fallback_candidates < <(hardware_profile_legacy_compat_keys)
-    (( ${#fallback_candidates[@]} > 0 )) || return 1
-    start_index=$((RANDOM % ${#fallback_candidates[@]}))
-    for ((index = 0; index < ${#fallback_candidates[@]}; index += 1)); do
-        platform=${fallback_candidates[$(((start_index + index) % ${#fallback_candidates[@]}))]}
-        hardware_combination_load "$platform" || return 1
-        cpu_key=$CPU_PROFILE
-        if [[ ! -v 'probed_class[$cpu_key]' ]]; then
-            cpu_profile_load "$cpu_key" || return 1
-            cpu_model=$CPU_MODEL
-            if g11_cpu_capability_probe "$qemu_bin" "$cpu_model"; then
-                probed_class[$cpu_key]=$G11_CPU_CAPABILITY_CLASS
-            else
-                probed_class[$cpu_key]=$G11_CPU_CAPABILITY_CLASS
-            fi
-        fi
-        capability=${probed_class[$cpu_key]}
-        if [[ "$capability" == supported || "$capability" == compatibility ]]; then
-            PLATFORM=$platform
-            AUTO_LEGACY_FALLBACK=1
-            HOST_PLATFORM_SELECTION_REASON=no-supported-new-legacy-fallback
-            return 0
-        fi
-    done
     return 1
 }
 
@@ -699,10 +694,24 @@ elif (( COMPONENT_SELECTOR_COUNT )); then
         echo "用 --list-platforms 查看合法整机组合；组件不会做笛卡尔积乱配" >&2
         exit 2
     fi
+    # A broad component query can still match several reviewed tuples.  Keep
+    # only the fastest tier, then randomize within that equally ranked tier.
+    PLATFORM_PRIORITY=999999
+    PLATFORM_PREFERRED=()
+    for candidate in "${PLATFORMS[@]}"; do
+        candidate_priority=$(hardware_profile_performance_priority "$candidate") || exit $?
+        if (( candidate_priority < PLATFORM_PRIORITY )); then
+            PLATFORM_PRIORITY=$candidate_priority
+            PLATFORM_PREFERRED=()
+        fi
+        (( candidate_priority == PLATFORM_PRIORITY )) || continue
+        PLATFORM_PREFERRED+=("$candidate")
+    done
+    PLATFORMS=("${PLATFORM_PREFERRED[@]}")
     PLATFORM=${PLATFORMS[$((RANDOM % ${#PLATFORMS[@]}))]}
 else
     if ! select_default_platform_for_host; then
-        echo "所有新建平台均无法由本机 KVM enforce=on 实现，旧兼容池也没有可启动候选" >&2
+        echo "两款活跃 4C/8T X79 CPU 均无法由本机 KVM enforce=on 实现；拒绝降级到旧慢平台" >&2
         echo "请先运行 ./deploy/scripts/check-hardware-pool.sh 查看逐 CPU 原因" >&2
         exit 2
     fi
@@ -714,7 +723,14 @@ PLATFORM_LIFECYCLE_CLASS=$(hardware_profile_lifecycle_class "$PLATFORM") || {
     exit 2
 }
 PLATFORM_COMPAT_NEW_REJECT=0
-if [[ "$PLATFORM_LIFECYCLE_CLASS" == legacy-compatibility ]]; then
+if [[ "$PLATFORM_LIFECYCLE_CLASS" == archived ]]; then
+    if (( ! FORCE || ! CONFIG_WAS_PRESENT )) || [[ "$OLD_PLATFORM" != "$PLATFORM" ]]; then
+        echo "平台 $PLATFORM 属于旧硬件/已取消 6G 方案归档，只允许原 VM 使用 --force 保持原平台" >&2
+        echo "新建请改用 X79 上的 4G/8G 双通道或 12G/16G 三/四通道方案" >&2
+        exit 2
+    fi
+    CPU_REALIZATION_POLICY=enforced
+elif [[ "$PLATFORM_LIFECYCLE_CLASS" == legacy-compatibility ]]; then
     if (( AUTO_LEGACY_FALLBACK || ALLOW_FALLBACK_PLATFORM )); then
         PLATFORM_COMPAT_NEW_REJECT=0
     elif (( ! FORCE || ! CONFIG_WAS_PRESENT )) || [[ "$OLD_PLATFORM" != "$PLATFORM" ]]; then
@@ -724,13 +740,11 @@ if [[ "$PLATFORM_LIFECYCLE_CLASS" == legacy-compatibility ]]; then
 else
     CPU_REALIZATION_POLICY=enforced
 fi
-if (( AUTO_LEGACY_FALLBACK )); then
-    echo "[create-vm] WARN: 6 款新建 CPU 均未通过本机 enforce=on；仅本次自动选择旧平台兜底: $PLATFORM" >&2
-elif [[ "$PLATFORM_LIFECYCLE_CLASS" == legacy-compatibility ]] && \
+if [[ "$PLATFORM_LIFECYCLE_CLASS" == legacy-compatibility ]] && \
         (( ALLOW_FALLBACK_PLATFORM )); then
     echo "[create-vm] WARN: 用户显式授权新建旧平台兜底配置: $PLATFORM" >&2
 elif [[ "$HOST_PLATFORM_SELECTION_REASON" == no-supported-default-explicit-new-fallback ]]; then
-    echo "[create-vm] WARN: 5 款低端默认 CPU 均未通过本机 enforce=on；仅本次使用两槽 i7 新平台兜底: $PLATFORM" >&2
+    echo "[create-vm] WARN: 默认性能层不可用；仅本次使用通过审核的显式新平台: $PLATFORM" >&2
 fi
 BOARD_VERSION=$BOARD_REVISION
 XHCI_IDENTITY=$(hardware_xhci_identity_for_platform "$PLATFORM")
@@ -788,7 +802,7 @@ if [[ -z "$SSD_PROFILE_REQUEST" ]]; then
             (( candidate_tier == SSD_PREFERENCE_TIER )) || continue
             SSD_PROFILE_REQUESTS+=("$candidate")
         fi
-    done < <(ssd_default_profile_keys)
+    done < <(ssd_auto_profile_keys)
     (( ${#SSD_PROFILE_REQUESTS[@]} > 0 )) || {
         echo "平台 $PLATFORM 没有经审核的默认 SSD 组合" >&2
         exit 1

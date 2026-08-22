@@ -52,6 +52,18 @@ persist = settings["generalize"].find(".//u:PersistAllDeviceInstalls", ns)
 assert persist is not None and persist.text == "false"
 name = settings["specialize"].find(".//u:ComputerName", ns)
 assert name is None
+expected_input = (
+    "0409:00000409;"
+    "0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}"
+    "{FA550B04-5AD7-411F-A5AC-CA038EC515D7}"
+)
+for pass_name in ("specialize", "oobeSystem"):
+    input_locale = settings[pass_name].find(
+        ".//u:component[@name='Microsoft-Windows-International-Core']"
+        "/u:InputLocale",
+        ns,
+    )
+    assert input_locale is not None and input_locale.text == expected_input
 oobe = settings["oobeSystem"].find(".//u:OOBE", ns)
 for key in (
     "HideEULAPage", "HideOEMRegistrationScreen", "HideOnlineAccountScreens",
@@ -76,7 +88,7 @@ PY
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.3.0" and
+    .schemaVersion == 1 and .profileVersion == "2.5.2" and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
         "G11-Guest-Lite.ps1", "README.txt"
@@ -145,8 +157,61 @@ grep -Fq 'Read-And-ValidateGuestLitePayload' "$FINALIZER" ||
     fail "clone finalizer does not authenticate Guest Lite"
 grep -Fq -- '-Mode CloneApply' "$FINALIZER" ||
     fail "clone finalizer does not apply Guest Lite unattended"
+grep -Fq 'foreach ($candidate in @($standardError, $standardOutput))' "$FINALIZER" ||
+    fail "clone finalizer does not surface redirected Guest Lite stdout failures"
 grep -Fq 'Read-And-ValidateGuestLiteState -RequireStopped' "$FINALIZER" ||
     fail "clone finalizer does not require the firewall to be stopped after reboot"
+guest_lite_state_reader=$(sed -n \
+    '/^function Read-And-ValidateGuestLiteState {/,/^function Invoke-And-WaitGuestLiteEnforcement {/p' \
+    "$FINALIZER")
+grep -Fq '$stateMachineGuid -cne [string]$osIdentity.MachineGuid' \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not bind Guest Lite state to the stable MachineGuid"
+grep -Fq "Name = 'ToastEnabled'; Value = 0; Type = 'DWord'" \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify the notification master switch"
+grep -Fq "Name = 'SearchboxTaskbarMode'; Value = 0; Type = 'DWord'" \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify hidden taskbar search"
+grep -Fq "Name = 'InputMethodOverride'; Value = '0409:00000409'; Type = 'String'" \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify the en-US default input method"
+grep -Fq '[int]$state.SchemaVersion -ne 5' \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not require the audio/language rollback schema"
+grep -Fq '$GuestLiteEnglishInputTip' <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify en-US/US as the first input"
+grep -Fq '$GuestLitePinyinInputTip' <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify Microsoft Pinyin as the second input"
+grep -Fq "@('zh-CN', 'zh-Hans-CN')" "$FINALIZER" ||
+    fail "clone finalizer does not accept the Windows 10 canonical Simplified Chinese tag"
+grep -Fq 'Open-GuestLiteUserHive -UserSid ([string]$state.UserSid)' \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not bind per-user checks to the saved SID hive"
+grep -Fq "Registry::HKEY_USERS\\\$UserSid" "$FINALIZER" ||
+    fail "clone finalizer does not address the target user hive under SYSTEM"
+grep -Fq "'Languages', [string[]]@()" <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify language order from the target SID hive"
+if grep -Fq '$state.ComputerName' <<<"$guest_lite_state_reader"; then
+    fail "clone finalizer still binds Guest Lite state to the mutable computer name"
+fi
+grep -Fq '$resumeVerifiedProjection = $null -ne $projectionReceipt' \
+    "$FINALIZER" ||
+    fail "Auto retry does not detect an already validated projection reboot"
+grep -Fq 'interactive Auto retry safely' "$FINALIZER" ||
+    fail "Auto retry does not document the baseline-preserving profile upgrade"
+grep -Fq -- '-RedirectStandardOutput $standardOutput' "$FINALIZER" ||
+    fail "clone Guest Lite output is not redirected away from the rendered console"
+grep -Fq 'Invoke-And-WaitGuestLiteEnforcement' "$FINALIZER" ||
+    fail "clone finalizer does not require a measured SYSTEM enforcement run"
+grep -Fq '$info.LastRunTime -gt $previousRunTime' "$FINALIZER" ||
+    fail "Guest Lite task completion is still coupled to a wall-clock tolerance"
+grep -Fq 'result=pass failures=0' "$FINALIZER" ||
+    fail "clone finalizer does not validate the Guest Lite enforcement receipt"
+grep -Fq 'audio=default-render-muted' "$FINALIZER" ||
+    fail "clone finalizer does not require a measured default-audio mute receipt"
+grep -Fq 'enforcementLastResult = [int64]$guestLiteEnforcement.LastTaskResult' \
+    "$FINALIZER" || fail "clone marker lacks the Guest Lite task result"
 grep -Fq 'schemaVersion = 3' "$FINALIZER" ||
     fail "clone-ready marker schema does not include Guest Lite evidence"
 grep -Fq 'guestLite = [ordered]@{' "$FINALIZER" ||
@@ -157,6 +222,23 @@ grep -Fq '.guestLite.firewallStartMode == "Disabled"' "$VERIFY" ||
     fail "host verifier does not enforce disabled firewall startup"
 grep -Fq '.guestLite.baseFilteringEngine == "preserved-running"' "$VERIFY" ||
     fail "host verifier does not enforce BFE preservation"
+grep -Fq '.guestLite.enforcementLastResult == 0' "$VERIFY" ||
+    fail "host verifier does not require a clean Guest Lite SYSTEM run"
+grep -Fq '.guestLite.notifications == "disabled"' "$VERIFY" ||
+    fail "host verifier does not require notifications to be disabled"
+grep -Fq '.guestLite.taskbarSearch == "hidden"' "$VERIFY" ||
+    fail "host verifier does not require taskbar search to be hidden"
+grep -Fq '.guestLite.defaultInputMethod == "0409:00000409"' "$VERIFY" ||
+    fail "host verifier does not require the en-US default input method"
+grep -Fq '.guestLite.inputOrder == "en-US/US,zh-CN/Microsoft-Pinyin"' "$VERIFY" ||
+    fail "host verifier does not require en-US first and Microsoft Pinyin second"
+grep -Fq '.guestLite.audio == "muted"' "$VERIFY" ||
+    fail "host verifier does not require default audio to be muted"
+safe_identity_block=$(sed -n \
+    '/^SAFE_IDENTITY_JSON=/,/^umount -- /p' "$VERIFY")
+if grep -Fq 'guestLiteProfile:' <<<"$safe_identity_block"; then
+    fail "host verifier leaks non-identity Guest Lite data into its strict identity contract"
+fi
 if grep -Eiq 'bcdedit([.]exe)?[[:space:]]+/(set|deletevalue)|testsigning[[:space:]]+(on|yes|true|1)|nointegritychecks[[:space:]]+(on|yes|true|1)' \
         "$XML" "$FINALIZER" "$INSTALLER" "$CLONE" "$EXPORT" "$IMPORT" \
         "$INITIAL" "$VERIFY" "$PACKAGER" "$COORDINATOR"; then

@@ -41,13 +41,16 @@
 #   --cpu-isolate      CPU 隔离 required 模式（默认；保留为显式兼容参数）
 #   --cpu-isolate-auto CPU 隔离 auto 模式（不可用时显式降级继续）
 #   --no-cpu-isolate   关闭 CPU 隔离
+#   --host-performance 启动前必须应用动态全频段宿主性能策略
+#   --no-host-performance 本次不改变宿主性能策略
 #   --svc-cpus <0..64|auto>
 #                      QEMU 主循环/显示/IO 专用逻辑 CPU 数（默认 0，不单独分配）
 #   --dgame-preview    为 DGame 创建独立本地 fb-shm 帧源（native 默认）
 #   --no-dgame-preview 关闭 DGame 本地预览兼容端点
 #   --dgame-preview-rate <Hz>  本地预览帧率 1..240（默认 60）
 #   --dgame-preview-gpu 优先 SDL/GTK texture -> dma-buf（默认）
-#   --no-dgame-preview-gpu 只保留 SHM 兼容帧
+#   --no-dgame-preview-gpu 禁用 GPU-first/native EGL 启动，保留 SHM fallback
+#                      （native Wayland A/B 必选）
 #   --stream <URL>      启用 fb-shm 区域推流；必须给显式目标 URL/绝对文件
 #   --stream-roi X,Y,W,H  固定推流区域（默认完整主显示）
 #   --stream-rate <Hz>  捕获/编码帧率 1..240（默认 30）
@@ -62,6 +65,13 @@
 #   --dry-run          只打印最终 QEMU argv，不分配 mdev/不启动
 #   --numlock          默认；根据 Windows USB LED 回报确保小键盘数字键开启
 #   --no-numlock       禁用本次启动的 NumLock 自动收敛
+#   --low-latency-input 显式把 usb-kbd/usb-mouse interrupt interval 改为 1ms
+#                      （会改变 endpoint descriptor 指纹；默认关闭）
+#   --no-low-latency-input 恢复设备目录原始 USB interval（默认）
+#   --guest-cursor     SDL 优先使用 QEMU 收到的权威 guest cursor sprite；
+#                      unavailable 时自动保留 host 光标，不猜 framebuffer
+#   --auto-cursor      REGION 内确认到拖窗软件箭头时隐藏 host 光标（可选）
+#   --host-cursor      SDL 始终使用 host 光标兜底（默认，跟手优先）
 #   --no-tame-gnome    不让本地 QEMU/viewer 动态处理 GNOME/IBus 宿主快捷键
 #   --tame-gnome       鼠标在本地窗口内时临时关闭宿主 Ctrl+Alt+Del/Super/Alt+Tab
 #   --extra "<args>"   透传额外 QEMU 参数
@@ -96,14 +106,23 @@
 #                     IBus/Fcitx/XIM；0 恢复旧行为，auto 仅检测到 IME 时隔离
 #   QEMU_SDL_PRESENT_MODE fixed|dynamic；默认 fixed，SDL 固定 60Hz Present；
 #                     dynamic 保留旧的按画面变化 Present 行为
+#   QEMU_SDL_TITLE_FPS auto|0|1；默认 auto。X11 实时更新标题；Wayland
+#                     仅在启动器找到 Cairo libdecor 时启用，否则保持静态标题
+#   QEMU_SDL_CURSOR_MODE auto|host|guest；默认 host，保留宿主即时光标；
+#                     auto 只在左键拖动且 REGION 内严格确认配置的箭头
+#                     模板时隐藏 host 光标
 #   QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP 0|1；默认 0，SDL 窗口运行期间阻止
 #                     宿主屏保/显示器休眠；1 恢复上游 QEMU 的自动息屏行为
 #   QEMU_SDL_GNOME_ANIMATIONS off|on；默认 off。GNOME 下由可逆守护器
 #                     去掉 SDL 窗口最小化/恢复/最大化的 clone 双影；
 #                     最后一个 G-11 SDL 退出后恢复宿主原值
+#   G11_SDL_WINDOW_MODE native-wayland-v1 仅由性能 wrapper 的显式
+#                     --native-wayland A/B 设置；不是默认窗口路径
 #   GUEST_NUMLOCK     1=默认按 guest LED 状态保持 NumLock 开启；0=关闭
+#   G11_USB_HID_LOW_LATENCY 1=键盘及相对鼠标宣告 1ms USB poll；0=保持
+#                     profile 原始 endpoint descriptor（默认 0）
 #   G11_CHIPSET_PRESENTATION catalog|off；默认 catalog，把主板目录中的
-#                     H81/H97/B150/B360 映射到 00:1f.0；off 为兼容回退
+#                     H81/H97/B150/B360/X79 映射到 00:1f.0；off 为兼容回退
 #                     不修改 Windows 注册表，也不盲目发送切换键
 #   DISPLAY_WIDTH/HEIGHT  旧 external viewer 窗口大小 (默认 1920x1080)
 #   VGPU_ROMBAR      vGPU ROM BAR 策略 (auto|0|1；native 默认 0)
@@ -122,6 +141,14 @@
 #                     新配置按 BOARD_TPM_VERSION 自动选择；旧配置仍默认 TPM 2.0
 #   MEM_GUARD/MEM_FORCE  prealloc 内存护栏及显式风险旁路
 #   HOST_OOM_PROTECT 1=将当前 VM 进程树临时设为 oom_score_adj=-500
+#   G11_HOST_PERFORMANCE auto|required|off（默认 auto）；释放 CPU 硬件
+#                     min/max 全频段、保持动态 governor、开启睿频，并避免 THP
+#                     同步整理造成的卡顿。不会按来宾 CPU 型号设置频率上限
+#   G11_RTC_CLOCK    vm|host（默认 vm）；vm 与 V-11 一致，减少 RTC/TSC 双时基
+#                     在宿主调度抖动时产生的同步告警；host 为兼容回退
+#   G11_TSC_POLICY   auto|profile|host|omit（默认 auto）；启动前读取真实 KVM
+#                     TSC scaling 能力。支持时保持目录 TSC；不支持时显式使用
+#                     宿主 invariant TSC，避免带着不可能的缩放值启动
 #   PROXY            QMP `.proxy` 兼容别名开关（0/1，默认 0）
 #   CPU_ISOLATION    auto|required|off（默认 required）
 #   CPU_ISOLATION_AUTO_INSTALL  缺 helper/依赖时自动安装（0/1，默认 1）
@@ -401,6 +428,8 @@ input_profile_validate_catalog
 source "$here/lib/vm-tpm.sh"
 # shellcheck source=lib/cpu-isolation.sh
 source "$here/lib/cpu-isolation.sh"
+# shellcheck source=lib/host-performance.sh
+source "$here/lib/host-performance.sh"
 # shellcheck source=lib/windows-unattend.sh
 source "$here/lib/windows-unattend.sh"
 # shellcheck source=lib/vgpu-host-config.sh
@@ -1336,7 +1365,7 @@ case "${G11_HARDWARE_CONTRACT_VERSION-}" in
             exit 2
         }
         case "$expected_profile_lifecycle" in
-            new|explicit-new)
+            new|explicit-new|archived)
                 [[ "$CPU_REALIZATION_POLICY" == enforced ]] || {
                     echo "[start-vm] CPU realization policy conflicts with platform ${PLATFORM}: ${CPU_REALIZATION_POLICY}/${expected_profile_lifecycle}" >&2
                     exit 2
@@ -2028,9 +2057,14 @@ TAME_GNOME="${TAME_GNOME:-auto}"
 QEMU_SDL_WINDOWS_CURSOR="${QEMU_SDL_WINDOWS_CURSOR:-$VM_ASSET_DIR/aero_arrow.cur}"
 QEMU_SDL_DISABLE_IBUS="${QEMU_SDL_DISABLE_IBUS:-1}"
 QEMU_SDL_PRESENT_MODE="${QEMU_SDL_PRESENT_MODE:-fixed}"
+QEMU_SDL_TARGET_FPS="${QEMU_SDL_TARGET_FPS:-60}"
+QEMU_SDL_INPUT_POLL_MS="${QEMU_SDL_INPUT_POLL_MS:-2}"
+QEMU_SDL_TITLE_FPS="${QEMU_SDL_TITLE_FPS:-auto}"
+QEMU_SDL_CURSOR_MODE="${QEMU_SDL_CURSOR_MODE:-host}"
 QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP="${QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP:-0}"
 QEMU_SDL_GNOME_ANIMATIONS="${QEMU_SDL_GNOME_ANIMATIONS:-off}"
 GUEST_NUMLOCK="${GUEST_NUMLOCK:-1}"
+G11_USB_HID_LOW_LATENCY="${G11_USB_HID_LOW_LATENCY:-0}"
 G11_CHIPSET_PRESENTATION="${G11_CHIPSET_PRESENTATION:-catalog}"
 
 should_tame_gnome_super() {
@@ -2040,6 +2074,94 @@ should_tame_gnome_super() {
         0|no|false|off) return 1 ;;
     esac
     gnome_super_shortcuts_is_gnome && gnome_super_shortcuts_available
+}
+
+find_libdecor_cairo_plugin() {
+    local candidate multiarch=""
+
+    if command -v dpkg-architecture >/dev/null 2>&1; then
+        multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)
+    fi
+    for candidate in \
+            "${multiarch:+/usr/lib/$multiarch/libdecor/plugins-1/libdecor-cairo.so}" \
+            /usr/lib/libdecor/plugins-1/libdecor-cairo.so \
+            /usr/lib64/libdecor/plugins-1/libdecor-cairo.so; do
+        [[ -n "$candidate" && -f "$candidate" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    while IFS= read -r candidate; do
+        [[ -f "$candidate" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done < <(find /usr/lib /usr/lib64 -maxdepth 6 -type f \
+        -path '*/libdecor/plugins-1/libdecor-cairo.so' -print 2>/dev/null)
+    return 1
+}
+
+sdl_session_likely_wayland() {
+    case "${SDL_VIDEODRIVER:-}" in
+        wayland) return 0 ;;
+        ?*)      return 1 ;;
+    esac
+    [[ "${XDG_SESSION_TYPE:-}" == wayland && -n "${WAYLAND_DISPLAY:-}" ]]
+}
+
+configure_sdl_wayland_decor() {
+    local cairo_plugin plugin_dir plugin_link unexpected
+
+    sdl_session_likely_wayland || return 0
+    [[ "$QEMU_SDL_TITLE_FPS" != 0 ]] || return 0
+
+    if [[ -n "${LIBDECOR_PLUGIN_DIR:-}" ]]; then
+        if [[ "$DRY_RUN" != 1 ]]; then
+            echo "[start-vm] 保留显式 LIBDECOR_PLUGIN_DIR；标题 FPS 按 QEMU_SDL_TITLE_FPS=${QEMU_SDL_TITLE_FPS} 处理"
+        fi
+        return 0
+    fi
+
+    cairo_plugin=$(find_libdecor_cairo_plugin 2>/dev/null || true)
+    if [[ -z "$cairo_plugin" ]]; then
+        if [[ "$DRY_RUN" != 1 ]]; then
+            if [[ "$QEMU_SDL_TITLE_FPS" == 1 ]]; then
+                echo "[start-vm] WARN: 已显式开启 Wayland 实时标题，但未找到 Cairo libdecor；libdecor-gtk 可能重复输出 GDK monitor 告警" >&2
+            else
+                echo "[start-vm] SDL Wayland 未找到 Cairo libdecor；使用静态标题，避免 libdecor-gtk/GDK 日志风暴" >&2
+            fi
+            echo "[start-vm] 可选一键安装: ./deploy/host/install-g11-sdl-wayland-decor.sh" >&2
+        fi
+        return 0
+    fi
+
+    plugin_dir="$INSTANCE_RUN_DIR/libdecor-cairo"
+    plugin_link="$plugin_dir/libdecor-cairo.so"
+    if [[ "$DRY_RUN" != 1 ]]; then
+        if [[ -e "$plugin_dir" && ! -d "$plugin_dir" ]]; then
+            echo "[start-vm] libdecor 私有目录被非目录占用: $plugin_dir" >&2
+            return 1
+        fi
+        mkdir -p -- "$plugin_dir"
+        chmod 0700 -- "$plugin_dir"
+        unexpected=$(find "$plugin_dir" -mindepth 1 -maxdepth 1 \
+            ! -name libdecor-cairo.so -print -quit 2>/dev/null || true)
+        if [[ -n "$unexpected" ]]; then
+            echo "[start-vm] libdecor 私有目录含未知文件，拒绝加载: $unexpected" >&2
+            return 1
+        fi
+        if [[ -e "$plugin_link" && ! -L "$plugin_link" ]]; then
+            echo "[start-vm] libdecor Cairo 入口被普通文件占用: $plugin_link" >&2
+            return 1
+        fi
+        ln -sfn -- "$cairo_plugin" "$plugin_link"
+    fi
+    export LIBDECOR_PLUGIN_DIR="$plugin_dir"
+    if [[ "$QEMU_SDL_TITLE_FPS" == auto ]]; then
+        QEMU_SDL_TITLE_FPS=1
+        export QEMU_SDL_TITLE_FPS
+    fi
+    if [[ "$DRY_RUN" != 1 ]]; then
+        echo "[start-vm] SDL Wayland 标题装饰：Cairo（实时 Content/Present，绕开 libdecor-gtk）"
+    fi
 }
 
 # ivshmem 只是旧 guest relay 的传输通道。默认 native 路径不向
@@ -2052,6 +2174,9 @@ DRY_RUN="${DRY_RUN:-0}"
 PROXY="${PROXY:-0}"
 CPU_ISOLATION="${CPU_ISOLATION:-}"
 HOST_OOM_PROTECT="${HOST_OOM_PROTECT:-1}"
+G11_HOST_PERFORMANCE="${G11_HOST_PERFORMANCE:-auto}"
+G11_RTC_CLOCK="${G11_RTC_CLOCK:-vm}"
+G11_TSC_POLICY="${G11_TSC_POLICY:-auto}"
 QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-0}"
 HOST_RESERVE_CORES="${HOST_RESERVE_CORES:-auto}"
 CPU_ISOLATION_QMP_TIMEOUT="${CPU_ISOLATION_QMP_TIMEOUT:-90}"
@@ -2178,6 +2303,8 @@ while (( $# > 0 )); do
         --cpu-isolate) CPU_ISOLATION=required; shift ;;
         --cpu-isolate-auto) CPU_ISOLATION=auto; shift ;;
         --no-cpu-isolate) CPU_ISOLATION=off; shift ;;
+        --host-performance) G11_HOST_PERFORMANCE=required; shift ;;
+        --no-host-performance) G11_HOST_PERFORMANCE=off; shift ;;
         --svc-cpus)
             require_cli_value "$1" "$#"
             QEMU_SERVICE_CPUS="$2"; shift 2 ;;
@@ -2233,6 +2360,11 @@ while (( $# > 0 )); do
         --no-stream) STREAM_ENABLED=0; STREAM_OUTPUT=""; shift ;;
         --numlock) GUEST_NUMLOCK=1; shift ;;
         --no-numlock) GUEST_NUMLOCK=0; shift ;;
+        --low-latency-input) G11_USB_HID_LOW_LATENCY=1; shift ;;
+        --no-low-latency-input) G11_USB_HID_LOW_LATENCY=0; shift ;;
+        --guest-cursor) QEMU_SDL_CURSOR_MODE=guest; shift ;;
+        --auto-cursor) QEMU_SDL_CURSOR_MODE=auto; shift ;;
+        --host-cursor) QEMU_SDL_CURSOR_MODE=host; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --tame-gnome) TAME_GNOME=1; shift ;;
         --no-tame-gnome) TAME_GNOME=0; shift ;;
@@ -2248,6 +2380,21 @@ done
 case "$GUEST_NUMLOCK" in
     0|1) ;;
     *) echo "GUEST_NUMLOCK 必须是 0 或 1: $GUEST_NUMLOCK" >&2; exit 2 ;;
+esac
+case "$G11_USB_HID_LOW_LATENCY" in
+    0|1) ;;
+    *)
+        echo "G11_USB_HID_LOW_LATENCY 必须是 0 或 1: $G11_USB_HID_LOW_LATENCY" >&2
+        exit 2
+        ;;
+esac
+QEMU_SDL_CURSOR_MODE=${QEMU_SDL_CURSOR_MODE,,}
+case "$QEMU_SDL_CURSOR_MODE" in
+    auto|host|guest) ;;
+    *)
+        echo "QEMU_SDL_CURSOR_MODE 必须是 auto、host 或 guest: $QEMU_SDL_CURSOR_MODE" >&2
+        exit 2
+        ;;
 esac
 
 INSTALL_MEDIA_BACKEND=${INSTALL_MEDIA_BACKEND,,}
@@ -2725,6 +2872,18 @@ cpu_isolation_ensure_ready || {
     echo "[start-vm] 默认 required CPU 隔离准备失败；VM 未启动" >&2
     exit 1
 }
+g11_host_performance_normalize_mode || {
+    echo "G11_HOST_PERFORMANCE 必须是 auto、required 或 off" >&2
+    exit 2
+}
+case "${G11_RTC_CLOCK,,}" in
+    vm|host) G11_RTC_CLOCK=${G11_RTC_CLOCK,,} ;;
+    *) echo "G11_RTC_CLOCK 必须是 vm 或 host" >&2; exit 2 ;;
+esac
+case "${G11_TSC_POLICY,,}" in
+    auto|profile|host|omit) G11_TSC_POLICY=${G11_TSC_POLICY,,} ;;
+    *) echo "G11_TSC_POLICY 必须是 auto、profile、host 或 omit" >&2; exit 2 ;;
+esac
 [[ "$HOST_OOM_PROTECT" == 0 || "$HOST_OOM_PROTECT" == 1 ]] || {
     echo "HOST_OOM_PROTECT 必须是 0 或 1" >&2; exit 2;
 }
@@ -2806,6 +2965,7 @@ if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
     fi
     MONITOR_SYNC=0
 fi
+
 case "$REPAIR_DISPLAY_VARS" in
     auto|force|off) ;;
     *) echo "REPAIR_DISPLAY_VARS 必须是 auto、force 或 off" >&2; exit 2 ;;
@@ -3066,6 +3226,12 @@ else
             exit 1
             ;;
     esac
+fi
+
+if ! g11_tsc_policy_resolve "$here/scripts/kvm-capabilities.py" \
+        "$TSC_FREQ" "$G11_TSC_POLICY"; then
+    echo "[start-vm] TSC 策略无法实现: policy=${G11_TSC_POLICY} profile=${TSC_FREQ}Hz host=${G11_KVM_TSC_KHZ:-unknown}kHz error=${G11_KVM_ERROR:-unknown}" >&2
+    exit 1
 fi
 
 # 与 guest 磁盘无关地读取 QEMU 自身 ELF，先验证 host file AIO 后端。
@@ -3339,17 +3505,25 @@ for ((mem_i = 0; mem_i < MEM_SLOTS; mem_i += 1)); do
     esac
 done
 case "${MEM_CHANNEL_MODE:-}" in
-    dual-channel)
-        (( MEM_SLOTS == 2 )) &&
-            [[ "${MEM_MODULE_SIZES[0]}" == "${MEM_MODULE_SIZES[1]}" &&
-               "${MEM_MODEL_PARTS[0]}" == "${MEM_MODEL_PARTS[1]}" &&
-               "${MEM_RANKS[0]}" == "${MEM_RANKS[1]}" &&
-               "${MEM_DEVICE_WIDTHS[0]}" == "${MEM_DEVICE_WIDTHS[1]}" &&
-               "${MEM_MODULE_JEP106_IDS[0]}" == "${MEM_MODULE_JEP106_IDS[1]}" &&
-               "${MEM_DRAM_JEP106_IDS[0]}" == "${MEM_DRAM_JEP106_IDS[1]}" ]] || {
-            echo "dual-channel 必须是两条同容量、同料号、同几何 DIMM" >&2
-            exit 2
-        }
+    dual-channel|triple-channel|quad-channel)
+        case "${MEM_CHANNEL_MODE}:${MEM_SLOTS}" in
+            dual-channel:2|triple-channel:3|quad-channel:4) ;;
+            *)
+                echo "内存通道数必须等于已安装条数: ${MEM_CHANNEL_MODE}/${MEM_SLOTS}" >&2
+                exit 2
+                ;;
+        esac
+        for ((mem_i = 1; mem_i < MEM_SLOTS; mem_i += 1)); do
+            [[ "${MEM_MODULE_SIZES[0]}" == "${MEM_MODULE_SIZES[mem_i]}" &&
+               "${MEM_MODEL_PARTS[0]}" == "${MEM_MODEL_PARTS[mem_i]}" &&
+               "${MEM_RANKS[0]}" == "${MEM_RANKS[mem_i]}" &&
+               "${MEM_DEVICE_WIDTHS[0]}" == "${MEM_DEVICE_WIDTHS[mem_i]}" &&
+               "${MEM_MODULE_JEP106_IDS[0]}" == "${MEM_MODULE_JEP106_IDS[mem_i]}" &&
+               "${MEM_DRAM_JEP106_IDS[0]}" == "${MEM_DRAM_JEP106_IDS[mem_i]}" ]] || {
+                echo "多通道内存必须逐条同容量、同料号、同几何 DIMM" >&2
+                exit 2
+            }
+        done
         ;;
     flex)
         [[ "$MEM_MODULE_MB_LIST" == 4096,2048 &&
@@ -3359,7 +3533,7 @@ case "${MEM_CHANNEL_MODE:-}" in
         }
         ;;
     *)
-        echo "MEM_CHANNEL_MODE 必须是 dual-channel 或 flex: ${MEM_CHANNEL_MODE:-<empty>}" >&2
+        echo "MEM_CHANNEL_MODE 必须是 dual/triple/quad-channel 或归档 flex: ${MEM_CHANNEL_MODE:-<empty>}" >&2
         exit 2
         ;;
 esac
@@ -3471,17 +3645,30 @@ if [[ "$DRY_RUN" != 1 ]]; then
         exit 1
     fi
     unset QEMU_XHCI_HELP
-    if [[ "$GUEST_NUMLOCK" == 1 ]]; then
-        if ! QEMU_KBD_HELP=$("$QEMU_BIN" -device usb-kbd,help 2>&1) ||
-                ! grep -q '^  x-force-numlock-on=<bool>' \
-                    <<<"$QEMU_KBD_HELP" ||
-                ! grep -q '^  x-numlock-on-confirmed=<bool>' \
+    if [[ "$GUEST_NUMLOCK" == 1 || "$G11_USB_HID_LOW_LATENCY" == 1 ]]; then
+        QEMU_KBD_EXTENSIONS_OK=1
+        QEMU_KBD_HELP=""
+        if ! QEMU_KBD_HELP=$("$QEMU_BIN" -device usb-kbd,help 2>&1); then
+            QEMU_KBD_EXTENSIONS_OK=0
+        fi
+        if [[ "$GUEST_NUMLOCK" == 1 ]] &&
+                { ! grep -q '^  x-force-numlock-on=<bool>' \
+                      <<<"$QEMU_KBD_HELP" ||
+                  ! grep -q '^  x-numlock-on-confirmed=<bool>' \
+                      <<<"$QEMU_KBD_HELP"; }; then
+            QEMU_KBD_EXTENSIONS_OK=0
+        fi
+        if [[ "$G11_USB_HID_LOW_LATENCY" == 1 ]] &&
+                ! grep -q '^  x-low-latency=<bool>' \
                     <<<"$QEMU_KBD_HELP"; then
-            echo "[start-vm] 当前 QEMU 缺少 G-11 NumLock LED 状态机" >&2
+            QEMU_KBD_EXTENSIONS_OK=0
+        fi
+        if [[ "$QEMU_KBD_EXTENSIONS_OK" != 1 ]]; then
+            echo "[start-vm] 当前 QEMU 缺少所请求的 G-11 USB HID 扩展" >&2
             echo "[start-vm] 先运行 ./deploy/host/build-qemu.sh 增量重编，再重试" >&2
             exit 1
         fi
-        unset QEMU_KBD_HELP
+        unset QEMU_KBD_HELP QEMU_KBD_EXTENSIONS_OK
     fi
     if [[ "$MODE" == install && "$INSTALL_MEDIA_BACKEND" == usb ]] &&
             ! "$QEMU_BIN" -device usb-storage,help >/dev/null 2>&1; then
@@ -3712,8 +3899,22 @@ esac
 # tree; they do not change the desktop's global input-source setting.
 if [[ "$LOCAL_INPUT_BACKEND" == sdl ]]; then
     # DGame 的 G-11 窗口发现合同使用 win10-N；QEMU 进程名继续保留 vmN，
-    # 避免改变 ctl/stop 生命周期。X11 WM_CLASS 与主窗口标题使用同一实例名。
+    # 避免改变 ctl/stop 生命周期。X11 用 WM_CLASS，native Wayland
+    # 用 xdg_toplevel app_id；SDL 2.30 对两者分别读取下列环境变量。
     export SDL_VIDEO_X11_WMCLASS="win10-${VM_ID}"
+    export SDL_VIDEO_WAYLAND_WMCLASS="win10-${VM_ID}"
+    QEMU_SDL_TITLE_FPS=${QEMU_SDL_TITLE_FPS,,}
+    case "$QEMU_SDL_TITLE_FPS" in
+        auto) ;;
+        1|yes|true|on) QEMU_SDL_TITLE_FPS=1 ;;
+        0|no|false|off) QEMU_SDL_TITLE_FPS=0 ;;
+        *)
+            echo "QEMU_SDL_TITLE_FPS 必须是 auto 或 0/1: $QEMU_SDL_TITLE_FPS" >&2
+            exit 2
+            ;;
+    esac
+    export QEMU_SDL_TITLE_FPS
+    export QEMU_SDL_CURSOR_MODE
     case "${QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP,,}" in
         0|no|false|off)
             QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP=0
@@ -3743,6 +3944,7 @@ if [[ "$LOCAL_INPUT_BACKEND" == sdl ]]; then
             export SDL_VIDEODRIVER=x11
         fi
     fi
+    configure_sdl_wayland_decor
     case "${QEMU_SDL_GNOME_ANIMATIONS,,}" in
         off|on)
             QEMU_SDL_GNOME_ANIMATIONS="${QEMU_SDL_GNOME_ANIMATIONS,,}"
@@ -3828,6 +4030,21 @@ case "$MODE" in
 esac
 
 if [[ "$MODE" == vgpu-sdl ]]; then
+    if [[ ! "$QEMU_SDL_TARGET_FPS" =~ ^[0-9]+$ ]] ||
+            (( 10#$QEMU_SDL_TARGET_FPS < 30 ||
+               10#$QEMU_SDL_TARGET_FPS > 240 )); then
+        echo "QEMU_SDL_TARGET_FPS 必须是 30..240: $QEMU_SDL_TARGET_FPS" >&2
+        exit 2
+    fi
+    if [[ ! "$QEMU_SDL_INPUT_POLL_MS" =~ ^[0-9]+$ ]] ||
+            (( 10#$QEMU_SDL_INPUT_POLL_MS < 1 ||
+               10#$QEMU_SDL_INPUT_POLL_MS > 16 )); then
+        echo "QEMU_SDL_INPUT_POLL_MS 必须是 1..16: $QEMU_SDL_INPUT_POLL_MS" >&2
+        exit 2
+    fi
+    QEMU_SDL_TARGET_FPS=$((10#$QEMU_SDL_TARGET_FPS))
+    QEMU_SDL_INPUT_POLL_MS=$((10#$QEMU_SDL_INPUT_POLL_MS))
+    export QEMU_SDL_TARGET_FPS QEMU_SDL_INPUT_POLL_MS
     case "${QEMU_SDL_PRESENT_MODE,,}" in
         fixed|dynamic)
             QEMU_SDL_PRESENT_MODE="${QEMU_SDL_PRESENT_MODE,,}"
@@ -3840,10 +4057,32 @@ if [[ "$MODE" == vgpu-sdl ]]; then
     esac
     if [[ "$DRY_RUN" != 1 ]]; then
         if [[ "$QEMU_SDL_PRESENT_MODE" == fixed ]]; then
-            echo "[start-vm] SDL Present 模式：固定 60Hz（默认）"
+            echo "[start-vm] SDL Present 模式：固定 ${QEMU_SDL_TARGET_FPS}Hz（默认）"
         else
             echo "[start-vm] SDL Present 模式：动态（仅画面变化时 Present）"
         fi
+        case "$QEMU_SDL_TITLE_FPS" in
+            1)
+                echo "[start-vm] SDL 输入轮询：${QEMU_SDL_INPUT_POLL_MS}ms；标题实时显示 Content/Present"
+                ;;
+            0)
+                echo "[start-vm] SDL 输入轮询：${QEMU_SDL_INPUT_POLL_MS}ms；标题 FPS 已显式关闭"
+                ;;
+            auto)
+                echo "[start-vm] SDL 输入轮询：${QEMU_SDL_INPUT_POLL_MS}ms；标题 FPS 自动策略（Wayland 静态、X11 实时）"
+                ;;
+        esac
+        case "$QEMU_SDL_CURSOR_MODE" in
+            auto)
+                echo "[start-vm] SDL 光标策略：自动；仅确认 REGION 已合成拖窗箭头时隐藏 host fallback（显式模式）"
+                ;;
+            guest)
+                echo "[start-vm] SDL 光标策略：guest sprite 优先；不可用时自动保留 host fallback"
+                ;;
+            host)
+                echo "[start-vm] SDL 光标策略：始终使用 host fallback（默认，跟手优先）"
+                ;;
+        esac
     fi
 
     if [[ -r "$QEMU_SDL_WINDOWS_CURSOR" ]]; then
@@ -4003,7 +4242,7 @@ esac
 XHCI_DEVICE_ID=$BOARD_XHCI_DEVICE_ID
 
 if [[ "$XHCI_IDENTITY_LEGACY" == 1 ]]; then
-    XHCI_PCI_VENDOR_ID=0x8086
+    XHCI_PCI_VENDOR_ID=$BOARD_XHCI_VENDOR_ID
     XHCI_PCI_DEVICE_ID=$XHCI_DEVICE_ID
     XHCI_PCI_REVISION=0x01
     XHCI_PCI_BUS=pcie.0
@@ -4067,10 +4306,24 @@ fi
 MEM_SERIALS=${MEM_SERIAL_LIST//,/|}
 unset MEM_SN_SOURCE legacy_mem_sn
 
-# Four-slot consumer boards normally populate A2/B2 first.  The remaining
-# Type 17 records describe the real empty A1/B1 sockets rather than inventing
-# duplicate A2/B2 or CHANNEL C/D labels.
-if (( MEM_BOARD_SLOTS == 4 && MEM_SLOTS == 2 )); then
+# X79 is quad-channel-capable at every capacity.  Two, three and four matching
+# sticks truthfully occupy channels A/B, A/B/C and A/B/C/D.  Any second socket
+# per channel is emitted as empty after the populated records.  Older archived
+# four-slot boards retain their historical A2/B2 population order.
+if [[ "$BOARD_CHIPSET" == X79 && "$MEM_BOARD_SLOTS" == 8 && "$MEM_SLOTS" == 2 ]]; then
+    MEM_LOCATORS='DIMM_A1|DIMM_B1|DIMM_C1|DIMM_D1|DIMM_A2|DIMM_B2|DIMM_C2|DIMM_D2'
+    MEM_BANKS='P0 CHANNEL A|P0 CHANNEL B|P0 CHANNEL C|P0 CHANNEL D|P0 CHANNEL A|P0 CHANNEL B|P0 CHANNEL C|P0 CHANNEL D'
+elif [[ "$BOARD_CHIPSET" == X79 && "$MEM_BOARD_SLOTS" == 8 && "$MEM_SLOTS" == 3 ]]; then
+    MEM_LOCATORS='DIMM_A1|DIMM_B1|DIMM_C1|DIMM_D1|DIMM_A2|DIMM_B2|DIMM_C2|DIMM_D2'
+    MEM_BANKS='P0 CHANNEL A|P0 CHANNEL B|P0 CHANNEL C|P0 CHANNEL D|P0 CHANNEL A|P0 CHANNEL B|P0 CHANNEL C|P0 CHANNEL D'
+elif [[ "$BOARD_CHIPSET" == X79 && "$MEM_BOARD_SLOTS" == 8 && "$MEM_SLOTS" == 4 ]]; then
+    MEM_LOCATORS='DIMM_A1|DIMM_B1|DIMM_C1|DIMM_D1|DIMM_A2|DIMM_B2|DIMM_C2|DIMM_D2'
+    MEM_BANKS='P0 CHANNEL A|P0 CHANNEL B|P0 CHANNEL C|P0 CHANNEL D|P0 CHANNEL A|P0 CHANNEL B|P0 CHANNEL C|P0 CHANNEL D'
+elif [[ "$BOARD_CHIPSET" == X79 && "$MEM_BOARD_SLOTS" == 4 &&
+        ( "$MEM_SLOTS" == 2 || "$MEM_SLOTS" == 3 || "$MEM_SLOTS" == 4 ) ]]; then
+    MEM_LOCATORS='DIMM_A1|DIMM_B1|DIMM_C1|DIMM_D1'
+    MEM_BANKS='P0 CHANNEL A|P0 CHANNEL B|P0 CHANNEL C|P0 CHANNEL D'
+elif (( MEM_BOARD_SLOTS == 4 && MEM_SLOTS == 2 )); then
     MEM_LOCATORS='DIMM_A2|DIMM_B2|DIMM_A1|DIMM_B1'
     MEM_BANKS='P0 CHANNEL A|P0 CHANNEL B|P0 CHANNEL A|P0 CHANNEL B'
 elif (( MEM_BOARD_SLOTS == 4 && MEM_SLOTS == 4 )); then
@@ -4136,14 +4389,28 @@ SMBIOS+=( -smbios "type=4,sock_pfx=CPU,manufacturer=Intel(R) Corporation,version
 SMBIOS+=( -smbios "type=7,socket_designation=L1 Cache,level=1,installed_size=${CPU_L1_CACHE_KB},max_size=${CPU_L1_CACHE_KB},associativity=7,cache_type=5" )
 SMBIOS+=( -smbios "type=7,socket_designation=L2 Cache,level=2,installed_size=${CPU_L2_CACHE_KB},max_size=${CPU_L2_CACHE_KB},associativity=${CPU_L2_ASSOC},cache_type=5" )
 SMBIOS+=( -smbios "type=7,socket_designation=L3 Cache,level=3,installed_size=${CPU_L3_CACHE_KB},max_size=${CPU_L3_CACHE_KB},associativity=${CPU_L3_ASSOC},cache_type=5" )
-# type 9 (System Slots) — 主显卡槽是 Gen3 x16；第二个已占用槽严格
+# type 9 (System Slots) — 主显卡槽代际跟随 CPU PCIe 控制器；第二个已占用槽严格
 # 跟随主板实际布线，用于解释 Intel CT add-in NIC。
 #   slot_type: 0xB1 = PCI Express Gen 3 (width comes from data_bus_width)
 #              0xAB = PCI Express Gen 2 (width comes from data_bus_width)
 #   current_usage: 0x03 Available, 0x04 In Use
 #   slot_length: 0x03 Short, 0x04 Long
 #   chars1 0x0C (3.3V + shared opening); chars2 0x01 (PME)
-SMBIOS+=( -smbios "type=9,slot_designation=${PCIE_MAIN_SLOT},slot_type=177,slot_data_bus_width=13,current_usage=4,slot_length=4,slot_id=1,slot_characteristics1=12,slot_characteristics2=1" )
+case "$CPU_PCIE_GENERATION" in
+    2)
+        PCIE_MAIN_SLOT_TYPE=171
+        GPU_ROOT_PORT_SPEED=5
+        ;;
+    3)
+        PCIE_MAIN_SLOT_TYPE=177
+        GPU_ROOT_PORT_SPEED=8
+        ;;
+    *)
+        echo "CPU PCIe 代际未经审核: ${CPU_PCIE_GENERATION:-<empty>}" >&2
+        exit 2
+        ;;
+esac
+SMBIOS+=( -smbios "type=9,slot_designation=${PCIE_MAIN_SLOT},slot_type=${PCIE_MAIN_SLOT_TYPE},slot_data_bus_width=13,current_usage=4,slot_length=4,slot_id=1,slot_characteristics1=12,slot_characteristics2=1" )
 SMBIOS+=( -smbios "type=9,slot_designation=${PCIE_AUX_SLOT},slot_type=${PCIE_AUX_TYPE},slot_data_bus_width=${PCIE_AUX_WIDTH},current_usage=4,slot_length=${PCIE_AUX_LENGTH},slot_id=2,slot_characteristics1=12,slot_characteristics2=1" )
 # type 11 (OEM Strings) — 真机 BIOS 常有若干无意义字符串，我们塞 2-3 条像 ASUS/MSI
 # 出厂机默认字符串那样。"Default string" 大量真机里会出现。
@@ -4167,7 +4434,8 @@ SMBIOS+=( -smbios "type=17,loc_pfx=${MEM_LOCATORS},bank=${MEM_BANKS},manufacture
 # New profiles always use enforce=on.  Immutable older Skylake/Coffee Lake
 # profiles may use enforce=off only after the bounded preflight proved that
 # the failure is a host-feature gap and that compatibility realization works.
-CPU_ARGS="${CPU_MODEL},enforce=${CPU_ENFORCE_MODE},kvm=off,x-hv-stealth=on,+invtsc,vmx=off,hypervisor=off,vmware-cpuid-freq=off,tsc-freq=${TSC_FREQ}"
+CPU_ARGS="${CPU_MODEL},enforce=${CPU_ENFORCE_MODE},kvm=off,x-hv-stealth=on,+invtsc,vmx=off,hypervisor=off,vmware-cpuid-freq=off"
+[[ -z "$G11_TSC_QEMU_OPTION" ]] || CPU_ARGS+=",${G11_TSC_QEMU_OPTION}"
 MACHINE_ARGS="q35,accel=kvm,vmport=off,smm=on,kernel-irqchip=split,hpet=off,i8042=off"
 MACHINE_ARGS+=",x-oem-id=ALASKA,x-oem-table-id=A M I"  # 覆盖 QEMU ACPI OEM ID (QEMU→AMI)
 
@@ -4295,7 +4563,7 @@ attach_vgpu_root_port() {
     # 00:10.0 location and put the GPU at 01:00.0 so the endpoint retains its
     # PCIe capability.  GTX 750 Ti/1050 use x16; GT 1030 is electrically x4.
     GFX_ARGS+=(
-        -device "pcie-root-port,id=gpu-root-port,bus=pcie.0,addr=0x10,port=0x10,chassis=1,slot=1,hotplug=off,x-speed=8,x-width=${gpu_link_width},x-pci-vendor-id=0x8086,x-pci-device-id=${GPU_ROOT_PORT_DEVICE_ID},x-pci-revision=${GPU_ROOT_PORT_REVISION}"
+        -device "pcie-root-port,id=gpu-root-port,bus=pcie.0,addr=0x10,port=0x10,chassis=1,slot=1,hotplug=off,x-speed=${GPU_ROOT_PORT_SPEED},x-width=${gpu_link_width},x-pci-vendor-id=0x8086,x-pci-device-id=${GPU_ROOT_PORT_DEVICE_ID},x-pci-revision=${GPU_ROOT_PORT_REVISION}"
     )
 }
 
@@ -4648,9 +4916,12 @@ fi
 KBD_NUMLOCK_PROP=""
 [[ "$GUEST_NUMLOCK" == 0 ]] || \
     KBD_NUMLOCK_PROP=',x-force-numlock-on=on'
+HID_LOW_LATENCY_PROP=""
+[[ "$G11_USB_HID_LOW_LATENCY" == 0 ]] || \
+    HID_LOW_LATENCY_PROP=',x-low-latency=on'
 INPUT_ARGS=(
     -device "qemu-xhci,id=xhci,bus=${XHCI_PCI_BUS},addr=${XHCI_PCI_ADDR}"
-    -device "usb-kbd,id=kbd0,bus=xhci.0,usb_version=${KBD_USB_VERSION},vendorid=${KBD_VID},productid=${KBD_PID},bcd-device=${KBD_BCD_DEVICE},manufacturer=${KBD_MFR},product=${KBD_PRODUCT}${KBD_NUMLOCK_PROP}"
+    -device "usb-kbd,id=kbd0,bus=xhci.0,usb_version=${KBD_USB_VERSION},vendorid=${KBD_VID},productid=${KBD_PID},bcd-device=${KBD_BCD_DEVICE},manufacturer=${KBD_MFR},product=${KBD_PRODUCT}${KBD_NUMLOCK_PROP}${HID_LOW_LATENCY_PROP}"
 )
 if [[ "$POINTER_MODE" == absolute ]]; then
     INPUT_ARGS+=(
@@ -4658,9 +4929,20 @@ if [[ "$POINTER_MODE" == absolute ]]; then
     )
 else
     INPUT_ARGS+=(
-        -device "usb-mouse,bus=xhci.0,usb_version=${MOUSE_USB_VERSION},vendorid=${MOUSE_VID},productid=${MOUSE_PID},bcd-device=${MOUSE_BCD_DEVICE},manufacturer=${MOUSE_MFR},product=${MOUSE_PRODUCT}"
+        -device "usb-mouse,bus=xhci.0,usb_version=${MOUSE_USB_VERSION},vendorid=${MOUSE_VID},productid=${MOUSE_PID},bcd-device=${MOUSE_BCD_DEVICE},manufacturer=${MOUSE_MFR},product=${MOUSE_PRODUCT}${HID_LOW_LATENCY_PROP}"
     )
 fi
+
+# Apply the global host policy only after platform/device validation has
+# succeeded.  Any required-mode failure is still before the QEMU process is
+# launched; existing cleanup traps release a prepared TPM or mdev. Shared CPU
+# mode deliberately has no process-count/vCPU-capacity gate: Linux schedules
+# idle guest vCPUs normally, while simultaneous saturation remains an operator
+# performance decision rather than a launcher warning.
+g11_host_performance_apply || {
+    echo "[start-vm] required 宿主性能策略未能应用；VM 未启动" >&2
+    exit 1
+}
 
 echo "启动 VM ${VM_ID} 模式=${MODE}"
 echo "  VM 目录: $(vm_storage_instance_dir "$VM_ID")"
@@ -4678,21 +4960,23 @@ if ((DGAME_PREVIEW_ENABLED)); then
         echo "  DGame transport: GPU first (active display EGL/dma-buf)"
         echo "  DGame fallback: per-client SHM"
     else
-        echo "  DGame transport: SHM only (DGAME_PREVIEW_GPU=off)"
+        echo "  DGame transport: GPU-first disabled; SHM fallback retained"
     fi
     echo "  DGame compatibility: $(dgame_endpoint_path "$VM_ID" fb)"
 fi
-echo "  CPU: ${CPU_MODEL}@${TSC_FREQ}Hz (${CPU_CORES}C/${CPU_VCPUS}T)"
+echo "  CPU: ${CPU_MODEL}@${TSC_FREQ}Hz identity (${CPU_CORES}C/${CPU_VCPUS}T)"
 echo "  CPU realization: policy=${CPU_REALIZATION_POLICY} class=${G11_CPU_CAPABILITY_CLASS} enforce=${CPU_ENFORCE_MODE}"
+echo "  TSC: policy=${G11_TSC_POLICY} source=${G11_TSC_RUNTIME_SOURCE} effective=${G11_TSC_EFFECTIVE_HZ:-host-implicit}Hz / host-dynamic-frequency-independent"
 echo "  硬件合法性: ${HARDWARE_LEGALITY_POLICY}/${G11_HW_LEGALITY_CODE}"
 cpu_isolation_print_plan
+g11_host_performance_print_plan
 echo "  主板: ${BOARD_BRAND} ${BOARD_MODEL} / ${VM_UUID}"
 if [[ "${G11_CHIPSET_PRESENTATION,,}" == catalog ]]; then
     echo "  芯片组: ${CHIPSET_PRESENTATION_NAME} / LPC ${BOARD_LPC_PCI_VENDOR_ID}:${BOARD_LPC_PCI_DEVICE_ID} rev ${BOARD_LPC_PCI_REVISION}（q35/ICH9 行为实现）"
 else
     echo "  芯片组: ICH9（G11_CHIPSET_PRESENTATION=off 兼容回退）"
 fi
-echo "  内存: ${MEM_MODULE_MB_LIST//,/+} MiB ${MEM_MODEL_LIST//,/ + } (${MEM_FAMILY:-unknown}@${MEM_SPEED}, ${MEM_CHANNEL_MODE})"
+echo "  内存: ${MEM_MODULE_MB_LIST//,/+} MiB ${MEM_MODEL_LIST//,/ + } (${MEM_FAMILY:-unknown}@${MEM_SPEED} 身份；运行带宽=host-native/unthrottled，${MEM_CHANNEL_MODE})"
 if [[ "$SSD_INTERFACE" == nvme ]]; then
     echo "  SSD: ${SSD_MODEL} / ${SSD_INTERFACE}:${SSD_CONTROLLER_PROFILE} / PCIe ${SSD_PCIE_GEN}.0 x${SSD_PCIE_LANES} ${SSD_FORM_FACTOR} / fw=${SSD_FIRMWARE_REV} / sector=${SSD_LOGICAL_BLOCK_SIZE}/${SSD_PHYSICAL_BLOCK_SIZE}B / ${SSD_SIZE_BYTES} bytes"
 else
@@ -4715,6 +4999,13 @@ else
     echo "  光驱: 未挂载（默认；仅 --install 或 vmctl.sh cdrom mount 时创建）"
 fi
 echo "  键盘: ${KBD_BRAND} ${KBD_MODEL} / usb-kbd / USB ${KBD_VID#0x}:${KBD_PID#0x} / SN=${KBD_SERIAL_POLICY} / ${KBD_FIDELITY}"
+if [[ "$G11_USB_HID_LOW_LATENCY" == 1 ]]; then
+    if [[ "$POINTER_MODE" == absolute ]]; then
+        echo "  USB 输入延迟: keyboard=1ms opt-in；absolute tablet 已是 1ms（descriptor 指纹权衡）"
+    else
+        echo "  USB 输入延迟: keyboard=1ms / relative mouse=1ms opt-in（descriptor 指纹权衡）"
+    fi
+fi
 if [[ "$GUEST_NUMLOCK" == 1 ]]; then
     echo "  NumLock: guest LED 驱动，明确 OFF 时单次开启（QOM: kbd0）"
 else
@@ -4812,12 +5103,12 @@ fi
 case "$RTC_MODE" in
     localtime)
         export TZ="$VM_RTC_TZ"
-        RTC_ARGS=( -rtc base=localtime,clock=host,driftfix=slew )
+        RTC_ARGS=( -rtc "base=localtime,clock=${G11_RTC_CLOCK},driftfix=slew" )
         PIT_LOST_TICK_POLICY=delay
-        echo "  RTC: host localtime (${TZ}) / clock=host"
+        echo "  RTC: host localtime (${TZ}) / clock=${G11_RTC_CLOCK}"
         ;;
     utc|utc-compat)
-        RTC_ARGS=( -rtc base=utc,clock=host,driftfix=slew )
+        RTC_ARGS=( -rtc "base=utc,clock=${G11_RTC_CLOCK},driftfix=slew" )
         PIT_LOST_TICK_POLICY=discard
         if [[ "$RTC_MODE" == utc-compat ]]; then
             echo "  RTC: UTC compatibility rescue (one boot only)"
@@ -4835,7 +5126,7 @@ QEMU_CMD=(
     -cpu "$CPU_ARGS"
     -smp "${CPU_VCPUS},sockets=1,cores=${CPU_CORES},threads=${CPU_THREADS_PER_CORE}"
     -m "$GUEST_MEM_MB"
-    -object "memory-backend-memfd,id=ram0,size=${GUEST_MEM_MB}M,share=on,prealloc=on"
+    -object "memory-backend-memfd,id=ram0,size=${GUEST_MEM_MB}M,share=on,prealloc=on,merge=off"
     -numa node,memdev=ram0
     "${RTC_ARGS[@]}"
     -global "kvm-pit.lost_tick_policy=${PIT_LOST_TICK_POLICY}"

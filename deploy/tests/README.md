@@ -27,19 +27,23 @@ bash deploy/tests/vgpu/test_storage_aio.sh
 bash deploy/tests/vgpu/test_cpu_isolation.sh
 bash deploy/tests/vgpu/test_host_oom_protection.sh
 bash deploy/tests/vgpu/test_host_nvme_apst.sh
+bash deploy/tests/vgpu/test_host_performance.sh
+bash deploy/tests/vgpu/test_tsc_policy.sh
 ```
 
 前两项验证 `deploy/scripts/` 是唯一入口、旧 deploy-root 文件已删除、旧 G-11
 基础镜像名称只做兼容转发，以及 `vmctl` 的路径分发；
 这些测试使用只读查询、伪 QMP、伪 cgroup 和临时文件，不启动或修改真实
 VM/宿主；AIO 测试还会用已构建 QEMU 读取其自身 4 KiB，既不创建临时盘，
-也不接触 VM 磁盘。
+也不接触 VM 磁盘。性能/TSC 两项另用伪 sysfs 验证动态全频段、回滚和 KVM
+能力分支，不写真实 cpufreq、THP、KVM 或 NVMe 节点。
 
 傻瓜封装入口的快速行为回归：
 
 ```bash
 bash deploy/tests/vgpu/test_vgpu_one_click_package.sh
 bash deploy/tests/qemu/test_sdl_no_sleep_static.sh
+./deploy/tests/run-g11-sdl.sh --static-only
 ```
 
 它使用隔离配置验证任意 VM ID、A/B 分发、off/动态/重复配置拒绝和配置竞态绑定，

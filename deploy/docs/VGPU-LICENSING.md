@@ -219,9 +219,10 @@ Frame Rate Limit: N/A
 ```
 
 历史 VM3 动态 `winsat d3d -time 10` 曾观测到多个高于 3 FPS 的区间，说明当时的 3 FPS
-限制不再是当前瓶颈；这不是完整 GPU 跑分，也不保证 60 FPS。SDL 标题在静止桌面显示
-`Present 0.0 FPS` 是 REGION 像素去重的正常结果，必须用持续变化的 native workload
-判断。RDP 自己的编码帧率、RDPIDD 分辨率和动态缩放均不能作为 vGPU/FRL 验收数据。
+限制不再是当前瓶颈；这不是完整 GPU 跑分，也不保证 60 FPS。默认 fixed 模式的
+静止桌面常见 `Content 0/s | Present 60/s (fixed)`，必须用持续变化的 native
+workload 判断内容更新。RDP 自己的编码帧率、RDPIDD 分辨率和动态缩放均不能作为
+vGPU/FRL 验收数据。
 
 ## RTC 仍由宿主负责
 
@@ -229,7 +230,7 @@ Frame Rate Limit: N/A
 
 ```text
 TZ=Asia/Shanghai
--rtc base=localtime,clock=host,driftfix=slew
+-rtc base=localtime,clock=vm,driftfix=slew
 ```
 
 新装 Windows 不要写 `RealTimeIsUniversal=1`，也不要运行旧

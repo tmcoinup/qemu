@@ -13,10 +13,12 @@
 #   g11_hardware_serial_board_validate VENDOR SERIAL MODEL RELEASE_YEAR
 #
 # MODEL is required for MSI so the MS-XXXX board code can be bound into the
-# serial.  RELEASE_YEAR is required for Gigabyte so its YY/week fields are not
-# invented independently from the board.  ASUS, ASRock and ECS ignore those
-# two arguments.  ASRock and ECS formats follow their official serial-label
-# examples/guides:
+# serial.  RELEASE_YEAR is required for ASUS/Gigabyte so their manufacture
+# year fields are not invented independently from the board.  New identities
+# follow the manufacturers' published serial-label shapes; no real unit's
+# serial is copied or reused:
+#   https://www.asus.com/us/support/article/706/
+#   https://esupport.gigabyte.com/Notice/mb_sn.htm
 #   https://www.asrock.com/support/index.asp?cat=FindSN
 #   https://campaign.ecs.com.tw/support/productinfo/MB.htm
 #
@@ -146,7 +148,8 @@ _g11_hardware_serial_release_year_yy() {
 
 g11_hardware_serial_board_generate() {
     local vendor=${1:-} model=${2:-} release_year=${3:-}
-    local token code yy week suffix prefix letter
+    local token code yy week suffix prefix letter month month_index
+    local month_alphabet=123456789ABC
 
     token=$(_g11_hardware_serial_board_vendor_token "$vendor") || {
         _g11_hardware_serial_error "unsupported board vendor: ${vendor:-<empty>}"
@@ -154,8 +157,15 @@ g11_hardware_serial_board_generate() {
     }
     case "$token" in
         asus)
-            prefix=$(_g11_hardware_serial_random_hex 2) || return
-            suffix=$(_g11_hardware_serial_random_hex 9) || return
+            yy=$(_g11_hardware_serial_release_year_yy "$release_year") || {
+                _g11_hardware_serial_error \
+                    "ASUS release year must be a four-digit 20xx value"
+                return
+            }
+            month_index=$(_g11_hardware_serial_random_bounded 12) || return
+            month=${month_alphabet:month_index:1}
+            prefix="${yy:1:1}${month}"
+            suffix=$(_g11_hardware_serial_random_alnum 9) || return
             printf '%sS%s\n' "$prefix" "$suffix"
             ;;
         msi)
@@ -175,7 +185,7 @@ g11_hardware_serial_board_generate() {
             }
             week=$(_g11_hardware_serial_random_bounded 53) || return
             week=$((week + 1))
-            suffix=$(_g11_hardware_serial_random_digits 8) || return
+            suffix=$(_g11_hardware_serial_random_digits 6) || return
             printf 'SN%s%02d%s\n' "$yy" "$week" "$suffix"
             ;;
         asrock)
@@ -201,7 +211,12 @@ g11_hardware_serial_board_validate() {
     token=$(_g11_hardware_serial_board_vendor_token "$vendor") || return 2
     case "$token" in
         asus)
-            [[ "$serial" =~ ^[A-Z0-9]{2}S[A-Z0-9]{9}$ ]]
+            [[ "$serial" =~ ^[0-9][1-9A-C]S[A-Z0-9]{9}$ ]] || return 1
+            if [[ -n "$release_year" ]]; then
+                yy=$(_g11_hardware_serial_release_year_yy "$release_year") \
+                    || return 2
+                [[ "${serial:0:1}" == "${yy:1:1}" ]] || return 1
+            fi
             ;;
         msi)
             code=$(_g11_hardware_serial_msi_board_code "$model") || return 2
@@ -210,7 +225,7 @@ g11_hardware_serial_board_validate() {
         gigabyte)
             yy=$(_g11_hardware_serial_release_year_yy "$release_year") \
                 || return 2
-            [[ "$serial" =~ ^SN[0-9]{12}$ ]] || return 1
+            [[ "$serial" =~ ^SN[0-9]{10}$ ]] || return 1
             [[ "${serial:2:2}" == "$yy" ]] || return 1
             week=${serial:4:2}
             (( 10#$week >= 1 && 10#$week <= 53 ))

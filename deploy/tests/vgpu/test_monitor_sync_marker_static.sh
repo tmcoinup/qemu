@@ -47,16 +47,23 @@ require_marker_input 'nvidia_modes.py'
 require_marker_input 'windows_hive.py'
 require_marker_input 'profile_override.toml'
 require_marker_input 'update-vgpu-mdev-identity.py'
+require_marker_input 'marker_file_digest monitor-profile-catalog'
+require_marker_input 'marker_file_digest qemu-edid'
 require_marker_input 'vgpu_display_contract=1:1920:1080:2073600'
-require_marker_input 'host-edid-sync-v8-edid-override'
+require_marker_input 'host-edid-sync-v9-content-addressed'
 
 grep -F -- 'vgpu_profile_native_grid_pnp_id' "$SYNC" >/dev/null ||
     fail "monitor sync does not map nvidia-256/257 to the native 1Q/2Q PnP ID"
 grep -F -- "\${VGPU_MDEV_PROFILE:-}" "$SYNC" >/dev/null ||
     fail "monitor sync native PnP mapping is not selected from the VM profile"
 
-if grep -E 'host-edid-sync-v(3|4|5|6|7)([^0-9]|$)' "$SYNC" >/dev/null; then
-    fail "legacy v3..v7 marker generation remains"
+if grep -E 'host-edid-sync-v(3|4|5|6|7|8)([^0-9]|$)' "$SYNC" >/dev/null; then
+    fail "legacy v3..v8 marker generation remains"
+fi
+grep -F -- "printf 'file.%s=%s\\n'" "$SYNC" >/dev/null ||
+    fail "marker file digests do not use stable logical labels"
+if grep -F -- 'sha256sum "$MONITOR_PROFILE_CATALOG" "$QEMU_EDID"' "$SYNC" >/dev/null; then
+    fail "marker still hashes absolute filenames emitted by sha256sum"
 fi
 grep -F -- '--marker-value "$spec_hash"' "$SYNC" >/dev/null ||
     fail "computed identity-bound hash is not passed to the cache helper"
@@ -80,4 +87,4 @@ grep -F -- '凭据不会写入仓库或参数' "$SYNC" >/dev/null ||
 grep -F -- '非交互运行缺少 sudo 票据' "$SYNC" >/dev/null ||
     fail "non-interactive privilege failure is not explicit"
 
-echo "OK: monitor sync v8 marker, automatic privilege prompt, GPU, driver, EDID override, mode, and hive policies"
+echo "OK: monitor sync v9 content marker, automatic privilege prompt, GPU, driver, EDID override, mode, and hive policies"

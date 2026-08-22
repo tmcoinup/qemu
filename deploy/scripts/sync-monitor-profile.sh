@@ -205,6 +205,11 @@ disk_identity=$(stat -Lc '%d:%i' "$DISK") || {
     echo "[monitor-sync] 无法读取磁盘身份: $DISK" >&2
     exit 1
 }
+marker_file_digest() {
+    local label=$1 path=$2 digest
+    digest=$(sha256sum -- "$path" | awk '{print $1}') || return 1
+    printf 'file.%s=%s\n' "$label" "$digest"
+}
 spec_hash=$({
     monitor_config_block
     # A PCI spoof/driver change can make Windows enumerate a new
@@ -230,13 +235,19 @@ spec_hash=$({
     printf 'production_driver_policy=%s:%s\n' \
         "$MONITOR_DRIVER_POLICY" "$MONITOR_DRIVER_PNP_ID"
     printf 'vgpu_display_contract=1:1920:1080:2073600\n'
-    sha256sum "$MONITOR_PROFILE_CATALOG" "$QEMU_EDID" \
-        "$here/host/sync-monitor-cache.sh" "$here/lib/nvidia_modes.py" \
-        "$here/lib/windows_hive.py" \
-        "$here/host/profile_override.toml" \
+    # Bind to content, not the absolute checkout/container path printed by
+    # sha256sum. The same reviewed files must yield one marker in CLI, GUI,
+    # package-maintenance containers and relocated installations.
+    marker_file_digest monitor-profile-catalog "$MONITOR_PROFILE_CATALOG"
+    marker_file_digest qemu-edid "$QEMU_EDID"
+    marker_file_digest sync-monitor-cache "$here/host/sync-monitor-cache.sh"
+    marker_file_digest nvidia-modes "$here/lib/nvidia_modes.py"
+    marker_file_digest windows-hive "$here/lib/windows_hive.py"
+    marker_file_digest profile-override "$here/host/profile_override.toml"
+    marker_file_digest update-vgpu-mdev-identity \
         "$here/host/update-vgpu-mdev-identity.py"
     printf 'disk=%s:%s\n' "$(readlink -m -- "$DISK")" "$disk_identity"
-    printf 'host-edid-sync-v8-edid-override\n'
+    printf 'host-edid-sync-v9-content-addressed\n'
 } | sha256sum | awk '{print $1}')
 
 if (( ! FORCE )) && [[ -r "$MARKER" ]] && grep -qxF "$spec_hash" "$MARKER"; then

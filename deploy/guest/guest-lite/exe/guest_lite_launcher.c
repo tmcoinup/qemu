@@ -430,7 +430,7 @@ int wmain(int argc, wchar_t **argv)
         }
     }
 
-    wprintf(L"G-11 Windows 10 Guest Lite 2.3.0 - %ls\n\n", mode);
+    wprintf(L"G-11 Windows 10 Guest Lite 2.5.2 - %ls\n\n", mode);
     if (!get_program_data(program_data) ||
         !create_run_directory(program_data, run_directory)) {
         show_error(L"Could not create a protected extraction directory.");

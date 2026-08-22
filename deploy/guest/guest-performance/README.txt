@@ -29,6 +29,7 @@ C:\ProgramData\G11GuestPerformance\tools
 - 保留正式 GRID 驱动、license 和官方 NVDisplay.ContainerLocalSystem；
 - 取消 Explorer 对开机启动软件的人为延迟；
 - 使用 Windows 内置“高性能”电源计划（系统存在时）；
+- 将该计划的显示器超时和系统空闲睡眠（交流/电池）设为“从不”，防止无人操作后 guest 自己黑屏；
 - 关闭重复的 guest Game DVR 和部分桌面动画，DGame/QEMU host 画面不受影响；
 - 生成开机事件、启动项和 3 秒 CPU 采样报告。
 

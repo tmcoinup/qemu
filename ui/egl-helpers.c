@@ -367,7 +367,7 @@ bool egl_dmabuf_export_texture(uint32_t tex_id, int *fd, EGLint *offset,
     return true;
 }
 
-void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
+bool egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
 {
     EGLDisplay egl_display = qemu_egl_current_or_global_display();
     EGLContext egl_context = eglGetCurrentContext();
@@ -381,6 +381,7 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
     const uint32_t *offsets = qemu_dmabuf_get_offsets(dmabuf, &noffsets);
     const uint32_t *strides = qemu_dmabuf_get_strides(dmabuf, &nstrides);
     uint32_t num_planes = qemu_dmabuf_get_num_planes(dmabuf);
+    GLenum error;
 
     EGLint fd_attrs[] = {
         EGL_DMA_BUF_PLANE0_FD_EXT,
@@ -414,25 +415,25 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
     };
 
     if (texture != 0) {
-        return;
+        return true;
     }
     if (egl_display == EGL_NO_DISPLAY) {
         error_report("egl: no current display for dmabuf import");
-        return;
+        return false;
     }
     if (egl_context == EGL_NO_CONTEXT) {
         error_report("egl: no current context for dmabuf import");
-        return;
+        return false;
     }
     if (!epoxy_has_egl_extension(egl_display, "EGL_KHR_image_base") &&
         !epoxy_has_egl_extension(egl_display, "EGL_KHR_image")) {
         error_report("egl: EGL_KHR_image is unavailable for dmabuf import");
-        return;
+        return false;
     }
     if (!epoxy_has_egl_extension(egl_display,
                                  "EGL_EXT_image_dma_buf_import")) {
         error_report("egl: EGL_EXT_image_dma_buf_import is unavailable");
-        return;
+        return false;
     }
 
     assert(nfds >= num_planes);
@@ -470,17 +471,29 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
                               NULL, attrs);
     if (image == EGL_NO_IMAGE_KHR) {
         error_report("eglCreateImageKHR failed");
-        return;
+        return false;
     }
 
+    for (j = 0; j < 32 && glGetError() != GL_NO_ERROR; j++) {
+        /* Discard errors belonging to the caller's previous operation. */
+    }
     glGenTextures(1, &texture);
-    qemu_dmabuf_set_texture(dmabuf, texture);
     glBindTexture(GL_TEXTURE_2D, texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)image);
+    error = glGetError();
     eglDestroyImageKHR(egl_display, image);
+    if (!texture || error != GL_NO_ERROR) {
+        if (texture) {
+            glDeleteTextures(1, &texture);
+        }
+        qemu_dmabuf_set_texture(dmabuf, 0);
+        return false;
+    }
+    qemu_dmabuf_set_texture(dmabuf, texture);
+    return true;
 }
 
 void egl_dmabuf_release_texture(QemuDmaBuf *dmabuf)
@@ -546,7 +559,8 @@ EGLSurface qemu_egl_init_surface_x11(EGLContext ectx, EGLNativeWindowType win)
     b = eglMakeCurrent(qemu_egl_display, esurface, esurface, ectx);
     if (b == EGL_FALSE) {
         error_report("egl: eglMakeCurrent failed");
-        return NULL;
+        eglDestroySurface(qemu_egl_display, esurface);
+        return EGL_NO_SURFACE;
     }
 
     return esurface;
@@ -757,6 +771,7 @@ EGLContext qemu_egl_init_ctx(void)
     b = eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, ectx);
     if (b == EGL_FALSE) {
         error_report("egl: eglMakeCurrent failed");
+        eglDestroyContext(qemu_egl_display, ectx);
         return NULL;
     }
 

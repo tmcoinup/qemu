@@ -7,12 +7,18 @@ dispatcher="$root/deploy/package-vgpu-one-click.sh"
 builder="$root/deploy/guest/gpuz-launcher/build.sh"
 launcher="$root/deploy/guest/gpuz-launcher/gpuz_profile_launcher.c"
 guest="$root/deploy/guest/apply-gpuz-profile.ps1"
+profile_writer="$root/deploy/guest/apply-vm-profile.ps1"
 start="$root/deploy/scripts/start-vm.sh"
 
 fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
+
+for memory_mapper in "$guest" "$profile_writer"; do
+    rg -Fq "3 { @('Elpida', 'Elpida') }" "$memory_mapper" ||
+        fail "Elpida(3) is present in the catalog but missing from ${memory_mapper#$root/}"
+done
 
 tmp=$(mktemp -d)
 cleanup() {

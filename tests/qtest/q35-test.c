@@ -51,6 +51,11 @@ static const SpdTestArgs spd_ddr3_4g_1600 = {
     .speed_mts = 1600,
 };
 
+static const SpdTestArgs spd_ddr3_4g_1866 = {
+    .module_mb = 4096,
+    .speed_mts = 1866,
+};
+
 /* @esmramc_tseg_sz: ESMRAMC.TSEG_SZ bitmask for selecting the requested TSEG
  *                   size. Must be a subset of
  *                   MCH_HOST_BRIDGE_ESMRAMC_TSEG_SZ_MASK.
@@ -458,7 +463,7 @@ static void test_spd_ddr3(const void *opaque)
         g_assert_cmphex(spd[20], ==, 0x6c);
         g_assert_cmphex(spd[22], ==, 0x20);
         g_assert_cmphex(spd[23], ==, 0x89);
-    } else {
+    } else if (args->speed_mts == 1600) {
         g_assert_cmphex(spd[12], ==, 0x0a);
         g_assert_cmphex(spd[14], ==, 0xfc);
         g_assert_cmphex(spd[16], ==, 0x6e);
@@ -466,6 +471,17 @@ static void test_spd_ddr3(const void *opaque)
         g_assert_cmphex(spd[20], ==, 0x6e);
         g_assert_cmphex(spd[22], ==, 0x18);
         g_assert_cmphex(spd[23], ==, 0x81);
+        g_assert_cmphex(spd[34], ==, 0x00);
+    } else {
+        g_assert_cmphex(spd[12], ==, 0x09);
+        g_assert_cmphex(spd[14], ==, 0xfe);
+        g_assert_cmphex(spd[15], ==, 0x02);
+        g_assert_cmphex(spd[16], ==, 0x69);
+        g_assert_cmphex(spd[18], ==, 0x69);
+        g_assert_cmphex(spd[20], ==, 0x69);
+        g_assert_cmphex(spd[22], ==, 0x10);
+        g_assert_cmphex(spd[23], ==, 0x79);
+        g_assert_cmphex(spd[34], ==, 0xca);
     }
 
     if (args->module_mb == 2048) {
@@ -838,6 +854,8 @@ int main(int argc, char **argv)
     qtest_add_data_func("/q35/spd/ddr3/4g-1333", &spd_ddr3_4g_1333,
                         test_spd_ddr3);
     qtest_add_data_func("/q35/spd/ddr3/4g-1600", &spd_ddr3_4g_1600,
+                        test_spd_ddr3);
+    qtest_add_data_func("/q35/spd/ddr3/4g-1866", &spd_ddr3_4g_1866,
                         test_spd_ddr3);
     qtest_add_func("/q35/spd/ddr3/mixed-4g-2g",
                    test_spd_ddr3_mixed_modules);

@@ -721,6 +721,7 @@ static const G11LPCIdentity g11_lpc_identities[] = {
     { "H97",  0x8cc6, 0x00 },
     { "B150", 0xa148, 0x31 },
     { "B360", 0xa308, 0x10 },
+    { "X79",  0x1d41, 0x06 },
 };
 
 static bool ich9_lpc_apply_g11_identity(ICH9LPCState *lpc, Error **errp)
@@ -744,7 +745,7 @@ static bool ich9_lpc_apply_g11_identity(ICH9LPCState *lpc, Error **errp)
     }
 
     error_setg(errp,
-               "ICH9-LPC x-g11-chipset must be one of H81, H97, B150, B360");
+               "ICH9-LPC x-g11-chipset must be one of H81, H97, B150, B360, X79");
     return false;
 }
 

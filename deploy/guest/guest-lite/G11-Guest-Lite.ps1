@@ -6,15 +6,17 @@
 .DESCRIPTION
   The full profile disables Microsoft Defender Antivirus, Windows and common
   software auto-updaters, Microsoft Store, OneDrive/cloud sync, news/weather
-  feeds, consumer Appx apps, background activity, and reviewed optional
-  services/tasks. It also selects the built-in High performance power plan and
-  reduces desktop animation/startup delay for the interactive user.
+  feeds, notifications, consumer Appx apps, background activity, and reviewed
+  optional services/tasks. It also keeps the default playback endpoint muted,
+  orders English (United States) - US first and Microsoft Pinyin second, selects
+  the built-in High performance power plan, and reduces desktop
+  animation/startup delay for the interactive user.
 
   The tool does not bypass Tamper Protection, remove provisioned Appx payloads,
   modify BCD or driver-signing policy, change kernel drivers, delete firewall
   rules/service files, or delete Windows component-store files. Original
-  registry, firewall, power, service, task, and app state is saved under
-  C:\ProgramData\G11GuestLite.
+  registry, firewall, audio mute, user-language/input, power, service, task,
+  and app state is saved under C:\ProgramData\G11GuestLite.
 #>
 [CmdletBinding()]
 param(
@@ -32,7 +34,7 @@ $StateRoot = Join-Path $env:ProgramData 'G11GuestLite'
 $StatePath = Join-Path $StateRoot 'state.json'
 $ReportRoot = Join-Path $StateRoot 'reports'
 $ToolRoot = Join-Path $StateRoot 'tools'
-$SchemaVersion = 4
+$SchemaVersion = 5
 $MinimumSchemaVersion = 1
 $EnforcementTaskPath = '\'
 $EnforcementTaskName = 'G11GuestLite-EnforceProfile'
@@ -42,6 +44,11 @@ $LocalPolicyRoot = Join-Path $env:SystemRoot 'System32\GroupPolicy'
 $MachinePolicyPath = Join-Path $LocalPolicyRoot 'Machine\Registry.pol'
 $UserPolicyPath = Join-Path $LocalPolicyRoot 'User\Registry.pol'
 $PolicyMetadataPath = Join-Path $LocalPolicyRoot 'gpt.ini'
+$EnglishLanguageTag = 'en-US'
+$EnglishInputTip = '0409:00000409'
+$PinyinLanguageTag = 'zh-CN'
+$PinyinCanonicalLanguageTag = 'zh-Hans-CN'
+$PinyinInputTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
 
 # Policy values only. The tool never changes Defender service ACLs or deletes
 # Defender files. Windows 10 1903+ requires Tamper Protection to be turned off
@@ -105,6 +112,22 @@ $RegistryPlan = @(
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds'; Name = 'EnableFeeds'; Type = 'DWord'; Value = 0; Group = 'NewsWeather' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Feeds'; Name = 'ShellFeedsTaskbarViewMode'; Type = 'DWord'; Value = 2; Group = 'NewsWeather' },
 
+    # Disable the per-user notification master switch, application/lock-screen
+    # toast policy, Action Center UI, and Windows Security notifications. These
+    # values are preserved in the exact rollback baseline and reasserted for
+    # the saved clone user by the short-lived SYSTEM enforcement task.
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'ToastEnabled'; Type = 'DWord'; Value = 0; Group = 'Notifications' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'NoToastApplicationNotification'; Type = 'DWord'; Value = 1; Group = 'Notifications' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'NoToastApplicationNotificationOnLockScreen'; Type = 'DWord'; Value = 1; Group = 'Notifications' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer'; Name = 'DisableNotificationCenter'; Type = 'DWord'; Value = 1; Group = 'Notifications' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications'; Name = 'DisableNotifications'; Type = 'DWord'; Value = 1; Group = 'Notifications' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications'; Name = 'DisableEnhancedNotifications'; Type = 'DWord'; Value = 1; Group = 'Notifications' },
+
+    # This is the value managed by Set-WinDefaultInputMethodOverride. It makes
+    # the plain en-US US keyboard the default without deleting Chinese or any
+    # other installed language/input method, so Win+Space remains available.
+    [pscustomobject]@{ Path = 'HKCU:\Control Panel\International\User Profile'; Name = 'InputMethodOverride'; Type = 'String'; Value = '0409:00000409'; Group = 'Input' },
+
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'; Name = 'AllowTelemetry'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; Name = 'DisableWindowsConsumerFeatures'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; Name = 'DisableTailoredExperiencesWithDiagnosticData'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
@@ -117,6 +140,7 @@ $RegistryPlan = @(
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search'; Name = 'AllowCloudSearch'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; Name = 'LetAppsRunInBackground'; Type = 'DWord'; Value = 2; Group = 'Background' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer'; Name = 'DisableSearchBoxSuggestions'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search'; Name = 'SearchboxTaskbarMode'; Type = 'DWord'; Value = 0; Group = 'Taskbar' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AdvertisingInfo'; Name = 'Enabled'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'; Name = 'ContentDeliveryAllowed'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'; Name = 'OemPreInstalledAppsEnabled'; Type = 'DWord'; Value = 0; Group = 'Privacy' },
@@ -994,11 +1018,28 @@ function Get-EnforcementTaskSnapshot {
     $task = Get-ScheduledTask -TaskPath $EnforcementTaskPath `
         -TaskName $EnforcementTaskName -ErrorAction SilentlyContinue | `
         Select-Object -First 1
+    $taskState = ''
+    $lastRunTime = ''
+    $lastTaskResult = ''
+    if ($null -ne $task) {
+        $taskState = [string]$task.State
+        try {
+            $taskInfo = Get-ScheduledTaskInfo -TaskPath $EnforcementTaskPath `
+                -TaskName $EnforcementTaskName -ErrorAction Stop
+            if ($taskInfo.LastRunTime.Year -gt 1900) {
+                $lastRunTime = $taskInfo.LastRunTime.ToString('o')
+            }
+            $lastTaskResult = [string]([int64]$taskInfo.LastTaskResult)
+        } catch { }
+    }
     return [pscustomobject]@{
         Path = $EnforcementTaskPath
         Name = $EnforcementTaskName
         Existed = [bool]($null -ne $task)
         Enabled = [bool]($null -ne $task -and $task.Settings.Enabled)
+        State = $taskState
+        LastRunTime = $lastRunTime
+        LastTaskResult = $lastTaskResult
     }
 }
 
@@ -1024,7 +1065,10 @@ function Register-EnforcementTask {
         -Argument $arguments -WorkingDirectory $ToolRoot
     $startup = New-ScheduledTaskTrigger -AtStartup
     $startup.Delay = 'PT45S'
-    $logon = New-ScheduledTaskTrigger -AtLogOn -User ([string]$State.UserName)
+    # A local account name is prefixed by the computer name and becomes stale
+    # after an otherwise harmless Windows rename. The SID is stable across a
+    # rename and Task Scheduler accepts it as the logon-trigger identity.
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User ([string]$State.UserSid)
     $logon.Delay = 'PT45S'
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
         -LogonType ServiceAccount -RunLevel Highest
@@ -1072,11 +1116,18 @@ function Read-EnforcementState {
         [int]$state.SchemaVersion -gt $SchemaVersion) {
         throw "Unsupported state schema '$($state.SchemaVersion)'."
     }
-    if ([string]$state.ComputerName -ine $env:COMPUTERNAME) {
-        throw "State belongs to computer '$($state.ComputerName)', not '$env:COMPUTERNAME'."
-    }
     if ([string]$state.UserSid -ne $ExpectedUserSid) {
         throw "Enforcement SID '$ExpectedUserSid' does not match saved SID '$($state.UserSid)'."
+    }
+    $accounts = @(Get-CimInstance Win32_UserAccount `
+        -Filter "SID='$ExpectedUserSid'" -ErrorAction Stop | Where-Object {
+            [bool]$_.LocalAccount
+        })
+    if ($accounts.Count -ne 1) {
+        throw "Saved enforcement SID is not one local Windows account: $ExpectedUserSid"
+    }
+    if (-not (Test-StateMachineGuid $state)) {
+        throw 'Rollback state lacks its stable MachineGuid binding. Run Apply once to upgrade the baseline.'
     }
     return $state
 }
@@ -1169,6 +1220,33 @@ function Stop-CurrentDefenderScan {
 
 function Set-DefenderRuntimePreferences {
     $failures = New-Object 'System.Collections.Generic.List[string]'
+    # Once native policy has made every effective protection field false,
+    # newer Defender platforms can leave the protected WinDefend/MsMpEng shell
+    # resident while rejecting Set-MpPreference with 0x800106ba. Repeating the
+    # calls adds no protection change and makes a healthy boot task look failed.
+    # Judge this fast path from the same effective fields used by Audit.
+    try {
+        $effective = Get-MpComputerStatus -ErrorAction Stop
+        $effectiveNames = @(
+            'RealTimeProtectionEnabled', 'BehaviorMonitorEnabled',
+            'IoavProtectionEnabled', 'OnAccessProtectionEnabled', 'NISEnabled'
+        )
+        $allAvailable = $true
+        $anyEnabled = $false
+        foreach ($name in $effectiveNames) {
+            $property = $effective.PSObject.Properties[$name]
+            if ($null -eq $property) {
+                $allAvailable = $false
+                break
+            }
+            if ([bool]$property.Value) { $anyEnabled = $true }
+        }
+        if ($allAvailable -and -not $anyEnabled) {
+            Write-Host '  Defender effective protections are already inactive; runtime calls skipped' `
+                -ForegroundColor DarkGray
+            return $failures.ToArray()
+        }
+    } catch { }
     $defenderService = Get-Service -Name WinDefend -ErrorAction SilentlyContinue
     $defenderEngineRunning = @(
         Get-Process -Name MsMpEng -ErrorAction SilentlyContinue
@@ -1824,6 +1902,397 @@ function Stop-PlannedProcesses {
     return $failures.ToArray()
 }
 
+function Initialize-AudioEndpointInterop {
+    if ($null -ne ('G11GuestLite.AudioEndpoint' -as [type])) { return }
+
+    Add-Type -Language CSharp -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace G11GuestLite
+{
+    internal enum EDataFlow
+    {
+        Render = 0,
+        Capture = 1,
+        All = 2
+    }
+
+    internal enum ERole
+    {
+        Console = 0,
+        Multimedia = 1,
+        Communications = 2
+    }
+
+    [Flags]
+    internal enum CLSCTX : uint
+    {
+        All = 23
+    }
+
+    [ComImport]
+    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    internal class MMDeviceEnumeratorComObject
+    {
+    }
+
+    [ComImport]
+    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDeviceEnumerator
+    {
+        [PreserveSig]
+        int EnumAudioEndpoints(EDataFlow dataFlow, uint stateMask,
+            out IntPtr devices);
+
+        [PreserveSig]
+        int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role,
+            out IMMDevice endpoint);
+    }
+
+    [ComImport]
+    [Guid("D666063F-1587-4E43-81F1-B948E807363F")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDevice
+    {
+        [PreserveSig]
+        int Activate(ref Guid iid, CLSCTX clsctx, IntPtr activationParameters,
+            [MarshalAs(UnmanagedType.IUnknown)] out object interfacePointer);
+    }
+
+    [ComImport]
+    [Guid("5CDF2C82-841E-4546-9722-0CF74078229A")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioEndpointVolume
+    {
+        [PreserveSig] int RegisterControlChangeNotify(IntPtr notify);
+        [PreserveSig] int UnregisterControlChangeNotify(IntPtr notify);
+        [PreserveSig] int GetChannelCount(out uint channelCount);
+        [PreserveSig] int SetMasterVolumeLevel(float levelDb,
+            ref Guid eventContext);
+        [PreserveSig] int SetMasterVolumeLevelScalar(float level,
+            ref Guid eventContext);
+        [PreserveSig] int GetMasterVolumeLevel(out float levelDb);
+        [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+        [PreserveSig] int SetChannelVolumeLevel(uint channel, float levelDb,
+            ref Guid eventContext);
+        [PreserveSig] int SetChannelVolumeLevelScalar(uint channel, float level,
+            ref Guid eventContext);
+        [PreserveSig] int GetChannelVolumeLevel(uint channel, out float levelDb);
+        [PreserveSig] int GetChannelVolumeLevelScalar(uint channel,
+            out float level);
+        [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool muted,
+            ref Guid eventContext);
+        [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool muted);
+    }
+
+    public static class AudioEndpoint
+    {
+        private static void ThrowIfFailed(int result)
+        {
+            if (result < 0)
+            {
+                Marshal.ThrowExceptionForHR(result);
+            }
+        }
+
+        private static IAudioEndpointVolume Open(
+            out IMMDeviceEnumerator enumerator, out IMMDevice device)
+        {
+            enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+            ThrowIfFailed(enumerator.GetDefaultAudioEndpoint(
+                EDataFlow.Render, ERole.Console, out device));
+            Guid iid = typeof(IAudioEndpointVolume).GUID;
+            object activated;
+            ThrowIfFailed(device.Activate(ref iid, CLSCTX.All, IntPtr.Zero,
+                out activated));
+            return (IAudioEndpointVolume)activated;
+        }
+
+        private static void Release(object value)
+        {
+            if (value != null && Marshal.IsComObject(value))
+            {
+                Marshal.ReleaseComObject(value);
+            }
+        }
+
+        public static bool GetMute()
+        {
+            IMMDeviceEnumerator enumerator = null;
+            IMMDevice device = null;
+            IAudioEndpointVolume volume = null;
+            try
+            {
+                volume = Open(out enumerator, out device);
+                bool muted;
+                ThrowIfFailed(volume.GetMute(out muted));
+                return muted;
+            }
+            finally
+            {
+                Release(volume);
+                Release(device);
+                Release(enumerator);
+            }
+        }
+
+        public static void SetMute(bool muted)
+        {
+            IMMDeviceEnumerator enumerator = null;
+            IMMDevice device = null;
+            IAudioEndpointVolume volume = null;
+            try
+            {
+                volume = Open(out enumerator, out device);
+                Guid eventContext = Guid.Empty;
+                ThrowIfFailed(volume.SetMute(muted, ref eventContext));
+            }
+            finally
+            {
+                Release(volume);
+                Release(device);
+                Release(enumerator);
+            }
+        }
+    }
+}
+'@
+}
+
+function Get-AudioEndpointSnapshot {
+    $result = [ordered]@{
+        Available = $false
+        Muted = $false
+        Error = ''
+    }
+    try {
+        Initialize-AudioEndpointInterop
+        $result.Muted = [bool][G11GuestLite.AudioEndpoint]::GetMute()
+        $result.Available = $true
+    } catch {
+        $result.Error = $_.Exception.Message
+    }
+    return [pscustomobject]$result
+}
+
+function Set-DefaultAudioMuted {
+    param([Parameter(Mandatory = $true)][bool]$Muted)
+
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        Initialize-AudioEndpointInterop
+        [G11GuestLite.AudioEndpoint]::SetMute($Muted)
+        $current = Get-AudioEndpointSnapshot
+        if (-not [bool]$current.Available -or
+            [bool]$current.Muted -ne $Muted) {
+            throw "default render endpoint mute verification failed: available=$($current.Available) muted=$($current.Muted) error=$($current.Error)"
+        }
+        Write-Host "  default playback endpoint muted: $Muted" `
+            -ForegroundColor DarkGray
+    } catch {
+        $message = "default playback endpoint mute: $($_.Exception.Message)"
+        $failures.Add($message)
+        Write-Warning $message
+    }
+    return $failures.ToArray()
+}
+
+function Restore-AudioEndpointSnapshot {
+    param([AllowNull()][object]$Snapshot)
+
+    if ($null -eq $Snapshot -or -not [bool]$Snapshot.Available) { return }
+    Initialize-AudioEndpointInterop
+    [G11GuestLite.AudioEndpoint]::SetMute([bool]$Snapshot.Muted)
+    $current = Get-AudioEndpointSnapshot
+    if (-not [bool]$current.Available -or
+        [bool]$current.Muted -ne [bool]$Snapshot.Muted) {
+        throw "original audio mute state was not restored: $($current.Error)"
+    }
+}
+
+function Test-InputTipText {
+    param([AllowNull()][string]$InputTip)
+
+    return -not [string]::IsNullOrWhiteSpace($InputTip) -and
+        $InputTip -match '^[0-9A-Fa-f]{4}:(?:[0-9A-Fa-f]{8}|\{[0-9A-Fa-f-]{36}\}\{[0-9A-Fa-f-]{36}\})$'
+}
+
+function Get-UserLanguageListSnapshot {
+    $result = [ordered]@{
+        Available = $false
+        Items = @()
+        Error = ''
+    }
+    try {
+        foreach ($commandName in @(
+            'Get-WinUserLanguageList', 'New-WinUserLanguageList',
+            'Set-WinUserLanguageList', 'Set-WinDefaultInputMethodOverride'
+        )) {
+            if ($null -eq (Get-Command $commandName -ErrorAction SilentlyContinue)) {
+                throw "$commandName is unavailable"
+            }
+        }
+        # Windows PowerShell 5.1 can emit LanguageList as one pipeline object
+        # instead of enumerating its WinUserLanguage entries. Index the
+        # collection explicitly so a two-language list cannot collapse into a
+        # one-item snapshot whose properties contain arrays.
+        $liveLanguages = Get-WinUserLanguageList -ErrorAction Stop
+        $items = New-Object 'System.Collections.Generic.List[object]'
+        for ($languageIndex = 0;
+             $languageIndex -lt $liveLanguages.Count;
+             $languageIndex++) {
+            $language = $liveLanguages[$languageIndex]
+            $items.Add([pscustomobject]@{
+                LanguageTag = [string]$language.LanguageTag
+                InputMethodTips = @($language.InputMethodTips | ForEach-Object {
+                    [string]$_
+                })
+            })
+        }
+        if ($items.Count -eq 0) { throw 'the current user language list is empty' }
+        $result.Items = $items.ToArray()
+        $result.Available = $true
+    } catch {
+        $result.Error = $_.Exception.Message
+    }
+    return [pscustomobject]$result
+}
+
+function Test-PreferredUserLanguageList {
+    param([AllowNull()][object]$Snapshot)
+
+    if ($null -eq $Snapshot -or -not [bool]$Snapshot.Available) {
+        return $false
+    }
+    $items = @($Snapshot.Items)
+    if ($items.Count -lt 2) { return $false }
+    $englishTagMatches = ([string]$items[0].LanguageTag -ieq `
+        $EnglishLanguageTag)
+    $englishTipMatches = $false
+    foreach ($tip in @($items[0].InputMethodTips)) {
+        if ([string]$tip -ieq $EnglishInputTip) {
+            $englishTipMatches = $true
+            break
+        }
+    }
+    $pinyinTag = [string]$items[1].LanguageTag
+    $pinyinTagMatches = ($pinyinTag -ieq $PinyinLanguageTag -or
+        $pinyinTag -ieq $PinyinCanonicalLanguageTag)
+    $pinyinTipMatches = $false
+    foreach ($tip in @($items[1].InputMethodTips)) {
+        if ([string]$tip -ieq $PinyinInputTip) {
+            $pinyinTipMatches = $true
+            break
+        }
+    }
+    return $englishTagMatches -and $englishTipMatches -and
+        $pinyinTagMatches -and $pinyinTipMatches
+}
+
+function Set-PreferredUserLanguageList {
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        $current = Get-UserLanguageListSnapshot
+        if (-not [bool]$current.Available) {
+            throw "current user language list cannot be read: $($current.Error)"
+        }
+
+        $desired = New-WinUserLanguageList -Language $EnglishLanguageTag `
+            -ErrorAction Stop
+        $desired[0].InputMethodTips.Clear()
+        $null = $desired[0].InputMethodTips.Add($EnglishInputTip)
+
+        # LanguageList.Add accepts a language tag, not a WinUserLanguage
+        # object. Passing $pinyin[0] appears valid in newer PowerShell but
+        # fails on Windows PowerShell 5.1 with "Cannot find an overload for
+        # Add". Append by tag, then configure the newly created item.
+        $null = $desired.Add($PinyinLanguageTag)
+        $pinyin = $desired[$desired.Count - 1]
+        $pinyin.InputMethodTips.Clear()
+        $null = $pinyin.InputMethodTips.Add($PinyinInputTip)
+
+        $liveLanguages = Get-WinUserLanguageList -ErrorAction Stop
+        for ($languageIndex = 0;
+             $languageIndex -lt $liveLanguages.Count;
+             $languageIndex++) {
+            $language = $liveLanguages[$languageIndex]
+            if ([string]$language.LanguageTag -iin @(
+                    $EnglishLanguageTag, $PinyinLanguageTag,
+                    $PinyinCanonicalLanguageTag)) {
+                continue
+            }
+            $languageTag = [string]$language.LanguageTag
+            $null = $desired.Add($languageTag)
+            $addedLanguage = $desired[$desired.Count - 1]
+            $addedLanguage.InputMethodTips.Clear()
+            foreach ($tip in @($language.InputMethodTips)) {
+                $tipText = [string]$tip
+                if (-not (Test-InputTipText $tipText)) {
+                    throw "current language list contains an invalid input TIP: $tipText"
+                }
+                $null = $addedLanguage.InputMethodTips.Add($tipText)
+            }
+        }
+
+        Set-WinUserLanguageList -LanguageList $desired -Force `
+            -ErrorAction Stop
+        Set-WinDefaultInputMethodOverride -InputTip $EnglishInputTip `
+            -ErrorAction Stop
+        $applied = Get-UserLanguageListSnapshot
+        if (-not (Test-PreferredUserLanguageList $applied)) {
+            $actual = @($applied.Items | ForEach-Object {
+                '{0}[{1}]' -f [string]$_.LanguageTag,
+                    (@($_.InputMethodTips) -join ',')
+            }) -join ';'
+            throw "en-US/US first and zh-CN/Microsoft Pinyin second were not applied: actual=$actual error=$($applied.Error)"
+        }
+        Write-Host '  input order: en-US/US first, zh-CN/Microsoft Pinyin second' `
+            -ForegroundColor DarkGray
+    } catch {
+        $message = "user language/input order: $($_.Exception.Message)"
+        $failures.Add($message)
+        Write-Warning $message
+    }
+    return $failures.ToArray()
+}
+
+function Restore-UserLanguageListSnapshot {
+    param([AllowNull()][object]$Snapshot)
+
+    if ($null -eq $Snapshot -or -not [bool]$Snapshot.Available) { return }
+    $items = @($Snapshot.Items)
+    if ($items.Count -eq 0) {
+        throw 'Rollback state contains an empty user language list.'
+    }
+
+    $restored = $null
+    foreach ($item in $items) {
+        $languageTag = [string]$item.LanguageTag
+        if ($languageTag -notmatch '^[A-Za-z0-9-]{2,35}$') {
+            throw "Rollback state contains an invalid language tag: $languageTag"
+        }
+        if ($null -eq $restored) {
+            $restored = New-WinUserLanguageList -Language $languageTag `
+                -ErrorAction Stop
+            $target = $restored[0]
+        } else {
+            $null = $restored.Add($languageTag)
+            $target = $restored[$restored.Count - 1]
+        }
+        $target.InputMethodTips.Clear()
+        foreach ($tip in @($item.InputMethodTips)) {
+            $tipText = [string]$tip
+            if (-not (Test-InputTipText $tipText)) {
+                throw "Rollback state contains an invalid input TIP: $tipText"
+            }
+            $null = $target.InputMethodTips.Add($tipText)
+        }
+    }
+    Set-WinUserLanguageList -LanguageList $restored -Force -ErrorAction Stop
+}
+
 function Get-PowerSnapshot {
     $result = [ordered]@{
         Available = $false
@@ -1887,6 +2356,37 @@ function Restore-PowerSnapshot {
     }
 }
 
+function Get-CurrentMachineGuid {
+    $raw = [string](Get-ItemProperty -LiteralPath `
+        'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid `
+        -ErrorAction Stop).MachineGuid
+    try {
+        return ([Guid]$raw).ToString('D').ToLowerInvariant()
+    } catch {
+        throw "Windows MachineGuid is invalid: $raw"
+    }
+}
+
+function Test-StateMachineGuid {
+    param([Parameter(Mandatory = $true)][object]$State)
+
+    $property = $State.PSObject.Properties['MachineGuid']
+    if ($null -eq $property -or
+        [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        return $false
+    }
+    try {
+        $saved = ([Guid]([string]$property.Value)).ToString('D').ToLowerInvariant()
+    } catch {
+        throw "Rollback state contains an invalid MachineGuid: $($property.Value)"
+    }
+    $current = Get-CurrentMachineGuid
+    if ($saved -cne $current) {
+        throw "State belongs to Windows MachineGuid '$saved', not '$current'."
+    }
+    return $true
+}
+
 function Save-StateAtomically {
     param([Parameter(Mandatory = $true)][object]$State)
 
@@ -1911,12 +2411,14 @@ function Read-State {
         [int]$state.SchemaVersion -gt $SchemaVersion) {
         throw "Unsupported state schema '$($state.SchemaVersion)'."
     }
-    if ([string]$state.ComputerName -ine $env:COMPUTERNAME) {
-        throw "State belongs to computer '$($state.ComputerName)', not '$env:COMPUTERNAME'."
-    }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     if ([string]$state.UserSid -ne $sid) {
         throw "State belongs to user SID '$($state.UserSid)', current SID is '$sid'."
+    }
+    $null = Test-StateMachineGuid $state
+    if ([string]$state.ComputerName -ine $env:COMPUTERNAME) {
+        Write-Host "Windows was renamed from '$($state.ComputerName)' to '$env:COMPUTERNAME'; the stable SID/MachineGuid binding is retained." `
+            -ForegroundColor Yellow
     }
     return $state
 }
@@ -1980,7 +2482,22 @@ function Assert-DefenderCanBeConfigured {
     }
     $os = Get-CimInstance Win32_OperatingSystem
     if ($tamper -eq 'Unknown' -and [int]$os.BuildNumber -ge 18362) {
-        throw 'Tamper Protection state cannot be verified. This tool will not bypass it. Check Windows Security manually, then run again.'
+        # A previously optimized clone can no longer answer
+        # Get-MpComputerStatus after WinDefend/MsMpEng have become inert.  In
+        # that exact state there is no live Defender engine to bypass and the
+        # runtime setter below already takes the same no-op fast path.  Keep
+        # refusing an unknown Tamper state whenever either engine component is
+        # still active.
+        $defender = Get-DefenderStatusSummary
+        $engineInactive = [bool](
+            [string]$defender.WinDefendState -notin @('Running', 'StartPending') -and
+            -not [bool]$defender.MsMpEngProcessRunning
+        )
+        if (-not $engineInactive) {
+            throw 'Tamper Protection state cannot be verified while the Defender engine is active. This tool will not bypass it. Check Windows Security manually, then run again.'
+        }
+        Write-Host 'Tamper Protection state is unavailable because the Defender engine is already inactive; continuing without a bypass.' `
+            -ForegroundColor Yellow
     }
     # On consumer Windows 10 the Status key can exist without this optional
     # value. Get-ItemPropertyValue turns that normal state into a terminating
@@ -2001,6 +2518,8 @@ This full Windows 10 guest profile will:
 - turn off all Windows Firewall profiles and disable MpsSvc startup
 - turn off Windows, Store, and reviewed software auto-updaters
 - turn off OneDrive/cloud sync, news/weather, and background apps
+- mute the default playback endpoint without disabling Windows Audio
+- order en-US/US first and zh-CN/Microsoft Pinyin second
 - remove reviewed consumer apps for this user
 - disable reviewed optional services/tasks and select High performance power
 
@@ -2139,9 +2658,32 @@ function Get-VerificationIssues {
     $enforcement = Get-EnforcementTaskSnapshot
     if (-not [bool]$enforcement.Existed -or -not [bool]$enforcement.Enabled) {
         $issues.Add("startup/logon enforcement task is missing or disabled: $EnforcementTaskPath$EnforcementTaskName")
+    } elseif (-not [string]::IsNullOrWhiteSpace(
+            [string]$enforcement.LastRunTime) -and
+        -not [string]::IsNullOrWhiteSpace(
+            [string]$enforcement.LastTaskResult) -and
+        [int64]$enforcement.LastTaskResult -ne 0) {
+        $issues.Add("startup/logon enforcement task last run failed: result=$($enforcement.LastTaskResult) time=$($enforcement.LastRunTime)")
     }
     if (-not (Test-Path -LiteralPath $PolicyMetadataPath -PathType Leaf)) {
         $issues.Add("local policy metadata is missing: $PolicyMetadataPath")
+    }
+
+    $languageList = Get-UserLanguageListSnapshot
+    if (-not [bool]$languageList.Available) {
+        $issues.Add("user language/input order cannot be read: $($languageList.Error)")
+    } elseif (-not (Test-PreferredUserLanguageList $languageList)) {
+        $shownOrder = @($languageList.Items | ForEach-Object {
+            [string]$_.LanguageTag
+        }) -join ','
+        $issues.Add("user language/input order differs: current=$shownOrder desired=en-US,zh-CN(Microsoft Pinyin)")
+    }
+
+    $audio = Get-AudioEndpointSnapshot
+    if (-not [bool]$audio.Available) {
+        $issues.Add("default playback endpoint mute cannot be read: $($audio.Error)")
+    } elseif (-not [bool]$audio.Muted) {
+        $issues.Add('default playback endpoint is not muted')
     }
 
     $power = Get-PowerSnapshot
@@ -2212,10 +2754,18 @@ function New-AuditReport {
     $defender = Get-DefenderStatusSummary
     $lines.Add("defenderAvailable=$($defender.Available) amServiceEnabled=$($defender.AMServiceEnabled) antivirusEnabled=$($defender.AntivirusEnabled) antispywareEnabled=$($defender.AntispywareEnabled) realtimeEnabled=$($defender.RealTimeProtectionEnabled) behaviorEnabled=$($defender.BehaviorMonitorEnabled) ioavEnabled=$($defender.IoavProtectionEnabled) onAccessEnabled=$($defender.OnAccessProtectionEnabled) nisEnabled=$($defender.NISEnabled) winDefendState=$($defender.WinDefendState) msMpEngRunning=$($defender.MsMpEngProcessRunning) error=$($defender.Error)")
     $enforcement = Get-EnforcementTaskSnapshot
-    $lines.Add("enforcementTask=$EnforcementTaskPath$EnforcementTaskName exists=$($enforcement.Existed) enabled=$($enforcement.Enabled) log=$EnforcementLogPath")
+    $lines.Add("enforcementTask=$EnforcementTaskPath$EnforcementTaskName exists=$($enforcement.Existed) enabled=$($enforcement.Enabled) state=$($enforcement.State) lastRun=$($enforcement.LastRunTime) lastResult=$($enforcement.LastTaskResult) log=$EnforcementLogPath")
     $lines.Add("machinePolicyFile=$MachinePolicyPath exists=$(Test-Path -LiteralPath $MachinePolicyPath -PathType Leaf)")
     $lines.Add("userPolicyFile=$UserPolicyPath exists=$(Test-Path -LiteralPath $UserPolicyPath -PathType Leaf)")
     $lines.Add("policyMetadataFile=$PolicyMetadataPath exists=$(Test-Path -LiteralPath $PolicyMetadataPath -PathType Leaf)")
+    $audio = Get-AudioEndpointSnapshot
+    $lines.Add("audioEndpointAvailable=$($audio.Available) masterMuted=$($audio.Muted) desiredMuted=True error=$($audio.Error)")
+    $languageList = Get-UserLanguageListSnapshot
+    $languageOrder = @($languageList.Items | ForEach-Object {
+        '{0}[{1}]' -f [string]$_.LanguageTag,
+            (@($_.InputMethodTips) -join ',')
+    }) -join ';'
+    $lines.Add("userLanguageListAvailable=$($languageList.Available) order=$languageOrder desired=en-US/US,zh-CN/Microsoft-Pinyin error=$($languageList.Error)")
     if ($Label -in @('before-apply', 'after-apply')) {
         # Apply already builds its rollback inventory separately. Repeating
         # every scheduled-task/Appx/CIM query here used several minutes on
@@ -2349,7 +2899,7 @@ function New-AuditReport {
     }
     $lines.Add('')
     $lines.Add('[protected by design]')
-    $lines.Add('BCD and boot integrity; kernel and NVIDIA/vGPU drivers; Defender/firewall service files and ACLs; BFE and other core networking services; protected-but-inert DoSvc/UpdateOrchestrator objects; firewall saved rules; audio; printing; BITS; CryptSvc; AppXSvc; ClipSVC; Microsoft Edge/WebView2 application binaries; Calculator; Photos; Paint; Notepad; DesktopAppInstaller; VCLibs/.NET/UI.Xaml dependencies; provisioned Appx payloads.')
+    $lines.Add('BCD and boot integrity; kernel and NVIDIA/vGPU drivers; Defender/firewall service files and ACLs; BFE and other core networking services; protected-but-inert DoSvc/UpdateOrchestrator objects; firewall saved rules; Windows Audio service/device (only the default playback endpoint is muted); printing; BITS; CryptSvc; AppXSvc; ClipSVC; Microsoft Edge/WebView2 application binaries; Calculator; Photos; Paint; Notepad; DesktopAppInstaller; VCLibs/.NET/UI.Xaml dependencies; provisioned Appx payloads.')
 
     return (Save-AuditReportLines -Lines $lines -Label $Label)
 }
@@ -2362,12 +2912,15 @@ function New-OriginalState {
         SchemaVersion = $SchemaVersion
         CreatedUtc = [DateTime]::UtcNow.ToString('o')
         ComputerName = $env:COMPUTERNAME
+        MachineGuid = Get-CurrentMachineGuid
         UserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         UserName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
         OsCaption = [string]$os.Caption
         OsBuild = [string]$os.BuildNumber
         DefenderPreferences = @(Get-DefenderPreferenceSnapshots)
         FirewallProfiles = @(Get-FirewallSnapshots)
+        AudioEndpoint = Get-AudioEndpointSnapshot
+        UserLanguageList = Get-UserLanguageListSnapshot
         Registry = @(Get-AllRegistryPlans | ForEach-Object { Get-RegistrySnapshot $_ })
         Services = @($servicePlans | ForEach-Object { Get-ServiceSnapshot $_ })
         Tasks = @($taskPlans | ForEach-Object { Get-TaskSnapshot $_ })
@@ -2408,6 +2961,23 @@ function Ensure-CurrentBaseline {
     param([Parameter(Mandatory = $true)][object]$State)
 
     $changed = [int]$State.SchemaVersion -ne $SchemaVersion
+    $machineGuidProperty = $State.PSObject.Properties['MachineGuid']
+    if ($null -eq $machineGuidProperty -or
+        [string]::IsNullOrWhiteSpace([string]$machineGuidProperty.Value)) {
+        Set-StateProperty -State $State -Name MachineGuid `
+            -Value (Get-CurrentMachineGuid)
+        $changed = $true
+    }
+    if ([string]$State.ComputerName -ine $env:COMPUTERNAME) {
+        Set-StateProperty -State $State -Name ComputerName `
+            -Value $env:COMPUTERNAME
+        $changed = $true
+    }
+    $currentUserName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ([string]$State.UserName -ine $currentUserName) {
+        Set-StateProperty -State $State -Name UserName -Value $currentUserName
+        $changed = $true
+    }
     if ($null -eq $State.PSObject.Properties['DefenderPreferences']) {
         Set-StateProperty -State $State -Name DefenderPreferences `
             -Value @(Get-DefenderPreferenceSnapshots)
@@ -2416,6 +2986,16 @@ function Ensure-CurrentBaseline {
     if ($null -eq $State.PSObject.Properties['FirewallProfiles']) {
         Set-StateProperty -State $State -Name FirewallProfiles `
             -Value @(Get-FirewallSnapshots)
+        $changed = $true
+    }
+    if ($null -eq $State.PSObject.Properties['AudioEndpoint']) {
+        Set-StateProperty -State $State -Name AudioEndpoint `
+            -Value (Get-AudioEndpointSnapshot)
+        $changed = $true
+    }
+    if ($null -eq $State.PSObject.Properties['UserLanguageList']) {
+        Set-StateProperty -State $State -Name UserLanguageList `
+            -Value (Get-UserLanguageListSnapshot)
         $changed = $true
     }
 
@@ -2543,7 +3123,7 @@ function Ensure-CurrentBaseline {
 
     if ($changed) {
         Save-StateAtomically $State
-        Write-Host 'Upgraded the original rollback baseline for Guest Lite 2.3.' `
+        Write-Host 'Upgraded the original rollback baseline for Guest Lite 2.5.' `
             -ForegroundColor Yellow
         return (Read-State)
     }
@@ -2565,7 +3145,14 @@ function Invoke-Apply {
     Initialize-StateRoot
     Install-LocalTools
 
-    $null = New-AuditReport 'before-apply'
+    # Clone finalization already authenticates the payload, captures the full
+    # rollback baseline below, performs a measured SYSTEM enforcement run, and
+    # publishes one strict host-ready receipt after reboot. Avoid two duplicate
+    # full WMI/Appx audit passes in that trusted path; interactive Apply keeps
+    # both human-readable reports.
+    if (-not $UnattendedClone) {
+        $null = New-AuditReport 'before-apply'
+    }
     if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
         $state = Read-State
         Write-Host "Reusing original rollback baseline: $StatePath" `
@@ -2587,7 +3174,7 @@ function Invoke-Apply {
         $failures.Add($failure)
     }
 
-    Write-Host '[1/8] Applying policy values and disabling startup entries' `
+    Write-Host '[1/9] Applying policy values/input order and disabling startup entries' `
         -ForegroundColor Cyan
     foreach ($failure in @(Restore-RetiredRegistryValues $state)) {
         $failures.Add($failure)
@@ -2611,14 +3198,17 @@ function Invoke-Apply {
             Write-Warning $message
         }
     }
+    foreach ($failure in @(Set-PreferredUserLanguageList)) {
+        $failures.Add($failure)
+    }
 
-    Write-Host '[2/8] Disabling live Defender scanning and cancelling current scan' `
+    Write-Host '[2/9] Disabling live Defender scanning and cancelling current scan' `
         -ForegroundColor Cyan
     foreach ($failure in @(Set-DefenderRuntimePreferences)) {
         $failures.Add($failure)
     }
 
-    Write-Host '[3/8] Disabling Windows Firewall profiles and MpsSvc startup' `
+    Write-Host '[3/9] Disabling Windows Firewall profiles and MpsSvc startup' `
         -ForegroundColor Cyan
     foreach ($failure in @(Disable-FirewallProfiles)) {
         $failures.Add($failure)
@@ -2627,31 +3217,39 @@ function Invoke-Apply {
         $failures.Add($failure)
     }
 
-    Write-Host '[4/8] Disabling reviewed services' -ForegroundColor Cyan
+    Write-Host '[4/9] Disabling reviewed services' -ForegroundColor Cyan
     foreach ($failure in @(Disable-PlannedServices)) { $failures.Add($failure) }
 
-    Write-Host '[5/8] Disabling reviewed scheduled tasks' -ForegroundColor Cyan
+    Write-Host '[5/9] Disabling reviewed scheduled tasks' -ForegroundColor Cyan
     foreach ($failure in @(Disable-PlannedTasks)) { $failures.Add($failure) }
 
-    Write-Host '[6/8] Removing reviewed apps for the current user' `
+    Write-Host '[6/9] Removing reviewed apps for the current user' `
         -ForegroundColor Cyan
     foreach ($failure in @(Remove-PlannedApps)) {
         $failures.Add($failure)
     }
 
-    Write-Host '[7/8] Stopping reviewed background processes' `
+    Write-Host '[7/9] Stopping reviewed background processes' `
         -ForegroundColor Cyan
     foreach ($failure in @(Stop-PlannedProcesses)) {
         $failures.Add($failure)
     }
 
-    Write-Host '[8/8] Selecting the built-in High performance power plan' `
+    Write-Host '[8/9] Muting the default playback endpoint' `
+        -ForegroundColor Cyan
+    foreach ($failure in @(Set-DefaultAudioMuted -Muted $true)) {
+        $failures.Add($failure)
+    }
+
+    Write-Host '[9/9] Selecting the built-in High performance power plan' `
         -ForegroundColor Cyan
     foreach ($failure in @(Set-PerformancePowerPlan)) {
         $failures.Add($failure)
     }
 
-    $null = New-AuditReport 'after-apply'
+    if (-not $UnattendedClone) {
+        $null = New-AuditReport 'after-apply'
+    }
     Write-Host ''
     if ($failures.Count -gt 0) {
         Write-Host "APPLY PARTIAL: $($failures.Count) item(s) were protected or failed." `
@@ -2695,10 +3293,19 @@ function Invoke-Enforce {
     if ([string]::IsNullOrWhiteSpace($UserSid)) {
         throw 'Enforce mode requires the saved interactive-user SID.'
     }
-    $state = Read-EnforcementState -ExpectedUserSid $UserSid
     $failures = New-Object 'System.Collections.Generic.List[string]'
     $log = New-Object 'System.Collections.Generic.List[string]'
     $log.Add("generated=$([DateTime]::Now.ToString('o')) mode=Enforce")
+    try {
+        $state = Read-EnforcementState -ExpectedUserSid $UserSid
+        $log.Add("identity=validated computer=$env:COMPUTERNAME machineGuid=$(Get-CurrentMachineGuid) sid=$UserSid")
+    } catch {
+        $message = "state identity: $($_.Exception.Message)"
+        $log.Add("failure=$message")
+        $log.Add('result=failed failures=1')
+        try { $log | Set-Content -LiteralPath $EnforcementLogPath -Encoding UTF8 } catch { }
+        throw
+    }
 
     try {
         Write-ManagedPolicyFiles -Snapshots $state.PolicyFiles
@@ -2764,10 +3371,34 @@ function Invoke-Enforce {
         $failures.Add($failure)
         $log.Add("failure=$failure")
     }
+    foreach ($failure in @(Disable-PlannedServices)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    $log.Add('services=reviewed-disabled')
+    foreach ($failure in @(Disable-PlannedTasks)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    $log.Add('tasks=reviewed-disabled')
     foreach ($failure in @(Stop-PlannedProcesses)) {
         $failures.Add($failure)
         $log.Add("failure=$failure")
     }
+    $log.Add('processes=reviewed-stopped')
+    $audioFailures = @(Set-DefaultAudioMuted -Muted $true)
+    foreach ($failure in $audioFailures) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    if ($audioFailures.Count -eq 0) {
+        $log.Add('audio=default-render-muted')
+    }
+    foreach ($failure in @(Set-PerformancePowerPlan)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    $log.Add('power=high-performance')
     $log.Add("result=$(if ($failures.Count -eq 0) { 'pass' } else { 'partial' }) failures=$($failures.Count)")
     $log | Set-Content -LiteralPath $EnforcementLogPath -Encoding UTF8
     if ($failures.Count -gt 0) { return 3 }
@@ -2781,7 +3412,7 @@ function Invoke-Rollback {
     $state = Read-State
     $failures = New-Object 'System.Collections.Generic.List[string]'
 
-    Write-Host '[1/9] Removing the Guest Lite enforcement task' -ForegroundColor Cyan
+    Write-Host '[1/11] Removing the Guest Lite enforcement task' -ForegroundColor Cyan
     try {
         Remove-EnforcementTask $state.EnforcementTask
     } catch {
@@ -2790,13 +3421,23 @@ function Invoke-Rollback {
         Write-Warning $message
     }
 
-    Write-Host '[2/9] Restoring native local-policy files' -ForegroundColor Cyan
+    Write-Host '[2/11] Restoring native local-policy files' -ForegroundColor Cyan
     foreach ($failure in @(Restore-PolicyFileSnapshots $state.PolicyFiles)) {
         $failures.Add($failure)
         Write-Warning $failure
     }
 
-    Write-Host '[3/9] Restoring registry policy/startup values' -ForegroundColor Cyan
+    Write-Host '[3/11] Restoring the original user language/input order' `
+        -ForegroundColor Cyan
+    if ($null -ne $state.PSObject.Properties['UserLanguageList']) {
+        try { Restore-UserLanguageListSnapshot $state.UserLanguageList } catch {
+            $message = "user language/input order: $($_.Exception.Message)"
+            $failures.Add($message)
+            Write-Warning $message
+        }
+    }
+
+    Write-Host '[4/11] Restoring registry policy/startup values' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Registry)) {
         try { Restore-RegistrySnapshot $snapshot } catch {
             $message = "policy $($snapshot.Path)\$($snapshot.Name): $($_.Exception.Message)"
@@ -2805,7 +3446,7 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[4/9] Restoring Defender runtime preferences' -ForegroundColor Cyan
+    Write-Host '[5/11] Restoring Defender runtime preferences' -ForegroundColor Cyan
     $defenderSnapshots = @()
     if ($null -ne $state.PSObject.Properties['DefenderPreferences']) {
         $defenderSnapshots = @($state.DefenderPreferences)
@@ -2816,7 +3457,7 @@ function Invoke-Rollback {
         $failures.Add($failure)
     }
 
-    Write-Host '[5/9] Restoring service startup/running state' -ForegroundColor Cyan
+    Write-Host '[6/11] Restoring service startup/running state' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Services)) {
         try { Restore-ServiceSnapshot $snapshot } catch {
             $message = "service $($snapshot.Name): $($_.Exception.Message)"
@@ -2825,7 +3466,7 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[6/9] Restoring Windows Firewall profiles' -ForegroundColor Cyan
+    Write-Host '[7/11] Restoring Windows Firewall profiles' -ForegroundColor Cyan
     $firewallSnapshots = @()
     if ($null -ne $state.PSObject.Properties['FirewallProfiles']) {
         $firewallSnapshots = @($state.FirewallProfiles)
@@ -2836,7 +3477,7 @@ function Invoke-Rollback {
         $failures.Add($failure)
     }
 
-    Write-Host '[7/9] Restoring scheduled task enabled state' -ForegroundColor Cyan
+    Write-Host '[8/11] Restoring scheduled task enabled state' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Tasks)) {
         try { Restore-TaskSnapshot $snapshot } catch {
             $message = "task $($snapshot.Path)$($snapshot.Name): $($_.Exception.Message)"
@@ -2845,13 +3486,23 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[8/9] Re-registering removed current-user apps' `
+    Write-Host '[9/11] Re-registering removed current-user apps' `
         -ForegroundColor Cyan
     foreach ($failure in @(Restore-PlannedApps @($state.Apps))) {
         $failures.Add($failure)
     }
 
-    Write-Host '[9/9] Restoring the original power scheme' -ForegroundColor Cyan
+    Write-Host '[10/11] Restoring the original audio mute state' `
+        -ForegroundColor Cyan
+    if ($null -ne $state.PSObject.Properties['AudioEndpoint']) {
+        try { Restore-AudioEndpointSnapshot $state.AudioEndpoint } catch {
+            $message = "audio mute: $($_.Exception.Message)"
+            $failures.Add($message)
+            Write-Warning $message
+        }
+    }
+
+    Write-Host '[11/11] Restoring the original power scheme' -ForegroundColor Cyan
     if ($null -ne $state.PSObject.Properties['Power']) {
         try { Restore-PowerSnapshot $state.Power } catch {
             $message = "power scheme: $($_.Exception.Message)"

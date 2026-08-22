@@ -22,6 +22,7 @@
 #endif
 
 #include "ui/kbd-state.h"
+#include "ui/sdl2-cursor.h"
 #include "ui/sdl2-display-policy.h"
 #include "ui/sdl2-event.h"
 #include "ui/sdl2-pointer.h"
@@ -37,6 +38,7 @@ struct sdl2_console {
     SDL_Texture *texture;
     SDL_Window *real_window;
     SDL_Renderer *real_renderer;
+    char *last_window_title;
     int idx;
     int last_vm_running; /* per console for caption reasons */
     int x, y, w, h;
@@ -50,11 +52,24 @@ struct sdl2_console {
     SDL2Size window_maximum;
     int64_t fps_window_start_us;
     uint32_t fps_frame_count;
+    uint32_t content_frame_count;
     double present_fps;
+    double content_fps;
     bool present_fps_valid;
     uint8_t fps_low_warmup_windows;
     bool fixed_present;
     bool presented_since_refresh;
+    bool content_update_pending;
+    bool manual_redraw;
+    bool texture_recreate_pending;
+    bool texture_upload_failed;
+    bool surface_upload_pending;
+    bool warned_texture_recovery;
+    int64_t texture_recreate_after_us;
+    bool window_create_retry_pending;
+    bool warned_window_create;
+    uint8_t window_create_attempts;
+    int64_t window_create_after_us;
     bool gui_keysym;
     /* Keyboard follows input focus.  Pointer events additionally require
      * mouse focus (or an active grab); SDL/XWayland does not guarantee that
@@ -64,6 +79,10 @@ struct sdl2_console {
     bool absolute_enabled;
     bool absolute_available;
     uint32_t mouse_button_state;
+    SDL2CursorHistory framebuffer_cursor_history;
+    bool framebuffer_cursor_visible;
+    bool logged_framebuffer_cursor_match;
+    uint8_t framebuffer_cursor_miss_frames;
     bool guest_cursor;
     int guest_x;
     int guest_y;
@@ -73,6 +92,11 @@ struct sdl2_console {
     SDL2AxisScale window_to_render_y;
     SDL2AxisScale render_to_guest_x;
     SDL2AxisScale render_to_guest_y;
+    SDL2Size pointer_window;
+    SDL2Size pointer_render;
+    SDL2Size pointer_guest;
+    SDL2Rect pointer_dst;
+    bool pointer_geometry_valid;
     SDL_GLContext winctx;
     QKbdState *kbd;
     bool has_dmabuf;
@@ -83,16 +107,29 @@ struct sdl2_console {
     bool y0_top;
     bool scanout_mode;
     bool native_egl;
+    bool native_egl_context_api;
     uintptr_t native_egl_window;
     uintptr_t native_egl_colormap;
     EGLContext ectx;
     EGLSurface esurface;
     int native_egl_owner_tid;
+    int native_egl_ui_tid;
     bool logged_native_egl_visual;
     bool logged_scanout_texture;
     bool logged_scanout_flush;
     bool warned_missing_scanout_fb;
     bool warned_native_egl_blit;
+    bool warned_native_egl_swap;
+    bool warned_native_egl_guest_current;
+    bool warned_gl_surface_texture;
+    bool native_egl_recovery_pending;
+    bool native_egl_context_lost;
+    bool scanout_replay_pending;
+    bool scanout_replay_in_progress;
+    EGLint native_egl_last_error;
+    uint8_t native_egl_recovery_attempts;
+    int64_t native_egl_recovery_after_us;
+    int64_t scanout_replay_after_us;
     bool warned_native_egl_make_current;
     bool warned_native_egl_release;
 #endif
@@ -205,11 +242,23 @@ static inline void sdl2_gfx_dst_rect(int ww, int wh, int gw, int gh,
 
 void sdl2_window_create(struct sdl2_console *scon);
 void sdl2_window_destroy(struct sdl2_console *scon);
+#ifdef CONFIG_OPENGL
+bool sdl2_window_recreate_native_egl_surface(struct sdl2_console *scon,
+                                             EGLint *error);
+void sdl2_gl_window_context_destroying(struct sdl2_console *scon);
+void sdl2_gl_native_egl_init_failed(struct sdl2_console *scon,
+                                    EGLint error);
+bool sdl2_gl_native_egl_provider_failed(void);
+#endif
 void sdl2_window_update_size_limits(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
 void sdl2_flush_window_updates(void);
 void sdl2_note_present(struct sdl2_console *scon);
+void sdl2_note_content_update(struct sdl2_console *scon);
+void sdl2_pointer_geometry_changed(struct sdl2_console *scon);
+void sdl2_framebuffer_cursor_update(struct sdl2_console *scon);
+void sdl2_framebuffer_cursor_reset(struct sdl2_console *scon);
 
 void sdl2_process_key(struct sdl2_console *scon,
                       SDL_KeyboardEvent *ev);

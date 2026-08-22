@@ -1,5 +1,5 @@
 /*
- * usb-kbd NumLock opt-in qtest
+ * usb-kbd opt-in behavior qtest
  *
  * 测试通过 UHCI guest DMA 描述符发送 HID SET_REPORT，
  * 随后从 interrupt IN 端点读取 NumLock 按下和释放报告。
@@ -14,6 +14,7 @@
 #include "libqos/libqos-pc.h"
 #include "libqos/usb.h"
 #include "libqtest.h"
+#include "qobject/qdict.h"
 #include <glib/gstdio.h>
 
 #define USB_KBD_PATH "/machine/peripheral/kbd0"
@@ -32,6 +33,7 @@
                                 TD_CTRL_TIMEOUT)
 #define TEST_HID_REPORT_SIZE   8
 #define TEST_HID_NUMLOCK_USAGE 0x53
+#define TEST_HID_CONFIG_DESC_SIZE 34
 
 typedef struct TestUHCITD {
     uint32_t link;
@@ -147,6 +149,39 @@ static void test_uhci_control_out(TestUHCI *uhci, uint8_t address,
     test_assert_td_complete(uhci, td_status);
 }
 
+static void test_uhci_control_in(TestUHCI *uhci, uint8_t address,
+                                 const uint8_t setup[8], uint8_t *data,
+                                 uint16_t length)
+{
+    const uint32_t td_setup = uhci->workspace;
+    const uint32_t td_data = uhci->workspace + 0x10;
+    const uint32_t td_status = uhci->workspace + 0x20;
+    const uint32_t setup_buffer = uhci->workspace + 0x100;
+    const uint32_t data_buffer = uhci->workspace + 0x110;
+    const uint32_t active = TD_CTRL_ACTIVE | TEST_TD_ERROR_COUNT |
+                            TEST_TD_ACTLEN_MASK;
+
+    qtest_memwrite(uhci->qs->qts, setup_buffer, setup, 8);
+    memset(data, 0xa5, length);
+    qtest_memwrite(uhci->qs->qts, data_buffer, data, length);
+
+    test_write_td(uhci, td_setup, td_data, active,
+                  test_td_token(USB_TOKEN_SETUP, address, 0, false, 8),
+                  setup_buffer);
+    test_write_td(uhci, td_data, td_status, active,
+                  test_td_token(USB_TOKEN_IN, address, 0, true, length),
+                  data_buffer);
+    test_write_td(uhci, td_status, TEST_LINK_TERMINATE,
+                  active | TD_CTRL_IOC,
+                  test_td_token(USB_TOKEN_OUT, address, 0, true, 0), 0);
+
+    test_schedule_td(uhci, td_setup);
+    test_assert_td_complete(uhci, td_setup);
+    test_assert_td_complete(uhci, td_data);
+    test_assert_td_complete(uhci, td_status);
+    qtest_memread(uhci->qs->qts, data_buffer, data, length);
+}
+
 static bool test_uhci_interrupt_in(TestUHCI *uhci, uint8_t report[8])
 {
     const uint32_t td = uhci->workspace + 0x200;
@@ -175,14 +210,17 @@ static bool test_uhci_interrupt_in(TestUHCI *uhci, uint8_t report[8])
     return true;
 }
 
-static TestUHCI test_uhci_start_with_extra(const char *extra)
+static TestUHCI test_uhci_start_with_options(bool low_latency,
+                                             const char *extra)
 {
     const char *command =
         "-device piix3-usb-uhci,id=uhci,addr=1d.0 "
         "-device usb-kbd,id=kbd0,bus=uhci.0,port=1,"
         "x-force-numlock-on=on";
     TestUHCI uhci = {
-        .qs = qtest_pc_boot("%s %s", command, extra ? extra : ""),
+        .qs = qtest_pc_boot("%s%s %s", command,
+                            low_latency ? ",x-low-latency=on" : "",
+                            extra ? extra : ""),
     };
     uint32_t frames[TEST_FRAME_COUNT];
     uint16_t port;
@@ -220,6 +258,11 @@ static TestUHCI test_uhci_start_with_extra(const char *extra)
     qpci_io_writew(uhci.hc.dev, uhci.hc.bar, UHCI_USBFRNUM, 0);
     qpci_io_writew(uhci.hc.dev, uhci.hc.bar, UHCI_USBCMD, UHCI_CMD_RS);
     return uhci;
+}
+
+static TestUHCI test_uhci_start_with_extra(const char *extra)
+{
+    return test_uhci_start_with_options(false, extra);
 }
 
 static TestUHCI test_uhci_start(void)
@@ -325,6 +368,66 @@ static void test_numlock_force_can_be_enabled(void)
     g_assert_false(qtest_qom_get_bool(
         qts, USB_KBD_PATH, "x-numlock-startup-completed"));
     qtest_quit(qts);
+}
+
+static size_t test_endpoint_interval_offset(const uint8_t *descriptor,
+                                            size_t length)
+{
+    size_t offset = 0;
+
+    while (offset + 2 <= length) {
+        uint8_t item_length = descriptor[offset];
+        uint8_t item_type = descriptor[offset + 1];
+
+        g_assert_cmpuint(item_length, >=, 2);
+        g_assert_cmpuint(offset + item_length, <=, length);
+        if (item_type == USB_DT_ENDPOINT) {
+            g_assert_cmpuint(item_length, >=, 7);
+            return offset + 6;
+        }
+        offset += item_length;
+    }
+
+    g_assert_not_reached();
+}
+
+static void test_read_keyboard_config_descriptor(bool low_latency,
+                                                 uint8_t *descriptor)
+{
+    const uint8_t setup[8] = {
+        USB_DIR_IN, USB_REQ_GET_DESCRIPTOR,
+        0, USB_DT_CONFIG, 0, 0, TEST_HID_CONFIG_DESC_SIZE, 0,
+    };
+    TestUHCI uhci = test_uhci_start_with_options(low_latency, NULL);
+
+    g_assert_cmpint(qtest_qom_get_bool(uhci.qs->qts, USB_KBD_PATH,
+                                      "x-low-latency"), ==, low_latency);
+    test_uhci_control_in(&uhci, 0, setup, descriptor,
+                         TEST_HID_CONFIG_DESC_SIZE);
+    test_uhci_stop(&uhci);
+}
+
+static void test_low_latency_descriptor_is_opt_in(void)
+{
+    uint8_t default_descriptor[TEST_HID_CONFIG_DESC_SIZE];
+    uint8_t low_latency_descriptor[TEST_HID_CONFIG_DESC_SIZE];
+    size_t interval_offset;
+    size_t i;
+
+    test_read_keyboard_config_descriptor(false, default_descriptor);
+    test_read_keyboard_config_descriptor(true, low_latency_descriptor);
+    interval_offset = test_endpoint_interval_offset(
+        default_descriptor, sizeof(default_descriptor));
+
+    g_assert_cmpuint(default_descriptor[interval_offset], ==, 10);
+    g_assert_cmpuint(low_latency_descriptor[interval_offset], ==, 1);
+    for (i = 0; i < sizeof(default_descriptor); i++) {
+        if (i == interval_offset) {
+            continue;
+        }
+        g_assert_cmphex(default_descriptor[i], ==,
+                        low_latency_descriptor[i]);
+    }
 }
 
 static void test_numlock_set_report_end_to_end(void)
@@ -478,6 +581,87 @@ static void test_numlock_migration_preserves_unknown(void)
     }
 }
 
+static void test_low_latency_migration_matches(void)
+{
+    g_autofree char *socket_path = g_strdup_printf(
+        "%s/qemu-usb-hid-low-latency-%u-%u.sock", g_get_tmp_dir(),
+        (unsigned)getpid(), g_random_int());
+    g_autofree char *uri = g_strdup_printf("unix:%s", socket_path);
+    g_autofree char *incoming = g_strdup_printf("-incoming %s", uri);
+    TestUHCI source = test_uhci_start_with_options(true, NULL);
+    TestUHCI destination = test_uhci_start_with_options(true, incoming);
+
+    migrate(source.qs, destination.qs, uri);
+    g_assert_true(qtest_qom_get_bool(destination.qs->qts, USB_KBD_PATH,
+                                    "x-low-latency"));
+
+    test_uhci_stop(&destination);
+    test_uhci_stop_migrated_source(&source);
+    if (g_file_test(socket_path, G_FILE_TEST_EXISTS)) {
+        g_assert_cmpint(g_unlink(socket_path), ==, 0);
+    }
+}
+
+static void test_wait_for_migration_terminal(QTestState *source,
+                                             const char *uri)
+{
+    QDict *response;
+    unsigned int attempt;
+
+    response = qtest_qmp(source,
+                         "{ 'execute': 'migrate', "
+                         "  'arguments': { 'uri': %s }}", uri);
+    g_assert_true(qdict_haskey(response, "return"));
+    qobject_unref(response);
+
+    for (attempt = 0; attempt < 1000; attempt++) {
+        const char *status;
+        QDict *result;
+
+        response = qtest_qmp(source, "{ 'execute': 'query-migrate' }");
+        g_assert_true(qdict_haskey(response, "return"));
+        result = qdict_get_qdict(response, "return");
+        status = qdict_get_str(result, "status");
+        if (g_str_equal(status, "failed") ||
+            g_str_equal(status, "completed")) {
+            qobject_unref(response);
+            return;
+        }
+        qobject_unref(response);
+        g_usleep(5000);
+    }
+    g_assert_not_reached();
+}
+
+static void test_low_latency_migration_rejects_mismatch(void)
+{
+    g_autofree char *socket_path = g_strdup_printf(
+        "%s/qemu-usb-hid-low-latency-mismatch-%u-%u.sock", g_get_tmp_dir(),
+        (unsigned)getpid(), g_random_int());
+    g_autofree char *uri = g_strdup_printf("unix:%s", socket_path);
+    g_autofree char *incoming = g_strdup_printf("-incoming %s", uri);
+    TestUHCI source = test_uhci_start_with_options(true, NULL);
+    TestUHCI destination = test_uhci_start_with_options(false, incoming);
+    unsigned int attempt;
+
+    qtest_set_expected_status(destination.qs->qts, EXIT_FAILURE);
+    test_wait_for_migration_terminal(source.qs->qts, uri);
+    for (attempt = 0; attempt < 1000; attempt++) {
+        if (!qtest_probe_child(destination.qs->qts)) {
+            break;
+        }
+        g_usleep(5000);
+    }
+    g_assert_cmpuint(attempt, <, 1000);
+
+    uhci_deinit(&destination.hc);
+    qtest_shutdown(destination.qs);
+    test_uhci_stop(&source);
+    if (g_file_test(socket_path, G_FILE_TEST_EXISTS)) {
+        g_assert_cmpint(g_unlink(socket_path), ==, 0);
+    }
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -485,11 +669,17 @@ int main(int argc, char **argv)
                     test_numlock_force_defaults_off);
     g_test_add_func("/usb-hid-numlock/explicit-on",
                     test_numlock_force_can_be_enabled);
+    g_test_add_func("/usb-hid-low-latency/descriptor-opt-in",
+                    test_low_latency_descriptor_is_opt_in);
     g_test_add_func("/usb-hid-numlock/set-report-end-to-end",
                     test_numlock_set_report_end_to_end);
     g_test_add_func("/usb-hid-numlock/migration-on-rearms",
                     test_numlock_migration_on_rearms_after_off);
     g_test_add_func("/usb-hid-numlock/migration-unknown",
                     test_numlock_migration_preserves_unknown);
+    g_test_add_func("/usb-hid-low-latency/migration-match",
+                    test_low_latency_migration_matches);
+    g_test_add_func("/usb-hid-low-latency/migration-mismatch",
+                    test_low_latency_migration_rejects_mismatch);
     return g_test_run();
 }

@@ -237,7 +237,7 @@ EXPECTED_CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
 [[ "$EXPECTED_CATALOG_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
     die "could not calculate the current GPU profile catalog hash"
 
-for dependency in jq stat flock mktemp sha256sum awk find realpath rmdir; do
+for dependency in jq stat date flock mktemp sha256sum awk find realpath rmdir; do
     command -v "$dependency" >/dev/null 2>&1 ||
         die "missing dependency: $dependency"
 done
@@ -261,8 +261,16 @@ ATTESTATION="${BASE}.vgpu-portable.json"
 BASE_FILE_BYTES=$(stat -c %s -- "$BASE")
 BASE_DEVICE_ID=$(stat -c %D -- "$BASE")
 BASE_INODE=$(stat -c %i -- "$BASE")
-BASE_MTIME_NS=$(stat -c %y -- "$BASE")
-BASE_CTIME_NS=$(stat -c %z -- "$BASE")
+OBSERVED_BASE_MTIME_NS=$(TZ=UTC stat -c %y -- "$BASE")
+BASE_CTIME_NS=$(TZ=UTC stat -c %z -- "$BASE")
+BASE_MTIME_NS=$(jq -er '.baseMtimeNs | strings' "$ATTESTATION") ||
+    die "base portable-package attestation has no string mtime"
+OBSERVED_BASE_MTIME_INSTANT=$(date -u -d "$OBSERVED_BASE_MTIME_NS" '+%s.%N') ||
+    die "could not normalize the base image mtime"
+ATTESTED_BASE_MTIME_INSTANT=$(date -u -d "$BASE_MTIME_NS" '+%s.%N') ||
+    die "base portable-package attestation has an invalid mtime"
+[[ "$OBSERVED_BASE_MTIME_INSTANT" == "$ATTESTED_BASE_MTIME_INSTANT" ]] ||
+    die "base image mtime changed after portable-package installation"
 # A V-11-style hard-link pin legitimately changes the base inode's ctime when
 # clones are created/deleted. Content safety remains bound to path, device,
 # inode, byte length and nanosecond mtime; baseCtimeNs stays an audit field but
@@ -658,12 +666,12 @@ cat <<EOF
   monitor:     ${MONITOR_SYNC_RESULT}
   guest:       independent generalized Windows identity
   portable:    C:\ProgramData\VMate\G11\VgpuPortable.exe
-  Guest Lite:  pinned 2.3.0 / automatic / exact rollback baseline
+  Guest Lite:  pinned 2.5.2 / audio muted / notifications off / taskbar search hidden / en-US first + Pinyin second / automatic / exact rollback baseline
   system NVAPI: per-VM read-only ISO / ${SYSTEM_CONTRACT_ID}
   DLS:         dls.gvmates.com:443
 
 首次启动会自动跳过 OOBE、运行一次授权版 VgpuPortable.exe、应用经过内容校验的
-Guest Lite 2.3.0（母盘封装前必须手工关闭篡改防护）、安装该 VM
+Guest Lite 2.5.2（母盘封装前必须手工关闭篡改防护）、安装该 VM
 专属的系统 NVAPI/显示器投影并自动重启；重启后由 SYSTEM 自动验收
 GRID 538.33 / DEV_1E30 / Code 0 / Licensed / x86+x64 NVAPI，以及 MpsSvc
 Disabled/Stopped、BFE 保留运行和 Guest Lite 回滚基线，成功后完整关机。

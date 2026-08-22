@@ -81,7 +81,7 @@ grep -Fq 'Assert-LocalRtcContract' "$GUEST_SCRIPT" \
     || fail "guest script does not enforce the host-owned local RTC contract"
 grep -Fq 'RealTimeIsUniversal must be absent or DWORD 0' "$GUEST_SCRIPT" \
     || fail "guest script does not reject the obsolete UTC RTC registry contract"
-grep -Fq -- '-rtc base=localtime,clock=host,driftfix=slew' "$GUEST_SCRIPT" \
+grep -Fq -- '-rtc base=localtime,clock=vm,driftfix=slew' "$GUEST_SCRIPT" \
     || fail "guest script does not identify the required host RTC arguments"
 grep -Fq 'TZ=Asia/Shanghai' "$GUEST_SCRIPT" \
     || fail "guest script does not identify the required host timezone"
@@ -113,7 +113,7 @@ grep -Fq 'RealTimeIsUniversal must be absent or DWORD 0' "$RTC_SCRIPT" \
     || fail "RTC diagnostic does not verify the local RTC registry contract"
 grep -Fq 'TZ=Asia/Shanghai' "$RTC_SCRIPT" \
     || fail "RTC diagnostic does not show the required host timezone"
-grep -Fq -- '-rtc base=localtime,clock=host,driftfix=slew' "$RTC_SCRIPT" \
+grep -Fq -- '-rtc base=localtime,clock=vm,driftfix=slew' "$RTC_SCRIPT" \
     || fail "RTC diagnostic does not show the required QEMU arguments"
 grep -Fq 'fully shut down Windows' "$RTC_SCRIPT" \
     || fail "RTC diagnostic does not require a new QEMU cold boot after manual correction"

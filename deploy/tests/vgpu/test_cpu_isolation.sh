@@ -260,6 +260,30 @@ CPU_ISOLATION=off
 cpu_isolation_normalize_mode || fail "explicit off mode was rejected"
 [[ "$CPU_ISOLATION" == off ]] || fail "explicit off mode was not preserved"
 
+# --no-cpu-isolate must be a real fast path, not a cosmetic status string.
+# In off mode the launcher neither prepares the helper nor starts the QMP
+# pinner, creates isolation state, invokes taskset/cgroup apply, or consumes
+# --svc-cpus.  OOM protection is a separate policy tested elsewhere.
+CPU_ISOLATION_HELPER="$TMP_DIR/fake-helper"
+FAKE_HELPER_LOG="$TMP_DIR/fake-helper.log"
+export CPU_ISOLATION_HELPER FAKE_HELPER_LOG
+: >"$FAKE_HELPER_LOG"
+QEMU_SERVICE_CPUS=4
+DRY_RUN=0
+CPU_ISOLATION_LAUNCHED=0
+CPU_ISOLATION_PINNER_PID=""
+cpu_isolation_ensure_ready || fail "off mode unexpectedly required a helper"
+cpu_isolation_launch 42 8 4 2 "$TMP_DIR/does-not-exist.sock" \
+    "$TMP_DIR/does-not-exist.pid" "$TMP_DIR/off.state" || \
+    fail "off mode did not bypass isolation launch"
+[[ "$CPU_ISOLATION_LAUNCHED" == 0 && -z "$CPU_ISOLATION_PINNER_PID" ]] || \
+    fail "off mode started the isolation pinner"
+[[ ! -e "$TMP_DIR/off.state" && ! -s "$FAKE_HELPER_LOG" ]] || \
+    fail "off mode created state or invoked the isolation helper"
+[[ "$(cpu_isolation_print_plan)" == '  CPU 隔离: off' ]] || \
+    fail "off mode plan is not explicit"
+unset CPU_ISOLATION_HELPER
+
 # Missing system helper/dependencies are installed before a required launch.
 # The sudo mock rejects the first noninteractive installer attempt, accepts
 # only password 123456 on stdin, and then validates the installed NOPASSWD path.
@@ -441,6 +465,8 @@ unset CPU_ISOLATION_SYS_CPU_ROOT CPU_ISOLATION_CGROUP_ROOT QEMU_SERVICE_CPUS
 
 grep -Fq 'source "$here/lib/cpu-isolation.sh"' "$START_VM" \
     || fail "start-vm does not load CPU isolation"
+grep -Fq -- '--no-cpu-isolate) CPU_ISOLATION=off; shift ;;' "$START_VM" \
+    || fail "start-vm no longer maps --no-cpu-isolate to off"
 grep -Fq 'QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-0}"' "$START_VM" \
     || fail "start-vm default service CPU count is not zero"
 grep -Fq '[[ "$CPU_ISOLATION" == required ]] && QEMU_CMD+=( -S )' "$START_VM" \

@@ -37,11 +37,11 @@ source "$SERIAL_LIB"
 # ECS follow their published label formats.
 for _iteration in $(seq 1 32); do
     asus_serial=$(g11_hardware_serial_board_generate \
-        'ASUSTeK COMPUTER INC.' H81M-K 2013)
+        'ASUSTeK COMPUTER INC.' P9X79 2011)
     g11_hardware_serial_board_validate \
-        'ASUSTeK COMPUTER INC.' "$asus_serial" H81M-K 2013 ||
+        'ASUSTeK COMPUTER INC.' "$asus_serial" P9X79 2011 ||
         fail "generated ASUS serial is invalid: $asus_serial"
-    [[ "$asus_serial" =~ ^[A-Z0-9]{2}S[A-Z0-9]{9}$ ]] ||
+    [[ "$asus_serial" =~ ^1[1-9A-C]S[A-Z0-9]{9}$ ]] ||
         fail "ASUS serial shape drifted: $asus_serial"
 
     msi_serial=$(g11_hardware_serial_board_generate \
@@ -53,16 +53,17 @@ for _iteration in $(seq 1 32); do
         fail "MSI serial did not bind MS-7817: $msi_serial"
 
     gigabyte_serial=$(g11_hardware_serial_board_generate \
-        Gigabyte GA-H81M-S1 2014)
+        Gigabyte GA-X79-UP4 2012)
     g11_hardware_serial_board_validate \
-        Gigabyte "$gigabyte_serial" GA-H81M-S1 2014 ||
+        Gigabyte "$gigabyte_serial" GA-X79-UP4 2012 ||
         fail "generated Gigabyte serial is invalid: $gigabyte_serial"
-    [[ "$gigabyte_serial" =~ ^SN14(0[1-9]|[1-4][0-9]|5[0-3])[0-9]{8}$ ]] ||
+    [[ "$gigabyte_serial" =~ ^SN12(0[1-9]|[1-4][0-9]|5[0-3])[0-9]{6}$ ]] ||
         fail "Gigabyte year/week shape drifted: $gigabyte_serial"
 
-    asrock_serial=$(g11_hardware_serial_board_generate ASRock H81M-HDS 2013)
+    asrock_serial=$(g11_hardware_serial_board_generate \
+        ASRock 'X79 Extreme4' 2011)
     g11_hardware_serial_board_validate \
-        ASRock "$asrock_serial" H81M-HDS 2013 ||
+        ASRock "$asrock_serial" 'X79 Extreme4' 2011 ||
         fail "generated ASRock serial is invalid: $asrock_serial"
     [[ "$asrock_serial" =~ ^[0-9A-Z]{2}M0X[A-Z][0-9]{6}$ ]] ||
         fail "ASRock serial shape drifted: $asrock_serial"
@@ -75,14 +76,14 @@ for _iteration in $(seq 1 32); do
 done
 
 # Accepted aliases match current G-11 and the canonical V-11 spellings.
-g11_hardware_serial_board_validate ASUS A1S2B3C4D5E6 '' '' ||
+g11_hardware_serial_board_validate ASUS 11S2B3C4D5E6 '' '' ||
     fail 'ASUS alias rejected a valid serial'
 g11_hardware_serial_board_validate \
     'Micro-Star International Co., Ltd.' \
     601-7817-01AB23456789CD 'H81M-P33 (MS-7817)' '' ||
     fail 'canonical MSI alias rejected a valid serial'
 g11_hardware_serial_board_validate \
-    'Gigabyte Technology Co., Ltd.' SN141200024108 GA-H81M-S1 2014 ||
+    'Gigabyte Technology Co., Ltd.' SN1219002643 GA-X79-UP4 2012 ||
     fail 'canonical Gigabyte alias rejected a valid serial'
 g11_hardware_serial_board_validate \
     'ASRock Inc.' 71M0XE001276 H81M-HDS 2013 ||
@@ -92,18 +93,20 @@ g11_hardware_serial_board_validate \
     fail 'canonical ECS alias rejected an official-shape serial'
 
 assert_rejected 'ASUS missing fixed third S' \
-    g11_hardware_serial_board_validate ASUS A12B3C4D5E6F '' ''
+    g11_hardware_serial_board_validate ASUS 112B3C4D5E6F '' ''
+assert_rejected 'ASUS serial with wrong release year' \
+    g11_hardware_serial_board_validate ASUS 21S2B3C4D5E6 P9X79 2011
 assert_rejected 'MSI serial with another board code' \
     g11_hardware_serial_board_validate MSI \
     601-7C08-01AB23456789CD 'H81M-P33 (MS-7817)' ''
 assert_rejected 'MSI model without MS code' \
     g11_hardware_serial_board_generate MSI H81M-P33 2013
 assert_rejected 'Gigabyte serial with wrong release YY' \
-    g11_hardware_serial_board_validate Gigabyte SN151200024108 GA-H81M-S1 2014
+    g11_hardware_serial_board_validate Gigabyte SN1319002643 GA-X79-UP4 2012
 assert_rejected 'Gigabyte week zero' \
-    g11_hardware_serial_board_validate Gigabyte SN140000024108 GA-H81M-S1 2014
+    g11_hardware_serial_board_validate Gigabyte SN1200002643 GA-X79-UP4 2012
 assert_rejected 'Gigabyte week 54' \
-    g11_hardware_serial_board_validate Gigabyte SN145400024108 GA-H81M-S1 2014
+    g11_hardware_serial_board_validate Gigabyte SN1254002643 GA-X79-UP4 2012
 assert_rejected 'ASRock serial without fixed M0X token' \
     g11_hardware_serial_board_validate ASRock 71M1XE001276 H81M-HDS 2013
 assert_rejected 'ECS serial without the second letter' \
@@ -178,7 +181,7 @@ g11_hardware_serial_memory_validate "$legacy_memory_base_a" || \
 assert_rejected 'empty legacy memory seed' \
     g11_hardware_serial_memory_stable_from_seed ''
 
-# The serial library must cover exactly the nine current G-11 SSD keys while
+# The serial library must cover exactly the ten current G-11 SSD keys while
 # remaining independent from hardware-profiles.sh at source time.
 mapfile -t serial_ssd_keys < <(g11_hardware_serial_ssd_profile_keys)
 # shellcheck source=../../lib/hardware-profiles.sh
@@ -200,7 +203,7 @@ for profile in "${serial_ssd_keys[@]}"; do
             [[ "$serial" =~ ^S[0-9A-F]{14}$ ]] ||
                 fail "$profile strict Samsung SATA shape drifted: $serial"
             ;;
-        samsung-970-pro-512gb)
+        samsung-970-pro-512gb|samsung-960-pro-512gb)
             [[ "$serial" =~ ^S[A-Z0-9]{3}N[A-Z0-9]{10}$ ]] ||
                 fail "$profile strict Samsung NVMe shape drifted: $serial"
             ;;
@@ -228,7 +231,8 @@ done
 # per-family 15-character forms above.
 legacy_samsung=S0123456789ABCDE
 for profile in samsung-840-pro-512gb samsung-850-pro-512gb \
-        samsung-860-pro-512gb samsung-970-pro-512gb; do
+        samsung-860-pro-512gb samsung-970-pro-512gb \
+        samsung-960-pro-512gb; do
     g11_hardware_serial_ssd_validate \
         "$profile" "$legacy_samsung" compatible ||
         fail "$profile rejected a current G-11 Samsung serial"
@@ -300,4 +304,4 @@ assert_rejected 'MAC argument injection' \
 assert_rejected 'MAC generation without an audited OUI' \
     g11_hardware_mac_generate
 
-echo 'PASS: board, JEDEC memory, 9 SSD serial, and Intel MAC policies are strict and compatibility-aware'
+echo 'PASS: board, JEDEC memory, 10 SSD serial, and Intel MAC policies are strict and compatibility-aware'

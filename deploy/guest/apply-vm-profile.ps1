@@ -411,6 +411,7 @@ function ConvertTo-ValidatedConfig {
     }
     $memoryMakerContract = switch ([int]$gpu.MemoryMaker) {
         1 { @('Samsung', 'Samsung') }
+        3 { @('Elpida', 'Elpida') }
         6 { @('SK hynix', 'Hynix') }
         10 { @('Micron', 'Micron') }
         default { $null }

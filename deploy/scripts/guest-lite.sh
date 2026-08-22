@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command build/hot-mount wrapper for G-11 Windows 10 Guest Lite 2.3.0.
+# One-command build/hot-mount wrapper for G-11 Windows 10 Guest Lite 2.5.2.
 set -euo pipefail
 umask 077
 
@@ -31,7 +31,8 @@ By default, artifacts use one fixed child directory on the public tools USB:
 usb-mount is preferred: it rebuilds only the G11GuestLite child directory,
 then hot-adds shared/usb as a read-only removable USB disk. mount is the
 optical compatibility path. Windows changes occur only after the user runs
-G11GuestLite.exe. Version 2.3.0 covers Defender/firewall, system and reviewed
+G11GuestLite.exe. Version 2.5.2 covers Defender/firewall, notifications,
+English-US default input, system and reviewed
 software updates, OneDrive/cloud sync, consumer apps, and VM performance.
 EOF
 }

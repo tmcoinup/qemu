@@ -41,80 +41,135 @@
 #define VFIO_REGION_FULL_MOTION_PERCENT  75
 #define VFIO_REGION_FULL_MOTION_STREAK    8
 #define VFIO_REGION_COMPARE_BYPASS_FRAMES 60
+#define VFIO_REGION_FAILURE_RETRY_US      100000
 
 typedef struct VFIORegionDirtyRun {
     uint32_t y;
     uint32_t height;
 } VFIORegionDirtyRun;
 
-static void vfio_display_region_shadow_reset(VFIODisplay *dpy)
+/*
+ * The console owns region.surface after dpy_gfx_replace_surface().  Its pixman
+ * image only borrows region.staging, so staging may be freed only after the
+ * console has switched to another surface (or graphic_console_close() has
+ * detached it).
+ */
+static void vfio_display_region_drop_staging(VFIODisplay *dpy)
 {
-    g_clear_pointer(&dpy->region.shadow, g_free);
-    dpy->region.shadow_size = 0;
-    dpy->region.shadow_width = 0;
-    dpy->region.shadow_height = 0;
-    dpy->region.shadow_stride = 0;
-    dpy->region.shadow_row_bytes = 0;
-    dpy->region.shadow_format = 0;
+    dpy->region.surface = NULL;
+    g_clear_pointer(&dpy->region.staging, g_free);
+    dpy->region.staging_size = 0;
+    dpy->region.staging_row_bytes = 0;
     dpy->region.full_motion_streak = 0;
     dpy->region.compare_bypass_frames = 0;
-    dpy->region.shadow_valid = false;
 }
 
-static bool vfio_display_region_shadow_prepare(
-    VFIODisplay *dpy, const struct vfio_device_gfx_plane_info *plane,
-    pixman_format_code_t format)
+static void vfio_display_region_buffer_reset(VFIODisplay *dpy)
+{
+    if (dpy->region.buffer.mem) {
+        vfio_region_exit(&dpy->region.buffer);
+        vfio_region_finalize(&dpy->region.buffer);
+    }
+    memset(&dpy->region.buffer, 0, sizeof(dpy->region.buffer));
+}
+
+static bool vfio_display_region_mark_failure(VFIODisplay *dpy)
+{
+    bool first = dpy->region.failure_streak == 0;
+
+    if (dpy->region.failure_streak != UINT32_MAX) {
+        dpy->region.failure_streak++;
+    }
+    dpy->region.force_full_update = true;
+    dpy->region.full_motion_streak = 0;
+    dpy->region.compare_bypass_frames = 0;
+    dpy->region.failure_retry_after_us =
+        g_get_monotonic_time() + VFIO_REGION_FAILURE_RETRY_US;
+    return first;
+}
+
+static void vfio_display_region_mark_recovered(VFIODisplay *dpy)
+{
+    if (dpy->region.failure_streak) {
+        info_report("vfio-display-region: source recovered after %u failed "
+                    "refreshes; queued a full staging update",
+                    dpy->region.failure_streak);
+        dpy->region.failure_streak = 0;
+    }
+    dpy->region.failure_retry_after_us = 0;
+}
+
+static bool vfio_display_region_layout(
+    const struct vfio_device_gfx_plane_info *plane,
+    pixman_format_code_t format, size_t *row_bytes, size_t *staging_size)
 {
     uint32_t bytes_per_pixel = DIV_ROUND_UP(PIXMAN_FORMAT_BPP(format), 8);
-    size_t row_bytes;
-    size_t shadow_size;
 
-    if (!bytes_per_pixel || plane->width > SIZE_MAX / bytes_per_pixel) {
+    if (!bytes_per_pixel || !plane->width || !plane->height ||
+        plane->width > INT_MAX || plane->height > INT_MAX ||
+        plane->stride > INT_MAX || plane->stride % sizeof(uint32_t) ||
+        plane->region_index > UINT8_MAX ||
+        plane->width > SIZE_MAX / bytes_per_pixel) {
         return false;
     }
-    row_bytes = plane->width * bytes_per_pixel;
-    if (row_bytes > plane->stride ||
-        (plane->height && plane->stride > plane->size / plane->height) ||
-        (plane->height && row_bytes > SIZE_MAX / plane->height)) {
+    *row_bytes = plane->width * bytes_per_pixel;
+    if (*row_bytes > plane->stride ||
+        plane->stride > SIZE_MAX / plane->height) {
         return false;
     }
-    shadow_size = row_bytes * plane->height;
+    *staging_size = (size_t)plane->stride * plane->height;
+    return *staging_size <= plane->size;
+}
 
-    if (dpy->region.shadow &&
-        dpy->region.shadow_size == shadow_size &&
-        dpy->region.shadow_width == plane->width &&
-        dpy->region.shadow_height == plane->height &&
-        dpy->region.shadow_stride == plane->stride &&
-        dpy->region.shadow_row_bytes == row_bytes &&
-        dpy->region.shadow_format == format) {
-        return true;
-    }
+static bool vfio_display_region_staging_matches(
+    VFIODisplay *dpy, const struct vfio_device_gfx_plane_info *plane,
+    pixman_format_code_t format, size_t row_bytes, size_t staging_size)
+{
+    return dpy->region.surface && dpy->region.staging &&
+           dpy->region.staging_size == staging_size &&
+           dpy->region.staging_row_bytes == row_bytes &&
+           surface_width(dpy->region.surface) == plane->width &&
+           surface_height(dpy->region.surface) == plane->height &&
+           surface_format(dpy->region.surface) == format &&
+           surface_stride(dpy->region.surface) == plane->stride;
+}
 
-    vfio_display_region_shadow_reset(dpy);
-    dpy->region.shadow = g_try_malloc(shadow_size);
-    if (!dpy->region.shadow) {
+static bool vfio_display_region_install_staging(
+    VFIODisplay *dpy, const struct vfio_device_gfx_plane_info *plane,
+    pixman_format_code_t format, size_t row_bytes, size_t staging_size,
+    const uint8_t *source)
+{
+    DisplaySurface *surface;
+    uint8_t *old_staging = dpy->region.staging;
+    uint8_t *staging = g_try_malloc(staging_size);
+
+    if (!staging) {
         return false;
     }
-    dpy->region.shadow_size = shadow_size;
-    dpy->region.shadow_width = plane->width;
-    dpy->region.shadow_height = plane->height;
-    dpy->region.shadow_stride = plane->stride;
-    dpy->region.shadow_row_bytes = row_bytes;
-    dpy->region.shadow_format = format;
+
+    /* Populate the complete stable backing before any listener can see it. */
+    memcpy(staging, source, staging_size);
+    surface = qemu_create_displaysurface_from(plane->width, plane->height,
+                                              format, plane->stride, staging);
+    dpy_gfx_replace_surface(dpy->con, surface);
+
+    dpy->region.surface = surface;
+    dpy->region.staging = staging;
+    dpy->region.staging_size = staging_size;
+    dpy->region.staging_row_bytes = row_bytes;
+    dpy->region.full_motion_streak = 0;
+    dpy->region.compare_bypass_frames = 0;
+    dpy->region.force_full_update = false;
+
+    /* dpy_gfx_replace_surface() has synchronously detached old_staging. */
+    g_free(old_staging);
     return true;
 }
 
-static void vfio_display_region_shadow_copy(VFIODisplay *dpy,
-                                            const uint8_t *source)
+static void vfio_display_region_staging_copy(VFIODisplay *dpy,
+                                             const uint8_t *source)
 {
-    uint32_t y;
-
-    for (y = 0; y < dpy->region.shadow_height; y++) {
-        memcpy(dpy->region.shadow + y * dpy->region.shadow_row_bytes,
-               source + y * dpy->region.shadow_stride,
-               dpy->region.shadow_row_bytes);
-    }
-    dpy->region.shadow_valid = true;
+    memcpy(dpy->region.staging, source, dpy->region.staging_size);
 }
 
 /*
@@ -129,6 +184,8 @@ static bool vfio_display_region_find_updates(
     VFIORegionDirtyRun runs[VFIO_REGION_MAX_DIRTY_RUNS],
     uint32_t *run_count, uint32_t *dirty_rows, bool *too_many_runs)
 {
+    uint32_t height = surface_height(dpy->region.surface);
+    uint32_t stride = surface_stride(dpy->region.surface);
     uint32_t y;
     uint32_t run_start = 0;
     bool in_run = false;
@@ -137,15 +194,14 @@ static bool vfio_display_region_find_updates(
     *dirty_rows = 0;
     *too_many_runs = false;
 
-    for (y = 0; y < dpy->region.shadow_height; y++) {
-        const uint8_t *src = source + y * dpy->region.shadow_stride;
-        uint8_t *shadow = dpy->region.shadow +
-                          y * dpy->region.shadow_row_bytes;
-        bool changed = memcmp(src, shadow,
-                              dpy->region.shadow_row_bytes) != 0;
+    for (y = 0; y < height; y++) {
+        const uint8_t *src = source + y * stride;
+        uint8_t *staging = dpy->region.staging + y * stride;
+        bool changed = memcmp(src, staging,
+                              dpy->region.staging_row_bytes) != 0;
 
         if (changed) {
-            memcpy(shadow, src, dpy->region.shadow_row_bytes);
+            memcpy(staging, src, dpy->region.staging_row_bytes);
             (*dirty_rows)++;
             if (!in_run) {
                 run_start = y;
@@ -172,6 +228,39 @@ static bool vfio_display_region_find_updates(
         }
     }
     return *dirty_rows != 0;
+}
+
+static const uint8_t *vfio_display_region_source(VFIODisplay *dpy,
+                                                 size_t staging_size)
+{
+    VFIORegion *region = &dpy->region.buffer;
+
+    if (!region->mem || !region->nr_mmaps || !region->mmaps ||
+        region->mmaps[0].offset != 0 || !region->mmaps[0].mmap ||
+        region->mmaps[0].size < staging_size) {
+        return NULL;
+    }
+    return region->mmaps[0].mmap;
+}
+
+static void vfio_display_region_no_plane(VFIODisplay *dpy)
+{
+    DisplaySurface *surface = dpy->region.surface;
+
+    dpy->region.force_full_update = true;
+    dpy->region.full_motion_streak = 0;
+    dpy->region.compare_bypass_frames = 0;
+
+    if (!dpy->ramfb) {
+        return;
+    }
+
+    ramfb_display_update(dpy->con, dpy->ramfb);
+    if (surface && qemu_console_surface(dpy->con) != surface) {
+        /* ramfb detached and freed surface; staging is now safe to release. */
+        vfio_display_region_drop_staging(dpy);
+        dpy->region.force_full_update = true;
+    }
 }
 
 
@@ -435,6 +524,9 @@ static void vfio_display_dmabuf_update(void *opaque)
     if (primary == NULL) {
         if (dpy->ramfb) {
             ramfb_display_update(dpy->con, dpy->ramfb);
+            /* A resumed plane at the same address must still be resubmitted. */
+            dpy->dmabuf.primary = NULL;
+            dpy->dmabuf.cursor = NULL;
         }
         return;
     }
@@ -515,6 +607,8 @@ static void vfio_display_dmabuf_exit(VFIODisplay *dpy)
 {
     VFIODMABuf *dmabuf;
 
+    dpy->dmabuf.primary = NULL;
+    dpy->dmabuf.cursor = NULL;
     if (QTAILQ_EMPTY(&dpy->dmabuf.bufs)) {
         return;
     }
@@ -527,8 +621,11 @@ static void vfio_display_dmabuf_exit(VFIODisplay *dpy)
 /* ---------------------------------------------------------------------- */
 void vfio_display_reset(VFIOPCIDevice *vdev)
 {
-    if (!vdev || !vdev->dpy || !vdev->dpy->con ||
-        !vdev->dpy->dmabuf.primary) {
+    if (!vdev || !vdev->dpy || !vdev->dpy->con) {
+        return;
+    }
+    if (!vdev->dpy->dmabuf.primary &&
+        QTAILQ_EMPTY(&vdev->dpy->dmabuf.bufs)) {
         return;
     }
 
@@ -548,95 +645,136 @@ static void vfio_display_region_update(void *opaque)
     pixman_format_code_t format;
     VFIORegionDirtyRun runs[VFIO_REGION_MAX_DIRTY_RUNS];
     const uint8_t *source;
+    size_t row_bytes;
+    size_t staging_size;
     uint32_t run_count;
     uint32_t dirty_rows;
     bool too_many_runs;
     int ret;
 
+    if (dpy->region.failure_retry_after_us &&
+        g_get_monotonic_time() < dpy->region.failure_retry_after_us) {
+        return;
+    }
+    dpy->region.failure_retry_after_us = 0;
+
     ret = ioctl(vdev->vbasedev.fd, VFIO_DEVICE_QUERY_GFX_PLANE, &plane);
     if (ret < 0) {
-        error_report("ioctl VFIO_DEVICE_QUERY_GFX_PLANE: %s",
-                     strerror(errno));
+        int saved_errno = errno;
+
+        if (vfio_display_region_mark_failure(dpy)) {
+            error_report("ioctl VFIO_DEVICE_QUERY_GFX_PLANE: %s; "
+                         "keeping the last staged frame",
+                         strerror(saved_errno));
+        }
         return;
     }
     if (!plane.drm_format || !plane.size) {
-        vfio_display_region_shadow_reset(dpy);
-        if (dpy->ramfb) {
-            ramfb_display_update(dpy->con, dpy->ramfb);
-            dpy->region.surface = NULL;
-        }
+        vfio_display_region_no_plane(dpy);
         return;
     }
     format = qemu_drm_format_to_pixman(plane.drm_format);
     if (!format) {
+        if (vfio_display_region_mark_failure(dpy)) {
+            error_report("vfio-display-region: unsupported DRM format 0x%x; "
+                         "keeping the last staged frame", plane.drm_format);
+        }
+        return;
+    }
+    if (!vfio_display_region_layout(&plane, format, &row_bytes,
+                                    &staging_size)) {
+        if (vfio_display_region_mark_failure(dpy)) {
+            error_report("vfio-display-region: invalid plane layout "
+                         "%ux%u stride=%u size=%u; keeping the last staged "
+                         "frame", plane.width, plane.height, plane.stride,
+                         plane.size);
+        }
         return;
     }
 
-    if (dpy->region.buffer.size &&
+    if (dpy->region.buffer.mem &&
         dpy->region.buffer.nr != plane.region_index) {
-        /* region changed */
-        vfio_region_exit(&dpy->region.buffer);
-        vfio_region_finalize(&dpy->region.buffer);
-        dpy->region.surface = NULL;
-        vfio_display_region_shadow_reset(dpy);
+        /* The installed surface uses staging, so unmapping cannot dangle it. */
+        vfio_display_region_buffer_reset(dpy);
+        dpy->region.force_full_update = true;
     }
 
-    if (dpy->region.surface &&
-        (surface_width(dpy->region.surface) != plane.width ||
-         surface_height(dpy->region.surface) != plane.height ||
-         surface_format(dpy->region.surface) != format ||
-         surface_stride(dpy->region.surface) != plane.stride)) {
-        /* size changed */
-        dpy->region.surface = NULL;
-        vfio_display_region_shadow_reset(dpy);
-    }
-
-    if (!dpy->region.buffer.size) {
+    if (!dpy->region.buffer.mem) {
         /* mmap region */
         Error *error = NULL;
+
         ret = vfio_region_setup(OBJECT(vdev), &vdev->vbasedev,
                                 &dpy->region.buffer,
                                 plane.region_index,
                                 "display", &error);
         if (ret != 0) {
-            error_report_err(error);
-            goto err;
+            bool first = vfio_display_region_mark_failure(dpy);
+
+            if (first && error) {
+                error_reportf_err(error, "vfio-display-region: ");
+            } else if (first) {
+                error_report("vfio-display-region: cannot set up region %u; "
+                             "keeping the last staged frame",
+                             plane.region_index);
+            } else {
+                error_free(error);
+            }
+            vfio_display_region_buffer_reset(dpy);
+            return;
         }
         ret = vfio_region_mmap(&dpy->region.buffer);
         if (ret != 0) {
-            error_report("%s: vfio_region_mmap(%d): %s", __func__,
-                         plane.region_index, strerror(-ret));
-            goto err;
+            if (vfio_display_region_mark_failure(dpy)) {
+                error_report("%s: vfio_region_mmap(%d): %s; keeping the "
+                             "last staged frame", __func__,
+                             plane.region_index, strerror(-ret));
+            }
+            vfio_display_region_buffer_reset(dpy);
+            return;
         }
-        assert(dpy->region.buffer.mmaps[0].mmap != NULL);
     }
 
-    if (dpy->region.surface == NULL) {
-        /* create surface */
-        dpy->region.surface = qemu_create_displaysurface_from
-            (plane.width, plane.height, format,
-             plane.stride, dpy->region.buffer.mmaps[0].mmap);
-        dpy_gfx_replace_surface(dpy->con, dpy->region.surface);
+    source = vfio_display_region_source(dpy, staging_size);
+    if (!source) {
+        if (vfio_display_region_mark_failure(dpy)) {
+            error_report("vfio-display-region: region %u has no contiguous "
+                         "mapping for %zu bytes; keeping the last staged frame",
+                         plane.region_index, staging_size);
+        }
+        return;
     }
 
-    source = dpy->region.buffer.mmaps[0].mmap;
-    if (!vfio_display_region_shadow_prepare(dpy, &plane, format)) {
-        /* Invalid metadata or allocation failure: preserve old fail-open. */
+    if (!vfio_display_region_staging_matches(dpy, &plane, format, row_bytes,
+                                             staging_size)) {
+        if (!vfio_display_region_install_staging(dpy, &plane, format,
+                                                 row_bytes, staging_size,
+                                                 source)) {
+            if (vfio_display_region_mark_failure(dpy)) {
+                error_report("vfio-display-region: cannot allocate %zu-byte "
+                             "staging frame; keeping the last staged frame",
+                             staging_size);
+            }
+            return;
+        }
+        vfio_display_region_mark_recovered(dpy);
         dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
         return;
     }
 
-    if (!dpy->region.shadow_valid) {
-        vfio_display_region_shadow_copy(dpy, source);
+    if (dpy->region.force_full_update) {
+        vfio_display_region_staging_copy(dpy, source);
+        dpy->region.force_full_update = false;
+        dpy->region.full_motion_streak = 0;
+        dpy->region.compare_bypass_frames = 0;
+        vfio_display_region_mark_recovered(dpy);
         dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
         return;
     }
 
     if (dpy->region.compare_bypass_frames) {
+        /* Consumers only ever see the stable copy, never the live mmap. */
+        vfio_display_region_staging_copy(dpy, source);
         dpy->region.compare_bypass_frames--;
-        if (!dpy->region.compare_bypass_frames) {
-            vfio_display_region_shadow_copy(dpy, source);
-        }
         dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
         return;
     }
@@ -676,12 +814,6 @@ static void vfio_display_region_update(void *opaque)
     dpy_gfx_update(dpy->con, 0, runs[0].y, plane.width,
                    runs[run_count - 1].y + runs[run_count - 1].height -
                    runs[0].y);
-    return;
-
-err:
-    vfio_display_region_shadow_reset(dpy);
-    vfio_region_exit(&dpy->region.buffer);
-    vfio_region_finalize(&dpy->region.buffer);
 }
 
 static const GraphicHwOps vfio_display_region_ops = {
@@ -705,13 +837,9 @@ static bool vfio_display_region_init(VFIOPCIDevice *vdev, Error **errp)
 
 static void vfio_display_region_exit(VFIODisplay *dpy)
 {
-    vfio_display_region_shadow_reset(dpy);
-    if (!dpy->region.buffer.size) {
-        return;
-    }
-
-    vfio_region_exit(&dpy->region.buffer);
-    vfio_region_finalize(&dpy->region.buffer);
+    /* graphic_console_close() has already detached and freed region.surface. */
+    vfio_display_region_drop_staging(dpy);
+    vfio_display_region_buffer_reset(dpy);
 }
 
 /* ---------------------------------------------------------------------- */

@@ -175,22 +175,32 @@ jq -e \
     .testsigning == false and .nointegritychecks == false and
     (.completedUtc | type) == "string" and
     (.guestLite | keys | sort) == [
-        "appearance", "baseFilteringEngine", "enforcementTask",
+        "appearance", "audio", "baseFilteringEngine", "defaultInputMethod",
+        "enforcementLastResult",
+        "enforcementLastRun", "enforcementTask",
         "firewallProcessId", "firewallService", "firewallStartMode",
-        "firewallState", "profileVersion", "rollbackBaseline", "state",
-        "userSid"
+        "firewallState", "inputOrder", "notifications", "profileVersion",
+        "rollbackBaseline", "state", "taskbarSearch", "userSid"
     ] and
     .guestLite.state == "validated" and
-    .guestLite.profileVersion == "2.3.0" and
+    .guestLite.profileVersion == "2.5.2" and
     .guestLite.userSid == (.machineSid + "-500") and
     .guestLite.rollbackBaseline == "C:\\ProgramData\\G11GuestLite\\state.json" and
     .guestLite.enforcementTask == "\\G11GuestLite-EnforceProfile" and
+    .guestLite.enforcementLastResult == 0 and
+    (.guestLite.enforcementLastRun | type) == "string" and
+    (.guestLite.enforcementLastRun | length) > 0 and
     .guestLite.firewallService == "MpsSvc" and
     .guestLite.firewallStartMode == "Disabled" and
     .guestLite.firewallState == "Stopped" and
     .guestLite.firewallProcessId == 0 and
     .guestLite.baseFilteringEngine == "preserved-running" and
     .guestLite.appearance == "background-and-font-preserved" and
+    .guestLite.audio == "muted" and
+    .guestLite.notifications == "disabled" and
+    .guestLite.taskbarSearch == "hidden" and
+    .guestLite.defaultInputMethod == "0409:00000409" and
+    .guestLite.inputOrder == "en-US/US,zh-CN/Microsoft-Pinyin" and
     (.systemNvapiProjection | keys | sort) == [
         "contractId", "driverSigned", "driverVersion", "gpuProfile",
         "monitorProfile", "nointegritychecks", "state", "testsigning",
@@ -325,7 +335,6 @@ SAFE_IDENTITY_JSON=$(jq -c '
         machineSid: .machineSid,
         observedVmUuid: (.observedVmUuid | ascii_downcase),
         gpuProfile: .gpuProfile,
-        guestLiteProfile: .guestLite.profileVersion,
         systemNvapiContractId: .systemNvapiProjection.contractId
     }
 ' "$GUEST_MARKER")
@@ -338,4 +347,4 @@ COMPLETED=1
 trap - EXIT HUP INT TERM
 rmdir -- "$MOUNT_DIR"
 printf 'G11_SAFE_IDENTITY_JSON=%s\n' "$SAFE_IDENTITY_JSON"
-echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / Guest Lite 2.3.0 + MpsSvc stopped / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"
+echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / Guest Lite 2.5.2 + audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc stopped / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"

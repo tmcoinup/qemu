@@ -52,6 +52,9 @@ for required in \
         "PurgeRdpGhosts" \
         "StealthMonitor-Refresh" \
         "NVDisplay.ContainerLocalSystem" \
+        "VIDEOIDLE" \
+        "STANDBYIDLE" \
+        "PowerSettings" \
         "Invoke-RollbackInternal"; do
     rg -Fq "$required" "$guest" || fail "guest script omitted: $required"
 done

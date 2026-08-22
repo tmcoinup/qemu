@@ -69,6 +69,7 @@ struct DisplayState {
     uint64_t update_interval_ns;
     bool update_interval_precise;
     bool refreshing;
+    uint64_t refresh_generation;
 
     QLIST_HEAD(, DisplayChangeListener) listeners;
 };
@@ -111,6 +112,9 @@ static void gui_update(void *opaque)
     deadline_ns = ds->next_update_ns;
     old_interval_ns = ds->update_interval_ns;
     ds->refreshing = true;
+    if (++ds->refresh_generation == 0) {
+        ds->refresh_generation++;
+    }
     dpy_refresh(ds);
     ds->refreshing = false;
 
@@ -206,6 +210,19 @@ void graphic_hw_update(QemuConsole *con)
     bool async = false;
     if (!con) {
         return;
+    }
+    /*
+     * Multiple listeners (for example SDL plus fb-shm preview) refresh the
+     * same console in one GUI tick.  Pull the producer once: gfx_update fans
+     * its damage out to every listener, so repeating the ioctl/memcmp/upload
+     * only adds latency and can break producer-side motion heuristics.
+     */
+    if (con->ds && con->ds->refreshing) {
+        if (con->last_hw_update_generation ==
+            con->ds->refresh_generation) {
+            return;
+        }
+        con->last_hw_update_generation = con->ds->refresh_generation;
     }
     if (con->hw_ops->gfx_update) {
         con->hw_ops->gfx_update(con->hw);
@@ -1240,6 +1257,35 @@ void dpy_gl_scanout_dmabuf(QemuConsole *con,
         if (dcl->ops->dpy_gl_scanout_dmabuf) {
             dcl->ops->dpy_gl_scanout_dmabuf(dcl, dmabuf);
         }
+    }
+}
+
+void dpy_gl_replay_current_scanout(DisplayChangeListener *dcl)
+{
+    QemuConsole *con = dcl ? dcl->con : NULL;
+
+    if (!con) {
+        return;
+    }
+    switch (con->scanout.kind) {
+    case SCANOUT_TEXTURE:
+        if (dcl->ops->dpy_gl_scanout_texture) {
+            ScanoutTexture *texture = &con->scanout.texture;
+
+            dcl->ops->dpy_gl_scanout_texture(
+                dcl, texture->backing_id, texture->backing_y_0_top,
+                texture->backing_width, texture->backing_height,
+                texture->x, texture->y, texture->width, texture->height,
+                texture->d3d_tex2d);
+        }
+        break;
+    case SCANOUT_DMABUF:
+        if (dcl->ops->dpy_gl_scanout_dmabuf) {
+            dcl->ops->dpy_gl_scanout_dmabuf(dcl, con->scanout.dmabuf);
+        }
+        break;
+    default:
+        break;
     }
 }
 

@@ -32,6 +32,19 @@ G11_CPU_CAPABILITY_ENFORCE_RC=
 G11_CPU_CAPABILITY_COMPAT_RC=
 G11_CPU_GATE_DECISION=
 G11_CPU_GATE_REASON=
+G11_KVM_CAPABILITIES_INJECTED=0
+if [[ -v G11_KVM_AVAILABLE && -v G11_KVM_TSC_CONTROL &&
+      -v G11_KVM_GET_TSC_KHZ && -v G11_KVM_TSC_KHZ ]]; then
+    G11_KVM_CAPABILITIES_INJECTED=1
+fi
+: "${G11_KVM_AVAILABLE:=}"
+: "${G11_KVM_TSC_CONTROL:=}"
+: "${G11_KVM_GET_TSC_KHZ:=}"
+: "${G11_KVM_TSC_KHZ:=}"
+: "${G11_KVM_ERROR:=}"
+G11_TSC_QEMU_OPTION=
+G11_TSC_EFFECTIVE_HZ=
+G11_TSC_RUNTIME_SOURCE=
 
 _G11_CPU_PROBE_OUTPUT=
 _G11_CPU_PROBE_RC=
@@ -345,4 +358,116 @@ g11_cpu_capability_report() {
         "${G11_CPU_CAPABILITY_MODEL:-unknown}" \
         "${G11_CPU_GATE_DECISION:-deny}" \
         "${G11_CPU_GATE_REASON:-G11_CPU_GATE_NOT_RUN}"
+}
+
+g11_tsc_frequency_within_250ppm() {
+    local current_khz=${1:-0} requested_khz=${2:-0} delta
+
+    [[ "$current_khz" =~ ^[1-9][0-9]*$ &&
+       "$requested_khz" =~ ^[1-9][0-9]*$ ]] || return 1
+    if ((current_khz >= requested_khz)); then
+        delta=$((current_khz - requested_khz))
+    else
+        delta=$((requested_khz - current_khz))
+    fi
+    ((delta * 1000000 <= current_khz * 250))
+}
+
+g11_kvm_tsc_probe() {
+    local helper=${1:-} output rc=0
+
+    # Tests and controlled deployments may inject the complete fixed tuple.
+    if [[ "$G11_KVM_CAPABILITIES_INJECTED" == 1 &&
+          "$G11_KVM_TSC_CONTROL" =~ ^[01]$ &&
+          "$G11_KVM_AVAILABLE" =~ ^[01]$ &&
+          "${G11_KVM_GET_TSC_KHZ:-0}" =~ ^[01]$ &&
+          "${G11_KVM_TSC_KHZ:-0}" =~ ^[0-9]+$ ]]; then
+        return 0
+    fi
+    [[ -f "$helper" && ! -L "$helper" && -r "$helper" ]] || {
+        G11_KVM_ERROR='KVM TSC capability helper is unavailable'
+        return 1
+    }
+    command -v python3 >/dev/null 2>&1 || {
+        G11_KVM_ERROR='python3 is unavailable'
+        return 1
+    }
+    if output=$(python3 "$helper" --format shell 2>/dev/null); then
+        rc=0
+    else
+        rc=$?
+    fi
+    # The helper emits only five fixed assignments and single-quotes its sole
+    # string.  Reject any unexpected line before evaluating that closed ABI.
+    if grep -Evq "^(G11_KVM_(AVAILABLE|TSC_CONTROL|GET_TSC_KHZ|TSC_KHZ)=[0-9]+|G11_KVM_ERROR='([^']|'\"'\"')*')$" <<<"$output"; then
+        G11_KVM_ERROR='KVM TSC helper returned an invalid protocol'
+        return 1
+    fi
+    eval "$output"
+    [[ "$G11_KVM_AVAILABLE" =~ ^[01]$ &&
+       "$G11_KVM_TSC_CONTROL" =~ ^[01]$ &&
+       "$G11_KVM_GET_TSC_KHZ" =~ ^[01]$ &&
+       "$G11_KVM_TSC_KHZ" =~ ^[0-9]+$ ]] || return 1
+    ((rc == 0 && G11_KVM_AVAILABLE == 1))
+}
+
+g11_tsc_policy_resolve() {
+    local helper=${1:-} profile_hz=${2:-} policy=${3:-auto}
+    local profile_khz
+
+    G11_TSC_QEMU_OPTION=
+    G11_TSC_EFFECTIVE_HZ=
+    G11_TSC_RUNTIME_SOURCE=
+    [[ "$profile_hz" =~ ^[1-9][0-9]*$ &&
+       "$profile_hz" -ge 100000000 && "$profile_hz" -le 10000000000 ]] || {
+        G11_KVM_ERROR='profile TSC frequency is outside 100MHz..10GHz'
+        return 2
+    }
+    case "$policy" in auto|profile|host|omit) ;; *) return 2 ;; esac
+    profile_khz=$((profile_hz / 1000))
+
+    if [[ "${DRY_RUN:-0}" == 1 && "$G11_KVM_CAPABILITIES_INJECTED" == 0 ]]; then
+        if [[ "$policy" == omit ]]; then
+            G11_TSC_RUNTIME_SOURCE=omitted-dry-run
+        else
+            G11_TSC_QEMU_OPTION="tsc-freq=${profile_hz}"
+            G11_TSC_EFFECTIVE_HZ=$profile_hz
+            G11_TSC_RUNTIME_SOURCE=profile-dry-run
+        fi
+        return 0
+    fi
+    g11_kvm_tsc_probe "$helper" || return 1
+
+    case "$policy" in
+        omit)
+            G11_TSC_RUNTIME_SOURCE=host-implicit
+            return 0
+            ;;
+        host)
+            ((G11_KVM_GET_TSC_KHZ == 1 && G11_KVM_TSC_KHZ > 0)) || return 1
+            G11_TSC_EFFECTIVE_HZ=$((G11_KVM_TSC_KHZ * 1000))
+            G11_TSC_QEMU_OPTION="tsc-freq=${G11_TSC_EFFECTIVE_HZ}"
+            G11_TSC_RUNTIME_SOURCE=host-explicit
+            return 0
+            ;;
+        auto|profile)
+            if ((G11_KVM_TSC_CONTROL == 1)) ||
+                    g11_tsc_frequency_within_250ppm \
+                        "$G11_KVM_TSC_KHZ" "$profile_khz"; then
+                G11_TSC_EFFECTIVE_HZ=$profile_hz
+                G11_TSC_QEMU_OPTION="tsc-freq=${profile_hz}"
+                G11_TSC_RUNTIME_SOURCE=profile-stable
+                return 0
+            fi
+            ;;
+    esac
+
+    [[ "$policy" == auto ]] || return 1
+    ((G11_KVM_GET_TSC_KHZ == 1 && G11_KVM_TSC_KHZ > 0)) || return 1
+    # No scaling: use the invariant host TSC explicitly instead of asking KVM
+    # for an impossible ratio.  Execution frequency remains independently
+    # dynamic and may turbo above or idle below this reference clock.
+    G11_TSC_EFFECTIVE_HZ=$((G11_KVM_TSC_KHZ * 1000))
+    G11_TSC_QEMU_OPTION="tsc-freq=${G11_TSC_EFFECTIVE_HZ}"
+    G11_TSC_RUNTIME_SOURCE=host-fallback-no-scaling
 }

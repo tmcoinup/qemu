@@ -336,7 +336,7 @@ function Read-Payload([string]$Root) {
         [string]$contract.profile.name -cne [string]$contract.transport.gpuName -or
         [int]$contract.profile.vramMB -notin @(1024, 2048) -or
         [int]$contract.profile.memoryType -ne 8 -or
-        [int]$contract.profile.memoryMaker -notin @(1, 6, 10) -or
+        [int]$contract.profile.memoryMaker -notin @(1, 3, 6, 10) -or
         [int]$contract.profile.d3d12RaytracingTier -ne 0 -or
         [int]$contract.profile.rayTracingCores -ne 0 -or
         [int]$contract.profile.tensorCores -ne 0 -or

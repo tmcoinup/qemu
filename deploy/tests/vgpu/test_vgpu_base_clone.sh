@@ -387,6 +387,21 @@ run_clone() {
     "$HARNESS/deploy/scripts/clone-from-base.sh" "$BASE_NAME" "$@"
 }
 
+# stat(1) renders %y in the caller's local timezone, while a base sidecar may
+# have been produced in UTC by a container or on a host in another timezone.
+# The same nanosecond instant must remain cloneable across that boundary.
+attested_mtime=$("$REAL_JQ" -r '.baseMtimeNs' "$ATTESTATION")
+utc_mtime=$(date -u -d "$attested_mtime" '+%Y-%m-%d %H:%M:%S.%N +0000')
+"$REAL_JQ" --arg mtime "$utc_mtime" '.baseMtimeNs = $mtime' \
+    "$ATTESTATION" >"$ATTESTATION.utc"
+mv -f -- "$ATTESTATION.utc" "$ATTESTATION"
+chmod 0444 "$ATTESTATION"
+TZ=America/Los_Angeles run_clone 449 --no-monitor-sync \
+    >"$TMP_DIR/cross-timezone.out"
+grep -Fxq 'create-disk|449|--from-base|--base-name|win10-base|--linked' \
+    "$TRACE" || fail "equivalent cross-timezone base mtime was rejected"
+write_attestation
+
 if "$HARNESS/deploy/scripts/clone-from-base.sh" 453 \
         >"$TMP_DIR/missing-base-name.out" 2>"$TMP_DIR/missing-base-name.err"; then
     fail "canonical clone guessed a base name"

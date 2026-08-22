@@ -146,7 +146,7 @@ function Assert-LocalRtcContract {
         throw "Windows timezone must be '$expectedTimeZone' for this VM (current: '$actual'). Change it in Windows Settings, fully shut down Windows, and retry; this installer only validates the RTC contract"
     }
     if ($null -ne $rtcProperty -and [int]$rtcProperty.Value -ne 0) {
-        throw 'RealTimeIsUniversal must be absent or DWORD 0. The host owns RTC configuration and must launch QEMU with TZ=Asia/Shanghai and -rtc base=localtime,clock=host,driftfix=slew; fully shut down Windows after correcting the host/guest configuration'
+        throw 'RealTimeIsUniversal must be absent or DWORD 0. The host owns RTC configuration and must launch QEMU with TZ=Asia/Shanghai and -rtc base=localtime,clock=vm,driftfix=slew; fully shut down Windows after correcting the host/guest configuration'
     }
 
     $rtcValue = if ($null -eq $rtcProperty) { '<missing>' } else { [string][int]$rtcProperty.Value }
@@ -183,7 +183,7 @@ function Assert-ServerClock {
         ([DateTimeOffset]::UtcNow - $serverTime.ToUniversalTime()).TotalSeconds
     )
     if ($clockSkewSeconds -gt $maximumClockSkewSeconds) {
-        throw ('Windows UTC time differs from the license server by {0:N0} seconds; NVIDIA may report Clock windback has been detected. Verify the host uses TZ=Asia/Shanghai with -rtc base=localtime,clock=host,driftfix=slew, fully shut down Windows, start a new QEMU process, and retry' -f $clockSkewSeconds)
+        throw ('Windows UTC time differs from the license server by {0:N0} seconds; NVIDIA may report Clock windback has been detected. Verify the host uses TZ=Asia/Shanghai with -rtc base=localtime,clock=vm,driftfix=slew, fully shut down Windows, start a new QEMU process, and retry' -f $clockSkewSeconds)
     }
     Write-Host ('[license] clock preflight: timezone={0} UTC skew={1:N0}s' -f `
         $expectedTimeZone, $clockSkewSeconds)

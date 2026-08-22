@@ -17,6 +17,8 @@ Windows BCD，不开启 `testsigning`/`nointegritychecks`，也不安装任何
   回写成 Guest 分辨率。
 - 窗口最小化或通过 QMP 隐藏后，2D、GL 和 native-EGL 统一停止
   Present；native-EGL X11 子窗口不再被 resize/map/raise。
+- 隐藏期间不再创建/整帧上传 GL surface texture，也不导入 DMA-BUF 或创建
+  scanout FBO；只保留“最新画面待补”标记，恢复可见后一次性上传或 replay。
 - 最小化前排队的 resize/redraw 会被丢弃，恢复时补一次完整重绘。
 - Guest 若在最小化期间主动换显示模式，宿主窗口尺寸只在恢复后
   按最新画面一次性应用。

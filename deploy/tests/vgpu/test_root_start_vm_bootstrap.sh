@@ -329,11 +329,13 @@ require_text 'POINTER_PRODUCT=' \
     "$INSTALL_ROOT/${INSTALL_ID}/vm.conf"
 require_text 'INPUT_COMPONENT_CONTRACT_VERSION=2' \
     "$INSTALL_ROOT/${INSTALL_ID}/vm.conf"
-require_text 'XHCI_PCI_VENDOR_ID=0x8086' \
-    "$INSTALL_ROOT/${INSTALL_ID}/vm.conf"
-require_text 'XHCI_PCI_DEVICE_ID=0x' \
-    "$INSTALL_ROOT/${INSTALL_ID}/vm.conf"
-grep -Eq '^XHCI_PCI_REVISION=0x(01|05)$' \
+grep -Eq '^XHCI_PCI_VENDOR_ID=0x(1B21|1B73)$' \
+    "$INSTALL_ROOT/${INSTALL_ID}/vm.conf" || \
+    fail 'install bootstrap xHCI vendor is outside the reviewed X79 pool'
+grep -Eq '^XHCI_PCI_DEVICE_ID=0x(1042|1009)$' \
+    "$INSTALL_ROOT/${INSTALL_ID}/vm.conf" || \
+    fail 'install bootstrap xHCI device is outside the reviewed X79 pool'
+grep -Eq '^XHCI_PCI_REVISION=0x(00|02)$' \
     "$INSTALL_ROOT/${INSTALL_ID}/vm.conf" || \
     fail 'install bootstrap xHCI revision is outside the reviewed platform pool'
 require_text 'XHCI_PCI_BUS=pcie.0' \
@@ -351,7 +353,7 @@ if grep -F -- 'qemu-xhci\,' "$TMP_DIR/qemu.trace" |
     fail 'install bootstrap projected physical PCI facts onto qemu-xhci'
 fi
 require_text 'i8042=off' "$TMP_DIR/qemu.trace"
-require_text '-rtc base=localtime\,clock=host\,driftfix=slew' "$TMP_DIR/qemu.trace"
+require_text '-rtc base=localtime\,clock=vm\,driftfix=slew' "$TMP_DIR/qemu.trace"
 require_text 'kvm-pit.lost_tick_policy=delay' "$TMP_DIR/qemu.trace"
 require_text 'RTC_CONTRACT=localtime' \
     "$INSTALL_ROOT/${INSTALL_ID}/vm.conf"

@@ -22,9 +22,11 @@ assert_eq 512110190592 "$SSD_REQUIRED_SIZE_BYTES" 'fixed SSD byte contract'
 mapfile -t profile_keys < <(ssd_profile_keys)
 mapfile -t default_keys < <(ssd_default_profile_keys)
 mapfile -t explicit_keys < <(ssd_explicit_profile_keys)
+mapfile -t auto_keys < <(ssd_auto_profile_keys)
 assert_eq 10 "${#profile_keys[@]}" 'selectable SSD profile count'
-assert_eq 7 "${#default_keys[@]}" 'H81-compatible default SSD key count'
+assert_eq 7 "${#default_keys[@]}" 'historical SATA partition count'
 assert_eq 3 "${#explicit_keys[@]}" 'explicit NVMe SSD key count'
+assert_eq 10 "${#auto_keys[@]}" 'topology-filtered automatic SSD count'
 assert_eq "$(printf '%s\n' "${profile_keys[@]}" | LC_ALL=C sort)" \
     "$(printf '%s\n' "${default_keys[@]}" "${explicit_keys[@]}" | LC_ALL=C sort)" \
     'selectable/default+explicit SSD key sets'
@@ -34,6 +36,12 @@ assert_eq samsung-970-pro-512gb "${explicit_keys[1]}" \
     'Samsung 970 Pro moved to explicit NVMe SSD profile'
 assert_eq samsung-960-pro-512gb "${explicit_keys[2]}" \
     'Samsung 960 Pro explicit NVMe SSD profile'
+assert_eq wd-black-pcie-512gb "${auto_keys[0]}" \
+    'WD Black is in the first Gen3 NVMe preference tier'
+assert_eq samsung-970-pro-512gb "${auto_keys[1]}" \
+    'Samsung 970 Pro is in the first Gen3 NVMe preference tier'
+assert_eq samsung-960-pro-512gb "${auto_keys[2]}" \
+    'Samsung 960 Pro is in the first Gen3 NVMe preference tier'
 
 declare -A seen=()
 sata_count=0
@@ -68,8 +76,34 @@ while IFS=$'\t' read -r key _brand _interface size _firmware _controller \
     listed=$((listed + 1))
 done < <(ssd_profile_print_catalog)
 assert_eq 10 "$listed" 'printed SSD catalog count'
-assert_eq 7 "$listed_default" 'printed default SSD count'
-assert_eq 3 "$listed_explicit" 'printed explicit SSD count'
+assert_eq 10 "$listed_default" 'printed automatic SSD count'
+assert_eq 0 "$listed_explicit" 'printed non-automatic SSD count'
+
+# i7-4820K provides CPU-side PCIe Gen3 and each active X79 board has one
+# audited passive x4 adapter path, so automatic creation prefers NVMe.  The
+# Sandy Bridge-E i7-3820 remains honest Gen2 and must fall back to SATA.
+for platform in \
+    i7-4820k-p9x79-micron-16g \
+    i7-4820k-x79-up4-elpida-12g \
+    i7-4820k-x79-extreme4-kingston-8g; do
+    hardware_storage_combination_allowed "$platform" nvme 3 4 m.2-2280 || \
+        fail "$platform lost its audited Gen3 x4 NVMe adapter path"
+done
+for platform in \
+    i7-3820-p9x79-kingston-16g \
+    i7-3820-x79-up4-samsung-12g \
+    i7-3820-x79-extreme4-kingston-8g \
+    g3220-h81m-k-4g; do
+    if hardware_storage_combination_allowed "$platform" nvme 3 4 m.2-2280; then
+        fail "$platform incorrectly accepted a Gen3 x4 NVMe identity"
+    fi
+    hardware_storage_combination_allowed "$platform" sata 0 0 2.5-inch || \
+        fail "$platform lost its SATA fallback"
+done
+assert_eq 0 "$(hardware_storage_preference_tier nvme 3 4)" \
+    'Gen3 x4 NVMe preference tier'
+assert_eq 20 "$(hardware_storage_preference_tier sata 0 0)" \
+    'SATA fallback preference tier'
 
 # Fail closed if a future edit introduces a 500 GB/other-capacity row, even
 # when it is also added to the default list.  Direct loads must reject it too.
@@ -110,4 +144,4 @@ if (
     fail 'catalog accepted a default/explicit SSD overlap'
 fi
 
-echo 'PASS: 10 exact-size SSD profiles; 7 H81-safe defaults and 3 explicit NVMe rows'
+echo 'PASS: 10 exact-size SSDs; compatible X79/i7-4820K creation prefers three Gen3 x4 NVMe rows'

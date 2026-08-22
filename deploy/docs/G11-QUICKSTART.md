@@ -3,6 +3,12 @@
 本页和当前 DGame 部署只适用于 **G-11/vGPU 分支**；已退役分支不参与运行时发现、
 窗口标题或故障回退。
 
+新建整机已升级到 4C/8T X79 与 4/8/12/16G；硬件选择、归档 6G、PCIe 3.0 NVMe
+优先和共享 CPU 并发请先看
+[`G11-HARDWARE-POOL.md`](G11-HARDWARE-POOL.md) 与
+[`G11-PERFORMANCE-QUICKSTART.md`](G11-PERFORMANCE-QUICKSTART.md)。本文后部若仍以
+H81/4+2G 举例，只适用于 archived 旧 VM，不可照抄用于新建。
+
 宿主底层 GPU 名称、显存类型/位宽的通用安装、多工具重新扫描验收、安全边界和
 回滚见 [`G11-BOTTOM-GPU-IDENTITY.md`](G11-BOTTOM-GPU-IDENTITY.md)。
 所有主板误显 ICH9、旧显卡误显“光线追踪”的统一修复见
@@ -249,32 +255,28 @@ fail-closed，不会污染默认身份安装。
 ./deploy/scripts/check-hardware-pool.sh --machine-readable
 ```
 
-当前 active 池是 6 款 CPU、10 块双槽 H81 主板和 25 套双条 DDR3 内存；内存覆盖
-Kingston、Samsung、Micron、SK hynix、Crucial 五品牌。完整目录另保留 2 款 legacy-only
-CPU、3 块 legacy 四槽板和 2 套 legacy DDR4，因此内存目录共 27 套。i3-4130
-在每块 active H81 上均提供 Kingston、Samsung、Micron、SK hynix 的
-DDR3-1333/1600；每个频率/品牌组合都有 4G、6G、8G 三档。整机白名单
-共 264 套：默认低端池 24 套、必须显式指定的扩展组合 237 套、legacy 3 套。
-5 款默认 CPU 均未得到 supported 时，无参数创建仍会探测 i7；i7 明确 supported
-才使用它，连 i7 在内的 6 款 active 都明确非 supported 才会自动 legacy 兜底，
-探测不确定则 fail-closed。另有
-7 款默认 SATA、3 款显式 NVMe 的精确 `512110190592` 字节 SSD，3 个 1GB + 3 个
+当前正常新建池只有两款家用 4C/8T 无核显 Core i7、三块三品牌 X79 主板以及
+4G/8G/12G/16G 四档 DDR3-1600/1866。48 条新建组合全部是 CPU、主板、逐槽 DIMM
+共同审核的原子白名单；默认先选 i7-4820K + DDR3-1866。完整目录共 10 CPU、
+16 主板、37 内存、312 整机，其中旧 H81/6G 等 261 条为 archived，另有 3 条
+legacy compatibility。归档项即使打开兜底也不能新建，宿主能力探测不确定时仍
+fail-closed。另有 3 款优先 Gen3 x4 NVMe 和 7 款平台回退 SATA，容量均为精确
+`512110190592` 字节；还有 3 个 1GB + 3 个
 2GB GPU 芯片型号（25 条板卡/显存原子 profile：2GB 默认 12 条、1GB Maxwell
 新建 4 条、显式 1 条、Kepler legacy 8 条），以及 35 款全部为
-1920×1080@60 的显示器（其中 28 款可新建）。4 GiB 是 2×2 GiB 真双通道，8 GiB
-是 2×4 GiB 真双通道；6 GiB 是 4+2 GiB Intel Flex，只能把匹配的 4 GiB 区称为
-双通道，额外 2 GiB 区为单通道。审计器会标出哪些组合可用于新 VM、哪些只保留
-旧平台身份。完整明细和报错处理见
+1920×1080@60 的显示器（其中 28 款可新建）。4G 是 2×2G 双通道，8G 是 2×4G
+双通道，12G 是 3×4G 三通道，16G 是 4×4G 四通道。审计器会标出哪些组合可用于
+新 VM、哪些只保留旧平台身份。完整明细和报错处理见
 [G-11 vGPU 硬件池教程](G11-HARDWARE-POOL.md)。
 
-可替换硬件的品牌覆盖为：主板 5、内存 5、SSD 5、GPU 系统用户态板卡 metadata 9、
+正常新建的品牌覆盖为：主板 3、内存 4、SSD 5、GPU 系统用户态板卡 metadata 9、
 active 键盘 3、可选相对鼠标 3。显示器因保留 35 款 FHD 目录而明确例外为新建
 8 品牌/完整 11 品牌；默认绝对指针只有诚实的 QEMU 通用 profile。CPU/芯片组实现、
 Intel e1000e、Intel HDA、swtpm 和安装期临时介质也都是固定合同，不为凑品牌数
 只改字符串。普通启动不创建光驱；安装或手动热插时可使用
 `HL-DT-ST DVDRAM GH24NS50 / XP02` 审核身份，但不伪造序列。
 主板目录现在只把 00:1f.0 的 LPC inventory identity 映射为
-H81/H97/B150/B360；`q35`/ICH9 行为、ICH9-AHCI、`qemu-xhci`、QEMU `nvme` controller、
+X79/H81/H97/B150/B360；`q35`/ICH9 行为、ICH9-AHCI、`qemu-xhci`、QEMU `nvme` controller、
 安装/救援 `std-vga` 和 legacy `ivshmem` 是实现/兼容边界，也不进入品牌随机。
 
 新 VM 使用硬件合同 v3：system/baseboard/chassis 三个标签延续 ASUS、MSI、
@@ -308,7 +310,7 @@ cd /home/ubuntu/projects/qemu
 ```
 
 下面是一套可直接照抄的 VM8 安装命令。组件只能筛选审核过的整机白名单，不会
-任意笛卡尔组合；不先显式创建时，启动器从 24 套 4/6/8 GiB 默认低端组合中选择：
+任意笛卡尔组合；不指定平台时，创建器从 48 条 X79 正常组合中按性能级别选择：
 
 ```bash
 cd /home/ubuntu/projects/qemu
@@ -328,8 +330,7 @@ ISO=/home/ubuntu/images/iso/win10.iso
 ./deploy/scripts/create-vm.sh --include-fallback --list-platforms
 
 ./deploy/scripts/create-vm.sh "$VM_ID" \
-  --memory-size 8G \
-  --ssd-profile samsung-850-pro-512gb \
+  --platform i7-4820k-x79-up4-elpida-12g \
   --gpu-vram 2048 \
   --monitor-profile philips-243v7
 
@@ -345,10 +346,9 @@ ISO=/home/ubuntu/images/iso/win10.iso
 路径异常时才加 `--install-media ide` 做慢速回退。照抄命令、校验和原理见
 [高速安装介质教程](G11-INSTALL-MEDIA.md)。
 
-4 GiB、6 GiB 和 8 GiB 都在默认低端池。要固定 6 GiB Flex，可执行
-`./deploy/scripts/create-vm.sh 10 --platform i5-4590-h81m-c-6g`；要使用不会随机
-抽中的 i7，则执行
-`./deploy/scripts/create-vm.sh 11 --platform i7-4790-h81m-p33-8g`。也可用
+4G/8G/12G/16G 都在正常 X79 池。要固定 16G 四通道，可执行
+`./deploy/scripts/create-vm.sh 10 --platform i7-4820k-p9x79-micron-16g`；硬盘不指定
+时会先尝试适配该平台的 Gen3 x4 NVMe。也可用
 `--cpu-profile`、`--board-profile`、`--memory-profile` 筛选白名单，完整示例见
 [硬件池教程](G11-HARDWARE-POOL.md)。
 

@@ -29,9 +29,17 @@ maximized_case="$(sed -n \
 hidden_case="$(sed -n \
     '/case SDL_WINDOWEVENT_HIDDEN:/,/^[[:space:]]*break;/p' "$sdl_c")"
 present_2d="$(sed -n \
-    '/^static void sdl2_2d_present_texture/,/^}/p' "$sdl_2d")"
+    '/^static bool sdl2_2d_present_texture/,/^}/p' "$sdl_2d")"
 scanout_flush="$(sed -n \
     '/^void sdl2_gl_scanout_flush/,/^}/p' "$sdl_gl")"
+surface_texture="$(sed -n \
+    '/^static bool sdl2_gl_create_surface_texture/,/^}/p' "$sdl_gl")"
+ensure_context="$(sed -n \
+    '/^static bool sdl2_gl_ensure_window_context/,/^}/p' "$sdl_gl")"
+scanout_texture="$(sed -n \
+    '/^void sdl2_gl_scanout_texture/,/^}/p' "$sdl_gl")"
+scanout_dmabuf="$(sed -n \
+    '/^void sdl2_gl_scanout_dmabuf/,/^}/p' "$sdl_gl")"
 
 grep -Fq 'bool window_resize_pending;' "$sdl_h" \
     || fail "deferred guest resize state is missing"
@@ -48,6 +56,11 @@ grep -Fq 'sdl2_window_is_renderable(target)' <<<"$window_flush" \
     || fail "queued window updates are not gated after draining SDL events"
 grep -Fq 'target->window_resize_pending' <<<"$window_flush" \
     || fail "deferred resize is not applied after restore"
+not_renderable="$(sed -n \
+    '/if (!sdl2_window_is_renderable(target))/,/continue;/p' <<<"$window_flush")"
+if grep -Fq 'window_redraw_pending = false' <<<"$not_renderable"; then
+    fail "SHOWN/RESTORED flag races can still discard the pending redraw"
+fi
 grep -Fq 'scon->window_redraw_pending = false;' <<<"$minimized_case" \
     || fail "minimize does not discard the queued animation redraw"
 grep -Fq 'scon->window_redraw_pending = true;' <<<"$maximized_case" \
@@ -64,6 +77,20 @@ grep -Fq 'sdl2_window_is_renderable(scon)' "$sdl_gl" \
 if grep -Fq 'scon->updates++' "$sdl_2d" "$sdl_gl"; then
     fail "pending frames can overflow while the window stays minimized"
 fi
+grep -Fq 'scon->surface_upload_pending = true;' "$sdl_2d" \
+    || fail "2D still uploads every invisible frame while minimized"
+grep -Fq 'scon->surface_upload_pending = true;' "$sdl_gl" \
+    || fail "GL still uploads every invisible frame while minimized"
+grep -Fq '!sdl2_window_is_renderable(scon)' <<<"$surface_texture" \
+    || fail "GL texture allocation can upload a full hidden surface"
+grep -Fq 'scon->surface_upload_pending = true;' <<<"$ensure_context" \
+    || fail "hidden GL context setup does not latch a visible full upload"
+grep -Fq 'sdl2_gl_defer_hidden_scanout(scon)' <<<"$scanout_texture" \
+    || fail "hidden texture scanout can still allocate an FBO"
+grep -Fq 'sdl2_gl_defer_hidden_scanout(scon)' <<<"$scanout_dmabuf" \
+    || fail "hidden dma-buf scanout can still import a texture"
+grep -Fq '!scon->native_egl_context_api' <<<"$scanout_dmabuf" \
+    || fail "a detached native EGL window can discard its pending dma-buf"
 
 if grep -Fq 'dpy_set_ui_info' "$sdl_c"; then
     fail "host SDL resize must not feed animation geometry back to the Guest"

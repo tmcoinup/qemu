@@ -54,7 +54,7 @@ clear_component_contract() {
 }
 
 load_valid() {
-    local platform=${1:-i5-6500}
+    local platform=${1:-i7-4820k-p9x79-micron-16g}
     local ssd=${2:-samsung-970-pro-512gb}
     local gpu=${3:-gtx1050_2gb}
 
@@ -76,24 +76,26 @@ load_valid() {
     TPM_FRONTEND=$(g11_hardware_expected_tpm_frontend "$TPM_EFFECTIVE_VERSION")
 }
 
-# The normalized catalog is itself a contract: six active Haswell CPUs plus
-# two legacy-only CPUs, ten active two-slot boards plus three four-slot
-# compatibility boards, and no 4x2 GiB memory kit anywhere.  Append-only
-# explicit rows do not change the 24-row default random pool.
+# The normalized catalog is itself a contract.  New VMs use only the reviewed
+# consumer X79 pool: two 4C/8T CPUs without integrated graphics, three real
+# board brands and the 4/8/12/16 GiB capacity policy.  Historical H81/H97/
+# B150/B360 rows remain loadable only as archived or legacy compatibility
+# records; in particular, 6 GiB is not selectable for a new VM.
 hardware_profile_validate_catalog || fail 'hardware catalog validation failed'
 vgpu_profile_validate_catalog || fail 'vGPU catalog validation failed'
 # The legality function defensively revalidates both immutable catalogs on
 # every call.  This test validates them once above, then exercises many field
-# mutations; stubbing only the repeated catalog scan keeps the 264-row matrix
+# mutations; stubbing only the repeated catalog scan keeps the 312-row matrix
 # from turning the assertions into a quadratic-time test.
 hardware_profile_validate_catalog() { return 0; }
 vgpu_profile_validate_catalog() { return 0; }
-assert_eq 8 "${#CPU_PROFILES[@]}" 'CPU catalog count'
-assert_eq 13 "${#BOARD_PROFILES[@]}" 'board catalog count'
-assert_eq 27 "${#MEMORY_PROFILES[@]}" 'memory catalog count'
-assert_eq 264 "${#HARDWARE_COMBINATIONS[@]}" 'combination catalog count'
-assert_eq 24 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new count'
-assert_eq 237 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" 'explicit-new count'
+assert_eq 10 "${#CPU_PROFILES[@]}" 'CPU catalog count'
+assert_eq 16 "${#BOARD_PROFILES[@]}" 'board catalog count'
+assert_eq 37 "${#MEMORY_PROFILES[@]}" 'memory catalog count'
+assert_eq 312 "${#HARDWARE_COMBINATIONS[@]}" 'combination catalog count'
+assert_eq 48 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new count'
+assert_eq 0 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" 'explicit-new count'
+assert_eq 261 "${#HARDWARE_ARCHIVED_PROFILE_KEYS[@]}" 'archived count'
 assert_eq 3 "${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}" 'legacy count'
 assert_eq "${#HARDWARE_COMBINATIONS[@]}" \
     "${#_HARDWARE_COMBINATION_ROW_BY_KEY[@]}" 'combination index count'
@@ -103,127 +105,95 @@ for fixture_row in "${HARDWARE_COMBINATIONS[@]}"; do
         "$fixture_key indexed combination row"
 done
 
-assert_eq $'g3220\ni3-4130\ni5-4460\ni5-4570\ni5-4590\ni7-4790' \
+assert_eq $'i7-3820\ni7-4820k' \
     "$(for cpu in $(cpu_profile_keys); do
         [[ -n "$(hardware_profile_component_candidates "$cpu" '' '')" ]] &&
             printf '%s\n' "$cpu"
-    done)" 'six active CPU profiles'
-assert_eq $'i5-6500\ni3-8100' \
+    done)" 'two active consumer 4C/8T CPU profiles'
+assert_eq $'g3220\ni3-4130\ni5-4460\ni5-4570\ni5-4590\ni7-4790\ni5-6500\ni3-8100' \
     "$(for cpu in $(cpu_profile_keys); do
         [[ -z "$(hardware_profile_component_candidates "$cpu" '' '')" ]] &&
             printf '%s\n' "$cpu"
-    done)" 'two legacy-only CPU profiles'
+    done)" 'eight archived or legacy-only CPU profiles'
 
 active_boards='|'
-legacy_boards='|'
-i3_capacity_seen='|'
-i3_brand_capacity_seen='|'
-i3_brand_speed_capacity_seen='|'
-i3_matrix_seen='|'
+active_cpu_board_capacity_seen='|'
+active_memory_brands='|'
 count_4g=0
 count_6g=0
 count_8g=0
+count_12g=0
+count_16g=0
 for fixture_row in "${HARDWARE_COMBINATIONS[@]}"; do
     IFS='|' read -r fixture_platform _fixture_cpu fixture_board \
         _fixture_memory fixture_lifecycle <<<"$fixture_row"
+    [[ "$fixture_lifecycle" == new ||
+       "$fixture_lifecycle" == explicit-new ]] || continue
     hardware_profile_load "$fixture_platform"
-    [[ "$MEM_MODULE_MB_LIST" != *,*,* ]] || \
-        fail "$fixture_platform unexpectedly uses more than two DIMMs"
-    if [[ "$fixture_lifecycle" != legacy-compatibility ]]; then
-        assert_eq 2 "$MEM_BOARD_SLOTS" "$fixture_platform active board slot count"
-        assert_eq 2 "$MEM_SLOTS" "$fixture_platform populated DIMM count"
-        active_boards+="$fixture_board|"
-        if [[ "$_fixture_cpu" == i3-4130 ]]; then
-            i3_capacity_seen+="$fixture_board:$MEM_TOTAL_MB|"
-            i3_brand_capacity_seen+="$fixture_board:$MEM_BRAND:$MEM_TOTAL_MB|"
-            i3_brand_speed_capacity_seen+="$fixture_board:$MEM_BRAND:$MEM_SPEED:$MEM_TOTAL_MB|"
-            i3_matrix_seen+="$fixture_board:$_fixture_memory|"
-        fi
-        case "$MEM_TOTAL_MB" in
-            4096) count_4g=$((count_4g + 1)) ;;
-            6144)
-                count_6g=$((count_6g + 1))
-                assert_eq 4096,2048 "$MEM_MODULE_MB_LIST" \
-                    "$fixture_platform Flex module layout"
-                [[ "$MEM_RANK_LIST" =~ ^[12],[12]$ &&
-                   "$MEM_DEVICE_WIDTH_LIST" =~ ^(8|16),(8|16)$ ]] || \
-                    fail "$fixture_platform Flex geometry is not reviewed"
-                assert_eq flex "$MEM_CHANNEL_MODE" \
-                    "$fixture_platform channel mode"
-                ;;
-            8192) count_8g=$((count_8g + 1)) ;;
-            *) fail "$fixture_platform has unsupported active capacity $MEM_TOTAL_MB" ;;
-        esac
-    else
-        assert_eq 4 "$MEM_BOARD_SLOTS" \
-            "$fixture_platform legacy board slot count"
-        legacy_boards+="$fixture_board|"
-    fi
+    assert_eq X79 "$BOARD_CHIPSET" "$fixture_platform active chipset"
+    [[ "$MEM_BOARD_SLOTS" == 4 || "$MEM_BOARD_SLOTS" == 8 ]] || \
+        fail "$fixture_platform does not expose a quad-channel-capable board"
+    active_boards+="$fixture_board|"
+    active_cpu_board_capacity_seen+="$_fixture_cpu:$fixture_board:$MEM_TOTAL_MB|"
+    active_memory_brands+="$MEM_BRAND|"
+    case "$MEM_TOTAL_MB" in
+        4096)
+            count_4g=$((count_4g + 1))
+            assert_eq 2 "$MEM_SLOTS" "$fixture_platform populated DIMM count"
+            assert_eq dual-channel "$MEM_CHANNEL_MODE" "$fixture_platform channel mode"
+            ;;
+        6144) count_6g=$((count_6g + 1)) ;;
+        8192)
+            count_8g=$((count_8g + 1))
+            assert_eq 2 "$MEM_SLOTS" "$fixture_platform populated DIMM count"
+            assert_eq dual-channel "$MEM_CHANNEL_MODE" "$fixture_platform channel mode"
+            ;;
+        12288)
+            count_12g=$((count_12g + 1))
+            assert_eq 3 "$MEM_SLOTS" "$fixture_platform populated DIMM count"
+            assert_eq triple-channel "$MEM_CHANNEL_MODE" "$fixture_platform channel mode"
+            assert_eq 4096,4096,4096 "$MEM_MODULE_MB_LIST" \
+                "$fixture_platform 3x4 GiB module layout"
+            ;;
+        16384)
+            count_16g=$((count_16g + 1))
+            assert_eq 4 "$MEM_SLOTS" "$fixture_platform populated DIMM count"
+            assert_eq quad-channel "$MEM_CHANNEL_MODE" "$fixture_platform channel mode"
+            assert_eq 4096,4096,4096,4096 "$MEM_MODULE_MB_LIST" \
+                "$fixture_platform 4x4 GiB module layout"
+            ;;
+        *) fail "$fixture_platform has unsupported active capacity $MEM_TOTAL_MB" ;;
+    esac
 done
-assert_eq 86 "$count_4g" 'active 4 GiB combination count'
-assert_eq 87 "$count_6g" 'active 6 GiB combination count'
-assert_eq 88 "$count_8g" 'active 8 GiB combination count (including explicit rows)'
-for fixture_board in asus-h81m-k asus-h81m-c gigabyte-h81m-s1 msi-h81m-p33 \
-        asus-h81m-plus asus-h81m-a gigabyte-h81m-ds2 msi-h81m-e33 \
-        asrock-h81m-hds ecs-h81h3-m4; do
+assert_eq 12 "$count_4g" 'active 4 GiB combination count'
+assert_eq 0 "$count_6g" 'active 6 GiB combination count'
+assert_eq 12 "$count_8g" 'active 8 GiB combination count'
+assert_eq 12 "$count_12g" 'active 12 GiB combination count'
+assert_eq 12 "$count_16g" 'active 16 GiB combination count'
+for fixture_board in asus-p9x79 gigabyte-x79-up4 asrock-x79-extreme4; do
     [[ "$active_boards" == *"|$fixture_board|"* ]] || \
-        fail "active two-slot board is missing: $fixture_board"
+        fail "active X79 board is missing: $fixture_board"
 done
-
-# Every i3-4130 board must expose all three reviewed capacities without a
-# reverse board switch.  Only the asymmetric 6 GiB row may use Flex mode.
-for fixture_board in asus-h81m-k asus-h81m-c gigabyte-h81m-s1 msi-h81m-p33 \
-        asus-h81m-plus asus-h81m-a gigabyte-h81m-ds2 msi-h81m-e33 \
-        asrock-h81m-hds ecs-h81h3-m4; do
-    for fixture_capacity in 4096 6144 8192; do
-        [[ "$i3_capacity_seen" == *"|$fixture_board:$fixture_capacity|"* ]] ||
-            fail "$fixture_board lacks i3-4130 ${fixture_capacity} MiB"
-    done
+for fixture_brand in Kingston Samsung Elpida Micron; do
+    [[ "$active_memory_brands" == *"|$fixture_brand|"* ]] || \
+        fail "active memory brand is missing: $fixture_brand"
 done
-
-# Every active H81 board exposes all four brands at both 1333 and 1600,
-# each with 4G/6G/8G.  Verify both the matrix IDs and their visible facts.
-for fixture_board_row in "${I3_4130_REVIEWED_BOARD_MATRIX[@]}"; do
-    IFS='|' read -r fixture_board _ <<<"$fixture_board_row"
-    for fixture_memory_row in "${I3_4130_REVIEWED_MEMORY_MATRIX[@]}"; do
-        IFS='|' read -r fixture_memory _ <<<"$fixture_memory_row"
-        [[ "$i3_matrix_seen" == *"|$fixture_board:$fixture_memory|"* ]] ||
-            fail "$fixture_board lacks reviewed i3 memory profile $fixture_memory"
-    done
-    for fixture_brand in Kingston Samsung Micron 'SK hynix'; do
-        for fixture_speed in 1333 1600; do
-            for fixture_capacity in 4096 6144 8192; do
-                [[ "$i3_brand_speed_capacity_seen" == *"|$fixture_board:$fixture_brand:$fixture_speed:$fixture_capacity|"* ]] ||
-                    fail "$fixture_board lacks $fixture_brand DDR3-$fixture_speed ${fixture_capacity} MiB"
-            done
+for fixture_cpu in i7-3820 i7-4820k; do
+    for fixture_board in asus-p9x79 gigabyte-x79-up4 asrock-x79-extreme4; do
+        for fixture_capacity in 4096 8192 12288 16384; do
+            [[ "$active_cpu_board_capacity_seen" == \
+               *"|$fixture_cpu:$fixture_board:$fixture_capacity|"* ]] ||
+                fail "$fixture_cpu/$fixture_board lacks ${fixture_capacity} MiB"
         done
     done
 done
 
-# Keep the original screenshot paths complete: selecting capacity on either
-# existing Samsung board must not silently change the board or memory brand.
-for fixture_board in gigabyte-h81m-s1 msi-h81m-p33; do
-    for fixture_capacity in 4096 6144 8192; do
-        [[ "$i3_brand_capacity_seen" == *"|$fixture_board:Samsung:$fixture_capacity|"* ]] ||
-            fail "$fixture_board Samsung lacks i3-4130 ${fixture_capacity} MiB"
-    done
-done
-for fixture_board in gigabyte-h97-d3h gigabyte-b150m-d3h asus-prime-b360m-a; do
-    [[ "$legacy_boards" == *"|$fixture_board|"* ]] || \
-        fail "legacy four-slot board is missing: $fixture_board"
-done
-
 # Every reviewed whole-machine combination must satisfy the v3 strict
-# contract. SATA is valid on every board; the two legacy-only Gen3 platforms
-# additionally exercise their NVMe tier.
+# contract. SATA is valid on every board; dedicated checks below exercise the
+# reviewed X79 passive-adapter NVMe path and reject Gen2 CPU-side links.
 for fixture_row in "${HARDWARE_COMBINATIONS[@]}"; do
     IFS='|' read -r fixture_platform _ <<<"$fixture_row"
-    case "$fixture_platform" in
-        i5-6500) fixture_ssd=samsung-970-pro-512gb ;;
-        i3-8100) fixture_ssd=wd-black-pcie-512gb ;;
-        *) fixture_ssd=samsung-850-pro-512gb ;;
-    esac
-    load_valid "$fixture_platform" "$fixture_ssd" gtx1050_2gb
+    load_valid "$fixture_platform" samsung-850-pro-512gb gtx1050_2gb
     assert_ok strict
 done
 
@@ -231,31 +201,30 @@ done
 # same reviewed platform; a Cartesian repetition over every machine adds no
 # new boundary.
 for fixture_gpu in $(vgpu_profile_keys); do
-    load_valid g3220-h81m-k-4g samsung-850-pro-512gb "$fixture_gpu"
+    load_valid i7-4820k-p9x79-micron-16g samsung-970-pro-512gb "$fixture_gpu"
     assert_ok strict
 done
 
 # Component selection is a reviewed allowlist, never a Cartesian product.
-assert_eq g3220-h81m-k-4g \
-    "$(hardware_profile_component_candidates g3220 asus-h81m-k kvr13n9s6-2x2)" \
+assert_eq i7-3820-p9x79-kingston-4g \
+    "$(hardware_profile_component_candidates i7-3820 asus-p9x79 kvr16n11s6-2x2)" \
     'reviewed default 4 GiB component combination'
-assert_eq i7-4790-h81m-p33-8g \
-    "$(hardware_profile_component_candidates i7-4790 msi-h81m-p33 kvr16n11s8-2x4)" \
-    'reviewed explicit i7 component combination'
+assert_eq i7-4820k-p9x79-elpida-12g \
+    "$(hardware_profile_component_candidates i7-4820k asus-p9x79 elpida-ebj40ug8bfw0-3x4)" \
+    'reviewed high-frequency 12 GiB component combination'
 assert_eq '' \
     "$(hardware_profile_component_candidates g3220 gigabyte-h97-d3h kvr16n11s8-2x4)" \
-    'legacy board excluded from new component selection'
+    'archived board excluded from new component selection'
 assert_eq 4096 "$(hardware_memory_size_mb_normalize '4G')" \
     '4G memory capacity normalization'
-assert_eq 6144 "$(hardware_memory_size_mb_normalize '6144 MB')" \
-    '6144 MB memory capacity normalization'
 assert_eq 8192 "$(hardware_memory_size_mb_normalize '8GiB')" \
     '8GiB memory capacity normalization'
-assert_eq g3220-h81m-c-6g \
-    "$(hardware_profile_component_candidates g3220 '' '' 6144)" \
-    'capacity selector resolves one reviewed Flex platform'
-if hardware_memory_size_mb_normalize 12G >/dev/null 2>&1; then
-    fail 'unsupported memory capacity was normalized'
+assert_eq 12288 "$(hardware_memory_size_mb_normalize '12G')" \
+    '12G memory capacity normalization'
+assert_eq 16384 "$(hardware_memory_size_mb_normalize '16 GiB')" \
+    '16G memory capacity normalization'
+if hardware_memory_size_mb_normalize 6G >/dev/null 2>&1; then
+    fail 'archived 6G memory capacity was normalized for a new VM'
 fi
 
 # Persisted component metadata is immutable.  A single mismatched key or
@@ -358,7 +327,7 @@ for fixture_field in MEM_MODEL_LIST MEM_MODULE_MB_LIST \
 done
 
 load_valid
-PLATFORM_GENERATION=6
+PLATFORM_GENERATION=3
 assert_ok strict
 PLATFORM_GENERATION=8
 assert_rejected strict PLATFORM_GENERATION_MISMATCH
@@ -384,7 +353,7 @@ BOARD_VERSION=Rev-X
 assert_rejected strict BOARD_VERSION_MISMATCH
 
 load_valid
-MEM_FAMILY=DDR3
+MEM_FAMILY=DDR4
 assert_rejected strict MEMORY_FAMILY_MISMATCH
 
 load_valid
@@ -395,7 +364,10 @@ load_valid
 MEM_TOTAL_MB=4096
 assert_rejected strict MEMORY_CAPACITY_MISMATCH
 
-load_valid i5-4590 samsung-970-pro-512gb
+load_valid i7-4820k-p9x79-micron-16g samsung-970-pro-512gb
+assert_ok strict
+
+load_valid i7-3820-p9x79-kingston-16g samsung-970-pro-512gb
 assert_rejected strict STORAGE_TOPOLOGY_UNSUPPORTED
 
 load_valid i5-6500 samsung-970-pro-512gb
@@ -455,11 +427,11 @@ GPU_PCIE_WIDTH=16
 assert_rejected strict GPU_PCIE_WIDTH_MISMATCH
 
 load_valid
-TPM_FRONTEND=tpm-tis
+TPM_FRONTEND=tpm-crb
 assert_rejected strict TPM_FRONTEND_MISMATCH
 
 load_valid
-TPM_EFFECTIVE_VERSION=1.2
+TPM_EFFECTIVE_VERSION=2.0
 assert_rejected strict TPM_VERSION_MISMATCH
 
 load_valid
@@ -538,6 +510,10 @@ assert_eq 4 "$(g11_hardware_platform_generation g3220-h81m-k-4g)" \
     'Pentium Haswell platform generation'
 assert_eq 4 "$(g11_hardware_platform_generation i3-4130-h81m-s1-6g)" \
     'Core i3 Haswell platform generation'
+assert_eq 2 "$(g11_hardware_platform_generation i7-3820-p9x79-kingston-4g)" \
+    'Sandy Bridge-E X79 platform generation'
+assert_eq 3 "$(g11_hardware_platform_generation i7-4820k-p9x79-micron-16g)" \
+    'Ivy Bridge-E X79 platform generation'
 assert_eq tpm-tis "$(g11_hardware_expected_tpm_frontend 1.2)" \
     'TPM 1.2 frontend'
 assert_eq tpm-crb "$(g11_hardware_expected_tpm_frontend 2.0)" \

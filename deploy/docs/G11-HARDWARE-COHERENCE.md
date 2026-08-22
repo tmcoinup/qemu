@@ -3,6 +3,10 @@
 本页只适用于 **G-11/vGPU**。V-11 是独立分支，不要互拷脚本、QEMU 二进制或
 guest 包。
 
+> 2026-08-21：正常新建已切到两款 4C/8T Core i7 + 三品牌 X79 +
+> 4/8/12/16G。本文保留的 H81/i3 截图与逐项分析只用于解释 archived 旧 VM；当前
+> 数量、选择与 NVMe 规则以 [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) 为准。
+
 ## 结论
 
 本轮没有针对鲁大师的进程名、安装目录或 exe 做适配。鲁大师、GPU-Z、HWiNFO、
@@ -12,13 +16,13 @@ guest 包。
 
 | 层 | 处理 | 覆盖 |
 |---|---|---:|
-| QEMU 00:1f.0 LPC inventory | 主板目录选择 H81/H97/B150/B360 身份 | 264/264 个平台 |
+| QEMU 00:1f.0 LPC inventory | 主板目录选择 X79/H81/H97/B150/B360 身份 | 312/312 个平台 |
 | G-11 系统 NVAPI | 同一 VM 合同供所有 32/64 位 NVAPI 调用者使用 | 25/25 个 GPU profile |
 | GPU 能力目录 | 六个消费卡 device ID 都显式要求目标 DXR tier 0、NVAPI RT core 0、Tensor core 0 | 6/6 个 device ID |
 | 原生 D3D12 审计 | 安装写入前和最终验收均直接查 OPTIONS5；查询失败阻断，签名 transport 能力差异警告 | x86 + x64 |
 
-截图中的 `Gigabyte GA-H81M-S1 + i3-4130 + GTX 750` 因此适用同一条公共路径，
-不是 VM8 或鲁大师特例。
+截图中的 `Gigabyte GA-H81M-S1 + i3-4130 + GTX 750` 现在属于 archived 旧配置，
+仍适用同一条公共读取路径，但不能用于新建。
 
 ## 为什么所有主板以前都显示 ICH9
 
@@ -31,6 +35,7 @@ SMBIOS 虽然会变化，00:1f.0 的 PCI identity 没有变化，所以检测软
 
 | 主板目录芯片组 | 来宾 00:1f.0 LPC | revision | 平台数量 |
 |---|---|---:|---:|
+| X79 | `8086:1D41` | `06` | 48 |
 | H81 | `8086:8C5C` | `04` | 261 |
 | H97 | `8086:8CC6` | `00` | 1 |
 | B150 | `8086:A148` | `31` | 1 |
@@ -111,7 +116,7 @@ cd /home/ubuntu/projects/qemu
 预期包含：
 
 ```text
-chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 coverage=all-264-platforms
+chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 X79=8086:1D41:06 coverage=all-312-platforms
 ```
 
 正常启动目标 VM：

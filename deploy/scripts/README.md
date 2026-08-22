@@ -11,6 +11,8 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 | 停止 | `./deploy/scripts/stop-vm.sh ID [options]` |
 | 运行中显示控制 | `./deploy/scripts/ctl-vm.sh ID ACTION` |
 | 初始化宿主 bridge | `./deploy/scripts/setup-bridge.sh` |
+| 宿主动态提速/回滚 | `./deploy/scripts/g11-performance.sh audit\|apply\|restore` |
+| SDL 画面/键鼠响应封装 | `./deploy/scripts/g11-sdl-performance.sh audit\|profile\|start\|verify` |
 | 可选 NVMe APST 管理 | `./deploy/scripts/host-nvme-apst.sh ACTION` |
 | 封装基础镜像 | `./deploy/scripts/seal-base.sh SOURCE_ID BASE_NAME` |
 | 克隆基础镜像 | `./deploy/scripts/clone-from-base.sh BASE_NAME NEW_ID [options]` |
@@ -55,12 +57,16 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 `autorun.inf` 覆盖名称，也不创建或预分配宿主机镜像。它和任意 host 目录 U 盘均为
 只读 VVFAT/USB Mass Storage，不需要 Windows 额外驱动。详见
 [`../docs/G11-USB-DIRECTORY.md`](../docs/G11-USB-DIRECTORY.md)。
-`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.3.0；Defender、防火墙服务启动、
-系统/软件更新、OneDrive、资讯天气、消费 App 和性能项的 VM1 傻瓜验收与回滚见
+`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.5.2；Defender、防火墙服务启动、
+系统/软件更新、OneDrive、资讯天气、通知、消费 App、默认静音、en-US/US 第一和
+Microsoft Pinyin 第二及性能项的 VM1
+傻瓜验收与回滚见
 [`../docs/G11-GUEST-LITE.md`](../docs/G11-GUEST-LITE.md)。
 新版 `VgpuPortable.exe` 已在同一次双击中应用可回滚的登录启动优化。只有仍使用
 旧版 EXE 或支持人员需要独立诊断时，才运行 `guest-performance.sh ID mount`，详见
 [`../docs/G11-GUEST-PERFORMANCE.md`](../docs/G11-GUEST-PERFORMANCE.md)。
+宿主 CPU 动态全频段、稳定 TSC、RTC A/B、内存不限速和一键回滚见
+[`../docs/G11-PERFORMANCE-QUICKSTART.md`](../docs/G11-PERFORMANCE-QUICKSTART.md)。
 
 native 启动默认创建与网络编码分离的 DGame preview，发布
 `/tmp/qemu-stealth-ID.{fb,qmp,mon}`，SDL 标题统一为 `win10-ID`。QMP/进程身份仍为

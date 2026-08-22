@@ -1,8 +1,9 @@
 # G-11 SDL 空闲不黑屏傻瓜教程
 
-本功能只调整 **Linux 宿主机** 的 SDL 屏保/显示器休眠许可。它不修改 Windows
-电源计划，不改 BCD，不开启 `testsigning`/`nointegritychecks`，也不安装任何
-测试签名或自签名内核驱动。改动只在 G-11 分支；不要把它当作 V-11 的发布物。
+G-11 的“无操作后黑屏”分成两层：Linux 宿主的屏保/DPMS，以及 Windows guest 的
+显示器超时/自动睡眠。SDL 默认处理宿主层；现有 guest-performance 包以可回滚方式
+处理 Windows 层。两层都不改 BCD，不开启 `testsigning`/`nointegritychecks`，也不
+安装任何测试签名或自签名内核驱动。改动只在 G-11 分支；不要当作 V-11 发布物。
 
 ## 已封装的默认行为
 
@@ -19,8 +20,10 @@ cd /home/ubuntu/projects/qemu
 [start-vm] SDL 宿主防息屏已启用：窗口空闲不会触发宿主屏保/显示器休眠
 ```
 
-此后只要该 QEMU SDL 进程仍在运行，SDL 会阻止宿主屏保/DPMS 因空闲把物理显示器
-变黑。QEMU 正常退出时会恢复宿主自动息屏资格，不会永久修改 GNOME/KDE 设置。
+此后只要该 QEMU SDL 进程仍在运行，SDL 会向桌面会话申请阻止屏保/空闲息屏。
+GNOME、KDE 和常见 X11/XWayland 会话通常会遵守该申请；独立 DPMS 工具、显示器自身
+定时器或桌面策略仍可能覆盖它，所以必须完成下面的实机等待验收。QEMU 正常退出时会
+恢复宿主自动息屏资格，不会永久修改 GNOME/KDE 设置。
 
 ## 第一次使用：一键构建与检查
 
@@ -49,8 +52,32 @@ OK: SDL host-display no-sleep static checks passed
 
 “整台宿主显示器变黑”属于本功能处理范围。如果宿主桌面和其他窗口仍然可见，
 只有 Windows 画面在 SDL 客户区内变黑，则通常是 Guest 自己关闭显示输出或 GPU
-scanout 异常，不要用本开关掩盖；先在 Guest 内按键唤醒，再检查 Windows 电源计划
-和 QEMU/GPU 日志。
+scanout 异常。先按下一节处理 guest 电源策略；仍复现再查 QEMU/GPU 日志。
+
+## Windows guest 也设为不自动黑屏/睡眠
+
+新版 `VgpuPortable.exe` 已封装这一步；日常只需在 Windows 内双击它并让 UAC 通过。
+旧包维护入口则双击：
+
+```text
+02-Apply-Recommended.cmd
+```
+
+它只把内置“高性能”计划的 `VIDEOIDLE` 和 `STANDBYIDLE` AC/DC 值设为 0（从不自动
+关闭显示器、从不因空闲自动睡眠），用户主动关机/睡眠仍可使用。原值保存在：
+
+```text
+C:\ProgramData\G11GuestPerformance\state.json
+```
+
+要完整回退，双击：
+
+```text
+C:\ProgramData\G11GuestPerformance\tools\04-Rollback.cmd
+```
+
+应用后用 `03-Verify.cmd` 检查；详细步骤见
+[G11-GUEST-PERFORMANCE.md](G11-GUEST-PERFORMANCE.md)。
 
 ## 确实需要宿主自动息屏时
 

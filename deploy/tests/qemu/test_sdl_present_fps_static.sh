@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guard the visible SDL 60 Hz pacing and Present FPS title counter.
+# Guard configurable SDL pacing and distinct content/present rate telemetry.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,7 +15,13 @@ fail() {
 }
 
 grep -Eq '^#define SDL2_REFRESH_INTERVAL_ACTIVE_NS +16666667ULL$' "$SDL2_C" \
-    || fail "visible SDL refresh must stay at an exact 60 Hz nanosecond period"
+    || fail "visible SDL default must stay at an exact 60 Hz period"
+grep -Fq '"QEMU_SDL_TARGET_FPS", 60, 30, 240' "$SDL2_C" \
+    || fail "SDL target FPS override/range is missing"
+grep -Fq '"QEMU_SDL_INPUT_POLL_MS", SDL2_INPUT_POLL_INTERVAL_ACTIVE_MS, 1, 16' \
+    "$SDL2_C" || fail "SDL active input-poll override/range is missing"
+grep -Fq 'DIV_ROUND_UP(' "$SDL2_C" \
+    || fail "runtime target FPS is not converted at nanosecond precision"
 grep -Fq 'update_displaychangelistener_ns(' "$SDL2_C" \
     || fail "SDL restore paths no longer select precise frame pacing"
 grep -Fq 'dcl.update_interval_ns =' "$SDL2_C" \
@@ -47,15 +53,15 @@ fi
 if grep -Fq '!d->cpu_surface_gpu_dirty || !fb_shm_has_gpu_clients' "$FB_SHM_C"; then
     fail "fb-shm GPU publication regressed to damage-driven cadence"
 fi
-grep -Fq 'SDL Present %.1f FPS' "$SDL2_C" \
-    || fail "window title lost its Present FPS indicator"
-grep -Fq '"%s | SDL Present %.1f FPS%s%s", title_name' "$SDL2_C" \
-    || fail "primary explicit SDL title no longer stays free of an invented console suffix"
-grep -Fq 'snprintf(win_title, sizeof(win_title), "%s%s%s"' "$SDL2_C" \
+grep -Fq '" | Content %.1f/s | Present %.1f/s (%s)"' "$SDL2_C" \
+    || fail "window title no longer distinguishes content updates from swaps"
+grep -Fq 'scon->fixed_present ? "fixed" : "dynamic"' "$SDL2_C" \
+    || fail "window title no longer identifies the active Present mode"
+grep -Fq 'snprintf(win_title, sizeof(win_title), "%s%s%s%s"' "$SDL2_C" \
     || fail "primary explicit SDL base title is no longer used verbatim"
 grep -Fq 'title_is_explicit && scon->idx == 0' "$SDL2_C" \
     || fail "explicit title is not restricted to the primary console"
-grep -Fq '"%s-console-%d | SDL Present %.1f FPS%s%s", title_name' "$SDL2_C" \
+grep -Fq '"%s-console-%d%s%s%s"' "$SDL2_C" \
     || fail "secondary SDL consoles can collide with the primary instance title"
 grep -Fq 'o->u.sdl.has_single_console && o->u.sdl.single_console' "$SDL2_C" \
     || fail "SDL single-console launcher policy is not implemented"
@@ -64,20 +70,32 @@ grep -Fq 'SDL_SetWindowMaximumSize(scon->real_window' "$SDL2_C" \
 grep -Fq 'sdl2_window_resize(scon);' "$SDL2_C" \
     || fail "SDL show/resume no longer restores the current guest resolution"
 grep -Fq 'sdl2_present_rate_tick(scon);' "$SDL2_C" \
-    || fail "Present FPS no longer falls to zero when frame dedup skips swaps"
+    || fail "dynamic Present rate no longer falls to zero when swaps stop"
 grep -Fq 'scon->fps_low_warmup_windows = SDL2_FPS_LOW_WARMUP_WINDOWS;' "$SDL2_C" \
     || fail "SDL restore can publish a misleading minimized-cadence FPS sample"
 grep -Fq 'sdl2_note_present(scon);' "$SDL2_GL" \
     || fail "OpenGL swap path is not counted"
 grep -Fq 'sdl2_note_present(scon);' "$SDL2_2D" \
     || fail "2D SDL_RenderPresent path is not counted"
-grep -Fq 'SDL_GL_SetSwapInterval(0);' "$SDL2_C" \
+grep -Fq 'sdl2_note_content_update(scon);' "$SDL2_GL" \
+    || fail "OpenGL content updates are not counted separately"
+grep -Fq 'sdl2_note_content_update(scon);' "$SDL2_2D" \
+    || fail "2D content updates are not counted separately"
+grep -Fq 'SDL_GL_SetSwapInterval(0)' "$SDL2_C" \
     || fail "QEMU main-loop-safe nonblocking swap policy changed"
+grep -Fq 'eglSwapInterval(qemu_egl_display, 0)' "$SDL2_C" \
+    || fail "native EGL can block the main loop on driver-default vsync"
 grep -Fq 'QEMU_SDL_PRESENT_MODE' "$REPO_ROOT/deploy/scripts/start-vm.sh" \
     || fail "launcher no longer exposes fixed/dynamic SDL Present modes"
 grep -Fq 'QEMU_SDL_PRESENT_MODE="${QEMU_SDL_PRESENT_MODE:-fixed}"' \
     "$REPO_ROOT/deploy/scripts/start-vm.sh" \
     || fail "launcher must default SDL Present mode to fixed"
+grep -Fq 'QEMU_SDL_TARGET_FPS="${QEMU_SDL_TARGET_FPS:-60}"' \
+    "$REPO_ROOT/deploy/scripts/start-vm.sh" \
+    || fail "launcher does not default target FPS to 60"
+grep -Fq 'QEMU_SDL_INPUT_POLL_MS="${QEMU_SDL_INPUT_POLL_MS:-2}"' \
+    "$REPO_ROOT/deploy/scripts/start-vm.sh" \
+    || fail "launcher does not default active input polling to 2ms"
 grep -Fq 'scon->fixed_present && !scon->presented_since_refresh' "$SDL2_GL" \
     || fail "OpenGL SDL fixed 60 Hz redraw path is missing"
 grep -Fq 'scon->fixed_present && !scon->presented_since_refresh' "$SDL2_2D" \
@@ -88,5 +106,7 @@ grep -Fq 'sdl2_gl_release_window_current(scon);' "$SDL2_GL" \
     || fail "native EGL rendering does not release bounded window ownership"
 grep -Fq 'warned_native_egl_make_current' "$SDL2_GL" \
     || fail "native EGL make-current failures can flood the operator log"
+grep -Fq 'refresh_generation' "$REPO_ROOT/ui/console.c" \
+    || fail "multiple display listeners can pull the same producer twice per GUI tick"
 
-echo "OK: SDL 60 Hz pacing and Present FPS static checks passed"
+echo "OK: SDL pacing and content/present rate static checks passed"

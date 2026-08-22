@@ -24,19 +24,46 @@
 /* Ported SDL 1.2 code to 2.0 by Dave Airlie. */
 
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "ui/console.h"
 #include "ui/input.h"
 #include "ui/sdl2.h"
 
-static void sdl2_2d_present_texture(struct sdl2_console *scon)
+static void sdl2_2d_schedule_texture_recovery(struct sdl2_console *scon,
+                                              const char *operation)
+{
+    if (!scon->warned_texture_recovery) {
+        warn_report("sdl2: %s failed; scheduling texture recovery: %s",
+                    operation, SDL_GetError());
+        scon->warned_texture_recovery = true;
+    }
+    if (!scon->texture_recreate_pending) {
+        scon->texture_recreate_pending = true;
+        scon->texture_recreate_after_us =
+            g_get_monotonic_time() + G_USEC_PER_SEC;
+    }
+}
+
+static void sdl2_2d_texture_recovered(struct sdl2_console *scon)
+{
+    if (scon->texture_upload_failed) {
+        return;
+    }
+    scon->texture_recreate_pending = false;
+    scon->texture_recreate_after_us = 0;
+    scon->warned_texture_recovery = false;
+}
+
+static bool sdl2_2d_present_texture(struct sdl2_console *scon)
 {
     DisplaySurface *surf = scon->surface;
+    SDL2Size output;
     SDL_Rect dst;
-    int ow, oh, dx, dy, dw, dh;
+    int dx, dy, dw, dh;
 
     if (!surf || !scon->texture || !scon->real_renderer ||
         !sdl2_window_is_renderable(scon)) {
-        return;
+        return false;
     }
 
     /*
@@ -46,18 +73,27 @@ static void sdl2_2d_present_texture(struct sdl2_console *scon)
      * SDL_RenderSetLogicalSize(), which would scale the guest up to fill the
      * window.
      */
-    SDL_GetRendererOutputSize(scon->real_renderer, &ow, &oh);
-    sdl2_gfx_dst_rect(ow, oh, surface_width(surf), surface_height(surf),
+    if (!sdl2_current_render_size(scon, &output)) {
+        scon->window_redraw_pending = true;
+        return false;
+    }
+    sdl2_gfx_dst_rect(output.width, output.height,
+                      surface_width(surf), surface_height(surf),
                       &dx, &dy, &dw, &dh);
     dst.x = dx;
     dst.y = dy;
     dst.w = dw;
     dst.h = dh;
-    SDL_SetRenderDrawColor(scon->real_renderer, 0, 0, 0, 255);
-    SDL_RenderClear(scon->real_renderer);
-    SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst);
+    if (SDL_SetRenderDrawColor(scon->real_renderer, 0, 0, 0, 255) != 0 ||
+        SDL_RenderClear(scon->real_renderer) != 0 ||
+        SDL_RenderCopy(scon->real_renderer, scon->texture, NULL, &dst) != 0) {
+        sdl2_2d_schedule_texture_recovery(scon, "2D render");
+        return false;
+    }
     SDL_RenderPresent(scon->real_renderer);
     sdl2_note_present(scon);
+    sdl2_2d_texture_recovered(scon);
+    return true;
 }
 
 void sdl2_2d_update(DisplayChangeListener *dcl,
@@ -72,6 +108,13 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
     if (!scon->texture) {
         return;
     }
+    if (!sdl2_window_is_renderable(scon)) {
+        /* Avoid CPU-to-GPU uploads that cannot be shown while minimized. */
+        scon->surface_upload_pending = true;
+        scon->updates = 1;
+        return;
+    }
+    sdl2_framebuffer_cursor_update(scon);
 
     surface_data_offset = surface_bytes_per_pixel(surf) * x +
                           surface_stride(surf) * y;
@@ -86,8 +129,16 @@ void sdl2_2d_update(DisplayChangeListener *dcl,
          * One graphic update may contain many dirty rectangles.  This is a
          * pending latch, not a frame counter: keep it saturated while the
          * window is minimized, then present the latest complete texture once.
-         */
+        */
         scon->updates = 1;
+        if (scon->manual_redraw) {
+            scon->texture_upload_failed = false;
+            sdl2_2d_texture_recovered(scon);
+        }
+        sdl2_note_content_update(scon);
+    } else {
+        scon->texture_upload_failed = true;
+        sdl2_2d_schedule_texture_recovery(scon, "texture upload");
     }
 }
 
@@ -100,7 +151,9 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
 
     assert(!scon->opengl);
 
+    sdl2_framebuffer_cursor_reset(scon);
     scon->surface = new_surface;
+    sdl2_pointer_geometry_changed(scon);
 
     if (scon->texture) {
         SDL_DestroyTexture(scon->texture);
@@ -118,6 +171,13 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
                ((surface_width(old_surface)  != surface_width(new_surface)) ||
                 (surface_height(old_surface) != surface_height(new_surface)))) {
         sdl2_window_resize(scon);
+    }
+    if (!scon->real_window || !scon->real_renderer) {
+        scon->texture_upload_failed = true;
+        scon->texture_recreate_pending = true;
+        scon->texture_recreate_after_us =
+            g_get_monotonic_time() + G_USEC_PER_SEC;
+        return;
     }
 
     /*
@@ -158,6 +218,19 @@ void sdl2_2d_switch(DisplayChangeListener *dcl,
                                       SDL_TEXTUREACCESS_STREAMING,
                                       surface_width(new_surface),
                                       surface_height(new_surface));
+    if (!scon->texture) {
+        if (!scon->warned_texture_recovery) {
+            warn_report("sdl2: cannot create display texture: %s",
+                        SDL_GetError());
+            scon->warned_texture_recovery = true;
+        }
+        scon->texture_upload_failed = true;
+        scon->texture_recreate_pending = true;
+        scon->texture_recreate_after_us =
+            g_get_monotonic_time() + G_USEC_PER_SEC;
+        return;
+    }
+    scon->texture_upload_failed = true;
     sdl2_2d_redraw(scon);
 }
 
@@ -168,32 +241,56 @@ void sdl2_2d_refresh(DisplayChangeListener *dcl)
     assert(!scon->opengl);
     sdl2_poll_events(scon);
     sdl2_flush_window_updates();
-    scon->presented_since_refresh = false;
     graphic_hw_update(dcl->con);
+    if (scon->surface_upload_pending &&
+        sdl2_window_is_renderable(scon)) {
+        scon->surface_upload_pending = false;
+        sdl2_2d_redraw(scon);
+    }
+    if (scon->texture_recreate_pending &&
+        (!scon->real_window || sdl2_window_is_renderable(scon)) &&
+        g_get_monotonic_time() >= scon->texture_recreate_after_us) {
+        /*
+         * Start one bounded retry.  A repeated failure schedules the next
+         * attempt one second out instead of rebuilding every refresh.
+         */
+        scon->texture_recreate_pending = false;
+        scon->texture_recreate_after_us = 0;
+        sdl2_2d_switch(dcl, scon->surface);
+    }
     if (scon->updates && sdl2_window_is_renderable(scon)) {
-        scon->updates = 0;
-        sdl2_2d_present_texture(scon);
+        if (sdl2_2d_present_texture(scon)) {
+            scon->updates = 0;
+        }
     }
     if (scon->fixed_present && !scon->presented_since_refresh &&
         sdl2_window_is_renderable(scon)) {
         sdl2_2d_present_texture(scon);
     }
+    scon->presented_since_refresh = false;
+    scon->content_update_pending = false;
 }
 
 void sdl2_2d_redraw(struct sdl2_console *scon)
 {
+    bool was_manual_redraw;
+
     assert(!scon->opengl);
 
     if (!scon->surface) {
         return;
     }
     scon->updates = 0;
+    was_manual_redraw = scon->manual_redraw;
+    scon->manual_redraw = true;
     sdl2_2d_update(&scon->dcl, 0, 0,
                    surface_width(scon->surface),
                    surface_height(scon->surface));
+    scon->manual_redraw = was_manual_redraw;
     if (scon->updates && sdl2_window_is_renderable(scon)) {
-        scon->updates = 0;
-        sdl2_2d_present_texture(scon);
+        if (sdl2_2d_present_texture(scon)) {
+            scon->updates = 0;
+        }
     }
 }
 

@@ -1,13 +1,15 @@
-# G-11 Guest Lite 2.3.0：Windows 10 全面精简/提速傻瓜教程
+# G-11 Guest Lite 2.5.2：Windows 10 全面精简/提速傻瓜教程
 
 本工具只属于 **G-11/vGPU**。V-11 是独立分支；不要互拷 VM bundle、驱动或配置。
-2.3.0 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
-资讯、天气、商店、OneDrive/同步、消费 App、后台服务/任务和常见 VM 高 I/O 项。
+2.5.2 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
+资讯、天气、商店、OneDrive/同步、通知、任务栏搜索框、消费 App、后台服务/任务和常见 VM 高 I/O 项，
+把默认播放端点静音，并把输入顺序设为 en-US/US keyboard 第一、中文（简体）
+Microsoft Pinyin 第二。
 
 它是激进配置：完成后系统没有内置杀毒、防火墙和自动安全更新。先只在用户指定的
 实验机 **VM1** 验收，不要直接批量投放。
 
-`2.3.0` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
+`2.5.2` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
 清掉”补齐完整原生本地策略状态：原始 `Registry.pol` 和 `gpt.ini` 均逐字节存入回滚
 基线，受管副本只写本地 GPO 支持的 `Version` 并同时递增机器/用户版本。Local System 补强
 任务在开机/登录延迟 45 秒后强制刷新策略、再写入运行态，然后立即退出；没有常驻进程
@@ -15,8 +17,19 @@
 
 VM1 的第二轮重启审计还定位出 Windows PowerShell 5.1 Registry provider 的陷阱：对
 已经存在的叶键反复执行 `New-Item -Force` 会重建该键并删除刚写入的兄弟值，表现为同一
-键下只有最后一个策略留下。2.3.0 改为仅在键不存在时创建；设置和回滚都不再重建现有
+键下只有最后一个策略留下。2.5.2 继续仅在键不存在时创建；设置和回滚都不再重建现有
 叶键。Appx 审计也从逐包查询改为一次枚举后按精确白名单过滤，明显缩短应用/验证时间。
+
+2.5.2 新增任务栏搜索框默认隐藏，并修复克隆内部重启后 finalizer 以 Local System 身份
+误读 SYSTEM `HKCU` 的问题。克隆验收现在把 `state.json` 中保存的用户 SID 映射到
+`HKEY_USERS`，通知、搜索和语言顺序都核验同一个目标用户。自动 CloneApply 的逐项输出
+改写入 ProgramData 日志，避免虚拟显示逐行重绘，并跳过与完整基线采集和重启后严格
+验收重复的两个全量审计；服务、Appx 和策略操作仍使用 Windows 原生接口顺序执行，
+因此无需也不引入第三方运行库。
+
+2.5.2 同时修复旧克隆升级边界：已经确认 `WinDefend` 不运行且没有 `MsMpEng`
+进程时，Defender 接口可能无法再返回篡改防护状态，此时允许重施现有策略；若引擎
+仍活动，未知状态继续硬性拒绝。明确检测到篡改防护为 `On` 时永远不会绕过。
 
 ## 一、VM1 最短流程
 
@@ -95,7 +108,7 @@ Get-Process | Sort-Object CPU -Descending |
 中具体进程名保留下来，再定位是否实际为 `MsMpEng`、`svchost` 内另一服务或第三方
 网络过滤器。
 
-## 三、2.3 实际修改矩阵
+## 三、2.5 实际修改矩阵
 
 | 类别 | 处理 | 保留/边界 |
 |---|---|---|
@@ -107,7 +120,11 @@ Get-Process | Sort-Object CPU -Descending |
 | 云盘/同步 | 禁 OneDrive、设置/活动/剪贴板同步，删 OneDrive 启动值，停更新任务/进程 | OneDrive 程序载荷不硬删，回滚后可恢复 |
 | 资讯/天气 | 隐藏 Win10 资讯和兴趣，移除 Bing News/Weather | 无通配卸载 |
 | 消费 App | 当前用户移除 Xbox、Phone Link、Teams、Outlook、Mail/Calendar、3D、纸牌等白名单包 | 保留计算器、照片、画图、记事本、DesktopAppInstaller 和框架依赖 |
-| 后台/隐私 | 关后台 App、内容投放、遥测、推送、地图、定位、Game DVR 等白名单服务/任务 | 不碰网络、音频、打印、NVIDIA/vGPU |
+| 通知 | 关闭通知总开关、应用/锁屏 Toast、通知中心和 Windows Security 通知 | 不删通知组件；所有原值进入精确回滚基线 |
+| 任务栏 | `SearchboxTaskbarMode=0`，默认隐藏搜索框 | 开始菜单/Win 键搜索仍可用；回滚恢复原显示方式 |
+| 声音 | 通过 Windows Core Audio 把默认播放端点设为静音，启动补强和审计再次核验 | 保留 Audiosrv、音频设备及驱动；回滚恢复 Apply 前的静音状态 |
+| 默认输入 | `en-US` + US (`0409:00000409`) 第一，`zh-CN` + Microsoft Pinyin (`0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}`) 第二 | 其他原有语言排在后面，Win+Space 可切换；回滚恢复原语言列表和默认覆盖 |
+| 后台/隐私 | 关后台 App、内容投放、遥测、推送、地图、定位、Game DVR 等白名单服务/任务 | 不碰网络、音频服务/驱动、打印、NVIDIA/vGPU；仅静音默认播放端点 |
 | 性能 | 关 SysMain/搜索索引、电源节流、透明/任务栏动画和启动延时；切换内置“高性能”方案 | 保留桌面背景和字体平滑；2.2 自动恢复旧版 `VisualFXSetting` 基线；不改分页文件、时钟、HPET 或 BCD |
 | 重启持久化 | 保存并扩展机器/用户 `Registry.pol`，生成/合并合法的 `gpt.ini Version`，开机和目标用户登录后由 SYSTEM 延迟刷新、补强一次 | `gPCMachineExtensionNames`/`gPCUserExtensionNames` 是 AD GPO 对象属性，绝不写进本地 gpt.ini；无常驻服务、无密码、无第三方库；回滚逐字节还原原 policy/metadata 文件 |
 
@@ -123,13 +140,14 @@ OneDrive 服务和计划任务只允许通过锚定的路径/正则白名单发�
 C:\ProgramData\G11GuestLite\state.json
 ```
 
-其中包含计算机名、用户 SID、注册表值/类型、防火墙三 profile、活动电源方案、服务
+其中包含 MachineGuid、计算机名、用户 SID、注册表值/类型、防火墙三 profile、原始
+音频静音状态、原始用户语言/输入列表、活动电源方案、服务
 启动/运行状态、任务启用状态、当前用户 App 清单，以及机器/用户原始
 `Registry.pol`、`gpt.ini` 字节和补强任务是否原先存在。目录 ACL 只允许 Administrators 和
 SYSTEM。重复 Apply 复用首次基线，不把“已经禁用”的状态覆盖成原始值。
 
-若 VM1 已经运行过 1.5/2.0/2.1/2.2，2.3 会先把新增项目（包括 `MpsSvc`）的当前状态
-补进旧基线、原子保存为 schema 4，再开始新增修改。VM1 从 2.1 升级时，原基线已保存
+若 VM1 已经运行过旧版，2.5 会先把新增项目（包括音频静音和语言/输入列表）的当前状态
+补进旧基线、原子保存为 schema 5，再开始新增修改。VM1 从 2.1 升级时，原基线已保存
 最初的 Registry.pol；2.1 没有创建过 gpt.ini，因此新版可安全补记“原文件不存在”并
 保证回滚精确删除它。
 
@@ -140,7 +158,8 @@ C:\ProgramData\G11GuestLite\tools\03-Rollback.cmd
 ```
 
 看到 `ROLLBACK PASS` 后重启。回滚会先删除 Guest Lite 补强任务、恢复原始
-`Registry.pol`/`gpt.ini`，再恢复注册表/防火墙/服务/任务/App/电源。失败时显示
+`Registry.pol`/`gpt.ini`，再恢复语言/输入、注册表、防火墙、声音静音、服务、任务、
+App 和电源。失败时显示
 `ROLLBACK PARTIAL`，原 state 不删除，可修复后重试。App 只恢复首次 Apply 前存在的
 包；若其他工具后来删除 WindowsApps 预配文件，本工具不会从互联网下载来源不明的 Appx。
 
@@ -182,8 +201,25 @@ DLL、Windows PowerShell 5.1、CIM/NetSecurity/Defender/Appx/TaskScheduler cmdle
 ```
 
 测试会验证确定性构建、PE 架构/UAC 清单、严格 DLL 导入白名单、内嵌资源、ISO/USB
-目录、CRLF 启动器、schema 4 policy/metadata/task 回滚、合法 gpt.ini、克隆 manifest、
-禁止 BCD/签名/驱动/系统包删除操作及 2.3 必需控制项。
+目录、CRLF 启动器、schema 5 policy/metadata/task/audio/language 回滚、合法 gpt.ini、
+克隆 manifest、禁止 BCD/签名/驱动/系统包删除操作及 2.5 必需控制项。
+
+### en-US 是否需要离线语言包
+
+这里的目标是“英语（美国）US 键盘作为默认输入”，不是把 Windows 显示界面改成
+英文。US 键盘布局属于 Windows 10 inbox 组件；Guest Lite 使用系统自带
+`New-WinUserLanguageList`/`Set-WinUserLanguageList` 建立 `en-US` 输入项，Sysprep
+应答文件也在 `specialize` 和 `oobeSystem` 写入同一顺序，因此没有网络、没有 CAB
+也能完成。
+
+部分 Windows 10 会把第二项的 BCP-47 标签规范化成 `zh-Hans-CN`；这与 `zh-CN` 指向
+同一简体中文输入项。验收接受这两个等价标签，但仍要求第二项包含上面的微软拼音 TIP，
+不会因为标签别名而放宽到其他输入法。
+
+当前两张安装 ISO 都是 zh-CN，仓库外镜像目录也没有与该系统版本匹配的微软官方
+en-US Language Pack/FOD CAB，所以本次不会把来源不明或版本不匹配的 CAB 塞进母盘。
+若未来要把整个 Windows UI 改成英文，应单独准备与目标 Win10 build、架构和累计更新
+严格匹配的微软官方 LP/FOD，再增加离线 DISM 阶段；这不影响本次 US 键盘输入目标。
 
 ## 六、克隆后自动运行与 VM2 验收
 
@@ -197,6 +233,19 @@ Sysprep `/generalize /oobe /shutdown`。这是 Defender 的人工安全边界，
 ./deploy/scripts/clone-from-base.sh win10-base 2 --start
 ```
 
+等待 VM2 自动内部重启一次并最终完整关机；不要在初始化窗口运行时强制停止。命令行
+用户随后执行：
+
+```bash
+sudo ./deploy/scripts/initialize-clone.sh 2
+./deploy/scripts/start-vm.sh 2
+```
+
+第一条会严格验收来宾完成标记、独立 Windows 身份、Licensed/Code 0、系统 NVAPI、
+Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Disabled/Stopped/PID 0` 与
+`BFE=Auto/Running`、默认声音静音以及精确输入顺序，并刷新显示器缓存；任一项失败都
+保留等待门禁，绝不发布半成品。
+
 首启顺序如下：
 
 1. 自动 OOBE/独立 MachineGuid、机器 SID 和 `DESKTOP-XXXXXXX` 名称；
@@ -204,13 +253,18 @@ Sysprep `/generalize /oobe /shutdown`。这是 Defender 的人工安全边界，
 3. finalizer 校验 `clone-manifest.json` 固定摘要及 Guest Lite 每个载荷摘要，自动运行
    `CloneApply`，保存该克隆 RID-500 用户的原始外观/策略/App/服务回滚基线；
 4. 复用系统 NVAPI 的内部重启，SYSTEM 验证 NVAPI/显示器，同时要求
-   `MpsSvc=Disabled/Stopped/PID 0`、`BFE=Auto/Running`、本地 policy 文件及 Guest Lite
-   补强任务完整；
+   `MpsSvc=Disabled/Stopped/PID 0`、`BFE=Auto/Running`、通知关闭、默认声音静音、
+   en-US/US 第一、Microsoft Pinyin 第二、本地 policy 文件及 Guest Lite 补强任务完整；
 5. 只有全部通过才写 schema-3 完成标记并完整关机；宿主“初始”只读复核后再启动。
 
 若母盘篡改防护仍开启，自动链会明确失败并保留
 `C:\ProgramData\VMate\G11\clone-initialization-error.txt`，不会静默跳过 Defender。修复
 母盘后重建；不要通过 BCD、测试签名、驱动或 ACL 绕过。
+
+桌面 Retry 使用 Auto 模式：若系统 NVAPI 已产生严格绑定的 validated receipt，会
+直接续跑 Complete 验收，不重复 Apply、不覆盖首次回滚基线。Windows 在投影阶段改名
+不会造成误判，因为状态绑定采用 `MachineGuid + RID-500 SID`；SYSTEM 补强任务则以
+启动前后 `LastRunTime` 确实递增和返回码 0 为准，不依赖本机时间容差。
 
 ## 七、明确禁止和保留项
 
@@ -245,5 +299,7 @@ Update Orchestrator/DoSvc 的受保护对象
 - [Windows Firewall 概览与微软“不停止 MpsSvc”的风险说明](https://learn.microsoft.com/windows/security/operating-system-security/network-security/windows-firewall/)
 - [Set-NetFirewallProfile](https://learn.microsoft.com/powershell/module/netsecurity/set-netfirewallprofile)
 - [Get-NetFirewallProfile](https://learn.microsoft.com/powershell/module/netsecurity/get-netfirewallprofile)
+- [Windows 默认输入区域设置/TIP 表](https://learn.microsoft.com/windows-hardware/manufacture/desktop/default-input-locales-for-windows-language-packs)
+- [New-WinUserLanguageList](https://learn.microsoft.com/powershell/module/international/new-winuserlanguagelist)
 - [Microsoft Group Policy gpt.ini 版本格式](https://learn.microsoft.com/openspecs/windows_protocols/ms-gpol/59bb540a-64f4-4c52-9c55-5ca2fd2c0270)
 - [Microsoft Registry.pol 消息格式（键名和值名必须为 NUL 结尾 UTF-16LE）](https://learn.microsoft.com/openspecs/windows_protocols/ms-gpreg/5c092c22-bf6b-4e7f-b180-b20743d368f5)

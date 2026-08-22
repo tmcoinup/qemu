@@ -38,6 +38,24 @@ $SchemaVersion = 2
 $HighPerformanceGuid = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 $OfficialNvidiaServiceName = 'NVDisplay.ContainerLocalSystem'
 
+# Disable only automatic idle blank/sleep on the dedicated VM's High
+# performance plan.  Explicit user sleep/shutdown remains available.  Exact
+# AC/DC values are saved in state.json and restored by 04-Rollback.cmd.
+$PowerSettingPlan = @(
+    [pscustomobject]@{
+        SubgroupGuid = '7516b95f-f776-4464-8c53-06167f40cc99'
+        SettingGuid = '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e'
+        Name = 'VIDEOIDLE'
+        Purpose = 'Keep the guest display from blanking while the SDL console is idle.'
+    },
+    [pscustomobject]@{
+        SubgroupGuid = '238c9fa8-0aad-41ed-83f4-97be242c8f20'
+        SettingGuid = '29f6c1db-86da-48c5-9fdb-f2b67b1f44da'
+        Name = 'STANDBYIDLE'
+        Purpose = 'Keep the guest from entering automatic idle sleep.'
+    }
+)
+
 $RegistryPlan = @(
     [pscustomobject]@{
         Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Serialize'
@@ -229,6 +247,98 @@ function Set-ActivePowerScheme {
         $ErrorActionPreference = $savedPreference
     }
     return $exitCode -eq 0
+}
+
+function Get-PowerSettingSnapshot {
+    param([Parameter(Mandatory = $true)][object]$Entry)
+
+    $path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\{0}\{1}\{2}' -f `
+        $HighPerformanceGuid, $Entry.SubgroupGuid, $Entry.SettingGuid
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        return [pscustomobject]@{
+            SchemeGuid = $HighPerformanceGuid
+            SubgroupGuid = [string]$Entry.SubgroupGuid
+            SettingGuid = [string]$Entry.SettingGuid
+            Name = [string]$Entry.Name
+            Exists = $false
+            ACValue = $null
+            DCValue = $null
+        }
+    }
+    $values = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
+    return [pscustomobject]@{
+        SchemeGuid = $HighPerformanceGuid
+        SubgroupGuid = [string]$Entry.SubgroupGuid
+        SettingGuid = [string]$Entry.SettingGuid
+        Name = [string]$Entry.Name
+        Exists = $true
+        ACValue = [uint32]$values.ACSettingIndex
+        DCValue = [uint32]$values.DCSettingIndex
+    }
+}
+
+function Set-PowerSettingValues {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][uint32]$ACValue,
+        [Parameter(Mandatory = $true)][uint32]$DCValue
+    )
+
+    $allowed = @($PowerSettingPlan | ForEach-Object {
+        "$($_.SubgroupGuid)|$($_.SettingGuid)"
+    })
+    if ($allowed -notcontains "$($Snapshot.SubgroupGuid)|$($Snapshot.SettingGuid)" -or
+        [string]$Snapshot.SchemeGuid -ne $HighPerformanceGuid) {
+        throw "State contains an unexpected power setting: $($Snapshot.Name)"
+    }
+    $requests = @(
+        [pscustomobject]@{ Mode = '/setacvalueindex'; Value = $ACValue },
+        [pscustomobject]@{ Mode = '/setdcvalueindex'; Value = $DCValue }
+    )
+    foreach ($request in $requests) {
+        $arguments = @(
+            [string]$request.Mode, $HighPerformanceGuid,
+            [string]$Snapshot.SubgroupGuid, [string]$Snapshot.SettingGuid,
+            [string]$request.Value
+        )
+        $savedPreference = $ErrorActionPreference
+        $exitCode = -1
+        try {
+            $ErrorActionPreference = 'Continue'
+            $null = (& powercfg.exe @arguments 2>&1 | Out-String)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedPreference
+        }
+        if ($exitCode -ne 0) {
+            throw "powercfg failed for $($Snapshot.Name) ($($request.Mode))."
+        }
+    }
+}
+
+function Disable-AutomaticGuestBlanking {
+    param([Parameter(Mandatory = $true)][object[]]$Snapshots)
+
+    foreach ($snapshot in $Snapshots) {
+        if (-not [bool]$snapshot.Exists) {
+            Write-Warning "Power setting '$($snapshot.Name)' is unavailable; left untouched."
+            continue
+        }
+        Set-PowerSettingValues -Snapshot $snapshot -ACValue 0 -DCValue 0
+        Write-Host "  power setting: $($snapshot.Name) AC=0 DC=0 (never idle)" `
+            -ForegroundColor Gray
+    }
+}
+
+function Restore-PowerSettings {
+    param([object[]]$Snapshots)
+
+    foreach ($snapshot in @($Snapshots)) {
+        if (-not [bool]$snapshot.Exists) { continue }
+        Set-PowerSettingValues -Snapshot $snapshot `
+            -ACValue ([uint32]$snapshot.ACValue) `
+            -DCValue ([uint32]$snapshot.DCValue)
+    }
 }
 
 function Get-RegistrySnapshot {
@@ -627,6 +737,13 @@ function New-AuditReport {
     $lines.Add("HiberbootEnabled=$hiberboot (audit only; supported G-11 value is 0)")
     $lines.Add('')
 
+    $lines.Add('[guest idle display/sleep policy]')
+    foreach ($entry in $PowerSettingPlan) {
+        $snapshot = Get-PowerSettingSnapshot $entry
+        $lines.Add("setting=$($snapshot.Name) exists=$($snapshot.Exists) AC=$($snapshot.ACValue) DC=$($snapshot.DCValue) desired=0 purpose=$($entry.Purpose)")
+    }
+    $lines.Add('')
+
     $lines.Add('[recent Windows boot degradation events]')
     try {
         $ids = 100, 101, 102, 103, 106, 107, 108, 109, 110
@@ -689,6 +806,9 @@ function New-OriginalState {
         UserName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
         StartupDelayMs = $StartupDelayMs
         ActivePowerScheme = Get-ActivePowerScheme
+        PowerSettings = @($PowerSettingPlan | ForEach-Object {
+            Get-PowerSettingSnapshot $_
+        })
         Registry = @($RegistryPlan | ForEach-Object { Get-RegistrySnapshot $_ })
         LegacyServices = @($LegacyServicePlan | ForEach-Object {
             Get-LegacyServiceSnapshot $_
@@ -696,6 +816,24 @@ function New-OriginalState {
         LegacyTasks = $taskSnapshots
     }
     Save-StateAtomically $state
+    return (Read-State)
+}
+
+function Ensure-PowerSettingState {
+    param([Parameter(Mandatory = $true)][object]$State)
+
+    if ($null -ne $State.PSObject.Properties['PowerSettings']) {
+        return $State
+    }
+    # State schema 2 predates the idle-display policy.  Extend the original
+    # backup before the first write so existing installations remain safely
+    # upgradeable and rollback never guesses a previous value.
+    $snapshots = @($PowerSettingPlan | ForEach-Object {
+        Get-PowerSettingSnapshot $_
+    })
+    $State | Add-Member -NotePropertyName PowerSettings `
+        -NotePropertyValue $snapshots
+    Save-StateAtomically $State
     return (Read-State)
 }
 
@@ -717,6 +855,11 @@ function Invoke-RollbackInternal {
     Write-Host '[rollback] restoring registry values' -ForegroundColor Cyan
     foreach ($snapshot in @($State.Registry)) {
         Restore-RegistrySnapshot $snapshot
+    }
+    if ($null -ne $State.PSObject.Properties['PowerSettings']) {
+        Write-Host '[rollback] restoring guest idle display/sleep policy' `
+            -ForegroundColor Cyan
+        Restore-PowerSettings @($State.PowerSettings)
     }
     if ([string]$State.ActivePowerScheme -match `
         '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') {
@@ -764,10 +907,12 @@ function Invoke-Apply {
     } else {
         New-OriginalState
     }
+    $state = Ensure-PowerSettingState $state
 
     try {
         Write-Host '[apply] registry and power policy' -ForegroundColor Cyan
         foreach ($entry in $RegistryPlan) { Set-PlannedRegistryValue $entry }
+        Disable-AutomaticGuestBlanking @($state.PowerSettings)
         Set-HighPerformanceIfAvailable
 
         Write-Host '[apply] native display: disable only owned legacy relay/RDP helpers' `
@@ -822,6 +967,14 @@ function Invoke-Verify {
     $activePower = Get-ActivePowerScheme
     if ($activePower -ne $HighPerformanceGuid) {
         $issues.Add("active power plan is '$activePower', not High performance")
+    }
+    foreach ($entry in $PowerSettingPlan) {
+        $setting = Get-PowerSettingSnapshot $entry
+        if (-not [bool]$setting.Exists -or
+            [uint32]$setting.ACValue -ne 0 -or
+            [uint32]$setting.DCValue -ne 0) {
+            $issues.Add("automatic guest idle timeout is not disabled: $($entry.Name)")
+        }
     }
     $hiberboot = Get-ItemPropertyValue `
         -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' `

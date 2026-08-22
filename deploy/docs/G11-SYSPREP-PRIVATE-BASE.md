@@ -3,9 +3,12 @@
 这条流程的结果是：制作方只在模板里执行一次 Sysprep；每台克隆拥有独立的
 Windows SID、MachineGuid、计算机名和 VM UUID；授权版 `VgpuPortable.exe` 在每台
 克隆首次启动时只运行一次。随后自动安装该 VM 专属的 x86/x64 系统 NVAPI、内部
-重启一次、验收显示器身份并完整关机。用户只需在 VMate 点一次“初始”，宿主便会
-校验全部结果、核对本机没有重复的 Machine SID、MachineGuid、计算机名或 VM UUID，
-刷新显示器缓存并启动 VM。
+重启一次；同一条链还会自动应用 Guest Lite 2.5.2，关闭 Defender 实时扫描、三种
+防火墙 profile、`MpsSvc` 开机启动、系统/软件更新、资讯、天气、商店、OneDrive、通知和
+审核过的后台高占用项，将默认声音静音，并把输入顺序设为 en-US/US keyboard 第一、
+zh-CN/Microsoft Pinyin 第二，同时保留桌面背景、字体和精确回滚基线。验收显示器身份后
+Windows 完整关机。用户只需在 VMate 点一次“初始”，宿主便会校验全部结果、核对
+本机没有重复的 Machine SID、MachineGuid、计算机名或 VM UUID，并刷新显示器缓存。
 
 ## 重要结论
 
@@ -17,7 +20,14 @@ Windows SID、MachineGuid、计算机名和 VM UUID；授权版 `VgpuPortable.ex
   `package-system-nvapi-projection.sh` 的产物绑定 VM ID、UUID、GPU profile、显示器
   profile 和 `vm.conf` 哈希，不能预先烘焙。VMate 创建克隆时会自动生成它，以只读
   光盘挂入，来宾复制到受保护的 `ProgramData` 后完成安装和重启验证。
+- `package-g11-sysprep-kit.sh` 只生成公开、无凭据的三文件 Sysprep 工具包。它负责让
+  克隆在第一次登录时调用固定的 Retry 入口，但工具包本身不含 Guest Lite、授权 EXE
+  或 token；只有再运行本页第二节的私有 base 构建/注入，克隆才会自动完成整条链。
 - token 可以由多台 VM 共用，但只进入私有 EXE 和私有 qcow2；不会写入 Git 或 deb。
+- Guest Lite EXE 静态链接编译器支持，只依赖 Windows 10 自带 DLL、PowerShell 5.1
+  和系统命令；不会向来宾安装 Python、Java、VC++/.NET 运行库或常驻第三方服务。
+- Guest Lite 回滚状态使用稳定的 `MachineGuid + RID-500 用户 SID` 绑定；系统 NVAPI
+  重命名 Windows 后仍可验收，但绝不会接受另一台 Windows 或另一名用户的状态。
 - DLS 固定为 `dls.gvmates.com:443`。
 - 不开启 `testsigning`、`nointegritychecks`，不修改 BCD，不安装测试签名或自签名
   内核驱动。
@@ -28,9 +38,11 @@ Windows SID、MachineGuid、计算机名和 VM UUID；授权版 `VgpuPortable.ex
    保留至少一个日常使用的、有密码的本地管理员账户。
 2. 正常启动一次，确认 NVIDIA 设备是 `DEV_1E30`、驱动版本
    `31.0.15.3833`、设备状态 Code 0。
-3. 模板阶段不要运行任何 `VgpuPortable.exe`，也不要只给当前用户安装/更新
+3. 打开“Windows 安全中心 → 病毒和威胁防护 → 管理设置”，手工关闭一次
+   “篡改防护”。自动链不会绕过该开关；未关闭时 Guest Lite 会明确失败。
+4. 模板阶段不要运行任何 `VgpuPortable.exe`，也不要只给当前用户安装/更新
    Microsoft Store 应用；后者可能导致 Sysprep 校验失败。
-4. 在宿主项目目录运行：
+5. 在宿主项目目录运行：
 
    ```bash
    ./deploy/package-g11-sysprep-kit.sh
@@ -44,15 +56,22 @@ Windows SID、MachineGuid、计算机名和 VM UUID；授权版 `VgpuPortable.ex
 
    `--replace` 只接受原封装的三个普通文件；目录里有额外内容时会拒绝覆盖。
 
-5. 把输出的整个 `G11SysprepKit` 目录复制到模板 Windows。
-6. 在 Windows 中右键“以管理员身份运行”`Seal-G11-Template.cmd`，按 `Y`。
-7. 脚本会执行：
+6. 把输出的整个 `G11SysprepKit` 目录复制到模板 Windows。
+7. 在 Windows 中右键“以管理员身份运行”`Seal-G11-Template.cmd`，按 `Y`。
+8. 脚本会执行：
 
    ```text
    Sysprep.exe /generalize /oobe /shutdown /unattend:g11-sysprep-clone.xml
    ```
 
-8. 等模板完整关机。成功后不要再启动这个源 VM。
+9. 等模板完整关机。成功后不要再启动这个源 VM。
+
+应答文件已在 `specialize` 和 `oobeSystem` 固定输入顺序为 US
+(`0409:00000409`) 第一、Microsoft Pinyin
+(`0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}`)
+第二。US 键盘是 Windows 10 自带组件，离线封装不需要 en-US 显示语言 CAB。当前不把
+整个 Windows UI 改为英文；若以后需要英文界面，必须另备与目标 build/架构/补丁严格
+匹配的微软官方 Language Pack/FOD CAB，不能使用随机或不匹配的语言包。
 
 应答文件会隐藏 OOBE 页面并自动登录内置 Administrator 一次，但不会绕过
 `/generalize`。该临时空密码账户被限制为仅本机控制台登录，初始化成功前会清除
@@ -151,16 +170,39 @@ V-11 式增量盘：
 ./deploy/scripts/clone-from-base.sh win10-base 9 --start
 ```
 
-例如要固定为 1GB 显存池，并选择 i3-4130、2 核 4 线程、H81M-K、Samsung
-双通道 4GB 这套审核组合，直接在克隆命令里指定；不需要提前创建配置，也不需要写
-`--linked`（它已经是默认值）：
+此命令返回后不要立即再次启动或强制停止 VM9。等待 Windows 自动完成一次内部重启，
+随后让 QEMU 因来宾完整关机自行退出。命令行环境再执行下面两条；图形界面中等价操作
+是点一次“初始”，成功后再点“启动”：
+
+```bash
+sudo ./deploy/scripts/initialize-clone.sh 9
+./deploy/scripts/start-vm.sh 9
+```
+
+`initialize-clone.sh` 只接受完整关机的干净 NTFS；它会只读验证 Licensed、GRID
+538.33/Code 0、独立 Windows 身份、系统 NVAPI、Guest Lite SYSTEM 回执及
+`MpsSvc=Disabled/Stopped/PID 0`，再离线刷新显示器缓存并发布 `.g11-initialized`。
+失败时不会清除 `.g11-init-required`，也不会把半成品 VM 标记为可用。不要使用
+`ntfsfix`、`remove_hiberfile` 或强制挂载跳过门禁。
+
+例如要固定为 1GB 显存池，并选择 Core i7-4820K、4 核 8 线程、ASUS P9X79、
+Elpida DDR3-1866 双通道 8GB（4GB ×2），以及 Samsung 970 PRO 512GB
+PCIe 3.0 ×4 NVMe 这套审核组合，直接在克隆命令里指定；不需要提前创建配置，
+也不需要写 `--linked`（它已经是默认值）：
 
 ```bash
 ./deploy/scripts/clone-from-base.sh win10-base 1 \
   --gpu-vram 1024 \
-  --platform i3-4130-h81m-k-samsung-4g \
+  --platform i7-4820k-p9x79-elpida-8g \
+  --ssd-profile samsung-970-pro-512gb \
   --start
 ```
+
+这套搭配的共同上限是 LGA2011/X79、DDR3-1866 和 CPU 直连 PCIe Gen3。8GB 由两条
+同型号 4GB DIMM 组成，按双通道工作。P9X79 没有原生 M.2，970 PRO 通过已审核的
+被动 M.2-to-PCIe Gen3 ×4 转接路径连接，不冒充板载 M.2。i7-4820K 本身不带核显，
+P9X79 也没有处理器核显输出，因此不存在需要伪造的“主板已禁用核显”状态；正常 vGPU
+启动使用 `-vga none`，只呈现 NVIDIA vGPU，安装/救援时的临时标准 VGA 不属于核显。
 
 新 VM 的磁盘关系如下：
 
@@ -238,6 +280,9 @@ PnP devnode；新克隆无需手工点“更新驱动程序”。
    - 运行授权 `VgpuPortable.exe /no-launch` 一次；
    - 验证 VM UUID/profile、DEV_1E30、GRID 538.33、Code 0、Licensed；
    - 应用性能设置并关闭休眠/Fast Startup；
+   - 校验固定 Guest Lite manifest，自动关闭 Defender、防火墙/MpsSvc、更新、
+     云盘、资讯天气、通知、商店/消费 App 和审核过的后台项，将默认声音静音；输入顺序
+     固定为 en-US/US 第一、Microsoft Pinyin 第二，并保留其他语言、背景、字体及回滚基线；
    - 从只读初始化光盘复制 VM-bound 系统 NVAPI 包到受保护的 `ProgramData`；
    - 安装 x86/x64 系统 NVAPI 与显示器身份，内部自动重启一次；
    - 验证生产签名驱动、Code Integrity、x86/x64 收据和显示器身份后完整关机。
@@ -266,6 +311,14 @@ PnP 枚举；它不会把第三方驱动包从 Driver Store 删除。为了适�
 - 首次启动失败时 VM 不会自动关机；在已经打开的 Windows 中查看
   `C:\ProgramData\VMate\G11\clone-initialization-error.txt`，修复网络/驱动后，
   右键管理员运行桌面的 `Retry-Clone-Initialization.cmd`。
+- 最新 Retry 会自动识别已经完成的系统 NVAPI 验证，直接续跑 Complete 验收，不会
+  重复 Apply 或覆盖 Guest Lite 的首次回滚基线。状态允许计算机名改变，但仍严格绑定
+  MachineGuid 和 RID-500 SID；SYSTEM 任务以启动前后的 `LastRunTime` 单调变化确认
+  本次运行，不依赖容易受时区/调度延迟影响的两秒时间窗口。
+- 若错误包含 `Only cataloged GDDR5 ...`（尤其 Gigabyte GTX 750 / Elpida=3），或
+  Guest Lite 报 `property 'Name' cannot be found`，说明克隆使用的是旧私有 EXE/旧
+  Guest Lite 载荷。不要开启测试签名或修改 BCD；先构建最新授权 Portable、重新注入
+  母盘，再克隆验证。现有失败克隆仅在支持人员明确替换已验证载荷后才运行 Retry。
 - 若错误停在“安装32/64位程序共用的单显卡系统投影”之后，并报告原生 D3D12
   tier 11，说明该克隆使用了旧版“tier 0 强制门禁”初始化包。母盘不用重做；先
   关闭实验 VM，在宿主执行 `./deploy/scripts/vmctl.sh repair-init ID`，再启动它并

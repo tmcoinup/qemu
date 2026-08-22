@@ -30,6 +30,7 @@ struct QemuConsole {
     QEMUTimer *ui_timer;
     const GraphicHwOps *hw_ops;
     void *hw;
+    uint64_t last_hw_update_generation;
     CoQueue dump_queue;
 
     QTAILQ_ENTRY(QemuConsole) next;

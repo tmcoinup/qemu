@@ -362,6 +362,7 @@ void dpy_gl_scanout_texture(QemuConsole *con,
                             void *d3d_tex2d);
 void dpy_gl_scanout_dmabuf(QemuConsole *con,
                            QemuDmaBuf *dmabuf);
+void dpy_gl_replay_current_scanout(DisplayChangeListener *dcl);
 void dpy_gl_scanout_dmabuf_update(QemuConsole *con,
                                   QemuDmaBuf *dmabuf);
 void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,

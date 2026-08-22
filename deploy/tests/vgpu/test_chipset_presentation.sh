@@ -21,6 +21,7 @@ declare -A expected=(
     [H97]='H97|H97|0x8086|0x8CC6|0x00'
     [B150]='B150|B150|0x8086|0xA148|0x31'
     [B360]='B360|B360|0x8086|0xA308|0x10'
+    [X79]='X79|X79|0x8086|0x1D41|0x06'
 )
 
 count=0
@@ -32,14 +33,15 @@ for row in "${HARDWARE_COMBINATIONS[@]}"; do
         fail "$platform maps $BOARD_CHIPSET to $actual"
     count=$((count + 1))
 done
-[[ "$count" == 264 ]] || fail "expected 264 platform rows, got $count"
+[[ "$count" == 312 ]] || fail "expected 312 platform rows, got $count"
 
 require_text 'DEFINE_PROP_STRING("x-g11-chipset"' "$lpc_source"
 for mapping in \
         '{ "H81",  0x8c5c, 0x04 }' \
         '{ "H97",  0x8cc6, 0x00 }' \
         '{ "B150", 0xa148, 0x31 }' \
-        '{ "B360", 0xa308, 0x10 }'; do
+        '{ "B360", 0xa308, 0x10 }' \
+        '{ "X79",  0x1d41, 0x06 }'; do
     require_text "$mapping" "$lpc_source"
 done
 require_text 'ICH9-LPC.x-g11-chipset=${CHIPSET_QEMU_PRESENTATION_KEY}' \
@@ -61,4 +63,4 @@ if [[ -x "$qemu" ]]; then
     fi
 fi
 
-echo 'PASS: all 264 G-11 platforms map to the four reviewed LPC identities'
+echo 'PASS: all 312 G-11 platforms map to the five reviewed LPC identities'

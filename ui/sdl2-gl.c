@@ -33,6 +33,83 @@
 #include "ui/input.h"
 #include "ui/sdl2.h"
 
+#define SDL2_GL_RECOVERY_RETRY_US 100000
+#define SDL2_EGL_RECOVERY_RETRY_US 100000
+#define SDL2_EGL_RECOVERY_SLOW_US 1000000
+#define SDL2_EGL_RECOVERY_FAST_ATTEMPTS 5
+
+static bool sdl2_gl_create_surface_texture(struct sdl2_console *scon);
+static int sdl2_native_egl_async_terminal_error = EGL_SUCCESS;
+
+static bool sdl2_gl_egl_context_error(EGLint error)
+{
+    return error == EGL_CONTEXT_LOST || error == EGL_BAD_CONTEXT;
+}
+
+static bool sdl2_gl_egl_provider_error(EGLint error)
+{
+    return error == EGL_CONTEXT_LOST || error == EGL_BAD_DISPLAY ||
+           error == EGL_NOT_INITIALIZED;
+}
+
+static bool sdl2_gl_egl_terminal_error(EGLint error)
+{
+    return sdl2_gl_egl_context_error(error) ||
+           error == EGL_BAD_DISPLAY || error == EGL_NOT_INITIALIZED ||
+           error == EGL_BAD_MATCH || error == EGL_BAD_CONFIG;
+}
+
+static void sdl2_gl_note_egl_failure(struct sdl2_console *scon,
+                                     const char *operation,
+                                     EGLint error)
+{
+    if (sdl2_gl_egl_terminal_error(error)) {
+        if (sdl2_gl_egl_provider_error(error)) {
+            qatomic_cmpxchg(&sdl2_native_egl_async_terminal_error,
+                            EGL_SUCCESS, error);
+        }
+        if (!scon->native_egl_context_lost) {
+            error_report("sdl2-egl: %s reported a terminal EGL failure "
+                         "(EGL 0x%x); "
+                         "local EGL rendering is stopped until QEMU is "
+                         "normally restarted", operation, error);
+        }
+        scon->native_egl_context_lost = true;
+        scon->native_egl_recovery_pending = false;
+        scon->native_egl_recovery_after_us = 0;
+        scon->scanout_replay_pending = false;
+        scon->scanout_replay_after_us = 0;
+        scon->window_redraw_pending = false;
+        return;
+    }
+
+    /* Every other EGL error uses one bounded retry path. */
+    scon->native_egl_last_error = error;
+    scon->native_egl_recovery_pending = true;
+    if (scon->native_egl_recovery_attempts != UINT8_MAX) {
+        scon->native_egl_recovery_attempts++;
+    }
+    if (!scon->native_egl_recovery_after_us) {
+        scon->native_egl_recovery_after_us =
+            g_get_monotonic_time() +
+            (scon->native_egl_recovery_attempts <=
+             SDL2_EGL_RECOVERY_FAST_ATTEMPTS ?
+             SDL2_EGL_RECOVERY_RETRY_US : SDL2_EGL_RECOVERY_SLOW_US);
+    }
+    scon->window_redraw_pending = true;
+}
+
+void sdl2_gl_native_egl_init_failed(struct sdl2_console *scon,
+                                    EGLint error)
+{
+    sdl2_gl_note_egl_failure(scon, "window initialization", error);
+}
+
+bool sdl2_gl_native_egl_provider_failed(void)
+{
+    return qatomic_read(&sdl2_native_egl_async_terminal_error) != EGL_SUCCESS;
+}
+
 static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 {
     if (scon->scanout_mode == scanout) {
@@ -40,11 +117,18 @@ static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
     }
 
     scon->scanout_mode = scanout;
+    sdl2_pointer_geometry_changed(scon);
     if (!scon->scanout_mode) {
         egl_fb_destroy(&scon->guest_fb);
         if (scon->surface && scon->gls) {
             surface_gl_destroy_texture(scon->gls, scon->surface);
-            surface_gl_create_texture(scon->gls, scon->surface);
+            scon->texture_recreate_pending = true;
+            scon->texture_recreate_after_us = 0;
+            if (sdl2_window_is_renderable(scon)) {
+                sdl2_gl_create_surface_texture(scon);
+            } else {
+                scon->surface_upload_pending = true;
+            }
         }
     }
 }
@@ -63,6 +147,7 @@ static bool sdl2_gl_window_ready(struct sdl2_console *scon)
 
 static int sdl2_gl_make_window_current(struct sdl2_console *scon)
 {
+    EGLint error;
     int current_tid;
 
     if (!sdl2_gl_window_ready(scon)) {
@@ -70,19 +155,31 @@ static int sdl2_gl_make_window_current(struct sdl2_console *scon)
     }
     if (scon->native_egl) {
         current_tid = qemu_get_thread_id();
+        if (scon->native_egl_context_lost ||
+            scon->native_egl_recovery_pending) {
+            return -1;
+        }
+        if (scon->native_egl_ui_tid != current_tid) {
+            sdl2_gl_note_egl_failure(scon, "window context ownership",
+                                     EGL_BAD_ACCESS);
+            return -1;
+        }
         if (!eglMakeCurrent(qemu_egl_display, scon->esurface,
                             scon->esurface, scon->ectx)) {
+            error = eglGetError();
             if (!scon->warned_native_egl_make_current) {
                 error_report("sdl2-egl: eglMakeCurrent failed for console %d "
-                             "(thread=%d last-owner=%d): %s; suppressing "
+                             "(thread=%d last-owner=%d EGL=0x%x); suppressing "
                              "repeated reports",
                              scon->idx, current_tid,
                              scon->native_egl_owner_tid,
-                             qemu_egl_get_error_string());
+                             error);
                 scon->warned_native_egl_make_current = true;
             }
+            sdl2_gl_note_egl_failure(scon, "eglMakeCurrent", error);
             return -1;
         }
+        scon->warned_native_egl_make_current = false;
         scon->native_egl_owner_tid = current_tid;
         return 0;
     }
@@ -91,36 +188,208 @@ static int sdl2_gl_make_window_current(struct sdl2_console *scon)
 
 static void sdl2_gl_release_window_current(struct sdl2_console *scon)
 {
+    EGLint error;
+
     if (!scon->native_egl || eglGetCurrentContext() != scon->ectx) {
         return;
     }
     if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
                         EGL_NO_SURFACE, EGL_NO_CONTEXT)) {
+        error = eglGetError();
         if (!scon->warned_native_egl_release) {
             warn_report("sdl2-egl: cannot release window context for console "
-                        "%d (thread=%d): %s",
+                        "%d (thread=%d EGL=0x%x)",
                         scon->idx, qemu_get_thread_id(),
-                        qemu_egl_get_error_string());
+                        error);
             scon->warned_native_egl_release = true;
         }
+        sdl2_gl_note_egl_failure(scon, "window context release", error);
         return;
     }
+    scon->warned_native_egl_release = false;
     scon->native_egl_owner_tid = 0;
 }
 
-static void sdl2_gl_swap_window(struct sdl2_console *scon)
+static void sdl2_gl_clear_errors(void)
 {
+    unsigned int i;
+
+    for (i = 0; i < 32 && glGetError() != GL_NO_ERROR; i++) {
+        /* Drain errors belonging to an earlier frontend operation. */
+    }
+}
+
+static void sdl2_gl_defer_scanout_replay(struct sdl2_console *scon)
+{
+    if (scon->native_egl_context_lost) {
+        return;
+    }
+    scon->scanout_replay_pending = true;
+    if (!scon->scanout_replay_after_us) {
+        scon->scanout_replay_after_us =
+            g_get_monotonic_time() + SDL2_GL_RECOVERY_RETRY_US;
+    }
+    scon->window_redraw_pending = true;
+}
+
+static bool sdl2_gl_defer_hidden_scanout(struct sdl2_console *scon)
+{
+    if (sdl2_window_is_renderable(scon)) {
+        return false;
+    }
+
+    /* Keep the producer-owned scanout authoritative without importing it. */
+    sdl2_gl_defer_scanout_replay(scon);
+    return true;
+}
+
+static void sdl2_gl_begin_scanout_update(struct sdl2_console *scon)
+{
+    if (scon->native_egl_context_lost) {
+        return;
+    }
+    if (!scon->scanout_replay_pending) {
+        scon->scanout_replay_after_us = 0;
+    }
+    scon->scanout_replay_pending = true;
+    scon->window_redraw_pending = true;
+}
+
+static bool sdl2_gl_recover_native_egl_surface(struct sdl2_console *scon)
+{
+    EGLint error;
+
+    if (!scon->native_egl_context_api &&
+        !scon->native_egl_recovery_pending) {
+        return true;
+    }
+    if (scon->native_egl_context_lost) {
+        return false;
+    }
+    if (!scon->native_egl_recovery_pending) {
+        return true;
+    }
+    if (g_get_monotonic_time() < scon->native_egl_recovery_after_us) {
+        return false;
+    }
+    if (!scon->real_window) {
+        /* The retry creates a new SDL parent and EGL window surface. */
+        scon->native_egl_recovery_pending = false;
+        scon->native_egl_recovery_after_us = 0;
+        return true;
+    }
+    if (!sdl2_window_is_renderable(scon)) {
+        return false;
+    }
+
+    if (scon->native_egl_last_error == EGL_BAD_ACCESS) {
+        /* Ownership contention is retryable without replacing the surface. */
+        scon->native_egl_recovery_pending = false;
+        scon->native_egl_recovery_after_us = 0;
+        scon->native_egl_recovery_attempts = 0;
+        return true;
+    }
+
+    scon->native_egl_recovery_pending = false;
+    scon->native_egl_recovery_after_us = 0;
+    if (!sdl2_window_recreate_native_egl_surface(scon, &error)) {
+        sdl2_gl_note_egl_failure(scon, "window surface recovery", error);
+        return false;
+    }
+
+    info_report("sdl2-egl: window surface recovered for console %d",
+                scon->idx);
+    scon->native_egl_last_error = EGL_SUCCESS;
+    scon->native_egl_recovery_attempts = 0;
+    scon->warned_native_egl_make_current = false;
+    scon->warned_native_egl_release = false;
+    scon->warned_native_egl_swap = false;
+    scon->updates = 1;
+    scon->window_redraw_pending = true;
+    return true;
+}
+
+static void sdl2_gl_surface_texture_failed(struct sdl2_console *scon,
+                                           const char *operation,
+                                           GLenum error)
+{
+    if (!scon->warned_gl_surface_texture) {
+        warn_report("sdl2-gl: %s failed (GL 0x%x); retrying surface "
+                    "texture recovery", operation, error);
+        scon->warned_gl_surface_texture = true;
+    }
+    scon->texture_recreate_pending = true;
+    scon->texture_recreate_after_us =
+        g_get_monotonic_time() + SDL2_GL_RECOVERY_RETRY_US;
+    scon->window_redraw_pending = true;
+}
+
+static bool sdl2_gl_create_surface_texture(struct sdl2_console *scon)
+{
+    GLenum error;
+
+    if (!scon->gls || !scon->surface) {
+        return false;
+    }
+    if (!sdl2_window_is_renderable(scon)) {
+        scon->surface_upload_pending = true;
+        return false;
+    }
+    if (scon->surface->texture && !scon->texture_recreate_pending) {
+        return true;
+    }
+    if (scon->texture_recreate_after_us &&
+        g_get_monotonic_time() < scon->texture_recreate_after_us) {
+        return false;
+    }
+
+    surface_gl_destroy_texture(scon->gls, scon->surface);
+    sdl2_gl_clear_errors();
+    surface_gl_create_texture(scon->gls, scon->surface);
+    error = glGetError();
+    if (!scon->surface->texture || error != GL_NO_ERROR) {
+        surface_gl_destroy_texture(scon->gls, scon->surface);
+        sdl2_gl_surface_texture_failed(scon, "surface texture creation",
+                                       error);
+        return false;
+    }
+
+    if (scon->warned_gl_surface_texture) {
+        info_report("sdl2-gl: surface texture recovered");
+    }
+    scon->warned_gl_surface_texture = false;
+    scon->texture_recreate_pending = false;
+    scon->texture_recreate_after_us = 0;
+    /* glTexImage2D uploaded the complete, current DisplaySurface. */
+    scon->surface_upload_pending = false;
+    scon->updates = 1;
+    return true;
+}
+
+static bool sdl2_gl_swap_window(struct sdl2_console *scon)
+{
+    EGLint error;
     bool presented = true;
 
     if (!sdl2_window_is_renderable(scon)) {
-        return;
+        return false;
     }
 
     if (scon->native_egl) {
         if (!eglSwapBuffers(qemu_egl_display, scon->esurface)) {
-            error_report("sdl2-egl: eglSwapBuffers failed: %s",
-                         qemu_egl_get_error_string());
+            error = eglGetError();
+            if (!scon->warned_native_egl_swap) {
+                error_report("sdl2-egl: eglSwapBuffers failed "
+                             "(EGL=0x%x); "
+                             "retaining the pending frame",
+                             error);
+                scon->warned_native_egl_swap = true;
+            }
+            sdl2_gl_note_egl_failure(scon, "eglSwapBuffers", error);
             presented = false;
+            scon->window_redraw_pending = true;
+        } else {
+            scon->warned_native_egl_swap = false;
         }
     } else {
         SDL_GL_SwapWindow(scon->real_window);
@@ -128,34 +397,72 @@ static void sdl2_gl_swap_window(struct sdl2_console *scon)
     if (presented) {
         sdl2_note_present(scon);
     }
+    return presented;
 }
 
 static int sdl2_gl_make_guest_context_current(struct sdl2_console *scon,
                                               QEMUGLContext ctx)
 {
-    if (scon->native_egl) {
+    if (scon->native_egl_context_api) {
+        EGLint error;
+        EGLenum api = qemu_egl_mode == DISPLAY_GL_MODE_ES ?
+                      EGL_OPENGL_ES_API : EGL_OPENGL_API;
+
         /*
          * 中文注释：virgl 和 fb-shm 的共享 context 只渲染/读取 FBO，不需要
          * 绑定窗口 surface。若多个 context 轮流把同一个 window surface
          * 设为 current，部分 EGL 驱动会返回 EGL_BAD_ACCESS，甚至出现 swap
          * 成功但 SDL 窗口全黑。窗口 surface 只留给 scon->ectx。
          */
-        if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+        if (!eglBindAPI(api) ||
+            !eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
                             EGL_NO_SURFACE, (EGLContext)ctx)) {
-            error_report("sdl2-egl: guest eglMakeCurrent failed: %s",
-                         qemu_egl_get_error_string());
+            error = eglGetError();
+            if (!qatomic_xchg(&scon->warned_native_egl_guest_current, true)) {
+                error_report("sdl2-egl: guest eglMakeCurrent failed "
+                             "(EGL=0x%x); suppressing repeated reports",
+                             error);
+            }
+            if (sdl2_gl_egl_provider_error(error)) {
+                qatomic_cmpxchg(&sdl2_native_egl_async_terminal_error,
+                                EGL_SUCCESS, error);
+            }
             return -1;
         }
-        if (scon->native_egl_owner_tid == qemu_get_thread_id()) {
-            scon->native_egl_owner_tid = 0;
-        }
+        qatomic_set(&scon->warned_native_egl_guest_current, false);
         return 0;
     }
     return SDL_GL_MakeCurrent(scon->real_window, (SDL_GLContext)ctx);
 }
 
+static QEMUGLContext sdl2_gl_create_native_context(
+    DisplayGLCtx *dgc, struct sdl2_console *scon, QEMUGLParams *params)
+{
+    QEMUGLContext ctx = qemu_egl_create_context(dgc, params, scon->ectx);
+
+    if (!ctx) {
+        EGLint error = eglGetError();
+
+        error_report("sdl2-egl: shared context creation failed (EGL=0x%x)",
+                     error);
+        if (sdl2_gl_egl_provider_error(error)) {
+            qatomic_cmpxchg(&sdl2_native_egl_async_terminal_error,
+                            EGL_SUCCESS, error);
+        }
+    }
+    return ctx;
+}
+
 static bool sdl2_gl_ensure_window_context(struct sdl2_console *scon)
 {
+    bool shader_created = false;
+
+    if (scon->native_egl_context_lost) {
+        return false;
+    }
+    if (!sdl2_gl_recover_native_egl_surface(scon)) {
+        return false;
+    }
     if (!scon->surface) {
         scon->surface = qemu_console_surface(scon->dcl.con);
         if (!scon->surface) {
@@ -167,7 +474,22 @@ static bool sdl2_gl_ensure_window_context(struct sdl2_console *scon)
         sdl2_window_create(scon);
     }
     if (sdl2_gl_make_window_current(scon) != 0) {
+        scon->window_redraw_pending = true;
         return false;
+    }
+
+    /*
+     * A hidden console may still need its provider/root context initialized,
+     * but shader setup and glTexImage2D can wait until a frame is visible.
+     */
+    if (!sdl2_window_is_renderable(scon)) {
+        if (!scon->scanout_mode && scon->guest_fb.framebuffer) {
+            egl_fb_destroy(&scon->guest_fb);
+        }
+        if (!scon->scanout_mode) {
+            scon->surface_upload_pending = true;
+        }
+        return true;
     }
 
     if (!scon->gls) {
@@ -177,41 +499,67 @@ static bool sdl2_gl_ensure_window_context(struct sdl2_console *scon)
          * libepoxy 在没有当前 GL/EGL context 的线程上解析入口并 abort。
          */
         scon->gls = qemu_gl_init_shader();
-        /*
-         * 中文注释：native EGL 路径下窗口创建和 GL shader 初始化可能发生在
-         * 首次 refresh/update，而不是 dpy_gfx_switch 的固定时机。shader 建好
-         * 后必须立刻为当前 surface 创建 GL texture；否则第一阶段固件/主板
-         * 画面仍在走普通 surface update，但渲染端没有可采样纹理，SDL 子窗口
-         * 就只会显示清屏后的黑色。
-         */
-        if (scon->gls && scon->surface) {
-            surface_gl_destroy_texture(scon->gls, scon->surface);
-            surface_gl_create_texture(scon->gls, scon->surface);
-        }
+        shader_created = scon->gls != NULL;
     }
     if (!scon->gls) {
+        scon->window_redraw_pending = true;
         sdl2_gl_release_window_current(scon);
         return false;
+    }
+    if (!scon->scanout_mode && scon->guest_fb.framebuffer) {
+        /*
+         * A failed scanout-disable can defer GL deletion until a context is
+         * current again.  Do it before returning to surface rendering.
+         */
+        egl_fb_destroy(&scon->guest_fb);
+    }
+    /*
+     * Window/shader initialization may happen during refresh instead of the
+     * gfx-switch callback.  Always make ordinary surface texture creation a
+     * retryable invariant; otherwise one transient make-current failure can
+     * leave REGION updates targeting texture zero forever.
+     */
+    if (shader_created && scon->surface) {
+        surface_gl_destroy_texture(scon->gls, scon->surface);
+        scon->texture_recreate_pending = true;
+        scon->texture_recreate_after_us = 0;
+    }
+    if (!scon->scanout_mode && !scon->scanout_replay_pending &&
+        (!scon->surface->texture || scon->texture_recreate_pending)) {
+        if (!sdl2_window_is_renderable(scon)) {
+            scon->surface_upload_pending = true;
+        } else if (!sdl2_gl_create_surface_texture(scon)) {
+            sdl2_gl_release_window_current(scon);
+            return false;
+        }
     }
     return true;
 }
 
-static void sdl2_gl_render_surface(struct sdl2_console *scon)
+static bool sdl2_gl_render_surface(struct sdl2_console *scon)
 {
     SDL2Size output;
     SDL2Size guest;
     SDL2Rect dst;
     SDL2Rect viewport;
+    GLenum error;
+    bool presented;
 
     if (!sdl2_window_is_renderable(scon) ||
         sdl2_gl_make_window_current(scon) != 0) {
-        return;
+        scon->window_redraw_pending = true;
+        return false;
     }
     sdl2_set_scanout_mode(scon, false);
+    if (!sdl2_gl_create_surface_texture(scon)) {
+        sdl2_gl_release_window_current(scon);
+        return false;
+    }
 
     if (!sdl2_current_render_size(scon, &output)) {
+        scon->window_redraw_pending = true;
         sdl2_gl_release_window_current(scon);
-        return;
+        return false;
     }
     guest = (SDL2Size) {
         surface_width(scon->surface), surface_height(scon->surface),
@@ -224,6 +572,7 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
      */
     dst = sdl2_guest_dst_rect(output, guest);
     viewport = sdl2_gl_viewport(output, dst);
+    sdl2_gl_clear_errors();
     if (scon->native_egl) {
         /*
          * 中文注释：native EGL 子窗口使用带 alpha 的 X11 visual。普通
@@ -246,24 +595,58 @@ static void sdl2_gl_render_surface(struct sdl2_console *scon)
         glClear(GL_COLOR_BUFFER_BIT);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     }
-    sdl2_gl_swap_window(scon);
+    error = glGetError();
+    if (error != GL_NO_ERROR) {
+        surface_gl_destroy_texture(scon->gls, scon->surface);
+        sdl2_gl_surface_texture_failed(scon, "surface render", error);
+        sdl2_gl_release_window_current(scon);
+        return false;
+    }
+    presented = sdl2_gl_swap_window(scon);
     sdl2_gl_release_window_current(scon);
+    return presented;
 }
 
 void sdl2_gl_update(DisplayChangeListener *dcl,
                     int x, int y, int w, int h)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    GLenum error;
 
     assert(scon->opengl);
 
-    if (!sdl2_gl_ensure_window_context(scon)) {
+    if (!sdl2_window_is_renderable(scon)) {
+        /* Upload the latest complete surface once the window is visible. */
+        scon->surface_upload_pending = true;
+        scon->updates = 1;
         return;
     }
 
+    if (!sdl2_gl_ensure_window_context(scon)) {
+        if (!scon->texture_recreate_pending) {
+            scon->texture_recreate_pending = true;
+            scon->texture_recreate_after_us = 0;
+        }
+        scon->updates = 1;
+        scon->window_redraw_pending = true;
+        return;
+    }
+    sdl2_framebuffer_cursor_update(scon);
+
+    sdl2_gl_clear_errors();
     surface_gl_update_texture(scon->gls, scon->surface, x, y, w, h);
+    error = glGetError();
+    if (error != GL_NO_ERROR) {
+        surface_gl_destroy_texture(scon->gls, scon->surface);
+        sdl2_gl_surface_texture_failed(scon, "surface upload", error);
+        sdl2_gl_release_window_current(scon);
+        return;
+    }
     /* Pending latch: do not accumulate indefinitely while minimized. */
     scon->updates = 1;
+    if (w && h) {
+        sdl2_note_content_update(scon);
+    }
     sdl2_gl_release_window_current(scon);
 }
 
@@ -272,27 +655,43 @@ void sdl2_gl_switch(DisplayChangeListener *dcl,
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
     DisplaySurface *old_surface = scon->surface;
+    bool old_context_current = false;
 
     assert(scon->opengl);
 
+    sdl2_framebuffer_cursor_reset(scon);
+    scon->scanout_replay_pending = false;
+    scon->scanout_replay_after_us = 0;
+    scon->texture_recreate_pending = true;
+    scon->texture_recreate_after_us = 0;
+
     if (sdl2_gl_window_ready(scon) &&
         sdl2_gl_make_window_current(scon) == 0) {
+        old_context_current = true;
         surface_gl_destroy_texture(scon->gls, old_surface);
+    }
+    if (scon->scanout_mode) {
+        if (old_context_current) {
+            egl_fb_destroy(&scon->guest_fb);
+        }
+        scon->scanout_mode = false;
+        sdl2_pointer_geometry_changed(scon);
     }
 
     scon->surface = new_surface;
+    sdl2_pointer_geometry_changed(scon);
 
     if (surface_is_placeholder(new_surface) && qemu_console_get_index(dcl->con)) {
-        if (scon->gls) {
-            qemu_gl_fini_shader(scon->gls);
-        }
-        scon->gls = NULL;
+        scon->texture_recreate_pending = false;
         sdl2_window_destroy(scon);
         return;
     }
 
     if (!sdl2_gl_ensure_window_context(scon)) {
         return;
+    }
+    if (!old_context_current) {
+        surface_gl_destroy_texture(scon->gls, old_surface);
     }
 
     if (old_surface &&
@@ -301,31 +700,71 @@ void sdl2_gl_switch(DisplayChangeListener *dcl,
         sdl2_window_resize(scon);
     }
 
-    surface_gl_create_texture(scon->gls, scon->surface);
+    scon->updates = 1;
+    sdl2_note_content_update(scon);
     sdl2_gl_release_window_current(scon);
 }
 
 void sdl2_gl_refresh(DisplayChangeListener *dcl)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    bool hw_pulled = false;
 
     assert(scon->opengl);
     sdl2_poll_events(scon);
+    if (scon->native_egl_context_api) {
+        EGLint async_error = qatomic_read(
+            &sdl2_native_egl_async_terminal_error);
+
+        if (async_error != EGL_SUCCESS &&
+            !scon->native_egl_context_lost) {
+            sdl2_gl_note_egl_failure(scon, "shared guest context",
+                                     async_error);
+        }
+    }
+    if (scon->scanout_replay_pending) {
+        if (g_get_monotonic_time() >= scon->scanout_replay_after_us) {
+            /* A failed replay gets a fresh bounded deadline. */
+            scon->scanout_replay_after_us = 0;
+            scon->scanout_replay_in_progress = true;
+            dpy_gl_replay_current_scanout(dcl);
+            scon->scanout_replay_in_progress = false;
+        }
+        if (scon->scanout_replay_pending) {
+            /*
+             * A replay may contain an obsolete texture/dma-buf.  Keep
+             * pulling the producer so a newer scanout can replace it.
+             */
+            graphic_hw_update(dcl->con);
+            hw_pulled = true;
+        }
+    }
     sdl2_flush_window_updates();
 
     if (!sdl2_gl_ensure_window_context(scon)) {
         return;
     }
-    scon->presented_since_refresh = false;
-    graphic_hw_update(dcl->con);
-    if (scon->updates && sdl2_window_is_renderable(scon)) {
-        scon->updates = 0;
-        sdl2_gl_render_surface(scon);
+    if (!hw_pulled) {
+        graphic_hw_update(dcl->con);
+    }
+    if (scon->surface_upload_pending && !scon->scanout_mode &&
+        sdl2_window_is_renderable(scon)) {
+        scon->surface_upload_pending = false;
+        sdl2_gl_update(dcl, 0, 0, surface_width(scon->surface),
+                       surface_height(scon->surface));
+    }
+    if (!scon->scanout_mode && scon->updates &&
+        sdl2_window_is_renderable(scon)) {
+        if (sdl2_gl_render_surface(scon)) {
+            scon->updates = 0;
+        }
     }
     if (scon->fixed_present && !scon->presented_since_refresh &&
         sdl2_window_is_renderable(scon)) {
         sdl2_gl_redraw(scon);
     }
+    scon->presented_since_refresh = false;
+    scon->content_update_pending = false;
     sdl2_gl_release_window_current(scon);
 }
 
@@ -334,6 +773,9 @@ void sdl2_gl_redraw(struct sdl2_console *scon)
     assert(scon->opengl);
 
     if (!sdl2_window_is_renderable(scon)) {
+        return;
+    }
+    if (!sdl2_gl_ensure_window_context(scon)) {
         return;
     }
 
@@ -345,6 +787,7 @@ void sdl2_gl_redraw(struct sdl2_console *scon)
     if (scon->surface) {
         sdl2_gl_render_surface(scon);
     }
+    sdl2_gl_release_window_current(scon);
 }
 
 QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
@@ -355,13 +798,21 @@ QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
 
     assert(scon->opengl);
 
+    if (scon->native_egl_context_api) {
+        if (scon->ectx == EGL_NO_CONTEXT ||
+            qatomic_read(&sdl2_native_egl_async_terminal_error) !=
+            EGL_SUCCESS) {
+            return NULL;
+        }
+        return sdl2_gl_create_native_context(dgc, scon, params);
+    }
+
     if (!sdl2_gl_ensure_window_context(scon)) {
         return NULL;
     }
-
-    if (scon->native_egl) {
-        QEMUGLContext egl_ctx = qemu_egl_create_context(dgc, params,
-                                                        scon->ectx);
+    if (scon->native_egl_context_api) {
+        QEMUGLContext egl_ctx = sdl2_gl_create_native_context(
+            dgc, scon, params);
 
         sdl2_gl_release_window_current(scon);
         return egl_ctx;
@@ -405,7 +856,7 @@ void sdl2_gl_destroy_context(DisplayGLCtx *dgc, QEMUGLContext ctx)
     struct sdl2_console *scon = container_of(dgc, struct sdl2_console, dgc);
     SDL_GLContext sdlctx = (SDL_GLContext)ctx;
 
-    if (scon->native_egl) {
+    if (scon->native_egl_context_api) {
         qemu_egl_destroy_context(dgc, ctx);
     } else {
         SDL_GL_DeleteContext(sdlctx);
@@ -428,12 +879,26 @@ void sdl2_gl_scanout_disable(DisplayChangeListener *dcl)
     bool was_scanout = scon->scanout_mode;
 
     assert(scon->opengl);
-    if (scon->scanout_mode && sdl2_gl_make_window_current(scon) != 0) {
-        return;
-    }
+    scon->scanout_replay_pending = false;
+    scon->scanout_replay_after_us = 0;
+    scon->window_redraw_pending = true;
     scon->w = 0;
     scon->h = 0;
+    if (scon->scanout_mode && sdl2_gl_make_window_current(scon) != 0) {
+        /*
+         * Keep the old FBO IDs for deferred deletion in ensure(), but switch
+         * logical rendering back to the stable DisplaySurface immediately.
+         */
+        scon->scanout_mode = false;
+        sdl2_pointer_geometry_changed(scon);
+        scon->texture_recreate_pending = true;
+        scon->texture_recreate_after_us = 0;
+        scon->updates = 1;
+        scon->window_resize_pending = true;
+        return;
+    }
     sdl2_set_scanout_mode(scon, false);
+    scon->updates = 1;
     sdl2_gl_release_window_current(scon);
     if (was_scanout) {
         sdl2_window_resize(scon);
@@ -450,30 +915,69 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
                              void *d3d_tex2d)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    egl_fb candidate = EGL_FB_INIT;
+    egl_fb old;
+    GLenum error;
+    GLenum status;
     bool guest_size_changed;
 
     assert(scon->opengl);
-    if (!sdl2_gl_ensure_window_context(scon)) {
+    sdl2_framebuffer_cursor_reset(scon);
+    sdl2_gl_begin_scanout_update(scon);
+    if (sdl2_gl_defer_hidden_scanout(scon)) {
         return;
     }
-    scon->x = x;
-    scon->y = y;
-    scon->w = w;
-    scon->h = h;
-    scon->y0_top = backing_y_0_top;
-
+    if (!sdl2_gl_ensure_window_context(scon)) {
+        sdl2_gl_defer_scanout_replay(scon);
+        return;
+    }
     if (sdl2_gl_make_window_current(scon) != 0) {
         sdl2_gl_release_window_current(scon);
+        sdl2_gl_defer_scanout_replay(scon);
         return;
     }
 
     guest_size_changed = !scon->scanout_mode ||
                          scon->guest_fb.width != backing_width ||
                          scon->guest_fb.height != backing_height;
-    sdl2_set_scanout_mode(scon, true);
-    egl_fb_setup_for_tex(&scon->guest_fb, backing_width, backing_height,
+    sdl2_gl_clear_errors();
+    egl_fb_setup_for_tex(&candidate, backing_width, backing_height,
                          backing_id, false);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, candidate.framebuffer);
+    status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+    error = glGetError();
+    if (!candidate.framebuffer || status != GL_FRAMEBUFFER_COMPLETE ||
+        error != GL_NO_ERROR) {
+        if (!scon->warned_missing_scanout_fb) {
+            warn_report("sdl2-gl: scanout setup incomplete "
+                        "(framebuffer=%u status=0x%x GL=0x%x); retrying",
+                        candidate.framebuffer, status, error);
+            scon->warned_missing_scanout_fb = true;
+        }
+        egl_fb_destroy(&candidate);
+        sdl2_gl_defer_scanout_replay(scon);
+        sdl2_gl_release_window_current(scon);
+        return;
+    }
+    /* Commit only a complete candidate, preserving the last safe scanout. */
+    old = scon->guest_fb;
+    scon->guest_fb = candidate;
+    candidate = (egl_fb)EGL_FB_INIT;
     scon->guest_fb.dmabuf = NULL;
+    scon->x = x;
+    scon->y = y;
+    scon->w = w;
+    scon->h = h;
+    scon->y0_top = backing_y_0_top;
+    sdl2_set_scanout_mode(scon, true);
+    egl_fb_destroy(&old);
+    scon->updates = 0;
+    scon->warned_missing_scanout_fb = false;
+    scon->scanout_replay_pending = false;
+    scon->scanout_replay_after_us = 0;
+    if (!scon->scanout_replay_in_progress) {
+        sdl2_note_content_update(scon);
+    }
     if (!scon->logged_scanout_texture) {
         info_report("sdl2-gl: scanout texture active "
                     "(texture=%u %ux%u roi=%ux%u@%u,%u y0_top=%d native_egl=%d)",
@@ -483,6 +987,7 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
     }
     sdl2_gl_release_window_current(scon);
     if (guest_size_changed) {
+        sdl2_pointer_geometry_changed(scon);
         sdl2_window_resize(scon);
     }
 }
@@ -499,22 +1004,32 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
     uint32_t width;
     uint32_t x;
     uint32_t y;
+    bool imported_here;
     bool y0_top;
 
     assert(scon->opengl);
+    sdl2_framebuffer_cursor_reset(scon);
 
     if (!dmabuf) {
         sdl2_gl_scanout_disable(dcl);
         return;
     }
-    if (!scon->native_egl) {
+    sdl2_gl_begin_scanout_update(scon);
+    if (!scon->native_egl_context_api) {
+        scon->scanout_replay_pending = false;
+        scon->scanout_replay_after_us = 0;
+        return;
+    }
+    if (sdl2_gl_defer_hidden_scanout(scon)) {
         return;
     }
     if (!sdl2_gl_ensure_window_context(scon)) {
+        sdl2_gl_defer_scanout_replay(scon);
         return;
     }
     if (sdl2_gl_make_window_current(scon) != 0) {
         sdl2_gl_release_window_current(scon);
+        sdl2_gl_defer_scanout_replay(scon);
         return;
     }
 
@@ -523,9 +1038,16 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
      * 默认路径不进入这里；native EGL 路径下导入得到本地 texture 后，复用
      * 现有 texture scanout 绘制逻辑，避免新增另一套窗口绘制代码。
      */
-    egl_dmabuf_import_texture(dmabuf);
+    imported_here = qemu_dmabuf_get_texture(dmabuf) == 0;
+    sdl2_gl_clear_errors();
+    if (!egl_dmabuf_import_texture(dmabuf)) {
+        sdl2_gl_defer_scanout_replay(scon);
+        sdl2_gl_release_window_current(scon);
+        return;
+    }
     texture = qemu_dmabuf_get_texture(dmabuf);
     if (!texture) {
+        sdl2_gl_defer_scanout_replay(scon);
         sdl2_gl_release_window_current(scon);
         return;
     }
@@ -540,8 +1062,16 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
 
     sdl2_gl_scanout_texture(dcl, texture, y0_top, backing_width,
                             backing_height, x, y, width, height, NULL);
-    if (qemu_dmabuf_get_allow_fences(dmabuf)) {
+    if (!scon->scanout_replay_pending &&
+        qemu_dmabuf_get_allow_fences(dmabuf)) {
         scon->guest_fb.dmabuf = dmabuf;
+    } else if (scon->scanout_replay_pending && texture && imported_here) {
+        if (sdl2_gl_make_window_current(scon) == 0) {
+            egl_dmabuf_release_texture(dmabuf);
+        } else {
+            /* Do not carry an ID from a context we can no longer enter. */
+            qemu_dmabuf_set_texture(dmabuf, 0);
+        }
     }
     sdl2_gl_release_window_current(scon);
 }
@@ -550,20 +1080,144 @@ void sdl2_gl_release_dmabuf(DisplayChangeListener *dcl,
                             QemuDmaBuf *dmabuf)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
+    bool anchor_current = false;
+    EGLint error;
+    int current_tid = qemu_get_thread_id();
 
     if (scon->guest_fb.dmabuf == dmabuf) {
         scon->guest_fb.dmabuf = NULL;
     }
-    if (!scon->native_egl || !dmabuf) {
+    if (!dmabuf || !scon->native_egl_context_api) {
         return;
     }
-    if (sdl2_gl_make_window_current(scon) != 0) {
-        return;
+    if (scon->native_egl) {
+        if (sdl2_gl_make_window_current(scon) != 0) {
+            qemu_dmabuf_set_texture(dmabuf, 0);
+            return;
+        }
+    } else {
+        EGLenum api = qemu_egl_mode == DISPLAY_GL_MODE_ES ?
+                      EGL_OPENGL_ES_API : EGL_OPENGL_API;
+
+        if (scon->native_egl_context_lost ||
+            scon->ectx == EGL_NO_CONTEXT ||
+            scon->native_egl_ui_tid != current_tid ||
+            (scon->native_egl_owner_tid &&
+             scon->native_egl_owner_tid != current_tid)) {
+            qemu_dmabuf_set_texture(dmabuf, 0);
+            return;
+        }
+        if (!eglBindAPI(api)) {
+            error = eglGetError();
+            if (!scon->warned_native_egl_make_current) {
+                warn_report("sdl2-egl: cannot bind the anchor API while "
+                            "releasing dma-buf (EGL=0x%x)", error);
+                scon->warned_native_egl_make_current = true;
+            }
+            sdl2_gl_note_egl_failure(scon, "dma-buf anchor API bind", error);
+            qemu_dmabuf_set_texture(dmabuf, 0);
+            return;
+        }
+        if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                            EGL_NO_SURFACE, scon->ectx)) {
+            error = eglGetError();
+            if (!scon->warned_native_egl_make_current) {
+                warn_report("sdl2-egl: cannot make the anchor current while "
+                            "releasing dma-buf (EGL=0x%x)", error);
+                scon->warned_native_egl_make_current = true;
+            }
+            sdl2_gl_note_egl_failure(scon, "dma-buf anchor make-current",
+                                     error);
+            qemu_dmabuf_set_texture(dmabuf, 0);
+            return;
+        }
+        scon->warned_native_egl_make_current = false;
+        scon->native_egl_owner_tid = current_tid;
+        anchor_current = true;
     }
     egl_dmabuf_release_texture(dmabuf);
-    sdl2_gl_release_window_current(scon);
+    if (anchor_current) {
+        if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                            EGL_NO_SURFACE, EGL_NO_CONTEXT)) {
+            error = eglGetError();
+            if (!scon->warned_native_egl_release) {
+                warn_report("sdl2-egl: cannot release the anchor after "
+                            "dma-buf cleanup (thread=%d EGL=0x%x)",
+                            current_tid, error);
+                scon->warned_native_egl_release = true;
+            }
+            sdl2_gl_note_egl_failure(scon, "dma-buf anchor release", error);
+        } else {
+            scon->warned_native_egl_release = false;
+            scon->native_egl_owner_tid = 0;
+        }
+    } else {
+        sdl2_gl_release_window_current(scon);
+    }
 }
 #endif
+
+void sdl2_gl_window_context_destroying(struct sdl2_console *scon)
+{
+    bool current = false;
+
+    if (!scon->opengl) {
+        return;
+    }
+
+    if (scon->native_egl) {
+        if (!scon->native_egl_context_lost &&
+            scon->ectx != EGL_NO_CONTEXT &&
+            scon->native_egl_ui_tid == qemu_get_thread_id()) {
+            current = eglGetCurrentContext() == scon->ectx ||
+                      eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                                     EGL_NO_SURFACE, scon->ectx);
+            if (current) {
+                scon->native_egl_owner_tid = qemu_get_thread_id();
+            }
+        }
+    } else if (scon->real_window && scon->winctx) {
+        current = SDL_GL_MakeCurrent(scon->real_window, scon->winctx) == 0;
+    }
+
+#ifdef CONFIG_GBM
+    if (scon->guest_fb.dmabuf) {
+        /* The texture number is meaningful only in the dying share group. */
+        qemu_dmabuf_set_texture(scon->guest_fb.dmabuf, 0);
+    }
+#endif
+    if (current) {
+        if (scon->gls && scon->surface) {
+            surface_gl_destroy_texture(scon->gls, scon->surface);
+        }
+        egl_fb_destroy(&scon->guest_fb);
+        egl_fb_destroy(&scon->win_fb);
+        qemu_gl_fini_shader(scon->gls);
+    } else {
+        if (scon->surface) {
+            scon->surface->texture = 0;
+        }
+        qemu_gl_forget_shader(scon->gls);
+    }
+    scon->gls = NULL;
+    scon->guest_fb = (egl_fb)EGL_FB_INIT;
+    scon->win_fb = (egl_fb)EGL_FB_INIT;
+    scon->scanout_mode = false;
+    scon->scanout_replay_pending = false;
+    scon->scanout_replay_in_progress = false;
+    scon->scanout_replay_after_us = 0;
+    scon->texture_recreate_pending = false;
+    scon->surface_upload_pending = false;
+
+    if (current && scon->native_egl) {
+        if (eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                           EGL_NO_SURFACE, EGL_NO_CONTEXT)) {
+            scon->native_egl_owner_tid = 0;
+        }
+    } else if (current) {
+        SDL_GL_MakeCurrent(scon->real_window, NULL);
+    }
+}
 
 void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h)
@@ -573,14 +1227,20 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
     SDL2Size guest;
     SDL2Rect dst;
     SDL2Rect viewport;
+    GLenum error;
+    bool presented;
     int ww, wh, dx, dy, dw, dh;
     GLint sy1, sy2;
 
     assert(scon->opengl);
     if (!sdl2_window_is_renderable(scon)) {
+        scon->window_redraw_pending = true;
         return;
     }
     if (!scon->scanout_mode) {
+        if (scon->scanout_replay_pending) {
+            scon->window_redraw_pending = true;
+        }
         return;
     }
     if (!scon->guest_fb.framebuffer) {
@@ -588,14 +1248,17 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
             warn_report("sdl2-gl: scanout flush skipped: missing guest framebuffer");
             scon->warned_missing_scanout_fb = true;
         }
+        sdl2_gl_defer_scanout_replay(scon);
         return;
     }
 
     if (sdl2_gl_make_window_current(scon) != 0) {
+        scon->window_redraw_pending = true;
         return;
     }
 
     if (!sdl2_current_render_size(scon, &output)) {
+        scon->window_redraw_pending = true;
         sdl2_gl_release_window_current(scon);
         return;
     }
@@ -631,10 +1294,10 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
         scon->logged_scanout_flush = true;
     }
 
+    sdl2_gl_clear_errors();
     if (scon->native_egl) {
         GLint sy1_native;
         GLint sy2_native;
-        GLenum err;
 
         /*
          * 中文注释：native EGL 直接画 X11 window surface。这里不用通用
@@ -655,11 +1318,6 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
         glBlitFramebuffer(0, sy1_native, scon->guest_fb.width, sy2_native,
                           dx, dy, dx + dw, dy + dh,
                           GL_COLOR_BUFFER_BIT, GL_LINEAR);
-        err = glGetError();
-        if (err != GL_NO_ERROR && !scon->warned_native_egl_blit) {
-            warn_report("sdl2-egl: scanout blit GL error 0x%x", err);
-            scon->warned_native_egl_blit = true;
-        }
     } else {
         /* guest texture is bottom-up unless y0_top: flip the source Y span */
         sy1 = scon->y0_top ? 0 : scon->guest_fb.height;
@@ -675,7 +1333,26 @@ void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                           GL_COLOR_BUFFER_BIT, GL_LINEAR);
     }
 
-    sdl2_gl_swap_window(scon);
+    error = glGetError();
+    if (error != GL_NO_ERROR) {
+        if (!scon->warned_native_egl_blit) {
+            warn_report("sdl2-gl: scanout blit GL error 0x%x; retrying",
+                        error);
+            scon->warned_native_egl_blit = true;
+        }
+        sdl2_gl_defer_scanout_replay(scon);
+        sdl2_gl_release_window_current(scon);
+        return;
+    }
+    scon->warned_native_egl_blit = false;
+
+    if (w && h) {
+        sdl2_note_content_update(scon);
+    }
+    presented = sdl2_gl_swap_window(scon);
+    if (presented) {
+        scon->window_redraw_pending = false;
+    }
     sdl2_gl_release_window_current(scon);
 }
 

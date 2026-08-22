@@ -170,11 +170,24 @@ QemuGLShader *qemu_gl_init_shader(void)
 
 void qemu_gl_fini_shader(QemuGLShader *gls)
 {
+    GLuint vao;
+
     if (!gls) {
         return;
     }
+    vao = gls->texture_blit_vao;
     glDeleteProgram(gls->texture_blit_prog);
     glDeleteProgram(gls->texture_blit_flip_prog);
-    glDeleteProgram(gls->texture_blit_vao);
+    glDeleteVertexArrays(1, &vao);
+    g_free(gls);
+}
+
+void qemu_gl_forget_shader(QemuGLShader *gls)
+{
+    /*
+     * The owning GL context is already unusable or is about to be destroyed.
+     * Its driver-side objects die with that context; only release the CPU
+     * bookkeeping so numeric GL names cannot be reused in another context.
+     */
     g_free(gls);
 }

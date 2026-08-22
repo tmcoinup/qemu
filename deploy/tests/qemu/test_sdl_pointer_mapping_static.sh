@@ -53,6 +53,10 @@ grep -Fq 'sdl2_window_to_guest(dst, guest' "$sdl_c" \
     || fail "render to guest mapping is not centralized"
 grep -Fq 'sdl2_scale_relative_motion' "$sdl_c" \
     || fail "relative movement no longer retains fractional remainders"
+grep -Fq 'bool pointer_geometry_valid;' "$sdl_h" \
+    || fail "per-motion pointer geometry cache is missing"
+grep -Fq 'sdl2_pointer_geometry_changed(scon);' "$sdl_c" \
+    || fail "window/DPI changes do not invalidate cached pointer geometry"
 grep -Fq 'qemu_input_has_absolute' "$input_c" \
     || fail "tablet capability query is missing"
 grep -Fq 'sdl2_pointer_policy' "$sdl_c" \

@@ -111,6 +111,8 @@ require_text 'lowLevelInstallerSha256' "$packager"
 require_text 'coordinatorSha256' "$packager"
 require_text 'identityCatalogJsonSha256' "$packager"
 require_text 'transport-device-profile-subsystem' "$packager"
+require_text '[int]$contract.profile.memoryMaker -notin @(1, 3, 6, 10)' \
+    "$coordinator"
 require_text 'PciProjectionMode = [string]$contract.transport.pciProjectionMode' \
     "$coordinator"
 require_text 'expectedSubsystem' "$coordinator"
@@ -381,11 +383,11 @@ assert_bundle "$tmp/output-samsung" 903 gtx1050_gigabyte_2gb Gigabyte \
 
 # A 1 GiB/nvidia-256 fixture exercises the native RTX6000-1Q 1325 transport;
 # the older 2 GiB fixtures above exercise the RTX6000-2Q 1326 transport.
-create_fixture 904 gtx750_asus_1gb dell-p2419h \
+create_fixture 904 gtx750_gigabyte_1gb dell-p2419h \
     "$vm_root_1g" "$host_config_1g"
 package_fixture 904 "$tmp/output-grid-1q" "$vm_root_1g"
-assert_bundle "$tmp/output-grid-1q" 904 gtx750_asus_1gb ASUS dell-p2419h \
-    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Samsung 1 Samsung \
+assert_bundle "$tmp/output-grid-1q" 904 gtx750_gigabyte_1gb Gigabyte dell-p2419h \
+    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Elpida 3 Elpida \
     "$vm_root_1g"
 
 # Without --output-root the delivery artifacts must stay inside the numeric
@@ -393,8 +395,8 @@ assert_bundle "$tmp/output-grid-1q" 904 gtx750_asus_1gb ASUS dell-p2419h \
 default_output="$vm_root_1g/904/packages/SystemNvapiProjection"
 IMAGE_ROOT="$image_root" VM_ROOT="$vm_root_1g" STAGE_DIR="$stage_dir" \
     bash "$packager" 904 >"$tmp/default-output.log"
-assert_bundle "$default_output" 904 gtx750_asus_1gb ASUS dell-p2419h \
-    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Samsung 1 Samsung \
+assert_bundle "$default_output" 904 gtx750_gigabyte_1gb Gigabyte dell-p2419h \
+    'Dell P2419H' DEL 0xD0D8 DELD0D8 'DELL P2419H' Dell Elpida 3 Elpida \
     "$vm_root_1g"
 require_text "$default_output" "$tmp/default-output.log"
 require_text './deploy/scripts/vmctl.sh cdrom 904 mount' "$tmp/default-output.log"

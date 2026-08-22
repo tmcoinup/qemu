@@ -8,7 +8,7 @@
 
   The supported RTC contract is owned by the host launcher:
     TZ=Asia/Shanghai
-    -rtc base=localtime,clock=host,driftfix=slew
+    -rtc base=localtime,clock=vm,driftfix=slew
 
   Windows must use China Standard Time. RealTimeIsUniversal must be absent or
   DWORD 0 so Windows interprets the emulated RTC as local time.
@@ -34,7 +34,7 @@ $rtcValue = if ($null -eq $rtcProperty) { '<missing>' } else { [string][int]$rtc
 
 Write-Warning 'deploy/guest/fix-rtc-utc.ps1 is deprecated and performs read-only diagnostics'
 Write-Host '[time] host-required: TZ=Asia/Shanghai' -ForegroundColor Cyan
-Write-Host '[time] qemu-required: -rtc base=localtime,clock=host,driftfix=slew' -ForegroundColor Cyan
+Write-Host '[time] qemu-required: -rtc base=localtime,clock=vm,driftfix=slew' -ForegroundColor Cyan
 Write-Host "[time] windows-timezone=$configuredZone"
 Write-Host "[time] RealTimeIsUniversal=$rtcValue"
 Write-Host "[time] current-local=$((Get-Date).ToString('o'))"

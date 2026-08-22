@@ -42,19 +42,10 @@ case "${FAKE_CPU_MODE:-supported}" in
         echo 'qemu-system-x86_64: failed to initialize kvm: Permission denied' >&2
         exit 1
         ;;
-    no-new|i7-only|default-unavailable-i7-supported)
+    no-new|only-3820|default-unavailable-3820-supported)
         case "$model" in
-            Core-i7-4790)
-                if [[ "${FAKE_CPU_MODE}" == i7-only ||
-                      "${FAKE_CPU_MODE}" == default-unavailable-i7-supported ]]; then
-                    :
-                elif [[ "$enforce" == on ]]; then
-                    echo "qemu-system-x86_64: Host doesn't support requested features" >&2
-                    exit 1
-                fi
-                ;;
-            Intel-Pentium-G3220|Core-i3-4130|Core-i5-4460|Core-i5-4570|Core-i5-4590)
-                if [[ "${FAKE_CPU_MODE}" == default-unavailable-i7-supported ]]; then
+            Core-i7-4820K)
+                if [[ "${FAKE_CPU_MODE}" == default-unavailable-3820-supported ]]; then
                     echo 'qemu-system-x86_64: failed to initialize kvm: Permission denied' >&2
                     exit 1
                 elif [[ "$enforce" == on ]]; then
@@ -62,7 +53,11 @@ case "${FAKE_CPU_MODE:-supported}" in
                     exit 1
                 fi
                 ;;
-            Core-i5-6500|Core-i3-8100)
+            Core-i7-3820)
+                if [[ "${FAKE_CPU_MODE}" == no-new && "$enforce" == on ]]; then
+                    echo "qemu-system-x86_64: Host doesn't support requested features" >&2
+                    exit 1
+                fi
                 ;;
             *)
                 echo "qemu-system-x86_64: unable to find CPU model '$model'" >&2
@@ -94,12 +89,14 @@ create_one() {
 supported_conf=$(create_one supported 1)
 # shellcheck source=/dev/null
 source "$supported_conf"
-[[ "$PLATFORM_SELECTION_POLICY" == host-supported-new ]] ||
+[[ "$PLATFORM_SELECTION_POLICY" == host-supported-performance-first ]] ||
     fail "supported host selection reason: $PLATFORM_SELECTION_POLICY"
 [[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == new ]] ||
     fail "supported host selected non-new platform: $PLATFORM"
-[[ "$MEM_BOARD_SLOTS" == 2 ]] ||
-    fail "supported host selected a four-slot default board"
+[[ "$CPU_PROFILE" == i7-4820k && "$MEM_SPEED" == 1866 ]] ||
+    fail "supported host did not select the fastest reviewed tier: $PLATFORM"
+[[ "$BOARD_CHIPSET" == X79 && "$MEM_BOARD_SLOTS" == 8 ]] ||
+    fail "supported host did not select an 1866-capable X79 board"
 
 unavailable_conf=$(create_one unavailable 2)
 # shellcheck source=/dev/null
@@ -109,32 +106,36 @@ source "$unavailable_conf"
 [[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == new ]] ||
     fail "unavailable probe silently selected legacy: $PLATFORM"
 
-i7_conf=$(create_one i7-only 4)
+fallback_cpu_conf=$(create_one only-3820 4)
 # shellcheck source=/dev/null
-source "$i7_conf"
-[[ "$PLATFORM_SELECTION_POLICY" == no-supported-default-explicit-new-fallback ]] ||
-    fail "i7 was not tried before legacy: $PLATFORM_SELECTION_POLICY"
-[[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == explicit-new ]] ||
-    fail "i7 last-new fallback selected wrong lifecycle: $PLATFORM"
-[[ "$CPU_PROFILE" == i7-4790 && "$MEM_BOARD_SLOTS" == 2 ]] ||
-    fail "i7 fallback is not the reviewed two-slot platform"
+source "$fallback_cpu_conf"
+[[ "$PLATFORM_SELECTION_POLICY" == host-supported-performance-first ]] ||
+    fail "second active CPU selection reason: $PLATFORM_SELECTION_POLICY"
+[[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == new ]] ||
+    fail "second active CPU selected wrong lifecycle: $PLATFORM"
+[[ "$CPU_PROFILE" == i7-3820 && "$BOARD_CHIPSET" == X79 ]] ||
+    fail "failed to select the reviewed i7-3820 X79 tier"
 
-mixed_probe_conf=$(create_one default-unavailable-i7-supported 5)
+mixed_probe_conf=$(create_one default-unavailable-3820-supported 5)
 # shellcheck source=/dev/null
 source "$mixed_probe_conf"
-[[ "$PLATFORM_SELECTION_POLICY" == no-supported-default-explicit-new-fallback ]] ||
-    fail "default probe uncertainty prevented a conclusive i7 result: $PLATFORM_SELECTION_POLICY"
-[[ "$CPU_PROFILE" == i7-4790 ]] ||
-    fail "default probe uncertainty selected $CPU_PROFILE instead of the supported i7"
+[[ "$PLATFORM_SELECTION_POLICY" == host-supported-performance-first ]] ||
+    fail "probe uncertainty prevented a conclusive second CPU result: $PLATFORM_SELECTION_POLICY"
+[[ "$CPU_PROFILE" == i7-3820 ]] ||
+    fail "probe uncertainty selected $CPU_PROFILE instead of the supported i7-3820"
 
-fallback_conf=$(create_one no-new 3)
-# shellcheck source=/dev/null
-source "$fallback_conf"
-[[ "$PLATFORM_SELECTION_POLICY" == no-supported-new-legacy-fallback ]] ||
-    fail "conclusive no-new result did not record fallback: $PLATFORM_SELECTION_POLICY"
-[[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == legacy-compatibility ]] ||
-    fail "conclusive no-new result did not select legacy: $PLATFORM"
-[[ "$CPU_REALIZATION_POLICY" == legacy-compatibility ]] ||
-    fail "fallback did not retain legacy CPU gate: $CPU_REALIZATION_POLICY"
+no_new_root="$tmp_dir/no-new"
+mkdir -p "$no_new_root/images" "$no_new_root/vms"
+if FAKE_CPU_MODE=no-new QEMU_BIN="$fake_qemu" \
+        IMAGE_ROOT="$no_new_root/images" VM_ROOT="$no_new_root/vms" \
+        "$create_vm" 3 --ssd-profile samsung-850-pro-512gb \
+        --gpu-profile gtx1050_2gb --monitor-profile dell-p2419h \
+        >"$tmp_dir/no-new.out" 2>"$tmp_dir/no-new.err"; then
+    fail 'creation unexpectedly fell back after both active CPUs failed'
+fi
+[[ ! -f "$no_new_root/vms/3/vm.conf" ]] ||
+    fail 'failed active-CPU probe published a legacy vm.conf'
+grep -Fq '拒绝降级到旧慢平台' "$tmp_dir/no-new.err" ||
+    fail 'conclusive active-CPU failure did not explain the fail-closed policy'
 
-echo 'PASS: default creation uses old platforms only after every new CPU conclusively fails enforce=on'
+echo 'PASS: default creation is performance-first and never silently falls back from the active X79 pool'

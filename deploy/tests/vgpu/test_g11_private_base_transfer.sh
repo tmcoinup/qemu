@@ -139,6 +139,21 @@ QEMU_IMG="$(command -v qemu-img)" \
 }
 grep -Fq '[g11-base-export] PASS' "$TMP_DIR/export-in-place-refresh.out"
 
+# The installer may run in a UTC container while export runs in the host's
+# local timezone. Equivalent stat timestamps must compare by instant rather
+# than by their rendered offset.
+ATTESTED_MTIME=$(jq -r '.baseMtimeNs' "$SIDE")
+UTC_MTIME=$(date -u -d "$ATTESTED_MTIME" '+%Y-%m-%d %H:%M:%S.%N +0000')
+jq --arg mtime "$UTC_MTIME" '.baseMtimeNs = $mtime' "$SIDE" >"$SIDE.utc"
+mv -f -- "$SIDE.utc" "$SIDE"
+chmod 0600 "$SIDE"
+IMAGE_ROOT="$TMP_DIR/source-images" VM_ROOT="$SOURCE_ROOT" VMS_DIR="$SOURCE_ROOT" \
+VM_INSTANCES_DIR="$SOURCE_ROOT" VM_BASE_DIR="$(dirname -- "$BASE")" \
+QEMU_IMG="$(command -v qemu-img)" TZ=America/Los_Angeles \
+    "$EXPORT" --in-place "$BASE_NAME" "$(dirname -- "$BASE")" \
+    >"$TMP_DIR/export-cross-timezone.out"
+grep -Fq '[g11-base-export] PASS' "$TMP_DIR/export-cross-timezone.out"
+
 ln -s -- "$(basename "$MANIFEST")" "$BUNDLE/symlink.g11base"
 if IMAGE_ROOT="$TMP_DIR/link-images" VM_ROOT="$TMP_DIR/link-vms" \
         VMS_DIR="$TMP_DIR/link-vms" VM_INSTANCES_DIR="$TMP_DIR/link-vms" \

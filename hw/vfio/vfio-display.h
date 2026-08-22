@@ -31,16 +31,14 @@ typedef struct VFIODisplay {
     struct {
         VFIORegion buffer;
         DisplaySurface *surface;
-        uint8_t *shadow;
-        size_t shadow_size;
-        uint32_t shadow_width;
-        uint32_t shadow_height;
-        uint32_t shadow_stride;
-        uint32_t shadow_row_bytes;
-        pixman_format_code_t shadow_format;
+        uint8_t *staging;
+        size_t staging_size;
+        uint32_t staging_row_bytes;
         uint32_t full_motion_streak;
         uint32_t compare_bypass_frames;
-        bool shadow_valid;
+        uint32_t failure_streak;
+        int64_t failure_retry_after_us;
+        bool force_full_update;
     } region;
     struct {
         QTAILQ_HEAD(, VFIODMABuf) bufs;

@@ -2337,13 +2337,14 @@ function Read-And-ValidateProfile {
     }
     $memoryMakerContract = switch ([int]$gpu.memoryMaker) {
         1 { @('Samsung', 'Samsung') }
+        3 { @('Elpida', 'Elpida') }
         6 { @('SK hynix', 'Hynix') }
         10 { @('Micron', 'Micron') }
         default { $null }
     }
     if ([int64]$gpu.memoryType -ne 8 -or
         $null -eq $memoryMakerContract) {
-        throw 'Only cataloged GDDR5 with Samsung(1), Hynix(6), or Micron(10) is accepted.'
+        throw 'Only cataloged GDDR5 with Samsung(1), Elpida(3), Hynix(6), or Micron(10) is accepted.'
     }
     if ($atomicSchema2 -and
         ([string]$gpu.memoryTypeName -cne 'GDDR5' -or

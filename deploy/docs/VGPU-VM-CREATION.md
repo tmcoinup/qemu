@@ -38,7 +38,7 @@ NVIDIA 控制面板产品名则应先排查 host per-mdev 配置和冷启动日�
 安装模式默认自动处理 OOBE：使用内置英文账号 `Administrator`、空密码并首次自动
 登录，区域/输入法为中国大陆简体中文，时区为 `China Standard Time`（北京/上海
 同属 UTC+8）。RTC 由宿主通过 `TZ=Asia/Shanghai` 和
-`-rtc base=localtime,clock=host,driftfix=slew` 提供；新装不写
+`-rtc base=localtime,clock=vm,driftfix=slew` 提供；新装不写
 `RealTimeIsUniversal`。NumLock 由宿主 QEMU 根据 guest USB LED 回报默认保持开启，
 不依赖登录界面或用户注册表；specialize 阶段只一次性写 `HiberbootEnabled=0`，
 避免首次“关机”变成 Fast Startup 休眠。
@@ -231,7 +231,7 @@ ISO=/home/ubuntu/images/iso/win10.iso
 尺寸档位和“不伪造 75 Hz 模式”的边界见
 [`G11-MONITOR-POOL.md`](G11-MONITOR-POOL.md)。
 
-品牌审计口径是主板 4、内存 5、SSD 5、GPU app-local 板卡 metadata 9、active
+正常新建品牌审计口径是主板 3、内存 4、SSD 5、GPU app-local 板卡 metadata 9、active
 键盘 3、可选相对鼠标 3；显示器是明确例外（新建 8 品牌/完整 11 品牌）。默认绝对
 指针只有 QEMU 通用 profile。GPU 板卡 metadata 的序列策略为 `not-exposed`，USB
 输入为 `none`/`iSerialNumber=0`；不会拿 mdev UUID 或虚构 `serial=` 充数。显示器
@@ -240,7 +240,7 @@ ISO=/home/ubuntu/images/iso/win10.iso
 [`G11-HARDWARE-POOL.md`](G11-HARDWARE-POOL.md)。
 
 底层 `q35`/ICH9 行为、ICH9-AHCI、`qemu-xhci` 和 QEMU `nvme` controller 是实现边界；
-00:1f.0 的 LPC inventory identity 会按主板目录映射成 H81/H97/B150/B360，
+00:1f.0 的 LPC inventory identity 会按主板目录映射成 X79/H81/H97/B150/B360，
 用来避免所有配置都被硬件工具标成 ICH9，但不代表完整 PCH 行为仿真；
 安装/救援 `std-vga` 与 `--legacy-shmem` 的 `ivshmem` 是临时/旧兼容边界。它们不
 参加品牌池，也不能因 profile 名称或 PCI metadata 被解释成完整物理设备仿真。

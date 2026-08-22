@@ -25,7 +25,9 @@
             <TimeZone>China Standard Time</TimeZone>
         </component>
         <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <InputLocale>0804:00000804</InputLocale>
+            <!-- The US keyboard is built into Windows and does not require an
+                 en-US display-language CAB. Keep Microsoft Pinyin second. -->
+            <InputLocale>0409:00000409;0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}</InputLocale>
             <SystemLocale>zh-CN</SystemLocale>
             <UILanguage>zh-CN</UILanguage>
             <UILanguageFallback>en-US</UILanguageFallback>
@@ -87,7 +89,7 @@
             </FirstLogonCommands>
         </component>
         <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-            <InputLocale>0804:00000804</InputLocale>
+            <InputLocale>0409:00000409;0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}</InputLocale>
             <SystemLocale>zh-CN</SystemLocale>
             <UILanguage>zh-CN</UILanguage>
             <UILanguageFallback>en-US</UILanguageFallback>

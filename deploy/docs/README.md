@@ -30,7 +30,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | VMate 私有交付：Sysprep 独立 Windows 身份、跳过 OOBE、授权 EXE 首启一次和跨机导入 | [G11-SYSPREP-PRIVATE-BASE.md](G11-SYSPREP-PRIVATE-BASE.md) |
 | 普通 32/64 位程序统一板卡/显存身份、单 3D adapter、显示器持久化与一键回滚 | [G11-BOTTOM-GPU-IDENTITY.md](G11-BOTTOM-GPU-IDENTITY.md) |
 | vGPU 硬件池、整机搭配合法性与宿主 CPU realization | [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) |
-| H81/H97/B150/B360 芯片组、旧卡 DXR 能力审计与全配置现实一致性边界 | [G11-HARDWARE-COHERENCE.md](G11-HARDWARE-COHERENCE.md) |
+| X79 正常新建、归档 H81/H97/B150/B360、旧卡 DXR 能力审计与现实一致性边界 | [G11-HARDWARE-COHERENCE.md](G11-HARDWARE-COHERENCE.md) |
 | 1GB Maxwell 新建层、Kepler 旧配置边界及整池单档切换 | [G11-1GB-GPU-EXPANSION.md](G11-1GB-GPU-EXPANSION.md) |
 | 35 款显示器目录、正常 FHD/1K 分辨率白名单及已有 VM 一键刷新 | [G11-MONITOR-POOL.md](G11-MONITOR-POOL.md) |
 | 无 VM 绑定显卡身份、GPU-Z 选装、新建/克隆通用性和 HWiNFO 边界 | [GPUZ-ONE-CLICK.md](GPUZ-ONE-CLICK.md) |
@@ -41,6 +41,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 公共工具目录或任意 host 目录免驱挂成 Windows 只读 U 盘 | [G11-USB-DIRECTORY.md](G11-USB-DIRECTORY.md) |
 | Windows 10 一键关闭 Defender/防火墙/系统与软件更新/云盘/资讯天气并全面提速、审计和回滚 | [G11-GUEST-LITE.md](G11-GUEST-LITE.md) |
 | Windows 登录后卡顿、启动软件很晚出现：guest 审计、优化、验收与一键回滚 | [G11-GUEST-PERFORMANCE.md](G11-GUEST-PERFORMANCE.md) |
+| G-11 比 V-11 卡、CPU/RTC 时钟告警：宿主动频、稳定 TSC、内存不限速与一键回滚 | [G11-PERFORMANCE-QUICKSTART.md](G11-PERFORMANCE-QUICKSTART.md) |
 | Windows 安装出现 `USBXHCI.SYS` / `PAGE_FAULT_IN_NONPAGED_AREA` | [USBXHCI-INSTALL-RECOVERY.md](USBXHCI-INSTALL-RECOVERY.md) |
 | Windows 网卡有链路但没有 IPv4、宿主一键建桥、默认 LAN 与 VLAN 生命周期 | [G11-NETWORK-BRIDGE-VLAN.md](G11-NETWORK-BRIDGE-VLAN.md) |
 | GRID 538.33 正式基线、三款显卡身份边界与 driver 回退 | [DRIVER-INSTALL.md](DRIVER-INSTALL.md) |
@@ -51,6 +52,9 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 开机 NumLock、`--no-numlock` 与首次桌面右键卡顿排查 | [G11-NUMLOCK-FIRST-BOOT.md](G11-NUMLOCK-FIRST-BOOT.md) |
 | SDL 窗口在宿主拼音/Fcitx 状态下仍向 Guest 发送完整物理按键 | [G11-SDL-HOST-IME.md](G11-SDL-HOST-IME.md) |
 | SDL 窗口空闲后宿主屏保/显示器休眠导致黑屏 | [G11-SDL-NO-SLEEP.md](G11-SDL-NO-SLEEP.md) |
+| SDL 画面定格/帧率、双鼠标、键盘延迟与 balanced/响应/120Hz 实验一键封装 | [G11-SDL-PERFORMANCE.md](G11-SDL-PERFORMANCE.md) |
+| SDL/Wayland 每秒大量 `gdk_monitor_get_scale_factor` / `GDK_IS_MONITOR` 日志 | [G11-SDL-WAYLAND-TITLE.md](G11-SDL-WAYLAND-TITLE.md) |
+| GNOME Wayland 下 1000Hz 实体鼠标拖动大型 SDL/XWayland 窗口一卡一卡：Mutter KMS thread 官方 workaround 与回滚 | [G11-MUTTER-MOUSE-DRAG.md](G11-MUTTER-MOUSE-DRAG.md) |
 | 理解 off/B/A 身份模式 | [STEALTH-APPROACHES.md](STEALTH-APPROACHES.md) |
 | 备份、迁移和恢复每 VM bundle | [STORAGE-LAYOUT.md](STORAGE-LAYOUT.md) |
 | 可选的 Linux 宿主 NVMe APST 检查、持久化与回滚 | [NVME-APST.md](NVME-APST.md) |
@@ -209,8 +213,9 @@ nvidia-smi vgpu -q
 原生 vGPU。537.58 即使有历史 Code-0 qualification 也不会被生产使用。
 
 最终分辨率必须在 native SDL/GTK 会话验收。RDP 会创建 Remote Display Adapter，
-其动态分辨率、WMI 设备数量和编码帧率都不能代表 NVIDIA 输出或 FRL。静止桌面时
-`SDL Present 0.0 FPS` 是像素去重的正常结果。
+其动态分辨率、WMI 设备数量和编码帧率都不能代表 NVIDIA 输出或 FRL。默认 fixed
+模式的静止桌面常见 `Content 0/s | Present 60/s (fixed)`：前者是内容更新率，
+后者是窗口提交率。
 
 ## 安全回退
 

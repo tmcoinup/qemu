@@ -165,6 +165,7 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/start-vm.sh <vm_id> --vlan-id VID` | 把该 VM 接入已授权的业务 VLAN；不带参数就是默认原生 LAN |
 | `./deploy/scripts/start-vm.sh <vm_id> --cpu-isolate` | 与默认行为相同：CPU 隔离 required，guest core/SMT 精确映射到 host core/sibling 后才放行；2C4T 占 host 2C4T，失败即终止 |
 | `./deploy/scripts/g11-performance.sh {audit\|apply\|restore}` | 一键审核、应用或回滚宿主动态全频段/睿频、稳定 TSC 配套、THP 与 NVMe 低抖动策略；见 [`docs/G11-PERFORMANCE-QUICKSTART.md`](docs/G11-PERFORMANCE-QUICKSTART.md) |
+| `./deploy/host/g11-host-display.sh {audit\|check}` / `sudo ... {apply\|rollback}` | 修复 NVIDIA vGPU-only 卡被固件/GDM 误选为宿主主屏导致的开机花屏与 Xorg 重试；只固定 GDM 走 AMD Wayland，不碰 guest/驱动，见 [`docs/G11-HOST-DISPLAY-BOOT-FIX.md`](docs/G11-HOST-DISPLAY-BOOT-FIX.md) |
 | `./deploy/scripts/g11-sdl-performance.sh {audit\|profile\|start\|verify}` | SDL fixed 提交、安全 Guest-cursor/Host fallback、1ms 键鼠与 service CPU 的傻瓜封装；120Hz 仅显式单窗口实验，见 [`docs/G11-SDL-PERFORMANCE.md`](docs/G11-SDL-PERFORMANCE.md) |
 | `./deploy/host/install-g11-sdl-wayland-decor.sh [--check]` | 安装/检查纯 userspace Cairo libdecor；保留 Wayland 实时 FPS 标题并绕开 GTK monitor 日志风暴，见 [`docs/G11-SDL-WAYLAND-TITLE.md`](docs/G11-SDL-WAYLAND-TITLE.md) |
 | `HOST_OOM_PROTECT=0 ./deploy/scripts/start-vm.sh <vm_id>` | 仅诊断：关闭默认的每 VM 进程树临时 `oom_score_adj=-500`；普通启动不需要设置 |
@@ -490,7 +491,9 @@ deploy/
 3. NVIDIA vGPU host driver 已装，`nvidia-smi vgpu` 能列出支持的 type。当前 535
    栈提供 VFIO REGION display，不提供 DMA-BUF；guest GRID 驱动必须与该 host
    branch 和所选 profile 兼容。
-4. 物理显示靠 AMD RX 570，不要让 Ubuntu desktop 动 NVIDIA 卡。
+4. 物理显示靠 AMD RX 570/580，不要让 Ubuntu desktop 动 NVIDIA 卡。若宿主进入桌面前
+   花屏、桌面与 guest 正常，运行 `./deploy/host/g11-host-display.sh audit` 并按
+   [`docs/G11-HOST-DISPLAY-BOOT-FIX.md`](docs/G11-HOST-DISPLAY-BOOT-FIX.md) 修复。
 5. 安装 TPM/应答 ISO/推流运行时：
    `sudo apt install swtpm swtpm-tools xorriso ffmpeg`。默认 TPM 启动会 fail-closed；
    不会因缺包而悄悄启动成一台无 TPM 的 VM。

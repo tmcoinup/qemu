@@ -42,6 +42,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | Windows 10 一键关闭 Defender/防火墙/系统与软件更新/云盘/资讯天气并全面提速、审计和回滚 | [G11-GUEST-LITE.md](G11-GUEST-LITE.md) |
 | Windows 登录后卡顿、启动软件很晚出现：guest 审计、优化、验收与一键回滚 | [G11-GUEST-PERFORMANCE.md](G11-GUEST-PERFORMANCE.md) |
 | G-11 比 V-11 卡、CPU/RTC 时钟告警：宿主动频、稳定 TSC、内存不限速与一键回滚 | [G11-PERFORMANCE-QUICKSTART.md](G11-PERFORMANCE-QUICKSTART.md) |
+| 宿主开机进桌面前花屏、桌面和 guest 正常：AMD/NVIDIA 选卡审计、一键修复与回滚 | [G11-HOST-DISPLAY-BOOT-FIX.md](G11-HOST-DISPLAY-BOOT-FIX.md) |
 | Windows 安装出现 `USBXHCI.SYS` / `PAGE_FAULT_IN_NONPAGED_AREA` | [USBXHCI-INSTALL-RECOVERY.md](USBXHCI-INSTALL-RECOVERY.md) |
 | Windows 网卡有链路但没有 IPv4、宿主一键建桥、默认 LAN 与 VLAN 生命周期 | [G11-NETWORK-BRIDGE-VLAN.md](G11-NETWORK-BRIDGE-VLAN.md) |
 | GRID 538.33 正式基线、三款显卡身份边界与 driver 回退 | [DRIVER-INSTALL.md](DRIVER-INSTALL.md) |

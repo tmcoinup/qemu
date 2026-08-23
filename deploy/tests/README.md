@@ -28,6 +28,7 @@ bash deploy/tests/vgpu/test_cpu_isolation.sh
 bash deploy/tests/vgpu/test_host_oom_protection.sh
 bash deploy/tests/vgpu/test_host_nvme_apst.sh
 bash deploy/tests/vgpu/test_host_performance.sh
+bash deploy/tests/vgpu/test_g11_host_display.sh
 bash deploy/tests/vgpu/test_tsc_policy.sh
 ```
 
@@ -35,8 +36,9 @@ bash deploy/tests/vgpu/test_tsc_policy.sh
 基础镜像名称只做兼容转发，以及 `vmctl` 的路径分发；
 这些测试使用只读查询、伪 QMP、伪 cgroup 和临时文件，不启动或修改真实
 VM/宿主；AIO 测试还会用已构建 QEMU 读取其自身 4 KiB，既不创建临时盘，
-也不接触 VM 磁盘。性能/TSC 两项另用伪 sysfs 验证动态全频段、回滚和 KVM
-能力分支，不写真实 cpufreq、THP、KVM 或 NVMe 节点。
+也不接触 VM 磁盘。性能/TSC 与宿主显示测试另用伪 sysfs 验证动态全频段、回滚、
+KVM 能力分支以及 AMD 显示/NVIDIA vGPU-only 选卡，不写真实 cpufreq、THP、KVM、
+NVMe 或 GDM 配置。
 
 傻瓜封装入口的快速行为回归：
 

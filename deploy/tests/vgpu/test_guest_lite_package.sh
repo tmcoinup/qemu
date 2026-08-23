@@ -84,7 +84,7 @@ done
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.5.2" and
+    .schemaVersion == 1 and .profileVersion == "2.6.0" and
     (.files | length) == 5 and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -128,7 +128,7 @@ exe_wide=$(strings -a -el "$exe")
 for token in 'G11GuestLite.exe /apply' 'G11GuestLite.exe /audit' \
         'G11GuestLite.exe /rollback' \
         'WindowsPowerShell\v1.0\powershell.exe' \
-        'G-11 Windows 10 Guest Lite 2.5.2'; do
+        'G-11 Windows 10 Guest Lite 2.6.0'; do
     rg -Fq "$token" <<<"$exe_wide" \
         || fail "standalone launcher omitted fixed entry point: $token"
 done
@@ -140,7 +140,7 @@ rg -Fq 'Some Windows' "$exe_source" \
     || fail 'standalone launcher omitted the FAT package-media compatibility path'
 rg -Fq 'level="requireAdministrator"' "$exe_manifest" \
     || fail 'standalone launcher omitted its UAC manifest'
-rg -Fq 'assemblyIdentity version="2.5.2.0"' "$exe_manifest" \
+rg -Fq 'assemblyIdentity version="2.6.0.0"' "$exe_manifest" \
     || fail 'standalone launcher manifest version is stale'
 if rg -n 'bundle_id|G11GuestLite-\$|G11GuestLite-\*|sha256sum|SHA256SUMS|ISO-SHA256' \
         "$packager"; then
@@ -214,6 +214,33 @@ for required in \
         'SysMain' \
         'WSearch' \
         'PowerThrottlingOff' \
+        "Name = 'HistoricalCaptureEnabled'; Type = 'DWord'; Value = 0; Group = 'Gaming'" \
+        "Name = 'AllowAutoGameMode'; Type = 'DWord'; Value = 1; Group = 'Gaming'" \
+        "Name = 'AutoGameModeEnabled'; Type = 'DWord'; Value = 1; Group = 'Gaming'" \
+        'Image File Execution Options\DNF.exe\PerfOptions' \
+        "Name = 'CpuPriorityClass'; Type = 'DWord'; Value = 3; Group = 'DNF'" \
+        'Get-DnfProcessSnapshots' \
+        'Set-DnfProcessPriority' \
+        'Restore-DnfProcessSnapshots' \
+        '[Diagnostics.ProcessPriorityClass]::High' \
+        'Initialize-NvidiaDrsInterop' \
+        'PreferredPstateId = 0x1057EB71u' \
+        'PreferMaximumPerformance = 1u' \
+        'NvAPI_DRS_GetBaseProfile' \
+        'NvAPI_DRS_SetSetting' \
+        'NvAPI_DRS_SaveSettings' \
+        'Get-NvidiaPowerModeSnapshot' \
+        'Set-NvidiaMaximumPerformance' \
+        'Restore-NvidiaPowerModeSnapshot' \
+        'LoadLibrarySearchSystem32' \
+        'LastTemporaryCleanup' \
+        'TemporaryFileMinimumAgeHours = 24' \
+        'Clear-SafeTemporaryDirectory' \
+        'Clear-SafeTemporaryFiles' \
+        "[IO.FileAttributes]::ReparsePoint" \
+        "[IO.DriveType]::Fixed" \
+        "Join-Path \$env:LOCALAPPDATA 'Temp'" \
+        "Join-Path \$env:SystemRoot 'Temp'" \
         'RetiredRegistryPlan' \
         'preserved appearance restored' \
         'SCHEME_MIN' \
@@ -240,7 +267,7 @@ for required in \
         "-UserId 'SYSTEM'" \
         'S-1-5-18' \
         'Ensure-CurrentBaseline' \
-        'SchemaVersion = 5' \
+        'SchemaVersion = 6' \
         "'CloneApply' { Invoke-Apply -UnattendedClone }" \
         'Avoid two duplicate' \
         'Save-AuditReportLines' \
@@ -275,10 +302,22 @@ fi
 enforce_body=$(sed -n '/^function Invoke-Enforce {/,/^function Invoke-Rollback {/p' \
     "$guest")
 for required_call in Disable-PlannedServices Disable-PlannedTasks \
-        Stop-PlannedProcesses Set-DefaultAudioMuted Set-PerformancePowerPlan; do
+        Stop-PlannedProcesses Set-DefaultAudioMuted Set-PerformancePowerPlan \
+        Set-NvidiaMaximumPerformance Set-DnfProcessPriority; do
     rg -Fq "$required_call" <<<"$enforce_body" \
         || fail "SYSTEM enforcement omitted self-healing call: $required_call"
 done
+if rg -Fq 'Clear-SafeTemporaryFiles' <<<"$enforce_body"; then
+    fail 'SYSTEM enforcement must not repeatedly delete temporary files'
+fi
+if rg -n 'ProcessPriorityClass\]::Realtime|PriorityClass[[:space:]]*=[[:space:]]*[^#]*Realtime' \
+        "$guest"; then
+    fail 'guest-lite must never assign Realtime priority to DNF'
+fi
+if rg -n 'Clear-SafeTemporaryDirectory.+-Recurse|Remove-Item.+-Recurse' \
+        "$guest"; then
+    fail 'temporary cleanup can recurse through an unreviewed reparse path'
+fi
 enforcement_reader=$(sed -n \
     '/^function Read-EnforcementState {/,/^function Get-DefenderPreferenceSnapshots {/p' \
     "$guest")

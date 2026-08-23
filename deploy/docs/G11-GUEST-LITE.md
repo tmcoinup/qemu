@@ -1,15 +1,23 @@
-# G-11 Guest Lite 2.5.2：Windows 10 全面精简/提速傻瓜教程
+# G-11 Guest Lite 2.6.0：Windows 10 全面精简/提速傻瓜教程
 
 本工具只属于 **G-11/vGPU**。V-11 是独立分支；不要互拷 VM bundle、驱动或配置。
-2.5.2 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
-资讯、天气、商店、OneDrive/同步、通知、任务栏搜索框、消费 App、后台服务/任务和常见 VM 高 I/O 项，
+2.6.0 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
+资讯、天气、商店、OneDrive/同步、通知、任务栏搜索框、消费 App、后台服务/任务和常见 VM 高 I/O 项；
+同时开启游戏模式、关闭 Xbox/Game DVR 后台录制、选择高性能电源计划、通过正式
+NVIDIA 驱动的 NVAPI DRS 设置“最高性能优先”，并为精确白名单 DNF 映像配置 High
+（非 Realtime）优先级。Apply 会安全清理两个固定 Temp 目录中创建/最后写入均超过
+24 小时的普通文件，
 把默认播放端点静音，并把输入顺序设为 en-US/US keyboard 第一、中文（简体）
 Microsoft Pinyin 第二。
 
 它是激进配置：完成后系统没有内置杀毒、防火墙和自动安全更新。先只在用户指定的
 实验机 **VM1** 验收，不要直接批量投放。
 
-`2.5.2` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
+临时文件删除不可逆：运行前关闭安装器、解压器和其他正在使用 Temp 的程序，并确认
+不再需要 `%LOCALAPPDATA%\Temp`、`%SystemRoot%\Temp` 内超过 24 小时的内容。脚本不碰
+Downloads、桌面、自定义 TEMP、WindowsApps、WinSxS 或浏览器用户资料。
+
+`2.6.0` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
 清掉”补齐完整原生本地策略状态：原始 `Registry.pol` 和 `gpt.ini` 均逐字节存入回滚
 基线，受管副本只写本地 GPO 支持的 `Version` 并同时递增机器/用户版本。Local System 补强
 任务在开机/登录延迟 45 秒后强制刷新策略、再写入运行态，然后立即退出；没有常驻进程
@@ -17,17 +25,17 @@ Microsoft Pinyin 第二。
 
 VM1 的第二轮重启审计还定位出 Windows PowerShell 5.1 Registry provider 的陷阱：对
 已经存在的叶键反复执行 `New-Item -Force` 会重建该键并删除刚写入的兄弟值，表现为同一
-键下只有最后一个策略留下。2.5.2 继续仅在键不存在时创建；设置和回滚都不再重建现有
+键下只有最后一个策略留下。2.6.0 继续仅在键不存在时创建；设置和回滚都不再重建现有
 叶键。Appx 审计也从逐包查询改为一次枚举后按精确白名单过滤，明显缩短应用/验证时间。
 
-2.5.2 新增任务栏搜索框默认隐藏，并修复克隆内部重启后 finalizer 以 Local System 身份
+2.6.0 新增任务栏搜索框默认隐藏，并修复克隆内部重启后 finalizer 以 Local System 身份
 误读 SYSTEM `HKCU` 的问题。克隆验收现在把 `state.json` 中保存的用户 SID 映射到
 `HKEY_USERS`，通知、搜索和语言顺序都核验同一个目标用户。自动 CloneApply 的逐项输出
 改写入 ProgramData 日志，避免虚拟显示逐行重绘，并跳过与完整基线采集和重启后严格
 验收重复的两个全量审计；服务、Appx 和策略操作仍使用 Windows 原生接口顺序执行，
 因此无需也不引入第三方运行库。
 
-2.5.2 同时修复旧克隆升级边界：已经确认 `WinDefend` 不运行且没有 `MsMpEng`
+2.6.0 同时修复旧克隆升级边界：已经确认 `WinDefend` 不运行且没有 `MsMpEng`
 进程时，Defender 接口可能无法再返回篡改防护状态，此时允许重施现有策略；若引擎
 仍活动，未知状态继续硬性拒绝。明确检测到篡改防护为 `On` 时永远不会绕过。
 
@@ -62,6 +70,11 @@ VM1 的第二轮重启审计还定位出 Windows PowerShell 5.1 Registry provide
    ```text
    C:\ProgramData\G11GuestLite\reports
    ```
+
+6. 可选 DNF 实测：正常启动 DNF 后再次双击 `02-Audit.cmd`。报告内正在运行的
+   `DNF`/`DNFClient`/`DNFChina`/`DNFLauncher` 应显示 `priority=High`。DNF 未运行时
+   `dnfProcessFound=False` 是正常状态；下次启动仍由 Windows 自动套用 High。不要改成
+   `Realtime`，也不要给 `TCls` 等反作弊进程强制提权。
 
 验收后宿主可弹出只读 U 盘：
 
@@ -108,7 +121,7 @@ Get-Process | Sort-Object CPU -Descending |
 中具体进程名保留下来，再定位是否实际为 `MsMpEng`、`svchost` 内另一服务或第三方
 网络过滤器。
 
-## 三、2.5 实际修改矩阵
+## 三、2.6 实际修改矩阵
 
 | 类别 | 处理 | 保留/边界 |
 |---|---|---|
@@ -124,8 +137,12 @@ Get-Process | Sort-Object CPU -Descending |
 | 任务栏 | `SearchboxTaskbarMode=0`，默认隐藏搜索框 | 开始菜单/Win 键搜索仍可用；回滚恢复原显示方式 |
 | 声音 | 通过 Windows Core Audio 把默认播放端点设为静音，启动补强和审计再次核验 | 保留 Audiosrv、音频设备及驱动；回滚恢复 Apply 前的静音状态 |
 | 默认输入 | `en-US` + US (`0409:00000409`) 第一，`zh-CN` + Microsoft Pinyin (`0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}`) 第二 | 其他原有语言排在后面，Win+Space 可切换；回滚恢复原语言列表和默认覆盖 |
-| 后台/隐私 | 关后台 App、内容投放、遥测、推送、地图、定位、Game DVR 等白名单服务/任务 | 不碰网络、音频服务/驱动、打印、NVIDIA/vGPU；仅静音默认播放端点 |
-| 性能 | 关 SysMain/搜索索引、电源节流、透明/任务栏动画和启动延时；切换内置“高性能”方案 | 保留桌面背景和字体平滑；2.2 自动恢复旧版 `VisualFXSetting` 基线；不改分页文件、时钟、HPET 或 BCD |
+| 游戏模式/录制 | `AllowAutoGameMode=1`、`AutoGameModeEnabled=1`；关闭 Game DVR、AppCapture 和 HistoricalCapture | 游戏模式与后台录制分别设置；关闭录制不等于关闭游戏模式；原值逐项回滚 |
+| 后台/隐私 | 关后台 App、内容投放、遥测、推送、地图、定位等白名单服务/任务；结束更新器、Game Bar、Teams/Widgets 等精确白名单进程 | 不按 CPU 排名盲杀，不碰网络/音频驱动、打印和 NVIDIA 服务；仅静音默认播放端点 |
+| Windows 性能 | 关 SysMain/搜索索引、电源节流、透明/任务栏动画和启动延时；切换内置“高性能”方案 | 保留桌面背景和字体平滑；2.2 自动恢复旧版 `VisualFXSetting` 基线；不改分页文件、时钟、HPET 或 BCD |
+| NVIDIA 性能 | 通过 System32 正式 NVIDIA NVAPI 的 DRS 全局 profile 设置 `PREFERRED_PSTATE_ID=0x1057EB71` 为 `PREFER_MAX=1` | 不写私有 PowerMizer 注册表，不替换 NVAPI/驱动/服务；原覆盖值或“未覆盖”状态精确回滚；驱动不支持会明确 PARTIAL |
+| DNF 优先级 | 仅 `DNF.exe`、`DNFClient.exe`、`DNFChina.exe`、`DNFLauncher.exe` 使用 IFEO `PerfOptions/CpuPriorityClass=3`，并立即检查已运行实例 | `3` 对应 High；不使用通配符、不提升反作弊进程、不使用 Realtime；回滚删除/恢复原 IFEO 值并恢复 Apply 时仍存活的进程优先级 |
+| 临时文件 | 遍历当前用户 LocalAppData Temp 与 Windows Temp；只删创建/最后写入均超过 24 小时的普通文件及清空后的旧目录 | 固定本机目录、拒绝根目录/网络盘/重解析点，不跟随联接；占用/拒绝项保留并报告；删除不可回滚 |
 | 重启持久化 | 保存并扩展机器/用户 `Registry.pol`，生成/合并合法的 `gpt.ini Version`，开机和目标用户登录后由 SYSTEM 延迟刷新、补强一次 | `gPCMachineExtensionNames`/`gPCUserExtensionNames` 是 AD GPO 对象属性，绝不写进本地 gpt.ini；无常驻服务、无密码、无第三方库；回滚逐字节还原原 policy/metadata 文件 |
 
 脚本不会按“名称里含 update/service”粗暴匹配。固定对象用精确名称；版本化 Google/
@@ -141,13 +158,14 @@ C:\ProgramData\G11GuestLite\state.json
 ```
 
 其中包含 MachineGuid、计算机名、用户 SID、注册表值/类型、防火墙三 profile、原始
-音频静音状态、原始用户语言/输入列表、活动电源方案、服务
+音频静音状态、原始用户语言/输入列表、活动电源方案、NVIDIA DRS 覆盖状态、Apply 时
+仍运行的 DNF 进程 PID/启动时间/优先级、服务
 启动/运行状态、任务启用状态、当前用户 App 清单，以及机器/用户原始
 `Registry.pol`、`gpt.ini` 字节和补强任务是否原先存在。目录 ACL 只允许 Administrators 和
 SYSTEM。重复 Apply 复用首次基线，不把“已经禁用”的状态覆盖成原始值。
 
-若 VM1 已经运行过旧版，2.5 会先把新增项目（包括音频静音和语言/输入列表）的当前状态
-补进旧基线、原子保存为 schema 5，再开始新增修改。VM1 从 2.1 升级时，原基线已保存
+若 VM1 已经运行过旧版，2.6 会先把新增项目（包括 NVIDIA DRS、DNF 运行态、游戏设置）的当前状态
+补进旧基线、原子保存为 schema 6，再开始新增修改。VM1 从 2.1 升级时，原基线已保存
 最初的 Registry.pol；2.1 没有创建过 gpt.ini，因此新版可安全补记“原文件不存在”并
 保证回滚精确删除它。
 
@@ -158,8 +176,9 @@ C:\ProgramData\G11GuestLite\tools\03-Rollback.cmd
 ```
 
 看到 `ROLLBACK PASS` 后重启。回滚会先删除 Guest Lite 补强任务、恢复原始
-`Registry.pol`/`gpt.ini`，再恢复语言/输入、注册表、防火墙、声音静音、服务、任务、
-App 和电源。失败时显示
+`Registry.pol`/`gpt.ini`，再恢复语言/输入、注册表、防火墙、声音静音、NVIDIA DRS、
+仍存活的原 DNF 进程优先级、服务、任务、App 和电源。已删除的临时文件不能恢复。
+失败时显示
 `ROLLBACK PARTIAL`，原 state 不删除，可修复后重试。App 只恢复首次 Apply 前存在的
 包；若其他工具后来删除 WindowsApps 预配文件，本工具不会从互联网下载来源不明的 Appx。
 
@@ -192,7 +211,8 @@ EXE 是普通 x86-64 Windows 用户态 PE，内嵌可审查的 PS1/CMD/README；
 支持静态链接，导入表测试只允许 Windows inbox 的
 `ADVAPI32/bcrypt/KERNEL32/msvcrt/SHELL32/USER32`。Windows 运行时只需要系统自带
 DLL、Windows PowerShell 5.1、CIM/NetSecurity/Defender/Appx/TaskScheduler cmdlet
-和 `powercfg/sc/icacls`，不安装 VC++/.NET/Python/Java 等第三方运行库。
+和 `powercfg/sc/icacls`；NVIDIA 项仅动态调用已安装驱动的 System32 `nvapi64.dll`，
+不随包携带或替换 NVAPI。工具不安装 VC++/.NET/Python/Java 等第三方运行库。
 
 运行完整封装回归：
 
@@ -201,8 +221,9 @@ DLL、Windows PowerShell 5.1、CIM/NetSecurity/Defender/Appx/TaskScheduler cmdle
 ```
 
 测试会验证确定性构建、PE 架构/UAC 清单、严格 DLL 导入白名单、内嵌资源、ISO/USB
-目录、CRLF 启动器、schema 5 policy/metadata/task/audio/language 回滚、合法 gpt.ini、
-克隆 manifest、禁止 BCD/签名/驱动/系统包删除操作及 2.5 必需控制项。
+目录、CRLF 启动器、schema 6 policy/metadata/task/audio/language/NVIDIA/DNF 回滚、
+Game Mode/Game DVR、固定 Temp 白名单/重解析点保护、合法 gpt.ini、
+克隆 manifest、禁止 BCD/签名/驱动/系统包删除操作及 2.6 必需控制项。
 
 ### en-US 是否需要离线语言包
 
@@ -255,7 +276,7 @@ Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Disabled/Stopped/PID 0` 与
 4. 复用系统 NVAPI 的内部重启，SYSTEM 验证 NVAPI/显示器，同时要求
    `MpsSvc=Disabled/Stopped/PID 0`、`BFE=Auto/Running`、通知关闭、默认声音静音、
    en-US/US 第一、Microsoft Pinyin 第二、本地 policy 文件及 Guest Lite 补强任务完整；
-5. 只有全部通过才写 schema-3 完成标记并完整关机；宿主“初始”只读复核后再启动。
+5. 只有全部通过才写 schema-4 完成标记并完整关机；宿主“初始”只读复核后再启动。
 
 若母盘篡改防护仍开启，自动链会明确失败并保留
 `C:\ProgramData\VMate\G11\clone-initialization-error.txt`，不会静默跳过 Defender。修复
@@ -270,12 +291,15 @@ Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Disabled/Stopped/PID 0` 与
 
 - 不运行 `bcdedit`，不设置 `testsigning`/`nointegritychecks`；
 - 不安装、替换、测试签名或自签名任何内核驱动；
-- 不修改正式 NVIDIA GRID/vGPU、网卡、音频、打印和存储驱动；
+- 不修改正式 NVIDIA GRID/vGPU、网卡、音频、打印和存储驱动；只调用正式驱动公开的
+  用户态 NVAPI DRS 配置接口；
 - 不使用 TrustedInstaller/接管 ACL/删除系统服务的手段；
 - 不调用 `Remove-AppxProvisionedPackage`，不删 WinSxS/System32/WindowsApps；
 - 不停 BITS、CryptSvc、AppXSvc、ClipSVC；
 - 不关闭桌面背景或字体平滑，不再设置全局“最佳性能”视觉预设；
 - 不写入或索取宿主/guest 凭据，包内不含 VM ID、UUID、token 或账号信息；
+- 不清理 Downloads、桌面、用户资料、自定义 TEMP、WindowsApps 或组件存储；固定
+  Temp 内删除的旧文件不可回滚；
 - 只支持 Windows 10 client，不在 Windows 11/Server 执行。
 
 ## 八、为什么可能出现 PARTIAL
@@ -286,6 +310,8 @@ Windows 10 1903+ 的篡改防护会阻止 Defender 本地改动；新版 Defende
 Update Orchestrator/DoSvc 的受保护对象
 不接管 ACL，而是验证其上游 WU 策略及 `wuauserv`/`UsoSvc` 已关闭。其他必需策略、
 服务、任务、App、进程或三种防火墙 profile 不符时仍返回 PARTIAL。
+正式 NVIDIA 驱动缺失、NVAPI DRS 不支持/拒绝写入，或两个固定 Temp 根目录均无法
+安全处理时也返回 PARTIAL；不会用私有驱动注册表值或安装其他组件伪装成功。
 
 参考：
 
@@ -303,3 +329,5 @@ Update Orchestrator/DoSvc 的受保护对象
 - [New-WinUserLanguageList](https://learn.microsoft.com/powershell/module/international/new-winuserlanguagelist)
 - [Microsoft Group Policy gpt.ini 版本格式](https://learn.microsoft.com/openspecs/windows_protocols/ms-gpol/59bb540a-64f4-4c52-9c55-5ca2fd2c0270)
 - [Microsoft Registry.pol 消息格式（键名和值名必须为 NUL 结尾 UTF-16LE）](https://learn.microsoft.com/openspecs/windows_protocols/ms-gpreg/5c092c22-bf6b-4e7f-b180-b20743d368f5)
+- [NVIDIA NVAPI DRS API](https://docs.nvidia.com/nvapi/group__drsapi.html)
+- [NVIDIA NVAPI PREFERRED_PSTATE 设置和值](https://docs.nvidia.com/nvapi/NvApiDriverSettings_8h.html)

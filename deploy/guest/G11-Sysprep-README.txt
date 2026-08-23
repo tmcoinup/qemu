@@ -24,5 +24,6 @@ Windows SID、MachineGuid 和计算机名。不会启用 testsigning/nointegrity
 
 应答文件把 US 键盘设为第一输入、Microsoft Pinyin 设为第二输入。US 键盘是 Windows
 10 自带组件，所以该输入需求可完全离线封装，不需要 en-US 显示语言 CAB；系统界面仍
-保持 zh-CN。Guest Lite 2.5 会再次核验这个顺序、关闭通知、把默认播放端点静音，并
-保留背景、字体、音频静音和输入列表的可回滚基线。
+保持 zh-CN。Guest Lite 2.6 会再次核验这个顺序、关闭通知、把默认播放端点静音，
+开启游戏模式/关闭 Game DVR、设置高性能电源/NVIDIA 最高性能/DNF High，并保存
+schema 6 回滚基线；超过 24 小时的固定 Temp 文件会安全清理且不能回滚。

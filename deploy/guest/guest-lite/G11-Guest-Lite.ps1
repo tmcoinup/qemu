@@ -8,15 +8,20 @@
   software auto-updaters, Microsoft Store, OneDrive/cloud sync, news/weather
   feeds, notifications, consumer Appx apps, background activity, and reviewed
   optional services/tasks. It also keeps the default playback endpoint muted,
-  orders English (United States) - US first and Microsoft Pinyin second, selects
-  the built-in High performance power plan, and reduces desktop
-  animation/startup delay for the interactive user.
+  orders English (United States) - US first and Microsoft Pinyin second, enables
+  Windows Game Mode while disabling Xbox background recording, selects the
+  built-in High performance power plan, requests NVIDIA's global "Prefer
+  maximum performance" mode through the installed driver's NVAPI DRS surface,
+  gives allowlisted DNF game images High (never Realtime) priority, safely
+  clears stale temporary files, and reduces desktop animation/startup delay for
+  the interactive user.
 
   The tool does not bypass Tamper Protection, remove provisioned Appx payloads,
   modify BCD or driver-signing policy, change kernel drivers, delete firewall
   rules/service files, or delete Windows component-store files. Original
-  registry, firewall, audio mute, user-language/input, power, service, task,
-  and app state is saved under C:\ProgramData\G11GuestLite.
+  registry, firewall, audio mute, user-language/input, power, NVIDIA DRS,
+  running DNF priority, service, task, and app state is saved under
+  C:\ProgramData\G11GuestLite. Deleted stale temporary files cannot be restored.
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +39,7 @@ $StateRoot = Join-Path $env:ProgramData 'G11GuestLite'
 $StatePath = Join-Path $StateRoot 'state.json'
 $ReportRoot = Join-Path $StateRoot 'reports'
 $ToolRoot = Join-Path $StateRoot 'tools'
-$SchemaVersion = 5
+$SchemaVersion = 6
 $MinimumSchemaVersion = 1
 $EnforcementTaskPath = '\'
 $EnforcementTaskName = 'G11GuestLite-EnforceProfile'
@@ -49,6 +54,9 @@ $EnglishInputTip = '0409:00000409'
 $PinyinLanguageTag = 'zh-CN'
 $PinyinCanonicalLanguageTag = 'zh-Hans-CN'
 $PinyinInputTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
+$NvidiaPreferredPstateId = [uint32]0x1057EB71
+$NvidiaPreferMaximumPerformance = [uint32]1
+$TemporaryFileMinimumAgeHours = 24
 
 # Policy values only. The tool never changes Defender service ACLs or deletes
 # Defender files. Windows 10 1903+ requires Tamper Protection to be turned off
@@ -158,7 +166,17 @@ $RegistryPlan = @(
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting'; Name = 'Disabled'; Type = 'DWord'; Value = 1; Group = 'Privacy' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; Name = 'AllowGameDVR'; Type = 'DWord'; Value = 0; Group = 'Gaming' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR'; Name = 'AppCaptureEnabled'; Type = 'DWord'; Value = 0; Group = 'Gaming' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR'; Name = 'HistoricalCaptureEnabled'; Type = 'DWord'; Value = 0; Group = 'Gaming' },
     [pscustomobject]@{ Path = 'HKCU:\System\GameConfigStore'; Name = 'GameDVR_Enabled'; Type = 'DWord'; Value = 0; Group = 'Gaming' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\GameBar'; Name = 'AllowAutoGameMode'; Type = 'DWord'; Value = 1; Group = 'Gaming' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\GameBar'; Name = 'AutoGameModeEnabled'; Type = 'DWord'; Value = 1; Group = 'Gaming' },
+
+    # IFEO PerfOptions is a Windows process-creation setting, not a debugger.
+    # Exact DNF image names only; High=3. Realtime priority is never requested.
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DNF.exe\PerfOptions'; Name = 'CpuPriorityClass'; Type = 'DWord'; Value = 3; Group = 'DNF' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DNFClient.exe\PerfOptions'; Name = 'CpuPriorityClass'; Type = 'DWord'; Value = 3; Group = 'DNF' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DNFChina.exe\PerfOptions'; Name = 'CpuPriorityClass'; Type = 'DWord'; Value = 3; Group = 'DNF' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DNFLauncher.exe\PerfOptions'; Name = 'CpuPriorityClass'; Type = 'DWord'; Value = 3; Group = 'DNF' },
 
     [pscustomobject]@{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling'; Name = 'PowerThrottlingOff'; Type = 'DWord'; Value = 1; Group = 'Performance' },
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Serialize'; Name = 'StartupDelayInMSec'; Type = 'DWord'; Value = 0; Group = 'Performance' },
@@ -382,10 +400,24 @@ $ProcessPlan = @(
     [pscustomobject]@{ Name = 'GameBar'; Group = 'Gaming'; Purpose = 'Xbox Game Bar' },
     [pscustomobject]@{ Name = 'GameBarFTServer'; Group = 'Gaming'; Purpose = 'Xbox Game Bar server' },
     [pscustomobject]@{ Name = 'XboxGameBarWidgets'; Group = 'Gaming'; Purpose = 'Xbox Game Bar widgets' },
+    [pscustomobject]@{ Name = 'Teams'; Group = 'ConsumerApp'; Purpose = 'classic Teams background client' },
+    [pscustomobject]@{ Name = 'ms-teams'; Group = 'ConsumerApp'; Purpose = 'new Teams background client' },
+    [pscustomobject]@{ Name = 'msteams'; Group = 'ConsumerApp'; Purpose = 'Teams Appx background client' },
+    [pscustomobject]@{ Name = 'Widgets'; Group = 'ConsumerApp'; Purpose = 'Windows widgets background host' },
+    [pscustomobject]@{ Name = 'WidgetService'; Group = 'ConsumerApp'; Purpose = 'Windows widgets service process' },
     [pscustomobject]@{ Name = 'YourPhone'; Group = 'Cloud'; Purpose = 'Phone Link' },
     [pscustomobject]@{ Name = 'PhoneExperienceHost'; Group = 'Cloud'; Purpose = 'Phone Link host' },
     [pscustomobject]@{ Name = 'HxTsr'; Group = 'Cloud'; Purpose = 'Mail and Calendar background host' },
     [pscustomobject]@{ Name = 'Video.UI'; Group = 'ConsumerApp'; Purpose = 'Movies and TV background host' }
+)
+
+# Only these exact DNF process base names may receive High priority. This list
+# is deliberately separate from the background-process termination plan.
+$DnfProcessPlan = @(
+    [pscustomobject]@{ Name = 'DNF'; Image = 'DNF.exe' },
+    [pscustomobject]@{ Name = 'DNFClient'; Image = 'DNFClient.exe' },
+    [pscustomobject]@{ Name = 'DNFChina'; Image = 'DNFChina.exe' },
+    [pscustomobject]@{ Name = 'DNFLauncher'; Image = 'DNFLauncher.exe' }
 )
 
 $HighPerformanceScheme = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
@@ -1902,6 +1934,279 @@ function Stop-PlannedProcesses {
     return $failures.ToArray()
 }
 
+function Test-DnfProcessNameAllowed {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return $DnfProcessPlan.Name -icontains $Name
+}
+
+function Get-DnfProcessSnapshots {
+    $snapshots = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($plan in $DnfProcessPlan) {
+        foreach ($process in @(Get-Process -Name ([string]$plan.Name) `
+            -ErrorAction SilentlyContinue)) {
+            try {
+                $snapshots.Add([pscustomobject]@{
+                    Available = $true
+                    Name = [string]$process.ProcessName
+                    Id = [int]$process.Id
+                    StartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
+                    PriorityClass = [string]$process.PriorityClass
+                    Error = ''
+                })
+            } catch {
+                $snapshots.Add([pscustomobject]@{
+                    Available = $false
+                    Name = [string]$process.ProcessName
+                    Id = [int]$process.Id
+                    StartTimeUtc = ''
+                    PriorityClass = ''
+                    Error = $_.Exception.Message
+                })
+            }
+        }
+    }
+    return $snapshots.ToArray()
+}
+
+function Set-DnfProcessPriority {
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    $found = 0
+    foreach ($plan in $DnfProcessPlan) {
+        foreach ($process in @(Get-Process -Name ([string]$plan.Name) `
+            -ErrorAction SilentlyContinue)) {
+            $found++
+            try {
+                $process.PriorityClass = `
+                    [Diagnostics.ProcessPriorityClass]::High
+                $process.Refresh()
+                if ([string]$process.PriorityClass -cne 'High') {
+                    throw "priority verification returned $($process.PriorityClass)"
+                }
+                Write-Host "  DNF priority: $($process.ProcessName) pid=$($process.Id) High" `
+                    -ForegroundColor DarkGray
+            } catch {
+                $message = "DNF process $($plan.Name) pid=$($process.Id): $($_.Exception.Message)"
+                $failures.Add($message)
+                Write-Warning $message
+            }
+        }
+    }
+    if ($found -eq 0) {
+        Write-Host '  DNF priority: no allowlisted DNF process is running; IFEO High priority is staged for the next launch' `
+            -ForegroundColor DarkGray
+    }
+    return $failures.ToArray()
+}
+
+function Restore-DnfProcessSnapshots {
+    param([AllowNull()][object[]]$Snapshots)
+
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($snapshot in @($Snapshots)) {
+        if (-not [bool]$snapshot.Available) { continue }
+        $name = [string]$snapshot.Name
+        if (-not (Test-DnfProcessNameAllowed $name)) {
+            $failures.Add("unexpected DNF process identity in state: $name")
+            continue
+        }
+        $processId = [int]$snapshot.Id
+        if ($processId -le 0) {
+            $failures.Add("invalid DNF process id in state: $processId")
+            continue
+        }
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($null -eq $process -or [string]$process.ProcessName -ine $name) {
+            continue
+        }
+        try {
+            $liveStart = $process.StartTime.ToUniversalTime().ToString('o')
+            if ($liveStart -cne [string]$snapshot.StartTimeUtc) { continue }
+            $priority = [Diagnostics.ProcessPriorityClass][Enum]::Parse(
+                [Diagnostics.ProcessPriorityClass],
+                [string]$snapshot.PriorityClass, $false
+            )
+            $process.PriorityClass = $priority
+            $process.Refresh()
+            if ([string]$process.PriorityClass -cne [string]$priority) {
+                throw "priority verification returned $($process.PriorityClass)"
+            }
+            Write-Host "  DNF priority restored: $name pid=$processId $priority" `
+                -ForegroundColor DarkGray
+        } catch {
+            $message = "DNF process priority restore $name pid=${processId}: $($_.Exception.Message)"
+            $failures.Add($message)
+            Write-Warning $message
+        }
+    }
+    return $failures.ToArray()
+}
+
+function Clear-SafeTemporaryDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][DateTime]$CutoffUtc
+    )
+
+    $deletedFiles = 0
+    $deletedDirectories = 0
+    [uint64]$reclaimedBytes = 0
+    $skippedItems = 0
+    $errors = New-Object 'System.Collections.Generic.List[string]'
+    $rootItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (-not [bool]$rootItem.PSIsContainer -or
+        [string]$rootItem.PSProvider.Name -cne 'FileSystem' -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "temporary root is not a plain filesystem directory: $Path"
+    }
+    $root = [IO.Path]::GetFullPath([string]$rootItem.FullName).TrimEnd('\')
+    $allowed = @(
+        [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Temp')).TrimEnd('\'),
+        [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'Temp')).TrimEnd('\')
+    )
+    if ($allowed -inotcontains $root) {
+        throw "temporary root is outside the fixed allowlist: $root"
+    }
+    $driveRoot = [IO.Path]::GetPathRoot($root)
+    $drive = New-Object -TypeName System.IO.DriveInfo `
+        -ArgumentList $driveRoot
+    if ($drive.DriveType -ne [IO.DriveType]::Fixed) {
+        throw "temporary root is not on a fixed local drive: $root"
+    }
+
+    $rootPrefix = $root + '\'
+    $pending = New-Object 'System.Collections.Generic.Stack[object]'
+    $directories = New-Object 'System.Collections.Generic.List[object]'
+    $pending.Push($rootItem)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        $directories.Add($directory)
+        try {
+            $children = @(Get-ChildItem -LiteralPath $directory.FullName `
+                -Force -ErrorAction Stop)
+        } catch {
+            if ($errors.Count -lt 20) {
+                $errors.Add("enumerate $($directory.FullName): $($_.Exception.Message)")
+            }
+            $skippedItems++
+            continue
+        }
+        foreach ($child in $children) {
+            try {
+                $childPath = [IO.Path]::GetFullPath([string]$child.FullName)
+                if (-not $childPath.StartsWith($rootPrefix,
+                        [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "item escaped the temporary root: $childPath"
+                }
+                if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    $skippedItems++
+                    continue
+                }
+                if ([bool]$child.PSIsContainer) {
+                    $pending.Push($child)
+                    continue
+                }
+                if ($child.LastWriteTimeUtc -ge $CutoffUtc -or
+                    $child.CreationTimeUtc -ge $CutoffUtc) {
+                    $skippedItems++
+                    continue
+                }
+                [uint64]$length = [uint64]$child.Length
+                Remove-Item -LiteralPath $child.FullName -Force `
+                    -ErrorAction Stop
+                $deletedFiles++
+                $reclaimedBytes += $length
+            } catch {
+                if ($errors.Count -lt 20) {
+                    $errors.Add("skip $($child.FullName): $($_.Exception.Message)")
+                }
+                $skippedItems++
+            }
+        }
+    }
+
+    foreach ($directory in @($directories | Sort-Object {
+            ([string]$_.FullName).Length
+        } -Descending)) {
+        $directoryPath = [IO.Path]::GetFullPath(
+            [string]$directory.FullName).TrimEnd('\')
+        if ($directoryPath -ieq $root -or
+            $directory.LastWriteTimeUtc -ge $CutoffUtc -or
+            $directory.CreationTimeUtc -ge $CutoffUtc) { continue }
+        try {
+            if (@(Get-ChildItem -LiteralPath $directory.FullName -Force `
+                    -ErrorAction Stop).Count -eq 0) {
+                Remove-Item -LiteralPath $directory.FullName -Force `
+                    -ErrorAction Stop
+                $deletedDirectories++
+            }
+        } catch {
+            if ($errors.Count -lt 20) {
+                $errors.Add("keep directory $($directory.FullName): $($_.Exception.Message)")
+            }
+            $skippedItems++
+        }
+    }
+
+    return [pscustomobject]@{
+        Root = $root
+        DeletedFiles = $deletedFiles
+        DeletedDirectories = $deletedDirectories
+        ReclaimedBytes = $reclaimedBytes
+        SkippedItems = $skippedItems
+        Errors = $errors.ToArray()
+    }
+}
+
+function Clear-SafeTemporaryFiles {
+    $cutoff = [DateTime]::UtcNow.AddHours(-$TemporaryFileMinimumAgeHours)
+    $roots = @(
+        (Join-Path $env:LOCALAPPDATA 'Temp'),
+        (Join-Path $env:SystemRoot 'Temp')
+    ) | Select-Object -Unique
+    $results = New-Object 'System.Collections.Generic.List[object]'
+    $rootErrors = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($root in $roots) {
+        try {
+            $result = Clear-SafeTemporaryDirectory -Path $root `
+                -CutoffUtc $cutoff
+            $results.Add($result)
+            Write-Host ("  temp cleaned: {0}; files={1} directories={2} reclaimed={3:N0} bytes skipped={4}" -f `
+                $result.Root, $result.DeletedFiles, $result.DeletedDirectories,
+                $result.ReclaimedBytes, $result.SkippedItems) `
+                -ForegroundColor DarkGray
+            foreach ($detail in @($result.Errors)) {
+                Write-Host "    kept: $detail" -ForegroundColor DarkYellow
+            }
+        } catch {
+            $message = "temporary root ${root}: $($_.Exception.Message)"
+            $rootErrors.Add($message)
+            Write-Warning $message
+        }
+    }
+    [uint64]$totalBytes = 0
+    $totalFiles = 0
+    $totalDirectories = 0
+    $totalSkipped = 0
+    foreach ($result in $results) {
+        $totalBytes += [uint64]$result.ReclaimedBytes
+        $totalFiles += [int]$result.DeletedFiles
+        $totalDirectories += [int]$result.DeletedDirectories
+        $totalSkipped += [int]$result.SkippedItems
+    }
+    return [pscustomobject]@{
+        CompletedUtc = [DateTime]::UtcNow.ToString('o')
+        MinimumAgeHours = $TemporaryFileMinimumAgeHours
+        RootsProcessed = $results.Count
+        DeletedFiles = $totalFiles
+        DeletedDirectories = $totalDirectories
+        ReclaimedBytes = $totalBytes
+        SkippedItems = $totalSkipped
+        Roots = $results.ToArray()
+        RootErrors = $rootErrors.ToArray()
+    }
+}
+
 function Initialize-AudioEndpointInterop {
     if ($null -ne ('G11GuestLite.AudioEndpoint' -as [type])) { return }
 
@@ -2293,6 +2598,486 @@ function Restore-UserLanguageListSnapshot {
     Set-WinUserLanguageList -LanguageList $restored -Force -ErrorAction Stop
 }
 
+function Initialize-NvidiaDrsInterop {
+    if ($null -ne ('G11GuestLite.NvidiaDrs' -as [type])) { return }
+
+    # The public NVIDIA NVAPI SDK defines PREFERRED_PSTATE_ID=0x1057EB71 and
+    # PREFERRED_PSTATE_PREFER_MAX=1. Resolve only the installed System32
+    # driver's nvapi64.dll and call its documented DRS surface. No DLL, driver,
+    # service, signing policy, or private nvlddmkm registry value is replaced.
+    Add-Type -Language CSharp -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace G11GuestLite
+{
+    public sealed class NvidiaPowerModeSnapshot
+    {
+        public bool SettingFound { get; set; }
+        public bool HasUserOverride { get; set; }
+        public uint CurrentValue { get; set; }
+        public uint SettingLocation { get; set; }
+    }
+
+    public static class NvidiaDrs
+    {
+        private const uint PreferredPstateId = 0x1057EB71u;
+        private const uint PreferMaximumPerformance = 1u;
+        private const int NvapiOk = 0;
+        private const int NvapiSettingNotFound = -160;
+        private const uint LoadLibrarySearchDllLoadDir = 0x00000100u;
+        private const uint LoadLibrarySearchSystem32 = 0x00000800u;
+        private const int DrsDwordType = 0;
+        private const int DrsSettingBytes = 12320;
+
+        [StructLayout(LayoutKind.Sequential, Pack = 4)]
+        private struct DrsSetting
+        {
+            public uint Version;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 2048,
+                ArraySubType = UnmanagedType.U2)]
+            public ushort[] SettingName;
+            public uint SettingId;
+            public int SettingType;
+            public uint SettingLocation;
+            public uint IsCurrentPredefined;
+            public uint IsPredefinedValid;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4100,
+                ArraySubType = UnmanagedType.U1)]
+            public byte[] PredefinedValue;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4100,
+                ArraySubType = UnmanagedType.U1)]
+            public byte[] CurrentValue;
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate IntPtr QueryInterfaceDelegate(uint interfaceId);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int StatusOnlyDelegate();
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int CreateSessionDelegate(out IntPtr session);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int SessionDelegate(IntPtr session);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int GetBaseProfileDelegate(IntPtr session,
+            out IntPtr profile);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int GetSettingDelegate(IntPtr session, IntPtr profile,
+            uint settingId, [In, Out] ref DrsSetting setting);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int SetSettingDelegate(IntPtr session, IntPtr profile,
+            [In] ref DrsSetting setting);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int DeleteSettingDelegate(IntPtr session,
+            IntPtr profile, uint settingId);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl,
+            CharSet = CharSet.Ansi)]
+        private delegate int ErrorMessageDelegate(int status,
+            [Out] StringBuilder message);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        private static extern uint GetSystemDirectory(StringBuilder buffer,
+            uint size);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        private static extern IntPtr LoadLibraryEx(string fileName,
+            IntPtr file, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi,
+            SetLastError = true)]
+        private static extern IntPtr GetProcAddress(IntPtr module,
+            string procedureName);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FreeLibrary(IntPtr module);
+
+        private sealed class Context : IDisposable
+        {
+            private IntPtr module;
+            private bool initialized;
+            private QueryInterfaceDelegate queryInterface;
+
+            internal StatusOnlyDelegate Unload;
+            internal CreateSessionDelegate CreateSession;
+            internal SessionDelegate DestroySession;
+            internal SessionDelegate LoadSettings;
+            internal SessionDelegate SaveSettings;
+            internal GetBaseProfileDelegate GetBaseProfile;
+            internal GetSettingDelegate GetSetting;
+            internal SetSettingDelegate SetSetting;
+            internal DeleteSettingDelegate DeleteSetting;
+            internal ErrorMessageDelegate GetErrorMessage;
+
+            internal Context()
+            {
+                try
+                {
+                    StringBuilder directory = new StringBuilder(32768);
+                    uint length = GetSystemDirectory(directory,
+                        (uint)directory.Capacity);
+                    if (length == 0 || length >= (uint)directory.Capacity)
+                    {
+                        throw new InvalidOperationException(
+                            "Windows System32 path is unavailable");
+                    }
+                    string path = Path.Combine(directory.ToString(),
+                        "nvapi64.dll");
+                    module = LoadLibraryEx(path, IntPtr.Zero,
+                        LoadLibrarySearchDllLoadDir |
+                        LoadLibrarySearchSystem32);
+                    if (module == IntPtr.Zero)
+                    {
+                        throw new InvalidOperationException(
+                            "the installed System32 NVIDIA NVAPI is unavailable (Win32 " +
+                            Marshal.GetLastWin32Error().ToString() + ")");
+                    }
+                    IntPtr queryPointer = GetProcAddress(module,
+                        "nvapi_QueryInterface");
+                    if (queryPointer == IntPtr.Zero)
+                    {
+                        throw new InvalidOperationException(
+                            "nvapi_QueryInterface is unavailable");
+                    }
+                    queryInterface = (QueryInterfaceDelegate)
+                        Marshal.GetDelegateForFunctionPointer(queryPointer,
+                            typeof(QueryInterfaceDelegate));
+                    StatusOnlyDelegate initialize = Resolve<StatusOnlyDelegate>(
+                        0x0150E828u, "NvAPI_Initialize");
+                    Unload = Resolve<StatusOnlyDelegate>(0xD22BDD7Eu,
+                        "NvAPI_Unload");
+                    GetErrorMessage = Resolve<ErrorMessageDelegate>(0x6C2D048Cu,
+                        "NvAPI_GetErrorMessage");
+                    CreateSession = Resolve<CreateSessionDelegate>(0x0694D52Eu,
+                        "NvAPI_DRS_CreateSession");
+                    DestroySession = Resolve<SessionDelegate>(0xDAD9CFF8u,
+                        "NvAPI_DRS_DestroySession");
+                    LoadSettings = Resolve<SessionDelegate>(0x375DBD6Bu,
+                        "NvAPI_DRS_LoadSettings");
+                    SaveSettings = Resolve<SessionDelegate>(0xFCBC7E14u,
+                        "NvAPI_DRS_SaveSettings");
+                    GetBaseProfile = Resolve<GetBaseProfileDelegate>(0xDA8466A0u,
+                        "NvAPI_DRS_GetBaseProfile");
+                    GetSetting = Resolve<GetSettingDelegate>(0x73BF8338u,
+                        "NvAPI_DRS_GetSetting");
+                    SetSetting = Resolve<SetSettingDelegate>(0x577DD202u,
+                        "NvAPI_DRS_SetSetting");
+                    DeleteSetting = Resolve<DeleteSettingDelegate>(0xE4A26362u,
+                        "NvAPI_DRS_DeleteProfileSetting");
+                    Check(initialize(), "NvAPI_Initialize");
+                    initialized = true;
+                }
+                catch
+                {
+                    if (module != IntPtr.Zero)
+                    {
+                        FreeLibrary(module);
+                        module = IntPtr.Zero;
+                    }
+                    throw;
+                }
+            }
+
+            private T Resolve<T>(uint id, string name) where T : class
+            {
+                IntPtr pointer = queryInterface(id);
+                if (pointer == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException(name +
+                        " is unsupported by the installed NVIDIA driver");
+                }
+                return (T)(object)Marshal.GetDelegateForFunctionPointer(
+                    pointer, typeof(T));
+            }
+
+            internal void Check(int status, string operation)
+            {
+                if (status == NvapiOk) return;
+                string detail = String.Empty;
+                if (GetErrorMessage != null)
+                {
+                    try
+                    {
+                        StringBuilder message = new StringBuilder(64);
+                        GetErrorMessage(status, message);
+                        detail = message.ToString();
+                    }
+                    catch { }
+                }
+                throw new InvalidOperationException(operation + " failed: " +
+                    status.ToString() +
+                    (detail.Length == 0 ? String.Empty : " (" + detail + ")"));
+            }
+
+            public void Dispose()
+            {
+                if (initialized && Unload != null)
+                {
+                    try { Unload(); } catch { }
+                    initialized = false;
+                }
+                if (module != IntPtr.Zero)
+                {
+                    FreeLibrary(module);
+                    module = IntPtr.Zero;
+                }
+            }
+        }
+
+        private static DrsSetting NewSetting()
+        {
+            int bytes = Marshal.SizeOf(typeof(DrsSetting));
+            if (bytes != DrsSettingBytes)
+            {
+                throw new InvalidOperationException(
+                    "unexpected NVDRS_SETTING size: " + bytes.ToString());
+            }
+            DrsSetting setting = new DrsSetting();
+            setting.Version = (uint)bytes | 0x00010000u;
+            setting.SettingName = new ushort[2048];
+            setting.PredefinedValue = new byte[4100];
+            setting.CurrentValue = new byte[4100];
+            return setting;
+        }
+
+        private static uint ReadDword(byte[] value)
+        {
+            if (value == null || value.Length < 4)
+            {
+                throw new InvalidOperationException(
+                    "NVIDIA DRS DWORD buffer is invalid");
+            }
+            return BitConverter.ToUInt32(value, 0);
+        }
+
+        private static void WriteDword(byte[] target, uint value)
+        {
+            byte[] source = BitConverter.GetBytes(value);
+            Array.Copy(source, 0, target, 0, source.Length);
+        }
+
+        private static NvidiaPowerModeSnapshot ReadPowerMode(Context context)
+        {
+            IntPtr session = IntPtr.Zero;
+            try
+            {
+                context.Check(context.CreateSession(out session),
+                    "NvAPI_DRS_CreateSession");
+                context.Check(context.LoadSettings(session),
+                    "NvAPI_DRS_LoadSettings");
+                IntPtr profile;
+                context.Check(context.GetBaseProfile(session, out profile),
+                    "NvAPI_DRS_GetBaseProfile");
+                DrsSetting setting = NewSetting();
+                int status = context.GetSetting(session, profile,
+                    PreferredPstateId, ref setting);
+                if (status == NvapiSettingNotFound)
+                {
+                    return new NvidiaPowerModeSnapshot {
+                        SettingFound = false,
+                        HasUserOverride = false,
+                        CurrentValue = 0u,
+                        SettingLocation = 0u
+                    };
+                }
+                context.Check(status, "NvAPI_DRS_GetSetting");
+                if (setting.SettingType != DrsDwordType)
+                {
+                    throw new InvalidOperationException(
+                        "NVIDIA power mode is not a DWORD setting");
+                }
+                return new NvidiaPowerModeSnapshot {
+                    SettingFound = true,
+                    HasUserOverride = setting.IsCurrentPredefined == 0u,
+                    CurrentValue = ReadDword(setting.CurrentValue),
+                    SettingLocation = setting.SettingLocation
+                };
+            }
+            finally
+            {
+                if (session != IntPtr.Zero)
+                {
+                    try { context.DestroySession(session); } catch { }
+                }
+            }
+        }
+
+        private static void WritePowerMode(Context context, uint value)
+        {
+            IntPtr session = IntPtr.Zero;
+            try
+            {
+                context.Check(context.CreateSession(out session),
+                    "NvAPI_DRS_CreateSession");
+                context.Check(context.LoadSettings(session),
+                    "NvAPI_DRS_LoadSettings");
+                IntPtr profile;
+                context.Check(context.GetBaseProfile(session, out profile),
+                    "NvAPI_DRS_GetBaseProfile");
+                DrsSetting setting = NewSetting();
+                setting.SettingId = PreferredPstateId;
+                setting.SettingType = DrsDwordType;
+                WriteDword(setting.CurrentValue, value);
+                context.Check(context.SetSetting(session, profile, ref setting),
+                    "NvAPI_DRS_SetSetting");
+                context.Check(context.SaveSettings(session),
+                    "NvAPI_DRS_SaveSettings");
+            }
+            finally
+            {
+                if (session != IntPtr.Zero)
+                {
+                    try { context.DestroySession(session); } catch { }
+                }
+            }
+        }
+
+        private static void DeletePowerModeOverride(Context context)
+        {
+            IntPtr session = IntPtr.Zero;
+            try
+            {
+                context.Check(context.CreateSession(out session),
+                    "NvAPI_DRS_CreateSession");
+                context.Check(context.LoadSettings(session),
+                    "NvAPI_DRS_LoadSettings");
+                IntPtr profile;
+                context.Check(context.GetBaseProfile(session, out profile),
+                    "NvAPI_DRS_GetBaseProfile");
+                int status = context.DeleteSetting(session, profile,
+                    PreferredPstateId);
+                if (status != NvapiOk && status != NvapiSettingNotFound)
+                {
+                    context.Check(status,
+                        "NvAPI_DRS_DeleteProfileSetting");
+                }
+                context.Check(context.SaveSettings(session),
+                    "NvAPI_DRS_SaveSettings");
+            }
+            finally
+            {
+                if (session != IntPtr.Zero)
+                {
+                    try { context.DestroySession(session); } catch { }
+                }
+            }
+        }
+
+        public static NvidiaPowerModeSnapshot ReadPowerMode()
+        {
+            using (Context context = new Context())
+            {
+                return ReadPowerMode(context);
+            }
+        }
+
+        public static void SetMaximumPerformance()
+        {
+            using (Context context = new Context())
+            {
+                WritePowerMode(context, PreferMaximumPerformance);
+            }
+            NvidiaPowerModeSnapshot current = ReadPowerMode();
+            if (!current.SettingFound || current.CurrentValue !=
+                PreferMaximumPerformance || !current.HasUserOverride)
+            {
+                throw new InvalidOperationException(
+                    "NVIDIA maximum-performance verification failed");
+            }
+        }
+
+        public static void RestorePowerMode(bool hadUserOverride,
+            uint originalValue)
+        {
+            using (Context context = new Context())
+            {
+                if (hadUserOverride)
+                {
+                    WritePowerMode(context, originalValue);
+                }
+                else
+                {
+                    DeletePowerModeOverride(context);
+                }
+            }
+            NvidiaPowerModeSnapshot current = ReadPowerMode();
+            if (hadUserOverride)
+            {
+                if (!current.SettingFound || !current.HasUserOverride ||
+                    current.CurrentValue != originalValue)
+                {
+                    throw new InvalidOperationException(
+                        "original NVIDIA power-mode override was not restored");
+                }
+            }
+            else if (current.SettingFound && current.HasUserOverride)
+            {
+                throw new InvalidOperationException(
+                    "NVIDIA power-mode override was not removed");
+            }
+        }
+    }
+}
+'@
+}
+
+function Get-NvidiaPowerModeSnapshot {
+    $result = [ordered]@{
+        Available = $false
+        SettingFound = $false
+        HasUserOverride = $false
+        CurrentValue = 0
+        SettingLocation = 0
+        Error = ''
+    }
+    try {
+        Initialize-NvidiaDrsInterop
+        $snapshot = [G11GuestLite.NvidiaDrs]::ReadPowerMode()
+        $result.SettingFound = [bool]$snapshot.SettingFound
+        $result.HasUserOverride = [bool]$snapshot.HasUserOverride
+        $result.CurrentValue = [uint32]$snapshot.CurrentValue
+        $result.SettingLocation = [uint32]$snapshot.SettingLocation
+        $result.Available = $true
+    } catch {
+        $result.Error = $_.Exception.Message
+    }
+    return [pscustomobject]$result
+}
+
+function Set-NvidiaMaximumPerformance {
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        Initialize-NvidiaDrsInterop
+        [G11GuestLite.NvidiaDrs]::SetMaximumPerformance()
+        $current = Get-NvidiaPowerModeSnapshot
+        if (-not [bool]$current.Available -or
+            -not [bool]$current.SettingFound -or
+            -not [bool]$current.HasUserOverride -or
+            [uint32]$current.CurrentValue -ne $NvidiaPreferMaximumPerformance) {
+            throw "NVAPI verification failed: available=$($current.Available) found=$($current.SettingFound) override=$($current.HasUserOverride) value=$($current.CurrentValue) error=$($current.Error)"
+        }
+        Write-Host '  NVIDIA power management mode: Prefer maximum performance' `
+            -ForegroundColor DarkGray
+    } catch {
+        $message = "NVIDIA maximum-performance mode: $($_.Exception.Message)"
+        $failures.Add($message)
+        Write-Warning $message
+    }
+    return $failures.ToArray()
+}
+
+function Restore-NvidiaPowerModeSnapshot {
+    param([AllowNull()][object]$Snapshot)
+
+    if ($null -eq $Snapshot -or -not [bool]$Snapshot.Available) { return }
+    Initialize-NvidiaDrsInterop
+    [G11GuestLite.NvidiaDrs]::RestorePowerMode(
+        [bool]$Snapshot.HasUserOverride,
+        [uint32]$Snapshot.CurrentValue
+    )
+}
+
 function Get-PowerSnapshot {
     $result = [ordered]@{
         Available = $false
@@ -2521,7 +3306,12 @@ This full Windows 10 guest profile will:
 - mute the default playback endpoint without disabling Windows Audio
 - order en-US/US first and zh-CN/Microsoft Pinyin second
 - remove reviewed consumer apps for this user
+- enable Game Mode while disabling Xbox background recording
 - disable reviewed optional services/tasks and select High performance power
+- set NVIDIA global power management to Prefer maximum performance
+- give exact allowlisted DNF images High (never Realtime) priority
+- permanently delete plain temporary files older than 24 hours from the
+  current user's LocalAppData\Temp and Windows\Temp
 
 The guest will have no built-in antivirus/firewall and will not receive security updates.
 Disabling MpsSvc startup can affect network discovery, IPsec, or Windows components.
@@ -2692,6 +3482,21 @@ function Get-VerificationIssues {
     } elseif ([string]$power.ActiveScheme -ine $HighPerformanceScheme) {
         $issues.Add("High performance power scheme is not active: $($power.ActiveScheme)")
     }
+    $nvidia = Get-NvidiaPowerModeSnapshot
+    if (-not [bool]$nvidia.Available) {
+        $issues.Add("NVIDIA power-management mode cannot be read: $($nvidia.Error)")
+    } elseif (-not [bool]$nvidia.SettingFound -or
+        -not [bool]$nvidia.HasUserOverride -or
+        [uint32]$nvidia.CurrentValue -ne $NvidiaPreferMaximumPerformance) {
+        $issues.Add("NVIDIA global power-management mode is not Prefer maximum performance: found=$($nvidia.SettingFound) override=$($nvidia.HasUserOverride) value=$($nvidia.CurrentValue)")
+    }
+    foreach ($snapshot in @(Get-DnfProcessSnapshots)) {
+        if (-not [bool]$snapshot.Available) {
+            $issues.Add("DNF process priority cannot be read: $($snapshot.Name) pid=$($snapshot.Id) error=$($snapshot.Error)")
+        } elseif ([string]$snapshot.PriorityClass -cne 'High') {
+            $issues.Add("DNF process does not have High priority: $($snapshot.Name) pid=$($snapshot.Id) priority=$($snapshot.PriorityClass)")
+        }
+    }
     foreach ($plan in $ProcessPlan) {
         if (@(Get-Process -Name ([string]$plan.Name) `
             -ErrorAction SilentlyContinue).Count -gt 0) {
@@ -2766,6 +3571,42 @@ function New-AuditReport {
             (@($_.InputMethodTips) -join ',')
     }) -join ';'
     $lines.Add("userLanguageListAvailable=$($languageList.Available) order=$languageOrder desired=en-US/US,zh-CN/Microsoft-Pinyin error=$($languageList.Error)")
+    $nvidia = Get-NvidiaPowerModeSnapshot
+    $lines.Add("nvidiaDrsAvailable=$($nvidia.Available) settingId=0x$($NvidiaPreferredPstateId.ToString('X8')) found=$($nvidia.SettingFound) userOverride=$($nvidia.HasUserOverride) currentValue=$($nvidia.CurrentValue) desiredValue=$NvidiaPreferMaximumPerformance desired=Prefer-maximum-performance location=$($nvidia.SettingLocation) error=$($nvidia.Error)")
+    $dnfSnapshots = @(Get-DnfProcessSnapshots)
+    if ($dnfSnapshots.Count -eq 0) {
+        $lines.Add('dnfProcessFound=False desiredPriority=High persistentImages=DNF.exe,DNFClient.exe,DNFChina.exe,DNFLauncher.exe')
+    } else {
+        foreach ($snapshot in $dnfSnapshots) {
+            $lines.Add("dnfProcessFound=True name=$($snapshot.Name) pid=$($snapshot.Id) priority=$($snapshot.PriorityClass) desiredPriority=High available=$($snapshot.Available) error=$($snapshot.Error)")
+        }
+    }
+    if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+        try {
+            $reportState = Read-State
+            $cleanupProperty = $reportState.PSObject.Properties[
+                'LastTemporaryCleanup']
+            if ($null -ne $cleanupProperty) {
+                $cleanup = $cleanupProperty.Value
+                $lines.Add("lastTemporaryCleanup=$($cleanup.CompletedUtc) minimumAgeHours=$($cleanup.MinimumAgeHours) rootsProcessed=$($cleanup.RootsProcessed) deletedFiles=$($cleanup.DeletedFiles) deletedDirectories=$($cleanup.DeletedDirectories) reclaimedBytes=$($cleanup.ReclaimedBytes) skippedItems=$($cleanup.SkippedItems) rootErrors=$(@($cleanup.RootErrors).Count) reversible=False")
+                foreach ($rootResult in @($cleanup.Roots)) {
+                    $lines.Add("temporaryRoot=$($rootResult.Root) deletedFiles=$($rootResult.DeletedFiles) deletedDirectories=$($rootResult.DeletedDirectories) reclaimedBytes=$($rootResult.ReclaimedBytes) skippedItems=$($rootResult.SkippedItems) errors=$(@($rootResult.Errors).Count)")
+                    foreach ($detail in @($rootResult.Errors)) {
+                        $lines.Add("temporaryItemKept=$detail")
+                    }
+                }
+                foreach ($detail in @($cleanup.RootErrors)) {
+                    $lines.Add("temporaryRootKept=$detail")
+                }
+            } else {
+                $lines.Add('lastTemporaryCleanup=<not-run> reversible=False')
+            }
+        } catch {
+            $lines.Add("lastTemporaryCleanup=<unreadable> error=$($_.Exception.Message) reversible=False")
+        }
+    } else {
+        $lines.Add('lastTemporaryCleanup=<not-run> reversible=False')
+    }
     if ($Label -in @('before-apply', 'after-apply')) {
         # Apply already builds its rollback inventory separately. Repeating
         # every scheduled-task/Appx/CIM query here used several minutes on
@@ -2899,7 +3740,7 @@ function New-AuditReport {
     }
     $lines.Add('')
     $lines.Add('[protected by design]')
-    $lines.Add('BCD and boot integrity; kernel and NVIDIA/vGPU drivers; Defender/firewall service files and ACLs; BFE and other core networking services; protected-but-inert DoSvc/UpdateOrchestrator objects; firewall saved rules; Windows Audio service/device (only the default playback endpoint is muted); printing; BITS; CryptSvc; AppXSvc; ClipSVC; Microsoft Edge/WebView2 application binaries; Calculator; Photos; Paint; Notepad; DesktopAppInstaller; VCLibs/.NET/UI.Xaml dependencies; provisioned Appx payloads.')
+    $lines.Add('BCD and boot integrity; kernel and NVIDIA/vGPU driver files (only the installed driver user-mode NVAPI DRS setting is changed); Defender/firewall service files and ACLs; BFE and other core networking services; protected-but-inert DoSvc/UpdateOrchestrator objects; firewall saved rules; Windows Audio service/device (only the default playback endpoint is muted); printing; BITS; CryptSvc; AppXSvc; ClipSVC; Microsoft Edge/WebView2 application binaries; Calculator; Photos; Paint; Notepad; DesktopAppInstaller; VCLibs/.NET/UI.Xaml dependencies; provisioned Appx payloads.')
 
     return (Save-AuditReportLines -Lines $lines -Label $Label)
 }
@@ -2921,6 +3762,8 @@ function New-OriginalState {
         FirewallProfiles = @(Get-FirewallSnapshots)
         AudioEndpoint = Get-AudioEndpointSnapshot
         UserLanguageList = Get-UserLanguageListSnapshot
+        NvidiaPowerMode = Get-NvidiaPowerModeSnapshot
+        DnfProcesses = @(Get-DnfProcessSnapshots)
         Registry = @(Get-AllRegistryPlans | ForEach-Object { Get-RegistrySnapshot $_ })
         Services = @($servicePlans | ForEach-Object { Get-ServiceSnapshot $_ })
         Tasks = @($taskPlans | ForEach-Object { Get-TaskSnapshot $_ })
@@ -2996,6 +3839,16 @@ function Ensure-CurrentBaseline {
     if ($null -eq $State.PSObject.Properties['UserLanguageList']) {
         Set-StateProperty -State $State -Name UserLanguageList `
             -Value (Get-UserLanguageListSnapshot)
+        $changed = $true
+    }
+    if ($null -eq $State.PSObject.Properties['NvidiaPowerMode']) {
+        Set-StateProperty -State $State -Name NvidiaPowerMode `
+            -Value (Get-NvidiaPowerModeSnapshot)
+        $changed = $true
+    }
+    if ($null -eq $State.PSObject.Properties['DnfProcesses']) {
+        Set-StateProperty -State $State -Name DnfProcesses `
+            -Value @(Get-DnfProcessSnapshots)
         $changed = $true
     }
 
@@ -3123,7 +3976,7 @@ function Ensure-CurrentBaseline {
 
     if ($changed) {
         Save-StateAtomically $State
-        Write-Host 'Upgraded the original rollback baseline for Guest Lite 2.5.' `
+        Write-Host 'Upgraded the original rollback baseline for Guest Lite 2.6.' `
             -ForegroundColor Yellow
         return (Read-State)
     }
@@ -3174,7 +4027,7 @@ function Invoke-Apply {
         $failures.Add($failure)
     }
 
-    Write-Host '[1/9] Applying policy values/input order and disabling startup entries' `
+    Write-Host '[1/12] Applying policy values/input order and disabling startup entries' `
         -ForegroundColor Cyan
     foreach ($failure in @(Restore-RetiredRegistryValues $state)) {
         $failures.Add($failure)
@@ -3202,13 +4055,13 @@ function Invoke-Apply {
         $failures.Add($failure)
     }
 
-    Write-Host '[2/9] Disabling live Defender scanning and cancelling current scan' `
+    Write-Host '[2/12] Disabling live Defender scanning and cancelling current scan' `
         -ForegroundColor Cyan
     foreach ($failure in @(Set-DefenderRuntimePreferences)) {
         $failures.Add($failure)
     }
 
-    Write-Host '[3/9] Disabling Windows Firewall profiles and MpsSvc startup' `
+    Write-Host '[3/12] Disabling Windows Firewall profiles and MpsSvc startup' `
         -ForegroundColor Cyan
     foreach ($failure in @(Disable-FirewallProfiles)) {
         $failures.Add($failure)
@@ -3217,34 +4070,55 @@ function Invoke-Apply {
         $failures.Add($failure)
     }
 
-    Write-Host '[4/9] Disabling reviewed services' -ForegroundColor Cyan
+    Write-Host '[4/12] Disabling reviewed services' -ForegroundColor Cyan
     foreach ($failure in @(Disable-PlannedServices)) { $failures.Add($failure) }
 
-    Write-Host '[5/9] Disabling reviewed scheduled tasks' -ForegroundColor Cyan
+    Write-Host '[5/12] Disabling reviewed scheduled tasks' -ForegroundColor Cyan
     foreach ($failure in @(Disable-PlannedTasks)) { $failures.Add($failure) }
 
-    Write-Host '[6/9] Removing reviewed apps for the current user' `
+    Write-Host '[6/12] Removing reviewed apps for the current user' `
         -ForegroundColor Cyan
     foreach ($failure in @(Remove-PlannedApps)) {
         $failures.Add($failure)
     }
 
-    Write-Host '[7/9] Stopping reviewed background processes' `
+    Write-Host '[7/12] Stopping reviewed background processes' `
         -ForegroundColor Cyan
     foreach ($failure in @(Stop-PlannedProcesses)) {
         $failures.Add($failure)
     }
 
-    Write-Host '[8/9] Muting the default playback endpoint' `
+    Write-Host '[8/12] Muting the default playback endpoint' `
         -ForegroundColor Cyan
     foreach ($failure in @(Set-DefaultAudioMuted -Muted $true)) {
         $failures.Add($failure)
     }
 
-    Write-Host '[9/9] Selecting the built-in High performance power plan' `
+    Write-Host '[9/12] Selecting the built-in High performance power plan' `
         -ForegroundColor Cyan
     foreach ($failure in @(Set-PerformancePowerPlan)) {
         $failures.Add($failure)
+    }
+
+    Write-Host '[10/12] Setting NVIDIA global power mode to Prefer maximum performance' `
+        -ForegroundColor Cyan
+    foreach ($failure in @(Set-NvidiaMaximumPerformance)) {
+        $failures.Add($failure)
+    }
+
+    Write-Host '[11/12] Checking allowlisted DNF processes and applying High priority' `
+        -ForegroundColor Cyan
+    foreach ($failure in @(Set-DnfProcessPriority)) {
+        $failures.Add($failure)
+    }
+
+    Write-Host '[12/12] Clearing allowlisted temporary files older than 24 hours' `
+        -ForegroundColor Cyan
+    $cleanup = Clear-SafeTemporaryFiles
+    Set-StateProperty -State $state -Name LastTemporaryCleanup -Value $cleanup
+    Save-StateAtomically $state
+    if ([int]$cleanup.RootsProcessed -eq 0) {
+        $failures.Add('temporary cleanup: neither fixed allowlisted root could be processed')
     }
 
     if (-not $UnattendedClone) {
@@ -3399,6 +4273,16 @@ function Invoke-Enforce {
         $log.Add("failure=$failure")
     }
     $log.Add('power=high-performance')
+    foreach ($failure in @(Set-NvidiaMaximumPerformance)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    $log.Add('nvidiaPowerMode=prefer-maximum-performance')
+    foreach ($failure in @(Set-DnfProcessPriority)) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    $log.Add('dnfPriority=high-if-running')
     $log.Add("result=$(if ($failures.Count -eq 0) { 'pass' } else { 'partial' }) failures=$($failures.Count)")
     $log | Set-Content -LiteralPath $EnforcementLogPath -Encoding UTF8
     if ($failures.Count -gt 0) { return 3 }
@@ -3412,7 +4296,7 @@ function Invoke-Rollback {
     $state = Read-State
     $failures = New-Object 'System.Collections.Generic.List[string]'
 
-    Write-Host '[1/11] Removing the Guest Lite enforcement task' -ForegroundColor Cyan
+    Write-Host '[1/13] Removing the Guest Lite enforcement task' -ForegroundColor Cyan
     try {
         Remove-EnforcementTask $state.EnforcementTask
     } catch {
@@ -3421,13 +4305,13 @@ function Invoke-Rollback {
         Write-Warning $message
     }
 
-    Write-Host '[2/11] Restoring native local-policy files' -ForegroundColor Cyan
+    Write-Host '[2/13] Restoring native local-policy files' -ForegroundColor Cyan
     foreach ($failure in @(Restore-PolicyFileSnapshots $state.PolicyFiles)) {
         $failures.Add($failure)
         Write-Warning $failure
     }
 
-    Write-Host '[3/11] Restoring the original user language/input order' `
+    Write-Host '[3/13] Restoring the original user language/input order' `
         -ForegroundColor Cyan
     if ($null -ne $state.PSObject.Properties['UserLanguageList']) {
         try { Restore-UserLanguageListSnapshot $state.UserLanguageList } catch {
@@ -3437,7 +4321,7 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[4/11] Restoring registry policy/startup values' -ForegroundColor Cyan
+    Write-Host '[4/13] Restoring registry policy/startup values' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Registry)) {
         try { Restore-RegistrySnapshot $snapshot } catch {
             $message = "policy $($snapshot.Path)\$($snapshot.Name): $($_.Exception.Message)"
@@ -3446,7 +4330,17 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[5/11] Restoring Defender runtime preferences' -ForegroundColor Cyan
+    Write-Host '[5/13] Restoring the NVIDIA global power-mode baseline' `
+        -ForegroundColor Cyan
+    if ($null -ne $state.PSObject.Properties['NvidiaPowerMode']) {
+        try { Restore-NvidiaPowerModeSnapshot $state.NvidiaPowerMode } catch {
+            $message = "NVIDIA power mode: $($_.Exception.Message)"
+            $failures.Add($message)
+            Write-Warning $message
+        }
+    }
+
+    Write-Host '[6/13] Restoring Defender runtime preferences' -ForegroundColor Cyan
     $defenderSnapshots = @()
     if ($null -ne $state.PSObject.Properties['DefenderPreferences']) {
         $defenderSnapshots = @($state.DefenderPreferences)
@@ -3457,7 +4351,7 @@ function Invoke-Rollback {
         $failures.Add($failure)
     }
 
-    Write-Host '[6/11] Restoring service startup/running state' -ForegroundColor Cyan
+    Write-Host '[7/13] Restoring service startup/running state' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Services)) {
         try { Restore-ServiceSnapshot $snapshot } catch {
             $message = "service $($snapshot.Name): $($_.Exception.Message)"
@@ -3466,7 +4360,7 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[7/11] Restoring Windows Firewall profiles' -ForegroundColor Cyan
+    Write-Host '[8/13] Restoring Windows Firewall profiles' -ForegroundColor Cyan
     $firewallSnapshots = @()
     if ($null -ne $state.PSObject.Properties['FirewallProfiles']) {
         $firewallSnapshots = @($state.FirewallProfiles)
@@ -3477,7 +4371,7 @@ function Invoke-Rollback {
         $failures.Add($failure)
     }
 
-    Write-Host '[8/11] Restoring scheduled task enabled state' -ForegroundColor Cyan
+    Write-Host '[9/13] Restoring scheduled task enabled state' -ForegroundColor Cyan
     foreach ($snapshot in @($state.Tasks)) {
         try { Restore-TaskSnapshot $snapshot } catch {
             $message = "task $($snapshot.Path)$($snapshot.Name): $($_.Exception.Message)"
@@ -3486,13 +4380,13 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[9/11] Re-registering removed current-user apps' `
+    Write-Host '[10/13] Re-registering removed current-user apps' `
         -ForegroundColor Cyan
     foreach ($failure in @(Restore-PlannedApps @($state.Apps))) {
         $failures.Add($failure)
     }
 
-    Write-Host '[10/11] Restoring the original audio mute state' `
+    Write-Host '[11/13] Restoring the original audio mute state' `
         -ForegroundColor Cyan
     if ($null -ne $state.PSObject.Properties['AudioEndpoint']) {
         try { Restore-AudioEndpointSnapshot $state.AudioEndpoint } catch {
@@ -3502,7 +4396,17 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[11/11] Restoring the original power scheme' -ForegroundColor Cyan
+    Write-Host '[12/13] Restoring priorities of DNF processes that survived since Apply' `
+        -ForegroundColor Cyan
+    if ($null -ne $state.PSObject.Properties['DnfProcesses']) {
+        foreach ($failure in @(
+            Restore-DnfProcessSnapshots @($state.DnfProcesses)
+        )) {
+            $failures.Add($failure)
+        }
+    }
+
+    Write-Host '[13/13] Restoring the original power scheme' -ForegroundColor Cyan
     if ($null -ne $state.PSObject.Properties['Power']) {
         try { Restore-PowerSnapshot $state.Power } catch {
             $message = "power scheme: $($_.Exception.Message)"
@@ -3510,6 +4414,9 @@ function Invoke-Rollback {
             Write-Warning $message
         }
     }
+
+    Write-Host 'Temporary files deleted during Apply are not recreated by Rollback.' `
+        -ForegroundColor Yellow
 
     $null = New-AuditReport 'after-rollback'
     if ($failures.Count -gt 0) {

@@ -57,9 +57,10 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 `autorun.inf` 覆盖名称，也不创建或预分配宿主机镜像。它和任意 host 目录 U 盘均为
 只读 VVFAT/USB Mass Storage，不需要 Windows 额外驱动。详见
 [`../docs/G11-USB-DIRECTORY.md`](../docs/G11-USB-DIRECTORY.md)。
-`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.5.2；Defender、防火墙服务启动、
+`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.6.0；Defender、防火墙服务启动、
 系统/软件更新、OneDrive、资讯天气、通知、消费 App、默认静音、en-US/US 第一和
-Microsoft Pinyin 第二及性能项的 VM1
+Microsoft Pinyin 第二、游戏模式/Game DVR、高性能电源、NVIDIA 最高性能、DNF High
+优先级和固定 Temp 旧文件清理的 VM1
 傻瓜验收与回滚见
 [`../docs/G11-GUEST-LITE.md`](../docs/G11-GUEST-LITE.md)。
 新版 `VgpuPortable.exe` 已在同一次双击中应用可回滚的登录启动优化。只有仍使用

@@ -666,15 +666,16 @@ cat <<EOF
   monitor:     ${MONITOR_SYNC_RESULT}
   guest:       independent generalized Windows identity
   portable:    C:\ProgramData\VMate\G11\VgpuPortable.exe
-  Guest Lite:  pinned 2.5.2 / audio muted / notifications off / taskbar search hidden / en-US first + Pinyin second / automatic / exact rollback baseline
+  Guest Lite:  pinned 2.6.0 / Game Mode / Game DVR off / NVIDIA max performance / DNF High-on-launch / stale Temp cleaned / reviewed background processes stopped / audio muted / automatic
   system NVAPI: per-VM read-only ISO / ${SYSTEM_CONTRACT_ID}
   DLS:         dls.gvmates.com:443
 
 首次启动会自动跳过 OOBE、运行一次授权版 VgpuPortable.exe、应用经过内容校验的
-Guest Lite 2.5.2（母盘封装前必须手工关闭篡改防护）、安装该 VM
+Guest Lite 2.6.0（母盘封装前必须手工关闭篡改防护）、安装该 VM
 专属的系统 NVAPI/显示器投影并自动重启；重启后由 SYSTEM 自动验收
 GRID 538.33 / DEV_1E30 / Code 0 / Licensed / x86+x64 NVAPI，以及 MpsSvc
-Disabled/Stopped、BFE 保留运行和 Guest Lite 回滚基线，成功后完整关机。
+Disabled/Stopped、BFE 保留运行、游戏模式/Game DVR、NVIDIA 最高性能、DNF High、
+Temp 清理回执和 Guest Lite 回滚基线，成功后完整关机。
 主机名按 V-11 规则规范为 DESKTOP-XXXXXXX（取本 VM UUID 去横线后的前 7 位）。VM-bound ISO 只在
 首次初始化短暂显示为审核过的 HL-DT-ST 光驱，载荷复制后会自动弹出并热拔；
 此后普通启动没有光驱。显示器 live 名称也由同一次初始化通过 SetupAPI 发布，

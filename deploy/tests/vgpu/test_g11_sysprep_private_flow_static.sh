@@ -88,7 +88,7 @@ PY
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.5.2" and
+    .schemaVersion == 1 and .profileVersion == "2.6.0" and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
         "G11-Guest-Lite.ps1", "README.txt"
@@ -173,12 +173,21 @@ grep -Fq "Name = 'ToastEnabled'; Value = 0; Type = 'DWord'" \
 grep -Fq "Name = 'SearchboxTaskbarMode'; Value = 0; Type = 'DWord'" \
     <<<"$guest_lite_state_reader" ||
     fail "clone finalizer does not verify hidden taskbar search"
+grep -Fq "Name = 'HistoricalCaptureEnabled'; Value = 0; Type = 'DWord'" \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify disabled Game DVR background recording"
+grep -Fq "Name = 'AutoGameModeEnabled'; Value = 1; Type = 'DWord'" \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify enabled Game Mode"
+grep -Fq 'Image File Execution Options\DNF.exe\PerfOptions' \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not verify persistent DNF High priority"
 grep -Fq "Name = 'InputMethodOverride'; Value = '0409:00000409'; Type = 'String'" \
     <<<"$guest_lite_state_reader" ||
     fail "clone finalizer does not verify the en-US default input method"
-grep -Fq '[int]$state.SchemaVersion -ne 5' \
+grep -Fq '[int]$state.SchemaVersion -ne 6' \
     <<<"$guest_lite_state_reader" ||
-    fail "clone finalizer does not require the audio/language rollback schema"
+    fail "clone finalizer does not require the audio/language/NVIDIA/DNF rollback schema"
 grep -Fq '$GuestLiteEnglishInputTip' <<<"$guest_lite_state_reader" ||
     fail "clone finalizer does not verify en-US/US as the first input"
 grep -Fq '$GuestLitePinyinInputTip' <<<"$guest_lite_state_reader" ||
@@ -210,13 +219,19 @@ grep -Fq 'result=pass failures=0' "$FINALIZER" ||
     fail "clone finalizer does not validate the Guest Lite enforcement receipt"
 grep -Fq 'audio=default-render-muted' "$FINALIZER" ||
     fail "clone finalizer does not require a measured default-audio mute receipt"
+grep -Fq 'nvidiaPowerMode=prefer-maximum-performance' "$FINALIZER" ||
+    fail "clone finalizer does not require measured NVIDIA maximum performance"
+grep -Fq 'dnfPriority=high-if-running' "$FINALIZER" ||
+    fail "clone finalizer does not require measured DNF priority enforcement"
+grep -Fq 'processes=reviewed-stopped' "$FINALIZER" ||
+    fail "clone finalizer does not require reviewed background processes to stop"
 grep -Fq 'enforcementLastResult = [int64]$guestLiteEnforcement.LastTaskResult' \
     "$FINALIZER" || fail "clone marker lacks the Guest Lite task result"
-grep -Fq 'schemaVersion = 3' "$FINALIZER" ||
+grep -Fq 'schemaVersion = 4' "$FINALIZER" ||
     fail "clone-ready marker schema does not include Guest Lite evidence"
 grep -Fq 'guestLite = [ordered]@{' "$FINALIZER" ||
     fail "clone-ready marker lacks Guest Lite evidence"
-grep -Fq '.schemaVersion == 3' "$VERIFY" ||
+grep -Fq '.schemaVersion == 4' "$VERIFY" ||
     fail "host verifier does not require the Guest Lite-aware marker schema"
 grep -Fq '.guestLite.firewallStartMode == "Disabled"' "$VERIFY" ||
     fail "host verifier does not enforce disabled firewall startup"
@@ -234,6 +249,18 @@ grep -Fq '.guestLite.inputOrder == "en-US/US,zh-CN/Microsoft-Pinyin"' "$VERIFY" 
     fail "host verifier does not require en-US first and Microsoft Pinyin second"
 grep -Fq '.guestLite.audio == "muted"' "$VERIFY" ||
     fail "host verifier does not require default audio to be muted"
+grep -Fq '.guestLite.gameMode == "enabled"' "$VERIFY" ||
+    fail "host verifier does not require enabled Game Mode"
+grep -Fq '.guestLite.gameDvr == "disabled"' "$VERIFY" ||
+    fail "host verifier does not require disabled Game DVR"
+grep -Fq '.guestLite.nvidiaPowerMode == "prefer-maximum-performance"' "$VERIFY" ||
+    fail "host verifier does not require NVIDIA maximum performance"
+grep -Fq '.guestLite.dnfPriority == "high-on-launch"' "$VERIFY" ||
+    fail "host verifier does not require persistent DNF High priority"
+grep -Fq '.guestLite.temporaryCleanup == "stale-files-over-24h-completed"' "$VERIFY" ||
+    fail "host verifier does not require the temporary-cleanup receipt"
+grep -Fq '.guestLite.backgroundProcesses == "reviewed-stopped"' "$VERIFY" ||
+    fail "host verifier does not require reviewed background processes to stop"
 safe_identity_block=$(sed -n \
     '/^SAFE_IDENTITY_JSON=/,/^umount -- /p' "$VERIFY")
 if grep -Fq 'guestLiteProfile:' <<<"$safe_identity_block"; then

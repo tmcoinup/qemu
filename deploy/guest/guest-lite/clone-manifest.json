@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "profileVersion": "2.5.2",
+  "profileVersion": "2.6.0",
   "files": [
     {
       "name": "01-OneClick-Apply.cmd",
-      "sha256": "482E1B9DD0F36ABBF4EE6E774218947EAC8AEE63243172D96FD0580F5282CDAD",
-      "bytes": 838
+      "sha256": "F4E2A41C5729AF0DB1CE25608CE7354EE8892B2F71C163D03C7E8DB0AA37ED03",
+      "bytes": 1008
     },
     {
       "name": "02-Audit.cmd",
@@ -14,18 +14,18 @@
     },
     {
       "name": "03-Rollback.cmd",
-      "sha256": "C02CDAAA8F9281567FD0678223CB0672F45964ED681CA5B4CDC61854FE09095B",
-      "bytes": 627
+      "sha256": "D6A09EDD4EC6DC07E1728C9E3804F1F1F42DDB80D3ECB325951B8B7F03348CF4",
+      "bytes": 763
     },
     {
       "name": "G11-Guest-Lite.ps1",
-      "sha256": "DB7332F2B663811BDC11B3AB423904BC5E4E1C8782AD32B1D8CA9A3D08EB17D6",
-      "bytes": 162790
+      "sha256": "F55BABB8F16474E6A24A97CCC697594B59DC98D3B573B4C995B47D3C630377CD",
+      "bytes": 202555
     },
     {
       "name": "README.txt",
-      "sha256": "032B34EC899626EE24D7DFE0FF2109186222B641AC4D1A1B490A909CF37D1F58",
-      "bytes": 12436
+      "sha256": "E8B0D4C6C0508681A322460EF48BED697B6CDA25A3F81897DAAA3337F650FE99",
+      "bytes": 14877
     }
   ]
 }

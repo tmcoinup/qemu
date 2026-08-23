@@ -24,8 +24,8 @@ $GuestLiteManifestPath = Join-Path $GuestLiteRoot 'clone-manifest.json'
 $GuestLiteStatePath = Join-Path $env:ProgramData 'G11GuestLite\state.json'
 $GuestLiteEnforcementLogPath = Join-Path $env:ProgramData `
     'G11GuestLite\enforce-last.txt'
-$GuestLiteProfileVersion = '2.5.2'
-$ExpectedGuestLiteManifestSha256 = 'FC098C96AFE5068690E89FEC24B96E318CA0E2C3EE6D9D10AE5D0C7679797850'
+$GuestLiteProfileVersion = '2.6.0'
+$ExpectedGuestLiteManifestSha256 = 'B5BD6096BB465783E47EE470F1995434A8E9AD535439C40EE544F0A70FC25758'
 $GuestLiteEnglishInputTip = '0409:00000409'
 $GuestLitePinyinLanguageTags = @('zh-CN', 'zh-Hans-CN')
 $GuestLitePinyinInputTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
@@ -330,18 +330,27 @@ function Read-And-ValidateGuestLiteState {
             [bool]$_.LocalAccount -and [string]$_.SID -match '-500$'
         })
     if ($bootstrapAccounts.Count -ne 1 -or
-        [int]$state.SchemaVersion -ne 5 -or
+        [int]$state.SchemaVersion -ne 6 -or
         $stateMachineGuid -cne [string]$osIdentity.MachineGuid -or
         [string]$state.UserSid -cne [string]$bootstrapAccounts[0].SID) {
         throw 'Guest Lite rollback state is not bound to this clone/bootstrap user.'
     }
     $audioBaseline = $state.PSObject.Properties['AudioEndpoint']
     $languageBaseline = $state.PSObject.Properties['UserLanguageList']
+    $nvidiaBaseline = $state.PSObject.Properties['NvidiaPowerMode']
+    $dnfBaseline = $state.PSObject.Properties['DnfProcesses']
+    $cleanupSummary = $state.PSObject.Properties['LastTemporaryCleanup']
     if ($null -eq $audioBaseline -or
         -not [bool]$audioBaseline.Value.Available -or
         $null -eq $languageBaseline -or
-        -not [bool]$languageBaseline.Value.Available) {
-        throw 'Guest Lite rollback state lacks the audio/language baseline.'
+        -not [bool]$languageBaseline.Value.Available -or
+        $null -eq $nvidiaBaseline -or
+        -not [bool]$nvidiaBaseline.Value.Available -or
+        $null -eq $dnfBaseline -or
+        $null -eq $cleanupSummary -or
+        [int]$cleanupSummary.Value.MinimumAgeHours -ne 24 -or
+        [int]$cleanupSummary.Value.RootsProcessed -lt 1) {
+        throw 'Guest Lite rollback state lacks the audio/language/NVIDIA/DNF baseline or the temporary-cleanup receipt.'
     }
 
     $task = Get-ScheduledTask -TaskPath '\' `
@@ -369,6 +378,15 @@ function Read-And-ValidateGuestLiteState {
             [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'NoToastApplicationNotificationOnLockScreen'; Value = 1; Type = 'DWord' },
             [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer'; Name = 'DisableNotificationCenter'; Value = 1; Type = 'DWord' },
             [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Search'; Name = 'SearchboxTaskbarMode'; Value = 0; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; Name = 'AllowGameDVR'; Value = 0; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\GameDVR'; Name = 'HistoricalCaptureEnabled'; Value = 0; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\System\GameConfigStore'; Name = 'GameDVR_Enabled'; Value = 0; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\GameBar'; Name = 'AllowAutoGameMode'; Value = 1; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\GameBar'; Name = 'AutoGameModeEnabled'; Value = 1; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DNF.exe\PerfOptions'; Name = 'CpuPriorityClass'; Value = 3; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DNFClient.exe\PerfOptions'; Name = 'CpuPriorityClass'; Value = 3; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DNFChina.exe\PerfOptions'; Name = 'CpuPriorityClass'; Value = 3; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\DNFLauncher.exe\PerfOptions'; Name = 'CpuPriorityClass'; Value = 3; Type = 'DWord' },
             [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications'; Name = 'DisableNotifications'; Value = 1; Type = 'DWord' },
             [pscustomobject]@{ Path = 'HKCU:\Control Panel\International\User Profile'; Name = 'InputMethodOverride'; Value = '0409:00000409'; Type = 'String' }
         )) {
@@ -459,6 +477,12 @@ function Read-And-ValidateGuestLiteState {
         DefaultInputMethod = '0409:00000409'
         InputOrder = 'en-US/US,zh-CN/Microsoft-Pinyin'
         Audio = 'muted'
+        GameMode = 'enabled'
+        GameDvr = 'disabled'
+        NvidiaPowerMode = 'prefer-maximum-performance'
+        DnfPriority = 'high-on-launch'
+        TemporaryCleanup = 'stale-files-over-24h-completed'
+        BackgroundProcesses = 'reviewed-stopped'
     }
 }
 
@@ -507,6 +531,9 @@ function Invoke-And-WaitGuestLiteEnforcement {
         'Guest Lite enforcement log'
     $log = Get-Content -LiteralPath $logItem.FullName -Raw -Encoding UTF8
     if ($log -notmatch '(?m)^audio=default-render-muted\r?$' -or
+        $log -notmatch '(?m)^processes=reviewed-stopped\r?$' -or
+        $log -notmatch '(?m)^nvidiaPowerMode=prefer-maximum-performance\r?$' -or
+        $log -notmatch '(?m)^dnfPriority=high-if-running\r?$' -or
         $log -notmatch '(?m)^result=pass failures=0\r?$') {
         throw 'Guest Lite enforcement log does not contain a clean pass receipt.'
     }
@@ -861,7 +888,7 @@ try {
     $guestLiteState = Read-And-ValidateGuestLiteState -RequireStopped
 
     $safeMarker = [ordered]@{
-        schemaVersion = 3
+        schemaVersion = 4
         state = 'ready-for-host-initialization'
         completedUtc = [DateTime]::UtcNow.ToString('o')
         observedVmUuid = $guestUuid
@@ -893,6 +920,12 @@ try {
             defaultInputMethod = [string]$guestLiteState.DefaultInputMethod
             inputOrder = [string]$guestLiteState.InputOrder
             audio = [string]$guestLiteState.Audio
+            gameMode = [string]$guestLiteState.GameMode
+            gameDvr = [string]$guestLiteState.GameDvr
+            nvidiaPowerMode = [string]$guestLiteState.NvidiaPowerMode
+            dnfPriority = [string]$guestLiteState.DnfPriority
+            temporaryCleanup = [string]$guestLiteState.TemporaryCleanup
+            backgroundProcesses = [string]$guestLiteState.BackgroundProcesses
         }
         systemNvapiProjection = [ordered]@{
             state = 'validated'

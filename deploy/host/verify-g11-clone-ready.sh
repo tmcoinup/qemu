@@ -165,7 +165,7 @@ jq -e \
         "observedVmUuid", "pnpDeviceId", "schemaVersion", "state",
         "systemNvapiProjection", "testsigning"
     ] and
-    .schemaVersion == 3 and .state == "ready-for-host-initialization" and
+    .schemaVersion == 4 and .state == "ready-for-host-initialization" and
     (.observedVmUuid | ascii_downcase) == $uuid and .gpuProfile == $profile and
     (.pnpDeviceId | ascii_upcase | startswith("PCI\\VEN_10DE&DEV_1E30")) and
     .driverVersion == "31.0.15.3833" and .licenseStatus == "Licensed" and
@@ -175,15 +175,18 @@ jq -e \
     .testsigning == false and .nointegritychecks == false and
     (.completedUtc | type) == "string" and
     (.guestLite | keys | sort) == [
-        "appearance", "audio", "baseFilteringEngine", "defaultInputMethod",
+        "appearance", "audio", "backgroundProcesses", "baseFilteringEngine",
+        "defaultInputMethod", "dnfPriority",
         "enforcementLastResult",
         "enforcementLastRun", "enforcementTask",
         "firewallProcessId", "firewallService", "firewallStartMode",
-        "firewallState", "inputOrder", "notifications", "profileVersion",
-        "rollbackBaseline", "state", "taskbarSearch", "userSid"
+        "firewallState", "gameDvr", "gameMode", "inputOrder",
+        "notifications", "nvidiaPowerMode", "profileVersion",
+        "rollbackBaseline", "state", "taskbarSearch", "temporaryCleanup",
+        "userSid"
     ] and
     .guestLite.state == "validated" and
-    .guestLite.profileVersion == "2.5.2" and
+    .guestLite.profileVersion == "2.6.0" and
     .guestLite.userSid == (.machineSid + "-500") and
     .guestLite.rollbackBaseline == "C:\\ProgramData\\G11GuestLite\\state.json" and
     .guestLite.enforcementTask == "\\G11GuestLite-EnforceProfile" and
@@ -197,6 +200,12 @@ jq -e \
     .guestLite.baseFilteringEngine == "preserved-running" and
     .guestLite.appearance == "background-and-font-preserved" and
     .guestLite.audio == "muted" and
+    .guestLite.backgroundProcesses == "reviewed-stopped" and
+    .guestLite.gameMode == "enabled" and
+    .guestLite.gameDvr == "disabled" and
+    .guestLite.nvidiaPowerMode == "prefer-maximum-performance" and
+    .guestLite.dnfPriority == "high-on-launch" and
+    .guestLite.temporaryCleanup == "stale-files-over-24h-completed" and
     .guestLite.notifications == "disabled" and
     .guestLite.taskbarSearch == "hidden" and
     .guestLite.defaultInputMethod == "0409:00000409" and
@@ -347,4 +356,4 @@ COMPLETED=1
 trap - EXIT HUP INT TERM
 rmdir -- "$MOUNT_DIR"
 printf 'G11_SAFE_IDENTITY_JSON=%s\n' "$SAFE_IDENTITY_JSON"
-echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / Guest Lite 2.5.2 + audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc stopped / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"
+echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / Guest Lite 2.6.0 + Game Mode + Game DVR off + NVIDIA maximum performance + DNF High-on-launch + stale temp cleanup + reviewed background processes stopped + audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc stopped / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"

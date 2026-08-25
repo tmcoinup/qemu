@@ -1,0 +1,2 @@
+#!/usr/bin/dh-exec
+debian/aavmf32-install/Shell.efi => /usr/share/efi-shell-arm/shellarm.efi

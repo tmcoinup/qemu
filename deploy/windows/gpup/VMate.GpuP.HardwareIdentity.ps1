@@ -6,8 +6,8 @@
 
 .DESCRIPTION
     本模块把固件五字段和静态 MAC 作为 identity.json 的 HardwareIdentity
-    子记录保存。随机值只在首次创建时生成；重试、重启和 GPU 驱动更新都复用
-    同一记录。GPU/CPU/DIMM/控制器身份不在本模块的可写范围内。
+    子记录保存。可在首次创建时显式提供值，未提供的字段使用 CSPRNG；重试、
+    重启和 GPU 驱动更新都复用同一记录。GPU/CPU 品牌及 DIMM/控制器身份只读。
 #>
 
 Set-StrictMode -Version Latest
@@ -16,6 +16,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Identity.ps1')
 . (Join-Path $PSScriptRoot 'VMate.HyperV.FirmwareIdentity.ps1')
 . (Join-Path $PSScriptRoot 'VMate.HyperV.NetworkIdentity.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.GuestIdentity.ps1')
 
 $script:VMateGpuPHardwareSerialFields = @(
     'BIOSSerialNumber',
@@ -23,6 +24,22 @@ $script:VMateGpuPHardwareSerialFields = @(
     'ChassisSerialNumber',
     'ChassisAssetTag'
 )
+
+function Resolve-VMateGpuPFirmwareIdentity {
+    param([AllowNull()][object]$Overrides)
+
+    $fragment = New-VMateHyperVFirmwareIdentityFragment
+    if ($null -ne $Overrides) {
+        foreach ($name in $script:VMateHyperVFirmwareFields) {
+            $property = $Overrides.PSObject.Properties[$name]
+            if ($null -ne $property -and
+                -not [String]::IsNullOrWhiteSpace([string]$property.Value)) {
+                $fragment.$name = [string]$property.Value
+            }
+        }
+    }
+    return ConvertTo-VMateHyperVFirmwareIdentityFragment $fragment
+}
 
 function Get-VMateGpuPHardwareProperty {
     param(
@@ -158,7 +175,9 @@ function Initialize-VMateGpuPHardwareIdentity {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object]$VM,
-        [string]$StateRoot = ''
+        [string]$StateRoot = '',
+        [AllowNull()][object]$FirmwareIdentity = $null,
+        [string]$StaticMacAddress = ''
     )
 
     if ([string]$VM.State -cne 'Off') {
@@ -181,6 +200,31 @@ function Initialize-VMateGpuPHardwareIdentity {
             $existing = $identity.PSObject.Properties['HardwareIdentity']
             if ($null -ne $existing -and $null -ne $existing.Value) {
                 $current = ConvertTo-VMateGpuPHardwareIdentity $existing.Value
+                if ($null -ne $FirmwareIdentity) {
+                    $merged = $current.Firmware | Select-Object *
+                    foreach ($name in $script:VMateHyperVFirmwareFields) {
+                        $property = $FirmwareIdentity.PSObject.Properties[$name]
+                        if ($null -ne $property -and -not
+                            [String]::IsNullOrWhiteSpace(
+                                [string]$property.Value)) {
+                            $merged.$name = [string]$property.Value
+                        }
+                    }
+                    $requested = Resolve-VMateGpuPFirmwareIdentity $merged
+                    if (-not (Test-VMateHyperVFirmwareIdentityMatch `
+                            $current.Firmware $requested)) {
+                        throw 'VM 已有不同的持久固件身份，拒绝重新抽取或覆盖。'
+                    }
+                }
+                if (-not [String]::IsNullOrWhiteSpace($StaticMacAddress)) {
+                    $requestedMac = Assert-VMateHyperVLocalUnicastMacAddress `
+                        $StaticMacAddress
+                    if (@($current.NetworkAdapters).Count -ne 1 -or
+                        [string]$current.NetworkAdapters[0].StaticMacAddress `
+                            -cne $requestedMac) {
+                        throw 'VM 已有不同的持久静态 MAC，拒绝覆盖。'
+                    }
+                }
                 Assert-VMateGpuPHardwareIdentityAvailable $vmId $current `
                     $StateRoot
                 return $current
@@ -188,11 +232,18 @@ function Initialize-VMateGpuPHardwareIdentity {
 
             $network = New-VMateHyperVNetworkIdentityFragment -VM $VM `
                 -StateRoot $StateRoot
+            if (-not [String]::IsNullOrWhiteSpace($StaticMacAddress)) {
+                if (@($network.NetworkAdapters).Count -ne 1) {
+                    throw '显式 StaticMacAddress 要求 VM 恰好有一张虚拟网卡。'
+                }
+                $network.NetworkAdapters[0].StaticMacAddress =
+                    Assert-VMateHyperVLocalUnicastMacAddress $StaticMacAddress
+            }
             $record = [pscustomobject][ordered]@{
                 SchemaVersion = 1
                 PersistencePolicy = 'generate-once-no-reroll'
                 State = 'Prepared'
-                Firmware = New-VMateHyperVFirmwareIdentityFragment
+                Firmware = Resolve-VMateGpuPFirmwareIdentity $FirmwareIdentity
                 NetworkStatus = [string]$network.Status
                 NetworkAdapters = @($network.NetworkAdapters)
                 HostObserved = $null
@@ -240,11 +291,49 @@ function Complete-VMateGpuPHardwareIdentity {
     finally { Exit-VMateGpuPIdentityLock -Mutex $identityLock }
 }
 
+function Set-VMateGpuPGuestObservedHardwareIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][Guid]$VMId,
+        [Parameter(Mandatory = $true)][object]$GuestObserved,
+        [string]$StateRoot = ''
+    )
+
+    $identityLock = Enter-VMateGpuPIdentityLock -VMId $VMId
+    try {
+        $path = Get-VMateGpuPIdentityPath $VMId $StateRoot
+        $identity = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        Assert-VMateGpuPIdentityRecord $identity $VMId | Out-Null
+        $hardwareProperty = $identity.PSObject.Properties['HardwareIdentity']
+        if ($null -eq $hardwareProperty -or $null -eq $hardwareProperty.Value) {
+            throw 'HardwareIdentity 在 guest 回读期间消失。'
+        }
+        $hardware = ConvertTo-VMateGpuPHardwareIdentity $hardwareProperty.Value
+        if ([string]$hardware.State -cne 'Applied') {
+            throw '只有 Applied 硬件身份可以保存 GuestObserved。'
+        }
+        $verified = Test-VMateGpuPGuestHardwareIdentityMatch `
+            -Expected $hardware -Observed $GuestObserved
+        if (-not [bool]$verified.Match) {
+            throw ('guest 硬件身份回读不一致：' +
+                (@($verified.Mismatches) -join ', '))
+        }
+        $hardware.GuestObserved = $verified
+        $hardwareProperty.Value = $hardware
+        $identity.UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        Write-VMateGpuPAtomicJson $identity $path | Out-Null
+        return $hardware
+    }
+    finally { Exit-VMateGpuPIdentityLock -Mutex $identityLock }
+}
+
 function Ensure-VMateGpuPHardwareIdentity {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][object]$VM,
         [string]$StateRoot = '',
+        [AllowNull()][object]$FirmwareIdentity = $null,
+        [string]$StaticMacAddress = '',
         [ValidateRange(1, 300)][int]$JobTimeoutSeconds = 60
     )
 
@@ -252,30 +341,17 @@ function Ensure-VMateGpuPHardwareIdentity {
         throw 'VM 必须为 Off 才能应用持久硬件身份。'
     }
     $hardware = Initialize-VMateGpuPHardwareIdentity -VM $VM `
-        -StateRoot $StateRoot
+        -StateRoot $StateRoot -FirmwareIdentity $FirmwareIdentity `
+        -StaticMacAddress $StaticMacAddress
     $network = ConvertTo-VMateGpuPHardwareNetworkFragment $hardware
+    # 先提交可重复修改、内部可回滚的 MAC，最后才写 Win10 上可能一次性的
+    # BIOSGUID。任一失败都保留已经持久化的 Prepared 期望值；同参重试只会
+    # 收敛到该记录，绝不重新抽取身份或尝试把 BIOSGUID 改回旧值。
+    $networkResult = Set-VMateHyperVNetworkIdentity -VM $VM `
+        -NetworkIdentity $network -StateRoot $StateRoot
     $firmwareResult = Invoke-VMateHyperVFirmwareIdentityTransaction `
         -VMId ([Guid]$VM.Id) -Identity $hardware.Firmware `
         -JobTimeoutSeconds $JobTimeoutSeconds
-    try {
-        $networkResult = Set-VMateHyperVNetworkIdentity -VM $VM `
-            -NetworkIdentity $network -StateRoot $StateRoot
-    }
-    catch {
-        $networkFailure = $_.Exception.Message
-        if ([string]$firmwareResult.Status -ceq 'Applied') {
-            try {
-                Restore-VMateHyperVFirmwareIdentitySnapshot `
-                    -VMId ([Guid]$VM.Id) -Snapshot $firmwareResult.Previous `
-                    -JobTimeoutSeconds $JobTimeoutSeconds | Out-Null
-            }
-            catch {
-                throw "网络身份失败且固件补偿失败；网络：$networkFailure；" +
-                    "固件：$($_.Exception.Message)"
-            }
-        }
-        throw $networkFailure
-    }
     $networkObserved = if ($null -ne $networkResult.PSObject.Properties[
             'Observed']) { $networkResult.Observed } else {
         Get-VMateHyperVNetworkIdentityObserved $VM $network

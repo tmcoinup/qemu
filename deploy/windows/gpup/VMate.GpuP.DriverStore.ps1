@@ -11,6 +11,7 @@
 
 . (Join-Path $PSScriptRoot 'VMate.GpuP.DriverDiscovery.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.WindowsImage.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.GuestMonitor.ps1')
 
 function New-VMateGpuPManifest {
     param(
@@ -157,20 +158,34 @@ function Install-VMateGpuPFileAtomically {
     )
 
     $temporary = $Destination + '.vmate-' + $TransactionId + '.tmp'
+    $replaceBackup = $Destination + '.vmate-' + $TransactionId + `
+        '.replace-backup'
     try {
+        if ((Test-Path -LiteralPath $temporary) -or
+            (Test-Path -LiteralPath $replaceBackup)) {
+            throw "原子发布临时路径已被占用：$Destination"
+        }
         Copy-Item -LiteralPath $Source -Destination $temporary -ErrorAction Stop
         if ((Get-FileHash -LiteralPath $temporary `
                     -Algorithm SHA256).Hash -ine $ExpectedSHA256) {
             throw "待发布临时文件哈希不一致：$Destination"
         }
         if (Test-Path -LiteralPath $Destination) {
-            [System.IO.File]::Replace($temporary, $Destination, $null)
+            # Windows PowerShell 5.1/.NET Framework 不接受空 backupFileName。
+            # 使用同目录事务唯一备份保持 Replace 原子性；跨文件回滚材料由
+            # 调用方的 previous 目录独立持有。
+            [System.IO.File]::Replace(
+                $temporary, $Destination, $replaceBackup)
+            Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction Stop
         } else {
             [System.IO.File]::Move($temporary, $Destination)
         }
     } finally {
         if (Test-Path -LiteralPath $temporary) {
             Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop
+        }
+        if (Test-Path -LiteralPath $replaceBackup) {
+            Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction Stop
         }
     }
 }
@@ -324,10 +339,15 @@ function Invoke-VMateGpuPDriverPublish {
                 $fingerprint $Selection $afterFiles) (Join-Path $stage 'manifest.after.json')
         $packageName = $Selection.Vendor.Vendor.ToLowerInvariant() + '-' +
             $fingerprint.Substring(0, 16).ToLowerInvariant() + '-' + $transaction
-        Move-Item -LiteralPath $stage -Destination (Join-Path $packages $packageName) `
-            -ErrorAction Stop
+        $packagePath = Join-Path $packages $packageName
+        if ([IO.Directory]::Exists($packagePath)) {
+            throw "驱动发布包目标已存在：$packagePath"
+        }
+        # PowerShell 5.1 Move-Item 会拒绝离线 VHD 的 \\?\Volume{GUID}
+        # 目录；同卷 Directory.Move 保持原子重命名并已在 Win10 验证。
+        [IO.Directory]::Move($stage, $packagePath)
         return [pscustomobject]@{ Status = 'Published'; Fingerprint = $fingerprint
-            Package = (Join-Path $packages $packageName); Files = $afterFiles }
+            Package = $packagePath; Files = $afterFiles }
     } catch {
         $publishError = $_
         for ($index = $published.Count - 1; $index -ge 0; $index--) {
@@ -413,11 +433,19 @@ function Sync-VMateGpuPDriverStore {
                 GuestImage = $guestImage
                 Files = $plan
             }
+            $guestMonitor = Install-VMateGpuPGuestMonitorProvisioner `
+                -GuestWindowsRoot $guestWindows -DryRun
+            $result | Add-Member -NotePropertyName GuestMonitor `
+                -NotePropertyValue $guestMonitor
         }
         else {
             $result = Invoke-VMateGpuPDriverPublish $guestWindows $selection $plan
             $result | Add-Member -NotePropertyName GuestImage `
                 -NotePropertyValue $guestImage
+            $guestMonitor = Install-VMateGpuPGuestMonitorProvisioner `
+                -GuestWindowsRoot $guestWindows
+            $result | Add-Member -NotePropertyName GuestMonitor `
+                -NotePropertyValue $guestMonitor
         }
     }
     catch {

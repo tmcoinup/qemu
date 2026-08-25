@@ -9,6 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 COMMON="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.Common.ps1"
+VM_CONFIG="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.VMConfiguration.ps1"
 HOST="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.Host.ps1"
 
 fail() {
@@ -42,8 +43,9 @@ test_static_contract() {
     local file function_name line_count dry_line mutation_line
 
     [[ -f "$COMMON" ]] || fail "missing GPU-P common module"
+    [[ -f "$VM_CONFIG" ]] || fail "missing GPU-P VM configuration module"
     [[ -f "$HOST" ]] || fail "missing GPU-P host module"
-    for file in "$COMMON" "$HOST"; do
+    for file in "$COMMON" "$VM_CONFIG" "$HOST"; do
         line_count="$(wc -l <"$file")"
         (( line_count <= 500 )) \
             || fail "$file exceeds 500 lines: $line_count"
@@ -59,7 +61,11 @@ test_static_contract() {
         Get-VMateGpuPVendorInfo ConvertTo-VMateGpuPPartitionIdentitySeed \
         Get-VMateGpuPScaledValue Get-VMateGpuPResourcePlan \
         Resolve-VMateGpuPQuotaRequest Assert-VMateGpuPFullHostVramQuota \
-        Get-VMateGpuPCapabilitySnapshot Get-VMateGpuPQuotaSummary; do
+        Get-VMateGpuPCapabilitySnapshot Get-VMateGpuPQuotaSummary \
+        Resolve-VMateGpuPHostPartitionCommand \
+        Get-VMateGpuPHostPartitionableGpu \
+        Test-VMateGpuPHostPartitionSetter \
+        Set-VMateGpuPNativePartitionCount; do
         require_text "function $function_name" "$COMMON"
     done
     require_text '[decimal]::Floor(' "$COMMON"
@@ -68,6 +74,10 @@ test_static_contract() {
     require_text "'Total', 'Available', 'MinPartition'" "$COMMON"
     reject_regex '\[uint64\]\$totalValue[[:space:]]*\*' "$COMMON"
     reject_regex '(NewGuid|RandomNumberGenerator)' "$COMMON"
+    require_text "@('Get-VMHostPartitionableGpu', 'Get-VMPartitionableGpu')" \
+        "$COMMON"
+    require_text "@('Set-VMHostPartitionableGpu', 'Set-VMPartitionableGpu')" \
+        "$COMMON"
 
     require_text "@('VRAM', 'Encode', 'Decode', 'Compute')" "$COMMON"
     require_text '"Total$resource"' "$COMMON"
@@ -77,12 +87,19 @@ test_static_contract() {
         Assert-VMateGpuPHostEnvironment Resolve-VMateGpuPHostGpu \
         Get-VMateGpuPVirtualMachine Assert-VMateGpuPVirtualMachine \
         Resolve-VMateGpuPExistingAdapter Get-VMateGpuPOtherAllocations \
-        Get-VMateGpuPConfigurationPlan Assert-VMateGpuPAppliedState \
+        Get-VMateGpuPConfigurationPlan \
         Invoke-VMateGpuPConfiguration; do
         require_text "function $function_name" "$HOST"
     done
+    for function_name in Get-VMateGpuPVMConfigurationSnapshot \
+        Test-VMateGpuPVMConfigurationMatch Assert-VMateGpuPAppliedState; do
+        require_text "function $function_name" "$VM_CONFIG"
+    done
+    require_text 'LowMmioGapSize' "$VM_CONFIG"
+    require_text 'HighMmioGapSize' "$VM_CONFIG"
+    require_text "'HyperVCmdlet+VSSD'" "$VM_CONFIG"
     for function_name in \
-        Get-VMHostPartitionableGpu Get-VMGpuPartitionAdapter \
+        Get-VMateGpuPHostPartitionableGpu Get-VMGpuPartitionAdapter \
         Add-VMGpuPartitionAdapter Set-VMGpuPartitionAdapter \
         Remove-VMGpuPartitionAdapter; do
         require_text "$function_name" "$HOST"
@@ -182,6 +199,16 @@ test_dynamic_pure_functions() {
             $amdPath = "\\?\PCI#VEN_1002&DEV_BBBB#2#{guid}\PARAV"
             $nvidia = New-TestGpu $nvidiaPath
             $amd = New-TestGpu $amdPath
+
+            $legacyAdapter = [pscustomobject]@{}
+            $legacyOwner = Get-VMateGpuPAdapterOwnership $legacyAdapter `
+                $nvidiaPath @($nvidiaPath)
+            Assert-Equal $legacyOwner.Ownership SelectedGpu `
+                "单 GPU Win10 无路径 adapter 未归属到唯一 GPU"
+            $ambiguousOwner = Get-VMateGpuPAdapterOwnership $legacyAdapter `
+                $nvidiaPath @($nvidiaPath, $amdPath)
+            Assert-Equal $ambiguousOwner.Ownership Unknown `
+                "多 GPU 无路径 adapter 没有 fail closed"
 
             Assert-Equal (Get-VMateGpuPScaledValue 1000 100 800 1 VRAM) 100 `
                 "厂商下限夹紧失败"

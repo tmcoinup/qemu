@@ -33,6 +33,15 @@ param(
 
     [switch]$FullSharedGpuQuota,
 
+    [switch]$Win10ReferenceGpuQuota,
+
+    [ValidateSet('Unchanged', 'Default', 'Maximum', 'Single')]
+    [string]$ConsoleResolutionType = 'Unchanged',
+
+    [ValidateRange(640, 8192)][int]$ConsoleHorizontalResolution = 1920,
+
+    [ValidateRange(480, 8192)][int]$ConsoleVerticalResolution = 1200,
+
     [switch]$SkipDriverSync,
 
     [switch]$StartVM,
@@ -70,8 +79,11 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VMate.GpuP.DriverStore.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Identity.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.HardwareIdentity.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.HardwareProfile.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Guest.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Partition.ps1')
+. (Join-Path $PSScriptRoot 'VMate.HyperV.IdentityBoot.ps1')
+. (Join-Path $PSScriptRoot 'VMate.HyperV.HostIdentityExtension.ps1')
 
 if ($ValidateGuest -and -not $StartVM) {
     throw '-ValidateGuest 要求同时使用 -StartVM。'
@@ -92,7 +104,7 @@ if (-not [String]::IsNullOrWhiteSpace($PartitionIdentitySeed) -and
 }
 $percentageNames = @('VramPercentage', 'EncodePercentage',
     'DecodePercentage', 'ComputePercentage')
-$quotaRequest = Resolve-VMateGpuPQuotaRequest -Percentages @{
+$quotaRequest = Resolve-VMateGpuPQuotaCompatibilityRequest -Percentages @{
     VramPercentage = $VramPercentage
     EncodePercentage = $EncodePercentage
     DecodePercentage = $DecodePercentage
@@ -100,17 +112,24 @@ $quotaRequest = Resolve-VMateGpuPQuotaRequest -Percentages @{
 } -ExplicitNames @($percentageNames | Where-Object {
         $PSBoundParameters.ContainsKey($_)
     }) -FullSharedGpuQuota:$FullSharedGpuQuota.IsPresent `
+    -Win10ReferenceGpuQuota:$Win10ReferenceGpuQuota.IsPresent `
     -AllowOvercommit:$AllowOvercommit.IsPresent
 $VramPercentage = [int]$quotaRequest.Percentages.VramPercentage
 $EncodePercentage = [int]$quotaRequest.Percentages.EncodePercentage
 $DecodePercentage = [int]$quotaRequest.Percentages.DecodePercentage
 $ComputePercentage = [int]$quotaRequest.Percentages.ComputePercentage
 $effectiveAllowOvercommit = [bool]$quotaRequest.EffectiveAllowOvercommit
+$consoleProfile = if ($ConsoleResolutionType -ceq 'Unchanged') { $null } else {
+    New-VMateHyperVConsoleProfile $ConsoleResolutionType `
+        $ConsoleHorizontalResolution $ConsoleVerticalResolution
+}
 
 Assert-VMateGpuPHostEnvironment
 $vm = Get-VMateGpuPVirtualMachine -VMName $VMName
 Assert-VMateGpuPVirtualMachine -VM $vm
 $identity = Get-VMateGpuPIdentity -VMId $vm.Id -StateRoot $StateRoot
+$hardwareProfile = Get-VMateGpuPHardwareProfileBinding `
+    -VMId $vm.Id -StateRoot $StateRoot
 
 $effectivePath = $InstancePath
 $effectiveVendor = $Vendor
@@ -149,6 +168,8 @@ $configurationParameters = @{
     DecodePercentage = $DecodePercentage
     ComputePercentage = $ComputePercentage
     AllowOvercommit = $effectiveAllowOvercommit
+    QuotaRequest = $quotaRequest
+    ConsoleProfile = $consoleProfile
     PartitionIdentitySeed = $seed
     LowMemoryMappedIoSpace = $LowMemoryMappedIoSpace
     HighMemoryMappedIoSpace = $HighMemoryMappedIoSpace
@@ -173,6 +194,31 @@ if ($null -eq $identity -and -not $DryRun) {
 }
 
 $hardwareIdentity = $null
+$hostIdentityExtension = $null
+$identityBoot = if ($null -eq $hardwareProfile) {
+    [pscustomobject][ordered]@{
+        Status = 'Unbound'
+        Required = $false
+        Capability = 'guest-boot-smbios-only'
+        FullIdentitySupported = $false
+    }
+}
+elseif (-not [bool]$hardwareProfile.RequiresHostExtension) {
+    [pscustomobject][ordered]@{
+        Status = 'NotRequired'
+        Required = $false
+        Capability = 'guest-boot-smbios-only'
+        FullIdentitySupported = [bool]$hardwareProfile.FullIdentitySupported
+    }
+}
+else {
+    [pscustomobject][ordered]@{
+        Status = 'WouldInstallOrUpdate'
+        Required = $true
+        Capability = 'guest-boot-smbios-only'
+        FullIdentitySupported = $false
+    }
+}
 if (-not $DryRun) {
     $preflightUniqueness = Test-VMateGpuPIdentityUniqueness -StateRoot $StateRoot
     if (-not $preflightUniqueness.IsUnique) {
@@ -184,6 +230,22 @@ if (-not $DryRun) {
         -StateRoot $StateRoot
     if (-not $hardwareUniqueness.IsUnique) {
         throw 'Hyper-V 硬件身份预检发现碰撞；尚未修改 GPU-P adapter。'
+    }
+    if ($null -ne $hardwareProfile -and
+        [bool]$hardwareProfile.RequiresHostExtension) {
+        $identityBoot = Install-VMateHyperVIdentityBoot -VM $vm `
+            -Profile $hardwareProfile `
+            -HardwareIdentity $hardwareIdentity.Desired `
+            -AllowDisableSecureBoot
+        $identityBoot | Add-Member -NotePropertyName Required `
+            -NotePropertyValue $true
+        $identityBoot | Add-Member -NotePropertyName FullIdentitySupported `
+            -NotePropertyValue $false
+        $hostIdentityExtension =
+            Publish-VMateHyperVHostIdentityDesiredManifest `
+                -VM $vm -Profile $hardwareProfile `
+                -HardwareIdentity $hardwareIdentity.Desired `
+                -StateRoot $StateRoot
     }
 }
 
@@ -274,6 +336,7 @@ try {
         PnpInstanceId = $pnpInstanceId
         DriverSelection = $driverSelection
         DriverSync = $driverResult
+        ConsoleProfile = $plan.ConsoleProfile
         Configuration = $configurationResult
         PartitionCapacity = $partitionCapacity
         VM = $lockedVm
@@ -343,6 +406,9 @@ if ($DryRun) {
         HostPartitionCapacity = $partitionCapacity
         DriverSync = $driverResult
         HardwareIdentityPolicy = 'random-once-persisted-on-create'
+        HardwareProfile = $hardwareProfile
+        IdentityBoot = $identityBoot
+        HostIdentityExtension = $hostIdentityExtension
         WillStartVM = $StartVM.IsPresent
         WillValidateGuest = $ValidateGuest.IsPresent
     }
@@ -354,10 +420,14 @@ if ($ValidateGuest) {
         -Credential $GuestCredential -Vendor $plan.Vendor `
         -GpuName ([string]$driverSelection.Pnp.Name) `
         -DriverVersion ([string]$driverSelection.SignedDriver.DriverVersion) `
+        -ExpectedHardwareIdentity $hardwareIdentity.Desired `
         -StrictDisplay $StrictGuestDisplay `
         -DisableHyperVVideo:$DisableHyperVVideo.IsPresent `
         -RequireNvidiaSmi:$RequireNvidiaSmi.IsPresent `
         -TimeoutSeconds $GuestValidationTimeoutSeconds
+    $hardwareIdentity.Desired = Set-VMateGpuPGuestObservedHardwareIdentity `
+        -VMId ([Guid]$vm.Id) -GuestObserved $guestResult.HardwareIdentity `
+        -StateRoot $StateRoot
     $vendorGpuUuid = [string]$guestResult.VendorGpuUuid
     if (-not [String]::IsNullOrWhiteSpace($vendorGpuUuid)) {
         $identity = Update-VMateGpuPObservedIdentity -VMId $vm.Id `
@@ -391,6 +461,10 @@ if (-not $uniqueness.IsUnique) {
         [uint64]$configurationResult.CapabilitySnapshot.Resources.VRAM.Total)
     HostPartitionCapacity = $partitionCapacity
     DriverSync = $driverResult
+    ConsoleProfile = $configurationResult.ConsoleProfile
     HardwareIdentity = $hardwareIdentity
+    HardwareProfile = $hardwareProfile
+    IdentityBoot = $identityBoot
+    HostIdentityExtension = $hostIdentityExtension
     GuestValidation = $guestResult
 }

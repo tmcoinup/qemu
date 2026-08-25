@@ -1,0 +1,1305 @@
+edk2 (2024.02-2ubuntu0.8) noble; urgency=medium
+
+  * d/control, d/rules: Add ovmf-legacy package, shipping an OVMF.legacy.fd
+    firmware that enables deprecated features such as PVSCSI (LP: #2129178)
+
+ -- Lukas Märdian <slyon@ubuntu.com>  Wed, 10 Dec 2025 11:08:54 +0100
+
+edk2 (2024.02-2ubuntu0.7) noble-security; urgency=medium
+
+  * SECURITY REGRESSION: UEFI network boot broken (LP: #2133157)
+    - d/p/CVE-2023-45236.patch: disabled pending further investigation.
+    - d/p/CVE-2023-45237.patch: disabled pending further investigation.
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Thu, 27 Nov 2025 11:14:36 -0500
+
+edk2 (2024.02-2ubuntu0.6) noble-security; urgency=medium
+
+  * SECURITY UPDATE: denial of service via excessive time
+    - debian/patches/CVE-2023-3446.patch: adds check to prevent the testing
+      of an excessively large modulus in DH_check() in
+      CryptoPkg/Library/OpensslLib/openssl/crypto/dh/dh_check.c,
+      CryptoPkg/Library/OpensslLib/openssl/include/openssl/dh.h.
+    - CVE-2023-3446
+  * SECURITY UPDATE: denial of service via invalid q values
+    - debian/patches/CVE-2023-3817.patch: adds check to prevent the testing
+      of invalid q values in DH_check() in
+      CryptoPkg/Library/OpensslLib/openssl/crypto/dh/dh_check.c.
+    - CVE-2023-3817
+  * SECURITY UPDATE: predictable TCP Initial Sequence Number
+    - debian/patches/CVE-2023-45236.patch: update TCP ISN generation in
+      NetworkPkg/TcpDxe/TcpDriver.c, NetworkPkg/TcpDxe/TcpDxe.inf,
+      NetworkPkg/TcpDxe/TcpFunc.h, NetworkPkg/TcpDxe/TcpInput.c,
+      NetworkPkg/TcpDxe/TcpMain.h, NetworkPkg/TcpDxe/TcpMisc.c,
+      NetworkPkg/TcpDxe/TcpTimer.c.
+    - CVE-2023-45236
+  * SECURITY UPDATE: predictable TCP Initial Sequence Number
+    - debian/patches/CVE-2023-45237.patch: fix use of weak PRNG in
+      NetworkPkg/*.
+    - CVE-2023-45237
+  * SECURITY UPDATE: Excessive time spent in DH check / generation with
+    large Q parameter value
+    - debian/patches/CVE-2023-5678.patch: make DH_check_pub_key() and
+      DH_generate_key() safer yet in
+      CryptoPkg/Library/OpensslLib/openssl/crypto/dh/dh_check.c,
+      CryptoPkg/Library/OpensslLib/openssl/crypto/dh/dh_err.c,
+      CryptoPkg/Library/OpensslLib/openssl/crypto/dh/dh_key.c,
+      CryptoPkg/Library/OpensslLib/openssl/crypto/err/openssl.txt,
+      CryptoPkg/Library/OpensslLib/openssl/include/crypto/dherr.h,
+      CryptoPkg/Library/OpensslLib/openssl/include/openssl/dh.h,
+      CryptoPkg/Library/OpensslLib/openssl/include/openssl/dherr.h.
+    - CVE-2023-5678
+  * SECURITY UPDATE: Excessive time spent checking invalid RSA public keys
+    - debian/patches/CVE-2023-6237.patch: limit the execution time of RSA
+      public key check in
+      CryptoPkg/Library/OpensslLib/openssl/crypto/rsa/rsa_sp800_56b_check.c.
+    - CVE-2023-6237
+  * SECURITY UPDATE: PKCS12 Decoding crashes
+    - debian/patches/CVE-2024-0727.patch: add NULL checks where ContentInfo
+      data can be NULL in
+      CryptoPkg/Library/OpensslLib/openssl/crypto/pkcs12/p12_add.c,
+      CryptoPkg/Library/OpensslLib/openssl/crypto/pkcs12/p12_mutl.c,
+      CryptoPkg/Library/OpensslLib/openssl/crypto/pkcs12/p12_npas.c,
+      CryptoPkg/Library/OpensslLib/openssl/crypto/pkcs7/pk7_mime.c.
+    - CVE-2024-0727
+  * SECURITY UPDATE: division-by-zero in S3 sleep
+    - debian/patches/CVE-2024-1298.patch: fix potential UINT32 overflow in
+      S3 ResumeCount in
+      MdeModulePkg/Universal/Acpi/Firmware*/FirmwarePerformancePei.c.
+    - CVE-2024-1298
+  * SECURITY UPDATE: Timing side-channel in ECDSA signature computation
+    - debian/patches/CVE-2024-13176.patch: fix timing side-channel in
+      CryptoPkg/Library/OpensslLib/openssl/crypto/bn/bn_exp.c,
+      CryptoPkg/Library/OpensslLib/openssl/crypto/ec/ec_lib.c,
+      CryptoPkg/Library/OpensslLib/openssl/include/crypto/bn.h.
+    - CVE-2024-13176
+  * SECURITY UPDATE: unbounded memory growth
+    - debian/patches/CVE-2024-2511.patch: fix unconstrained session cache
+      growth in TLSv1.3 in
+      CryptoPkg/Library/OpensslLib/openssl/ssl/ssl_lib.c,
+      CryptoPkg/Library/OpensslLib/openssl/ssl/ssl_sess.c,
+      CryptoPkg/Library/OpensslLib/openssl/ssl/statem/statem_srvr.c.
+    - CVE-2024-2511
+  * SECURITY UPDATE: overflow in PeCoffLoaderRelocateImage()
+    - debian/patches/CVE-2024-38796.patch: fix overflow issue in
+      BasePeCoffLib in MdePkg/Library/BasePeCoffLib/BasePeCoff.c.
+    - CVE-2024-38796
+  * SECURITY UPDATE: out of bounds read in HashPeImageByType()
+    - debian/patches/CVE-2024-38797-1.patch: fix OOB read in
+      SecurityPkg/Library/DxeImageVerificationLib/DxeImageVerificationLib.c.
+    - debian/patches/CVE-2024-38797-2.patch: improve logic in
+      SecurityPkg/Library/DxeImageVerificationLib/DxeImageVerificationLib.c.
+    - debian/patches/CVE-2024-38797-3.patch: improve logic in
+      SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigImpl.c.
+    - CVE-2024-38797
+  * SECURITY UPDATE: DoS via integer overflow
+    - debian/patches/CVE-2024-38805.patch: fix for out of bound memory
+      access in NetworkPkg/IScsiDxe/IScsiProto.c.
+    - CVE-2024-38805
+  * SECURITY UPDATE: use after free with SSL_free_buffers
+    - debian/patches/CVE-2024-4741.patch: only free the read buffers if
+      we're not using them in
+      CryptoPkg/Library/OpensslLib/openssl/ssl/record/rec_layer_s3.c,
+      CryptoPkg/Library/OpensslLib/openssl/ssl/record/record.h,
+      CryptoPkg/Library/OpensslLib/openssl/ssl/ssl_lib.c.
+    - CVE-2024-4741
+  * SECURITY UPDATE: crash or memory disclosure via SSL_select_next_proto
+    - debian/patches/CVE-2024-5535.patch: validate provided client list in
+      CryptoPkg/Library/OpensslLib/openssl/ssl/ssl_lib.c.
+    - CVE-2024-5535
+  * SECURITY UPDATE: Possible denial of service in X.509 name checks
+    - debian/patches/CVE-2024-6119.patch: avoid type errors in EAI-related
+      name check logic in
+      CryptoPkg/Library/OpensslLib/openssl/crypto/x509/v3_utl.c,
+      CryptoPkg/Library/OpensslLib/openssl/test/*.
+    - CVE-2024-6119
+  * SECURITY UPDATE: Low-level invalid GF(2^m) parameters lead to OOB
+    memory access
+    - debian/patches/CVE-2024-9143.patch: harden BN_GF2m_poly2arr against
+      misuse in CryptoPkg/Library/OpensslLib/openssl/crypto/bn/bn_gf2m.c,
+      CryptoPkg/Library/OpensslLib/openssl/test/ec_internal_test.c.
+    - CVE-2024-9143
+  * SECURITY UPDATE: DoS via integer overflow
+    - debian/patches/CVE-2025-2295.patch: fix for Remote Memory Exposure in
+      ISCSI in NetworkPkg/IScsiDxe/IScsiProto.c.
+    - CVE-2025-2295
+  * SECURITY UPDATE: code execution via IDT register
+    - debian/patches/CVE-2025-3770.patch: safe handling of IDT register on
+      SMM entry in UefiCpuPkg/PiSmmCpuDxeSmm/X64/SmiEntry.nasm.
+    - CVE-2025-3770
+
+ -- Marc Deslauriers <marc.deslauriers@ubuntu.com>  Wed, 08 Oct 2025 13:17:32 -0400
+
+edk2 (2024.02-2ubuntu0.5) noble; urgency=medium
+
+  * d/rules: Build OVMF.amdsev.fd (LP: #2122286)
+  * d/descriptors: Add amd-sev JSON
+  * d/ovmf.README.Debian: Mention OVMF.amdsev.fd firmware
+
+ -- Lukas Märdian <slyon@ubuntu.com>  Wed, 17 Sep 2025 10:25:57 +0200
+
+edk2 (2024.02-2ubuntu0.4) noble; urgency=medium
+
+  * ovmf: cherry-pick patch from upstream to "use user-specified
+    opt/ovmf/X-PciMmio64Mb value unconditionally". (LP: #2101903).
+     - d/p/0001-OvmfPkg-Use-user-specified-opt-ovmf-X-PciMmio64Mb-va.patch
+
+ -- Mitchell Augustin <mitchell.augustin@canonical.com>  Tue, 3 Jun 2025 22:51:00 -0500
+
+edk2 (2024.02-2ubuntu0.3) noble-security; urgency=medium
+
+  * Disable the built-in Shell when SecureBoot is enabled (LP: #2101797)
+  * d/tests/shell.py: Align aarch64 snakeoil tests w/ x64.
+  * SECURITY UPDATE: UEFI Shell accessible in AAVMF with Secure Boot enabled
+    - CVE-2025-2486
+
+ -- Mate Kukri <mate.kukri@canonical.com>  Fri, 21 Mar 2025 12:28:14 +0000
+
+edk2 (2024.02-2ubuntu0.1) noble; urgency=medium
+
+  * qemu-efi-riscv64: Fix crash in KVM-based emulation (LP: #2077731):
+    - d/p/0001-MdePkg-BaseLib-RISC-V-Add-FPU-CSR-constants.patch
+    - d/p/0002-UefiCpuPkg-RiscV64-initialize-FPU.patch
+    - d/p/0003-OvmfPkg-RiscV64-build-BaseRiscVFpuLib.patch
+
+ -- dann frazier <dannf@ubuntu.com>  Fri, 25 Oct 2024 11:25:40 -0600
+
+edk2 (2024.02-2) unstable; urgency=medium
+
+  * Drop unused build-dependency on python3-distutils. (Closes: #1065854).
+
+ -- dann frazier <dannf@debian.org>  Mon, 11 Mar 2024 08:25:33 -0600
+
+edk2 (2024.02-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202402 tag:
+    - Stop including unused mbedtls source to avoid unnecessary
+      security triage:
+      + d/p/mbedtls-disable.diff
+    - Drop patches merged upstream:
+      + d/p/0001-SecurityPkg-DxeTpm2MeasureBootLib-SECURITY-PATCH-411.patch
+      + d/p/0002-SecurityPkg-DxeTpmMeasureBootLib-SECURITY-PATCH-4117.patch
+      + d/p/0003-SecurityPkg-Adding-CVE-2022-36763-to-SecurityFixes.y.patch
+      + d/p/0001-SecurityPkg-DxeTpm2MeasureBootLib-SECURITY-PATCH-411-2.patch
+      + d/p/0002-SecurityPkg-DxeTpmMeasureBootLib-SECURITY-PATCH-4118.patch
+      + d/p/0003-SecurityPkg-Adding-CVE-2022-36764-to-SecurityFixes.y.patch
+      + d/p/0001-SecurityPkg-DxeTpm2MeasureBootLib-SECURITY-PATCH-411-3.patch
+      + d/p/0002-SecurityPkg-DxeTpmMeasureBootLib-SECURITY-PATCH-4117-2.patch
+      + d/p/0003-SecurityPkg-Updating-SecurityFixes.yaml-after-symbol.patch
+      + d/p/0001-UefiPayloadPkg-Hob-Integer-Overflow-in-CreateHob.patch
+      + d/p/0001-NetworkPkg-Dhcp6Dxe-SECURITY-PATCH-CVE-2023-45230-Pa.patch
+      + d/p/0002-NetworkPkg-Add-Unit-tests-to-CI-and-create-Host-Test.patch
+      + d/p/0003-NetworkPkg-Dhcp6Dxe-SECURITY-PATCH-CVE-2023-45230-Un.patch
+      + d/p/0004-NetworkPkg-Dhcp6Dxe-SECURITY-PATCH-CVE-2023-45229-Pa.patch
+      + d/p/0005-NetworkPkg-Dhcp6Dxe-SECURITY-PATCH-CVE-2023-45229-Un.patch
+      + d/p/0006-NetworkPkg-Ip6Dxe-SECURITY-PATCH-CVE-2023-45231-Patc.patch
+      + d/p/0007-NetworkPkg-Ip6Dxe-SECURITY-PATCH-CVE-2023-45231-Unit.patch
+      + d/p/0008-NetworkPkg-Ip6Dxe-SECURITY-PATCH-CVE-2023-45232-Patc.patch
+      + d/p/0009-NetworkPkg-Ip6Dxe-SECURITY-PATCH-CVE-2023-45232-Unit.patch
+      + d/p/0010-NetworkPkg-UefiPxeBcDxe-SECURITY-PATCH-CVE-2023-4523.patch
+      + d/p/0011-NetworkPkg-UefiPxeBcDxe-SECURITY-PATCH-CVE-2023-4523.patch
+      + d/p/0012-MdePkg-Test-Add-gRT_GetTime-Google-Test-Mock.patch
+      + d/p/0013-NetworkPkg-UefiPxeBcDxe-SECURITY-PATCH-CVE-2023-4523.patch
+      + d/p/0014-NetworkPkg-UefiPxeBcDxe-SECURITY-PATCH-CVE-2023-4523.patch
+      + d/p/0015-NetworkPkg-Adds-a-SecurityFix.yaml-file.patch
+   * d/binary-check.ignore: Remove globs that no longer match anything.
+
+ -- dann frazier <dannf@debian.org>  Sun, 25 Feb 2024 15:34:27 -0700
+
+edk2 (2023.11-8) unstable; urgency=medium
+
+  * debian/rules: Add debug flag to edk2-vars-generator.py commands.
+  * debian/python/UEFI/Qemu: Fix var template for snakeoil commands.
+  * debian/rules: Fix OVMF snakeoil enrollment by using the secboot
+    CODE variant.
+  * debian/tests/shell.py: Detect "Access Denied" message to fix
+    test_*_ms_secure_boot_unsigned cases.
+  * debian/rules: switch to 64bit PEI for OVMF(X64) images now that
+    it supports S3 suspend. Thanks Hector Cao.
+
+ -- dann frazier <dannf@debian.org>  Wed, 21 Feb 2024 16:25:20 -0700
+
+edk2 (2023.11-7) unstable; urgency=medium
+
+  * ovmf, qemu-efi-*: Stop building Secure Boot code into non-secboot
+    images so they can include a built-in shell which is unsafe in
+    Secure Boot mode.
+  * ovmf-ia32: Add non-secboot image. Thanks to Lionel Debroux.
+    (Closes: #1023491).
+  * debian/tests/shell.py: Add tests for ovmf-ia32 non-secboot image.
+  * qemu-efi-aarch64: Add non-secboot variant. AAVMF_CODE.fd is the
+    secboot variant, so name it AAVMF_CODE.no-secboot.fd.
+  * qemu-efi-aarch64: Rename the secboot variant, AAVMF_CODE.fd,
+    to AAVMF_CODE.secboot.fd and add a compat symlink.
+  * ovmf, ovmf-ia32, qemu-efi-aarch64: Stop including a built-in shell
+    in secboot variants, CVE-2023-48733. Thanks to Mate Kukri.
+    LP: #2040137.
+    - d/tests: Drop the boot-to-shell tests for images w/ Secure Boot.
+    - d/tests: Update run_cmd_check_secure_boot() to not expect shell
+      interaction.
+
+ -- dann frazier <dannf@debian.org>  Wed, 14 Feb 2024 07:35:13 -0700
+
+edk2 (2023.11-6) unstable; urgency=medium
+
+  * Cherry-pick security fixes from upstream:
+    - Fix a buffer overflow via a long server ID option in DHCPv6
+      client, CVE-2023-45230:
+      + 0001-NetworkPkg-Dhcp6Dxe-SECURITY-PATCH-CVE-2023-45230-Pa.patch
+      + 0002-NetworkPkg-Add-Unit-tests-to-CI-and-create-Host-Test.patch
+      + 0003-NetworkPkg-Dhcp6Dxe-SECURITY-PATCH-CVE-2023-45230-Un.patch
+    - Fix an out-of-bounds read vulnerability when processing the IA_NA
+      or IA_TA option in a DHCPv6 Advertise message, CVE-2023-45229:
+      + 0004-NetworkPkg-Dhcp6Dxe-SECURITY-PATCH-CVE-2023-45229-Pa.patch
+      + 0005-NetworkPkg-Dhcp6Dxe-SECURITY-PATCH-CVE-2023-45229-Un.patch
+    - Fix an out-of-bounds read when processing Neighbor Discovery
+      Redirect messages, CVE-2023-45231:
+      + 0006-NetworkPkg-Ip6Dxe-SECURITY-PATCH-CVE-2023-45231-Patc.patch
+      + 0007-NetworkPkg-Ip6Dxe-SECURITY-PATCH-CVE-2023-45231-Unit.patch
+    - Avoid an infinite loop when parsing unknown options in the
+      Destination Options header of IPv6, CVE-2023-45232:
+      + 0008-NetworkPkg-Ip6Dxe-SECURITY-PATCH-CVE-2023-45232-Patc.patch
+      + 0009-NetworkPkg-Ip6Dxe-SECURITY-PATCH-CVE-2023-45232-Unit.patch
+    - Avoid an infinite loop when parsing a PadN option in the
+      Destination Options header of IPv6, CVE-2023-45233:
+      + 0010-NetworkPkg-UefiPxeBcDxe-SECURITY-PATCH-CVE-2023-4523.patch
+      + 0011-NetworkPkg-UefiPxeBcDxe-SECURITY-PATCH-CVE-2023-4523.patch
+    - Fix a potential buffer overflow when processing a DNS Servers
+      option from a DHCPv6 Advertise message, CVE-2023-45234:
+      + 0013-NetworkPkg-UefiPxeBcDxe-SECURITY-PATCH-CVE-2023-4523.patch
+    - Fix a potential buffer overflow when handling a Server ID option
+      from a DHCPv6 proxy Advertise message, CVE-2023-45235:
+      + 0012-MdePkg-Test-Add-gRT_GetTime-Google-Test-Mock.patch
+      + 0014-NetworkPkg-UefiPxeBcDxe-SECURITY-PATCH-CVE-2023-4523.patch
+    - Record fixes in a SecurityFix.yaml file:
+      + 0015-NetworkPkg-Adds-a-SecurityFix.yaml-file.patch
+
+ -- dann frazier <dannf@debian.org>  Sat, 10 Feb 2024 14:02:37 -0700
+
+edk2 (2023.11-5) unstable; urgency=medium
+
+  * Cherry-pick security fixes from upstream (Closes: #1060408):
+    - Fix heap buffer overflow in Tcg2MeasureGptTable(), CVE-2022-36763
+      + 0001-SecurityPkg-DxeTpm2MeasureBootLib-SECURITY-PATCH-411.patch
+      + 0002-SecurityPkg-DxeTpmMeasureBootLib-SECURITY-PATCH-4117.patch
+      + 0003-SecurityPkg-Adding-CVE-2022-36763-to-SecurityFixes.y.patch
+    - Fix heap buffer overflow in Tcg2MeasurePeImage(), CVE-2022-36764
+      + 0001-SecurityPkg-DxeTpm2MeasureBootLib-SECURITY-PATCH-411-2.patch
+      + 0002-SecurityPkg-DxeTpmMeasureBootLib-SECURITY-PATCH-4118.patch
+      + 0003-SecurityPkg-Adding-CVE-2022-36764-to-SecurityFixes.y.patch
+    - Fix build failure due to symbol collision in above patches:
+      + 0001-SecurityPkg-DxeTpm2MeasureBootLib-SECURITY-PATCH-411-3.patch
+      + 0002-SecurityPkg-DxeTpmMeasureBootLib-SECURITY-PATCH-4117-2.patch
+      + 0003-SecurityPkg-Updating-SecurityFixes.yaml-after-symbol.patch
+    - Fix integer overflow in CreateHob(), CVE-2022-36765
+      + 0001-UefiPayloadPkg-Hob-Integer-Overflow-in-CreateHob.patch
+
+ -- dann frazier <dannf@debian.org>  Sat, 20 Jan 2024 09:13:36 -0700
+
+edk2 (2023.11-4) unstable; urgency=medium
+
+  * ovmf: Enable EFI_CC_MEASUREMENT_PROTOCOL. LP: #2047922.
+
+ -- dann frazier <dannf@debian.org>  Sat, 06 Jan 2024 11:16:34 -0700
+
+edk2 (2023.11-3) unstable; urgency=medium
+
+  * ovmf: Fix link to migration doc (missing .gz). Closes: #1059506.
+  * Add efi-shell-riscv64 package, thanks to Heinrich Schuchardt.
+
+ -- dann frazier <dannf@debian.org>  Sun, 31 Dec 2023 11:48:34 -0700
+
+edk2 (2023.11-2) unstable; urgency=medium
+
+  * ovmf: Remove dangling symlink to removed 2M image:
+    - /usr/share/OVMF/OVMF_CODE.ms.fd
+  * autopkgtest: Add missing dependency on qemu-efi-riscv64.
+  * ovmf: Add guide and tool for migrating VMs using 2M images to 4M
+    images now that python3-virt-firmware is available in Debian.
+  * ovmf: Restore the combined CODE/VARS image OVMF.fd, this time
+    as a 4M image. Document that it is being provided as a convenience
+    for testing purposes only.
+
+ -- dann frazier <dannf@debian.org>  Sun, 24 Dec 2023 16:24:28 -0700
+
+edk2 (2023.11-1) experimental; urgency=medium
+
+  * New upstream release, based on edk2-stable202311 tag.
+    - Include new MbedTlsLib submodule.
+    - d/binary-check.ignore: Add new upstream files.
+  * qemu-efi-riscv64: Add a README.Debian, thanks to Heinrich Schuchardt.
+    Closes: #1054651.
+  * ovmf/qemu-efi-*: Add a Suggests for the appropriate QEMU system package.
+  * d/find-binaries.py: Replace nameOK() with globs in d/binary-check.ignore.
+  * d/find-binaries.py: Replace extensionOK() with globs in
+    d/binary-check.ignore.
+  * d/copyright: Remove superfluous file patterns. Thanks lintian.
+  * d/copyright: Correct globbing order. Thanks lintian.
+
+ -- dann frazier <dannf@debian.org>  Tue, 19 Dec 2023 14:22:47 -0700
+
+edk2 (2023.08-1) experimental; urgency=medium
+
+  * New upstream release, based on edk2-stable202308 tag.
+  * Add qemu-efi-riscv64 package.
+  * Use an infinite timeout for pyexpect scripts that run during build
+    to avoid build failures due to slow builders. Closes: #1049840.
+  * ovmf: Drop 2M compatibility images. See README.Debian for details.
+  * Add ${misc:Depends} to efi-shell-* to address lintian warning.
+
+ -- dann frazier <dannf@debian.org>  Wed, 25 Oct 2023 07:51:53 -0600
+
+edk2 (2023.05-2) unstable; urgency=medium
+
+  * qemu-efi-aarch64/qemu-efi-arm: Disable the EFI_MEMORY_ATTRIBUTE
+    protocol temporarily to workaround a bug in shim until distributions
+    have had a chance to fix it. Closes: #1042438, LP: #2036604.
+  * Drop qemu-efi transitional package. Closes: #1032695.
+
+ -- dann frazier <dannf@debian.org>  Sat, 23 Sep 2023 08:35:39 -0600
+
+edk2 (2023.05-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202305 tag.
+    - Update debian/copyright, including change to BSD-2-Clause-Patent
+      license that happened in 2019.
+    - Refresh patches:
+      + d/p/no-stack-protector-all-archs.diff
+      + d/p/x64-baseline-abi.patch
+      + d/p/Revert-ArmVirtPkg-make-EFI_LOADER_DATA-non-executabl.patch
+
+ -- dann frazier <dannf@debian.org>  Sat, 22 Jul 2023 17:17:53 -0600
+
+edk2 (2023.02-2) experimental; urgency=medium
+
+  * Introduce efi-shell-* packages. Thanks to Heinrich Schuchardt of
+    Canonical. Closes: #837093, LP: #2006980.
+  * Add missing build dependency on lsb-release, thanks to José Martínez
+    of Google.
+  * Fix empty AAVMF_VARS.fd file, thanks to José Martínez of Google.
+  * Generate a new snakeoil certificate with a CN set. LP: #2019993.
+
+ -- dann frazier <dannf@debian.org>  Fri, 19 May 2023 17:21:36 -0600
+
+edk2 (2023.02-1) experimental; urgency=medium
+
+  * New upstream release, based on edk2-stable202302 tag.
+    - Drop patches merged upstream:
+      + d/p/0001-ArmVirtPkg-ArmPlatformLibQemu-Ensure-that-VFP-is-on-.patch
+      + d/p/0002-ArmVirtPkg-ArmVirtQemu-Avoid-early-ID-map-on-Thunder.patch
+    - Refresh patches:
+      + Revert-ArmVirtPkg-make-EFI_LOADER_DATA-non-executabl.patch
+      + brotlicompress-disable.diff
+      + no-stack-protector-all-archs.diff
+      + x64-baseline-abi.patch
+  * d/binary-check updates:
+    - binary-check.(allow,remove): Remove files that no longer exist
+      upstream.
+    - find-binaries.py: Fix exit code when new possible binaries are found.
+    - Rename binary-check.allow to binary-check.ignore.
+    - Convert binary-check.ignore from a list of files to a list of globs.
+    - binary-check.ignore: Update.
+  * debian/rules: Correctness fix for OVMF32 build target dependency,
+    thanks to Glenn Washburn.
+  * Provide PCD configuration for SMBIOS release info. Thanks to Fiona Ebner
+    of Proxmox for noticing and reporting the need for this.
+
+ -- dann frazier <dannf@debian.org>  Mon, 10 Apr 2023 14:16:04 -0600
+
+edk2 (2022.11-6) unstable; urgency=medium
+
+  * autopkgtest: Set an encoding in pexpect.spawn() calls so we can
+    log to sys.stdout instead of using sys.stdout.buffer as a workaround.
+  * autopkgtest: Also fail secure boot tests if QEMU process exits
+    non-zero.
+  * autopkgtest: Output test runtimes to help debug timeout issues like
+    the one fixed in the last upload.
+  * autopkgtest: Bump test timeout from 60s to 120s. We've hit the
+    60s timeout on Ubuntu infrastructure with QEMU 7.2.
+
+ -- dann frazier <dannf@debian.org>  Sun, 05 Mar 2023 13:36:02 -0700
+
+edk2 (2022.11-5) unstable; urgency=medium
+
+  * autopkgtest: Use 1 CPU QEMU models instead of 2. This avoids a
+    performance issue on s390x instances with 1 host CPU that can
+    result in timeouts. LP: #2008865.
+
+ -- dann frazier <dannf@debian.org>  Wed, 01 Mar 2023 21:55:27 -0700
+
+edk2 (2022.11-4) unstable; urgency=medium
+
+  * debian/rules: various improvements from Glenn Washburn:
+    - Create OVMF*_INSTALL_DIR variables to replace literals.
+    - Create BUILD_TYPE variable to make it easier to select other
+      build types.
+    - Explicitly use python3 to run ./debian/edk2-vars-generator.py
+      in case the file does not have the executable bit set.
+  * autopkgtest: Fail if QEMU process exits non-zero, which can catch
+    issues such as passing incorrect arguments to qemu-system-*.
+  * qemu-efi-(arm,ia32): Fix indention in README.Debian.
+
+ -- dann frazier <dannf@debian.org>  Tue, 21 Feb 2023 18:38:29 -0700
+
+edk2 (2022.11-3) unstable; urgency=medium
+
+  * qemu-efi-aarch64: Fix regression for VMs running on Cavium ThunderX SoCs:
+    - Add d/p/0001-ArmVirtPkg-ArmPlatformLibQemu-Ensure-that-VFP-is-on-.patch
+    - Add d/p/0002-ArmVirtPkg-ArmVirtQemu-Avoid-early-ID-map-on-Thunder.patch
+    - debian/rules: Set -DCAVIUM_ERRATUM_27456=TRUE
+
+ -- dann frazier <dannf@debian.org>  Mon, 09 Jan 2023 15:09:39 -0700
+
+edk2 (2022.11-2) unstable; urgency=medium
+
+  * d/p/Revert-ArmVirtPkg-make-EFI_LOADER_DATA-non-executabl.patch:
+    Continue to allow bootloaders to execute memory allocated as
+    EFI_LOADER_DATA until GRUB fixes are more generally available.
+    (Closes: #1025656)
+
+ -- dann frazier <dannf@debian.org>  Thu, 29 Dec 2022 11:14:52 -0700
+
+edk2 (2022.11-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202211 tag.
+
+ -- dann frazier <dannf@debian.org>  Fri, 25 Nov 2022 15:00:25 -0700
+
+edk2 (2022.08-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202208 tag.
+
+ -- dann frazier <dannf@debian.org>  Sun, 11 Sep 2022 11:33:08 -0600
+
+edk2 (2022.05-4) unstable; urgency=medium
+
+  * autopkgtest: Fix regression in test_aavmf_ms_secure_boot_unsigned
+    by porting it to the new GrubShellBootableIsoImage interface.
+
+ -- dann frazier <dannf@debian.org>  Wed, 07 Sep 2022 07:23:15 -0600
+
+edk2 (2022.05-3) unstable; urgency=medium
+
+  * Enroll snakeoil keys w/ EnrollDefaultKeys.efi --no-default, fixing
+    a regression introduced with the transition to edk2-vars-generator.py.
+    LP: #1986692.
+  * Clear the BootOrder EFI variable after enrolling keys.
+    (Closes: #1015759)
+  * autopkgtest: Move bootloader selection logic out of Filesystems.py.
+  * autopkgtest: Add snakeoil regression tests.
+
+ -- dann frazier <dannf@debian.org>  Tue, 06 Sep 2022 09:18:46 -0600
+
+edk2 (2022.05-2) unstable; urgency=medium
+
+  * d/p/x64-baseline-abi.patch: Override microarchitecture ABI for x64
+    to retain compatibility with generic x86-64 platforms. LP: #1976267.
+
+ -- dann frazier <dannf@debian.org>  Mon, 06 Jun 2022 18:48:56 +0100
+
+edk2 (2022.05-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202205 tag.
+  * Drop patches merged upstream:
+    - d/p/0001-OvmfPkg-OvmfPkgX64-Use-different-CcProbeLib-when-SMM.patch
+
+ -- dann frazier <dannf@debian.org>  Fri, 03 Jun 2022 10:29:46 +0100
+
+edk2 (2022.05~rc1-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202205-rc1 tag.
+  * Drop patches merged upstream:
+    - d/p/0001-MdeModulePkg-NvmExpressDxe-fix-check-for-Cap.Css.patch
+    - d/p/0002-MdeModulePkg-NvmExpressPei-fix-check-for-NVM-command.patch
+  * ovmf: Fix boot hang with SMM enabled:
+    - d/p/0001-OvmfPkg-OvmfPkgX64-Use-different-CcProbeLib-when-SMM.patch
+
+ -- dann frazier <dannf@debian.org>  Tue, 17 May 2022 09:59:17 -0600
+
+edk2 (2022.02-3) unstable; urgency=medium
+
+  * Fix NVMe controller support in QEMU (Closes: #1007793).
+    - d/p/0001-MdeModulePkg-NvmExpressDxe-fix-check-for-Cap.Css.patch
+    - d/p/0002-MdeModulePkg-NvmExpressPei-fix-check-for-NVM-command.patch
+    Thanks to Mara Sophie Grosch!
+
+ -- dann frazier <dannf@debian.org>  Mon, 28 Mar 2022 14:59:17 -0600
+
+edk2 (2022.02-2) unstable; urgency=medium
+
+  * Fix TPM support which regressed due to an upstream build flag rename.
+    (Closes: #1006842)
+
+ -- dann frazier <dannf@debian.org>  Tue, 08 Mar 2022 07:43:32 -0700
+
+edk2 (2022.02-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202202 tag.
+  * Drop patch merged upstream:
+    - 0001-OvmfPkg-FvbServicesSmm-use-the-VmgExitLibNull.patch
+  * qemu-efi-arm: Build with non-hard-float ARM compiler, allowing
+    us to stop carrying debian/patches/ftbfs-gcc-11.patch.
+
+ -- dann frazier <dannf@debian.org>  Fri, 25 Feb 2022 12:12:36 -0700
+
+edk2 (2022.02~rc1-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202202-rc1 tag.
+  * d/p/0001-OvmfPkg-FvbServicesSmm-use-the-VmgExitLibNull.patch:
+    Fix regression causing OVMF builds w/ SMM to crash.
+
+ -- dann frazier <dannf@debian.org>  Tue, 15 Feb 2022 09:20:52 -0700
+
+edk2 (2021.11-2) unstable; urgency=medium
+
+  * Set NETWORK_IP6_ENABLE to support IPv6 PXE. (Closes: #1004147)
+  * Move descriptions for OVMF32 images to ovmf-ia32's README.Debian.
+  * qemu-efi-*: Add README.Debian files with image descriptions.
+
+ -- dann frazier <dannf@debian.org>  Fri, 04 Feb 2022 17:23:13 -0700
+
+edk2 (2021.11-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202111 tag.
+  * d/find-binaries.py: Cleanup pyflake issues
+  * Inclusivity cleanup:
+    - Rename d/binary-check.blacklist -> d/binary-check.remove
+    - Rename d/binary-check.whitelist -> d/binary-check.allow
+
+ -- dann frazier <dannf@debian.org>  Wed, 01 Dec 2021 18:30:09 -0700
+
+edk2 (2021.11~rc1-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202111-rc1 tag.
+    - d/binary-check.blacklist: Update ResetVector file list to match
+      upstream.
+  * d/rules: Use shallow clones to save time when initializing submodules.
+
+ -- dann frazier <dannf@debian.org>  Mon, 15 Nov 2021 15:03:21 -0700
+
+edk2 (2021.08-3) unstable; urgency=medium
+
+  * d/p/ftbfs-gcc-11.patch: Resurrect, since gcc-11 has changed defaults
+    again. Use -march=armv7-a+fp instead of -march=armv7-a to fix FTBFS.
+    (Closes: #997200)
+
+ -- dann frazier <dannf@debian.org>  Mon, 25 Oct 2021 10:49:28 -0600
+
+edk2 (2021.08-2) unstable; urgency=medium
+
+  * README.Debian: Document OVMF.fd image.
+  * autopkgtest: Only run AAVMF Secure Boot test on distributions that
+    derive from Ubuntu. Debian's shim-signed on arm64 is currently, in
+    fact, not signed (see #992073). (Closes: #995656)
+
+ -- dann frazier <dannf@debian.org>  Fri, 08 Oct 2021 14:49:45 -0600
+
+edk2 (2021.08-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202108 tag.
+  * d/p/ftbfs-gcc-11.patch: Drop; no longer needed now that
+    gcc-11 has restored its previous behavior.
+
+ -- dann frazier <dannf@debian.org>  Tue, 07 Sep 2021 11:27:26 -0600
+
+edk2 (2021.08~rc0-2) experimental; urgency=medium
+
+  * d/p/ftbfs-gcc-11.patch: Use -march=armv7-a+fp instead of -march=armv7-a
+    to fix FTBFS w/ the new gcc-11 defaults. (Closes: #992100)
+
+ -- dann frazier <dannf@debian.org>  Wed, 11 Aug 2021 11:24:42 -0600
+
+edk2 (2021.08~rc0-1) experimental; urgency=medium
+
+  * New upstream release, based on edk2-stable202108-rc0 tag.
+  * qemu-efi: Set Multi-Arch: foreign, thanks to the Multiarch hinter.
+
+ -- dann frazier <dannf@debian.org>  Mon, 09 Aug 2021 16:13:04 -0600
+
+edk2 (2021.05-1) experimental; urgency=medium
+
+  * New upstream release, based on edk2-stable202105 tag.
+  * debian/rules: Only embed required git submodules.
+
+ -- dann frazier <dannf@debian.org>  Fri, 28 May 2021 13:56:57 -0600
+
+edk2 (2021.02-1) experimental; urgency=medium
+
+  * New upstream release, based on edk2-stable202102 tag.
+  * Drop qemu-ovmf-secureboot which is no longer used.
+  * debian/control: Make versioned build-dep on qemu-system-x86 backport
+    safe.
+  * Add pre-enrolled "ms" and "snakeoil" variants of AAVMF templates.
+  * d/p/BaseTools-Fix-the-lib-order-in-static_library_files..patch:
+    Remove orphaned patch.
+  * debian/control: Drop unnecessary Testsuite field.
+
+ -- dann frazier <dannf@debian.org>  Tue, 09 Mar 2021 13:23:59 -0700
+
+edk2 (2020.11-4) unstable; urgency=medium
+
+  * UEFI/Filesystems.py: Force "/sbin" into $PATH before calling
+    mkdosfs, fixing autopkgtest failures.
+
+ -- dann frazier <dannf@debian.org>  Tue, 09 Mar 2021 09:20:12 -0700
+
+edk2 (2020.11-3) unstable; urgency=medium
+
+  * autopkgtest: Avoid needing to use 'atexit' callbacks to cleanup
+    uefi variable flash images by implementing a PflashParams object
+    that cleans itself up when deleted.
+  * autopkgtest: Add missing carriage return to 'reset -s' command
+    that is intended to shutdown the guest.
+  * autopkgtest: Require guest shutdown to complete.
+  * autopkgtest: Add tests to validate secureboot.
+  * autopkgtest: Refactor create_efi_bootable_iso() into a subclass of
+    EfiBootableIsoImage.
+  * autopkgtest: Introduce a series of QemuUefi*Command classes.
+  * autopkgtest: Reorganize code into a python package.
+  * autopkgtest: Test booting to shell w/ snakeoil vars.
+  * Add edk2-vars-generator.py and use it instead of ovmf-vars-generator.
+    This tool reuses the UEFI python package, which should allow us to
+    more easily add pre-enrolled images for additional architectures.
+  * debian/rules: Consolidate list of files to cleanup into debian/clean.
+  * Add a OVMF_CODE_4M.snakeoil.fd symlink to help users discover the
+    appropriate image to use with OVMF_VARS_4M.snakeoil.fd.
+  * debian/rules: Update PkKek-1 selection to allow for derivative
+    distributions.
+  * autopkgtest: Enable debug output to make it easier to diagnose
+    failures.
+  * qemu-efi-arm, qemu-efi-aarch64: Enable TPM support. LP: #1901014.
+
+ -- dann frazier <dannf@debian.org>  Mon, 08 Mar 2021 15:31:22 -0700
+
+edk2 (2020.11-2) unstable; urgency=medium
+
+  * autopkgtest: Add allow-stderr to Restrictions to fix failure.
+
+ -- dann frazier <dannf@debian.org>  Tue, 15 Dec 2020 11:42:37 -0700
+
+edk2 (2020.11-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202011 tag.
+  * Version the build-dep on qemu-system-x86 to ensure it is new enough
+    to support setting smbios OEM strings on the command line. Thanks to
+    Christian Ehrhardt. LP: #1900846.
+  * Introduce ovmf-ia32 package. (Closes: #842683)
+  * Switch OVMF_CODE_4M images to use a 32-bit PEI phase which supports
+    S3 suspend. This avoids having to disable S3 in QEMU to use the
+    SMM-enforcing secboot variant. Non-4M images are for backwards
+    compatibility only, and remain with a 64-bit PEI phase. LP: #1903681.
+    (Closes: #973783)
+  * Rework autopkgtests to cover all provided images.
+
+ -- dann frazier <dannf@debian.org>  Sat, 12 Dec 2020 17:57:02 -0700
+
+edk2 (2020.08-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202008 tag.
+  * Drop patches merged upstream:
+     - d/p/0001-SecurityPkg-DxeImageVerificationLib-extract-SecDataD.patch
+     - d/p/0002-SecurityPkg-DxeImageVerificationLib-assign-WinCertif.patch
+     - d/p/0003-SecurityPkg-DxeImageVerificationLib-catch-alignment-.patch
+  * Drop patch no longer required due to upstream fixes:
+     - d/p/no-missing-braces.diff
+  * Refresh patch:
+     - d/p/no-stack-protector-all-archs.diff
+
+ -- dann frazier <dannf@debian.org>  Mon, 28 Sep 2020 13:40:05 -0600
+
+edk2 (2020.05-5) unstable; urgency=medium
+
+  * Update snakeoil keys. Previous one expired 2019-12-01. New one
+    expires 2120-08-14.
+
+ -- dann frazier <dannf@debian.org>  Mon, 07 Sep 2020 13:23:29 -0600
+
+edk2 (2020.05-4) unstable; urgency=medium
+
+  * Fix integer overflow in DxeImageVerificationHandler. (CVE-2019-14562)
+    (Closes: #968819)
+     - d/p/0001-SecurityPkg-DxeImageVerificationLib-extract-SecDataD.patch
+     - d/p/0002-SecurityPkg-DxeImageVerificationLib-assign-WinCertif.patch
+     - d/p/0003-SecurityPkg-DxeImageVerificationLib-catch-alignment-.patch
+  * Re-enable TPM support, which was accidentally disabled due to an
+    upstream build flag rename in 2020.05-1. LP: #1890646.
+
+ -- dann frazier <dannf@debian.org>  Wed, 02 Sep 2020 10:26:10 -0600
+
+edk2 (2020.05-3) unstable; urgency=medium
+
+  * Provide 4MB OVMF images as the existing 2MB images no longer
+    have sufficient variable space for the current Secure Boot Forbidden
+    Signature Database. LP: #1885662.
+  * Update fw descriptors to reference 4M images instead of their 2M
+    counterparts. This will migrate tools that use the descriptor interface
+    (like libvirt) over to the 4M images when creating new VMs. Existing 2M
+    VMs will require manual migration.
+  * Add a 4M snakeoil variable template and drop the 2M version. This will
+    break existing snakeoil VMs, but that should be OK for a test/devel
+    facility.
+  * Increase autopkgtest timeout from 30s to 60s. LP: #1885186.
+
+ -- dann frazier <dannf@debian.org>  Wed, 05 Aug 2020 18:33:22 -0600
+
+edk2 (2020.05-2) unstable; urgency=medium
+
+  * Enable https boot support, thanks to Dimitri John Ledkov. LP: #1883114.
+
+ -- dann frazier <dannf@debian.org>  Thu, 11 Jun 2020 08:40:31 -0600
+
+edk2 (2020.05-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202005 tag.
+
+ -- dann frazier <dannf@debian.org>  Wed, 03 Jun 2020 15:39:40 -0600
+
+edk2 (0.0~20200229-2) unstable; urgency=medium
+
+  * Actually install the new "ms" descriptor.
+
+ -- dann frazier <dannf@debian.org>  Sat, 11 Apr 2020 09:17:23 -0600
+
+edk2 (0.0~20200229-1) unstable; urgency=medium
+
+  * Reintroduce OVMF_CODE.ms.fd symlink, but now it points to
+    OVMF_CODE.secboot.fd instead of OVMF_CODE.fd, which enforces SMM.
+  * Update firmware descriptor JSON files:
+     - Update the existing secboot descriptor to use an empty variable
+       store. This makes it Secure Boot-capable, but with Secure Boot disabled.
+       Previously it used a store w/ keys pre-enrolled, without advertising
+       that feature.
+     - Add a new "ms" descriptor which has keys pre-enrolled and Secure Boot
+       enabled, and advertises the "enrolled-keys" feature.
+     - Provide more details in "description" fields.
+  * README.Debian: Improve the use-case description for each image.
+  * Mark ovmf, qemu-efi-aarch64 and qemu-efi-arm as Multi-Arch: foreign.
+    Thanks to the Multiarch hinter.
+  * Change versioning scheme to reflect usage of edk2-stable<YYYYMM>
+    tag releases over git snapshots.
+  * Bump Standards-Version from 4.1.3 to 4.5.0.
+  * Add a debian/watch file.
+
+ -- dann frazier <dannf@debian.org>  Tue, 31 Mar 2020 16:46:58 -0600
+
+edk2 (0~20200229.4c0f6e34-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable202002 tag.
+    - Fix numeric truncation in S3BootScript[Save]*() API. (CVE-2019-14563)
+      (Closes: #952934)
+    - Fix use-after-free in PcdHiiOsRuntimeSupport. (CVE-2019-14586)
+    - Clear memory before free to avoid potential password leak.
+      (CVE-2019-14558)
+    - Fix double-unmap in SdMmcCreateTrb(). This did not impact any
+      of the images built from this package. (CVE-2019-14587)
+    - Fix memory leak in ArpOnFrameRcvdDpc(). (CVE-2019-14559)
+    - Fix issue that could allow an efi image with a blacklisted hash in the
+      dbx to be loaded. (CVE-2019-14575) (Closes: #952935)
+    - Fix a memory leak in the ARP handler. (CVE-2019-14559) (Closes: #952926)
+    - Refresh patches:
+       + debian/patches/no-missing-braces.diff
+       + debian/patches/no-stack-protector-all-archs.diff
+
+ -- dann frazier <dannf@debian.org>  Fri, 13 Mar 2020 16:05:49 -0600
+
+edk2 (0~20191122.bd85bf54-2) unstable; urgency=medium
+
+  * Bump debhelper compatibility level to 12.
+  * Provide an OVMF_VARS.snakeoil.fd image and matching private key for
+    development testing. LP: #1850848.
+  * Drop OVMF_CODE.ms.fd symlink. LP: #1864535.
+
+ -- dann frazier <dannf@debian.org>  Thu, 27 Feb 2020 07:23:16 -0700
+
+edk2 (0~20191122.bd85bf54-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable201911 tag.
+  * Drop patches merged upstream:
+    - BaseTools-Fix-the-lib-order-in-static_library_files..patch
+    - 0001-MdePkg-Include-Protocol-Tls.h-Add-the-data-type-of-E.patch
+    - 0002-CryptoPkg-TlsLib-Add-the-new-API-TlsSetVerifyHost-CV.patch
+    - 0003-CryptoPkg-Crt-turn-strchr-into-a-function-CVE-2019-1.patch
+    - 0004-CryptoPkg-Crt-satisfy-inet_pton.c-dependencies-CVE-2.patch
+    - 0005-CryptoPkg-Crt-import-inet_pton.c-CVE-2019-14553.patch
+    - 0006-CryptoPkg-TlsLib-TlsSetVerifyHost-parse-IP-address-l.patch
+    - 0007-NetworkPkg-TlsDxe-Add-the-support-of-host-validation.patch
+    - 0008-NetworkPkg-HttpDxe-Set-the-HostName-for-the-verifica.patch
+  * Compile the liblto plugins for ARM & AARCH64, allowing us to
+    move our toolchain config from GCC49 to GCC5. Move to GCC5.
+
+ -- dann frazier <dannf@debian.org>  Sun, 08 Dec 2019 09:16:40 -0700
+
+edk2 (0~20190828.37eef910-4) unstable; urgency=medium
+
+  * Support server identify validation in HTTPS Boot (CVE-2019-14553).
+    Closes: #941775.
+
+ -- dann frazier <dannf@debian.org>  Mon, 11 Nov 2019 19:37:52 +0100
+
+edk2 (0~20190828.37eef910-3) unstable; urgency=medium
+
+  * Don't require an SMM for the OVMF.fd image. Closes: #939928.
+
+ -- dann frazier <dannf@debian.org>  Tue, 01 Oct 2019 11:23:42 -0600
+
+edk2 (0~20190828.37eef910-2) unstable; urgency=medium
+
+  * debian/control: Correct Maintainer field.
+
+ -- dann frazier <dannf@debian.org>  Sat, 28 Sep 2019 06:52:05 -0600
+
+edk2 (0~20190828.37eef910-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable201908 tag.
+    - debian/rules: Use git archive in get-orig-source to take advantage
+      of openssl .gitattributes that will trim cruft from the source tarball.
+    - d/binary-check.blacklist: Drop binary removed upstream.
+    - debian/find-binaries.py: Add to the list of heuristically "OK"
+      file extensions.
+  * d/p/BaseTools-Fix-the-lib-order-in-static_library_files..patch:
+    Fix ARM image FTBFS.
+
+ -- dann frazier <dannf@debian.org>  Fri, 27 Sep 2019 18:05:34 -0600
+
+edk2 (0~20190606.20d2e5a1-4) unstable; urgency=medium
+
+  * Fix up remaining references to python.
+
+ -- Steve Langasek <vorlon@debian.org>  Sun, 01 Sep 2019 05:31:40 +0000
+
+edk2 (0~20190606.20d2e5a1-3) unstable; urgency=medium
+
+  [ dann frazier ]
+  * d/p/ovmf-vars-generator-ignore-qemu-warnings.patch: Avoid build
+    hang in Ubuntu resulting from unexpected QEMU warnings in output
+    while enrolling keys.
+
+  [ Steve Langasek ]
+  * debian/patches/python3.patch: Use python3 syntax.
+  * Drop python from Build-Depends.  Closes: #936470.
+
+ -- Steve Langasek <vorlon@debian.org>  Fri, 30 Aug 2019 21:59:55 -0700
+
+edk2 (0~20190606.20d2e5a1-2) unstable; urgency=medium
+
+  * debian/tests/control: Add missing dependencies on ovmf,
+    qemu-efi-aarch64, and qemu-efi-arm.
+  * debian/rules: Fix a comment typo in the get-orig-source rules.
+  * debian/rules: Introduce a setup-build-stamp to avoid unnecessary
+    BuildTools rebuilds.
+  * ovmf: Add SecureBoot enabled variant:
+    - debian/control: add xorriso, qemu-utils, qemu-system-x86, python3 to
+      Build-Depends for the automatic key enrollment process.
+    - debian/rules:
+      - build a SecureBoot/SMM enabled variant of OVMF_CODE too.
+      - build OVMF_VARS.ms.fd with embedded Microsoft keys from the binary
+        EnrollDefaultKeys.efi
+    - debian/ovmf.links: add OVMF_CODE.ms.fd.
+    - debian/ovmf.install: install OVMF_VARS.ms.fd.
+    - d/p/ovmf-vars-generator-Pass-OEM-Strings-to-the-guest.patch: Support
+      passing in the PK/KEK via QEMU's --oemstring.
+  * Reenable HTTP Boot, which was accidentally disabled due to an upstream
+    macro rename.
+  * Add firmware descriptor files. Closes: #932269, LP: #1836859.
+
+ -- dann frazier <dannf@debian.org>  Wed, 31 Jul 2019 13:44:42 -0600
+
+edk2 (0~20190606.20d2e5a1-1) experimental; urgency=medium
+
+  * New upstream release, based on edk2-stable201905 tag.
+    - d/binary-check.blacklist: Drop binaries removed upstream.
+    - Remove unused embedded copy of BrotliCompress to avoid
+      security scanner false-positives.
+    - Adapt to upstream's use of git submodules for openssl and
+      berkeley-softfloat-3.
+  * debian/control: Fold and sort Build-Depends line.
+  * debian/control: Add bc to Build-Depends, as it is now used by
+    edksetup.sh.
+  * debian/control: Add python3-distutils to Build-Depends. Part of
+    the build will now use python3 instead of python if found at build-time.
+    However, the build requires distutils, and upstream only embeds the
+    python(2) version of that.
+  * Revert "Adjust debian/rules to only build ovmf when building with -b"
+    commit, as Debian now has the necessary cross-compilers.
+  * Remove unnecessary sourcing of edksetup.sh. It only needs to be
+    sourced in targets that need to inherent its environment.
+  * Add a set of autopkgtests that verify each image type boots to a
+    UEFI shell prompt in QEMU.
+  * Include /usr/share/dpkg/architecture.mk instead of manually defining
+    equivalent variables.
+
+ -- dann frazier <dannf@debian.org>  Fri, 28 Jun 2019 16:07:10 -0600
+
+edk2 (0~20190309.89910a39-1) experimental; urgency=medium
+
+  * New upstream release, based on edk2-stable201903 tag.
+    - Fixes for CVE-2018-12178, CVE-2018-12180 and CVE-2018-12181
+      Closes: #924615.
+    - qemu-efi-*: Avoid silent corruption of firmware flash image
+      by buggy EFI apps. Closes: #924620, LP: #1812093.
+    - d/binary-check.blacklist: Drop binaries removed upstream.
+    - d/binary-check.whitelist: Add new files detected as binary
+      that were hand-verified to be source.
+    - Bump openssl up to 1.1.0j.
+    - qemu-efi-{arm,aarch64}: Drop -DINTEL_BDS from build flags.
+      It became the default some time ago and was removed.
+    - ovmf: Stop cargo-culting the inclusion and build of external
+      EdkShell source. This is now no longer supported by upstream,
+      and is a no-op because it was replaced by the internal UEFI
+      shell back 2013 (9bef3cdc "OvmfPkg: Build and use the UEFI shell
+      by default").
+    - qemu-efi-{arm,aarch64}: Don't explicitly build ShellPkg,
+      ArmVirtPkg has been doing it since 2015 (da1ce6f8
+      "ArmVirtualizationPkg: build UEFI shell from source").
+    - Don't explicitly build FatPkg, OvmfPkg & ArmVirtPkg have
+      included it since 2016 (aa47e529 "OvmfPkg: Convert to using
+      FatPkg in the EDK II tree"), (42e3d9eb "ArmVirtPkg: Convert to
+      build FatPkg from source").
+    - d/p/no-missing-braces.diff: Forward port.
+    - d/p/no-stack-protector-all-archs.diff: Forward port.
+
+ -- dann frazier <dannf@debian.org>  Mon, 18 Mar 2019 15:38:21 -0600
+
+edk2 (0~20181115.85588389-3) unstable; urgency=medium
+
+  * Security fixes (Closes: #924615):
+    - Fix buffer overflow in BlockIo service (CVE-2018-12180)
+    - DNS: Check received packet size before using (CVE-2018-12178)
+    - Fix stack overflow with corrupted BMP (CVE-2018-12181)
+
+ -- dann frazier <dannf@debian.org>  Fri, 15 Mar 2019 18:37:44 -0600
+
+edk2 (0~20181115.85588389-2) unstable; urgency=medium
+
+  * debian/rules: Factor out common feature flags across builds.
+  * ovmf: Enable TPM2 device support. Closes: #914722.
+
+ -- dann frazier <dannf@debian.org>  Mon, 26 Nov 2018 16:34:54 -0700
+
+edk2 (0~20181115.85588389-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable201811 tag.
+
+ -- dann frazier <dannf@debian.org>  Thu, 15 Nov 2018 11:28:06 -0700
+
+edk2 (0~20180812.cb5f4f45-1) unstable; urgency=medium
+
+  * New upstream release, based on edk2-stable201808 tag.
+
+ -- dann frazier <dannf@debian.org>  Thu, 06 Sep 2018 16:12:41 -0600
+
+edk2 (0~20180803.dd4cae4d-1) unstable; urgency=medium
+
+  * New upstream release.
+  * debian/control: Point the Vcs-* links to the new location on salsa.
+  * d/p/ShellPkg-dp-Correct-case-of-included-file.patch: Drop;
+    now upstream.
+
+ -- dann frazier <dannf@debian.org>  Fri, 03 Aug 2018 15:35:01 -0600
+
+edk2 (0~20180626.e5735040-1) unstable; urgency=medium
+
+  * New upstream release.
+  * d/p/ShellPkg-dp-Correct-case-of-included-file.patch: Add; fixes FTBFS.
+  * debian/control: Point the Vcs-* links to the edk2 project in my
+    namespace on salsa until we identify a more permanent location.
+
+ -- dann frazier <dannf@debian.org>  Tue, 26 Jun 2018 17:06:59 -0600
+
+edk2 (0~20180503.ebafede9-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- dann frazier <dannf@debian.org>  Thu, 03 May 2018 17:00:35 -0600
+
+edk2 (0~20180328.c27c0003-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Bump openssl up to latest upstream version, 1.1.0h.
+
+ -- dann frazier <dannf@debian.org>  Wed, 28 Mar 2018 11:06:08 -0600
+
+edk2 (0~20180205.c0d9813c-2) unstable; urgency=medium
+
+  * Enable HTTP Boot. LP: #1750481.
+
+ -- dann frazier <dannf@debian.org>  Tue, 20 Feb 2018 13:14:10 -0700
+
+edk2 (0~20180205.c0d9813c-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- dann frazier <dannf@debian.org>  Mon, 05 Feb 2018 12:03:01 -0700
+
+edk2 (0~20180105.0bc94c74-1) unstable; urgency=medium
+
+  * New upstream release.
+    - d/p/Revert-BaseTools-Update-Gensec-to-set-PROCESSING_REQ.patch: Drop;
+      superseded by upstream fix:
+       1e6e6e18 BaseTools: Fix GenSec GCC make failure
+  * Bump Standards-Version from 4.1.1 to 4.1.3.
+    - Use https instead of http in Vcs-Browser URL.
+
+ -- dann frazier <dannf@debian.org>  Fri, 05 Jan 2018 12:33:43 -0700
+
+edk2 (0~20171205.a9212288-1) unstable; urgency=medium
+
+  * New upstream release.
+    - Fix Windows Server 2012 BSOD during installation. Closes: #881219.
+      Thanks to Jeff Ketchum.
+    - Bump openssl up to latest upstream version, 1.1.0g.
+  * d/p/Revert-BaseTools-Update-Gensec-to-set-PROCESSING_REQ.patch: Add;
+    fixes FTBFS.
+  * Change package priorities from extra (now deprecated) to optional.
+
+ -- dann frazier <dannf@debian.org>  Tue, 05 Dec 2017 15:04:06 -0700
+
+edk2 (0~20171027.76fd5a66-1) unstable; urgency=medium
+
+  * New upstream release.
+    - Fix Win10 guests booting from IDE drives. LP: #1725560.
+
+ -- dann frazier <dannf@debian.org>  Fri, 27 Oct 2017 16:10:29 -0600
+
+edk2 (0~20171010.234dbcef-1) unstable; urgency=medium
+
+  * New upstream release.
+    - d/p/demote-maybe-uninitialized-to-warning.patch: Drop; issue resolved
+      upstream.
+  * Bump Standards-Version from 3.9.8 to 4.1.1.
+  * Bump debhelper compatibility level to 10.
+
+ -- dann frazier <dannf@debian.org>  Tue, 10 Oct 2017 14:28:01 -0600
+
+edk2 (0~20170911.5dfba97c-1) unstable; urgency=medium
+
+  * New upstream release.
+    - Now builds with gcc-7. Closes: #853382.
+    - d/p/no-missing-braces.diff: Refresh.
+    - d/p/no-stack-protector-all-archs.diff: Refresh.
+    - d/p/no-pie-for-arm.diff: Drop; superseded by upstream commit
+      a6b53806.
+    - OpenSSL: Switch to the new openssl-1.1-based system, which no
+      longer requires patching.
+    - d/p/demote-maybe-uninitialized-to-warning.patch: Workaround compiler
+      error until upstream code is fixed.
+  * Unset environment variables that are used internally by edk2.
+  * Avoid the need for "post-patches" by explicitly setting the
+    ACTIVE_PLATFORM and TARGET_ARCH variables on the build commandline
+    for ovmf, like we already do for qemu-efi-{arm,aarch64}.
+
+ -- dann frazier <dannf@debian.org>  Tue, 12 Sep 2017 13:17:42 -0600
+
+edk2 (0~20161202.7bbe0b3e-2) experimental; urgency=medium
+
+  * debian/rules: Replace hardcoded "AARCH64" strings with $(EDK2_HOST_ARCH).
+  * debian/rules: AAVMF image generation doesn't require the edksetup
+    environment, so move that code outside of it.
+  * debian/rules: Refactor build-qemu-efi into common and aarch64-specific
+    targets, so that the common target can be used by a future arm-specific
+    target.
+  * d/p/arm64-no-pie-for-you.diff -> d/p/no-pie-for-arm.diff: Update patch
+    to also apply to arm builds.
+  * Rename qemu-efi to qemu-efi-aarch64 to open the namespace for
+    qemu-efi-arm. qemu-efi is now a transitional package with a compatibility
+    symlink.
+  * Add qemu-efi-arm package. Closes: #857858.
+
+ -- dann frazier <dannf@debian.org>  Thu, 18 May 2017 10:17:41 -0600
+
+edk2 (0~20161202.7bbe0b3e-1) unstable; urgency=medium
+
+  * New upstream release.
+    - GOP driver for the VirtIo GPU (virtio-gpu-pci). Closes: #842680.
+    - Drop precompiled binaries from Vlv2TbltDevicePkg/.
+    - Drop precompiled liblto-*.a binaries from ArmPkg/.
+  * Add myself to Uploaders.
+  * debian/rules: Set OpenSSL version in one place.
+  * d/p/arm64-reorder-blocks-algorithm.diff: Drop; superseded by
+    upstream commit 8866d337.
+  * d/p/arm64-no-pie-for-you.diff: Fix FTBFS w/ GCC that has PIE
+    enabled by default (now the case in Debian). Closes: #846690.
+  * debian/control: Clarify the package/guest architecture mapping.
+    Closes: #837092.
+  * d/p/no-missing-braces.diff: Refresh.
+  * d/p/no-stack-protector-all-archs.diff: Refresh.
+  * debian/copyright: Update.
+
+ -- dann frazier <dannf@debian.org>  Fri, 09 Dec 2016 09:09:39 +0100
+
+edk2 (0~20160813.de74668f-2) unstable; urgency=medium
+
+  [ dann frazier ]
+  * d/p/arm64-reorder-blocks-algorithm.diff: Workaround to fix
+    booting in KVM mode. LP: #1632875.
+  * debian/rules: Export compiler prefix variable to simplify
+    build-qemu-efi target.
+  * debian/rules: Make the target dependencies on setup-build explicit.
+  * debian/rules: Set the aarch64 toolchain prefix agnostically of the
+    toolchain tag being used.
+  * debian/rules: Respect EDK2_TOOLCHAIN tag when building ovmf.
+
+ -- Steve Langasek <vorlon@debian.org>  Wed, 19 Oct 2016 13:07:08 -0700
+
+edk2 (0~20160813.de74668f-1) unstable; urgency=medium
+
+  * New upstream release.
+    - fixes build failure with gcc-6.  Closes: #834467.
+    - increases variable size for arm64 build, to support SecureBoot.
+      Closes: #830488.
+  * debian/patches/shell-proper-valist.patch: use VA_COPY() in Shell.
+  * update Standards Version.
+
+ -- Steve Langasek <vorlon@debian.org>  Tue, 16 Aug 2016 06:20:28 +0000
+
+edk2 (0~20160408.ffea0a2c-2) unstable; urgency=medium
+
+  * Provide split AAVMF_{CODE,VARS}.fd for arm64 in the qemu-efi package,
+    for VM-friendly nvram persistence in the same style as Fedora et al.
+    and by analogy with the OVMF_{CODE,VARS}.fd on x86.  Thanks to
+    William Grant <wgrant@ubuntu.com> for the patch.
+
+ -- Steve Langasek <vorlon@debian.org>  Sat, 16 Apr 2016 00:30:50 +0000
+
+edk2 (0~20160408.ffea0a2c-1) unstable; urgency=medium
+
+  [ dann frazier ]
+  * New upstream version.
+    - d/p/enable-nvme: Drop; superseded by upstream commit 8ae3832d.
+    - d/p/no-missing-braces.diff: Refresh.
+    - d/p/FatPkg-AARCH64.diff: Drop; fixed upstream in commit 04a4fdb9.
+    - d/p/no-stack-protector-all-archs.diff: Refresh.
+    - d/p/arm64-mistrict-align.patch: Drop; superseded by upstream
+      commit d764d5984.
+  * Move out of non-free as the FAT driver has been replaced with a free
+    implementation, Thanks to Microsoft.  Closes: #815618, LP: #1569602.
+  * Add SECURE_BOOT_ENABLE flag to aarch64 build to enable support for UEFI
+    Secure Boot.  Closes: #819757. Thanks to Linn Crosetto.
+
+ -- Steve Langasek <vorlon@debian.org>  Thu, 14 Apr 2016 20:50:11 +0000
+
+edk2 (0~20160104.c2a892d7-1) unstable; urgency=medium
+
+  * New upstream version.
+    - Fixes support for kvm GPU passthrough.  Closes: #810163.
+    - Adds GICv3 support.  Closes: #810495.
+
+  [ dann frazier ]
+  * Use GCC49 toolchain for all architectures; the ARMGCC toolchain has
+    been dropped upstream.
+  * Supersede debian/patches/arm64-no-expensive-optimizations.patch
+    with debian/patches/arm64-mstrict-align.patch.  Closes LP: #1489460.
+
+ -- Steve Langasek <vorlon@debian.org>  Thu, 28 Jan 2016 01:35:30 +0000
+
+edk2 (0~20150106.5c2d456b-2) unstable; urgency=medium
+
+  [ Steve Langasek ]
+  * Build-depend on gcc-aarch64-linux-gnu and make qemu-efi an Arch: all
+    package.
+  * Ship OVMF_CODE.fd and OVMF_VARS.fd for proper EFI variable support.
+    Closes: #764918.  Continue shipping OVMF.fd too for now, for
+    compatibility.
+
+  [ dann frazier ]
+  * qemu-efi: Switch to Intel BDS. This supports a fallback to the removable
+    media path (i.e. \EFI\BOOT\BOOTaa64.EFI) as required by the Linaro VM
+    Specification.  Closes: #796928.
+  * debian/patches/arm64-no-expensive-optimizations.patch: Workaround
+    ARM64 compiler issue by disabling certain optimizations.
+    Closes: LP #1489560
+
+ -- Steve Langasek <vorlon@debian.org>  Thu, 03 Sep 2015 22:08:41 +0000
+
+edk2 (0~20150106.5c2d456b-1) unstable; urgency=medium
+
+  * New upstream release, for arm64 support.
+  * debian/patches/no-missing-braces.diff: Add -Wno-missing-braces to
+    CFLAGS to avoid build failures.  Thanks to dann frazier
+    <dannf@debian.org>.
+  * debian/patches/FatPkg-AARCH64.diff: AARCH64 support.  Thanks to dann
+    frazier <dannf@debian.org>.
+  * Drop debian/patches/fix-undefined-behavior-in-vfrcompiler.patch, included
+    upstream.
+  * Drop debian/patches/gcc-4.9-align.patch in favor of using the GCC49
+    upstream toolchain rules.
+  * Adjust debian/rules to only build ovmf when building with -b, in
+    preparation for enabling other architecture builds (which currently can't
+    be Arch: all due to lack of cross-compilers in the Debian archive).
+
+  [ dann frazier ]
+  * Add new qemu-efi package for arm64.  Closes: #775308.
+
+  [ Steve Langasek ]
+  * Refactor debian/rules to support cross-building.
+  * debian/patches/no-stack-protector-all-archs.diff: pass
+    -fno-stack-protector to all ARM GCC toolchains.
+  * Add XS-Build-Indep-Architecture to debian/control, as a temporary 
+    measure pending standardization, to work around Launchpad builder
+    behavior which would try to build our arch: all package on an arm64
+    builder instead of an x86 one.
+  * Fix Vcs-Git URI in debian/control.
+  * Standards-Version 3.9.6.
+
+ -- Steve Langasek <vorlon@debian.org>  Thu, 05 Feb 2015 14:57:40 +0000
+
+edk2 (0~20131112.2590861a-3) unstable; urgency=medium
+
+  [ Steve Langasek ]
+  * debian/copyright: include a Disclaimer field to document clearly why
+    this package is not in main.  Closes: #742589.
+
+  [ Michael Tokarev ]
+  * apply gcc-4.9-align.patch kindly provided by dann frazier to fix ftbfs
+    with gcc-4.9 (Closes: #771114)
+  * apply upstream fix-undefined-behavior-in-vfrcompiler.patch, kindly provided
+    by dann frazier, to fix another ftbfs (Closes: #773492)
+
+ -- Michael Tokarev <mjt@tls.msk.ru>  Fri, 19 Dec 2014 10:16:14 +0300
+
+edk2 (0~20131112.2590861a-2) unstable; urgency=medium
+
+  * debian/ovmf.links: create a OVMF.fd link for qemu
+  * debian/control: ovmf Replaces qemu-system-common versions which
+    shipped that link in Ubuntu.
+
+ -- Serge Hallyn <serge.hallyn@ubuntu.com>  Tue, 25 Feb 2014 09:50:04 -0600
+
+edk2 (0~20131112.2590861a-1) unstable; urgency=medium
+
+  * New upstream release, requested by Dimitri Ledkov for persistent nvram
+    variable support.
+  * Pass -DFD_SIZE_2MB to the build, since we're now over the size limit
+
+ -- Steve Langasek <vorlon@debian.org>  Thu, 30 Jan 2014 11:47:05 +0000
+
+edk2 (0~20131029.2f34e065-1) unstable; urgency=medium
+
+  * New upstream release.  Closes: #714463.
+    - update debian/rules to pull a new version of the shell.
+    - drop debian/patches/enum-handling, fixed upstream.
+    - drop debian/patches/mismatched-enums, fixed upstream.
+    - fixes breakage with the EFI shell.  LP: #1223413.
+  * debian/patches/enable-nvme: enable the NVMe driver.
+    Closes LP: #1267816.
+  * debian/post-patches/setup.diff: drop gcc4.7 handling, which is
+    sorted upstream.
+  * Update debian/copyright
+
+ -- Steve Langasek <vorlon@debian.org>  Sat, 11 Jan 2014 23:34:25 +0000
+
+edk2 (0~20121205.edae8d2d-2) unstable; urgency=low
+
+  * Fix the package section and debian/copyright: the FAT driver has a
+    license addendum which makes it non-free instead of BSD.
+    Closes: #714322.
+  * Make our build friendlier to git checkouts, by making sure our target
+    dir exists before copying.
+
+ -- Steve Langasek <vorlon@debian.org>  Wed, 25 Sep 2013 03:35:20 +0000
+
+edk2 (0~20121205.edae8d2d-1) unstable; urgency=low
+
+  * Initial release.
+
+ -- Steve Langasek <vorlon@debian.org>  Sun, 10 Feb 2013 06:45:06 +0000

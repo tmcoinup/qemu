@@ -9,6 +9,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 DISCOVERY="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.DriverDiscovery.ps1"
 STORE="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.DriverStore.ps1"
 WINDOWS_IMAGE="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.WindowsImage.ps1"
+GUEST_MONITOR="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.GuestMonitor.ps1"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -32,7 +33,7 @@ reject_regex() {
 
 test_files_are_bounded_ps51_modules() {
     local file signature lines
-    for file in "$DISCOVERY" "$STORE" "$WINDOWS_IMAGE"; do
+    for file in "$DISCOVERY" "$STORE" "$WINDOWS_IMAGE" "$GUEST_MONITOR"; do
         [[ -f "$file" ]] || fail "missing module: $file"
         signature="$(od -An -tx1 -N3 "$file" | tr -d ' \n')"
         [[ "$signature" == "efbbbf" ]] \
@@ -45,15 +46,24 @@ test_files_are_bounded_ps51_modules() {
         "$STORE"
     require_text ". (Join-Path \$PSScriptRoot 'VMate.GpuP.WindowsImage.ps1')" \
         "$STORE"
+    require_text ". (Join-Path \$PSScriptRoot 'VMate.GpuP.GuestMonitor.ps1')" \
+        "$STORE"
 }
 
 test_discovery_is_bound_to_real_signed_vendor_package() {
-    require_text 'Get-VMHostPartitionableGpu' "$DISCOVERY"
+    require_text 'Get-VMateGpuPHostPartitionableGpu' "$DISCOVERY"
     require_text 'ConvertTo-VMateGpuPInstanceId' "$DISCOVERY"
     require_text 'Win32_PnPEntity' "$DISCOVERY"
     require_text 'Win32_PNPSignedDriver' "$DISCOVERY"
     require_text 'Win32_SystemDriver' "$DISCOVERY"
     require_text 'Win32_PNPSignedDriverCIMDataFile' "$DISCOVERY"
+    require_text '-ClassName Win32_PNPSignedDriverCIMDataFile' "$DISCOVERY"
+    require_text '[string]$driver.CimClass.CimClassName' "$DISCOVERY"
+    require_text '[string]$file.CimClass.CimClassName' "$DISCOVERY"
+    require_text '[string]$Selection.InstanceId' "$DISCOVERY"
+    require_text "('INF\\' + [string]\$Selection.SignedDriver.InfName)" \
+        "$DISCOVERY"
+    require_text '$candidate.Equals($publishedInf' "$DISCOVERY"
     require_text 'IsSigned -ne $true' "$DISCOVERY"
     require_text 'DriverProviderName' "$DISCOVERY"
     require_text "Vendor = 'NVIDIA'; VendorId = '10DE'" "$DISCOVERY"
@@ -90,6 +100,7 @@ test_offline_publish_is_transactional_and_idempotent() {
     require_text 'Dismount-VHD -Path $resolvedVhd' "$STORE"
     require_text 'VHD 必须包含唯一且无 reparse 的 Windows 卷' "$STORE"
     require_text 'Assert-VMateGpuPGuestWindowsImage' "$STORE"
+    require_text 'Install-VMateGpuPGuestMonitorProvisioner' "$STORE"
     require_text "PeMachine = \$pe.Machine" "$WINDOWS_IMAGE"
     require_text "if (\$pe.Architecture -cne 'x64')" "$WINDOWS_IMAGE"
     require_text "BuildCompatibilityPolicy = 'Windows builds may differ" \
@@ -97,7 +108,10 @@ test_offline_publish_is_transactional_and_idempotent() {
     require_text "Status = 'DryRun'" "$STORE"
     require_text "Status = 'UpToDate'" "$STORE"
     require_text "Ensure-VMateGpuPDirectory \$auditRoot '.staging'" "$STORE"
-    require_text '[System.IO.File]::Replace($temporary, $Destination, $null)' "$STORE"
+    require_text '[System.IO.File]::Replace(' "$STORE"
+    require_text '$temporary, $Destination, $replaceBackup)' "$STORE"
+    require_text "'.replace-backup'" "$STORE"
+    require_text '[IO.Directory]::Move($stage, $packagePath)' "$STORE"
     require_text 'Remove-Item -LiteralPath $temporary -Force' "$STORE"
     require_text 'manifest.before.json' "$STORE"
     require_text 'manifest.after.json' "$STORE"

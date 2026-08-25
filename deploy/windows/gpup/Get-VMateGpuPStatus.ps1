@@ -14,11 +14,21 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VMate.GpuP.DriverStore.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Identity.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.HardwareIdentity.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.HardwareProfile.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Display.ps1')
+. (Join-Path $PSScriptRoot 'VMate.HyperV.ComputeProfile.ps1')
+. (Join-Path $PSScriptRoot 'VMate.HyperV.DisplayTopology.ps1')
+. (Join-Path $PSScriptRoot 'VMate.HyperV.MetadataExchange.ps1')
+. (Join-Path $PSScriptRoot 'VMate.HyperV.IdentityBoot.ps1')
+. (Join-Path $PSScriptRoot 'VMate.HyperV.HostIdentityExtension.ps1')
+. (Join-Path $PSScriptRoot 'VMate.Windows.CodeIntegrity.ps1')
 
 Assert-VMateGpuPHostEnvironment
+$hostCodeIntegrity = Get-VMateWindowsCodeIntegrityStatus
+$hostCodeIntegrity | Add-Member -NotePropertyName Policy -NotePropertyValue `
+    'host-native-does-not-require-testsigning; custom-cpu-extension-currently-requires-testsigning'
 $gpuStatus = @()
-foreach ($gpu in @(Get-VMHostPartitionableGpu -ErrorAction Stop)) {
+foreach ($gpu in @(Get-VMateGpuPHostPartitionableGpu)) {
     try {
         $vendorInfo = Get-VMateGpuPVendorInfo -InstancePath ([string]$gpu.Name)
         $instanceId = ConvertTo-VMateGpuPInstanceId -PartitionableName ([string]$gpu.Name)
@@ -77,15 +87,70 @@ if (-not [String]::IsNullOrWhiteSpace($VMName)) {
     $vm = Get-VMateGpuPVirtualMachine -VMName $VMName
     $adapters = @(Get-VMGpuPartitionAdapter -VM $vm -ErrorAction Stop)
     $identity = Get-VMateGpuPIdentity -VMId $vm.Id -StateRoot $StateRoot
+    $hardwareProfile = Get-VMateGpuPHardwareProfileBinding `
+        -VMId $vm.Id -StateRoot $StateRoot
+    $identityBoot = if ($null -eq $hardwareProfile) {
+        [pscustomobject][ordered]@{
+            State = 'Unbound'; Required = $false; Integrity = $null
+            Capability = 'guest-boot-smbios-only'
+        }
+    }
+    elseif (-not [bool]$hardwareProfile.RequiresHostExtension) {
+        [pscustomobject][ordered]@{
+            State = 'NotRequired'; Required = $false; Integrity = $true
+            ProfileId = [string]$hardwareProfile.ProfileId
+            Capability = 'guest-boot-smbios-only'
+        }
+    }
+    elseif ([string]$vm.State -cne 'Off') {
+        [pscustomobject][ordered]@{
+            State = 'UnavailableWhileRunning'; Required = $true
+            Integrity = $null
+            ProfileId = [string]$hardwareProfile.ProfileId
+            SecureBoot = [string](Get-VMFirmware -VM $vm `
+                -ErrorAction Stop).SecureBoot
+            Capability = 'guest-boot-smbios-only'
+        }
+    }
+    else {
+        try {
+            $bootStatus = Get-VMateHyperVIdentityBootStatus -VM $vm
+            $bootStatus | Add-Member -NotePropertyName Required `
+                -NotePropertyValue $true
+            $bootStatus
+        }
+        catch {
+            [pscustomobject][ordered]@{
+                State = 'Error'; Required = $true; Integrity = $false
+                ProfileId = [string]$hardwareProfile.ProfileId
+                Error = $_.Exception.Message
+                Capability = 'guest-boot-smbios-only'
+            }
+        }
+    }
+    $displayTopology = Get-VMateHyperVDisplayTopologySnapshot `
+        -VMName ([string]$vm.Name)
+    $metadataExchange = Get-VMateHyperVMetadataExchangeHostSnapshot `
+        -VMName ([string]$vm.Name)
     $vmStatus = [pscustomobject][ordered]@{
         Name = [string]$vm.Name
         Id = [string]$vm.Id
         State = [string]$vm.State
         Generation = [int]$vm.Generation
+        ConfigurationVersion = [string]$vm.Version
         GpuPartitionAdapters = $adapters
+        GpuPVMConfiguration = Get-VMateGpuPVMConfigurationSnapshot -VM $vm
+        DisplayTopology = $displayTopology
+        ConsoleProfile = $displayTopology.Console
+        MetadataExchange = $metadataExchange
+        ComputeProfile = Get-VMateHyperVComputeSnapshot -VM $vm
         Identity = $identity
+        HardwareProfile = $hardwareProfile
         HardwareIdentity = Get-VMateGpuPHardwareIdentityStatus `
             -VM $vm -StateRoot $StateRoot
+        IdentityBoot = $identityBoot
+        HostIdentityExtension = Get-VMateHyperVHostIdentityExtensionStatus `
+            -VMId ([Guid]$vm.Id) -StateRoot $StateRoot
     }
 }
 
@@ -98,6 +163,7 @@ $hardwareIdentityAudit = Test-VMateGpuPHardwareIdentityUniqueness `
     ComputerName = $env:COMPUTERNAME
     OperatingSystem = [string]$os.Caption
     OperatingSystemVersion = [string]$os.Version
+    HostCodeIntegrity = $hostCodeIntegrity
     PartitionableGpus = $gpuStatus
     HostIndirectDisplayAdapters = @(Get-VMateGpuPHostIndirectDisplayAdapter)
     VM = $vmStatus

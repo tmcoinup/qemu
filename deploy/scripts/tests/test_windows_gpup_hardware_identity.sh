@@ -24,8 +24,15 @@ require_text() {
 require_text "PersistencePolicy = 'generate-once-no-reroll'" "$MODULE"
 require_text 'State = '\''Prepared' "$MODULE"
 require_text 'Ensure-VMateGpuPHardwareIdentity' "$MODULE"
-require_text 'Restore-VMateHyperVFirmwareIdentitySnapshot' "$MODULE"
 require_text 'Test-VMateGpuPHardwareIdentityUniqueness' "$MODULE"
+require_text 'Set-VMateGpuPGuestObservedHardwareIdentity' "$MODULE"
+require_text 'Test-VMateGpuPGuestHardwareIdentityMatch' "$MODULE"
+require_text 'Resolve-VMateGpuPFirmwareIdentity' "$MODULE"
+require_text '[string]$StaticMacAddress' "$MODULE"
+network_line="$(rg -n -F 'Set-VMateHyperVNetworkIdentity -VM $VM' "$MODULE" | cut -d: -f1)"
+firmware_line="$(rg -n -F 'Invoke-VMateHyperVFirmwareIdentityTransaction' "$MODULE" | cut -d: -f1)"
+[[ -n "$network_line" && -n "$firmware_line" && "$network_line" -lt "$firmware_line" ]] || \
+    fail 'network identity must be committed before the one-way BIOSGUID write'
 if rg -n '(qemu|vfio|nvapi|adl|Set-ItemProperty|New-ItemProperty)' "$MODULE"; then
     fail 'hardware identity module contains a forbidden legacy/projection path'
 fi
@@ -55,10 +62,10 @@ function New-MockAdapter([Guid]$VMId, [string]$Id) {
         MacAddress = ""; DynamicMacAddressEnabled = $true
     }
 }
-$script:firmwareRestoreCalls = 0
-$script:expectedRestoreVmId = [Guid]::Empty
+$script:firmwareCalls = 0
 function Invoke-VMateHyperVFirmwareIdentityTransaction {
     param([Guid]$VMId, [object]$Identity, [int]$JobTimeoutSeconds)
+    $script:firmwareCalls++
     [pscustomobject]@{
         Status = "Applied"; Requested = $Identity
         Previous = [pscustomobject]@{
@@ -72,15 +79,6 @@ function Invoke-VMateHyperVFirmwareIdentityTransaction {
     }
 }
 $script:failNetworkOnce = $false
-function Restore-VMateHyperVFirmwareIdentitySnapshot {
-    param([Guid]$VMId, [object]$Snapshot, [int]$JobTimeoutSeconds)
-    if ($VMId -ne $script:expectedRestoreVmId -or
-        [string]$Snapshot.BIOSSerialNumber -cne "OLD-BIOS") {
-        throw "firmware compensation received the wrong snapshot"
-    }
-    $script:firmwareRestoreCalls++
-    [pscustomobject]@{ Status = "Restored" }
-}
 function Set-VMateHyperVNetworkIdentity {
     param([object]$VM, [object]$NetworkIdentity, [string]$StateRoot)
     if ($script:failNetworkOnce) {
@@ -132,6 +130,42 @@ try {
             $second.NetworkAdapters[0].StaticMacAddress) {
         throw "different VMs received the same hardware identity"
     }
+    $vmCustom = [pscustomobject]@{
+        Id = [Guid]::NewGuid(); State = "Off"
+    }
+    $script:adapters[[string]$vmCustom.Id] =
+        New-MockAdapter $vmCustom.Id "nic-custom"
+    Initialize-VMateGpuPIdentity $vmCustom.Id NVIDIA `
+        -StateRoot $root | Out-Null
+    $customFirmware = [pscustomobject]@{
+        BIOSGUID = "{12345678-1234-4234-9234-1234567890AB}"
+        BIOSSerialNumber = "BIOS-REAL-0001"
+        BaseBoardSerialNumber = "BOARD-REAL-0001"
+        ChassisSerialNumber = "CHASSIS-REAL-0001"
+        ChassisAssetTag = "ASSET-REAL-0001"
+    }
+    $custom = Initialize-VMateGpuPHardwareIdentity $vmCustom `
+        -StateRoot $root -FirmwareIdentity $customFirmware `
+        -StaticMacAddress "02AABBCCDDEE"
+    if ($custom.Firmware.BIOSSerialNumber -cne "BIOS-REAL-0001" -or
+        $custom.NetworkAdapters[0].StaticMacAddress -cne "02AABBCCDDEE") {
+        throw "explicit firmware/MAC profile was not persisted"
+    }
+    $customAgain = Initialize-VMateGpuPHardwareIdentity $vmCustom `
+        -StateRoot $root -FirmwareIdentity $customFirmware `
+        -StaticMacAddress "02AABBCCDDEE"
+    if ($customAgain.Firmware.BIOSGUID -cne $custom.Firmware.BIOSGUID) {
+        throw "matching explicit identity was rerolled"
+    }
+    try {
+        Initialize-VMateGpuPHardwareIdentity $vmCustom -StateRoot $root `
+            -FirmwareIdentity $customFirmware `
+            -StaticMacAddress "02AABBCCDDEC" | Out-Null
+        throw "existing custom MAC was silently overwritten"
+    } catch {
+        if ($_.Exception.Message -eq
+            "existing custom MAC was silently overwritten") { throw }
+    }
     $mac = [string]$first.NetworkAdapters[0].StaticMacAddress
     if ($mac -notmatch "^02[0-9A-F]{10}$") {
         throw "generated MAC is not local unicast"
@@ -150,19 +184,49 @@ try {
         $persisted.Firmware.BIOSGUID -ne $first.Firmware.BIOSGUID) {
         throw "applied identity was not persisted"
     }
+    $guestObserved = [pscustomobject]@{
+        SchemaVersion = 1; Source = "WindowsCimColdBootReadback"
+        Firmware = $first.Firmware
+        NetworkAdapters = @([pscustomobject]@{
+                MACAddress = $first.NetworkAdapters[0].StaticMacAddress
+                Name = "Microsoft Hyper-V Network Adapter"; PNPDeviceID = "VMBUS"
+            })
+        Platform = [pscustomobject]@{
+            Manufacturer = "Microsoft Corporation"; Model = "Virtual Machine"
+        }
+        Match = $true; Mismatches = @()
+        ObservedAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
+    $withGuest = Set-VMateGpuPGuestObservedHardwareIdentity $vmA.Id `
+        $guestObserved $root
+    if (-not $withGuest.GuestObserved.Match -or
+        $withGuest.GuestObserved.Firmware.BIOSGUID -cne
+            $first.Firmware.BIOSGUID) {
+        throw "matching GuestObserved was not persisted"
+    }
+    $guestObserved.Firmware = $first.Firmware | Select-Object *
+    $guestObserved.Firmware.BIOSSerialNumber = "WRONG-BIOS"
+    try {
+        Set-VMateGpuPGuestObservedHardwareIdentity $vmA.Id `
+            $guestObserved $root | Out-Null
+        throw "mismatched GuestObserved was persisted"
+    } catch {
+        if ($_.Exception.Message -eq "mismatched GuestObserved was persisted") {
+            throw
+        }
+    }
     $audit = Test-VMateGpuPHardwareIdentityUniqueness -StateRoot $root
-    if (-not $audit.IsUnique -or $audit.Records -ne 2) {
+    if (-not $audit.IsUnique -or $audit.Records -ne 3) {
         throw "hardware identity uniqueness audit failed"
     }
 
-    # 固件写入成功而网络阶段失败时，必须补偿固件；Prepared 清单保留原随机值，
+    # 网络阶段失败时不能先触碰一次性的 BIOSGUID；Prepared 清单保留原随机值，
     # 下一次 Ensure 使用同一组 GUID/serial/MAC 完成恢复，不能重新抽取。
     $vmRecovery = [pscustomobject]@{ Id = [Guid]::NewGuid(); State = "Off" }
     $script:adapters[[string]$vmRecovery.Id] =
         New-MockAdapter $vmRecovery.Id "nic-recovery"
     Initialize-VMateGpuPIdentity $vmRecovery.Id NVIDIA `
         -StateRoot $root | Out-Null
-    $script:expectedRestoreVmId = $vmRecovery.Id
     $script:failNetworkOnce = $true
     $failedAsExpected = $false
     try {
@@ -174,8 +238,8 @@ try {
         }
         $failedAsExpected = $true
     }
-    if (-not $failedAsExpected -or $script:firmwareRestoreCalls -ne 1) {
-        throw "cross-layer firmware compensation did not run exactly once"
+    if (-not $failedAsExpected -or $script:firmwareCalls -ne 0) {
+        throw "network failure occurred after an irreversible firmware write"
     }
     $prepared = Get-VMateGpuPHardwareIdentity $vmRecovery.Id `
         -StateRoot $root
@@ -188,6 +252,7 @@ try {
         -StateRoot $root
     if ($recovered.Status -cne "Applied" -or
         -not [bool]$recovered.HostObserved.Match -or
+        $script:firmwareCalls -ne 1 -or
         [string]$recovered.Desired.Firmware.BIOSGUID -cne $preparedGuid -or
         [string]$recovered.Desired.NetworkAdapters[0].StaticMacAddress -cne
             $preparedMac) {

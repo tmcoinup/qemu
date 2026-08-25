@@ -291,6 +291,60 @@ function Exit-VMateGpuPConfigurationLock {
     }
 }
 
+function Resolve-VMateGpuPHostPartitionCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Get', 'Set')][string]$Operation,
+        [switch]$AllowMissing
+    )
+
+    # Windows 10 Hyper-V 使用 Get/Set-VMPartitionableGpu；较新的 Windows
+    # 使用带 Host 的名称。两组 cmdlet 暴露相同的 GPU-P 宿主对象/参数。
+    $candidates = if ($Operation -ceq 'Get') {
+        @('Get-VMHostPartitionableGpu', 'Get-VMPartitionableGpu')
+    } else {
+        @('Set-VMHostPartitionableGpu', 'Set-VMPartitionableGpu')
+    }
+    foreach ($candidate in $candidates) {
+        if (Get-Command -Name $candidate -ErrorAction SilentlyContinue) {
+            return $candidate
+        }
+    }
+    if ($AllowMissing.IsPresent) {
+        return $null
+    }
+    throw ('缺少 Hyper-V PowerShell cmdlet：' +
+        "需要 $($candidates -join ' 或 ')。")
+}
+
+function Get-VMateGpuPHostPartitionableGpu {
+    [CmdletBinding()]
+    param()
+
+    $command = Resolve-VMateGpuPHostPartitionCommand -Operation Get
+    return @(& $command -ErrorAction Stop)
+}
+
+function Test-VMateGpuPHostPartitionSetter {
+    [CmdletBinding()]
+    param()
+
+    return $null -ne (Resolve-VMateGpuPHostPartitionCommand `
+        -Operation Set -AllowMissing)
+}
+
+function Set-VMateGpuPNativePartitionCount {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$InstancePath,
+        [Parameter(Mandatory = $true)][uint16]$PartitionCount
+    )
+
+    $command = Resolve-VMateGpuPHostPartitionCommand -Operation Set
+    & $command -Name $InstancePath -PartitionCount $PartitionCount `
+        -ErrorAction Stop
+}
+
 function Get-VMateGpuPCmdletCompatibility {
     param(
         [Parameter(Mandatory = $true)][object]$AddCommand,
@@ -348,6 +402,21 @@ function Get-VMateGpuPAdapterOwnership {
     }
     else { [string]$pathProperty.Value }
     if ([String]::IsNullOrWhiteSpace($adapterPath)) {
+        # Windows 10 的旧版 Hyper-V adapter 对象不公开 InstancePath。
+        # 宿主只有一个唯一、具名的 partitionable GPU 时不存在归属歧义，
+        # 此时所有无路径 adapter 都只能属于该 GPU；多 GPU 仍保持 fail closed。
+        $uniqueNames = @($HostGpuNames | Where-Object {
+                -not [String]::IsNullOrWhiteSpace([string]$_)
+            } | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() } |
+            Sort-Object -Unique)
+        if ($uniqueNames.Count -eq 1 -and
+            [string]::Equals($uniqueNames[0],
+                $SelectedInstancePath.Trim().ToUpperInvariant(),
+                [StringComparison]::Ordinal)) {
+            return [pscustomobject]@{
+                Ownership = 'SelectedGpu'; InstancePath = ''
+            }
+        }
         return [pscustomobject]@{ Ownership = 'Unknown'; InstancePath = '' }
     }
     $matches = @($HostGpuNames | Where-Object {

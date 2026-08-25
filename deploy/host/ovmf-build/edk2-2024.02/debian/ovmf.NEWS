@@ -1,0 +1,19 @@
+edk2 (2023.11-2) unstable; urgency=medium
+
+  The 2MB ovmf pflash images, OVMF_CODE.*.fd and OVMF_VARS.*.fd, have now
+  been removed. Users of the 2MB pflash images should migrate to their 4MB
+  image counterparts:
+
+    OVMF_CODE.fd         -> OVMF_CODE_4M.fd
+    OVMF_CODE.ms.fd      -> OVMF_CODE_4M.ms.fd
+    OVMF_CODE.secboot.fd -> OVMF_CODE_4M.secboot.fd
+    OVMF_VARS.fd         -> OVMF_VARS_4M.fd
+    OVMF_VARS.ms.fd      -> OVMF_VARS_4M.ms.fd
+
+  2MB VAR images are not compatible with 4MB CODE images. Users must
+  migrate both CODE and VARS images simultaneously.
+
+  A migration guide is provided at:
+    /usr/share/doc/ovmf/howto-2M-to-4M-migration.md.gz
+
+ -- dann frazier <dannf@debian.org>  Wed, 27 Dec 2023 10:15:33 -0700

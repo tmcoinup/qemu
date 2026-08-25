@@ -33,16 +33,32 @@ test_files_and_encoding() {
     local file line_count bom
     local files=(
         VMate.GpuP.Identity.ps1
+        VMate.GpuP.BaseImage.ps1
+        VMate.Windows.CodeIntegrity.ps1
+        VMate.GpuP.HardwareProfile.ps1
+        VMate.GpuP.CpuidProfile.ps1
+        VMate.GpuP.HardwareReprofile.ps1
+        VMate.GpuP.DetectionParity.ps1
         VMate.HyperV.FirmwareIdentity.ps1
         VMate.HyperV.NetworkIdentity.ps1
+        VMate.HyperV.ComputeProfile.ps1
         VMate.GpuP.HardwareIdentity.ps1
+        VMate.GpuP.GuestIdentity.ps1
         VMate.GpuP.Lifecycle.ps1
         VMate.GpuP.Guest.ps1
+        VMate.GpuP.VMConfiguration.ps1
+        VMate.GpuP.QuotaProfile.ps1
+        VMate.HyperV.ConsoleProfile.ps1
+        VMate.HyperV.HostIdentityExtension.ps1
         New-VMateGpuPVM.ps1
         Enable-VMateGpuP.ps1
         Update-VMateGpuPDriver.ps1
         Disable-VMateGpuP.ps1
         Get-VMateGpuPStatus.ps1
+        Set-VMateGpuPComputeProfile.ps1
+        Set-VMateGpuPHardwareProfile.ps1
+        Detect-VGpuP.ps1
+        Compare-VMateGpuPDetection.ps1
     )
     for file in "${files[@]}"; do
         file="$GPUP/$file"
@@ -65,25 +81,52 @@ test_dynamic_gpu_contract() {
     local identity_preflight_line hardware_apply_line
 
     require_text "[ValidateSet('Auto', 'NVIDIA', 'AMD')]" "$new_vm"
-    require_text 'Get-VMHostPartitionableGpu -ErrorAction Stop' "$new_vm"
+    require_text 'Get-VMateGpuPHostPartitionableGpu' "$new_vm"
     require_text 'Resolve-VMateGpuPHostGpu' "$new_vm"
     require_text 'PartitionIdentitySeed = $seed' "$new_vm"
     require_text '[string]$PartitionIdentitySeed' "$new_vm"
     require_text 'Set-VMateGpuPIdentityBinding -VMId $created.VM.Id' "$new_vm"
     require_text 'GpuPercentage' "$new_vm"
     require_text 'WillDeferGpuProvisioning = $CreateVhd.IsPresent' "$new_vm"
+    require_text 'WillCloneBaseImage' "$new_vm"
+    require_text '[string]$BaseImagePath' "$new_vm"
     require_text '[switch]$FullSharedGpuQuota' "$new_vm"
-    require_text 'Resolve-VMateGpuPQuotaRequest' "$new_vm"
+    require_text 'Resolve-VMateGpuPQuotaCompatibilityRequest' "$new_vm"
+    require_text '[switch]$Win10ReferenceGpuQuota' "$new_vm"
+    require_text 'Get-VMateGpuPResourcePlanForRequest' "$new_vm"
+    require_text 'ConfigurationVersion = $ConfigurationVersion' "$new_vm"
+    require_text 'ConsoleResolutionType = $consoleProfile.ResolutionType' "$new_vm"
     require_text 'FullSharedGpuQuota = $FullSharedGpuQuota' "$new_vm"
     require_text 'FullHostVramQuota = $fullHostVramQuotaPreview' "$new_vm"
     require_text 'ResumeArguments = [pscustomobject][ordered]@{' "$new_vm"
     require_text 'Enable-VMateGpuP.ps1 -FullSharedGpuQuota -GuestCapacity' "$new_vm"
     require_text '[int]$GuestCapacity = 2' "$new_vm"
+    require_text '[int]$CpuMaximumPercent = 100' "$new_vm"
+    require_text '[int]$CpuReservePercent = 0' "$new_vm"
+    require_text '[int]$CpuRelativeWeight = 100' "$new_vm"
+    require_text '[int]$HwThreadCountPerCore = 1' "$new_vm"
+    require_text '[bool]$ExposeVirtualizationExtensions = $false' "$new_vm"
+    require_text "[string]\$HardwareProfileId = 'host-native'" "$new_vm"
+    require_text 'Resolve-VMateGpuPHardwareProfile' "$new_vm"
+    require_text 'HardwareProfile = $created.HardwareProfile' "$new_vm"
+    require_text '[string]$BaseBoardSerialNumber' "$new_vm"
+    require_text '[string]$StaticMacAddress' "$new_vm"
     require_text 'Get-VMateGpuPCmdletCompatibility' "$new_vm"
     require_text 'HostLockTimeoutSeconds = $HostLockTimeoutSeconds' "$new_vm"
-    require_text "HardwareIdentityPolicy = 'random-once-persisted-on-create'" \
+    require_text 'Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass' \
+        "$GPUP/VMate.GpuP.Guest.ps1"
+    require_text "'VMate.Windows.CodeIntegrity.ps1'" \
+        "$GPUP/VMate.GpuP.Guest.ps1"
+    require_text "PSObject.Properties['Execute']" \
+        "$GPUP/Test-VMateGpuPGuest.ps1"
+    if rg -n 'Set-ExecutionPolicy.*Scope (LocalMachine|CurrentUser)' \
+        "$GPUP/VMate.GpuP.Guest.ps1"; then
+        fail 'guest validation must not persist an execution-policy change'
+    fi
+    require_text "HardwareIdentityPolicy = 'custom-or-random-once-persisted-on-create'" \
         "$new_vm"
     require_text 'HardwareIdentity = $created.HardwareIdentity' "$new_vm"
+    require_text 'IdentityBoot = $created.IdentityBoot' "$new_vm"
     preflight_line="$(rg -n 'Get-VMateGpuPCmdletCompatibility' "$new_vm" | \
         head -n1 | cut -d: -f1)"
     create_line="$(rg -n '^\$created = New-VMateGpuPVirtualMachine' "$new_vm" | \
@@ -98,10 +141,15 @@ test_dynamic_gpu_contract() {
     require_text 'Invoke-VMateGpuPConfiguration' "$enable"
     require_text 'Test-VMateGpuPIdentityUniqueness' "$enable"
     require_text 'Invoke-VMateGpuPGuestValidation' "$enable"
+    require_text 'ExpectedHardwareIdentity $hardwareIdentity.Desired' "$enable"
+    require_text 'Set-VMateGpuPGuestObservedHardwareIdentity' "$enable"
     require_text 'GuestCredential/DisableHyperVVideo/RequireNvidiaSmi' "$enable"
     require_text 'VendorGpuUuid' "$enable"
     require_text '[switch]$FullSharedGpuQuota' "$enable"
-    require_text 'Resolve-VMateGpuPQuotaRequest' "$enable"
+    require_text 'Resolve-VMateGpuPQuotaCompatibilityRequest' "$enable"
+    require_text '[switch]$Win10ReferenceGpuQuota' "$enable"
+    require_text 'QuotaRequest = $quotaRequest' "$enable"
+    require_text "[string]\$ConsoleResolutionType = 'Unchanged'" "$enable"
     require_text '$quotaRequest.Percentages.VramPercentage' "$enable"
     require_text '$quotaRequest.Percentages.EncodePercentage' "$enable"
     require_text '$quotaRequest.Percentages.DecodePercentage' "$enable"
@@ -125,6 +173,8 @@ test_dynamic_gpu_contract() {
     require_text 'Ensure-VMateGpuPHardwareIdentity -VM $vm' "$enable"
     require_text 'Test-VMateGpuPHardwareIdentityUniqueness' "$enable"
     require_text 'HardwareIdentity = $hardwareIdentity' "$enable"
+    require_text 'Install-VMateHyperVIdentityBoot -VM $vm' "$enable"
+    require_text 'IdentityBoot = $identityBoot' "$enable"
     identity_preflight_line="$(rg -n 'Test-VMateGpuPIdentityUniqueness' \
         "$enable" | head -n1 | cut -d: -f1)"
     hardware_apply_line="$(rg -n 'Ensure-VMateGpuPHardwareIdentity -VM' \
@@ -143,10 +193,26 @@ test_dynamic_gpu_contract() {
     require_text '拒绝删除手工 adapter' "$disable"
     require_text 'Enter-VMateGpuPConfigurationLock' "$disable"
     require_text 'Exit-VMateGpuPConfigurationLock' "$disable"
-    require_text 'Get-VMHostPartitionableGpu' "$status"
+    require_text 'Get-VMateGpuPHostPartitionableGpu' "$status"
     require_text 'HostIndirectDisplayAdapters' "$status"
+    require_text 'HostCodeIntegrity = $hostCodeIntegrity' "$status"
+    require_text "VMate.Windows.CodeIntegrity.ps1" "$status"
+    require_text 'RebootRequiredForTestSigning' \
+        "$GPUP/VMate.Windows.CodeIntegrity.ps1"
     require_text 'Get-VMateGpuPHardwareIdentityStatus' "$status"
+    require_text 'Get-VMateHyperVComputeSnapshot' "$status"
+    require_text 'Get-VMateGpuPVMConfigurationSnapshot' "$status"
+    require_text "VMate.HyperV.DisplayTopology.ps1" "$status"
+    require_text 'Get-VMateHyperVDisplayTopologySnapshot' "$status"
+    require_text 'DisplayTopology = $displayTopology' "$status"
+    require_text 'ConsoleProfile = $displayTopology.Console' "$status"
+    require_text "VMate.HyperV.MetadataExchange.ps1" "$status"
+    require_text 'Get-VMateHyperVMetadataExchangeHostSnapshot' "$status"
+    require_text 'MetadataExchange = $metadataExchange' "$status"
+    require_text 'ConfigurationVersion = [string]$vm.Version' "$status"
     require_text 'HardwareIdentityAudit' "$status"
+    require_text 'Get-VMateHyperVIdentityBootStatus -VM $vm' "$status"
+    require_text 'IdentityBoot = $identityBoot' "$status"
     reject_regex '(DEV_[0-9A-Fa-f]{4}|GeForce[[:space:]]+(GTX|RTX)|Radeon[[:space:]]+PRO|4060|1060)' \
         "$new_vm" "$enable" "$update" "$status"
     reject_regex '(respawn-stealth|VioGpuDod|nvapi-shim|adl-shim)' \
@@ -167,7 +233,9 @@ test_full_shared_quota_argument_contract() {
                 { & $env:VMATE_GPUP_ENABLE -VMName test `
                     -FullSharedGpuQuota -VramPercentage 50 },
                 { & $env:VMATE_GPUP_NEW -VMName test -VhdPath test.vhdx `
-                    -FullSharedGpuQuota -GpuPercentage 50 }
+                    -FullSharedGpuQuota -GpuPercentage 50 },
+                { & $env:VMATE_GPUP_ENABLE -VMName test `
+                    -FullSharedGpuQuota -Win10ReferenceGpuQuota }
             )) {
                 try {
                     & $action
@@ -200,14 +268,22 @@ test_identity_contract() {
     reject_regex '(Set-ItemProperty|New-ItemProperty|nvapi|adl|GPU_SERIAL)' "$identity"
 
     require_text 'Generation = 2' "$lifecycle"
-    require_text '-AutomaticCheckpointsEnabled $false -CheckpointType Disabled' "$lifecycle"
+    require_text '-AutomaticCheckpointsEnabled $false' "$lifecycle"
+    require_text '-CheckpointType Disabled' "$lifecycle"
     require_text '-SecureBootTemplate MicrosoftWindows' "$lifecycle"
+    require_text "\$newVmParameters['Version'] = \$plan.ConfigurationVersion" \
+        "$lifecycle"
+    require_text 'Set-VMateHyperVConsoleProfile -VM $createdVm' "$lifecycle"
     require_text 'Hyper-V GPU-P 后端只接受 .vhd 或 .vhdx' "$lifecycle"
     require_text 'if ($createdVhd -and' "$lifecycle"
     require_text '$remaining = Get-VM -Id $createdVm.Id' "$lifecycle"
     require_text '已保留身份清单与 VHD' "$lifecycle"
     require_text 'Ensure-VMateGpuPHardwareIdentity -VM $createdVm' "$lifecycle"
     require_text 'HardwareIdentity = $hardwareIdentity' "$lifecycle"
+    require_text '-BlockSizeBytes $plan.VhdBlockSizeBytes' "$lifecycle"
+    require_text "StorageProfile = 'interactive-dynamic-vhdx-1mib'" "$lifecycle"
+    require_text 'Install-VMateHyperVIdentityBoot -VM $createdVm' "$lifecycle"
+    require_text 'IdentityBoot = $identityBoot' "$lifecycle"
     reject_regex '(qemu-system|whpx|vfio|Dismount-VMHostAssignableDevice)' "$lifecycle"
     reject_regex '(?i)(qemu|whpx|vfio|Dismount-VMHostAssignableDevice)' \
         "$GPUP/VMate.HyperV.FirmwareIdentity.ps1" \
@@ -272,6 +348,7 @@ test_packaging_and_documentation_contract() {
     local runtime_file
     local runtime_files=(
         VMate.GpuP.Common.ps1
+        VMate.GpuP.VMConfiguration.ps1
         VMate.GpuP.Host.ps1
         VMate.GpuP.Partition.ps1
         VMate.GpuP.DriverDiscovery.ps1
@@ -279,11 +356,29 @@ test_packaging_and_documentation_contract() {
         VMate.GpuP.WindowsImage.ps1
         VMate.GpuP.Display.ps1
         VMate.GpuP.Identity.ps1
+        VMate.GpuP.BaseImage.ps1
+        VMate.Windows.CodeIntegrity.ps1
+        VMate.GpuP.HardwareProfile.ps1
+        VMate.GpuP.CpuidProfile.ps1
+        VMate.GpuP.HardwareReprofile.ps1
+        VMate.GpuP.DetectionParity.ps1
         VMate.HyperV.FirmwareIdentity.ps1
         VMate.HyperV.NetworkIdentity.ps1
+        VMate.HyperV.ComputeProfile.ps1
+        VMate.HyperV.EnhancedSession.ps1
+        VMate.HyperV.DisplayTopology.ps1
+        VMate.HyperV.MetadataExchange.ps1
+        VMate.HyperV.IdentityBoot.ps1
+        VMate.HyperV.IdentityBoot.Support.ps1
+        VMate.HyperV.HostIdentityExtension.ps1
+        VMate.HyperV.HostIdentityRuntime.ps1
+        VMate.HyperV.CpuidColdStart.ps1
         VMate.GpuP.HardwareIdentity.ps1
+        VMate.GpuP.GuestIdentity.ps1
         VMate.GpuP.Lifecycle.ps1
         VMate.GpuP.Guest.ps1
+        VMate.GpuP.GuestMonitor.ps1
+        VMate.GpuP.GuestMonitorValidation.ps1
         VMate.GpuP.GuestValidation.ps1
         VMate.GpuP.D3DValidation.ps1
         New-VMateGpuPVM.ps1
@@ -292,28 +387,70 @@ test_packaging_and_documentation_contract() {
         Disable-VMateGpuP.ps1
         Get-VMateGpuPStatus.ps1
         Test-VMateGpuPGuest.ps1
+        Set-VMateGpuPComputeProfile.ps1
+        Invoke-VMateVidContextProbe.ps1
+        Invoke-VMateCpuidBrandExtension.ps1
+        Start-VMateGpuPVM.ps1
+        Confirm-VMateGpuPVMIdentity.ps1
+        Enable-VMateHyperVEnhancedSession.ps1
+        Connect-VMateGpuPVM.ps1
+        Set-VMateGpuPDisplayTopology.ps1
+        Restore-VMateGpuPDisplayTopology.ps1
+        Disable-VMateGpuPMetadataExchange.ps1
+        Restore-VMateGpuPMetadataExchange.ps1
+        Detect-VGpuP.ps1
+        Compare-VMateGpuPDetection.ps1
+        native/bin/VMateGuestMonitorProvisioner.exe
+        firmware/bin/VMateIdentityBoot.efi
+        firmware/bin/VMateIdentityBoot.efi.sha256
     )
 
     for runtime_file in "${runtime_files[@]}"; do
         require_text "deploy/windows/gpup/$runtime_file" "$NSIS_HELPER"
     done
     require_text 'deploy/docs/HYPERV-GPU-P.md' "$NSIS_HELPER"
+    require_text 'deploy/hardware/p11-platforms.json' "$NSIS_HELPER"
     require_text 'File /r "${BINDIR}\deploy\windows\*.*"' "$NSIS_SCRIPT"
     require_text 'File /r "${BINDIR}\deploy\docs\*.*"' "$NSIS_SCRIPT"
     require_text 'Hyper-V GPU-P modules' "$NSIS_SCRIPT"
     require_text 'New-VMateGpuPVM.ps1' "$GPU_P_DOC"
     require_text 'Enable-VMateGpuP.ps1' "$GPU_P_DOC"
+    require_text 'Set-VMateGpuPComputeProfile.ps1' "$GPU_P_DOC"
+    require_text 'Compare-VMateGpuPDetection.ps1' "$GPU_P_DOC"
+    require_text 'Enable-VMateHyperVEnhancedSession.ps1' "$GPU_P_DOC"
+    require_text 'Connect-VMateGpuPVM.ps1' "$GPU_P_DOC"
+    require_text 'Set-VMateGpuPDisplayTopology.ps1' "$GPU_P_DOC"
+    require_text 'Restore-VMateGpuPDisplayTopology.ps1' "$GPU_P_DOC"
+    require_text 'Disable-VMateGpuPMetadataExchange.ps1' "$GPU_P_DOC"
+    require_text 'Restore-VMateGpuPMetadataExchange.ps1' "$GPU_P_DOC"
     require_text '首次随机、随后固定' "$GPU_P_DOC"
     require_text 'HostObserved.Match=True' "$GPU_P_DOC"
     require_text 'GuestObserved' "$GPU_P_DOC"
+    require_text 'WindowsCimColdBootReadback' "$GPU_P_DOC"
     require_text 'stream-fb-shm.ps1' "$GPU_P_DOC"
     require_text 'test_windows_gpup_workflow.sh' \
         "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
     require_text 'test_windows_hyperv_firmware_identity.sh' \
         "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_hyperv_compute_profile.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_hyperv_cpuid_cold_start.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_hyperv_display_topology.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_hyperv_metadata_exchange.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
     require_text 'test_windows_hyperv_network_identity.sh' \
         "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
     require_text 'test_windows_gpup_hardware_identity.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_gpup_guest_identity.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_gpup_vm_configuration.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_gpup_hardware_profile.sh' \
+        "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
+    require_text 'test_windows_gpup_detection_parity.sh' \
         "$REPO_ROOT/deploy/scripts/tests/run-vmate-tests.py"
 }
 

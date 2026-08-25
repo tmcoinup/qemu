@@ -1,83 +1,119 @@
 ﻿#Requires -Version 5.1
-
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string]$VMName,
-
-    [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [string]$VhdPath,
-
-    [ValidateSet('Auto', 'NVIDIA', 'AMD')]
-    [string]$Vendor = 'Auto',
-
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$VMName,
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$VhdPath,
+    [ValidateSet('Auto', 'NVIDIA', 'AMD')][string]$Vendor = 'Auto',
     [string]$InstancePath = '',
-
-    [ValidateRange(1, 256)]
-    [int]$ProcessorCount = 4,
-
-    [ValidateRange(1073741824, 1099511627776)]
-    [UInt64]$MemoryStartupBytes = 8GB,
-
+    [ValidateRange(1, 256)][int]$ProcessorCount = 4,
+    [ValidateRange(1, 100)][int]$CpuMaximumPercent = 100,
+    [ValidateRange(0, 100)][int]$CpuReservePercent = 0,
+    [ValidateRange(1, 10000)][int]$CpuRelativeWeight = 100,
+    [ValidateRange(1, 64)][int]$HwThreadCountPerCore = 1,
+    [bool]$ExposeVirtualizationExtensions = $false,
+    [string]$HardwareProfileId = 'host-native',
+    [string]$HardwareProfileCatalogPath = '',
+    [switch]$RequireFullHardwareIdentity,
+    [string]$BIOSGUID = '',
+    [string]$BIOSSerialNumber = '',
+    [string]$BaseBoardSerialNumber = '',
+    [string]$ChassisSerialNumber = '',
+    [string]$ChassisAssetTag = '',
+    [string]$StaticMacAddress = '',
+    [ValidateRange(1073741824, 1099511627776)][UInt64]$MemoryStartupBytes = 8GB,
     [string]$SwitchName = '',
-
     [switch]$CreateVhd,
-
-    [ValidateRange(21474836480, 70368744177664)]
-    [UInt64]$VhdSizeBytes = 127GB,
-
+    [ValidateRange(21474836480, 70368744177664)][UInt64]$VhdSizeBytes = 127GB,
     [string]$IsoPath = '',
-
-    [ValidateRange(1, 100)]
-    [int]$GpuPercentage = 50,
-
+    [string]$BaseImagePath = '',
+    [ValidateRange(1, 100)][int]$GpuPercentage = 50,
     [UInt64]$LowMemoryMappedIoSpace = 1GB,
-
     [UInt64]$HighMemoryMappedIoSpace = 32GB,
-
+    [ValidateSet('Default', 'Maximum', 'Single')]
+    [string]$ConsoleResolutionType = 'Default',
+    [ValidateRange(640, 8192)][int]$ConsoleHorizontalResolution = 1920,
+    [ValidateRange(480, 8192)][int]$ConsoleVerticalResolution = 1200,
+    [string]$ConfigurationVersion = '',
     [switch]$AllowOvercommit,
-
     [switch]$FullSharedGpuQuota,
-
+    [switch]$Win10ReferenceGpuQuota,
     [switch]$SkipDriverSync,
-
     [switch]$StartVM,
-
     [switch]$ValidateGuest,
-
     [PSCredential]$GuestCredential,
-
     [bool]$StrictGuestDisplay = $true,
-
     [switch]$DisableHyperVVideo,
-
     [switch]$RequireNvidiaSmi,
-
-    [ValidateRange(10, 300)]
-    [int]$GuestValidationTimeoutSeconds = 90,
-
+    [ValidateRange(10, 300)][int]$GuestValidationTimeoutSeconds = 90,
     [string]$StateRoot = '',
-
     [string]$PartitionIdentitySeed = '',
-
-    [ValidateRange(0, 65535)]
-    [int]$GuestCapacity = 2,
-
-    [ValidateRange(1, 300)]
-    [int]$HostLockTimeoutSeconds = 120,
-
+    [ValidateRange(0, 65535)][int]$GuestCapacity = 2,
+    [ValidateRange(1, 300)][int]$HostLockTimeoutSeconds = 120,
     [switch]$DryRun
 )
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Host.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Lifecycle.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.Partition.ps1')
-
+$hardwareProfile = Resolve-VMateGpuPHardwareProfile `
+    -ProfileId $HardwareProfileId `
+    -CatalogPath $HardwareProfileCatalogPath `
+    -RequireFullIdentity:$RequireFullHardwareIdentity.IsPresent
+[void](Assert-VMateGpuPHardwareProfileOverrides $hardwareProfile $PSBoundParameters)
+if (-not $PSBoundParameters.ContainsKey('ProcessorCount')) {
+    $ProcessorCount = [int]$hardwareProfile.Processor.Count
+}
+if (-not $PSBoundParameters.ContainsKey('CpuMaximumPercent')) {
+    $CpuMaximumPercent = [int]$hardwareProfile.Processor.MaximumPercent
+}
+if (-not $PSBoundParameters.ContainsKey('CpuReservePercent')) {
+    $CpuReservePercent = [int]$hardwareProfile.Processor.ReservePercent
+}
+if (-not $PSBoundParameters.ContainsKey('CpuRelativeWeight')) {
+    $CpuRelativeWeight = [int]$hardwareProfile.Processor.RelativeWeight
+}
+if (-not $PSBoundParameters.ContainsKey('HwThreadCountPerCore')) {
+    $HwThreadCountPerCore = [int]$hardwareProfile.Processor.HwThreadsPerCore
+}
+if (-not $PSBoundParameters.ContainsKey('ExposeVirtualizationExtensions')) {
+    $ExposeVirtualizationExtensions = [bool](
+        $hardwareProfile.Processor.ExposeVirtualizationExtensions)
+}
+if (-not $PSBoundParameters.ContainsKey('MemoryStartupBytes')) {
+    $MemoryStartupBytes = [uint64]$hardwareProfile.Memory.startup_bytes
+}
+$profileGpu = $hardwareProfile.Gpu
+if (-not $PSBoundParameters.ContainsKey('LowMemoryMappedIoSpace')) {
+    $LowMemoryMappedIoSpace = [uint64]$profileGpu.low_mmio_bytes
+}
+if (-not $PSBoundParameters.ContainsKey('HighMemoryMappedIoSpace')) {
+    $HighMemoryMappedIoSpace = [uint64]$profileGpu.high_mmio_bytes
+}
+if (-not $PSBoundParameters.ContainsKey('ConsoleResolutionType')) {
+    $ConsoleResolutionType = [string]$profileGpu.console_resolution_type
+}
+if (-not $PSBoundParameters.ContainsKey('ConsoleHorizontalResolution')) {
+    $ConsoleHorizontalResolution = [int]$profileGpu.console_horizontal_resolution
+}
+if (-not $PSBoundParameters.ContainsKey('ConsoleVerticalResolution')) {
+    $ConsoleVerticalResolution = [int]$profileGpu.console_vertical_resolution
+}
+if (-not $PSBoundParameters.ContainsKey('ConfigurationVersion')) {
+    $ConfigurationVersion = [string]$profileGpu.vm_configuration_version
+}
+if (-not $PSBoundParameters.ContainsKey('GpuPercentage') -and
+    -not $PSBoundParameters.ContainsKey('FullSharedGpuQuota') -and
+    -not $PSBoundParameters.ContainsKey('Win10ReferenceGpuQuota')) {
+    if ([string]$profileGpu.quota_profile -ceq 'win10-reference-100') {
+        $Win10ReferenceGpuQuota = [Management.Automation.SwitchParameter]$true
+    } elseif ([string]$profileGpu.quota_profile -ceq
+        'full-all-shared-resources') {
+        $FullSharedGpuQuota = [Management.Automation.SwitchParameter]$true
+    }
+}
+$consoleProfile = New-VMateHyperVConsoleProfile $ConsoleResolutionType `
+    $ConsoleHorizontalResolution $ConsoleVerticalResolution
 if ($CreateVhd -and $ValidateGuest) {
     throw '空 VHDX 尚未安装系统；完成 Windows 安装并关机后再执行 guest 验证。'
 }
@@ -100,21 +136,35 @@ $explicitQuotaNames = if ($PSBoundParameters.ContainsKey('GpuPercentage')) {
     @('VramPercentage', 'EncodePercentage',
         'DecodePercentage', 'ComputePercentage')
 } else { @() }
-$quotaRequest = Resolve-VMateGpuPQuotaRequest -Percentages @{
+$quotaRequest = Resolve-VMateGpuPQuotaCompatibilityRequest -Percentages @{
     VramPercentage = $GpuPercentage
     EncodePercentage = $GpuPercentage
     DecodePercentage = $GpuPercentage
     ComputePercentage = $GpuPercentage
 } -ExplicitNames $explicitQuotaNames `
     -FullSharedGpuQuota:$FullSharedGpuQuota.IsPresent `
+    -Win10ReferenceGpuQuota:$Win10ReferenceGpuQuota.IsPresent `
     -AllowOvercommit:$AllowOvercommit.IsPresent
 $GpuPercentage = [int]$quotaRequest.Percentages.VramPercentage
 $effectiveAllowOvercommit = [bool]$quotaRequest.EffectiveAllowOvercommit
+$firmwareValues = @($BIOSGUID, $BIOSSerialNumber,
+    $BaseBoardSerialNumber, $ChassisSerialNumber, $ChassisAssetTag)
+$firmwareIdentity = if (@($firmwareValues | Where-Object {
+            -not [String]::IsNullOrWhiteSpace([string]$_)
+        }).Count -eq 0) { $null } else {
+    [pscustomobject][ordered]@{
+        BIOSGUID = $BIOSGUID
+        BIOSSerialNumber = $BIOSSerialNumber
+        BaseBoardSerialNumber = $BaseBoardSerialNumber
+        ChassisSerialNumber = $ChassisSerialNumber
+        ChassisAssetTag = $ChassisAssetTag
+    }
+}
 Assert-VMateGpuPHostEnvironment
 $seed = if ([String]::IsNullOrWhiteSpace($PartitionIdentitySeed)) {
     New-VMateGpuPRandomHex -ByteCount 32
 } else { $PartitionIdentitySeed.Trim().ToLowerInvariant() }
-$hostGpus = @(Get-VMHostPartitionableGpu -ErrorAction Stop)
+$hostGpus = @(Get-VMateGpuPHostPartitionableGpu)
 $selected = Resolve-VMateGpuPHostGpu -Gpus $hostGpus `
     -InstancePath $InstancePath -Vendor $Vendor `
     -PartitionIdentitySeed $seed
@@ -122,12 +172,8 @@ if ([string]$selected.VendorInfo.Vendor -ieq 'AMD' -and
     $RequireNvidiaSmi) {
     throw 'Auto 选择到 AMD GPU，不能要求 nvidia-smi。'
 }
-
-# 在 New-VM 之前完成旧 Win10 cmdlet 能力和宿主分区容量的只读
-# 预检。这样不支持 InstancePath 的多 GPU 宿主或容量变更阻断，
-# 都不会先留下一个无法安全绑卡的 VM 外壳。
-$resourcePreview = Get-VMateGpuPResourcePlan $selected.Gpu `
-    $GpuPercentage $GpuPercentage $GpuPercentage $GpuPercentage
+# 在 New-VM 前完成 cmdlet、GPU 能力和分区容量预检。
+$resourcePreview = Get-VMateGpuPResourcePlanForRequest $selected.Gpu $quotaRequest
 $capabilityPreview = Get-VMateGpuPCapabilitySnapshot `
     $selected.Gpu $selected.VendorInfo
 $fullHostVramQuotaPreview = (
@@ -150,15 +196,13 @@ $uniqueNamedGpuCount = @($namedGpus | ForEach-Object {
         (Get-Command Add-VMGpuPartitionAdapter -ErrorAction Stop) `
         (Get-Command Set-VMGpuPartitionAdapter -ErrorAction Stop) `
         $quotaNames $hostGpus.Count $namedGpus.Count $uniqueNamedGpuCount)
-
 $partitionCapacityPlan = $null
 if ($GuestCapacity -gt 0) {
     $partitionCapacityPlan = Get-VMateGpuPPartitionCountPlan `
         -HostGpu $selected.Gpu -GuestCapacity $GuestCapacity
     if ($partitionCapacityPlan.ChangeRequired) {
-        if (-not (Get-Command Set-VMHostPartitionableGpu `
-                -ErrorAction SilentlyContinue)) {
-            throw ('当前 Hyper-V 模块缺少 Set-VMHostPartitionableGpu；' +
+        if (-not (Test-VMateGpuPHostPartitionSetter)) {
+            throw ('当前 Hyper-V 模块缺少可用的 GPU-P PartitionCount setter；' +
                 '现有 PartitionCount 不足，未创建 VM。')
         }
         $assigned = @(Get-VMateGpuPAssignedAdapterSnapshot `
@@ -169,22 +213,33 @@ if ($GuestCapacity -gt 0) {
         }
     }
 }
-
 $creationParameters = @{
     VMName = $VMName
     VhdPath = $VhdPath
     ProcessorCount = $ProcessorCount
+    CpuMaximumPercent = $CpuMaximumPercent
+    CpuReservePercent = $CpuReservePercent
+    CpuRelativeWeight = $CpuRelativeWeight
+    HwThreadCountPerCore = $HwThreadCountPerCore
+    ExposeVirtualizationExtensions = $ExposeVirtualizationExtensions
+    HardwareProfileId = $HardwareProfileId
+    HardwareProfileCatalogPath = $HardwareProfileCatalogPath
+    RequireFullHardwareIdentity = $RequireFullHardwareIdentity
+    FirmwareIdentity = $firmwareIdentity
+    StaticMacAddress = $StaticMacAddress
+    ConfigurationVersion = $ConfigurationVersion
+    ConsoleProfile = $consoleProfile
     MemoryStartupBytes = $MemoryStartupBytes
     Vendor = [string]$selected.VendorInfo.Vendor
     PartitionIdentitySeed = $seed
     SwitchName = $SwitchName
     IsoPath = $IsoPath
+    BaseImagePath = $BaseImagePath
     CreateVhd = $CreateVhd
     VhdSizeBytes = $VhdSizeBytes
     StateRoot = $StateRoot
     DryRun = $DryRun
 }
-
 if ($DryRun) {
     $creationPlanParameters = @{} + $creationParameters
     [void]$creationPlanParameters.Remove('StateRoot')
@@ -205,13 +260,15 @@ if ($DryRun) {
         FullHostVramQuota = $fullHostVramQuotaPreview
         HostPartitionCapacityPlan = $partitionCapacityPlan
         PhysicalGpuSerialPolicy = 'vendor-managed-read-only'
-        HardwareIdentityPolicy = 'random-once-persisted-on-create'
+        HardwareIdentityPolicy = 'custom-or-random-once-persisted-on-create'
+        HardwareProfile = $creationPlan.HardwareProfile
+        IdentityBoot = $creationPlan.IdentityBoot; HostIdentityExtension = $creationPlan.HostIdentityExtension
         WillDeferGpuProvisioning = $CreateVhd.IsPresent
+        WillCloneBaseImage = -not [String]::IsNullOrWhiteSpace($BaseImagePath)
         WillStartVM = $StartVM.IsPresent
         WillValidateGuest = $ValidateGuest.IsPresent
     }
 }
-
 $created = New-VMateGpuPVirtualMachine @creationParameters
 $operation = '固定物理 GPU 身份'
 try {
@@ -230,6 +287,7 @@ try {
             VMName = $VMName
             VMId = [string]$created.VM.Id
             VhdPath = [string]$created.Plan.VhdPath
+            VhdBlockSizeBytes = [uint64]$created.Plan.VhdBlockSizeBytes
             Vendor = [string]$selected.VendorInfo.Vendor
             InstancePath = [string]$selected.VendorInfo.InstancePath
             PartitionIdentitySeed = [string]$createdIdentity.PartitionIdentitySeed
@@ -239,6 +297,9 @@ try {
             EffectiveAllowOvercommit = $effectiveAllowOvercommit
             FullHostVramQuota = $fullHostVramQuotaPreview
             HardwareIdentity = $created.HardwareIdentity
+            HardwareProfile = $created.HardwareProfile
+            IdentityBoot = $created.IdentityBoot; HostIdentityExtension = $created.HostIdentityExtension
+            ComputeProfile = $created.ComputeProfile
             ResumeArguments = [pscustomobject][ordered]@{
                 VMName = $VMName
                 Vendor = [string]$selected.VendorInfo.Vendor
@@ -249,6 +310,12 @@ try {
                 DecodePercentage = $GpuPercentage
                 ComputePercentage = $GpuPercentage
                 FullSharedGpuQuota = $FullSharedGpuQuota.IsPresent
+                Win10ReferenceGpuQuota = $Win10ReferenceGpuQuota.IsPresent
+                LowMemoryMappedIoSpace = $LowMemoryMappedIoSpace
+                HighMemoryMappedIoSpace = $HighMemoryMappedIoSpace
+                ConsoleResolutionType = $consoleProfile.ResolutionType
+                ConsoleHorizontalResolution = $consoleProfile.HorizontalResolution
+                ConsoleVerticalResolution = $consoleProfile.VerticalResolution
                 GuestCapacity = $GuestCapacity
                 HostLockTimeoutSeconds = $HostLockTimeoutSeconds
                 PartitionIdentitySeed = [string]$createdIdentity.PartitionIdentitySeed
@@ -261,7 +328,6 @@ try {
             }
         }
     }
-
     $operation = '同步驱动并启用 GPU-P'
     $enableScript = Join-Path $PSScriptRoot 'Enable-VMateGpuP.ps1'
     $enableParameters = @{
@@ -277,6 +343,10 @@ try {
         HighMemoryMappedIoSpace = $HighMemoryMappedIoSpace
         AllowOvercommit = $effectiveAllowOvercommit
         FullSharedGpuQuota = $FullSharedGpuQuota
+        Win10ReferenceGpuQuota = $Win10ReferenceGpuQuota
+        ConsoleResolutionType = $consoleProfile.ResolutionType
+        ConsoleHorizontalResolution = $consoleProfile.HorizontalResolution
+        ConsoleVerticalResolution = $consoleProfile.VerticalResolution
         SkipDriverSync = $SkipDriverSync
         StartVM = $StartVM
         ValidateGuest = $ValidateGuest
@@ -313,6 +383,10 @@ try {
         FullHostVramQuota = [bool]$gpuResult.FullHostVramQuota
         HostPartitionCapacity = $gpuResult.HostPartitionCapacity
         HardwareIdentity = $gpuResult.HardwareIdentity
+        HardwareProfile = $created.HardwareProfile
+        IdentityBoot = $gpuResult.IdentityBoot; HostIdentityExtension = $gpuResult.HostIdentityExtension
+        ComputeProfile = $created.ComputeProfile
+        ConsoleProfile = $gpuResult.ConsoleProfile
         GuestValidation = $gpuResult.GuestValidation
     }
 }
@@ -334,7 +408,6 @@ catch {
         $inventoryReadable = $false
         [void]$rollbackErrors.Add("无法回读 VM 注册状态：$($_.Exception.Message)")
     }
-
     $adapterCount = -1
     if ($null -ne $liveVm) {
         try {
@@ -346,30 +419,46 @@ catch {
                 "无法回读 GPU-P adapter：$($_.Exception.Message)")
         }
     }
-
     $vmUnregistered = $inventoryReadable -and $null -eq $liveVm
     if ($null -ne $liveVm -and [string]$liveVm.State -ceq 'Off' -and
         $adapterCount -eq 0) {
-        try {
-            Remove-VM -VM $liveVm -Force -Confirm:$false -ErrorAction Stop
-            $remaining = @(Get-VM -ErrorAction Stop | Where-Object {
-                    [string]$_.Id -ceq [string]$created.VM.Id
-                })
-            if ($remaining.Count -ne 0) {
-                throw '回读发现 VM 仍在 Hyper-V 注册。'
+        $safeToUnregister = $true
+        if ($null -ne $created.IdentityBoot -and
+            [string]$created.IdentityBoot.Status -in @('Installed', 'Reinstalled')) {
+            try {
+                [void](Uninstall-VMateHyperVIdentityBoot -VM $liveVm)
             }
-            $vmUnregistered = $true
+            catch {
+                $safeToUnregister = $false
+                [void]$rollbackErrors.Add(
+                    "回滚本次 identity boot 失败：$($_.Exception.Message)")
+            }
         }
-        catch {
+        if ($safeToUnregister) {
+            try {
+                Remove-VM -VM $liveVm -Force -Confirm:$false -ErrorAction Stop
+                $remaining = @(Get-VM -ErrorAction Stop | Where-Object {
+                        [string]$_.Id -ceq [string]$created.VM.Id
+                    })
+                if ($remaining.Count -ne 0) {
+                    throw '回读发现 VM 仍在 Hyper-V 注册。'
+                }
+                $vmUnregistered = $true
+            }
+            catch {
+                [void]$rollbackErrors.Add(
+                    "注销本次 VM 失败：$($_.Exception.Message)")
+            }
+        }
+        else {
             [void]$rollbackErrors.Add(
-                "注销本次 VM 失败：$($_.Exception.Message)")
+                'identity boot 未安全回滚；保留 VM、身份清单和 VHD。')
         }
     }
     elseif ($null -ne $liveVm) {
         [void]$rollbackErrors.Add(
             "VM 状态=$($liveVm.State)，adapter 数=$adapterCount；保留诊断状态。")
     }
-
     if ($vmUnregistered) {
         try {
             if (Test-Path -LiteralPath $created.IdentityPath -PathType Leaf) {
@@ -398,7 +487,6 @@ catch {
         [void]$rollbackErrors.Add(
             '未确认 VM 已注销；身份清单和 VHD 均保留。')
     }
-
     $rollbackSummary = if ($rollbackErrors.Count -eq 0) {
         if ($created.Plan.CreateVhd) {
             '已回滚 VM、身份和本次空 VHD。'
@@ -406,5 +494,5 @@ catch {
         else { '已回滚 VM 与身份；用户 VHD 保留。' }
     }
     else { $rollbackErrors -join '；' }
-    throw "新 VM 在$operation时失败：$primaryError；$rollbackSummary"
+    throw "新 VM 在${operation}时失败：$primaryError；$rollbackSummary"
 }

@@ -38,7 +38,7 @@ $adapters = @(Get-VMGpuPartitionAdapter -VM $vm -ErrorAction Stop)
 if ($adapters.Count -gt 1) {
     throw '该 VM 有多个 GPU-P adapter，拒绝猜测应同步哪个厂商包。'
 }
-$hostGpus = @(Get-VMHostPartitionableGpu -ErrorAction Stop)
+$hostGpus = @(Get-VMateGpuPHostPartitionableGpu)
 $boundHostGpus = @($hostGpus | Where-Object {
         $null -ne $_.PSObject.Properties['Name'] -and
         [string]::Equals([string]$_.Name,

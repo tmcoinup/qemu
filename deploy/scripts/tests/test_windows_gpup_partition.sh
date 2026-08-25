@@ -53,12 +53,13 @@ test_static_contract() {
     require_text "PSObject.Properties['ValidPartitionCounts']" "$PARTITION"
     require_text '$current -ge [uint64]$GuestCapacity' "$PARTITION"
     require_text '$_ -ge [uint64]$GuestCapacity' "$PARTITION"
-    require_text 'Set-VMHostPartitionableGpu -Name $InstancePath' "$PARTITION"
+    require_text 'Set-VMateGpuPNativePartitionCount -InstancePath $InstancePath' \
+        "$PARTITION"
     require_text 'Get-VMGpuPartitionAdapter -VM $vm' "$PARTITION"
     require_text "\$ownership = 'Unknown'" "$PARTITION"
     require_text "\$ownership = 'SelectedGpu'" "$PARTITION"
     require_text '$otherMatches.Count -eq 1' "$PARTITION"
-    require_text 'Get-VMHostPartitionableGpu -ErrorAction Stop' "$PARTITION"
+    require_text 'Get-VMateGpuPHostPartitionableGpu' "$PARTITION"
     require_text '$assigned.Count -ne 0' "$PARTITION"
     require_text 'PartitionCount 回读不一致' "$PARTITION"
     require_text '回滚失败' "$PARTITION"
@@ -94,7 +95,8 @@ test_static_contract() {
     dry_line="$(rg -n -F 'if ($DryRun.IsPresent)' "$PARTITION" | \
         head -n1 | cut -d: -f1)"
     mutation_line="$(rg -n -- \
-        '^[[:space:]]*Set-VMHostPartitionableGpu -Name' "$PARTITION" | \
+        '^[[:space:]]*Set-VMateGpuPNativePartitionCount -InstancePath' \
+        "$PARTITION" | \
         head -n1 | cut -d: -f1)"
     [[ -n "$dry_line" && -n "$mutation_line" && "$dry_line" -lt "$mutation_line" ]] \
         || fail 'DryRun does not return before the first PartitionCount mutation'
@@ -176,15 +178,28 @@ test_dynamic_partition_contract() {
             $script:MutationCount = 0
             $script:SetMode = "Normal"
             $script:GetVmCount = 0
+            $script:NativeCommandStyle = "Host"
             function Get-Command {
                 param([string]$Name, [object]$ErrorAction)
-                if ($Name -ceq "Set-VMHostPartitionableGpu" -and
-                    -not $script:SetterAvailable) {
-                    return $null
+                if ($Name -in @("Get-VMHostPartitionableGpu",
+                        "Set-VMHostPartitionableGpu")) {
+                    if ($script:NativeCommandStyle -cne "Host" -or
+                        ($Name -like "Set-*" -and
+                            -not $script:SetterAvailable)) { return $null }
+                }
+                if ($Name -in @("Get-VMPartitionableGpu",
+                        "Set-VMPartitionableGpu")) {
+                    if ($script:NativeCommandStyle -cne "Legacy" -or
+                        ($Name -like "Set-*" -and
+                            -not $script:SetterAvailable)) { return $null }
                 }
                 return [pscustomobject]@{ Name = $Name }
             }
             function Get-VMHostPartitionableGpu {
+                param([object]$ErrorAction)
+                return @($script:FakeGpuInventory)
+            }
+            function Get-VMPartitionableGpu {
                 param([object]$ErrorAction)
                 return @($script:FakeGpuInventory)
             }
@@ -197,7 +212,7 @@ test_dynamic_partition_contract() {
                 param([object]$VM, [object]$ErrorAction)
                 return @($script:FakeAdapters)
             }
-            function Set-VMHostPartitionableGpu {
+            function Invoke-FakePartitionSetter {
                 param(
                     [string]$Name,
                     [uint16]$PartitionCount,
@@ -218,6 +233,16 @@ test_dynamic_partition_contract() {
                     throw "injected rollback failure"
                 }
                 $script:FakeGpu.PartitionCount = [uint64]$PartitionCount
+            }
+            function Set-VMHostPartitionableGpu {
+                param([string]$Name, [uint16]$PartitionCount,
+                    [object]$ErrorAction)
+                Invoke-FakePartitionSetter @PSBoundParameters
+            }
+            function Set-VMPartitionableGpu {
+                param([string]$Name, [uint16]$PartitionCount,
+                    [object]$ErrorAction)
+                Invoke-FakePartitionSetter @PSBoundParameters
             }
             function Reset-Fake {
                 param([uint64]$Current = 1)
@@ -251,6 +276,19 @@ test_dynamic_partition_contract() {
                 try { Set-VMateGpuPHostPartitionCount -InstancePath $script:FakeGpu.Name }
                 catch { $missingCapacityFailed = $true }
                 if (-not $missingCapacityFailed) { throw "省略 GuestCapacity 未失败" }
+                # Win10 旧名与新版 Host 名都必须解析到同一个封装入口。
+                $script:NativeCommandStyle = "Legacy"
+                Assert-Equal (Resolve-VMateGpuPHostPartitionCommand Get) `
+                    Get-VMPartitionableGpu "Win10 getter 未回退到旧名"
+                Reset-Fake
+                $legacyChanged = Set-VMateGpuPHostPartitionCount `
+                    -InstancePath $script:FakeGpu.Name -GuestCapacity 3
+                Assert-Equal $legacyChanged.Status Changed `
+                    "Win10 旧名 setter 未执行"
+                Assert-Equal $script:FakeGpu.PartitionCount 4 `
+                    "Win10 旧名 setter 未生效"
+                $script:NativeCommandStyle = "Host"
+                Reset-Fake -Current 8
                 # 旧 Win10 无 setter，但现有数量足够时应保持只读并成功。
                 $unchanged = Set-VMateGpuPHostPartitionCount `
                     -InstancePath $script:FakeGpu.Name -GuestCapacity 3
@@ -263,7 +301,7 @@ test_dynamic_partition_contract() {
                 Assert-Throws {
                     Set-VMateGpuPHostPartitionCount `
                         -InstancePath $script:FakeGpu.Name -GuestCapacity 3
-                } "缺少 Set-VMHostPartitionableGpu"
+                } "缺少可用的 GPU-P PartitionCount setter"
                 # 旧 Win10 pathless adapter 归属未知，必须阻断。
                 Assert-AdapterInventoryBlocked ([pscustomobject]@{ Id = 1 }) `
                     "归属未知 adapter 存在时仍发生写入"

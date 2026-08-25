@@ -1,0 +1,2 @@
+debian/riscv64-install/RISCV_VIRT_CODE.fd /usr/share/qemu-efi-riscv64
+debian/riscv64-install/RISCV_VIRT_VARS.fd /usr/share/qemu-efi-riscv64

@@ -59,9 +59,12 @@ test_static_contract() {
     require_text 'Assert-VMateGpuPHostContext -RequireHyperV -RequireAdministrator' \
         "$HOST_DISPLAY"
 
-    # Guest 只接受一张健康、型号精确相等且具有真实厂商 PCI 证据的设备。
+    # Guest 只接受一张健康、型号精确相等且具有真实厂商 PCI 证据的目标 GPU；
+    # 非严格模式可以额外保留经过完整身份约束的微软控制台显卡。
     require_text "VMate.GpuP.GuestValidation.ps1" "$GUEST_TEST"
-    require_text '$healthy.Count -ne 1' "$GUEST_VALIDATION"
+    require_text '$targetGpu.Count -ne 1' "$GUEST_VALIDATION"
+    require_text 'ConsoleCompatible = @($extras' "$GUEST_VALIDATION"
+    require_text '$problem -notin @(0, 22)' "$GUEST_VALIDATION"
     require_text '.Equals($GpuName.Trim(),' "$GUEST_VALIDATION"
     require_text "if (\$Vendor -ieq 'NVIDIA') { '10DE' } else { '1002' }" \
         "$GUEST_VALIDATION"
@@ -71,6 +74,8 @@ test_static_contract() {
     require_text "[string]\$Display.Service -ieq 'VirtualRender'" "$GUEST_VALIDATION"
     require_text "[IO.Path]::GetFileName(\$_) -ieq 'vrd.sys'" "$GUEST_VALIDATION"
     require_text 'Get-AuthenticodeSignature -LiteralPath $Path' "$GUEST_VALIDATION"
+    require_text "foreach (\$directory in @('System32', 'SysWOW64'))" \
+        "$GUEST_VALIDATION"
     require_text 'nvldumdx|nvwgf2umx|nvapi64|nvcuda' "$GUEST_VALIDATION"
     require_text 'atidxx64|amdxx64|amdxc64|amdocl64' "$GUEST_VALIDATION"
     require_text "'--query-gpu=name,driver_version,uuid'" \
@@ -88,6 +93,8 @@ test_static_contract() {
         "$D3D_VALIDATION"
     require_text 'System32\atiadlxx.dll' "$D3D_VALIDATION"
     require_text 'SysWOW64\atiadlxy.dll' "$D3D_VALIDATION"
+    require_text '$adlPaths = @(@(' "$D3D_VALIDATION"
+    require_text '$paths = @(@(' "$GUEST_VALIDATION"
     require_text 'WarpFallbackAllowed = $false' "$D3D_VALIDATION"
     require_text 'VendorGpuUuid = if ($null -eq $smi)' "$GUEST_VALIDATION"
     require_text "if (\$Vendor -ieq 'AMD' -and \$RequireNvidiaSmi.IsPresent)" \
@@ -152,6 +159,9 @@ test_dynamic_contract() {
 
         . $env:VMATE_GPUP_GUEST_TEST
         function Assert-VMateGpuPGuestContext { return [pscustomobject]@{} }
+        function Assert-VMateWindowsProductionCodeIntegrity {
+            return [pscustomobject]@{ Enabled = $true; TestSigningActive = $false }
+        }
         function Get-VMateGpuPGuestVendorRuntimeFiles { return @() }
         function Assert-VMateGpuPDriverStack { }
         function Assert-VMateGpuPNoNvapiShim { }
@@ -225,6 +235,22 @@ test_dynamic_contract() {
         $nonStrict = Test-VMateGpuPGuest NVIDIA `
             "NVIDIA GeForce GTX 1060 6GB" "577.00" -StrictMode $false
         if (-not $nonStrict.Passed) { throw "disabled Hyper-V Video was not tolerated" }
+        $healthyConsole = New-TestDisplay "Microsoft Hyper-V Video" `
+            "VMBUS\CONSOLE" "HyperVideo" 0 "OK" "Microsoft Corporation"
+        $global:testDisplays = @($nvidia, $healthyConsole)
+        $consoleResult = Test-VMateGpuPGuest NVIDIA `
+            "NVIDIA GeForce GTX 1060 6GB" "577.00" -StrictMode $false
+        if (-not $consoleResult.ConsoleCompatible -or
+            $consoleResult.HealthyDisplayCount -ne 2) {
+            throw "healthy Hyper-V console video was not tolerated"
+        }
+        $global:testDisplays = @($nvidia,
+            (New-TestDisplay "Microsoft Hyper-V Video" "ROOT\FAKE" `
+                "HyperVideo" 0 "OK" "Microsoft Corporation"))
+        Assert-Fails { Test-VMateGpuPGuest NVIDIA `
+                "NVIDIA GeForce GTX 1060 6GB" "577.00" -StrictMode $false } `
+            "非严格模式只允许"
+        $global:testDisplays = @($nvidia)
         $nvidia.Service = "VioGpuDod"
         Assert-Fails { Test-VMateGpuPGuest NVIDIA `
                 "NVIDIA GeForce GTX 1060 6GB" "577.00" -StrictMode $false } `
@@ -244,7 +270,7 @@ test_dynamic_contract() {
                 "32.0.15.7700" -RequireNvidiaSmi } "不能要求 nvidia-smi"
 
         $hyperV = New-TestDisplay "Microsoft Hyper-V Video" "VMBUS\VIDEO" `
-            "synthvid" 0 "OK" "Microsoft Corporation"
+            "HyperVideo" 0 "OK" "Microsoft Corporation"
         $global:testDisplays = @($hyperV, $amd)
         $global:disabled = @()
         function Disable-PnpDevice {

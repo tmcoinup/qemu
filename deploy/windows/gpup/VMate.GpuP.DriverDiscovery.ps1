@@ -274,7 +274,7 @@ function New-VMateGpuPDriverCopyPlan {
 function Get-VMateGpuPDriverSelection {
     param([string]$GpuInstanceId = '')
 
-    $partitionable = @(Get-VMHostPartitionableGpu -ErrorAction Stop |
+    $partitionable = @(Get-VMateGpuPHostPartitionableGpu |
         Where-Object { [string]$_.Name -match '(?i)VEN_(10DE|1002)(?:&|#)' } |
         ForEach-Object {
             $id = ConvertTo-VMateGpuPInstanceId ([string]$_.Name)
@@ -341,15 +341,62 @@ function Get-VMateGpuPDriverSourcePaths {
         [Parameter(Mandatory = $true)][string]$SystemRoot
     )
 
-    $files = @(Get-CimAssociatedInstance -InputObject $Selection.SignedDriver `
-        -Association Win32_PNPSignedDriverCIMDataFile `
-        -ResultClassName CIM_DataFile -ErrorAction Stop)
+    $files = @()
+    $associatedError = ''
+    try {
+        $files = @(Get-CimAssociatedInstance `
+            -InputObject $Selection.SignedDriver `
+            -Association Win32_PNPSignedDriverCIMDataFile `
+            -ResultClassName CIM_DataFile -ErrorAction Stop)
+    }
+    catch { $associatedError = $_.Exception.Message }
+    if ($files.Count -eq 0) {
+        # Win10 19045 的 CIM provider 会对 Get-CimAssociatedInstance 返回
+        # 0x80041008，但同一 association class 可直接枚举。只接受
+        # Antecedent 精确匹配已验证 DeviceID、Dependent 确为 CIM_DataFile
+        # 的记录，不能用 INF 名称的模糊目录扫描代替。
+        try {
+            $associations = @(Get-CimInstance `
+                -ClassName Win32_PNPSignedDriverCIMDataFile `
+                -ErrorAction Stop)
+            $files = @($associations | Where-Object {
+                    $driver = $_.Antecedent
+                    $file = $_.Dependent
+                    $null -ne $driver -and $null -ne $file -and
+                    [string]$driver.CimClass.CimClassName -ceq
+                        'Win32_PnPSignedDriver' -and
+                    [string]$file.CimClass.CimClassName -ceq 'CIM_DataFile' -and
+                    [string]::Equals([string]$driver.DeviceID,
+                        [string]$Selection.InstanceId,
+                        [StringComparison]::OrdinalIgnoreCase)
+                } | ForEach-Object { $_.Dependent })
+        }
+        catch {
+            throw ('无法读取签名驱动文件关联；Get-CimAssociatedInstance：' +
+                $associatedError + '；association class：' +
+                $_.Exception.Message)
+        }
+    }
+    if ($files.Count -eq 0) {
+        throw ('签名驱动没有匹配 DeviceID 的 CIM_DataFile 关联；' +
+            "Get-CimAssociatedInstance：$associatedError")
+    }
     $paths = New-Object System.Collections.Generic.List[string]
+    # oemNN.inf 是宿主 Published Name，不是可跨 Windows 实例复用的包名；
+    # 客机同名文件可能属于另一设备。精确排除已验证 SignedDriver.InfName，
+    # 原始 INF 及 CAT/SYS/DLL 仍由 FileRepository 关联完整同步。
+    $publishedInf = [IO.Path]::GetFullPath((Join-Path $SystemRoot `
+            ('INF\' + [string]$Selection.SignedDriver.InfName)))
     foreach ($file in $files) {
         if ([string]::IsNullOrWhiteSpace([string]$file.Name)) {
             throw '驱动 CIM 关联包含空文件路径。'
         }
-        $paths.Add([string]$file.Name)
+        $candidate = [IO.Path]::GetFullPath([string]$file.Name)
+        if ($candidate.Equals($publishedInf,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $paths.Add($candidate)
     }
     foreach ($service in @($Selection.Services)) {
         $paths.Add((ConvertTo-VMateGpuPServiceFilePath `

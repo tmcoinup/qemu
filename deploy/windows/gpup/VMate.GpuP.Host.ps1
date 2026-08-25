@@ -12,6 +12,9 @@ if (-not (Get-Command -Name Get-VMateGpuPResourcePlan `
         -CommandType Function -ErrorAction SilentlyContinue)) {
     . $gpuPCommon
 }
+. (Join-Path $PSScriptRoot 'VMate.GpuP.VMConfiguration.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.QuotaProfile.ps1')
+. (Join-Path $PSScriptRoot 'VMate.HyperV.ConsoleProfile.ps1')
 function Assert-VMateGpuPHostEnvironment {
     if ($env:OS -ne 'Windows_NT') {
         throw 'GPU-P 配置只能在 Windows Hyper-V 宿主运行。'
@@ -23,8 +26,8 @@ function Assert-VMateGpuPHostEnvironment {
         $nativeArchitecture -ine 'AMD64') {
         throw 'P-11 GPU-P 宿主必须是 x64 Windows。'
     }
-    $required = @(
-        'Get-VM', 'Set-VM', 'Get-VMHostPartitionableGpu',
+    [void](Resolve-VMateGpuPHostPartitionCommand -Operation Get)
+    $required = @('Get-VM', 'Set-VM',
         'Get-VMGpuPartitionAdapter', 'Add-VMGpuPartitionAdapter',
         'Set-VMGpuPartitionAdapter', 'Remove-VMGpuPartitionAdapter'
     )
@@ -33,8 +36,7 @@ function Assert-VMateGpuPHostEnvironment {
             throw "缺少 Hyper-V PowerShell cmdlet：$command"
         }
     }
-    # GPU-P 的读取与配置均需要提升权限，提前给出确定错误，避免事务中途才因
-    # Access Denied 失败。WindowsPrincipal 检查本身不改变系统状态。
+    # GPU-P 读取和配置均要求提升权限，必须在事务前失败。
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try {
         $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -97,8 +99,7 @@ function Resolve-VMateGpuPHostGpu {
         $ordered = @($supported | Sort-Object {
                 ([string]$_.VendorInfo.InstancePath).ToUpperInvariant()
             })
-        # Identity 模块生成 256-bit 密码学随机 seed。按稳定排序取 seed 前 32 bit
-        # 映射候选，保证同一 VM 重跑不重抽，同时始终使用真实物理卡的厂商路径。
+        # 以持久化随机 seed 映射稳定排序后的真实物理卡。
         $selector = [convert]::ToUInt32($seed.Substring(0, 8), 16)
         return $ordered[$selector % [uint32]$ordered.Count]
     }
@@ -231,6 +232,8 @@ function Get-VMateGpuPConfigurationPlan {
         [int]$DecodePercentage = 100,
         [int]$ComputePercentage = 100,
         [switch]$AllowOvercommit,
+        [AllowNull()][object]$QuotaRequest = $null,
+        [AllowNull()][object]$ConsoleProfile = $null,
         [string]$PartitionIdentitySeed = '',
         [uint64]$LowMemoryMappedIoSpace = 1GB,
         [uint64]$HighMemoryMappedIoSpace = 32GB
@@ -239,7 +242,7 @@ function Get-VMateGpuPConfigurationPlan {
     if ($LowMemoryMappedIoSpace -eq 0 -or $HighMemoryMappedIoSpace -eq 0) {
         throw 'GPU-P 的 LowMMIO/HighMMIO 必须大于零。'
     }
-    $allGpus = @(Get-VMHostPartitionableGpu -ErrorAction Stop)
+    $allGpus = @(Get-VMateGpuPHostPartitionableGpu)
     $namedGpus = @($allGpus | Where-Object {
             $null -ne $_.PSObject.Properties['Name'] -and
             -not [String]::IsNullOrWhiteSpace([string]$_.Name)
@@ -279,8 +282,15 @@ function Get-VMateGpuPConfigurationPlan {
         $selected.VendorInfo.InstancePath $partitionableGpuCount
     $capabilitySnapshot = Get-VMateGpuPCapabilitySnapshot `
         $selected.Gpu $selected.VendorInfo
-    $resourcePlan = Get-VMateGpuPResourcePlan $selected.Gpu `
-        $VramPercentage $EncodePercentage $DecodePercentage $ComputePercentage
+    if ($null -eq $QuotaRequest) {
+        $QuotaRequest = Resolve-VMateGpuPQuotaCompatibilityRequest `
+            -Percentages @{ VramPercentage = $VramPercentage
+                EncodePercentage = $EncodePercentage
+                DecodePercentage = $DecodePercentage
+                ComputePercentage = $ComputePercentage } `
+            -AllowOvercommit:$AllowOvercommit.IsPresent
+    }
+    $resourcePlan = Get-VMateGpuPResourcePlanForRequest $selected.Gpu $QuotaRequest
     $quotaNames = @((Get-VMateGpuPAdapterSettings $resourcePlan).Keys)
     $setCommand = Get-Command -Name Set-VMGpuPartitionAdapter -ErrorAction Stop
     $compat = Get-VMateGpuPCmdletCompatibility $addCommand $setCommand `
@@ -319,28 +329,14 @@ function Get-VMateGpuPConfigurationPlan {
         AddTargetParameter = $compat.AddTargetParameter
         AddQuotaParameters = @($compat.AddQuotaParameters)
         AllowOvercommit = $AllowOvercommit.IsPresent
+        ConsoleProfile = if ($null -eq $ConsoleProfile) { $null } else {
+            New-VMateHyperVConsoleProfile `
+                -ResolutionType ([string]$ConsoleProfile.ResolutionType) `
+                -HorizontalResolution ([int]$ConsoleProfile.HorizontalResolution) `
+                -VerticalResolution ([int]$ConsoleProfile.VerticalResolution)
+        }
         LowMemoryMappedIoSpace = $LowMemoryMappedIoSpace
         HighMemoryMappedIoSpace = $HighMemoryMappedIoSpace
-    }
-}
-function Assert-VMateGpuPAppliedState {
-    param([Parameter(Mandatory = $true)][object]$Plan)
-    $vm = Get-VMateGpuPVirtualMachine $Plan.VMName
-    if ($vm.GuestControlledCacheTypes -ne $true -or
-        [uint64]$vm.LowMemoryMappedIoSpace -ne $Plan.LowMemoryMappedIoSpace -or
-        [uint64]$vm.HighMemoryMappedIoSpace -ne $Plan.HighMemoryMappedIoSpace -or
-        [string]$vm.CheckpointType -cne 'Disabled') {
-        throw 'GPU-P VM cache/MMIO/checkpoint 配置回读不一致。'
-    }
-    $adapters = @(Get-VMateGpuPAdaptersForVm $vm)
-    $adapter = Resolve-VMateGpuPExistingAdapter $adapters `
-        $Plan.InstancePath $Plan.SupportedGpuCount
-    $expected = Get-VMateGpuPAdapterSettings $Plan.ResourcePlan
-    $actual = Get-VMateGpuPAdapterSettings $adapter
-    foreach ($name in $expected.Keys) {
-        if ([uint64]$actual[$name] -ne [uint64]$expected[$name]) {
-            throw "GPU-P adapter 回读不一致：$name"
-        }
     }
 }
 function Invoke-VMateGpuPConfiguration {
@@ -354,6 +350,8 @@ function Invoke-VMateGpuPConfiguration {
         [ValidateRange(1, 100)][int]$DecodePercentage = 100,
         [ValidateRange(1, 100)][int]$ComputePercentage = 100,
         [switch]$AllowOvercommit,
+        [AllowNull()][object]$QuotaRequest = $null,
+        [AllowNull()][object]$ConsoleProfile = $null,
         [string]$PartitionIdentitySeed = '',
         [switch]$DryRun,
         [uint64]$LowMemoryMappedIoSpace = 1GB,
@@ -370,12 +368,7 @@ function Invoke-VMateGpuPConfiguration {
     if ($DryRun.IsPresent) {
         return $plan
     }
-    $vmSnapshot = [pscustomobject]@{
-        GuestControlledCacheTypes = [bool]$plan.VM.GuestControlledCacheTypes
-        LowMemoryMappedIoSpace = [uint64]$plan.VM.LowMemoryMappedIoSpace
-        HighMemoryMappedIoSpace = [uint64]$plan.VM.HighMemoryMappedIoSpace
-        CheckpointType = $plan.VM.CheckpointType
-    }
+    $vmSnapshot = Get-VMateGpuPVMConfigurationSnapshot $plan.VM
     $oldAdapterSettings = if ($null -ne $plan.ExistingAdapter) {
         Get-VMateGpuPAdapterSettings $plan.ExistingAdapter
     } else { $null }
@@ -383,11 +376,13 @@ function Invoke-VMateGpuPConfiguration {
     $adapterAttempted = $false
     $createdAdapters = @()
     try {
-        $vmAttempted = $true
-        Set-VM -VM $plan.VM -GuestControlledCacheTypes $true `
-            -LowMemoryMappedIoSpace $plan.LowMemoryMappedIoSpace `
-            -HighMemoryMappedIoSpace $plan.HighMemoryMappedIoSpace `
-            -CheckpointType Disabled -Confirm:$false -ErrorAction Stop
+        if (-not (Test-VMateGpuPVMConfigurationMatch $vmSnapshot $plan)) {
+            $vmAttempted = $true
+            Set-VM -VM $plan.VM -GuestControlledCacheTypes $true `
+                -LowMemoryMappedIoSpace $plan.LowMemoryMappedIoSpace `
+                -HighMemoryMappedIoSpace $plan.HighMemoryMappedIoSpace `
+                -CheckpointType Disabled -Confirm:$false -ErrorAction Stop
+        }
         $settings = Get-VMateGpuPAdapterSettings $plan.ResourcePlan
         $adapterAttempted = $true
         if ($plan.Action -ceq 'Add') {
@@ -397,8 +392,7 @@ function Invoke-VMateGpuPConfiguration {
             foreach ($name in $plan.AddQuotaParameters) {
                 $parameters[$name] = $settings[$name]
             }
-            # 部分 Win10 Hyper-V 模块没有 -InstancePath；单 GPU 宿主可让系统
-            # 唯一选择并在回读时核验，多 GPU 则已在计划阶段 fail closed。
+            # Win10 无 -InstancePath 时只允许已预检的唯一单 GPU。
             if ($plan.SupportsInstancePath) {
                 $parameters['InstancePath'] = $plan.InstancePath
             }
@@ -426,6 +420,10 @@ function Invoke-VMateGpuPConfiguration {
             [void](Set-VMGpuPartitionAdapter @settings)
         }
         Assert-VMateGpuPAppliedState $plan
+        $consoleResult = if ($null -eq $plan.ConsoleProfile) { $null } else {
+            Set-VMateHyperVConsoleProfile -VM $plan.VM `
+                -Profile $plan.ConsoleProfile
+        }
     } catch {
         $original = $_.Exception.Message
         $rollback = [System.Collections.Generic.List[string]]::new()
@@ -492,6 +490,8 @@ function Invoke-VMateGpuPConfiguration {
         PartitionIdentitySeed = $plan.PartitionIdentitySeed
         ResourcePlan = $plan.ResourcePlan
         Quota = $plan.Quota
+        ConsoleProfile = $consoleResult
+        VMSettingsChanged = $vmAttempted
     }
     }
     finally {

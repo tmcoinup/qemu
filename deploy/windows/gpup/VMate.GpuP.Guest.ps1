@@ -22,6 +22,9 @@ function Invoke-VMateGpuPGuestValidation {
         [Parameter(Mandatory = $true)]
         [string]$DriverVersion,
 
+        [AllowNull()]
+        [object]$ExpectedHardwareIdentity = $null,
+
         [bool]$StrictDisplay = $true,
 
         [switch]$DisableHyperVVideo,
@@ -42,17 +45,36 @@ function Invoke-VMateGpuPGuestValidation {
 
     $entry = Join-Path $PSScriptRoot 'Test-VMateGpuPGuest.ps1'
     $module = Join-Path $PSScriptRoot 'VMate.GpuP.GuestValidation.ps1'
+    $monitorModule = Join-Path $PSScriptRoot `
+        'VMate.GpuP.GuestMonitorValidation.ps1'
     $d3dModule = Join-Path $PSScriptRoot 'VMate.GpuP.D3DValidation.ps1'
-    foreach ($file in @($entry, $module, $d3dModule)) {
+    $identityModule = Join-Path $PSScriptRoot 'VMate.GpuP.GuestIdentity.ps1'
+    # GuestValidation dot-sources the production Code Integrity gate. Copy the
+    # complete transitive closure into the per-run guest directory; checking
+    # only the four direct entry files lets the host-side copy pass but makes
+    # the guest fail before any GPU validation runs.
+    $codeIntegrityModule = Join-Path $PSScriptRoot `
+        'VMate.Windows.CodeIntegrity.ps1'
+    $validationFiles = @(
+        $entry,
+        $module,
+        $monitorModule,
+        $d3dModule,
+        $identityModule,
+        $codeIntegrityModule
+    )
+    foreach ($file in $validationFiles) {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
             throw "缺少 GPU-P guest 验证文件：$file"
         }
     }
     $sourceHashes = @{}
-    foreach ($file in @($entry, $module, $d3dModule)) {
+    foreach ($file in $validationFiles) {
         $sourceHashes[[IO.Path]::GetFileName($file)] =
             (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
     }
+    $expectedHardwareJson = if ($null -eq $ExpectedHardwareIdentity) { '' }
+    else { $ExpectedHardwareIdentity | ConvertTo-Json -Depth 8 -Compress }
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $session = $null
@@ -88,7 +110,7 @@ function Invoke-VMateGpuPGuestValidation {
                     -ErrorAction Stop | Out-Null
                 return $Path
             } -ErrorAction Stop
-        foreach ($file in @($entry, $module, $d3dModule)) {
+        foreach ($file in $validationFiles) {
             Copy-Item -LiteralPath $file -Destination $guestDirectory `
                 -ToSession $session -ErrorAction Stop
         }
@@ -118,19 +140,41 @@ function Invoke-VMateGpuPGuestValidation {
         return Invoke-Command -Session $session -ArgumentList @(
             $guestDirectory, $Vendor, $GpuName, $DriverVersion,
             $StrictDisplay, $DisableHyperVVideo.IsPresent,
-            $RequireNvidiaSmi.IsPresent
+            $RequireNvidiaSmi.IsPresent, $expectedHardwareJson
         ) -ScriptBlock {
             param(
                 [string]$Path, [string]$ExpectedVendor,
                 [string]$ExpectedName, [string]$ExpectedVersion,
-                [bool]$Strict, [bool]$DisableVideo, [bool]$RequireSmi
+                [bool]$Strict, [bool]$DisableVideo, [bool]$RequireSmi,
+                [string]$ExpectedHardwareJson
             )
             $script = Join-Path $Path 'Test-VMateGpuPGuest.ps1'
-            & $script -ExpectedVendor $ExpectedVendor `
+            $identityScript = Join-Path $Path `
+                'VMate.GpuP.GuestIdentity.ps1'
+            # PowerShell Direct 会话不继承宿主 powershell.exe 的
+            # -ExecutionPolicy。只在该临时进程内允许已做 SHA-256 传输校验的
+            # P-11 脚本；会话销毁后自动恢复，不修改 guest 的持久策略。
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass `
+                -Force -ErrorAction Stop
+            $result = & $script -ExpectedVendor $ExpectedVendor `
                 -ExpectedGpuName $ExpectedName `
                 -ExpectedDriverVersion $ExpectedVersion -Strict:$Strict `
                 -DisableHyperVVideo:$DisableVideo `
-                -RequireNvidiaSmi:$RequireSmi
+                -RequireNvidiaSmi:$RequireSmi -RequireMonitor
+            . $identityScript
+            $observed = Get-VMateGpuPGuestHardwareIdentitySnapshot
+            if (-not [String]::IsNullOrWhiteSpace($ExpectedHardwareJson)) {
+                $ExpectedHardware = $ExpectedHardwareJson | ConvertFrom-Json
+                $observed = Test-VMateGpuPGuestHardwareIdentityMatch `
+                    -Expected $ExpectedHardware -Observed $observed
+                if (-not [bool]$observed.Match) {
+                    throw ('guest 硬件身份回读不一致：' +
+                        (@($observed.Mismatches) -join ', '))
+                }
+            }
+            $result | Add-Member -NotePropertyName HardwareIdentity `
+                -NotePropertyValue $observed -Force
+            return $result
         } -ErrorAction Stop
     }
     finally {

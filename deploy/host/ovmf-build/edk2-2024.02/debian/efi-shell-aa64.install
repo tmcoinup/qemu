@@ -1,0 +1,2 @@
+#!/usr/bin/dh-exec
+debian/aavmf-install/Shell.efi => /usr/share/efi-shell-aa64/shellaa64.efi

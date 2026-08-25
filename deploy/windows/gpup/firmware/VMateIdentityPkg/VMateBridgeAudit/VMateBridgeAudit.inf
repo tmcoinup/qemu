@@ -1,0 +1,27 @@
+[Defines]
+  INF_VERSION                    = 0x0001001A
+  BASE_NAME                      = VMateBridgeAudit
+  FILE_GUID                      = 4DC80209-1F1A-44F0-A933-FC0B69868BFC
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  VMateBridgeAudit.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  VMateIdentityPkg/VMateIdentityPkg.dec
+
+[LibraryClasses]
+  BaseMemoryLib
+  DevicePathLib
+  MemoryAllocationLib
+  PrintLib
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid

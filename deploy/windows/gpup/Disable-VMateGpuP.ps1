@@ -36,7 +36,7 @@ if ($adapters.Count -eq 1) {
         [String]::IsNullOrWhiteSpace([string]$identity.GpuInstancePath)) {
         throw '唯一 GPU-P adapter 没有有效 P-11 身份绑定；拒绝删除手工 adapter。'
     }
-    $hostGpus = @(Get-VMHostPartitionableGpu -ErrorAction Stop)
+    $hostGpus = @(Get-VMateGpuPHostPartitionableGpu)
     $ownership = Get-VMateGpuPAdapterOwnership $adapters[0] `
         ([string]$identity.GpuInstancePath) `
         @($hostGpus | ForEach-Object { [string]$_.Name })

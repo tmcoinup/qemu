@@ -1,0 +1,2 @@
+#!/usr/bin/dh-exec
+debian/ovmf-install/Shell.efi => /usr/share/efi-shell-x64/shellx64.efi

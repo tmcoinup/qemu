@@ -1,0 +1,2 @@
+#!/usr/bin/dh-exec
+debian/riscv64-install/Shell.efi => /usr/share/efi-shell-riscv64/shellriscv64.efi

@@ -1,0 +1,33 @@
+[Defines]
+  INF_VERSION                    = 0x0001001A
+  BASE_NAME                      = VMateIdentityBoot
+  FILE_GUID                      = 574788DD-1BA4-4A4D-AAC6-B29A42B27F72
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  IdentityConfig.c
+  IdentityConfig.h
+  SmbiosIdentity.c
+  SmbiosIdentity.h
+  VMateIdentityBoot.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  VMateIdentityPkg/VMateIdentityPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DevicePathLib
+  MemoryAllocationLib
+  PrintLib
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
+  gEfiSmbiosProtocolGuid

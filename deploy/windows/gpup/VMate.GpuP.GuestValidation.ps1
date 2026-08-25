@@ -1,6 +1,8 @@
 ﻿#Requires -Version 5.1
 # 在 guest 内验证唯一、真实且受信的 GPU-P 显示栈。期望值必须来自宿主已选
 # partitionable GPU；不接受投影、VioGpuDod、第三方 IDD 或 NVAPI shim。
+. (Join-Path $PSScriptRoot 'VMate.Windows.CodeIntegrity.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.GuestMonitorValidation.ps1')
 function Assert-VMateGpuPGuestContext {
     if ($env:OS -cne 'Windows_NT') {
         throw 'GPU-P guest 验证只支持 Windows。'
@@ -13,10 +15,15 @@ function Assert-VMateGpuPGuestContext {
     }
     $computer = Get-CimInstance -ClassName Win32_ComputerSystem `
         -ErrorAction Stop
-    if ([string]$computer.Manufacturer -notmatch
-            '(?i)^Microsoft Corporation$' -or
-        [string]$computer.Model -notmatch '(?i)Virtual Machine') {
-        throw '当前系统不是可识别的 Hyper-V guest，拒绝执行 guest 显示操作。'
+    # 自定义 P-11 profile 会有意替换 Win32_ComputerSystem 的厂商/型号，不能再
+    # 用 "Microsoft Corporation / Virtual Machine" 作为 Hyper-V 身份门禁。
+    # HypervisorPresent 与 VMBus 设备是不可缺少的架构事实，且不会与 profile 冲突。
+    $vmbus = @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
+        Where-Object {
+            [string]$_.PNPDeviceID -match '(?i)^(ROOT\\VMBUS|VMBUS\\)'
+        })
+    if ($computer.HypervisorPresent -ne $true -or $vmbus.Count -eq 0) {
+        throw '当前系统缺少 Hyper-V/VMBus guest 事实，拒绝执行 guest 显示操作。'
     }
     return $computer
 }
@@ -167,10 +174,17 @@ function Test-VMateGpuPOfficialDriverPath {
     } catch {
         return $false
     }
-    $prefix = $windows + [IO.Path]::DirectorySeparatorChar + 'System32' +
-        [IO.Path]::DirectorySeparatorChar
-    if (-not $full.StartsWith($prefix,
-            [StringComparison]::OrdinalIgnoreCase)) {
+    $trusted = $false
+    foreach ($directory in @('System32', 'SysWOW64')) {
+        $prefix = $windows + [IO.Path]::DirectorySeparatorChar + $directory +
+            [IO.Path]::DirectorySeparatorChar
+        if ($full.StartsWith($prefix,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            $trusted = $true
+            break
+        }
+    }
+    if (-not $trusted) {
         return $false
     }
     return $full -notmatch '(?i)[\\/]HostDriverStore[\\/]VMate[\\/]'
@@ -324,10 +338,10 @@ function Assert-VMateGpuPDriverStack {
 function Assert-VMateGpuPNoNvapiShim {
     param([Parameter(Mandatory = $true)]
         [ValidateSet('NVIDIA', 'AMD')][string]$Vendor)
-    $paths = @(
-        (Join-Path $env:windir 'System32\nvapi64.dll'),
-        (Join-Path $env:windir 'SysWOW64\nvapi.dll')
-    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    $paths = @(@(
+            (Join-Path $env:windir 'System32\nvapi64.dll'),
+            (Join-Path $env:windir 'SysWOW64\nvapi.dll')
+        ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     if ($Vendor -ieq 'AMD' -and $paths.Count -gt 0) {
         throw 'AMD guest 中发现 NVAPI 文件；拒绝残留或 shim 投影。'
     }
@@ -339,9 +353,11 @@ function Disable-VMateHyperVVideo {
     [CmdletBinding()]
     param()
     [void](Assert-VMateGpuPGuestContext)
+    $codeIntegrity = Assert-VMateWindowsProductionCodeIntegrity `
+        -Label 'P-11 guest'
     $targets = @(Get-VMateGpuPGuestDisplayInventory | Where-Object {
             $_.Present -eq $true -and
-            [string]$_.Service -ieq 'synthvid' -and
+            [string]$_.Service -iin @('synthvid', 'HyperVideo') -and
             [string]$_.InstanceId -match '(?i)^VMBUS\\' -and
             [string]$_.DriverProvider -match '(?i)^Microsoft' -and
             ([string]$_.InstanceId -notmatch '(?i)VEN_(10DE|1002)')
@@ -372,8 +388,11 @@ function Test-VMateGpuPGuest {
         [Parameter(Mandatory = $true)][string]$GpuName,
         [Parameter(Mandatory = $true)][string]$DriverVersion,
         [bool]$StrictMode = $true,
-        [switch]$DisableHyperVVideoAdapter, [switch]$RequireNvidiaSmi)
+        [switch]$DisableHyperVVideoAdapter, [switch]$RequireNvidiaSmi,
+        [switch]$RequireMonitor)
     [void](Assert-VMateGpuPGuestContext)
+    $codeIntegrity = Assert-VMateWindowsProductionCodeIntegrity `
+        -Label 'P-11 guest'
     if ([string]::IsNullOrWhiteSpace($GpuName) -or
         [string]::IsNullOrWhiteSpace($DriverVersion)) {
         throw '必须从所选宿主真实 GPU 提供非空型号和驱动版本。'
@@ -397,10 +416,15 @@ function Test-VMateGpuPGuest {
         }
     }
     $healthy = @($present | Where-Object { Test-VMateGpuPHealthyDisplay $_ })
-    if ($healthy.Count -ne 1) {
-        throw "guest 必须只有一张健康 Present 显示设备，实际：$($healthy.Count)"
+    $targetGpu = @($healthy | Where-Object {
+            [string]$_.Name -notmatch
+                '(?i)^Microsoft Hyper-V Video(?: Adapter)?$'
+        })
+    if ($targetGpu.Count -ne 1) {
+        throw ("guest 必须只有一张健康的目标 GPU-P 显示设备，" +
+            "实际：$($targetGpu.Count)，健康显示设备总数：$($healthy.Count)")
     }
-    $gpu = $healthy[0]
+    $gpu = $targetGpu[0]
     if (-not ([string]$gpu.Name).Trim().Equals($GpuName.Trim(),
             [StringComparison]::OrdinalIgnoreCase)) {
         throw "guest GPU 型号不是所选宿主真实型号：$($gpu.Name) != $GpuName"
@@ -415,19 +439,25 @@ function Test-VMateGpuPGuest {
     $extras = @($present | Where-Object {
             [string]$_.InstanceId -cne [string]$gpu.InstanceId })
     if ($StrictMode -and $extras.Count -gt 0) {
-        throw ('严格模式要求 guest 设备管理器只有一张 Present 显卡；' +
+        throw ('严格模式要求 guest 必须只有一张健康且 Present 的显卡；' +
             '禁用 Microsoft Hyper-V Video 通常只产生 Code 22，devnode 仍 Present，' +
             '这是平台枚举行为，不能用注册表隐藏。额外节点：' +
             (($extras | ForEach-Object { $_.Name }) -join ', '))
     }
     if (-not $StrictMode) {
         $badExtras = @($extras | Where-Object {
-                [string]$_.Name -notmatch
-                    '(?i)^Microsoft Hyper-V Video(?: Adapter)?$' -or
-                [int]$_.ProblemCode -ne 22
+                $isMicrosoftConsole =
+                    [string]$_.Name -match
+                        '(?i)^Microsoft Hyper-V Video(?: Adapter)?$' -and
+                    [string]$_.InstanceId -match '(?i)^VMBUS\\' -and
+                    [string]$_.Service -match '(?i)^(synthvid|HyperVideo)$' -and
+                    [string]$_.DriverProvider -match '(?i)^Microsoft'
+                $problem = [int]$_.ProblemCode
+                -not $isMicrosoftConsole -or $problem -notin @(0, 22)
             })
         if ($badExtras.Count -gt 0) {
-            throw '非严格模式也只允许已禁用(Code 22)的 Microsoft Hyper-V Video。'
+            throw ('非严格模式只允许一张健康或已禁用(Code 22)的 ' +
+                'Microsoft Hyper-V Video 控制台设备。')
         }
     }
     $runtime = @(Get-VMateGpuPGuestVendorRuntimeFiles $Vendor)
@@ -439,6 +469,9 @@ function Test-VMateGpuPGuest {
         Invoke-VMateNvidiaSmiValidation $GpuName $DriverVersion `
             -Required:$RequireNvidiaSmi.IsPresent
     } else { $null }
+    $monitor = if ($RequireMonitor.IsPresent) {
+        Assert-VMateGpuPGuestMonitor
+    } else { $null }
     return [pscustomobject][ordered]@{
         Passed = $true
         Vendor = $Vendor
@@ -447,9 +480,17 @@ function Test-VMateGpuPGuest {
         Service = [string]$gpu.Service
         Stack = $stack
         PresentDisplayCount = $present.Count
+        HealthyDisplayCount = $healthy.Count
+        ConsoleCompatible = @($extras | Where-Object {
+                [string]$_.Name -match
+                    '(?i)^Microsoft Hyper-V Video(?: Adapter)?$' -and
+                [int]$_.ProblemCode -eq 0
+            }).Count -eq 1
         StrictMode = $StrictMode
+        CodeIntegrity = $codeIntegrity
         D3D11 = $d3d11
         VendorGpuUuid = if ($null -eq $smi) { '' } else { [string]$smi.Uuid }
         NvidiaSmi = $smi
+        Monitor = $monitor
     }
 }

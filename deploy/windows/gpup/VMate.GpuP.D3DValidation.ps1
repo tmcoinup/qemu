@@ -199,11 +199,11 @@ function Assert-VMateGpuPVendorApiFiles {
     # NVAPI 与 ADL 都只允许目标厂商的官方签名文件。另一厂商
     # 的 API DLL 在干净新镜像中属于旧驱动/投影残留，必须拒绝。
     Assert-VMateGpuPNoNvapiShim $Vendor
-    $adlPaths = @(
-        (Join-Path $env:windir 'System32\atiadlxx.dll'),
-        (Join-Path $env:windir 'SysWOW64\atiadlxy.dll'),
-        (Join-Path $env:windir 'SysWOW64\atiadlxx.dll')
-    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    $adlPaths = @(@(
+            (Join-Path $env:windir 'System32\atiadlxx.dll'),
+            (Join-Path $env:windir 'SysWOW64\atiadlxy.dll'),
+            (Join-Path $env:windir 'SysWOW64\atiadlxx.dll')
+        ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     if ($Vendor -ieq 'NVIDIA' -and $adlPaths.Count -gt 0) {
         throw 'NVIDIA guest 中发现 AMD ADL 文件；拒绝异厂驱动或 shim 残留。'
     }

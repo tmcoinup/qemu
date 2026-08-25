@@ -7,7 +7,8 @@ param(
     [string]$ExpectedDriverVersion = '',
     [bool]$Strict = $true,
     [switch]$DisableHyperVVideo,
-    [switch]$RequireNvidiaSmi
+    [switch]$RequireNvidiaSmi,
+    [switch]$RequireMonitor
 )
 
 # 入口只负责无交互参数绑定；验证逻辑独立成模块，便于宿主/guest mock 回归。
@@ -33,7 +34,14 @@ function Assert-VMateGpuPCleanGuestImage {
     if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
         foreach ($task in @(Get-ScheduledTask -ErrorAction Stop)) {
             $actions = @($task.Actions | ForEach-Object {
-                    @([string]$_.Execute, [string]$_.Arguments) -join ' '
+                    $execute = $_.PSObject.Properties['Execute']
+                    $arguments = $_.PSObject.Properties['Arguments']
+                    @(
+                        if ($null -eq $execute) { '' }
+                        else { [string]$execute.Value }
+                        if ($null -eq $arguments) { '' }
+                        else { [string]$arguments.Value }
+                    ) -join ' '
                 }) -join '|'
             if (([string]$task.TaskName + '|' + $actions) -match
                 '(?i)(respawn-stealth|StealthGPU|VMate.*stealth)') {
@@ -71,7 +79,8 @@ if ($MyInvocation.InvocationName -cne '.') {
     $result = Test-VMateGpuPGuest -Vendor $ExpectedVendor -GpuName $ExpectedGpuName `
         -DriverVersion $ExpectedDriverVersion -StrictMode $Strict `
         -DisableHyperVVideoAdapter:$DisableHyperVVideo.IsPresent `
-        -RequireNvidiaSmi:$RequireNvidiaSmi.IsPresent
+        -RequireNvidiaSmi:$RequireNvidiaSmi.IsPresent `
+        -RequireMonitor:$RequireMonitor.IsPresent
     $result | Add-Member -NotePropertyName CleanImage -NotePropertyValue $cleanImage
     $result
 }

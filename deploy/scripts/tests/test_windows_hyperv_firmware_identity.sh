@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P-11 Hyper-V 固件身份 CSPRNG、WMI 事务与失败回滚回归。
+# P-11 Hyper-V 固件身份 CSPRNG、WMI 单次提交与回读回归。
 # shellcheck disable=SC2016
 set -euo pipefail
 
@@ -42,8 +42,7 @@ test_static_contract() {
     require_text '$state -ne 3'
     require_text '$returnValue -eq 4096'
     require_text '$state -in @(8, 9, 10)'
-    require_text '恢复后固件身份快照回读不一致'
-    require_text '固件身份应用失败且回滚失败'
+    require_text '不能假定 BIOSGUID 可回滚'
 
     local name
     for name in \
@@ -52,7 +51,6 @@ test_static_contract() {
         Get-VMateHyperVFirmwareIdentitySnapshot \
         Get-VMateHyperVFirmwareVssd \
         Wait-VMateHyperVFirmwareWmiJob \
-        Restore-VMateHyperVFirmwareIdentitySnapshot \
         Invoke-VMateHyperVFirmwareIdentityTransaction; do
         require_text "function $name"
     done
@@ -127,9 +125,18 @@ test_dynamic_contract() {
         $broken.BIOSSerialNumber = "bad"
         Assert-Throws {
             ConvertTo-VMateHyperVFirmwareIdentityFragment $broken
-        } "32 位"
+        } "4..64 位"
+        $custom = $one | Select-Object *
+        $custom.BIOSSerialNumber = "BIOS-REAL-0001"
+        $custom.BaseBoardSerialNumber = "BOARD-REAL-0001"
+        $custom.ChassisSerialNumber = "CHASSIS-REAL-0001"
+        $custom.ChassisAssetTag = "ASSET-REAL-0001"
+        $normalizedCustom =
+            ConvertTo-VMateHyperVFirmwareIdentityFragment $custom
+        Assert-Equal $normalizedCustom.BaseBoardSerialNumber `
+            "BOARD-REAL-0001" "自定义主板序列未保留"
 
-        # 用纯内存边界替换 Hyper-V WMI；事务核心仍执行完整预检、回读和回滚。
+        # 用纯内存边界替换 Hyper-V WMI；事务核心仍执行完整预检和回读。
         $script:VmState = [uint16]3
         $script:Stored = [pscustomobject]@{
             BIOSGUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -177,20 +184,12 @@ test_dynamic_contract() {
         Assert-Equal $unchanged.Status Unchanged "幂等事务未报告 Unchanged"
         Assert-Equal $script:ModifyCalls 1 "幂等事务仍执行写入"
 
-        # 补偿 API 接受 Get-Snapshot 的 Hyper-V 原始字符串，不套用 32-hex 校验。
-        $restored = Restore-VMateHyperVFirmwareIdentitySnapshot `
-            -VMId $vmId -Snapshot $original
-        Assert-Equal $restored.Status Restored "补偿 API 未报告 Restored"
-        Assert-True (Test-VMateHyperVFirmwareIdentityExactMatch `
-                $script:Stored $original) "补偿 API 没有精确恢复原始快照"
-        Assert-Equal $script:ModifyCalls 2 "补偿 API 写入次数错误"
-
         $script:VmState = [uint16]2
         Assert-Throws {
             Invoke-VMateHyperVFirmwareIdentityTransaction `
                 -VMId $vmId -Identity $two
         } "只能在 VM Off"
-        Assert-Equal $script:ModifyCalls 2 "运行中 VM 发生写入"
+        Assert-Equal $script:ModifyCalls 1 "运行中 VM 发生写入"
 
         $script:VmState = [uint16]3
         $script:Stored = Copy-Identity $original
@@ -199,10 +198,10 @@ test_dynamic_contract() {
         Assert-Throws {
             Invoke-VMateHyperVFirmwareIdentityTransaction `
                 -VMId $vmId -Identity $two
-        } "已回滚原值"
-        Assert-True (Test-VMateHyperVFirmwareIdentityMatch `
-                $script:Stored $beforeFailure) "回读不一致后没有恢复原值"
-        Assert-Equal $script:ModifyCalls 4 "失败事务没有执行一次回滚"
+        } "部分更改"
+        Assert-True (-not (Test-VMateHyperVFirmwareIdentityMatch `
+                $script:Stored $beforeFailure)) "部分写入被错误报告为原值"
+        Assert-Equal $script:ModifyCalls 2 "失败事务重复写入或尝试 GUID 回滚"
 
         # 异步 Job 的成功与失败终态均需可诊断。
         $script:JobPoll = 0

@@ -215,7 +215,6 @@ function New-VMateHyperVNetworkIdentityFragment {
             if ($null -eq $mac) { throw '生成唯一 Hyper-V MAC 连续碰撞 256 次。' }
             [void]$items.Add([pscustomobject][ordered]@{
                     AdapterId = Get-VMateHyperVAdapterKey $adapter
-                    AdapterName = [string]$adapter.Name
                     StaticMacAddress = $mac
                 })
         }

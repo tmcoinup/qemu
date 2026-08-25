@@ -7,8 +7,9 @@
 .DESCRIPTION
     本模块只处理 Msvm_VirtualSystemSettingData 官方公开的五个固件字段。身份的
     长期持久化由上层 identity.json 的 HardwareIdentity 嵌套对象负责；本文件
-    不拥有清单，也不修改注册表或客机文件。写入只允许在 VM Off 状态执行，
-    并在失败时回滚原值。
+    不拥有清单，也不修改注册表或客机文件。写入只允许在 VM Off 状态执行。
+    Win10 Hyper-V 的 BIOSGUID 首次改写后可能无法改回，因此先持久化期望值，
+    再单次提交并用宿主回读判定结果；不承诺回滚该字段。
 #>
 
 Set-StrictMode -Version Latest
@@ -117,8 +118,9 @@ function ConvertTo-VMateHyperVFirmwareIdentityFragment {
     $serials = [ordered]@{}
     foreach ($name in $script:VMateHyperVFirmwareFields[1..4]) {
         $value = [string](Get-VMateHyperVFirmwareProperty $Identity $name)
-        if ($value -notmatch '^[0-9a-fA-F]{32}$') {
-            throw "Hyper-V 固件身份 $name 必须是 32 位十六进制字符串。"
+        if ($value -notmatch '^[0-9A-Za-z][0-9A-Za-z._ -]{3,63}$' -or
+            $value -cne $value.Trim()) {
+            throw "Hyper-V 固件身份 $name 必须是 4..64 位安全 ASCII 字符串。"
         }
         $serials[$name] = $value.ToUpperInvariant()
     }
@@ -387,49 +389,6 @@ function Exit-VMateHyperVFirmwareIdentityLock {
     finally { $Mutex.Dispose() }
 }
 
-function Restore-VMateHyperVFirmwareIdentitySnapshot {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][Guid]$VMId,
-        [Parameter(Mandatory = $true)][object]$Snapshot,
-        [ValidateRange(1, 300)][int]$JobTimeoutSeconds = 60
-    )
-
-    # 快照可能来自 Hyper-V 默认值，不应套用新 fragment 的 32-hex 格式约束。
-    $desired = Get-VMateHyperVFirmwareIdentitySnapshot -Vssd $Snapshot
-    $mutex = Enter-VMateHyperVFirmwareIdentityLock -VMId $VMId
-    try {
-        $system = Get-VMateHyperVFirmwareComputerSystem -VMId $VMId
-        Assert-VMateHyperVFirmwareVmOff -ComputerSystem $system
-        $before = Get-VMateHyperVFirmwareIdentitySnapshot `
-            (Get-VMateHyperVFirmwareVssd -VMId $VMId)
-        if (Test-VMateHyperVFirmwareIdentityExactMatch $before $desired) {
-            return [pscustomobject][ordered]@{
-                Status = 'Unchanged'; VMId = $VMId.ToString('D')
-                Requested = $desired; Previous = $before; Observed = $before
-            }
-        }
-
-        $target = Get-VMateHyperVFirmwareVssd -VMId $VMId
-        Set-VMateHyperVFirmwareVssdIdentityValues $target $desired | Out-Null
-        Invoke-VMateHyperVFirmwareWmiModify -Vssd $target `
-            -JobTimeoutSeconds $JobTimeoutSeconds
-        $observed = Get-VMateHyperVFirmwareIdentitySnapshot `
-            (Get-VMateHyperVFirmwareVssd -VMId $VMId)
-        if (-not (Test-VMateHyperVFirmwareIdentityExactMatch `
-                $observed $desired)) {
-            throw '恢复后固件身份快照回读不一致。'
-        }
-        return [pscustomobject][ordered]@{
-            Status = 'Restored'; VMId = $VMId.ToString('D')
-            Requested = $desired; Previous = $before; Observed = $observed
-        }
-    }
-    finally {
-        Exit-VMateHyperVFirmwareIdentityLock -Mutex $mutex
-    }
-}
-
 function Invoke-VMateHyperVFirmwareIdentityTransaction {
     [CmdletBinding()]
     param(
@@ -454,12 +413,10 @@ function Invoke-VMateHyperVFirmwareIdentityTransaction {
             }
         }
 
-        $mutationStarted = $false
         try {
             $target = Get-VMateHyperVFirmwareVssd -VMId $VMId
             Set-VMateHyperVFirmwareVssdIdentityValues $target $requested |
                 Out-Null
-            $mutationStarted = $true
             Invoke-VMateHyperVFirmwareWmiModify -Vssd $target `
                 -JobTimeoutSeconds $JobTimeoutSeconds
             $observed = Get-VMateHyperVFirmwareIdentitySnapshot `
@@ -476,17 +433,27 @@ function Invoke-VMateHyperVFirmwareIdentityTransaction {
         }
         catch {
             $applyError = $_.Exception.Message
-            if (-not $mutationStarted) { throw }
             try {
-                Restore-VMateHyperVFirmwareIdentitySnapshot -VMId $VMId `
-                    -Snapshot $before -JobTimeoutSeconds $JobTimeoutSeconds |
-                    Out-Null
+                $afterFailure = Get-VMateHyperVFirmwareIdentitySnapshot `
+                    (Get-VMateHyperVFirmwareVssd -VMId $VMId)
             }
             catch {
-                throw "固件身份应用失败且回滚失败；应用错误：$applyError；" +
-                    "回滚错误：$($_.Exception.Message)"
+                throw "固件身份应用失败，且无法确认宿主最终状态；" +
+                    "应用错误：$applyError；回读错误：$($_.Exception.Message)"
             }
-            throw "固件身份应用失败，已回滚原值：$applyError"
+            if (Test-VMateHyperVFirmwareIdentityMatch `
+                    $afterFailure $requested) {
+                return [pscustomobject][ordered]@{
+                    Status = 'Applied'; VMId = $VMId.ToString('D')
+                    Requested = $requested; Previous = $before
+                    Observed = $afterFailure; ProviderWarning = $applyError
+                }
+            }
+            if (Test-VMateHyperVFirmwareIdentityMatch $afterFailure $before) {
+                throw "固件身份应用失败，宿主回读确认未发生更改：$applyError"
+            }
+            throw "固件身份应用失败且宿主出现部分更改；已保留 Prepared 清单，" +
+                "请修复原因后用同一身份重试，不能假定 BIOSGUID 可回滚：$applyError"
         }
     }
     finally {

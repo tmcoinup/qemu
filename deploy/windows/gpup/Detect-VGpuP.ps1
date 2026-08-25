@@ -28,7 +28,8 @@
 [CmdletBinding()]
 param(
     [switch]$Json,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [string]$OutputPath = ''
 )
 
 # 关键：不设置全局 Stop，避免任一非核心查询抛异常导致整脚本秒退。
@@ -271,7 +272,20 @@ namespace VMate.VGpuP
     # -----------------------------------------------------------------------
     # 总判定
     # -----------------------------------------------------------------------
-    $gpupPositive = @($signals | Where-Object { $_.Hit -and ($_.Layer -eq 'Display' -or $_.Layer -eq 'D3DKMT') }).Count
+    $hypervisorExposure = @($signals | Where-Object {
+            $_.Hit -and $_.Layer -eq 'Hypervisor'
+        }).Count
+    $displayExposure = @($signals | Where-Object {
+            $_.Hit -and $_.Layer -eq 'Display'
+        }).Count
+    $intrinsicGpuP = @($signals | Where-Object {
+            $_.Hit -and $_.Layer -eq 'D3DKMT'
+        }).Count
+    # 保留原 GpuPSignalCount 语义，便于与旧结果和样例做同口径回归；
+    # 同时单独报告虚拟化痕迹，禁止用功能阳性数量掩盖痕迹差距。
+    $gpupPositive = $displayExposure + $intrinsicGpuP
+    $artifactExposure = $hypervisorExposure + $displayExposure
+    $totalPositive = $artifactExposure + $intrinsicGpuP
 
     if (($paravirtFlag -eq $true) -or $hasHostStore -or $gpuIsNonPci) {
         $verdict = 'GPU-P'
@@ -290,8 +304,14 @@ namespace VMate.VGpuP
         GpuNonPciPath    = $gpuIsNonPci
         ParavirtAdapter  = $paravirtFlag
         GpuName          = $gpuDisplayName
-        GpuPSignalCount  = $gpupPositive
-        Signals          = $signals
+        GpuPSignalCount              = $gpupPositive
+        FunctionalGpuPSignalCount    = $gpupPositive
+        IntrinsicGpuPSignalCount     = $intrinsicGpuP
+        HypervisorExposureSignalCount = $hypervisorExposure
+        DisplayExposureSignalCount   = $displayExposure
+        ArtifactExposureSignalCount  = $artifactExposure
+        TotalPositiveSignalCount     = $totalPositive
+        Signals                      = $signals
     }
 }
 
@@ -301,7 +321,17 @@ try {
     $result = Invoke-VGpuPDetection
 
     if ($Json) {
-        $result | ConvertTo-Json -Depth 5
+        $jsonOutput = $result | ConvertTo-Json -Depth 5
+        if (-not [String]::IsNullOrWhiteSpace($OutputPath)) {
+            $resolvedOutput = [IO.Path]::GetFullPath($OutputPath)
+            $parent = [IO.Path]::GetDirectoryName($resolvedOutput)
+            if (-not [IO.Directory]::Exists($parent)) {
+                throw "输出目录不存在: $parent"
+            }
+            [IO.File]::WriteAllText($resolvedOutput, $jsonOutput,
+                (New-Object Text.UTF8Encoding($true)))
+        }
+        Write-Output $jsonOutput
     } else {
         Write-Host ''
         Write-Host '==== vGPU-P 环境检测 ====' -ForegroundColor Cyan
@@ -325,6 +355,8 @@ try {
         Write-Host ("  显卡非PCI路径    : {0}" -f $result.GpuNonPciPath)
         $pv = if ($null -eq $result.ParavirtAdapter) { '未测得' } else { $result.ParavirtAdapter }
         Write-Host ("  Paravirt适配器   : {0}" -f $pv)
+        Write-Host ("  GPU-P功能信号    : {0}" -f $result.FunctionalGpuPSignalCount)
+        Write-Host ("  虚拟化痕迹信号   : {0}" -f $result.ArtifactExposureSignalCount)
         Write-Host ''
     }
 } catch {

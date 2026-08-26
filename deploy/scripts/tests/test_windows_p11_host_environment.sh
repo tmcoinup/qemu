@@ -70,17 +70,20 @@ done
 for text in \
     "'hypervisorlaunchtype', 'auto'" \
     "'testsigning', 'on'" \
+    "'testsigning', 'off'" \
     "'nointegritychecks', 'off'"; do
     require_text "$text" "$HOST_ENV"
 done
 
-# 测试模式属于宿主冷启动扩展运行条件。guest 校验必须继续要求生产 CI，且任何
-# guest 生命周期脚本都不得顺带写 BCD。
+# 默认 P-11 路径与 guest 都要求生产 CI；test signing 只保留给显式隔离实验。
+require_text 'param([bool]$RequireTestSigning = $false)' "$HOST_ENV"
+require_text 'P-11 默认产品路径要求关闭' "$HOST_ENV"
 require_text 'Assert-VMateWindowsProductionCodeIntegrity' "$CODE_INTEGRITY"
 if rg -ni '\b(bcdedit|testsigning\s+(on|off)|nointegritychecks)\b' \
     "$GPUP/VMate.GpuP.Guest.ps1" \
     "$GPUP/Test-VMateGpuPGuest.ps1" \
     "$GPUP/VMate.GpuP.GuestValidation.ps1" \
+    "$GPUP/VMate.GpuP.GuestDeviceReality.ps1" \
     "$GPUP/VMate.GpuP.GuestMonitor.ps1" \
     "$GPUP/VMate.GpuP.GuestMonitorValidation.ps1"; then
     fail 'guest lifecycle must not modify Code Integrity or BCD'

@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 HOST_DISPLAY="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.Display.ps1"
 GUEST_TEST="$REPO_ROOT/deploy/windows/gpup/Test-VMateGpuPGuest.ps1"
 GUEST_VALIDATION="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.GuestValidation.ps1"
+DEVICE_REALITY="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.GuestDeviceReality.ps1"
 D3D_VALIDATION="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.D3DValidation.ps1"
 
 fail() {
@@ -33,7 +34,7 @@ reject_regex() {
 test_static_contract() {
     local file
     for file in "$HOST_DISPLAY" "$GUEST_TEST" "$GUEST_VALIDATION" \
-        "$D3D_VALIDATION"; do
+        "$DEVICE_REALITY" "$D3D_VALIDATION"; do
         [[ -f "$file" ]] || fail "missing GPU-P display file: $file"
         [[ "$(wc -l < "$file")" -le 500 ]] \
             || fail "PowerShell file exceeds 500 lines: $file"
@@ -69,10 +70,21 @@ test_static_contract() {
     require_text "if (\$Vendor -ieq 'NVIDIA') { '10DE' } else { '1002' }" \
         "$GUEST_VALIDATION"
     require_text '拒绝名称字符串投影' "$GUEST_VALIDATION"
+    require_text 'Test-VMateGpuPOfficialVendorDisplayDevice' "$GUEST_VALIDATION"
+    require_text 'DriverProvider -notmatch $providerPattern' "$GUEST_VALIDATION"
+    require_text "@('nvlddmkm')" "$GUEST_VALIDATION"
+    require_text "@('amdkmdag', 'amdwddmg', 'amdkmdap')" \
+        "$GUEST_VALIDATION"
     require_text 'VioGpuDod|viogpudo\.sys|VEN_1AF4' "$GUEST_VALIDATION"
     require_text 'GameViewer|IndirectKmd|IddCx|IddSample' "$GUEST_VALIDATION"
-    require_text "[string]\$Display.Service -ieq 'VirtualRender'" "$GUEST_VALIDATION"
-    require_text "[IO.Path]::GetFileName(\$_) -ieq 'vrd.sys'" "$GUEST_VALIDATION"
+    require_text 'OfficialVendorPnpDriver' "$DEVICE_REALITY"
+    require_text 'ExactlyOneDisplayAdapter' "$DEVICE_REALITY"
+    require_text 'NoVMateNamedDevices' "$DEVICE_REALITY"
+    require_text 'PhysicalStorageIdentity' "$DEVICE_REALITY"
+    require_text 'PhysicalNetworkIdentity' "$DEVICE_REALITY"
+    require_text 'Assert-VMateGpuPGuestDeviceReality -Vendor $Vendor' \
+        "$GUEST_VALIDATION"
+    require_text 'DeviceReality = $deviceReality' "$GUEST_VALIDATION"
     require_text 'Get-AuthenticodeSignature -LiteralPath $Path' "$GUEST_VALIDATION"
     require_text "foreach (\$directory in @('System32', 'SysWOW64'))" \
         "$GUEST_VALIDATION"
@@ -165,6 +177,9 @@ test_dynamic_contract() {
         function Get-VMateGpuPGuestVendorRuntimeFiles { return @() }
         function Assert-VMateGpuPDriverStack { }
         function Assert-VMateGpuPNoNvapiShim { }
+        function Assert-VMateGpuPGuestDeviceReality {
+            return [pscustomobject]@{ RequiredPassed = $true }
+        }
         function Assert-VMateGpuPVendorApiFiles { }
         function Invoke-VMateGpuPD3D11HardwareProbe {
             return [pscustomobject]@{ Passed = $true; DriverType = "Hardware" }
@@ -185,7 +200,8 @@ test_dynamic_contract() {
                 HardwareIds = @($InstanceId); Service = $Service
                 ProblemCode = $Problem; Status = $Status; Present = $true
                 DriverProvider = $Provider; DriverVersion = "32.0.15.7700"
-                InfName = "oem1.inf"; IsSigned = $true; Signer = "WHCP"
+                InfName = "oem1.inf"; IsSigned = $true
+                Signer = "Microsoft Windows Hardware Compatibility Publisher"
                 DriverFiles = @() }
         }
         function Assert-Fails {
@@ -215,11 +231,9 @@ test_dynamic_contract() {
             "ROOT\VIRTUALRENDER\0000" "VirtualRender"
         $vrd.HardwareIds = @("ROOT\VIRTUALRENDER")
         $global:testDisplays = @($vrd)
-        $vrdResult = Test-VMateGpuPGuest NVIDIA `
-            "NVIDIA GeForce GTX 1060 6GB" "577.00"
-        if (-not $vrdResult.Passed) {
-            throw "trusted VRD path incorrectly required a guest PCI VEN"
-        }
+        Assert-Fails { Test-VMateGpuPGuest NVIDIA `
+                "NVIDIA GeForce GTX 1060 6GB" "577.00" } `
+            "目标 GPU-P 显示设备"
         $global:testDisplays = @($nvidia)
         $global:testDisplays = @($nvidia,
             (New-TestDisplay "Second GPU" "PCI\VEN_10DE&DEV_2200\GPU2"))

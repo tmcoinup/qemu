@@ -26,7 +26,7 @@ $ErrorActionPreference = 'Stop'
 Assert-VMateGpuPHostEnvironment
 $hostCodeIntegrity = Get-VMateWindowsCodeIntegrityStatus
 $hostCodeIntegrity | Add-Member -NotePropertyName Policy -NotePropertyValue `
-    'host-native-does-not-require-testsigning; custom-cpu-extension-currently-requires-testsigning'
+    'default-p11-requires-production-code-integrity; paused-cpuid-extension-disabled'
 $gpuStatus = @()
 foreach ($gpu in @(Get-VMateGpuPHostPartitionableGpu)) {
     try {

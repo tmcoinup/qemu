@@ -113,6 +113,10 @@ test_dynamic_gpu_contract() {
     require_text '[string]$StaticMacAddress' "$new_vm"
     require_text 'Get-VMateGpuPCmdletCompatibility' "$new_vm"
     require_text 'HostLockTimeoutSeconds = $HostLockTimeoutSeconds' "$new_vm"
+    require_text '[string]$ArtifactManifestPath' "$new_vm"
+    require_text "'P11SafePartialIdentityColdBoot'" "$new_vm"
+    require_text 'RequireFullHardwareIdentity =' "$new_vm"
+    require_text 'paused-CPUID 路径已停用' "$new_vm"
     require_text 'Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass' \
         "$GPUP/VMate.GpuP.Guest.ps1"
     require_text "'VMate.Windows.CodeIntegrity.ps1'" \
@@ -139,6 +143,11 @@ test_dynamic_gpu_contract() {
     require_text 'Get-VMateGpuPDriverSelection' "$enable"
     require_text 'Sync-VMateGpuPDriverStore' "$enable"
     require_text 'Invoke-VMateGpuPConfiguration' "$enable"
+    require_text '[string]$ArtifactManifestPath' "$enable"
+    require_text "'Start-VMateGpuPVM.ps1'" "$enable"
+    require_text '-RequireFullHardwareIdentity:$RequireFullHardwareIdentity' "$enable"
+    require_text "'P11SafePartialIdentityColdBoot'" "$enable"
+    require_text '当前安全后端尚未实现启动期 direct CPUID' "$enable"
     require_text 'Test-VMateGpuPIdentityUniqueness' "$enable"
     require_text 'Invoke-VMateGpuPGuestValidation' "$enable"
     require_text 'ExpectedHardwareIdentity $hardwareIdentity.Desired' "$enable"
@@ -353,6 +362,7 @@ test_packaging_and_documentation_contract() {
         VMate.GpuP.Partition.ps1
         VMate.GpuP.DriverDiscovery.ps1
         VMate.GpuP.DriverStore.ps1
+        VMate.GpuP.OfflineDriverPackage.ps1
         VMate.GpuP.WindowsImage.ps1
         VMate.GpuP.Display.ps1
         VMate.GpuP.Identity.ps1
@@ -366,6 +376,7 @@ test_packaging_and_documentation_contract() {
         VMate.HyperV.NetworkIdentity.ps1
         VMate.HyperV.ComputeProfile.ps1
         VMate.HyperV.EnhancedSession.ps1
+        VMate.HyperV.RdpConnection.ps1
         VMate.HyperV.DisplayTopology.ps1
         VMate.HyperV.MetadataExchange.ps1
         VMate.HyperV.IdentityBoot.ps1
@@ -379,6 +390,7 @@ test_packaging_and_documentation_contract() {
         VMate.GpuP.Guest.ps1
         VMate.GpuP.GuestMonitor.ps1
         VMate.GpuP.GuestMonitorValidation.ps1
+        VMate.GpuP.GuestDeviceReality.ps1
         VMate.GpuP.GuestValidation.ps1
         VMate.GpuP.D3DValidation.ps1
         New-VMateGpuPVM.ps1
@@ -394,13 +406,13 @@ test_packaging_and_documentation_contract() {
         Confirm-VMateGpuPVMIdentity.ps1
         Enable-VMateHyperVEnhancedSession.ps1
         Connect-VMateGpuPVM.ps1
+        Connect-VMateGpuPRdp.ps1
         Set-VMateGpuPDisplayTopology.ps1
         Restore-VMateGpuPDisplayTopology.ps1
         Disable-VMateGpuPMetadataExchange.ps1
         Restore-VMateGpuPMetadataExchange.ps1
         Detect-VGpuP.ps1
         Compare-VMateGpuPDetection.ps1
-        native/bin/VMateGuestMonitorProvisioner.exe
         firmware/bin/VMateIdentityBoot.efi
         firmware/bin/VMateIdentityBoot.efi.sha256
     )
@@ -419,6 +431,7 @@ test_packaging_and_documentation_contract() {
     require_text 'Compare-VMateGpuPDetection.ps1' "$GPU_P_DOC"
     require_text 'Enable-VMateHyperVEnhancedSession.ps1' "$GPU_P_DOC"
     require_text 'Connect-VMateGpuPVM.ps1' "$GPU_P_DOC"
+    require_text 'Connect-VMateGpuPRdp.ps1' "$GPU_P_DOC"
     require_text 'Set-VMateGpuPDisplayTopology.ps1' "$GPU_P_DOC"
     require_text 'Restore-VMateGpuPDisplayTopology.ps1' "$GPU_P_DOC"
     require_text 'Disable-VMateGpuPMetadataExchange.ps1' "$GPU_P_DOC"

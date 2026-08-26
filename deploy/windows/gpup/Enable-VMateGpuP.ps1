@@ -43,24 +43,19 @@ param(
     [ValidateRange(480, 8192)][int]$ConsoleVerticalResolution = 1200,
 
     [switch]$SkipDriverSync,
-
     [switch]$StartVM,
-
+    [switch]$RequireFullHardwareIdentity,
     [switch]$ValidateGuest,
-
     [PSCredential]$GuestCredential,
-
     [bool]$StrictGuestDisplay = $true,
-
     [switch]$DisableHyperVVideo,
-
     [switch]$RequireNvidiaSmi,
 
     [ValidateRange(10, 300)]
     [int]$GuestValidationTimeoutSeconds = 90,
 
     [string]$StateRoot = '',
-
+    [string]$ArtifactManifestPath = '',
     [string]$PartitionIdentitySeed = '',
 
     [ValidateRange(0, 65535)]
@@ -130,6 +125,17 @@ Assert-VMateGpuPVirtualMachine -VM $vm
 $identity = Get-VMateGpuPIdentity -VMId $vm.Id -StateRoot $StateRoot
 $hardwareProfile = Get-VMateGpuPHardwareProfileBinding `
     -VMId $vm.Id -StateRoot $StateRoot
+$requiresProfileStart = $null -ne $hardwareProfile -and
+    [bool]$hardwareProfile.RequiresHostExtension
+if (-not [String]::IsNullOrWhiteSpace($ArtifactManifestPath)) {
+    throw ('-ArtifactManifestPath 对应的 paused-CPUID 路径已停用；' +
+        'P-11 安全启动不加载该清单。')
+}
+if ($StartVM -and $RequireFullHardwareIdentity -and
+    $requiresProfileStart) {
+    throw ('当前安全后端尚未实现启动期 direct CPUID；' +
+        '已在驱动同步和 GPU-P 配置前阻断。')
+}
 
 $effectivePath = $InstancePath
 $effectiveVendor = $Vendor
@@ -298,6 +304,7 @@ try {
     $lockedVm = $lockedPlan.VM
     $partitionId = $null
     $partitionVfLuid = $null
+    $startResult = $null
     if (-not $DryRun) {
         $identity = Set-VMateGpuPIdentityBinding -VMId $vm.Id `
             -Vendor $lockedPlan.Vendor `
@@ -309,7 +316,23 @@ try {
         $configurationResult = Invoke-VMateGpuPConfiguration `
             @configurationParameters
         if ($StartVM) {
-            Start-VM -VM $lockedVm -ErrorAction Stop | Out-Null
+            if ($requiresProfileStart) {
+                $startScript = Join-Path $PSScriptRoot `
+                    'Start-VMateGpuPVM.ps1'
+                $startResult = & $startScript -VMName $VMName `
+                    -StateRoot $StateRoot `
+                    -RequireFullHardwareIdentity:$RequireFullHardwareIdentity
+            }
+            else {
+                Start-VM -VM $lockedVm -ErrorAction Stop | Out-Null
+                $startResult = [pscustomobject][ordered]@{
+                    Action = 'StandardHyperVColdBoot'
+                    ProfileId = if ($null -eq $hardwareProfile) {
+                        'unbound'
+                    } else { [string]$hardwareProfile.ProfileId }
+                    RuntimeModelSwitch = $false
+                }
+            }
             $lockedVm = Get-VMateGpuPVirtualMachine -VMName $VMName
         }
         $adapters = @(Get-VMGpuPartitionAdapter -VM $lockedVm `
@@ -343,6 +366,7 @@ try {
         Identity = $identity
         PartitionId = $partitionId
         PartitionVfLuid = $partitionVfLuid
+        Start = $startResult
     }
 }
 catch {
@@ -411,6 +435,9 @@ if ($DryRun) {
         HostIdentityExtension = $hostIdentityExtension
         WillStartVM = $StartVM.IsPresent
         WillValidateGuest = $ValidateGuest.IsPresent
+        StartMode = if (-not $StartVM) { 'NotRequested' }
+            elseif ($requiresProfileStart) { 'P11SafePartialIdentityColdBoot' }
+            else { 'StandardHyperVColdBoot' }
     }
 }
 
@@ -466,5 +493,6 @@ if (-not $uniqueness.IsUnique) {
     HardwareProfile = $hardwareProfile
     IdentityBoot = $identityBoot
     HostIdentityExtension = $hostIdentityExtension
+    Start = $lockedResult.Start
     GuestValidation = $guestResult
 }

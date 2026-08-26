@@ -27,6 +27,8 @@ require_text 'HypervisorExposureSignalCount' "$DETECT"
 require_text 'ArtifactExposureSignalCount' "$DETECT"
 require_text '[string]$OutputPath' "$DETECT"
 require_text '[IO.File]::WriteAllText' "$DETECT"
+require_text 'function Test-PhysicalPciLocationInfo' "$DETECT"
+require_text 'Virtual PCI Bus Slot' "$DETECT"
 require_text 'function Compare-VMateGpuPDetection' "$MODULE"
 require_text "@('GpuPDetector', 'Detector')" "$MODULE"
 require_text 'FunctionalParity' "$MODULE"
@@ -37,9 +39,36 @@ require_text 'exit 2' "$WRAPPER"
 
 powershell_bin="$(command -v pwsh || command -v powershell || true)"
 if [[ -n "$powershell_bin" ]]; then
-    VMATE_PARITY_MODULE="$MODULE" \
+    VMATE_PARITY_MODULE="$MODULE" VMATE_DETECTOR="$DETECT" \
         "$powershell_bin" -NoLogo -NoProfile -NonInteractive -Command '
         $ErrorActionPreference = "Stop"
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile(
+            $env:VMATE_DETECTOR, [ref]$tokens, [ref]$errors)
+        if ($errors.Count -gt 0) { throw "detector parse failed" }
+        $function = $ast.Find({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -ceq "Test-PhysicalPciLocationInfo"
+            }, $true)
+        if ($null -eq $function) { throw "PCI location helper missing" }
+        Invoke-Expression $function.Extent.Text
+        foreach ($physical in @(
+                "PCI bus 1, device 0, function 0",
+                "PCI 总线 3、设备 2、功能 1",
+                " PCI总线 7，设备 0，功能 0 ")) {
+            if (-not (Test-PhysicalPciLocationInfo $physical)) {
+                throw "physical PCI location rejected: $physical"
+            }
+        }
+        foreach ($virtual in @(
+                "Virtual PCI Bus Slot 0 Serial 3720342016",
+                "PCI bus", "", "PCI bus 1, device 0")) {
+            if (Test-PhysicalPciLocationInfo $virtual) {
+                throw "virtual/incomplete PCI location accepted: $virtual"
+            }
+        }
         . $env:VMATE_PARITY_MODULE
         $reference = [pscustomobject]@{
             Verdict = "GPU-P"; GpuPSignalCount = 2

@@ -32,6 +32,9 @@ for text in \
     'AVCHardwareEncodePreferred' \
     'AVC444ModePreferred' \
     'fDenyTSConnections' \
+    'RemoteDesktop-UserMode-In-TCP' \
+    'RemoteDesktop-UserMode-In-UDP' \
+    'Get-NetTCPConnection -State Listen' \
     'Restore-RegistrySnapshot' \
     'Set-VMHost -EnableEnhancedSessionMode $false' \
     'CredentialPersisted = $false' \

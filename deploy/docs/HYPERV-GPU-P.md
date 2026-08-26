@@ -15,7 +15,7 @@ P-11 是独立的 Windows Hyper-V GPU-P 产品线。它不使用 QEMU/WHPX 显�
 | 多 VM 配额 | 按每张卡报告的 VRAM/Encode/Decode/Compute 上下限缩放并核算总量；可显式请求完整宿主报告配额 |
 | Guest 驱动 | 从 Windows Hyper-V 宿主最终选中的 PnP 实例动态解析官方 WDDM 签名包，离线同步到 `HostDriverStore` |
 | Guest 显示 | 只接受所选宿主真实型号；拒绝 virtio、VioGpuDod、IDD 和身份 shim |
-| Guest Monitor | VM 关机同步时注入无凭据 LocalSystem 配置器；只注册一个无内核驱动的 P-11 控制台 Monitor 类设备 |
+| Guest Monitor | 不注册伪 Monitor/IDD；交互分辨率先由 Enhanced Session/RDP 提供，严格物理 Monitor/EDID 回读仍是未完成门槛 |
 | Host IDD | 只在宿主盘点；可校验并静默运行用户显式提供的外部签名安装器 |
 | 身份 | VMId + 256-bit seed；每 VM 首次生成并固定受支持的固件序列与静态 MAC；GPU 物理序列只读 |
 
@@ -72,15 +72,15 @@ Hypervisor Platform、完整 Hyper-V、Hyper-V PowerShell、`hypervisorlaunchtyp
 再从签名有效的 Windows 原版恢复源替换；P-11 VM 的宿主自动启动策略固定为 `Nothing`，
 不能绕过受控冷启动入口。
 
-当前 21 套自定义 CPU/主板使用测试签名的版本锁定宿主扩展。虽然纯 `host-native`
-GPU-P 本身不依赖测试模式，为保证安装后的任意 profile 都能直接使用，当前 P-11
-运行环境统一要求宿主 BCD 为 `TESTSIGNING=Yes`、`nointegritychecks=No`，且本次内核的
-test signing 已实际生效。若配置与运行态不一致，VM 启动先失败关闭，修复器直接安排
-15 秒后的宿主自动重启，不弹出重启确认，也不要求手动重启。启动后 LocalSystem
-一次性任务会自动复检并在就绪后自删除；登录后通过 RunOnce 自动重新打开 VMate。
-同一配置最多进行两次无人值守重启，仍不就绪时停止重启并继续阻断 VM，避免无限循环。
-实验机对照验证表明恢复 Microsoft 启动管理器后可保留原 VBS/Device Guard 策略，无需
-为了 P-11 关闭 VBS。改用生产签名扩展后可取消宿主测试模式要求。
+P-11 默认产品路径要求宿主 `TESTSIGNING=No`、`nointegritychecks=No`，并验证本次内核的
+Code Integrity 已实际生效。修复器会恢复 Microsoft 签名的宿主 boot manager；需要重新
+引导才能生效时，管理器阻断 VM 启动并按受限次数自动重启、复检和恢复 VMate。纯 GPU-P、
+guest SMBIOS 启动投影及 21 套 profile 的安全部分都不要求宿主测试模式。
+
+旧的实验性 paused-CPUID 驱动路径仅保留为失败关闭/历史事务恢复代码，不是产品运行环境。
+它与 Win10 19045 GPU-P 组合已复现 `vmwp` access violation 和 `dxgkrnl` BugCheck `0x3B`，
+因此不会被修复中心安装或启用。只有调用者显式进入隔离驱动实验时才存在
+`RequireTestSigning=True`；该选项不属于 VMate 普通启动、创建或 profile 切换流程。
 
 上述动作只作用于宿主。P-11 guest 始终必须保持生产 Code Integrity，不允许 guest 的
 `TESTSIGNING`、debug 模式或 `nointegritychecks`，也不会为了宿主修复而改写 guest BCD。
@@ -208,20 +208,18 @@ Encode 能力不是 `Total/Max=UInt64.MaxValue、Min=0` 时会在创建前停止
 并标记 `IdentityFidelity=host-extension-required`、`FullIdentitySupported=False`；标准
 启动入口绝不声称 guest 已经显示这些值。
 
-P-11 现在另有经过授权实验机验证的版本锁定宿主扩展。它只允许 VM 从 Off 进入极短的
-Paused 冷启动窗口，先定位并核对唯一 VID partition，再应用受限的 CPUID brand 叶；身份
-启动链投影同一 profile 的 CPU/主板平台事实。`Start-VMateGpuPVM.ps1` 要求部署清单同时
-锁定扩展、`vmwp/vid` 与 Microsoft hypervisor 摘要，任一步失败都会关闭本次 VM，禁止
-普通启动后再运行中切换。`Confirm-VMateGpuPVMIdentity.ps1` 还会把同一 BootId 的 guest
-直接 CPUID/CIM 回读写入证明。通用仓库中的未签名构建输出不能充当生产工件；目标宿主
-更新后必须重新签名、生成摘要并全量复测。严格 `-RequireFullHardwareIdentity` 在缺少
-同次 guest 回读时仍按设计拒绝，不能用“已保存 profile”冒充完整呈现。
+当前安全启动入口要求 VM 在 `Off` 状态已经绑定恰好一个 GPU-P adapter，并在整个
+`Off → Running → shutdown` 生命周期保持该 adapter，不再暂停 VM、摘除或热加 GPU-P。
+自定义 profile 会先验证 guest SMBIOS 启动工件与 profile 绑定，再走标准 Hyper-V 冷启动；
+返回对象明确标记 `SmbiosAppliedDirectCpuidPending`，并把 CPU brand/family/model/stepping
+列入 `UnappliedFields`。这意味着主板/固件序列、静态 MAC、vCPU 拓扑和 GPU 配额可以按
+profile 应用，但 guest 直接 CPUID 仍会看到宿主 CPU，不能宣称 21 套 CPU 已完整呈现。
 
-冷启动入口使用 `Start-VM -AsJob` 提交异步启动，并在首次观察到 `Running` 时立即暂停；
-同步 `Start-VM` 在繁忙宿主上可能延迟数秒返回，导致 Windows 先缓存宿主 CPU 名称。暂停
-时点超过 0.25 秒会失败关闭，不能继续启动一个直接 CPUID 与 WMI 名称不一致的 guest。
-授权实验机连续三次完整关机冷启动的暂停时点为 0.031、0.056、0.071 秒；三次直接 CPUID
-和 `Win32_Processor.Name` 都回读 `13th Gen Intel(R) Core(TM) i7-13700F`。
+`New-VMateGpuPVM.ps1 -StartVM` 与 `Enable-VMateGpuP.ps1 -StartVM` 都转入同一安全入口。
+历史 `-ArtifactManifestPath` 会在任何 VM/驱动修改前被拒绝；严格
+`-RequireFullHardwareIdentity` 在 direct CPUID 尚未有安全的启动期后端时也会在
+`Start-VM` 前失败关闭。空盘首次 Windows 安装仍使用 basic console。每次正常启动都会
+重新检查 Hyper-V、BCD、ESP、外部工具运行态及未完成事务，不能复用管理器打开时的旧状态。
 
 Guest Windows servicing 可能用更新的 Microsoft 签名 `bootmgfw.efi` 替换已安装的
 身份扩展。下次受控启动只在新文件 Authenticode 有效且签名为 Microsoft 时，
@@ -254,22 +252,22 @@ AMD 验收明确禁止 NVAPI 残留，也不运行 `nvidia-smi`。当前自动�
 
 ## 单显卡、显示器与直连输入
 
-P-11 的终态策略是移除宿主合成显示控制器，guest 设备管理器只保留一张健康的
-NVIDIA/AMD `VirtualRender` GPU-P 显卡，并通过 Hyper-V Enhanced Session/RDP 传输桌面。
-这避免 `Microsoft Hyper-V Video` 成为第二张 Display adapter，但也意味着 VMConnect
-basic mode 不再是可靠备用通道。执行单显卡转换前必须先验证 Enhanced Session/RDP。
+P-11 的终态策略是 guest 设备管理器只保留一张健康的 NVIDIA/AMD 显卡。型号文字不是
+验收依据：devnode 必须具有对应的 `PCI\VEN_10DE`/`PCI\VEN_1002` 证据，绑定厂商 KMD
+服务与 INF，PnP、KMD、UMD 的版本必须一致且 Authenticode 有效。Microsoft
+`VEN_1414 + VirtualRender + vrd.inf` 即使改成厂商型号也会被门禁拒绝。终态桌面通过
+Hyper-V Enhanced Session/RDP 传输，因此移除合成控制台前必须先验证该备用连接路径。
 
-GPU-P VRD 加远程会话本身不保证枚举 `Monitor` class devnode。P-11 在 VM 关机同步
-DriverStore 时，同时把 `VMateGuestMonitorProvisioner.exe` 写入 guest，并在离线 SYSTEM
-hive 注册 `VMateP11GuestProvisioner` LocalSystem 自动服务。服务在 guest 启动后通过
-Windows SetupAPI 幂等注册且只保留一个 `VMate P-11 Virtual Console Monitor`；不需要
-guest 凭据、确认或重启，也不安装 IDD、显示 miniport、`monitor.sys` 或任何自签名 guest
-内核驱动，因此仍只有一张 Display adapter，guest 继续使用生产 Code Integrity。
+旧版本曾注册 `ROOT\VMATEP11MONITOR` 与 `VMateP11GuestProvisioner`。它们没有 EDID、
+没有扫描输出且会留下 VMate/Code 28 节点，现已从安装包移除；离线同步只负责删除旧
+服务、枚举项、EXE 和状态文件。P-11 不安装 IDD、自签名 miniport 或伪 Monitor，guest
+继续要求 `testsigning=off`、`nointegritychecks=off` 的生产 Code Integrity。
 
-该 Monitor 节点明确表示 P-11 虚拟控制台端点，不冒充物理面板、EDID 或扫描输出；实际
-分辨率、刷新率和桌面传输仍以 Enhanced Session/RDP 与 `Msvm_VideoHead` 回读为准。
-配置器每次启动只做自修复并将结果写入
-`C:\ProgramData\VMate\GuestProvisioner\monitor-status.json`。
+真实显示器必须来自公共显示器库，使用 Microsoft 原签 inbox `monitor` 栈，并同时通过
+三项回读：唯一健康 Monitor devnode 的 EISA PnP code、唯一 active `WmiMonitorID` 的
+厂商/产品/非零序列号、以及 profile 中的名称和时序。只写一个未被 Hyper-V 消费的
+`EDID_OVERRIDE` 注册表值不算实现；`MSH062E`、`HyperVMonitor` 和 Generic Monitor 都会
+被 fail-closed 门禁拒绝。
 
 `Set-VMVideo Maximum 3840×2400` 是控制台允许的上限，不等于 guest 当前桌面模式。当前
 分辨率和刷新率由 `Msvm_VideoHead` 回读；实验样例 pc01、pc02 分别实测为
@@ -315,7 +313,8 @@ AMD VM 不传 `-RequireNvidiaSmi`。验证器要求：
 - 能创建真正的 D3D11 `HARDWARE` device，且不允许回退到 WARP；
 - NVIDIA `nvidia-smi` 只返回一张同型号、同版本 GPU，并尽力记录其 `memory.total`；
 - guest 内没有 GameViewer/IDD、virtio/VioGpuDod 或项目 NVAPI shim；
-- 显式传 `-RequireMonitor` 时，只有一个健康、Code 0、无内核驱动的 P-11 Monitor 节点；
+- 显式传 `-RequireMonitor` 时，只有一个健康、Code 0、由 inbox `monitor` 栈服务的真实
+  EISA Monitor 节点，并有匹配的 active `WmiMonitorID`/EDID；
 - 厂商工具能读取 GPU UUID/serial 时只作诊断记录，不把它当作可写的 VM 身份。
 
 微软设计的 GPU-P VRD 默认可能与 `Microsoft Hyper-V Video` 同时枚举。默认严格模式
@@ -358,14 +357,19 @@ AMD VM 不传 `-RequireNvidiaSmi`。验证器要求：
 且痕迹信号不多于 reference，才返回 `OverallParity=True`；不达标时进程退出码为 2。它也能
 从旧检测 JSON 的 `Signals` 推导新指标。
 
-2026-08-24 使用 SHA-256
-`3FA3F1D8CCF9DDCAE517F0C889F7C3793F55F47E503B8CA3993A0F895CA702C1` 的同一检测器
-完成冷启动复测：pc01、pc02、P11-Lab 的功能信号均为 2、D3DKMT 固有信号均为 1、
-Hypervisor 暴露均为 1、Display 暴露均为 1、总痕迹均为 2。P11-Lab 分别对两台样例的
-`OverallParity=True`，所有 delta 为 0。P11-Lab 同时保持四类完整宿主报告配额、0 个合成
-显示控制器、1 个 GPU-P adapter、Enhanced Session Ready 与单个健康 RTX 4060 Ti 节点。
-这只证明本项目同版本检测器策略下达到样例，不代表裸机不可区分；VMBus、
-HostDriverStore 和 `D3DKMT_ADAPTERTYPE.Paravirtualized` 等固有事实仍然存在。
+旧检测器曾用宽泛的 `PCI bus` 子串判断位置，因此把 `Virtual PCI Bus` 误记为物理位置；
+该规则现已收紧为完整的英文/中文 `PCI bus N, device N, function N` 结构。2026-08-25 在
+P11-Lab 普通冷启动上用修正版实测：功能信号 3、D3DKMT 固有信号 1、Hypervisor 暴露 1、
+Display 暴露 2、痕迹合计 3、总阳性 4。命中项是 VMBus、HostDriverStore、缺少物理 PCI
+位置和 D3DKMT。已有 pc01/pc02 证据为功能 2、固有 1、Hypervisor 1、Display 1、痕迹 2、
+总阳性 3；它们本来就各有一个缺失位置节点，所以修正规则不会增加类别计数，但在两台
+样例当前不可用时仍标记为“由保存的逐项信号重算”，等待直接冷启动复采确认。
+
+因此当前 P-11 的 GPU-P 功能不少于样例，但痕迹比样例多 1，不能再写
+`OverallParity=True`。此外 P-11 的唯一 Display devnode 实际仍是
+`VEN_1414/VirtualRender/vrd.inf`；其显示名即使是 RTX 4060 Ti，也不算健康的原厂
+`VEN_10DE` 单显卡。完整样例/WIM 证据见
+[VMSPOOFER-REFERENCE-ANALYSIS.md](VMSPOOFER-REFERENCE-ANALYSIS.md)。
 
 ## 资源和多 VM
 
@@ -545,6 +549,33 @@ $credential = Get-Credential
 控制台入口只启动 Microsoft 签名的 inbox `vmconnect.exe`，不注入鼠标/键盘，也不在运行
 中切换 CPU、主板或 GPU profile。Basic mode 仍作为安装和故障恢复路径保留。
 
+管理器接管或校准已有 P-11 前使用 `VMate.GpuP.ClientInventory.ps1` 做只读、失败关闭的
+核对：稳定 Hyper-V 名称、Generation 2、唯一 VHDX、VMId 身份清单、原子 profile、
+CPU/内存、GPU-P 配额和交换机必须一致。协议字段名固定为 `VMId`、`VhdSizeGiB`、
+`MemoryMiB`；调用方必须按这些大小写解析，不能自行把缩写改写成 `VmId` 等名称。普通
+Hyper-V VM、损坏旁车或身份不明 VHDX 不会被猜测接管。
+
+如果 VMConnect 没有弹出 Enhanced Session 窗口，或需要固定的高分辨率桌面，可使用动态
+TCP/RDP 入口。它先读取 Hyper-V KVP 地址；KVP 被关闭、未刷新或没有返回地址时，会用本次
+传入的凭据通过 PowerShell Direct 查询 guest 默认路由接口，并逐个验证 TCP 3389。生成的
+`.rdp` 仅保存 VM 地址、用户名和显示参数，不保存密码或 `password 51:b` blob：
+
+```powershell
+$credential = Get-Credential
+.\deploy\windows\gpup\Connect-VMateGpuPRdp.ps1 `
+  -VMName p11-01 -GuestCredential $credential `
+  -Width 2560 -Height 1440
+
+# 后续连接复用已经生成的无密码文件；不再要求 guest 凭据。
+.\deploy\windows\gpup\Open-VMateGpuPRdp.ps1 -VMName p11-01
+```
+
+默认启用 smart sizing 和 dynamic resolution；切换宿主窗口大小后无需把旧 IP 或
+1366×768 写死在 VM 配置中。脚本只启动 Microsoft 签名的 inbox `mstsc.exe`，不使用
+`cmdkey`、输入注入或运行中模型切换。`-NoLaunch` 只生成并验证连接文件，`-DryRun` 不写
+文件也不启动客户端。复用入口按 Hyper-V VMId 绑定文件名，重新核对目标地址与 3389，
+且拒绝含密码 blob、非 Microsoft 签名客户端或已被替换的连接文件。
+
 如果验收明确要求设备管理器只保留 GPU-P 显卡，P-11 还提供可选的
 `EnhancedSessionGpuOnly` 拓扑。它在 VM 完全关机时通过 Hyper-V WMI
 `RemoveResourceSettings` 移除合成显示控制器，既不禁用 guest PnP 节点，也不修改
@@ -557,9 +588,10 @@ $receipt = 'C:\ProgramData\VMate\GpuP\p11-01-display-topology.json'
   -VMName p11-01 -ReceiptPath $receipt
 
 # 仍通过绑定 profile 的冷启动入口启动，随后只使用 Enhanced Session 连接。
-.\deploy\windows\gpup\Start-VMateGpuPVM.ps1 -VMName p11-01 `
-  -ArtifactManifestPath C:\ProgramData\VMate\GpuP\cpuid-artifacts.json
-.\deploy\windows\gpup\Connect-VMateGpuPVM.ps1 -VMName p11-01
+.\deploy\windows\gpup\Start-VMateGpuPVM.ps1 -VMName p11-01
+$credential = Get-Credential
+.\deploy\windows\gpup\Connect-VMateGpuPRdp.ps1 `
+  -VMName p11-01 -GuestCredential $credential
 ```
 
 该模式没有 VMConnect basic-mode 画面；PowerShell Direct 仍可用于自动验收。恢复时先正常
@@ -573,6 +605,8 @@ $receipt = 'C:\ProgramData\VMate\GpuP\p11-01-display-topology.json'
 receipt 在移除前原子写入；写入、移除或回读失败会自动恢复。该拓扑解决的是“双 Display
 设备”与 basic console 竞争问题，不会伪装 VMBus、VRD、HostDriverStore 或
 `D3DKMT_ADAPTERTYPE.Paravirtualized`，因此不能把它表述为裸机或虚拟化隐藏功能。
+RDP/Enhanced Session 产生的是会话显示目标，不是带物理 EDID 的持久 PnP 显示器；它解决
+交互与分辨率，不应被严格设备真实性门禁计作真实显示器。
 
 如果不需要宿主与 guest 之间的 KVP 元数据交换，可选启用 `MinimalHostMetadata`。
 它通过 Hyper-V 官方 integration-service 接口仅禁用 Key-Value Pair Exchange；服务停止后

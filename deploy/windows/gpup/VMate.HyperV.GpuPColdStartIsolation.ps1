@@ -2,16 +2,13 @@
 
 <#
 .SYNOPSIS
-    在 P-11 的 paused cold-boot 窗口中事务隔离 GPU-P adapter。
+    只用于恢复历史未完成事务的 GPU-P adapter 快照模块。
 
 .DESCRIPTION
-    Windows 10 在 GPU-P 虚拟 PCI 已初始化后立即执行 Running -> Paused，可能令
-    vmwp/vmuidevices 异常退出，并在 vpcivsp 清理时触发 dxgkrnl 空上下文崩溃。
-    本模块在 VM 仍为 Off 时保存并摘下唯一 GPU-P adapter；CPU 品牌写入且 guest
-    心跳稳定后，再短暂 Paused，并按原物理 GPU 与十二项精确配额恢复 adapter。
-
-    每次摘除前都会写入 ProgramData 事务日志。进程中断或宿主重启后，只能在 VM
-    已关闭时按日志恢复；绝不凭默认值猜测配额，也绝不留下无 GPU 的半成品 VM。
+    旧 paused-CPUID 实验曾在 Off 状态摘除 adapter，并尝试在 Paused 状态恢复。
+    该序列已在 Win10 19045 复现 vmwp/vmuidevices access violation 和 dxgkrnl
+    BugCheck 0x3B，现已永久停用。保留本模块只为读取旧事务日志，并在 VM 为 Off
+    时按原十二项配额恢复 adapter；新流程绝不创建事务、摘除或热加 adapter。
 #>
 
 Set-StrictMode -Version Latest
@@ -141,8 +138,8 @@ function Add-VMateHyperVGpuPColdStartAdapter {
     )
 
     $current = Get-VM -Name ([string]$VM.Name) -ErrorAction Stop
-    if ([string]$current.State -notin @('Off', 'Paused')) {
-        throw "GPU-P adapter 只允许在 Off/Paused 恢复；当前 $($current.State)。"
+    if ([string]$current.State -cne 'Off') {
+        throw "GPU-P adapter 只允许在 Off 状态恢复；当前 $($current.State)。"
     }
     $existing = @(Get-VMGpuPartitionAdapter -VM $current -ErrorAction Stop)
     if ($existing.Count -eq 1) {
@@ -190,18 +187,8 @@ function Remove-VMateHyperVGpuPColdStartAdapter {
         [Parameter(Mandatory = $true)][object]$Snapshot
     )
 
-    if ([string]$VM.State -cne 'Off') {
-        throw "GPU-P adapter 摘除要求 VM 为 Off；当前 $($VM.State)。"
-    }
-    [void](Assert-VMateHyperVGpuPColdStartAdapterRestored `
-            -VM $VM -Snapshot $Snapshot)
-    $adapter = @(Get-VMGpuPartitionAdapter -VM $VM -ErrorAction Stop)[0]
-    Remove-VMGpuPartitionAdapter -VMGpuPartitionAdapter $adapter `
-        -Confirm:$false -ErrorAction Stop
-    $remaining = @(Get-VMGpuPartitionAdapter -VM $VM -ErrorAction Stop)
-    if ($remaining.Count -ne 0) {
-        throw "GPU-P adapter 摘除后仍有 $($remaining.Count) 个 adapter。"
-    }
+    throw ('GPU-P cold-start adapter 摘除路径已停用：adapter 必须从 Off ' +
+        '到 Running 全程保持绑定。')
 }
 
 function Get-VMateHyperVGpuPColdStartTransactionPath {

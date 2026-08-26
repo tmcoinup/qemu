@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 DISCOVERY="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.DriverDiscovery.ps1"
 STORE="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.DriverStore.ps1"
+OFFLINE_PACKAGE="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.OfflineDriverPackage.ps1"
 WINDOWS_IMAGE="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.WindowsImage.ps1"
 GUEST_MONITOR="$REPO_ROOT/deploy/windows/gpup/VMate.GpuP.GuestMonitor.ps1"
 
@@ -33,7 +34,8 @@ reject_regex() {
 
 test_files_are_bounded_ps51_modules() {
     local file signature lines
-    for file in "$DISCOVERY" "$STORE" "$WINDOWS_IMAGE" "$GUEST_MONITOR"; do
+    for file in "$DISCOVERY" "$STORE" "$OFFLINE_PACKAGE" \
+            "$WINDOWS_IMAGE" "$GUEST_MONITOR"; do
         [[ -f "$file" ]] || fail "missing module: $file"
         signature="$(od -An -tx1 -N3 "$file" | tr -d ' \n')"
         [[ "$signature" == "efbbbf" ]] \
@@ -46,8 +48,36 @@ test_files_are_bounded_ps51_modules() {
         "$STORE"
     require_text ". (Join-Path \$PSScriptRoot 'VMate.GpuP.WindowsImage.ps1')" \
         "$STORE"
+    require_text ". (Join-Path \$PSScriptRoot 'VMate.GpuP.OfflineDriverPackage.ps1')" \
+        "$STORE"
     require_text ". (Join-Path \$PSScriptRoot 'VMate.GpuP.GuestMonitor.ps1')" \
         "$STORE"
+}
+
+test_offline_vendor_package_is_signed_and_transactional() {
+    require_text 'Get-VMateGpuPOfflineDriverPackage' "$OFFLINE_PACKAGE"
+    require_text 'System32\\DriverStore\\FileRepository' "$OFFLINE_PACKAGE"
+    require_text 'Get-AuthenticodeSignature -LiteralPath $path' "$OFFLINE_PACKAGE"
+    require_text "[string]\$signature.Status -cne 'Valid'" "$OFFLINE_PACKAGE"
+    require_text 'Microsoft Windows Hardware Compatibility Publisher' \
+        "$OFFLINE_PACKAGE"
+    require_text 'Get-WindowsDriver -Path $OfflineImageRoot -All' \
+        "$OFFLINE_PACKAGE"
+    require_text 'Add-WindowsDriver -Path $dismImageRoot' "$OFFLINE_PACKAGE"
+    require_text 'Remove-WindowsDriver' "$OFFLINE_PACKAGE"
+    require_text 'Open-VMateGpuPDismWindowsPath' "$OFFLINE_PACKAGE"
+    require_text ".TrimEnd('\\')" "$OFFLINE_PACKAGE"
+    require_text 'Add-PartitionAccessPath' "$OFFLINE_PACKAGE"
+    require_text 'Close-VMateGpuPDismWindowsPath' "$OFFLINE_PACKAGE"
+    require_text 'Remove-PartitionAccessPath' "$OFFLINE_PACKAGE"
+    require_text "StateProbe = 'DeferredToWritableApply'" "$OFFLINE_PACKAGE"
+    require_text 'Undo-VMateGpuPOfflineDriverPackageInstall' "$OFFLINE_PACKAGE"
+    require_text 'Invoke-VMateGpuPDriverPublishWithOfflinePackage' \
+        "$OFFLINE_PACKAGE"
+    reject_regex 'ForceUnsigned|pnputil|devcon|SetupDi(Create|CallClass)' \
+        "$OFFLINE_PACKAGE"
+    reject_regex 'TESTSIGNING|nointegritychecks|Add-VMGpuPartitionAdapter' \
+        "$OFFLINE_PACKAGE"
 }
 
 test_discovery_is_bound_to_real_signed_vendor_package() {
@@ -100,7 +130,7 @@ test_offline_publish_is_transactional_and_idempotent() {
     require_text 'Dismount-VHD -Path $resolvedVhd' "$STORE"
     require_text 'VHD 必须包含唯一且无 reparse 的 Windows 卷' "$STORE"
     require_text 'Assert-VMateGpuPGuestWindowsImage' "$STORE"
-    require_text 'Install-VMateGpuPGuestMonitorProvisioner' "$STORE"
+    require_text 'Remove-VMateGpuPLegacyGuestMonitorArtifacts' "$STORE"
     require_text "PeMachine = \$pe.Machine" "$WINDOWS_IMAGE"
     require_text "if (\$pe.Architecture -cne 'x64')" "$WINDOWS_IMAGE"
     require_text "BuildCompatibilityPolicy = 'Windows builds may differ" \
@@ -128,9 +158,10 @@ test_offline_publish_is_transactional_and_idempotent() {
     (( before_line < copy_line && copy_line < after_line )) \
         || fail 'manifest/copy order is not before -> staged copy -> after'
 
-    # 驱动同步不得隐式改变 GPU-P adapter 或厂商包身份。
+    # 驱动同步不得隐式改变 GPU-P adapter、厂商包身份或创建设备节点。
     reject_regex '(Add|Remove|Set)-VMGpuPartitionAdapter|pnputil|dism\.exe|devcon' \
         "$STORE"
+    reject_regex 'Install-VMateGpuPGuestMonitorProvisioner' "$STORE"
 }
 
 test_pure_functions_when_powershell_exists() {
@@ -237,6 +268,7 @@ test_windows_image_architecture_when_powershell_exists() {
 test_files_are_bounded_ps51_modules
 test_discovery_is_bound_to_real_signed_vendor_package
 test_copy_plan_has_fail_closed_path_mapping
+test_offline_vendor_package_is_signed_and_transactional
 test_offline_publish_is_transactional_and_idempotent
 test_pure_functions_when_powershell_exists
 test_windows_image_architecture_when_powershell_exists

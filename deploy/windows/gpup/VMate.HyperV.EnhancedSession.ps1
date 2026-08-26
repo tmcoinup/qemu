@@ -139,7 +139,30 @@ function Invoke-VMateHyperVEnhancedSessionGuestConfigure {
                 }).Count -gt 0) {
             throw 'Remote Desktop Services 中存在 Disabled 服务。'
         }
+        $firewallNames = @(
+            'RemoteDesktop-UserMode-In-TCP'
+            'RemoteDesktop-UserMode-In-UDP'
+        )
+        $beforeFirewall = @($firewallNames | ForEach-Object {
+            $rule = @(Get-NetFirewallRule -Name $_ -ErrorAction Stop)
+            if ($rule.Count -ne 1) {
+                throw "Remote Desktop 防火墙规则数量异常：$_。"
+            }
+            [pscustomobject][ordered]@{
+                Name = [string]$rule[0].Name
+                Enabled = [string]$rule[0].Enabled
+                Direction = [string]$rule[0].Direction
+                Action = [string]$rule[0].Action
+            }
+        })
+        if (@($beforeFirewall | Where-Object {
+                    [string]$_.Direction -cne 'Inbound' -or
+                    [string]$_.Action -cne 'Allow'
+                }).Count -gt 0) {
+            throw 'Remote Desktop 防火墙规则不是 Inbound/Allow。'
+        }
         $started = [Collections.Generic.List[string]]::new()
+        $firewallEnabled = [Collections.Generic.List[string]]::new()
         try {
             foreach ($target in $targets) {
                 if (-not (Test-Path -LiteralPath $target.Path)) {
@@ -156,15 +179,38 @@ function Invoke-VMateHyperVEnhancedSessionGuestConfigure {
                     [void]$started.Add([string]$service.Name)
                 }
             }
+            foreach ($rule in $beforeFirewall) {
+                if ([string]$rule.Enabled -cne 'True') {
+                    Enable-NetFirewallRule -Name $rule.Name `
+                        -ErrorAction Stop
+                    [void]$firewallEnabled.Add([string]$rule.Name)
+                }
+            }
+            $rdpListening = $false
+            for ($attempt = 0; $attempt -lt 30; ++$attempt) {
+                $rdpListening = @(Get-NetTCPConnection -State Listen `
+                    -LocalPort 3389 -ErrorAction SilentlyContinue).Count -gt 0
+                if ($rdpListening) { break }
+                Start-Sleep -Milliseconds 250
+            }
             $afterServices = @(Get-Service TermService, SessionEnv,
                     UmRdpService -ErrorAction Stop |
                 Select-Object Name, Status, StartType)
+            $afterFirewall = @($firewallNames | ForEach-Object {
+                Get-NetFirewallRule -Name $_ -ErrorAction Stop |
+                    Select-Object Name, Enabled, Direction, Action
+            })
             $afterRegistry = @($targets | ForEach-Object {
                     Get-RegistrySnapshot $_
                 })
             $ready = @($afterServices | Where-Object {
                     [string]$_.Status -cne 'Running'
                 }).Count -eq 0 -and
+                @($afterFirewall | Where-Object {
+                    [string]$_.Enabled -cne 'True' -or
+                    [string]$_.Direction -cne 'Inbound' -or
+                    [string]$_.Action -cne 'Allow'
+                }).Count -eq 0 -and $rdpListening -and
                 @($afterRegistry | Where-Object {
                     ([string]$_.Name -ceq 'fDenyTSConnections' -and
                         [int]$_.Value -ne 0) -or
@@ -181,12 +227,16 @@ function Invoke-VMateHyperVEnhancedSessionGuestConfigure {
                 Before = [pscustomobject][ordered]@{
                     Registry = $beforeRegistry
                     Services = $beforeServices
+                    Firewall = $beforeFirewall
                 }
                 After = [pscustomobject][ordered]@{
                     Registry = $afterRegistry
                     Services = $afterServices
+                    Firewall = $afterFirewall
+                    RdpListening = $rdpListening
                 }
                 StartedServices = @($started)
+                EnabledFirewallRules = @($firewallEnabled)
                 Ready = $ready
                 RestartRequired = @($beforeRegistry | Where-Object {
                         [string]$_.Name -ne 'fDenyTSConnections' -and
@@ -196,6 +246,11 @@ function Invoke-VMateHyperVEnhancedSessionGuestConfigure {
         }
         catch {
             $primary = $_.Exception.Message
+            for ($index = $firewallEnabled.Count - 1;
+                $index -ge 0; --$index) {
+                Disable-NetFirewallRule -Name $firewallEnabled[$index] `
+                    -ErrorAction SilentlyContinue
+            }
             for ($index = $started.Count - 1; $index -ge 0; --$index) {
                 Stop-Service -Name $started[$index] -Force `
                     -ErrorAction SilentlyContinue
@@ -291,6 +346,13 @@ function Get-VMateHyperVEnhancedSessionStatus {
             -ErrorAction Stop
         $services = @(Get-Service TermService, SessionEnv, UmRdpService `
                 -ErrorAction Stop | Select-Object Name, Status, StartType)
+        $firewall = @(
+            'RemoteDesktop-UserMode-In-TCP'
+            'RemoteDesktop-UserMode-In-UDP'
+        ) | ForEach-Object {
+            Get-NetFirewallRule -Name $_ -ErrorAction Stop |
+                Select-Object Name, Enabled, Direction, Action
+        }
         return [pscustomobject][ordered]@{
             RdpEnabled = [int]$rdp.fDenyTSConnections -eq 0
             HardwareGpu = $null -ne $policy -and
@@ -300,10 +362,19 @@ function Get-VMateHyperVEnhancedSessionStatus {
             Avc444 = $null -ne $policy -and
                 [int]$policy.AVC444ModePreferred -eq 1
             Services = $services
+            Firewall = @($firewall)
+            RdpListening = @(Get-NetTCPConnection -State Listen `
+                -LocalPort 3389 -ErrorAction SilentlyContinue).Count -gt 0
         }
     }
     $servicesReady = @($guest.Services | Where-Object {
             [string]$_.Status -cne 'Running'
+        }).Count -eq 0
+    $firewallReady = @($guest.Firewall).Count -eq 2 -and
+        @($guest.Firewall | Where-Object {
+            [string]$_.Enabled -cne 'True' -or
+            [string]$_.Direction -cne 'Inbound' -or
+            [string]$_.Action -cne 'Allow'
         }).Count -eq 0
     return [pscustomobject][ordered]@{
         VMName = $hostState.VMName
@@ -315,6 +386,7 @@ function Get-VMateHyperVEnhancedSessionStatus {
             [string]$hostState.Transport -ceq 'VMBus' -and
             [bool]$guest.RdpEnabled -and [bool]$guest.HardwareGpu -and
             [bool]$guest.HardwareAvc -and [bool]$guest.Avc444 -and
-            $servicesReady
+            $servicesReady -and $firewallReady -and
+            [bool]$guest.RdpListening
     }
 }

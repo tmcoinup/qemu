@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P-11 GPU-P 冷启动隔离：十二项精确配额、状态边界与中断事务恢复。
+# P-11 GPU-P 历史冷启动事务：只允许 Off 状态恢复，禁止摘除与热加。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,8 +16,9 @@ for text in \
     'vmate-p11-gpup-cold-start-transaction-v1' \
     "@('VRAM', 'Encode', 'Decode', 'Compute')" \
     "@('Min', 'Max', 'Optimal')" \
-    "-notin @('Off', 'Paused')" \
     "-cne 'Off'" \
+    'adapter 必须从 Off' \
+    'adapter 摘除路径已停用' \
     'Convert]::ToUInt64' \
     'cold-start-transactions'; do
     rg -F --quiet -- "$text" "$MODULE" || fail "missing contract text: $text"
@@ -131,33 +132,26 @@ try {
     Assert-True (@($snapshot.Quotas.PSObject.Properties).Count -eq 12) `
         "snapshot did not preserve twelve quotas"
 
-    Remove-VMateHyperVGpuPColdStartAdapter `
-        -VM $script:Vm -Snapshot $snapshot
-    Assert-True ($script:Removed -and $null -eq $script:Adapter) `
-        "adapter was not detached while Off"
-    [void](Add-VMateHyperVGpuPColdStartAdapter `
-        -VM $script:Vm -Snapshot $snapshot)
-    Assert-True ($script:AddParameters.MaxPartitionEncode -eq
-        [uint64]::MaxValue) "restored quota lost UInt64 precision"
-    Assert-True ($script:AddParameters.Count -ge 16) `
-        "restore did not splat all twelve quotas"
-    foreach ($name in $script:QuotaNames) {
-        Assert-True ($script:AddParameters.ContainsKey($name)) `
-            "restore omitted quota $name"
-    }
+    Assert-Throws {
+        Remove-VMateHyperVGpuPColdStartAdapter `
+            -VM $script:Vm -Snapshot $snapshot
+    } "摘除路径已停用"
+    Assert-True (-not $script:Removed -and $null -ne $script:Adapter) `
+        "disabled detach path mutated the adapter"
 
     $script:Vm.State = "Paused"
-    $script:Adapter = $null
-    [void](Add-VMateHyperVGpuPColdStartAdapter `
-        -VM $script:Vm -Snapshot $snapshot)
-    Assert-True ($null -ne $script:Adapter) "paused hot-add was rejected"
-
-    $script:Vm.State = "Running"
     $script:Adapter = $null
     Assert-Throws {
         Add-VMateHyperVGpuPColdStartAdapter `
             -VM $script:Vm -Snapshot $snapshot
-    } "只允许在 Off/Paused"
+    } "只允许在 Off 状态恢复"
+    Assert-True ($null -eq $script:Adapter) "paused path hot-added an adapter"
+
+    $script:Vm.State = "Running"
+    Assert-Throws {
+        Add-VMateHyperVGpuPColdStartAdapter `
+            -VM $script:Vm -Snapshot $snapshot
+    } "只允许在 Off 状态恢复"
 
     $script:Vm.State = "Off"
     $script:Adapter = New-MockAdapter
@@ -166,8 +160,8 @@ try {
     $transactionPath = Get-VMateHyperVGpuPColdStartTransactionPath $script:Vm.Id
     Assert-True (Test-Path -LiteralPath $transactionPath) `
         "transaction journal was not written"
-    Remove-VMateHyperVGpuPColdStartAdapter `
-        -VM $script:Vm -Snapshot $snapshot
+    # 模拟旧版已经在 Off 状态摘除 adapter 后中断；新代码本身不得执行摘除。
+    $script:Adapter = $null
     Set-VMateHyperVGpuPColdStartTransactionPhase `
         -Transaction $transaction -Phase "AdapterDetachedWhileOff"
     $script:Vm.State = "Running"
@@ -175,6 +169,14 @@ try {
     Assert-True ($recovery.Status -ceq "Recovered") "journal was not recovered"
     Assert-True ($script:Vm.State -ceq "Off") "recovery did not turn VM off"
     Assert-True ($null -ne $script:Adapter) "recovery did not restore adapter"
+    Assert-True ($script:AddParameters.MaxPartitionEncode -eq
+        [uint64]::MaxValue) "restored quota lost UInt64 precision"
+    Assert-True ($script:AddParameters.Count -ge 16) `
+        "restore did not splat all twelve quotas"
+    foreach ($name in $script:QuotaNames) {
+        Assert-True ($script:AddParameters.ContainsKey($name)) `
+            "restore omitted quota $name"
+    }
     Assert-True (-not (Test-Path -LiteralPath $transactionPath)) `
         "committed recovery left stale journal"
 } finally {

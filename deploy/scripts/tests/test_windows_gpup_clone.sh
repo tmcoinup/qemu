@@ -25,6 +25,8 @@ require_text '-AutomaticStartAction Nothing' "$LIFECYCLE"
 require_text '-AutomaticStopAction ShutDown' "$LIFECYCLE"
 require_text '[string]$BaseImagePath' "$ENTRY"
 require_text 'WillCloneBaseImage' "$ENTRY"
+require_text 'paused-CPUID 路径已停用' "$ENTRY"
+require_text "'P11SafePartialIdentityColdBoot'" "$ENTRY"
 
 powershell_bin="$(command -v pwsh || command -v powershell || true)"
 if [[ -n "$powershell_bin" ]]; then

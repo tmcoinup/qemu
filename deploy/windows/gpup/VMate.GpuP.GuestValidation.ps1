@@ -2,7 +2,7 @@
 # 在 guest 内验证唯一、真实且受信的 GPU-P 显示栈。期望值必须来自宿主已选
 # partitionable GPU；不接受投影、VioGpuDod、第三方 IDD 或 NVAPI shim。
 . (Join-Path $PSScriptRoot 'VMate.Windows.CodeIntegrity.ps1')
-. (Join-Path $PSScriptRoot 'VMate.GpuP.GuestMonitorValidation.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.GuestDeviceReality.ps1')
 function Assert-VMateGpuPGuestContext {
     if ($env:OS -cne 'Windows_NT') {
         throw 'GPU-P guest 验证只支持 Windows。'
@@ -259,11 +259,7 @@ function Assert-VMateGpuPDriverStack {
     $providerPattern = if ($Vendor -ieq 'NVIDIA') {
         '(?i)^NVIDIA(?: Corporation)?$'
     } else { '(?i)^(AMD|Advanced Micro Devices(?:, Inc\.)?)$' }
-    $isVrd = [string]$Display.Service -ieq 'VirtualRender'
-    $microsoftProvider = [string]$Display.DriverProvider -match
-        '(?i)^Microsoft(?: Corporation)?$'
-    if (([string]$Display.DriverProvider -notmatch $providerPattern -and
-            (-not $isVrd -or -not $microsoftProvider)) -or
+    if ([string]$Display.DriverProvider -notmatch $providerPattern -or
         $Display.IsSigned -ne $true -or
         [string]::IsNullOrWhiteSpace([string]$Display.Signer)) {
         throw "$Vendor GPU-P 设备不是匹配厂商的官方签名 PnP 驱动。"
@@ -271,38 +267,27 @@ function Assert-VMateGpuPDriverStack {
     $vendorServices = if ($Vendor -ieq 'NVIDIA') {
         @('nvlddmkm')
     } else { @('amdkmdag', 'amdwddmg', 'amdkmdap') }
-    if (-not $isVrd -and $vendorServices -inotcontains
-        [string]$Display.Service) {
-        throw "guest GPU 服务不是 $Vendor KMD 或 Microsoft GPU-P VRD：$($Display.Service)"
+    if ($vendorServices -inotcontains [string]$Display.Service -or
+        [string]$Display.InfName -match '(?i)^(vrd|basicdisplay)\.inf$') {
+        throw "guest GPU 服务不是 $Vendor 官方 KMD：$($Display.Service) / $($Display.InfName)"
     }
     $allFiles = @($Display.DriverFiles) + @($RuntimeFiles) | Select-Object -Unique
     $binaries = @($allFiles | Where-Object { $_ -match '(?i)\.(sys|dll|exe)$' })
     if ($binaries.Count -eq 0) {
         throw 'GPU-P PnP 记录没有可直接验证的驱动二进制。'
     }
-    if ($isVrd) {
-        $vrd = @($binaries | Where-Object {
-                [IO.Path]::GetFileName($_) -ieq 'vrd.sys' -and
-                $_ -match '(?i)[\\/]vrd\.inf_[^\\/]+[\\/]vrd\.sys$'
-            })
-        if ($vrd.Count -ne 1) {
-            throw 'VirtualRender 服务没有唯一的 inbox vrd.inf/vrd.sys 路径。'
-        }
-        [void](Assert-VMateGpuPSignedBinary $vrd[0] Microsoft)
+    $serviceBinary = if ($Vendor -ieq 'NVIDIA') {
+        @($binaries | Where-Object {
+                [IO.Path]::GetFileName($_) -ieq 'nvlddmkm.sys' })
     } else {
-        $serviceBinary = if ($Vendor -ieq 'NVIDIA') {
-            @($binaries | Where-Object {
-                    [IO.Path]::GetFileName($_) -ieq 'nvlddmkm.sys' })
-        } else {
-            @($binaries | Where-Object {
-                    [IO.Path]::GetFileName($_) -match '(?i)^amd.*\.sys$' })
-        }
-        if ($serviceBinary.Count -eq 0) {
-            throw "$Vendor 显示服务缺少对应的官方 KMD 文件。"
-        }
-        foreach ($file in $serviceBinary) {
-            [void](Assert-VMateGpuPSignedBinary $file $Vendor)
-        }
+        @($binaries | Where-Object {
+                [IO.Path]::GetFileName($_) -match '(?i)^amd.*\.sys$' })
+    }
+    if ($serviceBinary.Count -eq 0) {
+        throw "$Vendor 显示服务缺少对应的官方 KMD 文件。"
+    }
+    foreach ($file in $serviceBinary) {
+        [void](Assert-VMateGpuPSignedBinary $file $Vendor)
     }
     $runtimePattern = if ($Vendor -ieq 'NVIDIA') {
         '(?i)^(nvldumdx|nvwgf2umx|nvapi64|nvcuda)\.dll$'
@@ -324,14 +309,12 @@ function Assert-VMateGpuPDriverStack {
             $version -and (Test-VMateGpuPVersionMatch $version `
                     $ExpectedVersion $Vendor)
         }).Count -gt 0
-    if ((-not $isVrd -and -not $pnpVersionMatches) -or
-        ($isVrd -and -not $pnpVersionMatches -and
-            -not $runtimeVersionMatches)) {
+    if (-not $pnpVersionMatches -or -not $runtimeVersionMatches) {
         throw "guest 厂商驱动版本与宿主期望不一致：$($Display.DriverVersion) != $ExpectedVersion"
     }
     return [pscustomobject]@{
-        IsVirtualRender = $isVrd
-        VersionSource = if ($pnpVersionMatches) { 'PnP' } else { 'VendorUMD' }
+        IsVirtualRender = $false
+        VersionSource = 'VendorPnPAndUMD'
         RuntimeFiles = $runtime
     }
 }
@@ -417,8 +400,7 @@ function Test-VMateGpuPGuest {
     }
     $healthy = @($present | Where-Object { Test-VMateGpuPHealthyDisplay $_ })
     $targetGpu = @($healthy | Where-Object {
-            [string]$_.Name -notmatch
-                '(?i)^Microsoft Hyper-V Video(?: Adapter)?$'
+            Test-VMateGpuPOfficialVendorDisplayDevice $_ $Vendor
         })
     if ($targetGpu.Count -ne 1) {
         throw ("guest 必须只有一张健康的目标 GPU-P 显示设备，" +
@@ -431,9 +413,8 @@ function Test-VMateGpuPGuest {
     }
     $vendorId = if ($Vendor -ieq 'NVIDIA') { '10DE' } else { '1002' }
     $hardwareFacts = @($gpu.InstanceId) + @($gpu.HardwareIds)
-    $isVrd = [string]$gpu.Service -ieq 'VirtualRender'
-    if (-not $isVrd -and
-        ($hardwareFacts -join '|') -notmatch "(?i)VEN_$vendorId(?=&|\\|$)") {
+    if (($hardwareFacts -join '|') -notmatch
+        "(?i)VEN_$vendorId(?=&|\\|$)") {
         throw "guest GPU 没有真实 $Vendor PCI vendor 证据；拒绝名称字符串投影。"
     }
     $extras = @($present | Where-Object {
@@ -472,6 +453,9 @@ function Test-VMateGpuPGuest {
     $monitor = if ($RequireMonitor.IsPresent) {
         Assert-VMateGpuPGuestMonitor
     } else { $null }
+    $deviceReality = Assert-VMateGpuPGuestDeviceReality -Vendor $Vendor `
+        -ExpectedGpuName $GpuName `
+        -RequireNoHyperVNames:$StrictMode
     return [pscustomobject][ordered]@{
         Passed = $true
         Vendor = $Vendor
@@ -492,5 +476,6 @@ function Test-VMateGpuPGuest {
         VendorGpuUuid = if ($null -eq $smi) { '' } else { [string]$smi.Uuid }
         NvidiaSmi = $smi
         Monitor = $monitor
+        DeviceReality = $deviceReality
     }
 }

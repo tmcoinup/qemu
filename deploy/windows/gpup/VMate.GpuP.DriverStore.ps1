@@ -5,12 +5,13 @@
     将 Windows Hyper-V 宿主的官方 WDDM 驱动事务化同步到离线 Windows guest。
 
 .DESCRIPTION
-    入口只接受发现模块按最终 PnP InstanceId 解析出的签名厂商包；发布过程不
-    安装或修改驱动，也不增删 GPU partition adapter。
+    入口只接受发现模块按最终 PnP InstanceId 解析出的签名厂商包；同步
+    HostDriverStore，并用 DISM 登记同一完整签名包。不会创建设备或改变 adapter。
 #>
 
 . (Join-Path $PSScriptRoot 'VMate.GpuP.DriverDiscovery.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.WindowsImage.ps1')
+. (Join-Path $PSScriptRoot 'VMate.GpuP.OfflineDriverPackage.ps1')
 . (Join-Path $PSScriptRoot 'VMate.GpuP.GuestMonitor.ps1')
 
 function New-VMateGpuPManifest {
@@ -396,7 +397,9 @@ function Sync-VMateGpuPDriverStore {
     }
     foreach ($command in @('Get-VM', 'Get-VMHardDiskDrive', 'Get-VHD',
             'Mount-VHD', 'Dismount-VHD', 'Get-Disk', 'Get-Partition',
-            'Get-Volume')) {
+            'Get-Volume', 'Get-WindowsDriver', 'Add-WindowsDriver',
+            'Remove-WindowsDriver', 'Add-PartitionAccessPath',
+            'Remove-PartitionAccessPath')) {
         if (-not (Get-Command -Name $command -ErrorAction SilentlyContinue)) {
             throw "缺少 Hyper-V 驱动同步 cmdlet：$command"
         }
@@ -405,8 +408,11 @@ function Sync-VMateGpuPDriverStore {
     $systemRoot = (Get-Item -LiteralPath $env:SystemRoot -Force -ErrorAction Stop).FullName
     $selection = Get-VMateGpuPDriverSelection -GpuInstanceId $GpuInstanceId
     $plan = @(Get-VMateGpuPDriverSourcePaths $selection $systemRoot)
+    $offlinePackage = Get-VMateGpuPOfflineDriverPackage `
+        -Selection $selection -Plan $plan
     $mountedByThisCall = $false
     $result = $null
+    $offlineInstall = $null
     $operationError = $null
     $dismountError = $null
     try {
@@ -433,16 +439,23 @@ function Sync-VMateGpuPDriverStore {
                 GuestImage = $guestImage
                 Files = $plan
             }
-            $guestMonitor = Install-VMateGpuPGuestMonitorProvisioner `
+            $guestMonitor = Remove-VMateGpuPLegacyGuestMonitorArtifacts `
                 -GuestWindowsRoot $guestWindows -DryRun
             $result | Add-Member -NotePropertyName GuestMonitor `
                 -NotePropertyValue $guestMonitor
+            $offlineInstall = Install-VMateGpuPOfflineDriverPackage `
+                -GuestWindowsRoot $guestWindows -Package $offlinePackage `
+                -DryRun
+            $result | Add-Member -NotePropertyName OfflineDriverPackage `
+                -NotePropertyValue $offlineInstall
         }
         else {
-            $result = Invoke-VMateGpuPDriverPublish $guestWindows $selection $plan
+            $result = Invoke-VMateGpuPDriverPublishWithOfflinePackage `
+                -GuestWindowsRoot $guestWindows -Selection $selection `
+                -Plan $plan -Package $offlinePackage
             $result | Add-Member -NotePropertyName GuestImage `
                 -NotePropertyValue $guestImage
-            $guestMonitor = Install-VMateGpuPGuestMonitorProvisioner `
+            $guestMonitor = Remove-VMateGpuPLegacyGuestMonitorArtifacts `
                 -GuestWindowsRoot $guestWindows
             $result | Add-Member -NotePropertyName GuestMonitor `
                 -NotePropertyValue $guestMonitor

@@ -6,8 +6,9 @@
 
 .DESCRIPTION
     该模块只管理 P-11 明确依赖的 Windows/Hyper-V/GPU-P 宿主环境。它不会修改
-    guest BCD。当前 21 套自定义硬件 profile 使用测试签名的宿主冷启动扩展，
-    因此宿主必须同时满足 BCD 已配置 testsigning 和本次内核运行态已经激活。
+    guest BCD。默认产品路径使用标准 GPU-P 与 guest EFI SMBIOS 投影，宿主也要求
+    testsigning=off。RequireTestSigning 只保留给隔离实验，不是 21 套 profile 的
+    正常启动条件。
 
     修复动作只写入目标配置；需要重新引导才能生效时返回 RebootRequired，调用方
     必须在重启前阻断 VM 启动。自动重启动作由安装目录 repair-env.ps1 统一协调，
@@ -78,7 +79,6 @@ function Get-VMateP11GpuPColdStartTransactionStatus {
 }
 function Invoke-VMateP11BcdEdit {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
-
     $output = @(& "$env:SystemRoot\System32\bcdedit.exe" @Arguments 2>&1 |
         ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0) {
@@ -86,10 +86,8 @@ function Invoke-VMateP11BcdEdit {
     }
     return @($output)
 }
-
 function Get-VMateP11OptionalFeatureState {
     param([Parameter(Mandatory = $true)][string]$Name)
-
     $escaped = $Name.Replace("'", "''")
     $feature = Get-CimInstance Win32_OptionalFeature `
         -Filter "Name='$escaped'" -ErrorAction Stop
@@ -101,7 +99,6 @@ function Get-VMateP11OptionalFeatureState {
         default { return "Unknown:$([int]$feature.InstallState)" }
     }
 }
-
 function Resolve-VMateP11HostPartitionCommand {
     foreach ($name in @('Get-VMHostPartitionableGpu',
             'Get-VMPartitionableGpu')) {
@@ -110,20 +107,17 @@ function Resolve-VMateP11HostPartitionCommand {
     }
     return $null
 }
-
 function Resolve-VMateP11ArtifactPath {
     param(
         [Parameter(Mandatory = $true)][string]$ManifestPath,
         [Parameter(Mandatory = $true)][string]$Value
     )
-
     if ([IO.Path]::IsPathRooted($Value)) {
         return [IO.Path]::GetFullPath($Value)
     }
     return [IO.Path]::GetFullPath((Join-Path `
         ([IO.Path]::GetDirectoryName($ManifestPath)) $Value))
 }
-
 function Get-VMateP11ArtifactManifestPath {
     $commonData = [Environment]::GetFolderPath('CommonApplicationData')
     if ([String]::IsNullOrWhiteSpace($commonData)) {
@@ -131,13 +125,11 @@ function Get-VMateP11ArtifactManifestPath {
     }
     return Join-Path $commonData 'VMate\GpuP\cpuid-artifacts.json'
 }
-
 function Get-VMateP11ManifestProperty {
     param(
         [Parameter(Mandatory = $true)][object]$InputObject,
         [Parameter(Mandatory = $true)][string]$Name
     )
-
     $property = $InputObject.PSObject.Properties[$Name]
     if ($null -eq $property -or
         [String]::IsNullOrWhiteSpace([string]$property.Value)) {
@@ -145,7 +137,6 @@ function Get-VMateP11ManifestProperty {
     }
     return $property.Value
 }
-
 function Assert-VMateP11ArtifactFile {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -154,7 +145,6 @@ function Assert-VMateP11ArtifactFile {
         [switch]$RequireValidSignature,
         [switch]$RequireMicrosoftSigner
     )
-
     $fullPath = [IO.Path]::GetFullPath($Path)
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
         throw "$Label 不存在：$fullPath"
@@ -185,8 +175,6 @@ function Assert-VMateP11ArtifactFile {
         Signer = $signer
     }
 }
-
-
 function Get-VMateP11ForeignKernelActivity {
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
@@ -205,11 +193,9 @@ function Get-VMateP11ForeignKernelActivity {
         Drivers = $drivers
     }
 }
-
 function Get-VMateP11HostEnvironmentStatus {
     [CmdletBinding()]
-    param([bool]$RequireTestSigning = $true)
-
+    param([bool]$RequireTestSigning = $false)
     $problems = [Collections.Generic.List[string]]::new()
     $rebootReasons = [Collections.Generic.List[string]]::new()
     $featureStates = [ordered]@{}
@@ -272,6 +258,16 @@ function Get-VMateP11HostEnvironmentStatus {
                 [void]$rebootReasons.Add('本次内核尚未激活 test signing')
             }
         }
+        else {
+            if ($codeIntegrity.TestSigningConfigured) {
+                [void]$problems.Add('BCD testsigning=Yes；P-11 默认产品路径要求关闭。')
+                [void]$rebootReasons.Add('关闭宿主 testsigning 需要重新引导')
+            }
+            if ($codeIntegrity.TestSigningActive) {
+                [void]$problems.Add('本次宿主内核仍处于 test signing 运行态。')
+                [void]$rebootReasons.Add('退出宿主 test signing 运行态需要重新引导')
+            }
+        }
     }
     $espBootManager = Get-VMateP11EspBootManagerStatus
     if (-not $espBootManager.Readable) {
@@ -310,7 +306,7 @@ function Get-VMateP11HostEnvironmentStatus {
         catch { [void]$problems.Add("GPU-P 枚举失败：$($_.Exception.Message)") }
     }
     $artifacts = Test-VMateP11ColdStartArtifactManifest
-    if (-not $artifacts.Valid) {
+    if ($RequireTestSigning -and -not $artifacts.Valid) {
         [void]$problems.Add("21 套自定义 profile 工件无效：$($artifacts.Error)")
     }
     $foreign = Get-VMateP11ForeignKernelActivity
@@ -351,11 +347,9 @@ function Get-VMateP11HostEnvironmentStatus {
         RebootReasons = @($rebootReasons | Sort-Object -Unique)
     }
 }
-
 function Repair-VMateP11HostEnvironment {
     [CmdletBinding()]
-    param([bool]$RequireTestSigning = $true)
-
+    param([bool]$RequireTestSigning = $false)
     if (-not (Test-VMateP11Administrator)) {
         throw 'P-11 宿主环境修复需要管理员 PowerShell。'
     }
@@ -377,6 +371,10 @@ function Repair-VMateP11HostEnvironment {
     if ($RequireTestSigning) {
         [void](Invoke-VMateP11BcdEdit -Arguments @('/set', '{current}',
                 'testsigning', 'on'))
+    }
+    else {
+        [void](Invoke-VMateP11BcdEdit -Arguments @('/set', '{current}',
+                'testsigning', 'off'))
     }
     [void](Invoke-VMateP11BcdEdit -Arguments @('/set', '{current}',
             'nointegritychecks', 'off'))
@@ -447,11 +445,13 @@ function Repair-VMateP11HostEnvironment {
             }
         }
     }
-    $artifact = Test-VMateP11ColdStartArtifactManifest
-    if (-not $artifact.Valid) {
-        $artifact = New-VMateP11ColdStartArtifactManifest `
-            -GpuPRoot $PSScriptRoot -Path $artifact.Path
-        [void]$changes.Add('ColdStartArtifactManifest')
+    if ($RequireTestSigning) {
+        $artifact = Test-VMateP11ColdStartArtifactManifest
+        if (-not $artifact.Valid) {
+            $artifact = New-VMateP11ColdStartArtifactManifest `
+                -GpuPRoot $PSScriptRoot -Path $artifact.Path
+            [void]$changes.Add('ColdStartArtifactManifest')
+        }
     }
     $after = Get-VMateP11HostEnvironmentStatus `
         -RequireTestSigning:$RequireTestSigning
@@ -484,11 +484,9 @@ function Repair-VMateP11HostEnvironment {
         After = $after
     }
 }
-
 function Assert-VMateP11HostEnvironment {
     [CmdletBinding()]
-    param([bool]$RequireTestSigning = $true)
-
+    param([bool]$RequireTestSigning = $false)
     $status = Get-VMateP11HostEnvironmentStatus `
         -RequireTestSigning:$RequireTestSigning
     if (-not $status.Ready) {

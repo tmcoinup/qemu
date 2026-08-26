@@ -46,6 +46,7 @@ param(
     [switch]$RequireNvidiaSmi,
     [ValidateRange(10, 300)][int]$GuestValidationTimeoutSeconds = 90,
     [string]$StateRoot = '',
+    [string]$ArtifactManifestPath = '',
     [string]$PartitionIdentitySeed = '',
     [ValidateRange(0, 65535)][int]$GuestCapacity = 2,
     [ValidateRange(1, 300)][int]$HostLockTimeoutSeconds = 120,
@@ -62,46 +63,33 @@ $hardwareProfile = Resolve-VMateGpuPHardwareProfile `
     -RequireFullIdentity:$RequireFullHardwareIdentity.IsPresent
 [void](Assert-VMateGpuPHardwareProfileOverrides $hardwareProfile $PSBoundParameters)
 if (-not $PSBoundParameters.ContainsKey('ProcessorCount')) {
-    $ProcessorCount = [int]$hardwareProfile.Processor.Count
-}
+    $ProcessorCount = [int]$hardwareProfile.Processor.Count }
 if (-not $PSBoundParameters.ContainsKey('CpuMaximumPercent')) {
-    $CpuMaximumPercent = [int]$hardwareProfile.Processor.MaximumPercent
-}
+    $CpuMaximumPercent = [int]$hardwareProfile.Processor.MaximumPercent }
 if (-not $PSBoundParameters.ContainsKey('CpuReservePercent')) {
-    $CpuReservePercent = [int]$hardwareProfile.Processor.ReservePercent
-}
+    $CpuReservePercent = [int]$hardwareProfile.Processor.ReservePercent }
 if (-not $PSBoundParameters.ContainsKey('CpuRelativeWeight')) {
-    $CpuRelativeWeight = [int]$hardwareProfile.Processor.RelativeWeight
-}
+    $CpuRelativeWeight = [int]$hardwareProfile.Processor.RelativeWeight }
 if (-not $PSBoundParameters.ContainsKey('HwThreadCountPerCore')) {
-    $HwThreadCountPerCore = [int]$hardwareProfile.Processor.HwThreadsPerCore
-}
+    $HwThreadCountPerCore = [int]$hardwareProfile.Processor.HwThreadsPerCore }
 if (-not $PSBoundParameters.ContainsKey('ExposeVirtualizationExtensions')) {
     $ExposeVirtualizationExtensions = [bool](
-        $hardwareProfile.Processor.ExposeVirtualizationExtensions)
-}
+        $hardwareProfile.Processor.ExposeVirtualizationExtensions) }
 if (-not $PSBoundParameters.ContainsKey('MemoryStartupBytes')) {
-    $MemoryStartupBytes = [uint64]$hardwareProfile.Memory.startup_bytes
-}
+    $MemoryStartupBytes = [uint64]$hardwareProfile.Memory.startup_bytes }
 $profileGpu = $hardwareProfile.Gpu
 if (-not $PSBoundParameters.ContainsKey('LowMemoryMappedIoSpace')) {
-    $LowMemoryMappedIoSpace = [uint64]$profileGpu.low_mmio_bytes
-}
+    $LowMemoryMappedIoSpace = [uint64]$profileGpu.low_mmio_bytes }
 if (-not $PSBoundParameters.ContainsKey('HighMemoryMappedIoSpace')) {
-    $HighMemoryMappedIoSpace = [uint64]$profileGpu.high_mmio_bytes
-}
+    $HighMemoryMappedIoSpace = [uint64]$profileGpu.high_mmio_bytes }
 if (-not $PSBoundParameters.ContainsKey('ConsoleResolutionType')) {
-    $ConsoleResolutionType = [string]$profileGpu.console_resolution_type
-}
+    $ConsoleResolutionType = [string]$profileGpu.console_resolution_type }
 if (-not $PSBoundParameters.ContainsKey('ConsoleHorizontalResolution')) {
-    $ConsoleHorizontalResolution = [int]$profileGpu.console_horizontal_resolution
-}
+    $ConsoleHorizontalResolution = [int]$profileGpu.console_horizontal_resolution }
 if (-not $PSBoundParameters.ContainsKey('ConsoleVerticalResolution')) {
-    $ConsoleVerticalResolution = [int]$profileGpu.console_vertical_resolution
-}
+    $ConsoleVerticalResolution = [int]$profileGpu.console_vertical_resolution }
 if (-not $PSBoundParameters.ContainsKey('ConfigurationVersion')) {
-    $ConfigurationVersion = [string]$profileGpu.vm_configuration_version
-}
+    $ConfigurationVersion = [string]$profileGpu.vm_configuration_version }
 if (-not $PSBoundParameters.ContainsKey('GpuPercentage') -and
     -not $PSBoundParameters.ContainsKey('FullSharedGpuQuota') -and
     -not $PSBoundParameters.ContainsKey('Win10ReferenceGpuQuota')) {
@@ -118,15 +106,16 @@ if ($CreateVhd -and $ValidateGuest) {
     throw '空 VHDX 尚未安装系统；完成 Windows 安装并关机后再执行 guest 验证。'
 }
 if ($ValidateGuest -and -not $StartVM) {
-    throw '-ValidateGuest 要求同时使用 -StartVM。'
-}
+    throw '-ValidateGuest 要求同时使用 -StartVM。' }
 if (-not $ValidateGuest -and ($DisableHyperVVideo -or $RequireNvidiaSmi -or
         $null -ne $GuestCredential)) {
     throw 'GuestCredential/DisableHyperVVideo/RequireNvidiaSmi 只可与 -ValidateGuest 一起使用。'
 }
 $requiresCredential = $ValidateGuest -and $null -eq $GuestCredential
-if ($requiresCredential) {
-    throw '-ValidateGuest 要求显式传入 -GuestCredential。'
+if ($requiresCredential) { throw '-ValidateGuest 要求显式传入 -GuestCredential。' }
+if (-not [String]::IsNullOrWhiteSpace($ArtifactManifestPath)) {
+    throw ('-ArtifactManifestPath 对应的 paused-CPUID 路径已停用；' +
+        'P-11 安全启动不加载该清单。')
 }
 if (-not [String]::IsNullOrWhiteSpace($PartitionIdentitySeed) -and
     $PartitionIdentitySeed -notmatch '^[0-9a-fA-F]{64}$') {
@@ -267,6 +256,10 @@ if ($DryRun) {
         WillCloneBaseImage = -not [String]::IsNullOrWhiteSpace($BaseImagePath)
         WillStartVM = $StartVM.IsPresent
         WillValidateGuest = $ValidateGuest.IsPresent
+        StartMode = if (-not $StartVM) { 'NotRequested' } elseif ($CreateVhd) {
+            'WindowsInstallationBasic' } elseif (
+            [bool]$hardwareProfile.RequiresHostExtension) {
+            'P11SafePartialIdentityColdBoot' } else { 'StandardHyperVColdBoot' }
     }
 }
 $created = New-VMateGpuPVirtualMachine @creationParameters
@@ -292,6 +285,8 @@ try {
             InstancePath = [string]$selected.VendorInfo.InstancePath
             PartitionIdentitySeed = [string]$createdIdentity.PartitionIdentitySeed
             HostPartitionCapacityPlan = $partitionCapacityPlan
+            StartMode = if ($StartVM) { 'WindowsInstallationBasic' } else {
+                'NotRequested' }
             CapabilitySnapshot = $capabilityPreview
             QuotaMode = [string]$quotaRequest.QuotaMode
             EffectiveAllowOvercommit = $effectiveAllowOvercommit
@@ -319,6 +314,8 @@ try {
                 GuestCapacity = $GuestCapacity
                 HostLockTimeoutSeconds = $HostLockTimeoutSeconds
                 PartitionIdentitySeed = [string]$createdIdentity.PartitionIdentitySeed
+                RequireFullHardwareIdentity =
+                    $RequireFullHardwareIdentity.IsPresent
             }
             NextAction = if ($FullSharedGpuQuota) {
                 "安装 Windows 并完全关机后运行 Enable-VMateGpuP.ps1 -FullSharedGpuQuota -GuestCapacity $GuestCapacity。"
@@ -356,6 +353,7 @@ try {
         RequireNvidiaSmi = $RequireNvidiaSmi
         GuestValidationTimeoutSeconds = $GuestValidationTimeoutSeconds
         StateRoot = $StateRoot
+        RequireFullHardwareIdentity = $RequireFullHardwareIdentity
         PartitionIdentitySeed = $seed
         GuestCapacity = $GuestCapacity
         HostLockTimeoutSeconds = $HostLockTimeoutSeconds
@@ -387,6 +385,7 @@ try {
         IdentityBoot = $gpuResult.IdentityBoot; HostIdentityExtension = $gpuResult.HostIdentityExtension
         ComputeProfile = $created.ComputeProfile
         ConsoleProfile = $gpuResult.ConsoleProfile
+        Start = $gpuResult.Start
         GuestValidation = $gpuResult.GuestValidation
     }
 }

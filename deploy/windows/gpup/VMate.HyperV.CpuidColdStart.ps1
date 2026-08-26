@@ -2,21 +2,15 @@
 
 <#
 .SYNOPSIS
-    事务化协调 Hyper-V VM 的冷启动 CPUID 品牌投影。
+    已停用的 paused-CPUID 协调器兼容入口。
 
 .DESCRIPTION
-    仅允许 VM 从 Off 状态进入一次极短的 Paused 冷启动窗口。协调器先通过
-    固定 SHA-256 的只读用户态探针找出唯一受保护 VID handle，再调用只读、
-    非驻留的 VID context driver 核验 partition ID，最后调用白名单仅包含
-    0x80000002..0x80000004 的非驻留 CPUID driver。全部成功后才恢复 VM。
-
-    任一步失败都会关闭本次 VM，避免未投影或部分投影的 guest 继续启动。
-    本模块不修改 BCD，不开启 test signing，也不允许运行中切换 CPU 型号。
+    Win10 19045 + GPU-P 实机回归已经证明 Running/Paused 与 adapter 重配组合
+    不安全。入口现在只返回 dry-run 阻断证明，或在任何 VM 生命周期写入之前抛错。
+    历史辅助函数暂时保留用于证据复现和旧事务恢复，但正常产品入口不再调用它们。
 #>
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
 $gpuPIsolationModule = Join-Path $PSScriptRoot `
     'VMate.HyperV.GpuPColdStartIsolation.ps1'
 if (-not (Get-Command Get-VMateHyperVGpuPColdStartAdapterSnapshot `
@@ -264,6 +258,28 @@ function Start-VMateHyperVCpuidBrandColdBoot {
         $BrandString -match '[^\x20-\x7e]') {
         throw 'BrandString 必须是 1..48 字节可打印 ASCII。'
     }
+    $adapterCount = @(Get-VMGpuPartitionAdapter -VM $VM `
+            -ErrorAction Stop).Count
+    $blocked = [pscustomobject][ordered]@{
+        SchemaVersion = 3
+        ContractId = 'vmate-p11-paused-cpuid-disabled-v1'
+        State = 'BlockedBeforeVmStart'
+        VMName = [string]$VM.Name
+        VMId = ([Guid]$VM.Id).ToString('D')
+        BrandString = $BrandString
+        GpuPAdapterCount = $adapterCount
+        GpuPAdapterLifecycle = 'must-remain-attached-before-start-through-shutdown'
+        RuntimeModelSwitch = $false
+        SafeToStart = $false
+        RequiredReplacement = 'boot-bound-hypervisor-extension'
+        Reason = ('Win10 GPU-P paused/hot-add path disabled after ' +
+            'vmwp access violation and dxgkrnl BugCheck 0x3B reproduction')
+    }
+    if ($DryRun) { return $blocked }
+    throw ('paused-CPUID 路径已停用；已在 Start-VM、Suspend-VM 或 GPU-P ' +
+        'adapter 修改之前阻断。需要启动期宿主扩展才能应用 direct CPUID。')
+
+    # 以下实现仅作为旧实验的源码证据保留，入口在上方无条件失败关闭。
     $partitionProbe = Assert-VMateHyperVCpuidColdStartFile `
         -Path $PartitionProbePath `
         -ExpectedSha256 $ExpectedPartitionProbeSha256 `
@@ -289,11 +305,10 @@ function Start-VMateHyperVCpuidBrandColdBoot {
             StateTransition = @(
                 'OffWithGpuP', 'OffWithoutGpuP',
                 'RunningWithoutGpuP', 'PausedForCpuidWithoutGpuP',
-                'RunningGuestReadyWithoutGpuP',
-                'PausedForGpuPAttach', 'PausedWithGpuP',
+                'PausedWithGpuPBeforeGuestRelease',
                 'RunningWithGpuP')
             GpuPIsolation =
-                'DetachedBeforeStartRestoredAfterGuestReadyPause'
+                'DetachedBeforeStartRestoredAtFirstPausedBootGate'
             GuestReadyTimeoutSeconds = $GuestReadyTimeoutSeconds
             GuestStabilizationSeconds = $GuestStabilizationSeconds
             GpuPAdapter = $dryRunSnapshot
@@ -375,36 +390,31 @@ function Start-VMateHyperVCpuidBrandColdBoot {
             [string]$apply.State -cne 'AppliedWhilePaused') {
             throw 'CPUID 品牌扩展没有返回完整的 paused cold-boot 成功证明。'
         }
-        Resume-VM -VM $paused -Confirm:$false -ErrorAction Stop
-        $runningWithoutGpu = Wait-VMateHyperVState -VMName $current.Name `
+        # 在 guest 第一次继续执行前恢复 GPU-P。这样 Windows 从首次 PnP 枚举
+        # 起就看到 vendor GPU；同时避免在 dxgkrnl/vPCI 已初始化后再次暂停并
+        # 热加 adapter（Win10 19045 的该序列会留下 VirtualRender，历史上还在
+        # dxgkrnl+0x2596c 触发过一致的空指针 BugCheck 0x3B）。
+        [void](Add-VMateHyperVGpuPColdStartAdapter `
+                -VM $paused -Snapshot $adapterSnapshot)
+        Set-VMateHyperVGpuPColdStartTransactionPhase `
+            -Transaction $transaction `
+            -Phase 'AdapterRestoredAtFirstPausedBootGate'
+        Resume-VM -VM (Get-VM -Name $current.Name -ErrorAction Stop) `
+            -Confirm:$false -ErrorAction Stop
+        $live = Wait-VMateHyperVState -VMName $current.Name `
             -State 'Running' -TimeoutSeconds $StartupTimeoutSeconds
         $resumed = $true
         Set-VMateHyperVGpuPColdStartTransactionPhase `
-            -Transaction $transaction `
-            -Phase 'RunningWithoutAdapterWaitingForGuest'
+            -Transaction $transaction -Phase 'RunningWithAdapterRestored'
         $guestReady = Wait-VMateHyperVGuestHeartbeat `
             -VMName $current.Name -TimeoutSeconds $GuestReadyTimeoutSeconds
         if ($GuestStabilizationSeconds -gt 0) {
             Start-Sleep -Seconds $GuestStabilizationSeconds
         }
-        $readyVm = Get-VM -Name $current.Name -ErrorAction Stop
-        if ([string]$readyVm.State -cne 'Running') {
-            throw "GPU-P 延迟挂载前 VM 不再 Running；当前 $($readyVm.State)。"
+        $live = Get-VM -Name $current.Name -ErrorAction Stop
+        if ([string]$live.State -cne 'Running') {
+            throw "guest 就绪后 VM 不再 Running；当前 $($live.State)。"
         }
-        Suspend-VM -VM $readyVm -Confirm:$false -ErrorAction Stop
-        $gpuAttachPause = Wait-VMateHyperVState -VMName $current.Name `
-            -State 'Paused' -TimeoutSeconds $StartupTimeoutSeconds
-        [void](Add-VMateHyperVGpuPColdStartAdapter `
-                -VM $gpuAttachPause -Snapshot $adapterSnapshot)
-        Set-VMateHyperVGpuPColdStartTransactionPhase `
-            -Transaction $transaction `
-            -Phase 'AdapterRestoredAfterGuestReadyPause'
-        Resume-VM -VM (Get-VM -Name $current.Name -ErrorAction Stop) `
-            -Confirm:$false -ErrorAction Stop
-        $live = Wait-VMateHyperVState -VMName $current.Name `
-            -State 'Running' -TimeoutSeconds $StartupTimeoutSeconds
-        Set-VMateHyperVGpuPColdStartTransactionPhase `
-            -Transaction $transaction -Phase 'RunningWithAdapterRestored'
         $adapterCount = @(Get-VMGpuPartitionAdapter -VM $live `
                 -ErrorAction Stop).Count
         if ($adapterCount -ne 1) {
@@ -429,7 +439,7 @@ function Start-VMateHyperVCpuidBrandColdBoot {
             VidContext = $vidResult
             CpuidApply = $apply
             GpuPIsolation =
-                'DetachedBeforeStartRestoredAfterGuestReadyPause'
+                'DetachedBeforeStartRestoredAtFirstPausedBootGate'
             GuestReady = $guestReady
             GuestStabilizationSeconds = $GuestStabilizationSeconds
             GpuPAdapterCount = $adapterCount

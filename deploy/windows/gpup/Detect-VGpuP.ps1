@@ -36,6 +36,19 @@ param(
 # 不启用 StrictMode，避免访问不存在的属性触发终止错误。
 $ErrorActionPreference = 'Continue'
 
+function Test-PhysicalPciLocationInfo {
+    param([AllowEmptyString()][string]$Value)
+
+    # DEVPKEY_Device_LocationInfo 的真实 PCI 位置必须同时包含总线、设备和功能号。
+    # “Virtual PCI Bus Slot ...” 只是 Hyper-V vPCI 文本，不能按含有 “PCI Bus”
+    # 就误判成物理 PCI 拓扑。兼容英文和简体中文系统的 inbox 表述。
+    return $Value -match (
+        '(?ix)^\s*PCI\s*(?:' +
+        'bus\s+\d+\s*,\s*device\s+\d+\s*,\s*function\s+\d+|' +
+        '总线\s*\d+\s*[,，、]\s*设备\s*\d+\s*[,，、]\s*功能\s*\d+' +
+        ')\s*$')
+}
+
 function Invoke-VGpuPDetection {
 
     $signals = [System.Collections.Generic.List[object]]::new()
@@ -132,7 +145,7 @@ function Invoke-VGpuPDetection {
                 $loc = Get-PnpDeviceProperty -InstanceId $d.InstanceId `
                     -KeyName 'DEVPKEY_Device_LocationInfo' -ErrorAction SilentlyContinue
                 $val = if ($loc) { "$($loc.Data)" } else { '' }
-                $missing = -not ($val -match '(?i)PCI\s+bus')
+                $missing = -not (Test-PhysicalPciLocationInfo $val)
                 Add-Signal Display ("显卡缺失 PCI 位置信息 [{0}]" -f $d.FriendlyName) $missing `
                 ("LocationInfo='{0}'" -f $val)
             }

@@ -3,79 +3,16 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:VMateGuestMonitorServiceName = 'VMateP11GuestProvisioner'
-$script:VMateGuestMonitorRelativePath =
+# P-11 曾经在 Monitor class 下注册 ROOT\VMATEP11MONITOR 伪设备。该设备没有
+# EDID、没有显示输出，也没有签名驱动；重复枚举时还会留下 Code 28 的历史节点。
+# 新实现只负责离线清理这个旧格式。真实显示器身份必须由 active monitor 的
+# Microsoft inbox monitor stack 与可回读的 EDID 提供；仅写无效注册表值不算完成，
+# 也绝不再创建 VMate 命名的 PnP 节点。
+$script:VMateLegacyGuestMonitorServiceName = 'VMateP11GuestProvisioner'
+$script:VMateLegacyGuestMonitorRelativePath =
     'System32\VMate\VMateGuestMonitorProvisioner.exe'
-
-function Get-VMateGpuPGuestMonitorProvisionerSource {
-    [CmdletBinding()]
-    param()
-
-    $source = Join-Path $PSScriptRoot `
-        'native\bin\VMateGuestMonitorProvisioner.exe'
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-        throw "P-11 Guest Monitor 配置器缺失：$source"
-    }
-    $resolved = (Get-Item -LiteralPath $source -Force -ErrorAction Stop).FullName
-    if (Get-Command Get-VMateGpuPPeMachine -CommandType Function `
-            -ErrorAction SilentlyContinue) {
-        $pe = Get-VMateGpuPPeMachine -Path $resolved
-        if ($pe.Architecture -cne 'x64') {
-            throw "Guest Monitor 配置器不是 Windows x64 PE：$($pe.Machine)"
-        }
-    }
-    return [pscustomobject][ordered]@{
-        Path = $resolved
-        SHA256 = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash
-    }
-}
-
-function Copy-VMateGpuPGuestMonitorProvisioner {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][string]$GuestWindowsRoot,
-        [Parameter(Mandatory = $true)][object]$Source
-    )
-
-    $directory = Join-Path $GuestWindowsRoot 'System32\VMate'
-    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
-        [void](New-Item -ItemType Directory -Path $directory -Force `
-                -ErrorAction Stop)
-    }
-    if (Get-Command Assert-VMateGpuPNoReparsePoint -CommandType Function `
-            -ErrorAction SilentlyContinue) {
-        Assert-VMateGpuPNoReparsePoint -Path $directory `
-            -BoundaryRoot $GuestWindowsRoot
-    }
-    $destination = Join-Path $GuestWindowsRoot `
-        $script:VMateGuestMonitorRelativePath
-    if ((Test-Path -LiteralPath $destination -PathType Leaf) -and
-        (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ieq
-        [string]$Source.SHA256) {
-        return [pscustomobject]@{ Path = $destination; Changed = $false }
-    }
-    $temporary = Join-Path $directory `
-        ('.VMateGuestMonitorProvisioner.' +
-            [Guid]::NewGuid().ToString('N') + '.tmp')
-    try {
-        Copy-Item -LiteralPath ([string]$Source.Path) -Destination $temporary `
-            -Force -ErrorAction Stop
-        if ((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ine
-            [string]$Source.SHA256) {
-            throw 'Guest Monitor 配置器离线复制后哈希不一致。'
-        }
-        Move-Item -LiteralPath $temporary -Destination $destination -Force `
-            -ErrorAction Stop
-    }
-    finally {
-        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-    }
-    if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ine
-        [string]$Source.SHA256) {
-        throw 'Guest Monitor 配置器原子发布后哈希不一致。'
-    }
-    return [pscustomobject]@{ Path = $destination; Changed = $true }
-}
+$script:VMateLegacyGuestMonitorEnumRelativePath =
+    'Enum\Root\VMATEP11MONITOR'
 
 function Invoke-VMateGpuPOfflineSystemHive {
     [CmdletBinding()]
@@ -110,7 +47,22 @@ function Invoke-VMateGpuPOfflineSystemHive {
     }
 }
 
-function Set-VMateGpuPGuestMonitorOfflineService {
+function Get-VMateGpuPOfflineControlSets {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$HiveRoot)
+
+    $select = Get-ItemProperty -LiteralPath (Join-Path $HiveRoot 'Select') `
+        -ErrorAction Stop
+    $numbers = @($select.Current, $select.Default, $select.LastKnownGood |
+        Where-Object { $null -ne $_ -and [int]$_ -gt 0 } |
+        ForEach-Object { [int]$_ } | Sort-Object -Unique)
+    if ($numbers.Count -eq 0) {
+        throw '离线 Guest SYSTEM hive 没有有效 ControlSet。'
+    }
+    return @($numbers | ForEach-Object { 'ControlSet{0:D3}' -f $_ })
+}
+
+function Remove-VMateGpuPLegacyGuestMonitorRegistry {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$GuestWindowsRoot)
 
@@ -121,47 +73,63 @@ function Set-VMateGpuPGuestMonitorOfflineService {
     return Invoke-VMateGpuPOfflineSystemHive -SystemHivePath $hive `
         -Operation {
         param($root)
-        $select = Get-ItemProperty -LiteralPath (Join-Path $root 'Select') `
-            -ErrorAction Stop
-        $numbers = @($select.Current, $select.Default, $select.LastKnownGood |
-            Where-Object { $null -ne $_ -and [int]$_ -gt 0 } |
-            ForEach-Object { [int]$_ } | Sort-Object -Unique)
-        if ($numbers.Count -eq 0) {
-            throw '离线 Guest SYSTEM hive 没有有效 ControlSet。'
-        }
-        $configured = [Collections.Generic.List[string]]::new()
-        foreach ($number in $numbers) {
-            $controlSet = 'ControlSet{0:D3}' -f $number
-            $service = Join-Path $root `
-                "$controlSet\Services\$script:VMateGuestMonitorServiceName"
-            [void](New-Item -Path $service -Force -ErrorAction Stop)
-            $values = @{
-                Type = @('DWord', 0x10)
-                Start = @('DWord', 2)
-                ErrorControl = @('DWord', 1)
-                DelayedAutoStart = @('DWord', 0)
-                DisplayName = @('String', 'VMate P-11 Guest Provisioner')
-                Description = @('String',
-                    'Ensures the P-11 virtual console Monitor class device.')
-                ObjectName = @('String', 'LocalSystem')
-                ImagePath = @('ExpandString',
-                    ('"%SystemRoot%\{0}" --service' -f
-                        $script:VMateGuestMonitorRelativePath))
-                VMateContractId = @('String',
-                    'vmate-p11-guest-monitor-service-v1')
+        $removed = [Collections.Generic.List[string]]::new()
+        $controlSets = @(Get-VMateGpuPOfflineControlSets -HiveRoot $root)
+        foreach ($controlSet in $controlSets) {
+            $targets = @(
+                (Join-Path $root ("$controlSet\Services\" +
+                        $script:VMateLegacyGuestMonitorServiceName)),
+                (Join-Path $root ("$controlSet\" +
+                        $script:VMateLegacyGuestMonitorEnumRelativePath))
+            )
+            foreach ($target in $targets) {
+                if (Test-Path -LiteralPath $target) {
+                    Remove-Item -LiteralPath $target -Recurse -Force `
+                        -ErrorAction Stop
+                    if (Test-Path -LiteralPath $target) {
+                        throw "旧 P-11 Monitor 注册表项删除后仍存在：$target"
+                    }
+                    [void]$removed.Add($target.Substring($root.Length + 1))
+                }
             }
-            foreach ($entry in $values.GetEnumerator()) {
-                New-ItemProperty -LiteralPath $service -Name $entry.Key `
-                    -PropertyType $entry.Value[0] -Value $entry.Value[1] `
-                    -Force -ErrorAction Stop | Out-Null
-            }
-            [void]$configured.Add($controlSet)
         }
-        return @($configured)
+        return [pscustomobject][ordered]@{
+            ControlSets = $controlSets
+            Removed = @($removed)
+        }
     }
 }
 
-function Install-VMateGpuPGuestMonitorProvisioner {
+function Remove-VMateGpuPLegacyGuestMonitorFiles {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$GuestWindowsRoot)
+
+    $removed = [Collections.Generic.List[string]]::new()
+    $windows = (Get-Item -LiteralPath $GuestWindowsRoot -Force `
+        -ErrorAction Stop).FullName
+    # .NET Framework 对 \\?\Volume{GUID}\Windows 的 GetPathRoot 可能返回空；
+    # Windows 目录的已验证直接父级才是这里需要的卷根。
+    $volumeRoot = [IO.Directory]::GetParent($windows).FullName
+    $targets = @(
+        (Join-Path $windows $script:VMateLegacyGuestMonitorRelativePath),
+        (Join-Path $volumeRoot `
+            'ProgramData\VMate\GuestProvisioner\monitor-status.json'),
+        (Join-Path $volumeRoot `
+            'ProgramData\VMate\GuestProvisioner\.monitor-status.tmp')
+    )
+    foreach ($target in $targets) {
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            Remove-Item -LiteralPath $target -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $target) {
+                throw "旧 P-11 Monitor 文件删除后仍存在：$target"
+            }
+            [void]$removed.Add($target)
+        }
+    }
+    return @($removed)
+}
+
+function Remove-VMateGpuPLegacyGuestMonitorArtifacts {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$GuestWindowsRoot,
@@ -170,30 +138,44 @@ function Install-VMateGpuPGuestMonitorProvisioner {
 
     $root = (Get-Item -LiteralPath $GuestWindowsRoot -Force `
         -ErrorAction Stop).FullName
-    $source = Get-VMateGpuPGuestMonitorProvisionerSource
     if ($DryRun) {
         return [pscustomobject][ordered]@{
             Status = 'DryRun'
-            ServiceName = $script:VMateGuestMonitorServiceName
-            SourceSHA256 = $source.SHA256
-            GuestRelativePath = $script:VMateGuestMonitorRelativePath
+            LegacyServiceName = $script:VMateLegacyGuestMonitorServiceName
+            LegacyGuestRelativePath =
+                $script:VMateLegacyGuestMonitorRelativePath
+            LegacyEnumPath = $script:VMateLegacyGuestMonitorEnumRelativePath
+            CreatesMonitorDevice = $false
             GuestTestSigningRequired = $false
             GuestKernelDriverInstalled = $false
         }
     }
-    $copy = Copy-VMateGpuPGuestMonitorProvisioner `
-        -GuestWindowsRoot $root -Source $source
-    $controlSets = @(Set-VMateGpuPGuestMonitorOfflineService `
+    $registry = Remove-VMateGpuPLegacyGuestMonitorRegistry `
+        -GuestWindowsRoot $root
+    $files = @(Remove-VMateGpuPLegacyGuestMonitorFiles `
             -GuestWindowsRoot $root)
+    $changed = @($registry.Removed).Count -gt 0 -or $files.Count -gt 0
     return [pscustomobject][ordered]@{
-        Status = if ($copy.Changed) { 'Provisioned' } else { 'UpToDate' }
-        ServiceName = $script:VMateGuestMonitorServiceName
-        Path = $copy.Path
-        SHA256 = $source.SHA256
-        ControlSets = $controlSets
-        Startup = 'AutomaticLocalSystem'
-        MonitorClass = '{4d36e96e-e325-11ce-bfc1-08002be10318}'
+        Status = if ($changed) { 'LegacyArtifactsRemoved' }
+            else { 'AlreadyClean' }
+        ControlSets = @($registry.ControlSets)
+        RemovedRegistry = @($registry.Removed)
+        RemovedFiles = $files
+        CreatesMonitorDevice = $false
+        IdentityPolicy = 'signed-inbox-monitor-with-validated-active-edid'
         GuestTestSigningRequired = $false
         GuestKernelDriverInstalled = $false
     }
+}
+
+# 保留旧函数名作为内部调用兼容层，但语义已经是“清理旧伪设备”。新代码应调用
+# Remove-VMateGpuPLegacyGuestMonitorArtifacts。
+function Install-VMateGpuPGuestMonitorProvisioner {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$GuestWindowsRoot,
+        [switch]$DryRun
+    )
+    return Remove-VMateGpuPLegacyGuestMonitorArtifacts `
+        -GuestWindowsRoot $GuestWindowsRoot -DryRun:$DryRun
 }

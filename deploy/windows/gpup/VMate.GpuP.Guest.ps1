@@ -45,6 +45,8 @@ function Invoke-VMateGpuPGuestValidation {
 
     $entry = Join-Path $PSScriptRoot 'Test-VMateGpuPGuest.ps1'
     $module = Join-Path $PSScriptRoot 'VMate.GpuP.GuestValidation.ps1'
+    $deviceRealityModule = Join-Path $PSScriptRoot `
+        'VMate.GpuP.GuestDeviceReality.ps1'
     $monitorModule = Join-Path $PSScriptRoot `
         'VMate.GpuP.GuestMonitorValidation.ps1'
     $d3dModule = Join-Path $PSScriptRoot 'VMate.GpuP.D3DValidation.ps1'
@@ -58,6 +60,7 @@ function Invoke-VMateGpuPGuestValidation {
     $validationFiles = @(
         $entry,
         $module,
+        $deviceRealityModule,
         $monitorModule,
         $d3dModule,
         $identityModule,

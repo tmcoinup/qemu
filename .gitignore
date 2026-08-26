@@ -4,6 +4,7 @@
 /build-win64-vmate/
 /build-win64-audit/
 /.cache/
+/.codex-tmp/
 /.vscode/
 *.pyc
 .sdk

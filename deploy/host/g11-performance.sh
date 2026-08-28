@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
-# G-11 host runtime performance policy.
+# G-11 host runtime performance policy (latency-first).
 #
-# The policy deliberately keeps CPU frequency dynamic.  It restores every
-# cpufreq policy to the hardware min/max range, selects the fastest available
-# adaptive governor, enables turbo/boost, and removes latency spikes that are
-# harmful to KVM (THP synchronous defrag and KVM halt polling).  Guest CPUID,
-# TSC frequency, SMBIOS and Windows state are never modified.
+# G-11 guests are interactive desktops driven through an SDL window, so the
+# policy optimises wake-up latency rather than throughput-per-watt:
+#
+#   * governor=performance.  A vCPU thread looks like one long-running task to
+#     the host scheduler, so its utilisation never reflects the guest's bursty
+#     interactive load.  schedutil/powersave therefore ramp far too slowly --
+#     measured 1750 MHz average on a 3700 MHz part.
+#   * halt_poll_ns=200000.  Guests idle in very short bursts between input
+#     events; polling briefly before scheduling out removes a full IPI plus
+#     CFS wake-up round trip from every wake.
+#   * nx_huge_pages=N.  The iTLB-multihit mitigation runs a recovery thread
+#     that periodically zaps EPT huge pages, which shows up as regular micro
+#     stutter.  Local trusted guests can take that trade.
+#   * vm.swappiness=1.  memory-backend-memfd is shmem and stays swappable even
+#     with prealloc=on; a swapped-out guest page costs hundreds of ms.
+#
+# It also restores every cpufreq policy to the hardware min/max range, enables
+# turbo/boost, and keeps THP defrag synchronous-free.  Guest CPUID, TSC
+# frequency, SMBIOS and Windows state are never modified.
 set -euo pipefail
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -24,6 +38,7 @@ if ((TEST_MODE)); then
     THP_ROOT=${G11_PERFORMANCE_THP_ROOT:?test THP root is required}
     KVM_ROOT=${G11_PERFORMANCE_KVM_ROOT:?test KVM root is required}
     BLOCK_ROOT=${G11_PERFORMANCE_BLOCK_ROOT:?test block root is required}
+    VM_ROOT=${G11_PERFORMANCE_VM_ROOT:?test vm sysctl root is required}
     STATE_DIR=${G11_PERFORMANCE_STATE_DIR:?test state dir is required}
     LOCK_FILE=${G11_PERFORMANCE_LOCK_FILE:?test lock file is required}
 else
@@ -32,10 +47,16 @@ else
     THP_ROOT=/sys/kernel/mm/transparent_hugepage
     KVM_ROOT=/sys/module/kvm/parameters
     BLOCK_ROOT=/sys/block
+    VM_ROOT=/proc/sys/vm
     STATE_DIR=/run/qemu-g11-performance
     LOCK_FILE=/run/lock/qemu-g11-performance.lock
 fi
 STATE_FILE="$STATE_DIR/original-state.tsv"
+
+# Latency-first targets.  200 us of halt polling covers the common short idle
+# between input events without burning a meaningful slice of a vCPU.
+readonly HALT_POLL_NS_TARGET=200000
+readonly SWAPPINESS_TARGET=1
 
 log() { printf '[g11-performance] %s\n' "$*"; }
 warn() { printf '[g11-performance] WARN: %s\n' "$*" >&2; }
@@ -59,23 +80,22 @@ read_one_line() {
     printf '%s\n' "$value"
 }
 
-adaptive_governor_for_policy() {
-    local policy=$1 driver available
-    driver=$(read_one_line "$policy/scaling_driver" 2>/dev/null || true)
+latency_governor_for_policy() {
+    local policy=$1 available
     available=" $(read_one_line "$policy/scaling_available_governors" 2>/dev/null || true) "
 
-    # intel_pstate active mode calls its adaptive algorithm "powersave".  In
-    # passive intel_cpufreq mode, schedutil is the real load-following choice.
-    if [[ "$driver" == intel_pstate && "$available" == *' powersave '* ]]; then
-        printf 'powersave\n'
+    # Interactive guests need the frequency already high when the input event
+    # arrives, so a fixed high governor beats every load-following one here.
+    # The remaining branches are ordered by how quickly they ramp, and only
+    # matter on hosts that do not expose "performance" at all.
+    if [[ "$available" == *' performance '* ]]; then
+        printf 'performance\n'
     elif [[ "$available" == *' schedutil '* ]]; then
         printf 'schedutil\n'
     elif [[ "$available" == *' ondemand '* ]]; then
         printf 'ondemand\n'
     elif [[ "$available" == *' powersave '* ]]; then
         printf 'powersave\n'
-    elif [[ "$available" == *' performance '* ]]; then
-        printf 'performance\n'
     else
         return 1
     fi
@@ -132,6 +152,10 @@ snapshot_original_state() {
     done
     value=$(read_one_line "$KVM_ROOT/halt_poll_ns" 2>/dev/null || true)
     [[ -z "$value" ]] || state_append "$tmp" kvm.halt_poll_ns "$value"
+    value=$(read_one_line "$KVM_ROOT/nx_huge_pages" 2>/dev/null || true)
+    [[ -z "$value" ]] || state_append "$tmp" kvm.nx_huge_pages "$value"
+    value=$(read_one_line "$VM_ROOT/swappiness" 2>/dev/null || true)
+    [[ -z "$value" ]] || state_append "$tmp" vm.swappiness "$value"
     for scheduler in "$BLOCK_ROOT"/nvme*n*/queue/scheduler; do
         [[ -e "$scheduler" && ! -L "$scheduler" ]] || continue
         disk=${scheduler#"$BLOCK_ROOT"/}
@@ -151,7 +175,7 @@ performance_check() {
     for policy in "$CPUFREQ_ROOT"/policy[0-9]*; do
         [[ -d "$policy" && ! -L "$policy" ]] || continue
         count=$((count + 1))
-        expected=$(adaptive_governor_for_policy "$policy") || return 1
+        expected=$(latency_governor_for_policy "$policy") || return 1
         governor=$(read_one_line "$policy/scaling_governor" 2>/dev/null || true)
         [[ "$governor" == "$expected" ]] || return 1
         min=$(read_one_line "$policy/scaling_min_freq" 2>/dev/null || true)
@@ -179,7 +203,11 @@ performance_check() {
     value=$(read_one_line "$THP_ROOT/defrag" 2>/dev/null || true)
     [[ -z "$value" || "$(selected_value "$value")" == never ]] || return 1
     value=$(read_one_line "$KVM_ROOT/halt_poll_ns" 2>/dev/null || true)
-    [[ -z "$value" || "$value" == 0 ]] || return 1
+    [[ -z "$value" || "$value" == "$HALT_POLL_NS_TARGET" ]] || return 1
+    value=$(read_one_line "$KVM_ROOT/nx_huge_pages" 2>/dev/null || true)
+    [[ -z "$value" || "$value" == N ]] || return 1
+    value=$(read_one_line "$VM_ROOT/swappiness" 2>/dev/null || true)
+    [[ -z "$value" || "$value" == "$SWAPPINESS_TARGET" ]] || return 1
     for scheduler in "$BLOCK_ROOT"/nvme*n*/queue/scheduler; do
         [[ -e "$scheduler" && ! -L "$scheduler" ]] || continue
         value=$(read_one_line "$scheduler" 2>/dev/null || true)
@@ -195,6 +223,7 @@ performance_check() {
 performance_audit() {
     local first=1 policy governor min max hw_min hw_max count=0 summary='fixed-frequency'
     local turbo='n/a' thp_enabled='n/a' thp_defrag='n/a' halt_poll='n/a'
+    local nx_huge='n/a' swappiness='n/a'
     local ready=no
 
     for policy in "$CPUFREQ_ROOT"/policy[0-9]*; do
@@ -206,7 +235,7 @@ performance_audit() {
             max=$(read_one_line "$policy/scaling_max_freq" 2>/dev/null || echo unknown)
             hw_min=$(read_one_line "$policy/cpuinfo_min_freq" 2>/dev/null || echo unknown)
             hw_max=$(read_one_line "$policy/cpuinfo_max_freq" 2>/dev/null || echo unknown)
-            summary="dynamic governor=${governor} range=${min}-${max} hardware=${hw_min}-${hw_max}kHz"
+            summary="latency-first governor=${governor} range=${min}-${max} hardware=${hw_min}-${hw_max}kHz"
             first=0
         fi
     done
@@ -221,9 +250,14 @@ performance_audit() {
         "$(read_one_line "$THP_ROOT/defrag" 2>/dev/null || echo unknown)")
     [[ -e "$KVM_ROOT/halt_poll_ns" ]] &&
         halt_poll=$(read_one_line "$KVM_ROOT/halt_poll_ns" 2>/dev/null || echo unknown)
+    [[ -e "$KVM_ROOT/nx_huge_pages" ]] &&
+        nx_huge=$(read_one_line "$KVM_ROOT/nx_huge_pages" 2>/dev/null || echo unknown)
+    [[ -e "$VM_ROOT/swappiness" ]] &&
+        swappiness=$(read_one_line "$VM_ROOT/swappiness" 2>/dev/null || echo unknown)
     performance_check && ready=yes
-    printf 'g11-host-performance: ready=%s cpu="%s" policies=%s turbo=%s thp=%s/%s halt_poll_ns=%s memory=host-native-unthrottled\n' \
-        "$ready" "$summary" "$count" "$turbo" "$thp_enabled" "$thp_defrag" "$halt_poll"
+    printf 'g11-host-performance: ready=%s cpu="%s" policies=%s turbo=%s thp=%s/%s halt_poll_ns=%s nx_huge_pages=%s swappiness=%s memory=host-native-unthrottled\n' \
+        "$ready" "$summary" "$count" "$turbo" "$thp_enabled" "$thp_defrag" \
+        "$halt_poll" "$nx_huge" "$swappiness"
 }
 
 performance_apply() {
@@ -238,7 +272,7 @@ performance_apply() {
     for policy in "$CPUFREQ_ROOT"/policy[0-9]*; do
         [[ -d "$policy" && ! -L "$policy" ]] || continue
         count=$((count + 1))
-        governor=$(adaptive_governor_for_policy "$policy") || {
+        governor=$(latency_governor_for_policy "$policy") || {
             warn "${policy##*/} 没有可用 governor"
             failures=$((failures + 1))
             continue
@@ -278,7 +312,17 @@ performance_apply() {
         write_exact "$THP_ROOT/defrag" never || failures=$((failures + 1))
     fi
     if [[ -e "$KVM_ROOT/halt_poll_ns" ]]; then
-        write_exact "$KVM_ROOT/halt_poll_ns" 0 || failures=$((failures + 1))
+        write_exact "$KVM_ROOT/halt_poll_ns" "$HALT_POLL_NS_TARGET" ||
+            failures=$((failures + 1))
+    fi
+    # The bool parameter reads back as Y/N, so write the same spelling that
+    # write_exact will compare against.
+    if [[ -e "$KVM_ROOT/nx_huge_pages" ]]; then
+        write_exact "$KVM_ROOT/nx_huge_pages" N || failures=$((failures + 1))
+    fi
+    if [[ -e "$VM_ROOT/swappiness" ]]; then
+        write_exact "$VM_ROOT/swappiness" "$SWAPPINESS_TARGET" ||
+            failures=$((failures + 1))
     fi
     for scheduler in "$BLOCK_ROOT"/nvme*n*/queue/scheduler; do
         [[ -e "$scheduler" && ! -L "$scheduler" ]] || continue
@@ -290,7 +334,7 @@ performance_apply() {
     performance_audit
     ((failures == 0)) || die "有 ${failures} 个宿主性能旋钮未能应用"
     performance_check || die '应用后复核未通过'
-    log "已应用 dynamic-unbound-v1（${count} 个 CPU policy；不按来宾型号封顶）"
+    log "已应用 latency-first-v1（${count} 个 CPU policy；不按来宾型号封顶）"
 }
 
 restore_one() {
@@ -307,6 +351,8 @@ restore_one() {
         thp.enabled) path="$THP_ROOT/enabled" ;;
         thp.defrag) path="$THP_ROOT/defrag" ;;
         kvm.halt_poll_ns) path="$KVM_ROOT/halt_poll_ns" ;;
+        kvm.nx_huge_pages) path="$KVM_ROOT/nx_huge_pages" ;;
+        vm.swappiness) path="$VM_ROOT/swappiness" ;;
         nvme.nvme[0-9]*n[0-9]*.scheduler)
             [[ "$key" =~ ^nvme\.(nvme[0-9]+n[0-9]+)\.scheduler$ ]] || return 1
             disk=${BASH_REMATCH[1]}

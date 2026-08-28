@@ -20,9 +20,9 @@ $ErrorActionPreference = 'Stop'
 
 # Exact source value from the production-signed GRID 538.33 nvgridsw.inf and
 # the reviewed G-11 policy written to the active NVIDIA display-adapter
-# software key.  The legacy value is accepted only to migrate VMs that already
-# received the previous 15-mode policy.  The destination exactly matches the
-# ten source modes in the reviewed FHD EDID (notably including 1600x900).
+# software key.  Legacy values are accepted only to migrate VMs that already
+# received an older reviewed policy.  The destination contains only modes
+# whose R535 128-byte-pitch scanout length is exactly 4-KiB aligned.
 $NvidiaGrid53833NvModes = [string[]]@(
     '{*}SHV 1280x720x8,16,32,64 1680x1050x8,16,32,64 1920x1080x8,16,32,64 2048x1536x8,16,32,64=1; 1920x1440x8,16,32,64=1F; 640x480x8,16,32,64 800x600x8,16,32,64 1024x768x8,16,32,64=1FFF; 1920x1200x8,16,32,64=3F; 1600x900x8,16,32,64=3FF; 2560x1440x8,16,32,64 2560x1600x8,16,32,64=7B; 1600x1024x8,16,32,64 1600x1200x8,16,32,64=7F; 1280x768x8,16,32,64 1280x800x8,16,32,64 1280x960x8,16,32,64 1280x1024x8,16,32,64 1360x768x8,16,32,64 1366x768x8,16,32,64=7FF;',
     ' 1152x864x8,16,32,64 1440x1080x8,16,32,64=FFF;S 720x480x8,16,32,64=1; 720x576x8,16,32,64=8032;'
@@ -31,12 +31,15 @@ $NvidiaLegacyFhdNvModesPolicy = [string[]]@(
     '{*}SHV 1280x720x8,16,32,64 1920x1080x8,16,32,64=1; 640x480x8,16,32,64 800x600x8,16,32,64 1024x768x8,16,32,64=1FFF; 1600x900x8,16,32,64=3FF; 1600x1024x8,16,32,64 1600x1200x8,16,32,64=7F; 1280x768x8,16,32,64 1280x960x8,16,32,64 1280x1024x8,16,32,64 1360x768x8,16,32,64 1366x768x8,16,32,64=7FF;',
     ' 1152x864x8,16,32,64 1440x1080x8,16,32,64=FFF;'
 )
-$NvidiaFhdNvModesPolicy = [string[]]@(
+$NvidiaPageUnsafeFhdNvModesPolicy = [string[]]@(
     '{*}SHV 1280x720x8,16,32,64 1920x1080x8,16,32,64=1; 640x480x8,16,32,64 800x600x8,16,32,64 1024x768x8,16,32,64=1FFF; 1600x900x8,16,32,64=3FF; 1280x768x8,16,32,64 1280x960x8,16,32,64 1280x1024x8,16,32,64 1360x768x8,16,32,64=7FF;'
 )
+$NvidiaFhdNvModesPolicy = [string[]]@(
+    '{*}SHV 1280x720x8,16,32,64 1920x1080x8,16,32,64=1; 640x480x8,16,32,64 1024x768x8,16,32,64=1FFF; 1280x768x8,16,32,64 1280x960x8,16,32,64 1280x1024x8,16,32,64 1360x768x8,16,32,64=7FF;'
+)
 $NvidiaFhdModeNames = [string[]]@(
-    '1920x1080', '1600x900', '1360x768', '1280x1024', '1280x960',
-    '1280x768', '1280x720', '1024x768', '800x600', '640x480'
+    '1920x1080', '1360x768', '1280x1024', '1280x960',
+    '1280x768', '1280x720', '1024x768', '640x480'
 )
 $NvidiaGrid53833ProviderNames = [string[]]@('NVIDIA', 'NVIDIA Corporation')
 $NvidiaGrid53833DriverVersion = '31.0.15.3833'
@@ -398,8 +401,10 @@ function Build-FhdEdid {
         0xEE, 0x91, 0xA3, 0x54, 0x4C, 0x99, 0x26, 0x0F, 0x50, 0x54
     ))
 
-    # Established 60 Hz timings: 640x480, 800x600, and 1024x768.
-    $edid[35] = 0x21
+    # R535 presentation rejects 800x600 because its scanout length is not a
+    # 4-KiB multiple.  Keep only the page-safe established 60-Hz timings:
+    # 640x480 and 1024x768.
+    $edid[35] = 0x20
     $edid[36] = 0x08
     $edid[37] = 0x00
 
@@ -412,7 +417,6 @@ function Build-FhdEdid {
     }
     $standardModes = @(
         [pscustomobject]@{ X = 1920; Aspect = 3 }, # 1920x1080
-        [pscustomobject]@{ X = 1600; Aspect = 3 }, # 1600x900
         [pscustomobject]@{ X = 1280; Aspect = 2 }, # 1280x1024
         [pscustomobject]@{ X = 1280; Aspect = 3 }  # 1280x720
     )
@@ -525,17 +529,17 @@ function Assert-FhdEdid {
 
     $expectedStandard = [byte[]]@(
         0xD1, 0xC0, # 1920x1080
-        0xA9, 0xC0, # 1600x900
         0x81, 0x80, # 1280x1024
         0x81, 0xC0, # 1280x720
-        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01
+        0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01
     )
     for ($i = 0; $i -lt $expectedStandard.Length; $i++) {
         if ($Edid[38 + $i] -ne $expectedStandard[$i]) {
             throw "Internal EDID error: unexpected standard timing list"
         }
     }
-    if ($Edid[35] -ne 0x21 -or $Edid[36] -ne 0x08 -or $Edid[37] -ne 0) {
+    if ($Edid[35] -ne 0x20 -or $Edid[36] -ne 0x08 -or $Edid[37] -ne 0) {
         throw "Internal EDID error: unexpected established timings"
     }
     if ($Edid[75] -ne 0xF7 -or $Edid[93] -ne 0xFD -or
@@ -631,6 +635,30 @@ function Get-NvModeNames {
     return [string[]]@($seen.Keys | Sort-Object)
 }
 
+function Get-R535ConsoleFrameBytes {
+    param(
+        [Parameter(Mandatory = $true)][int]$Width,
+        [Parameter(Mandatory = $true)][int]$Height
+    )
+
+    if ($Width -le 0 -or $Height -le 0) {
+        throw "Invalid display mode ${Width}x${Height}"
+    }
+    [int64]$rowBytes = [int64]$Width * 4
+    [int64]$pitch = [int64]([Math]::Ceiling($rowBytes / 128.0) * 128)
+    return [int64]($pitch * $Height)
+}
+
+function Test-R535ConsoleSafeMode {
+    param(
+        [Parameter(Mandatory = $true)][int]$Width,
+        [Parameter(Mandatory = $true)][int]$Height
+    )
+
+    $frameBytes = Get-R535ConsoleFrameBytes -Width $Width -Height $Height
+    return ($frameBytes % 4096) -eq 0
+}
+
 function Assert-NvidiaFhdModePolicy {
     param([Parameter(Mandatory = $true)][string[]]$Values)
 
@@ -648,6 +676,13 @@ function Assert-NvidiaFhdModePolicy {
         $parts = $name.Split('x')
         if (([int]$parts[0] * 10) -eq ([int]$parts[1] * 16)) {
             throw "G-11 NV_Modes contains forbidden 16:10 mode: $name"
+        }
+        if (-not (Test-R535ConsoleSafeMode `
+                -Width ([int]$parts[0]) -Height ([int]$parts[1]))) {
+            $frameBytes = Get-R535ConsoleFrameBytes `
+                -Width ([int]$parts[0]) -Height ([int]$parts[1])
+            throw ("G-11 NV_Modes contains R535 page-unsafe mode: " +
+                ("{0} frame=0x{1:X}" -f $name, $frameBytes))
         }
     }
 }
@@ -700,6 +735,8 @@ function Set-NvidiaFhdModePolicy {
 
     [string[]]$sourceText = @(ConvertTo-NvModeCanonical $NvidiaGrid53833NvModes)
     [string[]]$legacyPolicyText = @(ConvertTo-NvModeCanonical $NvidiaLegacyFhdNvModesPolicy)
+    [string[]]$pageUnsafePolicyText = @(
+        ConvertTo-NvModeCanonical $NvidiaPageUnsafeFhdNvModesPolicy)
     [string[]]$policyText = @(ConvertTo-NvModeCanonical $NvidiaFhdNvModesPolicy)
     Assert-NvidiaFhdModePolicy $NvidiaFhdNvModesPolicy
     $plans = @()
@@ -776,7 +813,8 @@ function Set-NvidiaFhdModePolicy {
             Assert-NvidiaFhdModePolicy $existing
             $needsWrite = $false
         } elseif ((Test-StringArrayEqual -Left $existingText -Right $sourceText) -or
-                  (Test-StringArrayEqual -Left $existingText -Right $legacyPolicyText)) {
+                  (Test-StringArrayEqual -Left $existingText -Right $legacyPolicyText) -or
+                  (Test-StringArrayEqual -Left $existingText -Right $pageUnsafePolicyText)) {
             $needsWrite = $true
         } else {
             $existingLengths = (@($existingText | ForEach-Object { $_.Length }) -join ',')
@@ -798,7 +836,7 @@ function Set-NvidiaFhdModePolicy {
     try {
         foreach ($plan in $plans) {
             if (-not $plan.NeedsWrite) {
-                Write-Host "  $($plan.Path) NV_Modes already matches the $($NvidiaFhdModeNames.Count)-mode FHD policy"
+                Write-Host "  $($plan.Path) NV_Modes already matches the $($NvidiaFhdModeNames.Count)-mode R535 page-safe FHD policy"
                 continue
             }
             Set-RegistryValue $plan.Path 'NV_Modes' MultiString $NvidiaFhdNvModesPolicy
@@ -813,7 +851,7 @@ function Set-NvidiaFhdModePolicy {
                 [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames))
             Assert-NvidiaFhdModePolicy $written
             $writes++
-            Write-Host "  $($plan.Path) NV_Modes -> $($NvidiaFhdModeNames.Count) reviewed FHD/1K PC modes"
+            Write-Host "  $($plan.Path) NV_Modes -> $($NvidiaFhdModeNames.Count) reviewed R535 page-safe FHD/1K PC modes"
         }
     } catch {
         $failure = $_

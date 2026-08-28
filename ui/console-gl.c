@@ -149,22 +149,47 @@ void surface_gl_update_texture(QemuGLShader *gls,
                                DisplaySurface *surface,
                                int x, int y, int w, int h)
 {
+    assert(gls);
+    if (surface->texture) {
+        (void)surface_gl_upload_texture(surface, surface->texture,
+                                        x, y, x, y, w, h);
+    }
+}
+
+bool surface_gl_upload_texture(DisplaySurface *surface, GLuint texture,
+                               int src_x, int src_y,
+                               int dst_x, int dst_y, int w, int h)
+{
     uint8_t *data = (void *)surface_data(surface);
     GLenum glformat;
     GLenum gltype;
+    GLint old_texture;
+    GLint old_row_length;
 
-    assert(gls);
-    assert(map_format(surface_format(surface), &glformat, &gltype));
-
-    if (surface->texture) {
-        glBindTexture(GL_TEXTURE_2D, surface->texture);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT,
-                      surface_stride(surface)
-                      / surface_bytes_per_pixel(surface));
-        glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, glformat, gltype,
-                        data + surface_stride(surface) * y
-                        + surface_bytes_per_pixel(surface) * x);
+    if (!texture || src_x < 0 || src_y < 0 || dst_x < 0 || dst_y < 0 ||
+        w <= 0 || h <= 0 || w > surface_width(surface) ||
+        h > surface_height(surface) ||
+        src_x > surface_width(surface) - w ||
+        src_y > surface_height(surface) - h ||
+        !map_format(surface_format(surface), &glformat, &gltype)) {
+        return false;
     }
+
+    for (unsigned int i = 0; i < 8 && glGetError() != GL_NO_ERROR; i++) {
+        /* Discard errors left by the caller before checking this upload. */
+    }
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
+    glGetIntegerv(GL_UNPACK_ROW_LENGTH_EXT, &old_row_length);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT,
+                  surface_stride(surface) /
+                  surface_bytes_per_pixel(surface));
+    glTexSubImage2D(GL_TEXTURE_2D, 0, dst_x, dst_y, w, h, glformat, gltype,
+                    data + surface_stride(surface) * src_y +
+                    surface_bytes_per_pixel(surface) * src_x);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, old_row_length);
+    glBindTexture(GL_TEXTURE_2D, old_texture);
+    return glGetError() == GL_NO_ERROR;
 }
 
 void surface_gl_render_texture(QemuGLShader *gls,

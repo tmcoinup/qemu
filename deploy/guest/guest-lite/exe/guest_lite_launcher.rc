@@ -9,8 +9,8 @@
 105 RCDATA "README.txt"
 
 1 VERSIONINFO
- FILEVERSION 2,6,0,0
- PRODUCTVERSION 2,6,0,0
+ FILEVERSION 2,6,4,0
+ PRODUCTVERSION 2,6,4,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -23,11 +23,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Local QEMU guest tools\0"
             VALUE "FileDescription", "G-11 Windows 10 Guest Lite\0"
-            VALUE "FileVersion", "2.6.0.0\0"
+            VALUE "FileVersion", "2.6.4.0\0"
             VALUE "InternalName", "G11GuestLite\0"
             VALUE "OriginalFilename", "G11GuestLite.exe\0"
             VALUE "ProductName", "G-11 Windows 10 Guest Lite\0"
-            VALUE "ProductVersion", "2.6.0.0\0"
+            VALUE "ProductVersion", "2.6.4.0\0"
         END
     END
     BLOCK "VarFileInfo"

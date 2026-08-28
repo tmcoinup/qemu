@@ -13,6 +13,8 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 | 初始化宿主 bridge | `./deploy/scripts/setup-bridge.sh` |
 | 宿主动态提速/回滚 | `./deploy/scripts/g11-performance.sh audit\|apply\|restore` |
 | SDL 画面/键鼠响应封装 | `./deploy/scripts/g11-sdl-performance.sh audit\|profile\|start\|verify` |
+| 新镜像安全安装/修复 GRID | `./deploy/scripts/vmctl.sh driver-install ID [--start]` |
+| R535 SDL/QMP 纯黑恢复 | `./deploy/scripts/vmctl.sh repair-display ID [--no-start]` |
 | 可选 NVMe APST 管理 | `./deploy/scripts/host-nvme-apst.sh ACTION` |
 | 封装基础镜像 | `./deploy/scripts/seal-base.sh SOURCE_ID BASE_NAME` |
 | 克隆基础镜像 | `./deploy/scripts/clone-from-base.sh BASE_NAME NEW_ID [options]` |
@@ -25,13 +27,17 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 
 ```bash
 ./deploy/scripts/create-vm.sh ID
+./deploy/scripts/create-vm.sh ID --cpu-profile i7-4930k --board-profile asus-p9x79 --memory-size 4G
 ./deploy/scripts/create-disk.sh ID --blank
 ./deploy/scripts/seal-base.sh 1 win10-ltsc-v1
 ./deploy/scripts/clone-from-base.sh win10-ltsc-v1 11 --start
 ./deploy/scripts/delete-vm.sh ID
 ./deploy/scripts/sync-monitor-profile.sh ID --force
 ./deploy/scripts/recover-hibernated-vm.sh ID
+./deploy/scripts/recover-vgpu-black-screen.sh ID
+./deploy/scripts/install-vgpu-driver-safe.sh ID
 ./deploy/scripts/repair-clone-init.sh ID
+./deploy/scripts/refresh-g11-private-base.sh BASE_NAME [--check]
 ./deploy/scripts/report-vm-boot-timing.sh ID
 ./deploy/scripts/migrate-g11-layout.sh --check
 ./deploy/scripts/vmctl.sh start ID
@@ -48,6 +54,10 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 ./deploy/scripts/guest-performance.sh ID eject
 ```
 
+Core i7-4930K（6C/12T）直接使用统一 `create-vm.sh`，可选择 ASUS/Gigabyte/
+ASRock 主板、4–5 个大牌内存和五品牌 SSD。完整复制粘贴教程见
+[`../docs/G11-6C12T-QUICKSTART.md`](../docs/G11-6C12T-QUICKSTART.md)。
+
 这些文件就是唯一实现，共用 `deploy/lib/` 中的内部库。宿主凭据仍只能通过批准的
 运行时安全渠道或环境变量提供，脚本不会保存凭据。
 普通启动默认不创建光驱；上面的 `mount` 会热插只读光驱，`eject`
@@ -57,7 +67,7 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 `autorun.inf` 覆盖名称，也不创建或预分配宿主机镜像。它和任意 host 目录 U 盘均为
 只读 VVFAT/USB Mass Storage，不需要 Windows 额外驱动。详见
 [`../docs/G11-USB-DIRECTORY.md`](../docs/G11-USB-DIRECTORY.md)。
-`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.6.0；Defender、防火墙服务启动、
+`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.6.4；Defender、防火墙 profile、
 系统/软件更新、OneDrive、资讯天气、通知、消费 App、默认静音、en-US/US 第一和
 Microsoft Pinyin 第二、游戏模式/Game DVR、高性能电源、NVIDIA 最高性能、DNF High
 优先级和固定 Temp 旧文件清理的 VM1
@@ -112,8 +122,14 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
 ./deploy/scripts/vmctl.sh start 11
 ./deploy/scripts/vmctl.sh display 11 status
 ./deploy/scripts/vmctl.sh stop 11
-./deploy/scripts/vmctl.sh repair-init 11  # 仅失败克隆：刷新初始化包，不改母盘/系统盘
+./deploy/scripts/vmctl.sh repair-init 11  # 仅失败克隆：刷新用户态首启载荷与绑定 ISO
 ```
+
+`repair-init` 现在同时刷新停止的失败克隆中的用户态 finalizer/Guest Lite 和 VM 绑定
+初始化 ISO；它保留 Licensed 结果、正式驱动与母盘，不改 BCD 或代码完整性设置。
+仓库载荷升级后，后续克隆先运行
+`./deploy/scripts/vmctl.sh refresh-base BASE_NAME` 一次。完整傻瓜步骤见
+[`../docs/G11-CLONE-PAYLOAD-RECOVERY.md`](../docs/G11-CLONE-PAYLOAD-RECOVERY.md)。
 
 前四条分别完成“清理并封装 base → 构建无凭据 portable → 安全注入并生成证明 →
 克隆”。宿主凭据不会写入仓库；`sudo` 只通过运行时安全渠道取得授权。

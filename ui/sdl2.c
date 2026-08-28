@@ -1364,6 +1364,7 @@ void sdl2_window_create(struct sdl2_console *scon)
      * 直接拿 SDL 当前 flag 做初值, 避免冷启动后 sdl2_input_allowed 永远 false.
      */
     sdl2_sync_focus_from_window(scon);
+#ifdef CONFIG_OPENGL
     if (scon->opengl) {
         const char *driver = "opengl";
 
@@ -1454,7 +1455,9 @@ void sdl2_window_create(struct sdl2_console *scon)
             qemu_egl_display = eglGetCurrentDisplay();
         }
 #endif
-    } else {
+    } else
+#endif
+    {
         /* The SDL renderer is only used by sdl2-2D, when OpenGL is disabled */
         scon->real_renderer = SDL_CreateRenderer(
             scon->real_window, -1, SDL_RENDERER_ACCELERATED);

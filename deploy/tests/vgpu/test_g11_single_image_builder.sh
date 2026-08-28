@@ -65,8 +65,14 @@ TRACE="$TRACE" "$HARNESS/deploy/build-g11-private-base.sh" 8 win10-base \
 
 grep -Fq "seal|root=$VMS_DIR|base=$BASE_DIR|archive=$BASE_DIR/archive|8|win10-base|--yes|--single-image" "$TRACE" ||
     fail "builder did not pass the selected V-11-style storage and seal mode"
+grep -Fq 'package|--with-license-token' "$TRACE" ||
+    fail "builder did not rebuild the licensed EXE from the current checkout"
 grep -Fq 'install|--base-name|win10-base|--site-private|--sysprep-generalized|--single-image|--yes' "$TRACE" ||
     fail "builder did not request ephemeral installer rollback"
+package_line=$(grep -nF 'package|--with-license-token' "$TRACE" | head -1 | cut -d: -f1)
+install_line=$(grep -nF 'install|--base-name|win10-base' "$TRACE" | head -1 | cut -d: -f1)
+[[ "$package_line" -lt "$install_line" ]] ||
+    fail "builder did not package current source before offline injection"
 grep -Fq "export|--in-place|win10-base|$BASE_DIR" "$TRACE" ||
     fail "builder did not create an in-place transfer manifest"
 [[ -f "$BASE_DIR/win10-base.qcow2" && -f "$BASE_DIR/win10-base.g11base" ]] ||

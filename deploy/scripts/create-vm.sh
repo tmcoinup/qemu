@@ -573,8 +573,8 @@ if (( FORCE )) && [[ -f "$CONF" ]]; then
 fi
 
 # For an unqualified default creation, try reviewed new combinations in their
-# performance-first order (no-iGPU 4C/8T, then CPU/RAM frequency)
-# against this host before materializing identity.  If both active CPUs fail,
+# performance-first order (6C/12T i7-4930K, then the 4C/8T X79 CPUs)
+# against this host before materializing identity.  If all active CPUs fail,
 # creation fails instead of silently selecting an older, slower platform.  If
 # probing is unavailable (missing KVM/QEMU/timeout), keep a new X79 profile and
 # let the launcher fail closed.
@@ -711,7 +711,7 @@ elif (( COMPONENT_SELECTOR_COUNT )); then
     PLATFORM=${PLATFORMS[$((RANDOM % ${#PLATFORMS[@]}))]}
 else
     if ! select_default_platform_for_host; then
-        echo "两款活跃 4C/8T X79 CPU 均无法由本机 KVM enforce=on 实现；拒绝降级到旧慢平台" >&2
+        echo "普通新建池中的 X79 CPU 均无法由本机 KVM enforce=on 实现；拒绝降级到旧慢平台" >&2
         echo "请先运行 ./deploy/scripts/check-hardware-pool.sh 查看逐 CPU 原因" >&2
         exit 2
     fi

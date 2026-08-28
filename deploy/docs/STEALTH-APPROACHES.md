@@ -44,7 +44,7 @@ strict-A 不再是交付目标。启动器拒绝新的 CLI/持久化 A；legacy 
 ## off：原生安装与恢复身份
 
 ```bash
-./deploy/scripts/start-vm.sh 2 --no-spoof --no-monitor-sync
+./deploy/scripts/vmctl.sh driver-install 2
 ```
 
 off 使用原生 GRID PCI 身份：
@@ -54,7 +54,8 @@ off 使用原生 GRID PCI 身份：
 2GB/2Q: 10DE:1E30 / SUBSYS_132610DE
 ```
 
-它适合安装原版 GRID 538.33、排查 Code 28/43，以及从严格身份安全恢复。off 启动会
+统一入口适合安装原版 GRID 538.33、排查 Code 28/43，以及从严格身份安全恢复。安装
+期间另有标准 VGA 承担 console；底层 off 身份会
 移除该 UUID 的 per-mdev marketing/internal identity；即使配置持久化了
 `VGPU_MDEV_FRL_ENABLED=0`，本次 off 启动也不会应用该 FRL override。
 
@@ -211,7 +212,7 @@ Remote Display Adapter，其设备数量、动态分辨率与编码 FPS 不能�
 执行：
 
 ```bash
-./deploy/scripts/start-vm.sh <vm_id> --no-spoof --no-monitor-sync
+./deploy/scripts/vmctl.sh driver-install <vm_id>
 ```
 
 不要自动卸载设备或删除现有 `oemN.inf`，避免让 VM 失去显示。先在原生

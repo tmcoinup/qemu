@@ -432,7 +432,7 @@ verify_guest_lite_dir() {
        "$GUEST_LITE_MANIFEST_SHA256" ]] || return 1
     jq -e '
         (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-        .schemaVersion == 1 and .profileVersion == "2.6.0" and
+        .schemaVersion == 1 and .profileVersion == "2.6.4" and
         (.files | type) == "array" and (.files | length) == 5 and
         ([.files[].name] | sort) == [
             "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -811,17 +811,38 @@ else
 fi
 mkdir -p -- "$DEST_DIR"
 if ((SITE_PRIVATE)); then
+    # Seal-G11-Template.cmd must roll back live experimental state before
+    # Sysprep.  Offline deletion cannot restore registry/services from an
+    # active baseline, so fail closed instead of producing a contaminated base.
+    for active_clone_state in \
+            "$MOUNT_DIR/ProgramData/G11GuestPerformance/state.json" \
+            "$MOUNT_DIR/ProgramData/G11GuestLite/state.json" \
+            "$MOUNT_DIR/ProgramData/QemuGpuZProfile/last-result.json"; do
+        [[ ! -e "$active_clone_state" && ! -L "$active_clone_state" ]] ||
+            die "generalized template retained active clone state: ${active_clone_state#"$MOUNT_DIR"/}"
+    done
+    PROJECTION_STATE="$MOUNT_DIR/ProgramData/G11/SystemNvapiProjection"
+    [[ ! -e "$PROJECTION_STATE" && ! -L "$PROJECTION_STATE" ]] ||
+        die "generalized template retained per-VM system NVAPI projection state"
+
     # A private Sysprep generation has exactly one executable route. Remove
     # generic/previous-run state even when the maker reused an older template.
     rm -f -- \
         "$MOUNT_DIR/Users/Public/Desktop/VgpuPortable.exe" \
         "$DEST_DIR/clone-initialization.json" \
-        "$DEST_DIR/clone-initialization-error.txt" \
-        "$MOUNT_DIR/ProgramData/QemuGpuZProfile/last-result.json"
-    # A rollback baseline is bound to one generalized Windows identity and
-    # one interactive SID. Never let template/previous-test state leak into a
-    # new clone generation.
-    rm -rf -- "$MOUNT_DIR/ProgramData/G11GuestLite"
+        "$DEST_DIR/clone-initialization-error.txt"
+    # Rolled-back reports/archives and prior executable output are not active
+    # baselines, but remain identity-bound. Remove their exact plain roots so
+    # a new clone can create its own state from scratch.
+    for stale_clone_root in \
+            "$MOUNT_DIR/ProgramData/QemuGpuZProfile" \
+            "$MOUNT_DIR/ProgramData/G11GuestPerformance" \
+            "$MOUNT_DIR/ProgramData/G11GuestLite" \
+            "$DEST_DIR/logs"; do
+        [[ ! -L "$stale_clone_root" ]] ||
+            die "clone-state cleanup target is a symlink/reparse path: ${stale_clone_root#"$MOUNT_DIR"/}"
+        rm -rf -- "$stale_clone_root"
+    done
 fi
 PORTABLE_DEST_TMP="$DEST_DIR/.VgpuPortable.exe.new.$$"
 cp --reflink=never -- "$PORTABLE_EXE" "$PORTABLE_DEST_TMP"
@@ -886,9 +907,13 @@ if ((SITE_PRIVATE)); then
     [[ ! -e "$MOUNT_DIR/Users/Public/Desktop/VgpuPortable.exe" &&
        ! -e "$DEST_DIR/clone-initialization.json" &&
        ! -e "$DEST_DIR/clone-initialization-error.txt" &&
-       ! -e "$MOUNT_DIR/ProgramData/QemuGpuZProfile/last-result.json" ]] ||
+       ! -e "$MOUNT_DIR/ProgramData/QemuGpuZProfile" &&
+       ! -e "$MOUNT_DIR/ProgramData/G11GuestPerformance" &&
+       ! -e "$MOUNT_DIR/ProgramData/G11GuestLite" &&
+       ! -e "$MOUNT_DIR/ProgramData/G11/SystemNvapiProjection" &&
+       ! -e "$DEST_DIR/logs" ]] ||
         die "private base retained a generic EXE or previous clone result"
-    log "installed one licensed V7 EXE, pinned Guest Lite 2.6.0, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
+    log "installed one licensed V7 EXE, pinned Guest Lite 2.6.4, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
 elif ((WITH_GPUZ)); then
     [[ "$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256" &&
        "$(stat -c %s -- "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_BYTES" ]] ||
@@ -1178,7 +1203,7 @@ if ((SITE_PRIVATE)); then
   portable:   C:\ProgramData\VMate\G11\VgpuPortable.exe
               sha256=$PORTABLE_SHA256
   first boot: automatic licensed V7 finalizer; one execution only
-  Guest Lite: automatic pinned 2.6.0 profile in the same verified first-boot flow
+  Guest Lite: automatic pinned 2.6.4 profile in the same verified first-boot flow
   OOBE:       unattended; each clone still receives a generalized Windows identity
   DLS:        dls.gvmates.com:443
   performance: embedded recommended-native-v1

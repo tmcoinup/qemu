@@ -7,6 +7,8 @@ create_vm="$repo_root/deploy/scripts/create-vm.sh"
 source "$repo_root/deploy/lib/hardware-profiles.sh"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf -- "$tmp_dir"' EXIT
+host_config="$tmp_dir/vgpu-host.conf"
+printf 'VGPU_HOST_FB_TIER_MB=2048\n' >"$host_config"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -65,6 +67,12 @@ case "${FAKE_CPU_MODE:-supported}" in
                 ;;
         esac
         ;;
+    only-4930)
+        if [[ "$enforce" == on && "$model" != Core-i7-4930K ]]; then
+            echo "qemu-system-x86_64: Host doesn't support requested features" >&2
+            exit 1
+        fi
+        ;;
     *) exit 99 ;;
 esac
 
@@ -79,6 +87,7 @@ create_one() {
     mkdir -p "$root/images" "$root/vms"
     FAKE_CPU_MODE=$mode QEMU_BIN="$fake_qemu" \
         IMAGE_ROOT="$root/images" VM_ROOT="$root/vms" \
+        VGPU_HOST_CONFIG="$host_config" \
         "$create_vm" "$id" \
         --ssd-profile samsung-850-pro-512gb \
         --gpu-profile gtx1050_2gb \
@@ -93,7 +102,7 @@ source "$supported_conf"
     fail "supported host selection reason: $PLATFORM_SELECTION_POLICY"
 [[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == new ]] ||
     fail "supported host selected non-new platform: $PLATFORM"
-[[ "$CPU_PROFILE" == i7-4820k && "$MEM_SPEED" == 1866 ]] ||
+[[ "$CPU_PROFILE" == i7-4930k && "$CPU_VCPUS" == 12 && "$MEM_SPEED" == 1866 ]] ||
     fail "supported host did not select the fastest reviewed tier: $PLATFORM"
 [[ "$BOARD_CHIPSET" == X79 && "$MEM_BOARD_SLOTS" == 8 ]] ||
     fail "supported host did not select an 1866-capable X79 board"
@@ -124,14 +133,25 @@ source "$mixed_probe_conf"
 [[ "$CPU_PROFILE" == i7-3820 ]] ||
     fail "probe uncertainty selected $CPU_PROFILE instead of the supported i7-3820"
 
+six_core_conf=$(create_one only-4930 6)
+# shellcheck source=/dev/null
+source "$six_core_conf"
+[[ "$PLATFORM_SELECTION_POLICY" == host-supported-performance-first ]] ||
+    fail "6C/12T pool selection reason: $PLATFORM_SELECTION_POLICY"
+[[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == new ]] ||
+    fail "6C/12T fallback selected wrong lifecycle: $PLATFORM"
+[[ "$CPU_PROFILE" == i7-4930k && "$CPU_VCPUS" == 12 && "$MEM_SPEED" == 1866 ]] ||
+    fail "failed to select the reviewed i7-4930K/Samsung 1866 tier"
+
 no_new_root="$tmp_dir/no-new"
 mkdir -p "$no_new_root/images" "$no_new_root/vms"
 if FAKE_CPU_MODE=no-new QEMU_BIN="$fake_qemu" \
         IMAGE_ROOT="$no_new_root/images" VM_ROOT="$no_new_root/vms" \
+        VGPU_HOST_CONFIG="$host_config" \
         "$create_vm" 3 --ssd-profile samsung-850-pro-512gb \
         --gpu-profile gtx1050_2gb --monitor-profile dell-p2419h \
         >"$tmp_dir/no-new.out" 2>"$tmp_dir/no-new.err"; then
-    fail 'creation unexpectedly fell back after both active CPUs failed'
+    fail 'creation unexpectedly fell back after all active CPUs failed'
 fi
 [[ ! -f "$no_new_root/vms/3/vm.conf" ]] ||
     fail 'failed active-CPU probe published a legacy vm.conf'

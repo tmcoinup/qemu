@@ -358,10 +358,10 @@ uint8_t *spd_data_generate_ddr3_config(
         return NULL;
     }
     if (config->speed_mts == 1866 &&
-        (config->size_mb != 4096 || config->ranks != 1 ||
-         config->device_width_bits != 8)) {
-        error_setg(errp, "DDR3-1866 SPD is reviewed only for a 4096 MB, "
-                   "single-rank x8 UDIMM");
+        ((config->size_mb != 2048 && config->size_mb != 4096) ||
+         config->ranks != 1 || config->device_width_bits != 8)) {
+        error_setg(errp, "DDR3-1866 SPD is reviewed only for a 2048 or "
+                   "4096 MB, single-rank x8 UDIMM");
         return NULL;
     }
     if (!spd_ddr3_geometry(config, &density_code, &addressing,
@@ -405,7 +405,8 @@ uint8_t *spd_data_generate_ddr3_config(
         spd[23] = 0x81; /* tRCmin: 48.125 ns */
     } else {
         /*
-         * JEDEC DDR3-1866M down-bin used by MT8KTF51264AZ-1G9:
+         * JEDEC DDR3-1866M bin used by reviewed Samsung CMA and Micron -1G9
+         * single-rank x8 UDIMMs:
          * 1.071 ns tCK (9 MTB - 54 FTB), CL13, 13.125 ns
          * tAA/tRCD/tRP, 34 ns tRAS and 47.125 ns tRC.
          */

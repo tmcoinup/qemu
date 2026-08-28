@@ -1,6 +1,6 @@
 # 虚拟化检测面 (DNF TP / 常见反作弊) 全量清单
 
-最后更新 2026-08-21。按检测层从低到高排列。本文只描述 G-11/vGPU；V-11 是
+最后更新 2026-08-27。按检测层从低到高排列。本文只描述 G-11/vGPU；V-11 是
 独立分支，不能把它的 GPU、显示驱动或检测结论直接套用。GPU 身份必须区分新配置
 的安全 B、历史 A 实验，以及始终不变的 host backing hardware。
 
@@ -11,8 +11,8 @@
 | `CPUID.1.ECX[31]` HYPERVISOR bit | 0 | **1** ⚠️ | `-cpu ...,x-hv-stealth=on` (见 `target/i386/cpu.c:8317`) |
 | `CPUID.40000000-400000FF` KVM/HV leaves | 无 (InvalidLeaf) | KVM signature ⚠️ | `-cpu ...,kvm=off` |
 | `CPUID.1.ECX[5]` VMX / `CPUID.80000001.ECX[2]` SVM | 可能 1 | 0 | 我们显式 `,vmx=off` 固化 |
-| Brand string (80000002-4) | 真实型号 | QEMU 默认带 "Virtual CPU" | 10 个目录模型各自写入对应 brand；正常新建 2、归档 6、legacy 2 |
-| Family / Model / Stepping | 真实 | qemu64 族：15/6/1 | 正常新建 i7-3820/i7-4820K；旧 G3220、i3/i5/i7 与 legacy i5-6500/i3-8100 仅解释已有配置 |
+| Brand string (80000002-4) | 真实型号 | QEMU 默认带 "Virtual CPU" | 11 个目录模型各自写入对应 brand；普通新建含 2 款 4C/8T 与 1 款 6C/12T，其余为 archived/legacy |
+| Family / Model / Stepping | 真实 | qemu64 族：15/6/1 | 普通新建 i7-3820/i7-4820K/i7-4930K；旧 G3220、i3/i5/i7 与 legacy i5-6500/i3-8100 仅解释已有配置 |
 | TSC invariant (`80000007.EDX[8]`) | 1 | 0 (qemu64) | `,+invtsc` 固定打开 |
 | RDTSC 一致性 (rdtsc 在不同核差异 < 几千周期) | 一致 | KVM-clock 校准差 → 可能漂移 | `kvm=off` 关 KVMclock；KVM 能力门禁固定 TSC，`-rtc clock=vm,driftfix=slew` 与 V-11 对齐 |
 

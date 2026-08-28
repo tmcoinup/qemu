@@ -58,8 +58,8 @@ stream/relay 和 `--rdp` 只是同一 vGPU VM 的显示模式。
 ./deploy/scripts/create-vm.sh --list-cpu-profiles
 ./deploy/scripts/create-vm.sh --list-board-profiles
 ./deploy/scripts/create-vm.sh --list-memory-profiles
-./deploy/scripts/create-vm.sh --list-platforms # 查看 48 套正常 X79 新建整机
-./deploy/scripts/create-vm.sh --include-fallback --list-platforms # 查看 312 套及 archived/legacy 策略
+./deploy/scripts/create-vm.sh --list-platforms # 查看 102 套普通新建 X79 整机
+./deploy/scripts/create-vm.sh --include-fallback --list-platforms # 查看完整 366 套生命周期目录
 ./deploy/scripts/create-vm.sh --list-ssd-profiles
 ./deploy/scripts/create-vm.sh --list-gpu-profiles
 ./deploy/scripts/create-vm.sh --list-monitor-profiles
@@ -101,12 +101,14 @@ G-11 已开放完整的 `--vlan-id VID` 生命周期：root-owned helper 逐 VM 
 均会幂等回收。未携带 VLAN 参数时使用默认原生 LAN，不会继承 `vm.conf` 中的 VID，
 VLAN 失败也不会静默回退。
 
-正常新建池包含 Core i7-4820K/Core i7-3820 两款家用无核显 4C/8T CPU、ASUS
-P9X79/Gigabyte GA-X79-UP4/ASRock X79 Extreme4 三块三品牌 X79 主板，以及 48 条
-审核整机。内存覆盖 Kingston、Samsung、Elpida、Micron 的 DDR3-1600/1866；只在
+普通新建池包含 Core i7-4930K 6C/12T 和 Core i7-4820K/Core i7-3820 4C/8T，
+配 ASUS P9X79、Gigabyte GA-X79-UP4、ASRock X79 Extreme4 三品牌 X79 主板，
+共 102 条审核整机。统一创建教程见
+[`docs/G11-6C12T-QUICKSTART.md`](docs/G11-6C12T-QUICKSTART.md)。内存覆盖
+Kingston、Samsung、Elpida、Micron、SK hynix 的 DDR3-1600/1866；只在
 CPU、主板和模组共同上限内组合。4/8 GiB 为两根双通道，12 GiB 为 3×4 GiB
-三通道，16 GiB 为 4×4 GiB 四通道。无参数创建优先 i7-4820K + DDR3-1866。
-完整目录共 10 CPU、16 主板、37 内存、312 整机；旧 H81/6G 等 261 条 archived
+三通道，16 GiB 为 4×4 GiB 四通道。无参数创建优先 i7-4930K + DDR3-1866。
+完整目录共 11 CPU、16 主板、45 内存、366 整机；旧 H81/6G 等 261 条 archived
 只供已有 VM，另 3 条 legacy compatibility 必须显式授权。
 另有 10 款精确 `512110190592` 字节 SSD（3 款 Gen3 x4 NVMe 自动优先、7 款 SATA
 按平台回退）、
@@ -578,9 +580,10 @@ QEMU/SDL Present，不能把 manager 的 copy 周期动态降回 10 Hz。请勿�
   --gpu-profile gtx1050_2gb
 ```
 
-完整目录可查询 10 款 CPU、16 块主板和 37 套内存，组合总数 312；正常新建层只
-投影两款 4C/8T Core i7、三块 X79 和 48 条审核组合，不会做任意笛卡尔组合。
-默认按性能级别优先 DDR3-1866 的 i7-4820K。旧 H81、4+2 GiB Flex 与 6G 组合均为
+完整目录可查询 11 款 CPU、16 块主板和 45 套内存，组合总数 366；普通新建层
+投影三款 Core i7、三块 X79 和 102 条审核组合，其中 i7-4930K 有 54 条
+多主板/多内存品牌组合，不会做任意笛卡尔组合。
+默认按性能级别优先 DDR3-1866 的 i7-4930K。旧 H81、4+2 GiB Flex 与 6G 组合均为
 archived-existing-only；3 条 legacy compatibility 也不会自动混入正常新建。
 组件 key、合法组合及
 `--cpu-profile`/`--board-profile`/`--memory-profile` 完整示例见
@@ -590,7 +593,7 @@ archived-existing-only；3 条 legacy compatibility 也不会自动混入正常�
 Samsung 840/850/860 PRO、Crucial MX100、Kingston KC400、Intel 545s、
 Western Digital PC SA530 七款 SATA 盘，以及 Samsung 970 PRO、WD Black、
 Samsung 960 PRO 三款 Gen3 x4 NVMe 中选择。自动顺序先尝试 NVMe；仅
-i7-4820K + 审核被动转接路径满足 Gen3 合同，i7-3820 自动回退 SATA。
+i7-4820K/i7-4930K + 审核被动转接路径满足 Gen3 合同，i7-3820 自动回退 SATA。
 完整目录十款，且每款均精确为
 `512110190592` 字节；其他容量不能进入新建
 目录。新配置也会持久化并传递逻辑/物理扇区：MX100 为
@@ -694,7 +697,9 @@ PCI device 仍是宿主 mdev；正式 merge 只投影 profile 的原子 Subsyste
 | **B** | 真 RTX 6000 (`DEV_1E30`) | host 按 mdev UUID 提供 vm.conf 选定型号 | 最稳；guest 无名称代理 | GPU-Z 等查 PCI ID 会暴露 |
 | **off** | 真 RTX 6000 | 驱动/mdev 原生名称（全局 type 配置仍会影响它） | 最稳 | 完全不隐身（装 driver 阶段必用） |
 
-原版 driver 安装阶段使用 `--no-spoof`。历史 GTX1050 ZIP 会修改 INF 并自签
+原版 driver 安装阶段统一使用 `./deploy/scripts/vmctl.sh driver-install N`；它在
+临时标准 VGA 下保留 native mdev PnP 并固定 `display=off`，安装后完整关机再离线
+认证模式表。不要自行以普通 `--no-spoof` vGPU console 首装。历史 GTX1050 ZIP 会修改 INF 并自签
 catalog，现已在 `finish-vgpu-install.sh` 中硬禁用，不会切 A 或写完成 marker；
 不要手工写只读配置。受支持的新实例保持 B；VM3 的 legacy A marker 已通过迁移
 回执提交为 B/native，并已绑定 NVIDIA/Microsoft 正式生产签名驱动。尚未迁移的旧
@@ -708,7 +713,7 @@ A 实例仍会被默认启动门禁拒绝，只能按生产迁移流程处理。
 
 | 步 | 干啥 | 控制 flag |
 |---|---|---|
-| 1 | 当前基线 GRID 538.33 driver（卸 NVIDIA INF + 拷文件 + 装 + 写注册表 block WU 替换） | `--skip-vgpu` |
+| 1 | 不在线安装；若未完成，退出并提示关机后运行 `vmctl.sh driver-install N` | `--skip-vgpu`（驱动已完成时必加） |
 | 2 | License token (从 host fastapi-dls 拉 + 推到 guest token 路径 + Restart NVDisplay daemon) | `--skip-license` |
 | 3 | ivshmem.sys driver（默认直显不需要） | `--skip-ivshmem` |
 | 4 | NvDisplayContainer 服务 + nv_stream_relay + AudioSvcHost（默认直显不需要）；注册表 `DesktopWidth/Height=1920/1080` + `FrameRate=60` | `--skip-service` |
@@ -734,8 +739,9 @@ A 实例仍会被默认启动门禁拒绝，只能按生产迁移流程处理。
 `vm.conf` 自动校验/同步显示器，不需要任何 guest 凭据。`vmctl monitor --force`
 只用于关机态强制修复或切换型号。
 
-> **注意**：默认直显只需要第 1、2 步对应的 NVIDIA GRID 驱动和授权；可以分别
-> 用 `install-vgpu-driver.sh` / `install-vgpu-license.sh` 完成，不必安装第 3、4 步。
+> **注意**：默认直显只需要 GRID 驱动和授权。驱动必须用
+> `./deploy/scripts/vmctl.sh driver-install N`；正常启动后再用
+> `install-vgpu-license.sh`。不必安装旧 relay 的第 3、4 步。
 
 ## 显示器型号与 Windows 分辨率
 
@@ -775,7 +781,9 @@ SYSTEM hive 中已有的 raw EDID、模式缓存和 Microsoft 标准
 
 交互终端缺少 sudo 票据时会自动安全提示；密码不会写入仓库或参数。新建/克隆不传
 显示器参数时由创建器自动选择 profile 并持久化，克隆器立即尝试同步。全新 base
-尚无 `Enum\DISPLAY` 时，首次启动枚举、完整关机后的下一次普通启动自动补齐。
+尚无 `Enum\DISPLAY` 时，普通 vGPU 启动会失败关闭并提示运行
+`vmctl.sh driver-install ID`；封装在标准 VGA 隔离状态完成首次枚举、驱动安装、完整
+关机和离线收敛后，才允许下一次普通启动。
 
 这里的 v8 marker 会绑定 EDID override helper 哈希。Windows 会优先消费
 `EDID_OVERRIDE`，因此 WMI/鲁大师的厂商、型号、尺寸、16:9 和 1920×1080
@@ -829,17 +837,19 @@ chmod 600 /home/ubuntu/images/staging/client_configuration_token.tok
 Startup 与 RTC 收尾；宿主严格校验 UUID/GPU/token。同一 DLS 的受信任 VM 可复用
 缓存产物，但宿主命令仍需逐 VM 运行。不使用 VNC、RDP、WinRM 或 guest HTTP。
 
-NVIDIA vGPU 路径让 EDID 与受控 `NV_Modes` 使用同一份 10 项：1920×1080、
-1600×900、1360×768、1280×1024/960/768/720、1024×768、800×600、
-640×480；Windows“设置”通常隐藏 640×480，所以一般显示 9 项。它精确清除
+NVIDIA vGPU 路径让 EDID 与受控 `NV_Modes` 使用同一份 8 项 R535 page-safe
+模式：1920×1080、1360×768、1280×1024/960/768/720、1024×768、640×480；
+Windows“设置”通常隐藏 640×480，所以一般显示 7 项。它精确清除
 1920×1200、1680×1050、1280×800、2560×1600 等 16:10，也删除上一版额外的
-1600×1200、1600×1024、1440×1080、1366×768、1152×864，不会误删
-1600×900；不能把已退役的 virtio 显示驱动规则套到 G-11。正常
+1600×1200、1600×1024、1600×900、1440×1080、1366×768、1152×864 和
+800×600；后两项会触发与 1680×1050 相同的 R535 pixel-length 页对齐黑屏。
+不能把已退役的 virtio 显示驱动规则套到 G-11。正常
 `start-vm.sh N` 会自动按 marker 约束 NVIDIA source modes；只有要无条件清除旧
 EDID/GraphicsDrivers 缓存时才执行 `./deploy/scripts/vmctl.sh monitor N --force`。受支持的 GRID 安装封装会在同版本重装前主动使
 monitor marker 失效；手工 Device Manager 重装后则必须再显式使用 `--force`。
 完整傻瓜步骤和 native SDL/GTK 验收见
-[`docs/G11-MONITOR-POOL.md`](docs/G11-MONITOR-POOL.md)。
+[`docs/G11-MONITOR-POOL.md`](docs/G11-MONITOR-POOL.md)；纯黑恢复见
+[`docs/G11-R535-BLACK-SCREEN.md`](docs/G11-R535-BLACK-SCREEN.md)。
 
 ## 日常工作流
 
@@ -856,8 +866,8 @@ monitor marker 失效；手工 Device Manager 重装后则必须再显式使用 
 第一次装 GRID 驱动时应保留真实 vGPU PCI ID：
 
 ```bash
-# 先用真实 PCI 身份安装匹配的 GRID driver
-./deploy/scripts/start-vm.sh 1 --no-spoof --no-monitor-sync
+# 用标准 VGA 隔离 console、真实 mdev PnP 安装匹配的 GRID driver
+./deploy/scripts/vmctl.sh driver-install 1
 
 # 正常 B 重启后，全部 25 条 profile 统一运行私有 VgpuPortable.exe：
 ./deploy/package-vgpu-one-click.sh --with-license-token
@@ -946,20 +956,22 @@ host:                                     │ (KVM 直接 page mapping，纯 RAM
 
 | 命令 | 用途 |
 |---|---|
-| `./deploy/install-vgpu-driver.sh 1` | 单独重装 vGPU 驱动 |
+| `./deploy/scripts/vmctl.sh driver-install 1 [--start]` | 新镜像首装/单独重装 GRID；标准 VGA 隔离 NVIDIA console，完整关机后离线认证模式表 |
 | `./deploy/install-ivshmem-driver.sh 1` | 旧 relay 路径：单独装 ivshmem driver |
 | `./deploy/install-nv-service.sh 1` | 旧 relay 路径：单独刷 service binary |
 | `./deploy/scripts/create-vm.sh <vm_id>` | 生成 `$VM_ROOT/N/vm.conf`（一次性） |
 | `./deploy/scripts/create-disk.sh <vm_id> --from-base --linked` | 从 standalone base 创建 V-11 式实例内 pin + 小型增量盘；不存在则失败，不退回空盘；`--full-copy` 才复制独立整盘 |
 | `./deploy/scripts/recover-hibernated-vm.sh <vm_id> [--rescue-gtk] [--proxy]` | host-only 本地标准 VGA 恢复休眠；完整关机后自动强刷 EDID/NV_Modes，失败闭锁 |
+| `./deploy/scripts/vmctl.sh repair-display <vm_id> [--no-start]` | R535 pixel-length SDL/QMP 纯黑一键恢复；只用 ACPI 正常关机，离线清缓存并写 page-safe 模式 |
 | `./deploy/finish-vgpu-install.sh <vm_id>` | 仅统一前 GTX750Ti/GT1030 的旧 token 回执/UTC 迁移；当前 25 条新 VM 不使用，GTX1050 strict-A 仍拒绝 |
-| `./deploy/scripts/vmctl.sh monitor 1 [--monitor-profile PROFILE] [--force]` | 关机状态从 host 离线同步 EDID_OVERRIDE/raw EDID/NVIDIA 10 项模式策略；guest 无常驻组件 |
+| `./deploy/scripts/vmctl.sh monitor 1 [--monitor-profile PROFILE] [--force]` | 关机状态从 host 离线同步 EDID_OVERRIDE/raw EDID/NVIDIA 8 项 R535 page-safe 模式策略；guest 无常驻组件 |
 | `./deploy/scripts/host-nvme-apst.sh check` | 只读检查 Linux 宿主 NVMe APST；`persist/apply/rollback` 只在管理员显式执行时写入，见 [`docs/NVME-APST.md`](docs/NVME-APST.md) |
 | `./deploy/sync-vgpu-profile.sh 1` | 可选：清理/同步旧 guest 的注册表身份；默认不安装 NVAPI shim |
 
 ## 常见坑
 
-- **vGPU 显示 Error 43**：8/14/2024 之后的 GeForce DCH driver 在 vGPU passthrough 上拒绝工作。`./deploy/install-vgpu-driver.sh 1` 能完成 wipe + 重装当前基线 GRID 538.33（staging 仍沿用历史文件名 `553.24`）。
+- **vGPU 显示 Error 43 / 新镜像尚未装 GRID**：运行 `./deploy/scripts/vmctl.sh driver-install N`；它会完成 wipe + 正式 GRID 538.33 安装、完整关机与离线模式收敛。不要在普通 SDL vGPU 窗口里双击驱动（staging 仍沿用历史文件名 `553.24`）。
+- **VM 在运行但 SDL/QMP 同时纯黑，host 有 `mismatch on pixel length`**：执行 `sudo -v` 后运行 `./deploy/scripts/vmctl.sh repair-display N`；不要重装系统或反复直装驱动。见 [`docs/G11-R535-BLACK-SCREEN.md`](docs/G11-R535-BLACK-SCREEN.md)。
 - **显示器同步报 `Windows is hibernated` / vGPU 恢复可能报 0x10E**：不要启动 vGPU，也不要用 host 强挂载、强删 `hiberfil.sys` 或运行 `ntfsfix`。任何型号都执行 `./deploy/scripts/recover-hibernated-vm.sh N`，在本地标准 VGA 窗口用管理员权限关闭 Fast Startup 并完整关机；封装会自动强制同步。详见 [`docs/VGPU-RECOVERY-RUNBOOK.md`](docs/VGPU-RECOVERY-RUNBOOK.md)。
 - **重启后 NVIDIA 授权长时间不恢复**：若 guest 日志持续报告
   `Clock windback has been detected`，先按上一条取得完整关机；只有统一前、明确为

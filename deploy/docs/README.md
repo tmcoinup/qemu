@@ -27,10 +27,11 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 对比最新 V-11 的 VM 操作、已补齐功能和不可混用边界 | [G11-V11-OPERATION-PARITY.md](G11-V11-OPERATION-PARITY.md) |
 | 默认/指定 VM 路径、独立 bundle 和旧 G-11 目录迁移 | [STORAGE-PATHS-QUICKSTART.md](STORAGE-PATHS-QUICKSTART.md) |
 | 第一次操作 G-11：portable EXE、base 注入、任意 VM 克隆与验收 | [G11-QUICKSTART.md](G11-QUICKSTART.md) |
+| 在统一创建池选择家用 i7-4930K 6C/12T、三品牌主板、4–5 个内存品牌和五品牌 SSD | [G11-6C12T-QUICKSTART.md](G11-6C12T-QUICKSTART.md) |
 | VMate 私有交付：Sysprep 独立 Windows 身份、跳过 OOBE、授权 EXE 首启一次和跨机导入 | [G11-SYSPREP-PRIVATE-BASE.md](G11-SYSPREP-PRIVATE-BASE.md) |
 | 普通 32/64 位程序统一板卡/显存身份、单 3D adapter、显示器持久化与一键回滚 | [G11-BOTTOM-GPU-IDENTITY.md](G11-BOTTOM-GPU-IDENTITY.md) |
 | vGPU 硬件池、整机搭配合法性与宿主 CPU realization | [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) |
-| X79 正常新建、归档 H81/H97/B150/B360、旧卡 DXR 能力审计与现实一致性边界 | [G11-HARDWARE-COHERENCE.md](G11-HARDWARE-COHERENCE.md) |
+| X79 LPC + CPU DMI2 通用呈现、鲁大师末尾横杠复扫结论、归档芯片组与旧卡 DXR 边界 | [G11-HARDWARE-COHERENCE.md](G11-HARDWARE-COHERENCE.md) |
 | 1GB Maxwell 新建层、Kepler 旧配置边界及整池单档切换 | [G11-1GB-GPU-EXPANSION.md](G11-1GB-GPU-EXPANSION.md) |
 | 35 款显示器目录、正常 FHD/1K 分辨率白名单及已有 VM 一键刷新 | [G11-MONITOR-POOL.md](G11-MONITOR-POOL.md) |
 | 无 VM 绑定显卡身份、GPU-Z 选装、新建/克隆通用性和 HWiNFO 边界 | [GPUZ-ONE-CLICK.md](GPUZ-ONE-CLICK.md) |
@@ -45,7 +46,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 宿主开机进桌面前花屏、桌面和 guest 正常：AMD/NVIDIA 选卡审计、一键修复与回滚 | [G11-HOST-DISPLAY-BOOT-FIX.md](G11-HOST-DISPLAY-BOOT-FIX.md) |
 | Windows 安装出现 `USBXHCI.SYS` / `PAGE_FAULT_IN_NONPAGED_AREA` | [USBXHCI-INSTALL-RECOVERY.md](USBXHCI-INSTALL-RECOVERY.md) |
 | Windows 网卡有链路但没有 IPv4、宿主一键建桥、默认 LAN 与 VLAN 生命周期 | [G11-NETWORK-BRIDGE-VLAN.md](G11-NETWORK-BRIDGE-VLAN.md) |
-| GRID 538.33 正式基线、三款显卡身份边界与 driver 回退 | [DRIVER-INSTALL.md](DRIVER-INSTALL.md) |
+| 新镜像安全首装 GRID、538.33 正式基线、三款显卡身份边界与 driver 回退 | [DRIVER-INSTALL.md](DRIVER-INSTALL.md) |
 | 旧 A VM 迁移到原始生产签名驱动，同时保留设备/GPU-Z 型号 | [VGPU-PRODUCTION-MIGRATION.md](VGPU-PRODUCTION-MIGRATION.md) |
 | 537.58 Xid/TDR 隔离、旧合同回滚与仅限可删除克隆的审计复现 | [SIGNED-CONSUMER-PRODUCTION.md](SIGNED-CONSUMER-PRODUCTION.md) |
 | 授权 + 显示器最短照抄流程 | [VGPU-RECOVERY-RUNBOOK.md](VGPU-RECOVERY-RUNBOOK.md) |
@@ -53,6 +54,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 开机 NumLock、`--no-numlock` 与首次桌面右键卡顿排查 | [G11-NUMLOCK-FIRST-BOOT.md](G11-NUMLOCK-FIRST-BOOT.md) |
 | SDL 窗口在宿主拼音/Fcitx 状态下仍向 Guest 发送完整物理按键 | [G11-SDL-HOST-IME.md](G11-SDL-HOST-IME.md) |
 | SDL 窗口空闲后宿主屏保/显示器休眠导致黑屏 | [G11-SDL-NO-SLEEP.md](G11-SDL-NO-SLEEP.md) |
+| 新镜像装驱动或 VM 运行中 SDL/QMP/VFIO 同时纯黑：R535 pixel-length 页对齐故障、通用预防与一键恢复 | [G11-R535-BLACK-SCREEN.md](G11-R535-BLACK-SCREEN.md) |
 | SDL 画面定格/帧率、双鼠标、键盘延迟与 balanced/响应/120Hz 实验一键封装 | [G11-SDL-PERFORMANCE.md](G11-SDL-PERFORMANCE.md) |
 | SDL/Wayland 每秒大量 `gdk_monitor_get_scale_factor` / `GDK_IS_MONITOR` 日志 | [G11-SDL-WAYLAND-TITLE.md](G11-SDL-WAYLAND-TITLE.md) |
 | GNOME Wayland 下 1000Hz 实体鼠标拖动大型 SDL/XWayland 窗口一卡一卡：Mutter KMS thread 官方 workaround 与回滚 | [G11-MUTTER-MOUSE-DRAG.md](G11-MUTTER-MOUSE-DRAG.md) |
@@ -81,7 +83,10 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name win10-ltsc-v1
 
 VMate 私有 Sysprep 流程无需手工执行最后一行：`clone-from-base.sh` 会按新 VM 的
 UUID/profile/显示器/config 自动生成只读 ISO，Windows 首启内部重启验收，最终用户
-只点一次“初始”。旧 schema-6 私有包必须用当前工具重做或重新导入。
+只点一次“初始”。旧 schema-6 私有包必须用当前工具重做或重新导入；已克隆磁盘与
+当前宿主的 finalizer/Guest Lite 合同不一致时，使用
+[`G11-CLONE-PAYLOAD-RECOVERY.md`](G11-CLONE-PAYLOAD-RECOVERY.md) 的一键母盘刷新和
+失败克隆修复流程。
 
 `VgpuPortable.exe` 内嵌全部已审计 profile，不含 VM ID/UUID，也不内嵌、下载或
 默认安装 GPU-Z。base 注入器默认只预置这一个文件；以后只有显式执行
@@ -146,13 +151,13 @@ guest 显示 GTX 1050 也不能被描述成底层已变成真实 GP107，核心�
 ./deploy/scripts/start-vm.sh 2 --install /home/ubuntu/images/iso/win10-ltsc.iso
 ```
 
-Windows 装好并完整关机后，以原生 PCI 身份启动并安装基础 GRID 538.33：
+Windows 装好并完整关机后，以隔离 console 的原生 PCI 身份安装基础 GRID 538.33：
 
 ```bash
-./deploy/scripts/start-vm.sh 2 --no-spoof --no-monitor-sync
+./deploy/scripts/vmctl.sh driver-install 2
 ```
 
-基础 driver Code 0 后再次完整关机，从普通 B 启动进入 Windows。全部 profile 统一构建
+封装验收 driver Code 0、自动完整关机并离线收敛后，从普通 B 启动进入 Windows。全部 profile 统一构建
 私有 `VgpuPortable.exe`，在 guest 双击后要求 `Licensed` 并关闭休眠/Fast Startup：
 
 ```bash

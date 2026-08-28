@@ -56,6 +56,30 @@ grep -Fq 'no HTTP download was used' "$GUEST_SCRIPT" \
     || fail "guest script does not identify the HTTP-free token path"
 grep -Fq '[IO.File]::Replace' "$GUEST_SCRIPT" \
     || fail "token replacement is not atomic"
+grep -Fq 'the exact token is already installed; reusing it without replacing the service-owned file' \
+    "$GUEST_SCRIPT" \
+    || fail "guest retry does not reuse an identical installed token"
+grep -Fq '$serviceStoppedForReplacement = $true' "$GUEST_SCRIPT" \
+    || fail "guest token replacement does not track the stopped NVIDIA service"
+python3 - "$GUEST_SCRIPT" <<'PY' || fail "guest token replacement/rollback ordering is unsafe"
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+replace = text.index("[IO.File]::Replace($temporaryPath, $installedTokenPath")
+stop_before_replace = text.rfind(
+    "Invoke-LicenseServiceControl -Action stop", 0, replace
+)
+if stop_before_replace < 0:
+    raise SystemExit("live token replacement is not preceded by a bounded service stop")
+
+rollback = text.index("[IO.File]::Replace($rollbackPath, $installedTokenPath")
+stop_before_rollback = text.rfind(
+    "Invoke-LicenseServiceControl -Action stop", replace, rollback
+)
+if stop_before_rollback < 0:
+    raise SystemExit("token rollback is not preceded by a bounded service stop")
+PY
 grep -Fq 'rollback' "$GUEST_SCRIPT" \
     || fail "guest script has no rollback path"
 grep -Fq 'MinimumTokenBytes' "$GUEST_SCRIPT" \

@@ -84,7 +84,7 @@ done
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.0" and
+    .schemaVersion == 1 and .profileVersion == "2.6.4" and
     (.files | length) == 5 and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -128,7 +128,7 @@ exe_wide=$(strings -a -el "$exe")
 for token in 'G11GuestLite.exe /apply' 'G11GuestLite.exe /audit' \
         'G11GuestLite.exe /rollback' \
         'WindowsPowerShell\v1.0\powershell.exe' \
-        'G-11 Windows 10 Guest Lite 2.6.0'; do
+        'G-11 Windows 10 Guest Lite 2.6.4'; do
     rg -Fq "$token" <<<"$exe_wide" \
         || fail "standalone launcher omitted fixed entry point: $token"
 done
@@ -140,7 +140,7 @@ rg -Fq 'Some Windows' "$exe_source" \
     || fail 'standalone launcher omitted the FAT package-media compatibility path'
 rg -Fq 'level="requireAdministrator"' "$exe_manifest" \
     || fail 'standalone launcher omitted its UAC manifest'
-rg -Fq 'assemblyIdentity version="2.6.0.0"' "$exe_manifest" \
+rg -Fq 'assemblyIdentity version="2.6.4.0"' "$exe_manifest" \
     || fail 'standalone launcher manifest version is stale'
 if rg -n 'bundle_id|G11GuestLite-\$|G11GuestLite-\*|sha256sum|SHA256SUMS|ISO-SHA256' \
         "$packager"; then
@@ -173,7 +173,7 @@ for required in \
         'Set-NetFirewallProfile' \
         'FirewallProfiles' \
         "FirewallServiceName = 'MpsSvc'" \
-        'Disable-FirewallService' \
+        'Ensure-FirewallServiceAvailable' \
         'Start-ScheduledTask' \
         'BFE and other core networking services' \
         'DisableFileSyncNGSC' \
@@ -287,6 +287,13 @@ for required in \
     rg -Fq -- "$required" "$guest" || fail "guest script omitted: $required"
 done
 
+rg -Fq "Name = 'EnableFeeds'; Type = 'DWord'; Value = 0; Group = 'NewsWeather'; Required = \$false }" \
+    "$guest" || fail 'protected machine-wide Feeds preference can still fail the clone'
+rg -Fq "Name = 'ShellFeedsTaskbarViewMode'; Type = 'DWord'; Value = 2; Group = 'NewsWeather'; Required = \$false }" \
+    "$guest" || fail 'protected per-user Feeds preference can still fail the clone'
+rg -Fq 'Never take registry ownership' "$guest" \
+    || fail 'Feeds compatibility boundary does not forbid ACL takeover'
+
 if grep -Fq '@(Get-WinUserLanguageList' "$guest"; then
     fail 'guest-lite must explicitly index the Windows PowerShell 5.1 LanguageList collection'
 fi
@@ -307,9 +314,48 @@ for required_call in Disable-PlannedServices Disable-PlannedTasks \
     rg -Fq "$required_call" <<<"$enforce_body" \
         || fail "SYSTEM enforcement omitted self-healing call: $required_call"
 done
+if rg -Fq 'Refresh-LocalPolicy' <<<"$enforce_body"; then
+    fail 'SYSTEM enforcement still waits for duplicate synchronous gpupdate work'
+fi
+rg -Fq 'localPolicyRefresh=deferred directRegistry=True' <<<"$enforce_body" ||
+    fail 'SYSTEM enforcement does not record its direct-registry policy fast path'
+firewall_line=$(grep -nF 'Ensure-FirewallServiceAvailable' <<<"$enforce_body" |
+    head -1 | cut -d: -f1)
+defender_line=$(grep -nF 'Set-DefenderRuntimePreferences' <<<"$enforce_body" |
+    head -1 | cut -d: -f1)
+[[ -n "$firewall_line" && -n "$defender_line" &&
+   "$firewall_line" -lt "$defender_line" ]] ||
+    fail 'SYSTEM enforcement does not establish MpsSvc compatibility before slower maintenance'
+firewall_body=$(sed -n \
+    '/^function Ensure-FirewallServiceAvailable {/,/^function Restore-ServiceSnapshot {/p' \
+    "$guest")
+rg -Fq 'StartupType Automatic' <<<"$firewall_body" ||
+    fail 'Guest Lite does not preserve MpsSvc Automatic startup'
+rg -Fq 'Start-Service -Name $FirewallServiceName' <<<"$firewall_body" ||
+    fail 'Guest Lite does not preserve the running MpsSvc instance'
+if rg -Fq 'StartupType Disabled' <<<"$firewall_body"; then
+    fail 'Guest Lite still disables MpsSvc in its dedicated compatibility path'
+fi
+rg -Fq 'firewallService=automatic-running' <<<"$enforce_body" ||
+    fail 'SYSTEM enforcement receipt omits the measured MpsSvc state'
 if rg -Fq 'Clear-SafeTemporaryFiles' <<<"$enforce_body"; then
     fail 'SYSTEM enforcement must not repeatedly delete temporary files'
 fi
+
+apply_body=$(sed -n '/^function Invoke-Apply {/,/^function Get-EnforcementRegistryEntry {/p' \
+    "$guest")
+rg -Fq 'clone fast path: immediate gpupdate deferred' <<<"$apply_body" ||
+    fail 'trusted CloneApply does not skip duplicate synchronous gpupdate work'
+[[ "$(grep -Fc '$state = Ensure-CurrentBaseline $state' <<<"$apply_body")" == 1 ]] ||
+    fail 'fresh rollback baseline is still immediately rescanned'
+for bulk_gate in \
+        'Get-ServiceInventoryIndex -Inventory $inventory' \
+        'Get-TaskInventoryIndex -Inventory $inventory' \
+        'Get-CurrentServicePlans -Inventory $serviceInventory' \
+        'Get-CurrentTaskPlans -Inventory $taskInventory'; do
+    rg -Fq "$bulk_gate" "$guest" ||
+        fail "guest-lite lacks bulk provider reuse: $bulk_gate"
+done
 if rg -n 'ProcessPriorityClass\]::Realtime|PriorityClass[[:space:]]*=[[:space:]]*[^#]*Realtime' \
         "$guest"; then
     fail 'guest-lite must never assign Realtime priority to DNF'

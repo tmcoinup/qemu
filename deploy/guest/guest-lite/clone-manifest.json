@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "profileVersion": "2.6.0",
+  "profileVersion": "2.6.4",
   "files": [
     {
       "name": "01-OneClick-Apply.cmd",
@@ -19,13 +19,13 @@
     },
     {
       "name": "G11-Guest-Lite.ps1",
-      "sha256": "F55BABB8F16474E6A24A97CCC697594B59DC98D3B573B4C995B47D3C630377CD",
-      "bytes": 202555
+      "sha256": "4985A9C110FC5DD63E2846EFC2EF9731BD7A0BF3791387844A66411E73823E0C",
+      "bytes": 206386
     },
     {
       "name": "README.txt",
-      "sha256": "E8B0D4C6C0508681A322460EF48BED697B6CDA25A3F81897DAAA3337F650FE99",
-      "bytes": 14877
+      "sha256": "69B95F1163D7F20A0A6C7AAB522A09ABDE82115DB993984E649640AFE615D4D4",
+      "bytes": 17001
     }
   ]
 }

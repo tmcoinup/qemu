@@ -540,6 +540,17 @@ static void mch_reset(DeviceState *qdev)
     PCIDevice *d = PCI_DEVICE(qdev);
     MCHPCIState *mch = MCH_PCI_DEVICE(d);
 
+    /* Firmware must always discover the functional q35 MCH identity. */
+    pci_config_set_vendor_id(d->config, PCI_VENDOR_ID_INTEL);
+    pci_config_set_device_id(d->config, PCI_DEVICE_ID_INTEL_P35_MCH);
+    pci_config_set_revision(d->config, MCH_HOST_BRIDGE_REVISION_DEFAULT);
+    if (mch->g11_q35_subsystem_saved) {
+        pci_set_word(d->config + PCI_SUBSYSTEM_VENDOR_ID,
+                     mch->g11_q35_subsystem_vendor_id);
+        pci_set_word(d->config + PCI_SUBSYSTEM_ID,
+                     mch->g11_q35_subsystem_id);
+    }
+
     pci_set_quad(d->config + MCH_HOST_BRIDGE_PCIEXBAR,
                  MCH_HOST_BRIDGE_PCIEXBAR_DEFAULT);
 
@@ -561,10 +572,83 @@ static void mch_reset(DeviceState *qdev)
     mch_update(mch);
 }
 
+typedef struct G11MCHIdentity {
+    const char *host_bridge;
+    uint16_t device_id;
+    uint8_t revision;
+} G11MCHIdentity;
+
+static const G11MCHIdentity g11_mch_identities[] = {
+    { "SandyBridge-E", 0x3c00, 0x07 },
+    { "IvyBridge-E",   0x0e00, 0x04 },
+};
+
+static const G11MCHIdentity *mch_g11_identity(const MCHPCIState *mch)
+{
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(g11_mch_identities); i++) {
+        if (!g_strcmp0(mch->g11_host_bridge,
+                       g11_mch_identities[i].host_bridge)) {
+            return &g11_mch_identities[i];
+        }
+    }
+    return NULL;
+}
+
+/*
+ * OVMF needs the functional q35 8086:29c0 identity while discovering PCI and
+ * boot media.  The bundled OVMF emits a private handoff command while handling
+ * ExitBootServices, after firmware PCI work and before operating-system PCI
+ * inventory.  The same 00:00.0 function then exposes its reviewed Sandy/Ivy
+ * Bridge-E DMI2 identity.  Only guest-visible PCI identity changes; the device
+ * continues to use q35's MCH implementation.
+ */
+void mch_g11_firmware_handoff(MCHPCIState *mch)
+{
+    const G11MCHIdentity *identity = mch_g11_identity(mch);
+    PCIDevice *d;
+
+    if (!identity) {
+        return;
+    }
+
+    d = PCI_DEVICE(mch);
+    pci_config_set_vendor_id(d->config, PCI_VENDOR_ID_INTEL);
+    pci_config_set_device_id(d->config, identity->device_id);
+    pci_config_set_revision(d->config, identity->revision);
+    /* CPU-integrated DMI2 functions use Intel's self-subsystem identity. */
+    pci_set_word(d->config + PCI_SUBSYSTEM_VENDOR_ID, PCI_VENDOR_ID_INTEL);
+    pci_set_word(d->config + PCI_SUBSYSTEM_ID, identity->device_id);
+}
+
+static bool mch_validate_g11_identity(MCHPCIState *mch, Error **errp)
+{
+    if (!mch->g11_host_bridge || mch_g11_identity(mch)) {
+        return true;
+    }
+
+    error_setg(errp,
+               "mch x-g11-host-bridge must be one of SandyBridge-E, IvyBridge-E");
+    return false;
+}
+
 static void mch_realize(PCIDevice *d, Error **errp)
 {
     int i;
     MCHPCIState *mch = MCH_PCI_DEVICE(d);
+
+    if (!mch_validate_g11_identity(mch, errp)) {
+        return;
+    }
+
+    if (mch->g11_host_bridge) {
+        mch->g11_q35_subsystem_vendor_id =
+            pci_get_word(d->config + PCI_SUBSYSTEM_VENDOR_ID);
+        mch->g11_q35_subsystem_id =
+            pci_get_word(d->config + PCI_SUBSYSTEM_ID);
+        mch->g11_q35_subsystem_saved = true;
+    }
 
     if (mch->ext_tseg_mbytes > MCH_HOST_BRIDGE_EXT_TSEG_MBYTES_MAX) {
         error_setg(errp, "invalid extended-tseg-mbytes value: %" PRIu16,
@@ -661,6 +745,7 @@ static const Property mch_props[] = {
     DEFINE_PROP_UINT16("extended-tseg-mbytes", MCHPCIState, ext_tseg_mbytes,
                        64),
     DEFINE_PROP_BOOL("smbase-smram", MCHPCIState, has_smram_at_smbase, true),
+    DEFINE_PROP_STRING("x-g11-host-bridge", MCHPCIState, g11_host_bridge),
 };
 
 static void mch_class_init(ObjectClass *klass, const void *data)

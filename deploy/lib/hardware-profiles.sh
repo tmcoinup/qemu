@@ -23,11 +23,13 @@
 #   https://www.intel.com/content/www/us/en/products/sku/80806/intel-core-i74790-processor-8m-cache-up-to-4-00-ghz/specifications.html
 #   https://www.intel.com/content/www/us/en/products/sku/63698/intel-core-i73820-processor-10m-cache-up-to-3-80-ghz/specifications.html
 #   https://www.intel.com/content/www/us/en/products/sku/77781/intel-core-i74820k-processor-10m-cache-up-to-3-90-ghz/specifications.html
+#   https://www.intel.com/content/www/us/en/products/sku/77780/intel-core-i74930k-processor-12m-cache-up-to-3-90-ghz/specifications.html
+# Retail i7-4930K CPUID/cache validation (12 MiB, 16-way LLC):
+#   https://valid.x86.fr/7ehxl9
 #
-# The strict consumer-desktop intersection requested for this expansion is
-# 4C/8T + no integrated graphics + LGA2011 quad-channel memory.  It contains
-# exactly i7-3820 and i7-4820K; a third row would require admitting a Xeon,
-# a 6C/12T part, an iGPU part, or a dual-channel platform.
+# The active consumer-desktop intersection is no-iGPU LGA2011 with
+# quad-channel DDR3.  The normal pool contains the two 4C/8T parts plus the
+# reviewed i7-4930K 6C/12T part, without admitting Xeon identities.
 CPU_PROFILES=(
     "g3220|Intel-Pentium-G3220|Intel(R) Pentium(R) CPU G3220 @ 3.00GHz|3000000000|BX80646G3220|3000|3000|11|0x2D|0xEC|2|1|128|512|3072|7|9|4|LGA1150|DDR3|1333|0x0C01|0x06|3"
     "i3-4130|Core-i3-4130|Intel(R) Core(TM) i3-4130 CPU @ 3.40GHz|3400000000|BX80646I34130|3400|3400|206|0x2D|0xFC|2|2|128|512|3072|7|9|4|LGA1150|DDR3|1600|0x0C01|0x06|3"
@@ -39,6 +41,18 @@ CPU_PROFILES=(
     "i3-8100|Core-i3-8100|Intel(R) Core(TM) i3-8100 CPU @ 3.60GHz|3600000000|SR3N5|3600|3600|206|0x32|0xEC|4|1|256|1024|6144|5|9|8|LGA1151-300|DDR4|2400|0x1901|0x07|3"
     "i7-3820|Core-i7-3820|Intel(R) Core(TM) i7-3820 CPU @ 3.60GHz|3600000000|BX80619I73820|3600|3800|198|0x26|0xFC|4|2|256|1024|10240|7|14|2|LGA2011|DDR3|1600|0x3C02|0x07|2"
     "i7-4820k|Core-i7-4820K|Intel(R) Core(TM) i7-4820K CPU @ 3.70GHz|3700000000|BX80633I74820K|3700|3900|198|0x26|0xFC|4|2|256|1024|10240|7|14|3|LGA2011|DDR3|1866|0x0E02|0x04|3"
+    "i7-4930k|Core-i7-4930K|Intel(R) Core(TM) i7-4930K CPU @ 3.40GHz|3400000000|BX80633I74930K|3400|3900|198|0x26|0xFC|6|2|384|1536|12288|7|8|3|LGA2011|DDR3|1866|0x0E02|0x04|3"
+)
+
+# CPU-side host bridge inventory for the active X79 CPUs.  These identities
+# pair with the 0x3C02/0x0E02 CPU PCIe root-port identities above; q35 remains
+# the behavior model.  Archived mainstream CPUs intentionally keep q35's
+# default P35 MCH until an equally narrow, reviewed mapping exists for them.
+# cpu-profile|QEMU-presentation-key|PCI-vendor|PCI-device|PCI-revision
+CPU_HOST_BRIDGE_PRESENTATION_PROFILES=(
+    "i7-3820|SandyBridge-E|0x8086|0x3C00|0x07"
+    "i7-4820k|IvyBridge-E|0x8086|0x0E00|0x04"
+    "i7-4930k|IvyBridge-E|0x8086|0x0E00|0x04"
 )
 
 # Board fields:
@@ -94,7 +108,7 @@ BOARD_PROFILES=(
     "asrock-h81m-hds|ASRock|H81M-HDS|1.0|H81|2.20|03/09/2016|none|2|16|0|0|0x8086|0x8C31|0x05|PCIE1|PCIE2|171|8|3|LGA1150|DDR3|1600|2013|asrock"
     "ecs-h81h3-m4|ECS|H81H3-M4|1.0A|H81|5.04.10|04/10/2015|none|2|16|0|0|0x8086|0x8C31|0x05|PCIEX16|PCIEX1|171|8|3|LGA1150|DDR3|1600|2013|ecs"
     # Consumer X79 boards.  None has native M.2; Gen3 NVMe is supplied only by
-    # the separately audited passive-adapter path below and only with i7-4820K.
+    # the separately audited passive-adapter path below and Ivy Bridge-E CPUs.
     "asus-p9x79|ASUSTeK COMPUTER INC.|P9X79|Rev 1.xx|X79|4701|06/23/2014|1.2|8|64|0|0|0x1B21|0x1042|0x00|PCIEX16_1|PCIEX1_1|171|8|3|LGA2011|DDR3|1866|2011|asus"
     "gigabyte-x79-up4|Gigabyte|GA-X79-UP4|1.0|X79|F7|03/20/2014|1.2|8|64|0|0|0x1B73|0x1009|0x02|PCIEX16_1|PCIEX1_1|171|8|3|LGA2011|DDR3|1866|2012|gigabyte"
     "asrock-x79-extreme4|ASRock|X79 Extreme4|1.0|X79|P3.20|07/22/2013|none|4|32|0|0|0x1B21|0x1042|0x00|PCIE1|PCIE2|171|8|3|LGA2011|DDR3|1600|2011|asrock"
@@ -128,6 +142,7 @@ CHIPSET_PRESENTATION_PROFILES=(
 #   https://www.kingston.com/datasheets/KVR16N11S6_2.pdf
 #   https://www.kingston.com/datasheets/KVR16N11S8_4.pdf
 #   https://download.semiconductor.samsung.com/resources/data-sheet/237561ds_ddr3_2gb_d-die_based_udimm_rev14.pdf
+#   https://download.semiconductor.samsung.com/resources/data-sheet/DS_DDR3_4Gb_Q_die_UDIMM_Rev10-0.pdf
 #   https://www.micron.com/products/obsolete/obsolete-udimm/part-catalog
 #   https://product.skhynix.com/products/dram/module/module_info.jsp
 #   https://www.crucial.com/memory/ddr3/ct51264bd160b
@@ -170,12 +185,23 @@ MEMORY_PROFILES=(
     "kvr16n11s8-4x4|Kingston|KVR16N11S8/4,KVR16N11S8/4,KVR16N11S8/4,KVR16N11S8/4|1600|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|1,1,1,1|8,8,8,8|1500|quad-channel|0198,0198,0198,0198|0000,0000,0000,0000"
     "samsung-m378b5273dh0-3x4|Samsung|M378B5273DH0-CK0,M378B5273DH0-CK0,M378B5273DH0-CK0|1600|DDR3|0x18|64|4096,4096,4096|3|DIMM|2,2,2|8,8,8|1500|triple-channel|80CE,80CE,80CE|80CE,80CE,80CE"
     "samsung-m378b5273dh0-4x4|Samsung|M378B5273DH0-CK0,M378B5273DH0-CK0,M378B5273DH0-CK0,M378B5273DH0-CK0|1600|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|2,2,2,2|8,8,8,8|1500|quad-channel|80CE,80CE,80CE,80CE|80CE,80CE,80CE,80CE"
+    "micron-mt8jtf51264az-3x4|Micron|MT8JTF51264AZ-1G6,MT8JTF51264AZ-1G6,MT8JTF51264AZ-1G6|1600|DDR3|0x18|64|4096,4096,4096|3|DIMM|1,1,1|8,8,8|1500|triple-channel|802C,802C,802C|802C,802C,802C"
+    "micron-mt8jtf51264az-4x4|Micron|MT8JTF51264AZ-1G6,MT8JTF51264AZ-1G6,MT8JTF51264AZ-1G6,MT8JTF51264AZ-1G6|1600|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|1,1,1,1|8,8,8,8|1500|quad-channel|802C,802C,802C,802C|802C,802C,802C,802C"
+    "hynix-hmt351u6cfr8c-3x4|SK hynix|HMT351U6CFR8C-PB,HMT351U6CFR8C-PB,HMT351U6CFR8C-PB|1600|DDR3|0x18|64|4096,4096,4096|3|DIMM|2,2,2|8,8,8|1500|triple-channel|80AD,80AD,80AD|80AD,80AD,80AD"
+    "hynix-hmt351u6cfr8c-4x4|SK hynix|HMT351U6CFR8C-PB,HMT351U6CFR8C-PB,HMT351U6CFR8C-PB,HMT351U6CFR8C-PB|1600|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|2,2,2,2|8,8,8,8|1500|quad-channel|80AD,80AD,80AD,80AD|80AD,80AD,80AD,80AD"
     "elpida-ebj40ug8bfw0-2x4|Elpida|EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F|1866|DDR3|0x18|64|4096,4096|2|DIMM|1,1|8,8|1500|dual-channel|02FE,02FE|02FE,02FE"
     "elpida-ebj40ug8bfw0-3x4|Elpida|EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F|1866|DDR3|0x18|64|4096,4096,4096|3|DIMM|1,1,1|8,8,8|1500|triple-channel|02FE,02FE,02FE|02FE,02FE,02FE"
     "elpida-ebj40ug8bfw0-4x4|Elpida|EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F,EBJ40UG8BFW0-JS-F|1866|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|1,1,1,1|8,8,8,8|1500|quad-channel|02FE,02FE,02FE,02FE|02FE,02FE,02FE,02FE"
     "micron-mt8ktf51264az-2x4|Micron|MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9|1866|DDR3|0x18|64|4096,4096|2|DIMM|1,1|8,8|1500|dual-channel|802C,802C|802C,802C"
     "micron-mt8ktf51264az-3x4|Micron|MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9|1866|DDR3|0x18|64|4096,4096,4096|3|DIMM|1,1,1|8,8,8|1500|triple-channel|802C,802C,802C|802C,802C,802C"
     "micron-mt8ktf51264az-4x4|Micron|MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9,MT8KTF51264AZ-1G9|1866|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|1,1,1,1|8,8,8,8|1500|quad-channel|802C,802C,802C,802C|802C,802C,802C,802C"
+    # Samsung original JEDEC DDR3-1866 UDIMMs for the unified Ivy Bridge-E pool.
+    # The 2 GiB CMA module is 1Rx8, allowing the minimum 4 GiB option to keep
+    # the requested 1866 MT/s identity instead of silently down-binning.
+    "samsung-m378b5773dh0-1866-2x2|Samsung|M378B5773DH0-CMA,M378B5773DH0-CMA|1866|DDR3|0x18|64|2048,2048|2|DIMM|1,1|8,8|1500|dual-channel|80CE,80CE|80CE,80CE"
+    "samsung-m378b5173qh0-1866-2x4|Samsung|M378B5173QH0-CMA,M378B5173QH0-CMA|1866|DDR3|0x18|64|4096,4096|2|DIMM|1,1|8,8|1500|dual-channel|80CE,80CE|80CE,80CE"
+    "samsung-m378b5173qh0-1866-3x4|Samsung|M378B5173QH0-CMA,M378B5173QH0-CMA,M378B5173QH0-CMA|1866|DDR3|0x18|64|4096,4096,4096|3|DIMM|1,1,1|8,8,8|1500|triple-channel|80CE,80CE,80CE|80CE,80CE,80CE"
+    "samsung-m378b5173qh0-1866-4x4|Samsung|M378B5173QH0-CMA,M378B5173QH0-CMA,M378B5173QH0-CMA,M378B5173QH0-CMA|1866|DDR3|0x18|64|4096,4096,4096,4096|4|DIMM|1,1,1,1|8,8,8,8|1500|quad-channel|80CE,80CE,80CE,80CE|80CE,80CE,80CE,80CE"
     "kvr21n15s8-2x4|Kingston|KVR21N15S8/4,KVR21N15S8/4|2133|DDR4|0x1A|64|4096,4096|2|DIMM|1,1|8,8|1200|dual-channel|0198,0198|0000,0000"
     "kvr24n17s8-2x4|Kingston|KVR24N17S8/4,KVR24N17S8/4|2400|DDR4|0x1A|64|4096,4096|2|DIMM|1,1|8,8|1200|dual-channel|0198,0198|0000,0000"
     # Crucial is Micron's module brand; 802C is retained for both the module
@@ -387,6 +413,80 @@ _hardware_profile_append_i3_4130_memory_matrix() {
 
 _hardware_profile_append_i3_4130_memory_matrix
 
+# The home-desktop i7-4930K participates in the same normal creation pool as
+# the other X79 CPUs.  Three board brands are exposed.  On ASUS/Gigabyte, each
+# capacity has four or five major memory brands and the audited Samsung,
+# Micron and Elpida parts run at native DDR3-1866 where available.  ASRock's
+# official non-overclocked ceiling is DDR3-1600, so its four-brand rows retain
+# the real 1600 bins instead of relabeling them as 1866.
+I7_4930K_REVIEWED_BOARD_MATRIX=(
+    "asus-p9x79|p9x79|1866"
+    "gigabyte-x79-up4|x79-up4|1866"
+    "asrock-x79-extreme4|x79-extreme4|1600"
+)
+I7_4930K_REVIEWED_MEMORY_MATRIX=(
+    "samsung-m378b5773dh0-1866-2x2|samsung-4g|1866"
+    "samsung-m378b5173qh0-1866-2x4|samsung-8g|1866"
+    "samsung-m378b5173qh0-1866-3x4|samsung-12g|1866"
+    "samsung-m378b5173qh0-1866-4x4|samsung-16g|1866"
+    "samsung-m378b5773dh0-2x2|samsung-4g|1600"
+    "samsung-m378b5273dh0-2x4|samsung-8g|1600"
+    "samsung-m378b5273dh0-3x4|samsung-12g|1600"
+    "samsung-m378b5273dh0-4x4|samsung-16g|1600"
+    "micron-mt4jtf25664az-2x2|micron-4g|all"
+    "micron-mt8ktf51264az-2x4|micron-8g|1866"
+    "micron-mt8ktf51264az-3x4|micron-12g|1866"
+    "micron-mt8ktf51264az-4x4|micron-16g|1866"
+    "micron-mt8jtf51264az-2x4|micron-8g|1600"
+    "micron-mt8jtf51264az-3x4|micron-12g|1600"
+    "micron-mt8jtf51264az-4x4|micron-16g|1600"
+    "elpida-ebj40ug8bfw0-2x4|elpida-8g|1866"
+    "elpida-ebj40ug8bfw0-3x4|elpida-12g|1866"
+    "elpida-ebj40ug8bfw0-4x4|elpida-16g|1866"
+    "kvr16n11s6-2x2|kingston-4g|all"
+    "kvr16n11s8-2x4|kingston-8g|all"
+    "kvr16n11s8-3x4|kingston-12g|all"
+    "kvr16n11s8-4x4|kingston-16g|all"
+    "hynix-hmt325u6cfr8c-2x2|hynix-4g|all"
+    "hynix-hmt351u6cfr8c-2x4|hynix-8g|all"
+    "hynix-hmt351u6cfr8c-3x4|hynix-12g|all"
+    "hynix-hmt351u6cfr8c-4x4|hynix-16g|all"
+)
+
+_hardware_profile_append_i7_4930k_pool() {
+    local row platform cpu board memory lifecycle board_row board_alias
+    local board_speed memory_row memory_alias scope key triple
+    local -A seen_triples=() seen_keys=()
+
+    for row in "${HARDWARE_COMBINATIONS[@]}"; do
+        IFS='|' read -r platform cpu board memory lifecycle <<<"$row"
+        seen_keys["$platform"]=1
+        seen_triples["$cpu|$board|$memory"]=1
+    done
+    for board_row in "${I7_4930K_REVIEWED_BOARD_MATRIX[@]}"; do
+        IFS='|' read -r board board_alias board_speed <<<"$board_row"
+        for memory_row in "${I7_4930K_REVIEWED_MEMORY_MATRIX[@]}"; do
+            IFS='|' read -r memory memory_alias scope <<<"$memory_row"
+            case "$scope:$board_speed" in
+                all:*|1866:1866|1600:1600) ;;
+                *) continue ;;
+            esac
+            triple="i7-4930k|$board|$memory"
+            [[ ! -v "seen_triples[$triple]" ]] || continue
+            key="i7-4930k-$board_alias-$memory_alias"
+            [[ ! -v "seen_keys[$key]" ]] || {
+                echo "i7-4930K 审核矩阵生成了重复平台 ID: $key" >&2
+                return 1
+            }
+            HARDWARE_COMBINATIONS+=("$key|$triple|new")
+            seen_keys["$key"]=1
+            seen_triples["$triple"]=1
+        done
+    done
+}
+
+_hardware_profile_append_i7_4930k_pool
+
 # Keep every pre-X79 and historical 6 GiB key loadable for immutable existing
 # vm.conf files, but remove it from every creation/component candidate path.
 # This is an archive operation, not a deletion, so existing installations keep
@@ -564,6 +664,7 @@ INTEL_OUIS=(
 # rescanning the full Bash arrays for every flattened row would otherwise make
 # list/start commands quadratic.
 declare -A _HARDWARE_CPU_ROW_BY_KEY=()
+declare -A _HARDWARE_CPU_HOST_BRIDGE_ROW_BY_KEY=()
 declare -A _HARDWARE_BOARD_ROW_BY_KEY=()
 declare -A _HARDWARE_MEMORY_ROW_BY_KEY=()
 declare -A _HARDWARE_COMBINATION_ROW_BY_KEY=()
@@ -574,6 +675,7 @@ _hardware_profile_build_indexes() {
     local row key
 
     _HARDWARE_CPU_ROW_BY_KEY=()
+    _HARDWARE_CPU_HOST_BRIDGE_ROW_BY_KEY=()
     _HARDWARE_BOARD_ROW_BY_KEY=()
     _HARDWARE_MEMORY_ROW_BY_KEY=()
     _HARDWARE_COMBINATION_ROW_BY_KEY=()
@@ -582,6 +684,10 @@ _hardware_profile_build_indexes() {
     for row in "${CPU_PROFILES[@]}"; do
         key=${row%%|*}
         _HARDWARE_CPU_ROW_BY_KEY["$key"]=$row
+    done
+    for row in "${CPU_HOST_BRIDGE_PRESENTATION_PROFILES[@]}"; do
+        key=${row%%|*}
+        _HARDWARE_CPU_HOST_BRIDGE_ROW_BY_KEY["$key"]=$row
     done
     for row in "${BOARD_PROFILES[@]}"; do
         key=${row%%|*}
@@ -692,6 +798,36 @@ cpu_profile_load() {
         GPU_ROOT_PORT_DEVICE_ID GPU_ROOT_PORT_REVISION \
         CPU_PCIE_GENERATION <<<"$matched"
     CPU_VCPUS=$((CPU_CORES * CPU_THREADS_PER_CORE))
+}
+
+cpu_host_bridge_presentation_load() {
+    local requested=${1:-} matched=
+
+    CPU_HOST_BRIDGE_PRESENTATION_KEY=""
+    CPU_HOST_BRIDGE_PCI_VENDOR_ID=""
+    CPU_HOST_BRIDGE_PCI_DEVICE_ID=""
+    CPU_HOST_BRIDGE_PCI_REVISION=""
+    if [[ -n "$requested" ]]; then
+        matched=${_HARDWARE_CPU_HOST_BRIDGE_ROW_BY_KEY["$requested"]-}
+    fi
+    [[ -n "$matched" ]] || return 1
+    IFS='|' read -r _ CPU_HOST_BRIDGE_PRESENTATION_KEY \
+        CPU_HOST_BRIDGE_PCI_VENDOR_ID CPU_HOST_BRIDGE_PCI_DEVICE_ID \
+        CPU_HOST_BRIDGE_PCI_REVISION <<<"$matched"
+}
+
+hardware_cpu_host_bridge_identity_for_platform() {
+    local requested=${1:-}
+
+    (
+        hardware_profile_load "$requested" || exit
+        cpu_host_bridge_presentation_load "$CPU_PROFILE" || return 1
+        printf '%s|%s|%s|%s\n' \
+            "$CPU_HOST_BRIDGE_PRESENTATION_KEY" \
+            "$CPU_HOST_BRIDGE_PCI_VENDOR_ID" \
+            "$CPU_HOST_BRIDGE_PCI_DEVICE_ID" \
+            "$CPU_HOST_BRIDGE_PCI_REVISION"
+    )
 }
 
 chipset_presentation_load() {
@@ -853,6 +989,7 @@ hardware_profile_load() {
 
     hardware_combination_load "$requested" || return
     cpu_profile_load "$CPU_PROFILE" || return
+    cpu_host_bridge_presentation_load "$CPU_PROFILE" || true
     board_profile_load "$BOARD_PROFILE" || return
     memory_profile_load "$MEMORY_PROFILE" || return
     optical_drive_profile_load "$OPTICAL_DRIVE_DEFAULT_PROFILE" || return
@@ -924,18 +1061,19 @@ hardware_profile_matches_components() {
     return 0
 }
 
-# Lower number wins.  The new consumer X79 pool intentionally prefers the
-# no-iGPU 4C/8T i7-4820K, then its DDR3-1866 combinations, before older
-# dual-channel choices.  This is a selection policy only; every returned row
-# still has to pass the KVM enforce=on realization gate.
+# Lower number wins.  The normal consumer X79 pool prefers the 6C/12T
+# i7-4930K, then the 4C/8T Ivy/Sandy Bridge-E models.  Every returned row still
+# has to pass the KVM enforce=on realization gate.
 hardware_profile_performance_priority() {
     local requested=${1:-}
 
     (
         hardware_profile_load "$requested" || exit
         case "$CPU_PROFILE:$MEM_SPEED" in
-            i7-4820k:1866) printf '0\n' ;;
-            i7-4820k:*) printf '10\n' ;;
+            i7-4930k:1866) printf '0\n' ;;
+            i7-4930k:*) printf '5\n' ;;
+            i7-4820k:1866) printf '10\n' ;;
+            i7-4820k:*) printf '15\n' ;;
             i7-3820:*) printf '20\n' ;;
             i5-4590:*) printf '100\n' ;;
             i5-4570:*) printf '110\n' ;;
@@ -1389,12 +1527,15 @@ hardware_profile_validate_catalog() {
         local cpu_key board_key memory_key module device_width rank mem_total
         local part index
         local used_cpu='|' used_board='|' used_memory='|' flat flat_count=0
-        local seen_model='|' seen_chipset='|' used_chipset='|'
+        local seen_model='|' seen_chipset='|' used_chipset='|' seen_host_bridge='|'
         local presentation_key lpc_vendor lpc_device lpc_revision
+        local host_cpu host_key host_vendor host_device host_revision
         local -a parts modules ranks device_widths module_jeps dram_jeps
         local -A active_cpu_seen=() active_board_seen=() default_cpu_seen=()
         local -A active_memory_brand_seen=()
+        local -A i7_4930k_board_capacity_brand_seen=()
         local -A active_board_capacity_seen=() active_cpu_capacity_seen=()
+        local capacity expected_brand_count brand_count memory_brand
         local new_count=0 explicit_count=0 archived_count=0 legacy_count=0
 
         seen='|'
@@ -1424,7 +1565,8 @@ hardware_profile_validate_catalog() {
                "$l1" =~ ^[1-9][0-9]*$ && "$l2" =~ ^[1-9][0-9]*$ &&
                "$l3" =~ ^[1-9][0-9]*$ &&
                ( "$l2assoc" == 5 || "$l2assoc" == 7 ) &&
-               ( "$l3assoc" == 9 || "$l3assoc" == 14 ) &&
+               ( "$l3assoc" == 8 || "$l3assoc" == 9 || "$l3assoc" == 10 ||
+                 "$l3assoc" == 14 ) &&
                ( "$generation" == 2 || "$generation" == 3 ||
                  "$generation" == 4 || "$generation" == 6 ||
                  "$generation" == 8 ) &&
@@ -1437,11 +1579,42 @@ hardware_profile_validate_catalog() {
                 echo "CPU profile 字段非法: $key" >&2
                 exit 1
             }
-            (( max >= base && cores * threads >= 2 && cores * threads <= 8 )) || {
+            (( max >= base && cores * threads >= 2 && cores * threads <= 12 )) || {
                 echo "CPU topology/frequency 未经审核: $key" >&2
                 exit 1
             }
         done
+
+        for row in "${CPU_HOST_BRIDGE_PRESENTATION_PROFILES[@]}"; do
+            IFS='|' read -r host_cpu host_key host_vendor host_device \
+                host_revision <<<"$row"
+            [[ -n "$host_revision" &&
+               "$seen_host_bridge" != *"|$host_cpu|"* ]] || {
+                echo "重复或字段不完整的 CPU host bridge identity: $host_cpu" >&2
+                exit 1
+            }
+            seen_host_bridge+="$host_cpu|"
+            [[ -v "_HARDWARE_CPU_ROW_BY_KEY[$host_cpu]" &&
+               "$host_vendor" == 0x8086 &&
+               "$host_device" =~ ^0x[0-9A-F]{4}$ &&
+               "$host_revision" =~ ^0x[0-9A-F]{2}$ ]] || {
+                echo "CPU host bridge identity 未经审核: $row" >&2
+                exit 1
+            }
+            case "$row" in
+                'i7-3820|SandyBridge-E|0x8086|0x3C00|0x07'|\
+                'i7-4820k|IvyBridge-E|0x8086|0x0E00|0x04'|\
+                'i7-4930k|IvyBridge-E|0x8086|0x0E00|0x04') ;;
+                *)
+                    echo "CPU host bridge identity 不在 X79 闭集: $row" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+        (( ${#CPU_HOST_BRIDGE_PRESENTATION_PROFILES[@]} == 3 )) || {
+            echo "CPU host bridge identity 必须精确覆盖三款活跃 X79 CPU" >&2
+            exit 1
+        }
 
         for row in "${CHIPSET_PRESENTATION_PROFILES[@]}"; do
             IFS='|' read -r chipset presentation_key lpc_vendor lpc_device \
@@ -1698,6 +1871,9 @@ hardware_profile_validate_catalog() {
                 active_board_capacity_seen["$board_key:$MEM_TOTAL_MB"]=1
                 active_cpu_capacity_seen["$cpu_key:$MEM_TOTAL_MB"]=1
                 active_memory_brand_seen["$MEM_BRAND"]=1
+                if [[ "$cpu_key" == i7-4930k ]]; then
+                    i7_4930k_board_capacity_brand_seen["$board_key:$MEM_TOTAL_MB:$MEM_BRAND"]=1
+                fi
                 [[ "$lifecycle" != new ]] || default_cpu_seen["$cpu_key"]=1
             fi
             used_cpu+="$cpu_key|"
@@ -1714,14 +1890,14 @@ hardware_profile_validate_catalog() {
             echo "兼容平台视图数量错误" >&2
             exit 1
         }
-        (( new_count == 48 && explicit_count == 0 && archived_count == 261 &&
+        (( new_count == 102 && explicit_count == 0 && archived_count == 261 &&
            legacy_count == 3 )) || {
-            echo "平台生命周期数量必须是 new=48/explicit=0/archived=261/legacy=3" >&2
+            echo "平台生命周期数量必须是 new=102/explicit=0/archived=261/legacy=3" >&2
             exit 1
         }
-        (( ${#active_cpu_seen[@]} == 2 && ${#active_board_seen[@]} == 3 &&
-           ${#default_cpu_seen[@]} == 2 )) || {
-            echo "新建池必须是 2 款无核显 4C/8T 家用 CPU/3 块四通道家用主板" >&2
+        (( ${#active_cpu_seen[@]} == 3 && ${#active_board_seen[@]} == 3 &&
+           ${#default_cpu_seen[@]} == 3 )) || {
+            echo "新建池必须是 3 款消费级 X79 CPU（含 6C/12T）/3 块四通道家用主板" >&2
             exit 1
         }
         for board_key in "${!active_board_seen[@]}"; do
@@ -1734,6 +1910,10 @@ hardware_profile_validate_catalog() {
             }
         done
         for cpu_key in "${!active_cpu_seen[@]}"; do
+            [[ -v "_HARDWARE_CPU_HOST_BRIDGE_ROW_BY_KEY[$cpu_key]" ]] || {
+                echo "新建 X79 CPU 缺少 DMI2 host bridge identity: $cpu_key" >&2
+                exit 1
+            }
             [[ -v "active_cpu_capacity_seen[$cpu_key:4096]" &&
                -v "active_cpu_capacity_seen[$cpu_key:8192]" &&
                -v "active_cpu_capacity_seen[$cpu_key:12288]" &&
@@ -1742,14 +1922,33 @@ hardware_profile_validate_catalog() {
                 exit 1
             }
         done
-        (( ${#active_memory_brand_seen[@]} == 4 )) &&
+        (( ${#active_memory_brand_seen[@]} == 5 )) &&
             [[ -v 'active_memory_brand_seen[Kingston]' &&
                -v 'active_memory_brand_seen[Samsung]' &&
                -v 'active_memory_brand_seen[Micron]' &&
-               -v 'active_memory_brand_seen[Elpida]' ]] || {
-            echo "新建内存池必须覆盖 Kingston/Samsung/Micron/Elpida 四个消费级品牌" >&2
+               -v 'active_memory_brand_seen[Elpida]' &&
+               -v 'active_memory_brand_seen[SK hynix]' ]] || {
+            echo "新建内存池必须覆盖 Kingston/Samsung/Micron/Elpida/SK hynix 五个大牌" >&2
             exit 1
         }
+        for board_key in asus-p9x79 gigabyte-x79-up4 asrock-x79-extreme4; do
+            for capacity in 4096 8192 12288 16384; do
+                brand_count=0
+                for memory_brand in Samsung Micron Kingston 'SK hynix' Elpida; do
+                    [[ -v "i7_4930k_board_capacity_brand_seen[$board_key:$capacity:$memory_brand]" ]] &&
+                        brand_count=$((brand_count + 1))
+                done
+                expected_brand_count=4
+                if [[ "$board_key" != asrock-x79-extreme4 &&
+                      "$capacity" != 4096 ]]; then
+                    expected_brand_count=5
+                fi
+                (( brand_count == expected_brand_count )) || {
+                    echo "i7-4930K 主板/容量品牌覆盖异常: $board_key/${capacity}MiB=$brand_count（应为 $expected_brand_count）" >&2
+                    exit 1
+                }
+            done
+        done
 
         for row in "${CPU_PROFILES[@]}"; do
             IFS='|' read -r key _ <<<"$row"

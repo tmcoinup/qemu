@@ -6,17 +6,20 @@ guest 包。
 > 2026-08-21：正常新建已切到两款 4C/8T Core i7 + 三品牌 X79 +
 > 4/8/12/16G。本文保留的 H81/i3 截图与逐项分析只用于解释 archived 旧 VM；当前
 > 数量、选择与 NVMe 规则以 [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) 为准。
+> 2026-08-27：i7-4930K 6C/12T 已进入普通创建池，覆盖三品牌 X79、每容量
+> 4–5 个内存品牌；普通新建 102 条，活跃 X79 合计 102 条。
 
 ## 结论
 
 本轮没有针对鲁大师的进程名、安装目录或 exe 做适配。鲁大师、GPU-Z、HWiNFO、
 设备管理器等都只是验收工具；仓库中不存在鲁大师专用 DLL、安装器或打包器。
 
-公共层现在有三道必过门禁和一项如实审计：
+公共层现在同时约束 CPU、主板和显卡读取路径，并保留一项如实审计：
 
 | 层 | 处理 | 覆盖 |
 |---|---|---:|
-| QEMU 00:1f.0 LPC inventory | 主板目录选择 X79/H81/H97/B150/B360 身份 | 312/312 个平台 |
+| QEMU 00:00.0 CPU DMI2 inventory | 按 CPU 目录在 UEFI 退出后呈现 Sandy/Ivy Bridge-E DMI2 | 102/102 个 X79 平台 |
+| QEMU 00:1f.0 LPC inventory | 主板目录选择 X79/H81/H97/B150/B360 身份 | 366/366 个平台 |
 | G-11 系统 NVAPI | 同一 VM 合同供所有 32/64 位 NVAPI 调用者使用 | 25/25 个 GPU profile |
 | GPU 能力目录 | 六个消费卡 device ID 都显式要求目标 DXR tier 0、NVAPI RT core 0、Tensor core 0 | 6/6 个 device ID |
 | 原生 D3D12 审计 | 安装写入前和最终验收均直接查 OPTIONS5；查询失败阻断，签名 transport 能力差异警告 | x86 + x64 |
@@ -24,7 +27,7 @@ guest 包。
 截图中的 `Gigabyte GA-H81M-S1 + i3-4130 + GTX 750` 现在属于 archived 旧配置，
 仍适用同一条公共读取路径，但不能用于新建。
 
-## 为什么所有主板以前都显示 ICH9
+## 主板 PCH 为什么以前都显示 ICH9
 
 G-11 使用 QEMU q35；上游 q35 的 LPC 设备固定为 ICH9 `8086:2918`。此前主板
 SMBIOS 虽然会变化，00:1f.0 的 PCI identity 没有变化，所以检测软件换多少款
@@ -35,7 +38,7 @@ SMBIOS 虽然会变化，00:1f.0 的 PCI identity 没有变化，所以检测软
 
 | 主板目录芯片组 | 来宾 00:1f.0 LPC | revision | 平台数量 |
 |---|---|---:|---:|
-| X79 | `8086:1D41` | `06` | 48 |
+| X79 | `8086:1D41` | `06` | 102 |
 | H81 | `8086:8C5C` | `04` | 261 |
 | H97 | `8086:8CC6` | `00` | 1 |
 | B150 | `8086:A148` | `31` | 1 |
@@ -45,6 +48,54 @@ SMBIOS 虽然会变化，00:1f.0 的 PCI identity 没有变化，所以检测软
 只改变 LPC inventory；q35/ICH9 的 ACPI、IRQ 和 machine 行为不变，SATA 仍是
 ICH9-AHCI，USB 仍是 `qemu-xhci`。这避免 Windows 为虚拟 SATA/USB 控制器加载
 实体 PCH 专用 quirks。
+
+## X79 的 CPU 侧 DMI2 怎样通用呈现
+
+X79 平台不只需要 00:1f.0 的 Patsburg/X79 LPC，还需要与 CPU 代际一致的
+00:00.0 DMI2 host bridge。当前 102 个正常 X79 组合全部从 CPU 目录取得固定映射，
+不读取 VM ID，也不检测验收软件：
+
+| CPU 目录 | Windows 看到的 00:00.0 | revision | subsystem |
+|---|---|---:|---|
+| Core i7-3820 / Sandy Bridge-E | `8086:3C00` | `07` | `8086:3C00` |
+| Core i7-4820K / Ivy Bridge-E | `8086:0E00` | `04` | `8086:0E00` |
+| Core i7-4930K / Ivy Bridge-E | `8086:0E00` | `04` | `8086:0E00` |
+
+QEMU 的功能模型仍然是 q35。OVMF 在 PEI/DXE 阶段必须看到原生 P35 MCH
+`8086:29C0`，否则固件不能按现有 q35 路径可靠建立 PCI host bridge。随仓库封装的
+OVMF 在 `ExitBootServices` 发出私有且固定的 APM `0x47` 通知；只有启用了已审核
+`x-g11-host-bridge` 白名单的同一个 00:00.0 才在此时切换到对应 DMI2 identity。
+此时固件已结束 PCI 初始化，Windows 还没有开始枚举。系统复位会先恢复
+`8086:29C0` 与主板 subsystem，下一次退出固件时再切换，因而冷启动和重启走同一
+状态机。
+
+该处理只改 guest 可见的 PCI vendor/device/revision/subsystem，不声称 q35 的内部
+实现变成了实体 X79，也不为 archived 的非 X79 CPU 猜测 host bridge ID。目录外的
+CPU 代际会失败关闭。OVMF 构建器会同时生成 hash 绑定的 `.features` 清单；启动器在
+分配 VM 资源前核对固件确实包含同版本交接能力，旧固件或被替换的自定义固件不会
+静默退回 `29C0`。
+
+## 鲁大师末尾横杠的深度复扫结论
+
+VM3 只是验收机。使用鲁大师 `6.1026.4785.824` 明确点击“重新扫描”后，主板页仍会
+显示 `X79 PCH -`；但同一次扫描的 `ComputerZ_HardwareDll.log` 已给出决定性链路：
+
+```text
+Northbridge name:Intel Ivytown DMI2
+Name(DB)=X79 PCH - LPC Interface Controller
+Southbridge name:X79 PCH -
+```
+
+Windows 同时枚举到 `VEN_8086&DEV_0E00&SUBSYS_0E008086&REV_04`，说明 CPU 侧 DMI2
+已被检测器命中；00:1f.0 则是目录要求的真实 `8086:1D41 rev 06`。末尾横杠不是
+QEMU 缺少北桥，也不是鲁大师缓存未刷新，而是鲁大师把自身数据库名称
+`X79 PCH - LPC Interface Controller` 删除控制器后缀时，没有继续清理分隔符。
+
+PCI 配置空间只提供数值身份，不提供鲁大师最终显示的中文名称，因此宿主公共层没有
+一个可用于“删掉横杠”的标准字段。为了视觉效果改成另一枚 LPC ID、修改鲁大师
+数据库/DLL、注入进程或增加假设备，都会把应用特例或错误硬件引入所有 VM；本分支
+明确不这样做。验收时应把 `X79 PCH -` 记为该版本鲁大师的已知显示缺陷，并以
+00:00.0、00:1f.0 的 PnP ID 和交叉工具结果判断底层身份。
 
 ## 旧显卡能力怎样统一处理
 
@@ -101,33 +152,39 @@ VM10 已停止、mdev 已移除，宿主 `profile_override.toml` 已恢复原摘
 
 ## 傻瓜操作
 
-### 1. 更新并验证宿主 QEMU
+### 1. 更新并验证宿主 QEMU 与 OVMF
 
-先让目标 VM 完整关机，然后执行：
+先让目标 VM 完整关机。下面以 VM3 为验收示例；换成任何合法 VM ID 都走相同目录
+映射，没有 VM3 特判：
 
 ```bash
 cd /home/ubuntu/projects/qemu
+VM_ID=3
+./deploy/scripts/vmctl.sh stop "$VM_ID"
 ./deploy/host/build-qemu.sh
-./deploy/tests/vgpu/test_chipset_presentation.sh
+./deploy/host/build-stealth-ovmf.sh
 ./deploy/scripts/check-hardware-pool.sh --machine-readable | \
   rg 'chipset_presentations|architecture_boundaries'
+./deploy/tests/vgpu/test_chipset_presentation.sh
 ```
 
 预期包含：
 
 ```text
-chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 X79=8086:1D41:06 coverage=all-312-platforms
+chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 X79=8086:1D41:06 coverage=all-366-platforms
+PASS: 366 G-11 platforms map LPC identities; all 102 X79 rows map UEFI-handoff CPU DMI2 identities
 ```
 
 正常启动目标 VM：
 
 ```bash
-VM_ID=8
-./deploy/scripts/start-vm.sh "$VM_ID"
+VM_ID=3
+./deploy/scripts/vmctl.sh start "$VM_ID"
 ```
 
-启动摘要必须打印该主板的芯片组和 LPC identity。Windows 第一次看到新 LPC PnP
-ID 时可能重新枚举设备；让 Windows 完整重启一次。
+启动摘要必须同时打印主板的 LPC identity 和 CPU DMI2 inventory。Windows 第一次
+看到新的 PnP ID 时可能重新枚举设备；进入桌面后让 Windows 完整重启一次，再打开
+检测工具。无需安装 guest 驱动，不改 BCD，也不需要测试签名。
 
 ### 2. 生成唯一的系统能力包
 
@@ -182,12 +239,27 @@ D3D12_NATIVE_VERIFY PASS ... native_raytracing_nonzero=no|yes   # x64
 `31.0.15.3833` 且为 NVIDIA/Microsoft 正式签名。然后让每个检测工具执行
 “重新扫描”，至少交叉检查两种不同来源：
 
-- 主板应显示目录型号和对应芯片组，例如 `GA-H81M-S1 (H81)`；
+- 鲁大师进入“硬件参数”后点击“重新扫描”，扫描完成再打开“主板”；仅切换页签不会
+  刷新旧缓存；
+- 主板型号应来自目录；X79 的底层应为 CPU DMI2 `3C00/0E00` 加 LPC `1D41`；
+  鲁大师 `6.1026.4785.824` 可能仍显示 `X79 PCH -`，按上文已知显示缺陷处理；
+- H81/H97/B150/B360 等 archived 旧配置仍应显示各自目录 LPC，不套用 X79 DMI2；
 - 显卡型号、板卡厂商、1/2 GB、GDDR5、厂家、位宽、时钟必须来自同一个 profile；
 - NVAPI RT core 与 Tensor core 都必须为 0；
 - 不得出现第二块显卡、Code 43、Xid、TDR 或持续黑屏；
 - 若任何工具仍显示光追，按上文 D3D12 边界记为“严格现实一致性未通过”，不能把
   NVAPI 的 PASS 描述成已经改变原生 D3D12。
+
+X79 可在管理员 PowerShell 直接做数值验收，不依赖任何检测器的名称数据库：
+
+```powershell
+Get-PnpDevice -PresentOnly |
+  Where-Object InstanceId -Match 'VEN_8086&DEV_(0E00|3C00|1D41)' |
+  Select-Object Status, Class, FriendlyName, InstanceId
+```
+
+i7-4820K/i7-4930K 应同时出现 `DEV_0E00` 与 `DEV_1D41`；i7-3820 应同时出现 `DEV_3C00`
+与 `DEV_1D41`，且状态为 `OK`。
 
 硬件工具的缓存可能保留旧结果，所以“重新扫描”只是验收动作，不是实现依赖。
 
@@ -200,6 +272,15 @@ G11_CHIPSET_PRESENTATION=off ./deploy/scripts/start-vm.sh "$VM_ID"
 ```
 
 这只恢复上游 ICH9 `8086:2918`，不改写 `vm.conf`，不要作为日常配置。
+
+若只需回退 CPU 侧 DMI2，同样只影响本次启动：
+
+```bash
+G11_HOST_BRIDGE_PRESENTATION=off ./deploy/scripts/start-vm.sh "$VM_ID"
+```
+
+这会让 00:00.0 始终保持 q35/P35 MCH `8086:29C0`。两个开关都只接受
+`catalog` 或 `off`，不能从环境变量注入任意 PCI ID。
 
 系统 NVAPI 包需要回滚时，在原包中双击 `Rollback-As-Administrator.cmd`。它按
 validated 收据恢复保存的 NVIDIA 正式签名原件，不删除未知文件。不要手工覆盖
@@ -219,8 +300,9 @@ cd /home/ubuntu/projects/qemu
 ./deploy/tests/vgpu/test_root_start_vm_bootstrap.sh
 ```
 
-这些检查覆盖全部 264 个平台、25 个 GPU profile、六个 GPU device ID、x86/x64
-NVAPI 与原生 D3D12 探针，以及“只能改 LPC、不能连带改 AHCI/xHCI”的架构边界。
+这些检查覆盖全部 366 个平台、25 个 GPU profile、六个 GPU device ID、x86/x64
+NVAPI 与原生 D3D12 探针，以及“LPC 不连带改 AHCI/xHCI、CPU DMI2 只能在
+ExitBootServices 后交接且复位恢复”的架构边界。
 
 整个流程不修改 BCD，不开启 `testsigning`/`nointegritychecks`，不安装或修改
 INF/CAT/SYS，不导入证书，也不把宿主凭据写入仓库或包。

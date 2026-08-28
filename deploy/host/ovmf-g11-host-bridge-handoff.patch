@@ -1,0 +1,80 @@
+# Signal QEMU at ExitBootServices so the catalog host-bridge identity becomes
+# visible after OVMF platform setup and before operating-system PCI inventory.
+--- a/OvmfPkg/SmbiosPlatformDxe/EntryPoint.c
++++ b/OvmfPkg/SmbiosPlatformDxe/EntryPoint.c
+@@ -4,11 +4,30 @@
+   SPDX-License-Identifier: BSD-2-Clause-Patent
+ **/
+ 
++#include <IndustryStandard/Q35MchIch9.h>
++#include <Library/DebugLib.h>
++#include <Library/IoLib.h>
+ #include <Library/MemoryAllocationLib.h> // FreePool()
++#include <Library/UefiBootServicesTableLib.h>
+ #include <OvmfPlatforms.h>               // CLOUDHV_DEVICE_ID
+ 
+ #include "SmbiosPlatformDxe.h"
+ 
++#define G11_HOST_BRIDGE_HANDOFF_COMMAND  0x47
++
++STATIC
++VOID
++EFIAPI
++G11HostBridgeHandoff (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  (VOID)Event;
++  (VOID)Context;
++  IoWrite8 (ICH9_APM_CNT, G11_HOST_BRIDGE_HANDOFF_COMMAND);
++}
++
+ /**
+   Installs SMBIOS information for OVMF
+ 
+@@ -27,6 +45,8 @@
+   )
+ {
+   EFI_STATUS  Status;
++  EFI_STATUS  EventStatus;
++  EFI_EVENT   ExitBootServicesEvent;
+   UINT8       *SmbiosTables;
+   UINT16      HostBridgeDevId;
+ 
+@@ -48,5 +68,25 @@
+     }
+   }
+ 
++  //
++  // QEMU must retain q35's native host-bridge identity while OVMF performs
++  // platform and PCI setup.  Signal the bundled QEMU at the architectural
++  // firmware/OS boundary so it can expose the catalog CPU-side DMI2 identity
++  // before the operating system starts PCI inventory.
++  //
++  if (HostBridgeDevId == INTEL_Q35_MCH_DEVICE_ID) {
++    EventStatus = gBS->CreateEvent (
++                         EVT_SIGNAL_EXIT_BOOT_SERVICES,
++                         TPL_CALLBACK,
++                         G11HostBridgeHandoff,
++                         NULL,
++                         &ExitBootServicesEvent
++                         );
++    if (EFI_ERROR (EventStatus)) {
++      DEBUG ((DEBUG_WARN, "%a: G-11 host bridge handoff event: %r\n",
++        __func__, EventStatus));
++    }
++  }
++
+   return Status;
+ }
+--- a/OvmfPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.inf
++++ b/OvmfPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.inf
+@@ -39,6 +39,7 @@
+   BaseLib
+   BaseMemoryLib
+   DebugLib
++  IoLib
+   MemoryAllocationLib
+   PcdLib
+   QemuFwCfgLib

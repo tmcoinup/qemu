@@ -8,6 +8,110 @@ VGPU_DRIVER_EXE_SHA256=aaa3080c0b7e3a6fbe825a05725f4171c75072faa8b667d97556c1605
 VGPU_DRIVER_ZIP_SHA256=a3d7ad8b8082d6ac6214565b4766b5190a819bc9b7574765b14897e0db809690
 VGPU_DRIVER_VERSION=31.0.15.3833
 
+# Validate one already-tokenized QEMU argv.  Keeping the parser separate makes
+# the security decision unit-testable without adding a production environment
+# switch that could forge /proc.  Usage:
+#   vgpu_driver_install_argv_is_safe VM_ID DISK VM_UUID "${argv[@]}"
+vgpu_driver_install_argv_is_safe() {
+    local vm_id=$1 disk=$2 vm_uuid=${3,,}
+    shift 3
+    local -a argv=( "$@" )
+    local arg value
+    local name_ok=0 disk_ok=0 vga_ok=0 mdev_ok=0 window_ok=0 forbidden=0
+    local i
+
+    ((${#argv[@]} > 0)) || return 1
+    [[ "${argv[0]##*/}" == qemu-system-x86_64 ]] || return 1
+    for ((i = 1; i < ${#argv[@]}; i += 1)); do
+        arg=${argv[i]}
+        case "$arg" in
+            -name|-drive|-device|-display)
+                ((i + 1 < ${#argv[@]})) || return 1
+                value=${argv[++i]}
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        case "$arg" in
+            -name)
+                [[ "$value" == "vm${vm_id}" ]] && name_ok=1
+                ;;
+            -drive)
+                [[ "$value" == *"file=${disk},"* ]] && disk_ok=1
+                ;;
+            -device)
+                if [[ "$value" == "VGA,id=driver-install-vga,bus=pcie.0,addr=0x2" ]]; then
+                    vga_ok=1
+                elif [[ "$value" == vfio-pci* ]]; then
+                    if [[ "$value" == vfio-pci-nohotplug,* &&
+                          "$value" == *"sysfsdev=/sys/bus/mdev/devices/${vm_uuid}"* &&
+                          "$value" == *",display=off,"* &&
+                          "$value" == *",enable-migration=off,"* &&
+                          "$value" == *",bus=gpu-root-port,"* &&
+                          "$value" == *",addr=0x0,"* &&
+                          "$value" == *",rombar=0"* ]]; then
+                        mdev_ok=1
+                    fi
+                    [[ "$value" != *",display=on"* &&
+                       "$value" != *",ramfb=on"* &&
+                       "$value" != *",x-pci-vendor-id="* &&
+                       "$value" != *",x-pci-device-id="* ]] || forbidden=1
+                fi
+                ;;
+            -display)
+                case "$value" in
+                    sdl,gl=off,*|gtk,gl=off,*) window_ok=1 ;;
+                esac
+                ;;
+        esac
+    done
+    ((name_ok && disk_ok && vga_ok && mdev_ok && window_ok && !forbidden))
+}
+
+# Refuse all guest writes unless exactly one live QEMU process for this VM uses
+# the isolated GRID-install topology.  /proc is authoritative for the complete
+# QEMU lifetime; a normal display=on VM cannot transition into this mode.
+# vm-storage.sh must already be sourced and initialized by the caller.
+vgpu_require_safe_driver_install_topology() {
+    local vm_id=$1 conf disk expected_uuid pid cmdline_path matched=0 matched_pid=""
+    local VM_UUID=""
+    local -a argv=()
+
+    conf=$(vm_storage_config_path "$vm_id") || return
+    disk=$(vm_storage_disk_path "$vm_id") || return
+    [[ -f "$conf" && ! -L "$conf" && -f "$disk" && ! -L "$disk" ]] || {
+        echo "[driver-assets] vm${vm_id} config/disk is missing or unsafe" >&2
+        return 1
+    }
+    # shellcheck source=/dev/null
+    source "$conf"
+    expected_uuid=${VM_UUID,,}
+    [[ "$expected_uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+        echo "[driver-assets] vm${vm_id} has an invalid VM_UUID" >&2
+        return 1
+    }
+
+    for cmdline_path in /proc/[0-9]*/cmdline; do
+        [[ -r "$cmdline_path" ]] || continue
+        argv=()
+        mapfile -d '' -t argv <"$cmdline_path" 2>/dev/null || continue
+        vgpu_driver_install_argv_is_safe \
+            "$vm_id" "$disk" "$expected_uuid" "${argv[@]}" || continue
+        pid=${cmdline_path#/proc/}
+        pid=${pid%/cmdline}
+        matched=$((matched + 1))
+        matched_pid=$pid
+    done
+    if ((matched != 1)); then
+        echo "[driver-assets] REFUSE: vm${vm_id} 未运行唯一的安全 GRID 安装拓扑" >&2
+        echo "[driver-assets] 先运行: ./deploy/scripts/vmctl.sh driver-install ${vm_id}" >&2
+        echo "[driver-assets] 要求: 标准 VGA + native mdev display=off + spoof=off + rombar=0" >&2
+        return 1
+    fi
+    echo "[driver-assets] verified isolated GRID-install topology for vm${vm_id} (qemu pid=${matched_pid})"
+}
+
 vgpu_valid_ipv4() {
     local address=$1 octet
     local -a octets=()

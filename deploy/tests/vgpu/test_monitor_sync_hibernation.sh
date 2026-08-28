@@ -81,6 +81,12 @@ TRACE="$TMP_DIR/commands.trace"
 cat >"$TMP_DIR/fake-bin/qemu-edid" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ ${1:-} == -h ]]; then
+    printf '%s\n' \
+        '--week' '--year' '--range-min-v' '--range-max-v' \
+        '--range-min-h' '--range-max-h' '--max-clock'
+    exit 0
+fi
 out=""
 while (( $# > 0 )); do
     case "$1" in

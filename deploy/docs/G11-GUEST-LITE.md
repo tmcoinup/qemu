@@ -1,7 +1,7 @@
-# G-11 Guest Lite 2.6.0：Windows 10 全面精简/提速傻瓜教程
+# G-11 Guest Lite 2.6.4：Windows 10 全面精简/提速傻瓜教程
 
 本工具只属于 **G-11/vGPU**。V-11 是独立分支；不要互拷 VM bundle、驱动或配置。
-2.6.0 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
+2.6.4 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
 资讯、天气、商店、OneDrive/同步、通知、任务栏搜索框、消费 App、后台服务/任务和常见 VM 高 I/O 项；
 同时开启游戏模式、关闭 Xbox/Game DVR 后台录制、选择高性能电源计划、通过正式
 NVIDIA 驱动的 NVAPI DRS 设置“最高性能优先”，并为精确白名单 DNF 映像配置 High
@@ -10,34 +10,63 @@ NVIDIA 驱动的 NVAPI DRS 设置“最高性能优先”，并为精确白名�
 把默认播放端点静音，并把输入顺序设为 en-US/US keyboard 第一、中文（简体）
 Microsoft Pinyin 第二。
 
-它是激进配置：完成后系统没有内置杀毒、防火墙和自动安全更新。先只在用户指定的
+`2.6.4` 保留 2.6.3 的 MpsSvc/NVIDIA 控制面板兼容性与克隆快速路径，并修复真实克隆中
+Task Scheduler 把 SID 返回为账户名时的等价身份校验，不减少显卡、授权或防火墙验收项：
+
+- vGPU 首启不再让 DISM 枚举整个在线驱动库，而是按当前 GPU 的 DeviceID 精确查询
+  `Win32_PnPSignedDriver`，再把已发布 INF 的 SHA-256 与正在加载的
+  `nvlddmkm.sys` 所在 `nvgridsw.inf_*` DriverStore 目录逐一绑定；INF 版本、CAT 和
+  SYS 的正式 NVIDIA/WHCP 签名及非 Flight 微软生产根仍全部硬性验证；
+- 新建回滚基线时，服务和计划任务各只读取一次系统清单；刚创建的完整基线不再立即
+  做第二轮升级扫描；
+- 自动 `CloneApply` 与短时 SYSTEM 补强任务不再同步等待 `gpupdate /force`。脚本仍先
+  原子写入 `Registry.pol + gpt.ini`，并直接写入每个受管运行态值；Windows 后续正常
+  策略处理仍保留。交互式 Apply 和 Rollback 的刷新路径不变；
+- 内部重启后，finalizer 会复用本次开机已经成功完成的那一次 SYSTEM 补强，前提是
+  Task Scheduler 返回 0、运行时间晚于本次开机、日志生成时间也晚于本次开机，并且
+  日志中的计算机名、MachineGuid、用户 SID 和全部结果逐项匹配。任一条件不满足才会
+  启动一次新的补强任务。
+
+此外，三种防火墙 profile 仍关闭，但 `MpsSvc` 改为必须 `Auto/Running/PID>0`。
+Windows AppContainer 注册不再因 0x800706D9 失败，NVIDIA 控制面板可正常启动。
+
+因此提速没有开启 `testsigning`/`nointegritychecks`，没有修改 BCD，没有安装测试或
+自签名内核驱动，也没有放宽授权、Code 0、系统 NVAPI、防火墙运行态或回滚验收。
+
+它是激进配置：完成后系统没有启用的内置杀毒、防火墙 profile 和自动安全更新。先只在用户指定的
 实验机 **VM1** 验收，不要直接批量投放。
 
 临时文件删除不可逆：运行前关闭安装器、解压器和其他正在使用 Temp 的程序，并确认
 不再需要 `%LOCALAPPDATA%\Temp`、`%SystemRoot%\Temp` 内超过 24 小时的内容。脚本不碰
 Downloads、桌面、自定义 TEMP、WindowsApps、WinSxS 或浏览器用户资料。
 
-`2.6.0` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
+`2.6.4` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
 清掉”补齐完整原生本地策略状态：原始 `Registry.pol` 和 `gpt.ini` 均逐字节存入回滚
 基线，受管副本只写本地 GPO 支持的 `Version` 并同时递增机器/用户版本。Local System 补强
-任务在开机/登录延迟 45 秒后强制刷新策略、再写入运行态，然后立即退出；没有常驻进程
+任务在开机/登录延迟 45 秒后重写原生策略和运行态，然后立即退出；没有常驻进程
 或第三方服务。2.0.1 的 PowerShell 5.1 异常显示修复也继续保留。
 
 VM1 的第二轮重启审计还定位出 Windows PowerShell 5.1 Registry provider 的陷阱：对
 已经存在的叶键反复执行 `New-Item -Force` 会重建该键并删除刚写入的兄弟值，表现为同一
-键下只有最后一个策略留下。2.6.0 继续仅在键不存在时创建；设置和回滚都不再重建现有
+键下只有最后一个策略留下。2.6.1 继续仅在键不存在时创建；设置和回滚都不再重建现有
 叶键。Appx 审计也从逐包查询改为一次枚举后按精确白名单过滤，明显缩短应用/验证时间。
 
-2.6.0 新增任务栏搜索框默认隐藏，并修复克隆内部重启后 finalizer 以 Local System 身份
+2.6.1 新增任务栏搜索框默认隐藏，并修复克隆内部重启后 finalizer 以 Local System 身份
 误读 SYSTEM `HKCU` 的问题。克隆验收现在把 `state.json` 中保存的用户 SID 映射到
 `HKEY_USERS`，通知、搜索和语言顺序都核验同一个目标用户。自动 CloneApply 的逐项输出
 改写入 ProgramData 日志，避免虚拟显示逐行重绘，并跳过与完整基线采集和重启后严格
 验收重复的两个全量审计；服务、Appx 和策略操作仍使用 Windows 原生接口顺序执行，
 因此无需也不引入第三方运行库。
 
-2.6.0 同时修复旧克隆升级边界：已经确认 `WinDefend` 不运行且没有 `MsMpEng`
+2.6.1 同时修复旧克隆升级边界：已经确认 `WinDefend` 不运行且没有 `MsMpEng`
 进程时，Defender 接口可能无法再返回篡改防护状态，此时允许重施现有策略；若引擎
 仍活动，未知状态继续硬性拒绝。明确检测到篡改防护为 `On` 时永远不会绕过。
+
+2.6.4 的真实克隆又确认：个别封装镜像连
+HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds\EnableFeeds 也会被 ACL
+保护。机器策略和 HKCU 的 ShellFeedsTaskbarViewMode 现在都只作兼容尝试；失败时不
+夺注册表所有权、不改 ACL，也不阻断克隆。资讯/天气属于界面精简项，不参与显卡、
+授权、MpsSvc、通知核心开关或宿主初始化标记的硬性验收。
 
 ## 一、VM1 最短流程
 
@@ -91,17 +120,13 @@ VM1 的第二轮重启审计还定位出 Windows PowerShell 5.1 Registry provide
 
 ## 二、VM1 防火墙/CPU 专项验收
 
-按 VM1 的实验要求，工具先用 Windows 自带 `Set-NetFirewallProfile` 关闭 Domain、
-Private、Public 三种配置文件，再把 `MpsSvc` 启动类型设为 `Disabled` 并尝试停止当前
-实例。它不删除服务、规则或文件，不修改服务 ACL，也不停止 `BFE` 和其他网络基础服务。
-Windows 10 会让 `MpsSvc` 拒绝普通管理员的 `SERVICE_CHANGE_CONFIG`；工具遇到该受支持的
-`Access denied` 时，立即启动自己受回滚基线管理的 Local System 补强任务并等待
-`StartMode=Disabled`，不接管 ACL、不删服务。这样第一次正常重启就是无 MpsSvc 进程的
-验证启动。
+工具用 Windows 自带 `Set-NetFirewallProfile` 关闭 Domain、Private、Public 三种配置
+文件，同时要求 `MpsSvc` 为 `Auto/Running`。它不删除服务、规则或文件，不修改服务
+ACL，也不停止 `BFE` 和其他网络基础服务。Windows 10 若拒绝普通管理员修改 MpsSvc，
+受回滚基线管理的 Local System 补强任务会恢复它，不接管 ACL、不删服务。
 
-微软明确建议“关闭 profile，不要停止 `MpsSvc`”，因为禁用服务可能影响网络发现、
-IPsec 或部分 Windows 组件。本版本是用户明确指定的受控 VM1 实验配置；不要投放到只能
-远程管理的机器。若网络或应用异常，在 VM1 本地双击
+这遵循“关闭 profile、保留 MpsSvc”的 Windows 组件兼容边界；NVIDIA 控制面板等
+AppContainer 应用仍能向防火墙基础设施注册。若网络或应用异常，在 VM1 本地双击
 `C:\ProgramData\G11GuestLite\tools\03-Rollback.cmd`，看到 `ROLLBACK PASS` 后重启。
 
 管理员 PowerShell 可只读复核：
@@ -114,8 +139,8 @@ Get-Process | Sort-Object CPU -Descending |
   Select-Object -First 15 ProcessName, CPU, Id
 ```
 
-重启后的目标是 `MpsSvc StartMode=Disabled`、`State=Stopped`、`ProcessId=0`。服务停止
-后 `Get-NetFirewallProfile` 可能不可用；停止前能读取时三个 `Enabled` 都应为 `False`。
+重启后的目标是 `MpsSvc StartMode=Auto`、`State=Running`、`ProcessId>0`，同时三个
+profile 的 `Enabled` 均为 `False`。
 注意 `CPU` 列是进程启动后的累计 CPU 时间，不是瞬时百分比；任务管理器“详细信息”页
 更适合观察重启后 3–5 分钟的实时占用。若仍然出现 50%，把最新 audit 报告和任务管理器
 中具体进程名保留下来，再定位是否实际为 `MsMpEng`、`svchost` 内另一服务或第三方
@@ -126,7 +151,7 @@ Get-Process | Sort-Object CPU -Descending |
 | 类别 | 处理 | 保留/边界 |
 |---|---|---|
 | Defender | 本地策略与 `Set-MpPreference` 双通道关闭扫描，取消当前扫描，停可管理任务；开机/登录后补强并检查实际扫描字段 | 不夺服务 ACL，不删 Defender 文件；新版 Windows 可保留空闲的 `MsMpEng`/`WinDefend` 外壳及“引擎已加载”信息字段，是否通过以实时、行为、下载、访问、网络保护字段为准 |
-| 防火墙 | 三种 profile 全关；`MpsSvc` 启动类型设为禁用并停止，保存 profile 及服务原值 | 不删服务/规则/文件，不改 ACL；保留 `BFE`；微软不推荐停服务，限 VM1 实验，异常走本地回滚 |
+| 防火墙 | 三种 profile 全关；`MpsSvc` 保持 Auto/Running，保存 profile 及服务原值 | 不删服务/规则/文件，不改 ACL；保留 `BFE`；兼容 AppContainer/NVIDIA 控制面板，异常走本地回滚 |
 | Windows 更新 | 关 WU/公网/Delivery Optimization 对等下载策略，停 `wuauserv`/`UsoSvc`/Update Health 和可管理任务 | 受 Windows 保护的 `DoSvc`/UpdateOrchestrator 对象可保留但被上游策略和服务链路架空；保留 BITS/CryptSvc |
 | 软件更新 | 关 Edge/Office/Google 策略及 Edge/Google/Adobe/Mozilla 常见更新服务、任务、进程 | 浏览器、Office、Adobe 本体不卸载 |
 | 商店 | 禁用 Store 策略/服务，移除当前用户 Store 与购买 App 注册 | 保留 AppXSvc/ClipSVC 和预配载荷供回滚 |
@@ -262,8 +287,20 @@ sudo ./deploy/scripts/initialize-clone.sh 2
 ./deploy/scripts/start-vm.sh 2
 ```
 
+如果第一条明确显示来宾仍是旧 `schemaVersion`/Guest Lite 版本，不要重复点“初始”，
+也不要改 BCD 或驱动。先完整关机并按
+[`G11-CLONE-PAYLOAD-RECOVERY.md`](G11-CLONE-PAYLOAD-RECOVERY.md) 运行：
+
+```bash
+sudo ./deploy/scripts/repair-clone-init.sh 2
+```
+
+同时对用于后续克隆的私有母盘执行一次
+`./deploy/scripts/refresh-g11-private-base.sh win10-base`，即可避免其它新克隆重复命中
+旧载荷。
+
 第一条会严格验收来宾完成标记、独立 Windows 身份、Licensed/Code 0、系统 NVAPI、
-Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Disabled/Stopped/PID 0` 与
+Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Auto/Running/PID>0` 与
 `BFE=Auto/Running`、默认声音静音以及精确输入顺序，并刷新显示器缓存；任一项失败都
 保留等待门禁，绝不发布半成品。
 
@@ -274,7 +311,7 @@ Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Disabled/Stopped/PID 0` 与
 3. finalizer 校验 `clone-manifest.json` 固定摘要及 Guest Lite 每个载荷摘要，自动运行
    `CloneApply`，保存该克隆 RID-500 用户的原始外观/策略/App/服务回滚基线；
 4. 复用系统 NVAPI 的内部重启，SYSTEM 验证 NVAPI/显示器，同时要求
-   `MpsSvc=Disabled/Stopped/PID 0`、`BFE=Auto/Running`、通知关闭、默认声音静音、
+   `MpsSvc=Auto/Running/PID>0`、`BFE=Auto/Running`、通知关闭、默认声音静音、
    en-US/US 第一、Microsoft Pinyin 第二、本地 policy 文件及 Guest Lite 补强任务完整；
 5. 只有全部通过才写 schema-4 完成标记并完整关机；宿主“初始”只读复核后再启动。
 

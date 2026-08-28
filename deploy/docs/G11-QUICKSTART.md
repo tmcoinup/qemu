@@ -101,14 +101,14 @@ shutdown.exe /s /f /t 0
 既有状态；它不安装驱动、token 或身份组件。新装系统尚未缓存 NVIDIA 显示器时，
 最后的离线 EDID 同步可能提示 defer，这是驱动尚未安装时的正常边界。
 
-然后使用原生 vGPU 身份启动安装驱动：
+然后使用隔离 NVIDIA console 的统一入口安装驱动：
 
 ```bash
-./deploy/scripts/start-vm.sh 9 --no-spoof --no-monitor-sync
+./deploy/scripts/vmctl.sh driver-install 9
 ```
 
-在 Windows 中安装未经修改、生产签名的 GRID 538.33，确认设备管理器 Code 0，
-然后执行完整“关机”，不要使用休眠。再次在宿主构建私有通用收尾包并正常启动：
+封装自动在标准 VGA 窗口中安装未经修改、生产签名的 GRID 538.33，并在收据通过后
+完整关机、离线认证模式表。再次在宿主构建私有通用收尾包并正常启动：
 
 ```bash
 chmod 600 /home/ubuntu/images/staging/client_configuration_token.tok
@@ -255,10 +255,12 @@ fail-closed，不会污染默认身份安装。
 ./deploy/scripts/check-hardware-pool.sh --machine-readable
 ```
 
-当前正常新建池只有两款家用 4C/8T 无核显 Core i7、三块三品牌 X79 主板以及
-4G/8G/12G/16G 四档 DDR3-1600/1866。48 条新建组合全部是 CPU、主板、逐槽 DIMM
-共同审核的原子白名单；默认先选 i7-4820K + DDR3-1866。完整目录共 10 CPU、
-16 主板、37 内存、312 整机，其中旧 H81/6G 等 261 条为 archived，另有 3 条
+普通新建池有一款家用 6C/12T 和两款 4C/8T 无核显 Core i7、三块三品牌 X79
+主板，以及 4G/8G/12G/16G 四档 DDR3-1600/1866。102 条组合全部是 CPU、主板、
+逐槽 DIMM 共同审核的原子白名单；默认先选 i7-4930K + DDR3-1866。4930K 的
+三主板和每容量 4–5 个大牌内存选择及复制粘贴步骤见
+[6C/12T 傻瓜教程](G11-6C12T-QUICKSTART.md)。完整目录共 11 CPU、
+16 主板、45 内存、366 整机，其中旧 H81/6G 等 261 条为 archived，另有 3 条
 legacy compatibility。归档项即使打开兜底也不能新建，宿主能力探测不确定时仍
 fail-closed。另有 3 款优先 Gen3 x4 NVMe 和 7 款平台回退 SATA，容量均为精确
 `512110190592` 字节；还有 3 个 1GB + 3 个
@@ -269,7 +271,7 @@ fail-closed。另有 3 款优先 Gen3 x4 NVMe 和 7 款平台回退 SATA，容�
 新 VM、哪些只保留旧平台身份。完整明细和报错处理见
 [G-11 vGPU 硬件池教程](G11-HARDWARE-POOL.md)。
 
-正常新建的品牌覆盖为：主板 3、内存 4、SSD 5、GPU 系统用户态板卡 metadata 9、
+普通新建的品牌覆盖为：主板 3、内存 5、SSD 5、GPU 系统用户态板卡 metadata 9、
 active 键盘 3、可选相对鼠标 3。显示器因保留 35 款 FHD 目录而明确例外为新建
 8 品牌/完整 11 品牌；默认绝对指针只有诚实的 QEMU 通用 profile。CPU/芯片组实现、
 Intel e1000e、Intel HDA、swtpm 和安装期临时介质也都是固定合同，不为凑品牌数
@@ -310,7 +312,7 @@ cd /home/ubuntu/projects/qemu
 ```
 
 下面是一套可直接照抄的 VM8 安装命令。组件只能筛选审核过的整机白名单，不会
-任意笛卡尔组合；不指定平台时，创建器从 48 条 X79 正常组合中按性能级别选择：
+任意笛卡尔组合；不指定平台时，创建器先从 102 条 X79 组合中按性能级别选择：
 
 ```bash
 cd /home/ubuntu/projects/qemu

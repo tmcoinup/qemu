@@ -111,8 +111,8 @@ function Restart-LicenseService {
 
     $service = Invoke-LicenseServiceControl -Action start `
         -DesiredStatus ([System.ServiceProcess.ServiceControllerStatus]::Running)
-    Write-Host ("[license] service restart: {0}={1} " +
-        "(bounded {2}s stop/start)" -f $serviceName, $service.Status,
+    Write-Host (("[license] service restart: {0}={1} " +
+        "(bounded {2}s stop/start)") -f $serviceName, $service.Status,
         $serviceControlTimeoutSeconds)
 }
 
@@ -288,8 +288,11 @@ New-Item -ItemType Directory -Path $tokenDirectory -Force | Out-Null
 
 $hadOriginal = $false
 $tokenInstalled = $false
+$reusedOriginal = $false
+$serviceStoppedForReplacement = $false
 $activationSucceeded = $false
 $tokenBytes = 0
+$candidateTokenSha256 = ''
 $lockStream = $null
 
 try {
@@ -347,13 +350,13 @@ try {
             throw 'TokenFile must be a transferred source file, not the installed NVIDIA token path'
         }
         Copy-Item -LiteralPath $sourceTokenPath -Destination $temporaryPath -Force
-        $actualTokenSha256 = (Get-FileHash -LiteralPath $temporaryPath `
+        $candidateTokenSha256 = (Get-FileHash -LiteralPath $temporaryPath `
             -Algorithm SHA256 -ErrorAction Stop).Hash
         if (-not [string]::IsNullOrWhiteSpace($ExpectedTokenSha256) -and
-            $actualTokenSha256 -ine $ExpectedTokenSha256) {
-            throw "Transferred token SHA-256 mismatch (actual $actualTokenSha256, expected $ExpectedTokenSha256)"
+            $candidateTokenSha256 -ine $ExpectedTokenSha256) {
+            throw "Transferred token SHA-256 mismatch (actual $candidateTokenSha256, expected $ExpectedTokenSha256)"
         }
-        Write-Host "[license] local token SHA-256=$actualTokenSha256; no HTTP download was used"
+        Write-Host "[license] local token SHA-256=$candidateTokenSha256; no HTTP download was used"
     }
 
     $candidateToken = Get-Item -LiteralPath $temporaryPath -ErrorAction Stop
@@ -367,16 +370,42 @@ try {
     if ($prefix -match '(?i)<\s*(?:!doctype\s+html|html)') {
         throw 'The supplied token is HTML instead of a client configuration token'
     }
+    if ([string]::IsNullOrWhiteSpace($candidateTokenSha256)) {
+        $candidateTokenSha256 = (Get-FileHash -LiteralPath $temporaryPath `
+            -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
 
     if ($hadOriginal) {
-        [IO.File]::Replace($temporaryPath, $installedTokenPath, $rollbackPath, $true)
+        $originalToken = Get-Item -LiteralPath $installedTokenPath `
+            -ErrorAction Stop
+        $originalTokenSha256 = (Get-FileHash -LiteralPath `
+            $originalToken.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ([int64]$originalToken.Length -eq $tokenBytes -and
+            $originalTokenSha256 -ieq $candidateTokenSha256) {
+            $reusedOriginal = $true
+            Remove-Item -LiteralPath $temporaryPath -Force `
+                -ErrorAction Stop
+            Write-Host '[license] the exact token is already installed; reusing it without replacing the service-owned file'
+        }
+        else {
+            # NVDisplay.ContainerLocalSystem can keep the installed token open
+            # without delete sharing.  Stop it before the atomic replacement;
+            # otherwise a legitimate retry/rotation fails with access denied.
+            $serviceStoppedForReplacement = $true
+            $null = Invoke-LicenseServiceControl -Action stop `
+                -DesiredStatus ([System.ServiceProcess.ServiceControllerStatus]::Stopped)
+            [IO.File]::Replace($temporaryPath, $installedTokenPath, `
+                $rollbackPath, $true)
+            $tokenInstalled = $true
+        }
     }
     else {
         Move-Item -LiteralPath $temporaryPath -Destination $installedTokenPath
+        $tokenInstalled = $true
     }
-    $tokenInstalled = $true
 
     Restart-LicenseService
+    $serviceStoppedForReplacement = $false
     $nvidiaSmi = Find-NvidiaSmi
     $deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
     $query = ''
@@ -422,7 +451,12 @@ try {
     $activationSucceeded = $true
     Remove-Item -LiteralPath $rollbackPath -Force -ErrorAction SilentlyContinue
 
-    Write-Host "[license] token installed atomically: $installedTokenPath ($tokenBytes bytes)"
+    if ($reusedOriginal) {
+        Write-Host "[license] exact installed token retained: $installedTokenPath ($tokenBytes bytes)"
+    }
+    else {
+        Write-Host "[license] token installed atomically: $installedTokenPath ($tokenBytes bytes)"
+    }
     Write-Host "[license] service=$($service.Status) license=Licensed"
     Write-Host "[license] gpu='$($gpu.Name)' driver=$($gpu.DriverVersion) code=$($gpu.ConfigManagerErrorCode)"
 }
@@ -430,6 +464,11 @@ catch {
     $activationError = $_
     if ($tokenInstalled) {
         try {
+            # Rollback also needs delete sharing on the live token.  Stop the
+            # service first, then restore/remove the token and restart it.
+            $serviceStoppedForReplacement = $true
+            $null = Invoke-LicenseServiceControl -Action stop `
+                -DesiredStatus ([System.ServiceProcess.ServiceControllerStatus]::Stopped)
             if ($hadOriginal -and (Test-Path -LiteralPath $rollbackPath -PathType Leaf)) {
                 if (Test-Path -LiteralPath $installedTokenPath -PathType Leaf) {
                     [IO.File]::Replace($rollbackPath, $installedTokenPath, $discardPath, $true)
@@ -443,9 +482,20 @@ catch {
                 Remove-Item -LiteralPath $installedTokenPath -Force -ErrorAction SilentlyContinue
             }
             Restart-LicenseService
+            $serviceStoppedForReplacement = $false
         }
         catch {
             throw "Activation failed: $($activationError.Exception.Message); token rollback also failed: $($_.Exception.Message)"
+        }
+    }
+    elseif ($serviceStoppedForReplacement) {
+        try {
+            $null = Invoke-LicenseServiceControl -Action start `
+                -DesiredStatus ([System.ServiceProcess.ServiceControllerStatus]::Running)
+            $serviceStoppedForReplacement = $false
+        }
+        catch {
+            throw "Activation failed: $($activationError.Exception.Message); the unchanged NVIDIA service could not be restarted: $($_.Exception.Message)"
         }
     }
     throw $activationError

@@ -40,6 +40,7 @@
 #include "hw/core/irq.h"
 #include "hw/isa/apm.h"
 #include "hw/pci/pci.h"
+#include "hw/pci-host/q35.h"
 #include "hw/southbridge/ich9.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/ich9.h"
@@ -460,9 +461,26 @@ static void ich9_lpc_pm_init(ICH9LPCState *lpc)
 
 /* APM */
 
+#define ICH9_APM_G11_HOST_BRIDGE_HANDOFF 0x47
+
 static void ich9_apm_ctrl_changed(uint32_t val, void *arg)
 {
     ICH9LPCState *lpc = arg;
+
+    /*
+     * The bundled OVMF emits this command from its ExitBootServices event.
+     * At that point firmware has finished using q35's native host-bridge ID,
+     * while the operating system has not started PCI inventory yet.
+     */
+    if (val == ICH9_APM_G11_HOST_BRIDGE_HANDOFF) {
+        PCIDevice *mch = pci_find_device(
+            pci_device_root_bus(PCI_DEVICE(lpc)), 0, PCI_DEVFN(0, 0));
+
+        if (mch && object_dynamic_cast(OBJECT(mch), TYPE_MCH_PCI_DEVICE)) {
+            mch_g11_firmware_handoff(MCH_PCI_DEVICE(mch));
+        }
+        return;
+    }
 
     /* ACPI specs 3.0, 4.7.2.5 */
     acpi_pm1_cnt_update(&lpc->pm.acpi_regs,

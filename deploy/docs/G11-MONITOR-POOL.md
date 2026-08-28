@@ -54,28 +54,32 @@ profile。本轮扩容的 12 个型号如下：
 |---|---|
 | 首选 DTD | 1920×1080@60 |
 | CTA 视频模式 | 1920×1080@60、1280×720@60 |
-| Standard Timings | 1920×1080、1600×900、1280×1024、1280×720（均为 60 Hz） |
+| Standard Timings | 1920×1080、1280×1024、1280×720（均为 60 Hz） |
 | Established Timings III | 1360×768、1280×1024、1280×960、1280×768（均为 60 Hz） |
-| Base Established | 1024×768、800×600、640×480（均为 60 Hz） |
+| Base Established | 1024×768、640×480（均为 60 Hz） |
 
 去重后的 EDID 主动广告集合是
-`1920×1080 / 1600×900 / 1360×768 / 1280×1024 / 1280×960 / 1280×768 /
-1280×720 / 1024×768 / 800×600 / 640×480`。这 10 项同时是显示器 target modes
+`1920×1080 / 1360×768 / 1280×1024 / 1280×960 / 1280×768 /
+1280×720 / 1024×768 / 640×480`。这 8 项同时是显示器 target modes
 和 NVIDIA source modes；Windows“设置”通常隐藏兼容档 `640×480`，所以下拉里
-一般看到其余 9 项。
+一般看到其余 7 项。
 
 生产签名 GRID 538.33 的 `nvgridsw.inf` 会在 NVIDIA 显示适配器 software key 的
 `NV_Modes` 中补充 GPU scaling/source modes。G-11 对其使用单独的精确策略，并将
-它收敛为与 EDID 完全相同的 10 项：
+它收敛为与 EDID 完全相同的 8 项：
 
-`1920×1080 / 1600×900 / 1360×768 / 1280×1024 / 1280×960 /
-1280×768 / 1280×720 / 1024×768 / 800×600 / 640×480`。
+`1920×1080 / 1360×768 / 1280×1024 / 1280×960 / 1280×768 /
+1280×720 / 1024×768 / 640×480`。
 
-策略明确保留 `1600×900`，并删除上一版兼容策略额外加入的 `1600×1200`、
+R535 会把 32-bpp pitch 对齐到 128 字节、消息补到 4 KiB；两者长度不等时会拒绝
+display-head 投递。策略因此删除会复现该缺陷的 `1600×900` 和 `800×600`，并删除
+上一版兼容策略额外加入的 `1600×1200`、
 `1600×1024`、`1440×1080`、`1366×768`、`1152×864`。INF 原值中的
 `1920×1200`、`1680×1050`、`1280×800`、`2560×1600` 等 16:10，所有高于
 FHD 和电视专用模式也不会进入这份“正常 1K/FHD PC 列表”。未来若驱动值出现
 `1440×900`、`1600×1000` 等未知模式，离线同步会失败关闭，不会默默接受或覆盖。
+故障证据、精确计算和一键恢复见
+[`G11-R535-BLACK-SCREEN.md`](G11-R535-BLACK-SCREEN.md)。
 
 G-11 与 V-11 的显示驱动不同：V-11 的 virtio 驱动从 EDID 建 source list，G-11
 的 NVIDIA 驱动还消费私有 `NV_Modes`，所以只照搬 V-11 的 EDID/清缓存流程不够。
@@ -96,8 +100,9 @@ ControlSet 拼出“成功”。写入前还要求当前 Class key 的 `Provider
 `DriverVersion=31.0.15.3833`、`InfPath` 是规范 `oemN.inf`，且该已发布
 INF 的 SHA-256 精确匹配生产 `nvgridsw.inf` 收据。即使其他 NVIDIA 版本
 恰好使用相同 `NV_Modes` 文本也会被拒绝。只有值精确等于锁定 INF 原值、上一版
-已审核的 15 项策略或已经等于当前 10 项策略时才继续；旧 15 项仅作为迁移来源，
-绝不会再被写入。写后还会重新检查类型、双 NUL、10 项精确集合及零 16:10。
+已审核的 15 项策略、上一版 10 项策略或已经等于当前 8 项策略时才继续；旧 15/10
+项仅作为迁移来源，绝不会再被写入。写后还会重新检查类型、双 NUL、8 项精确集合、
+零 16:10 和每个模式的 R535 page-safe 帧长。
 
 这是 EDID/Windows 缓存策略，不需要修改、重编或重签 NVIDIA guest 驱动；流程
 不会开启 `testsigning`、`nointegritychecks`，不会修改 BCD，也不会安装测试签名或
@@ -111,7 +116,7 @@ INF 的 SHA-256 精确匹配生产 `nvgridsw.inf` 收据。即使其他 NVIDIA �
 `4 heads/1920×1200` 资源合同；这解决的是实时 vGPU 的显示头数和最大分辨率上限。
 
 关机态同步会验证并写入 BenQ/Dell 等目标 raw EDID、标准
-`EDID_OVERRIDE`、10 项 `NV_Modes`、缓存 `FriendlyName` 和 Windows
+`EDID_OVERRIDE`、8 项 `NV_Modes`、缓存 `FriendlyName` 和 Windows
 GraphicsDrivers 缓存。它不能在 Windows 关机时修改 live PnP 对象；私有 Sysprep
 克隆的系统身份包会在启动/登录后用 SetupAPI 再发布实时 FriendlyName，并回读验证。
 启动后 Windows 可能仍保留 NVIDIA 发布的原始父 key
@@ -119,7 +124,7 @@ GraphicsDrivers 缓存。它不能在 Windows 关机时修改 live PnP 对象；
 改 key 名而换驱动。验收看的是有效 WMI EDID、设备管理器友好名和第三方工具结果：
 
 - Windows 本地输出必须是所选 profile 的 1920×1080、16:9、物理尺寸、厂商/型号和
-  10 项目标/source modes；
+  8 项目标/source modes；
 - 设备管理器“监视器”应显示 `MONITOR_DISPLAY_NAME`，而不是“通用即插即用监视器”；
 - 鲁大师应显示 profile 对应的 PNP/品牌型号、尺寸、16:9 和 1920×1080。若仍是
   `NVIDIA VGX / 641×400 mm / 16:10`，就是旧 marker 或未写入
@@ -170,17 +175,37 @@ cd /home/ubuntu/projects/qemu
 ./deploy/scripts/start-vm.sh N
 ```
 
+从其他分支切回 G-11 时，未纳入 Git 的 `build/` 可能仍保留另一版
+`qemu-edid`。当前显示器封装会在生成前识别新版
+`--manufacture-week/--min-vfreq-hz` 与 G-11 旧版
+`--week/--range-min-v` 的差异。两版生成的描述符布局也不同，所以封装不会只翻译
+参数名后冒充兼容，而会在写出 EDID 前失败关闭并直接提示重建 G-11；不会再出现
+难以定位的 `unrecognized option '--week'`。最短照抄流程是：
+
+```bash
+cd /home/ubuntu/projects/qemu
+./deploy/host/build-qemu.sh
+./deploy/scripts/clone-from-base.sh win10-base 1 --gpu-vram 1024 \
+  --platform i7-4820k-p9x79-elpida-8g \
+  --ssd-profile samsung-970-pro-512gb --start
+```
+
+若旧版本已在这个错误处退出，`clone-from-base.sh` 会像日志所示回滚新建配置；
+确认 `./deploy/scripts/vmctl.sh status 1` 没有在运行后，直接重跑上面两条即可，
+不需要手工删除镜像，也不需要修改 Windows、BCD 或驱动签名策略。
+
 把 `N` 换成实例号。`start-vm.sh` 缺省启用 monitor sync，读取该 VM 已生成的
 `MONITOR_PROFILE`，按 marker 判断是否需要离线更新；不需要单独执行
 `vmctl monitor`。需要离线挂载且当前没有 sudo 票据时，交互终端会自动显示标准
 sudo 密码提示，凭据不会写入仓库或命令参数。非交互启动必须事先通过批准的运行时
 渠道提供 sudo 票据或 `SUDO_PASSWORD`，不能把宿主凭据写进配置。
 
-若 base 从未枚举过显示器，第一次启动会看到“本次先启动枚举”的提示；在 Windows
-内完整关机后，再执行同一条 `start-vm.sh N`，启动器会自动补齐，无需插入一条人工
-monitor 命令。私有 Sysprep 克隆则由首启系统身份任务完成 live 名称；如果首启窗口
-红字退出，应先看 `C:\ProgramData\VMate\G11\clone-initialization-error.txt` 并以
-管理员运行同目录的 `Retry-Clone-Initialization.cmd`，不要反复点击设备管理器更新。
+若 base 从未枚举过显示器，普通 vGPU 启动会拒绝让 NVIDIA console 承担首次枚举，
+并提示运行 `./deploy/scripts/vmctl.sh driver-install N`。该封装在标准 VGA 隔离窗口中
+完成枚举、驱动安装和完整关机，随后离线补齐缓存，无需插入一条人工 monitor 命令。
+私有 Sysprep 克隆则由首启系统身份任务完成 live 名称；如果首启窗口红字退出，应先看
+`C:\ProgramData\VMate\G11\clone-initialization-error.txt` 并以管理员运行同目录的
+`Retry-Clone-Initialization.cmd`，不要反复点击设备管理器更新。
 
 `vmctl monitor` 是关机态强制修复/切换型号入口：它离线更新 `Select` 选中
 ControlSet 中已有的 `Enum\DISPLAY`
@@ -251,7 +276,8 @@ finish 是另一条流程，边界见
 [`VGPU-RECOVERY-RUNBOOK.md`](VGPU-RECOVERY-RUNBOOK.md)。
 
 同步日志必须同时出现 EDID 列表、`GRID 31.0.15.3833 / oemN.inf
-生产 INF 哈希验证通过` 和类似 `NV_Modes 写入 10 个 EDID 对齐的 FHD/1K PC 模式`
+生产 INF 哈希验证通过` 和类似
+`NV_Modes 写入 8 个 R535 page-safe、EDID 对齐的 FHD/1K PC 模式`
 （重复运行会显示“已符合”）。验收时
 使用本地 SDL/GTK 或 fb-shm 原生画面，冷启动后打开“设置 → 系统 → 显示 → 显示
 分辨率”。先退出 RDP；RDP 的 Remote Display Adapter 和动态分辨率不代表 NVIDIA
@@ -261,11 +287,12 @@ finish 是另一条流程，边界见
 若 helper 报“拒绝覆盖未知 NV_Modes”、版本或 INF 哈希不符，停止并保留日志；
 这表示已安装包或现场自定义与锁定基线不同，不能强删。任何 GRID 安装、
 修复或同版本重装都会由 INF 恢复默认 `NV_Modes`。仓库支持的
-`install-vgpu-driver.sh` / `install-vgpu-driver-gui.sh` 会在首次 guest 写入前安全使
-monitor marker 失效；即使显式传 `--ip`，也必须与指定 `VM_ID` 配置的
+`vmctl.sh driver-install N` 会先以标准 VGA + mdev `display=off` 隔离 R535 console；
+其内部 `install-vgpu-driver.sh` / `install-vgpu-driver-gui.sh` 还会在首次 guest 写入前
+从实际 QEMU argv 验证该拓扑并安全使 monitor marker 失效。即使显式传 `--ip`，也必须与指定 `VM_ID` 配置的
 `VM_MAC` 在 `br0` 邻居表中匹配，避免改了一台 guest 却使另一台的 marker 失效。
-下次完整关机后会重刷；若是在 Device Manager 手工修复/
-重装，完整关机后明确执行 `./deploy/scripts/vmctl.sh monitor N --force`。不能靠
+安装收据通过后封装会自动完整关机并立即离线重刷；若绕过入口在 Device Manager
+手工修复/重装，完整关机后明确执行 `./deploy/scripts/vmctl.sh monitor N --force`。不能靠
 修改/自签 INF/SYS/CAT、安装
 测试驱动、改 BCD、开启 `testsigning`/`nointegritychecks` 或锁死注册表 ACL 绕过。
 
@@ -368,9 +395,10 @@ cd /home/ubuntu/projects/qemu
 测试会逐个检查完整 35 条目录和 28 条新建池，再为全部 profile 生成 EDID，检查
 长度、双块 checksum、PNP、物理尺寸、preferred-timing 标志及第一条 DTD 必须为
 1920×1080@60，并要求 Standard Timings 与 `0xf7` 位图精确等于本页白名单、广告
-集合包含 1600×900 且不存在任意 16:10 比例。NVIDIA 策略测试使用 GRID 538.33 的
-真实双元素 `NV_Modes`，要求得到上述 10 项、精确保留 1600×900，并验证旧 15 项
-策略只能迁移到新策略，同时拒绝未知值、错误 mask、畸形 REG_MULTI_SZ、非
+集合精确等于上述 8 项、不存在任意 16:10，并要求每项按 128 字节 pitch 计算后的
+帧长是 4 KiB 整数倍。NVIDIA 策略测试使用 GRID 538.33 的真实双元素
+`NV_Modes`，验证原始值、旧 15 项和上一版 10 项都只能迁移到新策略，同时拒绝
+未知值、错误 mask、畸形 REG_MULTI_SZ、非
 538.33 版本/已发布 INF 身份与
 host/PowerShell 策略漂移；安装封装的静态门禁还要求同版本重装前使 marker
 失效。EDID 测试还会向

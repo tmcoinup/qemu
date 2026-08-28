@@ -43,6 +43,7 @@
 #include "qom/object_interfaces.h"
 #include "system/system.h"
 #include "ui/console.h"
+#include "ui/fb-shm-gpu-sync.h"
 #include "ui/fb-shm-abi.h"
 #ifdef CONFIG_OPENGL
 #include "ui/egl-helpers.h"
@@ -98,6 +99,16 @@ QEMU_BUILD_BUG_ON(sizeof(FbShmGpuFrame) != 344);
 #define FB_SHM_MAX_RATE       240u
 #define FB_SHM_MIN_RATE       1u
 #define FB_SHM_MAX_DIM        16384u
+#define FB_SHM_GPU_LEASE_NS   3000000000ull
+/*
+ * 连续多少次租约超时之后才真正断开 consumer。
+ *
+ * 单次超时优先只回收槽位：consumer 可能只是短暂来不及归还（渲染线程长任务、
+ * 窗口暂停重绘）。直接 drop 会让它冷却重连后再次超时被踢，把“丢一帧”放大成
+ * 无限重连风暴，业务侧反而彻底断流。回收后 backing 不再复用，下一 tick 就能
+ * 继续推帧；只有真正死掉的 consumer 才会走到断开。
+ */
+#define FB_SHM_GPU_LEASE_MAX_EXPIRY 5u
 #ifndef _WIN32
 # define FB_SHM_DEFAULT_RUNDIR "/run/qemu"
 #else
@@ -117,6 +128,7 @@ struct FbShmClient {
     bool wants_win32_names;      /* HELLO requested Win32 name payload     */
     bool wants_gpu_frames;       /* HELLO 订阅 GPU resident frame 通知      */
     bool wants_gpu_source_size;  /* HELLO accepts GPU payload v2           */
+    bool wants_gpu_sync;         /* GPU frame carries acquire fence + DONE */
     bool gpu_required;           /* 客户端要求 GPU 路径，不接受 SHM 回退    */
     bool linked;                /* present in owner->clients              */
     bool dropping;              /* fd removed; waiting for deferred free  */
@@ -154,11 +166,20 @@ struct FbShmDisplay {
     uint32_t cur_src_w, cur_src_h;
     int32_t cur_roi_x, cur_roi_y;
     uint64_t frame_seq;
+    uint64_t shm_last_frame_ns;
     bool surface_present;
     /* Damage refreshes the cached CPU ROI; other ticks repeat it. */
     bool cpu_surface_dirty;
     /* Track when the cached GPU ROI texture needs a fresh blit. */
     bool cpu_surface_gpu_dirty;
+    FbShmGpuPendingFrame gpu_pending;
+    uint64_t gpu_pending_deadline_ns;
+    /*
+     * 连续租约超时次数。consumer 卡住时 drop -> 重连 -> 再超时会无限循环，
+     * 每轮都刷一条 warning。只在进入故障态时报一次，恢复时再报一次总结，
+     * 中间静默；drop 行为本身不变（卡住的 consumer 会一直占着 GL fence）。
+     */
+    unsigned gpu_lease_expiry_streak;
 
 #ifndef _WIN32
     int memfd;
@@ -189,11 +210,14 @@ struct FbShmDisplay {
     uint32_t gl_backing_w, gl_backing_h;
     uint32_t gl_x, gl_y, gl_w, gl_h;
     uint64_t gl_last_frame_ns;
-    uint64_t shm_last_frame_ns;
+    uint64_t gpu_sync_last_frame_ns;
     uint64_t gpu_frame_seq;
     QEMUGLContext gl_ctx;
     egl_fb gl_guest_fb;
     egl_fb gl_blit_fb;
+    egl_fb gl_cpu_upload_fb;
+    egl_fb gl_sync_fb;
+    bool gl_sync_retired;
     QemuDmaBuf *gl_dmabuf;
     DisplaySurface *gl_slot_surface[FB_SHM_BUF_COUNT];
     bool gl_pbo_checked;
@@ -202,6 +226,8 @@ struct FbShmDisplay {
     bool gl_warned_texture_export;
     bool gl_logged_texture_export;
     bool gl_warned_surface_blit;
+    bool gl_warned_sync_blit;
+    bool gl_warned_native_fence;
     bool gl_logged_surface_export;
     bool gl_logged_texture_scanout;
     bool gl_logged_dmabuf_scanout;
@@ -348,6 +374,49 @@ static bool fb_shm_gl_make_current(FbShmDisplay *d)
         return false;
     }
 
+    return true;
+}
+
+static void fb_shm_gl_clear_errors(void)
+{
+    for (unsigned int i = 0; i < 8; i++) {
+        if (glGetError() == GL_NO_ERROR) {
+            return;
+        }
+    }
+}
+
+static void fb_shm_gl_discard_private_fb(egl_fb *fb)
+{
+    if (fb->framebuffer) {
+        egl_fb_destroy(fb);
+        return;
+    }
+    if (fb->delete_texture && fb->texture) {
+        glDeleteTextures(1, &fb->texture);
+    }
+    *fb = (egl_fb)EGL_FB_INIT;
+}
+
+static bool fb_shm_gl_setup_private_fb(egl_fb *fb, uint32_t w, uint32_t h)
+{
+    egl_fb candidate = EGL_FB_INIT;
+    GLenum status;
+    GLenum error;
+
+    fb_shm_gl_clear_errors();
+    egl_fb_setup_new_tex(&candidate, w, h);
+    glBindFramebuffer(GL_FRAMEBUFFER, candidate.framebuffer);
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    error = glGetError();
+    if (!candidate.texture || !candidate.framebuffer ||
+        status != GL_FRAMEBUFFER_COMPLETE || error != GL_NO_ERROR) {
+        fb_shm_gl_discard_private_fb(&candidate);
+        return false;
+    }
+
+    fb_shm_gl_discard_private_fb(fb);
+    *fb = candidate;
     return true;
 }
 
@@ -574,7 +643,10 @@ static void fb_shm_gl_release_fbos(FbShmDisplay *d)
 
     fb_shm_gl_pbo_discard(d, true);
     egl_fb_destroy(&d->gl_guest_fb);
-    egl_fb_destroy(&d->gl_blit_fb);
+    fb_shm_gl_discard_private_fb(&d->gl_blit_fb);
+    fb_shm_gl_discard_private_fb(&d->gl_cpu_upload_fb);
+    fb_shm_gl_discard_private_fb(&d->gl_sync_fb);
+    d->gl_sync_retired = false;
 }
 
 static void fb_shm_gl_release(FbShmDisplay *d)
@@ -876,13 +948,27 @@ static int fb_shm_ensure_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
 
 static void fb_shm_client_drop(FbShmClient *c)
 {
+    FbShmDisplay *d;
     int fd;
 
     if (!c || c->dropping) {
         return;
     }
 
+    d = c->owner;
     c->dropping = true;
+#if defined(CONFIG_OPENGL) && !defined(_WIN32)
+    if (d && fb_shm_gpu_pending_retire(&d->gpu_pending, c)) {
+        /*
+         * The peer may still have the exported BO imported.  Never reuse
+         * this texture after a disconnect; delete it from the GL thread on
+         * the next refresh and allocate a fresh backing.
+         */
+        d->gl_sync_retired = true;
+        d->gpu_sync_last_frame_ns = 0;
+        d->gpu_pending_deadline_ns = 0;
+    }
+#endif
     fd = c->fd;
     c->fd = -1;
     if (fd >= 0) {
@@ -900,7 +986,7 @@ static void fb_shm_client_drop(FbShmClient *c)
         QLIST_REMOVE(c, next);
         c->linked = false;
     }
-    fb_shm_update_effective_rate(c->owner);
+    fb_shm_update_effective_rate(d);
     c->owner = NULL;
     aio_bh_schedule_oneshot(qemu_get_aio_context(), fb_shm_client_free_bh, c);
 }
@@ -932,6 +1018,26 @@ static uint64_t fb_shm_rate_interval_ns(uint32_t rate)
      */
     rate = fb_shm_clamp_rate(rate);
     return DIV_ROUND_UP((uint64_t)NANOSECONDS_PER_SECOND, rate);
+}
+
+static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
+                            uint64_t now_ns)
+{
+    const uint64_t slack_ns = 1000000ull;
+    uint64_t interval_ns;
+
+    rate_hz = fb_shm_clamp_rate(rate_hz);
+    interval_ns = fb_shm_rate_interval_ns(rate_hz);
+    if (!*last_ns) {
+        *last_ns = now_ns;
+        return true;
+    }
+    if (now_ns + slack_ns < *last_ns + interval_ns) {
+        return false;
+    }
+
+    *last_ns = now_ns;
+    return true;
 }
 
 #ifndef _WIN32
@@ -1097,6 +1203,17 @@ static bool fb_shm_client_accepts_gpu(const FbShmClient *c)
            !c->dropping && c->fd >= 0;
 }
 
+#ifdef CONFIG_OPENGL
+static bool fb_shm_client_accepts_legacy_gpu(const FbShmClient *c)
+{
+#ifndef _WIN32
+    return fb_shm_client_accepts_gpu(c) && !c->wants_gpu_sync;
+#else
+    return fb_shm_client_accepts_gpu(c);
+#endif
+}
+#endif
+
 static bool fb_shm_has_gpu_clients(FbShmDisplay *d)
 {
     FbShmClient *c;
@@ -1109,7 +1226,43 @@ static bool fb_shm_has_gpu_clients(FbShmDisplay *d)
     return false;
 }
 
-#if defined(CONFIG_GBM) && !defined(_WIN32)
+#ifdef CONFIG_OPENGL
+static bool fb_shm_has_legacy_gpu_clients(FbShmDisplay *d)
+{
+    FbShmClient *c;
+
+    QLIST_FOREACH(c, &d->clients, next) {
+        if (fb_shm_client_accepts_legacy_gpu(c)) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
+#if defined(CONFIG_OPENGL) && defined(CONFIG_GBM) && !defined(_WIN32)
+static FbShmClient *fb_shm_gpu_sync_client(FbShmDisplay *d,
+                                            const FbShmClient *exclude)
+{
+    FbShmClient *c;
+
+    QLIST_FOREACH(c, &d->clients, next) {
+        if (c != exclude && fb_shm_client_accepts_gpu(c) &&
+            c->wants_gpu_sync) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
+static bool fb_shm_gpu_sync_available(FbShmDisplay *d)
+{
+    return fb_shm_gpu_sync_client(d, NULL) &&
+           !fb_shm_gpu_pending_active(&d->gpu_pending, NULL, NULL);
+}
+#endif
+
+#if defined(CONFIG_OPENGL) && defined(CONFIG_GBM) && !defined(_WIN32)
 /*
  * 严格 GPU consumer 只参与 Linux GBM/dma-buf texture 导出降级判断。
  * Windows 没有这条路径，因此不应生成一个永远不会调用的静态函数。
@@ -1173,6 +1326,7 @@ static void fb_shm_update_effective_rate(FbShmDisplay *d)
                                     fb_shm_rate_interval_ns(rate));
 }
 
+#ifdef CONFIG_OPENGL
 static const void *fb_shm_gpu_payload_for_client(
     const FbShmClient *c, const FbShmGpuFrame *frame,
     FbShmGpuFrameV1 *legacy, size_t *payload_size)
@@ -1192,7 +1346,8 @@ static const void *fb_shm_gpu_payload_for_client(
 
 #ifndef _WIN32
 static int fb_shm_send_gpu_frame(FbShmClient *c,
-                                 const FbShmGpuFrame *frame, int gpu_fd)
+                                 const FbShmGpuFrame *frame,
+                                 int gpu_fd, int sync_fd)
 {
     FbShmGpuFrameV1 legacy;
     size_t payload_size;
@@ -1211,28 +1366,39 @@ static int fb_shm_send_gpu_frame(FbShmClient *c,
         { .iov_base = &ack, .iov_len = sizeof(ack) },
         { .iov_base = (void *)payload, .iov_len = payload_size },
     };
-    char cbuf[CMSG_SPACE(sizeof(int))];
+    int descriptors[2];
+    size_t descriptor_count = 0;
+    char cbuf[CMSG_SPACE(sizeof(descriptors))];
     struct msghdr msg = {
         .msg_iov = iov,
         .msg_iovlen = G_N_ELEMENTS(iov),
     };
     if (gpu_fd >= 0) {
+        descriptors[descriptor_count++] = gpu_fd;
+        if (sync_fd >= 0) {
+            descriptors[descriptor_count++] = sync_fd;
+        }
         memset(cbuf, 0, sizeof(cbuf));
         msg.msg_control = cbuf;
-        msg.msg_controllen = CMSG_SPACE(sizeof(int));
+        msg.msg_controllen = CMSG_SPACE(descriptor_count * sizeof(int));
 
         struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
         cm->cmsg_level = SOL_SOCKET;
         cm->cmsg_type = SCM_RIGHTS;
-        cm->cmsg_len = CMSG_LEN(sizeof(int));
-        memcpy(CMSG_DATA(cm), &gpu_fd, sizeof(gpu_fd));
+        cm->cmsg_len = CMSG_LEN(descriptor_count * sizeof(int));
+        memcpy(CMSG_DATA(cm), descriptors,
+               descriptor_count * sizeof(int));
+    } else if (sync_fd >= 0) {
+        errno = EINVAL;
+        return -1;
     }
 
     return fb_shm_sendmsg_all(c->fd, &msg);
 }
 #else
 static int fb_shm_send_gpu_frame(FbShmClient *c,
-                                 const FbShmGpuFrame *frame, int gpu_fd)
+                                 const FbShmGpuFrame *frame,
+                                 int gpu_fd, int sync_fd)
 {
     FbShmGpuFrameV1 legacy;
     size_t payload_size;
@@ -1249,6 +1415,7 @@ static int fb_shm_send_gpu_frame(FbShmClient *c,
     };
 
     (void)gpu_fd;
+    (void)sync_fd;
     if (fb_shm_send_bytes(c->fd, &ack, sizeof(ack)) < 0) {
         return -1;
     }
@@ -1261,9 +1428,9 @@ static bool fb_shm_client_disconnect_errno(int err)
     return err == EPIPE || err == ECONNRESET || err == ENOTCONN;
 }
 
-static void fb_shm_broadcast_gpu_frame(FbShmDisplay *d,
-                                       const FbShmGpuFrame *frame,
-                                       int gpu_fd)
+static int fb_shm_broadcast_gpu_frame(FbShmDisplay *d,
+                                      const FbShmGpuFrame *frame,
+                                      int gpu_fd, int sync_fd)
 {
     FbShmClient *c, *cn;
     int recipients = 0;
@@ -1272,7 +1439,25 @@ static void fb_shm_broadcast_gpu_frame(FbShmDisplay *d,
         if (!fb_shm_client_accepts_gpu(c)) {
             continue;
         }
-        if (fb_shm_send_gpu_frame(c, frame, gpu_fd) < 0) {
+#ifndef _WIN32
+        if (c->wants_gpu_sync != (sync_fd >= 0)) {
+            continue;
+        }
+        if (sync_fd >= 0 &&
+            !fb_shm_gpu_pending_begin(&d->gpu_pending, c,
+                                      frame->frame_seq)) {
+            continue;
+        }
+#endif
+        if (fb_shm_send_gpu_frame(c, frame, gpu_fd, sync_fd) < 0) {
+#ifndef _WIN32
+            if (sync_fd >= 0) {
+                fb_shm_gpu_pending_retire(&d->gpu_pending, c);
+#ifdef CONFIG_OPENGL
+                d->gl_sync_retired = true;
+#endif
+            }
+#endif
             if (!fb_shm_client_disconnect_errno(errno)) {
                 warn_report("fb-shm: NOTIFY_GPU_FRAME send failed "
                             "(errno=%d %s); dropping client fd=%d",
@@ -1281,18 +1466,81 @@ static void fb_shm_broadcast_gpu_frame(FbShmDisplay *d,
             fb_shm_client_drop(c);
         } else {
             recipients++;
+#if defined(CONFIG_OPENGL) && defined(CONFIG_GBM) && !defined(_WIN32)
+            if (sync_fd >= 0) {
+                d->gpu_pending_deadline_ns =
+                    fb_shm_now_ns() + FB_SHM_GPU_LEASE_NS;
+            }
+#endif
         }
     }
 
-    (void)recipients;
+    return recipients;
 }
+#endif
 
 static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
                                 const FbShmCtlReq *req)
 {
+    FbShmCtlAck rejected = {
+        .magic = FB_SHM_MAGIC,
+        .op = FB_SHM_CTL_HELLO,
+    };
     bool gpu_only;
 
     if (c->dropping || c->fd < 0) {
+        return;
+    }
+    if (c->hello_done) {
+        rejected.status = FB_SHM_CTL_EBUSY;
+        if (fb_shm_send_ack(d, c, &rejected, false) < 0) {
+            fb_shm_client_drop(c);
+        }
+        return;
+    }
+
+    if (!fb_shm_gpu_hello_flags_valid(req->flags)) {
+        rejected.status = FB_SHM_CTL_EINVAL;
+        if (fb_shm_send_ack(d, c, &rejected, false) < 0) {
+            fb_shm_client_drop(c);
+        }
+        return;
+    }
+#ifndef _WIN32
+    if (req->flags & FB_SHM_HELLO_F_GPU_SYNC) {
+#if defined(CONFIG_OPENGL) && defined(CONFIG_GBM)
+        if (fb_shm_gpu_sync_client(d, c)) {
+            rejected.status = FB_SHM_CTL_EBUSY;
+            if (fb_shm_send_ack(d, c, &rejected, false) < 0) {
+                fb_shm_client_drop(c);
+            }
+            return;
+        }
+#else
+        rejected.status = FB_SHM_CTL_EUNSUPPORTED;
+        if (fb_shm_send_ack(d, c, &rejected, false) < 0) {
+            fb_shm_client_drop(c);
+        }
+        return;
+#endif
+    }
+#else
+    if (req->flags & FB_SHM_HELLO_F_GPU_SYNC) {
+        rejected.status = FB_SHM_CTL_EUNSUPPORTED;
+        if (fb_shm_send_ack(d, c, &rejected, false) < 0) {
+            fb_shm_client_drop(c);
+        }
+        return;
+    }
+#endif
+
+    gpu_only = (req->flags & FB_SHM_HELLO_F_GPU_FRAMES) &&
+               (req->flags & FB_SHM_HELLO_F_GPU_REQUIRED);
+    if (!d->shm && !gpu_only) {
+        rejected.status = FB_SHM_CTL_EBUSY;
+        if (fb_shm_send_ack(d, c, &rejected, false) < 0) {
+            fb_shm_client_drop(c);
+        }
         return;
     }
 
@@ -1309,6 +1557,8 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
         (req->flags & FB_SHM_HELLO_F_GPU_FRAMES) != 0;
     c->wants_gpu_source_size =
         (req->flags & FB_SHM_HELLO_F_GPU_SOURCE_SIZE) != 0;
+    c->wants_gpu_sync =
+        (req->flags & FB_SHM_HELLO_F_GPU_SYNC) != 0;
     c->gpu_required =
         (req->flags & FB_SHM_HELLO_F_GPU_REQUIRED) != 0;
     if (!c->gpu_required) {
@@ -1321,9 +1571,9 @@ static void fb_shm_handle_hello(FbShmDisplay *d, FbShmClient *c,
         d->cpu_surface_gpu_dirty = true;
 #ifdef CONFIG_OPENGL
         d->gl_last_frame_ns = 0;
+        d->gpu_sync_last_frame_ns = 0;
 #endif
     }
-    gpu_only = c->wants_gpu_frames && c->gpu_required;
     fb_shm_update_effective_rate(d);
 
     FbShmCtlAck ack = {
@@ -1428,6 +1678,7 @@ static void fb_shm_handle_set_roi(FbShmDisplay *d, FbShmClient *c,
     d->shm_last_frame_ns = 0;
 #ifdef CONFIG_OPENGL
     d->gl_last_frame_ns = 0;
+    d->gpu_sync_last_frame_ns = 0;
 #endif
 
     FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
@@ -1453,6 +1704,7 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
         d->cpu_surface_gpu_dirty = true;
 #ifdef CONFIG_OPENGL
         d->gl_last_frame_ns = 0;
+        d->gpu_sync_last_frame_ns = 0;
 #endif
     } else {
         d->shm_target_fps = r;
@@ -1471,6 +1723,40 @@ static void fb_shm_handle_set_rate(FbShmDisplay *d, FbShmClient *c,
 
     FbShmCtlAck ack = { .magic = FB_SHM_MAGIC, .op = req->op,
                         .status = FB_SHM_CTL_OK };
+    if (fb_shm_send_ack(d, c, &ack, false) < 0) {
+        fb_shm_client_drop(c);
+    }
+}
+
+static void fb_shm_handle_gpu_frame_done(FbShmDisplay *d, FbShmClient *c,
+                                         const FbShmCtlReq *req)
+{
+    uint32_t status = FB_SHM_CTL_EUNSUPPORTED;
+
+#if defined(CONFIG_OPENGL) && defined(CONFIG_GBM) && !defined(_WIN32)
+    uint64_t sequence;
+
+    status = FB_SHM_CTL_EINVAL;
+    if (c->wants_gpu_sync &&
+        fb_shm_gpu_done_req_sequence(req, &sequence) &&
+        fb_shm_gpu_pending_complete(&d->gpu_pending, c, sequence)) {
+        status = FB_SHM_CTL_OK;
+        d->gpu_pending_deadline_ns = 0;
+        if (d->gpu_lease_expiry_streak > 0) {
+            info_report("fb-shm: consumer 已恢复；其间回收了 %u 次超时租约",
+                        d->gpu_lease_expiry_streak);
+        }
+        d->gpu_lease_expiry_streak = 0;
+    }
+#else
+    (void)req;
+#endif
+
+    FbShmCtlAck ack = {
+        .magic = FB_SHM_MAGIC,
+        .op = FB_SHM_CTL_GPU_FRAME_DONE,
+        .status = status,
+    };
     if (fb_shm_send_ack(d, c, &ack, false) < 0) {
         fb_shm_client_drop(c);
     }
@@ -1531,6 +1817,9 @@ static void fb_shm_client_read(void *opaque)
             break;
         case FB_SHM_CTL_SET_RATE:
             fb_shm_handle_set_rate(d, c, &req);
+            break;
+        case FB_SHM_CTL_GPU_FRAME_DONE:
+            fb_shm_handle_gpu_frame_done(d, c, &req);
             break;
         case FB_SHM_CTL_BYE:
             fb_shm_client_drop(c);
@@ -1805,7 +2094,7 @@ static void fb_shm_broadcast_dmabuf_frame(FbShmDisplay *d,
     uint32_t x;
     uint32_t y;
 
-    if (!dmabuf || !fb_shm_has_gpu_clients(d)) {
+    if (!dmabuf || !fb_shm_has_legacy_gpu_clients(d)) {
         return;
     }
 
@@ -1831,7 +2120,7 @@ static void fb_shm_broadcast_dmabuf_frame(FbShmDisplay *d,
                           qemu_dmabuf_get_backing_height(dmabuf),
                           d->gl_w, d->gl_h,
                           qemu_dmabuf_get_modifier(dmabuf));
-    fb_shm_broadcast_gpu_frame(d, &frame, fd);
+    fb_shm_broadcast_gpu_frame(d, &frame, fd, -1);
     close(fd);
 #else
     (void)d;
@@ -1852,7 +2141,8 @@ static bool fb_shm_broadcast_texture_dmabuf(FbShmDisplay *d,
                                             uint32_t backing_h,
                                             uint32_t source_w,
                                             uint32_t source_h,
-                                            bool y0_top)
+                                            bool y0_top,
+                                            bool synchronized)
 {
     FbShmGpuFrame frame;
     EGLint offsets[DMABUF_MAX_PLANES] = { 0 };
@@ -1862,10 +2152,14 @@ static bool fb_shm_broadcast_texture_dmabuf(FbShmDisplay *d,
     int fds[DMABUF_MAX_PLANES] = { -1, -1, -1, -1 };
     int num_planes = 0;
     uint32_t flags = 0;
+    int sync_fd = -1;
+    int recipients;
     int fd;
     int i;
 
-    if (!fb_shm_has_gpu_clients(d) || !texture) {
+    if (!texture ||
+        (synchronized ? !fb_shm_gpu_sync_available(d) :
+                        !fb_shm_has_legacy_gpu_clients(d))) {
         return false;
     }
 
@@ -1876,7 +2170,8 @@ static bool fb_shm_broadcast_texture_dmabuf(FbShmDisplay *d,
      */
     if (!egl_dmabuf_export_texture(texture, fds, offsets,
                                    strides, &fourcc, &num_planes,
-                                   &modifier) || num_planes != 1) {
+                                   &modifier) || num_planes != 1 ||
+        (synchronized && (offsets[0] != 0 || strides[0] <= 0))) {
         for (i = 0; i < DMABUF_MAX_PLANES; i++) {
             if (fds[i] >= 0) {
                 close(fds[i]);
@@ -1907,14 +2202,31 @@ static bool fb_shm_broadcast_texture_dmabuf(FbShmDisplay *d,
     if (y0_top) {
         flags |= FB_SHM_GPU_FRAME_F_Y0_TOP;
     }
+    if (synchronized) {
+        sync_fd = egl_create_native_fence_fd();
+        if (sync_fd < 0) {
+            if (!d->gl_warned_native_fence) {
+                warn_report("fb-shm: synchronized GPU preview requires "
+                            "EGL_ANDROID_native_fence_sync; no unsafe "
+                            "GPU frame will be sent");
+                d->gl_warned_native_fence = true;
+            }
+            close(fd);
+            return false;
+        }
+        flags |= FB_SHM_GPU_FRAME_F_SYNC_FILE;
+    }
     fb_shm_gpu_frame_init(d, &frame, FB_SHM_GPU_HANDLE_DMA_BUF, flags,
                           w, h, (uint32_t)strides[0], (uint32_t)fourcc,
                           x, y, backing_w, backing_h,
                           source_w, source_h,
                           (uint64_t)modifier);
-    fb_shm_broadcast_gpu_frame(d, &frame, fd);
+    recipients = fb_shm_broadcast_gpu_frame(d, &frame, fd, sync_fd);
+    if (sync_fd >= 0) {
+        close(sync_fd);
+    }
     close(fd);
-    return true;
+    return recipients > 0;
 }
 #else
 static bool fb_shm_broadcast_texture_dmabuf(FbShmDisplay *d,
@@ -1925,7 +2237,8 @@ static bool fb_shm_broadcast_texture_dmabuf(FbShmDisplay *d,
                                             uint32_t backing_h,
                                             uint32_t source_w,
                                             uint32_t source_h,
-                                            bool y0_top)
+                                            bool y0_top,
+                                            bool synchronized)
 {
     (void)d;
     (void)texture;
@@ -1938,6 +2251,7 @@ static bool fb_shm_broadcast_texture_dmabuf(FbShmDisplay *d,
     (void)source_w;
     (void)source_h;
     (void)y0_top;
+    (void)synchronized;
     return false;
 }
 #endif
@@ -1951,7 +2265,7 @@ static bool fb_shm_broadcast_texture_dmabuf_frame(FbShmDisplay *d,
         d, d->gl_backing_id, w, h,
         d->gl_x + (uint32_t)roi_x, d->gl_y + (uint32_t)roi_y,
         d->gl_backing_w, d->gl_backing_h,
-        d->gl_w, d->gl_h, d->gl_y0_top);
+        d->gl_w, d->gl_h, d->gl_y0_top, false);
 }
 
 #ifdef _WIN32
@@ -2057,7 +2371,7 @@ static void fb_shm_broadcast_d3d_frame(FbShmDisplay *d,
                   sizeof(frame.handle_name)) >= sizeof(frame.handle_name)) {
         return;
     }
-    fb_shm_broadcast_gpu_frame(d, &frame, -1);
+    fb_shm_broadcast_gpu_frame(d, &frame, -1, -1);
 }
 #endif
 
@@ -2082,43 +2396,88 @@ static void fb_shm_broadcast_current_gpu_frame(FbShmDisplay *d,
     fb_shm_broadcast_texture_dmabuf_frame(d, w, h, roi_x, roi_y);
 }
 
-static bool fb_shm_rate_due(uint32_t rate_hz, uint64_t *last_ns,
-                            uint64_t now_ns)
+#if defined(CONFIG_GBM) && !defined(_WIN32)
+static bool fb_shm_prepare_sync_fb(FbShmDisplay *d, uint32_t w, uint32_t h)
 {
-    const uint64_t slack_ns = 1000000ull;
-    uint64_t interval_ns;
+    if (d->gl_sync_retired || d->gl_sync_fb.width != w ||
+        d->gl_sync_fb.height != h || !d->gl_sync_fb.texture) {
+        bool ready = fb_shm_gl_setup_private_fb(&d->gl_sync_fb, w, h);
 
-    rate_hz = fb_shm_clamp_rate(rate_hz);
-    /* DCL 与发布节流共用同一个精确纳秒周期。 */
-    interval_ns = fb_shm_rate_interval_ns(rate_hz);
-    if (!*last_ns) {
-        *last_ns = now_ns;
-        return true;
+        if (!ready) {
+            if (!d->gl_warned_sync_blit) {
+                warn_report("fb-shm: private GPU preview framebuffer "
+                            "is incomplete; using SHM fallback");
+                d->gl_warned_sync_blit = true;
+            }
+            return false;
+        }
+        /* Only a complete replacement makes a retired backing reusable. */
+        d->gl_sync_retired = false;
     }
+    return d->gl_sync_fb.texture && d->gl_sync_fb.framebuffer;
+}
 
-    /*
-     * QEMU 只发布“当前 tick 的最新帧”。如果宿主被调度走或 GL 读回慢了，
-     * 不在这里补多个 deadline；消费端会重复上一帧或丢帧，避免视觉快进。
-     */
-    if (now_ns + slack_ns < *last_ns + interval_ns) {
+static bool fb_shm_publish_gl_sync_frame(FbShmDisplay *d,
+                                         uint32_t sw, uint32_t sh,
+                                         uint32_t rw, uint32_t rh,
+                                         int32_t rx, int32_t ry)
+{
+    int sx1 = (int)d->gl_x + rx;
+    int sx2 = sx1 + (int)rw;
+    int sy1 = (int)d->gl_y + ry;
+    int sy2 = sy1 + (int)rh;
+    GLenum gl_error;
+
+    if (!fb_shm_gpu_sync_available(d) ||
+        !fb_shm_prepare_sync_fb(d, rw, rh)) {
         return false;
     }
 
-    *last_ns = now_ns;
-    return true;
+    if (d->gl_y0_top) {
+        int backing_height = (int)d->gl_backing_h;
+
+        sy1 = backing_height - ((int)d->gl_y + ry);
+        sy2 = backing_height - ((int)d->gl_y + ry + (int)rh);
+    }
+
+    fb_shm_gl_clear_errors();
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, d->gl_guest_fb.framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->gl_sync_fb.framebuffer);
+    glViewport(0, 0, rw, rh);
+    glBlitFramebuffer(sx1, sy1, sx2, sy2,
+                      0, rh, rw, 0,
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    gl_error = glGetError();
+    if (gl_error != GL_NO_ERROR) {
+        if (!d->gl_warned_sync_blit) {
+            warn_report("fb-shm: private GPU preview blit failed "
+                        "(GL 0x%x); using SHM fallback", gl_error);
+            d->gl_warned_sync_blit = true;
+        }
+        return false;
+    }
+
+    return fb_shm_broadcast_texture_dmabuf(
+        d, d->gl_sync_fb.texture, rw, rh, 0, 0, rw, rh,
+        sw, sh, false, true);
 }
+#endif
 
 static bool fb_shm_commit_surface_gpu_frame(FbShmDisplay *d,
                                             DisplaySurface *surface)
 {
-    egl_fb source_fb = { 0 };
     uint32_t sw, sh, rw, rh;
     int32_t rx, ry;
     uint64_t now_ns;
+    bool upload_changed;
+    bool legacy_due;
+    bool sync_due = false;
+    bool sync_client = false;
+    bool sync_published = false;
     GLenum gl_error;
-    bool published;
+    bool legacy_published = false;
 
-    if (!fb_shm_has_gpu_clients(d) || !surface->texture) {
+    if (!fb_shm_has_gpu_clients(d)) {
         return false;
     }
     if (!fb_shm_gl_make_current(d)) {
@@ -2126,58 +2485,112 @@ static bool fb_shm_commit_surface_gpu_frame(FbShmDisplay *d,
     }
 
     now_ns = fb_shm_now_ns();
-    if (!fb_shm_rate_due(d->gpu_target_fps, &d->gl_last_frame_ns, now_ns)) {
+    legacy_due = fb_shm_has_legacy_gpu_clients(d) &&
+        fb_shm_rate_due(d->gpu_target_fps, &d->gl_last_frame_ns, now_ns);
+#if defined(CONFIG_GBM) && !defined(_WIN32)
+    sync_client = fb_shm_gpu_sync_client(d, NULL) != NULL;
+    sync_due = fb_shm_gpu_sync_available(d) &&
+        fb_shm_rate_due(d->gpu_target_fps,
+                        &d->gpu_sync_last_frame_ns, now_ns);
+#endif
+    if (!legacy_due && !sync_due) {
         return false;
     }
 
     sw = surface_width(surface);
     sh = surface_height(surface);
     fb_shm_resolve_roi(d, sw, sh, &rw, &rh, &rx, &ry);
+    upload_changed = d->cpu_surface_gpu_dirty ||
+        d->gl_cpu_upload_fb.width != rw ||
+        d->gl_cpu_upload_fb.height != rh ||
+        !d->gl_cpu_upload_fb.texture;
 
-    if (d->cpu_surface_gpu_dirty || d->gl_blit_fb.width != rw ||
-        d->gl_blit_fb.height != rh || !d->gl_blit_fb.texture) {
-        /*
-         * Damage 只刷新一次私有 ROI texture；固定节拍的其余 tick
-         * 重新发布该 texture，不做重复 blit。
-         */
+    if (upload_changed) {
+        if (d->gl_cpu_upload_fb.width != rw ||
+            d->gl_cpu_upload_fb.height != rh ||
+            !d->gl_cpu_upload_fb.texture) {
+            if (!fb_shm_gl_setup_private_fb(&d->gl_cpu_upload_fb,
+                                            rw, rh)) {
+                if (!d->gl_warned_surface_blit) {
+                    warn_report("fb-shm: private DisplaySurface upload "
+                                "framebuffer is incomplete");
+                    d->gl_warned_surface_blit = true;
+                }
+                return false;
+            }
+        }
+        fb_shm_gl_clear_errors();
+        if (!surface_gl_upload_texture(surface,
+                                       d->gl_cpu_upload_fb.texture,
+                                       rx, ry, 0, 0, rw, rh)) {
+            if (!d->gl_warned_surface_blit) {
+                warn_report("fb-shm: private DisplaySurface GPU upload "
+                            "failed; using SHM fallback");
+                d->gl_warned_surface_blit = true;
+            }
+            return false;
+        }
+    }
+
+    if (legacy_due) {
         if (d->gl_blit_fb.width != rw || d->gl_blit_fb.height != rh ||
             !d->gl_blit_fb.texture) {
-            egl_fb_destroy(&d->gl_blit_fb);
-            egl_fb_setup_new_tex(&d->gl_blit_fb, rw, rh);
+            if (!fb_shm_gl_setup_private_fb(&d->gl_blit_fb, rw, rh)) {
+                return false;
+            }
         }
-        egl_fb_setup_for_tex(&source_fb, sw, sh, surface->texture, false);
-        while (glGetError() != GL_NO_ERROR) {
-            /* Clear stale frontend errors before checking this blit. */
-        }
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, source_fb.framebuffer);
+        fb_shm_gl_clear_errors();
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,
+                          d->gl_cpu_upload_fb.framebuffer);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->gl_blit_fb.framebuffer);
-        glBlitFramebuffer(rx, ry, rx + (int32_t)rw, ry + (int32_t)rh,
+        glBlitFramebuffer(0, 0, rw, rh,
                           0, rh, rw, 0,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
         gl_error = glGetError();
-        egl_fb_destroy(&source_fb);
         if (gl_error != GL_NO_ERROR) {
             if (!d->gl_warned_surface_blit) {
-                warn_report("fb-shm: surface texture GPU blit failed "
+                warn_report("fb-shm: private DisplaySurface GPU blit failed "
                             "(GL 0x%x); using SHM fallback", gl_error);
                 d->gl_warned_surface_blit = true;
             }
-            return true;
+        } else {
+            legacy_published = fb_shm_broadcast_texture_dmabuf(
+                d, d->gl_blit_fb.texture, rw, rh, 0, 0, rw, rh,
+                sw, sh, false, false);
         }
-        glFlush();
     }
 
-    published = fb_shm_broadcast_texture_dmabuf(
-        d, d->gl_blit_fb.texture, rw, rh, 0, 0, rw, rh,
-        sw, sh, false);
-    if (published && !d->gl_logged_surface_export) {
-        info_report("fb-shm: DisplaySurface GPU preview active "
-                    "(%ux%u texture -> dma-buf)", rw, rh);
+#if defined(CONFIG_GBM) && !defined(_WIN32)
+    if (sync_due && fb_shm_prepare_sync_fb(d, rw, rh)) {
+        fb_shm_gl_clear_errors();
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,
+                          d->gl_cpu_upload_fb.framebuffer);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->gl_sync_fb.framebuffer);
+        glBlitFramebuffer(0, 0, rw, rh,
+                          0, rh, rw, 0,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        gl_error = glGetError();
+        if (gl_error == GL_NO_ERROR) {
+            sync_published = fb_shm_broadcast_texture_dmabuf(
+                d, d->gl_sync_fb.texture, rw, rh, 0, 0, rw, rh,
+                sw, sh, false, true);
+        } else if (!d->gl_warned_sync_blit) {
+            warn_report("fb-shm: synchronized DisplaySurface blit failed "
+                        "(GL 0x%x); using SHM fallback", gl_error);
+            d->gl_warned_sync_blit = true;
+        }
+    }
+#endif
+
+    if ((legacy_published || sync_published) &&
+        !d->gl_logged_surface_export) {
+        info_report("fb-shm: SDL-independent DisplaySurface GPU preview "
+                    "active (%ux%u private texture -> dma-buf)", rw, rh);
         d->gl_logged_surface_export = true;
     }
 
-    /* Every due tick publishes; damage only controls cache refresh. */
-    return true;
+    /* Keep damage dirty while a synchronized client still owns the slot. */
+    return sync_client ? sync_published : legacy_due;
 }
 
 static void fb_shm_commit_gl_frame(FbShmDisplay *d)
@@ -2189,6 +2602,7 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     uint64_t now_ns;
     bool geometry_changed;
     bool has_gpu_clients;
+    bool has_legacy_gpu_clients;
     bool has_shm_consumers;
     bool need_shm_frame;
     Error *err = NULL;
@@ -2198,6 +2612,7 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     }
 
     has_gpu_clients = fb_shm_has_gpu_clients(d);
+    has_legacy_gpu_clients = fb_shm_has_legacy_gpu_clients(d);
     has_shm_consumers = fb_shm_has_shm_consumers(d);
     need_shm_frame = has_shm_consumers || !d->shm;
     /*
@@ -2234,18 +2649,26 @@ static void fb_shm_commit_gl_frame(FbShmDisplay *d)
     }
 
     now_ns = fb_shm_now_ns();
-    if (has_gpu_clients &&
+    if (has_legacy_gpu_clients &&
         fb_shm_rate_due(d->gpu_target_fps, &d->gl_last_frame_ns, now_ns)) {
         fb_shm_broadcast_current_gpu_frame(d, rw, rh, rx, ry);
     }
+#if defined(CONFIG_GBM) && !defined(_WIN32)
+    if (fb_shm_gpu_sync_available(d) &&
+        fb_shm_rate_due(d->gpu_target_fps,
+                        &d->gpu_sync_last_frame_ns, now_ns)) {
+        fb_shm_publish_gl_sync_frame(d, sw, sh, rw, rh, rx, ry);
+    }
+#endif
     if (!need_shm_frame ||
         !fb_shm_rate_due(d->shm_target_fps, &d->shm_last_frame_ns, now_ns)) {
         return;
     }
 
     if (d->gl_blit_fb.width != rw || d->gl_blit_fb.height != rh) {
-        egl_fb_destroy(&d->gl_blit_fb);
-        egl_fb_setup_new_tex(&d->gl_blit_fb, rw, rh);
+        if (!fb_shm_gl_setup_private_fb(&d->gl_blit_fb, rw, rh)) {
+            return;
+        }
     }
 
     /*
@@ -2297,6 +2720,7 @@ static void fb_shm_gl_scanout_disable(DisplayChangeListener *dcl)
 
     d->gl_scanout = false;
     d->gl_last_frame_ns = 0;
+    d->gpu_sync_last_frame_ns = 0;
     d->gl_dmabuf = NULL;
     fb_shm_gl_release_fbos(d);
 }
@@ -2441,9 +2865,54 @@ static void fb_shm_gl_update(DisplayChangeListener *dcl,
 }
 #endif
 
+static void fb_shm_expire_gpu_lease(FbShmDisplay *d)
+{
+#if defined(CONFIG_OPENGL) && defined(CONFIG_GBM) && !defined(_WIN32)
+    const void *owner = NULL;
+    uint64_t sequence = 0;
+
+    if (!d->gpu_pending_deadline_ns ||
+        fb_shm_now_ns() < d->gpu_pending_deadline_ns ||
+        !fb_shm_gpu_pending_active(&d->gpu_pending, &owner, &sequence)) {
+        return;
+    }
+
+    d->gpu_lease_expiry_streak++;
+
+    if (d->gpu_lease_expiry_streak < FB_SHM_GPU_LEASE_MAX_EXPIRY) {
+        if (d->gpu_lease_expiry_streak == 1) {
+            warn_report("fb-shm: synchronized GPU frame %" PRIu64
+                        " lease expired; reclaiming the slot"
+                        " (后续重复超时将被静默，直到 consumer 恢复)", sequence);
+        }
+        /*
+         * consumer 可能仍然导入着这块 BO，因此回收槽位之后绝不能复用同一张
+         * 纹理：标记 retired 让下一次 refresh 重新分配 backing，并清掉限速
+         * 时间戳，使新帧可以立即发布，不必再等一个 gpu_target_fps 周期。
+         */
+        fb_shm_gpu_pending_retire(&d->gpu_pending, owner);
+        d->gpu_pending_deadline_ns = 0;
+        d->gl_sync_retired = true;
+        d->gpu_sync_last_frame_ns = 0;
+        return;
+    }
+
+    warn_report("fb-shm: consumer 连续 %u 次未在租约内归还 GPU 帧 "
+                "(最后一帧 %" PRIu64 ")；断开该 consumer",
+                d->gpu_lease_expiry_streak, sequence);
+    /* 断开后计数归零，新接入的 consumer 重新获得完整的重试预算。 */
+    d->gpu_lease_expiry_streak = 0;
+    fb_shm_client_drop((FbShmClient *)owner);
+#else
+    (void)d;
+#endif
+}
+
 static void fb_shm_refresh(DisplayChangeListener *dcl)
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
+
+    fb_shm_expire_gpu_lease(d);
 
 #ifdef CONFIG_OPENGL
     /*

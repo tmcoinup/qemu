@@ -7,7 +7,7 @@
 #   显示器目标模式从这份【缓存的 EDID】解析。旧 guest（以及从旧 base 克隆
 #   出来的实例）不会自动刷新这份缓存，所以即便 QEMU 端 EDID 已改变，
 #   Windows 仍可能显示旧目标模式。NVIDIA GRID 还会从显示适配器 software key
-#   的 NV_Modes 补充 source modes，必须用同一份 FHD 合同约束。
+#   的 NV_Modes 补充 source modes，必须用同一份 R535 page-safe FHD 合同约束。
 #   GraphicsDrivers\Configuration / Connectivity 还会按显示器签名缓存"已验证
 #   模式表"，同样会拖着旧分辨率。
 #
@@ -17,7 +17,7 @@
 #        EDID_OVERRIDE\0..N；后者才是 Windows 显示栈/第三方工具优先消费的
 #        有效 EDID override；
 #     2) 沿 Enum\PCI 中的 NVIDIA Driver 关系，只把锁定 GRID 538.33 的
-#        NV_Modes 收敛为 EDID 同一份 10 项 FHD/1K PC 模式合同；
+#        NV_Modes 收敛为 EDID 同一份 8 项 page-safe FHD/1K PC 模式合同；
 #     3) 清空 GraphicsDrivers 的模式/连接缓存子键（含跨厂商
 #        残留，如 DEL0F65），让 Windows 下次开机从新 EDID 重建模式表。
 #
@@ -109,6 +109,34 @@ die() { echo "[disp-cache] ERROR: $*" >&2; exit 1; }
 [[ -r "$NVIDIA_MODE_POLICY" ]] || die "找不到 NVIDIA 模式策略: $NVIDIA_MODE_POLICY"
 [[ -r "$WINDOWS_HIVE_VALIDATOR" ]] || \
     die "找不到 Windows hive 校验器: $WINDOWS_HIVE_VALIDATOR"
+
+# qemu-edid's option names and descriptor layout changed in newer QEMU
+# branches.  The untracked build/ directory can therefore contain the other
+# branch's binary immediately after a checkout.  Detect that state before
+# generation: translating only the option names would still produce an EDID
+# outside G-11's reviewed descriptor contract.
+if ! QEMU_EDID_HELP=$("$QEMU_EDID" -h 2>&1); then
+    die "无法读取 $QEMU_EDID 的参数接口；请运行 ./deploy/host/build-qemu.sh"
+fi
+qemu_edid_help_has_all() {
+    local option
+    for option in "$@"; do
+        [[ "$QEMU_EDID_HELP" == *"$option"* ]] || return 1
+    done
+}
+if qemu_edid_help_has_all \
+        --week --year --range-min-v --range-max-v \
+        --range-min-h --range-max-h --max-clock; then
+    : # Expected G-11 helper and descriptor layout.
+elif qemu_edid_help_has_all \
+        --manufacture-week --manufacture-year \
+        --min-vfreq-hz --max-vfreq-hz \
+        --min-hfreq-khz --max-hfreq-khz --max-pixel-clock-mhz; then
+    die "$QEMU_EDID 来自其他 QEMU 分支，EDID 布局不符合 G-11；请运行 ./deploy/host/build-qemu.sh"
+else
+    die "$QEMU_EDID 的参数接口不受支持；请在 G-11 分支运行 ./deploy/host/build-qemu.sh"
+fi
+unset QEMU_EDID_HELP
 case "$DRIVER_POLICY" in
     grid-53833-native)
         [[ "$EXPECTED_DRIVER_VERSION" == 31.0.15.3833 &&
@@ -184,8 +212,8 @@ log "${INSTANCE_LABEL}: ${MONITOR_DISPLAY_NAME} ${MONITOR_VENDOR}:${MONITOR_PROD
     --range-min-h "$MONITOR_MIN_H" --range-max-h "$MONITOR_MAX_H" \
     --max-clock "$MONITOR_MAX_CLOCK_MHZ" >/dev/null
 
-# G-11/NVIDIA vGPU 的精简 FHD/1K 合同：保留 1600x900，并让 EDID 与
-# NV_Modes 使用同一份 10 项白名单。standard timing 由这里写入精确白名单；
+# G-11/NVIDIA vGPU 的精简 FHD/1K 合同：EDID 与 NV_Modes 使用同一份
+# 8 项 R535 page-safe 白名单。standard timing 由这里写入精确白名单；
 # Established Timings III 也必须匹配不含 1680x1050/1440x900 的精确位图。
 python3 - "$EDID_BIN" "$MONITOR_VENDOR" \
     "$MONITOR_PRODUCT_ID" "$MONITOR_WIDTH_MM" "$MONITOR_HEIGHT_MM" <<'PY'
@@ -307,20 +335,32 @@ require(cta_tags and cta_tags[0] == 0xff,
 
 cta_modes_by_vic = {16: (1920, 1080), 4: (1280, 720)}
 cta_modes = [cta_modes_by_vic[vic] for vic in cta_vics]
-established = [(1024, 768), (800, 600), (640, 480)]
+established = [(1024, 768), (640, 480)]
 xtra3_modes = [(1360, 768), (1280, 1024), (1280, 960), (1280, 768)]
-standard_modes = [(1920, 1080), (1600, 900), (1280, 1024), (1280, 720)]
+standard_modes = [(1920, 1080), (1280, 1024), (1280, 720)]
 advertised = (set(base_dtds) | set(cta_modes) | set(established) |
               set(xtra3_modes) | set(standard_modes))
 expected = {
-    (1920, 1080), (1600, 900), (1360, 768),
+    (1920, 1080), (1360, 768),
     (1280, 1024), (1280, 960), (1280, 768), (1280, 720),
-    (1024, 768), (800, 600), (640, 480),
+    (1024, 768), (640, 480),
 }
 require(advertised == expected,
         f'advertised modes differ: {advertised} != {expected}')
 require(not any(x * 10 == y * 16 for x, y in advertised),
         f'16:10 mode detected: {advertised}')
+
+
+def r535_console_frame_bytes(mode):
+    width, height = mode
+    pitch = ((width * 4 + 127) // 128) * 128
+    return pitch * height
+
+
+unsafe = {mode: r535_console_frame_bytes(mode) for mode in advertised
+          if r535_console_frame_bytes(mode) % 4096}
+require(not unsafe,
+        f'R535 page-unsafe mode detected: {unsafe}')
 
 # Add only NVIDIA-safe standard timings after the source blob passes every
 # structural check.  Aspect values: 3=16:9 and 2=5:4; no 0=16:10 entry exists.
@@ -330,14 +370,20 @@ def encode_standard(x, aspect):
 
 standard_bytes = b''.join((
     encode_standard(1920, 3),
-    encode_standard(1600, 3),
     encode_standard(1280, 2),
     encode_standard(1280, 3),
-)) + b'\x01\x01' * 4
+)) + b'\x01\x01' * 5
 e[38:54] = standard_bytes
+# qemu-edid's source blob contains the ordinary 800x600 established bit.
+# Clear it only after the input layout has passed validation: NVIDIA R535's
+# 800x600 console frame is 0x1d4c00 bytes and triggers the same page-rounding
+# mismatch as the observed 1680x1050 -> 1696x1050 failure.
+e[35:38] = bytes.fromhex('200800')
 e[127] = (-sum(e[:127])) & 0xff
 require(e[38:54] == standard_bytes,
         'standard timing whitelist was not written exactly')
+require(e[35:38] == bytes.fromhex('200800'),
+        'page-unsafe established timing survived output filtering')
 checksums = [sum(e[i:i + 128]) & 0xff for i in (0, 128)]
 require(checksums == [0, 0], f'output checksums are invalid: {checksums}')
 print(f'[disp-cache] EDID: DTD={base_dtds} CTA={cta_modes} '
@@ -457,6 +503,8 @@ PYTHONDONTWRITEBYTECODE=1 \
 
 # ---- 5) hivex：替换缓存 EDID/可读身份 + NVIDIA source modes + 清配置 ----
 MONITOR_PNP="${MONITOR_VENDOR}${MONITOR_PRODUCT_ID#0x}"
+monitor_registry_rc=0
+set +e
 HIVE="$HIVE" EDID_BIN="$EDID_BIN" \
     NVIDIA_MODE_POLICY="$NVIDIA_MODE_POLICY" \
     WINDOWS_INF_DIR="${MOUNT}/Windows/INF" \
@@ -795,7 +843,7 @@ for cs in csets:
                           f'({len(edid)}B / {len(edid_blocks)} blocks)')
 
     # 5b) NVIDIA 的生产 INF 会用 NV_Modes 扩展 source modes，因此将其锁定为
-    # EDID 同一份 10 项。只沿固定 B/native PnP 的 Enum\\PCI Driver 关系改当前
+    # EDID 同一份 8 项 page-safe 合同。只沿固定 B/native PnP 的 Enum\\PCI Driver 关系改当前
     # software key；旧 A
     # consumer-ID Enum 历史明确跳过。当前目标的未知驱动值仍失败关闭，绝不
     # 全扫 Class、删除 NV_Modes 或改 NV_R&T。
@@ -831,7 +879,7 @@ for cs in csets:
             raise SystemExit(f'{label}: NV_Modes 最终列表不完整')
         action = '写入' if changed else '已符合'
         print(f'  {label}: NV_Modes {action} {len(FHD_VISIBLE_MODES)} 个 '
-              'EDID 对齐的 FHD/1K PC 模式')
+              'R535 page-safe、EDID 对齐的 FHD/1K PC 模式')
 
     # 5c) 清 GraphicsDrivers\Configuration / Connectivity 子键
     for sub in ('Configuration', 'Connectivity', 'ScaleFactors', 'MonitorDataStore'):
@@ -850,21 +898,38 @@ print(f'[disp-cache] EDID 替换 {edid_writes} 处, '
       f'模式配置删 {cfg_deletes} 子键')
 current_stats = control_set_stats[current_name.lower()]
 if current_stats['edid'] == 0:
+    if current_stats['nvidia'] == 0:
+        print(f'[disp-cache] FIRST-DRIVER: {current_name} 同时没有缓存 EDID 和已绑定 '
+              'nvlddmkm；必须使用隔离 NVIDIA console 的 driver-install 模式')
+        raise SystemExit(13)
     print(f'[disp-cache] WAIT: {current_name} 没找到缓存 EDID；'
-          'guest 需要先正常枚举一次显示器')
+          '已认证生产 NVIDIA 驱动，guest 需要先正常枚举一次显示器')
     raise SystemExit(10)
 if current_stats['override'] != current_stats['edid']:
     raise SystemExit(
         f'{current_name} EDID_OVERRIDE 写入数 '
         f"{current_stats['override']} != EDID 命中数 {current_stats['edid']}")
 if current_stats['nvidia'] == 0:
-    print(f'[disp-cache] WAIT: {current_name} 没找到已绑定 nvlddmkm 的 NVIDIA 显示设备；'
-          'guest 需要先完成生产驱动安装并正常关机')
-    raise SystemExit(10)
+    # A freshly installed Windows image has a real monitor cache before the
+    # NVIDIA software key exists.  Committing the reviewed EDID and deleting
+    # stale GraphicsDrivers caches here closes the first-driver-install gap;
+    # NV_Modes remains deliberately pending until a signed GRID target can be
+    # authenticated after a full shutdown.
+    h.commit(None)
+    del h
+    print('[disp-cache] hivex pre-driver commit 完成：安全 EDID/缓存已落盘，NV_Modes 待驱动安装后认证')
+    raise SystemExit(12)
 h.commit(None)
 del h
-print('[disp-cache] hivex commit 完成')
+print('[disp-cache] hivex full commit 完成')
 PY
+monitor_registry_rc=$?
+set -e
+case "$monitor_registry_rc" in
+    0)  MONITOR_COMMIT_STATE=full ;;
+    12) MONITOR_COMMIT_STATE=predriver ;;
+    *)  exit "$monitor_registry_rc" ;;
+esac
 
 # ---- 6) hivex commit 后只读验证 ----
 # hivex owns the transaction.  Do not conceal an incomplete commit by syncing
@@ -890,8 +955,16 @@ if [[ -n "$MARKER" ]]; then
     [[ -n "$MARKER_VALUE" ]] || die "--marker 需要同时指定 --marker-value"
     mkdir -p "$(dirname "$MARKER")"
     marker_tmp="${MARKER}.tmp.$$"
-    printf '%s\n' "$MARKER_VALUE" >"$marker_tmp"
+    if [[ "$MONITOR_COMMIT_STATE" == predriver ]]; then
+        printf 'g11-r535-predriver-v1:%s\n' "$MARKER_VALUE" >"$marker_tmp"
+    else
+        printf '%s\n' "$MARKER_VALUE" >"$marker_tmp"
+    fi
     chmod 0644 "$marker_tmp"
     mv -f -- "$marker_tmp" "$MARKER"
+fi
+if [[ "$MONITOR_COMMIT_STATE" == predriver ]]; then
+    log "PRE-DRIVER：已提交 ${MONITOR_DISPLAY_NAME} 的安全 EDID/EDID_OVERRIDE 并清理模式缓存；生产 NV_Modes 将在驱动安装后完整关机时认证写入。"
+    exit 12
 fi
 log "完成 Windows 离线 EDID/EDID_OVERRIDE/模式缓存：${MONITOR_DISPLAY_NAME}；此 host 命令不直接修改 live PnP 名称。"

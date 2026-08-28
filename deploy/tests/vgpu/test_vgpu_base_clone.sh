@@ -31,13 +31,23 @@ cleanup() {
 trap cleanup EXIT
 
 HARNESS="$TMP_DIR/harness"
-mkdir -p "$HARNESS/deploy/lib" "$HARNESS/deploy/scripts" "$HARNESS/bin"
+mkdir -p "$HARNESS/deploy/lib" "$HARNESS/deploy/scripts" \
+    "$HARNESS/deploy/guest/guest-lite" "$HARNESS/deploy/autounattend" \
+    "$HARNESS/bin"
 cp -- "$CLONE_SOURCE" "$HARNESS/deploy/scripts/clone-from-base.sh"
 cp -- "$REPO_ROOT/deploy/lib/vm-storage.sh" "$HARNESS/deploy/lib/vm-storage.sh"
 cp -- "$REPO_ROOT/deploy/lib/vgpu-profiles.sh" \
     "$HARNESS/deploy/lib/vgpu-profiles.sh"
 cp -- "$REPO_ROOT/deploy/lib/gpuz-assets.sh" \
     "$HARNESS/deploy/lib/gpuz-assets.sh"
+cp -- "$REPO_ROOT/deploy/guest/finalize-g11-clone.ps1" \
+    "$HARNESS/deploy/guest/finalize-g11-clone.ps1"
+cp -- "$REPO_ROOT/deploy/guest/Retry-Clone-Initialization.cmd" \
+    "$HARNESS/deploy/guest/Retry-Clone-Initialization.cmd"
+cp -- "$REPO_ROOT/deploy/guest/guest-lite/clone-manifest.json" \
+    "$HARNESS/deploy/guest/guest-lite/clone-manifest.json"
+cp -- "$REPO_ROOT/deploy/autounattend/g11-sysprep-clone.xml" \
+    "$HARNESS/deploy/autounattend/g11-sysprep-clone.xml"
 chmod +x "$HARNESS/deploy/scripts/clone-from-base.sh"
 
 # jq wrapper gives the lock test an observable marker after sidecar parsing.
@@ -296,12 +306,21 @@ write_attestation() {
 }
 
 write_private_attestation() {
-    local bytes device inode mtime ctime
+    local bytes device inode mtime ctime finalizer_sha retry_sha sysprep_sha
     bytes=$(stat -c %s -- "$BASE")
     device=$(stat -c %D -- "$BASE")
     inode=$(stat -c %i -- "$BASE")
     mtime=$(stat -c %y -- "$BASE")
     ctime=$(stat -c %z -- "$BASE")
+    finalizer_sha=$(sha256sum \
+        "$HARNESS/deploy/guest/finalize-g11-clone.ps1" | \
+        awk '{print toupper($1)}')
+    retry_sha=$(sha256sum \
+        "$HARNESS/deploy/guest/Retry-Clone-Initialization.cmd" | \
+        awk '{print toupper($1)}')
+    sysprep_sha=$(sha256sum \
+        "$HARNESS/deploy/autounattend/g11-sysprep-clone.xml" | \
+        awk '{print toupper($1)}')
     rm -f -- "$ATTESTATION"
     "$REAL_JQ" -n \
         --arg basePath "$BASE" \
@@ -310,7 +329,10 @@ write_private_attestation() {
         --arg baseInode "$inode" \
         --arg baseMtimeNs "$mtime" \
         --arg baseCtimeNs "$ctime" \
-        --arg catalogSha256 "$CATALOG_SHA256" '
+        --arg catalogSha256 "$CATALOG_SHA256" \
+        --arg finalizerSha256 "$finalizer_sha" \
+        --arg retrySha256 "$retry_sha" \
+        --arg sysprepSha256 "$sysprep_sha" '
         {
             schemaVersion: 7,
             bindingMode: "portable-auto",
@@ -325,11 +347,11 @@ write_private_attestation() {
             portableSha256: ("A" * 64),
             portableBytes: 1048576,
             firstBootScriptGuestPath: "C:\\ProgramData\\VMate\\G11\\Finalize-Clone.ps1",
-            firstBootScriptSha256: ("B" * 64),
+            firstBootScriptSha256: $finalizerSha256,
             retryGuestPath: "C:\\ProgramData\\VMate\\G11\\Retry-Clone-Initialization.cmd",
-            retrySha256: ("C" * 64),
+            retrySha256: $retrySha256,
             sysprepAnswerGuestPath: "C:\\Windows\\Panther\\unattend.xml",
-            sysprepAnswerSha256: ("D" * 64),
+            sysprepAnswerSha256: $sysprepSha256,
             windowsGeneralized: true,
             oobeMode: "unattended-auto-finalize",
             licenseDelivery: "embedded-private-shared-token",
@@ -589,6 +611,23 @@ fi
 grep -Fq 'schema-6 base lacks automatic system NVAPI projection' \
     "$TMP_DIR/private-old.err" ||
     fail "obsolete private base refusal did not explain the required rebuild"
+
+write_private_attestation
+"$REAL_JQ" '.firstBootScriptSha256 = ("A" * 64)' \
+    "$ATTESTATION" >"$ATTESTATION.stale"
+mv -f -- "$ATTESTATION.stale" "$ATTESTATION"
+chmod 0400 "$ATTESTATION"
+if run_clone 832 >"$TMP_DIR/private-stale-payload.out" \
+        2>"$TMP_DIR/private-stale-payload.err"; then
+    fail "private clone accepted an obsolete finalizer payload"
+fi
+grep -Fq 'refresh-g11-private-base.sh' \
+    "$TMP_DIR/private-stale-payload.err" ||
+    fail "obsolete private payload refusal omitted the one-command refresh"
+[[ ! -e "$VM_INSTANCES_DIR/832/vm.conf" &&
+   ! -e "$VM_INSTANCES_DIR/832/disk.qcow2" ]] ||
+    fail "obsolete private payload created VM state before being rejected"
+
 write_private_attestation
 before_monitor=$(grep -c '^monitor-sync|' "$TRACE" || true)
 run_clone 834 --gpu-profile gtx750_asus_1gb --start >"$TMP_DIR/private.out"

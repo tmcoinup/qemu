@@ -153,7 +153,84 @@ fi
 [[ -f "$PORTABLE_RESULT" && ! -L "$PORTABLE_RESULT" ]] ||
     die "licensed VgpuPortable final result is missing"
 
-jq -e \
+describe_guest_marker_mismatch() {
+    echo "[g11-clone-verify] guest marker diagnostics:" >&2
+    jq -r \
+        --argjson vmId "$VM_ID" \
+        --arg uuid "$EXPECTED_UUID" \
+        --arg computerName "$EXPECTED_COMPUTER_NAME" \
+        --arg profile "$EXPECTED_PROFILE" \
+        --arg monitorProfile "$EXPECTED_MONITOR_PROFILE" '
+        def shown:
+            if type == "number" or type == "boolean" or type == "null" then
+                tostring
+            else
+                (tostring | .[0:80] | @json)
+            end;
+        def lower_string: if type == "string" then ascii_downcase else "" end;
+        def upper_string: if type == "string" then ascii_upcase else "" end;
+        "  actual schemaVersion=\(.schemaVersion | shown) guestLite.profileVersion=\(.guestLite.profileVersion | shown)",
+        ([
+            (if ((keys | sort) == [
+                "completedUtc", "computerName", "driverVersion", "gpuProfile",
+                "guestLite", "licenseStatus", "machineGuid", "machineSid",
+                "nointegritychecks", "observedVmUuid", "pnpDeviceId",
+                "schemaVersion", "state", "systemNvapiProjection", "testsigning"
+            ] and .schemaVersion == 4 and
+            .state == "ready-for-host-initialization") then empty
+             else "top-level-schema-or-fields" end),
+            (if ((.observedVmUuid | lower_string) == $uuid and
+                 .gpuProfile == $profile and .computerName == $computerName)
+             then empty else "vm-config-or-windows-identity" end),
+            (if (((.pnpDeviceId | upper_string) |
+                    startswith("PCI\\VEN_10DE&DEV_1E30")) and
+                 .driverVersion == "31.0.15.3833" and
+                 .licenseStatus == "Licensed" and
+                 .testsigning == false and .nointegritychecks == false)
+             then empty else "driver-license-or-code-integrity" end),
+            (if ((.guestLite | type) == "object" and
+                 .guestLite.state == "validated" and
+                 .guestLite.profileVersion == "2.6.4")
+             then empty else "guest-lite-schema-or-version" end),
+            (if (.guestLite.firewallService == "MpsSvc" and
+                 .guestLite.firewallStartMode == "Auto" and
+                 .guestLite.firewallState == "Running" and
+                 .guestLite.firewallProcessId > 0 and
+                 .guestLite.baseFilteringEngine == "preserved-running" and
+                 .guestLite.enforcementLastResult == 0)
+             then empty else "guest-lite-system-enforcement" end),
+            (if (.guestLite.audio == "muted" and
+                 .guestLite.notifications == "disabled" and
+                 .guestLite.taskbarSearch == "hidden" and
+                 .guestLite.gameMode == "enabled" and
+                 .guestLite.gameDvr == "disabled" and
+                 .guestLite.nvidiaPowerMode == "prefer-maximum-performance" and
+                 .guestLite.dnfPriority == "high-on-launch" and
+                 .guestLite.temporaryCleanup == "stale-files-over-24h-completed" and
+                 .guestLite.backgroundProcesses == "reviewed-stopped" and
+                 .guestLite.defaultInputMethod == "0409:00000409" and
+                 .guestLite.inputOrder == "en-US/US,zh-CN/Microsoft-Pinyin")
+             then empty else "guest-lite-policy-receipt" end),
+            (if ((.systemNvapiProjection | type) == "object" and
+                 .systemNvapiProjection.state == "validated" and
+                 .systemNvapiProjection.vmId == $vmId and
+                 (.systemNvapiProjection.vmUuid | lower_string) == $uuid and
+                 .systemNvapiProjection.gpuProfile == $profile and
+                 .systemNvapiProjection.monitorProfile == $monitorProfile and
+                 .systemNvapiProjection.driverSigned == true and
+                 .systemNvapiProjection.testsigning == false and
+                 .systemNvapiProjection.nointegritychecks == false)
+             then empty else "system-nvapi-projection" end)
+        ] | "  failed checks: " + (if length == 0 then "strict-shape/detail"
+                                    else join(", ") end))
+    ' "$GUEST_MARKER" 2>/dev/null |
+        head -c 4096 |
+        LC_ALL=C tr -cd '\11\12\15\40-\176\200-\377' >&2 ||
+        echo "  marker is not valid JSON" >&2
+    echo >&2
+}
+
+if ! jq -e \
     --argjson vmId "$VM_ID" \
     --arg uuid "$EXPECTED_UUID" \
     --arg computerName "$EXPECTED_COMPUTER_NAME" \
@@ -186,7 +263,7 @@ jq -e \
         "userSid"
     ] and
     .guestLite.state == "validated" and
-    .guestLite.profileVersion == "2.6.0" and
+    .guestLite.profileVersion == "2.6.4" and
     .guestLite.userSid == (.machineSid + "-500") and
     .guestLite.rollbackBaseline == "C:\\ProgramData\\G11GuestLite\\state.json" and
     .guestLite.enforcementTask == "\\G11GuestLite-EnforceProfile" and
@@ -194,9 +271,9 @@ jq -e \
     (.guestLite.enforcementLastRun | type) == "string" and
     (.guestLite.enforcementLastRun | length) > 0 and
     .guestLite.firewallService == "MpsSvc" and
-    .guestLite.firewallStartMode == "Disabled" and
-    .guestLite.firewallState == "Stopped" and
-    .guestLite.firewallProcessId == 0 and
+    .guestLite.firewallStartMode == "Auto" and
+    .guestLite.firewallState == "Running" and
+    .guestLite.firewallProcessId > 0 and
     .guestLite.baseFilteringEngine == "preserved-running" and
     .guestLite.appearance == "background-and-font-preserved" and
     .guestLite.audio == "muted" and
@@ -225,7 +302,10 @@ jq -e \
     .systemNvapiProjection.driverSigned == true and
     .systemNvapiProjection.testsigning == false and
     .systemNvapiProjection.nointegritychecks == false
-' "$GUEST_MARKER" >/dev/null || die "guest initialization marker does not match vm.conf"
+' "$GUEST_MARKER" >/dev/null; then
+    describe_guest_marker_mismatch
+    die "guest initialization marker does not match the current vm.conf/clone contract"
+fi
 
 jq -e --arg uuid "$EXPECTED_UUID" --arg profile "$EXPECTED_PROFILE" '
     .receiptType == "vgpu-identity-portable-final" and
@@ -356,4 +436,4 @@ COMPLETED=1
 trap - EXIT HUP INT TERM
 rmdir -- "$MOUNT_DIR"
 printf 'G11_SAFE_IDENTITY_JSON=%s\n' "$SAFE_IDENTITY_JSON"
-echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / Guest Lite 2.6.0 + Game Mode + Game DVR off + NVIDIA maximum performance + DNF High-on-launch + stale temp cleanup + reviewed background processes stopped + audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc stopped / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"
+echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / Guest Lite 2.6.4 fast path + Game Mode + Game DVR off + NVIDIA maximum performance + DNF High-on-launch + stale Temp cleaned + reviewed background processes stopped + audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc Automatic/Running / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"

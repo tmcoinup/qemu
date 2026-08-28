@@ -7,6 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 XML="$ROOT/deploy/autounattend/g11-sysprep-clone.xml"
 FINALIZER="$ROOT/deploy/guest/finalize-g11-clone.ps1"
+RETRY="$ROOT/deploy/guest/Retry-Clone-Initialization.cmd"
+SEAL="$ROOT/deploy/guest/Seal-G11-Template.cmd"
+SYSPREP_DIAGNOSTIC="$ROOT/deploy/guest/Collect-Sysprep-Diagnostics.ps1"
+TEMPLATE_READINESS="$ROOT/deploy/guest/Assert-G11-Template-Ready.ps1"
+TEMPLATE_RESET="$ROOT/deploy/guest/Reset-G11-Template-State.ps1"
+GUEST_PERFORMANCE="$ROOT/deploy/guest/guest-performance/Optimize-Guest.ps1"
 GUEST_LITE_ROOT="$ROOT/deploy/guest/guest-lite"
 GUEST_LITE_MANIFEST="$GUEST_LITE_ROOT/clone-manifest.json"
 INSTALLER="$ROOT/deploy/install-vgpu-portable-to-base.sh"
@@ -15,6 +21,8 @@ CREATE_DISK="$ROOT/deploy/scripts/create-disk.sh"
 EXPORT="$ROOT/deploy/scripts/export-vgpu-base.sh"
 IMPORT="$ROOT/deploy/scripts/import-vgpu-base.sh"
 INITIAL="$ROOT/deploy/scripts/initialize-clone.sh"
+REPAIR="$ROOT/deploy/scripts/repair-clone-init.sh"
+REFRESH_BASE="$ROOT/deploy/scripts/refresh-g11-private-base.sh"
 VERIFY="$ROOT/deploy/host/verify-g11-clone-ready.sh"
 BUILD_BASE="$ROOT/deploy/build-g11-private-base.sh"
 KIT="$ROOT/deploy/package-g11-sysprep-kit.sh"
@@ -31,14 +39,17 @@ GUEST_LITE_ASSETS=(
 )
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-for file in "$XML" "$FINALIZER" "$INSTALLER" "$CLONE" "$CREATE_DISK" "$EXPORT" \
-        "$IMPORT" "$INITIAL" "$VERIFY" "$BUILD_BASE" "$KIT" "$START" \
+for file in "$XML" "$FINALIZER" "$RETRY" "$SEAL" "$SYSPREP_DIAGNOSTIC" \
+        "$TEMPLATE_READINESS" "$TEMPLATE_RESET" "$GUEST_PERFORMANCE" \
+        "$INSTALLER" "$CLONE" "$CREATE_DISK" "$EXPORT" \
+        "$IMPORT" "$INITIAL" "$REPAIR" "$REFRESH_BASE" "$VERIFY" \
+        "$BUILD_BASE" "$KIT" "$START" \
         "$PACKAGER" "$COORDINATOR" "$INIT_MEDIA_WATCHER" \
         "$GUEST_LITE_MANIFEST" "${GUEST_LITE_ASSETS[@]}"; do
     [[ -s "$file" && ! -L "$file" ]] || fail "missing/unsafe asset: $file"
 done
-bash -n "$INSTALLER" "$CLONE" "$CREATE_DISK" "$EXPORT" "$IMPORT" "$INITIAL" "$VERIFY" \
-    "$BUILD_BASE" "$KIT" "$START" "$PACKAGER"
+bash -n "$INSTALLER" "$CLONE" "$CREATE_DISK" "$EXPORT" "$IMPORT" "$INITIAL" \
+    "$REPAIR" "$REFRESH_BASE" "$VERIFY" "$BUILD_BASE" "$KIT" "$START" "$PACKAGER"
 
 python3 - "$XML" <<'PY'
 import sys
@@ -88,7 +99,7 @@ PY
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.0" and
+    .schemaVersion == 1 and .profileVersion == "2.6.4" and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
         "G11-Guest-Lite.ps1", "README.txt"
@@ -112,13 +123,20 @@ grep -Fq 'C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe' "$INSTALLER" ||
 grep -Fq 'Users/Public/Desktop/VgpuPortable.exe' "$INSTALLER" ||
     fail "private base does not remove a stale generic portable EXE"
 grep -Fq 'QemuGpuZProfile/last-result.json' "$INSTALLER" ||
-    fail "private base does not clear a stale portable result"
+    fail "private base does not reject an active portable result"
 grep -Fq 'GUEST_LITE_STAGE="$WORK_ROOT/GuestLite"' "$INSTALLER" ||
     fail "private base does not stage Guest Lite"
 grep -Fq 'verify_guest_lite_dir "$GUEST_LITE_DEST"' "$INSTALLER" ||
     fail "private base does not verify the published Guest Lite payload"
-grep -Fq 'rm -rf -- "$MOUNT_DIR/ProgramData/G11GuestLite"' "$INSTALLER" ||
-    fail "private base can leak a clone-bound Guest Lite rollback baseline"
+grep -Fq 'generalized template retained active clone state' "$INSTALLER" ||
+    fail "private base does not reject an active clone rollback baseline"
+for clone_state_root in QemuGpuZProfile G11GuestPerformance G11GuestLite; do
+    grep -Fq "\"\$MOUNT_DIR/ProgramData/$clone_state_root\"" "$INSTALLER" ||
+        fail "private base can leak clone state: $clone_state_root"
+done
+grep -Fq 'generalized template retained per-VM system NVAPI projection state' \
+    "$INSTALLER" ||
+    fail "private base does not reject per-VM system NVAPI projection state"
 grep -Fq 'dls.gvmates.com' "$FINALIZER" || fail "fixed DLS host missing"
 grep -Fq "'Licensed'" "$FINALIZER" || fail "Licensed validation missing"
 grep -Fq "'31.0.15.3833'" "$FINALIZER" || fail "GRID 538.33 validation missing"
@@ -147,6 +165,53 @@ grep -Fq "'/no-launch'" "$FINALIZER" || fail "single noninteractive EXE call mis
     fail "licensed VgpuPortable must have exactly one invocation site"
 grep -Fq 'Register-CloneContinuationTask' "$FINALIZER" ||
     fail "post-reboot clone continuation is missing"
+grep -Fq "[ValidateSet('Auto', 'Complete', 'Notice')]" "$FINALIZER" ||
+    fail "interactive post-reboot notice phase is missing"
+grep -Fq "\$ContinuationNoticeTaskName = 'VMate-G11-Clone-Notice'" \
+    "$FINALIZER" || fail "post-reboot notice task has no stable identity"
+notice_task=$(sed -n \
+    '/^function Register-CloneContinuationNoticeTask {/,/^function Register-CloneContinuationTask {/p' \
+    "$FINALIZER")
+grep -Fq 'New-ScheduledTaskTrigger -AtLogOn -User $UserSid' \
+    <<<"$notice_task" || fail "post-reboot notice is not tied to the clone user logon"
+grep -Fq -- '-LogonType Interactive -RunLevel Limited' <<<"$notice_task" ||
+    fail "post-reboot notice cannot enter the interactive user session"
+grep -Fq 'Resolve-ScheduledTaskUserSid' "$FINALIZER" ||
+    fail "post-reboot notice does not normalize Task Scheduler identities to SID"
+if grep -Fq '[string]$task.Principal.UserId -cne $UserSid' <<<"$notice_task"; then
+    fail "post-reboot notice still compares equivalent SID/account strings directly"
+fi
+grep -Fq -- '-Phase Notice' <<<"$notice_task" ||
+    fail "post-reboot notice task does not launch the read-only notice phase"
+grep -Fq '[System.Windows.Forms.ProgressBarStyle]::Marquee' "$FINALIZER" ||
+    fail "post-reboot notice lacks an indeterminate progress indicator"
+grep -Fq '$form.ControlBox = $false' "$FINALIZER" ||
+    fail "running clone notice can be mistaken for a dismissible completion message"
+grep -Fq 'Test-Path -LiteralPath $ErrorFile -PathType Leaf' "$FINALIZER" ||
+    fail "post-reboot notice cannot surface a continuation failure"
+grep -Fq 'Test-Path -LiteralPath $Marker -PathType Leaf' "$FINALIZER" ||
+    fail "post-reboot notice cannot distinguish actual completion"
+python3 - "$FINALIZER" <<'PY'
+import base64
+import re
+import sys
+
+source = open(sys.argv[1], encoding="ascii").read()
+decoded = "\n".join(
+    base64.b64decode(value).decode("utf-8")
+    for value in re.findall(
+        r"ConvertFrom-Utf8Base64\s+(?:`\s*)?'([A-Za-z0-9+/]{8,}={0,2})'",
+        source,
+    )
+)
+for required in (
+    "这是第一次克隆后的自动重启。进入桌面不代表初始化已经完成。",
+    "请勿关机、重启或注销。完成后虚拟机会自动关机。",
+    "初始化失败，请勿强制关机。",
+    "Retry-Clone-Initialization.cmd",
+):
+    assert required in decoded, f"post-reboot notice omits: {required}"
+PY
 grep -Fq -- '-Action Install' "$FINALIZER" ||
     fail "system NVAPI install stage is missing"
 grep -Fq 'Read-And-ValidateProjectionReceipt' "$FINALIZER" ||
@@ -159,8 +224,8 @@ grep -Fq -- '-Mode CloneApply' "$FINALIZER" ||
     fail "clone finalizer does not apply Guest Lite unattended"
 grep -Fq 'foreach ($candidate in @($standardError, $standardOutput))' "$FINALIZER" ||
     fail "clone finalizer does not surface redirected Guest Lite stdout failures"
-grep -Fq 'Read-And-ValidateGuestLiteState -RequireStopped' "$FINALIZER" ||
-    fail "clone finalizer does not require the firewall to be stopped after reboot"
+grep -Fq 'Read-And-ValidateGuestLiteState -RequireFirewallReady' "$FINALIZER" ||
+    fail "clone finalizer does not require MpsSvc after reboot"
 guest_lite_state_reader=$(sed -n \
     '/^function Read-And-ValidateGuestLiteState {/,/^function Invoke-And-WaitGuestLiteEnforcement {/p' \
     "$FINALIZER")
@@ -211,12 +276,36 @@ grep -Fq 'interactive Auto retry safely' "$FINALIZER" ||
     fail "Auto retry does not document the baseline-preserving profile upgrade"
 grep -Fq -- '-RedirectStandardOutput $standardOutput' "$FINALIZER" ||
     fail "clone Guest Lite output is not redirected away from the rendered console"
+grep -Fq -- '-RedirectStandardOutput $portableOutput' "$FINALIZER" ||
+    fail "clone portable stdout is not persisted for retry diagnosis"
+grep -Fq -- '-RedirectStandardError $portableError' "$FINALIZER" ||
+    fail "clone portable stderr is not persisted for retry diagnosis"
+grep -Fq -- "-Tail 24 -ErrorAction SilentlyContinue" "$FINALIZER" ||
+    fail "clone portable failure does not include a bounded output tail"
+grep -Fq "Clone log root must be a regular, non-reparse directory" "$FINALIZER" ||
+    fail "clone portable log directory is not protected against reparse paths"
 grep -Fq 'Invoke-And-WaitGuestLiteEnforcement' "$FINALIZER" ||
     fail "clone finalizer does not require a measured SYSTEM enforcement run"
+enforcement_waiter=$(sed -n \
+    '/^function Invoke-And-WaitGuestLiteEnforcement {/,/^function Invoke-GuestLiteCloneProfile {/p' \
+    "$FINALIZER")
+grep -Fq '$info.LastRunTime -gt $lastBootTime' <<<"$enforcement_waiter" ||
+    fail "clone finalizer cannot reuse a clean enforcement run from this boot"
 grep -Fq '$info.LastRunTime -gt $previousRunTime' "$FINALIZER" ||
     fail "Guest Lite task completion is still coupled to a wall-clock tolerance"
+[[ "$(grep -Fc 'Start-ScheduledTask -TaskPath $taskPath' <<<"$enforcement_waiter")" == 1 ]] ||
+    fail "clone finalizer has more than one fallback enforcement launch site"
+grep -Fq -- '-MinimumGeneratedTime $lastBootTime' <<<"$enforcement_waiter" ||
+    fail "clone finalizer accepts a stale pre-boot Guest Lite receipt"
+grep -Fq -- '-ExpectedUserSid ([string]$guestLiteState.UserSid)' "$FINALIZER" ||
+    fail "clone finalizer does not bind enforcement reuse to the saved user SID"
+grep -Fq 'Guest Lite enforcement receipt does not match this clone identity.' \
+    "$FINALIZER" ||
+    fail "clone finalizer does not bind enforcement reuse to clone identity"
 grep -Fq 'result=pass failures=0' "$FINALIZER" ||
     fail "clone finalizer does not validate the Guest Lite enforcement receipt"
+grep -Fq 'firewallService=automatic-running' "$FINALIZER" ||
+    fail "clone finalizer does not require a measured MpsSvc receipt"
 grep -Fq 'audio=default-render-muted' "$FINALIZER" ||
     fail "clone finalizer does not require a measured default-audio mute receipt"
 grep -Fq 'nvidiaPowerMode=prefer-maximum-performance' "$FINALIZER" ||
@@ -233,8 +322,12 @@ grep -Fq 'guestLite = [ordered]@{' "$FINALIZER" ||
     fail "clone-ready marker lacks Guest Lite evidence"
 grep -Fq '.schemaVersion == 4' "$VERIFY" ||
     fail "host verifier does not require the Guest Lite-aware marker schema"
-grep -Fq '.guestLite.firewallStartMode == "Disabled"' "$VERIFY" ||
-    fail "host verifier does not enforce disabled firewall startup"
+grep -Fq '.guestLite.firewallStartMode == "Auto"' "$VERIFY" ||
+    fail "host verifier does not enforce Automatic MpsSvc startup"
+grep -Fq '.guestLite.firewallState == "Running"' "$VERIFY" ||
+    fail "host verifier does not enforce running MpsSvc state"
+grep -Fq '.guestLite.firewallProcessId > 0' "$VERIFY" ||
+    fail "host verifier does not require a live MpsSvc process"
 grep -Fq '.guestLite.baseFilteringEngine == "preserved-running"' "$VERIFY" ||
     fail "host verifier does not enforce BFE preservation"
 grep -Fq '.guestLite.enforcementLastResult == 0' "$VERIFY" ||
@@ -268,11 +361,17 @@ if grep -Fq 'guestLiteProfile:' <<<"$safe_identity_block"; then
 fi
 if grep -Eiq 'bcdedit([.]exe)?[[:space:]]+/(set|deletevalue)|testsigning[[:space:]]+(on|yes|true|1)|nointegritychecks[[:space:]]+(on|yes|true|1)' \
         "$XML" "$FINALIZER" "$INSTALLER" "$CLONE" "$EXPORT" "$IMPORT" \
-        "$INITIAL" "$VERIFY" "$PACKAGER" "$COORDINATOR"; then
+        "$INITIAL" "$REPAIR" "$REFRESH_BASE" "$VERIFY" "$PACKAGER" \
+        "$SYSPREP_DIAGNOSTIC" "$TEMPLATE_READINESS" "$TEMPLATE_RESET" \
+        "$COORDINATOR"; then
     fail "forbidden BCD/code-integrity mutation found"
 fi
 
 grep -Fq '.g11-init-required' "$CLONE" || fail "clone initialization gate missing"
+grep -Fq 'ATTESTED_FINALIZER_SHA256' "$CLONE" ||
+    fail "private clone does not bind the base to the current finalizer"
+grep -Fq 'refresh-g11-private-base.sh' "$CLONE" ||
+    fail "obsolete private base refusal lacks a packaged remediation"
 grep -Fq 'package-system-nvapi-projection.sh' "$CLONE" ||
     fail "private clone does not build its per-VM system NVAPI package"
 grep -Fq 'G11_INIT_REQUIRED="$SELECTED_VM_DIR/.g11-init-required"' "$START" ||
@@ -326,6 +425,8 @@ grep -Fq 'SEAL_ARGS+=(--progress)' "$BUILD_BASE" ||
     fail "G-11 private base compression progress is not enabled"
 grep -Fq '"$SOURCE_VM_ID" "$BASE_NAME" --yes --single-image' "$BUILD_BASE" ||
     fail "one-command builder does not request V-11-style single-image sealing"
+grep -Fq 'chmod 0600 -- "$SEALED_BASE"' "$BUILD_BASE" ||
+    fail "private base is not made owner-only before credential injection"
 grep -Fq -- '--single-image --yes' "$BUILD_BASE" ||
     fail "one-command builder retains the portable installer rollback archive"
 grep -Fq 'export-vgpu-base.sh" --in-place' "$BUILD_BASE" ||
@@ -355,6 +456,31 @@ grep -Fq 'guest initialization failure:' "$VERIFY" ||
     fail "host verifier does not surface the persisted guest failure"
 grep -Fq 'tr -cd' "$VERIFY" ||
     fail "host verifier prints untrusted guest errors without control-byte filtering"
+grep -Fq 'guest marker diagnostics:' "$VERIFY" ||
+    fail "host verifier does not explain marker contract failures"
+grep -Fq 'guest-lite-schema-or-version' "$VERIFY" ||
+    fail "host verifier diagnostics do not identify obsolete Guest Lite markers"
+grep -Fq 'nbd_connect NBD "$DISK" read-write' "$REPAIR" ||
+    fail "repair-init does not refresh the stopped guest payload"
+grep -Fq 'Finalize-Clone.ps1' "$REPAIR" ||
+    fail "repair-init does not publish the current clone finalizer"
+grep -Fq 'verify_guest_lite_dir "$GUEST_LITE_DEST"' "$REPAIR" ||
+    fail "repair-init does not verify Guest Lite after offline publication"
+grep -Fq 'clone-initialization.json' "$REPAIR" ||
+    fail "repair-init does not clear an obsolete guest completion marker"
+grep -Fq 'ntfs-3g.probe --readwrite' "$REPAIR" ||
+    fail "repair-init can write a dirty or hibernated Windows volume"
+if grep -Fq 'QemuGpuZProfile/last-result.json' "$REPAIR"; then
+    fail "repair-init removes the reusable licensed VgpuPortable result"
+fi
+if grep -Eiq 'pnputil|dism([.]exe)?[[:space:]].*/add-driver|DriverStore.*(rm|remove)|[.]sys([^A-Za-z]|$)' \
+        "$REPAIR"; then
+    fail "repair-init contains a kernel-driver installation/removal path"
+fi
+grep -Fq -- '--site-private' "$REFRESH_BASE" ||
+    fail "private base refresh does not use the reviewed private installer"
+grep -Fq 'export-vgpu-base.sh" --in-place' "$REFRESH_BASE" ||
+    fail "private base refresh does not update the one-image transfer manifest"
 grep -Fq 'Windows OS identity duplicates another initialized G-11 VM' "$INITIAL" ||
     fail "host Windows OS identity uniqueness gate missing"
 grep -Fq 'sync-monitor-profile.sh" "$VM_ID" --force' "$INITIAL" ||
@@ -381,6 +507,127 @@ trap 'rm -rf -- "$KIT_TMP"' EXIT
 "$KIT" "$KIT_TMP/G11SysprepKit" --replace >/dev/null
 cmp -- "$XML" "$KIT_TMP/G11SysprepKit/g11-sysprep-clone.xml" ||
     fail "refreshed Sysprep kit does not contain the current answer file"
+cmp -- "$FINALIZER" "$KIT_TMP/G11SysprepKit/Payload/Finalize-Clone.ps1" ||
+    fail "complete Sysprep kit does not contain the current finalizer"
+cmp -- "$GUEST_LITE_MANIFEST" \
+    "$KIT_TMP/G11SysprepKit/Payload/GuestLite/clone-manifest.json" ||
+    fail "complete Sysprep kit does not contain the pinned Guest Lite manifest"
+[[ -s "$KIT_TMP/G11SysprepKit/Standalone-GuestLite/G11GuestLite.exe" ]] ||
+    fail "complete Sysprep kit does not contain the compiled Guest Lite EXE"
+expected_kit_files=$(cat <<'EOF'
+Assert-G11-Template-Ready.ps1
+Collect-Sysprep-Diagnostics.ps1
+G11-Sysprep-README.txt
+Payload/Finalize-Clone.ps1
+Payload/GuestLite/01-OneClick-Apply.cmd
+Payload/GuestLite/02-Audit.cmd
+Payload/GuestLite/03-Rollback.cmd
+Payload/GuestLite/G11-Guest-Lite.ps1
+Payload/GuestLite/README.txt
+Payload/GuestLite/clone-manifest.json
+Payload/Retry-Clone-Initialization.cmd
+Reset-G11-Template-State.ps1
+Seal-G11-Template.cmd
+Standalone-GuestLite/G11GuestLite.exe
+Template-Reset/GuestLite/G11-Guest-Lite.ps1
+Template-Reset/GuestPerformance/Optimize-Guest.ps1
+g11-sysprep-clone.xml
+EOF
+)
+actual_kit_files=$(find "$KIT_TMP/G11SysprepKit" -type f -printf '%P\n' | LC_ALL=C sort)
+[[ "$actual_kit_files" == "$expected_kit_files" ]] ||
+    fail "complete Sysprep kit file set differs from the reviewed contract"
+grep -Fq 'set "PAYLOAD=%~dp0Payload"' "$SEAL" ||
+    fail "Seal entry point does not locate the collected public payload"
+grep -Fq 'move /y "%GUESTLITE_NEW%" "%DEST%\GuestLite"' "$SEAL" ||
+    fail "Seal entry point does not stage Guest Lite into ProgramData"
+grep -Fq 'Standalone-GuestLite\G11GuestLite.exe' "$SEAL" ||
+    fail "Seal entry point does not reject an incomplete compiled kit"
+grep -Fq 'G11SysprepKit cannot be stored in or below' "$SEAL" ||
+    fail "Seal entry point does not reject ProgramData source placement"
+grep -Fq 'Collect-Sysprep-Diagnostics.ps1' "$SEAL" ||
+    fail "Seal entry point does not collect Sysprep failure diagnostics"
+grep -Fq 'Get-MpComputerStatus' "$TEMPLATE_READINESS" ||
+    fail "template readiness gate does not query supported Defender status"
+grep -Fq "PSObject.Properties['IsTamperProtected']" "$TEMPLATE_READINESS" ||
+    fail "template readiness gate does not require explicit Tamper status"
+grep -Fq 'turn Tamper Protection OFF manually' "$TEMPLATE_READINESS" ||
+    fail "template readiness gate does not preserve the manual Windows Security boundary"
+grep -Fq 'Per-VM system NVAPI projection state' "$TEMPLATE_READINESS" ||
+    fail "template readiness gate can seal VM-bound system projection state"
+if grep -Eiq 'Set-MpPreference|Set-ItemProperty|New-ItemProperty|Remove-Item(Property)?|reg([.]exe)?[[:space:]]+(add|delete)|takeown|icacls' \
+        "$TEMPLATE_READINESS"; then
+    fail "read-only template readiness gate contains a security/state mutation"
+fi
+grep -Fq "Invoke-SavedRollbackIfPresent \$GuestLiteRoot" "$TEMPLATE_RESET" ||
+    fail "template reset does not roll back Guest Lite"
+grep -Fq "Invoke-SavedRollbackIfPresent \$PerformanceRoot" "$TEMPLATE_RESET" ||
+    fail "template reset does not roll back guest performance"
+grep -Fq 'contains a reparse point; refusing recursive removal' "$TEMPLATE_RESET" ||
+    fail "template reset recursively removes unchecked reparse paths"
+grep -Fq "'licensed portable clone result'" "$TEMPLATE_RESET" ||
+    fail "template reset does not remove portable clone output"
+grep -Fq 'Windows SID and MachineGuid were not edited' "$TEMPLATE_RESET" ||
+    fail "template reset does not document the Sysprep identity boundary"
+cmp -- "$GUEST_LITE_ROOT/G11-Guest-Lite.ps1" \
+    "$KIT_TMP/G11SysprepKit/Template-Reset/GuestLite/G11-Guest-Lite.ps1" ||
+    fail "Sysprep kit reset helper is not the reviewed Guest Lite script"
+cmp -- "$GUEST_PERFORMANCE" \
+    "$KIT_TMP/G11SysprepKit/Template-Reset/GuestPerformance/Optimize-Guest.ps1" ||
+    fail "Sysprep kit reset helper is not the reviewed performance script"
+grep -Fq '0x800F0975' "$SYSPREP_DIAGNOSTIC" ||
+    fail "Sysprep diagnostics do not identify the reserved-storage blocker"
+grep -Fq '0x80073cf2' "$SYSPREP_DIAGNOSTIC" ||
+    fail "Sysprep diagnostics do not identify Appx provisioning mismatch"
+if grep -Eiq 'Remove-AppxPackage|Remove-AppxProvisionedPackage|Set-ReservedStorageState|ReserveManager.*(Set|New-ItemProperty)|bcdedit' \
+        "$SYSPREP_DIAGNOSTIC"; then
+    fail "Sysprep diagnostic collector contains an automatic destructive repair"
+fi
+seal_sysprep_line=$(grep -n 'Sysprep.exe.* /generalize /oobe /shutdown ' "$SEAL" |
+    cut -d: -f1)
+seal_readiness_line=$(grep -n 'ExecutionPolicy Bypass -File "%READINESS%"' "$SEAL" |
+    cut -d: -f1)
+seal_reset_line=$(grep -n 'ExecutionPolicy Bypass -File "%RESET%"' "$SEAL" |
+    cut -d: -f1)
+seal_stage_line=$(grep -n '^set "GUESTLITE_NEW=' "$SEAL" | cut -d: -f1)
+seal_success_exit_line=$(grep -n '^exit /b 0$' "$SEAL" | cut -d: -f1)
+seal_stage_error_line=$(grep -n '^:stage_error$' "$SEAL" | cut -d: -f1)
+[[ "$seal_sysprep_line" =~ ^[0-9]+$ &&
+   "$seal_readiness_line" =~ ^[0-9]+$ &&
+   "$seal_reset_line" =~ ^[0-9]+$ &&
+   "$seal_stage_line" =~ ^[0-9]+$ &&
+   "$seal_success_exit_line" =~ ^[0-9]+$ &&
+   "$seal_stage_error_line" =~ ^[0-9]+$ &&
+   "$seal_readiness_line" -lt "$seal_reset_line" &&
+   "$seal_reset_line" -lt "$seal_stage_line" &&
+   "$seal_stage_line" -lt "$seal_sysprep_line" &&
+   "$seal_sysprep_line" -lt "$seal_success_exit_line" &&
+   "$seal_success_exit_line" -lt "$seal_stage_error_line" ]] ||
+    fail "Seal entry point can exit or enter its error label before Sysprep"
+
+mkdir "$KIT_TMP/LegacyKit"
+cp -- "$ROOT/deploy/guest/G11-Sysprep-README.txt" \
+    "$ROOT/deploy/guest/Seal-G11-Template.cmd" \
+    "$XML" "$KIT_TMP/LegacyKit/"
+"$KIT" "$KIT_TMP/LegacyKit" --replace >/dev/null
+[[ -s "$KIT_TMP/LegacyKit/Standalone-GuestLite/G11GuestLite.exe" ]] ||
+    fail "--replace did not safely upgrade a recognized legacy three-file kit"
+cp -a -- "$KIT_TMP/G11SysprepKit" "$KIT_TMP/PreviousCompleteKit"
+rm -rf -- "$KIT_TMP/PreviousCompleteKit/Template-Reset"
+rm -- "$KIT_TMP/PreviousCompleteKit/Assert-G11-Template-Ready.ps1" \
+    "$KIT_TMP/PreviousCompleteKit/Reset-G11-Template-State.ps1" \
+    "$KIT_TMP/PreviousCompleteKit/Collect-Sysprep-Diagnostics.ps1"
+"$KIT" "$KIT_TMP/PreviousCompleteKit" --replace >/dev/null
+[[ -s "$KIT_TMP/PreviousCompleteKit/Collect-Sysprep-Diagnostics.ps1" ]] ||
+    fail "--replace did not safely upgrade the previous complete kit"
+cp -a -- "$KIT_TMP/G11SysprepKit" "$KIT_TMP/DiagnosticCompleteKit"
+rm -rf -- "$KIT_TMP/DiagnosticCompleteKit/Template-Reset"
+rm -- "$KIT_TMP/DiagnosticCompleteKit/Assert-G11-Template-Ready.ps1" \
+    "$KIT_TMP/DiagnosticCompleteKit/Reset-G11-Template-State.ps1"
+"$KIT" "$KIT_TMP/DiagnosticCompleteKit" --replace >/dev/null
+[[ -s "$KIT_TMP/DiagnosticCompleteKit/Assert-G11-Template-Ready.ps1" &&
+   -s "$KIT_TMP/DiagnosticCompleteKit/Template-Reset/GuestPerformance/Optimize-Guest.ps1" ]] ||
+    fail "--replace did not safely upgrade the diagnostic complete kit"
 touch "$KIT_TMP/G11SysprepKit/operator-file.txt"
 if "$KIT" "$KIT_TMP/G11SysprepKit" --replace >/dev/null 2>&1; then
     fail "Sysprep kit replacement deleted an unknown operator file"

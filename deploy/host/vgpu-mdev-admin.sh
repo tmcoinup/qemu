@@ -276,19 +276,54 @@ mdev_remove() {
 }
 
 console_interval() {
-    local uuid=$1 interval=$2 version params
+    local uuid=$1 interval=$2 frl=${3:-} version params
     valid_uuid "$uuid" || die "invalid mdev UUID: $uuid"
     [[ "$interval" =~ ^(0|[1-9][0-9]{0,6})$ ]] || die "invalid console interval"
     ((interval == 0)) && return 0
     ((interval >= 5000 && interval <= 1000000)) ||
         die "R535 console interval must be 5000..1000000us"
+    # frame_rate_limiter 是布尔键：0 禁用 FRL，1 保持 profile 的 frlConfig。
+    # 省略该参数时不写这个键，vGPU 保持 vgpuConfig.xml 的默认值。
+    [[ -z "$frl" || "$frl" == 0 || "$frl" == 1 ]] ||
+        die "frame_rate_limiter must be 0 or 1"
     version=$(cat "$NVIDIA_VERSION_FILE" 2>/dev/null || true)
     [[ "$version" == 535.* ]] || die "console interval is validated only for NVIDIA R535"
     params="$MDEV_DEVICES_DIR/$uuid/nvidia/vgpu_params"
     [[ -L "$MDEV_DEVICES_DIR/$uuid" && -e "$params" ]] ||
         die "mdev console parameter node is missing"
-    printf 'intervaltime=%s,vgaintervaltime=%s\n' "$interval" "$interval" >"$params"
-    echo "vgpu-mdev-admin: console-interval uuid=$uuid interval_us=$interval"
+    if [[ -n "$frl" ]]; then
+        printf 'intervaltime=%s,vgaintervaltime=%s,frame_rate_limiter=%s\n' \
+            "$interval" "$interval" "$frl" >"$params"
+    else
+        printf 'intervaltime=%s,vgaintervaltime=%s\n' "$interval" "$interval" >"$params"
+    fi
+    echo "vgpu-mdev-admin: console-interval uuid=$uuid interval_us=$interval frl=${frl:-default}"
+}
+
+# vGPU 低负载时 SM 时钟会掉到最低档，交互场景表现为"动一下才升频"的迟滞。
+# 锁定下限让每帧都在高频上渲染；上限保持硬件最大值，不动功耗墙。
+gpu_clocks() {
+    local action=$1 bdf=$2 maxsm minsm
+    [[ "$bdf" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$ ]] ||
+        die "invalid PCI address: $bdf"
+    command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is unavailable"
+    case "$action" in
+        lock)
+            maxsm=$(nvidia-smi -i "$bdf" --query-gpu=clocks.max.sm \
+                --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+            [[ "$maxsm" =~ ^[0-9]+$ ]] || die "cannot read max SM clock for $bdf"
+            minsm=$((maxsm * 64 / 100))
+            nvidia-smi -i "$bdf" -lgc "${minsm},${maxsm}" >/dev/null 2>&1 ||
+                die "failed to lock GPU clocks for $bdf"
+            echo "vgpu-mdev-admin: gpu-clocks lock bdf=$bdf range=${minsm}-${maxsm}MHz"
+            ;;
+        reset)
+            nvidia-smi -i "$bdf" -rgc >/dev/null 2>&1 ||
+                die "failed to reset GPU clocks for $bdf"
+            echo "vgpu-mdev-admin: gpu-clocks reset bdf=$bdf"
+            ;;
+        *) die "gpu-clocks action must be lock or reset" ;;
+    esac
 }
 
 self_check() {
@@ -300,7 +335,7 @@ self_check() {
 }
 
 usage() {
-    echo "usage: $INSTALLED_SELF {check|identity-set|identity-remove|mdev-create|mdev-remove|console-interval} ..." >&2
+    echo "usage: $INSTALLED_SELF {check|identity-set|identity-remove|mdev-create|mdev-remove|console-interval|gpu-clocks} ..." >&2
     exit 2
 }
 
@@ -333,8 +368,12 @@ case "$action" in
         mdev_remove "$1"
         ;;
     console-interval)
-        [[ $# == 2 ]] || usage
+        [[ $# == 2 || $# == 3 ]] || usage
         console_interval "$@"
+        ;;
+    gpu-clocks)
+        [[ $# == 2 ]] || usage
+        gpu_clocks "$@"
         ;;
     *) usage ;;
 esac

@@ -55,7 +55,10 @@ Sysprep base once with:
 A private Sysprep clone runs its licensed VgpuPortable.exe automatically from
 C:\ProgramData\VMate\G11; no licensed EXE remains on the Desktop. Legacy
 non-Sysprep bases keep their explicitly attested manual workflow. GPU-Z is not
-required. If --gpu-profile or --monitor-profile is omitted, create-vm.sh
+required. The private base must embed the exact finalizer/Retry/Sysprep payload
+from this checkout; refresh an obsolete base once with
+  ./deploy/scripts/refresh-g11-private-base.sh BASE_NAME
+before creating more clones. If --gpu-profile or --monitor-profile is omitted, create-vm.sh
 selects from the corresponding audited pool and records the result in vm.conf.
 Clone applies the monitor profile automatically; every normal start-vm.sh
 start verifies both persisted identities again.
@@ -67,6 +70,16 @@ die() {
     exit 1
 }
 sha256_upper() { sha256sum -- "$1" | awk '{print toupper($1)}'; }
+
+# A private base attestation proves which first-boot files were injected, but
+# a syntactically valid old attestation must not authorize a clone against a
+# newer host verifier.  Bind private cloning to the exact reviewed payload in
+# this checkout so an obsolete base is rejected before vm.conf or a disk is
+# created.
+CURRENT_FINALIZER="$here/guest/finalize-g11-clone.ps1"
+CURRENT_RETRY="$here/guest/Retry-Clone-Initialization.cmd"
+CURRENT_SYSPREP_ANSWER="$here/autounattend/g11-sysprep-clone.xml"
+CURRENT_GUEST_LITE_MANIFEST="$here/guest/guest-lite/clone-manifest.json"
 
 BASE_NAME=""
 BASE_ARG=""
@@ -237,7 +250,7 @@ EXPECTED_CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
 [[ "$EXPECTED_CATALOG_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
     die "could not calculate the current GPU profile catalog hash"
 
-for dependency in jq stat date flock mktemp sha256sum awk find realpath rmdir; do
+for dependency in jq stat date flock mktemp sha256sum awk find realpath rmdir sed; do
     command -v "$dependency" >/dev/null 2>&1 ||
         die "missing dependency: $dependency"
 done
@@ -325,6 +338,36 @@ if [[ "$BASE_ATTESTATION_SCHEMA" == 7 ]]; then
         .catalogSha256 == $catalogSha256 and (.installedUtc | type) == "string"
     ' "$ATTESTATION" >/dev/null ||
         die "private Sysprep base/catalog binding is invalid; re-import the .g11base package"
+
+    for current_payload in "$CURRENT_FINALIZER" "$CURRENT_RETRY" \
+            "$CURRENT_SYSPREP_ANSWER" "$CURRENT_GUEST_LITE_MANIFEST"; do
+        [[ -f "$current_payload" && ! -L "$current_payload" && -s "$current_payload" ]] ||
+            die "current private clone payload is missing or unsafe: $current_payload"
+    done
+    CURRENT_FINALIZER_SHA256=$(sha256_upper "$CURRENT_FINALIZER")
+    CURRENT_RETRY_SHA256=$(sha256_upper "$CURRENT_RETRY")
+    CURRENT_SYSPREP_ANSWER_SHA256=$(sha256_upper "$CURRENT_SYSPREP_ANSWER")
+    CURRENT_GUEST_LITE_MANIFEST_SHA256=$(sha256_upper "$CURRENT_GUEST_LITE_MANIFEST")
+    FINALIZER_PINNED_GUEST_LITE_SHA256=$(sed -n \
+        "s/^\\\$ExpectedGuestLiteManifestSha256 = '\\([0-9A-F]\\{64\\}\\)'$/\\1/p" \
+        "$CURRENT_FINALIZER")
+    [[ "$FINALIZER_PINNED_GUEST_LITE_SHA256" == \
+       "$CURRENT_GUEST_LITE_MANIFEST_SHA256" ]] ||
+        die "current clone finalizer does not pin the current Guest Lite manifest"
+    jq -e '
+        (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
+        .schemaVersion == 1 and .profileVersion == "2.6.4"
+    ' "$CURRENT_GUEST_LITE_MANIFEST" >/dev/null ||
+        die "current Guest Lite clone manifest is invalid"
+
+    ATTESTED_FINALIZER_SHA256=$(jq -er '.firstBootScriptSha256' "$ATTESTATION")
+    ATTESTED_RETRY_SHA256=$(jq -er '.retrySha256' "$ATTESTATION")
+    ATTESTED_SYSPREP_ANSWER_SHA256=$(jq -er '.sysprepAnswerSha256' "$ATTESTATION")
+    if [[ "$ATTESTED_FINALIZER_SHA256" != "$CURRENT_FINALIZER_SHA256" ||
+          "$ATTESTED_RETRY_SHA256" != "$CURRENT_RETRY_SHA256" ||
+          "$ATTESTED_SYSPREP_ANSWER_SHA256" != "$CURRENT_SYSPREP_ANSWER_SHA256" ]]; then
+        die "private Sysprep base embeds an obsolete clone payload; run ./deploy/scripts/refresh-g11-private-base.sh '$BASE_NAME' once before cloning"
+    fi
     BASE_DEPLOYMENT_MODE=private-sysprep-auto
 elif [[ "$BASE_ATTESTATION_SCHEMA" == 6 ]]; then
     die "private schema-6 base lacks automatic system NVAPI projection; rebuild/re-import the current .g11base"
@@ -666,15 +709,15 @@ cat <<EOF
   monitor:     ${MONITOR_SYNC_RESULT}
   guest:       independent generalized Windows identity
   portable:    C:\ProgramData\VMate\G11\VgpuPortable.exe
-  Guest Lite:  pinned 2.6.0 / Game Mode / Game DVR off / NVIDIA max performance / DNF High-on-launch / stale Temp cleaned / reviewed background processes stopped / audio muted / automatic
+  Guest Lite:  pinned 2.6.4 / MpsSvc Automatic/Running / clone fast path / Game Mode / Game DVR off / NVIDIA max performance / DNF High-on-launch / stale Temp cleaned / reviewed background processes stopped / audio muted / automatic
   system NVAPI: per-VM read-only ISO / ${SYSTEM_CONTRACT_ID}
   DLS:         dls.gvmates.com:443
 
 首次启动会自动跳过 OOBE、运行一次授权版 VgpuPortable.exe、应用经过内容校验的
-Guest Lite 2.6.0（母盘封装前必须手工关闭篡改防护）、安装该 VM
+Guest Lite 2.6.4（母盘封装前必须手工关闭篡改防护）、安装该 VM
 专属的系统 NVAPI/显示器投影并自动重启；重启后由 SYSTEM 自动验收
 GRID 538.33 / DEV_1E30 / Code 0 / Licensed / x86+x64 NVAPI，以及 MpsSvc
-Disabled/Stopped、BFE 保留运行、游戏模式/Game DVR、NVIDIA 最高性能、DNF High、
+Auto/Running/PID>0、BFE 保留运行、游戏模式/Game DVR、NVIDIA 最高性能、DNF High、
 Temp 清理回执和 Guest Lite 回滚基线，成功后完整关机。
 主机名按 V-11 规则规范为 DESKTOP-XXXXXXX（取本 VM UUID 去横线后的前 7 位）。VM-bound ISO 只在
 首次初始化短暂显示为审核过的 HL-DT-ST 光驱，载荷复制后会自动弹出并热拔；
@@ -707,8 +750,9 @@ host commit。看到最终 INSTALL PASS 后完整关机并正常冷启动。以�
 
 显示器不由 VgpuPortable.exe 处理。显式选择或自动生成的 monitor profile
 已经固定在 vm.conf；clone 已自动尝试同步，每次正常 start-vm.sh 也会在
-实例盘关机时校验 Windows EDID_OVERRIDE。新 base 尚未枚举过显示器时，
-第一次启动只负责枚举；完整关机后下一次启动会自动完成，无需另跑命令。
+实例盘关机时校验 Windows EDID_OVERRIDE。新 base 尚未枚举过显示器时，普通 vGPU
+启动会失败关闭；先运行 vmctl.sh driver-install ${VM_ID}，由标准 VGA 隔离窗口完成
+首次枚举、驱动安装、完整关机和离线收敛，再进行正常冷启动。
 vmctl.sh monitor --force 只用于关机态切换型号或强制修复缓存。
 EOF
 fi

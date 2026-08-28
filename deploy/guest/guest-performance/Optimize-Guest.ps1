@@ -372,9 +372,20 @@ function Get-RegistrySnapshot {
 function Set-PlannedRegistryValue {
     param([Parameter(Mandatory = $true)][object]$Entry)
 
-    New-Item -Path $Entry.Path -Force | Out-Null
-    New-ItemProperty -Path $Entry.Path -Name $Entry.Name `
-        -PropertyType $Entry.Type -Value $Entry.Value -Force | Out-Null
+    $target = "$($Entry.Path)\$($Entry.Name)"
+    try {
+        # Do not ask the registry provider to recreate an existing key.  On
+        # hardened Windows keys, New-Item -Force can require create-subkey
+        # access even though setting a value on the key is permitted.
+        if (-not (Test-Path -LiteralPath $Entry.Path -PathType Container)) {
+            New-Item -Path $Entry.Path -Force -ErrorAction Stop | Out-Null
+        }
+        New-ItemProperty -LiteralPath $Entry.Path -Name $Entry.Name `
+            -PropertyType $Entry.Type -Value $Entry.Value -Force `
+            -ErrorAction Stop | Out-Null
+    } catch {
+        throw "Could not apply registry target '$target': $($_.Exception.Message)"
+    }
     Write-Host "  registry: $($Entry.Path)\$($Entry.Name)=$($Entry.Value)" `
         -ForegroundColor Gray
 }
@@ -387,10 +398,21 @@ function Restore-RegistrySnapshot {
         throw "State contains an unexpected registry target: $($Snapshot.Path)\$($Snapshot.Name)"
     }
     if ([bool]$Snapshot.ValueExisted) {
-        New-Item -Path ([string]$Snapshot.Path) -Force | Out-Null
-        New-ItemProperty -Path ([string]$Snapshot.Path) `
-            -Name ([string]$Snapshot.Name) -PropertyType ([string]$Snapshot.Kind) `
-            -Value $Snapshot.Value -Force | Out-Null
+        $restorePath = [string]$Snapshot.Path
+        $restoreTarget = "$restorePath\$($Snapshot.Name)"
+        try {
+            if (-not (Test-Path -LiteralPath $restorePath `
+                        -PathType Container)) {
+                New-Item -Path $restorePath -Force -ErrorAction Stop |
+                    Out-Null
+            }
+            New-ItemProperty -LiteralPath $restorePath `
+                -Name ([string]$Snapshot.Name) `
+                -PropertyType ([string]$Snapshot.Kind) `
+                -Value $Snapshot.Value -Force -ErrorAction Stop | Out-Null
+        } catch {
+            throw "Could not restore registry target '$restoreTarget': $($_.Exception.Message)"
+        }
     } else {
         Remove-ItemProperty -LiteralPath ([string]$Snapshot.Path) `
             -Name ([string]$Snapshot.Name) -ErrorAction SilentlyContinue
@@ -923,7 +945,12 @@ function Invoke-Apply {
     } catch {
         $failure = $_
         Write-Warning "Apply failed; restoring the saved original state: $($failure.Exception.Message)"
-        Invoke-RollbackInternal -State $state
+        try {
+            Invoke-RollbackInternal -State $state
+        } catch {
+            throw ("Apply failed: {0}; rollback also failed: {1}" -f `
+                $failure.Exception.Message, $_.Exception.Message)
+        }
         throw $failure
     }
 

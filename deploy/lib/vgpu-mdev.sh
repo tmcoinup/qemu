@@ -694,8 +694,22 @@ mdev_validate_active_framebuffer_tier() {
     done
 }
 
+# 锁定物理 GPU 的 SM 时钟下限。vGPU 在低负载时会掉到最低档，交互场景表现为
+# "动一下才升频"的迟滞。失败一律非致命：这只是优化，不该挡住 VM 启动。
+mdev_lock_gpu_clocks() {
+    local bdf=${1:-}
+    [[ "$bdf" =~ ^[0-9A-Fa-f]{4}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-7]$ ]] || {
+        mdev_err "跳过 GPU 时钟锁定：VGPU_MGPU 不是具体 BDF (${bdf:-unset})"
+        return 0
+    }
+    _mdev_is_production_sysfs && _mdev_admin_available || return 0
+    _mdev_admin_run gpu-clocks lock "$bdf" ||
+        mdev_err "GPU 时钟锁定失败（非致命，继续启动）"
+    return 0
+}
+
 mdev_configure_console_interval() {
-    local uuid=$1 interval_us=$2
+    local uuid=$1 interval_us=$2 frl=${3:-}
     local mdev_dir=$MDEV_DEVICES_DIR/$uuid
     local params_path=$mdev_dir/nvidia/vgpu_params
     local driver_version
@@ -713,6 +727,14 @@ mdev_configure_console_interval() {
         mdev_err "NVIDIA R535 console interval 必须为 5000..1000000us: $interval_us"
         return 1
     fi
+    # frame_rate_limiter：0 禁用 FRL（vGPU 输出跟随 guest 渲染帧率），
+    # 1 保持 profile 的 frlConfig，空则不写该键。FRL 默认把 scanout 锁在
+    # 60 FPS，与 QEMU 60Hz 的 QUERY_GFX_PLANE 同频不同步会产生拍频，
+    # 实测只能接住约一半的帧。
+    if [[ -n "$frl" && "$frl" != 0 && "$frl" != 1 ]]; then
+        mdev_err "VGPU_FRAME_RATE_LIMITER 必须是 0 或 1: $frl"
+        return 1
+    fi
     [[ -L "$mdev_dir" && -e "$params_path" ]] || {
         mdev_err "mdev console 参数节点不存在: $params_path"
         return 1
@@ -728,18 +750,18 @@ mdev_configure_console_interval() {
     # NVIDIA R535 的默认 console-copy / VGA-copy 周期都是 100000us，
     # 所以 QEMU 即使以 60Hz QUERY_GFX_PLANE，也只能看到约 10 个新帧/秒。
     # 这两个内部键必须在 QEMU 打开 mdev 之前一起设置。
+    local params="intervaltime=${interval_us},vgaintervaltime=${interval_us}"
+    [[ -z "$frl" ]] || params+=",frame_rate_limiter=${frl}"
     if _mdev_is_production_sysfs && _mdev_admin_available; then
-        _mdev_admin_run console-interval "$uuid" "$interval_us" || {
+        _mdev_admin_run console-interval "$uuid" "$interval_us" ${frl:+"$frl"} || {
             mdev_err "设置 R535 console REGION 周期失败"
             return 1
         }
-    elif ! _mdev_sudo_write \
-            "intervaltime=${interval_us},vgaintervaltime=${interval_us}" \
-            "$params_path"; then
+    elif ! _mdev_sudo_write "$params" "$params_path"; then
         mdev_err "设置 R535 console REGION 周期失败"
         return 1
     fi
-    mdev_err "R535 console REGION 周期=${interval_us}us（实验性内部参数）"
+    mdev_err "R535 console REGION 周期=${interval_us}us FRL=${frl:-profile默认}（实验性内部参数）"
 }
 
 _mdev_allocate_locked() {

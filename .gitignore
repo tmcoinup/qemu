@@ -23,10 +23,17 @@ GTAGS
 *.patch
 !deploy/host/ovmf-mdev-fastboot.patch
 !deploy/host/ovmf-security-modules.patch
+!deploy/host/ovmf-g11-host-bridge-handoff.patch
 !deploy/host/patches/vgpu-unlock-rs-g11.patch
 *.gcov
 /.claude/settings.local.json
 .claude/scheduled_tasks.lock
+/.codex-tmp/
 
 # deploy: 宿主特定 GPU BDF/profile（从 .example 复制）
 deploy/host/vgpu-host.conf
+deploy/host/vgpu-host.conf.bak-*
+
+# deploy: OVMF 原子替换过程中的临时文件；正式固件及 .features 清单需要入库。
+deploy/host/OVMF_CODE_4M_stealth.fd.tmp.*
+deploy/host/OVMF_CODE_4M_stealth.fd.features.tmp.*

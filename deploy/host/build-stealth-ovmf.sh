@@ -3,7 +3,8 @@
 # build-stealth-ovmf.sh — 构建 root deploy 启动器使用的 OVMF：
 #   1. 把 PcdFirmwareVendor 改成 "American Megatrends Inc."；
 #   2. backport edk2 early-MTRR，避免挂 mdev 时主 FV LZMA 解压卡约 80s；
-#   3. 补齐 TcgMor、Hash2DxeCrypto 和通用 RngDxe 安全模块。
+#   3. 补齐 TcgMor、Hash2DxeCrypto 和通用 RngDxe 安全模块；
+#   4. 在 ExitBootServices 通知 QEMU 切换已审核的 CPU DMI2 identity。
 #
 # 首次需约 2–4 分钟。重运行不会重复 apt-get source，但会干净重建 X64 OVMF。
 #
@@ -98,14 +99,44 @@ for component in "${security_components[@]}"; do
     fi
 done
 
-# 3) build-dep。edk2-dev 是本源码包的产物，不是 build-dep，不能拿它
+# 3) OVMF 必须在 PEI/DXE 期间继续看到 q35 原生 29c0，否则它不会建立正确的
+# PCI host bridge。退出 Boot Services 时，固件已完成 PCI 工作，而 OS 尚未
+# 枚举 PCI；在这个架构边界发一个私有 APM 命令，由启用白名单属性的 QEMU
+# 把同一个 00:00.0 切换到 CPU 代际对应的 DMI2 identity。
+HANDOFF_PATCH="$HOST_DIR/ovmf-g11-host-bridge-handoff.patch"
+handoff_source=OvmfPkg/SmbiosPlatformDxe/EntryPoint.c
+handoff_inf=OvmfPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.inf
+if grep -Fq 'G11_HOST_BRIDGE_HANDOFF_COMMAND' "$handoff_source" &&
+   grep -Eq '^[[:space:]]+IoLib[[:space:]]*$' "$handoff_inf"; then
+    echo "[build] OVMF G-11 host-bridge handoff patch already applied — skip"
+elif grep -Fq 'G11_HOST_BRIDGE_HANDOFF_COMMAND' "$handoff_source" ||
+     grep -Eq '^[[:space:]]+IoLib[[:space:]]*$' "$handoff_inf"; then
+    echo "[build] ERROR: partial OVMF G-11 host-bridge handoff patch" >&2
+    exit 1
+elif patch --binary --batch --dry-run --fuzz=0 -p1 < "$HANDOFF_PATCH" \
+        >/dev/null 2>&1; then
+    echo "[build] applying ovmf-g11-host-bridge-handoff.patch"
+    patch --binary --batch --forward --fuzz=0 -p1 < "$HANDOFF_PATCH"
+else
+    echo "[build] ERROR: OVMF G-11 host-bridge handoff patch does not apply cleanly" >&2
+    echo "[build]        check that the source is the expected edk2 2024.02 tree" >&2
+    exit 1
+fi
+
+grep -Fq 'IoWrite8 (ICH9_APM_CNT, G11_HOST_BRIDGE_HANDOFF_COMMAND);' \
+    "$handoff_source" || {
+        echo "[build] ERROR: G-11 ExitBootServices handoff source verification failed" >&2
+        exit 1
+    }
+
+# 4) build-dep。edk2-dev 是本源码包的产物，不是 build-dep，不能拿它
 # 判断依赖是否齐全；dpkg-checkbuilddeps 会按 debian/control 精确检查。
 if ! dpkg-checkbuilddeps >/dev/null 2>&1; then
     echo "[build] installing build deps"
     sudo apt-get build-dep -y edk2
 fi
 
-# 4) 只构建实际使用的 X64/4M/RELEASE 固件。debian 的 build-ovmf target
+# 5) 只构建实际使用的 X64/4M/RELEASE 固件。debian 的 build-ovmf target
 # 会连 secureboot/legacy/amdsev 变体一起构建，而且旧产物存在时可能直接
 # 判定 up-to-date；这里显式 clean 后调用 edk2 build，保证源码补丁进固件。
 echo "[build] clean X64 OVMF build"
@@ -137,18 +168,29 @@ build_args=(
 echo "[build] edk2 X64 OVMF RELEASE"
 build "${build_args[@]}"
 
-# 5) Verify the actual firmware volume, then stage it atomically. A failed
+# 6) Verify the actual firmware volume, then stage it atomically. A failed
 # security-module check leaves the previously installed firmware untouched.
 OUT=Build/OvmfX64/RELEASE_GCC5/FV/OVMF_CODE.fd
 if [[ ! -f "$OUT" ]]; then
     echo "[build] ERROR: expected $OUT not produced"; exit 1
 fi
 DST="$HOST_DIR/OVMF_CODE_4M_stealth.fd"
+FEATURES_DST="${DST}.features"
 TMP_DST=$(mktemp "${DST}.tmp.XXXXXX")
-trap 'rm -f "$TMP_DST"' EXIT
+TMP_FEATURES=$(mktemp "${FEATURES_DST}.tmp.XXXXXX")
+trap 'rm -f "$TMP_DST" "$TMP_FEATURES"' EXIT
 install -m 0644 "$OUT" "$TMP_DST"
 "$VERIFY_SCRIPT" "$TMP_DST"
+firmware_sha=$(sha256sum -- "$TMP_DST" | awk '{print $1}')
+{
+    printf '%s\n' 'schema=1'
+    printf 'sha256=%s\n' "$firmware_sha"
+    printf '%s\n' \
+        'g11_host_bridge_handoff=exit-boot-services-apm-0x47'
+} >"$TMP_FEATURES"
+chmod 0644 "$TMP_FEATURES"
 mv -f "$TMP_DST" "$DST"
+mv -f "$TMP_FEATURES" "$FEATURES_DST"
 trap - EXIT
 echo "[build] installed: $DST"
 ls -la "$DST"
@@ -156,8 +198,11 @@ sha256sum "$DST"
 
 cat <<EOF
 Done.  Now run from the repository root:
-    ./deploy/scripts/start-vm.sh 1
+    ./deploy/tests/vgpu/test_chipset_presentation.sh
+    ./deploy/scripts/vmctl.sh start 1
 Verify in guest:
     Get-ItemProperty 'HKLM:\\HARDWARE\\DESCRIPTION\\System' SystemBiosVersion
 should show "American Megatrends Inc. - 10000" in the list (not "Ubuntu ...").
+For X79, Device Manager should also show 8086:3C00 (i7-3820) or 8086:0E00
+(i7-4820K) after Windows starts.  No guest driver or BCD change is required.
 EOF

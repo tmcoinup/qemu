@@ -692,6 +692,38 @@ static void vfio_display_region_update(void *opaque)
         return;
     }
 
+    /*
+     * NVIDIA R535's vmiop-presentation path page-aligns the message buffer,
+     * then compares that padded length with stride * height.  For a scanout
+     * whose frame length is not host-page aligned it logs, for example,
+     *
+     *   mismatch on pixel length (expected 0x6cb100 received 0x6cc000)
+     *
+     * and publishes an all-zero console REGION.  QEMU cannot repair the
+     * guest mode after that proprietary hand-off.  Refuse to replace ramfb or
+     * the last good staging surface, and report the exact mode/length so the
+     * management layer can select a reviewed page-safe mode (1920x1080).
+     */
+    if (vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID) &&
+        !QEMU_IS_ALIGNED(staging_size, qemu_real_host_page_size())) {
+        size_t rounded_size = ROUND_UP(staging_size,
+                                      qemu_real_host_page_size());
+
+        if (vfio_display_region_mark_failure(dpy)) {
+            error_report("vfio-display-region: NVIDIA scanout %ux%u "
+                         "stride=%u has page-unsafe frame length 0x%zx "
+                         "(R535 presentation rounds it to 0x%zx and rejects "
+                         "head delivery); keeping ramfb/last staged frame; "
+                         "select a page-safe guest mode such as 1920x1080",
+                         plane.width, plane.height, plane.stride,
+                         staging_size, rounded_size);
+        }
+        if (!dpy->region.surface && dpy->ramfb) {
+            ramfb_display_update(dpy->con, dpy->ramfb);
+        }
+        return;
+    }
+
     if (dpy->region.buffer.mem &&
         dpy->region.buffer.nr != plane.region_index) {
         /* The installed surface uses staging, so unmapping cannot dangle it. */

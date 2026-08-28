@@ -55,9 +55,14 @@ for required in \
         "VIDEOIDLE" \
         "STANDBYIDLE" \
         "PowerSettings" \
+        "Could not apply registry target" \
+        "rollback also failed" \
         "Invoke-RollbackInternal"; do
     rg -Fq "$required" "$guest" || fail "guest script omitted: $required"
 done
+
+rg -Fq 'if (-not (Test-Path -LiteralPath $Entry.Path -PathType Container))' \
+    "$guest" || fail 'registry apply still recreates existing hardened keys'
 
 if rg -n -i \
         'bcdedit\.exe|pnputil\.exe|Disable-PnpDevice|Unregister-ScheduledTask|sc\.exe[[:space:]]+delete|Set-MpPreference|nointegritychecks[[:space:]]+on|testsigning[[:space:]]+on' \

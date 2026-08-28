@@ -247,7 +247,9 @@ spec_hash=$({
     marker_file_digest update-vgpu-mdev-identity \
         "$here/host/update-vgpu-mdev-identity.py"
     printf 'disk=%s:%s\n' "$(readlink -m -- "$DISK")" "$disk_identity"
-    printf 'host-edid-sync-v9-content-addressed\n'
+    # v10 removes R535 page-unsafe target/source modes and clears every old
+    # GraphicsDrivers cache so an existing VM cannot restore 1680x1050.
+    printf 'host-edid-sync-v10-r535-page-safe\n'
 } | sha256sum | awk '{print $1}')
 
 if (( ! FORCE )) && [[ -r "$MARKER" ]] && grep -qxF "$spec_hash" "$MARKER"; then
@@ -272,19 +274,31 @@ args=(
     --marker-value "$spec_hash"
 )
 
+helper_rc=0
 if (( EUID == 0 )); then
-    "${args[@]}"
+    "${args[@]}" || helper_rc=$?
 elif sudo -n true 2>/dev/null; then
-    sudo -- "${args[@]}"
+    sudo -- "${args[@]}" || helper_rc=$?
 elif [[ -n "${SUDO_PASSWORD:-}" ]]; then
-    printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' -- "${args[@]}"
+    printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' -- "${args[@]}" || helper_rc=$?
 elif [[ -t 0 ]]; then
     echo "[monitor-sync] 正在通过当前终端安全取得临时 sudo 票据（凭据不会写入仓库或参数）"
     sudo -v
-    sudo -- "${args[@]}"
+    sudo -- "${args[@]}" || helper_rc=$?
 else
     echo "[monitor-sync] 非交互运行缺少 sudo 票据；请预先 sudo -v，或通过安全环境变量 SUDO_PASSWORD 提供" >&2
     exit 1
 fi
 
-echo "[monitor-sync] 完成：Windows 标准 EDID_OVERRIDE 已按 128B block 写入；设备管理器 live 名称由私有克隆的 SYSTEM 身份任务在下次启动通过 SetupAPI 发布"
+case "$helper_rc" in
+    0)
+        echo "[monitor-sync] 完成：Windows 标准 EDID_OVERRIDE 已按 128B block 写入；设备管理器 live 名称由私有克隆的 SYSTEM 身份任务在下次启动通过 SetupAPI 发布"
+        ;;
+    12)
+        echo "[monitor-sync] 预驱动完成：安全 EDID/模式缓存已落盘；安装 GRID 并完整关机后会自动补齐认证 NV_Modes"
+        exit 12
+        ;;
+    *)
+        exit "$helper_rc"
+        ;;
+esac

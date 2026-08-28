@@ -20,7 +20,7 @@ Options:
   --print-dir-path   Print only the directory that can be mounted as a USB disk
   -h, --help         Show this help
 
-The output contains standalone 64-bit Guest Lite 2.6.0 plus reviewable Windows 10
+The output contains standalone 64-bit Guest Lite 2.6.4 plus reviewable Windows 10
 audit/apply/rollback sources. The launcher imports Windows inbox components only;
 the NVIDIA tuning step dynamically calls the guest's already-installed System32
 NVAPI and never bundles/replaces a driver DLL. The package has no credential or

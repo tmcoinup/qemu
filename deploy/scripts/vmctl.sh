@@ -16,6 +16,9 @@ promote_base="$here/scripts/promote-base.sh"
 delete_vm="$here/scripts/delete-vm.sh"
 migrate_layout="$here/scripts/migrate-g11-layout.sh"
 repair_init="$here/scripts/repair-clone-init.sh"
+refresh_private_base="$here/scripts/refresh-g11-private-base.sh"
+recover_display="$here/scripts/recover-vgpu-black-screen.sh"
+install_vgpu_driver="$here/scripts/install-vgpu-driver-safe.sh"
 preview_capacity="$here/host/check-dgame-preview-capacity.sh"
 
 usage() {
@@ -31,6 +34,9 @@ usage:
   ./deploy/scripts/vmctl.sh seal   SOURCE_ID BASE_NAME [--vms-dir ABS] [seal options]
   ./deploy/scripts/vmctl.sh delete ID [--vms-dir ABS] [-y]
   ./deploy/scripts/vmctl.sh repair-init ID [--vms-dir ABS]
+  ./deploy/scripts/vmctl.sh refresh-base BASE_NAME [--vms-dir ABS] [options]
+  ./deploy/scripts/vmctl.sh repair-display ID [--vms-dir ABS] [--no-start]
+  ./deploy/scripts/vmctl.sh driver-install ID [--vms-dir ABS] [--ip IPv4] [--gtk] [--start]
   ./deploy/scripts/vmctl.sh path   ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh status ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh display ID ACTION [--vms-dir ABS|--vm-dir ABS]
@@ -55,6 +61,9 @@ Examples:
   ./deploy/scripts/vmctl.sh cdrom 2 mount /path/to/package.iso
   ./deploy/scripts/vmctl.sh cdrom 2 eject
   ./deploy/scripts/vmctl.sh repair-init 2
+  ./deploy/scripts/vmctl.sh refresh-base win10-base
+  ./deploy/scripts/vmctl.sh repair-display 8
+  ./deploy/scripts/vmctl.sh driver-install 8
 
 When a new configuration omits --gpu-profile, create and clone choose one
 audited GPU row at random and persist it in vm.conf.  Normal start and clone
@@ -146,6 +155,18 @@ case "$ACTION" in
     repair-init)
         shift
         exec_with_vms_root "$repair_init" "$@"
+        ;;
+    refresh-base)
+        shift
+        exec_with_vms_root "$refresh_private_base" "$@"
+        ;;
+    repair-display|recover-display)
+        shift
+        exec "$recover_display" "$@"
+        ;;
+    driver-install|prepare-driver)
+        shift
+        exec_with_vms_root "$install_vgpu_driver" "$@"
         ;;
     promote)
         shift

@@ -22,17 +22,28 @@ staging 中个别源资产仍沿用历史文件名 `553.24.exe` /
 
 ## 首次安装驱动
 
-使用原生 vGPU 身份启动，避免在驱动安装阶段叠加任何身份层：
+新装系统、将要制作基础镜像的系统、同版本修复都使用同一个一键入口：
 
 ```bash
 cd /home/ubuntu/projects/qemu
 VM_ID=9
-./deploy/scripts/start-vm.sh "$VM_ID" --no-spoof --no-monitor-sync
+./deploy/scripts/vmctl.sh driver-install "$VM_ID"
 ```
 
-在 Windows 安装仓库审核过、未经修改且由 NVIDIA/Microsoft 生产链签名的 GRID
-538.33。安装完成后执行 Windows“关机”，不要休眠或只断开 RDP。之后用正常入口
-冷启动：
+它自动以临时标准 VGA 启动，真实 mdev 只供 GRID PnP 匹配并固定
+`display=off`。安装过程因此不会让 R535 接管 SDL console。安装收据通过后会自动
+完整关机、离线认证发布的 NVIDIA INF，并把 EDID/`NV_Modes` 收敛到 8 项
+page-safe 合同；默认保持关机供封装。想完成后直接普通启动：
+
+```bash
+./deploy/scripts/vmctl.sh driver-install "$VM_ID" --start
+```
+
+不要直接双击安装器，也不要用普通 `--no-spoof` vGPU console 首装。底层
+`install-vgpu-driver.sh` 只允许在上述安全 QEMU 拓扑中运行，并会验证
+标准 VGA、native mdev `display=off`、无 ramfb/PCI spoof 后才写 guest。完整原理和
+已有黑屏实例的恢复入口见
+[`G11-R535-BLACK-SCREEN.md`](G11-R535-BLACK-SCREEN.md)。默认完成后用正常入口冷启动：
 
 ```bash
 ./deploy/scripts/start-vm.sh "$VM_ID"
@@ -95,16 +106,17 @@ SYSTEM 持久任务，在启动和登录后对新实例重新发布 FriendlyName
 
 | 现象 | 处理 |
 |---|---|
-| Microsoft 基本显示适配器、Code 28/43 | 回到 `--no-spoof --no-monitor-sync`，先修原版 GRID 538.33 绑定 |
+| Microsoft 基本显示适配器、Code 28/43，或尚无显示器缓存 | 完整关机后运行 `vmctl.sh driver-install VM_ID`，不要在普通 console 中直装/首次枚举 |
 | 设备管理器出现两个 Display | 断开 RDP；检查是否有 Remote Display Adapter，不要把 PCI bridge 算成显卡 |
 | 显示器变成通用监视器 | 正常启动后等持久任务收敛；再运行系统包的 Verify |
-| 偶发/持续黑屏 | 查 host Xid 与 guest TDR；确认没有 537.58 consumer 合同 |
+| host 有 `mismatch on pixel length`，SDL/QMP 同时纯黑 | `./deploy/scripts/vmctl.sh repair-display VM_ID`；不重装系统 |
+| 无长度错配但偶发/持续黑屏 | 查 host Xid 与 guest TDR；确认没有 537.58 consumer 合同 |
 | 休眠/Fast Startup 阻止离线同步 | 使用 `recover-hibernated-vm.sh VM_ID`，在标准 VGA 中关闭后完整关机 |
 | 身份包拒绝未知 NVAPI DLL | 不手工覆盖；保留日志，使用原包 Rollback 恢复已验证的 NVIDIA 原件 |
 
 不要卸载 DriverStore 中仍正常工作的 538.33，也不要靠反复睡眠唤醒掩盖 TDR。
 系统身份层异常时使用包内 `Rollback-As-Administrator.cmd`；普通 vGPU 修复可完整
-关机后再次从 `--no-spoof --no-monitor-sync` 启动。
+关机后再次运行统一的 `vmctl.sh driver-install VM_ID`。
 
 ## 永久安全边界
 

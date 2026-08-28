@@ -159,6 +159,9 @@ if have_system
     'test-fb-shm-stream-gpu': [
       meson.project_source_root() / 'tools/fb-shm-stream/gpu.c'
     ],
+    'test-fb-shm-gpu-sync': [
+      meson.project_source_root() / 'ui/fb-shm-gpu-sync.c'
+    ],
     'test-fb-shm-stream-ffmpeg': [
       meson.project_source_root() / 'tools/fb-shm-stream/ffmpeg.c'
     ],

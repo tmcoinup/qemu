@@ -158,6 +158,12 @@ SEAL_ARGS=(
 )
 ((SHOW_COMPRESSION_PROGRESS == 0)) || SEAL_ARGS+=(--progress)
 "$here/scripts/seal-base.sh" "${SEAL_ARGS[@]}"
+SEALED_BASE="$VM_BASE_DIR/$BASE_NAME.qcow2"
+[[ -f "$SEALED_BASE" && ! -L "$SEALED_BASE" ]] ||
+    die "seal completed without a safe base image: $SEALED_BASE"
+# The next step embeds a DLS credential.  seal-base.sh also serves public
+# workflows, so make the private generation owner-only before injection.
+chmod 0600 -- "$SEALED_BASE"
 PACKAGE_ARGS=(--with-license-token)
 if [[ -n "$TOKEN_FILE" ]]; then
     PACKAGE_ARGS=(--token-file "$TOKEN_FILE")

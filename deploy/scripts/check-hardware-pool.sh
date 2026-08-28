@@ -135,6 +135,8 @@ keyboard_brand_count=${#keyboard_brand_seen[@]}
 mouse_brand_count=${#mouse_brand_seen[@]}
 monitor_catalog_brand_count=${#monitor_catalog_brands[@]}
 monitor_create_brand_count=${#monitor_create_brands[@]}
+active_x79_platform_count=$((${#HARDWARE_NEW_PROFILE_KEYS[@]} +
+    ${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}))
 
 for audited_count in "$board_brand_count" "$memory_brand_count" \
         "$ssd_brand_count" "$keyboard_brand_count" "$mouse_brand_count"; do
@@ -201,6 +203,8 @@ if (( machine_readable )); then
         "${#HARDWARE_COMBINATIONS[@]}"
     printf 'chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 X79=8086:1D41:06 coverage=all-%s-platforms\n' \
         "${#HARDWARE_COMBINATIONS[@]}"
+    printf 'cpu_host_bridge_presentations SandyBridge-E=8086:3C00:07 IvyBridge-E=8086:0E00:04 coverage=all-%s-active-X79-platforms fallback=archived-mainstream-P35\n' \
+        "$active_x79_platform_count"
     printf 'architecture_boundaries machine=q35-ICH9-behavior sata=ICH9-AHCI xhci=qemu-xhci nvme=QEMU-nvme rescue_display=std-vga legacy_transport=ivshmem\n'
 else
     printf 'G-11 硬件池（QEMU=%s）\n' "$qemu_bin"
@@ -233,6 +237,8 @@ else
     printf '  架构绑定例外: Intel Core i7/X79、Intel e1000e、Intel HDA、swtpm、QEMU 通用绝对指针、安装期临时传输介质。\n'
     printf '  芯片组呈现: H81=8086:8C5C/04，H97=8086:8CC6/00，B150=8086:A148/31，B360=8086:A308/10，X79=8086:1D41/06；覆盖全部 %s 套平台。\n' \
         "${#HARDWARE_COMBINATIONS[@]}"
+    printf '  CPU host bridge 呈现: i7-3820=8086:3C00/07，i7-4820K/i7-4930K=8086:0E00/04；覆盖全部 %s 套活跃 X79 平台，按 CPU profile 选择、不按 VM ID 特判。\n' \
+        "$active_x79_platform_count"
     printf '  实现/兼容边界: machine/LPC 行为仍是 q35/ICH9，SATA 仍是 ICH9-AHCI；qemu-xhci、QEMU nvme controller、救援 std-vga、legacy ivshmem 保持原生身份。\n'
     printf '  序列策略: 主板/内存/SSD/显示器按各自合同；GPU/HID/光驱不伪造序列；NIC 用唯一 MAC。\n\n'
     printf '%-14s %-24s %-10s %-13s %-13s %s\n' \
@@ -263,11 +269,18 @@ for row in "${CPU_PROFILES[@]}"; do
     mapfile -t cpu_candidates < <(
         hardware_profile_component_candidates "$cpu_key" '' ''
     )
-    if ((${#cpu_candidates[@]})); then
-        create_scope=new
-    fi
+    for candidate in "${cpu_candidates[@]}"; do
+        candidate_lifecycle=$(hardware_profile_lifecycle_class "$candidate")
+        if [[ "$candidate_lifecycle" == new ]]; then
+            create_scope=new
+            break
+        elif [[ "$candidate_lifecycle" == explicit-new ]]; then
+            create_scope=explicit-new
+        fi
+    done
     result=not-creatable
-    [[ "$create_scope" != new ]] || result=$([[ "$host_class" == supported ]] && printf ready || printf blocked)
+    [[ "$create_scope" == existing-only ]] || \
+        result=$([[ "$host_class" == supported ]] && printf ready || printf blocked)
 
     if (( machine_readable )); then
         printf 'cpu_profile=%s qemu_model=%s topology=%sC/%sT host_class=%s create_scope=%s result=%s reason=%s\n' \
@@ -350,7 +363,7 @@ else
 fi
 
 if [[ "$selection_result" == blocked ]]; then
-    echo "两款活跃 4C/8T X79 CPU 在本宿主均无法 enforce=on；为避免性能倒退，不自动降级到旧平台。" >&2
+    echo "普通新建池中的 X79 CPU 在本宿主均无法 enforce=on；为避免性能倒退，不自动降级到旧平台。" >&2
     exit 1
 fi
 if (( probe_failed )); then

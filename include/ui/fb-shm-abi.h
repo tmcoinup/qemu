@@ -59,9 +59,10 @@
  *   server -> client : FbShmCtlAck (32 bytes) + ancillary SCM_RIGHTS
  *                      { memfd, eventfd } on HELLO ack.
  *   server -> client : FbShmCtlAck (32 bytes) + FbShmGpuFrame +
- *                      ancillary SCM_RIGHTS { dmabuf_fd } when the client
- *                      requested FB_SHM_HELLO_F_GPU_FRAMES and QEMU has a
- *                      dma-buf backed scanout.
+ *                      ancillary SCM_RIGHTS { dmabuf_fd } for legacy GPU
+ *                      clients.  A client that also negotiated GPU_SYNC gets
+ *                      the ordered pair { dmabuf_fd, acquire_sync_file_fd }
+ *                      and must return GPU_FRAME_DONE before reuse.
  *
  * Windows:
  *   client sets FB_SHM_HELLO_F_WIN32_NAMES in HELLO.flags.
@@ -87,6 +88,8 @@
 #define FB_SHM_CTL_BYE            4u
 #define FB_SHM_CTL_NOTIFY_RESIZED   5u /* server -> client; SCM_RIGHTS {memfd,evfd} */
 #define FB_SHM_CTL_NOTIFY_GPU_FRAME 6u /* server -> client; optional GPU handle */
+/* GPU_SYNC release: w=sequence low 32 bits, h=sequence high 32 bits. */
+#define FB_SHM_CTL_GPU_FRAME_DONE   7u
 
 #define FB_SHM_CTL_OK           0u
 #define FB_SHM_CTL_EINVAL       1u
@@ -98,6 +101,7 @@
 #define FB_SHM_HELLO_F_WIN32_NAMES   (1u << 1)
 #define FB_SHM_HELLO_F_GPU_FRAMES    (1u << 2)
 #define FB_SHM_HELLO_F_GPU_REQUIRED  (1u << 3)
+/* Linux NOTIFY carries {dma-buf, acquire sync_file} and requires DONE. */
 #define FB_SHM_HELLO_F_GPU_SYNC      (1u << 4)
 /* Client accepts FbShmGpuFrame v2 with full guest source dimensions. */
 #define FB_SHM_HELLO_F_GPU_SOURCE_SIZE (1u << 5)
@@ -113,6 +117,8 @@
 /* FbShmGpuFrame.flags bit masks. */
 #define FB_SHM_GPU_FRAME_F_Y0_TOP       (1u << 0)
 #define FB_SHM_GPU_FRAME_F_KEYED_MUTEX  (1u << 1)
+/* Linux SCM_RIGHTS is exactly {dma-buf fd, producer acquire-fence fd}. */
+#define FB_SHM_GPU_FRAME_F_SYNC_FILE    (1u << 2)
 
 #define FB_SHM_GPU_FRAME_VERSION_V1 1u
 #define FB_SHM_GPU_FRAME_VERSION    2u

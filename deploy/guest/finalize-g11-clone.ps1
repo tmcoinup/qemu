@@ -1,7 +1,7 @@
 # G-11 Sysprep clone one-shot finalizer. Windows PowerShell 5.1 compatible.
 [CmdletBinding()]
 param(
-    [ValidateSet('Auto', 'Complete')]
+    [ValidateSet('Auto', 'Complete', 'Notice')]
     [string]$Phase = 'Auto'
 )
 
@@ -19,13 +19,14 @@ $ExpectedPnpPrefix = 'PCI\VEN_10DE&DEV_1E30'
 $ProjectionStateRoot = Join-Path $env:ProgramData 'G11\SystemNvapiProjection'
 $ProjectionReceiptRoot = Join-Path $ProjectionStateRoot 'receipts'
 $ContinuationTaskName = 'VMate-G11-Clone-Continuation'
+$ContinuationNoticeTaskName = 'VMate-G11-Clone-Notice'
 $GuestLiteRoot = Join-Path $Root 'GuestLite'
 $GuestLiteManifestPath = Join-Path $GuestLiteRoot 'clone-manifest.json'
 $GuestLiteStatePath = Join-Path $env:ProgramData 'G11GuestLite\state.json'
 $GuestLiteEnforcementLogPath = Join-Path $env:ProgramData `
     'G11GuestLite\enforce-last.txt'
-$GuestLiteProfileVersion = '2.6.0'
-$ExpectedGuestLiteManifestSha256 = 'B5BD6096BB465783E47EE470F1995434A8E9AD535439C40EE544F0A70FC25758'
+$GuestLiteProfileVersion = '2.6.4'
+$ExpectedGuestLiteManifestSha256 = '1C3A590BFBF8BF37FE7743475D75A9FEE8DA454346C740AEA6F6D7F98FD13E70'
 $GuestLiteEnglishInputTip = '0409:00000409'
 $GuestLitePinyinLanguageTags = @('zh-CN', 'zh-Hans-CN')
 $GuestLitePinyinInputTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
@@ -313,7 +314,7 @@ function Resolve-GuestLiteRegistryPath {
 }
 
 function Read-And-ValidateGuestLiteState {
-    param([switch]$RequireStopped)
+    param([switch]$RequireFirewallReady)
 
     $stateItem = Get-PlainFile $GuestLiteStatePath `
         'Guest Lite rollback state'
@@ -454,13 +455,13 @@ function Read-And-ValidateGuestLiteState {
 
     $firewall = Get-CimInstance Win32_Service -Filter "Name='MpsSvc'" `
         -ErrorAction Stop
-    if ([string]$firewall.StartMode -cne 'Disabled') {
-        throw "Guest Lite did not disable MpsSvc startup: $($firewall.StartMode)"
+    if ([string]$firewall.StartMode -cne 'Auto') {
+        throw "Guest Lite did not preserve MpsSvc Automatic startup: $($firewall.StartMode)"
     }
-    if ($RequireStopped -and
-        ([string]$firewall.State -cne 'Stopped' -or
-         [uint32]$firewall.ProcessId -ne 0)) {
-        throw "MpsSvc still has a running instance after clone verification reboot: state=$($firewall.State) pid=$($firewall.ProcessId)"
+    if ($RequireFirewallReady -and
+        ([string]$firewall.State -cne 'Running' -or
+         [uint32]$firewall.ProcessId -eq 0)) {
+        throw "MpsSvc is unavailable after clone verification reboot: state=$($firewall.State) pid=$($firewall.ProcessId)"
     }
     $bfe = Get-CimInstance Win32_Service -Filter "Name='BFE'" -ErrorAction Stop
     if ([string]$bfe.StartMode -cne 'Auto' -or
@@ -486,13 +487,81 @@ function Read-And-ValidateGuestLiteState {
     }
 }
 
+function Read-And-ValidateGuestLiteEnforcementReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedUserSid,
+        [Parameter(Mandatory = $true)][string]$ExpectedMachineGuid,
+        [Parameter(Mandatory = $true)][string]$ExpectedComputerName,
+        [Parameter(Mandatory = $true)][DateTime]$MinimumGeneratedTime
+    )
+
+    $logItem = Get-PlainFile $GuestLiteEnforcementLogPath `
+        'Guest Lite enforcement log'
+    $lines = @(Get-Content -LiteralPath $logItem.FullName -Encoding UTF8)
+    $generatedLines = @($lines | Where-Object {
+        [string]$_ -match '^generated=.+ mode=Enforce$'
+    })
+    if ($generatedLines.Count -ne 1) {
+        throw 'Guest Lite enforcement log has no unique generated receipt.'
+    }
+    $generatedMatch = [regex]::Match(
+        [string]$generatedLines[0], '^generated=(.+) mode=Enforce$'
+    )
+    if (-not $generatedMatch.Success) {
+        throw 'Guest Lite enforcement log has an invalid generated receipt.'
+    }
+    try {
+        $generatedAt = [DateTimeOffset]::Parse(
+            [string]$generatedMatch.Groups[1].Value,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )
+    } catch {
+        throw 'Guest Lite enforcement generated time is invalid.'
+    }
+    if ($generatedAt.UtcDateTime -lt $MinimumGeneratedTime.ToUniversalTime()) {
+        throw 'Guest Lite enforcement receipt predates the current Windows boot.'
+    }
+
+    $expectedIdentity = 'identity=validated computer={0} machineGuid={1} sid={2}' -f
+        $ExpectedComputerName, $ExpectedMachineGuid, $ExpectedUserSid
+    if ($lines -cnotcontains $expectedIdentity) {
+        throw 'Guest Lite enforcement receipt does not match this clone identity.'
+    }
+    foreach ($requiredLine in @(
+        'firewallService=automatic-running',
+        'audio=default-render-muted',
+        'processes=reviewed-stopped',
+        'nvidiaPowerMode=prefer-maximum-performance',
+        'dnfPriority=high-if-running',
+        'result=pass failures=0'
+    )) {
+        if ($lines -cnotcontains $requiredLine) {
+            throw "Guest Lite enforcement receipt is incomplete: $requiredLine"
+        }
+    }
+    return $generatedAt
+}
+
 function Invoke-And-WaitGuestLiteEnforcement {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedUserSid,
+        [Parameter(Mandatory = $true)][string]$ExpectedMachineGuid,
+        [Parameter(Mandatory = $true)][string]$ExpectedComputerName
+    )
+
     $taskPath = '\'
     $taskName = 'G11GuestLite-EnforceProfile'
     $deadline = [DateTime]::Now.AddMinutes(10)
+    $operatingSystems = @(Get-CimInstance Win32_OperatingSystem `
+        -OperationTimeoutSec 15 -ErrorAction Stop)
+    if ($operatingSystems.Count -ne 1) {
+        throw "Expected one Windows operating system; observed $($operatingSystems.Count)."
+    }
+    $lastBootTime = [DateTime]$operatingSystems[0].LastBootUpTime
 
-    # Do not race the 45-second startup trigger. If it is already running,
-    # wait for that instance and then request a fresh, measurable run.
+    # Do not race the delayed startup/logon trigger. Its clean, identity-bound
+    # current-boot receipt is already the required post-reboot SYSTEM run.
     do {
         $task = Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
             -ErrorAction Stop
@@ -503,39 +572,53 @@ function Invoke-And-WaitGuestLiteEnforcement {
         throw 'Guest Lite enforcement task did not become idle within ten minutes.'
     }
 
-    $previousInfo = Get-ScheduledTaskInfo -TaskPath $taskPath `
+    $info = Get-ScheduledTaskInfo -TaskPath $taskPath `
         -TaskName $taskName -ErrorAction Stop
-    $previousRunTime = $previousInfo.LastRunTime
-    Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
-        -ErrorAction Stop
-    $completed = $false
-    do {
-        Start-Sleep -Seconds 2
-        $task = Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
-            -ErrorAction Stop
-        $info = Get-ScheduledTaskInfo -TaskPath $taskPath `
-            -TaskName $taskName -ErrorAction Stop
-        if ([string]$task.State -notin @('Running', 'Queued') -and
-            $info.LastRunTime -gt $previousRunTime) {
-            $completed = $true
-            break
+    $receipt = $null
+    if ([int64]$info.LastTaskResult -eq 0 -and
+        $info.LastRunTime -gt $lastBootTime) {
+        try {
+            $receipt = Read-And-ValidateGuestLiteEnforcementReceipt `
+                -ExpectedUserSid $ExpectedUserSid `
+                -ExpectedMachineGuid $ExpectedMachineGuid `
+                -ExpectedComputerName $ExpectedComputerName `
+                -MinimumGeneratedTime $lastBootTime
+            Write-Host 'Reusing the clean Guest Lite SYSTEM enforcement receipt from this Windows boot.' `
+                -ForegroundColor DarkGray
+        } catch {
+            $receipt = $null
         }
-    } while ([DateTime]::Now -lt $deadline)
-    if (-not $completed) {
-        throw 'Guest Lite enforcement task did not finish within ten minutes.'
     }
-    if ([int64]$info.LastTaskResult -ne 0) {
-        throw "Guest Lite enforcement task failed: result=$($info.LastTaskResult), lastRun=$($info.LastRunTime.ToString('o'))."
-    }
-    $logItem = Get-PlainFile $GuestLiteEnforcementLogPath `
-        'Guest Lite enforcement log'
-    $log = Get-Content -LiteralPath $logItem.FullName -Raw -Encoding UTF8
-    if ($log -notmatch '(?m)^audio=default-render-muted\r?$' -or
-        $log -notmatch '(?m)^processes=reviewed-stopped\r?$' -or
-        $log -notmatch '(?m)^nvidiaPowerMode=prefer-maximum-performance\r?$' -or
-        $log -notmatch '(?m)^dnfPriority=high-if-running\r?$' -or
-        $log -notmatch '(?m)^result=pass failures=0\r?$') {
-        throw 'Guest Lite enforcement log does not contain a clean pass receipt.'
+
+    if ($null -eq $receipt) {
+        $previousRunTime = $info.LastRunTime
+        Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
+            -ErrorAction Stop
+        $deadline = [DateTime]::Now.AddMinutes(10)
+        $completed = $false
+        do {
+            Start-Sleep -Seconds 2
+            $task = Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
+                -ErrorAction Stop
+            $info = Get-ScheduledTaskInfo -TaskPath $taskPath `
+                -TaskName $taskName -ErrorAction Stop
+            if ([string]$task.State -notin @('Running', 'Queued') -and
+                $info.LastRunTime -gt $previousRunTime) {
+                $completed = $true
+                break
+            }
+        } while ([DateTime]::Now -lt $deadline)
+        if (-not $completed) {
+            throw 'Guest Lite enforcement task did not finish within ten minutes.'
+        }
+        if ([int64]$info.LastTaskResult -ne 0) {
+            throw "Guest Lite enforcement task failed: result=$($info.LastTaskResult), lastRun=$($info.LastRunTime.ToString('o'))."
+        }
+        $receipt = Read-And-ValidateGuestLiteEnforcementReceipt `
+            -ExpectedUserSid $ExpectedUserSid `
+            -ExpectedMachineGuid $ExpectedMachineGuid `
+            -ExpectedComputerName $ExpectedComputerName `
+            -MinimumGeneratedTime $lastBootTime
     }
     return [pscustomobject]@{
         LastRunTime = $info.LastRunTime.ToString('o')
@@ -580,7 +663,7 @@ function Invoke-GuestLiteCloneProfile {
                 break
             }
         }
-        throw "Guest Lite clone profile failed with exit code $($process.ExitCode). Check that Tamper Protection was manually turned off before sealing the base. Logs: $standardOutput / $standardError. $detail"
+        throw "Guest Lite clone profile failed with exit code $($process.ExitCode). Review the exact protected/failed items in the preserved logs; Tamper Protection must be turned off manually and must not be bypassed. Logs: $standardOutput / $standardError. $detail"
     }
     return (Read-And-ValidateGuestLiteState)
 }
@@ -747,7 +830,186 @@ function Test-ProjectionPendingReceipt {
     return $true
 }
 
+function ConvertFrom-Utf8Base64 {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Value))
+}
+
+function Show-CloneContinuationNotice {
+    # Keep this source file ASCII so Windows PowerShell 5.1 can load it without
+    # relying on a BOM. User-facing Chinese text is decoded only at runtime.
+    $title = ConvertFrom-Utf8Base64 `
+        'Vk1hdGUgRy0xMSDlhYvpmobliJ3lp4vljJbov5vooYzkuK0='
+    $headingText = ConvertFrom-Utf8Base64 `
+        '5YWL6ZqG5Yid5aeL5YyW5LuN5Zyo57un57ut'
+    $rebootText = ConvertFrom-Utf8Base64 `
+        '6L+Z5piv56ys5LiA5qyh5YWL6ZqG5ZCO55qE6Ieq5Yqo6YeN5ZCv44CC6L+b5YWl5qGM6Z2i5LiN5Luj6KGo5Yid5aeL5YyW5bey57uP5a6M5oiQ44CC'
+    $doNotStopText = ConvertFrom-Utf8Base64 `
+        '6K+35Yu/5YWz5py644CB6YeN5ZCv5oiW5rOo6ZSA44CC5a6M5oiQ5ZCO6Jma5ouf5py65Lya6Ieq5Yqo5YWz5py644CC'
+    $stageText = ConvertFrom-Utf8Base64 `
+        '5b2T5YmN77ya5q2j5Zyo5a6M5oiQ6YeN5ZCv5ZCO55qE6amx5Yqo5LiO57O757uf5qOA5p+l4oCm4oCm'
+    $elapsedPrefix = ConvertFrom-Utf8Base64 '5bey562J5b6F77ya'
+    $minuteText = ConvertFrom-Utf8Base64 'IOWIhiA='
+    $secondText = ConvertFrom-Utf8Base64 'IOenkg=='
+    $completedText = ConvertFrom-Utf8Base64 `
+        '5Yid5aeL5YyW5bey57uP5a6M5oiQ77yM6Jma5ouf5py65q2j5Zyo6Ieq5Yqo5YWz5py64oCm4oCm'
+    $failedText = ConvertFrom-Utf8Base64 `
+        '5Yid5aeL5YyW5aSx6LSl77yM6K+35Yu/5by65Yi25YWz5py644CC'
+    $errorPathText = ConvertFrom-Utf8Base64 `
+        '6K+35p+l55yL6ZSZ6K+v5paH5Lu277ya'
+    $retryText = ConvertFrom-Utf8Base64 `
+        '5L+u5aSN5ZCO77yM6K+35Lul566h55CG5ZGY6Lqr5Lu96L+Q6KGM5qGM6Z2i55qEIFJldHJ5LUNsb25lLUluaXRpYWxpemF0aW9uLmNtZOOAgg=='
+    $closeText = ConvertFrom-Utf8Base64 '5YWz6Zet'
+    $bodyText = $rebootText + [Environment]::NewLine + [Environment]::NewLine +
+        $doNotStopText + [Environment]::NewLine + [Environment]::NewLine + $stageText
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        [System.Windows.Forms.Application]::EnableVisualStyles()
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = $title
+        $form.ClientSize = New-Object System.Drawing.Size(640, 300)
+        $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+        $form.ControlBox = $false
+        $form.ShowInTaskbar = $true
+        $form.TopMost = $true
+
+        $heading = New-Object System.Windows.Forms.Label
+        $heading.Location = New-Object System.Drawing.Point(28, 24)
+        $heading.Size = New-Object System.Drawing.Size(584, 42)
+        $heading.Font = New-Object System.Drawing.Font(
+            $form.Font.FontFamily, 18,
+            [System.Drawing.FontStyle]::Bold)
+        $heading.Text = $headingText
+
+        $body = New-Object System.Windows.Forms.Label
+        $body.Location = New-Object System.Drawing.Point(30, 78)
+        $body.Size = New-Object System.Drawing.Size(580, 112)
+        $body.Font = New-Object System.Drawing.Font(
+            $form.Font.FontFamily, 11,
+            [System.Drawing.FontStyle]::Regular)
+        $body.Text = $bodyText
+
+        $progress = New-Object System.Windows.Forms.ProgressBar
+        $progress.Location = New-Object System.Drawing.Point(32, 202)
+        $progress.Size = New-Object System.Drawing.Size(576, 22)
+        $progress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+        $progress.MarqueeAnimationSpeed = 30
+
+        $elapsedLabel = New-Object System.Windows.Forms.Label
+        $elapsedLabel.Location = New-Object System.Drawing.Point(30, 239)
+        $elapsedLabel.Size = New-Object System.Drawing.Size(430, 26)
+
+        $closeButton = New-Object System.Windows.Forms.Button
+        $closeButton.Location = New-Object System.Drawing.Point(510, 235)
+        $closeButton.Size = New-Object System.Drawing.Size(98, 32)
+        $closeButton.Text = $closeText
+        $closeButton.Visible = $false
+        $closeButton.Add_Click({ $form.Close() })
+
+        $form.Controls.AddRange(@(
+            $heading, $body, $progress, $elapsedLabel, $closeButton
+        ))
+
+        $started = [DateTime]::UtcNow
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 1000
+        $timer.Add_Tick({
+            $elapsed = [DateTime]::UtcNow - $started
+            $elapsedLabel.Text = ('{0}{1}{2}{3}{4}' -f
+                $elapsedPrefix, [int][Math]::Floor($elapsed.TotalMinutes),
+                $minuteText, $elapsed.Seconds, $secondText)
+
+            # Check the error first because a shutdown scheduling failure can be
+            # reported after the host-ready marker has already been committed.
+            if (Test-Path -LiteralPath $ErrorFile -PathType Leaf) {
+                $timer.Stop()
+                $heading.Text = $failedText
+                $body.Text = $errorPathText + [Environment]::NewLine +
+                    $ErrorFile + [Environment]::NewLine + [Environment]::NewLine +
+                    $retryText
+                $progress.Style = [System.Windows.Forms.ProgressBarStyle]::Blocks
+                $progress.Value = 0
+                $form.ControlBox = $true
+                $closeButton.Visible = $true
+            } elseif (Test-Path -LiteralPath $Marker -PathType Leaf) {
+                $timer.Stop()
+                $heading.Text = $completedText
+                $body.Text = $doNotStopText
+                $progress.Style = [System.Windows.Forms.ProgressBarStyle]::Blocks
+                $progress.Value = 100
+            }
+        })
+        $form.Add_FormClosed({
+            $timer.Stop()
+            $timer.Dispose()
+        })
+        $timer.Start()
+        [System.Windows.Forms.Application]::Run($form)
+    } catch {
+        # A minimal built-in fallback still gives the operator an explicit
+        # warning if WinForms cannot initialize in the interactive session.
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $null = $shell.Popup($bodyText, 900, $title, 0x1030)
+        } catch { }
+    }
+}
+
+function Resolve-ScheduledTaskUserSid {
+    param([Parameter(Mandatory = $true)][string]$Identity)
+    try {
+        if ($Identity -match '^S-1-[0-9]+(?:-[0-9]+)+$') {
+            $sid = New-Object System.Security.Principal.SecurityIdentifier `
+                -ArgumentList $Identity
+        } else {
+            $account = New-Object System.Security.Principal.NTAccount `
+                -ArgumentList $Identity
+            $sid = $account.Translate(
+                [System.Security.Principal.SecurityIdentifier])
+        }
+        return [string]$sid.Value
+    } catch {
+        throw "Scheduled task identity cannot be resolved to a SID: $Identity"
+    }
+}
+
+function Register-CloneContinuationNoticeTask {
+    param([Parameter(Mandatory = $true)][string]$UserSid)
+    if ($UserSid -notmatch '^S-1-5-21-[0-9]+-[0-9]+-[0-9]+-[0-9]+$') {
+        throw "Cannot register clone continuation notice for invalid user SID: $UserSid"
+    }
+    $powerShell = Join-Path $env:SystemRoot `
+        'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = '-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Phase Notice' `
+        -f $PSCommandPath
+    $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserSid
+    $principal = New-ScheduledTaskPrincipal -UserId $UserSid `
+        -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
+        -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $ContinuationNoticeTaskName -Action $action `
+        -Trigger $trigger -Principal $principal -Settings $settings -Force |
+        Out-Null
+    $task = Get-ScheduledTask -TaskName $ContinuationNoticeTaskName `
+        -ErrorAction Stop
+    # Task Scheduler may normalize a SID principal to COMPUTER\Account when it
+    # reads the registered task back. Compare the resolved SID instead of the
+    # two equivalent textual forms so a valid interactive notice is not
+    # rejected during the first clone boot.
+    $observedUserSid = Resolve-ScheduledTaskUserSid `
+        -Identity ([string]$task.Principal.UserId)
+    if ($observedUserSid -cne $UserSid) {
+        throw 'Could not register the interactive clone continuation notice task.'
+    }
+}
+
 function Register-CloneContinuationTask {
+    param([Parameter(Mandatory = $true)][string]$UserSid)
     $powerShell = Join-Path $env:SystemRoot `
         'System32\WindowsPowerShell\v1.0\powershell.exe'
     $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Phase Complete' `
@@ -758,19 +1020,27 @@ function Register-CloneContinuationTask {
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable `
         -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::FromMinutes(12))
-    Register-ScheduledTask -TaskName $ContinuationTaskName -Action $action `
-        -Trigger $trigger -Principal $principal -Settings $settings -Force |
-        Out-Null
-    $task = Get-ScheduledTask -TaskName $ContinuationTaskName -ErrorAction Stop
-    if ([string]$task.Principal.UserId -cne 'SYSTEM' -or
-        [string]$task.Principal.RunLevel -cne 'Highest') {
-        throw 'Could not register the SYSTEM clone continuation task.'
+    try {
+        Register-ScheduledTask -TaskName $ContinuationTaskName -Action $action `
+            -Trigger $trigger -Principal $principal -Settings $settings -Force |
+            Out-Null
+        $task = Get-ScheduledTask -TaskName $ContinuationTaskName -ErrorAction Stop
+        if ([string]$task.Principal.UserId -cne 'SYSTEM' -or
+            [string]$task.Principal.RunLevel -cne 'Highest') {
+            throw 'Could not register the SYSTEM clone continuation task.'
+        }
+        Register-CloneContinuationNoticeTask -UserSid $UserSid
+    } catch {
+        Unregister-CloneContinuationTask
+        throw
     }
 }
 
 function Unregister-CloneContinuationTask {
-    Unregister-ScheduledTask -TaskName $ContinuationTaskName -Confirm:$false `
-        -ErrorAction SilentlyContinue
+    foreach ($taskName in @($ContinuationTaskName, $ContinuationNoticeTaskName)) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false `
+            -ErrorAction SilentlyContinue
+    }
 }
 
 function Restart-ForProjectionVerification {
@@ -797,6 +1067,11 @@ function Wait-ForProjectionReceipt {
     throw 'System NVAPI verification did not publish a validated receipt within eight minutes.'
 }
 
+if ($Phase -ceq 'Notice') {
+    Show-CloneContinuationNotice
+    exit 0
+}
+
 $readyForHost = $false
 try {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -817,10 +1092,46 @@ try {
             throw "Licensed VgpuPortable.exe is missing: $Portable"
         }
         Wait-DlsEndpoint
+        $logRoot = Join-Path $Root 'logs'
+        if (-not (Test-Path -LiteralPath $logRoot -PathType Container)) {
+            New-Item -Path $logRoot -ItemType Directory -Force `
+                -ErrorAction Stop | Out-Null
+        }
+        $logRootItem = Get-Item -LiteralPath $logRoot -Force `
+            -ErrorAction Stop
+        if ($logRootItem -isnot [IO.DirectoryInfo] -or
+            ($logRootItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Clone log root must be a regular, non-reparse directory: $logRoot"
+        }
+        $portableOutput = Join-Path $logRoot 'vgpu-portable-output.txt'
+        $portableError = Join-Path $logRoot 'vgpu-portable-error.txt'
+        Remove-Item -LiteralPath $portableOutput, $portableError -Force `
+            -ErrorAction SilentlyContinue
         $process = Start-Process -FilePath $Portable -ArgumentList '/no-launch' `
-            -WorkingDirectory $Root -Wait -PassThru
+            -WorkingDirectory $Root -WindowStyle Hidden `
+            -RedirectStandardOutput $portableOutput `
+            -RedirectStandardError $portableError -Wait -PassThru
         if ($process.ExitCode -ne 0) {
-            throw "VgpuPortable.exe failed with exit code $($process.ExitCode)."
+            $details = @()
+            foreach ($candidate in @($portableError, $portableOutput)) {
+                if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                    continue
+                }
+                $candidateDetail = (@(Get-Content -LiteralPath $candidate `
+                    -Tail 24 -ErrorAction SilentlyContinue) -join ' | ').Trim()
+                if (-not [string]::IsNullOrWhiteSpace($candidateDetail)) {
+                    $details += ('{0}: {1}' -f
+                        [IO.Path]::GetFileName($candidate), $candidateDetail)
+                }
+            }
+            $detail = if ($details.Count -eq 0) {
+                'No child output was captured.'
+            } else {
+                $details -join ' || '
+            }
+            throw ("VgpuPortable.exe failed with exit code {0}. Logs: {1} / {2}. {3}" -f
+                $process.ExitCode, $portableOutput, $portableError, $detail)
         }
         $receipt = Read-And-ValidateResult -GuestUuid $guestUuid
     }
@@ -834,19 +1145,20 @@ try {
     # Run after licensed vGPU/DLS validation but before the existing internal
     # projection reboot. The trusted clone-only mode keeps the interactive
     # user's exact rollback baseline and starts its Local System enforcement
-    # task immediately, so that same reboot is also the no-MpsSvc verification
+    # task immediately, so that same reboot also verifies MpsSvc is available
     # boot. Complete mode only verifies. An interactive Auto retry safely
     # reapplies the currently attested profile while retaining the original
     # state.json baseline; this upgrades older clones and newly added settings.
     $guestLiteState = if ($Phase -ceq 'Complete') {
         $null = Read-And-ValidateGuestLitePayload
-        Read-And-ValidateGuestLiteState -RequireStopped
+        Read-And-ValidateGuestLiteState -RequireFirewallReady
     } else {
         Invoke-GuestLiteCloneProfile
     }
     if ($null -ne $projectionReceipt -and $Phase -cne 'Complete' -and
         [string]$guestLiteState.FirewallState -cne 'Stopped') {
-        Register-CloneContinuationTask
+        Register-CloneContinuationTask `
+            -UserSid ([string]$guestLiteState.UserSid)
         Disable-OneShotAutoLogon
         Remove-Item -LiteralPath $ErrorFile -Force -ErrorAction SilentlyContinue
         Restart-ForProjectionVerification
@@ -858,7 +1170,8 @@ try {
                 -Projection $projection -GuestUuid $guestUuid `
                 -PortableReceipt $receipt
         } else {
-            Register-CloneContinuationTask
+            Register-CloneContinuationTask `
+                -UserSid ([string]$guestLiteState.UserSid)
             Disable-OneShotAutoLogon
             Remove-Item -LiteralPath $ErrorFile -Force -ErrorAction SilentlyContinue
             if (Test-ProjectionPendingReceipt -Projection $projection `
@@ -880,12 +1193,15 @@ try {
         }
     }
 
-    # A host-ready receipt is issued only after one explicit post-profile
+    # A host-ready receipt is issued only after one current-boot, identity-bound
     # SYSTEM run has re-disabled reviewed services/tasks/processes and returned
-    # a clean result. This also catches clone-time rename/SID binding errors
-    # instead of leaving them hidden behind an old enforcement log.
-    $guestLiteEnforcement = Invoke-And-WaitGuestLiteEnforcement
-    $guestLiteState = Read-And-ValidateGuestLiteState -RequireStopped
+    # a clean result. Reuse the startup-triggered run when it already satisfies
+    # that contract; otherwise request exactly one measured fallback run.
+    $guestLiteEnforcement = Invoke-And-WaitGuestLiteEnforcement `
+        -ExpectedUserSid ([string]$guestLiteState.UserSid) `
+        -ExpectedMachineGuid ([string]$osIdentity.MachineGuid) `
+        -ExpectedComputerName ([string]$osIdentity.ComputerName)
+    $guestLiteState = Read-And-ValidateGuestLiteState -RequireFirewallReady
 
     $safeMarker = [ordered]@{
         schemaVersion = 4

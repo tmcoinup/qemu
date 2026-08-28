@@ -231,7 +231,7 @@ ISO=/home/ubuntu/images/iso/win10.iso
 尺寸档位和“不伪造 75 Hz 模式”的边界见
 [`G11-MONITOR-POOL.md`](G11-MONITOR-POOL.md)。
 
-正常新建品牌审计口径是主板 3、内存 4、SSD 5、GPU app-local 板卡 metadata 9、active
+普通新建品牌审计口径是主板 3、内存 5、SSD 5、GPU app-local 板卡 metadata 9、active
 键盘 3、可选相对鼠标 3；显示器是明确例外（新建 8 品牌/完整 11 品牌）。默认绝对
 指针只有 QEMU 通用 profile。GPU 板卡 metadata 的序列策略为 `not-exposed`，USB
 输入为 `none`/`iSerialNumber=0`；不会拿 mdev UUID 或虚构 `serial=` 充数。显示器
@@ -333,17 +333,16 @@ adapter_name = "<GPU_NAME>"
 改成同一个型号。per-mdev 配置由 unlock 在实例启动时读取，不需要重启
 `nvidia-vgpu-mgr`；名称必须是 1..31 个 ASCII 可打印字节。
 
-### 4. 用真实 PCI 身份启动 vGPU
+### 4. 用隔离 console 的真实 PCI 身份安装 GRID
 
 ```bash
-# 终端 A；保持前台运行
-./deploy/scripts/start-vm.sh "$VM_ID" --no-spoof --no-monitor-sync
+./deploy/scripts/vmctl.sh driver-install "$VM_ID"
 ```
 
-此时 QEMU 不添加任何 `x-pci-*` 消费卡覆盖。驱动安装前，Windows 可能只显示
-`Microsoft Basic Display Adapter`；原版 GRID 驱动成功绑定后应出现 NVIDIA
-适配器，但产品名可能继承当前 type 级标签。新装此时跳过 EDID 同步，是为了在关闭
-休眠/Fast Startup 前不离线写 NTFS；最终由收尾脚本完成同步。
+封装不添加任何 `x-pci-*` 消费卡覆盖。临时 `Microsoft Basic Display Adapter`
+承担本地窗口，真实 mdev 以 native PnP 存在但固定 `display=off`，因此 GRID 首次接管
+不会触发 R535 console 黑屏。安装完成后封装自动完整关机并离线认证 EDID/
+`NV_Modes`，默认保持关机供继续制作母盘。
 
 在 guest 管理员 PowerShell 中先确认 PnP 真 ID：
 
@@ -352,14 +351,12 @@ Get-PnpDevice -Class Display -PresentOnly | Format-List Status,FriendlyName,Inst
 # 1GB/nvidia-256 应为 SUBSYS_132510DE；2GB/nvidia-257 应为 SUBSYS_132610DE
 ```
 
-### 5. 安装 538.33 guest 驱动
+### 5. 验收 538.33 guest 驱动
 
-先在宿主核对安装资产 hash 和 INF `DriverVer`，再用自己的文件传输方式把已验证的
-GRID 538.33 安装包放进 Windows，在当前本地 QEMU 窗口中运行 NVIDIA 安装器。不要
-从 guest 下载脚本或安装包，也不需要远程管理服务。仓库 staging 中的 `553.24`
-只是历史误名；验收内容版本必须是 538.33 / `31.0.15.3833`。
-
-驱动安装完成后，让 Windows 完整关机。不要制作 base，也不要先切消费身份。
+上一步会在宿主核对安装资产 hash/INF `DriverVer`，在活动桌面执行审核过的 GRID
+538.33，并要求安装收据、完整关机和离线 INF/NV_Modes 认证全部通过。仓库 staging
+中的 `553.24` 只是历史误名；验收内容版本必须是 538.33 / `31.0.15.3833`。
+任一步失败都不要制作 base，也不要先切消费身份。
 
 ### 6. 统一完成身份、授权、电源和性能收尾
 

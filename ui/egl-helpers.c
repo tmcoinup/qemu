@@ -34,7 +34,7 @@ bool qemu_egl_angle_d3d;
 
 #ifdef CONFIG_GBM
 /*
- * 当前 EGL display 的回退逻辑只服务于下方 GBM/dma-buf 导入导出函数。
+ * 当前 EGL display 的回退逻辑只服务于下方 GBM/dma-buf 操作。
  * Windows 构建不启用 GBM，条件化定义可避免产生无调用者的静态函数。
  */
 static EGLDisplay qemu_egl_current_or_global_display(void)
@@ -537,6 +537,32 @@ void egl_dmabuf_create_fence(QemuDmaBuf *dmabuf)
         eglDestroySyncKHR(qemu_egl_display, sync);
         qemu_dmabuf_set_sync(dmabuf, NULL);
     }
+}
+
+int egl_create_native_fence_fd(void)
+{
+    EGLDisplay egl_display = qemu_egl_current_or_global_display();
+    EGLSyncKHR sync;
+    int fence_fd;
+
+    if (egl_display == EGL_NO_DISPLAY ||
+        eglGetCurrentContext() == EGL_NO_CONTEXT ||
+        !epoxy_has_egl_extension(egl_display,
+                                 "EGL_KHR_fence_sync") ||
+        !epoxy_has_egl_extension(egl_display,
+                                 "EGL_ANDROID_native_fence_sync")) {
+        return -1;
+    }
+
+    sync = eglCreateSyncKHR(egl_display,
+                            EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
+    if (sync == EGL_NO_SYNC_KHR) {
+        return -1;
+    }
+    glFlush();
+    fence_fd = eglDupNativeFenceFDANDROID(egl_display, sync);
+    eglDestroySyncKHR(egl_display, sync);
+    return fence_fd;
 }
 
 #endif /* CONFIG_GBM */

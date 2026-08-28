@@ -29,23 +29,45 @@ def require(condition: bool, message: str) -> None:
 
 expected = {
     (1920, 1080),
-    (1600, 900),
     (1360, 768),
     (1280, 1024),
     (1280, 960),
     (1280, 768),
     (1280, 720),
     (1024, 768),
-    (800, 600),
     (640, 480),
 }
 policy_set = set(modes.mode_set(modes.FHD_NV_MODES_POLICY))
 require(policy_set == expected, f"policy mode set differs: {sorted(policy_set)}")
-require((1600, 900) in policy_set, "1600x900 was lost")
 require(not any(modes.is_16_10(mode) for mode in policy_set), "policy has 16:10")
-require(len(policy_set) == 10, f"policy is not the reviewed 10-mode set: {policy_set}")
+require(len(policy_set) == 8, f"policy is not the reviewed 8-mode set: {policy_set}")
+require(
+    all(modes.is_r535_console_safe_mode(mode) for mode in policy_set),
+    "policy contains an R535 page-unsafe console mode",
+)
 
-legacy_expected = expected | {
+page_unsafe_expected = expected | {(1600, 900), (800, 600)}
+require(
+    set(modes.mode_set(modes.PAGE_UNSAFE_FHD_NV_MODES_POLICY))
+    == page_unsafe_expected,
+    "reviewed page-unsafe 10-mode migration source changed",
+)
+require(
+    modes.r535_console_frame_bytes((1680, 1050)) == 0x6CB100,
+    "observed 1680x1050 pitch-aligned R535 frame length changed",
+)
+for unsafe_mode in ((1680, 1050), (1600, 900), (800, 600)):
+    require(
+        not modes.is_r535_console_safe_mode(unsafe_mode),
+        f"known R535 page-unsafe mode was accepted: {unsafe_mode}",
+    )
+require(
+    modes.r535_console_frame_bytes((1360, 768)) == 0x408000
+    and modes.is_r535_console_safe_mode((1360, 768)),
+    "1360x768 pitch padding was not modeled correctly",
+)
+
+legacy_expected = page_unsafe_expected | {
     (1600, 1200),
     (1600, 1024),
     (1440, 1080),
@@ -89,6 +111,9 @@ require(changed and policy == modes.FHD_NV_MODES_POLICY, "source was not rewritt
 policy, changed = modes.locked_policy_for(modes.LEGACY_FHD_NV_MODES_POLICY)
 require(changed and policy == modes.FHD_NV_MODES_POLICY,
         "reviewed legacy policy was not migrated")
+policy, changed = modes.locked_policy_for(modes.PAGE_UNSAFE_FHD_NV_MODES_POLICY)
+require(changed and policy == modes.FHD_NV_MODES_POLICY,
+        "reviewed page-unsafe policy was not migrated")
 policy, changed = modes.locked_policy_for(modes.FHD_NV_MODES_POLICY)
 require(not changed and policy == modes.FHD_NV_MODES_POLICY, "policy is not idempotent")
 
@@ -101,8 +126,15 @@ require(
 )
 require(
     hashlib.sha256(encoded).hexdigest()
-    == "f1eb560018991dfbe711341590a0b329fd3c03b977e953c4aa7db44bce37f8a2",
+    == "dc209fe34f9089cb108aa7d6cf45c96af189615d856d627f9b3250bcf98d1399",
     "reviewed G-11 policy REG_MULTI_SZ bytes changed",
+)
+require(
+    hashlib.sha256(
+        modes.encode_reg_multi_sz(modes.PAGE_UNSAFE_FHD_NV_MODES_POLICY)
+    ).hexdigest()
+    == "f1eb560018991dfbe711341590a0b329fd3c03b977e953c4aa7db44bce37f8a2",
+    "reviewed page-unsafe G-11 migration source changed",
 )
 require(
     hashlib.sha256(
@@ -125,7 +157,7 @@ for malformed in (encoded[:-2], encoded + b"\x00", b"x\x00\x00"):
 
 unknown_values = [
     modes.GRID_53833_NV_MODES + ("1440x900x8,16,32,64=1;",),
-    (modes.FHD_NV_MODES_POLICY[0].replace("1600x900", "1600x1000"),),
+    (modes.FHD_NV_MODES_POLICY[0].replace("1360x768", "1360x767"),),
     (modes.FHD_NV_MODES_POLICY[0].replace("=7FF", "=7FE"),),
 ]
 for unknown in unknown_values:
@@ -283,6 +315,11 @@ require(
     "PowerShell reviewed legacy migration source differs from host policy",
 )
 require(
+    extract_ps_array("NvidiaPageUnsafeFhdNvModesPolicy")
+    == modes.PAGE_UNSAFE_FHD_NV_MODES_POLICY,
+    "PowerShell reviewed page-unsafe migration source differs from host policy",
+)
+require(
     extract_ps_array("NvidiaFhdNvModesPolicy") == modes.FHD_NV_MODES_POLICY,
     "PowerShell FHD policy differs from host policy",
 )
@@ -335,6 +372,7 @@ require(first_write >= 0, "NVIDIA policy function has no registry write")
 for preflight in (
     "Assert-NvidiaFhdModePolicy $NvidiaFhdNvModesPolicy",
     "ConvertTo-NvModeCanonical $NvidiaLegacyFhdNvModesPolicy",
+    "ConvertTo-NvModeCanonical $NvidiaPageUnsafeFhdNvModesPolicy",
     "GetValueKind($identityName)",
     "$NvidiaGrid53833ProviderNames",
     "$NvidiaGrid53833DriverVersion",
@@ -343,6 +381,7 @@ for preflight in (
     "$NvidiaGrid53833InfSha256",
     "GetValueKind('NV_Modes')",
     "Test-StringArrayEqual -Left $existingText -Right $legacyPolicyText",
+    "Test-StringArrayEqual -Left $existingText -Right $pageUnsafePolicyText",
     "Refusing to overwrite unknown NV_Modes",
 ):
     position = policy_function.find(preflight)
@@ -357,4 +396,4 @@ require(main_policy_call >= 0 and main_edid_write >= 0,
 require(main_policy_call < main_edid_write,
         "guest EDID writes can occur before NVIDIA driver authentication")
 
-print("OK: locked GRID 538.33/legacy NV_Modes -> 10-mode G-11 FHD policy")
+print("OK: locked GRID 538.33/legacy NV_Modes -> 8-mode R535 page-safe G-11 FHD policy")

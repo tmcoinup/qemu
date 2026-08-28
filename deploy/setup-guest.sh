@@ -6,7 +6,9 @@
 # subsequent code update just rerun individual installers.
 #
 # What it does (in order):
-#   1. Install vGPU GRID 538.33 driver       (install-vgpu-driver.sh)
+#   1. Verify that GRID installation was completed through the dedicated safe
+#      host workflow (`vmctl.sh driver-install ID`); this script never installs
+#      a display driver into a running native/rdp console.
 #   2. Install ivshmem.sys driver            (install-ivshmem-driver.sh)
 #   3. Install NvDisplayContainer Windows    (install-nv-service.sh)
 #      service + nv_stream_relay + AudioSvcHost, set
@@ -185,14 +187,11 @@ fi
 step() { echo; echo "════════════════════ $* ════════════════════"; }
 
 if [[ $SKIP_VGPU -eq 0 ]]; then
-    step "[1/7] vGPU 16.x driver (538.33; legacy staging name 553.24)"
-    ./install-vgpu-driver.sh "$VM_ID" $ip_arg --no-reboot || {
-        echo "[setup-guest] !! vGPU driver silent install 失败"
-        echo "  这是已知 NVIDIA GRID 538.33 quirk：silent + vGPU mdev 不 work，必须 GUI 装。"
-        echo "  → RDP 进 guest，双击 C:\\nv\\553.24.exe 选 Express install。"
-        echo "  → 装好 reboot 后 shutdown，再运行 ./deploy/scripts/seal-base.sh $VM_ID BASE_NAME 生成具名 base，"
-        echo "    之后所有 fresh VM 跳过这步。"
-    }
+    step "[1/7] vGPU 16.x driver uses the dedicated host-safe workflow"
+    echo "[setup-guest] 为避免 R535 首次接管 console 时黑屏，本脚本不再在线重装显示驱动。" >&2
+    echo "[setup-guest] 先完整关机并运行：./deploy/scripts/vmctl.sh driver-install ${VM_ID}" >&2
+    echo "[setup-guest] 完成后正常启动，再运行：./deploy/setup-guest.sh ${VM_ID} --skip-vgpu" >&2
+    exit 2
 fi
 
 if [[ $SKIP_LICENSE -eq 0 ]]; then

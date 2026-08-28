@@ -7,6 +7,7 @@ unset VM_INSTANCE_DIR VM_INSTANCE_ID VM_STORAGE_COMPAT_FALLBACK
 unset VM_SHARED_DIR VM_CONFIG_DIR VM_DISK_DIR VM_BASE_DIR VM_NVRAM_DIR
 unset VM_CONTROL_DIR VM_RUN_DIR VM_LOG_DIR VM_ASSET_DIR
 unset VM_DISK_ARCHIVE_DIR VM_BASE_ARCHIVE_DIR VM_NVRAM_BACKUP_DIR
+unset VGPU_HOST_CONFIG
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 packager="$root/deploy/package-gpuz-profile.sh"
@@ -19,6 +20,10 @@ trap 'rm -rf "$tmp"' EXIT
 image_root="$tmp/images"
 vm_root="$tmp/vms"
 stage_dir="$tmp/staging"
+test_host_config="$tmp/vgpu-host.conf"
+printf '%s\n' 'VGPU_HOST_FB_TIER_MB=2048' >"$test_host_config"
+chmod 0600 "$test_host_config"
+export VGPU_HOST_CONFIG=$test_host_config
 locked_gpuz_source="${GPUZ_TEST_SOURCE:-/home/ubuntu/images/candidates/gpuz-2.70-audit/GPU-Z.2.70.0.exe}"
 
 fail() {
@@ -298,13 +303,32 @@ rg -Fq "'(?i)\\b(no|off|false|0)\\s*$'" "$guest_entry" ||
     fail "BCD flag parsing is not fail-closed"
 rg -Fq 'Microsoft Windows Hardware Compatibility Publisher' "$guest_entry" ||
     fail "guest entry lacks the production signer gate"
-if rg -Fq 'Get-WindowsDriver -Online -Driver $infName' "$guest_entry"; then
-    fail "guest entry incorrectly requires one expanded DISM model row"
+if rg -n 'Get-WindowsDriver[[:space:]`].*-Online' "$guest_entry"; then
+    fail "guest entry still performs a slow online DISM driver-store scan"
 fi
-rg -Fq '$package = $packages[0]' "$guest_entry" ||
-    fail "guest entry does not retain the unique package-level DriverStore row"
-rg -Fq '([string]$package.OriginalFileName)' "$guest_entry" ||
-    fail "guest entry does not use the package-level canonical DriverStore INF"
+rg -Fq 'Get-CimInstance Win32_PnPSignedDriver `' "$guest_entry" ||
+    fail "guest entry does not query the active signed PnP row directly"
+rg -Fq -- "-Filter \"DeviceID='\$escapedPnpDeviceId'\"" "$guest_entry" ||
+    fail "guest entry still enumerates every signed PnP driver"
+rg -Fq "'nvgridsw.inf'" "$guest_entry" ||
+    fail "guest entry does not bind the GRID INF to the loaded kernel directory"
+rg -Fq "'\Anvgridsw\.inf_amd64_[0-9a-f]{16}\z'" "$guest_entry" ||
+    fail "guest entry does not accept only the standard x64 GRID DriverStore directory"
+rg -Fq '$publishedInfHash -cne $driverStoreInfHash' "$guest_entry" ||
+    fail "guest entry does not bind the published active INF to DriverStore"
+rg -Fq -- "-LoadedDriver \$driverItem" "$guest_entry" ||
+    fail "driver catalog validation is not bound to the loaded kernel image"
+healthy_display_body=$(sed -n \
+    '/^function Get-HealthyDisplayState {/,/^function Get-HealthyDisplayStateWithRetry {/p' \
+    "$guest_entry")
+catalog_gate_line=$(grep -nF 'Get-ValidatedDriverCatalog `' \
+    <<<"$healthy_display_body" | head -1 | cut -d: -f1)
+kernel_signature_line=$(grep -nF \
+    'Get-AuthenticodeSignature -LiteralPath $driverPath' \
+    <<<"$healthy_display_body" | head -1 | cut -d: -f1)
+[[ -n "$catalog_gate_line" && -n "$kernel_signature_line" &&
+   "$catalog_gate_line" -lt "$kernel_signature_line" ]] ||
+    fail "catalog intermediates are not validated before the loaded SYS leaf"
 rg -Fq 'CatalogFile(?:\.[A-Za-z0-9_.-]+)?' "$guest_entry" ||
     fail "guest entry does not resolve the actual DriverStore catalog"
 rg -Fq "Get-AuthenticodeSignature -LiteralPath \$catalogItem.FullName" \

@@ -79,13 +79,14 @@ assert_eq 10 "$listed" 'printed SSD catalog count'
 assert_eq 10 "$listed_default" 'printed automatic SSD count'
 assert_eq 0 "$listed_explicit" 'printed non-automatic SSD count'
 
-# i7-4820K provides CPU-side PCIe Gen3 and each active X79 board has one
-# audited passive x4 adapter path, so automatic creation prefers NVMe.  The
-# Sandy Bridge-E i7-3820 remains honest Gen2 and must fall back to SATA.
+# The Ivy Bridge-E i7-4820K/i7-4930K provide CPU-side PCIe Gen3 and each active
+# X79 board has one audited passive x4 adapter path, so automatic creation may
+# prefer NVMe.  The Sandy Bridge-E i7-3820 remains honest Gen2 and falls back.
 for platform in \
     i7-4820k-p9x79-micron-16g \
     i7-4820k-x79-up4-elpida-12g \
-    i7-4820k-x79-extreme4-kingston-8g; do
+    i7-4820k-x79-extreme4-kingston-8g \
+    i7-4930k-p9x79-samsung-4g; do
     hardware_storage_combination_allowed "$platform" nvme 3 4 m.2-2280 || \
         fail "$platform lost its audited Gen3 x4 NVMe adapter path"
 done
@@ -144,4 +145,4 @@ if (
     fail 'catalog accepted a default/explicit SSD overlap'
 fi
 
-echo 'PASS: 10 exact-size SSDs; compatible X79/i7-4820K creation prefers three Gen3 x4 NVMe rows'
+echo 'PASS: 10 exact-size SSDs; compatible X79/Ivy Bridge-E creation prefers three Gen3 x4 NVMe rows'

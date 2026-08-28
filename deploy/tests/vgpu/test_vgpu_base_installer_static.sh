@@ -210,8 +210,14 @@ require_text 'mv -fT -- "$GPUZ_DEST_TMP" "$DEST_DIR/GPU-Z.exe"' \
     "atomic external GPU-Z publication"
 require_text "sed -i 's/\$/\\r/' \"\$guest_lite_launcher\"" \
     "Windows-safe Guest Lite launcher conversion"
-require_text 'rm -rf -- "$MOUNT_DIR/ProgramData/G11GuestLite"' \
-    "stale clone-bound Guest Lite state removal"
+require_text 'for stale_clone_root in \' \
+    "fixed stale clone-state cleanup loop"
+require_text '"$MOUNT_DIR/ProgramData/G11GuestLite" \' \
+    "stale clone-bound Guest Lite cleanup target"
+require_text '[[ ! -L "$stale_clone_root" ]]' \
+    "stale clone-state symlink rejection"
+require_text 'rm -rf -- "$stale_clone_root"' \
+    "stale clone-bound state removal"
 require_text 'cp --reflink=never -- "$GUEST_LITE_STAGE"/* "$GUEST_LITE_DEST/"' \
     "Guest Lite payload publication"
 require_text 'verify_guest_lite_dir "$GUEST_LITE_DEST"' \

@@ -16,6 +16,17 @@ qtest. For a focused
 iteration use `--filter TEXT`; use `--no-build` only when the build directory
 is already current.
 
+家用 6C/12T 统一创建池的聚焦回归：
+
+```bash
+bash deploy/tests/vgpu/test_create_6c12t_pool.sh
+bash deploy/tests/vgpu/test_hardware_legality.sh
+bash deploy/tests/vgpu/test_hardware_pool_audit.sh
+```
+
+它在临时目录校验 i7-4930K 的三品牌主板、每容量 4–5 个内存品牌和五品牌 SSD，
+并通过统一 `create-vm.sh` 创建代表配置；不修改真实 VM 或宿主设置。
+
 最新 V-11 通用能力在 G-11 的聚焦回归：
 
 ```bash
@@ -44,12 +55,15 @@ NVMe 或 GDM 配置。
 
 ```bash
 bash deploy/tests/vgpu/test_vgpu_one_click_package.sh
+bash deploy/tests/vgpu/test_r535_black_screen_recovery_static.sh
+bash deploy/tests/vgpu/test_driver_install_safe_mode.sh
 bash deploy/tests/qemu/test_sdl_no_sleep_static.sh
 ./deploy/tests/run-g11-sdl.sh --static-only
 ```
 
 它使用隔离配置验证任意 VM ID、A/B 分发、off/动态/重复配置拒绝和配置竞态绑定，
-不会启动或修改真实 VM。
+并验证新镜像首次装 GRID 时必须使用标准 VGA + mdev `display=off`、完整关机后
+再离线认证 NV_Modes；不会启动或修改真实 VM。
 
 无 VM 绑定 portable、GPU-Z 显式选装、基础镜像注入与克隆的聚焦回归：
 
@@ -60,6 +74,7 @@ bash deploy/tests/vgpu/test_gpuz_profile_package.sh
 bash deploy/tests/vgpu/test_gpuz_registry_absence_static.sh
 bash deploy/tests/vgpu/test_vgpu_base_installer_static.sh
 bash deploy/tests/vgpu/test_vgpu_base_clone.sh
+bash deploy/tests/vgpu/test_g11_private_base_refresh.sh
 bash deploy/tests/vgpu/test_wegame_base_cleanup_static.sh
 ```
 

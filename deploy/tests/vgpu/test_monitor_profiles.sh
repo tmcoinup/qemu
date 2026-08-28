@@ -274,11 +274,11 @@ from pathlib import Path
 root = Path(os.environ['OUT_DIR'])
 files = list(root.glob('*.bin'))
 assert len(files) == int(os.environ['KEY_COUNT'])
-expected_std = bytes.fromhex('d1c0a9c0818081c00101010101010101')
+expected_std = bytes.fromhex('d1c0818081c001010101010101010101')
 expected_modes = {
-    (1920, 1080), (1600, 900), (1360, 768),
+    (1920, 1080), (1360, 768),
     (1280, 1024), (1280, 960), (1280, 768), (1280, 720),
-    (1024, 768), (800, 600), (640, 480),
+    (1024, 768), (640, 480),
 }
 
 def advertised_modes(edid):
@@ -344,6 +344,9 @@ for path in files:
     modes = advertised_modes(edid)
     assert modes == expected_modes, (path, modes)
     assert not any(x * 10 == y * 16 for x, y in modes), (path, modes)
+    for x, y in modes:
+        pitch = ((x * 4 + 127) // 128) * 128
+        assert (pitch * y) % 4096 == 0, (path, (x, y), pitch * y)
 PY
 
 # Exercise the host fail-closed gate with structurally valid checksums but an
@@ -353,6 +356,30 @@ PY
 cat >"$tmp/fake-qemu-edid" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ ${1:-} == -h ]]; then
+    case "${FAKE_QEMU_EDID_DIALECT:-g11-legacy}" in
+        current)
+            printf '%s\n' \
+                '--manufacture-week' '--manufacture-year' \
+                '--min-vfreq-hz' '--max-vfreq-hz' \
+                '--min-hfreq-khz' '--max-hfreq-khz' \
+                '--max-pixel-clock-mhz'
+            ;;
+        g11-legacy)
+            printf '%s\n' \
+                '--week' '--year' '--range-min-v' '--range-max-v' \
+                '--range-min-h' '--range-max-h' '--max-clock'
+            ;;
+        unsupported)
+            printf '%s\n' '--unrelated-option'
+            ;;
+        *) exit 2 ;;
+    esac
+    exit 0
+fi
+if [[ -n ${FAKE_QEMU_EDID_ARGS_TRACE:-} ]]; then
+    printf '%s\n' "$@" >"$FAKE_QEMU_EDID_ARGS_TRACE"
+fi
 out=""
 while (( $# > 0 )); do
     case "$1" in
@@ -368,8 +395,10 @@ from pathlib import Path
 source, output, mutation = sys.argv[1:]
 e = bytearray(Path(source).read_bytes())
 # The saved good blob is post-sync; reconstruct qemu-edid's intentionally
-# empty source standard-timing slots before applying each malformed mutation.
+# empty source standard-timing slots and ordinary 800x600 established bit
+# before applying each malformed mutation.
 e[38:54] = b'\x01\x01' * 8
+e[35] |= 0x01
 if mutation == 'extra-cta-vic':
     e[130] = 8
     e[132:136] = bytes((0x43, 16, 4, 5))
@@ -422,6 +451,59 @@ env PYTHONOPTIMIZE=1 GOOD_EDID="$good_edid" EDID_MUTATION=none \
     --instance "$negative_instance" \
     --generate-only "$tmp/optimized-valid.bin" >/dev/null
 
+# A branch checkout does not remove build/.  G-11's old option names also
+# identify its reviewed descriptor layout.  A newer dialect must fail before
+# generation rather than receiving a name-only translation.
+args_trace="$tmp/qemu-edid-g11-legacy.args"
+env GOOD_EDID="$good_edid" EDID_MUTATION=none \
+    FAKE_QEMU_EDID_DIALECT=g11-legacy \
+    FAKE_QEMU_EDID_ARGS_TRACE="$args_trace" \
+    QEMU_EDID="$tmp/fake-qemu-edid" \
+    "$REPO_ROOT/deploy/host/sync-monitor-cache.sh" \
+    --monitor-profile dell-p2419h --serial CC3P12345678 \
+    --instance "$negative_instance" \
+    --generate-only "$tmp/g11-legacy-valid.bin" >/dev/null
+expected_options=(
+    --week --year --range-min-v --range-max-v
+    --range-min-h --range-max-h --max-clock
+)
+for option in "${expected_options[@]}"; do
+    grep -Fxq -- "$option" "$args_trace" || \
+        fail "G-11 qemu-edid invocation omitted $option"
+done
+
+current_args_trace="$tmp/qemu-edid-current.args"
+if env GOOD_EDID="$good_edid" EDID_MUTATION=none \
+        FAKE_QEMU_EDID_DIALECT=current \
+        FAKE_QEMU_EDID_ARGS_TRACE="$current_args_trace" \
+        QEMU_EDID="$tmp/fake-qemu-edid" \
+        "$REPO_ROOT/deploy/host/sync-monitor-cache.sh" \
+        --monitor-profile dell-p2419h --serial CC3P12345678 \
+        --instance "$negative_instance" \
+        --generate-only "$tmp/current.bin" \
+        >"$tmp/current.out" 2>"$tmp/current.err"; then
+    fail "host monitor sync accepted another branch's qemu-edid CLI"
+fi
+grep -Fq '来自其他 QEMU 分支' "$tmp/current.err" || \
+    fail "cross-branch qemu-edid rejection was not actionable"
+[[ ! -e $current_args_trace && ! -e $tmp/current.bin ]] || \
+    fail "cross-branch qemu-edid reached generation"
+
+if env GOOD_EDID="$good_edid" EDID_MUTATION=none \
+        FAKE_QEMU_EDID_DIALECT=unsupported \
+        QEMU_EDID="$tmp/fake-qemu-edid" \
+        "$REPO_ROOT/deploy/host/sync-monitor-cache.sh" \
+        --monitor-profile dell-p2419h --serial CC3P12345678 \
+        --instance "$negative_instance" \
+        --generate-only "$tmp/unsupported.bin" \
+        >"$tmp/unsupported.out" 2>"$tmp/unsupported.err"; then
+    fail "host monitor sync accepted an unknown qemu-edid CLI"
+fi
+grep -Fq '参数接口不受支持' "$tmp/unsupported.err" || \
+    fail "unknown qemu-edid CLI rejection was not actionable"
+[[ ! -e $tmp/unsupported.bin ]] || \
+    fail "unknown qemu-edid CLI produced an EDID"
+
 GUEST_MONITOR="$REPO_ROOT/deploy/guest/spoof-monitor.ps1"
 GUEST_APPLY="$REPO_ROOT/deploy/guest/apply-vm-profile.ps1"
 for reserved_serial in H4ZMC01676 H4ZMC01889 2920000167575 2920000116680; do
@@ -430,8 +512,14 @@ for reserved_serial in H4ZMC01676 H4ZMC01889 2920000167575 2920000116680; do
     grep -Fq "$reserved_serial" "$GUEST_APPLY" || \
         fail "guest profile validator omits reserved serial $reserved_serial"
 done
-grep -Fq '[pscustomobject]@{ X = 1600; Aspect = 3 }, # 1600x900' \
-    "$GUEST_MONITOR" || fail "online monitor rescue omits 1600x900"
+if grep -Fq '[pscustomobject]@{ X = 1600; Aspect = 3 }, # 1600x900' \
+        "$GUEST_MONITOR"; then
+    fail "online monitor rescue still publishes page-unsafe 1600x900"
+fi
+grep -Fq '$edid[35] = 0x20' "$GUEST_MONITOR" || \
+    fail "online monitor rescue still advertises page-unsafe 800x600"
+grep -Fq 'Test-R535ConsoleSafeMode' "$GUEST_MONITOR" || \
+    fail "online monitor rescue does not validate R535 page alignment"
 if grep -Eq 'X = (1680|1440).*16:10|X = 1280; Aspect = 0' "$GUEST_MONITOR"; then
     fail "online monitor rescue publishes a 16:10 standard timing"
 fi
@@ -483,8 +571,8 @@ from pathlib import Path
 e = Path(os.environ['PS_EDID']).read_bytes()
 assert len(e) == 256
 assert [sum(e[i:i + 128]) & 0xff for i in (0, 128)] == [0, 0]
-assert e[35:38] == bytes.fromhex('210800')
-assert e[38:54] == bytes.fromhex('d1c0a9c0818081c00101010101010101')
+assert e[35:38] == bytes.fromhex('200800')
+assert e[38:54] == bytes.fromhex('d1c0818081c001010101010101010101')
 assert e[72:90] == bytes.fromhex('000000f7000a004a80000000000000000000')
 assert e[128:135] == bytes.fromhex('02030700421004')
 assert e[135:139] == bytes.fromhex('000000ff')

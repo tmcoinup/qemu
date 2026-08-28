@@ -77,7 +77,7 @@ load_valid() {
 }
 
 # The normalized catalog is itself a contract.  New VMs use only the reviewed
-# consumer X79 pool: two 4C/8T CPUs without integrated graphics, three real
+# consumer X79 pool: two 4C/8T CPUs plus a normal-pool 6C/12T CPU, three real
 # board brands and the 4/8/12/16 GiB capacity policy.  Historical H81/H97/
 # B150/B360 rows remain loadable only as archived or legacy compatibility
 # records; in particular, 6 GiB is not selectable for a new VM.
@@ -85,15 +85,15 @@ hardware_profile_validate_catalog || fail 'hardware catalog validation failed'
 vgpu_profile_validate_catalog || fail 'vGPU catalog validation failed'
 # The legality function defensively revalidates both immutable catalogs on
 # every call.  This test validates them once above, then exercises many field
-# mutations; stubbing only the repeated catalog scan keeps the 312-row matrix
+# mutations; stubbing only the repeated catalog scan keeps the 366-row matrix
 # from turning the assertions into a quadratic-time test.
 hardware_profile_validate_catalog() { return 0; }
 vgpu_profile_validate_catalog() { return 0; }
-assert_eq 10 "${#CPU_PROFILES[@]}" 'CPU catalog count'
+assert_eq 11 "${#CPU_PROFILES[@]}" 'CPU catalog count'
 assert_eq 16 "${#BOARD_PROFILES[@]}" 'board catalog count'
-assert_eq 37 "${#MEMORY_PROFILES[@]}" 'memory catalog count'
-assert_eq 312 "${#HARDWARE_COMBINATIONS[@]}" 'combination catalog count'
-assert_eq 48 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new count'
+assert_eq 45 "${#MEMORY_PROFILES[@]}" 'memory catalog count'
+assert_eq 366 "${#HARDWARE_COMBINATIONS[@]}" 'combination catalog count'
+assert_eq 102 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new count'
 assert_eq 0 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" 'explicit-new count'
 assert_eq 261 "${#HARDWARE_ARCHIVED_PROFILE_KEYS[@]}" 'archived count'
 assert_eq 3 "${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}" 'legacy count'
@@ -105,11 +105,11 @@ for fixture_row in "${HARDWARE_COMBINATIONS[@]}"; do
         "$fixture_key indexed combination row"
 done
 
-assert_eq $'i7-3820\ni7-4820k' \
+assert_eq $'i7-3820\ni7-4820k\ni7-4930k' \
     "$(for cpu in $(cpu_profile_keys); do
         [[ -n "$(hardware_profile_component_candidates "$cpu" '' '')" ]] &&
             printf '%s\n' "$cpu"
-    done)" 'two active consumer 4C/8T CPU profiles'
+    done)" 'three active consumer X79 CPU profiles'
 assert_eq $'g3220\ni3-4130\ni5-4460\ni5-4570\ni5-4590\ni7-4790\ni5-6500\ni3-8100' \
     "$(for cpu in $(cpu_profile_keys); do
         [[ -z "$(hardware_profile_component_candidates "$cpu" '' '')" ]] &&
@@ -165,20 +165,20 @@ for fixture_row in "${HARDWARE_COMBINATIONS[@]}"; do
         *) fail "$fixture_platform has unsupported active capacity $MEM_TOTAL_MB" ;;
     esac
 done
-assert_eq 12 "$count_4g" 'active 4 GiB combination count'
+assert_eq 24 "$count_4g" 'active 4 GiB combination count'
 assert_eq 0 "$count_6g" 'active 6 GiB combination count'
-assert_eq 12 "$count_8g" 'active 8 GiB combination count'
-assert_eq 12 "$count_12g" 'active 12 GiB combination count'
-assert_eq 12 "$count_16g" 'active 16 GiB combination count'
+assert_eq 26 "$count_8g" 'active 8 GiB combination count'
+assert_eq 26 "$count_12g" 'active 12 GiB combination count'
+assert_eq 26 "$count_16g" 'active 16 GiB combination count'
 for fixture_board in asus-p9x79 gigabyte-x79-up4 asrock-x79-extreme4; do
     [[ "$active_boards" == *"|$fixture_board|"* ]] || \
         fail "active X79 board is missing: $fixture_board"
 done
-for fixture_brand in Kingston Samsung Elpida Micron; do
+for fixture_brand in Kingston Samsung Elpida Micron 'SK hynix'; do
     [[ "$active_memory_brands" == *"|$fixture_brand|"* ]] || \
         fail "active memory brand is missing: $fixture_brand"
 done
-for fixture_cpu in i7-3820 i7-4820k; do
+for fixture_cpu in i7-3820 i7-4820k i7-4930k; do
     for fixture_board in asus-p9x79 gigabyte-x79-up4 asrock-x79-extreme4; do
         for fixture_capacity in 4096 8192 12288 16384; do
             [[ "$active_cpu_board_capacity_seen" == \
@@ -212,6 +212,9 @@ assert_eq i7-3820-p9x79-kingston-4g \
 assert_eq i7-4820k-p9x79-elpida-12g \
     "$(hardware_profile_component_candidates i7-4820k asus-p9x79 elpida-ebj40ug8bfw0-3x4)" \
     'reviewed high-frequency 12 GiB component combination'
+assert_eq i7-4930k-p9x79-samsung-4g \
+    "$(hardware_profile_component_candidates i7-4930k asus-p9x79 samsung-m378b5773dh0-1866-2x2)" \
+    'reviewed Samsung DDR3-1866 minimum-capacity 6C/12T combination'
 assert_eq '' \
     "$(hardware_profile_component_candidates g3220 gigabyte-h97-d3h kvr16n11s8-2x4)" \
     'archived board excluded from new component selection'

@@ -41,6 +41,16 @@ grep -Fq 'failure_retry_after_us' "$VFIO_HEADER" \
     || fail "REGION source failures can retry at the full display rate"
 grep -Fq 'VFIO_REGION_FAILURE_RETRY_US' "$VFIO_DISPLAY" \
     || fail "REGION retry work no longer has a bounded backoff"
+grep -Fq 'vfio_pci_is(vdev, PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID)' \
+    "$VFIO_DISPLAY" \
+    || fail "NVIDIA REGION no longer has a vendor-scoped page-safety gate"
+grep -Fq '!QEMU_IS_ALIGNED(staging_size, qemu_real_host_page_size())' \
+    "$VFIO_DISPLAY" \
+    || fail "R535 page-unsafe scanouts can replace the last good surface"
+grep -Fq 'R535 presentation rounds it' "$VFIO_DISPLAY" \
+    || fail "R535 pixel-length failure no longer has an actionable diagnostic"
+grep -Fq 'select a page-safe guest mode such as 1920x1080' "$VFIO_DISPLAY" \
+    || fail "R535 diagnostic does not identify a safe recovery mode"
 grep -Fq 'vfio_display_region_mark_recovered(dpy);' "$VFIO_DISPLAY" \
     || fail "REGION recovery no longer forces and reports a full staged frame"
 grep -Fq 'qemu_console_surface(dpy->con) != surface' "$VFIO_DISPLAY" \

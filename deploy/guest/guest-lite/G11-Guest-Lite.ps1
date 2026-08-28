@@ -117,8 +117,13 @@ $RegistryPlan = @(
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'PublishUserActivities'; Type = 'DWord'; Value = 0; Group = 'Cloud' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'UploadUserActivities'; Type = 'DWord'; Value = 0; Group = 'Cloud' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; Name = 'AllowCrossDeviceClipboard'; Type = 'DWord'; Value = 0; Group = 'Cloud' },
-    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds'; Name = 'EnableFeeds'; Type = 'DWord'; Value = 0; Group = 'NewsWeather' },
-    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Feeds'; Name = 'ShellFeedsTaskbarViewMode'; Type = 'DWord'; Value = 2; Group = 'NewsWeather' },
+    # Some sealed Windows 10 images protect both the supported machine Feeds
+    # policy and the redundant per-user shell preference. News and interests is
+    # unrelated to the GPU/application compatibility contract, so request both
+    # values only when the image permits it. Never take registry ownership,
+    # change an ACL, or fail clone initialization for this cosmetic setting.
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds'; Name = 'EnableFeeds'; Type = 'DWord'; Value = 0; Group = 'NewsWeather'; Required = $false },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Feeds'; Name = 'ShellFeedsTaskbarViewMode'; Type = 'DWord'; Value = 2; Group = 'NewsWeather'; Required = $false },
 
     # Disable the per-user notification master switch, application/lock-screen
     # toast policy, Action Center UI, and Windows Security notifications. These
@@ -221,9 +226,10 @@ $DefenderPreferencePlan = @(
 
 # Exact service names only. BFE and the rest of core networking, audio,
 # printing, BITS, cryptography, AppX infrastructure, and NVIDIA services remain
-# untouched. MpsSvc is the one explicit firewall exception requested for the
-# controlled VM: profiles are disabled first, then its startup is disabled.
-# Missing services are harmless and are reported as such.
+# untouched. MpsSvc remains in the inventory so rollback retains its original
+# state, but it is handled separately: the three firewall profiles are disabled
+# while MpsSvc stays Automatic/Running for AppContainer registration and apps
+# such as NVIDIA Control Panel. Missing services are reported explicitly.
 $ServicePlan = @(
     [pscustomobject]@{ Name = 'MpsSvc'; Group = 'Firewall'; Purpose = 'Windows Defender Firewall startup and runtime' },
     [pscustomobject]@{ Name = 'wuauserv'; Group = 'WindowsUpdate'; Purpose = 'Windows Update' },
@@ -1400,8 +1406,8 @@ function Get-FirewallSnapshots {
             })
         }
     } catch {
-        # NetSecurity can become unavailable after MpsSvc has been stopped.
-        # The service startup/state is audited independently below.
+        # NetSecurity can be unavailable while MpsSvc is unhealthy. The
+        # service startup/state is audited independently below.
         return $result.ToArray()
     }
     return $result.ToArray()
@@ -1409,14 +1415,6 @@ function Get-FirewallSnapshots {
 
 function Disable-FirewallProfiles {
     $failures = New-Object 'System.Collections.Generic.List[string]'
-    $firewallService = Get-CimInstance Win32_Service `
-        -Filter "Name='$FirewallServiceName'" -ErrorAction SilentlyContinue
-    if ($null -ne $firewallService -and
-        [string]$firewallService.StartMode -eq 'Disabled') {
-        Write-Host '  Windows Firewall profiles inactive: MpsSvc startup is disabled' `
-            -ForegroundColor DarkGray
-        return $failures.ToArray()
-    }
     $setter = Get-Command Set-NetFirewallProfile -ErrorAction SilentlyContinue
     if ($null -eq $setter) {
         $failures.Add('Windows Firewall: Set-NetFirewallProfile is unavailable')
@@ -1481,7 +1479,25 @@ function Test-ServiceNameAllowed {
     return $false
 }
 
+function Get-ServiceInventoryIndex {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Inventory)
+
+    $index = @{}
+    foreach ($service in @($Inventory)) {
+        $name = [string]$service.Name
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $index[$name] = $service
+        }
+    }
+    return $index
+}
+
 function Get-CurrentServicePlans {
+    param([AllowNull()][object[]]$Inventory)
+
+    if (-not $PSBoundParameters.ContainsKey('Inventory')) {
+        $Inventory = @(Get-CimInstance Win32_Service -ErrorAction Stop)
+    }
     $result = New-Object 'System.Collections.Generic.List[object]'
     $seen = @{}
     foreach ($plan in $ServicePlan) {
@@ -1491,7 +1507,7 @@ function Get-CurrentServicePlans {
             $seen[$key] = $true
         }
     }
-    foreach ($service in @(Get-CimInstance Win32_Service -ErrorAction Stop)) {
+    foreach ($service in @($Inventory)) {
         $name = [string]$service.Name
         $key = $name.ToLowerInvariant()
         if ($seen.ContainsKey($key)) { continue }
@@ -1512,10 +1528,17 @@ function Get-CurrentServicePlans {
 }
 
 function Get-ServiceSnapshot {
-    param([Parameter(Mandatory = $true)][object]$Plan)
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [AllowNull()][hashtable]$InventoryByName
+    )
 
-    $service = Get-CimInstance Win32_Service `
-        -Filter "Name='$($Plan.Name)'" -ErrorAction SilentlyContinue
+    if ($PSBoundParameters.ContainsKey('InventoryByName')) {
+        $service = $InventoryByName[([string]$Plan.Name)]
+    } else {
+        $service = Get-CimInstance Win32_Service `
+            -Filter "Name='$($Plan.Name)'" -ErrorAction SilentlyContinue
+    }
     if ($null -eq $service) {
         return [pscustomobject]@{
             Name = $Plan.Name; Exists = $false; StartMode = ''; State = ''
@@ -1537,9 +1560,12 @@ function Get-ServiceSnapshot {
 
 function Disable-PlannedServices {
     $failures = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($plan in @(Get-CurrentServicePlans)) {
+    $inventory = @(Get-CimInstance Win32_Service -ErrorAction Stop)
+    $inventoryByName = Get-ServiceInventoryIndex -Inventory $inventory
+    foreach ($plan in @(Get-CurrentServicePlans -Inventory $inventory)) {
         if ([string]$plan.Name -ieq $FirewallServiceName) { continue }
-        $saved = Get-ServiceSnapshot $plan
+        $saved = Get-ServiceSnapshot -Plan $plan `
+            -InventoryByName $inventoryByName
         if (-not [bool]$saved.Exists) {
             Write-Host "  service absent: $($plan.Name)" -ForegroundColor DarkGray
             continue
@@ -1565,7 +1591,7 @@ function Disable-PlannedServices {
     return $failures.ToArray()
 }
 
-function Disable-FirewallService {
+function Ensure-FirewallServiceAvailable {
     $failures = New-Object 'System.Collections.Generic.List[string]'
     $plan = @($ServicePlan | Where-Object {
         [string]$_.Name -ieq $FirewallServiceName
@@ -1580,30 +1606,27 @@ function Disable-FirewallService {
         return $failures.ToArray()
     }
     try {
-        Stop-Service -Name $FirewallServiceName -Force `
-            -ErrorAction SilentlyContinue
-        Set-Service -Name $FirewallServiceName -StartupType Disabled `
+        Set-Service -Name $FirewallServiceName -StartupType Automatic `
             -ErrorAction Stop
+        Start-Service -Name $FirewallServiceName -ErrorAction Stop
         $current = Get-ServiceSnapshot $plan
-        if ([string]$current.StartMode -ne 'Disabled') {
+        if ([string]$current.StartMode -ne 'Auto') {
             throw "startup mode remained '$($current.StartMode)'"
         }
-        $stateNote = if ([string]$current.State -eq 'Running') {
-            ' (running instance will be absent after restart)'
-        } else { '' }
-        Write-Host "  firewall service startup disabled: $FirewallServiceName$stateNote" `
+        if ([string]$current.State -ne 'Running') {
+            throw "runtime state remained '$($current.State)'"
+        }
+        Write-Host "  firewall service preserved: $FirewallServiceName Automatic/Running" `
             -ForegroundColor DarkGray
     } catch {
         $directError = $_.Exception.Message
         $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         if ($currentSid -ne 'S-1-5-18') {
-            # MpsSvc intentionally denies SERVICE_CHANGE_CONFIG to a normal
-            # elevated administrator on supported Windows 10 builds.  The
-            # profile's already-installed, rollback-owned task runs as Local
-            # System and can apply the same documented startup-mode change
-            # without deleting the service, changing its ACL, or touching a
-            # driver.  Start it immediately so the first requested reboot is
-            # already a true no-MpsSvc boot.
+            # MpsSvc can deny SERVICE_CHANGE_CONFIG to a normal elevated
+            # administrator on supported Windows 10 builds. The profile's
+            # rollback-owned task runs as Local System and can restore the
+            # supported Automatic/Running state without changing an ACL,
+            # deleting a service, or touching a driver.
             try {
                 Start-ScheduledTask -TaskPath $EnforcementTaskPath `
                     -TaskName $EnforcementTaskName -ErrorAction Stop
@@ -1611,16 +1634,14 @@ function Disable-FirewallService {
                 do {
                     Start-Sleep -Seconds 2
                     $current = Get-ServiceSnapshot $plan
-                    if ([string]$current.StartMode -eq 'Disabled') {
-                        $stateNote = if ([string]$current.State -eq 'Running') {
-                            ' (running instance will be absent after restart)'
-                        } else { '' }
-                        Write-Host "  firewall startup disabled by the Local System enforcement task: $FirewallServiceName$stateNote" `
+                    if ([string]$current.StartMode -eq 'Auto' -and
+                        [string]$current.State -eq 'Running') {
+                        Write-Host "  firewall service restored by the Local System enforcement task: $FirewallServiceName Automatic/Running" `
                             -ForegroundColor DarkGray
                         return $failures.ToArray()
                     }
                 } while ([DateTime]::UtcNow -lt $deadline)
-                throw 'Local System enforcement did not set Disabled within three minutes.'
+                throw 'Local System enforcement did not establish Automatic/Running within three minutes.'
             } catch {
                 $failures.Add("Windows Firewall service ${FirewallServiceName}: direct=$directError; Local System=$($_.Exception.Message)")
                 return $failures.ToArray()
@@ -1687,7 +1708,23 @@ function Test-TaskTargetAllowed {
     return $false
 }
 
+function Get-TaskInventoryIndex {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Inventory)
+
+    $index = @{}
+    foreach ($task in @($Inventory)) {
+        $key = ("$([string]$task.TaskPath)|$([string]$task.TaskName)").ToLowerInvariant()
+        $index[$key] = $task
+    }
+    return $index
+}
+
 function Get-CurrentTaskPlans {
+    param([AllowNull()][object[]]$Inventory)
+
+    if (-not $PSBoundParameters.ContainsKey('Inventory')) {
+        $Inventory = @(Get-ScheduledTask -ErrorAction Stop)
+    }
     $result = New-Object 'System.Collections.Generic.List[object]'
     $seen = @{}
     foreach ($plan in $TaskPlan) {
@@ -1697,7 +1734,7 @@ function Get-CurrentTaskPlans {
             $seen[$key] = $true
         }
     }
-    foreach ($task in @(Get-ScheduledTask -ErrorAction Stop)) {
+    foreach ($task in @($Inventory)) {
         $path = [string]$task.TaskPath
         $name = [string]$task.TaskName
         $key = ("${path}|${name}").ToLowerInvariant()
@@ -1720,10 +1757,18 @@ function Get-CurrentTaskPlans {
 }
 
 function Get-TaskSnapshot {
-    param([Parameter(Mandatory = $true)][object]$Plan)
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [AllowNull()][hashtable]$InventoryByKey
+    )
 
-    $task = Get-ScheduledTask -TaskName $Plan.Name -TaskPath $Plan.Path `
-        -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($PSBoundParameters.ContainsKey('InventoryByKey')) {
+        $key = ("$([string]$Plan.Path)|$([string]$Plan.Name)").ToLowerInvariant()
+        $task = $InventoryByKey[$key]
+    } else {
+        $task = Get-ScheduledTask -TaskName $Plan.Name -TaskPath $Plan.Path `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
     if ($null -eq $task) {
         return [pscustomobject]@{
             Path = $Plan.Path; Name = $Plan.Name; Exists = $false
@@ -1740,8 +1785,10 @@ function Get-TaskSnapshot {
 
 function Disable-PlannedTasks {
     $failures = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($plan in @(Get-CurrentTaskPlans)) {
-        $saved = Get-TaskSnapshot $plan
+    $inventory = @(Get-ScheduledTask -ErrorAction Stop)
+    $inventoryByKey = Get-TaskInventoryIndex -Inventory $inventory
+    foreach ($plan in @(Get-CurrentTaskPlans -Inventory $inventory)) {
+        $saved = Get-TaskSnapshot -Plan $plan -InventoryByKey $inventoryByKey
         if (-not [bool]$saved.Exists -or -not [bool]$saved.Enabled) { continue }
         try {
             Stop-ScheduledTask -TaskName $plan.Name -TaskPath $plan.Path `
@@ -3300,7 +3347,7 @@ function Confirm-FullProfile {
 This full Windows 10 guest profile will:
 
 - turn off Microsoft Defender Antivirus protection
-- turn off all Windows Firewall profiles and disable MpsSvc startup
+- turn off all Windows Firewall profiles while preserving MpsSvc Automatic/Running
 - turn off Windows, Store, and reviewed software auto-updaters
 - turn off OneDrive/cloud sync, news/weather, and background apps
 - mute the default playback endpoint without disabling Windows Audio
@@ -3313,8 +3360,8 @@ This full Windows 10 guest profile will:
 - permanently delete plain temporary files older than 24 hours from the
   current user's LocalAppData\Temp and Windows\Temp
 
-The guest will have no built-in antivirus/firewall and will not receive security updates.
-Disabling MpsSvc startup can affect network discovery, IPsec, or Windows components.
+The guest will have no enabled built-in antivirus/firewall profiles and will not receive security updates.
+MpsSvc remains available for Windows AppContainer registration and NVIDIA Control Panel.
 Continue?
 '@
     try {
@@ -3422,21 +3469,16 @@ function Get-VerificationIssues {
     $firewallService = if ($null -ne $firewallPlan) {
         Get-ServiceSnapshot $firewallPlan
     } else { $null }
-    $firewallServiceDisabled = [bool](
-        $null -ne $firewallService -and
-        [bool]$firewallService.Exists -and
-        [string]$firewallService.StartMode -eq 'Disabled'
-    )
     if ($null -eq $firewallService -or -not [bool]$firewallService.Exists) {
         $issues.Add("Windows Firewall service is missing: $FirewallServiceName")
-    } elseif (-not $firewallServiceDisabled) {
-        $issues.Add("Windows Firewall service startup is not disabled: $FirewallServiceName start=$($firewallService.StartMode)")
-    } elseif ([string]$firewallService.State -eq 'Running') {
-        $issues.Add("Windows Firewall service is still running after restart: $FirewallServiceName")
+    } elseif ([string]$firewallService.StartMode -ne 'Auto') {
+        $issues.Add("Windows Firewall service startup is not Automatic: $FirewallServiceName start=$($firewallService.StartMode)")
+    } elseif ([string]$firewallService.State -ne 'Running') {
+        $issues.Add("Windows Firewall service is not running: $FirewallServiceName state=$($firewallService.State)")
     }
 
     $firewallProfiles = @(Get-FirewallSnapshots)
-    if ($firewallProfiles.Count -ne 3 -and -not $firewallServiceDisabled) {
+    if ($firewallProfiles.Count -ne 3) {
         $issues.Add("Windows Firewall profile state is incomplete: found=$($firewallProfiles.Count) expected=3")
     }
     foreach ($profile in $firewallProfiles) {
@@ -3747,8 +3789,16 @@ function New-AuditReport {
 
 function New-OriginalState {
     $os = Get-CimInstance Win32_OperatingSystem
-    $servicePlans = @(Get-CurrentServicePlans)
-    $taskPlans = @(Get-CurrentTaskPlans)
+    # Capture each expensive provider inventory once, then reuse those exact
+    # rows for both allowlist expansion and rollback snapshots. This preserves
+    # the same state while avoiding one WMI/task-provider call per plan item.
+    $serviceInventory = @(Get-CimInstance Win32_Service -ErrorAction Stop)
+    $serviceInventoryByName = Get-ServiceInventoryIndex `
+        -Inventory $serviceInventory
+    $servicePlans = @(Get-CurrentServicePlans -Inventory $serviceInventory)
+    $taskInventory = @(Get-ScheduledTask -ErrorAction Stop)
+    $taskInventoryByKey = Get-TaskInventoryIndex -Inventory $taskInventory
+    $taskPlans = @(Get-CurrentTaskPlans -Inventory $taskInventory)
     $state = [ordered]@{
         SchemaVersion = $SchemaVersion
         CreatedUtc = [DateTime]::UtcNow.ToString('o')
@@ -3765,8 +3815,13 @@ function New-OriginalState {
         NvidiaPowerMode = Get-NvidiaPowerModeSnapshot
         DnfProcesses = @(Get-DnfProcessSnapshots)
         Registry = @(Get-AllRegistryPlans | ForEach-Object { Get-RegistrySnapshot $_ })
-        Services = @($servicePlans | ForEach-Object { Get-ServiceSnapshot $_ })
-        Tasks = @($taskPlans | ForEach-Object { Get-TaskSnapshot $_ })
+        Services = @($servicePlans | ForEach-Object {
+            Get-ServiceSnapshot -Plan $_ `
+                -InventoryByName $serviceInventoryByName
+        })
+        Tasks = @($taskPlans | ForEach-Object {
+            Get-TaskSnapshot -Plan $_ -InventoryByKey $taskInventoryByKey
+        })
         Apps = @(Get-AppSnapshots)
         AppBaselineNames = @($AppPlan)
         Power = (Get-PowerSnapshot)
@@ -3880,10 +3935,14 @@ function Ensure-CurrentBaseline {
             $serviceSeen[$key] = $true
         }
     }
-    foreach ($plan in @(Get-CurrentServicePlans)) {
+    $serviceInventory = @(Get-CimInstance Win32_Service -ErrorAction Stop)
+    $serviceInventoryByName = Get-ServiceInventoryIndex `
+        -Inventory $serviceInventory
+    foreach ($plan in @(Get-CurrentServicePlans -Inventory $serviceInventory)) {
         $key = ([string]$plan.Name).ToLowerInvariant()
         if (-not $serviceSeen.ContainsKey($key)) {
-            $services.Add((Get-ServiceSnapshot $plan))
+            $services.Add((Get-ServiceSnapshot -Plan $plan `
+                -InventoryByName $serviceInventoryByName))
             $serviceSeen[$key] = $true
             $changed = $true
         }
@@ -3899,10 +3958,13 @@ function Ensure-CurrentBaseline {
             $taskSeen[$key] = $true
         }
     }
-    foreach ($plan in @(Get-CurrentTaskPlans)) {
+    $taskInventory = @(Get-ScheduledTask -ErrorAction Stop)
+    $taskInventoryByKey = Get-TaskInventoryIndex -Inventory $taskInventory
+    foreach ($plan in @(Get-CurrentTaskPlans -Inventory $taskInventory)) {
         $key = ("$($plan.Path)|$($plan.Name)").ToLowerInvariant()
         if (-not $taskSeen.ContainsKey($key)) {
-            $tasks.Add((Get-TaskSnapshot $plan))
+            $tasks.Add((Get-TaskSnapshot -Plan $plan `
+                -InventoryByKey $taskInventoryByKey))
             $taskSeen[$key] = $true
             $changed = $true
         }
@@ -4008,6 +4070,7 @@ function Invoke-Apply {
     }
     if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
         $state = Read-State
+        $state = Ensure-CurrentBaseline $state
         Write-Host "Reusing original rollback baseline: $StatePath" `
             -ForegroundColor Yellow
     } else {
@@ -4015,7 +4078,6 @@ function Invoke-Apply {
         Write-Host "Saved original rollback baseline: $StatePath" `
             -ForegroundColor Green
     }
-    $state = Ensure-CurrentBaseline $state
     $failures = New-Object 'System.Collections.Generic.List[string]'
 
     Write-Host '[persistence] Writing native local policy and installing the SYSTEM enforcement task' `
@@ -4023,8 +4085,17 @@ function Invoke-Apply {
     Write-ManagedPolicyFiles -Snapshots $state.PolicyFiles
     Write-ManagedPolicyMetadata -Snapshot $state.PolicyFiles.Metadata
     Register-EnforcementTask -State $state
-    foreach ($failure in @(Refresh-LocalPolicy)) {
-        $failures.Add($failure)
+    if ($UnattendedClone) {
+        # Every managed policy value is written directly below, while the
+        # authenticated Registry.pol/gpt.ini pair persists it for later policy
+        # processing. Waiting for gpupdate here duplicates that work and added
+        # about a minute to every fresh clone.
+        Write-Host '  clone fast path: immediate gpupdate deferred; native policy plus direct registry writes remain authoritative' `
+            -ForegroundColor DarkGray
+    } else {
+        foreach ($failure in @(Refresh-LocalPolicy)) {
+            $failures.Add($failure)
+        }
     }
 
     Write-Host '[1/12] Applying policy values/input order and disabling startup entries' `
@@ -4039,7 +4110,7 @@ function Invoke-Apply {
                 $failures.Add($message)
                 Write-Warning $message
             } else {
-                Write-Host "  protected legacy policy retained: $($entry.Name)" `
+                Write-Host "  optional compatibility setting retained: $($entry.Name)" `
                     -ForegroundColor DarkYellow
             }
         }
@@ -4061,12 +4132,12 @@ function Invoke-Apply {
         $failures.Add($failure)
     }
 
-    Write-Host '[3/12] Disabling Windows Firewall profiles and MpsSvc startup' `
+    Write-Host '[3/12] Preserving MpsSvc and disabling Windows Firewall profiles' `
         -ForegroundColor Cyan
-    foreach ($failure in @(Disable-FirewallProfiles)) {
+    foreach ($failure in @(Ensure-FirewallServiceAvailable)) {
         $failures.Add($failure)
     }
-    foreach ($failure in @(Disable-FirewallService)) {
+    foreach ($failure in @(Disable-FirewallProfiles)) {
         $failures.Add($failure)
     }
 
@@ -4190,7 +4261,24 @@ function Invoke-Enforce {
         $failures.Add($message)
         $log.Add("failure=$message")
     }
-    foreach ($failure in @(Refresh-LocalPolicy)) {
+
+    # Enforce writes every managed registry value directly below. Registry.pol
+    # and gpt.ini remain installed for normal Windows policy processing, so a
+    # synchronous gpupdate would only repeat the same writes during clone boot.
+    $log.Add('localPolicyRefresh=deferred directRegistry=True')
+
+    # Repair legacy Guest Lite state before any AppContainer-aware application
+    # needs it. An elevated interactive administrator can be denied this
+    # protected service change, so the SYSTEM enforcement path owns it.
+    $firewallServiceFailures = @(Ensure-FirewallServiceAvailable)
+    foreach ($failure in $firewallServiceFailures) {
+        $failures.Add($failure)
+        $log.Add("failure=$failure")
+    }
+    if ($firewallServiceFailures.Count -eq 0) {
+        $log.Add('firewallService=automatic-running')
+    }
+    foreach ($failure in @(Disable-FirewallProfiles)) {
         $failures.Add($failure)
         $log.Add("failure=$failure")
     }
@@ -4234,14 +4322,6 @@ function Invoke-Enforce {
     }
 
     foreach ($failure in @(Set-DefenderRuntimePreferences)) {
-        $failures.Add($failure)
-        $log.Add("failure=$failure")
-    }
-    foreach ($failure in @(Disable-FirewallProfiles)) {
-        $failures.Add($failure)
-        $log.Add("failure=$failure")
-    }
-    foreach ($failure in @(Disable-FirewallService)) {
         $failures.Add($failure)
         $log.Add("failure=$failure")
     }

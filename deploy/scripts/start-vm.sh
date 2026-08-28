@@ -20,6 +20,10 @@
 #   --gtk              同 --native，改用 GTK 窗口
 #   --vgpu-gtk         --gtk 的显式别名
 #   --vgpu-sdl         --sdl 的显式别名
+#   --driver-install   首次/重装 GRID 的安全 SDL 模式：标准 VGA 主显示，
+#                      mdev 仅供 PnP 安装且 display=off；自动强制 spoof=off
+#   --driver-install-gtk
+#                      同上，使用 GTK 标准 VGA 窗口
 #   --rdp              旧兼容路径：ivshmem + guest relay + 外部 SDL viewer
 #   --legacy-shmem     --rdp 的语义化别名
 #   --rescue-sdl       本地 SDL 标准显卡救援（不挂 vGPU，不用 VNC/RDP）
@@ -227,7 +231,7 @@ source "$here/lib/dgame-qemu-ptracer.sh"
 
 VM_ID="${1:-}"
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso] [--install-media usb|ide]|--native|--gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
+    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso] [--install-media usb|ide]|--native|--gtk|--driver-install|--driver-install-gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -484,10 +488,18 @@ EARLY_SPOOF_MODE_OVERRIDE=""
 EARLY_SPOOF_SELECTOR_COUNT=0
 EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED=0
 EARLY_SIGNED_CONSUMER_PROBE_STAGE=""
+EARLY_DRIVER_INSTALL_REQUESTED=0
 EARLY_ARGS=( "$@" )
 for ((early_i = 0; early_i < ${#EARLY_ARGS[@]}; early_i += 1)); do
     case "${EARLY_ARGS[$early_i]}" in
         --dry-run) EARLY_DRY_RUN=1 ;;
+        --driver-install|--driver-install-sdl|--driver-install-gtk)
+            ((EARLY_DRIVER_INSTALL_REQUESTED == 0)) || {
+                echo "[start-vm] driver-install 显示模式只能指定一次" >&2
+                exit 2
+            }
+            EARLY_DRIVER_INSTALL_REQUESTED=1
+            ;;
         --production-migration-source)
             ((EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED == 0)) || {
                 echo "[start-vm] --production-migration-source may appear only once" >&2
@@ -1150,6 +1162,21 @@ else
         EARLY_EFFECTIVE_SPOOF_MODE=A
     fi
 fi
+if ((EARLY_DRIVER_INSTALL_REQUESTED)); then
+    ((EARLY_SPOOF_SELECTOR_COUNT == 0)) || {
+        echo "[start-vm] --driver-install 已固定 spoof=off，不能再组合 spoof CLI" >&2
+        exit 2
+    }
+    ((EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED == 0)) &&
+        [[ -z "$EARLY_SIGNED_CONSUMER_PROBE_STAGE" ]] || {
+        echo "[start-vm] --driver-install 不能与生产迁移/probe 模式组合" >&2
+        exit 2
+    }
+    # The installer must see the unmodified native GRID PnP endpoint.  Apply
+    # this before the early strict-A gate as well as in the full parser below,
+    # so an old config can be repaired without ever booting its legacy mode.
+    EARLY_EFFECTIVE_SPOOF_MODE=off
+fi
 
 PRODUCTION_MIGRATION_SOURCE_AUTHORIZED=0
 PRODUCTION_MIGRATION_EXPECTED_CONFIG_SHA256=""
@@ -1210,6 +1237,7 @@ readonly SIGNED_CONSUMER_PROBE_AUTHORIZED \
     SIGNED_CONSUMER_PROBE_EXPECTED_DRIVER_VERSION \
     SIGNED_CONSUMER_PROBE_EXPECTED_RESOURCE_PROFILE \
     SIGNED_CONSUMER_PROBE_EXPECTED_FB_MB
+readonly EARLY_DRIVER_INSTALL_REQUESTED
 
 case "$EARLY_EFFECTIVE_SPOOF_MODE" in
     A)
@@ -2066,6 +2094,7 @@ QEMU_SDL_GNOME_ANIMATIONS="${QEMU_SDL_GNOME_ANIMATIONS:-off}"
 GUEST_NUMLOCK="${GUEST_NUMLOCK:-1}"
 G11_USB_HID_LOW_LATENCY="${G11_USB_HID_LOW_LATENCY:-0}"
 G11_CHIPSET_PRESENTATION="${G11_CHIPSET_PRESENTATION:-catalog}"
+G11_HOST_BRIDGE_PRESENTATION="${G11_HOST_BRIDGE_PRESENTATION:-catalog}"
 
 should_tame_gnome_super() {
     local mode=${TAME_GNOME,,}
@@ -2200,6 +2229,10 @@ NATIVE_FULLSCREEN=0
 VGPU_ROMBAR="${VGPU_ROMBAR:-}"
 VGPU_ROMFILE="${VGPU_ROMFILE:-}"
 VGPU_CONSOLE_INTERVAL_US="${VGPU_CONSOLE_INTERVAL_US:-16667}"
+# 0=禁用 vGPU 帧率限制器（scanout 跟随 guest 渲染帧率），1=保持 profile
+# 的 frlConfig，空=不改动。FRL 默认锁 60 FPS，与 QEMU 60Hz 的
+# QUERY_GFX_PLANE 同频不同步会拍频，实测只能接住约一半的帧。
+VGPU_FRAME_RATE_LIMITER="${VGPU_FRAME_RATE_LIMITER-}"
 MONITOR_SYNC="${MONITOR_SYNC:-1}"
 TPM_CLI_DISABLED=0
 # 正常入口沿用旧 qemu-9.2.0 生产脚本的 Windows local-RTC 契约。
@@ -2263,6 +2296,14 @@ while (( $# > 0 )); do
         --sdl)     MODE=vgpu-sdl; shift ;;
         --vgpu-gtk) MODE=vgpu-gtk; shift ;;
         --vgpu-sdl) MODE=vgpu-sdl; shift ;;
+        --driver-install|--driver-install-sdl)
+            MODE=driver-install-sdl
+            shift
+            ;;
+        --driver-install-gtk)
+            MODE=driver-install-gtk
+            shift
+            ;;
         --rescue|--rescue-sdl) MODE=rescue-sdl; shift ;;
         --rescue-gtk) MODE=rescue-gtk; shift ;;
         --no-gpu)  MODE=no-gpu; shift ;;
@@ -2376,6 +2417,28 @@ while (( $# > 0 )); do
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
 done
+
+case "$MODE" in
+    driver-install-sdl|driver-install-gtk)
+        ((EARLY_DRIVER_INSTALL_REQUESTED == 1)) || {
+            echo "[start-vm] driver-install early/full 解析状态不一致" >&2
+            exit 2
+        }
+        # This is a tightly scoped production-signed GRID install topology, not
+        # a general alternate display mode.  The mdev remains present for PnP,
+        # while every consumer/internal identity override is disabled.
+        SPOOF_MODE=off
+        VGPU_MDEV_INTERNAL_PCI_IDENTITY=0
+        VGPU_ROMBAR=0
+        VGPU_ROMFILE=""
+        ;;
+    *)
+        ((EARLY_DRIVER_INSTALL_REQUESTED == 0)) || {
+            echo "[start-vm] --driver-install 不能与其他显示模式组合" >&2
+            exit 2
+        }
+        ;;
+esac
 
 case "$GUEST_NUMLOCK" in
     0|1) ;;
@@ -2789,7 +2852,8 @@ fi
 if [[ -z "$VGPU_ROMBAR" ]]; then
     # native 用 ramfb 提供固件画面，不向 OVMF 暴露 NVIDIA ROM，避免 EFI
     # GOP 半初始化；Windows GRID 驱动已实测可直接接管。旧模式保持 auto。
-    [[ "$MODE" == vgpu-gtk || "$MODE" == vgpu-sdl ]] && \
+    [[ "$MODE" == vgpu-gtk || "$MODE" == vgpu-sdl ||
+       "$MODE" == driver-install-gtk || "$MODE" == driver-install-sdl ]] && \
         VGPU_ROMBAR=0 || VGPU_ROMBAR=auto
 fi
 
@@ -2956,10 +3020,12 @@ if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
         echo "[start-vm] 每 VM 系统 NVAPI ISO 名称与 UUID/合同不一致" >&2
         exit 1
     }
-    [[ "$MODE" != install ]] || {
-        echo "[start-vm] 私有克隆初始化期间禁止切换到 Windows 安装模式" >&2
-        exit 1
-    }
+    case "$MODE" in
+        install|driver-install-sdl|driver-install-gtk)
+            echo "[start-vm] 私有克隆初始化期间禁止切换到 Windows/GRID 驱动安装模式" >&2
+            exit 1
+            ;;
+    esac
     if [[ "$MONITOR_SYNC" == 1 ]]; then
         echo "[start-vm] G-11 首次启动尚未完成；将自动安装系统 NVAPI、重启验收并关机"
     fi
@@ -2981,6 +3047,11 @@ if (( VGPU_CONSOLE_INTERVAL_US != 0 &&
       (VGPU_CONSOLE_INTERVAL_US < 5000 ||
        VGPU_CONSOLE_INTERVAL_US > 1000000) )); then
     echo "VGPU_CONSOLE_INTERVAL_US 必须为 0 或 5000..1000000" >&2
+    exit 2
+fi
+if [[ -n "$VGPU_FRAME_RATE_LIMITER" &&
+      "$VGPU_FRAME_RATE_LIMITER" != 0 && "$VGPU_FRAME_RATE_LIMITER" != 1 ]]; then
+    echo "VGPU_FRAME_RATE_LIMITER 必须是 0、1 或留空" >&2
     exit 2
 fi
 if [[ -n "$VGPU_ROMFILE" && ! -r "$VGPU_ROMFILE" ]]; then
@@ -3192,6 +3263,35 @@ case "${G11_CHIPSET_PRESENTATION,,}" in
         ;;
 esac
 
+# The active X79 catalog also has a CPU-side DMI2 inventory identity.  This is
+# selected by CPU profile rather than VM ID, so VM3 is only an acceptance
+# machine and every legal i7-3820/i7-4820K instance gets the same mapping.
+# The functional 00:00.0 device remains q35 throughout: OVMF first sees its
+# required 29c0 ID, then the reviewed DMI2 ID becomes visible at the standard
+# UEFI ExitBootServices boundary, before operating-system PCI inventory.
+HOST_BRIDGE_PRESENTATION_ARGS=()
+case "${G11_HOST_BRIDGE_PRESENTATION,,}" in
+    catalog)
+        if [[ -n "${CPU_HOST_BRIDGE_PRESENTATION_KEY:-}" ]]; then
+            HOST_BRIDGE_PRESENTATION_ARGS=(
+                -global "mch.x-g11-host-bridge=${CPU_HOST_BRIDGE_PRESENTATION_KEY}"
+            )
+        elif [[ "$BOARD_CHIPSET" == X79 ]]; then
+            echo "[start-vm] X79 CPU 缺少已审核的 DMI2 host bridge identity: ${CPU_PROFILE}" >&2
+            exit 2
+        fi
+        ;;
+    off)
+        if [[ -n "${CPU_HOST_BRIDGE_PRESENTATION_KEY:-}" ]]; then
+            echo "[start-vm] WARN: CPU DMI2 inventory identity 已关闭；来宾只看到默认 P35 MCH" >&2
+        fi
+        ;;
+    *)
+        echo "[start-vm] G11_HOST_BRIDGE_PRESENTATION 必须是 catalog 或 off" >&2
+        exit 2
+        ;;
+esac
+
 : "${QEMU_BIN:=$here/../build/qemu-system-x86_64}"
 : "${QEMU_IMG:=$here/../build/qemu-img}"
 
@@ -3386,7 +3486,7 @@ disk_headroom_guard "$DISK_PATH"
 # 和模式缓存；只改系统 hive，不向 guest 复制脚本、安装服务或创建计划任务。
 if [[ "$DRY_RUN" != 1 && "$MONITOR_SYNC" == 1 ]]; then
     case "$MODE" in
-        vgpu-gtk|vgpu-sdl|rdp)
+        vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl|rdp)
             echo "[start-vm] 检查 host 侧 Windows EDID_OVERRIDE/EDID（guest 内不安装组件）..."
             QEMU_EDID_BIN="${QEMU_EDID:-$(dirname "$QEMU_BIN")/qemu-edid}"
             monitor_sync_rc=0
@@ -3396,8 +3496,40 @@ if [[ "$DRY_RUN" != 1 && "$MONITOR_SYNC" == 1 ]]; then
             case "$monitor_sync_rc" in
                 0) ;;
                 10)
-                    echo "[start-vm] WARN: Windows 尚未缓存显示器；本次先启动枚举，" >&2
-                    echo "[start-vm]       正常关机后，下次启动会在 host 离线完成同步" >&2
+                    case "$MODE" in
+                        driver-install-sdl|driver-install-gtk)
+                            echo "[start-vm] GRID 首装：认证驱动已存在但尚无显示器缓存；标准 VGA 将安全完成枚举"
+                            ;;
+                        *)
+                            echo "[start-vm] ERROR: Windows 尚未缓存显示器；拒绝在 NVIDIA native console 上做首次枚举" >&2
+                            echo "[start-vm]        请运行通用安全入口：./deploy/scripts/vmctl.sh driver-install ${VM_ID}" >&2
+                            exit 10
+                            ;;
+                    esac
+                    ;;
+                12)
+                    case "$MODE" in
+                        driver-install-sdl|driver-install-gtk)
+                            echo "[start-vm] GRID 首装基线已落盘：安全 EDID/缓存完成，NV_Modes 待驱动安装后补齐"
+                            ;;
+                        *)
+                            echo "[start-vm] ERROR: Windows 尚未安装认证 GRID 驱动；拒绝让 R535 在 native console 上首次接管" >&2
+                            echo "[start-vm]        请运行通用安全入口：./deploy/scripts/vmctl.sh driver-install ${VM_ID}" >&2
+                            exit 12
+                            ;;
+                    esac
+                    ;;
+                13)
+                    case "$MODE" in
+                        driver-install-sdl|driver-install-gtk)
+                            echo "[start-vm] GRID 首装：尚无 EDID/NVIDIA 缓存；标准 VGA 将先完成枚举，mdev console 保持隔离"
+                            ;;
+                        *)
+                            echo "[start-vm] ERROR: 新 Windows 尚无 EDID 和认证 GRID 驱动；禁止直接 native 首装" >&2
+                            echo "[start-vm]        请运行通用安全入口：./deploy/scripts/vmctl.sh driver-install ${VM_ID}" >&2
+                            exit 13
+                            ;;
+                    esac
                     ;;
                 11)
                     echo "[start-vm] ERROR: Windows 处于休眠/Fast Startup；vGPU 恢复可能触发 0x10E" >&2
@@ -3614,6 +3746,38 @@ host_oom_protect_launcher "$VM_ID" || {
 [[ -x "$QEMU_BIN" ]] || { echo "QEMU 不存在或没执行权: $QEMU_BIN" >&2; exit 1; }
 [[ -r "$OVMF_CODE" ]] || { echo "OVMF_CODE 不存在或不可读: $OVMF_CODE" >&2; exit 1; }
 [[ -r "$OVMF_VARS" ]] || { echo "OVMF_VARS 不存在或不可读: $OVMF_VARS" >&2; exit 1; }
+if [[ "$DRY_RUN" != 1 &&
+      "${G11_HOST_BRIDGE_PRESENTATION,,}" == catalog &&
+      -n "${CPU_HOST_BRIDGE_PRESENTATION_KEY:-}" ]]; then
+    # The QEMU property alone is insufficient: OVMF must issue the matching
+    # ExitBootServices APM handoff.  The builder publishes a hash-bound sidecar
+    # so a stale/custom firmware fails before any VM resources are allocated.
+    OVMF_FEATURES="${OVMF_CODE}.features"
+    [[ -r "$OVMF_FEATURES" ]] || {
+        echo "[start-vm] OVMF 缺少 G-11 CPU DMI2 功能清单: $OVMF_FEATURES" >&2
+        echo "[start-vm] 运行 ./deploy/host/build-stealth-ovmf.sh，或仅诊断时设 G11_HOST_BRIDGE_PRESENTATION=off" >&2
+        exit 1
+    }
+    OVMF_FEATURE_SCHEMA=$(sed -n 's/^schema=//p' "$OVMF_FEATURES")
+    OVMF_FEATURE_SHA=$(sed -n 's/^sha256=//p' "$OVMF_FEATURES")
+    OVMF_HANDOFF_FEATURE=$(
+        sed -n 's/^g11_host_bridge_handoff=//p' "$OVMF_FEATURES"
+    )
+    if [[ "$OVMF_FEATURE_SCHEMA" != 1 ||
+          "$OVMF_HANDOFF_FEATURE" != exit-boot-services-apm-0x47 ||
+          ! "$OVMF_FEATURE_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "[start-vm] OVMF G-11 CPU DMI2 功能清单非法: $OVMF_FEATURES" >&2
+        exit 1
+    fi
+    OVMF_ACTUAL_SHA=$(sha256sum -- "$OVMF_CODE" | awk '{print $1}')
+    if [[ "$OVMF_ACTUAL_SHA" != "$OVMF_FEATURE_SHA" ]]; then
+        echo "[start-vm] OVMF 与 G-11 CPU DMI2 功能清单不匹配" >&2
+        echo "[start-vm] 运行 ./deploy/host/build-stealth-ovmf.sh 后重试" >&2
+        exit 1
+    fi
+    unset OVMF_FEATURES OVMF_FEATURE_SCHEMA OVMF_FEATURE_SHA \
+        OVMF_HANDOFF_FEATURE OVMF_ACTUAL_SHA
+fi
 dgame_qemu_ptracer_preflight || {
     echo "[start-vm] DGame/QEMU 内存读取兼容预检失败；VM 未启动" >&2
     exit 1
@@ -3633,6 +3797,17 @@ if [[ "$DRY_RUN" != 1 ]]; then
             exit 1
         fi
         unset QEMU_LPC_HELP
+    fi
+    if [[ "${G11_HOST_BRIDGE_PRESENTATION,,}" == catalog &&
+          -n "${CPU_HOST_BRIDGE_PRESENTATION_KEY:-}" ]]; then
+        if ! QEMU_MCH_HELP=$("$QEMU_BIN" -device mch,help 2>&1) ||
+                ! grep -Eq '^  x-g11-host-bridge=<(str|string)>' \
+                    <<<"$QEMU_MCH_HELP"; then
+            echo "[start-vm] 当前 QEMU 缺少 G-11 CPU DMI2 inventory 白名单" >&2
+            echo "[start-vm] 先运行 ./deploy/host/build-qemu.sh 增量重编，再重试" >&2
+            exit 1
+        fi
+        unset QEMU_MCH_HELP
     fi
     if ! QEMU_XHCI_HELP=$("$QEMU_BIN" -device qemu-xhci,help 2>&1); then
         echo "[start-vm] QEMU 缺 qemu-xhci 支持" >&2
@@ -3876,9 +4051,9 @@ cleanup_started_tpm() {
 trap cleanup_started_tpm EXIT
 
 case "$MODE" in
-    vgpu-gtk) WINDOW_BACKEND=gtk ;;
-    vgpu-sdl) WINDOW_BACKEND=sdl ;;
-    *)                  WINDOW_BACKEND="" ;;
+    vgpu-gtk|driver-install-gtk) WINDOW_BACKEND=gtk ;;
+    vgpu-sdl|driver-install-sdl) WINDOW_BACKEND=sdl ;;
+    *)                              WINDOW_BACKEND="" ;;
 esac
 
 # Keyboard ownership applies to every local QEMU window, including the GTK
@@ -3887,8 +4062,8 @@ esac
 # vGPU mode.
 case "$MODE" in
     install)    LOCAL_INPUT_BACKEND=${INSTALL_GFX_BACKEND,,} ;;
-    rescue-gtk|vgpu-gtk) LOCAL_INPUT_BACKEND=gtk ;;
-    rescue-sdl|vgpu-sdl) LOCAL_INPUT_BACKEND=sdl ;;
+    rescue-gtk|vgpu-gtk|driver-install-gtk) LOCAL_INPUT_BACKEND=gtk ;;
+    rescue-sdl|vgpu-sdl|driver-install-sdl) LOCAL_INPUT_BACKEND=sdl ;;
     *)          LOCAL_INPUT_BACKEND="" ;;
 esac
 
@@ -4011,7 +4186,7 @@ if [[ "$MODE" == vgpu-gtk || "$MODE" == vgpu-sdl ]]; then
     fi
 fi
 case "$MODE" in
-    rdp|vgpu-gtk|vgpu-sdl)
+    rdp|vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl)
         if ! VGPU_ROOT_PORT_HELP=$(
                 "$QEMU_BIN" -device pcie-root-port,help 2>&1
             ); then
@@ -4195,7 +4370,9 @@ case "$MODE" in
     # native 用 ramfb 做固件期 ConOut；旧拓扑持久化的 PCI/GOP 路径
     # 会让 BDS 直连 mdev，清掉后才能稳定走 ramfb。
     vgpu-gtk|vgpu-sdl) EXPECTED_CONOUT_DEV="" ;;
-    install|no-gpu|rescue-sdl|rescue-gtk) EXPECTED_CONOUT_DEV=02 ;;
+    install|no-gpu|rescue-sdl|rescue-gtk|driver-install-sdl|driver-install-gtk)
+        EXPECTED_CONOUT_DEV=02
+        ;;
 esac
 if ! repair_ovmf_conout "$EXPECTED_CONOUT_DEV"; then
     if [[ "$REPAIR_DISPLAY_VARS" == force ]]; then
@@ -4693,10 +4870,12 @@ allocate_vgpu() {
     fi
     if [[ "$MODE" == vgpu-sdl || "$MODE" == vgpu-gtk ]]; then
         mdev_configure_console_interval \
-            "$MDEV_UUID" "$VGPU_CONSOLE_INTERVAL_US" || {
+            "$MDEV_UUID" "$VGPU_CONSOLE_INTERVAL_US" \
+            ${VGPU_FRAME_RATE_LIMITER:+"$VGPU_FRAME_RATE_LIMITER"} || {
             echo "mdev console 刷新周期配置失败" >&2
             return 1
         }
+        mdev_lock_gpu_clocks "${VGPU_MGPU:-}"
     fi
 }
 
@@ -4735,6 +4914,29 @@ case "$MODE" in
         case "$MODE" in
             rescue-sdl) GFX_ARGS+=( -display sdl,gl=off ) ;;
             rescue-gtk) GFX_ARGS+=( -display gtk,gl=off,grab-on-hover=on ) ;;
+        esac
+        ;;
+    driver-install-sdl|driver-install-gtk)
+        # Safe first/reinstall topology for the production-signed GRID package:
+        # Windows keeps a temporary standard VGA as the only host-visible
+        # console while the real mdev remains enumerated for PnP.  QEMU never
+        # polls NVIDIA's R535 display REGION during setup, so an INF-provided
+        # page-unsafe mode cannot turn the installation window black.
+        allocate_vgpu || exit 1
+        attach_vgpu_root_port || exit 1
+        vfio_opts="sysfsdev=/sys/bus/mdev/devices/${MDEV_UUID},display=off,enable-migration=off,bus=gpu-root-port,addr=0x0,rombar=0"
+        GFX_ARGS+=(
+            -device "vfio-pci-nohotplug,${vfio_opts}"
+            -vga none
+            -device "VGA,id=driver-install-vga,bus=pcie.0,addr=0x2"
+        )
+        case "$MODE" in
+            driver-install-sdl)
+                GFX_ARGS+=( -display "sdl,gl=off,title=win10-${VM_ID}-driver-install" )
+                ;;
+            driver-install-gtk)
+                GFX_ARGS+=( -display "gtk,gl=off,grab-on-hover=on" )
+                ;;
         esac
         ;;
     rdp)
@@ -4976,6 +5178,12 @@ if [[ "${G11_CHIPSET_PRESENTATION,,}" == catalog ]]; then
 else
     echo "  芯片组: ICH9（G11_CHIPSET_PRESENTATION=off 兼容回退）"
 fi
+if [[ "${G11_HOST_BRIDGE_PRESENTATION,,}" == catalog &&
+      -n "${CPU_HOST_BRIDGE_PRESENTATION_KEY:-}" ]]; then
+    echo "  CPU DMI2 inventory: ${CPU_HOST_BRIDGE_PRESENTATION_KEY} / ${CPU_HOST_BRIDGE_PCI_VENDOR_ID}:${CPU_HOST_BRIDGE_PCI_DEVICE_ID} rev ${CPU_HOST_BRIDGE_PCI_REVISION}（00:00.0 UEFI 退出后呈现；固件阶段 P35 MCH；行为仍为 q35）"
+else
+    echo "  CPU DMI2 inventory: off（仅保留 P35 MCH）"
+fi
 echo "  内存: ${MEM_MODULE_MB_LIST//,/+} MiB ${MEM_MODEL_LIST//,/ + } (${MEM_FAMILY:-unknown}@${MEM_SPEED} 身份；运行带宽=host-native/unthrottled，${MEM_CHANNEL_MODE})"
 if [[ "$SSD_INTERFACE" == nvme ]]; then
     echo "  SSD: ${SSD_MODEL} / ${SSD_INTERFACE}:${SSD_CONTROLLER_PROFILE} / PCIe ${SSD_PCIE_GEN}.0 x${SSD_PCIE_LANES} ${SSD_FORM_FACTOR} / fw=${SSD_FIRMWARE_REV} / sector=${SSD_LOGICAL_BLOCK_SIZE}/${SSD_PHYSICAL_BLOCK_SIZE}B / ${SSD_SIZE_BYTES} bytes"
@@ -5077,6 +5285,10 @@ case "$MODE" in
         echo "  显示: vGPU console -> ${WINDOW_BACKEND} (ramfb early boot, 无 guest relay)"
         echo "  显示能力: 1 head / 1920x1080 / max_pixels=2073600"
         echo "  Windows 有效显示器目标: ${MONITOR_DISPLAY_NAME:-${MONITOR_PROFILE:-legacy/unknown}} (${MONITOR_VENDOR:-???}:${MONITOR_PRODUCT_ID:-???}; EDID_OVERRIDE + raw cache)" ;;
+    driver-install-sdl|driver-install-gtk)
+        echo "  显示: 临时标准 VGA -> ${WINDOW_BACKEND}；NVIDIA mdev display=off（仅供生产 GRID PnP 安装）"
+        echo "  安装保护: spoof=off / rombar=0 / 无 ramfb / 无 NVIDIA console REGION 读取"
+        echo "  安装后要求: 完整关机 -> host 认证 NV_Modes -> 再以正常 vGPU 模式启动" ;;
     rescue-sdl)
         echo "  显示: 标准显卡 -> SDL 本地救援（无 vGPU/VNC/RDP）" ;;
     rescue-gtk)
@@ -5131,6 +5343,7 @@ QEMU_CMD=(
     "${RTC_ARGS[@]}"
     -global "kvm-pit.lost_tick_policy=${PIT_LOST_TICK_POLICY}"
     -global ICH9-LPC.disable_s3=1
+    "${HOST_BRIDGE_PRESENTATION_ARGS[@]}"
     "${CHIPSET_PRESENTATION_ARGS[@]}"
     "${TPM_ARGS[@]}"
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
@@ -5278,10 +5491,11 @@ if [[ -n "$G11_INIT_ISO" ]]; then
     echo "[start-vm] 初始化光驱将在载荷复制完成后自动热拔"
 fi
 
-# 非 rdp 模式都是"QEMU 直接挂前台显示"——install/vgpu-gtk/vgpu-sdl 都让 QEMU 自己
+# 非 rdp 模式都是"QEMU 直接挂前台显示"——install/driver-install/vgpu-* 都让 QEMU 自己
 # 弹窗（-display sdl/gtk），no-gpu 走旧 VNC 远程。这些路径不需要一条龙
 # (setup-task + ivshmem viewer)，因为：
 #   - install: guest 还没装 Windows / 在 UEFI shell，没法跑 nv_stream_relay
+#   - driver-install-*: 临时标准 VGA 显示，NVIDIA mdev 只做 PnP、display=off
 #   - vgpu-gtk/vgpu-sdl: QEMU 直读 vGPU console region，不通过 ivshmem
 #   - rescue-*: 本地标准显卡救援，不依赖任何 guest 网络
 #   - no-gpu: 旧纯远程救援，QEMU 把画面推 VNC
@@ -5531,15 +5745,6 @@ PY
     # 3) sys=True 且 lic=Licensed 但 svc != Running → start service
     # 4) sys=True 且 lic=Licensed 且 svc=Running → 完美，跳过
 
-    # 根据 SPOOF_MODE 决定 setup-guest 跑哪几步：
-    #   A / B: 跑 stealth (name spoof) + monitor (EDID spoof)
-    #   off:   都跳过
-    # Automatic repair keeps the guest-minimal contract.  Product names come
-    # from the host per-mdev override; registry tasks and NVAPI DLL replacement
-    # remain explicit compatibility operations.
-    SG_ARGS=("--ip" "$guest_ip" "--skip-stealth" "--skip-nvapi-shim" "--skip-input")
-    [[ "${SPOOF_MODE:-B}" == "off" ]] && SG_ARGS+=("--skip-stealth" "--skip-monitor")
-
     # 注意：DCH driver 不再拷 nvlddmkm.sys 到 system32\drivers，而是从
     # DriverStore 加载 — sys=False 不能作 driver 缺失的判据。用 err==-1
     # (Win32_VideoController 完全找不到 NVIDIA 适配器) + ver 错 来判断。
@@ -5547,12 +5752,11 @@ PY
         echo "[setup-task] driver 状态错: ver='${ver}' err=${err} (期望 ver=${EXPECT_VER})"
         if [[ "${SPOOF_MODE:-B}" == "A" ]]; then
             echo "[setup-task] !! 当前 A 模式下驱动未正确绑定；不在运行中的显示设备上重装。"
-            echo "[setup-task]    恢复：./deploy/scripts/stop-vm.sh ${VM_ID}"
-            echo "[setup-task]          ./deploy/scripts/start-vm.sh ${VM_ID} --no-spoof --no-monitor-sync"
+            echo "[setup-task]    恢复：完整关机后运行 ./deploy/scripts/vmctl.sh driver-install ${VM_ID}"
             echo "[setup-task]    当前生产路径统一保持 B/name-only；不要恢复 legacy consumer-ID driver。"
         else
-            echo "[setup-task] SPOOF_MODE=${SPOOF_MODE} (PCI 真身)，跑 setup-guest 装 driver"
-            ./setup-guest.sh "$VM_ID" "${SG_ARGS[@]}" || echo "[setup-task] setup-guest 失败"
+            echo "[setup-task] driver 缺失/版本错误；运行中的 rdp/native console 禁止自动重装"
+            echo "[setup-task] 请完整关机后运行：./deploy/scripts/vmctl.sh driver-install ${VM_ID}"
         fi
     elif [[ "$err" == "43" && "$lic" != "Licensed" ]]; then
         echo "[setup-task] driver 完整但未授权 (Error 43) → 跑 install-vgpu-license"

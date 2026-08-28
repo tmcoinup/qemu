@@ -56,6 +56,10 @@ struct MCHPCIState {
     uint64_t above_4g_mem_size;
     uint64_t pci_hole64_size;
     uint16_t ext_tseg_mbytes;
+    char *g11_host_bridge;
+    uint16_t g11_q35_subsystem_vendor_id;
+    uint16_t g11_q35_subsystem_id;
+    bool g11_q35_subsystem_saved;
 };
 
 struct Q35PCIHost {
@@ -66,6 +70,8 @@ struct Q35PCIHost {
     bool pci_hole64_fix;
     MCHPCIState mch;
 };
+
+void mch_g11_firmware_handoff(MCHPCIState *mch);
 
 #define Q35_MASK(bit, ms_bit, ls_bit) \
 ((uint##bit##_t)(((1ULL << ((ms_bit) + 1)) - 1) & ~((1ULL << ls_bit) - 1)))

@@ -50,7 +50,7 @@ require_marker_input 'update-vgpu-mdev-identity.py'
 require_marker_input 'marker_file_digest monitor-profile-catalog'
 require_marker_input 'marker_file_digest qemu-edid'
 require_marker_input 'vgpu_display_contract=1:1920:1080:2073600'
-require_marker_input 'host-edid-sync-v9-content-addressed'
+require_marker_input 'host-edid-sync-v10-r535-page-safe'
 
 grep -F -- 'vgpu_profile_native_grid_pnp_id' "$SYNC" >/dev/null ||
     fail "monitor sync does not map nvidia-256/257 to the native 1Q/2Q PnP ID"
@@ -87,4 +87,4 @@ grep -F -- '凭据不会写入仓库或参数' "$SYNC" >/dev/null ||
 grep -F -- '非交互运行缺少 sudo 票据' "$SYNC" >/dev/null ||
     fail "non-interactive privilege failure is not explicit"
 
-echo "OK: monitor sync v9 content marker, automatic privilege prompt, GPU, driver, EDID override, mode, and hive policies"
+echo "OK: monitor sync v10 R535 page-safe marker, automatic privilege prompt, GPU, driver, EDID override, mode, and hive policies"

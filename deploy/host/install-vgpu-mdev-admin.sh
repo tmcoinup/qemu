@@ -45,7 +45,7 @@ id "$invoking_user" >/dev/null 2>&1 || {
     exit 1
 }
 
-sudoers_line="${invoking_user} ALL=(root) NOPASSWD:NOSETENV: ${installed_admin} check, ${installed_admin} identity-set *, ${installed_admin} identity-remove *, ${installed_admin} mdev-create *, ${installed_admin} mdev-remove *, ${installed_admin} console-interval *"
+sudoers_line="${invoking_user} ALL=(root) NOPASSWD:NOSETENV: ${installed_admin} check, ${installed_admin} identity-set *, ${installed_admin} identity-remove *, ${installed_admin} mdev-create *, ${installed_admin} mdev-remove *, ${installed_admin} console-interval *, ${installed_admin} gpu-clocks *"
 
 if ((print_only)); then
     echo "admin_helper=$installed_admin"

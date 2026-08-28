@@ -29,6 +29,7 @@
 typedef struct SpdTestArgs {
     uint32_t module_mb;
     uint32_t speed_mts;
+    uint8_t device_width_bits;
 } SpdTestArgs;
 
 static const SpdTestArgs spd_ddr3_2g_1333 = {
@@ -54,6 +55,12 @@ static const SpdTestArgs spd_ddr3_4g_1600 = {
 static const SpdTestArgs spd_ddr3_4g_1866 = {
     .module_mb = 4096,
     .speed_mts = 1866,
+};
+
+static const SpdTestArgs spd_ddr3_2g_1866_samsung = {
+    .module_mb = 2048,
+    .speed_mts = 1866,
+    .device_width_bits = 8,
 };
 
 /* @esmramc_tseg_sz: ESMRAMC.TSEG_SZ bitmask for selecting the requested TSEG
@@ -429,6 +436,15 @@ static void test_spd_ddr3(const void *opaque)
     QTestState *qts;
 
     q35_test_unset_spd_detail_env(&saved_details);
+    if (args->device_width_bits) {
+        g_setenv("QEMU_SPD_RANK_LIST", "1,1", true);
+        g_setenv("QEMU_SPD_DEVICE_WIDTH_LIST", "8,8", true);
+        g_setenv("QEMU_SPD_MODULE_MFR_JEP106_LIST", "80CE,80CE", true);
+        g_setenv("QEMU_SPD_DRAM_MFR_JEP106_LIST", "80CE,80CE", true);
+        g_setenv("QEMU_SPD_SERIAL_LIST", "12345678,12345679", true);
+        g_setenv("QEMU_SPD_PART_LIST",
+                 "M378B5773DH0-CMA,M378B5773DH0-CMA", true);
+    }
     qts = qtest_init(machine_args);
     pcibus = qpci_new_pc(qts, NULL);
     g_assert_nonnull(pcibus);
@@ -448,9 +464,12 @@ static void test_spd_ddr3(const void *opaque)
     g_assert_cmphex(spd[0], ==, 0x92);
     g_assert_cmphex(spd[2], ==, 0x0b);
     g_assert_cmphex(spd[3], ==, 0x02);
-    g_assert_cmphex(spd[4], ==, 0x04);
+    g_assert_cmphex(spd[4], ==,
+                    args->device_width_bits == 8 ? 0x03 : 0x04);
     g_assert_cmphex(spd[5], ==, args->module_mb == 2048 ? 0x19 : 0x21);
-    g_assert_cmphex(spd[7], ==, args->module_mb == 2048 ? 0x02 : 0x01);
+    g_assert_cmphex(spd[7], ==,
+                    args->module_mb == 2048 && !args->device_width_bits ?
+                    0x02 : 0x01);
     g_assert_cmphex(spd[8], ==, 0x03);
 
     g_assert_cmpuint(spd_ddr3_decode_mb(spd), ==, args->module_mb);
@@ -484,7 +503,7 @@ static void test_spd_ddr3(const void *opaque)
         g_assert_cmphex(spd[34], ==, 0xca);
     }
 
-    if (args->module_mb == 2048) {
+    if (args->module_mb == 2048 && args->device_width_bits != 8) {
         g_assert_cmphex(spd[19], ==, 0x3c);
         g_assert_cmphex(spd[28], ==, 0x01);
         g_assert_cmphex(spd[29], ==,
@@ -497,11 +516,31 @@ static void test_spd_ddr3(const void *opaque)
 
     crc = spd_test_crc16(spd, 117);
     g_assert_cmphex(spd[126] | (spd[127] << 8), ==, crc);
-    g_assert_cmpmem(spd_second, sizeof(spd_second), spd, sizeof(spd));
-    g_assert_cmphex(spd[117], ==, 0x00);
-    g_assert_cmphex(spd[122], ==, 0x00);
-    g_assert_cmphex(spd[128], ==, 0x00);
-    g_assert_cmphex(spd[148], ==, 0x00);
+    if (args->device_width_bits) {
+        uint16_t second_crc = spd_test_crc16(spd_second, 117);
+
+        g_assert_cmpmem(spd_second, 122, spd, 122);
+        g_assert_cmpmem(&spd_second[128], sizeof(spd_second) - 128,
+                        &spd[128], sizeof(spd) - 128);
+        g_assert_cmphex(spd[122], ==, 0x12);
+        g_assert_cmphex(spd[125], ==, 0x78);
+        g_assert_cmphex(spd_second[122], ==, 0x12);
+        g_assert_cmphex(spd_second[125], ==, 0x79);
+        g_assert_cmphex(spd_second[126] | (spd_second[127] << 8), ==,
+                        second_crc);
+        g_assert_cmphex(spd[117], ==, 0x80);
+        g_assert_cmphex(spd[118], ==, 0xce);
+        g_assert_cmpmem(&spd[128], strlen("M378B5773DH0-CMA"),
+                        "M378B5773DH0-CMA", strlen("M378B5773DH0-CMA"));
+        g_assert_cmphex(spd[148], ==, 0x80);
+        g_assert_cmphex(spd[149], ==, 0xce);
+    } else {
+        g_assert_cmpmem(spd_second, sizeof(spd_second), spd, sizeof(spd));
+        g_assert_cmphex(spd[117], ==, 0x00);
+        g_assert_cmphex(spd[122], ==, 0x00);
+        g_assert_cmphex(spd[128], ==, 0x00);
+        g_assert_cmphex(spd[148], ==, 0x00);
+    }
 
     qpci_iounmap(smb, bar);
     g_free(smb);
@@ -857,6 +896,8 @@ int main(int argc, char **argv)
                         test_spd_ddr3);
     qtest_add_data_func("/q35/spd/ddr3/4g-1866", &spd_ddr3_4g_1866,
                         test_spd_ddr3);
+    qtest_add_data_func("/q35/spd/ddr3/2g-1866-samsung",
+                        &spd_ddr3_2g_1866_samsung, test_spd_ddr3);
     qtest_add_func("/q35/spd/ddr3/mixed-4g-2g",
                    test_spd_ddr3_mixed_modules);
     qtest_add_func("/q35/spd/ddr3/per-slot-geometry-and-identity",

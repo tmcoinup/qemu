@@ -2579,42 +2579,62 @@ function Assert-MicrosoftRootProgramCertificate {
 }
 
 function Get-ValidatedDriverCatalog {
-    param([Parameter(Mandatory = $true)][object]$SignedDriver)
+    param(
+        [Parameter(Mandatory = $true)][object]$SignedDriver,
+        [Parameter(Mandatory = $true)][IO.FileInfo]$LoadedDriver
+    )
     $infName = [string]$SignedDriver.InfName
     if ($infName -notmatch '\A[A-Za-z0-9_.-]+\.inf\z' -or
         $infName.Contains('..')) {
         throw "The active PnP package has an unsafe INF name: '$infName'."
     }
-    if (-not (Get-Command Get-WindowsDriver -ErrorAction SilentlyContinue)) {
-        throw 'Get-WindowsDriver is required to authenticate the DriverStore catalog.'
-    }
-    $packages = @(Get-WindowsDriver -Online -All -ErrorAction Stop |
-        Where-Object { [string]$_.Driver -ieq $infName })
-    if ($packages.Count -ne 1) {
-        throw "Expected one DriverStore package for $infName; observed $($packages.Count)."
-    }
-    $package = $packages[0]
-    # The package-level `-All` row is the canonical package record.  On the
-    # target Win10 DISM build, querying the same NVIDIA oemN.inf again with
-    # `-Driver` expands it to 1750 model rows, so Count==1 is not a valid
-    # package-integrity assertion.
-    if ([string]$package.Driver -ine $infName -or
-        [string]$package.ProviderName -notmatch `
-            '\ANVIDIA(?: Corporation)?\z' -or
-        [string]$package.Version -cne [string]$SignedDriver.DriverVersion) {
-        throw "DriverStore metadata does not match active package $infName."
-    }
-
-    $infItem = Assert-RegularLocalPath `
-        ([string]$package.OriginalFileName) 'DriverStore INF'
     $driverStoreRoot = [IO.Path]::GetFullPath(
         (Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository')
     ).TrimEnd('\') + '\'
-    if (-not $infItem.FullName.StartsWith(
+    $loadedDirectory = [IO.Path]::GetFullPath(
+        $LoadedDriver.DirectoryName
+    ).TrimEnd('\')
+    if (-not ($loadedDirectory + '\').StartsWith(
             $driverStoreRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Published INF is outside DriverStore FileRepository: $($infItem.FullName)"
+        throw 'The active NVIDIA kernel image is not loaded from DriverStore.'
+    }
+    $packageDirectoryName = $loadedDirectory.Substring($driverStoreRoot.Length)
+    if ([string]::IsNullOrWhiteSpace($packageDirectoryName) -or
+        $packageDirectoryName.Contains('\') -or
+        $packageDirectoryName -notmatch
+            '\Anvgridsw\.inf_amd64_[0-9a-f]{16}\z') {
+        throw "The loaded NVIDIA package directory is unexpected: $loadedDirectory"
+    }
+
+    # Win32_PnPSignedDriver binds the active device to its published oemN.inf;
+    # the running nvlddmkm service binds it to one exact FileRepository
+    # directory. Comparing those two INF copies avoids a multi-minute full
+    # full online DISM driver-store scan while retaining a fail-closed link
+    # between the active PnP package, loaded kernel image, INF and catalog.
+    $publishedInfItem = Assert-RegularLocalPath `
+        (Join-Path (Join-Path $env:SystemRoot 'INF') $infName) `
+        'published active PnP INF'
+    $infItem = Assert-RegularLocalPath `
+        (Join-Path $loadedDirectory 'nvgridsw.inf') 'loaded DriverStore INF'
+    $publishedInfHash = (Get-FileHash -LiteralPath $publishedInfItem.FullName `
+        -Algorithm SHA256 -ErrorAction Stop).Hash
+    $driverStoreInfHash = (Get-FileHash -LiteralPath $infItem.FullName `
+        -Algorithm SHA256 -ErrorAction Stop).Hash
+    if ($publishedInfHash -cne $driverStoreInfHash) {
+        throw "The active published INF does not match loaded DriverStore package $packageDirectoryName."
     }
     $infText = [IO.File]::ReadAllText($infItem.FullName)
+    $driverVersionMatches = [regex]::Matches(
+        $infText,
+        '(?im)^\s*DriverVer\s*=\s*[^,\r\n]+,\s*([0-9.]+)\s*(?:;.*)?$'
+    )
+    $infDriverVersions = @($driverVersionMatches | ForEach-Object {
+        [string]$_.Groups[1].Value.Trim()
+    } | Sort-Object -Unique)
+    if ($infDriverVersions.Count -ne 1 -or
+        $infDriverVersions[0] -cne [string]$SignedDriver.DriverVersion) {
+        throw "Loaded DriverStore INF version does not match active package $infName."
+    }
     $catalogMatches = [regex]::Matches(
         $infText,
         '(?im)^\s*CatalogFile(?:\.[A-Za-z0-9_.-]+)?\s*=\s*"?([^";\r\n]+?)"?\s*(?:;.*)?$'
@@ -2689,10 +2709,11 @@ function Get-HealthyDisplayState {
         throw "GPU parent must be one System-class PCI bridge, not a second GPU: $parentId"
     }
 
-    $signedDrivers = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
-        Where-Object {
-            [string]$_.DeviceID -ieq [string]$controllers[0].PNPDeviceID
-        })
+    $escapedPnpDeviceId = ([string]$controllers[0].PNPDeviceID).Replace(
+        '\', '\\'
+    ).Replace("'", "\'")
+    $signedDrivers = @(Get-CimInstance Win32_PnPSignedDriver `
+        -Filter "DeviceID='$escapedPnpDeviceId'" -ErrorAction Stop)
     if ($signedDrivers.Count -ne 1 -or -not [bool]$signedDrivers[0].IsSigned -or
         [string]$signedDrivers[0].DriverVersion -cne $Contract.ExpectedDriverVersion -or
         [string]$signedDrivers[0].DriverProviderName -notmatch `
@@ -2705,8 +2726,6 @@ function Get-HealthyDisplayState {
     if ([string]::IsNullOrWhiteSpace($pnpSigner) -or -not $trustedPnpSigner) {
         throw "The active PnP package signer is not NVIDIA/WHCP: '$pnpSigner'."
     }
-    $driverPackage = Get-ValidatedDriverCatalog $signedDrivers[0]
-
     $kernelDrivers = @(Get-CimInstance Win32_SystemDriver -Filter `
         "Name='nvlddmkm'" -ErrorAction Stop)
     if ($kernelDrivers.Count -ne 1) {
@@ -2739,6 +2758,11 @@ function Get-HealthyDisplayState {
             $systemDriversPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "The loaded NVIDIA kernel driver is outside approved Windows roots: $driverPath"
     }
+    # The catalog carries the package's PKCS#7 intermediate certificates.
+    # Validate that identity-bound production chain first, then require the
+    # loaded SYS to use the same already-approved leaf certificate below.
+    $driverPackage = Get-ValidatedDriverCatalog `
+        -SignedDriver $signedDrivers[0] -LoadedDriver $driverItem
     $driverVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($driverPath)
     $kernelFileVersion = '{0}.{1}.{2}.{3}' -f
         $driverVersion.FileMajorPart, $driverVersion.FileMinorPart,

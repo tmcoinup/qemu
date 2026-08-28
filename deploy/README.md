@@ -71,11 +71,12 @@ G-11 的 host/guest、驱动、推流和零拷贝支持边界统一记录在
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)；其中明确区分 upstream QEMU
 源码能力和本分支已经验收的产品能力。
 历史分支对比材料仅供考古，不属于当前操作员工作流。
-组件化硬件池当前正常新建层包含 2 款家用无核显 4C/8T CPU（Core i7-4820K、
-Core i7-3820）、3 块三品牌消费 X79 主板和 48 套原子整机。完整目录为 10 CPU、
-16 主板、37 内存、312 整机：旧 H81/6G 等 261 条统一 archived，另有 3 条
-legacy compatibility。新建内存只用 4/8/12/16 GiB，其中 4/8 双通道、12 三通道、
-16 四通道；Kingston、Samsung、Elpida、Micron 按真实 CPU/板/模组上限运行
+组件化硬件普通新建池包含 Core i7-4930K 6C/12T、Core i7-4820K/Core i7-3820
+4C/8T，以及 ASUS、Gigabyte、ASRock 三品牌 X79 主板，共 102 套原子整机。
+4930K 每个主板/容量都有 4–5 个大牌内存选择。完整目录为 11 CPU、16 主板、45 内存、
+366 整机：旧 H81/6G 等 261 条统一 archived，另有 3 条 legacy compatibility。
+新建内存只用 4/8/12/16 GiB，其中 4/8 双通道、12 三通道、
+16 四通道；Kingston、Samsung、Elpida、Micron、SK hynix 按真实 CPU/板/模组上限运行
 DDR3-1600/1866。
 10 款 SSD 覆盖 Samsung、Crucial、Kingston、Intel、WD 五品牌且均精确为
 `512110190592` 字节；自动选择会先尝试 3 款 PCIe 3.0 x4 NVMe，再按平台合理性
@@ -142,18 +143,24 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/vmctl.sh cdrom <vm_id> {status\|mount ABS.iso [--replace]\|eject}` | 普通启动零光驱；`mount` 热插只读 USB-BOT/SCSI 光驱，`eject` 删除整台设备，无需重启 Windows |
 | `./deploy/scripts/shared-usb.sh <vm_id> {mount\|status\|eject}` | 把 `shared/usb/` 热插为逻辑 128 GiB、宿主不预分配镜像的只读 FAT32 U 盘；真实卷标固定为 `U盘` |
 | `./deploy/scripts/usb-directory.sh <vm_id> mount ABS_DIR [--replace]` | 把明确指定的 host 目录免驱热插为只读 VVFAT/USB Mass Storage |
-| `./deploy/scripts/guest-lite.sh <vm_id> usb-mount` | 封装 Guest Lite 2.6.0（Defender/防火墙/更新/云盘/通知/输入法/游戏模式/Game DVR/高性能电源/NVIDIA 最高性能/DNF High/安全清理旧 Temp/后台进程）到固定目录并刷新只读公共工具 U 盘 |
+| `./deploy/scripts/guest-lite.sh <vm_id> usb-mount` | 封装 Guest Lite 2.6.4（保留 MpsSvc 兼容 NVIDIA 控制面板；含克隆快速路径、Defender/防火墙 profile/更新/云盘/通知/输入法/游戏模式/Game DVR/高性能电源/NVIDIA 最高性能/DNF High/安全清理旧 Temp/后台进程）到固定目录并刷新只读公共工具 U 盘 |
 | `./deploy/scripts/vmctl.sh seal <source_id> <base_name> [--no-clean]` | 将停机 VM 封装为具名 standalone base；默认先离线清理 WeGame/Tencent 跨克隆身份，失败不发布；`--no-clean` 仅用于明确保留状态 |
 | `./deploy/scripts/vmctl.sh clone <base_name> <new_id> [--gpu-profile PROFILE] [--start]` | 精确选择具名 portable base，默认创建 V-11 式 hard-link pin + 小型增量盘；不指定 GPU 时按宿主 framebuffer 单档、显示器按新建池各随机一次并写死到 `vm.conf`，`--full-copy` 才复制独立整盘 |
+| `./deploy/scripts/vmctl.sh refresh-base <base_name> [--check]` | 仓库首启合同升级后，一键检查/原子刷新私有 Sysprep 母盘；已有克隆 pin 不变，后续克隆使用当前 finalizer + Guest Lite |
+| `./deploy/scripts/vmctl.sh repair-init <vm_id>` | 停机失败克隆的一键升级：刷新用户态 finalizer/Guest Lite 与 VM 绑定 ISO，保留 Licensed 结果、正式驱动和母盘 |
+| `./deploy/scripts/vmctl.sh driver-install <vm_id> [--start]` | 新 Windows/新母盘/同版本修复的通用 GRID 入口：临时标准 VGA + mdev `display=off` 安装，完整关机后离线认证并写 page-safe `NV_Modes`；默认停机 |
+| `./deploy/scripts/vmctl.sh repair-display <vm_id> [--no-start]` | R535 SDL/QMP 纯黑一键恢复：只允许 ACPI 关机，离线清旧模式并写 8 项 page-safe EDID/`NV_Modes`，默认冷启动 |
 | `./deploy/scripts/vmctl.sh monitor <vm_id> [--monitor-profile PROFILE] --force` | 仅关机态切换显示器或强制清旧缓存；普通 start 已自动按 `vm.conf` 同步 |
 | `./deploy/scripts/vmctl.sh migrate [--check\|--apply] [--vms-dir ABS]` | 两代旧 G-11 bundle 到 `VMS_DIR/N` 的只读检查/安全迁移 |
 | `./deploy/host/build-qemu.sh` | 增量构建 `qemu-system-x86_64` 与离线同步依赖的 `qemu-edid` |
+| `./deploy/host/build-stealth-ovmf.sh` | 构建随 G-11 封装的 OVMF；在 UEFI 退出后通用交接 X79 CPU DMI2 identity，不含 VM/验收软件特判 |
 | `./deploy/scripts/recover-hibernated-vm.sh <vm_id> [--rescue-gtk] [--proxy]` | 休眠/Fast Startup 一键恢复：只开本地标准 VGA，Windows 完整关机后自动强制同步显示器；不挂 vGPU、不走远程桌面、不装 guest 包，任一步失败即停止 |
-| `./deploy/scripts/sync-monitor-profile.sh <vm_id> --force` | `vmctl monitor` 的底层入口；普通启动和克隆已自动调用，强制修复时核对生产 538.33/INF 收据并重写 FHD/1K EDID 与 10 项 `NV_Modes`；guest 内零常驻 |
+| `./deploy/scripts/sync-monitor-profile.sh <vm_id> --force` | `vmctl monitor` 的底层入口；普通启动和克隆已自动调用，强制修复时核对生产 538.33/INF 收据并重写 FHD/1K EDID 与 8 项 R535 page-safe `NV_Modes`；guest 内零常驻 |
 | `sudo ./deploy/host/recover-vgpu-gpu.sh --check --resume`（确认后去掉 `--check`） | 所有 VM/mdev 已停后的 host GPU 一键恢复；共享锁与 fd 门禁后仅尝试 NVIDIA reset、干净模块重载和精确 FLR，绝不 bus reset、强卸模块或自动重启宿主 |
 | `./deploy/scripts/check-hardware-pool.sh` | 无 sudo、无写入地验证硬件目录及本机 KVM CPU realization；区分新 VM 与旧 VM 兼容池 |
-| `./deploy/scripts/create-vm.sh --list-cpu-profiles`（另有 `--list-board-profiles`、`--list-memory-profiles`） | 默认只显示正常池：2 款 4C/8T Core i7、3 块 X79、4/8/12/16G DDR3；前置 `--include-fallback` 才读取完整 10/16/37 目录，archived 仍不可新建 |
-| `./deploy/scripts/create-vm.sh --list-platforms` | 默认显示 261 套可新建审核白名单（默认随机 24、显式新 237）；前置 `--include-fallback` 才追加 3 套 legacy |
+| `./deploy/scripts/create-vm.sh <vm_id> --cpu-profile i7-4930k --board-profile BOARD --memory-profile MEMORY --ssd-profile SSD` | 统一创建 6C/12T，多品牌复制粘贴教程见 [`docs/G11-6C12T-QUICKSTART.md`](docs/G11-6C12T-QUICKSTART.md) |
+| `./deploy/scripts/create-vm.sh --list-cpu-profiles`（另有 `--list-board-profiles`、`--list-memory-profiles`） | 默认显示 3 款消费级 X79 Core i7、3 块三品牌 X79、4/8/12/16G DDR3；前置 `--include-fallback` 才读取完整 11/16/45 目录，archived 仍不可新建 |
+| `./deploy/scripts/create-vm.sh --list-platforms` | 默认显示 102 套普通新建审核白名单；前置 `--include-fallback` 才显示完整 366 套生命周期目录 |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso]` | 缺配置时自动生成身份，缺盘时固定建空盘；默认以安装期 UEFI helper 自动引导 xHCI USB Windows 光盘（约 64 KiB 合并读取）并挂最小应答 ISO；helper/两张 ISO 在普通启动全部消失；默认跳过 OOBE，以空密码 `Administrator` 首次登录，设置中国时区/NumLock，并预先关闭 Fast Startup |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso] --install-media ide` | 仅异常固件/ISO 的慢速 ATAPI 兼容回退；不挂 helper，也不会把选择写入 `vm.conf`。完整说明见 [`docs/G11-INSTALL-MEDIA.md`](docs/G11-INSTALL-MEDIA.md) |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso] --manual-oobe` | 同一安全建盘语义，但不挂应答 ISO，完整手动完成 OOBE |
@@ -300,7 +307,7 @@ hibernated、挂载或同步验证失败都会停止，不删除 `hiberfil.sys`�
 ```bash
 ./deploy/scripts/start-vm.sh 1                    # 使用 vm.conf 已验收的持久模式
 ./deploy/scripts/start-vm.sh 1 --no-numlock       # 仅本次允许 NumLock 保持关闭
-# 临时安全回退：./deploy/scripts/start-vm.sh 1 --no-spoof --no-monitor-sync
+# 新镜像装/修 GRID：./deploy/scripts/vmctl.sh driver-install 1
 # 新 clone 无需 WinRM/guest 名称同步
 # ramfb 先显示固件/启动画面，随后 NVIDIA vGPU framebuffer 接管
 # Ctrl+C / 关 QEMU 窗口 / 另一终端 ./deploy/scripts/stop-vm.sh 1 都能优雅关
@@ -362,7 +369,7 @@ NVIDIA REGION 还会逐行精确对比可见像素：静止桌面不再重复上
 
 **spoof 切换**：
 ```bash
-./deploy/scripts/start-vm.sh 1 --no-spoof          # off：装 driver / 调试用
+./deploy/scripts/start-vm.sh 1 --no-spoof          # off：只用于无 guest 写入的身份诊断
 ./deploy/scripts/start-vm.sh 1 --spoof-name-only   # B：PCI 真身 + name spoof，driver 最稳
 ./deploy/scripts/start-vm.sh 1 --spoof              # legacy A 诊断：当前无可用生产签名 transition，会拒绝
 ```
@@ -386,7 +393,7 @@ host keyboard/mouse ─QEMU native input────────┘→ guest
 | 位置 | 改动 |
 |------|------|
 | `target/i386/cpu.h` | 新字段 `stealth_hypervisor` (X86CPU) |
-| `target/i386/cpu.c` | 新属性 `x-hv-stealth`；gate `FEAT_1_ECX` 的 HYPERVISOR bit；新增并实现 `Core-i7-3820`、`Core-i7-4820K` 10 MiB L3 模型。完整目录十款 CPU 中只有这两款家用 4C/8T 无核显型号进入 X79 正常新建层 |
+| `target/i386/cpu.c` | 新属性 `x-hv-stealth`；gate `FEAT_1_ECX` 的 HYPERVISOR bit；实现 `Core-i7-3820`、`Core-i7-4820K` 10 MiB L3 以及 `Core-i7-4930K` 6C/12T、12 MiB L3 模型；三款均进入普通 X79 新建池 |
 | `hw/smbios/smbios.c` | type 17 新增 `memtype` / `typedetail` / `width` / `totalwidth` / `rank` / `rank-list` / `voltage` 及逐槽 part/serial 语义，把 DDR 类型、位宽、每槽 Rank、料号、序列、同步属性和电压显式填进 SMBIOS；未指定时保持 QEMU 11 默认语义 |
 | `hw/nvme/nvme.h` + `hw/nvme/ctrl.c` | NVMe 新增 `model=` 属性（默认 `QEMU NVMe Ctrl` 覆盖为 SSD 真实型号） |
 | `hw/ide/atapi.c` | ATAPI INQUIRY 在显式给出 `model=` 时按 `vendor(8)+product(16)` 投影；仅显式 IDE 安装回退使用审核的 `HL-DT-ST DVDRAM GH24NS50 / XP02`。普通启动不创建光驱，手动 ISO 走可热插 USB-BOT/SCSI |
@@ -395,7 +402,7 @@ host keyboard/mouse ─QEMU native input────────┘→ guest
 | `hw/smbios/smbios.c` | **type 4 → type 7 cache handle 链接**：以前 `l1/l2/l3_cache_handle` 硬编 `0xFFFF`，导致 Windows `Win32_Processor.L2CacheSize` 为空 / `L3CacheSize=0`。现在先 build type 7、按 level (1/2/3) 记录 handle，再 build type 4 把 handle 填进去。顺序不能反，否则 level→handle 表仍是 0xFFFF |
 | `hw/smbios/smbios.c` | type 4 新增 `external-clock` / `voltage` / `processor-upgrade`；默认 socket enum 保持 Other，启动器按 LGA1150/LGA1151/LGA2011 显式传值。type 3 新增 `chassis_type`，启动器显式传 Desktop |
 | `hw/smbios/smbios.c` | type 1/2/3 `version=` 参数必须显式传。**为空时**会落到 `smbios_set_defaults()` 从 `mc->name` 继承成 `"pc-q35-11.0"` — `Win32_BaseBoard.Version = "pc-q35-11.0"` 是 QEMU 指纹。`start-vm.sh` 已显式填 `version=1.0` 等 |
-| `target/i386/cpu.c` | 十个 CPU 模型都有与目录一致的 cache info；新 i7-3820/i7-4820K 均为 10 MiB L3。启动器按拓扑生成对应 L1/L2/L3 SMBIOS，避免 `legacy_cache` 回退到错误缓存 |
+| `target/i386/cpu.c` | 十一个 CPU 模型都有与目录一致的 cache info；i7-3820/i7-4820K 为 10 MiB L3，i7-4930K 为 12 MiB/16-way L3。启动器按拓扑生成对应 L1/L2/L3 SMBIOS，避免 `legacy_cache` 回退到错误缓存 |
 | `hw/pci/pci.c` | `pci_default_sub_vendor_id/device_id` 可通过 env vars `QEMU_PCI_SUBVENDOR_ID/SUBDEVICE_ID` 覆盖（默认 `0x1AF4/0x1100` = Red Hat/QEMU 是典型虚拟化指纹）。start-vm.sh 按 `BOARD_BRAND` 查表设成 MSI/ASUS/Gigabyte/ASRock 真实 OEM subsystem ID，guest 里 `lspci` 再也看不到 Red Hat/QEMU |
 | `hw/audio/hda-codec.c` | `QEMU_HDA_ID_VENDOR` 从 `0x1AF4` (Red Hat) 改为 `0x10EC` (Realtek)。Windows 里 HD Audio Device 不再显示 "Red Hat High Definition Audio"，codec InstanceId 是 `HDAUDIO\FUNC_01&VEN_10EC&...` |
 | `hw/nvme/ctrl.c` | 保留兼容性优先的 Red Hat 默认 PCI ID，并支持 Samsung/Intel/WD 显式 ID；Samsung Identify 使用 NVMe 1.3，WD Black 使用实机 `15b7:5001`、subsystem `1b4b:1093`、NVMe 1.2 与 Gen3 x4 链路 |
@@ -449,7 +456,7 @@ deploy/
 ├── lib/
 │   ├── bridge-network.sh     # QEMU 创建 TAP 前的物理 bridge fail-closed 门禁
 │   ├── cpu-isolation.sh      # QMP vCPU TID 获取与 CPU 隔离启动/回滚
-│   ├── nvidia_modes.py       # 锁定 GRID 538.33/旧策略 → EDID 对齐 10 项模式
+│   ├── nvidia_modes.py       # 锁定 GRID 538.33/旧策略 → 8 项 R535 page-safe 模式
 │   ├── windows_hive.py       # 按 REGF Length 只读校验活动 hbin，保留物理 slack
 │   ├── vm-storage.sh         # VM/ISO/config/base/NVRAM 统一路径解析
 │   ├── vm-tpm.sh             # swtpm TPM 1.2/2.0 生命周期与精确清理
@@ -570,12 +577,13 @@ cd /home/ubuntu/projects/qemu
 # 若必须新建兜底平台，先在完整目录中确认，再同时显式授权：
 # ./deploy/scripts/create-vm.sh 3 --platform i5-6500 --allow-fallback-platform
 # 每个 VM 的组件选择及可持久化身份写入 vms/N/vm.conf；GPU/USB 不虚构序列号。
-# 正常新建池为 2 CPU/3 块三品牌 X79/48 套原子整机；默认性能优先。
+# 普通新建池为 3 CPU/3 块三品牌 X79/102 套，包含 54 套 i7-4930K 6C/12T。
+# 例：./deploy/scripts/create-vm.sh 3 --cpu-profile i7-4930k --board-profile asus-p9x79 --memory-size 4G
 # 4/8 GiB 为两根真双通道，12 GiB=3×4 GiB 三通道，16 GiB=4×4 GiB 四通道。
 # 旧 6 GiB/H81 组合均 archived，只供已有 VM，不会被 --include-fallback 重新新建。
 # 硬件合同 v3 把每槽 Rank/device-width/JEP106/part/独立 serial 同步到 SMBIOS/SPD；
 # Micron 的 18-byte SPD 字段使用对应 -1G6/-1G4 基础 part；legacy DDR4 仍 page0-only。
-# 默认优先 i7-4820K + DDR3-1866，再按宿主 realization 和共同频率上限回落。
+# 默认优先 i7-4930K + DDR3-1866，再按宿主 realization 和共同频率上限回落。
 # SSD 为七款 SATA + 三款 Gen3 x4 NVMe，十款均精确 512110190592 字节；自动先 NVMe，
 # i7-3820/不兼容链路会合理回退 SATA；
 # GPU 池为三款 1GB + 三款 2GB NVIDIA、共 25 条多品牌原子行；2GB 默认层 12 条、1GB R535 安全层 4 条、显式层 1 条、Kepler 旧配置层 8 条；显示器完整目录 35 款且全部 FHD 1920×1080@60，
@@ -611,7 +619,7 @@ cd /home/ubuntu/projects/qemu
 `./deploy/scripts/create-disk.sh 1 --blank`、
 `./deploy/scripts/start-vm.sh 1 --install`；正常操作不需要拆分。
 
-装好 Windows 后去掉 CD，先按下一节用 `--no-monitor-sync` 安装 GRID driver；不要
+装好 Windows 后去掉 CD，先按下一节用统一安全入口安装 GRID driver；不要
 使用旧 `--no-gpu` + VNC 救援。driver 装好并完整关机后，当前全部 profile 都按第 8 节使用
 私有 `VgpuPortable.exe`。若磁盘已经处于休眠/Fast Startup，任何型号都先运行
 `recover-hibernated-vm.sh` 的本地标准 VGA 恢复。
@@ -624,10 +632,9 @@ RTC 统一由宿主负责：QEMU 进程使用 `TZ=Asia/Shanghai`，并传入
 
 ### 6. 装 vGPU guest 驱动（vGPU 真 PCI ID）
 
-用 `./deploy/scripts/start-vm.sh 1 --no-spoof --no-monitor-sync` 启动，使匹配的 GRID INF 能看到
-真实 vGPU PCI ID，同时避免在关闭休眠前离线写 NTFS。安装与 host branch/profile
-兼容的 GRID guest 驱动；驱动接管前由 ramfb 显示。装完让 Windows 完整关机，
-license 留到第 8 节统一收尾。
+运行 `./deploy/scripts/vmctl.sh driver-install 1`。封装让匹配的 GRID INF 看见真实
+vGPU PCI ID，但由临时标准 VGA 承担窗口、mdev 固定 `display=off`；安装成功后自动
+完整关机并离线认证/写入安全模式表。默认保持关机，license 留到第 8 节统一收尾。
 
 ### 7. 消费卡身份策略
 

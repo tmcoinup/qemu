@@ -136,6 +136,8 @@ IMAGE_ROOT="$tmp/empty-image-root" "$packager" \
     --output-exe "$tmp/licensed/VgpuPortable.exe" >/dev/null
 licensed_contract="$tmp/licensed/.host-bundle/gpuz-contract.json"
 licensed_manifest="$tmp/licensed/.host-bundle/bundle-manifest.json"
+cmp -s -- "$guest" "$tmp/licensed/.host-bundle/apply-gpuz-profile.ps1" ||
+    fail "private portable did not embed apply-gpuz-profile.ps1 from the current checkout"
 token_hash=$(sha256sum "$licensed_token" | awk '{print toupper($1)}')
 token_bytes=$(stat -c %s -- "$licensed_token")
 jq -e --arg tokenHash "$token_hash" --argjson tokenBytes "$token_bytes" '

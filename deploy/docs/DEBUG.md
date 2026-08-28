@@ -188,20 +188,21 @@ sudo journalctl -b -u nvidia-vgpu-mgr.service --no-pager |
 
 1. 让 Windows 完整关机，不要休眠或只在 guest 中点“重启”。无法操作桌面时，
    host 可先用 `./deploy/scripts/stop-vm.sh 3` 优雅关机。
-2. 用一次性 off 模式启动：
+2. 用通用安全驱动恢复入口：
 
    ```bash
-   ./deploy/scripts/start-vm.sh 3 --no-spoof --no-monitor-sync
+   ./deploy/scripts/vmctl.sh driver-install 3
    ```
 
-   `--no-spoof` 只影响这次启动，不会改写只读 `vm.conf`；它会让外层 PCI 和
-   per-mdev 内部身份暂时回到驱动恢复路径，并不带入 VM3 的 FRL 覆盖。
-3. 在 off 启动中先验证原生 538.33 能 Code 0，然后完整关机。不要手工删除当前
-   NVIDIA device，也不要用未校验的 INF 覆盖 Driver Store。
+   封装只影响这次启动，不会改写只读 `vm.conf`；它让外层 PCI/per-mdev 身份回到
+   native PnP，并用标准 VGA 隔离 mdev console，不带入 VM3 的 FRL 覆盖。
+3. 封装会验证原生 538.33、完整关机并离线收敛。不要手工删除当前 NVIDIA device，
+   也不要用未校验的 INF 覆盖 Driver Store。
 4. 保持 off/B，不运行历史 GTX1050 strict ZIP/finish。先取得与目标 PnP/版本匹配的
    NVIDIA/Microsoft 正式生产签名驱动；在此之前不要恢复 A/internal/FRL marker。
-   启动器会在磁盘干净离线时同步 EDID。第一次尚未建立 NVIDIA 显示器缓存时，先让
-   Windows 完成一次枚举和完整关机，下一次冷启动再完成同步。
+   启动器会在磁盘干净离线时同步 EDID。第一次尚未建立 NVIDIA 显示器缓存时，普通
+   vGPU 启动会拒绝首次枚举；统一使用上面的 `vmctl.sh driver-install 3`，让标准
+   VGA 隔离窗口完成枚举和完整关机，下一次冷启动才进入 NVIDIA console。
 
 如果 Code 0 已恢复且 NVIDIA 已列出 1920×1080，但当前模式仍不对，应在
 本地 console 的 Windows 显示设置或 NVIDIA 控制面板中选择 1920×1080 @ 60 Hz；

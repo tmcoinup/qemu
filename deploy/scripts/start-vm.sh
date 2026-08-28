@@ -42,9 +42,11 @@
 #                      已消费 host attestation FD；普通入口不能建立授权
 #   --proxy           创建 .proxy 兼容别名；DGame preview 默认已启用原生 multi QMP
 #   --no-proxy        不创建 .proxy 别名（默认；不关闭 preview 所需的 multi QMP）
-#   --cpu-isolate      CPU 隔离 required 模式（默认；保留为显式兼容参数）
-#   --cpu-isolate-auto CPU 隔离 auto 模式（不可用时显式降级继续）
-#   --no-cpu-isolate   关闭 CPU 隔离
+#   --cpu-isolate=true|false
+#                      是否启用 CPU 隔离（默认 true）
+#   --memory-prealloc=true|false
+#                      是否全量预分配宿主 RAM（默认 true）；false 按 Guest 实际
+#                      触页分配，Guest 容量/身份不变
 #   --host-performance 启动前必须应用动态全频段宿主性能策略
 #   --no-host-performance 本次不改变宿主性能策略
 #   --svc-cpus <0..64|auto>
@@ -143,7 +145,7 @@
 #   VGPU_MDEV_FRL_ENABLED 可选的 per-mdev FRL 开关：0|1；未设置则继承 profile
 #   TPM               TPM 开关（0/1）；显式环境值覆盖主板 profile
 #                     新配置按 BOARD_TPM_VERSION 自动选择；旧配置仍默认 TPM 2.0
-#   MEM_GUARD/MEM_FORCE  prealloc 内存护栏及显式风险旁路
+#   MEM_GUARD/MEM_FORCE  Guest 最大容量护栏及显式风险旁路
 #   HOST_OOM_PROTECT 1=将当前 VM 进程树临时设为 oom_score_adj=-500
 #   G11_HOST_PERFORMANCE auto|required|off（默认 auto）；释放 CPU 硬件
 #                     min/max 全频段、保持动态 governor、开启睿频，并避免 THP
@@ -154,7 +156,6 @@
 #                     TSC scaling 能力。支持时保持目录 TSC；不支持时显式使用
 #                     宿主 invariant TSC，避免带着不可能的缩放值启动
 #   PROXY            QMP `.proxy` 兼容别名开关（0/1，默认 0）
-#   CPU_ISOLATION    auto|required|off（默认 required）
 #   CPU_ISOLATION_AUTO_INSTALL  缺 helper/依赖时自动安装（0/1，默认 1）
 #   QEMU_SERVICE_CPUS  非 vCPU 服务线程专用逻辑 CPU 数（默认 0；需显式指定）
 #   DGAME_PREVIEW     auto|on|off；native 默认 on，使用独立 fb-shm 对象
@@ -231,7 +232,7 @@ source "$here/lib/dgame-qemu-ptracer.sh"
 
 VM_ID="${1:-}"
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso] [--install-media usb|ide]|--native|--gtk|--driver-install|--driver-install-gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
+    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso] [--install-media usb|ide]|--native|--gtk|--driver-install|--driver-install-gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate=true|false|--memory-prealloc=true|false|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -2202,6 +2203,11 @@ REPAIR_DISPLAY_VARS="${REPAIR_DISPLAY_VARS:-auto}"
 DRY_RUN="${DRY_RUN:-0}"
 PROXY="${PROXY:-0}"
 CPU_ISOLATION="${CPU_ISOLATION:-}"
+# 两项都是本次启动的宿主资源策略，不写入 vm.conf。CLI 省略时分别由
+# CPU required 默认和 G-11 原有的低延迟内存预分配默认接管。
+CPU_ISOLATION_CLI_SEEN=0
+G11_MEMORY_PREALLOC=on
+MEMORY_PREALLOC_CLI_SEEN=0
 HOST_OOM_PROTECT="${HOST_OOM_PROTECT:-1}"
 G11_HOST_PERFORMANCE="${G11_HOST_PERFORMANCE:-auto}"
 G11_RTC_CLOCK="${G11_RTC_CLOCK:-vm}"
@@ -2341,9 +2347,32 @@ while (( $# > 0 )); do
         --production-migration-source) shift ;;
         --proxy) PROXY=1; shift ;;
         --no-proxy) PROXY=0; shift ;;
-        --cpu-isolate) CPU_ISOLATION=required; shift ;;
-        --cpu-isolate-auto) CPU_ISOLATION=auto; shift ;;
-        --no-cpu-isolate) CPU_ISOLATION=off; shift ;;
+        --cpu-isolate=*)
+            (( CPU_ISOLATION_CLI_SEEN == 0 )) || {
+                echo "--cpu-isolate 只能指定一次" >&2
+                exit 2
+            }
+            case "${1#*=}" in
+                true) CPU_ISOLATION=required ;;
+                false) CPU_ISOLATION=off ;;
+                *) echo "--cpu-isolate 只接受 true 或 false" >&2; exit 2 ;;
+            esac
+            CPU_ISOLATION_CLI_SEEN=1
+            shift
+            ;;
+        --memory-prealloc=*)
+            (( MEMORY_PREALLOC_CLI_SEEN == 0 )) || {
+                echo "--memory-prealloc 只能指定一次" >&2
+                exit 2
+            }
+            case "${1#*=}" in
+                true) G11_MEMORY_PREALLOC=on ;;
+                false) G11_MEMORY_PREALLOC=off ;;
+                *) echo "--memory-prealloc 只接受 true 或 false" >&2; exit 2 ;;
+            esac
+            MEMORY_PREALLOC_CLI_SEEN=1
+            shift
+            ;;
         --host-performance) G11_HOST_PERFORMANCE=required; shift ;;
         --no-host-performance) G11_HOST_PERFORMANCE=off; shift ;;
         --svc-cpus)
@@ -3703,8 +3732,8 @@ if [[ "$MEM_TOPOLOGY_LEGACY" == 1 ]]; then
 fi
 unset mem_i mem_module_size MEM_MODULE_TOTAL_MB
 
-# memory-backend-memfd 使用 prealloc=on；在分配 mdev、启动 swtpm 之前先
-# 确认 host RAM + swap 至少能容纳本 VM，避免 OOM killer 连带杀掉其它 VM。
+# 即使使用按需触页，Guest 后续仍可能用满固定上限；在分配 mdev、启动 swtpm
+# 之前先确认 host RAM + swap 至少能容纳本 VM，避免 OOM killer 连带杀掉其它 VM。
 # MEM_GUARD=0 可关闭；确知风险时可用 MEM_FORCE=1 越过硬拒绝。
 check_memory_capacity() {
     local avail_kb swap_kb required_kb margin_mb margin_kb total_kb
@@ -5185,6 +5214,12 @@ else
     echo "  CPU DMI2 inventory: off（仅保留 P35 MCH）"
 fi
 echo "  内存: ${MEM_MODULE_MB_LIST//,/+} MiB ${MEM_MODEL_LIST//,/ + } (${MEM_FAMILY:-unknown}@${MEM_SPEED} 身份；运行带宽=host-native/unthrottled，${MEM_CHANNEL_MODE})"
+if [[ "$G11_MEMORY_PREALLOC" == off ]]; then
+    echo "  宿主内存: 按需触页（Guest 上限 ${GUEST_MEM_MB} MiB 与 DIMM/SMBIOS 身份不变；工作集仍可能增长到上限）"
+else
+    echo "  宿主内存: 全量预分配（默认，Guest 上限 ${GUEST_MEM_MB} MiB）"
+fi
+echo "  睡眠: ACPI S3 已暴露（空闲自动睡眠由 Guest 设为从不；手动睡眠可用 vmctl.sh wake ${VM_ID} 唤醒）"
 if [[ "$SSD_INTERFACE" == nvme ]]; then
     echo "  SSD: ${SSD_MODEL} / ${SSD_INTERFACE}:${SSD_CONTROLLER_PROFILE} / PCIe ${SSD_PCIE_GEN}.0 x${SSD_PCIE_LANES} ${SSD_FORM_FACTOR} / fw=${SSD_FIRMWARE_REV} / sector=${SSD_LOGICAL_BLOCK_SIZE}/${SSD_PHYSICAL_BLOCK_SIZE}B / ${SSD_SIZE_BYTES} bytes"
 else
@@ -5338,11 +5373,15 @@ QEMU_CMD=(
     -cpu "$CPU_ARGS"
     -smp "${CPU_VCPUS},sockets=1,cores=${CPU_CORES},threads=${CPU_THREADS_PER_CORE}"
     -m "$GUEST_MEM_MB"
-    -object "memory-backend-memfd,id=ram0,size=${GUEST_MEM_MB}M,share=on,prealloc=on,merge=off"
+    -object "memory-backend-memfd,id=ram0,size=${GUEST_MEM_MB}M,share=on,prealloc=${G11_MEMORY_PREALLOC},merge=off"
     -numa node,memdev=ram0
     "${RTC_ARGS[@]}"
     -global "kvm-pit.lost_tick_policy=${PIT_LOST_TICK_POLICY}"
-    -global ICH9-LPC.disable_s3=1
+    # Expose the q35/ICH9 ACPI S3 state just like a physical desktop. Guest
+    # policy keeps automatic idle sleep at Never; an explicit user Sleep can
+    # be resumed through QMP with `vmctl.sh wake ID` if local USB wake is not
+    # delivered by the host desktop stack.
+    -global ICH9-LPC.disable_s3=0
     "${HOST_BRIDGE_PRESENTATION_ARGS[@]}"
     "${CHIPSET_PRESENTATION_ARGS[@]}"
     "${TPM_ARGS[@]}"

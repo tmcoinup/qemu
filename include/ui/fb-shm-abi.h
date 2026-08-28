@@ -251,6 +251,30 @@ typedef struct FbShmHeader {
     uint64_t ts_ns;
     uint32_t active_idx;
     uint32_t flags;
+
+    /* --- content liveness (appended; older producers leave it 0) -- */
+    /*
+     * Counts frames whose PIXELS actually changed, as opposed to @frame_seq
+     * which counts publications.
+     *
+     * @target_fps is a publication cadence, not a damage ceiling: when the
+     * guest stops refreshing its display output (Windows idle screen-off,
+     * DWM halting composition) the producer keeps re-publishing the active
+     * slot at the target rate, so @frame_seq advances at 60 Hz while not a
+     * single pixel moves.  Consumers that trust @frame_seq alone therefore
+     * report a healthy "60 fps" over a frozen picture -- and any OCR built on
+     * those frames silently re-reads one stale image.
+     *
+     * @content_seq only advances when the guest actually redrew, giving
+     * consumers an exact "is the picture moving?" predicate.
+     *
+     * Compatibility: the field lives in the reserved tail of the 256-byte
+     * header, so its offset is additive and @header_size is unchanged.
+     * Producers that do not maintain it leave it at 0 for the lifetime of the
+     * mapping; a consumer must treat 0 as "not supported" and fall back to its
+     * own content comparison rather than concluding the picture is frozen.
+     */
+    uint64_t content_seq;
 } FbShmHeader;
 
 #endif /* QEMU_UI_FB_SHM_ABI_H */

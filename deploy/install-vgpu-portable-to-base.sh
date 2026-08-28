@@ -432,7 +432,7 @@ verify_guest_lite_dir() {
        "$GUEST_LITE_MANIFEST_SHA256" ]] || return 1
     jq -e '
         (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-        .schemaVersion == 1 and .profileVersion == "2.6.4" and
+        .schemaVersion == 1 and .profileVersion == "2.6.7" and
         (.files | type) == "array" and (.files | length) == 5 and
         ([.files[].name] | sort) == [
             "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -913,7 +913,7 @@ if ((SITE_PRIVATE)); then
        ! -e "$MOUNT_DIR/ProgramData/G11/SystemNvapiProjection" &&
        ! -e "$DEST_DIR/logs" ]] ||
         die "private base retained a generic EXE or previous clone result"
-    log "installed one licensed V7 EXE, pinned Guest Lite 2.6.4, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
+    log "installed one licensed V7 EXE, pinned Guest Lite 2.6.7, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
 elif ((WITH_GPUZ)); then
     [[ "$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256" &&
        "$(stat -c %s -- "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_BYTES" ]] ||
@@ -1203,7 +1203,7 @@ if ((SITE_PRIVATE)); then
   portable:   C:\ProgramData\VMate\G11\VgpuPortable.exe
               sha256=$PORTABLE_SHA256
   first boot: automatic licensed V7 finalizer; one execution only
-  Guest Lite: automatic pinned 2.6.4 profile in the same verified first-boot flow
+  Guest Lite: automatic pinned 2.6.7 profile in the same verified first-boot flow
   OOBE:       unattended; each clone still receives a generalized Windows identity
   DLS:        dls.gvmates.com:443
   performance: embedded recommended-native-v1

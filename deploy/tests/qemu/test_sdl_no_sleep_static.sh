@@ -8,6 +8,7 @@ sdl_c="$repo_root/ui/sdl2.c"
 start_vm="$repo_root/deploy/scripts/start-vm.sh"
 guide="$repo_root/deploy/docs/G11-SDL-NO-SLEEP.md"
 guest_power="$repo_root/deploy/guest/guest-performance/Optimize-Guest.ps1"
+guest_lite="$repo_root/deploy/guest/guest-lite/G11-Guest-Lite.ps1"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -40,12 +41,27 @@ grep -Fq 'export QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP' "$start_vm" \
     || fail "wrapped SDL launch does not export the selected sleep policy"
 grep -Fq 'SDL 宿主防息屏已启用' "$start_vm" \
     || fail "operator cannot see that SDL host-display inhibition is active"
+grep -Fq -- '-global ICH9-LPC.disable_s3=0' "$start_vm" \
+    || fail "G-11 no longer exposes physical-desktop-like ACPI S3"
+grep -Fq '睡眠: ACPI S3 已暴露' "$start_vm" \
+    || fail "operator cannot see that manual ACPI S3 is available"
+if grep -Fq -- '-global ICH9-LPC.disable_s3=1' "$start_vm"; then
+    fail "G-11 still hides the Windows Sleep page by disabling ACPI S3"
+fi
 grep -Fq "Name = 'VIDEOIDLE'" "$guest_power" \
     || fail "guest display idle timeout is not covered"
 grep -Fq "Name = 'STANDBYIDLE'" "$guest_power" \
     || fail "guest automatic sleep timeout is not covered"
 grep -Fq 'Restore-PowerSettings' "$guest_power" \
     || fail "guest idle policy cannot be rolled back exactly"
+for setting in VIDEOIDLE STANDBYIDLE; do
+    grep -Fq "Name = '$setting'" "$guest_lite" \
+        || fail "Guest Lite does not set $setting to Never"
+done
+grep -Fq 'Get-AllPowerSettingSnapshots' "$guest_lite" \
+    || fail "Guest Lite does not cover every installed power plan"
+grep -Fq 'Merge-PowerSettingSnapshots' "$guest_lite" \
+    || fail "Guest Lite lacks append-only rollback-baseline upgrades"
 
 [[ -f "$guide" ]] || fail "foolproof SDL no-sleep guide is missing"
 

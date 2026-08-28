@@ -91,7 +91,7 @@ FINALIZER_GUEST_LITE_MANIFEST_SHA256=$(sed -n \
     die "current finalizer does not pin the current Guest Lite manifest"
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.4" and
+    .schemaVersion == 1 and .profileVersion == "2.6.7" and
     (.files | type) == "array" and (.files | length) == 5 and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -316,7 +316,7 @@ publish_guest_file() {
     mv -fT -- "$temporary_file" "$destination_file"
 }
 
-echo "[g11-init-repair] safely updating the stopped guest to marker schema 4 / Guest Lite 2.6.4"
+echo "[g11-init-repair] safely updating the stopped guest to marker schema 4 / Guest Lite 2.6.7"
 modprobe nbd max_part=32 >/dev/null 2>&1 || true
 nbd_connect NBD "$DISK" read-write
 partprobe "$NBD"
@@ -440,7 +440,7 @@ cat <<EOF
 [g11-init-repair] PASS vm${VM_ID}
   contract: $CONTRACT_ID
   ISO:      $CURRENT_ROOT/$ISO_FILE
-  guest:    marker schema 4 / Guest Lite 2.6.4 payload refreshed
+  guest:    marker schema 4 / Guest Lite 2.6.7 payload refreshed
   old package: removed (no archive); private base and licensed result retained
 
 下一步只需：

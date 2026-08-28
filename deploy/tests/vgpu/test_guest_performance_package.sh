@@ -14,6 +14,7 @@ done
 
 bash -n "$packager"
 bash -n "$wrapper"
+bash "$root/deploy/tests/guest/test_guest_idle_blank_all_plans.sh"
 
 tmp=$(mktemp -d)
 cleanup() { rm -rf -- "$tmp"; }

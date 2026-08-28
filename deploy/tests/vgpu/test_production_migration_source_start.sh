@@ -231,7 +231,7 @@ run_start() {
         OVMF_VARS="$TMP_DIR/OVMF_VARS.fd" \
         VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
         REPAIR_DISPLAY_VARS=off \
-        "$START_VM" "$VM_ID" --dry-run --no-tpm --no-cpu-isolate \
+        "$START_VM" "$VM_ID" --dry-run --no-tpm --cpu-isolate=false \
             --no-monitor-sync "$@"
 }
 

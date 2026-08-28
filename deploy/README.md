@@ -139,11 +139,12 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 |---|---|
 | `./deploy/scripts/vmctl.sh {path\|start\|stop\|status\|delete} <vm_id> [...]` | 路径感知的傻瓜封装；默认数字目录及 `--vms-dir`/`--vm-dir` 都透传到唯一生命周期入口 |
 | `./deploy/scripts/vmctl.sh display <vm_id> {status\|preview-on\|preview-off\|window-hide\|window-show\|stream-only\|window-only}` | 运行中热插独立 DGame preview，或安全切换 SDL 与 fb-shm；QMP 会核对 VM 身份 |
+| `./deploy/scripts/vmctl.sh wake <vm_id>` | 唤醒用户主动进入 ACPI S3 的 G-11 VM；先核对 QMP 身份和 `suspended` 状态，不影响已运行 VM |
 | `./deploy/scripts/vmctl.sh preview-capacity --instances 16 --rate 60` | 只读检查亮机卡 DRM provider，并核算 1080p 源上传、800×600 / 1067×600 ROI 与 16 窗口纹理常驻量 |
 | `./deploy/scripts/vmctl.sh cdrom <vm_id> {status\|mount ABS.iso [--replace]\|eject}` | 普通启动零光驱；`mount` 热插只读 USB-BOT/SCSI 光驱，`eject` 删除整台设备，无需重启 Windows |
 | `./deploy/scripts/shared-usb.sh <vm_id> {mount\|status\|eject}` | 把 `shared/usb/` 热插为逻辑 128 GiB、宿主不预分配镜像的只读 FAT32 U 盘；真实卷标固定为 `U盘` |
 | `./deploy/scripts/usb-directory.sh <vm_id> mount ABS_DIR [--replace]` | 把明确指定的 host 目录免驱热插为只读 VVFAT/USB Mass Storage |
-| `./deploy/scripts/guest-lite.sh <vm_id> usb-mount` | 封装 Guest Lite 2.6.4（保留 MpsSvc 兼容 NVIDIA 控制面板；含克隆快速路径、Defender/防火墙 profile/更新/云盘/通知/输入法/游戏模式/Game DVR/高性能电源/NVIDIA 最高性能/DNF High/安全清理旧 Temp/后台进程）到固定目录并刷新只读公共工具 U 盘 |
+| `./deploy/scripts/guest-lite.sh <vm_id> usb-mount` | 封装 Guest Lite 2.6.7（保留 MpsSvc 兼容 NVIDIA 控制面板，退役 CDPSvc 禁用并按旧基线恢复 Settings 兼容性；含克隆快速路径、Defender/防火墙 profile/更新/云盘/通知/输入法/游戏模式/Game DVR/高性能电源、所有计划屏幕与自动睡眠“从不”、NVIDIA 最高性能/DNF High/安全清理旧 Temp/后台进程）到固定目录并刷新只读公共工具 U 盘 |
 | `./deploy/scripts/vmctl.sh seal <source_id> <base_name> [--no-clean]` | 将停机 VM 封装为具名 standalone base；默认先离线清理 WeGame/Tencent 跨克隆身份，失败不发布；`--no-clean` 仅用于明确保留状态 |
 | `./deploy/scripts/vmctl.sh clone <base_name> <new_id> [--gpu-profile PROFILE] [--start]` | 精确选择具名 portable base，默认创建 V-11 式 hard-link pin + 小型增量盘；不指定 GPU 时按宿主 framebuffer 单档、显示器按新建池各随机一次并写死到 `vm.conf`，`--full-copy` 才复制独立整盘 |
 | `./deploy/scripts/vmctl.sh refresh-base <base_name> [--check]` | 仓库首启合同升级后，一键检查/原子刷新私有 Sysprep 母盘；已有克隆 pin 不变，后续克隆使用当前 finalizer + Guest Lite |
@@ -166,11 +167,12 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso] --manual-oobe` | 同一安全建盘语义，但不挂应答 ISO，完整手动完成 OOBE |
 | `./deploy/scripts/start-vm.sh <vm_id> --spoof-name-only` | 通用安全 B：保留 PCI 真身，host 按 mdev UUID 提供每 VM 产品名，前台打开 QEMU SDL 原生窗口 |
 | `./deploy/scripts/start-vm.sh <vm_id> --gtk --spoof-name-only` | 同一条 B 路径，改用 QEMU GTK 窗口 |
-| `./deploy/scripts/start-vm.sh <vm_id>` | 缺配置时自动生成身份，缺盘时严格从公共 base clone；默认 required CPU 隔离，成功后才放行 guest；新配置及当前 25 条 GPU 原子 profile 均保持 B，legacy GTX1050 strict-A transition 已禁用 |
+| `./deploy/scripts/start-vm.sh <vm_id>` | 缺配置时自动生成身份，缺盘时严格从公共 base clone；默认 required CPU 隔离和宿主内存全量预分配，成功后才放行 guest；新配置及当前 25 条 GPU 原子 profile 均保持 B，legacy GTX1050 strict-A transition 已禁用 |
 | `./deploy/scripts/start-vm.sh <vm_id> --proxy` | 仅为旧工具创建 `.proxy` 兼容别名；默认 DGame preview 已让主 `qmp.sock` 使用原生 multi-client，正常启动和 DGame 不需要此参数 |
 | `./deploy/scripts/start-vm.sh <vm_id> --no-tpm` | 明确关闭该主板 profile 的 TPM；只用于兼容/诊断 |
 | `./deploy/scripts/start-vm.sh <vm_id> --vlan-id VID` | 把该 VM 接入已授权的业务 VLAN；不带参数就是默认原生 LAN |
-| `./deploy/scripts/start-vm.sh <vm_id> --cpu-isolate` | 与默认行为相同：CPU 隔离 required，guest core/SMT 精确映射到 host core/sibling 后才放行；2C4T 占 host 2C4T，失败即终止 |
+| `./deploy/scripts/start-vm.sh <vm_id> --cpu-isolate=true\|false` | CPU 隔离布尔开关；省略即 `true`，`false` 改用宿主共享调度，Guest core/SMT 身份不变 |
+| `./deploy/scripts/start-vm.sh <vm_id> --memory-prealloc=true\|false` | 宿主内存预分配布尔开关；省略即 `true`，`false` 让 memfd 按实际触页占用，Guest 固定容量、DIMM/SMBIOS 不变。见 [`docs/G11-MEMORY-ON-DEMAND.md`](docs/G11-MEMORY-ON-DEMAND.md) |
 | `./deploy/scripts/g11-performance.sh {audit\|apply\|restore}` | 一键审核、应用或回滚宿主动态全频段/睿频、稳定 TSC 配套、THP 与 NVMe 低抖动策略；见 [`docs/G11-PERFORMANCE-QUICKSTART.md`](docs/G11-PERFORMANCE-QUICKSTART.md) |
 | `./deploy/host/g11-host-display.sh {audit\|check}` / `sudo ... {apply\|rollback}` | 修复 NVIDIA vGPU-only 卡被固件/GDM 误选为宿主主屏导致的开机花屏与 Xorg 重试；只固定 GDM 走 AMD Wayland，不碰 guest/驱动，见 [`docs/G11-HOST-DISPLAY-BOOT-FIX.md`](docs/G11-HOST-DISPLAY-BOOT-FIX.md) |
 | `./deploy/scripts/g11-sdl-performance.sh {audit\|profile\|start\|verify}` | SDL fixed 提交、安全 Guest-cursor/Host fallback、1ms 键鼠与 service CPU 的傻瓜封装；120Hz 仅显式单窗口实验，见 [`docs/G11-SDL-PERFORMANCE.md`](docs/G11-SDL-PERFORMANCE.md) |
@@ -509,7 +511,8 @@ deploy/
    可用。默认 `required`；建议先交互执行 `sudo -v`，再提前执行
    `sudo ./deploy/host/install-cpu-isolation.sh`。无人值守确需凭据时，只能通过
    批准的安全渠道或运行时环境变量提供，不得写入仓库、配置或命令历史。
-   `--cpu-isolate-auto` 是显式允许降级，`--no-cpu-isolate` 才是明确关闭。
+   不传资源策略参数等价于 `--cpu-isolate=true --memory-prealloc=true`；只有显式
+   `--cpu-isolate=false` 才会关闭隔离。
 
 ### 1. vgpu_unlock-rs + profile_override
 

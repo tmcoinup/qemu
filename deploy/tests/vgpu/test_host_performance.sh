@@ -113,7 +113,8 @@ grep -Fq 'NOPASSWD:NOSETENV' <<<"$install_plan" || fail 'sudo rule permits envir
 grep -Fq '/usr/local/libexec/qemu-g11-performance apply' <<<"$install_plan" ||
     fail 'installer omits fixed apply command'
 grep -Fq 'clock=${G11_RTC_CLOCK}' "$launcher" || fail 'launcher omits selectable RTC clock'
-grep -Fq 'prealloc=on,merge=off' "$launcher" || fail 'guest RAM still permits KSM merging'
+grep -Fq 'G11_MEMORY_PREALLOC=on' "$launcher" || fail 'guest RAM no longer defaults to preallocation'
+grep -Fq 'prealloc=${G11_MEMORY_PREALLOC},merge=off' "$launcher" ||
+    fail 'guest RAM backend no longer keeps KSM disabled in every allocation mode'
 
 echo 'PASS: G-11 latency-first host performance policy, rollback and launcher integration'
-

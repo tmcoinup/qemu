@@ -59,13 +59,14 @@ A/B 时才显式传 `--svc-cpus N`；本优化流程不添加该参数。
   进程；
 - 将 `StartupDelayInMSec` 设为 0，让 Explorer 立即放行普通启动项；
 - 选择 Windows 内置“高性能”电源计划（存在时），关闭 VM 内前台任务节流；
-- 将该计划的显示器空闲超时和系统自动睡眠（AC/DC）设为“从不”，避免 guest
+- 将每个已安装计划的显示器空闲超时和系统自动睡眠（AC/DC）设为“从不”，避免 guest
   无操作后自己黑屏；用户主动睡眠/关机仍然可用；
 - 关闭透明效果、任务栏动画和重复的 guest Game DVR；G-11 的 host DGame/QEMU
   画面不受影响。
 
-脚本会先保存注册表原值、电源计划、该计划的 AC/DC 超时原值、服务状态和每个任务的
-启用状态。状态与报告在：
+脚本会先保存注册表原值、活动电源计划、每个已安装计划的 AC/DC 超时原值、服务状态
+和每个任务的启用状态。旧状态升级时只追加未记录的计划/设置组合，绝不重新采样覆盖
+已有原值。状态与报告在：
 
 ```text
 C:\ProgramData\G11GuestPerformance\state.json
@@ -113,7 +114,7 @@ guest 优化并完成一次正常冷启动后，仍觉得慢才做一次性 A/B�
 ./deploy/scripts/start-vm.sh 8 --proxy
 
 # Windows 正常关机后再测 B；不写入默认配置
-./deploy/scripts/start-vm.sh 8 --proxy --no-cpu-isolate
+./deploy/scripts/start-vm.sh 8 --proxy --cpu-isolate=false
 ```
 
 两次都从完整关机开始，比较进入桌面、启动软件全部出现的时间和 SDL FPS/卡顿。

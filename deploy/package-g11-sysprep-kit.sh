@@ -186,7 +186,7 @@ verify_guest_lite_payload() {
 
     jq -e '
         (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-        .schemaVersion == 1 and .profileVersion == "2.6.4" and
+        .schemaVersion == 1 and .profileVersion == "2.6.7" and
         (.files | type) == "array" and (.files | length) == 5 and
         ([.files[].name] | sort) == [
             "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",

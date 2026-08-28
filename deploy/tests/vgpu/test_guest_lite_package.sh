@@ -23,6 +23,8 @@ done
 bash -n "$packager"
 bash -n "$wrapper"
 bash -n "$exe_builder"
+bash "$root/deploy/tests/guest/test_guest_lite_power_all_plans.sh"
+bash "$root/deploy/tests/guest/test_guest_lite_settings_compatibility.sh"
 [[ -x "$exe_builder" ]] || fail 'EXE builder is not executable'
 [[ -s "$clone_manifest" && ! -L "$clone_manifest" ]] \
     || fail 'clone manifest is missing or unsafe'
@@ -84,7 +86,7 @@ done
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.4" and
+    .schemaVersion == 1 and .profileVersion == "2.6.7" and
     (.files | length) == 5 and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -128,7 +130,7 @@ exe_wide=$(strings -a -el "$exe")
 for token in 'G11GuestLite.exe /apply' 'G11GuestLite.exe /audit' \
         'G11GuestLite.exe /rollback' \
         'WindowsPowerShell\v1.0\powershell.exe' \
-        'G-11 Windows 10 Guest Lite 2.6.4'; do
+        'G-11 Windows 10 Guest Lite 2.6.7'; do
     rg -Fq "$token" <<<"$exe_wide" \
         || fail "standalone launcher omitted fixed entry point: $token"
 done
@@ -140,7 +142,7 @@ rg -Fq 'Some Windows' "$exe_source" \
     || fail 'standalone launcher omitted the FAT package-media compatibility path'
 rg -Fq 'level="requireAdministrator"' "$exe_manifest" \
     || fail 'standalone launcher omitted its UAC manifest'
-rg -Fq 'assemblyIdentity version="2.6.4.0"' "$exe_manifest" \
+rg -Fq 'assemblyIdentity version="2.6.7.0"' "$exe_manifest" \
     || fail 'standalone launcher manifest version is stale'
 if rg -n 'bundle_id|G11GuestLite-\$|G11GuestLite-\*|sha256sum|SHA256SUMS|ISO-SHA256' \
         "$packager"; then
@@ -243,7 +245,22 @@ for required in \
         "Join-Path \$env:SystemRoot 'Temp'" \
         'RetiredRegistryPlan' \
         'preserved appearance restored' \
+        'RetiredServicePlan' \
+        'Restore-RetiredServiceSnapshots' \
+        'retired service restored from original baseline' \
         'SCHEME_MIN' \
+        "Name = 'VIDEOIDLE'" \
+        "Name = 'STANDBYIDLE'" \
+        'PowerSchemeRegistryRoot' \
+        'Get-PowerSchemeGuids' \
+        'Get-PowerSettingSnapshot' \
+        'Get-AllPowerSettingSnapshots' \
+        'Merge-PowerSettingSnapshots' \
+        'PowerSettings = @(Get-AllPowerSettingSnapshots)' \
+        '/SetAcValueIndex' \
+        '/SetDcValueIndex' \
+        'Restore-PowerSettings' \
+        'idleTimeouts=display-and-sleep-never-all-plans' \
         'Registry.pol' \
         'MS-GPREG 2.2.1' \
         '($key + [char]0)' \
@@ -319,6 +336,12 @@ if rg -Fq 'Refresh-LocalPolicy' <<<"$enforce_body"; then
 fi
 rg -Fq 'localPolicyRefresh=deferred directRegistry=True' <<<"$enforce_body" ||
     fail 'SYSTEM enforcement does not record its direct-registry policy fast path'
+rg -Fq 'Set-PerformancePowerPlan -PowerSettings @($state.PowerSettings)' \
+    <<<"$enforce_body" ||
+    fail 'SYSTEM enforcement does not use the saved all-plan rollback baseline'
+rg -Fq 'idleTimeouts=display-and-sleep-never-all-plans' \
+    <<<"$enforce_body" ||
+    fail 'SYSTEM enforcement receipt omits all-plan display/sleep Never'
 firewall_line=$(grep -nF 'Ensure-FirewallServiceAvailable' <<<"$enforce_body" |
     head -1 | cut -d: -f1)
 defender_line=$(grep -nF 'Set-DefenderRuntimePreferences' <<<"$enforce_body" |
@@ -432,6 +455,9 @@ if rg -n -i \
         'Set-Service.+WinDefend|Stop-Service.+WinDefend|Set-Service.+BITS|Stop-Service.+BITS|Set-Service.+NVDisplay|Stop-Service.+NVDisplay' \
         "$guest"; then
     fail 'guest-lite attempts to modify a protected service'
+fi
+if rg -n "Name = '(SystemSettings|ApplicationFrameHost)'" "$guest"; then
+    fail 'guest-lite attempts to close the Windows Settings application'
 fi
 if rg -n -F "Name = 'BFE'" "$guest"; then
     fail 'guest-lite attempts to disable the Base Filtering Engine'

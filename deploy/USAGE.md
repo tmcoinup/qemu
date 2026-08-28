@@ -52,6 +52,7 @@ stream/relay 和 `--rdp` 只是同一 vGPU VM 的显示模式。
 ./deploy/scripts/vmctl.sh display <vm_id> status         # 核对 QMP 身份并查看窗口/推流状态
 ./deploy/scripts/vmctl.sh display <vm_id> window-hide    # 运行中隐藏默认 SDL 窗口
 ./deploy/scripts/vmctl.sh display <vm_id> window-show    # 恢复 SDL 并强制重画静止桌面
+./deploy/scripts/vmctl.sh wake <vm_id>                   # 仅唤醒用户主动进入的 ACPI S3
 ./deploy/scripts/vmctl.sh migrate --check              # 旧 G-11 布局只读检查
 ./deploy/scripts/vmctl.sh migrate --apply              # 全部 G-11 VM 停机后显式迁移
 ./deploy/scripts/check-hardware-pool.sh        # 只读审计目录和本机 KVM CPU 能力
@@ -275,10 +276,8 @@ VM，该物理核就不会再分给新 VM。
 ```bash
 sudo ./deploy/host/install-cpu-isolation.sh
 
-./deploy/scripts/start-vm.sh 1                     # 默认 required；失败即终止
-./deploy/scripts/start-vm.sh 1 --cpu-isolate       # 同默认行为，保留为显式兼容参数
-./deploy/scripts/start-vm.sh 1 --cpu-isolate-auto  # 显式允许不可用时降级继续
-./deploy/scripts/start-vm.sh 1 --no-cpu-isolate    # 明确关闭
+./deploy/scripts/start-vm.sh 1                     # 省略布尔键：CPU 隔离与内存预分配均为 true
+./deploy/scripts/start-vm.sh 1 --cpu-isolate=false # 明确关闭 CPU 隔离
 ./deploy/scripts/start-vm.sh 1 --svc-cpus auto     # 可选：容量足够时另留一个逻辑 CPU
 ./deploy/scripts/start-vm.sh 1 --svc-cpus 1        # 可选：为非 vCPU 线程另留一个逻辑 CPU
 ```
@@ -292,6 +291,22 @@ root-owned helper 将当前 VM 进程树临时设为 `oom_score_adj=-500`。调�
 校验 VM ID、调用 UID 和 PID starttime；不写全局 sysctl，进程退出即失效。
 该策略不代替 `MEM_GUARD` 容量门禁；明确接受运行期 OOM 风险时才可对单次启动
 设 `HOST_OOM_PROTECT=0`。
+
+## G-11 宿主内存按需占用
+
+需要保持 Windows 的 8G 上限和完整 DIMM/SMBIOS 身份，但不希望 QEMU 启动时把整块
+RAM 主动触页，可在完整关机后执行：
+
+```bash
+./deploy/scripts/start-vm.sh 1 --proxy --cpu-isolate=false --memory-prealloc=false
+# 保持共享 CPU，但恢复原有低延迟全量预分配：
+./deploy/scripts/start-vm.sh 1 --proxy --cpu-isolate=false
+```
+
+这不是 balloon 或 Hyper-V Dynamic Memory：未触及页可留给宿主，但已触及后由
+Guest 释放的页不保证立即归还，工作集仍可能增长到完整上限。启动容量护栏也继续按
+完整上限计算。两个布尔键都省略时默认值均为 `true`。验证方法见
+[`docs/G11-MEMORY-ON-DEMAND.md`](docs/G11-MEMORY-ON-DEMAND.md)。
 
 系统盘的宿主文件 AIO 默认使用 `QEMU_DISK_AIO=auto`。每次真实启动会先用 QEMU
 自身文件完成 4 KiB O_DIRECT active-read，按 `io_uring`、`native`、`threads`

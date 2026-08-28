@@ -1,4 +1,4 @@
-G-11 Windows 10 Guest Lite 2.6.4（全面精简/提速一键包）
+G-11 Windows 10 Guest Lite 2.6.7（全面精简/提速一键包）
 =====================================================
 
 用途
@@ -7,9 +7,10 @@ G-11 Windows 10 Guest Lite 2.6.4（全面精简/提速一键包）
 只用于 G-11/vGPU 的受控 Windows 10 实验机或模板。V-11 是独立分支，不要把
 G-11 的 VM 目录、驱动或配置复制给 V-11。
 
-2.6.4 一次完成 Defender 杀毒、防火墙、Windows/商店/常见软件自动更新、资讯、
+2.6.7 一次完成 Defender 杀毒、防火墙、Windows/商店/常见软件自动更新、资讯、
 天气、OneDrive/设置同步、通知、任务栏搜索框、消费 App、后台任务和 VM 高 I/O 项的停用/精简；
-同时开启 Windows 游戏模式、关闭 Xbox/Game DVR 后台录制、切换高性能电源计划、
+同时开启 Windows 游戏模式、关闭 Xbox/Game DVR 后台录制、切换高性能电源计划，
+并把每个已安装电源计划的“关闭屏幕”和“自动睡眠”交流/电池值都设为“从不”；
 通过正式 NVIDIA 驱动的 NVAPI DRS 设置全局“最高性能优先”，并把 DNF 精确白名单
 映像固定为 High（绝不使用 Realtime）优先级。Apply 还会清理当前用户 LocalAppData\Temp
 和 Windows\Temp 内“创建时间和最后写入时间均超过 24 小时”的普通临时文件，跳过
@@ -20,7 +21,7 @@ Pinyin 第二，同时保存精确回滚基线。它不会安装
 编译器支持已静态链接，启动器运行时只导入 Windows 自带 DLL；优化脚本调用
 PowerShell 5.1、系统命令，以及来宾已安装正式 NVIDIA 驱动的 System32 NVAPI。
 
-2.6.4 的克隆快速路径不会减少验收：当前 GPU 的签名驱动按 DeviceID 精确查询，已
+2.6.7 的克隆快速路径不会减少验收：当前 GPU 的签名驱动按 DeviceID 精确查询，已
 发布 INF 与正在加载的 nvlddmkm.sys 所在 nvgridsw.inf_* DriverStore 目录按 SHA-256
 绑定，INF 版本、CAT/SYS 正式 NVIDIA/WHCP 签名和微软生产根继续硬性检查。服务与
 计划任务清单各只枚举一次；新建完整回滚基线不再立即重复升级扫描。自动 CloneApply
@@ -31,12 +32,27 @@ PowerShell 5.1、系统命令，以及来宾已安装正式 NVIDIA 驱动的 Sys
 这不改 BCD，不开启 testsigning/nointegritychecks，不安装测试/自签名内核驱动，也不
 放宽 Licensed、Code 0、x86/x64 系统 NVAPI、防火墙或回滚检查。
 
-2.6.4 保留 NVIDIA 控制面板兼容性：三种防火墙 profile 仍保持关闭，但不再禁用
+2.6.7 保留 NVIDIA 控制面板兼容性：三种防火墙 profile 仍保持关闭，但不再禁用
 MpsSvc。脚本和每次 SYSTEM 补强都会要求 MpsSvc=Auto/Running；Windows Store/UWP
 的 AppContainer 注册因此可正常完成，避免 NVIDIA 控制面板出现 0x800706D9 后无界面。
 这只调整 Windows 用户态服务策略，不修改 BCD、代码完整性或任何内核驱动。
 
-2.6.4 会保存并扩展 Windows 原生机器/用户 Registry.pol，同时只生成/更新本地 GPO
+2.6.7 的电源处理不再只依赖“高性能”计划。Windows 更新、驱动安装或厂商工具即使
+把活动计划切回“平衡”，每个已安装计划的 VIDEOIDLE（关闭屏幕）和 STANDBYIDLE
+（自动睡眠）AC/DC 仍都是 0（从不）。升级旧 state.json 时保留已经记录的原值，只
+追加从未记录过的“计划 + 设置”组合；绝不把本工具已经改成 0 的当前值重新采样成
+“原值”，所以精确回滚不会被升级破坏。计划由当前 Windows 的
+powercfg /List 动态枚举，不写死名称、数量或 VM1 GUID。注册表没有 AC/DC 覆盖
+值时表示该计划继承默认值，并非设置缺失；Apply 写入 0，Rollback 删除新建覆盖以
+恢复原继承状态。
+
+2.6.7 同时退役了旧版对 CDPSvc 的禁用。VM1 已用应用事件、完整转储和
+同路径 A/B 确认：CDPSvc=Disabled/Stopped 会让“设置 -> 系统”里的
+SystemSettings.exe 延迟崩溃。升级仅按旧 state.json 中已保存的原值恢复，绝不
+重新采样工具已改坏的现值；新安装不接管 CDPSvc 的 Windows/OEM/用户原状。
+NcbService 也不在禁用清单。
+
+2.6.7 会保存并扩展 Windows 原生机器/用户 Registry.pol，同时只生成/更新本地 GPO
 真正支持的 gpt.ini Version 字段；另外安装一个 Local System 开机/登录延迟
 45 秒执行的短时补强任务，重新禁用受管服务/计划任务、结束更新进程、重写策略和
 高性能电源方案后退出，无常驻进程。原 Registry.pol 和
@@ -57,7 +73,7 @@ SID 读取 HKEY_USERS，并从同一用户 Hive 核验语言顺序。克隆 Appl
 引擎组件仍在运行，未知状态仍会硬性失败并要求人工检查；篡改防护明确为 On 时始终
 拒绝执行。
 
-2.6.4 的真实克隆确认部分镜像还会保护机器级 EnableFeeds。机器级 EnableFeeds 和
+2.6.7 的真实克隆确认部分镜像还会保护机器级 EnableFeeds。机器级 EnableFeeds 和
 用户级 ShellFeedsTaskbarViewMode 都只作兼容尝试；失败时不夺所有权、不改 ACL，
 也不阻断初始化。资讯/天气是界面精简项，不属于显卡、授权、MpsSvc 或通知核心开关
 的硬性验收。Task Scheduler 把登录 SID 规范化为账户名时，也会先解析回 SID 再校验，
@@ -90,6 +106,29 @@ Windows 里只做 4 步
 DNF/DNFClient/DNFChina/DNFLauncher 必须显示 priority=High；未启动 DNF 时显示
 dnfProcessFound=False 是正常结果，下次启动仍会由 Windows IFEO PerfOptions 自动设为
 High。不要手工改成 Realtime。
+
+电源和睡眠页面真机化（VM1 只做一次）
+--------------------------------------
+
+Guest Lite 负责把页面里的两个空闲计时设为“从不”；G-11 启动器负责像物理桌面一样
+向 Windows 暴露 ACPI S3。ACPI 能力只在 QEMU 冷启动时生成，因此旧 QEMU 进程里
+只重启 Windows 不会补出“睡眠”一栏。完成上面的 VERIFY PASS 后按顺序做：
+
+1. 在 Windows 开始菜单选择“关机”，不要选“重启”“睡眠”或“休眠”，等 VM 窗口
+   自然关闭。
+2. 宿主执行 `./deploy/scripts/vmctl.sh status 1`，确认显示 `VM_STATUS=stopped`，再执行
+   `./deploy/scripts/vmctl.sh start 1`。
+3. 进入“设置 -> 系统 -> 电源和睡眠”。“屏幕”和“睡眠”都应出现，接通电源/使用
+   电池的下拉框都应显示“从不”。管理员 CMD 运行 `powercfg /a` 时应列出待机 (S3)；
+   休眠仍保持关闭，它不是本功能的一部分。
+4. 只在 VM1 保存好工作后试一次手动“睡眠”。若键盘/鼠标没有唤醒，在宿主执行
+   `./deploy/scripts/vmctl.sh wake 1`。驱动安装、母盘封装和离线磁盘操作仍必须使用
+   Windows 完整关机，不能用睡眠代替。
+
+Guest Lite 的结束进程白名单不包含 SystemSettings.exe 或 ApplicationFrameHost.exe，
+不会主动关闭 Windows“设置”窗口。VM1 的自动退出已确认是旧版禁用
+CDPSvc 触发的 SystemSettings.exe 崩溃，不是 DGame 或电源合并测试关窗。保留
+state.json 并重施 2.6.7 即可按原始基线恢复。
 
 会做什么
 --------
@@ -133,7 +172,8 @@ High。不要手工改成 Realtime。
   Language Pack/FOD CAB；本包不携带也不下载来源或版本不明的语言包。
 - 性能：关闭 SysMain、搜索索引、遥测、推送、地图、定位、Xbox 等审计清单内服务
   和任务，结束 OneDrive、更新器、Game Bar、Teams/Widgets 等精确白名单后台进程；
-  关闭透明/任务栏动画、启动延时、电源节流，并选择 Windows 自带“高性能”电源方案。
+  关闭透明/任务栏动画、启动延时、电源节流，选择 Windows 自带“高性能”电源方案，
+  并把所有已安装计划的关闭屏幕/自动睡眠 AC/DC 都设为“从不”。
   开启游戏模式，同时关闭 Game DVR/AppCapture/HistoricalCapture 后台录制。
 - NVIDIA：仅通过 System32 中已安装正式驱动提供的 NVAPI DRS，把全局
   Power management mode 设为 Prefer maximum performance；不写 PowerMizer 私有值，
@@ -146,7 +186,8 @@ High。不要手工改成 Realtime。
   无权限项保留并写报告。此项释放的文件不可回滚，其余配置仍可精确回滚。
   保留桌面背景和字体平滑；2.2 会恢复旧版曾改动的全局 VisualFXSetting。
 - 每次执行都会生成执行前/后的文本报告。首次 Apply 前把注册表、防火墙、音频静音、
-  用户语言/输入、电源、NVIDIA DRS、Apply 时仍在运行的 DNF 优先级、服务、任务、
+  用户语言/输入、活动电源方案、每个已安装计划的关闭屏幕/自动睡眠 AC/DC 原值、
+  NVIDIA DRS、Apply 时仍在运行的 DNF 优先级、服务、任务、
   当前用户 App、原始 Registry.pol/gpt.ini 和补强
   任务状态保存到受限 ACL 的 state.json；重复 Apply 不会覆盖最初基线。旧基线会先
   安全扩展为 schema 6。
@@ -159,7 +200,8 @@ High。不要手工改成 Realtime。
 校验后，校验内置 Guest Lite manifest 和每个文件的 SHA-256，再以内部 CloneApply
 模式自动应用；它复用系统 NVAPI 的那一次验证重启，不额外安装第三方组件。重启后
 SYSTEM 同时验收 MpsSvc=Auto/Running/PID>0、BFE=Auto/Running、policy 文件、通知
-关闭、默认声音静音、en-US/US 第一、Microsoft Pinyin 第二、目标用户 SID 和精确回滚
+关闭、默认声音静音、所有电源计划的关闭屏幕/自动睡眠均为“从不”、en-US/US 第一、
+Microsoft Pinyin 第二、目标用户 SID 和精确回滚
 基线；finalizer 还会主动运行一次 SYSTEM 补强任务，并要求返回码为 0、日志为 pass，
 全部通过才写宿主可接受的完成标记并关机。V-11 不走此链。
 
@@ -185,7 +227,8 @@ build-g11-private-base.sh（或私有 installer）注入授权 EXE并再次校�
 
 打开 C:\ProgramData\G11GuestLite\tools，双击 03-Rollback.cmd，看到 ROLLBACK PASS
 后重启。它会先删除 Guest Lite 补强任务并逐字节恢复原 Registry.pol/gpt.ini，再恢复首次
-Apply 前的用户语言/输入顺序、策略/启动项、防火墙配置、声音静音、电源方案、NVIDIA
+Apply 前的用户语言/输入顺序、策略/启动项、防火墙配置、声音静音、活动电源方案及
+每个已记录计划的关闭屏幕/自动睡眠 AC/DC 原值、NVIDIA
 DRS、仍存活的原 DNF 进程优先级、服务、任务，并尝试从保留的
 WindowsApps 载荷重新注册原有 App。任一项失败时 state.json 会保留，修复原因后可
 再次运行回滚。已删除的临时文件不会也不能由 Rollback 伪造回来。
@@ -213,6 +256,9 @@ WindowsApps 载荷重新注册原有 App。任一项失败时 state.json 会保�
 --------
 
 - 仅支持 Windows 10 客户端，不支持 Windows 11/Server。
+- G-11 暴露的是物理桌面常见的 ACPI S3 手动睡眠；自动空闲睡眠仍固定为“从不”，
+  休眠/Fast Startup 仍关闭。vGPU 的 S3 恢复先只在 VM1 试跑；驱动、母盘或离线磁盘
+  工作流始终用完整关机。
 - 临时清理是唯一不可逆的数据删除项；运行前先关闭安装器/解压器，并确认不需要
   两个 Temp 目录中超过 24 小时的内容。工具不会清理 Downloads、桌面、WindowsApps、
   WinSxS、浏览器资料或任意自定义 TEMP 路径。

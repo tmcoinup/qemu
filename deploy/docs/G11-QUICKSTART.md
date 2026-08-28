@@ -46,6 +46,7 @@ H81/4+2G 举例，只适用于 archived 旧 VM，不可照抄用于新建。
 ./deploy/scripts/vmctl.sh display 9 preview-on   # 旧的运行中 VM 可无重启补帧源
 ./deploy/scripts/vmctl.sh display 9 window-hide
 ./deploy/scripts/vmctl.sh display 9 window-show
+./deploy/scripts/vmctl.sh wake 9         # 仅当 Windows 主动进入 S3 后使用
 ```
 
 native 新启动默认已有独立 DGame preview；它会创建

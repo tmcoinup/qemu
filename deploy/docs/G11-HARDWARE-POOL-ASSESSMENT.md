@@ -499,7 +499,7 @@ architecture_boundaries machine=q35-ICH9-behavior sata=ICH9-AHCI xhci=qemu-xhci
 |--------|------|------|
 | **vGPU 显存**（2 GB 档） | 16384 MiB ÷ 2048，不扣固定余量 | **理论 8 台，须验第 8 台** |
 | vGPU 显存（1 GB 档） | 16384 MiB ÷ 1024，不扣固定余量 | 理论 16 台，须验第 16 台 |
-| **内存** | (62 − 10 host) GiB ÷ 4 GiB，`prealloc=on` 全量预分配 | **13 台**（4 GB 档）/ 6 台（8 GB 档） |
+| **内存** | (62 − 10 host) GiB ÷ Guest 完整上限；默认 `prealloc=on`，按需模式仍须按最坏工作集核算 | **13 台**（4 GB 档）/ 6 台（8 GB 档） |
 | **CPU 线程** | 44 线程，实际每 VM 调度与负载未知 | 待并发压测 |
 | **磁盘容量** | 304 GiB ÷ 35 GiB | **8 台**（不含游戏数据） |
 | 磁盘 IOPS | 单块 DRAM-less TLC，多 VM 并发 O_DIRECT 随机写 | 风险存在，缺少 IOPS/体验压测 |

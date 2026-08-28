@@ -136,9 +136,9 @@ PINNED_MANIFEST_SHA256=$(sed -n \
     die "current finalizer does not pin the current Guest Lite manifest"
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.4"
+    .schemaVersion == 1 and .profileVersion == "2.6.7"
 ' "$GUEST_LITE_MANIFEST" >/dev/null ||
-    die "current Guest Lite manifest is not the supported 2.6.4 contract"
+    die "current Guest Lite manifest is not the supported 2.6.7 contract"
 grep -Fq 'schemaVersion = 4' "$FINALIZER" ||
     die "current finalizer does not publish clone marker schema 4"
 
@@ -185,7 +185,7 @@ fi
 
 if ((CHECK_ONLY)); then
     if ((CURRENT)); then
-        echo "[g11-base-refresh] PASS: $BASE_NAME already embeds marker schema 4 / Guest Lite 2.6.4"
+        echo "[g11-base-refresh] PASS: $BASE_NAME already embeds marker schema 4 / Guest Lite 2.6.7"
         exit 0
     fi
     echo "[g11-base-refresh] STALE: $BASE_NAME must be refreshed before another clone" >&2
@@ -222,7 +222,7 @@ echo "[g11-base-refresh] atomically refreshing $BASE_NAME; existing clone pins a
 "$here/scripts/export-vgpu-base.sh" --in-place "$BASE_NAME" "$VM_BASE_DIR"
 
 cat <<EOF
-[g11-base-refresh] PASS: $BASE_NAME now embeds marker schema 4 / Guest Lite 2.6.4
+[g11-base-refresh] PASS: $BASE_NAME now embeds marker schema 4 / Guest Lite 2.6.7
 
 后续克隆直接运行：
   ./deploy/scripts/clone-from-base.sh $BASE_NAME NEW_VM_ID --start

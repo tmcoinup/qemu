@@ -190,7 +190,7 @@ All sub-options::
 
     -display fb-shm[,id=name][,path=sock]
                    [,x=N][,y=N][,width=W][,height=H]
-                   [,rate=Hz]
+                   [,rate=Hz][,keepalive=on|off]
 
 * ``id=name`` — short name used to derive defaults; defaults to
   ``qemu-${pid}``.
@@ -205,6 +205,41 @@ All sub-options::
   ``16,666,667 ns`` rather than a millisecond-quantised 16 ms loop.  Every
   due tick publishes: when no new damage exists, QEMU repeats the latest
   cached GPU texture or SHM slot without redoing the ROI copy/blit.
+* ``keepalive=on|off`` — wake a guest that stopped refreshing its display
+  output; defaults to ``on``.  See `Display keep-alive`_.
+
+Display keep-alive
+------------------
+
+``rate`` is a publication cadence, not a damage ceiling: a due tick republishes
+the active slot even when nothing changed.  That is deliberate, but it means
+``frame_seq`` alone cannot tell a live stream from a frozen one.
+
+After a long stretch without input a guest may stop refreshing its display
+output entirely -- on Windows the idle power policy blanks the output and the
+compositor stops composing.  The guest keeps rendering, but the console handed
+to QEMU stops changing, so the damage compare finds nothing dirty.  Consumers
+then receive a perfectly steady frame rate over a picture frozen on its last
+frame; one that drives decisions off the picture will keep reading that stale
+frame as if it were live state.
+
+Two mechanisms address this, and consumers can rely on either:
+
+* ``content_seq`` in ``FbShmHeader`` advances only when the guest actually
+  redrew, giving consumers an exact "is the picture moving?" predicate that is
+  independent of ``frame_seq``.  It lives in the reserved tail of the 256-byte
+  header, so producers that predate it leave it at 0 and consumers must read 0
+  as "unsupported" rather than "frozen".
+* With ``keepalive=on`` QEMU injects a Scroll Lock press once the guest has not
+  redrawn for roughly ten seconds and at least one consumer is attached, then
+  backs off before trying again.  Neither the desktop nor a fullscreen
+  application acts on that key, while the guest still counts it as user input
+  activity.  Press duration and intervals are jittered.  Nothing is injected
+  before the guest has been seen to draw at least once, so a console that never
+  reports damage is never poked.
+
+Fixing the guest's own idle policy remains the cleaner cure; the keep-alive is
+the backstop for guests that cannot be reconfigured.
 
 Runtime control
 ---------------

@@ -10,8 +10,10 @@
   optional services/tasks. It also keeps the default playback endpoint muted,
   orders English (United States) - US first and Microsoft Pinyin second, enables
   Windows Game Mode while disabling Xbox background recording, selects the
-  built-in High performance power plan, requests NVIDIA's global "Prefer
-  maximum performance" mode through the installed driver's NVAPI DRS surface,
+  built-in High performance power plan, sets the display and automatic-sleep
+  idle timeouts to Never on every installed power plan, requests NVIDIA's
+  global "Prefer maximum performance" mode through the installed driver's
+  NVAPI DRS surface,
   gives allowlisted DNF game images High (never Realtime) priority, safely
   clears stale temporary files, and reduces desktop animation/startup delay for
   the interactive user.
@@ -57,6 +59,22 @@ $PinyinInputTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411
 $NvidiaPreferredPstateId = [uint32]0x1057EB71
 $NvidiaPreferMaximumPerformance = [uint32]1
 $TemporaryFileMinimumAgeHours = 24
+$PowerSchemeRegistryRoot = `
+    'HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes'
+$PowerSettingPlan = @(
+    [pscustomobject]@{
+        SubgroupGuid = '7516b95f-f776-4464-8c53-06167f40cc99'
+        SettingGuid = '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e'
+        Name = 'VIDEOIDLE'
+        Purpose = 'Keep the guest display on while the VM is idle.'
+    },
+    [pscustomobject]@{
+        SubgroupGuid = '238c9fa8-0aad-41ed-83f4-97be242c8f20'
+        SettingGuid = '29f6c1db-86da-48c5-9fdb-f2b67b1f44da'
+        Name = 'STANDBYIDLE'
+        Purpose = 'Keep the guest from entering automatic idle sleep.'
+    }
+)
 
 # Policy values only. The tool never changes Defender service ACLs or deletes
 # Defender files. Windows 10 1903+ requires Tamper Protection to be turned off
@@ -251,7 +269,6 @@ $ServicePlan = @(
     [pscustomobject]@{ Name = 'MozillaMaintenance'; Group = 'SoftwareUpdate'; Purpose = 'Mozilla Maintenance/Update' },
     [pscustomobject]@{ Name = 'SysMain'; Group = 'Performance'; Purpose = 'SysMain prefetch background I/O' },
     [pscustomobject]@{ Name = 'WSearch'; Group = 'Performance'; Purpose = 'Windows Search indexing' },
-    [pscustomobject]@{ Name = 'CDPSvc'; Group = 'Optional'; Purpose = 'Connected Devices Platform' },
     [pscustomobject]@{ Name = 'DusmSvc'; Group = 'Optional'; Purpose = 'Data Usage collection' },
     [pscustomobject]@{ Name = 'WpnService'; Group = 'Optional'; Purpose = 'Windows push notifications' },
     [pscustomobject]@{ Name = 'DiagTrack'; Group = 'Optional'; Purpose = 'Connected User Experiences and Telemetry' },
@@ -275,6 +292,21 @@ $ServicePlan = @(
     [pscustomobject]@{ Name = 'icssvc'; Group = 'Optional'; Purpose = 'Mobile hotspot service' },
     [pscustomobject]@{ Name = 'AJRouter'; Group = 'Optional'; Purpose = 'AllJoyn router' },
     [pscustomobject]@{ Name = 'SharedRealitySvc'; Group = 'Optional'; Purpose = 'Spatial data service' }
+)
+
+# Older Guest Lite releases disabled CDPSvc. Windows 10's Settings > System
+# route can finish its first page render and then terminate asynchronously in
+# msvcrt.dll with 0x40000015 when that platform service is unavailable. Keep
+# the service out of the active disable plan. During an upgrade, restore only
+# the original snapshot already present in state.json; never sample the
+# tool-modified Disabled/Stopped value as a new baseline. Fresh installs have
+# no retired snapshot and leave the service exactly as Windows/the user set it.
+$RetiredServicePlan = @(
+    [pscustomobject]@{
+        Name = 'CDPSvc'
+        Group = 'SettingsCompatibility'
+        Purpose = 'Connected Devices Platform required by Windows Settings System pages'
+    }
 )
 
 # Newer vendor updater services have versioned names. Discovery is constrained
@@ -1473,6 +1505,7 @@ function Test-ServiceNameAllowed {
     param([Parameter(Mandatory = $true)][string]$Name)
 
     if ($ServicePlan.Name -icontains $Name) { return $true }
+    if ($RetiredServicePlan.Name -icontains $Name) { return $true }
     foreach ($pattern in $ServicePatternPlan) {
         if ($Name -imatch ([string]$pattern.Pattern)) { return $true }
     }
@@ -1689,6 +1722,33 @@ function Restore-ServiceSnapshot {
         [string]$Snapshot.StartMode -ne 'Disabled') {
         Start-Service -Name ([string]$Snapshot.Name) -ErrorAction Stop
     }
+}
+
+function Restore-RetiredServiceSnapshots {
+    param([Parameter(Mandatory = $true)][object]$State)
+
+    $failures = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($plan in $RetiredServicePlan) {
+        # Existing state rows are append-only rollback evidence. In particular,
+        # do not call Get-ServiceSnapshot here: the live value may be the
+        # Disabled/Stopped value written by an older Guest Lite release.
+        $snapshot = @($State.Services | Where-Object {
+            [string]$_.Name -ieq [string]$plan.Name
+        }) | Select-Object -First 1
+        if ($null -eq $snapshot) {
+            Write-Host "  retired service untouched; no original baseline: $($plan.Name)" `
+                -ForegroundColor DarkGray
+            continue
+        }
+        try {
+            Restore-ServiceSnapshot $snapshot
+            Write-Host "  retired service restored from original baseline: $($plan.Name)" `
+                -ForegroundColor DarkGray
+        } catch {
+            $failures.Add("retired service $($plan.Name): $($_.Exception.Message)")
+        }
+    }
+    return $failures.ToArray()
 }
 
 function Test-TaskTargetAllowed {
@@ -3125,6 +3185,252 @@ function Restore-NvidiaPowerModeSnapshot {
     )
 }
 
+function Get-PowerSchemeGuids {
+    # The labels emitted by powercfg /list are localized, but the GUIDs are
+    # not.  The registry root also contains hidden/deleted scheme records that
+    # powercfg does not regard as installed; using it as the inventory made a
+    # real Windows 10 guest target seven rows while /list exposed only three.
+    $savedPreference = $ErrorActionPreference
+    $exitCode = -1
+    $output = ''
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = (& powercfg.exe /List 2>&1 | Out-String)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "powercfg /List failed with exit code $exitCode."
+    }
+    $guids = @([regex]::Matches($output,
+        '(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}') |
+        ForEach-Object { $_.Value.ToLowerInvariant() } | Sort-Object -Unique)
+    if ($guids.Count -eq 0) {
+        throw 'powercfg /List reported no installed power plans.'
+    }
+    return $guids
+}
+
+function Get-PowerSettingEffectiveValues {
+    param(
+        [Parameter(Mandatory = $true)][string]$SchemeGuid,
+        [Parameter(Mandatory = $true)][object]$Entry
+    )
+
+    $savedPreference = $ErrorActionPreference
+    $exitCode = -1
+    $output = ''
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = (& powercfg.exe /Query $SchemeGuid `
+            ([string]$Entry.SubgroupGuid) `
+            ([string]$Entry.SettingGuid) 2>&1 | Out-String)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($exitCode -ne 0) {
+        return [pscustomobject]@{
+            Available = $false
+            ACValue = $null
+            DCValue = $null
+            Error = "powercfg /Query returned $exitCode`: $($output.Trim())"
+        }
+    }
+
+    # Numeric power settings always end with the current AC and DC indices.
+    # Their surrounding labels are localized, so parse the final two hex
+    # tokens rather than matching English text.  VIDEOIDLE/STANDBYIDLE also
+    # print min/max/increment tokens before them; taking the first two would
+    # silently save the wrong values.
+    $hexValues = @([regex]::Matches($output, '(?i)0x[0-9a-f]{1,8}') |
+        ForEach-Object { [string]$_.Value })
+    if ($hexValues.Count -lt 2) {
+        return [pscustomobject]@{
+            Available = $false
+            ACValue = $null
+            DCValue = $null
+            Error = 'powercfg /Query did not expose AC/DC setting indices.'
+        }
+    }
+    try {
+        $acValue = [Convert]::ToUInt32(
+            $hexValues[$hexValues.Count - 2].Substring(2), 16)
+        $dcValue = [Convert]::ToUInt32(
+            $hexValues[$hexValues.Count - 1].Substring(2), 16)
+    } catch {
+        return [pscustomobject]@{
+            Available = $false
+            ACValue = $null
+            DCValue = $null
+            Error = "powercfg /Query returned invalid AC/DC indices: $($_.Exception.Message)"
+        }
+    }
+    return [pscustomobject]@{
+        Available = $true
+        ACValue = [uint32]$acValue
+        DCValue = [uint32]$dcValue
+        Error = ''
+    }
+}
+
+function Get-PowerSettingSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$SchemeGuid,
+        [Parameter(Mandatory = $true)][object]$Entry
+    )
+
+    if ($SchemeGuid -notmatch `
+        '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+        throw "Invalid installed power-scheme GUID: $SchemeGuid"
+    }
+    $normalizedScheme = $SchemeGuid.ToLowerInvariant()
+    $path = '{0}\{1}\{2}\{3}' -f $PowerSchemeRegistryRoot,
+        $normalizedScheme, [string]$Entry.SubgroupGuid,
+        [string]$Entry.SettingGuid
+    $effective = Get-PowerSettingEffectiveValues `
+        -SchemeGuid $normalizedScheme -Entry $Entry
+    $keyExisted = Test-Path -LiteralPath $path -PathType Container
+    $acValueExisted = $false
+    $dcValueExisted = $false
+    if ($keyExisted) {
+        $key = Get-Item -LiteralPath $path -ErrorAction Stop
+        $valueNames = @($key.GetValueNames())
+        $acValueExisted = $valueNames -contains 'ACSettingIndex'
+        $dcValueExisted = $valueNames -contains 'DCSettingIndex'
+    }
+    return [pscustomobject]@{
+        SchemeGuid = $normalizedScheme
+        SubgroupGuid = [string]$Entry.SubgroupGuid
+        SettingGuid = [string]$Entry.SettingGuid
+        Name = [string]$Entry.Name
+        Available = [bool]$effective.Available
+        # Exists is retained for old state.json readers.  It describes an
+        # explicit AC+DC override pair, not whether Windows exposes the
+        # setting; an absent override is a valid rollback baseline.
+        Exists = [bool]($acValueExisted -and $dcValueExisted)
+        KeyExisted = [bool]$keyExisted
+        ACValueExisted = [bool]$acValueExisted
+        DCValueExisted = [bool]$dcValueExisted
+        ACValue = $effective.ACValue
+        DCValue = $effective.DCValue
+        Error = [string]$effective.Error
+    }
+}
+
+function Get-AllPowerSettingSnapshots {
+    $snapshots = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($schemeGuid in @(Get-PowerSchemeGuids)) {
+        foreach ($entry in $PowerSettingPlan) {
+            $snapshots.Add((Get-PowerSettingSnapshot `
+                -SchemeGuid $schemeGuid -Entry $entry))
+        }
+    }
+    return $snapshots.ToArray()
+}
+
+function Merge-PowerSettingSnapshots {
+    param(
+        [AllowEmptyCollection()][object[]]$Existing = @(),
+        [AllowEmptyCollection()][object[]]$Current = @()
+    )
+
+    # Never re-sample a pair already present in the rollback baseline. An older
+    # Guest Lite or Guest Performance run may already have forced it to zero;
+    # replacing the saved non-zero original would make exact rollback
+    # impossible. Only append plan/setting pairs that have never been recorded.
+    $captured = @{}
+    foreach ($snapshot in @($Existing)) {
+        $key = ('{0}|{1}|{2}' -f [string]$snapshot.SchemeGuid,
+            [string]$snapshot.SubgroupGuid,
+            [string]$snapshot.SettingGuid).ToLowerInvariant()
+        $captured[$key] = $true
+    }
+    $added = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($snapshot in @($Current)) {
+        $key = ('{0}|{1}|{2}' -f [string]$snapshot.SchemeGuid,
+            [string]$snapshot.SubgroupGuid,
+            [string]$snapshot.SettingGuid).ToLowerInvariant()
+        if ($captured.ContainsKey($key)) { continue }
+        $added.Add($snapshot)
+        $captured[$key] = $true
+    }
+    return [pscustomobject]@{
+        Changed = [bool]($added.Count -gt 0)
+        Snapshots = @($Existing) + @($added.ToArray())
+    }
+}
+
+function Assert-PowerSettingTarget {
+    param([Parameter(Mandatory = $true)][object]$Snapshot)
+
+    $allowed = $false
+    foreach ($entry in $PowerSettingPlan) {
+        if ([string]$entry.SubgroupGuid -ieq `
+                [string]$Snapshot.SubgroupGuid -and
+            [string]$entry.SettingGuid -ieq `
+                [string]$Snapshot.SettingGuid) {
+            $allowed = $true
+            break
+        }
+    }
+    if (-not $allowed) {
+        throw "State contains an unexpected power setting: $($Snapshot.Name)"
+    }
+    $schemeGuid = [string]$Snapshot.SchemeGuid
+    if ($schemeGuid -notmatch `
+        '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -or
+        @(Get-PowerSchemeGuids) -notcontains $schemeGuid) {
+        throw "State references an unknown power plan: $schemeGuid"
+    }
+}
+
+function Set-OnePowerSettingValue {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('/SetAcValueIndex', '/SetDcValueIndex')]
+        [string]$Mode,
+        [Parameter(Mandatory = $true)][uint32]$Value
+    )
+
+    Assert-PowerSettingTarget $Snapshot
+    $schemeGuid = [string]$Snapshot.SchemeGuid
+    $arguments = @(
+        $Mode, $schemeGuid,
+        [string]$Snapshot.SubgroupGuid,
+        [string]$Snapshot.SettingGuid,
+        [string]$Value
+    )
+    $savedPreference = $ErrorActionPreference
+    $exitCode = -1
+    $output = ''
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = (& powercfg.exe @arguments 2>&1 | Out-String).Trim()
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "powercfg $Mode failed for $schemeGuid/$($Snapshot.Name) (exit $exitCode): $output"
+    }
+}
+
+function Set-PowerSettingValues {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][uint32]$ACValue,
+        [Parameter(Mandatory = $true)][uint32]$DCValue
+    )
+
+    Set-OnePowerSettingValue -Snapshot $Snapshot `
+        -Mode '/SetAcValueIndex' -Value $ACValue
+    Set-OnePowerSettingValue -Snapshot $Snapshot `
+        -Mode '/SetDcValueIndex' -Value $DCValue
+}
+
 function Get-PowerSnapshot {
     $result = [ordered]@{
         Available = $false
@@ -3152,8 +3458,50 @@ function Get-PowerSnapshot {
 }
 
 function Set-PerformancePowerPlan {
+    param([Parameter(Mandatory = $true)][object[]]$PowerSettings)
+
     $failures = New-Object 'System.Collections.Generic.List[string]'
     try {
+        # Saved rows prove that every value can be rolled back, but write
+        # targets always come from a fresh installed-plan enumeration. This
+        # safely ignores plans removed since Apply and refuses a newly added
+        # pair until its original value has been appended to state.json.
+        $installedSchemes = @(Get-PowerSchemeGuids)
+        $baselinePairs = @{}
+        foreach ($snapshot in @($PowerSettings)) {
+            $schemeKey = ([string]$snapshot.SchemeGuid).ToLowerInvariant()
+            if ($installedSchemes -notcontains $schemeKey) { continue }
+            $subgroupKey = ([string]$snapshot.SubgroupGuid).ToLowerInvariant()
+            $settingKey = ([string]$snapshot.SettingGuid).ToLowerInvariant()
+            $baselinePairs["$schemeKey|$subgroupKey|$settingKey"] = $true
+        }
+        $currentSettings = @(Get-AllPowerSettingSnapshots)
+        if ($currentSettings.Count -eq 0) {
+            throw 'No installed power plan exposes display/sleep idle settings.'
+        }
+        foreach ($setting in $currentSettings) {
+            if (-not [bool]$setting.Available) {
+                throw "$($setting.Name) is unavailable on installed plan $($setting.SchemeGuid): $($setting.Error)"
+            }
+            $currentKey = ('{0}|{1}|{2}' -f
+                [string]$setting.SchemeGuid,
+                [string]$setting.SubgroupGuid,
+                [string]$setting.SettingGuid).ToLowerInvariant()
+            if (-not $baselinePairs.ContainsKey($currentKey)) {
+                throw "The rollback baseline does not cover installed power setting $($setting.SchemeGuid)/$($setting.Name); idle timeouts were left unchanged."
+            }
+        }
+        foreach ($entry in $PowerSettingPlan) {
+            $requiredPair = '{0}|{1}|{2}' -f $HighPerformanceScheme,
+                ([string]$entry.SubgroupGuid).ToLowerInvariant(),
+                ([string]$entry.SettingGuid).ToLowerInvariant()
+            if (-not $baselinePairs.ContainsKey($requiredPair)) {
+                throw "The High performance $($entry.Name) baseline is unavailable; idle timeouts were not changed without rollback state."
+            }
+        }
+        foreach ($setting in $currentSettings) {
+            Set-PowerSettingValues -Snapshot $setting -ACValue 0 -DCValue 0
+        }
         & powercfg.exe /SetActive SCHEME_MIN *> $null
         if ($LASTEXITCODE -ne 0) {
             throw "powercfg /SetActive SCHEME_MIN returned $LASTEXITCODE"
@@ -3163,14 +3511,142 @@ function Set-PerformancePowerPlan {
             [string]$current.ActiveScheme -ine $HighPerformanceScheme) {
             throw "High performance scheme was not activated: $($current.Error)"
         }
+        $verifiedPairs = 0
+        $verifiedSchemes = @{}
+        foreach ($setting in @(Get-AllPowerSettingSnapshots)) {
+            if (-not [bool]$setting.Available) {
+                throw "$($setting.Name) is unavailable on installed plan $($setting.SchemeGuid): $($setting.Error)"
+            }
+            $verifiedPairs++
+            $verifiedSchemes[([string]$setting.SchemeGuid).ToLowerInvariant()] = `
+                $true
+            if ([uint32]$setting.ACValue -ne 0 -or
+                [uint32]$setting.DCValue -ne 0) {
+                throw "$($setting.Name) is not Never on plan $($setting.SchemeGuid): AC=$($setting.ACValue) DC=$($setting.DCValue)"
+            }
+        }
+        if ($verifiedPairs -eq 0) {
+            throw 'No installed power plan exposes display/sleep idle settings for verification.'
+        }
         Write-Host "  power scheme: High performance ($HighPerformanceScheme)" `
             -ForegroundColor DarkGray
+        Write-Host "  display and automatic sleep: Never (AC=0 DC=0) on $($verifiedSchemes.Count) installed plan(s)" `
+            -ForegroundColor DarkGray
     } catch {
-        $message = "power scheme: $($_.Exception.Message)"
+        $message = "power scheme/display/sleep idle timeout: $($_.Exception.Message)"
         $failures.Add($message)
         Write-Warning $message
     }
     return $failures.ToArray()
+}
+
+function Get-SavedPowerOverrideFlag {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $property = $Snapshot.PSObject.Properties[$Name]
+    if ($null -ne $property) { return [bool]$property.Value }
+    # Legacy rows only had Exists.  True meant both AC/DC values were present;
+    # false meant the tool recorded no explicit pair.  Never re-sample such a
+    # row after Apply: removing the tool-created overrides is the only safe way
+    # to restore its inherited defaults.
+    $legacy = $Snapshot.PSObject.Properties['Exists']
+    return [bool]($null -ne $legacy -and [bool]$legacy.Value)
+}
+
+function Restore-PowerSettings {
+    param([AllowEmptyCollection()][object[]]$Snapshots = @())
+
+    $installed = @(Get-PowerSchemeGuids)
+    foreach ($snapshot in @($Snapshots)) {
+        $schemeGuid = ([string]$snapshot.SchemeGuid).ToLowerInvariant()
+        if ($installed -notcontains $schemeGuid) {
+            Write-Host "  removed power plan skipped during rollback: $schemeGuid" `
+                -ForegroundColor DarkYellow
+            continue
+        }
+        Assert-PowerSettingTarget $snapshot
+
+        $keyExisted = Get-SavedPowerOverrideFlag `
+            -Snapshot $snapshot -Name 'KeyExisted'
+        $acExisted = Get-SavedPowerOverrideFlag `
+            -Snapshot $snapshot -Name 'ACValueExisted'
+        $dcExisted = Get-SavedPowerOverrideFlag `
+            -Snapshot $snapshot -Name 'DCValueExisted'
+        if ($acExisted) {
+            if ($null -eq $snapshot.PSObject.Properties['ACValue'] -or
+                $null -eq $snapshot.ACValue) {
+                throw "rollback baseline lacks the original AC value for $schemeGuid/$($snapshot.Name)"
+            }
+            Set-OnePowerSettingValue -Snapshot $snapshot `
+                -Mode '/SetAcValueIndex' -Value ([uint32]$snapshot.ACValue)
+        }
+        if ($dcExisted) {
+            if ($null -eq $snapshot.PSObject.Properties['DCValue'] -or
+                $null -eq $snapshot.DCValue) {
+                throw "rollback baseline lacks the original DC value for $schemeGuid/$($snapshot.Name)"
+            }
+            Set-OnePowerSettingValue -Snapshot $snapshot `
+                -Mode '/SetDcValueIndex' -Value ([uint32]$snapshot.DCValue)
+        }
+
+        $path = '{0}\{1}\{2}\{3}' -f $PowerSchemeRegistryRoot,
+            $schemeGuid, [string]$snapshot.SubgroupGuid,
+            [string]$snapshot.SettingGuid
+        if (Test-Path -LiteralPath $path -PathType Container) {
+            $key = Get-Item -LiteralPath $path -ErrorAction Stop
+            $names = @($key.GetValueNames())
+            if (-not $acExisted -and $names -contains 'ACSettingIndex') {
+                Remove-ItemProperty -LiteralPath $path `
+                    -Name 'ACSettingIndex' -ErrorAction Stop
+            }
+            if (-not $dcExisted -and $names -contains 'DCSettingIndex') {
+                Remove-ItemProperty -LiteralPath $path `
+                    -Name 'DCSettingIndex' -ErrorAction Stop
+            }
+        }
+        if (-not $keyExisted -and
+            (Test-Path -LiteralPath $path -PathType Container)) {
+            $key = Get-Item -LiteralPath $path -ErrorAction Stop
+            if (@($key.GetValueNames()).Count -eq 0 -and
+                @($key.GetSubKeyNames()).Count -eq 0) {
+                $key.Close()
+                Remove-Item -LiteralPath $path -ErrorAction Stop
+            }
+        } elseif ($keyExisted -and
+            -not (Test-Path -LiteralPath $path -PathType Container)) {
+            New-Item -Path $path -Force -ErrorAction Stop | Out-Null
+        }
+
+        $currentKeyExisted = Test-Path -LiteralPath $path -PathType Container
+        $currentAcExisted = $false
+        $currentDcExisted = $false
+        $currentAcValue = $null
+        $currentDcValue = $null
+        if ($currentKeyExisted) {
+            $key = Get-Item -LiteralPath $path -ErrorAction Stop
+            $names = @($key.GetValueNames())
+            $currentAcExisted = $names -contains 'ACSettingIndex'
+            $currentDcExisted = $names -contains 'DCSettingIndex'
+            if ($currentAcExisted) {
+                $currentAcValue = [uint32]$key.GetValue('ACSettingIndex')
+            }
+            if ($currentDcExisted) {
+                $currentDcValue = [uint32]$key.GetValue('DCSettingIndex')
+            }
+        }
+        if ([bool]$currentKeyExisted -ne [bool]$keyExisted -or
+            [bool]$currentAcExisted -ne [bool]$acExisted -or
+            [bool]$currentDcExisted -ne [bool]$dcExisted -or
+            ($acExisted -and
+                [uint32]$currentAcValue -ne [uint32]$snapshot.ACValue) -or
+            ($dcExisted -and
+                [uint32]$currentDcValue -ne [uint32]$snapshot.DCValue)) {
+            throw "original $($snapshot.Name) override was not restored for plan $schemeGuid"
+        }
+    }
 }
 
 function Restore-PowerSnapshot {
@@ -3354,7 +3830,8 @@ This full Windows 10 guest profile will:
 - order en-US/US first and zh-CN/Microsoft Pinyin second
 - remove reviewed consumer apps for this user
 - enable Game Mode while disabling Xbox background recording
-- disable reviewed optional services/tasks and select High performance power
+- disable reviewed optional services/tasks, select High performance power, and
+  set display/automatic-sleep idle timeouts to Never on every installed plan
 - set NVIDIA global power management to Prefer maximum performance
 - give exact allowlisted DNF images High (never Realtime) priority
 - permanently delete plain temporary files older than 24 hours from the
@@ -3441,6 +3918,31 @@ function Get-VerificationIssues {
             $issues.Add("service unreadable: $($plan.Name): $($_.Exception.Message)")
         }
     }
+    # A retired optimization is verified only when an older state.json already
+    # owns an original snapshot for it. Fresh installs deliberately do not
+    # adopt or rewrite a pre-existing user choice for the service.
+    $state = Read-State
+    foreach ($plan in $RetiredServicePlan) {
+        $saved = @($state.Services | Where-Object {
+            [string]$_.Name -ieq [string]$plan.Name
+        }) | Select-Object -First 1
+        if ($null -eq $saved -or -not [bool]$saved.Exists) { continue }
+        try {
+            $current = Get-ServiceSnapshot $plan
+            $modeMatches = [bool]$current.Exists -and
+                [string]$current.StartMode -eq [string]$saved.StartMode
+            $delayMatches = [string]$saved.StartMode -ne 'Auto' -or
+                [int]$current.DelayedAutoStart -eq [int]$saved.DelayedAutoStart
+            $runningMatches = [string]$saved.State -ne 'Running' -or
+                [string]$current.State -eq 'Running'
+            if (-not $modeMatches -or -not $delayMatches -or
+                -not $runningMatches) {
+                $issues.Add("retired service baseline not restored: $($plan.Name) current=$($current.StartMode)/$($current.State)/delayed=$($current.DelayedAutoStart) original=$($saved.StartMode)/$($saved.State)/delayed=$($saved.DelayedAutoStart)")
+            }
+        } catch {
+            $issues.Add("retired service unreadable: $($plan.Name): $($_.Exception.Message)")
+        }
+    }
     foreach ($plan in @(Get-CurrentTaskPlans)) {
         try {
             $current = Get-TaskSnapshot $plan
@@ -3523,6 +4025,14 @@ function Get-VerificationIssues {
         $issues.Add("active power scheme cannot be read: $($power.Error)")
     } elseif ([string]$power.ActiveScheme -ine $HighPerformanceScheme) {
         $issues.Add("High performance power scheme is not active: $($power.ActiveScheme)")
+    }
+    foreach ($setting in @(Get-AllPowerSettingSnapshots)) {
+        if (-not [bool]$setting.Available) {
+            $issues.Add("automatic idle setting is unavailable: plan=$($setting.SchemeGuid) setting=$($setting.Name) error=$($setting.Error)")
+        } elseif ([uint32]$setting.ACValue -ne 0 -or
+            [uint32]$setting.DCValue -ne 0) {
+            $issues.Add("automatic idle timeout is not Never: plan=$($setting.SchemeGuid) setting=$($setting.Name) AC=$($setting.ACValue) DC=$($setting.DCValue)")
+        }
     }
     $nvidia = Get-NvidiaPowerModeSnapshot
     if (-not [bool]$nvidia.Available) {
@@ -3666,6 +4176,9 @@ function New-AuditReport {
         }
         $power = Get-PowerSnapshot
         $lines.Add("powerAvailable=$($power.Available) activeScheme=$($power.ActiveScheme) desiredScheme=$HighPerformanceScheme error=$($power.Error)")
+        foreach ($setting in @(Get-AllPowerSettingSnapshots)) {
+            $lines.Add("powerPlan=$($setting.SchemeGuid) setting=$($setting.Name) available=$($setting.Available) keyExisted=$($setting.KeyExisted) acOverride=$($setting.ACValueExisted) dcOverride=$($setting.DCValueExisted) AC=$($setting.ACValue) DC=$($setting.DCValue) desired=Never(0) error=$($setting.Error)")
+        }
         $lines.Add('cpuSampleSkipped=True (run 02-Audit.cmd after restart for the measured sample)')
         return (Save-AuditReportLines -Lines $lines -Label $Label)
     }
@@ -3732,6 +4245,9 @@ function New-AuditReport {
     $lines.Add('[runtime and performance]')
     $power = Get-PowerSnapshot
     $lines.Add("powerAvailable=$($power.Available) activeScheme=$($power.ActiveScheme) desiredScheme=$HighPerformanceScheme error=$($power.Error)")
+    foreach ($setting in @(Get-AllPowerSettingSnapshots)) {
+        $lines.Add("powerPlan=$($setting.SchemeGuid) setting=$($setting.Name) available=$($setting.Available) keyExisted=$($setting.KeyExisted) acOverride=$($setting.ACValueExisted) dcOverride=$($setting.DCValueExisted) AC=$($setting.ACValue) DC=$($setting.DCValue) desired=Never(0) error=$($setting.Error)")
+    }
     foreach ($plan in $ProcessPlan) {
         $running = @(Get-Process -Name ([string]$plan.Name) `
             -ErrorAction SilentlyContinue).Count -gt 0
@@ -3825,6 +4341,7 @@ function New-OriginalState {
         Apps = @(Get-AppSnapshots)
         AppBaselineNames = @($AppPlan)
         Power = (Get-PowerSnapshot)
+        PowerSettings = @(Get-AllPowerSettingSnapshots)
         PolicyFiles = [pscustomobject]@{
             Machine = Get-PolicyFileSnapshot -Scope 'Machine' `
                 -Path $MachinePolicyPath
@@ -4012,6 +4529,21 @@ function Ensure-CurrentBaseline {
         Set-StateProperty -State $State -Name Power -Value (Get-PowerSnapshot)
         $changed = $true
     }
+    $powerSettingsProperty = $State.PSObject.Properties['PowerSettings']
+    $existingPowerSettings = if ($null -eq $powerSettingsProperty) {
+        @()
+    } else {
+        @($powerSettingsProperty.Value)
+    }
+    $powerSettingsMerge = Merge-PowerSettingSnapshots `
+        -Existing $existingPowerSettings `
+        -Current @(Get-AllPowerSettingSnapshots)
+    if ($null -eq $powerSettingsProperty -or
+        [bool]$powerSettingsMerge.Changed) {
+        Set-StateProperty -State $State -Name PowerSettings `
+            -Value @($powerSettingsMerge.Snapshots)
+        $changed = $true
+    }
     if ($null -eq $State.PSObject.Properties['PolicyFiles']) {
         Set-StateProperty -State $State -Name PolicyFiles -Value `
             ([pscustomobject]@{
@@ -4141,7 +4673,11 @@ function Invoke-Apply {
         $failures.Add($failure)
     }
 
-    Write-Host '[4/12] Disabling reviewed services' -ForegroundColor Cyan
+    Write-Host '[4/12] Restoring retired compatibility baselines and disabling reviewed services' `
+        -ForegroundColor Cyan
+    foreach ($failure in @(Restore-RetiredServiceSnapshots $state)) {
+        $failures.Add($failure)
+    }
     foreach ($failure in @(Disable-PlannedServices)) { $failures.Add($failure) }
 
     Write-Host '[5/12] Disabling reviewed scheduled tasks' -ForegroundColor Cyan
@@ -4165,9 +4701,11 @@ function Invoke-Apply {
         $failures.Add($failure)
     }
 
-    Write-Host '[9/12] Selecting the built-in High performance power plan' `
+    Write-Host '[9/12] Selecting High performance and disabling display/sleep idle timeouts on every power plan' `
         -ForegroundColor Cyan
-    foreach ($failure in @(Set-PerformancePowerPlan)) {
+    foreach ($failure in @(
+        Set-PerformancePowerPlan -PowerSettings @($state.PowerSettings)
+    )) {
         $failures.Add($failure)
     }
 
@@ -4348,11 +4886,17 @@ function Invoke-Enforce {
     if ($audioFailures.Count -eq 0) {
         $log.Add('audio=default-render-muted')
     }
-    foreach ($failure in @(Set-PerformancePowerPlan)) {
+    $powerFailures = @(
+        Set-PerformancePowerPlan -PowerSettings @($state.PowerSettings)
+    )
+    foreach ($failure in $powerFailures) {
         $failures.Add($failure)
         $log.Add("failure=$failure")
     }
-    $log.Add('power=high-performance')
+    if ($powerFailures.Count -eq 0) {
+        $log.Add('power=high-performance')
+        $log.Add('idleTimeouts=display-and-sleep-never-all-plans')
+    }
     foreach ($failure in @(Set-NvidiaMaximumPerformance)) {
         $failures.Add($failure)
         $log.Add("failure=$failure")
@@ -4486,7 +5030,15 @@ function Invoke-Rollback {
         }
     }
 
-    Write-Host '[13/13] Restoring the original power scheme' -ForegroundColor Cyan
+    Write-Host '[13/13] Restoring original power-plan display/sleep timeouts and active scheme' `
+        -ForegroundColor Cyan
+    if ($null -ne $state.PSObject.Properties['PowerSettings']) {
+        try { Restore-PowerSettings @($state.PowerSettings) } catch {
+            $message = "power display/sleep timeouts: $($_.Exception.Message)"
+            $failures.Add($message)
+            Write-Warning $message
+        }
+    }
     if ($null -ne $state.PSObject.Properties['Power']) {
         try { Restore-PowerSnapshot $state.Power } catch {
             $message = "power scheme: $($_.Exception.Message)"

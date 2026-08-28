@@ -76,6 +76,11 @@ with open(record, "w", encoding="utf-8") as output:
             response = {"return": result, "id": request.get("id")}
         elif command == "query-display-options":
             response = {"return": {"type": "sdl"}, "id": request.get("id")}
+        elif command == "query-status":
+            response = {
+                "return": {"status": "suspended", "running": False},
+                "id": request.get("id"),
+            }
         elif command == "qom-list":
             objects = []
             if preview_present:
@@ -159,6 +164,16 @@ wait "$FAKE_PID"
 grep -Fxq 'display-pause sdl2' "$TMP_DIR/hide.record" ||
     fail "vmctl display did not pause the SDL listener"
 
+start_fake "$TMP_DIR/wake.record"
+"$VMCTL" wake 42 --vms-dir "$VMS_DIR" >"$TMP_DIR/wake.out"
+wait "$FAKE_PID"
+grep -Fxq 'query-status ' "$TMP_DIR/wake.record" ||
+    fail "vmctl wake did not inspect the VM run state"
+grep -Fxq 'system_wakeup ' "$TMP_DIR/wake.record" ||
+    fail "vmctl wake did not issue QMP system_wakeup"
+grep -Fq 'OK: ACPI S3 wake requested' "$TMP_DIR/wake.out" ||
+    fail "vmctl wake did not report the requested wake"
+
 start_fake "$TMP_DIR/stream.record"
 "$CTL" 42 stream-only --vms-dir "$VMS_DIR" >"$TMP_DIR/stream.out"
 wait "$FAKE_PID"
@@ -183,4 +198,4 @@ wait "$FAKE_PID"
 grep -Fq 'QMP 身份不匹配' "$TMP_DIR/wrong-vm.out" ||
     fail "identity rejection did not explain the mismatch"
 
-echo "PASS: safe runtime SDL/fb-shm display control"
+echo "PASS: safe runtime SDL/fb-shm display and ACPI wake control"

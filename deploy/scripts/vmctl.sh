@@ -39,6 +39,7 @@ usage:
   ./deploy/scripts/vmctl.sh driver-install ID [--vms-dir ABS] [--ip IPv4] [--gtk] [--start]
   ./deploy/scripts/vmctl.sh path   ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh status ID [--vms-dir ABS|--vm-dir ABS]
+  ./deploy/scripts/vmctl.sh wake   ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh display ID ACTION [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh preview-capacity [--instances N] [--source-size WxH]
       [--size WxH] [--rate HZ]
@@ -57,6 +58,7 @@ Examples:
   ./deploy/scripts/vmctl.sh monitor 2 --monitor-profile benq-gw2280 --force
   ./deploy/scripts/vmctl.sh display 2 stream-only
   ./deploy/scripts/vmctl.sh display 2 window-show
+  ./deploy/scripts/vmctl.sh wake 2
   ./deploy/scripts/vmctl.sh preview-capacity --instances 16 --rate 60
   ./deploy/scripts/vmctl.sh cdrom 2 mount /path/to/package.iso
   ./deploy/scripts/vmctl.sh cdrom 2 eject
@@ -194,6 +196,10 @@ case "$ACTION" in
     display|control)
         shift
         exec "$ctl_vm" "$@"
+        ;;
+    wake)
+        shift
+        exec "$ctl_vm" "$@" wake
         ;;
     preview-capacity)
         shift

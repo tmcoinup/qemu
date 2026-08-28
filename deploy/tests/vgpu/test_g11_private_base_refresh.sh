@@ -65,7 +65,7 @@ jq -n \
 IMAGE_ROOT="$TMP_DIR/images" VM_ROOT="$VM_ROOT" VMS_DIR="$VM_ROOT" \
 VM_INSTANCES_DIR="$VM_ROOT" VM_BASE_DIR="$VM_BASE_DIR" \
     "$REFRESH" "$BASE_NAME" --check >"$TMP_DIR/current.out"
-grep -Fq 'already embeds marker schema 4 / Guest Lite 2.6.4' \
+grep -Fq 'already embeds marker schema 4 / Guest Lite 2.6.7' \
     "$TMP_DIR/current.out" || fail "current private base was not recognized"
 
 jq '.firstBootScriptSha256 = ("0" * 64)' "$ATTESTATION" \

@@ -25,11 +25,26 @@ $GuestLiteManifestPath = Join-Path $GuestLiteRoot 'clone-manifest.json'
 $GuestLiteStatePath = Join-Path $env:ProgramData 'G11GuestLite\state.json'
 $GuestLiteEnforcementLogPath = Join-Path $env:ProgramData `
     'G11GuestLite\enforce-last.txt'
-$GuestLiteProfileVersion = '2.6.4'
-$ExpectedGuestLiteManifestSha256 = '1C3A590BFBF8BF37FE7743475D75A9FEE8DA454346C740AEA6F6D7F98FD13E70'
+$GuestLiteProfileVersion = '2.6.7'
+$ExpectedGuestLiteManifestSha256 = '6AE841CEE64CBE0D8410F82D9B5C937C78DE096BC385BD682A821D30C521C038'
 $GuestLiteEnglishInputTip = '0409:00000409'
 $GuestLitePinyinLanguageTags = @('zh-CN', 'zh-Hans-CN')
 $GuestLitePinyinInputTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
+$GuestLiteHighPerformanceScheme = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+$GuestLitePowerSchemeRoot = `
+    'HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes'
+$GuestLitePowerSettings = @(
+    [pscustomobject]@{
+        Name = 'VIDEOIDLE'
+        SubgroupGuid = '7516b95f-f776-4464-8c53-06167f40cc99'
+        SettingGuid = '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e'
+    },
+    [pscustomobject]@{
+        Name = 'STANDBYIDLE'
+        SubgroupGuid = '238c9fa8-0aad-41ed-83f4-97be242c8f20'
+        SettingGuid = '29f6c1db-86da-48c5-9fdb-f2b67b1f44da'
+    }
+)
 
 function Write-AtomicUtf8Json {
     param(
@@ -313,6 +328,79 @@ function Resolve-GuestLiteRegistryPath {
     return $Path
 }
 
+function Get-GuestLitePowerState {
+    $savedPreference = $ErrorActionPreference
+    $activeOutput = ''
+    $activeExitCode = -1
+    try {
+        $ErrorActionPreference = 'Continue'
+        $activeOutput = (& powercfg.exe /GetActiveScheme 2>&1 | Out-String)
+        $activeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    $activeMatch = [regex]::Match($activeOutput,
+        '(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+    if ($activeExitCode -ne 0 -or -not $activeMatch.Success) {
+        throw "Guest Lite active power scheme cannot be read (exit $activeExitCode)."
+    }
+    $listOutput = ''
+    $listExitCode = -1
+    try {
+        $ErrorActionPreference = 'Continue'
+        $listOutput = (& powercfg.exe /List 2>&1 | Out-String)
+        $listExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($listExitCode -ne 0) {
+        throw "powercfg /List failed while validating Guest Lite (exit $listExitCode)."
+    }
+    $schemeGuids = @([regex]::Matches($listOutput,
+        '(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}') |
+        ForEach-Object { $_.Value.ToLowerInvariant() } | Sort-Object -Unique)
+    if ($schemeGuids.Count -eq 0) {
+        throw 'Windows reports no installed power schemes.'
+    }
+    $settings = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($schemeGuid in $schemeGuids) {
+        foreach ($entry in $GuestLitePowerSettings) {
+            $queryOutput = ''
+            $queryExitCode = -1
+            try {
+                $ErrorActionPreference = 'Continue'
+                $queryOutput = (& powercfg.exe /Query $schemeGuid `
+                    ([string]$entry.SubgroupGuid) `
+                    ([string]$entry.SettingGuid) 2>&1 | Out-String)
+                $queryExitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $savedPreference
+            }
+            $hexValues = @([regex]::Matches($queryOutput,
+                '(?i)0x[0-9a-f]{1,8}') | ForEach-Object {
+                    [string]$_.Value
+                })
+            if ($queryExitCode -ne 0 -or $hexValues.Count -lt 2) {
+                throw "Guest Lite power setting cannot be queried: $schemeGuid/$($entry.Name) (exit $queryExitCode)."
+            }
+            $settings.Add([pscustomobject]@{
+                SchemeGuid = $schemeGuid
+                SubgroupGuid = [string]$entry.SubgroupGuid
+                SettingGuid = [string]$entry.SettingGuid
+                Name = [string]$entry.Name
+                ACValue = [Convert]::ToUInt32(
+                    $hexValues[$hexValues.Count - 2].Substring(2), 16)
+                DCValue = [Convert]::ToUInt32(
+                    $hexValues[$hexValues.Count - 1].Substring(2), 16)
+            })
+        }
+    }
+    return [pscustomobject]@{
+        ActiveScheme = $activeMatch.Value.ToLowerInvariant()
+        Settings = $settings.ToArray()
+    }
+}
+
 function Read-And-ValidateGuestLiteState {
     param([switch]$RequireFirewallReady)
 
@@ -340,6 +428,7 @@ function Read-And-ValidateGuestLiteState {
     $languageBaseline = $state.PSObject.Properties['UserLanguageList']
     $nvidiaBaseline = $state.PSObject.Properties['NvidiaPowerMode']
     $dnfBaseline = $state.PSObject.Properties['DnfProcesses']
+    $powerSettingsBaseline = $state.PSObject.Properties['PowerSettings']
     $cleanupSummary = $state.PSObject.Properties['LastTemporaryCleanup']
     if ($null -eq $audioBaseline -or
         -not [bool]$audioBaseline.Value.Available -or
@@ -348,10 +437,37 @@ function Read-And-ValidateGuestLiteState {
         $null -eq $nvidiaBaseline -or
         -not [bool]$nvidiaBaseline.Value.Available -or
         $null -eq $dnfBaseline -or
+        $null -eq $powerSettingsBaseline -or
+        @($powerSettingsBaseline.Value).Count -eq 0 -or
         $null -eq $cleanupSummary -or
         [int]$cleanupSummary.Value.MinimumAgeHours -ne 24 -or
         [int]$cleanupSummary.Value.RootsProcessed -lt 1) {
-        throw 'Guest Lite rollback state lacks the audio/language/NVIDIA/DNF baseline or the temporary-cleanup receipt.'
+        throw 'Guest Lite rollback state lacks the audio/language/NVIDIA/DNF/power baseline or the temporary-cleanup receipt.'
+    }
+
+    $powerState = Get-GuestLitePowerState
+    if ([string]$powerState.ActiveScheme -cne `
+            $GuestLiteHighPerformanceScheme) {
+        throw "Guest Lite High performance plan is not active: $($powerState.ActiveScheme)"
+    }
+    $powerBaselineKeys = @{}
+    foreach ($snapshot in @($powerSettingsBaseline.Value)) {
+        $key = ('{0}|{1}|{2}' -f [string]$snapshot.SchemeGuid,
+            [string]$snapshot.SubgroupGuid,
+            [string]$snapshot.SettingGuid).ToLowerInvariant()
+        $powerBaselineKeys[$key] = $true
+    }
+    foreach ($setting in @($powerState.Settings)) {
+        $key = ('{0}|{1}|{2}' -f [string]$setting.SchemeGuid,
+            [string]$setting.SubgroupGuid,
+            [string]$setting.SettingGuid).ToLowerInvariant()
+        if (-not $powerBaselineKeys.ContainsKey($key)) {
+            throw "Guest Lite rollback state does not cover installed power setting: $($setting.SchemeGuid)/$($setting.Name)"
+        }
+        if ([uint32]$setting.ACValue -ne 0 -or
+            [uint32]$setting.DCValue -ne 0) {
+            throw "Guest Lite idle timeout is not Never: $($setting.SchemeGuid)/$($setting.Name) AC=$($setting.ACValue) DC=$($setting.DCValue)"
+        }
     }
 
     $task = Get-ScheduledTask -TaskPath '\' `
@@ -532,6 +648,7 @@ function Read-And-ValidateGuestLiteEnforcementReceipt {
         'firewallService=automatic-running',
         'audio=default-render-muted',
         'processes=reviewed-stopped',
+        'idleTimeouts=display-and-sleep-never-all-plans',
         'nvidiaPowerMode=prefer-maximum-performance',
         'dnfPriority=high-if-running',
         'result=pass failures=0'

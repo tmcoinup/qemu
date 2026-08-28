@@ -278,9 +278,14 @@ QEMU_SDL_PRESENT_MODE=dynamic \
 
 如果宿主桌面仍亮、只有 Windows 客户区变黑，则在 guest 内运行新版
 `VgpuPortable.exe`（旧维护包运行 `02-Apply-Recommended.cmd`）。它把 Windows
-“高性能”计划的显示器超时和系统自动睡眠 AC/DC 设为“从不”，并把精确原值保存到
+每个已安装电源计划的显示器超时和系统自动睡眠 AC/DC 设为“从不”，并把每个计划的
+精确原值保存到
 `C:\ProgramData\G11GuestPerformance\state.json`。双击 tools 目录里的
 `04-Rollback.cmd` 可完整恢复；不改 BCD、签名策略或驱动。
+
+页面只有“屏幕”而没有“睡眠”不是超时值造成的，而是旧 QEMU 启动隐藏了 ACPI S3。
+使用当前 G-11 启动器完整关机再冷启动一次后，“睡眠”项会出现；空闲值仍为“从不”，
+用户可主动睡眠。若本地键鼠未唤醒，宿主运行 `./deploy/scripts/vmctl.sh wake ID`。
 
 若两层均已禁用仍黑屏，按“最小化→恢复”“切走焦点→返回”和持续动态画面三种场景
 分别记录 Content/Present 与 QEMU 日志。这时应排查 REGION/scanout 恢复，而不是继续

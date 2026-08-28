@@ -1,16 +1,17 @@
-# G-11 Guest Lite 2.6.4：Windows 10 全面精简/提速傻瓜教程
+# G-11 Guest Lite 2.6.7：Windows 10 全面精简/提速傻瓜教程
 
 本工具只属于 **G-11/vGPU**。V-11 是独立分支；不要互拷 VM bundle、驱动或配置。
-2.6.4 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
+2.6.7 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
 资讯、天气、商店、OneDrive/同步、通知、任务栏搜索框、消费 App、后台服务/任务和常见 VM 高 I/O 项；
-同时开启游戏模式、关闭 Xbox/Game DVR 后台录制、选择高性能电源计划、通过正式
+同时开启游戏模式、关闭 Xbox/Game DVR 后台录制、选择高性能电源计划，把所有已安装
+电源计划的关闭屏幕/自动睡眠 AC/DC 都设为“从不”，并通过正式
 NVIDIA 驱动的 NVAPI DRS 设置“最高性能优先”，并为精确白名单 DNF 映像配置 High
 （非 Realtime）优先级。Apply 会安全清理两个固定 Temp 目录中创建/最后写入均超过
 24 小时的普通文件，
 把默认播放端点静音，并把输入顺序设为 en-US/US keyboard 第一、中文（简体）
 Microsoft Pinyin 第二。
 
-`2.6.4` 保留 2.6.3 的 MpsSvc/NVIDIA 控制面板兼容性与克隆快速路径，并修复真实克隆中
+`2.6.7` 保留 2.6.3 的 MpsSvc/NVIDIA 控制面板兼容性与克隆快速路径，并修复真实克隆中
 Task Scheduler 把 SID 返回为账户名时的等价身份校验，不减少显卡、授权或防火墙验收项：
 
 - vGPU 首启不再让 DISM 枚举整个在线驱动库，而是按当前 GPU 的 DeviceID 精确查询
@@ -26,6 +27,18 @@ Task Scheduler 把 SID 返回为账户名时的等价身份校验，不减少显
   Task Scheduler 返回 0、运行时间晚于本次开机、日志生成时间也晚于本次开机，并且
   日志中的计算机名、MachineGuid、用户 SID 和全部结果逐项匹配。任一条件不满足才会
   启动一次新的补强任务。
+- 电源基线从“只记高性能计划”扩展为“每个已安装计划 × VIDEOIDLE/STANDBYIDLE”。
+  升级旧 `state.json` 时只追加尚未记录的组合，已保存的原值绝不重新采样，避免把
+  工具已写入的 0 当成原值而永久破坏回滚；
+- 计划清单以本机 `powercfg /List` 为准，不依赖计划的本地化名称、固定数量或
+  VM1 的 GUID。`powercfg /Query` 能读到有效值、但注册表中没有显式
+  `ACSettingIndex`/`DCSettingIndex` 时，表示该计划正在继承默认值，不是“设置不可用”。
+  Apply 会写入 0，Rollback 则删除工具新建的覆盖值，恢复原来的继承状态；
+- 旧版曾把 `CDPSvc` 当作可选后台服务禁用。VM1 确认这会使 Windows 10
+  从“设置 → 系统”进入后由 `SystemSettings.exe` 延迟崩溃。2.6.7 已将
+  `CDPSvc` 移出禁用清单：升级时只恢复旧 `state.json` 中已保存的真实原值，
+  既不重新采样工具写入的 `Disabled/Stopped`，也不在新安装上接管用户或
+  OEM 原有选择。`NcbService` 同样不在禁用清单。
 
 此外，三种防火墙 profile 仍关闭，但 `MpsSvc` 改为必须 `Auto/Running/PID>0`。
 Windows AppContainer 注册不再因 0x800706D9 失败，NVIDIA 控制面板可正常启动。
@@ -40,7 +53,7 @@ Windows AppContainer 注册不再因 0x800706D9 失败，NVIDIA 控制面板可�
 不再需要 `%LOCALAPPDATA%\Temp`、`%SystemRoot%\Temp` 内超过 24 小时的内容。脚本不碰
 Downloads、桌面、自定义 TEMP、WindowsApps、WinSxS 或浏览器用户资料。
 
-`2.6.4` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
+`2.6.7` 保留 2.2 在 VM1 实测发现的“只有 Registry.pol、缺少 gpt.ini 时，重启后策略仍被
 清掉”补齐完整原生本地策略状态：原始 `Registry.pol` 和 `gpt.ini` 均逐字节存入回滚
 基线，受管副本只写本地 GPO 支持的 `Version` 并同时递增机器/用户版本。Local System 补强
 任务在开机/登录延迟 45 秒后重写原生策略和运行态，然后立即退出；没有常驻进程
@@ -62,7 +75,7 @@ VM1 的第二轮重启审计还定位出 Windows PowerShell 5.1 Registry provide
 进程时，Defender 接口可能无法再返回篡改防护状态，此时允许重施现有策略；若引擎
 仍活动，未知状态继续硬性拒绝。明确检测到篡改防护为 `On` 时永远不会绕过。
 
-2.6.4 的真实克隆又确认：个别封装镜像连
+2.6.7 的真实克隆又确认：个别封装镜像连
 HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds\EnableFeeds 也会被 ACL
 保护。机器策略和 HKCU 的 ShellFeedsTaskbarViewMode 现在都只作兼容尝试；失败时不
 夺注册表所有权、不改 ACL，也不阻断克隆。资讯/天气属于界面精简项，不参与显卡、
@@ -104,6 +117,55 @@ HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds\EnableFeeds 也会被 ACL
    `DNF`/`DNFClient`/`DNFChina`/`DNFLauncher` 应显示 `priority=High`。DNF 未运行时
    `dnfProcessFound=False` 是正常状态；下次启动仍由 Windows 自动套用 High。不要改成
    `Realtime`，也不要给 `TCls` 等反作弊进程强制提权。
+
+### 电源和睡眠页面补齐：VM1 一次冷启动验收
+
+这次补齐分两层，缺一不可：Guest Lite 把页面内的计时值设为“从不”；G-11
+`start-vm.sh` 在 QEMU 冷启动时向 Windows 暴露物理桌面常见的 ACPI S3。旧启动中的
+`ICH9-LPC.disable_s3=1` 正是截图只有“屏幕”、没有“睡眠”的原因。ACPI 表在开机时
+确定，所以 Windows 内点“重启”不能让旧 QEMU 进程获得新能力。
+
+上面出现 `VERIFY PASS` 后，按顺序执行：
+
+1. 在 Windows 开始菜单点“关机”，不要点重启、睡眠或休眠，等待 VM 窗口自然退出。
+2. 宿主确认 VM1 已停：
+
+   ```bash
+   ./deploy/scripts/vmctl.sh status 1
+   ```
+
+   只有看到 `VM_STATUS=stopped` 才继续：
+
+   ```bash
+   ./deploy/scripts/vmctl.sh start 1
+   ```
+
+3. Windows 打开“设置 → 系统 → 电源和睡眠”。页面应同时有“屏幕”和“睡眠”，所有
+   接通电源/使用电池选项都应是“从不”。管理员 CMD 可只读复核：
+
+   ```bat
+   powercfg /getactivescheme
+   powercfg /query SCHEME_MIN SUB_VIDEO VIDEOIDLE
+   powercfg /query SCHEME_MIN SUB_SLEEP STANDBYIDLE
+   powercfg /a
+   ```
+
+   前两项超时的 AC/DC 索引应为 `0x00000000`，`powercfg /a` 应列出待机 (S3)。
+   休眠/Fast Startup 仍关闭，它不属于本次“真机化睡眠”。
+4. 可选且只先在 VM1 做：保存工作，在 Windows 开始菜单主动点一次“睡眠”。若本地
+   键鼠没有唤醒，在宿主执行：
+
+   ```bash
+   ./deploy/scripts/vmctl.sh wake 1
+   ```
+
+   驱动安装、母盘封装、离线磁盘同步仍必须完整关机；不能把 S3 当成关机。
+
+Guest Lite 的进程白名单没有 `SystemSettings.exe` 或 `ApplicationFrameHost.exe`，不会
+主动关闭“设置”窗口。VM1 上那次“自动关闭”是旧 Guest Lite 禁用 `CDPSvc`
+后触发的 `SystemSettings.exe` 崩溃；应用事件为 `Application Error / 1000`、
+`msvcrt.dll`、`0x40000015`、偏移 `0xae22`。重施 2.6.7 会按旧基线恢复该服务；
+不要删除 `state.json`，也不要手工把所有机器写死为某个启动类型。
 
 验收后宿主可弹出只读 U 盘：
 
@@ -164,7 +226,7 @@ profile 的 `Enabled` 均为 `False`。
 | 默认输入 | `en-US` + US (`0409:00000409`) 第一，`zh-CN` + Microsoft Pinyin (`0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}`) 第二 | 其他原有语言排在后面，Win+Space 可切换；回滚恢复原语言列表和默认覆盖 |
 | 游戏模式/录制 | `AllowAutoGameMode=1`、`AutoGameModeEnabled=1`；关闭 Game DVR、AppCapture 和 HistoricalCapture | 游戏模式与后台录制分别设置；关闭录制不等于关闭游戏模式；原值逐项回滚 |
 | 后台/隐私 | 关后台 App、内容投放、遥测、推送、地图、定位等白名单服务/任务；结束更新器、Game Bar、Teams/Widgets 等精确白名单进程 | 不按 CPU 排名盲杀，不碰网络/音频驱动、打印和 NVIDIA 服务；仅静音默认播放端点 |
-| Windows 性能 | 关 SysMain/搜索索引、电源节流、透明/任务栏动画和启动延时；切换内置“高性能”方案 | 保留桌面背景和字体平滑；2.2 自动恢复旧版 `VisualFXSetting` 基线；不改分页文件、时钟、HPET 或 BCD |
+| Windows 性能 | 关 SysMain/搜索索引、电源节流、透明/任务栏动画和启动延时；切换内置“高性能”方案；所有已安装计划的关闭屏幕/自动睡眠 AC/DC 均为“从不” | S3 手动睡眠仍可用；保留桌面背景和字体平滑；2.2 自动恢复旧版 `VisualFXSetting` 基线；不改分页文件、时钟、HPET 或 BCD |
 | NVIDIA 性能 | 通过 System32 正式 NVIDIA NVAPI 的 DRS 全局 profile 设置 `PREFERRED_PSTATE_ID=0x1057EB71` 为 `PREFER_MAX=1` | 不写私有 PowerMizer 注册表，不替换 NVAPI/驱动/服务；原覆盖值或“未覆盖”状态精确回滚；驱动不支持会明确 PARTIAL |
 | DNF 优先级 | 仅 `DNF.exe`、`DNFClient.exe`、`DNFChina.exe`、`DNFLauncher.exe` 使用 IFEO `PerfOptions/CpuPriorityClass=3`，并立即检查已运行实例 | `3` 对应 High；不使用通配符、不提升反作弊进程、不使用 Realtime；回滚删除/恢复原 IFEO 值并恢复 Apply 时仍存活的进程优先级 |
 | 临时文件 | 遍历当前用户 LocalAppData Temp 与 Windows Temp；只删创建/最后写入均超过 24 小时的普通文件及清空后的旧目录 | 固定本机目录、拒绝根目录/网络盘/重解析点，不跟随联接；占用/拒绝项保留并报告；删除不可回滚 |
@@ -183,14 +245,18 @@ C:\ProgramData\G11GuestLite\state.json
 ```
 
 其中包含 MachineGuid、计算机名、用户 SID、注册表值/类型、防火墙三 profile、原始
-音频静音状态、原始用户语言/输入列表、活动电源方案、NVIDIA DRS 覆盖状态、Apply 时
+音频静音状态、原始用户语言/输入列表、活动电源方案、每个已安装电源计划的
+`VIDEOIDLE`/`STANDBYIDLE` AC/DC 有效原值以及原先是否存在显式覆盖、NVIDIA DRS
+覆盖状态、Apply 时
 仍运行的 DNF 进程 PID/启动时间/优先级、服务
 启动/运行状态、任务启用状态、当前用户 App 清单，以及机器/用户原始
 `Registry.pol`、`gpt.ini` 字节和补强任务是否原先存在。目录 ACL 只允许 Administrators 和
 SYSTEM。重复 Apply 复用首次基线，不把“已经禁用”的状态覆盖成原始值。
 
 若 VM1 已经运行过旧版，2.6 会先把新增项目（包括 NVIDIA DRS、DNF 运行态、游戏设置）的当前状态
-补进旧基线、原子保存为 schema 6，再开始新增修改。VM1 从 2.1 升级时，原基线已保存
+补进旧基线、原子保存为 schema 6，再开始新增修改。电源设置使用更严格的追加合并：
+已有“计划 + 设置”行完整保留，只采样并追加从未记录的组合。即使旧版已把高性能
+计划改成 0，也不会覆盖旧基线中保存的 900/1800 等真实原值。VM1 从 2.1 升级时，原基线已保存
 最初的 Registry.pol；2.1 没有创建过 gpt.ini，因此新版可安全补记“原文件不存在”并
 保证回滚精确删除它。
 
@@ -201,7 +267,9 @@ C:\ProgramData\G11GuestLite\tools\03-Rollback.cmd
 ```
 
 看到 `ROLLBACK PASS` 后重启。回滚会先删除 Guest Lite 补强任务、恢复原始
-`Registry.pol`/`gpt.ini`，再恢复语言/输入、注册表、防火墙、声音静音、NVIDIA DRS、
+`Registry.pol`/`gpt.ini`，再恢复语言/输入、注册表、防火墙、声音静音、每个已记录
+计划的关闭屏幕/自动睡眠原值及原活动方案；若原先是继承默认值，回滚会删除
+本工具创建的覆盖，而不是伪造一个数字。随后恢复 NVIDIA DRS、
 仍存活的原 DNF 进程优先级、服务、任务、App 和电源。已删除的临时文件不能恢复。
 失败时显示
 `ROLLBACK PARTIAL`，原 state 不删除，可修复后重试。App 只恢复首次 Apply 前存在的
@@ -247,6 +315,7 @@ DLL、Windows PowerShell 5.1、CIM/NetSecurity/Defender/Appx/TaskScheduler cmdle
 
 测试会验证确定性构建、PE 架构/UAC 清单、严格 DLL 导入白名单、内嵌资源、ISO/USB
 目录、CRLF 启动器、schema 6 policy/metadata/task/audio/language/NVIDIA/DNF 回滚、
+所有电源计划的屏幕/睡眠 Never、升级基线只追加不覆盖、G-11 S3 暴露和 QMP 唤醒、
 Game Mode/Game DVR、固定 Temp 白名单/重解析点保护、合法 gpt.ini、
 克隆 manifest、禁止 BCD/签名/驱动/系统包删除操作及 2.6 必需控制项。
 
@@ -300,7 +369,8 @@ sudo ./deploy/scripts/repair-clone-init.sh 2
 旧载荷。
 
 第一条会严格验收来宾完成标记、独立 Windows 身份、Licensed/Code 0、系统 NVAPI、
-Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Auto/Running/PID>0` 与
+Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Auto/Running/PID>0`、全部电源计划的
+屏幕/自动睡眠值为 0 与
 `BFE=Auto/Running`、默认声音静音以及精确输入顺序，并刷新显示器缓存；任一项失败都
 保留等待门禁，绝不发布半成品。
 
@@ -311,7 +381,8 @@ Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Auto/Running/PID>0` 与
 3. finalizer 校验 `clone-manifest.json` 固定摘要及 Guest Lite 每个载荷摘要，自动运行
    `CloneApply`，保存该克隆 RID-500 用户的原始外观/策略/App/服务回滚基线；
 4. 复用系统 NVAPI 的内部重启，SYSTEM 验证 NVAPI/显示器，同时要求
-   `MpsSvc=Auto/Running/PID>0`、`BFE=Auto/Running`、通知关闭、默认声音静音、
+   `MpsSvc=Auto/Running/PID>0`、`BFE=Auto/Running`、通知关闭、默认声音静音、全部
+   电源计划的关闭屏幕/自动睡眠为“从不”、
    en-US/US 第一、Microsoft Pinyin 第二、本地 policy 文件及 Guest Lite 补强任务完整；
 5. 只有全部通过才写 schema-4 完成标记并完整关机；宿主“初始”只读复核后再启动。
 
@@ -338,6 +409,8 @@ Guest Lite 的 SYSTEM `pass/0` 回执、`MpsSvc=Auto/Running/PID>0` 与
 - 不清理 Downloads、桌面、用户资料、自定义 TEMP、WindowsApps 或组件存储；固定
   Temp 内删除的旧文件不可回滚；
 - 只支持 Windows 10 client，不在 Windows 11/Server 执行。
+- G-11 只恢复物理桌面常见的 ACPI S3 手动睡眠入口；自动空闲睡眠为“从不”，休眠和
+  Fast Startup 仍保持关闭。S3 恢复先在 VM1 验收，驱动/母盘/离线磁盘操作一律完整关机。
 
 ## 八、为什么可能出现 PARTIAL
 

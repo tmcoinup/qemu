@@ -3,7 +3,7 @@
 这条流程的结果是：制作方只在模板里执行一次 Sysprep；每台克隆拥有独立的
 Windows SID、MachineGuid、计算机名和 VM UUID；授权版 `VgpuPortable.exe` 在每台
 克隆首次启动时只运行一次。随后自动安装该 VM 专属的 x86/x64 系统 NVAPI、内部
-重启一次；同一条链还会自动应用 Guest Lite 2.6.4 克隆快速路径，关闭 Defender 实时扫描、三种
+重启一次；同一条链还会自动应用 Guest Lite 2.6.7 克隆快速路径，关闭 Defender 实时扫描、三种
 防火墙 profile，同时保留 `MpsSvc` Auto/Running，关闭系统/软件更新、资讯、天气、商店、OneDrive、通知和
 审核过的后台高占用项；开启游戏模式、关闭 Game DVR、选择高性能电源/NVIDIA 最高
 性能、固定 DNF High 优先级并安全清理超过 24 小时的固定 Temp 文件，将默认声音静音，并把输入顺序设为 en-US/US keyboard 第一、

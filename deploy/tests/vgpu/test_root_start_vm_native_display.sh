@@ -223,9 +223,15 @@ WAYLAND_OUT="$TMP_DIR/native-wayland.out"
 STREAM_OUT="$TMP_DIR/stream.out"
 GT1030_OUT="$TMP_DIR/gt1030.out"
 VLAN_OUT="$TMP_DIR/vlan.out"
+RESOURCE_FALSE_OUT="$TMP_DIR/resource-false.out"
+RESOURCE_TRUE_OUT="$TMP_DIR/resource-true.out"
 
 run_start_vm "$SDL_OUT"
 require_text "模式=vgpu-sdl" "$SDL_OUT"
+require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=on\,merge=off' \
+    "$SDL_OUT"
+require_text '宿主内存: 全量预分配（默认，Guest 上限 8192 MiB）' "$SDL_OUT"
+require_text '  -S' "$SDL_OUT"
 require_text "XMODIFIERS=@im=none SDL_IM_MODULE=none IBUS_ADDRESS=/nonexistent NATIVE_EGL=1 SDL_DRIVER=x11 X11_WMCLASS=win10-${VM_ID} WAYLAND_WMCLASS=win10-${VM_ID} WINDOW_MODE= CURSOR_MODE=host args=-display help" \
     "$TMP_DIR/qemu-env.trace"
 require_text 'ide-cd.bootindex=-1' "$SDL_OUT"
@@ -277,6 +283,67 @@ require_no_legacy_transport "$SDL_OUT"
 require_text 'bridge\,id=net0\,br=br0\,helper=/usr/local/libexec/qemu-g11-bridge-helper' \
     "$SDL_OUT"
 reject_text 'g11t' "$SDL_OUT"
+
+# The exact false/false boolean pair selects shared CPU scheduling and host-only
+# lazy memory allocation without changing Guest-visible capacity/topology or
+# adding a balloon/virtio-mem device.  The full-capacity guard remains separate
+# because the working set may still grow to the 8 GiB ceiling.
+run_start_vm "$RESOURCE_FALSE_OUT" \
+    --cpu-isolate=false --memory-prealloc=false
+require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=off\,merge=off' \
+    "$RESOURCE_FALSE_OUT"
+require_text '宿主内存: 按需触页（Guest 上限 8192 MiB 与 DIMM/SMBIOS 身份不变；工作集仍可能增长到上限）' \
+    "$RESOURCE_FALSE_OUT"
+reject_text '  -S' "$RESOURCE_FALSE_OUT"
+for guest_memory_device in virtio-balloon hv-balloon virtio-mem pc-dimm maxmem= slots=; do
+    reject_text "$guest_memory_device" "$RESOURCE_FALSE_OUT"
+done
+
+# Explicit true values must be equivalent to omitting both keys.
+run_start_vm "$RESOURCE_TRUE_OUT" \
+    --cpu-isolate=true --memory-prealloc=true
+require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=on\,merge=off' \
+    "$RESOURCE_TRUE_OUT"
+require_text '  -S' "$RESOURCE_TRUE_OUT"
+
+# Resource policy has only two key=value boolean switches.  Former bare,
+# negative, automatic and compatibility spellings must reach the unknown gate.
+removed_resource_index=0
+for removed_resource_flag in \
+        --no-cpu-isolate --cpu-isolate --cpu-isolate-auto \
+        --memory-on-demand --memory-prealloc --no-memory-prealloc; do
+    removed_resource_index=$((removed_resource_index + 1))
+    removed_resource_out="$TMP_DIR/removed-resource-${removed_resource_index}.out"
+    if run_start_vm "$removed_resource_out" "$removed_resource_flag"; then
+        fail "removed resource flag was accepted: $removed_resource_flag"
+    fi
+    require_text "未知参数: $removed_resource_flag" \
+        "${removed_resource_out%.out}.err"
+done
+unset removed_resource_flag removed_resource_index removed_resource_out
+
+if run_start_vm "$TMP_DIR/invalid-cpu-resource.out" --cpu-isolate=auto; then
+    fail 'non-boolean CPU resource value was accepted'
+fi
+require_text '--cpu-isolate 只接受 true 或 false' \
+    "$TMP_DIR/invalid-cpu-resource.err"
+if run_start_vm "$TMP_DIR/invalid-memory-resource.out" --memory-prealloc=on; then
+    fail 'non-boolean memory resource value was accepted'
+fi
+require_text '--memory-prealloc 只接受 true 或 false' \
+    "$TMP_DIR/invalid-memory-resource.err"
+if run_start_vm "$TMP_DIR/duplicate-cpu-resource.out" \
+        --cpu-isolate=true --cpu-isolate=false; then
+    fail 'duplicate CPU resource key was accepted'
+fi
+require_text '--cpu-isolate 只能指定一次' \
+    "$TMP_DIR/duplicate-cpu-resource.err"
+if run_start_vm "$TMP_DIR/duplicate-memory-resource.out" \
+        --memory-prealloc=false --memory-prealloc=true; then
+    fail 'duplicate memory resource key was accepted'
+fi
+require_text '--memory-prealloc 只能指定一次' \
+    "$TMP_DIR/duplicate-memory-resource.err"
 
 TEST_NATIVE_WAYLAND=1 run_start_vm "$WAYLAND_OUT" --no-dgame-preview-gpu
 require_text "模式=vgpu-sdl" "$WAYLAND_OUT"
@@ -532,7 +599,7 @@ unset TEST_VGPU_HOST_CONFIG
 # the explicit guest-cursor and native-Wayland SDL runs each exercise the same
 # four normal probes; Wayland disables GPU-first but retains the fb-shm object.
 QEMU_PROBE_COUNT=$(wc -l <"$TMP_DIR/qemu.trace")
-[[ "$QEMU_PROBE_COUNT" -eq 41 ]] \
+[[ "$QEMU_PROBE_COUNT" -eq 49 ]] \
     || fail "fake QEMU saw an unexpected invocation count: $QEMU_PROBE_COUNT"
 
 [[ -z "$(find "$VM_ROOT/control" -mindepth 1 -print -quit)" ]] \

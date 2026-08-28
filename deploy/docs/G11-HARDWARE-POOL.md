@@ -192,7 +192,7 @@ system/baseboard/chassis、DIMM、SSD、显示器、UUID 和 MAC 跨 VM 查重�
 
 ## 共享 CPU、22C/44T 与时钟
 
-`--no-cpu-isolate` 完全绕过 taskset、QMP pin、cpuset/cgroup 和隔离 helper。8 vCPU
+`--cpu-isolate=false` 完全绕过 taskset、QMP pin、cpuset/cgroup 和隔离 helper。8 vCPU
 是 Guest 的最大并行资源，不是永久占用 8 个宿主线程；空闲时调度资源可给宿主和
 其它 VM。它不等于无限算力，也不会直接修复 RTC/TSC。
 
@@ -205,7 +205,7 @@ system/baseboard/chassis、DIMM、SSD、显示器、UUID 和 MAC 跨 VM 查重�
 ```bash
 ./deploy/scripts/g11-performance.sh audit
 ./deploy/scripts/g11-performance.sh apply
-./deploy/scripts/start-vm.sh 101 --no-cpu-isolate
+./deploy/scripts/start-vm.sh 101 --cpu-isolate=false
 ```
 
 不会开启 testsigning/nointegritychecks，不改 Windows BCD，不安装测试签名或自签名

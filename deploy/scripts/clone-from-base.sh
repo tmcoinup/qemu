@@ -356,7 +356,7 @@ if [[ "$BASE_ATTESTATION_SCHEMA" == 7 ]]; then
         die "current clone finalizer does not pin the current Guest Lite manifest"
     jq -e '
         (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-        .schemaVersion == 1 and .profileVersion == "2.6.4"
+        .schemaVersion == 1 and .profileVersion == "2.6.7"
     ' "$CURRENT_GUEST_LITE_MANIFEST" >/dev/null ||
         die "current Guest Lite clone manifest is invalid"
 
@@ -709,12 +709,12 @@ cat <<EOF
   monitor:     ${MONITOR_SYNC_RESULT}
   guest:       independent generalized Windows identity
   portable:    C:\ProgramData\VMate\G11\VgpuPortable.exe
-  Guest Lite:  pinned 2.6.4 / MpsSvc Automatic/Running / clone fast path / Game Mode / Game DVR off / NVIDIA max performance / DNF High-on-launch / stale Temp cleaned / reviewed background processes stopped / audio muted / automatic
+  Guest Lite:  pinned 2.6.7 / MpsSvc Automatic/Running / clone fast path / Game Mode / Game DVR off / NVIDIA max performance / DNF High-on-launch / stale Temp cleaned / reviewed background processes stopped / audio muted / automatic
   system NVAPI: per-VM read-only ISO / ${SYSTEM_CONTRACT_ID}
   DLS:         dls.gvmates.com:443
 
 首次启动会自动跳过 OOBE、运行一次授权版 VgpuPortable.exe、应用经过内容校验的
-Guest Lite 2.6.4（母盘封装前必须手工关闭篡改防护）、安装该 VM
+Guest Lite 2.6.7（母盘封装前必须手工关闭篡改防护）、安装该 VM
 专属的系统 NVAPI/显示器投影并自动重启；重启后由 SYSTEM 自动验收
 GRID 538.33 / DEV_1E30 / Code 0 / Licensed / x86+x64 NVAPI，以及 MpsSvc
 Auto/Running/PID>0、BFE 保留运行、游戏模式/Game DVR、NVIDIA 最高性能、DNF High、

@@ -40,8 +40,11 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 ./deploy/scripts/refresh-g11-private-base.sh BASE_NAME [--check]
 ./deploy/scripts/report-vm-boot-timing.sh ID
 ./deploy/scripts/migrate-g11-layout.sh --check
-./deploy/scripts/vmctl.sh start ID
+./deploy/scripts/vmctl.sh start ID  # 省略布尔键：CPU 隔离与内存预分配均为 true
+./deploy/scripts/vmctl.sh start ID --cpu-isolate=false --memory-prealloc=false
+                                   # 共享 CPU + 宿主按需触页，Guest 身份不变
 ./deploy/scripts/vmctl.sh display ID preview-on
+./deploy/scripts/vmctl.sh wake ID
 ./deploy/scripts/vmctl.sh preview-capacity --instances 16 --rate 60
 ./deploy/scripts/vmctl.sh cdrom ID mount /absolute/file.iso
 ./deploy/scripts/vmctl.sh cdrom ID eject
@@ -67,12 +70,16 @@ ASRock 主板、4–5 个大牌内存和五品牌 SSD。完整复制粘贴教程
 `autorun.inf` 覆盖名称，也不创建或预分配宿主机镜像。它和任意 host 目录 U 盘均为
 只读 VVFAT/USB Mass Storage，不需要 Windows 额外驱动。详见
 [`../docs/G11-USB-DIRECTORY.md`](../docs/G11-USB-DIRECTORY.md)。
-`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.6.4；Defender、防火墙 profile、
+`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.6.7；Defender、防火墙 profile、
 系统/软件更新、OneDrive、资讯天气、通知、消费 App、默认静音、en-US/US 第一和
-Microsoft Pinyin 第二、游戏模式/Game DVR、高性能电源、NVIDIA 最高性能、DNF High
+Microsoft Pinyin 第二、游戏模式/Game DVR、高性能电源、所有已安装计划的屏幕关闭与
+自动睡眠“从不”、NVIDIA 最高性能、DNF High
 优先级和固定 Temp 旧文件清理的 VM1
 傻瓜验收与回滚见
 [`../docs/G11-GUEST-LITE.md`](../docs/G11-GUEST-LITE.md)。
+当前 G-11 冷启动会向 Windows 暴露 ACPI S3，因此“电源和睡眠”页同时出现“屏幕”和
+“睡眠”；自动睡眠保持“从不”。用户主动睡眠后若本地键鼠未恢复，执行
+`vmctl.sh wake ID`。驱动/母盘/离线磁盘流程仍必须完整关机。
 新版 `VgpuPortable.exe` 已在同一次双击中应用可回滚的登录启动优化。只有仍使用
 旧版 EXE 或支持人员需要独立诊断时，才运行 `guest-performance.sh ID mount`，详见
 [`../docs/G11-GUEST-PERFORMANCE.md`](../docs/G11-GUEST-PERFORMANCE.md)。
@@ -121,6 +128,7 @@ sudo ./deploy/install-vgpu-portable-to-base.sh --base-name "$BASE_NAME"
 ./deploy/scripts/vmctl.sh clone "$BASE_NAME" 11 --start
 ./deploy/scripts/vmctl.sh start 11
 ./deploy/scripts/vmctl.sh display 11 status
+./deploy/scripts/vmctl.sh wake 11       # 仅当 Windows 主动进入 S3 后使用
 ./deploy/scripts/vmctl.sh stop 11
 ./deploy/scripts/vmctl.sh repair-init 11  # 仅失败克隆：刷新用户态首启载荷与绑定 ISO
 ```

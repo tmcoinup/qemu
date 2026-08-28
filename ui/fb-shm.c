@@ -43,6 +43,7 @@
 #include "qom/object_interfaces.h"
 #include "system/system.h"
 #include "ui/console.h"
+#include "ui/input.h"
 #include "ui/fb-shm-gpu-sync.h"
 #include "ui/fb-shm-abi.h"
 #ifdef CONFIG_OPENGL
@@ -166,6 +167,13 @@ struct FbShmDisplay {
     uint32_t cur_src_w, cur_src_h;
     int32_t cur_roi_x, cur_roi_y;
     uint64_t frame_seq;
+    /* Publications whose pixels really changed; see FbShmHeader.content_seq. */
+    uint64_t content_seq;
+    /* Wall clock of the last real redraw, and the display keep-alive state. */
+    uint64_t content_change_ns;
+    uint64_t keepalive_next_ns;
+    uint32_t keepalive_streak;
+    bool keepalive;
     uint64_t shm_last_frame_ns;
     bool surface_present;
     /* Damage refreshes the cached CPU ROI; other ticks repeat it. */
@@ -2908,6 +2916,135 @@ static void fb_shm_expire_gpu_lease(FbShmDisplay *d)
 #endif
 }
 
+/*
+ * Advance FbShmHeader.content_seq when the guest actually redrew.
+ *
+ * @frame_seq counts publications and keeps ticking at the target rate while
+ * the picture is frozen (see fb_shm_commit_frame's !cpu_surface_dirty path),
+ * so it cannot answer "is the picture moving?".  The dirty flags set by
+ * dpy_gfx_update / dpy_gfx_switch can: they are only raised when the guest
+ * submitted damage.  Publishing that distinction lets a consumer tell a live
+ * 60 fps stream from a stalled guest display instead of guessing from pixels.
+ *
+ * Left at 0 while nothing has ever been drawn, which is exactly the value an
+ * older producer leaves behind -- consumers treat 0 as "unsupported".
+ */
+static void fb_shm_note_content_change(FbShmDisplay *d, uint64_t now_ns)
+{
+    d->content_change_ns = now_ns;
+    /* The picture moved, so whatever we did to wake it up worked. */
+    d->keepalive_streak = 0;
+    if (!d->hdr) {
+        return;
+    }
+    d->content_seq++;
+    qatomic_store_release(&d->hdr->content_seq, d->content_seq);
+}
+
+/*
+ * Display keep-alive: nudge a guest that stopped refreshing its output.
+ *
+ * After a long stretch without input the guest powers its display down (on
+ * Windows the idle power policy blanks the output and DWM stops composing).
+ * The guest keeps rendering -- an in-game frame counter happily climbs -- but
+ * the console the vGPU hands us stops changing, so the DisplaySurface compare
+ * finds zero dirty rows.  fb-shm keeps re-publishing the active slot at the
+ * configured cadence, so consumers see a perfectly healthy frame rate over a
+ * picture that is frozen on its last frame.
+ *
+ * For a consumer that merely watches, that is a stale image.  For one that
+ * drives decisions off the picture, it is worse: it keeps reading the same old
+ * frame as if it were live state.  Neither can fix this from the outside
+ * without reaching back into the guest, so close the loop here, where the
+ * damage state is known exactly rather than inferred from pixels.
+ *
+ * Scroll Lock is the injected key because neither the desktop nor a fullscreen
+ * application acts on it, while the guest still counts it as user input
+ * activity.  Timing is jittered so the keep-alive does not turn into a
+ * fixed-period input signature.
+ */
+#define FB_SHM_KEEPALIVE_IDLE_MS      10000
+#define FB_SHM_KEEPALIVE_COOLDOWN_MS  15000
+/* Jitter is +/- this share of the interval, in percent. */
+#define FB_SHM_KEEPALIVE_JITTER_PCT   20
+/* A real key press dwells for tens of milliseconds, never zero. */
+#define FB_SHM_KEEPALIVE_HOLD_MIN_MS  45
+#define FB_SHM_KEEPALIVE_HOLD_MAX_MS  110
+/* Repeated no-op wake-ups mean the freeze is not an idle blank any more. */
+#define FB_SHM_KEEPALIVE_ALERT_STREAK 3
+
+static uint64_t fb_shm_jittered_ns(uint32_t base_ms)
+{
+    uint32_t spread = base_ms * FB_SHM_KEEPALIVE_JITTER_PCT / 100;
+    int32_t offset = spread ? g_random_int_range(-(int32_t)spread,
+                                                 (int32_t)spread + 1) : 0;
+
+    return (uint64_t)((int64_t)base_ms + offset) * 1000000ULL;
+}
+
+static bool fb_shm_has_any_consumers(FbShmDisplay *d)
+{
+    return fb_shm_has_shm_consumers(d) || fb_shm_has_gpu_clients(d);
+}
+
+static void fb_shm_send_keepalive_key(void)
+{
+    uint32_t hold_ms = g_random_int_range(FB_SHM_KEEPALIVE_HOLD_MIN_MS,
+                                          FB_SHM_KEEPALIVE_HOLD_MAX_MS + 1);
+
+    /*
+     * The queued delay keeps press and release apart without blocking the
+     * main loop: the input layer drains the queue from its own timer.
+     */
+    qemu_input_event_send_key_qcode(NULL, Q_KEY_CODE_SCROLL_LOCK, true);
+    qemu_input_event_send_key_delay(hold_ms);
+    qemu_input_event_send_key_qcode(NULL, Q_KEY_CODE_SCROLL_LOCK, false);
+}
+
+static void fb_shm_maintain_keepalive(FbShmDisplay *d, uint64_t now_ns)
+{
+    uint64_t idle_ns;
+
+    if (!d->keepalive) {
+        return;
+    }
+    /*
+     * Never inject without having seen the guest redraw at least once.  Paths
+     * that do not feed this counter (gl_scanout passthrough) would otherwise
+     * look permanently idle and get poked forever; and right after startup
+     * "nothing drawn yet" is not the same as "stopped drawing".
+     */
+    if (!d->content_change_ns) {
+        return;
+    }
+    /* Nobody is looking, so there is no reason to disturb the guest. */
+    if (!fb_shm_has_any_consumers(d)) {
+        return;
+    }
+    if (now_ns < d->keepalive_next_ns) {
+        return;
+    }
+    idle_ns = now_ns - d->content_change_ns;
+    if (idle_ns < fb_shm_jittered_ns(FB_SHM_KEEPALIVE_IDLE_MS)) {
+        return;
+    }
+
+    fb_shm_send_keepalive_key();
+    d->keepalive_streak++;
+    d->keepalive_next_ns = now_ns +
+        fb_shm_jittered_ns(FB_SHM_KEEPALIVE_COOLDOWN_MS);
+
+    if (d->keepalive_streak == 1) {
+        info_report("fb-shm: id=%s guest display idle for %" PRIu64 "s; "
+                    "injected a keep-alive key", d->id,
+                    (uint64_t)(idle_ns / 1000000000ULL));
+    } else if (d->keepalive_streak == FB_SHM_KEEPALIVE_ALERT_STREAK) {
+        warn_report("fb-shm: id=%s picture still frozen after %u keep-alive "
+                    "keys; consumers are seeing a stale frame at the "
+                    "configured rate", d->id, d->keepalive_streak);
+    }
+}
+
 static void fb_shm_refresh(DisplayChangeListener *dcl)
 {
     FbShmDisplay *d = container_of(dcl, FbShmDisplay, dcl);
@@ -2940,6 +3077,17 @@ static void fb_shm_refresh(DisplayChangeListener *dcl)
     DisplaySurface *surface = qemu_console_surface(dcl->con);
     if (!surface || surface_is_placeholder(surface)) {
         return;
+    }
+    /*
+     * Sample the damage flags before either commit path clears them; both GPU
+     * and SHM consumers share one content counter, so a frame that reaches
+     * only one of them still counts as the guest having redrawn.
+     */
+    uint64_t refresh_ns = fb_shm_now_ns();
+    if (d->cpu_surface_dirty || d->cpu_surface_gpu_dirty) {
+        fb_shm_note_content_change(d, refresh_ns);
+    } else {
+        fb_shm_maintain_keepalive(d, refresh_ns);
     }
 #ifdef CONFIG_OPENGL
     if (fb_shm_commit_surface_gpu_frame(d, surface)) {
@@ -2980,6 +3128,7 @@ typedef struct FbShmConfig {
     uint32_t x, y, w, h;     /* ROI; 0 = track full surface             */
     uint32_t rate;           /* target Hz                               */
     bool blend_cursor;
+    bool keepalive;          /* wake a guest that stopped refreshing     */
 } FbShmConfig;
 
 static char *fb_shm_default_id(void)
@@ -3026,6 +3175,7 @@ static FbShmDisplay *fb_shm_create(const FbShmConfig *cfg, Error **errp)
     d->shm_target_fps = d->target_fps;
     d->gpu_target_fps = d->target_fps;
     d->blend_cursor = cfg->blend_cursor;
+    d->keepalive = cfg->keepalive;
     /* 首次 refresh 必须创建 mapping 并发布 bootstrap 帧。 */
     d->cpu_surface_dirty = true;
 
@@ -3104,6 +3254,7 @@ static void fb_shm_init(DisplayState *ds, DisplayOptions *opts)
         .h           = o->has_height ? o->height : 0,
         .rate        = o->has_rate   ? o->rate   : 0,
         .blend_cursor = o->has_cursor && o->cursor,
+        .keepalive   = !o->has_keepalive || o->keepalive,
     };
     Error *err = NULL;
     if (!fb_shm_create(&cfg, &err)) {
@@ -3143,6 +3294,9 @@ struct FbShmExport {
     uint32_t x, y, width, height;
     uint32_t rate;
     bool cursor;
+    /* Keep-alive defaults to on; @keepalive_set marks an explicit choice. */
+    bool keepalive;
+    bool keepalive_set;
     /* runtime */
     Notifier machine_done_notifier;
     bool deferred_pending;
@@ -3185,6 +3339,7 @@ static void fb_shm_export_machine_done(Notifier *n, void *unused)
         .h           = o->height,
         .rate        = o->rate,
         .blend_cursor = o->cursor,
+        .keepalive   = o->keepalive_set ? o->keepalive : true,
     };
     Error *err = NULL;
     o->display = fb_shm_create(&cfg, &err);
@@ -3260,6 +3415,25 @@ static void fb_shm_export_set_cursor(Object *obj, Visitor *v,
     visit_type_bool(v, name, &o->cursor, errp);
 }
 
+static void fb_shm_export_get_keepalive(Object *obj, Visitor *v,
+                                        const char *name, void *opaque,
+                                        Error **errp)
+{
+    FbShmExport *o = FB_SHM_EXPORT(obj);
+    bool value = o->keepalive_set ? o->keepalive : true;
+    visit_type_bool(v, name, &value, errp);
+}
+static void fb_shm_export_set_keepalive(Object *obj, Visitor *v,
+                                        const char *name, void *opaque,
+                                        Error **errp)
+{
+    FbShmExport *o = FB_SHM_EXPORT(obj);
+    if (!visit_type_bool(v, name, &o->keepalive, errp)) {
+        return;
+    }
+    o->keepalive_set = true;
+}
+
 static void fb_shm_export_class_init(ObjectClass *oc, const void *data)
 {
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
@@ -3286,6 +3460,9 @@ static void fb_shm_export_class_init(ObjectClass *oc, const void *data)
     object_class_property_add(oc, "cursor", "bool",
                               fb_shm_export_get_cursor,
                               fb_shm_export_set_cursor, NULL, NULL);
+    object_class_property_add(oc, "keepalive", "bool",
+                              fb_shm_export_get_keepalive,
+                              fb_shm_export_set_keepalive, NULL, NULL);
 }
 
 static const TypeInfo fb_shm_export_info = {

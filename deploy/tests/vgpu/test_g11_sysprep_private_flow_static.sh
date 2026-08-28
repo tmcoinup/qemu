@@ -99,7 +99,7 @@ PY
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.4" and
+    .schemaVersion == 1 and .profileVersion == "2.6.7" and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
         "G11-Guest-Lite.ps1", "README.txt"
@@ -253,6 +253,17 @@ grep -Fq "Name = 'InputMethodOverride'; Value = '0409:00000409'; Type = 'String'
 grep -Fq '[int]$state.SchemaVersion -ne 6' \
     <<<"$guest_lite_state_reader" ||
     fail "clone finalizer does not require the audio/language/NVIDIA/DNF rollback schema"
+grep -Fq 'Get-GuestLitePowerState' <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not measure every installed power plan"
+grep -Fq "PSObject.Properties['PowerSettings']" \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not require the all-plan rollback baseline"
+for power_setting in VIDEOIDLE STANDBYIDLE; do
+    grep -Fq "Name = '$power_setting'" "$FINALIZER" ||
+        fail "clone finalizer does not validate $power_setting"
+done
+grep -Fq 'idleTimeouts=display-and-sleep-never-all-plans' "$FINALIZER" ||
+    fail "clone finalizer does not require measured all-plan idle timeouts"
 grep -Fq '$GuestLiteEnglishInputTip' <<<"$guest_lite_state_reader" ||
     fail "clone finalizer does not verify en-US/US as the first input"
 grep -Fq '$GuestLitePinyinInputTip' <<<"$guest_lite_state_reader" ||

@@ -41,7 +41,7 @@ Status meanings:
 | Native local display | **Supported** | NVIDIA REGION to QEMU SDL/GTK. |
 | DGame local GPU preview | **Experimental; implemented** | SDL/GTK's existing DisplaySurface texture is ROI-blitted on the active display GPU and exported as DMA-BUF. RX570 is the current provider; RX550 follows the same generic amdgpu/EGL selection. Every VM independently falls back to SHM. |
 | DGame discovery | **Implemented** | Native starts expose `/tmp/qemu-stealth-N.{fb,qmp,mon}`, SDL title `win10-N`, and keep G-11 QMP identity `vmN`; old running VMs can hot-add preview. |
-| Host CPU isolation | **Experimental; implemented; required by default** | Launcher/QMP and mock-cgroup rollback tests pass. Missing Ubuntu packages/helper/sudoers are installed automatically before launch; target-host cgroup v2 partition behavior still requires acceptance. `--cpu-isolate-auto` is an explicit opt-down. |
+| Host CPU isolation | **Experimental; implemented; required by default** | Launcher/QMP and mock-cgroup rollback tests pass. Missing Ubuntu packages/helper/sudoers are installed automatically before launch; target-host cgroup v2 partition behavior still requires acceptance. The omitted default is `--cpu-isolate=true`; `--cpu-isolate=false` explicitly disables it. |
 | Fixed ROI capture | **Experimental; implemented** | The TCG-to-SHM-to-libx264 end-to-end test passes, including a runtime ROI change.  A real R535 vGPU dynamic-frame soak remains outstanding. |
 | Network video output | **Experimental; implemented** | Explicit destinations, lifecycle and validation are tested; a production ingest/TLS/authentication soak is not yet recorded.  The launcher never creates a listener. |
 | Dirty-region local display updates | **Supported** | REGION row comparison reduces local GL uploads and presents. |
@@ -55,6 +55,11 @@ Status meanings:
 | Audio in the `fb-shm` stream | **Unsupported** | The current sidecar transports video only. |
 | Remote input/session control | **Unsupported in the network streamer** | Native SDL/GTK input and the legacy local ivshmem viewer remain separate paths. |
 | Multi-region/edge orchestration | **Unsupported** | No CDN routing, ABR controller, origin/edge failover, or session scheduler is included. |
+
+The resource-policy CLI has exactly two boolean keys:
+`--cpu-isolate=true|false` and `--memory-prealloc=true|false`. Omitting either
+key means `true`; shared CPU scheduling plus demand-backed RAM therefore uses
+`--cpu-isolate=false --memory-prealloc=false`.
 
 ## Zero-copy terminology
 

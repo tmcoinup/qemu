@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runtime display-channel control for a running G-11 VM.
+# Runtime display-channel and ACPI wake control for a running G-11 VM.
 # Uses the per-instance QMP socket and never stores credentials.
 set -euo pipefail
 umask 077
@@ -22,6 +22,7 @@ Actions:
   window-only     show SDL first, then pause fb-shm when it exists
   preview-on      hot-add the independent DGame fb-shm preview endpoint
   preview-off     hot-remove only the DGame preview endpoint
+  wake             wake an explicitly sleeping ACPI S3 guest through QMP
 
 V-11 compatibility aliases: sdl-hide, sdl-show, fb-pause, fb-resume,
 sdl-only, fb-on, fb-off.  Window actions target G-11's default SDL backend;
@@ -109,7 +110,7 @@ case "$ACTION" in
 esac
 case "$ACTION" in
     status|window-hide|window-show|stream-pause|stream-resume|stream-only|\
-        window-only|preview-on|preview-off) ;;
+        window-only|preview-on|preview-off|wake) ;;
     *) echo "未知动作: $ACTION" >&2; usage >&2; exit 2 ;;
 esac
 
@@ -301,6 +302,18 @@ try:
             print("OK: DGame preview disabled")
         else:
             print("OK: DGame preview already absent")
+    elif action == "wake":
+        state = command("query-status") or {}
+        status = state.get("status", "unknown")
+        if status == "suspended":
+            command("system_wakeup")
+            print("OK: ACPI S3 wake requested")
+        elif status == "running":
+            print("OK: VM is already running")
+        else:
+            raise QMPError(
+                f"VM is not in a wakeable state: {status}"
+            )
 except (QMPError, OSError, ValueError, json.JSONDecodeError) as exc:
     print(f"显示控制失败: {exc}", file=sys.stderr)
     raise SystemExit(1)

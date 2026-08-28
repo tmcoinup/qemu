@@ -650,16 +650,21 @@
 # @cursor: blend the guest cursor onto the published frame
 #     (default off; reserved for future use).
 #
+# @keepalive: inject a harmless key when the guest stops refreshing
+#     its display output, so consumers stop receiving the same frozen
+#     frame at the configured rate (default on).
+#
 # Since: 9.2
 ##
 { 'struct': 'FbShmProperties',
-  'data': { '*path'   : 'str',
-            '*x'      : 'uint32',
-            '*y'      : 'uint32',
-            '*width'  : 'uint32',
-            '*height' : 'uint32',
-            '*rate'   : 'uint32',
-            '*cursor' : 'bool' },
+  'data': { '*path'      : 'str',
+            '*x'         : 'uint32',
+            '*y'         : 'uint32',
+            '*width'     : 'uint32',
+            '*height'    : 'uint32',
+            '*rate'      : 'uint32',
+            '*cursor'    : 'bool',
+            '*keepalive' : 'bool' },
   'if': { 'any': [ 'CONFIG_LINUX', 'CONFIG_WIN32' ] } }
 
 ##

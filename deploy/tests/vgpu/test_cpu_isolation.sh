@@ -260,7 +260,7 @@ CPU_ISOLATION=off
 cpu_isolation_normalize_mode || fail "explicit off mode was rejected"
 [[ "$CPU_ISOLATION" == off ]] || fail "explicit off mode was not preserved"
 
-# --no-cpu-isolate must be a real fast path, not a cosmetic status string.
+# --cpu-isolate=false must be a real fast path, not a cosmetic status string.
 # In off mode the launcher neither prepares the helper nor starts the QMP
 # pinner, creates isolation state, invokes taskset/cgroup apply, or consumes
 # --svc-cpus.  OOM protection is a separate policy tested elsewhere.
@@ -465,8 +465,8 @@ unset CPU_ISOLATION_SYS_CPU_ROOT CPU_ISOLATION_CGROUP_ROOT QEMU_SERVICE_CPUS
 
 grep -Fq 'source "$here/lib/cpu-isolation.sh"' "$START_VM" \
     || fail "start-vm does not load CPU isolation"
-grep -Fq -- '--no-cpu-isolate) CPU_ISOLATION=off; shift ;;' "$START_VM" \
-    || fail "start-vm no longer maps --no-cpu-isolate to off"
+grep -Fq -- 'false) CPU_ISOLATION=off ;;' "$START_VM" \
+    || fail "start-vm no longer maps --cpu-isolate=false to off"
 grep -Fq 'QEMU_SERVICE_CPUS="${QEMU_SERVICE_CPUS:-0}"' "$START_VM" \
     || fail "start-vm default service CPU count is not zero"
 grep -Fq '[[ "$CPU_ISOLATION" == required ]] && QEMU_CMD+=( -S )' "$START_VM" \

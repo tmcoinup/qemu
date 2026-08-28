@@ -20,8 +20,8 @@ if grep -Eq 'vm-capacity|g11_capacity|G11_CAPACITY|CPU capacity:' "$start_vm"; t
     fail 'start-vm still contains a shared-mode capacity scan or warning'
 fi
 
-grep -Fq -- '--no-cpu-isolate) CPU_ISOLATION=off; shift ;;' "$start_vm" || \
-    fail 'start-vm no longer maps --no-cpu-isolate to shared scheduling'
+grep -Fq -- 'false) CPU_ISOLATION=off ;;' "$start_vm" || \
+    fail 'start-vm no longer maps --cpu-isolate=false to shared scheduling'
 grep -Fq '[[ "${CPU_ISOLATION:-required}" != off ]] || return 0' "$cpu_isolation" || \
     fail 'shared scheduling no longer bypasses CPU isolation setup'
 

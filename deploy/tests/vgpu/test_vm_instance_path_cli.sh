@@ -207,19 +207,19 @@ assert_selected_bundle() {
 
 run_start "$TMP_DIR/exact.out" "$TMP_DIR/exact.err" \
     --vm-dir "$EXACT_BUNDLE" --dry-run --no-gpu --no-tpm \
-    --no-monitor-sync --no-cpu-isolate
+    --no-monitor-sync --cpu-isolate=false
 assert_selected_bundle "$EXACT_BUNDLE" \
     "$TMP_DIR/exact.out" "$TMP_DIR/exact.err" "--vm-dir"
 
 run_start "$TMP_DIR/instances.out" "$TMP_DIR/instances.err" \
     --instances-dir "$INSTANCES_PARENT" --dry-run --no-gpu --no-tpm \
-    --no-monitor-sync --no-cpu-isolate
+    --no-monitor-sync --cpu-isolate=false
 assert_selected_bundle "$INSTANCES_BUNDLE" \
     "$TMP_DIR/instances.out" "$TMP_DIR/instances.err" "--instances-dir"
 
 run_start "$TMP_DIR/vms.out" "$TMP_DIR/vms.err" \
     --vms-dir "$VMS_ROOT" --dry-run --no-gpu --no-tpm \
-    --no-monitor-sync --no-cpu-isolate
+    --no-monitor-sync --cpu-isolate=false
 assert_selected_bundle "$VMS_BUNDLE" \
     "$TMP_DIR/vms.out" "$TMP_DIR/vms.err" "--vms-dir"
 require_text "VM_ROOT=$VMS_ROOT" <(

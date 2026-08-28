@@ -36,6 +36,9 @@ G11_HOST_PERFORMANCE=required ./deploy/scripts/start-vm.sh VM编号
 
 ## 实际改变了什么
 
+资源策略 CLI 只接受 `--cpu-isolate=true|false` 和
+`--memory-prealloc=true|false`；省略两个键时均默认为 `true`。
+
 - CPU：每个 cpufreq policy 的最低/最高值恢复为硬件 `cpuinfo_min/max_freq`，选择
   `schedutil`、`ondemand` 或 Intel P-State 的动态 governor，并开启 turbo/boost。
   负载低时仍可降频，负载到来时可以升到硬件上限；绝不按来宾 CPU 的标称频率给
@@ -46,13 +49,16 @@ G11_HOST_PERFORMANCE=required ./deploy/scripts/start-vm.sh VM编号
 - RTC：默认改为与 V-11 相同的
   `-rtc base=localtime,clock=vm,driftfix=slew`，PIT 保持 `delay`，减少宿主 wall clock
   与来宾 TSC 两条时基在调度抖动时产生的同步告警。
-- 内存：继续使用 `memory-backend-memfd,share=on,prealloc=on`，并显式
-  `merge=off`，避免 KSM 合并/COW 抖动。SPD 中的 DDR3-1600/1866 是型号身份，不是
-  带宽限速；来宾实际使用宿主原生内存带宽。THP 使用 `madvise`，同步 defrag 关闭。
+- 内存：默认继续使用 `memory-backend-memfd,share=on,prealloc=on`，也可显式传
+  `--memory-prealloc=false` 改成 `prealloc=off`；两者都保持 `merge=off`、Guest 固定容量
+  和相同 DIMM/SMBIOS 身份。SPD 中的 DDR3-1600/1866 是型号身份，不是带宽限速；
+  来宾实际使用宿主原生内存带宽。按需模式说明见
+  [`G11-MEMORY-ON-DEMAND.md`](G11-MEMORY-ON-DEMAND.md)。THP 使用 `madvise`，同步
+  defrag 关闭。
 - I/O：NVMe 有 `none` 调度器时优先使用；磁盘仍由启动器实测选择
   `io_uring` / native AIO / threads，不强塞不适合 qcow2 的 IOThread。
 
-`--no-cpu-isolate` 和 `--svc-cpus 4` 对本次问题作用不大是符合预期的：前者只改变
+`--cpu-isolate=false` 和 `--svc-cpus 4` 对本次问题作用不大是符合预期的：前者只改变
 vCPU 是否独占宿主逻辑核，后者只给 QEMU 主循环/显示/I/O 辅助线程留核；两者都不会
 改变 RTC/TSC 的时间基准，也不会把 2C4T 来宾变成 4C8T。
 

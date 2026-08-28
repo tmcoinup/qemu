@@ -148,7 +148,7 @@ env -i \
     MEM_GUARD=0 \
     REPAIR_DISPLAY_VARS=off \
     "$START_VM" "$VM_ID" --dry-run --no-gpu --no-tpm \
-    --no-monitor-sync --no-cpu-isolate \
+    --no-monitor-sync --cpu-isolate=false \
     >"$START_OUT" 2>"$START_ERR"
 
 require_text \

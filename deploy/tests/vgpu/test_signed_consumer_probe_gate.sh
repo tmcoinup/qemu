@@ -172,7 +172,7 @@ run_probe() {
         VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
         REPAIR_DISPLAY_VARS=off \
         "$PROBE" "$VM_ID" --stage "$stage" --vms-dir "$VM_ROOT" \
-            --dry-run --no-tpm --no-cpu-isolate \
+            --dry-run --no-tpm --cpu-isolate=false \
             >"$output" 2>"$error"; then
         if (( report_failure )); then
             sed -n '1,240p' "$error" >&2

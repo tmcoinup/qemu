@@ -8,7 +8,7 @@
 
 如果诊断同时显示旧的 `schemaVersion` 或旧的 `guestLite.profileVersion`，说明克隆时
 母盘内嵌的首启脚本早于当前宿主验收规则。例如旧克隆可能写出 schema 3 / Guest Lite
-2.5.2，而当前流程要求 schema 4 / Guest Lite 2.6.4。这不是授权、BCD 或驱动签名问题。
+2.5.2，而当前流程要求 schema 4 / Guest Lite 2.6.7。这不是授权、BCD 或驱动签名问题。
 
 ## 一、先修复已经失败的克隆
 
@@ -26,7 +26,7 @@ sudo ./deploy/scripts/repair-clone-init.sh 1
 1. 验证 VM 仍处于 `.g11-init-required` 等待状态，并锁住停止的磁盘；
 2. 生成当前 VM UUID/GPU/显示器绑定的系统 NVAPI 只读 ISO；
 3. 仅离线替换 Windows 中的当前 `Finalize-Clone.ps1`、桌面 Retry 和 Guest Lite
-   2.6.4 用户态载荷；
+   2.6.7 用户态载荷；
 4. 删除旧的完成/错误标记，让新 finalizer 重新生成 schema 4 回执。
 
 它保留已有的 Licensed VgpuPortable 结果、Windows 身份、驱动和私有母盘。它不会运行

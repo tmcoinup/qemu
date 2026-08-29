@@ -92,6 +92,15 @@ typedef struct FbShmGlPbo {
 
 /* Compile-time guards on the wire format. */
 QEMU_BUILD_BUG_ON(sizeof(FbShmHeader) > FB_SHM_HEADER_SIZE);
+/*
+ * 消费端（Rust/Python/C）按固定偏移逐字段解析这份 header，编译器插入的任何
+ * padding 都会让它们从某个字段开始整体读错，而且读到的仍是"合法"的数字——
+ * 没有 magic 能提示错位。尾部追加字段时最容易踩到，所以把两个关键锚点钉死：
+ * content_seq 是旧尾部的起点，req_roi_x 是新追加区的起点。
+ */
+QEMU_BUILD_BUG_ON(offsetof(FbShmHeader, content_seq) != 128);
+QEMU_BUILD_BUG_ON(offsetof(FbShmHeader, req_roi_x) != 136);
+QEMU_BUILD_BUG_ON(offsetof(FbShmHeader, req_roi_h) != 148);
 QEMU_BUILD_BUG_ON(FB_SHM_BUF_COUNT < 2);
 QEMU_BUILD_BUG_ON(sizeof(FbShmGpuFrameV1) != 336);
 QEMU_BUILD_BUG_ON(sizeof(FbShmGpuFrame) != 344);
@@ -150,6 +159,11 @@ struct FbShmDisplay {
     char *sock_path;
     uint32_t cfg_x, cfg_y;
     uint32_t cfg_w, cfg_h;       /* 0 means "track source dim" */
+    /*
+     * 当前请求 ROI 是否正被钳制。钳制判定每帧都会跑，但告警只在状态跃迁时
+     * 发一次，既不会刷屏，也不会让「ROI 已经恢复」这一事实无人可见。
+     */
+    bool roi_clamped;
     uint32_t target_fps;         /* effective DCL tick rate       */
     uint32_t shm_target_fps;     /* SHM/CPU readback publish rate */
     uint32_t gpu_target_fps;     /* GPU metadata publish rate     */
@@ -296,15 +310,68 @@ static void fb_shm_resolve_roi(FbShmDisplay *d, uint32_t sw, uint32_t sh,
 {
     uint32_t rx = d->cfg_x;
     uint32_t ry = d->cfg_y;
-    uint32_t rw = d->cfg_w ? d->cfg_w : sw;
-    uint32_t rh = d->cfg_h ? d->cfg_h : sh;
+    uint32_t req_w = d->cfg_w ? d->cfg_w : sw;
+    uint32_t req_h = d->cfg_h ? d->cfg_h : sh;
+    uint32_t rw = req_w;
+    uint32_t rh = req_h;
+    bool clamped = false;
 
-    if (rx >= sw) rx = sw ? sw - 1 : 0;
-    if (ry >= sh) ry = sh ? sh - 1 : 0;
-    if (rx + rw > sw) rw = sw - rx;
-    if (ry + rh > sh) rh = sh - ry;
-    if (!rw) rw = 1;
-    if (!rh) rh = 1;
+    if (rx >= sw) {
+        rx = sw ? sw - 1 : 0;
+        clamped = true;
+    }
+    if (ry >= sh) {
+        ry = sh ? sh - 1 : 0;
+        clamped = true;
+    }
+    if ((uint64_t)rx + rw > sw) {
+        rw = sw - rx;
+        clamped = true;
+    }
+    if ((uint64_t)ry + rh > sh) {
+        rh = sh - ry;
+        clamped = true;
+    }
+    if (!rw) {
+        rw = 1;
+        clamped = true;
+    }
+    if (!rh) {
+        rh = 1;
+        clamped = true;
+    }
+
+    /*
+     * 静默钳制是一个真实的线上故障源：消费者请求 1360,2150 791x640，而 guest
+     * 桌面只有 1280x720，producer 会把它夹成 1279,719 1x1 并照常发帧，SET_ROI
+     * 也回 OK。消费者只看到「header 和我请求的对不上」，这与「ROI 被别的连接
+     * 抢占」完全同形，于是它每 250ms 重发一次同一个越界 SET_ROI，永远等不到
+     * 正确画面，上层 OCR 一路报「原始推流帧为空」。
+     *
+     * 因此钳制必须说出来，并且明说重发无效、需要重新定位窗口。告警只在钳制
+     * 状态跃迁时发一次：判定每帧都跑，逐帧告警会淹没日志。显示尺寸尚未建立
+     * （sw/sh 为 0）时不判定——那只是启动过渡，不是配置错误。
+     */
+    if (sw && sh) {
+        if (clamped != d->roi_clamped) {
+            d->roi_clamped = clamped;
+            if (clamped) {
+                warn_report("fb-shm: requested ROI %ux%u@%u,%u does not fit the "
+                            "%ux%u guest display; clamped to %ux%u@%d,%d. "
+                            "Re-sending the same SET_ROI cannot help - the "
+                            "consumer must re-resolve its window rectangle",
+                            req_w, req_h, d->cfg_x, d->cfg_y, sw, sh,
+                            rw, rh, (int32_t)rx, (int32_t)ry);
+            } else {
+                info_report("fb-shm: requested ROI %ux%u@%u,%u fits the %ux%u "
+                            "guest display again", req_w, req_h,
+                            d->cfg_x, d->cfg_y, sw, sh);
+            }
+        }
+    } else if (d->roi_clamped) {
+        /* 显示尺寸消失只说明 guest 正在切模式，旧的钳制结论不再有效。 */
+        d->roi_clamped = false;
+    }
 
     *out_x = (int32_t)rx;
     *out_y = (int32_t)ry;
@@ -763,6 +830,14 @@ static int fb_shm_apply_geometry(FbShmDisplay *d, uint32_t w, uint32_t h,
     hdr->src_height = sh;
     hdr->roi_x = roi_x;
     hdr->roi_y = roi_y;
+    /*
+     * 未钳制的请求值必须与生效值一起发布，消费者才能无歧义地区分
+     * 「区域被抢占」（重发 SET_ROI 有效）和「请求越界」（必须重新定位窗口）。
+     */
+    hdr->req_roi_x = (int32_t)d->cfg_x;
+    hdr->req_roi_y = (int32_t)d->cfg_y;
+    hdr->req_roi_w = d->cfg_w ? d->cfg_w : sw;
+    hdr->req_roi_h = d->cfg_h ? d->cfg_h : sh;
     hdr->damage_x = 0;
     hdr->damage_y = 0;
     hdr->damage_w = (int32_t)w;

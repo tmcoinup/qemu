@@ -275,6 +275,35 @@ typedef struct FbShmHeader {
      * own content comparison rather than concluding the picture is frozen.
      */
     uint64_t content_seq;
+
+    /* --- requested ROI (appended; older producers leave it 0) ----- */
+    /*
+     * The ROI the consumer last asked for via SET_ROI, *before* clamping.
+     *
+     * @roi_x / @roi_y / @width / @height describe what the producer actually
+     * publishes.  When the request does not fit the guest display the producer
+     * silently clamps it to the visible edge -- a request of 1360,2150 791x640
+     * against a 1280x720 desktop becomes 1279,719 1x1 -- and SET_ROI still
+     * acks OK.  A consumer comparing only the published ROI against its own
+     * request cannot tell that case apart from "another connection stole the
+     * source region", so it keeps re-sending the very same out-of-range
+     * SET_ROI and never receives a usable frame.
+     *
+     * Exposing the request verbatim makes the distinction unambiguous:
+     * req_* == published ROI means the region is honoured; req_* differing
+     * from the published ROI means the request was clamped and the consumer
+     * must re-resolve its window rectangle instead of retrying.
+     *
+     * Compatibility: appended inside the reserved tail of the 256-byte header,
+     * so @header_size is unchanged.  Producers that do not maintain these
+     * fields leave them at 0; a consumer must treat an all-zero @req_roi_w /
+     * @req_roi_h as "not supported" and fall back to comparing the published
+     * ROI against the guest display size.
+     */
+    int32_t  req_roi_x;
+    int32_t  req_roi_y;
+    uint32_t req_roi_w;
+    uint32_t req_roi_h;
 } FbShmHeader;
 
 #endif /* QEMU_UI_FB_SHM_ABI_H */

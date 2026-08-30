@@ -259,12 +259,12 @@ infer_existing_vgpu_host_tier() {
     printf '%s\n' "$seen"
 }
 
-# Resolve the one physical-GPU tier for both VM creation and the management
-# TSV.  Publishing the active tier through the existing AUTO_RANDOM column
-# keeps VMate's eight-column protocol backward compatible: a 2 GiB host marks
-# only the 12 production rows, while a 1 GiB host marks only four Maxwell rows.
+# Resolve the physical-GPU framebuffer policy for both VM creation and the
+# management TSV.  The return value is 1024/2048 for equal-size mode or
+# "mixed" for a V100/R580 host that has published both reviewed mappings.
+# AUTO_RANDOM stays an eight-column backward-compatible flag.
 resolve_vgpu_host_tier() {
-    local quiet=${1:-0} config_was_set=0 config tier inferred_tier infer_rc
+    local quiet=${1:-0} config_was_set=0 config mode tier inferred_tier infer_rc
     local config_rc=0
 
     if [[ -v VGPU_HOST_CONFIG ]]; then
@@ -274,7 +274,8 @@ resolve_vgpu_host_tier() {
         config=$here/host/vgpu-host.conf
     fi
     if vgpu_host_config_load "$config" '[create-vm]' \
-            VGPU_HOST_FB_TIER_MB VGPU_HOST_VRAM_MB; then
+            VGPU_HOST_FB_MODE VGPU_HOST_FB_TIER_MB VGPU_HOST_VRAM_MB \
+            VGPU_RESOURCE_PROFILE_1024 VGPU_RESOURCE_PROFILE_2048; then
         config_rc=0
     else
         config_rc=$?
@@ -286,6 +287,14 @@ resolve_vgpu_host_tier() {
             return 1
         fi
     fi
+    mode=${VGPU_HOST_FB_MODE:-equal}
+    case "$mode" in
+        equal|mixed) ;;
+        *)
+            echo "VGPU_HOST_FB_MODE 必须是 equal 或 mixed: $mode" >&2
+            return 2
+            ;;
+    esac
     if [[ -n "${VGPU_HOST_FB_TIER_MB:-}" &&
           -n "${VGPU_HOST_VRAM_MB:-}" &&
           "$VGPU_HOST_FB_TIER_MB" != "$VGPU_HOST_VRAM_MB" ]]; then
@@ -293,6 +302,19 @@ resolve_vgpu_host_tier() {
         return 2
     fi
     tier=${VGPU_HOST_FB_TIER_MB:-${VGPU_HOST_VRAM_MB:-}}
+    if [[ "$mode" == mixed ]]; then
+        if [[ -n "$tier" ]]; then
+            echo 'mixed-size 配置不能同时声明 VGPU_HOST_FB_TIER_MB/VGPU_HOST_VRAM_MB' >&2
+            return 2
+        fi
+        if [[ -z "${VGPU_RESOURCE_PROFILE_1024:-}" ||
+              -z "${VGPU_RESOURCE_PROFILE_2048:-}" ]]; then
+            echo 'mixed-size 配置必须同时声明 1024/2048MB resource profile' >&2
+            return 2
+        fi
+        printf '%s\n' mixed
+        return 0
+    fi
     if [[ -z "$tier" ]]; then
         if inferred_tier=$(infer_existing_vgpu_host_tier); then
             tier=$inferred_tier
@@ -326,8 +348,8 @@ if [[ -n "$LIST_ACTION" ]]; then
         ssd) ssd_profile_print_catalog ;;
         gpu) vgpu_profile_print_catalog ;;
         gpu-tsv)
-            VGPU_CATALOG_HOST_TIER=$(resolve_vgpu_host_tier 1) || exit $?
-            vgpu_profile_print_tsv_catalog "$VGPU_CATALOG_HOST_TIER"
+            VGPU_CATALOG_HOST_SELECTOR=$(resolve_vgpu_host_tier 1) || exit $?
+            vgpu_profile_print_tsv_catalog "$VGPU_CATALOG_HOST_SELECTOR"
             ;;
         monitor) monitor_create_pool_print_catalog ;;
         input) input_profile_print_catalog active all ;;
@@ -339,12 +361,18 @@ if [[ -n "$LIST_ACTION" ]]; then
     exit 0
 fi
 
-# The framebuffer tier is a host/physical-GPU policy, not a per-account
-# random choice.  Prefer an explicit gitignored host config.  For a pre-policy
-# installation, infer one unambiguous tier from existing immutable vm.conf
-# files; an empty pool starts on the production 2 GiB default.  A mixed legacy
-# pool cannot be guessed safely and must be reconciled by the operator.
-VGPU_HOST_FB_TIER_MB=$(resolve_vgpu_host_tier) || exit $?
+# Prefer an explicit gitignored host config.  Equal-size legacy hosts infer one
+# unambiguous tier from existing vm.conf files and otherwise default to 2 GiB.
+# Mixed-size is never inferred: it is accepted only from an explicit config
+# that publishes both mappings.
+VGPU_HOST_FB_POLICY=$(resolve_vgpu_host_tier) || exit $?
+if [[ "$VGPU_HOST_FB_POLICY" == mixed ]]; then
+    VGPU_HOST_FB_MODE=mixed
+    VGPU_HOST_FB_TIER_MB=
+else
+    VGPU_HOST_FB_MODE=equal
+    VGPU_HOST_FB_TIER_MB=$VGPU_HOST_FB_POLICY
+fi
 
 if (( GPU_PROFILE_EXPLICIT && GPU_VRAM_EXPLICIT )); then
     echo "--gpu-profile 与 --gpu-vram 不能同时使用" >&2
@@ -984,13 +1012,16 @@ fi
 
 if [[ -z "$GPU_PROFILE_REQUEST" ]]; then
     if [[ -n "$GPU_VRAM_MB_REQUEST" ]]; then
-        [[ "$GPU_VRAM_MB_REQUEST" == "$VGPU_HOST_FB_TIER_MB" ]] || {
+        if [[ "$VGPU_HOST_FB_MODE" == equal &&
+              "$GPU_VRAM_MB_REQUEST" != "$VGPU_HOST_FB_TIER_MB" ]]; then
             echo "请求 ${GPU_VRAM_MB_REQUEST}MB 与宿主固定档 ${VGPU_HOST_FB_TIER_MB}MB 冲突" >&2
             exit 2
-        }
-        vgpu_profile_pick_random_vram "$VGPU_HOST_FB_TIER_MB"
+        fi
+        vgpu_profile_pick_random_vram "$GPU_VRAM_MB_REQUEST"
     else
-        vgpu_profile_pick_random_vram "$VGPU_HOST_FB_TIER_MB"
+        # mixed-size 允许显式选择两档，但保持原生产默认随机池为 2 GiB。
+        vgpu_profile_pick_random_vram \
+            "${VGPU_HOST_FB_TIER_MB:-2048}"
     fi
     GPU_PROFILE_REQUEST=$GPU_PROFILE
 else
@@ -1002,7 +1033,8 @@ if vgpu_profile_is_legacy "$GPU_PROFILE"; then
         exit 2
     fi
 fi
-if [[ "$GPU_VRAM_MB" != "$VGPU_HOST_FB_TIER_MB" ]]; then
+if [[ "$VGPU_HOST_FB_MODE" == equal &&
+      "$GPU_VRAM_MB" != "$VGPU_HOST_FB_TIER_MB" ]]; then
     echo "GPU profile $GPU_PROFILE/${GPU_VRAM_MB}MB 与宿主固定档 ${VGPU_HOST_FB_TIER_MB}MB 冲突" >&2
     echo "先关停该物理 GPU 上全部 VM，再用 configure-g11-vgpu-host.sh 统一切档" >&2
     exit 2

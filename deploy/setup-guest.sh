@@ -44,11 +44,16 @@ source ./lib/vgpu-profiles.sh
 source ./lib/monitor-profiles.sh
 # shellcheck source=lib/vm-storage.sh
 source ./lib/vm-storage.sh
+# shellcheck source=lib/g11-python-runtime.sh
+source ./lib/g11-python-runtime.sh
+G11_PYTHON_RUNTIME_INSTALLER="$PWD/host/install-g11-python-runtime.sh"
 monitor_profiles_validate
 vm_storage_init
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
+GUEST_USER=${GUEST_USER:-Administrator}
+GUEST_PASS=${GUEST_PASS:-}
 GPU_NAME_OVERRIDE="${GPU_NAME:-}"
 MONITOR_PROFILE_OVERRIDE="${MONITOR_BRAND:-}"
 INPUT_BRAND="${INPUT_BRAND:-rapoo-v303}"
@@ -89,6 +94,13 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+(( ${#GUEST_PASS} >= 6 && ${#GUEST_PASS} <= 64 )) &&
+        [[ "$GUEST_PASS" != *$'\r'* && "$GUEST_PASS" != *$'\n'* ]] || {
+    echo "GUEST_PASS 必须通过安全运行时环境提供（6..64 字符）" >&2
+    exit 2
+}
+WINRM_PYTHON=$(g11_python_resolve pypsrp) || exit 1
 
 # 新建 VM 的型号、PCI ID 和 advertised clocks 都从同一份 vm.conf 读取。
 # 老配置缺少规格字段时按 GPU_PROFILE 从 catalog 回填；不重新随机。
@@ -239,7 +251,8 @@ if [[ $SKIP_STEALTH -eq 0 ]]; then
     CATALOG_ASSET_SHA256=$(sha256sum guest/vgpu-profile-catalog.json | awk '{print toupper($1)}')
     CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
     INSTALLER_SHA256=$(sha256sum guest/install-nvapi-shim.ps1 | awk '{print toupper($1)}')
-    python3 - "$IP" "$HOST_IP" "$GPU_PROFILE" "$GPU_NAME" \
+    env -u GUEST_PASS "$WINRM_PYTHON" - "$IP" "$GUEST_USER" "$HOST_IP" \
+        "$GPU_PROFILE" "$GPU_NAME" \
         "$((GPU_PCI_VID))" "$((GPU_PCI_DID))" \
         "$((GPU_SUB_VID))" "$((GPU_SUB_DID))" "$((GPU_REV))" \
         "$GPU_CORE_MHZ" "$GPU_BOOST_MHZ" "$GPU_MEMORY_MHZ" \
@@ -252,18 +265,20 @@ if [[ $SKIP_STEALTH -eq 0 ]]; then
         "$GPU_VBIOS_VERSION" "$SHIM64_SHA256" "$SHIM32_SHA256" \
         "$PATCH_SHA256" "$CATALOG_ASSET_SHA256" "$CATALOG_SHA256" \
         "$INSTALLER_SHA256" \
-        "$((1 - SKIP_NVAPI_SHIM))" <<'PYEOF'
+        "$((1 - SKIP_NVAPI_SHIM))" 3<<<"$GUEST_PASS" <<'PYEOF'
 import sys
 from pypsrp.client import Client
 (
-    ip, host, gpu_profile, gpu, pci_vendor, pci_device, pci_subvendor, pci_subdevice,
+    ip, user, host, gpu_profile, gpu, pci_vendor, pci_device, pci_subvendor, pci_subdevice,
     pci_revision, core, boost, memory, bus, bandwidth, vram,
     memory_type, memory_maker, cuda_cores, shader_subpipes, rop_count, tmu_count,
     architecture, implementation, chip_revision, pcie_width, vbios_version,
     shim64_sha, shim32_sha, patch_sha, catalog_asset_sha, catalog_sha,
     installer_sha, install_shim,
-) = sys.argv[1:34]
-c = Client(ip, username='Administrator', password='123456', ssl=False, auth='ntlm')
+) = sys.argv[1:35]
+with open(3, 'r', encoding='utf-8') as stream:
+    password = stream.read().removesuffix('\n')
+c = Client(ip, username=user, password=password, ssl=False, auth='ntlm')
 ps = fr'''
 $ProgressPreference = 'SilentlyContinue'
 Invoke-WebRequest 'http://{host}:8080/patch-grid-strings.ps1' `
@@ -365,11 +380,14 @@ if [[ $SKIP_MONITOR -eq 0 ]]; then
         IP="$IP_OVERRIDE"
     fi
 
-    python3 - "$IP" "$HOST_IP" "$MONITOR_PROFILE" "$MONITOR_SERIAL" <<'PYEOF'
+    env -u GUEST_PASS "$WINRM_PYTHON" - "$IP" "$GUEST_USER" "$HOST_IP" \
+        "$MONITOR_PROFILE" "$MONITOR_SERIAL" 3<<<"$GUEST_PASS" <<'PYEOF'
 import sys
 from pypsrp.client import Client
-ip, host, profile, serial = sys.argv[1:5]
-c = Client(ip, username='Administrator', password='123456', ssl=False, auth='ntlm')
+ip, user, host, profile, serial = sys.argv[1:6]
+with open(3, 'r', encoding='utf-8') as stream:
+    password = stream.read().removesuffix('\n')
+c = Client(ip, username=user, password=password, ssl=False, auth='ntlm')
 ps = fr'''
 $ProgressPreference = 'SilentlyContinue'
 try {{
@@ -408,11 +426,14 @@ if [[ $SKIP_INPUT -eq 0 ]]; then
         IP="$IP_OVERRIDE"
     fi
 
-    python3 - "$IP" "$HOST_IP" "$INPUT_BRAND" <<'PYEOF'
+    env -u GUEST_PASS "$WINRM_PYTHON" - "$IP" "$GUEST_USER" "$HOST_IP" \
+        "$INPUT_BRAND" 3<<<"$GUEST_PASS" <<'PYEOF'
 import sys
 from pypsrp.client import Client
-ip, host, brand = sys.argv[1:4]
-c = Client(ip, username='Administrator', password='123456', ssl=False, auth='ntlm')
+ip, user, host, brand = sys.argv[1:5]
+with open(3, 'r', encoding='utf-8') as stream:
+    password = stream.read().removesuffix('\n')
+c = Client(ip, username=user, password=password, ssl=False, auth='ntlm')
 ps = fr'''
 $ProgressPreference = 'SilentlyContinue'
 Invoke-WebRequest 'http://{host}:8080/spoof-input.ps1' `

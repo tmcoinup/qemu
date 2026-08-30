@@ -2,10 +2,16 @@
   G-11 installation-media chainloader.
 
   The helper is booted from a tiny FAT volume.  It skips that volume (marked
-  with HELPER.MARK), finds another SimpleFileSystem containing the removable
-  media fallback path, and starts it through its real device path.  Keeping
-  the device path is important: Windows Boot Manager uses it to find the BCD
-  and the remaining files on the installation ISO.
+  with HELPER.MARK), verifies a Windows ISO data volume containing boot.wim
+  and Microsoft's signed no-prompt EFI loader, and then confirms that the
+  volume belongs to the same physical optical device as the El Torito boot
+  partition.  UEFI exposes those two ISO views as separate SimpleFileSystem
+  handles, so they are matched by their common hardware-device path.  The
+  no-prompt loader avoids fresh unattended installs falling back to an empty
+  system disk while waiting for an impossible interactive key press.  The
+  launcher records a one-shot marker in start-vm's per-instance writable copy;
+  after Windows Setup reboots, firmware therefore falls through to the NVMe
+  disk instead of starting the ISO again.
 
   SPDX-License-Identifier: BSD-2-Clause-Patent
 **/
@@ -25,7 +31,10 @@ STATIC CONST EFI_GUID  mSimpleFileSystemProtocolGuid = EFI_SIMPLE_FILE_SYSTEM_PR
 STATIC CONST EFI_GUID  mDevicePathProtocolGuid = EFI_DEVICE_PATH_PROTOCOL_GUID;
 
 STATIC CHAR16  mHelperMarker[] = L"\\HELPER.MARK";
+STATIC CHAR16  mHelperConsumedMarker[] = L"\\G11BOOT.ONCE";
 STATIC CHAR16  mWindowsBootPath[] = L"\\EFI\\BOOT\\BOOTX64.EFI";
+STATIC CHAR16  mWindowsNoPromptPath[] =
+  L"\\EFI\\Microsoft\\Boot\\cdboot_noprompt.efi";
 STATIC CHAR16  mWindowsBootWimPath[] = L"\\sources\\boot.wim";
 
 STATIC
@@ -86,6 +95,106 @@ G11DevicePathSize (
   }
 
   return EFI_BAD_BUFFER_SIZE;
+}
+
+STATIC
+BOOLEAN
+G11DevicePathContainsCdrom (
+  IN CONST EFI_DEVICE_PATH_PROTOCOL  *DevicePath
+  )
+{
+  CONST EFI_DEVICE_PATH_PROTOCOL  *Node;
+  UINTN                           Size;
+  UINTN                           Offset;
+  UINT16                          NodeLength;
+
+  if (EFI_ERROR (G11DevicePathSize (DevicePath, &Size))) {
+    return FALSE;
+  }
+
+  Node   = DevicePath;
+  Offset = 0;
+  while (Offset < Size) {
+    NodeLength = G11DevicePathNodeLength (Node);
+    if ((Node->Type == MEDIA_DEVICE_PATH) &&
+        (Node->SubType == MEDIA_CDROM_DP)) {
+      return TRUE;
+    }
+
+    if ((Node->Type == END_DEVICE_PATH_TYPE) &&
+        (Node->SubType == END_ENTIRE_DEVICE_PATH_SUBTYPE)) {
+      break;
+    }
+
+    Offset += NodeLength;
+    Node = (CONST EFI_DEVICE_PATH_PROTOCOL *)((CONST UINT8 *)Node + NodeLength);
+  }
+
+  return FALSE;
+}
+
+STATIC
+BOOLEAN
+G11DevicePathsShareHardwarePrefix (
+  IN CONST EFI_DEVICE_PATH_PROTOCOL  *First,
+  IN CONST EFI_DEVICE_PATH_PROTOCOL  *Second
+  )
+{
+  CONST EFI_DEVICE_PATH_PROTOCOL  *FirstNode;
+  CONST EFI_DEVICE_PATH_PROTOCOL  *SecondNode;
+  UINTN                           FirstSize;
+  UINTN                           SecondSize;
+  UINTN                           FirstOffset;
+  UINTN                           SecondOffset;
+  UINTN                           ByteIndex;
+  UINT16                          FirstNodeLength;
+  UINT16                          SecondNodeLength;
+
+  if (EFI_ERROR (G11DevicePathSize (First, &FirstSize)) ||
+      EFI_ERROR (G11DevicePathSize (Second, &SecondSize))) {
+    return FALSE;
+  }
+
+  FirstNode   = First;
+  SecondNode  = Second;
+  FirstOffset = 0;
+  SecondOffset = 0;
+  while ((FirstOffset < FirstSize) && (SecondOffset < SecondSize)) {
+    if ((FirstNode->Type == MEDIA_DEVICE_PATH) ||
+        (SecondNode->Type == MEDIA_DEVICE_PATH)) {
+      return (BOOLEAN)((FirstNode->Type == MEDIA_DEVICE_PATH) &&
+                       (SecondNode->Type == MEDIA_DEVICE_PATH));
+    }
+
+    if ((FirstNode->Type == END_DEVICE_PATH_TYPE) ||
+        (SecondNode->Type == END_DEVICE_PATH_TYPE)) {
+      return FALSE;
+    }
+
+    FirstNodeLength  = G11DevicePathNodeLength (FirstNode);
+    SecondNodeLength = G11DevicePathNodeLength (SecondNode);
+    if (FirstNodeLength != SecondNodeLength) {
+      return FALSE;
+    }
+
+    for (ByteIndex = 0; ByteIndex < FirstNodeLength; ++ByteIndex) {
+      if (((CONST UINT8 *)FirstNode)[ByteIndex] !=
+          ((CONST UINT8 *)SecondNode)[ByteIndex]) {
+        return FALSE;
+      }
+    }
+
+    FirstOffset  += FirstNodeLength;
+    SecondOffset += SecondNodeLength;
+    FirstNode = (CONST EFI_DEVICE_PATH_PROTOCOL *)(
+                  (CONST UINT8 *)FirstNode + FirstNodeLength
+                  );
+    SecondNode = (CONST EFI_DEVICE_PATH_PROTOCOL *)(
+                   (CONST UINT8 *)SecondNode + SecondNodeLength
+                   );
+  }
+
+  return FALSE;
 }
 
 STATIC
@@ -185,6 +294,86 @@ G11VolumeContainsFile (
   return TRUE;
 }
 
+STATIC
+EFI_STATUS
+G11OpenHelperRoot (
+  IN  EFI_BOOT_SERVICES          *BootServices,
+  IN  EFI_LOADED_IMAGE_PROTOCOL  *LoadedImage,
+  OUT EFI_FILE_PROTOCOL          **Root
+  )
+{
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL  *FileSystem;
+  EFI_STATUS                       Status;
+
+  if ((BootServices == NULL) || (LoadedImage == NULL) || (Root == NULL)) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *Root      = NULL;
+  FileSystem = NULL;
+  Status = BootServices->HandleProtocol (
+                           LoadedImage->DeviceHandle,
+                           (EFI_GUID *)&mSimpleFileSystemProtocolGuid,
+                           (VOID **)&FileSystem
+                           );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Status = FileSystem->OpenVolume (FileSystem, Root);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (!G11VolumeContainsFile (*Root, mHelperMarker)) {
+    (*Root)->Close (*Root);
+    *Root = NULL;
+    return EFI_SECURITY_VIOLATION;
+  }
+
+  return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+G11MarkBootConsumed (
+  IN EFI_FILE_PROTOCOL  *Root
+  )
+{
+  EFI_FILE_PROTOCOL  *File;
+  EFI_STATUS         Status;
+  UINT8              Value;
+  UINTN              ValueSize;
+
+  if (Root == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  File = NULL;
+  Status = Root->Open (
+                   Root,
+                   &File,
+                   mHelperConsumedMarker,
+                   EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE |
+                   EFI_FILE_MODE_CREATE,
+                   0
+                   );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Value     = 1;
+  ValueSize = sizeof (Value);
+  Status = File->Write (File, &ValueSize, &Value);
+  if (!EFI_ERROR (Status) && (ValueSize != sizeof (Value))) {
+    Status = EFI_DEVICE_ERROR;
+  }
+  if (!EFI_ERROR (Status)) {
+    Status = File->Flush (File);
+  }
+  File->Close (File);
+  return Status;
+}
+
 EFI_STATUS
 EFIAPI
 UefiMain (
@@ -196,8 +385,10 @@ UefiMain (
   EFI_LOADED_IMAGE_PROTOCOL         *LoadedImage;
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL   *FileSystem;
   EFI_FILE_PROTOCOL                 *Root;
+  EFI_FILE_PROTOCOL                 *HelperRoot;
   EFI_DEVICE_PATH_PROTOCOL          *BasePath;
   EFI_DEVICE_PATH_PROTOCOL          *BootPath;
+  EFI_DEVICE_PATH_PROTOCOL          *WindowsDataPath;
   EFI_HANDLE                        *Handles;
   EFI_HANDLE                        ChildImage;
   EFI_STATUS                        Status;
@@ -205,6 +396,7 @@ UefiMain (
   UINTN                             HandleCount;
   UINTN                             Attempt;
   UINTN                             Index;
+  BOOLEAN                           WindowsDataPresent;
 
   if ((SystemTable == NULL) || (SystemTable->BootServices == NULL)) {
     return EFI_INVALID_PARAMETER;
@@ -221,6 +413,17 @@ UefiMain (
     return Status;
   }
 
+  HelperRoot = NULL;
+  Status = G11OpenHelperRoot (BootServices, LoadedImage, &HelperRoot);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+  if (G11VolumeContainsFile (HelperRoot, mHelperConsumedMarker)) {
+    HelperRoot->Close (HelperRoot);
+    return EFI_ALREADY_STARTED;
+  }
+  HelperRoot->Close (HelperRoot);
+
   LastStatus = EFI_NOT_FOUND;
   for (Attempt = 0; Attempt < G11_DISCOVERY_ATTEMPTS; ++Attempt) {
     Handles     = NULL;
@@ -235,6 +438,8 @@ UefiMain (
     if (EFI_ERROR (Status)) {
       LastStatus = Status;
     } else {
+      WindowsDataPresent = FALSE;
+      WindowsDataPath    = NULL;
       for (Index = 0; Index < HandleCount; ++Index) {
         if (Handles[Index] == LoadedImage->DeviceHandle) {
           continue;
@@ -258,9 +463,61 @@ UefiMain (
           continue;
         }
 
+        if (!G11VolumeContainsFile (Root, mHelperMarker) &&
+            G11VolumeContainsFile (Root, mWindowsBootWimPath) &&
+            G11VolumeContainsFile (Root, mWindowsNoPromptPath)) {
+          BasePath = NULL;
+          Status = BootServices->HandleProtocol (
+                                   Handles[Index],
+                                   (EFI_GUID *)&mDevicePathProtocolGuid,
+                                   (VOID **)&BasePath
+                                   );
+          if (!EFI_ERROR (Status)) {
+            WindowsDataPresent = TRUE;
+            WindowsDataPath    = BasePath;
+          } else if (EFI_ERROR (Status)) {
+            LastStatus = Status;
+          }
+        }
+
+        Root->Close (Root);
+        if (WindowsDataPresent) {
+          break;
+        }
+      }
+
+      if (!WindowsDataPresent) {
+        LastStatus = EFI_NOT_FOUND;
+      }
+
+      for (Index = 0; Index < HandleCount; ++Index) {
+        if (!WindowsDataPresent) {
+          break;
+        }
+        if (Handles[Index] == LoadedImage->DeviceHandle) {
+          continue;
+        }
+
+        FileSystem = NULL;
+        Status = BootServices->HandleProtocol (
+                                 Handles[Index],
+                                 (EFI_GUID *)&mSimpleFileSystemProtocolGuid,
+                                 (VOID **)&FileSystem
+                                 );
+        if (EFI_ERROR (Status)) {
+          LastStatus = Status;
+          continue;
+        }
+
+        Root = NULL;
+        Status = FileSystem->OpenVolume (FileSystem, &Root);
+        if (EFI_ERROR (Status)) {
+          LastStatus = Status;
+          continue;
+        }
+
         if (G11VolumeContainsFile (Root, mHelperMarker) ||
-            !G11VolumeContainsFile (Root, mWindowsBootPath) ||
-            !G11VolumeContainsFile (Root, mWindowsBootWimPath)) {
+            !G11VolumeContainsFile (Root, mWindowsBootPath)) {
           Root->Close (Root);
           continue;
         }
@@ -276,12 +533,21 @@ UefiMain (
           LastStatus = Status;
           continue;
         }
+        if (!G11DevicePathContainsCdrom (BasePath)) {
+          LastStatus = EFI_NOT_FOUND;
+          continue;
+        }
+        if ((WindowsDataPath == NULL) ||
+            !G11DevicePathsShareHardwarePrefix (WindowsDataPath, BasePath)) {
+          LastStatus = EFI_NOT_FOUND;
+          continue;
+        }
 
         BootPath = NULL;
         Status = G11BuildFileDevicePath (
                    BootServices,
-                   BasePath,
-                   mWindowsBootPath,
+                   WindowsDataPath,
+                   mWindowsNoPromptPath,
                    &BootPath
                    );
         if (EFI_ERROR (Status)) {
@@ -307,8 +573,25 @@ UefiMain (
           continue;
         }
 
+        HelperRoot = NULL;
+        Status = G11OpenHelperRoot (BootServices, LoadedImage, &HelperRoot);
+        if (EFI_ERROR (Status)) {
+          LastStatus = Status;
+          BootServices->UnloadImage (ChildImage);
+          continue;
+        }
+        Status = G11MarkBootConsumed (HelperRoot);
+        HelperRoot->Close (HelperRoot);
+        if (EFI_ERROR (Status)) {
+          LastStatus = Status;
+          BootServices->UnloadImage (ChildImage);
+          continue;
+        }
+
         Status = BootServices->StartImage (ChildImage, NULL, NULL);
         LastStatus = Status;
+        BootServices->FreePool (Handles);
+        return LastStatus;
       }
 
       BootServices->FreePool (Handles);

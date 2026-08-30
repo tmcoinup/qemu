@@ -20,12 +20,15 @@ set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 # shellcheck source=lib/vm-storage.sh
 source ./lib/vm-storage.sh
+# shellcheck source=lib/g11-python-runtime.sh
+source ./lib/g11-python-runtime.sh
+G11_PYTHON_RUNTIME_INSTALLER="$PWD/host/install-g11-python-runtime.sh"
 vm_storage_init
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
 GUEST_USER=${GUEST_USER:-Administrator}
-GUEST_PASS=${GUEST_PASS:-123456}
+GUEST_PASS=${GUEST_PASS:-}
 UNINSTALL=0
 FRAMERATE=""
 DESKTOP=""
@@ -42,6 +45,13 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+(( ${#GUEST_PASS} >= 6 && ${#GUEST_PASS} <= 64 )) &&
+        [[ "$GUEST_PASS" != *$'\r'* && "$GUEST_PASS" != *$'\n'* ]] || {
+    echo "GUEST_PASS 必须通过安全运行时环境提供（6..64 字符）" >&2
+    exit 2
+}
+WINRM_PYTHON=$(g11_python_resolve pypsrp) || exit 1
 
 # Discover guest IP via the VM's selected vmN/vm.conf.
 if [[ -z "$IP_OVERRIDE" ]]; then
@@ -86,10 +96,13 @@ if [[ -n "$DESKTOP" ]]; then
     PS_FLAGS="$PS_FLAGS -DesktopWidth $DW -DesktopHeight $DH"
 fi
 
-exec python3 - "$IP" "$GUEST_USER" "$GUEST_PASS" "$BASE_URL" "$PS_FLAGS" <<'PYEOF'
+exec env -u GUEST_PASS "$WINRM_PYTHON" - "$IP" "$GUEST_USER" "$BASE_URL" \
+    "$PS_FLAGS" 3<<<"$GUEST_PASS" <<'PYEOF'
 import sys
 from pypsrp.client import Client
-ip, user, pw, base, ps_flags = sys.argv[1:6]
+ip, user, base, ps_flags = sys.argv[1:5]
+with open(3, 'r', encoding='utf-8') as stream:
+    pw = stream.read().removesuffix('\n')
 c = Client(ip, username=user, password=pw, ssl=False, auth='ntlm')
 ps = fr'''
 $ProgressPreference = 'SilentlyContinue'

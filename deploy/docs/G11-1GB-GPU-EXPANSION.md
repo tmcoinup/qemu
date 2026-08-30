@@ -104,36 +104,28 @@ chmod 600 /安全路径/client_configuration_token.tok
   --token-file /安全路径/client_configuration_token.tok
 ```
 
-## 更换 Tesla V100 后选择一个 framebuffer 档
+## Tesla V100 / vGPU 19.5 的 1Q
 
-先确认该 NVIDIA GPU 上没有运行中的 VM/mdev，再用统一封装生成宿主本地策略。
-例如 16GB PCIe V100 的 1GB 档：
+V100 的 vGPU 19.5 路径默认启用已经实机验证的 mixed mode。先确认没有活动
+VM/mdev，再为 16GB PCIe V100 生成 1Q/2Q 双映射：
 
 ```bash
 bash deploy/configure-g11-vgpu-host.sh \
   --preset v100-pcie-16gb \
-  --tier 1024 \
   --gpu 0000:04:00.0
 ```
 
 把示例 BDF 换成实卡的完整地址；32GB 卡把 preset 换成
-`v100-pcie-32gb`。脚本按 16384/32768MB 完整显存计算，不扣固定预留，并为真 V100
-固定 `VGPU_MDEV_IDENTITY_MODE=off`、`SPOOF_MODE=off`。然后只读核验该档：
+`v100-pcie-32gb`。脚本按 16384/32768MB 完整显存计算，不扣固定预留。业务只用
+1Q 时，每次创建明确指定：
 
 ```bash
-./deploy/host/probe-vgpu-host.sh \
-  --config deploy/host/vgpu-host.conf \
-  --profile V100-1Q
+./deploy/scripts/vmctl.sh create 1 --gpu-vram 1024
 ```
 
-启动时 1GB 行拿 `V100-1Q/1024MB`；2GB VM 会被明确拒绝。要整池切到 2GB，先
-关闭该 NVIDIA GPU 上所有 VM/mdev，再用配置封装统一生成 `V100-2Q/2048MB`。
-官方 V100 模板默认 `SPOOF_MODE=off` 且
-`VGPU_MDEV_IDENTITY_MODE=off`，所以 Windows 系统 PCI/PnP 身份保持 V100 vGPU 原生
-值；消费卡目录只负责容量合同和可选的便携用户态元数据，不能宣称改变了物理卡或
-系统 PCI 身份。启动器会拒绝容量不一致、同名 profile 多卡歧义和超额分配。
+若策略层也要禁止 2Q，停完全部 VM/mdev 后用 `--fb-mode equal --tier 1024`
+重新生成。vGPU 19.5 的 1Q 已验证 RAM_TYPE、显存厂商和位宽投影；2Q 会自动跳过
+RAM_TYPE，1Q+2Q 同卡也已验证 Code 0 和正常关机。
 
-完整的 V100 驱动、license、变体名称和到机验收见
-[`V100-ADAPTATION.md`](V100-ADAPTATION.md)。在真 V100 上完成所选档位的
-驱动 Code 0、图形输出、授权、压力与满槽并发验证前，状态仍是
-`hardware-unverified`，不能宣称生产验收完成。
+完整的 19.5 安装和安全边界见
+[`G11-V100-VGPU19.5-FRESH-INSTALL.md`](G11-V100-VGPU19.5-FRESH-INSTALL.md)。

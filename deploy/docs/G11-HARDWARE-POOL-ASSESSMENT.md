@@ -16,6 +16,11 @@
 > i7-3930K/i7-4930K/i7-4960X 6C/12T，覆盖三品牌 X79、每容量 4–5 个大牌内存；
 > 当前完整目录为 13/16/45/524，操作见
 > [G11-HOME-CPU-POOL-QUICKSTART.md](G11-HOME-CPU-POOL-QUICKSTART.md)。后文旧统计仍只作历史底稿。
+>
+> 2026-08-30 V100 实机更新：后文基于 R535/vGPU 16 推导的“V100 只能单档、
+> 不需要 identity Hook”已被 vGPU 19.5 实验替代。精确 580.159.01 已验证 1Q、2Q
+> 及同卡 1Q+2Q；V100 使用 R580 RM identity Hook，1Q 放行 RAM_TYPE，2Q 自动
+> 抑制 RAM_TYPE。当前结论见 [V100-ADAPTATION.md](V100-ADAPTATION.md)。
 
 ## 先读：2026-08-20 复核结论（优先于后文初版）
 
@@ -31,7 +36,7 @@
 | 新建 GPU/驱动世代 | 实际 guest 基线是正式签名 GRID **538.33 / R535**，不是文件历史误名 553.24；8 个 GT 730/740 Kepler 身份与该基线不自洽 | 2GB 默认层 12 条；1GB 新建层只保留 4 条 Maxwell GTX 750；8 条 Kepler 仅供旧 `vm.conf` 读取，不再新建/随机 |
 | 跨组件 SSD 随机 | `create-vm.sh` 自己会先按平台过滤，不存在“随机命中 NVMe 后不重试”；但客户端若先从 `AUTO_RANDOM=1` 独立选 SSD，再显式传给默认 H81，确有跨组件拒绝风险 | 默认层只含 7 款 H81 可达 SATA；WD Black、970 Pro、960 Pro 三款 NVMe 都改为显式选择 |
 | 宿主 profile 漂移 | 全局 `profile_override.toml` 基线漂移真实存在；当前活动 VM 的 per-mdev FHD 合同正确，不能声称它正在继承 4 屏旧值 | 提供只读 check、保留未知/mdev 段的语义合并和停机应用封装；不在本次提交中改宿主 `/etc` 或重启服务 |
-| 未来 V100 | V100 也不能沿用 `1Q+2Q` 混档方案；官方卡应走原生 vGPU 驱动与原生身份，不需要 vgpu_unlock | 配置封装每张物理卡只生成 `V100*-1Q` 或 `V100*-2Q` 一个档；V100 路径关闭 identity override |
+| V100/vGPU 19.5 | 精确 580.159.01 在实卡报告并支持 heterogeneous time-slice；1Q+2Q 已完成 Code 0/关机验证 | V100 默认生成双映射并由 live capability/mode 门禁；R580 Hook 仅改审核身份字段，`unlock=false` |
 
 ### 显存容量决定
 
@@ -190,10 +195,9 @@ brands  board=5 memory=5 ssd=5 gpu_board=9 keyboard=3 relative_mouse=3
 **结论（确凿）**：在**当前宿主**上，同一物理 GPU 的所有 vGPU 实例必须使用
 相同 framebuffer 大小；相同容量的不同 type 不应被误拒绝。
 
-本项目固定在 R535 / vGPU 16.x；该分支的官方有效配置要求同一物理 GPU 上的
-time-sliced vGPU 使用相同 framebuffer 大小。本机 sysfs 行为与该约束一致。
-未来 V100 若继续使用本项目的 vGPU 16 栈，同样必须按单一档位配置；不把其他
-驱动分支可能提供的 heterogeneous/mixed-size 能力当作本项目合同（见附录 C）。
+此处实验只描述 RTX 2080 的 R535/vGPU 16.x 路径，该分支继续要求同一物理 GPU
+使用相同 framebuffer 大小。V100 已迁移到独立的 vGPU 19.5/580.159.01 合同，并按
+实时 heterogeneous capability/mode 允许 mixed-size（见附录 C）。
 
 ### 3.2 实验二：2 GB 档真实上限
 
@@ -648,44 +652,31 @@ vCPU 拓扑分布: 2C/2T ×3, 2C/4T ×241, 4C/4T ×19, 4C/8T ×1
 
 ---
 
-## 附录 C：本项目的 V100 合同
+## 附录 C：本项目当前的 V100 合同
 
-> 补充于 2026-08-20，回答“Tesla V100 能否 1GB/2GB 混搭”。
+> 2026-08-30 实机更新，替代 2026-08-20 的无卡推导。
 
 ### C.1 framebuffer 规则
 
-本项目使用 R535 / vGPU 16.x。NVIDIA vGPU 16 的有效 time-sliced 配置允许在同一
-物理 GPU 上混用相同 framebuffer 大小的不同 A/B/Q series，但不允许混用不同
-framebuffer 大小。因此守卫比较的是解析出的 framebuffer MB，不是 type 名称：
+V100 固定使用 vGPU 19.5 / host 580.159.01。只有目标 V100 实时报告
+`Heterogeneous Time-Slice Sizes: Supported` 且 `vGPU Heterogeneous Mode: Enabled`
+时，分配器才允许 `V100*-1Q` 与 `V100*-2Q` 同卡活动。任何版本、BDF、profile、
+framebuffer 或 mode 无法验证时都 fail-closed。
 
-- `V100-2Q` 与同为 2048MB 的其他 series 可以通过同档检查；
-- `V100-1Q` 与 `V100-2Q` 不能在同一物理 GPU 上同时活动；
-- type 描述、framebuffer 或 parent 无法可靠解析时 fail-closed。
+RTX 2080/R535 的 equal-size 规则不变，不能从 V100 的结果外推。
 
-这条规则同时适用于当前 RTX 2080 unlock 路径和未来 V100 官方路径。即使其他
-硬件/驱动组合存在 mixed-size 能力，也不自动扩大本项目已经验证的合同。
+### C.2 身份与稳定性
 
-### C.2 容量与 profile
+V100 原生 mdev 能力仍由官方 host driver 提供。R580 Hook 固定 `unlock=false`，只对
+每 mdev 投影审核身份字段：1Q 可写 RAM_TYPE、显存厂商和位宽；2Q 自动跳过
+RAM_TYPE。单 1Q、单 2Q 和 1Q+2Q 已使用正式 582.53 guest driver 验证 Code 0、
+生产签名和正常关机。
 
-每张物理 V100 只配置一个档，默认 2048MB：
+### C.3 容量与隔离
 
-| SKU | 默认 profile | 完整显存 | 2GB 理论槽位 |
-|---|---|---:|---:|
-| V100 PCIe 16GB | `V100-2Q` | 16384MB | 8 |
-| V100 32GB / V100S 32GB | 按 sysfs 实际名称解析对应 2Q | 32768MB | 16 |
+16GB/32GB 仍分别使用完整 16384/32768MB，不扣固定余量；并发上限必须以实际
+QEMU/Windows 启动验收为准。V100 与 RTX 2080 的 driver 资产、VMate 修复分支和
+宿主策略保持独立。两条路径都禁止 testsigning、nointegritychecks、BCD 修改、
+测试签名或自签名 Windows 内核驱动。
 
-不扣固定 512MB 预留。第 8/16 个实例必须完成 QEMU VFIO open、Windows Code 0、
-guest 驱动/许可、负载与长稳测试；`mdev create` 成功本身不算容量验收。
-
-### C.3 与 RTX 2080 路径隔离
-
-V100 是官方 vGPU 路径，配置 `VGPU_MDEV_IDENTITY_MODE=off`，使用原生 V100 vGPU
-身份验收；不安装或加载 vgpu_unlock，不创建 `profile_override.toml`，也不复用
-钉死 RTX 2080 BDF/驱动包的恢复脚本。严格遵守本仓库约束：不开
-`testsigning`/`nointegritychecks`，不修改 BCD，不安装测试签名或自签名内核驱动。
-
-买卡后仍须确认精确 SKU（PCIe/FHHL 与 SXM2 不能混为一谈）、BDF、供电、被动
-散热风道、IOMMU 分组、官方 host/guest bundle 和许可证。宿主凭据与许可材料必须
-放在仓库外的 root-owned 配置或通过环境变量/安全渠道提供。
-
-完整封装与验收步骤见 `G11-VGPU-HOST-QUICKSTART.md` 和 `V100-ADAPTATION.md`。
+完整流程见 `G11-V100-VGPU19.5-FRESH-INSTALL.md` 和 `V100-ADAPTATION.md`。

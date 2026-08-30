@@ -1,44 +1,34 @@
-# Tesla V100 host resource example for deploy/scripts/start-vm.sh.
-#
-# Copy this file to deploy/host/vgpu-host.conf, or point
-# VGPU_HOST_CONFIG at another readable file.  The example is intentionally
-# not enabled in the repository because the exact V100 SKU and BDF must be
-# confirmed on the target host.
+# Tesla V100 resource example for the validated vGPU 19.5/R580.159.01 path.
+# Generate the real host file with configure-g11-vgpu-host.sh; do not copy an
+# example BDF onto another machine.
 
-# "auto" searches all /sys/class/mdev_bus parents and succeeds only when the
-# selected profile is unique.  On a multi-V100 host, replace it with the
-# explicit domain:bus:slot.function, for example 0000:65:00.0.
+# Replace auto with the complete BDF on a multi-GPU host.
 VGPU_MGPU=auto
 
-# Common 16 GiB PCIe V100, fixed to one 2 GiB framebuffer tier.  NVIDIA vGPU
-# 16 does not permit 1Q and 2Q sizes to coexist on one physical V100.  To run a
-# 1 GiB pool, change all three tier/profile/framebuffer values together while
-# every VM on this GPU is stopped; do not configure both mappings at once.
-VGPU_HOST_FB_TIER_MB=2048
-VGPU_RESOURCE_PROFILE='V100-2Q'
-VGPU_RESOURCE_FB_MB=2048
+# vGPU 19.5 exposes and enables heterogeneous time-slice sizes on the tested
+# V100 SXM2 16GB host. Mixed mode lets 1Q and 2Q coexist. An all-1Q pool is
+# also valid; allocation is still checked against the physical 16 GiB total.
+VGPU_HOST_FB_MODE=mixed
+VGPU_RESOURCE_PROFILE_1024='V100X-1Q'
+VGPU_RESOURCE_PROFILE_2048='V100X-2Q'
 VGPU_TOTAL_FB_MB=16384
-
-# Other Q-series names (choose exactly one size for the installed SKU):
-#   PCIe 32 GiB : V100D-1Q or V100D-2Q   (VGPU_TOTAL_FB_MB=32768)
-#   SXM2 16 GiB : V100X-1Q or V100X-2Q   (VGPU_TOTAL_FB_MB=16384)
-#   SXM2 32 GiB : V100DX-1Q or V100DX-2Q (VGPU_TOTAL_FB_MB=32768)
-#   V100S 32 GiB: V100S-1Q or V100S-2Q   (VGPU_TOTAL_FB_MB=32768)
-#   FHHL        : V100L-1Q or V100L-2Q   (VGPU_TOTAL_FB_MB=16384)
-
-# Check both NVIDIA's available_instances and the per-parent framebuffer sum.
 VGPU_CAPACITY_CHECK=both
 
-# intervaltime/vgaintervaltime are undocumented R535 plugin parameters that
-# have only been verified on this project's RTX 2080 host.  Keep them disabled
-# until the physical V100 console path has been tested.
+# Other reviewed prefixes:
+#   PCIe 16 GiB : V100-1Q / V100-2Q
+#   PCIe 32 GiB : V100D-1Q / V100D-2Q       (total 32768)
+#   SXM2 32 GiB : V100DX-1Q / V100DX-2Q     (total 32768)
+#   V100S 32 GiB: V100S-1Q / V100S-2Q       (total 32768)
+#   FHHL 16 GiB : V100L-1Q / V100L-2Q
+
 VGPU_CONSOLE_INTERVAL_US=0
 
-# Official V100 hosts do not load vgpu_unlock, so no per-mdev marketing-name
-# backend exists.  Do not make mdev allocation depend on its config file.
-VGPU_MDEV_IDENTITY_MODE=off
+# B/name-only uses the reviewed R580 RM identity Hook. On 1Q, bus width,
+# memory vendor and RAM_TYPE are applied. On 2Q, RAM_TYPE alone is suppressed
+# by the runtime framebuffer guard because that is the verified safe policy.
+VGPU_MDEV_IDENTITY_MODE=required
+SPOOF_MODE=B
 
-# A genuine V100 does not need vgpu_unlock or the RTX6000 profile override.
-# Keep the real vGPU PCI identity; do not install a patched/test-signed driver
-# or change Windows BCD to imitate the RTX path.
-SPOOF_MODE=off
+# For a deliberately uniform pool, regenerate instead of hand-editing:
+#   configure-g11-vgpu-host.sh --preset v100-sxm2-16gb --fb-mode equal \
+#       --tier 1024 --gpu DDDD:BB:SS.F

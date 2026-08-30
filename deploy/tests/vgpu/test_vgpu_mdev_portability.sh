@@ -125,7 +125,24 @@ MDEV_DEVICES_DIR="$DEVICES_DIR"
 VGPU_TOTAL_FB_MB=16384
 VGPU_CAPACITY_CHECK=both
 VGPU_HOST_LOCK_FILE="$TMP_DIR/gpu-mode.lock"
+NVIDIA_MODULE_VERSION_FILE="$TMP_DIR/nvidia-version"
+VGPU_TEST_MIXED_STATE_FILE="$TMP_DIR/mixed-state"
+VGPU_NVIDIA_SMI_BIN="$TMP_DIR/nvidia-smi"
 : >"$VGPU_HOST_LOCK_FILE"
+printf '%s\n' 580.159.01 >"$NVIDIA_MODULE_VERSION_FILE"
+printf '%s\n' Enabled >"$VGPU_TEST_MIXED_STATE_FILE"
+export VGPU_TEST_MIXED_STATE_FILE
+cat >"$VGPU_NVIDIA_SMI_BIN" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+state=$(cat "$VGPU_TEST_MIXED_STATE_FILE")
+cat <<OUTPUT
+    vGPU Device Capability
+        Heterogeneous Time-Slice Sizes : Supported
+    vGPU Heterogeneous Mode            : $state
+OUTPUT
+EOF
+chmod 0755 "$VGPU_NVIDIA_SMI_BIN"
 # shellcheck source=../../../lib/vgpu-mdev.sh
 source "$MDEV_LIB"
 
@@ -230,6 +247,13 @@ remove_active() {
     rm -f -- "$DEVICES_DIR/$uuid"
     rm -rf -- "$parent/$uuid"
 }
+
+# Locality follows the resolved mdev object, not a guessed/configured BDF.
+printf '%s\n' 1 >"$V100_PARENT/numa_node"
+make_active "$V100_PARENT" "$V100_TYPE" 999
+assert_eq 1 "$(mdev_numa_node 10000000-0000-0000-0000-000000000999)" \
+    'resolved mdev NUMA node'
+remove_active "$V100_PARENT" 999
 
 # Exercise the exact cleanup state machine used by start-vm.  A signal while
 # the allocator owns the host lock must use the locked release primitive for a
@@ -336,6 +360,31 @@ if mdev_allocate V100-1Q 20000000-0000-0000-0000-000000000007 \
 fi
 [[ -z "$WRITE_CONTENT" ]] \
     || fail 'mixed-size rejection attempted a sysfs write'
+
+# R580 on a V100 that reports heterogeneous-size capability and enabled mode
+# may mix 1Q and 2Q.  Both the driver family and live mode are fail-closed.
+VGPU_HOST_FB_MODE=mixed
+printf '%s\n' Disabled >"$VGPU_TEST_MIXED_STATE_FILE"
+if mdev_allocate V100-1Q 20000000-0000-0000-0000-000000000011 \
+        1024 >/dev/null 2>&1; then
+    fail 'mixed-size allocation ignored disabled live GPU mode'
+fi
+printf '%s\n' Enabled >"$VGPU_TEST_MIXED_STATE_FILE"
+printf '%s\n' 535.161.05 >"$NVIDIA_MODULE_VERSION_FILE"
+if mdev_allocate V100-1Q 20000000-0000-0000-0000-000000000012 \
+        1024 >/dev/null 2>&1; then
+    fail 'mixed-size allocation ignored the R580 driver gate'
+fi
+printf '%s\n' 580.159.01 >"$NVIDIA_MODULE_VERSION_FILE"
+MIXED_UUID=20000000-0000-0000-0000-000000000013
+WRITE_CONTENT=""
+mdev_allocate V100-1Q "$MIXED_UUID" 1024 >/dev/null
+assert_eq "$MIXED_UUID" "$WRITE_CONTENT" \
+    'R580 mixed-size 1Q create UUID'
+assert_eq "$(readlink -f "$V100_1Q_TYPE")/create" \
+    "$(readlink -f "$(dirname "$WRITE_PATH")")/$(basename "$WRITE_PATH")" \
+    'R580 mixed-size 1Q create path'
+VGPU_HOST_FB_MODE=equal
 
 # A different series with the same 2 GiB framebuffer remains valid in
 # equal-size mode.

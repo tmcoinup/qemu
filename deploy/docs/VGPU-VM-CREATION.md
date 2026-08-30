@@ -164,11 +164,11 @@ B 是所有 profile 当前的安全 name-only 路径。新 GTX1050 配置与其�
 “切成消费卡”不会改变底层 mdev、显存大小、物理频率或调度份额。六个芯片
 身份按目录固定为 1024MB 或 2048MB，启动器必须分配同容量 mdev。
 
-当前 RTX 2080 宿主必须用 `deploy/configure-g11-vgpu-host.sh` 固定整池为
-`nvidia-256/1024MB` 或 `nvidia-257/2048MB`。更换 V100 后也只能固定为
-`V100-1Q` 或 `V100-2Q` 其中一档；同一物理 GPU 不能同时发布两档映射。
-完整流程见 [`V100-ADAPTATION.md`](V100-ADAPTATION.md)。无论使用哪种宿主卡，
-创建器、启动器和 mdev 分配锁内检查都会拒绝 guest 与宿主档位不一致。
+当前 RTX 2080/R535 宿主必须固定整池为 `nvidia-256/1024MB` 或
+`nvidia-257/2048MB`。V100/vGPU 19.5 默认可发布 `V100*-1Q` 与 `V100*-2Q`
+双映射；只有 NVIDIA 实时报告 heterogeneous capability=`Supported`、mode=`Enabled`
+时才允许混搭。完整流程见 [`V100-ADAPTATION.md`](V100-ADAPTATION.md)。创建器、
+启动器和 mdev 分配器仍会校验 profile、真实显存、parent 与总容量。
 
 `deploy/host/gpu-mode.sh consumer` 是把**宿主机**切到消费版 NVIDIA 驱动，会让
 mdev/vGPU 不可用；它与 guest 消费卡身份切换完全不是一回事。

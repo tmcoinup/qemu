@@ -43,6 +43,10 @@ safe=(
 )
 vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "${safe[@]}" ||
     fail "reviewed driver-install argv was rejected"
+safe_headless=( "${safe[@]}" )
+safe_headless[14]=none
+vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "${safe_headless[@]}" ||
+    fail "reviewed headless driver-install argv was rejected"
 
 reject_argv() {
     if vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "$@"; then
@@ -67,16 +71,33 @@ for required in \
         'SPOOF_MODE=off' \
         'VGPU_MDEV_INTERNAL_PCI_IDENTITY=0' \
         'VGPU_ROMBAR=0' \
-        'driver-install-sdl|driver-install-gtk)' \
+        'driver-install-sdl|driver-install-gtk|driver-install-headless)' \
+        'MODE=driver-install-headless' \
         'VGA,id=driver-install-vga,bus=pcie.0,addr=0x2' \
         'vfio-pci-nohotplug,${vfio_opts}' \
         'display=off,enable-migration=off' \
         'sdl,gl=off,title=win10-${VM_ID}-driver-install' \
         'GRID 首装基线已落盘' \
         '拒绝在 NVIDIA native console 上做首次枚举' \
-        'vmctl.sh driver-install ${VM_ID}'; do
+        'vmctl.sh driver-install ${VM_ID}' \
+        'source "$here/lib/vgpu-driver-assets.sh"' \
+        'if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 0' \
+        'R580: 跳过 R535 专用 EDID_OVERRIDE/NV_Modes 离线同步'; do
     require_text "$required" "$start_vm"
 done
+
+for required in \
+        'winrm_host=127.0.0.1' \
+        'winrm_port=$LAB_USERNET_WINRM_PORT' \
+        'EXPECT_VER="$VGPU_SELECTED_DRIVER_VERSION"' \
+        "password = stream.read().removesuffix('\\n')" \
+        "port=int(sys.argv[3])" \
+        'env -u GUEST_PASS -u G11_LAB_GUEST_PASSWORD "$winrm_python" -'; do
+    require_text "$required" "$start_vm"
+done
+if grep -Eq "password[[:space:]]*=[[:space:]]*['\"]" "$start_vm"; then
+    fail "start-vm embeds a guest credential"
+fi
 
 for required in \
         'hivex pre-driver commit 完成' \
@@ -107,8 +128,8 @@ assert pre < commit < partial_exit < full_commit
 
 # Every guest mutation is behind the live topology gate.
 topology = gui.index('vgpu_require_safe_driver_install_topology "$VM_ID"')
-marker = gui.index('\ninvalidate_monitor_sync_marker\n')
-guest_write = gui.index('\npython3 - ', marker)
+marker = gui.index('\n    invalidate_monitor_sync_marker\n')
+guest_write = gui.index('GUEST_PASS_VALUE=$GUEST_PASS "$WINRM_PYTHON" -', marker)
 assert topology < marker < guest_write
 
 # Successful installation is not complete until a graceful full shutdown and
@@ -119,14 +140,22 @@ lock = installer.index('flock -w 60 "$START_LOCK_FD"', shutdown)
 sync = installer.index('sync-monitor-profile.sh" "$VM_ID" --force', lock)
 assert gui_call < shutdown < lock < sync
 
-safe_start = orchestrator.index('"$here/scripts/start-vm.sh" "${start_args[@]}" &')
+safe_start = orchestrator.index('LAB_USERNET_WINRM_PORT=$WINRM_PORT')
 install = orchestrator.index('"$here/install-vgpu-driver.sh" "${install_args[@]}"', safe_start)
 assert safe_start < install
 PY
 
-if rg -n -i 'testsigning|nointegritychecks|bcdedit|self[- ]signed|自签' \
-        "$assets_lib" "$gui_installer" "$installer" "$orchestrator" >/dev/null; then
+if command -v rg >/dev/null 2>&1; then
+    forbidden_match=$(rg -n -i \
+        'testsigning|nointegritychecks|bcdedit|self[- ]signed|自签' \
+        "$assets_lib" "$gui_installer" "$installer" "$orchestrator" || true)
+else
+    forbidden_match=$(grep -Eni \
+        'testsigning|nointegritychecks|bcdedit|self[- ]signed|自签' \
+        "$assets_lib" "$gui_installer" "$installer" "$orchestrator" || true)
+fi
+if [[ -n "$forbidden_match" ]]; then
     fail "safe driver-install path mentions a forbidden BCD/signing bypass"
 fi
 
-echo 'PASS: generic GRID first-install mode isolates R535 console, then shuts down and converges offline'
+echo 'PASS: dual-stack GRID install isolates the mdev console and keeps R535 convergence branch-scoped'

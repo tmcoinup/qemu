@@ -16,8 +16,8 @@ usage() {
 usage: probe-vgpu-host.sh [--config FILE] [--profile NAME] [--fb-mb 1024|2048]
 
 Lists every mdev type exposed by the selected/auto-detected GPU parent and
-validates the configured single framebuffer tier without writing host state.
---fb-mb may select a legacy mapping only when it matches the fixed host tier.
+validates equal-size or V100/R580 mixed-size policy without writing host state.
+--fb-mb may select either published mapping in mixed-size mode.
 EOF
 }
 
@@ -67,13 +67,21 @@ source "$deploy_dir/lib/vgpu-mdev.sh"
 # shellcheck source=../lib/vgpu-profiles.sh
 source "$deploy_dir/lib/vgpu-profiles.sh"
 
+VGPU_HOST_FB_MODE=${VGPU_HOST_FB_MODE:-equal}
+case "$VGPU_HOST_FB_MODE" in
+    equal|mixed) ;;
+    *) echo "invalid VGPU_HOST_FB_MODE: $VGPU_HOST_FB_MODE" >&2; exit 2 ;;
+esac
 if [[ -n "${VGPU_HOST_FB_TIER_MB:-}" && -n "${VGPU_HOST_VRAM_MB:-}" &&
       "$VGPU_HOST_FB_TIER_MB" != "$VGPU_HOST_VRAM_MB" ]]; then
     echo 'VGPU_HOST_FB_TIER_MB conflicts with VGPU_HOST_VRAM_MB' >&2
     exit 2
 fi
 VGPU_HOST_FB_TIER_MB=${VGPU_HOST_FB_TIER_MB:-${VGPU_HOST_VRAM_MB:-}}
-if [[ -n "$VGPU_HOST_FB_TIER_MB" ]]; then
+if [[ "$VGPU_HOST_FB_MODE" == mixed && -n "$VGPU_HOST_FB_TIER_MB" ]]; then
+    echo 'mixed-size policy conflicts with fixed host tier' >&2
+    exit 2
+elif [[ -n "$VGPU_HOST_FB_TIER_MB" ]]; then
     VGPU_HOST_FB_TIER_MB=$(vgpu_profile_normalize_vram_mb \
         "$VGPU_HOST_FB_TIER_MB") || exit $?
 fi
@@ -84,6 +92,7 @@ mapfile -t roots <<<"$roots_output"
 printf 'NVIDIA module : %s\n' \
     "$(cat "$NVIDIA_MODULE_VERSION_FILE" 2>/dev/null || echo not-loaded)"
 printf 'GPU selector  : %s\n' "$VGPU_MGPU"
+printf 'Host FB mode  : %s\n' "$VGPU_HOST_FB_MODE"
 printf 'Host FB tier  : %s\n' "${VGPU_HOST_FB_TIER_MB:-not-configured}"
 printf 'Capacity cap  : %s MB (%s)\n' "$VGPU_TOTAL_FB_MB" "$VGPU_CAPACITY_CHECK"
 
@@ -120,7 +129,8 @@ declare -a configured_profiles=()
 if [[ -n "$profile_arg" ]]; then
     configured_profiles+=("$profile_arg|${fb_arg:-${VGPU_RESOURCE_FB_MB:-${VGPU_HOST_FB_TIER_MB:-}}}")
 elif [[ -n "$fb_arg" ]]; then
-    if [[ -n "$VGPU_HOST_FB_TIER_MB" && "$fb_arg" != "$VGPU_HOST_FB_TIER_MB" ]]; then
+    if [[ "$VGPU_HOST_FB_MODE" == equal &&
+          -n "$VGPU_HOST_FB_TIER_MB" && "$fb_arg" != "$VGPU_HOST_FB_TIER_MB" ]]; then
         echo "requested ${fb_arg}MB differs from host tier ${VGPU_HOST_FB_TIER_MB}MB" >&2
         exit 1
     fi
@@ -139,6 +149,14 @@ elif [[ -n "$fb_arg" ]]; then
     configured_profiles+=("$profile|$fb_arg")
 elif [[ -n "${VGPU_RESOURCE_PROFILE:-}" ]]; then
     configured_profiles+=("$VGPU_RESOURCE_PROFILE|${VGPU_RESOURCE_FB_MB:-${VGPU_HOST_FB_TIER_MB:-}}")
+elif [[ "$VGPU_HOST_FB_MODE" == mixed ]]; then
+    [[ -n "${VGPU_RESOURCE_PROFILE_1024:-}" &&
+       -n "${VGPU_RESOURCE_PROFILE_2048:-}" ]] || {
+        echo 'mixed-size policy requires both 1024/2048 mappings' >&2
+        exit 1
+    }
+    configured_profiles+=("$VGPU_RESOURCE_PROFILE_1024|1024")
+    configured_profiles+=("$VGPU_RESOURCE_PROFILE_2048|2048")
 elif [[ -n "$VGPU_HOST_FB_TIER_MB" ]]; then
     case "$VGPU_HOST_FB_TIER_MB" in
         1024) profile=${VGPU_RESOURCE_PROFILE_1024:-} ;;
@@ -167,7 +185,7 @@ for configured in "${configured_profiles[@]}"; do
         echo "selected profile framebuffer mismatch: profile=${profile} sysfs=${selected_fb}MB config=${expected_fb}MB" >&2
         exit 1
     fi
-    mdev_validate_active_framebuffer_tier "$selected" "$selected_fb"
+    mdev_validate_active_framebuffer_policy "$selected" "$selected_fb"
     printf '\nselected      : %s (%s, %s MB, available=%s)\n' \
         "$selected" "$(cat "$selected/name")" "$selected_fb" \
         "$selected_available"

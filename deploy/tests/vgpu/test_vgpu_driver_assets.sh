@@ -16,7 +16,8 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 STAGE_DIR="$TMP_DIR/staging"
 mkdir -p "$STAGE_DIR" "$TMP_DIR/bin"
-touch "$STAGE_DIR/553.24.exe" "$STAGE_DIR/553.24-display-driver.zip"
+touch "$STAGE_DIR/553.24.exe" "$STAGE_DIR/553.24-display-driver.zip" \
+    "$STAGE_DIR/582.53_grid_win10_win11_server2022_server_2025_dch_64bit_international.exe"
 export STAGE_DIR
 
 cat >"$TMP_DIR/bin/sha256sum" <<'EOF'
@@ -26,6 +27,8 @@ case "${1##*/}" in
         hash=aaa3080c0b7e3a6fbe825a05725f4171c75072faa8b667d97556c1605a219ddd ;;
     553.24-display-driver.zip)
         hash=a3d7ad8b8082d6ac6214565b4766b5190a819bc9b7574765b14897e0db809690 ;;
+    582.53_grid_win10_win11_server2022_server_2025_dch_64bit_international.exe)
+        hash=6f1210b459efc7f29db930103533c3de9b93c2afdfa8d7b4871640c6b8638c0b ;;
     *)
         hash=bad ;;
 esac
@@ -41,8 +44,28 @@ export PATH
 
 # shellcheck source=../../../lib/vgpu-driver-assets.sh
 source "$ASSET_LIB"
-vgpu_verify_driver_assets exe >"$TMP_DIR/exe.out"
-vgpu_verify_driver_assets all >"$TMP_DIR/all.out"
+vgpu_verify_driver_assets exe 535.161.05 >"$TMP_DIR/exe.out"
+vgpu_verify_driver_assets all 535.161.05 >"$TMP_DIR/all.out"
+vgpu_verify_driver_assets exe 580.159.01 >"$TMP_DIR/r580.out"
+[[ "$VGPU_SELECTED_DRIVER_BRANCH" == R580 &&
+   "$VGPU_SELECTED_DRIVER_LABEL" == 'GRID 582.53' &&
+   "$VGPU_SELECTED_DRIVER_VERSION" == 32.0.15.8253 &&
+   "$VGPU_SELECTED_DRIVER_PAYLOAD_ARCHIVE_NAME" == \
+       r580-582.53-official-payload.zip &&
+   "$VGPU_SELECTED_DRIVER_SETUP_SHA256" == \
+       4eded69953267cf82a7218c3f797292b35e0926f761aa733a1de3b54cdf96d69 &&
+   "$VGPU_SELECTED_DRIVER_INF_DRIVER_VER" == \
+       '04/15/2026, 32.0.15.8253' &&
+   "$VGPU_SELECTED_DRIVER_SETUP_VERSION" == 582.53 &&
+   "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 0 ]] ||
+    fail "R580/vGPU 19.5 host/guest selection is incorrect"
+
+if vgpu_select_driver_stack 580.65.05 >"$TMP_DIR/old-r580.out" \
+        2>"$TMP_DIR/old-r580.err"; then
+    fail "retired vGPU 19.0 stack was accepted"
+fi
+grep -Fq 'unsupported NVIDIA host driver: 580.65.05' \
+    "$TMP_DIR/old-r580.err" || fail "retired vGPU 19.0 rejection is unclear"
 
 # An explicit --ip must still prove that the address belongs to the requested
 # VM's configured MAC.  This prevents modifying vm3 while invalidating vm1's
@@ -82,10 +105,10 @@ cat >"$TMP_DIR/bin/sha256sum" <<'EOF'
 printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "$1"
 EOF
 chmod +x "$TMP_DIR/bin/sha256sum"
-if vgpu_verify_driver_assets exe >"$TMP_DIR/bad.out" 2>"$TMP_DIR/bad.err"; then
+if vgpu_verify_driver_assets exe 535.161.05 >"$TMP_DIR/bad.out" 2>"$TMP_DIR/bad.err"; then
     fail "unexpected driver asset hash was accepted"
 fi
 grep -Fq 'REFUSE: unexpected SHA256' "$TMP_DIR/bad.err" \
     || fail "hash mismatch did not produce a clear refusal"
 
-echo "PASS: vGPU 538.33 driver assets and VM-bound guest IP verification"
+echo "PASS: R535 and R580/vGPU 19.5 assets plus VM-bound guest IP verification"

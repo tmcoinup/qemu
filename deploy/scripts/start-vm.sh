@@ -12,6 +12,11 @@
 #                      默认仅跳过 OOBE；密钥/版本/磁盘分区仍手动选择
 #                      OOBE 使用内置 Administrator，密码为空
 #                      普通启动不创建光驱；手动 ISO 用 vmctl cdrom mount
+#   --install-headless [iso]
+#                      同 --install，但不创建宿主显示窗口；供 SSH 自动装机
+#   --fresh-unattended 仅与 --install/--install-headless 一起使用：只允许调用
+#                      仓库内置的 Win10 Pro 全新空盘模板；Disk 0 会被清空
+#                      要求启动前实例盘不存在，并通过运行时变量提供密码
 #   --install-media usb|ide
 #                      安装 ISO 传输：USB xHCI 高速光驱（默认）或 IDE 兼容回退
 #   --manual-oobe      安装时不附加应答 ISO，恢复完整手动 OOBE
@@ -24,6 +29,8 @@
 #                      mdev 仅供 PnP 安装且 display=off；自动强制 spoof=off
 #   --driver-install-gtk
 #                      同上，使用 GTK 标准 VGA 窗口
+#   --driver-install-headless
+#                      同上，不创建宿主窗口；供 SSH/自动化配合 WinRM 使用
 #   --rdp              旧兼容路径：ivshmem + guest relay + 外部 SDL viewer
 #   --legacy-shmem     --rdp 的语义化别名
 #   --rescue-sdl       本地 SDL 标准显卡救援（不挂 vGPU，不用 VNC/RDP）
@@ -68,6 +75,8 @@
 #   --stream-mode auto|shm|gpu  G-11 默认 auto；GPU 不可用时回退 SHM
 #   --no-stream         关闭环境变量配置的推流
 #   --vlan-id <1..4094> 本次 VM 接入指定 access VLAN；guest 内收发无标签帧
+#   --lab-usernet      仅实验/全新装机使用 QEMU NAT，并把宿主本地端口转发到
+#                     guest WinRM 5985；不修改宿主网卡或网桥
 #   --dry-run          只打印最终 QEMU argv，不分配 mdev/不启动
 #   --numlock          默认；根据 Windows USB LED 回报确保小键盘数字键开启
 #   --no-numlock       禁用本次启动的 NumLock 自动收敛
@@ -85,6 +94,7 @@
 # 环境变量:
 #   QEMU_BIN         QEMU 二进制路径 (默认 build/qemu-system-x86_64)
 #   QEMU_IMG         qemu-img 路径（默认 build/qemu-img）
+#   G11_QEMU_DATA_DIR QEMU x86 BIOS/VGA ROM 目录（默认仓库 pc-bios）
 #   OVMF_CODE        OVMF_CODE.fd 路径 (默认 host/OVMF_CODE_4M_stealth.fd)
 #   OVMF_VARS        OVMF_VARS.fd 模板
 #   VM_ROOT/VMS_DIR  VM 根目录 (默认 $IMAGE_ROOT/vms)
@@ -94,6 +104,9 @@
 #   ISO_DIR          Windows ISO 目录 (默认 $IMAGE_ROOT/iso)
 #   INSTALL_UNATTENDED  安装时自动附加 OOBE 应答 ISO (0/1，默认 1)
 #   INSTALL_UNATTEND_TEMPLATE  最小应答 XML 模板
+#   WINDOWS_UNATTEND_ADMIN_PASSWORD
+#                     --fresh-unattended 的运行时 Administrator 密码；生成
+#                     应答 ISO 后即从 QEMU 环境移除，不写仓库/argv/log
 #   INSTALL_MEDIA_BACKEND  usb|ide（默认 usb；CLI --install-media 优先）
 #                     usb 会临时挂载仓库内可复现的 UEFI helper；普通启动
 #                     不挂 helper、Windows ISO 或应答 ISO
@@ -104,10 +117,12 @@
 #   G11_BRIDGE_CONFIG setup-bridge.sh 写入的可信 bridge 契约
 #                     (默认 /etc/qemu/g11-bridge.conf)
 #   G11_BRIDGE_HELPER setup 安装的固定 root-owned bridge helper
+#   LAB_USERNET_WINRM_PORT --lab-usernet 的宿主 localhost 端口；默认
+#                     15984+VM_ID，必须为 1024..65535
 #   VLAN_ID          等价于 --vlan-id；CLI 优先，vm.conf 不得持久化 VLAN
 #   GUEST_MEM_MB     分配内存 (默认 8192)
 #   GFX_BACKEND      vGPU native 窗口后端 (sdl|gtk，默认 sdl)
-#   INSTALL_GFX_BACKEND  install 窗口后端 (gtk|sdl，默认 gtk)
+#   INSTALL_GFX_BACKEND  install 显示后端 (gtk|sdl|none，默认 gtk)
 #   QEMU_SDL_DISABLE_IBUS auto|0|1；默认 1，仅为当前 SDL QEMU 子进程隔离
 #                     IBus/Fcitx/XIM；0 恢复旧行为，auto 仅检测到 IME 时隔离
 #   QEMU_SDL_PRESENT_MODE fixed|dynamic；默认 fixed，SDL 固定 60Hz Present；
@@ -232,7 +247,7 @@ source "$here/lib/dgame-qemu-ptracer.sh"
 
 VM_ID="${1:-}"
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso] [--install-media usb|ide]|--native|--gtk|--driver-install|--driver-install-gtk|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate=true|false|--memory-prealloc=true|false|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
+    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso]|--install-headless [iso] [--fresh-unattended] [--install-media usb|ide] [--lab-usernet]|--native|--gtk|--driver-install|--driver-install-gtk|--driver-install-headless|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate=true|false|--memory-prealloc=true|false|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -314,7 +329,7 @@ while (( $# > 0 )); do
             PRINT_PATHS=1
             shift
             ;;
-        --install)
+        --install|--install-headless)
             START_VM_ARGS+=( "$1" )
             shift
             if (( $# > 0 )) && [[ "$1" != --* ]]; then
@@ -439,11 +454,16 @@ source "$here/lib/host-performance.sh"
 source "$here/lib/windows-unattend.sh"
 # shellcheck source=lib/vgpu-host-config.sh
 source "$here/lib/vgpu-host-config.sh"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
+# shellcheck source=lib/g11-python-runtime.sh
+source "$here/lib/g11-python-runtime.sh"
+G11_PYTHON_RUNTIME_INSTALLER="$here/host/install-g11-python-runtime.sh"
 
-# 宿主资源配置与 vmN/vm.conf 的 guest-visible identity 分开。正版
-# Tesla V100 在这里固定为 V100-1Q 或 V100-2Q 单一 framebuffer 档；同一
-# 物理 GPU 不能同时发布两档。显式指定的配置丢失时应立即报错，默认本地
-# 文件不存在则保持旧行为。
+# 宿主资源配置与 vmN/vm.conf 的 guest-visible identity 分开。RTX 2080
+# unlock 与旧驱动保持 equal-size；受支持的 V100/R580 宿主可以显式发布
+# 1Q+2Q mixed-size。显式指定的配置丢失时应立即报错，默认本地文件不存在
+# 则保持旧行为。
 VGPU_HOST_CONFIG_WAS_SET=0
 [[ -v VGPU_HOST_CONFIG ]] && VGPU_HOST_CONFIG_WAS_SET=1
 VGPU_HOST_CONFIG="${VGPU_HOST_CONFIG:-$here/host/vgpu-host.conf}"
@@ -494,7 +514,7 @@ EARLY_ARGS=( "$@" )
 for ((early_i = 0; early_i < ${#EARLY_ARGS[@]}; early_i += 1)); do
     case "${EARLY_ARGS[$early_i]}" in
         --dry-run) EARLY_DRY_RUN=1 ;;
-        --driver-install|--driver-install-sdl|--driver-install-gtk)
+        --driver-install|--driver-install-sdl|--driver-install-gtk|--driver-install-headless)
             ((EARLY_DRIVER_INSTALL_REQUESTED == 0)) || {
                 echo "[start-vm] driver-install 显示模式只能指定一次" >&2
                 exit 2
@@ -551,8 +571,8 @@ for ((early_i = 0; early_i < ${#EARLY_ARGS[@]}; early_i += 1)); do
         --install-media)
             ((early_i += 1))
             ;;
-        # --install consumes only a following non-option ISO path.
-        --install)
+        # Install selectors consume only a following non-option ISO path.
+        --install|--install-headless)
             if ((early_i + 1 < ${#EARLY_ARGS[@]})) &&
                     [[ "${EARLY_ARGS[$((early_i + 1))]}" != --* ]]; then
                 ((early_i += 1))
@@ -1291,6 +1311,10 @@ fi
 # per-VM 默认值优先于脚本默认，但仍然能被 env / CLI 覆盖。
 CONF=$EARLY_CONF
 DISK_PATH=$(vm_storage_disk_path "$VM_ID")
+FRESH_INSTALL_DISK_EXISTED_AT_ENTRY=0
+if [[ -e "$DISK_PATH" || -L "$DISK_PATH" ]]; then
+    FRESH_INSTALL_DISK_EXISTED_AT_ENTRY=1
+fi
 
 # 配置不存在时先生成并载入；磁盘必须等 CLI 完整解析出 MODE 后再创建，
 # 否则 --install 会在公共 base 存在时误克隆一个已装系统的盘。
@@ -1580,17 +1604,35 @@ if [[ -z "${VGPU_MDEV_PROFILE:-}" ]]; then
     esac
 fi
 : "${VGPU_FB_MB:=${GPU_VRAM_MB:-2048}}"
-# NVIDIA vGPU 16 time-sliced instances on one physical GPU must use one
-# framebuffer size.  The host policy is checked before choosing the real V100
-# (or other host GPU) resource; a legacy size-keyed mapping remains readable,
-# but it cannot authorize a VM outside the fixed host tier.
+# The host policy is checked before choosing the real V100 (or other host GPU)
+# resource.  Equal-size retains the fixed-tier contract; mixed-size requires
+# both size-keyed mappings and is revalidated against R580 runtime state by the
+# mdev allocator before any sysfs create.
+VGPU_HOST_FB_MODE=${VGPU_HOST_FB_MODE:-equal}
+case "$VGPU_HOST_FB_MODE" in
+    equal|mixed) ;;
+    *)
+        echo "[start-vm] VGPU_HOST_FB_MODE 必须是 equal 或 mixed: $VGPU_HOST_FB_MODE" >&2
+        exit 2
+        ;;
+esac
 if [[ -n "${VGPU_HOST_FB_TIER_MB:-}" && -n "${VGPU_HOST_VRAM_MB:-}" &&
       "$VGPU_HOST_FB_TIER_MB" != "$VGPU_HOST_VRAM_MB" ]]; then
     echo "[start-vm] VGPU_HOST_FB_TIER_MB 与兼容变量 VGPU_HOST_VRAM_MB 冲突" >&2
     exit 2
 fi
 VGPU_HOST_FB_TIER_MB=${VGPU_HOST_FB_TIER_MB:-${VGPU_HOST_VRAM_MB:-}}
-if [[ -n "$VGPU_HOST_FB_TIER_MB" ]]; then
+if [[ "$VGPU_HOST_FB_MODE" == mixed ]]; then
+    if [[ -n "$VGPU_HOST_FB_TIER_MB" ]]; then
+        echo '[start-vm] mixed-size 不能同时声明固定 framebuffer 档' >&2
+        exit 2
+    fi
+    if [[ -z "${VGPU_RESOURCE_PROFILE_1024:-}" ||
+          -z "${VGPU_RESOURCE_PROFILE_2048:-}" ]]; then
+        echo '[start-vm] mixed-size 必须同时配置 1024/2048MB resource profile' >&2
+        exit 2
+    fi
+elif [[ -n "$VGPU_HOST_FB_TIER_MB" ]]; then
     VGPU_HOST_FB_TIER_MB=$(vgpu_profile_normalize_vram_mb \
         "$VGPU_HOST_FB_TIER_MB") || exit $?
     if [[ "$VGPU_FB_MB" != "$VGPU_HOST_FB_TIER_MB" ]]; then
@@ -1815,7 +1857,7 @@ GFX_BACKEND="${GFX_BACKEND:-sdl}"
 INSTALL_GFX_BACKEND="${INSTALL_GFX_BACKEND:-gtk}"
 INSTALL_MEDIA_CLI_SEEN=0
 INSTALL_BOOT_HELPER="$here/firmware/g11-usb-install-boot.img"
-INSTALL_BOOT_HELPER_SHA256="6c5201c7429874b83462f2694f7545dc4e625c8f7271df3a434d103c3525a96c"
+INSTALL_BOOT_HELPER_SHA256="7f16e46360c7774e5c426f2ad2c0d51a3a4fb7d5bf0372791fa9dd7ee15d60c1"
 
 # SPOOF_MODE:  A | B | off
 #   A   = legacy 外部/内部消费卡 tuple；当前无生产签名 attestation，
@@ -2081,6 +2123,11 @@ VNC_DISPLAY=":${VM_ID}"
 DEFAULT_ISO="${DEFAULT_ISO:-}"
 INSTALL_UNATTENDED="${INSTALL_UNATTENDED:-1}"
 INSTALL_UNATTEND_TEMPLATE="${INSTALL_UNATTEND_TEMPLATE:-$here/autounattend/autounattend.xml}"
+FRESH_UNATTENDED=0
+FRESH_UNATTEND_TEMPLATE="$here/autounattend/fresh-lab-autounattend.xml"
+FRESH_WINDOWS_ISO_SHA256="d485d370406cbcb68959718817bd12ed87e537a14c885f84962e07136fc4a049"
+LAB_USERNET=0
+LAB_USERNET_WINRM_PORT="${LAB_USERNET_WINRM_PORT:-}"
 UNATTEND_ISO=""
 TAME_GNOME="${TAME_GNOME:-auto}"
 QEMU_SDL_WINDOWS_CURSOR="${QEMU_SDL_WINDOWS_CURSOR:-$VM_ASSET_DIR/aero_arrow.cur}"
@@ -2270,6 +2317,34 @@ while (( $# > 0 )); do
                 ISO="$DEFAULT_ISO"
                 shift
             fi ;;
+        --install-headless)
+            MODE=install
+            INSTALL_GFX_BACKEND=none
+            if [[ $# -ge 2 && "$2" != --* ]]; then
+                ISO="$2"
+                shift 2
+            else
+                [[ -n "$DEFAULT_ISO" ]] || \
+                    DEFAULT_ISO=$(vm_storage_iso_path win10.iso)
+                ISO="$DEFAULT_ISO"
+                shift
+            fi ;;
+        --fresh-unattended)
+            (( FRESH_UNATTENDED == 0 )) || {
+                echo "--fresh-unattended 只能指定一次" >&2
+                exit 2
+            }
+            FRESH_UNATTENDED=1
+            shift
+            ;;
+        --lab-usernet)
+            (( LAB_USERNET == 0 )) || {
+                echo "--lab-usernet 只能指定一次" >&2
+                exit 2
+            }
+            LAB_USERNET=1
+            shift
+            ;;
         --manual-oobe|--interactive-oobe) INSTALL_UNATTENDED=0; shift ;;
         --unattended-oobe) INSTALL_UNATTENDED=1; shift ;;
         --install-media)
@@ -2308,6 +2383,10 @@ while (( $# > 0 )); do
             ;;
         --driver-install-gtk)
             MODE=driver-install-gtk
+            shift
+            ;;
+        --driver-install-headless)
+            MODE=driver-install-headless
             shift
             ;;
         --rescue|--rescue-sdl) MODE=rescue-sdl; shift ;;
@@ -2447,8 +2526,29 @@ while (( $# > 0 )); do
     esac
 done
 
+if (( FRESH_UNATTENDED )); then
+    [[ "$MODE" == install ]] || {
+        echo "--fresh-unattended 必须与 --install 或 --install-headless 同时使用" >&2
+        exit 2
+    }
+    [[ "$INSTALL_UNATTENDED" == 1 ]] || {
+        echo "--fresh-unattended 不能与 --manual-oobe/INSTALL_UNATTENDED=0 组合" >&2
+        exit 2
+    }
+    (( FRESH_INSTALL_DISK_EXISTED_AT_ENTRY == 0 )) || {
+        echo "[start-vm] 拒绝全自动擦盘：启动前实例盘已经存在: $DISK_PATH" >&2
+        echo "[start-vm] 此入口只允许全新空 VM；已有盘请用普通 --install 手动确认分区" >&2
+        exit 2
+    }
+    INSTALL_UNATTEND_TEMPLATE=$FRESH_UNATTEND_TEMPLATE
+elif [[ "$MODE" == install && "$INSTALL_UNATTENDED" == 1 ]] \
+        && windows_unattend_template_wipes_disk "$INSTALL_UNATTEND_TEMPLATE"; then
+    echo "[start-vm] 检测到会擦除 Disk 0 的应答模板，但未给 --fresh-unattended" >&2
+    exit 2
+fi
+
 case "$MODE" in
-    driver-install-sdl|driver-install-gtk)
+    driver-install-sdl|driver-install-gtk|driver-install-headless)
         ((EARLY_DRIVER_INSTALL_REQUESTED == 1)) || {
             echo "[start-vm] driver-install early/full 解析状态不一致" >&2
             exit 2
@@ -2466,6 +2566,21 @@ case "$MODE" in
             echo "[start-vm] --driver-install 不能与其他显示模式组合" >&2
             exit 2
         }
+        ;;
+esac
+
+# Offline EDID_OVERRIDE/NV_Modes convergence is an R535-only safety contract.
+# Select the exact reviewed host/guest stack once for every mode that can
+# attach an mdev.  R580 must not require qemu-edid or mutate an otherwise
+# healthy guest SYSTEM hive before a normal start.
+case "$MODE" in
+    vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl|driver-install-headless|rdp)
+        vgpu_select_driver_stack || exit 1
+        if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 0 &&
+              "$MONITOR_SYNC" == 1 ]]; then
+            echo "[start-vm] R580: 跳过 R535 专用 EDID_OVERRIDE/NV_Modes 离线同步"
+            MONITOR_SYNC=0
+        fi
         ;;
 esac
 
@@ -2870,19 +2985,30 @@ fi
 # fails closed on legacy or disabled identity paths.
 VGPU_PORTABLE_PROFILE_CLAIM=""
 if [[ "$SPOOF_MODE" == B ]]; then
+    VGPU_PORTABLE_HOST_DRIVER=$(cat "$NVIDIA_MODULE_VERSION_FILE" 2>/dev/null || true)
+    case "$VGPU_PORTABLE_HOST_DRIVER" in
+        535.*) VGPU_PORTABLE_GUEST_DRIVER=31.0.15.3833 ;;
+        580.159.01) VGPU_PORTABLE_GUEST_DRIVER=32.0.15.8253 ;;
+        *)
+            echo "[start-vm] B identity 不支持当前 NVIDIA host driver: ${VGPU_PORTABLE_HOST_DRIVER:-unknown}" >&2
+            exit 1
+            ;;
+    esac
     VGPU_PROFILE_CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
     [[ "$VGPU_PROFILE_CATALOG_SHA256" =~ ^[0-9A-F]{64}$ ]] || {
         echo "[start-vm] 无法计算 portable vGPU profile catalog 摘要" >&2
         exit 1
     }
-    VGPU_PORTABLE_PROFILE_CLAIM="G11_VGPU_PROFILE_V1|${GPU_PROFILE}|${VM_UUID,,}|${VGPU_PROFILE_CATALOG_SHA256}|10DE:1E30|31.0.15.3833"
+    VGPU_PORTABLE_PROFILE_CLAIM="G11_VGPU_PROFILE_V1|${GPU_PROFILE}|${VM_UUID,,}|${VGPU_PROFILE_CATALOG_SHA256}|10DE:1E30|${VGPU_PORTABLE_GUEST_DRIVER}"
+    unset VGPU_PORTABLE_HOST_DRIVER VGPU_PORTABLE_GUEST_DRIVER
 fi
 
 if [[ -z "$VGPU_ROMBAR" ]]; then
     # native 用 ramfb 提供固件画面，不向 OVMF 暴露 NVIDIA ROM，避免 EFI
     # GOP 半初始化；Windows GRID 驱动已实测可直接接管。旧模式保持 auto。
     [[ "$MODE" == vgpu-gtk || "$MODE" == vgpu-sdl ||
-       "$MODE" == driver-install-gtk || "$MODE" == driver-install-sdl ]] && \
+       "$MODE" == driver-install-gtk || "$MODE" == driver-install-sdl ||
+       "$MODE" == driver-install-headless ]] && \
         VGPU_ROMBAR=0 || VGPU_ROMBAR=auto
 fi
 
@@ -2898,6 +3024,25 @@ fi
 : "${BR0:=br0}"
 : "${G11_BRIDGE_CONFIG:=/etc/qemu/g11-bridge.conf}"
 : "${G11_BRIDGE_HELPER:=/usr/local/libexec/qemu-g11-bridge-helper}"
+case "$LAB_USERNET" in
+    0|1) ;;
+    *) echo "LAB_USERNET 内部状态无效: $LAB_USERNET" >&2; exit 2 ;;
+esac
+if (( LAB_USERNET )); then
+    [[ -z "$VLAN_ID" ]] || {
+        echo "--lab-usernet 不能与 --vlan-id/VLAN_ID 组合" >&2
+        exit 2
+    }
+    if [[ -z "$LAB_USERNET_WINRM_PORT" ]]; then
+        LAB_USERNET_WINRM_PORT=$((15984 + VM_ID))
+    fi
+    [[ "$LAB_USERNET_WINRM_PORT" =~ ^[0-9]+$ \
+        && "$LAB_USERNET_WINRM_PORT" -ge 1024 \
+        && "$LAB_USERNET_WINRM_PORT" -le 65535 ]] || {
+        echo "LAB_USERNET_WINRM_PORT 必须是 1024..65535: ${LAB_USERNET_WINRM_PORT}" >&2
+        exit 2
+    }
+fi
 VLAN_TAP_IF=""
 G11_VLAN_RUNTIME_MARKER="$(g11_vlan_marker_path "$VM_ID")"
 if [[ -n "$VLAN_ID" ]]; then
@@ -2914,7 +3059,7 @@ if [[ -n "$VLAN_ID" ]]; then
         exit 2
     }
 fi
-if [[ "$DRY_RUN" != 1 ]]; then
+if [[ "$DRY_RUN" != 1 && "$LAB_USERNET" != 1 ]]; then
     if [[ -n "$VLAN_ID" || "${BRIDGE_UPLINK_CHECK:-required}" != off ]]; then
         g11_network_maintenance_lock_shared \
             "${G11_NETWORK_LOCK:-/run/qemu-g11-network.lock}" || exit $?
@@ -3050,7 +3195,7 @@ if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
         exit 1
     }
     case "$MODE" in
-        install|driver-install-sdl|driver-install-gtk)
+        install|driver-install-sdl|driver-install-gtk|driver-install-headless)
             echo "[start-vm] 私有克隆初始化期间禁止切换到 Windows/GRID 驱动安装模式" >&2
             exit 1
             ;;
@@ -3323,6 +3468,15 @@ esac
 
 : "${QEMU_BIN:=$here/../build/qemu-system-x86_64}"
 : "${QEMU_IMG:=$here/../build/qemu-img}"
+: "${G11_QEMU_DATA_DIR:=$here/../pc-bios}"
+[[ -d "$G11_QEMU_DATA_DIR" && ! -L "$G11_QEMU_DATA_DIR" \
+    && -r "$G11_QEMU_DATA_DIR/bios-256k.bin" \
+    && -r "$G11_QEMU_DATA_DIR/vgabios-stdvga.bin" ]] || {
+    echo "[start-vm] QEMU x86 firmware 数据目录缺失或不完整: $G11_QEMU_DATA_DIR" >&2
+    exit 1
+}
+G11_QEMU_DATA_DIR=$(readlink -f -- "$G11_QEMU_DATA_DIR")
+export G11_QEMU_DATA_DIR
 
 # Probe the exact catalog CPU against KVM before creating a disk, changing
 # offline guest state, allocating a TAP/mdev or starting swtpm.  Dry-run stays
@@ -3373,11 +3527,31 @@ if [[ "$MODE" == install && ! -f "$ISO" ]]; then
     echo "ISO 不存在: $ISO" >&2
     exit 1
 fi
+if (( FRESH_UNATTENDED )); then
+    [[ -f "$FRESH_UNATTEND_TEMPLATE" && ! -L "$FRESH_UNATTEND_TEMPLATE" ]] || {
+        echo "[start-vm] 内置全新装机模板缺失或类型不安全: $FRESH_UNATTEND_TEMPLATE" >&2
+        exit 1
+    }
+    [[ ! -e "$DISK_PATH" && ! -L "$DISK_PATH" ]] || {
+        echo "[start-vm] 全自动装机提交前实例盘已出现，拒绝擦盘: $DISK_PATH" >&2
+        exit 1
+    }
+    FRESH_WINDOWS_ISO_ACTUAL_SHA256=$(sha256sum -- "$ISO" | awk '{print $1}')
+    [[ "$FRESH_WINDOWS_ISO_ACTUAL_SHA256" == "$FRESH_WINDOWS_ISO_SHA256" ]] || {
+        echo "[start-vm] 全自动 Win10 Pro 模板只接受已审核的 win10.iso" >&2
+        echo "  expected: $FRESH_WINDOWS_ISO_SHA256" >&2
+        echo "  actual:   ${FRESH_WINDOWS_ISO_ACTUAL_SHA256:-unreadable}" >&2
+        exit 1
+    }
+    unset FRESH_WINDOWS_ISO_ACTUAL_SHA256
+fi
 
 # OVMF can read a USB BOT CD-ROM efficiently but does not create a persistent
 # boot option for this El Torito layout on fresh NVRAM.  The reviewed helper is
-# a tiny read-only FAT volume that chainloads only a Windows ISO containing both
-# EFI/BOOT/BOOTX64.EFI and sources/boot.wim.  Verify the exact generated asset
+# a tiny FAT template that selects Microsoft's signed no-prompt loader only when
+# the matching Windows data/El Torito views are present.  start-vm gives QEMU a
+# per-instance writable copy so the helper can consume itself exactly once;
+# the repository template remains immutable.  Verify the exact generated asset
 # before xorriso, blank-disk publication, TPM/TAP/mdev allocation or full VM launch.
 # IDE fallback and every non-install mode deliberately have no helper dependency.
 if [[ "$MODE" == install && "$INSTALL_MEDIA_BACKEND" == usb ]]; then
@@ -3406,8 +3580,9 @@ if [[ "$MODE" == install && "$INSTALL_MEDIA_BACKEND" == usb ]]; then
 fi
 
 # Windows Setup 会从第二张只读光盘根目录自动读取 Autounattend.xml。
-# 模板只处理 locale/OOBE/内置 Administrator/NumLock；产品密钥、版本和
-# 磁盘分区仍由安装界面确认，因此给已有系统盘挂安装 ISO 也不会静默擦盘。
+# 普通模板只处理 locale/OOBE/内置 Administrator/NumLock；产品密钥、版本
+# 和磁盘分区仍由安装界面确认。全自动模板另有 --fresh-unattended、空盘状态
+# 和精确 ISO 哈希三重门禁，绝不允许由 INSTALL_UNATTEND_TEMPLATE 偷换启用。
 # answer ISO 在建空系统盘之前生成：模板或 xorriso 有问题时可安全重试，
 # 不会留下一个看似已准备好、实际无法按预期安装的 blank disk。
 if [[ "$MODE" == install && "$INSTALL_UNATTENDED" == 1 ]]; then
@@ -3419,9 +3594,15 @@ if [[ "$MODE" == install && "$INSTALL_UNATTENDED" == 1 ]]; then
         windows_unattend_build_iso \
             "$INSTALL_UNATTEND_TEMPLATE" "$UNATTEND_ISO" \
             "$INSTALL_COMPUTER_NAME"
+        unset WINDOWS_UNATTEND_ADMIN_PASSWORD
     fi
-    echo "[start-vm] 自动 OOBE: Administrator 空密码 / China Standard Time / NumLock on"
-    echo "[start-vm] 手动安装: 产品密钥 / Windows 版本 / 目标磁盘与分区"
+    if (( FRESH_UNATTENDED )); then
+        echo "[start-vm] 全新自动安装: 已审核中文 Windows 10 Pro / GPT / Disk 0"
+        echo "[start-vm] 安全边界: 调用前空盘 + 固定模板 + 固定 ISO SHA-256"
+    else
+        echo "[start-vm] 自动 OOBE: Administrator 空密码 / China Standard Time / NumLock on"
+        echo "[start-vm] 手动安装: 产品密钥 / Windows 版本 / 目标磁盘与分区"
+    fi
     echo "[start-vm] 应答介质: $UNATTEND_ISO  (ComputerName=$INSTALL_COMPUTER_NAME)"
 elif [[ "$MODE" == install ]]; then
     echo "[start-vm] 手动 OOBE: 未附加 Autounattend.xml"
@@ -3515,7 +3696,7 @@ disk_headroom_guard "$DISK_PATH"
 # 和模式缓存；只改系统 hive，不向 guest 复制脚本、安装服务或创建计划任务。
 if [[ "$DRY_RUN" != 1 && "$MONITOR_SYNC" == 1 ]]; then
     case "$MODE" in
-        vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl|rdp)
+        vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl|driver-install-headless|rdp)
             echo "[start-vm] 检查 host 侧 Windows EDID_OVERRIDE/EDID（guest 内不安装组件）..."
             QEMU_EDID_BIN="${QEMU_EDID:-$(dirname "$QEMU_BIN")/qemu-edid}"
             monitor_sync_rc=0
@@ -3526,7 +3707,7 @@ if [[ "$DRY_RUN" != 1 && "$MONITOR_SYNC" == 1 ]]; then
                 0) ;;
                 10)
                     case "$MODE" in
-                        driver-install-sdl|driver-install-gtk)
+                        driver-install-sdl|driver-install-gtk|driver-install-headless)
                             echo "[start-vm] GRID 首装：认证驱动已存在但尚无显示器缓存；标准 VGA 将安全完成枚举"
                             ;;
                         *)
@@ -3538,7 +3719,7 @@ if [[ "$DRY_RUN" != 1 && "$MONITOR_SYNC" == 1 ]]; then
                     ;;
                 12)
                     case "$MODE" in
-                        driver-install-sdl|driver-install-gtk)
+                        driver-install-sdl|driver-install-gtk|driver-install-headless)
                             echo "[start-vm] GRID 首装基线已落盘：安全 EDID/缓存完成，NV_Modes 待驱动安装后补齐"
                             ;;
                         *)
@@ -3550,7 +3731,7 @@ if [[ "$DRY_RUN" != 1 && "$MONITOR_SYNC" == 1 ]]; then
                     ;;
                 13)
                     case "$MODE" in
-                        driver-install-sdl|driver-install-gtk)
+                        driver-install-sdl|driver-install-gtk|driver-install-headless)
                             echo "[start-vm] GRID 首装：尚无 EDID/NVIDIA 缓存；标准 VGA 将先完成枚举，mdev console 保持隔离"
                             ;;
                         *)
@@ -3902,6 +4083,7 @@ fi
 STREAM_HELPER="$here/fb-shm-stream.sh"
 STREAM_BIN="${QEMU_FB_SHM_STREAM_BIN:-$here/../build/qemu-fb-shm-stream}"
 INSTANCE_RUN_DIR=$(vm_storage_instance_run_dir "$VM_ID")
+INSTALL_BOOT_HELPER_RUNTIME="$INSTANCE_RUN_DIR/install-boot-helper.raw"
 DGAME_PREVIEW_SOCKET=$(dgame_preview_socket_path "$INSTANCE_RUN_DIR")
 STREAM_SOCKET="$INSTANCE_RUN_DIR/fb-shm.sock"
 if ((DGAME_PREVIEW_ENABLED)); then
@@ -4215,7 +4397,7 @@ if [[ "$MODE" == vgpu-gtk || "$MODE" == vgpu-sdl ]]; then
     fi
 fi
 case "$MODE" in
-    rdp|vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl)
+    rdp|vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl|driver-install-headless)
         if ! VGPU_ROOT_PORT_HELP=$(
                 "$QEMU_BIN" -device pcie-root-port,help 2>&1
             ); then
@@ -4399,7 +4581,7 @@ case "$MODE" in
     # native 用 ramfb 做固件期 ConOut；旧拓扑持久化的 PCI/GOP 路径
     # 会让 BDS 直连 mdev，清掉后才能稳定走 ramfb。
     vgpu-gtk|vgpu-sdl) EXPECTED_CONOUT_DEV="" ;;
-    install|no-gpu|rescue-sdl|rescue-gtk|driver-install-sdl|driver-install-gtk)
+    install|no-gpu|rescue-sdl|rescue-gtk|driver-install-sdl|driver-install-gtk|driver-install-headless)
         EXPECTED_CONOUT_DEV=02
         ;;
 esac
@@ -4647,7 +4829,12 @@ MACHINE_ARGS+=",x-oem-id=ALASKA,x-oem-table-id=A M I"  # 覆盖 QEMU ACPI OEM ID
 
 # ─── 网络 ───────────────────────────────────────────────────────────────────
 NIC_ARG="e1000e,netdev=net0,mac=${VM_MAC},subsys_ven=0x8086,subsys=0xA01F,bus=pcie.0,addr=0x4"
-if [[ -n "$VLAN_ID" ]]; then
+if (( LAB_USERNET )); then
+    NET_ARGS=(
+        -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${LAB_USERNET_WINRM_PORT}-:5985"
+        -device "$NIC_ARG"
+    )
+elif [[ -n "$VLAN_ID" ]]; then
     NET_ARGS=(
         -netdev "tap,id=net0,ifname=${VLAN_TAP_IF},script=no,downscript=${G11_VLAN_DOWNSCRIPT}"
         -device "$NIC_ARG"
@@ -4711,7 +4898,26 @@ if [[ "$MODE" == "install" ]]; then
             # firmware boot target; it then chainloads the Windows USB CD-ROM
             # after confirming sources/boot.wim.  Frontends are appended after
             # xHCI exists, on stable ports 3 and 4.
-            DRIVE_ARGS+=( -drive "file=${INSTALL_BOOT_HELPER},if=none,id=installboot,format=raw,readonly=on" )
+            if [[ "$DRY_RUN" != 1 ]]; then
+                if [[ -L "$INSTALL_BOOT_HELPER_RUNTIME" ||
+                      ( -e "$INSTALL_BOOT_HELPER_RUNTIME" &&
+                        ! -f "$INSTALL_BOOT_HELPER_RUNTIME" ) ]]; then
+                    echo "[start-vm] 拒绝不安全的一次性安装 helper: $INSTALL_BOOT_HELPER_RUNTIME" >&2
+                    exit 1
+                fi
+                install_boot_helper_tmp=$(mktemp \
+                    "$INSTANCE_RUN_DIR/.install-boot-helper.XXXXXX") || exit 1
+                if ! install -m 0600 -- "$INSTALL_BOOT_HELPER" \
+                        "$install_boot_helper_tmp" ||
+                        ! mv -fT -- "$install_boot_helper_tmp" \
+                            "$INSTALL_BOOT_HELPER_RUNTIME"; then
+                    rm -f -- "$install_boot_helper_tmp"
+                    echo "[start-vm] 无法发布一次性安装 helper" >&2
+                    exit 1
+                fi
+                unset install_boot_helper_tmp
+            fi
+            DRIVE_ARGS+=( -drive "file=${INSTALL_BOOT_HELPER_RUNTIME},if=none,id=installboot,format=raw" )
             # Keep the ISO frontend before the helper frontend.  Combined
             # with ISO bootindex=3 this makes OVMF connect its SimpleFS before
             # launching helper=1; reversing the device order reproduces a
@@ -4921,13 +5127,15 @@ case "$MODE" in
         #               GTK 没这问题。
         #   sdl         SDL2 (gl=off 软件渲染)。X11 session OK；Wayland
         #               下慎用，可能错位。
-        # 两种都需要 QEMU build 带相应支持，没的话跑
+        #   none        SSH 全自动装机，不创建宿主显示窗口。
+        # GTK/SDL 需要 QEMU build 带相应支持，没的话跑
         # ./deploy/host/build-qemu.sh 重编。
         GFX_ARGS+=( -vga none -device "VGA,id=bootstrap-vga,bus=pcie.0,addr=0x2" )
         case "$INSTALL_GFX_BACKEND" in
             sdl) GFX_ARGS+=( -display sdl,gl=off ) ;;
             gtk) GFX_ARGS+=( -display gtk,gl=off,grab-on-hover=on ) ;;
-            *)   echo "未知 INSTALL_GFX_BACKEND=${INSTALL_GFX_BACKEND} (gtk|sdl)" >&2; exit 2 ;;
+            none) GFX_ARGS+=( -display none ) ;;
+            *)   echo "未知 INSTALL_GFX_BACKEND=${INSTALL_GFX_BACKEND} (gtk|sdl|none)" >&2; exit 2 ;;
         esac
         ;;
     no-gpu)
@@ -4945,7 +5153,7 @@ case "$MODE" in
             rescue-gtk) GFX_ARGS+=( -display gtk,gl=off,grab-on-hover=on ) ;;
         esac
         ;;
-    driver-install-sdl|driver-install-gtk)
+    driver-install-sdl|driver-install-gtk|driver-install-headless)
         # Safe first/reinstall topology for the production-signed GRID package:
         # Windows keeps a temporary standard VGA as the only host-visible
         # console while the real mdev remains enumerated for PnP.  QEMU never
@@ -4965,6 +5173,9 @@ case "$MODE" in
                 ;;
             driver-install-gtk)
                 GFX_ARGS+=( -display "gtk,gl=off,grab-on-hover=on" )
+                ;;
+            driver-install-headless)
+                GFX_ARGS+=( -display none )
                 ;;
         esac
         ;;
@@ -5060,6 +5271,18 @@ if [[ -n "${MDEV_UUID:-}" && "$DRY_RUN" != 1 ]]; then
         cleanup_started_tpm
     }
     trap cleanup_native_mdev EXIT
+fi
+
+VGPU_HOST_NUMA_NODE=""
+if [[ -n "${MDEV_UUID:-}" && "$DRY_RUN" != 1 ]]; then
+    if VGPU_HOST_NUMA_NODE=$(mdev_numa_node "$MDEV_UUID"); then
+        CPU_ISOLATION_PREFERRED_NUMA_NODE=$VGPU_HOST_NUMA_NODE
+    else
+        echo "[start-vm] WARN: 无法解析 mdev 的宿主 NUMA 节点，使用通用调度" >&2
+        CPU_ISOLATION_PREFERRED_NUMA_NODE=auto
+    fi
+else
+    CPU_ISOLATION_PREFERRED_NUMA_NODE=auto
 fi
 
 # ─── ivshmem ──────────────────────────────────────────────────────────────
@@ -5259,7 +5482,9 @@ if [[ "$POINTER_MODE" == absolute ]]; then
 else
     echo "  相对鼠标: ${MOUSE_BRAND} ${MOUSE_MODEL} / usb-mouse / USB ${MOUSE_VID#0x}:${MOUSE_PID#0x} / SN=${MOUSE_SERIAL_POLICY} / ${MOUSE_FIDELITY}"
 fi
-if [[ -n "$VLAN_ID" ]]; then
+if (( LAB_USERNET )); then
+    echo "  网络: lab usernet NAT / WinRM 127.0.0.1:${LAB_USERNET_WINRM_PORT} -> guest:5985"
+elif [[ -n "$VLAN_ID" ]]; then
     echo "  网络: access VLAN ${VLAN_ID} / ${VLAN_TAP_IF} -> br0（guest untagged）"
 else
     echo "  网络: br0 默认/native LAN"
@@ -5320,8 +5545,12 @@ case "$MODE" in
         echo "  显示: vGPU console -> ${WINDOW_BACKEND} (ramfb early boot, 无 guest relay)"
         echo "  显示能力: 1 head / 1920x1080 / max_pixels=2073600"
         echo "  Windows 有效显示器目标: ${MONITOR_DISPLAY_NAME:-${MONITOR_PROFILE:-legacy/unknown}} (${MONITOR_VENDOR:-???}:${MONITOR_PRODUCT_ID:-???}; EDID_OVERRIDE + raw cache)" ;;
-    driver-install-sdl|driver-install-gtk)
-        echo "  显示: 临时标准 VGA -> ${WINDOW_BACKEND}；NVIDIA mdev display=off（仅供生产 GRID PnP 安装）"
+    driver-install-sdl|driver-install-gtk|driver-install-headless)
+        if [[ "$MODE" == driver-install-headless ]]; then
+            echo "  显示: 临时标准 VGA（headless）；NVIDIA mdev display=off（仅供生产 GRID PnP 安装）"
+        else
+            echo "  显示: 临时标准 VGA -> ${WINDOW_BACKEND}；NVIDIA mdev display=off（仅供生产 GRID PnP 安装）"
+        fi
         echo "  安装保护: spoof=off / rombar=0 / 无 ramfb / 无 NVIDIA console REGION 读取"
         echo "  安装后要求: 完整关机 -> host 认证 NV_Modes -> 再以正常 vGPU 模式启动" ;;
     rescue-sdl)
@@ -5368,6 +5597,7 @@ esac
 # QEMU command line built once, used by both code paths below.
 QEMU_CMD=(
     "$QEMU_BIN"
+    -L "$G11_QEMU_DATA_DIR"
     -name "vm${VM_ID}"
     -machine "$MACHINE_ARGS"
     -cpu "$CPU_ARGS"
@@ -5407,7 +5637,28 @@ QEMU_CMD=(
 # Defense in depth for callers that exported a runtime credential before
 # entering this script.  QEMU never needs it, and env -u also covers every
 # launch mode below without changing the reviewed QEMU argv.
-QEMU_LAUNCH=( env -u SUDO_PASSWORD )
+QEMU_LAUNCH=(
+    env
+    -u SUDO_PASSWORD
+    -u WINDOWS_UNATTEND_ADMIN_PASSWORD
+    -u GUEST_PASS
+    -u G11_LAB_GUEST_PASSWORD
+    -u G11_ARM_ADMIN_PASS
+)
+if [[ -n "$VGPU_HOST_NUMA_NODE" ]]; then
+    command -v numactl >/dev/null 2>&1 || {
+        echo "[start-vm] mdev 位于 NUMA ${VGPU_HOST_NUMA_NODE}，但缺少 numactl；请安装 numactl" >&2
+        exit 1
+    }
+    # Apply the policy before QEMU allocates/preallocates ram0.  The cgroup
+    # pinner later gives individual vCPU threads exact same-node CPUs.
+    QEMU_LAUNCH+=(
+        numactl
+        "--cpunodebind=${VGPU_HOST_NUMA_NODE}"
+        "--membind=${VGPU_HOST_NUMA_NODE}"
+    )
+    echo "[start-vm] vGPU NUMA locality: node=${VGPU_HOST_NUMA_NODE} (CPU + RAM)"
+fi
 if [[ "$LOCAL_INPUT_BACKEND" == sdl &&
       "$QEMU_SDL_GNOME_ANIMATIONS" == off ]] &&
         gnome_super_shortcuts_is_gnome &&
@@ -5500,7 +5751,10 @@ fi
 QEMU_LOG=$(vm_storage_log_path "$VM_ID")
 mkdir -p "$(dirname "$QEMU_LOG")"
 : > "$QEMU_LOG"
-if [[ -n "$VLAN_ID" ]]; then
+if (( LAB_USERNET )); then
+    printf '[start-vm] network mode=lab-usernet winrm=127.0.0.1:%s->guest:5985\n' \
+        "$LAB_USERNET_WINRM_PORT" >>"$QEMU_LOG"
+elif [[ -n "$VLAN_ID" ]]; then
     printf '[start-vm] network access-vlan=%s tap=%s bridge=br0 guest-tagging=untagged\n' \
         "$VLAN_ID" "$VLAN_TAP_IF" >>"$QEMU_LOG"
 else
@@ -5691,22 +5945,49 @@ fi
     cd "$here"
     mac_lc=${VM_MAC,,}
     guest_ip=""
+    winrm_host=""
+    winrm_port=5985
+    setup_guest_user=${GUEST_USER:-Administrator}
+    setup_guest_pass=${GUEST_PASS:-${G11_LAB_GUEST_PASSWORD:-}}
     winrm_ready=0
-    echo "[setup-task] 等 guest WinRM (5985)..."
+    winrm_python=$(g11_python_resolve pypsrp) || {
+        echo "[setup-task] 缺少受管 WinRM Python，跳过 auto-setup"
+        exit 0
+    }
+    if ((LAB_USERNET)); then
+        winrm_host=127.0.0.1
+        winrm_port=$LAB_USERNET_WINRM_PORT
+    fi
+    if (( ${#setup_guest_pass} < 6 || ${#setup_guest_pass} > 64 )) ||
+            [[ "$setup_guest_pass" == *$'\r'* || "$setup_guest_pass" == *$'\n'* ]]; then
+        echo "[setup-task] 未通过 GUEST_PASS/G11_LAB_GUEST_PASSWORD 提供有效运行时凭据，跳过 auto-setup"
+        exit 0
+    fi
+    echo "[setup-task] 等 guest WinRM (${winrm_host:-bridge-neighbor}:${winrm_port})..."
     for i in $(seq 1 120); do
-        guest_ip=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" -v bridge="$BR0" \
-            '$3==bridge && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}')
-        if [[ -n "$guest_ip" ]] && nc -z -w 2 "$guest_ip" 5985 2>/dev/null; then
-            echo "[setup-task] WinRM port up → ${guest_ip}"
+        if ((LAB_USERNET)); then
+            guest_ip=$winrm_host
+        else
+            guest_ip=$(ip -4 neigh show 2>/dev/null | awk -v m="$mac_lc" -v bridge="$BR0" \
+                '$3==bridge && tolower($5)==m && $1 ~ /^[0-9]/ {print $1; exit}')
+            winrm_host=$guest_ip
+        fi
+        if [[ -n "$winrm_host" ]] && nc -z -w 2 "$winrm_host" "$winrm_port" 2>/dev/null; then
+            echo "[setup-task] WinRM port up → ${winrm_host}:${winrm_port}"
             # WinRM TCP listener 通 ≠ pypsrp NTLM 能用。Fresh boot 阶段
             # 端口通了但 Windows 后台 service 还在 init，pypsrp connect
             # 会 connection refused / 401。等 NTLM 稳定一次再继续。
             for j in $(seq 1 30); do
-                if python3 - "$guest_ip" <<'PY' >/dev/null 2>&1; then
+                if env -u GUEST_PASS -u G11_LAB_GUEST_PASSWORD "$winrm_python" - \
+                        "$winrm_host" "$setup_guest_user" "$winrm_port" \
+                        3<<<"$setup_guest_pass" <<'PY' >/dev/null 2>&1; then
 import sys
 from pypsrp.client import Client
 try:
-    Client(sys.argv[1], username='Administrator', password='123456', ssl=False, auth='ntlm') \
+    with open(3, 'r', encoding='utf-8') as stream:
+        password = stream.read().removesuffix('\n')
+    Client(sys.argv[1], username=sys.argv[2], password=password,
+           ssl=False, auth='ntlm', port=int(sys.argv[3])) \
         .execute_ps('Get-Date')
     sys.exit(0)
 except Exception:
@@ -5735,10 +6016,15 @@ PY
     #   lic:    nvidia-smi License Status (Licensed/Unlicensed/N/A)
     state=""
     for k in $(seq 1 8); do
-        state=$(python3 - "$guest_ip" <<'PY' 2>/dev/null || true
+        state=$(env -u GUEST_PASS -u G11_LAB_GUEST_PASSWORD "$winrm_python" - \
+            "$winrm_host" "$setup_guest_user" "$winrm_port" \
+            3<<<"$setup_guest_pass" <<'PY' 2>/dev/null || true
 import sys
 from pypsrp.client import Client
-c = Client(sys.argv[1], username='Administrator', password='123456', ssl=False, auth='ntlm')
+with open(3, 'r', encoding='utf-8') as stream:
+    password = stream.read().removesuffix('\n')
+c = Client(sys.argv[1], username=sys.argv[2], password=password,
+           ssl=False, auth='ntlm', port=int(sys.argv[3]))
 ps = r"""
 $svc  = (Get-Service NvDisplayContainer -EA 0).Status
 $grid = Test-Path 'C:\Windows\System32\drivers\nvlddmkm.sys'
@@ -5773,10 +6059,9 @@ PY
         exit 0
     fi
 
-    # 期望 driver 版本：GRID 16.4 / 538.33 内部版本号
-    # (host vGPU driver 是 535.161.05 = vGPU 16.x，必须配 16.x guest driver
-    #  才不会 "driver version mismatch" Error 43)
-    EXPECT_VER="31.0.15.3833"
+    # Host/guest 必须命中 vgpu-driver-assets.sh 的精确审核映射；R535、
+    # 19.0 和 19.5 不能在这里再用一个写死的 guest 版本互相误判。
+    EXPECT_VER="$VGPU_SELECTED_DRIVER_VERSION"
 
     # ── 决策矩阵 ──
     # 1) sys=False  或  ver != EXPECT_VER  → driver 缺/坏，重装
@@ -5798,20 +6083,36 @@ PY
             echo "[setup-task] 请完整关机后运行：./deploy/scripts/vmctl.sh driver-install ${VM_ID}"
         fi
     elif [[ "$err" == "43" && "$lic" != "Licensed" ]]; then
-        echo "[setup-task] driver 完整但未授权 (Error 43) → 跑 install-vgpu-license"
-        ./install-vgpu-license.sh "$VM_ID" --ip "$guest_ip" || echo "[setup-task] license 失败"
+        if ((LAB_USERNET)); then
+            echo "[setup-task] driver 完整但未授权；lab-usernet 自定义端口不执行旧 license helper"
+        else
+            echo "[setup-task] driver 完整但未授权 (Error 43) → 跑 install-vgpu-license"
+            printf '%s\n' "$setup_guest_pass" | GUEST_USER="$setup_guest_user" \
+                ./install-vgpu-license.sh "$VM_ID" --ip "$guest_ip" --password-stdin \
+                || echo "[setup-task] license 失败"
+        fi
     elif [[ "$svc" != "Running" && -n "$svc" ]]; then
         echo "[setup-task] NvDisplayContainer=${svc} → Start-Service"
-        python3 - "$guest_ip" <<'PY' 2>/dev/null || true
+        env -u GUEST_PASS -u G11_LAB_GUEST_PASSWORD "$winrm_python" - \
+            "$winrm_host" "$setup_guest_user" "$winrm_port" \
+            3<<<"$setup_guest_pass" <<'PY' 2>/dev/null || true
 import sys
 from pypsrp.client import Client
-Client(sys.argv[1], username='Administrator', password='123456', ssl=False, auth='ntlm') \
+with open(3, 'r', encoding='utf-8') as stream:
+    password = stream.read().removesuffix('\n')
+Client(sys.argv[1], username=sys.argv[2], password=password,
+       ssl=False, auth='ntlm', port=int(sys.argv[3])) \
     .execute_ps("Start-Service NvDisplayContainer")
 PY
     elif [[ -z "$svc" ]]; then
-        echo "[setup-task] NvDisplayContainer 没装 → 跑 setup-guest（仅 service 步）"
-        ./setup-guest.sh "$VM_ID" --ip "$guest_ip" --skip-vgpu --skip-ivshmem \
-            --skip-stealth --skip-nvapi-shim --skip-monitor --skip-input || true
+        if ((LAB_USERNET)); then
+            echo "[setup-task] NvDisplayContainer 未安装；lab-usernet 下跳过不支持自定义端口的旧 service helper"
+        else
+            echo "[setup-task] NvDisplayContainer 没装 → 跑 setup-guest（仅 service 步）"
+            GUEST_PASS="$setup_guest_pass" GUEST_USER="$setup_guest_user" \
+                ./setup-guest.sh "$VM_ID" --ip "$guest_ip" --skip-vgpu --skip-ivshmem \
+                --skip-stealth --skip-nvapi-shim --skip-monitor --skip-input || true
+        fi
     else
         echo "[setup-task] driver+license+service 全 OK；GPU 产品名由 host per-mdev 提供 (license=${lic})"
     fi

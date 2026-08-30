@@ -1,0 +1,960 @@
+diff --git a/src/config.rs b/src/config.rs
+index 56cee7c..7f43994 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -18,10 +18,17 @@ impl Defaults {
+     const fn unlock_migration() -> bool {
+         false
+     }
++
++    #[inline]
++    const fn observe_only() -> bool {
++        false
++    }
+ }
+ 
+ #[derive(Debug, Deserialize)]
+ pub struct Config {
++    #[serde(default = "Defaults::observe_only")]
++    pub observe_only: bool,
+     #[serde(default = "Defaults::unlock")]
+     pub unlock: bool,
+     #[serde(default = "Defaults::unlock_migration")]
+@@ -40,6 +47,7 @@ impl Default for Config {
+     #[inline]
+     fn default() -> Self {
+         Self {
++            observe_only: Defaults::observe_only(),
+             unlock: Defaults::unlock(),
+             unlock_migration: Defaults::unlock_migration(),
+             pci_info_map: None,
+diff --git a/src/lib.rs b/src/lib.rs
+index 5fdd9d5..355baa6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -54,12 +54,15 @@ use crate::nvidia::ctrl2080gpu::NV2080_CTRL_CMD_GPU_GET_INFOROM_OBJECT_VERSION;
+ use crate::nvidia::ctrl9096::NV9096_CTRL_CMD_GET_ZBC_CLEAR_TABLE;
+ use crate::nvidia::ctrla081::{
+     NvA081CtrlCmdVgpuConfigGetMigrationCapParams, NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525,
+-    NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580, NvA081CtrlVgpuInfoV525, NvA081CtrlVgpuInfoV580,
++    NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580,
++    NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159, NvA081CtrlVgpuInfoV525,
++    NvA081CtrlVgpuInfoV580, NvA081CtrlVgpuInfoV580_159,
+     NVA081_CTRL_CMD_VGPU_CONFIG_GET_MIGRATION_CAP, NVA081_CTRL_CMD_VGPU_CONFIG_GET_VGPU_TYPE_INFO,
+ };
+ use crate::nvidia::ctrla082::{
+     NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525,
+     NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580,
++    NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159,
+     NVA082_CTRL_CMD_HOST_VGPU_DEVICE_GET_VGPU_TYPE_INFO,
+ };
+ use crate::nvidia::error::{
+@@ -82,8 +85,13 @@ static RM_IDENTITY_OVERRIDE: Mutex<RmIdentityOverrideState> =
+ const DEFAULT_RM_CONTROL_TRACE_LIMIT: u32 = 4096;
+ const MAX_RM_CONTROL_TRACE_LIMIT: u32 = 100_000;
+ const NVIDIA_MODULE_VERSION_PATH: &str = "/sys/module/nvidia/version";
++const MDEV_DEVICES_PATH: &str = "/sys/bus/mdev/devices";
+ const NV2080_CTRL_CMD_FB_GET_INFO_V2: u32 = 0x2080_1303;
+-const NV2080_CTRL_FB_INFO_MAX_LIST_SIZE: usize = 0x36;
++const NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R535: usize = 0x36;
++// NVIDIA open-gpu-kernel-modules commit 307159f (the R580.65.05 source)
++// deliberately expands this fixed array to 0x80 entries. The observed
++// 580.65.05 RM call is therefore 4 + (0x80 * 8) = 1028 bytes.
++const NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R580: usize = 0x80;
+ const NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH: u32 = 0x0b;
+ const NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE: u32 = 0x0d;
+ const NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID: u32 = 0x1c;
+@@ -95,9 +103,15 @@ struct RmInfoEntry {
+ }
+ 
+ #[repr(C)]
+-struct Nv2080CtrlFbGetInfoV2Params {
++struct Nv2080CtrlFbGetInfoV2ParamsR535 {
+     fb_info_list_size: u32,
+-    fb_info_list: [RmInfoEntry; NV2080_CTRL_FB_INFO_MAX_LIST_SIZE],
++    fb_info_list: [RmInfoEntry; NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R535],
++}
++
++#[repr(C)]
++struct Nv2080CtrlFbGetInfoV2ParamsR580 {
++    fb_info_list_size: u32,
++    fb_info_list: [RmInfoEntry; NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R580],
+ }
+ 
+ #[derive(Clone, Copy, Default)]
+@@ -116,6 +130,7 @@ impl RmIdentityOverrideConfig {
+ struct RmIdentityOverrideState {
+     mdev_uuid: Option<String>,
+     config: RmIdentityOverrideConfig,
++    abi: Option<RmIdentityAbi>,
+ }
+ 
+ impl RmIdentityOverrideState {
+@@ -127,12 +142,75 @@ impl RmIdentityOverrideState {
+                 fb_ram_type: None,
+                 fb_memory_vendor: None,
+             },
++            abi: None,
+         }
+     }
+ }
+ 
+-fn rm_identity_driver_supported(version: &str) -> bool {
+-    version.trim().starts_with("535.")
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum RmIdentityAbi {
++    R535,
++    R580_65_05,
++    R580_159_01,
++}
++
++fn parse_mdev_framebuffer_mb(description: &str) -> Option<u32> {
++    let value = description
++        .split(',')
++        .map(str::trim)
++        .find_map(|field| field.strip_prefix("framebuffer="))?
++        .trim();
++    let digits_len = value
++        .find(|character: char| !character.is_ascii_digit())
++        .unwrap_or(value.len());
++    if digits_len == 0 {
++        return None;
++    }
++    let amount = value[..digits_len].parse::<u32>().ok()?;
++    match value[digits_len..].trim() {
++        "" | "M" | "m" => Some(amount),
++        "G" | "g" => amount.checked_mul(1024),
++        "K" | "k" => amount.checked_add(1023).map(|value| value / 1024),
++        _ => None,
++    }
++}
++
++fn mdev_framebuffer_mb(mdev_uuid: &str) -> Option<u32> {
++    let description_path = PathBuf::from(MDEV_DEVICES_PATH)
++        .join(mdev_uuid)
++        .join("mdev_type/description");
++    fs::read_to_string(description_path)
++        .ok()
++        .and_then(|description| parse_mdev_framebuffer_mb(&description))
++}
++
++fn rm_identity_field_write_allowed(
++    abi: RmIdentityAbi,
++    index: u32,
++    framebuffer_mb: Option<u32>,
++) -> bool {
++    // On R580, rewriting a V100 guest's physical HBM2 RAM type to the
++    // catalog GDDR5 value keeps the device at Code 0 but deadlocks Windows
++    // shutdown for V100X-2Q. V100X-1Q was independently verified at Code 0
++    // and exits normally with the same RAM_TYPE write. Keep that proven 1 GiB
++    // path, but fail closed for 2 GiB and unknown tiers. BUS_WIDTH and
++    // MEMORYINFO_VENDOR_ID remain independently safe, and R535 is unchanged.
++    !matches!(abi, RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01)
++        || index != NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE
++        || framebuffer_mb == Some(1024)
++}
++
++fn rm_identity_driver_abi(version: &str) -> Option<RmIdentityAbi> {
++    let version = version.trim();
++    if version.starts_with("535.") {
++        Some(RmIdentityAbi::R535)
++    } else if version == "580.65.05" {
++        Some(RmIdentityAbi::R580_65_05)
++    } else if version == "580.159.01" {
++        Some(RmIdentityAbi::R580_159_01)
++    } else {
++        None
++    }
+ }
+ 
+ struct RmControlTraceState {
+@@ -323,6 +401,35 @@ impl VgpuConfigLike for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580 {
+     //impl_trait_fn!(vgpu_extra_params, [u8]);
+ }
+ 
++impl VgpuConfigLike for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159 {
++    impl_trait_fn!(vgpu_type, u32);
++    impl_trait_fn!(vgpu_name, [u8; ..]);
++    impl_trait_fn!(vgpu_class, [u8; ..]);
++    impl_trait_fn!(license, [u8; 128]);
++    impl_trait_fn!(max_instance, u32);
++    impl_trait_fn!(num_heads, u32);
++    impl_trait_fn!(max_resolution_x, u32);
++    impl_trait_fn!(max_resolution_y, u32);
++    impl_trait_fn!(max_pixels, u32);
++    impl_trait_fn!(frl_config, u32);
++    impl_trait_fn!(cuda_enabled, u32);
++    impl_trait_fn!(ecc_supported, u32);
++    impl_trait_fn!(gpu_instance_size => mig_instance_size, u32);
++    impl_trait_fn!(multi_vgpu_supported, u32);
++    impl_trait_fn!(vdev_id, u64);
++    impl_trait_fn!(pdev_id, u64);
++    impl_trait_fn!(fb_length, u64);
++    impl_trait_fn!(mappable_video_size, u64);
++    impl_trait_fn!(fb_reservation, u64);
++    impl_trait_fn!(encoder_capacity, u32);
++    impl_trait_fn!(bar1_length, u64);
++    impl_trait_fn!(frl_enable, u32);
++    impl_trait_fn!(adapter_name, [u8; 64]);
++    impl_trait_fn!(adapter_name_unicode, [u16; 64]);
++    impl_trait_fn!(short_gpu_name_string, [u8; 64]);
++    impl_trait_fn!(licensed_product_name, [u8; 128]);
++}
++
+ impl VgpuConfigLike for NvA081CtrlVgpuInfoV525 {
+     impl_trait_fn!(vgpu_type, u32);
+     impl_trait_fn!(vgpu_name, [u8; ..]);
+@@ -399,6 +506,35 @@ impl VgpuConfigLike for NvA081CtrlVgpuInfoV580 {
+     //impl_trait_fn!(vgpu_extra_params, [u8]);
+ }
+ 
++impl VgpuConfigLike for NvA081CtrlVgpuInfoV580_159 {
++    impl_trait_fn!(vgpu_type, u32);
++    impl_trait_fn!(vgpu_name, [u8; ..]);
++    impl_trait_fn!(vgpu_class, [u8; ..]);
++    impl_trait_fn!(license, [u8; 128]);
++    impl_trait_fn!(max_instance, u32);
++    impl_trait_fn!(num_heads, u32);
++    impl_trait_fn!(max_resolution_x, u32);
++    impl_trait_fn!(max_resolution_y, u32);
++    impl_trait_fn!(max_pixels, u32);
++    impl_trait_fn!(frl_config, u32);
++    impl_trait_fn!(cuda_enabled, u32);
++    impl_trait_fn!(ecc_supported, u32);
++    impl_trait_fn!(gpu_instance_size => mig_instance_size, u32);
++    impl_trait_fn!(multi_vgpu_supported, u32);
++    impl_trait_fn_aligned!(vdev_id, u64);
++    impl_trait_fn_aligned!(pdev_id, u64);
++    impl_trait_fn_aligned!(fb_length, u64);
++    impl_trait_fn_aligned!(mappable_video_size, u64);
++    impl_trait_fn_aligned!(fb_reservation, u64);
++    impl_trait_fn!(encoder_capacity, u32);
++    impl_trait_fn_aligned!(bar1_length, u64);
++    impl_trait_fn!(frl_enable, u32);
++    impl_trait_fn!(adapter_name, [u8; 64]);
++    impl_trait_fn!(adapter_name_unicode, [u16; 64]);
++    impl_trait_fn!(short_gpu_name_string, [u8; 64]);
++    impl_trait_fn!(licensed_product_name, [u8; 128]);
++}
++
+ #[derive(Deserialize)]
+ struct ProfileOverridesConfig {
+     #[serde(default)]
+@@ -554,11 +690,26 @@ fn configure_rm_identity_override_for_mdev(
+     config_overrides: &ProfileOverridesConfig,
+ ) {
+     let mdev_uuid = mdev_uuid.to_string();
++    if CONFIG.observe_only {
++        {
++            let mut state = RM_IDENTITY_OVERRIDE.lock();
++            state.mdev_uuid = Some(mdev_uuid.clone());
++            state.config = RmIdentityOverrideConfig::default();
++            state.abi = None;
++        }
++        RM_IDENTITY_OVERRIDE_ENABLED.store(false, Ordering::Release);
++        info!(
++            "G11_RM_IDENTITY disabled mdev={} observe_only=true",
++            mdev_uuid
++        );
++        return;
++    }
+     let driver_version = fs::read_to_string(NVIDIA_MODULE_VERSION_PATH);
+-    if !driver_version
++    let abi = driver_version
+         .as_deref()
+-        .is_ok_and(rm_identity_driver_supported)
+-    {
++        .ok()
++        .and_then(rm_identity_driver_abi);
++    let Some(abi) = abi else {
+         let reported_version = driver_version
+             .as_deref()
+             .map(str::trim)
+@@ -567,14 +718,15 @@ fn configure_rm_identity_override_for_mdev(
+             let mut state = RM_IDENTITY_OVERRIDE.lock();
+             state.mdev_uuid = Some(mdev_uuid.clone());
+             state.config = RmIdentityOverrideConfig::default();
++            state.abi = None;
+         }
+         RM_IDENTITY_OVERRIDE_ENABLED.store(false, Ordering::Release);
+         error!(
+-            "G11_RM_IDENTITY disabled mdev={} unsupported_driver={} expected=535.x",
++            "G11_RM_IDENTITY disabled mdev={} unsupported_driver={} expected=535.x|580.65.05|580.159.01",
+             mdev_uuid, reported_version
+         );
+         return;
+-    }
++    };
+     let mut config = config_overrides
+         .mdev
+         .get(mdev_uuid.as_str())
+@@ -619,19 +771,29 @@ fn configure_rm_identity_override_for_mdev(
+             config.fb_memory_vendor = None;
+         }
+     }
++    if let Some(value) = config.fb_ram_type {
++        if matches!(abi, RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01) {
++            info!(
++                "G11_RM_IDENTITY armed fb_ram_type={:#x} mdev={} abi={:?} guard=runtime_exact_1024mb",
++                value, mdev_uuid, abi
++            );
++        }
++    }
+ 
+     let enabled = config.enabled();
+     {
+         let mut state = RM_IDENTITY_OVERRIDE.lock();
+         state.mdev_uuid = Some(mdev_uuid.clone());
+         state.config = config;
++        state.abi = Some(abi);
+     }
+     RM_IDENTITY_OVERRIDE_ENABLED.store(enabled, Ordering::Release);
+ 
+     if enabled {
+         info!(
+-            "G11_RM_IDENTITY configured mdev={} fb_bus_width={:?} fb_ram_type={:?} fb_memory_vendor={:?}",
++            "G11_RM_IDENTITY configured mdev={} abi={:?} fb_bus_width={:?} fb_ram_type={:?} fb_memory_vendor={:?}",
+             mdev_uuid,
++            abi,
+             config.fb_bus_width,
+             config.fb_ram_type,
+             config.fb_memory_vendor
+@@ -658,34 +820,52 @@ fn patch_rm_info_entry(
+ }
+ 
+ unsafe fn apply_rm_identity_override(io_data: &mut Nvos54Parameters) {
+-    if !RM_IDENTITY_OVERRIDE_ENABLED.load(Ordering::Acquire)
++    if CONFIG.observe_only
++        || !RM_IDENTITY_OVERRIDE_ENABLED.load(Ordering::Acquire)
+         || io_data.cmd != NV2080_CTRL_CMD_FB_GET_INFO_V2
+     {
+         return;
+     }
+ 
+-    if io_data.params.is_null()
+-        || io_data.params_size as usize != mem::size_of::<Nv2080CtrlFbGetInfoV2Params>()
+-    {
++    let state = RM_IDENTITY_OVERRIDE.lock();
++    let Some(abi) = state.abi else {
++        error!("G11_RM_IDENTITY refusing FB_GET_INFO_V2 without a selected ABI");
++        return;
++    };
++    let expected_size = match abi {
++        RmIdentityAbi::R535 => mem::size_of::<Nv2080CtrlFbGetInfoV2ParamsR535>(),
++        RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01 => {
++            mem::size_of::<Nv2080CtrlFbGetInfoV2ParamsR580>()
++        }
++    };
++    if io_data.params.is_null() || io_data.params_size as usize != expected_size {
+         error!(
+-            "G11_RM_IDENTITY refusing FB_GET_INFO_V2 size={} expected={}",
+-            io_data.params_size,
+-            mem::size_of::<Nv2080CtrlFbGetInfoV2Params>()
++            "G11_RM_IDENTITY refusing FB_GET_INFO_V2 abi={:?} size={} expected={}",
++            abi, io_data.params_size, expected_size
+         );
+         return;
+     }
+ 
+-    let params: &mut Nv2080CtrlFbGetInfoV2Params = &mut *io_data.params.cast();
+-    if params.fb_info_list_size as usize > params.fb_info_list.len() {
++    let (list_size, entries): (u32, &mut [RmInfoEntry]) = match abi {
++        RmIdentityAbi::R535 => {
++            let params: &mut Nv2080CtrlFbGetInfoV2ParamsR535 = &mut *io_data.params.cast();
++            (params.fb_info_list_size, &mut params.fb_info_list)
++        }
++        RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01 => {
++            let params: &mut Nv2080CtrlFbGetInfoV2ParamsR580 = &mut *io_data.params.cast();
++            (params.fb_info_list_size, &mut params.fb_info_list)
++        }
++    };
++    if list_size as usize > entries.len() {
+         error!(
+-            "G11_RM_IDENTITY refusing FB_GET_INFO_V2 list_size={} max={}",
+-            params.fb_info_list_size,
+-            params.fb_info_list.len()
++            "G11_RM_IDENTITY refusing FB_GET_INFO_V2 abi={:?} list_size={} max={}",
++            abi,
++            list_size,
++            entries.len()
+         );
+         return;
+     }
+ 
+-    let state = RM_IDENTITY_OVERRIDE.lock();
+     let mdev_uuid = state.mdev_uuid.as_deref().unwrap_or("unknown");
+     for (field, index, value) in [
+         (
+@@ -703,12 +883,19 @@ unsafe fn apply_rm_identity_override(io_data: &mut Nvos54Parameters) {
+             Some(value) => value,
+             None => continue,
+         };
+-        match patch_rm_info_entry(
+-            &mut params.fb_info_list,
+-            params.fb_info_list_size,
+-            index,
+-            value,
+-        ) {
++        let framebuffer_mb = if index == NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE {
++            mdev_framebuffer_mb(mdev_uuid)
++        } else {
++            None
++        };
++        if !rm_identity_field_write_allowed(abi, index, framebuffer_mb) {
++            error!(
++                "G11_RM_IDENTITY suppressing field={} value={:#x} mdev={} abi={:?} framebuffer_mb={:?} reason=r580_v100_non_1q_runtime_guard",
++                field, value, mdev_uuid, abi, framebuffer_mb
++            );
++            continue;
++        }
++        match patch_rm_info_entry(entries, list_size, index, value) {
+             Some(old) => info!(
+                 "G11_RM_IDENTITY mdev={} cmd={:#010x} field={} index={:#04x} old={} new={} requested=true",
+                 mdev_uuid, io_data.cmd, field, index, old, value
+@@ -722,8 +909,8 @@ unsafe fn apply_rm_identity_override(io_data: &mut Nvos54Parameters) {
+ 
+     if let Some(value) = state.config.fb_memory_vendor {
+         match patch_rm_info_entry(
+-            &mut params.fb_info_list,
+-            params.fb_info_list_size,
++            entries,
++            list_size,
+             NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID,
+             value,
+         ) {
+@@ -936,7 +1123,7 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+             if check_size!(
+                 NV2080_CTRL_CMD_BUS_GET_PCI_INFO,
+                 Nv2080CtrlBusGetPciInfoParams
+-            ) && CONFIG.unlock =>
++            ) && CONFIG.unlock && !CONFIG.observe_only =>
+         {
+             let params: &mut Nv2080CtrlBusGetPciInfoParams = &mut *io_data.params.cast();
+ 
+@@ -998,11 +1185,11 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+         NV0080_CTRL_CMD_GPU_GET_VIRTUALIZATION_MODE
+         // 18.0 driver sends larger struct with size 8 bytes. Only extra members added at the end,
+         // nothing in between or changed, so accessing the larger struct is "safe"
+-        if io_data.params_size == 8
++        if (io_data.params_size == 8
+             || check_size!(
+                 NV0080_CTRL_CMD_GPU_GET_VIRTUALIZATION_MODE,
+                 Nv0080CtrlGpuGetVirtualizationModeParams
+-            ) && CONFIG.unlock =>
++            )) && CONFIG.unlock && !CONFIG.observe_only =>
+         {
+             let params: &mut Nv0080CtrlGpuGetVirtualizationModeParams = &mut *io_data.params.cast();
+ 
+@@ -1013,7 +1200,7 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+             if check_size!(
+                 NVA081_CTRL_CMD_VGPU_CONFIG_GET_MIGRATION_CAP,
+                 NvA081CtrlCmdVgpuConfigGetMigrationCapParams
+-            ) && CONFIG.unlock_migration =>
++            ) && CONFIG.unlock_migration && !CONFIG.observe_only =>
+         {
+             let params: &mut NvA081CtrlCmdVgpuConfigGetMigrationCapParams =
+                 &mut *io_data.params.cast();
+@@ -1032,7 +1219,9 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+                 ) =>
+             {
+                 let config: &Nv0000CtrlVgpuGetStartDataParams = &*io_data.params.cast();
+-                info!("{:#?}", config);
++                if !CONFIG.observe_only {
++                    info!("{:#?}", config);
++                }
+ 
+                 *LAST_MDEV_UUID.lock() = Some(config.mdev_uuid);
+                 configure_rm_control_trace_for_mdev(config.mdev_uuid);
+@@ -1048,7 +1237,9 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+             {
+                 // 17.0 driver provides mdev uuid as vgpu_name in this command
+                 let params: &mut Nv0000CtrlVgpuCreateDeviceParams = &mut *io_data.params.cast();
+-                info!("{:#?}", params);
++                if !CONFIG.observe_only {
++                    info!("{:#?}", params);
++                }
+ 
+                 *LAST_MDEV_UUID.lock() = Some(params.vgpu_name);
+                 configure_rm_control_trace_for_mdev(params.vgpu_name);
+@@ -1065,21 +1256,35 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+                 {
+                     let params: &mut NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525 =
+                         &mut *io_data.params.cast();
+-                    info!("{:#?}", params);
++                    if !CONFIG.observe_only {
++                        info!("{:#?}", params);
++                    }
++
++                    if !handle_profile_override(&mut params.vgpu_type_info) {
++                        error!("Failed to apply profile override");
++                        return -1;
++                    }
++                } else if check_size_raw!(NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159) {
++                    let params: &mut NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159 =
++                        &mut *io_data.params.cast();
++                    if !CONFIG.observe_only {
++                        info!("{:#?}", params);
++                    }
+ 
+                     if !handle_profile_override(&mut params.vgpu_type_info) {
+                         error!("Failed to apply profile override");
+                         return -1;
+                     }
+                 } else if
+-                    // 19.0 driver sends much larger structure than 18.x and prior with expanded
+-                    // fields. This necessitated a separate structure as it was no longer
+-                    // backwards compatible.
++                    // 19.0 driver sends a much larger structure than 18.x and prior with
++                    // expanded fields. 19.5 adds vgpuSsvid and has its own exact branch above.
+                     check_size_raw!(NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580)
+                 {
+                     let params: &mut NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580 =
+                         &mut *io_data.params.cast();
+-                    info!("{:#?}", params);
++                    if !CONFIG.observe_only {
++                        info!("{:#?}", params);
++                    }
+ 
+                     if !handle_profile_override(&mut params.vgpu_type_info) {
+                         error!("Failed to apply profile override");
+@@ -1091,6 +1296,7 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+                         types: [
+                             NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525,
+                             NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580,
++                            NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159,
+                         ],
+                         other: [5232, 5096],
+                     };
+@@ -1100,7 +1306,22 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+                 if check_size_raw!(NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525) {
+                     let params: &mut NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525 =
+                         &mut *io_data.params.cast();
+-                    info!("{:#?}", params);
++                    if !CONFIG.observe_only {
++                        info!("{:#?}", params);
++                    }
++
++                    if !handle_profile_override(params) {
++                        error!("Failed to apply profile override");
++                        return -1;
++                    }
++                } else if check_size_raw!(
++                    NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159
++                ) {
++                    let params: &mut NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159 =
++                        &mut *io_data.params.cast();
++                    if !CONFIG.observe_only {
++                        info!("{:#?}", params);
++                    }
+ 
+                     if !handle_profile_override(params) {
+                         error!("Failed to apply profile override");
+@@ -1109,7 +1330,9 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+                 } else if check_size_raw!(NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580) {
+                     let params: &mut NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580 =
+                         &mut *io_data.params.cast();
+-                    info!("{:#?}", params);
++                    if !CONFIG.observe_only {
++                        info!("{:#?}", params);
++                    }
+ 
+                     if !handle_profile_override(params) {
+                         error!("Failed to apply profile override");
+@@ -1121,6 +1344,7 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+                         types: [
+                             NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525,
+                             NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580,
++                            NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159,
+                         ],
+                         other: [],
+                     };
+@@ -1134,7 +1358,9 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+         // Things seems to work fine even if some operations that fail result in failed assertions.
+         // So here we change the status value for these cases to cleanup the logs for
+         // `nvidia-vgpu-mgr`.
+-        if io_data.cmd == 0xa0820104 || io_data.cmd == NV9096_CTRL_CMD_GET_ZBC_CLEAR_TABLE {
++        if !CONFIG.observe_only
++            && (io_data.cmd == 0xa0820104 || io_data.cmd == NV9096_CTRL_CMD_GET_ZBC_CLEAR_TABLE)
++        {
+             io_data.status = NV_OK;
+         } else {
+             error!("cmd: {:#x} failed.", io_data.cmd);
+@@ -1144,6 +1370,7 @@ pub unsafe extern "C" fn ioctl(fd: RawFd, request: c_ulong, argp: *mut c_void) -
+     // Workaround for some Maxwell cards not supporting reading inforom.
+     if io_data.cmd == NV2080_CTRL_CMD_GPU_GET_INFOROM_OBJECT_VERSION
+         && io_data.status == NV_ERR_NOT_SUPPORTED
++        && !CONFIG.observe_only
+     {
+         io_data.status = NV_ERR_OBJECT_NOT_FOUND;
+     }
+@@ -1198,6 +1425,13 @@ fn handle_profile_override<C: VgpuConfigLike>(config: &mut C) -> bool {
+         "profile",
+     );
+ 
++    // Observation mode is a strict no-write path: it may select metadata-only
++    // RM events, but it never applies profile, PCI, capability, status or FB
++    // identity changes to the signed driver's response.
++    if CONFIG.observe_only {
++        return true;
++    }
++
+     if let Some(config_override) = config_overrides.profile.get(vgpu_type.as_str()) {
+         info!("Applying profile {} overrides", vgpu_type);
+ 
+@@ -1454,9 +1688,12 @@ mod g11_tests {
+     use std::mem;
+ 
+     use super::{
+-        merge_rm_control_trace_config, patch_rm_info_entry, rm_identity_driver_supported,
+-        Nv2080CtrlFbGetInfoV2Params, ProfileOverridesConfig, RmControlTraceConfig, RmInfoEntry,
+-        NV2080_CTRL_FB_INFO_MAX_LIST_SIZE,
++        merge_rm_control_trace_config, parse_mdev_framebuffer_mb, patch_rm_info_entry,
++        rm_identity_driver_abi, rm_identity_field_write_allowed, Nv2080CtrlFbGetInfoV2ParamsR535,
++        Nv2080CtrlFbGetInfoV2ParamsR580, ProfileOverridesConfig, RmControlTraceConfig,
++        RmIdentityAbi, RmInfoEntry, NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH,
++        NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID, NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE,
++        NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R535, NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R580,
+     };
+ 
+     #[test]
+@@ -1491,17 +1728,91 @@ mod g11_tests {
+     }
+ 
+     #[test]
+-    fn fb_get_info_v2_layout_matches_r535() {
+-        assert_eq!(NV2080_CTRL_FB_INFO_MAX_LIST_SIZE, 0x36);
++    fn fb_get_info_v2_layouts_match_r535_and_r580_65_05() {
++        assert_eq!(NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R535, 0x36);
++        assert_eq!(NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R580, 0x80);
+         assert_eq!(mem::size_of::<RmInfoEntry>(), 8);
+-        assert_eq!(mem::size_of::<Nv2080CtrlFbGetInfoV2Params>(), 436);
++        assert_eq!(mem::size_of::<Nv2080CtrlFbGetInfoV2ParamsR535>(), 436);
++        assert_eq!(mem::size_of::<Nv2080CtrlFbGetInfoV2ParamsR580>(), 1028);
+     }
+ 
+     #[test]
+-    fn rm_identity_is_gated_to_r535() {
+-        assert!(rm_identity_driver_supported("535.161.05\n"));
+-        assert!(!rm_identity_driver_supported("550.163.02\n"));
+-        assert!(!rm_identity_driver_supported("unavailable"));
++    fn rm_identity_abi_is_gated_to_proven_driver_branches() {
++        assert_eq!(
++            rm_identity_driver_abi("535.161.05\n"),
++            Some(RmIdentityAbi::R535)
++        );
++        assert_eq!(
++            rm_identity_driver_abi("580.65.05\n"),
++            Some(RmIdentityAbi::R580_65_05)
++        );
++        assert_eq!(
++            rm_identity_driver_abi("580.159.01\n"),
++            Some(RmIdentityAbi::R580_159_01)
++        );
++        assert_eq!(rm_identity_driver_abi("580.159.03"), None);
++        assert_eq!(rm_identity_driver_abi("580.88"), None);
++        assert_eq!(rm_identity_driver_abi("580.95.05"), None);
++        assert_eq!(rm_identity_driver_abi("550.163.02\n"), None);
++        assert_eq!(rm_identity_driver_abi("unavailable"), None);
++    }
++
++    #[test]
++    fn mdev_framebuffer_parser_accepts_nvidia_units_and_rejects_unknowns() {
++        assert_eq!(
++            parse_mdev_framebuffer_mb(
++                "num_heads=4, frl_config=60, framebuffer=1024M, max_instance=16"
++            ),
++            Some(1024)
++        );
++        assert_eq!(parse_mdev_framebuffer_mb("framebuffer=1G"), Some(1024));
++        assert_eq!(parse_mdev_framebuffer_mb("framebuffer=2048K"), Some(2));
++        assert_eq!(parse_mdev_framebuffer_mb("framebuffer=unknown"), None);
++        assert_eq!(parse_mdev_framebuffer_mb("max_instance=16"), None);
++    }
++
++    #[test]
++    fn r580_ram_type_write_is_limited_to_verified_1q_but_other_fields_remain() {
++        assert!(rm_identity_field_write_allowed(
++            RmIdentityAbi::R535,
++            NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE,
++            None
++        ));
++        assert!(rm_identity_field_write_allowed(
++            RmIdentityAbi::R580_65_05,
++            NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE,
++            Some(1024)
++        ));
++        assert!(!rm_identity_field_write_allowed(
++            RmIdentityAbi::R580_65_05,
++            NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE,
++            Some(2048)
++        ));
++        assert!(!rm_identity_field_write_allowed(
++            RmIdentityAbi::R580_65_05,
++            NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE,
++            None
++        ));
++        assert!(rm_identity_field_write_allowed(
++            RmIdentityAbi::R580_159_01,
++            NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE,
++            Some(1024)
++        ));
++        assert!(!rm_identity_field_write_allowed(
++            RmIdentityAbi::R580_159_01,
++            NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE,
++            Some(2048)
++        ));
++        assert!(rm_identity_field_write_allowed(
++            RmIdentityAbi::R580_65_05,
++            NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH,
++            Some(2048)
++        ));
++        assert!(rm_identity_field_write_allowed(
++            RmIdentityAbi::R580_65_05,
++            NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID,
++            None
++        ));
+     }
+ 
+     #[test]
+diff --git a/src/nvidia/ctrla081.rs b/src/nvidia/ctrla081.rs
+index a53521a..2e44503 100644
+--- a/src/nvidia/ctrla081.rs
++++ b/src/nvidia/ctrla081.rs
+@@ -122,6 +122,58 @@ pub struct NvA081CtrlVgpuInfoV580 {
+     pub heterogeneous_placement_ids: [u32; NVA081_MAX_VGPU_PER_PGPU_V580],
+ }
+ 
++/// R580.159 adds `vgpuSsvid` immediately after `frlEnable`.  Keeping a
++/// separate type is intentional: interpreting a 19.5 response with the 19.0
++/// layout shifts every following string field and would corrupt the signed
++/// manager's output buffer.
++#[repr(C, align(8))]
++pub struct NvA081CtrlVgpuInfoV580_159 {
++    pub vgpu_type: u32,
++    pub vgpu_name: [u8; NVA081_VGPU_STRING_BUFFER_SIZE_V580],
++    pub vgpu_class: [u8; NVA081_VGPU_STRING_BUFFER_SIZE_V580],
++    pub vgpu_signature: [u8; NVA081_VGPU_SIGNATURE_SIZE],
++    pub license: [u8; NV_GRID_LICENSE_INFO_MAX_LENGTH],
++    pub max_instance: u32,
++    pub num_heads: u32,
++    pub max_resolution_x: u32,
++    pub max_resolution_y: u32,
++    pub max_pixels: u32,
++    pub frl_config: u32,
++    pub cuda_enabled: u32,
++    pub ecc_supported: u32,
++    pub gpu_instance_size: u32,
++    pub multi_vgpu_supported: u32,
++    pub vdev_id: AlignedU64,
++    pub pdev_id: AlignedU64,
++    pub profile_size: AlignedU64,
++    pub fb_length: AlignedU64,
++    pub gsp_heap_size: AlignedU64,
++    pub fb_reservation: AlignedU64,
++    pub mappable_video_size: AlignedU64,
++    pub encoder_capacity: u32,
++    pub bar1_length: AlignedU64,
++    pub frl_enable: u32,
++    pub vgpu_ssvid: u16,
++    pub adapter_name: [u8; NV2080_GPU_MAX_NAME_STRING_LENGTH],
++    pub adapter_name_unicode: [u16; NV2080_GPU_MAX_NAME_STRING_LENGTH],
++    pub short_gpu_name_string: [u8; NV2080_GPU_MAX_NAME_STRING_LENGTH],
++    pub licensed_product_name: [u8; NV_GRID_LICENSE_INFO_MAX_LENGTH],
++    pub vgpu_extra_params: [u32; NVA081_EXTRA_PARAMETERS_SIZE],
++    pub ftrace_enable: u32,
++    pub gpu_direct_supported: u32,
++    pub nvlink_p2p_supported: u32,
++    pub max_instance_per_gi: u32,
++    pub multi_vgpu_exclusive: u32,
++    pub exclusive_type: u32,
++    pub exclusive_size: u32,
++    pub gpu_instance_profile_id: u32,
++    pub placement_size: u32,
++    pub homogeneous_placement_count: u32,
++    pub homogeneous_placement_ids: [u32; NVA081_MAX_VGPU_PER_PGPU_V580],
++    pub heterogeneous_placement_count: u32,
++    pub heterogeneous_placement_ids: [u32; NVA081_MAX_VGPU_PER_PGPU_V580],
++}
++
+ pub const NVA081_CTRL_CMD_VGPU_CONFIG_GET_VGPU_TYPE_INFO: u32 = 0xa0810103;
+ 
+ /// This RM control command is used starting in vGPU version 15.0 (525.60.12).
+@@ -142,6 +194,13 @@ pub struct NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580 {
+     pub vgpu_type_info: NvA081CtrlVgpuInfoV580,
+ }
+ 
++/// Exact type-info response layout used by vGPU Manager 580.159.01.
++#[repr(C)]
++pub struct NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159 {
++    pub vgpu_type: u32,
++    pub vgpu_type_info: NvA081CtrlVgpuInfoV580_159,
++}
++
+ pub const NVA081_CTRL_CMD_VGPU_CONFIG_GET_MIGRATION_CAP: u32 = 0xa0810112;
+ 
+ /// See `NVA081_CTRL_CMD_VGPU_CONFIG_GET_MIGRATION_CAP_PARAMS`
+@@ -295,6 +354,21 @@ impl fmt::Debug for NvA081CtrlVgpuInfoV580 {
+     }
+ }
+ 
++impl fmt::Debug for NvA081CtrlVgpuInfoV580_159 {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        f.debug_struct("NvA081CtrlVgpuInfoV580_159")
++            .field("vgpu_type", &self.vgpu_type)
++            .field("vgpu_name", &CStrFormat(&self.vgpu_name))
++            .field("vgpu_class", &CStrFormat(&self.vgpu_class))
++            .field("max_instance", &self.max_instance)
++            .field("fb_length", &HexFormat(self.fb_length))
++            .field("frl_enable", &self.frl_enable)
++            .field("vgpu_ssvid", &HexFormat(self.vgpu_ssvid))
++            .field("adapter_name", &CStrFormat(&self.adapter_name))
++            .finish()
++    }
++}
++
+ impl fmt::Debug for NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525 {
+     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+         f.debug_struct("NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525")
+@@ -313,20 +387,31 @@ impl fmt::Debug for NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580 {
+     }
+ }
+ 
++impl fmt::Debug for NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159 {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        f.debug_struct("NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159")
++            .field("vgpu_type", &self.vgpu_type)
++            .field("vgpu_type_info", &self.vgpu_type_info)
++            .finish()
++    }
++}
++
+ #[cfg(test)]
+ mod test {
+     use std::mem;
+ 
+     use super::{
+         NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525,
+-        NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580, NvA081CtrlVgpuInfoV525,
+-        NvA081CtrlVgpuInfoV580,
++        NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580,
++        NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159, NvA081CtrlVgpuInfoV525,
++        NvA081CtrlVgpuInfoV580, NvA081CtrlVgpuInfoV580_159,
+     };
+ 
+     #[test]
+     fn verify_sizes() {
+         assert_eq!(mem::size_of::<NvA081CtrlVgpuInfoV525>(), 0x1358);
+         assert_eq!(mem::size_of::<NvA081CtrlVgpuInfoV580>(), 0x1528);
++        assert_eq!(mem::size_of::<NvA081CtrlVgpuInfoV580_159>(), 0x1530);
+         assert_eq!(
+             mem::size_of::<NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV525>(),
+             0x1360
+@@ -335,5 +420,9 @@ mod test {
+             mem::size_of::<NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580>(),
+             0x1530
+         );
++        assert_eq!(
++            mem::size_of::<NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159>(),
++            0x1538
++        );
+     }
+ }
+diff --git a/src/nvidia/ctrla082.rs b/src/nvidia/ctrla082.rs
+index 9c951a8..033d1a8 100644
+--- a/src/nvidia/ctrla082.rs
++++ b/src/nvidia/ctrla082.rs
+@@ -92,6 +92,54 @@ pub struct NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580 {
+     pub heterogeneous_placement_ids: [u32; NVA081_MAX_VGPU_PER_PGPU_V580],
+ }
+ 
++/// Exact host-device type-info layout paired with vGPU Manager 580.159.01.
++/// NVIDIA requires this structure to remain in sync with NVA081_CTRL_VGPU_INFO.
++#[repr(C)]
++pub struct NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159 {
++    pub vgpu_type: u32,
++    pub vgpu_name: [u8; NVA081_VGPU_STRING_BUFFER_SIZE_V580],
++    pub vgpu_class: [u8; NVA081_VGPU_STRING_BUFFER_SIZE_V580],
++    pub vgpu_signature: [u8; NVA081_VGPU_SIGNATURE_SIZE],
++    pub license: [u8; NV_GRID_LICENSE_INFO_MAX_LENGTH],
++    pub max_instance: u32,
++    pub num_heads: u32,
++    pub max_resolution_x: u32,
++    pub max_resolution_y: u32,
++    pub max_pixels: u32,
++    pub frl_config: u32,
++    pub cuda_enabled: u32,
++    pub ecc_supported: u32,
++    pub gpu_instance_size: u32,
++    pub multi_vgpu_supported: u32,
++    pub vdev_id: u64,
++    pub pdev_id: u64,
++    pub fb_length: u64,
++    pub mappable_video_size: u64,
++    pub fb_reservation: u64,
++    pub encoder_capacity: u32,
++    pub bar1_length: u64,
++    pub frl_enable: u32,
++    pub vgpu_ssvid: u16,
++    pub adapter_name: [u8; NV2080_GPU_MAX_NAME_STRING_LENGTH],
++    pub adapter_name_unicode: [u16; NV2080_GPU_MAX_NAME_STRING_LENGTH],
++    pub short_gpu_name_string: [u8; NV2080_GPU_MAX_NAME_STRING_LENGTH],
++    pub licensed_product_name: [u8; NV_GRID_LICENSE_INFO_MAX_LENGTH],
++    pub vgpu_extra_params: [u8; NVA081_EXTRA_PARAMETERS_SIZE],
++    pub ftrace_enable: u32,
++    pub gpu_direct_supported: u32,
++    pub nvlink_p2p_supported: u32,
++    pub max_instance_per_gi: u32,
++    pub multi_vgpu_exclusive: u32,
++    pub exclusive_type: u32,
++    pub exclusive_size: u32,
++    pub gpu_instance_profile_id: u32,
++    pub placement_size: u32,
++    pub homogeneous_placement_count: u32,
++    pub homogeneous_placement_ids: [u32; NVA081_MAX_VGPU_PER_PGPU_V580],
++    pub heterogeneous_placement_count: u32,
++    pub heterogeneous_placement_ids: [u32; NVA081_MAX_VGPU_PER_PGPU_V580],
++}
++
+ impl fmt::Debug for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525 {
+     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+         let vgpu_signature = if self.vgpu_signature[..].iter().any(|&x| x != 0) {
+@@ -226,6 +274,21 @@ impl fmt::Debug for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580 {
+     }
+ }
+ 
++impl fmt::Debug for NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159 {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        f.debug_struct("NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159")
++            .field("vgpu_type", &self.vgpu_type)
++            .field("vgpu_name", &CStrFormat(&self.vgpu_name))
++            .field("vgpu_class", &CStrFormat(&self.vgpu_class))
++            .field("max_instance", &self.max_instance)
++            .field("fb_length", &HexFormat(self.fb_length))
++            .field("frl_enable", &self.frl_enable)
++            .field("vgpu_ssvid", &HexFormat(self.vgpu_ssvid))
++            .field("adapter_name", &CStrFormat(&self.adapter_name))
++            .finish()
++    }
++}
++
+ #[cfg(test)]
+ mod test {
+     use std::mem;
+@@ -233,6 +296,7 @@ mod test {
+     use super::{
+         NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV525,
+         NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580,
++        NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159,
+     };
+ 
+     #[test]
+@@ -245,5 +309,9 @@ mod test {
+             mem::size_of::<NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580>(),
+             0x918
+         );
++        assert_eq!(
++            mem::size_of::<NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159>(),
++            0x920
++        );
+     }
+ }

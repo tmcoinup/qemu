@@ -1,12 +1,187 @@
 #!/usr/bin/env bash
-# Shared fail-closed checks for the verified host 535 / guest 538.33 assets.
-# The filenames are historical and must not be used as proof of driver version.
+# Shared fail-closed checks for the reviewed production-signed stacks:
+#
+#   host 535.161.05 -> guest 538.33 / 31.0.15.3833
+#   host 580.159.01 -> guest 582.53 / 32.0.15.8253
+#
+# The legacy R535 filenames are historical and must not be used as proof of
+# driver version.  Keep the VGPU_DRIVER_* names as the R535 archive contract:
+# older production-migration tooling imports them directly.
 
 VGPU_DRIVER_EXE_NAME=553.24.exe
 VGPU_DRIVER_ZIP_NAME=553.24-display-driver.zip
 VGPU_DRIVER_EXE_SHA256=aaa3080c0b7e3a6fbe825a05725f4171c75072faa8b667d97556c1605a219ddd
 VGPU_DRIVER_ZIP_SHA256=a3d7ad8b8082d6ac6214565b4766b5190a819bc9b7574765b14897e0db809690
 VGPU_DRIVER_VERSION=31.0.15.3833
+
+VGPU_R580_DRIVER_EXE_NAME=582.53_grid_win10_win11_server2022_server_2025_dch_64bit_international.exe
+VGPU_R580_DRIVER_EXE_SHA256=6f1210b459efc7f29db930103533c3de9b93c2afdfa8d7b4871640c6b8638c0b
+VGPU_R580_DRIVER_VERSION=32.0.15.8253
+VGPU_R580_PAYLOAD_ARCHIVE_NAME=r580-582.53-official-payload.zip
+VGPU_R580_PAYLOAD_SETUP_SHA256=4eded69953267cf82a7218c3f797292b35e0926f761aa733a1de3b54cdf96d69
+VGPU_R580_PAYLOAD_INF_DRIVER_VER='04/15/2026, 32.0.15.8253'
+VGPU_R580_PAYLOAD_SETUP_VERSION=582.53
+
+VGPU_SELECTED_HOST_DRIVER=""
+VGPU_SELECTED_DRIVER_BRANCH=""
+VGPU_SELECTED_DRIVER_LABEL=""
+VGPU_SELECTED_DRIVER_EXE_NAME=""
+VGPU_SELECTED_DRIVER_EXE_SHA256=""
+VGPU_SELECTED_DRIVER_VERSION=""
+VGPU_SELECTED_DRIVER_ZIP_NAME=""
+VGPU_SELECTED_DRIVER_ZIP_SHA256=""
+VGPU_SELECTED_DRIVER_PAYLOAD_ARCHIVE_NAME=""
+VGPU_SELECTED_DRIVER_SETUP_SHA256=""
+VGPU_SELECTED_DRIVER_INF_DRIVER_VER=""
+VGPU_SELECTED_DRIVER_SETUP_VERSION=""
+VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR=0
+
+vgpu_select_driver_stack() {
+    local version_file=/sys/module/nvidia/version
+    local host_version=${1:-}
+
+    if [[ -z "$host_version" ]]; then
+        [[ -r "$version_file" ]] || {
+            echo "[driver-assets] NVIDIA host module is not loaded" >&2
+            return 1
+        }
+        IFS= read -r host_version <"$version_file" || true
+    fi
+    case "$host_version" in
+        535.161.05)
+            VGPU_SELECTED_HOST_DRIVER=$host_version
+            VGPU_SELECTED_DRIVER_BRANCH=R535
+            VGPU_SELECTED_DRIVER_LABEL='GRID 538.33'
+            VGPU_SELECTED_DRIVER_EXE_NAME=$VGPU_DRIVER_EXE_NAME
+            VGPU_SELECTED_DRIVER_EXE_SHA256=$VGPU_DRIVER_EXE_SHA256
+            VGPU_SELECTED_DRIVER_VERSION=$VGPU_DRIVER_VERSION
+            VGPU_SELECTED_DRIVER_ZIP_NAME=$VGPU_DRIVER_ZIP_NAME
+            VGPU_SELECTED_DRIVER_ZIP_SHA256=$VGPU_DRIVER_ZIP_SHA256
+            VGPU_SELECTED_DRIVER_PAYLOAD_ARCHIVE_NAME=""
+            VGPU_SELECTED_DRIVER_SETUP_SHA256=$VGPU_DRIVER_EXE_SHA256
+            VGPU_SELECTED_DRIVER_INF_DRIVER_VER=""
+            VGPU_SELECTED_DRIVER_SETUP_VERSION=""
+            VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR=1
+            ;;
+        580.159.01)
+            VGPU_SELECTED_HOST_DRIVER=$host_version
+            VGPU_SELECTED_DRIVER_BRANCH=R580
+            VGPU_SELECTED_DRIVER_LABEL='GRID 582.53'
+            VGPU_SELECTED_DRIVER_EXE_NAME=$VGPU_R580_DRIVER_EXE_NAME
+            VGPU_SELECTED_DRIVER_EXE_SHA256=$VGPU_R580_DRIVER_EXE_SHA256
+            VGPU_SELECTED_DRIVER_VERSION=$VGPU_R580_DRIVER_VERSION
+            VGPU_SELECTED_DRIVER_ZIP_NAME=""
+            VGPU_SELECTED_DRIVER_ZIP_SHA256=""
+            VGPU_SELECTED_DRIVER_PAYLOAD_ARCHIVE_NAME=$VGPU_R580_PAYLOAD_ARCHIVE_NAME
+            VGPU_SELECTED_DRIVER_SETUP_SHA256=$VGPU_R580_PAYLOAD_SETUP_SHA256
+            VGPU_SELECTED_DRIVER_INF_DRIVER_VER=$VGPU_R580_PAYLOAD_INF_DRIVER_VER
+            VGPU_SELECTED_DRIVER_SETUP_VERSION=$VGPU_R580_PAYLOAD_SETUP_VERSION
+            VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR=0
+            ;;
+        *)
+            echo "[driver-assets] unsupported NVIDIA host driver: ${host_version:-unknown}" >&2
+            echo "[driver-assets] reviewed pairs: 535.161.05/538.33 or 580.159.01/582.53" >&2
+            return 1
+            ;;
+    esac
+}
+
+vgpu_validate_r580_payload_archive() {
+    local archive=$1 setup_sha driver_ver setup_version
+
+    [[ -f "$archive" && ! -L "$archive" ]] || return 1
+    command -v unzip >/dev/null 2>&1 || {
+        echo "[driver-assets] unzip is required to validate the R580 payload cache" >&2
+        return 1
+    }
+    setup_sha=$(unzip -p "$archive" setup.exe 2>/dev/null | sha256sum | awk '{print $1}') || return
+    [[ -n "$VGPU_SELECTED_DRIVER_SETUP_SHA256" &&
+       "$setup_sha" == "$VGPU_SELECTED_DRIVER_SETUP_SHA256" ]] || {
+        echo "[driver-assets] REFUSE: R580 payload contains an unexpected setup.exe" >&2
+        return 1
+    }
+    driver_ver=$(unzip -p "$archive" Display.Driver/nvgridsw.inf 2>/dev/null |
+        tr -d '\r' | awk -F'= *' '/^DriverVer *=/ && !found {print $2; found=1}') || return
+    [[ -n "$VGPU_SELECTED_DRIVER_INF_DRIVER_VER" &&
+       "$driver_ver" == "$VGPU_SELECTED_DRIVER_INF_DRIVER_VER" ]] || {
+        echo "[driver-assets] REFUSE: R580 payload nvgridsw.inf DriverVer is '$driver_ver'" >&2
+        echo "  expected: $VGPU_SELECTED_DRIVER_INF_DRIVER_VER" >&2
+        return 1
+    }
+    setup_version=$(unzip -p "$archive" setup.cfg 2>/dev/null |
+        tr -d '\r' | sed -n 's/.*<setup[^>]* version="\([^"]*\)".*/\1/p' | head -n 1) || return
+    [[ -n "$VGPU_SELECTED_DRIVER_SETUP_VERSION" &&
+       "$setup_version" == "$VGPU_SELECTED_DRIVER_SETUP_VERSION" ]] || {
+        echo "[driver-assets] REFUSE: R580 payload setup.cfg version is '$setup_version'" >&2
+        return 1
+    }
+}
+
+# NVIDIA's reviewed silent-install command applies to the inner setup.exe, not
+# the 713 MB PackageLauncher SFX.  Build a host-side ZIP cache from the exact
+# reviewed outer package, then validate the signed payload identity by its
+# setup.exe hash and nvgridsw.inf version.  The resulting archive hash is
+# computed at runtime because ZIP encoder metadata is not a vendor artifact.
+#
+# Output (stdout): absolute_archive_path<TAB>sha256
+vgpu_prepare_selected_driver_payload() {
+    local stage_dir=${STAGE_DIR:-${IMAGE_ROOT:-/home/ubuntu/images}/staging}
+    local source archive archive_sha scratch payload temporary
+
+    [[ "$VGPU_SELECTED_DRIVER_BRANCH" == R580 ]] || {
+        echo "[driver-assets] expanded payload preparation is R580-only" >&2
+        return 1
+    }
+    source="$stage_dir/$VGPU_SELECTED_DRIVER_EXE_NAME"
+    archive="$stage_dir/$VGPU_SELECTED_DRIVER_PAYLOAD_ARCHIVE_NAME"
+    [[ -d "$stage_dir" && ! -L "$stage_dir" ]] || {
+        echo "[driver-assets] unsafe/missing staging directory: $stage_dir" >&2
+        return 1
+    }
+    vgpu_verify_driver_asset "$source" "$VGPU_SELECTED_DRIVER_EXE_SHA256" \
+        "$VGPU_SELECTED_DRIVER_LABEL" || return
+
+    if [[ -e "$archive" || -L "$archive" ]]; then
+        vgpu_validate_r580_payload_archive "$archive" || {
+            echo "[driver-assets] refusing invalid existing R580 payload cache: $archive" >&2
+            return 1
+        }
+    else
+        command -v 7z >/dev/null 2>&1 || {
+            echo "[driver-assets] 7z is required to expand the reviewed R580 package" >&2
+            return 1
+        }
+        command -v zip >/dev/null 2>&1 || {
+            echo "[driver-assets] zip is required to package the reviewed R580 payload" >&2
+            return 1
+        }
+        scratch=$(mktemp -d "$stage_dir/.r580-payload.XXXXXX") || return
+        payload="$scratch/payload"
+        temporary="$scratch/$VGPU_SELECTED_DRIVER_PAYLOAD_ARCHIVE_NAME"
+        install -d -m 0700 "$payload"
+        (
+            set -e
+            trap 'find "$scratch" -depth -delete 2>/dev/null || true' EXIT
+            echo "[driver-assets] expanding exact R580 PackageLauncher payload" >&2
+            7z x -y -o"$payload" "$source" >/dev/null
+            [[ $(sha256sum "$payload/setup.exe" | awk '{print $1}') == \
+               "$VGPU_SELECTED_DRIVER_SETUP_SHA256" ]]
+            (
+                cd "$payload"
+                zip -1 -q -r "$temporary" .
+            )
+            vgpu_validate_r580_payload_archive "$temporary"
+            chmod 0644 "$temporary"
+            mv -T -- "$temporary" "$archive"
+            echo "[driver-assets] published reviewed R580 inner payload cache" >&2
+        ) || {
+            find "$scratch" -depth -delete 2>/dev/null || true
+            return 1
+        }
+    fi
+    archive_sha=$(sha256sum "$archive" | awk '{print $1}') || return
+    printf '%s\t%s\n' "$archive" "$archive_sha"
+}
 
 # Validate one already-tokenized QEMU argv.  Keeping the parser separate makes
 # the security decision unit-testable without adding a production environment
@@ -61,7 +236,7 @@ vgpu_driver_install_argv_is_safe() {
                 ;;
             -display)
                 case "$value" in
-                    sdl,gl=off,*|gtk,gl=off,*) window_ok=1 ;;
+                    sdl,gl=off,*|gtk,gl=off,*|none) window_ok=1 ;;
                 esac
                 ;;
         esac
@@ -184,7 +359,7 @@ vgpu_resolve_bound_guest_ip() {
 }
 
 vgpu_verify_driver_asset() {
-    local path=$1 expected=$2 actual
+    local path=$1 expected=$2 label=${3:-reviewed} actual
 
     if [[ ! -f "$path" ]]; then
         echo "[driver-assets] missing: $path" >&2
@@ -193,9 +368,8 @@ vgpu_verify_driver_asset() {
     actual=$(sha256sum "$path" | awk '{print $1}')
     if [[ "$actual" != "$expected" ]]; then
         echo "[driver-assets] REFUSE: unexpected SHA256 for $path" >&2
-        echo "  expected (verified 538.33): $expected" >&2
-        echo "  actual:                     $actual" >&2
-        echo "  The legacy 553.24 filename does not mean a real 553.24 package is compatible." >&2
+        echo "  expected (${label}): $expected" >&2
+        echo "  actual:              $actual" >&2
         return 1
     fi
 }
@@ -203,14 +377,17 @@ vgpu_verify_driver_asset() {
 # Usage: vgpu_verify_driver_assets exe | all
 vgpu_verify_driver_assets() {
     local scope=${1:-all}
+    local host_version_override=${2:-}
     local stage_dir=${STAGE_DIR:-${IMAGE_ROOT:-/home/ubuntu/images}/staging}
-    local exe="$stage_dir/$VGPU_DRIVER_EXE_NAME"
-    local zip="$stage_dir/$VGPU_DRIVER_ZIP_NAME"
+    local exe zip
     local driver_ver
 
-    vgpu_verify_driver_asset "$exe" "$VGPU_DRIVER_EXE_SHA256" || return
+    vgpu_select_driver_stack "$host_version_override" || return
+    exe="$stage_dir/$VGPU_SELECTED_DRIVER_EXE_NAME"
+    vgpu_verify_driver_asset "$exe" "$VGPU_SELECTED_DRIVER_EXE_SHA256" \
+        "$VGPU_SELECTED_DRIVER_LABEL" || return
     if [[ "$scope" == exe ]]; then
-        echo "[driver-assets] verified 538.33 installer: $exe"
+        echo "[driver-assets] verified ${VGPU_SELECTED_DRIVER_LABEL} installer for host ${VGPU_SELECTED_HOST_DRIVER}: $exe"
         return 0
     fi
     if [[ "$scope" != all ]]; then
@@ -218,7 +395,14 @@ vgpu_verify_driver_assets() {
         return 2
     fi
 
-    vgpu_verify_driver_asset "$zip" "$VGPU_DRIVER_ZIP_SHA256" || return
+    [[ "$VGPU_SELECTED_DRIVER_BRANCH" == R535 &&
+       -n "$VGPU_SELECTED_DRIVER_ZIP_NAME" ]] || {
+        echo "[driver-assets] Display.Driver archive workflow is R535-only" >&2
+        return 1
+    }
+    zip="$stage_dir/$VGPU_SELECTED_DRIVER_ZIP_NAME"
+    vgpu_verify_driver_asset "$zip" "$VGPU_SELECTED_DRIVER_ZIP_SHA256" \
+        "$VGPU_SELECTED_DRIVER_LABEL" || return
     driver_ver=$(unzip -p "$zip" Display.Driver/nvgridsw.inf 2>/dev/null \
         | tr -d '\r' | awk -F'= *' '/^DriverVer *=/ && !found {print $2; found=1}')
     if [[ "$driver_ver" != "01/25/2024, $VGPU_DRIVER_VERSION" ]]; then
@@ -226,5 +410,5 @@ vgpu_verify_driver_assets() {
         echo "  expected: 01/25/2024, $VGPU_DRIVER_VERSION" >&2
         return 1
     fi
-    echo "[driver-assets] verified 538.33 installer and Display.Driver archive"
+    echo "[driver-assets] verified ${VGPU_SELECTED_DRIVER_LABEL} installer and Display.Driver archive"
 }

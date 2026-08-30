@@ -15,6 +15,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 cd "$SCRIPT_DIR"
 # shellcheck source=lib/vm-storage.sh
 source ./lib/vm-storage.sh
+# shellcheck source=lib/g11-python-runtime.sh
+source ./lib/g11-python-runtime.sh
+G11_PYTHON_RUNTIME_INSTALLER="$SCRIPT_DIR/host/install-g11-python-runtime.sh"
 vm_storage_init
 
 usage() {
@@ -208,9 +211,8 @@ elif [[ -z "${GUEST_PASS:-}" ]]; then
 fi
 [[ -n "$GUEST_PASS" ]] || die "guest password is empty"
 
-command -v python3 >/dev/null 2>&1 || die "python3 is required"
-python3 -c 'import pypsrp' >/dev/null 2>&1 \
-    || die "Python package pypsrp is required for WinRM transport"
+WINRM_PYTHON=$(g11_python_resolve pypsrp) \
+    || die "managed Python/pypsrp runtime is required for WinRM transport"
 
 GUEST_SCRIPT="$SCRIPT_DIR/guest/install-vgpu-license.ps1"
 [[ -s "$GUEST_SCRIPT" ]] || die "missing guest activation script: $GUEST_SCRIPT"
@@ -224,7 +226,7 @@ if [[ "$SOURCE_MODE" == url && "$INSECURE_TLS" == 1 ]]; then
     echo "[license] WARNING: TLS certificate verification is disabled for this run" >&2
 fi
 
-env -u GUEST_PASS python3 - "$IP" "$GUEST_USER" "$SOURCE_MODE" "$SOURCE_VALUE" \
+env -u GUEST_PASS "$WINRM_PYTHON" - "$IP" "$GUEST_USER" "$SOURCE_MODE" "$SOURCE_VALUE" \
     "$TOKEN_SHA256" "$INSECURE_TLS" "$ALLOW_HTTP" "$MIN_TOKEN_BYTES" \
     "$WAIT_SECONDS" "$GUEST_SCRIPT" 3<<<"$GUEST_PASS" <<'PYEOF'
 import pathlib

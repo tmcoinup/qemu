@@ -253,9 +253,9 @@ grep -Fq '"$GPU_MEMORY_VENDOR_RM"' "$START_VM" || \
     fail 'start-vm does not pass the canonical RM memory-vendor enum'
 grep -Fq 'VGPU_MDEV_FRL_ENABLED' "$START_VM" || \
     fail 'start-vm does not expose an explicit per-mdev FRL override'
-grep -Fq 'VGPU_MDEV_IDENTITY_MODE=off' \
+grep -Fq 'VGPU_MDEV_IDENTITY_MODE=required' \
     "$REPO_ROOT/deploy/host/vgpu-host-v100.conf.example" || \
-    fail 'official V100 path still depends on vgpu_unlock identity config'
+    fail 'vGPU 19.5 V100 path does not require the reviewed R580 identity Hook'
 grep -Fq 'preserving existing profile_override.toml' "$UNLOCK_SETUP" || \
     fail 'vgpu_unlock maintenance would erase generated per-mdev identities'
 

@@ -4,8 +4,8 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 deploy_dir="$(cd "$here/.." && pwd)"
 image="$deploy_dir/firmware/g11-usb-install-boot.img"
-expected_image_sha256="6c5201c7429874b83462f2694f7545dc4e625c8f7271df3a434d103c3525a96c"
-expected_efi_sha256="846e7c7534a420fc72cfde4b3e3bd9bffd8980e1e34faaa5d0ee659c5d0017b8"
+expected_image_sha256="7f16e46360c7774e5c426f2ad2c0d51a3a4fb7d5bf0372791fa9dd7ee15d60c1"
+expected_efi_sha256="c25165f2098c782a81e8372eebf5cbe3cc6b5df00d6eee2ee4d7415371b95574"
 
 for dependency in sha256sum stat mdir mcopy file; do
     command -v "$dependency" >/dev/null 2>&1 || {

@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
 SETUP="$REPO_ROOT/deploy/host/setup-vgpu-unlock.sh"
 PATCH="$REPO_ROOT/deploy/host/patches/vgpu-unlock-rs-g11.patch"
+R580_PATCH="$REPO_ROOT/deploy/host/patches/vgpu-unlock-rs-g11-r580.diff"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -14,15 +15,21 @@ fail() {
 
 bash -n "$SETUP"
 [[ -s "$PATCH" && ! -L "$PATCH" ]] || fail 'G-11 vgpu_unlock patch is missing or unsafe'
+[[ -s "$R580_PATCH" && ! -L "$R580_PATCH" ]] ||
+    fail 'G-11 R580 vGPU unlock patch is missing or unsafe'
 
 grep -Fq '71ec870d4b456c9a8013c114a57372b1a60d36ca' "$SETUP" ||
     fail 'vgpu_unlock build is not pinned to the audited upstream commit'
 grep -Fq 'cargo fmt -- --check && cargo test && cargo build --release' "$SETUP" ||
     fail 'installer does not test the patched library before installation'
-grep -Fq 'apply --reverse --check' "$SETUP" ||
-    fail 'installer cannot recognize an already-applied patch safely'
-grep -Fq 'diff -- src/lib.rs | sha256sum' "$SETUP" ||
+grep -Fq 'source_tree_has_only_reviewed_paths' "$SETUP" ||
     fail 'installer does not reject extra source-tree modifications'
+grep -Fq '580.159.01) DRIVER_FAMILY=r580' "$SETUP" ||
+    fail 'installer does not gate the exact vGPU 19.5 host'
+grep -Fq 'EXPECTED_CTRLA081_RS_SHA256=' "$SETUP" ||
+    fail 'installer does not authenticate the R580 A081 ABI source'
+grep -Fq 'EXPECTED_CTRLA082_RS_SHA256=' "$SETUP" ||
+    fail 'installer does not authenticate the R580 A082 ABI source'
 grep -Fq 'active_mdev_pids' "$SETUP" ||
     fail 'manager restart lacks an active-mdev guard'
 grep -Fq 'BACKUP_DIR=' "$SETUP" ||
@@ -70,4 +77,22 @@ if grep -Eq '^\+.*(prepare_rm_identity_query|query_appended|CLK_GET_EXTENDED_INF
     fail 'final patch contains request expansion or operational clock probing'
 fi
 
-echo 'PASS: G-11 RM trace/FB identity is pinned, bounded, response-only and restart-safe'
+for required in \
+        'R580_159_01' \
+        'version == "580.159.01"' \
+        'MDEV_DEVICES_PATH: &str = "/sys/bus/mdev/devices"' \
+        'framebuffer_mb == Some(1024)' \
+        'reason=r580_v100_non_1q_runtime_guard' \
+        'NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159' \
+        'NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159' \
+        'mem::size_of::<Nv2080CtrlFbGetInfoV2ParamsR580>(), 1028' \
+        'mem::size_of::<NvA081CtrlVgpuConfigGetVgpuTypeInfoParamsV580_159>()' \
+        'mem::size_of::<NvA082CtrlCmdHostVgpuDeviceGetVgpuTypeInfoParamsV580_159>()'; do
+    grep -Fq -- "$required" "$R580_PATCH" ||
+        fail "R580.159 ABI/runtime guard omits: $required"
+done
+if grep -Fq 'version.starts_with("580.")' "$R580_PATCH"; then
+    fail 'R580 driver gate accepts an unreviewed minor version'
+fi
+
+echo 'PASS: G-11 RM trace and deployed R535/R580.159 identity ABIs are pinned, bounded and restart-safe'

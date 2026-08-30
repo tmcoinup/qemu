@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Static contract: supported driver repair wrappers invalidate only the exact
-# per-VM monitor marker after preflight and before their first guest write.
+# Static contract: R535 repair invalidates only the exact per-VM monitor marker
+# after preflight and before its first guest write; R580 skips this R535 cache.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -65,7 +65,10 @@ for raw_path in sys.argv[1:]:
         require(required in text, f"{label} omits safety gate {required!r}")
 
     definition = text.index('invalidate_monitor_sync_marker() {')
-    call = text.index('\ninvalidate_monitor_sync_marker\n', definition)
+    branch_gate = text.index(
+        'if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]]', definition
+    )
+    call = text.index('\n    invalidate_monitor_sync_marker\n', branch_gate)
     topology = text.index('vgpu_require_safe_driver_install_topology "$VM_ID"')
     verify = text.index('vgpu_verify_driver_assets ', definition)
     ip_binding = text.index(
@@ -73,15 +76,21 @@ for raw_path in sys.argv[1:]:
     )
     asset_loop = text.index('for asset in ', verify)
     asset_done = text.index('\ndone', asset_loop)
-    first_guest_write = text.index('\npython3 - ', call)
+    first_guest_write = text.index(
+        'GUEST_PASS_VALUE=$GUEST_PASS "$WINRM_PYTHON" -', call
+    )
 
     require(
-        definition < topology < verify < ip_binding < asset_loop < asset_done < call < first_guest_write,
+        definition < topology < verify < ip_binding < asset_loop < asset_done < branch_gate < call < first_guest_write,
         f"{label} topology/VM/IP/marker gate is not before guest write",
     )
     require(
-        text.count('\ninvalidate_monitor_sync_marker\n') == 1,
-        f"{label} must invalidate the marker exactly once and unconditionally",
+        text.count('\n    invalidate_monitor_sync_marker\n') == 1,
+        f"{label} must invalidate the marker exactly once in the R535 gate",
+    )
+    require(
+        'R580: skip R535 monitor/NV_Modes marker invalidation' in text,
+        f"{label} does not explicitly skip the R535 cache on R580",
     )
     require(
         'vm_storage_run_legacy_path "$VM_ID" monitor-edid' not in text,
@@ -106,6 +115,17 @@ for required in \
         '$mode.dmPelsHeight = 1080' \
         '$process.WaitForExit(1000)' \
         'Wait-SafeFhdDisplayMode -TimeoutSeconds 60' \
+        "\$scriptPath = 'C:\\nv\\install-driver-runonce.ps1'" \
+        "\$launcherPath = 'C:\\nv\\install-driver-runonce.cmd'" \
+        "\$cmd.Length -gt 260" \
+        "stage=launcher-entered" \
+        "stage=powershell-entered" \
+        "runonce-console.log" \
+        "'-s', '-n', 'Display.Driver'" \
+        "'-log:C:\\nv\\installer-logs'" \
+        '"source_package_sha256=$($ExpectedSourcePackageSha256.ToUpperInvariant())"' \
+        '"installer_sha256=$packageSha256"' \
+        '"payload_sha256=$payloadSha256"' \
         '"installer=$installerExit"' \
         '"console_safe={0}"' \
         'Move-Item -LiteralPath $receiptTemp -Destination $FlagPath -Force'; do
@@ -117,18 +137,53 @@ for required in \
         '--clean-existing' \
         'G11_NVIDIA_PRE_CLEAN_DONE' \
         'pnputil /delete-driver $inf /uninstall /force' \
-        "[[ \"\$RECEIPT\" == *'console_safe='* ]]" \
-        '"$DISPLAY_MODE" != 1920x1080' \
-        '"$CONSOLE_BYTES" != 8294400' \
-        '"$CONSOLE_SAFE" != 1' \
-        'GRID installer=0 / display=1920x1080'; do
+        "[[ \"\$RECEIPT\" == *'package_signature='* && \"\$RECEIPT\" == *'console_safe='* ]]" \
+        '"$DISPLAY_MODE" == 1920x1080' \
+        '"$CONSOLE_BYTES" == 8294400' \
+        '"$CONSOLE_SAFE" == 1' \
+        'R535/GRID 538.33 signed / Code 0 / page-safe 1920x1080' \
+        'R580/${DRIVER_LABEL} signed / Code 0 / runtime code integrity enforced' \
+        'Win32_PnPSignedDriver' \
+        'Win32_SystemDriver' \
+        "\$kernelDriverPath -replace '^\\\\SystemRoot', \$env:SystemRoot" \
+        'Microsoft Windows Hardware Compatibility Publisher' \
+        'development_signatures' \
+        "environment={'G11_ARM_ADMIN_PASS': pw}" \
+        'except Exception as exc:' \
+        'operation_timeout=30, read_timeout=45'; do
     grep -Fq -- "$required" "$repo_root/deploy/install-vgpu-driver-gui.sh" ||
         fail "GUI installer receipt gate omits: $required"
 done
 
-if rg -n -i 'testsigning|nointegritychecks|bcdedit|self[- ]signed|自签' \
+for required in \
+        "Set-ItemProperty -Path \$wl -Name 'DefaultDomainName' -Value \$env:COMPUTERNAME" \
+        "Set-ItemProperty -Path \$wl -Name 'AutoLogonCount'  -Value 2"; do
+    grep -Fq -- "$required" "$runonce" ||
+        fail "RunOnce AutoLogon hardening omits: $required"
+done
+for required in \
+        "Remove-G11RegistryValueIfPresent \$wl 'DefaultUserName'" \
+        "Remove-G11RegistryValueIfPresent \$wl 'DefaultDomainName'"; do
+    grep -Fq -- "$required" "$repo_root/deploy/install-vgpu-driver-gui.sh" ||
+        fail "GUI installer AutoLogon cleanup omits: $required"
+done
+
+if grep -Fq 'def ps_literal' "$repo_root/deploy/install-vgpu-driver-gui.sh"; then
+    fail "GUI installer must not interpolate the guest password into PowerShell text"
+fi
+
+if command -v rg >/dev/null 2>&1; then
+    forbidden_match=$(rg -n -i \
+        'testsigning|nointegritychecks|bcdedit|self[- ]signed|自签' \
         "$runonce" "$repo_root/deploy/install-vgpu-driver.sh" \
-        "$repo_root/deploy/install-vgpu-driver-gui.sh" >/dev/null; then
+        "$repo_root/deploy/install-vgpu-driver-gui.sh" || true)
+else
+    forbidden_match=$(grep -Eni \
+        'testsigning|nointegritychecks|bcdedit|self[- ]signed|自签' \
+        "$runonce" "$repo_root/deploy/install-vgpu-driver.sh" \
+        "$repo_root/deploy/install-vgpu-driver-gui.sh" || true)
+fi
+if [[ -n "$forbidden_match" ]]; then
     fail "supported driver installer path mentions a forbidden BCD/signing bypass"
 fi
 

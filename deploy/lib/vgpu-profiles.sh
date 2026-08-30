@@ -68,9 +68,10 @@ VGPU_PROFILE_CATALOG=(
     "gtx750ti_evga_sc_2gb|nvidia-257|NVIDIA GeForce GTX 750 Ti|0x10DE|0x1380|0x3842|0x3753|0xA2|2048|Version 82.07.25.00.50|1176|1255|1350|128|86400|GDDR5|Samsung|8|1|640|5|16|40|0x110|7|0x12|16"
 )
 
-# New G-11 VMs use one host-wide framebuffer tier.  The production default is
-# 2 GiB; a host that deliberately selects the 1 GiB tier randomizes only among
-# the four Maxwell GTX 750 rows.  Kepler identities remain readable for old
+# Equal-size G-11 hosts use one framebuffer tier.  R580 on a supported V100 can
+# instead publish both reviewed tiers in mixed-size mode.  The default random
+# choice remains 2 GiB; an explicit 1 GiB request uses only the four Maxwell
+# GTX 750 rows.  Kepler identities remain readable for old
 # immutable vm.conf files, but cannot enter a new production-driver selection:
 # the locked GRID 538.33/R535 branch post-dates Kepler's R470 support ceiling.
 VGPU_DEFAULT_PROFILE_KEYS=(
@@ -823,9 +824,11 @@ vgpu_profile_print_catalog() {
 # model/board brand are separate fields, so callers never have to infer an AIB
 # vendor from spacing or from the profile key.
 vgpu_profile_print_tsv_catalog() {
-    local active_tier=${1:-2048} row auto_random
+    local active_selector=${1:-2048} row auto_random
 
-    active_tier=$(vgpu_profile_normalize_vram_mb "$active_tier") || return
+    if [[ "$active_selector" != mixed ]]; then
+        active_selector=$(vgpu_profile_normalize_vram_mb "$active_selector") || return
+    fi
 
     printf 'PROFILE\tMODEL\tBOARD_BRAND\tBOARD_MODEL\tVRAM_MIB\tVRAM_MAKER\tMDEV\tAUTO_RANDOM\n'
     for row in "${VGPU_PROFILE_CATALOG[@]}"; do
@@ -834,7 +837,13 @@ vgpu_profile_print_tsv_catalog() {
             GPU_VRAM_MB _ _ _ _ _ _ _ GPU_MEMORY_MAKER \
             _ _ _ _ _ _ _ _ _ _ <<<"$row"
         vgpu_profile_load_board_metadata "$GPU_PROFILE" || return 1
-        if vgpu_profile_is_default_for_vram "$GPU_PROFILE" "$active_tier"; then
+        if [[ "$active_selector" == mixed ]] && {
+                vgpu_profile_is_default_for_vram "$GPU_PROFILE" 1024 ||
+                vgpu_profile_is_default_for_vram "$GPU_PROFILE" 2048
+            }; then
+            auto_random=1
+        elif [[ "$active_selector" != mixed ]] &&
+                vgpu_profile_is_default_for_vram "$GPU_PROFILE" "$active_selector"; then
             auto_random=1
         else
             auto_random=0

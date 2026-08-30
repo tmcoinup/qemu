@@ -272,7 +272,7 @@ test_catalog() {
             fail "printed catalog omits $expected_board_brand/not-exposed"
     done
 
-    local tsv_catalog tsv_1gb_catalog tsv_rows
+    local tsv_catalog tsv_1gb_catalog tsv_mixed_catalog tsv_rows
     tsv_catalog=$(vgpu_profile_print_tsv_catalog) || \
         fail "machine-readable GPU catalog could not be generated"
     assert_eq $'PROFILE\tMODEL\tBOARD_BRAND\tBOARD_MODEL\tVRAM_MIB\tVRAM_MAKER\tMDEV\tAUTO_RANDOM' \
@@ -311,6 +311,19 @@ test_catalog() {
             <<<"$tsv_1gb_catalog"; then
         fail '1 GiB host catalog randomized another tier or Kepler identity'
     fi
+
+    tsv_mixed_catalog=$(vgpu_profile_print_tsv_catalog mixed) || \
+        fail "mixed-size machine-readable GPU catalog could not be generated"
+    assert_eq 16 \
+        "$(awk -F '\t' 'NR > 1 && $8 == 1 { count++ } END { print count + 0 }' \
+            <<<"$tsv_mixed_catalog")" \
+        'mixed-size host catalog AUTO_RANDOM count'
+    grep -Fqx $'gtx750_asus_1gb\tNVIDIA GeForce GTX 750\tASUS\tGTX750-PHOC-1GD5\t1024\tSamsung\tnvidia-256\t1' \
+        <<<"$tsv_mixed_catalog" || \
+        fail 'mixed-size catalog omitted reviewed 1 GiB rows'
+    grep -Fqx $'gt1030_asus_2gb\tNVIDIA GeForce GT 1030\tASUS\tSilent\t2048\tSK hynix\tnvidia-257\t1' \
+        <<<"$tsv_mixed_catalog" || \
+        fail 'mixed-size catalog omitted reviewed 2 GiB rows'
 
     [[ -r "$EVIDENCE_TSV" ]] || fail "1GB manufacturer evidence TSV is missing"
     assert_eq 13 "$(wc -l <"$EVIDENCE_TSV")" \
@@ -813,11 +826,13 @@ test_create_random_profile() {
     local selected after_profile
 
     env -u GPU_PROFILE "$CREATE_VM" "$vm_id" \
-        --platform g3220-h81m-k-4g \
+        --platform i7-4820k-p9x79-elpida-8g \
         --ssd-profile samsung-850-pro-512gb \
         --monitor-profile lenovo-d24-20 \
-        >"$TMP_DIR/create-random.out" 2>"$TMP_DIR/create-random.err" ||
+        >"$TMP_DIR/create-random.out" 2>"$TMP_DIR/create-random.err" || {
+        sed -n '1,120p' "$TMP_DIR/create-random.err" >&2
         fail "create-vm could not choose a random audited GPU"
+    }
     [[ -f "$conf" ]] || fail "random GPU creation did not publish vm.conf"
     selected=$(
         unset GPU_PROFILE

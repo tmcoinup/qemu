@@ -26,12 +26,15 @@ set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 # shellcheck source=lib/vm-storage.sh
 source ./lib/vm-storage.sh
+# shellcheck source=lib/g11-python-runtime.sh
+source ./lib/g11-python-runtime.sh
+G11_PYTHON_RUNTIME_INSTALLER="$PWD/host/install-g11-python-runtime.sh"
 vm_storage_init
 
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
 GUEST_USER=${GUEST_USER:-Administrator}
-GUEST_PASS=${GUEST_PASS:-123456}
+GUEST_PASS=${GUEST_PASS:-}
 UNINSTALL=0
 DRIVER_DIR="${IVSHMEM_DRIVER_DIR:-$STAGE_DIR/ivshmem-driver}"
 
@@ -46,6 +49,13 @@ while [[ $# -gt 0 ]]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
+
+(( ${#GUEST_PASS} >= 6 && ${#GUEST_PASS} <= 64 )) &&
+        [[ "$GUEST_PASS" != *$'\r'* && "$GUEST_PASS" != *$'\n'* ]] || {
+    echo "GUEST_PASS 必须通过安全运行时环境提供（6..64 字符）" >&2
+    exit 2
+}
+WINRM_PYTHON=$(g11_python_resolve pypsrp) || exit 1
 
 # Find a working driver dir
 if [[ $UNINSTALL -eq 0 ]]; then
@@ -124,10 +134,13 @@ Get-PnpDevice -PresentOnly | Where-Object InstanceId -like 'PCI\\VEN_1AF4&DEV_11
 EOPS
 fi
 
-exec python3 - "$IP" "$GUEST_USER" "$GUEST_PASS" "$PS" <<'PYEOF'
+exec env -u GUEST_PASS "$WINRM_PYTHON" - "$IP" "$GUEST_USER" "$PS" \
+    3<<<"$GUEST_PASS" <<'PYEOF'
 import sys
 from pypsrp.client import Client
-ip, user, pw, ps = sys.argv[1:5]
+ip, user, ps = sys.argv[1:4]
+with open(3, 'r', encoding='utf-8') as stream:
+    pw = stream.read().removesuffix('\n')
 c = Client(ip, username=user, password=pw, ssl=False, auth='ntlm')
 out, streams, _ = c.execute_ps(ps)
 print(out)

@@ -25,6 +25,12 @@ grep -Fq 'mWindowsBootPath[] = L"\\EFI\\BOOT\\BOOTX64.EFI"' "$SOURCE" || \
     fail "chainloader target path is missing"
 grep -Fq 'mWindowsBootWimPath[] = L"\\sources\\boot.wim"' "$SOURCE" || \
     fail "chainloader does not constrain the target to Windows install media"
+grep -Fq 'mWindowsNoPromptPath[] =' "$SOURCE" || \
+    fail "chainloader does not use the signed no-prompt Windows loader"
+grep -Fq 'mHelperConsumedMarker[] = L"\\G11BOOT.ONCE"' "$SOURCE" || \
+    fail "chainloader does not prevent a post-Setup ISO boot loop"
+grep -Fq 'G11MarkBootConsumed' "$SOURCE" || \
+    fail "chainloader does not persist its one-shot runtime marker"
 grep -Fq '#define G11_DISCOVERY_ATTEMPTS      3U' "$SOURCE" || \
     fail "chainloader bounded late-USB discovery retry is missing"
 grep -Fq 'BootServices->LoadImage' "$SOURCE" || \

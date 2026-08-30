@@ -82,6 +82,21 @@ _g11_cpu_resolve_executable() {
     printf '%s\n' "$resolved"
 }
 
+_g11_cpu_resolve_data_dir() {
+    local qemu_bin=$1 candidate=${G11_QEMU_DATA_DIR:-}
+
+    if [[ -z "$candidate" && "$qemu_bin" == */* ]]; then
+        candidate="$(cd "$(dirname "$qemu_bin")" && pwd)/../pc-bios"
+    fi
+    if [[ -z "$candidate" ]]; then
+        # A distro QEMU can use its compiled-in /usr/share/qemu path.
+        return 0
+    fi
+    [[ -d "$candidate" && ! -L "$candidate" \
+        && -r "$candidate/bios-256k.bin" ]] || return 1
+    readlink -f -- "$candidate"
+}
+
 _g11_cpu_output_is_model_missing() {
     local output=${1,,}
 
@@ -109,7 +124,11 @@ _g11_cpu_output_is_host_feature_gap() {
 
 _g11_cpu_probe_once() {
     local qemu_bin=$1 cpu_model=$2 enforce_value=$3 timeout_bin=$4 timeout_seconds=$5
+    local qemu_data_dir=${6:-}
     local output rc qmp_input
+    local -a qemu_data_args=()
+
+    [[ -z "$qemu_data_dir" ]] || qemu_data_args=( -L "$qemu_data_dir" )
 
     qmp_input=$'{"execute":"qmp_capabilities"}\n{"execute":"quit"}'
     if output=$(
@@ -124,6 +143,7 @@ _g11_cpu_probe_once() {
         LC_ALL=C "$timeout_bin" --foreground --kill-after=1 \
             "$timeout_seconds" \
             "$qemu_bin" \
+            "${qemu_data_args[@]}" \
             -nodefaults \
             -no-user-config \
             -machine q35,accel=kvm \
@@ -163,7 +183,7 @@ _g11_cpu_probe_once() {
 
 g11_cpu_capability_probe() {
     local requested_qemu=${1:-} cpu_model=${2:-}
-    local qemu_bin timeout_bin timeout_seconds version_output enforce_output
+    local qemu_bin qemu_data_dir timeout_bin timeout_seconds version_output enforce_output
 
     _g11_cpu_reset_result "$cpu_model"
 
@@ -186,6 +206,12 @@ g11_cpu_capability_probe() {
         _g11_cpu_set_capability_result unavailable \
             G11_CPU_CAP_QEMU_INVALID \
             'Executable did not identify itself as QEMU'
+        return 1
+    fi
+    if ! qemu_data_dir=$(_g11_cpu_resolve_data_dir "$qemu_bin"); then
+        _g11_cpu_set_capability_result unavailable \
+            G11_CPU_CAP_QEMU_DATA_UNAVAILABLE \
+            'QEMU x86 firmware data directory is missing or incomplete'
         return 1
     fi
 
@@ -213,7 +239,7 @@ g11_cpu_capability_probe() {
     fi
 
     if _g11_cpu_probe_once "$qemu_bin" "$cpu_model" on \
-            "$timeout_bin" "$timeout_seconds"; then
+            "$timeout_bin" "$timeout_seconds" "$qemu_data_dir"; then
         G11_CPU_CAPABILITY_ENFORCE_RC=0
         _g11_cpu_set_capability_result supported \
             G11_CPU_CAP_OK_ENFORCED \
@@ -264,7 +290,7 @@ g11_cpu_capability_probe() {
     fi
 
     if _g11_cpu_probe_once "$qemu_bin" "$cpu_model" off \
-            "$timeout_bin" "$timeout_seconds"; then
+            "$timeout_bin" "$timeout_seconds" "$qemu_data_dir"; then
         G11_CPU_CAPABILITY_COMPAT_RC=0
         _g11_cpu_set_capability_result compatibility \
             G11_CPU_CAP_HOST_FEATURE_GAP \

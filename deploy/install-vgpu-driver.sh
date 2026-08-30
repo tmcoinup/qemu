@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compatibility entry for a clean GRID 538.33 guest reinstall.
+# Compatibility entry for a clean, host-branch-matched GRID guest reinstall.
 #
 # The old implementation ran setup.exe from WinRM session 0, then fell back to
 # pnputil.  Besides being unreliable, that path could let an old 1680x1050
@@ -13,16 +13,21 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/vm-storage.sh
 source "$here/lib/vm-storage.sh"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
 vm_storage_init
 VM_ID=${VM_ID:-1}
 IP_OVERRIDE=""
 NO_REBOOT=0
 START_AFTER_SYNC=0
 TIMEOUT_INSTALL=""
+WINRM_PORT=5985
+LAB_USERNET=0
 
 usage() {
     cat <<'EOF'
-usage: ./deploy/install-vgpu-driver.sh [VM_ID] [--ip IPv4] [--timeout SEC] [--start]
+usage: ./deploy/install-vgpu-driver.sh [VM_ID] [--ip IPv4] [--timeout SEC]
+       [--winrm-port PORT] [--lab-usernet] [--start]
 
 Clean-reinstall wrapper for install-vgpu-driver-gui.sh.  Existing/partial
 NVIDIA packages are removed first.  The VM must already be in the isolated
@@ -47,6 +52,15 @@ while (( $# > 0 )); do
             (( $# >= 2 )) || { echo "--timeout requires seconds" >&2; exit 2; }
             TIMEOUT_INSTALL=$2
             shift 2
+            ;;
+        --winrm-port)
+            (( $# >= 2 )) || { echo "--winrm-port requires a port" >&2; exit 2; }
+            WINRM_PORT=$2
+            shift 2
+            ;;
+        --lab-usernet)
+            LAB_USERNET=1
+            shift
             ;;
         --start)
             START_AFTER_SYNC=1
@@ -83,13 +97,19 @@ if [[ -n "$TIMEOUT_INSTALL" ]] &&
     echo "[install-vgpu] --timeout 必须是 1..3600 秒" >&2
     exit 2
 fi
+[[ "$WINRM_PORT" =~ ^[1-9][0-9]*$ ]] && ((WINRM_PORT <= 65535)) || {
+    echo "[install-vgpu] --winrm-port 必须是 1..65535" >&2
+    exit 2
+}
 
 vm_storage_require_namespace_ready "$VM_ID"
+vgpu_select_driver_stack
 
 # Offline convergence after the guest shutdown needs root for qemu-nbd.  Obtain
 # only a normal sudo timestamp before the first guest write; never place the
 # credential in argv, a file, or this repository.
-if ((EUID != 0)) && ! sudo -n true 2>/dev/null; then
+if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]] &&
+        ((EUID != 0)) && ! sudo -n true 2>/dev/null; then
     if [[ -n "${SUDO_PASSWORD:-}" ]]; then
         : # sync-monitor-profile.sh consumes the approved runtime channel.
     elif [[ -t 0 ]]; then
@@ -104,27 +124,34 @@ fi
 args=( "$VM_ID" --clean-existing )
 [[ -z "$IP_OVERRIDE" ]] || args+=( --ip "$IP_OVERRIDE" )
 [[ -z "$TIMEOUT_INSTALL" ]] || args+=( --timeout "$TIMEOUT_INSTALL" )
+args+=( --winrm-port "$WINRM_PORT" )
+((LAB_USERNET == 0)) || args+=( --lab-usernet )
 echo "[install-vgpu] 使用临时标准 VGA + mdev display=off + active-desktop 安装路径"
 "$here/install-vgpu-driver-gui.sh" "${args[@]}"
 
 echo "[install-vgpu] 官方 GRID 安装收据通过；请求 Windows 完整关机"
 "$here/scripts/stop-vm.sh" "$VM_ID" --graceful-only
 
-# stop-vm returns once QEMU is gone, but start-vm may still be releasing mdev,
-# swtpm and its launch lock.  Own that same lock across the offline transaction
-# so a concurrent normal start cannot race the SYSTEM hive commit.
-start_lock=$(vm_storage_run_preferred_path "$VM_ID" start.lock)
-exec {START_LOCK_FD}>"$start_lock"
-if ! flock -w 60 "$START_LOCK_FD"; then
-    echo "[install-vgpu] QEMU 已关机，但 60 秒内未取得 start lock；未离线写盘" >&2
-    exit 1
+if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]]; then
+    # stop-vm returns once QEMU is gone, but start-vm may still be releasing
+    # mdev/swtpm and its launch lock.  Own that lock across the R535-only
+    # offline SYSTEM-hive transaction.
+    start_lock=$(vm_storage_run_preferred_path "$VM_ID" start.lock)
+    exec {START_LOCK_FD}>"$start_lock"
+    if ! flock -w 60 "$START_LOCK_FD"; then
+        echo "[install-vgpu] QEMU 已关机，但 60 秒内未取得 start lock；未离线写盘" >&2
+        exit 1
+    fi
+    echo "[install-vgpu] guest 已完整关机；认证 GRID 538.33 并写入 R535 page-safe NV_Modes"
+    VM_START_LOCK_HELD=1 "$here/scripts/sync-monitor-profile.sh" "$VM_ID" --force
+    echo "[install-vgpu] PASS: R535 驱动、完整关机、离线 EDID/NV_Modes 收敛全部完成"
+else
+    echo "[install-vgpu] PASS: R580/${VGPU_SELECTED_DRIVER_LABEL} 正式签名驱动和完整关机已完成；跳过 R535 NV_Modes 流程"
 fi
-echo "[install-vgpu] guest 已完整关机；认证 GRID 538.33 并写入 R535 page-safe NV_Modes"
-VM_START_LOCK_HELD=1 "$here/scripts/sync-monitor-profile.sh" "$VM_ID" --force
-
-echo "[install-vgpu] PASS: 驱动安装、完整关机、离线 EDID/NV_Modes 收敛全部完成"
 if ((START_AFTER_SYNC)); then
-    exec {START_LOCK_FD}>&-
+    if [[ -n "${START_LOCK_FD:-}" ]]; then
+        exec {START_LOCK_FD}>&-
+    fi
     exec "$here/scripts/start-vm.sh" "$VM_ID"
 fi
 echo "[install-vgpu] VM 保持关机；正常启动: ./deploy/scripts/vmctl.sh start ${VM_ID}"

@@ -26,6 +26,9 @@ source "$here/lib/vm-storage.sh"
 source "$here/lib/vlan-runtime.sh"
 # shellcheck source=lib/dgame-endpoints.sh
 source "$here/lib/dgame-endpoints.sh"
+# shellcheck source=lib/g11-python-runtime.sh
+source "$here/lib/g11-python-runtime.sh"
+G11_PYTHON_RUNTIME_INSTALLER="$here/host/install-g11-python-runtime.sh"
 STORAGE_SELECTION_EXPLICIT=0
 if [[ -v VM_INSTANCE_DIR || -v VM_INSTANCES_DIR || -v VM_ROOT || -v VMS_DIR ]]; then
     STORAGE_SELECTION_EXPLICIT=1
@@ -423,16 +426,26 @@ if (( ! FORCE )); then
     fi
     GUEST_IP=${GUEST_IP_HINT:-$(find_vm_ip || true)}
     if [[ -n "$GUEST_IP" && -n "$GUEST_PASS" ]]; then
-        echo "[down] WinRM → ${GUEST_IP}: shutdown /s"
-        export GUEST_IP GUEST_USER GUEST_PASS
-        python3 - <<'PY' 2>/dev/null || echo "[down] WinRM unreachable"
-import os
+        if winrm_python=$(g11_python_resolve pypsrp); then
+            echo "[down] WinRM → ${GUEST_IP}: shutdown /s"
+            if env -u GUEST_PASS "$winrm_python" - "$GUEST_IP" "$GUEST_USER" \
+                    3<<<"$GUEST_PASS" <<'PY' 2>/dev/null
+import sys
 from pypsrp.client import Client
-Client(os.environ['GUEST_IP'], username=os.environ['GUEST_USER'],
-       password=os.environ['GUEST_PASS'], ssl=False, auth='ntlm') \
+with open(3, 'r', encoding='utf-8') as stream:
+    password = stream.read().removesuffix('\n')
+Client(sys.argv[1], username=sys.argv[2], password=password,
+       ssl=False, auth='ntlm') \
   .execute_ps('shutdown /s /t 3 /f /c "stop-vm.sh"')
 PY
-        GRACEFUL_SENT=1
+            then
+                GRACEFUL_SENT=1
+            else
+                echo "[down] WinRM unreachable"
+            fi
+        else
+            echo "[down] 缺少受管 WinRM Python，跳过 WinRM 冗余关机"
+        fi
     elif [[ -n "$GUEST_IP" ]]; then
         echo "[down] GUEST_PASS 未通过环境变量提供，跳过 WinRM 冗余关机"
         if (( ! GRACEFUL_SENT )); then

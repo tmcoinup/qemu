@@ -475,8 +475,17 @@ grep -Fq 'cpu_isolation_launch "$VM_ID" "$CPU_VCPUS" "$CPU_CORES"' "$START_VM" \
     || fail "start-vm does not launch the QMP pinner with profile CPU topology"
 grep -Fq 'export -n SUDO_PASSWORD' "$START_VM" \
     || fail "start-vm leaves a caller-exported host credential exported"
-grep -Fq 'QEMU_LAUNCH=( env -u SUDO_PASSWORD )' "$START_VM" \
-    || fail "start-vm does not strip the host credential from QEMU's environment"
+grep -Fq 'QEMU_LAUNCH=(' "$START_VM" \
+    || fail "start-vm does not build the credential-scrubbed QEMU wrapper"
+for secret_name in SUDO_PASSWORD WINDOWS_UNATTEND_ADMIN_PASSWORD GUEST_PASS \
+        G11_LAB_GUEST_PASSWORD G11_ARM_ADMIN_PASS; do
+    grep -Fq -- "-u $secret_name" "$START_VM" \
+        || fail "start-vm does not strip $secret_name from QEMU's environment"
+done
+grep -Fq 'CPU_ISOLATION_PREFERRED_NUMA_NODE=$VGPU_HOST_NUMA_NODE' "$START_VM" \
+    || fail "start-vm does not pass mdev NUMA locality to CPU isolation"
+grep -Fq '"--membind=${VGPU_HOST_NUMA_NODE}"' "$START_VM" \
+    || fail "start-vm does not bind initial guest RAM to the mdev NUMA node"
 [[ "$(grep -Fc '"${QEMU_LAUNCH[@]}" "${QEMU_EXEC_CMD[@]}"' "$START_VM")" -eq 3 ]] \
     || fail "not every QEMU launch mode uses the credential-scrubbed wrapper"
 grep -Fq 'cpu_isolation_release_vm "$VM_ID"' "$STOP_VM" \

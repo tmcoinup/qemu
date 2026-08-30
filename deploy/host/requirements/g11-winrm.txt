@@ -1,0 +1,8 @@
+# G-11 host-side WinRM transport.  Universal wheels only; hashes are from the
+# official PyPI files.  Ubuntu supplies requests and cryptography as audited
+# system packages, so the managed venv installs these two packages with
+# --no-deps and --system-site-packages.
+pypsrp==0.9.1 \
+    --hash=sha256:1217b03397589f8e77c98dc9d2a4af2abc34a89ccc15efd4b6758ec76eb1bb7d
+pyspnego==0.12.2 \
+    --hash=sha256:04e7c9260ced15197b3f42b891ffa30fa98c37bb09372c5c2bf927bcdfe30b53

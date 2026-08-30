@@ -36,7 +36,8 @@ usage:
   ./deploy/scripts/vmctl.sh repair-init ID [--vms-dir ABS]
   ./deploy/scripts/vmctl.sh refresh-base BASE_NAME [--vms-dir ABS] [options]
   ./deploy/scripts/vmctl.sh repair-display ID [--vms-dir ABS] [--no-start]
-  ./deploy/scripts/vmctl.sh driver-install ID [--vms-dir ABS] [--ip IPv4] [--gtk] [--start]
+  ./deploy/scripts/vmctl.sh driver-install ID [--vms-dir ABS] [--ip IPv4]
+      [--gtk|--sdl|--headless] [--lab-usernet] [--start]
   ./deploy/scripts/vmctl.sh path   ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh status ID [--vms-dir ABS|--vm-dir ABS]
   ./deploy/scripts/vmctl.sh wake   ID [--vms-dir ABS|--vm-dir ABS]
@@ -65,7 +66,7 @@ Examples:
   ./deploy/scripts/vmctl.sh repair-init 2
   ./deploy/scripts/vmctl.sh refresh-base win10-base
   ./deploy/scripts/vmctl.sh repair-display 8
-  ./deploy/scripts/vmctl.sh driver-install 8
+  GUEST_PASS='runtime-secret' ./deploy/scripts/vmctl.sh driver-install 8
 
 When a new configuration omits --gpu-profile, create and clone choose one
 audited GPU row at random and persist it in vm.conf.  Normal start and clone

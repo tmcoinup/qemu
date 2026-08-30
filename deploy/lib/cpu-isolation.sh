@@ -260,7 +260,8 @@ cpu_isolation_launch() {
         "$guest_core_count" "$guest_threads_per_core" "$qmp_sock" \
         "$pid_file" "$helper" "${QEMU_SERVICE_CPUS:-0}" \
         "${HOST_RESERVE_CORES:-auto}" "$timeout" "$state_file" \
-        "$topology_root" "$cgroup_root" <<'PY' &
+        "$topology_root" "$cgroup_root" \
+        "${CPU_ISOLATION_PREFERRED_NUMA_NODE:-auto}" <<'PY' &
 import glob
 import json
 import os
@@ -273,7 +274,7 @@ import time
 (mode, vm_id, expected_text, guest_cores_text, guest_threads_text,
  qmp_path, pid_file, helper, service_text, reserve_text, timeout_text,
  state_file, topology_root,
- cgroup_root) = sys.argv[1:]
+ cgroup_root, preferred_numa_text) = sys.argv[1:]
 expected = int(expected_text)
 guest_cores = int(guest_cores_text)
 guest_threads = int(guest_threads_text)
@@ -291,6 +292,18 @@ except ValueError:
 if not 0 <= service_count <= 64:
     raise SystemExit(f"service CPU count out of range: {service_count}")
 timeout = int(timeout_text)
+preferred_numa = None
+if preferred_numa_text.lower() != "auto":
+    try:
+        preferred_numa = int(preferred_numa_text)
+    except ValueError:
+        raise SystemExit(
+            f"invalid preferred NUMA node: {preferred_numa_text}"
+        )
+    if preferred_numa < 0:
+        raise SystemExit(
+            f"invalid preferred NUMA node: {preferred_numa_text}"
+        )
 
 def log(message):
     print(f"[cpu-isolate] {message}", flush=True)
@@ -338,6 +351,20 @@ def topology():
         if siblings:
             cores[siblings] = siblings
     return sorted(cores.values(), key=lambda siblings: siblings[0])
+
+def core_numa_node(core):
+    nodes = set()
+    for cpu in core:
+        pattern = os.path.join(topology_root, f"cpu{cpu}", "node[0-9]*")
+        for path in glob.glob(pattern):
+            name = os.path.basename(path)
+            try:
+                nodes.add(int(name[4:]))
+            except ValueError:
+                continue
+    if len(nodes) == 1:
+        return next(iter(nodes))
+    return None
 
 def held_partition_cpus():
     held = set()
@@ -544,6 +571,22 @@ def placement(service_cpus):
 held_cpus = held_partition_cpus()
 
 reserve, eligible = placement(service_count)
+if preferred_numa is not None:
+    local_cores = [
+        core for core in eligible if core_numa_node(core) == preferred_numa
+    ]
+    remote_cores = [core for core in eligible if core not in local_cores]
+    if local_cores:
+        eligible = local_cores + remote_cores
+        log(
+            f"NUMA 优先节点={preferred_numa}："
+            f"local cores={len(local_cores)} remote fallback={len(remote_cores)}"
+        )
+    else:
+        log(
+            f"NUMA 优先节点={preferred_numa} 没有可识别 CPU，"
+            "按通用顺序兼容回退"
+        )
 free_cores = [core for core in eligible if not (set(core) & held_cpus)]
 guest_host_cores = [
     core for core in free_cores if len(core) >= guest_threads

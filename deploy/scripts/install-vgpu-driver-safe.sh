@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command, fail-closed GRID 538.33 installation for a fresh/base G-11 disk.
+# One-command, fail-closed branch-matched GRID installation for a G-11 disk.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,17 +7,21 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$here/lib/vm-storage.sh"
 # shellcheck source=lib/vgpu-driver-assets.sh
 source "$here/lib/vgpu-driver-assets.sh"
+# shellcheck source=lib/g11-python-runtime.sh
+source "$here/lib/g11-python-runtime.sh"
+G11_PYTHON_RUNTIME_INSTALLER="$here/host/install-g11-python-runtime.sh"
 vm_storage_init
 
 usage() {
     cat <<'EOF'
-usage: ./deploy/scripts/vmctl.sh driver-install ID [--ip IPv4] [--gtk]
+usage: ./deploy/scripts/vmctl.sh driver-install ID [--ip IPv4]
+       [--gtk|--sdl|--headless] [--lab-usernet] [--winrm-port PORT]
        [--boot-timeout SEC] [--install-timeout SEC] [--start]
 
 Boots a temporary standard-VGA console with the NVIDIA mdev present only for
-PnP (display=off), installs the verified production GRID 538.33 package, fully
-shuts Windows down, and performs authenticated offline EDID/NV_Modes convergence.
-The default leaves the VM stopped for base-image work; --start boots normally.
+PnP (display=off), installs the reviewed production package matching the exact
+host branch, and fully shuts Windows down.  R535 additionally performs offline
+EDID/NV_Modes convergence; R580 deliberately skips that R535-only path.
 EOF
 }
 
@@ -27,6 +31,8 @@ BACKEND=sdl
 BOOT_TIMEOUT=360
 INSTALL_TIMEOUT=600
 START_AFTER_SYNC=0
+LAB_USERNET=0
+WINRM_PORT=0
 while (($#)); do
     case "$1" in
         [1-9]|[1-9][0-9]*)
@@ -41,6 +47,13 @@ while (($#)); do
             ;;
         --gtk) BACKEND=gtk; shift ;;
         --sdl) BACKEND=sdl; shift ;;
+        --headless) BACKEND=headless; shift ;;
+        --lab-usernet) LAB_USERNET=1; shift ;;
+        --winrm-port)
+            (($# >= 2)) || { echo "--winrm-port requires a port" >&2; exit 2; }
+            WINRM_PORT=$2
+            shift 2
+            ;;
         --boot-timeout)
             (($# >= 2)) || { echo "--boot-timeout requires seconds" >&2; exit 2; }
             BOOT_TIMEOUT=$2
@@ -58,6 +71,12 @@ while (($#)); do
 done
 
 [[ -n "$VM_ID" ]] || { usage >&2; exit 2; }
+GUEST_PASS=${GUEST_PASS:-}
+(( ${#GUEST_PASS} >= 6 && ${#GUEST_PASS} <= 64 )) &&
+        [[ "$GUEST_PASS" != *$'\r'* && "$GUEST_PASS" != *$'\n'* ]] || {
+    echo "GUEST_PASS must be supplied through a secure runtime environment (6..64 characters)" >&2
+    exit 2
+}
 vm_storage_id_is_supported "$VM_ID" || { echo "unsupported VM ID: $VM_ID" >&2; exit 2; }
 [[ "$BOOT_TIMEOUT" =~ ^[1-9][0-9]*$ && "$BOOT_TIMEOUT" -le 1800 ]] || {
     echo "--boot-timeout must be 1..1800" >&2; exit 2;
@@ -65,6 +84,20 @@ vm_storage_id_is_supported "$VM_ID" || { echo "unsupported VM ID: $VM_ID" >&2; e
 [[ "$INSTALL_TIMEOUT" =~ ^[1-9][0-9]*$ && "$INSTALL_TIMEOUT" -le 3600 ]] || {
     echo "--install-timeout must be 1..3600" >&2; exit 2;
 }
+if ((WINRM_PORT == 0)); then
+    if ((LAB_USERNET)); then
+        WINRM_PORT=$((15984 + VM_ID))
+    else
+        WINRM_PORT=5985
+    fi
+fi
+[[ "$WINRM_PORT" =~ ^[1-9][0-9]*$ ]] && ((WINRM_PORT <= 65535)) || {
+    echo "--winrm-port must be 1..65535" >&2; exit 2;
+}
+if ((LAB_USERNET)) && [[ -n "$IP_OVERRIDE" && "$IP_OVERRIDE" != 127.0.0.1 ]]; then
+    echo "--lab-usernet only accepts localhost as an explicit WinRM endpoint" >&2
+    exit 2
+fi
 vm_storage_require_namespace_ready "$VM_ID"
 conf=$(vm_storage_config_path "$VM_ID")
 disk=$(vm_storage_disk_path "$VM_ID")
@@ -78,6 +111,7 @@ if pgrep -af qemu-system-x86_64 2>/dev/null | grep -F -- "$disk" >/dev/null; the
 fi
 
 vgpu_verify_driver_assets exe
+WINRM_PYTHON=$(g11_python_resolve pypsrp) || exit 1
 
 # start-vm performs an offline pre-driver commit and allocates the mdev.  Give
 # every later sudo call a normal timestamp before start-vm is backgrounded, so
@@ -141,8 +175,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 start_args=( "$VM_ID" "--driver-install-${BACKEND}" )
-echo "[driver-install] 启动 vm${VM_ID} 安全安装窗口：标准 VGA + mdev display=off"
-"$here/scripts/start-vm.sh" "${start_args[@]}" &
+((LAB_USERNET == 0)) || start_args+=( --lab-usernet )
+echo "[driver-install] 启动 vm${VM_ID} 安全安装拓扑：标准 VGA + mdev display=off (${BACKEND})"
+LAB_USERNET_WINRM_PORT=$WINRM_PORT \
+    "$here/scripts/start-vm.sh" "${start_args[@]}" &
 launcher_pid=$!
 
 deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
@@ -155,11 +191,15 @@ while (( $(date +%s) < deadline )); do
         wait "$launcher_pid" || true
         exit 1
     }
-    guest_ip=$(vgpu_resolve_bound_guest_ip "$VM_ID" "$IP_OVERRIDE" 2>/dev/null || true)
-    if [[ -n "$guest_ip" ]] && nc -z -w 2 "$guest_ip" 5985 2>/dev/null; then
+    if ((LAB_USERNET)); then
+        guest_ip=127.0.0.1
+    else
+        guest_ip=$(vgpu_resolve_bound_guest_ip "$VM_ID" "$IP_OVERRIDE" 2>/dev/null || true)
+    fi
+    if [[ -n "$guest_ip" ]] && nc -z -w 2 "$guest_ip" "$WINRM_PORT" 2>/dev/null; then
         if GUEST_USER_VALUE=${GUEST_USER:-Administrator} \
-                GUEST_PASS_VALUE=${GUEST_PASS:-123456} \
-                python3 - "$guest_ip" <<'PY' >/dev/null 2>&1
+                GUEST_PASS_VALUE=$GUEST_PASS \
+                "$WINRM_PYTHON" - "$guest_ip" "$WINRM_PORT" <<'PY' >/dev/null 2>&1
 import os
 import sys
 from pypsrp.client import Client
@@ -167,7 +207,7 @@ from pypsrp.client import Client
 try:
     Client(sys.argv[1], username=os.environ['GUEST_USER_VALUE'],
            password=os.environ['GUEST_PASS_VALUE'], ssl=False,
-           auth='ntlm').execute_ps('Get-Date')
+           auth='ntlm', port=int(sys.argv[2])).execute_ps('Get-Date')
 except Exception:
     raise SystemExit(1)
 PY
@@ -184,6 +224,8 @@ done
 }
 
 install_args=( "$VM_ID" --ip "$guest_ip" --timeout "$INSTALL_TIMEOUT" )
+install_args+=( --winrm-port "$WINRM_PORT" )
+((LAB_USERNET == 0)) || install_args+=( --lab-usernet )
 ((START_AFTER_SYNC == 0)) || install_args+=( --start )
 "$here/install-vgpu-driver.sh" "${install_args[@]}"
 install_complete=1

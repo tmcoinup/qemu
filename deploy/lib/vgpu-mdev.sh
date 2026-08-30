@@ -42,6 +42,7 @@
 : "${VGPU_PER_VM_FB_GB:=2}"         # 旧 API 未传 framebuffer_mb 时的 fallback
 : "${VGPU_PER_VM_FB_MB:=$((VGPU_PER_VM_FB_GB * 1024))}"
 : "${VGPU_CAPACITY_CHECK:=both}"    # both | framebuffer | sysfs | none
+: "${VGPU_HOST_FB_MODE:=equal}"      # equal | mixed (V100 + R580 only)
 : "${MDEV_DEVICES_DIR:=/sys/bus/mdev/devices}"
 : "${MDEV_PROC_DIR:=/proc}"
 : "${NVIDIA_MODULE_VERSION_FILE:=/sys/module/nvidia/version}"
@@ -568,6 +569,23 @@ _mdev_parent_for_type() {
     readlink -f "$(dirname "$(dirname "$type_dir")")"
 }
 
+# Return the host NUMA node of an already-created mdev.  The mdev sysfs link
+# resolves below its physical PCI parent, so this follows the allocation that
+# QEMU will actually open instead of guessing from a configured BDF.
+mdev_numa_node() {
+    local uuid=$1 resolved parent node
+
+    [[ "$uuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || {
+        mdev_err "NUMA 查询收到非法 mdev UUID: $uuid"
+        return 1
+    }
+    resolved=$(readlink -f "$MDEV_DEVICES_DIR/$uuid" 2>/dev/null) || return 1
+    parent=$(dirname "$resolved")
+    node=$(cat "$parent/numa_node" 2>/dev/null || true)
+    [[ "$node" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$node"
+}
+
 mdev_validate_type_parent() {
     local type_dir=$1 parent vendor device_api
     parent=$(_mdev_parent_for_type "$type_dir") || return 1
@@ -631,19 +649,26 @@ mdev_active_framebuffer_mb() {
     echo "$total"
 }
 
-# Equal-size is a scheduler/RM contract, not merely a capacity calculation.
-# NVIDIA vGPU 16 permits different A/B/Q series on one physical GPU only when
-# their framebuffer amount is the same.  Read every active mdev's real type
-# while the host allocation lock is held; an unreadable or different size is
-# fail-closed so a stale VM cannot race a new allocation into another tier.
+# Read every active mdev's real type while the host allocation lock is held.
+# Equal-size rejects a different amount; mixed-size still performs the full
+# structural/framebuffer audit but permits 1Q+2Q after the R580 runtime mode is
+# independently proven enabled.  Unreadable state always fails closed.
 mdev_validate_active_framebuffer_tier() {
-    local type_dir=$1 requested_fb_mb=$2 parent d fb active_type active_name
+    local type_dir=$1 requested_fb_mb=$2 policy=${3:-equal}
+    local parent d fb active_type active_name
     local resolved active_parent uuid
 
     [[ "$requested_fb_mb" =~ ^[1-9][0-9]*$ ]] || {
         mdev_err "请求 framebuffer 档位必须是正整数: $requested_fb_mb"
         return 1
     }
+    case "$policy" in
+        equal|mixed) ;;
+        *)
+            mdev_err "framebuffer policy 必须是 equal 或 mixed: $policy"
+            return 1
+            ;;
+    esac
     parent=$(_mdev_parent_for_type "$type_dir") || return 1
     if [[ ! -d "$MDEV_DEVICES_DIR" || -L "$MDEV_DEVICES_DIR" ||
           ! -r "$MDEV_DEVICES_DIR" || ! -x "$MDEV_DEVICES_DIR" ]]; then
@@ -686,12 +711,67 @@ mdev_validate_active_framebuffer_tier() {
             mdev_err "无法确认活动 mdev $(basename "$d") 的 framebuffer 档位: ${active_type:-unknown}"
             return 1
         fi
-        if (( fb != requested_fb_mb )); then
+        if [[ "$policy" == equal ]] && (( fb != requested_fb_mb )); then
             active_name=$(cat "$d/mdev_type/name" 2>/dev/null || true)
             mdev_err "同一物理 GPU 禁止混合 framebuffer 档位: 活动 $(basename "$d")=${active_name:-$(basename "$active_type")}/${fb}MB，请求 ${requested_fb_mb}MB"
             return 1
         fi
     done
+}
+
+mdev_validate_mixed_size_runtime() {
+    local type_dir=$1 parent bdf driver_version smi output
+
+    driver_version=$(cat "$NVIDIA_MODULE_VERSION_FILE" 2>/dev/null || true)
+    if [[ "$driver_version" != 580.* ]]; then
+        mdev_err "mixed-size 仅在已验证的 NVIDIA R580 路径开放，当前 ${driver_version:-unknown}"
+        return 1
+    fi
+    parent=$(_mdev_parent_for_type "$type_dir") || return 1
+    bdf=$(basename -- "$parent")
+    if _mdev_is_production_sysfs; then
+        smi=/usr/bin/nvidia-smi
+    else
+        smi=${VGPU_NVIDIA_SMI_BIN:-nvidia-smi}
+    fi
+    [[ -x "$smi" ]] || {
+        mdev_err "mixed-size 无法执行可信 nvidia-smi: $smi"
+        return 1
+    }
+    output=$("$smi" -q -i "$bdf" 2>/dev/null) || {
+        mdev_err "mixed-size 无法读取 GPU $bdf 的 vGPU capability/mode"
+        return 1
+    }
+    if ! grep -Eqi 'Heterogeneous Time-Slice Sizes[[:space:]]*:[[:space:]]*Supported' \
+            <<<"$output"; then
+        mdev_err "GPU $bdf 未报告 Heterogeneous Time-Slice Sizes: Supported"
+        return 1
+    fi
+    if ! grep -Eqi 'vGPU Heterogeneous Mode[[:space:]]*:[[:space:]]*Enabled' \
+            <<<"$output"; then
+        mdev_err "GPU $bdf 尚未启用 mixed-size；先执行受管的 nvidia-smi vgpu -shm 1 修复"
+        return 1
+    fi
+}
+
+mdev_validate_active_framebuffer_policy() {
+    local type_dir=$1 requested_fb_mb=$2
+
+    case "$VGPU_HOST_FB_MODE" in
+        equal)
+            mdev_validate_active_framebuffer_tier \
+                "$type_dir" "$requested_fb_mb" equal
+            ;;
+        mixed)
+            mdev_validate_mixed_size_runtime "$type_dir" &&
+                mdev_validate_active_framebuffer_tier \
+                    "$type_dir" "$requested_fb_mb" mixed
+            ;;
+        *)
+            mdev_err "VGPU_HOST_FB_MODE 必须是 equal 或 mixed: $VGPU_HOST_FB_MODE"
+            return 1
+            ;;
+    esac
 }
 
 # 锁定物理 GPU 的 SM 时钟下限。vGPU 在低负载时会掉到最低档，交互场景表现为
@@ -844,7 +924,7 @@ _mdev_allocate_locked() {
         mdev_err "profile 显存不匹配: $profile 实际 ${actual_fb_mb}MB，请求 ${requested_fb_mb}MB"
         return 1
     fi
-    mdev_validate_active_framebuffer_tier "$type_dir" "$requested_fb_mb" || return 1
+    mdev_validate_active_framebuffer_policy "$type_dir" "$requested_fb_mb" || return 1
 
     mdev_dir=$MDEV_DEVICES_DIR/$uuid
     if [[ -L "$mdev_dir" ]]; then

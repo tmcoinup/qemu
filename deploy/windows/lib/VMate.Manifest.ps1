@@ -108,12 +108,12 @@ function Assert-VMatePlatformTpm {
         }
         $seenBanks[[string]$bank] = $true
     }
-    $boardTpmHost = switch ([string]$Board.subsystem_vendor) {
-        '0x1043' { 'www.asus.com' }
-        '0x1462' { 'www.msi.com' }
-        '0x1458' { 'www.gigabyte.com' }
-        '0x1849' { 'www.asrock.com' }
-        default { '' }
+    $boardTpmHosts = switch ([string]$Board.subsystem_vendor) {
+        '0x1043' { @('www.asus.com', 'dlcdnet.asus.com', 'dlcdnets.asus.com') }
+        '0x1462' { @('www.msi.com', 'download-2.msi.com') }
+        '0x1458' { @('www.gigabyte.com', 'download.gigabyte.com') }
+        '0x1849' { @('www.asrock.com', 'download.asrock.com') }
+        default { @() }
     }
     $cpuTpmHost = if ($CpuVendor -ceq 'AuthenticAMD') {
         'www.amd.com'
@@ -128,7 +128,7 @@ function Assert-VMatePlatformTpm {
                 [UriKind]::Absolute, [ref]$sourceUri) -or
             $sourceUri.Scheme -cne 'https' -or
             $sourceUri.DnsSafeHost.ToLowerInvariant() -notin @(
-                $boardTpmHost, $cpuTpmHost)) {
+                @($boardTpmHosts) + $cpuTpmHost)) {
             throw "平台 '$PlatformId' 的 tpm.$sourceField 必须是已注册厂商官方 HTTPS 来源。"
         }
     }

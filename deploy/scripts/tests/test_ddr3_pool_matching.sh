@@ -17,6 +17,7 @@ is_known_active_memory_product_pair() {
     local key="$1|$2|$3|$4"
     case "$key" in
         "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400" \
+        |"Samsung|M378B5773DH0-CMA|M378B5273DH0-CMA|1866" \
         |"Crucial|CT2G4DFS624A|CT4G4DFS824A|2400" \
         |"Kingston|KVR16N11S6/2|KVR16N11S8/4|1600" \
         |"SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600" \
@@ -44,7 +45,7 @@ for row in "${BOARD_POOL[@]}"; do
     esac
 done
 
-# 旧双料号视图只允许五组有型号级依据的 DDR4/DDR3。Kingston DDR4 仅有
+# 旧双料号视图只允许六组有型号级依据的 DDR4/DDR3。Kingston DDR4 仅有
 # 官方可证的 4GB 单品，由新 module API 选择，不伪造 2GB 料号来拼旧 ABI。
 # DDR3 只绑定老家用 socket，
 # 不会被默认 LGA1151/AM4 bundle 抽到。
@@ -68,7 +69,7 @@ for row in "${MEM_POOL[@]}"; do
     fi
     active_count=$((active_count + 1))
 done
-(( active_count == 5 )) || fail "旧双料号池应为两组 DDR4 + 三组 DDR3"
+(( active_count == 6 )) || fail "旧双料号池应为两组 DDR4 + 四组 DDR3"
 
 # 三组已核验 DDR3 已因家用 compatibility bundle 转为活动物料。
 (( ${#MEM_DORMANT_POOL[@]} == 0 )) || fail "DDR3 不应继续留在 dormant 目录"
@@ -84,14 +85,15 @@ for row in "${MEM_QUARANTINED_POOL[@]}"; do
     fi
 done
 
-# 当前所有可随机 bundle 都必须明确报告 DDR4；compatibility AMD 条目也使用 DDR4，
-# 但因为 enabled=false 不进入 CPU_POOL。
+# 可随机 X79 bundle 必须报告 DDR3 1.5V，其它既有 enabled bundle 保持 DDR4 1.2V。
 for row in "${PLATFORM_POOL[@]}"; do
     IFS='|' read -r platform_id enabled _ _ _ _ <<<"$row"
     [[ "$enabled" == true ]] || continue
     stealth_platform_load "$platform_id"
-    [[ "$MEM_TYPE" == DDR4 && "$MEM_VOLTAGE_MV" == 1200 ]] \
-        || fail "enabled 平台不是 DDR4 1.2V: $platform_id"
+    case "$CPU_SOCKET:$MEM_TYPE:$MEM_VOLTAGE_MV" in
+        LGA2011:DDR3:1500|*:DDR4:1200) ;;
+        *) fail "enabled 平台内存代际/电压错误: $platform_id" ;;
+    esac
 done
 
-echo "OK: DDR3 household materials remain isolated from default enabled platforms"
+echo "OK: DDR3 materials stay bound to audited household/X79 platforms"

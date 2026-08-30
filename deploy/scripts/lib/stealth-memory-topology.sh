@@ -28,6 +28,10 @@ stealth_resolve_memory_topology() {
         echo "ERROR: manifest 内存通道/槽位字段非法" >&2
         return 2
     fi
+    if (( (RAM == 12288 || RAM == 16384) && slots < 4 )); then
+        echo "ERROR: RAM=${RAM}MiB 仅允许用于至少四个 DIMM 插槽的主板" >&2
+        return 2
+    fi
 
     NUM_DIMMS=0
     PER_DIMM_MB=0

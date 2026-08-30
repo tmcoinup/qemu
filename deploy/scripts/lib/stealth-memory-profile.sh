@@ -231,7 +231,7 @@ stealth_resolve_loaded_memory_profile() {
         esac
     fi
     case "$CPU_SOCKET" in
-        AM3|AM3+|FM2+|LGA1155)
+        AM3|AM3+|FM2+|LGA1150|LGA1155|LGA2011)
             : "${MEM_TYPE:=DDR3}"
             : "${MEM_VOLTAGE_MV:=1500}"
             ;;

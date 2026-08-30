@@ -36,6 +36,7 @@ env \
     STEALTH_KVM_TSC_KHZ=3600000 \
     STEALTH_HOST_CPU_VENDOR=GenuineIntel \
     STEALTH_HOST_CPU_MAX_MHZ=5000 \
+    STEALTH_PLATFORM_ID=intel-lga1151-i3-9100f-asus-prime-h310m-a-r2 \
     CPUS=4 \
     "$START_VM" 9741 --no-sdl --no-fb-shm --no-bridge >"$TMP_DIR/argv"
 

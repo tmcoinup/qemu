@@ -107,7 +107,8 @@ stealth_validate_guest_cpu_class() {
             echo "ERROR: Guest 家用 CPU 不得使用通用 -cpu max 基型" >&2
             return 1
             ;;
-        sandybridge-ibrs|ivybridge-ibrs|haswell-v4|skylake-client-ibrs|phenom|ryzen3-1200)
+        sandybridge-ibrs|ivybridge-ibrs|haswell-v4|skylake-client-ibrs|phenom|ryzen3-1200|\
+        core-i7-3820|core-i7-3930k|core-i7-4820k|core-i7-4930k|core-i7-4960x)
             ;;
         *)
             echo "ERROR: Guest CPU 未使用已审计家用 QEMU named-model: ${qemu_base:-empty}" >&2
@@ -162,10 +163,10 @@ stealth_validate_platform_host_constraints() {
         return 1
     fi
     case "${CPU_CORES}:${CPU_THREADS}" in
-        2:2|2:4|4:4)
+        2:2|2:4|4:4|4:8|6:12)
             ;;
         *)
-            echo "ERROR: Guest CPU 拓扑只允许 2C2T、2C4T 或 4C4T；当前 ${CPU_CORES}C${CPU_THREADS}T" >&2
+            echo "ERROR: Guest CPU 拓扑不在受控家用池；当前 ${CPU_CORES}C${CPU_THREADS}T" >&2
             return 1
             ;;
     esac
@@ -247,8 +248,9 @@ stealth_pick_profile() {
     #    其它宿主再走普通物理 supported；显式 compatibility 才加入其余家用
     #    型号和受限 host 模板。每层都逐个执行真实 KVM realize。
     local _requested_cpus="${CPUS:-4}"
-    if [[ "$_requested_cpus" != 2 && "$_requested_cpus" != 4 ]]; then
-        echo "ERROR: 家用 Guest 的 CPUS 只允许 2 或 4（2C2T/2C4T/4C4T）" >&2
+    if [[ "$_requested_cpus" != 2 && "$_requested_cpus" != 4 &&
+          "$_requested_cpus" != 8 && "$_requested_cpus" != 12 ]]; then
+        echo "ERROR: 家用 Guest 的 CPUS 只允许 2、4、8 或 12" >&2
         return 1
     fi
     case "${ALLOW_PLATFORM_COMPATIBILITY:-0}" in

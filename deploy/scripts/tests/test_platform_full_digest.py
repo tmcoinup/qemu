@@ -62,6 +62,21 @@ def main() -> None:
         "intel-lga1151-i3-9100f-msi-h310m-pro-m2-plus-ms-7c08",
         "intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2",
         target_id,
+        "intel-lga2011-i7-3820-asrock-x79-extreme4",
+        "intel-lga2011-i7-3820-asus-p9x79",
+        "intel-lga2011-i7-3820-gigabyte-ga-x79-up4",
+        "intel-lga2011-i7-3930k-asrock-x79-extreme4",
+        "intel-lga2011-i7-3930k-asus-p9x79",
+        "intel-lga2011-i7-3930k-gigabyte-ga-x79-up4",
+        "intel-lga2011-i7-4820k-asrock-x79-extreme4",
+        "intel-lga2011-i7-4820k-asus-p9x79",
+        "intel-lga2011-i7-4820k-gigabyte-ga-x79-up4",
+        "intel-lga2011-i7-4930k-asrock-x79-extreme4",
+        "intel-lga2011-i7-4930k-asus-p9x79",
+        "intel-lga2011-i7-4930k-gigabyte-ga-x79-up4",
+        "intel-lga2011-i7-4960x-asrock-x79-extreme4",
+        "intel-lga2011-i7-4960x-asus-p9x79",
+        "intel-lga2011-i7-4960x-gigabyte-ga-x79-up4",
     }:
         raise AssertionError("默认平台集合发生未审计增删")
     print("OK: full platform fact digests reject coordinated drift")

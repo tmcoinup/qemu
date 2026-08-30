@@ -234,6 +234,8 @@ d22cdfa1018a00aa0b61172017f7bfb8f58382bfa80545e56b2b7a16c0242b9b  sunrisepoint-h
 def9c32b7720dd1d8ea960d50a9ad1aa00d3e1c4f75a89c93e5738515bddebeb  cougarpoint.cat
 11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6  PantherPointSystem.inf
 a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500  pantherpoint.cat
+f4b3572cc42be6d471a9a1a0340091677648571e6f05f8d40bd89f60e89d86b1  PatsburgSystem.inf
+0e725443833f813142c8f470a4eb78d7648dc5ebe2bad316c4c0f22930a2b110  patsburg.cat
 2e754318dab5a3f906eb267a785fe040dc253c26fdcbe4878cd2aaf1316a7209  LynxPointSystem.inf
 28ec883087c5ffe99e132631f4a7ec27c8d315430cddb83942ff1384e1643dee  lynxpoint.cat
 HASHES
@@ -248,6 +250,8 @@ for hash in \
     def9c32b7720dd1d8ea960d50a9ad1aa00d3e1c4f75a89c93e5738515bddebeb \
     11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6 \
     a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500 \
+    f4b3572cc42be6d471a9a1a0340091677648571e6f05f8d40bd89f60e89d86b1 \
+    0e725443833f813142c8f470a4eb78d7648dc5ebe2bad316c4c0f22930a2b110 \
     2e754318dab5a3f906eb267a785fe040dc253c26fdcbe4878cd2aaf1316a7209 \
     28ec883087c5ffe99e132631f4a7ec27c8d315430cddb83942ff1384e1643dee; do
     grep -F "$hash" "$INSTALLER" >/dev/null \
@@ -351,6 +355,7 @@ for payload in install-chipset-device.ps1 CannonLake-HSystem.inf cannonlake-h.ca
         SunrisePoint-HSystem.inf sunrisepoint-h.cat \
         CougarPointSystem.inf cougarpoint.cat \
         PantherPointSystem.inf pantherpoint.cat \
+        PatsburgSystem.inf patsburg.cat \
         LynxPointSystem.inf lynxpoint.cat respawn-restart-state.ps1; do
     grep -F "$payload" "$BUILD_SCRIPT" "$PAYLOADS_HEADER" >/dev/null \
         || fail "单 EXE 接线缺少 $payload"

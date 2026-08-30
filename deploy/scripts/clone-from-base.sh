@@ -4,7 +4,7 @@
 # 用法：
 #   deploy/scripts/clone-from-base.sh <BASE_NAME|BASE_QCOW2> <NEW_INSTANCE>
 #       [--allow-platform-compatibility] [--migrate-storage-profile] [--qemu=PATH]
-#       [--cpus=2|4] [--memory-id=ID] [--storage-id=ID] [--gpu-id=ID] [--monitor-id=ID]
+#       [--cpus=2|4|8|12] [--memory-id=ID] [--storage-id=ID] [--gpu-id=ID] [--monitor-id=ID]
 #       [--image-root=PATH|--vms-dir=PATH|--base-dir=PATH] [--qemu-img=PATH]
 #
 # 例：
@@ -80,7 +80,7 @@ VMS_DIR="${VMS_DIR%/}"
 BASE_DIR="${CLI_BASE_DIR:-${BASE_DIR:-$VMS_DIR/_base}}"
 
 if [[ -z "$BASE_ARG" || -z "$NEW_INSTANCE" ]]; then
-    echo "usage: $0 <BASE_NAME|BASE_QCOW2> <NEW_INSTANCE> [--cpus=2|4] [--qemu=PATH] [--allow-platform-compatibility] [--migrate-storage-profile]" >&2
+    echo "usage: $0 <BASE_NAME|BASE_QCOW2> <NEW_INSTANCE> [--cpus=2|4|8|12] [--qemu=PATH] [--allow-platform-compatibility] [--migrate-storage-profile]" >&2
     echo "       [--memory-id=ID] [--storage-id=ID] [--gpu-id=ID] [--monitor-id=ID]" >&2
     echo "       [--image-root=PATH] [--vms-dir=PATH] [--base-dir=PATH] [--qemu-img=PATH]" >&2
     echo "" >&2
@@ -109,9 +109,9 @@ case "$ALLOW_STORAGE_MIGRATION" in
 esac
 CPUS="${CLI_CPUS:-${CPUS:-4}}"
 case "$CPUS" in
-    2|4) ;;
+    2|4|8|12) ;;
     *)
-        echo "ERROR: clone --cpus 只支持完整家用 SKU 的 2 或 4 线程" >&2
+        echo "ERROR: clone --cpus 只支持完整家用 SKU 的 2、4、8 或 12 线程" >&2
         exit 2
         ;;
 esac

@@ -231,6 +231,8 @@ def validate_memory(
     }
     if any(total not in possible for total in totals):
         fail(f"{where}.allowed_total_mib 无法由 DIMM 物料和槽位组成")
+    if board["dimm_slots"] < 4 and any(total in (12288, 16384) for total in totals):
+        fail(f"{where} 12/16GiB 选项要求主板至少四个 DIMM 插槽")
     if max(totals) > board["max_memory_gib"] * 1024:
         fail(f"{where} 总容量超过主板上限")
 
@@ -265,9 +267,14 @@ def validate_devices(
         fail(f"{where}.nvme PCIe 代际超过主板")
     if require(nvme, "lanes", int, where) not in (1, 2, 4):
         fail(f"{where}.nvme lane 数无效")
-    require(nvme, "boot_supported", bool, where)
-    if require(nvme, "attachment", str, where) != "m2_socket":
-        fail(f"{where}.nvme 当前只允许可核验的主板 M.2 socket")
+    boot_supported = require(nvme, "boot_supported", bool, where)
+    attachment = require(nvme, "attachment", str, where)
+    expected_attachment = "m2_socket" if boot_supported else "pcie_add_in"
+    if attachment != expected_attachment:
+        fail(
+            f"{where}.nvme attachment 必须与可核验启动能力一致："
+            f"expected={expected_attachment}"
+        )
 
     nic = require(devices, "nic", dict, where)
     exact(nic, {
@@ -300,11 +307,17 @@ def validate_devices(
         require_hex(require(audio, key, str, where), f"{where}.audio.{key}", (8,))
     for key in ("controller_pci_vendor", "controller_pci_device"):
         require_hex(require(audio, key, str, where), f"{where}.audio.{key}")
+    allowed_codecs = {
+        "ALC887": "0x10ec0887",
+        "ALC892": "0x10ec0892",
+        "ALC898": "0x10ec0899",
+    }
     if (
-        audio["codec"], audio["codec_id"], audio["codec_revision"],
-        audio["identity_fidelity"],
-    ) != ("ALC887", "0x10ec0887", "0x00100302", "protocol_identity_only"):
-        fail(f"{where}.audio 不是已审计 ALC887 协议身份")
+        allowed_codecs.get(audio["codec"]) != audio["codec_id"]
+        or audio["codec_revision"] != "0x00100302"
+        or audio["identity_fidelity"] != "protocol_identity_only"
+    ):
+        fail(f"{where}.audio 不是已审计 Realtek 协议身份")
     if audio["codec_subsystem_id"][2:6].lower() != board["subsystem_vendor"][2:].lower():
         fail(f"{where}.audio codec subsystem vendor 与主板厂商不一致")
 
@@ -350,8 +363,10 @@ def validate_platform(
             fail(f"{where}.cpu.{key} 必须为正整数")
     if cpu["current_mhz"] > cpu["max_mhz"] or cpu["tsc_mhz"] != cpu["current_mhz"]:
         fail(f"{where}.cpu 频率/TSC 不自洽")
-    if (cpu["cores"], cpu["threads"]) not in {(2, 2), (2, 4), (4, 4)}:
-        fail(f"{where}.cpu 拓扑不在 2C2T/2C4T/4C4T 家用白名单")
+    if (cpu["cores"], cpu["threads"]) not in {
+        (2, 2), (2, 4), (4, 4), (4, 8), (6, 12),
+    }:
+        fail(f"{where}.cpu 拓扑不在受控家用白名单")
     if not 32 <= cpu["phys_bits"] <= 52:
         fail(f"{where}.cpu.phys_bits 超出 QEMU/KVM 范围")
     if cpu["vendor_id"] == "GenuineIntel" and "+topoext" in cpu["features"]:

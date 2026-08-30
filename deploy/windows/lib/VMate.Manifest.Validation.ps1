@@ -145,7 +145,15 @@ function Assert-VMateHouseholdGuestCpu {
     $name = [string]$Cpu.name
     $identity = "$name|$([string]$Cpu.qemu_arg)"
     $qemuBase = ([string]$Cpu.qemu_arg).Split(',')[0].ToLowerInvariant()
-    if ($qemuBase -notin @('skylake-client-ibrs', 'ryzen3-1200')) {
+    if ($qemuBase -notin @(
+            'skylake-client-ibrs',
+            'ryzen3-1200',
+            'core-i7-3820',
+            'core-i7-3930k',
+            'core-i7-4820k',
+            'core-i7-4930k',
+            'core-i7-4960x'
+        )) {
         throw "平台 '$PlatformId' 的 CPU 未使用已审计家用 QEMU named-model。"
     }
     $serverPattern = '(?i)\b(?:xeon|epyc|opteron|threadripper)\b|' +
@@ -193,7 +201,7 @@ function Assert-VMatePlatformFacts {
     if ($cpu.vendor_id -notin @('AuthenticAMD', 'GenuineIntel') -or
         [int64]$cpu.current_mhz -gt [int64]$cpu.max_mhz -or
         [int64]$cpu.tsc_mhz -gt [int64]$cpu.max_mhz -or
-        $cpuTopology -notin @('2C2T', '2C4T', '4C4T') -or
+        $cpuTopology -notin @('2C2T', '2C4T', '4C4T', '4C8T', '6C12T') -or
         [int64]$cpu.phys_bits -lt 32 -or [int64]$cpu.phys_bits -gt 52) {
         throw "平台 '$PlatformId' 的 CPU 厂商、频率、拓扑或物理地址位无效。"
     }
@@ -263,10 +271,15 @@ function Assert-VMatePlatformFacts {
     }
     Assert-VMatePositiveIntegerFields $devices.nvme `
         @('max_pcie_generation', 'lanes') "平台 '$PlatformId'.devices.nvme"
+    $expectedNvmeAttachment = if ([bool]$devices.nvme.boot_supported) {
+        'm2_socket'
+    } else {
+        'pcie_add_in'
+    }
     if ([int]$devices.nvme.max_pcie_generation -gt [int]$board.pcie_generation -or
         [int]$devices.nvme.lanes -notin @(1, 2, 4) -or
         $devices.nvme.boot_supported -isnot [bool] -or
-        [string]$devices.nvme.attachment -ne 'm2_socket') {
+        [string]$devices.nvme.attachment -cne $expectedNvmeAttachment) {
         throw "平台 '$PlatformId' 的 NVMe 接口事实无效。"
     }
 
@@ -297,21 +310,29 @@ function Assert-VMatePlatformFacts {
             "平台 '$PlatformId'.devices.audio.$field"
     }
     $audioContracts = @{
-        '0x1043' = 'ALC887|0x10ec0887|0x00100302|0x104386c7'
-        '0x1462' = 'ALC887|0x10ec0887|0x00100302|0x1462c708'
-        '0x1458' = 'ALC887|0x10ec0887|0x00100302|0x1458a182'
+        'ALC887' = '0x10ec0887'
+        'ALC892' = '0x10ec0892'
+        'ALC898' = '0x10ec0899'
     }
-    $expectedAudio = $audioContracts[[string]$board.subsystem_vendor]
-    if ($null -eq $expectedAudio -or
-        (@($audio.codec, $audio.codec_id, $audio.codec_revision,
-                $audio.codec_subsystem_id) -join '|') -cne $expectedAudio -or
+    $expectedCodecId = $audioContracts[[string]$audio.codec]
+    $codecSubsystemVendor = ([string]$audio.codec_subsystem_id).Substring(2, 4)
+    $boardSubsystemVendor = ([string]$board.subsystem_vendor).Substring(2, 4)
+    if ($null -eq $expectedCodecId -or
+        [string]$audio.codec_id -cne $expectedCodecId -or
+        [string]$audio.codec_revision -cne '0x00100302' -or
+        $codecSubsystemVendor -cne $boardSubsystemVendor -or
         $audio.identity_fidelity -cne 'protocol_identity_only') {
-        throw "平台 '$PlatformId' 的 ALC887 协议身份不是已审计组合。"
+        throw "平台 '$PlatformId' 的 Realtek 协议身份不是已审计组合。"
     }
 
     if ([int]$Platform.memory.voltage_mv -notin @(1200, 1500) -or
         [int]$Platform.memory.rank -notin @(1, 2)) {
         throw "平台 '$PlatformId' 的内存电压或 rank 不受支持。"
+    }
+    if ([int]$board.dimm_slots -lt 4 -and
+        (@($Platform.memory.allowed_total_mib) -contains 12288 -or
+            @($Platform.memory.allowed_total_mib) -contains 16384)) {
+        throw "平台 '$PlatformId' 少于四个 DIMM 槽，不能提供 12/16GiB。"
     }
     Assert-VMateH310CpuPolicy -Platform $Platform -PlatformId $PlatformId
 }

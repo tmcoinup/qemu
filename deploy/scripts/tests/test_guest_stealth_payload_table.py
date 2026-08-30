@@ -57,6 +57,7 @@ required = {
     "monitor-friendly-name-projector.exe",
     "CougarPointSystem.inf",
     "PantherPointSystem.inf",
+    "PatsburgSystem.inf",
     "LynxPointSystem.inf",
 }
 missing = required - set(files)

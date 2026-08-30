@@ -60,6 +60,21 @@ Cougar/Panther/Lynx/Sunrise/Cannon Lake 控制器。
   `a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500`
 - INF 版本: `10.1.1.44`
 
+## X79 / `PCI\VEN_8086&DEV_1D22`
+
+与 H110 共用上面的 `10.1.1.44` CAB；Microsoft Update Catalog 中针对
+C600/X79 的审计条目为：
+
+- Microsoft Update Catalog Update ID:
+  `7b25e47d-17e2-4483-83de-3a697a9f1275`
+- 目录详情:
+  <https://www.catalog.update.microsoft.com/ScopedViewInline.aspx?updateid=7b25e47d-17e2-4483-83de-3a697a9f1275>
+- `PatsburgSystem.inf`:
+  `f4b3572cc42be6d471a9a1a0340091677648571e6f05f8d40bd89f60e89d86b1`
+- `patsburg.cat`:
+  `0e725443833f813142c8f470a4eb78d7648dc5ebe2bad316c4c0f22930a2b110`
+- INF 版本: `10.1.1.44`
+
 ## H81 / `PCI\VEN_8086&DEV_8C22`
 
 与 H110 共用上面的 `10.1.1.44` CAB：

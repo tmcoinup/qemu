@@ -29,6 +29,8 @@ AMD_HOUSEHOLD_RE = re.compile(
 HOUSEHOLD_QEMU_BASES = {
     "SandyBridge-IBRS", "IvyBridge-IBRS", "Haswell-v4",
     "Skylake-Client-IBRS", "phenom", "Ryzen3-1200",
+    "Core-i7-3820", "Core-i7-3930K", "Core-i7-4820K",
+    "Core-i7-4930K", "Core-i7-4960X",
 }
 
 

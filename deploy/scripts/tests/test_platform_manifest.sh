@@ -18,7 +18,7 @@ stealth_platform_validate >/dev/null
 # JSON 索引必须同时保留可审计的兼容条目和可随机的 supported 条目；兼容条目
 # 不能因为同厂商而偷偷进入随机池。
 mapfile -t platform_rows < <(stealth_platform_index)
-(( ${#platform_rows[@]} == 7 )) || fail "平台数量应为 7，实际 ${#platform_rows[@]}"
+(( ${#platform_rows[@]} == 22 )) || fail "平台数量应为 22，实际 ${#platform_rows[@]}"
 # 审计白名单钉住型号、系列、料号、主板和年代。结构校验只能证明字段自洽，
 # 不能代替 DMTF/CPU 厂商/主板支持表中的外部事实。
 python3 - "$REPO_ROOT/deploy/hardware/platforms.json" <<'PY' || \
@@ -50,8 +50,10 @@ expected = {
         True, "supported", 2016, "Intel(R) Core(TM) i5-6400T CPU @ 2.20GHz",
         "BXC80662I56400T", "H110M-A/M.2", "0x00CD", "0x00EC", False),
 }
-if set(platforms) != set(expected):
-    raise SystemExit("平台 ID 集合不是审计后的七个 bundle")
+if not set(expected) <= set(platforms):
+    raise SystemExit("既有七个审计 bundle 缺失")
+if len(platforms) != 22:
+    raise SystemExit(f"平台总数应为 22，实际 {len(platforms)}")
 for platform_id, facts in expected.items():
     item = platforms[platform_id]
     cpu = item["cpu"]
@@ -71,7 +73,7 @@ for row in "${platform_rows[@]}"; do
         || fail "平台数字字段错误: $row"
     [[ "$enabled" == true ]] && enabled_count=$((enabled_count + 1))
 done
-(( enabled_count == 6 )) || fail "随机平台应只有六个 Intel bundle"
+(( enabled_count == 21 )) || fail "随机平台应有二十一个 supported bundle"
 # 每个平台（包括默认不进入随机池的 compatibility 条目）都必须能完整导出，
 # 且 CPU、内存、BIOS、PCI、TPM 和板载设备字段相互约束。
 for row in "${platform_rows[@]}"; do
@@ -87,9 +89,9 @@ for row in "${platform_rows[@]}"; do
             || fail "$platform_id 禁用平台不是 compatibility"
     fi
     [[ "$PLATFORM_SCHEMA_VERSION" == 1 ]] || fail "$platform_id schema 错误"
-    (( CPU_CORES == 2 || CPU_CORES == 4 )) \
+    (( CPU_CORES == 2 || CPU_CORES == 4 || CPU_CORES == 6 )) \
         || fail "$platform_id 核数不在已审计桌面 SKU 范围"
-    (( CPU_THREADS == 2 || CPU_THREADS == 4 )) \
+    (( CPU_THREADS == 2 || CPU_THREADS == 4 || CPU_THREADS == 8 || CPU_THREADS == 12 )) \
         || fail "$platform_id 线程数不在已审计桌面 SKU 范围"
     (( CPU_TSC_MHZ == CPU_CUR_MHZ )) || fail "$platform_id TSC 与基准频率不一致"
     if [[ "$CPU_VENDOR" == GenuineIntel ]]; then
@@ -97,8 +99,10 @@ for row in "${platform_rows[@]}"; do
     else
         [[ "$CPU_FEATURES" == *topoext* ]] || fail "AMD 平台缺少 topoext"
     fi
-    [[ "$MEM_TYPE" == DDR4 && "$MEM_VOLTAGE_MV" == 1200 && "$MEM_RANK" == 1 ]] \
-        || fail "$platform_id 内存类型/电压/rank 错误"
+    case "$CPU_SOCKET:$MEM_TYPE:$MEM_VOLTAGE_MV:$MEM_RANK" in
+        LGA2011:DDR3:1500:1|*:DDR4:1200:1) ;;
+        *) fail "$platform_id 内存类型/电压/rank 错误" ;;
+    esac
     [[ ",$MEM_ALLOWED_TOTAL_MB," == *",8192,"* ]] || fail "$platform_id 不允许默认 8GB"
     (( MEM_MAX_CAPACITY_MB == BOARD_MAX_MEMORY_GIB * 1024 )) \
         || fail "$platform_id Type16 最大容量不一致"
@@ -111,22 +115,31 @@ for row in "${platform_rows[@]}"; do
     [[ "$NVME_MAX_PCIE_GENERATION" -le "$PCIE_GENERATION" ]] \
         || fail "$platform_id NVMe 总线能力错误"
     [[ "$NVME_LANES" == 2 || "$NVME_LANES" == 4 ]] || fail "$platform_id NVMe lane 数错误"
-    [[ "$NVME_ATTACHMENT" == m2_socket ]] || fail "$platform_id 没有物理 M.2 约束"
+    case "$NVME_BOOT_SUPPORTED:$NVME_ATTACHMENT" in
+        1:m2_socket|0:pcie_add_in) ;;
+        *) fail "$platform_id NVMe 启动能力/连接方式不一致" ;;
+    esac
     [[ "$SYSTEM_CHASSIS_TYPE" == 0x03 ]] || fail "$platform_id chassis type 未绑定 Desktop"
-    [[ "$AUDIO_CODEC:$AUDIO_CODEC_ID:$AUDIO_CODEC_REVISION" == \
-       "ALC887:0x10ec0887:0x00100302" && \
-       "${AUDIO_CODEC_SUBSYSTEM_ID:2:4}" == "${BOARD_SUBSYS_VEN#0x}" ]] \
-        || fail "$platform_id ALC887 协议身份不完整"
+    case "$AUDIO_CODEC:$AUDIO_CODEC_ID:$AUDIO_CODEC_REVISION" in
+        ALC887:0x10ec0887:0x00100302|\
+        ALC892:0x10ec0892:0x00100302|\
+        ALC898:0x10ec0899:0x00100302) ;;
+        *) fail "$platform_id Realtek 协议身份不完整" ;;
+    esac
+    [[ "${AUDIO_CODEC_SUBSYSTEM_ID:2:4}" == "${BOARD_SUBSYS_VEN#0x}" ]] \
+        || fail "$platform_id codec subsystem 厂商错误"
     [[ "$AUDIO_IDENTITY_FIDELITY" == protocol_identity_only ]] \
-        || fail "$platform_id 误声称完整 ALC887 拓扑"
-    if [[ "$platform_id" == intel-lga1151-i5-6400t-asus-h110m-a-m2 ]]; then
+        || fail "$platform_id 误声称完整 codec 拓扑"
+    if [[ "$TPM_CAPABILITY" == none ]]; then
         [[ "$TPM_CAPABILITY:$TPM_SUPPORTED:$TPM_IMPLEMENTATION:$TPM_VERSION:$TPM_FRONTEND:$TPM_PCR_BANKS" == \
            "none:0:none:none:none:" ]] \
-            || fail "$platform_id 在缺少板级 PTT 证据时没有 fail closed"
+            || fail "$platform_id 在缺少板级 TPM 证据时没有 fail closed"
     elif [[ "$TPM_CAPABILITY" == discrete ]]; then
-        [[ "$TPM_SUPPORTED:$TPM_IMPLEMENTATION:$TPM_VERSION:$TPM_FRONTEND:$TPM_PCR_BANKS" == \
-           "1:discrete-module:2.0:tpm-tis:sha256" ]] \
-            || fail "$platform_id 独立 TPM 2.0 模块能力没有完整导出"
+        case "$TPM_SUPPORTED:$TPM_IMPLEMENTATION:$TPM_VERSION:$TPM_FRONTEND:$TPM_PCR_BANKS" in
+            1:discrete-module:1.2:tpm-tis:sha1|\
+            1:discrete-module:2.0:tpm-tis:sha256) ;;
+            *) fail "$platform_id 独立 TPM 模块能力没有完整导出" ;;
+        esac
     elif [[ "$CPU_VENDOR" == GenuineIntel ]]; then
         [[ "$TPM_CAPABILITY:$TPM_SUPPORTED:$TPM_IMPLEMENTATION:$TPM_VERSION:$TPM_FRONTEND:$TPM_PCR_BANKS" == \
            "firmware:1:intel-ptt:2.0:tpm-crb:sha256" ]] \
@@ -208,7 +221,11 @@ trap 'rm -rf "$tmp_dir"' EXIT
     export ALLOW_PLATFORM_COMPATIBILITY=1
     unset STEALTH_PLATFORM_ID MEM_TOTAL_MB
     export STEALTH_PLATFORM_MANIFEST="$REPO_ROOT/deploy/hardware/platforms.json"
+    export STEALTH_HOST_PROBE_TEST_MODE=1
     export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+    export STEALTH_HOST_CPU_FAMILY=6
+    export STEALTH_HOST_CPU_MODEL=999
+    export STEALTH_HOST_CPU_MODEL_NAME="Intel(R) Core(TM) unknown test CPU"
     export STEALTH_HOST_CPU_MAX_MHZ=5000
     export STEALTH_REQUIRED_TSC_MHZ=
     export CPUS=4
@@ -226,7 +243,11 @@ trap 'rm -rf "$tmp_dir"' EXIT
 # 本单元测试不得被解读为 E5 严格兼容性证明。
 unset MEM_TOTAL_MB
 # 选择器按全局变量名读取宿主视图；导出同时固定其调用的子进程环境。
+export STEALTH_HOST_PROBE_TEST_MODE=1
 export STEALTH_HOST_CPU_VENDOR=GenuineIntel
+export STEALTH_HOST_CPU_FAMILY=6
+export STEALTH_HOST_CPU_MODEL=999
+export STEALTH_HOST_CPU_MODEL_NAME="Intel(R) Core(TM) unknown test CPU"
 export STEALTH_HOST_CPU_MAX_MHZ=3600
 export STEALTH_REQUIRED_TSC_MHZ=2200
 export CPUS=4

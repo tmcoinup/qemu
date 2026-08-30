@@ -479,8 +479,8 @@ function Assert-VMateRequestedTopology {
         throw "MemoryMiB=$MemoryMiB 没有符合平台代际/插槽/速率约束的 DIMM。"
     }
     $platformTopology = "$([int]$Platform.cpu.cores)C$([int]$Platform.cpu.threads)T"
-    if ($platformTopology -notin @('2C2T', '2C4T', '4C4T')) {
-        throw "平台 CPU 拓扑只允许 2C2T、2C4T 或 4C4T；当前 $platformTopology。"
+    if ($platformTopology -notin @('2C2T', '2C4T', '4C4T', '4C8T', '6C12T')) {
+        throw "平台 CPU 拓扑不在受控家用白名单；当前 $platformTopology。"
     }
     if ($Cpus -ne [int]$Platform.cpu.threads) {
         throw "vCPU=$Cpus 与平台 $($Platform.id) 的完整线程数 $($Platform.cpu.threads) 不一致。"

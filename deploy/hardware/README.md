@@ -5,9 +5,11 @@
 芯片组和板载设备字段。禁止重新采用“先随机 CPU、再按 socket 随机主板、最后从
 全局池随机 BIOS”的方式；这种独立抽签会生成现实中不存在的跨代组合。
 
-默认 `supported` 池包含 G4900（2C2T）、G5400（2C4T）、i3-9100F（4C4T）
-和 i5-6400T（4C4T）；其中 H310 原子组合覆盖 ASUS、MSI、GIGABYTE，各条目仍与
-具体主板、DDR4 速率、M.2 lane、BIOS、TPM 和设备身份成套绑定。
+默认 `supported` 池除既有 G4900（2C2T）、G5400（2C4T）、i3-9100F（4C4T）
+和 i5-6400T（4C4T）外，还包含 i7-3820/i7-4820K（4C8T）及
+i7-3930K/i7-4930K/i7-4960X（6C12T）。X79 原子组合覆盖 ASUS P9X79、
+Gigabyte GA-X79-UP4、ASRock X79 Extreme4 三品牌，共 15 套；各条目仍与具体主板、
+DDR3 速率、PCIe NVMe 转接能力、SATA 启动盘策略、BIOS、TPM 和设备身份成套绑定。
 
 `board-vendors.json` 是主板 canonical manufacturer 的共享注册表，联合绑定平台 ID
 token、序号生成函数、PCI subsystem vendor、官方来源主机和序号格式证据。ASUS、
@@ -133,8 +135,8 @@ CPU 字段：
 - `memory.type`、通道数、最大速率和允许工作速率必须同时符合 CPU 内存控制器与主板。
   颗粒额定速率可以高于平台工作速率，但客体报告值必须降到 `max_mts`。
 - `voltage_mv`、`rank`、`module_mib` 和 `allowed_total_mib` 共同限制可生成的 DIMM
-  组合。当前只允许单条 2GB、单条 4GB 或两条 4GB，明确禁止把 6GB 虚构成两条
-  不存在于物料目录的 3GB UDIMM。
+  组合。既有平台保持 2/4/8GB；X79 提供 4/8/12/16GB，并以 1/2/3/4 条 4GB
+  模块表达。任何少于四个 DIMM 槽的平台都不得声明 12/16GB。
 - `bios.version` 与 `bios.date` 是同一厂商正式发布的配对值；不能跨主板随机。
 - `system.chassis_type` 是 SMBIOS Type 3 的 DMTF 编码。当前整机清单只允许
   Desktop `0x03`，Linux 与 Windows 必须从该字段生成相同的机箱类型。
@@ -159,6 +161,8 @@ TPM 字段：
   它不是目标主板上的物理接口、排针类型或固件内部连接方式，也不得据此宣称已模拟
   主板 TPM 电气拓扑。当前 H310 和兼容性 B350 条目选择 TPM 2.0
   `tpm-crb`/`sha256`；H110M-A/M.2 因缺少板级 PTT 证据而 fail closed 为 `none`。
+  X79 中 P9X79/GA-X79-UP4 按独立 TPM 1.2、TIS/SHA-1 投影，X79 Extreme4
+  在证据不足时 fail closed 为 `none`。
 - `support_source_ref` 与 `version_source_ref` 必须是两条不同的当前主板或 CPU
   厂商官方 HTTPS 证据：前者核验具体主板/芯片组是否提供 fTPM/PTT 或独立模块排针，
   后者核验对应实现的 TPM 版本。不能只用一篇通用 TPM 文章同时替代两项依据。
@@ -180,14 +184,16 @@ TPM 字段：
   82574L bundle 还必须绑定 Intel 子系统 `0x8086:0xA01F` 和 `mac_oui=3c:fd:fe`；
   Linux/Windows 都只能消费清单值，不允许在启动器再硬编码一份。
 - `audio` 是具体主板的板载器件，不能跟随全局随机值或板厂随意改变。
-  ALC887 必须同时绑定 `codec_id=0x10ec0887`、`codec_revision=0x00100302`
-  和以当前板厂 PCI subsystem vendor 开头的 `codec_subsystem_id`。当前
+  受控 ALC887/ALC892/ALC898 必须分别绑定 `0x10ec0887`/`0x10ec0892`/
+  `0x10ec0899`、共同的 `codec_revision=0x00100302`，以及以当前板厂 PCI
+  subsystem vendor 开头的 `codec_subsystem_id`。当前
   `identity_fidelity` 必须是
-  `protocol_identity_only`：它只承诺 HDA 协议身份，不承诺真实 ALC887 的全部
+  `protocol_identity_only`：它只承诺 HDA 协议身份，不承诺真实 codec 的全部
   widget、插孔检测和板级布线拓扑。
 - `nvme` 是总线能力而不是某一块 SSD 的型号；SSD model、firmware、容量仍需在存储
-  目录中成套选择。`attachment=m2_socket` 是物理插槽硬约束，避免在只有一个已被
-  独显占用的 x16 插槽上同时虚构一块 x4 NVMe 转接卡。
+  目录中成套选择。`boot_supported=true` 必须对应 `attachment=m2_socket`；无原生
+  M.2 的 X79 使用 `boot_supported=false`、`attachment=pcie_add_in`，系统盘切到
+  SATA/AHCI，NVMe 只作为数据盘能力。
 - `NVME_BOOT_SUPPORTED=false` 时，household 平台必须把
   `PLATFORM_BOOT_MODEL`/`PLATFORM_BOOT_FIRMWARE` 写成
   `storage-compatibility-pool` 策略标记，并绑定

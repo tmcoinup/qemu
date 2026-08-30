@@ -67,7 +67,8 @@ function Assert-VMateHostCompatibilityManifest {
         [string]$selection.cpu_model_source -ne 'host_passthrough' -or
         [string]$selection.guest_cpu_class -ne 'household_only' -or
         [string]$selection.server_brand_policy -ne 'reject' -or
-        [string]$selection.host_topology_policy -ne 'exact_up_to_4_threads' -or
+        [string]$selection.host_topology_policy -ne
+            'bounded_guest_subset_2c2t_2c4t_4c4t' -or
         [string]$selection.profile_binding -ne
             'vendor_brand_family_model_stepping_phys_bits_tsc_topology' -or
         [string]$selection.tsc_policy -ne 'host_default_no_tsc_freq' -or

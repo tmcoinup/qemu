@@ -345,25 +345,19 @@ if (( PER_DIMM_MB >= 4096 )); then
 else
     _mem_part_used="$MEM_PART_2G"
 fi
-if (( NUM_DIMMS == 1 )); then
-    echo ">> 内存:        ${RAM} MiB 单通道 (1× ${PER_DIMM_MB} MiB DIMM, 1 memfd, NUMA 1 node)"
-    echo ">>   卡槽布局 : 2 卡槽 / 占用 1 / 空 1"
-else
-    echo ">> 内存:        ${RAM} MiB 双通道 (2× ${PER_DIMM_MB} MiB DIMM, 1 memfd, NUMA 1 node)"
-    echo ">>   卡槽布局 : 2 卡槽 / 全部占用"
-fi
+echo ">> 内存:        ${RAM} MiB (${NUM_DIMMS}× ${PER_DIMM_MB} MiB DIMM, 1 memfd, NUMA 1 node)"
+echo ">>   卡槽布局 : ${BOARD_DIMM_SLOTS:-$NUM_DIMMS} 卡槽 / 占用 ${NUM_DIMMS} / 空 $(( ${BOARD_DIMM_SLOTS:-$NUM_DIMMS} - NUM_DIMMS ))"
 echo ">>   DIMM 厂商 : ${MEM_MFR:-?}"
 echo ">>   part 号   : ${_mem_part_used:-?}"
-if (( NUM_DIMMS == 2 )); then
-    # 双通道：每条 DIMM 各自唯一 SN（第 2 条由 MEM_SERIAL 确定性派生），核对用
-    _mem_sn2="$(_stealth_memory_slot_serial "$MEM_SERIAL" 2)" || {
-        echo "ERROR: 无法派生合法的第二条 DIMM 序列号" >&2
+_mem_serials="${MEM_SERIAL:-?}"
+for ((_mem_slot = 2; _mem_slot <= NUM_DIMMS; _mem_slot++)); do
+    _mem_slot_serial="$(_stealth_memory_slot_serial "$MEM_SERIAL" "$_mem_slot")" || {
+        echo "ERROR: 无法派生第 ${_mem_slot} 条 DIMM 序列号" >&2
         exit 1
     }
-    echo ">>   SN        : ${MEM_SERIAL:-?} (DIMM_A2) / ${_mem_sn2} (DIMM_B2)  ← 两条各自唯一"
-else
-    echo ">>   SN        : ${MEM_SERIAL:-?}"
-fi
+    _mem_serials+=" / ${_mem_slot_serial}"
+done
+echo ">>   SN        : ${_mem_serials}  ← 每条各自唯一"
 # CPU 信息：profile 选定的型号 + 实际给 guest 的 vCPU 拓扑
 echo ">> CPU:         ${CPU_NAME:-?}"
 echo ">>   QEMU 串   : $(stealth_qemu_cpu_arg)"

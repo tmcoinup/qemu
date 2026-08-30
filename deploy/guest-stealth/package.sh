@@ -124,6 +124,7 @@ if [[ "$include_legacy_scripts" == "1" ]]; then
         SunrisePoint-HSystem.inf sunrisepoint-h.cat
         CougarPointSystem.inf cougarpoint.cat
         PantherPointSystem.inf pantherpoint.cat
+        PatsburgSystem.inf patsburg.cat
         LynxPointSystem.inf lynxpoint.cat
     )
     for chipset_file in "${chipset_files[@]}"; do

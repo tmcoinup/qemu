@@ -34,6 +34,7 @@ catalog_revision="$(python3 -c \
 export STEALTH_HOST_CPU_VENDOR=GenuineIntel
 export STEALTH_HOST_CPU_MAX_MHZ=5000
 export STEALTH_REQUIRED_TSC_MHZ=3600
+export STEALTH_PLATFORM_ID=intel-lga1151-i3-9100f-asus-prime-h310m-a-r2
 export CPUS=4
 
 declare -A selected_monitor_brands=()

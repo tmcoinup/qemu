@@ -4,7 +4,7 @@
 由 `deploy/guest-stealth/package.sh` 生成的离线 `respawn-stealth.exe`。
 
 本流程坚持“客体尽量不安装软件”：不在客体下载脚本，不修改启动链，也不安装自签名、
-补丁或 NVIDIA 显示驱动。统一 EXE 内嵌 stock VioGpuDod、五套 Microsoft WHCP
+补丁或 NVIDIA 显示驱动。统一 EXE 内嵌 stock VioGpuDod、六套 Microsoft WHCP
 Intel NO_DRV 识别包、用户态 NVAPI/ADL shim、项目脚本和受控维护任务；没有自有服务、
 控制面板、运行时安装包或第三方常驻进程。
 
@@ -207,7 +207,7 @@ GTX 1050 Ti profile 的期望结果：
 
 - PnP 实例仍以 `PCI\VEN_1AF4&DEV_1050` 开头。
 - `DEVPKEY_Device_Service` 为 `VioGpuDod`，设备状态为 OK 且 Problem 为 0。
-- SMBus 为 `Status=OK`、`Class=System`、ProblemCode 0、空 Service；五款 payload
+- SMBus 为 `Status=OK`、`Class=System`、ProblemCode 0、空 Service；六套 payload
   型号使用 `oem*.inf`，2930 使用 inbox `machine.inf`。
 - Monitor FriendlyName 命中四款 EDID 映射之一；其 HardwareID、INF 和
   `monitor.sys` 仍为 Windows 按该 EDID 枚举的原值。

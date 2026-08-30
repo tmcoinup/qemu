@@ -14,6 +14,18 @@
 #include <stdio.h>
 #include <wchar.h>
 
+/* MinGW-w64 10 的 import library 已导出该 Vista+ API，但旧 cfgmgr32.h
+ * 漏掉了声明。仅为 MinGW 补齐官方原型；MSVC/Windows SDK 继续使用系统头。 */
+#if defined(__MINGW32__)
+CMAPI CONFIGRET WINAPI CM_Set_DevNode_PropertyW(
+    DEVINST dnDevInst,
+    const DEVPROPKEY *property_key,
+    DEVPROPTYPE property_type,
+    const PBYTE property_buffer,
+    ULONG property_buffer_size,
+    ULONG flags);
+#endif
+
 /*
  * 只投影显示器的现代 FriendlyName 属性。
  *

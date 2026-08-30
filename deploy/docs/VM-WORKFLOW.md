@@ -394,7 +394,7 @@ bash deploy/guest-stealth/package.sh
 封 base 前（阶段 A 末、B.1 sysprep 之前），只把
 `deploy/guest-stealth/dist/respawn-stealth.exe` 拷进 guest，固定放到
 `D:\工具\respawn-stealth.exe`。
-EXE 自带 stock VioGpuDod、五套 SMBus INF/CAT、Monitor 清单/投影器及初始化脚本，运行时
+EXE 自带 stock VioGpuDod、六套 SMBus INF/CAT、Monitor 清单/投影器及初始化脚本，运行时
 释放到 `C:\ProgramData\StealthGPU\respawn-exe\`，不依赖旁边任何文件。
 
 拷完照常 sysprep + `seal-base.sh` 封 base，之后每个 clone 首次登录都会执行这份 EXE 一次。

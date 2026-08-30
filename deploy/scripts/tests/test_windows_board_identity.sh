@@ -43,8 +43,8 @@ REPO_ROOT="$REPO_ROOT" "$POWERSHELL" -NoLogo -NoProfile -NonInteractive \
             })
         $brands = @($platforms.board.manufacturer | Sort-Object -Unique)
         Assert-BoardTest (($brands -join "|") -eq
-            "ASUSTeK COMPUTER INC.|Gigabyte Technology Co., Ltd.|Micro-Star International Co., Ltd.") `
-            "Windows 启用平台未覆盖 ASUS/MSI/GIGABYTE 三个主板品牌。"
+            "ASRock|ASUSTeK COMPUTER INC.|Gigabyte Technology Co., Ltd.|Micro-Star International Co., Ltd.") `
+            "Windows 启用平台未覆盖 ASRock/ASUS/GIGABYTE/MSI 四个主板品牌。"
 
         $samples = @{}
         foreach ($platform in $platforms) {
@@ -79,6 +79,10 @@ REPO_ROOT="$REPO_ROOT" "$POWERSHELL" -NoLogo -NoProfile -NonInteractive \
                         $week -ge 1 -and $week -le 53) `
                         "GIGABYTE 序列号未使用有效 YYWW 日期码。"
                 }
+                "ASRock" {
+                    Assert-BoardTest ($serial -cmatch "^[A-Z0-9]{12}$") `
+                        "ASRock 序列号未遵循 12 字符大写结构。"
+                }
             }
         }
 
@@ -111,19 +115,12 @@ REPO_ROOT="$REPO_ROOT" "$POWERSHELL" -NoLogo -NoProfile -NonInteractive \
             [void](Get-VMateBoardVendorPolicy $tampered)
         } "Windows 主板策略接受了 MSI subsystem 与 ASUS 品牌混搭。"
 
-        # 当前 enabled 平台使用三个常见品牌；仍验证共享注册表中的 ASRock
-        # 生成器，以防后续添加平台时 Windows 路径落后于 Linux。
-        $asrock = $platforms[0] | ConvertTo-Json -Depth 64 | ConvertFrom-Json
-        $asrock.id = "windows-asrock-policy-test"
-        $asrock.board.manufacturer = "ASRock"
-        $asrock.board.product = "B450M Pro4"
-        $asrock.board.serial_fn = "_serial_asr"
-        $asrock.board.subsystem_vendor = "0x1849"
-        $asrock.board.subsystem_device = "0x1234"
-        $asrockSerial = New-VMateBoardSerial $asrock
-        Assert-VMateBoardSerial $asrock $asrockSerial
-        Assert-BoardTest ($asrockSerial -cmatch "^[A-Z0-9]{12}$") `
-            "Windows ASRock 序列号未遵循 12 字符大写结构。"
+        $asrock = @($platforms | Where-Object {
+                $_.board.manufacturer -eq "ASRock"
+            })[0]
+        Assert-BoardThrows {
+            Assert-VMateBoardSerial $asrock "asrock123456"
+        } "Windows ASRock 校验器接受了小写序列号。"
     '
 
 echo "PASS: Windows multi-brand board identity"

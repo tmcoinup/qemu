@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-22-memory-r1",
+  "catalog_revision": "2026-08-29-memory-r1",
   "serial_policy": {
     "id": "jedec-spd-module-serial-u32",
     "field_bytes": 4,
@@ -137,6 +137,46 @@
       ]
     },
     {
+      "id": "samsung-m378b5773dh0-cma-ddr3-2g",
+      "family_id": "samsung-m378b5x73dh0-ddr3-1866",
+      "status": "active",
+      "selection_weight": 60,
+      "manufacturer": "Samsung",
+      "part_number": "M378B5773DH0-CMA",
+      "type": "DDR3",
+      "module_mib": 2048,
+      "rated_mts": 1866,
+      "voltage_mv": 1500,
+      "rank": 1,
+      "device_width_bits": 8,
+      "spd_ee1004": false,
+      "allowed_sockets": ["LGA2011"],
+      "allowed_platform_channel_counts": [4],
+      "source_refs": [
+        "https://download.semiconductor.samsung.com/resources/data-sheet/237561ds_ddr3_2gb_d-die_based_udimm_rev14.pdf"
+      ]
+    },
+    {
+      "id": "samsung-m378b5273dh0-cma-ddr3-4g",
+      "family_id": "samsung-m378b5x73dh0-ddr3-1866",
+      "status": "active",
+      "selection_weight": 60,
+      "manufacturer": "Samsung",
+      "part_number": "M378B5273DH0-CMA",
+      "type": "DDR3",
+      "module_mib": 4096,
+      "rated_mts": 1866,
+      "voltage_mv": 1500,
+      "rank": 2,
+      "device_width_bits": 8,
+      "spd_ee1004": false,
+      "allowed_sockets": ["LGA2011"],
+      "allowed_platform_channel_counts": [4],
+      "source_refs": [
+        "https://download.semiconductor.samsung.com/resources/data-sheet/m378b5273dh0-cma_ck0_ch9_cf8-0.pdf"
+      ]
+    },
+    {
       "id": "kingston-kvr16n11s6-2-ddr3-2g",
       "family_id": "kingston-kvr16n11-ddr3-1600",
       "status": "active",
@@ -150,8 +190,8 @@
       "rank": 1,
       "device_width_bits": 16,
       "spd_ee1004": false,
-      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155"],
-      "allowed_platform_channel_counts": [1, 2],
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155", "LGA2011"],
+      "allowed_platform_channel_counts": [1, 2, 4],
       "source_refs": [
         "https://www.kingston.com/datasheets/KVR16N11S6_2.pdf"
       ]
@@ -170,8 +210,8 @@
       "rank": 1,
       "device_width_bits": 8,
       "spd_ee1004": false,
-      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155"],
-      "allowed_platform_channel_counts": [1, 2],
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155", "LGA2011"],
+      "allowed_platform_channel_counts": [1, 2, 4],
       "source_refs": [
         "https://www.kingston.com/datasheets/KVR16N11S8_4.pdf"
       ]
@@ -190,8 +230,8 @@
       "rank": 1,
       "device_width_bits": 8,
       "spd_ee1004": false,
-      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155"],
-      "allowed_platform_channel_counts": [1, 2],
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155", "LGA2011"],
+      "allowed_platform_channel_counts": [1, 2, 4],
       "source_refs": [
         "https://product.skhynix.com/products/dram/module/module_info.jsp"
       ]
@@ -210,8 +250,8 @@
       "rank": 2,
       "device_width_bits": 8,
       "spd_ee1004": false,
-      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155"],
-      "allowed_platform_channel_counts": [1, 2],
+      "allowed_sockets": ["AM3+", "FM2+", "LGA1150", "LGA1155", "LGA2011"],
+      "allowed_platform_channel_counts": [1, 2, 4],
       "source_refs": [
         "https://product.skhynix.com/products/dram/module/module_info.jsp"
       ]

@@ -27,6 +27,26 @@ stealth_resolve_memory_topology
 [[ "$NUM_DIMMS" == "1" && "$PER_DIMM_MB" == "4096" ]] \
     || fail "4GiB 应与 SMBIOS/SPD chunk 对齐为 1x4GiB"
 
+export MEM_ALLOWED_TOTAL_MB="4096,8192,12288,16384"
+export MEM_MODULE_MB="2048,4096"
+export MEM_CHANNELS=4
+export BOARD_DIMM_SLOTS=4
+RAM=12288
+stealth_resolve_memory_topology
+[[ "$NUM_DIMMS" == "3" && "$PER_DIMM_MB" == "4096" ]] \
+    || fail "12GiB 应解析成 3x4GiB"
+RAM=16384
+stealth_resolve_memory_topology
+[[ "$NUM_DIMMS" == "4" && "$PER_DIMM_MB" == "4096" ]] \
+    || fail "16GiB 应解析成 4x4GiB"
+
+export BOARD_DIMM_SLOTS=3
+for RAM in 12288 16384; do
+    if stealth_resolve_memory_topology >/dev/null 2>&1; then
+        fail "少于四槽的主板不应接受 ${RAM}MiB"
+    fi
+done
+
 RAM=6144
 if stealth_resolve_memory_topology >/dev/null 2>&1; then
     fail "manifest 未允许 6GiB 时必须拒绝"

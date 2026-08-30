@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_revision": "2026-07-22.1",
+  "catalog_revision": "2026-08-29.1",
   "defaults": {
     "vcpus": 4,
     "memory_total_mib": 8192
@@ -465,6 +465,2306 @@
         "https://www.asus.com/us/supportonly/h110m-a-m-2/helpdesk_cpu/",
         "https://www.asus.com/us/supportonly/h110m-a-m-2/helpdesk_bios/",
         "https://dlcdnet.asus.com/pub/ASUS/mb/LGA1151/H110M-A_M2/E11483_H110M-A_M2_UM_WEB_041816.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4820k-asus-p9x79",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4820K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4820K CPU @ 3.70GHz",
+        "max_mhz": 3900,
+        "current_mhz": 3700,
+        "tsc_mhz": 3700,
+        "part": "BX80633I74820K",
+        "socket": "LGA2011",
+        "cores": 4,
+        "threads": 8,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "P9X79",
+        "family": "P9X79",
+        "version": "Rev 1.xx",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1866,
+        "allowed_mts": [
+          1600,
+          1866
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x104386c7",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "4701",
+        "date": "06/23/2014"
+      },
+      "system": {
+        "product": "P9X79",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "version_source_ref": "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77781/intel-core-i74820k-processor-10m-cache-up-to-3-90-ghz/specifications.html",
+        "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4820k-gigabyte-ga-x79-up4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4820K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4820K CPU @ 3.70GHz",
+        "max_mhz": 3900,
+        "current_mhz": 3700,
+        "tsc_mhz": 3700,
+        "part": "BX80633I74820K",
+        "socket": "LGA2011",
+        "cores": 4,
+        "threads": 8,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "Gigabyte Technology Co., Ltd.",
+        "product": "GA-X79-UP4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_giga",
+        "subsystem_vendor": "0x1458",
+        "subsystem_device": "0x5001",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1866,
+        "allowed_mts": [
+          1600,
+          1866
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B73",
+          "pci_device": "0x1009",
+          "revision": "0x02"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x1458a182",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "F7",
+        "date": "03/20/2014"
+      },
+      "system": {
+        "product": "GA-X79-UP4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "version_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77781/intel-core-i74820k-processor-10m-cache-up-to-3-90-ghz/specifications.html",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4820k-asrock-x79-extreme4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4820K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4820K CPU @ 3.70GHz",
+        "max_mhz": 3900,
+        "current_mhz": 3700,
+        "tsc_mhz": 3700,
+        "part": "BX80633I74820K",
+        "socket": "LGA2011",
+        "cores": 4,
+        "threads": 8,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASRock",
+        "product": "X79 Extreme4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_asr",
+        "subsystem_vendor": "0x1849",
+        "subsystem_device": "0x1D41",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 4,
+        "max_memory_gib": 32
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC898",
+          "codec_id": "0x10ec0899",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x18498992",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "P3.20",
+        "date": "07/22/2013"
+      },
+      "system": {
+        "product": "X79 Extreme4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "none",
+        "supported": false,
+        "implementation": "none",
+        "version": "none",
+        "emulation_frontend": "none",
+        "pcr_banks": [],
+        "support_source_ref": "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "version_source_ref": "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77781/intel-core-i74820k-processor-10m-cache-up-to-3-90-ghz/specifications.html",
+        "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-3820-asus-p9x79",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2012,
+      "cpu": {
+        "qemu_arg": "Core-i7-3820",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-3820 CPU @ 3.60GHz",
+        "max_mhz": 3800,
+        "current_mhz": 3600,
+        "tsc_mhz": 3600,
+        "part": "BX80619I73820",
+        "socket": "LGA2011",
+        "cores": 4,
+        "threads": 8,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "P9X79",
+        "family": "P9X79",
+        "version": "Rev 1.xx",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x3C00",
+            "0x07"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x3C02",
+          "revision": "0x07"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 2,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x104386c7",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "4701",
+        "date": "06/23/2014"
+      },
+      "system": {
+        "product": "P9X79",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "version_source_ref": "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/63698/intel-core-i73820-processor-10m-cache-up-to-3-80-ghz/specifications.html",
+        "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-3820-gigabyte-ga-x79-up4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2012,
+      "cpu": {
+        "qemu_arg": "Core-i7-3820",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-3820 CPU @ 3.60GHz",
+        "max_mhz": 3800,
+        "current_mhz": 3600,
+        "tsc_mhz": 3600,
+        "part": "BX80619I73820",
+        "socket": "LGA2011",
+        "cores": 4,
+        "threads": 8,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "Gigabyte Technology Co., Ltd.",
+        "product": "GA-X79-UP4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_giga",
+        "subsystem_vendor": "0x1458",
+        "subsystem_device": "0x5001",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x3C00",
+            "0x07"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x3C02",
+          "revision": "0x07"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B73",
+          "pci_device": "0x1009",
+          "revision": "0x02"
+        },
+        "nvme": {
+          "max_pcie_generation": 2,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x1458a182",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "F7",
+        "date": "03/20/2014"
+      },
+      "system": {
+        "product": "GA-X79-UP4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "version_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/63698/intel-core-i73820-processor-10m-cache-up-to-3-80-ghz/specifications.html",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-3820-asrock-x79-extreme4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2012,
+      "cpu": {
+        "qemu_arg": "Core-i7-3820",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-3820 CPU @ 3.60GHz",
+        "max_mhz": 3800,
+        "current_mhz": 3600,
+        "tsc_mhz": 3600,
+        "part": "BX80619I73820",
+        "socket": "LGA2011",
+        "cores": 4,
+        "threads": 8,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASRock",
+        "product": "X79 Extreme4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_asr",
+        "subsystem_vendor": "0x1849",
+        "subsystem_device": "0x1D41",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 4,
+        "max_memory_gib": 32
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x3C00",
+            "0x07"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x3C02",
+          "revision": "0x07"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 2,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC898",
+          "codec_id": "0x10ec0899",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x18498992",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "P3.20",
+        "date": "07/22/2013"
+      },
+      "system": {
+        "product": "X79 Extreme4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "none",
+        "supported": false,
+        "implementation": "none",
+        "version": "none",
+        "emulation_frontend": "none",
+        "pcr_banks": [],
+        "support_source_ref": "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "version_source_ref": "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/63698/intel-core-i73820-processor-10m-cache-up-to-3-80-ghz/specifications.html",
+        "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4960x-asus-p9x79",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4960X",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4960X CPU @ 3.60GHz",
+        "max_mhz": 4000,
+        "current_mhz": 3600,
+        "tsc_mhz": 3600,
+        "part": "BX80633I74960X",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "P9X79",
+        "family": "P9X79",
+        "version": "Rev 1.xx",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1866,
+        "allowed_mts": [
+          1600,
+          1866
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x104386c7",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "4701",
+        "date": "06/23/2014"
+      },
+      "system": {
+        "product": "P9X79",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "version_source_ref": "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77779/intel-core-i74960x-processor-extreme-edition-15m-cache-up-to-4-00-ghz/specifications.html",
+        "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4960x-gigabyte-ga-x79-up4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4960X",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4960X CPU @ 3.60GHz",
+        "max_mhz": 4000,
+        "current_mhz": 3600,
+        "tsc_mhz": 3600,
+        "part": "BX80633I74960X",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "Gigabyte Technology Co., Ltd.",
+        "product": "GA-X79-UP4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_giga",
+        "subsystem_vendor": "0x1458",
+        "subsystem_device": "0x5001",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1866,
+        "allowed_mts": [
+          1600,
+          1866
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B73",
+          "pci_device": "0x1009",
+          "revision": "0x02"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x1458a182",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "F7",
+        "date": "03/20/2014"
+      },
+      "system": {
+        "product": "GA-X79-UP4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "version_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77779/intel-core-i74960x-processor-extreme-edition-15m-cache-up-to-4-00-ghz/specifications.html",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4960x-asrock-x79-extreme4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4960X",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4960X CPU @ 3.60GHz",
+        "max_mhz": 4000,
+        "current_mhz": 3600,
+        "tsc_mhz": 3600,
+        "part": "BX80633I74960X",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASRock",
+        "product": "X79 Extreme4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_asr",
+        "subsystem_vendor": "0x1849",
+        "subsystem_device": "0x1D41",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 4,
+        "max_memory_gib": 32
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC898",
+          "codec_id": "0x10ec0899",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x18498992",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "P3.20",
+        "date": "07/22/2013"
+      },
+      "system": {
+        "product": "X79 Extreme4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "none",
+        "supported": false,
+        "implementation": "none",
+        "version": "none",
+        "emulation_frontend": "none",
+        "pcr_banks": [],
+        "support_source_ref": "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "version_source_ref": "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77779/intel-core-i74960x-processor-extreme-edition-15m-cache-up-to-4-00-ghz/specifications.html",
+        "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4930k-asus-p9x79",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4930K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4930K CPU @ 3.40GHz",
+        "max_mhz": 3900,
+        "current_mhz": 3400,
+        "tsc_mhz": 3400,
+        "part": "BX80633I74930K",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "P9X79",
+        "family": "P9X79",
+        "version": "Rev 1.xx",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1866,
+        "allowed_mts": [
+          1600,
+          1866
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x104386c7",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "4701",
+        "date": "06/23/2014"
+      },
+      "system": {
+        "product": "P9X79",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "version_source_ref": "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77780/intel-core-i74930k-processor-12m-cache-up-to-3-90-ghz/specifications.html",
+        "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4930k-gigabyte-ga-x79-up4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4930K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4930K CPU @ 3.40GHz",
+        "max_mhz": 3900,
+        "current_mhz": 3400,
+        "tsc_mhz": 3400,
+        "part": "BX80633I74930K",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "Gigabyte Technology Co., Ltd.",
+        "product": "GA-X79-UP4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_giga",
+        "subsystem_vendor": "0x1458",
+        "subsystem_device": "0x5001",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1866,
+        "allowed_mts": [
+          1600,
+          1866
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B73",
+          "pci_device": "0x1009",
+          "revision": "0x02"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x1458a182",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "F7",
+        "date": "03/20/2014"
+      },
+      "system": {
+        "product": "GA-X79-UP4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "version_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77780/intel-core-i74930k-processor-12m-cache-up-to-3-90-ghz/specifications.html",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-4930k-asrock-x79-extreme4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2013,
+      "cpu": {
+        "qemu_arg": "Core-i7-4930K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-4930K CPU @ 3.40GHz",
+        "max_mhz": 3900,
+        "current_mhz": 3400,
+        "tsc_mhz": 3400,
+        "part": "BX80633I74930K",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASRock",
+        "product": "X79 Extreme4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_asr",
+        "subsystem_vendor": "0x1849",
+        "subsystem_device": "0x1D41",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 4,
+        "max_memory_gib": 32
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x0E00",
+            "0x04"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x0E02",
+          "revision": "0x04"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 3,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC898",
+          "codec_id": "0x10ec0899",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x18498992",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "P3.20",
+        "date": "07/22/2013"
+      },
+      "system": {
+        "product": "X79 Extreme4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "none",
+        "supported": false,
+        "implementation": "none",
+        "version": "none",
+        "emulation_frontend": "none",
+        "pcr_banks": [],
+        "support_source_ref": "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "version_source_ref": "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/77780/intel-core-i74930k-processor-12m-cache-up-to-3-90-ghz/specifications.html",
+        "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-3930k-asus-p9x79",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2012,
+      "cpu": {
+        "qemu_arg": "Core-i7-3930K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-3930K CPU @ 3.20GHz",
+        "max_mhz": 3800,
+        "current_mhz": 3200,
+        "tsc_mhz": 3200,
+        "part": "BX80619I73930K",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASUSTeK COMPUTER INC.",
+        "product": "P9X79",
+        "family": "P9X79",
+        "version": "Rev 1.xx",
+        "serial_fn": "_serial_asus",
+        "subsystem_vendor": "0x1043",
+        "subsystem_device": "0x8694",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x3C00",
+            "0x07"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x3C02",
+          "revision": "0x07"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 2,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x104386c7",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "4701",
+        "date": "06/23/2014"
+      },
+      "system": {
+        "product": "P9X79",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "version_source_ref": "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/63697/intel-core-i73930k-processor-12m-cache-up-to-3-80-ghz/specifications.html",
+        "https://www.asus.com/au/supportonly/p9x79/helpdesk_cpu/",
+        "https://dlcdnets.asus.com/pub/ASUS/mb/LGA2011/P9X79/E8038_P9X79.pdf"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-3930k-gigabyte-ga-x79-up4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2012,
+      "cpu": {
+        "qemu_arg": "Core-i7-3930K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-3930K CPU @ 3.20GHz",
+        "max_mhz": 3800,
+        "current_mhz": 3200,
+        "tsc_mhz": 3200,
+        "part": "BX80619I73930K",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "Gigabyte Technology Co., Ltd.",
+        "product": "GA-X79-UP4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_giga",
+        "subsystem_vendor": "0x1458",
+        "subsystem_device": "0x5001",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 8,
+        "max_memory_gib": 64
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x3C00",
+            "0x07"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x3C02",
+          "revision": "0x07"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B73",
+          "pci_device": "0x1009",
+          "revision": "0x02"
+        },
+        "nvme": {
+          "max_pcie_generation": 2,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC892",
+          "codec_id": "0x10ec0892",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x1458a182",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "F7",
+        "date": "03/20/2014"
+      },
+      "system": {
+        "product": "GA-X79-UP4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "discrete",
+        "supported": true,
+        "implementation": "discrete-module",
+        "version": "1.2",
+        "emulation_frontend": "tpm-tis",
+        "pcr_banks": [
+          "sha1"
+        ],
+        "support_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "version_source_ref": "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/63697/intel-core-i73930k-processor-12m-cache-up-to-3-80-ghz/specifications.html",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/sp",
+        "https://www.gigabyte.com/us/Motherboard/GA-X79-UP4-rev-10/support"
+      ]
+    },
+    {
+      "id": "intel-lga2011-i7-3930k-asrock-x79-extreme4",
+      "enabled": true,
+      "status": "supported",
+      "release_year": 2012,
+      "cpu": {
+        "qemu_arg": "Core-i7-3930K",
+        "vendor_id": "GenuineIntel",
+        "name": "Intel(R) Core(TM) i7-3930K CPU @ 3.20GHz",
+        "max_mhz": 3800,
+        "current_mhz": 3200,
+        "tsc_mhz": 3200,
+        "part": "BX80619I73930K",
+        "socket": "LGA2011",
+        "cores": 6,
+        "threads": 12,
+        "phys_bits": 46,
+        "features": "+invtsc,+tsc-deadline",
+        "integrated_gpu": {
+          "present": false,
+          "profile_state": "absent",
+          "model": "none"
+        },
+        "smbios": {
+          "family": "0x00C6",
+          "upgrade": "0x26",
+          "voltage_mv": 1200,
+          "external_clock_mhz": 100,
+          "characteristics": "0x00FC"
+        }
+      },
+      "board": {
+        "manufacturer": "ASRock",
+        "product": "X79 Extreme4",
+        "family": "X79",
+        "version": "1.0",
+        "serial_fn": "_serial_asr",
+        "subsystem_vendor": "0x1849",
+        "subsystem_device": "0x1D41",
+        "pch": "Intel X79",
+        "pcie_generation": 3,
+        "dimm_slots": 4,
+        "max_memory_gib": 32
+      },
+      "memory": {
+        "type": "DDR3",
+        "channels": 4,
+        "max_mts": 1600,
+        "allowed_mts": [
+          1333,
+          1600
+        ],
+        "voltage_mv": 1500,
+        "rank": 1,
+        "module_mib": [
+          2048,
+          4096
+        ],
+        "allowed_total_mib": [
+          4096,
+          8192,
+          12288,
+          16384
+        ]
+      },
+      "devices": {
+        "chipset": {
+          "mch": [
+            "0x8086",
+            "0x3C00",
+            "0x07"
+          ],
+          "lpc": [
+            "0x8086",
+            "0x1D41",
+            "0x06"
+          ],
+          "smbus": [
+            "0x8086",
+            "0x1D22",
+            "0x06"
+          ],
+          "ahci": [
+            "0x8086",
+            "0x1D02",
+            "0x06"
+          ]
+        },
+        "root_port": {
+          "pci_vendor": "0x8086",
+          "pci_device": "0x3C02",
+          "revision": "0x07"
+        },
+        "xhci": {
+          "pci_vendor": "0x1B21",
+          "pci_device": "0x1042",
+          "revision": "0x00"
+        },
+        "nvme": {
+          "max_pcie_generation": 2,
+          "lanes": 4,
+          "boot_supported": false,
+          "attachment": "pcie_add_in"
+        },
+        "nic": {
+          "vendor": "Intel",
+          "model": "Intel 82574L Gigabit Network Connection",
+          "pci_vendor": "0x8086",
+          "pci_device": "0x10D3",
+          "subsystem_vendor": "0x8086",
+          "subsystem_device": "0xA01F",
+          "mac_oui": "3c:fd:fe",
+          "attachment": "add_in",
+          "board_nic_state": "disabled_in_bios"
+        },
+        "audio": {
+          "vendor": "Realtek",
+          "codec": "ALC898",
+          "codec_id": "0x10ec0899",
+          "codec_revision": "0x00100302",
+          "codec_subsystem_id": "0x18498992",
+          "identity_fidelity": "protocol_identity_only",
+          "controller_pci_vendor": "0x8086",
+          "controller_pci_device": "0x1D20"
+        }
+      },
+      "bios": {
+        "vendor": "American Megatrends Inc.",
+        "version": "P3.20",
+        "date": "07/22/2013"
+      },
+      "system": {
+        "product": "X79 Extreme4",
+        "family": "X79 Desktop",
+        "chassis_type": "0x03"
+      },
+      "tpm": {
+        "capability": "none",
+        "supported": false,
+        "implementation": "none",
+        "version": "none",
+        "emulation_frontend": "none",
+        "pcr_banks": [],
+        "support_source_ref": "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "version_source_ref": "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
+      },
+      "source_refs": [
+        "https://www.intel.com/content/www/us/en/products/sku/63697/intel-core-i73930k-processor-12m-cache-up-to-3-80-ghz/specifications.html",
+        "https://www.asrock.com/mb/Intel/X79%20Extreme4/index.asp",
+        "https://download.asrock.com/Manual/X79%20Extreme4.pdf"
       ]
     }
   ]

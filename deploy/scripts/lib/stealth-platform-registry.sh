@@ -146,12 +146,28 @@ _stealth_platform_registry_apply_metadata() {
             PLATFORM_SMBIOS_POLICY=physical-platform-projection
             PLATFORM_TEMPLATE_DIGEST=
             PLATFORM_HOST_CLASSES=
-            PLATFORM_BOOT_STORAGE_POOL_ID=component-nvme
-            PLATFORM_BOOT_STORAGE=nvme
-            PLATFORM_BOOT_MODEL=component
-            PLATFORM_BOOT_FIRMWARE=component
-            PLATFORM_STORAGE_SWITCH_REQUIRED=0
-            NVME_ROLE=boot
+            case "${NVME_BOOT_SUPPORTED:-}:${NVME_ATTACHMENT:-}" in
+                1:m2_socket)
+                    PLATFORM_BOOT_STORAGE_POOL_ID=component-nvme
+                    PLATFORM_BOOT_STORAGE=nvme
+                    PLATFORM_BOOT_MODEL=component
+                    PLATFORM_BOOT_FIRMWARE=component
+                    PLATFORM_STORAGE_SWITCH_REQUIRED=0
+                    NVME_ROLE=boot
+                    ;;
+                0:pcie_add_in)
+                    PLATFORM_BOOT_STORAGE_POOL_ID=samsung-sata-pro-512gb
+                    PLATFORM_BOOT_STORAGE=sata-ahci
+                    PLATFORM_BOOT_MODEL=storage-compatibility-pool
+                    PLATFORM_BOOT_FIRMWARE=storage-compatibility-pool
+                    PLATFORM_STORAGE_SWITCH_REQUIRED=1
+                    NVME_ROLE=data-only
+                    ;;
+                *)
+                    echo "ERROR: manifest 的 NVMe 启动能力与 attachment 不一致" >&2
+                    return 1
+                    ;;
+            esac
             ;;
         household)
             # CPU source、宿主类和启动盘策略必须由 household loader 明确导出。

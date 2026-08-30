@@ -377,6 +377,7 @@ stealth_load_profile() {
             AM4)     CPU_SMBIOS_UPGRADE=0x31 ;;
             LGA1151) CPU_SMBIOS_UPGRADE=0x32 ;;
             LGA1155) CPU_SMBIOS_UPGRADE=0x24 ;;
+            LGA2011) CPU_SMBIOS_UPGRADE=0x26 ;;
             AM3|AM3+) CPU_SMBIOS_UPGRADE=0x1B ;;
             *)       CPU_SMBIOS_UPGRADE=0x02 ;;
         esac

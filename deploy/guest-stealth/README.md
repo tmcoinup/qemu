@@ -80,7 +80,8 @@ Service、Driver 和 PCI 配置空间仍为物理 carrier。MULTI_SZ 中的多�
 芯片组识别输入来自 `deploy/scripts/stock-intel-chipset-inf/`，覆盖硬件池全部 SMBus：
 H310/A323、H110/A123、H61/1C22、B75/1E22、H81/8C22 分别使用
 `CannonLake-HSystem.inf`、`SunrisePoint-HSystem.inf`、`CougarPointSystem.inf`、
-`PantherPointSystem.inf`、`LynxPointSystem.inf` 及其 CAT。五套包均由 Microsoft
+`PantherPointSystem.inf`、`PatsburgSystem.inf`、`LynxPointSystem.inf` 及其 CAT。
+六套包均由 Microsoft
 WHCP 签名并引用 inbox `machine.inf` 的 `NO_DRV` section；Q35/ICH9 compatibility
 的 2930 则直接验证 Win10 inbox `machine.inf`，不随 EXE 分发第六套 INF。它们只清除
 Code 28 并正确命名，不包含 SMBus `.sys` 或服务。来源、版本和摘要见 `SOURCES.md`。
@@ -414,7 +415,7 @@ PowerShell 脚本文件只供源码调试，默认发布目录不包含它们。
 INCLUDE_LEGACY_SCRIPTS=1 bash deploy/guest-stealth/package.sh
 ```
 
-脚本调试必须把芯片组/显示驱动 installer、五套 Intel INF/CAT、
+脚本调试必须把芯片组/显示驱动 installer、六套 Intel INF/CAT、
 `install-nvapi-system.ps1`、`nvapi-system-validation.ps1`、
 `nvapi-system-transaction.ps1`、`install-adl-system.ps1`、
 `adl-system-transaction.ps1`、`install-gpu-api-system.ps1`、

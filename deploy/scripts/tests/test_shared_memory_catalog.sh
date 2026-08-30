@@ -15,12 +15,12 @@ fail() {
 # shellcheck source=../lib/stealth-memory-catalog.sh
 source "$REPO_ROOT/deploy/scripts/lib/stealth-memory-catalog.sh"
 
-[[ "$(stealth_memory_catalog_validate)" == "2026-07-22-memory-r1" ]] \
+[[ "$(stealth_memory_catalog_validate)" == "2026-08-29-memory-r1" ]] \
     || fail "共享目录 revision 未通过 Linux 校验"
 
 mapfile -t active_rows < <(stealth_memory_catalog_active_rows)
 mapfile -t quarantine_rows < <(stealth_memory_catalog_quarantine_rows)
-(( ${#active_rows[@]} == 5 )) || fail "旧 ABI 可投影的 active family 数量错误"
+(( ${#active_rows[@]} == 6 )) || fail "旧 ABI 可投影的 active family 数量错误"
 (( ${#quarantine_rows[@]} == 2 )) || fail "quarantine family 数量错误"
 
 # 新 module-plans 协议按实际存在的 DIMM SKU 选型，不要求同 family 伪造

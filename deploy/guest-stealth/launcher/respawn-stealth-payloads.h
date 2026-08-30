@@ -42,6 +42,8 @@
 #include "payload_cougarpoint_cat.h"
 #include "payload_pantherpoint_system_inf.h"
 #include "payload_pantherpoint_cat.h"
+#include "payload_patsburg_system_inf.h"
+#include "payload_patsburg_cat.h"
 #include "payload_lynxpoint_system_inf.h"
 #include "payload_lynxpoint_cat.h"
 #include "payload_nvapi_x86_dll.h"
@@ -96,6 +98,8 @@ static const EmbeddedPayload embedded_payloads[] = {
     { L"cougarpoint.cat", payload_cougarpoint_cat, (DWORD)sizeof(payload_cougarpoint_cat) },
     { L"PantherPointSystem.inf", payload_pantherpoint_system_inf, (DWORD)sizeof(payload_pantherpoint_system_inf) },
     { L"pantherpoint.cat", payload_pantherpoint_cat, (DWORD)sizeof(payload_pantherpoint_cat) },
+    { L"PatsburgSystem.inf", payload_patsburg_system_inf, (DWORD)sizeof(payload_patsburg_system_inf) },
+    { L"patsburg.cat", payload_patsburg_cat, (DWORD)sizeof(payload_patsburg_cat) },
     { L"LynxPointSystem.inf", payload_lynxpoint_system_inf, (DWORD)sizeof(payload_lynxpoint_system_inf) },
     { L"lynxpoint.cat", payload_lynxpoint_cat, (DWORD)sizeof(payload_lynxpoint_cat) },
     { L"nvapi.dll", payload_nvapi_x86_dll, (DWORD)sizeof(payload_nvapi_x86_dll) },

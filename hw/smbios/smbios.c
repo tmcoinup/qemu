@@ -996,10 +996,10 @@ static void smbios_build_type_16_table(unsigned dimm_cnt)
 
 /*
  * stealth: build the Type 17 device-locator string. If loc_pfx contains
- * "%C", substitute the channel letter (A for an even DIMM index, B for odd)
- * and emit it verbatim, e.g. loc_pfx="DIMM_%C2" -> "DIMM_A2"/"DIMM_B2",
- * matching real dual-channel desktop board SMBIOS dumps. Otherwise keep the
- * legacy "<pfx> <instance>" form so unmodified callers are unaffected.
+ * "%C", substitute the populated channel letter in order (A, B, C, D ...)
+ * and emit it verbatim.  Two-DIMM profiles remain DIMM_A2/DIMM_B2 while
+ * quad-channel LGA2011 profiles can expose unique C/D locations as well.
+ * Otherwise keep the legacy "<pfx> <instance>" form.
  */
 static void smbios_type17_locator(char *buf, size_t buflen, unsigned instance)
 {
@@ -1008,7 +1008,7 @@ static void smbios_type17_locator(char *buf, size_t buflen, unsigned instance)
     if (pct) {
         int pre_len = pct - type17.loc_pfx;
         snprintf(buf, buflen, "%.*s%c%s", pre_len, type17.loc_pfx,
-                 (instance & 1) ? 'B' : 'A', pct + 2);
+                 'A' + MIN(instance, 25U), pct + 2);
     } else {
         snprintf(buf, buflen, "%s %d", type17.loc_pfx, instance);
     }
@@ -1072,8 +1072,8 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
     t->device_set = 0; /* Not in a set */
     smbios_type17_locator(loc_str, sizeof(loc_str), instance);
     SMBIOS_TABLE_SET_STR(17, device_locator_str, loc_str);
-    /* Dual-channel support: substitute "%C" in bank string with channel
-     * letter based on DIMM index (A for even, B for odd). This allows a
+    /* Multi-channel support: substitute "%C" in bank string with the
+     * populated DIMM index. This allows a
      * single -smbios type=17,bank="P0 CHANNEL %C" override to produce
      * "P0 CHANNEL A" for DIMM 0 and "P0 CHANNEL B" for DIMM 1, matching
      * real dual-channel Ryzen board SMBIOS dumps. */
@@ -1084,7 +1084,7 @@ static void smbios_build_type_17_table(unsigned instance, uint64_t size)
             int pre_len = pct - type17.bank;
             snprintf(bank_str, sizeof(bank_str), "%.*s%c%s",
                      pre_len, type17.bank,
-                     (instance & 1) ? 'B' : 'A', pct + 2);
+                     'A' + MIN(instance, 25U), pct + 2);
             SMBIOS_TABLE_SET_STR(17, bank_locator_str, bank_str);
         } else {
             SMBIOS_TABLE_SET_STR(17, bank_locator_str, type17.bank);
@@ -1141,7 +1141,7 @@ static void smbios_build_type_17_empty_table(unsigned instance)
             int pre_len = pct - type17.bank;
             snprintf(bank_str, sizeof(bank_str), "%.*s%c%s",
                      pre_len, type17.bank,
-                     (instance & 1) ? 'B' : 'A', pct + 2);
+                     'A' + MIN(instance, 25U), pct + 2);
             SMBIOS_TABLE_SET_STR(17, bank_locator_str, bank_str);
         } else {
             SMBIOS_TABLE_SET_STR(17, bank_locator_str, type17.bank);

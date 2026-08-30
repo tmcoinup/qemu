@@ -82,6 +82,36 @@ AUDITED_PLATFORM_CPU_SHA256 = {
         "5d9bc9b2b5cc234480f0ff76cd631c677381d533bda4e3c1b28b595edb26f2ca",
     "intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2":
         "4ea617abcb7c704f85620dfe7213649b75f1bc12b295852467cc3c7b2ac3f85f",
+    "intel-lga2011-i7-4820k-asus-p9x79":
+        "a8a9f8756f41162c37dac65b6e09792ed0298bc342359294801a131d280e97cb",
+    "intel-lga2011-i7-4820k-gigabyte-ga-x79-up4":
+        "a8a9f8756f41162c37dac65b6e09792ed0298bc342359294801a131d280e97cb",
+    "intel-lga2011-i7-4820k-asrock-x79-extreme4":
+        "a8a9f8756f41162c37dac65b6e09792ed0298bc342359294801a131d280e97cb",
+    "intel-lga2011-i7-3820-asus-p9x79":
+        "7b95ad19130760d471400019ce5a81208fc3f34f86e72d35717b74b3df74a8b8",
+    "intel-lga2011-i7-3820-gigabyte-ga-x79-up4":
+        "7b95ad19130760d471400019ce5a81208fc3f34f86e72d35717b74b3df74a8b8",
+    "intel-lga2011-i7-3820-asrock-x79-extreme4":
+        "7b95ad19130760d471400019ce5a81208fc3f34f86e72d35717b74b3df74a8b8",
+    "intel-lga2011-i7-4960x-asus-p9x79":
+        "9f20c4ae55fdc8e6e5f2e6f318e68854a23649276d57c58301ef54bba237352f",
+    "intel-lga2011-i7-4960x-gigabyte-ga-x79-up4":
+        "9f20c4ae55fdc8e6e5f2e6f318e68854a23649276d57c58301ef54bba237352f",
+    "intel-lga2011-i7-4960x-asrock-x79-extreme4":
+        "9f20c4ae55fdc8e6e5f2e6f318e68854a23649276d57c58301ef54bba237352f",
+    "intel-lga2011-i7-4930k-asus-p9x79":
+        "af302dab3db2107989566b2c6d0161aa38b9b47ac7189e82d14da8f67efc35d2",
+    "intel-lga2011-i7-4930k-gigabyte-ga-x79-up4":
+        "af302dab3db2107989566b2c6d0161aa38b9b47ac7189e82d14da8f67efc35d2",
+    "intel-lga2011-i7-4930k-asrock-x79-extreme4":
+        "af302dab3db2107989566b2c6d0161aa38b9b47ac7189e82d14da8f67efc35d2",
+    "intel-lga2011-i7-3930k-asus-p9x79":
+        "c180c7f26d649649b6dfdc210d50e9f53dfba9b8ceffcca674942b5185a0ad79",
+    "intel-lga2011-i7-3930k-gigabyte-ga-x79-up4":
+        "c180c7f26d649649b6dfdc210d50e9f53dfba9b8ceffcca674942b5185a0ad79",
+    "intel-lga2011-i7-3930k-asrock-x79-extreme4":
+        "c180c7f26d649649b6dfdc210d50e9f53dfba9b8ceffcca674942b5185a0ad79",
 }
 
 # CPU 摘要之外再覆盖完整 platform：主板/PCH/PCIe、内存能力、BIOS、设备、
@@ -102,6 +132,36 @@ AUDITED_PLATFORM_FACT_SHA256 = {
         "4ecc3a224c534a529366f773e3cf6715a4974423d28c54f29daca1dfa8750215",
     "intel-lga1151-pentium-g5400-gigabyte-h310m-s2h-2":
         "67e9940f1881fc4bc0acb4cd6423ced4c202fb4b458fa66bf1768d0277aadd54",
+    "intel-lga2011-i7-4820k-asus-p9x79":
+        "2bb482ccdc060a90963a2b1bdc0a5c014e6b33f1713e1c5819ce93573fd4feb6",
+    "intel-lga2011-i7-4820k-gigabyte-ga-x79-up4":
+        "8096f080da2d42dc71dd1a9461175c6040108ffd366d477b0e6c95f49c0ded91",
+    "intel-lga2011-i7-4820k-asrock-x79-extreme4":
+        "cd53d2783e16bc9ef730b4b4e271d19b82a16de67a1725e7103dc8f1b8a923f7",
+    "intel-lga2011-i7-3820-asus-p9x79":
+        "e569e58da61165b4ae14c1b917e1e6b01715261631137186f5094e5bd92889e7",
+    "intel-lga2011-i7-3820-gigabyte-ga-x79-up4":
+        "980c40955de1d1e2d0eaba01243d17750deb8d3a27a387c09c3325d03c3b2042",
+    "intel-lga2011-i7-3820-asrock-x79-extreme4":
+        "41e73ff2d2afc56c3e4b5ac57da9c409dc63c3deef2b0387c02beac1e5779fd5",
+    "intel-lga2011-i7-4960x-asus-p9x79":
+        "11188c2e8a681d24e494ec344ab451308cc2a657fa3cbd06e723969ede1fc522",
+    "intel-lga2011-i7-4960x-gigabyte-ga-x79-up4":
+        "891a7cb98cbb75c3582b85bd9c7865b11321407985f3bb04b7d30d87891b93f8",
+    "intel-lga2011-i7-4960x-asrock-x79-extreme4":
+        "483a53a3b36e7173743044b9bc2c935e79728497d336fd49c07a6c5ce5902b60",
+    "intel-lga2011-i7-4930k-asus-p9x79":
+        "b69c56d7f6b0bdf4c57649a6b247e17ab6e53814fc778eae205532b40b29658d",
+    "intel-lga2011-i7-4930k-gigabyte-ga-x79-up4":
+        "3ac60c70502bb0f2c8efb5889c27836d3570fd1f3aaab95d729335319a0ae3ae",
+    "intel-lga2011-i7-4930k-asrock-x79-extreme4":
+        "dadca87ca13a0d8876baacda2ccbd951d3138929a8868c21b99e4b9d70d62b7f",
+    "intel-lga2011-i7-3930k-asus-p9x79":
+        "2d9e9309b1cd66bbf746c9df21dfb30b006a88a4bfe1aa5eeaa0f487e1899627",
+    "intel-lga2011-i7-3930k-gigabyte-ga-x79-up4":
+        "78671fe5fe882d53dea3dd67e15c62fab730ff85321d47190cec43bf8e93ef3c",
+    "intel-lga2011-i7-3930k-asrock-x79-extreme4":
+        "5509b74b67c440700c5359bb1f0484f37f8b52bd351f690ddff0ce9533e36469",
 }
 
 # Intel ARK、Intel ordering、Intel CPUID guidance 与各板厂支持资料共同固化这些值。

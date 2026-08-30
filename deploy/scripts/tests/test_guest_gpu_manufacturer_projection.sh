@@ -136,9 +136,9 @@ if ($global:manufacturerCaseName -eq 'modified-inf') {
 }
 
 $projector = if ($global:manufacturerCaseName -eq 'projector-failure') {
-    '/usr/bin/gnufalse'
+    '/usr/bin/false'
 } else {
-    '/usr/bin/gnutrue'
+    '/usr/bin/true'
 }
 $failed = $false
 $failureMessage = ''

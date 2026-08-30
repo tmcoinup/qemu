@@ -13,3 +13,4 @@ Cargo.lock      diff=toml merge=binary
 deploy/scripts/stock-viogpudo/viogpudo.inf -text -whitespace
 deploy/scripts/stock-intel-chipset-inf/CannonLake-HSystem.inf -text -whitespace
 deploy/scripts/stock-intel-chipset-inf/SunrisePoint-HSystem.inf -text -whitespace
+deploy/scripts/stock-intel-chipset-inf/PatsburgSystem.inf -text -whitespace

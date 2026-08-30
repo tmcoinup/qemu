@@ -14,15 +14,17 @@ stealth_print_profile() {
         fi
         local slot_layout
         if (( NUM_DIMMS == 1 )); then
-            slot_layout="单通道, 2 卡槽占 1 空 1"
+            slot_layout="单通道, ${BOARD_DIMM_SLOTS:-2} 卡槽占 1"
+        elif (( NUM_DIMMS == 2 )); then
+            slot_layout="双通道, ${BOARD_DIMM_SLOTS:-2} 卡槽占 2"
         else
-            slot_layout="双通道, 2 卡槽全占"
+            slot_layout="${NUM_DIMMS} 通道, ${BOARD_DIMM_SLOTS:-$NUM_DIMMS} 卡槽占 ${NUM_DIMMS}"
         fi
         local sn_disp="${MEM_SERIAL:-?}"
-        if (( NUM_DIMMS == 2 )); then
-            # 双通道时两条 DIMM 各自唯一 SN（第 2 条由 MEM_SERIAL 确定性派生），打印出来便于核对
-            sn_disp="${MEM_SERIAL:-?}+$(_stealth_memory_slot_serial "$MEM_SERIAL" 2)"
-        fi
+        local mem_slot
+        for ((mem_slot = 2; mem_slot <= NUM_DIMMS; mem_slot++)); do
+            sn_disp+="+$(_stealth_memory_slot_serial "$MEM_SERIAL" "$mem_slot")"
+        done
         mem_line="${MEM_MFR}  ${RAM} MiB = ${NUM_DIMMS}× $(( PER_DIMM_MB / 1024 )).$(( (PER_DIMM_MB % 1024) * 10 / 1024 )) GiB  part=${part_used}  SN=${sn_disp}  (${slot_layout})"
     else
         mem_line="${MEM_MFR}  (候选: 2G=${MEM_PART_2G} / 4G=${MEM_PART_4G})  SN=${MEM_SERIAL:-?}"

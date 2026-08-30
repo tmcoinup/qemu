@@ -1,6 +1,6 @@
 # USAGE — Linux/KVM 操作参考
 
-> **当前基线**：QEMU `11.0.2` + `V-11`，严格硬件目录 schema 1，Linux/KVM 为主路径。新 VM 启用六套 Intel 受控 bundle，主板覆盖 ASUS、MSI、GIGABYTE；底层仍是 Q35/ICH9，不能把 `supported` 解读为 H110/H310 machine/BDF 等价。AMD/B350 禁用。
+> **当前基线**：QEMU `11.0.2` + `V-11`，严格硬件目录 schema 1，Linux/KVM 为主路径。新 VM 启用 21 套 Intel 受控 bundle；其中新增 15 套 X79，覆盖 5 款 4C8T/6C12T CPU 与 ASUS、Gigabyte、ASRock 三款主板。底层仍是 Q35/ICH9，不能把 `supported` 解读为目标芯片组 machine/BDF 等价。AMD/B350 禁用。
 > NVMe 只含 Samsung、Intel、WD、KIOXIA 四款精确 512GB 原子模板，显示器有四款 1080p/16:9 模板；新 GPU 池覆盖 6 个芯片型号，每个型号 3 个板卡品牌，共 18 块 AIB（12 NVIDIA、6 AMD）。物理显示仍为 virtio `1AF4:1050`，不使用 GPU passthrough/vGPU，也不虚构 GPU 序列号。
 
 当前能力、E5-2696 v4/X99、其它 E5 与 Windows/WHPX 的结论先看 [硬件平台评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)；字段来源和 fidelity 见 [Profile 字段](PROFILE-FIELDS.md)。DGame 的区域推流依赖最终 QEMU 叶进程的进程级 Yama 例外；`start-vm.sh` 已逐实例自动选择包内 wrapper、内置 Python wrapper 或新版 `setpriv`，无需手工降低全局 `ptrace_scope`，详见 [DGame QEMU 内存授权记录](DGAME_QEMU_MEMORY_AUTH.md)。
@@ -13,7 +13,7 @@ Linux 严格启动至少需要：
 - 本仓库编译的 patched `qemu-system-x86_64` 和 `qemu-img`；不能用 stock QEMU 代替。
 - OVMF、swtpm/swtpm-tools、Python 3、`socat`、`flock`（`jq` 用于诊断输出）。
 - 默认 host tune、每实例 OOM 保护和 CPU isolate 所需的 root-owned helper。
-- 至少 2 个可用逻辑 CPU；`CPUS` 只能为 2 或 4，并须等于所选 2C2T/2C4T/4C4T SKU 的完整线程数。
+- 至少 2 个可用逻辑 CPU；`CPUS` 只能为 2、4、8 或 12，并须等于所选 2C2T、2C4T、4C4T、4C8T 或 6C12T SKU 的完整线程数。
 
 新 Ubuntu host 应按用途安装依赖，不要把运行时、固件重建和 Windows 交叉打包工具混成一组。完整包名、命令对应关系、Podman/rootless 边界及安装后自检见 [开发与跨平台验证依赖](DEVELOPMENT-DEPENDENCIES.md)。
 
@@ -50,6 +50,20 @@ sudo -n /usr/local/libexec/qemu-vmate-cpu-isolate preflight
 
 本分支不做 GPU passthrough/vGPU，因此 VT-d/IOMMU 不是当前功能前提。它仍可用于宿主其它用途，但不能据此提高本项目 GPU 真机化评级。
 家用 CPU 目录分为两层：E5 v3/v4 精确宿主类拥有无需附加参数的 Haswell `supported` 正常池；E5 v1/v2、AMD K10/Zen 及其它候选仍属于显式 `compatibility` 兜底。E5 v1-v4 在这里只是宿主代际分类，不是 Guest 型号；目录只产生家用 Guest CPU，服务器/E 系列不会作为 Guest 兜底。
+
+新增 X79 家用池的推荐入口是：
+
+```bash
+# 默认 8G，优先 i7-4820K + DDR3-1866
+deploy/scripts/start-home-vm.sh 11 --spec 4c8t
+
+# 6C/12T，指定 16G，优先 i7-4960X + DDR3-1866
+deploy/scripts/start-home-vm.sh 12 --spec 6c12t --memory-size 16G
+```
+
+四档容量为 4/8/12/16G，默认 8G；少于四个 DIMM 槽的平台会拒绝 12/16G。
+完整型号、固定平台方法、SATA 启动/PCIe NVMe 数据盘边界及验收命令见
+[V-11 家用 X79 傻瓜教程](V11-HOME-X79-QUICKSTART.zh-CN.md)。
 
 若当前目标只是先在 AMD 宿主安装/运行 Windows 10，并明确接受“Ryzen/B350 字段 +
 Q35/ICH9 machine 行为”不等于真实 B350，可使用窄范围兼容入口：
@@ -377,8 +391,8 @@ STRICT_HARDWARE=1 DRY_RUN=1 \
 | `ALLOW_LEGACY_PROFILE` / `--allow-legacy-profile` | `0` | 仅配合 `STRICT_HARDWARE=0` 显式诊断无 manifest 绑定旧 profile |
 | `ALLOW_STORAGE_PROFILE_MIGRATION` / `--migrate-storage-profile` | `0` | 显式允许已知旧 schema-1 启动盘字段做只读内存迁移 |
 | `STEALTH_TSC_POLICY` | `auto` | 有 scaling 用 profile TSC；无 scaling 按宿主实测约束 |
-| `CPUS` | `4` | 只允许 `2`/`4`，并须等于所选 2C2T/2C4T/4C4T SKU 的完整线程数 |
-| `MEM_TOTAL_MB` | 新 profile `8192` | 2/4/8 GiB 由 manifest 约束；新建默认 2×4 GiB |
+| `CPUS` | `4` | 只允许 `2`/`4`/`8`/`12`，并须等于所选 SKU 的完整线程数 |
+| `MEM_TOTAL_MB` | 新 profile `8192` | 平台目录约束容量；X79 为 4/8/12/16 GiB，默认 2×4 GiB |
 | `TPM` | `auto` | 跟随 profile 的主板能力、版本和前端；`1` 强制要求支持，`0` 显式关闭 |
 | `HOST_OOM_PROTECT` | `1` | 为当前实例进程树临时设置 `oom_score_adj=-500`；退出即失效 |
 | `HOST_TUNE` | `1` | PPD performance（无 PPD 时回退 performance governor）、`halt_poll`、THP defrag |

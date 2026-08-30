@@ -32,7 +32,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     print(json.load(stream)["catalog_revision"])
 PY
-    )" "2026-07-22.1" "platform catalog revision 错误"
+    )" "2026-08-29.1" "platform catalog revision 错误"
 
     for id in \
         intel-lga1151-celeron-g4900-asus-prime-h310m-a-r2 \

@@ -20,7 +20,7 @@
 - [`deploy/hardware/storage-compatibility.json`](../hardware/storage-compatibility.json)：
   无原生 NVMe boot 的老主板可用的消费级 SATA 启动盘完整组合。
 
-当前目录都是 schema 1；整机为 `2026-07-22.1`，household 为
+当前目录都是 schema 1；整机为 `2026-08-29.1`，household 为
 `2026-07-19.6`，组件、GPU AIB 与 NVMe 子目录为 `2026-07-24.1`，SATA 启动盘为
 `2026-07-19.1`。
 修订号用于绑定或迁移诊断，不应手工伪造。
@@ -94,12 +94,12 @@ CPU realize、组件绑定、磁盘，或请求 `TPM=1` 时的 TPM 严格门禁�
 | `CPU_QEMU_ARG` | manifest 中的 QEMU named-model、family/model/stepping 和 model-id 前缀 |
 | `CPU_MODEL` | `CPU_QEMU_ARG` 的模型主名，用于摘要和兼容逻辑 |
 | `CPU_VENDOR`、`CPU_NAME` | CPUID vendor 与品牌串；映射到客体处理器名称 |
-| `CPU_CORES`、`CPU_THREADS` | 完整 SKU 拓扑；只允许 2C2T、2C4T、4C4T，`CPUS` 必须等于完整线程数 |
+| `CPU_CORES`、`CPU_THREADS` | 完整 SKU 拓扑；只允许 2C2T、2C4T、4C4T、4C8T、6C12T，`CPUS` 必须等于完整线程数 |
 | `CPU_MAX_MHZ`、`CPU_CUR_MHZ` | SMBIOS Type 4 最大/当前频率 |
 | `CPU_TSC_MHZ` | 目标 invariant TSC；受 KVM TSC scaling/实测频率硬约束 |
 | `CPU_PHYS_BITS` | 客体物理地址位数 |
 | `CPU_FEATURES` | bundle 允许的附加 CPUID 特性 |
-| `CPU_SOCKET` | 目标桌面 CPU 插槽；与主板 bundle 绑定，当前为 LGA1151 |
+| `CPU_SOCKET` | 目标桌面 CPU 插槽；与主板 bundle 绑定，主清单当前包含 LGA1151/LGA2011 |
 | `CPU_PART` | SMBIOS Type 4 part number |
 | `CPU_PROC_FAMILY` | SMBIOS Type 4 processor family |
 | `CPU_SMBIOS_UPGRADE` | SMBIOS Type 4 processor upgrade/socket 编码 |
@@ -176,12 +176,12 @@ H110/H310 固定功能布局”。
 | `NIC_SUBSYSTEM_VEN`、`NIC_SUBSYSTEM_DEV` | 网卡自身 subsystem；当前为 `8086:a01f` |
 | `NIC_MAC_OUI`、`NIC_MAC` | Intel OUI 与每实例随机后缀；不使用 QEMU `52:54:00` OUI |
 | `NIC_ATTACHMENT`、`BOARD_NIC_STATE` | 扩展卡连接方式及主板网卡 BIOS 禁用状态 |
-| `AUDIO_VENDOR`、`AUDIO_CODEC` | 当前 Realtek ALC887 画像 |
+| `AUDIO_VENDOR`、`AUDIO_CODEC` | 当前受控 Realtek ALC887/ALC892/ALC898 画像 |
 | `AUDIO_CODEC_ID`、`AUDIO_CODEC_REVISION`、`AUDIO_CODEC_SUBSYSTEM_ID` | HDA codec ID/revision/subsystem |
 | `AUDIO_CONTROLLER_PCI_VEN`、`AUDIO_CONTROLLER_PCI_DEV` | HDA controller PCI 身份 |
 | `AUDIO_IDENTITY_FIDELITY` | 当前固定为 `protocol_identity_only` |
 
-`protocol_identity_only` 表示只对协议身份和主要枚举字段负责，不承诺真实 ALC887 widget、
+`protocol_identity_only` 表示只对协议身份和主要枚举字段负责，不承诺真实 codec widget、
 插孔检测、放大器、板级布线或声音路径。
 
 ## 启动盘、SATA/NVMe 与磁盘容量
@@ -248,8 +248,8 @@ SATA 1.5/3/6 Gb/s 向下兼容；当前没有对应实物的 ATA IDENTIFY captur
 | 字段 | 含义 |
 |---|---|
 | `MEM_TOTAL_MB` | 持久化总内存；新 profile 默认 8192 MiB |
-| `MEM_TYPE`、`MEM_CHANNELS` | 随平台选择 DDR3/DDR4；当前目录均支持双通道 |
-| `MEM_ALLOWED_TOTAL_MB` | 当前平台允许的总量：`2048,4096,8192` |
+| `MEM_TYPE`、`MEM_CHANNELS` | 随平台选择 DDR3/DDR4；当前目录包含双通道和 X79 四通道 |
+| `MEM_ALLOWED_TOTAL_MB` | 当前平台允许的总量；X79 为 `4096,8192,12288,16384` |
 | `MEM_MODULE_MB` | 允许的单条容量：`2048,4096` |
 | `MEM_MAX_CAPACITY_MB` | 主板最大内存容量 |
 | `MEM_MAX_MTS`、`MEM_ALLOWED_MTS` | 平台控制器上限和允许速率 |
@@ -270,6 +270,8 @@ SATA 1.5/3/6 Gb/s 向下兼容；当前没有对应实物的 ATA IDENTIFY captur
 | 2048 MiB | 1×2 GiB | 单通道 | 1 node |
 | 4096 MiB | 1×4 GiB | 单通道 | 1 node |
 | 8192 MiB | 2×4 GiB | 双通道 | 1 node |
+| 12288 MiB | 3×4 GiB | 三条已安装，平台为四通道控制器 | 1 node |
+| 16384 MiB | 4×4 GiB | 四通道 | 1 node |
 
 SMBIOS Type 17 的 `Speed` 使用 `MEM_RATED_MTS`，`Configured Memory Speed` 使用
 `MEM_CONFIGURED_MTS`；Q35 SPD 的 tCKmin 只使用额定速率。例如 DDR4-2400 DIMM 在 H110/
@@ -284,8 +286,8 @@ DDR4 SPD 实现完整 512 字节 EE1004 地址空间和 0x36/0x37 页选择，by
 已核验 raw-card；其余短料号使用 JEDEC `ZZ`（未知）值，避免把批次相关 PCB revision
 伪造成固定事实。
 
-DDR3 继续使用标准 256 字节 SPD，模组厂商码、序列号和料号位于同一页；同样覆盖目录中的
-Crucial、Kingston 和 SK hynix，并按具体 2/4 GiB 料号生成 rank、颗粒位宽与时序。
+DDR3 继续使用标准 256 字节 SPD，模组厂商码、序列号和料号位于同一页；活动 LGA2011
+池覆盖 Samsung、Kingston 和 SK hynix，并按具体 2/4 GiB 料号生成 rank、颗粒位宽与时序。
 
 历史 `2026-07-19.6` profile 中曾把 Kingston 4 GiB 实际模块
 `KVR24N17S8/4` 与一个未使用的 2 GiB 候选一起保存。只有平台、总量、插槽数、速率、
@@ -297,8 +299,8 @@ Crucial、Kingston 和 SK hynix，并按具体 2/4 GiB 料号生成 rank、颗�
 迁移/快照目标必须使用与源端相同的 `spd-ee1004` 设备配置，这与其它 QEMU 设备拓扑参数
 相同；已访问 SPD 的 256B/512B 状态错配会直接拒绝加载。
 
-第二条 DIMM serial 由 `sha256("${MEM_SERIAL}-dimm2")` 前 8 位稳定派生。双 DIMM 不等于
-双 NUMA；当前消费级单 socket 客体始终只创建一个 guest NUMA node。宿主双路 E5 的 NUMA
+第二条及后续 DIMM serial 由 `sha256("${MEM_SERIAL}-dimmN")` 前 8 位稳定派生。多 DIMM
+不等于多 NUMA；当前消费级单 socket 客体始终只创建一个 guest NUMA node。宿主双路 E5 的 NUMA
 仅影响 vCPU/内存放置，不改变客体这一拓扑。
 
 ## 显示器 EDID

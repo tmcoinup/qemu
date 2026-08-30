@@ -1,7 +1,7 @@
 ﻿# install-chipset-device.ps1 —— 验证或安装硬件池 Intel SMBus 设备识别 INF。
 #
 # QEMU 当前仍实现 ICH9 SMBus 寄存器行为，但已启用的平台会把 PCI 配置身份投影为：
-#   - H310/H110: A323/A123；H61/B75/H81: 1C22/1E22/8C22。
+#   - H310/H110: A323/A123；X79/H61/B75/H81: 1D22/1C22/1E22/8C22。
 # Intel 官方包对上述 ID 使用 Needs_NO_DRV：它只把设备归入 System 类并赋予正确
 # 名称，不包含 SYS/服务，也不会假装提供目标 PCH 的寄存器行为。显式 Q35/ICH9
 # compatibility profile 使用 2930，由 Windows 10 19041 inbox machine.inf 负责。
@@ -60,6 +60,17 @@ $ChipsetPayloads = @(
         FriendlyName    = 'Intel(R) 7 Series/C216 Chipset Family SMBus Host Controller - 1E22'
         InfHash         = '11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6'
         CatHash         = 'a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500'
+        SignerThumbprint = 'A3165BF7F09B48194C3724707023CDA874710D16'
+    },
+    [pscustomobject]@{
+        Provisioning    = 'Payload'
+        DeviceId        = '1D22'
+        InfName         = 'PatsburgSystem.inf'
+        CatName         = 'patsburg.cat'
+        CatalogFile     = 'Patsburg.cat'
+        FriendlyName    = 'Intel(R) C600/X79 series chipset SMBus Host Controller - 1D22'
+        InfHash         = 'f4b3572cc42be6d471a9a1a0340091677648571e6f05f8d40bd89f60e89d86b1'
+        CatHash         = '0e725443833f813142c8f470a4eb78d7648dc5ebe2bad316c4c0f22930a2b110'
         SignerThumbprint = 'A3165BF7F09B48194C3724707023CDA874710D16'
     },
     [pscustomobject]@{

@@ -20,7 +20,7 @@ VMate 当前应定位为：**Linux/KVM 优先、Windows/WHPX 受限支持、非 
 | Windows 10 客体 | Linux/KVM 主验收对象 |
 | Windows 11 客体 | 有 TPM 2.0 路径，但 Secure Boot operational state 尚未闭环，不宣称正式支持 |
 | Linux 客体 | QEMU 设备功能兼容；启动器的命名、RTC 和安装流程仍偏向 Windows |
-| Intel SMBus | 全池 A323/A123/1C22/1E22/8C22 使用五套 WHCP NO_DRV INF；2930 使用 Win10 inbox `machine.inf` |
+| Intel SMBus | 全池 A323/A123/1C22/1D22/1E22/8C22 使用六套 WHCP NO_DRV INF；2930 使用 Win10 inbox `machine.inf` |
 | GPU | 只有一个 virtio `1AF4:1050`/VioGpuDod devnode；PnP HardwareID 为规范逻辑首项 + 完整物理尾项，NVAPI 主键以物理 carrier 去重；18 个 AIB 身份仅作用户态投影，不使用 passthrough、SR-IOV GPU 或 vGPU |
 
 ## 唯一事实源
@@ -67,6 +67,8 @@ PCI BDF、寄存器或 PCH 行为与目标 H110/H310 等价：
 | `compat-haswell-g3220-h81` | G3220，2C/2T | ASUS H81M-K / H81 | DDR3，2/4/8 GiB | E5 v3/v4 默认正常池；Q35 identity compatibility |
 | `compat-haswell-i3-4130-h81` | i3-4130，2C/4T | ASUS H81M-K / H81 | DDR3，2/4/8 GiB | E5 v3/v4 默认正常池；Q35 identity compatibility |
 | `compat-haswell-i5-4570-h81` | i5-4570，4C/4T | ASUS H81M-K / H81 | DDR3，2/4/8 GiB | E5 v3/v4 默认正常池；Q35 identity compatibility |
+| `intel-lga2011-i7-{3820,4820k}-*` | i7-3820/i7-4820K，4C/8T | P9X79、GA-X79-UP4、X79 Extreme4 / X79 | DDR3，4/8/12/16 GiB | 6 套启用候选；1866 合法组合优先 |
+| `intel-lga2011-i7-{3930k,4930k,4960x}-*` | i7-3930K/i7-4930K/i7-4960X，6C/12T | 同上三品牌 X79 | DDR3，4/8/12/16 GiB | 9 套启用候选；SATA 启动、NVMe 数据盘 |
 
 三个 H81 条目保留历史 `compat-` ID 以兼容已有 profile；授权依据 registry 中的
 `PLATFORM_STATUS=supported`，不依据 ID 文本。旧 revision 的同 ID
@@ -104,8 +106,9 @@ MAC、主板/系统/机箱/CPU/DIMM、NVMe 和 EDID 序列号。键鼠模板声�
 serial，profile 内的稳定派生值不会送进描述符。
 GPU 目录同样明确 `serial_exposed=false`：本项目没有 `GPU_SERIAL` 投影，也不会用
 主板、显存或其它设备序列号冒充显卡序列号。
-新 VM 的活动 DIMM 池包含 Samsung、Kingston、Crucial 三组 DDR4-2400，以及供
-Sandy/Ivy/Haswell household bundle 使用的 Kingston、SK hynix DDR3-1333/1600。
+新 VM 的活动 DIMM 池包含 Samsung、Kingston、Crucial 三组 DDR4-2400；LGA2011
+另有 Samsung DDR3-1866（最高权重）、Kingston 与 SK hynix DDR3-1600 三个真实品牌系列。
+其它 Sandy/Ivy/Haswell household bundle 继续使用审核的 DDR3-1333/1600 物料。
 缺精确料号或修订证据的 Hynix DDR4 和 Crucial DDR3 位于 quarantine，不会被严格
 profile 或随机选择接受。
 
@@ -114,7 +117,7 @@ profile 或随机选择接受。
 Linux 启动器默认按以下顺序 fail closed：
 
 1. 检查 patched QEMU、KVM 和 TSC 能力。
-2. 按宿主 CPU 厂商、目标 SKU 的完整 2/4 线程拓扑、宿主最大频率和 TSC 约束选择整机 bundle。
+2. 按宿主 CPU 厂商、目标 SKU 的完整 2/4/8/12 线程拓扑、宿主最大频率和 TSC 约束选择整机 bundle。
 3. 用实际 QEMU/KVM 和 `enforce=on` 创建最小 vCPU，拒绝 warning、unsupported 或失败。
 4. 校验 profile 的 platform/component schema、目录修订号及每个绑定字段。
 5. 校验 qcow2 的 guest 可见虚拟容量等于实际启动盘的 `BOOT_STORAGE_SIZE_BYTES`。
@@ -132,9 +135,9 @@ Linux 启动器默认按以下顺序 fail closed：
 | 硬件面 | 可见身份 | 行为边界 |
 |---|---|---|
 | CPU/SMBIOS/内存 | 平台字段、拓扑、Type 0/1/2/3/4/16/17；DIMM 额定/配置速率分离；DDR4 使用 512B EE1004 与 0x36/0x37 页选择，并把硬件目录中的品牌、料号和唯一序列号投影到 SPD page 1 | cache、MSR、微码、性能和时序仍受宿主及 KVM 限制；SPD 是按目录字段生成的标准数据，不是具体 DIMM 的原始 raw dump/XMP |
-| 芯片组/PCIe/xHCI | 全 SMBus 池用 NO_DRV 正确归类和命名；芯片组与 root port 身份/链路可注入；xHCI 平台字段仅留作事实 | 五款 payload 不含 `.sys`/服务，2930 只用 inbox `machine.inf`；实现仍是 Q35/ICH9/QEMU 控制器；`qemu-xhci` 固定与行为匹配的 `1B36:000D rev01 / SUBSYS 1AF4:1100`；Linux 为 root port `00:01.0`–`00:04.0`、HDA `00:05.0`，Windows 少一个空端口、HDA 为 `00:04.0`，均不承诺目标 PCH BDF/silicon 等价 |
+| 芯片组/PCIe/xHCI | 全 SMBus 池用 NO_DRV 正确归类和命名；芯片组与 root port 身份/链路可注入；xHCI 平台字段仅留作事实 | 六套 payload 不含 `.sys`/服务，2930 只用 inbox `machine.inf`；实现仍是 Q35/ICH9/QEMU 控制器；`qemu-xhci` 固定与行为匹配的 `1B36:000D rev01 / SUBSYS 1AF4:1100`；Linux 为 root port `00:01.0`–`00:04.0`、HDA `00:05.0`，Windows 少一个空端口、HDA 为 `00:04.0`，均不承诺目标 PCH BDF/silicon 等价 |
 | NVMe | Identify、容量、PCI/subsystem、SubNQN 可绑定 | SMART、热管理、功耗和错误恢复仍是通用 QEMU NVMe |
-| 音频 | HDA controller 和 ALC887 codec 身份 | `protocol_identity_only`，widget、插孔和板级布线不等价 |
+| 音频 | HDA controller 和受控 ALC887/ALC892/ALC898 codec 身份 | `protocol_identity_only`，widget、插孔和板级布线不等价 |
 | EDID/HID | EDID 型号规格成套，并按其 PnP code 投影 Monitor FriendlyName；HID 仅绑定 VID/PID/名称 | FriendlyName 不改变 EDID、HardwareID、INF 或 `monitor.sys`；EDID 产品码/制造信息是明确标注的合成值；键鼠 report descriptor 仍是通用实现 |
 | 显示/GPU | 内核枚举固定为唯一 virtio `1AF4:1050` devnode；HardwareID 使用逻辑首项 + 物理尾项，NVAPI 以物理 carrier 跨接口关联并保留逻辑 external/AIB/型号 | `audited_aib_bundle_shallow_user_projection_no_passthrough`；不改变 virtio 驱动、寄存器、显存分配或 3D 性能，不代表 NVIDIA/AMD 物理 GPU，也不虚构 GPU 序列号 |
 
@@ -155,6 +158,10 @@ python3 deploy/scripts/tests/run-vmate-tests.py --mode quick --jobs 4
 
 # 首次启动会生成并保存 profile；默认 8 GiB、4 vCPU、SDL + fb-shm
 deploy/scripts/start-vm.sh 1 --iso=/home/ubuntu/images/win10_ltsc.iso
+
+# 家用 X79 封装：默认 8G，分别优先 DDR3-1866 的 4C/8T、6C/12T 组合
+deploy/scripts/start-home-vm.sh 11 --spec 4c8t
+deploy/scripts/start-home-vm.sh 12 --spec 6c12t --memory-size 16G
 
 # AMD 宿主的显式功能兼容路径；不是 B350 真机化验收结果
 deploy/scripts/start-vm.sh 2 \
@@ -190,6 +197,8 @@ deploy/scripts/stop-vm.sh 1
 
 ## 文档入口
 
+- [V-11 家用 X79 傻瓜教程](V11-HOME-X79-QUICKSTART.zh-CN.md)：4C/8T、6C/12T、
+  4/8/12/16G 一键封装、真实型号矩阵和 SATA/NVMe 边界。
 - [硬件平台、E5/X99 与兼容性评估](HARDWARE_PLATFORM_ASSESSMENT_2026-07-13.md)：当前结论和验收矩阵。
 - [Profile 字段](PROFILE-FIELDS.md)：schema、目录绑定、字段和 fidelity。
 - [操作参考](USAGE.md)：Linux 构建、启动、网络、调优和验收命令。

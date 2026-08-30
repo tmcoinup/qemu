@@ -93,6 +93,7 @@ for chipset_file in CannonLake-HSystem.inf cannonlake-h.cat \
         SunrisePoint-HSystem.inf sunrisepoint-h.cat \
         CougarPointSystem.inf cougarpoint.cat \
         PantherPointSystem.inf pantherpoint.cat \
+        PatsburgSystem.inf patsburg.cat \
         LynxPointSystem.inf lynxpoint.cat; do
     strings -a "$EXE" | grep -F "$chipset_file" >/dev/null \
         || fail "EXE 未包含芯片组 payload 文件名: $chipset_file"
@@ -323,6 +324,8 @@ payloads = (
     root / "deploy/scripts/stock-intel-chipset-inf/cougarpoint.cat",
     root / "deploy/scripts/stock-intel-chipset-inf/PantherPointSystem.inf",
     root / "deploy/scripts/stock-intel-chipset-inf/pantherpoint.cat",
+    root / "deploy/scripts/stock-intel-chipset-inf/PatsburgSystem.inf",
+    root / "deploy/scripts/stock-intel-chipset-inf/patsburg.cat",
     root / "deploy/scripts/stock-intel-chipset-inf/LynxPointSystem.inf",
     root / "deploy/scripts/stock-intel-chipset-inf/lynxpoint.cat",
     root / "deploy/nvapi-shim/nvapi.dll",
@@ -348,6 +351,7 @@ for helper_name in persist-gpu-profile.ps1 gpu-profile-transaction.ps1 gpu-board
         SunrisePoint-HSystem.inf sunrisepoint-h.cat \
         CougarPointSystem.inf cougarpoint.cat \
         PantherPointSystem.inf pantherpoint.cat \
+        PatsburgSystem.inf patsburg.cat \
         LynxPointSystem.inf lynxpoint.cat \
         install-nvapi-system.ps1 nvapi-system-validation.ps1 \
         nvapi-system-transaction.ps1 gpu-api-identity-binding.ps1 \

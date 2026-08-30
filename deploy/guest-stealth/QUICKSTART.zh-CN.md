@@ -175,7 +175,7 @@ C:\ProgramData\StealthGPU\respawn.log
   改名，也不要安装 NVIDIA 驱动。
 - 设备管理器仍显示“SM 总线控制器”Code 28：查看
   `chipset-device-install.log`；不要安装来源不明的 SMBus `.sys`，本项目使用的是
-  五套 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF；2930 使用 inbox
+  六套 Microsoft WHCP 签名的 Intel NO_DRV 识别 INF（含 X79/Patsburg）；2930 使用 inbox
   `machine.inf`。
 - 显示器仍显示“通用即插即用监视器”：查看 `monitor-identity-projection.log`；
   不要安装或改写厂商 Monitor INF，标签必须由当前 EDID PnP ID 唯一选择。

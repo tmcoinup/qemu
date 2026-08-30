@@ -64,7 +64,7 @@ Assert-MemoryTest ([int]$catalog.schema_version -eq 1) `
 $active = @(Get-VMateMemoryPartCatalog)
 $quarantine = @(Get-VMateMemoryPartCatalog -IncludeQuarantine |
     Where-Object { $_.status -eq 'quarantine' })
-Assert-MemoryTest ($active.Count -eq 11 -and $quarantine.Count -eq 4) `
+Assert-MemoryTest ($active.Count -eq 13 -and $quarantine.Count -eq 4) `
     'Windows active/quarantine DIMM 数量错误。'
 Assert-MemoryTest `
     ((@($active.manufacturer | Sort-Object -Unique) -join ',') -eq
@@ -151,6 +151,21 @@ Assert-MemoryTest (@($ddr3Plans | Where-Object {
             $_.Type -ne 'DDR3' -or $_.SpdEe1004
         }).Count -eq 0) `
     'DDR3 计划混入 DDR4 或错误启用 EE1004。'
+
+$x79 = New-TestMemoryPlatform -Type DDR3 -Socket LGA2011 `
+    -VoltageMv 1500 -MaxMts 1866 -AllowedMts @(1333, 1600, 1866) -DimmSlots 4
+$x79.memory.allowed_total_mib = @(4096, 8192, 12288, 16384)
+$x79.memory.channels = 4
+$x79Plans = @(Get-VMateMemoryModulePlans -Platform $x79 -MemoryMiB 8192)
+Assert-MemoryTest ($x79Plans.Count -eq 3) `
+    'LGA2011 DDR3 没有得到三个真实品牌系列。'
+Assert-MemoryTest `
+    ((@($x79Plans.Manufacturer) -join ',') -eq 'Samsung,Kingston,SK hynix') `
+    'LGA2011 DDR3 候选品牌或 1866 优先级错误。'
+Assert-MemoryTest `
+    ($x79Plans[0].ConfiguredMts -eq 1866 -and
+        $x79Plans[0].PartNumber -eq 'M378B5273DH0-CMA') `
+    'LGA2011 默认计划没有优先使用三星 DDR3-1866 真实料号。'
 
 # 新 profile 持久化稳定 module ID；旧 schema-1 profile 没有这个新增字段时，
 # 仍可由品牌+料号无歧义解析，避免升级后强制改变既有 VM 的内存身份。

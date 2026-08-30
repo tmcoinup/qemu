@@ -150,7 +150,7 @@ verify_driver_file viogpudo.sys 04e873ad57387a518ad8ccae5116989c63170503c14b9cca
 verify_driver_file viogpudo.cat b5122b2e060ec0c2f0157afcdc64c728ec31646819055c8b79ae3f4227472078
 verify_driver_file viogpudo.inf 48abd56644386e1f0d85c54cd64db93e62a4eb33bc7acb2613f237c6e1c6a0ee
 
-# 五套 Intel 芯片组 INF 都是 Microsoft WHCP 签名的 NO_DRV 识别包。正式构建只接受
+# 六套 Intel 芯片组 INF 都是 Microsoft WHCP 签名的 NO_DRV 识别包。正式构建只接受
 # Microsoft Update Catalog 锁定版本的原始字节，不能用同名自签包或另一 OEM 版本。
 verify_chipset_file() {
     local file_name="$1"
@@ -182,6 +182,10 @@ verify_chipset_file PantherPointSystem.inf \
     11506b52ab41359f2740de07b3e8348aadb6a60b9d6c9bd277209bdbc39102d6
 verify_chipset_file pantherpoint.cat \
     a8c1f9ed394dc534d7dbe089e12c911813642985a75cd5e56a6d19702b4e5500
+verify_chipset_file PatsburgSystem.inf \
+    f4b3572cc42be6d471a9a1a0340091677648571e6f05f8d40bd89f60e89d86b1
+verify_chipset_file patsburg.cat \
+    0e725443833f813142c8f470a4eb78d7648dc5ebe2bad316c4c0f22930a2b110
 verify_chipset_file LynxPointSystem.inf \
     2e754318dab5a3f906eb267a785fe040dc253c26fdcbe4878cd2aaf1316a7209
 verify_chipset_file lynxpoint.cat \
@@ -420,6 +424,11 @@ xxd -i -n payload_pantherpoint_system_inf \
     > "$BUILD_DIR/payload_pantherpoint_system_inf.h"
 xxd -i -n payload_pantherpoint_cat "$CHIPSET_INF_SRC_DIR/pantherpoint.cat" \
     > "$BUILD_DIR/payload_pantherpoint_cat.h"
+xxd -i -n payload_patsburg_system_inf \
+    "$CHIPSET_INF_SRC_DIR/PatsburgSystem.inf" \
+    > "$BUILD_DIR/payload_patsburg_system_inf.h"
+xxd -i -n payload_patsburg_cat "$CHIPSET_INF_SRC_DIR/patsburg.cat" \
+    > "$BUILD_DIR/payload_patsburg_cat.h"
 xxd -i -n payload_lynxpoint_system_inf \
     "$CHIPSET_INF_SRC_DIR/LynxPointSystem.inf" \
     > "$BUILD_DIR/payload_lynxpoint_system_inf.h"

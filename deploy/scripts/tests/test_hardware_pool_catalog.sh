@@ -28,6 +28,11 @@ known_cpu() {
         |"Intel(R) Pentium(R) Gold G5400 CPU @ 3.70GHz" \
         |"Intel(R) Core(TM) i3-9100F CPU @ 3.60GHz" \
         |"Intel(R) Core(TM) i5-6400T CPU @ 2.20GHz" \
+        |"Intel(R) Core(TM) i7-3820 CPU @ 3.60GHz" \
+        |"Intel(R) Core(TM) i7-3930K CPU @ 3.20GHz" \
+        |"Intel(R) Core(TM) i7-4820K CPU @ 3.70GHz" \
+        |"Intel(R) Core(TM) i7-4930K CPU @ 3.40GHz" \
+        |"Intel(R) Core(TM) i7-4960X CPU @ 3.60GHz" \
         |"Intel(R) Core(TM) i5-2380P CPU @ 3.10GHz" \
         |"Intel(R) Core(TM) i5-2550K CPU @ 3.40GHz" \
         |"Intel(R) Core(TM) i5-3350P CPU @ 3.10GHz")
@@ -81,6 +86,9 @@ known_board() {
         |"LGA1151|B360M D2V" \
         |"LGA1151|B360M Pro4" \
         |"LGA1151|H310CM-HDV" \
+        |"LGA2011|P9X79" \
+        |"LGA2011|GA-X79-UP4" \
+        |"LGA2011|X79 Extreme4" \
         |"LGA1200|PRIME H410M-A" \
         |"LGA1200|PRIME B460M-A" \
         |"LGA1200|H410M PRO (MS-7C89)" \
@@ -124,6 +132,7 @@ known_nvme() {
 known_memory() {
     case "$1|$2|$3|$4" in
         "Samsung|M378A5644EB0-CRC|M378A5244CB0-CRC|2400" \
+        |"Samsung|M378B5773DH0-CMA|M378B5273DH0-CMA|1866" \
         |"Crucial|CT2G4DFS624A|CT4G4DFS824A|2400" \
         |"Kingston|KVR16N11S6/2|KVR16N11S8/4|1600" \
         |"SK hynix|HMT325U6CFR8C-PB|HMT351U6CFR8C-PB|1600" \
@@ -194,10 +203,10 @@ for row in "${CPU_POOL[@]}"; do
     known_cpu "$name" || fail "CPU 未在真实发售目录中: $name"
     [[ "$name" != *"i3-8100F"* ]] || fail "i3-8100F 缺 Intel 官方发售规格，不得入池"
 done
-(( ${#CPU_POOL[@]} == 4 )) || fail "新 VM 应暴露四个 enabled Intel CPU bundle"
+(( ${#CPU_POOL[@]} == 9 )) || fail "新 VM 应暴露九款 enabled Intel CPU"
 for row in "${CPU_POOL[@]}"; do
     IFS='|' read -r _ vendor name _ _ part family socket <<<"$row"
-    [[ "$vendor" == GenuineIntel && "$socket" == LGA1151 ]] \
+    [[ "$vendor" == GenuineIntel && ( "$socket" == LGA1151 || "$socket" == LGA2011 ) ]] \
         || fail "unsupported/legacy CPU 泄漏到随机池: $row"
     [[ "$part" != GX80684I39100F ]] || fail "i3-9100F 使用了不存在的 GX 订购号"
     case "$name" in
@@ -207,6 +216,7 @@ for row in "${CPU_POOL[@]}"; do
             || fail "G5400 SMBIOS family 应为 Pentium" ;;
         *i3-9100F*) [[ "$family" == 0x00CE ]] || fail "i3-9100F SMBIOS family 应为 Core i3" ;;
         *i5-6400T*) [[ "$family" == 0x00CD ]] || fail "i5-6400T SMBIOS family 应为 Core i5" ;;
+        *i7-*) [[ "$family" == 0x00C6 ]] || fail "X79 Core i7 SMBIOS family 应为 Core i7" ;;
     esac
 done
 
@@ -215,7 +225,8 @@ for row in "${BOARD_POOL[@]}"; do
     known_board "$socket" "$product" || fail "主板未在真实发售目录中: $socket $product"
 done
 for row in "${BOARD_POOL[@]}"; do
-    [[ "${row%%|*}" == LGA1151 ]] || fail "旧 socket 主板泄漏到随机池: $row"
+    [[ "${row%%|*}" == LGA1151 || "${row%%|*}" == LGA2011 ]] \
+        || fail "未审核 socket 主板泄漏到随机池: $row"
 done
 
 declare -A expected_gpu_rows=()
@@ -311,8 +322,8 @@ for row in "${MEM_POOL[@]}"; do
     [[ "$width_4g" == 4 || "$width_4g" == 8 || "$width_4g" == 16 ]] \
         || fail "4GB 内存 device-width 非法: $row"
 done
-(( ${#MEM_POOL[@]} == 5 )) \
-    || fail "旧双料号 ABI 应为两组 DDR4 + 三组 DDR3 已核验物料"
+(( ${#MEM_POOL[@]} == 6 )) \
+    || fail "旧双料号 ABI 应为两组 DDR4 + 四组 DDR3 已核验物料"
 (( ${#MEM_DORMANT_POOL[@]} == 0 )) \
     || fail "已启用 household compatibility 后 DDR3 不应继续留在 dormant 池"
 for row in "${MEM_DORMANT_POOL[@]}"; do

@@ -329,19 +329,23 @@ stealth_smbios_args() {
     # smbios.c 打补丁：serial 支持 '|' 分隔的 per-DIMM 列表，loc_pfx 支持 %C 通道
     # 替换。第 2 条 SN 由 MEM_SERIAL 确定性派生（sha256 前 8 hex、大写），跨重启
     # 稳定、跨 VM 唯一，无需再往 profile 多存字段；单条 DIMM 时 QEMU 只取 SN1。
-    local mem_serial2
-    mem_serial2="$(_stealth_memory_slot_serial "$MEM_SERIAL" 2)" || {
-        echo "ERROR: 无法派生合法的第二条 DIMM 序列号" >&2
-        return 1
-    }
-    # loc_pfx=DIMM_%C2 → DIMM_A2 / DIMM_B2（ASUS/AMI 双通道槽位命名）；bank %C → CHANNEL A/B。
+    local mem_serials="$MEM_SERIAL" mem_slot mem_slot_serial
+    local mem_count="${NUM_DIMMS:-2}"
+    for ((mem_slot = 2; mem_slot <= mem_count; mem_slot++)); do
+        mem_slot_serial="$(_stealth_memory_slot_serial "$MEM_SERIAL" "$mem_slot")" || {
+            echo "ERROR: 无法派生第 ${mem_slot} 条 DIMM 的合法序列号" >&2
+            return 1
+        }
+        mem_serials+="|${mem_slot_serial}"
+    done
+    # loc_pfx=DIMM_%C2 依次生成 DIMM_A2/B2/C2/D2；双通道旧配置保持 A/B。
     local memory_type_enum
     case "${MEM_TYPE:-DDR4}" in
         DDR3) memory_type_enum="0x18" ;;
         DDR4) memory_type_enum="0x1A" ;;
         *) echo "ERROR: 不支持的 MEM_TYPE=${MEM_TYPE:-}" >&2; return 1 ;;
     esac
-    t17="type=17,loc_pfx=DIMM_%C2,bank=P0 CHANNEL %C,manufacturer=$(_e "$MEM_MFR"),serial=${MEM_SERIAL}|${mem_serial2},part=$(_e "$mem_part"),speed=$mem_rated_speed,configured-speed=$mem_configured_speed,memory-type=$memory_type_enum,type-detail=0x0080,rank=$mem_rank,voltage=${MEM_VOLTAGE_MV:-1200},device-width=$mem_device_width"
+    t17="type=17,loc_pfx=DIMM_%C2,bank=P0 CHANNEL %C,manufacturer=$(_e "$MEM_MFR"),serial=${mem_serials},part=$(_e "$mem_part"),speed=$mem_rated_speed,configured-speed=$mem_configured_speed,memory-type=$memory_type_enum,type-detail=0x0080,rank=$mem_rank,voltage=${MEM_VOLTAGE_MV:-1200},device-width=$mem_device_width"
     if [[ "$MEM_TYPE" == DDR4 ]]; then
         t17+=",spd-ee1004=on"
     fi

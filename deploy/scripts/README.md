@@ -27,6 +27,8 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 
 ```bash
 ./deploy/scripts/create-vm.sh ID
+./deploy/scripts/create-home-vm.sh ID --spec 4c8t
+./deploy/scripts/create-home-vm.sh ID --spec 6c12t --memory-size 12G
 ./deploy/scripts/create-vm.sh ID --cpu-profile i7-4930k --board-profile asus-p9x79 --memory-size 4G
 ./deploy/scripts/create-disk.sh ID --blank
 ./deploy/scripts/seal-base.sh 1 win10-ltsc-v1
@@ -57,9 +59,10 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 ./deploy/scripts/guest-performance.sh ID eject
 ```
 
-Core i7-4930K（6C/12T）直接使用统一 `create-vm.sh`，可选择 ASUS/Gigabyte/
-ASRock 主板、4–5 个大牌内存和五品牌 SSD。完整复制粘贴教程见
-[`../docs/G11-6C12T-QUICKSTART.md`](../docs/G11-6C12T-QUICKSTART.md)。
+家用池提供两款 4C/8T 与三款 6C/12T Core i7，可选择 ASUS/Gigabyte/ASRock
+主板、每容量 4–5 个大牌内存和五品牌 SSD。日常使用默认 8G 的
+`create-home-vm.sh` 封装；完整复制粘贴教程见
+[`../docs/G11-HOME-CPU-POOL-QUICKSTART.md`](../docs/G11-HOME-CPU-POOL-QUICKSTART.md)。
 
 这些文件就是唯一实现，共用 `deploy/lib/` 中的内部库。宿主凭据仍只能通过批准的
 运行时安全渠道或环境变量提供，脚本不会保存凭据。

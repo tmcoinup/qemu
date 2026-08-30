@@ -83,12 +83,13 @@ chmod +x "$fake_qemu"
 
 create_one() {
     local mode=$1 id=$2 root
+    shift 2
     root="$tmp_dir/$mode"
     mkdir -p "$root/images" "$root/vms"
     FAKE_CPU_MODE=$mode QEMU_BIN="$fake_qemu" \
         IMAGE_ROOT="$root/images" VM_ROOT="$root/vms" \
         VGPU_HOST_CONFIG="$host_config" \
-        "$create_vm" "$id" \
+        "$create_vm" "$id" "$@" \
         --ssd-profile samsung-850-pro-512gb \
         --gpu-profile gtx1050_2gb \
         --monitor-profile dell-p2419h >/dev/null
@@ -102,7 +103,8 @@ source "$supported_conf"
     fail "supported host selection reason: $PLATFORM_SELECTION_POLICY"
 [[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == new ]] ||
     fail "supported host selected non-new platform: $PLATFORM"
-[[ "$CPU_PROFILE" == i7-4930k && "$CPU_VCPUS" == 12 && "$MEM_SPEED" == 1866 ]] ||
+[[ "$CPU_PROFILE" == i7-4960x && "$CPU_VCPUS" == 12 &&
+   "$MEM_SPEED" == 1866 && "$MEM_TOTAL_MB" == 8192 ]] ||
     fail "supported host did not select the fastest reviewed tier: $PLATFORM"
 [[ "$BOARD_CHIPSET" == X79 && "$MEM_BOARD_SLOTS" == 8 ]] ||
     fail "supported host did not select an 1866-capable X79 board"
@@ -122,7 +124,8 @@ source "$fallback_cpu_conf"
     fail "second active CPU selection reason: $PLATFORM_SELECTION_POLICY"
 [[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == new ]] ||
     fail "second active CPU selected wrong lifecycle: $PLATFORM"
-[[ "$CPU_PROFILE" == i7-3820 && "$BOARD_CHIPSET" == X79 ]] ||
+[[ "$CPU_PROFILE" == i7-3820 && "$BOARD_CHIPSET" == X79 &&
+   "$MEM_TOTAL_MB" == 8192 ]] ||
     fail "failed to select the reviewed i7-3820 X79 tier"
 
 mixed_probe_conf=$(create_one default-unavailable-3820-supported 5)
@@ -140,8 +143,29 @@ source "$six_core_conf"
     fail "6C/12T pool selection reason: $PLATFORM_SELECTION_POLICY"
 [[ "$(hardware_profile_lifecycle_class "$PLATFORM")" == new ]] ||
     fail "6C/12T fallback selected wrong lifecycle: $PLATFORM"
-[[ "$CPU_PROFILE" == i7-4930k && "$CPU_VCPUS" == 12 && "$MEM_SPEED" == 1866 ]] ||
+[[ "$CPU_PROFILE" == i7-4930k && "$CPU_VCPUS" == 12 &&
+   "$MEM_SPEED" == 1866 && "$MEM_TOTAL_MB" == 8192 ]] ||
     fail "failed to select the reviewed i7-4930K/Samsung 1866 tier"
+
+four_spec_conf=$(create_one supported 7 --cpu-spec 4c8t --memory-size 8G)
+# shellcheck source=/dev/null
+source "$four_spec_conf"
+[[ "$PLATFORM_SELECTION_POLICY" == host-supported-performance-first ]] ||
+    fail "4C/8T selector did not use the host gate: $PLATFORM_SELECTION_POLICY"
+[[ "$CPU_PROFILE" == i7-4820k && "$CPU_CORES" == 4 &&
+   "$CPU_VCPUS" == 8 && "$MEM_SPEED" == 1866 &&
+   "$MEM_TOTAL_MB" == 8192 ]] ||
+    fail "4C/8T selector escaped its preferred reviewed tier: $PLATFORM"
+
+six_spec_conf=$(create_one only-4930 8 --cpu-spec 6c12t --memory-size 8G)
+# shellcheck source=/dev/null
+source "$six_spec_conf"
+[[ "$PLATFORM_SELECTION_POLICY" == host-supported-performance-first ]] ||
+    fail "6C/12T selector did not use the host gate: $PLATFORM_SELECTION_POLICY"
+[[ "$CPU_PROFILE" == i7-4930k && "$CPU_CORES" == 6 &&
+   "$CPU_VCPUS" == 12 && "$MEM_SPEED" == 1866 &&
+   "$MEM_TOTAL_MB" == 8192 ]] ||
+    fail "6C/12T selector failed to stay inside its topology: $PLATFORM"
 
 no_new_root="$tmp_dir/no-new"
 mkdir -p "$no_new_root/images" "$no_new_root/vms"

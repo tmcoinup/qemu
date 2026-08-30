@@ -237,7 +237,7 @@ else
     printf '  架构绑定例外: Intel Core i7/X79、Intel e1000e、Intel HDA、swtpm、QEMU 通用绝对指针、安装期临时传输介质。\n'
     printf '  芯片组呈现: H81=8086:8C5C/04，H97=8086:8CC6/00，B150=8086:A148/31，B360=8086:A308/10，X79=8086:1D41/06；覆盖全部 %s 套平台。\n' \
         "${#HARDWARE_COMBINATIONS[@]}"
-    printf '  CPU host bridge 呈现: i7-3820=8086:3C00/07，i7-4820K/i7-4930K=8086:0E00/04；覆盖全部 %s 套活跃 X79 平台，按 CPU profile 选择、不按 VM ID 特判。\n' \
+    printf '  CPU host bridge 呈现: i7-3820/i7-3930K=8086:3C00/07，i7-4820K/i7-4930K/i7-4960X=8086:0E00/04；覆盖全部 %s 套活跃 X79 平台，按 CPU profile 选择、不按 VM ID 特判。\n' \
         "$active_x79_platform_count"
     printf '  实现/兼容边界: machine/LPC 行为仍是 q35/ICH9，SATA 仍是 ICH9-AHCI；qemu-xhci、QEMU nvme controller、救援 std-vga、legacy ivshmem 保持原生身份。\n'
     printf '  序列策略: 主板/内存/SSD/显示器按各自合同；GPU/HID/光驱不伪造序列；NIC 用唯一 MAC。\n\n'

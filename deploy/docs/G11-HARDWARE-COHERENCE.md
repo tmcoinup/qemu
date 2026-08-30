@@ -6,8 +6,9 @@ guest 包。
 > 2026-08-21：正常新建已切到两款 4C/8T Core i7 + 三品牌 X79 +
 > 4/8/12/16G。本文保留的 H81/i3 截图与逐项分析只用于解释 archived 旧 VM；当前
 > 数量、选择与 NVMe 规则以 [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) 为准。
-> 2026-08-27：i7-4930K 6C/12T 已进入普通创建池，覆盖三品牌 X79、每容量
-> 4–5 个内存品牌；普通新建 102 条，活跃 X79 合计 102 条。
+> 2026-08-29：普通池已扩成 i7-3820/i7-4820K 两款 4C/8T 与
+> i7-3930K/i7-4930K/i7-4960X 三款 6C/12T，覆盖三品牌 X79、每容量
+> 4–5 个内存品牌；普通新建与活跃 X79 均为 260 条。
 
 ## 结论
 
@@ -18,8 +19,8 @@ guest 包。
 
 | 层 | 处理 | 覆盖 |
 |---|---|---:|
-| QEMU 00:00.0 CPU DMI2 inventory | 按 CPU 目录在 UEFI 退出后呈现 Sandy/Ivy Bridge-E DMI2 | 102/102 个 X79 平台 |
-| QEMU 00:1f.0 LPC inventory | 主板目录选择 X79/H81/H97/B150/B360 身份 | 366/366 个平台 |
+| QEMU 00:00.0 CPU DMI2 inventory | 按 CPU 目录在 UEFI 退出后呈现 Sandy/Ivy Bridge-E DMI2 | 260/260 个 X79 平台 |
+| QEMU 00:1f.0 LPC inventory | 主板目录选择 X79/H81/H97/B150/B360 身份 | 524/524 个平台 |
 | G-11 系统 NVAPI | 同一 VM 合同供所有 32/64 位 NVAPI 调用者使用 | 25/25 个 GPU profile |
 | GPU 能力目录 | 六个消费卡 device ID 都显式要求目标 DXR tier 0、NVAPI RT core 0、Tensor core 0 | 6/6 个 device ID |
 | 原生 D3D12 审计 | 安装写入前和最终验收均直接查 OPTIONS5；查询失败阻断，签名 transport 能力差异警告 | x86 + x64 |
@@ -38,7 +39,7 @@ SMBIOS 虽然会变化，00:1f.0 的 PCI identity 没有变化，所以检测软
 
 | 主板目录芯片组 | 来宾 00:1f.0 LPC | revision | 平台数量 |
 |---|---|---:|---:|
-| X79 | `8086:1D41` | `06` | 102 |
+| X79 | `8086:1D41` | `06` | 260 |
 | H81 | `8086:8C5C` | `04` | 261 |
 | H97 | `8086:8CC6` | `00` | 1 |
 | B150 | `8086:A148` | `31` | 1 |
@@ -52,14 +53,16 @@ ICH9-AHCI，USB 仍是 `qemu-xhci`。这避免 Windows 为虚拟 SATA/USB 控制
 ## X79 的 CPU 侧 DMI2 怎样通用呈现
 
 X79 平台不只需要 00:1f.0 的 Patsburg/X79 LPC，还需要与 CPU 代际一致的
-00:00.0 DMI2 host bridge。当前 102 个正常 X79 组合全部从 CPU 目录取得固定映射，
+00:00.0 DMI2 host bridge。当前 260 个正常 X79 组合全部从 CPU 目录取得固定映射，
 不读取 VM ID，也不检测验收软件：
 
 | CPU 目录 | Windows 看到的 00:00.0 | revision | subsystem |
 |---|---|---:|---|
 | Core i7-3820 / Sandy Bridge-E | `8086:3C00` | `07` | `8086:3C00` |
+| Core i7-3930K / Sandy Bridge-E | `8086:3C00` | `07` | `8086:3C00` |
 | Core i7-4820K / Ivy Bridge-E | `8086:0E00` | `04` | `8086:0E00` |
 | Core i7-4930K / Ivy Bridge-E | `8086:0E00` | `04` | `8086:0E00` |
+| Core i7-4960X / Ivy Bridge-E | `8086:0E00` | `04` | `8086:0E00` |
 
 QEMU 的功能模型仍然是 q35。OVMF 在 PEI/DXE 阶段必须看到原生 P35 MCH
 `8086:29C0`，否则固件不能按现有 q35 路径可靠建立 PCI host bridge。随仓库封装的
@@ -171,8 +174,8 @@ VM_ID=3
 预期包含：
 
 ```text
-chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 X79=8086:1D41:06 coverage=all-366-platforms
-PASS: 366 G-11 platforms map LPC identities; all 102 X79 rows map UEFI-handoff CPU DMI2 identities
+chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 X79=8086:1D41:06 coverage=all-524-platforms
+PASS: 524 G-11 platforms map LPC identities; all 260 X79 rows map UEFI-handoff CPU DMI2 identities
 ```
 
 正常启动目标 VM：
@@ -300,7 +303,7 @@ cd /home/ubuntu/projects/qemu
 ./deploy/tests/vgpu/test_root_start_vm_bootstrap.sh
 ```
 
-这些检查覆盖全部 366 个平台、25 个 GPU profile、六个 GPU device ID、x86/x64
+这些检查覆盖全部 524 个平台、25 个 GPU profile、六个 GPU device ID、x86/x64
 NVAPI 与原生 D3D12 探针，以及“LPC 不连带改 AHCI/xHCI、CPU DMI2 只能在
 ExitBootServices 后交接且复位恢复”的架构边界。
 

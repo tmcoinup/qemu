@@ -1,15 +1,19 @@
 # G-11 家用 6C/12T：统一创建池傻瓜教程
 
-Core i7-4930K 已直接进入 `create-vm.sh` 普通新建池，不需要也不提供单独的
-`create-6c12t-vm.sh`。CPU、主板、内存、SSD 都通过通用组件参数选择，最终仍只会
-生成审核过的完整整机组合。
+Core i7-3930K、i7-4930K、i7-4960X 都已进入普通新建池。最省心的入口是
+`create-home-vm.sh ID --spec 6c12t`：默认 8G，优先 i7-4960X/DDR3-1866，
+首选不适合宿主时仍只在 6C/12T 组内回落。更完整的 4C/8T + 6C/12T 新教程见
+[G11-HOME-CPU-POOL-QUICKSTART.md](G11-HOME-CPU-POOL-QUICKSTART.md)。
 
 ## 1. 可选硬件
 
-固定 CPU 身份是 Intel Core i7-4930K：6 核 12 线程、3.40/3.90 GHz、12 MiB L3、
-LGA2011、四通道 DDR3-1866、无核显。Intel 的
-[官方规格](https://www.intel.com/content/www/us/en/products/sku/77780/intel-core-i74930k-processor-12m-cache-up-to-3-90-ghz/specifications.html)
-是 CPU 合同依据。
+可选 CPU 都是 LGA2011、四通道 DDR3、无核显的消费级 Intel Core i7：
+
+| profile | 型号 | 主频/睿频 | L3 | 官方内存上限 |
+|---|---|---:|---:|---:|
+| `i7-3930k` | Core i7-3930K | 3.20/3.80 GHz | 12 MiB | DDR3-1600 |
+| `i7-4930k` | Core i7-4930K | 3.40/3.90 GHz | 12 MiB | DDR3-1866 |
+| `i7-4960x` | Core i7-4960X | 3.60/4.00 GHz | 15 MiB | DDR3-1866 |
 
 主板有三个品牌：
 
@@ -55,13 +59,18 @@ SSD 通用池提供五个品牌：Samsung、Crucial、Kingston、Intel、Western
 ./deploy/scripts/create-vm.sh --list-ssd-profiles
 ```
 
-宿主检查中 `i7-4930k` 的 `HOST_CLASS` 必须为 `supported`。如果不是，不要绕过
-`enforce=on`；换宿主或选择检查通过的 CPU。
+宿主检查中至少一个 6C/12T profile 的 `HOST_CLASS` 必须为 `supported`。如果不是，
+不要绕过 `enforce=on`；换宿主或选择检查通过的 CPU。
 
 ## 3. 复制命令创建
 
-先选一个没有使用过的 VM ID。下面三条分别覆盖三个主板品牌、三个内存品牌和三个
-SSD 品牌。
+先选一个没有使用过的 VM ID。默认 8G 的傻瓜命令是：
+
+```bash
+./deploy/scripts/create-home-vm.sh 100 --spec 6c12t
+```
+
+下面三条固定 i7-4930K，分别覆盖三个主板品牌、三个内存品牌和三个 SSD 品牌。
 
 ASUS + Samsung DDR3-1866 4 GiB + Samsung 840 PRO：
 
@@ -104,7 +113,8 @@ ASRock + SK hynix DDR3-1600 16 GiB + WD SA530：
 ```
 
 需要确定品牌时必须使用 `--memory-profile`，不要同时再传 `--memory-size`。合法容量为
-`4G`、`8G`、`12G`、`16G`；12G 如实呈现三通道，16G 如实呈现四通道。
+`4G`、`8G`、`12G`、`16G`；默认 8G。12G 如实呈现三通道，16G 如实呈现四通道，
+二者只允许至少四个 DIMM 插槽的主板。
 
 GPU 和显示器仍来自现有通用池；因为 4930K 没有核显，需要时可附加：
 
@@ -137,7 +147,8 @@ Get-CimInstance Win32_PhysicalMemory |
 Get-PhysicalDisk | Select-Object FriendlyName, BusType, Size
 ```
 
-CPU 应显示 6 核/12 线程和 12288 KiB L3；主板、内存和 SSD 品牌应与创建命令一致。
+CPU 应显示 6 核/12 线程；i7-3930K/i7-4930K 为 12288 KiB L3，i7-4960X 为
+15360 KiB L3。主板、内存和 SSD 品牌应与创建命令一致。
 
 ## 5. 安全边界
 

@@ -17,6 +17,7 @@ CANONICAL_ENTRIES=(
     start-vm.sh
     stop-vm.sh
     create-vm.sh
+    create-home-vm.sh
     create-disk.sh
     clone-from-base.sh
     seal-base.sh
@@ -41,6 +42,7 @@ REMOVED_ROOT_ENTRIES=(
     start-vm.sh
     stop-vm.sh
     create-vm.sh
+    create-home-vm.sh
     create-disk.sh
     clone-vgpu-base.sh
     promote-base.sh

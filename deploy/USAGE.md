@@ -59,8 +59,10 @@ stream/relay 和 `--rdp` 只是同一 vGPU VM 的显示模式。
 ./deploy/scripts/create-vm.sh --list-cpu-profiles
 ./deploy/scripts/create-vm.sh --list-board-profiles
 ./deploy/scripts/create-vm.sh --list-memory-profiles
-./deploy/scripts/create-vm.sh --list-platforms # 查看 102 套普通新建 X79 整机
-./deploy/scripts/create-vm.sh --include-fallback --list-platforms # 查看完整 366 套生命周期目录
+./deploy/scripts/create-home-vm.sh 101 --spec 4c8t # 默认 8G 的家用池傻瓜入口
+./deploy/scripts/create-home-vm.sh 102 --spec 6c12t --memory-size 12G
+./deploy/scripts/create-vm.sh --list-platforms # 查看 260 套普通新建 X79 整机
+./deploy/scripts/create-vm.sh --include-fallback --list-platforms # 查看完整 524 套生命周期目录
 ./deploy/scripts/create-vm.sh --list-ssd-profiles
 ./deploy/scripts/create-vm.sh --list-gpu-profiles
 ./deploy/scripts/create-vm.sh --list-monitor-profiles
@@ -102,14 +104,15 @@ G-11 已开放完整的 `--vlan-id VID` 生命周期：root-owned helper 逐 VM 
 均会幂等回收。未携带 VLAN 参数时使用默认原生 LAN，不会继承 `vm.conf` 中的 VID，
 VLAN 失败也不会静默回退。
 
-普通新建池包含 Core i7-4930K 6C/12T 和 Core i7-4820K/Core i7-3820 4C/8T，
-配 ASUS P9X79、Gigabyte GA-X79-UP4、ASRock X79 Extreme4 三品牌 X79 主板，
-共 102 条审核整机。统一创建教程见
-[`docs/G11-6C12T-QUICKSTART.md`](docs/G11-6C12T-QUICKSTART.md)。内存覆盖
+普通新建池包含 Core i7-3930K/i7-4930K/i7-4960X 6C/12T 和
+Core i7-3820/i7-4820K 4C/8T，配 ASUS P9X79、Gigabyte GA-X79-UP4、
+ASRock X79 Extreme4 三品牌 X79 主板，共 260 条审核整机。一键创建教程见
+[`docs/G11-HOME-CPU-POOL-QUICKSTART.md`](docs/G11-HOME-CPU-POOL-QUICKSTART.md)。内存覆盖
 Kingston、Samsung、Elpida、Micron、SK hynix 的 DDR3-1600/1866；只在
 CPU、主板和模组共同上限内组合。4/8 GiB 为两根双通道，12 GiB 为 3×4 GiB
-三通道，16 GiB 为 4×4 GiB 四通道。无参数创建优先 i7-4930K + DDR3-1866。
-完整目录共 11 CPU、16 主板、45 内存、366 整机；旧 H81/6G 等 261 条 archived
+三通道，16 GiB 为 4×4 GiB 四通道；12/16G 只允许至少 4 个 DIMM 插槽的主板。
+默认容量为 8G，无参数创建优先 i7-4960X + DDR3-1866。
+完整目录共 13 CPU、16 主板、45 内存、524 整机；旧 H81/6G 等 261 条 archived
 只供已有 VM，另 3 条 legacy compatibility 必须显式授权。
 另有 10 款精确 `512110190592` 字节 SSD（3 款 Gen3 x4 NVMe 自动优先、7 款 SATA
 按平台回退）、
@@ -595,10 +598,9 @@ QEMU/SDL Present，不能把 manager 的 copy 周期动态降回 10 Hz。请勿�
   --gpu-profile gtx1050_2gb
 ```
 
-完整目录可查询 11 款 CPU、16 块主板和 45 套内存，组合总数 366；普通新建层
-投影三款 Core i7、三块 X79 和 102 条审核组合，其中 i7-4930K 有 54 条
-多主板/多内存品牌组合，不会做任意笛卡尔组合。
-默认按性能级别优先 DDR3-1866 的 i7-4930K。旧 H81、4+2 GiB Flex 与 6G 组合均为
+完整目录可查询 13 款 CPU、16 块主板和 45 套内存，组合总数 524；普通新建层
+投影五款 Core i7、三块 X79 和 260 条审核组合，不会做任意笛卡尔组合。
+默认容量 8G，并按性能级别优先 DDR3-1866 的 i7-4960X。旧 H81、4+2 GiB Flex 与 6G 组合均为
 archived-existing-only；3 条 legacy compatibility 也不会自动混入正常新建。
 组件 key、合法组合及
 `--cpu-profile`/`--board-profile`/`--memory-profile` 完整示例见
@@ -608,7 +610,8 @@ archived-existing-only；3 条 legacy compatibility 也不会自动混入正常�
 Samsung 840/850/860 PRO、Crucial MX100、Kingston KC400、Intel 545s、
 Western Digital PC SA530 七款 SATA 盘，以及 Samsung 970 PRO、WD Black、
 Samsung 960 PRO 三款 Gen3 x4 NVMe 中选择。自动顺序先尝试 NVMe；仅
-i7-4820K/i7-4930K + 审核被动转接路径满足 Gen3 合同，i7-3820 自动回退 SATA。
+i7-4820K/i7-4930K/i7-4960X + 审核被动转接路径满足 Gen3 合同；
+i7-3820/i7-3930K 自动回退 SATA。
 完整目录十款，且每款均精确为
 `512110190592` 字节；其他容量不能进入新建
 目录。新配置也会持久化并传递逻辑/物理扇区：MX100 为

@@ -40,10 +40,10 @@ for row in "${HARDWARE_COMBINATIONS[@]}"; do
         fail "$platform maps $BOARD_CHIPSET to $actual"
     if [[ "$BOARD_CHIPSET" == X79 ]]; then
         case "$CPU_PROFILE" in
-            i7-3820)
+            i7-3820|i7-3930k)
                 expected_host='SandyBridge-E|0x8086|0x3C00|0x07'
                 ;;
-            i7-4820k|i7-4930k)
+            i7-4820k|i7-4930k|i7-4960x)
                 expected_host='IvyBridge-E|0x8086|0x0E00|0x04'
                 ;;
             *)
@@ -60,8 +60,8 @@ for row in "${HARDWARE_COMBINATIONS[@]}"; do
     fi
     count=$((count + 1))
 done
-[[ "$count" == 366 ]] || fail "expected 366 platform rows, got $count"
-[[ "$host_count" == 102 ]] || fail "expected 102 X79 host-bridge rows, got $host_count"
+[[ "$count" == 524 ]] || fail "expected 524 platform rows, got $count"
+[[ "$host_count" == 260 ]] || fail "expected 260 X79 host-bridge rows, got $host_count"
 
 require_text 'DEFINE_PROP_STRING("x-g11-chipset"' "$lpc_source"
 for mapping in \
@@ -160,4 +160,4 @@ if [[ -x "$qemu" ]]; then
     verify_firmware_handoff IvyBridge-E 0e00
 fi
 
-echo 'PASS: 366 G-11 platforms map LPC identities; all 102 X79 rows map UEFI-handoff CPU DMI2 identities'
+echo 'PASS: 524 G-11 platforms map LPC identities; all 260 X79 rows map UEFI-handoff CPU DMI2 identities'

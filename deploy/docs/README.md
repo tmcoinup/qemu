@@ -27,7 +27,7 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 对比最新 V-11 的 VM 操作、已补齐功能和不可混用边界 | [G11-V11-OPERATION-PARITY.md](G11-V11-OPERATION-PARITY.md) |
 | 默认/指定 VM 路径、独立 bundle 和旧 G-11 目录迁移 | [STORAGE-PATHS-QUICKSTART.md](STORAGE-PATHS-QUICKSTART.md) |
 | 第一次操作 G-11：portable EXE、base 注入、任意 VM 克隆与验收 | [G11-QUICKSTART.md](G11-QUICKSTART.md) |
-| 在统一创建池选择家用 i7-4930K 6C/12T、三品牌主板、4–5 个内存品牌和五品牌 SSD | [G11-6C12T-QUICKSTART.md](G11-6C12T-QUICKSTART.md) |
+| 一键选择家用 4C/8T 或 6C/12T、默认 8G、三品牌主板和 4–5 个内存品牌 | [G11-HOME-CPU-POOL-QUICKSTART.md](G11-HOME-CPU-POOL-QUICKSTART.md) |
 | VMate 私有交付：Sysprep 独立 Windows 身份、跳过 OOBE、授权 EXE 首启一次和跨机导入 | [G11-SYSPREP-PRIVATE-BASE.md](G11-SYSPREP-PRIVATE-BASE.md) |
 | 普通 32/64 位程序统一板卡/显存身份、单 3D adapter、显示器持久化与一键回滚 | [G11-BOTTOM-GPU-IDENTITY.md](G11-BOTTOM-GPU-IDENTITY.md) |
 | vGPU 硬件池、整机搭配合法性与宿主 CPU realization | [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) |

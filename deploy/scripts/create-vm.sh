@@ -2,7 +2,8 @@
 # create-vm.sh — 一次性生成 G-11 的 $VM_ROOT/<N>/vm.conf。
 #
 #   用法:  ./deploy/scripts/create-vm.sh <vm_id> [--platform PLATFORM]
-#          ./deploy/scripts/create-vm.sh <vm_id> [--cpu-profile CPU] [--board-profile BOARD]
+#          ./deploy/scripts/create-vm.sh <vm_id> [--cpu-spec 4c8t|6c12t|--cpu-profile CPU]
+#                                  [--board-profile BOARD]
 #                                  [--memory-profile MEMORY|--memory-size 4G|8G|12G|16G]
 #                                  [--ssd-profile PROFILE]
 #                                  [--gpu-profile PROFILE|--gpu-vram 1024|2048]
@@ -62,6 +63,7 @@ VM_ID=""
 FORCE=0
 PLATFORM_REQUEST=""
 CPU_PROFILE_REQUEST=""
+CPU_SPEC_REQUEST=""
 BOARD_PROFILE_REQUEST=""
 MEMORY_PROFILE_REQUEST=""
 MEMORY_SIZE_MB_REQUEST=""
@@ -100,6 +102,18 @@ while (( $# > 0 )); do
         --cpu-profile)
             [[ $# -ge 2 ]] || { echo "--cpu-profile 缺少参数" >&2; exit 2; }
             CPU_PROFILE_REQUEST=$2
+            shift 2
+            ;;
+        --cpu-spec)
+            [[ $# -ge 2 ]] || { echo "--cpu-spec 缺少参数" >&2; exit 2; }
+            case "${2,,}" in
+                4c8t) CPU_SPEC_REQUEST=4c8t ;;
+                6c12t) CPU_SPEC_REQUEST=6c12t ;;
+                *)
+                    echo "--cpu-spec 只支持 4c8t 或 6c12t" >&2
+                    exit 2
+                    ;;
+            esac
             shift 2
             ;;
         --board-profile)
@@ -345,20 +359,25 @@ if [[ -n "$MEMORY_PROFILE_REQUEST" && -n "$MEMORY_SIZE_MB_REQUEST" ]]; then
     echo "--memory-profile 与 --memory-size 不能同时使用" >&2
     exit 2
 fi
+if [[ -n "$CPU_PROFILE_REQUEST" && -n "$CPU_SPEC_REQUEST" ]]; then
+    echo "--cpu-profile 与 --cpu-spec 不能同时使用" >&2
+    exit 2
+fi
 
 COMPONENT_SELECTOR_COUNT=0
 [[ -z "$CPU_PROFILE_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
+[[ -z "$CPU_SPEC_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
 [[ -z "$BOARD_PROFILE_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
 [[ -z "$MEMORY_PROFILE_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
 [[ -z "$MEMORY_SIZE_MB_REQUEST" ]] || COMPONENT_SELECTOR_COUNT=$((COMPONENT_SELECTOR_COUNT + 1))
 if [[ -n "$PLATFORM_REQUEST" && "$COMPONENT_SELECTOR_COUNT" != 0 ]]; then
-    echo "--platform 与 --cpu-profile/--board-profile/--memory-profile/--memory-size 不能混用" >&2
+    echo "--platform 与 --cpu-spec/--cpu-profile/--board-profile/--memory-profile/--memory-size 不能混用" >&2
     echo "整机组合只从审核白名单选择；请任选一种选择方式" >&2
     exit 2
 fi
 
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--force] [--platform PLATFORM|--cpu-profile CPU --board-profile BOARD (--memory-profile MEMORY|--memory-size 4G|8G|12G|16G)] [--allow-fallback-platform] [--ssd-profile PROFILE] [--gpu-profile PROFILE|--gpu-vram 1024|2048] [--monitor-profile PROFILE] [--keyboard-profile PROFILE] [--relative-mouse [--mouse-profile PROFILE]]" >&2
+    echo "usage: $0 <vm_id> [--force] [--platform PLATFORM|--cpu-spec 4c8t|6c12t|--cpu-profile CPU --board-profile BOARD (--memory-profile MEMORY|--memory-size 4G|8G|12G|16G)] [--allow-fallback-platform] [--ssd-profile PROFILE] [--gpu-profile PROFILE|--gpu-vram 1024|2048] [--monitor-profile PROFILE] [--keyboard-profile PROFILE] [--relative-mouse [--mouse-profile PROFILE]]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -573,8 +592,9 @@ if (( FORCE )) && [[ -f "$CONF" ]]; then
 fi
 
 # For an unqualified default creation, try reviewed new combinations in their
-# performance-first order (6C/12T i7-4930K, then the 4C/8T X79 CPUs)
-# against this host before materializing identity.  If all active CPUs fail,
+# performance-first order (three 6C/12T CPUs, then two 4C/8T X79 CPUs), with
+# 8 GiB as the ordinary memory default and native DDR3-1866 preferred, against
+# this host before materializing identity.  If all active CPUs fail,
 # creation fails instead of silently selecting an older, slower platform.  If
 # probing is unavailable (missing KVM/QEMU/timeout), keep a new X79 profile and
 # let the launcher fail closed.
@@ -667,9 +687,94 @@ select_default_platform_for_host() {
     return 1
 }
 
+# Select only the requested home-CPU topology while retaining the same
+# enforce=on host-capability fallback used by the unqualified default.  Board,
+# memory-model and memory-capacity selectors are applied before probing, so a
+# request can never escape the reviewed atomic platform whitelist.
+select_cpu_spec_platform_for_host() {
+    local qemu_bin=${QEMU_BIN:-"$here/../build/qemu-system-x86_64"}
+    local expected_cores expected_vcpus start_index index platform
+    local cpu_key cpu_model capability priority fallback_platform=
+    local unavailable_platform='' saw_unavailable=0
+    local -a candidates filtered priorities tier_candidates
+    local -A probed_class=()
+
+    case "$CPU_SPEC_REQUEST" in
+        4c8t) expected_cores=4; expected_vcpus=8 ;;
+        6c12t) expected_cores=6; expected_vcpus=12 ;;
+        *) return 2 ;;
+    esac
+
+    mapfile -t candidates < <(hardware_profile_component_candidates \
+        '' "$BOARD_PROFILE_REQUEST" "$MEMORY_PROFILE_REQUEST" \
+        "$MEMORY_SIZE_MB_REQUEST" 0)
+    filtered=()
+    for platform in "${candidates[@]}"; do
+        hardware_profile_load "$platform" || return 1
+        [[ "$CPU_CORES" == "$expected_cores" && \
+           "$CPU_VCPUS" == "$expected_vcpus" ]] || continue
+        filtered+=("$platform")
+    done
+    (( ${#filtered[@]} > 0 )) || return 1
+
+    mapfile -t priorities < <(
+        for platform in "${filtered[@]}"; do
+            hardware_profile_performance_priority "$platform"
+        done | LC_ALL=C sort -n -u
+    )
+    for priority in "${priorities[@]}"; do
+        tier_candidates=()
+        for platform in "${filtered[@]}"; do
+            [[ "$(hardware_profile_performance_priority "$platform")" == \
+                "$priority" ]] || continue
+            tier_candidates+=("$platform")
+        done
+        (( ${#tier_candidates[@]} > 0 )) || continue
+        start_index=$((RANDOM % ${#tier_candidates[@]}))
+        : "${fallback_platform:=${tier_candidates[$start_index]}}"
+        for ((index = 0; index < ${#tier_candidates[@]}; index += 1)); do
+            platform=${tier_candidates[$(((start_index + index) % ${#tier_candidates[@]}))]}
+            hardware_combination_load "$platform" || return 1
+            cpu_key=$CPU_PROFILE
+            if [[ ! -v 'probed_class[$cpu_key]' ]]; then
+                cpu_profile_load "$cpu_key" || return 1
+                cpu_model=$CPU_MODEL
+                if g11_cpu_capability_probe "$qemu_bin" "$cpu_model"; then
+                    probed_class[$cpu_key]=$G11_CPU_CAPABILITY_CLASS
+                else
+                    probed_class[$cpu_key]=$G11_CPU_CAPABILITY_CLASS
+                fi
+            fi
+            capability=${probed_class[$cpu_key]}
+            if [[ "$capability" == supported ]]; then
+                PLATFORM=$platform
+                HOST_PLATFORM_SELECTION_REASON=host-supported-performance-first
+                return 0
+            fi
+            if [[ "$capability" == unavailable ]]; then
+                saw_unavailable=1
+                : "${unavailable_platform:=$platform}"
+            fi
+        done
+    done
+
+    if (( saw_unavailable )); then
+        PLATFORM=${unavailable_platform:-$fallback_platform}
+        HOST_PLATFORM_SELECTION_REASON=probe-unavailable-new-fail-closed
+        return 0
+    fi
+    return 1
+}
+
 # ─── 平台选择 ────────────────────────────────────────────────────────────────
 if [[ -n "$PLATFORM_REQUEST" ]]; then
     PLATFORM=$PLATFORM_REQUEST
+elif [[ -n "$CPU_SPEC_REQUEST" ]]; then
+    if ! select_cpu_spec_platform_for_host; then
+        echo "普通新建池中没有可由本机 KVM enforce=on 实现的 $CPU_SPEC_REQUEST 平台" >&2
+        echo "请运行 ./deploy/scripts/check-hardware-pool.sh 查看逐 CPU 原因" >&2
+        exit 2
+    fi
 elif (( COMPONENT_SELECTOR_COUNT )); then
     mapfile -t PLATFORM_COMPONENT_CANDIDATES < <(hardware_profile_component_candidates \
         "$CPU_PROFILE_REQUEST" "$BOARD_PROFILE_REQUEST" \
@@ -686,6 +791,7 @@ elif (( COMPONENT_SELECTOR_COUNT )); then
     if (( ${#PLATFORMS[@]} == 0 )); then
         echo "没有通过审核的 CPU/主板/内存组合:" >&2
         echo "  CPU=${CPU_PROFILE_REQUEST:-任意}" >&2
+        echo "  CPU规格=${CPU_SPEC_REQUEST:-任意}" >&2
         echo "  主板=${BOARD_PROFILE_REQUEST:-任意}" >&2
         echo "  内存=${MEMORY_PROFILE_REQUEST:-任意}" >&2
         if [[ -n "$MEMORY_SIZE_MB_REQUEST" ]]; then

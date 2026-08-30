@@ -1011,11 +1011,11 @@ static const CPUCaches desktop_snb_e_10m_cache_info = {
 };
 
 /*
- * Desktop Ivy Bridge-E cache layout used by Core-i7-4930K.  Each of its six
- * cores has private 32 KiB data/instruction L1 and 256 KiB L2 caches; the die
- * exposes one package-shared 12 MiB, 16-way inclusive LLC.
+ * Desktop Sandy/Ivy Bridge-E cache layout used by Core-i7-3930K/4930K.  Each
+ * of its six cores has private 32 KiB data/instruction L1 and 256 KiB L2
+ * caches; the die exposes one package-shared 12 MiB, 16-way inclusive LLC.
  */
-static const CPUCaches desktop_ivb_e_12m_cache_info = {
+static const CPUCaches desktop_snb_ivb_e_12m_cache_info = {
     .l1d_cache = &(CPUCacheInfo) {
         .type = DATA_CACHE,
         .level = 1,
@@ -1058,6 +1058,64 @@ static const CPUCaches desktop_ivb_e_12m_cache_info = {
         .size = 12 * MiB,
         .line_size = 64,
         .associativity = 16,
+        .sets = 12288,
+        .partitions = 1,
+        .lines_per_tag = 1,
+        .self_init = true,
+        .inclusive = true,
+        .complex_indexing = true,
+        .share_level = CPU_TOPOLOGY_LEVEL_DIE,
+    },
+};
+
+/*
+ * Desktop Ivy Bridge-E cache layout used by Core-i7-4960X.  Its private
+ * caches match the other six-core LGA2011 parts, while the package-shared
+ * inclusive LLC exposes the retail SKU's complete 15 MiB, 20-way layout.
+ */
+static const CPUCaches desktop_ivb_e_15m_cache_info = {
+    .l1d_cache = &(CPUCacheInfo) {
+        .type = DATA_CACHE,
+        .level = 1,
+        .size = 32 * KiB,
+        .self_init = 1,
+        .line_size = 64,
+        .associativity = 8,
+        .sets = 64,
+        .partitions = 1,
+        .no_invd_sharing = true,
+        .share_level = CPU_TOPOLOGY_LEVEL_CORE,
+    },
+    .l1i_cache = &(CPUCacheInfo) {
+        .type = INSTRUCTION_CACHE,
+        .level = 1,
+        .size = 32 * KiB,
+        .self_init = 1,
+        .line_size = 64,
+        .associativity = 8,
+        .sets = 64,
+        .partitions = 1,
+        .no_invd_sharing = true,
+        .share_level = CPU_TOPOLOGY_LEVEL_CORE,
+    },
+    .l2_cache = &(CPUCacheInfo) {
+        .type = UNIFIED_CACHE,
+        .level = 2,
+        .size = 256 * KiB,
+        .self_init = 1,
+        .line_size = 64,
+        .associativity = 8,
+        .sets = 512,
+        .partitions = 1,
+        .no_invd_sharing = true,
+        .share_level = CPU_TOPOLOGY_LEVEL_CORE,
+    },
+    .l3_cache = &(CPUCacheInfo) {
+        .type = UNIFIED_CACHE,
+        .level = 3,
+        .size = 15 * MiB,
+        .line_size = 64,
+        .associativity = 20,
         .sets = 12288,
         .partitions = 1,
         .lines_per_tag = 1,
@@ -5016,6 +5074,47 @@ static const X86CPUDefinition builtin_x86_defs[] = {
     },
     {
         /*
+         * Desktop Sandy Bridge-E (LGA2011), family 6 model 45 stepping 7.
+         * The retail i7-3930K keeps the i7-3820 instruction contract while
+         * exposing six cores, twelve threads and its 12 MiB inclusive LLC.
+         */
+        .name = "Core-i7-3930K",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 45,
+        .stepping = 7,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_POPCNT |
+            CPUID_EXT_X2APIC | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
+            CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ |
+            CPUID_EXT_SSE3,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
+            CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_LAHF_LM,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
+        .features[FEAT_6_EAX] =
+            CPUID_6_EAX_ARAT,
+        .xlevel = 0x80000008,
+        .model_id = "Intel(R) Core(TM) i7-3930K CPU @ 3.20GHz",
+        .cache_info = &desktop_snb_ivb_e_12m_cache_info,
+        .versions = (X86CPUVersionDefinition[]) {
+            { .version = 1 },
+            { /* end of list */ }
+        }
+    },
+    {
+        /*
          * Desktop Ivy Bridge-E (LGA2011), family 6 model 62 stepping 4.
          * It adds the reviewed Ivy Bridge instruction set and retains the
          * retail i7-4820K 10 MiB, 20-way LLC identity.
@@ -5097,7 +5196,51 @@ static const X86CPUDefinition builtin_x86_defs[] = {
             CPUID_6_EAX_ARAT,
         .xlevel = 0x80000008,
         .model_id = "Intel(R) Core(TM) i7-4930K CPU @ 3.40GHz",
-        .cache_info = &desktop_ivb_e_12m_cache_info,
+        .cache_info = &desktop_snb_ivb_e_12m_cache_info,
+        .versions = (X86CPUVersionDefinition[]) {
+            { .version = 1 },
+            { /* end of list */ }
+        }
+    },
+    {
+        /*
+         * Desktop Ivy Bridge-E (LGA2011), family 6 model 62 stepping 4.
+         * The Extreme Edition i7-4960X shares the reviewed Ivy Bridge-E
+         * feature contract and exposes its complete 15 MiB, 20-way LLC.
+         */
+        .name = "Core-i7-4960X",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 62,
+        .stepping = 4,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_POPCNT |
+            CPUID_EXT_X2APIC | CPUID_EXT_SSE42 | CPUID_EXT_SSE41 |
+            CPUID_EXT_CX16 | CPUID_EXT_SSSE3 | CPUID_EXT_PCLMULQDQ |
+            CPUID_EXT_SSE3 | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_ERMS,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
+            CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_LAHF_LM,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
+        .features[FEAT_6_EAX] =
+            CPUID_6_EAX_ARAT,
+        .xlevel = 0x80000008,
+        .model_id = "Intel(R) Core(TM) i7-4960X CPU @ 3.60GHz",
+        .cache_info = &desktop_ivb_e_15m_cache_info,
         .versions = (X86CPUVersionDefinition[]) {
             { .version = 1 },
             { /* end of list */ }

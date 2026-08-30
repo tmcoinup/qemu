@@ -7,12 +7,12 @@ V-11 的整套平台、驱动或运行参数直接复制到 G-11。
 
 | 类别 | 当前结果 |
 |---|---|
-| 普通新建 CPU | 3 款：Core i7-4930K 6C/12T、Core i7-4820K/Core i7-3820 4C/8T；均为家用无核显 |
+| 普通新建 CPU | 5 款：Core i7-3930K/i7-4930K/i7-4960X 6C/12T、Core i7-3820/i7-4820K 4C/8T；均为家用无核显 |
 | 正常新建主板 | 3 款/3 品牌：ASUS P9X79、Gigabyte GA-X79-UP4、ASRock X79 Extreme4 |
 | 正常内存档 | 4G、8G、12G、16G；DDR3-1600/1866，Samsung/Micron/Kingston/SK hynix/Elpida |
-| 通道 | 4G/8G 为两根双通道；12G 为 3×4G 三通道；16G 为 4×4G 四通道 |
-| 可新建整机组合 | 普通 `new` 102 条，其中 i7-4930K 54 条；全部是 X79/LGA2011 原子白名单 |
-| 完整目录 | 11 CPU、16 主板、45 内存、366 整机；其中 261 archived、3 legacy compatibility |
+| 通道 | 4G/8G 为两根双通道；12G 为 3×4G 三通道；16G 为 4×4G 四通道；12/16G 要求主板至少 4 槽 |
+| 可新建整机组合 | 普通 `new` 260 条；全部是 X79/LGA2011 原子白名单 |
+| 完整目录 | 13 CPU、16 主板、45 内存、524 整机；其中 261 archived、3 legacy compatibility |
 | SSD | 10 款精确 512110190592 字节；自动优先 3 款 Gen3 x4 NVMe，再按平台回退 7 款 SATA |
 | 序列 | 主板厂牌格式、DIMM JEDEC 4-byte、SSD 型号严格格式；创建并持久化、全池查重 |
 
@@ -33,12 +33,12 @@ V-11 的整套平台、驱动或运行参数直接复制到 G-11。
 当前摘要必须是：
 
 ```text
-cpu=11 board=16 memory=45 combination=366
-new_default=102 explicit_new=0 archived=261 legacy=3
+cpu=13 board=16 memory=45 combination=524
+new_default=260 explicit_new=0 archived=261 legacy=3
 brands board=3 memory=5 ssd=5
 ```
 
-## 三款普通新建 CPU
+## 五款普通新建 CPU
 
 用户条件的交集是：
 
@@ -54,19 +54,23 @@ brands board=3 memory=5 ssd=5
 |---|---|---:|---:|---:|---:|
 | `i7-4820k` | Core i7-4820K | 4C/8T | 3.7/3.9 GHz | DDR3-1866、4 通道 | Gen3 |
 | `i7-3820` | Core i7-3820 | 4C/8T | 3.6/3.8 GHz | DDR3-1600、4 通道 | Gen2 |
+| `i7-3930k` | Core i7-3930K | 6C/12T | 3.2/3.8 GHz | DDR3-1600、4 通道 | Gen2 |
 | `i7-4930k` | Core i7-4930K | 6C/12T | 3.4/3.9 GHz | DDR3-1866、4 通道 | Gen3 |
+| `i7-4960x` | Core i7-4960X | 6C/12T | 3.6/4.0 GHz | DDR3-1866、4 通道 | Gen3 |
 
-新增项使用家用 Core i7 而不是 Xeon，也不引入带核显平台。i7-4930K 直接属于
-普通 `new` 池，默认性能优先级先选 i7-4930K + DDR3-1866，再按宿主能力回落到
-i7-4820K/i7-3820。宿主不支持某个模型时仍由 realization 门禁跳过，不会只看名字
-强启。所有创建统一使用 `create-vm.sh`，详细教程见
-[G11-6C12T-QUICKSTART.md](G11-6C12T-QUICKSTART.md)。
+这些型号都使用家用 Core i7 而不是 Xeon，也不引入带核显平台。普通 `new` 池默认
+8G，整体性能优先级先选 i7-4960X + DDR3-1866；使用 `--cpu-spec` 时只在所选
+4C/8T 或 6C/12T 组内按宿主能力回落。宿主不支持某个模型时由 realization 门禁
+跳过，不会只看名字强启。日常封装为 `create-home-vm.sh`，详细教程见
+[G11-HOME-CPU-POOL-QUICKSTART.md](G11-HOME-CPU-POOL-QUICKSTART.md)。
 
 官方来源：
 
 - [Intel Core i7-3820 规格](https://www.intel.com/content/www/us/en/products/sku/63698/intel-core-i73820-processor-10m-cache-up-to-3-80-ghz/specifications.html)
+- [Intel Core i7-3930K 规格](https://www.intel.com/content/www/us/en/products/sku/63697/intel-core-i73930k-processor-12m-cache-up-to-3-80-ghz/specifications.html)
 - [Intel Core i7-4820K 规格](https://www.intel.com/content/www/us/en/products/sku/77781/intel-core-i74820k-processor-10m-cache-up-to-3-90-ghz/specifications.html)
 - [Intel Core i7-4930K 规格](https://www.intel.com/content/www/us/en/products/sku/77780/intel-core-i74930k-processor-12m-cache-up-to-3-90-ghz/specifications.html)
+- [Intel Core i7-4960X 规格](https://www.intel.com/content/www/us/en/products/sku/77779/intel-core-i74960x-processor-extreme-edition-15m-cache-up-to-4-00-ghz/specifications.html)
 - [Intel 关于无核显处理器的说明](https://www.intel.com/content/www/us/en/support/articles/000006778/processors.html)
 
 ## 三块真实 X79 主板
@@ -106,18 +110,19 @@ ICH9-AHCI、qemu-xhci 和 QEMU nvme controller 仍保留各自真实实现边界
 
 “几根就是几通道”在这里落实为 2/2、3/3、4/4 对称布局。12G 不是 8+4 Flex，16G
 也不是单条或两条 8G。每槽容量、Rank、device width、JEP106、料号与独立序列同时
-进入 SMBIOS Type 17 和 SPD，任何字段不一致都会失败关闭。
+进入 SMBIOS Type 17 和 SPD，任何字段不一致都会失败关闭。8G 是创建默认值；
+12G/16G 还会强制检查主板至少有 4 个 DIMM 插槽。
 
 DDR3-1866 使用 Samsung CMA、Intel Ivy Bridge-E 非 ECC 验证表中的 Elpida
 `EBJ40UG8BFW0-JS-F` 与 Micron `MT8KTF51264AZ-1G9`；只和 Ivy Bridge-E 及支持
 1866 的 P9X79/GA-X79-UP4 组合。ASRock X79 Extreme4 按官方非超频上限使用
 DDR3-1600。
 
-i7-4930K 的品牌覆盖不是固定整机：P9X79/GA-X79-UP4 的 4G 有 Samsung、Micron、
-Kingston、SK hynix 四品牌，8/12/16G 再加入 Elpida，共五品牌；X79 Extreme4 的
-每个容量都有 Samsung、Micron、Kingston、SK hynix 四品牌。最低 4G 的 1866 选项
-为 `2 × M378B5773DH0-CMA`，8/12/16G 的 Samsung 1866 使用
-`M378B5173QH0-CMA`。不会为了凑品牌数违反板、CPU 或模组上限。
+每个 CPU/主板/容量至少有 Samsung、Micron、Kingston、SK hynix 四品牌；
+Ivy Bridge-E 搭配 P9X79/GA-X79-UP4 的 8/12/16G 再加入 Elpida，共五品牌。
+最低 4G 的 1866 选项为 `2 × M378B5773DH0-CMA`，8/12/16G 的 Samsung 1866
+使用 `M378B5173QH0-CMA`。Sandy Bridge-E 或 ASRock 会诚实保持 1600，不会为了
+凑品牌数违反 CPU、主板或模组上限。
 
 来源：
 
@@ -138,8 +143,9 @@ SPD 的 1600/1866 是来宾硬件身份，不是 QEMU 带宽限速。启动使�
 3. Samsung 960 PRO 512GB；
 4. 七款审核 SATA 512GB。
 
-三款 NVMe 都声明 Gen3 x4，`i7-4820K/i7-4930K + X79 被动转接器` 能满足合同。
-i7-3820 的官方 PCIe 是 Gen2，因此源头自动选择会回退 SATA；手动指定不合理的
+三款 NVMe 都声明 Gen3 x4，`i7-4820K/i7-4930K/i7-4960X + X79 被动转接器`
+能满足合同。i7-3820/i7-3930K 的官方 PCIe 是 Gen2，因此源头自动选择会回退
+SATA；手动指定不合理的
 Gen3 profile 会被平台/SSD 联合门禁拒绝。十款盘的虚拟容量均精确为
 `512110190592` 字节，不能只改型号字符串跨容量重绑。
 
@@ -166,23 +172,24 @@ system/baseboard/chassis、DIMM、SSD、显示器、UUID 和 MAC 跨 VM 查重�
 
 ## 新建示例
 
-性能优先自动选择：
+傻瓜入口按规格选择，内存默认 8G：
 
 ```bash
-./deploy/scripts/create-vm.sh 101
+./deploy/scripts/create-home-vm.sh 101 --spec 4c8t
+./deploy/scripts/create-home-vm.sh 102 --spec 6c12t
 ```
 
 固定一条真实 12G/三通道组合，并让存储自动优先 Gen3 NVMe：
 
 ```bash
-./deploy/scripts/create-vm.sh 102 \
-  --platform i7-4820k-x79-up4-elpida-12g
+./deploy/scripts/create-home-vm.sh 103 --spec 6c12t --memory-size 12G \
+  --board-profile gigabyte-x79-up4
 ```
 
 固定 16G/四通道和审核 NVMe：
 
 ```bash
-./deploy/scripts/create-vm.sh 103 \
+./deploy/scripts/create-vm.sh 104 \
   --platform i7-4820k-p9x79-micron-16g \
   --ssd-profile samsung-970-pro-512gb
 ```
@@ -216,6 +223,8 @@ system/baseboard/chassis、DIMM、SSD、显示器、UUID 和 MAC 跨 VM 查重�
 ```bash
 bash ./deploy/tests/vgpu/test_hardware_legality.sh
 bash ./deploy/tests/vgpu/test_hardware_pool_audit.sh
+bash ./deploy/tests/vgpu/test_create_6c12t_pool.sh
+bash ./deploy/tests/vgpu/test_create_vm_platform_fallback.sh
 bash ./deploy/tests/vgpu/test_hardware_serials.sh
 bash ./deploy/tests/vgpu/test_ssd_catalog.sh
 bash ./deploy/tests/vgpu/test_cpu_isolation.sh

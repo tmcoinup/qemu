@@ -281,6 +281,12 @@ assert_platform() {
     local actual_board_revision
 
     case "$requested" in
+        i7-4960x-x79-up4-elpida-12g)
+            expected_cpu_profile=i7-4960x
+            expected_board_profile=gigabyte-x79-up4
+            expected_memory_profile=elpida-ebj40ug8bfw0-3x4
+            expected_lifecycle=new
+            ;;
         i7-4930k-p9x79-samsung-4g)
             expected_cpu_profile=i7-4930k
             expected_board_profile=asus-p9x79
@@ -333,6 +339,12 @@ assert_platform() {
             expected_cpu_profile=i7-3820
             expected_board_profile=asrock-x79-extreme4
             expected_memory_profile=samsung-m378b5273dh0-4x4
+            expected_lifecycle=new
+            ;;
+        i7-3930k-p9x79-samsung-8g)
+            expected_cpu_profile=i7-3930k
+            expected_board_profile=asus-p9x79
+            expected_memory_profile=samsung-m378b5273dh0-2x4
             expected_lifecycle=new
             ;;
         g3220-h81m-k-4g)
@@ -496,6 +508,13 @@ assert_platform() {
             expected_family=198 expected_socket=0x26
             expected_l2_assoc=7 expected_l3_assoc=14
             ;;
+        i7-3930k)
+            expected_cpu=Core-i7-3930K expected_tsc=3200000000
+            expected_cores=6 expected_threads=2 expected_vcpus=12
+            expected_l1=384 expected_l2=1536 expected_l3=12288
+            expected_family=198 expected_socket=0x26
+            expected_l2_assoc=7 expected_l3_assoc=8
+            ;;
         i7-4820k)
             expected_cpu=Core-i7-4820K expected_tsc=3700000000
             expected_cores=4 expected_threads=2 expected_vcpus=8
@@ -509,6 +528,13 @@ assert_platform() {
             expected_l1=384 expected_l2=1536 expected_l3=12288
             expected_family=198 expected_socket=0x26
             expected_l2_assoc=7 expected_l3_assoc=8
+            ;;
+        i7-4960x)
+            expected_cpu=Core-i7-4960X expected_tsc=3600000000
+            expected_cores=6 expected_threads=2 expected_vcpus=12
+            expected_l1=384 expected_l2=1536 expected_l3=15360
+            expected_family=198 expected_socket=0x26
+            expected_l2_assoc=7 expected_l3_assoc=14
             ;;
         g3220)
             expected_cpu=Intel-Pentium-G3220 expected_tsc=3000000000
@@ -568,7 +594,8 @@ assert_platform() {
             ;;
         *) fail "test bug: unknown CPU profile $expected_cpu_profile" ;;
     esac
-    if [[ "$expected_cpu_profile" == i7-3820 ]]; then
+    if [[ "$expected_cpu_profile" == i7-3820 ||
+          "$expected_cpu_profile" == i7-3930k ]]; then
         expected_main_type=171
     else
         expected_main_type=177
@@ -806,6 +833,14 @@ assert_platform() {
             expected_mem_total=12288 expected_mem_voltage=1500
             expected_channel_mode=triple-channel
             ;;
+        samsung-m378b5273dh0-2x4)
+            expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1600
+            expected_mem_model_list='M378B5273DH0-CK0,M378B5273DH0-CK0'
+            expected_mem_module_list=4096,4096
+            expected_mem_device_width_list=8,8
+            expected_mem_total=8192 expected_mem_voltage=1500
+            expected_channel_mode=dual-channel
+            ;;
         samsung-m378b5273dh0-4x4)
             expected_mem_family=DDR3 expected_mem_type=0x18 expected_mem_speed=1600
             expected_mem_model_list='M378B5273DH0-CK0,M378B5273DH0-CK0,M378B5273DH0-CK0,M378B5273DH0-CK0'
@@ -964,7 +999,7 @@ assert_platform() {
             expected_module_jep106_list=$(printf '80CE,%.0s' $(seq 2 "$expected_mem_slots"))80CE
             expected_dram_jep106_list=$(printf '80CE,%.0s' $(seq 2 "$expected_mem_slots"))80CE
             ;;
-        samsung-m378b5273dh0-3x4|samsung-m378b5273dh0-4x4)
+        samsung-m378b5273dh0-2x4|samsung-m378b5273dh0-3x4|samsung-m378b5273dh0-4x4)
             expected_mem_rank_list=$(printf '2,%.0s' $(seq 2 "$expected_mem_slots"))2
             expected_module_jep106_list=$(printf '80CE,%.0s' $(seq 2 "$expected_mem_slots"))80CE
             expected_dram_jep106_list=$(printf '80CE,%.0s' $(seq 2 "$expected_mem_slots"))80CE
@@ -1356,15 +1391,15 @@ HARDWARE_PROFILES="$REPO_ROOT/deploy/lib/hardware-profiles.sh"
 [[ -r "$HARDWARE_PROFILES" ]] || fail "hardware profile library is missing"
 # shellcheck source=/dev/null
 source "$HARDWARE_PROFILES"
-assert_eq 11 "${#CPU_PROFILES[@]}" 'CPU component catalog count'
+assert_eq 13 "${#CPU_PROFILES[@]}" 'CPU component catalog count'
 assert_eq 16 "${#BOARD_PROFILES[@]}" 'board component catalog count'
 assert_eq 5 "${#CHIPSET_PRESENTATION_PROFILES[@]}" \
     'chipset presentation catalog count'
-assert_eq 3 "${#CPU_HOST_BRIDGE_PRESENTATION_PROFILES[@]}" \
+assert_eq 5 "${#CPU_HOST_BRIDGE_PRESENTATION_PROFILES[@]}" \
     'active X79 CPU host bridge presentation catalog count'
 assert_eq 45 "${#MEMORY_PROFILES[@]}" 'memory component catalog count'
-assert_eq 366 "${#HARDWARE_COMBINATIONS[@]}" 'reviewed combination count'
-assert_eq 102 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new combination count'
+assert_eq 524 "${#HARDWARE_COMBINATIONS[@]}" 'reviewed combination count'
+assert_eq 260 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new combination count'
 assert_eq 0 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" \
     'explicit-new combination count'
 assert_eq 261 "${#HARDWARE_ARCHIVED_PROFILE_KEYS[@]}" \
@@ -1373,7 +1408,7 @@ assert_eq 3 "${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}" \
     'legacy combination count'
 
 assert_eq \
-    'g3220 i3-4130 i5-4460 i5-4570 i5-4590 i7-4790 i5-6500 i3-8100 i7-3820 i7-4820k i7-4930k' \
+    'g3220 i3-4130 i5-4460 i5-4570 i5-4590 i7-4790 i5-6500 i3-8100 i7-3820 i7-3930k i7-4820k i7-4930k i7-4960x' \
     "$(cpu_profile_keys | tr '\n' ' ' | sed 's/ $//')" \
     'exact CPU component keys'
 assert_eq \
@@ -1404,6 +1439,12 @@ assert_eq 'IvyBridge-E|0x8086|0x0E00|0x04' \
 assert_eq 'SandyBridge-E|0x8086|0x3C00|0x07' \
     "$(hardware_cpu_host_bridge_identity_for_platform i7-3820-p9x79-kingston-4g)" \
     'i7-3820 X79 presents the reviewed Sandy Bridge-E DMI2 identity'
+assert_eq 'SandyBridge-E|0x8086|0x3C00|0x07' \
+    "$(hardware_cpu_host_bridge_identity_for_platform i7-3930k-p9x79-samsung-8g)" \
+    'i7-3930K X79 presents the reviewed Sandy Bridge-E DMI2 identity'
+assert_eq 'IvyBridge-E|0x8086|0x0E00|0x04' \
+    "$(hardware_cpu_host_bridge_identity_for_platform i7-4960x-x79-up4-elpida-12g)" \
+    'i7-4960X X79 presents the reviewed Ivy Bridge-E DMI2 identity'
 if hardware_cpu_host_bridge_identity_for_platform i3-4130-h81m-s1-6g \
         >/dev/null 2>&1; then
     fail 'archived H81 platform unexpectedly received an X79 CPU host bridge identity'
@@ -1433,7 +1474,7 @@ for memory_key in $(memory_profile_keys); do
         || fail "$memory_key has invalid DRAM JEP106 codes: $MEM_DRAM_MFR_JEP106_LIST"
 done
 
-# The active pool contains two 4C/8T CPUs plus one normal-pool 6C/12T CPU.
+# The active pool contains two 4C/8T CPUs plus three 6C/12T CPUs.
 active_cpu_keys=()
 legacy_only_cpu_keys=()
 for cpu_key in $(cpu_profile_keys); do
@@ -1451,8 +1492,8 @@ for cpu_key in $(cpu_profile_keys); do
     (( active_count == 0 )) || active_cpu_keys+=("$cpu_key")
     (( active_count != 0 || legacy_count == 0 )) || legacy_only_cpu_keys+=("$cpu_key")
 done
-assert_eq 'i7-3820 i7-4820k i7-4930k' \
-    "${active_cpu_keys[*]}" 'three active CPU profiles'
+assert_eq 'i7-3820 i7-3930k i7-4820k i7-4930k i7-4960x' \
+    "${active_cpu_keys[*]}" 'five active CPU profiles'
 assert_eq 'i5-4590 i5-6500 i3-8100' "${legacy_only_cpu_keys[*]}" \
     'three legacy-only CPU profiles'
 
@@ -1561,13 +1602,13 @@ cpu_catalog="$TMP_DIR/cpu-catalog.out"
 "$CREATE_VM" --list-cpu-profiles >"$cpu_catalog"
 fallback_cpu_catalog="$TMP_DIR/cpu-catalog-fallback.out"
 "$CREATE_VM" --include-fallback --list-cpu-profiles >"$fallback_cpu_catalog"
-assert_eq 102 "$(( $(wc -l <"$platform_catalog") - 1 ))" \
+assert_eq 260 "$(( $(wc -l <"$platform_catalog") - 1 ))" \
     'default visible platform count'
-assert_eq 366 "$(( $(wc -l <"$fallback_platform_catalog") - 1 ))" \
+assert_eq 524 "$(( $(wc -l <"$fallback_platform_catalog") - 1 ))" \
     'fallback-visible platform count'
-assert_eq 3 "$(( $(wc -l <"$cpu_catalog") - 1 ))" \
+assert_eq 5 "$(( $(wc -l <"$cpu_catalog") - 1 ))" \
     'default visible CPU count'
-assert_eq 11 "$(( $(wc -l <"$fallback_cpu_catalog") - 1 ))" \
+assert_eq 13 "$(( $(wc -l <"$fallback_cpu_catalog") - 1 ))" \
     'fallback-visible CPU count'
 require_text $'i7-4820k\tCore-i7-4820K\t4C/8T\t3700/3900\t10240' \
     "$cpu_catalog" 'i7-4820K 4C/8T and 10 MiB LLC catalog row'
@@ -1575,6 +1616,10 @@ require_text $'i7-3820\tCore-i7-3820\t4C/8T\t3600/3800\t10240' \
     "$cpu_catalog" 'i7-3820 4C/8T and 10 MiB LLC catalog row'
 require_text $'i7-4930k\tCore-i7-4930K\t6C/12T\t3400/3900\t12288' \
     "$cpu_catalog" 'i7-4930K 6C/12T and 12 MiB LLC catalog row'
+require_text $'i7-3930k\tCore-i7-3930K\t6C/12T\t3200/3800\t12288' \
+    "$cpu_catalog" 'i7-3930K 6C/12T and 12 MiB LLC catalog row'
+require_text $'i7-4960x\tCore-i7-4960X\t6C/12T\t3600/4000\t15360' \
+    "$cpu_catalog" 'i7-4960X 6C/12T and 15 MiB LLC catalog row'
 require_text $'i7-4820k-p9x79-micron-16g\tCore-i7-4820K 4C/8T\tASUSTeK COMPUTER INC. P9X79\tX79' \
     "$platform_catalog" 'ASUS X79 high-frequency quad-channel row'
 require_text $'i7-4820k-x79-up4-elpida-12g\tCore-i7-4820K 4C/8T\tGigabyte GA-X79-UP4\tX79' \
@@ -1587,6 +1632,10 @@ require_text $'i7-4930k-x79-up4-elpida-12g\tCore-i7-4930K 6C/12T\tGigabyte GA-X7
     "$platform_catalog" 'normal-pool i7-4930K/Gigabyte/Elpida row'
 require_text $'i7-4930k-x79-extreme4-hynix-16g\tCore-i7-4930K 6C/12T\tASRock X79 Extreme4\tX79' \
     "$platform_catalog" 'normal-pool i7-4930K/ASRock/SK hynix row'
+require_text $'i7-3930k-p9x79-samsung-8g\tCore-i7-3930K 6C/12T\tASUSTeK COMPUTER INC. P9X79\tX79' \
+    "$platform_catalog" 'normal-pool i7-3930K/ASUS/Samsung row'
+require_text $'i7-4960x-x79-up4-elpida-12g\tCore-i7-4960X 6C/12T\tGigabyte GA-X79-UP4\tX79' \
+    "$platform_catalog" 'normal-pool i7-4960X/Gigabyte/Elpida row'
 reject_text $'i5-6500\tCore-i5-6500' "$platform_catalog" \
     'default platform catalog legacy B150 row'
 reject_text 'h81' "$platform_catalog" 'default platform catalog archived H81 row'
@@ -1644,10 +1693,12 @@ assert_eq enforced "$CPU_REALIZATION_POLICY" \
     'implicit creation enforced CPU realization'
 assert_eq 3 "$G11_HARDWARE_CONTRACT_VERSION" \
     'implicit creation hardware contract'
-assert_eq i7-4930k "$CPU_PROFILE" \
+assert_eq i7-4960x "$CPU_PROFILE" \
     'implicit creation performance-first CPU'
 assert_eq 1866 "$MEM_SPEED" \
     'implicit creation performance-first memory speed'
+assert_eq 8192 "$MEM_TOTAL_MB" \
+    'implicit creation default 8G memory capacity'
 assert_eq X79 "$BOARD_CHIPSET" 'implicit creation X79 chipset'
 
 # Component selectors resolve only to a reviewed combination.  A valid exact
@@ -1708,6 +1759,7 @@ assert_eq nvidia-256 "$VGPU_MDEV_PROFILE" '1GB GPU resource mapping'
 declare -A PLATFORM_IDS=()
 next_id=780001
 for platform in \
+        i7-4960x-x79-up4-elpida-12g \
         i7-4930k-p9x79-samsung-4g \
         i7-4930k-x79-up4-elpida-12g \
         i7-4930k-x79-extreme4-hynix-16g \
@@ -1717,12 +1769,14 @@ for platform in \
         i7-3820-p9x79-kingston-4g \
         i7-3820-x79-up4-samsung-12g \
         i7-3820-x79-extreme4-samsung-16g \
+        i7-3930k-p9x79-samsung-8g \
         i5-4590 i5-6500 i3-8100; do
     id=$next_id
     next_id=$((next_id + 1))
     output="$TMP_DIR/create-$id.out"
     platform_ssd=samsung-860-pro-512gb
     if [[ "$platform" == i7-4820k-* || "$platform" == i7-4930k-* ||
+          "$platform" == i7-4960x-* ||
           "$platform" == i5-6500 || "$platform" == i3-8100 ]]; then
         platform_ssd=samsung-970-pro-512gb
     fi

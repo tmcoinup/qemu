@@ -71,10 +71,11 @@ G-11 的 host/guest、驱动、推流和零拷贝支持边界统一记录在
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)；其中明确区分 upstream QEMU
 源码能力和本分支已经验收的产品能力。
 历史分支对比材料仅供考古，不属于当前操作员工作流。
-组件化硬件普通新建池包含 Core i7-4930K 6C/12T、Core i7-4820K/Core i7-3820
-4C/8T，以及 ASUS、Gigabyte、ASRock 三品牌 X79 主板，共 102 套原子整机。
-4930K 每个主板/容量都有 4–5 个大牌内存选择。完整目录为 11 CPU、16 主板、45 内存、
-366 整机：旧 H81/6G 等 261 条统一 archived，另有 3 条 legacy compatibility。
+组件化硬件普通新建池包含 Core i7-3930K/i7-4930K/i7-4960X 6C/12T、
+Core i7-3820/i7-4820K 4C/8T，以及 ASUS、Gigabyte、ASRock 三品牌 X79 主板，
+共 260 套原子整机。每个 CPU/主板/容量都有 4–5 个大牌内存选择。完整目录为
+13 CPU、16 主板、45 内存、524 整机：旧 H81/6G 等 261 条统一 archived，另有
+3 条 legacy compatibility。
 新建内存只用 4/8/12/16 GiB，其中 4/8 双通道、12 三通道、
 16 四通道；Kingston、Samsung、Elpida、Micron、SK hynix 按真实 CPU/板/模组上限运行
 DDR3-1600/1866。
@@ -159,9 +160,10 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/sync-monitor-profile.sh <vm_id> --force` | `vmctl monitor` 的底层入口；普通启动和克隆已自动调用，强制修复时核对生产 538.33/INF 收据并重写 FHD/1K EDID 与 8 项 R535 page-safe `NV_Modes`；guest 内零常驻 |
 | `sudo ./deploy/host/recover-vgpu-gpu.sh --check --resume`（确认后去掉 `--check`） | 所有 VM/mdev 已停后的 host GPU 一键恢复；共享锁与 fd 门禁后仅尝试 NVIDIA reset、干净模块重载和精确 FLR，绝不 bus reset、强卸模块或自动重启宿主 |
 | `./deploy/scripts/check-hardware-pool.sh` | 无 sudo、无写入地验证硬件目录及本机 KVM CPU realization；区分新 VM 与旧 VM 兼容池 |
-| `./deploy/scripts/create-vm.sh <vm_id> --cpu-profile i7-4930k --board-profile BOARD --memory-profile MEMORY --ssd-profile SSD` | 统一创建 6C/12T，多品牌复制粘贴教程见 [`docs/G11-6C12T-QUICKSTART.md`](docs/G11-6C12T-QUICKSTART.md) |
-| `./deploy/scripts/create-vm.sh --list-cpu-profiles`（另有 `--list-board-profiles`、`--list-memory-profiles`） | 默认显示 3 款消费级 X79 Core i7、3 块三品牌 X79、4/8/12/16G DDR3；前置 `--include-fallback` 才读取完整 11/16/45 目录，archived 仍不可新建 |
-| `./deploy/scripts/create-vm.sh --list-platforms` | 默认显示 102 套普通新建审核白名单；前置 `--include-fallback` 才显示完整 366 套生命周期目录 |
+| `./deploy/scripts/create-home-vm.sh <vm_id> --spec 4c8t\|6c12t [--memory-size 4G\|8G\|12G\|16G]` | 家用池傻瓜封装；默认 8G、同规格内按宿主兼容性选择，教程见 [`docs/G11-HOME-CPU-POOL-QUICKSTART.md`](docs/G11-HOME-CPU-POOL-QUICKSTART.md) |
+| `./deploy/scripts/create-vm.sh <vm_id> --cpu-profile i7-4930k --board-profile BOARD --memory-profile MEMORY --ssd-profile SSD` | 底层精确组件入口；完整 4C/8T、6C/12T 多品牌矩阵仍只从审核白名单选择 |
+| `./deploy/scripts/create-vm.sh --list-cpu-profiles`（另有 `--list-board-profiles`、`--list-memory-profiles`） | 默认显示 5 款消费级 X79 Core i7、3 块三品牌 X79、4/8/12/16G DDR3；前置 `--include-fallback` 才读取完整 13/16/45 目录，archived 仍不可新建 |
+| `./deploy/scripts/create-vm.sh --list-platforms` | 默认显示 260 套普通新建审核白名单；前置 `--include-fallback` 才显示完整 524 套生命周期目录 |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso]` | 缺配置时自动生成身份，缺盘时固定建空盘；默认以安装期 UEFI helper 自动引导 xHCI USB Windows 光盘（约 64 KiB 合并读取）并挂最小应答 ISO；helper/两张 ISO 在普通启动全部消失；默认跳过 OOBE，以空密码 `Administrator` 首次登录，设置中国时区/NumLock，并预先关闭 Fast Startup |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso] --install-media ide` | 仅异常固件/ISO 的慢速 ATAPI 兼容回退；不挂 helper，也不会把选择写入 `vm.conf`。完整说明见 [`docs/G11-INSTALL-MEDIA.md`](docs/G11-INSTALL-MEDIA.md) |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso] --manual-oobe` | 同一安全建盘语义，但不挂应答 ISO，完整手动完成 OOBE |
@@ -395,7 +397,7 @@ host keyboard/mouse ─QEMU native input────────┘→ guest
 | 位置 | 改动 |
 |------|------|
 | `target/i386/cpu.h` | 新字段 `stealth_hypervisor` (X86CPU) |
-| `target/i386/cpu.c` | 新属性 `x-hv-stealth`；gate `FEAT_1_ECX` 的 HYPERVISOR bit；实现 `Core-i7-3820`、`Core-i7-4820K` 10 MiB L3 以及 `Core-i7-4930K` 6C/12T、12 MiB L3 模型；三款均进入普通 X79 新建池 |
+| `target/i386/cpu.c` | 新属性 `x-hv-stealth`；gate `FEAT_1_ECX` 的 HYPERVISOR bit；实现五款消费级 X79：`Core-i7-3820`/`Core-i7-4820K` 4C/8T、`Core-i7-3930K`/`Core-i7-4930K`/`Core-i7-4960X` 6C/12T，并按 10/12/15 MiB L3 投影 |
 | `hw/smbios/smbios.c` | type 17 新增 `memtype` / `typedetail` / `width` / `totalwidth` / `rank` / `rank-list` / `voltage` 及逐槽 part/serial 语义，把 DDR 类型、位宽、每槽 Rank、料号、序列、同步属性和电压显式填进 SMBIOS；未指定时保持 QEMU 11 默认语义 |
 | `hw/nvme/nvme.h` + `hw/nvme/ctrl.c` | NVMe 新增 `model=` 属性（默认 `QEMU NVMe Ctrl` 覆盖为 SSD 真实型号） |
 | `hw/ide/atapi.c` | ATAPI INQUIRY 在显式给出 `model=` 时按 `vendor(8)+product(16)` 投影；仅显式 IDE 安装回退使用审核的 `HL-DT-ST DVDRAM GH24NS50 / XP02`。普通启动不创建光驱，手动 ISO 走可热插 USB-BOT/SCSI |
@@ -404,7 +406,7 @@ host keyboard/mouse ─QEMU native input────────┘→ guest
 | `hw/smbios/smbios.c` | **type 4 → type 7 cache handle 链接**：以前 `l1/l2/l3_cache_handle` 硬编 `0xFFFF`，导致 Windows `Win32_Processor.L2CacheSize` 为空 / `L3CacheSize=0`。现在先 build type 7、按 level (1/2/3) 记录 handle，再 build type 4 把 handle 填进去。顺序不能反，否则 level→handle 表仍是 0xFFFF |
 | `hw/smbios/smbios.c` | type 4 新增 `external-clock` / `voltage` / `processor-upgrade`；默认 socket enum 保持 Other，启动器按 LGA1150/LGA1151/LGA2011 显式传值。type 3 新增 `chassis_type`，启动器显式传 Desktop |
 | `hw/smbios/smbios.c` | type 1/2/3 `version=` 参数必须显式传。**为空时**会落到 `smbios_set_defaults()` 从 `mc->name` 继承成 `"pc-q35-11.0"` — `Win32_BaseBoard.Version = "pc-q35-11.0"` 是 QEMU 指纹。`start-vm.sh` 已显式填 `version=1.0` 等 |
-| `target/i386/cpu.c` | 十一个 CPU 模型都有与目录一致的 cache info；i7-3820/i7-4820K 为 10 MiB L3，i7-4930K 为 12 MiB/16-way L3。启动器按拓扑生成对应 L1/L2/L3 SMBIOS，避免 `legacy_cache` 回退到错误缓存 |
+| `target/i386/cpu.c` | 十三个 CPU 模型都有与目录一致的 cache info；i7-3820/i7-4820K 为 10 MiB L3，i7-3930K/i7-4930K 为 12 MiB，i7-4960X 为 15 MiB。启动器按拓扑生成对应 L1/L2/L3 SMBIOS，避免 `legacy_cache` 回退到错误缓存 |
 | `hw/pci/pci.c` | `pci_default_sub_vendor_id/device_id` 可通过 env vars `QEMU_PCI_SUBVENDOR_ID/SUBDEVICE_ID` 覆盖（默认 `0x1AF4/0x1100` = Red Hat/QEMU 是典型虚拟化指纹）。start-vm.sh 按 `BOARD_BRAND` 查表设成 MSI/ASUS/Gigabyte/ASRock 真实 OEM subsystem ID，guest 里 `lspci` 再也看不到 Red Hat/QEMU |
 | `hw/audio/hda-codec.c` | `QEMU_HDA_ID_VENDOR` 从 `0x1AF4` (Red Hat) 改为 `0x10EC` (Realtek)。Windows 里 HD Audio Device 不再显示 "Red Hat High Definition Audio"，codec InstanceId 是 `HDAUDIO\FUNC_01&VEN_10EC&...` |
 | `hw/nvme/ctrl.c` | 保留兼容性优先的 Red Hat 默认 PCI ID，并支持 Samsung/Intel/WD 显式 ID；Samsung Identify 使用 NVMe 1.3，WD Black 使用实机 `15b7:5001`、subsystem `1b4b:1093`、NVMe 1.2 与 Gen3 x4 链路 |
@@ -580,13 +582,14 @@ cd /home/ubuntu/projects/qemu
 # 若必须新建兜底平台，先在完整目录中确认，再同时显式授权：
 # ./deploy/scripts/create-vm.sh 3 --platform i5-6500 --allow-fallback-platform
 # 每个 VM 的组件选择及可持久化身份写入 vms/N/vm.conf；GPU/USB 不虚构序列号。
-# 普通新建池为 3 CPU/3 块三品牌 X79/102 套，包含 54 套 i7-4930K 6C/12T。
-# 例：./deploy/scripts/create-vm.sh 3 --cpu-profile i7-4930k --board-profile asus-p9x79 --memory-size 4G
+# 普通新建池为 5 CPU/3 块三品牌 X79/260 套：2 款 4C/8T、3 款 6C/12T。
+# 傻瓜入口：./deploy/scripts/create-home-vm.sh 3 --spec 6c12t --memory-size 8G
+# 精确入口：./deploy/scripts/create-vm.sh 3 --cpu-profile i7-4930k --board-profile asus-p9x79 --memory-size 4G
 # 4/8 GiB 为两根真双通道，12 GiB=3×4 GiB 三通道，16 GiB=4×4 GiB 四通道。
 # 旧 6 GiB/H81 组合均 archived，只供已有 VM，不会被 --include-fallback 重新新建。
 # 硬件合同 v3 把每槽 Rank/device-width/JEP106/part/独立 serial 同步到 SMBIOS/SPD；
 # Micron 的 18-byte SPD 字段使用对应 -1G6/-1G4 基础 part；legacy DDR4 仍 page0-only。
-# 默认优先 i7-4930K + DDR3-1866，再按宿主 realization 和共同频率上限回落。
+# 默认 8G，优先 i7-4960X + DDR3-1866，再按宿主 realization、同规格和共同频率上限回落。
 # SSD 为七款 SATA + 三款 Gen3 x4 NVMe，十款均精确 512110190592 字节；自动先 NVMe，
 # i7-3820/不兼容链路会合理回退 SATA；
 # GPU 池为三款 1GB + 三款 2GB NVIDIA、共 25 条多品牌原子行；2GB 默认层 12 条、1GB R535 安全层 4 条、显式层 1 条、Kepler 旧配置层 8 条；显示器完整目录 35 款且全部 FHD 1920×1080@60，

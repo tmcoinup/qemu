@@ -16,7 +16,7 @@ qtest. For a focused
 iteration use `--filter TEXT`; use `--no-build` only when the build directory
 is already current.
 
-家用 6C/12T 统一创建池的聚焦回归：
+家用 4C/8T、6C/12T 统一创建池的聚焦回归：
 
 ```bash
 bash deploy/tests/vgpu/test_create_6c12t_pool.sh
@@ -24,8 +24,9 @@ bash deploy/tests/vgpu/test_hardware_legality.sh
 bash deploy/tests/vgpu/test_hardware_pool_audit.sh
 ```
 
-它在临时目录校验 i7-4930K 的三品牌主板、每容量 4–5 个内存品牌和五品牌 SSD，
-并通过统一 `create-vm.sh` 创建代表配置；不修改真实 VM 或宿主设置。
+它在临时目录校验五款 Core i7 的三品牌主板、每容量 4–5 个内存品牌、默认 8G、
+DDR3-1866 优先和五品牌 SSD，并通过 `create-home-vm.sh`/`create-vm.sh` 创建代表
+配置；不修改真实 VM 或宿主设置。
 
 最新 V-11 通用能力在 G-11 的聚焦回归：
 

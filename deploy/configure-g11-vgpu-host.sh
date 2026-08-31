@@ -15,6 +15,7 @@ GPU_BDF=auto
 OUTPUT="$here/host/vgpu-host.conf"
 FORCE=0
 : "${MDEV_DEVICES_DIR:=/sys/bus/mdev/devices}"
+: "${NVIDIA_MODULE_VERSION_FILE:=/sys/module/nvidia/version}"
 : "${VGPU_HOST_LOCK_FILE:=/opt/nvidia-modes/state/current}"
 : "${VGPU_HOST_LOCK_WAIT_SECONDS:=30}"
 
@@ -27,7 +28,7 @@ usage() {
                       v100-sxm2-16gb | v100-sxm2-32gb
                       v100s-pcie-32gb | v100-fhhl-16gb
   --fb-mode MODE     auto（默认）| equal | mixed
-                     V100/R580 默认 mixed；RTX 2080 固定 equal
+                     V100/R570/R580 默认 mixed；RTX 2080 固定 equal
   --tier 1024|2048   equal 模式的 framebuffer 档（默认 2048）
   --gpu auto|BDF     NVIDIA GPU；多卡宿主建议写完整 0000:BB:DD.F
   --output FILE      输出路径（默认 deploy/host/vgpu-host.conf，已 gitignore）
@@ -84,13 +85,13 @@ esac
 }
 
 # G-11 always uses the production-signed B/name-only path.  RTX/R535 may
-# tolerate a missing per-mdev backend during legacy migration; V100/R580 is a
-# fresh-host contract and requires the dual-ABI Hook for the per-mdev name and
-# display contract.  R580.159.01 production defaults to name-only because the
-# RM framebuffer tuple caused repeatable guest PTE failures/TDR/XID 43 on the
-# physical V100 validation host; R535 keeps the reviewed tuple enabled.
+# tolerate a missing per-mdev backend during legacy migration; V100 is a
+# fresh-host contract and requires the reviewed Hook for the per-mdev name and
+# display contract. R570/R535 use the guarded framebuffer identity path;
+# R580.159.01 remains name-only because its full tuple caused repeatable guest
+# PTE failures/TDR/XID 43 on the physical V100 validation host.
 IDENTITY_MODE=required
-RM_FB_IDENTITY_MODE=off
+RM_FB_IDENTITY_MODE=required
 SPOOF_MODE_VALUE=B
 CONSOLE_INTERVAL=0
 IS_V100=1
@@ -117,8 +118,25 @@ case "$PRESET" in
         ;;
 esac
 
+HOST_DRIVER_VERSION=$(cat "$NVIDIA_MODULE_VERSION_FILE" 2>/dev/null || true)
+if (( IS_V100 == 1 )); then
+    case "$HOST_DRIVER_VERSION" in
+        535.161.05|570.172.07)
+            RM_FB_IDENTITY_MODE=required
+            ;;
+        580.159.01)
+            RM_FB_IDENTITY_MODE=off
+            ;;
+        *)
+            echo "V100 策略只接受已审核 host driver 535.161.05、570.172.07 或 580.159.01；当前 ${HOST_DRIVER_VERSION:-未加载}" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 if [[ "$FB_MODE" == auto ]]; then
-    if (( IS_V100 == 1 && TIER_EXPLICIT == 0 )); then
+    if (( IS_V100 == 1 && TIER_EXPLICIT == 0 )) &&
+            [[ "$HOST_DRIVER_VERSION" != 535.161.05 ]]; then
         FB_MODE=mixed
     else
         FB_MODE=equal

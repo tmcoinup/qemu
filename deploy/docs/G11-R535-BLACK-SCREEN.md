@@ -125,7 +125,8 @@ Modules Installer 占用 WinRM 的冷启动。复检会按真实的单反斜杠 
 V100/R535 的已验证 1Q 组合虽然也使用 `nvidia-256` host alias，但 Guest 的正式
 签名 transport 是 `PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE`，不是 RTX6000-1Q
 的 `1E30/1325`。离线同步从 VMate 托管 host policy 中读取精确 `V100X-1Q`
-进行区分；V100X-2Q 尚未完成同版本实测，继续拒绝推断。
+进行区分；V100X-2Q 不属于 R535 合同。它已在独立的 R570.172.07 + 573.48 合同中
+完成实测，不能跨版本推断。
 
 `install-vgpu-driver.sh` 现在是上述封装内部的第二阶段，也会从实际 `/proc` QEMU
 参数验证安全拓扑；在普通 `display=on` VM 中直接调用会在任何 guest 写入前拒绝。

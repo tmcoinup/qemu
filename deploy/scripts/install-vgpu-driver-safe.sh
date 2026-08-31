@@ -41,7 +41,7 @@ usage: ./deploy/scripts/vmctl.sh driver-install ID [--ip IPv4]
 Boots a temporary standard-VGA console with the NVIDIA mdev present only for
 PnP (display=off), installs the reviewed production package matching the exact
 host branch, and fully shuts Windows down.  R535 additionally performs offline
-EDID/NV_Modes convergence; R580 deliberately skips that R535-only path.
+EDID/NV_Modes convergence; R570/R580 skip that R535-only path.
 EOF
 }
 

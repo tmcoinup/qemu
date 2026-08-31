@@ -146,7 +146,7 @@ if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]]; then
     VM_START_LOCK_HELD=1 "$here/scripts/sync-monitor-profile.sh" "$VM_ID" --force
     echo "[install-vgpu] PASS: R535 驱动、完整关机、离线 EDID/NV_Modes 收敛全部完成"
 else
-    echo "[install-vgpu] PASS: R580/${VGPU_SELECTED_DRIVER_LABEL} 正式签名驱动和完整关机已完成；跳过 R535 NV_Modes 流程"
+    echo "[install-vgpu] PASS: ${VGPU_SELECTED_DRIVER_BRANCH}/${VGPU_SELECTED_DRIVER_LABEL} 正式签名驱动和完整关机已完成；跳过 R535 NV_Modes 流程"
 fi
 if ((START_AFTER_SYNC)); then
     if [[ -n "${START_LOCK_FD:-}" ]]; then

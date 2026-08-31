@@ -2,6 +2,7 @@
 # Shared fail-closed checks for the reviewed production-signed stacks:
 #
 #   host 535.161.05 -> guest 538.33 / 31.0.15.3833
+#   host 570.172.07 -> guest 573.48 / 32.0.15.7348
 #   host 580.159.01 -> guest 582.53 / 32.0.15.8253
 #
 # The legacy R535 filenames are historical and must not be used as proof of
@@ -13,6 +14,11 @@ VGPU_DRIVER_ZIP_NAME=553.24-display-driver.zip
 VGPU_DRIVER_EXE_SHA256=aaa3080c0b7e3a6fbe825a05725f4171c75072faa8b667d97556c1605a219ddd
 VGPU_DRIVER_ZIP_SHA256=a3d7ad8b8082d6ac6214565b4766b5190a819bc9b7574765b14897e0db809690
 VGPU_DRIVER_VERSION=31.0.15.3833
+
+VGPU_R570_DRIVER_EXE_NAME=573.48_grid_win10_win11_server2022_dch_64bit_international.exe
+VGPU_R570_DRIVER_EXE_SHA256=c49ceac0bbbd578dff628054166959531d38dbe548eb8cc9070509695cb23226
+VGPU_R570_DRIVER_VERSION=32.0.15.7348
+VGPU_R570_DRIVER_INF_DRIVER_VER='06/26/2025, 32.0.15.7348'
 
 VGPU_R580_DRIVER_EXE_NAME=582.53_grid_win10_win11_server2022_server_2025_dch_64bit_international.exe
 VGPU_R580_DRIVER_EXE_SHA256=6f1210b459efc7f29db930103533c3de9b93c2afdfa8d7b4871640c6b8638c0b
@@ -63,6 +69,21 @@ vgpu_select_driver_stack() {
             VGPU_SELECTED_DRIVER_SETUP_VERSION=""
             VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR=1
             ;;
+        570.172.07)
+            VGPU_SELECTED_HOST_DRIVER=$host_version
+            VGPU_SELECTED_DRIVER_BRANCH=R570
+            VGPU_SELECTED_DRIVER_LABEL='GRID 573.48'
+            VGPU_SELECTED_DRIVER_EXE_NAME=$VGPU_R570_DRIVER_EXE_NAME
+            VGPU_SELECTED_DRIVER_EXE_SHA256=$VGPU_R570_DRIVER_EXE_SHA256
+            VGPU_SELECTED_DRIVER_VERSION=$VGPU_R570_DRIVER_VERSION
+            VGPU_SELECTED_DRIVER_ZIP_NAME=""
+            VGPU_SELECTED_DRIVER_ZIP_SHA256=""
+            VGPU_SELECTED_DRIVER_PAYLOAD_ARCHIVE_NAME=""
+            VGPU_SELECTED_DRIVER_SETUP_SHA256=$VGPU_R570_DRIVER_EXE_SHA256
+            VGPU_SELECTED_DRIVER_INF_DRIVER_VER=$VGPU_R570_DRIVER_INF_DRIVER_VER
+            VGPU_SELECTED_DRIVER_SETUP_VERSION=573.48
+            VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR=0
+            ;;
         580.159.01)
             VGPU_SELECTED_HOST_DRIVER=$host_version
             VGPU_SELECTED_DRIVER_BRANCH=R580
@@ -80,7 +101,7 @@ vgpu_select_driver_stack() {
             ;;
         *)
             echo "[driver-assets] unsupported NVIDIA host driver: ${host_version:-unknown}" >&2
-            echo "[driver-assets] reviewed pairs: 535.161.05/538.33 or 580.159.01/582.53" >&2
+            echo "[driver-assets] reviewed pairs: 535.161.05/538.33, 570.172.07/573.48, or 580.159.01/582.53" >&2
             return 1
             ;;
     esac

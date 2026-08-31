@@ -1,0 +1,129 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 355baa6..c890046 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -88,6 +88,9 @@ const NVIDIA_MODULE_VERSION_PATH: &str = "/sys/module/nvidia/version";
+ const MDEV_DEVICES_PATH: &str = "/sys/bus/mdev/devices";
+ const NV2080_CTRL_CMD_FB_GET_INFO_V2: u32 = 0x2080_1303;
+ const NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R535: usize = 0x36;
++// NVIDIA R570.172.08 publishes 0x39 entries. The matching 18.4 host
++// manager reports 4 + (0x39 * 8) = 460 bytes for FB_GET_INFO_V2.
++const NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R570: usize = 0x39;
+ // NVIDIA open-gpu-kernel-modules commit 307159f (the R580.65.05 source)
+ // deliberately expands this fixed array to 0x80 entries. The observed
+ // 580.65.05 RM call is therefore 4 + (0x80 * 8) = 1028 bytes.
+@@ -108,6 +111,12 @@ struct Nv2080CtrlFbGetInfoV2ParamsR535 {
+     fb_info_list: [RmInfoEntry; NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R535],
+ }
+ 
++#[repr(C)]
++struct Nv2080CtrlFbGetInfoV2ParamsR570 {
++    fb_info_list_size: u32,
++    fb_info_list: [RmInfoEntry; NV2080_CTRL_FB_INFO_MAX_LIST_SIZE_R570],
++}
++
+ #[repr(C)]
+ struct Nv2080CtrlFbGetInfoV2ParamsR580 {
+     fb_info_list_size: u32,
+@@ -150,6 +159,7 @@ impl RmIdentityOverrideState {
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ enum RmIdentityAbi {
+     R535,
++    R570_172_07,
+     R580_65_05,
+     R580_159_01,
+ }
+@@ -189,21 +199,26 @@ fn rm_identity_field_write_allowed(
+     index: u32,
+     framebuffer_mb: Option<u32>,
+ ) -> bool {
+-    // On R580, rewriting a V100 guest's physical HBM2 RAM type to the
+-    // catalog GDDR5 value keeps the device at Code 0 but deadlocks Windows
+-    // shutdown for V100X-2Q. V100X-1Q was independently verified at Code 0
+-    // and exits normally with the same RAM_TYPE write. Keep that proven 1 GiB
+-    // path, but fail closed for 2 GiB and unknown tiers. BUS_WIDTH and
+-    // MEMORYINFO_VENDOR_ID remain independently safe, and R535 is unchanged.
+-    !matches!(abi, RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01)
+-        || index != NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE
+-        || framebuffer_mb == Some(1024)
++    // R570 V100X-1Q and V100X-2Q were independently verified at Code 0, without
++    // TDR/XID, and with normal shutdown both alone and in a mixed pool. R580
++    // remains fail-closed at 1Q because its 2Q rewrite deadlocked shutdown.
++    // BUS_WIDTH and MEMORYINFO_VENDOR_ID are independently safe; R535 is unchanged.
++    if index != NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE {
++        return true;
++    }
++    match abi {
++        RmIdentityAbi::R535 => true,
++        RmIdentityAbi::R570_172_07 => matches!(framebuffer_mb, Some(1024 | 2048)),
++        RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01 => framebuffer_mb == Some(1024),
++    }
+ }
+ 
+ fn rm_identity_driver_abi(version: &str) -> Option<RmIdentityAbi> {
+     let version = version.trim();
+     if version.starts_with("535.") {
+         Some(RmIdentityAbi::R535)
++    } else if version == "570.172.07" {
++        Some(RmIdentityAbi::R570_172_07)
+     } else if version == "580.65.05" {
+         Some(RmIdentityAbi::R580_65_05)
+     } else if version == "580.159.01" {
+@@ -722,7 +737,7 @@ fn configure_rm_identity_override_for_mdev(
+         }
+         RM_IDENTITY_OVERRIDE_ENABLED.store(false, Ordering::Release);
+         error!(
+-            "G11_RM_IDENTITY disabled mdev={} unsupported_driver={} expected=535.x|580.65.05|580.159.01",
++            "G11_RM_IDENTITY disabled mdev={} unsupported_driver={} expected=535.x|570.172.07|580.65.05|580.159.01",
+             mdev_uuid, reported_version
+         );
+         return;
+@@ -772,10 +787,17 @@ fn configure_rm_identity_override_for_mdev(
+         }
+     }
+     if let Some(value) = config.fb_ram_type {
+-        if matches!(abi, RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01) {
++        if matches!(
++            abi,
++            RmIdentityAbi::R570_172_07 | RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01
++        ) {
++            let guard = match abi {
++                RmIdentityAbi::R570_172_07 => "runtime_exact_1024_or_2048mb",
++                _ => "runtime_exact_1024mb",
++            };
+             info!(
+-                "G11_RM_IDENTITY armed fb_ram_type={:#x} mdev={} abi={:?} guard=runtime_exact_1024mb",
+-                value, mdev_uuid, abi
++                "G11_RM_IDENTITY armed fb_ram_type={:#x} mdev={} abi={:?} guard={}",
++                value, mdev_uuid, abi, guard
+             );
+         }
+     }
+@@ -834,6 +856,7 @@ unsafe fn apply_rm_identity_override(io_data: &mut Nvos54Parameters) {
+     };
+     let expected_size = match abi {
+         RmIdentityAbi::R535 => mem::size_of::<Nv2080CtrlFbGetInfoV2ParamsR535>(),
++        RmIdentityAbi::R570_172_07 => mem::size_of::<Nv2080CtrlFbGetInfoV2ParamsR570>(),
+         RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01 => {
+             mem::size_of::<Nv2080CtrlFbGetInfoV2ParamsR580>()
+         }
+@@ -851,6 +874,10 @@ unsafe fn apply_rm_identity_override(io_data: &mut Nvos54Parameters) {
+             let params: &mut Nv2080CtrlFbGetInfoV2ParamsR535 = &mut *io_data.params.cast();
+             (params.fb_info_list_size, &mut params.fb_info_list)
+         }
++        RmIdentityAbi::R570_172_07 => {
++            let params: &mut Nv2080CtrlFbGetInfoV2ParamsR570 = &mut *io_data.params.cast();
++            (params.fb_info_list_size, &mut params.fb_info_list)
++        }
+         RmIdentityAbi::R580_65_05 | RmIdentityAbi::R580_159_01 => {
+             let params: &mut Nv2080CtrlFbGetInfoV2ParamsR580 = &mut *io_data.params.cast();
+             (params.fb_info_list_size, &mut params.fb_info_list)
+@@ -890,7 +917,7 @@ unsafe fn apply_rm_identity_override(io_data: &mut Nvos54Parameters) {
+         };
+         if !rm_identity_field_write_allowed(abi, index, framebuffer_mb) {
+             error!(
+-                "G11_RM_IDENTITY suppressing field={} value={:#x} mdev={} abi={:?} framebuffer_mb={:?} reason=r580_v100_non_1q_runtime_guard",
++                "G11_RM_IDENTITY suppressing field={} value={:#x} mdev={} abi={:?} framebuffer_mb={:?} reason=abi_framebuffer_ram_type_guard",
+                 field, value, mdev_uuid, abi, framebuffer_mb
+             );
+             continue;

@@ -1,13 +1,13 @@
-# Tesla V100 resource example for the validated vGPU 19.5/R580.159.01 path.
+# Tesla V100 resource example for the validated vGPU 18.4/R570.172.07 path.
 # Generate the real host file with configure-g11-vgpu-host.sh; do not copy an
 # example BDF onto another machine.
 
 # Replace auto with the complete BDF on a multi-GPU host.
 VGPU_MGPU=auto
 
-# vGPU 19.5 exposes and enables heterogeneous time-slice sizes on the tested
-# V100 SXM2 16GB host. Mixed mode lets 1Q and 2Q coexist. An all-1Q pool is
-# also valid; allocation is still checked against the physical 16 GiB total.
+# vGPU 18.4 exposes and enables heterogeneous time-slice sizes on the tested
+# V100 SXM2 16GB host. Mixed mode lets 1Q and 2Q coexist; both sizes and their
+# coexistence passed the Windows/host error/reclaim quick validation.
 VGPU_HOST_FB_MODE=mixed
 VGPU_RESOURCE_PROFILE_1024='V100X-1Q'
 VGPU_RESOURCE_PROFILE_2048='V100X-2Q'
@@ -23,12 +23,12 @@ VGPU_CAPACITY_CHECK=both
 
 VGPU_CONSOLE_INTERVAL_US=0
 
-# Keep the reviewed R580 Hook for per-mdev name and FHD display identity, but
-# do not rewrite the RM framebuffer tuple.  On the physical R580.159.01 V100
-# host the tuple made the 582.53 guest enter repeatable PTE failures, TDR and
-# XID 43; the same 1Q guest stayed stable with the native RM tuple.
+# R570 uses the reviewed 460-byte FB_GET_INFO_V2 ABI. RAM_TYPE is rewritten
+# only for exact 1024/2048 MiB instances; unknown framebuffer sizes are
+# fail-closed. The V100 keeps its native vGPU capability while per-mdev name,
+# FHD display identity and the guarded framebuffer identity stay required.
 VGPU_MDEV_IDENTITY_MODE=required
-VGPU_RM_FB_IDENTITY_MODE=off
+VGPU_RM_FB_IDENTITY_MODE=required
 SPOOF_MODE=B
 
 # For a deliberately uniform pool, regenerate instead of hand-editing:

@@ -200,7 +200,7 @@ WINRM_PYTHON=$(g11_python_resolve pypsrp) || exit 1
 if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]]; then
     invalidate_monitor_sync_marker
 else
-    echo "[gui-install] R580: skip R535 monitor/NV_Modes marker invalidation"
+    echo "[gui-install] ${DRIVER_BRANCH}: skip R535 monitor/NV_Modes marker invalidation"
 fi
 
 # The compatibility installer historically repaired partial installs by
@@ -357,7 +357,7 @@ if ('{branch}' -eq 'R580') {{
     $installer = 'C:\nv\g11-grid-driver.exe'
     if (-not (Test-Path -LiteralPath $installer) -or
             (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -cne '{source_sha}') {{
-        Write-Host '  pulling reviewed R535 package...'
+        Write-Host '  pulling reviewed direct GRID package...'
         Invoke-WebRequest '{base}/{asset}' -OutFile $installer -UseBasicParsing
     }}
 }}
@@ -508,11 +508,18 @@ if [[ "$DRIVER_BRANCH" == R535 ]]; then
            "$DISPLAY_MODE" == 1920x1080 && "$CONSOLE_BYTES" == 8294400 &&
            "$CONSOLE_REQUIRED" == 1 && "$CONSOLE_SAFE" == 1 ]] || RECEIPT_VALID=0
     fi
-else
+elif [[ "$DRIVER_BRANCH" == R570 ]]; then
+    [[ "$RECEIPT_PAYLOAD_SHA256" == none &&
+       ( "$INSTALLER_EXIT" == 0 || "$INSTALLER_EXIT" == 1 ) &&
+       "$DISPLAY_MODE" == 0x0 && "$CONSOLE_BYTES" == 0 &&
+       "$CONSOLE_REQUIRED" == 0 && "$CONSOLE_SAFE" == 1 ]] || RECEIPT_VALID=0
+elif [[ "$DRIVER_BRANCH" == R580 ]]; then
     [[ "$RECEIPT_PAYLOAD_SHA256" == "$PAYLOAD_SHA256" &&
        ( "$INSTALLER_EXIT" == 0 || "$INSTALLER_EXIT" == 1 ) &&
        "$DISPLAY_MODE" == 0x0 && "$CONSOLE_BYTES" == 0 &&
        "$CONSOLE_REQUIRED" == 0 && "$CONSOLE_SAFE" == 1 ]] || RECEIPT_VALID=0
+else
+    RECEIPT_VALID=0
 fi
 echo "[gui-install] receipt: branch=${RECEIPT_BRANCH:-invalid} installer=${INSTALLER_EXIT:-invalid} signature=${PACKAGE_SIGNATURE:-invalid} display=${DISPLAY_MODE:-invalid} page_safe=${CONSOLE_SAFE:-invalid} console=${CONSOLE_GUARD_POLICY}"
 
@@ -731,7 +738,7 @@ if (( RECEIPT_VALID == 0 )); then
     exit 1
 fi
 if [[ "$DRIVER_BRANCH" == R535 && "$INSTALLER_EXIT" != 0 ]] ||
-        [[ "$DRIVER_BRANCH" == R580 && "$INSTALLER_EXIT" != 0 &&
+        [[ "$DRIVER_BRANCH" != R535 && "$INSTALLER_EXIT" != 0 &&
            "$INSTALLER_EXIT" != 1 ]]; then
     echo "[gui-install] !! GRID installer 退出码不在允许集合: $INSTALLER_EXIT" >&2
     exit 1
@@ -744,5 +751,5 @@ if [[ "$DRIVER_BRANCH" == R535 ]]; then
         echo "[gui-install] PASS: R535/GRID 538.33 signed / Code 0 / page-safe 1920x1080"
     fi
 else
-    echo "[gui-install] PASS: R580/${DRIVER_LABEL} signed / Code 0 / runtime code integrity enforced"
+    echo "[gui-install] PASS: ${DRIVER_BRANCH}/${DRIVER_LABEL} signed / Code 0 / runtime code integrity enforced"
 fi

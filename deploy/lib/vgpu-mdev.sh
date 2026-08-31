@@ -42,7 +42,7 @@
 : "${VGPU_PER_VM_FB_GB:=2}"         # 旧 API 未传 framebuffer_mb 时的 fallback
 : "${VGPU_PER_VM_FB_MB:=$((VGPU_PER_VM_FB_GB * 1024))}"
 : "${VGPU_CAPACITY_CHECK:=both}"    # both | framebuffer | sysfs | none
-: "${VGPU_HOST_FB_MODE:=equal}"      # equal | mixed (V100 + R580 only)
+: "${VGPU_HOST_FB_MODE:=equal}"      # equal | mixed (V100 + reviewed R570/R580)
 : "${MDEV_DEVICES_DIR:=/sys/bus/mdev/devices}"
 : "${MDEV_PROC_DIR:=/proc}"
 : "${NVIDIA_MODULE_VERSION_FILE:=/sys/module/nvidia/version}"
@@ -724,10 +724,13 @@ mdev_validate_mixed_size_runtime() {
     local type_dir=$1 parent bdf driver_version smi output
 
     driver_version=$(cat "$NVIDIA_MODULE_VERSION_FILE" 2>/dev/null || true)
-    if [[ "$driver_version" != 580.* ]]; then
-        mdev_err "mixed-size 仅在已验证的 NVIDIA R580 路径开放，当前 ${driver_version:-unknown}"
-        return 1
-    fi
+    case "$driver_version" in
+        570.172.07|580.159.01) ;;
+        *)
+            mdev_err "mixed-size 仅允许审核的 R570.172.07/R580.159.01，当前 ${driver_version:-unknown}"
+            return 1
+            ;;
+    esac
     parent=$(_mdev_parent_for_type "$type_dir") || return 1
     bdf=$(basename -- "$parent")
     if _mdev_is_production_sysfs; then

@@ -32,7 +32,7 @@ param(
     [string]$FlagPath      = 'C:\nv\drv-done.flag',
     [string]$AdminUser     = 'Administrator',
     [string]$AdminPass     = '',
-    [ValidateSet('R535', 'R580')]
+    [ValidateSet('R535', 'R570', 'R580')]
     [string]$DriverBranch  = 'R535',
     [string]$ExpectedInstallerSha256 = '',
     [string]$ExpectedSourcePackageSha256 = '',
@@ -267,7 +267,7 @@ if ($RunInstaller) {
     } elseif ($DriverBranch -eq 'R535') {
         Write-Host '[display-guard] headless console is host-isolated; defer page-safe convergence to offline host sync' -Fore Cyan
     } else {
-        Write-Host '[display-guard] R580 does not use the R535 page-alignment workaround' -Fore Cyan
+        Write-Host "[display-guard] $DriverBranch does not use the R535 page-alignment workaround" -Fore Cyan
     }
 
     Write-Host ("[driver] {0} production setup.exe in active desktop session" -f

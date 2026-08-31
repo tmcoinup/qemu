@@ -121,6 +121,11 @@ main() {
             expected_package=nvidia-vgpu-ubuntu-535
             expected_policy=r535_unlock_policy=consumer
             ;;
+        r570)
+            expected_version=570.172.07
+            expected_package=nvidia-vgpu-ubuntu-570
+            expected_policy=r570_unlock_policy=consumer
+            ;;
         r580-lab)
             expected_version=580.159.01
             expected_package=nvidia-vgpu-ubuntu-580

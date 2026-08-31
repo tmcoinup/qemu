@@ -1618,7 +1618,7 @@ fi
 : "${VGPU_FB_MB:=${GPU_VRAM_MB:-2048}}"
 # The host policy is checked before choosing the real V100 (or other host GPU)
 # resource.  Equal-size retains the fixed-tier contract; mixed-size requires
-# both size-keyed mappings and is revalidated against R580 runtime state by the
+# both size-keyed mappings and is revalidated against R570/R580 runtime state by the
 # mdev allocator before any sysfs create.
 VGPU_HOST_FB_MODE=${VGPU_HOST_FB_MODE:-equal}
 case "$VGPU_HOST_FB_MODE" in
@@ -2590,7 +2590,7 @@ case "$MODE" in
         vgpu_select_driver_stack || exit 1
         if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 0 &&
               "$MONITOR_SYNC" == 1 ]]; then
-            echo "[start-vm] R580: 跳过 R535 专用 EDID_OVERRIDE/NV_Modes 离线同步"
+            echo "[start-vm] R570/R580: 跳过 R535 专用 EDID_OVERRIDE/NV_Modes 离线同步"
             MONITOR_SYNC=0
         fi
         ;;
@@ -3000,6 +3000,7 @@ if [[ "$SPOOF_MODE" == B ]]; then
     VGPU_PORTABLE_HOST_DRIVER=$(cat "$NVIDIA_MODULE_VERSION_FILE" 2>/dev/null || true)
     case "$VGPU_PORTABLE_HOST_DRIVER" in
         535.*) VGPU_PORTABLE_GUEST_DRIVER=31.0.15.3833 ;;
+        570.172.07) VGPU_PORTABLE_GUEST_DRIVER=32.0.15.7348 ;;
         580.159.01) VGPU_PORTABLE_GUEST_DRIVER=32.0.15.8253 ;;
         *)
             echo "[start-vm] B identity 不支持当前 NVIDIA host driver: ${VGPU_PORTABLE_HOST_DRIVER:-unknown}" >&2
@@ -5038,7 +5039,7 @@ allocate_vgpu() {
                 )
                 ;;
             off)
-                echo "[start-vm] R580 稳定策略：保留 per-mdev 名称/显示合同，跳过 RM framebuffer tuple"
+                echo "[start-vm] name-only 策略：保留 per-mdev 名称/显示合同，跳过 RM framebuffer tuple"
                 # Name-only must stay the legacy four-argument allocation
                 # form.  Add positional placeholders only when PCI/FRL was
                 # separately requested; an empty FRL seventh argument is not

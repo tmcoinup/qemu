@@ -7,8 +7,8 @@
 #   * 构建产物 install 到 /opt/vgpu_unlock/ 并注入 systemd LD_PRELOAD
 #
 # 要求:
-#   * NVIDIA vGPU R535，或已实机验证的 R580.159.01 host driver
-#   * RM FB 身份按 R535(436B)/R580(1028B) 与精确 type-info ABI fail-closed
+#   * NVIDIA vGPU R535、18.4/R570.172.07，或已实机验证的 R580.159.01 host driver
+#   * RM FB 身份按 R535(436B)/R570(460B)/R580(1028B) 与精确 type-info ABI fail-closed
 #   * 物理 GPU 在 vfio/mdev 框架下 (mdev_supported_types 出现)
 
 set -euo pipefail
@@ -19,18 +19,25 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPSTREAM_COMMIT=${UPSTREAM_COMMIT:-71ec870d4b456c9a8013c114a57372b1a60d36ca}
 G11_PATCH=${G11_PATCH:-$here/patches/vgpu-unlock-rs-g11.patch}
 G11_R580_PATCH=${G11_R580_PATCH:-$here/patches/vgpu-unlock-rs-g11-r580.diff}
+G11_R570_PATCH=${G11_R570_PATCH:-$here/patches/vgpu-unlock-rs-g11-r570.diff}
 MDEV_ADMIN_INSTALLER=${MDEV_ADMIN_INSTALLER:-$here/install-vgpu-mdev-admin.sh}
 MDEV_ADMIN_USER=${VGPU_MDEV_ADMIN_USER:-${SUDO_USER:-$(id -un)}}
 BUILD_USER=${G11_BUILD_USER:-${SUDO_USER:-$(id -un)}}
 EXPECTED_CONFIG_RS_SHA256=52737179b0526cb29376ae2d9626a7914d1a6b5e789d5be52b662920d02942a0
-EXPECTED_LIB_RS_SHA256=c64a959f100900f6b804cbe9d40370e02b33fe36320161d454955b175369ce57
+EXPECTED_LIB_RS_SHA256=f68c4bdb7396866d3bdfd0cee2ffbe646e63b3d73bbeb17fbae202ab87005dc0
 EXPECTED_CTRLA081_RS_SHA256=052bd4d7ceebea5be3c407ed23b6604200509c9a3bb599dc02a16427e38f0d2f
 EXPECTED_CTRLA082_RS_SHA256=466e3507baaf8ca79a6a2d2fcf531a5c813c1d53dbbdec346aed0b697657d1dd
+PRE_R570_CONFIG_RS_SHA256=52737179b0526cb29376ae2d9626a7914d1a6b5e789d5be52b662920d02942a0
+PRE_R570_LIB_RS_SHA256=c64a959f100900f6b804cbe9d40370e02b33fe36320161d454955b175369ce57
+PRE_R570_CTRLA081_RS_SHA256=052bd4d7ceebea5be3c407ed23b6604200509c9a3bb599dc02a16427e38f0d2f
+PRE_R570_CTRLA082_RS_SHA256=466e3507baaf8ca79a6a2d2fcf531a5c813c1d53dbbdec346aed0b697657d1dd
 BASE_CONFIG_RS_SHA256=ae1cab431968e031f433f540bf6973b67caa5a8c1c26987abe5af8d11c1c2ed0
 BASE_LIB_RS_SHA256=65fafddfbdcdd13a0288ec0c1335598bfff8404afa32e347f4f6ab6aa9fa8e49
 BASE_CTRLA081_RS_SHA256=0ca58bcf29dcc6750ed1761d5b94431aa476bcc61381f38ca998b806efab9465
 BASE_CTRLA082_RS_SHA256=edf489a8e979a8da348d5070e0a1c67f5612dedef4d2c636492151ea9d5f7ed8
 RESTART_MANAGER=0
+SKIP_TESTS=0
+R570_UNLOCK_MODE=native
 R580_UNLOCK_MODE=native
 INSTALL_TRANSACTION_ACTIVE=0
 LIB_PREEXISTED=0
@@ -43,13 +50,19 @@ TMP=
 
 usage() {
     cat <<'EOF'
-用法: setup-vgpu-unlock.sh [--restart-manager] [--r580-consumer-lab]
+用法: setup-vgpu-unlock.sh [--restart-manager] [--no-tests]
+                            [--r570-consumer] [--r580-consumer-lab]
 
 默认只构建、测试、备份并安装，不打断正在运行的 vGPU。
 --restart-manager 仅在没有 QEMU 占用 mdev 时重启 nvidia-vgpu-mgr。
+--no-tests 只做格式校验和 release 构建；仅供明确要求跳过测试的快速实机验证。
 R535 用于 RTX 2080/2080 Ti，以及已实机验证的 V100/vGPU 16.4 全 1Q 路径。
+R570.172.07 对应 vGPU 18.4；V100 默认保留原生 capability，已验证
+V100X-1Q/2Q 的 RAM_TYPE 改写、单档和 1Q+2Q 混合运行及正常关机。
 R580 只保留给 V100/vGPU 19.5 name-only 路径，并固定保持原生能力
 （unlock=false）。安装器按已加载驱动选择 ABI，不做跨分支升级。
+--r570-consumer 只供分支切换器在精确 RTX 2080/R570.172.07 上启用 capability Hook；
+必须完成切换器的冷启动验收后才可启动 VM。
 --r580-consumer-lab 只供本机母盘暂存实验；它会启用消费卡 capability Hook，
 但该组合已出现 XID 43/TDR，不能作为生产通过证明。
 EOF
@@ -58,6 +71,8 @@ EOF
 while (($#)); do
     case "$1" in
         --restart-manager) RESTART_MANAGER=1 ;;
+        --no-tests) SKIP_TESTS=1 ;;
+        --r570-consumer) R570_UNLOCK_MODE=consumer ;;
         --r580-consumer-lab) R580_UNLOCK_MODE=consumer-lab ;;
         -h|--help) usage; exit 0 ;;
         *) echo "未知参数: $1" >&2; usage >&2; exit 2 ;;
@@ -178,6 +193,10 @@ build_run sh -c 'command -v cargo >/dev/null 2>&1' || {
     echo "G-11 R580 ABI patch 缺失或不安全: $G11_R580_PATCH" >&2
     exit 1
 }
+[[ -f "$G11_R570_PATCH" && ! -L "$G11_R570_PATCH" ]] || {
+    echo "G-11 R570 ABI patch 缺失或不安全: $G11_R570_PATCH" >&2
+    exit 1
+}
 [[ -x "$MDEV_ADMIN_INSTALLER" && ! -L "$MDEV_ADMIN_INSTALLER" ]] || {
     echo "G-11 mdev admin installer 缺失或不安全: $MDEV_ADMIN_INSTALLER" >&2
     exit 1
@@ -227,7 +246,17 @@ if source_hashes_match \
         echo "源码含审核范围之外的改动，拒绝构建: $BUILD_DIR" >&2
         exit 1
     }
-    echo "[1/6] G-11 R535/R580.159 patch 已存在且四文件哈希匹配"
+    echo "[1/6] G-11 R535/R570.172.07/R580.159 patch 已存在且四文件哈希匹配"
+elif source_hashes_match \
+        "$PRE_R570_CONFIG_RS_SHA256" "$PRE_R570_LIB_RS_SHA256" \
+        "$PRE_R570_CTRLA081_RS_SHA256" "$PRE_R570_CTRLA082_RS_SHA256"; then
+    source_tree_has_only_reviewed_paths || {
+        echo "旧 R535/R580 G-11 源码含审核范围之外的改动，拒绝升级: $BUILD_DIR" >&2
+        exit 1
+    }
+    build_run git -C "$BUILD_DIR" apply --check "$G11_R570_PATCH"
+    build_run git -C "$BUILD_DIR" apply "$G11_R570_PATCH"
+    echo "[1/6] 精确识别 R535/R580 G-11 源码，已追加 R570.172.07 ABI/运行时保护"
 elif source_hashes_match \
         "$BASE_CONFIG_RS_SHA256" "$BASE_LIB_RS_SHA256" \
         "$BASE_CTRLA081_RS_SHA256" "$BASE_CTRLA082_RS_SHA256"; then
@@ -237,7 +266,9 @@ elif source_hashes_match \
     }
     build_run git -C "$BUILD_DIR" apply --check "$G11_R580_PATCH"
     build_run git -C "$BUILD_DIR" apply "$G11_R580_PATCH"
-    echo "[1/6] 精确识别旧 R535 G-11 源码，已追加 R580.159 ABI/运行时保护"
+    build_run git -C "$BUILD_DIR" apply --check "$G11_R570_PATCH"
+    build_run git -C "$BUILD_DIR" apply "$G11_R570_PATCH"
+    echo "[1/6] 精确识别旧 R535 G-11 源码，已追加 R570/R580 ABI/运行时保护"
 else
     if ! build_run git -C "$BUILD_DIR" diff --quiet -- ||
             ! build_run git -C "$BUILD_DIR" diff --cached --quiet --; then
@@ -248,12 +279,14 @@ else
     build_run git -C "$BUILD_DIR" apply "$G11_PATCH"
     build_run git -C "$BUILD_DIR" apply --check "$G11_R580_PATCH"
     build_run git -C "$BUILD_DIR" apply "$G11_R580_PATCH"
+    build_run git -C "$BUILD_DIR" apply --check "$G11_R570_PATCH"
+    build_run git -C "$BUILD_DIR" apply "$G11_R570_PATCH"
 fi
 refresh_source_hashes
 source_hashes_match \
     "$EXPECTED_CONFIG_RS_SHA256" "$EXPECTED_LIB_RS_SHA256" \
     "$EXPECTED_CTRLA081_RS_SHA256" "$EXPECTED_CTRLA082_RS_SHA256" || {
-    echo "G-11 三 ABI 源码哈希复检失败，拒绝构建: $BUILD_DIR" >&2
+    echo "G-11 R535/R570/R580 ABI 源码哈希复检失败，拒绝构建: $BUILD_DIR" >&2
     exit 1
 }
 build_run git -C "$BUILD_DIR" --no-pager diff --check
@@ -261,9 +294,10 @@ build_run git -C "$BUILD_DIR" --no-pager diff --check
 DRIVER_VERSION=$(cat /sys/module/nvidia/version 2>/dev/null || true)
 case "$DRIVER_VERSION" in
     535.*) DRIVER_FAMILY=r535 ;;
+    570.172.07) DRIVER_FAMILY=r570 ;;
     580.159.01) DRIVER_FAMILY=r580 ;;
     *)
-        echo "拒绝注入未经验证的 NVIDIA host driver：${DRIVER_VERSION:-未加载}（仅允许 535.x 或 580.159.01）" >&2
+        echo "拒绝注入未经验证的 NVIDIA host driver：${DRIVER_VERSION:-未加载}（仅允许 535.x、570.172.07 或 580.159.01）" >&2
         exit 1
         ;;
 esac
@@ -273,14 +307,23 @@ DRIVER_LICENSE=$(modinfo -F license nvidia 2>/dev/null | head -n 1 || true)
     exit 1
 }
 
-echo "[2/6] cargo fmt/test/build（用户身份）"
+if ((SKIP_TESTS)); then
+    echo "[2/6] cargo fmt/build（按本次要求跳过测试，用户身份）"
+else
+    echo "[2/6] cargo fmt/test/build（用户身份）"
+fi
 # The single-quoted program is intentionally expanded by the child shell,
 # where G11_BUILD_DIR is present in its environment.
 # shellcheck disable=SC2016
-build_run env G11_BUILD_DIR="$BUILD_DIR" sh -c '
-    cd "$G11_BUILD_DIR" &&
-    cargo fmt -- --check && cargo test && cargo build --release
-'
+if ((SKIP_TESTS)); then
+    build_run env G11_BUILD_DIR="$BUILD_DIR" sh -c '
+        cd "$G11_BUILD_DIR" && cargo fmt -- --check && cargo build --release
+    '
+else
+    build_run env G11_BUILD_DIR="$BUILD_DIR" sh -c '
+        cd "$G11_BUILD_DIR" && cargo fmt -- --check && cargo test && cargo build --release
+    '
+fi
 
 LIB_SRC="$BUILD_DIR/target/release/libvgpu_unlock_rs.so"
 LIB_DST="$INSTALL_DIR/libvgpu_unlock_rs.so"
@@ -367,6 +410,29 @@ EOF
     sudo_run install -o root -g root -m 0644 "$TMP" "$CONFIG_DST"
     rm -f -- "$TMP"
     TMP=
+elif [[ "$DRIVER_FAMILY" == r570 ]]; then
+    TMP=$(mktemp)
+    if [[ "$R570_UNLOCK_MODE" == consumer ]]; then
+        cat >"$TMP" <<'EOF'
+# Managed by G-11 for the exact RTX 2080/R570.172.07 branch-switch path.
+# The switcher requires a cold-boot verification before it permits VM startup.
+observe_only = false
+unlock = true
+unlock_migration = false
+EOF
+    else
+        cat >"$TMP" <<'EOF'
+# Managed by G-11 for the exact R570.172.07 V100/vGPU 18.4 path.
+# Native V100 capability remains untouched; only reviewed per-mdev RM FB fields
+# from profile_override.toml may be changed.
+observe_only = false
+unlock = false
+unlock_migration = false
+EOF
+    fi
+    sudo_run install -o root -g root -m 0644 "$TMP" "$CONFIG_DST"
+    rm -f -- "$TMP"
+    TMP=
 else
     TMP=$(mktemp)
     cat >"$TMP" <<'EOF'
@@ -411,6 +477,7 @@ sudo_run "$MDEV_ADMIN_INSTALLER" --user "$MDEV_ADMIN_USER"
 LIB_SHA256=$(sha256sum "$LIB_SRC" | awk '{print $1}')
 G11_PATCH_SHA256=$(sha256sum "$G11_PATCH" | awk '{print $1}')
 G11_R580_PATCH_SHA256=$(sha256sum "$G11_R580_PATCH" | awk '{print $1}')
+G11_R570_PATCH_SHA256=$(sha256sum "$G11_R570_PATCH" | awk '{print $1}')
 TMP=$(mktemp)
 {
     echo 'schema=2'
@@ -423,9 +490,16 @@ TMP=$(mktemp)
     printf 'ctrla082_rs_sha256=%s\n' "$ctrla082_rs_sha"
     printf 'g11_patch_sha256=%s\n' "$G11_PATCH_SHA256"
     printf 'r580_patch_sha256=%s\n' "$G11_R580_PATCH_SHA256"
-    echo 'r580_ram_type_policy=exact-1024mb-only'
+    printf 'r570_patch_sha256=%s\n' "$G11_R570_PATCH_SHA256"
+    case "$DRIVER_FAMILY" in
+        r570) echo 'ram_type_policy=exact-1024-or-2048mb' ;;
+        r580) echo 'ram_type_policy=exact-1024mb-only' ;;
+        *) echo 'ram_type_policy=r535-no-framebuffer-tier-guard' ;;
+    esac
     if [[ "$DRIVER_FAMILY" == r580 ]]; then
         printf 'r580_unlock_policy=%s\n' "$R580_UNLOCK_MODE"
+    elif [[ "$DRIVER_FAMILY" == r570 ]]; then
+        printf 'r570_unlock_policy=%s\n' "$R570_UNLOCK_MODE"
     else
         echo 'r535_unlock_policy=consumer'
     fi
@@ -442,7 +516,7 @@ cat <<EOF
     lib        = $LIB_DST
     override   = /etc/vgpu_unlock/profile_override.toml
     policy     = $CONFIG_DST ($DRIVER_FAMILY/$DRIVER_VERSION)
-    unlock     = $([[ "$DRIVER_FAMILY" == r580 ]] && printf '%s' "$R580_UNLOCK_MODE" || printf 'consumer')
+    unlock     = $(case "$DRIVER_FAMILY" in r580) printf '%s' "$R580_UNLOCK_MODE" ;; r570) printf '%s' "$R570_UNLOCK_MODE" ;; *) printf 'consumer' ;; esac)
     state      = $STATE_DST
     mdev admin = /usr/local/libexec/qemu-vgpu-mdev-admin
     systemd d  = /etc/systemd/system/nvidia-vgpu-mgr.service.d/vgpu_unlock.conf

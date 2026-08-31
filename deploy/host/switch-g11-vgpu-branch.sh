@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G-11 RTX 2080 host vGPU branch switcher: stable R535 <-> R580 staging lab.
+# G-11 RTX 2080 host vGPU branch switcher: R535 <-> R570, plus R580 staging lab.
 #
 # The R535 seed is host-local because it contains NVIDIA proprietary files and
 # kernel-specific, locally adapted modules.  Nothing from that seed belongs in
@@ -12,10 +12,13 @@ shopt -s nullglob
 umask 022
 
 readonly R535_VERSION=535.161.05
+readonly R570_VERSION=570.172.07
 readonly R580_VERSION=580.159.01
 readonly R535_PACKAGE=nvidia-vgpu-ubuntu-535
+readonly R570_PACKAGE=nvidia-vgpu-ubuntu-570
 readonly R580_PACKAGE=nvidia-vgpu-ubuntu-580
 readonly R535_DEB_SHA256=2786430d32b6894f360ce0c249b29f849ae963c186840547151ed00d0feaebb9
+readonly R570_DEB_SHA256=37e13ef147fe97f77be44736fb4b9996f67355c1f19ef3da7be48a9a4af34fe9
 readonly R580_DEB_SHA256=033d2aec703ea366f35cade25207ab30a279b8076eb7382daa31e9649bf3f246
 readonly RTX2080_VENDOR_DEVICE=10de:1e82
 
@@ -29,8 +32,10 @@ readonly BRANCH_STATE="$STATE_ROOT/current.state"
 readonly GLOBAL_LOCK=/opt/nvidia-modes/state/current
 readonly PENDING_STATE="$STATE_ROOT/pending-reboot.state"
 readonly DEFAULT_R535_DEB=/home/ubuntu/Downloads/vGPU16.4/Host_Drivers/nvidia-vgpu-ubuntu-535_535.161.05_amd64.deb
+readonly DEFAULT_R570_DEB=/home/ubuntu/Downloads/vGPU18.4/Host_Drivers/nvidia-vgpu-ubuntu-570_570.172.07_amd64.deb
 readonly DEFAULT_R580_DEB=/home/ubuntu/Downloads/vGPU19.5/Host_Drivers/nvidia-vgpu-ubuntu-580_580.159.01_amd64.deb
 readonly CACHED_R535_DEB="$PACKAGE_CACHE/nvidia-vgpu-ubuntu-535_535.161.05_amd64.deb"
+readonly CACHED_R570_DEB="$PACKAGE_CACHE/nvidia-vgpu-ubuntu-570_570.172.07_amd64.deb"
 readonly CACHED_R580_DEB="$PACKAGE_CACHE/nvidia-vgpu-ubuntu-580_580.159.01_amd64.deb"
 # Ubuntu DKMS otherwise signs every locally built module with its generated
 # MOK even when Secure Boot is disabled.  Passing an intentionally absent
@@ -46,6 +51,7 @@ readonly QEMU_GATE_FILE="$QEMU_GATE_DIR/20-vmate-g11-vgpu-branch-verify.conf"
 
 COMMAND=status
 R535_DEB=
+R570_DEB=
 R580_DEB=
 NO_REBOOT=0
 FORCE=0
@@ -66,7 +72,8 @@ G-11 RTX 2080 vGPU 宿主驱动分支切换
 
 用法：
   switch-g11-vgpu-branch.sh status
-  sudo switch-g11-vgpu-branch.sh init-r535 [--r535-deb FILE] [--r580-deb FILE]
+  sudo switch-g11-vgpu-branch.sh init-r535 [--r535-deb FILE] [--r570-deb FILE] [--r580-deb FILE]
+  sudo switch-g11-vgpu-branch.sh r570 [--r570-deb FILE] [--no-reboot]
   sudo switch-g11-vgpu-branch.sh r580-lab [--r580-deb FILE] [--no-reboot]
   sudo switch-g11-vgpu-branch.sh r535 [--r535-deb FILE] [--no-reboot]
   switch-g11-vgpu-branch.sh doctor
@@ -74,6 +81,8 @@ G-11 RTX 2080 vGPU 宿主驱动分支切换
 命令：
   status      只读显示当前驱动、RM、包、Hook 和 R535 恢复种子状态。
   init-r535   在当前健康 R535 上建立内核绑定、root-only 的恢复种子。
+  r570        切到 vGPU 18.4/R570.172.07 闭源 RM + RTX capability Hook。
+              切换后必须通过自动冷启动验收，才会解除 VM 启动门禁。
   r580-lab    切到 R580.159.01 闭源 RM + RTX capability Hook。
               只供 Guest 582.53 母盘预装/暂存；不能作为生产稳定性证明。
   r535        恢复已验证的 R535.161.05 稳定生产分支。
@@ -81,6 +90,7 @@ G-11 RTX 2080 vGPU 宿主驱动分支切换
 
 选项：
   --r535-deb FILE  指定官方 R535.161.05 amd64 DEB 的绝对路径。
+  --r570-deb FILE  指定官方 R570.172.07 amd64 DEB 的绝对路径。
   --r580-deb FILE  指定官方 R580.159.01 amd64 DEB 的绝对路径。
   --no-reboot      工程验证用；切换完成后不自动重启。
   --force          仅 init-r535：重建已有的 R535 恢复种子。
@@ -105,6 +115,11 @@ parse_args() {
                 R535_DEB=$2
                 shift 2
                 ;;
+            --r570-deb)
+                (($# >= 2)) || die '--r570-deb 缺少路径'
+                R570_DEB=$2
+                shift 2
+                ;;
             --r580-deb)
                 (($# >= 2)) || die '--r580-deb 缺少路径'
                 R580_DEB=$2
@@ -117,7 +132,7 @@ parse_args() {
         esac
     done
     case "$COMMAND" in
-        status|init-r535|r535|r580-lab|doctor) ;;
+        status|init-r535|r535|r570|r580-lab|doctor) ;;
         -h|--help|help) usage; exit 0 ;;
         *) usage >&2; die "未知命令：$COMMAND" ;;
     esac
@@ -271,6 +286,8 @@ hook_policy() {
         printf 'missing\n'
     elif grep -Fxq 'r535_unlock_policy=consumer' "$state"; then
         printf 'r535-consumer\n'
+    elif grep -Fxq 'r570_unlock_policy=consumer' "$state"; then
+        printf 'r570-consumer\n'
     elif grep -Fxq 'r580_unlock_policy=consumer-lab' "$state"; then
         printf 'r580-consumer-lab\n'
     elif grep -Fxq 'r580_unlock_policy=native' "$state"; then
@@ -295,7 +312,8 @@ show_host_fb_policy() {
 
 cmd_status() {
     detect_rtx2080 || true
-    local version license signer seed_kernel seed_archive branch branch_status package535 package580
+    local version license signer seed_kernel seed_archive branch branch_status
+    local package535 package570 package580
     version=$(loaded_version)
     license=$(module_license)
     signer=$(module_signer)
@@ -304,6 +322,7 @@ cmd_status() {
     branch=$(state_value "$BRANCH_STATE" branch || true)
     branch_status=$(state_value "$BRANCH_STATE" status || true)
     package535="$(package_status "$R535_PACKAGE")/$(package_version "$R535_PACKAGE")"
+    package570="$(package_status "$R570_PACKAGE")/$(package_version "$R570_PACKAGE")"
     package580="$(package_status "$R580_PACKAGE")/$(package_version "$R580_PACKAGE")"
     printf 'GPU            : %s (%s)\n' "${GPU_BDF:-未唯一识别}" "$RTX2080_VENDOR_DEVICE"
     printf '当前内核       : %s\n' "$KVER"
@@ -313,6 +332,7 @@ cmd_status() {
     printf '脚本记录分支   : %s/%s\n' "${branch:-unknown}" "${branch_status:-unknown}"
     printf 'Hook 策略      : %s\n' "$(hook_policy)"
     printf 'R535 dpkg      : %s\n' "$package535"
+    printf 'R570 dpkg      : %s\n' "$package570"
     printf 'R580 dpkg      : %s\n' "$package580"
     if [[ -n "$seed_kernel" && -n "$seed_archive" ]]; then
         printf 'R535 恢复种子  : ready (kernel=%s, archive=%s)\n' \
@@ -323,6 +343,8 @@ cmd_status() {
     show_host_fb_policy
     if [[ "$version" == "$R580_VERSION" ]]; then
         printf '稳定性结论     : R580/RTX 仅限母盘暂存；已观察到 XID 43/TDR\n'
+    elif [[ "$version" == "$R570_VERSION" ]]; then
+        printf '稳定性结论     : R570/RTX 分支；以本次冷启动/Guest 快速验收状态为准\n'
     elif [[ "$version" == "$R535_VERSION" ]]; then
         printf '稳定性结论     : R535 本机生产分支\n'
     fi
@@ -438,7 +460,7 @@ cmd_init_r535() {
     [[ -d /usr/share/nvidia/vgpu && ! -L /usr/share/nvidia/vgpu ]] || \
         die 'R535 vGPU 数据目录缺失或不安全'
 
-    local selected535 selected580 archive temp_archive archive_sha module
+    local selected535 selected570 selected580 archive temp_archive archive_sha module
     local -a modules=()
     selected535=$(select_deb "$R535_DEB" "$CACHED_R535_DEB" "$DEFAULT_R535_DEB" \
         "$R535_PACKAGE" "$R535_VERSION" "$R535_DEB_SHA256")
@@ -460,6 +482,13 @@ cmd_init_r535() {
         ((FORCE)) || die 'R535 种子已存在；确认当前 R535 健康后用 --force 重建'
     fi
     cache_deb "$selected535" "$CACHED_R535_DEB"
+    if selected570=$(select_deb "$R570_DEB" "$CACHED_R570_DEB" "$DEFAULT_R570_DEB" \
+            "$R570_PACKAGE" "$R570_VERSION" "$R570_DEB_SHA256" 2>/dev/null); then
+        cache_deb "$selected570" "$CACHED_R570_DEB"
+        log '已同时缓存并校验官方 R570.172.07 DEB'
+    else
+        warn '未缓存 R570 DEB；首次切换时用 --r570-deb 指定'
+    fi
     if selected580=$(select_deb "$R580_DEB" "$CACHED_R580_DEB" "$DEFAULT_R580_DEB" \
             "$R580_PACKAGE" "$R580_VERSION" "$R580_DEB_SHA256" 2>/dev/null); then
         cache_deb "$selected580" "$CACHED_R580_DEB"
@@ -566,16 +595,16 @@ remove_exact_source_tree() {
 
 run_unlock_setup() {
     local branch=$1
-    local -a environment=()
+    local -a environment=() setup_args=(--restart-manager --no-tests)
     if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root && \
           "$SUDO_USER" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
         environment+=("G11_BUILD_USER=$SUDO_USER")
     fi
-    if [[ "$branch" == r580-lab ]]; then
-        env "${environment[@]}" "$UNLOCK_SETUP" --restart-manager --r580-consumer-lab
-    else
-        env "${environment[@]}" "$UNLOCK_SETUP" --restart-manager
-    fi
+    case "$branch" in
+        r570) setup_args+=(--r570-consumer) ;;
+        r580-lab) setup_args+=(--r580-consumer-lab) ;;
+    esac
+    env "${environment[@]}" "$UNLOCK_SETUP" "${setup_args[@]}"
 }
 
 wait_for_mdev_types() {
@@ -697,6 +726,7 @@ restore_r535_core() {
     archive=$(state_value "$SEED_META" archive)
 
     stop_driver_stack
+    purge_vgpu_package "$R570_PACKAGE" "$R570_VERSION"
     purge_vgpu_package "$R580_PACKAGE" "$R580_VERSION"
     purge_vgpu_package "$R535_PACKAGE" "$R535_VERSION"
     MUTATION_STARTED=1
@@ -726,6 +756,48 @@ restore_r535_core() {
     queue_postboot_validation r535
 }
 
+switch_to_r570() {
+    local selected570
+    verify_r535_seed
+    selected570=$(select_deb "$R570_DEB" "$CACHED_R570_DEB" "$DEFAULT_R570_DEB" \
+        "$R570_PACKAGE" "$R570_VERSION" "$R570_DEB_SHA256")
+    cache_deb "$selected570" "$CACHED_R570_DEB"
+
+    stop_driver_stack
+    MUTATION_STARTED=1
+    purge_vgpu_package "$R535_PACKAGE" "$R535_VERSION"
+    purge_vgpu_package "$R570_PACKAGE" "$R570_VERSION"
+    purge_vgpu_package "$R580_PACKAGE" "$R580_VERSION"
+    log '安装官方 R570.172.07 host 包（随后强制改为闭源 RM）'
+    dpkg_without_module_signing -i "$CACHED_R570_DEB"
+
+    # RTX 2080 is selected for open RM by NVIDIA's postinst.  The reviewed
+    # vGPU path needs the proprietary RM tree shipped in the same package.
+    stop_driver_stack
+    dkms remove -m nvidia -v "$R570_VERSION-open" --all >/dev/null 2>&1 || true
+    dkms remove -m nvidia -v "$R570_VERSION" --all >/dev/null 2>&1 || true
+    [[ -d "/usr/src/nvidia-$R570_VERSION" && \
+       ! -L "/usr/src/nvidia-$R570_VERSION" ]] || \
+        die '官方 R570 闭源 DKMS 源码树缺失'
+    dkms_without_module_signing add -m nvidia -v "$R570_VERSION"
+    IGNORE_CC_MISMATCH=1 dkms_without_module_signing \
+        install -m nvidia -v "$R570_VERSION" -k "$KVER"
+    depmod -a "$KVER"
+    modinfo -k "$KVER" -F version nvidia | grep -Fxq "$R570_VERSION" || \
+        die 'R570 闭源模块版本复验失败'
+    modinfo -k "$KVER" -F license nvidia | grep -Fxq NVIDIA || \
+        die 'R570 模块仍是 open RM，拒绝继续'
+    assert_nvidia_modules_unsigned
+    modprobe nvidia
+    modprobe nvidia_vgpu_vfio
+    unmask_driver_services
+    run_unlock_setup r570
+    apt-mark hold "$R570_PACKAGE" >/dev/null
+    update-initramfs -u -k "$KVER"
+    validate_runtime_before_reboot "$R570_VERSION" 'r570_unlock_policy=consumer'
+    queue_postboot_validation r570
+}
+
 switch_to_r580() {
     local selected580
     verify_r535_seed
@@ -736,6 +808,7 @@ switch_to_r580() {
     stop_driver_stack
     MUTATION_STARTED=1
     purge_vgpu_package "$R535_PACKAGE" "$R535_VERSION"
+    purge_vgpu_package "$R570_PACKAGE" "$R570_VERSION"
     purge_vgpu_package "$R580_PACKAGE" "$R580_VERSION"
     log '安装官方 R580.159.01 host 包（随后强制改为闭源 RM）'
     dpkg_without_module_signing -i "$CACHED_R580_DEB"
@@ -774,16 +847,16 @@ switch_failure() {
     unmask_driver_services
     ((rc != 0)) || return 0
     [[ -n "$GPU_BDF" ]] && write_branch_state "${TARGET_REQUEST:-unknown}" incomplete || true
-    if [[ "$TARGET_REQUEST" == r580-lab && $MUTATION_STARTED == 1 && \
+    if [[ "$TARGET_REQUEST" =~ ^r(570|580-lab)$ && $MUTATION_STARTED == 1 && \
           $ROLLBACK_RUNNING == 0 ]]; then
         ROLLBACK_RUNNING=1
-        warn "R580 切换失败（exit=$rc），开始自动恢复 R535"
+        warn "$TARGET_REQUEST 切换失败（exit=$rc），开始自动恢复 R535"
         set +e
         ( set -e; restore_r535_core )
         local rollback_rc=$?
         set -e
         if ((rollback_rc == 0)); then
-            warn '已自动恢复并验证 R535；R580 命令仍以失败返回，请查看上方原始错误'
+            warn "已自动恢复并验证 R535；$TARGET_REQUEST 命令仍以失败返回，请查看上方原始错误"
         else
             warn "R535 自动恢复也失败（exit=$rollback_rc）；重新运行 sudo $0 r535"
         fi
@@ -831,8 +904,17 @@ cmd_switch() {
         validate_runtime "$R580_VERSION" 'r580_unlock_policy=consumer-lab'
         write_branch_state r580-lab ready
         rm -f -- "$PENDING_STATE"
+    elif [[ "$target" == r570 && "$current" == "$R570_VERSION" && \
+          "$(module_license)" == NVIDIA && "$(hook_policy)" == r570-consumer ]]; then
+        log '当前已经是健康 R570 分支，无需重装'
+        install_postboot_verifier
+        validate_runtime "$R570_VERSION" 'r570_unlock_policy=consumer'
+        write_branch_state r570 ready
+        rm -f -- "$PENDING_STATE"
     elif [[ "$target" == r535 ]]; then
         restore_r535_core
+    elif [[ "$target" == r570 ]]; then
+        switch_to_r570
     else
         warn 'R580/RTX 仅限 Guest 582.53 母盘暂存；本机曾出现 XID 43/TDR/SDL 黑屏'
         switch_to_r580
@@ -868,6 +950,7 @@ main() {
         status) cmd_status ;;
         init-r535) cmd_init_r535 ;;
         r535) cmd_switch r535 ;;
+        r570) cmd_switch r570 ;;
         r580-lab) cmd_switch r580-lab ;;
         doctor) cmd_doctor ;;
     esac

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keep the official R580 V100 heterogeneous time-slice mode enabled.
+# Keep the official R570/R580 V100 heterogeneous time-slice mode enabled.
 set -euo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -37,9 +37,9 @@ device_id=${device_id#0x}
 
 driver_version=$(cat /sys/module/nvidia/version 2>/dev/null || true)
 case "$driver_version" in
-    580.159.01) ;;
+    570.172.07|580.159.01) ;;
     *)
-        die "mixed-size is restricted to validated vGPU 19.5/R580.159.01 (loaded ${driver_version:-none})"
+        die "mixed-size requires reviewed vGPU 18.4/R570.172.07 or 19.5/R580.159.01 (loaded ${driver_version:-none})"
         ;;
 esac
 [[ -x "$NVIDIA_SMI" && ! -L "$NVIDIA_SMI" ]] || \

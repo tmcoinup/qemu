@@ -104,9 +104,10 @@ chmod 600 /安全路径/client_configuration_token.tok
   --token-file /安全路径/client_configuration_token.tok
 ```
 
-## Tesla V100 / vGPU 16.4 的 1Q
+## 既有 Tesla V100 / vGPU 16.4 的 1Q
 
-业务全部 1Q 时，推荐已完成 Code 0 与 RAM_TYPE/位宽验收的 R535/vGPU 16.4。
+本节只用于保留既有 R535/vGPU 16.4 全 1Q 主机；新 V100 使用 R570/vGPU 18.4。
+R535 组合已经完成 Code 0 与 RAM_TYPE/位宽验收。
 先确认没有活动 VM/mdev，再为 16GB PCIe V100 生成 equal 1Q：
 
 ```bash
@@ -126,10 +127,11 @@ bash deploy/configure-g11-vgpu-host.sh \
 
 R535.161.05 + 538.33 的 `V100X-1Q` 已确认 RAM_TYPE、位宽、Code 0、WHCP、
 1024MiB，并完成约 9 分钟无 PTE/TDR/XID/display-copy timeout 与正常关机回收。
-显存厂家因 Manager 未查询仍是未证明字段。2Q 和 mixed 不属于该合同。
+显存厂家因 Manager 未查询仍是该 R535 轮次的未证明字段；2Q 和 mixed 不属于
+R535/16.4 合同。V100 新主机的 R570/18.4 已另行完成单 2Q 和 1Q+2Q 实测。
 
 完整的 16.4 安装和安全边界见
 [`G11-V100-R535-VGPU16.4-FRESH-INSTALL.md`](G11-V100-R535-VGPU16.4-FRESH-INSTALL.md)。
-若明确需要 R580 19.5 的 mixed capability，参阅
-[`G11-V100-VGPU19.5-FRESH-INSTALL.md`](G11-V100-VGPU19.5-FRESH-INSTALL.md)；
-R580 完整消费卡 RM tuple 的 XID/TDR 结果不能与 R535 混为一谈。
+V100 新主机、2Q 或 mixed 请参阅
+[`G11-V100-VGPU18.4-FRESH-INSTALL.md`](G11-V100-VGPU18.4-FRESH-INSTALL.md)；
+R570 的通过结果不能外推到 R535/R580。

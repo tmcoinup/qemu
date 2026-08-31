@@ -16,7 +16,7 @@ usage() {
 usage: probe-vgpu-host.sh [--config FILE] [--profile NAME] [--fb-mb 1024|2048]
 
 Lists every mdev type exposed by the selected/auto-detected GPU parent and
-validates equal-size or V100/R580 mixed-size policy without writing host state.
+validates equal-size or V100/R570/R580 mixed-size policy without writing host state.
 --fb-mb may select either published mapping in mixed-size mode.
 EOF
 }

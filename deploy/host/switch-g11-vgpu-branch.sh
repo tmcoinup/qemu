@@ -98,7 +98,8 @@ G-11 vGPU 宿主驱动分支切换（RTX 2080 / Tesla V100 SXM2 16GB）
   init-r535   在当前健康 R535 上建立内核绑定、root-only 的恢复种子。
   bootstrap-v100-r535
               仅用于当前健康 R570/V100 且尚无 R535 种子的首次统一：安装
-              R535、发布 equal 1Q 策略、建立恢复种子并进入冷启动验收。
+              R535、发布 equal 1Q 策略、建立恢复种子并进入冷启动验收；
+              也可续跑本脚本记录且精确匹配的 R535 DKMS 失败断点。
   r570        切到 vGPU 18.4/R570.172.07 闭源 RM；RTX 使用 capability Hook，
               V100 保持 native capability 并启用 mixed 1Q+2Q。
               切换后必须通过自动冷启动验收，才会解除 VM 启动门禁。
@@ -925,20 +926,47 @@ switch_to_r570() {
     queue_postboot_validation r570
 }
 
+legacy_v100_bootstrap_resume_state() {
+    local mode
+    [[ -f "$BRANCH_STATE" && ! -L "$BRANCH_STATE" ]] || return 1
+    [[ "$(stat -c '%U:%G' "$BRANCH_STATE")" == root:root ]] || return 1
+    mode=$(stat -c '%a' "$BRANCH_STATE")
+    (((8#$mode & 0022) == 0)) || return 1
+    [[ "$(state_value "$BRANCH_STATE" branch || true)" == \
+       bootstrap-v100-r535 ]] || return 1
+    [[ "$(state_value "$BRANCH_STATE" status || true)" == incomplete ]] || return 1
+    [[ "$(state_value "$BRANCH_STATE" kernel || true)" == "$KVER" ]] || return 1
+    [[ "$(state_value "$BRANCH_STATE" gpu || true)" == "$GPU_BDF" ]] || return 1
+    [[ -z "$(loaded_version)" ]] || return 1
+    [[ "$(package_status "$R535_PACKAGE")" == unpacked && \
+       "$(package_version "$R535_PACKAGE")" == "$R535_VERSION" ]] || return 1
+    [[ -z "$(package_status "$R570_PACKAGE")" && \
+       -z "$(package_status "$R580_PACKAGE")" ]] || return 1
+    [[ "$(hook_policy)" == r570-native ]] || return 1
+    [[ -d "/usr/src/nvidia-$R535_VERSION" && \
+       ! -L "/usr/src/nvidia-$R535_VERSION" ]] || return 1
+}
+
 bootstrap_v100_r535_core() {
     local selected535 selected570
+    local -i resume_incomplete=0
     [[ "$GPU_KIND" == v100 ]] || \
         die 'bootstrap-v100-r535 只允许已审核的 Tesla V100'
     [[ ! -e "$SEED_META" ]] || \
         die 'R535 恢复种子已存在；请直接运行 r535'
-    [[ "$(loaded_version)" == "$R570_VERSION" && \
-       "$(module_license)" == NVIDIA && \
-       "$(hook_policy)" == r570-native ]] || \
-        die '首次 V100 统一必须从健康的 R570/native 分支执行'
-    [[ "$(package_status "$R570_PACKAGE")" == installed && \
-       "$(package_version "$R570_PACKAGE")" == "$R570_VERSION" ]] || \
-        die "dpkg 中没有完整安装 $R570_PACKAGE/$R570_VERSION"
-    validate_runtime "$R570_VERSION" "$(expected_hook_policy r570)"
+    if legacy_v100_bootstrap_resume_state; then
+        resume_incomplete=1
+        warn '检测到本脚本记录的 R535 DKMS 失败断点；将从官方 DEB 清理重装后续跑'
+    else
+        [[ "$(loaded_version)" == "$R570_VERSION" && \
+           "$(module_license)" == NVIDIA && \
+           "$(hook_policy)" == r570-native ]] || \
+            die '首次 V100 统一必须从健康的 R570/native 分支执行；只自动续跑精确匹配的失败断点'
+        [[ "$(package_status "$R570_PACKAGE")" == installed && \
+           "$(package_version "$R570_PACKAGE")" == "$R570_VERSION" ]] || \
+            die "dpkg 中没有完整安装 $R570_PACKAGE/$R570_VERSION"
+        validate_runtime "$R570_VERSION" "$(expected_hook_policy r570)"
+    fi
 
     selected535=$(select_deb "$R535_DEB" "$CACHED_R535_DEB" "$DEFAULT_R535_DEB" \
         "$R535_PACKAGE" "$R535_VERSION" "$R535_DEB_SHA256")
@@ -948,13 +976,18 @@ bootstrap_v100_r535_core() {
     cache_deb "$selected570" "$CACHED_R570_DEB"
 
     # Stop the retry timer before unloading R570 so it cannot race the package
-    # transaction.  --remove keeps a timestamped backup and retains the helper.
+    # transaction.  --remove is idempotent for the narrowly accepted resume
+    # state, keeps a timestamped backup and retains the helper.
     "$MIXED_MODE_INSTALLER" --remove
     stop_driver_stack
     MUTATION_STARTED=1
     purge_vgpu_package "$R570_PACKAGE" "$R570_VERSION"
     purge_vgpu_package "$R580_PACKAGE" "$R580_VERSION"
     purge_vgpu_package "$R535_PACKAGE" "$R535_VERSION"
+
+    if ((resume_incomplete)); then
+        log '失败断点已清理；从锁定哈希的官方 R535 包重新开始'
+    fi
 
     "$V100_R535_INSTALLER" --bdf "$GPU_BDF" \
         --driver-deb "$CACHED_R535_DEB"

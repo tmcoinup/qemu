@@ -14,6 +14,7 @@ from pathlib import Path
 
 PRISTINE_SHA256 = {
     "conftest.sh": "4e1d7009462d800339801c6e4029e225a531409124d0574f88423856c8024682",
+    "nvidia/nv.c": "16a9f2454cf8c0f14a8d7eee6ac9439e5d0bac665d3c6d7dc27051ee45ff2176",
     "nvidia/nv-pci.c": "7e17739d773b7fce1af2cca8babb67c2ee1b8357e7b31dc0d7e5901298e93863",
     "nvidia/nvidia.Kbuild": "b56c73c1dcda951440e8e3258ae949e427b57987ec457e601e5311d997e16bc2",
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.Kbuild": "615ec37048bac0ac8fe45dbbf6160a80915795d8119889c48ac716bb5a08b019",
@@ -27,6 +28,7 @@ PRISTINE_SHA256 = {
 # rejecting a partly patched or locally modified proprietary source tree.
 PATCHED_SHA256 = {
     "conftest.sh": "55d12131fbe924873548a49e452241c1dff77c2f4fb488ddce471483f465c6d5",
+    "nvidia/nv.c": "57886e429020dbc15ed98242bb38d54720fca1c3a1b91e7d39c5245075ae8603",
     "nvidia/nv-pci.c": "98b2d287f987b66ec37917f0ba58c3486e52a53a00acd90b7da7259f463d797d",
     "nvidia/nvidia.Kbuild": "513b373e37617a0af04c2a0ea3b1c948af3ae3d277a26d4172e364f0b4e831ba",
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.Kbuild": "6b86d471b5488fdf363cc48e293e0b37d381d88ff330cc569606bf1093abe2a3",
@@ -171,6 +173,16 @@ def patch_nvidia_kbuild(text: str) -> str:
     )
 
 
+def patch_nv(text: str) -> str:
+    return replace_once(
+        text,
+        "#if !defined(CONFIG_RETPOLINE)\n",
+        "#if !defined(CONFIG_RETPOLINE) && "
+        "!defined(CONFIG_MITIGATION_RETPOLINE)\n",
+        "Ubuntu 6.8 retpoline config rename",
+    )
+
+
 def patch_nv_pci(text: str) -> str:
     text = replace_once(
         text,
@@ -299,6 +311,7 @@ def patch_vgpu_source(text: str) -> str:
 
 PATCHERS = {
     "conftest.sh": patch_conftest,
+    "nvidia/nv.c": patch_nv,
     "nvidia/nv-pci.c": patch_nv_pci,
     "nvidia/nvidia.Kbuild": patch_nvidia_kbuild,
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.Kbuild": patch_vgpu_kbuild,

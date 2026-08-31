@@ -159,15 +159,13 @@ setup_exit() {
     exit "$status"
 }
 
-# 优先复用 /opt/vgpu_unlock-rs（仅当构建用户确实可写），否则落到构建用户 HOME。
+# 默认使用按固定上游 commit 隔离的 VMate 构建缓存。旧版本曾使用
+# ~/src/vgpu_unlock-rs 或 /opt/vgpu_unlock-rs；这些目录可能含已审核旧版补丁，也可能
+# 含操作员工作，新的自动修复一律原样保留。显式 BUILD_DIR 仍供工程诊断使用。
 # 脚本可能由 root 入口代普通用户执行；这里不能使用入口进程的 $HOME（通常为
 # /root），否则后续 build_run 会以普通用户在 /root 下创建目录并必然失败。
 if [[ -z "${BUILD_DIR:-}" ]]; then
-    if [[ -d /opt/vgpu_unlock-rs ]] && build_run test -w /opt/vgpu_unlock-rs; then
-        BUILD_DIR=/opt/vgpu_unlock-rs
-    else
-        BUILD_DIR=$BUILD_HOME/src/vgpu_unlock-rs
-    fi
+    BUILD_DIR="$BUILD_HOME/.cache/vmate/g11/vgpu_unlock-rs-$UPSTREAM_COMMIT"
 fi
 
 # ─── 装 rust/cargo ─────────────────────────────────────────────────────────

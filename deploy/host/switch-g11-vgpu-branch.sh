@@ -51,6 +51,8 @@ readonly DKMS_NO_SIGN_FILE=/run/vmate-dkms-module-signing-disabled
 readonly POSTBOOT_HELPER_SOURCE="$SCRIPT_DIR/verify-g11-vgpu-branch-postboot.sh"
 readonly POSTBOOT_UNIT_SOURCE="$SCRIPT_DIR/vmate-g11-vgpu-branch-verify.service"
 readonly V100_R535_INSTALLER="$SCRIPT_DIR/install-v100-r535-host.sh"
+readonly V100_R535_PATCHER="$SCRIPT_DIR/patch-nvidia-vgpu-r535-linux68.py"
+readonly V100_R535_INSTALL_STATE=/etc/vmate/g11-v100-r535.state
 readonly HOST_CONFIGURATOR="$SCRIPT_DIR/../configure-g11-vgpu-host.sh"
 readonly MIXED_MODE_INSTALLER="$SCRIPT_DIR/install-vgpu-mixed-mode.sh"
 readonly POSTBOOT_HELPER=/usr/local/libexec/vmate-g11-vgpu-branch-verify
@@ -185,6 +187,8 @@ require_commands() {
         die "冷启动验收 unit 缺失或不安全：$POSTBOOT_UNIT_SOURCE"
     [[ -x "$V100_R535_INSTALLER" && ! -L "$V100_R535_INSTALLER" ]] || \
         die "V100 R535 安装封装缺失或不安全：$V100_R535_INSTALLER"
+    [[ -x "$V100_R535_PATCHER" && ! -L "$V100_R535_PATCHER" ]] || \
+        die "V100 R535 兼容补丁器缺失或不安全：$V100_R535_PATCHER"
     [[ -x "$HOST_CONFIGURATOR" && ! -L "$HOST_CONFIGURATOR" ]] || \
         die "宿主策略生成器缺失或不安全：$HOST_CONFIGURATOR"
     [[ -x "$MIXED_MODE_INSTALLER" && ! -L "$MIXED_MODE_INSTALLER" ]] || \
@@ -926,8 +930,8 @@ switch_to_r570() {
     queue_postboot_validation r570
 }
 
-legacy_v100_bootstrap_resume_state() {
-    local mode r535_status
+v100_bootstrap_incomplete_state() {
+    local mode
     [[ -f "$BRANCH_STATE" && ! -L "$BRANCH_STATE" ]] || return 1
     [[ "$(stat -c '%U:%G' "$BRANCH_STATE")" == root:root ]] || return 1
     mode=$(stat -c '%a' "$BRANCH_STATE")
@@ -937,6 +941,11 @@ legacy_v100_bootstrap_resume_state() {
     [[ "$(state_value "$BRANCH_STATE" status || true)" == incomplete ]] || return 1
     [[ "$(state_value "$BRANCH_STATE" kernel || true)" == "$KVER" ]] || return 1
     [[ "$(state_value "$BRANCH_STATE" gpu || true)" == "$GPU_BDF" ]] || return 1
+}
+
+partial_v100_bootstrap_resume_state() {
+    local r535_status
+    v100_bootstrap_incomplete_state || return 1
     [[ -z "$(loaded_version)" ]] || return 1
     r535_status=$(package_status "$R535_PACKAGE")
     [[ "$r535_status" == unpacked || "$r535_status" == half-configured ]] || return 1
@@ -948,15 +957,47 @@ legacy_v100_bootstrap_resume_state() {
        ! -L "/usr/src/nvidia-$R535_VERSION" ]] || return 1
 }
 
+ready_v100_bootstrap_resume_state() {
+    local mode expected_patcher
+    v100_bootstrap_incomplete_state || return 1
+    [[ "$(loaded_version)" == "$R535_VERSION" && \
+       "$(module_license)" == NVIDIA && -z "$(module_signer)" ]] || return 1
+    [[ "$(package_status "$R535_PACKAGE")" == installed && \
+       "$(package_version "$R535_PACKAGE")" == "$R535_VERSION" ]] || return 1
+    [[ -z "$(package_status "$R570_PACKAGE")" && \
+       -z "$(package_status "$R580_PACKAGE")" ]] || return 1
+    [[ "$(hook_policy)" == r570-native ]] || return 1
+    systemctl is-active --quiet nvidia-vgpu-mgr.service || return 1
+    [[ -f "$V100_R535_INSTALL_STATE" && \
+       ! -L "$V100_R535_INSTALL_STATE" ]] || return 1
+    [[ "$(stat -c '%U:%G' "$V100_R535_INSTALL_STATE")" == root:root ]] || return 1
+    mode=$(stat -c '%a' "$V100_R535_INSTALL_STATE")
+    (((8#$mode & 0022) == 0)) || return 1
+    [[ "$(state_value "$V100_R535_INSTALL_STATE" phase || true)" == ready ]] || return 1
+    [[ "$(state_value "$V100_R535_INSTALL_STATE" kernel || true)" == "$KVER" ]] || return 1
+    [[ "$(state_value "$V100_R535_INSTALL_STATE" target_bdf || true)" == \
+       "$GPU_BDF" ]] || return 1
+    [[ "$(state_value "$V100_R535_INSTALL_STATE" driver_version || true)" == \
+       "$R535_VERSION" ]] || return 1
+    [[ "$(state_value "$V100_R535_INSTALL_STATE" driver_sha256 || true)" == \
+       "$R535_DEB_SHA256" ]] || return 1
+    expected_patcher=$(sha256sum "$V100_R535_PATCHER" | awk '{print $1}')
+    [[ "$(state_value "$V100_R535_INSTALL_STATE" patcher_sha256 || true)" == \
+       "$expected_patcher" ]] || return 1
+}
+
 bootstrap_v100_r535_core() {
     local selected535 selected570
-    local -i resume_incomplete=0
+    local resume_mode=fresh
     [[ "$GPU_KIND" == v100 ]] || \
         die 'bootstrap-v100-r535 只允许已审核的 Tesla V100'
     [[ ! -e "$SEED_META" ]] || \
         die 'R535 恢复种子已存在；请直接运行 r535'
-    if legacy_v100_bootstrap_resume_state; then
-        resume_incomplete=1
+    if ready_v100_bootstrap_resume_state; then
+        resume_mode=driver-ready
+        warn '检测到已通过安装器复检的 R535 驱动断点；保留驱动并从 Hook 安装续跑'
+    elif partial_v100_bootstrap_resume_state; then
+        resume_mode=package-partial
         warn '检测到本脚本记录的 R535 DKMS 失败断点；将从官方 DEB 清理重装后续跑'
     else
         [[ "$(loaded_version)" == "$R570_VERSION" && \
@@ -980,18 +1021,24 @@ bootstrap_v100_r535_core() {
     # transaction.  --remove is idempotent for the narrowly accepted resume
     # state, keeps a timestamped backup and retains the helper.
     "$MIXED_MODE_INSTALLER" --remove
-    stop_driver_stack
     MUTATION_STARTED=1
-    purge_vgpu_package "$R570_PACKAGE" "$R570_VERSION"
-    purge_vgpu_package "$R580_PACKAGE" "$R580_VERSION"
-    purge_vgpu_package "$R535_PACKAGE" "$R535_VERSION"
+    if [[ "$resume_mode" == driver-ready ]]; then
+        assert_nvidia_modules_unsigned
+        nvidia-smi --query-gpu=driver_version,name,memory.total --format=csv,noheader
+        log 'R535 驱动断点复检通过；开始安装当前审核 Hook'
+    else
+        stop_driver_stack
+        purge_vgpu_package "$R570_PACKAGE" "$R570_VERSION"
+        purge_vgpu_package "$R580_PACKAGE" "$R580_VERSION"
+        purge_vgpu_package "$R535_PACKAGE" "$R535_VERSION"
 
-    if ((resume_incomplete)); then
-        log '失败断点已清理；从锁定哈希的官方 R535 包重新开始'
+        if [[ "$resume_mode" == package-partial ]]; then
+            log '失败断点已清理；从锁定哈希的官方 R535 包重新开始'
+        fi
+
+        "$V100_R535_INSTALLER" --bdf "$GPU_BDF" \
+            --driver-deb "$CACHED_R535_DEB"
     fi
-
-    "$V100_R535_INSTALLER" --bdf "$GPU_BDF" \
-        --driver-deb "$CACHED_R535_DEB"
     run_unlock_setup r535
     apt-mark hold "$R535_PACKAGE" >/dev/null
     update-initramfs -u -k "$KVER"

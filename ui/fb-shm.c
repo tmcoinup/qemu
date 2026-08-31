@@ -2588,6 +2588,7 @@ static bool fb_shm_commit_surface_gpu_frame(FbShmDisplay *d,
         d->gl_cpu_upload_fb.height != rh ||
         !d->gl_cpu_upload_fb.texture;
 
+    /* Every due tick publishes; damage only controls cache refresh. */
     if (upload_changed) {
         if (d->gl_cpu_upload_fb.width != rw ||
             d->gl_cpu_upload_fb.height != rh ||

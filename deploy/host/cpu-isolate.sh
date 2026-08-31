@@ -128,8 +128,10 @@ verify_qemu_process() {
     [[ "$pid" =~ ^[1-9][0-9]*$ && -d "$PROC_ROOT/$pid/task" ]] ||
         die "QEMU pid 不存在: $pid"
     exe=$(readlink -f "$PROC_ROOT/$pid/exe" 2>/dev/null || true)
-    [[ "${exe##*/}" == qemu-system-x86_64 ]] ||
-        die "pid=$pid 不是 qemu-system-x86_64"
+    case "${exe##*/}" in
+        qemu-system-x86_64|qemu-system-x86_64.g11.real) ;;
+        *) die "pid=$pid 不是受支持的 G-11 qemu-system-x86_64" ;;
+    esac
     while IFS= read -r arg; do
         if (( expect_name )); then
             [[ "$arg" == "vm${vm_id}" || "$arg" == "vm${vm_id},"* ]] &&

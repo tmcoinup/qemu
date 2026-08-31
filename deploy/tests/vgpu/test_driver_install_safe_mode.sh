@@ -47,6 +47,15 @@ safe_headless=( "${safe[@]}" )
 safe_headless[14]=none
 vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "${safe_headless[@]}" ||
     fail "reviewed headless driver-install argv was rejected"
+safe_packaged=( "${safe[@]}" )
+safe_packaged[0]=/opt/vmate/libexec/qemu-system-x86_64.g11.real
+vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "${safe_packaged[@]}" ||
+    fail "packaged G-11 driver-install argv was rejected"
+safe_v11=( "${safe[@]}" )
+safe_v11[0]=/opt/vmate/libexec/qemu-system-x86_64.real
+if vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "${safe_v11[@]}"; then
+    fail "independent V-11 runtime was accepted as a G-11 driver-install VM"
+fi
 
 reject_argv() {
     if vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "$@"; then

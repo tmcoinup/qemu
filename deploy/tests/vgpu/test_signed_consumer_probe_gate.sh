@@ -86,6 +86,7 @@ chmod +x "$TMP_DIR/qemu-system-x86_64"
 env -i \
     HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
     IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+    VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
     "$CREATE_VM" "$VM_ID" \
         --platform i5-4590-h81m-s1-8g \
         --ssd-profile samsung-850-pro-512gb \
@@ -187,6 +188,7 @@ run_probe() {
 # wrapper-consumed FD cannot create authorization.
 if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
         IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+        VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
         "$START_VM" "$VM_ID" --dry-run --spoof \
         >"$TMP_DIR/ordinary-a.out" 2>"$TMP_DIR/ordinary-a.err"; then
     fail "ordinary strict-A launch was accepted"
@@ -195,6 +197,7 @@ require_text "strict-A startup is disabled" "$TMP_DIR/ordinary-a.err"
 
 if env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
         IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+        VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
         "$START_VM" "$VM_ID" --dry-run \
             --signed-consumer-probe outer-only \
         >"$TMP_DIR/no-fd.out" 2>"$TMP_DIR/no-fd.err"; then
@@ -252,6 +255,7 @@ VM_ID=2147483647
 env -i \
     HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
     IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+    VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
     "$CREATE_VM" "$VM_ID" \
         --platform i5-4590-h81m-s1-8g \
         --ssd-profile samsung-850-pro-512gb \
@@ -273,6 +277,7 @@ require_text "signed-consumer-probe authorized for this invocation only: vm${VM_
 UNQUALIFIED_VM_ID=88
 env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
     IMAGE_ROOT="$IMAGE_ROOT" VM_ROOT="$VM_ROOT" \
+    VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
     "$CREATE_VM" "$UNQUALIFIED_VM_ID" \
         --platform i5-4590-h81m-s1-8g \
         --ssd-profile samsung-850-pro-512gb \

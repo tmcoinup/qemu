@@ -207,7 +207,10 @@ done
 for proc in /proc/[0-9]*; do
     [[ -r "$proc/cmdline" ]] || continue
     exe=$(readlink -f "$proc/exe" 2>/dev/null || true)
-    [[ "${exe##*/}" == qemu-system-x86_64 ]] || continue
+    case "${exe##*/}" in
+        qemu-system-x86_64|qemu-system-x86_64.g11.real) ;;
+        *) continue ;;
+    esac
     mapfile -d '' -t argv <"$proc/cmdline" || true
     is_vgpu=0
     uses_root=0

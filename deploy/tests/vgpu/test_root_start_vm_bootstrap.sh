@@ -48,7 +48,11 @@ else
     trap 'rm -rf -- "$TMP_DIR"' EXIT
 fi
 
-touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd"
+EMPTY_VGPU_CONFIG="$TMP_DIR/vgpu-host.conf"
+mkdir -p "$TMP_DIR/pc-bios"
+touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd" \
+    "$EMPTY_VGPU_CONFIG" "$TMP_DIR/pc-bios/bios-256k.bin" \
+    "$TMP_DIR/pc-bios/vgabios-stdvga.bin"
 
 # Non-dry-run startup now validates the bridge helper, exact ACL and shared
 # maintenance lock even when BRIDGE_UPLINK_CHECK=off (that switch skips only
@@ -250,15 +254,18 @@ run_start() {
         VM_ROOT="$vm_root" \
         QEMU_IMG="$TMP_DIR/qemu-img" \
         QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \
+        G11_QEMU_DATA_DIR="$TMP_DIR/pc-bios" \
         XORRISO="$TMP_DIR/xorriso" \
         OVMF_CODE="$TMP_DIR/OVMF_CODE.fd" \
         OVMF_VARS="$TMP_DIR/OVMF_VARS.fd" \
+        VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
         TPM=0 \
         CPU_ISOLATION=off \
         HOST_OOM_PROTECT=0 \
         QEMU_DISK_AIO=threads \
         MEM_GUARD=0 \
         REPAIR_DISPLAY_VARS=off \
+        G11_HOST_BRIDGE_PRESENTATION=off \
         BRIDGE_UPLINK_CHECK=off \
         G11_BRIDGE_HELPER="$NETWORK_TEST_ROOT/bridge-helper" \
         G11_BRIDGE_ACL="$NETWORK_TEST_ROOT/bridge.conf" \
@@ -294,7 +301,7 @@ require_text 'id=odd0' "$TMP_DIR/qemu.trace"
 require_text 'media=cdrom' "$TMP_DIR/qemu.trace"
 require_text 'format=raw' "$TMP_DIR/qemu.trace"
 require_text 'id=installboot' "$TMP_DIR/qemu.trace"
-require_text 'g11-usb-install-boot.img' "$TMP_DIR/qemu.trace"
+require_text 'install-boot-helper.raw' "$TMP_DIR/qemu.trace"
 require_text 'id=installboot\,format=raw\,readonly=on' "$TMP_DIR/qemu.trace"
 require_text 'usb-storage\,id=installboot-usb\,drive=installboot\,bus=xhci.0\,port=4\,bootindex=1\,removable=on' \
     "$TMP_DIR/qemu.trace"

@@ -1474,7 +1474,10 @@ ${INPUT_POLICY_CONFIG}
 VM_MAC=${VM_MAC}
 EOF
 chmod 444 "$CONF_TMP"
-mv -T -- "$CONF_TMP" "$CONF"
+# --force is non-interactive even when a caller owns a TTY and the existing
+# immutable-by-policy vm.conf is mode 0444.  The fully written temporary file
+# remains the only object atomically published at the destination.
+mv -fT -- "$CONF_TMP" "$CONF"
 trap - EXIT
 
 printf '创建成功: %s\n' "$CONF"

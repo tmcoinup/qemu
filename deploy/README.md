@@ -158,7 +158,7 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/recover-hibernated-vm.sh <vm_id> [--rescue-gtk] [--proxy]` | 休眠/Fast Startup 一键恢复：只开本地标准 VGA，Windows 完整关机后自动强制同步显示器；不挂 vGPU、不走远程桌面、不装 guest 包，任一步失败即停止 |
 | `./deploy/scripts/sync-monitor-profile.sh <vm_id> --force` | `vmctl monitor` 的底层入口；普通启动和克隆已自动调用，强制修复时核对生产 538.33/INF 收据并重写 FHD/1K EDID 与 8 项 R535 page-safe `NV_Modes`；guest 内零常驻 |
 | `sudo ./deploy/host/recover-vgpu-gpu.sh --check --resume`（确认后去掉 `--check`） | 所有 VM/mdev 已停后的 host GPU 一键恢复；共享锁与 fd 门禁后仅尝试 NVIDIA reset、干净模块重载和精确 FLR，绝不 bus reset、强卸模块或自动重启宿主 |
-| `./deploy/host/switch-g11-vgpu-branch.sh {status\|doctor}` / `sudo ... {init-r535\|r535\|r580-lab}` | 本机 RTX 2080 的 R535 稳定生产档与 R580 母盘暂存实验档一键切换；精确 DEB/RM/内核门禁、失败自动回滚，教程见 [`docs/G11-RTX2080-R535-R580-SWITCH.md`](docs/G11-RTX2080-R535-R580-SWITCH.md) |
+| `./deploy/host/switch-g11-vgpu-branch.sh {status\|doctor}` / `sudo ... {init-r535\|r535\|r580-lab}` | 本机 RTX 2080 的 R535 稳定生产档与 R580 母盘暂存实验档一键切换；精确 DEB/RM/内核/空 signer 门禁、失败自动回滚，重启后先于 VM 自动验收并写 `ready`，教程见 [`docs/G11-RTX2080-R535-R580-SWITCH.md`](docs/G11-RTX2080-R535-R580-SWITCH.md) |
 | `./deploy/scripts/check-hardware-pool.sh` | 无 sudo、无写入地验证硬件目录及本机 KVM CPU realization；区分新 VM 与旧 VM 兼容池 |
 | `./deploy/scripts/create-home-vm.sh <vm_id> --spec 2c2t\|2c4t\|4c4t\|4c8t\|6c12t [--memory-size 4G\|8G\|12G\|16G]` | 家用池傻瓜封装；默认 8G、同规格内按宿主兼容性选择，教程见 [`docs/G11-HOME-CPU-POOL-QUICKSTART.md`](docs/G11-HOME-CPU-POOL-QUICKSTART.md) |
 | `./deploy/scripts/create-vm.sh <vm_id> --cpu-profile i7-4930k --board-profile BOARD --memory-profile MEMORY --ssd-profile SSD` | 底层精确组件入口；五种 CPU 规格都只从审核白名单选择 |

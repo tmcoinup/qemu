@@ -57,6 +57,7 @@ STATE_FILE="$STATE_DIR/original-state.tsv"
 # between input events without burning a meaningful slice of a vCPU.
 readonly HALT_POLL_NS_TARGET=200000
 readonly SWAPPINESS_TARGET=1
+readonly PERFORMANCE_SERVICE=qemu-g11-performance.service
 
 log() { printf '[g11-performance] %s\n' "$*"; }
 warn() { printf '[g11-performance] WARN: %s\n' "$*" >&2; }
@@ -139,10 +140,8 @@ snapshot_original_state() {
                 "$(selected_value "$value")"
         done
     done
-    for field in no_turbo; do
-        value=$(read_one_line "$INTEL_PSTATE_ROOT/$field" 2>/dev/null || true)
-        [[ -z "$value" ]] || state_append "$tmp" "intel_pstate.${field}" "$value"
-    done
+    value=$(read_one_line "$INTEL_PSTATE_ROOT/no_turbo" 2>/dev/null || true)
+    [[ -z "$value" ]] || state_append "$tmp" intel_pstate.no_turbo "$value"
     value=$(read_one_line "$CPUFREQ_ROOT/boost" 2>/dev/null || true)
     [[ -z "$value" ]] || state_append "$tmp" cpufreq.boost "$value"
     for field in enabled defrag; do
@@ -220,10 +219,20 @@ performance_check() {
     return 0
 }
 
+performance_persistence_check() {
+    ((TEST_MODE)) && return 0
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl is-enabled --quiet "$PERFORMANCE_SERVICE" >/dev/null 2>&1
+}
+
+performance_ready() {
+    performance_check && performance_persistence_check
+}
+
 performance_audit() {
     local first=1 policy governor min max hw_min hw_max count=0 summary='fixed-frequency'
     local turbo='n/a' thp_enabled='n/a' thp_defrag='n/a' halt_poll='n/a'
-    local nx_huge='n/a' swappiness='n/a'
+    local nx_huge='n/a' swappiness='n/a' persistent=no
     local ready=no
 
     for policy in "$CPUFREQ_ROOT"/policy[0-9]*; do
@@ -254,10 +263,11 @@ performance_audit() {
         nx_huge=$(read_one_line "$KVM_ROOT/nx_huge_pages" 2>/dev/null || echo unknown)
     [[ -e "$VM_ROOT/swappiness" ]] &&
         swappiness=$(read_one_line "$VM_ROOT/swappiness" 2>/dev/null || echo unknown)
-    performance_check && ready=yes
-    printf 'g11-host-performance: ready=%s cpu="%s" policies=%s turbo=%s thp=%s/%s halt_poll_ns=%s nx_huge_pages=%s swappiness=%s memory=host-native-unthrottled\n' \
+    performance_persistence_check && persistent=yes
+    performance_ready && ready=yes
+    printf 'g11-host-performance: ready=%s cpu="%s" policies=%s turbo=%s thp=%s/%s halt_poll_ns=%s nx_huge_pages=%s swappiness=%s persistent=%s memory=host-native-unthrottled\n' \
         "$ready" "$summary" "$count" "$turbo" "$thp_enabled" "$thp_defrag" \
-        "$halt_poll" "$nx_huge" "$swappiness"
+        "$halt_poll" "$nx_huge" "$swappiness" "$persistent"
 }
 
 performance_apply() {
@@ -333,7 +343,7 @@ performance_apply() {
 
     performance_audit
     ((failures == 0)) || die "有 ${failures} 个宿主性能旋钮未能应用"
-    performance_check || die '应用后复核未通过'
+    performance_ready || die '应用后运行时或开机持久化复核未通过'
     log "已应用 latency-first-v1（${count} 个 CPU policy；不按来宾型号封顶）"
 }
 

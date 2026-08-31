@@ -23,10 +23,12 @@ VGPU_CAPACITY_CHECK=both
 
 VGPU_CONSOLE_INTERVAL_US=0
 
-# B/name-only uses the reviewed R580 RM identity Hook. On 1Q, bus width,
-# memory vendor and RAM_TYPE are applied. On 2Q, RAM_TYPE alone is suppressed
-# by the runtime framebuffer guard because that is the verified safe policy.
+# Keep the reviewed R580 Hook for per-mdev name and FHD display identity, but
+# do not rewrite the RM framebuffer tuple.  On the physical R580.159.01 V100
+# host the tuple made the 582.53 guest enter repeatable PTE failures, TDR and
+# XID 43; the same 1Q guest stayed stable with the native RM tuple.
 VGPU_MDEV_IDENTITY_MODE=required
+VGPU_RM_FB_IDENTITY_MODE=off
 SPOOF_MODE=B
 
 # For a deliberately uniform pool, regenerate instead of hand-editing:

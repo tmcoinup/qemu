@@ -251,11 +251,18 @@ grep -Fq 'mdev_identity_contract_args=(' "$START_VM" || \
     fail 'start-vm does not build one complete per-mdev identity contract'
 grep -Fq '"$GPU_MEMORY_VENDOR_RM"' "$START_VM" || \
     fail 'start-vm does not pass the canonical RM memory-vendor enum'
+grep -Fq 'case "$VGPU_RM_FB_IDENTITY_MODE" in' "$START_VM" || \
+    fail 'start-vm cannot independently gate the RM framebuffer tuple'
+grep -Fq 'R580 稳定策略：保留 per-mdev 名称/显示合同' "$START_VM" || \
+    fail 'start-vm does not explain the R580 name-only stability policy'
 grep -Fq 'VGPU_MDEV_FRL_ENABLED' "$START_VM" || \
     fail 'start-vm does not expose an explicit per-mdev FRL override'
 grep -Fq 'VGPU_MDEV_IDENTITY_MODE=required' \
     "$REPO_ROOT/deploy/host/vgpu-host-v100.conf.example" || \
     fail 'vGPU 19.5 V100 path does not require the reviewed R580 identity Hook'
+grep -Fq 'VGPU_RM_FB_IDENTITY_MODE=off' \
+    "$REPO_ROOT/deploy/host/vgpu-host-v100.conf.example" || \
+    fail 'vGPU 19.5 V100 path does not disable the unstable RM framebuffer tuple'
 grep -Fq 'preserving existing profile_override.toml' "$UNLOCK_SETUP" || \
     fail 'vgpu_unlock maintenance would erase generated per-mdev identities'
 

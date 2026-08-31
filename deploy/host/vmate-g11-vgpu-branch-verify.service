@@ -1,0 +1,14 @@
+[Unit]
+Description=VMate G-11 vGPU driver branch cold-boot verification
+After=local-fs.target systemd-modules-load.service nvidia-vgpu-mgr.service
+Wants=nvidia-vgpu-mgr.service
+Before=qemu-vm-server.service
+ConditionPathExists=/var/lib/vmate/g11-vgpu-branch-switch/pending-reboot.state
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/vmate-g11-vgpu-branch-verify
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

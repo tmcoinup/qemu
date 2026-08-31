@@ -33,6 +33,7 @@ assert_assignment "$rtx_conf" 'VGPU_RESOURCE_PROFILE=nvidia-257'
 assert_assignment "$rtx_conf" 'VGPU_RESOURCE_FB_MB=2048'
 assert_assignment "$rtx_conf" 'VGPU_TOTAL_FB_MB=16384'
 assert_assignment "$rtx_conf" 'VGPU_MDEV_IDENTITY_MODE=auto'
+assert_assignment "$rtx_conf" 'VGPU_RM_FB_IDENTITY_MODE=required'
 assert_assignment "$rtx_conf" 'SPOOF_MODE=B'
 if grep -Eq '15872|RESERVE|PASSWORD|TOKEN|CREDENTIAL' "$rtx_conf"; then
     fail 'RTX policy contains a reserve or credential-like field'
@@ -48,6 +49,7 @@ assert_assignment "$v100_conf" 'VGPU_RESOURCE_PROFILE=V100D-1Q'
 assert_assignment "$v100_conf" 'VGPU_RESOURCE_FB_MB=1024'
 assert_assignment "$v100_conf" 'VGPU_TOTAL_FB_MB=32768'
 assert_assignment "$v100_conf" 'VGPU_MDEV_IDENTITY_MODE=required'
+assert_assignment "$v100_conf" 'VGPU_RM_FB_IDENTITY_MODE=off'
 assert_assignment "$v100_conf" 'SPOOF_MODE=B'
 if grep -Eq 'VGPU_RESOURCE_PROFILE_(1024|2048)' "$v100_conf"; then
     fail 'V100 policy published a mixed-size dual mapping'
@@ -63,6 +65,7 @@ assert_assignment "$mixed_conf" 'VGPU_HOST_FB_MODE=mixed'
 assert_assignment "$mixed_conf" 'VGPU_RESOURCE_PROFILE_1024=V100X-1Q'
 assert_assignment "$mixed_conf" 'VGPU_RESOURCE_PROFILE_2048=V100X-2Q'
 assert_assignment "$mixed_conf" 'VGPU_TOTAL_FB_MB=16384'
+assert_assignment "$mixed_conf" 'VGPU_RM_FB_IDENTITY_MODE=off'
 if grep -Eq '^VGPU_(HOST_FB_TIER_MB|RESOURCE_PROFILE|RESOURCE_FB_MB)=' \
         "$mixed_conf"; then
     fail 'mixed-size V100 policy also published a fixed tier/static profile'

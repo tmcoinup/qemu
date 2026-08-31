@@ -145,11 +145,17 @@ V100 2Q：
 
 ## 6. V100 身份字段说明
 
-- 1Q：RAM_TYPE、显存厂商和位宽均按 G-11 profile 投影；
-- 2Q：显存厂商和位宽可投影，RAM_TYPE 由运行时 framebuffer guard 自动跳过；
-- 1Q + 2Q 已在同卡、正式 582.53 guest driver 上完成 Code 0 和关机验证。
+- 1Q/2Q：mdev profile 仍决定 1024/2048MB 配额，名称/FHD 可按 G-11 profile
+  投影；
+- R580/V100 生产默认 `VGPU_RM_FB_IDENTITY_MODE=off`，RAM_TYPE、显存厂商和
+  位宽全部保留 NVIDIA 原生值；
+- `V100X-1Q` + 582.53 已完成 4 分钟宿主稳定性和正常关机回收验证，未出现
+  PTE/TDR/XID 43/driver unload；该轮未读取 guest Device Manager，不能写成已验证
+  Code 0；
+- 2Q 和 1Q+2Q 在 name-only 策略下仍需单独做正式 guest 验收。
 
-2Q 的 RAM_TYPE 跳过是稳定性保护，不应通过测试签名驱动或 BCD 绕过。
+完整消费卡 RM tuple 在 1Q 上会重复触发故障，不能通过测试签名驱动、关闭完整性
+校验或修改 BCD 绕过该稳定性保护。
 
 ## 7. 切换失败时
 

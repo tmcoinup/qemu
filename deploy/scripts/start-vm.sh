@@ -155,6 +155,8 @@
 #   VGPU_RESOURCE_PROFILE_1024/_2048  仅为旧配置读取兼容；配置了宿主固定档
 #                     后只能命中其中一档，不能授权同一物理 GPU 混档
 #   VGPU_MDEV_IDENTITY_MODE host per-mdev 名称：auto|required|off（默认 auto）
+#   VGPU_RM_FB_IDENTITY_MODE host RM framebuffer tuple：required|off
+#                         （默认 required；R580 实机稳定策略为 off/name-only）
 #   VGPU_MDEV_INTERNAL_PCI_IDENTITY 实验性内部 vdev/pdev ID：0|1（默认 0）
 #                     仅 SPOOF_MODE=A 时生效；其他情况仍为 name-only
 #   VGPU_MDEV_FRL_ENABLED 可选的 per-mdev FRL 开关：0|1；未设置则继承 profile
@@ -1277,6 +1279,16 @@ unset EARLY_VM_ID_LINES EARLY_CONFIG_VM_ID \
     EARLY_EFFECTIVE_SPOOF_MODE \
     EARLY_PRODUCTION_MIGRATION_SOURCE_REQUESTED \
     EARLY_SIGNED_CONSUMER_PROBE_STAGE EARLY_SPOOF_SELECTOR_COUNT
+
+# A host-driver branch switch is not complete until the required cold boot has
+# passed the exact RM/module/Hook/XID verifier.  The system service has the same
+# ExecStartPre gate, but direct launcher invocations must fail closed too.
+readonly G11_VGPU_BRANCH_PENDING_STATE=/var/lib/vmate/g11-vgpu-branch-switch/pending-reboot.state
+if [[ "$EARLY_DRY_RUN" != 1 && -e "$G11_VGPU_BRANCH_PENDING_STATE" ]]; then
+    echo "[start-vm] vGPU 驱动分支仍待冷启动验收：$G11_VGPU_BRANCH_PENDING_STATE" >&2
+    echo '[start-vm] 请重启宿主并确认 switch-g11-vgpu-branch.sh status 显示 ready' >&2
+    exit 1
+fi
 
 if [[ "$EARLY_DRY_RUN" != 1 ]]; then
     # Shared for the complete QEMU lifetime.  The explicit storage migrator
@@ -3468,7 +3480,27 @@ esac
 
 : "${QEMU_BIN:=$here/../build/qemu-system-x86_64}"
 : "${QEMU_IMG:=$here/../build/qemu-img}"
-: "${G11_QEMU_DATA_DIR:=$here/../pc-bios}"
+if [[ -z "${G11_QEMU_DATA_DIR:-}" ]]; then
+    # Source builds keep pc-bios beside deploy/.  VMate's installed public
+    # wrapper instead lives at /opt/vmate and owns an independently hashed
+    # share/qemu-g11 closure.  Derive that closure from the selected QEMU so
+    # direct packaged-script calls get the same assets as GUI launches.
+    G11_QEMU_DATA_DIR=
+    QEMU_BIN_RESOLVED=$(readlink -f -- "$QEMU_BIN" 2>/dev/null || true)
+    QEMU_BIN_PARENT=${QEMU_BIN_RESOLVED%/*}
+    for QEMU_DATA_CANDIDATE in \
+        "$QEMU_BIN_PARENT/share/qemu-g11" \
+        "$QEMU_BIN_PARENT/../share/qemu-g11" \
+        "$here/../pc-bios"; do
+        if [[ -d "$QEMU_DATA_CANDIDATE" && ! -L "$QEMU_DATA_CANDIDATE" \
+            && -r "$QEMU_DATA_CANDIDATE/bios-256k.bin" \
+            && -r "$QEMU_DATA_CANDIDATE/vgabios-stdvga.bin" ]]; then
+            G11_QEMU_DATA_DIR=$QEMU_DATA_CANDIDATE
+            break
+        fi
+    done
+    unset QEMU_BIN_RESOLVED QEMU_BIN_PARENT QEMU_DATA_CANDIDATE
+fi
 [[ -d "$G11_QEMU_DATA_DIR" && ! -L "$G11_QEMU_DATA_DIR" \
     && -r "$G11_QEMU_DATA_DIR/bios-256k.bin" \
     && -r "$G11_QEMU_DATA_DIR/vgabios-stdvga.bin" ]] || {
@@ -4917,7 +4949,7 @@ if [[ "$MODE" == "install" ]]; then
                 fi
                 unset install_boot_helper_tmp
             fi
-            DRIVE_ARGS+=( -drive "file=${INSTALL_BOOT_HELPER_RUNTIME},if=none,id=installboot,format=raw" )
+            DRIVE_ARGS+=( -drive "file=${INSTALL_BOOT_HELPER_RUNTIME},if=none,id=installboot,format=raw,readonly=on" )
             # Keep the ISO frontend before the helper frontend.  Combined
             # with ISO bootindex=3 this makes OVMF connect its SimpleFS before
             # launching helper=1; reversing the device order reproduces a
@@ -4987,22 +5019,47 @@ allocate_vgpu() {
     [[ "$SPOOF_MODE" == B || "$SPOOF_MODE" == A ]] && \
         mdev_identity_name=$GPU_NAME
     if [[ -n "$mdev_identity_name" ]]; then
-        # Fixed placeholders make this one atomic per-VM contract:
-        # optional internal PCI pair, optional FRL, the always-complete RM
-        # framebuffer tuple. Outer QEMU PCI identity stays separate.
-        mdev_identity_contract_args=("" "" "")
-        if (( VGPU_MDEV_INTERNAL_PCI_ACTIVE )); then
-            mdev_identity_contract_args[0]=$VGPU_MDEV_INTERNAL_VDEV_ID
-            mdev_identity_contract_args[1]=$VGPU_MDEV_INTERNAL_PDEV_ID
-        fi
-        if (( VGPU_MDEV_FRL_OVERRIDE_ACTIVE )); then
-            mdev_identity_contract_args[2]=$VGPU_MDEV_FRL_ENABLED
-        fi
-        mdev_identity_contract_args+=(
-            "$GPU_MEMORY_BUS_BITS"
-            "$GPU_MEMORY_TYPE_NVAPI"
-            "$GPU_MEMORY_VENDOR_RM"
-        )
+        case "$VGPU_RM_FB_IDENTITY_MODE" in
+            required)
+                # The complete RM contract uses fixed PCI/FRL placeholders so
+                # every field reaches the atomic TOML generator positionally.
+                mdev_identity_contract_args=("" "" "")
+                if (( VGPU_MDEV_INTERNAL_PCI_ACTIVE )); then
+                    mdev_identity_contract_args[0]=$VGPU_MDEV_INTERNAL_VDEV_ID
+                    mdev_identity_contract_args[1]=$VGPU_MDEV_INTERNAL_PDEV_ID
+                fi
+                if (( VGPU_MDEV_FRL_OVERRIDE_ACTIVE )); then
+                    mdev_identity_contract_args[2]=$VGPU_MDEV_FRL_ENABLED
+                fi
+                mdev_identity_contract_args+=(
+                    "$GPU_MEMORY_BUS_BITS"
+                    "$GPU_MEMORY_TYPE_NVAPI"
+                    "$GPU_MEMORY_VENDOR_RM"
+                )
+                ;;
+            off)
+                echo "[start-vm] R580 稳定策略：保留 per-mdev 名称/显示合同，跳过 RM framebuffer tuple"
+                # Name-only must stay the legacy four-argument allocation
+                # form.  Add positional placeholders only when PCI/FRL was
+                # separately requested; an empty FRL seventh argument is not
+                # a valid old contract.
+                if (( VGPU_MDEV_INTERNAL_PCI_ACTIVE )); then
+                    mdev_identity_contract_args=(
+                        "$VGPU_MDEV_INTERNAL_VDEV_ID"
+                        "$VGPU_MDEV_INTERNAL_PDEV_ID"
+                    )
+                    if (( VGPU_MDEV_FRL_OVERRIDE_ACTIVE )); then
+                        mdev_identity_contract_args+=("$VGPU_MDEV_FRL_ENABLED")
+                    fi
+                elif (( VGPU_MDEV_FRL_OVERRIDE_ACTIVE )); then
+                    mdev_identity_contract_args=("" "" "$VGPU_MDEV_FRL_ENABLED")
+                fi
+                ;;
+            *)
+                echo "[start-vm] VGPU_RM_FB_IDENTITY_MODE 必须是 required 或 off: $VGPU_RM_FB_IDENTITY_MODE" >&2
+                return 1
+                ;;
+        esac
     fi
     if [[ "$DRY_RUN" == 1 ]]; then
         MDEV_UUID=$VM_UUID
@@ -5915,7 +5972,15 @@ cleanup_all() {
         "$here/scripts/stop-vm.sh" "$VM_ID" \
         || VM_START_LOCK_HELD=1 VM_START_LOCK_FD="$START_LOCK_FD" \
             "$here/scripts/stop-vm.sh" "$VM_ID" --force || true
-    cleanup_started_tpm
+    # stop-vm owns the normal teardown, but an early fail-closed path can race
+    # the just-terminated QEMU generation.  Reuse the allocation guard once
+    # more after stop-vm: the narrow mdev helper rejects a live owner and is
+    # idempotent when stop-vm already removed the UUID.
+    if declare -F cleanup_native_mdev >/dev/null 2>&1; then
+        cleanup_native_mdev
+    else
+        cleanup_started_tpm
+    fi
     gnome_super_shortcuts_restore
     "$here/gnome-super-guard.sh" restore-stale 2>/dev/null || true
     exit 0

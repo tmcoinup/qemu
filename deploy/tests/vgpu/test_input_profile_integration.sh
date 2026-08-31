@@ -80,6 +80,7 @@ env -i \
     LANG=C.UTF-8 \
     IMAGE_ROOT="$IMAGE_ROOT" \
     VM_ROOT="$VM_ROOT" \
+    VGPU_HOST_CONFIG="$VGPU_HOST_CONFIG" \
     "$CREATE_VM" "$VM_ID" \
     --platform g3220-h81m-k-4g \
     --ssd-profile crucial-mx100-512gb \
@@ -147,6 +148,7 @@ env -i \
     MONITOR_SYNC=0 \
     MEM_GUARD=0 \
     REPAIR_DISPLAY_VARS=off \
+    G11_HOST_BRIDGE_PRESENTATION=off \
     "$START_VM" "$VM_ID" --dry-run --no-gpu --no-tpm \
     --no-monitor-sync --cpu-isolate=false \
     >"$START_OUT" 2>"$START_ERR"

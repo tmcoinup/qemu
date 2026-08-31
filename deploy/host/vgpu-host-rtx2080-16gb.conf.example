@@ -23,4 +23,5 @@ VGPU_CAPACITY_CHECK=both
 # These R535-only console values are already validated on the current host.
 VGPU_CONSOLE_INTERVAL_US=16667
 VGPU_MDEV_IDENTITY_MODE=auto
+VGPU_RM_FB_IDENTITY_MODE=required
 SPOOF_MODE=B

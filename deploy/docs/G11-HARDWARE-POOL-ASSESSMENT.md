@@ -18,9 +18,11 @@
 > [G11-HOME-CPU-POOL-QUICKSTART.md](G11-HOME-CPU-POOL-QUICKSTART.md)。后文旧统计仍只作历史底稿。
 >
 > 2026-08-30 V100 实机更新：后文基于 R535/vGPU 16 推导的“V100 只能单档、
-> 不需要 identity Hook”已被 vGPU 19.5 实验替代。精确 580.159.01 已验证 1Q、2Q
-> 及同卡 1Q+2Q；V100 使用 R580 RM identity Hook，1Q 放行 RAM_TYPE，2Q 自动
-> 抑制 RAM_TYPE。当前结论见 [V100-ADAPTATION.md](V100-ADAPTATION.md)。
+> 不需要 identity Hook”已被 vGPU 19.5 实验替代。精确 580.159.01 已确认
+> heterogeneous capability/mode，并完成 1Q 的 RM tuple A/B 实验：完整消费卡 tuple
+> 会触发 PTE/TDR/XID 43，生产改为只投影名称/FHD、保留原生 RM framebuffer 字段。
+> 2Q 与同卡混搭仍需按该安全策略重验。当前结论见
+> [V100-ADAPTATION.md](V100-ADAPTATION.md)。
 
 ## 先读：2026-08-20 复核结论（优先于后文初版）
 
@@ -36,7 +38,7 @@
 | 新建 GPU/驱动世代 | 实际 guest 基线是正式签名 GRID **538.33 / R535**，不是文件历史误名 553.24；8 个 GT 730/740 Kepler 身份与该基线不自洽 | 2GB 默认层 12 条；1GB 新建层只保留 4 条 Maxwell GTX 750；8 条 Kepler 仅供旧 `vm.conf` 读取，不再新建/随机 |
 | 跨组件 SSD 随机 | `create-vm.sh` 自己会先按平台过滤，不存在“随机命中 NVMe 后不重试”；但客户端若先从 `AUTO_RANDOM=1` 独立选 SSD，再显式传给默认 H81，确有跨组件拒绝风险 | 默认层只含 7 款 H81 可达 SATA；WD Black、970 Pro、960 Pro 三款 NVMe 都改为显式选择 |
 | 宿主 profile 漂移 | 全局 `profile_override.toml` 基线漂移真实存在；当前活动 VM 的 per-mdev FHD 合同正确，不能声称它正在继承 4 屏旧值 | 提供只读 check、保留未知/mdev 段的语义合并和停机应用封装；不在本次提交中改宿主 `/etc` 或重启服务 |
-| V100/vGPU 19.5 | 精确 580.159.01 在实卡报告并支持 heterogeneous time-slice；1Q+2Q 已完成 Code 0/关机验证 | V100 默认生成双映射并由 live capability/mode 门禁；R580 Hook 仅改审核身份字段，`unlock=false` |
+| V100/vGPU 19.5 | 精确 580.159.01 在实卡报告并启用 heterogeneous time-slice；1Q name-only 运行 4 分钟无 PTE/TDR/XID/unload 且正常回收，guest Code 0 尚需凭据复核，2Q/混搭待重验 | V100 默认生成双映射并由 live capability/mode 门禁；R580 Hook 只投影名称/FHD，保留原生 RM framebuffer tuple，`unlock=false` |
 
 ### 显存容量决定
 
@@ -667,10 +669,13 @@ RTX 2080/R535 的 equal-size 规则不变，不能从 V100 的结果外推。
 
 ### C.2 身份与稳定性
 
-V100 原生 mdev 能力仍由官方 host driver 提供。R580 Hook 固定 `unlock=false`，只对
-每 mdev 投影审核身份字段：1Q 可写 RAM_TYPE、显存厂商和位宽；2Q 自动跳过
-RAM_TYPE。单 1Q、单 2Q 和 1Q+2Q 已使用正式 582.53 guest driver 验证 Code 0、
-生产签名和正常关机。
+V100 原生 mdev 能力仍由官方 host driver 提供。R580 Hook 固定 `unlock=false`。
+实机 A/B 已证明完整消费卡 RM framebuffer tuple 会在 1Q 上重复触发 PTE 映射失败、
+TDR、XID 43 和 guest driver 循环卸载；生产因此只投影每 mdev 名称/FHD 合同，
+并通过 `VGPU_RM_FB_IDENTITY_MODE=off` 保留原生 RAM_TYPE、显存厂商和位宽。
+同一 1Q 在该策略下运行 4 分钟，上述宿主错误计数为 0，且 QEMU、mdev、TPM 与
+CPU 隔离均正常回收。该次没有 guest 凭据，不能把宿主日志外推为 Device Manager
+Code 0；2Q 和 1Q+2Q 必须在同一安全策略下重新做 guest 验收。
 
 ### C.3 容量与隔离
 

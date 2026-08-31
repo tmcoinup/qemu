@@ -31,6 +31,7 @@ BASE_LIB_RS_SHA256=65fafddfbdcdd13a0288ec0c1335598bfff8404afa32e347f4f6ab6aa9fa8
 BASE_CTRLA081_RS_SHA256=0ca58bcf29dcc6750ed1761d5b94431aa476bcc61381f38ca998b806efab9465
 BASE_CTRLA082_RS_SHA256=edf489a8e979a8da348d5070e0a1c67f5612dedef4d2c636492151ea9d5f7ed8
 RESTART_MANAGER=0
+R580_UNLOCK_MODE=native
 INSTALL_TRANSACTION_ACTIVE=0
 LIB_PREEXISTED=0
 PROFILE_PREEXISTED=0
@@ -42,16 +43,21 @@ TMP=
 
 usage() {
     cat <<'EOF'
-用法: setup-vgpu-unlock.sh [--restart-manager]
+用法: setup-vgpu-unlock.sh [--restart-manager] [--r580-consumer-lab]
 
 默认只构建、测试、备份并安装，不打断正在运行的 vGPU。
 --restart-manager 仅在没有 QEMU 占用 mdev 时重启 nvidia-vgpu-mgr。
+R580 只用于已经实机验证的 V100/vGPU 19.5 路径，并固定保持原生能力
+（unlock=false）。RTX 2080/2080 Ti 生产路径固定使用 R535。
+--r580-consumer-lab 只供本机母盘暂存实验；它会启用消费卡 capability Hook，
+但该组合已出现 XID 43/TDR，不能作为生产通过证明。
 EOF
 }
 
 while (($#)); do
     case "$1" in
         --restart-manager) RESTART_MANAGER=1 ;;
+        --r580-consumer-lab) R580_UNLOCK_MODE=consumer-lab ;;
         -h|--help) usage; exit 0 ;;
         *) echo "未知参数: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -247,7 +253,7 @@ source_hashes_match \
     echo "G-11 三 ABI 源码哈希复检失败，拒绝构建: $BUILD_DIR" >&2
     exit 1
 }
-build_run git -C "$BUILD_DIR" diff --check
+build_run git -C "$BUILD_DIR" --no-pager diff --check
 
 DRIVER_VERSION=$(cat /sys/module/nvidia/version 2>/dev/null || true)
 case "$DRIVER_VERSION" in
@@ -258,8 +264,16 @@ case "$DRIVER_VERSION" in
         exit 1
         ;;
 esac
+DRIVER_LICENSE=$(modinfo -F license nvidia 2>/dev/null | head -n 1 || true)
+[[ "$DRIVER_LICENSE" == NVIDIA ]] || {
+    echo "拒绝使用 NVIDIA open kernel module（license=${DRIVER_LICENSE:-unknown}）；G-11 vGPU 只验证了官方闭源 RM 模块" >&2
+    exit 1
+}
 
 echo "[2/6] cargo fmt/test/build（用户身份）"
+# The single-quoted program is intentionally expanded by the child shell,
+# where G11_BUILD_DIR is present in its environment.
+# shellcheck disable=SC2016
 build_run env G11_BUILD_DIR="$BUILD_DIR" sh -c '
     cd "$G11_BUILD_DIR" &&
     cargo fmt -- --check && cargo test && cargo build --release
@@ -328,7 +342,17 @@ else
 fi
 if [[ "$DRIVER_FAMILY" == r580 ]]; then
     TMP=$(mktemp)
-    cat >"$TMP" <<'EOF'
+    if [[ "$R580_UNLOCK_MODE" == consumer-lab ]]; then
+        cat >"$TMP" <<'EOF'
+# Managed by G-11 for the explicitly requested RTX R580 staging lab.
+# This only exposes consumer vGPU capability for temporary mother-image work.
+# Runtime XID 43/TDR was observed; never treat this policy as production-ready.
+observe_only = false
+unlock = true
+unlock_migration = false
+EOF
+    else
+        cat >"$TMP" <<'EOF'
 # Managed by G-11 for the exact R580.159.01 V100/vGPU 19.5 path.
 # Native V100 capability remains untouched; only reviewed per-mdev RM FB fields
 # from profile_override.toml may be changed.
@@ -336,10 +360,11 @@ observe_only = false
 unlock = false
 unlock_migration = false
 EOF
+    fi
     sudo_run install -o root -g root -m 0644 "$TMP" "$CONFIG_DST"
     rm -f -- "$TMP"
     TMP=
-elif (( ! CONFIG_PREEXISTED )); then
+else
     TMP=$(mktemp)
     cat >"$TMP" <<'EOF'
 # Managed by G-11 for the R535 RTX unlock path.
@@ -396,6 +421,11 @@ TMP=$(mktemp)
     printf 'g11_patch_sha256=%s\n' "$G11_PATCH_SHA256"
     printf 'r580_patch_sha256=%s\n' "$G11_R580_PATCH_SHA256"
     echo 'r580_ram_type_policy=exact-1024mb-only'
+    if [[ "$DRIVER_FAMILY" == r580 ]]; then
+        printf 'r580_unlock_policy=%s\n' "$R580_UNLOCK_MODE"
+    else
+        echo 'r535_unlock_policy=consumer'
+    fi
     printf 'library_sha256=%s\n' "$LIB_SHA256"
 } >"$TMP"
 sudo_run install -o root -g root -m 0644 "$TMP" "$STATE_DST"
@@ -409,6 +439,7 @@ cat <<EOF
     lib        = $LIB_DST
     override   = /etc/vgpu_unlock/profile_override.toml
     policy     = $CONFIG_DST ($DRIVER_FAMILY/$DRIVER_VERSION)
+    unlock     = $([[ "$DRIVER_FAMILY" == r580 ]] && printf '%s' "$R580_UNLOCK_MODE" || printf 'consumer')
     state      = $STATE_DST
     mdev admin = /usr/local/libexec/qemu-vgpu-mdev-admin
     systemd d  = /etc/systemd/system/nvidia-vgpu-mgr.service.d/vgpu_unlock.conf

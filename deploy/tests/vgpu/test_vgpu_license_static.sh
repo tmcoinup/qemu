@@ -86,7 +86,7 @@ grep -Fq 'MinimumTokenBytes' "$GUEST_SCRIPT" \
     || fail "guest script does not validate token size"
 grep -Fq 'License Status\s*:\s*Licensed(?:\s+\([^\r\n]*\))?' "$GUEST_SCRIPT" \
     || fail "guest script does not strictly verify Licensed state"
-grep -Fq 'env -u GUEST_PASS python3' "$HOST_SCRIPT" \
+grep -Fq 'env -u GUEST_PASS "$WINRM_PYTHON"' "$HOST_SCRIPT" \
     || fail "host wrapper leaks an exported guest password into the WinRM helper environment"
 grep -Fq 'ConfigManagerErrorCode' "$GUEST_SCRIPT" \
     || fail "guest script does not verify Device Manager health"

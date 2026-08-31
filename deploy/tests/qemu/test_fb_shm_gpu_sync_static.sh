@@ -113,8 +113,12 @@ grep -Fq 'fb_shm_gpu_pending_begin' "$FB_SHM_C" \
     || fail "sync send no longer records the pending owner/sequence"
 grep -Fq 'fb_shm_gpu_pending_complete' "$FB_SHM_C" \
     || fail "matching GPU_FRAME_DONE no longer completes the lease"
-grep -Fq 'lease expired; dropping stalled consumer' "$FB_SHM_C" \
-    || fail "stalled sync clients are no longer dropped before BO retirement"
+grep -Fq '#define FB_SHM_GPU_LEASE_MAX_EXPIRY 5u' "$FB_SHM_C" \
+    || fail "stalled sync clients lost their bounded retry budget"
+grep -Fq 'fb_shm_gpu_pending_retire(&d->gpu_pending, owner);' "$FB_SHM_C" \
+    || fail "expired GPU leases no longer retire externally held BOs"
+grep -Fq 'fb_shm_client_drop((FbShmClient *)owner);' "$FB_SHM_C" \
+    || fail "repeatedly stalled sync clients are no longer disconnected"
 grep -Fq 'd->gl_sync_retired = true;' "$FB_SHM_C" \
     || fail "disconnect/send failure can reuse an externally held sync BO"
 prepare_sync=$(extract_function "$FB_SHM_C" fb_shm_prepare_sync_fb)

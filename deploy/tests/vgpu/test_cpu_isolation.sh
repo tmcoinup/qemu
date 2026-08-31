@@ -96,6 +96,33 @@ grep -Fxq -- '-pc 3 4002' "$TASKSET_LOG" || fail "vCPU 1 was not pinned"
 grep -Fxq -- '-pc 4 4000' "$TASKSET_LOG" || fail "QEMU main thread was not on service CPU"
 grep -Fxq -- '-pc 4 4003' "$TASKSET_LOG" || fail "QEMU worker was not on service CPU"
 
+# The packaged G-11 wrapper ultimately execs this deliberately product-scoped
+# basename.  It must pass the same process identity gate without admitting the
+# independent V-11 qemu-system-x86_64.real runtime.
+: >"$CG_ROOT/qemu-vm-isolation/vm${VM_ID}/cgroup.procs"
+run_helper release "$VM_ID" >/dev/null
+reset_mock
+: >"$TMP_DIR/bin/qemu-system-x86_64.g11.real"
+ln -sfn "$TMP_DIR/bin/qemu-system-x86_64.g11.real" \
+    "$PROC_ROOT/$QEMU_PID/exe"
+run_helper apply "$VM_ID" "$QEMU_PID" 2,3,4,5,6,7 4001,4002 1 \
+    >"$TMP_DIR/packaged-apply.out"
+grep -Fq "vm${VM_ID} applied" "$TMP_DIR/packaged-apply.out" \
+    || fail "packaged G-11 QEMU basename was rejected"
+: >"$CG_ROOT/qemu-vm-isolation/vm${VM_ID}/cgroup.procs"
+run_helper release "$VM_ID" >/dev/null
+reset_mock
+rm -f -- "$PROC_ROOT/$QEMU_PID/exe"
+: >"$TMP_DIR/bin/qemu-system-x86_64.real"
+ln -s "$TMP_DIR/bin/qemu-system-x86_64.real" "$PROC_ROOT/$QEMU_PID/exe"
+if run_helper apply "$VM_ID" "$QEMU_PID" 2,3,4,5,6,7 4001,4002 1 \
+        >"$TMP_DIR/v11-apply.out" 2>&1; then
+    fail "independent V-11 QEMU basename was accepted by the G-11 helper"
+fi
+reset_mock
+run_helper apply "$VM_ID" "$QEMU_PID" 2,3,4,5,6,7 4001,4002 1 \
+    >"$TMP_DIR/apply-before-live-release.out"
+
 # cgroup pseudo-files report size zero on real cgroupfs.  The helper must
 # inspect content, not stat size: a non-empty cgroup.procs must block release.
 if run_helper release "$VM_ID" >"$TMP_DIR/live-release.out" 2>&1; then

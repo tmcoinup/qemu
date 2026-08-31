@@ -35,26 +35,28 @@ Tesla V100
 
 V100 的 mdev、调度、显存份额和 guest 驱动都来自 NVIDIA 官方栈。R580 Hook 不伪造
 硬件能力，也不打开官方 unlock：其 `/etc/vgpu_unlock/config.toml` 固定
-`unlock=false`。它只把 G-11 profile 中经过实测的总线位宽、显存厂商和 RAM 类型等
-RM 身份字段投影到单个 mdev。
+`unlock=false`。生产策略继续用 Hook 写每个 mdev 的名称和 FHD 显示合同，但在
+R580.159.01/V100 上保留 NVIDIA 原生 RM framebuffer tuple。
 
 Windows 仍只安装正式签名驱动。禁止 testsigning、nointegritychecks、自签名内核
 驱动及 BCD 修改。
 
-## 1Q、2Q 和 RAM_TYPE
+## 1Q、2Q 和 RM framebuffer tuple
 
-已验证的 V100 SXM2 16GB 使用 `V100X-1Q` 与 `V100X-2Q`：
+2026-08-30 在目标 V100 SXM2 16GB、同一 VM/磁盘、`V100X-1Q` 与正式 582.53
+guest 上完成了 A/B 对照：
 
-| 场景 | 结果 | Hook 策略 |
+| 场景 | 宿主日志结果 | 结论 |
 |---|---|---|
-| 单 1Q / 1024MB | Code 0、WHCP、正常关机 | 位宽、显存厂商、RAM_TYPE 均可写 |
-| 单 2Q / 2048MB | Code 0、WHCP、正常关机 | 位宽/厂商可写，RAM_TYPE 自动跳过 |
-| 1Q + 2Q 同卡 | 两台 Code 0，可同时运行/关机 | 每个 mdev 按自身 framebuffer 决策 |
+| 完整消费卡 RM tuple | guest 查询出现 `RAM_TYPE 15 -> 8`，随后 PTE pin/translate 失败、TDR、XID 43，约 9 秒循环卸载/重载 | 不可用于生产 |
+| 完全关闭 per-mdev identity | 582.53 只加载一次，约 2 分钟内上述错误计数为 0 | 官方 1Q/R580 基础链路稳定 |
+| 保留名称/FHD、关闭 RM tuple | GTX 名称/FHD 合同写入，582.53 稳定加载，4 分钟内上述错误计数为 0，正式停机后资源全部回收 | 当前生产策略 |
 
-2Q 跳过 RAM_TYPE 不是 guest 侧降级。早期实验中向 2Q 强写消费卡 RAM_TYPE 会触发
-Windows 关机死锁；R580 Hook 因此在运行时读取该 mdev 的真实 framebuffer，仅对
-精确 1024MB 放行 RAM_TYPE，2048MB 或无法识别时 fail-closed。1Q 正常包含
-RAM_TYPE。
+因此不能再把“1Q 可安全改写 RAM_TYPE”当作已验证结论。日志最强地指向实际发生的
+`RAM_TYPE` 改写，但本次安全收口按完整 tuple 处理，不猜测位宽等未单独验收字段。
+`VGPU_RM_FB_IDENTITY_MODE=off` 只影响 RM 身份展示字段，不改变 1024MB 配额、正式
+签名驱动或官方 mdev 能力。`Unlicensed (Unrestricted)` 与两组对照相同，且稳定组
+没有 XID，故本次故障不是 DLS 授权拒绝。
 
 ## mixed mode
 
@@ -75,6 +77,8 @@ vGPU Heterogeneous Mode        : Enabled
 
 业务全部使用 1Q 时，可保持 mixed mode 但只创建 `--gpu-vram 1024`；也可在所有
 VM/mdev 停止后生成 `equal + 1024` 策略。RTX 2080/R535 仍只能使用整卡统一档位。
+2Q/混搭的宿主能力门禁仍然有效，但改为 name-only 后应在目标 SKU 上另做正式 guest
+回归，不能从旧 RM tuple 结果外推 Code 0。
 
 ## V100 SKU 与 profile 前缀
 
@@ -99,7 +103,8 @@ node 1 做了不重叠绑核验证。新主机若 V100 所在节点没有在线 
 
 V100 作为 vGPU 目标不承担 Ubuntu 桌面输出，宿主显示器应接 RX550 等另一张卡。
 RX550 无画面属于宿主显示栈/BIOS 主卡的独立复检项，不影响已经完成的 V100 mdev、
-Hook 和 guest Code 0 结论。
+Hook 和宿主侧稳定性结论。本轮没有 guest 凭据，Device Manager Code 0、签名和显存
+回执仍是正式封盘验收项。
 
 ## 最终验收与未覆盖范围
 

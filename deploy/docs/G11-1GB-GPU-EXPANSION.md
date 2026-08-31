@@ -124,8 +124,11 @@ bash deploy/configure-g11-vgpu-host.sh \
 ```
 
 若策略层也要禁止 2Q，停完全部 VM/mdev 后用 `--fb-mode equal --tier 1024`
-重新生成。vGPU 19.5 的 1Q 已验证 RAM_TYPE、显存厂商和位宽投影；2Q 会自动跳过
-RAM_TYPE，1Q+2Q 同卡也已验证 Code 0 和正常关机。
+重新生成。vGPU 19.5/V100 的生产策略只投影名称/FHD，使用
+`VGPU_RM_FB_IDENTITY_MODE=off` 保留 NVIDIA 原生 RAM_TYPE、显存厂商和位宽。
+完整消费卡 RM tuple 已在 1Q 上重复触发 PTE/TDR/XID 43；name-only 1Q 已完成
+4 分钟无上述错误及正常关机回收验证。该轮没有 guest Device Manager 回执，2Q 与
+1Q+2Q 也仍需在安全策略下重新做 Code 0 和长稳验收。
 
 完整的 19.5 安装和安全边界见
 [`G11-V100-VGPU19.5-FRESH-INSTALL.md`](G11-V100-VGPU19.5-FRESH-INSTALL.md)。

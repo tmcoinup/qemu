@@ -51,6 +51,7 @@
 : "${VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG_PATH:=${VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG:-/etc/vgpu_unlock/profile_override.toml}}"
 : "${VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG:=$VGPU_UNLOCK_PROFILE_OVERRIDE_CONFIG_PATH}"
 : "${VGPU_MDEV_IDENTITY_MODE:=auto}" # auto | required | off
+: "${VGPU_RM_FB_IDENTITY_MODE:=required}" # required | off
 : "${VGPU_MDEV_ADMIN_HELPER:=/usr/local/libexec/qemu-vgpu-mdev-admin}"
 : "${VGPU_MDEV_ADMIN_INSTALLER:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../host/install-vgpu-mdev-admin.sh}"
 _MDEV_MANAGED_IDENTITY_CONFIG=/etc/vgpu_unlock/profile_override.toml

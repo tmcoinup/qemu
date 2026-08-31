@@ -37,6 +37,8 @@ grep -Fq 'MDEV_ALLOCATION_STATE=active' "$START_VM" \
     || fail "successful allocation is not promoted to active cleanup state"
 grep -Fq 'mdev_cleanup_allocation_state "$MDEV_ALLOCATION_STATE"' "$START_VM" \
     || fail "start-vm does not delegate cleanup to the tested ownership state machine"
+grep -Fq 'declare -F cleanup_native_mdev' "$START_VM" \
+    || fail "RDP fail-closed cleanup does not retry its exact mdev allocation guard"
 grep -Fq '_mdev_release_locked "$uuid"' "$MDEV_LIB" \
     || fail "signal cleanup cannot reuse an allocator-held host lock"
 trap_line=$(grep -nF 'trap cleanup_allocated_mdev EXIT' "$START_VM" |

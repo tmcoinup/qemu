@@ -320,7 +320,10 @@ mdev_in_use_by_qemu() {
         proc=/proc/$pid
         [[ -r "$proc/cmdline" ]] || continue
         exe=$(readlink -f "$proc/exe" 2>/dev/null || true)
-        [[ "${exe##*/}" == qemu-system-x86_64 ]] || continue
+        case "${exe##*/}" in
+            qemu-system-x86_64|qemu-system-x86_64.g11.real) ;;
+            *) continue ;;
+        esac
         argv=()
         mapfile -d '' -t argv <"$proc/cmdline" 2>/dev/null || continue
         for arg in "${argv[@]}"; do

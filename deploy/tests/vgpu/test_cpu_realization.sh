@@ -17,7 +17,8 @@ assert_eq() {
         fail "$label: expected '$expected', got '$actual'"
 }
 
-mkdir -p "$TMP_DIR/bin"
+mkdir -p "$TMP_DIR/bin" "$TMP_DIR/pc-bios"
+touch "$TMP_DIR/pc-bios/bios-256k.bin"
 cat >"$TMP_DIR/bin/qemu-system-x86_64" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

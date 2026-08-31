@@ -196,7 +196,10 @@ vgpu_driver_install_argv_is_safe() {
     local i
 
     ((${#argv[@]} > 0)) || return 1
-    [[ "${argv[0]##*/}" == qemu-system-x86_64 ]] || return 1
+    case "${argv[0]##*/}" in
+        qemu-system-x86_64|qemu-system-x86_64.g11.real) ;;
+        *) return 1 ;;
+    esac
     for ((i = 1; i < ${#argv[@]}; i += 1)); do
         arg=${argv[i]}
         case "$arg" in

@@ -102,7 +102,9 @@ mkdir -p "$VM_ROOT/${VM_ID}/log" \
     "$VM_ROOT/${VM_ID}/run" "$VM_ROOT/control"
 touch "$VM_ROOT/${VM_ID}/disk.qcow2"
 touch "$VM_ROOT/${VM_ID}/nvram.fd"
-touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd"
+EMPTY_VGPU_CONFIG="$TMP_DIR/vgpu-host.conf"
+touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd" \
+    "$EMPTY_VGPU_CONFIG"
 
 cat >"$VM_ROOT/${VM_ID}/vm.conf" <<EOF
 VM_ID=$VM_ID
@@ -179,11 +181,13 @@ chmod +x "$TMP_DIR/qemu-system-x86_64"
 
 run_start_vm() {
     local output=$1
+    local host_config="$EMPTY_VGPU_CONFIG"
+    local qemu_bin="${TEST_QEMU_BIN:-$TMP_DIR/qemu-system-x86_64}"
     local -a optional_env=()
     shift
 
     if [[ -n "${TEST_VGPU_HOST_CONFIG:-}" ]]; then
-        optional_env+=("VGPU_HOST_CONFIG=$TEST_VGPU_HOST_CONFIG")
+        host_config=$TEST_VGPU_HOST_CONFIG
     fi
     if [[ "${TEST_NATIVE_WAYLAND:-0}" == 1 ]]; then
         optional_env+=(
@@ -200,10 +204,12 @@ run_start_vm() {
         PATH=/usr/bin:/bin \
         DISPLAY=:99 \
         VM_ROOT="$VM_ROOT" \
-        QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \
+        QEMU_BIN="$qemu_bin" \
         OVMF_CODE="$TMP_DIR/OVMF_CODE.fd" \
         OVMF_VARS="$TMP_DIR/OVMF_VARS.fd" \
+        VGPU_HOST_CONFIG="$host_config" \
         REPAIR_DISPLAY_VARS=off \
+        G11_HOST_BRIDGE_PRESENTATION=off \
         FAKE_QEMU_TRACE="$TMP_DIR/qemu.trace" \
         FAKE_QEMU_ENV_TRACE="$TMP_DIR/qemu-env.trace" \
         "${optional_env[@]}" \
@@ -601,6 +607,20 @@ unset TEST_VGPU_HOST_CONFIG
 QEMU_PROBE_COUNT=$(wc -l <"$TMP_DIR/qemu.trace")
 [[ "$QEMU_PROBE_COUNT" -eq 49 ]] \
     || fail "fake QEMU saw an unexpected invocation count: $QEMU_PROBE_COUNT"
+
+# Installed VMate layouts keep the independently hashed G-11 firmware beside
+# the selected public wrapper, not beside deploy/.  With no explicit override,
+# start-vm must derive that package-local directory before source pc-bios.
+PACKAGED_RUNTIME="$TMP_DIR/packaged-runtime"
+mkdir -p "$PACKAGED_RUNTIME/share/qemu-g11"
+cp -- "$TMP_DIR/qemu-system-x86_64" \
+    "$PACKAGED_RUNTIME/qemu-system-x86_64.g11"
+printf 'fixture bios\n' >"$PACKAGED_RUNTIME/share/qemu-g11/bios-256k.bin"
+printf 'fixture vga\n' >"$PACKAGED_RUNTIME/share/qemu-g11/vgabios-stdvga.bin"
+PACKAGED_OUT="$TMP_DIR/packaged-runtime.out"
+TEST_QEMU_BIN="$PACKAGED_RUNTIME/qemu-system-x86_64.g11" \
+    run_start_vm "$PACKAGED_OUT" --rdp --no-tpm
+require_text "$PACKAGED_RUNTIME/share/qemu-g11" "$PACKAGED_OUT"
 
 [[ -z "$(find "$VM_ROOT/control" -mindepth 1 -print -quit)" ]] \
     || fail "dry-run created runtime state"

@@ -30,7 +30,7 @@ source ./lib/vgpu-driver-assets.sh
 source ./lib/vm-storage.sh
 # shellcheck source=lib/g11-python-runtime.sh
 source ./lib/g11-python-runtime.sh
-G11_PYTHON_RUNTIME_INSTALLER="$PWD/host/install-g11-python-runtime.sh"
+export G11_PYTHON_RUNTIME_INSTALLER="$PWD/host/install-g11-python-runtime.sh"
 vm_storage_init
 
 VM_ID=${VM_ID:-1}
@@ -62,10 +62,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ "$WINRM_PORT" =~ ^[1-9][0-9]*$ ]] && ((WINRM_PORT <= 65535)) || {
+if [[ ! "$WINRM_PORT" =~ ^[1-9][0-9]*$ ]] || ((WINRM_PORT > 65535)); then
     echo "--winrm-port 必须是 1..65535" >&2
     exit 2
-}
+fi
 (( ${#GUEST_PASS} >= 6 && ${#GUEST_PASS} <= 64 )) &&
         [[ "$GUEST_PASS" != *$'\r'* && "$GUEST_PASS" != *$'\n'* ]] || {
     echo "GUEST_PASS 必须通过安全运行时环境提供（6..64 字符）" >&2
@@ -197,8 +197,9 @@ fi
 # The compatibility installer historically repaired partial installs by
 # removing every published NVIDIA package/device and stale System32 payload
 # first.  Keep that behavior behind an explicit internal flag, but never run
-# setup.exe or pnputil from WinRM session 0: after cleanup the guarded RunOnce
-# path below remains the only installer.
+# setup.exe or pnputil /add-driver from WinRM session 0: pnputil is used here
+# only to remove stale packages/devices, and guarded RunOnce remains the only
+# install path.
 if (( CLEAN_EXISTING )); then
     echo "[0/3] clean existing/partial NVIDIA packages before guarded reinstall"
     GUEST_PASS_VALUE=$GUEST_PASS "$WINRM_PYTHON" - "$IP" "$GUEST_USER" "$WINRM_PORT" <<'PYEOF'
@@ -214,17 +215,36 @@ $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Continue'
 New-Item -Path C:\nv -ItemType Directory -Force | Out-Null
 
-Write-Host '[clean 1/4] published NVIDIA driver packages' -Fore Cyan
-$nvInfs = Get-CimInstance Win32_PnPSignedDriver -EA 0 |
+Write-Host '[clean 1/4] published and offline NVIDIA display packages' -Fore Cyan
+$activeNvInfs = @(Get-CimInstance Win32_PnPSignedDriver -EA 0 |
     Where-Object { $_.Manufacturer -match 'NVIDIA' -or
                    $_.Description -match 'NVIDIA' } |
     Select-Object -ExpandProperty InfName -Unique |
-    Where-Object { $_ -match '^oem\d+\.inf$' }
+    Where-Object { $_ -match '^oem\d+\.inf$' })
+# Win32_PnPSignedDriver only reports packages bound to a current/phantom
+# device.  A previous GRID package can remain unused in Driver Store and later
+# win rank selection after reboot, so enumerate DISM's complete online store as
+# well.  This is the exact case seen during the R535 -> R580 migration test.
+$offlineNvInfs = @(Get-WindowsDriver -Online -All -EA 0 |
+    Where-Object { $_.ProviderName -match '^NVIDIA' -and
+                   $_.ClassName -eq 'Display' } |
+    ForEach-Object { [IO.Path]::GetFileName([string]$_.Driver) } |
+    Where-Object { $_ -match '^oem\d+\.inf$' })
+$nvInfs = @($activeNvInfs + $offlineNvInfs | Sort-Object -Unique)
 foreach ($inf in $nvInfs) {
     Write-Host "  delete $inf"
     pnputil /delete-driver $inf /uninstall /force 2>&1 | Out-Null
 }
-Write-Host "  removed $(@($nvInfs).Count) published packages"
+$remainingNvInfs = @(Get-WindowsDriver -Online -All -EA 0 |
+    Where-Object { $_.ProviderName -match '^NVIDIA' -and
+                   $_.ClassName -eq 'Display' } |
+    ForEach-Object { [IO.Path]::GetFileName([string]$_.Driver) } |
+    Where-Object { $_ -match '^oem\d+\.inf$' } |
+    Sort-Object -Unique)
+if ($remainingNvInfs.Count -ne 0) {
+    throw "NVIDIA display packages remain in Driver Store: $($remainingNvInfs -join ',')"
+}
+Write-Host "  removed $(@($nvInfs).Count) active/offline packages"
 
 Write-Host '[clean 2/4] present and phantom NVIDIA PCI devices' -Fore Cyan
 $env:DEVMGR_SHOW_NONPRESENT_DEVICES = '1'

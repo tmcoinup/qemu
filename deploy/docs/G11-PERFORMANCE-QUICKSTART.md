@@ -19,7 +19,8 @@
 
 ```text
 ready=yes
-dynamic-unbound-v1
+latency-first-v1
+persistent=yes
 memory=host-native-unthrottled
 ```
 
@@ -39,8 +40,8 @@ G11_HOST_PERFORMANCE=required ./deploy/scripts/start-vm.sh VM编号
 资源策略 CLI 只接受 `--cpu-isolate=true|false` 和
 `--memory-prealloc=true|false`；省略两个键时均默认为 `true`。
 
-- CPU：每个 cpufreq policy 的最低/最高值恢复为硬件 `cpuinfo_min/max_freq`，选择
-  `schedutil`、`ondemand` 或 Intel P-State 的动态 governor，并开启 turbo/boost。
+- CPU：每个 cpufreq policy 的最低/最高值恢复为硬件 `cpuinfo_min/max_freq`，优先选择
+  `performance` governor（不支持时才回退到可用的动态 governor），并开启 turbo/boost。
   负载低时仍可降频，负载到来时可以升到硬件上限；绝不按来宾 CPU 的标称频率给
   宿主 `scaling_max_freq` 封顶。
 - TSC：来宾计时器仍保持恒定。启动器先查询 `KVM_CAP_TSC_CONTROL` 和真实宿主 TSC；
@@ -94,8 +95,9 @@ G11_TSC_POLICY=profile ./deploy/scripts/start-vm.sh VM编号
 ./deploy/scripts/g11-performance.sh restore
 ```
 
-该状态和所有 sysfs 调整都会随宿主重启消失。RTC 只需下次启动临时指定
-`G11_RTC_CLOCK=host`；没有写入 Windows 注册表或 BCD。
+`apply` 同时启用 `qemu-g11-performance.service`，以后每次开机都会重放同一策略；
+`restore` 会先禁用该服务，再恢复本次启动首次 apply 前的值。RTC 只需下次启动临时
+指定 `G11_RTC_CLOCK=host`；没有写入 Windows 注册表或 BCD。
 
 ## 验收
 

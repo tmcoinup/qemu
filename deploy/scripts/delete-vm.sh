@@ -380,7 +380,10 @@ if [[ -f "$MDEV_FILE" ]]; then
     for proc in /proc/[0-9]*; do
         [[ -r "$proc/cmdline" ]] || continue
         exe=$(readlink -f "$proc/exe" 2>/dev/null || true)
-        [[ "${exe##*/}" == qemu-system-x86_64 ]] || continue
+        case "${exe##*/}" in
+            qemu-system-x86_64|qemu-system-x86_64.g11.real) ;;
+            *) continue ;;
+        esac
         if tr '\0' '\n' <"$proc/cmdline" 2>/dev/null | \
                 grep -Fq "/sys/bus/mdev/devices/$MDEV_UUID"; then
             MDEV_IN_USE=1

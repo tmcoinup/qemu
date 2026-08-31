@@ -96,6 +96,7 @@ env -i \
     IMAGE_ROOT="$IMAGE_ROOT" \
     VM_ROOT="$VM_ROOT" \
     STAGE_DIR="$STAGE_DIR" \
+    VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
     "$CREATE_VM" "$VM_ID" \
         --platform i5-4590-h81m-s1-8g \
         --ssd-profile samsung-850-pro-512gb \

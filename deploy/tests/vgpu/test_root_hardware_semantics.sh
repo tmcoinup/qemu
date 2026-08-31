@@ -2022,7 +2022,7 @@ for injected_odd_identity in CONFIG-MODEL-INJECT CONFIG-SERIAL-INJECT \
     reject_text "$injected_odd_identity" "$TMP_DIR/install-odd.out" \
         'ODD environment/config injection'
 done
-mv -- "$TMP_DIR/install-odd.vm.conf" "$install_odd_conf"
+mv -fT -- "$TMP_DIR/install-odd.vm.conf" "$install_odd_conf"
 require_text 'unset ODD_PROFILE ODD_BRAND ODD_MODEL ODD_FIRMWARE_REV ODD_INTERFACE' "$START_VM" \
     'ODD environment/config scrub'
 

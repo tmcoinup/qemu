@@ -640,6 +640,16 @@ install_vlan_runtime() {
     install -o root -g root -m 0644 "$config_tmp" "$VLAN_CONFIG"
     rm -f -- "$config_tmp"
 
+    # The first apply starts with no VLAN config, so the process-local cache
+    # still says "absent" after the file is installed.  Refresh it before the
+    # same transaction performs its strict final verification; otherwise a
+    # healthy first install is committed and then falsely reported as broken.
+    EXISTING_VLAN_CONFIG=1
+    EXISTING_ALLOWED_VLANS=$ALLOWED_VLANS
+    EXISTING_ALLOWED_UID=$ALLOWED_UID_VALUE
+    EXISTING_ALLOWED_GID=$ALLOWED_GID_VALUE
+    EXISTING_VLAN_UPLINK=$UPLINK_EFFECTIVE
+
     sudoers_tmp="$(mktemp /etc/sudoers.d/.qemu-g11-vlan.XXXXXX)"
     {
         printf '# G-11: only the setup caller may invoke the fixed VLAN TAP helper.\n'
@@ -1065,6 +1075,7 @@ apply_host() {
     PATH=/usr/sbin:/usr/bin:/sbin:/bin
     export PATH
     SETUP_SYS_CLASS_NET=/sys/class/net
+    export SETUP_SYS_CLASS_NET
     [[ -z "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" \
         || "${G11_NETWORK_ALLOW_SSH:-0}" == 1 ]] || {
         setup_error "SSH 会话默认拒绝迁网；请在宿主本地控制台执行。"

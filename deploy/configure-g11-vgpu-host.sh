@@ -85,9 +85,12 @@ esac
 
 # G-11 always uses the production-signed B/name-only path.  RTX/R535 may
 # tolerate a missing per-mdev backend during legacy migration; V100/R580 is a
-# fresh-host contract and requires the dual-ABI Hook so the RM framebuffer
-# identity fields are applied atomically with each mdev UUID.
+# fresh-host contract and requires the dual-ABI Hook for the per-mdev name and
+# display contract.  R580.159.01 production defaults to name-only because the
+# RM framebuffer tuple caused repeatable guest PTE failures/TDR/XID 43 on the
+# physical V100 validation host; R535 keeps the reviewed tuple enabled.
 IDENTITY_MODE=required
+RM_FB_IDENTITY_MODE=off
 SPOOF_MODE_VALUE=B
 CONSOLE_INTERVAL=0
 IS_V100=1
@@ -97,6 +100,7 @@ case "$PRESET" in
         TOTAL_FB_MB=16384
         PROFILE_PREFIX=nvidia
         IDENTITY_MODE=auto
+        RM_FB_IDENTITY_MODE=required
         SPOOF_MODE_VALUE=B
         CONSOLE_INTERVAL=16667
         ;;
@@ -179,6 +183,7 @@ VGPU_TOTAL_FB_MB=$TOTAL_FB_MB
 VGPU_CAPACITY_CHECK=both
 VGPU_CONSOLE_INTERVAL_US=$CONSOLE_INTERVAL
 VGPU_MDEV_IDENTITY_MODE=$IDENTITY_MODE
+VGPU_RM_FB_IDENTITY_MODE=$RM_FB_IDENTITY_MODE
 SPOOF_MODE=$SPOOF_MODE_VALUE
 EOF
 } >"$TEMP"

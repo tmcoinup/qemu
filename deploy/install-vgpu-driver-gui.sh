@@ -523,14 +523,18 @@ if ((RECEIPT_VALID)); then
 fi
 GUEST_PASS_VALUE=$GUEST_PASS "$WINRM_PYTHON" - \
     "$IP" "$GUEST_USER" "$WINRM_PORT" "$DRIVER_VERSION" "$DRIVER_BRANCH" \
-    "$CLEANUP_ALLOWED" "$KEEP_GUEST_INSTALLER" <<'PYEOF'
+    "$CLEANUP_ALLOWED" "$KEEP_GUEST_INSTALLER" "$TIMEOUT_INSTALL" <<'PYEOF'
 import json
 import os
 import sys
 import time
 from pypsrp.client import Client
-ip, user, port, expected_version, branch, cleanup_allowed, keep_installer = sys.argv[1:8]
+ip, user, port, expected_version, branch, cleanup_allowed, keep_installer, \
+    verification_timeout_text = sys.argv[1:9]
 cleanup = cleanup_allowed == '1' and keep_installer == '0'
+verification_timeout = int(verification_timeout_text)
+if not 1 <= verification_timeout <= 3600:
+    raise SystemExit('invalid signed-driver verification timeout')
 
 ps = rf"""
 $ErrorActionPreference = 'Stop'
@@ -563,7 +567,7 @@ namespace G11 {{
 }}
 
 $video = @(Get-CimInstance Win32_VideoController -ErrorAction Stop |
-    Where-Object {{ $_.PNPDeviceID -like 'PCI\\VEN_10DE*' }})
+    Where-Object {{ $_.PNPDeviceID -like 'PCI\VEN_10DE*' }})
 if ($video.Count -ne 1) {{ throw "expected one NVIDIA display, got $($video.Count)" }}
 $signed = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
     Where-Object {{ $_.DeviceID -eq $video[0].PNPDeviceID }})
@@ -666,7 +670,7 @@ Set-ItemProperty -Path $dskey -Name 'SearchOrderConfig' -Type DWord -Value 0
 $state | ConvertTo-Json -Compress
 """
 
-deadline = time.monotonic() + 360
+deadline = time.monotonic() + verification_timeout
 last = ''
 while time.monotonic() < deadline:
     try:
@@ -678,12 +682,17 @@ while time.monotonic() < deadline:
                    password=os.environ['GUEST_PASS_VALUE'],
                    ssl=False, auth='ntlm', port=int(port),
                    operation_timeout=30, read_timeout=45)
-        out, streams, _ = c.execute_ps(ps)
+        out, streams, had_errors = c.execute_ps(ps)
     except Exception as exc:
         last = f'{type(exc).__name__}: {exc}'
         time.sleep(5)
         continue
     last = (out or '').strip()
+    if had_errors:
+        errors = '; '.join(str(item) for item in streams.error)
+        last = 'PowerShell: ' + (errors or 'reported an error without details')
+        time.sleep(5)
+        continue
     for line in reversed(last.splitlines()):
         line = line.strip()
         if line.startswith('{') and line.endswith('}'):

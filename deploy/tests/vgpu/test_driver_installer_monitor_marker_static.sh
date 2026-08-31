@@ -152,9 +152,14 @@ for required in \
         'R580/${DRIVER_LABEL} signed / Code 0 / runtime code integrity enforced' \
         'Win32_PnPSignedDriver' \
         'Win32_SystemDriver' \
+        "PNPDeviceID -like 'PCI\\VEN_10DE*'" \
         "\$kernelDriverPath -replace '^\\\\SystemRoot', \$env:SystemRoot" \
         'Microsoft Windows Hardware Compatibility Publisher' \
         'development_signatures' \
+        'verification_timeout = int(verification_timeout_text)' \
+        'deadline = time.monotonic() + verification_timeout' \
+        'out, streams, had_errors = c.execute_ps(ps)' \
+        "last = 'PowerShell: '" \
         "environment={'G11_ARM_ADMIN_PASS': pw}" \
         'except Exception as exc:' \
         'operation_timeout=30, read_timeout=45'; do

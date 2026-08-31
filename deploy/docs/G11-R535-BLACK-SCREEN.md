@@ -115,6 +115,11 @@ NVIDIA console 已被 host 拓扑隔离，绝不表示跳过最终显示合同�
 正式签名与运行时代码完整性复检、完整关机，以及离线 8 项 page-safe
 EDID/`NV_Modes` 收敛，缺一步都返回失败。
 
+安装后复检沿用 `--install-timeout`（默认 600 秒），以覆盖 Windows Update 或
+Modules Installer 占用 WinRM 的冷启动。复检会按真实的单反斜杠 NVIDIA PnP ID
+匹配设备，并保留 PowerShell 错误流；因此超时会报告具体签名、PnP、服务或代码
+完整性失败，不会再把“设备匹配为 0”压成空白错误。
+
 `install-vgpu-driver.sh` 现在是上述封装内部的第二阶段，也会从实际 `/proc` QEMU
 参数验证安全拓扑；在普通 `display=on` VM 中直接调用会在任何 guest 写入前拒绝。
 普通启动若发现 Windows 没有认证 GRID，或虽有驱动但尚未生成显示器缓存，也会停止

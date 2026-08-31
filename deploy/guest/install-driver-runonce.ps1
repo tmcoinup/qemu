@@ -21,6 +21,11 @@
 
 .PARAMETER RunInstaller
   仅供 RunOnce 回调；在当前活动桌面安装并监控显示模式。
+
+.PARAMETER ConsoleGuardPolicy
+  Required 用于 SDL/GTK 安装窗口，必须实时收敛 1920x1080；Offline 只允许
+  host 已从 QEMU /proc 证明 `-display none` 且 NVIDIA mdev `display=off` 的
+  headless 安装。后者不冒充在线 console 验收，必须由 host 完整关机后离线同步。
 #>
 param(
     [string]$InstallerPath = 'C:\nv\g11-grid-driver.exe',
@@ -34,6 +39,8 @@ param(
     [string]$PayloadArchivePath = '',
     [string]$ExpectedPayloadSha256 = '',
     [string]$ExpectedDriverVersion = '',
+    [ValidateSet('Required', 'Offline')]
+    [string]$ConsoleGuardPolicy = 'Required',
     [switch]$RunInstaller
 )
 
@@ -253,10 +260,12 @@ if ($RunInstaller) {
         "stage=signature-verified`r`nbranch=$DriverBranch`r`n",
         [Text.Encoding]::ASCII)
 
-    if ($DriverBranch -eq 'R535') {
+    if ($DriverBranch -eq 'R535' -and $ConsoleGuardPolicy -eq 'Required') {
         Write-Host '[display-guard] pre-install 1920x1080 convergence' -Fore Cyan
         $preMode = Wait-SafeFhdDisplayMode -TimeoutSeconds 15
         Write-Host ("  before setup: " + (Format-DisplayMode $preMode))
+    } elseif ($DriverBranch -eq 'R535') {
+        Write-Host '[display-guard] headless console is host-isolated; defer page-safe convergence to offline host sync' -Fore Cyan
     } else {
         Write-Host '[display-guard] R580 does not use the R535 page-alignment workaround' -Fore Cyan
     }
@@ -288,7 +297,7 @@ if ($RunInstaller) {
         [Text.Encoding]::ASCII)
     $lastUnsafe = ''
     while (-not $process.WaitForExit(1000)) {
-        if ($DriverBranch -eq 'R535') {
+        if ($DriverBranch -eq 'R535' -and $ConsoleGuardPolicy -eq 'Required') {
             $current = Get-CurrentDisplayMode
             $description = Format-DisplayMode $current
             if (-not $current.Valid -or $current.Width -ne 1920 -or
@@ -306,12 +315,17 @@ if ($RunInstaller) {
         "stage=setup-exited`r`ninstaller=$installerExit`r`n",
         [Text.Encoding]::ASCII)
 
-    if ($DriverBranch -eq 'R535') {
+    if ($DriverBranch -eq 'R535' -and $ConsoleGuardPolicy -eq 'Required') {
         Write-Host '[display-guard] post-install 1920x1080 convergence' -Fore Cyan
         $finalMode = Wait-SafeFhdDisplayMode -TimeoutSeconds 60
         $displaySafe = ($finalMode.Valid -and $finalMode.Width -eq 1920 -and
             $finalMode.Height -eq 1080 -and $finalMode.PageSafe)
         Write-Host ("  after setup:  " + (Format-DisplayMode $finalMode))
+    } elseif ($DriverBranch -eq 'R535') {
+        $finalMode = [pscustomobject]@{
+            Width = 0; Height = 0; FrameBytes = [int64]0
+        }
+        $displaySafe = $true
     } else {
         $finalMode = [pscustomobject]@{
             Width = 0; Height = 0; FrameBytes = [int64]0
@@ -329,14 +343,17 @@ if ($RunInstaller) {
         "package_signature=$($packageSignature.Status)",
         ("display={0}x{1}" -f $finalMode.Width, $finalMode.Height),
         ("console_bytes={0}" -f $finalMode.FrameBytes),
-        ("console_required={0}" -f [int]($DriverBranch -eq 'R535')),
+        ("console_required={0}" -f [int](
+            $DriverBranch -eq 'R535' -and
+            $ConsoleGuardPolicy -eq 'Required')),
         ("console_safe={0}" -f [int]$displaySafe)
     )
     $receiptTemp = "$FlagPath.tmp"
     [IO.File]::WriteAllLines($receiptTemp, $receipt, [Text.Encoding]::ASCII)
     Move-Item -LiteralPath $receiptTemp -Destination $FlagPath -Force
 
-    if ($DriverBranch -eq 'R535' -and -not $displaySafe) {
+    if ($DriverBranch -eq 'R535' -and
+            $ConsoleGuardPolicy -eq 'Required' -and -not $displaySafe) {
         Write-Error ('GRID install completed but the R535 console could not ' +
             'converge to page-safe 1920x1080; leaving Windows running for recovery')
         exit 20
@@ -394,7 +411,8 @@ if ($DriverBranch -eq 'R580') {
     $powerShellCommand += "-PayloadArchivePath `"$PayloadArchivePath`" " +
         "-ExpectedPayloadSha256 $ExpectedPayloadSha256 "
 }
-$powerShellCommand += "-ExpectedDriverVersion $ExpectedDriverVersion"
+$powerShellCommand += "-ExpectedDriverVersion $ExpectedDriverVersion " +
+    "-ConsoleGuardPolicy $ConsoleGuardPolicy"
 
 # Run/RunOnce registry data is limited to 260 characters.  Keep only this
 # fixed short launcher in the registry and put the reviewed hash arguments in

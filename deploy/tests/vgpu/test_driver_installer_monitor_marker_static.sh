@@ -115,6 +115,10 @@ for required in \
         '$mode.dmPelsHeight = 1080' \
         '$process.WaitForExit(1000)' \
         'Wait-SafeFhdDisplayMode -TimeoutSeconds 60' \
+        "[ValidateSet('Required', 'Offline')]" \
+        "\$ConsoleGuardPolicy -eq 'Required'" \
+        'headless console is host-isolated' \
+        '"-ConsoleGuardPolicy $ConsoleGuardPolicy"' \
         "\$scriptPath = 'C:\\nv\\install-driver-runonce.ps1'" \
         "\$launcherPath = 'C:\\nv\\install-driver-runonce.cmd'" \
         "\$cmd.Length -gt 260" \
@@ -141,6 +145,9 @@ for required in \
         '"$DISPLAY_MODE" == 1920x1080' \
         '"$CONSOLE_BYTES" == 8294400' \
         '"$CONSOLE_SAFE" == 1' \
+        '"$VGPU_DRIVER_INSTALL_BACKEND" == headless' \
+        '"$DISPLAY_MODE" == 0x0' \
+        'headless console isolated; offline page-safe sync required' \
         'R535/GRID 538.33 signed / Code 0 / page-safe 1920x1080' \
         'R580/${DRIVER_LABEL} signed / Code 0 / runtime code integrity enforced' \
         'Win32_PnPSignedDriver' \

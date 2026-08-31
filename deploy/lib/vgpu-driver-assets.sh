@@ -192,7 +192,7 @@ vgpu_driver_install_argv_is_safe() {
     shift 3
     local -a argv=( "$@" )
     local arg value
-    local name_ok=0 disk_ok=0 vga_ok=0 mdev_ok=0 window_ok=0 forbidden=0
+    local name_ok=0 disk_ok=0 vga_ok=0 mdev_ok=0 window_count=0 forbidden=0
     local i
 
     ((${#argv[@]} > 0)) || return 1
@@ -239,12 +239,38 @@ vgpu_driver_install_argv_is_safe() {
                 ;;
             -display)
                 case "$value" in
-                    sdl,gl=off,*|gtk,gl=off,*|none) window_ok=1 ;;
+                    sdl,gl=off,*|gtk,gl=off,*|none)
+                        window_count=$((window_count + 1))
+                        ;;
                 esac
                 ;;
         esac
     done
-    ((name_ok && disk_ok && vga_ok && mdev_ok && window_ok && !forbidden))
+    ((name_ok && disk_ok && vga_ok && mdev_ok &&
+      window_count == 1 && !forbidden))
+}
+
+# Return the console contract proven by one already-validated installer argv.
+# `headless` is deliberately narrower than merely lacking SDL/GTK: it requires
+# the explicit QEMU `-display none` token.  Callers use this result to decide
+# whether user32 can be required inside the active Windows logon session.
+vgpu_driver_install_argv_backend() {
+    local -a argv=( "$@" )
+    local i value backend="" count=0
+
+    for ((i = 1; i < ${#argv[@]}; i += 1)); do
+        [[ "${argv[i]}" == -display ]] || continue
+        ((i + 1 < ${#argv[@]})) || return 1
+        value=${argv[++i]}
+        case "$value" in
+            none) backend=headless ;;
+            sdl,gl=off,*|gtk,gl=off,*) backend=windowed ;;
+            *) return 1 ;;
+        esac
+        count=$((count + 1))
+    done
+    ((count == 1)) || return 1
+    printf '%s\n' "$backend"
 }
 
 # Refuse all guest writes unless exactly one live QEMU process for this VM uses
@@ -253,6 +279,7 @@ vgpu_driver_install_argv_is_safe() {
 # vm-storage.sh must already be sourced and initialized by the caller.
 vgpu_require_safe_driver_install_topology() {
     local vm_id=$1 conf disk expected_uuid pid cmdline_path matched=0 matched_pid=""
+    local backend matched_backend=""
     local VM_UUID=""
     local -a argv=()
 
@@ -276,10 +303,12 @@ vgpu_require_safe_driver_install_topology() {
         mapfile -d '' -t argv <"$cmdline_path" 2>/dev/null || continue
         vgpu_driver_install_argv_is_safe \
             "$vm_id" "$disk" "$expected_uuid" "${argv[@]}" || continue
+        backend=$(vgpu_driver_install_argv_backend "${argv[@]}") || continue
         pid=${cmdline_path#/proc/}
         pid=${pid%/cmdline}
         matched=$((matched + 1))
         matched_pid=$pid
+        matched_backend=$backend
     done
     if ((matched != 1)); then
         echo "[driver-assets] REFUSE: vm${vm_id} 未运行唯一的安全 GRID 安装拓扑" >&2
@@ -287,7 +316,8 @@ vgpu_require_safe_driver_install_topology() {
         echo "[driver-assets] 要求: 标准 VGA + native mdev display=off + spoof=off + rombar=0" >&2
         return 1
     fi
-    echo "[driver-assets] verified isolated GRID-install topology for vm${vm_id} (qemu pid=${matched_pid})"
+    VGPU_DRIVER_INSTALL_BACKEND=$matched_backend
+    echo "[driver-assets] verified isolated GRID-install topology for vm${vm_id} (qemu pid=${matched_pid} backend=${matched_backend})"
 }
 
 vgpu_valid_ipv4() {

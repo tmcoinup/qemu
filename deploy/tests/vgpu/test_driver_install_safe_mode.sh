@@ -43,10 +43,14 @@ safe=(
 )
 vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "${safe[@]}" ||
     fail "reviewed driver-install argv was rejected"
+[[ $(vgpu_driver_install_argv_backend "${safe[@]}") == windowed ]] ||
+    fail "windowed driver-install backend was not classified"
 safe_headless=( "${safe[@]}" )
 safe_headless[14]=none
 vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "${safe_headless[@]}" ||
     fail "reviewed headless driver-install argv was rejected"
+[[ $(vgpu_driver_install_argv_backend "${safe_headless[@]}") == headless ]] ||
+    fail "headless driver-install backend was not classified"
 safe_packaged=( "${safe[@]}" )
 safe_packaged[0]=/opt/vmate/libexec/qemu-system-x86_64.g11.real
 vgpu_driver_install_argv_is_safe 42 "$disk" "$uuid" "${safe_packaged[@]}" ||
@@ -72,6 +76,8 @@ reject_argv "${unsafe[@]}"
 unsafe=( "${safe[@]}" )
 unsafe[12]='VGA,id=wrong-vga,bus=pcie.0,addr=0x2'
 reject_argv "${unsafe[@]}"
+unsafe=( "${safe[@]}" -display none )
+reject_argv "${unsafe[@]}"
 reject_argv "${safe[@]/$uuid/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"
 
 for required in \
@@ -96,6 +102,16 @@ for required in \
 done
 
 for required in \
+        '-f /etc/vmate/g11-vgpu-host.conf' \
+        '! -L /etc/vmate/g11-vgpu-host.conf' \
+        'export VGPU_HOST_CONFIG=/etc/vmate/g11-vgpu-host.conf' \
+        '-f /opt/vmate/qemu-edid.g11' \
+        '! -L /opt/vmate/qemu-edid.g11' \
+        'export QEMU_EDID=/opt/vmate/qemu-edid.g11'; do
+    require_text "$required" "$orchestrator"
+done
+
+for required in \
         'winrm_host=127.0.0.1' \
         'winrm_port=$LAB_USERNET_WINRM_PORT' \
         'EXPECT_VER="$VGPU_SELECTED_DRIVER_VERSION"' \
@@ -117,6 +133,9 @@ for required in \
 done
 require_text '预驱动完成：安全 EDID/模式缓存已落盘' "$sync_monitor"
 require_text 'vgpu_require_safe_driver_install_topology "$VM_ID"' "$gui_installer"
+require_text 'VGPU_DRIVER_INSTALL_BACKEND' "$gui_installer"
+require_text 'CONSOLE_GUARD_POLICY=Offline' "$gui_installer"
+require_text 'headless console isolated; offline page-safe sync required' "$gui_installer"
 require_text 'driver-install|prepare-driver)' "$vmctl"
 require_text 'exec_with_vms_root "$install_vgpu_driver"' "$vmctl"
 require_text '本脚本不再在线重装显示驱动' "$setup_guest"
@@ -152,6 +171,13 @@ assert gui_call < shutdown < lock < sync
 safe_start = orchestrator.index('LAB_USERNET_WINRM_PORT=$WINRM_PORT')
 install = orchestrator.index('"$here/install-vgpu-driver.sh" "${install_args[@]}"', safe_start)
 assert safe_start < install
+
+managed_host = orchestrator.index(
+    'export VGPU_HOST_CONFIG=/etc/vmate/g11-vgpu-host.conf'
+)
+managed_edid = orchestrator.index('export QEMU_EDID=/opt/vmate/qemu-edid.g11')
+asset_verify = orchestrator.index('vgpu_verify_driver_assets exe')
+assert managed_host < managed_edid < asset_verify < safe_start
 PY
 
 if command -v rg >/dev/null 2>&1; then

@@ -83,17 +83,24 @@ cd /home/ubuntu/projects/qemu
 
 封装会自动完成：
 
+0. 若 VMate 已完成宿主修复，CLI 自动使用
+   `/etc/vmate/g11-vgpu-host.conf` 的权威档位和包内
+   `/opt/vmate/qemu-edid.g11`；因此即使源码工作区尚未构建或残留旧的 gitignore
+   本机配置，也不会误回退到另一档位。调用者显式传入的路径仍优先。
 1. 关机态先预置 page-safe EDID 并清理旧 `GraphicsDrivers` 缓存；驱动尚不存在时
    只写“预驱动”标记，不冒充完整收敛。
 2. 用临时标准 VGA 打开本地窗口；真实 NVIDIA mdev 保持 native PnP，但固定
    `display=off`、`rombar=0`、无 ramfb、无 PCI spoof。R535 安装过程中不会成为
    QEMU console 来源。
 3. 在活动 Windows 桌面清理损坏/半安装包并安装未经修改的生产签名 GRID 538.33。
+   SDL/GTK 模式继续实时守护 1920×1080；`--headless` 必须先由 host 从 QEMU
+   `/proc` 证明标准 VGA + `-display none` + NVIDIA `display=off`，此时不要求
+   不存在的 user32 console，而把 page-safe 验收延后到完整关机后的离线步骤。
 4. 收据通过后自动让 Windows 完整关机；宿主认证 DriverVersion、已发布 INF 哈希和
    当前 PnP，再写 8 项安全 `NV_Modes`。
 5. 默认保持关机，便于继续制作母盘。需要立刻正常冷启动可加 `--start`。
 
-只有收到以下安装收据，并且后续离线认证也通过，命令才返回成功：
+SDL/GTK 只有收到以下安装收据，并且后续离线认证也通过，命令才返回成功：
 
 ```text
 installer=0
@@ -101,6 +108,12 @@ display=1920x1080
 console_bytes=8294400
 console_safe=1
 ```
+
+无图形宿主使用 `--headless` 时，受信收据改为
+`display=0x0 / console_required=0 / console_safe=1`；这里的 `safe=1` 只表示
+NVIDIA console 已被 host 拓扑隔离，绝不表示跳过最终显示合同。封装随后仍必须完成
+正式签名与运行时代码完整性复检、完整关机，以及离线 8 项 page-safe
+EDID/`NV_Modes` 收敛，缺一步都返回失败。
 
 `install-vgpu-driver.sh` 现在是上述封装内部的第二阶段，也会从实际 `/proc` QEMU
 参数验证安全拓扑；在普通 `display=on` VM 中直接调用会在任何 guest 写入前拒绝。

@@ -107,7 +107,16 @@ invalidate_monitor_sync_marker() {
 
 # Fail before touching the guest if the historically misnamed asset was replaced
 # by a real 553.24 (R550) installer or any other unverified package.
+VGPU_DRIVER_INSTALL_BACKEND=""
 vgpu_require_safe_driver_install_topology "$VM_ID"
+case "$VGPU_DRIVER_INSTALL_BACKEND" in
+    windowed) CONSOLE_GUARD_POLICY=Required ;;
+    headless) CONSOLE_GUARD_POLICY=Offline ;;
+    *)
+        echo "[gui-install] unsafe/unknown driver-install backend" >&2
+        exit 1
+        ;;
+esac
 vgpu_verify_driver_assets exe
 
 DRIVER_ASSET=$VGPU_SELECTED_DRIVER_EXE_NAME
@@ -184,7 +193,7 @@ for asset in "${http_assets[@]}"; do
     fi
 done
 
-echo "[gui-install] stack=${DRIVER_BRANCH}/${DRIVER_LABEL} guest=${IP}:${WINRM_PORT} timeout=${TIMEOUT_INSTALL}s"
+echo "[gui-install] stack=${DRIVER_BRANCH}/${DRIVER_LABEL} guest=${IP}:${WINRM_PORT} timeout=${TIMEOUT_INSTALL}s console=${CONSOLE_GUARD_POLICY}"
 echo
 WINRM_PYTHON=$(g11_python_resolve pypsrp) || exit 1
 
@@ -308,13 +317,15 @@ GUEST_PASS_VALUE=$GUEST_PASS "$WINRM_PYTHON" - \
     "$IP" "$GUEST_USER" "$WINRM_PORT" "$BASE_URL" "$DRIVER_ASSET" \
     "$DRIVER_SHA256" "$DRIVER_VERSION" "$DRIVER_BRANCH" "$RUNONCE_SHA256" \
     "$PAYLOAD_ASSET" "$PAYLOAD_SHA256" "$RUNONCE_INSTALLER_SHA256" \
-    "$TIMEOUT_INSTALL" <<'PYEOF'
+    "$CONSOLE_GUARD_POLICY" "$TIMEOUT_INSTALL" <<'PYEOF'
 import os
 import sys
 from pypsrp.client import Client
 
 ip, user, port, base, asset, source_sha, expected_version, branch, runonce_sha, \
-    payload_asset, payload_sha, installer_sha, timeout = sys.argv[1:14]
+    payload_asset, payload_sha, installer_sha, console_policy, timeout = sys.argv[1:15]
+if console_policy not in ('Required', 'Offline'):
+    raise SystemExit('invalid console guard policy')
 pw = os.environ['GUEST_PASS_VALUE']
 c = Client(ip, username=user, password=pw, ssl=False, auth='ntlm',
            port=int(port), operation_timeout=int(timeout),
@@ -381,7 +392,8 @@ $runOnce = [ScriptBlock]::Create(
     -DriverBranch '{branch}' -ExpectedInstallerSha256 '{installer_sha}' `
     -ExpectedSourcePackageSha256 '{source_sha}' `
     -PayloadArchivePath $payloadArchive -ExpectedPayloadSha256 '{payload_sha}' `
-    -ExpectedDriverVersion '{expected_version}' | Out-Host
+    -ExpectedDriverVersion '{expected_version}' `
+    -ConsoleGuardPolicy '{console_policy}' | Out-Host
 $adminPass = $null
 "  arm script returned (guest is rebooting)"
 """
@@ -487,16 +499,22 @@ RECEIPT_VALID=1
 [[ "$CONSOLE_REQUIRED" == 0 || "$CONSOLE_REQUIRED" == 1 ]] || RECEIPT_VALID=0
 [[ "$CONSOLE_SAFE" == 0 || "$CONSOLE_SAFE" == 1 ]] || RECEIPT_VALID=0
 if [[ "$DRIVER_BRANCH" == R535 ]]; then
-    [[ "$RECEIPT_PAYLOAD_SHA256" == none && "$INSTALLER_EXIT" == 0 &&
-       "$DISPLAY_MODE" == 1920x1080 && "$CONSOLE_BYTES" == 8294400 &&
-       "$CONSOLE_REQUIRED" == 1 && "$CONSOLE_SAFE" == 1 ]] || RECEIPT_VALID=0
+    if [[ "$VGPU_DRIVER_INSTALL_BACKEND" == headless ]]; then
+        [[ "$RECEIPT_PAYLOAD_SHA256" == none && "$INSTALLER_EXIT" == 0 &&
+           "$DISPLAY_MODE" == 0x0 && "$CONSOLE_BYTES" == 0 &&
+           "$CONSOLE_REQUIRED" == 0 && "$CONSOLE_SAFE" == 1 ]] || RECEIPT_VALID=0
+    else
+        [[ "$RECEIPT_PAYLOAD_SHA256" == none && "$INSTALLER_EXIT" == 0 &&
+           "$DISPLAY_MODE" == 1920x1080 && "$CONSOLE_BYTES" == 8294400 &&
+           "$CONSOLE_REQUIRED" == 1 && "$CONSOLE_SAFE" == 1 ]] || RECEIPT_VALID=0
+    fi
 else
     [[ "$RECEIPT_PAYLOAD_SHA256" == "$PAYLOAD_SHA256" &&
        ( "$INSTALLER_EXIT" == 0 || "$INSTALLER_EXIT" == 1 ) &&
        "$DISPLAY_MODE" == 0x0 && "$CONSOLE_BYTES" == 0 &&
        "$CONSOLE_REQUIRED" == 0 && "$CONSOLE_SAFE" == 1 ]] || RECEIPT_VALID=0
 fi
-echo "[gui-install] receipt: branch=${RECEIPT_BRANCH:-invalid} installer=${INSTALLER_EXIT:-invalid} signature=${PACKAGE_SIGNATURE:-invalid} display=${DISPLAY_MODE:-invalid} page_safe=${CONSOLE_SAFE:-invalid}"
+echo "[gui-install] receipt: branch=${RECEIPT_BRANCH:-invalid} installer=${INSTALLER_EXIT:-invalid} signature=${PACKAGE_SIGNATURE:-invalid} display=${DISPLAY_MODE:-invalid} page_safe=${CONSOLE_SAFE:-invalid} console=${CONSOLE_GUARD_POLICY}"
 
 # ── verify active signed PnP driver and runtime code-integrity state ────
 CLEANUP_ALLOWED=0
@@ -691,7 +709,11 @@ if [[ "$DRIVER_BRANCH" == R535 && "$INSTALLER_EXIT" != 0 ]] ||
 fi
 
 if [[ "$DRIVER_BRANCH" == R535 ]]; then
-    echo "[gui-install] PASS: R535/GRID 538.33 signed / Code 0 / page-safe 1920x1080"
+    if [[ "$VGPU_DRIVER_INSTALL_BACKEND" == headless ]]; then
+        echo "[gui-install] PASS: R535/GRID 538.33 signed / Code 0 / headless console isolated; offline page-safe sync required"
+    else
+        echo "[gui-install] PASS: R535/GRID 538.33 signed / Code 0 / page-safe 1920x1080"
+    fi
 else
     echo "[gui-install] PASS: R580/${DRIVER_LABEL} signed / Code 0 / runtime code integrity enforced"
 fi

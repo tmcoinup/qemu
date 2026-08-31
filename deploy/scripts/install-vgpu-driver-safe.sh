@@ -12,6 +12,26 @@ source "$here/lib/g11-python-runtime.sh"
 G11_PYTHON_RUNTIME_INSTALLER="$here/host/install-g11-python-runtime.sh"
 vm_storage_init
 
+# VMate keeps the repaired host policy and the matching G-11 EDID generator
+# outside a mutable source checkout.  The desktop client already passes these
+# paths explicitly, but the documented `vmctl.sh driver-install` CLI must be
+# equally deterministic when it is run from a fresh/unbuilt checkout.  Keep an
+# explicit caller override authoritative; otherwise prefer only regular,
+# non-symlink package files and let the existing downstream validators fail
+# closed if neither managed asset exists.
+if [[ -z "${VGPU_HOST_CONFIG:-}" &&
+      -f /etc/vmate/g11-vgpu-host.conf &&
+      ! -L /etc/vmate/g11-vgpu-host.conf &&
+      -r /etc/vmate/g11-vgpu-host.conf ]]; then
+    export VGPU_HOST_CONFIG=/etc/vmate/g11-vgpu-host.conf
+fi
+if [[ -z "${QEMU_EDID:-}" &&
+      -f /opt/vmate/qemu-edid.g11 &&
+      ! -L /opt/vmate/qemu-edid.g11 &&
+      -x /opt/vmate/qemu-edid.g11 ]]; then
+    export QEMU_EDID=/opt/vmate/qemu-edid.g11
+fi
+
 usage() {
     cat <<'EOF'
 usage: ./deploy/scripts/vmctl.sh driver-install ID [--ip IPv4]

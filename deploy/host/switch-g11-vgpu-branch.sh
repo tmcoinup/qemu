@@ -927,7 +927,7 @@ switch_to_r570() {
 }
 
 legacy_v100_bootstrap_resume_state() {
-    local mode
+    local mode r535_status
     [[ -f "$BRANCH_STATE" && ! -L "$BRANCH_STATE" ]] || return 1
     [[ "$(stat -c '%U:%G' "$BRANCH_STATE")" == root:root ]] || return 1
     mode=$(stat -c '%a' "$BRANCH_STATE")
@@ -938,8 +938,9 @@ legacy_v100_bootstrap_resume_state() {
     [[ "$(state_value "$BRANCH_STATE" kernel || true)" == "$KVER" ]] || return 1
     [[ "$(state_value "$BRANCH_STATE" gpu || true)" == "$GPU_BDF" ]] || return 1
     [[ -z "$(loaded_version)" ]] || return 1
-    [[ "$(package_status "$R535_PACKAGE")" == unpacked && \
-       "$(package_version "$R535_PACKAGE")" == "$R535_VERSION" ]] || return 1
+    r535_status=$(package_status "$R535_PACKAGE")
+    [[ "$r535_status" == unpacked || "$r535_status" == half-configured ]] || return 1
+    [[ "$(package_version "$R535_PACKAGE")" == "$R535_VERSION" ]] || return 1
     [[ -z "$(package_status "$R570_PACKAGE")" && \
        -z "$(package_status "$R580_PACKAGE")" ]] || return 1
     [[ "$(hook_policy)" == r570-native ]] || return 1

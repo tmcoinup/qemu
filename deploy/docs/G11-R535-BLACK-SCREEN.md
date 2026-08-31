@@ -119,6 +119,8 @@ EDID/`NV_Modes` 收敛，缺一步都返回失败。
 Modules Installer 占用 WinRM 的冷启动。复检会按真实的单反斜杠 NVIDIA PnP ID
 匹配设备，并保留 PowerShell 错误流；因此超时会报告具体签名、PnP、服务或代码
 完整性失败，不会再把“设备匹配为 0”压成空白错误。
+若 Windows 忙导致 WSMan 客户端重连，AutoLogon、临时文件和策略键清理均按幂等
+操作处理；上一条远程命令延迟完成时，不会因重复删除同一注册表值而误判驱动失败。
 
 `install-vgpu-driver.sh` 现在是上述封装内部的第二阶段，也会从实际 `/proc` QEMU
 参数验证安全拓扑；在普通 `display=on` VM 中直接调用会在任何 guest 写入前拒绝。

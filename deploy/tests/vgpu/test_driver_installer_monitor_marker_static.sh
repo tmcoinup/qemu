@@ -160,9 +160,13 @@ for required in \
         'deadline = time.monotonic() + verification_timeout' \
         'out, streams, had_errors = c.execute_ps(ps)' \
         "last = 'PowerShell: '" \
+        'Remove-ItemProperty -LiteralPath $LiteralPath -Name $Name -Force `' \
+        '-ErrorAction SilentlyContinue' \
+        'throw "could not remove sensitive Winlogon value: $Name"' \
+        "throw 'could not create the Windows Update driver policy key'" \
         "environment={'G11_ARM_ADMIN_PASS': pw}" \
         'except Exception as exc:' \
-        'operation_timeout=30, read_timeout=45'; do
+        'operation_timeout=90, read_timeout=120'; do
     grep -Fq -- "$required" "$repo_root/deploy/install-vgpu-driver-gui.sh" ||
         fail "GUI installer receipt gate omits: $required"
 done

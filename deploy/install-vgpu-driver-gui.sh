@@ -627,16 +627,26 @@ function Remove-G11RegistryValueIfPresent {{
     if (-not (Test-Path -LiteralPath $LiteralPath)) {{ return }}
     $valueNames = @((Get-ItemProperty -LiteralPath $LiteralPath).PSObject.Properties.Name)
     if ($valueNames -contains $Name) {{
-        Remove-ItemProperty -LiteralPath $LiteralPath -Name $Name -Force
+        # A timed-out WSMan request can still finish remotely while the host
+        # opens its next verification runspace.  Treat an already-removed
+        # value as success so concurrent cleanup remains idempotent.
+        Remove-ItemProperty -LiteralPath $LiteralPath -Name $Name -Force `
+            -ErrorAction SilentlyContinue
+        $remainingNames = @((Get-ItemProperty -LiteralPath $LiteralPath).PSObject.Properties.Name)
+        if ($remainingNames -contains $Name) {{
+            throw "could not remove sensitive Winlogon value: $Name"
+        }}
     }}
 }}
 function Remove-G11PathIfPresent {{
     param([string]$LiteralPath, [switch]$Recurse)
     if (-not (Test-Path -LiteralPath $LiteralPath)) {{ return }}
     if ($Recurse) {{
-        Remove-Item -LiteralPath $LiteralPath -Recurse -Force
+        Remove-Item -LiteralPath $LiteralPath -Recurse -Force `
+            -ErrorAction SilentlyContinue
     }} else {{
-        Remove-Item -LiteralPath $LiteralPath -Force
+        Remove-Item -LiteralPath $LiteralPath -Force `
+            -ErrorAction SilentlyContinue
     }}
 }}
 $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
@@ -662,10 +672,20 @@ if ($verified -and {'$true' if cleanup else '$false'}) {{
 }}
 
 $wukey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
-New-Item -Path $wukey -Force | Out-Null
+if (-not (Test-Path -LiteralPath $wukey)) {{
+    New-Item -Path $wukey -Force -ErrorAction SilentlyContinue | Out-Null
+}}
+if (-not (Test-Path -LiteralPath $wukey)) {{
+    throw 'could not create the Windows Update driver policy key'
+}}
 Set-ItemProperty -Path $wukey -Name 'ExcludeWUDriversInQualityUpdate' -Type DWord -Value 1
 $dskey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching'
-New-Item -Path $dskey -Force | Out-Null
+if (-not (Test-Path -LiteralPath $dskey)) {{
+    New-Item -Path $dskey -Force -ErrorAction SilentlyContinue | Out-Null
+}}
+if (-not (Test-Path -LiteralPath $dskey)) {{
+    throw 'could not create the driver-search policy key'
+}}
 Set-ItemProperty -Path $dskey -Name 'SearchOrderConfig' -Type DWord -Value 0
 $state | ConvertTo-Json -Compress
 """
@@ -681,7 +701,7 @@ while time.monotonic() < deadline:
         c = Client(ip, username=user,
                    password=os.environ['GUEST_PASS_VALUE'],
                    ssl=False, auth='ntlm', port=int(port),
-                   operation_timeout=30, read_timeout=45)
+                   operation_timeout=90, read_timeout=120)
         out, streams, had_errors = c.execute_ps(ps)
     except Exception as exc:
         last = f'{type(exc).__name__}: {exc}'

@@ -101,7 +101,8 @@ G-11 vGPU 宿主驱动分支切换（RTX 2080 / Tesla V100 SXM2 16GB）
   bootstrap-v100-r535
               仅用于当前健康 R570/V100 且尚无 R535 种子的首次统一：安装
               R535、发布 equal 1Q 策略、建立恢复种子并进入冷启动验收；
-              也可续跑本脚本记录且精确匹配的 R535 DKMS 失败断点。
+              也可续跑本脚本记录且精确匹配的安装断点，或修复精确命中
+              symbol_get GPL-only 兼容故障的 postboot-failed 状态。
   r570        切到 vGPU 18.4/R570.172.07 闭源 RM；RTX 使用 capability Hook，
               V100 保持 native capability 并启用 mixed 1Q+2Q。
               切换后必须通过自动冷启动验收，才会解除 VM 启动门禁。
@@ -986,28 +987,116 @@ ready_v100_bootstrap_resume_state() {
        "$expected_patcher" ]] || return 1
 }
 
+postboot_failed_v100_r535_rebuild_state() {
+    local mode archive stored_patcher current_patcher kernel_log
+    [[ -f "$BRANCH_STATE" && ! -L "$BRANCH_STATE" ]] || return 1
+    [[ "$(stat -c '%U:%G' "$BRANCH_STATE")" == root:root ]] || return 1
+    mode=$(stat -c '%a' "$BRANCH_STATE")
+    (((8#$mode & 0022) == 0)) || return 1
+    [[ "$(state_value "$BRANCH_STATE" branch || true)" == r535 && \
+       "$(state_value "$BRANCH_STATE" status || true)" == postboot-failed && \
+       "$(state_value "$BRANCH_STATE" kernel || true)" == "$KVER" && \
+       "$(state_value "$BRANCH_STATE" gpu || true)" == "$GPU_BDF" ]] || return 1
+
+    [[ -f "$PENDING_STATE" && ! -L "$PENDING_STATE" ]] || return 1
+    [[ "$(stat -c '%U:%G' "$PENDING_STATE")" == root:root ]] || return 1
+    mode=$(stat -c '%a' "$PENDING_STATE")
+    (((8#$mode & 0022) == 0)) || return 1
+    [[ "$(state_value "$PENDING_STATE" branch || true)" == r535 && \
+       "$(state_value "$PENDING_STATE" kernel || true)" == "$KVER" && \
+       "$(state_value "$PENDING_STATE" gpu || true)" == "$GPU_BDF" && \
+       "$(state_value "$PENDING_STATE" gpu_vendor_device || true)" == \
+       "$GPU_VENDOR_DEVICE" ]] || return 1
+
+    [[ "$(loaded_version)" == "$R535_VERSION" && \
+       "$(module_license)" == NVIDIA && -z "$(module_signer)" ]] || return 1
+    [[ "$(package_status "$R535_PACKAGE")" == installed && \
+       "$(package_version "$R535_PACKAGE")" == "$R535_VERSION" ]] || return 1
+    [[ -z "$(package_status "$R570_PACKAGE")" && \
+       -z "$(package_status "$R580_PACKAGE")" ]] || return 1
+    [[ "$(hook_policy)" == r535-consumer ]] || return 1
+    systemctl is-active --quiet nvidia-vgpu-mgr.service || return 1
+
+    [[ -f "$V100_R535_INSTALL_STATE" && \
+       ! -L "$V100_R535_INSTALL_STATE" ]] || return 1
+    [[ "$(stat -c '%U:%G' "$V100_R535_INSTALL_STATE")" == root:root ]] || return 1
+    mode=$(stat -c '%a' "$V100_R535_INSTALL_STATE")
+    (((8#$mode & 0022) == 0)) || return 1
+    [[ "$(state_value "$V100_R535_INSTALL_STATE" phase || true)" == ready && \
+       "$(state_value "$V100_R535_INSTALL_STATE" kernel || true)" == "$KVER" && \
+       "$(state_value "$V100_R535_INSTALL_STATE" target_bdf || true)" == \
+       "$GPU_BDF" && \
+       "$(state_value "$V100_R535_INSTALL_STATE" driver_version || true)" == \
+       "$R535_VERSION" && \
+       "$(state_value "$V100_R535_INSTALL_STATE" driver_sha256 || true)" == \
+       "$R535_DEB_SHA256" ]] || return 1
+    stored_patcher=$(state_value "$V100_R535_INSTALL_STATE" patcher_sha256 || true)
+    current_patcher=$(sha256sum "$V100_R535_PATCHER" | awk '{print $1}')
+    [[ "$stored_patcher" =~ ^[0-9a-f]{64}$ && \
+       "$stored_patcher" != "$current_patcher" ]] || return 1
+
+    [[ -f "$SEED_META" && ! -L "$SEED_META" ]] || return 1
+    archive=$(state_value "$SEED_META" archive || true)
+    [[ "$archive" == "$(seed_archive_path)" && -f "$archive" && \
+       ! -L "$archive" ]] || return 1
+    [[ -z "$(find "/sys/bus/pci/devices/$GPU_BDF/mdev_supported_types" \
+        -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)" ]] || return 1
+    kernel_log=$(journalctl -k -b --no-pager 2>/dev/null || true)
+    grep -Fq 'failing symbol_get of non-GPLONLY symbol nvidia_vgpu_vfio_get_ops.' \
+        <<<"$kernel_log" || return 1
+    grep -Fq '[nvidia-vgpu-vfio] Unable to get symbol for nvidia_vgpu_vfio_get_ops from nvidia.ko' \
+        <<<"$kernel_log" || return 1
+}
+
+archive_rejected_r535_seed() {
+    local archive backup_root backup_dir archive_name
+    archive=$(state_value "$SEED_META" archive) || die '待隔离 R535 种子缺少 archive'
+    [[ "$archive" == "$(seed_archive_path)" && -f "$archive" && \
+       ! -L "$archive" ]] || die '待隔离 R535 种子路径不安全'
+    backup_root=/var/backups/vmate-g11-vgpu-branch
+    install -d -o root -g root -m 0700 "$backup_root"
+    backup_dir=$(mktemp -d "$backup_root/rejected-r535-$KVER.XXXXXXXX")
+    chmod 0700 "$backup_dir"
+    install -o root -g root -m 0644 "$BRANCH_STATE" "$backup_dir/current.state"
+    install -o root -g root -m 0644 "$PENDING_STATE" "$backup_dir/pending-reboot.state"
+    install -o root -g root -m 0644 "$V100_R535_INSTALL_STATE" \
+        "$backup_dir/g11-v100-r535.state"
+    archive_name=${archive##*/}
+    mv -- "$archive" "$backup_dir/$archive_name"
+    if ! mv -- "$SEED_META" "$backup_dir/r535-seed.state"; then
+        mv -- "$backup_dir/$archive_name" "$archive" || true
+        die '隔离未通过冷启动验收的 R535 种子失败'
+    fi
+    log "未通过冷启动验收的 R535 种子已隔离到：$backup_dir"
+}
+
 bootstrap_v100_r535_core() {
     local selected535 selected570
     local resume_mode=fresh
     [[ "$GPU_KIND" == v100 ]] || \
         die 'bootstrap-v100-r535 只允许已审核的 Tesla V100'
-    [[ ! -e "$SEED_META" ]] || \
-        die 'R535 恢复种子已存在；请直接运行 r535'
-    if ready_v100_bootstrap_resume_state; then
-        resume_mode=driver-ready
-        warn '检测到已通过安装器复检的 R535 驱动断点；保留驱动并从 Hook 安装续跑'
-    elif partial_v100_bootstrap_resume_state; then
-        resume_mode=package-partial
-        warn '检测到本脚本记录的 R535 DKMS 失败断点；将从官方 DEB 清理重装后续跑'
+    if postboot_failed_v100_r535_rebuild_state; then
+        resume_mode=postboot-rebuild
+        warn '精确命中 R535 symbol_get GPL-only 冷启动故障；将隔离旧种子并重建'
     else
-        [[ "$(loaded_version)" == "$R570_VERSION" && \
-           "$(module_license)" == NVIDIA && \
-           "$(hook_policy)" == r570-native ]] || \
-            die '首次 V100 统一必须从健康的 R570/native 分支执行；只自动续跑精确匹配的失败断点'
-        [[ "$(package_status "$R570_PACKAGE")" == installed && \
-           "$(package_version "$R570_PACKAGE")" == "$R570_VERSION" ]] || \
-            die "dpkg 中没有完整安装 $R570_PACKAGE/$R570_VERSION"
-        validate_runtime "$R570_VERSION" "$(expected_hook_policy r570)"
+        [[ ! -e "$SEED_META" ]] || \
+            die 'R535 恢复种子已存在；请直接运行 r535'
+        if ready_v100_bootstrap_resume_state; then
+            resume_mode=driver-ready
+            warn '检测到已通过安装器复检的 R535 驱动断点；保留驱动并从 Hook 安装续跑'
+        elif partial_v100_bootstrap_resume_state; then
+            resume_mode=package-partial
+            warn '检测到本脚本记录的 R535 DKMS 失败断点；将从官方 DEB 清理重装后续跑'
+        else
+            [[ "$(loaded_version)" == "$R570_VERSION" && \
+               "$(module_license)" == NVIDIA && \
+               "$(hook_policy)" == r570-native ]] || \
+                die '首次 V100 统一必须从健康的 R570/native 分支执行；只自动续跑精确匹配的失败断点'
+            [[ "$(package_status "$R570_PACKAGE")" == installed && \
+               "$(package_version "$R570_PACKAGE")" == "$R570_VERSION" ]] || \
+                die "dpkg 中没有完整安装 $R570_PACKAGE/$R570_VERSION"
+            validate_runtime "$R570_VERSION" "$(expected_hook_policy r570)"
+        fi
     fi
 
     selected535=$(select_deb "$R535_DEB" "$CACHED_R535_DEB" "$DEFAULT_R535_DEB" \
@@ -1016,6 +1105,10 @@ bootstrap_v100_r535_core() {
         "$R570_PACKAGE" "$R570_VERSION" "$R570_DEB_SHA256")
     cache_deb "$selected535" "$CACHED_R535_DEB"
     cache_deb "$selected570" "$CACHED_R570_DEB"
+    if [[ "$resume_mode" == postboot-rebuild ]]; then
+        verify_r535_seed
+        archive_rejected_r535_seed
+    fi
 
     # Stop the retry timer before unloading R570 so it cannot race the package
     # transaction.  --remove is idempotent for the narrowly accepted resume
@@ -1034,6 +1127,8 @@ bootstrap_v100_r535_core() {
 
         if [[ "$resume_mode" == package-partial ]]; then
             log '失败断点已清理；从锁定哈希的官方 R535 包重新开始'
+        elif [[ "$resume_mode" == postboot-rebuild ]]; then
+            log '旧 R535 冷启动失败状态已隔离；应用 symbol_get GPL-only 兼容补丁重建'
         fi
 
         "$V100_R535_INSTALLER" --bdf "$GPU_BDF" \

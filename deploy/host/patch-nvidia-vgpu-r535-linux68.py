@@ -16,6 +16,7 @@ PRISTINE_SHA256 = {
     "conftest.sh": "4e1d7009462d800339801c6e4029e225a531409124d0574f88423856c8024682",
     "nvidia/nv.c": "16a9f2454cf8c0f14a8d7eee6ac9439e5d0bac665d3c6d7dc27051ee45ff2176",
     "nvidia/nv-pci.c": "7e17739d773b7fce1af2cca8babb67c2ee1b8357e7b31dc0d7e5901298e93863",
+    "nvidia/nv-vgpu-vfio-interface.c": "b8d2e86497a41960c492cc59e880091614a7a90b910e5c60de453399e4a687b2",
     "nvidia/nvidia.Kbuild": "b56c73c1dcda951440e8e3258ae949e427b57987ec457e601e5311d997e16bc2",
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.Kbuild": "615ec37048bac0ac8fe45dbbf6160a80915795d8119889c48ac716bb5a08b019",
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.c": "0ffd4d05e966973b4bdf0367d158e78395b520c448e12bf8c46eee3ebcf83b6f",
@@ -30,6 +31,7 @@ PATCHED_SHA256 = {
     "conftest.sh": "55d12131fbe924873548a49e452241c1dff77c2f4fb488ddce471483f465c6d5",
     "nvidia/nv.c": "57886e429020dbc15ed98242bb38d54720fca1c3a1b91e7d39c5245075ae8603",
     "nvidia/nv-pci.c": "98b2d287f987b66ec37917f0ba58c3486e52a53a00acd90b7da7259f463d797d",
+    "nvidia/nv-vgpu-vfio-interface.c": "e35da018cf69472cc7e9a5cc79fde880ba7db1ac6dedd8900c67a7c058b20a82",
     "nvidia/nvidia.Kbuild": "513b373e37617a0af04c2a0ea3b1c948af3ae3d277a26d4172e364f0b4e831ba",
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.Kbuild": "6b86d471b5488fdf363cc48e293e0b37d381d88ff330cc569606bf1093abe2a3",
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.c": "71766a933af2a3a834aadf53efeeaba6a87909c731053fda35f248c5d24936f1",
@@ -183,6 +185,21 @@ def patch_nv(text: str) -> str:
     )
 
 
+def patch_nv_vgpu_vfio_interface(text: str) -> str:
+    text = replace_once(
+        text,
+        "EXPORT_SYMBOL(nvidia_vgpu_vfio_set_ops);",
+        "EXPORT_SYMBOL_GPL(nvidia_vgpu_vfio_set_ops);",
+        "Linux symbol_get GPL-only set_ops export",
+    )
+    return replace_once(
+        text,
+        "EXPORT_SYMBOL(nvidia_vgpu_vfio_get_ops);",
+        "EXPORT_SYMBOL_GPL(nvidia_vgpu_vfio_get_ops);",
+        "Linux symbol_get GPL-only get_ops export",
+    )
+
+
 def patch_nv_pci(text: str) -> str:
     text = replace_once(
         text,
@@ -313,6 +330,7 @@ PATCHERS = {
     "conftest.sh": patch_conftest,
     "nvidia/nv.c": patch_nv,
     "nvidia/nv-pci.c": patch_nv_pci,
+    "nvidia/nv-vgpu-vfio-interface.c": patch_nv_vgpu_vfio_interface,
     "nvidia/nvidia.Kbuild": patch_nvidia_kbuild,
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.Kbuild": patch_vgpu_kbuild,
     "nvidia-vgpu-vfio/nvidia-vgpu-vfio.c": patch_vgpu_source,

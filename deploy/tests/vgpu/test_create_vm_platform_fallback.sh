@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 create_vm="$repo_root/deploy/scripts/create-vm.sh"
+export G11_QEMU_DATA_DIR="$repo_root/pc-bios"
 # shellcheck source=../../lib/hardware-profiles.sh
 source "$repo_root/deploy/lib/hardware-profiles.sh"
 tmp_dir="$(mktemp -d)"
@@ -179,7 +180,7 @@ if FAKE_CPU_MODE=no-new QEMU_BIN="$fake_qemu" \
 fi
 [[ ! -f "$no_new_root/vms/3/vm.conf" ]] ||
     fail 'failed active-CPU probe published a legacy vm.conf'
-grep -Fq '拒绝降级到旧慢平台' "$tmp_dir/no-new.err" ||
+grep -Fq '普通新建池中的所有 CPU 均无法' "$tmp_dir/no-new.err" ||
     fail 'conclusive active-CPU failure did not explain the fail-closed policy'
 
-echo 'PASS: default creation is performance-first and never silently falls back from the active X79 pool'
+echo 'PASS: default creation is performance-first across the restored mainstream and X79 pools'

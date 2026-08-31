@@ -3,12 +3,9 @@
 本页只适用于 **G-11/vGPU**。V-11 是独立分支，不要互拷脚本、QEMU 二进制或
 guest 包。
 
-> 2026-08-21：正常新建已切到两款 4C/8T Core i7 + 三品牌 X79 +
-> 4/8/12/16G。本文保留的 H81/i3 截图与逐项分析只用于解释 archived 旧 VM；当前
+> 2026-08-30：普通池已恢复 G3220、Core i3/i5/i7 + H81，并保留五款 Core i7 +
+> X79 扩展。当前可见新建为 11 CPU、13 主板、434 条；旧 6G 组合继续 archived。
 > 数量、选择与 NVMe 规则以 [G11-HARDWARE-POOL.md](G11-HARDWARE-POOL.md) 为准。
-> 2026-08-29：普通池已扩成 i7-3820/i7-4820K 两款 4C/8T 与
-> i7-3930K/i7-4930K/i7-4960X 三款 6C/12T，覆盖三品牌 X79、每容量
-> 4–5 个内存品牌；普通新建与活跃 X79 均为 260 条。
 
 ## 结论
 
@@ -25,8 +22,8 @@ guest 包。
 | GPU 能力目录 | 六个消费卡 device ID 都显式要求目标 DXR tier 0、NVAPI RT core 0、Tensor core 0 | 6/6 个 device ID |
 | 原生 D3D12 审计 | 安装写入前和最终验收均直接查 OPTIONS5；查询失败阻断，签名 transport 能力差异警告 | x86 + x64 |
 
-截图中的 `Gigabyte GA-H81M-S1 + i3-4130 + GTX 750` 现在属于 archived 旧配置，
-仍适用同一条公共读取路径，但不能用于新建。
+截图中的 `Gigabyte GA-H81M-S1 + i3-4130 + GTX 750` 若使用旧 4+2G/6G 内存，
+仍属于 archived 旧配置；同一 CPU/H81 的 4G/8G 审核组合已经恢复新建。
 
 ## 主板 PCH 为什么以前都显示 ICH9
 
@@ -73,7 +70,7 @@ OVMF 在 `ExitBootServices` 发出私有且固定的 APM `0x47` 通知；只有�
 状态机。
 
 该处理只改 guest 可见的 PCI vendor/device/revision/subsystem，不声称 q35 的内部
-实现变成了实体 X79，也不为 archived 的非 X79 CPU 猜测 host bridge ID。目录外的
+实现变成了实体 X79，也不为非 X79 CPU 猜测 X79 host bridge ID。目录外的
 CPU 代际会失败关闭。OVMF 构建器会同时生成 hash 绑定的 `.features` 清单；启动器在
 分配 VM 资源前核对固件确实包含同版本交接能力，旧固件或被替换的自定义固件不会
 静默退回 `29C0`。
@@ -246,7 +243,7 @@ D3D12_NATIVE_VERIFY PASS ... native_raytracing_nonzero=no|yes   # x64
   刷新旧缓存；
 - 主板型号应来自目录；X79 的底层应为 CPU DMI2 `3C00/0E00` 加 LPC `1D41`；
   鲁大师 `6.1026.4785.824` 可能仍显示 `X79 PCH -`，按上文已知显示缺陷处理；
-- H81/H97/B150/B360 等 archived 旧配置仍应显示各自目录 LPC，不套用 X79 DMI2；
+- H81（含新建 4G/8G）及 H97/B150/B360 兼容配置仍显示各自目录 LPC，不套用 X79 DMI2；
 - 显卡型号、板卡厂商、1/2 GB、GDDR5、厂家、位宽、时钟必须来自同一个 profile；
 - NVAPI RT core 与 Tensor core 都必须为 0；
 - 不得出现第二块显卡、Code 43、Xid、TDR 或持续黑屏；

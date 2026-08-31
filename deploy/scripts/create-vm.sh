@@ -2,7 +2,7 @@
 # create-vm.sh — 一次性生成 G-11 的 $VM_ROOT/<N>/vm.conf。
 #
 #   用法:  ./deploy/scripts/create-vm.sh <vm_id> [--platform PLATFORM]
-#          ./deploy/scripts/create-vm.sh <vm_id> [--cpu-spec 4c8t|6c12t|--cpu-profile CPU]
+#          ./deploy/scripts/create-vm.sh <vm_id> [--cpu-spec 2c2t|2c4t|4c4t|4c8t|6c12t|--cpu-profile CPU]
 #                                  [--board-profile BOARD]
 #                                  [--memory-profile MEMORY|--memory-size 4G|8G|12G|16G]
 #                                  [--ssd-profile PROFILE]
@@ -107,10 +107,9 @@ while (( $# > 0 )); do
         --cpu-spec)
             [[ $# -ge 2 ]] || { echo "--cpu-spec 缺少参数" >&2; exit 2; }
             case "${2,,}" in
-                4c8t) CPU_SPEC_REQUEST=4c8t ;;
-                6c12t) CPU_SPEC_REQUEST=6c12t ;;
+                2c2t|2c4t|4c4t|4c8t|6c12t) CPU_SPEC_REQUEST=${2,,} ;;
                 *)
-                    echo "--cpu-spec 只支持 4c8t 或 6c12t" >&2
+                    echo "--cpu-spec 只支持 2c2t/2c4t/4c4t/4c8t/6c12t" >&2
                     exit 2
                     ;;
             esac
@@ -405,7 +404,7 @@ if [[ -n "$PLATFORM_REQUEST" && "$COMPONENT_SELECTOR_COUNT" != 0 ]]; then
 fi
 
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--force] [--platform PLATFORM|--cpu-spec 4c8t|6c12t|--cpu-profile CPU --board-profile BOARD (--memory-profile MEMORY|--memory-size 4G|8G|12G|16G)] [--allow-fallback-platform] [--ssd-profile PROFILE] [--gpu-profile PROFILE|--gpu-vram 1024|2048] [--monitor-profile PROFILE] [--keyboard-profile PROFILE] [--relative-mouse [--mouse-profile PROFILE]]" >&2
+    echo "usage: $0 <vm_id> [--force] [--platform PLATFORM|--cpu-spec 2c2t|2c4t|4c4t|4c8t|6c12t|--cpu-profile CPU --board-profile BOARD (--memory-profile MEMORY|--memory-size 4G|8G|12G|16G)] [--allow-fallback-platform] [--ssd-profile PROFILE] [--gpu-profile PROFILE|--gpu-vram 1024|2048] [--monitor-profile PROFILE] [--keyboard-profile PROFILE] [--relative-mouse [--mouse-profile PROFILE]]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -620,12 +619,12 @@ if (( FORCE )) && [[ -f "$CONF" ]]; then
 fi
 
 # For an unqualified default creation, try reviewed new combinations in their
-# performance-first order (three 6C/12T CPUs, then two 4C/8T X79 CPUs), with
-# 8 GiB as the ordinary memory default and native DDR3-1866 preferred, against
-# this host before materializing identity.  If all active CPUs fail,
-# creation fails instead of silently selecting an older, slower platform.  If
-# probing is unavailable (missing KVM/QEMU/timeout), keep a new X79 profile and
-# let the launcher fail closed.
+# performance-first order: the X79 expansion remains preferred, followed by
+# the restored mainstream 4C/4T, 2C/4T and 2C/2T CPUs.  The ordinary memory
+# default is 8 GiB and native DDR3-1866 is preferred where both CPU and board
+# support it.  Every selected CPU must still pass the KVM enforce=on gate.  If
+# probing is unavailable (missing KVM/QEMU/timeout), keep a reviewed new
+# profile and let the launcher fail closed.
 AUTO_LEGACY_FALLBACK=0
 HOST_PLATFORM_SELECTION_REASON=explicit
 select_default_platform_for_host() {
@@ -679,9 +678,8 @@ select_default_platform_for_host() {
         done
     done
 
-    # Keep the explicit-new tier generic even though the current X79 policy
-    # leaves it empty.  Future reviewed performance tiers still pass through
-    # the same strict KVM realization gate.
+    # Restored manual mainstream combinations retain their explicit-new tier
+    # and pass through the same strict KVM realization gate.
     mapfile -t candidates < <(hardware_profile_explicit_new_keys)
     for platform in "${candidates[@]}"; do
         hardware_combination_load "$platform" || return 1
@@ -728,6 +726,9 @@ select_cpu_spec_platform_for_host() {
     local -A probed_class=()
 
     case "$CPU_SPEC_REQUEST" in
+        2c2t) expected_cores=2; expected_vcpus=2 ;;
+        2c4t) expected_cores=2; expected_vcpus=4 ;;
+        4c4t) expected_cores=4; expected_vcpus=4 ;;
         4c8t) expected_cores=4; expected_vcpus=8 ;;
         6c12t) expected_cores=6; expected_vcpus=12 ;;
         *) return 2 ;;
@@ -845,7 +846,7 @@ elif (( COMPONENT_SELECTOR_COUNT )); then
     PLATFORM=${PLATFORMS[$((RANDOM % ${#PLATFORMS[@]}))]}
 else
     if ! select_default_platform_for_host; then
-        echo "普通新建池中的 X79 CPU 均无法由本机 KVM enforce=on 实现；拒绝降级到旧慢平台" >&2
+        echo "普通新建池中的所有 CPU 均无法由本机 KVM enforce=on 实现" >&2
         echo "请先运行 ./deploy/scripts/check-hardware-pool.sh 查看逐 CPU 原因" >&2
         exit 2
     fi
@@ -859,8 +860,8 @@ PLATFORM_LIFECYCLE_CLASS=$(hardware_profile_lifecycle_class "$PLATFORM") || {
 PLATFORM_COMPAT_NEW_REJECT=0
 if [[ "$PLATFORM_LIFECYCLE_CLASS" == archived ]]; then
     if (( ! FORCE || ! CONFIG_WAS_PRESENT )) || [[ "$OLD_PLATFORM" != "$PLATFORM" ]]; then
-        echo "平台 $PLATFORM 属于旧硬件/已取消 6G 方案归档，只允许原 VM 使用 --force 保持原平台" >&2
-        echo "新建请改用 X79 上的 4G/8G 双通道或 12G/16G 三/四通道方案" >&2
+        echo "平台 $PLATFORM 属于已取消的 6G 方案归档，只允许原 VM 使用 --force 保持原平台" >&2
+        echo "新建请改用 4G/8G；至少四槽的审核主板还可选择 12G/16G" >&2
         exit 2
     fi
     CPU_REALIZATION_POLICY=enforced

@@ -11,8 +11,8 @@
 | `CPUID.1.ECX[31]` HYPERVISOR bit | 0 | **1** ⚠️ | `-cpu ...,x-hv-stealth=on` (见 `target/i386/cpu.c:8317`) |
 | `CPUID.40000000-400000FF` KVM/HV leaves | 无 (InvalidLeaf) | KVM signature ⚠️ | `-cpu ...,kvm=off` |
 | `CPUID.1.ECX[5]` VMX / `CPUID.80000001.ECX[2]` SVM | 可能 1 | 0 | 我们显式 `,vmx=off` 固化 |
-| Brand string (80000002-4) | 真实型号 | QEMU 默认带 "Virtual CPU" | 11 个目录模型各自写入对应 brand；普通新建含 2 款 4C/8T 与 1 款 6C/12T，其余为 archived/legacy |
-| Family / Model / Stepping | 真实 | qemu64 族：15/6/1 | 普通新建 i7-3820/i7-4820K/i7-4930K；旧 G3220、i3/i5/i7 与 legacy i5-6500/i3-8100 仅解释已有配置 |
+| Brand string (80000002-4) | 真实型号 | QEMU 默认带 "Virtual CPU" | 13 个目录模型各自写入对应 brand；其中 11 款可见新建，覆盖 2C2T、2C4T、4C4T、4C8T、6C12T |
+| Family / Model / Stepping | 真实 | qemu64 族：15/6/1 | 普通新建包含 G3220、i3/i5/i7 mainstream 与五款 X79 Core i7；仅 i5-6500/i3-8100 保持 legacy |
 | TSC invariant (`80000007.EDX[8]`) | 1 | 0 (qemu64) | `,+invtsc` 固定打开 |
 | RDTSC 一致性 (rdtsc 在不同核差异 < 几千周期) | 一致 | KVM-clock 校准差 → 可能漂移 | `kvm=off` 关 KVMclock；KVM 能力门禁固定 TSC，`-rtc clock=vm,driftfix=slew` 与 V-11 对齐 |
 
@@ -157,9 +157,9 @@ Get-CimInstance Win32_ComputerSystem | Select-Object HypervisorPresent, Manufact
 
 # AIDA64 / CPU-Z 里肉眼确认:
 #   - Brand string/核心数/缓存与 vm.conf 的 CPU_PROFILE 一致
-#   - 新建 Mainboard 是白名单中的 X79（archived/legacy VM 才可能是其它芯片组）
+#   - 新建 Mainboard 是白名单中的 H81 或 X79；H97/B150/B360 只用于兼容记录
 #   - SMBIOS Type 17 与 SPD 的 2/3/4 槽容量、Rank、料号、品牌和序列一致
-#   - 新建内存可能是 Kingston、Samsung、Elpida 或 Micron，不应强求 KVR
+#   - 新建内存可能来自六个审核品牌，不应强求 KVR；频率应为 1333/1600/1866
 
 # 对 DNF TP 的最终测试方式:
 #   - 先装游戏

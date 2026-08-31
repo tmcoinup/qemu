@@ -1,4 +1,4 @@
-# G-11 X79 硬件池与合法性门禁
+# G-11 家用通用硬件池与 X79 扩展门禁
 
 本页是当前 G-11 新建硬件池的权威操作说明。V-11 与 G-11 是独立分支；不要把
 V-11 的整套平台、驱动或运行参数直接复制到 G-11。
@@ -7,18 +7,19 @@ V-11 的整套平台、驱动或运行参数直接复制到 G-11。
 
 | 类别 | 当前结果 |
 |---|---|
-| 普通新建 CPU | 5 款：Core i7-3930K/i7-4930K/i7-4960X 6C/12T、Core i7-3820/i7-4820K 4C/8T；均为家用无核显 |
-| 正常新建主板 | 3 款/3 品牌：ASUS P9X79、Gigabyte GA-X79-UP4、ASRock X79 Extreme4 |
-| 正常内存档 | 4G、8G、12G、16G；DDR3-1600/1866，Samsung/Micron/Kingston/SK hynix/Elpida |
+| 普通可见 CPU | 11 款：原 G3220/Core i3/i5/i7 加 5 款 X79 Core i7；规格为 2C2T、2C4T、4C4T、4C8T、6C12T |
+| 正常新建主板 | 13 款/5 品牌：10 块 H81 加 ASUS/Gigabyte/ASRock 三块 X79 |
+| 正常内存档 | 4G、8G、12G、16G；DDR3-1333/1600/1866，六品牌；X79 子池每组保持 4–5 品牌 |
 | 通道 | 4G/8G 为两根双通道；12G 为 3×4G 三通道；16G 为 4×4G 四通道；12/16G 要求主板至少 4 槽 |
-| 可新建整机组合 | 普通 `new` 260 条；全部是 X79/LGA2011 原子白名单 |
-| 完整目录 | 13 CPU、16 主板、45 内存、524 整机；其中 261 archived、3 legacy compatibility |
+| 可见新建整机组合 | `new` 276 条、`explicit-new` 158 条，共 434 条原子白名单；默认性能顺序仍优先 X79 |
+| 完整目录 | 13 CPU、16 主板、45 内存、524 整机；其中 87 条 6G archived、3 条 legacy compatibility |
 | SSD | 10 款精确 512110190592 字节；自动优先 3 款 Gen3 x4 NVMe，再按平台回退 7 款 SATA |
 | 序列 | 主板厂牌格式、DIMM JEDEC 4-byte、SSD 型号严格格式；创建并持久化、全池查重 |
 
-旧 H81 与 6G 组合没有删除 ID，而是统一变成 `archived`，只用于加载已有 VM。
-`--include-fallback` 也不会让 archived 重新参与新建。三条
-`legacy-compatibility` 只在显式授权时作为旧平台兜底，不属于正常 X79 池。
+旧 H81 的 4G/8G 组合已经恢复到新建层；只有 6G 组合继续 `archived`，用于加载
+已有 VM。`--include-fallback` 也不会让 archived 重新参与新建。i5-4590/H97、
+i5-6500/B150、i3-8100/B360 三条 `legacy-compatibility` 只在显式授权时作为兜底；
+后两款在当前 Broadwell-EP 宿主上不能通过 `enforce=on`，不会冒充正常可用型号。
 
 机器可读事实以脚本输出为准：
 
@@ -34,11 +35,11 @@ V-11 的整套平台、驱动或运行参数直接复制到 G-11。
 
 ```text
 cpu=13 board=16 memory=45 combination=524
-new_default=260 explicit_new=0 archived=261 legacy=3
-brands board=3 memory=5 ssd=5
+new_default=276 explicit_new=158 archived=87 legacy=3
+brands board=5 memory=6 ssd=5
 ```
 
-## 五款普通新建 CPU
+## 五款 X79 扩展 CPU
 
 用户条件的交集是：
 
@@ -58,10 +59,11 @@ brands board=3 memory=5 ssd=5
 | `i7-4930k` | Core i7-4930K | 6C/12T | 3.4/3.9 GHz | DDR3-1866、4 通道 | Gen3 |
 | `i7-4960x` | Core i7-4960X | 6C/12T | 3.6/4.0 GHz | DDR3-1866、4 通道 | Gen3 |
 
-这些型号都使用家用 Core i7 而不是 Xeon，也不引入带核显平台。普通 `new` 池默认
+这些型号都使用家用 Core i7 而不是 Xeon，也不引入带核显平台。恢复的 mainstream
+层另含 G3220、i3-4130、i5-4460/4570/4590 与手选 i7-4790。普通 `new` 池默认
 8G，整体性能优先级先选 i7-4960X + DDR3-1866；使用 `--cpu-spec` 时只在所选
-4C/8T 或 6C/12T 组内按宿主能力回落。宿主不支持某个模型时由 realization 门禁
-跳过，不会只看名字强启。日常封装为 `create-home-vm.sh`，详细教程见
+2C2T、2C4T、4C4T、4C8T 或 6C12T 组内按宿主能力回落。宿主不支持某个模型时由
+realization 门禁跳过，不会只看名字强启。日常封装为 `create-home-vm.sh`，详细教程见
 [G11-HOME-CPU-POOL-QUICKSTART.md](G11-HOME-CPU-POOL-QUICKSTART.md)。
 
 官方来源：
@@ -175,21 +177,24 @@ system/baseboard/chassis、DIMM、SSD、显示器、UUID 和 MAC 跨 VM 查重�
 傻瓜入口按规格选择，内存默认 8G：
 
 ```bash
-./deploy/scripts/create-home-vm.sh 101 --spec 4c8t
-./deploy/scripts/create-home-vm.sh 102 --spec 6c12t
+./deploy/scripts/create-home-vm.sh 99 --spec 2c2t
+./deploy/scripts/create-home-vm.sh 100 --spec 2c4t
+./deploy/scripts/create-home-vm.sh 101 --spec 4c4t
+./deploy/scripts/create-home-vm.sh 102 --spec 4c8t
+./deploy/scripts/create-home-vm.sh 103 --spec 6c12t
 ```
 
 固定一条真实 12G/三通道组合，并让存储自动优先 Gen3 NVMe：
 
 ```bash
-./deploy/scripts/create-home-vm.sh 103 --spec 6c12t --memory-size 12G \
+./deploy/scripts/create-home-vm.sh 104 --spec 6c12t --memory-size 12G \
   --board-profile gigabyte-x79-up4
 ```
 
 固定 16G/四通道和审核 NVMe：
 
 ```bash
-./deploy/scripts/create-vm.sh 104 \
+./deploy/scripts/create-vm.sh 105 \
   --platform i7-4820k-p9x79-micron-16g \
   --ssd-profile samsung-970-pro-512gb
 ```

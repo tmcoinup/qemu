@@ -3,11 +3,12 @@
 本页和当前 DGame 部署只适用于 **G-11/vGPU 分支**；已退役分支不参与运行时发现、
 窗口标题或故障回退。
 
-新建整机已升级到 4C/8T X79 与 4/8/12/16G；硬件选择、归档 6G、PCIe 3.0 NVMe
+新建整机已恢复原 G3220/Core i3/i5/i7 + H81，并保留 4C/8T、6C/12T X79 扩展；
+硬件选择、归档 6G、PCIe 3.0 NVMe
 优先和共享 CPU 并发请先看
 [`G11-HARDWARE-POOL.md`](G11-HARDWARE-POOL.md) 与
 [`G11-PERFORMANCE-QUICKSTART.md`](G11-PERFORMANCE-QUICKSTART.md)。本文后部若仍以
-H81/4+2G 举例，只适用于 archived 旧 VM，不可照抄用于新建。
+H81/4+2G（6G）举例，只适用于 archived 旧 VM；H81 的 4G/8G 可正常新建。
 
 宿主底层 GPU 名称、显存类型/位宽的通用安装、多工具重新扫描验收、安全边界和
 回滚见 [`G11-BOTTOM-GPU-IDENTITY.md`](G11-BOTTOM-GPU-IDENTITY.md)。
@@ -256,12 +257,12 @@ fail-closed，不会污染默认身份安装。
 ./deploy/scripts/check-hardware-pool.sh --machine-readable
 ```
 
-普通新建池有三款家用 6C/12T 和两款 4C/8T 无核显 Core i7、三块三品牌 X79
-主板，以及 4G/8G/12G/16G 四档 DDR3-1600/1866。260 条组合全部是 CPU、主板、
-逐槽 DIMM 共同审核的原子白名单；内存默认 8G，优先 i7-4960X + DDR3-1866。
-五款 CPU、三块主板和每容量 4–5 个大牌内存的复制粘贴步骤见
+普通新建池包含恢复的六款 mainstream CPU/H81 与五款 Core i7/X79，覆盖
+2C2T、2C4T、4C4T、4C8T、6C12T，以及 4G/8G/12G/16G 四档 DDR3。
+434 条可见组合全部是 CPU、主板、逐槽 DIMM 共同审核的原子白名单；内存默认 8G，
+性能优先时选择 i7-4960X + DDR3-1866。五种规格的复制粘贴步骤见
 [家用 CPU 池傻瓜教程](G11-HOME-CPU-POOL-QUICKSTART.md)。完整目录共 13 CPU、
-16 主板、45 内存、524 整机，其中旧 H81/6G 等 261 条为 archived，另有 3 条
+16 主板、45 内存、524 整机，其中 87 条旧 6G 组合为 archived，另有 3 条
 legacy compatibility。归档项即使打开兜底也不能新建，宿主能力探测不确定时仍
 fail-closed。另有 3 款优先 Gen3 x4 NVMe 和 7 款平台回退 SATA，容量均为精确
 `512110190592` 字节；还有 3 个 1GB + 3 个
@@ -273,7 +274,7 @@ DIMM 插槽的主板。审计器会标出哪些组合可用于
 新 VM、哪些只保留旧平台身份。完整明细和报错处理见
 [G-11 vGPU 硬件池教程](G11-HARDWARE-POOL.md)。
 
-普通新建的品牌覆盖为：主板 3、内存 5、SSD 5、GPU 系统用户态板卡 metadata 9、
+普通新建的品牌覆盖为：主板 5、内存 6、SSD 5、GPU 系统用户态板卡 metadata 9、
 active 键盘 3、可选相对鼠标 3。显示器因保留 35 款 FHD 目录而明确例外为新建
 8 品牌/完整 11 品牌；默认绝对指针只有诚实的 QEMU 通用 profile。CPU/芯片组实现、
 Intel e1000e、Intel HDA、swtpm 和安装期临时介质也都是固定合同，不为凑品牌数
@@ -314,7 +315,8 @@ cd /home/ubuntu/projects/qemu
 ```
 
 下面是一套可直接照抄的 VM8 安装命令。组件只能筛选审核过的整机白名单，不会
-任意笛卡尔组合；不指定平台时，创建器先从 260 条 X79 组合中按性能级别选择：
+任意笛卡尔组合；不指定平台时，创建器先从 434 条可见组合中按性能级别选择，
+默认仍优先 X79：
 
 ```bash
 cd /home/ubuntu/projects/qemu

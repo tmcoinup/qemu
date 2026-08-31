@@ -71,14 +71,13 @@ G-11 的 host/guest、驱动、推流和零拷贝支持边界统一记录在
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)；其中明确区分 upstream QEMU
 源码能力和本分支已经验收的产品能力。
 历史分支对比材料仅供考古，不属于当前操作员工作流。
-组件化硬件普通新建池包含 Core i7-3930K/i7-4930K/i7-4960X 6C/12T、
-Core i7-3820/i7-4820K 4C/8T，以及 ASUS、Gigabyte、ASRock 三品牌 X79 主板，
-共 260 套原子整机。每个 CPU/主板/容量都有 4–5 个大牌内存选择。完整目录为
-13 CPU、16 主板、45 内存、524 整机：旧 H81/6G 等 261 条统一 archived，另有
-3 条 legacy compatibility。
+组件化硬件普通新建池恢复了 G3220、Core i3/i5/i7 + H81，并保留五款 Core i7 +
+X79 扩展，共 11 款 CPU、13 块主板和 434 套可见原子整机，覆盖 2C2T、2C4T、
+4C4T、4C8T、6C12T。完整目录为 13 CPU、16 主板、45 内存、524 整机：87 条
+旧 6G 组合 archived，另有 3 条 legacy compatibility。
 新建内存只用 4/8/12/16 GiB，其中 4/8 双通道、12 三通道、
-16 四通道；Kingston、Samsung、Elpida、Micron、SK hynix 按真实 CPU/板/模组上限运行
-DDR3-1600/1866。
+16 四通道；Kingston、Samsung、Elpida、Micron、SK hynix、Crucial 按真实
+CPU/板/模组上限运行 DDR3-1333/1600/1866。12/16G 只出现在至少四槽主板上。
 10 款 SSD 覆盖 Samsung、Crucial、Kingston、Intel、WD 五品牌且均精确为
 `512110190592` 字节；自动选择会先尝试 3 款 PCIe 3.0 x4 NVMe，再按平台合理性
 回退 7 款 SATA；3 个 1GB +
@@ -159,11 +158,12 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/recover-hibernated-vm.sh <vm_id> [--rescue-gtk] [--proxy]` | 休眠/Fast Startup 一键恢复：只开本地标准 VGA，Windows 完整关机后自动强制同步显示器；不挂 vGPU、不走远程桌面、不装 guest 包，任一步失败即停止 |
 | `./deploy/scripts/sync-monitor-profile.sh <vm_id> --force` | `vmctl monitor` 的底层入口；普通启动和克隆已自动调用，强制修复时核对生产 538.33/INF 收据并重写 FHD/1K EDID 与 8 项 R535 page-safe `NV_Modes`；guest 内零常驻 |
 | `sudo ./deploy/host/recover-vgpu-gpu.sh --check --resume`（确认后去掉 `--check`） | 所有 VM/mdev 已停后的 host GPU 一键恢复；共享锁与 fd 门禁后仅尝试 NVIDIA reset、干净模块重载和精确 FLR，绝不 bus reset、强卸模块或自动重启宿主 |
+| `./deploy/host/switch-g11-vgpu-branch.sh {status\|doctor}` / `sudo ... {init-r535\|r535\|r580-lab}` | 本机 RTX 2080 的 R535 稳定生产档与 R580 母盘暂存实验档一键切换；精确 DEB/RM/内核门禁、失败自动回滚，教程见 [`docs/G11-RTX2080-R535-R580-SWITCH.md`](docs/G11-RTX2080-R535-R580-SWITCH.md) |
 | `./deploy/scripts/check-hardware-pool.sh` | 无 sudo、无写入地验证硬件目录及本机 KVM CPU realization；区分新 VM 与旧 VM 兼容池 |
-| `./deploy/scripts/create-home-vm.sh <vm_id> --spec 4c8t\|6c12t [--memory-size 4G\|8G\|12G\|16G]` | 家用池傻瓜封装；默认 8G、同规格内按宿主兼容性选择，教程见 [`docs/G11-HOME-CPU-POOL-QUICKSTART.md`](docs/G11-HOME-CPU-POOL-QUICKSTART.md) |
-| `./deploy/scripts/create-vm.sh <vm_id> --cpu-profile i7-4930k --board-profile BOARD --memory-profile MEMORY --ssd-profile SSD` | 底层精确组件入口；完整 4C/8T、6C/12T 多品牌矩阵仍只从审核白名单选择 |
-| `./deploy/scripts/create-vm.sh --list-cpu-profiles`（另有 `--list-board-profiles`、`--list-memory-profiles`） | 默认显示 5 款消费级 X79 Core i7、3 块三品牌 X79、4/8/12/16G DDR3；前置 `--include-fallback` 才读取完整 13/16/45 目录，archived 仍不可新建 |
-| `./deploy/scripts/create-vm.sh --list-platforms` | 默认显示 260 套普通新建审核白名单；前置 `--include-fallback` 才显示完整 524 套生命周期目录 |
+| `./deploy/scripts/create-home-vm.sh <vm_id> --spec 2c2t\|2c4t\|4c4t\|4c8t\|6c12t [--memory-size 4G\|8G\|12G\|16G]` | 家用池傻瓜封装；默认 8G、同规格内按宿主兼容性选择，教程见 [`docs/G11-HOME-CPU-POOL-QUICKSTART.md`](docs/G11-HOME-CPU-POOL-QUICKSTART.md) |
+| `./deploy/scripts/create-vm.sh <vm_id> --cpu-profile i7-4930k --board-profile BOARD --memory-profile MEMORY --ssd-profile SSD` | 底层精确组件入口；五种 CPU 规格都只从审核白名单选择 |
+| `./deploy/scripts/create-vm.sh --list-cpu-profiles`（另有 `--list-board-profiles`、`--list-memory-profiles`） | 默认显示 11 款 CPU、13 块 H81/X79 主板与 4/8/12/16G DDR3；前置 `--include-fallback` 才读取完整 13/16/45 目录，archived 仍不可新建 |
+| `./deploy/scripts/create-vm.sh --list-platforms` | 默认显示 434 套可见新建审核白名单；前置 `--include-fallback` 才显示完整 524 套生命周期目录 |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso]` | 缺配置时自动生成身份，缺盘时固定建空盘；默认以安装期 UEFI helper 自动引导 xHCI USB Windows 光盘（约 64 KiB 合并读取）并挂最小应答 ISO；helper/两张 ISO 在普通启动全部消失；默认跳过 OOBE，以空密码 `Administrator` 首次登录，设置中国时区/NumLock，并预先关闭 Fast Startup |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso] --install-media ide` | 仅异常固件/ISO 的慢速 ATAPI 兼容回退；不挂 helper，也不会把选择写入 `vm.conf`。完整说明见 [`docs/G11-INSTALL-MEDIA.md`](docs/G11-INSTALL-MEDIA.md) |
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso] --manual-oobe` | 同一安全建盘语义，但不挂应答 ISO，完整手动完成 OOBE |
@@ -582,11 +582,11 @@ cd /home/ubuntu/projects/qemu
 # 若必须新建兜底平台，先在完整目录中确认，再同时显式授权：
 # ./deploy/scripts/create-vm.sh 3 --platform i5-6500 --allow-fallback-platform
 # 每个 VM 的组件选择及可持久化身份写入 vms/N/vm.conf；GPU/USB 不虚构序列号。
-# 普通新建池为 5 CPU/3 块三品牌 X79/260 套：2 款 4C/8T、3 款 6C/12T。
-# 傻瓜入口：./deploy/scripts/create-home-vm.sh 3 --spec 6c12t --memory-size 8G
+# 普通可见池为 11 CPU/13 块 H81+X79/434 套，覆盖 2C2T 到 6C12T 五种规格。
+# 傻瓜入口：./deploy/scripts/create-home-vm.sh 3 --spec 4c4t --memory-size 8G
 # 精确入口：./deploy/scripts/create-vm.sh 3 --cpu-profile i7-4930k --board-profile asus-p9x79 --memory-size 4G
 # 4/8 GiB 为两根真双通道，12 GiB=3×4 GiB 三通道，16 GiB=4×4 GiB 四通道。
-# 旧 6 GiB/H81 组合均 archived，只供已有 VM，不会被 --include-fallback 重新新建。
+# 旧 6 GiB 组合均 archived；H81 的 4G/8G 已恢复，12/16G 仍只允许至少四槽主板。
 # 硬件合同 v3 把每槽 Rank/device-width/JEP106/part/独立 serial 同步到 SMBIOS/SPD；
 # Micron 的 18-byte SPD 字段使用对应 -1G6/-1G4 基础 part；legacy DDR4 仍 page0-only。
 # 默认 8G，优先 i7-4960X + DDR3-1866，再按宿主 realization、同规格和共同频率上限回落。

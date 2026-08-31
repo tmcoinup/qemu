@@ -76,11 +76,12 @@ load_valid() {
     TPM_FRONTEND=$(g11_hardware_expected_tpm_frontend "$TPM_EFFECTIVE_VERSION")
 }
 
-# The normalized catalog is itself a contract.  New VMs use only the reviewed
-# consumer X79 pool: two 4C/8T CPUs plus three 6C/12T CPUs, three real board
-# brands and the 4/8/12/16 GiB capacity policy.  Historical H81/H97/
-# B150/B360 rows remain loadable only as archived or legacy compatibility
-# records; in particular, 6 GiB is not selectable for a new VM.
+# The normalized catalog is itself a contract.  New VMs use the restored H81
+# household pool plus the consumer X79 extension.  Together they expose five
+# topologies from 2C/2T through 6C/12T and the 4/8/12/16 GiB capacity policy.
+# Historical 6 GiB rows remain loadable only as archived records; B150/B360
+# stay legacy compatibility records because this host class cannot realize
+# them with enforce=on.
 hardware_profile_validate_catalog || fail 'hardware catalog validation failed'
 vgpu_profile_validate_catalog || fail 'vGPU catalog validation failed'
 # The legality function defensively revalidates both immutable catalogs on
@@ -93,9 +94,9 @@ assert_eq 13 "${#CPU_PROFILES[@]}" 'CPU catalog count'
 assert_eq 16 "${#BOARD_PROFILES[@]}" 'board catalog count'
 assert_eq 45 "${#MEMORY_PROFILES[@]}" 'memory catalog count'
 assert_eq 524 "${#HARDWARE_COMBINATIONS[@]}" 'combination catalog count'
-assert_eq 260 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new count'
-assert_eq 0 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" 'explicit-new count'
-assert_eq 261 "${#HARDWARE_ARCHIVED_PROFILE_KEYS[@]}" 'archived count'
+assert_eq 276 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new count'
+assert_eq 158 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" 'explicit-new count'
+assert_eq 87 "${#HARDWARE_ARCHIVED_PROFILE_KEYS[@]}" 'archived count'
 assert_eq 3 "${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}" 'legacy count'
 assert_eq "${#HARDWARE_COMBINATIONS[@]}" \
     "${#_HARDWARE_COMBINATION_ROW_BY_KEY[@]}" 'combination index count'
@@ -105,16 +106,16 @@ for fixture_row in "${HARDWARE_COMBINATIONS[@]}"; do
         "$fixture_key indexed combination row"
 done
 
-assert_eq $'i7-3820\ni7-3930k\ni7-4820k\ni7-4930k\ni7-4960x' \
+assert_eq $'g3220\ni3-4130\ni5-4460\ni5-4570\ni5-4590\ni7-4790\ni7-3820\ni7-3930k\ni7-4820k\ni7-4930k\ni7-4960x' \
     "$(for cpu in $(cpu_profile_keys); do
         [[ -n "$(hardware_profile_component_candidates "$cpu" '' '')" ]] &&
             printf '%s\n' "$cpu"
-    done)" 'five active consumer X79 CPU profiles'
-assert_eq $'g3220\ni3-4130\ni5-4460\ni5-4570\ni5-4590\ni7-4790\ni5-6500\ni3-8100' \
+    done)" 'eleven active household CPU profiles'
+assert_eq $'i5-6500\ni3-8100' \
     "$(for cpu in $(cpu_profile_keys); do
         [[ -z "$(hardware_profile_component_candidates "$cpu" '' '')" ]] &&
             printf '%s\n' "$cpu"
-    done)" 'eight archived or legacy-only CPU profiles'
+    done)" 'two legacy-only CPU profiles'
 
 active_boards='|'
 active_cpu_board_capacity_seen='|'
@@ -130,9 +131,10 @@ for fixture_row in "${HARDWARE_COMBINATIONS[@]}"; do
     [[ "$fixture_lifecycle" == new ||
        "$fixture_lifecycle" == explicit-new ]] || continue
     hardware_profile_load "$fixture_platform"
-    assert_eq X79 "$BOARD_CHIPSET" "$fixture_platform active chipset"
-    [[ "$MEM_BOARD_SLOTS" == 4 || "$MEM_BOARD_SLOTS" == 8 ]] || \
-        fail "$fixture_platform does not expose a quad-channel-capable board"
+    case "$BOARD_CHIPSET:$MEM_BOARD_SLOTS" in
+        H81:2|X79:4|X79:8) ;;
+        *) fail "$fixture_platform has an unsupported active board layout" ;;
+    esac
     active_boards+="$fixture_board|"
     active_cpu_board_capacity_seen+="$_fixture_cpu:$fixture_board:$MEM_TOTAL_MB|"
     active_memory_brands+="$MEM_BRAND|"
@@ -165,16 +167,16 @@ for fixture_row in "${HARDWARE_COMBINATIONS[@]}"; do
         *) fail "$fixture_platform has unsupported active capacity $MEM_TOTAL_MB" ;;
     esac
 done
-assert_eq 62 "$count_4g" 'active 4 GiB combination count'
+assert_eq 148 "$count_4g" 'active 4 GiB combination count'
 assert_eq 0 "$count_6g" 'active 6 GiB combination count'
-assert_eq 66 "$count_8g" 'active 8 GiB combination count'
+assert_eq 154 "$count_8g" 'active 8 GiB combination count'
 assert_eq 66 "$count_12g" 'active 12 GiB combination count'
 assert_eq 66 "$count_16g" 'active 16 GiB combination count'
 for fixture_board in asus-p9x79 gigabyte-x79-up4 asrock-x79-extreme4; do
     [[ "$active_boards" == *"|$fixture_board|"* ]] || \
         fail "active X79 board is missing: $fixture_board"
 done
-for fixture_brand in Kingston Samsung Elpida Micron 'SK hynix'; do
+for fixture_brand in Kingston Samsung Elpida Micron 'SK hynix' Crucial; do
     [[ "$active_memory_brands" == *"|$fixture_brand|"* ]] || \
         fail "active memory brand is missing: $fixture_brand"
 done

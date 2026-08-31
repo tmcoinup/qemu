@@ -135,16 +135,25 @@ keyboard_brand_count=${#keyboard_brand_seen[@]}
 mouse_brand_count=${#mouse_brand_seen[@]}
 monitor_catalog_brand_count=${#monitor_catalog_brands[@]}
 monitor_create_brand_count=${#monitor_create_brands[@]}
-active_x79_platform_count=$((${#HARDWARE_NEW_PROFILE_KEYS[@]} +
-    ${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}))
+active_x79_platform_count=0
+for platform in "${HARDWARE_NEW_PROFILE_KEYS[@]}" \
+        "${HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}"; do
+    hardware_profile_load "$platform"
+    [[ "$BOARD_CHIPSET" == X79 ]] && \
+        active_x79_platform_count=$((active_x79_platform_count + 1))
+done
 
-for audited_count in "$board_brand_count" "$memory_brand_count" \
-        "$ssd_brand_count" "$keyboard_brand_count" "$mouse_brand_count"; do
+for audited_count in "$board_brand_count" "$ssd_brand_count" \
+        "$keyboard_brand_count" "$mouse_brand_count"; do
     ((audited_count >= 3 && audited_count <= 5)) || {
         echo "可替换硬件品牌覆盖必须在 3..5，实际为 $audited_count" >&2
         exit 1
     }
 done
+((memory_brand_count >= 3 && memory_brand_count <= 6)) || {
+    echo "内存品牌覆盖必须在 3..6，实际为 $memory_brand_count" >&2
+    exit 1
+}
 ((gpu_board_brand_count >= 4 && gpu_board_brand_count <= 12)) || {
     echo "GPU 板卡品牌覆盖必须在 4..12，实际为 $gpu_board_brand_count" >&2
     exit 1
@@ -198,12 +207,12 @@ if (( machine_readable )); then
         "$mouse_brand_count" "$monitor_catalog_brand_count" \
         "$monitor_create_brand_count"
     printf 'serial_policy board=vendor-format memory=jedec-4byte ssd=model-strict optical=none monitor=profile-aware gpu=not-exposed keyboard=none relative_mouse=none absolute_pointer=none nic=mac install_media=none\n'
-    printf 'fixed_exceptions cpu=Intel-X79-consumer-platform nic=Intel-e1000e audio=Intel-HDA absolute_pointer=QEMU-generic tpm=swtpm install_media=generic-transient monitor=35-model-catalog\n'
+    printf 'fixed_exceptions cpu=Intel-household-mainstream-plus-X79 nic=Intel-e1000e audio=Intel-HDA absolute_pointer=QEMU-generic tpm=swtpm install_media=generic-transient monitor=35-model-catalog\n'
     printf 'optical_drive profile=lg-gh24ns50 brand=LG_Electronics model=HL-DT-ST_DVDRAM_GH24NS50 firmware=XP02 interface=sata-atapi serial=none lifecycle=install-or-manual-hotplug default=absent coverage=all-%s-platforms\n' \
         "${#HARDWARE_COMBINATIONS[@]}"
     printf 'chipset_presentations H81=8086:8C5C:04 H97=8086:8CC6:00 B150=8086:A148:31 B360=8086:A308:10 X79=8086:1D41:06 coverage=all-%s-platforms\n' \
         "${#HARDWARE_COMBINATIONS[@]}"
-    printf 'cpu_host_bridge_presentations SandyBridge-E=8086:3C00:07 IvyBridge-E=8086:0E00:04 coverage=all-%s-active-X79-platforms fallback=archived-mainstream-P35\n' \
+    printf 'cpu_host_bridge_presentations SandyBridge-E=8086:3C00:07 IvyBridge-E=8086:0E00:04 coverage=all-%s-active-X79-platforms fallback=mainstream-P35\n' \
         "$active_x79_platform_count"
     printf 'architecture_boundaries machine=q35-ICH9-behavior sata=ICH9-AHCI xhci=qemu-xhci nvme=QEMU-nvme rescue_display=std-vga legacy_transport=ivshmem\n'
 else
@@ -234,7 +243,7 @@ else
     printf '  显示器例外: 新建 %s 品牌 / 完整 %s 品牌，保留用户要求的 35 款 FHD 目录。\n' \
         "$monitor_create_brand_count" "$monitor_catalog_brand_count"
     printf '  可选光驱: LG Electronics HL-DT-ST DVDRAM GH24NS50 / XP02 / SN=none；普通启动不挂载，仅安装或手动热插。\n'
-    printf '  架构绑定例外: Intel Core i7/X79、Intel e1000e、Intel HDA、swtpm、QEMU 通用绝对指针、安装期临时传输介质。\n'
+    printf '  架构绑定例外: Intel 家用 mainstream+X79、Intel e1000e、Intel HDA、swtpm、QEMU 通用绝对指针、安装期临时传输介质。\n'
     printf '  芯片组呈现: H81=8086:8C5C/04，H97=8086:8CC6/00，B150=8086:A148/31，B360=8086:A308/10，X79=8086:1D41/06；覆盖全部 %s 套平台。\n' \
         "${#HARDWARE_COMBINATIONS[@]}"
     printf '  CPU host bridge 呈现: i7-3820/i7-3930K=8086:3C00/07，i7-4820K/i7-4930K/i7-4960X=8086:0E00/04；覆盖全部 %s 套活跃 X79 平台，按 CPU profile 选择、不按 VM ID 特判。\n' \
@@ -363,7 +372,7 @@ else
 fi
 
 if [[ "$selection_result" == blocked ]]; then
-    echo "普通新建池中的 X79 CPU 在本宿主均无法 enforce=on；为避免性能倒退，不自动降级到旧平台。" >&2
+    echo "普通新建池中的所有 CPU 在本宿主均无法 enforce=on；不会自动降级到 legacy compatibility 平台。" >&2
     exit 1
 fi
 if (( probe_failed )); then

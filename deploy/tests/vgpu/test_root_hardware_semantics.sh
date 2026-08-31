@@ -357,7 +357,7 @@ assert_platform() {
             expected_cpu_profile=g3220
             expected_board_profile=asus-h81m-c
             expected_memory_profile=kvr13n9-flex-4plus2
-            expected_lifecycle=new
+            expected_lifecycle=archived
             ;;
         i3-4130-h81m-p33-8g)
             expected_cpu_profile=i3-4130
@@ -375,7 +375,7 @@ assert_platform() {
             expected_cpu_profile=i5-4570
             expected_board_profile=asus-h81m-k
             expected_memory_profile=kvr16n11-flex-4plus2
-            expected_lifecycle=new
+            expected_lifecycle=archived
             ;;
         i5-4590-h81m-s1-8g)
             expected_cpu_profile=i5-4590
@@ -387,19 +387,19 @@ assert_platform() {
             expected_cpu_profile=i3-4130
             expected_board_profile=gigabyte-h81m-s1
             expected_memory_profile=samsung-m378b5-flex-4plus2
-            expected_lifecycle=new
+            expected_lifecycle=archived
             ;;
         i3-4130-h81m-s1-kingston-1333-6g)
             expected_cpu_profile=i3-4130
             expected_board_profile=gigabyte-h81m-s1
             expected_memory_profile=kvr13n9-flex-4plus2
-            expected_lifecycle=explicit-new
+            expected_lifecycle=archived
             ;;
         i3-4130-h81m-s1-micron-1600-6g)
             expected_cpu_profile=i3-4130
             expected_board_profile=gigabyte-h81m-s1
             expected_memory_profile=micron-mtjtf-flex-4plus2
-            expected_lifecycle=explicit-new
+            expected_lifecycle=archived
             ;;
         i3-4130-h81m-s1-samsung-1333-4g)
             expected_cpu_profile=i3-4130
@@ -411,7 +411,7 @@ assert_platform() {
             expected_cpu_profile=i3-4130
             expected_board_profile=gigabyte-h81m-s1
             expected_memory_profile=micron-mtjtf-1333-flex-4plus2
-            expected_lifecycle=explicit-new
+            expected_lifecycle=archived
             ;;
         i3-4130-h81m-s1-hynix-1333-8g)
             expected_cpu_profile=i3-4130
@@ -453,7 +453,7 @@ assert_platform() {
             expected_cpu_profile=i3-4130
             expected_board_profile=gigabyte-h81m-ds2
             expected_memory_profile=kvr16n11-flex-4plus2
-            expected_lifecycle=explicit-new
+            expected_lifecycle=archived
             ;;
         i3-4130-h81m-e33-8g)
             expected_cpu_profile=i3-4130
@@ -471,13 +471,13 @@ assert_platform() {
             expected_cpu_profile=i3-4130
             expected_board_profile=ecs-h81h3-m4
             expected_memory_profile=samsung-m378b5-flex-4plus2
-            expected_lifecycle=explicit-new
+            expected_lifecycle=archived
             ;;
         i5-4590-h81m-plus-6g)
             expected_cpu_profile=i5-4590
             expected_board_profile=asus-h81m-plus
             expected_memory_profile=kvr16n11-flex-4plus2
-            expected_lifecycle=explicit-new
+            expected_lifecycle=archived
             ;;
         i5-4590)
             expected_cpu_profile=i5-4590
@@ -1127,6 +1127,7 @@ VM_ROOT="$TMP_DIR/vms"
 EMPTY_VGPU_CONFIG="$TMP_DIR/vgpu-host.conf"
 HOST_1GB_CONFIG="$TMP_DIR/vgpu-host-1gb.conf"
 HOST_2GB_CONFIG="$TMP_DIR/vgpu-host-2gb.conf"
+HOST_DRIVER_VERSION_FILE="$TMP_DIR/nvidia-version"
 
 cleanup() {
     rm -rf -- "$TMP_DIR"
@@ -1139,6 +1140,7 @@ trap cleanup EXIT
 touch "$TMP_DIR/OVMF_CODE.fd" "$TMP_DIR/OVMF_VARS.fd" "$EMPTY_VGPU_CONFIG"
 printf '%s\n' 'VGPU_HOST_FB_TIER_MB=1024' >"$HOST_1GB_CONFIG"
 printf '%s\n' 'VGPU_HOST_FB_TIER_MB=2048' >"$HOST_2GB_CONFIG"
+printf '%s\n' '535.161.05' >"$HOST_DRIVER_VERSION_FILE"
 cat >"$TMP_DIR/qemu-system-x86_64" <<'EOF'
 #!/bin/sh
 if [ "$#" -eq 2 ] && [ "$1" = -display ] && [ "$2" = help ]; then
@@ -1275,6 +1277,7 @@ run_start() {
         IMAGE_ROOT="$IMAGE_ROOT" \
         VM_ROOT="$VM_ROOT" \
         QEMU_BIN="$TMP_DIR/qemu-system-x86_64" \
+        NVIDIA_MODULE_VERSION_FILE="$HOST_DRIVER_VERSION_FILE" \
         OVMF_CODE="$TMP_DIR/OVMF_CODE.fd" \
         OVMF_VARS="$TMP_DIR/OVMF_VARS.fd" \
         VGPU_HOST_CONFIG="$EMPTY_VGPU_CONFIG" \
@@ -1399,10 +1402,10 @@ assert_eq 5 "${#CPU_HOST_BRIDGE_PRESENTATION_PROFILES[@]}" \
     'active X79 CPU host bridge presentation catalog count'
 assert_eq 45 "${#MEMORY_PROFILES[@]}" 'memory component catalog count'
 assert_eq 524 "${#HARDWARE_COMBINATIONS[@]}" 'reviewed combination count'
-assert_eq 260 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new combination count'
-assert_eq 0 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" \
+assert_eq 276 "${#HARDWARE_NEW_PROFILE_KEYS[@]}" 'default-new combination count'
+assert_eq 158 "${#HARDWARE_EXPLICIT_NEW_PROFILE_KEYS[@]}" \
     'explicit-new combination count'
-assert_eq 261 "${#HARDWARE_ARCHIVED_PROFILE_KEYS[@]}" \
+assert_eq 87 "${#HARDWARE_ARCHIVED_PROFILE_KEYS[@]}" \
     'archived combination count'
 assert_eq 3 "${#HARDWARE_LEGACY_COMPAT_PROFILE_KEYS[@]}" \
     'legacy combination count'
@@ -1474,7 +1477,7 @@ for memory_key in $(memory_profile_keys); do
         || fail "$memory_key has invalid DRAM JEP106 codes: $MEM_DRAM_MFR_JEP106_LIST"
 done
 
-# The active pool contains two 4C/8T CPUs plus three 6C/12T CPUs.
+# The active pool restores the six mainstream CPUs and keeps five X79 CPUs.
 active_cpu_keys=()
 legacy_only_cpu_keys=()
 for cpu_key in $(cpu_profile_keys); do
@@ -1492,12 +1495,12 @@ for cpu_key in $(cpu_profile_keys); do
     (( active_count == 0 )) || active_cpu_keys+=("$cpu_key")
     (( active_count != 0 || legacy_count == 0 )) || legacy_only_cpu_keys+=("$cpu_key")
 done
-assert_eq 'i7-3820 i7-3930k i7-4820k i7-4930k i7-4960x' \
-    "${active_cpu_keys[*]}" 'five active CPU profiles'
-assert_eq 'i5-4590 i5-6500 i3-8100' "${legacy_only_cpu_keys[*]}" \
-    'three legacy-only CPU profiles'
+assert_eq 'g3220 i3-4130 i5-4460 i5-4570 i5-4590 i7-4790 i7-3820 i7-3930k i7-4820k i7-4930k i7-4960x' \
+    "${active_cpu_keys[*]}" 'eleven active CPU profiles'
+assert_eq 'i5-6500 i3-8100' "${legacy_only_cpu_keys[*]}" \
+    'two legacy-only CPU profiles'
 
-# Every active board is a reviewed consumer X79 model from a distinct brand.
+# Active boards contain ten reviewed H81 models plus three consumer X79 models.
 mapfile -t active_board_keys < <(
     for combination in "${HARDWARE_COMBINATIONS[@]}"; do
         IFS='|' read -r _ _ combination_board _ combination_lifecycle \
@@ -1507,12 +1510,14 @@ mapfile -t active_board_keys < <(
         printf '%s\n' "$combination_board"
     done | awk '!seen[$0]++'
 )
-assert_eq 'asus-p9x79 gigabyte-x79-up4 asrock-x79-extreme4' \
-    "${active_board_keys[*]}" 'three active consumer X79 board profiles'
+assert_eq 'asus-h81m-k gigabyte-h81m-s1 asus-h81m-c msi-h81m-p33 asus-h81m-plus asus-h81m-a msi-h81m-e33 gigabyte-h81m-ds2 asrock-h81m-hds ecs-h81h3-m4 asus-p9x79 gigabyte-x79-up4 asrock-x79-extreme4' \
+    "${active_board_keys[*]}" 'thirteen active board profiles'
 for board_key in "${active_board_keys[@]}"; do
     board_profile_load "$board_key"
-    [[ "$MEM_BOARD_SLOTS" == 4 || "$MEM_BOARD_SLOTS" == 8 ]] || \
-        fail "$board_key does not provide a quad-channel-capable layout"
+    case "$BOARD_CHIPSET:$MEM_BOARD_SLOTS" in
+        H81:2|X79:4|X79:8) ;;
+        *) fail "$board_key has an unsupported active board layout" ;;
+    esac
 done
 for board_key in gigabyte-h97-d3h gigabyte-b150m-d3h asus-prime-b360m-a; do
     board_profile_load "$board_key"
@@ -1528,13 +1533,14 @@ for combination in "${HARDWARE_COMBINATIONS[@]}"; do
        "$combination_lifecycle" == explicit-new ]] || continue
     board_profile_load "$combination_board"
     memory_profile_load "$combination_memory"
-    [[ "$MEM_BOARD_SLOTS" == 4 || "$MEM_BOARD_SLOTS" == 8 ]] || \
-        fail "$combination_key does not use an active X79 board"
     case "$MEM_TOTAL_MB:$MEM_SLOTS:$MEM_CHANNEL_MODE" in
         4096:2:dual-channel|8192:2:dual-channel|\
         12288:3:triple-channel|16384:4:quad-channel) ;;
         *) fail "$combination_key violates the 4/8/12/16 channel contract" ;;
     esac
+    if (( MEM_TOTAL_MB >= 12288 && MEM_BOARD_SLOTS < 4 )); then
+        fail "$combination_key offers 12/16 GiB on a board with fewer than four slots"
+    fi
 done
 mapfile -t default_ssds < <(ssd_default_profile_keys)
 assert_eq 'samsung-840-pro-512gb samsung-850-pro-512gb samsung-860-pro-512gb crucial-mx100-512gb kingston-kc400-512gb intel-545s-512gb wd-pc-sa530-512gb' \
@@ -1602,11 +1608,11 @@ cpu_catalog="$TMP_DIR/cpu-catalog.out"
 "$CREATE_VM" --list-cpu-profiles >"$cpu_catalog"
 fallback_cpu_catalog="$TMP_DIR/cpu-catalog-fallback.out"
 "$CREATE_VM" --include-fallback --list-cpu-profiles >"$fallback_cpu_catalog"
-assert_eq 260 "$(( $(wc -l <"$platform_catalog") - 1 ))" \
+assert_eq 434 "$(( $(wc -l <"$platform_catalog") - 1 ))" \
     'default visible platform count'
 assert_eq 524 "$(( $(wc -l <"$fallback_platform_catalog") - 1 ))" \
     'fallback-visible platform count'
-assert_eq 5 "$(( $(wc -l <"$cpu_catalog") - 1 ))" \
+assert_eq 11 "$(( $(wc -l <"$cpu_catalog") - 1 ))" \
     'default visible CPU count'
 assert_eq 13 "$(( $(wc -l <"$fallback_cpu_catalog") - 1 ))" \
     'fallback-visible CPU count'
@@ -1638,7 +1644,10 @@ require_text $'i7-4960x-x79-up4-elpida-12g\tCore-i7-4960X 6C/12T\tGigabyte GA-X7
     "$platform_catalog" 'normal-pool i7-4960X/Gigabyte/Elpida row'
 reject_text $'i5-6500\tCore-i5-6500' "$platform_catalog" \
     'default platform catalog legacy B150 row'
-reject_text 'h81' "$platform_catalog" 'default platform catalog archived H81 row'
+require_text $'g3220-h81m-k-4g\tIntel-Pentium-G3220 2C/2T\tASUSTeK COMPUTER INC. H81M-K\tH81' \
+    "$platform_catalog" 'default platform catalog restored G3220/H81 row'
+require_text $'i3-4130-h81m-p33-8g\tCore-i3-4130 2C/4T\tMSI H81M-P33 (MS-7817)\tH81' \
+    "$platform_catalog" 'default platform catalog restored i3/H81 row'
 reject_text '-6g' "$platform_catalog" 'default platform catalog archived 6G row'
 reject_text 'legacy-compatibility' "$platform_catalog" \
     'default platform catalog compatibility policy'

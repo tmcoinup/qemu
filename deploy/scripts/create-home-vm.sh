@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Foolproof entry point for the reviewed 4C/8T and 6C/12T home X79 pool.
+# Foolproof entry point for the reviewed G-11 household CPU pool.
 
 set -euo pipefail
 
@@ -9,12 +9,12 @@ create_vm="$script_dir/create-vm.sh"
 usage() {
     cat <<'EOF'
 用法:
-  ./deploy/scripts/create-home-vm.sh VM_ID --spec 4c8t|6c12t [选项]
+  ./deploy/scripts/create-home-vm.sh VM_ID --spec 2c2t|2c4t|4c4t|4c8t|6c12t [选项]
 
 常用选项:
   --memory-size 4G|8G|12G|16G   默认 8G
   --cpu-profile PROFILE          可选固定具体 CPU；必须属于所选规格
-  --board-profile PROFILE        可选固定 ASUS/Gigabyte/ASRock X79 主板
+  --board-profile PROFILE        可选固定与 CPU/容量匹配的审核主板
   --ssd-profile PROFILE          可选固定 SSD
   --gpu-profile PROFILE          可选固定显卡身份
   --gpu-vram 1024|2048           可选固定宿主 vGPU 档位
@@ -22,10 +22,13 @@ usage() {
   --force                        覆盖已停止 VM 的现有配置
 
 规格对应 CPU:
-  4c8t   i7-4820k（优先 DDR3-1866）、i7-3820
+  2c2t   g3220
+  2c4t   i3-4130
+  4c4t   i5-4590（优先）、i5-4570、i5-4460
+  4c8t   i7-4820k（优先 DDR3-1866）、i7-3820、i7-4790
   6c12t  i7-4960x（优先 DDR3-1866）、i7-4930k、i7-3930k
 
-12G/16G 只会从至少四条 DIMM 插槽的审核主板中选择；目录不允许绕过。
+默认 8G；旧 6G 已归档。12G/16G 只会从至少四条 DIMM 插槽的审核主板中选择。
 EOF
 }
 
@@ -44,8 +47,8 @@ while (( $# > 0 )); do
         --spec)
             [[ $# -ge 2 ]] || { echo "--spec 缺少参数" >&2; exit 2; }
             case "${2,,}" in
-                4c8t|6c12t) cpu_spec=${2,,} ;;
-                *) echo "--spec 只支持 4c8t 或 6c12t" >&2; exit 2 ;;
+                2c2t|2c4t|4c4t|4c8t|6c12t) cpu_spec=${2,,} ;;
+                *) echo "--spec 只支持 2c2t/2c4t/4c4t/4c8t/6c12t" >&2; exit 2 ;;
             esac
             shift 2
             ;;
@@ -90,11 +93,13 @@ while (( $# > 0 )); do
 done
 
 [[ -n "$vm_id" ]] || { echo "缺少 VM_ID" >&2; usage >&2; exit 2; }
-[[ -n "$cpu_spec" ]] || { echo "缺少 --spec 4c8t|6c12t" >&2; usage >&2; exit 2; }
+[[ -n "$cpu_spec" ]] || { echo "缺少 --spec 2c2t|2c4t|4c4t|4c8t|6c12t" >&2; usage >&2; exit 2; }
 
 if [[ -n "$cpu_profile" ]]; then
     case "$cpu_spec:$cpu_profile" in
-        4c8t:i7-3820|4c8t:i7-4820k|\
+        2c2t:g3220|2c4t:i3-4130|\
+        4c4t:i5-4460|4c4t:i5-4570|4c4t:i5-4590|\
+        4c8t:i7-3820|4c8t:i7-4790|4c8t:i7-4820k|\
         6c12t:i7-3930k|6c12t:i7-4930k|6c12t:i7-4960x) ;;
         *)
             echo "CPU $cpu_profile 不属于 $cpu_spec 家用池" >&2

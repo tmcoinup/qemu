@@ -419,12 +419,20 @@ _hardware_profile_append_i3_4130_memory_matrix() {
 
 _hardware_profile_append_i3_4130_memory_matrix
 
-# The unified home-desktop X79 pool contains only retail 4C/8T and 6C/12T
-# Core i7 parts.  Every CPU is paired with all three board brands and four or
-# five major memory brands at every 4/8/12/16 GiB capacity.  Effective speed
-# is the lower of the CPU and board ceilings: Ivy Bridge-E prefers native
-# DDR3-1866 on ASUS/Gigabyte, while Sandy Bridge-E and ASRock's non-OC path
-# retain honest DDR3-1600 identities.
+# The ordinary home pool keeps the previously reviewed mainstream CPUs and
+# extends them with retail 4C/8T and 6C/12T X79 parts.  The X79 subset pairs
+# every CPU with all three board brands and four or five major memory brands at
+# every 4/8/12/16 GiB capacity.  Effective speed is the lower of the CPU and
+# board ceilings: Ivy Bridge-E prefers native DDR3-1866 on ASUS/Gigabyte, while
+# Sandy Bridge-E and ASRock's non-OC path retain honest DDR3-1600 identities.
+MAINSTREAM_HOME_CPU_KEYS=(
+    g3220
+    i3-4130
+    i5-4460
+    i5-4570
+    i5-4590
+    i7-4790
+)
 X79_CONSUMER_CPU_KEYS=(
     i7-3820
     i7-3930k
@@ -523,11 +531,12 @@ _hardware_profile_append_x79_consumer_pool() {
 
 _hardware_profile_append_x79_consumer_pool
 
-# Keep every pre-X79 and historical 6 GiB key loadable for immutable existing
-# vm.conf files, but remove it from every creation/component candidate path.
-# This is an archive operation, not a deletion, so existing installations keep
-# booting while every newly created 4/8/12/16G machine uses a quad-capable X79.
-_hardware_profile_archive_retired_combinations() {
+# Keep every historical 6 GiB key loadable for immutable existing vm.conf
+# files, but remove only that retired capacity from creation/component paths.
+# Previously reviewed mainstream 2C/2T, 2C/4T, 4C/4T and i7-4790 4C/8T rows
+# remain available alongside the X79 expansion.  This is an archive operation,
+# not a deletion, so existing 6 GiB installations keep booting.
+_hardware_profile_archive_retired_6g_combinations() {
     local index row platform cpu board memory lifecycle memory_row module_list
     local module total
     local -a modules=()
@@ -547,16 +556,12 @@ _hardware_profile_archive_retired_combinations() {
             total=$((total + module))
         done
         [[ "$lifecycle" != legacy-compatibility ]] || continue
-        case "$board" in
-            asus-p9x79|gigabyte-x79-up4|asrock-x79-extreme4)
-                (( total != 6144 )) && continue
-                ;;
-        esac
+        (( total == 6144 )) || continue
         HARDWARE_COMBINATIONS[index]="$platform|$cpu|$board|$memory|archived"
     done
 }
 
-_hardware_profile_archive_retired_combinations
+_hardware_profile_archive_retired_6g_combinations
 
 # Compatibility view consumed by the existing legality/start/test code.  It is
 # generated from the normalized catalogs below; no hardware fact is duplicated.
@@ -1582,9 +1587,11 @@ hardware_profile_validate_catalog() {
         local host_cpu host_key host_vendor host_device host_revision
         local -a parts modules ranks device_widths module_jeps dram_jeps
         local -A active_cpu_seen=() active_board_seen=() default_cpu_seen=()
+        local -A active_topology_seen=()
+        local -A x79_cpu_seen=() x79_board_seen=()
         local -A active_memory_brand_seen=()
-        local -A active_cpu_board_capacity_brand_seen=()
-        local -A active_board_capacity_seen=() active_cpu_capacity_seen=()
+        local -A x79_cpu_board_capacity_brand_seen=()
+        local -A x79_board_capacity_seen=() x79_cpu_capacity_seen=()
         local capacity expected_brand_count brand_count memory_brand
         local new_count=0 explicit_count=0 archived_count=0 legacy_count=0
 
@@ -1878,8 +1885,8 @@ hardware_profile_validate_catalog() {
                 exit 1
             }
             if [[ "$lifecycle" == archived ]]; then
-                [[ "$MEM_TOTAL_MB" == 6144 || "$BOARD_CHIPSET" != X79 ]] || {
-                    echo "归档平台必须是已取消的 6G 档或旧非 X79 新建池: $key" >&2
+                [[ "$MEM_TOTAL_MB" == 6144 ]] || {
+                    echo "归档平台必须是已取消的 6G 档: $key" >&2
                     exit 1
                 }
             fi
@@ -1892,8 +1899,8 @@ hardware_profile_validate_catalog() {
             if [[ "$lifecycle" != legacy-compatibility && "$lifecycle" != archived ]]; then
                 case "$MEM_TOTAL_MB:$MEM_CHANNEL_MODE" in
                     4096:dual-channel|8192:dual-channel)
-                        (( MEM_BOARD_SLOTS >= 4 && MEM_SLOTS == 2 )) || {
-                            echo "4G/8G 新建档必须在四通道主板安装双通道两条: $key" >&2
+                        (( MEM_BOARD_SLOTS >= 2 && MEM_SLOTS == 2 )) || {
+                            echo "4G/8G 新建档必须安装双通道两条: $key" >&2
                             exit 1
                         }
                         ;;
@@ -1914,17 +1921,22 @@ hardware_profile_validate_catalog() {
                         exit 1
                         ;;
                 esac
-                [[ "$BOARD_CHIPSET" == X79 ]] || {
-                    echo "新建池主板必须统一为消费级四通道 X79: $key" >&2
+                [[ "$BOARD_CHIPSET" == H81 || "$BOARD_CHIPSET" == X79 ]] || {
+                    echo "普通新建池只允许审核过的 H81/X79 家用平台: $key" >&2
                     exit 1
                 }
                 active_cpu_seen["$cpu_key"]=1
                 active_board_seen["$board_key"]=1
-                active_board_capacity_seen["$board_key:$MEM_TOTAL_MB"]=1
-                active_cpu_capacity_seen["$cpu_key:$MEM_TOTAL_MB"]=1
+                active_topology_seen["${CPU_CORES}c${CPU_VCPUS}t"]=1
                 active_memory_brand_seen["$MEM_BRAND"]=1
-                active_cpu_board_capacity_brand_seen["$cpu_key:$board_key:$MEM_TOTAL_MB:$MEM_BRAND"]=1
                 [[ "$lifecycle" != new ]] || default_cpu_seen["$cpu_key"]=1
+                if [[ "$BOARD_CHIPSET" == X79 ]]; then
+                    x79_cpu_seen["$cpu_key"]=1
+                    x79_board_seen["$board_key"]=1
+                    x79_board_capacity_seen["$board_key:$MEM_TOTAL_MB"]=1
+                    x79_cpu_capacity_seen["$cpu_key:$MEM_TOTAL_MB"]=1
+                    x79_cpu_board_capacity_brand_seen["$cpu_key:$board_key:$MEM_TOTAL_MB:$MEM_BRAND"]=1
+                fi
             fi
             used_cpu+="$cpu_key|"
             used_board+="$board_key|"
@@ -1940,51 +1952,68 @@ hardware_profile_validate_catalog() {
             echo "兼容平台视图数量错误" >&2
             exit 1
         }
-        (( new_count == 260 && explicit_count == 0 && archived_count == 261 &&
+        (( new_count == 276 && explicit_count == 158 && archived_count == 87 &&
            legacy_count == 3 )) || {
-            echo "平台生命周期数量必须是 new=260/explicit=0/archived=261/legacy=3" >&2
+            echo "平台生命周期数量必须是 new=276/explicit=158/archived=87/legacy=3" >&2
             exit 1
         }
-        (( ${#active_cpu_seen[@]} == 5 && ${#active_board_seen[@]} == 3 &&
-           ${#default_cpu_seen[@]} == 5 )) || {
-            echo "新建池必须是 5 款消费级 X79 CPU（4C/8T 或 6C/12T）/3 块四通道家用主板" >&2
+        (( ${#active_cpu_seen[@]} == 11 && ${#active_board_seen[@]} == 13 &&
+           ${#default_cpu_seen[@]} == 10 && ${#active_topology_seen[@]} == 5 )) || {
+            echo "普通新建池必须覆盖 11 款 CPU/13 块主板/5 种拓扑" >&2
+            exit 1
+        }
+        for cpu_key in "${MAINSTREAM_HOME_CPU_KEYS[@]}"; do
+            [[ -v "active_cpu_seen[$cpu_key]" ]] || {
+                echo "旧家用 CPU 未恢复到普通新建池: $cpu_key" >&2
+                exit 1
+            }
+        done
+        for key in 2c2t 2c4t 4c4t 4c8t 6c12t; do
+            [[ -v "active_topology_seen[$key]" ]] || {
+                echo "普通新建池缺少 CPU 规格: $key" >&2
+                exit 1
+            }
+        done
+        (( ${#x79_cpu_seen[@]} == 5 && ${#x79_board_seen[@]} == 3 )) || {
+            echo "X79 扩展池必须是 5 款消费级 CPU/3 块四通道家用主板" >&2
             exit 1
         }
         for cpu_key in "${X79_CONSUMER_CPU_KEYS[@]}"; do
-            [[ -v "active_cpu_seen[$cpu_key]" ]] || {
+            [[ -v "x79_cpu_seen[$cpu_key]" ]] || {
                 echo "X79 家用 CPU 未进入普通新建池: $cpu_key" >&2
                 exit 1
             }
         done
-        for board_key in "${!active_board_seen[@]}"; do
-            [[ -v "active_board_capacity_seen[$board_key:4096]" &&
-               -v "active_board_capacity_seen[$board_key:8192]" &&
-               -v "active_board_capacity_seen[$board_key:12288]" &&
-               -v "active_board_capacity_seen[$board_key:16384]" ]] || {
+        for board_key in "${!x79_board_seen[@]}"; do
+            [[ -v "x79_board_capacity_seen[$board_key:4096]" &&
+               -v "x79_board_capacity_seen[$board_key:8192]" &&
+               -v "x79_board_capacity_seen[$board_key:12288]" &&
+               -v "x79_board_capacity_seen[$board_key:16384]" ]] || {
                 echo "四通道主板缺少 4G/8G/12G/16G 完整档位: $board_key" >&2
                 exit 1
             }
         done
-        for cpu_key in "${!active_cpu_seen[@]}"; do
+        for cpu_key in "${!x79_cpu_seen[@]}"; do
             [[ -v "_HARDWARE_CPU_HOST_BRIDGE_ROW_BY_KEY[$cpu_key]" ]] || {
                 echo "新建 X79 CPU 缺少 DMI2 host bridge identity: $cpu_key" >&2
                 exit 1
             }
-            [[ -v "active_cpu_capacity_seen[$cpu_key:4096]" &&
-               -v "active_cpu_capacity_seen[$cpu_key:8192]" &&
-               -v "active_cpu_capacity_seen[$cpu_key:12288]" &&
-               -v "active_cpu_capacity_seen[$cpu_key:16384]" ]] || {
+            [[ -v "x79_cpu_capacity_seen[$cpu_key:4096]" &&
+               -v "x79_cpu_capacity_seen[$cpu_key:8192]" &&
+               -v "x79_cpu_capacity_seen[$cpu_key:12288]" &&
+               -v "x79_cpu_capacity_seen[$cpu_key:16384]" ]] || {
                 echo "新建 CPU 缺少 4G/8G/12G/16G 完整档位: $cpu_key" >&2
                 exit 1
             }
         done
-        (( ${#active_memory_brand_seen[@]} == 5 )) &&
+        (( ${#active_memory_brand_seen[@]} == 6 )) &&
             [[ -v 'active_memory_brand_seen[Kingston]' &&
                -v 'active_memory_brand_seen[Samsung]' &&
                -v 'active_memory_brand_seen[Micron]' &&
                -v 'active_memory_brand_seen[Elpida]' &&
-               -v 'active_memory_brand_seen[SK hynix]' ]] || {
-            echo "新建内存池必须覆盖 Kingston/Samsung/Micron/Elpida/SK hynix 五个大牌" >&2
+               -v 'active_memory_brand_seen[SK hynix]' &&
+               -v 'active_memory_brand_seen[Crucial]' ]] || {
+            echo "新建内存池必须覆盖 Kingston/Samsung/Micron/Elpida/SK hynix/Crucial" >&2
             exit 1
         }
         for cpu_key in "${X79_CONSUMER_CPU_KEYS[@]}"; do
@@ -1992,7 +2021,7 @@ hardware_profile_validate_catalog() {
                 for capacity in 4096 8192 12288 16384; do
                     brand_count=0
                     for memory_brand in Samsung Micron Kingston 'SK hynix' Elpida; do
-                        [[ -v "active_cpu_board_capacity_brand_seen[$cpu_key:$board_key:$capacity:$memory_brand]" ]] &&
+                        [[ -v "x79_cpu_board_capacity_brand_seen[$cpu_key:$board_key:$capacity:$memory_brand]" ]] &&
                             brand_count=$((brand_count + 1))
                     done
                     expected_brand_count=4

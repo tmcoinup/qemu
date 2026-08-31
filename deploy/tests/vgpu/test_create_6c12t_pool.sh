@@ -92,6 +92,7 @@ create_exact() {
     local id=$1 cpu=$2 board=$3 memory=$4 ssd=$5 expected_board=$6
     local expected_memory_brand=$7 expected_speed=$8 expected_ssd_brand=$9
     local expected_cores=${10} expected_vcpus=${11}
+    local expected_lifecycle=${12:-new}
     local image_root="$tmp_dir/images-$id" vm_root="$tmp_dir/vms-$id"
 
     mkdir -p "$image_root" "$vm_root"
@@ -115,7 +116,7 @@ create_exact() {
     assert_eq "$expected_memory_brand" "$MEM_BRAND" "VM $id memory brand"
     assert_eq "$expected_speed" "$MEM_SPEED" "VM $id memory speed"
     assert_eq "$expected_ssd_brand" "$SSD_BRAND" "VM $id SSD brand"
-    assert_eq new "$(hardware_profile_lifecycle_class "$PLATFORM")" \
+    assert_eq "$expected_lifecycle" "$(hardware_profile_lifecycle_class "$PLATFORM")" \
         "VM $id lifecycle"
 }
 
@@ -133,26 +134,37 @@ create_exact 105 i7-4960x gigabyte-x79-up4 elpida-ebj40ug8bfw0-3x4 \
 wrapper_image_root="$tmp_dir/images-wrapper"
 wrapper_vm_root="$tmp_dir/vms-wrapper"
 mkdir -p "$wrapper_image_root" "$wrapper_vm_root"
-env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
-    IMAGE_ROOT="$wrapper_image_root" VM_ROOT="$wrapper_vm_root" \
-    VGPU_HOST_CONFIG="$host_config" QEMU_BIN=/bin/false \
-    "$create_home_vm" 106 --spec 6c12t \
-    --ssd-profile samsung-840-pro-512gb \
-    --gpu-profile gtx1050_2gb --monitor-profile dell-p2419h \
-    >"$tmp_dir/wrapper.out" 2>"$tmp_dir/wrapper.err"
-# shellcheck source=/dev/null
-source "$wrapper_vm_root/106/vm.conf"
-assert_eq i7-4960x "$CPU_PROFILE" 'wrapper preferred 6C/12T CPU'
-assert_eq 6 "$CPU_CORES" 'wrapper core count'
-assert_eq 12 "$CPU_VCPUS" 'wrapper thread count'
-assert_eq 8192 "$MEM_TOTAL_MB" 'wrapper default memory capacity'
-assert_eq 1866 "$MEM_SPEED" 'wrapper preferred memory speed'
 
-if "$create_home_vm" 107 --spec 4c8t --cpu-profile i7-4960x \
+create_wrapped() {
+    local id=$1 spec=$2 cpu=$3 expected_cores=$4 expected_vcpus=$5
+    local expected_speed=$6
+    env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin \
+        IMAGE_ROOT="$wrapper_image_root" VM_ROOT="$wrapper_vm_root" \
+        VGPU_HOST_CONFIG="$host_config" QEMU_BIN=/bin/false \
+        "$create_home_vm" "$id" --spec "$spec" --cpu-profile "$cpu" \
+        --ssd-profile samsung-840-pro-512gb \
+        --gpu-profile gtx1050_2gb --monitor-profile dell-p2419h \
+        >"$tmp_dir/wrapper-$id.out" 2>"$tmp_dir/wrapper-$id.err"
+    # shellcheck source=/dev/null
+    source "$wrapper_vm_root/$id/vm.conf"
+    assert_eq "$cpu" "$CPU_PROFILE" "wrapper $spec CPU"
+    assert_eq "$expected_cores" "$CPU_CORES" "wrapper $spec core count"
+    assert_eq "$expected_vcpus" "$CPU_VCPUS" "wrapper $spec thread count"
+    assert_eq 8192 "$MEM_TOTAL_MB" "wrapper $spec default memory capacity"
+    assert_eq "$expected_speed" "$MEM_SPEED" "wrapper $spec memory speed"
+}
+
+create_wrapped 301 2c2t g3220 2 2 1333
+create_wrapped 302 2c4t i3-4130 2 4 1600
+create_wrapped 303 4c4t i5-4590 4 4 1600
+create_wrapped 304 4c8t i7-4790 4 8 1600
+create_wrapped 305 6c12t i7-4960x 6 12 1866
+
+if "$create_home_vm" 306 --spec 4c8t --cpu-profile i7-4960x \
         >"$tmp_dir/wrapper-mismatch.out" 2>"$tmp_dir/wrapper-mismatch.err"; then
     fail 'wrapper accepted a CPU outside the requested topology'
 fi
 grep -Fq '不属于 4c8t 家用池' "$tmp_dir/wrapper-mismatch.err" ||
     fail 'wrapper topology mismatch did not explain the refusal'
 
-echo 'PASS: unified home pool exposes five 4C/8T or 6C/12T CPUs, three board brands, four-to-five memory brands, and five SSD brands'
+echo 'PASS: unified home pool exposes all five restored topologies, real mainstream/X79 identities, and reviewed memory speeds'

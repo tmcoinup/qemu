@@ -104,31 +104,32 @@ chmod 600 /安全路径/client_configuration_token.tok
   --token-file /安全路径/client_configuration_token.tok
 ```
 
-## Tesla V100 / vGPU 19.5 的 1Q
+## Tesla V100 / vGPU 16.4 的 1Q
 
-V100 的 vGPU 19.5 路径默认启用已经实机验证的 mixed mode。先确认没有活动
-VM/mdev，再为 16GB PCIe V100 生成 1Q/2Q 双映射：
+业务全部 1Q 时，推荐已完成 Code 0 与 RAM_TYPE/位宽验收的 R535/vGPU 16.4。
+先确认没有活动 VM/mdev，再为 16GB PCIe V100 生成 equal 1Q：
 
 ```bash
 bash deploy/configure-g11-vgpu-host.sh \
   --preset v100-pcie-16gb \
-  --gpu 0000:04:00.0
+  --fb-mode equal --tier 1024 \
+  --gpu 0000:04:00.0 --force
 ```
 
 把示例 BDF 换成实卡的完整地址；32GB 卡把 preset 换成
-`v100-pcie-32gb`。脚本按 16384/32768MB 完整显存计算，不扣固定预留。业务只用
-1Q 时，每次创建明确指定：
+`v100-pcie-32gb`。脚本按 16384/32768MB 完整显存计算，不扣固定预留。每次创建
+明确指定：
 
 ```bash
 ./deploy/scripts/vmctl.sh create 1 --gpu-vram 1024
 ```
 
-若策略层也要禁止 2Q，停完全部 VM/mdev 后用 `--fb-mode equal --tier 1024`
-重新生成。vGPU 19.5/V100 的生产策略只投影名称/FHD，使用
-`VGPU_RM_FB_IDENTITY_MODE=off` 保留 NVIDIA 原生 RAM_TYPE、显存厂商和位宽。
-完整消费卡 RM tuple 已在 1Q 上重复触发 PTE/TDR/XID 43；name-only 1Q 已完成
-4 分钟无上述错误及正常关机回收验证。该轮没有 guest Device Manager 回执，2Q 与
-1Q+2Q 也仍需在安全策略下重新做 Code 0 和长稳验收。
+R535.161.05 + 538.33 的 `V100X-1Q` 已确认 RAM_TYPE、位宽、Code 0、WHCP、
+1024MiB，并完成约 9 分钟无 PTE/TDR/XID/display-copy timeout 与正常关机回收。
+显存厂家因 Manager 未查询仍是未证明字段。2Q 和 mixed 不属于该合同。
 
-完整的 19.5 安装和安全边界见
-[`G11-V100-VGPU19.5-FRESH-INSTALL.md`](G11-V100-VGPU19.5-FRESH-INSTALL.md)。
+完整的 16.4 安装和安全边界见
+[`G11-V100-R535-VGPU16.4-FRESH-INSTALL.md`](G11-V100-R535-VGPU16.4-FRESH-INSTALL.md)。
+若明确需要 R580 19.5 的 mixed capability，参阅
+[`G11-V100-VGPU19.5-FRESH-INSTALL.md`](G11-V100-VGPU19.5-FRESH-INSTALL.md)；
+R580 完整消费卡 RM tuple 的 XID/TDR 结果不能与 R535 混为一谈。

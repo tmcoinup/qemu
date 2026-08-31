@@ -47,8 +47,9 @@ usage() {
 
 默认只构建、测试、备份并安装，不打断正在运行的 vGPU。
 --restart-manager 仅在没有 QEMU 占用 mdev 时重启 nvidia-vgpu-mgr。
-R580 只用于已经实机验证的 V100/vGPU 19.5 路径，并固定保持原生能力
-（unlock=false）。RTX 2080/2080 Ti 生产路径固定使用 R535。
+R535 用于 RTX 2080/2080 Ti，以及已实机验证的 V100/vGPU 16.4 全 1Q 路径。
+R580 只保留给 V100/vGPU 19.5 name-only 路径，并固定保持原生能力
+（unlock=false）。安装器按已加载驱动选择 ABI，不做跨分支升级。
 --r580-consumer-lab 只供本机母盘暂存实验；它会启用消费卡 capability Hook，
 但该组合已出现 XID 43/TDR，不能作为生产通过证明。
 EOF
@@ -367,7 +368,7 @@ EOF
 else
     TMP=$(mktemp)
     cat >"$TMP" <<'EOF'
-# Managed by G-11 for the R535 RTX unlock path.
+# Managed by G-11 for the R535 consumer-identity path (RTX or V100 all-1Q).
 observe_only = false
 unlock = true
 unlock_migration = false

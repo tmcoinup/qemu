@@ -165,10 +165,11 @@ B 是所有 profile 当前的安全 name-only 路径。新 GTX1050 配置与其�
 身份按目录固定为 1024MB 或 2048MB，启动器必须分配同容量 mdev。
 
 当前 RTX 2080/R535 宿主必须固定整池为 `nvidia-256/1024MB` 或
-`nvidia-257/2048MB`。V100/vGPU 19.5 默认可发布 `V100*-1Q` 与 `V100*-2Q`
-双映射；只有 NVIDIA 实时报告 heterogeneous capability=`Supported`、mode=`Enabled`
-时才允许混搭。完整流程见 [`V100-ADAPTATION.md`](V100-ADAPTATION.md)。创建器、
-启动器和 mdev 分配器仍会校验 profile、真实显存、parent 与总容量。
+`nvidia-257/2048MB`。V100 全 1Q 推荐 R535/vGPU 16.4，并固定 `V100*-1Q`、
+equal 1024MB。只有明确选择 V100/R580.159.01，且 NVIDIA 实时报告 heterogeneous
+capability=`Supported`、mode=`Enabled` 时，才发布 1Q/2Q 双映射并允许混搭。完整
+流程见 [`V100-ADAPTATION.md`](V100-ADAPTATION.md)。创建器、启动器和 mdev 分配器
+仍会校验 profile、真实显存、parent 与总容量。
 
 `deploy/host/gpu-mode.sh consumer` 是把**宿主机**切到消费版 NVIDIA 驱动，会让
 mdev/vGPU 不可用；它与 guest 消费卡身份切换完全不是一回事。

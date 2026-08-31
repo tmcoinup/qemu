@@ -1103,8 +1103,9 @@ hardware_profile_matches_components() {
 }
 
 # Lower number wins.  The normal consumer X79 pool prefers 6C/12T before
-# 4C/8T and, within a CPU, native DDR3-1866 before DDR3-1600.  Every returned
-# row still has to pass the KVM enforce=on realization gate.
+# 4C/8T and, within a CPU, native DDR3-1866 before DDR3-1600.  Mainstream
+# Haswell likewise prefers its reviewed 1600 bin over an explicit 1333 bin.
+# Every returned row still has to pass the KVM enforce=on realization gate.
 hardware_profile_performance_priority() {
     local requested=${1:-}
 
@@ -1120,12 +1121,17 @@ hardware_profile_performance_priority() {
             i7-4820k:1866) cpu_priority=50 ;;
             i7-4820k:*) cpu_priority=60 ;;
             i7-3820:*) cpu_priority=70 ;;
-            i5-4590:*) cpu_priority=100 ;;
-            i5-4570:*) cpu_priority=110 ;;
-            i5-4460:*) cpu_priority=120 ;;
-            i3-4130:*) cpu_priority=130 ;;
+            i5-4590:1600) cpu_priority=100 ;;
+            i5-4590:*) cpu_priority=101 ;;
+            i5-4570:1600) cpu_priority=110 ;;
+            i5-4570:*) cpu_priority=111 ;;
+            i5-4460:1600) cpu_priority=120 ;;
+            i5-4460:*) cpu_priority=121 ;;
+            i3-4130:1600) cpu_priority=130 ;;
+            i3-4130:*) cpu_priority=131 ;;
             g3220:*) cpu_priority=140 ;;
-            i7-4790:*) cpu_priority=150 ;;
+            i7-4790:1600) cpu_priority=150 ;;
+            i7-4790:*) cpu_priority=151 ;;
             *) cpu_priority=900 ;;
         esac
         # The ordinary home-pool default is 8 GiB.  Explicit --memory-size

@@ -17,11 +17,11 @@
 > 当前完整目录为 13/16/45/524，操作见
 > [G11-HOME-CPU-POOL-QUICKSTART.md](G11-HOME-CPU-POOL-QUICKSTART.md)。后文旧统计仍只作历史底稿。
 >
-> 2026-08-30 V100 实机更新：后文基于 R535/vGPU 16 推导的“V100 只能单档、
-> 不需要 identity Hook”已被 vGPU 19.5 实验替代。精确 580.159.01 已确认
-> heterogeneous capability/mode，并完成 1Q 的 RM tuple A/B 实验：完整消费卡 tuple
-> 会触发 PTE/TDR/XID 43，生产改为只投影名称/FHD、保留原生 RM framebuffer 字段。
-> 2Q 与同卡混搭仍需按该安全策略重验。当前结论见
+> 2026-08-31 V100 实机更新：R535/vGPU 16.4 + 538.33 的 `V100X-1Q` 已完成
+> RAM_TYPE/位宽 Hook、Device Manager Code 0、WHCP、1024MiB、约 9 分钟 SDL 无
+> XID/TDR/PTE/display-copy timeout 和正常回收验收，成为全 1Q 推荐路线。R580/19.5
+> 保留 name-only/mixed 可选分支；其完整消费卡 RM tuple 会触发 XID/TDR。2Q 与同卡
+> 混搭仍需单独验收。当前结论见
 > [V100-ADAPTATION.md](V100-ADAPTATION.md)。
 
 ## 先读：2026-08-20 复核结论（优先于后文初版）
@@ -38,7 +38,7 @@
 | 新建 GPU/驱动世代 | 实际 guest 基线是正式签名 GRID **538.33 / R535**，不是文件历史误名 553.24；8 个 GT 730/740 Kepler 身份与该基线不自洽 | 2GB 默认层 12 条；1GB 新建层只保留 4 条 Maxwell GTX 750；8 条 Kepler 仅供旧 `vm.conf` 读取，不再新建/随机 |
 | 跨组件 SSD 随机 | `create-vm.sh` 自己会先按平台过滤，不存在“随机命中 NVMe 后不重试”；但客户端若先从 `AUTO_RANDOM=1` 独立选 SSD，再显式传给默认 H81，确有跨组件拒绝风险 | 默认层只含 7 款 H81 可达 SATA；WD Black、970 Pro、960 Pro 三款 NVMe 都改为显式选择 |
 | 宿主 profile 漂移 | 全局 `profile_override.toml` 基线漂移真实存在；当前活动 VM 的 per-mdev FHD 合同正确，不能声称它正在继承 4 屏旧值 | 提供只读 check、保留未知/mdev 段的语义合并和停机应用封装；不在本次提交中改宿主 `/etc` 或重启服务 |
-| V100/vGPU 19.5 | 精确 580.159.01 在实卡报告并启用 heterogeneous time-slice；1Q name-only 运行 4 分钟无 PTE/TDR/XID/unload 且正常回收，guest Code 0 尚需凭据复核，2Q/混搭待重验 | V100 默认生成双映射并由 live capability/mode 门禁；R580 Hook 只投影名称/FHD，保留原生 RM framebuffer tuple，`unlock=false` |
+| V100/R535 1Q 与 R580 可选分支 | R535.161.05 + 538.33 的 1Q 完整 identity 已完成 Code 0/WHCP 与约 9 分钟无 XID/TDR；R580.159.01 name-only 1Q 宿主稳定，完整 tuple 会故障，2Q/混搭待重验 | 全 1Q 默认 R535/equal 1024；R580 只在明确选择时由 live capability/mode 门禁 mixed，并保留原生 RM framebuffer tuple |
 
 ### 显存容量决定
 
@@ -197,9 +197,9 @@ brands  board=5 memory=5 ssd=5 gpu_board=9 keyboard=3 relative_mouse=3
 **结论（确凿）**：在**当前宿主**上，同一物理 GPU 的所有 vGPU 实例必须使用
 相同 framebuffer 大小；相同容量的不同 type 不应被误拒绝。
 
-此处实验只描述 RTX 2080 的 R535/vGPU 16.x 路径，该分支继续要求同一物理 GPU
-使用相同 framebuffer 大小。V100 已迁移到独立的 vGPU 19.5/580.159.01 合同，并按
-实时 heterogeneous capability/mode 允许 mixed-size（见附录 C）。
+此处实验只描述 RTX 2080 的 R535/vGPU 16.x 路径。当前 V100 全 1Q 生产路线同样使用
+R535/equal 1024；只有明确选择的 V100 R580.159.01 分支，才会在实时 heterogeneous
+capability/mode 门禁全部通过时允许 mixed-size（见附录 C）。
 
 ### 3.2 实验二：2 GB 档真实上限
 
@@ -656,32 +656,35 @@ vCPU 拓扑分布: 2C/2T ×3, 2C/4T ×241, 4C/4T ×19, 4C/8T ×1
 
 ## 附录 C：本项目当前的 V100 合同
 
-> 2026-08-30 实机更新，替代 2026-08-20 的无卡推导。
+> 2026-08-31 实机更新，替代 2026-08-20 的无卡推导和 2026-08-30 的 R580-only 口径。
 
 ### C.1 framebuffer 规则
 
-V100 固定使用 vGPU 19.5 / host 580.159.01。只有目标 V100 实时报告
-`Heterogeneous Time-Slice Sizes: Supported` 且 `vGPU Heterogeneous Mode: Enabled`
+全 1Q 默认使用 vGPU 16.4 / host 535.161.05，固定 `V100*-1Q`、equal 1024MB，
+不发布 2Q 或 mixed 映射。只有明确选择 R580.159.01，且目标 V100 实时报告
+`Heterogeneous Time-Slice Sizes: Supported` 与 `vGPU Heterogeneous Mode: Enabled`
 时，分配器才允许 `V100*-1Q` 与 `V100*-2Q` 同卡活动。任何版本、BDF、profile、
 framebuffer 或 mode 无法验证时都 fail-closed。
 
-RTX 2080/R535 的 equal-size 规则不变，不能从 V100 的结果外推。
-
 ### C.2 身份与稳定性
 
-V100 原生 mdev 能力仍由官方 host driver 提供。R580 Hook 固定 `unlock=false`。
-实机 A/B 已证明完整消费卡 RM framebuffer tuple 会在 1Q 上重复触发 PTE 映射失败、
-TDR、XID 43 和 guest driver 循环卸载；生产因此只投影每 mdev 名称/FHD 合同，
-并通过 `VGPU_RM_FB_IDENTITY_MODE=off` 保留原生 RAM_TYPE、显存厂商和位宽。
-同一 1Q 在该策略下运行 4 分钟，上述宿主错误计数为 0，且 QEMU、mdev、TPM 与
-CPU 隔离均正常回收。该次没有 guest 凭据，不能把宿主日志外推为 Device Manager
-Code 0；2Q 和 1Q+2Q 必须在同一安全策略下重新做 guest 验收。
+R535.161.05 + 538.33 的 `V100X-1Q` 已确认 `RAM_TYPE 15 -> 8`、位宽
+`4096 -> 128`、Device Manager Code 0、WHCP、1024MiB，约 9 分钟内无
+PTE/TDR/XID/display-copy timeout/unload，且正常回收。显存厂家因为 Manager 没有
+查询，仍标为未证明。
+
+R580.159.01 + 582.53 的完整消费卡 RM tuple 会在 1Q 上重复触发 PTE、TDR、XID 43
+和 guest driver 循环卸载；R580 因此固定 `unlock=false`，只投影名称/FHD，并用
+`VGPU_RM_FB_IDENTITY_MODE=off` 保留原生 RM framebuffer tuple。其 1Q name-only
+宿主侧运行 4 分钟无上述错误，但该轮未读 Device Manager。R535 成功不能外推到
+R580；2Q 和 1Q+2Q 也必须重新做 Guest 验收。
 
 ### C.3 容量与隔离
 
 16GB/32GB 仍分别使用完整 16384/32768MB，不扣固定余量；并发上限必须以实际
-QEMU/Windows 启动验收为准。V100 与 RTX 2080 的 driver 资产、VMate 修复分支和
-宿主策略保持独立。两条路径都禁止 testsigning、nointegritychecks、BCD 修改、
-测试签名或自签名 Windows 内核驱动。
+QEMU/Windows 启动验收为准。V100 R535/R580 与 RTX 2080 的驱动资产由分支检测器
+分别维护，VMate 不做在线跨分支升级。所有路径都禁止 testsigning、
+nointegritychecks、BCD 修改、测试签名或自签名 Windows 内核驱动。
 
-完整流程见 `G11-V100-VGPU19.5-FRESH-INSTALL.md` 和 `V100-ADAPTATION.md`。
+完整流程见 `G11-V100-R535-VGPU16.4-FRESH-INSTALL.md`、
+`G11-V100-VGPU19.5-FRESH-INSTALL.md` 和 `V100-ADAPTATION.md`。

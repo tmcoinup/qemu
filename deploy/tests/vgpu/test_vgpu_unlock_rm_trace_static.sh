@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # G-11 host RM trace must stay opt-in, bounded, metadata-only, and reproducible.
+# shellcheck disable=SC2016 # grep patterns intentionally contain literal shell variables.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -7,16 +8,47 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
 SETUP="$REPO_ROOT/deploy/host/setup-vgpu-unlock.sh"
 PATCH="$REPO_ROOT/deploy/host/patches/vgpu-unlock-rs-g11.patch"
 R580_PATCH="$REPO_ROOT/deploy/host/patches/vgpu-unlock-rs-g11-r580.diff"
+R535_HOST_INSTALLER="$REPO_ROOT/deploy/host/install-v100-r535-host.sh"
+R535_LINUX68_PATCHER="$REPO_ROOT/deploy/host/patch-nvidia-vgpu-r535-linux68.py"
 
 fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
 
-bash -n "$SETUP"
+bash -n "$SETUP" "$R535_HOST_INSTALLER"
 [[ -s "$PATCH" && ! -L "$PATCH" ]] || fail 'G-11 vgpu_unlock patch is missing or unsafe'
 [[ -s "$R580_PATCH" && ! -L "$R580_PATCH" ]] ||
     fail 'G-11 R580 vGPU unlock patch is missing or unsafe'
+[[ -x "$R535_HOST_INSTALLER" && ! -L "$R535_HOST_INSTALLER" ]] ||
+    fail 'V100/R535 host installer is missing or unsafe'
+[[ -x "$R535_LINUX68_PATCHER" && ! -L "$R535_LINUX68_PATCHER" ]] ||
+    fail 'V100/R535 Linux 6.8 patcher is missing or unsafe'
+python3 "$R535_LINUX68_PATCHER" --help >/dev/null
+
+for required in \
+        'DRIVER_VERSION=535.161.05' \
+        'DRIVER_SHA256=2786430d32b6894f360ce0c249b29f849ae963c186840547151ed00d0feaebb9' \
+        'secure_boot_disabled' \
+        'DKMS_NO_SIGN_FILE=/run/vmate-dkms-module-signing-disabled' \
+        'require_unsigned_module "$kernel" nvidia-vgpu-vfio' \
+        '不会卸载运行中的驱动' \
+        '不会自动跨分支覆盖'; do
+    grep -Fq -- "$required" "$R535_HOST_INSTALLER" ||
+        fail "V100/R535 host installer omits: $required"
+done
+for required in \
+        'PRISTINE_SHA256' \
+        'PATCHED_SHA256' \
+        'vfio_device_ops_has_detach_ioas' \
+        'eventfd_signal_has_counter_arg' \
+        'bus_type_has_iommu_ops' \
+        'MODULE_IMPORT_NS(IOMMUFD)' \
+        'actual != PRISTINE_SHA256' \
+        'final != PATCHED_SHA256'; do
+    grep -Fq -- "$required" "$R535_LINUX68_PATCHER" ||
+        fail "V100/R535 Linux 6.8 patcher omits: $required"
+done
 
 grep -Fq '71ec870d4b456c9a8013c114a57372b1a60d36ca' "$SETUP" ||
     fail 'vgpu_unlock build is not pinned to the audited upstream commit'

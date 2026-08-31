@@ -1,7 +1,9 @@
 # G-11 vGPU 宿主策略快速教程
 
-本页只负责生成/切换宿主 framebuffer 策略。V100 的驱动、Hook、依赖、Windows 安装
-和回退请直接使用
+本页只负责生成/切换宿主 framebuffer 策略。V100 全 1Q 的驱动、Hook、依赖和
+Windows 安装使用
+[`G11-V100-R535-VGPU16.4-FRESH-INSTALL.md`](G11-V100-R535-VGPU16.4-FRESH-INSTALL.md)；
+R580 mixed 实验使用
 [`G11-V100-VGPU19.5-FRESH-INSTALL.md`](G11-V100-VGPU19.5-FRESH-INSTALL.md)。
 
 ## 先区分两条分支
@@ -9,10 +11,11 @@
 | 物理卡 | host/guest | framebuffer 策略 |
 |---|---|---|
 | RTX 2080/2080 Ti | R535 / GRID 538.33 | `equal`；整卡统一 1GB 或 2GB |
-| Tesla V100 | vGPU 19.5 `580.159.01` / `582.53` | 默认 `mixed`；1Q/2Q 可混搭 |
+| Tesla V100，推荐 | vGPU 16.4 `535.161.05` / `538.33` | `equal + 1024`；整卡只用 1Q |
+| Tesla V100，可选 | vGPU 19.5 `580.159.01` / `582.53` | `mixed` capability；生产 RM tuple 保持原生 |
 
-V100 不再支持旧 vGPU 19.0 部署入口。两条路径共享生命周期代码，但驱动资产和
-宿主修复合同独立。
+V100 不再使用旧 vGPU 19.0 部署入口。R535 与 R580 共享生命周期代码，但驱动资产、
+Hook ABI、Guest Driver 和宿主修复合同独立；VMate 不做在线跨分支升级。
 
 任何切档前都必须正常关闭目标 GPU 上全部 VM，并确认没有活动 mdev：
 
@@ -48,7 +51,31 @@ cd /home/ubuntu/projects/qemu
 这正是最初“1024MB 与宿主固定 2048MB 冲突”的原因。需切档时，停完该卡上全部
 VM/mdev 后重跑并加 `--force`。
 
-## 3. V100/vGPU 19.5：默认允许 1Q/2Q
+## 3A. V100/vGPU 16.4：推荐全 1Q
+
+已测 SXM2 16GB：
+
+```bash
+./deploy/configure-g11-vgpu-host.sh \
+  --preset v100-sxm2-16gb \
+  --fb-mode equal --tier 1024 \
+  --gpu 0000:81:00.0 --force
+```
+
+生成的关键合同为：
+
+```text
+VGPU_HOST_FB_MODE=equal
+VGPU_HOST_FB_TIER_MB=1024
+VGPU_RESOURCE_PROFILE=V100X-1Q
+VGPU_RESOURCE_FB_MB=1024
+VGPU_RM_FB_IDENTITY_MODE=required
+```
+
+R535/16.4 不运行 mixed-mode helper，也不创建 2Q。实机已经确认 RAM_TYPE、位宽 Hook、
+Windows Code 0/WHCP、1024MiB 和约 9 分钟无 XID/TDR/PTE/display-copy timeout。
+
+## 3B. V100/vGPU 19.5：可选 1Q/2Q capability
 
 已测 SXM2 16GB：
 
@@ -84,13 +111,14 @@ mixed 策略只有在精确 `580.159.01`、V100 capability=`Supported` 且 mode=
 sudo /usr/local/libexec/qemu-vgpu-mixed-mode status 0000:81:00.0
 ```
 
-业务全部使用 1Q 时，保持上述 mixed 策略并在每次创建时指定 1024 即可：
+R580 业务只用 1Q 时，也可以保持上述 mixed 策略并在每次创建时指定 1024：
 
 ```bash
 ./deploy/scripts/vmctl.sh create 8 --gpu-vram 1024
 ```
 
-如果希望策略层也禁止 2Q，则在全部 VM/mdev 停止后生成 equal 1Q：
+如果希望策略层也禁止 2Q，则在全部 VM/mdev 停止后生成 equal 1Q；不过当前全 1Q
+生产更推荐前一节已完成 Guest 验收的 R535/16.4：
 
 ```bash
 ./deploy/configure-g11-vgpu-host.sh \
@@ -108,7 +136,14 @@ bash -n deploy/host/vgpu-host.conf
 sed -n '1,80p' deploy/host/vgpu-host.conf
 ```
 
-V100 mixed 可分别 probe：
+V100/R535 1Q 只需 probe 实际 1Q profile：
+
+```bash
+deploy/host/probe-vgpu-host.sh \
+  --config deploy/host/vgpu-host.conf --profile V100X-1Q
+```
+
+V100/R580 mixed 才分别 probe：
 
 ```bash
 deploy/host/probe-vgpu-host.sh \
@@ -128,7 +163,7 @@ V100 1Q：
 ./deploy/scripts/vmctl.sh create 1 --gpu-vram 1024
 ```
 
-V100 2Q：
+V100 2Q（只属于已通过实时 capability/mode 门禁的 R580 分支）：
 
 ```bash
 ./deploy/scripts/vmctl.sh create 2 --gpu-vram 2048
@@ -140,28 +175,29 @@ V100 2Q：
 ./deploy/scripts/clone-from-base.sh win10-base 1 --gpu-vram 1024 --start
 ```
 
-若宿主策略为 RTX/equal 2048，申请 1024 会明确拒绝；若 V100/mixed 的 live mode
-关闭，1Q/2Q 混搭也会在写 sysfs 前拒绝。
+若宿主策略为 equal 2048，申请 1024 会明确拒绝；V100/R535 equal 1024 申请 2Q
+同样会拒绝。若 V100/R580 mixed 的 live mode 关闭，1Q/2Q 混搭会在写 sysfs 前拒绝。
 
 ## 6. V100 身份字段说明
 
-- 1Q/2Q：mdev profile 仍决定 1024/2048MB 配额，名称/FHD 可按 G-11 profile
+- mdev profile 决定 1Q/1024MB 或 2Q/2048MB 配额，名称/FHD 可按 G-11 profile
   投影；
-- R580/V100 生产默认 `VGPU_RM_FB_IDENTITY_MODE=off`，RAM_TYPE、显存厂商和
-  位宽全部保留 NVIDIA 原生值；
-- `V100X-1Q` + 582.53 已完成 4 分钟宿主稳定性和正常关机回收验证，未出现
-  PTE/TDR/XID 43/driver unload；该轮未读取 guest Device Manager，不能写成已验证
-  Code 0；
-- 2Q 和 1Q+2Q 在 name-only 策略下仍需单独做正式 guest 验收。
+- R535/V100 全 1Q 使用 `VGPU_RM_FB_IDENTITY_MODE=required`。实机日志确认
+  `RAM_TYPE 15 -> 8`、位宽 `4096 -> 128`，538.33 Code 0/WHCP，约 9 分钟没有
+  PTE/TDR/XID 43/display-copy timeout；显存厂家因 Manager 未查询仍是未证明字段；
+- R580/V100 生产默认 `VGPU_RM_FB_IDENTITY_MODE=off`，RAM_TYPE、显存厂家和位宽
+  保留 NVIDIA 原生值；`V100X-1Q` + 582.53 的 name-only 运行 4 分钟无
+  PTE/TDR/XID/unload，但该轮未读取 Device Manager；
+- R535 的 2Q，以及 R580 name-only 的 2Q/1Q+2Q 都必须另做正式 Guest 验收。
 
-完整消费卡 RM tuple 在 1Q 上会重复触发故障，不能通过测试签名驱动、关闭完整性
-校验或修改 BCD 绕过该稳定性保护。
+R580 完整消费卡 RM tuple 在 1Q 上会重复触发故障；R535 的成功不能无条件外推给
+R580。两条分支都不能通过测试签名驱动、关闭完整性校验或修改 BCD 绕过稳定性门禁。
 
 ## 7. 切换失败时
 
 1. `vmctl.sh status ID` 检查仍运行的 VM；
 2. 检查 `/sys/bus/mdev/devices`；
-3. V100 运行 mixed helper 的 `status`；
+3. 只有 V100/R580 才运行 mixed helper 的 `status`；R535 应确认 equal/1024；
 4. 确认 host config 指向实际文件且不是符号链接；
 5. 所有实例停止后，才可用同一 preset/BDF 加 `--force` 原子替换。
 

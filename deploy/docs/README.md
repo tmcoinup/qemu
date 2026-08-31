@@ -63,9 +63,10 @@ host mdev resource、guest marketing identity、driver binding、license 和 FRL
 | 备份、迁移和恢复每 VM bundle | [STORAGE-LAYOUT.md](STORAGE-LAYOUT.md) |
 | 可选的 Linux 宿主 NVMe APST 检查、持久化与回滚 | [NVME-APST.md](NVME-APST.md) |
 | G-11 硬件池事实复核、已采纳整改与未验证容量边界 | [G11-HARDWARE-POOL-ASSESSMENT.md](G11-HARDWARE-POOL-ASSESSMENT.md) |
-| RTX 2080 equal 与 V100/vGPU 19.5 mixed 宿主策略快速配置 | [G11-VGPU-HOST-QUICKSTART.md](G11-VGPU-HOST-QUICKSTART.md) |
-| 空白 Ubuntu 安装 V100 19.5、依赖、Hook、VM 与回退 | [G11-V100-VGPU19.5-FRESH-INSTALL.md](G11-V100-VGPU19.5-FRESH-INSTALL.md) |
-| Tesla V100 19.5 实机结论、RAM_TYPE 与混搭边界 | [V100-ADAPTATION.md](V100-ADAPTATION.md) |
+| RTX 2080 与 V100 的 R535/equal、R580/mixed 宿主策略快速配置 | [G11-VGPU-HOST-QUICKSTART.md](G11-VGPU-HOST-QUICKSTART.md) |
+| 推荐：空白 Ubuntu 安装 V100 vGPU 16.4/R535 全 1Q、Hook、VM 与验收 | [G11-V100-R535-VGPU16.4-FRESH-INSTALL.md](G11-V100-R535-VGPU16.4-FRESH-INSTALL.md) |
+| 可选：空白 Ubuntu 安装 V100 19.5/R580 name-only 与 mixed 能力 | [G11-V100-VGPU19.5-FRESH-INSTALL.md](G11-V100-VGPU19.5-FRESH-INSTALL.md) |
+| Tesla V100 R535/R580 实机结论、RAM_TYPE、XID/TDR 与混搭边界 | [V100-ADAPTATION.md](V100-ADAPTATION.md) |
 | 排查 QEMU、mdev、TPM 和 guest | [DEBUG.md](DEBUG.md) |
 
 仓库级概览和完整命令表见 [`../README.md`](../README.md) 与

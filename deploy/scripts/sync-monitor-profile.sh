@@ -8,6 +8,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$here/lib/monitor-profiles.sh"
 # shellcheck source=lib/vm-storage.sh
 source "$here/lib/vm-storage.sh"
+# shellcheck source=lib/vgpu-host-config.sh
+source "$here/lib/vgpu-host-config.sh"
 # shellcheck source=lib/signed-consumer-catalog.sh
 source "$here/lib/signed-consumer-catalog.sh"
 monitor_profiles_validate
@@ -75,6 +77,41 @@ source "$CONF"
 old_profile=${MONITOR_PROFILE:-}
 old_serial=${MONITOR_SERIAL:-}
 
+# nvidia-256 is used by both the RTX6000-1Q unlock path and the native
+# V100X-1Q/R535 path, but Windows exposes different production PnP IDs for
+# them.  The safe driver-install wrapper exports the root-managed host policy
+# path.  Read only its reviewed resource selector in a subshell so the host
+# assignments cannot overwrite this VM's persisted identity fields.
+HOST_RESOURCE_PROFILE=""
+if [[ -n "${VGPU_HOST_CONFIG:-}" ]]; then
+    HOST_RESOURCE_PROFILE=$(
+        (
+            vgpu_host_config_load "$VGPU_HOST_CONFIG" '[monitor-sync]' \
+                VGPU_HOST_FB_MODE VGPU_RESOURCE_PROFILE \
+                VGPU_RESOURCE_PROFILE_1024 VGPU_RESOURCE_PROFILE_2048 || exit
+            case "${VGPU_HOST_FB_MODE:-equal}" in
+                equal)
+                    printf '%s\n' "${VGPU_RESOURCE_PROFILE:-}"
+                    ;;
+                mixed)
+                    case "${VGPU_FB_MB:-}" in
+                        1024) printf '%s\n' "${VGPU_RESOURCE_PROFILE_1024:-}" ;;
+                        2048) printf '%s\n' "${VGPU_RESOURCE_PROFILE_2048:-}" ;;
+                        *)
+                            echo '[monitor-sync] mixed host 无法按 VM framebuffer 选择 resource profile' >&2
+                            exit 2
+                            ;;
+                    esac
+                    ;;
+                *)
+                    echo '[monitor-sync] VGPU_HOST_FB_MODE 必须是 equal 或 mixed' >&2
+                    exit 2
+                    ;;
+            esac
+        )
+    ) || exit
+fi
+
 # NV_Modes 迁移只适用于已审核的生产签名 GRID 538.33 包。这些值
 # 通过显式参数传给 sudo helper，既不依赖 sudo 保留环境变量，也不
 # 允许其他版本因 NV_Modes 文本相同而被误判。
@@ -82,7 +119,7 @@ GRID_53833_DRIVER_VERSION=31.0.15.3833
 GRID_53833_INF_SHA256=67a240e1d464cf97dabfec1a7cecf000eaa9ddfd702f32ba2c8771f17905dc2b
 GRID_53833_CATALOG_SHA256=56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f
 GRID_53833_PNP_ID=$(vgpu_profile_native_grid_pnp_id \
-    "${VGPU_MDEV_PROFILE:-}") || {
+    "${VGPU_MDEV_PROFILE:-}" "$HOST_RESOURCE_PROFILE") || {
     echo "[monitor-sync] GPU resource 没有审核过的 B/native PnP 映射" >&2
     exit 1
 }

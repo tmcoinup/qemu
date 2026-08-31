@@ -56,6 +56,10 @@ grep -F -- 'vgpu_profile_native_grid_pnp_id' "$SYNC" >/dev/null ||
     fail "monitor sync does not map nvidia-256/257 to the native 1Q/2Q PnP ID"
 grep -F -- "\${VGPU_MDEV_PROFILE:-}" "$SYNC" >/dev/null ||
     fail "monitor sync native PnP mapping is not selected from the VM profile"
+grep -F -- 'vgpu_host_config_load "$VGPU_HOST_CONFIG"' "$SYNC" >/dev/null ||
+    fail "monitor sync does not safely load the managed host resource profile"
+grep -F -- '"${VGPU_MDEV_PROFILE:-}" "$HOST_RESOURCE_PROFILE"' "$SYNC" >/dev/null ||
+    fail "monitor sync does not disambiguate RTX6000-1Q from V100X-1Q"
 
 if grep -E 'host-edid-sync-v(3|4|5|6|7|8)([^0-9]|$)' "$SYNC" >/dev/null; then
     fail "legacy v3..v8 marker generation remains"

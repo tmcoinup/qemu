@@ -182,19 +182,26 @@ VGPU_MEMORY_MAKER_CATALOG=(
 # The unmodified GRID 538.33 package exposes a different native subsystem for
 # the two reviewed RTX6000 resource sizes.  B/name-only keeps that transport
 # identity intact: nvidia-256 is RTX6000-1Q (1325), while nvidia-257 is
-# RTX6000-2Q (1326).  Keep this mapping beside the canonical GPU/mdev catalog
-# so monitor/cache callers cannot silently assume every profile is 2Q.
+# RTX6000-2Q (1326).  The independently reviewed V100/R535 1Q path keeps its
+# physical V100 transport (1DB1/125A) even though its host mdev alias is also
+# nvidia-256.  Accept an optional exact host resource name to disambiguate it;
+# unverified V100 2Q identities remain fail-closed.
 vgpu_profile_native_grid_pnp_id() {
-    case "$1" in
-        nvidia-256)
+    local mdev_profile=$1 resource_profile=${2:-}
+
+    case "$mdev_profile|$resource_profile" in
+        'nvidia-256|V100X-1Q')
+            printf '%s\n' 'PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE'
+            ;;
+        'nvidia-256|'|'nvidia-256|nvidia-256')
             printf '%s\n' 'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE'
             ;;
-        nvidia-257)
+        'nvidia-257|'|'nvidia-257|nvidia-257')
             printf '%s\n' 'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE'
             ;;
         *)
-            printf 'vGPU B/native transport 没有受支持的 mdev/PnP 映射: %s\n' \
-                "$1" >&2
+            printf 'vGPU B/native transport 没有受支持的 mdev/resource/PnP 映射: %s/%s\n' \
+                "$mdev_profile" "${resource_profile:-default}" >&2
             return 1
             ;;
     esac

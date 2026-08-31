@@ -122,6 +122,11 @@ Modules Installer 占用 WinRM 的冷启动。复检会按真实的单反斜杠 
 若 Windows 忙导致 WSMan 客户端重连，AutoLogon、临时文件和策略键清理均按幂等
 操作处理；上一条远程命令延迟完成时，不会因重复删除同一注册表值而误判驱动失败。
 
+V100/R535 的已验证 1Q 组合虽然也使用 `nvidia-256` host alias，但 Guest 的正式
+签名 transport 是 `PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE`，不是 RTX6000-1Q
+的 `1E30/1325`。离线同步从 VMate 托管 host policy 中读取精确 `V100X-1Q`
+进行区分；V100X-2Q 尚未完成同版本实测，继续拒绝推断。
+
 `install-vgpu-driver.sh` 现在是上述封装内部的第二阶段，也会从实际 `/proc` QEMU
 参数验证安全拓扑；在普通 `display=on` VM 中直接调用会在任何 guest 写入前拒绝。
 普通启动若发现 Windows 没有认证 GRID，或虽有驱动但尚未生成显示器缓存，也会停止

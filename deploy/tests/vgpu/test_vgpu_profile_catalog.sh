@@ -38,6 +38,12 @@ assert_eq 'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE' \
 assert_eq 'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE' \
     "$(vgpu_profile_native_grid_pnp_id nvidia-257)" \
     'nvidia-257 native GRID PnP mapping'
+assert_eq 'PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE' \
+    "$(vgpu_profile_native_grid_pnp_id nvidia-256 V100X-1Q)" \
+    'V100X-1Q R535 native GRID PnP mapping'
+if vgpu_profile_native_grid_pnp_id nvidia-257 V100X-2Q >/dev/null 2>&1; then
+    fail 'unverified V100X-2Q received an R535 native GRID PnP mapping'
+fi
 if vgpu_profile_native_grid_pnp_id nvidia-999 >/dev/null 2>&1; then
     fail 'unknown mdev profile received a native GRID PnP mapping'
 fi

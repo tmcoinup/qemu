@@ -183,6 +183,7 @@ for required in (
     "EXPECTED_NVIDIA_PNP_ID",
     r"PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE",
     r"PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE",
+    r"PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE",
     "expected_enum_prefix",
     "legacy/非当前 B-native NVIDIA PnP 残留",
     "ProviderName",

@@ -147,7 +147,8 @@ case "$DRIVER_POLICY" in
             die "GRID 538.33 monitor policy tuple 不在审核目录"
         case "${EXPECTED_NVIDIA_PNP_ID^^}" in
             'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE'|\
-            'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE') ;;
+            'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE'|\
+            'PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE') ;;
             *) die "GRID 538.33 B/native PnP 不在 1Q/2Q 审核目录" ;;
         esac
         NVIDIA_MODE_POLICY_KIND=locked-grid
@@ -550,6 +551,9 @@ allowed_driver_policies = {
         (GRID_53833_DRIVER_VERSION, GRID_53833_INF_SHA256,
          '56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f',
          r'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE', 'locked-grid'),
+        (GRID_53833_DRIVER_VERSION, GRID_53833_INF_SHA256,
+         '56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f',
+         r'PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE', 'locked-grid'),
     },
     'nvidia-53758-dch-whql-gtx1050-dell': {(
         '31.0.15.3758',

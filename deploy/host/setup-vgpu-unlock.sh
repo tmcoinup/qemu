@@ -144,12 +144,14 @@ setup_exit() {
     exit "$status"
 }
 
-# 优先复用 /opt/vgpu_unlock-rs (若已 chown 到本用户可写)，否则落到 $HOME/src
+# 优先复用 /opt/vgpu_unlock-rs（仅当构建用户确实可写），否则落到构建用户 HOME。
+# 脚本可能由 root 入口代普通用户执行；这里不能使用入口进程的 $HOME（通常为
+# /root），否则后续 build_run 会以普通用户在 /root 下创建目录并必然失败。
 if [[ -z "${BUILD_DIR:-}" ]]; then
-    if [[ -d /opt/vgpu_unlock-rs && -w /opt/vgpu_unlock-rs ]]; then
+    if [[ -d /opt/vgpu_unlock-rs ]] && build_run test -w /opt/vgpu_unlock-rs; then
         BUILD_DIR=/opt/vgpu_unlock-rs
     else
-        BUILD_DIR=$HOME/src/vgpu_unlock-rs
+        BUILD_DIR=$BUILD_HOME/src/vgpu_unlock-rs
     fi
 fi
 

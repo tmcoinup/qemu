@@ -52,6 +52,10 @@ done
 
 grep -Fq '71ec870d4b456c9a8013c114a57372b1a60d36ca' "$SETUP" ||
     fail 'vgpu_unlock build is not pinned to the audited upstream commit'
+grep -Fq 'build_run test -w /opt/vgpu_unlock-rs' "$SETUP" ||
+    fail 'managed /opt source reuse is not checked as the unprivileged build user'
+grep -Fq 'BUILD_DIR=$BUILD_HOME/src/vgpu_unlock-rs' "$SETUP" ||
+    fail 'root-invoked repair can still leak the Hook source path into /root'
 grep -Fq 'cargo fmt -- --check && cargo test && cargo build --release' "$SETUP" ||
     fail 'installer does not test the patched library before installation'
 grep -Fq 'source_tree_has_only_reviewed_paths' "$SETUP" ||

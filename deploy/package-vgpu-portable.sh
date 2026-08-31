@@ -17,6 +17,8 @@ source "$here/lib/vm-storage.sh"
 source "$here/lib/vgpu-profiles.sh"
 # shellcheck source=lib/gpuz-assets.sh
 source "$here/lib/gpuz-assets.sh"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
 
 usage() {
     cat <<'EOF'
@@ -136,6 +138,17 @@ for dependency in jq sha256sum awk stat find realpath mktemp install flock \
     command -v "$dependency" >/dev/null 2>&1 \
         || die "missing host dependency: $dependency"
 done
+vgpu_select_driver_stack \
+    || die "could not select the reviewed host/guest driver pair"
+case "$VGPU_SELECTED_DRIVER_BRANCH" in
+    R535|R570) ;;
+    *)
+        die "$VGPU_SELECTED_DRIVER_BRANCH does not have a validated B/native portable identity contract"
+        ;;
+esac
+PORTABLE_DRIVER_BRANCH=$VGPU_SELECTED_DRIVER_BRANCH
+PORTABLE_DRIVER_VERSION=$VGPU_SELECTED_DRIVER_VERSION
+PORTABLE_DRIVER_LABEL=$VGPU_SELECTED_DRIVER_LABEL
 vgpu_profile_validate_catalog ||
     die "GPU identity catalog validation failed"
 "$here/guest/generate-vgpu-profile-catalog.sh" --check ||
@@ -243,9 +256,13 @@ validate_existing_exe() {
             --arg exeSha256 "$hash" \
             --argjson exeBytes "$bytes" \
             --arg tokenSha256 "$TOKEN_SHA256" \
-            --argjson tokenBytes "$TOKEN_BYTES" '
+            --argjson tokenBytes "$TOKEN_BYTES" \
+            --arg driverBranch "$PORTABLE_DRIVER_BRANCH" \
+            --arg driverVersion "$PORTABLE_DRIVER_VERSION" '
             .bindingMode == "portable-auto" and
             .catalogSha256 == $catalogSha256 and
+            .driverBranch == $driverBranch and
+            .driverVersion == $driverVersion and
             .gpuZDelivery == "optional-explicit-sibling" and
             .licenseTokenDelivery == "embedded-private" and
             .licenseTokenSha256 == $tokenSha256 and
@@ -270,10 +287,22 @@ validate_existing_exe() {
                     "licenseTokenBytes", "licenseTokenDelivery",
                     "licenseTokenSha256", "schemaVersion"
                 ] and
-                 .schemaVersion == 7 and
+                .schemaVersion == 7 and
                  .guestPerformance == "embedded-recommended-native-v1" and
                  .launcherFormat ==
                     "QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7")
+                or
+                ((keys | sort) == [
+                    "bindingMode", "bundleManifestSha256", "catalogSha256",
+                    "driverBranch", "driverVersion", "exeBytes", "exeSha256",
+                    "gpuZDelivery", "guestPerformance", "launcherFormat",
+                    "licenseTokenBytes", "licenseTokenDelivery",
+                    "licenseTokenSha256", "schemaVersion"
+                ] and
+                 .schemaVersion == 8 and
+                 .guestPerformance == "embedded-recommended-native-v1" and
+                 .launcherFormat ==
+                    "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8")
             )
         ' "$receipt" >/dev/null || {
             ((REPLACE_LICENSED)) && return 1
@@ -283,9 +312,13 @@ validate_existing_exe() {
         jq -e \
             --arg catalogSha256 "$CATALOG_SHA256" \
             --arg exeSha256 "$hash" \
-            --argjson exeBytes "$bytes" '
+            --argjson exeBytes "$bytes" \
+            --arg driverBranch "$PORTABLE_DRIVER_BRANCH" \
+            --arg driverVersion "$PORTABLE_DRIVER_VERSION" '
         .bindingMode == "portable-auto" and
         .catalogSha256 == $catalogSha256 and
+        .driverBranch == $driverBranch and
+        .driverVersion == $driverVersion and
         .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
         (.bundleManifestSha256 | test("^[0-9A-F]{64}$")) and
         (
@@ -332,6 +365,17 @@ validate_existing_exe() {
              .gpuZDelivery == "optional-explicit-sibling" and
              .guestPerformance == "embedded-recommended-native-v1" and
              .launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6")
+            or
+            ((keys | sort) == [
+                "bindingMode", "bundleManifestSha256", "catalogSha256",
+                "driverBranch", "driverVersion", "exeBytes", "exeSha256",
+                "gpuZDelivery", "guestPerformance", "launcherFormat",
+                "schemaVersion"
+            ] and
+             .schemaVersion == 7 and
+             .gpuZDelivery == "optional-explicit-sibling" and
+             .guestPerformance == "embedded-recommended-native-v1" and
+             .launcherFormat == "QEMU_VGPU_PORTABLE_BRANCH_V7")
         )
         ' "$receipt" >/dev/null || {
             ((REPLACE_PUBLIC)) && return 1
@@ -405,9 +449,11 @@ if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
         validate_existing_bundle_authenticity
         jq -e --arg catalogSha256 "$CATALOG_SHA256" \
             --arg tokenSha256 "$TOKEN_SHA256" \
-            --argjson tokenBytes "$TOKEN_BYTES" '
+            --argjson tokenBytes "$TOKEN_BYTES" \
+            --arg driverVersion "$PORTABLE_DRIVER_VERSION" '
             .schemaVersion == 7 and .bindingMode == "portable-auto" and
             .catalogSha256 == $catalogSha256 and
+            .expectedDriverVersion == $driverVersion and
             .licenseToken.name == "client_configuration_token.tok" and
             .licenseToken.sha256 == $tokenSha256 and
             .licenseToken.bytes == $tokenBytes and
@@ -419,11 +465,13 @@ if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
             REPLACEMENT_KIND=licensed
         }
     else
-        if ! jq -e --arg catalogSha256 "$CATALOG_SHA256" '
+        if ! jq -e --arg catalogSha256 "$CATALOG_SHA256" \
+                --arg driverVersion "$PORTABLE_DRIVER_VERSION" '
             (.schemaVersion == 3 or .schemaVersion == 4 or
              .schemaVersion == 5 or .schemaVersion == 6) and
             .bindingMode == "portable-auto" and
-            .catalogSha256 == $catalogSha256
+            .catalogSha256 == $catalogSha256 and
+            .expectedDriverVersion == $driverVersion
         ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1; then
             ((REPLACE_PUBLIC)) ||
                 die "existing expanded bundle is not the current owned portable catalog (rerun with --replace-public)"
@@ -604,7 +652,7 @@ jq -n \
     --arg spoofMode B \
     --arg catalogSha256 "$CATALOG_SHA256" \
     --arg expectedPnpId 'PCI\VEN_10DE&DEV_1E30' \
-    --arg expectedDriverVersion 31.0.15.3833 \
+    --arg expectedDriverVersion "$PORTABLE_DRIVER_VERSION" \
     --argjson profiles "$profiles_json" \
     --arg catalogName vgpu-profile-catalog.json \
     --arg catalogAssetSha256 "$CATALOG_ASSET_SHA256" \
@@ -705,11 +753,11 @@ bash "$here/guest/gpuz-launcher/build.sh" \
 EXE_SHA256=$(sha256_upper "$SINGLE_EXE")
 EXE_BYTES=$(stat -c %s -- "$SINGLE_EXE")
 RECEIPT_TEMP="$WORK_ROOT/$EXE_SHA256.json"
-RECEIPT_SCHEMA=6
-LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_UNIFIED_V6
+RECEIPT_SCHEMA=7
+LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_BRANCH_V7
 if ((WITH_LICENSE_TOKEN)); then
-    RECEIPT_SCHEMA=7
-    LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7
+    RECEIPT_SCHEMA=8
+    LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8
 fi
 jq -n \
     --argjson schemaVersion "$RECEIPT_SCHEMA" \
@@ -718,6 +766,8 @@ jq -n \
     --arg gpuZDelivery optional-explicit-sibling \
     --arg guestPerformance embedded-recommended-native-v1 \
     --arg launcherFormat "$LAUNCHER_FORMAT" \
+    --arg driverBranch "$PORTABLE_DRIVER_BRANCH" \
+    --arg driverVersion "$PORTABLE_DRIVER_VERSION" \
     --arg exeSha256 "$EXE_SHA256" \
     --argjson exeBytes "$EXE_BYTES" \
     --arg bundleManifestSha256 "$MANIFEST_SHA256" \
@@ -731,6 +781,8 @@ jq -n \
         gpuZDelivery: $gpuZDelivery,
         guestPerformance: $guestPerformance,
         launcherFormat: $launcherFormat,
+        driverBranch: $driverBranch,
+        driverVersion: $driverVersion,
         exeSha256: $exeSha256,
         exeBytes: $exeBytes,
         bundleManifestSha256: $bundleManifestSha256
@@ -790,6 +842,7 @@ cat <<EOF
   binding:     portable-auto (no VM ID, no VM UUID)
   profiles:    $(vgpu_profile_keys | paste -sd, -)
   catalog:     ${CATALOG_SHA256}
+  driver:      ${PORTABLE_DRIVER_BRANCH} / ${PORTABLE_DRIVER_LABEL} / ${PORTABLE_DRIVER_VERSION}
   launcher:    $(if ((WITH_LICENSE_TOKEN)); then printf '%s' '1.7.0.0 / private identity + DLS + guest performance'; else printf '%s' '1.6.0.0 / identity + guest performance'; fi)
   bundle:      ${OUTPUT_DIR}
   single EXE:  ${OUTPUT_EXE}

@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# G-11 RTX 2080 host vGPU branch switcher: R535 <-> R570, plus R580 staging lab.
+# G-11 host vGPU branch switcher.
+#
+# RTX 2080 keeps the reviewed R535 <-> R570 path plus R580 staging.  The
+# validated Tesla V100 SXM2 16GB path is deliberately narrower: R535 equal
+# 1Q <-> vGPU 18.4/R570 mixed 1Q+2Q.  Hardware-specific Hook and framebuffer
+# policies are selected here rather than left to operator environment values.
 #
 # The R535 seed is host-local because it contains NVIDIA proprietary files and
 # kernel-specific, locally adapted modules.  Nothing from that seed belongs in
@@ -21,6 +26,7 @@ readonly R535_DEB_SHA256=2786430d32b6894f360ce0c249b29f849ae963c186840547151ed00
 readonly R570_DEB_SHA256=37e13ef147fe97f77be44736fb4b9996f67355c1f19ef3da7be48a9a4af34fe9
 readonly R580_DEB_SHA256=033d2aec703ea366f35cade25207ab30a279b8076eb7382daa31e9649bf3f246
 readonly RTX2080_VENDOR_DEVICE=10de:1e82
+readonly V100_SXM2_16GB_VENDOR_DEVICE=10de:1db1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -44,6 +50,9 @@ readonly CACHED_R580_DEB="$PACKAGE_CACHE/nvidia-vgpu-ubuntu-580_580.159.01_amd64
 readonly DKMS_NO_SIGN_FILE=/run/vmate-dkms-module-signing-disabled
 readonly POSTBOOT_HELPER_SOURCE="$SCRIPT_DIR/verify-g11-vgpu-branch-postboot.sh"
 readonly POSTBOOT_UNIT_SOURCE="$SCRIPT_DIR/vmate-g11-vgpu-branch-verify.service"
+readonly V100_R535_INSTALLER="$SCRIPT_DIR/install-v100-r535-host.sh"
+readonly HOST_CONFIGURATOR="$SCRIPT_DIR/../configure-g11-vgpu-host.sh"
+readonly MIXED_MODE_INSTALLER="$SCRIPT_DIR/install-vgpu-mixed-mode.sh"
 readonly POSTBOOT_HELPER=/usr/local/libexec/vmate-g11-vgpu-branch-verify
 readonly POSTBOOT_UNIT=/etc/systemd/system/vmate-g11-vgpu-branch-verify.service
 readonly QEMU_GATE_DIR=/etc/systemd/system/qemu-vm-server.service.d
@@ -56,11 +65,16 @@ R580_DEB=
 NO_REBOOT=0
 FORCE=0
 GPU_BDF=
+GPU_KIND=
+GPU_VENDOR_DEVICE=
+GPU_LABEL=
+GPU_PRESET=
 KVER="$(uname -r)"
 TARGET_REQUEST=
 MUTATION_STARTED=0
 ROLLBACK_RUNNING=0
 REBOOT_REQUIRED=0
+GLOBAL_LOCK_HELD=0
 
 log() { printf '[g11-driver-switch] %s\n' "$*" >&2; }
 warn() { printf '[g11-driver-switch] WARN: %s\n' "$*" >&2; }
@@ -68,11 +82,12 @@ die() { printf '[g11-driver-switch] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-G-11 RTX 2080 vGPU 宿主驱动分支切换
+G-11 vGPU 宿主驱动分支切换（RTX 2080 / Tesla V100 SXM2 16GB）
 
 用法：
   switch-g11-vgpu-branch.sh status
   sudo switch-g11-vgpu-branch.sh init-r535 [--r535-deb FILE] [--r570-deb FILE] [--r580-deb FILE]
+  sudo switch-g11-vgpu-branch.sh bootstrap-v100-r535 [--r535-deb FILE] [--r570-deb FILE] [--no-reboot]
   sudo switch-g11-vgpu-branch.sh r570 [--r570-deb FILE] [--no-reboot]
   sudo switch-g11-vgpu-branch.sh r580-lab [--r580-deb FILE] [--no-reboot]
   sudo switch-g11-vgpu-branch.sh r535 [--r535-deb FILE] [--no-reboot]
@@ -81,11 +96,15 @@ G-11 RTX 2080 vGPU 宿主驱动分支切换
 命令：
   status      只读显示当前驱动、RM、包、Hook 和 R535 恢复种子状态。
   init-r535   在当前健康 R535 上建立内核绑定、root-only 的恢复种子。
-  r570        切到 vGPU 18.4/R570.172.07 闭源 RM + RTX capability Hook。
+  bootstrap-v100-r535
+              仅用于当前健康 R570/V100 且尚无 R535 种子的首次统一：安装
+              R535、发布 equal 1Q 策略、建立恢复种子并进入冷启动验收。
+  r570        切到 vGPU 18.4/R570.172.07 闭源 RM；RTX 使用 capability Hook，
+              V100 保持 native capability 并启用 mixed 1Q+2Q。
               切换后必须通过自动冷启动验收，才会解除 VM 启动门禁。
   r580-lab    切到 R580.159.01 闭源 RM + RTX capability Hook。
               只供 Guest 582.53 母盘预装/暂存；不能作为生产稳定性证明。
-  r535        恢复已验证的 R535.161.05 稳定生产分支。
+  r535        恢复已验证的 R535.161.05；RTX 稳定档、V100 默认全 1Q 档。
   doctor      输出只读诊断信息。
 
 选项：
@@ -100,6 +119,7 @@ G-11 RTX 2080 vGPU 宿主驱动分支切换
   * 不安装测试签名或自签名内核模块；Secure Boot 开启时直接拒绝。
   * 切换前必须正常关闭全部 QEMU VM，并释放全部 mdev。
   * R535 恢复种子只适用于创建它时的精确内核。
+  * V100 只允许 R535/equal-1Q 与 R570/mixed-1Q+2Q；不开放 R580。
 EOF
 }
 
@@ -132,7 +152,7 @@ parse_args() {
         esac
     done
     case "$COMMAND" in
-        status|init-r535|r535|r570|r580-lab|doctor) ;;
+        status|init-r535|bootstrap-v100-r535|r535|r570|r580-lab|doctor) ;;
         -h|--help|help) usage; exit 0 ;;
         *) usage >&2; die "未知命令：$COMMAND" ;;
     esac
@@ -162,6 +182,12 @@ require_commands() {
         die "冷启动验收器缺失或不安全：$POSTBOOT_HELPER_SOURCE"
     [[ -f "$POSTBOOT_UNIT_SOURCE" && ! -L "$POSTBOOT_UNIT_SOURCE" ]] || \
         die "冷启动验收 unit 缺失或不安全：$POSTBOOT_UNIT_SOURCE"
+    [[ -x "$V100_R535_INSTALLER" && ! -L "$V100_R535_INSTALLER" ]] || \
+        die "V100 R535 安装封装缺失或不安全：$V100_R535_INSTALLER"
+    [[ -x "$HOST_CONFIGURATOR" && ! -L "$HOST_CONFIGURATOR" ]] || \
+        die "宿主策略生成器缺失或不安全：$HOST_CONFIGURATOR"
+    [[ -x "$MIXED_MODE_INSTALLER" && ! -L "$MIXED_MODE_INSTALLER" ]] || \
+        die "V100 mixed-mode 封装缺失或不安全：$MIXED_MODE_INSTALLER"
 }
 
 secure_boot_must_be_disabled() {
@@ -182,7 +208,7 @@ secure_boot_must_be_disabled() {
     die 'Secure Boot 未确认关闭；脚本不会安装自签名模块或修改启动策略'
 }
 
-detect_rtx2080() {
+detect_supported_gpu() {
     local device_dir vendor device class bdf
     local -a matches=()
     for device_dir in /sys/bus/pci/devices/*; do
@@ -198,14 +224,49 @@ detect_rtx2080() {
     done
     ((${#matches[@]} == 1)) || {
         printf '检测到的 NVIDIA 显示设备：%s\n' "${matches[*]:-(none)}" >&2
-        die '该封装只验证了单 NVIDIA 显示 GPU 的本机 RTX 2080'
+        die '该封装要求恰好一张已审核的 NVIDIA RTX 2080 或 Tesla V100 显示设备'
     }
     GPU_BDF=${matches[0]%:*}
     local device_id=${matches[0]##*:}
-    [[ "10de:${device_id,,}" == "$RTX2080_VENDOR_DEVICE" ]] || {
-        lspci -Dnns "$GPU_BDF" >&2 || true
-        die "GPU 不是已验证的 $RTX2080_VENDOR_DEVICE RTX 2080"
-    }
+    GPU_VENDOR_DEVICE="10de:${device_id,,}"
+    case "$GPU_VENDOR_DEVICE" in
+        "$RTX2080_VENDOR_DEVICE")
+            GPU_KIND=rtx2080
+            GPU_LABEL='RTX 2080'
+            GPU_PRESET=rtx2080-16gb
+            ;;
+        "$V100_SXM2_16GB_VENDOR_DEVICE")
+            GPU_KIND=v100
+            GPU_LABEL='Tesla V100 SXM2 16GB'
+            GPU_PRESET=v100-sxm2-16gb
+            ;;
+        *)
+            lspci -Dnns "$GPU_BDF" >&2 || true
+            die "GPU 不是已验证的 $RTX2080_VENDOR_DEVICE 或 $V100_SXM2_16GB_VENDOR_DEVICE"
+            ;;
+    esac
+}
+
+expected_hook_policy() {
+    local branch=$1
+    case "$branch:$GPU_KIND" in
+        r535:rtx2080|r535:v100) printf 'r535_unlock_policy=consumer\n' ;;
+        r570:rtx2080) printf 'r570_unlock_policy=consumer\n' ;;
+        r570:v100) printf 'r570_unlock_policy=native\n' ;;
+        r580-lab:rtx2080) printf 'r580_unlock_policy=consumer-lab\n' ;;
+        *) die "硬件 $GPU_LABEL 不支持分支 $branch" ;;
+    esac
+}
+
+expected_hook_label() {
+    local branch=$1
+    case "$branch:$GPU_KIND" in
+        r535:rtx2080|r535:v100) printf 'r535-consumer\n' ;;
+        r570:rtx2080) printf 'r570-consumer\n' ;;
+        r570:v100) printf 'r570-native\n' ;;
+        r580-lab:rtx2080) printf 'r580-consumer-lab\n' ;;
+        *) die "硬件 $GPU_LABEL 不支持分支 $branch" ;;
+    esac
 }
 
 state_value() {
@@ -288,6 +349,8 @@ hook_policy() {
         printf 'r535-consumer\n'
     elif grep -Fxq 'r570_unlock_policy=consumer' "$state"; then
         printf 'r570-consumer\n'
+    elif grep -Fxq 'r570_unlock_policy=native' "$state"; then
+        printf 'r570-native\n'
     elif grep -Fxq 'r580_unlock_policy=consumer-lab' "$state"; then
         printf 'r580-consumer-lab\n'
     elif grep -Fxq 'r580_unlock_policy=native' "$state"; then
@@ -298,7 +361,10 @@ hook_policy() {
 }
 
 show_host_fb_policy() {
-    local config="$SCRIPT_DIR/vgpu-host.conf"
+    local config=/etc/vmate/g11-vgpu-host.conf
+    if [[ ! -r "$config" || -L "$config" ]]; then
+        config="$SCRIPT_DIR/vgpu-host.conf"
+    fi
     if [[ ! -r "$config" || -L "$config" ]]; then
         printf '宿主 FB 策略 : 未在 %s 找到（驱动切换不修改它）\n' "$config"
         return
@@ -311,7 +377,7 @@ show_host_fb_policy() {
 }
 
 cmd_status() {
-    detect_rtx2080 || true
+    detect_supported_gpu || true
     local version license signer seed_kernel seed_archive branch branch_status
     local package535 package570 package580
     version=$(loaded_version)
@@ -324,7 +390,8 @@ cmd_status() {
     package535="$(package_status "$R535_PACKAGE")/$(package_version "$R535_PACKAGE")"
     package570="$(package_status "$R570_PACKAGE")/$(package_version "$R570_PACKAGE")"
     package580="$(package_status "$R580_PACKAGE")/$(package_version "$R580_PACKAGE")"
-    printf 'GPU            : %s (%s)\n' "${GPU_BDF:-未唯一识别}" "$RTX2080_VENDOR_DEVICE"
+    printf 'GPU            : %s (%s%s)\n' "${GPU_BDF:-未唯一识别}" \
+        "${GPU_VENDOR_DEVICE:-unknown}" "${GPU_LABEL:+ / $GPU_LABEL}"
     printf '当前内核       : %s\n' "$KVER"
     printf '已加载驱动     : %s\n' "${version:-none}"
     printf '内核 RM        : %s\n' "${license:-none}"
@@ -343,8 +410,12 @@ cmd_status() {
     show_host_fb_policy
     if [[ "$version" == "$R580_VERSION" ]]; then
         printf '稳定性结论     : R580/RTX 仅限母盘暂存；已观察到 XID 43/TDR\n'
+    elif [[ "$version" == "$R570_VERSION" && "$GPU_KIND" == v100 ]]; then
+        printf '稳定性结论     : V100 vGPU 18.4；已审核 mixed 1Q+2Q 分支\n'
     elif [[ "$version" == "$R570_VERSION" ]]; then
         printf '稳定性结论     : R570/RTX 分支；以本次冷启动/Guest 快速验收状态为准\n'
+    elif [[ "$version" == "$R535_VERSION" && "$GPU_KIND" == v100 ]]; then
+        printf '稳定性结论     : V100 R535 兼容分支；固定 equal 1Q\n'
     elif [[ "$version" == "$R535_VERSION" ]]; then
         printf '稳定性结论     : R535 本机生产分支\n'
     fi
@@ -405,7 +476,7 @@ write_seed_meta() {
         printf 'created_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         printf 'kernel=%s\n' "$KVER"
         printf 'gpu=%s\n' "$GPU_BDF"
-        printf 'gpu_vendor_device=%s\n' "$RTX2080_VENDOR_DEVICE"
+        printf 'gpu_vendor_device=%s\n' "$GPU_VENDOR_DEVICE"
         printf 'driver_version=%s\n' "$R535_VERSION"
         echo 'module_license=NVIDIA'
         echo 'module_signature=none'
@@ -419,7 +490,7 @@ write_seed_meta() {
 
 verify_r535_seed() {
     [[ -f "$SEED_META" && ! -L "$SEED_META" ]] || \
-        die "R535 恢复种子缺失；先在健康 R535 上运行：sudo $0 init-r535"
+        die "R535 恢复种子缺失；健康 R535 用 init-r535，健康 V100/R570 首次用 bootstrap-v100-r535"
     local seed_kernel seed_gpu_id seed_version seed_license seed_signature archive expected actual
     seed_kernel=$(state_value "$SEED_META" kernel) || die 'R535 种子缺少 kernel'
     seed_gpu_id=$(state_value "$SEED_META" gpu_vendor_device) || die 'R535 种子缺少 GPU ID'
@@ -431,7 +502,7 @@ verify_r535_seed() {
     expected=$(state_value "$SEED_META" archive_sha256) || die 'R535 种子缺少 archive SHA256'
     [[ "$seed_kernel" == "$KVER" ]] || \
         die "R535 种子绑定内核 $seed_kernel，当前是 $KVER；禁止跨内核恢复"
-    [[ "$seed_gpu_id" == "$RTX2080_VENDOR_DEVICE" && \
+    [[ "$seed_gpu_id" == "$GPU_VENDOR_DEVICE" && \
        "$seed_version" == "$R535_VERSION" && "$seed_license" == NVIDIA && \
        "$seed_signature" == none ]] || \
         die 'R535 种子身份与当前已验证分支不匹配'
@@ -446,7 +517,7 @@ cmd_init_r535() {
     require_root
     require_commands
     secure_boot_must_be_disabled
-    detect_rtx2080
+    detect_supported_gpu
     [[ "$(loaded_version)" == "$R535_VERSION" ]] || \
         die "init-r535 必须在已加载 $R535_VERSION 时执行"
     [[ "$(module_license)" == NVIDIA ]] || \
@@ -489,12 +560,14 @@ cmd_init_r535() {
     else
         warn '未缓存 R570 DEB；首次切换时用 --r570-deb 指定'
     fi
-    if selected580=$(select_deb "$R580_DEB" "$CACHED_R580_DEB" "$DEFAULT_R580_DEB" \
-            "$R580_PACKAGE" "$R580_VERSION" "$R580_DEB_SHA256" 2>/dev/null); then
-        cache_deb "$selected580" "$CACHED_R580_DEB"
-        log '已同时缓存并校验官方 R580.159.01 DEB'
-    else
-        warn '未缓存 R580 DEB；首次切换时用 --r580-deb 指定'
+    if [[ "$GPU_KIND" == rtx2080 ]]; then
+        if selected580=$(select_deb "$R580_DEB" "$CACHED_R580_DEB" "$DEFAULT_R580_DEB" \
+                "$R580_PACKAGE" "$R580_VERSION" "$R580_DEB_SHA256" 2>/dev/null); then
+            cache_deb "$selected580" "$CACHED_R580_DEB"
+            log '已同时缓存并校验官方 R580.159.01 DEB'
+        else
+            warn '未缓存 R580 DEB；首次切换时用 --r580-deb 指定'
+        fi
     fi
 
     temp_archive=$(mktemp "$STATE_ROOT/.r535-$KVER.XXXXXXXX.tar.zst")
@@ -517,6 +590,7 @@ acquire_global_lock() {
         die "vGPU 全局锁缺失或不安全：$GLOBAL_LOCK"
     exec 9<"$GLOBAL_LOCK"
     flock -n 9 || die 'GPU mode、mdev 分配或另一个驱动切换正在运行'
+    GLOBAL_LOCK_HELD=1
 }
 
 assert_no_vm_or_mdev() {
@@ -601,10 +675,61 @@ run_unlock_setup() {
         environment+=("G11_BUILD_USER=$SUDO_USER")
     fi
     case "$branch" in
-        r570) setup_args+=(--r570-consumer) ;;
+        r570)
+            [[ "$GPU_KIND" == v100 ]] || setup_args+=(--r570-consumer)
+            ;;
         r580-lab) setup_args+=(--r580-consumer-lab) ;;
     esac
     env "${environment[@]}" "$UNLOCK_SETUP" "${setup_args[@]}"
+}
+
+release_global_lock() {
+    ((GLOBAL_LOCK_HELD)) || return 0
+    flock -u 9 2>/dev/null || true
+    exec 9<&-
+    GLOBAL_LOCK_HELD=0
+}
+
+publish_v100_branch_policy() {
+    local branch=$1 mode tier owner group destination_temp
+    local -a args
+    [[ "$GPU_KIND" == v100 ]] || return 0
+
+    # Both the mixed helper and the policy generator take the same persistent
+    # host lock.  The branch mutation is complete and the postboot VM gate is
+    # already pending before this function is called, so hand the lock to
+    # those reviewed publishers instead of recursively deadlocking on it.
+    release_global_lock
+    case "$branch" in
+        r535)
+            "$MIXED_MODE_INSTALLER" --remove
+            mode=equal
+            tier=1024
+            ;;
+        r570)
+            "$MIXED_MODE_INSTALLER" --bdf "$GPU_BDF"
+            mode=mixed
+            tier=
+            ;;
+        *) die "V100 不支持宿主策略分支：$branch" ;;
+    esac
+
+    args=(--preset "$GPU_PRESET" --fb-mode "$mode" --gpu "$GPU_BDF"
+          --output /etc/vmate/g11-vgpu-host.conf --force)
+    [[ -z "$tier" ]] || args+=(--tier "$tier")
+    "$HOST_CONFIGURATOR" "${args[@]}"
+
+    # CLI vmctl defaults to the repository-local ignored copy while VMate uses
+    # /etc.  Publish the exact same non-secret policy atomically to both so a
+    # branch switch cannot leave two contradictory framebuffer contracts.
+    [[ ! -L "$SCRIPT_DIR/vgpu-host.conf" ]] || \
+        die "拒绝覆盖符号链接：$SCRIPT_DIR/vgpu-host.conf"
+    owner=$(stat -c '%u' "$SCRIPT_DIR")
+    group=$(stat -c '%g' "$SCRIPT_DIR")
+    destination_temp=$(mktemp "$SCRIPT_DIR/.vgpu-host.conf.XXXXXXXX")
+    install -o "$owner" -g "$group" -m 0644 \
+        /etc/vmate/g11-vgpu-host.conf "$destination_temp"
+    mv -fT -- "$destination_temp" "$SCRIPT_DIR/vgpu-host.conf"
 }
 
 wait_for_mdev_types() {
@@ -709,7 +834,7 @@ queue_postboot_validation() {
         printf 'branch=%s\n' "$branch"
         printf 'kernel=%s\n' "$KVER"
         printf 'gpu=%s\n' "$GPU_BDF"
-        printf 'gpu_vendor_device=%s\n' "$RTX2080_VENDOR_DEVICE"
+        printf 'gpu_vendor_device=%s\n' "$GPU_VENDOR_DEVICE"
     } >"$temp"
     install -o root -g root -m 0644 "$temp" "$PENDING_STATE"
     rm -f -- "$temp"
@@ -752,7 +877,8 @@ restore_r535_core() {
     run_unlock_setup r535
     apt-mark hold "$R535_PACKAGE" >/dev/null
     update-initramfs -u -k "$KVER"
-    validate_runtime_before_reboot "$R535_VERSION" 'r535_unlock_policy=consumer'
+    validate_runtime_before_reboot "$R535_VERSION" \
+        "$(expected_hook_policy r535)"
     queue_postboot_validation r535
 }
 
@@ -794,8 +920,54 @@ switch_to_r570() {
     run_unlock_setup r570
     apt-mark hold "$R570_PACKAGE" >/dev/null
     update-initramfs -u -k "$KVER"
-    validate_runtime_before_reboot "$R570_VERSION" 'r570_unlock_policy=consumer'
+    validate_runtime_before_reboot "$R570_VERSION" \
+        "$(expected_hook_policy r570)"
     queue_postboot_validation r570
+}
+
+bootstrap_v100_r535_core() {
+    local selected535 selected570
+    [[ "$GPU_KIND" == v100 ]] || \
+        die 'bootstrap-v100-r535 只允许已审核的 Tesla V100'
+    [[ ! -e "$SEED_META" ]] || \
+        die 'R535 恢复种子已存在；请直接运行 r535'
+    [[ "$(loaded_version)" == "$R570_VERSION" && \
+       "$(module_license)" == NVIDIA && \
+       "$(hook_policy)" == r570-native ]] || \
+        die '首次 V100 统一必须从健康的 R570/native 分支执行'
+    [[ "$(package_status "$R570_PACKAGE")" == installed && \
+       "$(package_version "$R570_PACKAGE")" == "$R570_VERSION" ]] || \
+        die "dpkg 中没有完整安装 $R570_PACKAGE/$R570_VERSION"
+    validate_runtime "$R570_VERSION" "$(expected_hook_policy r570)"
+
+    selected535=$(select_deb "$R535_DEB" "$CACHED_R535_DEB" "$DEFAULT_R535_DEB" \
+        "$R535_PACKAGE" "$R535_VERSION" "$R535_DEB_SHA256")
+    selected570=$(select_deb "$R570_DEB" "$CACHED_R570_DEB" "$DEFAULT_R570_DEB" \
+        "$R570_PACKAGE" "$R570_VERSION" "$R570_DEB_SHA256")
+    cache_deb "$selected535" "$CACHED_R535_DEB"
+    cache_deb "$selected570" "$CACHED_R570_DEB"
+
+    # Stop the retry timer before unloading R570 so it cannot race the package
+    # transaction.  --remove keeps a timestamped backup and retains the helper.
+    "$MIXED_MODE_INSTALLER" --remove
+    stop_driver_stack
+    MUTATION_STARTED=1
+    purge_vgpu_package "$R570_PACKAGE" "$R570_VERSION"
+    purge_vgpu_package "$R580_PACKAGE" "$R580_VERSION"
+    purge_vgpu_package "$R535_PACKAGE" "$R535_VERSION"
+
+    "$V100_R535_INSTALLER" --bdf "$GPU_BDF" \
+        --driver-deb "$CACHED_R535_DEB"
+    run_unlock_setup r535
+    apt-mark hold "$R535_PACKAGE" >/dev/null
+    update-initramfs -u -k "$KVER"
+    validate_runtime_before_reboot "$R535_VERSION" \
+        "$(expected_hook_policy r535)"
+
+    # The freshly built, unsigned closed-RM modules are now the exact healthy
+    # source for the kernel-bound recovery seed used by all later switches.
+    cmd_init_r535
+    queue_postboot_validation r535
 }
 
 switch_to_r580() {
@@ -852,7 +1024,14 @@ switch_failure() {
         ROLLBACK_RUNNING=1
         warn "$TARGET_REQUEST 切换失败（exit=$rc），开始自动恢复 R535"
         set +e
-        ( set -e; restore_r535_core )
+        ( set -e
+          if ((GLOBAL_LOCK_HELD == 0)); then
+              acquire_global_lock
+              assert_no_vm_or_mdev
+          fi
+          restore_r535_core
+          publish_v100_branch_policy r535
+        )
         local rollback_rc=$?
         set -e
         if ((rollback_rc == 0)); then
@@ -882,7 +1061,10 @@ cmd_switch() {
     require_root
     require_commands
     secure_boot_must_be_disabled
-    detect_rtx2080
+    detect_supported_gpu
+    if [[ "$GPU_KIND" == v100 && "$target" == r580-lab ]]; then
+        die 'V100 不开放 R580；只允许 r535 或 vGPU 18.4/r570'
+    fi
     acquire_global_lock
     assert_no_vm_or_mdev
     verify_r535_seed
@@ -905,10 +1087,11 @@ cmd_switch() {
         write_branch_state r580-lab ready
         rm -f -- "$PENDING_STATE"
     elif [[ "$target" == r570 && "$current" == "$R570_VERSION" && \
-          "$(module_license)" == NVIDIA && "$(hook_policy)" == r570-consumer ]]; then
+          "$(module_license)" == NVIDIA && \
+          "$(hook_policy)" == "$(expected_hook_label r570)" ]]; then
         log '当前已经是健康 R570 分支，无需重装'
         install_postboot_verifier
-        validate_runtime "$R570_VERSION" 'r570_unlock_policy=consumer'
+        validate_runtime "$R570_VERSION" "$(expected_hook_policy r570)"
         write_branch_state r570 ready
         rm -f -- "$PENDING_STATE"
     elif [[ "$target" == r535 ]]; then
@@ -919,6 +1102,26 @@ cmd_switch() {
         warn 'R580/RTX 仅限 Guest 582.53 母盘暂存；本机曾出现 XID 43/TDR/SDL 黑屏'
         switch_to_r580
     fi
+    publish_v100_branch_policy "$target"
+    trap - EXIT
+    unmask_driver_services
+    cmd_status
+    maybe_reboot
+}
+
+cmd_bootstrap_v100_r535() {
+    require_root
+    require_commands
+    secure_boot_must_be_disabled
+    detect_supported_gpu
+    [[ "$GPU_KIND" == v100 ]] || \
+        die 'bootstrap-v100-r535 只适用于 Tesla V100 SXM2 16GB'
+    acquire_global_lock
+    assert_no_vm_or_mdev
+    TARGET_REQUEST=bootstrap-v100-r535
+    trap switch_failure EXIT
+    bootstrap_v100_r535_core
+    publish_v100_branch_policy r535
     trap - EXIT
     unmask_driver_services
     cmd_status
@@ -949,6 +1152,7 @@ main() {
     case "$COMMAND" in
         status) cmd_status ;;
         init-r535) cmd_init_r535 ;;
+        bootstrap-v100-r535) cmd_bootstrap_v100_r535 ;;
         r535) cmd_switch r535 ;;
         r570) cmd_switch r570 ;;
         r580-lab) cmd_switch r580-lab ;;

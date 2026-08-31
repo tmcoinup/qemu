@@ -87,9 +87,10 @@ esac
 # G-11 always uses the production-signed B/name-only path.  RTX/R535 may
 # tolerate a missing per-mdev backend during legacy migration; V100 is a
 # fresh-host contract and requires the reviewed Hook for the per-mdev name and
-# display contract. R570/R535 use the guarded framebuffer identity path;
-# R580.159.01 remains name-only because its full tuple caused repeatable guest
-# PTE failures/TDR/XID 43 on the physical V100 validation host.
+# display contract. V100 R570/R535 use the guarded framebuffer identity path.
+# RTX 2080 keeps that tuple only on R535; R570 uses name-only because the same
+# GDDR5 tuple caused repeatable XID 43/XID 31 on the physical RTX validation
+# host. R580 remains name-only on both families.
 IDENTITY_MODE=required
 RM_FB_IDENTITY_MODE=required
 SPOOF_MODE_VALUE=B
@@ -129,6 +130,22 @@ if (( IS_V100 == 1 )); then
             ;;
         *)
             echo "V100 策略只接受已审核 host driver 535.161.05、570.172.07 或 580.159.01；当前 ${HOST_DRIVER_VERSION:-未加载}" >&2
+            exit 1
+            ;;
+    esac
+else
+    case "$HOST_DRIVER_VERSION" in
+        535.161.05)
+            IDENTITY_MODE=auto
+            RM_FB_IDENTITY_MODE=required
+            ;;
+        570.172.07|580.159.01)
+            IDENTITY_MODE=off
+            RM_FB_IDENTITY_MODE=off
+            CONSOLE_INTERVAL=0
+            ;;
+        *)
+            echo "RTX 2080 策略只接受已审核 host driver 535.161.05、570.172.07 或 580.159.01；当前 ${HOST_DRIVER_VERSION:-未加载}" >&2
             exit 1
             ;;
     esac

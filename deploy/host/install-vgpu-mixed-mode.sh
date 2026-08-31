@@ -18,14 +18,21 @@ die() {
 }
 
 usage() {
-    echo "usage: $0 --bdf DDDD:BB:SS.F" >&2
+    echo "usage: $0 --bdf DDDD:BB:SS.F | --remove" >&2
     exit 2
 }
 
 (( EUID == 0 )) || die "must run as root"
-(( $# == 2 )) && [[ "$1" == --bdf ]] || usage
-bdf=${2,,}
-[[ "$bdf" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]] || usage
+action=install
+bdf=
+if (( $# == 1 )) && [[ "$1" == --remove ]]; then
+    action=remove
+elif (( $# == 2 )) && [[ "$1" == --bdf ]]; then
+    bdf=${2,,}
+    [[ "$bdf" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]] || usage
+else
+    usage
+fi
 [[ -f "$source_helper" && ! -L "$source_helper" && -x "$source_helper" ]] || \
     die "source helper is missing or unsafe: $source_helper"
 bash -n "$source_helper"
@@ -39,6 +46,18 @@ for path in "$installed_helper" "$service_file" "$timer_file" "$manager_dropin";
         cp -a -- "$path" "$backup_dir/$(basename -- "$path").before"
     fi
 done
+
+if [[ "$action" == remove ]]; then
+    systemctl disable --now vmate-vgpu-mixed-mode.timer >/dev/null 2>&1 || true
+    systemctl stop vmate-vgpu-mixed-mode.service >/dev/null 2>&1 || true
+    rm -f -- "$service_file" "$timer_file" "$manager_dropin"
+    systemctl daemon-reload
+    systemctl reset-failed vmate-vgpu-mixed-mode.service \
+        vmate-vgpu-mixed-mode.timer >/dev/null 2>&1 || true
+    echo "V100 mixed-size guard disabled; helper retained at $installed_helper"
+    echo "backup=$backup_dir"
+    exit 0
+fi
 
 stage_helper=$(mktemp /usr/local/libexec/.qemu-vgpu-mixed-mode.XXXXXXXX)
 stage_service=$(mktemp /etc/systemd/system/.vmate-vgpu-mixed-mode.service.XXXXXXXX)

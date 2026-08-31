@@ -15,6 +15,8 @@ source "$here/lib/vgpu-profiles.sh"
 source "$here/lib/signed-consumer-catalog.sh"
 # shellcheck source=lib/monitor-profiles.sh
 source "$here/lib/monitor-profiles.sh"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
 
 usage() {
     cat <<'EOF'
@@ -238,12 +240,19 @@ if [[ "$SIGNED_STATE" == validated ]]; then
     MONITOR_DRIVER_CATALOG_SHA256=$SC_CATALOG_SHA256
     MONITOR_DRIVER_PNP_ID=$SC_CANONICAL_TARGET_PNP
 else
+    vgpu_select_driver_stack \
+        || die 'could not select the reviewed host/guest driver pair'
+    [[ "$VGPU_SELECTED_DRIVER_MONITOR_SYNC_MODE" != off &&
+       -n "$VGPU_SELECTED_DRIVER_MONITOR_POLICY" &&
+       "$VGPU_SELECTED_DRIVER_INF_SHA256" =~ ^[0-9a-f]{64}$ &&
+       "$VGPU_SELECTED_DRIVER_CATALOG_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || die "${VGPU_SELECTED_DRIVER_BRANCH:-unknown} has no reviewed B/native system projection policy"
     TARGET_PNP='PCI\VEN_10DE&DEV_1E30'
-    DRIVER_VERSION='31.0.15.3833'
+    DRIVER_VERSION=$VGPU_SELECTED_DRIVER_VERSION
     TRANSPORT_KIND=native-vgpu
-    MONITOR_DRIVER_POLICY=grid-53833-native
-    MONITOR_DRIVER_INF_SHA256=67a240e1d464cf97dabfec1a7cecf000eaa9ddfd702f32ba2c8771f17905dc2b
-    MONITOR_DRIVER_CATALOG_SHA256=56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f
+    MONITOR_DRIVER_POLICY=$VGPU_SELECTED_DRIVER_MONITOR_POLICY
+    MONITOR_DRIVER_INF_SHA256=$VGPU_SELECTED_DRIVER_INF_SHA256
+    MONITOR_DRIVER_CATALOG_SHA256=$VGPU_SELECTED_DRIVER_CATALOG_SHA256
     MONITOR_DRIVER_PNP_ID=$(vgpu_profile_native_grid_pnp_id \
         "$VGPU_MDEV_PROFILE") \
         || die 'GPU resource has no reviewed B/native PnP mapping'

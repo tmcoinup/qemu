@@ -1550,8 +1550,8 @@ function Read-And-ValidatePortableIdentityContract {
         (Get-RequiredProperty $RawContract 'expectedDriverVersion' 'contract') `
         'contract.expectedDriverVersion' 32 '^[0-9]+(\.[0-9]+){3}$'
     if ($expectedPnp -cne 'PCI\VEN_10DE&DEV_1E30' -or
-        $driverVersion -cne '31.0.15.3833') {
-        throw 'Portable identity mode accepts only native DEV_1E30 / GRID 538.33.'
+        $driverVersion -notin @('31.0.15.3833', '32.0.15.7348')) {
+        throw 'Portable identity mode accepts only reviewed native DEV_1E30 / GRID 538.33 or 573.48.'
     }
 
     $manifestFiles = @(Get-RequiredProperty $Manifest 'files' 'manifest')
@@ -2140,7 +2140,7 @@ function Select-PortableProfile {
             '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' -or
         $parts[3] -notmatch '^[0-9A-F]{64}$' -or
         $parts[4] -cne '10DE:1E30' -or
-        $parts[5] -cne '31.0.15.3833') {
+        $parts[5] -cne [string]$Contract.ExpectedDriverVersion) {
         throw 'The read-only portable profile claim is malformed.'
     }
     if ($parts[3] -cne [string]$Contract.CatalogSha256) {

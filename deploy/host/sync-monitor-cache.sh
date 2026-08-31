@@ -6,8 +6,9 @@
 #     HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\<PNP>\<inst>\Device Parameters\EDID
 #   显示器目标模式从这份【缓存的 EDID】解析。旧 guest（以及从旧 base 克隆
 #   出来的实例）不会自动刷新这份缓存，所以即便 QEMU 端 EDID 已改变，
-#   Windows 仍可能显示旧目标模式。NVIDIA GRID 还会从显示适配器 software key
-#   的 NV_Modes 补充 source modes，必须用同一份 R535 page-safe FHD 合同约束。
+#   Windows 仍可能显示旧目标模式。R535 GRID 还会从显示适配器 software key
+#   的 NV_Modes 补充 source modes，必须用同一份 page-safe FHD 合同约束；
+#   R570 只发布标准 EDID，并保留新驱动自己的 NV_Modes。
 #   GraphicsDrivers\Configuration / Connectivity 还会按显示器签名缓存"已验证
 #   模式表"，同样会拖着旧分辨率。
 #
@@ -152,6 +153,21 @@ case "$DRIVER_POLICY" in
             *) die "GRID 538.33 B/native PnP 不在 1Q/2Q 审核目录" ;;
         esac
         NVIDIA_MODE_POLICY_KIND=locked-grid
+        ;;
+    grid-57348-native)
+        [[ "$EXPECTED_DRIVER_VERSION" == 32.0.15.7348 &&
+           "$EXPECTED_DRIVER_INF_SHA256" == \
+               1212ad2ff13204151488806cce1d5a962cb71dc78ea980a446642a5a047e0aca &&
+           "$EXPECTED_DRIVER_CATALOG_SHA256" == \
+               d6715d48f864e4d7202f5cb21a57ecbe64457e49919306af5123bef256f2ac2b ]] || \
+            die "GRID 573.48 monitor policy tuple 不在审核目录"
+        case "${EXPECTED_NVIDIA_PNP_ID^^}" in
+            'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE'|\
+            'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE'|\
+            'PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE') ;;
+            *) die "GRID 573.48 B/native PnP 不在 1Q/2Q 审核目录" ;;
+        esac
+        NVIDIA_MODE_POLICY_KIND=edid-only-native
         ;;
     nvidia-53758-dch-whql-gtx1050-dell)
         [[ "$EXPECTED_DRIVER_VERSION" == 31.0.15.3758 &&
@@ -555,6 +571,20 @@ allowed_driver_policies = {
          '56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f',
          r'PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE', 'locked-grid'),
     },
+    'grid-57348-native': {
+        ('32.0.15.7348',
+         '1212ad2ff13204151488806cce1d5a962cb71dc78ea980a446642a5a047e0aca',
+         'd6715d48f864e4d7202f5cb21a57ecbe64457e49919306af5123bef256f2ac2b',
+         r'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE', 'edid-only-native'),
+        ('32.0.15.7348',
+         '1212ad2ff13204151488806cce1d5a962cb71dc78ea980a446642a5a047e0aca',
+         'd6715d48f864e4d7202f5cb21a57ecbe64457e49919306af5123bef256f2ac2b',
+         r'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE', 'edid-only-native'),
+        ('32.0.15.7348',
+         '1212ad2ff13204151488806cce1d5a962cb71dc78ea980a446642a5a047e0aca',
+         'd6715d48f864e4d7202f5cb21a57ecbe64457e49919306af5123bef256f2ac2b',
+         r'PCI\VEN_10DE&DEV_1DB1&SUBSYS_125A10DE', 'edid-only-native'),
+    },
     'nvidia-53758-dch-whql-gtx1050-dell': {(
         '31.0.15.3758',
         'c2860e03d30f7ba610f9726765354e75cabb624791aecea61478066d9ead50f1',
@@ -854,8 +884,8 @@ for cs in csets:
     for target, label in nvidia_driver_targets(cs):
         nvidia_devices += 1
         control_set_stats[cs.lower()]['nvidia'] += 1
-        if mode_policy_kind == 'edid-only-consumer':
-            print(f'  {label}: 消费级驱动私有 NV_Modes 保持原样；'
+        if mode_policy_kind in {'edid-only-consumer', 'edid-only-native'}:
+            print(f'  {label}: 驱动私有 NV_Modes 保持原样；'
                   '仅发布标准 EDID/EDID_OVERRIDE')
             continue
         item = value(target, 'NV_Modes')
@@ -960,7 +990,7 @@ if [[ -n "$MARKER" ]]; then
     mkdir -p "$(dirname "$MARKER")"
     marker_tmp="${MARKER}.tmp.$$"
     if [[ "$MONITOR_COMMIT_STATE" == predriver ]]; then
-        printf 'g11-r535-predriver-v1:%s\n' "$MARKER_VALUE" >"$marker_tmp"
+        printf 'g11-reviewed-predriver-v2:%s\n' "$MARKER_VALUE" >"$marker_tmp"
     else
         printf '%s\n' "$MARKER_VALUE" >"$marker_tmp"
     fi

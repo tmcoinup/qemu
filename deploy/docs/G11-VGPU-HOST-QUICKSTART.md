@@ -1,15 +1,15 @@
 # G-11 vGPU 宿主快速配置
 
-本文用于已经安装 VMate/QEMU 的宿主。空白 V100 新主机请优先按照
-[`G11-V100-VGPU18.4-FRESH-INSTALL.md`](G11-V100-VGPU18.4-FRESH-INSTALL.md)
-操作；本文只列日常切档、创建和验收命令。
+本文用于已经安装 VMate/QEMU 的宿主。默认全 1Q 池统一使用 R535；V100 需要 2Q 或
+1Q+2Q 时，把 vGPU 18.4/R570 作为可选分支。两者的一键切换见
+[`G11-V100-R535-R570-SWITCH.md`](G11-V100-R535-R570-SWITCH.md)。
 
 ## 当前受支持组合
 
 | 物理 GPU | host / guest | 宿主策略 | 当前定位 |
 | --- | --- | --- | --- |
-| Tesla V100 | vGPU 18.4：`570.172.07` / `573.48` | mixed，发布 1Q 与 2Q；RM identity required | 新主机生产主路径，已实测单 1Q、单 2Q、1Q+2Q |
-| Tesla V100 | vGPU 16.4：`535.161.05` / `538.33` | equal 1024，仅 1Q | 既有全 1Q 环境兼容 |
+| Tesla V100 | vGPU 16.4：`535.161.05` / `538.33` | equal 1024，仅 1Q | 默认全 1Q、与旧 RTX 宿主统一 |
+| Tesla V100 | vGPU 18.4：`570.172.07` / `573.48` | mixed，发布 1Q 与 2Q；RM identity required | 可选分支；已实测单 1Q、单 2Q、1Q+2Q |
 | RTX 2080 | R535：`535.161.05` / `538.33` | equal 1024 或 equal 2048 | 旧显卡稳定分支 |
 | Tesla V100 | vGPU 19.5：`580.159.01` / `582.53` | name-only，RM identity off | 历史问题定位；不作为统一版本 |
 
@@ -46,7 +46,7 @@ sudo /usr/local/libexec/qemu-vgpu-mixed-mode status 0000:81:00.0
   --fb-mode mixed \
   --force
 
-sudo ./deploy/host/install-vgpu-mixed-mode.sh 0000:81:00.0
+sudo ./deploy/host/install-vgpu-mixed-mode.sh --bdf 0000:81:00.0
 ```
 
 如果 V100 是 PCIe、32GB、V100S 或 FHHL，按 `--help` 选择对应 preset，不能仅凭名称

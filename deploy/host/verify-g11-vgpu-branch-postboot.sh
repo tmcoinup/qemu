@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify a pending G-11 RTX 2080 driver branch after the required cold boot.
+# Verify a pending G-11 RTX 2080 or Tesla V100 driver branch after cold boot.
 set -euo pipefail
 # depmod indexes are standard system metadata and must remain readable by
 # unprivileged status/repair checks.  State files use explicit install modes.
@@ -9,6 +9,7 @@ readonly STATE_ROOT=/var/lib/vmate/g11-vgpu-branch-switch
 readonly PENDING_STATE="$STATE_ROOT/pending-reboot.state"
 readonly BRANCH_STATE="$STATE_ROOT/current.state"
 readonly RTX2080_VENDOR_DEVICE=10de:1e82
+readonly V100_SXM2_16GB_VENDOR_DEVICE=10de:1db1
 POSTBOOT_BRANCH=unknown
 POSTBOOT_KERNEL=unknown
 POSTBOOT_GPU=unknown
@@ -101,6 +102,7 @@ main() {
     }
 
     local branch kernel gpu gpu_id expected_version expected_package expected_policy
+    local gpu_kind actual_vendor actual_device config
     branch=$(state_value "$PENDING_STATE" branch) || die 'pending 状态缺少 branch'
     kernel=$(state_value "$PENDING_STATE" kernel) || die 'pending 状态缺少 kernel'
     gpu=$(state_value "$PENDING_STATE" gpu) || die 'pending 状态缺少 gpu'
@@ -111,9 +113,17 @@ main() {
     POSTBOOT_GPU=$gpu
     [[ "$kernel" == "$(uname -r)" ]] || \
         die "pending 内核为 $kernel，当前为 $(uname -r)"
-    [[ "$gpu_id" == "$RTX2080_VENDOR_DEVICE" ]] || die 'pending GPU 身份不匹配'
-    [[ "$(cat "/sys/bus/pci/devices/$gpu/vendor" 2>/dev/null):$(cat "/sys/bus/pci/devices/$gpu/device" 2>/dev/null)" == \
-        0x10de:0x1e82 ]] || die "RTX 2080 不在预期 BDF：$gpu"
+    case "$gpu_id" in
+        "$RTX2080_VENDOR_DEVICE") gpu_kind=rtx2080 ;;
+        "$V100_SXM2_16GB_VENDOR_DEVICE") gpu_kind=v100 ;;
+        *) die "pending GPU 身份不受支持：$gpu_id" ;;
+    esac
+    actual_vendor=$(cat "/sys/bus/pci/devices/$gpu/vendor" 2>/dev/null || true)
+    actual_device=$(cat "/sys/bus/pci/devices/$gpu/device" 2>/dev/null || true)
+    actual_vendor=${actual_vendor#0x}
+    actual_device=${actual_device#0x}
+    [[ "${actual_vendor,,}:${actual_device,,}" == "$gpu_id" ]] || \
+        die "GPU 不在 pending 记录的 BDF/身份：$gpu ($gpu_id)"
 
     case "$branch" in
         r535)
@@ -124,9 +134,14 @@ main() {
         r570)
             expected_version=570.172.07
             expected_package=nvidia-vgpu-ubuntu-570
-            expected_policy=r570_unlock_policy=consumer
+            if [[ "$gpu_kind" == v100 ]]; then
+                expected_policy=r570_unlock_policy=native
+            else
+                expected_policy=r570_unlock_policy=consumer
+            fi
             ;;
         r580-lab)
+            [[ "$gpu_kind" == rtx2080 ]] || die 'V100 不允许 R580 pending 分支'
             expected_version=580.159.01
             expected_package=nvidia-vgpu-ubuntu-580
             expected_policy=r580_unlock_policy=consumer-lab
@@ -154,6 +169,29 @@ main() {
             "$expected_package" 2>/dev/null || true)" == "installed/$expected_version" ]] || \
         die "dpkg 分支不是 $expected_package/$expected_version"
     wait_for_runtime "$gpu" "$expected_version" "$expected_policy"
+    if [[ "$gpu_kind" == v100 ]]; then
+        config=/etc/vmate/g11-vgpu-host.conf
+        [[ -f "$config" && ! -L "$config" && -r "$config" ]] || \
+            die "V100 宿主策略缺失或不安全：$config"
+        if [[ "$branch" == r535 ]]; then
+            grep -Fxq 'VGPU_HOST_FB_MODE=equal' "$config" || \
+                die 'V100/R535 宿主策略不是 equal'
+            grep -Fxq 'VGPU_HOST_FB_TIER_MB=1024' "$config" || \
+                die 'V100/R535 宿主策略不是固定 1024MB'
+            systemctl is-active --quiet vmate-vgpu-mixed-mode.timer && \
+                die 'V100/R535 不应运行 mixed-mode timer'
+        else
+            grep -Fxq 'VGPU_HOST_FB_MODE=mixed' "$config" || \
+                die 'V100/R570 宿主策略不是 mixed'
+            grep -Fxq 'VGPU_RESOURCE_PROFILE_1024=V100X-1Q' "$config" || \
+                die 'V100/R570 缺少 V100X-1Q 映射'
+            grep -Fxq 'VGPU_RESOURCE_PROFILE_2048=V100X-2Q' "$config" || \
+                die 'V100/R570 缺少 V100X-2Q 映射'
+            systemctl is-active --quiet vmate-vgpu-mixed-mode.timer || \
+                die 'V100/R570 mixed-mode timer 未运行'
+            /usr/local/libexec/qemu-vgpu-mixed-mode status "$gpu"
+        fi
+    fi
     nvidia-smi --query-gpu=driver_version,name,memory.total --format=csv,noheader
     if journalctl -k -b --no-pager 2>/dev/null | grep -Eiq 'NVRM:.*Xid'; then
         journalctl -k -b --no-pager 2>/dev/null | grep -Ei 'NVRM:.*Xid' >&2 || true

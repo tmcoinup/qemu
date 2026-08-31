@@ -108,7 +108,7 @@ vgpu_select_driver_stack
 # Offline convergence after the guest shutdown needs root for qemu-nbd.  Obtain
 # only a normal sudo timestamp before the first guest write; never place the
 # credential in argv, a file, or this repository.
-if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]] &&
+if [[ "$VGPU_SELECTED_DRIVER_MONITOR_SYNC_MODE" != off ]] &&
         ((EUID != 0)) && ! sudo -n true 2>/dev/null; then
     if [[ -n "${SUDO_PASSWORD:-}" ]]; then
         : # sync-monitor-profile.sh consumes the approved runtime channel.
@@ -132,9 +132,9 @@ echo "[install-vgpu] 使用临时标准 VGA + mdev display=off + active-desktop 
 echo "[install-vgpu] 官方 GRID 安装收据通过；请求 Windows 完整关机"
 "$here/scripts/stop-vm.sh" "$VM_ID" --graceful-only
 
-if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]]; then
+if [[ "$VGPU_SELECTED_DRIVER_MONITOR_SYNC_MODE" != off ]]; then
     # stop-vm returns once QEMU is gone, but start-vm may still be releasing
-    # mdev/swtpm and its launch lock.  Own that lock across the R535-only
+    # mdev/swtpm and its launch lock.  Own that lock across the reviewed
     # offline SYSTEM-hive transaction.
     start_lock=$(vm_storage_run_preferred_path "$VM_ID" start.lock)
     exec {START_LOCK_FD}>"$start_lock"
@@ -142,11 +142,15 @@ if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]]; then
         echo "[install-vgpu] QEMU 已关机，但 60 秒内未取得 start lock；未离线写盘" >&2
         exit 1
     fi
-    echo "[install-vgpu] guest 已完整关机；认证 GRID 538.33 并写入 R535 page-safe NV_Modes"
+    if [[ "$VGPU_SELECTED_DRIVER_MONITOR_SYNC_MODE" == locked-grid ]]; then
+        echo "[install-vgpu] guest 已完整关机；认证 ${VGPU_SELECTED_DRIVER_LABEL} 并写入 R535 page-safe NV_Modes"
+    else
+        echo "[install-vgpu] guest 已完整关机；认证 ${VGPU_SELECTED_DRIVER_LABEL} 并同步 EDID（保留 NVIDIA NV_Modes）"
+    fi
     VM_START_LOCK_HELD=1 "$here/scripts/sync-monitor-profile.sh" "$VM_ID" --force
-    echo "[install-vgpu] PASS: R535 驱动、完整关机、离线 EDID/NV_Modes 收敛全部完成"
+    echo "[install-vgpu] PASS: ${VGPU_SELECTED_DRIVER_BRANCH} 驱动、完整关机、离线 monitor 收敛全部完成"
 else
-    echo "[install-vgpu] PASS: ${VGPU_SELECTED_DRIVER_BRANCH}/${VGPU_SELECTED_DRIVER_LABEL} 正式签名驱动和完整关机已完成；跳过 R535 NV_Modes 流程"
+    echo "[install-vgpu] PASS: ${VGPU_SELECTED_DRIVER_BRANCH}/${VGPU_SELECTED_DRIVER_LABEL} 正式签名驱动和完整关机已完成；跳过未审核的离线 monitor 流程"
 fi
 if ((START_AFTER_SYNC)); then
     if [[ -n "${START_LOCK_FD:-}" ]]; then

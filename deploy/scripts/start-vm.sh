@@ -2581,16 +2581,17 @@ case "$MODE" in
         ;;
 esac
 
-# Offline EDID_OVERRIDE/NV_Modes convergence is an R535-only safety contract.
-# Select the exact reviewed host/guest stack once for every mode that can
-# attach an mdev.  R580 must not require qemu-edid or mutate an otherwise
-# healthy guest SYSTEM hive before a normal start.
+# Offline EDID_OVERRIDE convergence is reviewed for R535 and R570.  R535 also
+# locks NV_Modes to its page-safe contract; R570 preserves the driver's private
+# NV_Modes and publishes only standard EDID state.  Select the exact stack
+# before the default native mode is normalized to vgpu-sdl later in this file.
+# R580 remains excluded from offline guest-hive writes.
 case "$MODE" in
-    vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl|driver-install-headless|rdp)
+    native|vgpu-gtk|vgpu-sdl|driver-install-gtk|driver-install-sdl|driver-install-headless|rdp)
         vgpu_select_driver_stack || exit 1
-        if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 0 &&
+        if [[ "$VGPU_SELECTED_DRIVER_MONITOR_SYNC_MODE" == off &&
               "$MONITOR_SYNC" == 1 ]]; then
-            echo "[start-vm] R570/R580: 跳过 R535 专用 EDID_OVERRIDE/NV_Modes 离线同步"
+            echo "[start-vm] ${VGPU_SELECTED_DRIVER_BRANCH}: 当前分支未审核离线 monitor 同步，保持 guest 磁盘不变"
             MONITOR_SYNC=0
         fi
         ;;

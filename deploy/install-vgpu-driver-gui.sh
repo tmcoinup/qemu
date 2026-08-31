@@ -197,10 +197,10 @@ echo "[gui-install] stack=${DRIVER_BRANCH}/${DRIVER_LABEL} guest=${IP}:${WINRM_P
 echo
 WINRM_PYTHON=$(g11_python_resolve pypsrp) || exit 1
 
-if [[ "$VGPU_SELECTED_DRIVER_NEEDS_R535_MONITOR" == 1 ]]; then
+if [[ "$VGPU_SELECTED_DRIVER_MONITOR_SYNC_MODE" != off ]]; then
     invalidate_monitor_sync_marker
 else
-    echo "[gui-install] ${DRIVER_BRANCH}: skip R535 monitor/NV_Modes marker invalidation"
+    echo "[gui-install] ${DRIVER_BRANCH}: skip unreviewed offline monitor marker invalidation"
 fi
 
 # The compatibility installer historically repaired partial installs by

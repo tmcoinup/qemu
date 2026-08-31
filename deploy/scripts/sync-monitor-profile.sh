@@ -10,6 +10,8 @@ source "$here/lib/monitor-profiles.sh"
 source "$here/lib/vm-storage.sh"
 # shellcheck source=lib/vgpu-host-config.sh
 source "$here/lib/vgpu-host-config.sh"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
 # shellcheck source=lib/signed-consumer-catalog.sh
 source "$here/lib/signed-consumer-catalog.sh"
 monitor_profiles_validate
@@ -112,22 +114,27 @@ if [[ -n "${VGPU_HOST_CONFIG:-}" ]]; then
     ) || exit
 fi
 
-# NV_Modes 迁移只适用于已审核的生产签名 GRID 538.33 包。这些值
-# 通过显式参数传给 sudo helper，既不依赖 sudo 保留环境变量，也不
-# 允许其他版本因 NV_Modes 文本相同而被误判。
-GRID_53833_DRIVER_VERSION=31.0.15.3833
-GRID_53833_INF_SHA256=67a240e1d464cf97dabfec1a7cecf000eaa9ddfd702f32ba2c8771f17905dc2b
-GRID_53833_CATALOG_SHA256=56b07bd93280bbda761cb5c9a3a13262c3605320d7286953989e2a5b16d5ec6f
-GRID_53833_PNP_ID=$(vgpu_profile_native_grid_pnp_id \
+# Select the exact host/guest pair.  R535 uses the reviewed page-safe
+# NV_Modes contract; R570 authenticates the official INF/CAT but leaves its
+# private NV_Modes untouched and publishes only standard EDID state.
+vgpu_select_driver_stack || exit 1
+[[ "$VGPU_SELECTED_DRIVER_MONITOR_SYNC_MODE" != off &&
+   -n "$VGPU_SELECTED_DRIVER_MONITOR_POLICY" &&
+   "$VGPU_SELECTED_DRIVER_INF_SHA256" =~ ^[0-9a-f]{64}$ &&
+   "$VGPU_SELECTED_DRIVER_CATALOG_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "[monitor-sync] ${VGPU_SELECTED_DRIVER_BRANCH:-unknown} 没有审核过的离线 monitor 策略" >&2
+    exit 1
+}
+NATIVE_GRID_PNP_ID=$(vgpu_profile_native_grid_pnp_id \
     "${VGPU_MDEV_PROFILE:-}" "$HOST_RESOURCE_PROFILE") || {
     echo "[monitor-sync] GPU resource 没有审核过的 B/native PnP 映射" >&2
     exit 1
 }
-MONITOR_DRIVER_POLICY=grid-53833-native
-MONITOR_DRIVER_VERSION=$GRID_53833_DRIVER_VERSION
-MONITOR_DRIVER_INF_SHA256=$GRID_53833_INF_SHA256
-MONITOR_DRIVER_CATALOG_SHA256=$GRID_53833_CATALOG_SHA256
-MONITOR_DRIVER_PNP_ID=$GRID_53833_PNP_ID
+MONITOR_DRIVER_POLICY=$VGPU_SELECTED_DRIVER_MONITOR_POLICY
+MONITOR_DRIVER_VERSION=$VGPU_SELECTED_DRIVER_VERSION
+MONITOR_DRIVER_INF_SHA256=$VGPU_SELECTED_DRIVER_INF_SHA256
+MONITOR_DRIVER_CATALOG_SHA256=$VGPU_SELECTED_DRIVER_CATALOG_SHA256
+MONITOR_DRIVER_PNP_ID=$NATIVE_GRID_PNP_ID
 
 # A qualified outer-only consumer route enumerates a new Display parent and
 # uses a different original NVIDIA INF. Select that audited row from the same
@@ -284,9 +291,9 @@ spec_hash=$({
     marker_file_digest update-vgpu-mdev-identity \
         "$here/host/update-vgpu-mdev-identity.py"
     printf 'disk=%s:%s\n' "$(readlink -m -- "$DISK")" "$disk_identity"
-    # v10 removes R535 page-unsafe target/source modes and clears every old
-    # GraphicsDrivers cache so an existing VM cannot restore 1680x1050.
-    printf 'host-edid-sync-v10-r535-page-safe\n'
+    # v11 keeps the R535 page-safe policy and adds exact R570 EDID-only
+    # authentication without importing R535 NV_Modes into the newer branch.
+    printf 'host-edid-sync-v11-reviewed-stack-page-safe\n'
 } | sha256sum | awk '{print $1}')
 
 if (( ! FORCE )) && [[ -r "$MARKER" ]] && grep -qxF "$spec_hash" "$MARKER"; then

@@ -219,7 +219,19 @@ if ((${#DELETE_QCOW2[@]})); then
         echo "[delete-vm] 缺少 lsof，无法确认待删除磁盘未被打开" >&2
         exit 1
     fi
+    INSTANCE_BASE_PIN=$(vm_storage_instance_base_pin_path "$VM_ID") || exit 1
     for f in "${DELETE_QCOW2[@]}"; do
+        # `.base.qcow2` is an instance-owned hard-link pin.  lsof selects by
+        # device/inode, so a QEMU process opening another VM's pin for the same
+        # immutable base inode is reported against this pathname as well.  The
+        # writable overlay remains covered by the open-file check below, while
+        # the start lock and QEMU-name guard above still protect this VM.
+        if [[ "$f" == "$INSTANCE_BASE_PIN" && -f "$f" && ! -L "$f" ]]; then
+            base_pin_links=$(stat -Lc '%h' -- "$f" 2>/dev/null || echo 0)
+            if (( base_pin_links > 1 )); then
+                continue
+            fi
+        fi
         holders=$(lsof -t -- "$f" 2>/dev/null | paste -sd, - || true)
         if [[ -n "$holders" ]]; then
             echo "[delete-vm] 磁盘仍被进程打开，拒绝删除: $f (pids=$holders)" >&2

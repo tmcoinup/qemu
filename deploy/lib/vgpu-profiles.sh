@@ -207,6 +207,29 @@ vgpu_profile_native_grid_pnp_id() {
     esac
 }
 
+# Guest-visible production GRID transport. The physical V100/R535 resource is
+# still 1DB1/125A inside the host mdev, but the generalized Windows template
+# and the unmodified signed GRID 538.33 package are bound to the reviewed
+# RTX6000 1Q/2Q transport IDs. QEMU presents this tuple only at the outer PCI
+# config layer; protected user-mode tools may still project the selected AIB.
+vgpu_profile_guest_grid_pnp_id() {
+    local mdev_profile=$1 resource_profile=${2:-}
+
+    case "$mdev_profile|$resource_profile" in
+        'nvidia-256|V100X-1Q'|'nvidia-256|'|'nvidia-256|nvidia-256')
+            printf '%s\n' 'PCI\VEN_10DE&DEV_1E30&SUBSYS_132510DE'
+            ;;
+        'nvidia-257|'|'nvidia-257|nvidia-257')
+            printf '%s\n' 'PCI\VEN_10DE&DEV_1E30&SUBSYS_132610DE'
+            ;;
+        *)
+            printf 'vGPU guest GRID transport 没有受支持的 mdev/resource/PnP 映射: %s/%s\n' \
+                "$mdev_profile" "${resource_profile:-default}" >&2
+            return 1
+            ;;
+    esac
+}
+
 # NVAPI/GPU-Z and NV2080_CTRL_FB_GET_INFO_V2 use different numeric domains
 # for the memory maker.  Samsung and Hynix happen to match; Micron is 10 in
 # the private NVAPI projection but 0x0F in NVIDIA's RM control ABI.

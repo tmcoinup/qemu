@@ -70,10 +70,14 @@ reset_complete_entries=(
     Template-Reset/GuestPerformance
     Template-Reset/GuestPerformance/Optimize-Guest.ps1
 )
-current_entries=(
+pre_storage_portability_entries=(
     "${reset_complete_entries[@]}"
     Assert-G11-Sysprep-Servicing-Ready.ps1
     Invoke-G11-Sysprep.ps1
+)
+current_entries=(
+    "${pre_storage_portability_entries[@]}"
+    Prepare-G11-Storage-Portability.ps1
 )
 mapfile -t legacy_entries < <(printf '%s\n' "${legacy_entries[@]}" | sort)
 mapfile -t previous_complete_entries < <(
@@ -84,6 +88,9 @@ mapfile -t diagnostic_complete_entries < <(
 )
 mapfile -t reset_complete_entries < <(
     printf '%s\n' "${reset_complete_entries[@]}" | sort
+)
+mapfile -t pre_storage_portability_entries < <(
+    printf '%s\n' "${pre_storage_portability_entries[@]}" | sort
 )
 mapfile -t current_entries < <(printf '%s\n' "${current_entries[@]}" | sort)
 
@@ -128,6 +135,7 @@ if [[ -e "$OUTPUT" || -L "$OUTPUT" ]]; then
             ! arrays_equal existing_entries previous_complete_entries &&
             ! arrays_equal existing_entries diagnostic_complete_entries &&
             ! arrays_equal existing_entries reset_complete_entries &&
+            ! arrays_equal existing_entries pre_storage_portability_entries &&
             ! arrays_equal existing_entries current_entries; then
         echo "[g11-sysprep-kit] existing output contains unknown/missing entries; refusing replacement" >&2
         exit 1
@@ -164,6 +172,7 @@ PUBLIC_SOURCES=(
     "$here/guest/Assert-G11-Template-Ready.ps1"
     "$here/guest/Assert-G11-Sysprep-Servicing-Ready.ps1"
     "$here/guest/Reset-G11-Template-State.ps1"
+    "$here/guest/Prepare-G11-Storage-Portability.ps1"
     "$here/guest/Collect-Sysprep-Diagnostics.ps1"
     "$here/guest/Invoke-G11-Sysprep.ps1"
     "$here/guest/G11-Sysprep-README.txt"
@@ -246,6 +255,8 @@ install -m 0600 -- "$here/guest/Assert-G11-Sysprep-Servicing-Ready.ps1" \
     "$STAGE/Assert-G11-Sysprep-Servicing-Ready.ps1"
 install -m 0600 -- "$here/guest/Reset-G11-Template-State.ps1" \
     "$STAGE/Reset-G11-Template-State.ps1"
+install -m 0600 -- "$here/guest/Prepare-G11-Storage-Portability.ps1" \
+    "$STAGE/Prepare-G11-Storage-Portability.ps1"
 install -m 0600 -- "$here/guest/Collect-Sysprep-Diagnostics.ps1" \
     "$STAGE/Collect-Sysprep-Diagnostics.ps1"
 install -m 0600 -- "$here/guest/Invoke-G11-Sysprep.ps1" \
@@ -301,5 +312,5 @@ if [[ -n "$BACKUP" ]]; then
 fi
 trap - EXIT
 echo "[g11-sysprep-kit] PASS: $OUTPUT"
-echo "[g11-sysprep-kit] security/servicing gates, quiet Sysprep runner, rollback helpers, public payload, and Guest Lite EXE collected"
+echo "[g11-sysprep-kit] security/servicing/storage gates, quiet Sysprep runner, rollback helpers, public payload, and Guest Lite EXE collected"
 echo '把整个目录复制为 C:\G11SysprepKit（不要放进 ProgramData），然后只以管理员身份运行 Seal-G11-Template.cmd。'

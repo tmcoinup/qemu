@@ -380,6 +380,7 @@ fi
 
 FIRST_BOOT_SOURCE="$here/guest/finalize-g11-clone.ps1"
 RETRY_SOURCE="$here/guest/Retry-Clone-Initialization.cmd"
+STORAGE_PORTABILITY_SOURCE="$here/guest/Prepare-G11-Storage-Portability.ps1"
 SYSPREP_ANSWER_SOURCE="$here/autounattend/g11-sysprep-clone.xml"
 GUEST_LITE_SOURCE_ROOT="$here/guest/guest-lite"
 GUEST_LITE_MANIFEST_SOURCE="$GUEST_LITE_SOURCE_ROOT/clone-manifest.json"
@@ -392,10 +393,12 @@ GUEST_LITE_ASSETS=(
 )
 FIRST_BOOT_SHA256=""
 RETRY_SHA256=""
+STORAGE_PORTABILITY_SHA256=""
 SYSPREP_ANSWER_SHA256=""
 GUEST_LITE_MANIFEST_SHA256=""
 if ((SITE_PRIVATE)); then
-    for private_asset in "$FIRST_BOOT_SOURCE" "$RETRY_SOURCE" "$SYSPREP_ANSWER_SOURCE"; do
+    for private_asset in "$FIRST_BOOT_SOURCE" "$RETRY_SOURCE" \
+            "$STORAGE_PORTABILITY_SOURCE" "$SYSPREP_ANSWER_SOURCE"; do
         [[ -f "$private_asset" && ! -L "$private_asset" && -s "$private_asset" ]] ||
             die "private Sysprep asset is missing or unsafe: $private_asset"
     done
@@ -411,6 +414,7 @@ if ((SITE_PRIVATE)); then
     done
     FIRST_BOOT_SHA256=$(sha256_upper "$FIRST_BOOT_SOURCE")
     RETRY_SHA256=$(sha256_upper "$RETRY_SOURCE")
+    STORAGE_PORTABILITY_SHA256=$(sha256_upper "$STORAGE_PORTABILITY_SOURCE")
     SYSPREP_ANSWER_SHA256=$(sha256_upper "$SYSPREP_ANSWER_SOURCE")
     GUEST_LITE_MANIFEST_SHA256=$(sha256_upper "$GUEST_LITE_MANIFEST_SOURCE")
     FINALIZER_GUEST_LITE_MANIFEST_SHA256=$(sed -n \
@@ -419,6 +423,12 @@ if ((SITE_PRIVATE)); then
     [[ "$FINALIZER_GUEST_LITE_MANIFEST_SHA256" == \
        "$GUEST_LITE_MANIFEST_SHA256" ]] ||
         die 'Guest Lite manifest is not pinned by the clone finalizer'
+    FINALIZER_STORAGE_PORTABILITY_SHA256=$(sed -n \
+        "s/^\\\$ExpectedStoragePortabilitySha256 = '\([0-9A-F]\{64\}\)'$/\1/p" \
+        "$FIRST_BOOT_SOURCE")
+    [[ "$FINALIZER_STORAGE_PORTABILITY_SHA256" == \
+       "$STORAGE_PORTABILITY_SHA256" ]] ||
+        die 'storage portability helper is not pinned by the clone finalizer'
 fi
 
 storage_uid=$(stat -c %u -- "$BASE")
@@ -1015,14 +1025,22 @@ mv -fT -- "$PORTABLE_DEST_TMP" "$DEST_DIR/VgpuPortable.exe"
 if ((SITE_PRIVATE)); then
     FIRST_BOOT_DEST_TMP="$DEST_DIR/.Finalize-Clone.ps1.new.$$"
     RETRY_DEST_TMP="$DEST_DIR/.Retry-Clone-Initialization.cmd.new.$$"
+    STORAGE_PORTABILITY_DEST_TMP="$DEST_DIR/.Prepare-G11-Storage-Portability.ps1.new.$$"
     cp --reflink=never -- "$FIRST_BOOT_SOURCE" "$FIRST_BOOT_DEST_TMP"
     cp --reflink=never -- "$RETRY_SOURCE" "$RETRY_DEST_TMP"
-    sync -- "$FIRST_BOOT_DEST_TMP" "$RETRY_DEST_TMP"
+    cp --reflink=never -- "$STORAGE_PORTABILITY_SOURCE" \
+        "$STORAGE_PORTABILITY_DEST_TMP"
+    sync -- "$FIRST_BOOT_DEST_TMP" "$RETRY_DEST_TMP" \
+        "$STORAGE_PORTABILITY_DEST_TMP"
     [[ "$(sha256_upper "$FIRST_BOOT_DEST_TMP")" == "$FIRST_BOOT_SHA256" &&
-       "$(sha256_upper "$RETRY_DEST_TMP")" == "$RETRY_SHA256" ]] ||
+       "$(sha256_upper "$RETRY_DEST_TMP")" == "$RETRY_SHA256" &&
+       "$(sha256_upper "$STORAGE_PORTABILITY_DEST_TMP")" == \
+          "$STORAGE_PORTABILITY_SHA256" ]] ||
         die "private first-boot asset verification failed inside the base image"
     mv -fT -- "$FIRST_BOOT_DEST_TMP" "$DEST_DIR/Finalize-Clone.ps1"
     mv -fT -- "$RETRY_DEST_TMP" "$DEST_DIR/Retry-Clone-Initialization.cmd"
+    mv -fT -- "$STORAGE_PORTABILITY_DEST_TMP" \
+        "$DEST_DIR/Prepare-G11-Storage-Portability.ps1"
 
     GUEST_LITE_DEST="$DEST_DIR/GuestLite"
     rm -rf -- "$GUEST_LITE_DEST"
@@ -1061,6 +1079,8 @@ sync
 if ((SITE_PRIVATE)); then
     [[ "$(sha256_upper "$DEST_DIR/Finalize-Clone.ps1")" == "$FIRST_BOOT_SHA256" &&
        "$(sha256_upper "$DEST_DIR/Retry-Clone-Initialization.cmd")" == "$RETRY_SHA256" &&
+       "$(sha256_upper "$DEST_DIR/Prepare-G11-Storage-Portability.ps1")" == \
+          "$STORAGE_PORTABILITY_SHA256" &&
        "$(sha256_upper "$MOUNT_DIR/Windows/Panther/unattend.xml")" == "$SYSPREP_ANSWER_SHA256" ]] ||
         die "published private Sysprep assets are incorrect"
     verify_guest_lite_dir "$DEST_DIR/GuestLite" ||
@@ -1074,7 +1094,7 @@ if ((SITE_PRIVATE)); then
        ! -e "$MOUNT_DIR/ProgramData/G11/SystemNvapiProjection" &&
        ! -e "$DEST_DIR/logs" ]] ||
         die "private base retained a generic EXE or previous clone result"
-    log "installed one driver-bound licensed receipt schema $PORTABLE_RECEIPT_SCHEMA EXE, pinned Guest Lite 2.6.7, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
+    log "installed one driver-bound licensed receipt schema $PORTABLE_RECEIPT_SCHEMA EXE, pinned Guest Lite 2.6.7, SATA/NVMe portability helper, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
 elif ((WITH_GPUZ)); then
     [[ "$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256" &&
        "$(stat -c %s -- "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_BYTES" ]] ||

@@ -138,6 +138,7 @@ MOUNTED=1
 
 GUEST_MARKER="$MOUNT_DIR/ProgramData/VMate/G11/clone-initialization.json"
 GUEST_ERROR="$MOUNT_DIR/ProgramData/VMate/G11/clone-initialization-error.txt"
+STORAGE_PORTABILITY_MARKER="$MOUNT_DIR/ProgramData/VMate/G11/storage-controller-portability.json"
 PORTABLE_RESULT="$MOUNT_DIR/ProgramData/QemuGpuZProfile/last-result.json"
 if [[ ! -f "$GUEST_MARKER" || -L "$GUEST_MARKER" ]]; then
     if [[ -f "$GUEST_ERROR" && ! -L "$GUEST_ERROR" ]]; then
@@ -152,6 +153,27 @@ if [[ ! -f "$GUEST_MARKER" || -L "$GUEST_MARKER" ]]; then
 fi
 [[ -f "$PORTABLE_RESULT" && ! -L "$PORTABLE_RESULT" ]] ||
     die "licensed VgpuPortable final result is missing"
+[[ -f "$STORAGE_PORTABILITY_MARKER" && ! -L "$STORAGE_PORTABILITY_MARKER" ]] ||
+    die "SATA/NVMe storage portability receipt is missing"
+jq -e '
+    (keys | sort) == ["contract", "controllers", "schemaVersion", "services"] and
+    .schemaVersion == 1 and
+    .contract == "g11-windows-storage-controller-portability-v1" and
+    .controllers == ["q35-ich9-ahci", "qemu-nvme"] and
+    (.services | keys | sort) == ["storahci", "stornvme"] and
+    (.services.storahci | keys | sort) == ["start", "startOverride0"] and
+    (.services.stornvme | keys | sort) == ["start", "startOverride0"] and
+    .services.storahci.start == 0 and
+    .services.storahci.startOverride0 == 0 and
+    .services.stornvme.start == 0 and
+    .services.stornvme.startOverride0 == 0
+' "$STORAGE_PORTABILITY_MARKER" >/dev/null ||
+    die "SATA/NVMe storage portability receipt is invalid"
+for storage_driver in storahci.sys stornvme.sys; do
+    [[ -f "$MOUNT_DIR/Windows/System32/drivers/$storage_driver" &&
+       ! -L "$MOUNT_DIR/Windows/System32/drivers/$storage_driver" ]] ||
+        die "Windows inbox storage driver is missing: $storage_driver"
+done
 
 describe_guest_marker_mismatch() {
     echo "[g11-clone-verify] guest marker diagnostics:" >&2
@@ -436,4 +458,4 @@ COMPLETED=1
 trap - EXIT HUP INT TERM
 rmdir -- "$MOUNT_DIR"
 printf 'G11_SAFE_IDENTITY_JSON=%s\n' "$SAFE_IDENTITY_JSON"
-echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / Guest Lite 2.6.7 fast path + Game Mode + Game DVR off + NVIDIA maximum performance + DNF High-on-launch + stale Temp cleaned + reviewed background processes stopped + audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc Automatic/Running / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"
+echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / SATA+NVMe boot paths / Guest Lite 2.6.7 fast path + Game Mode + Game DVR off + NVIDIA maximum performance + DNF High-on-launch + stale Temp cleaned + reviewed background processes stopped + audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc Automatic/Running / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"

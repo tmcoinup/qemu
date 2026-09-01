@@ -12,6 +12,8 @@ $Portable = Join-Path $Root 'VgpuPortable.exe'
 $Result = Join-Path $env:ProgramData 'QemuGpuZProfile\last-result.json'
 $Marker = Join-Path $Root 'clone-initialization.json'
 $ErrorFile = Join-Path $Root 'clone-initialization-error.txt'
+$StoragePortability = Join-Path $Root 'Prepare-G11-Storage-Portability.ps1'
+$ExpectedStoragePortabilitySha256 = '975C945D370F0EC9E6CF1C77FA6340E2F15D3A8C5BA134C3E1B4245E09391F07'
 $DlsHost = 'dls.gvmates.com'
 $DlsPort = 443
 $ExpectedDriver = '31.0.15.3833'
@@ -1199,6 +1201,14 @@ try {
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
         throw "VMate G-11 directory is missing: $Root"
     }
+    if (-not (Test-Path -LiteralPath $StoragePortability -PathType Leaf)) {
+        throw "Storage portability helper is missing: $StoragePortability"
+    }
+    if ((Get-Sha256 $StoragePortability) -cne
+        $ExpectedStoragePortabilitySha256) {
+        throw 'Storage portability helper differs from the pinned clone payload.'
+    }
+    & $StoragePortability
     $guestUuid = Get-GuestUuid
     $osIdentity = Get-WindowsOsIdentity
     $receipt = $null

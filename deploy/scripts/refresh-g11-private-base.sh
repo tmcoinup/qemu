@@ -122,8 +122,9 @@ FINALIZER="$here/guest/finalize-g11-clone.ps1"
 RETRY="$here/guest/Retry-Clone-Initialization.cmd"
 SYSPREP_ANSWER="$here/autounattend/g11-sysprep-clone.xml"
 GUEST_LITE_MANIFEST="$here/guest/guest-lite/clone-manifest.json"
+STORAGE_PORTABILITY="$here/guest/Prepare-G11-Storage-Portability.ps1"
 for payload in "$FINALIZER" "$RETRY" "$SYSPREP_ANSWER" \
-        "$GUEST_LITE_MANIFEST"; do
+        "$GUEST_LITE_MANIFEST" "$STORAGE_PORTABILITY"; do
     [[ -f "$payload" && ! -L "$payload" && -s "$payload" ]] ||
         die "current private clone payload is missing or unsafe: $payload"
 done
@@ -131,11 +132,17 @@ FINALIZER_SHA256=$(sha256_upper "$FINALIZER")
 RETRY_SHA256=$(sha256_upper "$RETRY")
 SYSPREP_ANSWER_SHA256=$(sha256_upper "$SYSPREP_ANSWER")
 GUEST_LITE_MANIFEST_SHA256=$(sha256_upper "$GUEST_LITE_MANIFEST")
+STORAGE_PORTABILITY_SHA256=$(sha256_upper "$STORAGE_PORTABILITY")
 PINNED_MANIFEST_SHA256=$(sed -n \
     "s/^\\\$ExpectedGuestLiteManifestSha256 = '\\([0-9A-F]\\{64\\}\\)'$/\\1/p" \
     "$FINALIZER")
 [[ "$PINNED_MANIFEST_SHA256" == "$GUEST_LITE_MANIFEST_SHA256" ]] ||
     die "current finalizer does not pin the current Guest Lite manifest"
+PINNED_STORAGE_SHA256=$(sed -n \
+    "s/^\\\$ExpectedStoragePortabilitySha256 = '\([0-9A-F]\{64\}\)'$/\1/p" \
+    "$FINALIZER")
+[[ "$PINNED_STORAGE_SHA256" == "$STORAGE_PORTABILITY_SHA256" ]] ||
+    die "current finalizer does not pin the storage portability helper"
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
     .schemaVersion == 1 and .profileVersion == "2.6.7"
@@ -231,7 +238,7 @@ fi
 
 if ((CHECK_ONLY)); then
     if ((CURRENT)); then
-        echo "[g11-base-refresh] PASS: $BASE_NAME already embeds marker schema 4 / Guest Lite 2.6.7"
+        echo "[g11-base-refresh] PASS: $BASE_NAME already embeds marker schema 4 / Guest Lite 2.6.7 / SATA+NVMe helper"
         exit 0
     fi
     echo "[g11-base-refresh] STALE: $BASE_NAME must be refreshed before another clone" >&2
@@ -268,7 +275,7 @@ echo "[g11-base-refresh] atomically refreshing $BASE_NAME; existing clone pins a
 "$here/scripts/export-vgpu-base.sh" --in-place "$BASE_NAME" "$VM_BASE_DIR"
 
 cat <<EOF
-[g11-base-refresh] PASS: $BASE_NAME now embeds marker schema 4 / Guest Lite 2.6.7
+[g11-base-refresh] PASS: $BASE_NAME now embeds marker schema 4 / Guest Lite 2.6.7 / SATA+NVMe helper
 
 后续克隆直接运行：
   ./deploy/scripts/clone-from-base.sh $BASE_NAME NEW_VM_ID --start

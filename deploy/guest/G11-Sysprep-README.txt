@@ -18,7 +18,8 @@ VMate G-11 模板封装工具
    并验证后再封装。
 6. 把完整工具包放在 C:\G11SysprepKit；不要放进 C:\ProgramData\VMate\G11 或其
    子目录。右键“以管理员身份运行” Seal-G11-Template.cmd。
-7. 确认后依次执行：只读模板门禁 → 按原基线回滚并清理克隆状态 → 把 Payload 中的
+7. 确认后依次执行：只读模板门禁 → 按原基线回滚并清理克隆状态 → 启用并验证
+   Windows 自带 storahci/stornvme 双启动路径 → 把 Payload 中的
    Finalize、Retry 和 Guest Lite 归集到 C:\ProgramData\VMate\G11 → 只读检查
    Windows 更新/组件维护 → Sysprep /generalize /oobe /shutdown /quiet。发现明确的
    待更新/待重启状态时不会启动 Sysprep。
@@ -30,6 +31,7 @@ package-g11-sysprep-kit.sh 一次编译并生成这个完整的公开、无凭�
 - Assert-G11-Template-Ready.ps1（只读检查篡改防护和 VM 绑定投影）；
 - Assert-G11-Sysprep-Servicing-Ready.ps1（只读检查待重启/更新/组件维护）；
 - Reset-G11-Template-State.ps1 与 Template-Reset（按保存基线安全回滚实验状态）；
+- Prepare-G11-Storage-Portability.ps1（启用并复核微软内置 SATA/NVMe 启动驱动）；
 - Invoke-G11-Sysprep.ps1（静默运行 Sysprep，并按本次新增日志判定成败）；
 - Collect-Sysprep-Diagnostics.ps1（Sysprep 失败时只读收集原因）；
 - Payload\Finalize-Clone.ps1、Payload\Retry-Clone-Initialization.cmd；
@@ -44,6 +46,9 @@ Guest Lite，也不需要手工复制 Finalize 或 Retry。
 应答文件会隐藏 OOBE 页面，但不会跳过 generalize。每台克隆仍会生成独立的
 Windows SID、MachineGuid 和计算机名。不会启用 testsigning/nointegritychecks，
 不会修改 BCD，也不会安装测试签名或自签名内核驱动。
+SATA 配置的旧母盘克隆首次初始化会临时以 NVMe 启动；来宾生成双控制器校验回执且
+宿主离线复核后，后续启动才切回 vm.conf 中的 SATA/AHCI。这避免创建出停在 UEFI
+启动项上的“假成功”虚拟机。
 无人值守只临时使用本机控制台空密码 Administrator；成功前会清除自动登录并禁用
 该内置账户，不会把空密码管理员留给最终用户。
 每 VM 系统 NVAPI 包由 VMate 克隆时自动生成并以只读光盘临时挂载；模板里不要

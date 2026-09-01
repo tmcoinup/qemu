@@ -13,6 +13,7 @@ set "DIAGNOSTIC=%~dp0Collect-Sysprep-Diagnostics.ps1"
 set "READINESS=%~dp0Assert-G11-Template-Ready.ps1"
 set "SERVICING_READINESS=%~dp0Assert-G11-Sysprep-Servicing-Ready.ps1"
 set "RESET=%~dp0Reset-G11-Template-State.ps1"
+set "STORAGE_PORTABILITY=%~dp0Prepare-G11-Storage-Portability.ps1"
 set "SYSPREP_RUNNER=%~dp0Invoke-G11-Sysprep.ps1"
 if not exist "%ANSWER%" (
   echo [ERROR] Missing %ANSWER%
@@ -35,6 +36,7 @@ for %%F in (
   "%READINESS%"
   "%SERVICING_READINESS%"
   "%RESET%"
+  "%STORAGE_PORTABILITY%"
   "%SYSPREP_RUNNER%"
   "%~dp0Template-Reset\GuestLite\G11-Guest-Lite.ps1"
   "%~dp0Template-Reset\GuestPerformance\Optimize-Guest.ps1"
@@ -59,6 +61,7 @@ if errorlevel 1 (
 echo This will generalize Windows, skip interactive OOBE in every clone,
 echo roll back clone-bound experiment state, stage the complete public first-boot
 echo payload, and fully shut down this template.
+echo It also enables and verifies the inbox storahci/stornvme boot paths.
 echo Do not boot this source again after success.
 echo.
 choice /C YN /N /M "Continue? [Y/N] "
@@ -74,6 +77,13 @@ if errorlevel 1 (
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%RESET%"
 if errorlevel 1 (
   echo [ERROR] Clone-bound state could not be reset. Sysprep was not started.
+  pause
+  exit /b 1
+)
+
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%STORAGE_PORTABILITY%"
+if errorlevel 1 (
+  echo [ERROR] SATA/NVMe storage portability preparation failed. Sysprep was not started.
   pause
   exit /b 1
 )
@@ -101,9 +111,13 @@ copy /b /y "%PAYLOAD%\Finalize-Clone.ps1" "%DEST%\Finalize-Clone.ps1.new" >nul
 if errorlevel 1 goto :stage_error
 copy /b /y "%PAYLOAD%\Retry-Clone-Initialization.cmd" "%DEST%\Retry-Clone-Initialization.cmd.new" >nul
 if errorlevel 1 goto :stage_error
+copy /b /y "%STORAGE_PORTABILITY%" "%DEST%\Prepare-G11-Storage-Portability.ps1.new" >nul
+if errorlevel 1 goto :stage_error
 move /y "%DEST%\Finalize-Clone.ps1.new" "%DEST%\Finalize-Clone.ps1" >nul
 if errorlevel 1 goto :stage_error
 move /y "%DEST%\Retry-Clone-Initialization.cmd.new" "%DEST%\Retry-Clone-Initialization.cmd" >nul
+if errorlevel 1 goto :stage_error
+move /y "%DEST%\Prepare-G11-Storage-Portability.ps1.new" "%DEST%\Prepare-G11-Storage-Portability.ps1" >nul
 if errorlevel 1 goto :stage_error
 if exist "%DEST%\GuestLite" rmdir /s /q "%DEST%\GuestLite"
 if exist "%DEST%\GuestLite" goto :stage_error

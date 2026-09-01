@@ -1683,6 +1683,25 @@ if [[ -n "${GPU_VRAM_MB:-}" && "$VGPU_FB_MB" != "$GPU_VRAM_MB" ]]; then
     exit 2
 fi
 
+VGPU_GUEST_TRANSPORT_PNP_ID=""
+VGPU_GUEST_TRANSPORT_PCI_VID=""
+VGPU_GUEST_TRANSPORT_PCI_DID=""
+VGPU_GUEST_TRANSPORT_SUB_DID=""
+VGPU_GUEST_TRANSPORT_SUB_VID=""
+if [[ "$SPOOF_MODE" == B ]]; then
+    VGPU_GUEST_TRANSPORT_PNP_ID=$(vgpu_profile_guest_grid_pnp_id \
+        "$VGPU_MDEV_PROFILE" "$VGPU_RESOURCE_PROFILE") || exit $?
+    if [[ "$VGPU_GUEST_TRANSPORT_PNP_ID" =~ ^PCI\\VEN_([0-9A-F]{4})\&DEV_([0-9A-F]{4})\&SUBSYS_([0-9A-F]{4})([0-9A-F]{4})$ ]]; then
+        VGPU_GUEST_TRANSPORT_PCI_VID="0x${BASH_REMATCH[1]}"
+        VGPU_GUEST_TRANSPORT_PCI_DID="0x${BASH_REMATCH[2]}"
+        VGPU_GUEST_TRANSPORT_SUB_DID="0x${BASH_REMATCH[3]}"
+        VGPU_GUEST_TRANSPORT_SUB_VID="0x${BASH_REMATCH[4]}"
+    else
+        echo "[start-vm] guest GRID transport PnP 合同非法: $VGPU_GUEST_TRANSPORT_PNP_ID" >&2
+        exit 2
+    fi
+fi
+
 # Input contract v2 binds a stable profile id to every descriptor fact that
 # this QEMU implementation can project.  serial-policy=none means descriptor
 # iSerialNumber=0 and therefore no `serial=` property is ever constructed.
@@ -3148,6 +3167,7 @@ esac
 G11_INIT_REQUIRED="$SELECTED_VM_DIR/.g11-init-required"
 G11_INIT_ISO=""
 G11_INIT_CONTRACT_ID=""
+G11_STORAGE_BOOTSTRAP=0
 if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
     [[ -f "$G11_INIT_REQUIRED" && ! -L "$G11_INIT_REQUIRED" ]] || {
         echo "[start-vm] G-11 初始化标记类型不安全，拒绝启动: $G11_INIT_REQUIRED" >&2
@@ -3218,6 +3238,13 @@ if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
         echo "[start-vm] G-11 首次启动尚未完成；将自动安装系统 NVAPI、重启验收并关机"
     fi
     MONITOR_SYNC=0
+    if [[ "$SSD_INTERFACE" == sata ]]; then
+        # A historical generalized base may only have enumerated NVMe before
+        # cloning. Keep the private first-boot gate on the proven controller;
+        # Finalize enables/verifies storahci and the host removes this marker
+        # only after an offline receipt check. The next boot then uses SATA.
+        G11_STORAGE_BOOTSTRAP=1
+    fi
 fi
 
 case "$REPAIR_DISPLAY_VARS" in
@@ -4446,6 +4473,23 @@ case "$MODE" in
             fi
         done
         unset VGPU_ROOT_PORT_HELP root_port_prop
+        if [[ "$SPOOF_MODE" == B &&
+              "$SIGNED_CONSUMER_PRODUCTION_ACTIVE" != 1 ]]; then
+            if ! VGPU_ENDPOINT_HELP=$(
+                    "$QEMU_BIN" -device vfio-pci-nohotplug,help 2>&1
+                ); then
+                echo "[start-vm] QEMU 缺 vfio-pci-nohotplug 支持" >&2
+                exit 1
+            fi
+            for endpoint_prop in x-pci-vendor-id x-pci-device-id \
+                    x-pci-sub-vendor-id x-pci-sub-device-id; do
+                if ! grep -q "^  ${endpoint_prop}=" <<<"$VGPU_ENDPOINT_HELP"; then
+                    echo "[start-vm] QEMU vGPU endpoint 缺 ${endpoint_prop} 支持" >&2
+                    exit 1
+                fi
+            done
+            unset VGPU_ENDPOINT_HELP endpoint_prop
+        fi
         ;;
 esac
 
@@ -4893,7 +4937,9 @@ DRIVE_ARGS+=( -drive "file=${DISK},if=none,id=ssd0,discard=unmap,detect-zeroes=u
 # 固定 00:01.0：避免在 std-vga/vGPU 模式间切换时自动分配漂移，
 # 使已持久化的 NVMe Boot#### device path 继续有效。
 : "${SSD_FIRMWARE_REV:=1.0}"
-case "$SSD_INTERFACE" in
+EFFECTIVE_SSD_INTERFACE=$SSD_INTERFACE
+((G11_STORAGE_BOOTSTRAP == 0)) || EFFECTIVE_SSD_INTERFACE=nvme
+case "$EFFECTIVE_SSD_INTERFACE" in
     sata)
         DRIVE_ARGS+=( -device "ide-hd,drive=ssd0,bus=ide.1,unit=0,bootindex=2,serial=${SSD_SN},model=${SSD_MODEL},ver=${SSD_FIRMWARE_REV},logical_block_size=${SSD_LOGICAL_BLOCK_SIZE},physical_block_size=${SSD_PHYSICAL_BLOCK_SIZE},rotation_rate=1" )
         ;;
@@ -5011,6 +5057,17 @@ attach_vgpu_root_port() {
     GFX_ARGS+=(
         -device "pcie-root-port,id=gpu-root-port,bus=pcie.0,addr=0x10,port=0x10,chassis=1,slot=1,hotplug=off,x-speed=${GPU_ROOT_PORT_SPEED},x-width=${gpu_link_width},x-pci-vendor-id=0x8086,x-pci-device-id=${GPU_ROOT_PORT_DEVICE_ID},x-pci-revision=${GPU_ROOT_PORT_REVISION}"
     )
+}
+
+append_vgpu_pci_identity_options() {
+    if [[ "$SPOOF_MODE" == A ||
+          "$SIGNED_CONSUMER_PRODUCTION_ACTIVE" == 1 ]]; then
+        vfio_opts+=",x-pci-vendor-id=${GPU_PCI_VID},x-pci-device-id=${GPU_PCI_DID}"
+        vfio_opts+=",x-pci-sub-vendor-id=${GPU_SUB_VID},x-pci-sub-device-id=${GPU_SUB_DID}"
+    elif [[ "$SPOOF_MODE" == B ]]; then
+        vfio_opts+=",x-pci-vendor-id=${VGPU_GUEST_TRANSPORT_PCI_VID},x-pci-device-id=${VGPU_GUEST_TRANSPORT_PCI_DID}"
+        vfio_opts+=",x-pci-sub-vendor-id=${VGPU_GUEST_TRANSPORT_SUB_VID},x-pci-sub-device-id=${VGPU_GUEST_TRANSPORT_SUB_DID}"
+    fi
 }
 
 allocate_vgpu() {
@@ -5221,6 +5278,7 @@ case "$MODE" in
         allocate_vgpu || exit 1
         attach_vgpu_root_port || exit 1
         vfio_opts="sysfsdev=/sys/bus/mdev/devices/${MDEV_UUID},display=off,enable-migration=off,bus=gpu-root-port,addr=0x0,rombar=0"
+        append_vgpu_pci_identity_options
         GFX_ARGS+=(
             -device "vfio-pci-nohotplug,${vfio_opts}"
             -vga none
@@ -5249,14 +5307,9 @@ case "$MODE" in
             vfio_opts="sysfsdev=/sys/bus/mdev/devices/${MDEV_UUID},display=off,enable-migration=off,bus=gpu-root-port,addr=0x0"
             [[ "$VGPU_ROMBAR" != auto ]] && vfio_opts+=",rombar=${VGPU_ROMBAR}"
             [[ -n "$VGPU_ROMFILE" ]] && vfio_opts+=",romfile=${VGPU_ROMFILE}"
-            if [[ "$SPOOF_MODE" == "A" ||
-                  "$SIGNED_CONSUMER_PRODUCTION_ACTIVE" == 1 ]]; then
-                # 方案 A：vfio 把 PCI config space 的 vendor/device/sub-* 改成消费卡 ID。
-                # ⚠️ 装 GRID 驱动阶段必须 --no-spoof (SPOOF_MODE=off)，
-                #    否则 INF 匹配不到消费卡 ID 导致 -436207360。
-                vfio_opts+=",x-pci-vendor-id=${GPU_PCI_VID},x-pci-device-id=${GPU_PCI_DID}"
-                vfio_opts+=",x-pci-sub-vendor-id=${GPU_SUB_VID},x-pci-sub-device-id=${GPU_SUB_DID}"
-            fi  # B / off: 不改 PCI config，driver 看真 RTX 6000
+            # B presents the signed GRID transport (DEV_1E30); A/qualified
+            # consumer mode uses its separately attested full PCI tuple.
+            append_vgpu_pci_identity_options
             GFX_ARGS+=( -device "vfio-pci,${vfio_opts}" )
             # -vga none: 不挂 std-vga，Windows Device Manager 里就不会有
             # "Microsoft 基本显示适配器"。纯 vGPU + Microsoft Remote Display
@@ -5278,11 +5331,7 @@ case "$MODE" in
         vfio_opts+=",bus=gpu-root-port,addr=0x0"
         [[ "$VGPU_ROMBAR" != auto ]] && vfio_opts+=",rombar=${VGPU_ROMBAR}"
         [[ -n "$VGPU_ROMFILE" ]] && vfio_opts+=",romfile=${VGPU_ROMFILE}"
-        if [[ "$SPOOF_MODE" == "A" ||
-              "$SIGNED_CONSUMER_PRODUCTION_ACTIVE" == 1 ]]; then
-            vfio_opts+=",x-pci-vendor-id=${GPU_PCI_VID},x-pci-device-id=${GPU_PCI_DID}"
-            vfio_opts+=",x-pci-sub-vendor-id=${GPU_SUB_VID},x-pci-sub-device-id=${GPU_SUB_DID}"
-        fi
+        append_vgpu_pci_identity_options
         GFX_ARGS+=( -device "vfio-pci-nohotplug,${vfio_opts}" -vga none )
         case "$MODE" in
             vgpu-sdl)
@@ -5507,6 +5556,9 @@ if [[ "$SSD_INTERFACE" == nvme ]]; then
 else
     echo "  SSD: ${SSD_MODEL} / ${SSD_INTERFACE}:${SSD_CONTROLLER_PROFILE} / SATA 6Gb/s ${SSD_FORM_FACTOR} / fw=${SSD_FIRMWARE_REV} / sector=${SSD_LOGICAL_BLOCK_SIZE}/${SSD_PHYSICAL_BLOCK_SIZE}B / ${SSD_SIZE_BYTES} bytes"
 fi
+if ((G11_STORAGE_BOOTSTRAP)); then
+    echo "  SSD 首次初始化: 临时使用 NVMe 启动；storahci/stornvme 离线验证通过后自动切回 SATA/AHCI"
+fi
 echo "  xHCI: qemu-xhci 1B36:000D rev01 / SUBSYS 1AF4:1100（行为身份固定；目标平台 ${XHCI_PCI_VENDOR_ID}:${XHCI_PCI_DEVICE_ID} 仅作事实校验）"
 if [[ "$MODE" == install ]]; then
     if [[ "$INSTALL_MEDIA_BACKEND" == usb ]]; then
@@ -5562,7 +5614,7 @@ case "$SPOOF_MODE" in
             echo "  GPU signed consumer: persistent outer-only ${GPU_PCI_VID#0x}:${GPU_PCI_DID#0x} SUBSYS ${GPU_SUB_DID#0x}:${GPU_SUB_VID#0x} / ${SC_DRIVER_KEY} ${SC_DRIVER_VERSION}"
             echo "  GPU signed consumer state: ${VGPU_SIGNED_CONSUMER_STATE} / experiment ${VGPU_SIGNED_CONSUMER_EXPERIMENT_ID}"
         else
-            echo "  GPU name target: ${GPU_NAME} (system PCI identity remains host mdev; catalog PCI tuple is app-local to GPU-Z/NVAPI)"
+            echo "  GPU name target: ${GPU_NAME} (system PCI transport ${VGPU_GUEST_TRANSPORT_PNP_ID}; catalog consumer tuple is app-local to GPU-Z/NVAPI)"
         fi ;;
     off)
         echo "  GPU target: disabled (profile metadata ${GPU_PROFILE} is not applied)" ;;

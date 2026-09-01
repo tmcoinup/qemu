@@ -125,9 +125,9 @@ vgpu_select_driver_stack || exit 1
     echo "[monitor-sync] ${VGPU_SELECTED_DRIVER_BRANCH:-unknown} 没有审核过的离线 monitor 策略" >&2
     exit 1
 }
-NATIVE_GRID_PNP_ID=$(vgpu_profile_native_grid_pnp_id \
+NATIVE_GRID_PNP_ID=$(vgpu_profile_guest_grid_pnp_id \
     "${VGPU_MDEV_PROFILE:-}" "$HOST_RESOURCE_PROFILE") || {
-    echo "[monitor-sync] GPU resource 没有审核过的 B/native PnP 映射" >&2
+    echo "[monitor-sync] GPU resource 没有审核过的 guest GRID PnP 映射" >&2
     exit 1
 }
 MONITOR_DRIVER_POLICY=$VGPU_SELECTED_DRIVER_MONITOR_POLICY

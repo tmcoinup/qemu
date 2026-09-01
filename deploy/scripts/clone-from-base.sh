@@ -80,6 +80,7 @@ sha256_upper() { sha256sum -- "$1" | awk '{print toupper($1)}'; }
 # created.
 CURRENT_FINALIZER="$here/guest/finalize-g11-clone.ps1"
 CURRENT_RETRY="$here/guest/Retry-Clone-Initialization.cmd"
+CURRENT_STORAGE_PORTABILITY="$here/guest/Prepare-G11-Storage-Portability.ps1"
 CURRENT_SYSPREP_ANSWER="$here/autounattend/g11-sysprep-clone.xml"
 CURRENT_GUEST_LITE_MANIFEST="$here/guest/guest-lite/clone-manifest.json"
 
@@ -414,12 +415,15 @@ if [[ "$BASE_ATTESTATION_SCHEMA" == 8 ||
     fi
 
     for current_payload in "$CURRENT_FINALIZER" "$CURRENT_RETRY" \
+            "$CURRENT_STORAGE_PORTABILITY" \
             "$CURRENT_SYSPREP_ANSWER" "$CURRENT_GUEST_LITE_MANIFEST"; do
         [[ -f "$current_payload" && ! -L "$current_payload" && -s "$current_payload" ]] ||
             die "current private clone payload is missing or unsafe: $current_payload"
     done
     CURRENT_FINALIZER_SHA256=$(sha256_upper "$CURRENT_FINALIZER")
     CURRENT_RETRY_SHA256=$(sha256_upper "$CURRENT_RETRY")
+    CURRENT_STORAGE_PORTABILITY_SHA256=$(sha256_upper \
+        "$CURRENT_STORAGE_PORTABILITY")
     CURRENT_SYSPREP_ANSWER_SHA256=$(sha256_upper "$CURRENT_SYSPREP_ANSWER")
     CURRENT_GUEST_LITE_MANIFEST_SHA256=$(sha256_upper "$CURRENT_GUEST_LITE_MANIFEST")
     FINALIZER_PINNED_GUEST_LITE_SHA256=$(sed -n \
@@ -428,6 +432,12 @@ if [[ "$BASE_ATTESTATION_SCHEMA" == 8 ||
     [[ "$FINALIZER_PINNED_GUEST_LITE_SHA256" == \
        "$CURRENT_GUEST_LITE_MANIFEST_SHA256" ]] ||
         die "current clone finalizer does not pin the current Guest Lite manifest"
+    FINALIZER_PINNED_STORAGE_SHA256=$(sed -n \
+        "s/^\\\$ExpectedStoragePortabilitySha256 = '\([0-9A-F]\{64\}\)'$/\1/p" \
+        "$CURRENT_FINALIZER")
+    [[ "$FINALIZER_PINNED_STORAGE_SHA256" == \
+       "$CURRENT_STORAGE_PORTABILITY_SHA256" ]] ||
+        die "current clone finalizer does not pin the storage portability helper"
     jq -e '
         (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
         .schemaVersion == 1 and .profileVersion == "2.6.7"

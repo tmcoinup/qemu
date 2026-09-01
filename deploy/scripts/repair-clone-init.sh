@@ -49,6 +49,7 @@ CURRENT_ROOT="$PACKAGE_PARENT/SystemNvapiProjection"
 PACKAGER="$here/package-system-nvapi-projection.sh"
 FIRST_BOOT_SOURCE="$here/guest/finalize-g11-clone.ps1"
 RETRY_SOURCE="$here/guest/Retry-Clone-Initialization.cmd"
+STORAGE_PORTABILITY_SOURCE="$here/guest/Prepare-G11-Storage-Portability.ps1"
 GUEST_LITE_SOURCE_ROOT="$here/guest/guest-lite"
 GUEST_LITE_MANIFEST_SOURCE="$GUEST_LITE_SOURCE_ROOT/clone-manifest.json"
 GUEST_LITE_ASSETS=(
@@ -70,6 +71,7 @@ GUEST_LITE_ASSETS=(
 [[ -x "$PACKAGER" && ! -L "$PACKAGER" ]] ||
     die "system NVAPI packager is missing or unsafe: $PACKAGER"
 for payload_source in "$FIRST_BOOT_SOURCE" "$RETRY_SOURCE" \
+        "$STORAGE_PORTABILITY_SOURCE" \
         "$GUEST_LITE_MANIFEST_SOURCE"; do
     [[ -f "$payload_source" && ! -L "$payload_source" && -s "$payload_source" ]] ||
         die "current clone payload is missing or unsafe: $payload_source"
@@ -82,6 +84,7 @@ for guest_lite_asset in "${GUEST_LITE_ASSETS[@]}"; do
 done
 FIRST_BOOT_SHA256=$(sha256_upper "$FIRST_BOOT_SOURCE")
 RETRY_SHA256=$(sha256_upper "$RETRY_SOURCE")
+STORAGE_PORTABILITY_SHA256=$(sha256_upper "$STORAGE_PORTABILITY_SOURCE")
 GUEST_LITE_MANIFEST_SHA256=$(sha256_upper "$GUEST_LITE_MANIFEST_SOURCE")
 FINALIZER_GUEST_LITE_MANIFEST_SHA256=$(sed -n \
     "s/^\\\$ExpectedGuestLiteManifestSha256 = '\\([0-9A-F]\\{64\\}\\)'$/\\1/p" \
@@ -89,6 +92,12 @@ FINALIZER_GUEST_LITE_MANIFEST_SHA256=$(sed -n \
 [[ "$FINALIZER_GUEST_LITE_MANIFEST_SHA256" == \
    "$GUEST_LITE_MANIFEST_SHA256" ]] ||
     die "current finalizer does not pin the current Guest Lite manifest"
+FINALIZER_STORAGE_PORTABILITY_SHA256=$(sed -n \
+    "s/^\\\$ExpectedStoragePortabilitySha256 = '\([0-9A-F]\{64\}\)'$/\1/p" \
+    "$FIRST_BOOT_SOURCE")
+[[ "$FINALIZER_STORAGE_PORTABILITY_SHA256" == \
+   "$STORAGE_PORTABILITY_SHA256" ]] ||
+    die "current finalizer does not pin the storage portability helper"
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
     .schemaVersion == 1 and .profileVersion == "2.6.7" and
@@ -372,6 +381,9 @@ publish_guest_file "$FIRST_BOOT_SOURCE" \
     "$GUEST_ROOT/Finalize-Clone.ps1" "$FIRST_BOOT_SHA256"
 publish_guest_file "$RETRY_SOURCE" \
     "$GUEST_ROOT/Retry-Clone-Initialization.cmd" "$RETRY_SHA256"
+publish_guest_file "$STORAGE_PORTABILITY_SOURCE" \
+    "$GUEST_ROOT/Prepare-G11-Storage-Portability.ps1" \
+    "$STORAGE_PORTABILITY_SHA256"
 publish_guest_file "$RETRY_SOURCE" \
     "$PUBLIC_DESKTOP/Retry-Clone-Initialization.cmd" "$RETRY_SHA256"
 

@@ -3,9 +3,11 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$here/../../.." && pwd)
+# Resolve the library from this deploy tree so the generator works both from
+# the source checkout and from VMate's relocated deploy/g11 package layout.
+deploy_root=$(cd "$here/../.." && pwd)
 # shellcheck source=../../lib/vgpu-profiles.sh
-source "$repo_root/deploy/lib/vgpu-profiles.sh"
+source "$deploy_root/lib/vgpu-profiles.sh"
 
 output="$here/vgpu_profile_catalog.h"
 check_only=0
@@ -25,7 +27,14 @@ catalog_sha256=$(vgpu_profile_catalog_sha256)
     exit 1
 }
 
-tmp=$(mktemp "$here/.vgpu-profile-catalog.XXXXXXXX")
+# Installed deploy assets are root-owned and read-only to the desktop user.
+# Check mode only needs a private comparison file, so keep it outside the
+# catalog directory; generation mode retains the adjacent atomic replacement.
+if ((check_only)); then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/vmate-nvapi-profile-catalog.XXXXXXXX")
+else
+    tmp=$(mktemp "$here/.vgpu-profile-catalog.XXXXXXXX")
+fi
 trap 'rm -f -- "$tmp"' EXIT
 
 c_string() {

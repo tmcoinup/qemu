@@ -253,9 +253,9 @@ else
     MONITOR_DRIVER_POLICY=$VGPU_SELECTED_DRIVER_MONITOR_POLICY
     MONITOR_DRIVER_INF_SHA256=$VGPU_SELECTED_DRIVER_INF_SHA256
     MONITOR_DRIVER_CATALOG_SHA256=$VGPU_SELECTED_DRIVER_CATALOG_SHA256
-    MONITOR_DRIVER_PNP_ID=$(vgpu_profile_native_grid_pnp_id \
-        "$VGPU_MDEV_PROFILE") \
-        || die 'GPU resource has no reviewed B/native PnP mapping'
+    MONITOR_DRIVER_PNP_ID=$(vgpu_profile_guest_grid_pnp_id \
+        "$VGPU_MDEV_PROFILE" "${VGPU_RESOURCE_PROFILE:-}") \
+        || die 'GPU resource has no reviewed guest GRID PnP mapping'
 fi
 
 # The system shim must identify the same logical adapter as Windows PnP.  The

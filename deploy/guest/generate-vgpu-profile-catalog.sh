@@ -3,9 +3,11 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$here/../.." && pwd)
+# Resolve the library from this deploy tree so the generator works both from
+# the source checkout and from VMate's relocated deploy/g11 package layout.
+deploy_root=$(cd "$here/.." && pwd)
 # shellcheck source=../lib/vgpu-profiles.sh
-source "$repo_root/deploy/lib/vgpu-profiles.sh"
+source "$deploy_root/lib/vgpu-profiles.sh"
 
 output="$here/vgpu-profile-catalog.json"
 check_only=0
@@ -96,7 +98,14 @@ while IFS= read -r profile_key; do
         '$profiles + [$row]')
 done < <(vgpu_profile_keys)
 
-tmp=$(mktemp "$here/.vgpu-profile-catalog.XXXXXXXX")
+# Installed deploy assets are root-owned and read-only to the desktop user.
+# Check mode only needs a private comparison file, so keep it outside the
+# catalog directory; generation mode retains the adjacent atomic replacement.
+if ((check_only)); then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/vmate-vgpu-profile-catalog.XXXXXXXX")
+else
+    tmp=$(mktemp "$here/.vgpu-profile-catalog.XXXXXXXX")
+fi
 trap 'rm -f -- "$tmp"' EXIT
 jq -S -n \
     --argjson schemaVersion "$VGPU_PROFILE_CATALOG_SCHEMA" \

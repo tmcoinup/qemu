@@ -11,7 +11,9 @@ if errorlevel 1 (
 set "ANSWER=%~dp0g11-sysprep-clone.xml"
 set "DIAGNOSTIC=%~dp0Collect-Sysprep-Diagnostics.ps1"
 set "READINESS=%~dp0Assert-G11-Template-Ready.ps1"
+set "SERVICING_READINESS=%~dp0Assert-G11-Sysprep-Servicing-Ready.ps1"
 set "RESET=%~dp0Reset-G11-Template-State.ps1"
+set "SYSPREP_RUNNER=%~dp0Invoke-G11-Sysprep.ps1"
 if not exist "%ANSWER%" (
   echo [ERROR] Missing %ANSWER%
   pause
@@ -31,7 +33,9 @@ for %%F in (
   "%~dp0Standalone-GuestLite\G11GuestLite.exe"
   "%DIAGNOSTIC%"
   "%READINESS%"
+  "%SERVICING_READINESS%"
   "%RESET%"
+  "%SYSPREP_RUNNER%"
   "%~dp0Template-Reset\GuestLite\G11-Guest-Lite.ps1"
   "%~dp0Template-Reset\GuestPerformance\Optimize-Guest.ps1"
 ) do (
@@ -120,18 +124,18 @@ if errorlevel 1 (
   exit /b 1
 )
 
-"%SystemRoot%\System32\Sysprep\Sysprep.exe" /generalize /oobe /shutdown /unattend:"%ANSWER%"
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SERVICING_READINESS%"
 if errorlevel 1 (
-  echo [ERROR] Sysprep validation failed. Collecting a read-only diagnostic report...
-  powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%DIAGNOSTIC%" -OutputPath "%~dp0Sysprep-Diagnostics.txt"
-  if errorlevel 1 (
-    echo [ERROR] Could not create the automatic report.
-    echo Check %%WINDIR%%\System32\Sysprep\Panther\setuperr.log and setupact.log.
-  ) else (
-    echo [PASS] Report saved as %~dp0Sysprep-Diagnostics.txt
-    start "" notepad.exe "%~dp0Sysprep-Diagnostics.txt"
-  )
-  echo Fix only the reported blocker, then run Seal-G11-Template.cmd again.
+  echo [ERROR] Windows servicing readiness gate failed. Sysprep was not started.
+  echo Install all Windows updates and use Restart until nothing is pending, then run Seal again.
+  pause
+  exit /b 1
+)
+
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SYSPREP_RUNNER%" -AnswerFile "%ANSWER%" -DiagnosticScript "%DIAGNOSTIC%" -DiagnosticOutput "%~dp0Sysprep-Diagnostics.txt"
+if errorlevel 1 (
+  echo [ERROR] Sysprep did not complete. The automatic diagnostic result is shown above.
+  echo Do not rerun Reset or Sysprep directly. Fix only the reported blocker, then run Seal again.
   pause
   exit /b 1
 )

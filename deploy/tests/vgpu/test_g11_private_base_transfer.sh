@@ -48,8 +48,8 @@ jq -n \
     --arg baseMtimeNs "$MTIME" --arg baseCtimeNs "$CTIME" \
     --arg catalogSha256 "$CATALOG_SHA256" '
     {
-        schemaVersion: 7, bindingMode: "portable-auto",
-        deploymentMode: "site-private-licensed-firstboot-v2",
+        schemaVersion: 8, bindingMode: "portable-auto",
+        deploymentMode: "site-private-licensed-firstboot-v3",
         basePath: $basePath, baseFileBytes: $baseFileBytes,
         baseDeviceId: $baseDeviceId, baseInode: $baseInode,
         baseMtimeNs: $baseMtimeNs, baseCtimeNs: $baseCtimeNs,
@@ -68,6 +68,9 @@ jq -n \
         systemNvapiRequired: true,
         dlsHost: "dls.gvmates.com", dlsPort: 443,
         guestPerformance: "embedded-recommended-native-v1",
+        portableReceiptSchema: 8,
+        portableLauncherFormat: "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8",
+        driverBranch: "R535", driverVersion: "31.0.15.3833",
         catalogSha256: $catalogSha256, installedUtc: "2026-01-01T00:00:00Z"
     }' >"$SIDE"
 chmod 0600 "$SIDE"
@@ -154,6 +157,49 @@ QEMU_IMG="$(command -v qemu-img)" TZ=America/Los_Angeles \
     >"$TMP_DIR/export-cross-timezone.out"
 grep -Fq '[g11-base-export] PASS' "$TMP_DIR/export-cross-timezone.out"
 
+# Historical V7 lacked explicit driver fields. It remains usable only on the
+# one stack that the old finalizer implicitly pinned: R535/31.0.15.3833.
+cp -- "$SIDE" "$SIDE.v8"
+jq 'del(.portableReceiptSchema, .portableLauncherFormat, .driverBranch,
+        .driverVersion) |
+    .schemaVersion = 7 |
+    .deploymentMode = "site-private-licensed-firstboot-v2"' \
+    "$SIDE.v8" >"$SIDE.v7"
+mv -f -- "$SIDE.v7" "$SIDE"
+chmod 0600 "$SIDE"
+mkdir "$TMP_DIR/legacy-output"
+IMAGE_ROOT="$TMP_DIR/source-images" VM_ROOT="$SOURCE_ROOT" VMS_DIR="$SOURCE_ROOT" \
+VM_INSTANCES_DIR="$SOURCE_ROOT" QEMU_IMG="$(command -v qemu-img)" \
+    "$EXPORT" "$BASE_NAME" "$TMP_DIR/legacy-output" \
+    >"$TMP_DIR/export-legacy.out"
+jq -e '
+    .schemaVersion == 2 and
+    .bundleType == "vmate-g11-private-base-v2" and
+    (has("driverBranch") | not) and
+    (has("portableReceiptSchema") | not)
+' "$TMP_DIR/legacy-output/${BASE_NAME}-g11-private/$BASE_NAME.g11base" \
+    >/dev/null || {
+    echo "FAIL: historical V7 export was not kept in its strict legacy schema" >&2
+    exit 1
+}
+mv -f -- "$SIDE.v8" "$SIDE"
+chmod 0600 "$SIDE"
+
+# Driver metadata is an authorization boundary, not descriptive decoration.
+# A transfer manifest for another stack must be rejected before image import.
+cp -- "$MANIFEST" "$MANIFEST.good"
+jq '.driverVersion = "32.0.15.7348"' "$MANIFEST.good" >"$MANIFEST.bad"
+mv -f -- "$MANIFEST.bad" "$MANIFEST"
+if IMAGE_ROOT="$TMP_DIR/wrong-driver-images" VM_ROOT="$TMP_DIR/wrong-driver-vms" \
+        VMS_DIR="$TMP_DIR/wrong-driver-vms" \
+        VM_INSTANCES_DIR="$TMP_DIR/wrong-driver-vms" \
+        QEMU_IMG="$(command -v qemu-img)" \
+        "$IMPORT" "$MANIFEST" >/dev/null 2>&1; then
+    echo "FAIL: import accepted a private manifest for another driver stack" >&2
+    exit 1
+fi
+mv -f -- "$MANIFEST.good" "$MANIFEST"
+
 ln -s -- "$(basename "$MANIFEST")" "$BUNDLE/symlink.g11base"
 if IMAGE_ROOT="$TMP_DIR/link-images" VM_ROOT="$TMP_DIR/link-vms" \
         VMS_DIR="$TMP_DIR/link-vms" VM_INSTANCES_DIR="$TMP_DIR/link-vms" \
@@ -196,13 +242,16 @@ jq -e \
     --arg inode "$(stat -c %i "$IMPORTED")" \
     --arg mtime "$(stat -c %y "$IMPORTED")" \
     --arg ctime "$(stat -c %z "$IMPORTED")" '
-    .schemaVersion == 7 and .basePath == $path and .baseFileBytes == $bytes and
+    .schemaVersion == 8 and .basePath == $path and .baseFileBytes == $bytes and
     .baseDeviceId == $device and .baseInode == $inode and
     .baseMtimeNs == $mtime and .baseCtimeNs == $ctime and
     .windowsGeneralized == true and
     .firstBootWorkflow == "licensed-portable-system-nvapi-two-boot-v1" and
     .systemNvapiDelivery == "per-vm-read-only-iso" and
     .systemNvapiRequired == true and
+    .portableReceiptSchema == 8 and
+    .portableLauncherFormat == "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8" and
+    .driverBranch == "R535" and .driverVersion == "31.0.15.3833" and
     .dlsHost == "dls.gvmates.com" and .dlsPort == 443
 ' "$IMPORTED_SIDE" >/dev/null || {
     echo "FAIL: imported attestation was not rebound to the target computer" >&2

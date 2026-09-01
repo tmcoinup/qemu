@@ -27,6 +27,7 @@ BASE_BYTES=$(stat -c %s -- "$BASE")
 BASE_DEVICE=$(stat -c %D -- "$BASE")
 BASE_INODE=$(stat -c %i -- "$BASE")
 BASE_MTIME=$(stat -c %y -- "$BASE")
+BASE_CTIME=$(stat -c %z -- "$BASE")
 # shellcheck source=../../lib/vgpu-profiles.sh
 source "$ROOT/deploy/lib/vgpu-profiles.sh"
 vgpu_profile_validate_catalog
@@ -41,24 +42,45 @@ jq -n \
     --arg baseDeviceId "$BASE_DEVICE" \
     --arg baseInode "$BASE_INODE" \
     --arg baseMtimeNs "$BASE_MTIME" \
+    --arg baseCtimeNs "$BASE_CTIME" \
     --arg catalogSha "$CATALOG_SHA" \
     --arg finalizerSha "$FINALIZER_SHA" \
     --arg retrySha "$RETRY_SHA" \
     --arg sysprepSha "$SYSPREP_SHA" '
     {
-        schemaVersion: 7,
-        deploymentMode: "site-private-licensed-firstboot-v2",
+        schemaVersion: 8,
+        bindingMode: "portable-auto",
+        deploymentMode: "site-private-licensed-firstboot-v3",
         basePath: $basePath,
         baseFileBytes: $baseFileBytes,
         baseDeviceId: $baseDeviceId,
         baseInode: $baseInode,
         baseMtimeNs: $baseMtimeNs,
+        baseCtimeNs: $baseCtimeNs,
+        portableGuestPath: "C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe",
+        portableSha256: ("A" * 64),
+        portableBytes: 123,
+        portableReceiptSchema: 8,
+        portableLauncherFormat: "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8",
+        driverBranch: "R535",
+        driverVersion: "31.0.15.3833",
         catalogSha256: $catalogSha,
+        firstBootScriptGuestPath: "C:\\ProgramData\\VMate\\G11\\Finalize-Clone.ps1",
         firstBootScriptSha256: $finalizerSha,
+        retryGuestPath: "C:\\ProgramData\\VMate\\G11\\Retry-Clone-Initialization.cmd",
         retrySha256: $retrySha,
+        sysprepAnswerGuestPath: "C:\\Windows\\Panther\\unattend.xml",
         sysprepAnswerSha256: $sysprepSha,
         windowsGeneralized: true,
-        firstBootWorkflow: "licensed-portable-system-nvapi-two-boot-v1"
+        oobeMode: "unattended-auto-finalize",
+        licenseDelivery: "embedded-private-shared-token",
+        firstBootWorkflow: "licensed-portable-system-nvapi-two-boot-v1",
+        systemNvapiDelivery: "per-vm-read-only-iso",
+        systemNvapiRequired: true,
+        dlsHost: "dls.gvmates.com",
+        dlsPort: 443,
+        guestPerformance: "embedded-recommended-native-v1",
+        installedUtc: "2026-01-01T00:00:00Z"
     }
 ' >"$ATTESTATION"
 

@@ -38,7 +38,8 @@ Options:
                          $STAGE_DIR/client_configuration_token.tok
   --token-file FILE.tok  Same private finalizer with an explicit token path
   --replace-licensed     Replace an authenticated private output whose receipt
-                         binds a different token/catalog.  Licensed builds only;
+                         binds a different token/catalog/driver contract.
+                         Licensed builds only;
                          the old EXE/bundle is retained in a mode-0700 backup.
   --replace-public       Replace an authenticated public output from an older
                          catalog/format; retain the old EXE/bundle in a
@@ -269,44 +270,19 @@ validate_existing_exe() {
             .licenseTokenBytes == $tokenBytes and
             .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
             (.bundleManifestSha256 | test("^[0-9A-F]{64}$")) and
-            (
-                ((keys | sort) == [
-                    "bindingMode", "bundleManifestSha256", "catalogSha256",
-                    "exeBytes", "exeSha256", "gpuZDelivery",
-                    "launcherFormat", "licenseTokenBytes",
-                    "licenseTokenDelivery", "licenseTokenSha256",
-                    "schemaVersion"
-                ] and
-                 .schemaVersion == 5 and
-                 .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_V5")
-                or
-                ((keys | sort) == [
-                    "bindingMode", "bundleManifestSha256", "catalogSha256",
-                    "exeBytes", "exeSha256", "gpuZDelivery",
-                    "guestPerformance", "launcherFormat",
-                    "licenseTokenBytes", "licenseTokenDelivery",
-                    "licenseTokenSha256", "schemaVersion"
-                ] and
-                .schemaVersion == 7 and
-                 .guestPerformance == "embedded-recommended-native-v1" and
-                 .launcherFormat ==
-                    "QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7")
-                or
-                ((keys | sort) == [
-                    "bindingMode", "bundleManifestSha256", "catalogSha256",
-                    "driverBranch", "driverVersion", "exeBytes", "exeSha256",
-                    "gpuZDelivery", "guestPerformance", "launcherFormat",
-                    "licenseTokenBytes", "licenseTokenDelivery",
-                    "licenseTokenSha256", "schemaVersion"
-                ] and
-                 .schemaVersion == 8 and
-                 .guestPerformance == "embedded-recommended-native-v1" and
-                 .launcherFormat ==
-                    "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8")
-            )
+            (keys | sort) == [
+                "bindingMode", "bundleManifestSha256", "catalogSha256",
+                "driverBranch", "driverVersion", "exeBytes", "exeSha256",
+                "gpuZDelivery", "guestPerformance", "launcherFormat",
+                "licenseTokenBytes", "licenseTokenDelivery",
+                "licenseTokenSha256", "schemaVersion"
+            ] and
+            .schemaVersion == 8 and
+            .guestPerformance == "embedded-recommended-native-v1" and
+            .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8"
         ' "$receipt" >/dev/null || {
             ((REPLACE_LICENSED)) && return 1
-            die "existing licensed portable EXE receipt does not match this token/catalog (rerun with --replace-licensed to retain it in a private backup and rebuild)"
+            die "existing licensed portable EXE receipt does not match this token/catalog/driver contract (rerun with --replace-licensed to retain it in a private backup and rebuild)"
         }
     else
         jq -e \
@@ -321,65 +297,19 @@ validate_existing_exe() {
         .driverVersion == $driverVersion and
         .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
         (.bundleManifestSha256 | test("^[0-9A-F]{64}$")) and
-        (
-            ((keys | sort) == [
-                "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "exeBytes", "exeSha256", "launcherFormat", "schemaVersion"
-            ] and
-             .schemaVersion == 1 and
-             .launcherFormat == "QEMU_GPUZ_PORTABLE_EXE_V1")
-            or
-            ((keys | sort) == [
-                "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "exeBytes", "exeSha256", "gpuZDelivery",
-                "launcherFormat", "schemaVersion"
-            ] and
-             .schemaVersion == 2 and
-             .gpuZDelivery == "external-sibling" and
-             .launcherFormat == "QEMU_GPUZ_PORTABLE_EXTERNAL_V2")
-            or
-            ((keys | sort) == [
-                "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "exeBytes", "exeSha256", "gpuZDelivery",
-                "launcherFormat", "schemaVersion"
-            ] and
-             .schemaVersion == 3 and
-             .gpuZDelivery == "external-sibling" and
-             .launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V3")
-            or
-            ((keys | sort) == [
-                "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "exeBytes", "exeSha256", "gpuZDelivery",
-                "launcherFormat", "schemaVersion"
-            ] and
-             .schemaVersion == 4 and
-             .gpuZDelivery == "optional-explicit-sibling" and
-             .launcherFormat == "QEMU_VGPU_PORTABLE_IDENTITY_V4")
-            or
-            ((keys | sort) == [
-                "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "exeBytes", "exeSha256", "gpuZDelivery",
-                "guestPerformance", "launcherFormat", "schemaVersion"
-            ] and
-             .schemaVersion == 6 and
-             .gpuZDelivery == "optional-explicit-sibling" and
-             .guestPerformance == "embedded-recommended-native-v1" and
-             .launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6")
-            or
-            ((keys | sort) == [
-                "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "driverBranch", "driverVersion", "exeBytes", "exeSha256",
-                "gpuZDelivery", "guestPerformance", "launcherFormat",
-                "schemaVersion"
-            ] and
-             .schemaVersion == 7 and
-             .gpuZDelivery == "optional-explicit-sibling" and
-             .guestPerformance == "embedded-recommended-native-v1" and
-             .launcherFormat == "QEMU_VGPU_PORTABLE_BRANCH_V7")
-        )
+        (keys | sort) == [
+            "bindingMode", "bundleManifestSha256", "catalogSha256",
+            "driverBranch", "driverVersion", "exeBytes", "exeSha256",
+            "gpuZDelivery", "guestPerformance", "launcherFormat",
+            "schemaVersion"
+        ] and
+        .schemaVersion == 7 and
+        .gpuZDelivery == "optional-explicit-sibling" and
+        .guestPerformance == "embedded-recommended-native-v1" and
+        .launcherFormat == "QEMU_VGPU_PORTABLE_BRANCH_V7"
         ' "$receipt" >/dev/null || {
             ((REPLACE_PUBLIC)) && return 1
-            die "existing portable EXE receipt does not match this catalog (rerun with --replace-public to retain it in a backup and rebuild)"
+            die "existing portable EXE receipt does not match this catalog/driver contract (rerun with --replace-public to retain it in a backup and rebuild)"
         }
     fi
 }
@@ -460,7 +390,7 @@ if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
             .licenseToken.delivery == "embedded-private"
         ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1 || {
             ((REPLACE_LICENSED)) ||
-                die "existing licensed bundle does not match this token/catalog (rerun with --replace-licensed to retain it in a private backup and rebuild)"
+                die "existing licensed bundle does not match this token/catalog/driver contract (rerun with --replace-licensed to retain it in a private backup and rebuild)"
             REPLACE_EXISTING=1
             REPLACEMENT_KIND=licensed
         }
@@ -474,7 +404,7 @@ if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
             .expectedDriverVersion == $driverVersion
         ' "$OUTPUT_DIR/gpuz-contract.json" >/dev/null 2>&1; then
             ((REPLACE_PUBLIC)) ||
-                die "existing expanded bundle is not the current owned portable catalog (rerun with --replace-public)"
+                die "existing expanded bundle is not the current owned portable catalog/driver contract (rerun with --replace-public)"
             validate_existing_bundle_authenticity
             REPLACE_EXISTING=1
             REPLACEMENT_KIND=public

@@ -29,9 +29,10 @@ No argument (recommended):
   $STAGE_DIR/client_configuration_token.tok.  --token-file selects another
   repository-external token.  The private EXE works for every B/native GPU
   profile and replaces the legacy model-specific finish step for new VMs.
-  When the DLS token changes, add --replace-licensed.  The old authenticated
-  private EXE/bundle is retained under a mode-0700 repository-external backup.
-  When the public catalog/format changes, add --replace-public; its old
+  When the DLS token, catalog, or selected driver contract changes, add
+  --replace-licensed.  The old authenticated private EXE/bundle is retained
+  under a mode-0700 repository-external backup.  When the public catalog,
+  driver contract, or format changes, add --replace-public; its old
   authenticated EXE/bundle is retained the same way.
   --portable forwards its remaining options to package-vgpu-portable.sh.
 

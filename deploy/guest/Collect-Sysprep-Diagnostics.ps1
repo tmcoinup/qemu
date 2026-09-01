@@ -1,9 +1,13 @@
+#requires -Version 5.1
 # Read-only Sysprep failure collector for the G-11 template kit.
 # Windows PowerShell 5.1 compatible. This script never removes Appx packages,
 # changes Sysprep registry state, modifies BCD, or installs a driver.
 [CmdletBinding()]
 param(
-    [string]$OutputPath = (Join-Path $PSScriptRoot 'Sysprep-Diagnostics.txt')
+    [string]$OutputPath = (Join-Path $PSScriptRoot 'Sysprep-Diagnostics.txt'),
+    [ValidateRange(0, [int]::MaxValue)][int]$SetupErrStartLine = 0,
+    [ValidateRange(0, [int]::MaxValue)][int]$SetupActStartLine = 0,
+    [switch]$InvocationScoped
 )
 
 Set-StrictMode -Version Latest
@@ -38,6 +42,19 @@ function Add-LogTail {
     }
 }
 
+function Get-LogLinesFromOffset {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [ValidateRange(0, [int]::MaxValue)][int]$StartLine
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    $allLines = @(Get-Content -LiteralPath $Path -ErrorAction Stop |
+        ForEach-Object { [string]$_ })
+    if ($StartLine -ge $allLines.Count) { return @() }
+    return @($allLines[$StartLine..($allLines.Count - 1)])
+}
+
 $outputFullPath = [IO.Path]::GetFullPath($OutputPath)
 $outputParent = [IO.Path]::GetDirectoryName($outputFullPath)
 if (-not (Test-Path -LiteralPath $outputParent -PathType Container)) {
@@ -59,6 +76,11 @@ Add-Line ('WindowsDirectory={0}' -f $env:WINDIR)
 Add-Line 'ReadOnlyCollector=true'
 Add-Line 'BCDChanged=false'
 Add-Line 'DriverChanged=false'
+Add-Line ('InvocationScope={0}' -f $(
+        if ($InvocationScoped) { 'PantherDelta' } else { 'FullHistory' }
+    ))
+Add-Line ('SetupErrStartLine={0}' -f $SetupErrStartLine)
+Add-Line ('SetupActStartLine={0}' -f $SetupActStartLine)
 try {
     $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 15
     Add-Line ('OS={0}' -f [string]$os.Caption)
@@ -110,16 +132,22 @@ try {
 
 $relevantLines = New-Object 'System.Collections.Generic.List[string]'
 $packageNames = New-Object 'System.Collections.Generic.List[string]'
-foreach ($logPath in @($setupErr, $setupAct)) {
+foreach ($logScope in @(
+        @{ Path = $setupErr; StartLine = $SetupErrStartLine },
+        @{ Path = $setupAct; StartLine = $SetupActStartLine }
+    )) {
+    $logPath = [string]$logScope.Path
     if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { continue }
     try {
-        $matches = @(Select-String -LiteralPath $logPath -Pattern `
+        $scopedLines = @(Get-LogLinesFromOffset -Path $logPath `
+                -StartLine ([int]$logScope.StartLine))
+        $matches = @($scopedLines | Select-String -Pattern `
             'SYSPRP.*(?:Error|fail|0x[0-9A-Fa-f]{4,})' -ErrorAction Stop |
             Select-Object -Last 160)
         foreach ($match in $matches) {
             $relevantLines.Add(([string]$match.Line))
         }
-        $packageMatches = @(Select-String -LiteralPath $logPath -Pattern `
+        $packageMatches = @($scopedLines | Select-String -Pattern `
             'SYSPRP Package (?<Package>\S+) was installed for a user, but not provisioned for all users' `
             -AllMatches -ErrorAction Stop)
         foreach ($packageMatch in $packageMatches) {

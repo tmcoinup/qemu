@@ -15,11 +15,11 @@ usage() {
 usage: $0 [OUTPUT_DIRECTORY] [--replace]
 
 Build one G11SysprepKit directory containing the Sysprep entry point, read-only
-template/Tamper-Protection gate, saved-state rollback helpers, failure
-diagnostics, answer file, Finalize/Retry scripts, pinned Guest Lite clone
-payload, and one compiled standalone G11GuestLite.exe. Licensed VgpuPortable.exe
-and its token are never included; build-g11-private-base.sh injects that private
-payload after shutdown.
+template/Tamper-Protection and Windows-servicing gates, saved-state rollback
+helpers, quiet Sysprep runner, failure diagnostics, answer file, Finalize/Retry
+scripts, pinned Guest Lite clone payload, and one compiled standalone
+G11GuestLite.exe. Licensed VgpuPortable.exe and its token are never included;
+build-g11-private-base.sh injects that private payload after shutdown.
 EOF
 }
 
@@ -60,7 +60,7 @@ diagnostic_complete_entries=(
     "${previous_complete_entries[@]}"
     Collect-Sysprep-Diagnostics.ps1
 )
-current_entries=(
+reset_complete_entries=(
     "${diagnostic_complete_entries[@]}"
     Assert-G11-Template-Ready.ps1
     Reset-G11-Template-State.ps1
@@ -70,12 +70,20 @@ current_entries=(
     Template-Reset/GuestPerformance
     Template-Reset/GuestPerformance/Optimize-Guest.ps1
 )
+current_entries=(
+    "${reset_complete_entries[@]}"
+    Assert-G11-Sysprep-Servicing-Ready.ps1
+    Invoke-G11-Sysprep.ps1
+)
 mapfile -t legacy_entries < <(printf '%s\n' "${legacy_entries[@]}" | sort)
 mapfile -t previous_complete_entries < <(
     printf '%s\n' "${previous_complete_entries[@]}" | sort
 )
 mapfile -t diagnostic_complete_entries < <(
     printf '%s\n' "${diagnostic_complete_entries[@]}" | sort
+)
+mapfile -t reset_complete_entries < <(
+    printf '%s\n' "${reset_complete_entries[@]}" | sort
 )
 mapfile -t current_entries < <(printf '%s\n' "${current_entries[@]}" | sort)
 
@@ -119,6 +127,7 @@ if [[ -e "$OUTPUT" || -L "$OUTPUT" ]]; then
     if ! arrays_equal existing_entries legacy_entries &&
             ! arrays_equal existing_entries previous_complete_entries &&
             ! arrays_equal existing_entries diagnostic_complete_entries &&
+            ! arrays_equal existing_entries reset_complete_entries &&
             ! arrays_equal existing_entries current_entries; then
         echo "[g11-sysprep-kit] existing output contains unknown/missing entries; refusing replacement" >&2
         exit 1
@@ -153,8 +162,10 @@ GUEST_LITE_ASSETS=(
 PUBLIC_SOURCES=(
     "$here/guest/Seal-G11-Template.cmd"
     "$here/guest/Assert-G11-Template-Ready.ps1"
+    "$here/guest/Assert-G11-Sysprep-Servicing-Ready.ps1"
     "$here/guest/Reset-G11-Template-State.ps1"
     "$here/guest/Collect-Sysprep-Diagnostics.ps1"
+    "$here/guest/Invoke-G11-Sysprep.ps1"
     "$here/guest/G11-Sysprep-README.txt"
     "$here/autounattend/g11-sysprep-clone.xml"
     "$here/guest/finalize-g11-clone.ps1"
@@ -231,10 +242,14 @@ install -m 0600 -- "$here/guest/Seal-G11-Template.cmd" \
     "$STAGE/Seal-G11-Template.cmd"
 install -m 0600 -- "$here/guest/Assert-G11-Template-Ready.ps1" \
     "$STAGE/Assert-G11-Template-Ready.ps1"
+install -m 0600 -- "$here/guest/Assert-G11-Sysprep-Servicing-Ready.ps1" \
+    "$STAGE/Assert-G11-Sysprep-Servicing-Ready.ps1"
 install -m 0600 -- "$here/guest/Reset-G11-Template-State.ps1" \
     "$STAGE/Reset-G11-Template-State.ps1"
 install -m 0600 -- "$here/guest/Collect-Sysprep-Diagnostics.ps1" \
     "$STAGE/Collect-Sysprep-Diagnostics.ps1"
+install -m 0600 -- "$here/guest/Invoke-G11-Sysprep.ps1" \
+    "$STAGE/Invoke-G11-Sysprep.ps1"
 install -m 0600 -- "$here/guest/G11-Sysprep-README.txt" \
     "$STAGE/G11-Sysprep-README.txt"
 install -m 0600 -- "$here/autounattend/g11-sysprep-clone.xml" \
@@ -286,5 +301,5 @@ if [[ -n "$BACKUP" ]]; then
 fi
 trap - EXIT
 echo "[g11-sysprep-kit] PASS: $OUTPUT"
-echo "[g11-sysprep-kit] readiness gate, rollback helpers, public payload, and Guest Lite EXE collected"
+echo "[g11-sysprep-kit] security/servicing gates, quiet Sysprep runner, rollback helpers, public payload, and Guest Lite EXE collected"
 echo '把整个目录复制为 C:\G11SysprepKit（不要放进 ProgramData），然后只以管理员身份运行 Seal-G11-Template.cmd。'

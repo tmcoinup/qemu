@@ -40,6 +40,8 @@ cp -- "$REPO_ROOT/deploy/lib/vgpu-profiles.sh" \
     "$HARNESS/deploy/lib/vgpu-profiles.sh"
 cp -- "$REPO_ROOT/deploy/lib/gpuz-assets.sh" \
     "$HARNESS/deploy/lib/gpuz-assets.sh"
+cp -- "$REPO_ROOT/deploy/lib/vgpu-driver-assets.sh" \
+    "$HARNESS/deploy/lib/vgpu-driver-assets.sh"
 cp -- "$REPO_ROOT/deploy/guest/finalize-g11-clone.ps1" \
     "$HARNESS/deploy/guest/finalize-g11-clone.ps1"
 cp -- "$REPO_ROOT/deploy/guest/Retry-Clone-Initialization.cmd" \
@@ -334,9 +336,9 @@ write_private_attestation() {
         --arg retrySha256 "$retry_sha" \
         --arg sysprepSha256 "$sysprep_sha" '
         {
-            schemaVersion: 7,
+            schemaVersion: 8,
             bindingMode: "portable-auto",
-            deploymentMode: "site-private-licensed-firstboot-v2",
+            deploymentMode: "site-private-licensed-firstboot-v3",
             basePath: $basePath,
             baseFileBytes: $baseFileBytes,
             baseDeviceId: $baseDeviceId,
@@ -358,6 +360,10 @@ write_private_attestation() {
             firstBootWorkflow: "licensed-portable-system-nvapi-two-boot-v1",
             systemNvapiDelivery: "per-vm-read-only-iso",
             systemNvapiRequired: true,
+            portableReceiptSchema: 8,
+            portableLauncherFormat: "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8",
+            driverBranch: "R535",
+            driverVersion: "31.0.15.3833",
             dlsHost: "dls.gvmates.com",
             dlsPort: 443,
             guestPerformance: "embedded-recommended-native-v1",
@@ -611,6 +617,22 @@ fi
 grep -Fq 'schema-6 base lacks automatic system NVAPI projection' \
     "$TMP_DIR/private-old.err" ||
     fail "obsolete private base refusal did not explain the required rebuild"
+
+write_private_attestation
+"$REAL_JQ" '.driverVersion = "32.0.15.7348"' \
+    "$ATTESTATION" >"$ATTESTATION.wrong-driver"
+mv -f -- "$ATTESTATION.wrong-driver" "$ATTESTATION"
+chmod 0400 "$ATTESTATION"
+if run_clone 831 >"$TMP_DIR/private-wrong-driver.out" \
+        2>"$TMP_DIR/private-wrong-driver.err"; then
+    fail "private clone accepted an attestation for another driver stack"
+fi
+grep -Fq 'base/driver/catalog binding is invalid' \
+    "$TMP_DIR/private-wrong-driver.err" ||
+    fail "wrong-driver refusal did not identify the private binding"
+[[ ! -e "$VM_INSTANCES_DIR/831/vm.conf" &&
+   ! -e "$VM_INSTANCES_DIR/831/disk.qcow2" ]] ||
+    fail "wrong-driver private base created VM state before rejection"
 
 write_private_attestation
 "$REAL_JQ" '.firstBootScriptSha256 = ("A" * 64)' \

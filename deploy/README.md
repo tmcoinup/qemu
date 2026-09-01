@@ -121,7 +121,7 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 优化。默认基础盘版仍不含 token。
 需要交付给 VMate、并要求每台 clone 经 Sysprep 获得独立 Windows OS 身份时，使用
 [`docs/G11-SYSPREP-PRIVATE-BASE.md`](docs/G11-SYSPREP-PRIVATE-BASE.md) 的私有流程：
-模板不运行 portable；关机后宿主只运行一个总命令，把授权 V7 EXE 固定注入
+模板不运行 portable；关机后宿主只运行一个总命令，把驱动分支绑定的授权 V8 EXE 固定注入
 `C:\ProgramData\VMate\G11`，并给同一个本机可克隆 qcow2 生成 `.g11base` 交付清单，
 不会再复制第二份 base 或保留 archive。每台克隆成功路径只运行
 授权版一次，OOBE 无交互；克隆时自动生成每 VM 的系统 NVAPI 只读 ISO，首启安装后

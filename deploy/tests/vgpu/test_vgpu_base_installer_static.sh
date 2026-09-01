@@ -62,6 +62,8 @@ grep -Fq -- '--with-gpuz' "$TMP_DIR/help.out" ||
     fail "--help did not describe explicit GPU-Z opt-in"
 grep -Fq -- '--single-image' "$TMP_DIR/help.out" ||
     fail "--help did not describe V-11-style single-image publication"
+grep -Fq -- '--expect-base-state-sha256' "$TMP_DIR/help.out" ||
+    fail "--help did not describe the locked resume state guard"
 [[ ! -e "$TMP_DIR/images" ]] ||
     fail "--help unexpectedly created storage"
 if "$INSTALLER" --base-name '../escape' \
@@ -110,8 +112,14 @@ require_text '.gpuZDelivery == "optional-explicit-sibling"' \
     "optional GPU-Z delivery receipt binding"
 require_text '.guestPerformance == "embedded-recommended-native-v1"' \
     "embedded guest performance receipt binding"
-require_text '.launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6"' \
-    "unified launcher format binding"
+require_text '.launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8"' \
+    "driver-bound licensed launcher format binding"
+require_text '.driverBranch == $driverBranch' \
+    "selected driver-branch receipt binding"
+require_text '.driverVersion == $driverVersion' \
+    "selected driver-version receipt binding"
+require_text 'private clone finalizer is reviewed only for R535/GRID 538.33' \
+    "private R535-only finalizer gate"
 require_text 'GUEST_LITE_MANIFEST_SOURCE="$GUEST_LITE_SOURCE_ROOT/clone-manifest.json"' \
     "Guest Lite clone-manifest source"
 require_text 'die '\''Guest Lite manifest is not pinned by the clone finalizer'\''' \
@@ -145,6 +153,10 @@ require_text 'global storage lock owner does not match the base-image owner' \
     "storage-owner fail-closed gate"
 require_text 'chown "$storage_uid:$storage_gid" "/proc/self/fd/$STORAGE_LOCK_FD"' \
     "root-created lock ownership repair"
+require_text 'OBSERVED_BASE_STATE_SHA256=$(' \
+    "locked resume base-state calculation"
+require_text 'base state changed before locked injection; refusing resume' \
+    "locked resume base-state refusal"
 require_text 'storage_dirs=("$VM_RUN_DIR")' \
     "single-image-aware storage-directory ownership repair"
 require_text '((SINGLE_IMAGE)) || storage_dirs+=("$VM_BASE_ARCHIVE_DIR")' \
@@ -154,6 +166,14 @@ assert_before \
     'flock -n -x "$STORAGE_LOCK_FD"' \
     'vm_storage_read_qcow2_metadata "$QEMU_IMG" "$BASE"' \
     "storage lock before qcow2 inspection"
+assert_before \
+    'flock -n -x "$STORAGE_LOCK_FD"' \
+    'OBSERVED_BASE_STATE_SHA256=$(' \
+    "storage lock before resume base-state validation"
+assert_before \
+    'OBSERVED_BASE_STATE_SHA256=$(' \
+    'cp --reflink=auto -- "$BASE" "$BASE_TMP"' \
+    "resume base-state validation before private-copy creation"
 assert_before \
     'flock -n -x "$STORAGE_LOCK_FD"' \
     'cp --reflink=auto -- "$BASE" "$BASE_TMP"' \
@@ -321,10 +341,14 @@ require_text 'refresh_restored_attestation_ctime()' \
     "rollback ctime refresh helper"
 require_text '.baseCtimeNs = $baseCtimeNs' \
     "rollback ctime rewrite"
-require_text 'valid schema-2..5 public or schema-6/7 private generation' \
+require_text 'valid schema-2..5 public or schema-6..8 private generation' \
     "legacy/new rollback attestation compatibility"
-require_text '.schemaVersion == 7 and' \
+require_text '.schemaVersion == 8 and' \
     "current private Sysprep attestation schema"
+require_text '.portableReceiptSchema == 8' \
+    "private attestation receipt-schema binding"
+require_text '.portableLauncherFormat == $launcherFormat' \
+    "private attestation launcher binding"
 require_text '.systemNvapiRequired == true' \
     "current private base requires per-VM system NVAPI"
 require_text 'mv -fT -- "$refresh_tmp" "$ATTESTATION"' \

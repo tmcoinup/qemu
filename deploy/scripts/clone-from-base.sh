@@ -15,6 +15,8 @@ source "$here/lib/vm-storage.sh"
 source "$here/lib/vgpu-profiles.sh"
 # shellcheck source=lib/gpuz-assets.sh
 source "$here/lib/gpuz-assets.sh"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
 
 usage() {
     cat <<'EOF'
@@ -242,6 +244,14 @@ vm_storage_validate_id "$VM_ID" || exit 2
 vm_storage_require_namespace_ready "$VM_ID"
 vgpu_profile_validate_catalog ||
     die "GPU profile catalog validation failed"
+vgpu_select_driver_stack ||
+    die "could not select the reviewed host/guest driver pair"
+case "$VGPU_SELECTED_DRIVER_BRANCH" in
+    R535|R570) ;;
+    *) die "selected driver branch has no reviewed G-11 clone contract" ;;
+esac
+EXPECTED_DRIVER_BRANCH=$VGPU_SELECTED_DRIVER_BRANCH
+EXPECTED_DRIVER_VERSION=$VGPU_SELECTED_DRIVER_VERSION
 if [[ -n "$GPU_PROFILE_REQUEST" ]]; then
     vgpu_profile_load "$GPU_PROFILE_REQUEST" ||
         die "unsupported --gpu-profile: $GPU_PROFILE_REQUEST"
@@ -292,8 +302,71 @@ BASE_ATTESTATION_SCHEMA=$(jq -er '.schemaVersion | numbers' "$ATTESTATION") ||
     die "base portable-package attestation has no numeric schema"
 BASE_DEPLOYMENT_MODE=public-portable
 BASE_GPUZ_INCLUDED=false
-if [[ "$BASE_ATTESTATION_SCHEMA" == 7 ]]; then
-    jq -e \
+if [[ "$BASE_ATTESTATION_SCHEMA" == 8 ||
+      "$BASE_ATTESTATION_SCHEMA" == 7 ]]; then
+    [[ "$EXPECTED_DRIVER_BRANCH" == R535 &&
+       "$EXPECTED_DRIVER_VERSION" == 31.0.15.3833 ]] ||
+        die "private G-11 clone finalizer is reviewed only for R535/GRID 538.33 (31.0.15.3833)"
+    if [[ "$BASE_ATTESTATION_SCHEMA" == 8 ]]; then
+        jq -e \
+            --arg basePath "$BASE" \
+            --argjson baseFileBytes "$BASE_FILE_BYTES" \
+            --arg baseDeviceId "$BASE_DEVICE_ID" \
+            --arg baseInode "$BASE_INODE" \
+            --arg baseMtimeNs "$BASE_MTIME_NS" \
+            --arg catalogSha256 "$EXPECTED_CATALOG_SHA256" \
+            --arg driverBranch "$EXPECTED_DRIVER_BRANCH" \
+            --arg driverVersion "$EXPECTED_DRIVER_VERSION" '
+            (keys | sort) == [
+                "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
+                "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
+                "deploymentMode", "dlsHost", "dlsPort", "driverBranch",
+                "driverVersion", "firstBootScriptGuestPath",
+                "firstBootScriptSha256", "firstBootWorkflow",
+                "guestPerformance", "installedUtc", "licenseDelivery",
+                "oobeMode", "portableBytes", "portableGuestPath",
+                "portableLauncherFormat", "portableReceiptSchema",
+                "portableSha256", "retryGuestPath", "retrySha256",
+                "schemaVersion", "sysprepAnswerGuestPath",
+                "sysprepAnswerSha256", "systemNvapiDelivery",
+                "systemNvapiRequired", "windowsGeneralized"
+            ] and
+            .schemaVersion == 8 and .bindingMode == "portable-auto" and
+            .deploymentMode == "site-private-licensed-firstboot-v3" and
+            .basePath == $basePath and .baseFileBytes == $baseFileBytes and
+            .baseDeviceId == $baseDeviceId and .baseInode == $baseInode and
+            .baseMtimeNs == $baseMtimeNs and
+            (.baseCtimeNs | type) == "string" and
+            .portableGuestPath == "C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe" and
+            .portableReceiptSchema == 8 and
+            .portableLauncherFormat ==
+                "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8" and
+            .driverBranch == $driverBranch and
+            .driverVersion == $driverVersion and
+            (.portableSha256 | test("^[0-9A-F]{64}$")) and
+            (.portableBytes | type) == "number" and
+            (.portableBytes | floor) == .portableBytes and .portableBytes > 0 and
+            .firstBootScriptGuestPath == "C:\\ProgramData\\VMate\\G11\\Finalize-Clone.ps1" and
+            (.firstBootScriptSha256 | test("^[0-9A-F]{64}$")) and
+            .retryGuestPath == "C:\\ProgramData\\VMate\\G11\\Retry-Clone-Initialization.cmd" and
+            (.retrySha256 | test("^[0-9A-F]{64}$")) and
+            .sysprepAnswerGuestPath == "C:\\Windows\\Panther\\unattend.xml" and
+            (.sysprepAnswerSha256 | test("^[0-9A-F]{64}$")) and
+            .windowsGeneralized == true and
+            .oobeMode == "unattended-auto-finalize" and
+            .licenseDelivery == "embedded-private-shared-token" and
+            .firstBootWorkflow == "licensed-portable-system-nvapi-two-boot-v1" and
+            .systemNvapiDelivery == "per-vm-read-only-iso" and
+            .systemNvapiRequired == true and
+            .dlsHost == "dls.gvmates.com" and .dlsPort == 443 and
+            .guestPerformance == "embedded-recommended-native-v1" and
+            .catalogSha256 == $catalogSha256 and
+            (.installedUtc | type) == "string"
+        ' "$ATTESTATION" >/dev/null ||
+            die "private Sysprep base/driver/catalog binding is invalid; re-import the .g11base package"
+    else
+        echo "[vgpu-clone] accepting historical schema-7 base only for R535/31.0.15.3833"
+        jq -e \
         --arg basePath "$BASE" \
         --argjson baseFileBytes "$BASE_FILE_BYTES" \
         --arg baseDeviceId "$BASE_DEVICE_ID" \
@@ -338,6 +411,7 @@ if [[ "$BASE_ATTESTATION_SCHEMA" == 7 ]]; then
         .catalogSha256 == $catalogSha256 and (.installedUtc | type) == "string"
     ' "$ATTESTATION" >/dev/null ||
         die "private Sysprep base/catalog binding is invalid; re-import the .g11base package"
+    fi
 
     for current_payload in "$CURRENT_FINALIZER" "$CURRENT_RETRY" \
             "$CURRENT_SYSPREP_ANSWER" "$CURRENT_GUEST_LITE_MANIFEST"; do

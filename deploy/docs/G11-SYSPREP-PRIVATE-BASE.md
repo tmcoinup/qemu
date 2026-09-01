@@ -17,7 +17,7 @@ Auto/Running/PID>0；这既保留 Windows AppContainer/NVIDIA 控制面板注册
 
 ## 重要结论
 
-- 不需要先运行无凭据通用版、再运行授权版。正常成功路径只调用授权 V7 版一次；
+- 不需要先运行无凭据通用版、再运行授权版。正常成功路径只调用驱动绑定的授权 V8 版一次；
   只有首次明确失败、管理员执行恢复脚本时才会再次尝试。
 - 文件固定放在 `C:\ProgramData\VMate\G11`，不依赖可能因光驱/数据盘变化而改变的
   `D:` 盘符。
@@ -33,7 +33,7 @@ Auto/Running/PID>0；这既保留 Windows AppContainer/NVIDIA 控制面板注册
 - `build-g11-private-base.sh` 每次都会先从当前 checkout 重新打包授权 EXE，再离线注入
   Finalize、Retry、Guest Lite 和应答文件；已有且凭据未变化的授权 EXE 只作为可信旧输入
   校验，不会跳过当前源码构建。因此普通源码升级不需要加 `--replace-licensed`；该参数只在
-  token 有意更换时使用。
+  token、profile catalog 或驱动封装合同有意变更时使用。
 - 生产驱动快速门禁只接受 Windows 10 x64 标准 DriverStore 目录
   `nvgridsw.inf_amd64_<16 位十六进制哈希>`，并把运行中的 `nvlddmkm.sys`、活动
   `oemN.inf`、DriverStore INF 与 NVIDIA/WHCP catalog 逐一绑定。它不再执行耗时的
@@ -80,11 +80,13 @@ cd /home/ubuntu/projects/qemu
 
 ```text
 /home/ubuntu/images/staging/G11SysprepKit/
-├── Assert-G11-Template-Ready.ps1         # 只读检查篡改防护/VM 绑定状态
-├── Collect-Sysprep-Diagnostics.ps1       # Sysprep 失败时只读生成报告
+├── Assert-G11-Template-Ready.ps1          # 只读检查篡改防护/VM 绑定状态
+├── Assert-G11-Sysprep-Servicing-Ready.ps1 # 只读检查更新/组件维护状态
+├── Collect-Sysprep-Diagnostics.ps1        # Sysprep 失败时只读生成报告
 ├── G11-Sysprep-README.txt
-├── Reset-G11-Template-State.ps1          # 用保存基线回滚实验克隆状态
-├── Seal-G11-Template.cmd                 # Windows 中唯一要运行的入口
+├── Invoke-G11-Sysprep.ps1                 # 静默执行并按本次 Panther 增量验收
+├── Reset-G11-Template-State.ps1           # 用保存基线回滚实验克隆状态
+├── Seal-G11-Template.cmd                  # Windows 中唯一要运行的入口
 ├── g11-sysprep-clone.xml
 ├── Payload/
 │   ├── Finalize-Clone.ps1
@@ -129,8 +131,10 @@ ISO，才另用 `./deploy/package-guest-lite.sh`；制作 G-11 私有母盘不�
 克隆。管理员只运行根目录中的 `Seal-G11-Template.cmd`；它会先只读确认 Windows 10、
 管理员、篡改防护已手工关闭，并拒绝已经安装过每 VM 系统 NVAPI 投影的克隆；随后按
 保存基线依次回滚 Guest Lite 和性能实验状态，清理旧首启结果，再把 Finalize、Retry
-和 Guest Lite `Payload` 预置到 `C:\ProgramData\VMate\G11`，最后执行 Sysprep 并
-完整关机。门禁或回滚失败时不会启动 Sysprep，也不会靠改 Defender 注册表/ACL 绕过。
+和 Guest Lite `Payload` 预置到 `C:\ProgramData\VMate\G11`，紧接着只读检查 CBS、
+Windows Update、待重启、DISM pending package 和 Reserved Storage 功能状态，最后以
+`/quiet` 执行 Sysprep 并完整关机。门禁或回滚失败时不会启动 Sysprep，也不会靠改
+Defender 注册表/ACL、`ReserveManager` 或 Sysprep 状态注册表绕过。
 
 模板关机后，回宿主运行一个私有母盘总命令：
 
@@ -195,10 +199,10 @@ CMD 或自行修改的 `clone-manifest.json` 直接塞进 qcow2；manifest、fin
    保留至少一个日常使用的、有密码的本地管理员账户。
 2. 正常启动一次，确认 NVIDIA 设备是 `DEV_1E30`、驱动版本
    `31.0.15.3833`、设备状态 Code 0。
-3. 打开“Windows 安全中心 → 病毒和威胁防护 → 管理设置”，手工关闭一次
-   “篡改防护”。自动链不会绕过该开关；未关闭时 Guest Lite 会明确失败。
-4. 在“Windows 更新”中安装全部更新并正常重启；重复检查，直到没有“正在安装”或
+3. 在“Windows 更新”中安装全部更新并正常重启；重复检查，直到没有“正在安装”或
    “需要重启”。Sysprep 不能在更新/组件维护仍占用 Reserved Storage 时运行。
+4. 最后一次更新重启后，打开“Windows 安全中心 → 病毒和威胁防护 → 管理设置”，
+   手工关闭一次“篡改防护”。自动链不会绕过该开关；未关闭时 Seal 会明确拒绝。
 5. 模板阶段不要运行任何 `VgpuPortable.exe` 或
    `Standalone-GuestLite/G11GuestLite.exe`，也不要只给当前用户安装/更新 Microsoft
    Store 应用；前两者会污染克隆首次运行/回滚基线，后者可能导致 Sysprep 校验失败。
@@ -218,10 +222,10 @@ CMD 或自行修改的 `clone-manifest.json` 直接塞进 qcow2；manifest、fin
    显示篡改防护门禁结果；如果这是 vm1/vm2 一类在首次初始化中途失败的实验克隆，
    它会按 `state.json` 保存的原始基线回滚后再删除旧状态。不要提前手工删这些目录。
 9. 只有门禁和回滚都显示 `[PASS]` 后，脚本才把公开 Payload 预置到
-   `C:\ProgramData\VMate\G11`，然后执行：
+   `C:\ProgramData\VMate\G11`；随后只读复核 Windows servicing 状态，并执行：
 
    ```text
-   Sysprep.exe /generalize /oobe /shutdown /unattend:g11-sysprep-clone.xml
+   Sysprep.exe /generalize /oobe /shutdown /quiet /unattend:g11-sysprep-clone.xml
    ```
 
 10. 等模板完整关机。成功后不要再启动这个源 VM。
@@ -276,10 +280,38 @@ $STAGE_DIR/client_configuration_token.tok
 其中 `1` 是刚才模板 VM 的 ID。总命令会顺序完成：
 
 1. 把已 Sysprep 关机的实例盘封装成独立 qcow2；
-2. 构建 VM 无关、全 profile 通用的授权 V7 `VgpuPortable.exe`；
+2. 构建 VM 无关、全 profile 通用、固定 R535/GRID 538.33 的授权 V8 `VgpuPortable.exe`；
 3. 离线注入授权 EXE，并再次校验/刷新首次启动脚本、Guest Lite 和 OOBE 应答文件；
-4. 生成本机绑定的 schema-7 证明，声明每 VM 系统 NVAPI 两阶段首启为必需项；
+4. 生成本机绑定的 schema-8 证明，精确记录 R535/`31.0.15.3833` 和 V8 launcher，
+   并声明每 VM 系统 NVAPI 两阶段首启为必需项；
 5. 在 `--base-dir` 中给同一个 qcow2 生成 `.g11base` 传输清单，不复制第二份镜像。
+
+### 只在“封装成功、portable 打包失败”时续跑
+
+如果终端已经明确显示“基础镜像封装完成”和新 qcow2 大小，随后才在
+`package-vgpu-one-click.sh` 阶段失败，不要重新压缩几十 GiB，也不要删除刚生成的
+qcow2。以同一个源 VM ID、同一个 base 名称显式续跑。例如 vm9 的 `g-1` 遇到
+“licensed portable EXE receipt does not match this token/catalog/driver”时，只执行：
+
+```bash
+./deploy/build-g11-private-base.sh 9 g-1 \
+  --resume-sealed --replace-licensed
+```
+
+`--replace-licensed` 只用于错误已经明确说明 token/catalog/driver 封装合同不匹配的
+情况；单纯网络或编译工具临时失败时去掉它。`--resume-sealed` 不是自动推断：不写该
+参数时仍必须执行正常 seal，同名 qcow2 已存在就会拒绝，不会悄悄跳过封装。
+
+续跑开始前会先做失败即停的安全门禁：源 VM 的启动锁、QEMU 进程以及源盘/base 文件
+占用都表明 VM 已停止；现有 base 是普通、单 hard-link、`qemu-img check` 通过且没有
+backing/data-file 的 standalone qcow2；它与当前源盘 virtual size 相同且时间不早于
+源盘，并由 `qemu-img compare` 确认逻辑内容逐扇区一致；同名 `.g11base`、
+`.vgpu-portable.json` 和 installer/export 事务残留全部不存在。打包前的 base
+设备号/inode/大小/纳秒 mtime 还会形成状态摘要，注入器取得全局存储锁后必须再次匹配。
+任一条件不满足都不要手工伪造或删除证明文件来绕过，请保留终端错误并核对实际状态。
+续跑模式不能再带 `--compression-type`、`--compression-parallel` 或 `--no-progress`，
+因为这些只属于不会重跑的 seal 阶段。通过门禁后，脚本仍会从当前 checkout 重新打包，
+然后继续离线注入和生成 `.g11base`。
 
 私有 qcow2 在注入授权凭据前会强制设为宿主当前用户独占读写（`0600`）；不要为了
 方便共享而放宽权限，跨电脑交付请使用受控介质复制 `.qcow2 + .g11base`。
@@ -330,8 +362,9 @@ $STAGE_DIR/client_configuration_token.tok
   --token-file /安全路径/client_configuration_token.tok
 ```
 
-只有确认 token 已更换时才加 `--replace-licensed`。不要把 base 目录提交 Git，也不要
-放到公共网盘；qcow2 内含授权凭据。
+只有确认 token、profile catalog 或驱动封装合同已变更时才加
+`--replace-licensed`。不要把 base 目录提交 Git，也不要放到公共网盘；qcow2 内含
+授权凭据。
 
 ## 三、本机直接从同一个镜像克隆
 
@@ -491,11 +524,16 @@ PnP 枚举；它不会把第三方驱动包从 Driver Store 删除。为了适�
 
 ## 失败时怎么做
 
-- 若 Sysprep 弹出“无法验证你的 Windows 安装”，新版 Seal 会在
-  `C:\G11SysprepKit\Sysprep-Diagnostics.txt` 自动保存并打开只读诊断。看到
+- 新版 Seal 使用微软的 `/quiet` 自动化参数，不再等待“无法验证你的 Windows 安装”
+  模态弹窗；也不再信任 Sysprep 不可靠的进程返回码。它比较调用前后的 Panther 日志，
+  只用本次新增错误判定失败，再把 `C:\G11SysprepKit\Sysprep-Diagnostics.txt` 自动
+  保存并打开。看到
   `0x800F0975` / `reserved storage is in use` 时，不要删 Appx，也不要修改
   `ReserveManager` 或 Sysprep 状态注册表；先安装全部 Windows 更新并正常重启，重复
-  到没有更新/重启待处理，再重新运行 Seal。微软对这个错误的处理也是完成更新和重启。
+  到没有更新/重启待处理，再确认篡改防护关闭，只重新运行 Seal。微软对这个错误的
+  处理也是完成更新和重启。脚本会提前拦截公开可见的 pending/busy 信号，但微软没有
+  “Reserved Storage 当前正在占用”的权威只读接口，因此不会冒充自动修复，也绝不以
+  `Set-ReservedStorageState` 作探针。
 - 若报告显示 `0x80073cf2` 以及某个包“installed for a user, but not provisioned for
   all users”，只处理报告点名的精确 Appx 包及所属模板用户；不要运行“删除全部 Appx”
   的脚本。
@@ -541,6 +579,8 @@ PnP 枚举；它不会把第三方驱动包从 Driver Store 删除。为了适�
 ## 官方依据
 
 - [Sysprep (Generalize) a Windows installation](https://learn.microsoft.com/windows-hardware/manufacture/desktop/sysprep--generalize--a-windows-installation)
+- [Sysprep 命令行与 `/quiet`](https://learn.microsoft.com/windows-hardware/manufacture/desktop/sysprep-command-line-options)
+- [Windows Setup `ImageState`](https://learn.microsoft.com/windows-hardware/manufacture/desktop/windows-setup-states)
 - [PersistAllDeviceInstalls](https://learn.microsoft.com/windows-hardware/customize/desktop/unattend/microsoft-windows-pnpsysprep-persistalldeviceinstalls)
 - [Sysprep process overview](https://learn.microsoft.com/windows-hardware/manufacture/desktop/sysprep-process-overview)
 - [Sysprep/捕获失败：Reserved Storage 与 Appx 的官方处理](https://learn.microsoft.com/troubleshoot/mem/configmgr/os-deployment/windows-11-image-capture-fail)

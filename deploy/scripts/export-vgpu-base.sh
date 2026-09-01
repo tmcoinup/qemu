@@ -10,6 +10,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$here/lib/vm-storage.sh"
 # shellcheck source=../lib/vgpu-profiles.sh
 source "$here/lib/vgpu-profiles.sh"
+# shellcheck source=../lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
 vm_storage_init
 
 die() { echo "[g11-base-export] ERROR: $*" >&2; exit 1; }
@@ -42,6 +44,12 @@ done
 
 vgpu_profile_validate_catalog || die "GPU profile catalog validation failed"
 CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
+vgpu_select_driver_stack || die "could not select the reviewed host/guest driver pair"
+[[ "$VGPU_SELECTED_DRIVER_BRANCH" == R535 &&
+   "$VGPU_SELECTED_DRIVER_VERSION" == 31.0.15.3833 ]] ||
+    die "private G-11 base export is reviewed only for R535/GRID 538.33 (31.0.15.3833)"
+DRIVER_BRANCH=$VGPU_SELECTED_DRIVER_BRANCH
+DRIVER_VERSION=$VGPU_SELECTED_DRIVER_VERSION
 vm_storage_prepare
 BASE=$(vm_storage_base_path "$BASE_NAME")
 ATTESTATION="${BASE}.vgpu-portable.json"
@@ -67,32 +75,42 @@ ATTESTED_BASE_MTIME_INSTANT=$(date -u -d "$BASE_MTIME_NS" '+%s.%N') ||
 # Instance-local hard-link pins change only inode ctime. Keep ctime as an audit
 # field, while content eligibility remains bound to inode/size/mtime and the
 # exported transfer manifest receives a fresh full-image SHA-256 below.
-jq -e \
+ATTESTATION_SCHEMA=$(jq -er '.schemaVersion | numbers' "$ATTESTATION") ||
+    die "private base attestation has no numeric schema"
+if [[ "$ATTESTATION_SCHEMA" == 8 ]]; then
+    jq -e \
     --arg basePath "$BASE" \
     --argjson baseFileBytes "$BASE_FILE_BYTES" \
     --arg baseDeviceId "$BASE_DEVICE_ID" \
     --arg baseInode "$BASE_INODE" \
     --arg baseMtimeNs "$BASE_MTIME_NS" \
     --arg baseCtimeNs "$BASE_CTIME_NS" \
-    --arg catalogSha256 "$CATALOG_SHA256" '
+    --arg catalogSha256 "$CATALOG_SHA256" \
+    --arg driverBranch "$DRIVER_BRANCH" \
+    --arg driverVersion "$DRIVER_VERSION" '
     (keys | sort) == [
         "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
         "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
-        "deploymentMode", "dlsHost", "dlsPort",
+        "deploymentMode", "dlsHost", "dlsPort", "driverBranch",
+        "driverVersion",
         "firstBootScriptGuestPath", "firstBootScriptSha256", "firstBootWorkflow",
         "guestPerformance", "installedUtc", "licenseDelivery", "oobeMode",
-        "portableBytes", "portableGuestPath", "portableSha256",
+        "portableBytes", "portableGuestPath", "portableLauncherFormat",
+        "portableReceiptSchema", "portableSha256",
         "retryGuestPath", "retrySha256", "schemaVersion",
         "sysprepAnswerGuestPath", "sysprepAnswerSha256",
         "systemNvapiDelivery", "systemNvapiRequired", "windowsGeneralized"
     ] and
-    .schemaVersion == 7 and .bindingMode == "portable-auto" and
-    .deploymentMode == "site-private-licensed-firstboot-v2" and
+    .schemaVersion == 8 and .bindingMode == "portable-auto" and
+    .deploymentMode == "site-private-licensed-firstboot-v3" and
     .basePath == $basePath and .baseFileBytes == $baseFileBytes and
     .baseDeviceId == $baseDeviceId and .baseInode == $baseInode and
     .baseMtimeNs == $baseMtimeNs and
     (.baseCtimeNs | type) == "string" and
     .portableGuestPath == "C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe" and
+    .portableReceiptSchema == 8 and
+    .portableLauncherFormat == "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8" and
+    .driverBranch == $driverBranch and .driverVersion == $driverVersion and
     (.portableSha256 | test("^[0-9A-F]{64}$")) and
     (.portableBytes | type) == "number" and
     (.portableBytes | floor) == .portableBytes and .portableBytes > 0 and
@@ -111,7 +129,67 @@ jq -e \
     .guestPerformance == "embedded-recommended-native-v1" and
     .catalogSha256 == $catalogSha256 and (.installedUtc | type) == "string"
 ' "$ATTESTATION" >/dev/null ||
-    die "the base is not a current private Sysprep first-boot generation"
+        die "the base is not a current driver-bound private Sysprep generation"
+    EXPORT_MANIFEST_SCHEMA=3
+    EXPORT_BUNDLE_TYPE=vmate-g11-private-base-v3
+    EXPORT_DEPLOYMENT_MODE=site-private-licensed-firstboot-v3
+    PORTABLE_RECEIPT_SCHEMA=8
+    PORTABLE_LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8
+elif [[ "$ATTESTATION_SCHEMA" == 7 ]]; then
+    jq -e \
+        --arg basePath "$BASE" \
+        --argjson baseFileBytes "$BASE_FILE_BYTES" \
+        --arg baseDeviceId "$BASE_DEVICE_ID" \
+        --arg baseInode "$BASE_INODE" \
+        --arg baseMtimeNs "$BASE_MTIME_NS" \
+        --arg catalogSha256 "$CATALOG_SHA256" '
+        (keys | sort) == [
+            "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
+            "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
+            "deploymentMode", "dlsHost", "dlsPort",
+            "firstBootScriptGuestPath", "firstBootScriptSha256",
+            "firstBootWorkflow", "guestPerformance", "installedUtc",
+            "licenseDelivery", "oobeMode", "portableBytes",
+            "portableGuestPath", "portableSha256", "retryGuestPath",
+            "retrySha256", "schemaVersion", "sysprepAnswerGuestPath",
+            "sysprepAnswerSha256", "systemNvapiDelivery",
+            "systemNvapiRequired", "windowsGeneralized"
+        ] and
+        .schemaVersion == 7 and .bindingMode == "portable-auto" and
+        .deploymentMode == "site-private-licensed-firstboot-v2" and
+        .basePath == $basePath and .baseFileBytes == $baseFileBytes and
+        .baseDeviceId == $baseDeviceId and .baseInode == $baseInode and
+        .baseMtimeNs == $baseMtimeNs and
+        (.baseCtimeNs | type) == "string" and
+        .portableGuestPath == "C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe" and
+        (.portableSha256 | test("^[0-9A-F]{64}$")) and
+        (.portableBytes | type) == "number" and
+        (.portableBytes | floor) == .portableBytes and .portableBytes > 0 and
+        .firstBootScriptGuestPath == "C:\\ProgramData\\VMate\\G11\\Finalize-Clone.ps1" and
+        (.firstBootScriptSha256 | test("^[0-9A-F]{64}$")) and
+        .retryGuestPath == "C:\\ProgramData\\VMate\\G11\\Retry-Clone-Initialization.cmd" and
+        (.retrySha256 | test("^[0-9A-F]{64}$")) and
+        .sysprepAnswerGuestPath == "C:\\Windows\\Panther\\unattend.xml" and
+        (.sysprepAnswerSha256 | test("^[0-9A-F]{64}$")) and
+        .windowsGeneralized == true and .oobeMode == "unattended-auto-finalize" and
+        .licenseDelivery == "embedded-private-shared-token" and
+        .firstBootWorkflow == "licensed-portable-system-nvapi-two-boot-v1" and
+        .systemNvapiDelivery == "per-vm-read-only-iso" and
+        .systemNvapiRequired == true and
+        .dlsHost == "dls.gvmates.com" and .dlsPort == 443 and
+        .guestPerformance == "embedded-recommended-native-v1" and
+        .catalogSha256 == $catalogSha256 and (.installedUtc | type) == "string"
+    ' "$ATTESTATION" >/dev/null ||
+        die "legacy private base attestation is invalid"
+    echo "[g11-base-export] accepting historical schema-7 base only for R535/31.0.15.3833"
+    EXPORT_MANIFEST_SCHEMA=2
+    EXPORT_BUNDLE_TYPE=vmate-g11-private-base-v2
+    EXPORT_DEPLOYMENT_MODE=site-private-licensed-firstboot-v2
+    PORTABLE_RECEIPT_SCHEMA=7
+    PORTABLE_LAUNCHER_FORMAT=QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7
+else
+    die "unsupported private base attestation schema: $ATTESTATION_SCHEMA"
+fi
 
 vm_storage_read_qcow2_metadata "$QEMU_IMG" "$BASE" ||
     die "base is not a verifiable qcow2 image"
@@ -160,22 +238,51 @@ if [[ -e "$MANIFEST_OUT" || -L "$MANIFEST_OUT" ]]; then
     ((IN_PLACE)) || die "output manifest already exists: $MANIFEST_OUT"
     [[ -f "$MANIFEST_OUT" && ! -L "$MANIFEST_OUT" ]] ||
         die "existing in-place manifest is not a regular non-symlink file: $MANIFEST_OUT"
-    jq -e --arg baseName "$BASE_NAME" --arg imageFile "$IMAGE_FILE" '
-        (keys | sort) == [
-            "baseName", "bindingMode", "bundleType", "catalogSha256",
-            "deploymentMode", "dlsHost", "dlsPort", "exportedUtc",
-            "firstBootScriptGuestPath", "firstBootScriptSha256",
-            "firstBootWorkflow", "guestPerformance", "imageBytes",
-            "imageFile", "imageSha256", "licenseDelivery", "oobeMode",
-            "portableBytes", "portableGuestPath", "portableSha256",
-            "retryGuestPath", "retrySha256", "schemaVersion",
-            "sysprepAnswerGuestPath", "sysprepAnswerSha256",
-            "systemNvapiDelivery", "systemNvapiRequired", "windowsGeneralized"
-        ] and
-        .schemaVersion == 2 and .bundleType == "vmate-g11-private-base-v2" and
+    jq -e --arg baseName "$BASE_NAME" --arg imageFile "$IMAGE_FILE" \
+            --arg driverBranch "$DRIVER_BRANCH" \
+            --arg driverVersion "$DRIVER_VERSION" '
+        (
+            ((keys | sort) == [
+                "baseName", "bindingMode", "bundleType", "catalogSha256",
+                "deploymentMode", "dlsHost", "dlsPort", "exportedUtc",
+                "firstBootScriptGuestPath", "firstBootScriptSha256",
+                "firstBootWorkflow", "guestPerformance", "imageBytes",
+                "imageFile", "imageSha256", "licenseDelivery", "oobeMode",
+                "portableBytes", "portableGuestPath", "portableSha256",
+                "retryGuestPath", "retrySha256", "schemaVersion",
+                "sysprepAnswerGuestPath", "sysprepAnswerSha256",
+                "systemNvapiDelivery", "systemNvapiRequired",
+                "windowsGeneralized"
+            ] and
+             .schemaVersion == 2 and
+             .bundleType == "vmate-g11-private-base-v2" and
+             .deploymentMode == "site-private-licensed-firstboot-v2")
+            or
+            ((keys | sort) == [
+                "baseName", "bindingMode", "bundleType", "catalogSha256",
+                "deploymentMode", "dlsHost", "dlsPort", "driverBranch",
+                "driverVersion", "exportedUtc", "firstBootScriptGuestPath",
+                "firstBootScriptSha256", "firstBootWorkflow",
+                "guestPerformance", "imageBytes", "imageFile",
+                "imageSha256", "licenseDelivery", "oobeMode",
+                "portableBytes", "portableGuestPath",
+                "portableLauncherFormat", "portableReceiptSchema",
+                "portableSha256", "retryGuestPath", "retrySha256",
+                "schemaVersion", "sysprepAnswerGuestPath",
+                "sysprepAnswerSha256", "systemNvapiDelivery",
+                "systemNvapiRequired", "windowsGeneralized"
+            ] and
+             .schemaVersion == 3 and
+             .bundleType == "vmate-g11-private-base-v3" and
+             .deploymentMode == "site-private-licensed-firstboot-v3" and
+             .portableReceiptSchema == 8 and
+             .portableLauncherFormat ==
+                "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8" and
+             .driverBranch == $driverBranch and
+             .driverVersion == $driverVersion)
+        ) and
         .baseName == $baseName and .imageFile == $imageFile and
         .bindingMode == "portable-auto" and
-        .deploymentMode == "site-private-licensed-firstboot-v2" and
         (.imageSha256 | test("^[0-9A-F]{64}$")) and
         (.imageBytes | type) == "number" and .imageBytes > 0 and
         .portableGuestPath == "C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe" and
@@ -217,7 +324,9 @@ IMAGE_SHA256=$(sha256_upper "$IMAGE_OUT")
 
 MANIFEST_TMP="$BUNDLE_DIR/.${MANIFEST_FILE}.new.$$.$RANDOM"
 jq -n \
-    --argjson schemaVersion 2 \
+    --argjson schemaVersion "$EXPORT_MANIFEST_SCHEMA" \
+    --arg bundleType "$EXPORT_BUNDLE_TYPE" \
+    --arg deploymentMode "$EXPORT_DEPLOYMENT_MODE" \
     --arg baseName "$BASE_NAME" \
     --arg imageFile "$IMAGE_FILE" \
     --arg imageSha256 "$IMAGE_SHA256" \
@@ -228,16 +337,20 @@ jq -n \
     --arg firstBootScriptSha256 "$(jq -r '.firstBootScriptSha256' "$ATTESTATION")" \
     --arg retrySha256 "$(jq -r '.retrySha256' "$ATTESTATION")" \
     --arg sysprepAnswerSha256 "$(jq -r '.sysprepAnswerSha256' "$ATTESTATION")" \
+    --argjson portableReceiptSchema "$PORTABLE_RECEIPT_SCHEMA" \
+    --arg portableLauncherFormat "$PORTABLE_LAUNCHER_FORMAT" \
+    --arg driverBranch "$DRIVER_BRANCH" \
+    --arg driverVersion "$DRIVER_VERSION" \
     --arg exportedUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     {
         schemaVersion: $schemaVersion,
-        bundleType: "vmate-g11-private-base-v2",
+        bundleType: $bundleType,
         baseName: $baseName,
         imageFile: $imageFile,
         imageSha256: $imageSha256,
         imageBytes: $imageBytes,
         bindingMode: "portable-auto",
-        deploymentMode: "site-private-licensed-firstboot-v2",
+        deploymentMode: $deploymentMode,
         portableGuestPath: "C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe",
         portableSha256: $portableSha256,
         portableBytes: $portableBytes,
@@ -258,7 +371,12 @@ jq -n \
         guestPerformance: "embedded-recommended-native-v1",
         catalogSha256: $catalogSha256,
         exportedUtc: $exportedUtc
-    }' >"$MANIFEST_TMP"
+    } + (if $schemaVersion == 3 then {
+        portableReceiptSchema: $portableReceiptSchema,
+        portableLauncherFormat: $portableLauncherFormat,
+        driverBranch: $driverBranch,
+        driverVersion: $driverVersion
+    } else {} end)' >"$MANIFEST_TMP"
 chmod 0600 "$MANIFEST_TMP"
 if ((REPLACE_MANIFEST)); then
     chown "$MANIFEST_UID:$MANIFEST_GID" "$MANIFEST_TMP"
@@ -273,6 +391,7 @@ cat <<EOF
   manifest: $MANIFEST_OUT
   image:    $IMAGE_OUT
   sha256:   $IMAGE_SHA256
+  driver:   $DRIVER_BRANCH / $DRIVER_VERSION
   layout:   $([[ "$IN_PLACE" == 1 ]] && echo 'one qcow2 / local + delivery' || echo 'copy-only bundle')
 
 这是私有授权镜像包。复制时必须同时保留上面两个文件；目标电脑在 VMate 中选择

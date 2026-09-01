@@ -111,10 +111,12 @@ receipt_dir="$tmp/out/.VgpuPortable.exe.receipts"
 exe_hash=$(sha256sum "$tmp/out/VgpuPortable.exe" |
     awk '{print toupper($1)}')
 jq -e --arg hash "$exe_hash" '
-    .schemaVersion == 6 and .bindingMode == "portable-auto" and
+    .schemaVersion == 7 and .bindingMode == "portable-auto" and
+    .driverBranch == "R535" and
+    .driverVersion == "31.0.15.3833" and
     .gpuZDelivery == "optional-explicit-sibling" and
     .guestPerformance == "embedded-recommended-native-v1" and
-    .launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6" and
+    .launcherFormat == "QEMU_VGPU_PORTABLE_BRANCH_V7" and
     .exeSha256 == $hash
 ' "$receipt_dir/$exe_hash.json" >/dev/null ||
     fail "portable host receipt is missing or malformed"
@@ -177,9 +179,11 @@ licensed_exe_hash=$(sha256sum "$tmp/licensed/VgpuPortable.exe" |
     awk '{print toupper($1)}')
 jq -e --arg hash "$licensed_exe_hash" --arg tokenHash "$token_hash" \
     --argjson tokenBytes "$token_bytes" '
-    .schemaVersion == 7 and
+    .schemaVersion == 8 and
+    .driverBranch == "R535" and
+    .driverVersion == "31.0.15.3833" and
     .guestPerformance == "embedded-recommended-native-v1" and
-    .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7" and
+    .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8" and
     .licenseTokenDelivery == "embedded-private" and
     .licenseTokenSha256 == $tokenHash and
     .licenseTokenBytes == $tokenBytes and

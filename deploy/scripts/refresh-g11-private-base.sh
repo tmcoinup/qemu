@@ -11,6 +11,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$here/lib/vm-storage.sh"
 # shellcheck source=../lib/vgpu-profiles.sh
 source "$here/lib/vgpu-profiles.sh"
+# shellcheck source=../lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
 
 die() { echo "[g11-base-refresh] ERROR: $*" >&2; exit 1; }
 usage() {
@@ -144,6 +146,12 @@ grep -Fq 'schemaVersion = 4' "$FINALIZER" ||
 
 vgpu_profile_validate_catalog || die "GPU profile catalog validation failed"
 CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
+vgpu_select_driver_stack || die "could not select the reviewed host/guest driver pair"
+[[ "$VGPU_SELECTED_DRIVER_BRANCH" == R535 &&
+   "$VGPU_SELECTED_DRIVER_VERSION" == 31.0.15.3833 ]] ||
+    die "private G-11 base refresh is reviewed only for R535/GRID 538.33 (31.0.15.3833)"
+DRIVER_BRANCH=$VGPU_SELECTED_DRIVER_BRANCH
+DRIVER_VERSION=$VGPU_SELECTED_DRIVER_VERSION
 BASE_FILE_BYTES=$(stat -c %s -- "$BASE")
 BASE_DEVICE_ID=$(stat -c %D -- "$BASE")
 BASE_INODE=$(stat -c %i -- "$BASE")
@@ -167,9 +175,47 @@ if ((MTIME_MATCHES)) && jq -e \
         --arg catalogSha256 "$CATALOG_SHA256" \
         --arg finalizerSha256 "$FINALIZER_SHA256" \
         --arg retrySha256 "$RETRY_SHA256" \
-        --arg sysprepAnswerSha256 "$SYSPREP_ANSWER_SHA256" '
-    .schemaVersion == 7 and
-    .deploymentMode == "site-private-licensed-firstboot-v2" and
+        --arg sysprepAnswerSha256 "$SYSPREP_ANSWER_SHA256" \
+        --arg driverBranch "$DRIVER_BRANCH" \
+        --arg driverVersion "$DRIVER_VERSION" '
+    (
+        ((keys | sort) == [
+            "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
+            "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
+            "deploymentMode", "dlsHost", "dlsPort", "driverBranch",
+            "driverVersion", "firstBootScriptGuestPath",
+            "firstBootScriptSha256", "firstBootWorkflow",
+            "guestPerformance", "installedUtc", "licenseDelivery",
+            "oobeMode", "portableBytes", "portableGuestPath",
+            "portableLauncherFormat", "portableReceiptSchema",
+            "portableSha256", "retryGuestPath", "retrySha256",
+            "schemaVersion", "sysprepAnswerGuestPath",
+            "sysprepAnswerSha256", "systemNvapiDelivery",
+            "systemNvapiRequired", "windowsGeneralized"
+        ] and
+         .schemaVersion == 8 and
+         .deploymentMode == "site-private-licensed-firstboot-v3" and
+         .portableReceiptSchema == 8 and
+         .portableLauncherFormat ==
+            "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8" and
+         .driverBranch == $driverBranch and
+         .driverVersion == $driverVersion)
+        or
+        ((keys | sort) == [
+            "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
+            "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
+            "deploymentMode", "dlsHost", "dlsPort",
+            "firstBootScriptGuestPath", "firstBootScriptSha256",
+            "firstBootWorkflow", "guestPerformance", "installedUtc",
+            "licenseDelivery", "oobeMode", "portableBytes",
+            "portableGuestPath", "portableSha256", "retryGuestPath",
+            "retrySha256", "schemaVersion", "sysprepAnswerGuestPath",
+            "sysprepAnswerSha256", "systemNvapiDelivery",
+            "systemNvapiRequired", "windowsGeneralized"
+        ] and
+         .schemaVersion == 7 and
+         .deploymentMode == "site-private-licensed-firstboot-v2")
+    ) and
     .basePath == $basePath and
     .baseFileBytes == $baseFileBytes and
     .baseDeviceId == $baseDeviceId and .baseInode == $baseInode and

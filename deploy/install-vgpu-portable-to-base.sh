@@ -15,6 +15,8 @@ source "$here/lib/vm-storage.sh"
 source "$here/lib/vgpu-profiles.sh"
 # shellcheck source=lib/gpuz-assets.sh
 source "$here/lib/gpuz-assets.sh"
+# shellcheck source=lib/vgpu-driver-assets.sh
+source "$here/lib/vgpu-driver-assets.sh"
 vm_storage_init
 
 usage() {
@@ -30,7 +32,7 @@ Options:
                      (public default: $STAGE_DIR/VgpuPortable/VgpuPortable.exe;
                      private default:
                      $STAGE_DIR/VgpuPortableLicensed/VgpuPortable.exe)
-  --site-private     Inject the licensed V7 EXE and the automatic Sysprep
+  --site-private     Inject the driver-bound licensed V8 EXE and automatic Sysprep
                      clone finalizer into C:\ProgramData\VMate\G11
   --sysprep-generalized
                      Required acknowledgement for --site-private: the input
@@ -43,6 +45,9 @@ Options:
   --yes, -y          Skip the final replacement confirmation
   --single-image     V-11 style transaction for the private one-command build:
                      keep rollback only while editing, then delete it on PASS
+  --expect-base-state-sha256 SHA256
+                     Internal resume guard: after taking the storage lock,
+                     require the exact pre-package base inode/size/mtime state
   -h, --help         Show this help
 
 Public mode writes the generic VgpuPortable.exe to the Public Desktop. Private
@@ -75,6 +80,7 @@ ASSUME_YES=0
 SITE_PRIVATE=0
 SYSPREP_GENERALIZED=0
 SINGLE_IMAGE=0
+EXPECTED_BASE_STATE_SHA256=""
 while (($#)); do
     case "$1" in
         --base)
@@ -117,6 +123,13 @@ while (($#)); do
             SINGLE_IMAGE=1
             shift
             ;;
+        --expect-base-state-sha256)
+            (($# >= 2)) || die "--expect-base-state-sha256 requires SHA256"
+            [[ -z "$EXPECTED_BASE_STATE_SHA256" ]] ||
+                die "--expect-base-state-sha256 may be specified once"
+            EXPECTED_BASE_STATE_SHA256=$2
+            shift 2
+            ;;
         -y|--yes)
             ASSUME_YES=1
             shift
@@ -143,6 +156,12 @@ elif ((SYSPREP_GENERALIZED)); then
 fi
 ((SINGLE_IMAGE == 0 || SITE_PRIVATE == 1)) ||
     die "--single-image is valid only with --site-private"
+if [[ -n "$EXPECTED_BASE_STATE_SHA256" ]]; then
+    [[ "$EXPECTED_BASE_STATE_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
+        die "--expect-base-state-sha256 must be 64 uppercase hexadecimal characters"
+    ((SITE_PRIVATE && SINGLE_IMAGE)) ||
+        die "--expect-base-state-sha256 is valid only with --site-private --single-image"
+fi
 if [[ -n "$BASE_NAME" ]]; then
     vm_storage_validate_base_name "$BASE_NAME" || exit 2
 fi
@@ -200,6 +219,20 @@ done
 QEMU_NBD=$(command -v qemu-nbd)
 vgpu_profile_validate_catalog ||
     die "GPU profile catalog validation failed"
+vgpu_select_driver_stack ||
+    die "could not select the reviewed host/guest driver pair"
+case "$VGPU_SELECTED_DRIVER_BRANCH" in
+    R535|R570) ;;
+    *)
+        die "$VGPU_SELECTED_DRIVER_BRANCH does not have a validated B/native portable identity contract"
+        ;;
+esac
+EXPECTED_DRIVER_BRANCH=$VGPU_SELECTED_DRIVER_BRANCH
+EXPECTED_DRIVER_VERSION=$VGPU_SELECTED_DRIVER_VERSION
+if ((SITE_PRIVATE)) && [[ "$EXPECTED_DRIVER_BRANCH" != R535 ||
+                         "$EXPECTED_DRIVER_VERSION" != 31.0.15.3833 ]]; then
+    die "private clone finalizer is reviewed only for R535/GRID 538.33 (31.0.15.3833); selected stack is $EXPECTED_DRIVER_BRANCH/$EXPECTED_DRIVER_VERSION"
+fi
 EXPECTED_CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
 [[ "$EXPECTED_CATALOG_SHA256" =~ ^[0-9A-F]{64}$ ]] ||
     die "could not calculate the current GPU profile catalog hash"
@@ -220,20 +253,26 @@ PORTABLE_RECEIPT="$PORTABLE_PARENT/.$(basename -- "$PORTABLE_EXE").receipts/${PO
 [[ -f "$PORTABLE_RECEIPT" && ! -L "$PORTABLE_RECEIPT" ]] ||
     die "portable EXE has no host content receipt"
 if ((SITE_PRIVATE)); then
-    CATALOG_SHA256=$(jq -er \
+    RECEIPT_METADATA=""
+    if RECEIPT_METADATA=$(jq -er \
         --arg exeSha256 "$PORTABLE_SHA256" \
-        --argjson exeBytes "$PORTABLE_BYTES" '
+        --argjson exeBytes "$PORTABLE_BYTES" \
+        --arg driverBranch "$EXPECTED_DRIVER_BRANCH" \
+        --arg driverVersion "$EXPECTED_DRIVER_VERSION" '
         select(
             (keys | sort) == [
                 "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "exeBytes", "exeSha256", "gpuZDelivery", "guestPerformance",
-                "launcherFormat", "licenseTokenBytes", "licenseTokenDelivery",
+                "driverBranch", "driverVersion", "exeBytes", "exeSha256",
+                "gpuZDelivery", "guestPerformance", "launcherFormat",
+                "licenseTokenBytes", "licenseTokenDelivery",
                 "licenseTokenSha256", "schemaVersion"
             ] and
-            .schemaVersion == 7 and .bindingMode == "portable-auto" and
+            .schemaVersion == 8 and .bindingMode == "portable-auto" and
             .gpuZDelivery == "optional-explicit-sibling" and
             .guestPerformance == "embedded-recommended-native-v1" and
-            .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7" and
+            .launcherFormat == "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8" and
+            .driverBranch == $driverBranch and
+            .driverVersion == $driverVersion and
             .licenseTokenDelivery == "embedded-private" and
             (.licenseTokenSha256 | test("^[0-9A-F]{64}$")) and
             (.licenseTokenBytes | type) == "number" and
@@ -241,29 +280,100 @@ if ((SITE_PRIVATE)); then
             .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
             (.catalogSha256 | test("^[0-9A-F]{64}$")) and
             (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
-        ) | .catalogSha256
-    ' "$PORTABLE_RECEIPT") ||
-        die "licensed private EXE host receipt is invalid"
+        ) | [.catalogSha256, (.schemaVersion | tostring), .launcherFormat,
+             .driverBranch, .driverVersion] | @tsv
+    ' "$PORTABLE_RECEIPT"); then
+        :
+    elif [[ "$EXPECTED_DRIVER_BRANCH" == R535 &&
+            "$EXPECTED_DRIVER_VERSION" == 31.0.15.3833 ]] &&
+            RECEIPT_METADATA=$(jq -er \
+                --arg exeSha256 "$PORTABLE_SHA256" \
+                --argjson exeBytes "$PORTABLE_BYTES" '
+            select(
+                (keys | sort) == [
+                    "bindingMode", "bundleManifestSha256", "catalogSha256",
+                    "exeBytes", "exeSha256", "gpuZDelivery",
+                    "guestPerformance", "launcherFormat",
+                    "licenseTokenBytes", "licenseTokenDelivery",
+                    "licenseTokenSha256", "schemaVersion"
+                ] and
+                .schemaVersion == 7 and .bindingMode == "portable-auto" and
+                .gpuZDelivery == "optional-explicit-sibling" and
+                .guestPerformance == "embedded-recommended-native-v1" and
+                .launcherFormat ==
+                    "QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7" and
+                .licenseTokenDelivery == "embedded-private" and
+                (.licenseTokenSha256 | test("^[0-9A-F]{64}$")) and
+                (.licenseTokenBytes | type) == "number" and
+                .licenseTokenBytes > 0 and
+                .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
+                (.catalogSha256 | test("^[0-9A-F]{64}$")) and
+                (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
+            ) | [.catalogSha256, (.schemaVersion | tostring), .launcherFormat,
+                 "R535", "31.0.15.3833"] | @tsv
+        ' "$PORTABLE_RECEIPT"); then
+        log "accepting historical licensed V7 receipt only for the reviewed R535/31.0.15.3833 stack"
+    else
+        die "licensed private EXE host receipt is invalid for $EXPECTED_DRIVER_BRANCH/$EXPECTED_DRIVER_VERSION"
+    fi
+    IFS=$'\t' read -r CATALOG_SHA256 PORTABLE_RECEIPT_SCHEMA \
+        PORTABLE_LAUNCHER_FORMAT PORTABLE_DRIVER_BRANCH \
+        PORTABLE_DRIVER_VERSION <<<"$RECEIPT_METADATA"
 else
-    CATALOG_SHA256=$(jq -er \
+    RECEIPT_METADATA=""
+    if RECEIPT_METADATA=$(jq -er \
         --arg exeSha256 "$PORTABLE_SHA256" \
-        --argjson exeBytes "$PORTABLE_BYTES" '
+        --argjson exeBytes "$PORTABLE_BYTES" \
+        --arg driverBranch "$EXPECTED_DRIVER_BRANCH" \
+        --arg driverVersion "$EXPECTED_DRIVER_VERSION" '
         select(
             (keys | sort) == [
                 "bindingMode", "bundleManifestSha256", "catalogSha256",
-                "exeBytes", "exeSha256", "gpuZDelivery", "guestPerformance",
-                "launcherFormat", "schemaVersion"
+                "driverBranch", "driverVersion", "exeBytes", "exeSha256",
+                "gpuZDelivery", "guestPerformance", "launcherFormat",
+                "schemaVersion"
             ] and
-            .schemaVersion == 6 and .bindingMode == "portable-auto" and
+            .schemaVersion == 7 and .bindingMode == "portable-auto" and
             .gpuZDelivery == "optional-explicit-sibling" and
             .guestPerformance == "embedded-recommended-native-v1" and
-            .launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6" and
+            .launcherFormat == "QEMU_VGPU_PORTABLE_BRANCH_V7" and
+            .driverBranch == $driverBranch and
+            .driverVersion == $driverVersion and
             .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
             (.catalogSha256 | test("^[0-9A-F]{64}$")) and
             (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
-        ) | .catalogSha256
-    ' "$PORTABLE_RECEIPT") ||
-        die "portable EXE host receipt is invalid"
+        ) | [.catalogSha256, (.schemaVersion | tostring), .launcherFormat,
+             .driverBranch, .driverVersion] | @tsv
+    ' "$PORTABLE_RECEIPT"); then
+        :
+    elif [[ "$EXPECTED_DRIVER_BRANCH" == R535 &&
+            "$EXPECTED_DRIVER_VERSION" == 31.0.15.3833 ]] &&
+            RECEIPT_METADATA=$(jq -er \
+                --arg exeSha256 "$PORTABLE_SHA256" \
+                --argjson exeBytes "$PORTABLE_BYTES" '
+            select(
+                (keys | sort) == [
+                    "bindingMode", "bundleManifestSha256", "catalogSha256",
+                    "exeBytes", "exeSha256", "gpuZDelivery",
+                    "guestPerformance", "launcherFormat", "schemaVersion"
+                ] and
+                .schemaVersion == 6 and .bindingMode == "portable-auto" and
+                .gpuZDelivery == "optional-explicit-sibling" and
+                .guestPerformance == "embedded-recommended-native-v1" and
+                .launcherFormat == "QEMU_VGPU_PORTABLE_UNIFIED_V6" and
+                .exeSha256 == $exeSha256 and .exeBytes == $exeBytes and
+                (.catalogSha256 | test("^[0-9A-F]{64}$")) and
+                (.bundleManifestSha256 | test("^[0-9A-F]{64}$"))
+            ) | [.catalogSha256, (.schemaVersion | tostring), .launcherFormat,
+                 "R535", "31.0.15.3833"] | @tsv
+        ' "$PORTABLE_RECEIPT"); then
+        log "accepting historical public V6 receipt only for the reviewed R535/31.0.15.3833 stack"
+    else
+        die "portable EXE host receipt is invalid for $EXPECTED_DRIVER_BRANCH/$EXPECTED_DRIVER_VERSION"
+    fi
+    IFS=$'\t' read -r CATALOG_SHA256 PORTABLE_RECEIPT_SCHEMA \
+        PORTABLE_LAUNCHER_FORMAT PORTABLE_DRIVER_BRANCH \
+        PORTABLE_DRIVER_VERSION <<<"$RECEIPT_METADATA"
 fi
 [[ "$CATALOG_SHA256" == "$EXPECTED_CATALOG_SHA256" ]] ||
     die "portable EXE uses an obsolete GPU profile catalog; rebuild it before installing the base"
@@ -357,6 +467,14 @@ fi
 if [[ "$lock_uid" == 0 && "$storage_uid" != 0 ]]; then
     chown "$storage_uid:$storage_gid" "/proc/self/fd/$STORAGE_LOCK_FD"
     chmod 0600 "/proc/self/fd/$STORAGE_LOCK_FD"
+fi
+if [[ -n "$EXPECTED_BASE_STATE_SHA256" ]]; then
+    OBSERVED_BASE_STATE_SHA256=$(
+        TZ=UTC stat -c '%D|%i|%s|%y' -- "$BASE" |
+            sha256sum | awk '{print toupper($1)}'
+    ) || die "could not fingerprint base after taking the storage lock"
+    [[ "$OBSERVED_BASE_STATE_SHA256" == "$EXPECTED_BASE_STATE_SHA256" ]] ||
+        die "base state changed before locked injection; refusing resume"
 fi
 storage_dirs=("$VM_RUN_DIR")
 ((SINGLE_IMAGE)) || storage_dirs+=("$VM_BASE_ARCHIVE_DIR")
@@ -656,11 +774,54 @@ refresh_restored_attestation_ctime() {
                  .systemNvapiRequired == true and
                  .dlsHost == "dls.gvmates.com" and .dlsPort == 443 and
                  .guestPerformance == "embedded-recommended-native-v1")
+                or
+                ((keys | sort) == [
+                    "baseCtimeNs", "baseDeviceId", "baseFileBytes",
+                    "baseInode", "baseMtimeNs", "basePath", "bindingMode",
+                    "catalogSha256", "deploymentMode", "dlsHost", "dlsPort",
+                    "driverBranch", "driverVersion", "firstBootScriptGuestPath",
+                    "firstBootScriptSha256", "firstBootWorkflow",
+                    "guestPerformance", "installedUtc", "licenseDelivery",
+                    "oobeMode", "portableBytes", "portableGuestPath",
+                    "portableLauncherFormat", "portableReceiptSchema",
+                    "portableSha256", "retryGuestPath", "retrySha256",
+                    "schemaVersion", "sysprepAnswerGuestPath",
+                    "sysprepAnswerSha256", "systemNvapiDelivery",
+                    "systemNvapiRequired", "windowsGeneralized"
+                ] and
+                 .schemaVersion == 8 and
+                 .deploymentMode == "site-private-licensed-firstboot-v3" and
+                 .portableReceiptSchema == 8 and
+                 .portableLauncherFormat ==
+                    "QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8" and
+                 .driverBranch == "R535" and
+                 .driverVersion == "31.0.15.3833" and
+                 .portableGuestPath == "C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe" and
+                 (.portableSha256 | test("^[0-9A-F]{64}$")) and
+                 (.portableBytes | type) == "number" and
+                 (.portableBytes | floor) == .portableBytes and .portableBytes > 0 and
+                 .firstBootScriptGuestPath ==
+                    "C:\\ProgramData\\VMate\\G11\\Finalize-Clone.ps1" and
+                 (.firstBootScriptSha256 | test("^[0-9A-F]{64}$")) and
+                 .retryGuestPath ==
+                    "C:\\ProgramData\\VMate\\G11\\Retry-Clone-Initialization.cmd" and
+                 (.retrySha256 | test("^[0-9A-F]{64}$")) and
+                 .sysprepAnswerGuestPath == "C:\\Windows\\Panther\\unattend.xml" and
+                 (.sysprepAnswerSha256 | test("^[0-9A-F]{64}$")) and
+                 .windowsGeneralized == true and
+                 .oobeMode == "unattended-auto-finalize" and
+                 .licenseDelivery == "embedded-private-shared-token" and
+                 .firstBootWorkflow ==
+                    "licensed-portable-system-nvapi-two-boot-v1" and
+                 .systemNvapiDelivery == "per-vm-read-only-iso" and
+                 .systemNvapiRequired == true and
+                 .dlsHost == "dls.gvmates.com" and .dlsPort == 443 and
+                 .guestPerformance == "embedded-recommended-native-v1")
             )
         ) then
             .baseCtimeNs = $baseCtimeNs
         else
-            error("restored attestation is not a valid schema-2..5 public or schema-6/7 private generation")
+            error("restored attestation is not a valid schema-2..5 public or schema-6..8 private generation")
         end
     ' "$ATTESTATION" >"$refresh_tmp"; then
         rm -f -- "$refresh_tmp"
@@ -913,7 +1074,7 @@ if ((SITE_PRIVATE)); then
        ! -e "$MOUNT_DIR/ProgramData/G11/SystemNvapiProjection" &&
        ! -e "$DEST_DIR/logs" ]] ||
         die "private base retained a generic EXE or previous clone result"
-    log "installed one licensed V7 EXE, pinned Guest Lite 2.6.7, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
+    log "installed one driver-bound licensed receipt schema $PORTABLE_RECEIPT_SCHEMA EXE, pinned Guest Lite 2.6.7, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
 elif ((WITH_GPUZ)); then
     [[ "$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256" &&
        "$(stat -c %s -- "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_BYTES" ]] ||
@@ -980,8 +1141,13 @@ if ((WITH_GPUZ)); then
     GPUZ_INCLUDED_JSON=true
 fi
 if ((SITE_PRIVATE)); then
+    PRIVATE_DEPLOYMENT_MODE=site-private-licensed-firstboot-v2
+    if [[ "$PORTABLE_RECEIPT_SCHEMA" == 8 ]]; then
+        PRIVATE_DEPLOYMENT_MODE=site-private-licensed-firstboot-v3
+    fi
     jq -n \
-        --argjson schemaVersion 7 \
+        --argjson schemaVersion "$PORTABLE_RECEIPT_SCHEMA" \
+        --arg deploymentMode "$PRIVATE_DEPLOYMENT_MODE" \
         --arg basePath "$BASE" \
         --argjson baseFileBytes "$BASE_FILE_BYTES" \
         --arg baseDeviceId "$BASE_DEVICE_ID" \
@@ -993,12 +1159,15 @@ if ((SITE_PRIVATE)); then
         --arg firstBootScriptSha256 "$FIRST_BOOT_SHA256" \
         --arg retrySha256 "$RETRY_SHA256" \
         --arg sysprepAnswerSha256 "$SYSPREP_ANSWER_SHA256" \
+        --arg portableLauncherFormat "$PORTABLE_LAUNCHER_FORMAT" \
+        --arg driverBranch "$PORTABLE_DRIVER_BRANCH" \
+        --arg driverVersion "$PORTABLE_DRIVER_VERSION" \
         --arg catalogSha256 "$CATALOG_SHA256" \
         --arg installedUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
         {
             schemaVersion: $schemaVersion,
             bindingMode: "portable-auto",
-            deploymentMode: "site-private-licensed-firstboot-v2",
+            deploymentMode: $deploymentMode,
             basePath: $basePath,
             baseFileBytes: $baseFileBytes,
             baseDeviceId: $baseDeviceId,
@@ -1025,7 +1194,12 @@ if ((SITE_PRIVATE)); then
             guestPerformance: "embedded-recommended-native-v1",
             catalogSha256: $catalogSha256,
             installedUtc: $installedUtc
-        }' >"$ATTESTATION_TMP"
+        } + (if $schemaVersion == 8 then {
+            portableReceiptSchema: 8,
+            portableLauncherFormat: $portableLauncherFormat,
+            driverBranch: $driverBranch,
+            driverVersion: $driverVersion
+        } else {} end)' >"$ATTESTATION_TMP"
     chmod 0600 "$ATTESTATION_TMP"
 else
     jq -n \
@@ -1086,20 +1260,49 @@ if ((SITE_PRIVATE)); then
         --argjson portableBytes "$PORTABLE_BYTES" \
         --arg firstBootScriptSha256 "$FIRST_BOOT_SHA256" \
         --arg retrySha256 "$RETRY_SHA256" \
-        --arg sysprepAnswerSha256 "$SYSPREP_ANSWER_SHA256" '
-        (keys | sort) == [
-            "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
-            "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
-            "deploymentMode", "dlsHost", "dlsPort",
-            "firstBootScriptGuestPath", "firstBootScriptSha256", "firstBootWorkflow",
-            "guestPerformance", "installedUtc", "licenseDelivery", "oobeMode",
-            "portableBytes", "portableGuestPath", "portableSha256",
-            "retryGuestPath", "retrySha256", "schemaVersion",
-            "sysprepAnswerGuestPath", "sysprepAnswerSha256",
-            "systemNvapiDelivery", "systemNvapiRequired", "windowsGeneralized"
-        ] and
-        .schemaVersion == 7 and .bindingMode == "portable-auto" and
-        .deploymentMode == "site-private-licensed-firstboot-v2" and
+        --arg sysprepAnswerSha256 "$SYSPREP_ANSWER_SHA256" \
+        --argjson receiptSchema "$PORTABLE_RECEIPT_SCHEMA" \
+        --arg launcherFormat "$PORTABLE_LAUNCHER_FORMAT" \
+        --arg driverBranch "$PORTABLE_DRIVER_BRANCH" \
+        --arg driverVersion "$PORTABLE_DRIVER_VERSION" '
+        (
+            ((keys | sort) == [
+                "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
+                "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
+                "deploymentMode", "dlsHost", "dlsPort",
+                "firstBootScriptGuestPath", "firstBootScriptSha256",
+                "firstBootWorkflow", "guestPerformance", "installedUtc",
+                "licenseDelivery", "oobeMode", "portableBytes",
+                "portableGuestPath", "portableSha256", "retryGuestPath",
+                "retrySha256", "schemaVersion", "sysprepAnswerGuestPath",
+                "sysprepAnswerSha256", "systemNvapiDelivery",
+                "systemNvapiRequired", "windowsGeneralized"
+            ] and
+             .schemaVersion == 7 and $receiptSchema == 7 and
+             .deploymentMode == "site-private-licensed-firstboot-v2")
+            or
+            ((keys | sort) == [
+                "baseCtimeNs", "baseDeviceId", "baseFileBytes", "baseInode",
+                "baseMtimeNs", "basePath", "bindingMode", "catalogSha256",
+                "deploymentMode", "dlsHost", "dlsPort", "driverBranch",
+                "driverVersion", "firstBootScriptGuestPath",
+                "firstBootScriptSha256", "firstBootWorkflow",
+                "guestPerformance", "installedUtc", "licenseDelivery",
+                "oobeMode", "portableBytes", "portableGuestPath",
+                "portableLauncherFormat", "portableReceiptSchema",
+                "portableSha256", "retryGuestPath", "retrySha256",
+                "schemaVersion", "sysprepAnswerGuestPath",
+                "sysprepAnswerSha256", "systemNvapiDelivery",
+                "systemNvapiRequired", "windowsGeneralized"
+            ] and
+             .schemaVersion == 8 and $receiptSchema == 8 and
+             .deploymentMode == "site-private-licensed-firstboot-v3" and
+             .portableReceiptSchema == 8 and
+             .portableLauncherFormat == $launcherFormat and
+             .driverBranch == $driverBranch and
+             .driverVersion == $driverVersion)
+        ) and
+        .bindingMode == "portable-auto" and
         .basePath == $basePath and .baseFileBytes == $baseFileBytes and
         .baseDeviceId == $baseDeviceId and .baseInode == $baseInode and
         .baseMtimeNs == $baseMtimeNs and .baseCtimeNs == $baseCtimeNs and
@@ -1202,11 +1405,12 @@ if ((SITE_PRIVATE)); then
   archive:    $BACKUP_RESULT
   portable:   C:\ProgramData\VMate\G11\VgpuPortable.exe
               sha256=$PORTABLE_SHA256
-  first boot: automatic licensed V7 finalizer; one execution only
+  first boot: automatic licensed receipt schema $PORTABLE_RECEIPT_SCHEMA finalizer; one execution only
   Guest Lite: automatic pinned 2.6.7 profile in the same verified first-boot flow
   OOBE:       unattended; each clone still receives a generalized Windows identity
   DLS:        dls.gvmates.com:443
   performance: embedded recommended-native-v1
+  driver:     $PORTABLE_DRIVER_BRANCH / $PORTABLE_DRIVER_VERSION
   catalog:    $CATALOG_SHA256
 
 下一步只需导出私有基础镜像包：

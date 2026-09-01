@@ -11,7 +11,9 @@ RETRY="$ROOT/deploy/guest/Retry-Clone-Initialization.cmd"
 SEAL="$ROOT/deploy/guest/Seal-G11-Template.cmd"
 SYSPREP_DIAGNOSTIC="$ROOT/deploy/guest/Collect-Sysprep-Diagnostics.ps1"
 TEMPLATE_READINESS="$ROOT/deploy/guest/Assert-G11-Template-Ready.ps1"
+SERVICING_READINESS="$ROOT/deploy/guest/Assert-G11-Sysprep-Servicing-Ready.ps1"
 TEMPLATE_RESET="$ROOT/deploy/guest/Reset-G11-Template-State.ps1"
+SYSPREP_RUNNER="$ROOT/deploy/guest/Invoke-G11-Sysprep.ps1"
 GUEST_PERFORMANCE="$ROOT/deploy/guest/guest-performance/Optimize-Guest.ps1"
 GUEST_LITE_ROOT="$ROOT/deploy/guest/guest-lite"
 GUEST_LITE_MANIFEST="$GUEST_LITE_ROOT/clone-manifest.json"
@@ -40,7 +42,8 @@ GUEST_LITE_ASSETS=(
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 for file in "$XML" "$FINALIZER" "$RETRY" "$SEAL" "$SYSPREP_DIAGNOSTIC" \
-        "$TEMPLATE_READINESS" "$TEMPLATE_RESET" "$GUEST_PERFORMANCE" \
+        "$TEMPLATE_READINESS" "$SERVICING_READINESS" "$TEMPLATE_RESET" \
+        "$SYSPREP_RUNNER" "$GUEST_PERFORMANCE" \
         "$INSTALLER" "$CLONE" "$CREATE_DISK" "$EXPORT" \
         "$IMPORT" "$INITIAL" "$REPAIR" "$REFRESH_BASE" "$VERIFY" \
         "$BUILD_BASE" "$KIT" "$START" \
@@ -50,6 +53,27 @@ for file in "$XML" "$FINALIZER" "$RETRY" "$SEAL" "$SYSPREP_DIAGNOSTIC" \
 done
 bash -n "$INSTALLER" "$CLONE" "$CREATE_DISK" "$EXPORT" "$IMPORT" "$INITIAL" \
     "$REPAIR" "$REFRESH_BASE" "$VERIFY" "$BUILD_BASE" "$KIT" "$START" "$PACKAGER"
+
+if command -v pwsh >/dev/null 2>&1; then
+    for powershell_source in "$SERVICING_READINESS" "$SYSPREP_RUNNER" \
+            "$SYSPREP_DIAGNOSTIC"; do
+        VMATE_PS_PARSE_PATH="$powershell_source" \
+            pwsh -NoLogo -NoProfile -Command '
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+                $env:VMATE_PS_PARSE_PATH, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+                $errors | ForEach-Object { Write-Error $_.Message }
+                exit 1
+            }
+        '
+    done
+    pwsh -NoLogo -NoProfile -File \
+        "$ROOT/deploy/tests/guest/sysprep_runner_delta.tests.ps1" \
+        -RunnerPath "$SYSPREP_RUNNER" \
+        -ServicingGatePath "$SERVICING_READINESS"
+fi
 
 python3 - "$XML" <<'PY'
 import sys
@@ -112,10 +136,12 @@ grep -Fq "\$ExpectedGuestLiteManifestSha256 = '$guest_lite_manifest_sha'" \
 
 grep -Fq -- '--site-private' "$INSTALLER" || fail "private installer option missing"
 grep -Fq -- '--sysprep-generalized' "$INSTALLER" || fail "generalize acknowledgement missing"
-grep -Fq 'QEMU_VGPU_PORTABLE_LICENSED_UNIFIED_V7' "$INSTALLER" ||
-    fail "licensed V7 receipt validation missing"
-grep -Fq 'site-private-licensed-firstboot-v2' "$INSTALLER" ||
-    fail "private base deployment mode missing"
+grep -Fq 'QEMU_VGPU_PORTABLE_LICENSED_BRANCH_V8' "$INSTALLER" ||
+    fail "licensed V8 receipt validation missing"
+grep -Fq 'site-private-licensed-firstboot-v3' "$INSTALLER" ||
+    fail "driver-bound private base deployment mode missing"
+grep -Fq 'private clone finalizer is reviewed only for R535/GRID 538.33' \
+    "$INSTALLER" || fail "private R535-only finalizer gate missing"
 grep -Fq 'licensed-portable-system-nvapi-two-boot-v1' "$INSTALLER" ||
     fail "private two-stage first-boot workflow missing"
 grep -Fq 'C:\\ProgramData\\VMate\\G11\\VgpuPortable.exe' "$INSTALLER" ||
@@ -500,8 +526,10 @@ grep -Fq 'rm -f -- "$REQUIRED_MARKER"' "$INITIAL" ||
     fail "initialization gate is not cleared after success"
 grep -Fq 'systemNvapiVerified: true' "$INITIAL" ||
     fail "one-click final state does not record system NVAPI verification"
-grep -Fq 'vmate-g11-private-base-v2' "$EXPORT" || fail "portable export manifest missing"
-grep -Fq 'vmate-g11-private-base-v2' "$IMPORT" || fail "portable import validation missing"
+grep -Fq 'vmate-g11-private-base-v3' "$EXPORT" || fail "portable export manifest missing"
+grep -Fq 'vmate-g11-private-base-v3' "$IMPORT" || fail "portable import validation missing"
+grep -Fq 'portableReceiptSchema' "$EXPORT" "$IMPORT" ||
+    fail "portable transfer receipt-schema binding missing"
 grep -Fq 'source:    retained' "$IMPORT" || fail "copy-only import result missing"
 grep -Fq 'target qemu-img cannot read this qcow2 compression format' "$IMPORT" ||
     fail "target-side qcow2 compression compatibility gate missing"
@@ -526,9 +554,11 @@ cmp -- "$GUEST_LITE_MANIFEST" \
 [[ -s "$KIT_TMP/G11SysprepKit/Standalone-GuestLite/G11GuestLite.exe" ]] ||
     fail "complete Sysprep kit does not contain the compiled Guest Lite EXE"
 expected_kit_files=$(cat <<'EOF'
+Assert-G11-Sysprep-Servicing-Ready.ps1
 Assert-G11-Template-Ready.ps1
 Collect-Sysprep-Diagnostics.ps1
 G11-Sysprep-README.txt
+Invoke-G11-Sysprep.ps1
 Payload/Finalize-Clone.ps1
 Payload/GuestLite/01-OneClick-Apply.cmd
 Payload/GuestLite/02-Audit.cmd
@@ -558,6 +588,10 @@ grep -Fq 'G11SysprepKit cannot be stored in or below' "$SEAL" ||
     fail "Seal entry point does not reject ProgramData source placement"
 grep -Fq 'Collect-Sysprep-Diagnostics.ps1' "$SEAL" ||
     fail "Seal entry point does not collect Sysprep failure diagnostics"
+grep -Fq 'Assert-G11-Sysprep-Servicing-Ready.ps1' "$SEAL" ||
+    fail "Seal entry point does not run the servicing readiness gate"
+grep -Fq 'Invoke-G11-Sysprep.ps1' "$SEAL" ||
+    fail "Seal entry point does not use the hardened Sysprep runner"
 grep -Fq 'Get-MpComputerStatus' "$TEMPLATE_READINESS" ||
     fail "template readiness gate does not query supported Defender status"
 grep -Fq "PSObject.Properties['IsTamperProtected']" "$TEMPLATE_READINESS" ||
@@ -590,31 +624,102 @@ grep -Fq '0x800F0975' "$SYSPREP_DIAGNOSTIC" ||
     fail "Sysprep diagnostics do not identify the reserved-storage blocker"
 grep -Fq '0x80073cf2' "$SYSPREP_DIAGNOSTIC" ||
     fail "Sysprep diagnostics do not identify Appx provisioning mismatch"
-if grep -Eiq 'Remove-AppxPackage|Remove-AppxProvisionedPackage|Set-ReservedStorageState|ReserveManager.*(Set|New-ItemProperty)|bcdedit' \
-        "$SYSPREP_DIAGNOSTIC"; then
-    fail "Sysprep diagnostic collector contains an automatic destructive repair"
+for required in SetupErrStartLine SetupActStartLine InvocationScoped PantherDelta; do
+    grep -Fq "$required" "$SYSPREP_DIAGNOSTIC" ||
+        fail "Sysprep diagnostic collector omits invocation scope: $required"
+done
+grep -Fq 'Get-LogLinesFromOffset' "$SYSPREP_DIAGNOSTIC" ||
+    fail "Sysprep diagnostics do not scope cause detection to this invocation"
+for powershell_source in "$SERVICING_READINESS" "$SYSPREP_RUNNER" \
+        "$SYSPREP_DIAGNOSTIC"; do
+    grep -Fxq '#requires -Version 5.1' "$powershell_source" ||
+        fail "Windows PowerShell 5.1 contract missing: $powershell_source"
+done
+
+for required in \
+        'Component Based Servicing' \
+        'RebootPending' \
+        'PackagesPending' \
+        'RebootRequired' \
+        'PendingFileRenameOperations' \
+        'Microsoft.Update.SystemInfo' \
+        'Microsoft.Update.Installer' \
+        'Get-WindowsPackage' \
+        'Get-WindowsOptionalFeature' \
+        'Get-WindowsReservedStorageState' \
+        '0x800F0975 was already logged during this boot'; do
+    grep -Fq "$required" "$SERVICING_READINESS" ||
+        fail "servicing readiness gate omits: $required"
+done
+grep -Fq 'Enabled is capability state, not proof that it is in use' \
+    "$SERVICING_READINESS" ||
+    fail "servicing readiness treats Reserved Storage Enabled as in-use"
+grep -Fq 'This does not guarantee that Reserved Storage is idle' \
+    "$SERVICING_READINESS" ||
+    fail "servicing readiness overclaims its read-only observation"
+grep -Fq 'if ($WindowsBuild -ge 19041)' "$SERVICING_READINESS" ||
+    fail "servicing readiness calls a new Reserved Storage cmdlet on every Windows 10 build"
+
+for required in \
+        Get-LogDeltaStartLine \
+        StringComparison \
+        Get-SysprepFailureLines \
+        Start-NativeProcessAndWait \
+        SetupErrStartLine \
+        SetupActStartLine \
+        InvocationScoped \
+        IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE \
+        '/generalize' '/oobe' '/shutdown' '/quiet' '/unattend:'; do
+    grep -Fq "$required" "$SYSPREP_RUNNER" ||
+        fail "hardened Sysprep runner omits: $required"
+done
+grep -Fq 'Start-Process -FilePath notepad.exe' "$SYSPREP_RUNNER" ||
+    fail "hardened Sysprep runner does not open its automatic report"
+grep -Eq 'Start-Process -FilePath \$FilePath -ArgumentList \$ArgumentList.*' \
+    "$SYSPREP_RUNNER" ||
+    fail "hardened Sysprep runner does not start the native process explicitly"
+grep -Eq '^[[:space:]]*-Wait -ErrorAction Stop$' "$SYSPREP_RUNNER" ||
+    fail "hardened Sysprep runner does not wait for Sysprep to exit"
+if grep -Fq 'Sysprep.exe' "$SEAL"; then
+    fail "Seal still invokes Sysprep directly instead of the hardened runner"
 fi
-seal_sysprep_line=$(grep -n 'Sysprep.exe.* /generalize /oobe /shutdown ' "$SEAL" |
+if grep -Fq '$LASTEXITCODE' "$SYSPREP_RUNNER" ||
+        grep -Fq '.ExitCode' "$SYSPREP_RUNNER"; then
+    fail "hardened Sysprep runner still trusts the unreliable process exit code"
+fi
+if grep -Eiq 'Set-WindowsReservedStorageState|/Set-ReservedStorageState|Remove-AppxPackage|Remove-AppxProvisionedPackage|bcdedit([.]exe)?[[:space:]]|pnputil([.]exe)?[[:space:]]|ReserveManager.*(Set|New-ItemProperty)' \
+        "$SERVICING_READINESS" "$SYSPREP_RUNNER" "$SYSPREP_DIAGNOSTIC"; then
+    fail "Sysprep gates/runner/collector contain a forbidden state mutation"
+fi
+seal_runner_line=$(grep -n 'ExecutionPolicy Bypass -File "%SYSPREP_RUNNER%"' "$SEAL" |
+    cut -d: -f1)
+seal_servicing_line=$(grep -n 'ExecutionPolicy Bypass -File "%SERVICING_READINESS%"' "$SEAL" |
     cut -d: -f1)
 seal_readiness_line=$(grep -n 'ExecutionPolicy Bypass -File "%READINESS%"' "$SEAL" |
     cut -d: -f1)
 seal_reset_line=$(grep -n 'ExecutionPolicy Bypass -File "%RESET%"' "$SEAL" |
     cut -d: -f1)
 seal_stage_line=$(grep -n '^set "GUESTLITE_NEW=' "$SEAL" | cut -d: -f1)
+seal_powercfg_line=$(grep -n '^powercfg.exe /hibernate off$' "$SEAL" |
+    cut -d: -f1)
 seal_success_exit_line=$(grep -n '^exit /b 0$' "$SEAL" | cut -d: -f1)
 seal_stage_error_line=$(grep -n '^:stage_error$' "$SEAL" | cut -d: -f1)
-[[ "$seal_sysprep_line" =~ ^[0-9]+$ &&
+[[ "$seal_runner_line" =~ ^[0-9]+$ &&
+   "$seal_servicing_line" =~ ^[0-9]+$ &&
    "$seal_readiness_line" =~ ^[0-9]+$ &&
    "$seal_reset_line" =~ ^[0-9]+$ &&
    "$seal_stage_line" =~ ^[0-9]+$ &&
+   "$seal_powercfg_line" =~ ^[0-9]+$ &&
    "$seal_success_exit_line" =~ ^[0-9]+$ &&
    "$seal_stage_error_line" =~ ^[0-9]+$ &&
    "$seal_readiness_line" -lt "$seal_reset_line" &&
    "$seal_reset_line" -lt "$seal_stage_line" &&
-   "$seal_stage_line" -lt "$seal_sysprep_line" &&
-   "$seal_sysprep_line" -lt "$seal_success_exit_line" &&
+   "$seal_stage_line" -lt "$seal_powercfg_line" &&
+   "$seal_powercfg_line" -lt "$seal_servicing_line" &&
+   "$seal_servicing_line" -lt "$seal_runner_line" &&
+   "$seal_runner_line" -lt "$seal_success_exit_line" &&
    "$seal_success_exit_line" -lt "$seal_stage_error_line" ]] ||
-    fail "Seal entry point can exit or enter its error label before Sysprep"
+    fail "Seal entry point ordering does not keep the servicing gate next to Sysprep"
 
 mkdir "$KIT_TMP/LegacyKit"
 cp -- "$ROOT/deploy/guest/G11-Sysprep-README.txt" \
@@ -627,18 +732,29 @@ cp -a -- "$KIT_TMP/G11SysprepKit" "$KIT_TMP/PreviousCompleteKit"
 rm -rf -- "$KIT_TMP/PreviousCompleteKit/Template-Reset"
 rm -- "$KIT_TMP/PreviousCompleteKit/Assert-G11-Template-Ready.ps1" \
     "$KIT_TMP/PreviousCompleteKit/Reset-G11-Template-State.ps1" \
-    "$KIT_TMP/PreviousCompleteKit/Collect-Sysprep-Diagnostics.ps1"
+    "$KIT_TMP/PreviousCompleteKit/Collect-Sysprep-Diagnostics.ps1" \
+    "$KIT_TMP/PreviousCompleteKit/Assert-G11-Sysprep-Servicing-Ready.ps1" \
+    "$KIT_TMP/PreviousCompleteKit/Invoke-G11-Sysprep.ps1"
 "$KIT" "$KIT_TMP/PreviousCompleteKit" --replace >/dev/null
 [[ -s "$KIT_TMP/PreviousCompleteKit/Collect-Sysprep-Diagnostics.ps1" ]] ||
     fail "--replace did not safely upgrade the previous complete kit"
 cp -a -- "$KIT_TMP/G11SysprepKit" "$KIT_TMP/DiagnosticCompleteKit"
 rm -rf -- "$KIT_TMP/DiagnosticCompleteKit/Template-Reset"
 rm -- "$KIT_TMP/DiagnosticCompleteKit/Assert-G11-Template-Ready.ps1" \
-    "$KIT_TMP/DiagnosticCompleteKit/Reset-G11-Template-State.ps1"
+    "$KIT_TMP/DiagnosticCompleteKit/Reset-G11-Template-State.ps1" \
+    "$KIT_TMP/DiagnosticCompleteKit/Assert-G11-Sysprep-Servicing-Ready.ps1" \
+    "$KIT_TMP/DiagnosticCompleteKit/Invoke-G11-Sysprep.ps1"
 "$KIT" "$KIT_TMP/DiagnosticCompleteKit" --replace >/dev/null
 [[ -s "$KIT_TMP/DiagnosticCompleteKit/Assert-G11-Template-Ready.ps1" &&
    -s "$KIT_TMP/DiagnosticCompleteKit/Template-Reset/GuestPerformance/Optimize-Guest.ps1" ]] ||
     fail "--replace did not safely upgrade the diagnostic complete kit"
+cp -a -- "$KIT_TMP/G11SysprepKit" "$KIT_TMP/PreHardenedCompleteKit"
+rm -- "$KIT_TMP/PreHardenedCompleteKit/Assert-G11-Sysprep-Servicing-Ready.ps1" \
+    "$KIT_TMP/PreHardenedCompleteKit/Invoke-G11-Sysprep.ps1"
+"$KIT" "$KIT_TMP/PreHardenedCompleteKit" --replace >/dev/null
+[[ -s "$KIT_TMP/PreHardenedCompleteKit/Assert-G11-Sysprep-Servicing-Ready.ps1" &&
+   -s "$KIT_TMP/PreHardenedCompleteKit/Invoke-G11-Sysprep.ps1" ]] ||
+    fail "--replace did not safely upgrade the pre-hardened complete kit"
 touch "$KIT_TMP/G11SysprepKit/operator-file.txt"
 if "$KIT" "$KIT_TMP/G11SysprepKit" --replace >/dev/null 2>&1; then
     fail "Sysprep kit replacement deleted an unknown operator file"

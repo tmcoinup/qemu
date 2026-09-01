@@ -3165,9 +3165,11 @@ esac
     echo "MONITOR_SYNC 必须是 0 或 1" >&2; exit 2;
 }
 G11_INIT_REQUIRED="$SELECTED_VM_DIR/.g11-init-required"
+G11_REPAIR_NATIVE_STORAGE="$SELECTED_VM_DIR/.g11-repair-native-storage"
 G11_INIT_ISO=""
 G11_INIT_CONTRACT_ID=""
 G11_STORAGE_BOOTSTRAP=0
+G11_STORAGE_REPAIR_NATIVE=0
 if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
     [[ -f "$G11_INIT_REQUIRED" && ! -L "$G11_INIT_REQUIRED" ]] || {
         echo "[start-vm] G-11 初始化标记类型不安全，拒绝启动: $G11_INIT_REQUIRED" >&2
@@ -3239,11 +3241,42 @@ if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
     fi
     MONITOR_SYNC=0
     if [[ "$SSD_INTERFACE" == sata ]]; then
-        # A historical generalized base may only have enumerated NVMe before
-        # cloning. Keep the private first-boot gate on the proven controller;
-        # Finalize enables/verifies storahci and the host removes this marker
-        # only after an offline receipt check. The next boot then uses SATA.
-        G11_STORAGE_BOOTSTRAP=1
+        if [[ -e "$G11_REPAIR_NATIVE_STORAGE" ||
+              -L "$G11_REPAIR_NATIVE_STORAGE" ]]; then
+            [[ -f "$G11_REPAIR_NATIVE_STORAGE" &&
+               ! -L "$G11_REPAIR_NATIVE_STORAGE" &&
+               "$(stat -c '%a:%u:%h' -- "$G11_REPAIR_NATIVE_STORAGE")" == "600:${CONF_UID}:1" ]] || {
+                echo "[start-vm] G-11 旧克隆存储恢复标记不安全，拒绝启动" >&2
+                exit 1
+            }
+            jq -e \
+                --arg vmUuid "${VM_UUID,,}" \
+                --arg sourceConfigSha256 "$(start_vm_sha256_upper "$CONF")" \
+                --arg systemNvapiContractId "$G11_INIT_CONTRACT_ID" '
+                (keys | sort) == [
+                    "createdUtc", "schemaVersion", "sourceConfigSha256", "state",
+                    "systemNvapiContractId", "vmUuid"
+                ] and
+                .schemaVersion == 1 and
+                .state == "repair-native-storage-firstboot" and
+                .vmUuid == $vmUuid and
+                .sourceConfigSha256 == $sourceConfigSha256 and
+                .systemNvapiContractId == $systemNvapiContractId and
+                (.createdUtc | type) == "string"
+            ' "$G11_REPAIR_NATIVE_STORAGE" >/dev/null || {
+                echo "[start-vm] G-11 旧克隆存储恢复标记已过期或不匹配" >&2
+                exit 1
+            }
+            # repair-clone-init operates on an already bootable clone. Keep
+            # its configured SATA controller for this recovery boot so the
+            # guest can run the portability helper before any NVMe migration.
+            G11_STORAGE_REPAIR_NATIVE=1
+        else
+            # A fresh generalized base was built on NVMe. Keep its private
+            # first boot on the proven controller; Finalize enables/verifies
+            # storahci and the host clears the gate after offline verification.
+            G11_STORAGE_BOOTSTRAP=1
+        fi
     fi
 fi
 
@@ -5558,6 +5591,8 @@ else
 fi
 if ((G11_STORAGE_BOOTSTRAP)); then
     echo "  SSD 首次初始化: 临时使用 NVMe 启动；storahci/stornvme 离线验证通过后自动切回 SATA/AHCI"
+elif ((G11_STORAGE_REPAIR_NATIVE)); then
+    echo "  SSD 旧克隆修复: 保持 SATA/AHCI 首次启动；来宾准备完成后同时支持 SATA 与 NVMe"
 fi
 echo "  xHCI: qemu-xhci 1B36:000D rev01 / SUBSYS 1AF4:1100（行为身份固定；目标平台 ${XHCI_PCI_VENDOR_ID}:${XHCI_PCI_DEVICE_ID} 仅作事实校验）"
 if [[ "$MODE" == install ]]; then

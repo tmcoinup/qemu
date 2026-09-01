@@ -31,12 +31,18 @@ INSTANCE_DIR=$(vm_storage_instance_dir "$VM_ID")
 DISK=$(vm_storage_disk_path "$VM_ID")
 REQUIRED_MARKER="$INSTANCE_DIR/.g11-init-required"
 DONE_MARKER="$INSTANCE_DIR/.g11-initialized"
+NATIVE_STORAGE_MARKER="$INSTANCE_DIR/.g11-repair-native-storage"
 if [[ ! -e "$REQUIRED_MARKER" && -f "$DONE_MARKER" && ! -L "$DONE_MARKER" ]]; then
     echo "[g11-initial] vm${VM_ID} already initialized"
     exit 0
 fi
 [[ -f "$REQUIRED_MARKER" && ! -L "$REQUIRED_MARKER" ]] ||
     die "this VM is not waiting for private G-11 initialization"
+if [[ -e "$NATIVE_STORAGE_MARKER" || -L "$NATIVE_STORAGE_MARKER" ]]; then
+    [[ -f "$NATIVE_STORAGE_MARKER" && ! -L "$NATIVE_STORAGE_MARKER" &&
+       "$(stat -c '%a:%u:%h' -- "$NATIVE_STORAGE_MARKER")" == "600:$(stat -c %u -- "$REQUIRED_MARKER"):1" ]] ||
+        die "old-clone native-storage marker is unsafe"
+fi
 vgpu_profile_validate_catalog || die "GPU profile catalog validation failed"
 CATALOG_SHA256=$(vgpu_profile_catalog_sha256)
 jq -e --arg catalogSha256 "$CATALOG_SHA256" '
@@ -193,7 +199,7 @@ chmod 0600 "$DONE_TMP"
 chown "$marker_uid:$marker_gid" "$DONE_TMP"
 mv -T -- "$DONE_TMP" "$DONE_MARKER"
 DONE_PUBLISHED=1
-rm -f -- "$REQUIRED_MARKER"
+rm -f -- "$REQUIRED_MARKER" "$NATIVE_STORAGE_MARKER"
 trap - EXIT
 
 echo "[g11-initial] PASS: vm${VM_ID} 来宾身份/授权、x86+x64 系统 NVAPI 已验证，显示器缓存已刷新，可以启动"

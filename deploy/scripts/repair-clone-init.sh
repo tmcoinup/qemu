@@ -43,6 +43,7 @@ CONF=$(vm_storage_config_path "$VM_ID")
 DISK=$(vm_storage_disk_path "$VM_ID")
 REQUIRED_MARKER="$INSTANCE_DIR/.g11-init-required"
 DONE_MARKER="$INSTANCE_DIR/.g11-initialized"
+NATIVE_STORAGE_MARKER="$INSTANCE_DIR/.g11-repair-native-storage"
 PACKAGE_PARENT=$(vm_storage_instance_package_dir "$VM_ID") ||
     die "could not resolve VM package directory"
 CURRENT_ROOT="$PACKAGE_PARENT/SystemNvapiProjection"
@@ -171,6 +172,7 @@ BASE_NAME=$(jq -er '.baseName' "$REQUIRED_MARKER")
 NEW_ROOT=$(mktemp -d "$PACKAGE_PARENT/.SystemNvapiProjection.new.XXXXXXXX")
 OLD_ROOT="$PACKAGE_PARENT/.SystemNvapiProjection.old.$$.$RANDOM"
 MARKER_TMP=$(mktemp "$INSTANCE_DIR/.g11-init-required.new.XXXXXXXX")
+NATIVE_STORAGE_MARKER_TMP=""
 PAYLOAD_STAGE=$(mktemp -d "$INSTANCE_DIR/.g11-clone-payload.new.XXXXXXXX")
 MOUNT_DIR=$(mktemp -d /tmp/g11-init-repair.XXXXXXXX)
 if [[ -n "${NBD:-}" ]]; then
@@ -206,6 +208,8 @@ cleanup() {
     fi
     if (( ! COMPLETE )); then
         [[ -z "$MARKER_TMP" ]] || rm -f -- "$MARKER_TMP"
+        [[ -z "$NATIVE_STORAGE_MARKER_TMP" ]] ||
+            rm -f -- "$NATIVE_STORAGE_MARKER_TMP"
         if (( ROOT_SWAPPED )); then
             rm -rf -- "$CURRENT_ROOT"
             mv -T -- "$OLD_ROOT" "$CURRENT_ROOT" >/dev/null 2>&1 || true
@@ -305,6 +309,27 @@ jq -n \
 chmod 0600 "$MARKER_TMP"
 chown "$(stat -c %u -- "$REQUIRED_MARKER"):$(stat -c %g -- "$REQUIRED_MARKER")" \
     "$MARKER_TMP"
+NATIVE_STORAGE_MARKER_TMP=$(mktemp \
+    "$INSTANCE_DIR/.g11-repair-native-storage.new.XXXXXXXX")
+jq -n \
+    --argjson schemaVersion 1 \
+    --arg state repair-native-storage-firstboot \
+    --arg createdUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg vmUuid "$VM_UUID" \
+    --arg sourceConfigSha256 "$CONFIG_SHA256" \
+    --arg systemNvapiContractId "$CONTRACT_ID" '
+    {
+        schemaVersion: $schemaVersion,
+        state: $state,
+        createdUtc: $createdUtc,
+        vmUuid: $vmUuid,
+        sourceConfigSha256: $sourceConfigSha256,
+        systemNvapiContractId: $systemNvapiContractId
+    }
+' >"$NATIVE_STORAGE_MARKER_TMP"
+chmod 0600 "$NATIVE_STORAGE_MARKER_TMP"
+chown "$(stat -c %u -- "$REQUIRED_MARKER"):$(stat -c %g -- "$REQUIRED_MARKER")" \
+    "$NATIVE_STORAGE_MARKER_TMP"
 chmod 0700 "$NEW_ROOT"
 chown -R "$(stat -c %u -- "$CURRENT_ROOT"):$(stat -c %g -- "$CURRENT_ROOT")" \
     "$NEW_ROOT"
@@ -443,6 +468,8 @@ mv -T -- "$NEW_ROOT" "$CURRENT_ROOT"
 NEW_ROOT=""
 mv -T -- "$MARKER_TMP" "$REQUIRED_MARKER"
 MARKER_TMP=""
+mv -T -- "$NATIVE_STORAGE_MARKER_TMP" "$NATIVE_STORAGE_MARKER"
+NATIVE_STORAGE_MARKER_TMP=""
 COMPLETE=1
 rm -rf -- "$OLD_ROOT"
 [[ ! -e "$OLD_ROOT" && ! -L "$OLD_ROOT" ]] ||
@@ -453,6 +480,7 @@ cat <<EOF
   contract: $CONTRACT_ID
   ISO:      $CURRENT_ROOT/$ISO_FILE
   guest:    marker schema 4 / Guest Lite 2.6.7 payload refreshed
+  storage:  first recovery boot keeps the VM's configured controller
   old package: removed (no archive); private base and licensed result retained
 
 下一步只需：

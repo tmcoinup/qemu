@@ -222,8 +222,9 @@ DISK_FORCE=1 ./deploy/scripts/vmctl.sh start 11
 ## 磁盘 AIO 自动选择
 
 普通启动不需要增加参数。`QEMU_DISK_AIO=auto` 是默认值，启动器会读取 QEMU
-可执行文件自身完成一次真实 4 KiB O_DIRECT 读取，不创建临时盘，也不读写 VM
-系统盘。启动摘要会显示实际结果，例如：
+可执行映像完成一次真实 4 KiB O_DIRECT 读取，不创建临时盘，也不读写 VM 系统盘。
+源码布局直接读取 QEMU ELF；VMate 打包布局若入口是小型保护脚本，则自动读取同包
+`libexec` 下的真实 QEMU ELF，不能因为入口不足 4 KiB 错误降级。启动摘要会显示：
 
 ```text
 >> disk aio:    io_uring (policy=auto)

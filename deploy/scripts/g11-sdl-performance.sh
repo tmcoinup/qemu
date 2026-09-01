@@ -21,7 +21,8 @@ readonly SDL_ALLOW_HOST_SLEEP=0
 SDL_PROFILE=$SDL_PROFILE_BALANCED
 SDL_TARGET_FPS=60
 SDL_INPUT_POLL_MS=2
-VGPU_CONSOLE_US=16667
+VGPU_CONSOLE_US=8333
+VGPU_FRAME_RATE_LIMITER=0
 SDL_SERVICE_CPUS=0
 SDL_USB_LOW_LATENCY=0
 
@@ -37,7 +38,8 @@ usage() {
   audit   只读检查源码、当前 QEMU build 和所选参数，不启动 VM。
   profile 只打印封装值；所有档位都只影响本次启动，不写入 VM 配置。
   start   默认 balanced；--ultra-responsive 使用 60Hz/1ms/服务核/1ms 键盘。
-          --experimental-120hz 才把 REGION/Present 提到 120Hz，须实测后使用。
+          所有档位都用 120Hz REGION + FRL off；--experimental-120hz 仅把
+          SDL Present 也提高到 120Hz，须实测后使用。
           --native-wayland 是非默认 A/B；仅真实 Wayland 会话可用，
           会禁用 X11-only native EGL/GPU-first 启动，保留 DGame SHM fallback。
           切换窗口模式前后都必须让 Windows 完整关机，不支持热切换。
@@ -51,7 +53,8 @@ select_profile() {
             SDL_PROFILE=$SDL_PROFILE_BALANCED
             SDL_TARGET_FPS=60
             SDL_INPUT_POLL_MS=2
-            VGPU_CONSOLE_US=16667
+            VGPU_CONSOLE_US=8333
+            VGPU_FRAME_RATE_LIMITER=0
             SDL_SERVICE_CPUS=0
             SDL_USB_LOW_LATENCY=0
             ;;
@@ -59,7 +62,8 @@ select_profile() {
             SDL_PROFILE=$SDL_PROFILE_ULTRA
             SDL_TARGET_FPS=60
             SDL_INPUT_POLL_MS=1
-            VGPU_CONSOLE_US=16667
+            VGPU_CONSOLE_US=8333
+            VGPU_FRAME_RATE_LIMITER=0
             SDL_SERVICE_CPUS=auto
             SDL_USB_LOW_LATENCY=1
             ;;
@@ -68,6 +72,7 @@ select_profile() {
             SDL_TARGET_FPS=120
             SDL_INPUT_POLL_MS=1
             VGPU_CONSOLE_US=8333
+            VGPU_FRAME_RATE_LIMITER=0
             SDL_SERVICE_CPUS=auto
             SDL_USB_LOW_LATENCY=1
             ;;
@@ -86,6 +91,7 @@ QEMU_SDL_INPUT_POLL_MS=$SDL_INPUT_POLL_MS
 QEMU_SDL_PRESENT_MODE=$SDL_PRESENT_MODE
 QEMU_SDL_CURSOR_MODE=$SDL_CURSOR_MODE
 VGPU_CONSOLE_INTERVAL_US=$VGPU_CONSOLE_US
+VGPU_FRAME_RATE_LIMITER=$VGPU_FRAME_RATE_LIMITER
 QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP=$SDL_ALLOW_HOST_SLEEP
 QEMU_SERVICE_CPUS=$SDL_SERVICE_CPUS
 G11_USB_HID_LOW_LATENCY=$SDL_USB_LOW_LATENCY
@@ -394,6 +400,7 @@ start_vm_low_latency() {
         QEMU_SDL_PRESENT_MODE="$SDL_PRESENT_MODE" \
         QEMU_SDL_CURSOR_MODE="$SDL_CURSOR_MODE" \
         VGPU_CONSOLE_INTERVAL_US="$VGPU_CONSOLE_US" \
+        VGPU_FRAME_RATE_LIMITER="$VGPU_FRAME_RATE_LIMITER" \
         QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP="$SDL_ALLOW_HOST_SLEEP" \
         QEMU_SERVICE_CPUS="$SDL_SERVICE_CPUS" \
         "${window_env[@]}" \
@@ -437,7 +444,7 @@ process_env_value() {
 }
 
 read_mdev_console_intervals() {
-    local uuid=$1 field value interval="" vga_interval=""
+    local uuid=$1 field value interval="" vga_interval="" frame_limiter="inherit"
     local params="/sys/bus/mdev/devices/$uuid/nvidia/vgpu_params"
     local content
     local -a fields=()
@@ -458,16 +465,20 @@ read_mdev_console_intervals() {
                 value=${field#vgaintervaltime=}
                 [[ "$value" =~ ^[0-9]+$ ]] && vga_interval=$value
                 ;;
+            frame_rate_limiter=*)
+                value=${field#frame_rate_limiter=}
+                [[ "$value" == 0 || "$value" == 1 ]] && frame_limiter=$value
+                ;;
         esac
     done
     [[ -n "$interval" && -n "$vga_interval" ]] || return 1
-    printf '%s %s\n' "$interval" "$vga_interval"
+    printf '%s %s %s\n' "$interval" "$vga_interval" "$frame_limiter"
 }
 
 verify_running_vm() {
     local vm_id=${1:-} audit_status=0 pid display_arg="" vfio_display=""
     local exe_path=""
-    local mdev_uuid="" interval_actual="" vga_interval_actual=""
+    local mdev_uuid="" interval_actual="" vga_interval_actual="" frl_actual=""
     local detected_profile="" declared_profile="" usb_low_latency=0
     local window_mode="" sdl_video_driver="" native_egl=""
     local env_readable=1
@@ -628,19 +639,21 @@ verify_running_vm() {
     if [[ -z "$mdev_uuid" ]]; then
         echo "[g11-sdl] FAIL: 无法从受限 vfio-pci argv 解析 mdev UUID" >&2
         failures=$((failures + 1))
-    elif read -r interval_actual vga_interval_actual \
+    elif read -r interval_actual vga_interval_actual frl_actual \
             < <(read_mdev_console_intervals "$mdev_uuid"); then
         if ((env_readable)); then
-            printf '[g11-sdl] MDEV %s intervaltime=%s vgaintervaltime=%s (expected %s)\n' \
+            printf '[g11-sdl] MDEV %s intervaltime=%s vgaintervaltime=%s frame_rate_limiter=%s (expected %s/%s)\n' \
                 "$mdev_uuid" "$interval_actual" "$vga_interval_actual" \
-                "$VGPU_CONSOLE_US"
+                "$frl_actual" "$VGPU_CONSOLE_US" "$VGPU_FRAME_RATE_LIMITER"
             if [[ "$interval_actual" != "$VGPU_CONSOLE_US" ||
-                  "$vga_interval_actual" != "$VGPU_CONSOLE_US" ]]; then
+                  "$vga_interval_actual" != "$VGPU_CONSOLE_US" ||
+                  "$frl_actual" != "$VGPU_FRAME_RATE_LIMITER" ]]; then
                 failures=$((failures + 1))
             fi
         else
-            printf '[g11-sdl] MDEV %s intervaltime=%s vgaintervaltime=%s (profile unavailable)\n' \
-                "$mdev_uuid" "$interval_actual" "$vga_interval_actual"
+            printf '[g11-sdl] MDEV %s intervaltime=%s vgaintervaltime=%s frame_rate_limiter=%s (profile unavailable)\n' \
+                "$mdev_uuid" "$interval_actual" "$vga_interval_actual" \
+                "$frl_actual"
         fi
     else
         echo "[g11-sdl] WARN: 无法读取 mdev $mdev_uuid 的已应用 console interval" >&2

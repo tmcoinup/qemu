@@ -52,7 +52,8 @@ Windows 进入桌面后，另开一个宿主终端：
 | `QEMU_SDL_PRESENT_MODE` | `fixed` | 可见窗口按固定节拍 Present，减少恢复后旧帧停留 |
 | `QEMU_SDL_CURSOR_MODE` | `host` | 保留宿主即时箭头，以跟手为优先；auto 仅显式测试 |
 | `QEMU_SDL_TITLE_FPS` | `auto` | X11 实时标题；Wayland 有 Cairo libdecor 才实时，否则静态防 GDK 刷屏 |
-| `VGPU_CONSOLE_INTERVAL_US` | `16667` | R535 上把 NVIDIA console REGION copy 从约 10Hz 提到约 60Hz |
+| `VGPU_CONSOLE_INTERVAL_US` | `8333` | R535 上以 120Hz 更新 console REGION，让 60Hz Present 尽量取得最新帧 |
+| `VGPU_FRAME_RATE_LIMITER` | `0` | 禁用 vGPU FRL，避免它与宿主 60Hz Present 同频但不同相造成拍频 |
 | `QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP` | `0` | SDL 运行期间不让宿主因空闲关闭物理显示器 |
 
 上表是默认 `low-latency-v1`。它还保持 `QEMU_SERVICE_CPUS=0` 和原设备 USB
@@ -160,7 +161,8 @@ SDL/Wayland。因此该 A/B 还会自动传入 `--no-dgame-preview-gpu`：DGame 
 - `-display sdl,...` 与 native vGPU `display=on`；
 - 响应 profile、SDL 低延迟环境和 QEMU service CPU 请求；
 - 从受限的 vfio-pci `sysfsdev` argv 解析 mdev UUID，再读取实际生效的
-  `intervaltime/vgaintervaltime`；不会把已经被启动器消费的环境变量误报为缺失；
+  `intervaltime/vgaintervaltime/frame_rate_limiter`；不会把已经被启动器消费的
+  环境变量误报为缺失；
 - `usb-kbd` 是否真的带 1ms endpoint，以及当前 host/guest cursor 策略；
 - `G11_SDL_WINDOW_MODE`、`SDL_VIDEODRIVER` 与 native EGL 是否组成合法
   `native-wayland-v1` 原子合同；未选 A/B 时只报告启动器默认值。
@@ -212,12 +214,13 @@ Windows 后运行：
 ./deploy/scripts/g11-sdl-performance.sh start 9 --ultra-responsive
 ```
 
-`ultra-responsive-v1` 只影响本次进程，并保持与这台宿主显示器/vGPU FRL 一致的
-60Hz 画面节拍：
+`ultra-responsive-v1` 只影响本次进程；与普通入口一样使用 120Hz REGION、关闭
+vGPU FRL，同时让 SDL 保持固定 60Hz Present：
 
 | 设置 | ultra 值 | 实际作用 |
 |---|---:|---|
-| SDL/REGION 内部节拍 | `60Hz` / `16667us` | 不为 60Hz 显示器重复扫描同一 REGION |
+| SDL/REGION 内部节拍 | `60Hz` / `8333us` | 每次 Present 前最多提前约 8.3ms 取得新 REGION |
+| vGPU FRL | `0` | 避免独立 60Hz 限制器与 SDL Present 拍频 |
 | SDL 输入事件泵 | `1ms` | 更快抽取宿主键鼠事件 |
 | QEMU service CPU | `auto` | 宿主有余量时给 main/display 服务线程一个候选 CPU；不足时安全回到 0 |
 | USB 键盘/相对鼠标 | `1ms` | 本次启用 low-latency HID descriptor；绝对 tablet 原本就是 1ms |
@@ -227,20 +230,20 @@ Windows 后运行：
 因此是比盲目翻倍画面轮询更可信的尾延迟优化。回退只需完整关机，下一次省略
 `--ultra-responsive`；不写配置、不改 BCD、不安装 Guest 驱动。
 
-### 仅单窗口实验：120Hz 内部轮询
+### 仅单窗口实验：120Hz Present
 
-若 60Hz 响应档已经验证稳定，仍愿意用约两倍 REGION 扫描/窗口提交成本换取理论上
-最多约 8.3ms、平均约 4.2ms 的额外相位缩短，可单独测试：
+若 60Hz 响应档已经验证稳定，仍愿意用约两倍窗口提交成本换取理论上最多约
+8.3ms、平均约 4.2ms 的额外相位缩短，可单独测试：
 
 ```bash
 ./deploy/scripts/g11-sdl-performance.sh profile experimental-120
 ./deploy/scripts/g11-sdl-performance.sh start 9 --experimental-120hz
 ```
 
-它使用 `120Hz / 8333us / fixed / input 1ms / service auto / keyboard 1ms`。宿主显示器
-约 59.91Hz、vGPU FRL 为 60，所以它不会产生 120 个独立 Guest 帧；1080p REGION
-无 damage metadata，source scan 约从 0.5GB/s 增至 1.0GB/s，高运动时还会增加 full
-copy/upload。只有 240fps 相机或调度 p95/p99 能稳定证明收益时才保留；否则回到
+它使用 `120Hz Present / 8333us REGION / FRL off / fixed / input 1ms / service auto /
+keyboard 1ms`。普通和 ultra 已经以 8333us 扫描 REGION，实验档只把 SDL 提交率从
+60 提高到 120；约 59.91Hz 的物理显示器不会显示 120 个独立帧，高运动时却会增加
+纹理提交成本。只有 240fps 相机或调度 p95/p99 能稳定证明收益时才保留；否则回到
 `--ultra-responsive`。多个 VM 不要同时使用实验档。
 
 建议对同一 VM、同一连续拖窗/60FPS 移动条分别测 balanced、ultra 和实验 120 各 2 分钟，记录
@@ -250,7 +253,7 @@ copy/upload。只有 240fps 相机或调度 p95/p99 能稳定证明收益时才�
 ## 画面不定格实机验收
 
 1. 从完整关机启动 VM，确认摘要有 R535
-   `console REGION 周期=16667us`、SDL fixed/60Hz 和 2ms 输入配置。
+   `console REGION 周期=8333us FRL=0`、SDL fixed/60Hz 和 2ms 输入配置。
 2. 进入 Windows 后持续播放本地 60FPS 测试视频，或连续拖动一个内容不断变化的窗口
    2 分钟。不要用完全静止的桌面判断“相同帧”。
 3. 同时观察 SDL 客户区和标题。持续动态内容时 `Content` 应持续非零，画面不应停住

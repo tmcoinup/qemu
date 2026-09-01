@@ -13,6 +13,7 @@ from collections.abc import Sequence
 
 
 FALLBACK_WARNING = "Unable to use Linux AIO, falling back to thread pool"
+DIRECT_READ_BYTES = 4096
 
 
 class ProbeError(RuntimeError):
@@ -35,13 +36,36 @@ def qmp_input() -> str:
     return "".join(json.dumps(command) + "\n" for command in commands)
 
 
-def blockdev_argument(binary: pathlib.Path, mode: str) -> str:
+def packaged_real_binary(binary: pathlib.Path) -> pathlib.Path:
+    """Use VMate's real packaged ELF when its public entry is a tiny guard."""
+
+    candidates = (
+        binary,
+        binary.parent / "libexec" / f"{binary.name}.real",
+    )
+    for candidate in candidates:
+        try:
+            size = candidate.stat().st_size
+        except OSError:
+            continue
+        if (
+            candidate.is_file()
+            and size >= DIRECT_READ_BYTES
+            and os.access(candidate, os.R_OK | os.X_OK)
+        ):
+            return candidate
+    raise ProbeError(
+        f"没有可完成 {DIRECT_READ_BYTES} 字节 O_DIRECT 读取的 QEMU 映像"
+    )
+
+
+def blockdev_argument(read_target: pathlib.Path, mode: str) -> str:
     """用 JSON 编码路径，避免空格、逗号或反斜杠进入 QEMU option 分隔语义。"""
 
     options = {
         "driver": "file",
         "node-name": "aio-probe",
-        "filename": str(binary),
+        "filename": str(read_target),
         "aio": mode,
         "read-only": True,
         "cache": {"direct": True, "no-flush": False},
@@ -84,6 +108,7 @@ def probe(binary_text: str, mode: str, timeout: float) -> None:
     binary = pathlib.Path(binary_text).expanduser().absolute()
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise ProbeError(f"QEMU 不可执行: {binary}")
+    read_target = packaged_real_binary(binary)
     command = [
         str(binary),
         "-machine", "none",
@@ -92,7 +117,7 @@ def probe(binary_text: str, mode: str, timeout: float) -> None:
         "-display", "none",
         "-S",
         "-qmp", "stdio",
-        "-blockdev", blockdev_argument(binary, mode),
+        "-blockdev", blockdev_argument(read_target, mode),
     ]
     completed = subprocess.run(
         command,

@@ -165,8 +165,8 @@
 #   MEM_GUARD/MEM_FORCE  Guest 最大容量护栏及显式风险旁路
 #   HOST_OOM_PROTECT 1=将当前 VM 进程树临时设为 oom_score_adj=-500
 #   G11_HOST_PERFORMANCE auto|required|off（默认 auto）；释放 CPU 硬件
-#                     min/max 全频段、保持动态 governor、开启睿频，并避免 THP
-#                     同步整理造成的卡顿。不会按来宾 CPU 型号设置频率上限
+#                     min/max 全频段、performance governor、开启睿频，并避免
+#                     THP 同步整理造成的卡顿。不会按来宾 CPU 型号设置频率上限
 #   G11_RTC_CLOCK    vm|host（默认 vm）；vm 与 V-11 一致，减少 RTC/TSC 双时基
 #                     在宿主调度抖动时产生的同步告警；host 为兼容回退
 #   G11_TSC_POLICY   auto|profile|host|omit（默认 auto）；启动前读取真实 KVM
@@ -2312,11 +2312,11 @@ STREAM_ENABLED=0
 NATIVE_FULLSCREEN=0
 VGPU_ROMBAR="${VGPU_ROMBAR:-}"
 VGPU_ROMFILE="${VGPU_ROMFILE:-}"
-VGPU_CONSOLE_INTERVAL_US="${VGPU_CONSOLE_INTERVAL_US:-16667}"
+VGPU_CONSOLE_INTERVAL_US="${VGPU_CONSOLE_INTERVAL_US:-8333}"
 # 0=禁用 vGPU 帧率限制器（scanout 跟随 guest 渲染帧率），1=保持 profile
-# 的 frlConfig，空=不改动。FRL 默认锁 60 FPS，与 QEMU 60Hz 的
-# QUERY_GFX_PLANE 同频不同步会拍频，实测只能接住约一半的帧。
-VGPU_FRAME_RATE_LIMITER="${VGPU_FRAME_RATE_LIMITER-}"
+# 的 frlConfig。交互式 SDL 默认禁用 FRL，并以 8333us（120Hz）刷新 console
+# REGION，让固定 60Hz Present 每次尽量拿到最新 guest 帧，避免同频拍频。
+VGPU_FRAME_RATE_LIMITER="${VGPU_FRAME_RATE_LIMITER:-0}"
 MONITOR_SYNC="${MONITOR_SYNC:-1}"
 TPM_CLI_DISABLED=0
 # 正常入口沿用旧 qemu-9.2.0 生产脚本的 Windows local-RTC 契约。
@@ -4587,7 +4587,7 @@ if [[ "$MODE" == vgpu-sdl ]]; then
     if [[ -r "$QEMU_SDL_WINDOWS_CURSOR" ]]; then
         export QEMU_SDL_WINDOWS_CURSOR
     elif [[ "$DRY_RUN" != 1 ]]; then
-        echo "[start-vm] Windows cursor 资源不可读，使用内置 fallback: $QEMU_SDL_WINDOWS_CURSOR" >&2
+        echo "[start-vm] Windows cursor：使用 QEMU 内置 32x32 Aero 光标"
     fi
 
 fi
@@ -5671,10 +5671,15 @@ else
     echo "  vGPU internal PCI identity: disabled (default; name-only cleanup remains active)"
 fi
 if (( VGPU_MDEV_FRL_OVERRIDE_ACTIVE )); then
-    echo "  vGPU frame-rate limiter: per-mdev frl_enabled=${VGPU_MDEV_FRL_ENABLED}"
+    echo "  vGPU identity profile FRL: per-mdev frl_enabled=${VGPU_MDEV_FRL_ENABLED}"
 else
-    echo "  vGPU frame-rate limiter: inherited from resource profile"
+    echo "  vGPU identity profile FRL: unchanged"
 fi
+case "$VGPU_FRAME_RATE_LIMITER" in
+    0) echo "  vGPU frame-rate limiter: disabled (frame_rate_limiter=0)" ;;
+    1) echo "  vGPU frame-rate limiter: enabled (frame_rate_limiter=1)" ;;
+    *) echo "  vGPU frame-rate limiter: inherited from resource profile" ;;
+esac
 echo "  vGPU resource: ${VGPU_RESOURCE_PROFILE}/${VGPU_RESOURCE_FB_MB}MB (host mdev)"
 if (( ${#TPM_ARGS[@]} )); then
     if [[ "$TPM_EFFECTIVE_VERSION" == 1.2 ]]; then

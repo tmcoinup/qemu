@@ -767,10 +767,14 @@ vm_storage_read_qcow2_metadata() {
 # arrays contain normalized filesystem paths for every layer (top first) and
 # every external data-file.  Protocol filenames are deliberately unsupported:
 # lifecycle tools must fail closed rather than treating file:/, json:, nbd:,
-# etc. as ordinary relative host paths.
+# etc. as ordinary relative host paths.  An optional third argument `shared`
+# adds qemu-img's read-only force-share mode for lifecycle scans that must
+# inspect other, currently running VMs without taking their image locks.
 vm_storage_read_qcow2_chain_metadata() {
-    local qemu_img=${1:-} image=${2:-} chain_json jq_bin count idx
+    local qemu_img=${1:-} image=${2:-} access_mode=${3:-exclusive}
+    local chain_json jq_bin count idx
     local raw_filename layer_path layer_full data_file data_path
+    local -a info_args=(info --backing-chain --output=json)
 
     [[ -n "$qemu_img" && -x "$qemu_img" && -n "$image" ]] || {
         echo "[vm-storage] qemu-img executable and image path are required" >&2
@@ -781,7 +785,15 @@ vm_storage_read_qcow2_chain_metadata() {
         echo "[vm-storage] jq is required to validate qcow2 backing chains" >&2
         return 1
     }
-    if ! chain_json=$("$qemu_img" info --backing-chain --output=json -- "$image" \
+    case "$access_mode" in
+        exclusive) ;;
+        shared) info_args+=(-U) ;;
+        *)
+            echo "[vm-storage] invalid qcow2 chain access mode: $access_mode" >&2
+            return 2
+            ;;
+    esac
+    if ! chain_json=$("$qemu_img" "${info_args[@]}" -- "$image" \
             2>/dev/null); then
         echo "[vm-storage] qemu-img could not inspect complete chain: $image" >&2
         return 1

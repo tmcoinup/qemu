@@ -258,7 +258,9 @@ if ((${#DELETE_QCOW2[@]})); then
         done
         ((is_target)) && continue
 
-        if ! vm_storage_read_qcow2_chain_metadata "$QEMU_IMG" "$image"; then
+        # Other managed VMs may be running.  `shared` only changes qemu-img's
+        # read-only info lock mode; dependency parsing stays fail-closed.
+        if ! vm_storage_read_qcow2_chain_metadata "$QEMU_IMG" "$image" shared; then
             echo "[delete-vm] 无法证明完整 backing/data-file chain 安全" >&2
             echo "  image: $image" >&2
             exit 1

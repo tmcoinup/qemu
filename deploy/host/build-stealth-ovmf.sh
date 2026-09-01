@@ -3,7 +3,7 @@
 # build-stealth-ovmf.sh — 构建 root deploy 启动器使用的 OVMF：
 #   1. 把 PcdFirmwareVendor 改成 "American Megatrends Inc."；
 #   2. backport edk2 early-MTRR，避免挂 mdev 时主 FV LZMA 解压卡约 80s；
-#   3. 补齐 TcgMor、Hash2DxeCrypto 和通用 RngDxe 安全模块；
+#   3. 补齐 TcgMor、Hash2DxeCrypto 和可在无 RDRAND CPU 上启动的通用 RngDxe；
 #   4. 在 ExitBootServices 通知 QEMU 切换已审核的 CPU DMI2 identity。
 #
 # 首次需约 2–4 分钟。重运行不会重复 apt-get source，但会干净重建 X64 OVMF。
@@ -57,8 +57,10 @@ else
 fi
 
 # edk2 2024.02 的 X64 DSC/FDF 尚未装入这些通用安全模块。补丁保留
-# VirtioRngDxe，并按后续 upstream OVMF 的做法给通用 RngDxe 绑定 CPU
-# BaseRngLib。源码是 CRLF，因此 patch 必须使用 --binary。
+# VirtioRngDxe。通用 RngDxe 使用 OVMF 全局的 timer-backed RngLib，
+# 不能绑定会无条件执行 RDRAND 的 BaseRngLib，否则忠实的
+# Sandy Bridge-E 模型会在启动期进入 #UD/CpuDeadLoop。源码是 CRLF，
+# 因此 patch 必须使用 --binary。
 SECURITY_PATCH="$HOST_DIR/ovmf-security-modules.patch"
 security_components=(
     SecurityPkg/Tcg/MemoryOverwriteControl/TcgMor.inf
@@ -74,6 +76,32 @@ for component in "${security_components[@]}"; do
         security_entries=$((security_entries + 1))
     fi
 done
+
+# Older runs of this builder may already have installed the unsafe component-
+# local BaseRngLib override.  Migrate that exact reviewed state while keeping a
+# fresh source tree on the corrected security-modules patch path.
+RNG_CPU_OVERRIDE='RngLib|MdePkg/Library/BaseRngLib/BaseRngLib.inf'
+RNG_TIMER_BINDING='RngLib|MdeModulePkg/Library/BaseRngLibTimerLib/BaseRngLibTimerLib.inf'
+RNG_FALLBACK_PATCH="$HOST_DIR/ovmf-rng-fallback.patch"
+if grep -Fq "$RNG_CPU_OVERRIDE" OvmfPkg/OvmfPkgX64.dsc; then
+    if patch --binary --batch --dry-run --fuzz=0 -p1 \
+            < "$RNG_FALLBACK_PATCH" >/dev/null 2>&1; then
+        echo "[build] replacing RngDxe CPU-only RNG binding with timer fallback"
+        patch --binary --batch --forward --fuzz=0 -p1 \
+            < "$RNG_FALLBACK_PATCH"
+    else
+        echo "[build] ERROR: OVMF RngDxe fallback patch does not apply cleanly" >&2
+        exit 1
+    fi
+fi
+if grep -Fq "$RNG_CPU_OVERRIDE" OvmfPkg/OvmfPkgX64.dsc; then
+    echo "[build] ERROR: RngDxe still requires RDRAND" >&2
+    exit 1
+fi
+if ! grep -Fq "$RNG_TIMER_BINDING" OvmfPkg/OvmfPkgX64.dsc; then
+    echo "[build] ERROR: OVMF timer-backed RngLib fallback is missing" >&2
+    exit 1
+fi
 expected_security_entries=$((${#security_components[@]} * 2))
 
 if ((security_entries == expected_security_entries)); then
@@ -187,6 +215,8 @@ firmware_sha=$(sha256sum -- "$TMP_DST" | awk '{print $1}')
     printf 'sha256=%s\n' "$firmware_sha"
     printf '%s\n' \
         'g11_host_bridge_handoff=exit-boot-services-apm-0x47'
+    printf '%s\n' \
+        'rng_protocol=timer-fallback-no-rdrand-required'
 } >"$TMP_FEATURES"
 chmod 0644 "$TMP_FEATURES"
 mv -f "$TMP_DST" "$DST"

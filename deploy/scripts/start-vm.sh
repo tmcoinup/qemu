@@ -4067,10 +4067,12 @@ if [[ "$DRY_RUN" != 1 &&
     OVMF_HANDOFF_FEATURE=$(
         sed -n 's/^g11_host_bridge_handoff=//p' "$OVMF_FEATURES"
     )
+    OVMF_RNG_FEATURE=$(sed -n 's/^rng_protocol=//p' "$OVMF_FEATURES")
     if [[ "$OVMF_FEATURE_SCHEMA" != 1 ||
           "$OVMF_HANDOFF_FEATURE" != exit-boot-services-apm-0x47 ||
+          "$OVMF_RNG_FEATURE" != timer-fallback-no-rdrand-required ||
           ! "$OVMF_FEATURE_SHA" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "[start-vm] OVMF G-11 CPU DMI2 功能清单非法: $OVMF_FEATURES" >&2
+        echo "[start-vm] OVMF G-11 CPU DMI2/RNG 功能清单非法: $OVMF_FEATURES" >&2
         exit 1
     fi
     OVMF_ACTUAL_SHA=$(sha256sum -- "$OVMF_CODE" | awk '{print $1}')
@@ -4080,7 +4082,7 @@ if [[ "$DRY_RUN" != 1 &&
         exit 1
     fi
     unset OVMF_FEATURES OVMF_FEATURE_SCHEMA OVMF_FEATURE_SHA \
-        OVMF_HANDOFF_FEATURE OVMF_ACTUAL_SHA
+        OVMF_HANDOFF_FEATURE OVMF_RNG_FEATURE OVMF_ACTUAL_SHA
 fi
 dgame_qemu_ptracer_preflight || {
     echo "[start-vm] DGame/QEMU 内存读取兼容预检失败；VM 未启动" >&2

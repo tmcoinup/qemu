@@ -1,8 +1,9 @@
 # Add the generic OVMF security services that are present in newer OVMF builds.
 #
-# Keep RngDxe's BaseRngLib override: the platform-wide OVMF RngLib instance is
-# timer based, while upstream wires the generic protocol provider to the CPU RNG.
-# VirtioRngDxe remains installed as a separate, device-backed protocol provider.
+# Keep OVMF's platform-wide timer-backed RngLib for the generic protocol.  A
+# BaseRngLib override executes RDRAND unconditionally and dead-loops in #UD on
+# faithful Sandy Bridge-E CPU profiles such as Core-i7-3930K.  VirtioRngDxe
+# remains installed as a separate, device-backed protocol provider.
 --- a/OvmfPkg/OvmfPkgX64.dsc
 +++ b/OvmfPkg/OvmfPkgX64.dsc
 @@ -1084,11 +1084,21 @@
@@ -18,10 +19,7 @@
 +  #
 +  SecurityPkg/Tcg/MemoryOverwriteControl/TcgMor.inf
 +  SecurityPkg/Hash2DxeCrypto/Hash2DxeCrypto.inf
-+  SecurityPkg/RandomNumberGenerator/RngDxe/RngDxe.inf {
-+    <LibraryClasses>
-+      RngLib|MdePkg/Library/BaseRngLib/BaseRngLib.inf
-+  }
++  SecurityPkg/RandomNumberGenerator/RngDxe/RngDxe.inf
 +
    #
    # TPM support

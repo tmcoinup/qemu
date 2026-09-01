@@ -1,0 +1,13 @@
+# Make an already-patched OVMF tree safe for CPUs without RDRAND.
+#
+# OvmfPkg's platform-wide RngLib is BaseRngLibTimerLib.  The component-local
+# BaseRngLib override bypasses that fallback and executes RDRAND even when the
+# selected virtual CPU correctly omits it (for example Core-i7-3930K).
+--- a/OvmfPkg/OvmfPkgX64.dsc
++++ b/OvmfPkg/OvmfPkgX64.dsc
+@@ -1096,4 +1096,1 @@
+-  SecurityPkg/RandomNumberGenerator/RngDxe/RngDxe.inf {
+-    <LibraryClasses>
+-      RngLib|MdePkg/Library/BaseRngLib/BaseRngLib.inf
+-  }
++  SecurityPkg/RandomNumberGenerator/RngDxe/RngDxe.inf

@@ -23,7 +23,7 @@ grep -Fxq 'QEMU_SDL_INPUT_POLL_MS=2' <<<"$balanced" \
     || fail "balanced input poll must remain 2ms"
 grep -Fxq 'QEMU_SDL_CURSOR_MODE=host' <<<"$balanced" \
     || fail "balanced profile must keep the responsive host cursor"
-grep -Fxq 'VGPU_CONSOLE_INTERVAL_US=16667' <<<"$balanced" \
+grep -Fxq 'VGPU_CONSOLE_INTERVAL_US=8333' <<<"$balanced" \
     || fail "balanced R535 copy interval changed"
 grep -Fxq 'QEMU_SERVICE_CPUS=0' <<<"$balanced" \
     || fail "balanced profile must not silently reserve another CPU"
@@ -37,8 +37,8 @@ grep -Fxq 'QEMU_SDL_TARGET_FPS=60' <<<"$ultra" \
     || fail "ultra response profile must stay aligned with the 60Hz display/FRL"
 grep -Fxq 'QEMU_SDL_INPUT_POLL_MS=1' <<<"$ultra" \
     || fail "ultra input poll must remain 1ms"
-grep -Fxq 'VGPU_CONSOLE_INTERVAL_US=16667' <<<"$ultra" \
-    || fail "ultra response profile must not double REGION scanning by default"
+grep -Fxq 'VGPU_CONSOLE_INTERVAL_US=8333' <<<"$ultra" \
+    || fail "ultra response profile must keep the 120Hz REGION period"
 grep -Fxq 'QEMU_SERVICE_CPUS=auto' <<<"$ultra" \
     || fail "ultra profile lost the optional QEMU service CPU"
 grep -Fxq 'G11_USB_HID_LOW_LATENCY=1' <<<"$ultra" \

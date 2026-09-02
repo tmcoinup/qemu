@@ -20,9 +20,9 @@ grep -Fq 'intervaltime=${interval_us},vgaintervaltime=${interval_us}' \
     || fail "both NVIDIA console-copy intervals must be configured together"
 grep -Fq 'driver_version" != 535.*' "$MDEV_LIB" \
     || fail "undocumented console parameters lost their R535 version guard"
-grep -Fq 'VGPU_CONSOLE_INTERVAL_US="${VGPU_CONSOLE_INTERVAL_US:-16667}"' \
+grep -Fq 'VGPU_CONSOLE_INTERVAL_US="${VGPU_CONSOLE_INTERVAL_US:-8333}"' \
     "$START_VM" \
-    || fail "native console no longer defaults to an approximately 60Hz copy period"
+    || fail "native console no longer defaults to an approximately 120Hz copy period"
 grep -Fq '"$MDEV_UUID" "$VGPU_CONSOLE_INTERVAL_US"' "$START_VM" \
     || fail "start-vm no longer configures the mdev before QEMU launch"
 grep -Fq 'MDEV_RECOVERY_FILE=$(vm_storage_run_preferred_path "$VM_ID" mdev)' "$START_VM" \

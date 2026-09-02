@@ -50,7 +50,7 @@
 #   --proxy           创建 .proxy 兼容别名；DGame preview 默认已启用原生 multi QMP
 #   --no-proxy        不创建 .proxy 别名（默认；不关闭 preview 所需的 multi QMP）
 #   --cpu-isolate=true|false
-#                      是否启用 CPU 隔离（默认 true）
+#                      是否启用 CPU 隔离（all/all 正常 vGPU 默认 false；显式 true 覆盖）
 #   --memory-prealloc=true|false
 #                      是否全量预分配宿主 RAM（默认 true）；false 按 Guest 实际
 #                      触页分配，Guest 容量/身份不变
@@ -483,6 +483,36 @@ else
     fi
 fi
 unset VGPU_HOST_CONFIG_RC
+# CPU 调度范围与 vGPU RAM 归属是两份独立的宿主策略。默认让 QEMU 使用
+# 全部在线 NUMA node 的 CPU，并在全部 node 上交错分配 RAM；显式 local
+# 才保持 mdev 所在 node。立即捕获，避免 guest vm.conf 改写宿主策略。
+VGPU_HOST_CPU_NODE_BIND_POLICY=${VGPU_HOST_CPU_NODE_BIND:-all}
+VGPU_HOST_CPU_NODE_BIND_POLICY=${VGPU_HOST_CPU_NODE_BIND_POLICY,,}
+case "$VGPU_HOST_CPU_NODE_BIND_POLICY" in
+    local|all) ;;
+    *)
+        echo "[start-vm] VGPU_HOST_CPU_NODE_BIND 必须是 local 或 all: $VGPU_HOST_CPU_NODE_BIND_POLICY" >&2
+        exit 2
+        ;;
+esac
+VGPU_HOST_MEMORY_NODE_BIND_POLICY=${VGPU_HOST_MEMORY_NODE_BIND:-all}
+VGPU_HOST_MEMORY_NODE_BIND_POLICY=${VGPU_HOST_MEMORY_NODE_BIND_POLICY,,}
+case "$VGPU_HOST_MEMORY_NODE_BIND_POLICY" in
+    local|all) ;;
+    *)
+        echo "[start-vm] VGPU_HOST_MEMORY_NODE_BIND 必须是 local 或 all: $VGPU_HOST_MEMORY_NODE_BIND_POLICY" >&2
+        exit 2
+        ;;
+esac
+if [[ "$VGPU_HOST_CPU_NODE_BIND_POLICY" != \
+      "$VGPU_HOST_MEMORY_NODE_BIND_POLICY" ]]; then
+    echo "[start-vm] CPU 与内存 NUMA 策略必须同时为 all 或同时为 local" >&2
+    exit 2
+fi
+unset VGPU_HOST_CPU_NODE_BIND
+unset VGPU_HOST_MEMORY_NODE_BIND
+readonly VGPU_HOST_CPU_NODE_BIND_POLICY
+readonly VGPU_HOST_MEMORY_NODE_BIND_POLICY
 # Host policy is sourced before vm.conf and therefore participates in the real
 # shell precedence.  Capture spoof inputs only now so the pre-storage guard
 # sees exactly what the later parser would inherit.
@@ -3125,6 +3155,16 @@ fi
 [[ "$PROXY" == 0 || "$PROXY" == 1 ]] || {
     echo "PROXY 必须是 0 或 1" >&2; exit 2;
 }
+# 宿主 NUMA 策略由外层 numactl 严格实施。若调用方没有显式选择隔离
+# 策略，正常 vGPU SDL/GTK 启动默认关闭逐线程/cpuset 绑核；
+# 显式 --cpu-isolate=true 仍可覆盖，用于需要独占核的场景。
+case "$MODE" in
+    vgpu-sdl|vgpu-gtk)
+        if [[ -z "$CPU_ISOLATION" && -z "${CPU_ISOLATE:-}" ]]; then
+            CPU_ISOLATION=off
+        fi
+        ;;
+esac
 cpu_isolation_normalize_mode || {
     echo "CPU_ISOLATION 必须是 auto、required 或 off" >&2; exit 2;
 }
@@ -3166,10 +3206,45 @@ esac
 }
 G11_INIT_REQUIRED="$SELECTED_VM_DIR/.g11-init-required"
 G11_REPAIR_NATIVE_STORAGE="$SELECTED_VM_DIR/.g11-repair-native-storage"
+G11_INIT_COLD_REBOOT_MARKER="$(vm_storage_instance_run_dir "$VM_ID")/g11-init-cold-reboot.json"
 G11_INIT_ISO=""
 G11_INIT_CONTRACT_ID=""
+G11_INIT_ACTIVE=0
+G11_INIT_COLD_BOOT_RESUME=0
 G11_STORAGE_BOOTSTRAP=0
 G11_STORAGE_REPAIR_NATIVE=0
+g11_init_cold_reboot_marker_validate() {
+    [[ -f "$G11_INIT_COLD_REBOOT_MARKER" &&
+       ! -L "$G11_INIT_COLD_REBOOT_MARKER" ]] || {
+        echo "[start-vm] 首次初始化冷启动标记类型不安全" >&2
+        return 1
+    }
+    [[ "$(stat -c '%a:%u:%h' -- "$G11_INIT_COLD_REBOOT_MARKER")" == \
+       "600:${CONF_UID}:1" ]] || {
+        echo "[start-vm] 首次初始化冷启动标记权限、owner 或链接数不安全" >&2
+        return 1
+    }
+    jq -e \
+        --arg vmName "vm${VM_ID}" \
+        --arg vmUuid "${VM_UUID,,}" \
+        --arg systemNvapiContractId "$G11_INIT_CONTRACT_ID" \
+        --arg systemNvapiIsoSha256 "$G11_INIT_ISO_SHA256" '
+        (keys | sort) == [
+            "createdUtc", "schemaVersion", "state",
+            "systemNvapiContractId", "systemNvapiIsoSha256",
+            "vmName", "vmUuid"
+        ] and
+        .schemaVersion == 1 and
+        .state == "verification-cold-boot-required" and
+        .vmName == $vmName and .vmUuid == $vmUuid and
+        .systemNvapiContractId == $systemNvapiContractId and
+        .systemNvapiIsoSha256 == $systemNvapiIsoSha256 and
+        (.createdUtc | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+    ' "$G11_INIT_COLD_REBOOT_MARKER" >/dev/null || {
+        echo "[start-vm] 首次初始化冷启动标记与当前 VM 合同不匹配" >&2
+        return 1
+    }
+}
 if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
     [[ -f "$G11_INIT_REQUIRED" && ! -L "$G11_INIT_REQUIRED" ]] || {
         echo "[start-vm] G-11 初始化标记类型不安全，拒绝启动: $G11_INIT_REQUIRED" >&2
@@ -3208,6 +3283,7 @@ if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
     G11_INIT_CONTRACT_ID=$(jq -er '.systemNvapiContractId' "$G11_INIT_REQUIRED")
     G11_INIT_ISO_FILE=$(jq -er '.systemNvapiIsoFile' "$G11_INIT_REQUIRED")
     G11_INIT_ISO_SHA256=$(jq -er '.systemNvapiIsoSha256' "$G11_INIT_REQUIRED")
+    G11_INIT_ACTIVE=1
     G11_INIT_PACKAGE_ROOT="$SELECTED_VM_DIR/packages/SystemNvapiProjection"
     [[ -d "$G11_INIT_PACKAGE_ROOT" && ! -L "$G11_INIT_PACKAGE_ROOT" &&
        "$(stat -c '%a:%u' -- "$G11_INIT_PACKAGE_ROOT")" == "700:${CONF_UID}" ]] || {
@@ -3230,14 +3306,21 @@ if [[ -e "$G11_INIT_REQUIRED" || -L "$G11_INIT_REQUIRED" ]]; then
         echo "[start-vm] 每 VM 系统 NVAPI ISO 名称与 UUID/合同不一致" >&2
         exit 1
     }
+    if [[ -e "$G11_INIT_COLD_REBOOT_MARKER" ||
+          -L "$G11_INIT_COLD_REBOOT_MARKER" ]]; then
+        g11_init_cold_reboot_marker_validate || exit 1
+        G11_INIT_COLD_BOOT_RESUME=1
+        echo "[start-vm] 检测到已认证的初始化重启；本次直接进入冷启动验收"
+    fi
     case "$MODE" in
-        install|driver-install-sdl|driver-install-gtk|driver-install-headless)
-            echo "[start-vm] 私有克隆初始化期间禁止切换到 Windows/GRID 驱动安装模式" >&2
+        vgpu-sdl|vgpu-gtk) ;;
+        *)
+            echo "[start-vm] 私有克隆初始化只允许正常 vGPU SDL/GTK 模式" >&2
             exit 1
             ;;
     esac
     if [[ "$MONITOR_SYNC" == 1 ]]; then
-        echo "[start-vm] G-11 首次启动尚未完成；将自动安装系统 NVAPI、重启验收并关机"
+        echo "[start-vm] G-11 首次启动尚未完成；将自动安装系统 NVAPI、冷启动验收并关机"
     fi
     MONITOR_SYNC=0
     if [[ "$SSD_INTERFACE" == sata ]]; then
@@ -5419,7 +5502,11 @@ fi
 VGPU_HOST_NUMA_NODE=""
 if [[ -n "${MDEV_UUID:-}" && "$DRY_RUN" != 1 ]]; then
     if VGPU_HOST_NUMA_NODE=$(mdev_numa_node "$MDEV_UUID"); then
-        CPU_ISOLATION_PREFERRED_NUMA_NODE=$VGPU_HOST_NUMA_NODE
+        if [[ "$VGPU_HOST_CPU_NODE_BIND_POLICY" == local ]]; then
+            CPU_ISOLATION_PREFERRED_NUMA_NODE=$VGPU_HOST_NUMA_NODE
+        else
+            CPU_ISOLATION_PREFERRED_NUMA_NODE=auto
+        fi
     else
         echo "[start-vm] WARN: 无法解析 mdev 的宿主 NUMA 节点，使用通用调度" >&2
         CPU_ISOLATION_PREFERRED_NUMA_NODE=auto
@@ -5747,6 +5834,16 @@ case "$RTC_MODE" in
         ;;
 esac
 
+# During the private clone's pending first boot, a Windows reboot must end the
+# current QEMU process.  Reusing the same process can leave an OVMF AP spinning
+# forever in WaitApWakeup; the authenticated watcher below permits exactly one
+# fresh-process relaunch.  Keep this option after EXTRA so a generic caller
+# cannot accidentally restore the unsafe in-process reset for this lifecycle.
+G11_INIT_REBOOT_ARGS=()
+if ((G11_INIT_ACTIVE)); then
+    G11_INIT_REBOOT_ARGS=( -action reboot=shutdown )
+fi
+
 # QEMU command line built once, used by both code paths below.
 QEMU_CMD=(
     "$QEMU_BIN"
@@ -5785,6 +5882,7 @@ QEMU_CMD=(
     "${QMP_ARGS[@]}"
     -pidfile "$PIDFILE"
     $EXTRA
+    "${G11_INIT_REBOOT_ARGS[@]}"
 )
 
 # Defense in depth for callers that exported a runtime credential before
@@ -5798,19 +5896,38 @@ QEMU_LAUNCH=(
     -u G11_LAB_GUEST_PASSWORD
     -u G11_ARM_ADMIN_PASS
 )
-if [[ -n "$VGPU_HOST_NUMA_NODE" ]]; then
+if [[ -n "${MDEV_UUID:-}" ]]; then
     command -v numactl >/dev/null 2>&1 || {
-        echo "[start-vm] mdev 位于 NUMA ${VGPU_HOST_NUMA_NODE}，但缺少 numactl；请安装 numactl" >&2
+        echo "[start-vm] vGPU NUMA 策略需要 numactl；请安装 numactl" >&2
         exit 1
     }
-    # Apply the policy before QEMU allocates/preallocates ram0.  The cgroup
-    # pinner later gives individual vCPU threads exact same-node CPUs.
+    if [[ "$VGPU_HOST_CPU_NODE_BIND_POLICY" == all ]]; then
+        VGPU_HOST_CPU_NODE_BIND_RESOLVED=all
+    else
+        if [[ -z "$VGPU_HOST_NUMA_NODE" && "$DRY_RUN" == 1 ]]; then
+            VGPU_HOST_NUMA_NODE=mdev-local
+        fi
+        [[ -n "$VGPU_HOST_NUMA_NODE" ]] || {
+            echo "[start-vm] local NUMA 策略无法解析 mdev 所在 node" >&2
+            exit 1
+        }
+        VGPU_HOST_CPU_NODE_BIND_RESOLVED=$VGPU_HOST_NUMA_NODE
+    fi
+    # Apply both policies before QEMU allocates/preallocates ram0.  all makes
+    # every online CPU schedulable and interleaves guest RAM over every online
+    # memory node; local preserves the original mdev-node-only behaviour.
     QEMU_LAUNCH+=(
         numactl
-        "--cpunodebind=${VGPU_HOST_NUMA_NODE}"
-        "--membind=${VGPU_HOST_NUMA_NODE}"
+        "--cpunodebind=${VGPU_HOST_CPU_NODE_BIND_RESOLVED}"
     )
-    echo "[start-vm] vGPU NUMA locality: node=${VGPU_HOST_NUMA_NODE} (CPU + RAM)"
+    if [[ "$VGPU_HOST_MEMORY_NODE_BIND_POLICY" == all ]]; then
+        QEMU_LAUNCH+=( --interleave=all )
+        VGPU_HOST_MEMORY_NODE_BIND_RESOLVED='all (interleave)'
+    else
+        QEMU_LAUNCH+=( "--membind=${VGPU_HOST_NUMA_NODE}" )
+        VGPU_HOST_MEMORY_NODE_BIND_RESOLVED="${VGPU_HOST_NUMA_NODE} (bind)"
+    fi
+    echo "[start-vm] vGPU NUMA policy: CPU nodes=${VGPU_HOST_CPU_NODE_BIND_RESOLVED}, RAM nodes=${VGPU_HOST_MEMORY_NODE_BIND_RESOLVED}"
 fi
 if [[ "$LOCAL_INPUT_BACKEND" == sdl &&
       "$QEMU_SDL_GNOME_ANIMATIONS" == off ]] &&
@@ -5916,6 +6033,19 @@ fi
 start_vm_timing_mark qemu-launch
 printf '%s\n' "${START_VM_TIMING_LINES[@]}" >>"$QEMU_LOG"
 
+if ((G11_INIT_COLD_BOOT_RESUME)); then
+    g11_init_cold_reboot_marker_validate || exit 1
+    rm -f -- "$G11_INIT_COLD_REBOOT_MARKER" || {
+        echo "[start-vm] 无法消费首次初始化冷启动标记" >&2
+        exit 1
+    }
+    [[ ! -e "$G11_INIT_COLD_REBOOT_MARKER" &&
+       ! -L "$G11_INIT_COLD_REBOOT_MARKER" ]] || {
+        echo "[start-vm] 首次初始化冷启动标记消费后仍然存在" >&2
+        exit 1
+    }
+fi
+
 if ! cpu_isolation_launch "$VM_ID" "$CPU_VCPUS" "$CPU_CORES" \
         "$CPU_THREADS_PER_CORE" "$QMP_SOCK" "$PIDFILE" \
         "$CPU_ISOLATION_STATE_FILE"; then
@@ -5923,7 +6053,7 @@ if ! cpu_isolation_launch "$VM_ID" "$CPU_VCPUS" "$CPU_CORES" \
     exit 1
 fi
 
-if [[ -n "$G11_INIT_ISO" ]]; then
+if [[ -n "$G11_INIT_ISO" && "$G11_INIT_COLD_BOOT_RESUME" == 0 ]]; then
     G11_INIT_MEDIA_WATCHER="$here/host/watch-g11-init-media.py"
     [[ -f "$G11_INIT_MEDIA_WATCHER" && ! -L "$G11_INIT_MEDIA_WATCHER" ]] || {
         echo "[start-vm] 初始化光驱自动热拔器缺失或类型不安全: $G11_INIT_MEDIA_WATCHER" >&2
@@ -5932,10 +6062,114 @@ if [[ -n "$G11_INIT_ISO" ]]; then
     python3 "$G11_INIT_MEDIA_WATCHER" \
         "$QMP_SOCK" "vm${VM_ID}" "$G11_INIT_ISO" \
         "$G11_INIT_ODD_VENDOR" "$G11_INIT_ODD_PRODUCT" \
-        "$ODD_FIRMWARE_REV" >>"$QEMU_LOG" 2>&1 &
+        "$ODD_FIRMWARE_REV" "$G11_INIT_COLD_REBOOT_MARKER" \
+        "${VM_UUID,,}" "$G11_INIT_CONTRACT_ID" \
+        "$G11_INIT_ISO_SHA256" >>"$QEMU_LOG" 2>&1 &
     G11_INIT_MEDIA_WATCH_PID=$!
     echo "[start-vm] 初始化光驱将在载荷复制完成后自动热拔"
 fi
+
+g11_init_wait_media_watcher() {
+    local watcher_rc=0
+
+    if [[ "${G11_INIT_MEDIA_WATCH_PID:-}" =~ ^[1-9][0-9]*$ ]]; then
+        if wait "$G11_INIT_MEDIA_WATCH_PID"; then
+            :
+        else
+            watcher_rc=$?
+        fi
+        G11_INIT_MEDIA_WATCH_PID=""
+    fi
+    if ((watcher_rc != 0)); then
+        echo "[start-vm] WARN: 初始化光驱/重启观察器异常退出 (rc=${watcher_rc})" >&2
+    fi
+}
+
+g11_init_remove_stale_qemu_runtime() {
+    local path kind
+
+    for path in "$QMP_SOCK" "$MON_SOCK"; do
+        [[ ! -L "$path" && ( ! -e "$path" || -S "$path" ) ]] || {
+            echo "[start-vm] 冷启动前发现不安全的 QEMU socket: $path" >&2
+            return 1
+        }
+        rm -f -- "$path"
+    done
+    path=$PIDFILE
+    kind="QEMU pidfile"
+    [[ ! -L "$path" && ( ! -e "$path" || -f "$path" ) ]] || {
+        echo "[start-vm] 冷启动前发现不安全的 ${kind}: $path" >&2
+        return 1
+    }
+    rm -f -- "$path"
+}
+
+# The watcher writes the marker only after both an authenticated optical eject
+# and QMP SHUTDOWN(reason=guest-reset).  Consume it once, release generation-
+# specific CPU/TPM runtime, then launch the same immutable VM contract in a new
+# QEMU process.  A second guest reboot exits without another relaunch, bounding
+# recovery and avoiding an unattended reboot loop.
+g11_init_cold_relaunch_if_armed() {
+    local initial_rc=$1
+
+    G11_FINAL_QEMU_RC=$initial_rc
+    g11_init_wait_media_watcher
+    ((G11_INIT_ACTIVE && !G11_INIT_COLD_BOOT_RESUME)) || return 0
+    if [[ ! -e "$G11_INIT_COLD_REBOOT_MARKER" &&
+          ! -L "$G11_INIT_COLD_REBOOT_MARKER" ]]; then
+        return 0
+    fi
+    if ! g11_init_cold_reboot_marker_validate; then
+        G11_FINAL_QEMU_RC=1
+        return 0
+    fi
+    if ((initial_rc != 0)); then
+        echo "[start-vm] QEMU 异常退出，保留已认证冷启动标记供下次恢复" >&2
+        return 0
+    fi
+    rm -f -- "$G11_INIT_COLD_REBOOT_MARKER" || {
+        echo "[start-vm] 无法消费已认证的首次初始化重启标记" >&2
+        G11_FINAL_QEMU_RC=1
+        return 0
+    }
+    [[ ! -e "$G11_INIT_COLD_REBOOT_MARKER" &&
+       ! -L "$G11_INIT_COLD_REBOOT_MARKER" ]] || {
+        echo "[start-vm] 已认证的首次初始化重启标记消费失败" >&2
+        G11_FINAL_QEMU_RC=1
+        return 0
+    }
+
+    cpu_isolation_cleanup "$VM_ID" "$CPU_ISOLATION_STATE_FILE"
+    if ! g11_init_remove_stale_qemu_runtime; then
+        G11_FINAL_QEMU_RC=1
+        return 0
+    fi
+    if (( ${#TPM_ARGS[@]} )); then
+        if ! vm_tpm_start "$VM_ID" "$QEMU_BIN" 0; then
+            echo "[start-vm] 首次初始化冷启动无法重建 TPM runtime" >&2
+            G11_FINAL_QEMU_RC=1
+            return 0
+        fi
+        TPM_LIFECYCLE_STARTED=1
+    fi
+    if ! cpu_isolation_launch "$VM_ID" "$CPU_VCPUS" "$CPU_CORES" \
+            "$CPU_THREADS_PER_CORE" "$QMP_SOCK" "$PIDFILE" \
+            "$CPU_ISOLATION_STATE_FILE"; then
+        echo "[start-vm] 首次初始化冷启动无法重建 CPU 隔离" >&2
+        G11_FINAL_QEMU_RC=1
+        return 0
+    fi
+
+    echo "[start-vm] 首次初始化：已把 guest 重启转换为宿主冷启动 (1/1)"
+    printf '%s\n' \
+        '[start-vm] firstboot guest-reset -> cold QEMU relaunch (1/1)' \
+        >>"$QEMU_LOG"
+    set +e
+    "${QEMU_LAUNCH[@]}" "${QEMU_EXEC_CMD[@]}" \
+        2> >(tee -a "$QEMU_LOG" >&2)
+    G11_FINAL_QEMU_RC=$?
+    set -e
+}
 
 # 非 rdp 模式都是"QEMU 直接挂前台显示"——install/driver-install/vgpu-* 都让 QEMU 自己
 # 弹窗（-display sdl/gtk），no-gpu 走旧 VNC 远程。这些路径不需要一条龙
@@ -6019,7 +6253,8 @@ if [[ "$MODE" != "rdp" ]]; then
         else
             echo "[start-vm] WARN: vm${VM_ID} 推流 sidecar 停止失败" >&2
         fi
-        exit "$qemu_rc"
+        g11_init_cold_relaunch_if_armed "$qemu_rc"
+        exit "$G11_FINAL_QEMU_RC"
     fi
 
     # 不能 exec：EXIT trap 负责回收 mdev 与独立 swtpm daemon。
@@ -6027,7 +6262,8 @@ if [[ "$MODE" != "rdp" ]]; then
     "${QEMU_LAUNCH[@]}" "${QEMU_EXEC_CMD[@]}" 2> >(tee -a "$QEMU_LOG" >&2)
     qemu_rc=$?
     set -e
-    exit "$qemu_rc"
+    g11_init_cold_relaunch_if_armed "$qemu_rc"
+    exit "$G11_FINAL_QEMU_RC"
 fi
 
 # ───────── 旧 rdp/legacy-shmem 兼容模式：QEMU 后台 + setup + viewer

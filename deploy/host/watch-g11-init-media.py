@@ -4,13 +4,16 @@
 The guest first copies and verifies its VM-bound payload, then issues the
 standard SCSI media-eject request.  This watcher treats the resulting open tray
 as the only authorization to hot-remove the reviewed scsi-cd + usb-bot stack.
-It never controls a normal/manual optical device and never writes guest data.
+After that authenticated transition it also records an exact guest-reset event,
+allowing the launcher to turn the one initialization reboot into a fresh QEMU
+process.  It never controls a normal/manual optical device or writes guest data.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import select
 import signal
 import socket
 import stat
@@ -24,6 +27,8 @@ USB_DEVICE_ID = "g11-init-odd-usb"
 BACKEND_ID = "g11-init-odd-media"
 CONNECT_TIMEOUT_SECONDS = 180
 EJECT_TIMEOUT_SECONDS = 20 * 60
+SHUTDOWN_TIMEOUT_SECONDS = 20 * 60
+REBOOT_MARKER_BASENAME = "g11-init-cold-reboot.json"
 
 
 class WatchError(RuntimeError):
@@ -41,6 +46,7 @@ class Qmp:
         self.sock.connect(path)
         self.stream = self.sock.makefile("rwb", buffering=0)
         self.sequence = 0
+        self.events: list[dict[str, Any]] = []
         while True:
             line = self.stream.readline()
             if not line:
@@ -67,12 +73,31 @@ class Qmp:
             if not line:
                 raise QmpClosed(f"QMP closed before {name} response")
             response = json.loads(line)
+            if "event" in response:
+                self.events.append(response)
+                continue
             if response.get("id") != ident:
                 continue
             if "error" in response:
                 detail = response["error"].get("desc", "QMP error")
                 raise WatchError(f"{name}: {detail}")
             return response.get("return")
+
+    def next_event(self, deadline: float) -> dict[str, Any] | None:
+        if self.events:
+            return self.events.pop(0)
+        while time.monotonic() < deadline:
+            timeout = min(5.0, max(0.0, deadline - time.monotonic()))
+            readable, _, _ = select.select([self.sock], [], [], timeout)
+            if not readable:
+                continue
+            line = self.stream.readline()
+            if not line:
+                raise QmpClosed("QMP closed while waiting for shutdown")
+            message = json.loads(line)
+            if "event" in message:
+                return message
+        return None
 
 
 def wait_for_socket(path: str) -> None:
@@ -198,14 +223,135 @@ def remove_stack(qmp: Qmp) -> None:
         raise WatchError("initialization optical frontend survived hot-remove")
 
 
+def publish_reboot_marker(
+    marker: str,
+    expected_name: str,
+    vm_uuid: str,
+    contract_id: str,
+    iso_sha256: str,
+) -> None:
+    if not os.path.isabs(marker) or os.path.basename(marker) != REBOOT_MARKER_BASENAME:
+        raise WatchError(f"invalid cold-reboot marker path: {marker}")
+    parent = os.path.dirname(marker)
+    parent_meta = os.lstat(parent)
+    if (
+        stat.S_ISLNK(parent_meta.st_mode)
+        or not stat.S_ISDIR(parent_meta.st_mode)
+        or os.path.realpath(parent) != parent
+        or parent_meta.st_uid != os.getuid()
+    ):
+        raise WatchError(f"cold-reboot marker directory is unsafe: {parent}")
+    if os.path.lexists(marker):
+        raise WatchError(f"cold-reboot marker already exists: {marker}")
+
+    payload = {
+        "createdUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schemaVersion": 1,
+        "state": "verification-cold-boot-required",
+        "systemNvapiContractId": contract_id,
+        "systemNvapiIsoSha256": iso_sha256,
+        "vmName": expected_name,
+        "vmUuid": vm_uuid,
+    }
+    temporary = f"{marker}.tmp.{os.getpid()}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        stream = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with stream:
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, marker, follow_symlinks=False)
+        os.unlink(temporary)
+        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def wait_for_shutdown(
+    qmp: Qmp,
+    marker: str,
+    expected_name: str,
+    vm_uuid: str,
+    contract_id: str,
+    iso_sha256: str,
+) -> None:
+    deadline = time.monotonic() + SHUTDOWN_TIMEOUT_SECONDS
+    while True:
+        event = qmp.next_event(deadline)
+        if event is None:
+            print(
+                "[g11-init-media] verification reboot was not requested within "
+                "20 minutes; no cold relaunch armed",
+                flush=True,
+            )
+            return
+        if event.get("event") != "SHUTDOWN":
+            continue
+        data = event.get("data") or {}
+        reason = data.get("reason")
+        if data.get("guest") is True and reason == "guest-reset":
+            publish_reboot_marker(
+                marker,
+                expected_name,
+                vm_uuid,
+                contract_id,
+                iso_sha256,
+            )
+            print(
+                "[g11-init-media] PASS: authenticated guest reboot armed one "
+                "cold QEMU relaunch",
+                flush=True,
+            )
+        else:
+            print(
+                f"[g11-init-media] shutdown reason={reason!r}; no cold relaunch armed",
+                flush=True,
+            )
+        return
+
+
 def run(arguments: list[str]) -> int:
-    if len(arguments) != 6:
+    if len(arguments) != 10:
         raise WatchError(
-            "usage: watch-g11-init-media.py QMP VM_NAME ISO VENDOR PRODUCT FIRMWARE"
+            "usage: watch-g11-init-media.py QMP VM_NAME ISO VENDOR PRODUCT "
+            "FIRMWARE REBOOT_MARKER VM_UUID CONTRACT_ID ISO_SHA256"
         )
-    qmp_path, expected_name, media, vendor, product, firmware = arguments
-    if not os.path.isabs(qmp_path) or not os.path.isabs(media):
-        raise WatchError("QMP and ISO paths must be absolute")
+    (
+        qmp_path,
+        expected_name,
+        media,
+        vendor,
+        product,
+        firmware,
+        reboot_marker,
+        vm_uuid,
+        contract_id,
+        iso_sha256,
+    ) = arguments
+    if not os.path.isabs(qmp_path) or not os.path.isabs(media) or not os.path.isabs(reboot_marker):
+        raise WatchError("QMP, ISO and reboot-marker paths must be absolute")
+    if (
+        not expected_name.startswith("vm")
+        or not vm_uuid
+        or len(contract_id) != 64
+        or len(iso_sha256) != 64
+    ):
+        raise WatchError("invalid VM initialization identity")
     expected_media = os.path.realpath(media)
     if not os.path.isfile(expected_media) or os.path.islink(media):
         raise WatchError(f"initialization ISO is not a safe file: {media}")
@@ -243,6 +389,21 @@ def run(arguments: list[str]) -> int:
                     "optical device and USB transport removed",
                     flush=True,
                 )
+                try:
+                    wait_for_shutdown(
+                        qmp,
+                        reboot_marker,
+                        expected_name,
+                        vm_uuid,
+                        contract_id,
+                        iso_sha256,
+                    )
+                except QmpClosed:
+                    print(
+                        "[g11-init-media] QEMU exited without an observed "
+                        "guest-reset shutdown; no cold relaunch armed",
+                        flush=True,
+                    )
                 return 0
             observed_inserted = observed_inserted or bool(inserted)
             time.sleep(0.25)

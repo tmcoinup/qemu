@@ -511,8 +511,24 @@ for secret_name in SUDO_PASSWORD WINDOWS_UNATTEND_ADMIN_PASSWORD GUEST_PASS \
 done
 grep -Fq 'CPU_ISOLATION_PREFERRED_NUMA_NODE=$VGPU_HOST_NUMA_NODE' "$START_VM" \
     || fail "start-vm does not pass mdev NUMA locality to CPU isolation"
+grep -Fq 'VGPU_HOST_CPU_NODE_BIND_POLICY=${VGPU_HOST_CPU_NODE_BIND:-all}' "$START_VM" \
+    || fail "start-vm does not default CPU scheduling to every host NUMA node"
+grep -Fq 'VGPU_HOST_MEMORY_NODE_BIND_POLICY=${VGPU_HOST_MEMORY_NODE_BIND:-all}' "$START_VM" \
+    || fail "start-vm does not default RAM allocation to every host NUMA node"
+grep -Fq 'CPU 与内存 NUMA 策略必须同时为 all 或同时为 local' "$START_VM" \
+    || fail "start-vm accepts an unreviewed mixed CPU/RAM NUMA policy"
+grep -Fq 'CPU_ISOLATION=off' "$START_VM" \
+    || fail "start-vm does not keep the default all policy open in vGPU mode"
+grep -Fq 'VGPU_HOST_CPU_NODE_BIND_RESOLVED=all' "$START_VM" \
+    || fail "start-vm cannot make all host NUMA CPU nodes schedulable"
+grep -Fq '"--cpunodebind=${VGPU_HOST_CPU_NODE_BIND_RESOLVED}"' "$START_VM" \
+    || fail "start-vm still couples CPU node binding directly to the mdev node"
+grep -Fq 'QEMU_LAUNCH+=( --interleave=all )' "$START_VM" \
+    || fail "start-vm cannot interleave guest RAM over all host NUMA nodes"
+grep -Fq 'VGPU_HOST_NUMA_NODE=mdev-local' "$START_VM" \
+    || fail "start-vm local NUMA dry-run has no safe node placeholder"
 grep -Fq '"--membind=${VGPU_HOST_NUMA_NODE}"' "$START_VM" \
-    || fail "start-vm does not bind initial guest RAM to the mdev NUMA node"
+    || fail "start-vm cannot restore local guest RAM binding"
 [[ "$(grep -Fc '"${QEMU_LAUNCH[@]}" "${QEMU_EXEC_CMD[@]}"' "$START_VM")" -eq 3 ]] \
     || fail "not every QEMU launch mode uses the credential-scrubbed wrapper"
 grep -Fq 'cpu_isolation_release_vm "$VM_ID"' "$STOP_VM" \

@@ -12,6 +12,8 @@ TIER_MB=2048
 TIER_EXPLICIT=0
 FB_MODE=auto
 GPU_BDF=auto
+CPU_NODE_BIND=all
+MEMORY_NODE_BIND=all
 OUTPUT="$here/host/vgpu-host.conf"
 FORCE=0
 : "${MDEV_DEVICES_DIR:=/sys/bus/mdev/devices}"
@@ -31,6 +33,12 @@ usage() {
                      V100/R570/R580 默认 mixed；RTX 2080 固定 equal
   --tier 1024|2048   equal 模式的 framebuffer 档（默认 2048）
   --gpu auto|BDF     NVIDIA GPU；多卡宿主建议写完整 0000:BB:DD.F
+  --cpu-node-bind POLICY
+                     all（默认）| local
+                     all 使用全部在线 NUMA node 的 CPU；local 仅使用 GPU 所在 node
+  --memory-node-bind POLICY
+                     all（默认）| local
+                     all 在全部在线 NUMA node 交错分配 RAM；local 仅使用 GPU 所在 node
   --output FILE      输出路径（默认 deploy/host/vgpu-host.conf，已 gitignore）
   --force            原子替换已有的本机策略
 
@@ -62,6 +70,16 @@ while (($#)); do
             GPU_BDF=$2
             shift 2
             ;;
+        --cpu-node-bind)
+            (($# >= 2)) || { echo '--cpu-node-bind 缺少参数' >&2; exit 2; }
+            CPU_NODE_BIND=${2,,}
+            shift 2
+            ;;
+        --memory-node-bind)
+            (($# >= 2)) || { echo '--memory-node-bind 缺少参数' >&2; exit 2; }
+            MEMORY_NODE_BIND=${2,,}
+            shift 2
+            ;;
         --output)
             (($# >= 2)) || { echo '--output 缺少参数' >&2; exit 2; }
             OUTPUT=$2
@@ -78,6 +96,18 @@ case "$FB_MODE" in
     auto|equal|mixed) ;;
     *) echo "--fb-mode 必须是 auto、equal 或 mixed: $FB_MODE" >&2; exit 2 ;;
 esac
+case "$CPU_NODE_BIND" in
+    local|all) ;;
+    *) echo "--cpu-node-bind 必须是 local 或 all: $CPU_NODE_BIND" >&2; exit 2 ;;
+esac
+case "$MEMORY_NODE_BIND" in
+    local|all) ;;
+    *) echo "--memory-node-bind 必须是 local 或 all: $MEMORY_NODE_BIND" >&2; exit 2 ;;
+esac
+[[ "$CPU_NODE_BIND" == "$MEMORY_NODE_BIND" ]] || {
+    echo '--cpu-node-bind 与 --memory-node-bind 必须同时为 all 或同时为 local' >&2
+    exit 2
+}
 [[ "$GPU_BDF" == auto ||
    "$GPU_BDF" =~ ^[0-9A-Fa-f]{4}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-7]$ ]] || {
     echo "--gpu 必须是 auto 或完整 PCI BDF: $GPU_BDF" >&2
@@ -226,6 +256,8 @@ EOF
 VGPU_TOTAL_FB_MB=$TOTAL_FB_MB
 VGPU_CAPACITY_CHECK=both
 VGPU_CONSOLE_INTERVAL_US=$CONSOLE_INTERVAL
+VGPU_HOST_CPU_NODE_BIND=$CPU_NODE_BIND
+VGPU_HOST_MEMORY_NODE_BIND=$MEMORY_NODE_BIND
 VGPU_MDEV_IDENTITY_MODE=$IDENTITY_MODE
 VGPU_RM_FB_IDENTITY_MODE=$RM_FB_IDENTITY_MODE
 SPOOF_MODE=$SPOOF_MODE_VALUE

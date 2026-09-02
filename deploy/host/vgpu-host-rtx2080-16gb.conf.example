@@ -19,6 +19,8 @@ VGPU_RESOURCE_FB_MB=2048
 # is available to the vGPU pool.  Keep both sysfs and per-parent sum checks.
 VGPU_TOTAL_FB_MB=16384
 VGPU_CAPACITY_CHECK=both
+VGPU_HOST_CPU_NODE_BIND=all
+VGPU_HOST_MEMORY_NODE_BIND=all
 
 # These R535-only console values are already validated on the current host.
 VGPU_CONSOLE_INTERVAL_US=16667

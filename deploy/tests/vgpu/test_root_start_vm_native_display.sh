@@ -237,7 +237,7 @@ require_text "模式=vgpu-sdl" "$SDL_OUT"
 require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=on\,merge=off' \
     "$SDL_OUT"
 require_text '宿主内存: 全量预分配（默认，Guest 上限 8192 MiB）' "$SDL_OUT"
-require_text '  -S' "$SDL_OUT"
+reject_text '  -S' "$SDL_OUT"
 require_text "XMODIFIERS=@im=none SDL_IM_MODULE=none IBUS_ADDRESS=/nonexistent NATIVE_EGL=1 SDL_DRIVER=x11 X11_WMCLASS=win10-${VM_ID} WAYLAND_WMCLASS=win10-${VM_ID} WINDOW_MODE= CURSOR_MODE=host args=-display help" \
     "$TMP_DIR/qemu-env.trace"
 require_text 'ide-cd.bootindex=-1' "$SDL_OUT"
@@ -305,7 +305,8 @@ for guest_memory_device in virtio-balloon hv-balloon virtio-mem pc-dimm maxmem= 
     reject_text "$guest_memory_device" "$RESOURCE_FALSE_OUT"
 done
 
-# Explicit true values must be equivalent to omitting both keys.
+# Explicit true still enables required isolation even though all/all shared
+# vGPU mode now defaults CPU isolation to off.
 run_start_vm "$RESOURCE_TRUE_OUT" \
     --cpu-isolate=true --memory-prealloc=true
 require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=on\,merge=off' \

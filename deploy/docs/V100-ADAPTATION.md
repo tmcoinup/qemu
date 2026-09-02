@@ -62,11 +62,38 @@ RAM_TYPE `15 -> 8`，随后却重复出现 PTE pin/translate 失败、Guest TDR�
 官方 mixed capability/mode 为准，不得猜测 `nvidia-NNN`。16GB/32GB 容量门禁按
 16384/32768 MiB 计算；不同 SKU 和满槽并发仍需重复做真实 Windows 验收。
 
-## CPU2、显示输出与安全边界
+## 双路 CPU、全部宿主内存与显示输出
 
 V100 所在插槽连接哪颗 CPU，对应 CPU 必须存在且 NUMA node 有在线核心。V100 不承担
 Ubuntu 桌面输出，显示器应接 RX550 等另一张卡；宿主显示异常与 vGPU Guest 是否能
 装载是两条独立链路，交付前仍要冷启动确认控制台。
+
+所有 preset 现在默认写入 `VGPU_HOST_CPU_NODE_BIND=all` 和
+`VGPU_HOST_MEMORY_NODE_BIND=all`。启动器据此执行：
+
+```text
+numactl --cpunodebind=all --interleave=all
+```
+
+因此两颗物理 CPU 的在线核心都可供 QEMU 调度，Guest RAM 也在所有在线内存 node
+间交错分配。V100 在 node1 时，node0 页面访问 V100 会经过 CPU 间互联；这是让 8 台
+VM 使用全部内存条容量和通道的预期代价。该策略不改变 Guest 看到的 vCPU 数量，
+也不要求一台小 VM 每时每刻同时跑满两路。
+
+旧 V100 宿主升级时必须先正常关闭全部 VM、确认 QEMU/mdev 为空，再重新运行 VMate
+“修复中心 → 自动修复”，或用缺省的 `--cpu-node-bind all`
+`--memory-node-bind all` 重新生成实际启动入口使用的配置。重启 VM 后检查
+`/proc/<QEMU_PID>/status` 的 `Cpus_allowed_list` 和 `/proc/<QEMU_PID>/numa_maps`：
+前者应覆盖全部在线 CPU；后者的 ram0 映射应显示 `interleave:<全部 node>`，并同时
+出现多个 `N<node>=...` 页计数。正常 VMate 共享启动使用 `--cpu-isolate=false`；显式
+开启隔离会再次缩小 cpuset。完整傻瓜命令见
+[`G11-VGPU-HOST-QUICKSTART.md`](G11-VGPU-HOST-QUICKSTART.md) 第 5 节。
+
+需要回滚时，在全部 VM/mdev 关闭后用相同 preset/显存参数重新生成
+`--cpu-node-bind local --memory-node-bind local`，再重启 VM并复查上述两个 `/proc`
+文件。只需回滚宿主配置，无需修改 Guest、BCD、签名策略或驱动。
+
+## 安全边界
 
 Windows 只安装 NVIDIA/Microsoft 正式签名驱动。禁止 `testsigning`、
 `nointegritychecks`、BCD 修改、测试签名或自签名内核驱动。宿主 Secure Boot 必须在

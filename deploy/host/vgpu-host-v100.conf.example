@@ -14,6 +14,11 @@ VGPU_RESOURCE_PROFILE_2048='V100X-2Q'
 VGPU_TOTAL_FB_MB=16384
 VGPU_CAPACITY_CHECK=both
 
+# 默认让 QEMU 线程使用所有 CPU，并把 guest RAM 交错分配到全部内存 node。
+# 若要恢复 GPU 本地优先，可将下面两个 all 都显式改为 local。
+VGPU_HOST_CPU_NODE_BIND=all
+VGPU_HOST_MEMORY_NODE_BIND=all
+
 # Other reviewed prefixes:
 #   PCIe 16 GiB : V100-1Q / V100-2Q
 #   PCIe 32 GiB : V100D-1Q / V100D-2Q       (total 32768)

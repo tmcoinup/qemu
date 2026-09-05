@@ -462,7 +462,7 @@ void surface_gl_create_texture(QemuGLShader *gls,
 bool surface_gl_create_texture_from_fd(DisplaySurface *surface,
                                        int fd, uint32_t *texture,
                                        uint32_t *mem_obj);
-void surface_gl_update_texture(QemuGLShader *gls,
+bool surface_gl_update_texture(QemuGLShader *gls,
                                DisplaySurface *surface,
                                int x, int y, int w, int h);
 bool surface_gl_upload_texture(DisplaySurface *surface, uint32_t texture,

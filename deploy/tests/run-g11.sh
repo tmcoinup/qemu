@@ -10,6 +10,8 @@ build_targets=1
 filter=""
 unit_names=(
     test-input-paused-release
+    test-console-gl-surface
+    test-vfio-region-motion
     test-sdl2-event
     test-sdl2-pointer
     test-usb-hid-numlock

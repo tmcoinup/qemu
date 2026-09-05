@@ -79,7 +79,6 @@ void surface_gl_create_texture(QemuGLShader *gls,
 
     assert(map_format(surface_format(surface), &glformat, &gltype));
     glGenTextures(1, &surface->texture);
-    glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, surface->texture);
     glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT,
                   surface_stride(surface) / surface_bytes_per_pixel(surface));
@@ -145,15 +144,16 @@ cleanup_mem:
     return false;
 }
 
-void surface_gl_update_texture(QemuGLShader *gls,
+bool surface_gl_update_texture(QemuGLShader *gls,
                                DisplaySurface *surface,
                                int x, int y, int w, int h)
 {
     assert(gls);
-    if (surface->texture) {
-        (void)surface_gl_upload_texture(surface, surface->texture,
-                                        x, y, x, y, w, h);
+    if (w == 0 || h == 0) {
+        return true;
     }
+    return surface_gl_upload_texture(surface, surface->texture,
+                                      x, y, x, y, w, h);
 }
 
 bool surface_gl_upload_texture(DisplaySurface *surface, GLuint texture,
@@ -200,6 +200,9 @@ void surface_gl_render_texture(QemuGLShader *gls,
     glClearColor(0.1f, 0.1f, 0.1f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    /* Uploads restore the caller's binding; select our sampler explicitly. */
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, surface->texture);
     qemu_gl_run_texture_blit(gls, false);
 }
 

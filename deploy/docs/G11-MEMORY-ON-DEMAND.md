@@ -28,7 +28,8 @@ cd /home/ubuntu/projects/qemu
 
 这两个布尔键只作用于本次启动，不写入固定 Guest 硬件身份。以后每次需要共享 CPU
 和按需占用时继续传 `--cpu-isolate=false --memory-prealloc=false`。两个键都省略时
-默认值均为 `true`，即 CPU 隔离和内存全量预分配。
+正常 G-11 vGPU SDL/GTK 默认共享 CPU（`false`）和内存全量预分配（`true`）；
+显式环境策略仍可覆盖 CPU 默认值。CPU 隔离需要明确传 `--cpu-isolate=true`。
 
 ## 恢复原来的低延迟模式
 
@@ -38,8 +39,10 @@ cd /home/ubuntu/projects/qemu
 ./deploy/scripts/vmctl.sh start 1 --proxy --cpu-isolate=false
 ```
 
-省略 `--memory-prealloc` 就恢复默认的 `true`；若也要恢复默认 CPU 隔离，则两个布尔键
-都省略即可。
+省略 `--memory-prealloc` 就恢复默认的 `true`；若还需要 CPU 隔离，另加
+`--cpu-isolate=true`。关闭 CPU 隔离时，`--svc-cpus` 或 SDL ultra 档的服务核请求不会
+应用。两项开关都不能保证消除 vGPU/SDL 黑屏；同一 VM 的单变量响应对比步骤见
+[SDL 低延迟教程](G11-SDL-PERFORMANCE.md#共享-cpu按需内存时卡顿怎么比较)。
 
 ## 怎么验证实际节省
 
@@ -51,6 +54,9 @@ cd /home/ubuntu/projects/qemu
 `--memory-prealloc=false` 只避免 QEMU 主动预触尚未使用的页。Guest 已经触及过的页，即使
 Windows 后来把它标为可用，也不保证立即归还宿主；NVIDIA 535 闭源 mdev 驱动还可能
 按工作集额外 pin 页。因此不能承诺固定节省多少 GiB，工作集仍可能增长到配置上限。
+第一次使用新页时，分配、清零和建立映射的成本会发生在运行期间；启动程序或切场景时
+可能增加延迟。预分配把部分成本移到 QEMU 启动时，但不会锁住所有页，也不会修复
+显示纹理或 scanout 错误。
 
 ## 容量和安全边界
 

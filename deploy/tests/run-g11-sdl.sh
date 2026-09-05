@@ -96,7 +96,7 @@ for test_path in "${shell_tests[@]}"; do
     fi
 done
 
-unit_names=(test-input-paused-release)
+unit_names=(test-input-paused-release test-console-gl-surface test-vfio-region-motion)
 while IFS= read -r unit_source; do
     unit_names+=("$(basename "$unit_source" .c)")
 done < <(find tests/unit -maxdepth 1 -type f -name 'test-sdl2-*.c' -print | sort)

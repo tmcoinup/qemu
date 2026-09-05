@@ -39,14 +39,14 @@ Status meanings:
 | Capability | G-11 product status | Notes |
 |---|---|---|
 | Native local display | **Supported** | NVIDIA REGION to QEMU SDL/GTK. |
-| DGame local GPU preview | **Experimental; implemented** | SDL/GTK's existing DisplaySurface texture is ROI-blitted on the active display GPU and exported as DMA-BUF. RX570 is the current provider; RX550 follows the same generic amdgpu/EGL selection. Every VM independently falls back to SHM. |
+| DGame local GPU preview | **Experimental; implemented** | The REGION DisplaySurface ROI is uploaded to a private preview texture on the active display GPU, then GPU-blitted and exported as DMA-BUF. This upload is separate from SDL/GTK's local display texture. RX570 is the current provider; RX550 follows the same generic amdgpu/EGL selection. Every VM independently falls back to SHM. |
 | DGame discovery | **Implemented** | Native starts expose `/tmp/qemu-stealth-N.{fb,qmp,mon}`, SDL title `win10-N`, and keep G-11 QMP identity `vmN`; old running VMs can hot-add preview. |
-| Host CPU isolation | **Experimental; implemented; required by default** | Launcher/QMP and mock-cgroup rollback tests pass. Missing Ubuntu packages/helper/sudoers are installed automatically before launch; target-host cgroup v2 partition behavior still requires acceptance. The omitted default is `--cpu-isolate=true`; `--cpu-isolate=false` explicitly disables it. |
+| Host CPU isolation | **Experimental; implemented; off by default for native SDL/GTK** | Launcher/QMP and mock-cgroup rollback tests pass. `--cpu-isolate=true` explicitly requires isolation and its helper; target-host cgroup v2 partition behavior still requires acceptance. Native SDL/GTK defaults to shared CPU scheduling when no isolation setting is supplied. |
 | Fixed ROI capture | **Experimental; implemented** | The TCG-to-SHM-to-libx264 end-to-end test passes, including a runtime ROI change.  A real R535 vGPU dynamic-frame soak remains outstanding. |
 | Network video output | **Experimental; implemented** | Explicit destinations, lifecycle and validation are tested; a production ingest/TLS/authentication soak is not yet recorded.  The launcher never creates a listener. |
 | Dirty-region local display updates | **Supported** | REGION row comparison reduces local GL uploads and presents. |
 | Dirty-region video encoding | **Unsupported** | The shared-memory path publishes a complete ROI frame. |
-| Generic QEMU GPU handle export | **Experimental** | The producer can publish a native scanout DMA-BUF or export an SDL/GTK DisplaySurface texture after its unavoidable CPU-to-display-GPU upload. Windows named-D3D11 transport is cross-compile checked only and currently lacks the keyed-mutex/fence synchronization required for safe asynchronous consumption. |
+| Generic QEMU GPU handle export | **Experimental** | The producer can publish a native scanout DMA-BUF or export a private texture uploaded from a CPU DisplaySurface. Windows named-D3D11 transport is cross-compile checked only and currently lacks the keyed-mutex/fence synchronization required for safe asynchronous consumption. |
 | Native GPU-handle encoding | **Unsupported** | No native DMA-BUF/D3D11 import-and-encode backend is implemented.  The current consumer reports `gpu.zero-copy=no` and `GPU_E_BACKEND_NOT_BUILT`, regardless of which optional library headers Meson discovers. |
 | R535 vGPU end-to-end zero-copy | **Unsupported** | The accepted NVIDIA mdev console exposes a system-memory REGION, not DMA-BUF. |
 | SHM/rawvideo to libx264 | **Exercised** | Automated TCG → dynamic ROI → SHM → ffmpeg → H.264 file test passes. |
@@ -57,9 +57,10 @@ Status meanings:
 | Multi-region/edge orchestration | **Unsupported** | No CDN routing, ABR controller, origin/edge failover, or session scheduler is included. |
 
 The resource-policy CLI has exactly two boolean keys:
-`--cpu-isolate=true|false` and `--memory-prealloc=true|false`. Omitting either
-key means `true`; shared CPU scheduling plus demand-backed RAM therefore uses
-`--cpu-isolate=false --memory-prealloc=false`.
+`--cpu-isolate=true|false` and `--memory-prealloc=true|false`. With no other
+isolation setting, native SDL/GTK defaults to CPU isolation off. RAM
+preallocation defaults to on. Explicit shared CPU scheduling plus demand-backed
+RAM uses `--cpu-isolate=false --memory-prealloc=false`.
 
 ## Zero-copy terminology
 
@@ -74,7 +75,7 @@ G-11 uses three separate checks:
    path.
 
 Passing level 1 does not imply level 2 or 3.  DGame implements level-1 import
-for the local SDL/GTK texture export, but that texture exists only after the
+for the private preview texture export, but that texture exists only after the
 system-memory R535 REGION has been uploaded to the bright/display GPU.  The
 network encoder consumer still does not implement level 2: it publishes BGR0
 through SHM, copies it into ffmpeg's `rawvideo` stdin, and may then upload it

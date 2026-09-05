@@ -38,7 +38,6 @@
 #define SDL2_EGL_RECOVERY_SLOW_US 1000000
 #define SDL2_EGL_RECOVERY_FAST_ATTEMPTS 5
 
-static bool sdl2_gl_create_surface_texture(struct sdl2_console *scon);
 static int sdl2_native_egl_async_terminal_error = EGL_SUCCESS;
 
 static bool sdl2_gl_egl_context_error(EGLint error)
@@ -118,17 +117,14 @@ static void sdl2_set_scanout_mode(struct sdl2_console *scon, bool scanout)
 
     scon->scanout_mode = scanout;
     sdl2_pointer_geometry_changed(scon);
+    scon->surface_damage = (SDL2Rect) { 0 };
+    scon->surface_upload_pending = !scanout;
     if (!scon->scanout_mode) {
         egl_fb_destroy(&scon->guest_fb);
         if (scon->surface && scon->gls) {
             surface_gl_destroy_texture(scon->gls, scon->surface);
             scon->texture_recreate_pending = true;
             scon->texture_recreate_after_us = 0;
-            if (sdl2_window_is_renderable(scon)) {
-                sdl2_gl_create_surface_texture(scon);
-            } else {
-                scon->surface_upload_pending = true;
-            }
         }
     }
 }
@@ -314,8 +310,13 @@ static void sdl2_gl_surface_texture_failed(struct sdl2_console *scon,
                                            GLenum error)
 {
     if (!scon->warned_gl_surface_texture) {
-        warn_report("sdl2-gl: %s failed (GL 0x%x); retrying surface "
-                    "texture recovery", operation, error);
+        if (error != GL_NO_ERROR) {
+            warn_report("sdl2-gl: %s failed (GL 0x%x); retrying surface "
+                        "texture recovery", operation, error);
+        } else {
+            warn_report("sdl2-gl: %s failed; retrying surface texture "
+                        "recovery", operation);
+        }
         scon->warned_gl_surface_texture = true;
     }
     scon->texture_recreate_pending = true;
@@ -362,7 +363,38 @@ static bool sdl2_gl_create_surface_texture(struct sdl2_console *scon)
     scon->texture_recreate_after_us = 0;
     /* glTexImage2D uploaded the complete, current DisplaySurface. */
     scon->surface_upload_pending = false;
+    scon->surface_damage = (SDL2Rect) { 0 };
     scon->updates = 1;
+    return true;
+}
+
+static bool sdl2_gl_upload_surface_damage(struct sdl2_console *scon)
+{
+    SDL2Rect *damage = &scon->surface_damage;
+
+    if (!sdl2_gl_create_surface_texture(scon)) {
+        return false;
+    }
+    if (scon->surface_upload_pending) {
+        *damage = (SDL2Rect) {
+            0, 0, surface_width(scon->surface), surface_height(scon->surface),
+        };
+    }
+    if (!damage->width || !damage->height) {
+        return true;
+    }
+
+    sdl2_gl_clear_errors();
+    /* The helper consumes GL errors; keep pending damage until success. */
+    if (!surface_gl_update_texture(scon->gls, scon->surface,
+                                    damage->x, damage->y,
+                                    damage->width, damage->height)) {
+        surface_gl_destroy_texture(scon->gls, scon->surface);
+        sdl2_gl_surface_texture_failed(scon, "surface upload", GL_NO_ERROR);
+        return false;
+    }
+    scon->surface_upload_pending = false;
+    *damage = (SDL2Rect) { 0 };
     return true;
 }
 
@@ -514,24 +546,14 @@ static bool sdl2_gl_ensure_window_context(struct sdl2_console *scon)
         egl_fb_destroy(&scon->guest_fb);
     }
     /*
-     * Window/shader initialization may happen during refresh instead of the
-     * gfx-switch callback.  Always make ordinary surface texture creation a
-     * retryable invariant; otherwise one transient make-current failure can
-     * leave REGION updates targeting texture zero forever.
+     * Shader initialization invalidates ordinary surface texture storage.
+     * Recreate/upload only before drawing, after producer notifications have
+     * accumulated; creating here would upload an intermediate surface twice.
      */
     if (shader_created && scon->surface) {
         surface_gl_destroy_texture(scon->gls, scon->surface);
         scon->texture_recreate_pending = true;
         scon->texture_recreate_after_us = 0;
-    }
-    if (!scon->scanout_mode && !scon->scanout_replay_pending &&
-        (!scon->surface->texture || scon->texture_recreate_pending)) {
-        if (!sdl2_window_is_renderable(scon)) {
-            scon->surface_upload_pending = true;
-        } else if (!sdl2_gl_create_surface_texture(scon)) {
-            sdl2_gl_release_window_current(scon);
-            return false;
-        }
     }
     return true;
 }
@@ -551,7 +573,11 @@ static bool sdl2_gl_render_surface(struct sdl2_console *scon)
         return false;
     }
     sdl2_set_scanout_mode(scon, false);
-    if (!sdl2_gl_create_surface_texture(scon)) {
+    if (scon->surface_damage.width || scon->surface_upload_pending ||
+        scon->texture_recreate_pending) {
+        sdl2_framebuffer_cursor_update(scon);
+    }
+    if (!sdl2_gl_upload_surface_damage(scon)) {
         sdl2_gl_release_window_current(scon);
         return false;
     }
@@ -603,6 +629,10 @@ static bool sdl2_gl_render_surface(struct sdl2_console *scon)
         return false;
     }
     presented = sdl2_gl_swap_window(scon);
+    if (presented) {
+        scon->updates = 0;
+        scon->window_redraw_pending = false;
+    }
     sdl2_gl_release_window_current(scon);
     return presented;
 }
@@ -611,43 +641,25 @@ void sdl2_gl_update(DisplayChangeListener *dcl,
                     int x, int y, int w, int h)
 {
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
-    GLenum error;
 
     assert(scon->opengl);
 
+    if (!scon->surface ||
+        !sdl2_surface_damage_add(
+            &scon->surface_damage,
+            (SDL2Size) { surface_width(scon->surface),
+                        surface_height(scon->surface) },
+            (SDL2Rect) { x, y, w, h })) {
+        return;
+    }
+    /* No GL/context work here: all damage shares one upload before draw. */
+    scon->updates = 1;
     if (!sdl2_window_is_renderable(scon)) {
         /* Upload the latest complete surface once the window is visible. */
         scon->surface_upload_pending = true;
-        scon->updates = 1;
         return;
     }
-
-    if (!sdl2_gl_ensure_window_context(scon)) {
-        if (!scon->texture_recreate_pending) {
-            scon->texture_recreate_pending = true;
-            scon->texture_recreate_after_us = 0;
-        }
-        scon->updates = 1;
-        scon->window_redraw_pending = true;
-        return;
-    }
-    sdl2_framebuffer_cursor_update(scon);
-
-    sdl2_gl_clear_errors();
-    surface_gl_update_texture(scon->gls, scon->surface, x, y, w, h);
-    error = glGetError();
-    if (error != GL_NO_ERROR) {
-        surface_gl_destroy_texture(scon->gls, scon->surface);
-        sdl2_gl_surface_texture_failed(scon, "surface upload", error);
-        sdl2_gl_release_window_current(scon);
-        return;
-    }
-    /* Pending latch: do not accumulate indefinitely while minimized. */
-    scon->updates = 1;
-    if (w && h) {
-        sdl2_note_content_update(scon);
-    }
-    sdl2_gl_release_window_current(scon);
+    sdl2_note_content_update(scon);
 }
 
 void sdl2_gl_switch(DisplayChangeListener *dcl,
@@ -664,6 +676,9 @@ void sdl2_gl_switch(DisplayChangeListener *dcl,
     scon->scanout_replay_after_us = 0;
     scon->texture_recreate_pending = true;
     scon->texture_recreate_after_us = 0;
+    scon->surface_damage = (SDL2Rect) { 0 };
+    scon->surface_upload_pending = true;
+    scon->updates = 1;
 
     if (sdl2_gl_window_ready(scon) &&
         sdl2_gl_make_window_current(scon) == 0) {
@@ -739,20 +754,14 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
             hw_pulled = true;
         }
     }
-    sdl2_flush_window_updates();
-
     if (!sdl2_gl_ensure_window_context(scon)) {
         return;
     }
     if (!hw_pulled) {
         graphic_hw_update(dcl->con);
     }
-    if (scon->surface_upload_pending && !scon->scanout_mode &&
-        sdl2_window_is_renderable(scon)) {
-        scon->surface_upload_pending = false;
-        sdl2_gl_update(dcl, 0, 0, surface_width(scon->surface),
-                       surface_height(scon->surface));
-    }
+    /* Window redraws must see the same final damage as the display tick. */
+    sdl2_flush_window_updates();
     if (!scon->scanout_mode && scon->updates &&
         sdl2_window_is_renderable(scon)) {
         if (sdl2_gl_render_surface(scon)) {
@@ -893,6 +902,8 @@ void sdl2_gl_scanout_disable(DisplayChangeListener *dcl)
         sdl2_pointer_geometry_changed(scon);
         scon->texture_recreate_pending = true;
         scon->texture_recreate_after_us = 0;
+        scon->surface_damage = (SDL2Rect) { 0 };
+        scon->surface_upload_pending = true;
         scon->updates = 1;
         scon->window_resize_pending = true;
         return;
@@ -1208,6 +1219,7 @@ void sdl2_gl_window_context_destroying(struct sdl2_console *scon)
     scon->scanout_replay_after_us = 0;
     scon->texture_recreate_pending = false;
     scon->surface_upload_pending = false;
+    scon->surface_damage = (SDL2Rect) { 0 };
 
     if (current && scon->native_egl) {
         if (eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,

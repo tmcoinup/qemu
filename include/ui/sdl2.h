@@ -64,6 +64,8 @@ struct sdl2_console {
     bool texture_recreate_pending;
     bool texture_upload_failed;
     bool surface_upload_pending;
+    /* Accumulate ordinary surface damage until the next draw. */
+    SDL2Rect surface_damage;
     bool warned_texture_recovery;
     int64_t texture_recreate_after_us;
     bool window_create_retry_pending;

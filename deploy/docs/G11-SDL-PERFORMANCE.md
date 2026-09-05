@@ -18,25 +18,31 @@ cd /home/ubuntu/projects/qemu
 ./deploy/scripts/g11-sdl-performance.sh audit
 ```
 
-三步都成功后，把 `9` 换成真实 VM 编号：
+三步都成功后，在 Windows 内选择“关机”，等待旧 QEMU 窗口和进程退出。
+下面以 VM1 为例，保留共享 CPU、按需 RAM；把 `1` 换成真实 VM 编号：
 
 ```bash
-./deploy/scripts/g11-sdl-performance.sh start 9
+./deploy/scripts/g11-sdl-performance.sh start 1 --proxy \
+  --cpu-isolate=false --memory-prealloc=false
 ```
 
 Windows 进入桌面后，另开一个宿主终端：
 
 ```bash
-./deploy/scripts/g11-sdl-performance.sh verify 9
+./deploy/scripts/g11-sdl-performance.sh verify 1
 ```
+
+应看到 `RESOURCE CPU_ISOLATION=off` 和 `RESOURCE RAM_PREALLOC=off`。这次显示优化
+不要求开启 CPU 隔离或 RAM 预分配，也不需要在 Guest 安装任何新软件。
 
 `verify` 成功只表示当前进程确实使用推荐 SDL argv 和环境，不表示它已经测得了
 “每一帧都是新画面”。继续完成下面的动态画面、鼠标和键盘实机验收。
 
-优先测试最低键鼠排队和显示线程竞争，可在完整关机后使用：
+想单独比较更快的键鼠轮询，可在完整关机后使用：
 
 ```bash
-./deploy/scripts/g11-sdl-performance.sh start 9 --ultra-responsive
+./deploy/scripts/g11-sdl-performance.sh start 1 --proxy --ultra-responsive \
+  --cpu-isolate=false --memory-prealloc=false
 ```
 
 先读完下文的光标能力和 USB descriptor 说明；这不是对所有 VM 静默启用的默认值。
@@ -76,6 +82,87 @@ preview：
 默认模式与 `--no-dgame-preview` 必须分别从 Windows 完整关机开始测试，不要在同一
 QEMU 进程中得出结论。默认 DGame GPU preview 可能启用 native EGL/X11；关闭后少一条
 preview 路径，但 DGame 本地预览也会不可用，不能把这个取舍静默改成所有 VM 的默认。
+
+## 共享 CPU、按需内存时卡顿怎么比较
+
+当前正常 G-11 vGPU SDL/GTK 默认共享 CPU、全量预分配 RAM。所以只运行
+`./deploy/scripts/start-vm.sh 1 --proxy`，在没有显式 CPU 环境策略时，对应
+`--cpu-isolate=false --memory-prealloc=true`。`--proxy` 只是 QMP socket 的兼容别名，
+不负责 SDL 画面传输；DGame preview 是否启用由自己的参数决定。
+
+`--memory-prealloc=false` 把新页的分配、清零和映射成本延后到 Guest 实际使用时，
+可能在开程序、切场景时增加延迟；共享 CPU 则让 QEMU 与其他负载竞争可运行的核。
+这些是需要实测的影响，画面突然全黑也可能来自 Guest 显示模式切换或宿主 GL 链路，
+不能仅凭两个 `false` 就认定根因。
+
+每组对比前在 Windows 中选择“关机”，等 QEMU 退出。保持同一个 VM、应用和画面，
+先记录当前配置，再只改变内存预分配：
+
+```bash
+# 第一组：保留共享 CPU 和按需 RAM
+./deploy/scripts/g11-sdl-performance.sh start 1 --proxy \
+  --cpu-isolate=false --memory-prealloc=false
+
+# 完整关机后第二组：只恢复 RAM 预分配
+./deploy/scripts/g11-sdl-performance.sh start 1 --proxy \
+  --cpu-isolate=false --memory-prealloc=true
+```
+
+每组进入桌面后，在另一个宿主终端运行：
+
+```bash
+./deploy/scripts/g11-sdl-performance.sh verify 1
+```
+
+确认 `RESOURCE CPU_ISOLATION=off`，以及两组 `RESOURCE RAM_PREALLOC` 分别为 `off`
+和 `on`。连续运行相同动态画面两分钟，记录黑屏出现时间、持续时间和标题中的
+Content/Present；同时比较启动程序或切场景是否更顺畅。第二组有收益时可以保留
+预分配；需要按需占用时继续第一组命令。仅凭 `verify` 成功无法证明帧时间改善。
+
+需要保留两个 `false` 并比较更快输入轮询，可在第一组命令追加 `--ultra-responsive`；
+它会使用 1ms SDL 输入轮询和键盘 endpoint，但服务核不会在共享 CPU 模式下应用。
+不要把这一步同时与内存 A/B 混在一起；USB descriptor 的影响见后文。
+
+### 本次切画面优化做了什么
+
+本次修改都在 Linux 宿主的 QEMU 内，重新构建并完整关机再启动后生效：
+
+- SDL 收到同一轮的多个画面更新时先合并变化区域，真正绘制窗口前再上传一次，减少
+  切场景和过渡动画期间重复的纹理上传与 GL context 操作。
+- 新建或恢复纹理时，创建操作已经上传完整画面，就不再紧接着重复上传同一张图。
+- VFIO 高运动路径从连续跳过 60 次比较，改为每 8 次更新重新精确比较源画面。
+  过渡动画结束、画面静止或保持全黑后，可更早停止无意义的整帧复制和上传；仍在运动
+  时继续走整帧更新。
+
+这些修改减少宿主的重复工作，仍然使用 REGION → CPU staging → 宿主 GPU → SDL。
+它们不增加 Guest 软件、不改变两个资源参数，也不把当前链路变成“全程 GPU”。
+如果 Guest 本身没有产生新帧，或源显示平面暂时不可用，宿主优化不会生成缺失画面。
+
+本轮尚未完整关闭并重新启动现场 VM 测量收益，因此没有实机帧时间或提速百分比。
+代码检查和构建通过也不能代替这一步。按本页的关机、启动、`verify` 和动态画面
+验收步骤，以相同场景比较切换耗时、黑屏持续时间与 QEMU CPU 占用。
+
+### 双 GPU 显示路径的边界
+
+当 NVIDIA 提供 vGPU、AMD 等另一张 GPU 驱动宿主显示器时，当前 R535 路径仍是
+NVIDIA console → 系统内存 REGION → QEMU staging → 宿主显示 GPU 纹理 → SDL。
+这条链路有 CPU 读取/复制和纹理上传，不能通过 `--proxy` 或 `--memory-prealloc=false`
+变成跨 GPU 零拷贝。当前 DGame GPU preview 还使用自己的私有纹理上传；导出的
+DMA-BUF 属于后续预览环节，不代表原始 vGPU scanout 已能直接交给显示 GPU。
+R535 的 REGION/DMA-BUF 支持边界见 [兼容性说明](COMPATIBILITY.md)。
+
+不增加 Guest 软件、不重启 VM 的源能力实测已封装为：
+
+```bash
+python3 deploy/host/probe-vgpu-dmabuf.py --vm 1
+```
+
+本次 VM1 返回 `SOURCE_DMABUF=unsupported`、`SOURCE_REGION=supported`。此时换副卡
+不能补上 NVIDIA 源头的接口；先保留现有 N+A 组合。完整条件和结果判读见
+[宿主 DMA-BUF 探测教程](G11-VGPU-DMABUF-PROBE.md)。
+
+不要为了绕过这条边界盲目提高到 120Hz Present。先完成 60Hz 的黑屏恢复和上述对比；
+高帧率增加提交成本，不能修复源画面停更。
 
 ## 显式原生 Wayland A/B（非默认）
 
@@ -147,6 +234,43 @@ SDL/Wayland。因此该 A/B 还会自动传入 `--no-dgame-preview-gpu`：DGame 
 通过 `QEMU_BIN` 指向仓库外部、且旁边没有 `build.ninja` 的二进制时，审计会明确显示
 `QEMU_BUILD_FRESH=not-checkable`；此时只能核对二进制合同，无法证明外部源码与它一致。
 
+## 使用 VMate 时怎么生效
+
+这次 QEMU 显示优化不需要修改 VMate 业务代码。VMate 的现有 Linux 打包流程会先同步
+G-11 的 QEMU 构建，再把 G-11 runtime 和当前 `deploy` 一起装进新包；只更新源码或
+重装以前生成的旧包不会带入修复。
+
+同次构建会生成 `vmate_版本号_amd64.deb` 和 `gmate_版本号_amd64.deb` 两个独立包。
+当前 G-11 客户端是 **GMate G11**，应安装 `gmate` 包；实际使用 VMate 客户端时才选
+`vmate` 包。两个包分别更新自己的安装目录，安装 `vmate` 不会更新 `/opt/gmate`。
+
+打包人员在包含本次修改的源码上执行现有入口：
+
+```bash
+cd /home/ubuntu/projects/vmate
+VMATE_QEMU_SRC=/home/ubuntu/projects/qemu ./packaging/client/build-deb.sh
+```
+
+安装时按以下顺序操作：
+
+1. 在 Windows 中正常关机，等待客户端中该 VM 停止、旧 QEMU 进程退出。
+2. 使用构建末尾输出的本次对应安装包。下面以 G-11 的 `gmate` 包为例，将文件名中的
+   `版本号` 换成实际文件名；`--reinstall` 也能覆盖包版本号相同的旧构建。
+
+   ```bash
+   sudo apt install --reinstall ./dist/client/gmate_版本号_amd64.deb
+   ```
+
+3. 重新打开实际使用的客户端，保持原来的共享 CPU、按需内存设置，正常启动 G-11 VM。
+   无需重建 Windows 镜像，也无需额外安装 Guest 工具。
+4. 按本页“画面不定格实机验收”复测。仅在 Windows 中点“重启”不会替换正在运行的
+   宿主 QEMU；必须先让旧 QEMU 退出。
+
+本轮没有构建或安装新的 VMate/GMate 包，也没有通过客户端重启 VM 验收；以上是交付新包时的
+生效步骤，不是已经完成的现场测量。打包依据是 VMate 的
+`packaging/client/build-deb.sh` 中 QEMU 构建同步、`stage_qemu_runtime_family g11`
+和 `copy_deploy_assets "$QEMU/deploy"` 三个既有步骤。
+
 ## verify 能证明什么、不能证明什么
 
 ```bash
@@ -160,6 +284,10 @@ SDL/Wayland。因此该 A/B 还会自动传入 `--no-dgame-preview-gpu`：DGame 
   完整关机重启，不会拿新源码/新文件替旧进程背书；
 - `-display sdl,...` 与 native vGPU `display=on`；
 - 响应 profile、SDL 低延迟环境和 QEMU service CPU 请求；
+- `RESOURCE CPU_ISOLATION` 来自当前进程的有限环境字段，`RESOURCE RAM_PREALLOC`
+  来自实际 `memory-backend-memfd,id=ram0` argv；不拿本次终端的默认值代替运行值；
+- `SERVICE_CPUS_APPLIED=no` 表示隔离关闭、服务核请求未应用；`unverified` 表示没有
+  核验实际线程亲和力，不能据此判断是否分配成功。这些资源项不改变已有 profile 验证结果；
 - 从受限的 vfio-pci `sysfsdev` argv 解析 mdev UUID，再读取实际生效的
   `intervaltime/vgaintervaltime/frame_rate_limiter`；不会把已经被启动器消费的
   环境变量误报为缺失；
@@ -194,8 +322,10 @@ CPU、Present rate 或静止桌面的相同帧包装成“零定格证明”。
 ### 静止画面是不是仍按正常频率“推流”
 
 是，但这里是本地 SDL Present，不是网络推流。fixed 模式每个显示 tick 都会先查询
-VFIO REGION，并把 live mmap 与稳定 staging 的可见像素逐行比较：像素变化就 copy、
-upload；完全相同时省掉无意义的 full upload，但仍按目标频率重复 Present 已缓存纹理。
+VFIO REGION；通常把 live mmap 与稳定 staging 的可见像素逐行比较，高运动时每
+8 次更新重新精确比较一次，其余更新直接复制整帧。变化区域在 SDL 中合并，到实际
+绘制前再上传；
+比较确认完全相同时省掉无意义的上传，但仍按目标频率重复 Present 已缓存纹理。
 因此 `Content 3/s | Present 60/s (fixed)` 的准确含义是“约 3 次内容更新、约 60 次窗口提交”，不是
 另外 57 次没有检查源画面。
 
@@ -206,8 +336,7 @@ upload；完全相同时省掉无意义的 full upload，但仍按目标频率�
 
 ## 单窗口极致响应 A/B
 
-默认档先通过后，想减少键鼠排队和 QEMU main/display 与 vCPU 的竞争时，完整关闭
-Windows 后运行：
+默认档先通过后，想比较更快的键鼠处理时，完整关闭 Windows 后运行：
 
 ```bash
 ./deploy/scripts/g11-sdl-performance.sh profile ultra
@@ -222,13 +351,22 @@ vGPU FRL，同时让 SDL 保持固定 60Hz Present：
 | SDL/REGION 内部节拍 | `60Hz` / `8333us` | 每次 Present 前最多提前约 8.3ms 取得新 REGION |
 | vGPU FRL | `0` | 避免独立 60Hz 限制器与 SDL Present 拍频 |
 | SDL 输入事件泵 | `1ms` | 更快抽取宿主键鼠事件 |
-| QEMU service CPU | `auto` | 宿主有余量时给 main/display 服务线程一个候选 CPU；不足时安全回到 0 |
+| QEMU service CPU | `auto` | 仅开启 CPU 隔离时参与服务核分配；共享 CPU 模式不应用 |
 | USB 键盘/相对鼠标 | `1ms` | 本次启用 low-latency HID descriptor；绝对 tablet 原本就是 1ms |
 | Present | `fixed 60Hz` | 即使静止也重复提交缓存纹理 |
 
-当前 VM3 的非-vCPU main/GL/I/O 线程与 8 个 vCPU 共用同一 cpuset；`service=auto`
-因此是比盲目翻倍画面轮询更可信的尾延迟优化。回退只需完整关机，下一次省略
-`--ultra-responsive`；不写配置、不改 BCD、不安装 Guest 驱动。
+当前正常 vGPU 启动默认关闭 CPU 隔离，因此上面的 ultra 命令主要比较输入轮询和
+USB endpoint 的变化，不能声称已经为 main/GL/I/O 分配了服务核。确需单独测试隔离
+和服务核时，在完整关机后执行：
+
+```bash
+./deploy/scripts/g11-sdl-performance.sh start 9 --ultra-responsive --cpu-isolate=true
+```
+
+隔离需要宿主有足够可分配的核，并通过启动器的 helper 校验；`auto` 服务核在容量
+不足时可以回到 0。检查启动输出的隔离结果；`verify` 中的环境请求不能替代实际线程
+亲和力检查。回退只需完整关机，下一次省略 `--ultra-responsive` 并明确使用
+`--cpu-isolate=false`；不写配置、不改 BCD、不安装 Guest 驱动。
 
 ### 仅单窗口实验：120Hz Present
 
@@ -296,6 +434,12 @@ QEMU_SDL_PRESENT_MODE=dynamic \
 
 ### 渲染恢复边界
 
+- 本次修复让纹理上传函数的失败结果真正传回 SDL，触发已有重试；每次渲染还会显式
+  绑定当前画面纹理，避免同一 GL context 其他操作留下的纹理绑定使窗口采样错误画面。
+  同时移除 shader 渲染不需要的 `glEnable(GL_TEXTURE_2D)`，避免 OpenGL core context
+  将它报为非法操作，导致正常纹理被误判失败并反复重建。
+  按开头步骤重新编译后，需让 Windows 正常关机、QEMU 退出，再启动 VM 才会加载修复。
+  这些代码修复不能保证解决现场所有黑屏，仍需完成动态画面与恢复验收。
 - SDL/GLX 是普通本地窗口的稳定默认路径；X11 native EGL 只在现有启动链
   显式启用时使用。`--native-wayland` 仅作为关闭该 native EGL 的完整重启 A/B。
 - 短暂的 surface、纹理或 scanout 候选失败会保留最后一张已提交画面并限速重试；

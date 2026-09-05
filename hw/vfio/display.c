@@ -19,6 +19,7 @@
 #include "qapi/error.h"
 #include "pci.h"
 #include "vfio-display.h"
+#include "display-region-motion.h"
 #include "trace.h"
 
 #ifndef DRM_PLANE_TYPE_PRIMARY
@@ -36,17 +37,8 @@
      pwrite(_fd, &(_ptr->_fld), sizeof(_ptr->_fld),                     \
            _reg->offset + offsetof(typeof(*_ptr), _fld)))
 
-#define VFIO_REGION_MAX_DIRTY_RUNS       32
 #define VFIO_REGION_FULL_UPDATE_PERCENT  50
-#define VFIO_REGION_FULL_MOTION_PERCENT  75
-#define VFIO_REGION_FULL_MOTION_STREAK    8
-#define VFIO_REGION_COMPARE_BYPASS_FRAMES 60
 #define VFIO_REGION_FAILURE_RETRY_US      100000
-
-typedef struct VFIORegionDirtyRun {
-    uint32_t y;
-    uint32_t height;
-} VFIORegionDirtyRun;
 
 /*
  * The console owns region.surface after dpy_gfx_replace_surface().  Its pixman
@@ -60,8 +52,8 @@ static void vfio_display_region_drop_staging(VFIODisplay *dpy)
     g_clear_pointer(&dpy->region.staging, g_free);
     dpy->region.staging_size = 0;
     dpy->region.staging_row_bytes = 0;
-    dpy->region.full_motion_streak = 0;
-    dpy->region.compare_bypass_frames = 0;
+    vfio_region_motion_reset(&dpy->region.full_motion_streak,
+                             &dpy->region.compare_bypass_frames);
 }
 
 static void vfio_display_region_buffer_reset(VFIODisplay *dpy)
@@ -81,8 +73,8 @@ static bool vfio_display_region_mark_failure(VFIODisplay *dpy)
         dpy->region.failure_streak++;
     }
     dpy->region.force_full_update = true;
-    dpy->region.full_motion_streak = 0;
-    dpy->region.compare_bypass_frames = 0;
+    vfio_region_motion_reset(&dpy->region.full_motion_streak,
+                             &dpy->region.compare_bypass_frames);
     dpy->region.failure_retry_after_us =
         g_get_monotonic_time() + VFIO_REGION_FAILURE_RETRY_US;
     return first;
@@ -157,8 +149,8 @@ static bool vfio_display_region_install_staging(
     dpy->region.staging = staging;
     dpy->region.staging_size = staging_size;
     dpy->region.staging_row_bytes = row_bytes;
-    dpy->region.full_motion_streak = 0;
-    dpy->region.compare_bypass_frames = 0;
+    vfio_region_motion_reset(&dpy->region.full_motion_streak,
+                             &dpy->region.compare_bypass_frames);
     dpy->region.force_full_update = false;
 
     /* dpy_gfx_replace_surface() has synchronously detached old_staging. */
@@ -176,58 +168,20 @@ static void vfio_display_region_staging_copy(VFIODisplay *dpy,
  * NVIDIA 535 exposes a pull-only system-memory console REGION without a frame
  * sequence or damage metadata.  Exact row comparisons let us keep polling at
  * low latency while avoiding redundant GL uploads and compositor presents for
- * an unchanged desktop.  High-motion content temporarily bypasses comparison
- * so games do not pay the extra scan/copy cost on every frame.
+ * an unchanged desktop.  High-motion content bypasses seven comparisons at a
+ * time, then checks exact pixels so a loading/black frame stops redundant work.
  */
 static bool vfio_display_region_find_updates(
     VFIODisplay *dpy, const uint8_t *source,
     VFIORegionDirtyRun runs[VFIO_REGION_MAX_DIRTY_RUNS],
     uint32_t *run_count, uint32_t *dirty_rows, bool *too_many_runs)
 {
-    uint32_t height = surface_height(dpy->region.surface);
-    uint32_t stride = surface_stride(dpy->region.surface);
-    uint32_t y;
-    uint32_t run_start = 0;
-    bool in_run = false;
-
-    *run_count = 0;
-    *dirty_rows = 0;
-    *too_many_runs = false;
-
-    for (y = 0; y < height; y++) {
-        const uint8_t *src = source + y * stride;
-        uint8_t *staging = dpy->region.staging + y * stride;
-        bool changed = memcmp(src, staging,
-                              dpy->region.staging_row_bytes) != 0;
-
-        if (changed) {
-            memcpy(staging, src, dpy->region.staging_row_bytes);
-            (*dirty_rows)++;
-            if (!in_run) {
-                run_start = y;
-                in_run = true;
-            }
-        } else if (in_run) {
-            if (*run_count < VFIO_REGION_MAX_DIRTY_RUNS) {
-                runs[*run_count].y = run_start;
-                runs[*run_count].height = y - run_start;
-                (*run_count)++;
-            } else {
-                *too_many_runs = true;
-            }
-            in_run = false;
-        }
-    }
-    if (in_run) {
-        if (*run_count < VFIO_REGION_MAX_DIRTY_RUNS) {
-            runs[*run_count].y = run_start;
-            runs[*run_count].height = y - run_start;
-            (*run_count)++;
-        } else {
-            *too_many_runs = true;
-        }
-    }
-    return *dirty_rows != 0;
+    return vfio_region_update_staging(
+        dpy->region.staging, source, dpy->region.staging_size,
+        dpy->region.staging_row_bytes, surface_stride(dpy->region.surface),
+        surface_height(dpy->region.surface), &dpy->region.full_motion_streak,
+        &dpy->region.compare_bypass_frames, runs, run_count, dirty_rows,
+        too_many_runs);
 }
 
 static const uint8_t *vfio_display_region_source(VFIODisplay *dpy,
@@ -248,8 +202,8 @@ static void vfio_display_region_no_plane(VFIODisplay *dpy)
     DisplaySurface *surface = dpy->region.surface;
 
     dpy->region.force_full_update = true;
-    dpy->region.full_motion_streak = 0;
-    dpy->region.compare_bypass_frames = 0;
+    vfio_region_motion_reset(&dpy->region.full_motion_streak,
+                             &dpy->region.compare_bypass_frames);
 
     if (!dpy->ramfb) {
         return;
@@ -796,38 +750,16 @@ static void vfio_display_region_update(void *opaque)
     if (dpy->region.force_full_update) {
         vfio_display_region_staging_copy(dpy, source);
         dpy->region.force_full_update = false;
-        dpy->region.full_motion_streak = 0;
-        dpy->region.compare_bypass_frames = 0;
+        vfio_region_motion_reset(&dpy->region.full_motion_streak,
+                                 &dpy->region.compare_bypass_frames);
         vfio_display_region_mark_recovered(dpy);
-        dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
-        return;
-    }
-
-    if (dpy->region.compare_bypass_frames) {
-        /* Consumers only ever see the stable copy, never the live mmap. */
-        vfio_display_region_staging_copy(dpy, source);
-        dpy->region.compare_bypass_frames--;
         dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
         return;
     }
 
     if (!vfio_display_region_find_updates(dpy, source, runs, &run_count,
                                           &dirty_rows, &too_many_runs)) {
-        dpy->region.full_motion_streak = 0;
         return;
-    }
-
-    if ((uint64_t)dirty_rows * 100 >=
-        (uint64_t)plane.height * VFIO_REGION_FULL_MOTION_PERCENT) {
-        dpy->region.full_motion_streak++;
-        if (dpy->region.full_motion_streak >=
-            VFIO_REGION_FULL_MOTION_STREAK) {
-            dpy->region.full_motion_streak = 0;
-            dpy->region.compare_bypass_frames =
-                VFIO_REGION_COMPARE_BYPASS_FRAMES;
-        }
-    } else {
-        dpy->region.full_motion_streak = 0;
     }
 
     if (too_many_runs ||

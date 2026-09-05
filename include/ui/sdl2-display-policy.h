@@ -20,4 +20,12 @@ bool sdl2_window_max_size(SDL2Size window, SDL2Size render,
                           SDL2Size guest, bool embedded_render_child,
                           SDL2Size *maximum);
 
+/*
+ * Accumulate clipped surface damage until the next upload.  A zero-sized
+ * box is empty.  Returns false for empty/outside updates without changing
+ * the pending box; callers clear it only after uploading successfully.
+ */
+bool sdl2_surface_damage_add(SDL2Rect *damage, SDL2Size surface,
+                              SDL2Rect update);
+
 #endif /* QEMU_UI_SDL2_DISPLAY_POLICY_H */

@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 VFIO_DISPLAY="$REPO_ROOT/hw/vfio/display.c"
 VFIO_HEADER="$REPO_ROOT/hw/vfio/vfio-display.h"
+VFIO_MOTION="$REPO_ROOT/hw/vfio/display-region-motion.h"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -21,18 +22,29 @@ grep -Fq '*staging_size = (size_t)plane->stride * plane->height;' \
     || fail "VFIO REGION staging does not preserve the source stride"
 grep -Fq 'vfio_display_region_find_updates' "$VFIO_DISPLAY" \
     || fail "VFIO REGION no longer performs exact unchanged-frame detection"
-grep -Fq 'memcmp(src, staging' "$VFIO_DISPLAY" \
+grep -Fq 'memcmp(src, staging' "$VFIO_MOTION" \
     || fail "VFIO REGION dedup must compare actual visible pixels"
 grep -Fq 'VFIO_REGION_MAX_DIRTY_RUNS' "$VFIO_DISPLAY" \
     || fail "VFIO REGION lost row-run damage coalescing"
-grep -Fq 'VFIO_REGION_COMPARE_BYPASS_FRAMES' "$VFIO_DISPLAY" \
+grep -Fq 'VFIO_REGION_COMPARE_BYPASS_FRAMES' "$VFIO_MOTION" \
     || fail "full-motion content no longer bypasses comparison overhead"
 grep -Fq 'memcpy(staging, source, staging_size);' "$VFIO_DISPLAY" \
     || fail "a replacement REGION surface is visible before staging is filled"
 grep -Fq 'plane->stride, staging);' "$VFIO_DISPLAY" \
     || fail "REGION DisplaySurface is not backed by stable staging"
 grep -Fq 'vfio_display_region_staging_copy(dpy, source);' "$VFIO_DISPLAY" \
+    || fail "forced full refresh no longer copies staging before update"
+grep -Fq 'return vfio_region_update_staging(' "$VFIO_DISPLAY" \
+    || fail "VFIO display no longer uses the tested staging/motion implementation"
+grep -Fq 'memcpy(staging_base, source, staging_size);' "$VFIO_MOTION" \
     || fail "full-motion bypass no longer refreshes staging before update"
+for reset_function in vfio_display_region_drop_staging \
+        vfio_display_region_mark_failure vfio_display_region_install_staging \
+        vfio_display_region_no_plane; do
+    reset_body=$(sed -n "/^static .* ${reset_function}(/,/^}/p" "$VFIO_DISPLAY")
+    grep -Fq 'vfio_region_motion_reset(' <<<"$reset_body" \
+        || fail "$reset_function no longer resets stale motion state"
+done
 grep -Fq 'keeping the last staged frame' "$VFIO_DISPLAY" \
     || fail "REGION failure paths no longer document safe-frame retention"
 grep -Fq 'failure_streak' "$VFIO_HEADER" \

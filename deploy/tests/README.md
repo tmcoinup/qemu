@@ -16,6 +16,24 @@ qtest. For a focused
 iteration use `--filter TEXT`; use `--no-build` only when the build directory
 is already current.
 
+SDL 场景切换的 OpenGL 回归已封装进 `./deploy/tests/run-g11-sdl.sh`：
+`test-console-gl-surface` 在离屏 EGL context 中验证纹理绑定、上传错误传递，
+以及合并多个更新后像素和黑帧过渡仍然正确，
+无需启动 Windows。可单独指定宿主显示卡验证，路径以本机 `/dev/dri/by-path/` 为准：
+
+```bash
+QEMU_TEST_GL_RENDER_NODE=/dev/dri/by-path/pci-0000:05:00.0-render \
+  ./build/tests/unit/test-console-gl-surface --tap
+LIBGL_ALWAYS_SOFTWARE=1 ./build/tests/unit/test-console-gl-surface --tap
+```
+
+没有可用 EGL context 时的跳过不代表实卡通过；软件渲染结果也不代表 vGPU
+端到端帧时间。实际 SDL 改善仍需正常关闭 Windows，再用新 QEMU 重开同一场景比较。
+
+同一入口也包含 `test-vfio-region-motion`：用真实像素缓冲区调用生产使用的
+REGION 比较/复制函数，验证高运动转静止后至多 7 次重复整帧更新、单像素变化
+不丢失，以及布局重置后的恢复。这里的更新次数是确定性回归结果，不是实机 FPS。
+
 家用 4C/8T、6C/12T 统一创建池的聚焦回归：
 
 ```bash

@@ -139,4 +139,43 @@ if grep -Fq 'env_keys=(' "$WRAPPER" &&
     fail "verify regressed to requiring a consumed launcher env value"
 fi
 
+# Exercise only the read-only resource reporter with synthetic argv; no VM,
+# host environment, mdev or /proc credentials are needed by this fixture.
+eval "$(sed -n '/^print_running_resource_policy() {$/,/^}$/p' "$WRAPPER")"
+resource_shared=$(print_running_resource_policy off auto \
+    qemu-system-x86_64 -object 'memory-backend-memfd,id=preview,prealloc=on' \
+    -object 'memory-backend-memfd,size=8192M,prealloc=off,id=ram0,share=on')
+grep -Fq 'RESOURCE CPU_ISOLATION=off' <<<"$resource_shared" \
+    || fail "resource verifier lost the running CPU isolation mode"
+grep -Fq 'RESOURCE RAM_PREALLOC=off' <<<"$resource_shared" \
+    || fail "resource verifier did not read prealloc from the ram0 argv"
+grep -Fq 'SERVICE_CPUS_REQUESTED=auto SERVICE_CPUS_APPLIED=no' <<<"$resource_shared" \
+    || fail "shared CPU mode falsely claims the service CPU request is applied"
+
+resource_isolated=$(print_running_resource_policy required auto \
+    qemu-system-x86_64 -object 'memory-backend-memfd,id=ram0,prealloc=on')
+grep -Fq 'RESOURCE RAM_PREALLOC=on' <<<"$resource_isolated" \
+    || fail "resource verifier did not distinguish preallocated RAM"
+grep -Fq 'SERVICE_CPUS_APPLIED=unverified' <<<"$resource_isolated" \
+    || fail "isolation request must not masquerade as verified thread affinity"
+
+resource_unknown=$(print_running_resource_policy '' '' \
+    qemu-system-x86_64 -object 'memory-backend-memfd,id=preview,prealloc=on')
+grep -Fq 'RESOURCE CPU_ISOLATION=unknown' <<<"$resource_unknown" \
+    || fail "missing process environment must not imply CPU isolation is off"
+grep -Fq 'RESOURCE RAM_PREALLOC=unknown' <<<"$resource_unknown" \
+    || fail "unrelated memory object must not imply guest RAM preallocation"
+grep -Fq 'SERVICE_CPUS_APPLIED=unverified' <<<"$resource_unknown" \
+    || fail "missing process environment must not imply applied service CPUs"
+
+resource_no_request=$(print_running_resource_policy required 0 \
+    qemu-system-x86_64 -object 'memory-backend-memfd,id=ram0,size=8192M')
+grep -Fq 'RESOURCE RAM_PREALLOC=unspecified' <<<"$resource_no_request" \
+    || fail "omitted RAM prealloc must be reported without guessing a value"
+grep -Fq 'SERVICE_CPUS_APPLIED=not-requested' <<<"$resource_no_request" \
+    || fail "zero service CPUs must be reported as not requested"
+
+grep -Fq 'print_running_resource_policy "$cpu_isolation" "$service_cpus" "${argv[@]}"' "$WRAPPER" \
+    || fail "verify no longer reports resources from the observed process"
+
 echo "OK: balanced/ultra SDL wrapper profiles and applied-state verification passed"

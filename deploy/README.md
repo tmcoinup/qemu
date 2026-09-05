@@ -47,8 +47,9 @@ TPM 2.0 使用 `tpm-crb`，不支持 TPM 的 profile 自动关闭；显式 `--no
 当前 host NVIDIA 535 驱动暴露的是 VFIO display **REGION**，没有 DMA-BUF，
 所以这条直显路径不是 GPU framebuffer 零拷贝。画面由 QEMU 读取 REGION 后交给
 SDL/GTK，但键鼠直接走 QEMU 原生输入设备，不经过共享内存 input ring 或 relay。
-native 默认同时创建一个与网络编码分离的 DGame preview：SDL/GTK 把 REGION
-画面上传到活动亮机卡后，QEMU 在 GPU 内裁 ROI 并向 DGame 导出 dma-buf。当前亮机卡
+native 默认同时创建一个与网络编码分离的 DGame preview：SDL/GTK 上传 REGION
+画面用于本地显示，preview 另将需要的 ROI 上传到独立私有纹理，再在 GPU 内复制并向
+DGame 导出 dma-buf；当前实现并不复用 SDL 的已上传纹理。当前亮机卡
 是 RX570；以后换 RX550 时按活动 `amdgpu/Mesa EGL` provider 自动选择，不写死
 型号或 PCI 地址。该局部链路避免 DGame 再复制 CPU 预览帧，但不把原始 NVIDIA
 vGPU REGION 冒充成端到端零拷贝；任一 GPU 导入失败会逐 VM 回退 SHM。
@@ -169,15 +170,15 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/start-vm.sh <vm_id> --install [iso] --manual-oobe` | 同一安全建盘语义，但不挂应答 ISO，完整手动完成 OOBE |
 | `./deploy/scripts/start-vm.sh <vm_id> --spoof-name-only` | 通用安全 B：保留 PCI 真身，host 按 mdev UUID 提供每 VM 产品名，前台打开 QEMU SDL 原生窗口 |
 | `./deploy/scripts/start-vm.sh <vm_id> --gtk --spoof-name-only` | 同一条 B 路径，改用 QEMU GTK 窗口 |
-| `./deploy/scripts/start-vm.sh <vm_id>` | 缺配置时自动生成身份，缺盘时严格从公共 base clone；默认 required CPU 隔离和宿主内存全量预分配，成功后才放行 guest；新配置及当前 25 条 GPU 原子 profile 均保持 B，legacy GTX1050 strict-A transition 已禁用 |
+| `./deploy/scripts/start-vm.sh <vm_id>` | 缺配置时自动生成身份，缺盘时严格从公共 base clone；正常 vGPU SDL/GTK 未显式配置隔离策略时默认共享 CPU，宿主内存仍全量预分配；新配置及当前 25 条 GPU 原子 profile 均保持 B，legacy GTX1050 strict-A transition 已禁用 |
 | `./deploy/scripts/start-vm.sh <vm_id> --proxy` | 仅为旧工具创建 `.proxy` 兼容别名；默认 DGame preview 已让主 `qmp.sock` 使用原生 multi-client，正常启动和 DGame 不需要此参数 |
 | `./deploy/scripts/start-vm.sh <vm_id> --no-tpm` | 明确关闭该主板 profile 的 TPM；只用于兼容/诊断 |
 | `./deploy/scripts/start-vm.sh <vm_id> --vlan-id VID` | 把该 VM 接入已授权的业务 VLAN；不带参数就是默认原生 LAN |
-| `./deploy/scripts/start-vm.sh <vm_id> --cpu-isolate=true\|false` | CPU 隔离布尔开关；省略即 `true`，`false` 改用宿主共享调度，Guest core/SMT 身份不变 |
+| `./deploy/scripts/start-vm.sh <vm_id> --cpu-isolate=true\|false` | CPU 隔离布尔开关；正常 vGPU SDL/GTK 未显式配置 CPU 环境策略时默认 `false`，共享宿主调度；需要隔离显式传 `true`，Guest core/SMT 身份不变 |
 | `./deploy/scripts/start-vm.sh <vm_id> --memory-prealloc=true\|false` | 宿主内存预分配布尔开关；省略即 `true`，`false` 让 memfd 按实际触页占用，Guest 固定容量、DIMM/SMBIOS 不变。见 [`docs/G11-MEMORY-ON-DEMAND.md`](docs/G11-MEMORY-ON-DEMAND.md) |
 | `./deploy/scripts/g11-performance.sh {audit\|apply\|restore}` | 一键审核、应用或回滚宿主动态全频段/睿频、稳定 TSC 配套、THP 与 NVMe 低抖动策略；见 [`docs/G11-PERFORMANCE-QUICKSTART.md`](docs/G11-PERFORMANCE-QUICKSTART.md) |
 | `./deploy/host/g11-host-display.sh {audit\|check}` / `sudo ... {apply\|rollback}` | 修复 NVIDIA vGPU-only 卡被固件/GDM 误选为宿主主屏导致的开机花屏与 Xorg 重试；只固定 GDM 走 AMD Wayland，不碰 guest/驱动，见 [`docs/G11-HOST-DISPLAY-BOOT-FIX.md`](docs/G11-HOST-DISPLAY-BOOT-FIX.md) |
-| `./deploy/scripts/g11-sdl-performance.sh {audit\|profile\|start\|verify}` | SDL fixed 提交、安全 Guest-cursor/Host fallback、1ms 键鼠与 service CPU 的傻瓜封装；120Hz 仅显式单窗口实验，见 [`docs/G11-SDL-PERFORMANCE.md`](docs/G11-SDL-PERFORMANCE.md) |
+| `./deploy/scripts/g11-sdl-performance.sh {audit\|profile\|start\|verify}` | SDL 低延迟启动与运行参数核验；教程含保留两个资源参数为 `false` 的切场景优化、构建与 VMate 新包生效步骤，见 [`docs/G11-SDL-PERFORMANCE.md`](docs/G11-SDL-PERFORMANCE.md) |
 | `./deploy/host/install-g11-sdl-wayland-decor.sh [--check]` | 安装/检查纯 userspace Cairo libdecor；保留 Wayland 实时 FPS 标题并绕开 GTK monitor 日志风暴，见 [`docs/G11-SDL-WAYLAND-TITLE.md`](docs/G11-SDL-WAYLAND-TITLE.md) |
 | `HOST_OOM_PROTECT=0 ./deploy/scripts/start-vm.sh <vm_id>` | 仅诊断：关闭默认的每 VM 进程树临时 `oom_score_adj=-500`；普通启动不需要设置 |
 | `QEMU_DISK_AIO=threads ./deploy/scripts/start-vm.sh <vm_id>` | 仅诊断：跳过默认 `io_uring` → `native` → `threads` active-read 自动选择，固定可靠线程池；不改变 guest 磁盘身份 |

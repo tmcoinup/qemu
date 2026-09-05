@@ -37,13 +37,14 @@ usage() {
 说明：
   audit   只读检查源码、当前 QEMU build 和所选参数，不启动 VM。
   profile 只打印封装值；所有档位都只影响本次启动，不写入 VM 配置。
-  start   默认 balanced；--ultra-responsive 使用 60Hz/1ms/服务核/1ms 键盘。
+  start   默认 balanced；--ultra-responsive 使用 60Hz/1ms/1ms 键盘，
+          并请求 auto 服务核（仅开启 CPU 隔离时参与分配）。
           所有档位都用 120Hz REGION + FRL off；--experimental-120hz 仅把
           SDL Present 也提高到 120Hz，须实测后使用。
           --native-wayland 是非默认 A/B；仅真实 Wayland 会话可用，
           会禁用 X11-only native EGL/GPU-first 启动，保留 DGame SHM fallback。
           切换窗口模式前后都必须让 Windows 完整关机，不支持热切换。
-  verify  只读核对运行中 QEMU 的 PID、SDL argv 和环境；不虚构新帧遥测。
+  verify  只读核对运行中 QEMU 的 PID、SDL argv、资源策略和环境；不虚构新帧遥测。
 EOF
 }
 
@@ -475,12 +476,55 @@ read_mdev_console_intervals() {
     printf '%s %s %s\n' "$interval" "$vga_interval" "$frame_limiter"
 }
 
+print_running_resource_policy() {
+    local isolation=$1 service_cpus=$2
+    shift 2
+    local ram_prealloc=unknown object_id object_prealloc field i
+    local -a resource_argv=("$@") object_fields=()
+
+    # Report only the launcher's RAM object and bounded policy values.  Never
+    # print the full argv/environment or infer applied affinity from a request.
+    case "$isolation" in
+        off|auto|required) ;;
+        *) isolation=unknown ;;
+    esac
+    [[ "$service_cpus" == auto || "$service_cpus" =~ ^[0-9]{1,2}$ ]] \
+        || service_cpus=unknown
+    for ((i = 0; i + 1 < ${#resource_argv[@]}; i += 1)); do
+        [[ "${resource_argv[i]}" == -object &&
+           "${resource_argv[i + 1]}" == memory-backend-memfd,* ]] || continue
+        IFS=',' read -r -a object_fields <<<"${resource_argv[i + 1]}"
+        object_id=""
+        object_prealloc=unspecified
+        for field in "${object_fields[@]}"; do
+            case "$field" in
+                id=*) object_id=${field#id=} ;;
+                prealloc=on|prealloc=off) object_prealloc=${field#prealloc=} ;;
+                prealloc=*) object_prealloc=unknown ;;
+            esac
+        done
+        [[ "$object_id" == ram0 ]] || continue
+        ram_prealloc=$object_prealloc
+        break
+    done
+    echo "[g11-sdl] RESOURCE CPU_ISOLATION=$isolation (launcher environment)"
+    echo "[g11-sdl] RESOURCE RAM_PREALLOC=$ram_prealloc (ram0 QEMU argv)"
+    if [[ "$isolation" == off ]]; then
+        echo "[g11-sdl] RESOURCE SERVICE_CPUS_REQUESTED=$service_cpus SERVICE_CPUS_APPLIED=no (CPU_ISOLATION=off；服务核请求未应用)"
+    elif [[ "$service_cpus" == 0 ]]; then
+        echo "[g11-sdl] RESOURCE SERVICE_CPUS_REQUESTED=0 SERVICE_CPUS_APPLIED=not-requested"
+    else
+        echo "[g11-sdl] RESOURCE SERVICE_CPUS_REQUESTED=$service_cpus SERVICE_CPUS_APPLIED=unverified (未核验线程亲和力)"
+    fi
+}
+
 verify_running_vm() {
     local vm_id=${1:-} audit_status=0 pid display_arg="" vfio_display=""
     local exe_path=""
     local mdev_uuid="" interval_actual="" vga_interval_actual="" frl_actual=""
     local detected_profile="" declared_profile="" usb_low_latency=0
     local window_mode="" sdl_video_driver="" native_egl=""
+    local cpu_isolation="" service_cpus=""
     local env_readable=1
     local failures=0 partial=0 i actual expected key
     local -a pids=() argv=()
@@ -628,6 +672,13 @@ verify_running_vm() {
                 ;;
         esac
     fi
+
+    if ((env_readable)); then
+        cpu_isolation=$(process_env_value "$pid" CPU_ISOLATION 2>/dev/null || true)
+        service_cpus=$(process_env_value "$pid" QEMU_SERVICE_CPUS 2>/dev/null || true)
+        service_cpus=${service_cpus:-0}
+    fi
+    print_running_resource_policy "$cpu_isolation" "$service_cpus" "${argv[@]}"
 
     echo "[g11-sdl] USB_KEYBOARD_1MS=$usb_low_latency"
     if ((env_readable)) && [[ "$SDL_USB_LOW_LATENCY" == 1 &&

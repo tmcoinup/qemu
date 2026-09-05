@@ -54,6 +54,7 @@ tests = {
   'test-sdl2-cursor': [meson.project_source_root() / 'ui/sdl2-cursor.c'],
   'test-sdl2-pointer': [meson.project_source_root() / 'ui/sdl2-pointer.c'],
   'test-usb-hid-numlock': [meson.project_source_root() / 'hw/usb/hid-numlock.c'],
+  'test-vfio-region-motion': [],
 }
 
 if sdl.found()
@@ -62,6 +63,17 @@ if sdl.found()
       meson.project_source_root() / 'ui/sdl2-event.c',
       sdl,
     ],
+  }
+endif
+
+if host_os == 'linux' and opengl.found() and pixman.found()
+  tests += {
+    'test-console-gl-surface': [
+      meson.project_source_root() / 'ui/console-gl.c',
+      meson.project_source_root() / 'ui/shader.c',
+      meson.project_source_root() / 'ui/sdl2-display-policy.c',
+      opengl, pixman,
+    ] + (gbm.found() ? [gbm] : []),
   }
 endif
 

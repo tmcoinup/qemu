@@ -1,15 +1,27 @@
-# G-11 Guest Lite 2.6.7：Windows 10 全面精简/提速傻瓜教程
+# G-11 Guest Lite 2.6.8：Windows 10 全面精简/提速傻瓜教程
 
 本工具只属于 **G-11/vGPU**。V-11 是独立分支；不要互拷 VM bundle、驱动或配置。
-2.6.7 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
+2.6.8 面向受控 Windows 10 VM，一次处理 Defender、防火墙、系统/软件自动更新、
 资讯、天气、商店、OneDrive/同步、通知、任务栏搜索框、消费 App、后台服务/任务和常见 VM 高 I/O 项；
 同时开启游戏模式、关闭 Xbox/Game DVR 后台录制、选择高性能电源计划，把所有已安装
 电源计划的关闭屏幕/自动睡眠 AC/DC 都设为“从不”，并通过正式
 NVIDIA 驱动的 NVAPI DRS 设置“最高性能优先”，并为精确白名单 DNF 映像配置 High
 （非 Realtime）优先级。Apply 会安全清理两个固定 Temp 目录中创建/最后写入均超过
 24 小时的普通文件，
-把默认播放端点静音，并把输入顺序设为 en-US/US keyboard 第一、中文（简体）
+禁用麦克风访问，把默认播放端点静音，并把输入顺序设为 en-US/US keyboard 第一、中文（简体）
 Microsoft Pinyin 第二。
+
+`2.6.8` 新增 **禁用麦克风**，随完整 Apply 自动执行：关闭设备、当前用户应用和
+桌面应用的麦克风隐私访问，Windows 应用策略设为强制拒绝，并清空允许/用户控制例外。
+没有麦克风的 VM 也可应用。原值进入现有 schema 6 注册表基线；旧版升级只追加未记录
+的麦克风值，重复 Apply 保留首次记录，开机/登录补强、审计和克隆重启验收覆盖全部六项。
+这是 Windows 隐私层的访问禁用，保留音频服务、设备和驱动；审计验证配置值，实际录音
+行为需按下方步骤在 Windows 内确认。
+
+微软的 [麦克风应用策略说明](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-privacy#letappsaccessmicrophone)
+规定 `2` 为强制拒绝，且单独应用例外优先于默认值；本包同时清空允许/用户控制例外。
+[Windows 麦克风权限说明](https://support.microsoft.com/en-us/windows/privacy/turn-on-app-permissions-for-your-microphone-in-windows)
+区分设备、应用和桌面应用开关，因此本包还设置对应的 Windows 10 ConsentStore 开关。
 
 `2.6.7` 保留 2.6.3 的 MpsSvc/NVIDIA 控制面板兼容性与克隆快速路径，并修复真实克隆中
 Task Scheduler 把 SID 返回为账户名时的等价身份校验，不减少显卡、授权或防火墙验收项：
@@ -118,6 +130,29 @@ HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds\EnableFeeds 也会被 ACL
    `dnfProcessFound=False` 是正常状态；下次启动仍由 Windows 自动套用 High。不要改成
    `Realtime`，也不要给 `TCls` 等反作弊进程强制提权。
 
+### 新增麦克风禁用：旧版升级和验收
+
+1. 宿主重新执行 `./deploy/scripts/guest-lite.sh 1 usb-mount`，在 Windows 的工具 U 盘
+   内双击新版 `G11GuestLite.exe`。仍执行完整 Guest Lite 配置，无需额外参数。
+   保留 `C:\ProgramData\G11GuestLite\state.json`，不要删除旧版回滚记录。
+2. 完成后重启，等待补强执行，再打开“设置 → 隐私 → 麦克风”。设备、应用和桌面
+   应用访问应关闭，受策略控制的开关可能置灰。重启也让原本已打开的录音程序重新读取设置。
+3. 双击 `C:\ProgramData\G11GuestLite\tools\02-Audit.cmd`，要求 `VERIFY PASS`。
+   最新报告中的 `group=Microphone` 应有六项：三个隐私值为 `Deny`，
+   `LetAppsAccessMicrophone=2`，允许和用户控制例外均为空。再用实际录音或语音应用
+   确认无法采集麦克风；本次 Linux 构建检查不能代替这一步 Windows 实测。
+4. 恢复时双击同目录的 `03-Rollback.cmd`，看到 `ROLLBACK PASS` 后重启。
+   这会恢复完整 Guest Lite 原始基线；麦克风恢复为首次使用 2.6.8 前的设置和例外。
+
+只想生成安装包时，在仓库根目录执行：
+
+```bash
+./deploy/package-guest-lite.sh --output-root /home/ubuntu/images/staging/guest-lite
+```
+
+取输出目录 `G11GuestLite/G11GuestLite.exe` 到目标 Windows 双击即可，教程已内嵌；
+同目录同时生成只读 ISO 和可审阅脚本。
+
 ### 电源和睡眠页面补齐：VM1 一次冷启动验收
 
 这次补齐分两层，缺一不可：Guest Lite 把页面内的计时值设为“从不”；G-11
@@ -223,6 +258,7 @@ profile 的 `Enabled` 均为 `False`。
 | 通知 | 关闭通知总开关、应用/锁屏 Toast、通知中心和 Windows Security 通知 | 不删通知组件；所有原值进入精确回滚基线 |
 | 任务栏 | `SearchboxTaskbarMode=0`，默认隐藏搜索框 | 开始菜单/Win 键搜索仍可用；回滚恢复原显示方式 |
 | 声音 | 通过 Windows Core Audio 把默认播放端点设为静音，启动补强和审计再次核验 | 保留 Audiosrv、音频设备及驱动；回滚恢复 Apply 前的静音状态 |
+| 麦克风 | 关闭设备/用户/桌面应用的麦克风隐私访问；Windows 应用强制拒绝并清空允许/用户控制例外；补强、审计与克隆重启验收覆盖 | 保留音频服务、设备和驱动；无麦克风也可应用；升级前原值和例外可回滚 |
 | 默认输入 | `en-US` + US (`0409:00000409`) 第一，`zh-CN` + Microsoft Pinyin (`0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}`) 第二 | 其他原有语言排在后面，Win+Space 可切换；回滚恢复原语言列表和默认覆盖 |
 | 游戏模式/录制 | `AllowAutoGameMode=1`、`AutoGameModeEnabled=1`；关闭 Game DVR、AppCapture 和 HistoricalCapture | 游戏模式与后台录制分别设置；关闭录制不等于关闭游戏模式；原值逐项回滚 |
 | 后台/隐私 | 关后台 App、内容投放、遥测、推送、地图、定位等白名单服务/任务；结束更新器、Game Bar、Teams/Widgets 等精确白名单进程 | 不按 CPU 排名盲杀，不碰网络/音频驱动、打印和 NVIDIA 服务；仅静音默认播放端点 |

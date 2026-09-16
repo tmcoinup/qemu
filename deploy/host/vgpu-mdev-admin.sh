@@ -281,13 +281,16 @@ console_interval() {
     [[ "$interval" =~ ^(0|[1-9][0-9]{0,6})$ ]] || die "invalid console interval"
     ((interval == 0)) && return 0
     ((interval >= 5000 && interval <= 1000000)) ||
-        die "R535 console interval must be 5000..1000000us"
+        die "NVIDIA console interval must be 5000..1000000us"
     # frame_rate_limiter 是布尔键：0 禁用 FRL，1 保持 profile 的 frlConfig。
     # 省略该参数时不写这个键，vGPU 保持 vgpuConfig.xml 的默认值。
     [[ -z "$frl" || "$frl" == 0 || "$frl" == 1 ]] ||
         die "frame_rate_limiter must be 0 or 1"
     version=$(cat "$NVIDIA_VERSION_FILE" 2>/dev/null || true)
-    [[ "$version" == 535.* ]] || die "console interval is validated only for NVIDIA R535"
+    # Keep the exact R570 vendor parser audit separate from broader families.
+    # R570 performance still needs host validation; R580 is not covered.
+    [[ "$version" == 535.* || "$version" == 570.172.07 ]] ||
+        die "console interval is allowed only for NVIDIA R535 or 570.172.07"
     params="$MDEV_DEVICES_DIR/$uuid/nvidia/vgpu_params"
     [[ -L "$MDEV_DEVICES_DIR/$uuid" && -e "$params" ]] ||
         die "mdev console parameter node is missing"

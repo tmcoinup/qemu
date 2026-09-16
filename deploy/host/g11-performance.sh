@@ -18,7 +18,8 @@
 #     with prealloc=on; a swapped-out guest page costs hundreds of ms.
 #
 # It also restores every cpufreq policy to the hardware min/max range, enables
-# turbo/boost, and keeps THP defrag synchronous-free.  Guest CPUID, TSC
+# turbo/boost, releases intel_pstate's separate global cap, and enables THP for
+# QEMU's MADV_HUGEPAGE memfd mappings without synchronous compaction. Guest CPUID, TSC
 # frequency, SMBIOS and Windows state are never modified.
 set -euo pipefail
 
@@ -121,7 +122,9 @@ state_append() {
 snapshot_original_state() {
     local tmp policy name field value disk scheduler
 
-    [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] && return 0
+    if [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
+        [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || die '原始状态文件类型不安全'
+    fi
     mkdir -p -- "$STATE_DIR"
     chmod 0700 -- "$STATE_DIR"
     tmp="$STATE_DIR/.original-state.$$.tmp"
@@ -142,9 +145,11 @@ snapshot_original_state() {
     done
     value=$(read_one_line "$INTEL_PSTATE_ROOT/no_turbo" 2>/dev/null || true)
     [[ -z "$value" ]] || state_append "$tmp" intel_pstate.no_turbo "$value"
+    value=$(read_one_line "$INTEL_PSTATE_ROOT/max_perf_pct" 2>/dev/null || true)
+    [[ -z "$value" ]] || state_append "$tmp" intel_pstate.max_perf_pct "$value"
     value=$(read_one_line "$CPUFREQ_ROOT/boost" 2>/dev/null || true)
     [[ -z "$value" ]] || state_append "$tmp" cpufreq.boost "$value"
-    for field in enabled defrag; do
+    for field in enabled defrag shmem_enabled; do
         value=$(read_one_line "$THP_ROOT/$field" 2>/dev/null || true)
         [[ -z "$value" ]] || state_append "$tmp" "thp.${field}" \
             "$(selected_value "$value")"
@@ -164,7 +169,16 @@ snapshot_original_state() {
         [[ -z "$value" ]] || state_append "$tmp" "nvme.${disk}.scheduler" \
             "$(selected_value "$value")"
     done
-    mv -fT -- "$tmp" "$STATE_FILE"
+    if [[ -f "$STATE_FILE" ]]; then
+        # An in-place upgrade may introduce knobs absent from the first
+        # snapshot. Preserve all old originals and capture only missing keys
+        # before touching them, including newly online CPU policies.
+        (umask 077; awk -F '\t' '!seen[$1]++' "$STATE_FILE" "$tmp" >"$tmp.merged")
+        mv -fT -- "$tmp.merged" "$STATE_FILE"
+        rm -f -- "$tmp"
+    else
+        mv -fT -- "$tmp" "$STATE_FILE"
+    fi
 }
 
 performance_check() {
@@ -195,12 +209,16 @@ performance_check() {
 
     value=$(read_one_line "$INTEL_PSTATE_ROOT/no_turbo" 2>/dev/null || true)
     [[ -z "$value" || "$value" == 0 ]] || return 1
+    value=$(read_one_line "$INTEL_PSTATE_ROOT/max_perf_pct" 2>/dev/null || true)
+    [[ -z "$value" || "$value" == 100 ]] || return 1
     value=$(read_one_line "$CPUFREQ_ROOT/boost" 2>/dev/null || true)
     [[ -z "$value" || "$value" == 1 ]] || return 1
     value=$(read_one_line "$THP_ROOT/enabled" 2>/dev/null || true)
     [[ -z "$value" || "$(selected_value "$value")" == madvise ]] || return 1
     value=$(read_one_line "$THP_ROOT/defrag" 2>/dev/null || true)
     [[ -z "$value" || "$(selected_value "$value")" == never ]] || return 1
+    value=$(read_one_line "$THP_ROOT/shmem_enabled" 2>/dev/null || true)
+    [[ -z "$value" || "$(selected_value "$value")" == advise ]] || return 1
     value=$(read_one_line "$KVM_ROOT/halt_poll_ns" 2>/dev/null || true)
     [[ -z "$value" || "$value" == "$HALT_POLL_NS_TARGET" ]] || return 1
     value=$(read_one_line "$KVM_ROOT/nx_huge_pages" 2>/dev/null || true)
@@ -233,6 +251,7 @@ performance_audit() {
     local first=1 policy governor min max hw_min hw_max count=0 summary='fixed-frequency'
     local turbo='n/a' thp_enabled='n/a' thp_defrag='n/a' halt_poll='n/a'
     local nx_huge='n/a' swappiness='n/a' persistent=no
+    local max_perf_pct='n/a' shmem_thp='n/a'
     local ready=no
 
     for policy in "$CPUFREQ_ROOT"/policy[0-9]*; do
@@ -253,6 +272,10 @@ performance_audit() {
     if [[ "$turbo" == n/a && -e "$CPUFREQ_ROOT/boost" ]]; then
         turbo=$([[ "$(read_one_line "$CPUFREQ_ROOT/boost" 2>/dev/null || echo 0)" == 1 ]] && echo on || echo off)
     fi
+    [[ -e "$INTEL_PSTATE_ROOT/max_perf_pct" ]] && max_perf_pct=$(read_one_line \
+        "$INTEL_PSTATE_ROOT/max_perf_pct" 2>/dev/null || echo unknown)
+    [[ -e "$THP_ROOT/shmem_enabled" ]] && shmem_thp=$(selected_value \
+        "$(read_one_line "$THP_ROOT/shmem_enabled" 2>/dev/null || echo unknown)")
     [[ -e "$THP_ROOT/enabled" ]] && thp_enabled=$(selected_value \
         "$(read_one_line "$THP_ROOT/enabled" 2>/dev/null || echo unknown)")
     [[ -e "$THP_ROOT/defrag" ]] && thp_defrag=$(selected_value \
@@ -265,9 +288,9 @@ performance_audit() {
         swappiness=$(read_one_line "$VM_ROOT/swappiness" 2>/dev/null || echo unknown)
     performance_persistence_check && persistent=yes
     performance_ready && ready=yes
-    printf 'g11-host-performance: ready=%s cpu="%s" policies=%s turbo=%s thp=%s/%s halt_poll_ns=%s nx_huge_pages=%s swappiness=%s persistent=%s memory=host-native-unthrottled\n' \
+    printf 'g11-host-performance: ready=%s cpu="%s" policies=%s turbo=%s thp=%s/%s halt_poll_ns=%s nx_huge_pages=%s swappiness=%s persistent=%s memory=host-native-unthrottled max_perf_pct=%s shmem_thp=%s\n' \
         "$ready" "$summary" "$count" "$turbo" "$thp_enabled" "$thp_defrag" \
-        "$halt_poll" "$nx_huge" "$swappiness" "$persistent"
+        "$halt_poll" "$nx_huge" "$swappiness" "$persistent" "$max_perf_pct" "$shmem_thp"
 }
 
 performance_apply() {
@@ -278,6 +301,18 @@ performance_apply() {
     exec 9>"$LOCK_FILE"
     flock -w 15 9 || die '性能策略锁超时'
     snapshot_original_state
+
+    # Release global limits before setting each policy's frequency range:
+    # with turbo disabled the kernel can clamp scaling_max_freq on write.
+    if [[ -e "$INTEL_PSTATE_ROOT/no_turbo" ]]; then
+        write_exact "$INTEL_PSTATE_ROOT/no_turbo" 0 || failures=$((failures + 1))
+    fi
+    if [[ -e "$CPUFREQ_ROOT/boost" ]]; then
+        write_exact "$CPUFREQ_ROOT/boost" 1 || failures=$((failures + 1))
+    fi
+    if [[ -e "$INTEL_PSTATE_ROOT/max_perf_pct" ]]; then
+        write_exact "$INTEL_PSTATE_ROOT/max_perf_pct" 100 || failures=$((failures + 1))
+    fi
 
     for policy in "$CPUFREQ_ROOT"/policy[0-9]*; do
         [[ -d "$policy" && ! -L "$policy" ]] || continue
@@ -309,17 +344,17 @@ performance_apply() {
         fi
     done
 
-    if [[ -e "$INTEL_PSTATE_ROOT/no_turbo" ]]; then
-        write_exact "$INTEL_PSTATE_ROOT/no_turbo" 0 || failures=$((failures + 1))
-    fi
-    if [[ -e "$CPUFREQ_ROOT/boost" ]]; then
-        write_exact "$CPUFREQ_ROOT/boost" 1 || failures=$((failures + 1))
-    fi
     if [[ -e "$THP_ROOT/enabled" ]]; then
         write_exact "$THP_ROOT/enabled" madvise || failures=$((failures + 1))
     fi
     if [[ -e "$THP_ROOT/defrag" ]]; then
         write_exact "$THP_ROOT/defrag" never || failures=$((failures + 1))
+    fi
+    # memfd is shmem: the anonymous-memory 'enabled=madvise' knob alone
+    # leaves guest RAM on small pages when shmem_enabled=never. 'advise'
+    # applies only to mappings requesting huge pages; no hugetlb pool needed.
+    if [[ -e "$THP_ROOT/shmem_enabled" ]]; then
+        write_exact "$THP_ROOT/shmem_enabled" advise || failures=$((failures + 1))
     fi
     if [[ -e "$KVM_ROOT/halt_poll_ns" ]]; then
         write_exact "$KVM_ROOT/halt_poll_ns" "$HALT_POLL_NS_TARGET" ||
@@ -357,9 +392,11 @@ restore_one() {
             path="$CPUFREQ_ROOT/$policy/$field"
             ;;
         intel_pstate.no_turbo) path="$INTEL_PSTATE_ROOT/no_turbo" ;;
+        intel_pstate.max_perf_pct) path="$INTEL_PSTATE_ROOT/max_perf_pct" ;;
         cpufreq.boost) path="$CPUFREQ_ROOT/boost" ;;
         thp.enabled) path="$THP_ROOT/enabled" ;;
         thp.defrag) path="$THP_ROOT/defrag" ;;
+        thp.shmem_enabled) path="$THP_ROOT/shmem_enabled" ;;
         kvm.halt_poll_ns) path="$KVM_ROOT/halt_poll_ns" ;;
         kvm.nx_huge_pages) path="$KVM_ROOT/nx_huge_pages" ;;
         vm.swappiness) path="$VM_ROOT/swappiness" ;;

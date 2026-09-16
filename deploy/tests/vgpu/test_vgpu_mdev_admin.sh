@@ -97,6 +97,37 @@ grep -Fxq 'intervaltime=16667,vgaintervaltime=16667' \
 if admin console-interval "$UUID" 4999 >/dev/null 2>&1; then
     fail 'admin helper accepted an unsafe console interval'
 fi
+printf '570.172.07\n' >"$VERSION"
+admin console-interval "$UUID" 8333 0 >/dev/null
+grep -Fxq 'intervaltime=8333,vgaintervaltime=8333,frame_rate_limiter=0' \
+    "$TARGET/nvidia/vgpu_params"
+for interval in 5000 1000000; do
+    admin console-interval "$UUID" "$interval" 1 >/dev/null
+    grep -Fxq \
+        "intervaltime=$interval,vgaintervaltime=$interval,frame_rate_limiter=1" \
+        "$TARGET/nvidia/vgpu_params"
+done
+for invalid in 04999 4999 1000001 not-a-number; do
+    if admin console-interval "$UUID" "$invalid" >/dev/null 2>&1; then
+        fail "admin helper accepted invalid R570 interval: $invalid"
+    fi
+done
+if admin console-interval "$UUID" 8333 2 >/dev/null 2>&1; then
+    fail 'admin helper accepted invalid R570 FRL'
+fi
+before=$(cat "$TARGET/nvidia/vgpu_params")
+admin console-interval "$UUID" 0 0 >/dev/null
+[[ "$(cat "$TARGET/nvidia/vgpu_params")" == "$before" ]] ||
+    fail 'admin helper wrote parameters for interval=0'
+for version in 550.1 570.133.10 570.172.070 570.172.08 580.159.01 unknown; do
+    printf '%s\n' "$version" >"$VERSION"
+    if VGPU_CONSOLE_INTERVAL_FORCE=1 \
+            admin console-interval "$UUID" 8333 0 >/dev/null 2>&1; then
+        fail "admin helper accepted unreviewed driver: $version"
+    fi
+    [[ "$(cat "$TARGET/nvidia/vgpu_params")" == "$before" ]] ||
+        fail "admin helper modified parameters for unreviewed driver: $version"
+done
 admin mdev-remove "$UUID" >/dev/null
 grep -Fxq 1 "$TARGET/remove"
 

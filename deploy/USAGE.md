@@ -922,7 +922,7 @@ A/internal/FRL。完整生产签名边界见
 | 刚进桌面右键很慢/不响应 | 先完成私有 portable 的 `Licensed` 验收并冷启动；再区分 Explorer/shell 扩展与全局画面延迟，按 [`docs/G11-NUMLOCK-FIRST-BOOT.md`](docs/G11-NUMLOCK-FIRST-BOOT.md) 收集 guest 进程和 host license/FRL 证据 |
 | `Ctrl+Alt+Del`/`Super`/`Alt+Tab` 被宿主吃掉 | 确认启动时打印“GTK/SDL 宿主快捷键保护已启用”，鼠标在窗口内且窗口已聚焦，并确认没有传 `--no-tame-gnome` |
 | 安装蓝屏 `USBXHCI.SYS` / `PAGE_FAULT_IN_NONPAGED_AREA` | 不删盘；按 [`docs/USBXHCI-INSTALL-RECOVERY.md`](docs/USBXHCI-INSTALL-RECOVERY.md) 增量重编并续装，确认启动摘要为固定上游 xHCI 行为身份 |
-| 动态拖动稳定只有约 10 FPS | 检查启动日志是否有 `R535 console REGION 周期=16667us`；确认未将 `VGPU_CONSOLE_INTERVAL_US` 设为 0 |
+| 动态拖动稳定只有约 10 FPS | 用 `grep -E 'NVIDIA .*console REGION 周期='` 检查启动日志；旧持久化 `VGPU_CONSOLE_INTERVAL_US=0` 不会自动覆盖，V100 精确 R570.172.07 的维护窗口试用见 [周期迁移](docs/G11-VGPU-HOST-QUICKSTART.md#已有-v100r570-配置的-sdl-周期迁移) |
 | GTK 标题没有 FPS | 正常；`SDL Present` 只在 SDL 后端实现。用 host license/FRL 和实际 frame-time 判断 |
 | DGame 设 60 但 `LIVE` 长期只有 28–32，或静置后定格 | 按“G-11 DGame 本地预览”的傻瓜更新流程同时重编 QEMU/DGame，并在维护窗口正常重启 VM；只热插 `preview-on` 不会替换运行中的 QEMU 代码 |
 | 动态画面卡在 3/15 FPS | 当前 B/off 检查 DLS、Licensed、Code 0 和实际 vGPU profile；不要用历史 strict-A 的 `Unlicensed / FRL N/A` 作为当前验收 |

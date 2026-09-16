@@ -336,6 +336,8 @@ static void sdl2_gnome_guard_update(struct sdl2_console *scon)
 
 static uint64_t sdl2_refresh_interval_active_ns =
     SDL2_REFRESH_INTERVAL_ACTIVE_NS;
+/* Opt-in for multi-VM desktops; zero preserves full-rate background windows. */
+static uint64_t sdl2_refresh_interval_background_ns;
 static uint32_t sdl2_input_poll_interval_active_ms =
     SDL2_INPUT_POLL_INTERVAL_ACTIVE_MS;
 
@@ -361,13 +363,74 @@ static void sdl2_init_timing_policy(void)
 {
     uint32_t target_fps = sdl2_parse_timing_env(
         "QEMU_SDL_TARGET_FPS", 60, 30, 240);
+    uint32_t background_fps = sdl2_parse_timing_env(
+        "QEMU_SDL_BACKGROUND_FPS", 0, 0, 240);
 
     sdl2_input_poll_interval_active_ms = sdl2_parse_timing_env(
         "QEMU_SDL_INPUT_POLL_MS", SDL2_INPUT_POLL_INTERVAL_ACTIVE_MS, 1, 16);
     sdl2_refresh_interval_active_ns = DIV_ROUND_UP(
         (uint64_t)NANOSECONDS_PER_SECOND, target_fps);
+    if (background_fps) {
+        sdl2_refresh_interval_background_ns = DIV_ROUND_UP(
+            (uint64_t)NANOSECONDS_PER_SECOND, MIN(background_fps, target_fps));
+        info_report("sdl2: background target=%u FPS (focused target=%u FPS)",
+                    MIN(background_fps, target_fps), target_fps);
+    }
     info_report("sdl2: timing profile target=%u FPS input-poll=%u ms",
                 target_fps, sdl2_input_poll_interval_active_ms);
+}
+
+static bool sdl2_background_limited(struct sdl2_console *scon)
+{
+    return sdl2_refresh_interval_background_ns &&
+           (!scon->has_input_focus || !sdl2_window_is_renderable(scon));
+}
+
+static void sdl2_update_refresh_rate(struct sdl2_console *scon)
+{
+    uint64_t interval;
+
+    if (!sdl2_window_is_renderable(scon)) {
+        return; /* Existing minimize/hidden policy owns the listener interval. */
+    }
+    interval = sdl2_background_limited(scon) ?
+               sdl2_refresh_interval_background_ns :
+               sdl2_refresh_interval_active_ns;
+    if (scon->dcl.update_interval_ns != interval) {
+        scon->next_background_refresh_ns = 0;
+        update_displaychangelistener_ns(&scon->dcl, interval);
+    }
+}
+
+bool sdl2_refresh_due(struct sdl2_console *scon)
+{
+    uint64_t interval;
+    int64_t now;
+
+    if (!sdl2_background_limited(scon)) {
+        scon->next_background_refresh_ns = 0;
+        return true;
+    }
+    interval = sdl2_refresh_interval_background_ns;
+    if (!sdl2_window_is_renderable(scon)) {
+        interval = MAX(interval,
+                       (uint64_t)SDL2_REFRESH_INTERVAL_MINIMIZED_MS * SCALE_MS);
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (now < scon->next_background_refresh_ns &&
+        !scon->window_redraw_pending) {
+        return false;
+    }
+    /* A faster fb-shm/stream listener drives the same global GUI timer.
+     * Gate our work too, not just our requested interval. Recovery/expose
+     * events may redraw immediately and keyboard polling stays independent. */
+    if (!scon->next_background_refresh_ns || scon->window_redraw_pending) {
+        scon->next_background_refresh_ns = now + interval;
+    } else {
+        scon->next_background_refresh_ns +=
+            ((now - scon->next_background_refresh_ns) / interval + 1) * interval;
+    }
+    return true;
 }
 
 static void sdl2_init_cursor_policy(void)
@@ -2712,6 +2775,7 @@ static void handle_windowevent(SDL_Event *ev)
 #endif
     case SDL_WINDOWEVENT_FOCUS_GAINED:
         scon->has_input_focus = true;
+        sdl2_update_refresh_rate(scon);
         scon->has_mouse_focus = !!(SDL_GetWindowFlags(scon->real_window) &
                                    SDL_WINDOW_MOUSE_FOCUS);
         if (sdl_console_is_grabbed(scon)) {
@@ -2759,6 +2823,7 @@ static void handle_windowevent(SDL_Event *ev)
         /* X11 输入焦点丢失 (alt-tab / WM 切窗 / 无 WM 时其他 client grab):
          * 抬掉所有按下的键, 防止 guest 卡在 "W 一直按住" 之类状态. */
         sdl2_deactivate_input(scon);
+        sdl2_update_refresh_rate(scon);
         if (qemu_console_is_graphic(scon->dcl.con)) {
             win32_kbd_set_window(NULL);
         }
@@ -3023,14 +3088,7 @@ void sdl2_poll_events(struct sdl2_console *scon)
     if (!idle) {
         scon->idle_counter = 0;
     }
-    if (!scon->hidden && scon->real_window &&
-        !(SDL_GetWindowFlags(scon->real_window) & SDL_WINDOW_MINIMIZED)) {
-        if (scon->dcl.update_interval_ns !=
-            sdl2_refresh_interval_active_ns) {
-            update_displaychangelistener_ns(
-                &scon->dcl, sdl2_refresh_interval_active_ns);
-        }
-    }
+    sdl2_update_refresh_rate(scon);
 }
 
 static uint32_t sdl2_input_poll_interval_ms(void)

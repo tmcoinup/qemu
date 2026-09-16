@@ -474,7 +474,7 @@ function Write-CloneComputerNameState($Contract, [string]$ComputerName) {
     }
 }
 
-function Read-CloneComputerNameState($Contract) {
+function Read-CloneComputerNameState($Contract, [switch]$AllowContractUpdate) {
     if (-not (Test-Path -LiteralPath $CloneComputerNameState -PathType Leaf)) {
         return $null
     }
@@ -487,7 +487,9 @@ function Read-CloneComputerNameState($Contract) {
     $expected = Get-V11ComputerName $Contract
     if ([int]$state.schemaVersion -ne 1 -or
         [string]$state.purpose -cne 'g11-private-clone-computer-name' -or
-        [string]$state.contractId -cne [string]$Contract.contractId -or
+        [string]$state.contractId -cnotmatch '^[0-9A-F]{64}$' -or
+        (-not $AllowContractUpdate -and
+            [string]$state.contractId -cne [string]$Contract.contractId) -or
         ([Guid]$state.vmUuid).ToString('D').ToLowerInvariant() -cne
             ([Guid]$Contract.vmUuid).ToString('D').ToLowerInvariant() -or
         [string]$state.computerName -cne $expected) {
@@ -497,7 +499,10 @@ function Read-CloneComputerNameState($Contract) {
 }
 
 function Prepare-V11CloneComputerName($Payload) {
-    $state = Read-CloneComputerNameState $Payload.Contract
+    # A GPU package update changes the contract hash, but the clone computer
+    # name belongs to its stable VM UUID. Only installation can advance the
+    # state to a new contract; subsequent verification remains exact.
+    $state = Read-CloneComputerNameState $Payload.Contract -AllowContractUpdate
     if ($null -eq $state -and
         -not (Test-PayloadRootIsCdRom $Payload.Root)) {
         # A manually unpacked system-NVAPI package is not a private clone
@@ -505,6 +510,11 @@ function Prepare-V11CloneComputerName($Payload) {
         return
     }
     $expected = Get-V11ComputerName $Payload.Contract
+    if ($null -ne $state -and
+        [string]$state.contractId -cne [string]$Payload.Contract.contractId -and
+        [string]$env:COMPUTERNAME -cne $expected) {
+        throw '更新显卡身份包时主机名与原克隆记录不一致；拒绝重命名已有系统。'
+    }
     if ([string]$env:COMPUTERNAME -cne $expected) {
         if (-not (Get-Command Rename-Computer -ErrorAction SilentlyContinue)) {
             throw '系统缺少 Rename-Computer，无法应用 V-11 风格主机名。'
@@ -757,7 +767,7 @@ function Test-PnpPrefix([string]$Actual, [string]$Expected) {
         $actualUpper.StartsWith($expectedUpper + '\', [StringComparison]::Ordinal)
 }
 
-function Get-GuestTransport($Contract) {
+function Get-GuestTransport($Contract, [switch]$AllowIdentityUpdate) {
     $products = @(Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop)
     if ($products.Count -ne 1 -or
         [Guid]$products[0].UUID -ne [Guid]$Contract.vmUuid) {
@@ -779,9 +789,8 @@ function Get-GuestTransport($Contract) {
     if ($controllers.Count -ne 1 -or
         [int]$controllers[0].ConfigManagerErrorCode -ne 0 -or
         [string]$controllers[0].DriverVersion -cne
-            [string]$Contract.transport.driverVersion -or
-        [string]$controllers[0].Name -cne [string]$Contract.transport.gpuName) {
-        throw 'Display 不是合同指定的 Code 0 / 驱动版本 / GPU 名称。'
+            [string]$Contract.transport.driverVersion) {
+        throw 'Display 不是合同指定的 Code 0 / 驱动版本。'
     }
     $signed = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
         Where-Object { [string]$_.DeviceID -ieq [string]$displays[0].InstanceId })
@@ -790,6 +799,14 @@ function Get-GuestTransport($Contract) {
             '\ANVIDIA(?: Corporation)?\z') {
         throw '当前 Display 未绑定唯一的生产签名 NVIDIA 驱动。'
     }
+    # A mutable caption cannot be an installation prerequisite: the old
+    # package may still publish its old GPU model after a profile change.
+    # UUID, unique PnP device, Code 0, version and signing checks above always
+    # apply. Verify actions still require the new caption after reboot.
+    if (-not $AllowIdentityUpdate -and
+        [string]$controllers[0].Name -cne [string]$Contract.transport.gpuName) {
+        throw 'Display 的 GPU 名称尚未更新为当前合同值。'
+    }
     return [pscustomobject]@{
         Display = $displays[0]
         Controller = $controllers[0]
@@ -797,12 +814,13 @@ function Get-GuestTransport($Contract) {
     }
 }
 
-function Wait-GuestTransport($Contract, [int]$Seconds = 300) {
+function Wait-GuestTransport($Contract, [int]$Seconds = 300,
+        [switch]$AllowIdentityUpdate) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     $last = ''
     do {
         try {
-            return Get-GuestTransport $Contract
+            return Get-GuestTransport $Contract -AllowIdentityUpdate:$AllowIdentityUpdate
         } catch {
             $last = $_.Exception.Message
             if ((Get-Date) -ge $deadline) {
@@ -906,7 +924,7 @@ namespace VMate.G11 {
 '@
 }
 
-function Set-MonitorPnpFriendlyName(
+function Set-DevicePnpFriendlyName(
         [string]$InstanceId, [string]$FriendlyName) {
     Initialize-MonitorSetupApi
     [VMate.G11.MonitorSetupApi]::SetFriendlyName($InstanceId, $FriendlyName)
@@ -918,6 +936,19 @@ function Set-MonitorPnpFriendlyName(
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
     throw "SetupAPI FriendlyName 回读失败：$InstanceId"
+}
+
+function Set-MonitorPnpFriendlyName(
+        [string]$InstanceId, [string]$FriendlyName) {
+    Set-DevicePnpFriendlyName $InstanceId $FriendlyName
+}
+
+function Publish-GpuPnpFriendlyName($Contract) {
+    $current = Get-GuestTransport $Contract -AllowIdentityUpdate
+    Set-DevicePnpFriendlyName ([string]$current.Display.InstanceId) `
+        ([string]$Contract.profile.name)
+    Write-Host ("GPU_PNP_IDENTITY PASS instance={0} name={1}" -f
+        $current.Display.InstanceId, $Contract.profile.name) -ForegroundColor Green
 }
 
 function Set-ProtectedMonitorValue {
@@ -1366,6 +1397,7 @@ function Invoke-ProfileWriter($Payload) {
         VbiosVersion = [string]$profile.vbiosVersion
     }
     & (Join-Path $Payload.Root 'patch-grid-strings.ps1') @arguments
+    Publish-GpuPnpFriendlyName $contract
 }
 
 function Invoke-LowLevelInstaller($Payload, [switch]$Remove) {
@@ -1539,9 +1571,10 @@ $entryBcd = Get-NormalBcdSnapshot
 $transport = if ($Action -in @(
         'Verify', 'VerifyUninstall', 'RefreshMonitor', 'RefreshIdentity'
     )) {
-    Wait-GuestTransport $payload.Contract
+    Wait-GuestTransport $payload.Contract `
+        -AllowIdentityUpdate:($Action -eq 'RefreshIdentity')
 } else {
-    Get-GuestTransport $payload.Contract
+    Get-GuestTransport $payload.Contract -AllowIdentityUpdate:($Action -eq 'Install')
 }
 
 switch ($Action) {

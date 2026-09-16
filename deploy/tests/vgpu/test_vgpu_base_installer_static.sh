@@ -207,6 +207,8 @@ if grep -E 'qemu-nbd.*(^|[[:space:]"])[$][{]?BASE[}]?("|[[:space:]]|$)' \
 fi
 require_text 'cat "/sys/block/$sys_name/pid"' "kernel NBD occupancy check"
 require_text 'findmnt -rn -S "$candidate"' "mounted NBD refusal"
+require_text 'modprobe nbd max_part=32 nbds_max=32' "host NBD module preparation"
+require_text 'source "$here/lib/nbd-lock.sh"' "shared NBD allocation lock"
 require_text 'mount -t ntfs-3g -o ro -- "$partition" "$MOUNT_DIR"' \
     "read-only Windows partition discovery"
 require_text '-d "$MOUNT_DIR/Windows/System32"' \

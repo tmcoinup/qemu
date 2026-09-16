@@ -70,6 +70,56 @@ sha256_upper() {
     sha256sum -- "$1" | awk '{print toupper($1)}'
 }
 
+prepare_nbd_device() {
+    local sys_path sys_name candidate nbd_pid nbd_size max_part mountpoints
+    local visible=0
+
+    # A fresh host may have qemu-nbd installed without its kernel client loaded.
+    # Load the distribution module once; never unload it or detach other users.
+    if [[ ! -d /sys/module/nbd ]]; then
+        command -v modprobe >/dev/null 2>&1 ||
+            die "modprobe is missing; install the host kmod package before refreshing the base"
+        log "loading the host NBD module (max_part=32, nbds_max=32)"
+        modprobe nbd max_part=32 nbds_max=32 ||
+            die "could not load the host NBD module; resolve the modprobe error above before retrying"
+    fi
+    udevadm settle || die "udev did not settle after NBD preparation"
+    max_part=$(cat /sys/module/nbd/parameters/max_part 2>/dev/null) ||
+        die "cannot inspect the host NBD partition configuration"
+    [[ "$max_part" =~ ^[0-9]+$ && "$max_part" != 0 ]] ||
+        die "NBD is already loaded without partition support (max_part=$max_part); see deploy/docs/G11-CLONE-PAYLOAD-RECOVERY.md; no module was unloaded"
+
+    NBD=""
+    # Enumerate the host's actual devices, including indices above 31.
+    for sys_path in /sys/block/nbd*; do
+        [[ -d "$sys_path" ]] || continue
+        sys_name=${sys_path##*/}
+        [[ "$sys_name" =~ ^nbd[0-9]+$ ]] || continue
+        candidate="/dev/$sys_name"
+        [[ -b "$candidate" ]] || continue
+        visible=$((visible + 1))
+        nbd_pid=""
+        if [[ -e "/sys/block/$sys_name/pid" ]]; then
+            nbd_pid=$(cat "/sys/block/$sys_name/pid" 2>/dev/null) || continue
+        fi
+        [[ -z "$nbd_pid" ]] || continue
+        nbd_size=$(cat "/sys/block/$sys_name/size" 2>/dev/null) || continue
+        [[ "$nbd_size" == 0 ]] || continue
+        if findmnt -rn -S "$candidate" >/dev/null 2>&1; then
+            continue
+        fi
+        # Include child partitions; an unmounted parent alone is insufficient.
+        mountpoints=$(lsblk -nrpo MOUNTPOINT "$candidate") || continue
+        [[ -z "${mountpoints//[[:space:]]/}" ]] || continue
+        NBD=$candidate
+        log "selected free host NBD device: $NBD"
+        return 0
+    done
+    ((visible > 0)) ||
+        die "NBD module is loaded but no /dev/nbdN block devices are visible; check the host /dev and udev setup"
+    die "no free /dev/nbd device is available: all $visible visible devices are busy or cannot be inspected; finish the owning offline-disk task and retry; no existing connection was disconnected"
+}
+
 BASE=""
 BASE_NAME=""
 BASE_PATH_SET=0
@@ -560,7 +610,7 @@ verify_guest_lite_dir() {
        "$GUEST_LITE_MANIFEST_SHA256" ]] || return 1
     jq -e '
         (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-        .schemaVersion == 1 and .profileVersion == "2.6.7" and
+        .schemaVersion == 1 and .profileVersion == "2.6.8" and
         (.files | type) == "array" and (.files | length) == 5 and
         ([.files[].name] | sort) == [
             "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -924,23 +974,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Use the same global lock as the other offline tools, through disconnect and
+# cleanup. Check the host before spending time copying a large Windows base.
+# shellcheck source=lib/nbd-lock.sh
+source "$here/lib/nbd-lock.sh"
+prepare_nbd_device
+
 log "copying standalone base to a private editable image"
 cp --reflink=auto -- "$BASE" "$BASE_TMP"
 chmod u+rw -- "$BASE_TMP"
 "$QEMU_IMG" check -q "$BASE_TMP"
 
-for candidate in /dev/nbd{0..31}; do
-    [[ -b "$candidate" ]] || continue
-    sys_name=${candidate##*/}
-    nbd_pid=$(cat "/sys/block/$sys_name/pid" 2>/dev/null || true)
-    [[ -z "$nbd_pid" ]] || continue
-    if findmnt -rn -S "$candidate" >/dev/null 2>&1; then
-        continue
-    fi
-    NBD=$candidate
-    break
-done
-[[ -n "$NBD" ]] || die "no free /dev/nbd device is available"
 "$QEMU_NBD" --connect="$NBD" --format=qcow2 --cache=none "$BASE_TMP"
 NBD_CONNECTED=1
 partprobe "$NBD"
@@ -1094,7 +1138,7 @@ if ((SITE_PRIVATE)); then
        ! -e "$MOUNT_DIR/ProgramData/G11/SystemNvapiProjection" &&
        ! -e "$DEST_DIR/logs" ]] ||
         die "private base retained a generic EXE or previous clone result"
-    log "installed one driver-bound licensed receipt schema $PORTABLE_RECEIPT_SCHEMA EXE, pinned Guest Lite 2.6.7, SATA/NVMe portability helper, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
+    log "installed one driver-bound licensed receipt schema $PORTABLE_RECEIPT_SCHEMA EXE, pinned Guest Lite 2.6.8, SATA/NVMe portability helper, and the unattended clone finalizer in C:\\ProgramData\\VMate\\G11"
 elif ((WITH_GPUZ)); then
     [[ "$(sha256_upper "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_SHA256" &&
        "$(stat -c %s -- "$DEST_DIR/GPU-Z.exe")" == "$GPUZ_BYTES" ]] ||
@@ -1426,7 +1470,7 @@ if ((SITE_PRIVATE)); then
   portable:   C:\ProgramData\VMate\G11\VgpuPortable.exe
               sha256=$PORTABLE_SHA256
   first boot: automatic licensed receipt schema $PORTABLE_RECEIPT_SCHEMA finalizer; one execution only
-  Guest Lite: automatic pinned 2.6.7 profile in the same verified first-boot flow
+  Guest Lite: automatic pinned 2.6.8 profile in the same verified first-boot flow
   OOBE:       unattended; each clone still receives a generalized Windows identity
   DLS:        dls.gvmates.com:443
   performance: embedded recommended-native-v1

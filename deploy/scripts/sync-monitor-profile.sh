@@ -339,7 +339,7 @@ case "$helper_rc" in
         echo "[monitor-sync] 完成：Windows 标准 EDID_OVERRIDE 已按 128B block 写入；设备管理器 live 名称由私有克隆的 SYSTEM 身份任务在下次启动通过 SetupAPI 发布"
         ;;
     12)
-        echo "[monitor-sync] 预驱动完成：安全 EDID/模式缓存已落盘；安装 GRID 并完整关机后会自动补齐认证 NV_Modes"
+        echo "[monitor-sync] 预驱动完成：安全 EDID/模式缓存已落盘；目标显卡尚未绑定认证驱动（换显存档也会如此），需安全枚举或安装 GRID 后完整关机再认证 NV_Modes"
         exit 12
         ;;
     *)

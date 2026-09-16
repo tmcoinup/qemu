@@ -160,6 +160,19 @@ $IdentityScope = [string]$selectedCatalogIdentity.identityScope
 # 否则命中短的会在 to 前留一个多余的 "NVIDIA " (→ "NVIDIA NVIDIA GeForce...")。
 $from = 'NVIDIA GRID RTX6000-1Q','NVIDIA GRID RTX6000-2Q','NVIDIA GRID RTX6000-3Q','NVIDIA GRID RTX6000-4Q','NVIDIA GRID RTX6000-8Q','NVIDIA GRID RTX6000',
         'GRID RTX6000-1Q','GRID RTX6000-2Q','GRID RTX6000-3Q','GRID RTX6000-4Q','GRID RTX6000-8Q','GRID RTX6000'
+$managedGpuNames = @($catalog.profiles | ForEach-Object { [string]$_.name } |
+    Sort-Object -Unique)
+
+function Convert-ManagedGpuCaption([string]$Value) {
+    # Published consumer captions are exact values. Never replace a shorter
+    # model inside a longer one (GTX 750 inside GTX 750 Ti), a path or an ID.
+    if ($managedGpuNames -ccontains $Value) { return $to }
+    $updated = $Value
+    foreach ($sourceName in $from) {
+        $updated = $updated.Replace($sourceName, $to)
+    }
+    return $updated
+}
 
 W "==== Config ===="
 W ("  ProfileKey = $ProfileKey")
@@ -347,8 +360,7 @@ function RewriteKey($path) {
     if (-not $props) { return }
     $props.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' -and $_.Value -is [string] } | ForEach-Object {
         $orig = $_.Value
-        $new  = $orig
-        foreach ($f in $from) { $new = $new.Replace($f, $to) }
+        $new = Convert-ManagedGpuCaption $orig
         if ($new -ne $orig) {
             W ("  $path :: $($_.Name)")
             W ("    -  $orig")
@@ -379,7 +391,7 @@ Get-ChildItem $pciRoot -ErrorAction SilentlyContinue | Where-Object { $_.PSChild
         $dd = (Get-ItemProperty $_.PSPath -Name DeviceDesc -ErrorAction SilentlyContinue).DeviceDesc
         if ($dd -and $dd -match '^@oem\d+\.inf,%[^%]+%;(.+)$') {
             $clean = $Matches[1]
-            foreach ($f in $from) { $clean = $clean.Replace($f, $to) }
+            $clean = Convert-ManagedGpuCaption $clean
             W ("  $($_.PSPath) :: DeviceDesc => $clean")
             Set-ItemProperty -Path $_.PSPath -Name DeviceDesc -Value $clean -Force
         }

@@ -25,7 +25,7 @@
 #                                   # 固定第 8-10 参数，第 5-7 参数可留空；
 #                                   # 旧 1-7 参数兼容。
 #   mdev_configure_console_interval <uuid> <microseconds>
-#                                   # R535 console REGION copy 周期。
+#                                   # R535 / exact R570.172.07 REGION copy 周期。
 #   mdev_set_identity_override <uuid> <guest_gpu_name>
 #                 [vgpu_pci_id vgpu_pci_device_id frl_enabled
 #                  rm_fb_bus_width rm_fb_ram_type rm_fb_memory_vendor]
@@ -808,7 +808,7 @@ mdev_configure_console_interval() {
     }
     (( interval_us == 0 )) && return 0
     if (( interval_us < 5000 || interval_us > 1000000 )); then
-        mdev_err "NVIDIA R535 console interval 必须为 5000..1000000us: $interval_us"
+        mdev_err "NVIDIA console interval 必须为 5000..1000000us: $interval_us"
         return 1
     fi
     # frame_rate_limiter：0 禁用 FRL（vGPU 输出跟随 guest 渲染帧率），
@@ -826,26 +826,31 @@ mdev_configure_console_interval() {
 
     driver_version=$(cat "$NVIDIA_MODULE_VERSION_FILE" 2>/dev/null || true)
     if [[ "$driver_version" != 535.* &&
+          "$driver_version" != 570.172.07 &&
           "${VGPU_CONSOLE_INTERVAL_FORCE:-0}" != 1 ]]; then
-        mdev_err "跳过未验证的 console interval 参数: NVIDIA ${driver_version:-unknown}（仅 R535 已验证）"
+        mdev_err "跳过未审核的 console interval 参数: NVIDIA ${driver_version:-unknown}（仅 R535 与 570.172.07）"
         return 0
     fi
 
-    # NVIDIA R535 的默认 console-copy / VGA-copy 周期都是 100000us，
-    # 所以 QEMU 即使以 60Hz QUERY_GFX_PLANE，也只能看到约 10 个新帧/秒。
-    # 这两个内部键必须在 QEMU 打开 mdev 之前一起设置。
+    # R535 与 570.172.07 的 vendor lib 默认周期均为 100000us，
+    # QEMU 的 60Hz QUERY_GFX_PLANE 本身不会缩短这条默认拷贝周期。
+    # 570.172.07 已静态核对解析、默认值与计时消费，尚待实机性能验收。
+    # 这两个内部键必须在 QEMU 打开 mdev 之前一起设置；不推广到 R580。
     local params="intervaltime=${interval_us},vgaintervaltime=${interval_us}"
     [[ -z "$frl" ]] || params+=",frame_rate_limiter=${frl}"
     if _mdev_is_production_sysfs && _mdev_admin_available; then
         _mdev_admin_run console-interval "$uuid" "$interval_us" ${frl:+"$frl"} || {
-            mdev_err "设置 R535 console REGION 周期失败"
+            mdev_err "设置 NVIDIA console REGION 周期失败"
             return 1
         }
     elif ! _mdev_sudo_write "$params" "$params_path"; then
-        mdev_err "设置 R535 console REGION 周期失败"
+        mdev_err "设置 NVIDIA console REGION 周期失败"
         return 1
     fi
-    mdev_err "R535 console REGION 周期=${interval_us}us FRL=${frl:-profile默认}（实验性内部参数）"
+    mdev_err "NVIDIA ${driver_version:-unknown} console REGION 周期=${interval_us}us FRL=${frl:-profile默认}（实验性内部参数）"
+    if [[ "$driver_version" == 570.172.07 ]]; then
+        mdev_err "570.172.07 console 参数仅完成 vendor 静态审核，实机帧率与稳定性仍需验收"
+    fi
 }
 
 _mdev_allocate_locked() {

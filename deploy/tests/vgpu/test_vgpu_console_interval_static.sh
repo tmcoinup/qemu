@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guard the R535 native-console cadence override used before QEMU opens mdev.
+# Guard the native-console cadence override used before QEMU opens mdev.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,6 +20,8 @@ grep -Fq 'intervaltime=${interval_us},vgaintervaltime=${interval_us}' \
     || fail "both NVIDIA console-copy intervals must be configured together"
 grep -Fq 'driver_version" != 535.*' "$MDEV_LIB" \
     || fail "undocumented console parameters lost their R535 version guard"
+grep -Fq 'driver_version" != 570.172.07' "$MDEV_LIB" \
+    || fail "R570 console parameters lost their exact vendor version guard"
 grep -Fq 'VGPU_CONSOLE_INTERVAL_US="${VGPU_CONSOLE_INTERVAL_US:-8333}"' \
     "$START_VM" \
     || fail "native console no longer defaults to an approximately 120Hz copy period"
@@ -60,6 +62,7 @@ fi
 
 # Exercise the helper without touching real sysfs or sudo.
 TMP_DIR="$(mktemp -d)"
+trap 'rm -rf -- "$TMP_DIR"' EXIT
 UUID=12345678-1234-1234-1234-123456789abc
 mkdir -p "$TMP_DIR/target/nvidia" "$TMP_DIR/devices"
 touch "$TMP_DIR/target/nvidia/vgpu_params"
@@ -92,18 +95,50 @@ if mdev_configure_console_interval bad-uuid 16667 2>/dev/null; then
     fail "invalid UUID was accepted"
 fi
 
-printf '%s\n' 550.1 >"$TMP_DIR/nvidia-version"
+printf '%s\n' 570.172.07 >"$TMP_DIR/nvidia-version"
 WRITE_CONTENT=""
-mdev_configure_console_interval "$UUID" 16667 2>/dev/null
-[[ -z "$WRITE_CONTENT" ]] \
-    || fail "unverified non-R535 driver was configured without FORCE"
+mdev_configure_console_interval "$UUID" 8333 0 2>"$TMP_DIR/r570.log"
+[[ "$WRITE_CONTENT" == \
+   'intervaltime=8333,vgaintervaltime=8333,frame_rate_limiter=0' ]] \
+    || fail "exact R570 did not receive both intervals and the FRL override"
+grep -Fq '静态审核' "$TMP_DIR/r570.log" \
+    || fail "R570 static audit was presented as host validation"
 
-printf '%s\n' 535.161.05 >"$TMP_DIR/nvidia-version"
-_mdev_sudo_write() { return 1; }
-if mdev_configure_console_interval "$UUID" 16667 2>/dev/null; then
-    fail "sysfs write failure was not propagated"
+for interval in 5000 1000000; do
+    mdev_configure_console_interval "$UUID" "$interval" 1 2>/dev/null
+    [[ "$WRITE_CONTENT" == \
+       "intervaltime=$interval,vgaintervaltime=$interval,frame_rate_limiter=1" ]] \
+        || fail "R570 rejected an interval boundary or FRL=1"
+done
+for invalid in 019000 4999 1000001 not-a-number; do
+    if mdev_configure_console_interval "$UUID" "$invalid" 2>/dev/null; then
+        fail "R570 accepted invalid interval: $invalid"
+    fi
+done
+if mdev_configure_console_interval "$UUID" 8333 2 2>/dev/null; then
+    fail "R570 accepted an invalid FRL value"
 fi
+WRITE_CONTENT=""
+mdev_configure_console_interval "$UUID" 0 0 2>/dev/null
+[[ -z "$WRITE_CONTENT" ]] || fail "interval=0 did not remain a no-op"
+
+for version in 550.1 570.133.10 570.172.070 570.172.08 580.159.01 unknown; do
+    printf '%s\n' "$version" >"$TMP_DIR/nvidia-version"
+    WRITE_CONTENT=""
+    VGPU_CONSOLE_INTERVAL_FORCE=0 \
+        mdev_configure_console_interval "$UUID" 8333 0 2>/dev/null
+    [[ -z "$WRITE_CONTENT" ]] \
+        || fail "unreviewed driver was configured: $version"
+done
+
+_mdev_sudo_write() { return 1; }
+for version in 535.161.05 570.172.07; do
+    printf '%s\n' "$version" >"$TMP_DIR/nvidia-version"
+    if mdev_configure_console_interval "$UUID" 8333 0 2>/dev/null; then
+        fail "sysfs write failure was not propagated for $version"
+    fi
+done
 
 rm -rf -- "$TMP_DIR"
 
-echo "OK: R535 vGPU console interval static checks passed"
+echo "OK: R535 and exact R570 vGPU console interval mock checks passed"

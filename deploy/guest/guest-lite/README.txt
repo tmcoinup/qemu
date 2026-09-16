@@ -1,4 +1,4 @@
-G-11 Windows 10 Guest Lite 2.6.7（全面精简/提速一键包）
+G-11 Windows 10 Guest Lite 2.6.8（全面精简/提速一键包）
 =====================================================
 
 用途
@@ -7,7 +7,7 @@ G-11 Windows 10 Guest Lite 2.6.7（全面精简/提速一键包）
 只用于 G-11/vGPU 的受控 Windows 10 实验机或模板。V-11 是独立分支，不要把
 G-11 的 VM 目录、驱动或配置复制给 V-11。
 
-2.6.7 一次完成 Defender 杀毒、防火墙、Windows/商店/常见软件自动更新、资讯、
+2.6.8 一次完成 Defender 杀毒、防火墙、Windows/商店/常见软件自动更新、资讯、
 天气、OneDrive/设置同步、通知、任务栏搜索框、消费 App、后台任务和 VM 高 I/O 项的停用/精简；
 同时开启 Windows 游戏模式、关闭 Xbox/Game DVR 后台录制、切换高性能电源计划，
 并把每个已安装电源计划的“关闭屏幕”和“自动睡眠”交流/电池值都设为“从不”；
@@ -15,11 +15,25 @@ G-11 的 VM 目录、驱动或配置复制给 V-11。
 映像固定为 High（绝不使用 Realtime）优先级。Apply 还会清理当前用户 LocalAppData\Temp
 和 Windows\Temp 内“创建时间和最后写入时间均超过 24 小时”的普通临时文件，跳过
 重解析点、新文件和占用中的文件。
-把默认播放端点静音，并把输入顺序设为 en-US/US keyboard 第一、zh-CN/Microsoft
+禁用麦克风访问，把默认播放端点静音，并把输入顺序设为 en-US/US keyboard 第一、zh-CN/Microsoft
 Pinyin 第二，同时保存精确回滚基线。它不会安装
 第三方运行库：G11GuestLite.exe 是普通 64 位用户态 EXE，
 编译器支持已静态链接，启动器运行时只导入 Windows 自带 DLL；优化脚本调用
 PowerShell 5.1、系统命令，以及来宾已安装正式 NVIDIA 驱动的 System32 NVAPI。
+
+2.6.8 新增“禁用麦克风”：关闭 Windows“隐私 -> 麦克风”的设备访问、当前用户应用
+访问及桌面应用访问，同时将 Windows 应用麦克风策略设为强制拒绝，清空允许/用户
+控制例外。无需插入麦克风也能应用；音频服务、设备和驱动保留。此项是 Windows 隐私
+层禁用，不是设备管理器里的硬件停用；审计验证配置值，实际录音需在 Windows 中验收。
+旧版升级直接重新运行新包，不要删除 state.json；仅追加麦克风原始值，不覆盖旧基线。
+开机/登录补强会重新关闭访问；回滚恢复升级前的麦克风开关和原有例外。
+
+麦克风最短操作：按下方流程重新封装并双击 G11GuestLite.exe，完成后重启，打开
+“设置 -> 隐私 -> 麦克风”，确认设备/应用/桌面应用访问关闭或因策略置灰；再双击
+C:\ProgramData\G11GuestLite\tools\02-Audit.cmd，要求 VERIFY PASS。
+报告中 group=Microphone 的六项均应符合 desired；用实际录音/语音应用确认无法采集。
+需要恢复时双击同目录 03-Rollback.cmd，等待 ROLLBACK PASS 后重启；它会回滚整个
+Guest Lite 配置。旧包已挂载时，重新执行 usb-mount 才能取得新 EXE。
 
 2.6.7 的克隆快速路径不会减少验收：当前 GPU 的签名驱动按 DeviceID 精确查询，已
 发布 INF 与正在加载的 nvlddmkm.sys 所在 nvgridsw.inf_* DriverStore 目录按 SHA-256
@@ -159,7 +173,9 @@ state.json 并重施 2.6.7 即可按原始基线恢复。
   恢复首次 Apply 前的每个值。
 - 任务栏：把当前用户 SearchboxTaskbarMode 设为 0，默认隐藏搜索框；开始菜单和
   Win 键搜索仍可用，Rollback 恢复首次 Apply 前的显示方式。
-- 声音：只把默认播放端点设为静音；不禁用 Windows Audio 服务，不卸载/禁用音频
+- 麦克风：关闭设备、当前用户应用和桌面应用访问，强制拒绝 Windows 应用麦克风
+  权限；原值进入回滚基线，补强、审计与克隆重启验收都检查此项。
+- 声音：把默认播放端点设为静音；不禁用 Windows Audio 服务，不卸载/禁用音频
   设备或驱动。Apply 前的静音状态进入回滚基线，开机补强和审计会再次核验。
 - 输入法：把当前用户语言/输入列表固定为 English (United States) - US
   (`0409:00000409`) 第一、中文（简体）Microsoft Pinyin
@@ -200,7 +216,7 @@ state.json 并重施 2.6.7 即可按原始基线恢复。
 校验后，校验内置 Guest Lite manifest 和每个文件的 SHA-256，再以内部 CloneApply
 模式自动应用；它复用系统 NVAPI 的那一次验证重启，不额外安装第三方组件。重启后
 SYSTEM 同时验收 MpsSvc=Auto/Running/PID>0、BFE=Auto/Running、policy 文件、通知
-关闭、默认声音静音、所有电源计划的关闭屏幕/自动睡眠均为“从不”、en-US/US 第一、
+关闭、麦克风访问关闭及其回滚基线、默认声音静音、所有电源计划的关闭屏幕/自动睡眠均为“从不”、en-US/US 第一、
 Microsoft Pinyin 第二、目标用户 SID 和精确回滚
 基线；finalizer 还会主动运行一次 SYSTEM 补强任务，并要求返回码为 0、日志为 pass，
 全部通过才写宿主可接受的完成标记并关机。V-11 不走此链。

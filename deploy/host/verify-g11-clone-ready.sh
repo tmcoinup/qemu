@@ -212,7 +212,7 @@ describe_guest_marker_mismatch() {
              then empty else "driver-license-or-code-integrity" end),
             (if ((.guestLite | type) == "object" and
                  .guestLite.state == "validated" and
-                 .guestLite.profileVersion == "2.6.7")
+                 .guestLite.profileVersion == "2.6.8")
              then empty else "guest-lite-schema-or-version" end),
             (if (.guestLite.firewallService == "MpsSvc" and
                  .guestLite.firewallStartMode == "Auto" and
@@ -285,7 +285,7 @@ if ! jq -e \
         "userSid"
     ] and
     .guestLite.state == "validated" and
-    .guestLite.profileVersion == "2.6.7" and
+    .guestLite.profileVersion == "2.6.8" and
     .guestLite.userSid == (.machineSid + "-500") and
     .guestLite.rollbackBaseline == "C:\\ProgramData\\G11GuestLite\\state.json" and
     .guestLite.enforcementTask == "\\G11GuestLite-EnforceProfile" and
@@ -458,4 +458,4 @@ COMPLETED=1
 trap - EXIT HUP INT TERM
 rmdir -- "$MOUNT_DIR"
 printf 'G11_SAFE_IDENTITY_JSON=%s\n' "$SAFE_IDENTITY_JSON"
-echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / SATA+NVMe boot paths / Guest Lite 2.6.7 fast path + Game Mode + Game DVR off + NVIDIA maximum performance + DNF High-on-launch + stale Temp cleaned + reviewed background processes stopped + audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc Automatic/Running / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"
+echo "[g11-clone-verify] PASS: vm${VM_ID} / independent Windows OS identity / SATA+NVMe boot paths / Guest Lite 2.6.8 fast path + Game Mode + Game DVR off + NVIDIA maximum performance + DNF High-on-launch + stale Temp cleaned + reviewed background processes stopped + microphone access disabled / audio muted + notifications off + taskbar search hidden + en-US/US first + Microsoft Pinyin second + MpsSvc Automatic/Running / GRID 538.33 / Code 0 / Licensed / x86+x64 system NVAPI + monitor identity validated"

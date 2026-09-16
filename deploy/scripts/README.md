@@ -9,6 +9,9 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 |---|---|
 | 启动 | `./deploy/scripts/start-vm.sh ID [options]` |
 | 停止 | `./deploy/scripts/stop-vm.sh ID [options]` |
+| 已有 VM 只换显卡 | `./deploy/scripts/vmctl.sh gpu-resize --vm ID:PROFILE --host-config FILE [--apply]`；[2G 迁移教程](../docs/G11-GPU-RESIZE.md) |
+| 换显存档后复用原驱动 | `./deploy/scripts/vmctl.sh gpu-rebind ID --proxy --cpu-isolate=false --memory-prealloc=false`；标准 VGA 枚举 → 完整关机 → 离线认证 → 普通启动 |
+| 挂载系统身份更新包 | `./deploy/scripts/mount-system-nvapi.sh ID /绝对路径/包.iso`；先确认普通单 vGPU 模式，再挂载只读光盘 |
 | 运行中显示控制 | `./deploy/scripts/ctl-vm.sh ID ACTION` |
 | 初始化宿主 bridge | `./deploy/scripts/setup-bridge.sh` |
 | 宿主动态提速/回滚 | `./deploy/scripts/g11-performance.sh audit\|apply\|restore` |
@@ -73,8 +76,8 @@ NVIDIA mdev/vGPU 路径，不枚举已退役分支的标题、端点或参数。
 `autorun.inf` 覆盖名称，也不创建或预分配宿主机镜像。它和任意 host 目录 U 盘均为
 只读 VVFAT/USB Mass Storage，不需要 Windows 额外驱动。详见
 [`../docs/G11-USB-DIRECTORY.md`](../docs/G11-USB-DIRECTORY.md)。
-`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.6.7；Defender、防火墙 profile、
-系统/软件更新、OneDrive、资讯天气、通知、消费 App、默认静音、en-US/US 第一和
+`guest-lite.sh ID usb-mount` 会封装并刷新 Guest Lite 2.6.8；Defender、防火墙 profile、
+系统/软件更新、OneDrive、资讯天气、通知、消费 App、禁用麦克风访问、默认静音、en-US/US 第一和
 Microsoft Pinyin 第二、游戏模式/Game DVR、高性能电源、所有已安装计划的屏幕关闭与
 自动睡眠“从不”、NVIDIA 最高性能、DNF High
 优先级和固定 Temp 旧文件清理的 VM1

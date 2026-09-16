@@ -77,9 +77,96 @@ VGPU_HOST_MEMORY_NODE_BIND=all
 VGPU_RESOURCE_PROFILE_1024=V100X-1Q
 VGPU_RESOURCE_PROFILE_2048=V100X-2Q
 VGPU_RM_FB_IDENTITY_MODE=required
+VGPU_CONSOLE_INTERVAL_US=8333
 ```
 
 这里的 `V100X` 只是 SXM2 16GB 示例；其它 V100 型号使用各自前缀。
+
+### 已有 V100/R570 配置的 SDL 周期迁移
+
+本节只适用于 **V100 + 精确 host driver `570.172.07`**。该版本 vendor 库的
+`intervaltime`、`vgaintervaltime` 解析、`100000us` 初值和主周期计时消费已经静态
+核对，允许试用 `8333us`。**这项周期调整尚无真实 V100 的运行、性能或稳定性验证**；
+前文的 1Q/2Q 验收不代表这项调整也通过验收。不要把它用于其它 R570 小版本或 R580。
+
+新生成的 V100/R570 策略使用 `8333`。安装更新不会自动覆盖现有配置中的
+`VGPU_CONSOLE_INTERVAL_US=0`；`0` 表示不写这些内部参数，保留驱动默认。
+配置文件会覆盖启动环境中的同名变量，因此只在终端加环境变量或换 SDL 启动封装，
+不能可靠地迁移旧 `0`。`vgpu-mdev-admin console-interval` 只配置单个 mdev，
+也不负责保存这份持久化策略。
+
+先安装包含本次修改的软件包，或更新源码中的部署脚本。保存工作，在 Windows 内
+正常关闭使用该 GPU 的全部 VM，等待 QEMU 和 mdev 回收。不要对运行中的 VM 写参数、
+强杀 QEMU、删除 mdev 或重启驱动。下面只读检查中，驱动必须精确匹配，mdev 列表
+必须为空；有输出时先完成正常关机，生成器也会再次检查并拒绝活动 mdev：
+
+```bash
+cat /sys/module/nvidia/version
+find /sys/bus/mdev/devices -mindepth 1 -maxdepth 1 -print
+```
+
+按实际启动方式选择一组路径，**两组只执行一组**。如已显式设置
+`VGPU_HOST_CONFIG` 或 GMate 的 `VMATE_G11_HOST_CONFIG`，使用那个实际路径：
+
+```bash
+# 源码启动；仓库不在此处时换成实际绝对路径
+g11_deploy=/home/ubuntu/projects/qemu/deploy
+g11_host_config="$g11_deploy/host/vgpu-host.conf"
+```
+
+```bash
+# GMate 的独立 deb 安装布局
+g11_deploy=/opt/gmate/deploy/g11
+g11_host_config=/etc/gmate/g11-vgpu-host.conf
+```
+
+先读原策略并备份，再更新已安装的窄权限 helper；从运行 GMate/QEMU 的普通用户
+终端执行。源码和已安装 helper 必须同时支持精确 `570.172.07`，只更新前者不够：
+
+```bash
+grep -E '^(# preset=|VGPU_)' "$g11_host_config"
+grep -F '570.172.07' "$g11_deploy/lib/vgpu-mdev.sh" \
+  "$g11_deploy/host/vgpu-mdev-admin.sh"
+sudo cp --no-clobber -- "$g11_host_config" "$g11_host_config.before-r570-cadence"
+sudo "$g11_deploy/host/install-vgpu-mdev-admin.sh" --user "$(id -un)"
+grep -F '570.172.07' /usr/local/libexec/qemu-vgpu-mdev-admin
+```
+
+若版本匹配的代码不存在或安装失败，先完成软件更新，不要用 FORCE 绕过。
+备份已存在时保留原备份；确认里面仍是所需的迁移前配置。
+
+对于配置生成器管理的标准策略，复用现有入口即可迁移。下面是 **SXM2 16GB、
+mixed、all/all** 示例；必须把 preset、BDF、显存模式和 NUMA 策略改为刚才读到的
+原配置，避免同时改变资源分配。equal 池还要保留原 `--tier 1024` 或 `--tier 2048`：
+
+```bash
+sudo "$g11_deploy/configure-g11-vgpu-host.sh" \
+  --preset v100-sxm2-16gb --gpu 0000:81:00.0 --fb-mode mixed \
+  --cpu-node-bind all --memory-node-bind all \
+  --output "$g11_host_config" --force
+```
+
+`--force` 在这里仅表示允许原子替换配置文件，不绕过驱动版本或活动 mdev 检查。
+原文件有额外自定义字段，或无法完整确认原生成参数时，保留原文件，改用
+`sudoedit "$g11_host_config"`，只把唯一的 `VGPU_CONSOLE_INTERVAL_US=0` 改成
+`VGPU_CONSOLE_INTERVAL_US=8333`。两种方式选其一；编辑方式同样必须先正常关机，
+不要重复添加同名赋值。
+
+```bash
+sudo bash -n "$g11_host_config"
+grep '^VGPU_CONSOLE_INTERVAL_US=' "$g11_host_config"
+```
+
+语法检查成功且只有一行 `VGPU_CONSOLE_INTERVAL_US=8333` 后，才通过原来的 GMate
+界面或 `start-vm.sh` 正常启动一台 VM。启动输出应含
+`NVIDIA 570.172.07 console REGION 周期=8333us`，并提示静态审核、实机待验收。
+该输出表示启动器提交了参数，不证明源画面已达到 120 FPS。保持同一个应用，比较
+首次加载、切场景、黑屏恢复和持续动态画面；两项 `false` 可以继续保留。
+
+如需撤回，先再次正常关闭相关 VM，再用 `sudoedit` 将这一行改回 `0`，重复语法
+检查，然后正常启动。现有运行进程不会因修改配置而热更新。回退 `0` 会同时停止
+启动器写入这组周期和 FRL 参数；之后重新生成策略或执行新版 GMate 的宿主修复，
+可能再次按产品默认生成 `8333`，需要复核这一行。
 
 ## 3. 配置旧 RTX 2080/R535 固定档
 

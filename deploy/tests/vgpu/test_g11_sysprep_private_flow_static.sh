@@ -123,7 +123,7 @@ PY
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.7" and
+    .schemaVersion == 1 and .profileVersion == "2.6.8" and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
         "G11-Guest-Lite.ps1", "README.txt"
@@ -261,6 +261,9 @@ grep -Fq '$stateMachineGuid -cne [string]$osIdentity.MachineGuid' \
 grep -Fq "Name = 'ToastEnabled'; Value = 0; Type = 'DWord'" \
     <<<"$guest_lite_state_reader" ||
     fail "clone finalizer does not verify the notification master switch"
+grep -Fq 'Guest Lite rollback state lacks a unique microphone baseline' \
+    <<<"$guest_lite_state_reader" ||
+    fail "clone finalizer does not require the microphone rollback baseline"
 grep -Fq "Name = 'SearchboxTaskbarMode'; Value = 0; Type = 'DWord'" \
     <<<"$guest_lite_state_reader" ||
     fail "clone finalizer does not verify hidden taskbar search"
@@ -567,6 +570,7 @@ Payload/GuestLite/G11-Guest-Lite.ps1
 Payload/GuestLite/README.txt
 Payload/GuestLite/clone-manifest.json
 Payload/Retry-Clone-Initialization.cmd
+Prepare-G11-Storage-Portability.ps1
 Reset-G11-Template-State.ps1
 Seal-G11-Template.cmd
 Standalone-GuestLite/G11GuestLite.exe
@@ -734,7 +738,8 @@ rm -- "$KIT_TMP/PreviousCompleteKit/Assert-G11-Template-Ready.ps1" \
     "$KIT_TMP/PreviousCompleteKit/Reset-G11-Template-State.ps1" \
     "$KIT_TMP/PreviousCompleteKit/Collect-Sysprep-Diagnostics.ps1" \
     "$KIT_TMP/PreviousCompleteKit/Assert-G11-Sysprep-Servicing-Ready.ps1" \
-    "$KIT_TMP/PreviousCompleteKit/Invoke-G11-Sysprep.ps1"
+    "$KIT_TMP/PreviousCompleteKit/Invoke-G11-Sysprep.ps1" \
+    "$KIT_TMP/PreviousCompleteKit/Prepare-G11-Storage-Portability.ps1"
 "$KIT" "$KIT_TMP/PreviousCompleteKit" --replace >/dev/null
 [[ -s "$KIT_TMP/PreviousCompleteKit/Collect-Sysprep-Diagnostics.ps1" ]] ||
     fail "--replace did not safely upgrade the previous complete kit"
@@ -743,14 +748,16 @@ rm -rf -- "$KIT_TMP/DiagnosticCompleteKit/Template-Reset"
 rm -- "$KIT_TMP/DiagnosticCompleteKit/Assert-G11-Template-Ready.ps1" \
     "$KIT_TMP/DiagnosticCompleteKit/Reset-G11-Template-State.ps1" \
     "$KIT_TMP/DiagnosticCompleteKit/Assert-G11-Sysprep-Servicing-Ready.ps1" \
-    "$KIT_TMP/DiagnosticCompleteKit/Invoke-G11-Sysprep.ps1"
+    "$KIT_TMP/DiagnosticCompleteKit/Invoke-G11-Sysprep.ps1" \
+    "$KIT_TMP/DiagnosticCompleteKit/Prepare-G11-Storage-Portability.ps1"
 "$KIT" "$KIT_TMP/DiagnosticCompleteKit" --replace >/dev/null
 [[ -s "$KIT_TMP/DiagnosticCompleteKit/Assert-G11-Template-Ready.ps1" &&
    -s "$KIT_TMP/DiagnosticCompleteKit/Template-Reset/GuestPerformance/Optimize-Guest.ps1" ]] ||
     fail "--replace did not safely upgrade the diagnostic complete kit"
 cp -a -- "$KIT_TMP/G11SysprepKit" "$KIT_TMP/PreHardenedCompleteKit"
 rm -- "$KIT_TMP/PreHardenedCompleteKit/Assert-G11-Sysprep-Servicing-Ready.ps1" \
-    "$KIT_TMP/PreHardenedCompleteKit/Invoke-G11-Sysprep.ps1"
+    "$KIT_TMP/PreHardenedCompleteKit/Invoke-G11-Sysprep.ps1" \
+    "$KIT_TMP/PreHardenedCompleteKit/Prepare-G11-Storage-Portability.ps1"
 "$KIT" "$KIT_TMP/PreHardenedCompleteKit" --replace >/dev/null
 [[ -s "$KIT_TMP/PreHardenedCompleteKit/Assert-G11-Sysprep-Servicing-Ready.ps1" &&
    -s "$KIT_TMP/PreHardenedCompleteKit/Invoke-G11-Sysprep.ps1" ]] ||

@@ -145,7 +145,7 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/vmctl.sh cdrom <vm_id> {status\|mount ABS.iso [--replace]\|eject}` | 普通启动零光驱；`mount` 热插只读 USB-BOT/SCSI 光驱，`eject` 删除整台设备，无需重启 Windows |
 | `./deploy/scripts/shared-usb.sh <vm_id> {mount\|status\|eject}` | 把 `shared/usb/` 热插为逻辑 128 GiB、宿主不预分配镜像的只读 FAT32 U 盘；真实卷标固定为 `U盘` |
 | `./deploy/scripts/usb-directory.sh <vm_id> mount ABS_DIR [--replace]` | 把明确指定的 host 目录免驱热插为只读 VVFAT/USB Mass Storage |
-| `./deploy/scripts/guest-lite.sh <vm_id> usb-mount` | 封装 Guest Lite 2.6.7（保留 MpsSvc 兼容 NVIDIA 控制面板，退役 CDPSvc 禁用并按旧基线恢复 Settings 兼容性；含克隆快速路径、Defender/防火墙 profile/更新/云盘/通知/输入法/游戏模式/Game DVR/高性能电源、所有计划屏幕与自动睡眠“从不”、NVIDIA 最高性能/DNF High/安全清理旧 Temp/后台进程）到固定目录并刷新只读公共工具 U 盘 |
+| `./deploy/scripts/guest-lite.sh <vm_id> usb-mount` | 封装 Guest Lite 2.6.8（新增可回滚的麦克风访问禁用；保留 MpsSvc 兼容 NVIDIA 控制面板，退役 CDPSvc 禁用并按旧基线恢复 Settings 兼容性；含克隆快速路径、Defender/防火墙 profile/更新/云盘/通知/输入法/游戏模式/Game DVR/高性能电源、所有计划屏幕与自动睡眠“从不”、NVIDIA 最高性能/DNF High/安全清理旧 Temp/后台进程）到固定目录并刷新只读公共工具 U 盘 |
 | `./deploy/scripts/vmctl.sh seal <source_id> <base_name> [--no-clean]` | 将停机 VM 封装为具名 standalone base；默认先离线清理 WeGame/Tencent 跨克隆身份，失败不发布；`--no-clean` 仅用于明确保留状态 |
 | `./deploy/scripts/vmctl.sh clone <base_name> <new_id> [--gpu-profile PROFILE] [--start]` | 精确选择具名 portable base，默认创建 V-11 式 hard-link pin + 小型增量盘；不指定 GPU 时按宿主 framebuffer 单档、显示器按新建池各随机一次并写死到 `vm.conf`，`--full-copy` 才复制独立整盘 |
 | `./deploy/scripts/vmctl.sh refresh-base <base_name> [--check]` | 仓库首启合同升级后，一键检查/原子刷新私有 Sysprep 母盘；已有克隆 pin 不变，后续克隆使用当前 finalizer + Guest Lite |
@@ -179,6 +179,7 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 | `./deploy/scripts/g11-performance.sh {audit\|apply\|restore}` | 一键审核、应用或回滚宿主动态全频段/睿频、稳定 TSC 配套、THP 与 NVMe 低抖动策略；见 [`docs/G11-PERFORMANCE-QUICKSTART.md`](docs/G11-PERFORMANCE-QUICKSTART.md) |
 | `./deploy/host/g11-host-display.sh {audit\|check}` / `sudo ... {apply\|rollback}` | 修复 NVIDIA vGPU-only 卡被固件/GDM 误选为宿主主屏导致的开机花屏与 Xorg 重试；只固定 GDM 走 AMD Wayland，不碰 guest/驱动，见 [`docs/G11-HOST-DISPLAY-BOOT-FIX.md`](docs/G11-HOST-DISPLAY-BOOT-FIX.md) |
 | `./deploy/scripts/g11-sdl-performance.sh {audit\|profile\|start\|verify}` | SDL 低延迟启动与运行参数核验；教程含保留两个资源参数为 `false` 的切场景优化、构建与 VMate 新包生效步骤，见 [`docs/G11-SDL-PERFORMANCE.md`](docs/G11-SDL-PERFORMANCE.md) |
+| `./deploy/scripts/start-vm.sh N --shared-performance` | 单路/双路共享全部可用 CPU/NUMA 与宿主性能策略；多开可另选 SDL wrapper 的 `--multi-vm`，见 [`docs/G11-FULL-PERFORMANCE.md`](docs/G11-FULL-PERFORMANCE.md) |
 | `./deploy/host/install-g11-sdl-wayland-decor.sh [--check]` | 安装/检查纯 userspace Cairo libdecor；保留 Wayland 实时 FPS 标题并绕开 GTK monitor 日志风暴，见 [`docs/G11-SDL-WAYLAND-TITLE.md`](docs/G11-SDL-WAYLAND-TITLE.md) |
 | `HOST_OOM_PROTECT=0 ./deploy/scripts/start-vm.sh <vm_id>` | 仅诊断：关闭默认的每 VM 进程树临时 `oom_score_adj=-500`；普通启动不需要设置 |
 | `QEMU_DISK_AIO=threads ./deploy/scripts/start-vm.sh <vm_id>` | 仅诊断：跳过默认 `io_uring` → `native` → `threads` active-read 自动选择，固定可靠线程池；不改变 guest 磁盘身份 |

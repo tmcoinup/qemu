@@ -56,6 +56,8 @@
 #                      触页分配，Guest 容量/身份不变
 #   --host-performance 启动前必须应用动态全频段宿主性能策略
 #   --no-host-performance 本次不改变宿主性能策略
+#   --shared-performance 所有在线 CPU/NUMA 节点共享，关闭 CPU 隔离，
+#                      必须应用宿主性能策略；单路/双路自动适配，容量不变
 #   --svc-cpus <0..64|auto>
 #                      QEMU 主循环/显示/IO 专用逻辑 CPU 数（默认 0，不单独分配）
 #   --dgame-preview    为 DGame 创建独立本地 fb-shm 帧源（native 默认）
@@ -2195,6 +2197,7 @@ QEMU_SDL_WINDOWS_CURSOR="${QEMU_SDL_WINDOWS_CURSOR:-$VM_ASSET_DIR/aero_arrow.cur
 QEMU_SDL_DISABLE_IBUS="${QEMU_SDL_DISABLE_IBUS:-1}"
 QEMU_SDL_PRESENT_MODE="${QEMU_SDL_PRESENT_MODE:-fixed}"
 QEMU_SDL_TARGET_FPS="${QEMU_SDL_TARGET_FPS:-60}"
+QEMU_SDL_BACKGROUND_FPS="${QEMU_SDL_BACKGROUND_FPS:-0}"
 QEMU_SDL_INPUT_POLL_MS="${QEMU_SDL_INPUT_POLL_MS:-2}"
 QEMU_SDL_TITLE_FPS="${QEMU_SDL_TITLE_FPS:-auto}"
 QEMU_SDL_CURSOR_MODE="${QEMU_SDL_CURSOR_MODE:-host}"
@@ -2314,6 +2317,8 @@ CPU_ISOLATION="${CPU_ISOLATION:-}"
 # 两项都是本次启动的宿主资源策略，不写入 vm.conf。CLI 省略时分别由
 # CPU required 默认和 G-11 原有的低延迟内存预分配默认接管。
 CPU_ISOLATION_CLI_SEEN=0
+G11_SHARED_PERFORMANCE=0
+G11_HOST_PERFORMANCE_CLI_OFF=0
 G11_MEMORY_PREALLOC=on
 MEMORY_PREALLOC_CLI_SEEN=0
 HOST_OOM_PROTECT="${HOST_OOM_PROTECT:-1}"
@@ -2513,8 +2518,11 @@ while (( $# > 0 )); do
             MEMORY_PREALLOC_CLI_SEEN=1
             shift
             ;;
-        --host-performance) G11_HOST_PERFORMANCE=required; shift ;;
-        --no-host-performance) G11_HOST_PERFORMANCE=off; shift ;;
+        --host-performance)
+            G11_HOST_PERFORMANCE=required; G11_HOST_PERFORMANCE_CLI_OFF=0; shift ;;
+        --no-host-performance)
+            G11_HOST_PERFORMANCE=off; G11_HOST_PERFORMANCE_CLI_OFF=1; shift ;;
+        --shared-performance) G11_SHARED_PERFORMANCE=1; shift ;;
         --svc-cpus)
             require_cli_value "$1" "$#"
             QEMU_SERVICE_CPUS="$2"; shift 2 ;;
@@ -2586,6 +2594,27 @@ while (( $# > 0 )); do
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
 done
+
+if (( G11_SHARED_PERFORMANCE )); then
+    if (( CPU_ISOLATION_CLI_SEEN )) && [[ "$CPU_ISOLATION" != off ]]; then
+        echo "--shared-performance 与 --cpu-isolate=true 冲突" >&2
+        exit 2
+    fi
+    if (( G11_HOST_PERFORMANCE_CLI_OFF )); then
+        echo "--shared-performance 与 --no-host-performance 冲突" >&2
+        exit 2
+    fi
+    CPU_ISOLATION=off
+    G11_HOST_PERFORMANCE=required
+    # Explicit CLI opt-in overrides even an older local/local host policy.
+    # numactl resolves 'all' from this machine's allowed online nodes.
+    G11_CPU_NODE_BIND=all
+    G11_MEMORY_NODE_BIND=all
+else
+    G11_CPU_NODE_BIND=$VGPU_HOST_CPU_NODE_BIND_POLICY
+    G11_MEMORY_NODE_BIND=$VGPU_HOST_MEMORY_NODE_BIND_POLICY
+fi
+readonly G11_CPU_NODE_BIND G11_MEMORY_NODE_BIND
 
 if (( FRESH_UNATTENDED )); then
     [[ "$MODE" == install ]] || {
@@ -3897,11 +3926,23 @@ if [[ "$DRY_RUN" != 1 && "$MONITOR_SYNC" == 1 ]]; then
                 12)
                     case "$MODE" in
                         driver-install-sdl|driver-install-gtk|driver-install-headless)
-                            echo "[start-vm] GRID 首装基线已落盘：安全 EDID/缓存完成，NV_Modes 待驱动安装后补齐"
+                            echo "[start-vm] GRID 首装基线已落盘：安全 EDID/缓存完成，NV_Modes 待目标显卡绑定驱动并完整关机后补齐"
                             ;;
                         *)
-                            echo "[start-vm] ERROR: Windows 尚未安装认证 GRID 驱动；拒绝让 R535 在 native console 上首次接管" >&2
-                            echo "[start-vm]        请运行通用安全入口：./deploy/scripts/vmctl.sh driver-install ${VM_ID}" >&2
+                            echo "[start-vm] ERROR: 目标显卡 PnP 尚未绑定认证 GRID 驱动；拒绝让 R535 在 native console 上首次接管" >&2
+                            echo "[start-vm]        刚更换显卡/显存档：先复用原驱动安全枚举（不是判定驱动包缺失）。" >&2
+                            rebind_cmd=( "./deploy/scripts/vmctl.sh" gpu-rebind "$VM_ID" )
+                            [[ -z "${VMS_DIR_CLI:-}" ]] || rebind_cmd+=( --vms-dir "$VMS_DIR_CLI" )
+                            [[ -z "${VM_DIR_CLI:-}" ]] || rebind_cmd+=( --vm-dir "$VM_DIR_CLI" )
+                            [[ -z "${INSTANCES_DIR_CLI:-}" ]] || rebind_cmd+=( --instances-dir "$INSTANCES_DIR_CLI" )
+                            [[ "$MODE" != vgpu-gtk ]] || rebind_cmd+=( --gtk )
+                            [[ "${PROXY:-0}" != 1 ]] || rebind_cmd+=( --proxy )
+                            [[ "$CPU_ISOLATION" != off ]] || rebind_cmd+=( --cpu-isolate=false )
+                            [[ "$G11_MEMORY_PREALLOC" != off ]] || rebind_cmd+=( --memory-prealloc=false )
+                            printf '[start-vm]        ' >&2
+                            printf ' %q' "${rebind_cmd[@]}" >&2
+                            printf '\n' >&2
+                            echo "[start-vm]        新系统或确认没有匹配驱动包：./deploy/scripts/vmctl.sh driver-install ${VM_ID}" >&2
                             exit 12
                             ;;
                     esac
@@ -4626,6 +4667,13 @@ if [[ "$MODE" == vgpu-sdl ]]; then
     fi
     QEMU_SDL_TARGET_FPS=$((10#$QEMU_SDL_TARGET_FPS))
     QEMU_SDL_INPUT_POLL_MS=$((10#$QEMU_SDL_INPUT_POLL_MS))
+    if [[ ! "$QEMU_SDL_BACKGROUND_FPS" =~ ^[0-9]+$ ]] ||
+            (( 10#$QEMU_SDL_BACKGROUND_FPS > QEMU_SDL_TARGET_FPS )); then
+        echo "QEMU_SDL_BACKGROUND_FPS 必须是 0..${QEMU_SDL_TARGET_FPS}（0=后台不限）" >&2
+        exit 2
+    fi
+    QEMU_SDL_BACKGROUND_FPS=$((10#$QEMU_SDL_BACKGROUND_FPS))
+    export QEMU_SDL_BACKGROUND_FPS
     export QEMU_SDL_TARGET_FPS QEMU_SDL_INPUT_POLL_MS
     case "${QEMU_SDL_PRESENT_MODE,,}" in
         fixed|dynamic)
@@ -4638,6 +4686,9 @@ if [[ "$MODE" == vgpu-sdl ]]; then
             ;;
     esac
     if [[ "$DRY_RUN" != 1 ]]; then
+        if (( QEMU_SDL_BACKGROUND_FPS > 0 )); then
+            echo "[start-vm] SDL 后台窗口 ${QEMU_SDL_BACKGROUND_FPS}Hz；获得键盘焦点后恢复 ${QEMU_SDL_TARGET_FPS}Hz，Guest 任务继续运行"
+        fi
         if [[ "$QEMU_SDL_PRESENT_MODE" == fixed ]]; then
             echo "[start-vm] SDL Present 模式：固定 ${QEMU_SDL_TARGET_FPS}Hz（默认）"
         else
@@ -5502,7 +5553,7 @@ fi
 VGPU_HOST_NUMA_NODE=""
 if [[ -n "${MDEV_UUID:-}" && "$DRY_RUN" != 1 ]]; then
     if VGPU_HOST_NUMA_NODE=$(mdev_numa_node "$MDEV_UUID"); then
-        if [[ "$VGPU_HOST_CPU_NODE_BIND_POLICY" == local ]]; then
+        if [[ "$G11_CPU_NODE_BIND" == local ]]; then
             CPU_ISOLATION_PREFERRED_NUMA_NODE=$VGPU_HOST_NUMA_NODE
         else
             CPU_ISOLATION_PREFERRED_NUMA_NODE=auto
@@ -5654,6 +5705,9 @@ echo "  TSC: policy=${G11_TSC_POLICY} source=${G11_TSC_RUNTIME_SOURCE} effective
 echo "  硬件合法性: ${HARDWARE_LEGALITY_POLICY}/${G11_HW_LEGALITY_CODE}"
 cpu_isolation_print_plan
 g11_host_performance_print_plan
+if (( G11_SHARED_PERFORMANCE )); then
+    echo "  共享性能: 全部可用 CPU/NUMA 节点，无独占分核；每台 VM 保留配置的 vCPU/RAM 上限"
+fi
 echo "  主板: ${BOARD_BRAND} ${BOARD_MODEL} / ${VM_UUID}"
 if [[ "${G11_CHIPSET_PRESENTATION,,}" == catalog ]]; then
     echo "  芯片组: ${CHIPSET_PRESENTATION_NAME} / LPC ${BOARD_LPC_PCI_VENDOR_ID}:${BOARD_LPC_PCI_DEVICE_ID} rev ${BOARD_LPC_PCI_REVISION}（q35/ICH9 行为实现）"
@@ -5901,7 +5955,7 @@ if [[ -n "${MDEV_UUID:-}" ]]; then
         echo "[start-vm] vGPU NUMA 策略需要 numactl；请安装 numactl" >&2
         exit 1
     }
-    if [[ "$VGPU_HOST_CPU_NODE_BIND_POLICY" == all ]]; then
+    if [[ "$G11_CPU_NODE_BIND" == all ]]; then
         VGPU_HOST_CPU_NODE_BIND_RESOLVED=all
     else
         if [[ -z "$VGPU_HOST_NUMA_NODE" && "$DRY_RUN" == 1 ]]; then
@@ -5920,7 +5974,7 @@ if [[ -n "${MDEV_UUID:-}" ]]; then
         numactl
         "--cpunodebind=${VGPU_HOST_CPU_NODE_BIND_RESOLVED}"
     )
-    if [[ "$VGPU_HOST_MEMORY_NODE_BIND_POLICY" == all ]]; then
+    if [[ "$G11_MEMORY_NODE_BIND" == all ]]; then
         QEMU_LAUNCH+=( --interleave=all )
         VGPU_HOST_MEMORY_NODE_BIND_RESOLVED='all (interleave)'
     else

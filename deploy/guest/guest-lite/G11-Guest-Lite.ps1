@@ -7,7 +7,8 @@
   The full profile disables Microsoft Defender Antivirus, Windows and common
   software auto-updaters, Microsoft Store, OneDrive/cloud sync, news/weather
   feeds, notifications, consumer Appx apps, background activity, and reviewed
-  optional services/tasks. It also keeps the default playback endpoint muted,
+  optional services/tasks. It also disables microphone access through Windows
+  privacy settings, keeps the default playback endpoint muted,
   orders English (United States) - US first and Microsoft Pinyin second, enables
   Windows Game Mode while disabling Xbox background recording, selects the
   built-in High performance power plan, sets the display and automatic-sleep
@@ -153,6 +154,19 @@ $RegistryPlan = @(
     [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\Explorer'; Name = 'DisableNotificationCenter'; Type = 'DWord'; Value = 1; Group = 'Notifications' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications'; Name = 'DisableNotifications'; Type = 'DWord'; Value = 1; Group = 'Notifications' },
     [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications'; Name = 'DisableEnhancedNotifications'; Type = 'DWord'; Value = 1; Group = 'Notifications' },
+
+    # Disable Windows microphone privacy access at device, user, and desktop-app
+    # scopes. AppPrivacy alone only covers Windows apps; clear its per-app
+    # allow/user-control exceptions as well. Keep audio services/devices/drivers
+    # intact. The shared registry pipeline snapshots these values before writing,
+    # persists them in Registry.pol, audits them, and enforces HKCU for state.UserSid.
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; Name = 'LetAppsAccessMicrophone'; Type = 'DWord'; Value = 2; Group = 'Microphone' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; Name = 'LetAppsAccessMicrophone_ForceAllowTheseApps'; Type = 'String'; Value = ''; Group = 'Microphone' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; Name = 'LetAppsAccessMicrophone_UserInControlOfTheseApps'; Type = 'String'; Value = ''; Group = 'Microphone' },
+    [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'; Name = 'Value'; Type = 'String'; Value = 'Deny'; Group = 'Microphone' },
+    # Child first so rollback can remove a newly created empty parent afterwards.
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged'; Name = 'Value'; Type = 'String'; Value = 'Deny'; Group = 'Microphone' },
+    [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'; Name = 'Value'; Type = 'String'; Value = 'Deny'; Group = 'Microphone' },
 
     # This is the value managed by Set-WinDefaultInputMethodOverride. It makes
     # the plain en-US US keyboard the default without deleting Chinese or any
@@ -3827,6 +3841,7 @@ This full Windows 10 guest profile will:
 - turn off Windows, Store, and reviewed software auto-updaters
 - turn off OneDrive/cloud sync, news/weather, and background apps
 - mute the default playback endpoint without disabling Windows Audio
+- disable microphone access in Windows device/app/desktop-app privacy settings
 - order en-US/US first and zh-CN/Microsoft Pinyin second
 - remove reviewed consumer apps for this user
 - enable Game Mode while disabling Xbox background recording
@@ -4630,7 +4645,7 @@ function Invoke-Apply {
         }
     }
 
-    Write-Host '[1/12] Applying policy values/input order and disabling startup entries' `
+    Write-Host '[1/12] Applying policy values/input order, disabling microphone access and startup entries' `
         -ForegroundColor Cyan
     foreach ($failure in @(Restore-RetiredRegistryValues $state)) {
         $failures.Add($failure)

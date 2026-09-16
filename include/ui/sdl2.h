@@ -58,6 +58,7 @@ struct sdl2_console {
     bool present_fps_valid;
     uint8_t fps_low_warmup_windows;
     bool fixed_present;
+    int64_t next_background_refresh_ns;
     bool presented_since_refresh;
     bool content_update_pending;
     bool manual_redraw;
@@ -255,6 +256,7 @@ bool sdl2_gl_native_egl_provider_failed(void);
 void sdl2_window_update_size_limits(struct sdl2_console *scon);
 void sdl2_window_resize(struct sdl2_console *scon);
 void sdl2_poll_events(struct sdl2_console *scon);
+bool sdl2_refresh_due(struct sdl2_console *scon);
 void sdl2_flush_window_updates(void);
 void sdl2_note_present(struct sdl2_console *scon);
 void sdl2_note_content_update(struct sdl2_console *scon);

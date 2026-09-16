@@ -12,6 +12,7 @@ qemu_bin="${QEMU_BIN:-$repo_root/build/qemu-system-x86_64}"
 readonly SDL_PROFILE_BALANCED=low-latency-v1
 readonly SDL_PROFILE_ULTRA=ultra-responsive-v1
 readonly SDL_PROFILE_EXPERIMENTAL_120=experimental-120hz-v1
+readonly SDL_PROFILE_MULTI_VM=multi-vm-v1
 readonly SDL_PRESENT_MODE=fixed
 readonly SDL_CURSOR_MODE=host
 readonly SDL_ALLOW_HOST_SLEEP=0
@@ -20,6 +21,7 @@ readonly SDL_ALLOW_HOST_SLEEP=0
 # passed to one start-vm process; nothing is persisted in vm.conf.
 SDL_PROFILE=$SDL_PROFILE_BALANCED
 SDL_TARGET_FPS=60
+SDL_BACKGROUND_FPS=0
 SDL_INPUT_POLL_MS=2
 VGPU_CONSOLE_US=8333
 VGPU_FRAME_RATE_LIMITER=0
@@ -29,8 +31,8 @@ SDL_USB_LOW_LATENCY=0
 usage() {
     cat <<'EOF'
 用法：
-  ./deploy/scripts/g11-sdl-performance.sh audit [--ultra-responsive|--experimental-120hz]
-  ./deploy/scripts/g11-sdl-performance.sh profile [balanced|ultra|experimental-120]
+  ./deploy/scripts/g11-sdl-performance.sh audit [--ultra-responsive|--experimental-120hz|--multi-vm]
+  ./deploy/scripts/g11-sdl-performance.sh profile [balanced|ultra|experimental-120|multi-vm]
   ./deploy/scripts/g11-sdl-performance.sh start  VM编号 [响应档位] [--native-wayland] [start-vm 其他参数]
   ./deploy/scripts/g11-sdl-performance.sh verify VM编号
 
@@ -39,8 +41,12 @@ usage() {
   profile 只打印封装值；所有档位都只影响本次启动，不写入 VM 配置。
   start   默认 balanced；--ultra-responsive 使用 60Hz/1ms/1ms 键盘，
           并请求 auto 服务核（仅开启 CPU 隔离时参与分配）。
-          所有档位都用 120Hz REGION + FRL off；--experimental-120hz 仅把
+          balanced/ultra 档位用 120Hz REGION + FRL off；--experimental-120hz 仅把
           SDL Present 也提高到 120Hz，须实测后使用。
+          --shared-performance 让所有 VM 共享本机全部可用 CPU/NUMA 节点，
+          并要求宿主性能策略就绪；自动适配单路/双路，vCPU/RAM 容量不变。
+          --multi-vm 采用共享性能、前台 60Hz/后台 SDL 15Hz、REGION 60Hz、
+          DGame 预览 15Hz；Guest CPU/GPU 任务继续运行，不限制游戏内部帧率。
           --native-wayland 是非默认 A/B；仅真实 Wayland 会话可用，
           会禁用 X11-only native EGL/GPU-first 启动，保留 DGame SHM fallback。
           切换窗口模式前后都必须让 Windows 完整关机，不支持热切换。
@@ -49,6 +55,7 @@ EOF
 }
 
 select_profile() {
+    SDL_BACKGROUND_FPS=0
     case "${1:-balanced}" in
         balanced|low-latency-v1)
             SDL_PROFILE=$SDL_PROFILE_BALANCED
@@ -77,8 +84,18 @@ select_profile() {
             SDL_SERVICE_CPUS=auto
             SDL_USB_LOW_LATENCY=1
             ;;
+        multi-vm|multi-vm-v1|--multi-vm)
+            SDL_PROFILE=$SDL_PROFILE_MULTI_VM
+            SDL_TARGET_FPS=60
+            SDL_BACKGROUND_FPS=15
+            SDL_INPUT_POLL_MS=2
+            VGPU_CONSOLE_US=16667
+            VGPU_FRAME_RATE_LIMITER=0
+            SDL_SERVICE_CPUS=0
+            SDL_USB_LOW_LATENCY=0
+            ;;
         *)
-            echo "[g11-sdl] 未知响应档位：$1（balanced|ultra|experimental-120）" >&2
+            echo "[g11-sdl] 未知响应档位：$1（balanced|ultra|experimental-120|multi-vm）" >&2
             return 2
             ;;
     esac
@@ -88,6 +105,7 @@ print_profile() {
     cat <<EOF
 G11_SDL_PROFILE=$SDL_PROFILE
 QEMU_SDL_TARGET_FPS=$SDL_TARGET_FPS
+QEMU_SDL_BACKGROUND_FPS=$SDL_BACKGROUND_FPS
 QEMU_SDL_INPUT_POLL_MS=$SDL_INPUT_POLL_MS
 QEMU_SDL_PRESENT_MODE=$SDL_PRESENT_MODE
 QEMU_SDL_CURSOR_MODE=$SDL_CURSOR_MODE
@@ -241,6 +259,11 @@ audit() {
         fi
     fi
 
+    if [[ "$SDL_BACKGROUND_FPS" != 0 ]] &&
+            ! binary_has QEMU_SDL_BACKGROUND_FPS; then
+        echo "[g11-sdl] QEMU 不支持后台 SDL 帧率；请先重新构建" >&2
+        failures=$((failures + 1))
+    fi
     if ((failures)); then
         echo "[g11-sdl] AUDIT_RESULT=not-ready failures=$failures"
         return 1
@@ -328,6 +351,14 @@ start_vm_low_latency() {
                 select_profile balanced
                 profile_seen=1
                 ;;
+            --multi-vm)
+                if ((profile_seen)); then
+                    echo "[g11-sdl] 响应档位只能指定一次" >&2
+                    return 2
+                fi
+                select_profile multi-vm
+                profile_seen=1
+                ;;
             --native-wayland)
                 if ((native_wayland_seen)); then
                     echo "[g11-sdl] --native-wayland 只能指定一次" >&2
@@ -393,10 +424,14 @@ start_vm_low_latency() {
 
     local -a latency_args=()
     [[ "$SDL_USB_LOW_LATENCY" == 0 ]] || latency_args+=(--low-latency-input)
+    if [[ "$SDL_PROFILE" == "$SDL_PROFILE_MULTI_VM" ]]; then
+        latency_args+=(--shared-performance --dgame-preview-rate 15)
+    fi
 
     exec env \
         G11_SDL_PROFILE="$SDL_PROFILE" \
         QEMU_SDL_TARGET_FPS="$SDL_TARGET_FPS" \
+        QEMU_SDL_BACKGROUND_FPS="$SDL_BACKGROUND_FPS" \
         QEMU_SDL_INPUT_POLL_MS="$SDL_INPUT_POLL_MS" \
         QEMU_SDL_PRESENT_MODE="$SDL_PRESENT_MODE" \
         QEMU_SDL_CURSOR_MODE="$SDL_CURSOR_MODE" \
@@ -534,6 +569,7 @@ verify_running_vm() {
         QEMU_SDL_PRESENT_MODE
         QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP
         QEMU_SERVICE_CPUS
+        QEMU_SDL_BACKGROUND_FPS
     )
     local -a env_expected=()
 
@@ -598,7 +634,10 @@ verify_running_vm() {
         partial=1
     else
         declared_profile=$(process_env_value "$pid" G11_SDL_PROFILE 2>/dev/null || true)
-        if [[ "$declared_profile" == "$SDL_PROFILE_EXPERIMENTAL_120" ]]; then
+        if [[ "$declared_profile" == "$SDL_PROFILE_MULTI_VM" ]]; then
+            select_profile multi-vm
+            detected_profile=$SDL_PROFILE_MULTI_VM
+        elif [[ "$declared_profile" == "$SDL_PROFILE_EXPERIMENTAL_120" ]]; then
             select_profile experimental-120
             detected_profile=$SDL_PROFILE_EXPERIMENTAL_120
         elif [[ "$declared_profile" == "$SDL_PROFILE_ULTRA" ]]; then
@@ -628,12 +667,14 @@ verify_running_vm() {
             "$SDL_PRESENT_MODE"
             "$SDL_ALLOW_HOST_SLEEP"
             "$SDL_SERVICE_CPUS"
+            "$SDL_BACKGROUND_FPS"
         )
         for ((i = 0; i < ${#env_keys[@]}; i += 1)); do
             key=${env_keys[i]}
             expected=${env_expected[i]}
             actual=$(process_env_value "$pid" "$key" 2>/dev/null || true)
-            if [[ "$key" == QEMU_SERVICE_CPUS && -z "$actual" ]]; then
+            if [[ ( "$key" == QEMU_SERVICE_CPUS ||
+                    "$key" == QEMU_SDL_BACKGROUND_FPS ) && -z "$actual" ]]; then
                 actual=0
             fi
             printf '[g11-sdl] ENV %s=%s (expected %s)\n' \
@@ -734,6 +775,8 @@ case "$command_name" in
             select_profile ultra
         elif (($# == 1)) && [[ "$1" == --experimental-120hz ]]; then
             select_profile experimental-120
+        elif (($# == 1)) && [[ "$1" == --multi-vm ]]; then
+            select_profile multi-vm
         elif (($# != 0)); then
             usage >&2
             exit 2

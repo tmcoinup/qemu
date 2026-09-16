@@ -86,7 +86,7 @@ done
 
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.7" and
+    .schemaVersion == 1 and .profileVersion == "2.6.8" and
     (.files | length) == 5 and
     ([.files[].name] | sort) == [
         "01-OneClick-Apply.cmd", "02-Audit.cmd", "03-Rollback.cmd",
@@ -130,7 +130,7 @@ exe_wide=$(strings -a -el "$exe")
 for token in 'G11GuestLite.exe /apply' 'G11GuestLite.exe /audit' \
         'G11GuestLite.exe /rollback' \
         'WindowsPowerShell\v1.0\powershell.exe' \
-        'G-11 Windows 10 Guest Lite 2.6.7'; do
+        'G-11 Windows 10 Guest Lite 2.6.8'; do
     rg -Fq "$token" <<<"$exe_wide" \
         || fail "standalone launcher omitted fixed entry point: $token"
 done
@@ -142,7 +142,7 @@ rg -Fq 'Some Windows' "$exe_source" \
     || fail 'standalone launcher omitted the FAT package-media compatibility path'
 rg -Fq 'level="requireAdministrator"' "$exe_manifest" \
     || fail 'standalone launcher omitted its UAC manifest'
-rg -Fq 'assemblyIdentity version="2.6.7.0"' "$exe_manifest" \
+rg -Fq 'assemblyIdentity version="2.6.8.0"' "$exe_manifest" \
     || fail 'standalone launcher manifest version is stale'
 if rg -n 'bundle_id|G11GuestLite-\$|G11GuestLite-\*|sha256sum|SHA256SUMS|ISO-SHA256' \
         "$packager"; then

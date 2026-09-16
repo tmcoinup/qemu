@@ -58,6 +58,7 @@ assert_assignment "$v100_conf" 'VGPU_HOST_CPU_NODE_BIND=all'
 assert_assignment "$v100_conf" 'VGPU_HOST_MEMORY_NODE_BIND=all'
 assert_assignment "$v100_conf" 'VGPU_MDEV_IDENTITY_MODE=required'
 assert_assignment "$v100_conf" 'VGPU_RM_FB_IDENTITY_MODE=off'
+assert_assignment "$v100_conf" 'VGPU_CONSOLE_INTERVAL_US=0'
 assert_assignment "$v100_conf" 'SPOOF_MODE=B'
 if grep -Eq 'VGPU_RESOURCE_PROFILE_(1024|2048)' "$v100_conf"; then
     fail 'V100 policy published a mixed-size dual mapping'
@@ -76,6 +77,7 @@ assert_assignment "$mixed_conf" 'VGPU_TOTAL_FB_MB=16384'
 assert_assignment "$mixed_conf" 'VGPU_HOST_CPU_NODE_BIND=all'
 assert_assignment "$mixed_conf" 'VGPU_HOST_MEMORY_NODE_BIND=all'
 assert_assignment "$mixed_conf" 'VGPU_RM_FB_IDENTITY_MODE=off'
+assert_assignment "$mixed_conf" 'VGPU_CONSOLE_INTERVAL_US=0'
 if grep -Eq '^VGPU_(HOST_FB_TIER_MB|RESOURCE_PROFILE|RESOURCE_FB_MB)=' \
         "$mixed_conf"; then
     fail 'mixed-size V100 policy also published a fixed tier/static profile'
@@ -118,6 +120,21 @@ assert_assignment "$r535_v100_conf" 'VGPU_HOST_CPU_NODE_BIND=all'
 assert_assignment "$r535_v100_conf" 'VGPU_HOST_MEMORY_NODE_BIND=all'
 assert_assignment "$r535_v100_conf" 'VGPU_CONSOLE_INTERVAL_US=8333'
 assert_assignment "$r535_v100_conf" 'VGPU_RM_FB_IDENTITY_MODE=required'
+
+# Exact R570 vendor support is statically audited. Limit the new generated
+# default to V100; RTX/R570 and R580 keep their previous cadence policy.
+printf '%s\n' 570.172.07 >"$NVIDIA_MODULE_VERSION_FILE"
+r570_v100_conf="$tmp_dir/v100-r570.conf"
+"$configure" --preset v100-sxm2-16gb \
+    --output "$r570_v100_conf" >/dev/null
+assert_assignment "$r570_v100_conf" 'VGPU_HOST_FB_MODE=mixed'
+assert_assignment "$r570_v100_conf" 'VGPU_CONSOLE_INTERVAL_US=8333'
+assert_assignment "$r570_v100_conf" 'VGPU_RM_FB_IDENTITY_MODE=required'
+r570_rtx_conf="$tmp_dir/rtx-r570.conf"
+"$configure" --preset rtx2080-16gb \
+    --output "$r570_rtx_conf" >/dev/null
+assert_assignment "$r570_rtx_conf" 'VGPU_CONSOLE_INTERVAL_US=0'
+assert_assignment "$r570_rtx_conf" 'VGPU_RM_FB_IDENTITY_MODE=off'
 printf '%s\n' 580.159.01 >"$NVIDIA_MODULE_VERSION_FILE"
 
 if "$configure" --preset v100-pcie-16gb --tier 2048 \

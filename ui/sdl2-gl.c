@@ -727,6 +727,9 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
 
     assert(scon->opengl);
     sdl2_poll_events(scon);
+    if (!sdl2_refresh_due(scon)) {
+        return;
+    }
     if (scon->native_egl_context_api) {
         EGLint async_error = qatomic_read(
             &sdl2_native_egl_async_terminal_error);

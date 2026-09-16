@@ -4,11 +4,38 @@
   and host helpers.
 - `qemu/` contains source-level checks for QEMU changes used by the vGPU path.
 
+已有 VM 仅变更显卡的聚焦回归：`bash deploy/tests/vgpu/test_resize_vgpu.sh`。
+使用临时文件验证其它硬件配置与磁盘/NVRAM/TPM 状态不变、整池档位检查、活动
+QEMU/mdev/锁拒绝、权限不足零写入、发布失败自动恢复，以及回滚时保护后续用户修改。
+显卡名称/VBIOS 的引号回归调用真实启动器解析器；另覆盖旧单引号修复及其与原
+迁移日志回滚的兼容性。
+
+换显存档后的驱动重新绑定回归：`bash deploy/tests/vgpu/test_rebind_vgpu.sh`。
+以真实封装和存储解析器配合替身启动/同步命令，验证安全窗口退出后才离线认证、
+所有未通过认证的状态都拒绝普通启动、配置变化中止，以及参数/存储路径传递。
+这是无 sudo、无磁盘挂载的流程回归；实际驱动绑定仍需 Windows 运行验收。
+
+系统身份包跨 GPU 档位更新：`bash deploy/tests/vgpu/test_system_nvapi_gpu_update.sh`。
+用 PowerShell AST 载入实际生产函数，覆盖旧名称安装/新名称验收、UUID/唯一 PnP/
+驱动版本/Code 0/签名约束、显卡标题精确替换及主机名状态跨包更新；替身接口隔离
+Windows 写入。包内资产与 ISO 另由 `test_system_nvapi_projection_package.sh` 验证。
+
 Run all deployment tests from the repository root:
 
 ```bash
 ./deploy/tests/run-g11.sh
 ```
+
+母盘刷新 NBD 预检的聚焦回归：
+
+```bash
+bash deploy/tests/vgpu/test_vgpu_base_nbd_prepare.sh
+bash deploy/tests/vgpu/test_vgpu_base_installer_static.sh
+```
+
+前者以临时 sysfs/设备夹具和替身命令运行生产预检函数，覆盖未加载模块、加载失败、
+分区未启用、设备缺失、占用/挂载/状态不可读以及索引超过 31 的空闲设备；不加载真实
+内核模块，不连接 NBD，也不打开真实镜像。
 
 The runner rebuilds the G-11 QEMU/streamer targets, executes every deployment
 test, and then runs the compiled input/SDL/streamer unit tests plus the USB HID

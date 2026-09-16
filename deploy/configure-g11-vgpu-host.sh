@@ -157,12 +157,14 @@ if (( IS_V100 == 1 )); then
             # V100 与 RTX 2080 在 R535 上共用同一条 console REGION 路径，
             # mdev_configure_console_interval 只按驱动版本放行。留 0 会保留
             # NVIDIA 默认 100000us，把 SDL Content 钉死在 10Hz —— Present 仍是
-            # 60，但每帧要重复提交 6 次，表现为持续卡顿。R570/R580 不设，
-            # 因为守卫只认 535.*，写了也会被跳过。
+            # 60，但每帧要重复提交 6 次，表现为持续卡顿。
             CONSOLE_INTERVAL=8333
             ;;
         570.172.07)
             RM_FB_IDENTITY_MODE=required
+            # Exact vendor lib has the same 100000us defaults and timer
+            # parser as R535. This is a static audit, pending host validation.
+            CONSOLE_INTERVAL=8333
             ;;
         580.159.01)
             RM_FB_IDENTITY_MODE=off

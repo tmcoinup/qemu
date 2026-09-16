@@ -240,6 +240,9 @@ void sdl2_2d_refresh(DisplayChangeListener *dcl)
 
     assert(!scon->opengl);
     sdl2_poll_events(scon);
+    if (!sdl2_refresh_due(scon)) {
+        return;
+    }
     sdl2_flush_window_updates();
     graphic_hw_update(dcl->con);
     if (scon->surface_upload_pending &&

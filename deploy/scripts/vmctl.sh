@@ -47,6 +47,8 @@ usage:
   ./deploy/scripts/vmctl.sh cdrom  ID status|eject [storage selector]
   ./deploy/scripts/vmctl.sh cdrom  ID mount /absolute/file.iso [--replace] [storage selector]
   ./deploy/scripts/vmctl.sh migrate [--check|--apply] [--vms-dir ABS]
+  ./deploy/scripts/vmctl.sh gpu-resize --vm ID:PROFILE --host-config FILE [--apply]
+  ./deploy/scripts/vmctl.sh gpu-rebind ID [--proxy] [--no-start] [--dry-run]
 
 Examples:
   ./deploy/scripts/vmctl.sh path 2
@@ -134,6 +136,14 @@ case "$ACTION" in
     create)
         shift
         exec_with_vms_root "$create_vm" "$@"
+        ;;
+    gpu-resize)
+        shift
+        exec "$here/scripts/resize-vgpu.sh" "$@"
+        ;;
+    gpu-rebind)
+        shift
+        exec "$here/scripts/rebind-vgpu.sh" "$@"
         ;;
     disk)
         shift

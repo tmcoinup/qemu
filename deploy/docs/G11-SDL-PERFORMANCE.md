@@ -3,6 +3,9 @@
 本页只适用于 **G-11 NVIDIA vGPU 的本地 SDL 窗口**。V-11 是独立分支，不要把
 这里的 vGPU、VFIO REGION 或启动参数直接复制过去。
 
+单路/双路共享满载、8–16 开容量分析和新增前台60/后台15Hz显示档，见
+[G-11 全面性能优化教程](G11-FULL-PERFORMANCE.md)。
+
 这套封装只设置当前 QEMU 进程的 Linux 宿主环境并委托现有
 `deploy/scripts/start-vm.sh`。它不修改 Windows BCD，不开启 `testsigning` 或
 `nointegritychecks`，不安装测试签名/自签名内核驱动，也不把宿主凭据写入仓库。
@@ -38,6 +41,11 @@ Windows 进入桌面后，另开一个宿主终端：
 `verify` 成功只表示当前进程确实使用推荐 SDL argv 和环境，不表示它已经测得了
 “每一帧都是新画面”。继续完成下面的动态画面、鼠标和键盘实机验收。
 
+V100 + 精确 `570.172.07` 若仍读取旧 `VGPU_CONSOLE_INTERVAL_US=0`，先按
+[已有 V100/R570 配置的 SDL 周期迁移](G11-VGPU-HOST-QUICKSTART.md#已有-v100r570-配置的-sdl-周期迁移)
+完成维护窗口迁移。旧配置不会自动覆盖，且会覆盖封装传入的同名环境变量。
+该版本 `8333us` 仅通过 vendor 静态审核，尚无真实 V100 的运行性能与稳定性验证。
+
 想单独比较更快的键鼠轮询，可在完整关机后使用：
 
 ```bash
@@ -58,7 +66,7 @@ Windows 进入桌面后，另开一个宿主终端：
 | `QEMU_SDL_PRESENT_MODE` | `fixed` | 可见窗口按固定节拍 Present，减少恢复后旧帧停留 |
 | `QEMU_SDL_CURSOR_MODE` | `host` | 保留宿主即时箭头，以跟手为优先；auto 仅显式测试 |
 | `QEMU_SDL_TITLE_FPS` | `auto` | X11 实时标题；Wayland 有 Cairo libdecor 才实时，否则静态防 GDK 刷屏 |
-| `VGPU_CONSOLE_INTERVAL_US` | `8333` | R535 上以 120Hz 更新 console REGION，让 60Hz Present 尽量取得最新帧 |
+| `VGPU_CONSOLE_INTERVAL_US` | `8333` | 请求约 120Hz 的 console 拷贝周期；R535 已有实测，精确 R570.172.07 仅静态审核，旧宿主配置可覆盖此值 |
 | `VGPU_FRAME_RATE_LIMITER` | `0` | 禁用 vGPU FRL，避免它与宿主 60Hz Present 同频但不同相造成拍频 |
 | `QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP` | `0` | SDL 运行期间不让宿主因空闲关闭物理显示器 |
 
@@ -208,6 +216,48 @@ SDL/Wayland。因此该 A/B 还会自动传入 `--no-dgame-preview-gpu`：DGame 
 诊断、显式启用及一键回滚步骤见
 [G11-MUTTER-MOUSE-DRAG.md](G11-MUTTER-MOUSE-DRAG.md)。
 
+## R570.172.07 白名单的静态审核依据
+
+新增的 console interval 白名单仅覆盖精确 `570.172.07`。审核对象来自官方 host
+包 `nvidia-vgpu-ubuntu-570_570.172.07_amd64.deb` 内的
+`usr/lib/x86_64-linux-gnu/libnvidia-vgpu.so.570.172.07`。只解压并读取文件，未安装
+或加载该库，也未修改宿主参数、运行 VM；vendor 二进制不随仓库提交。
+
+该库 SHA256 为：
+
+```text
+9f77cd0b14086b9da0792116e94882a9dbeffacec3b25ae409d3498c7b27381a
+```
+
+下表为该文件的 **ELF 虚拟地址（VMA，不是文件偏移）**，可用 `objdump -d`、
+`objdump -s` 对同一哈希的库复核。符号名经过混淆，因此记录实际地址和数据流：
+
+| 环节 | 静态证据 |
+|---|---|
+| 参数识别与范围 | `0xa0770` 起比较 `intervaltime`、`vgaintervaltime`；解析分支要求数值至少 `5000`，否则走错误路径并可打印对应 minimum 日志 |
+| 写入有效参数 | `0xa0b90` 将 `intervaltime` 写入全局 `0x337548`；`0xa0bea` 将 `vgaintervaltime` 写入 `0x337540` |
+| 实际初值 | `.data` 中上述两个 64 位槽均为 `0x186a0`，即 `100000`；参数表附近的字符串 `5000` 不能当作默认周期 |
+| 实例初始化 | `0xaeb9a`、`0xaebac` 分别把两全局值乘 `1000`，保存到实例 `+0x548`、`+0x550` |
+| 主周期消费 | `0xac6bb` 调用 `vmiop_thread_get_time`；`0xac6c0` 读取实例 `+0x548` 并计算下一周期边界；`0xac70f` 将结果交给 `vmiop_thread_event_wait` |
+| FRL 解析 | `0xa08a0` 起识别 `frame_rate_limiter`，零值清除、非零值设置实例 `+0xe8c` 的 `0x80000000` 位；`0xa09a7` 是清位分支 |
+
+对照本机 `libnvidia-vgpu.so.535.161.05`：有效参数写入点为
+`0x82b80` / `0x82be0`，对应全局 `0x4e8528` / `0x4e8520` 也均初始为
+`100000`；`0x86f4f` / `0x86f69` 同样乘 `1000` 后保存到实例。两版的最小值检查
+和 FRL 零/非零位操作一致。R570 包内 `vgpuConfig.xml` 的 `V100X-1Q`、
+`V100X-2Q` 均配置 `frlConfig=0x3c`、`frame_rate_limiter=1`。
+
+开源部分的 `nvidia-vgpu-vfio.c` 也核对了修改时机：R570 的
+`vgpu_params_store`（第 116 行起）仅在 `usage_count == 0` 时保存参数；第 2469 行
+起把参数放入 OPEN_DEVICE 事件，`vgpu-ctldev.c` 第 319 行将其交给用户态。
+R535 对应通过 `rm_vgpu_vfio_ops.update_request` 传递参数。sysfs 读回只是已保存
+输入，不代表插件已应用，也不提供实际源帧率。
+
+这些证据支持在 QEMU 打开 mdev 前，通过既有封装显式试用 `8333us`，不构成
+V100 实机性能或稳定性验收。主周期存在事件唤醒路径，实际帧率仍需观测，不能仅凭
+默认数值断言所有场景都恰好 10 FPS。本次没有外推其它 R570 小版本或 R580，
+也没有因此删除 NVIDIA page-safe 检查。
+
 ## audit 看什么
 
 ```bash
@@ -217,7 +267,7 @@ SDL/Wayland。因此该 A/B 还会自动传入 `--no-dgame-preview-gpu`：DGame 
 它只读检查：
 
 1. 当前源码是否认识四个 SDL 环境开关；
-2. `start-vm.sh` 是否仍有 R535 console interval 封装；
+2. `start-vm.sh` 是否仍有 NVIDIA console interval 封装；
 3. 当前 `build/qemu-system-x86_64` 是否包含相同开关并编译了 SDL backend；
 4. 对带 `build.ninja` 的本地 build 做 Ninja dry-run，确认源码/构建配置没有待编译项；
 5. 当前是 X11、Wayland/XWayland 还是无本地图形会话。
@@ -390,7 +440,7 @@ keyboard 1ms`。普通和 ultra 已经以 8333us 扫描 REGION，实验档只把
 
 ## 画面不定格实机验收
 
-1. 从完整关机启动 VM，确认摘要有 R535
+1. 从完整关机启动 VM，确认摘要有 `NVIDIA <实际驱动版本>` 和
    `console REGION 周期=8333us FRL=0`、SDL fixed/60Hz 和 2ms 输入配置。
 2. 进入 Windows 后持续播放本地 60FPS 测试视频，或连续拖动一个内容不断变化的窗口
    2 分钟。不要用完全静止的桌面判断“相同帧”。

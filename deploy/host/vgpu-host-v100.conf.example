@@ -26,7 +26,10 @@ VGPU_HOST_MEMORY_NODE_BIND=all
 #   V100S 32 GiB: V100S-1Q / V100S-2Q       (total 32768)
 #   FHHL 16 GiB : V100L-1Q / V100L-2Q
 
-VGPU_CONSOLE_INTERVAL_US=0
+# Exact 570.172.07 vendor parser and 100000us defaults were statically audited.
+# The faster cadence still needs performance/stability validation on the host.
+# R580 keeps 0; this setting must not be copied across driver versions.
+VGPU_CONSOLE_INTERVAL_US=8333
 
 # R570 uses the reviewed 460-byte FB_GET_INFO_V2 ABI. RAM_TYPE is rewritten
 # only for exact 1024/2048 MiB instances; unknown framebuffer sizes are

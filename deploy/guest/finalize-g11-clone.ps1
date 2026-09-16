@@ -27,8 +27,8 @@ $GuestLiteManifestPath = Join-Path $GuestLiteRoot 'clone-manifest.json'
 $GuestLiteStatePath = Join-Path $env:ProgramData 'G11GuestLite\state.json'
 $GuestLiteEnforcementLogPath = Join-Path $env:ProgramData `
     'G11GuestLite\enforce-last.txt'
-$GuestLiteProfileVersion = '2.6.7'
-$ExpectedGuestLiteManifestSha256 = '6AE841CEE64CBE0D8410F82D9B5C937C78DE096BC385BD682A821D30C521C038'
+$GuestLiteProfileVersion = '2.6.8'
+$ExpectedGuestLiteManifestSha256 = '249CCBC626C50BC4549448CEA58648D04C35BB4D8284FE193E192EE7AFA5D5D8'
 $GuestLiteEnglishInputTip = '0409:00000409'
 $GuestLitePinyinLanguageTags = @('zh-CN', 'zh-Hans-CN')
 $GuestLitePinyinInputTip = '0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}'
@@ -492,6 +492,12 @@ function Read-And-ValidateGuestLiteState {
     $userHive = Open-GuestLiteUserHive -UserSid ([string]$state.UserSid)
     try {
         foreach ($expected in @(
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; Name = 'LetAppsAccessMicrophone'; Value = 2; Type = 'DWord' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; Name = 'LetAppsAccessMicrophone_ForceAllowTheseApps'; Value = ''; Type = 'String' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; Name = 'LetAppsAccessMicrophone_UserInControlOfTheseApps'; Value = ''; Type = 'String' },
+            [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'; Name = 'Value'; Value = 'Deny'; Type = 'String' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged'; Name = 'Value'; Value = 'Deny'; Type = 'String' },
+            [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'; Name = 'Value'; Value = 'Deny'; Type = 'String' },
             [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'ToastEnabled'; Value = 0; Type = 'DWord' },
             [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'NoToastApplicationNotification'; Value = 1; Type = 'DWord' },
             [pscustomobject]@{ Path = 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications'; Name = 'NoToastApplicationNotificationOnLockScreen'; Value = 1; Type = 'DWord' },
@@ -509,6 +515,16 @@ function Read-And-ValidateGuestLiteState {
             [pscustomobject]@{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications'; Name = 'DisableNotifications'; Value = 1; Type = 'DWord' },
             [pscustomobject]@{ Path = 'HKCU:\Control Panel\International\User Profile'; Name = 'InputMethodOverride'; Value = '0409:00000409'; Type = 'String' }
         )) {
+            if ([string]$expected.Name -like 'LetAppsAccessMicrophone*' -or
+                [string]$expected.Path -like '*\ConsentStore\microphone*') {
+                $baseline = @($state.Registry | Where-Object {
+                    [string]$_.Path -ieq [string]$expected.Path -and
+                    [string]$_.Name -ieq [string]$expected.Name
+                })
+                if ($baseline.Count -ne 1) {
+                    throw "Guest Lite rollback state lacks a unique microphone baseline: $($expected.Path)\$($expected.Name)"
+                }
+            }
             $resolvedPath = Resolve-GuestLiteRegistryPath `
                 -Path ([string]$expected.Path) -UserHive $userHive
             $key = Get-Item -LiteralPath $resolvedPath -ErrorAction Stop

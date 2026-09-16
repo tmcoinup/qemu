@@ -947,11 +947,13 @@ if current_stats['nvidia'] == 0:
     # A freshly installed Windows image has a real monitor cache before the
     # NVIDIA software key exists.  Committing the reviewed EDID and deleting
     # stale GraphicsDrivers caches here closes the first-driver-install gap;
+    # A profile change also reaches this state until Windows binds the new
+    # subsystem ID, even when its matching signed package is already staged.
     # NV_Modes remains deliberately pending until a signed GRID target can be
     # authenticated after a full shutdown.
     h.commit(None)
     del h
-    print('[disp-cache] hivex pre-driver commit 完成：安全 EDID/缓存已落盘，NV_Modes 待驱动安装后认证')
+    print('[disp-cache] hivex pre-driver commit 完成：安全 EDID/缓存已落盘，NV_Modes 待目标显卡绑定驱动后认证')
     raise SystemExit(12)
 h.commit(None)
 del h
@@ -998,7 +1000,7 @@ if [[ -n "$MARKER" ]]; then
     mv -f -- "$marker_tmp" "$MARKER"
 fi
 if [[ "$MONITOR_COMMIT_STATE" == predriver ]]; then
-    log "PRE-DRIVER：已提交 ${MONITOR_DISPLAY_NAME} 的安全 EDID/EDID_OVERRIDE 并清理模式缓存；生产 NV_Modes 将在驱动安装后完整关机时认证写入。"
+    log "PRE-DRIVER：已提交 ${MONITOR_DISPLAY_NAME} 的安全 EDID/EDID_OVERRIDE 并清理模式缓存；目标显卡安全枚举并绑定 GRID 后，完整关机再认证写入生产 NV_Modes。"
     exit 12
 fi
 log "完成 Windows 离线 EDID/EDID_OVERRIDE/模式缓存：${MONITOR_DISPLAY_NAME}；此 host 命令不直接修改 live PnP 名称。"

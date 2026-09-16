@@ -31,6 +31,8 @@ Options:
 Without --token-file, the command reuses the authenticated licensed EXE under
 $STAGE_DIR/VgpuPortableLicensed. No credential is copied into the repository.
 The base must already be a private Sysprep-generalized managed image.
+The installer loads the host NBD module when absent and checks for a free
+partition-capable device before copying the base; busy devices are preserved.
 EOF
 }
 sha256_upper() { sha256sum -- "$1" | awk '{print toupper($1)}'; }
@@ -145,9 +147,9 @@ PINNED_STORAGE_SHA256=$(sed -n \
     die "current finalizer does not pin the storage portability helper"
 jq -e '
     (keys | sort) == ["files", "profileVersion", "schemaVersion"] and
-    .schemaVersion == 1 and .profileVersion == "2.6.7"
+    .schemaVersion == 1 and .profileVersion == "2.6.8"
 ' "$GUEST_LITE_MANIFEST" >/dev/null ||
-    die "current Guest Lite manifest is not the supported 2.6.7 contract"
+    die "current Guest Lite manifest is not the supported 2.6.8 contract"
 grep -Fq 'schemaVersion = 4' "$FINALIZER" ||
     die "current finalizer does not publish clone marker schema 4"
 
@@ -238,7 +240,7 @@ fi
 
 if ((CHECK_ONLY)); then
     if ((CURRENT)); then
-        echo "[g11-base-refresh] PASS: $BASE_NAME already embeds marker schema 4 / Guest Lite 2.6.7 / SATA+NVMe helper"
+        echo "[g11-base-refresh] PASS: $BASE_NAME already embeds marker schema 4 / Guest Lite 2.6.8 / SATA+NVMe helper"
         exit 0
     fi
     echo "[g11-base-refresh] STALE: $BASE_NAME must be refreshed before another clone" >&2
@@ -275,7 +277,7 @@ echo "[g11-base-refresh] atomically refreshing $BASE_NAME; existing clone pins a
 "$here/scripts/export-vgpu-base.sh" --in-place "$BASE_NAME" "$VM_BASE_DIR"
 
 cat <<EOF
-[g11-base-refresh] PASS: $BASE_NAME now embeds marker schema 4 / Guest Lite 2.6.7 / SATA+NVMe helper
+[g11-base-refresh] PASS: $BASE_NAME now embeds marker schema 4 / Guest Lite 2.6.8 / SATA+NVMe helper
 
 后续克隆直接运行：
   ./deploy/scripts/clone-from-base.sh $BASE_NAME NEW_VM_ID --start

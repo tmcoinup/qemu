@@ -36,6 +36,25 @@ grep -Fq 'vfio_display_region_staging_copy(dpy, source);' "$VFIO_DISPLAY" \
     || fail "forced full refresh no longer copies staging before update"
 grep -Fq 'return vfio_region_update_staging(' "$VFIO_DISPLAY" \
     || fail "VFIO display no longer uses the tested staging/motion implementation"
+grep -Fq 'damage = vfio_region_update_bounds(' "$VFIO_DISPLAY" \
+    || fail "VFIO display no longer uses the tested single upload bounds"
+if grep -Fq 'VFIO_REGION_FULL_UPDATE_PERCENT' "$VFIO_DISPLAY"; then
+    fail "VFIO REGION must preserve partial uploads when most rows change"
+fi
+grep -Fq 'g_strcmp0(g_getenv("QEMU_VFIO_REGION_UPDATE_MODE"), "copy") == 0;' \
+    "$VFIO_DISPLAY" \
+    || fail "VFIO REGION copy mode must remain explicitly opt-in"
+copy_body=$(sed -n '/^    if (vfio_region_try_copy_staging(/,/^    }/p' \
+    "$VFIO_DISPLAY")
+grep -Fq 'vfio_region_idle_reset(&dpy->region.idle);' <<<"$copy_body" \
+    || fail "copy mode must discard unverified idle observations"
+grep -Fq 'vfio_region_motion_reset(' <<<"$copy_body" \
+    || fail "copy mode must discard stale comparison-bypass state"
+grep -Fq 'dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);' \
+    <<<"$copy_body" \
+    || fail "copy mode must submit the entire copied frame"
+grep -Fq 'return;' <<<"$copy_body" \
+    || fail "copy mode must bypass the subsequent pixel comparison"
 grep -Fq 'memcpy(staging_base, source, staging_size);' "$VFIO_MOTION" \
     || fail "full-motion bypass no longer refreshes staging before update"
 for reset_function in vfio_display_region_drop_staging \

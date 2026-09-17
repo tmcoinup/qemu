@@ -19,11 +19,47 @@ typedef struct VFIORegionDirtyRun {
     uint32_t height;
 } VFIORegionDirtyRun;
 
+/*
+ * Called after a changed staging update, with nonempty, ordered dirty runs.
+ * One vertical bounding box keeps both GL uploads and immediate 2D presents
+ * bounded to one update.  Any smaller box saves pixels even when most rows
+ * changed.  Overflow loses the last run, so only a full update is safe then.
+ */
+static inline VFIORegionDirtyRun vfio_region_update_bounds(
+    const VFIORegionDirtyRun runs[VFIO_REGION_MAX_DIRTY_RUNS],
+    uint32_t run_count, bool too_many_runs, uint32_t height)
+{
+    if (too_many_runs) {
+        return (VFIORegionDirtyRun) { .y = 0, .height = height };
+    }
+    return (VFIORegionDirtyRun) {
+        .y = runs[0].y,
+        .height = runs[run_count - 1].y + runs[run_count - 1].height -
+                  runs[0].y,
+    };
+}
+
 static inline void vfio_region_motion_reset(uint32_t *full_motion_streak,
                                             uint32_t *compare_bypass_frames)
 {
     *full_motion_streak = 0;
     *compare_bypass_frames = 0;
+}
+
+/*
+ * Opt-in copy mode avoids all pixel comparisons, including for still frames.
+ * The caller validates the source and layout before using this path, then
+ * submits a full display update when it returns true.  Padding is retained.
+ */
+static inline bool vfio_region_try_copy_staging(
+    bool always_copy, uint8_t *staging, const uint8_t *source,
+    size_t staging_size)
+{
+    if (!always_copy) {
+        return false;
+    }
+    memcpy(staging, source, staging_size);
+    return true;
 }
 
 /*

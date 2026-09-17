@@ -6,6 +6,10 @@
 单路/双路共享满载、8–16 开容量分析和新增前台60/后台15Hz显示档，见
 [G-11 全面性能优化教程](G11-FULL-PERFORMANCE.md)。
 
+标题 `Content` 掉低时的归因边界、REGION 局部上传优化和
+`start --content-diagnostics` 静止观测、`start --game-content-copy` 游戏无比较模式，见
+[Content 审查结论与傻瓜教程](G11-SDL-CONTENT-FPS.md)。
+
 这套封装只设置当前 QEMU 进程的 Linux 宿主环境并委托现有
 `deploy/scripts/start-vm.sh`。它不修改 Windows BCD，不开启 `testsigning` 或
 `nointegritychecks`，不安装测试签名/自签名内核驱动，也不把宿主凭据写入仓库。
@@ -22,11 +26,10 @@ cd /home/ubuntu/projects/qemu
 ```
 
 三步都成功后，在 Windows 内选择“关机”，等待旧 QEMU 窗口和进程退出。
-下面以 VM1 为例，保留共享 CPU、按需 RAM；把 `1` 换成真实 VM 编号：
+下面以 VM1 为例，默认共享 CPU、按需 RAM、REGION 无比较复制；把 `1` 换成真实 VM 编号：
 
 ```bash
-./deploy/scripts/g11-sdl-performance.sh start 1 --proxy \
-  --cpu-isolate=false --memory-prealloc=false
+./deploy/scripts/g11-sdl-performance.sh start 1 --proxy
 ```
 
 Windows 进入桌面后，另开一个宿主终端：
@@ -93,9 +96,9 @@ preview 路径，但 DGame 本地预览也会不可用，不能把这个取舍�
 
 ## 共享 CPU、按需内存时卡顿怎么比较
 
-当前正常 G-11 vGPU SDL/GTK 默认共享 CPU、全量预分配 RAM。所以只运行
+当前正常 G-11 vGPU SDL/GTK 默认共享 CPU、按需 RAM、REGION 无比较复制。所以只运行
 `./deploy/scripts/start-vm.sh 1 --proxy`，在没有显式 CPU 环境策略时，对应
-`--cpu-isolate=false --memory-prealloc=true`。`--proxy` 只是 QMP socket 的兼容别名，
+`--cpu-isolate=false --memory-prealloc=false --game-content-copy`。`--proxy` 只是 QMP socket 的兼容别名，
 不负责 SDL 画面传输；DGame preview 是否启用由自己的参数决定。
 
 `--memory-prealloc=false` 把新页的分配、清零和映射成本延后到 Guest 实际使用时，

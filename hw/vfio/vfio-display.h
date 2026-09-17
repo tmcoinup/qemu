@@ -12,6 +12,7 @@
 #include "ui/console.h"
 #include "hw/display/ramfb.h"
 #include "hw/vfio/vfio-region.h"
+#include "hw/vfio/display-region-idle.h"
 
 typedef struct VFIODMABuf {
     QemuDmaBuf *buf;
@@ -39,6 +40,9 @@ typedef struct VFIODisplay {
         uint32_t failure_streak;
         int64_t failure_retry_after_us;
         bool force_full_update;
+        bool always_copy;
+        bool idle_reporting_enabled;
+        VFIORegionIdleState idle;
     } region;
     struct {
         QTAILQ_HEAD(, VFIODMABuf) bufs;

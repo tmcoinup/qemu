@@ -58,6 +58,14 @@ grep -Fxq 'QEMU_SERVICE_CPUS=auto' <<<"$experimental" \
 grep -Fxq 'G11_USB_HID_LOW_LATENCY=1' <<<"$experimental" \
     || fail "experimental profile lost the 1ms keyboard endpoint"
 
+for profile in balanced ultra experimental-120 multi-vm; do
+    profile_values=$("$WRAPPER" profile "$profile")
+    grep -Fxq 'QEMU_VFIO_REGION_UPDATE_MODE=copy' <<<"$profile_values" \
+        || fail "$profile does not default to full-frame copy"
+    grep -Fxq 'QEMU_VFIO_REGION_IDLE_REPORT=0' <<<"$profile_values" \
+        || fail "$profile silently enables pixel-idle diagnostics"
+done
+
 if "$WRAPPER" profile unknown-profile >/dev/null 2>&1; then
     fail "unknown profile was accepted"
 fi
@@ -177,5 +185,23 @@ grep -Fq 'SERVICE_CPUS_APPLIED=not-requested' <<<"$resource_no_request" \
 
 grep -Fq 'print_running_resource_policy "$cpu_isolation" "$service_cpus" "${argv[@]}"' "$WRAPPER" \
     || fail "verify no longer reports resources from the observed process"
+
+eval "$(sed -n '/^print_running_content_policy() {$/,/^}$/p' "$WRAPPER")"
+content_copy=$(print_running_content_policy copy 0)
+grep -Fq 'REGION UPDATE_MODE=copy IDLE_REPORT=0' <<<"$content_copy" \
+    || fail "content verifier lost the observed default REGION policy"
+grep -Fq 'Content 统计整帧提交次数，不表示游戏真实 FPS' <<<"$content_copy" \
+    || fail "copy mode telemetry could be mistaken for real game FPS"
+content_compare=$(print_running_content_policy compare 1)
+grep -Fq 'REGION UPDATE_MODE=compare IDLE_REPORT=1' <<<"$content_compare" \
+    || fail "content verifier rejected the comparison diagnostics rollback"
+if print_running_content_policy copy 1 >/dev/null 2>&1; then
+    fail "content verifier accepted impossible copy plus idle diagnostics"
+fi
+content_unknown=$(print_running_content_policy '' '')
+grep -Fq 'REGION UPDATE_MODE=unknown IDLE_REPORT=unknown' <<<"$content_unknown" \
+    || fail "unreadable content environment was guessed instead of reported unknown"
+grep -Fq 'print_running_content_policy "$region_mode" "$content_diagnostics"' "$WRAPPER" \
+    || fail "verify no longer reports REGION policy from the observed process"
 
 echo "OK: balanced/ultra SDL wrapper profiles and applied-state verification passed"

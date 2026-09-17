@@ -52,8 +52,11 @@
 #   --cpu-isolate=true|false
 #                      是否启用 CPU 隔离（all/all 正常 vGPU 默认 false；显式 true 覆盖）
 #   --memory-prealloc=true|false
-#                      是否全量预分配宿主 RAM（默认 true）；false 按 Guest 实际
+#                      是否全量预分配宿主 RAM（正常 vGPU 默认 false）；false 按 Guest 实际
 #                      触页分配，Guest 容量/身份不变
+#   --game-content-copy REGION 全量复制，跳过像素比较（正常 vGPU 默认）
+#   --game-content-compare 本次恢复 REGION 比较与局部上传
+#   --content-diagnostics 本次开启 REGION 静止观测，与 --game-content-copy 互斥
 #   --host-performance 启动前必须应用动态全频段宿主性能策略
 #   --no-host-performance 本次不改变宿主性能策略
 #   --shared-performance 所有在线 CPU/NUMA 节点共享，关闭 CPU 隔离，
@@ -129,6 +132,8 @@
 #                     IBus/Fcitx/XIM；0 恢复旧行为，auto 仅检测到 IME 时隔离
 #   QEMU_SDL_PRESENT_MODE fixed|dynamic；默认 fixed，SDL 固定 60Hz Present；
 #                     dynamic 保留旧的按画面变化 Present 行为
+#   QEMU_VFIO_REGION_UPDATE_MODE compare|copy；正常 vGPU 默认 copy，CLI 优先
+#   QEMU_VFIO_REGION_IDLE_REPORT 0|1；默认 0，仅 compare 模式可开启
 #   QEMU_SDL_TITLE_FPS auto|0|1；默认 auto。X11 实时更新标题；Wayland
 #                     仅在启动器找到 Cairo libdecor 时启用，否则保持静态标题
 #   QEMU_SDL_CURSOR_MODE auto|host|guest；默认 host，保留宿主即时光标；
@@ -251,7 +256,7 @@ source "$here/lib/dgame-qemu-ptracer.sh"
 
 VM_ID="${1:-}"
 if ! vm_storage_id_is_supported "$VM_ID"; then
-    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso]|--install-headless [iso] [--fresh-unattended] [--install-media usb|ide] [--lab-usernet]|--native|--gtk|--driver-install|--driver-install-gtk|--driver-install-headless|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate=true|false|--memory-prealloc=true|false|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
+    echo "usage: $0 <vm_id> [--vms-dir ABS|--vm-dir ABS|--instances-dir ABS] [--print-paths|--install [iso]|--install-headless [iso] [--fresh-unattended] [--install-media usb|ide] [--lab-usernet]|--native|--gtk|--driver-install|--driver-install-gtk|--driver-install-headless|--rdp|--rescue-sdl|--no-gpu|--production-migration-source|--proxy|--cpu-isolate=true|false|--memory-prealloc=true|false|--game-content-copy|--game-content-compare|--content-diagnostics|--svc-cpus 0..64|auto|--stream URL|--stream-roi X,Y,W,H|--vlan-id VID|--no-tpm|--numlock|--no-numlock|--dry-run|--extra \"...\"]" >&2
     echo "vm_id must be in 1..2147483647" >&2
     exit 2
 fi
@@ -2196,6 +2201,11 @@ TAME_GNOME="${TAME_GNOME:-auto}"
 QEMU_SDL_WINDOWS_CURSOR="${QEMU_SDL_WINDOWS_CURSOR:-$VM_ASSET_DIR/aero_arrow.cur}"
 QEMU_SDL_DISABLE_IBUS="${QEMU_SDL_DISABLE_IBUS:-1}"
 QEMU_SDL_PRESENT_MODE="${QEMU_SDL_PRESENT_MODE:-fixed}"
+QEMU_VFIO_REGION_UPDATE_MODE="${QEMU_VFIO_REGION_UPDATE_MODE:-}"
+QEMU_VFIO_REGION_IDLE_REPORT="${QEMU_VFIO_REGION_IDLE_REPORT:-0}"
+GAME_CONTENT_COPY_CLI_SEEN=0
+GAME_CONTENT_COMPARE_CLI_SEEN=0
+CONTENT_DIAGNOSTICS_CLI_SEEN=0
 QEMU_SDL_TARGET_FPS="${QEMU_SDL_TARGET_FPS:-60}"
 QEMU_SDL_BACKGROUND_FPS="${QEMU_SDL_BACKGROUND_FPS:-0}"
 QEMU_SDL_INPUT_POLL_MS="${QEMU_SDL_INPUT_POLL_MS:-2}"
@@ -2314,8 +2324,8 @@ REPAIR_DISPLAY_VARS="${REPAIR_DISPLAY_VARS:-auto}"
 DRY_RUN="${DRY_RUN:-0}"
 PROXY="${PROXY:-0}"
 CPU_ISOLATION="${CPU_ISOLATION:-}"
-# 两项都是本次启动的宿主资源策略，不写入 vm.conf。CLI 省略时分别由
-# CPU required 默认和 G-11 原有的低延迟内存预分配默认接管。
+# 两项都是本次启动的宿主资源策略，不写入 vm.conf。正常 vGPU 默认
+# 共享 CPU、按需 RAM；其他启动模式在归一化前保留既有预分配策略。
 CPU_ISOLATION_CLI_SEEN=0
 G11_SHARED_PERFORMANCE=0
 G11_HOST_PERFORMANCE_CLI_OFF=0
@@ -2492,6 +2502,34 @@ while (( $# > 0 )); do
         --production-migration-source) shift ;;
         --proxy) PROXY=1; shift ;;
         --no-proxy) PROXY=0; shift ;;
+        --game-content-copy)
+            (( GAME_CONTENT_COPY_CLI_SEEN == 0 )) || {
+                echo "--game-content-copy 只能指定一次" >&2
+                exit 2
+            }
+            GAME_CONTENT_COPY_CLI_SEEN=1
+            QEMU_VFIO_REGION_UPDATE_MODE=copy
+            shift
+            ;;
+        --content-diagnostics)
+            (( CONTENT_DIAGNOSTICS_CLI_SEEN == 0 )) || {
+                echo "--content-diagnostics 只能指定一次" >&2
+                exit 2
+            }
+            CONTENT_DIAGNOSTICS_CLI_SEEN=1
+            QEMU_VFIO_REGION_UPDATE_MODE=compare
+            QEMU_VFIO_REGION_IDLE_REPORT=1
+            shift
+            ;;
+        --game-content-compare)
+            (( GAME_CONTENT_COMPARE_CLI_SEEN == 0 )) || {
+                echo "--game-content-compare 只能指定一次" >&2
+                exit 2
+            }
+            GAME_CONTENT_COMPARE_CLI_SEEN=1
+            QEMU_VFIO_REGION_UPDATE_MODE=compare
+            shift
+            ;;
         --cpu-isolate=*)
             (( CPU_ISOLATION_CLI_SEEN == 0 )) || {
                 echo "--cpu-isolate 只能指定一次" >&2
@@ -2594,6 +2632,42 @@ while (( $# > 0 )); do
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
 done
+
+if (( GAME_CONTENT_COPY_CLI_SEEN &&
+      (CONTENT_DIAGNOSTICS_CLI_SEEN || GAME_CONTENT_COMPARE_CLI_SEEN) )); then
+    echo "--game-content-copy 不能与 --game-content-compare 或 --content-diagnostics 同用：复制模式不比较像素，无法进行静止诊断。" >&2
+    exit 2
+fi
+if [[ -z "$QEMU_VFIO_REGION_UPDATE_MODE" ]]; then
+    QEMU_VFIO_REGION_UPDATE_MODE=compare
+    case "$MODE" in
+        native|vgpu-sdl|vgpu-gtk)
+            [[ "$QEMU_VFIO_REGION_IDLE_REPORT" == 1 ]] ||
+                QEMU_VFIO_REGION_UPDATE_MODE=copy
+            ;;
+    esac
+fi
+case "$QEMU_VFIO_REGION_UPDATE_MODE" in
+    compare|copy) ;;
+    *) echo "QEMU_VFIO_REGION_UPDATE_MODE 必须是 compare 或 copy" >&2; exit 2 ;;
+esac
+case "$QEMU_VFIO_REGION_IDLE_REPORT" in
+    0|1) ;;
+    *) echo "QEMU_VFIO_REGION_IDLE_REPORT 必须是 0 或 1" >&2; exit 2 ;;
+esac
+if [[ "$QEMU_VFIO_REGION_UPDATE_MODE" == copy &&
+      "$QEMU_VFIO_REGION_IDLE_REPORT" == 1 ]]; then
+    echo "--game-content-copy 与 --content-diagnostics 冲突：复制模式不比较像素，无法进行静止诊断（请同时检查对应环境变量）。" >&2
+    exit 2
+fi
+if [[ "$QEMU_VFIO_REGION_UPDATE_MODE" == copy ||
+      "$QEMU_VFIO_REGION_IDLE_REPORT" == 1 ]]; then
+    case "$MODE" in
+        native|vgpu-sdl|vgpu-gtk) ;;
+        *) echo "REGION 复制/诊断仅支持正常 vGPU SDL/GTK 模式" >&2; exit 2 ;;
+    esac
+fi
+export QEMU_VFIO_REGION_UPDATE_MODE QEMU_VFIO_REGION_IDLE_REPORT
 
 if (( G11_SHARED_PERFORMANCE )); then
     if (( CPU_ISOLATION_CLI_SEEN )) && [[ "$CPU_ISOLATION" != off ]]; then
@@ -3189,6 +3263,9 @@ fi
 # 显式 --cpu-isolate=true 仍可覆盖，用于需要独占核的场景。
 case "$MODE" in
     vgpu-sdl|vgpu-gtk)
+        if (( ! MEMORY_PREALLOC_CLI_SEEN )); then
+            G11_MEMORY_PREALLOC=off
+        fi
         if [[ -z "$CPU_ISOLATION" && -z "${CPU_ISOLATE:-}" ]]; then
             CPU_ISOLATION=off
         fi
@@ -3653,6 +3730,20 @@ case "${G11_HOST_BRIDGE_PRESENTATION,,}" in
 esac
 
 : "${QEMU_BIN:=$here/../build/qemu-system-x86_64}"
+# Check explicit REGION features before the CPU probe or resource allocation.
+if [[ "$QEMU_VFIO_REGION_UPDATE_MODE" == copy ]] &&
+        ! LC_ALL=C grep -aFqm1 -- QEMU_VFIO_REGION_UPDATE_MODE "$QEMU_BIN"; then
+    echo "[start-vm] QEMU 不支持 --game-content-copy；请先运行 ./deploy/host/build-qemu.sh" >&2
+    exit 1
+fi
+if [[ "$QEMU_VFIO_REGION_IDLE_REPORT" == 1 ]] &&
+        ! LC_ALL=C grep -aFqm1 -- QEMU_VFIO_REGION_IDLE_REPORT "$QEMU_BIN"; then
+    echo "[start-vm] QEMU 不支持 --content-diagnostics；请先运行 ./deploy/host/build-qemu.sh" >&2
+    exit 1
+fi
+if [[ "$MODE" == vgpu-sdl || "$MODE" == vgpu-gtk ]]; then
+    echo "[start-vm] REGION UPDATE_MODE=$QEMU_VFIO_REGION_UPDATE_MODE IDLE_REPORT=$QEMU_VFIO_REGION_IDLE_REPORT（仅本次启动）"
+fi
 : "${QEMU_IMG:=$here/../build/qemu-img}"
 if [[ -z "${G11_QEMU_DATA_DIR:-}" ]]; then
     # Source builds keep pc-bios beside deploy/.  VMate's installed public
@@ -5724,7 +5815,7 @@ echo "  内存: ${MEM_MODULE_MB_LIST//,/+} MiB ${MEM_MODEL_LIST//,/ + } (${MEM_F
 if [[ "$G11_MEMORY_PREALLOC" == off ]]; then
     echo "  宿主内存: 按需触页（Guest 上限 ${GUEST_MEM_MB} MiB 与 DIMM/SMBIOS 身份不变；工作集仍可能增长到上限）"
 else
-    echo "  宿主内存: 全量预分配（默认，Guest 上限 ${GUEST_MEM_MB} MiB）"
+    echo "  宿主内存: 全量预分配（Guest 上限 ${GUEST_MEM_MB} MiB）"
 fi
 echo "  睡眠: ACPI S3 已暴露（空闲自动睡眠由 Guest 设为从不；手动睡眠可用 vmctl.sh wake ${VM_ID} 唤醒）"
 if [[ "$SSD_INTERFACE" == nvme ]]; then

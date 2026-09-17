@@ -113,7 +113,7 @@ grep -Fq 'NOPASSWD:NOSETENV' <<<"$install_plan" || fail 'sudo rule permits envir
 grep -Fq '/usr/local/libexec/qemu-g11-performance apply' <<<"$install_plan" ||
     fail 'installer omits fixed apply command'
 grep -Fq 'clock=${G11_RTC_CLOCK}' "$launcher" || fail 'launcher omits selectable RTC clock'
-grep -Fq 'G11_MEMORY_PREALLOC=on' "$launcher" || fail 'guest RAM no longer defaults to preallocation'
+grep -Fq 'G11_MEMORY_PREALLOC=off' "$launcher" || fail 'native vGPU lost the on-demand RAM default'
 grep -Fq 'prealloc=${G11_MEMORY_PREALLOC},merge=off' "$launcher" ||
     fail 'guest RAM backend no longer keeps KSM disabled in every allocation mode'
 

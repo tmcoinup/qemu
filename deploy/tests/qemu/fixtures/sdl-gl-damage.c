@@ -1,7 +1,8 @@
 /*
  * SDL display control-flow harness. Production functions are inserted by
- * test_sdl_gl_damage_batch.sh; only external GL/window/producer boundaries
- * are replaced with deterministic counters. No copied scheduling logic.
+ * test_sdl_gl_damage_batch.sh; only external GL/window/producer/refresh-clock
+ * boundaries are replaced with deterministic controls and counters.
+ * No copied scheduling logic.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -63,9 +64,10 @@ static struct sdl2_console console;
 static DisplaySurface surface;
 static int sdl2_native_egl_async_terminal_error;
 static int64_t now_us;
-static bool context_available, fail_upload, fail_create;
-static unsigned int creates, uploads, presents, context_entries;
+static bool context_available, fail_upload, fail_create, refresh_due;
+static unsigned int creates, uploads, draws, presents, context_entries;
 static unsigned int content_updates, pulled, texture_version;
+static unsigned int events_polled, refresh_checks;
 static GLenum current_error;
 static SDL2Rect last_upload;
 static void (*producer_update)(void);
@@ -185,6 +187,7 @@ static void surface_gl_render_texture(void *shader, DisplaySurface *s)
 {
     (void)shader;
     assert(s->texture && sdl2_window_is_renderable(&console));
+    draws++;
 }
 static bool sdl2_gl_swap_window(struct sdl2_console *s)
 {
@@ -199,7 +202,17 @@ static void sdl2_note_content_update(struct sdl2_console *s)
         s->content_update_pending = true;
     }
 }
-static void sdl2_poll_events(struct sdl2_console *s) { (void)s; }
+static void sdl2_poll_events(struct sdl2_console *s)
+{
+    (void)s;
+    events_polled++;
+}
+static bool sdl2_refresh_due(struct sdl2_console *s)
+{
+    (void)s;
+    refresh_checks++;
+    return refresh_due;
+}
 static void sdl2_gl_note_egl_failure(struct sdl2_console *s,
                                      const char *operation, EGLint error)
 {
@@ -245,9 +258,10 @@ static void reset_fixture(void)
     console.dcl.con = &console;
     surface = (DisplaySurface) { .texture = 42, .width = 600, .height = 400 };
     now_us = 1000000;
-    context_available = true;
+    context_available = refresh_due = true;
     fail_create = fail_upload = false;
-    creates = uploads = presents = context_entries = content_updates = pulled = 0;
+    creates = uploads = draws = presents = context_entries = 0;
+    content_updates = pulled = events_polled = refresh_checks = 0;
     current_error = texture_version = 0;
     last_upload = (SDL2Rect) { 0 };
     producer_update = NULL;
@@ -402,6 +416,39 @@ static void publish_latest_damage(void)
     sdl2_gl_update(&console.dcl, 10, 20, 30, 40);
 }
 
+static void test_refresh_not_due_preserves_damage(void)
+{
+    reset_fixture();
+    surface.version = 4;
+    sdl2_gl_update(&console.dcl, 10, 20, 30, 40);
+    producer_update = publish_latest_damage;
+    refresh_due = false;
+
+    sdl2_gl_refresh(&console.dcl);
+    sdl2_gl_refresh(&console.dcl);
+    assert(events_polled == 2 && refresh_checks == 2);
+    assert(pulled == 0 && context_entries == 0);
+    assert(creates == 0 && uploads == 0 && draws == 0 && presents == 0);
+    assert(surface.version == 4 && console.updates == 1);
+    assert(console.content_update_pending && content_updates == 1);
+    assert_box(console.surface_damage, 10, 20, 30, 40);
+
+    refresh_due = true;
+    sdl2_gl_refresh(&console.dcl);
+    assert(events_polled == 3 && refresh_checks == 3);
+    assert(pulled == 1 && uploads == 1 && creates == 0);
+    assert(draws == 1 && presents == 1 && texture_version == 8);
+    assert(console.updates == 0 && !console.content_update_pending);
+    assert_box(last_upload, 10, 20, 30, 40);
+    assert_box(console.surface_damage, 0, 0, 0, 0);
+
+    /* Fixed presentation must also wait when the existing texture is clean. */
+    refresh_due = false;
+    sdl2_gl_refresh(&console.dcl);
+    assert(events_polled == 4 && refresh_checks == 4);
+    assert(pulled == 1 && uploads == 1 && draws == 1 && presents == 1);
+}
+
 static void test_window_redraw_waits_for_producer(void)
 {
     reset_fixture();
@@ -424,7 +471,8 @@ int main(void)
     test_context_failure_retains_damage();
     test_scanout_return_defers_surface_upload();
     test_scanout_return_without_context();
+    test_refresh_not_due_preserves_damage();
     test_window_redraw_waits_for_producer();
-    puts("OK: 9 SDL damage/update/render production-flow regressions passed");
+    puts("OK: 10 SDL damage/update/render production-flow regressions passed");
     return 0;
 }

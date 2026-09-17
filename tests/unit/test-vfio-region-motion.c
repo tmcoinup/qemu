@@ -175,6 +175,56 @@ static void test_padding_is_not_visible_damage(void)
     assert_visible_equal(&region);
 }
 
+static void test_copy_mode(void)
+{
+    TestRegion region = { 0 };
+
+    memset(region.source, 0xa5, sizeof(region.source));
+    set_visible(&region, 0x71);
+
+    /* Default comparison mode must retain its no-copy decision and dedup. */
+    g_assert_false(vfio_region_try_copy_staging(
+        false, region.staging, region.source, sizeof(region.staging)));
+    for (unsigned i = 0; i < sizeof(region.staging); i++) {
+        g_assert_cmpuint(region.staging[i], ==, 0);
+    }
+    g_assert_true(update(&region));
+    assert_visible_equal(&region);
+    g_assert_false(update(&region));
+
+    /* Copy mode includes padding left untouched by the visible comparison. */
+    g_assert_true(vfio_region_try_copy_staging(
+        true, region.staging, region.source, sizeof(region.staging)));
+    g_assert_cmpmem(region.staging, sizeof(region.staging),
+                    region.source, sizeof(region.source));
+
+    /* Every tick sees fresh content, even when only a single byte changes. */
+    for (unsigned i = 0; i < 16; i++) {
+        region.source[3 * TEST_STRIDE + 5] ^= 1;
+        region.source[sizeof(region.source) - 1] ^= 0x80;
+        g_assert_true(vfio_region_try_copy_staging(
+            true, region.staging, region.source, sizeof(region.staging)));
+        g_assert_cmpmem(region.staging, sizeof(region.staging),
+                        region.source, sizeof(region.source));
+    }
+
+    /* Still and black frames are still copied and submitted in copy mode. */
+    g_assert_true(vfio_region_try_copy_staging(
+        true, region.staging, region.source, sizeof(region.staging)));
+    set_visible(&region, 0);
+    g_assert_true(vfio_region_try_copy_staging(
+        true, region.staging, region.source, sizeof(region.staging)));
+    g_assert_cmpmem(region.staging, sizeof(region.staging),
+                    region.source, sizeof(region.source));
+    g_assert_true(vfio_region_try_copy_staging(
+        true, region.staging, region.source, sizeof(region.staging)));
+
+    /* A later exact comparison can immediately deduplicate the copied frame. */
+    g_assert_false(vfio_region_try_copy_staging(
+        false, region.staging, region.source, sizeof(region.staging)));
+    g_assert_false(update(&region));
+}
+
 static void test_layout_reset_discards_old_motion(void)
 {
     TestRegion region = { 0 };
@@ -202,13 +252,71 @@ static void test_layout_reset_discards_old_motion(void)
     g_assert_cmpmem(staging, sizeof(staging), source, sizeof(source));
 }
 
-static void test_fragmented_damage_preserves_all_pixels(void)
+static void test_upload_bounds(void)
+{
+    static const struct {
+        VFIORegionDirtyRun changes[3];
+        uint32_t run_count;
+        uint32_t dirty_rows;
+        uint32_t y;
+        uint32_t height;
+    } cases[] = {
+        /* 55.6% dirty rows must upload 600 rows, not the full 1080. */
+        { { { 240, 600 } }, 1, 600, 240, 600 },
+        /* No arbitrary 90% cutoff either: the smaller box still saves work. */
+        { { { 50, 980 } }, 1, 980, 50, 980 },
+        /* Disjoint runs include the clean gap in the single upload. */
+        { { { 100, 100 }, { 500, 200 } }, 2, 300, 100, 600 },
+        { { { 0, 600 } }, 1, 600, 0, 600 },
+        { { { 480, 600 } }, 1, 600, 480, 600 },
+        /* Small damage at both ends really requires a full-height box. */
+        { { { 0, 1 }, { 1079, 1 } }, 2, 2, 0, 1080 },
+        { { { 0, 1080 } }, 1, 1080, 0, 1080 },
+    };
+
+    for (unsigned i = 0; i < G_N_ELEMENTS(cases); i++) {
+        uint8_t source[TEST_STRIDE * 1080] = { 0 };
+        uint8_t staging[sizeof(source)] = { 0 };
+        TestRegion region = { 0 };
+        VFIORegionDirtyRun damage;
+
+        for (unsigned run = 0; run < cases[i].run_count; run++) {
+            uint32_t start = cases[i].changes[run].y;
+            uint32_t end = start + cases[i].changes[run].height;
+
+            for (uint32_t y = start; y < end; y++) {
+                memset(source + y * TEST_STRIDE, 0x71, TEST_ROW_BYTES);
+            }
+        }
+        g_assert_true(vfio_region_update_staging(
+            staging, source, sizeof(staging), TEST_ROW_BYTES, TEST_STRIDE,
+            1080, &region.motion_streak, &region.bypass_frames,
+            region.runs, &region.run_count, &region.dirty_rows,
+            &region.too_many_runs));
+        g_assert_cmpuint(region.dirty_rows, ==, cases[i].dirty_rows);
+        g_assert_cmpuint(region.run_count, ==, cases[i].run_count);
+        g_assert_false(region.too_many_runs);
+        g_assert_cmpmem(staging, sizeof(staging), source, sizeof(source));
+        damage = vfio_region_update_bounds(region.runs, region.run_count,
+                                            region.too_many_runs, 1080);
+        g_assert_cmpuint(damage.y, ==, cases[i].y);
+        g_assert_cmpuint(damage.height, ==, cases[i].height);
+        g_assert_false(vfio_region_update_staging(
+            staging, source, sizeof(staging), TEST_ROW_BYTES, TEST_STRIDE,
+            1080, &region.motion_streak, &region.bypass_frames,
+            region.runs, &region.run_count, &region.dirty_rows,
+            &region.too_many_runs));
+    }
+}
+
+static void test_maximum_runs_keeps_partial_upload(void)
 {
     uint8_t source[4 * 66] = { 0 };
     uint8_t staging[sizeof(source)] = { 0 };
     TestRegion region = { 0 };
+    VFIORegionDirtyRun damage;
 
-    for (unsigned y = 0; y < 66; y += 2) {
+    for (unsigned y = 1; y < 64; y += 2) {
         source[4 * y] = 1;
     }
     g_assert_true(vfio_region_update_staging(
@@ -216,10 +324,42 @@ static void test_fragmented_damage_preserves_all_pixels(void)
         &region.motion_streak, &region.bypass_frames,
         region.runs, &region.run_count, &region.dirty_rows,
         &region.too_many_runs));
-    g_assert_cmpuint(region.dirty_rows, ==, 33);
+    g_assert_cmpuint(region.dirty_rows, ==, 32);
     g_assert_cmpuint(region.run_count, ==, 32);
-    g_assert_true(region.too_many_runs);
+    g_assert_false(region.too_many_runs);
     g_assert_cmpmem(staging, sizeof(staging), source, sizeof(source));
+    damage = vfio_region_update_bounds(region.runs, region.run_count,
+                                        region.too_many_runs, 66);
+    g_assert_cmpuint(damage.y, ==, 1);
+    g_assert_cmpuint(damage.height, ==, 63);
+}
+
+static void test_fragmented_damage_preserves_all_pixels(void)
+{
+    /* Overflow both when the final dirty run closes and at end of scanout. */
+    for (uint32_t height = 65; height <= 66; height++) {
+        uint8_t source[4 * 66] = { 0 };
+        uint8_t staging[sizeof(source)] = { 0 };
+        TestRegion region = { 0 };
+        VFIORegionDirtyRun damage;
+
+        for (unsigned y = 0; y < height; y += 2) {
+            source[4 * y] = 1;
+        }
+        g_assert_true(vfio_region_update_staging(
+            staging, source, 4 * height, 4, 4, height,
+            &region.motion_streak, &region.bypass_frames,
+            region.runs, &region.run_count, &region.dirty_rows,
+            &region.too_many_runs));
+        g_assert_cmpuint(region.dirty_rows, ==, 33);
+        g_assert_cmpuint(region.run_count, ==, 32);
+        g_assert_true(region.too_many_runs);
+        g_assert_cmpmem(staging, sizeof(staging), source, sizeof(source));
+        damage = vfio_region_update_bounds(region.runs, region.run_count,
+                                            region.too_many_runs, height);
+        g_assert_cmpuint(damage.y, ==, 0);
+        g_assert_cmpuint(damage.height, ==, height);
+    }
 }
 
 int main(int argc, char **argv)
@@ -235,8 +375,12 @@ int main(int argc, char **argv)
                     test_low_motion_exits_bypass);
     g_test_add_func("/vfio-region/ignore-padding",
                     test_padding_is_not_visible_damage);
+    g_test_add_func("/vfio-region/copy-mode", test_copy_mode);
     g_test_add_func("/vfio-region/layout-reset",
                     test_layout_reset_discards_old_motion);
+    g_test_add_func("/vfio-region/upload-bounds", test_upload_bounds);
+    g_test_add_func("/vfio-region/maximum-runs",
+                    test_maximum_runs_keeps_partial_upload);
     g_test_add_func("/vfio-region/fragmented-damage",
                     test_fragmented_damage_preserves_all_pixels);
     return g_test_run();

@@ -37,7 +37,6 @@
      pwrite(_fd, &(_ptr->_fld), sizeof(_ptr->_fld),                     \
            _reg->offset + offsetof(typeof(*_ptr), _fld)))
 
-#define VFIO_REGION_FULL_UPDATE_PERCENT  50
 #define VFIO_REGION_FAILURE_RETRY_US      100000
 
 /*
@@ -54,10 +53,12 @@ static void vfio_display_region_drop_staging(VFIODisplay *dpy)
     dpy->region.staging_row_bytes = 0;
     vfio_region_motion_reset(&dpy->region.full_motion_streak,
                              &dpy->region.compare_bypass_frames);
+    vfio_region_idle_reset(&dpy->region.idle);
 }
 
 static void vfio_display_region_buffer_reset(VFIODisplay *dpy)
 {
+    vfio_region_idle_reset(&dpy->region.idle);
     if (dpy->region.buffer.mem) {
         vfio_region_exit(&dpy->region.buffer);
         vfio_region_finalize(&dpy->region.buffer);
@@ -73,6 +74,7 @@ static bool vfio_display_region_mark_failure(VFIODisplay *dpy)
         dpy->region.failure_streak++;
     }
     dpy->region.force_full_update = true;
+    vfio_region_idle_reset(&dpy->region.idle);
     vfio_region_motion_reset(&dpy->region.full_motion_streak,
                              &dpy->region.compare_bypass_frames);
     dpy->region.failure_retry_after_us =
@@ -149,6 +151,7 @@ static bool vfio_display_region_install_staging(
     dpy->region.staging = staging;
     dpy->region.staging_size = staging_size;
     dpy->region.staging_row_bytes = row_bytes;
+    vfio_region_idle_reset(&dpy->region.idle);
     vfio_region_motion_reset(&dpy->region.full_motion_streak,
                              &dpy->region.compare_bypass_frames);
     dpy->region.force_full_update = false;
@@ -202,6 +205,7 @@ static void vfio_display_region_no_plane(VFIODisplay *dpy)
     DisplaySurface *surface = dpy->region.surface;
 
     dpy->region.force_full_update = true;
+    vfio_region_idle_reset(&dpy->region.idle);
     vfio_region_motion_reset(&dpy->region.full_motion_streak,
                              &dpy->region.compare_bypass_frames);
 
@@ -588,6 +592,38 @@ void vfio_display_reset(VFIOPCIDevice *vdev)
     dpy_gfx_update_full(vdev->dpy->con);
 }
 
+static void vfio_display_region_report_idle(
+    VFIODisplay *dpy, const struct vfio_device_gfx_plane_info *plane,
+    bool compared, bool changed)
+{
+    VFIORegionIdleEvent event;
+
+    if (!dpy->region.idle_reporting_enabled) {
+        return;
+    }
+    if (!compared) {
+        /* A blind copy cannot establish either a change or a still picture. */
+        vfio_region_idle_reset(&dpy->region.idle);
+        return;
+    }
+    event = vfio_region_idle_sample(&dpy->region.idle,
+                                    g_get_monotonic_time(), changed);
+    if (event.level) {
+        info_report("vfio-display-region: idle level=%u unchanged_ms=%" PRId64
+                    " region=%u width=%u height=%u stride=%u drm_format=0x%x; "
+                    "no pixel change observed, guest/driver cause unknown",
+                    event.level, event.unchanged_us / 1000,
+                    plane->region_index, plane->width, plane->height,
+                    plane->stride, plane->drm_format);
+    } else if (event.recovered) {
+        info_report("vfio-display-region: pixels changed after unchanged_ms=%"
+                    PRId64 " region=%u width=%u height=%u stride=%u "
+                    "drm_format=0x%x", event.unchanged_us / 1000,
+                    plane->region_index, plane->width, plane->height,
+                    plane->stride, plane->drm_format);
+    }
+}
+
 static void vfio_display_region_update(void *opaque)
 {
     VFIOPCIDevice *vdev = opaque;
@@ -598,12 +634,15 @@ static void vfio_display_region_update(void *opaque)
     };
     pixman_format_code_t format;
     VFIORegionDirtyRun runs[VFIO_REGION_MAX_DIRTY_RUNS];
+    VFIORegionDirtyRun damage;
     const uint8_t *source;
     size_t row_bytes;
     size_t staging_size;
     uint32_t run_count;
     uint32_t dirty_rows;
     bool too_many_runs;
+    bool compared;
+    bool changed;
     int ret;
 
     if (dpy->region.failure_retry_after_us &&
@@ -750,6 +789,7 @@ static void vfio_display_region_update(void *opaque)
     if (dpy->region.force_full_update) {
         vfio_display_region_staging_copy(dpy, source);
         dpy->region.force_full_update = false;
+        vfio_region_idle_reset(&dpy->region.idle);
         vfio_region_motion_reset(&dpy->region.full_motion_streak,
                                  &dpy->region.compare_bypass_frames);
         vfio_display_region_mark_recovered(dpy);
@@ -757,17 +797,25 @@ static void vfio_display_region_update(void *opaque)
         return;
     }
 
-    if (!vfio_display_region_find_updates(dpy, source, runs, &run_count,
-                                          &dirty_rows, &too_many_runs)) {
-        return;
-    }
-
-    if (too_many_runs ||
-        (uint64_t)dirty_rows * 100 >=
-        (uint64_t)plane.height * VFIO_REGION_FULL_UPDATE_PERCENT) {
+    if (vfio_region_try_copy_staging(dpy->region.always_copy,
+                                     dpy->region.staging, source,
+                                     dpy->region.staging_size)) {
+        /* Copy mode cannot establish pixel changes or unchanged duration. */
+        vfio_region_idle_reset(&dpy->region.idle);
+        vfio_region_motion_reset(&dpy->region.full_motion_streak,
+                                 &dpy->region.compare_bypass_frames);
         dpy_gfx_update(dpy->con, 0, 0, plane.width, plane.height);
         return;
     }
+
+    compared = !dpy->region.compare_bypass_frames;
+    changed = vfio_display_region_find_updates(dpy, source, runs, &run_count,
+                                               &dirty_rows, &too_many_runs);
+    vfio_display_region_report_idle(dpy, &plane, compared, changed);
+    if (!changed) {
+        return;
+    }
+
     /*
      * Keep a single display update per refresh.  The GL listener can batch
      * several texture uploads before its final swap, but SDL's 2D listener
@@ -775,9 +823,9 @@ static void vfio_display_region_update(void *opaque)
      * per dirty run.  A vertical bounding box preserves most of the upload
      * saving without creating an avoidable present storm.
      */
-    dpy_gfx_update(dpy->con, 0, runs[0].y, plane.width,
-                   runs[run_count - 1].y + runs[run_count - 1].height -
-                   runs[0].y);
+    damage = vfio_region_update_bounds(runs, run_count, too_many_runs,
+                                       plane.height);
+    dpy_gfx_update(dpy->con, 0, damage.y, plane.width, damage.height);
 }
 
 static const GraphicHwOps vfio_display_region_ops = {
@@ -787,6 +835,10 @@ static const GraphicHwOps vfio_display_region_ops = {
 static bool vfio_display_region_init(VFIOPCIDevice *vdev, Error **errp)
 {
     vdev->dpy = g_new0(VFIODisplay, 1);
+    vdev->dpy->region.always_copy =
+        g_strcmp0(g_getenv("QEMU_VFIO_REGION_UPDATE_MODE"), "copy") == 0;
+    vdev->dpy->region.idle_reporting_enabled =
+        g_strcmp0(g_getenv("QEMU_VFIO_REGION_IDLE_REPORT"), "1") == 0;
     vdev->dpy->con = graphic_console_init(DEVICE(vdev), 0,
                                           &vfio_display_region_ops,
                                           vdev);

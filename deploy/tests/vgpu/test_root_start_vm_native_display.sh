@@ -143,7 +143,8 @@ EOF
 cat >"$TMP_DIR/qemu-system-x86_64" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$FAKE_QEMU_TRACE"
-printf 'XMODIFIERS=%s SDL_IM_MODULE=%s IBUS_ADDRESS=%s NATIVE_EGL=%s SDL_DRIVER=%s X11_WMCLASS=%s WAYLAND_WMCLASS=%s WINDOW_MODE=%s CURSOR_MODE=%s args=%s\n' \
+printf 'REGION_UPDATE_MODE=%s REGION_IDLE_REPORT=%s XMODIFIERS=%s SDL_IM_MODULE=%s IBUS_ADDRESS=%s NATIVE_EGL=%s SDL_DRIVER=%s X11_WMCLASS=%s WAYLAND_WMCLASS=%s WINDOW_MODE=%s CURSOR_MODE=%s args=%s\n' \
+    "${QEMU_VFIO_REGION_UPDATE_MODE-}" "${QEMU_VFIO_REGION_IDLE_REPORT-}" \
     "${XMODIFIERS-}" "${SDL_IM_MODULE-}" "${IBUS_ADDRESS-}" \
     "${QEMU_SDL_NATIVE_EGL-}" "${SDL_VIDEODRIVER-}" \
     "${SDL_VIDEO_X11_WMCLASS-}" "${SDL_VIDEO_WAYLAND_WMCLASS-}" \
@@ -188,6 +189,12 @@ run_start_vm() {
 
     if [[ -n "${TEST_VGPU_HOST_CONFIG:-}" ]]; then
         host_config=$TEST_VGPU_HOST_CONFIG
+    fi
+    if [[ -n "${TEST_REGION_UPDATE_MODE+x}" ]]; then
+        optional_env+=("QEMU_VFIO_REGION_UPDATE_MODE=$TEST_REGION_UPDATE_MODE")
+    fi
+    if [[ -n "${TEST_REGION_IDLE_REPORT+x}" ]]; then
+        optional_env+=("QEMU_VFIO_REGION_IDLE_REPORT=$TEST_REGION_IDLE_REPORT")
     fi
     if [[ "${TEST_NATIVE_WAYLAND:-0}" == 1 ]]; then
         optional_env+=(
@@ -234,9 +241,13 @@ RESOURCE_TRUE_OUT="$TMP_DIR/resource-true.out"
 
 run_start_vm "$SDL_OUT"
 require_text "模式=vgpu-sdl" "$SDL_OUT"
-require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=on\,merge=off' \
+require_text 'REGION_UPDATE_MODE=copy REGION_IDLE_REPORT=0 XMODIFIERS=' \
+    "$TMP_DIR/qemu-env.trace"
+require_text 'REGION UPDATE_MODE=copy IDLE_REPORT=0' "$SDL_OUT"
+require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=off\,merge=off' \
     "$SDL_OUT"
-require_text '宿主内存: 全量预分配（默认，Guest 上限 8192 MiB）' "$SDL_OUT"
+require_text '宿主内存: 按需触页（Guest 上限 8192 MiB 与 DIMM/SMBIOS 身份不变；工作集仍可能增长到上限）' \
+    "$SDL_OUT"
 reject_text '  -S' "$SDL_OUT"
 require_text "XMODIFIERS=@im=none SDL_IM_MODULE=none IBUS_ADDRESS=/nonexistent NATIVE_EGL=1 SDL_DRIVER=x11 X11_WMCLASS=win10-${VM_ID} WAYLAND_WMCLASS=win10-${VM_ID} WINDOW_MODE= CURSOR_MODE=host args=-display help" \
     "$TMP_DIR/qemu-env.trace"
@@ -404,6 +415,10 @@ require_text '必须是 1..4094' "$TMP_DIR/vlan-invalid.err"
 
 run_start_vm "$GTK_OUT" --gtk --proxy
 require_text "模式=vgpu-gtk" "$GTK_OUT"
+require_text 'REGION UPDATE_MODE=copy IDLE_REPORT=0' "$GTK_OUT"
+require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=off\,merge=off' \
+    "$GTK_OUT"
+reject_text '  -S' "$GTK_OUT"
 require_native_vfio "$GTK_OUT"
 require_vgpu_root_port "$GTK_OUT"
 require_tpm2 "$GTK_OUT"
@@ -623,6 +638,126 @@ TEST_QEMU_BIN="$PACKAGED_RUNTIME/qemu-system-x86_64.g11" \
     run_start_vm "$PACKAGED_OUT" --rdp --no-tpm
 require_text "$PACKAGED_RUNTIME/share/qemu-g11" "$PACKAGED_OUT"
 
+# Exercise the actual launcher argument parser and the environment inherited by
+# its QEMU subprocesses.  Each scenario gets a fresh trace so an earlier launch
+# cannot satisfy the copy/diagnostics assertions accidentally.
+run_region_start_vm() {
+    : >"$TMP_DIR/qemu.trace"
+    : >"$TMP_DIR/qemu-env.trace"
+    run_start_vm "$@"
+}
+
+GAME_COPY_OUT="$TMP_DIR/game-content-copy.out"
+run_region_start_vm "$GAME_COPY_OUT" \
+    --proxy --cpu-isolate=false --memory-prealloc=false --game-content-copy
+require_text 'REGION_UPDATE_MODE=copy REGION_IDLE_REPORT=0 XMODIFIERS=' \
+    "$TMP_DIR/qemu-env.trace"
+require_text 'memory-backend-memfd\,id=ram0\,size=8192M\,share=on\,prealloc=off\,merge=off' \
+    "$GAME_COPY_OUT"
+reject_text '  -S' "$GAME_COPY_OUT"
+require_text "QMP alias: ${VM_ROOT}/${VM_ID}/run/qmp.sock.proxy" "$GAME_COPY_OUT"
+require_text 'DGame transport: GPU first (active display EGL/dma-buf)' "$GAME_COPY_OUT"
+require_native_vfio "$GAME_COPY_OUT"
+
+run_region_start_vm "$TMP_DIR/game-content-compare.out" --game-content-compare
+require_text 'REGION_UPDATE_MODE=compare REGION_IDLE_REPORT=0 XMODIFIERS=' \
+    "$TMP_DIR/qemu-env.trace"
+require_text 'REGION UPDATE_MODE=compare IDLE_REPORT=0' \
+    "$TMP_DIR/game-content-compare.out"
+
+run_region_start_vm "$TMP_DIR/content-diagnostics.out" --content-diagnostics
+require_text 'REGION_UPDATE_MODE=compare REGION_IDLE_REPORT=1 XMODIFIERS=' \
+    "$TMP_DIR/qemu-env.trace"
+
+# g11-sdl-performance.sh consumes these flags itself and supplies the resulting
+# settings through the environment.  The direct launcher must preserve them.
+TEST_REGION_UPDATE_MODE=copy TEST_REGION_IDLE_REPORT=0 \
+    run_region_start_vm "$TMP_DIR/content-copy-env.out"
+require_text 'REGION_UPDATE_MODE=copy REGION_IDLE_REPORT=0 XMODIFIERS=' \
+    "$TMP_DIR/qemu-env.trace"
+TEST_REGION_UPDATE_MODE=compare TEST_REGION_IDLE_REPORT=1 \
+    run_region_start_vm "$TMP_DIR/content-diagnostics-env.out"
+require_text 'REGION_UPDATE_MODE=compare REGION_IDLE_REPORT=1 XMODIFIERS=' \
+    "$TMP_DIR/qemu-env.trace"
+
+for first_content_flag in --game-content-copy --content-diagnostics; do
+    if [[ "$first_content_flag" == --game-content-copy ]]; then
+        second_content_flag=--content-diagnostics
+    else
+        second_content_flag=--game-content-copy
+    fi
+    conflict_out="$TMP_DIR/conflict-${first_content_flag#--}.out"
+    if run_region_start_vm "$conflict_out" \
+            "$first_content_flag" "$second_content_flag"; then
+        fail "incompatible REGION flags were accepted: $first_content_flag $second_content_flag"
+    fi
+    require_text '--game-content-copy' "${conflict_out%.out}.err"
+    require_text '--content-diagnostics' "${conflict_out%.out}.err"
+    [[ ! -s "$TMP_DIR/qemu.trace" ]] \
+        || fail 'incompatible REGION flags reached QEMU'
+
+    duplicate_out="$TMP_DIR/duplicate-${first_content_flag#--}.out"
+    if run_region_start_vm "$duplicate_out" \
+            "$first_content_flag" "$first_content_flag"; then
+        fail "duplicate REGION flag was accepted: $first_content_flag"
+    fi
+    require_text "$first_content_flag 只能指定一次" "${duplicate_out%.out}.err"
+    [[ ! -s "$TMP_DIR/qemu.trace" ]] \
+        || fail 'duplicate REGION flags reached QEMU'
+done
+unset first_content_flag second_content_flag conflict_out duplicate_out
+
+for first_content_flag in --game-content-copy --game-content-compare; do
+    if [[ "$first_content_flag" == --game-content-copy ]]; then
+        second_content_flag=--game-content-compare
+    else
+        second_content_flag=--game-content-copy
+    fi
+    conflict_out="$TMP_DIR/conflict-compare-${first_content_flag#--}.out"
+    if run_region_start_vm "$conflict_out" \
+            "$first_content_flag" "$second_content_flag"; then
+        fail "incompatible REGION modes were accepted: $first_content_flag $second_content_flag"
+    fi
+    require_text '--game-content-copy' "${conflict_out%.out}.err"
+    require_text '--game-content-compare' "${conflict_out%.out}.err"
+    [[ ! -s "$TMP_DIR/qemu.trace" ]] \
+        || fail 'incompatible REGION modes reached QEMU'
+done
+unset first_content_flag second_content_flag conflict_out
+if run_region_start_vm "$TMP_DIR/duplicate-game-content-compare.out" \
+        --game-content-compare --game-content-compare; then
+    fail 'duplicate REGION flag was accepted: --game-content-compare'
+fi
+require_text '--game-content-compare 只能指定一次' \
+    "$TMP_DIR/duplicate-game-content-compare.err"
+
+# An older executable must not silently ignore the effective REGION mode.
+# Hide only the relevant capability marker; preserve the fake QEMU's normal
+# probes so the explicit compare control proves that executable is usable.
+sed 's/QEMU_VFIO_REGION_UPDATE_MODE/TEST_UNSUPPORTED_REGION_UPDATE_MODE/g' \
+    "$TMP_DIR/qemu-system-x86_64" >"$TMP_DIR/qemu-no-region-copy"
+sed 's/QEMU_VFIO_REGION_IDLE_REPORT/TEST_UNSUPPORTED_REGION_IDLE_REPORT/g' \
+    "$TMP_DIR/qemu-system-x86_64" >"$TMP_DIR/qemu-no-region-diagnostics"
+chmod +x "$TMP_DIR/qemu-no-region-copy" "$TMP_DIR/qemu-no-region-diagnostics"
+TEST_QEMU_BIN="$TMP_DIR/qemu-no-region-copy" \
+    run_region_start_vm "$TMP_DIR/old-binary-compare.out" --game-content-compare
+require_native_vfio "$TMP_DIR/old-binary-compare.out"
+if TEST_QEMU_BIN="$TMP_DIR/qemu-no-region-copy" \
+        run_region_start_vm "$TMP_DIR/old-binary-default.out"; then
+    fail 'QEMU without REGION copy support accepted the default copy mode'
+fi
+require_text 'QEMU 不支持 --game-content-copy' "$TMP_DIR/old-binary-default.err"
+if TEST_QEMU_BIN="$TMP_DIR/qemu-no-region-copy" \
+        run_region_start_vm "$TMP_DIR/old-binary-copy.out" --game-content-copy; then
+    fail 'QEMU without REGION copy support accepted --game-content-copy'
+fi
+require_text '--game-content-copy' "$TMP_DIR/old-binary-copy.err"
+if TEST_QEMU_BIN="$TMP_DIR/qemu-no-region-diagnostics" \
+        run_region_start_vm "$TMP_DIR/old-binary-diagnostics.out" --content-diagnostics; then
+    fail 'QEMU without REGION idle reporting accepted --content-diagnostics'
+fi
+require_text '--content-diagnostics' "$TMP_DIR/old-binary-diagnostics.err"
+
 [[ -z "$(find "$VM_ROOT/control" -mindepth 1 -print -quit)" ]] \
     || fail "dry-run created runtime state"
 [[ -z "$(find "$VM_ROOT/${VM_ID}/run" -mindepth 1 -print -quit)" ]] \
@@ -636,4 +771,4 @@ grep -Fq 'QEMU_LOG=$(vm_storage_log_path "$VM_ID")' "$START_VM" \
 grep -Fq '2> >(tee -a "$QEMU_LOG" >&2)' "$START_VM" \
     || fail "foreground/native QEMU modes no longer retain stderr logs"
 
-echo "PASS: root start-vm native SDL/GTK and legacy RDP dry-run argv"
+echo "PASS: root start-vm native SDL/GTK, REGION copy/diagnostics and legacy RDP dry-run argv"

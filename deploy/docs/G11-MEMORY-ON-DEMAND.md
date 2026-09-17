@@ -11,13 +11,13 @@ Hyper-V 身份。它适合“给 Guest 配 8G，但空闲时不希望 QEMU 一�
 
 ```bash
 cd /home/ubuntu/projects/qemu
-./deploy/scripts/start-vm.sh 1 --proxy --cpu-isolate=false --memory-prealloc=false
+./deploy/scripts/start-vm.sh 1 --proxy
 ```
 
 也可以使用统一封装；后面的启动参数会原样、安全地交给唯一启动器：
 
 ```bash
-./deploy/scripts/vmctl.sh start 1 --proxy --cpu-isolate=false --memory-prealloc=false
+./deploy/scripts/vmctl.sh start 1 --proxy
 ```
 
 启动摘要看到下面这行就表示已生效：
@@ -26,20 +26,21 @@ cd /home/ubuntu/projects/qemu
 宿主内存: 按需触页（Guest 上限 8192 MiB 与 DIMM/SMBIOS 身份不变……）
 ```
 
-这两个布尔键只作用于本次启动，不写入固定 Guest 硬件身份。以后每次需要共享 CPU
-和按需占用时继续传 `--cpu-isolate=false --memory-prealloc=false`。两个键都省略时
-正常 G-11 vGPU SDL/GTK 默认共享 CPU（`false`）和内存全量预分配（`true`）；
-显式环境策略仍可覆盖 CPU 默认值。CPU 隔离需要明确传 `--cpu-isolate=true`。
+正常 G-11 vGPU SDL/GTK 已默认共享 CPU、按需内存，并默认启用 REGION 全量复制。
+不必重复传 `--cpu-isolate=false --memory-prealloc=false --game-content-copy`，也不必
+先运行性能封装。显式参数仍只作用于本次启动，不写入固定 Guest 硬件身份；
+显式环境策略仍可覆盖 CPU 默认值。安装和救援模式保留原有策略。
+显示模式及比较回退说明见 [Content 优化教程](G11-SDL-CONTENT-FPS.md)。
 
 ## 恢复原来的低延迟模式
 
 完整关闭 VM，再执行：
 
 ```bash
-./deploy/scripts/vmctl.sh start 1 --proxy --cpu-isolate=false
+./deploy/scripts/vmctl.sh start 1 --proxy --memory-prealloc=true
 ```
 
-省略 `--memory-prealloc` 就恢复默认的 `true`；若还需要 CPU 隔离，另加
+全量预分配现在需要显式 `--memory-prealloc=true`；若还需要 CPU 隔离，另加
 `--cpu-isolate=true`。关闭 CPU 隔离时，`--svc-cpus` 或 SDL ultra 档的服务核请求不会
 应用。两项开关都不能保证消除 vGPU/SDL 黑屏；同一 VM 的单变量响应对比步骤见
 [SDL 低延迟教程](G11-SDL-PERFORMANCE.md#共享-cpu按需内存时卡顿怎么比较)。

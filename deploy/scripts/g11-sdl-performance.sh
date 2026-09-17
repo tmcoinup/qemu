@@ -27,19 +27,23 @@ VGPU_CONSOLE_US=8333
 VGPU_FRAME_RATE_LIMITER=0
 SDL_SERVICE_CPUS=0
 SDL_USB_LOW_LATENCY=0
+SDL_CONTENT_DIAGNOSTICS=0
+SDL_REGION_UPDATE_MODE=copy
 
 usage() {
     cat <<'EOF'
 用法：
   ./deploy/scripts/g11-sdl-performance.sh audit [--ultra-responsive|--experimental-120hz|--multi-vm]
   ./deploy/scripts/g11-sdl-performance.sh profile [balanced|ultra|experimental-120|multi-vm]
-  ./deploy/scripts/g11-sdl-performance.sh start  VM编号 [响应档位] [--native-wayland] [start-vm 其他参数]
+  ./deploy/scripts/g11-sdl-performance.sh start  VM编号 [响应档位] [--native-wayland] [--content-diagnostics|--game-content-copy|--game-content-compare] [start-vm 其他参数]
   ./deploy/scripts/g11-sdl-performance.sh verify VM编号
 
 说明：
   audit   只读检查源码、当前 QEMU build 和所选参数，不启动 VM。
   profile 只打印封装值；所有档位都只影响本次启动，不写入 VM 配置。
-  start   默认 balanced；--ultra-responsive 使用 60Hz/1ms/1ms 键盘，
+  start   默认 balanced、REGION 整帧复制；CPU 隔离和内存预分配默认关闭，
+          可用 --cpu-isolate=true --memory-prealloc=true 显式开启。
+          --ultra-responsive 使用 60Hz/1ms/1ms 键盘，
           并请求 auto 服务核（仅开启 CPU 隔离时参与分配）。
           balanced/ultra 档位用 120Hz REGION + FRL off；--experimental-120hz 仅把
           SDL Present 也提高到 120Hz，须实测后使用。
@@ -50,6 +54,12 @@ usage() {
           --native-wayland 是非默认 A/B；仅真实 Wayland 会话可用，
           会禁用 X11-only native EGL/GPU-first 启动，保留 DGame SHM fallback。
           切换窗口模式前后都必须让 Windows 完整关机，不支持热切换。
+          --content-diagnostics 本次自动切换 compare，开启像素静止日志（默认关闭）；
+          在 2/10/30 秒阈值报告，只表示像素未变化，不判定 Guest 卡死。
+          --game-content-copy 使用默认的 REGION 整帧复制，跳过像素比较；
+          --game-content-compare 本次恢复像素比较，可与 --content-diagnostics 同用。
+          显式 --game-content-copy 不能与 compare 或 diagnostics 同用。
+          copy 下 Content 统计提交次数，不表示游戏真实 FPS。
   verify  只读核对运行中 QEMU 的 PID、SDL argv、资源策略和环境；不虚构新帧遥测。
 EOF
 }
@@ -114,6 +124,8 @@ VGPU_FRAME_RATE_LIMITER=$VGPU_FRAME_RATE_LIMITER
 QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP=$SDL_ALLOW_HOST_SLEEP
 QEMU_SERVICE_CPUS=$SDL_SERVICE_CPUS
 G11_USB_HID_LOW_LATENCY=$SDL_USB_LOW_LATENCY
+QEMU_VFIO_REGION_IDLE_REPORT=$SDL_CONTENT_DIAGNOSTICS
+QEMU_VFIO_REGION_UPDATE_MODE=$SDL_REGION_UPDATE_MODE
 EOF
 }
 
@@ -264,6 +276,22 @@ audit() {
         echo "[g11-sdl] QEMU 不支持后台 SDL 帧率；请先重新构建" >&2
         failures=$((failures + 1))
     fi
+    if [[ "$SDL_CONTENT_DIAGNOSTICS" == 1 ]]; then
+        if binary_has QEMU_VFIO_REGION_IDLE_REPORT; then
+            echo "[g11-sdl] binary QEMU_VFIO_REGION_IDLE_REPORT=yes"
+        else
+            echo "[g11-sdl] FAIL: QEMU 不支持 --content-diagnostics；请先重新构建" >&2
+            failures=$((failures + 1))
+        fi
+    fi
+    if [[ "$SDL_REGION_UPDATE_MODE" == copy ]]; then
+        if binary_has QEMU_VFIO_REGION_UPDATE_MODE; then
+            echo "[g11-sdl] binary QEMU_VFIO_REGION_UPDATE_MODE=yes"
+        else
+            echo "[g11-sdl] FAIL: QEMU 不支持 --game-content-copy；请先重新构建" >&2
+            failures=$((failures + 1))
+        fi
+    fi
     if ((failures)); then
         echo "[g11-sdl] AUDIT_RESULT=not-ready failures=$failures"
         return 1
@@ -318,6 +346,7 @@ require_native_wayland_session() {
 start_vm_low_latency() {
     local vm_id=${1:-}
     local arg profile_seen=0 native_wayland=0 native_wayland_seen=0
+    local region_mode_seen=""
     local -a forwarded=() window_env=() window_args=()
     shift || true
 
@@ -367,11 +396,34 @@ start_vm_low_latency() {
                 native_wayland=1
                 native_wayland_seen=1
                 ;;
+            --content-diagnostics)
+                if [[ "$SDL_CONTENT_DIAGNOSTICS" == 1 ]]; then
+                    echo "[g11-sdl] --content-diagnostics 只能指定一次" >&2
+                    return 2
+                fi
+                SDL_CONTENT_DIAGNOSTICS=1
+                ;;
+            --game-content-copy|--game-content-compare)
+                if [[ -n "$region_mode_seen" ]]; then
+                    echo "[g11-sdl] REGION 更新模式只能指定一次：$region_mode_seen 与 $arg" >&2
+                    return 2
+                fi
+                region_mode_seen=$arg
+                SDL_REGION_UPDATE_MODE=${arg#--game-content-}
+                ;;
             *)
                 forwarded+=("$arg")
                 ;;
         esac
     done
+    if [[ "$region_mode_seen" == --game-content-copy &&
+          "$SDL_CONTENT_DIAGNOSTICS" == 1 ]]; then
+        echo "[g11-sdl] --game-content-copy 与 --content-diagnostics 冲突：复制模式不比较像素，无法进行静止诊断。" >&2
+        return 2
+    fi
+    if [[ "$SDL_CONTENT_DIAGNOSTICS" == 1 ]]; then
+        SDL_REGION_UPDATE_MODE=compare
+    fi
     reject_conflicting_start_modes "${forwarded[@]}"
     if ((native_wayland)); then
         for arg in "${forwarded[@]}"; do
@@ -417,6 +469,12 @@ start_vm_low_latency() {
 
     echo "[g11-sdl] 启动 VM $vm_id，应用 $SDL_PROFILE："
     print_profile | sed 's/^/  /'
+    if [[ "$SDL_CONTENT_DIAGNOSTICS" == 1 ]]; then
+        echo "[g11-sdl] REGION 像素静止诊断已开启：2/10/30 秒阈值仅表示内容未变化，不判定 Guest 卡死。"
+    fi
+    if [[ "$SDL_REGION_UPDATE_MODE" == copy ]]; then
+        echo "[g11-sdl] REGION 整帧复制已开启：跳过像素比较，无法判断像素静止。"
+    fi
     if ((native_wayland)); then
         echo "[g11-sdl] 窗口 A/B：native-wayland-v1（SDL Wayland / X11 native EGL、GPU-first 启动已禁用 / 保留 DGame SHM fallback）"
     fi
@@ -439,6 +497,8 @@ start_vm_low_latency() {
         VGPU_FRAME_RATE_LIMITER="$VGPU_FRAME_RATE_LIMITER" \
         QEMU_SDL_ALLOW_HOST_DISPLAY_SLEEP="$SDL_ALLOW_HOST_SLEEP" \
         QEMU_SERVICE_CPUS="$SDL_SERVICE_CPUS" \
+        QEMU_VFIO_REGION_IDLE_REPORT="$SDL_CONTENT_DIAGNOSTICS" \
+        QEMU_VFIO_REGION_UPDATE_MODE="$SDL_REGION_UPDATE_MODE" \
         "${window_env[@]}" \
         "$start_vm" "$vm_id" "${latency_args[@]}" "${window_args[@]}" \
         "${forwarded[@]}" --sdl
@@ -553,6 +613,35 @@ print_running_resource_policy() {
     fi
 }
 
+print_running_content_policy() {
+    local mode=${1:-unknown} diagnostics=${2:-unknown}
+
+    case "$mode" in
+        copy|compare|unknown) ;;
+        *)
+            echo "[g11-sdl] FAIL: 无效的 REGION 更新模式" >&2
+            return 1
+            ;;
+    esac
+    case "$diagnostics" in
+        0|1|unknown) ;;
+        *)
+            echo "[g11-sdl] FAIL: 无效的 REGION 静止诊断设置" >&2
+            return 1
+            ;;
+    esac
+    echo "[g11-sdl] REGION UPDATE_MODE=$mode IDLE_REPORT=$diagnostics (QEMU environment)"
+    if [[ "$mode" == copy ]]; then
+        echo "[g11-sdl] REGION Content 统计整帧提交次数，不表示游戏真实 FPS；copy 无法判断像素静止。"
+        if [[ "$diagnostics" == 1 ]]; then
+            echo "[g11-sdl] FAIL: copy 与像素静止诊断不相容" >&2
+            return 1
+        fi
+    elif [[ "$mode" == compare ]]; then
+        echo "[g11-sdl] REGION 已启用像素比较；Content 统计内容更新通知（含强制更新），不表示游戏真实 FPS。"
+    fi
+}
+
 verify_running_vm() {
     local vm_id=${1:-} audit_status=0 pid display_arg="" vfio_display=""
     local exe_path=""
@@ -560,6 +649,7 @@ verify_running_vm() {
     local detected_profile="" declared_profile="" usb_low_latency=0
     local window_mode="" sdl_video_driver="" native_egl=""
     local cpu_isolation="" service_cpus=""
+    local region_mode="" content_diagnostics=""
     local env_readable=1
     local failures=0 partial=0 i actual expected key
     local -a pids=() argv=()
@@ -578,7 +668,6 @@ verify_running_vm() {
         return 2
     }
 
-    audit || audit_status=$?
     mapfile -t pids < <(find_vm_pids "$vm_id")
     if ((${#pids[@]} == 0)); then
         echo "[g11-sdl] VERIFY_RESULT=not-running VM=$vm_id" >&2
@@ -685,7 +774,8 @@ verify_running_vm() {
         done
         for key in SDL_VIDEODRIVER QEMU_SDL_NATIVE_EGL \
                 G11_SDL_WINDOW_MODE QEMU_SDL_CURSOR_MODE \
-                QEMU_SDL_TITLE_FPS LIBDECOR_PLUGIN_DIR; do
+                QEMU_SDL_TITLE_FPS LIBDECOR_PLUGIN_DIR \
+                QEMU_VFIO_REGION_IDLE_REPORT QEMU_VFIO_REGION_UPDATE_MODE; do
             actual=$(process_env_value "$pid" "$key" 2>/dev/null || true)
             printf '[g11-sdl] ENV %s=%s\n' "$key" "${actual:-<auto-or-unset>}"
         done
@@ -718,8 +808,22 @@ verify_running_vm() {
         cpu_isolation=$(process_env_value "$pid" CPU_ISOLATION 2>/dev/null || true)
         service_cpus=$(process_env_value "$pid" QEMU_SERVICE_CPUS 2>/dev/null || true)
         service_cpus=${service_cpus:-0}
+        region_mode=$(process_env_value "$pid" QEMU_VFIO_REGION_UPDATE_MODE 2>/dev/null || true)
+        content_diagnostics=$(process_env_value "$pid" QEMU_VFIO_REGION_IDLE_REPORT 2>/dev/null || true)
+        # Audit the observed profile and REGION choice, including an explicit
+        # compare rollback, instead of auditing the wrapper's copy default.
+        case "$region_mode" in
+            copy|compare) SDL_REGION_UPDATE_MODE=$region_mode ;;
+        esac
+        case "$content_diagnostics" in
+            0|1) SDL_CONTENT_DIAGNOSTICS=$content_diagnostics ;;
+        esac
     fi
     print_running_resource_policy "$cpu_isolation" "$service_cpus" "${argv[@]}"
+    if ! print_running_content_policy "$region_mode" "$content_diagnostics"; then
+        failures=$((failures + 1))
+    fi
+    audit || audit_status=$?
 
     echo "[g11-sdl] USB_KEYBOARD_1MS=$usb_low_latency"
     if ((env_readable)) && [[ "$SDL_USB_LOW_LATENCY" == 1 &&

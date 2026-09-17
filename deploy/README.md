@@ -138,6 +138,7 @@ native-display 性能优化。GPU-Z 是以后从官网取得并通过
 
 | 命令 | 干什么 |
 |---|---|
+| `./deploy/scripts/game-diagnostics.sh <vm_id> {watch\|usb-mount\|status\|eject}` | 游戏消失/Windows 重启只读取证：宿主记录 QMP 生命周期，Windows 双击采集事件；见 [`docs/G11-GAME-EXIT.md`](docs/G11-GAME-EXIT.md) |
 | `./deploy/scripts/vmctl.sh {path\|start\|stop\|status\|delete} <vm_id> [...]` | 路径感知的傻瓜封装；默认数字目录及 `--vms-dir`/`--vm-dir` 都透传到唯一生命周期入口 |
 | `./deploy/scripts/vmctl.sh display <vm_id> {status\|preview-on\|preview-off\|window-hide\|window-show\|stream-only\|window-only}` | 运行中热插独立 DGame preview，或安全切换 SDL 与 fb-shm；QMP 会核对 VM 身份 |
 | `./deploy/scripts/vmctl.sh wake <vm_id>` | 唤醒用户主动进入 ACPI S3 的 G-11 VM；先核对 QMP 身份和 `suspended` 状态，不影响已运行 VM |
